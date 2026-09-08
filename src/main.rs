@@ -29,15 +29,16 @@
 //!
 //! Without `--round` the tool enters the **query REPL**: commands over stdin or
 //! a `--script` file (`q <jq>`, `summary`, `advance [n]`, `control`, `apply
-//! <file>`, `cities`, `city <id>`, `ships`, `faction <id>`, `bodies`, `guide`,
-//! `quit` — plus aliases `s`/`a`/`q`), each returning a JSON value —
+//! <file>`, `save`/`load <file>`, `cities`, `city <id>`, `ships`, `faction <id>`,
+//! `bodies`, `guide`, `quit` — plus aliases `s`/`a`/`q`), each returning a JSON
+//! value —
 //! hierarchical, on-demand access instead of a per-round full dump. `control`
 //! emits the editable control surface, and `apply <file>` overlays a diff onto
 //! the state mid-session.
 
 use clap::Parser;
 use planet_x::agent;
-use planet_x::config::{load_config, load_state, parse_seed};
+use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{GameConfig, State};
 use planet_x::prng::Prng;
 use planet_x::{query, sim, web, world};
@@ -132,6 +133,11 @@ struct Cli {
     /// 按键 overlay 到状态上，再继续执行 --round/REPL。用于 agent 下达指令。
     #[arg(long, value_name = "FILE")]
     apply: Option<PathBuf>,
+
+    /// 批量运行（--round/--query）结束后，把当前状态连同 PRNG 位置写入一个
+    /// RON checkpoint，以便下次用 --start 确定性续玩（复现后续回合）。
+    #[arg(long, value_name = "FILE")]
+    save: Option<PathBuf>,
 }
 
 fn main() {
@@ -166,10 +172,11 @@ fn main() {
         return;
     }
 
-    // Initial state: from a file, or generated procedurally.
-    let mut state = match &cli.start {
-        Some(path) => load_state(path),
-        None => world::default_state(&config, seed),
+    // Initial state: from a checkpoint (state + RNG) or bare .ron state file
+    // (fresh RNG), or generated procedurally.
+    let (mut state, mut rng) = match &cli.start {
+        Some(path) => load_initial(path, seed),
+        None => (world::default_state(&config, seed), Prng::new(seed)),
     };
 
     // Apply a control-state diff (agent instructions) before anything else.
@@ -180,8 +187,6 @@ fn main() {
         }
     }
 
-    let mut rng = Prng::new(seed);
-
     // Batch query: run a jq filter over the agent state and print JSON Lines.
     // Honors --round N by advancing that many rounds first, so the filter runs
     // against the end-of-sim state. Takes precedence over interactive/REPL.
@@ -189,6 +194,12 @@ fn main() {
         let n = cli.round.unwrap_or(0);
         for _ in 0..n {
             sim::advance(&mut state, &config, &mut rng);
+        }
+        if let Some(path) = &cli.save {
+            if let Err(e) = save_checkpoint(path, &state, &rng) {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
+                std::process::exit(10);
+            }
         }
         let input = agent::state_value(&state, &config);
         match query::apply_lines(&input, filter) {
@@ -206,7 +217,7 @@ fn main() {
     }
 
     match cli.round {
-        Some(n) => run_rounds(&mut state, &config, &mut rng, n),
+        Some(n) => run_rounds(&mut state, &config, &mut rng, n, cli.save.as_deref()),
         None if cli.script.is_some() => {
             let path = cli.script.as_ref().expect("script is some");
             match File::open(path) {
@@ -376,6 +387,8 @@ fn guide_json() -> String {
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
             "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},
+            "save": {"usage": "save <file.ron>", "desc": "write a deterministic checkpoint: the current State plus the PRNG position. Resume later with `load` here or `--start <file>` in a new process; a resumed run reproduces the same future rounds."},
+            "load": {"usage": "load <file.ron>", "desc": "replace the in-memory state with a checkpoint saved by `save` / `--save`, restoring the RNG position too (alias resume)."},
             "cities": {"usage": "cities",     "desc": "list cities"},
             "ships":  {"usage": "ships",      "desc": "list ships"},
             "factions": {"usage": "factions", "desc": "list factions"},
@@ -481,6 +494,36 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
 
             // --- high-level command shortcuts ----------------------------------
             "events" => print_query(state, config, ".events"),
+            "save" | "save_state" => {
+                if rest.is_empty() {
+                    eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_ARGS", "message": "usage: save <file.ron>"})
+                    );
+                } else {
+                    match save_checkpoint(Path::new(rest), state, rng) {
+                        Ok(()) => emit(&json!({"ok": true, "saved": rest, "round": state.round}).to_string()),
+                        Err(e) => eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e})),
+                    }
+                }
+            }
+            "load" | "resume" => {
+                if rest.is_empty() {
+                    eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_ARGS", "message": "usage: load <file.ron>"})
+                    );
+                } else {
+                    match load_checkpoint(Path::new(rest)) {
+                        Ok((st, rg)) => {
+                            *state = st;
+                            *rng = rg;
+                            print_query(state, config, SUMMARY_JQ);
+                        }
+                        Err(e) => eprintln!("{}", json!({"ok": false, "code": "ERR_LOAD", "message": e})),
+                    }
+                }
+            }
             "order" => {
                 if let Err(e) = cmd_order(state, config, rest) {
                     eprintln!("{}", json!({"ok": false, "code": "ERR_ARGS", "message": e}));
@@ -531,12 +574,19 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
     }
 }
 
-fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32) {
+fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, save: Option<&Path>) {
     // Agent-only mode: zero-noise JSON Lines on stdout, one object per round
     // (round 0 first, then one per round as the simulation advances).
     emit(&agent::render_state(state, config));
     for _ in 0..n {
         sim::advance(state, config, rng);
         emit(&agent::render_state(state, config));
+    }
+    // Optionally persist a deterministic checkpoint (state + RNG position).
+    if let Some(path) = save {
+        if let Err(e) = save_checkpoint(path, state, rng) {
+            eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
+            std::process::exit(10);
+        }
     }
 }
