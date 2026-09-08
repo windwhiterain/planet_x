@@ -64,6 +64,7 @@ order <ship> attack|chase|siege|move|colonize|idle ...   # 一键下舰指令（
 budget <faction> <resource> <value>   # 设该势力「建设建筑」投资预算叶子（Player）
 build  <faction> <resource> <value>   # 设该势力「造舰」建造预算叶子（Player）
 events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级）
+delta [n]               # 推进 n 回合（默认 1）并打印一段紧凑的状态语义差分：新舰/被毁舰、城归属/夷平/人口变化、各势力资源增量、跨越战争阈值的关系。
 save <file.ron>         # 写 checkpoint：当前 State + PRNG 位置（续玩可复现后续回合）
 load <file.ron>         # 从 checkpoint 恢复状态与 PRNG 位置（别名 resume）
 cities / ships / factions / bodies
@@ -82,6 +83,9 @@ quit / exit
 > **作用域接管**：AI 不再把 `mode:"Ai"` 写死进每个叶子，而是写 `mode:null`（继承），所以
 > `{"scope":{"factions":[[3,"Player"]]}}` 就能真正整体接管中国（默认 `mode:null` + 全 None 作用域仍归 AI；
 > 想单独把某叶子钉成 `Ai`/`Player` 仍可显式设 `mode`）。
+> **`events` vs `delta`**：`events` 记「这回合发生了什么」（开火/被毁/夷平/殖民/陈旧指令）；
+> `delta` 记「状态变成了什么样」——两快照间的语义差分。想看一层楼到底改了什么用 `delta`，
+> 想看事件流水用 `events`。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 

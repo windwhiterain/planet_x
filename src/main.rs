@@ -28,10 +28,10 @@
 //!              scripted agent loop with `--start` + `--apply`.
 //!
 //! Without `--round` the tool enters the **query REPL**: commands over stdin or
-//! a `--script` file (`q <jq>`, `summary`, `advance [n]`, `control`, `apply
-//! <file>`, `save`/`load <file>`, `cities`, `city <id>`, `ships`, `faction <id>`,
-//! `bodies`, `guide`, `quit` — plus aliases `s`/`a`/`q`), each returning a JSON
-//! value —
+//! a `--script` file (`q <jq>`, `summary`, `advance [n]`, `delta [n]`,
+//! `control`, `apply <file>`, `save`/`load <file>`, `cities`, `city <id>`,
+//! `ships`, `faction <id>`, `bodies`, `guide`, `quit` — plus aliases `s`/`a`/`q`),
+//! each returning a JSON value —
 //! hierarchical, on-demand access instead of a per-round full dump. `control`
 //! emits the editable control surface, and `apply <file>` overlays a diff onto
 //! the state mid-session.
@@ -39,7 +39,7 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{GameConfig, State};
+use planet_x::model::{City, GameConfig, Ship, State};
 use planet_x::prng::Prng;
 use planet_x::{query, sim, web, world};
 use serde_json::json;
@@ -328,6 +328,156 @@ fn cmd_budget(state: &mut State, config: &GameConfig, field: &str, rest: &str) -
 /// The built-in `summary` radar: a compact per-round overview.
 const SUMMARY_JQ: &str = "{round, time_month, counts:{factions:(.factions|length), cities:(.cities|length), ships:(.ships|length)}, factions:[.factions[]|{id,name,wars}]}";
 
+/// Round a float to 2 decimals for the machine-readable surface.
+fn r2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Build the `delta` value: a compact semantic diff of the world between two
+/// states (`before` -> `after`). The agent's `events` log records *what
+/// happened* in a round; `delta` records *what the state changed to* — the
+/// structurally interesting deltas an agent would otherwise have to eyeball
+/// across two full snapshots. Emitted as one JSON value (round + diffs).
+///
+/// Sections (only populated when non-empty):
+///   * `new_ships` / `dead_ships`  — ships present in `after` but not `before`
+///     (and vice versa), by id + class + owner + hull.
+///   * `cities_changed`            — owner / razed / population changes.
+///   * `resource_deltas`           — per-faction per-resource stockpile change,
+///                                    with raw-key and 中文名 labels.
+///   * `wars_changed`              — relations that crossed the war threshold.
+fn delta_state(before: &State, after: &State, config: &GameConfig) -> serde_json::Value {
+    let fname = |id: u32| after.faction(id).map(|f| f.name.clone()).unwrap_or_else(|| format!("#{id}"));
+
+    // --- ships ----------------------------------------------------------------
+    fn ship_map<'a>(s: &'a State) -> std::collections::HashMap<u32, &'a Ship> {
+        s.ships.iter().map(|sh| (sh.id, sh)).collect()
+    }
+    let bmap = ship_map(before);
+    let amap = ship_map(after);
+    let mut new_ships = Vec::new();
+    let mut dead_ships = Vec::new();
+    for (id, ship) in &amap {
+        if !bmap.contains_key(id) {
+            new_ships.push(json!({
+                "id": ship.id, "name": ship.name.clone(), "class": ship.class.clone(),
+                "owner": fname(ship.faction_id), "hull": r2(ship.hull),
+            }));
+        }
+    }
+    for (id, ship) in &bmap {
+        if !amap.contains_key(id) {
+            dead_ships.push(json!({
+                "id": ship.id, "name": ship.name.clone(), "class": ship.class.clone(),
+                "owner": fname(ship.faction_id),
+            }));
+        }
+    }
+
+    // --- cities ---------------------------------------------------------------
+    fn city_map<'a>(s: &'a State) -> std::collections::HashMap<u32, &'a City> {
+        s.cities.iter().map(|c| (c.id, c)).collect()
+    }
+    let bcity = city_map(before);
+    let acity = city_map(after);
+    let mut cities_changed = Vec::new();
+    for (id, city) in &acity {
+        if let Some(prev) = bcity.get(id) {
+            let mut change = serde_json::Map::new();
+            let mut changed = false;
+            change.insert("id".into(), json!(id));
+            change.insert("name".into(), json!(city.name.clone()));
+            if prev.faction_id != city.faction_id {
+                change.insert("owner".into(), json!({
+                    "from": fname(prev.faction_id), "to": fname(city.faction_id),
+                }));
+                changed = true;
+            }
+            if prev.razed != city.razed {
+                change.insert("razed".into(), json!({"from": prev.razed, "to": city.razed}));
+                changed = true;
+            }
+            if prev.population != city.population {
+                change.insert("population".into(), json!({
+                    "from": prev.population, "to": city.population,
+                }));
+                changed = true;
+            }
+            if changed {
+                cities_changed.push(serde_json::Value::Object(change));
+            }
+        } else {
+            // Did not exist before: new colony this round (events would also say so).
+            cities_changed.push(json!({
+                "id": id, "name": city.name.clone(), "owner": fname(city.faction_id), "new_colony": true,
+            }));
+        }
+    }
+
+    // --- resource stockpile deltas (per faction, per resource) ----------------
+    let mut resource_deltas = Vec::new();
+    for fac in &after.factions {
+        let prev = before.faction(fac.id);
+        let mut per = Vec::new();
+        for (k, v) in &fac.resources {
+            let beforev = prev.map(|p| {
+                let mut found = 0.0;
+                for (rk, rv) in &p.resources {
+                    if rk.as_str() == k.as_str() {
+                        found = *rv;
+                        break;
+                    }
+                }
+                found
+            }).unwrap_or(0.0);
+            let dv = *v - beforev;
+            if dv.abs() >= 0.05 {
+                per.push(json!({
+                    "resource": k, "label": config.resource_name(k), "delta": r2(dv),
+                }));
+            }
+        }
+        if !per.is_empty() {
+            resource_deltas.push(json!({"faction": fac.id, "name": fac.name, "deltas": per}));
+        }
+    }
+
+    // --- wars crossed ---------------------------------------------------------
+    let mut wars_changed = Vec::new();
+    let hostile = |s: &State, a: u32, b: u32| -> bool {
+        s.faction(a)
+            .and_then(|f| f.relations.get(&b))
+            .map(|rel| *rel <= config.combat.war_threshold)
+            .unwrap_or(false)
+    };
+    for fac in &after.factions {
+        for (other, rel) in &fac.relations {
+            if *other <= fac.id {
+                continue; // report each pair once
+            }
+            let was = hostile(before, fac.id, *other);
+            let now = hostile(after, fac.id, *other);
+            if was != now {
+                wars_changed.push(json!({
+                    "a": fac.name.clone(), "b": fname(*other),
+                    "state": if now { "at_war" } else { "peace" },
+                    "relation": r2(*rel),
+                }));
+            }
+        }
+    }
+
+    json!({
+        "round": after.round,
+        "rounds_advanced": after.round.saturating_sub(before.round),
+        "new_ships": new_ships,
+        "dead_ships": dead_ships,
+        "cities_changed": cities_changed,
+        "resource_deltas": resource_deltas,
+        "wars_changed": wars_changed,
+    })
+}
+
 /// Write a line to stdout, ignoring broken-pipe errors so piping into `head`
 /// (or an agent that closes the pipe early) exits quietly instead of panicking.
 fn emit(s: &str) {
@@ -387,6 +537,7 @@ fn guide_json() -> String {
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
             "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},
+            "delta": {"usage": "delta [n]",   "desc": "advance n rounds (default 1) and print a compact semantic state diff over that window: new/destroyed ships, city owner/razed/population changes, per-faction resource stockpile deltas, and wars that crossed the threshold. Complements `events` (what happened) with `delta` (what the state changed to)."},
             "save": {"usage": "save <file.ron>", "desc": "write a deterministic checkpoint: the current State plus the PRNG position. Resume later with `load` here or `--start <file>` in a new process; a resumed run reproduces the same future rounds."},
             "load": {"usage": "load <file.ron>", "desc": "replace the in-memory state with a checkpoint saved by `save` / `--save`, restoring the RNG position too (alias resume)."},
             "cities": {"usage": "cities",     "desc": "list cities"},
@@ -455,6 +606,14 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
                     sim::advance(state, config, rng);
                 }
                 print_query(state, config, SUMMARY_JQ);
+            }
+            "delta" | "diff" => {
+                let n: u32 = rest.parse().unwrap_or(1);
+                let before = state.clone();
+                for _ in 0..n {
+                    sim::advance(state, config, rng);
+                }
+                emit(&delta_state(&before, state, config).to_string());
             }
 
             // --- editable control surface --------------------------------------
