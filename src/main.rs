@@ -14,18 +14,14 @@
 //! controllable-state diff (指令 = 对可控制状态的修改) is sparsely printed —
 //! in interactive mode below the state, and in `--round` mode inline.
 
-mod model;
-mod prng;
-mod sim;
-mod visual;
-mod world;
-
 use clap::Parser;
 use colored::Colorize;
-use model::{GameConfig, State};
-use prng::Prng;
+use planet_x::config::{self, load_config, load_state, parse_seed};
+use planet_x::model::{GameConfig, State};
+use planet_x::prng::Prng;
+use planet_x::{sim, visual, world};
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -67,7 +63,7 @@ fn main() {
 
     println!("{}", "行星X 沙盘轨迹生成器".bold().cyan());
     println!("  种子  : {} -> {}", cli.seed, seed);
-    println!("  配置  : {}", config_path().display());
+    println!("  配置  : {}", config::config_path().display());
     println!("  初始  : {}", cli.start.map_or_else(|| "程序化生成".to_string(), |p| p.display().to_string()));
 
     let mut rng = Prng::new(seed);
@@ -76,46 +72,6 @@ fn main() {
         Some(n) => run_rounds(&mut state, &config, &mut rng, n, seed),
         None => run_interactive(&mut state, &config, &mut rng),
     }
-}
-
-fn config_path() -> PathBuf {
-    std::env::var_os("PLANET_X_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("config/game.ron"))
-}
-
-fn load_config() -> GameConfig {
-    let path = config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("{} 无法读取配置文件 {}: {e}", "[错误]".red().bold(), path.display());
-        eprintln!("请提供 config/game.ron，或设置 PLANET_X_CONFIG 环境变量。");
-        std::process::exit(1);
-    });
-    ron::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("{} 配置文件 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
-        std::process::exit(1);
-    })
-}
-
-fn load_state(path: &Path) -> State {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("{} 无法读取初始状态 {}: {e}", "[错误]".red().bold(), path.display());
-        std::process::exit(1);
-    });
-    ron::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("{} 初始状态 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
-        std::process::exit(1);
-    })
-}
-
-fn parse_seed(v: &str) -> u64 {
-    if v.eq_ignore_ascii_case("random") {
-        return prng::random_seed();
-    }
-    v.trim().parse::<u64>().unwrap_or_else(|_| {
-        eprintln!("{} 无效的 --seed 值: {v} （用数字或 'random'）", "[错误]".red().bold());
-        std::process::exit(2);
-    })
 }
 
 fn print_state(state: &State, config: &GameConfig) {

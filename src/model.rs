@@ -14,7 +14,6 @@
 //! combination of housing / mining / shipyard), but the total area is finite,
 //! so the numbers above all stay continuous.
 
-use daft::Diffable;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -190,7 +189,7 @@ pub struct ShipSpec {
 /// of its ships. This is command-controlled state (see [`ControllableState`]),
 /// not an event: the simulation merely reads this to decide where to move and
 /// what to fire/bombard.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Diffable)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
     Move { position: [f64; 2] },
@@ -266,6 +265,8 @@ pub struct State {
     pub ships: Vec<Ship>,
     /// 各势力可控状态（指令控制量的集合），随状态一起序列化。
     pub control: BTreeMap<FactionId, ControllableState>,
+    /// 城市/天体/势力/全局 的控制作用域树：谁负责 AI 决策、谁收玩家指令。
+    pub scope: ControlScope,
 }
 
 impl State {
@@ -319,8 +320,45 @@ impl State {
         self.control(s.faction_id)?
             .ship_orders
             .get(&ship_id)
-            .copied()
+            .map(|c| c.value)
     }
+
+    // --- 控制模式判定（沿作用域链上溯，最具体者优先） ----------------------
+
+    /// 决定一艘舰的指令由谁控制：舰 → 势力 → 全局。
+    pub fn ship_control(&self, ship_id: ShipId) -> ControlMode {
+        let Some(s) = self.ship(ship_id) else {
+            return ControlMode::Ai;
+        };
+        let fid = s.faction_id;
+        let leaf = self.control(fid).and_then(|c| c.ship_orders.get(&ship_id)).and_then(|c| c.mode);
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, faction, self.scope.global])
+    }
+
+    /// 决定某一资源预算由谁控制：资源 → 势力 → 全局。
+    pub fn budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
+        let leaf = self.control(fid).and_then(|c| c.budget.get(resource)).and_then(|c| c.mode);
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, faction, self.scope.global])
+    }
+
+    /// 决定某建筑投资权重由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
+    pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
+        let (cid, _, _) = key;
+        let leaf = self.control(fid).and_then(|c| c.invest_weights.get(key)).and_then(|c| c.mode);
+        let city = self.scope.cities.get(cid).copied().flatten();
+        let body_id = self.city(*cid).map(|c| c.body_id);
+        let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+}
+
+/// 沿作用域链（从具体到宽泛）取第一个显式设置的 `ControlMode`，全 `None` 则
+/// 默认 [`ControlMode::Ai`]。
+fn resolve_chain(chain: &[Option<ControlMode>]) -> ControlMode {
+    chain.iter().find_map(|m| *m).unwrap_or(ControlMode::Ai)
 }
 
 // --- 可控状态 (controllable / command-controlled state) --------------------
@@ -329,18 +367,71 @@ impl State {
 /// (kind, resource) 组合至多对应一栋建筑。
 pub type InvestKey = (CityId, String, Option<String>);
 
+/// 一个可控字段由「谁决定」：AI（系统每回合自动决策/改写）还是
+/// Player（玩家指令，系统只读不改写）。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub enum ControlMode {
+    /// 系统自动决策（现有行为）。
+    #[default]
+    Ai,
+    /// 玩家下达指令，系统只用该值。
+    Player,
+}
+
+/// 一个可控叶子：值 + 由谁决定。
+///
+/// `mode = None` 表示未在此层显式指定，沿作用域链上溯继承
+/// （舰 → 资源 → 城市 → 天体 → 势力 → 全局），全链 `None` 时默认 [`ControlMode::Ai`]。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Control<T> {
+    pub value: T,
+    pub mode: Option<ControlMode>,
+}
+
+impl<T> Control<T> {
+    /// 一个由系统自动决策的可控值。
+    pub fn ai(value: T) -> Self {
+        Self { value, mode: Some(ControlMode::Ai) }
+    }
+
+    /// 一个由玩家指令决定的可控值。
+    pub fn player(value: T) -> Self {
+        Self { value, mode: Some(ControlMode::Player) }
+    }
+
+    /// 一个继承上层作用域的可控值。
+    pub fn inherit(value: T) -> Self {
+        Self { value, mode: None }
+    }
+}
+
+/// 城市/天体/势力/全局 的控制作用域。这些不是 [`ControllableState`] 的字段，
+/// 单独建一棵作用域树；判定可控叶子的 AI/玩家边界时沿链上溯。
+///
+/// `None` 表示该作用域没有显式指定，继承下一层（更宽泛）作用域。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ControlScope {
+    pub global: Option<ControlMode>,
+    pub factions: BTreeMap<FactionId, Option<ControlMode>>,
+    pub bodies: BTreeMap<BodyId, Option<ControlMode>>,
+    pub cities: BTreeMap<CityId, Option<ControlMode>>,
+}
+
 /// 单个势力的可控状态：所有「指令控制」的量的集合。
 ///
 /// 实体演化结果（资源量、耐久、人口、防御…）不在其中；本结构体是被指令
 /// 直接改写的状态。指令 = 对它的修改（diff）。
-#[derive(Serialize, Deserialize, Clone, Debug, Default, Diffable)]
+///
+/// 每个叶子用 [`Control`] 包裹：值 + 谁决定它。舰/资源/建筑的粒度在各自的
+/// `mode`；城市/天体/势力/全局这些更粗的作用域在 [`State::scope`]。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ControllableState {
-    /// 本方各飞船的当前指令。
-    pub ship_orders: BTreeMap<ShipId, ShipBehavior>,
-    /// 本方资源预算（资源/时间）：决定拿出多少资源用于投资。
-    pub budget: ResourceMap,
-    /// 本方各建筑的投资权重。
-    pub invest_weights: BTreeMap<InvestKey, f64>,
+    /// 本方各飞船的当前指令（每艘舰一个 Control）。
+    pub ship_orders: BTreeMap<ShipId, Control<ShipBehavior>>,
+    /// 本方资源预算（资源/时间）：决定拿出多少资源用于投资（每资源一个 Control）。
+    pub budget: BTreeMap<String, Control<f64>>,
+    /// 本方各建筑的投资权重（每建筑一个 Control）。
+    pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
 }
 
 /// Economy tuning (production and population).

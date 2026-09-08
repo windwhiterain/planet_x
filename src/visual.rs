@@ -297,44 +297,42 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
 /// Sparse-render the per-faction diff of controllable state (`before` vs
 /// `after`, typically two consecutive rounds). Only added / removed / modified
 /// entries are shown; unchanged controllable state is omitted.
+///
+/// The comparison is done per leaf on the `Control.value` (and its mode), so
+/// it stays simple even though the controllable state is now wrapped in
+/// [`Control`].
 pub fn render_control_diff(
     before: &BTreeMap<FactionId, ControllableState>,
     after: &BTreeMap<FactionId, ControllableState>,
     state: &State,
     config: &GameConfig,
 ) -> String {
-    use daft::Diffable;
-
     let mut out = String::new();
     let mut header_printed = false;
 
     for fid in after.keys() {
         let Some(prev) = before.get(fid) else { continue };
         let curr = &after[fid];
-        let diff = prev.diff(curr);
 
         let mut lines: Vec<String> = Vec::new();
-        for l in render_map_diff(
-            &diff.ship_orders,
+        lines.extend(render_control_map_diff(
+            &prev.ship_orders,
+            &curr.ship_orders,
             |k| format!("船#{}", k),
-            |v| behavior_str(v),
-        ) {
-            lines.push(l);
-        }
-        for l in render_map_diff::<String, f64>(
-            &diff.budget,
+            behavior_str,
+        ));
+        lines.extend(render_control_map_diff(
+            &prev.budget,
+            &curr.budget,
             |k| format!("资源预算·{}", config.resource_name(k)),
             |v| format!("{:.2}", v),
-        ) {
-            lines.push(l);
-        }
-        for l in render_map_diff(
-            &diff.invest_weights,
+        ));
+        lines.extend(render_control_map_diff(
+            &prev.invest_weights,
+            &curr.invest_weights,
             |k| format!("权重·{}", invest_key_str(config, state, k)),
             |v| format!("{:.2}", v),
-        ) {
-            lines.push(l);
-        }
+        ));
 
         if !lines.is_empty() {
             if !header_printed {
@@ -353,31 +351,40 @@ pub fn render_control_diff(
     out
 }
 
-/// Render added / removed / modified entries of a map diff, sparsely.
-fn render_map_diff<K, V>(
-    diff: &daft::BTreeMapDiff<'_, K, V>,
+/// Diff two maps of [`Control`] leaves (`before` vs `after`), sparsely. Entries
+/// whose value (or control mode) changed are shown; identical leaves are omitted.
+fn render_control_map_diff<K, V>(
+    before: &BTreeMap<K, Control<V>>,
+    after: &BTreeMap<K, Control<V>>,
     key: impl Fn(&K) -> String,
     val: impl Fn(&V) -> String,
 ) -> Vec<String>
 where
-    K: Ord,
-    V: PartialEq,
+    K: Ord + Clone,
+    V: Clone + PartialEq,
 {
+    let mut keys: Vec<K> = before.keys().cloned().chain(after.keys().cloned()).collect();
+    keys.sort();
+    keys.dedup();
+
     let mut lines = Vec::new();
-    for (k, v) in &diff.added {
-        lines.push(format!("    + {} = {}", key(k), val(v)));
-    }
-    for (k, v) in &diff.removed {
-        lines.push(format!("    - {} = {}", key(k), val(v)));
-    }
-    for (k, leaf) in &diff.common {
-        if leaf.before != leaf.after {
-            lines.push(format!(
-                "    ~ {} = {} -> {}",
-                key(k),
-                val(leaf.before),
-                val(leaf.after)
-            ));
+    for k in keys {
+        match (before.get(&k), after.get(&k)) {
+            (None, Some(a)) => lines.push(format!("    + {} = {}", key(&k), val(&a.value))),
+            (Some(b), None) => lines.push(format!("    - {} = {}", key(&k), val(&b.value))),
+            (Some(b), Some(a)) => {
+                let mut changes: Vec<String> = Vec::new();
+                if b.value != a.value {
+                    changes.push(format!("{} -> {}", val(&b.value), val(&a.value)));
+                }
+                if b.mode != a.mode {
+                    changes.push(format!("模式 {:?} -> {:?}", b.mode, a.mode));
+                }
+                if !changes.is_empty() {
+                    lines.push(format!("    ~ {} = {}", key(&k), changes.join("; ")));
+                }
+            }
+            _ => {}
         }
     }
     lines

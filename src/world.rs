@@ -425,7 +425,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         c.budget = f
             .resources
             .iter()
-            .map(|(k, v)| (k.clone(), *v * config.economy.invest_fraction))
+            .map(|(k, v)| (k.clone(), Control::ai(*v * config.economy.invest_fraction)))
             .collect();
         control.insert(f.id, c);
     }
@@ -434,14 +434,17 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         for b in &city.buildings {
             let key = (city.id, b.kind.clone(), b.resource.clone());
             c.invest_weights
-                .insert(key, config.building_spec(&b.kind).default_invest_weight);
+                .insert(key, Control::ai(config.building_spec(&b.kind).default_invest_weight));
         }
     }
     for s in &ships {
         if let Some(c) = control.get_mut(&s.faction_id) {
-            c.ship_orders.insert(s.id, ShipBehavior::Idle);
+            c.ship_orders.insert(s.id, Control::ai(ShipBehavior::Idle));
         }
     }
+
+    // Default control scopes: everything AI until the player flips fields.
+    let scope = ControlScope::default();
 
     State {
         round: 0,
@@ -451,5 +454,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         factions,
         ships,
         control,
+        scope,
     }
 }
