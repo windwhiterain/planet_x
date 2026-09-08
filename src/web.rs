@@ -617,9 +617,14 @@ fn normalize_behavior(v: &mut serde_json::Value) {
             *v = serde_json::Value::String("Idle".to_string());
             return;
         }
+        "none" => {
+            *v = serde_json::Value::String("None".to_string());
+            return;
+        }
         "move" => "Move",
         "target_ship" => "TargetShip",
         "target_settlement" => "TargetSettlement",
+        "dock" => "Dock",
         "colonize" => "Colonize",
         _ => return,
     };

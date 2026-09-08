@@ -711,7 +711,12 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 behavior = ShipBehavior::Idle;
             }
             match behavior {
-                ShipBehavior::Idle => continue,
+                // Idle / None: hold position, no movement this round.
+                ShipBehavior::Idle | ShipBehavior::None => continue,
+                ShipBehavior::Dock { .. } => {
+                    // 停泊：跟随天体——每回合重新取天体当前位置并驶向它。
+                    move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
+                }
                 ShipBehavior::Colonize { body } => {
                     let bpos = state.body_position(body);
                     if dist(pos, bpos) <= config.combat.arrival_eps {
@@ -899,7 +904,8 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
 
 fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: FactionId) -> bool {
     match behavior {
-        ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
+        ShipBehavior::Move { .. } | ShipBehavior::Idle | ShipBehavior::None => true,
+        ShipBehavior::Dock { body } => state.body(body).is_some(),
         ShipBehavior::Colonize { body } => state.body(body).map(|b| b.settlement.is_some()).unwrap_or(false),
         ShipBehavior::TargetShip { ship, attack } => {
             let alive = state.ship(ship).map(|s| s.hull > 0.0).unwrap_or(false);
@@ -1150,8 +1156,8 @@ fn behavior_dest(state: &State, behavior: ShipBehavior) -> [f64; 2] {
         ShipBehavior::Move { position } => position,
         ShipBehavior::TargetShip { ship, .. } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
         ShipBehavior::TargetSettlement { city, .. } => city_position(state, city),
-        ShipBehavior::Colonize { body } => state.body_position(body),
-        ShipBehavior::Idle => [0.0, 0.0],
+        ShipBehavior::Dock { body } | ShipBehavior::Colonize { body } => state.body_position(body),
+        ShipBehavior::None | ShipBehavior::Idle => [0.0, 0.0],
     }
 }
 
@@ -1294,5 +1300,50 @@ mod tests {
         }
         // After a few rounds of a war-torn seed, an event log should exist.
         assert!(!state.events.is_empty(), "after 6 rounds there should be events");
+    }
+
+    /// 停泊 (Dock) follows a body's current position; 无 (None) holds position.
+    /// Neither degrades to Idle, and None never moves the ship.
+    #[test]
+    fn dock_follows_body_and_none_holds_position() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // China (3) corvette id=0 docks body 4 (谷神星); id=1 is ordered None.
+        let diff = serde_json::json!({
+            "control": [{
+                "faction_id": 3,
+                "ship_orders": [
+                    {"ship": 0, "behavior": {"Dock": {"body": 4}}, "mode": "Player"},
+                    {"ship": 1, "behavior": "None", "mode": "Player"}
+                ]
+            }]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply dock/none order");
+
+        // Pin ship 0 away from the body so `Dock` must move it toward the body.
+        if let Some(s) = state.ship_mut(0) {
+            s.position = [5.0, 5.0];
+        }
+        if let Some(s) = state.ship_mut(1) {
+            s.position = [3.0, 3.0];
+        }
+        let dock_pos_before = state.ship(0).map(|s| s.position).unwrap();
+        let none_pos_before = state.ship(1).map(|s| s.position).unwrap();
+
+        advance(&mut state, &config, &mut rng);
+
+        // Dock: the ship moved toward the body (not froze, not degraded).
+        let dock_pos_after = state.ship(0).map(|s| s.position).unwrap();
+        assert_ne!(dock_pos_after, dock_pos_before, "docked ship should move toward the body");
+        assert_eq!(
+            state.ship_behavior(0),
+            Some(ShipBehavior::Dock { body: 4 }),
+            "dock order must persist (not degrade to Idle)"
+        );
+        // None: the ship did not move.
+        let none_pos_after = state.ship(1).map(|s| s.position).unwrap();
+        assert_eq!(none_pos_after, none_pos_before, "None must hold position");
+        assert_eq!(state.ship_behavior(1), Some(ShipBehavior::None));
     }
 }

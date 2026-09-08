@@ -228,9 +228,13 @@ pub enum ShipBehavior {
     TargetShip { ship: ShipId, attack: bool },
     /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
     TargetSettlement { city: CityId, bombard: bool },
+    /// 停泊：跟随某个天体——持续向该天体当前位置移动，随其轨道巡航/停靠。
+    Dock { body: BodyId },
+    /// 无：原地不动（保持当前坐标，不移动）。
+    None,
     /// 殖民：前往定居点天体并（再）建立一座城市。
     Colonize { body: BodyId },
-    /// 无（待命）。
+    /// 待命（无指令，但不强制钉死在原地——由 AI/玩家写入的默认值）。
     Idle,
 }
 

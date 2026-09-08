@@ -256,9 +256,10 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
         let target = match state.ship_behavior(sh.id) {
             Some(ShipBehavior::TargetShip { ship, .. }) => format!("船#{}", ship),
             Some(ShipBehavior::TargetSettlement { city, .. }) => format!("城#{}", city),
+            Some(ShipBehavior::Dock { body }) => format!("停泊#{}", body),
             Some(ShipBehavior::Colonize { body }) => format!("殖民#{}", body),
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
-            Some(ShipBehavior::Idle) | None => "待命".to_string(),
+            Some(ShipBehavior::None) | Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
         let color = faction_color(sh.faction_id);
         t.add_row(vec![
@@ -415,12 +416,14 @@ fn behavior_str(b: &ShipBehavior) -> String {
     match b {
         ShipBehavior::Move { position } => format!("移动({:+.1},{:+.1})", position[0], position[1]),
         ShipBehavior::TargetShip { ship, attack } => {
-            format!("舰→船#{}{}", ship, if *attack { "·攻" } else { "" })
+            format!("舰→船#{}{}", ship, if *attack { "·攻" } else { "·守" })
         }
         ShipBehavior::TargetSettlement { city, bombard } => {
             format!("舰→城#{}{}", city, if *bombard { "·轰" } else { "" })
         }
+        ShipBehavior::Dock { body } => format!("舰→天体#{}(停泊)", body),
         ShipBehavior::Colonize { body } => format!("舰→天体#{}(殖民)", body),
+        ShipBehavior::None => "无".to_string(),
         ShipBehavior::Idle => "待命".to_string(),
     }
 }
