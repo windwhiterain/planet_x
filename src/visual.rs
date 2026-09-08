@@ -259,7 +259,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             Some(ShipBehavior::Dock { body }) => format!("停泊#{}", body),
             Some(ShipBehavior::Colonize { body }) => format!("殖民#{}", body),
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
-            Some(ShipBehavior::None) | Some(ShipBehavior::Idle) | None => "待命".to_string(),
+            Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
         let color = faction_color(sh.faction_id);
         t.add_row(vec![
@@ -421,9 +421,8 @@ fn behavior_str(b: &ShipBehavior) -> String {
         ShipBehavior::TargetSettlement { city, bombard } => {
             format!("舰→城#{}{}", city, if *bombard { "·轰" } else { "" })
         }
-        ShipBehavior::Dock { body } => format!("舰→天体#{}(停泊)", body),
+        ShipBehavior::Dock { body } => format!("舰→天体#{}(停泊轨道)", body),
         ShipBehavior::Colonize { body } => format!("舰→天体#{}(殖民)", body),
-        ShipBehavior::None => "无".to_string(),
         ShipBehavior::Idle => "待命".to_string(),
     }
 }

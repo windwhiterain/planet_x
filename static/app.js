@@ -56,6 +56,7 @@ function behaviorType(b) {
   if (b && b.Move) return 'move';
   if (b && b.TargetShip) return 'ship';
   if (b && b.TargetSettlement) return 'settlement';
+  if (b && b.Dock) return 'dock';
   if (b && b.Colonize) return 'colonize';
   return 'idle';
 }
@@ -67,6 +68,10 @@ function behaviorSummary(b, world) {
     case 'move': return '移动(' + (b.Move.position[0] | 0) + ',' + (b.Move.position[1] | 0) + ')';
     case 'ship': return '→' + shipName(b.TargetShip.ship) + (b.TargetShip.attack ? '·攻' : '');
     case 'settlement': return '→' + cityName(b.TargetSettlement.city) + (b.TargetSettlement.bombard ? '·轰' : '');
+    case 'dock': {
+      const bd = world.bodies.find((x) => x.id === b.Dock.body);
+      return '→' + (bd ? bd.name : '天体#' + b.Dock.body) + '·停泊';
+    }
     case 'colonize': {
       const bd = world.bodies.find((x) => x.id === b.Colonize.body);
       return '→' + (bd ? bd.name : '天体#' + b.Colonize.body) + '·殖民';

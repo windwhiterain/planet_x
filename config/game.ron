@@ -39,33 +39,63 @@
         "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
         "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
     },
+    // 舰船 5 级，属性按 spec 的 低/中/高 分档：
+    //   护甲 hull:        低≈12-16  中≈24   高≈40
+    //   护甲再生 hull_regen(每月回 max 的分数):  低≈0.04  中≈0.08  高≈0.16
+    //   速度(月/AU):      低≈0.9    中≈1.2   高≈1.6
+    //   伤害 attack:      低≈5      中≈12    高≈24
+    //   攻击距离 attack_range:     低≈0.4    中≈0.6   高≈0.9-1.0
+    //   资源(成本量+稀有度): 常见=铁/碳/硅/氢/甲烷/水冰；稀有=氦-3/钍/铀/金/铂
     ships: {
         "corvette": (
             label: "护卫舰",
-            hull: 12.0,
-            attack: 5.0,
-            speed: 1.6,
-            attack_range: 0.4,
+            hull: 12.0,          // 低
+            hull_regen: 0.04,    // 低
+            attack: 5.0,         // 低
+            speed: 1.6,          // 高
+            attack_range: 0.4,   // 低
             build_points: 15.0,
-            build_cost: { "iron": 6.0, "carbon": 3.0 },
+            build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：低，常见
+        ),
+        "destroyer": (
+            label: "驱逐舰",
+            hull: 24.0,          // 中
+            hull_regen: 0.16,    // 高
+            attack: 6.0,         // 低
+            speed: 1.2,          // 中
+            attack_range: 0.6,   // 中
+            build_points: 26.0,
+            build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
         ),
         "cruiser": (
             label: "巡洋舰",
-            hull: 38.0,
-            attack: 15.0,
-            speed: 0.9,
-            attack_range: 0.6,
-            build_points: 45.0,
-            build_cost: { "iron": 14.0, "carbon": 6.0, "uranium": 3.0 },
+            hull: 40.0,          // 高
+            hull_regen: 0.08,    // 中
+            attack: 12.0,        // 中
+            speed: 0.9,          // 低
+            attack_range: 0.6,   // 中
+            build_points: 44.0,
+            build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：高，常见
         ),
-        "transport": (
-            label: "运输舰",
-            hull: 20.0,
-            attack: 1.0,
-            speed: 1.2,
-            attack_range: 0.2,
-            build_points: 26.0,
-            build_cost: { "iron": 4.0, "carbon": 12.0 },
+        "carrier": (
+            label: "航空母舰",
+            hull: 14.0,          // 低
+            hull_regen: 0.08,    // 中
+            attack: 5.0,         // 低
+            speed: 0.9,          // 低
+            attack_range: 1.0,   // 高
+            build_points: 58.0,
+            build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
+        ),
+        "battleship": (
+            label: "战列舰",
+            hull: 14.0,          // 低
+            hull_regen: 0.04,    // 低
+            attack: 24.0,        // 高
+            speed: 1.2,          // 中
+            attack_range: 0.6,   // 中
+            build_points: 40.0,
+            build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：低，稀有
         ),
     },
     buildings: {

@@ -203,7 +203,10 @@ impl Building {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShipSpec {
     pub label: String,
+    /// 护甲 (hull points).
     pub hull: f64,
+    /// 护甲再生 (%/时间): fraction of the max hull restored per round.
+    pub hull_regen: f64,
     pub attack: f64,
     /// Distance covered per round, in AU.
     pub speed: f64,
@@ -228,13 +231,11 @@ pub enum ShipBehavior {
     TargetShip { ship: ShipId, attack: bool },
     /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
     TargetSettlement { city: CityId, bombard: bool },
-    /// 停泊：跟随某个天体——持续向该天体当前位置移动，随其轨道巡航/停靠。
+    /// 停泊轨道：跟随某个天体——持续向该天体当前位置移动，随其轨道巡航/停靠。
     Dock { body: BodyId },
-    /// 无：原地不动（保持当前坐标，不移动）。
-    None,
     /// 殖民：前往定居点天体并（再）建立一座城市。
     Colonize { body: BodyId },
-    /// 待命（无指令，但不强制钉死在原地——由 AI/玩家写入的默认值）。
+    /// 待命（无指令，原地保持当前坐标——由 AI/玩家写入的默认值）。
     Idle,
 }
 

@@ -42,8 +42,9 @@ pub fn render_state(state: &State, config: &GameConfig) -> String {
 ///                (e.g. `"水冰"` → `"water_ice"`).
 /// * `buildings`  building *kind* → full spec (role, construction speed/cost,
 ///                staffing, productivity, default invest weight).
-/// * `ships`      ship *class* → full spec (hull, attack, speed, range, build
-///                points/cost). An agent needs these to decide what to build.
+/// * `ships`      ship *class* → full spec (hull, hull_regen, attack, speed,
+///                range, build points/cost). An agent needs these to decide
+///                what to build.
 /// * `economy` / `combat` / `diplomacy`  the numeric tuning constants
 ///                (`invest_fraction`, `war_threshold`, `production_rate`, …).
 ///
@@ -97,6 +98,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                 json!({
                     "label": s.label,
                     "hull": r2(s.hull),
+                    "hull_regen": r2(s.hull_regen),
                     "attack": r2(s.attack),
                     "speed": r2(s.speed),
                     "attack_range": r2(s.attack_range),
@@ -252,7 +254,6 @@ enum AgentOrder {
     TargetShip { ship: ShipId, attack: bool },
     TargetSettlement { city: CityId, bombard: bool },
     Dock { body: BodyId },
-    None,
     Colonize { body: BodyId },
 }
 
@@ -367,7 +368,6 @@ impl AgentState {
                 hull_max: r2(config.ship_spec(&s.class).hull),
                 order: match state.ship_behavior(s.id) {
                     Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
-                    Some(ShipBehavior::None) => AgentOrder::None,
                     Some(ShipBehavior::Move { position }) => AgentOrder::Move {
                         position: [r2(position[0]), r2(position[1])],
                     },

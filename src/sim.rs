@@ -711,8 +711,8 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 behavior = ShipBehavior::Idle;
             }
             match behavior {
-                // Idle / None: hold position, no movement this round.
-                ShipBehavior::Idle | ShipBehavior::None => continue,
+                // Idle (待命): hold position, no movement this round.
+                ShipBehavior::Idle => continue,
                 ShipBehavior::Dock { .. } => {
                     // 停泊：跟随天体——每回合重新取天体当前位置并驶向它。
                     move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
@@ -842,6 +842,15 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
     }
 
+    // 护甲再生（%/时间）：每回合幸存舰只按舰级 hull_regen 恢复其最大护甲的一
+    // 个比例（不消耗资源、不复活已毁舰）。
+    for s in state.ships.iter_mut() {
+        if s.hull > 0.0 {
+            let spec = config.ship_spec(&s.class);
+            s.hull = (s.hull + spec.hull * spec.hull_regen).min(spec.hull);
+        }
+    }
+
     // Drop destroyed ships and prune their behaviors from the controllable state.
     state.ships.retain(|s| s.hull > 0.0);
     let alive: std::collections::BTreeSet<ShipId> = state.ships.iter().map(|s| s.id).collect();
@@ -904,7 +913,7 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
 
 fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: FactionId) -> bool {
     match behavior {
-        ShipBehavior::Move { .. } | ShipBehavior::Idle | ShipBehavior::None => true,
+        ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Dock { body } => state.body(body).is_some(),
         ShipBehavior::Colonize { body } => state.body(body).map(|b| b.settlement.is_some()).unwrap_or(false),
         ShipBehavior::TargetShip { ship, attack } => {
@@ -1157,7 +1166,7 @@ fn behavior_dest(state: &State, behavior: ShipBehavior) -> [f64; 2] {
         ShipBehavior::TargetShip { ship, .. } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
         ShipBehavior::TargetSettlement { city, .. } => city_position(state, city),
         ShipBehavior::Dock { body } | ShipBehavior::Colonize { body } => state.body_position(body),
-        ShipBehavior::None | ShipBehavior::Idle => [0.0, 0.0],
+        ShipBehavior::Idle => [0.0, 0.0],
     }
 }
 
@@ -1201,17 +1210,17 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
 
-        // China (3) corvette id=0 is Player-ordered to approach US (1) corvette id=2.
+        // China (3) corvette id=0 is Player-ordered to approach US (1) destroyer id=3.
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": 3,
-                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 2, "attack": true}}, "mode": "Player"}]
+                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 3, "attack": true}}, "mode": "Player"}]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
 
         // Simulate the target being destroyed before the round advances.
-        if let Some(t) = state.ship_mut(2) {
+        if let Some(t) = state.ship_mut(3) {
             t.hull = 0.0;
         }
         let pos_before = state.ship(0).map(|s| s.position).unwrap();
@@ -1251,20 +1260,23 @@ mod tests {
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply guard order");
 
-        // Pin positions: defender + protected friend at [0,0]; US (1) enemy ship 2
-        // just inside the corvette attack range (0.4) so the guard can fire. Move
-        // the US cruiser (3) far out so only the corvette engages (its damage 5
-        // won't one-shot the guard's hull 12, letting the guard retaliate).
+        // Pin positions: defender + protected friend at [0,0]; US (1) enemy
+        // destroyer id=3 just inside the corvette attack range (0.4) so the guard
+        // can fire. Move the other US ships (4 destroyer, 5 cruiser) far out so
+        // only ship 3 engages (its damage 6 won't one-shot the guard's hull 12,
+        // letting the guard retaliate).
         for id in [0u32, 1u32] {
             if let Some(s) = state.ship_mut(id) {
                 s.position = [0.0, 0.0];
             }
         }
-        if let Some(enemy) = state.ship_mut(2) {
+        if let Some(enemy) = state.ship_mut(3) {
             enemy.position = [0.3, 0.0];
         }
-        if let Some(cruiser) = state.ship_mut(3) {
-            cruiser.position = [50.0, 50.0];
+        for far in [4u32, 5u32] {
+            if let Some(s) = state.ship_mut(far) {
+                s.position = [50.0, 50.0];
+            }
         }
 
         advance(&mut state, &config, &mut rng);
@@ -1273,7 +1285,7 @@ mod tests {
         assert!(
             state.events.iter().any(|e| matches!(
                 e,
-                GameEvent::Attack { attacker: 0, target, .. } if *target == 2
+                GameEvent::Attack { attacker: 0, target, .. } if *target == 3
             )),
             "guard should fire at the hostile, got {:?}",
             state.events
@@ -1302,24 +1314,24 @@ mod tests {
         assert!(!state.events.is_empty(), "after 6 rounds there should be events");
     }
 
-    /// 停泊 (Dock) follows a body's current position; 无 (None) holds position.
-    /// Neither degrades to Idle, and None never moves the ship.
+    /// 停泊轨道 (Dock) follows a body's current position; 待命 (Idle) holds
+    /// position. Dock persists (never degrades), and Idle never moves the ship.
     #[test]
-    fn dock_follows_body_and_none_holds_position() {
+    fn dock_follows_body_and_idle_holds_position() {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
 
-        // China (3) corvette id=0 docks body 4 (谷神星); id=1 is ordered None.
+        // China (3) corvette id=0 docks body 4 (火星); id=1 is ordered Idle.
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": 3,
                 "ship_orders": [
                     {"ship": 0, "behavior": {"Dock": {"body": 4}}, "mode": "Player"},
-                    {"ship": 1, "behavior": "None", "mode": "Player"}
+                    {"ship": 1, "behavior": "Idle", "mode": "Player"}
                 ]
             }]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply dock/none order");
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply dock/idle order");
 
         // Pin ship 0 away from the body so `Dock` must move it toward the body.
         if let Some(s) = state.ship_mut(0) {
@@ -1329,7 +1341,7 @@ mod tests {
             s.position = [3.0, 3.0];
         }
         let dock_pos_before = state.ship(0).map(|s| s.position).unwrap();
-        let none_pos_before = state.ship(1).map(|s| s.position).unwrap();
+        let idle_pos_before = state.ship(1).map(|s| s.position).unwrap();
 
         advance(&mut state, &config, &mut rng);
 
@@ -1341,9 +1353,46 @@ mod tests {
             Some(ShipBehavior::Dock { body: 4 }),
             "dock order must persist (not degrade to Idle)"
         );
-        // None: the ship did not move.
-        let none_pos_after = state.ship(1).map(|s| s.position).unwrap();
-        assert_eq!(none_pos_after, none_pos_before, "None must hold position");
-        assert_eq!(state.ship_behavior(1), Some(ShipBehavior::None));
+        // Idle: the ship did not move.
+        let idle_pos_after = state.ship(1).map(|s| s.position).unwrap();
+        assert_eq!(idle_pos_after, idle_pos_before, "Idle must hold position");
+        assert_eq!(state.ship_behavior(1), Some(ShipBehavior::Idle));
+    }
+
+    /// 护甲再生 (ShipSpec.hull_regen): a damaged ship regains a fraction of its
+    /// max hull each round; full-hull ships stay capped; destroyed ships stay gone.
+    #[test]
+    fn damaged_ship_regenerates_hull_each_round() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // Take China's Earth corvette (id 0, hull_max 12, hull_regen 0.04) and
+        // damage it to exactly half; pin it away from all hostiles so the round
+        // is quiet and only regeneration acts on it.
+        if let Some(s) = state.ship_mut(0) {
+            s.hull = 6.0;
+            s.position = [80.0, 80.0];
+        }
+        let class = state.ship(0).map(|s| s.class.clone()).unwrap();
+        let regen = config.ship_spec(&class).hull_regen;
+
+        advance(&mut state, &config, &mut rng);
+
+        let hull = state.ship(0).map(|s| s.hull).expect("ship 0 still alive");
+        let expected = (6.0 + 12.0 * regen).min(12.0);
+        assert!(
+            (hull - expected).abs() < 1e-9,
+            "hull should heal to {expected}, got {hull}"
+        );
+
+        // A full-hull ship stays capped (no over-heal).
+        if let Some(s) = state.ship_mut(1) {
+            s.hull = config.ship_spec(&s.class).hull;
+            s.position = [80.0, 80.0];
+        }
+        advance(&mut state, &config, &mut rng);
+        let max1 = config.ship_spec(&state.ship(1).map(|s| s.class.clone()).unwrap()).hull;
+        let hull1 = state.ship(1).map(|s| s.hull).unwrap();
+        assert!((hull1 - max1).abs() < 1e-9, "full hull must not over-heal, got {hull1}");
     }
 }
