@@ -645,13 +645,15 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
         }
     }
     let total = total.max(1);
+    let at_war = faction_at_war(state, config, fid);
 
     // Score: a **normalized** resource fit — how well the faction's profile covers the
     // class's cost (0..1, so cheap and expensive hulls are on the same scale: scarce
     // minerals lower it, but cost magnitude does not inflate it) — plus a
-    // diversification bonus for under-represented classes, minus an upkeep penalty.
-    // This yields a mixed navy without letting a rich faction's expensive hulls run
-    // away with the score (and the war).
+    // diversification bonus for under-represented classes, minus an upkeep penalty,
+    // plus a **war bonus** (at war the AI leans toward high-firepower hulls). This
+    // yields a mixed navy that adapts to the threat without letting a rich faction's
+    // expensive hulls run away with the score (and the war).
     let mut scored: Vec<(String, f64)> = Vec::new();
     for (cls, spec) in &config.ships {
         let cost_val: f64 = spec.build_cost.iter().map(|(r, c)| c * value_of(r)).sum();
@@ -661,7 +663,9 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
         // Classes the faction has < 25% of get a pull toward a balanced mix.
         let mix_bonus = (0.25 - share).max(0.0) * 1.5;
         let upkeep_penalty = spec.upkeep * 0.04; // 贵舰难养，只有当资源/构成都支持才造
-        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty));
+        // 威胁响应：战时给火力强的舰型加分（多造战争机器）。
+        let war_bonus = if at_war { spec.attack * 0.03 } else { 0.0 };
+        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty + war_bonus));
     }
 
     // Weighted random pick → variety; deterministic via the seeded RNG.
@@ -3414,8 +3418,48 @@ mod tests {
         );
     }
 
-    /// 拟人指挥官：军舰选装要「又能打、又能扛」——至少一件武器、一件防御（slot≥2 时），
-    /// 且战局感知：交战中的势力更舍得堆火力（武器数不下降）。
+    /// 威胁响应造舰（拟人「战时多造重舰」）：交战中，AI 会比和平时更倾向造重型战斗舰
+    /// （攻击力高的舰型加分），而不是只堆轻护卫。
+    #[test]
+    fn choose_next_class_builds_heavier_navy_at_war() {
+        let (config, mut state) = fresh_world(42);
+        if let Some(f) = state.faction_mut(3) {
+            for (r, amt) in [
+                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
+                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
+                ("silicon", 300.0),
+            ] {
+                *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
+            }
+        }
+        // 舰队全部护卫舰，让去重加分对各舰型一视同仁。
+        for s in state.ships.iter_mut() {
+            if s.faction_id == 3 {
+                s.class = "corvette".to_string();
+            }
+        }
+        let sample_heavy = |st: &State| -> usize {
+            let mut rng = Prng::new(99);
+            let mut heavy = 0;
+            for _ in 0..240 {
+                let c = choose_next_class(st, 3, &config, &mut rng);
+                if c == "battleship" || c == "carrier" {
+                    heavy += 1;
+                }
+            }
+            heavy
+        };
+        let peace = sample_heavy(&state);
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let war = sample_heavy(&state);
+        assert!(
+            war > peace,
+            "at war the AI should build more heavy hulls (war {war} > peace {peace})"
+        );
+    }
+
+    /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。
     #[test]
     fn choose_loadout_is_balanced_and_threat_aware() {
         let (config, mut state) = fresh_world(42);
