@@ -1533,17 +1533,82 @@ fn step_story(state: &mut State, config: &GameConfig) {
                 }
             }
         }
-        // 记入编年史 + 本回合故事事件。
+        // 记入编年史 + 本回合故事事件。参与方由静态模板 + 本次事件的具体对象合成
+        // （事件型触发把「实际是谁」写进编年史，让剧情真正反应该回合发生的事情）。
+        let participants = story_participants(state, spec);
         let entry = ChronicleEntry {
             round: state.round,
             id: spec.id.clone(),
             title: spec.title.clone(),
             body: spec.body.clone(),
-            participants: spec.participants.clone(),
+            participants: participants.clone(),
         };
-        ev(state, GameEvent::Story { id: spec.id.clone(), title: spec.title.clone() });
+        ev(state, GameEvent::Story { id: spec.id.clone(), title: spec.title.clone(), participants });
         state.chronicle.push(entry);
     }
+}
+
+/// 剧情事件的参与方：模板里写的静态可读名，加上事件型触发从本回合事件里提炼出的
+/// 具体对象（哪两方开战 / 哪座城被夷平 / 谁建立了殖民地）。保证编年史「自描述」——
+/// agent 无需反推就能知道这条剧情发生在谁身上。确定性：取自本回合事件流水。
+fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
+    let mut parts: Vec<String> = spec.participants.clone();
+    let add = |parts: &mut Vec<String>, name: Option<String>| {
+        if let Some(n) = name {
+            if !n.is_empty() && !parts.iter().any(|p| p == &n) {
+                parts.push(n);
+            }
+        }
+    };
+    let find_war = |state: &State, faction: Option<FactionId>| -> Option<(FactionId, FactionId)> {
+        state.events.iter().find_map(|e| match e {
+            GameEvent::WarStarted { a, b } => match faction {
+                Some(f) if *a == f || *b == f => Some((*a, *b)),
+                Some(_) => None,
+                None => Some((*a, *b)),
+            },
+            _ => None,
+        })
+    };
+    match &spec.trigger {
+        StoryTrigger::FirstWar => {
+            if let Some((a, b)) = find_war(state, None) {
+                add(&mut parts, state.faction(a).map(|f| f.name.clone()));
+                add(&mut parts, state.faction(b).map(|f| f.name.clone()));
+            }
+        }
+        StoryTrigger::FactionAtWar { faction } => {
+            add(&mut parts, state.faction(*faction).map(|f| f.name.clone()));
+            if let Some((a, b)) = find_war(state, Some(*faction)) {
+                let other = if a == *faction { b } else { a };
+                add(&mut parts, state.faction(other).map(|f| f.name.clone()));
+            }
+        }
+        StoryTrigger::FirstRaze => {
+            if let Some((city, fallen)) = state.events.iter().find_map(|e| match e {
+                GameEvent::CityRazed { city, fallen_to } => Some((*city, *fallen_to)),
+                _ => None,
+            }) {
+                add(&mut parts, state.city(city).map(|c| c.name.clone()));
+                add(&mut parts, state.faction(fallen).map(|f| f.name.clone()));
+            }
+        }
+        StoryTrigger::FirstColony => {
+            if let Some((owner, body)) = state.events.iter().find_map(|e| match e {
+                GameEvent::ColonyFounded { owner, body, .. } => Some((*owner, *body)),
+                _ => None,
+            }) {
+                add(&mut parts, state.faction(owner).map(|f| f.name.clone()));
+                add(&mut parts, state.body(body).map(|b| b.name.clone()));
+            }
+        }
+        StoryTrigger::WarBetween { a, b } => {
+            add(&mut parts, state.faction(*a).map(|f| f.name.clone()));
+            add(&mut parts, state.faction(*b).map(|f| f.name.clone()));
+        }
+        _ => {}
+    }
+    parts
 }
 
 /// 剧情：把一个舰级「出厂」给某势力，位置在天体当前位置附近（小幅确定性偏移）。
@@ -1961,5 +2026,35 @@ mod tests {
             .map(|s| (s.id, s.class.clone()))
             .collect();
         assert_eq!(fleet_a, fleet_b, "same seed must reproduce the same granted fleet");
+    }
+
+    /// 剧情参与方是「具体的」：事件型触发把本回合事件的实际对象写进编年史
+    /// （谁与谁开战、哪座城被夷平、谁建立了殖民地），而不是泛化的空标签。
+    #[test]
+    fn story_participants_are_concrete() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        for _ in 0..60 {
+            advance(&mut state, &config, &mut rng);
+        }
+        let find = |id: &str| state.chronicle.iter().find(|c| c.id == id);
+        if let Some(war) = find("first_war") {
+            assert_eq!(war.participants.len(), 2, "first_war names the two belligerents, got {:?}", war.participants);
+            assert!(war.participants.iter().all(|p| !p.is_empty()));
+        }
+        if let Some(razed) = find("first_raze") {
+            assert!(razed.participants.len() >= 2, "first_raze names the city and the razer, got {:?}", razed.participants);
+        }
+        if let Some(colon) = find("first_colony") {
+            assert!(colon.participants.len() >= 2, "first_colony names the colonizer and the body, got {:?}", colon.participants);
+        }
+        if let Some(cn) = find("cn_us_rivalry") {
+            assert!(cn.participants.contains(&"中国".to_string()), "cn_us_rivalry names 中国, got {:?}", cn.participants);
+            assert!(cn.participants.contains(&"美国".to_string()), "cn_us_rivalry names 美国, got {:?}", cn.participants);
+        }
+        // RoundAt beats keep exactly their static participants (no event to enrich).
+        if let Some(pro) = find("prologue") {
+            assert_eq!(pro.participants, vec!["无国界科学组织".to_string(), "行星X崇拜教".to_string()]);
+        }
     }
 }

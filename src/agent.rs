@@ -514,8 +514,8 @@ fn game_event_value(e: &GameEvent) -> serde_json::Value {
         WarEnded { a, b } => {
             json!({"type":"war_ended", "a": a, "b": b})
         }
-        Story { id, title } => {
-            json!({"type":"story", "id": id, "title": title})
+        Story { id, title, participants } => {
+            json!({"type":"story", "id": id, "title": title, "participants": participants})
         }
     }
 }

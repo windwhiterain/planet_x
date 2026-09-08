@@ -283,7 +283,8 @@ pub enum GameEvent {
     /// 外交事件：一对势力本回合停战（从交战回到和平）。
     WarEnded { a: FactionId, b: FactionId },
     /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
-    Story { id: String, title: String },
+    /// `participants` 是参与方可读名（事件型触发时为具体对象）。
+    Story { id: String, title: String, participants: Vec<String> },
 }
 
 /// A spaceship. Always owned by a faction.

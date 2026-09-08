@@ -258,12 +258,13 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 - `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`dock`、`colonize`。
 - `events`（每回合一条，`type` tag）：`attack` / `ship_destroyed` / `siege` / `city_razed` /
   `ship_spawned` / `colony_founded` / `stale_order` / `war_started` / `war_ended` / `story`
-  （`story` 事件只带 id/title，完整叙事在编年史 `.story`）。外交跃迁 `war_started`/`war_ended`
-  在任一势力跨越战争阈值的回合发出。
+  （`story` 事件带 `id`/`title`/`participants`；完整叙事在编年史 `.story`）。外交跃迁
+  `war_started`/`war_ended` 在任一势力跨越战争阈值的回合发出。事件型剧情节拍把**具体对象**
+  写进 `participants`（谁与谁开战 / 哪座城被夷平 / 谁建立了殖民地）。
 - `story`：仅在 `--query` / `q`/`story` 命令给出的状态下作为顶层字段出现（`render_state`
   的每回合 JSON 为了省 token **不含**整段编年史；要看本回合剧情看 `events` 里的 `story`，
   要看整段弧用 `story` 命令或 `--query '.story'`）。每条编年史为
-  `{ round, id, title, body, participants:[…] }`。
+  `{ round, id, title, body, participants:[…] }`，事件型触发时为具体参与方。
 - 定居点 ↔ 城市**一一对应**：`bodies[].settlements` 是天体上的定居点列表（含名字/面积/矿藏），
   `cities[]` 用 `settlement_index` 指向自己占据的那个定居点；一座定居点至多一座城市，
   城市被夷平（razed）后仍占位，只能被**再殖民**回填，不会被叠第二座城。
