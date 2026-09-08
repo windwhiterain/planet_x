@@ -1962,7 +1962,11 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
     let hull_before = hull;
     // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标在其首都本土防御半径内被削弱。
     let def_mult = home_defense_mult(state, tfac, tpos);
-    let pd = tpanel.intercept;
+    // 点防御 = 目标自身拦截 + 附近友舰的防空屏护（只对导弹有意义——导弹才是会被拦截的）。
+    // 攻击方没有导弹武器时跳过防空扫描（省去每击一次 O(舰队) 的额外开销）。
+    let has_missiles = weapons.iter().any(|w| w.kind == WEAPON_MISSILE);
+    let pd = tpanel.intercept
+        + if has_missiles { cluster_pd_cover(state, config, target_id, tfac, tpos) } else { 0.0 };
 
     let mut total_damage = 0.0;
     for w in &weapons {
@@ -2025,6 +2029,31 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
     if destroyed {
         ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: tclass });
     }
+}
+
+/// 舰队防空（防空屏护）：目标（`target_faction` 阵营、`tpos` 处）附近 `pd_radius` 内的友舰，
+/// 其点防御拦截能力会为它**替拦导弹**——随距离线性衰减、封顶。让有 PD 的舰组成防空圈，
+/// 能护卫航母/友舰（与护航行为衔接：护航舰贴近旗舰时提供防空）。确定性（无 RNG）。
+fn cluster_pd_cover(state: &State, config: &GameConfig, target_id: ShipId, target_faction: FactionId, tpos: [f64; 2]) -> f64 {
+    let r = config.combat.pd_radius;
+    if r <= 0.0 {
+        return 0.0;
+    }
+    let mut cover = 0.0;
+    for s in &state.ships {
+        if s.id == target_id || s.faction_id != target_faction || s.hull <= 0.0 {
+            continue;
+        }
+        let d = dist(s.position, tpos);
+        if d > r {
+            continue;
+        }
+        let p = ship_panel(config, s).intercept;
+        if p > 0.0 {
+            cover += p * (1.0 - d / r);
+        }
+    }
+    cover.min(30.0)
 }
 
 /// 本土防御伤害倍率：`pos` 位于 `faction` 首都的 `home_radius` 之内时返回该势力的
@@ -3620,6 +3649,34 @@ mod tests {
         assert!(
             !matches!(picked, Some(ShipBehavior::TargetShip { ship: 5, .. })),
             "a hostile beyond pursuit_range should not be chased; got {picked:?}"
+        );
+    }
+
+    /// 舰队防空（防空屏护）：有 PD 的舰会替 `pd_radius` 内的友舰拦导弹——附近有 PD 时目标
+    /// 得到的防空覆盖应更高，PD 舰远离时覆盖应下降。
+    #[test]
+    fn fleet_air_defense_covers_nearby_missile_targets() {
+        let (config, mut state) = fresh_world(42);
+        // 目标：US (1) ship 5 在 [40,40]，自身无 PD。
+        if let Some(t) = state.ship_mut(5) {
+            t.position = [40.0, 40.0];
+            t.components = Vec::new();
+            t.component_hp = Vec::new();
+        }
+        // 友舰：US ship 3 在 [41,40]，装点防御。
+        if let Some(g) = state.ship_mut(3) {
+            g.position = [41.0, 40.0];
+            g.components = vec!["point_defense".to_string()];
+            g.component_hp = g.components.iter().map(|c| component_integrity(&config, c)).collect();
+        }
+        let cover_with = cluster_pd_cover(&state, &config, 5, 1, [40.0, 40.0]);
+        assert!(cover_with > 0.0, "a nearby PD ship should give air-defense cover; got {cover_with}");
+        // 把 PD 舰移远 → 覆盖应下降。
+        state.ship_mut(3).unwrap().position = [100.0, 100.0];
+        let cover_far = cluster_pd_cover(&state, &config, 5, 1, [40.0, 40.0]);
+        assert!(
+            cover_far < cover_with,
+            "cover should drop once the PD ship is far (with {cover_with}, far {cover_far})"
         );
     }
 

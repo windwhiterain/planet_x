@@ -964,6 +964,11 @@ pub struct CombatConfig {
     /// 殖民/护卫）。这是拟人的「不追远敌、就近平守」。0 = 不限（总是追）。
     #[serde(default = "default_pursuit_range")]
     pub pursuit_range: f64,
+    /// 舰队防空半径（AU）：舰的点防御除了拦自己吃到的导弹，还会在**此半径内**替附近友舰
+    /// 拦截导弹（防空屏护，随距离线性衰减、封顶）。这让有 PD 的舰组成防空圈、能护卫航母/
+    /// 友舰——与护航行为衔接。0 = 只护自己。
+    #[serde(default = "default_pd_radius")]
+    pub pd_radius: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -988,6 +993,10 @@ fn default_escort_range() -> f64 {
 
 fn default_pursuit_range() -> f64 {
     12.0
+}
+
+fn default_pd_radius() -> f64 {
+    3.0
 }
 
 /// Building structure attribute (混凝土 / 钢结构).
