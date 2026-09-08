@@ -110,6 +110,12 @@ fn hostile(state: &State, config: &GameConfig, a: FactionId, b: FactionId) -> bo
     relation(state, a, b) <= config.combat.war_threshold
 }
 
+/// 该势力当前是否处于交战状态：与任意其他势力的关系已达到交战阈值。
+/// 用于「造舰按威胁响应」——战时倾向多造战争机器，和平时倾向多造殖民/经济舰。
+fn faction_at_war(state: &State, config: &GameConfig, fid: FactionId) -> bool {
+    state.factions.iter().any(|o| o.id != fid && hostile(state, config, fid, o.id))
+}
+
 fn relation(state: &State, a: FactionId, b: FactionId) -> f64 {
     state
         .faction(a)
@@ -630,15 +636,17 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
 }
 
 /// Deterministically pick a ship component loadout (舰船定制) for a faction building
-/// a ship of `class` — the **resource → military** link. Components whose rare inputs
-/// the faction has in abundance score highest; components it cannot fully pay for are
-/// dropped. A faction that controls 金/铂/铀/氦-3 fields genuinely better-armed and
-/// better-protected ships than one scraping by on iron & carbon, so hard-to-get
-/// minerals matter on the battlefield, not just on the ledger.
-///
-/// Deterministic (no RNG): the score is a pure function of the stockpile + config,
-/// and ties break on component id. Returns ≤ `ShipSpec::slots` component ids that are
-/// cumulatively affordable.
+/// a ship of `class` — the **resource → military** link, now also **category-balanced
+/// and threat-aware**:
+///   * components whose rare inputs the faction has in abundance score highest
+///     (resource advantage); unaffordable ones are dropped;
+///   * the loadout is balanced across weapon / defense / support so a ship can both
+///     hit and survive (a real commander doesn't field a mono-stack of glass cannons —
+///     it guarantees at least one weapon and, when the ship has ≥2 slots, one defense);
+///   * when at war the AI is biased toward weapons (weapon score bonus), so it invests
+///     in firepower; in peace it invests more in defense/support.
+/// Deterministic (no RNG): score is a function of stockpile + config, ties break on
+/// component id. Returns ≤ `ShipSpec::slots` component ids, cumulatively affordable.
 fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
     let slots = config.ship_spec(class).slots as usize;
     if slots == 0 {
@@ -657,37 +665,87 @@ fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &st
     }
     let abund = |r: &str| f.resources.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0);
 
+    // 战局感知：交战中的势力更看重武器（武器加分），和平时更偏向防御/支持。
+    let at_war = faction_at_war(state, config, fid);
+
     // Score every candidate component by (a) resource fit — how much of its rare
     // inputs the faction can comfortably supply — plus (b) a small raw combat-gain
     // tiebreak, minus (c) an upkeep drag so components that are strong but too costly
-    // to maintain get deprioritized.
+    // to maintain get deprioritized. 战时给武器加分（更舍得堆火力）。
     let mut cands: Vec<(String, f64)> = Vec::new();
     for (id, cs) in &config.components {
         let fit: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r) * abund(r)).sum();
         let gain = cs.damage * 4.0 + cs.shield * 0.8 + cs.hull * 0.8 + cs.hull_regen * 120.0
             + cs.shield_regen * 60.0 + cs.speed * 3.0 + cs.intercept * 2.0 + cs.range * 12.0;
-        let score = fit + gain * 0.03 - cs.upkeep * 2.0;
+        let mut score = fit + gain * 0.03 - cs.upkeep * 2.0;
+        if at_war && cs.category == "weapon" {
+            score += cs.damage * 2.0; // 战时要火力。
+        }
         if score > 0.0 {
             cands.push((id.clone(), score));
         }
     }
     cands.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    // Greedily fill the slots while the cumulative component cost stays affordable
-    // (we cannot fit a loadout we can't pay for), one of each id (no stacking).
+    // 类别配比（拟人指挥官）：一艘军舰要「又能打、又能扛」——至少一件武器（买得起时）、
+    // slot≥2 时至少一件防御（避免全军玻璃大炮或全是乌龟），其余按分数填满。
+    let defense_floor = if slots >= 2 { 1 } else { 0 };
+
     let mut chosen: Vec<String> = Vec::new();
     let mut remaining = f.resources.clone();
-    for (id, _) in cands {
-        if chosen.len() >= slots {
+    let afford = |id: &str, rem: &ResourceMap| -> bool {
+        config
+            .component_spec(id)
+            .cost
+            .iter()
+            .all(|(r, c)| rem.get(r).copied().unwrap_or(0.0) >= *c)
+    };
+    let count_cat = |chosen: &Vec<String>, cat: &str| -> usize {
+        chosen.iter().filter(|id| config.component_spec(id).category == cat).count()
+    };
+
+    // Pass 1: 保证至少一件武器（若买得起某件武器）。
+    for (id, _) in &cands {
+        if count_cat(&chosen, "weapon") >= 1 {
             break;
         }
-        let cs = config.component_spec(&id);
-        let pay = cs.cost.iter().all(|(r, c)| remaining.get(r).copied().unwrap_or(0.0) >= *c);
-        if pay {
-            chosen.push(id.clone());
+        if config.component_spec(id).category == "weapon" && !chosen.contains(id) && afford(id, &remaining) {
+            let cs = config.component_spec(id);
             for (r, c) in &cs.cost {
                 *remaining.entry(r.clone()).or_insert(0.0) -= c;
             }
+            chosen.push(id.clone());
+        }
+    }
+    // Pass 2: 保证至少一件防御（slot≥2 且买得起时）。
+    if count_cat(&chosen, "defense") < defense_floor {
+        for (id, _) in &cands {
+            if count_cat(&chosen, "defense") >= defense_floor {
+                break;
+            }
+            if config.component_spec(id).category == "defense" && !chosen.contains(id) && afford(id, &remaining) {
+                let cs = config.component_spec(id);
+                for (r, c) in &cs.cost {
+                    *remaining.entry(r.clone()).or_insert(0.0) -= c;
+                }
+                chosen.push(id.clone());
+            }
+        }
+    }
+    // Pass 3: 填满剩余槽位（按分数，武器在战时因加分更易入选）。
+    for (id, _) in &cands {
+        if chosen.len() >= slots {
+            break;
+        }
+        if chosen.contains(id) {
+            continue;
+        }
+        if afford(id, &remaining) {
+            let cs = config.component_spec(id);
+            for (r, c) in &cs.cost {
+                *remaining.entry(r.clone()).or_insert(0.0) -= c;
+            }
+            chosen.push(id.clone());
         }
     }
     chosen
@@ -3120,6 +3178,42 @@ mod tests {
         }
         // A resource-rich faction should fill more than a token slot.
         assert!(a.len() >= 2, "rich faction should field a real loadout, got {a:?}");
+    }
+
+    /// 拟人指挥官：军舰选装要「又能打、又能扛」——至少一件武器、一件防御（slot≥2 时），
+    /// 且战局感知：交战中的势力更舍得堆火力（武器数不下降）。
+    #[test]
+    fn choose_loadout_is_balanced_and_threat_aware() {
+        let (config, mut state) = fresh_world(42);
+        if let Some(f) = state.faction_mut(3) {
+            for (r, amt) in [
+                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
+                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
+                ("silicon", 300.0),
+            ] {
+                *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
+            }
+        }
+        // 和平：一艘巡洋舰（slot≥2）应至少各有一件武器与防御。
+        let peace = choose_loadout(&state, &config, 3, "cruiser");
+        assert!(
+            peace.iter().any(|c| config.component_spec(c).category == "weapon"),
+            "a ship should field a weapon (got {peace:?})"
+        );
+        assert!(
+            peace.iter().any(|c| config.component_spec(c).category == "defense"),
+            "a ship should field a defense (got {peace:?})"
+        );
+        // 开战：武器数不应比和平少（战时要火力的偏置）。
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let war = choose_loadout(&state, &config, 3, "cruiser");
+        let peace_w = peace.iter().filter(|c| config.component_spec(c).category == "weapon").count();
+        let war_w = war.iter().filter(|c| config.component_spec(c).category == "weapon").count();
+        assert!(
+            war_w >= peace_w,
+            "at war the AI should field at least as many weapons (war {war_w} >= peace {peace_w}); war={war:?} peace={peace:?}"
+        );
     }
 
     /// 战斗拟真：护盾池优先吸收，快速目标对低追踪武器规避更强（确定性命中折减）。
