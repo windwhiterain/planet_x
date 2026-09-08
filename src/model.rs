@@ -365,6 +365,20 @@ fn resolve_chain(chain: &[Option<ControlMode>]) -> ControlMode {
     chain.iter().find_map(|m| *m).unwrap_or(ControlMode::Ai)
 }
 
+impl ControlScope {
+    /// 把 `other` 按节点叠加到 `self`：仅覆盖 `other` 中显式给定的节点；`global`
+    /// 只有在 `other.global` 为 `Some` 时才被改写。节点值 `None` 表示「继承/清除
+    /// 该层的显式指定」。
+    pub fn overlay(&mut self, other: &ControlScope) {
+        if other.global.is_some() {
+            self.global = other.global;
+        }
+        self.factions.extend(other.factions.iter().map(|(k, v)| (*k, *v)));
+        self.bodies.extend(other.bodies.iter().map(|(k, v)| (*k, *v)));
+        self.cities.extend(other.cities.iter().map(|(k, v)| (*k, *v)));
+    }
+}
+
 // --- 可控状态 (controllable / command-controlled state) --------------------
 
 /// 建筑投资权重定位键：(城市, 建筑 kind, 资源)。同一城市内一个

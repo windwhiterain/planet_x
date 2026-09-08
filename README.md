@@ -72,14 +72,18 @@ planet_x --agent --seed 42 --query '.factions[] | select(.wars | length > 0) | .
 **查询 REPL**（`planet_x --agent`，无 `--round`）：状态留在进程内，每条命令返回 JSON，可下钻。
 
 ```
-summary                 # 紧凑雷达（回合/时间/计数/各势力交战）
 q <jq>                  # 对当前状态执行任意 jq 过滤（JSON Lines）
+summary                 # 紧凑雷达（回合/时间/计数/各势力交战）
 advance [n]             # 推进 n 回合（默认 1），然后打印 summary
+control                 # 输出当前可控制状态（control + scope）JSON，即 agent 可编辑的模板
+apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后回读 control
 cities / ships / factions / bodies
 city <id> / ship <id> / faction <id> / body <id>   # 单实体详情
-guide / help            # 命令目录（JSON）
+guide / help            # 命令目录（JSON）；q/query、s/summary、a/advance、quit/exit
 quit / exit
 ```
+
+`--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在进入任何模式前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 
 ```bash
 printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, order}\nquit\n' \
@@ -87,6 +91,29 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
 ```
 
 支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。
+
+### 4.1 下发指令（可控制状态 diff）
+
+模块化约束把「可控制状态」（指令）与「实体演化结果」分开：`State::control` 是每个势力的
+（舰船指令 `ship_orders` / 资源预算 `budget` / 建设投资权重 `invest_weights`），每个叶子带 `mode`
+（`Ai`|`Player`|`null`=继承）；`State::scope` 是一棵「谁负责决策」的作用域树（全局→势力→天体→城市）。
+
+用 `control` 读出可编辑模板，改动后以同一 JSON 形状写回，`--apply file.json` 或 REPL 的
+`apply <file>` 会**结构化、多层级**地应用它——**只触碰文件里出现的势力/叶子**：
+
+```bash
+# 圆 0：读取模板，然后把中国(3)的 0 号舰改成「玩家控制、攻击 2 号美舰」
+planet_x --agent --seed 42 --script control.txt        # control.txt: `control\nquit`
+# 写 diff.json：
+# {"control":[{"faction_id":3,"ship_orders":[{"ship":0,"behavior":{"TargetShip":{"ship":2,"attack":true}},"mode":"Player"}]}]}
+
+# 应用 diff，推进 6 回合，输出编年史
+planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.json --rounds 6
+```
+
+**最小修改语义**：只列出想改的叶子即可；某叶子里省略 `value`/`behavior` 保留其当前值，省略
+`mode` 保留其当前模式；整叶不出现则完全不动。既可只移动一条船，也可整体替换一个势力，
+或任何中间层级。`mode: null` 表示继承上层作用域。
 
 > `--agent` 与 `--round` 可同时使用；也常与 `--start` 搭配从指定状态续玩。
 
@@ -101,6 +128,8 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
 | `--round <N>` | 运行 `N` 回合并把每回合快照写入 `trajectory/`；别名 `--rounds`。 |
 | `--agent` | 零噪声机器输出：stdout 仅输出 JSON；无 `--round` 时进入查询 REPL。 |
 | `--query <JQ>` | 对 agent 状态执行一个 jq 过滤并输出 JSON Lines；带 `--round N` 先推进 N 回合。 |
+| `--apply <PATH>` | 把一份控制状态 diff（JSON，同 web `POST /api/command` 的 `{control,scope}` 形状）结构化成多层级补丁叠加到状态，再继续其它模式。 |
+| `--script <FILE>` |（别名 `--commands`）从文件非交互读取 REPL 命令执行后退出；配合 `--agent` 时 stdout 为纯 JSON Lines。 |
 
 其它：配置文件路径由 `PLANET_X_CONFIG` 环境变量指定，默认 `config/game.ron`。
 
