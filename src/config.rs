@@ -3,8 +3,9 @@
 //! server so the two entry points behave identically.
 
 use crate::model::{GameConfig, State};
-use crate::prng;
+use crate::prng::{self, Prng};
 use colored::Colorize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Config file path: `$PLANET_X_CONFIG` or the default `config/game.ron`.
@@ -38,6 +39,45 @@ pub fn load_state(path: &Path) -> State {
         eprintln!("{} 初始状态 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
         std::process::exit(1);
     })
+}
+
+/// A serializable session checkpoint: the full `State` plus the exact PRNG
+/// position, so a saved run can be resumed deterministically.
+#[derive(Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub prng_state: u64,
+    pub state: State,
+}
+
+/// Serialize the current `State` to a RON file (no RNG position). Use
+/// [`save_checkpoint`] when the run must resume deterministically.
+pub fn save_state(path: &Path, state: &State) -> Result<(), String> {
+    let text = ron::to_string(state).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Serialize a session checkpoint (state + RNG position) to a RON file.
+pub fn save_checkpoint(path: &Path, state: &State, rng: &Prng) -> Result<(), String> {
+    let cp = Checkpoint { prng_state: rng.state(), state: state.clone() };
+    let text = ron::to_string(&cp).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Load a checkpoint, returning the `State` and the resumable `Prng`.
+pub fn load_checkpoint(path: &Path) -> Result<(State, Prng), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    Ok((cp.state, Prng::from_state(cp.prng_state)))
+}
+
+/// `--start` style initial load: prefers a session checkpoint (state + RNG), and
+/// falls back to a bare `State` RON file (fresh RNG from `seed`).
+pub fn load_initial(path: &Path, seed: u64) -> (State, Prng) {
+    if let Ok((state, rng)) = load_checkpoint(path) {
+        return (state, rng);
+    }
+    // Not a checkpoint; treat as a bare initial state.
+    (load_state(path), Prng::new(seed))
 }
 
 /// Parse a `--seed` value: a number, or `random` (case-insensitive).

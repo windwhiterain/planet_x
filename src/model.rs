@@ -233,6 +233,27 @@ pub enum ShipBehavior {
     Idle,
 }
 
+/// 一回合内发生的、值得 agent 知道的事件。每回合开始时被清空、回合演化中被
+/// 追加；agent 无需反推状态差即可得知「谁开火/谁被毁/哪城被夷平/谁殖民」。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GameEvent {
+    /// 开火：攻击者对目标舰造成 damage 伤害。
+    Attack { attacker: ShipId, target: ShipId, damage: f64 },
+    /// 舰被击毁（hull ≤ 0）。
+    ShipDestroyed { ship: ShipId, owner: FactionId, class: String },
+    /// 围城：攻击者对本回合城市建筑造成 damage 伤害。
+    Siege { attacker: ShipId, city: CityId, damage: f64 },
+    /// 城市被夷平（razed），可再殖民。
+    CityRazed { city: CityId, fallen_to: FactionId },
+    /// 新舰从某城出厂。
+    ShipSpawned { ship: ShipId, owner: FactionId, class: String, city: CityId },
+    /// 新殖民 / 再殖民城市建立。
+    ColonyFounded { city: CityId, owner: FactionId, body: BodyId, seeded_ship_class: String },
+    /// 玩家指令因目标失效而降级（陈旧目标 / 城被夷平 / 无定居点），避免船飞向原点。
+    StaleOrder { ship: ShipId, reason: String },
+}
+
 /// A spaceship. Always owned by a faction.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Ship {
@@ -300,6 +321,9 @@ pub struct State {
     pub control: BTreeMap<FactionId, ControllableState>,
     /// 城市/天体/势力/全局 的控制作用域树：谁负责 AI 决策、谁收玩家指令。
     pub scope: ControlScope,
+    /// 本回合事件日志（`#[serde(default)]` 以便旧状态/旧 .ron 加载时缺字段不报错）。
+    #[serde(default)]
+    pub events: Vec<GameEvent>,
 }
 
 impl State {

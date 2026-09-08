@@ -451,13 +451,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         c.investment_budget = f
             .resources
             .iter()
-            .map(|(k, v)| (k.clone(), Control::ai(*v * config.economy.invest_fraction)))
+            .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
         // 建造预算默认与投资预算相等，作为造舰的资金池。
         c.construction_budget = f
             .resources
             .iter()
-            .map(|(k, v)| (k.clone(), Control::ai(*v * config.economy.invest_fraction)))
+            .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
         control.insert(f.id, c);
     }
@@ -466,17 +466,17 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         for b in &city.buildings {
             let ikey = (city.id, b.id);
             c.invest_weights
-                .insert(ikey, Control::ai(config.building_spec(&b.kind).default_invest_weight));
+                .insert(ikey, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
             if b.is_shipyard() {
                 let bkey = (city.id, b.id);
                 c.build_weights
-                    .insert(bkey, Control::ai(config.building_spec(&b.kind).default_build_weight));
+                    .insert(bkey, Control::inherit(config.building_spec(&b.kind).default_build_weight));
             }
         }
     }
     for s in &ships {
         if let Some(c) = control.get_mut(&s.faction_id) {
-            c.ship_orders.insert(s.id, Control::ai(ShipBehavior::Idle));
+            c.ship_orders.insert(s.id, Control::inherit(ShipBehavior::Idle));
         }
     }
 
@@ -492,5 +492,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ships,
         control,
         scope,
+        events: Vec::new(),
     }
 }

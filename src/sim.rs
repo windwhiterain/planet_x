@@ -35,6 +35,8 @@ use std::collections::BTreeMap;
 pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     state.round += 1;
     state.time_month += 1.0;
+    // 本回合事件日志从空开始，回合演化中追加。
+    state.events.clear();
 
     // Update each body's current position (当前位置) from its orbit.
     for b in &mut state.bodies {
@@ -86,6 +88,11 @@ fn adjust_relation(state: &mut State, a: FactionId, b: FactionId, delta: f64) {
             f.relations.insert(y, v + delta);
         }
     }
+}
+
+/// Append a [`GameEvent`] to this round's log.
+fn ev(state: &mut State, e: GameEvent) {
+    state.events.push(e);
 }
 
 /// A building's health ratio (armor / armor_max), clamped to [0, 1]. Intact
@@ -289,7 +296,7 @@ fn write_budget(
             };
             match mode {
                 ControlMode::Ai => {
-                    slot.insert(rt.clone(), Control::ai(*value));
+                    slot.insert(rt.clone(), Control::inherit(*value));
                 }
                 ControlMode::Player => {
                     slot.entry(rt.clone()).or_insert_with(|| Control::player(*value));
@@ -622,6 +629,7 @@ fn build_city(
                 position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
                 hull: spec.hull,
             });
+            ev(state, GameEvent::ShipSpawned { ship: *next_ship_id, owner: fid, class: cls.clone(), city: cid });
             *next_ship_id += 1;
             *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
             if let Some(c) = state.control_mut(fid) {
@@ -683,7 +691,24 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
         if !is_ai {
             // --- player-controlled: execute the commanded behavior literally ---
-            let behavior = state.ship_behavior(ship_id).unwrap_or(ShipBehavior::Idle);
+            let mut behavior = state.ship_behavior(ship_id).unwrap_or(ShipBehavior::Idle);
+            // A stale targeting/colonize order (target destroyed, city razed, or
+            // a body with no settlement) must not send the ship drifting toward
+            // the origin ([0,0]); degrade it to Idle and record a StaleOrder
+            // event so the agent knows to re-issue. Move/Idle are always valid.
+            if !behavior_is_valid(state, config, behavior, owner) {
+                let reason = match behavior {
+                    ShipBehavior::TargetShip { ship, .. } => format!("target ship {ship} gone"),
+                    ShipBehavior::TargetSettlement { city, .. } => format!("target city {city} razed or not hostile"),
+                    ShipBehavior::Colonize { body } => format!("body {body} has no settlement"),
+                    _ => "invalid".to_string(),
+                };
+                if let Some(c) = state.control_mut(owner) {
+                    c.ship_orders.insert(ship_id, Control::player(ShipBehavior::Idle));
+                }
+                ev(state, GameEvent::StaleOrder { ship: ship_id, reason });
+                behavior = ShipBehavior::Idle;
+            }
             match behavior {
                 ShipBehavior::Idle => continue,
                 ShipBehavior::Colonize { body } => {
@@ -744,7 +769,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         // --- AI-controlled: existing auto behavior ---
         if let Some(target) = nearest_enemy_ship(state, config, owner, pos, range) {
             if let Some(c) = state.control_mut(owner) {
-                c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::TargetShip { ship: target, attack: true }));
+                c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
             }
             fire(state, config, ship_id, target);
             continue;
@@ -775,7 +800,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             let np = ship.position;
             if let Some(target) = nearest_enemy_ship(state, config, owner, np, range) {
                 if let Some(c) = state.control_mut(owner) {
-                    c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::TargetShip { ship: target, attack: true }));
+                    c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
                 }
                 fire(state, config, ship_id, target);
             } else if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
@@ -845,6 +870,10 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
     if let Some(t) = state.ship_mut(target_id) {
         t.hull = if destroyed { 0.0 } else { new_hull };
     }
+    ev(state, GameEvent::Attack { attacker: attacker_id, target: target_id, damage: dmg });
+    if destroyed {
+        ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: state.ship(target_id).map(|s| s.class.clone()).unwrap_or_default() });
+    }
     adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
 }
 
@@ -877,7 +906,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     let picked = pick_target(state, config, owner, pos, rng);
     let behavior = picked.unwrap_or(ShipBehavior::Idle);
     if let Some(c) = state.control_mut(owner) {
-        c.ship_orders.insert(ship_id, Control::ai(behavior));
+        c.ship_orders.insert(ship_id, Control::inherit(behavior));
     }
     picked
 }
@@ -956,8 +985,10 @@ fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: Ci
         }
     };
     adjust_relation(state, attacker, old_owner, config.diplomacy.attack_delta);
+    ev(state, GameEvent::Siege { attacker: ship_id, city: cid, damage: dmg });
     if razed {
         adjust_relation(state, attacker, old_owner, config.diplomacy.capture_delta);
+        ev(state, GameEvent::CityRazed { city: cid, fallen_to: attacker });
     }
 }
 
@@ -980,7 +1011,7 @@ fn colonize(
     let settlement = state.body(body).and_then(|b| b.settlement.as_ref());
     let Some(settlement) = settlement else {
         if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::Idle));
+            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
         }
         return;
     };
@@ -1000,6 +1031,7 @@ fn colonize(
             c.ship_progress.clear();
             c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
         }
+        ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
     } else {
         // Find a new city if the settlement has room.
         let city_count = state.cities.iter().filter(|c| c.body_id == body).count();
@@ -1032,11 +1064,12 @@ fn colonize(
             }
             state.cities.push(city);
             *next_city_id += 1;
+            ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
         }
     }
 
     if let Some(c) = state.control_mut(faction) {
-        c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::Idle));
+        c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
     }
 }
 
@@ -1109,5 +1142,73 @@ fn step_diplomacy(state: &mut State, config: &GameConfig) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config;
+    use crate::model::GameEvent;
+    use crate::world::default_state;
+
+    /// Build the config + a fresh deterministic world (round 0).
+    fn fresh_world(seed: u64) -> (GameConfig, State) {
+        let config = load_config();
+        let state = default_state(&config, seed);
+        (config, state)
+    }
+
+    /// A player-facing regression guard for the "stale target" bug: a player
+    /// ship ordered to attack an already-destroyed target must degrade to Idle,
+    /// never drift toward the origin ([0,0]).
+    #[test]
+    fn player_stale_target_degrades_to_idle_and_does_not_drift() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // China (3) corvette id=0 is Player-ordered to approach US (1) corvette id=2.
+        let diff = serde_json::json!({
+            "control": [{
+                "faction_id": 3,
+                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 2, "attack": false}}, "mode": "Player"}]
+            }]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
+
+        // Simulate the target being destroyed before the round advances.
+        if let Some(t) = state.ship_mut(2) {
+            t.hull = 0.0;
+        }
+        let pos_before = state.ship(0).map(|s| s.position).unwrap();
+
+        advance(&mut state, &config, &mut rng);
+
+        // The order must have degraded to Idle ...
+        let order = state.ship_behavior(0);
+        assert_eq!(order, Some(ShipBehavior::Idle), "stale order must degrade to Idle");
+        // ... without moving the ship toward the origin.
+        let pos_after = state.ship(0).map(|s| s.position).unwrap();
+        assert_eq!(pos_after, pos_before, "ship must not drift (target is dead)");
+        // ... and a StaleOrder event must be recorded.
+        assert!(
+            state.events.iter().any(|e| matches!(e, GameEvent::StaleOrder { ship: 0, .. })),
+            "expected a StaleOrder event for ship 0, got {:?}",
+            state.events
+        );
+    }
+
+    /// Events must populate as the world advances (growth / spurious events are
+    /// fine; the round log must simply be populated and contain no panics).
+    #[test]
+    fn advance_populates_round_events() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        assert!(state.events.is_empty(), "round 0 has no events yet");
+        for _ in 0..6 {
+            advance(&mut state, &config, &mut rng);
+        }
+        // After a few rounds of a war-torn seed, an event log should exist.
+        assert!(!state.events.is_empty(), "after 6 rounds there should be events");
     }
 }

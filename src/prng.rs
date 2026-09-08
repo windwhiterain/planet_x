@@ -14,6 +14,18 @@ impl Prng {
         Prng { state: seed }
     }
 
+    /// The current internal state. Combined with [`Prng::from_state`] this lets a
+    /// checkpoint capture and later restore the exact RNG position, so a saved
+    /// run resumes deterministically.
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    /// Rebuild a PRNG at a previously-saved internal position.
+    pub fn from_state(state: u64) -> Self {
+        Prng { state }
+    }
+
     /// A freshly seeded RNG.
     #[allow(clippy::should_implement_trait)]
     pub fn next_u64(&mut self) -> u64 {
@@ -65,4 +77,24 @@ pub fn random_seed() -> u64 {
         .unwrap_or(0x5EED);
     // Mix in a fresh value so two runs in the same nanosecond differ.
     nanos ^ 0x9E37_79B9_7F4A_7C15
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_state_restores_identical_sequence() {
+        let mut a = Prng::new(42);
+        for _ in 0..100 {
+            a.next_u64();
+        }
+        // Save the position, then keep going from the fresh original.
+        let mut b = Prng::from_state(a.state());
+        for _ in 0..50 {
+            a.next_u64();
+            b.next_u64();
+        }
+        assert_eq!(a.state(), b.state());
+    }
 }

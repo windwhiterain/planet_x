@@ -111,9 +111,13 @@ pub struct FactionControlView {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ScopeView {
+    #[serde(default)]
     pub global: Option<ControlMode>,
+    #[serde(default)]
     pub factions: Vec<(FactionId, Option<ControlMode>)>,
+    #[serde(default)]
     pub bodies: Vec<(BodyId, Option<ControlMode>)>,
+    #[serde(default)]
     pub cities: Vec<(CityId, Option<ControlMode>)>,
 }
 
@@ -590,12 +594,64 @@ fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, 
     }
 }
 
+/// Normalize a single ship `behavior` value so `apply` accepts BOTH shapes:
+///   * the default serde enum form (`{"TargetShip":{"ship":2,"attack":true}}`,
+///     `"Idle"`) — what the `control` template emits and what `.ron` uses; and
+///   * the tagged agent-state form (`{"type":"target_ship","ship":2,"attack":true}`,
+///     `{"type":"idle"}`) — exactly what an agent sees in a ship's `order`.
+/// The latter is rewritten into the former so the rest of the pipeline stays
+/// unchanged. Unknown tags are left as-is (they'll fail downstream cleanly).
+fn normalize_behavior(v: &mut serde_json::Value) {
+    let Some(ty) = v.get("type").and_then(|t| t.as_str()).map(str::to_string) else {
+        return; // already the default form (object or "Idle")
+    };
+    let obj = v.as_object().expect("behavior with type is an object");
+    let mut inner = serde_json::Map::new();
+    for (k, val) in obj {
+        if k != "type" {
+            inner.insert(k.clone(), val.clone());
+        }
+    }
+    let variant = match ty.as_str() {
+        "idle" => {
+            *v = serde_json::Value::String("Idle".to_string());
+            return;
+        }
+        "move" => "Move",
+        "target_ship" => "TargetShip",
+        "target_settlement" => "TargetSettlement",
+        "colonize" => "Colonize",
+        _ => return,
+    };
+    let mut m = serde_json::Map::new();
+    m.insert(variant.to_string(), serde_json::Value::Object(inner));
+    *v = serde_json::Value::Object(m);
+}
+
+/// Walk a control diff and normalize every `ship_orders[].behavior` (see
+/// [`normalize_behavior`]). Only the apply-side JSON path; the state's `order`
+/// view is untouched.
+fn normalize_control_diffs(value: &mut serde_json::Value) {
+    let Some(control) = value.get_mut("control").and_then(|c| c.as_array_mut()) else { return };
+    for fac in control.iter_mut() {
+        let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else { continue };
+        for order in orders.iter_mut() {
+            if let Some(behavior) = order.get_mut("behavior") {
+                normalize_behavior(behavior);
+            }
+        }
+    }
+}
+
 /// Parse a control diff file (JSON) and apply it to `state` as a structural
 /// multi-level patch. Accepts the same shape as `POST /api/command`
-/// (`{control:[...],scope:{...}}`).
+/// (`{control:[...],scope:{...}}`). Ship behaviors may be written in either the
+/// default enum form or the tagged agent-state form (see [`normalize_behavior`]).
 pub fn apply_patch(state: &mut State, config: &GameConfig, value: &serde_json::Value) -> Result<(), String> {
+    let mut v = value.clone();
+    normalize_control_diffs(&mut v);
     let req: CommandReq =
-        serde_json::from_value(value.clone()).map_err(|e| format!("invalid control diff: {e}"))?;
+        serde_json::from_value(v).map_err(|e| format!("invalid control diff: {e}"))?;
     apply_diff(state, config, &req);
     Ok(())
 }
@@ -667,4 +723,92 @@ pub fn router(shared: Shared) -> Router {
         .route("/api/new", post(new_game))
         .with_state(shared)
         .fallback_service(ServeDir::new("static"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ControlMode, ShipBehavior};
+
+    /// The tagged agent-state `order` form must be accepted and rewritten into
+    /// the default enum form that the rest of the pipeline expects.
+    #[test]
+    fn normalize_behavior_accepts_tagged_form() {
+        let cases = [
+            (serde_json::json!({"type":"idle"}), serde_json::json!("Idle")),
+            (
+                serde_json::json!({"type":"target_ship","ship":2,"attack":true}),
+                serde_json::json!({"TargetShip":{"ship":2,"attack":true}}),
+            ),
+            (
+                serde_json::json!({"type":"target_settlement","city":0,"bombard":true}),
+                serde_json::json!({"TargetSettlement":{"city":0,"bombard":true}}),
+            ),
+            (
+                serde_json::json!({"type":"move","position":[-0.5,0.3]}),
+                serde_json::json!({"Move":{"position":[-0.5,0.3]}}),
+            ),
+            (
+                serde_json::json!({"type":"colonize","body":9}),
+                serde_json::json!({"Colonize":{"body":9}}),
+            ),
+        ];
+        for (tagged, expected) in cases {
+            let mut v = tagged.clone();
+            normalize_behavior(&mut v);
+            assert_eq!(v, expected, "tagged input {tagged:?} must normalize to {expected:?}");
+        }
+    }
+
+    /// The default form must pass through unchanged.
+    #[test]
+    fn normalize_behavior_keeps_default_form() {
+        let mut v = serde_json::json!({"TargetShip":{"ship":2,"attack":true}});
+        normalize_behavior(&mut v);
+        assert_eq!(v, serde_json::json!({"TargetShip":{"ship":2,"attack":true}}));
+    }
+
+    /// Applying a tagged-form diff to a real world must produce the same
+    /// controllable behavior as the equivalent default-form diff.
+    #[test]
+    fn apply_patch_accepts_tagged_ship_order() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let tagged = serde_json::json!({
+            "control": [{
+                "faction_id": 3,
+                "ship_orders": [{"ship": 0, "behavior": {"type": "target_ship", "ship": 2, "attack": true}, "mode": "Player"}]
+            }]
+        });
+        apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
+        let b = state.ship_behavior(0).expect("ship 0 has an order");
+        assert_eq!(b, ShipBehavior::TargetShip { ship: 2, attack: true });
+    }
+
+    /// Setting a faction's scope to Player must actually take over its leaves
+    /// (which are inert `inherit` now), even though the AI has "written" values.
+    #[test]
+    fn scope_player_takes_over_independent_faction() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        // Default scope (all None) → everything resolves to Ai.
+        assert_eq!(state.ship_control(0), ControlMode::Ai, "default scope is Ai");
+
+        // Take over faction 3 (中国) via a scope-only diff.
+        let scope_diff = serde_json::json!({"scope": {"factions": [[3, "Player"]]}});
+        apply_patch(&mut state, &config, &scope_diff).expect("scope diff applies");
+        assert_eq!(state.ship_control(0), ControlMode::Player, "ship of a Player faction is player-owned");
+        assert_eq!(state.investment_budget_control(3, "iron"), ControlMode::Player, "budget leaf follows scope");
+        assert_eq!(state.construction_budget_control(3, "iron"), ControlMode::Player);
+        // Other factions are untouched (still Ai).
+        assert_eq!(state.ship_control(2), ControlMode::Ai, "untouched faction stays Ai");
+
+        // An explicit leaf mode still overrides scope in the opposite direction:
+        // force ship 0 back to Ai inside a Player faction.
+        let leaf_diff = serde_json::json!({
+            "control": [{"faction_id": 3, "ship_orders": [{"ship": 0, "mode": "Ai"}]}]
+        });
+        apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
+        assert_eq!(state.ship_control(0), ControlMode::Ai, "explicit Ai leaf beats Player scope");
+    }
 }
