@@ -734,6 +734,9 @@ pub enum StoryEffect {
     Relations { a: FactionId, b: FactionId, delta: f64 },
     /// 给某势力注入一定量资源（key 为 config 原始资源 key）。
     GrantResources { faction: FactionId, resource: String, amount: f64 },
+    /// 给某势力在指定天体附近「出厂」一艘舰（给剧情以真实的机械分量——如
+    /// 一艘新锐旗舰从天体附近下水）。舰 id 由模拟按当前最大 id 连续分配，确定性。
+    GrantShip { faction: FactionId, class: String, body: BodyId },
 }
 
 /// 一条剧情事件模板，来自 config/game.ron 的 `story` 表。

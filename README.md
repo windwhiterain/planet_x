@@ -4,7 +4,7 @@
 
 **动态国际关系**：**开局和平**（无战争状态），关系由 `sim::step_diplomacy` 驱动波动——每对势力按意识形态 `alignment` 的静息亲和漂移（同阵营靠拢、异己升温），好战 `aggression` 加速敌对化；开火/占领压关系入战争，停战后经战争疲态向停战线回落、可再升温。**星际市场**（`sim::step_market`）：每势力自动把富余矿物按参考价值兑换成所缺的关键矿物——解决资源分布不均（如中国 700 铁却缺碳、欧盟不产工业三矿），也提供资源池；**维护费**（`sim::step_upkeep`，每舰每回合按舰级扣资源）则给舰队设上限、避免无限膨胀。
 
-**剧情编年史**：一局不只是状态机——`config/game.ron` 的 `story` 表定义了一条**数据驱动的叙事弧**（`sim::step_story` 每回合评估触发）。每条剧情事件有一个 `trigger`（`RoundAt` 节拍，或 `FirstWar`/`FirstRaze`/`FirstColony`/`WarBetween`/`FactionAtWar`/`RelationBelow` 这类**事件型**触发）——事件型触发恰好落在对应历史事件发生的那个回合，形成「剧情与局势同步」。每条带标题/正文/参与方，并可附带**小幅确定性**机械后果（`Relations` 关系 / `GrantResources` 资源）。触发的剧情记入 `State::chronicle` 编年史（agent 用 `story` 命令或 `--query '.story'` 读取整段弧），也作为一条 `events` 里的 `story` 事件在本回合流水出现。外交跃迁（开战 `war_started` / 停战 `war_ended`）同样作为事件暴露。
+**剧情编年史**：一局不只是状态机——`config/game.ron` 的 `story` 表定义了一条**数据驱动的叙事弧**（`sim::step_story` 每回合评估触发）。每条剧情事件有一个 `trigger`（`RoundAt` 节拍，或 `FirstWar`/`FirstRaze`/`FirstColony`/`WarBetween`/`FactionAtWar`/`RelationBelow` 这类**事件型**触发）——事件型触发恰好落在对应历史事件发生的那个回合，形成「剧情与局势同步」。每条带标题/正文/参与方，并可附带**小幅确定性**机械后果：`Relations`（关系变化）、`GrantResources`（注入资源）、`GrantShip`（在某天体附近为某势力**出厂一艘舰**——给剧情真实的机械分量，如新锐旗舰下水）。触发的剧情记入 `State::chronicle` 编年史（agent 用 `story` 命令或 `--query '.story'` 读取整段弧），也作为一条 `events` 里的 `story` 事件在本回合流水出现；`meta` 的 `story` 数组同时列出每条的 `trigger` 与 `effects`，供 agent 预判剧情节拍与后果。外交跃迁（开战 `war_started` / 停战 `war_ended`）同样作为事件暴露。
 
 ---
 

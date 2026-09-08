@@ -195,7 +195,7 @@
             body: "星系矿业的高层嗅到了外缘陨石的丰厚回报，宣布启动「柯伊伯淘金热」——数百艘采矿船冲向妊神星、创神星与阋神星的冰封矿带。随即，他们把一船船铂金与铁运回内太阳系，隐约有垄断稀有金属之势。",
             trigger: RoundAt(round: 24),
             participants: ["星系矿业"],
-            effects: [GrantResources(faction: 5, resource: "platinum", amount: 3.0), GrantResources(faction: 5, resource: "iron", amount: 8.0)],
+            effects: [GrantResources(faction: 5, resource: "platinum", amount: 3.0), GrantResources(faction: 5, resource: "iron", amount: 8.0), GrantShip(faction: 5, class: "cruiser", body: 9)],
         ),
         (
             id: "first_war",
@@ -254,12 +254,20 @@
             effects: [Relations(a: 6, b: 8, delta: -3.0), Relations(a: 0, b: 6, delta: 5.0)],
         ),
         (
+            id: "arms_race",
+            title: "军备竞赛",
+            body: "美中的对峙催生了一场军备竞赛。两国几乎同步开工新的战列舰——仿佛谁先凑齐一支无敌舰队，谁就能在谈判桌尽头占有整个太阳系。",
+            trigger: RoundAt(round: 48),
+            participants: ["美国", "中国"],
+            effects: [GrantShip(faction: 1, class: "battleship", body: 4), GrantShip(faction: 3, class: "battleship", body: 2), Relations(a: 1, b: 3, delta: -2.0)],
+        ),
+        (
             id: "planet_x_arrives",
             title: "行星X 现身",
             body: "那颗外来的天体终于越过柯伊伯带、进入内太阳系的视野。无论是崇拜教的欢腾，还是科学组织的冷静测算，所有人都将无法回避一个事实：太阳系，已不再是他们以为的那个太阳系。",
             trigger: RoundAt(round: 60),
             participants: ["无国界科学组织", "行星X崇拜教", "联合国"],
-            effects: [],
+            effects: [GrantShip(faction: 6, class: "battleship", body: 6), GrantShip(faction: 8, class: "battleship", body: 14)],
         ),
     ],
 )

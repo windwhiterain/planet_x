@@ -1528,6 +1528,9 @@ fn step_story(state: &mut State, config: &GameConfig) {
                         *f.resources.entry(resource.clone()).or_insert(0.0) += *amount;
                     }
                 }
+                StoryEffect::GrantShip { faction, class, body } => {
+                    grant_story_ship(state, config, *faction, class, *body);
+                }
             }
         }
         // 记入编年史 + 本回合故事事件。
@@ -1541,6 +1544,29 @@ fn step_story(state: &mut State, config: &GameConfig) {
         ev(state, GameEvent::Story { id: spec.id.clone(), title: spec.title.clone() });
         state.chronicle.push(entry);
     }
+}
+
+/// 剧情：把一个舰级「出厂」给某势力，位置在天体当前位置附近（小幅确定性偏移）。
+/// 舰 id 按当前最大 id 连续分配，/并配一条 `Idle` 指令；无 RNG，确定性复现。
+fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, class: &str, body: BodyId) {
+    if !config.ships.contains_key(class) {
+        return;
+    }
+    let pos = state.body_position(body);
+    if state.body(body).is_none() {
+        return;
+    }
+    let next_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
+    let spec = config.ship_spec(class);
+    state.ships.push(Ship {
+        id: next_id,
+        name: format!("{}-{}", spec.label, faction),
+        class: class.to_string(),
+        faction_id: faction,
+        position: [pos[0] + 0.05, pos[1] + 0.05],
+        hull: spec.hull,
+    });
+    state.control.entry(faction).or_default().ship_orders.insert(next_id, Control::inherit(ShipBehavior::Idle));
 }
 
 /// 判断一条剧情触发条件是否已满足。
@@ -1881,5 +1907,59 @@ mod tests {
         assert!(helium_after > helium_before, "prologue grants science 氦-3 (effect)");
         let rel_after = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
         assert!(rel_after < rel_before, "prologue must lower science↔cult relation (effect)");
+    }
+
+    /// 剧情 GrantShip 后果：kuiper_boom（RoundAt 24）给星系矿业(5)出厂一艘巡洋舰；
+    /// 出厂位置恰好在天体当前位置 + (0.05, 0.05)（确定性偏移）、带 Idle 指令、id 连续。
+    #[test]
+    fn story_grant_ship_spawns_a_fleet_member() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // Advance to round 24 so kuiper_boom fires.
+        for _ in 0..24 {
+            advance(&mut state, &config, &mut rng);
+        }
+
+        // The story fired this round.
+        assert!(
+            state.chronicle.iter().any(|c| c.id == "kuiper_boom" && c.round == 24),
+            "kuiper_boom must fire at round 24, got {:?}",
+            state.chronicle.iter().map(|c| (c.id.clone(), c.round)).collect::<Vec<_>>()
+        );
+
+        // The granted cruiser is at exactly body 9 (泰坦) position + the deterministic offset.
+        let bpos = state.body_position(9);
+        let granted = state
+            .ships
+            .iter()
+            .find(|s| {
+                s.faction_id == 5
+                    && s.class == "cruiser"
+                    && (s.position[0] - (bpos[0] + 0.05)).abs() < 1e-9
+                    && (s.position[1] - (bpos[1] + 0.05)).abs() < 1e-9
+            })
+            .expect("kuiper_boom must grant 星系矿业 a cruiser parked at 泰坦");
+        assert_eq!(state.ship_behavior(granted.id), Some(ShipBehavior::Idle), "granted ship starts Idle");
+
+        // Determinism: re-running reproduces the identical granted fleet.
+        let (_, mut state2) = fresh_world(42);
+        let mut rng2 = Prng::new(42);
+        for _ in 0..24 {
+            advance(&mut state2, &config, &mut rng2);
+        }
+        let fleet_a: Vec<(u32, String)> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == 5)
+            .map(|s| (s.id, s.class.clone()))
+            .collect();
+        let fleet_b: Vec<(u32, String)> = state2
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == 5)
+            .map(|s| (s.id, s.class.clone()))
+            .collect();
+        assert_eq!(fleet_a, fleet_b, "same seed must reproduce the same granted fleet");
     }
 }

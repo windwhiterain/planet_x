@@ -180,7 +180,22 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                         json!({"kind": "relation_below", "a": a, "b": b, "value": r2(*value)})
                     }
                 };
-                json!({"id": s.id, "title": s.title, "trigger": trigger})
+                let effects = s
+                    .effects
+                    .iter()
+                    .map(|e| match e {
+                        StoryEffect::Relations { a, b, delta } => {
+                            json!({"kind": "relations", "a": a, "b": b, "delta": r2(*delta)})
+                        }
+                        StoryEffect::GrantResources { faction, resource, amount } => {
+                            json!({"kind": "grant_resources", "faction": faction, "resource": resource, "amount": r2(*amount)})
+                        }
+                        StoryEffect::GrantShip { faction, class, body } => {
+                            json!({"kind": "grant_ship", "faction": faction, "class": class, "body": body})
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                json!({"id": s.id, "title": s.title, "trigger": trigger, "effects": effects})
             })
             .collect::<Vec<_>>(),
     })

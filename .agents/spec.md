@@ -202,7 +202,10 @@
     - `WarBetween(a,b)`：指定两势力第一次交战
     - `FactionAtWar(faction)`：指定势力第一次与任何人交战
     - `RelationBelow(a,b,value)`：a 对 b 关系跌破某值
-  - `effects`：可选小幅、确定性机械后果（`Relations(a,b,delta)` 关系 / `GrantResources(faction,resource,amount)` 资源）
+  - `effects`：可选小幅、确定性机械后果
+    - `Relations(a,b,delta)` 关系
+    - `GrantResources(faction,resource,amount)` 资源
+    - `GrantShip(faction,class,body)` 在某天体附近为某势力「出厂」一艘舰（id 连续、确定性）
 - 模拟每回合评估触发（`sim::step_story`），事件型触发恰好落在对应历史事件发生的回合。
 - 触发后写入 `State::chronicle` 编年史（可查询整段弧），并作为 `events` 里的 `story` 事件出现在本回合流水。
 - **确定性**：剧情全无 RNG，同一种子触发完全一致；checkpoint 续玩仍复现。
