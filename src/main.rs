@@ -1,6 +1,6 @@
 //! planet_x — a sandbox trajectory generator for the Planet X game.
 //!
-//! Usage: `planet_x [--seed <random>] [--start <path.ron>] [--round <n>] [--agent]`
+//! Usage: `planet_x [--seed <random>] [--start <path.ron>] [--round <n>] [--agent] [--query <jq>]`
 //!
 //! * `--seed`   the deterministic RNG seed, or `random` (the default).
 //! * `--start`  load an initial `State` from a RON file; otherwise the default
@@ -8,15 +8,22 @@
 //! * `--round`  run `n` rounds and dump each state snapshot (including the
 //!              per-faction controllable state `State::control`) to a `.ron`
 //!              file under `trajectory/`.
-//! * `--agent`  zero-noise machine output for an LLM agent player: stdout gets
-//!              exactly one compact JSON object per round (JSON Lines), with no
-//!              colours, star map, tables or prose. Round 0 first, then one per
-//!              advanced round (batch `--round N`, or streaming via stdin lines).
+//! * `--agent`  zero-noise machine output for an LLM agent player: JSON Lines,
+//!              no colours, star map, tables or prose.
+//! * `--query`  run a jq filter over the agent state and print JSON Lines. With
+//!              `--round N` it advances N rounds first, so filters run against
+//!              the end-of-sim state (e.g. the surviving marines or captured
+//!              cities). Useful for one-shot, composable pipelines.
 //!
-//! Without `--round` the tool runs interactively: every Enter advances one
-//! round and prints the new state in the CLI. After each round the per-faction
-//! controllable-state diff (指令 = 对可控制状态的修改) is sparsely printed —
-//! in interactive mode below the state, and in `--round` mode inline.
+//! `--agent` without `--round` enters a **query REPL**: commands over stdin
+//! (`q <jq>`, `summary`, `advance [n]`, `cities`, `city <id>`, `ships`,
+//! `faction <id>`, `bodies`, `guide`, `quit`), each returning a JSON value —
+//! hierarchical, on-demand access instead of a per-round full dump.
+//!
+//! Without `--round`/`--agent` the tool runs interactively: every Enter advances
+//! one round and prints the new state in the CLI. After each round the
+//! per-faction controllable-state diff (指令 = 对可控制状态的修改) is sparsely
+//! printed — in interactive mode below the state, and in `--round` mode inline.
 
 use clap::Parser;
 use colored::Colorize;
@@ -24,7 +31,8 @@ use planet_x::agent;
 use planet_x::config::{self, load_config, load_state, parse_seed};
 use planet_x::model::{GameConfig, State};
 use planet_x::prng::Prng;
-use planet_x::{sim, visual, world};
+use planet_x::{query, sim, visual, world};
+use serde_json::json;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -52,6 +60,11 @@ struct Cli {
     /// 无颜色/星图/表格/中文散文；浮点四舍五入到 2 位。
     #[arg(long)]
     agent: bool,
+
+    /// (agent/query) 对初始(或 --start 加载的)状态执行一个 jq 过滤并输出
+    /// JSON Lines 结果。例如: `planet_x --agent --query '.cities[] | select(.owner_name=="中国") | {name,population}'`
+    #[arg(long, value_name = "JQ")]
+    query: Option<String>,
 }
 
 fn main() {
@@ -81,9 +94,32 @@ fn main() {
 
     let mut rng = Prng::new(seed);
 
+    // Batch query: run a jq filter over the agent state and print JSON Lines.
+    // Honors --round N by advancing that many rounds first, so the filter runs
+    // against the end-of-sim state. Takes precedence over interactive/REPL.
+    if let Some(filter) = &cli.query {
+        let n = cli.round.unwrap_or(0);
+        for _ in 0..n {
+            sim::advance(&mut state, &config, &mut rng);
+        }
+        let input = agent::state_value(&state, &config);
+        match query::apply_lines(&input, filter) {
+            Ok(lines) => {
+                if !lines.is_empty() {
+                    emit(&lines);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()}));
+                std::process::exit(10);
+            }
+        }
+        return;
+    }
+
     match cli.round {
         Some(n) => run_rounds(&mut state, &config, &mut rng, n, seed, cli.agent),
-        None if cli.agent => run_agent_stream(&mut state, &config, &mut rng),
+        None if cli.agent => run_agent_repl(&mut state, &config, &mut rng),
         None => run_interactive(&mut state, &config, &mut rng),
     }
 }
@@ -93,28 +129,134 @@ fn print_state(state: &State, config: &GameConfig) {
     println!("{}", visual::render_summary(state, config));
 }
 
-fn run_agent_stream(state: &mut State, config: &GameConfig, rng: &mut Prng) {
-    // Streaming, turn-based loop without command injection (指令 comes later).
-    // Round 0 is printed; each line of stdin advances exactly one round and
-    // prints its state. Same zero-noise JSON format as `--rounds`.
-    println!("{}", agent::render_state(state, config));
+/// The built-in `summary` radar: a compact per-round overview.
+const SUMMARY_JQ: &str = "{round, time_month, counts:{factions:(.factions|length), cities:(.cities|length), ships:(.ships|length)}, factions:[.factions[]|{id,name,wars}]}";
+
+/// Write a line to stdout, ignoring broken-pipe errors so piping into `head`
+/// (or an agent that closes the pipe early) exits quietly instead of panicking.
+fn emit(s: &str) {
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "{s}");
+    let _ = out.flush();
+}
+
+/// Run a jq filter against the current agent state, printing each output on its
+/// own line (JSON Lines). Errors go to stderr as structured JSON.
+fn print_query(state: &State, config: &GameConfig, filter: &str) {
+    match query::apply_lines(&agent::state_value(state, config), filter) {
+        Ok(lines) => {
+            if !lines.is_empty() {
+                emit(&lines);
+            }
+        }
+        Err(e) => eprintln!(
+            "{}",
+            json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()})
+        ),
+    }
+}
+
+/// Structured command catalog returned by `guide`/`help` (progressive discovery).
+fn guide_json() -> String {
+    json!({
+        "schema_version": "1.0",
+        "commands": {
+            "q":  {"usage": "q <jq>",        "desc": "run a jq filter over the current state; JSON Lines out"},
+            "summary": {"usage": "summary",   "desc": "compact radar of the current round"},
+            "advance": {"usage": "advance [n]", "desc": "advance n rounds (default 1), then print summary"},
+            "cities": {"usage": "cities",     "desc": "list cities"},
+            "ships":  {"usage": "ships",      "desc": "list ships"},
+            "factions": {"usage": "factions", "desc": "list factions"},
+            "bodies": {"usage": "bodies",     "desc": "list bodies"},
+            "city": {"usage": "city <id>",    "desc": "detail one city"},
+            "ship": {"usage": "ship <id>",    "desc": "detail one ship"},
+            "faction": {"usage": "faction <id>", "desc": "detail one faction"},
+            "body": {"usage": "body <id>",    "desc": "detail one body"},
+            "guide": {"usage": "guide",       "desc": "this command catalog"},
+            "quit": {"usage": "quit|exit",    "desc": "end the session"}
+        },
+        "errors": {
+            "ERR_QUERY": {"exit_code": 10, "desc": "jq parse/runtime error"},
+            "ERR_BAD_ID": {"exit_code": 10, "desc": "non-numeric entity id"}
+        }
+    })
+    .to_string()
+}
+
+fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+    // Intro: a summary radar so the agent starts oriented (state lives in-process).
+    print_query(state, config, SUMMARY_JQ);
+
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     loop {
+        eprint!("agent> ");
+        io::stderr().flush().ok();
         let mut line = String::new();
         let n = handle.read_line(&mut line);
         if n.is_err() || n.unwrap_or(0) == 0 {
             break;
         }
-        let cmd = line.trim().to_lowercase();
+        let cmd = line.trim();
         if cmd.is_empty() {
             continue;
         }
-        if cmd == "q" || cmd == "quit" || cmd == "exit" {
-            break;
+        let (head, rest) = cmd
+            .split_once(|c: char| c.is_whitespace())
+            .unwrap_or((cmd, ""));
+        let rest = rest.trim();
+
+        match head {
+            // --- query pipeline -------------------------------------------------
+            "q" | "query" => {
+                if rest.is_empty() {
+                    emit(&guide_json());
+                } else {
+                    print_query(state, config, rest);
+                }
+            }
+            "summary" => print_query(state, config, SUMMARY_JQ),
+
+            // --- turn control ---------------------------------------------------
+            "advance" => {
+                let n: u32 = rest.parse().unwrap_or(1);
+                for _ in 0..n {
+                    sim::advance(state, config, rng);
+                }
+                print_query(state, config, SUMMARY_JQ);
+            }
+
+            // --- entity lists ---------------------------------------------------
+            "cities" => print_query(state, config, ".cities[] | {id,name,body,owner_name,population,defense,building}"),
+            "ships" => print_query(state, config, ".ships[] | {id,name,class,owner_name,position,hull,hull_max,order}"),
+            "factions" => print_query(state, config, ".factions[] | {id,name,resources,wars}"),
+            "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlement_area}"),
+
+            // --- entity detail --------------------------------------------------
+            "city" | "ship" | "faction" | "body" => {
+                let entity = match head {
+                    "city" => "cities",
+                    "ship" => "ships",
+                    "faction" => "factions",
+                    _ => "bodies",
+                };
+                match rest.parse::<u32>() {
+                    Ok(id) => print_query(state, config, &format!(".{entity}[] | select(.id == {id})")),
+                    Err(_) => eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_BAD_ID", "message": "expected a numeric id"})
+                    ),
+                }
+            }
+
+            // --- discovery / exit ------------------------------------------------
+            "guide" | "help" => emit(&guide_json()),
+            "quit" | "exit" | "bye" => break,
+            _ => eprintln!(
+                "{}",
+                json!({"ok": false, "code": "ERR_UNKNOWN_CMD", "message": format!("unknown command '{head}' (use 'guide')")})
+            ),
         }
-        sim::advance(state, config, rng);
-        println!("{}", agent::render_state(state, config));
     }
 }
 
@@ -148,10 +290,10 @@ fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, se
     // Agent mode: zero-noise JSON Lines on stdout, no trajectory files, no
     // banner (already suppressed upstream). Round 0 first, then one per round.
     if agent_mode {
-        println!("{}", agent::render_state(state, config));
+        emit(&agent::render_state(state, config));
         for _ in 0..n {
             sim::advance(state, config, rng);
-            println!("{}", agent::render_state(state, config));
+            emit(&agent::render_state(state, config));
         }
         return;
     }
