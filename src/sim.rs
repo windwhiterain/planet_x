@@ -11,12 +11,19 @@
 //! ratio, mining output scales with area × labour, and construction builds
 //! continuous area within the settlement's finite total area, paying resources
 //! from a command-controlled per-round budget.
+//!
+//! The command-controlled state lives in [`State::control`]
+//! ([`ControllableState`]): ship behaviors (指令), per-faction budget and per
+//! building invest weights. The simulation writes to that state each round; the
+//! caller diffs it between consecutive rounds to obtain the per-faction
+//! instruction (action) record.
 
 use crate::model::*;
 use crate::prng::Prng;
 
-/// Advance the world by one round and return a human-readable list of events.
-pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Vec<String> {
+/// Advance the world by one round, writing the new controllable state into
+/// [`State::control`].
+pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     state.round += 1;
     state.time_month += 1.0;
 
@@ -25,22 +32,13 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Vec<St
         b.position = b.orbit.position(state.time_month as f32);
     }
 
-    let mut events = Vec::new();
     step_production(state, config);
-    step_construction(state, config, rng, &mut events);
-    step_military(state, config, rng, &mut events);
+    step_construction(state, config, rng);
+    step_military(state, config, rng);
     step_diplomacy(state, config);
-    events
 }
 
 // --- helpers ----------------------------------------------------------------
-
-fn faction_name(state: &State, id: FactionId) -> String {
-    state
-        .faction(id)
-        .map(|f| f.name.clone())
-        .unwrap_or_else(|| format!("#{}", id))
-}
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
     let dx = a[0] - b[0];
@@ -79,6 +77,16 @@ fn adjust_relation(state: &mut State, a: FactionId, b: FactionId, delta: f64) {
             f.relations.insert(y, v + delta);
         }
     }
+}
+
+/// The command-controlled invest weight of a building, falling back to the
+/// config default when the faction has no explicit entry.
+fn invest_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId, b: &Building) -> f64 {
+    let key = (cid, b.kind.clone(), b.resource.clone());
+    state
+        .control(fid)
+        .and_then(|c| c.invest_weights.get(&key).copied())
+        .unwrap_or_else(|| config.building_spec(&b.kind).default_invest_weight)
 }
 
 // --- production -------------------------------------------------------------
@@ -239,13 +247,14 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
     }
 }
 
-fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, events: &mut Vec<String>) {
+fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let mut next_ship_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
 
     for fid in faction_ids {
-        // Command-controlled per-round investment budget (各类资源预算), stored
-        // on the faction and used as this round's construction spending cap.
+        // Command-controlled per-round investment budget (各类资源预算): stored in
+        // the faction's controllable state and used as this round's construction
+        // spending cap.
         let budget: ResourceMap = state
             .faction(fid)
             .unwrap()
@@ -253,14 +262,14 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, eve
             .iter()
             .map(|(rt, v)| (rt.clone(), *v * config.economy.invest_fraction))
             .collect();
-        if let Some(f) = state.faction_mut(fid) {
-            f.budget = budget.clone();
+        if let Some(c) = state.control_mut(fid) {
+            c.budget = budget.clone();
         }
         let mut spent: ResourceMap = ResourceMap::new();
 
         let city_ids: Vec<CityId> = state.cities.iter().filter(|c| c.faction_id == fid).map(|c| c.id).collect();
         for cid in city_ids {
-            next_ship_id = build_city(state, config, cid, fid, &budget, &mut spent, &mut next_ship_id, rng, events);
+            next_ship_id = build_city(state, config, cid, fid, &budget, &mut spent, &mut next_ship_id, rng);
         }
     }
 }
@@ -275,7 +284,6 @@ fn build_city(
     spent: &mut ResourceMap,
     next_ship_id: &mut u32,
     rng: &mut Prng,
-    events: &mut Vec<String>,
 ) -> u32 {
     let Some(body_id) = state.city(cid).map(|c| c.body_id) else { return *next_ship_id };
     let (ecocap, total_area, speed_mod, res_mod, deposits) = {
@@ -310,7 +318,7 @@ fn build_city(
             .unwrap_or(0.0)
     }
 
-    fn raise_area(buildings: &mut Vec<Building>, kind: &str, resource: Option<&str>, add: f64, config: &GameConfig) {
+    fn raise_area(buildings: &mut Vec<Building>, kind: &str, resource: Option<&str>, add: f64) {
         if add <= 1e-9 {
             return;
         }
@@ -329,7 +337,6 @@ fn build_city(
                 resource: resource.map(str::to_string),
                 area: add,
                 deployed: 0.0,
-                invest_weight: config.building_spec(kind).default_invest_weight,
             }),
         }
     }
@@ -341,7 +348,7 @@ fn build_city(
     let res_area = find_area(&buildings, "residential", None);
     if res_area < desired_res - 1e-9 && planning_remaining > 0.0 {
         let add = (desired_res - res_area).min(planning_remaining);
-        raise_area(&mut buildings, "residential", None, add, config);
+        raise_area(&mut buildings, "residential", None, add);
         planning_remaining -= add;
     }
 
@@ -349,7 +356,7 @@ fn build_city(
     let con_area = find_area(&buildings, "construction", None);
     if con_area < con_target - 1e-9 && planning_remaining > 0.0 {
         let add = (con_target - con_area).min(planning_remaining);
-        raise_area(&mut buildings, "construction", None, add, config);
+        raise_area(&mut buildings, "construction", None, add);
         planning_remaining -= add;
     }
 
@@ -360,14 +367,16 @@ fn build_city(
         let cur = find_area(&buildings, "mining", Some(rt));
         if cur < *darea - 1e-9 {
             let add = (*darea - cur).min(planning_remaining);
-            raise_area(&mut buildings, "mining", Some(rt), add, config);
+            raise_area(&mut buildings, "mining", Some(rt), add);
             planning_remaining -= add;
         }
     }
 
     // 2) Build: grow deployed toward the planned area, spending resources.
-    // Higher invest_weight builds first (its share of the budget gets priority).
-    buildings.sort_by(|a, b| b.invest_weight.total_cmp(&a.invest_weight));
+    // Higher invest weight builds first (its share of the budget gets priority).
+    buildings.sort_by(|a, b| {
+        invest_weight(state, config, fid, cid, b).total_cmp(&invest_weight(state, config, fid, cid, a))
+    });
     for b in buildings.iter_mut() {
         if !b.under_construction() {
             continue;
@@ -406,31 +415,41 @@ fn build_city(
         let name = format!("{}-{}", ship_spec.label, fid);
         state.ships.push(Ship {
             id: new_id,
-            name: name.clone(),
+            name,
             class: target_class.clone(),
             faction_id: fid,
             position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
             hull: ship_spec.hull,
-            target: None,
         });
+        // New ships start idle (no behavior) in the controllable state.
+        if let Some(c) = state.control_mut(fid) {
+            c.ship_orders.insert(new_id, ShipBehavior::Idle);
+        }
         ship_progress -= ship_spec.build_points;
-        events.push(format!("{} 建成 {} \"{}\"", faction_name(state, fid), ship_spec.label, name));
         spawned = true;
     }
     let next = if spawned { choose_next_class(state, fid, config, rng) } else { target_class.clone() };
 
-    // 4) Write back.
-    if let Some(c) = state.city_mut(cid) {
-        c.buildings = buildings;
-        c.ship_build.progress = ship_progress;
-        c.ship_build.target_class = next;
+    // 4) Write back, and ensure every building has an invest-weight entry.
+    if let Some(c) = state.control_mut(fid) {
+        for b in &buildings {
+            let key = (cid, b.kind.clone(), b.resource.clone());
+            c.invest_weights
+                .entry(key)
+                .or_insert_with(|| config.building_spec(&b.kind).default_invest_weight);
+        }
+    }
+    if let Some(city) = state.city_mut(cid) {
+        city.buildings = buildings;
+        city.ship_build.progress = ship_progress;
+        city.ship_build.target_class = next;
     }
     *next_ship_id
 }
 
 // --- military ---------------------------------------------------------------
 
-fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, events: &mut Vec<String>) {
+fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let mut order: Vec<ShipId> = state.ships.iter().map(|s| s.id).collect();
     for i in (1..order.len()).rev() {
         let j = rng.range(i as u64 + 1) as usize;
@@ -448,25 +467,28 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, events:
         let range = config.ship_spec(&class).attack_range;
 
         if let Some(target) = nearest_enemy_ship(state, config, owner, pos, range) {
-            fire(state, config, ship_id, target, events);
+            if let Some(c) = state.control_mut(owner) {
+                c.ship_orders.insert(ship_id, ShipBehavior::TargetShip { ship: target, attack: true });
+            }
+            fire(state, config, ship_id, target);
             continue;
         }
 
-        let Some(target) = resolve_target(state, config, ship_id, owner, pos, rng) else {
+        let Some(behavior) = resolve_target(state, config, ship_id, owner, pos, rng) else {
             continue;
         };
 
-        let dest = target_position(state, target);
-        let distance = dist(pos, dest);
-
-        if let ShipTarget::City(cid) = target {
-            let cpos = city_position(state, cid);
-            if dist(pos, cpos) <= config.combat.siege_range {
-                siege_city(state, config, ship_id, cid, events);
+        if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
+            let cpos = city_position(state, city);
+            if bombard && dist(pos, cpos) <= config.combat.siege_range {
+                siege_city(state, config, ship_id, city);
                 continue;
             }
         }
 
+        // Move toward the commanded destination.
+        let dest = behavior_dest(state, behavior);
+        let distance = dist(pos, dest);
         let speed = config.ship_spec(&class).speed;
         let step = if distance <= config.combat.arrival_eps { 0.0 } else { speed.min(distance) };
         if distance > 1e-9 {
@@ -477,20 +499,29 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, events:
             }
         }
 
+        // After moving: fire at a nearby enemy, or besiege if ordered to.
         if let Some(ship) = state.ship(ship_id) {
             let np = ship.position;
             if let Some(target) = nearest_enemy_ship(state, config, owner, np, range) {
-                fire(state, config, ship_id, target, events);
-            } else if let ShipTarget::City(cid) = target {
-                let cpos = city_position(state, cid);
-                if dist(np, cpos) <= config.combat.siege_range {
-                    siege_city(state, config, ship_id, cid, events);
+                if let Some(c) = state.control_mut(owner) {
+                    c.ship_orders.insert(ship_id, ShipBehavior::TargetShip { ship: target, attack: true });
+                }
+                fire(state, config, ship_id, target);
+            } else if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
+                let cpos = city_position(state, city);
+                if bombard && dist(np, cpos) <= config.combat.siege_range {
+                    siege_city(state, config, ship_id, city);
                 }
             }
         }
     }
 
+    // Drop destroyed ships and prune their behaviors from the controllable state.
     state.ships.retain(|s| s.hull > 0.0);
+    let alive: std::collections::BTreeSet<ShipId> = state.ships.iter().map(|s| s.id).collect();
+    for c in state.control.values_mut() {
+        c.ship_orders.retain(|sid, _| alive.contains(sid));
+    }
 }
 
 fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64) -> Option<ShipId> {
@@ -506,14 +537,14 @@ fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos:
     best.map(|(_, id)| id)
 }
 
-fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId, events: &mut Vec<String>) {
-    let (dmg, aname, afac) = {
+fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId) {
+    let (dmg, afac) = {
         let a = state.ship(attacker_id).expect("attacker gone");
-        (config.ship_spec(&a.class).attack, a.name.clone(), a.faction_id)
+        (config.ship_spec(&a.class).attack, a.faction_id)
     };
-    let (tname, tfac, hull) = {
+    let (tfac, hull) = {
         let t = state.ship(target_id).expect("target gone");
-        (t.name.clone(), t.faction_id, t.hull)
+        (t.faction_id, t.hull)
     };
     let new_hull = hull - dmg;
     let destroyed = new_hull <= 0.0;
@@ -521,49 +552,45 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         t.hull = if destroyed { 0.0 } else { new_hull };
     }
     adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
-
-    let an = faction_name(state, afac);
-    let tn = faction_name(state, tfac);
-    if destroyed {
-        events.push(format!("{} 击毁 {} 的 \"{}\"", an, tn, tname));
-    } else {
-        events.push(format!("{} 的 \"{}\" 炮击 {} 的 \"{}\"", an, aname, tn, tname));
-    }
 }
 
-fn rescue_target(state: &State, config: &GameConfig, t: ShipTarget, owner: FactionId) -> bool {
-    match t {
-        ShipTarget::Body(_) | ShipTarget::Position(_) => true,
-        ShipTarget::Ship(id) => state
-            .ship(id)
+fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: FactionId) -> bool {
+    match behavior {
+        ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
+        ShipBehavior::TargetShip { ship, .. } => state
+            .ship(ship)
             .map(|s| s.hull > 0.0 && hostile(state, config, owner, s.faction_id))
             .unwrap_or(false),
-        ShipTarget::City(id) => state
-            .city(id)
+        ShipBehavior::TargetSettlement { city, .. } => state
+            .city(city)
             .map(|c| hostile(state, config, owner, c.faction_id))
             .unwrap_or(false),
     }
 }
 
-fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipTarget> {
-    let cur = state.ship(ship_id).expect("ship gone").target;
-    if let Some(t) = cur {
-        if rescue_target(state, config, t, owner) {
-            return Some(t);
+fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipBehavior> {
+    let cur = state.ship_behavior(ship_id);
+    // Keep an existing targeting behavior while it is still valid, so the
+    // commander does not thrash between targets every round.
+    if let Some(b) = cur {
+        if matches!(b, ShipBehavior::TargetShip { .. } | ShipBehavior::TargetSettlement { .. })
+            && behavior_is_valid(state, config, b, owner)
+        {
+            return Some(b);
         }
     }
+    // Otherwise (no command yet, or a stale command) re-decide.
     let picked = pick_target(state, config, owner, pos, rng);
-    if let Some(t) = picked {
-        if let Some(s) = state.ship_mut(ship_id) {
-            s.target = Some(t);
-        }
+    let behavior = picked.unwrap_or(ShipBehavior::Idle);
+    if let Some(c) = state.control_mut(owner) {
+        c.ship_orders.insert(ship_id, behavior);
     }
     picked
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipTarget> {
-    let mut best: Option<(f64, ShipTarget)> = None;
-    let mut consider = |d: f64, t: ShipTarget, best: &mut Option<(f64, ShipTarget)>| {
+fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipBehavior> {
+    let mut best: Option<(f64, ShipBehavior)> = None;
+    let mut consider = |d: f64, b: ShipBehavior, best: &mut Option<(f64, ShipBehavior)>| {
         let replace = match *best {
             None => true,
             Some((bd, _)) => {
@@ -577,32 +604,32 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
             }
         };
         if replace {
-            *best = Some((d, t));
+            *best = Some((d, b));
         }
     };
 
     for s in &state.ships {
         if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
-            consider(dist(pos, s.position), ShipTarget::Ship(s.id), &mut best);
+            consider(dist(pos, s.position), ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
         }
     }
     for c in &state.cities {
         if hostile(state, config, owner, c.faction_id) {
             let p = city_position(state, c.id);
-            consider(dist(pos, p), ShipTarget::City(c.id), &mut best);
+            consider(dist(pos, p), ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
         }
     }
-    best.map(|(_, t)| t)
+    best.map(|(_, b)| b)
 }
 
-fn siege_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: CityId, events: &mut Vec<String>) {
-    let (dmg, attacker, aname) = {
+fn siege_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: CityId) {
+    let (dmg, attacker) = {
         let s = state.ship(ship_id).expect("ship gone");
-        (config.ship_spec(&s.class).attack, s.faction_id, s.name.clone())
+        (config.ship_spec(&s.class).attack, s.faction_id)
     };
-    let (cname, old_owner) = {
+    let old_owner = {
         let c = state.city(cid).expect("city gone");
-        (c.name.clone(), c.faction_id)
+        c.faction_id
     };
 
     let taken = {
@@ -619,24 +646,16 @@ fn siege_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: City
     };
 
     if taken {
-        events.push(format!(
-            "{} 攻占 {} 的城市 \"{}\"",
-            faction_name(state, attacker),
-            faction_name(state, old_owner),
-            cname
-        ));
         adjust_relation(state, old_owner, attacker, config.diplomacy.capture_delta);
-    } else {
-        events.push(format!("{} 的 \"{}\" 围攻 {}", faction_name(state, attacker), aname, cname));
     }
 }
 
-fn target_position(state: &State, t: ShipTarget) -> [f64; 2] {
-    match t {
-        ShipTarget::Body(id) => state.body_position(id),
-        ShipTarget::City(id) => city_position(state, id),
-        ShipTarget::Ship(id) => state.ship(id).map(|s| s.position).unwrap_or([0.0, 0.0]),
-        ShipTarget::Position(p) => p,
+fn behavior_dest(state: &State, behavior: ShipBehavior) -> [f64; 2] {
+    match behavior {
+        ShipBehavior::Move { position } => position,
+        ShipBehavior::TargetShip { ship, .. } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
+        ShipBehavior::TargetSettlement { city, .. } => city_position(state, city),
+        ShipBehavior::Idle => [0.0, 0.0],
     }
 }
 
