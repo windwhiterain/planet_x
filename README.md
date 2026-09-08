@@ -1,0 +1,126 @@
+# 行星X — 太空沙盘
+
+《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设）、飞船战斗、围城、外交全部在一个可确定复现的模拟器里推进。天体、资源、建筑、舰船均由 `config/game.ron` 数据驱动，不硬编码。
+
+---
+
+## 构建
+
+```bash
+cargo build                 # debug 构建（本文件所有示例均用 debug 二进制）
+# 或
+cargo build --release       # 产物在 target/release/planet_x
+```
+
+---
+
+## 三种运行模式
+
+`planet_x` 有三种消费方式：**交互式**（人看）、**批量回放**（人看 + 存轨迹）、**agent 零噪声**（LLM 读取）。
+
+### 1. 交互模式（默认）
+
+不带 `--round` 时进入交互模式。**每按一次回车推进一个回合**，打印 ASCII 星图、天体/城市/飞船/势力表、以及各势力可控状态（= 指令）的 diff。
+
+```bash
+planet_x --seed 42
+# 回车  -> 进入下一回合
+# q / quit / exit  -> 退出
+```
+
+### 2. 批量回放模式（`--round N`）
+
+运行 `N` 个回合，把每回合的完整世界快照（**含回合 0 初始状态**）写成 `trajectory/state_round_NNNN.ron`，并打印每回合的「可控状态 diff」。`seed.txt` 记录本次种子以复现。
+
+```bash
+planet_x --seed 42 --round 10      # 默认 seed 随机
+planet_x --seed 7 --rounds 5       # --rounds 是 --round 的别名
+```
+
+### 3. Agent 零噪声模式（`--agent`）
+
+为 LLM agent 设计：**stdout 只输出 JSON Lines**，每回合一个紧凑、稳定的 JSON 对象（回合 0 先，之后每回合一个）。无颜色、无星图、无表格、无中文散文、无无关输出；浮点四舍五入到 2 位小数，低于阈值的资源被丢弃。确定性：同一种子输出逐字节一致。
+
+```bash
+# 批量：N+1 行 JSON（回合 0 + N 个回合）
+planet_x --agent --seed 42 --rounds 10
+
+# 流式：先打印回合 0，此后 stdin 每输入一行推进一个回合
+printf 'go\ngo\nq\n' | planet_x --agent --seed 7
+#   空行被忽略；q/quit/exit 退出
+```
+
+> `--agent` 与 `--round` 可同时使用；也常与 `--start` 搭配从指定状态续玩。
+
+---
+
+## 命令行参数
+
+| 参数 | 说明 |
+|---|---|
+| `--seed <SEED>` | 确定性随机种子。数字或 `random` / `随机`（默认），默认随机生成。 |
+| `--start <PATH>` | 从指定的初始 `State`（`.ron`）加载；不传则程序化生成默认太阳系。 |
+| `--round <N>` | 运行 `N` 回合并把每回合快照写入 `trajectory/`；别名 `--rounds`。 |
+| `--agent` | 零噪声机器输出：stdout 仅输出每回合一个 JSON 对象（JSON Lines）。 |
+
+其它：配置文件路径由 `PLANET_X_CONFIG` 环境变量指定，默认 `config/game.ron`。
+
+---
+
+## Agent 输出 schema（JSON Lines）
+
+每行一个 JSON 对象，字段顺序固定：
+
+```jsonc
+{
+  "round": 1, "time_month": 1.0,
+  "factions": [{
+    "id": 3, "name": "中国",
+    "resources": { "水冰": 40.0, "硅": 2.0, "碳": 26.0, "铁": 7.0 },   // 非零、>=0.05
+    "relations": { "俄罗斯": -5.98, "欧盟": 10.01, "美国": -49.85, "行星X崇拜教": -52.51 },
+    "wars": ["美国", "行星X崇拜教"]                                     // relation <= 交战胜阈值
+  }],
+  "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65], "settlement_area": 120.0 }],
+  "cities": [{
+    "id": 0, "name": "长三角城市群", "body": "地球",
+    "owner": 3, "owner_name": "中国", "population": 1400, "defense": 40.0,
+    "building": "corvette",                                            // 当前建造的舰级
+    "buildings": [{ "kind": "residential", "resource": null, "area": 56.0, "deployed": 56.0 }]
+  }],
+  "ships": [{
+    "id": 0, "name": "护卫舰-3", "class": "corvette",
+    "owner": 3, "owner_name": "中国", "position": [-0.52, -0.67],
+    "hull": 12.0, "hull_max": 12.0,
+    "order": { "type": "target_ship", "ship": 2, "attack": true }      // tag 联合：idle / move / target_ship / target_settlement
+  }]
+}
+```
+
+- `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`。
+- `settlement_area` 非定居点天体为 `null`。
+- 引用一律用整数 id（`faction` / `body` / `city` / `ship`），名称字段便于直读。
+
+---
+
+## 复现
+
+`--seed` 决定整条轨迹；同一 `seed` + 相同配置 + 相同回合数 → 输出逐字节一致。用 `--start` 可从任意保存的状态续玩。
+
+---
+
+## 快速上手示例
+
+```bash
+# 看一次从头开始的战役（human）
+planet_x --seed 42
+
+# 生成 20 回合轨迹文件 + 每回合指令 diff
+planet_x --seed 42 --round 20
+
+# 给 agent 读：20 回合 + 初始，共 21 行 JSON
+planet_x --agent --seed 42 --rounds 20
+
+# 从保存的回合状态续玩（继续推进 5 回合）
+planet_x --start trajectory/state_round_0020.ron --round 5
+planet_x --start trajectory/state_round_0020.ron --agent --rounds 5
+```
