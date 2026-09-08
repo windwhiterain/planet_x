@@ -613,26 +613,72 @@ fn commit_spend(state: &mut State, fid: FactionId, spent: &mut ResourceMap, cost
     }
 }
 
-fn can_pay(state: &State, fid: FactionId, cost: &ResourceMap) -> bool {
-    cost.iter().all(|(rt, c)| {
-        state.faction(fid).map_or(0.0, |f| f.resources.get(rt).copied().unwrap_or(0.0)) >= *c
-    })
-}
-
-/// Pick a ship class a faction can currently afford (for new colonies / new
-/// shipyards with no class yet).
+/// Pick a ship class for a new colony / new shipyard (with no class yet). Instead of
+/// "random among fully-affordable" (which a cash-limited faction collapses to corvette),
+/// the AI sizes its navy to what its **resource profile can fit** (soft affordability:
+/// having most of the minerals counts, not all at once) and **diversifies** — it
+/// prefers classes it currently has few of. So the fleet grows into a **mixed navy**
+/// (screens + warships + carriers), not a one-class blob. Deterministic: the seeded
+/// RNG drives a weighted pick over class scores (variety), reproducible per seed.
 fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &mut Prng) -> String {
-    let affordable: Vec<String> = config
-        .ships
-        .keys()
-        .filter(|c| can_pay(state, fid, &config.ship_spec(c).build_cost))
-        .cloned()
-        .collect();
-    if affordable.is_empty() {
-        "corvette".to_string()
-    } else {
-        rng.pick(&affordable).clone()
+    let Some(f) = state.faction(fid) else { return "corvette".to_string() };
+    let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
+    let mut max_res = 0.0f64;
+    for (r, v) in &f.resources {
+        max_res = max_res.max(*v * value_of(r));
     }
+    let ab = |r: &str| {
+        if max_res > 1e-9 {
+            f.resources.get(r).map(|v| *v * value_of(r) / max_res).unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    };
+
+    // Current fleet composition by class (to know what the navy already has).
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total = 0usize;
+    for s in &state.ships {
+        if s.faction_id == fid && s.hull > 0.0 {
+            *counts.entry(s.class.clone()).or_insert(0) += 1;
+            total += 1;
+        }
+    }
+    let total = total.max(1);
+
+    // Score: a **normalized** resource fit — how well the faction's profile covers the
+    // class's cost (0..1, so cheap and expensive hulls are on the same scale: scarce
+    // minerals lower it, but cost magnitude does not inflate it) — plus a
+    // diversification bonus for under-represented classes, minus an upkeep penalty.
+    // This yields a mixed navy without letting a rich faction's expensive hulls run
+    // away with the score (and the war).
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    for (cls, spec) in &config.ships {
+        let cost_val: f64 = spec.build_cost.iter().map(|(r, c)| c * value_of(r)).sum();
+        let covered: f64 = spec.build_cost.iter().map(|(r, c)| c * value_of(r) * ab(r)).sum();
+        let fit = if cost_val > 1e-9 { covered / cost_val } else { 0.0 };
+        let share = counts.get(cls).copied().unwrap_or(0) as f64 / total as f64;
+        // Classes the faction has < 25% of get a pull toward a balanced mix.
+        let mix_bonus = (0.25 - share).max(0.0) * 1.5;
+        let upkeep_penalty = spec.upkeep * 0.04; // 贵舰难养，只有当资源/构成都支持才造
+        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty));
+    }
+
+    // Weighted random pick → variety; deterministic via the seeded RNG.
+    let total_score: f64 = scored.iter().map(|(_, s)| s.max(0.0)).sum();
+    if total_score <= 1e-9 {
+        return "corvette".to_string();
+    }
+    let mut roll = rng.unit() * total_score;
+    let mut last = "corvette".to_string();
+    for (cls, s) in &scored {
+        last = cls.clone();
+        roll -= s.max(0.0);
+        if roll <= 0.0 {
+            return cls.clone();
+        }
+    }
+    last
 }
 
 /// Deterministically pick a ship component loadout (舰船定制) for a faction building
@@ -3178,6 +3224,37 @@ mod tests {
         }
         // A resource-rich faction should fill more than a token slot.
         assert!(a.len() >= 2, "rich faction should field a real loadout, got {a:?}");
+    }
+
+    /// 拟人指挥官：海军**混编**——一支富有的、近乎全护卫的势力，`choose_next_class` 会被
+    /// 「去重加分」拉去建其它舰型（不只堆护卫），形成更像真实海军的混编。
+    #[test]
+    fn choose_next_class_diversifies_toward_a_mix() {
+        let (config, mut state) = fresh_world(42);
+        if let Some(f) = state.faction_mut(3) {
+            for (r, amt) in [
+                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
+                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
+                ("silicon", 300.0),
+            ] {
+                *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
+            }
+        }
+        // 强制这支势力的现役舰队全部是护卫舰——其余舰型因此「欠份额」，得到去重加分。
+        for s in state.ships.iter_mut() {
+            if s.faction_id == 3 {
+                s.class = "corvette".to_string();
+            }
+        }
+        let mut rng = Prng::new(7);
+        let mut got = std::collections::BTreeSet::new();
+        for _ in 0..60 {
+            got.insert(choose_next_class(&state, 3, &config, &mut rng));
+        }
+        assert!(
+            got.len() >= 3,
+            "an all-corvette navy should be pulled into a mix, got {got:?}"
+        );
     }
 
     /// 拟人指挥官：军舰选装要「又能打、又能扛」——至少一件武器、一件防御（slot≥2 时），
