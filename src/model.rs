@@ -959,6 +959,11 @@ pub struct CombatConfig {
     /// 高价值舰种。0 = 关闭。
     #[serde(default = "default_escort_range")]
     pub escort_range: f64,
+    /// 追击半径（AU）：AI 舰只在**此半径内**才会去追敌对舰——避免跨越全图去追一艘远逃
+    /// 的敌舰（过度延伸、漂移、被伏击）。超过此半径的敌舰不在追击范围（转而去轰炸城市/
+    /// 殖民/护卫）。这是拟人的「不追远敌、就近平守」。0 = 不限（总是追）。
+    #[serde(default = "default_pursuit_range")]
+    pub pursuit_range: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -979,6 +984,10 @@ fn default_component_repair() -> f64 {
 
 fn default_escort_range() -> f64 {
     10.0
+}
+
+fn default_pursuit_range() -> f64 {
+    12.0
 }
 
 /// Building structure attribute (混凝土 / 钢结构).

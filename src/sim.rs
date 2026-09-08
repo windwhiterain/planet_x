@@ -2179,7 +2179,12 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
     // wasting missiles on point-defense-heavy targets; wound = hull/hull_max);
     // cities are stationary large targets (neutral fit/wound=1.0, decided by distance).
     for s in &state.ships {
-        if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
+        // 拟人的「不追远敌」：超过追击半径的敌舰不在追击范围（避免跨全图去追远逃的敌舰、
+        // 过度延伸漂移）。城市（轰炸/殖民）不受此限制——征服仍然值得远征。
+        if s.hull > 0.0
+            && hostile(state, config, owner, s.faction_id)
+            && (config.combat.pursuit_range <= 0.0 || dist(pos, s.position) <= config.combat.pursuit_range)
+        {
             let is_focus = focus == Some(s.faction_id);
             let wound = s.hull / s.hull_max.max(1e-9);
             let fit = weapon_fit(weapons, config, s);
@@ -3597,6 +3602,25 @@ mod tests {
         }
         assert_eq!(fleet_flag(&state, 3), Some(2));
         // 没有航母 → 无旗舰（无护航）。
+    }
+
+    /// 拟人的「不追远敌」（驻守而非过度延伸）：超出追击半径的敌对舰不应被选为追击目标。
+    #[test]
+    fn ships_do_not_chase_enemies_beyond_pursuit_range() {
+        let (config, mut state) = fresh_world(42);
+        // 中国 ship 0 在 [40,40]；把 US 的 ship 5 放到远处（远超 pursuit_range 12）。
+        if let Some(s) = state.ship_mut(5) {
+            s.position = [140.0, 40.0];
+        }
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let weapons = ship_weapons(&config, state.ship(0).unwrap());
+        let picked = pick_target(&state, &config, 3, [40.0, 40.0], &mut Prng::new(1), None, &weapons);
+        // 远处那艘敌舰不应被选中（超出追击半径）；可能选中更近的目标或城市/空。
+        assert!(
+            !matches!(picked, Some(ShipBehavior::TargetShip { ship: 5, .. })),
+            "a hostile beyond pursuit_range should not be chased; got {picked:?}"
+        );
     }
 
     /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。
