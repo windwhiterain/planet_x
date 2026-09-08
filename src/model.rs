@@ -870,6 +870,16 @@ pub struct EconomyConfig {
     /// Housing target multiplier: residential area is kept at
     /// `population / ecological_capacity * housing_buffer`.
     pub housing_buffer: f64,
+    /// AI 造舰的「维护费保留」：自动指挥的势力在建新舰前，会从库存里**预留**一定倍数的
+    /// 舰队维护费（市场价值），只把超出部分用于造舰——「把海军养在经济能承受的规模」。
+    /// 避免基线 AI 无脑大建（库存×invest_fraction）、随后维护费拖垮经济、军备崩盘。
+    /// 越大越保守；0 = 不保留（旧行为）。
+    #[serde(default = "default_upkeep_reserve_mult")]
+    pub upkeep_reserve_mult: f64,
+}
+
+fn default_upkeep_reserve_mult() -> f64 {
+    4.0
 }
 
 /// Combat tuning. Cities have no separate defense pool: a city's hardness is

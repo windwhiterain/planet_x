@@ -427,3 +427,30 @@ fn probe_peak() {
         );
     }
 }
+
+/// 诊断：seed 1 中僵尸（无舰无活城）势力出现 3 个时的回合与各家状态。`--ignored`。
+#[test]
+#[ignore]
+fn probe_zombies() {
+    let config = load_config();
+    let mut state = world::default_state(&config, 1);
+    let mut rng = Prng::new(1);
+    for _ in 0..1000u32 {
+        sim::advance(&mut state, &config, &mut rng);
+        if zombie_count(&state) >= 3 {
+            println!("--- round {} dead {} ---", state.round, zombie_count(&state));
+            for f in &state.factions {
+                let ships = state.ships.iter().filter(|s| s.faction_id == f.id).count();
+                let cities = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count();
+                let razed = state.cities.iter().filter(|c| c.faction_id == f.id && c.razed).count();
+                println!("  {} ships={ships} cities={cities} own_razed={razed}", f.name);
+            }
+            let total_settlements: usize = state.bodies.iter().map(|b| b.settlements.len()).sum();
+            let total_cities = state.cities.len();
+            println!("  settlements={total_settlements} cities={total_cities}");
+            return;
+        }
+    }
+    println!("never reached 3 zombies");
+}
+

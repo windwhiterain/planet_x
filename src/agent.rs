@@ -165,6 +165,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
             "min_efficiency": r2(config.economy.min_efficiency),
             "invest_fraction": r2(config.economy.invest_fraction),
             "housing_buffer": r2(config.economy.housing_buffer),
+            "upkeep_reserve_mult": r2(config.economy.upkeep_reserve_mult),
         },
         "combat": {
             "war_threshold": r2(config.combat.war_threshold),

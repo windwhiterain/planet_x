@@ -471,7 +471,7 @@ fn step_market(state: &mut State, config: &GameConfig) {
 
 // --- construction (dual budgets) ---------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BudgetKind {
     Investment,
     Construction,
@@ -490,6 +490,36 @@ fn read_budget(
         .faction(fid)
         .map(|f| f.resources.clone())
         .unwrap_or_default();
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+    let stock_value: f64 = stockpile.iter().map(|(k, v)| v * value_of(k)).sum();
+    // 造舰的「维护费保留」：自动指挥势力在投入造舰预算前，先从库存里预留 `upkeep ×
+    // upkeep_reserve_mult` 的市场价值作为维护底线，只把超出部分用于造舰——「把海军养在
+    // 经济能承受的规模」。这样基线 AI 不会无脑大建，避免维护费拖垮经济、军备崩盘。
+    // 只对 Construction（造舰）生效；投资基础设施（Investment）不受影响。
+    let reserve = if kind == BudgetKind::Construction {
+        let upkeep: f64 = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid && s.hull > 0.0)
+            .map(|s| ship_panel(config, s).upkeep)
+            .sum();
+        upkeep * config.economy.upkeep_reserve_mult
+    } else {
+        0.0
+    };
+    let build_value = stock_value * config.economy.invest_fraction;
+    // 造舰预算允许的「上限」（市场价值）：不把库存打到维护底线之下。
+    let con_cap = if kind == BudgetKind::Construction {
+        (build_value).min((stock_value - reserve).max(0.0))
+    } else {
+        build_value
+    };
+    let con_scale = if kind == BudgetKind::Construction && build_value > 1e-9 {
+        (con_cap / build_value).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
     let mut budget: ResourceMap = ResourceMap::new();
     let mut modes = Vec::new();
     for (rt, v) in &stockpile {
@@ -499,7 +529,7 @@ fn read_budget(
             BudgetKind::Construction => state.construction_budget_control(fid, rt),
         };
         let value = match mode {
-            ControlMode::Ai => ai_value,
+            ControlMode::Ai => ai_value * con_scale,
             ControlMode::Player => state
                 .control(fid)
                 .and_then(|c| match kind {
@@ -507,7 +537,7 @@ fn read_budget(
                     BudgetKind::Construction => c.construction_budget.get(rt),
                 })
                 .map(|c| c.value)
-                .unwrap_or(ai_value),
+                .unwrap_or(ai_value * con_scale),
         };
         budget.insert(rt.clone(), value);
         modes.push((rt.clone(), mode));
@@ -1240,8 +1270,70 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// Deterministic: no RNG beyond the existing affordable-class pick. A faction
 /// that has been fully absorbed (has no footprint anywhere) is left eliminated —
 /// the rare, legitimate end of a civ.
+/// 找一个「尚无任何城市占据」的定居点（含空白/从未殖民）；城市占用即排除。返回
+/// (body_id, settlement_idx)。用于反僵尸重建的**强制立足点**兜底：当世界暂时没有空白
+/// 城足迹、又必须给被灭势力一个落脚点时，就在未占用定居点上新建一座城。
+fn find_vacant_settlement(state: &State) -> Option<(BodyId, usize)> {
+    for b in &state.bodies {
+        if b.settlements.is_empty() {
+            continue;
+        }
+        let occupied: BTreeSet<usize> = state
+            .cities
+            .iter()
+            .filter(|c| c.body_id == b.id)
+            .map(|c| c.settlement)
+            .collect();
+        for idx in 0..b.settlements.len() {
+            if !occupied.contains(&idx) {
+                return Some((b.id, idx));
+            }
+        }
+    }
+    None
+}
+
+/// 反僵尸重建的**最后兜底**：当世界已满（每个定居点都被活城占据）、被灭势力既无自己
+/// 的空白足迹、也找不到未占用定居点时，难民潮会**夺取当前控制城数最多的那个势力的最小
+/// id 活城**（一个边缘殖民地被难民潮占据），作为重新立足点。这保证「被完全吞并」的旧
+/// 势力也总能重返——既维持「上千回合不崩坏、无永久旁观者」，又给大帝国一个「难民危机」
+/// 式的代价。确定性（无 RNG）。返回被夺取的城市 id。
+fn displace_city_for_refugee(state: &State) -> Option<CityId> {
+    let mut counts: BTreeMap<FactionId, usize> = BTreeMap::new();
+    for c in &state.cities {
+        if !c.razed {
+            *counts.entry(c.faction_id).or_insert(0) += 1;
+        }
+    }
+    let holder = counts.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k)?;
+    state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == holder && !c.razed)
+        .min_by_key(|c| c.id)
+        .map(|c| c.id)
+}
+
+/// 反僵尸重建（`Resurgence` 事件）。若一支势力在一回合结束时**既无舰又无活城**（已被
+/// 彻底消灭、无从再殖民/重建的下限），它会在自己仍持有的**残骸足迹**上重新立足：重建
+/// 一座城并出场一艘廉价种子舰——保证没有势力会**永久**变成旁观者。确定性：无未播种 RNG；
+/// 位置/舰名/id 全由状态推导，同种子完全复现。
+///
+/// 立足点优先级（确保「总能重返」）：
+/// 1. 该势力自己最低 id 的空白城（diaspora claim，空白城保留最后主人的 id）；
+/// 2. 全系统最低 id 的任意空白城（难民避风港）；
+/// 3. 若无任何空白城，则在一个**从未被占据**的定居点上新建一座城（强制立足点）。
 fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let mut next_ship = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
+    let mut next_city = state.cities.iter().map(|c| c.id).max().map_or(0, |m| m + 1);
+    let mut next_building = state
+        .cities
+        .iter()
+        .flat_map(|c| c.buildings.iter().map(|b| b.id))
+        .max()
+        .map_or(0, |m| m + 1);
+
     for fid in faction_ids {
         // Already a participant (has a ship or a living city)? Nothing to do.
         let has_ship = state.ships.iter().any(|s| s.faction_id == fid && s.hull > 0.0);
@@ -1253,70 +1345,135 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             continue;
         }
 
-        // Anchor: this faction's own lowest-id city footprint (a diaspora claim —
-        // a razed city keeps its last owner's `faction_id` until re-colonized).
-        // If the faction has been fully absorbed (no footprint anywhere), fall back
-        // to emigrating onto the lowest-id razed settlement in the whole system —
-        // a refugee refuge — so a wiped civ can always re-enter the game.
-        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.id).map(|c| c.id);
-        let Some(anchor_id) = anchor.or_else(|| {
-            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.id).map(|c| c.id)
-        }) else {
-            continue; // no footprint and no razed refuge anywhere — leave eliminated.
-        };
-
-        // Read everything we need before mutating borrows.
-        let Some(settlement) = state.city_settlement(anchor_id).cloned() else { continue };
-        let body = state.city(anchor_id).map(|c| c.body_id).unwrap_or(0);
         let seeded_ship_class = choose_next_class(state, fid, config, rng);
-        let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-        let mut next_bid = state
-            .cities
-            .iter()
-            .flat_map(|c| c.buildings.iter().map(|b| b.id))
-            .max()
-            .map_or(0, |m| m + 1);
-        let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_bid);
+        let spec = config.ship_spec(&seeded_ship_class);
 
-        // Re-seed the city (mirrors `colonize`'s razed-city path).
-        if let Some(c) = state.city_mut(anchor_id) {
-            c.razed = false;
-            c.faction_id = fid;
-            c.population = pop;
-            c.buildings = buildings;
-            c.ship_progress.clear();
-            c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
-            c.loyalty = 1.0;
-        }
+        // Anchor 1/2: this faction's own lowest-id footprint, else any razed refuge.
+        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.id).map(|c| c.id);
+        let anchor_id = anchor.or_else(|| {
+            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.id).map(|c| c.id)
+        });
 
-        // Ensure the re-seeded buildings have invest/build-weight entries.
-        let city_buildings = state.city(anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
-        if let Some(ctrl) = state.control_mut(fid) {
-            for b in &city_buildings {
-                let ikey = (anchor_id, b.id);
-                ctrl.invest_weights.entry(ikey).or_insert_with(|| {
-                    Control::inherit(config.building_spec(&b.kind).default_invest_weight)
-                });
-                if b.is_shipyard() {
-                    let bkey = (anchor_id, b.id);
-                    ctrl.build_weights.entry(bkey).or_insert_with(|| {
-                        Control::inherit(config.building_spec(&b.kind).default_build_weight)
+        let (body, pos) = if let Some(anchor_id) = anchor_id {
+            // Re-seed the anchor's city (diaspora claim / refugee refuge).
+            let Some(settlement) = state.city_settlement(anchor_id).cloned() else { continue };
+            let body = state.city(anchor_id).map(|c| c.body_id).unwrap_or(0);
+            let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+            let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
+            if let Some(c) = state.city_mut(anchor_id) {
+                c.razed = false;
+                c.faction_id = fid;
+                c.population = pop;
+                c.buildings = buildings;
+                c.ship_progress.clear();
+                c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
+                c.loyalty = 1.0;
+            }
+            // Ensure the re-seeded buildings have invest/build-weight entries.
+            let city_buildings = state.city(anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
+            if let Some(ctrl) = state.control_mut(fid) {
+                for b in &city_buildings {
+                    let ikey = (anchor_id, b.id);
+                    ctrl.invest_weights.entry(ikey).or_insert_with(|| {
+                        Control::inherit(config.building_spec(&b.kind).default_invest_weight)
                     });
+                    if b.is_shipyard() {
+                        let bkey = (anchor_id, b.id);
+                        ctrl.build_weights.entry(bkey).or_insert_with(|| {
+                            Control::inherit(config.building_spec(&b.kind).default_build_weight)
+                        });
+                    }
                 }
             }
-        }
+            let cpos = state.body_position(body);
+            (body, [cpos[0] + 0.05, cpos[1] + 0.05])
+        } else {
+            // Anchor 3/4 (last resort): no razed footprint and no vacant settlement.
+            // First try to found a brand-new city on a never-occupied settlement; if
+            // the world is entirely full, a diaspora refugee overruns the strongest
+            // colonizer's lowest-id fringe city. Either way a wiped civ re-enters.
+            if let Some((body, idx)) = find_vacant_settlement(state) {
+                let Some(settlement) = state.body_settlement(body, idx).cloned() else { continue };
+                let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+                let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
+                let base = if settlement.name.is_empty() {
+                    state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
+                } else {
+                    settlement.name.clone()
+                };
+                let city = City {
+                    id: next_city,
+                    name: format!("{}-收容所", base),
+                    body_id: body,
+                    settlement: idx,
+                    faction_id: fid,
+                    population: pop,
+                    buildings,
+                    ship_progress: {
+                        let mut m = BTreeMap::new();
+                        m.insert(seeded_ship_class.clone(), 0.0);
+                        m
+                    },
+                    razed: false,
+                    loyalty: 1.0,
+                };
+                let ctrl = state.control.entry(fid).or_default();
+                for b in &city.buildings {
+                    let key = (city.id, b.id);
+                    ctrl.invest_weights
+                        .insert(key, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+                    if b.is_shipyard() {
+                        ctrl.build_weights
+                            .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
+                    }
+                }
+                state.cities.push(city);
+                next_city += 1;
+                let cpos = state.body_position(body);
+                (body, [cpos[0] + 0.05, cpos[1] + 0.05])
+            } else {
+                // 世界完全满员：难民夺取最强殖民者的最小 id 边缘城。
+                let Some(host_cid) = displace_city_for_refugee(state) else { continue };
+                let Some(settlement) = state.city_settlement(host_cid).cloned() else { continue };
+                let body = state.city(host_cid).map(|c| c.body_id).unwrap_or(0);
+                let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+                let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
+                if let Some(c) = state.city_mut(host_cid) {
+                    c.razed = false;
+                    c.faction_id = fid;
+                    c.population = pop;
+                    c.buildings = buildings;
+                    c.ship_progress.clear();
+                    c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
+                    c.loyalty = 1.0;
+                }
+                let city_buildings = state.city(host_cid).map(|c| c.buildings.clone()).unwrap_or_default();
+                if let Some(ctrl) = state.control_mut(fid) {
+                    for b in &city_buildings {
+                        let ikey = (host_cid, b.id);
+                        ctrl.invest_weights.entry(ikey).or_insert_with(|| {
+                            Control::inherit(config.building_spec(&b.kind).default_invest_weight)
+                        });
+                        if b.is_shipyard() {
+                            let bkey = (host_cid, b.id);
+                            ctrl.build_weights.entry(bkey).or_insert_with(|| {
+                                Control::inherit(config.building_spec(&b.kind).default_build_weight)
+                            });
+                        }
+                    }
+                }
+                let cpos = state.body_position(body);
+                (body, [cpos[0] + 0.05, cpos[1] + 0.05])
+            }
+        };
 
-        // Launch one affordable colony ship from the rebuilt city. Ordered Idle;
-        // the AI picks its behavior next round. Deterministic (id = max+1).
-        let pos = state.body_position(body);
-        let next_ship = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
-        let spec = config.ship_spec(&seeded_ship_class);
+        // Launch one affordable colony ship from the rebuilt/founded city.
         state.ships.push(Ship {
             id: next_ship,
             name: format!("{}-{}", spec.label, fid),
             class: seeded_ship_class.clone(),
             faction_id: fid,
-            position: [pos[0] + 0.05, pos[1] + 0.05],
+            position: pos,
             hull: spec.hull,
             hull_max: spec.hull,
             shield: 0.0,
@@ -1330,6 +1487,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             .ship_orders
             .insert(next_ship, Control::inherit(ShipBehavior::Idle));
         ev(state, GameEvent::Resurgence { faction: fid, body, ship: next_ship });
+        next_ship += 1;
     }
 }
 
