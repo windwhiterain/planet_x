@@ -54,29 +54,40 @@ main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .panel h2 { margin: 0 0 8px; font-size: 13px; }
 .panel .hint { color: var(--muted); font-size: 11px; }
-.row {
-  display: flex; align-items: center; gap: 8px; justify-content: space-between;
-  padding: 4px 0; border-bottom: 1px solid #1c2745; flex-wrap: wrap;
+/* hierarchy tree (control + scope) */
+.tnode { margin: 1px 0; }
+.tnode-head {
+  display: flex; align-items: center; gap: 6px; padding: 3px 4px;
+  border-radius: 5px;
 }
-.row:last-child { border-bottom: none; }
+.tnode-head:hover { background: #18224a; }
+.tnode .arrow {
+  width: 16px; text-align: center; color: var(--muted); cursor: pointer;
+  flex: none; user-select: none;
+}
+.tnode .arrow.leaf { cursor: default; opacity: .5; }
+.tnode-label { flex: 1; display: block; cursor: default; }
+.tnode-label.clickable { cursor: pointer; }
+.tnode-kids { margin-left: 14px; padding-left: 6px; border-left: 1px dashed #223052; }
+.tnode select.mode {
+  background: #0d1226; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 4px; font-size: 12px; flex: none;
+}
 .ship-editor {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 4px 0 10px 8px;
+  padding: 2px 0 8px 22px;
 }
-.row .label { flex: 1; color: var(--text); }
-.row input, .row select {
+.leaf-val {
+  display: flex; align-items: center; gap: 6px; padding: 2px 0 8px 22px;
+  color: var(--muted);
+}
+.leaf-val .lv-label { font-size: 12px; }
+.tnode .num, .ship-editor input[type="number"], .leaf-val input[type="number"] {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
-  border-radius: 4px; padding: 3px 6px; max-width: 120px;
+  border-radius: 4px; padding: 2px 6px; width: 84px;
 }
-.row .num { width: 80px; }
-
-/* mode toggle */
-.mode-toggle {
-  display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; cursor: pointer;
-}
-.mode-toggle button { border: none; background: transparent; color: var(--muted); padding: 3px 8px; cursor: pointer; }
-.mode-toggle button.on { background: var(--ai); color: #04130a; font-weight: 700; }
-.mode-toggle button.on.player { background: var(--player); color: #170f03; }
+.ship-editor label, .leaf-val label { color: var(--muted); font-size: 12px; }
+.ship-editor input[type="checkbox"] { accent-color: var(--accent); }
 
 /* apply button */
 #applyBtn { align-self: stretch; padding: 10px; font-size: 14px; }

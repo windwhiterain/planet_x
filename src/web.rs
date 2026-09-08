@@ -121,9 +121,10 @@ pub struct AdvanceReq {
 
 #[derive(Deserialize)]
 pub struct CommandReq {
-    pub faction_id: FactionId,
+    /// All factions' controllable state at once (hotseat). Each entry carries
+    /// its own `faction_id`.
     #[serde(default)]
-    pub control: Option<FactionControlView>,
+    pub control: Vec<FactionControlView>,
     #[serde(default)]
     pub scope: Option<ScopeView>,
 }
@@ -281,8 +282,8 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
 
 async fn command(AxState(shared): AxState<Shared>, Json(req): Json<CommandReq>) -> Json<StateView> {
     let mut world = shared.lock().unwrap();
-    if let Some(cv) = &req.control {
-        world.state.control.insert(req.faction_id, control_from_view(cv));
+    for cv in &req.control {
+        world.state.control.insert(cv.faction_id, control_from_view(cv));
     }
     if let Some(sv) = &req.scope {
         world.state.scope = scope_from_view(sv);
