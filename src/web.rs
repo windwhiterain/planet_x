@@ -111,6 +111,15 @@ pub struct ScopeView {
     pub cities: Vec<(CityId, Option<ControlMode>)>,
 }
 
+/// The editable control surface, exactly what the frontend edits and posts back
+/// to `/api/command`. Emitted by the agent CLI `control` command as the
+/// "template" the agent edits, and accepted by `apply` / `--apply` as a diff.
+#[derive(Serialize, Clone)]
+pub struct ControlSurface {
+    pub control: Vec<FactionControlView>,
+    pub scope: ScopeView,
+}
+
 #[derive(Serialize, Clone)]
 pub struct StateView {
     pub round: u32,
@@ -129,12 +138,70 @@ pub struct AdvanceReq {
     pub n: u32,
 }
 
+// --- presence-aware control patches (the "diff" the agent writes) ----------
+//
+// The read/template side uses FactionControlView (full leaves with a concrete
+// mode). The *apply* side is a structural multi-level patch: you may target a
+// whole faction, a category (ships / budget / invest), or an individual leaf,
+// and within a leaf you may set only the value, only the mode, or both.
+//
+// Presence is tracked so that an *absent* field is left unchanged instead of
+// being reset:
+//   * `behavior` / `value` absent  -> keep the leaf's current value.
+//   * `mode` absent                -> keep the leaf's current mode.
+//   * `mode: null`                 -> set mode to inherit (None).
+//   * `mode: "Ai"|"Player"`        -> set mode explicitly.
+// A leaf that is entirely absent from the diff is untouched (recursion stops
+// at the finest granularity present). This is what lets the agent edit just the
+// one ship it wants to move.
+
+#[derive(Deserialize, Default)]
+pub struct ShipOrderPatch {
+    pub ship: ShipId,
+    #[serde(default)]
+    pub behavior: Option<ShipBehavior>,
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct BudgetPatch {
+    pub resource: String,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct InvestWeightPatch {
+    pub city: CityId,
+    pub kind: String,
+    pub resource: Option<String>,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct FactionControlPatch {
+    pub faction_id: FactionId,
+    #[serde(default)]
+    pub ship_orders: Vec<ShipOrderPatch>,
+    #[serde(default)]
+    pub budget: Vec<BudgetPatch>,
+    #[serde(default)]
+    pub invest_weights: Vec<InvestWeightPatch>,
+}
+
 #[derive(Deserialize)]
 pub struct CommandReq {
-    /// All factions' controllable state at once (hotseat). Each entry carries
-    /// its own `faction_id`.
+    /// Factions' controllable-state patches. Only the factions/leaves that are
+    /// present are touched; everything else is left as-is.
     #[serde(default)]
-    pub control: Vec<FactionControlView>,
+    pub control: Vec<FactionControlPatch>,
+    /// Optional scope (AI/玩家 boundary tree) overlay.
     #[serde(default)]
     pub scope: Option<ScopeView>,
 }
@@ -226,21 +293,6 @@ pub fn state_view(world: &GameWorld) -> StateView {
     }
 }
 
-fn control_from_view(v: &FactionControlView) -> ControllableState {
-    let mut c = ControllableState::default();
-    for e in &v.ship_orders {
-        c.ship_orders.insert(e.ship, Control { value: e.behavior, mode: e.mode });
-    }
-    for e in &v.budget {
-        c.budget.insert(e.resource.clone(), Control { value: e.value, mode: e.mode });
-    }
-    for e in &v.invest_weights {
-        let key = (e.city, e.kind.clone(), e.resource.clone());
-        c.invest_weights.insert(key, Control { value: e.value, mode: e.mode });
-    }
-    c
-}
-
 fn scope_from_view(v: &ScopeView) -> ControlScope {
     ControlScope {
         global: v.global,
@@ -248,6 +300,117 @@ fn scope_from_view(v: &ScopeView) -> ControlScope {
         bodies: v.bodies.iter().cloned().collect(),
         cities: v.cities.iter().cloned().collect(),
     }
+}
+
+/// Round to 2 decimals (token-noise reduction, matching the agent output).
+fn r2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+fn round_behavior(b: ShipBehavior) -> ShipBehavior {
+    match b {
+        ShipBehavior::Move { position } => ShipBehavior::Move {
+            position: [r2(position[0]), r2(position[1])],
+        },
+        other => other,
+    }
+}
+
+/// Round every numeric field of a control view so the agent template has no
+/// float noise. Only used by the agent `control` command; the web `state_view`
+/// keeps raw values.
+fn round_view(v: FactionControlView) -> FactionControlView {
+    FactionControlView {
+        faction_id: v.faction_id,
+        ship_orders: v
+            .ship_orders
+            .into_iter()
+            .map(|o| ShipOrderEntry { ship: o.ship, behavior: round_behavior(o.behavior), mode: o.mode })
+            .collect(),
+        budget: v
+            .budget
+            .into_iter()
+            .map(|b| BudgetEntry { resource: b.resource, value: r2(b.value), mode: b.mode })
+            .collect(),
+        invest_weights: v
+            .invest_weights
+            .into_iter()
+            .map(|i| InvestWeightEntry { city: i.city, kind: i.kind, resource: i.resource, value: r2(i.value), mode: i.mode })
+            .collect(),
+    }
+}
+
+/// Render the current editable control surface (control + scope) as JSON —
+/// the template an agent edits and posts back as a diff. Values are rounded to
+/// 2 decimals so the template is clean for an LLM.
+pub fn control_surface(state: &State) -> serde_json::Value {
+    let control = state
+        .control
+        .iter()
+        .map(|(fid, c)| round_view(control_view(*fid, c)))
+        .collect();
+    let surface = ControlSurface { control, scope: scope_view(&state.scope) };
+    serde_json::to_value(surface).expect("control surface is serializable")
+}
+
+/// Apply a presence-aware control patch (a structural multi-level diff) to
+/// `state`. Only the factions and leaves present in `req` are modified; for a
+/// leaf that is present, an omitted `value`/`behavior` keeps the current value
+/// and an omitted `mode` keeps the current mode. `scope` is overlaid when given.
+pub fn apply_diff(state: &mut State, req: &CommandReq) {
+    for fac in &req.control {
+        let c = state.control.entry(fac.faction_id).or_default();
+        for sp in &fac.ship_orders {
+            let ctrl = c.ship_orders.entry(sp.ship).or_insert_with(|| Control {
+                value: sp.behavior.unwrap_or(ShipBehavior::Idle),
+                mode: sp.mode.flatten(),
+            });
+            if let Some(v) = sp.behavior {
+                ctrl.value = v;
+            }
+            if let Some(m) = sp.mode {
+                ctrl.mode = m;
+            }
+        }
+        for bp in &fac.budget {
+            let ctrl = c.budget.entry(bp.resource.clone()).or_insert_with(|| Control {
+                value: bp.value.unwrap_or(0.0),
+                mode: bp.mode.flatten(),
+            });
+            if let Some(v) = bp.value {
+                ctrl.value = v;
+            }
+            if let Some(m) = bp.mode {
+                ctrl.mode = m;
+            }
+        }
+        for ip in &fac.invest_weights {
+            let key = (ip.city, ip.kind.clone(), ip.resource.clone());
+            let ctrl = c.invest_weights.entry(key).or_insert_with(|| Control {
+                value: ip.value.unwrap_or(0.0),
+                mode: ip.mode.flatten(),
+            });
+            if let Some(v) = ip.value {
+                ctrl.value = v;
+            }
+            if let Some(m) = ip.mode {
+                ctrl.mode = m;
+            }
+        }
+    }
+    if let Some(sv) = &req.scope {
+        state.scope.overlay(&scope_from_view(sv));
+    }
+}
+
+/// Parse a control diff file (JSON) and apply it to `state` as a structural
+/// multi-level patch. Accepts the same shape as `POST /api/command`
+/// (`{control:[...],scope:{...}}`).
+pub fn apply_patch(state: &mut State, value: &serde_json::Value) -> Result<(), String> {
+    let req: CommandReq =
+        serde_json::from_value(value.clone()).map_err(|e| format!("invalid control diff: {e}"))?;
+    apply_diff(state, &req);
+    Ok(())
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -292,12 +455,12 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
 
 async fn command(AxState(shared): AxState<Shared>, Json(req): Json<CommandReq>) -> Json<StateView> {
     let mut world = shared.lock().unwrap();
-    for cv in &req.control {
-        world.state.control.insert(cv.faction_id, control_from_view(cv));
-    }
-    if let Some(sv) = &req.scope {
-        world.state.scope = scope_from_view(sv);
-    }
+    // Structural multi-level patch (a true diff): only the factions/leaves
+    // present in the payload are touched; unlisted ones are left unchanged.
+    // The frontend sends the full surface so this is equivalent to a full
+    // replace for it, while a partial "command" payload is now safely applied
+    // instead of silently dropping the unlisted leaves.
+    apply_diff(&mut world.state, &req);
     Json(state_view(&world))
 }
 
