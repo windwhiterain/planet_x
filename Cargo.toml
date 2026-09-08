@@ -10,6 +10,7 @@ ron = "0.8"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 colored = "2"
+daft = { version = "0.1", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

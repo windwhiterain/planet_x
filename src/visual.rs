@@ -4,6 +4,7 @@
 use colored::{Color, Colorize};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
+use std::collections::BTreeMap;
 use crate::model::*;
 
 const COLS: usize = 66;
@@ -244,12 +245,11 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     t.set_header(vec!["ID", "名称", "势力", "位置 (AU)", "目标", "航速", "耐久%"]);
     for sh in &state.ships {
         let spec = config.ship_spec(&sh.class);
-        let target = match sh.target {
-            Some(ShipTarget::Ship(id)) => format!("船#{}", id),
-            Some(ShipTarget::City(id)) => format!("城#{}", id),
-            Some(ShipTarget::Body(id)) => format!("体#{}", id),
-            Some(ShipTarget::Position(_)) => "点".to_string(),
-            None => "待命".to_string(),
+        let target = match state.ship_behavior(sh.id) {
+            Some(ShipBehavior::TargetShip { ship, .. }) => format!("船#{}", ship),
+            Some(ShipBehavior::TargetSettlement { city, .. }) => format!("城#{}", city),
+            Some(ShipBehavior::Move { .. }) => "移动".to_string(),
+            Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
         let color = faction_color(sh.faction_id);
         t.add_row(vec![
@@ -292,4 +292,119 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     s.push_str(&t.to_string());
 
     s
+}
+
+/// Sparse-render the per-faction diff of controllable state (`before` vs
+/// `after`, typically two consecutive rounds). Only added / removed / modified
+/// entries are shown; unchanged controllable state is omitted.
+pub fn render_control_diff(
+    before: &BTreeMap<FactionId, ControllableState>,
+    after: &BTreeMap<FactionId, ControllableState>,
+    state: &State,
+    config: &GameConfig,
+) -> String {
+    use daft::Diffable;
+
+    let mut out = String::new();
+    let mut header_printed = false;
+
+    for fid in after.keys() {
+        let Some(prev) = before.get(fid) else { continue };
+        let curr = &after[fid];
+        let diff = prev.diff(curr);
+
+        let mut lines: Vec<String> = Vec::new();
+        for l in render_map_diff(
+            &diff.ship_orders,
+            |k| format!("船#{}", k),
+            |v| behavior_str(v),
+        ) {
+            lines.push(l);
+        }
+        for l in render_map_diff::<String, f64>(
+            &diff.budget,
+            |k| format!("资源预算·{}", config.resource_name(k)),
+            |v| format!("{:.2}", v),
+        ) {
+            lines.push(l);
+        }
+        for l in render_map_diff(
+            &diff.invest_weights,
+            |k| format!("权重·{}", invest_key_str(config, state, k)),
+            |v| format!("{:.2}", v),
+        ) {
+            lines.push(l);
+        }
+
+        if !lines.is_empty() {
+            if !header_printed {
+                out.push_str(&heading("各势力行为 · 可控状态 diff"));
+                header_printed = true;
+            }
+            let color = faction_color(*fid);
+            out.push_str(&format!("  {}\n", faction_name(state, *fid).color(color).bold()));
+            for l in lines {
+                out.push_str(&l);
+                out.push('\n');
+            }
+        }
+    }
+
+    out
+}
+
+/// Render added / removed / modified entries of a map diff, sparsely.
+fn render_map_diff<K, V>(
+    diff: &daft::BTreeMapDiff<'_, K, V>,
+    key: impl Fn(&K) -> String,
+    val: impl Fn(&V) -> String,
+) -> Vec<String>
+where
+    K: Ord,
+    V: PartialEq,
+{
+    let mut lines = Vec::new();
+    for (k, v) in &diff.added {
+        lines.push(format!("    + {} = {}", key(k), val(v)));
+    }
+    for (k, v) in &diff.removed {
+        lines.push(format!("    - {} = {}", key(k), val(v)));
+    }
+    for (k, leaf) in &diff.common {
+        if leaf.before != leaf.after {
+            lines.push(format!(
+                "    ~ {} = {} -> {}",
+                key(k),
+                val(leaf.before),
+                val(leaf.after)
+            ));
+        }
+    }
+    lines
+}
+
+fn behavior_str(b: &ShipBehavior) -> String {
+    match b {
+        ShipBehavior::Move { position } => format!("移动({:+.1},{:+.1})", position[0], position[1]),
+        ShipBehavior::TargetShip { ship, attack } => {
+            format!("舰→船#{}{}", ship, if *attack { "·攻" } else { "" })
+        }
+        ShipBehavior::TargetSettlement { city, bombard } => {
+            format!("舰→城#{}{}", city, if *bombard { "·轰" } else { "" })
+        }
+        ShipBehavior::Idle => "待命".to_string(),
+    }
+}
+
+fn invest_key_str(config: &GameConfig, state: &State, key: &InvestKey) -> String {
+    let (cid, kind, res) = key;
+    let city = state
+        .city(*cid)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format!("城#{}", cid));
+    let label = &config.building_spec(kind).label;
+    match res {
+        Some(r) => format!("{}·{}·{}", city, label, config.resource_name(r)),
+        None => format!("{}·{}", city, label),
+    }
 }

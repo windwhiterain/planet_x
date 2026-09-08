@@ -5,11 +5,14 @@
 //! * `--seed`   the deterministic RNG seed, or `random` (the default).
 //! * `--start`  load an initial `State` from a RON file; otherwise the default
 //!              procedural solar system is generated.
-//! * `--round`  run `n` rounds and dump each state snapshot to a `.ron` file
-//!              under `trajectory/`.
+//! * `--round`  run `n` rounds and dump each state snapshot (including the
+//!              per-faction controllable state `State::control`) to a `.ron`
+//!              file under `trajectory/`.
 //!
 //! Without `--round` the tool runs interactively: every Enter advances one
-//! round and prints the new state in the CLI.
+//! round and prints the new state in the CLI. After each round the per-faction
+//! controllable-state diff (指令 = 对可控制状态的修改) is sparsely printed —
+//! in interactive mode below the state, and in `--round` mode inline.
 
 mod model;
 mod prng;
@@ -29,7 +32,7 @@ use std::path::{Path, PathBuf};
     name = "planet_x",
     version,
     about = "行星X——太空沙盘轨迹生成器",
-    after_help = "回合由 Enter 推进；--round 会将每回合状态写入 trajectory/*.ron。"
+    after_help = "回合由 Enter 推进；--round 会将每回合状态写入 trajectory/*.ron。每回合后稀疏打印各势力可控状态 diff（= 指令）。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -136,15 +139,12 @@ fn run_interactive(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         if cmd == "q" || cmd == "quit" || cmd == "exit" {
             break;
         }
-        let events = sim::advance(state, config, rng);
+        let before = state.control.clone();
+        sim::advance(state, config, rng);
         println!("\n{}", "─".repeat(72).dimmed());
         print_state(state, config);
-        if !events.is_empty() {
-            println!("\n{}", "── 事件 ──".cyan().bold());
-            for e in events {
-                println!("  {}", color_event(&e));
-            }
-        }
+        // 各势力可控状态 diff（指令）稀疏打印在 state 下方。
+        println!("{}", visual::render_control_diff(&before, &state.control, state, config));
     }
     println!();
 }
@@ -173,14 +173,19 @@ fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, se
 
     let mut idx = 0u32;
     for _ in 0..n {
-        let events = sim::advance(state, config, rng);
+        let before = state.control.clone();
+        sim::advance(state, config, rng);
         idx += 1;
         if let Err(e) = write_state(state, idx) {
             eprintln!("{} 写出回合 {} 失败: {e}", "[错误]".red().bold(), idx);
             std::process::exit(1);
         }
-        for e in events {
-            println!("[回合 {idx}] {}", color_event(&e));
+        // 指令 = 可控状态 diff：稀疏打印（无变化则打印空）。
+        let diff = visual::render_control_diff(&before, &state.control, state, config);
+        if diff.is_empty() {
+            println!("[回合 {idx}] （各势力可控状态无变化）");
+        } else {
+            println!("[回合 {idx}]{}", diff);
         }
     }
 
@@ -196,22 +201,4 @@ fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, se
         idx + 1
     );
     println!("输出目录: {}", dir.display());
-}
-
-/// Light heuristic to tint event lines (red hostility, green construction,
-/// yellow captures), which reads better against a dark terminal.
-fn color_event(e: &str) -> String {
-    if e.contains("击毁")
-        || e.contains("炮击")
-        || e.contains("围攻")
-        || e.contains("交战")
-    {
-        e.red().to_string()
-    } else if e.contains("建成") {
-        e.green().to_string()
-    } else if e.contains("攻占") {
-        e.yellow().to_string()
-    } else {
-        e.to_string()
-    }
 }

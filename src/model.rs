@@ -14,6 +14,7 @@
 //! combination of housing / mining / shipyard), but the total area is finite,
 //! so the numbers above all stay continuous.
 
+use daft::Diffable;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -151,15 +152,15 @@ pub struct Body {
 /// A single continuous-area building allocation on a city. Not an atom:
 /// `area` is the planned extent and `deployed` is how much is actually built.
 /// `kind` is a config key (open-ended), and a mining building carries the
-/// mined resource key in `resource`. `invest_weight` is the command-controlled
-/// priority used to ration the faction's construction budget.
+/// mined resource key in `resource`. The command-controlled investment weight
+/// lives in [`ControllableState::invest_weights`] (keyed by [`InvestKey`]),
+/// not here.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Building {
     pub kind: String,
     pub resource: Option<String>,
     pub area: f64,
     pub deployed: f64,
-    pub invest_weight: f64,
 }
 
 impl Building {
@@ -185,13 +186,20 @@ pub struct ShipSpec {
     pub build_cost: ResourceMap,
 }
 
-/// Which direction a ship is currently heading.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub enum ShipTarget {
-    Body(BodyId),
-    Ship(ShipId),
-    City(CityId),
-    Position([f64; 2]),
+/// A ship's controllable behavior — the instruction a faction issues to one
+/// of its ships. This is command-controlled state (see [`ControllableState`]),
+/// not an event: the simulation merely reads this to decide where to move and
+/// what to fire/bombard.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Diffable)]
+pub enum ShipBehavior {
+    /// 目标地点：移动到指定位置。
+    Move { position: [f64; 2] },
+    /// 目标飞船（attack 表示是否开火）。
+    TargetShip { ship: ShipId, attack: bool },
+    /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
+    TargetSettlement { city: CityId, bombard: bool },
+    /// 无（待命）。
+    Idle,
 }
 
 /// A spaceship. Always owned by a faction.
@@ -204,7 +212,6 @@ pub struct Ship {
     /// Position in AU (same plane as the orbits).
     pub position: [f64; 2],
     pub hull: f64,
-    pub target: Option<ShipTarget>,
 }
 
 /// A city's ship-production queue. Progress is accrued from the combined area
@@ -232,6 +239,9 @@ pub struct City {
 }
 
 /// A faction (势力) with diplomatic stances toward every other faction.
+///
+/// The command-controlled budget lives in [`ControllableState::budget`], not
+/// here.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Faction {
     pub id: FactionId,
@@ -239,9 +249,6 @@ pub struct Faction {
     pub color: char,
     /// Stockpiled resources (key -> amount).
     pub resources: ResourceMap,
-    /// 各类资源预算（资源/时间）: per-round investment budget, command-controlled.
-    /// The faction's policy recomputes this each round.
-    pub budget: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
     pub relations: BTreeMap<FactionId, f64>,
 }
@@ -257,6 +264,8 @@ pub struct State {
     pub cities: Vec<City>,
     pub factions: Vec<Faction>,
     pub ships: Vec<Ship>,
+    /// 各势力可控状态（指令控制量的集合），随状态一起序列化。
+    pub control: BTreeMap<FactionId, ControllableState>,
 }
 
 impl State {
@@ -293,6 +302,45 @@ impl State {
     pub fn body_position(&self, id: BodyId) -> [f64; 2] {
         self.body(id).map(|b| b.position).unwrap_or([0.0, 0.0])
     }
+
+    /// Read one faction's controllable state.
+    pub fn control(&self, fid: FactionId) -> Option<&ControllableState> {
+        self.control.get(&fid)
+    }
+
+    /// Mutably borrow one faction's controllable state.
+    pub fn control_mut(&mut self, fid: FactionId) -> Option<&mut ControllableState> {
+        self.control.get_mut(&fid)
+    }
+
+    /// Current behavior (指令) of a ship, if any.
+    pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
+        let s = self.ship(ship_id)?;
+        self.control(s.faction_id)?
+            .ship_orders
+            .get(&ship_id)
+            .copied()
+    }
+}
+
+// --- 可控状态 (controllable / command-controlled state) --------------------
+
+/// 建筑投资权重定位键：(城市, 建筑 kind, 资源)。同一城市内一个
+/// (kind, resource) 组合至多对应一栋建筑。
+pub type InvestKey = (CityId, String, Option<String>);
+
+/// 单个势力的可控状态：所有「指令控制」的量的集合。
+///
+/// 实体演化结果（资源量、耐久、人口、防御…）不在其中；本结构体是被指令
+/// 直接改写的状态。指令 = 对它的修改（diff）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Diffable)]
+pub struct ControllableState {
+    /// 本方各飞船的当前指令。
+    pub ship_orders: BTreeMap<ShipId, ShipBehavior>,
+    /// 本方资源预算（资源/时间）：决定拿出多少资源用于投资。
+    pub budget: ResourceMap,
+    /// 本方各建筑的投资权重。
+    pub invest_weights: BTreeMap<InvestKey, f64>,
 }
 
 /// Economy tuning (production and population).

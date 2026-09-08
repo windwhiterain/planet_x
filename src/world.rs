@@ -13,6 +13,7 @@
 
 use crate::model::*;
 use crate::prng::Prng;
+use std::collections::BTreeMap;
 
 // Named faction ids so the world is easy to read and stable across seeds.
 pub const F_UN: u32 = 0;
@@ -80,7 +81,6 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
         resource: None,
         area: resid,
         deployed: resid,
-        invest_weight: 1.0,
     });
 
     let construction = (s.total_area * 0.15).clamp(3.0, 10.0);
@@ -96,7 +96,6 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
                 resource: Some(d.resource.clone()),
                 area,
                 deployed: area,
-                invest_weight: 1.0,
             });
             budget -= area;
         }
@@ -106,7 +105,6 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
         resource: None,
         area: construction,
         deployed: construction,
-        invest_weight: 1.0,
     });
     buildings
 }
@@ -145,7 +143,6 @@ fn faction(id: FactionId, name: &str, color: char, resources: ResourceMap) -> Fa
         name: name.to_string(),
         color,
         resources,
-        budget: ResourceMap::new(),
         relations: std::collections::BTreeMap::new(),
     }
 }
@@ -374,7 +371,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let haumea = bodies[12].settlement.as_ref().unwrap();
     let ixion = bodies[14].settlement.as_ref().unwrap();
 
-    let mut cities = vec![
+    let cities = vec![
         city(0, "长三角城市群", 2, F_CN, 1400, earth, "corvette"),
         city(1, "珠三角城市群", 2, F_CN, 1100, earth, "cruiser"),
         city(2, "奥林匹斯港", 3, F_US, 1000, mars, "cruiser"),
@@ -385,21 +382,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         city(7, "妊神星转运站", 12, F_TRANSPORT, 280, haumea, "transport"),
         city(8, "伊克西翁圣所", 14, F_CULT, 200, ixion, "cruiser"),
     ];
-
-    // Fill the new data-driven fields from the config: a per-round investment
-    // budget for each faction and a default invest-weight per building.
-    for f in &mut factions {
-        f.budget = f
-            .resources
-            .iter()
-            .map(|(k, v)| (k.clone(), *v * config.economy.invest_fraction))
-            .collect();
-    }
-    for c in &mut cities {
-        for b in &mut c.buildings {
-            b.invest_weight = config.building_spec(&b.kind).default_invest_weight;
-        }
-    }
 
     // --- Starting navy ------------------------------------------------------
     let mut ships = Vec::new();
@@ -414,7 +396,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             faction_id: faction,
             position: [pos[0] + rng.range_f64(-0.05, 0.05), pos[1] + rng.range_f64(-0.05, 0.05)],
             hull: spec.hull,
-            target: None,
         });
         next_ship += 1;
     };
@@ -434,6 +415,34 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     add_ship(&mut ships, F_CULT, 14, "cruiser");
     add_ship(&mut ships, F_CULT, 14, "corvette");
 
+    // --- 可控状态 (command-controlled state) --------------------------------
+    // Populate each faction's controllable state from the config: per-round
+    // investment budget, default per-building invest weights, and an idle
+    // behavior for every starting ship.
+    let mut control: BTreeMap<FactionId, ControllableState> = BTreeMap::new();
+    for f in &factions {
+        let mut c = ControllableState::default();
+        c.budget = f
+            .resources
+            .iter()
+            .map(|(k, v)| (k.clone(), *v * config.economy.invest_fraction))
+            .collect();
+        control.insert(f.id, c);
+    }
+    for city in &cities {
+        let c = control.entry(city.faction_id).or_default();
+        for b in &city.buildings {
+            let key = (city.id, b.kind.clone(), b.resource.clone());
+            c.invest_weights
+                .insert(key, config.building_spec(&b.kind).default_invest_weight);
+        }
+    }
+    for s in &ships {
+        if let Some(c) = control.get_mut(&s.faction_id) {
+            c.ship_orders.insert(s.id, ShipBehavior::Idle);
+        }
+    }
+
     State {
         round: 0,
         time_month: 0.0,
@@ -441,5 +450,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         cities,
         factions,
         ships,
+        control,
     }
 }
