@@ -172,6 +172,8 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
             "arrival_eps": r2(config.combat.arrival_eps),
             "armor_regen": r2(config.combat.armor_regen),
             "colony_footprint": r2(config.combat.colony_footprint),
+            "retreat_hull": r2(config.combat.retreat_hull),
+            "retreat_min_dist": r2(config.combat.retreat_min_dist),
         },
         "diplomacy": {
             "attack_delta": r2(config.diplomacy.attack_delta),
@@ -634,6 +636,9 @@ fn game_event_value(e: &GameEvent) -> serde_json::Value {
         }
         StaleOrder { ship, reason } => {
             json!({"type":"stale_order", "ship": ship, "reason": reason})
+        }
+        Withdraw { ship, to_body } => {
+            json!({"type":"withdraw", "ship": ship, "to_body": to_body})
         }
         WarStarted { a, b } => {
             json!({"type":"war_started", "a": a, "b": b})

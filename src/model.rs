@@ -454,6 +454,9 @@ pub enum GameEvent {
     ColonyFounded { city: CityId, owner: FactionId, body: BodyId, seeded_ship_class: String },
     /// 玩家指令因目标失效而降级（陈旧目标 / 城被夷平 / 无定居点），避免船飞向原点。
     StaleOrder { ship: ShipId, reason: String },
+    /// 舰队战术撤退：一艘自动指挥的舰在**损伤过重且敌在本方射程内**时，向后撤往其
+    /// 首都/本土修整充能，而不是死战到底（自保行为）。`to_body` 是撤退目的地天体。
+    Withdraw { ship: ShipId, to_body: BodyId },
     /// 外交事件：一对势力本回合跨越战争阈值进入交战（war ≤ threshold）。
     WarStarted { a: FactionId, b: FactionId },
     /// 外交事件：一对势力本回合停战（从交战回到和平）。
@@ -886,6 +889,24 @@ pub struct CombatConfig {
     /// Fraction of the settlement area a freshly founded (colonized) city may
     /// claim, capped for the initial footprint.
     pub colony_footprint: f64,
+    /// 自动指挥舰的「自保撤退」阈值：舰当前护甲占最大护甲低于此比例、且敌方舰在本舰
+    /// 有效射程内时，向后撤往其首都/本土修整充能（而非死战）。这是拟人的「别送死」
+    /// 行为：打残就撤、养好再回来，让战争有损耗与恢复的循环。
+    #[serde(default = "default_retreat_hull")]
+    pub retreat_hull: f64,
+    /// 自保撤退的最小距离（AU）：舰距其首都**小于**此距离时不撤退（在主场原地驻防/
+    /// 充能），避免「已到家还一直撤退、白白不还手」的僵局。离首都越远、越难得到本土
+    /// 防御与再生时，才值得后撤修整。
+    #[serde(default = "default_retreat_min_dist")]
+    pub retreat_min_dist: f64,
+}
+
+fn default_retreat_hull() -> f64 {
+    0.28
+}
+
+fn default_retreat_min_dist() -> f64 {
+    1.5
 }
 
 /// Building structure attribute (混凝土 / 钢结构).
