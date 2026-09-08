@@ -1231,9 +1231,9 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                                 let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
                                 // Intercept the closest hostile in range, scanning
                                 // around the guard first, then the protected ship.
-                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range, focus) {
+                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range, focus, ship_id) {
                                     fire(state, config, ship_id, enemy);
-                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range, focus) {
+                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range, focus, ship_id) {
                                     fire(state, config, ship_id, e2);
                                 }
                             }
@@ -1262,7 +1262,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
 
         // --- AI-controlled: existing auto behavior ---
-        let tgt = nearest_enemy_ship(state, config, owner, pos, range, focus);
+        let tgt = nearest_enemy_ship(state, config, owner, pos, range, focus, ship_id);
 
         // 自保撤退（拟人的「别送死」）：舰已受重创、敌在本舰射程内、且离首都有一定距离
         // 时，不再死战，而是后撤回首都/本土修整充能（远离本土难以获得再生与防御）。这
@@ -1312,7 +1312,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
         if let Some(ship) = state.ship(ship_id) {
             let np = ship.position;
-            if let Some(target) = nearest_enemy_ship(state, config, owner, np, range, focus) {
+            if let Some(target) = nearest_enemy_ship(state, config, owner, np, range, focus, ship_id) {
                 if let Some(c) = state.control_mut(owner) {
                     c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
                 }
@@ -1753,11 +1753,17 @@ fn focus_priority(wound: f64) -> u8 {
     }
 }
 
-/// 集中火力排序（拟人）：结盟集火(focus) > 打残敌(priority 0) > 就近。返回 true 表示
-/// `new` 应替换 `cur`（确定性，无 RNG）。
-fn prefer_target(new_focus: bool, new_wound: f64, new_dist: f64, cur_focus: bool, cur_wound: f64, cur_dist: f64) -> bool {
+/// 集中火力排序（拟人）：结盟集火(focus) > **武器克制**(选自己的武器打得动的目标) >
+/// 打残敌(priority 0) > 就近。武器克制在先：别把导弹浪费在点防重镇上、别拿动能打高盾
+/// ——这比「先补刀残血」更能避免被对面用克制武器拖入消耗战。返回 true 表示 `new` 应
+/// 替换 `cur`（确定性，无 RNG）。
+fn prefer_target(new_focus: bool, new_fit: f64, new_wound: f64, new_dist: f64, cur_focus: bool, cur_fit: f64, cur_wound: f64, cur_dist: f64) -> bool {
     if new_focus != cur_focus {
         return new_focus;
+    }
+    // 武器克制：能有效杀伤的目标优先。
+    if (new_fit - cur_fit).abs() > 1e-3 {
+        return new_fit > cur_fit;
     }
     let np = focus_priority(new_wound);
     let cp = focus_priority(cur_wound);
@@ -1770,26 +1776,60 @@ fn prefer_target(new_focus: bool, new_wound: f64, new_dist: f64, cur_focus: bool
     new_dist < cur_dist // 都健康：打更近的
 }
 
-fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64, focus: Option<FactionId>) -> Option<ShipId> {
-    let mut best: Option<(bool, f64, f64, ShipId)> = None; // (is_focus, wound_frac, dist, id)
+/// 武器克制评分（0..1）：攻击者的武器对这一目标的**命中效率**——导弹会被目标点防御
+/// 拦截而大打折扣（导弹 vs 点防 克制），动能对高护盾目标较弱（动能 vs 护盾 克制）。AI
+/// 据此挑「自己能有效杀伤」的目标打，而不是把导弹浪费在全套点防御的堡垒上。确定性。
+fn weapon_fit(weapons: &[Weapon], config: &GameConfig, target: &Ship) -> f64 {
+    let panel = ship_panel(config, target);
+    let total: f64 = weapons.iter().map(|w| w.damage).sum();
+    if total <= 1e-9 {
+        return 1.0;
+    }
+    let shield_share = panel.shield_max / (panel.shield_max + panel.hull_max).max(1e-9);
+    let mut missile_dmg = 0.0;
+    let mut kin_dmg = 0.0;
+    for w in weapons {
+        match w.kind {
+            WEAPON_MISSILE => missile_dmg += w.damage,
+            WEAPON_KINETIC => kin_dmg += w.damage,
+            _ => {}
+        }
+    }
+    // 导弹被目标点防御拦截（拦截越强，导弹伤害越低）。
+    let intercept_frac = if panel.intercept > 0.0 {
+        (panel.intercept / (panel.intercept + total)).min(0.8)
+    } else {
+        0.0
+    };
+    let missile_blunt = (missile_dmg / total) * intercept_frac;
+    // 动能对高护盾目标较弱（护盾吸掉一部分）。
+    let kin_blunt = (kin_dmg / total) * shield_share * 0.4;
+    (1.0 - missile_blunt - kin_blunt).clamp(0.0, 1.0)
+}
+
+fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64, focus: Option<FactionId>, attacker_id: ShipId) -> Option<ShipId> {
+    // 攻击者的武器构成（决定它对各目标的有效杀伤——武器克制）。
+    let weapons = state.ship(attacker_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
+    let mut best: Option<(bool, f64, f64, f64, ShipId)> = None; // (is_focus, fit, wound, dist, id)
     for s in &state.ships {
         if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
             let d = dist(pos, s.position);
             if d <= range {
-                // 集中火力（拟人）：结盟集火 > 打残血敌舰 > 就近。
+                // 集中火力（拟人）：结盟集火 > 武器克制 > 打残血敌舰 > 就近。
                 let is_focus = focus == Some(s.faction_id);
                 let wound = s.hull / s.hull_max.max(1e-9);
+                let fit = weapon_fit(&weapons, config, s);
                 let better = match best {
                     None => true,
-                    Some((bf, bw, bd, _)) => prefer_target(is_focus, wound, d, bf, bw, bd),
+                    Some((bf, bfit, bw, bd, _)) => prefer_target(is_focus, fit, wound, d, bf, bfit, bw, bd),
                 };
                 if better {
-                    best = Some((is_focus, wound, d, s.id));
+                    best = Some((is_focus, fit, wound, d, s.id));
                 }
             }
         }
     }
-    best.map(|(_, _, _, id)| id)
+    best.map(|(_, _, _, _, id)| id)
 }
 
 /// 确定性命中率：武器追踪能力 `tracking`（AU/月）越高，越能咬住高速目标。目标速度
@@ -1952,7 +1992,8 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
             return Some(b);
         }
     }
-    let picked = pick_target(state, config, owner, pos, rng, focus);
+    let weapons = state.ship(ship_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
+    let picked = pick_target(state, config, owner, pos, rng, focus, &weapons);
     let behavior = picked.unwrap_or(ShipBehavior::Idle);
     if let Some(c) = state.control_mut(owner) {
         c.ship_orders.insert(ship_id, Control::inherit(behavior));
@@ -1960,13 +2001,13 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     picked
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
-    let mut best: Option<(bool, f64, f64, ShipBehavior)> = None; // (is_focus, wound, dist, behavior)
-    let mut consider = |d: f64, is_focus: bool, wound: f64, b: ShipBehavior, best: &mut Option<(bool, f64, f64, ShipBehavior)>| {
+fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>, weapons: &[Weapon]) -> Option<ShipBehavior> {
+    let mut best: Option<(bool, f64, f64, f64, ShipBehavior)> = None; // (is_focus, fit, wound, dist, behavior)
+    let mut consider = |d: f64, is_focus: bool, fit: f64, wound: f64, b: ShipBehavior, best: &mut Option<(bool, f64, f64, f64, ShipBehavior)>| {
         let replace = match *best {
             None => true,
-            Some((bf, bw, bd, _)) => {
-                if prefer_target(is_focus, wound, d, bf, bw, bd) {
+            Some((bf, bfit, bw, bd, _)) => {
+                if prefer_target(is_focus, fit, wound, d, bf, bfit, bw, bd) {
                     true
                 } else if (d - bd).abs() <= 1e-9 {
                     rng.range(2) == 0
@@ -1976,26 +2017,28 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
             }
         };
         if replace {
-            *best = Some((is_focus, wound, d, b));
+            *best = Some((is_focus, fit, wound, d, b));
         }
     };
 
     // Combat first: prefer the nearest hostile ship / city, and when in a coalition
     // war, prefer those belonging to the focused hegemon. Among hostile **ships**
-    // the AI concentrates fire on the most-wounded one (wound = hull/hull_max);
-    // cities are stationary large targets (neutral wound=1.0, decided by distance).
+    // the AI concentrates fire on the **hittable + most-wounded** one (it avoids
+    // wasting missiles on point-defense-heavy targets; wound = hull/hull_max);
+    // cities are stationary large targets (neutral fit/wound=1.0, decided by distance).
     for s in &state.ships {
         if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
             let is_focus = focus == Some(s.faction_id);
             let wound = s.hull / s.hull_max.max(1e-9);
-            consider(dist(pos, s.position), is_focus, wound, ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
+            let fit = weapon_fit(weapons, config, s);
+            consider(dist(pos, s.position), is_focus, fit, wound, ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
         }
     }
     for c in &state.cities {
         if !c.razed && hostile(state, config, owner, c.faction_id) {
             let is_focus = focus == Some(c.faction_id);
             let p = city_position(state, c.id);
-            consider(dist(pos, p), is_focus, 1.0, ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
+            consider(dist(pos, p), is_focus, 1.0, 1.0, ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
         }
     }
     // If there is nothing to fight, re-colonize a nearby razed (blank) settlement.
@@ -2003,11 +2046,11 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
         for c in &state.cities {
             if c.razed {
                 let p = city_position(state, c.id);
-                consider(dist(pos, p), false, 1.0, ShipBehavior::Colonize { body: c.body_id }, &mut best);
+                consider(dist(pos, p), false, 1.0, 1.0, ShipBehavior::Colonize { body: c.body_id }, &mut best);
             }
         }
     }
-    best.map(|(_, _, _, b)| b)
+    best.map(|(_, _, _, _, b)| b)
 }
 
 /// Bombard a city: damage is spread across its buildings by area share. When all
@@ -3372,11 +3415,40 @@ mod tests {
         }
         state.faction_mut(3).unwrap().relations.insert(1, -35.0);
         state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let target = nearest_enemy_ship(&state, &config, 3, [40.0, 40.0], 0.4, None);
+        let target = nearest_enemy_ship(&state, &config, 3, [40.0, 40.0], 0.4, None, 0);
         assert_eq!(
             target,
             Some(5),
             "should concentrate fire on the wounded enemy (5), got {target:?}"
+        );
+    }
+
+    /// 武器克制选目标（拟人「别浪费导弹打点防重镇」）：一舰有导弹时，应优先攻击**没有**
+    /// 点防御、导弹不会被拦截的目标，而不是把导弹打在被点防全面阻挡的目标上。
+    #[test]
+    fn target_selection_respects_weapon_advantage() {
+        let (config, mut state) = fresh_world(42);
+        // China (3) fields a missile-armed attacker (ship 0). Two hostile US (1)
+        // targets sit in range: ship 3 has point-defense (intercepts missiles),
+        // ship 5 has none — the missile attacker should prefer ship 5.
+        if let Some(s) = state.ship_mut(0) {
+            s.position = [40.0, 40.0];
+            s.components = vec!["missile".to_string()];
+        }
+        if let Some(s) = state.ship_mut(3) {
+            s.position = [40.2, 40.0];
+            s.components = vec!["point_defense".to_string()];
+        }
+        if let Some(s) = state.ship_mut(5) {
+            s.position = [40.3, 40.0];
+        }
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let target = nearest_enemy_ship(&state, &config, 3, [40.0, 40.0], 0.4, None, 0);
+        assert_eq!(
+            target,
+            Some(5),
+            "a missile attacker should shun the point-defense ship (5), got {target:?}"
         );
     }
 
