@@ -1,8 +1,12 @@
 (
     economy: (
-        production_rate: 0.35,
+        production_rate: 0.5,
         pop_growth: 0.04,
         min_efficiency: 0.1,
+        // 指令控制:每回合最多用各资源库存的 30% 投入建设。
+        invest_fraction: 0.3,
+        // 住宅目标余量:住宅面积维持在 (人口/生态容量)*1.25。
+        housing_buffer: 1.25,
     ),
     combat: (
         war_threshold: -20.0,
@@ -16,33 +20,72 @@
         capture_delta: -25.0,
         relax_rate: 0.5,
     ),
+    resources: {
+        "water_ice": (name: "水冰"),
+        "helium3":   (name: "氦-3"),
+        "uranium":   (name: "铀"),
+        "thorium":   (name: "钍"),
+        "gold":      (name: "金"),
+        "platinum":  (name: "铂"),
+        "iron":      (name: "铁"),
+        "hydrogen":  (name: "氢"),
+        "methane":   (name: "甲烷"),
+        "carbon":    (name: "碳"),
+        "silicon":   (name: "硅"),
+    },
     ships: {
-        Corvette: (
+        "corvette": (
             label: "护卫舰",
             hull: 12.0,
             attack: 5.0,
             speed: 1.6,
             attack_range: 0.4,
             build_points: 15.0,
-            build_cost: [(Iron, 6.0), (Carbon, 3.0)],
+            build_cost: { "iron": 6.0, "carbon": 3.0 },
         ),
-        Cruiser: (
+        "cruiser": (
             label: "巡洋舰",
             hull: 38.0,
             attack: 15.0,
             speed: 0.9,
             attack_range: 0.6,
             build_points: 45.0,
-            build_cost: [(Iron, 14.0), (Carbon, 6.0), (Uranium, 3.0)],
+            build_cost: { "iron": 14.0, "carbon": 6.0, "uranium": 3.0 },
         ),
-        Transport: (
+        "transport": (
             label: "运输舰",
             hull: 20.0,
             attack: 1.0,
             speed: 1.2,
             attack_range: 0.2,
             build_points: 26.0,
-            build_cost: [(Iron, 4.0), (Carbon, 12.0)],
+            build_cost: { "iron": 4.0, "carbon": 12.0 },
+        ),
+    },
+    buildings: {
+        "residential": (
+            label: "居住点",
+            role: "housing",
+            construction_speed: 1.0,
+            build_cost: { "silicon": 0.3, "iron": 0.2 },
+            staff_per_area: 0.0,
+            productivity: 1.0,
+        ),
+        "mining": (
+            label: "开采点",
+            role: "mining",
+            construction_speed: 1.0,
+            build_cost: { "iron": 0.4 },
+            staff_per_area: 4.0,
+            productivity: 1.0,
+        ),
+        "construction": (
+            label: "建造点",
+            role: "shipyard",
+            construction_speed: 0.8,
+            build_cost: { "iron": 0.4, "carbon": 0.3, "silicon": 0.2 },
+            staff_per_area: 6.0,
+            productivity: 1.0,
         ),
     },
 )

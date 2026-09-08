@@ -3,6 +3,16 @@
 //! The whole world is one [`State`]. Every field is serializable to and from
 //! RON so that a start state can be supplied by the user (`--start`) and so
 //! that round snapshots can be dumped as a trajectory.
+//!
+//! Everything that should be tunable is **data-driven**: resources, building
+//! kinds and ship classes are string keys resolved against the config tables
+//! in `config/game.ron`, and a resource bundle is a plain dictionary
+//! (key → value). No entity or resource is hard-coded as an enum here.
+//!
+//! Buildings are **not atomic**: a building is a continuous `area` allocation
+//! within a settlement's bounded total area. The kinds are open-ended (any
+//! combination of housing / mining / shipyard), but the total area is finite,
+//! so the numbers above all stay continuous.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,47 +24,22 @@ pub type BodyId = u32;
 pub type CityId = u32;
 pub type ShipId = u32;
 
-/// A mineable resource type.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ResourceType {
-    WaterIce,
-    Helium3,
-    Uranium,
-    Thorium,
-    Gold,
-    Platinum,
-    Iron,
-    Hydrogen,
-    Methane,
-    Carbon,
-    Silicon,
+/// A resource bundle: resource key -> amount. Resource keys are configurable
+/// and resolved against [`GameConfig::resources`].
+pub type ResourceMap = BTreeMap<String, f64>;
+
+/// A resource type definition (display metadata for a resource key).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResourceDef {
+    pub name: String,
 }
 
-impl ResourceType {
-    /// Short human-readable name (used for the CLI and ASCII map keys).
-    pub fn name(self) -> &'static str {
-        match self {
-            ResourceType::WaterIce => "水冰",
-            ResourceType::Helium3 => "氦-3",
-            ResourceType::Uranium => "铀",
-            ResourceType::Thorium => "钍",
-            ResourceType::Gold => "金",
-            ResourceType::Platinum => "铂",
-            ResourceType::Iron => "铁",
-            ResourceType::Hydrogen => "氢",
-            ResourceType::Methane => "甲烷",
-            ResourceType::Carbon => "碳",
-            ResourceType::Silicon => "硅",
-        }
-    }
-}
-
-/// A deposit of a single resource on a settlement. `area` bounds how much a
-/// mining point may carve out from this deposit.
+/// A deposit of a single resource on a settlement. `area` bounds how much
+/// mining may be carved out of this deposit.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ResourceDeposit {
-    pub resource_type: ResourceType,
-    pub area: f32,
+    pub resource: String,
+    pub area: f64,
 }
 
 /// 2D orbit around the central sun. The focus (sun) sits at the origin.
@@ -136,15 +121,19 @@ fn normalize2(v: [f32; 2]) -> [f64; 2] {
     }
 }
 
-/// A habitable place on a body; can hold a city. Resources here bound how much
-/// the cities built on this body may mine.
+/// A habitable place on a body. Its area is finite, so cities built here must
+/// fit inside it, and its resource deposits bound how much mining can occur.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settlement {
-    /// 人口容量 (how many people the settlement can support).
-    pub population_capacity: u32,
-    /// 建设速度 (construction speed multiplier for cities on this body).
-    pub construction_speed: f64,
-    /// 资源 deposits (type + area).
+    /// 总面积 (total buildable area).
+    pub total_area: f64,
+    /// 生态容量 (population per unit area).
+    pub ecological_capacity: f64,
+    /// 建设速度修正 (area built per unit time).
+    pub construction_speed_mod: f64,
+    /// 建设资源修正 (resources consumed per unit area built).
+    pub construction_resource_mod: f64,
+    /// 资源 deposits (resource key + area).
     pub resources: Vec<ResourceDeposit>,
 }
 
@@ -157,35 +146,26 @@ pub struct Body {
     pub settlement: Option<Settlement>,
 }
 
-/// A mining point on a city: draws a given resource at a given area.
+/// A single continuous-area building allocation on a city. Not an atom:
+/// `area` is the planned extent and `deployed` is how much is actually built.
+/// `kind` is a config key (open-ended), and a mining building carries the
+/// mined resource key in `resource`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MiningPoint {
-    pub resource_type: ResourceType,
-    pub area: f32,
+pub struct Building {
+    pub kind: String,
+    pub resource: Option<String>,
+    pub area: f64,
+    pub deployed: f64,
 }
 
-/// A construction point on a city, used to build spaceships. It accumulates
-/// `progress` each round and spawns a ship once the target class is complete.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ConstructionPoint {
-    pub progress: f64,
-    pub target: ShipClass,
+impl Building {
+    pub fn under_construction(&self) -> bool {
+        self.deployed < self.area - 1e-9
+    }
 }
 
-/// A ship class with the combat/economy stats that define it.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ShipClass {
-    Corvette,
-    Cruiser,
-    Transport,
-}
-
-impl ShipClass {
-    pub const ALL: [ShipClass; 3] = [ShipClass::Corvette, ShipClass::Cruiser, ShipClass::Transport];
-}
-
-/// Balance statistics for a ship class. Loaded from `config/game.ron`; nothing
-/// game-balance related lives in code.
+/// A ship class keyed by name in the config. The mechanics reference this key
+/// only through the config tables.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShipSpec {
     pub label: String,
@@ -195,65 +175,10 @@ pub struct ShipSpec {
     pub speed: f64,
     /// Engagement distance, in AU.
     pub attack_range: f64,
-    /// Build points required to finish this class at a construction point.
+    /// Build points required to finish this class at a shipyard.
     pub build_points: f64,
     /// Resource cost to fully build a ship of this class.
-    pub build_cost: Vec<(ResourceType, f64)>,
-}
-
-/// Economy tuning (production and population).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct EconomyConfig {
-    /// Mined resource units per unit of mine area per round at full efficiency.
-    pub production_rate: f64,
-    /// Fractional population growth toward a settlement's capacity each round.
-    pub pop_growth: f64,
-    /// Floor on production efficiency.
-    pub min_efficiency: f64,
-}
-
-/// Combat tuning.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CombatConfig {
-    /// A relation at or below this value is treated as hostile (war).
-    pub war_threshold: f64,
-    /// Distance, in AU, within which a ship can besiege a city.
-    pub siege_range: f64,
-    /// Distance, in AU, at which a ship is considered to have arrived.
-    pub arrival_eps: f64,
-    /// Starting garrison/defense value of a freshly built city.
-    pub defense_initial: f64,
-    /// Defense value a city is reset to after being captured.
-    pub defense_reset: f64,
-}
-
-/// Diplomacy tuning.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DiplomacyConfig {
-    /// Relation change caused by a hostile attack.
-    pub attack_delta: f64,
-    /// Relation change caused by capturing an enemy city.
-    pub capture_delta: f64,
-    /// Drift of non-war relations back toward neutral each round.
-    pub relax_rate: f64,
-}
-
-/// The whole game configuration, loaded from `config/game.ron`.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct GameConfig {
-    pub economy: EconomyConfig,
-    pub combat: CombatConfig,
-    pub diplomacy: DiplomacyConfig,
-    /// Ship statistics, keyed by class.
-    pub ships: BTreeMap<ShipClass, ShipSpec>,
-}
-
-impl GameConfig {
-    pub fn ship_spec(&self, class: ShipClass) -> &ShipSpec {
-        self.ships
-            .get(&class)
-            .expect("game config is missing a ship class")
-    }
+    pub build_cost: ResourceMap,
 }
 
 /// Which direction a ship is currently heading.
@@ -270,7 +195,7 @@ pub enum ShipTarget {
 pub struct Ship {
     pub id: ShipId,
     pub name: String,
-    pub class: ShipClass,
+    pub class: String,
     pub faction_id: FactionId,
     /// Position in AU (same plane as the orbits).
     pub position: [f64; 2],
@@ -278,7 +203,16 @@ pub struct Ship {
     pub target: Option<ShipTarget>,
 }
 
-/// A city on a settlement, controlled by a faction.
+/// A city's ship-production queue. Progress is accrued from the combined area
+/// of its shipyard buildings (建造点) each round.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShipBuild {
+    pub progress: f64,
+    pub target_class: String,
+}
+
+/// A city on a settlement, controlled by a faction. Its area is split among a
+/// set of continuous-area [`Building`]s.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct City {
     pub id: CityId,
@@ -287,10 +221,8 @@ pub struct City {
     pub faction_id: FactionId,
     /// 人口, limits production efficiency.
     pub population: u32,
-    /// 建造点 (optional): can build ships.
-    pub construction: Option<ConstructionPoint>,
-    /// 开采点 (mining points).
-    pub mining_points: Vec<MiningPoint>,
+    pub buildings: Vec<Building>,
+    pub ship_build: ShipBuild,
     /// Siege damage that has built up against this city.
     pub defense: f64,
 }
@@ -301,8 +233,8 @@ pub struct Faction {
     pub id: FactionId,
     pub name: String,
     pub color: char,
-    /// Stockpiled resources.
-    pub resources: BTreeMap<ResourceType, f64>,
+    /// Stockpiled resources (key -> amount).
+    pub resources: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
     pub relations: BTreeMap<FactionId, f64>,
 }
@@ -349,11 +281,108 @@ impl State {
         self.factions.iter_mut().find(|f| f.id == id)
     }
 
-    /// Resolve the current world position of a body (`months` is time already
-    /// reflected by orbit.position), as a plain AU pair.
+    /// Resolve the current world position of a body, as a plain AU pair.
     pub fn body_position(&self, id: BodyId) -> [f64; 2] {
         self.body(id)
             .map(|b| b.orbit.position(self.time_month as f32))
             .unwrap_or([0.0, 0.0])
     }
+}
+
+/// Economy tuning (production and population).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EconomyConfig {
+    /// Mined resource units per unit area per round at full staffing.
+    pub production_rate: f64,
+    /// Fractional population growth toward housing capacity each round.
+    pub pop_growth: f64,
+    /// Floor on production efficiency.
+    pub min_efficiency: f64,
+    /// Command-controlled construction budget: fraction of each resource
+    /// stockpile that may be invested into building infrastructure per round.
+    pub invest_fraction: f64,
+    /// Housing target multiplier: residential area is kept at
+    /// `population / ecological_capacity * housing_buffer`.
+    pub housing_buffer: f64,
+}
+
+/// Combat tuning.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CombatConfig {
+    /// A relation at or below this value is treated as hostile (war).
+    pub war_threshold: f64,
+    /// Distance, in AU, within which a ship can besiege a city.
+    pub siege_range: f64,
+    /// Distance, in AU, at which a ship is considered to have arrived.
+    pub arrival_eps: f64,
+    /// Starting garrison/defense value of a freshly built city.
+    pub defense_initial: f64,
+    /// Defense value a city is reset to after being captured.
+    pub defense_reset: f64,
+}
+
+/// Diplomacy tuning.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiplomacyConfig {
+    /// Relation change caused by a hostile attack.
+    pub attack_delta: f64,
+    /// Relation change caused by capturing an enemy city.
+    pub capture_delta: f64,
+    /// Drift of non-war relations back toward neutral each round.
+    pub relax_rate: f64,
+}
+
+/// The whole game configuration, loaded from `config/game.ron`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GameConfig {
+    pub economy: EconomyConfig,
+    pub combat: CombatConfig,
+    pub diplomacy: DiplomacyConfig,
+    /// Resource definitions (key -> display metadata). This is the source of
+    /// truth for which resource keys exist.
+    pub resources: BTreeMap<String, ResourceDef>,
+    /// Ship statistics, keyed by class name.
+    pub ships: BTreeMap<String, ShipSpec>,
+    /// Building statistics, keyed by building kind name.
+    pub buildings: BTreeMap<String, BuildingSpec>,
+}
+
+impl GameConfig {
+    pub fn ship_spec(&self, class: &str) -> &ShipSpec {
+        self.ships
+            .get(class)
+            .expect("game config is missing a ship class")
+    }
+
+    pub fn building_spec(&self, kind: &str) -> &BuildingSpec {
+        self.buildings
+            .get(kind)
+            .expect("game config is missing a building kind")
+    }
+
+    pub fn resource_name(&self, key: &str) -> String {
+        self.resources
+            .get(key)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| key.to_string())
+    }
+}
+
+/// Building statistics for a building kind. Loaded from `config/game.ron`.
+///
+/// `role` identifies the mechanical behaviour in the simulation and is one of
+/// `"housing"` (provides population capacity), `"mining"` (extracts the
+/// building's resource) or `"shipyard"` (builds ships).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BuildingSpec {
+    pub label: String,
+    pub role: String,
+    /// 建设速度 (base area this kind can be built per round).
+    pub construction_speed: f64,
+    /// 建设各类资源 (resources consumed per unit area).
+    pub build_cost: ResourceMap,
+    /// 员工需求 (population required per unit area, 人口/面积).
+    pub staff_per_area: f64,
+    /// 幸福度/生产效率修正 (productivity multiplier).
+    pub productivity: f64,
 }

@@ -60,6 +60,14 @@ fn faction_name(state: &State, id: FactionId) -> String {
         .unwrap_or_else(|| format!("#{}", id))
 }
 
+fn building_label(config: &GameConfig, b: &Building) -> String {
+    let spec = config.building_spec(&b.kind);
+    match &b.resource {
+        Some(r) => format!("{}·{}×{:.1}", spec.label, config.resource_name(r), b.deployed),
+        None => format!("{}×{:.1}", spec.label, b.deployed),
+    }
+}
+
 /// Render a colored ASCII map of the system at the current time.
 pub fn render_map(state: &State) -> String {
     let mut pts: Vec<[f64; 2]> = state
@@ -84,7 +92,6 @@ pub fn render_map(state: &State) -> String {
 
     let mut grid: Vec<String> = vec![" ".to_string(); COLS * ROWS];
 
-    // Draw with priority sun < body < ship (later writes win).
     let put = |grid: &mut Vec<String>, c: usize, r: usize, s: String| {
         grid[r * COLS + c] = s;
     };
@@ -145,12 +152,10 @@ fn render_legend(state: &State) -> String {
     out
 }
 
-/// Bullet heading for a section.
 fn heading(s: &str) -> String {
     format!("\n── {} ──\n", s.bold().green())
 }
 
-/// Build a bordered table with the default preset.
 fn new_table() -> Table {
     let mut t = Table::new();
     t.load_preset(UTF8_FULL);
@@ -164,6 +169,19 @@ fn cell(s: impl Into<String>) -> Cell {
 
 fn fmt_pos(p: [f64; 2]) -> String {
     format!("({:+.1}, {:+.1})", p[0], p[1])
+}
+
+fn fmt_resource_map(config: &GameConfig, m: &ResourceMap) -> String {
+    if m.is_empty() {
+        return "—".to_string();
+    }
+    let mut items: Vec<String> = m
+        .iter()
+        .filter(|(_, v)| **v >= 0.05)
+        .map(|(k, v)| format!("{}{:.1}", config.resource_name(k), v))
+        .collect();
+    items.sort();
+    items.join(" ")
 }
 
 /// Structured report of the current state.
@@ -202,20 +220,20 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     // --- Cities ---
     s.push_str(&heading("城市"));
     let mut t = new_table();
-    t.set_header(vec!["名称", "控制势力", "人口", "防御", "开采点"]);
+    t.set_header(vec!["名称", "控制势力", "人口", "防御", "建筑 (面积)"]);
     for c in &state.cities {
-        let mines: String = c
-            .mining_points
+        let buildings: String = c
+            .buildings
             .iter()
-            .map(|m| format!("{}×{:.0}", m.resource_type.name(), m.area))
+            .map(|b| building_label(config, b))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("  ");
         t.add_row(vec![
             cell(c.name.clone()),
             cell(faction_name(state, c.faction_id)),
             cell(c.population.to_string()),
             cell(format!("{:.0}", c.defense)),
-            cell(mines),
+            cell(buildings),
         ]);
     }
     s.push_str(&t.to_string());
@@ -225,7 +243,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     let mut t = new_table();
     t.set_header(vec!["ID", "名称", "势力", "位置 (AU)", "目标", "航速", "耐久%"]);
     for sh in &state.ships {
-        let spec = config.ship_spec(sh.class);
+        let spec = config.ship_spec(&sh.class);
         let target = match sh.target {
             Some(ShipTarget::Ship(id)) => format!("船#{}", id),
             Some(ShipTarget::City(id)) => format!("城#{}", id),
@@ -255,13 +273,6 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     let mut t = new_table();
     t.set_header(vec!["势力", "资源", "交战对象"]);
     for f in &state.factions {
-        let mut res: Vec<String> = f
-            .resources
-            .iter()
-            .filter(|(_, v)| **v >= 0.05)
-            .map(|(rt, v)| format!("{}{:.1}", rt.name(), v))
-            .collect();
-        res.sort();
         let enemies: Vec<String> = f
             .relations
             .iter()
@@ -274,7 +285,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
                 f.color.to_string().color(faction_color(f.id)),
                 f.name
             )),
-            cell(if res.is_empty() { "—".to_string() } else { res.join(" ") }),
+            cell(fmt_resource_map(config, &f.resources)),
             cell(if enemies.is_empty() { "—".to_string() } else { enemies.join(" ") }),
         ]);
     }
