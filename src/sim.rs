@@ -296,7 +296,7 @@ fn write_budget(
             };
             match mode {
                 ControlMode::Ai => {
-                    slot.insert(rt.clone(), Control::ai(*value));
+                    slot.insert(rt.clone(), Control::inherit(*value));
                 }
                 ControlMode::Player => {
                     slot.entry(rt.clone()).or_insert_with(|| Control::player(*value));
@@ -769,7 +769,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         // --- AI-controlled: existing auto behavior ---
         if let Some(target) = nearest_enemy_ship(state, config, owner, pos, range) {
             if let Some(c) = state.control_mut(owner) {
-                c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::TargetShip { ship: target, attack: true }));
+                c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
             }
             fire(state, config, ship_id, target);
             continue;
@@ -800,7 +800,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             let np = ship.position;
             if let Some(target) = nearest_enemy_ship(state, config, owner, np, range) {
                 if let Some(c) = state.control_mut(owner) {
-                    c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::TargetShip { ship: target, attack: true }));
+                    c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
                 }
                 fire(state, config, ship_id, target);
             } else if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
@@ -906,7 +906,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     let picked = pick_target(state, config, owner, pos, rng);
     let behavior = picked.unwrap_or(ShipBehavior::Idle);
     if let Some(c) = state.control_mut(owner) {
-        c.ship_orders.insert(ship_id, Control::ai(behavior));
+        c.ship_orders.insert(ship_id, Control::inherit(behavior));
     }
     picked
 }
@@ -1011,7 +1011,7 @@ fn colonize(
     let settlement = state.body(body).and_then(|b| b.settlement.as_ref());
     let Some(settlement) = settlement else {
         if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::Idle));
+            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
         }
         return;
     };
@@ -1069,7 +1069,7 @@ fn colonize(
     }
 
     if let Some(c) = state.control_mut(faction) {
-        c.ship_orders.insert(ship_id, Control::ai(ShipBehavior::Idle));
+        c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
     }
 }
 

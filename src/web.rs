@@ -111,9 +111,13 @@ pub struct FactionControlView {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ScopeView {
+    #[serde(default)]
     pub global: Option<ControlMode>,
+    #[serde(default)]
     pub factions: Vec<(FactionId, Option<ControlMode>)>,
+    #[serde(default)]
     pub bodies: Vec<(BodyId, Option<ControlMode>)>,
+    #[serde(default)]
     pub cities: Vec<(CityId, Option<ControlMode>)>,
 }
 
@@ -724,7 +728,7 @@ pub fn router(shared: Shared) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ShipBehavior;
+    use crate::model::{ControlMode, ShipBehavior};
 
     /// The tagged agent-state `order` form must be accepted and rewritten into
     /// the default enum form that the rest of the pipeline expects.
@@ -779,5 +783,32 @@ mod tests {
         apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
         let b = state.ship_behavior(0).expect("ship 0 has an order");
         assert_eq!(b, ShipBehavior::TargetShip { ship: 2, attack: true });
+    }
+
+    /// Setting a faction's scope to Player must actually take over its leaves
+    /// (which are inert `inherit` now), even though the AI has "written" values.
+    #[test]
+    fn scope_player_takes_over_independent_faction() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        // Default scope (all None) → everything resolves to Ai.
+        assert_eq!(state.ship_control(0), ControlMode::Ai, "default scope is Ai");
+
+        // Take over faction 3 (中国) via a scope-only diff.
+        let scope_diff = serde_json::json!({"scope": {"factions": [[3, "Player"]]}});
+        apply_patch(&mut state, &config, &scope_diff).expect("scope diff applies");
+        assert_eq!(state.ship_control(0), ControlMode::Player, "ship of a Player faction is player-owned");
+        assert_eq!(state.investment_budget_control(3, "iron"), ControlMode::Player, "budget leaf follows scope");
+        assert_eq!(state.construction_budget_control(3, "iron"), ControlMode::Player);
+        // Other factions are untouched (still Ai).
+        assert_eq!(state.ship_control(2), ControlMode::Ai, "untouched faction stays Ai");
+
+        // An explicit leaf mode still overrides scope in the opposite direction:
+        // force ship 0 back to Ai inside a Player faction.
+        let leaf_diff = serde_json::json!({
+            "control": [{"faction_id": 3, "ship_orders": [{"ship": 0, "mode": "Ai"}]}]
+        });
+        apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
+        assert_eq!(state.ship_control(0), ControlMode::Ai, "explicit Ai leaf beats Player scope");
     }
 }

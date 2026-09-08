@@ -77,6 +77,9 @@ quit / exit
 > `apply` 里舰的 `behavior` 两种写法都认：默认枚举形式（`{"TargetShip":{"ship":2,"attack":true}}`、
 > `"Idle"`），以及**状态视图里 `order` 的 tagged 形式**（`{"type":"target_ship","ship":2,"attack":true}`、
 > `{"type":"idle"}`）——所以你可以把 `order` 字段原样粘进 diff，无需手动翻译。
+> **作用域接管**：AI 不再把 `mode:"Ai"` 写死进每个叶子，而是写 `mode:null`（继承），所以
+> `{"scope":{"factions":[[3,"Player"]]}}` 就能真正整体接管中国（默认 `mode:null` + 全 None 作用域仍归 AI；
+> 想单独把某叶子钉成 `Ai`/`Player` 仍可显式设 `mode`）。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 
