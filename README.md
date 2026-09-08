@@ -94,7 +94,7 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
   | planet_x --seed 42
 ```
 
-支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。
+支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `sum` / `count` / `count(expr)` / `group_by(expr)` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。聚合常用形如 `.ships | group_by(.owner) | map({owner: .[0].owner, n: length})` 或 `[.factions[].resources["铁"]] | sum`。
 
 ### 1.0 游戏配置（规则字典 `meta`）
 

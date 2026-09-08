@@ -15,8 +15,8 @@
 //!   * pipeline `|`, array `[expr]`, object `{a: expr, b: expr}` / `{a, b}`
 //!   * `select(expr)`, `map(expr)`, `map_values(expr)`
 //!   * builtins: `length`, `keys`, `sort`, `sort_by(expr)`, `reverse`, `type`,
-//!     `add`, `unique`, `first`, `first(expr)`, `contains`, `startswith`,
-//!     `endswith`, `empty`
+//!     `add`, `sum`, `count`, `unique`, `first`, `first(expr)`, `contains`,
+//!     `startswith`, `endswith`, `empty`, `group_by(expr)`
 //!   * operators: `== != < <= > >=`, `and or not`, `+ - * /`, `//`
 //!   * literals: strings, numbers, `true`, `false`, `null`, arrays
 //!
@@ -596,7 +596,7 @@ impl Parser {
                 // bare identifier: builtin-of-zero-args, or field access.
                 match name.as_str() {
                     "length" | "keys" | "keys_unsorted" | "sort" | "reverse" | "type" | "add"
-                    | "unique" | "empty" => Ok(Filter::Func(name, vec![])),
+                    | "unique" | "empty" | "sum" | "count" => Ok(Filter::Func(name, vec![])),
                     _ => Ok(Filter::Path(vec![PathSeg::Field(name)])),
                 }
             }
@@ -894,6 +894,10 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 fn arith(a: &Value, b: &Value, op: BinOp) -> Value {
     match op {
         BinOp::Add => match (a, b) {
+            // Null is the additive identity (jq: null + x == x), which is what
+            // makes `add`/`sum` over an array work from a Null accumulator.
+            (Value::Null, _) => b.clone(),
+            (_, Value::Null) => a.clone(),
             (Value::Number(x), Value::Number(y)) => {
                 Value::from(x.as_f64().unwrap_or(0.0) + y.as_f64().unwrap_or(0.0))
             }
@@ -968,7 +972,35 @@ fn eval_func(name: &str, args: &[Filter], input: &Value) -> Vec<Value> {
             }
             _ => vec![input.clone()],
         },
+        "sum" => match input {
+            // Alias for `add` over an array; consistent with jq's `add`.
+            Value::Array(a) => {
+                let mut acc = Value::Null;
+                for v in a {
+                    acc = arith(&acc, v, BinOp::Add);
+                }
+                vec![acc]
+            }
+            _ => vec![input.clone()],
+        },
+        "count" => {
+            // Number of elements of the input (like jq's `length`), with an
+            // optional filter: `count(expr)` == `[expr] | length`.
+            if let Some(arg) = args.first() {
+                let outs = eval(arg, input);
+                vec![Value::from(outs.len() as i64)]
+            } else {
+                let n = match input {
+                    Value::String(s) => s.chars().count() as i64,
+                    Value::Array(a) => a.len() as i64,
+                    Value::Object(m) => m.len() as i64,
+                    _ => 0,
+                };
+                vec![Value::from(n)]
+            }
+        }
         "empty" => vec![],
+        "group_by" => group_by_input(args, input),
         "first" => {
             if args.is_empty() {
                 match input {
@@ -1095,6 +1127,37 @@ fn sort_by_input(args: &[Filter], input: &Value) -> Vec<Value> {
     vec![Value::Array(keyed.into_iter().map(|(_, v)| v).collect())]
 }
 
+/// jq `group_by(expr)`: sort the array by `expr`, then group runs of equal keys
+/// into sub-arrays. Returns an array of arrays (each group's elements), ordered
+/// by key.
+fn group_by_input(args: &[Filter], input: &Value) -> Vec<Value> {
+    let arg = args.first().cloned().unwrap_or(Filter::Identity);
+    let mut keyed: Vec<(Value, Value)> = match input {
+        Value::Array(a) => a
+            .iter()
+            .map(|el| {
+                let k = eval(&arg, el).into_iter().next().unwrap_or(Value::Null);
+                (k, el.clone())
+            })
+            .collect(),
+        _ => return vec![Value::Array(vec![])],
+    };
+    keyed.sort_by(|(ka, _), (kb, _)| cmp(ka, kb).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut groups: Vec<Vec<Value>> = Vec::new();
+    let mut last_key: Option<Value> = None;
+    for (k, v) in keyed {
+        let same = last_key.as_ref().map(|prev| prev == &k).unwrap_or(false);
+        if same {
+            groups.last_mut().expect("has group").push(v);
+        } else {
+            groups.push(vec![v]);
+            last_key = Some(k);
+        }
+    }
+    vec![Value::Array(groups.into_iter().map(Value::Array).collect())]
+}
+
 fn unique_input(input: &Value) -> Vec<Value> {
     match input {
         Value::Array(a) => {
@@ -1208,5 +1271,34 @@ mod tests {
         let v = json!({"m": {"x": 1, "y": 2}});
         let out = run(".m[] | .", &v);
         assert_eq!(out, vec![Value::from(1), Value::from(2)]);
+    }
+
+    #[test]
+    fn sum_and_count() {
+        assert_eq!(run("sum", &json!([1, 2, 3])), vec![Value::from(6.0)]);
+        assert_eq!(run("add", &json!([1, 2, 3])), vec![Value::from(6.0)]);
+        // count = length of input
+        assert_eq!(run("count", &json!([1, 2, 3])), vec![Value::from(3)]);
+        assert_eq!(run("count", &json!({"a": 1, "b": 2})), vec![Value::from(2)]);
+        // count(expr) == number of outputs of the filter
+        assert_eq!(run("count(.[])", &json!([1, 2, 3])), vec![Value::from(3)]);
+    }
+
+    #[test]
+    fn group_by_ships_by_owner() {
+        let v = json!({"ships": [
+            {"name": "A", "owner": "中国"},
+            {"name": "B", "owner": "美国"},
+            {"name": "C", "owner": "中国"},
+        ]});
+        // group ships by owner, then summarize each group
+        let out = run(
+            ".ships | group_by(.owner) | map({owner: .[0].owner, n: length})",
+            &v,
+        );
+        assert_eq!(
+            out,
+            vec![json!([{"owner": "中国", "n": 2}, {"owner": "美国", "n": 1}])]
+        );
     }
 }
