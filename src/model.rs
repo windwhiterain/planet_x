@@ -930,6 +930,11 @@ pub struct BalanceOfPowerConfig {
     /// 霸权保留的自动市场交易额度比例（0..1；1 = 不制裁）。这会给一家独大的经济体
     /// 造成资源封锁与失衡——它难以再靠市场兑换到短缺矿物（如铀/氦-3），产业受抑。
     pub sanction_trade_mult: f64,
+    /// 经济制裁的「治理代价」：被封锁的霸权维持帝国（行政 + 娱乐/福利）的成本倍率。
+    /// >1 表示被孤立/封锁的霸权要把更多稀缺资源中转去维持领地与治安，导致**远端/边缘
+    /// 殖民地更难养、更易离心叛乱**——把「多国资源封锁」转化为「霸权扩张受限」，让
+    /// 一家独大的体量自然回落。这个倍率只作用于被反制联盟锁定的霸权（不碰其他国家）。
+    pub sanction_cost_mult: f64,
 }
 
 impl Default for BalanceOfPowerConfig {
@@ -948,6 +953,7 @@ impl Default for BalanceOfPowerConfig {
             min_members: 2,
             coalition_estrange: -10.0,
             sanction_trade_mult: 1.0,
+            sanction_cost_mult: 1.6,
         }
     }
 }

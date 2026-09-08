@@ -1249,7 +1249,7 @@ fn step_governance(state: &mut State, config: &GameConfig) {
             total_admin += (g.admin_base + g.admin_per_au * a) * scale;
             ent_total += ent;
         }
-        let governance_total = total_admin + ent_total;
+        let governance_total = (total_admin + ent_total) * sanction_cost_mult(state, config, fid);
 
         // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
         // 治理是否到位以及娱乐投入是否真正落地。
@@ -1891,6 +1891,17 @@ pub(crate) fn active_coalition_hegemon(state: &State, config: &GameConfig) -> Op
         Some(hegemon)
     } else {
         None
+    }
+}
+
+/// 经济制裁的「治理代价」倍率：若 `fid` 正是被活跃反制联盟锁定的霸权，则其维持帝国
+/// （行政 + 娱乐）的成本按 `sanction_cost_mult` 放大；否则 1.0（不碰别国）。这使被
+/// 多国封锁的大国要花更多资源维持领地与治安——边缘殖民地更难养、更易离心。
+fn sanction_cost_mult(state: &State, config: &GameConfig, fid: FactionId) -> f64 {
+    if active_coalition_hegemon(state, config) == Some(fid) {
+        config.balance.sanction_cost_mult
+    } else {
+        1.0
     }
 }
 

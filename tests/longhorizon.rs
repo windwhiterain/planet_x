@@ -18,6 +18,7 @@ use planet_x::model::*;
 use planet_x::prng::Prng;
 use planet_x::sim;
 use planet_x::world;
+use std::collections::BTreeSet;
 
 /// Total market value of one faction's stockpile.
 fn faction_value(f: &Faction, config: &GameConfig) -> f64 {
@@ -299,8 +300,8 @@ fn same_seed_reproduces_identically() {
 }
 
 /// 多极与霸权制衡：合纵连横机制应让世界**不收敛成一家独大**——没有任何势力能长期
-/// 垄断全部城市（最高城占低于一致阈值），且反制联盟确实会成立（机制是活的，不是摆设）。
-/// 上千回合后游戏仍是多方参与，而非「一个霸主 + 一堆旁观者」。
+/// 垄断全部城市（最高城占低于一致阈值）、最强势力会**轮换**（不是同一霸主锁死），
+/// 且反制联盟确实会成立（机制是活的，不是摆设）。上千回合后游戏仍是多方参与。
 #[test]
 fn world_is_multipolar() {
     let config = load_config();
@@ -309,11 +310,15 @@ fn world_is_multipolar() {
         let mut rng = Prng::new(seed);
         let mut max_top_share: f64 = 0.0;
         let mut coalition_seen = false;
+        let mut leaders = BTreeSet::new();
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
             check_state(&state, &config);
-            let (_, share) = top_city_share(&state);
+            let (top, share) = top_city_share(&state);
             max_top_share = max_top_share.max(share);
+            if state.round >= 500 {
+                leaders.insert(top);
+            }
             if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
                 coalition_seen = true;
             }
@@ -323,8 +328,12 @@ fn world_is_multipolar() {
             max_top_share < 0.85,
             "seed {seed}: 单一势力城市占比峰值 {max_top_share:.3} —— 世界有被一家独大垄断的趋势"
         );
-        // 制衡是活的：长局里应出现过反制联盟（合纵连横确实发生）。
+        // 制衡是活的 + 霸权轮换：长局里应出现过反制联盟，且最强势力不止一个（不是锁死）。
         assert!(coalition_seen, "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）");
+        assert!(
+            leaders.len() >= 2,
+            "seed {seed}: 后半程最强势力始终是同一个人 {leaders:?} —— 存在长期锁死的单极霸权"
+        );
     }
 }
 
@@ -342,4 +351,34 @@ fn top_city_share(state: &State) -> (FactionId, f64) {
         }
     }
     best
+}
+
+/// 观测：合纵连横制裁严苛度调参（`--ignored`）。
+#[test]
+#[ignore]
+fn probe_sanction() {
+    let config = load_config();
+    for seed in [1u64, 42, 12345] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut max_dead = 0usize;
+        let mut max_top_share: f64 = 0.0;
+        let mut top_sum: f64 = 0.0;
+        let mut top_count = 0u32;
+        let mut sm = std::collections::BTreeSet::new();
+        for _ in 0..1200u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            let dead = zombie_count(&state);
+            let (top, share) = top_city_share(&state);
+            max_dead = max_dead.max(dead);
+            max_top_share = max_top_share.max(share);
+            if state.round >= 600 {
+                top_sum += share;
+                top_count += 1;
+                sm.insert(top);
+            }
+        }
+        let avg = top_sum / top_count as f64;
+        println!("seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}");
+    }
 }

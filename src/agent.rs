@@ -207,6 +207,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
             "min_members": config.balance.min_members,
             "coalition_estrange": r2(config.balance.coalition_estrange),
             "sanction_trade_mult": r2(config.balance.sanction_trade_mult),
+            "sanction_cost_mult": r2(config.balance.sanction_cost_mult),
         },
         "story": config
             .story
