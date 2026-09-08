@@ -58,6 +58,7 @@ q <jq>                  # 对当前状态执行任意 jq 过滤（JSON Lines）
 summary                 # 紧凑雷达（回合/时间/计数/各势力交战）
 advance [n]             # 推进 n 回合（默认 1），然后打印 summary
 control                 # 输出当前可控制状态（control + scope）JSON，即 agent 可编辑的模板
+meta [<jq>]             # 输出游戏配置（规则字典）：资源 raw key→中文名、建筑/舰船全表、经济/战斗/外交常量
 apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后回读 control
 cities / ships / factions / bodies
 city <id> / ship <id> / faction <id> / body <id>   # 单实体详情
@@ -73,6 +74,45 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
 ```
 
 支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。
+
+### 1.0 游戏配置（规则字典 `meta`）
+
+agent 的输入不只是状态，还有**规则**：可采什么、什么值多少、造一艘船要不要得起。`meta` 命令（或 `--meta` 标志）一次性输出整份 `GameConfig` 为一行 JSON——这是 agent 的规则字典，也是它把状态里的**中文名**翻译成 `control` 里**原始 key** 的映射表。
+
+```bash
+# 一次性读完整个配置
+planet_x --meta
+
+# 只取 资源 key→中文名 字典（写 control 预算时用原始 key）
+planet_x --meta --query '.resources'
+
+# 看某舰级数值（决定该造什么）
+planet_x --meta --query '.ships.corvette'
+
+# REPL 内过滤
+planet_x                      # 然后：meta .buildings.residential
+```
+
+返回结构：
+
+```jsonc
+{
+  "resources":  { "water_ice": "水冰", "iron": "铁", … },   // 原始 key → 中文名
+  "buildings":  { "residential": { "label":"居住点","role":"housing","construction_speed":1.0,
+                   "build_cost":{…},"staff_per_area":0.0,"productivity":1.0,"default_invest_weight":1.5 }, … },
+  "ships":      { "corvette": { "label":"护卫舰","hull":12.0,"attack":5.0,"speed":1.6,
+                   "attack_range":0.4,"build_points":15.0,"build_cost":{…} }, … },
+  "economy":    { "production_rate":0.5, "pop_growth":0.04, "min_efficiency":0.1,
+                  "invest_fraction":0.3, "housing_buffer":1.25 },
+  "combat":     { "war_threshold":-20.0, "siege_range":0.25, "arrival_eps":0.06,
+                  "defense_initial":40.0, "defense_reset":35.0 },
+  "diplomacy":  { "attack_delta":-3.0, "capture_delta":-25.0, "relax_rate":0.5 }
+}
+```
+
+**命名约定**：`meta` 的一切 key 都用**原始配置 key**（`carbon`/`corvette`/`residential`），与 `control`
+模板、`apply` 的机器格式一致；只有 `resources` 表给出 key→中文名 的映射。状态视图里资源/矿藏用**中文名**
+（人看直读），要写回 `control` 时经 `meta.resources` 反查原始 key。
 
 ### 1.1 下发指令（可控制状态 diff）
 
@@ -109,7 +149,8 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 | `--seed <SEED>` | 确定性随机种子。数字或 `random` / `随机`（默认），默认随机生成。 |
 | `--start <PATH>` | 从指定的初始 `State`（`.ron`）加载；不传则程序化生成默认太阳系。 |
 | `--round <N>` | 运行 `N` 个回合并把每个回合输出为一行 JSON（回合 0 先）；别名 `--rounds`。 |
-| `--query <JQ>` | 对 agent 状态执行一个 jq 过滤并输出 JSON Lines；带 `--round N` 先推进 N 回合。 |
+| `--query <JQ>` | 对 agent 状态执行一个 jq 过滤并输出 JSON Lines；带 `--round N` 先推进 N 回合。配合 `--meta` 时对配置做 jq。 |
+| `--meta` | 输出整份游戏配置（规则字典）为一行 JSON 后退出；resource key→中文名、建筑/舰船全表、经济/战斗/外交常量。 |
 | `--apply <PATH>` | 把一份控制状态 diff（JSON，同 web `POST /api/command` 的 `{control,scope}` 形状）结构化成多层级补丁叠加到状态，再继续其它模式。 |
 | `--script <FILE>` |（别名 `--commands`）从文件非交互读取 REPL 命令执行后退出；stdout 为纯 JSON Lines。 |
 
@@ -130,11 +171,17 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
     "relations": { "俄罗斯": -5.98, "欧盟": 10.01, "美国": -49.85, "行星X崇拜教": -52.51 },
     "wars": ["美国", "行星X崇拜教"]                                     // relation <= 交战胜阈值
   }],
-  "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65], "settlement_area": 120.0 }],
+  "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65],
+               "orbit": { "perihelion": 0.98, "aphelion": 1.02, "period": 12.0 },
+               "settlement_area": 120.0,
+               "settlement": { "ecological_capacity": 25.0, "construction_speed_mod": 2.4,
+                               "construction_resource_mod": 1.0,
+                               "deposits": [{ "resource": "水冰", "area": 40.0 }, … ] } }],
   "cities": [{
     "id": 0, "name": "长三角城市群", "body": "地球",
     "owner": 3, "owner_name": "中国", "population": 1400, "defense": 40.0,
     "building": "corvette",                                            // 当前建造的舰级
+    "ship_build_progress": 0.0,                                        // 距造出该舰还差的建造点
     "buildings": [{ "kind": "residential", "resource": null, "area": 56.0, "deployed": 56.0 }]
   }],
   "ships": [{
@@ -147,7 +194,8 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 ```
 
 - `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`。
-- `settlement_area` 非定居点天体为 `null`。
+- `settlement_area` / `settlement` 为非定居点天体为 `null`（`settlement_area` 是便捷字段 = `settlement.total_area`）。
+- 矿藏/资源在状态里用**中文名**直读；要写回 `control`（原始 key）时经 `meta.resources` 反查。
 - 引用一律用整数 id（`faction` / `body` / `city` / `ship`），名称字段便于直读。
 
 ---

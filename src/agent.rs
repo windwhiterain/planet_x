@@ -13,6 +13,7 @@
 
 use crate::model::*;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::BTreeMap;
 
 /// Round a float to 2 decimals (token-noise reduction).
@@ -30,6 +31,90 @@ pub fn state_value(state: &State, config: &GameConfig) -> serde_json::Value {
 pub fn render_state(state: &State, config: &GameConfig) -> String {
     let doc = AgentState::from_state(state, config);
     serde_json::to_string(&doc).expect("agent state is serializable")
+}
+
+/// The game's full tunable configuration, rendered as one JSON object for the
+/// `meta` command / `--meta` flag. This is the agent's "rules dictionary":
+///
+/// * `resources`  resource *key* → display name. This is the authoritative
+///                table an agent uses to translate the display-name keys it sees
+///                in [`state_value`] into the raw `control` keys it must write
+///                (e.g. `"水冰"` → `"water_ice"`).
+/// * `buildings`  building *kind* → full spec (role, construction speed/cost,
+///                staffing, productivity, default invest weight).
+/// * `ships`      ship *class* → full spec (hull, attack, speed, range, build
+///                points/cost). An agent needs these to decide what to build.
+/// * `economy` / `combat` / `diplomacy`  the numeric tuning constants
+///                (`invest_fraction`, `war_threshold`, `production_rate`, …).
+///
+/// Every key here is a raw config key (not a display name), so it lines up
+/// directly with the `control` template and the machine keys; the `resources`
+/// table is the single place that maps raw key ↔ 中文名.
+pub fn meta_value(config: &GameConfig) -> serde_json::Value {
+    let to_cost = |m: &BTreeMap<String, f64>| m.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>();
+
+    let resources: BTreeMap<String, String> =
+        config.resources.iter().map(|(k, d)| (k.clone(), d.name.clone())).collect();
+    let buildings: BTreeMap<String, serde_json::Value> = config
+        .buildings
+        .iter()
+        .map(|(k, b)| {
+            (
+                k.clone(),
+                json!({
+                    "label": b.label,
+                    "role": b.role,
+                    "construction_speed": r2(b.construction_speed),
+                    "build_cost": to_cost(&b.build_cost),
+                    "staff_per_area": r2(b.staff_per_area),
+                    "productivity": r2(b.productivity),
+                    "default_invest_weight": r2(b.default_invest_weight),
+                }),
+            )
+        })
+        .collect();
+    let ships: BTreeMap<String, serde_json::Value> = config
+        .ships
+        .iter()
+        .map(|(k, s)| {
+            (
+                k.clone(),
+                json!({
+                    "label": s.label,
+                    "hull": r2(s.hull),
+                    "attack": r2(s.attack),
+                    "speed": r2(s.speed),
+                    "attack_range": r2(s.attack_range),
+                    "build_points": r2(s.build_points),
+                    "build_cost": to_cost(&s.build_cost),
+                }),
+            )
+        })
+        .collect();
+    json!({
+        "resources": resources,
+        "buildings": buildings,
+        "ships": ships,
+        "economy": {
+            "production_rate": r2(config.economy.production_rate),
+            "pop_growth": r2(config.economy.pop_growth),
+            "min_efficiency": r2(config.economy.min_efficiency),
+            "invest_fraction": r2(config.economy.invest_fraction),
+            "housing_buffer": r2(config.economy.housing_buffer),
+        },
+        "combat": {
+            "war_threshold": r2(config.combat.war_threshold),
+            "siege_range": r2(config.combat.siege_range),
+            "arrival_eps": r2(config.combat.arrival_eps),
+            "defense_initial": r2(config.combat.defense_initial),
+            "defense_reset": r2(config.combat.defense_reset),
+        },
+        "diplomacy": {
+            "attack_delta": r2(config.diplomacy.attack_delta),
+            "capture_delta": r2(config.diplomacy.capture_delta),
+            "relax_rate": r2(config.diplomacy.relax_rate),
+        },
+    })
 }
 
 /// The compact, decision-relevant view of a round.
@@ -60,8 +145,38 @@ struct AgentBody {
     id: BodyId,
     name: String,
     position: [f64; 2],
+    /// Keplerian orbit, so the agent can reason about travel time.
+    orbit: AgentOrbit,
     /// Total buildable area, when this body has a settlement.
     settlement_area: Option<f64>,
+    /// Full settlement detail (capacity, construction modifiers, deposits).
+    settlement: Option<AgentSettlement>,
+}
+
+/// A body's orbit, summarised to the numbers that matter for planning travel.
+#[derive(Serialize)]
+struct AgentOrbit {
+    perihelion: f64,
+    aphelion: f64,
+    /// Orbit period in months.
+    period: f64,
+}
+
+/// Settlement detail: how much can be built, how fast, and what resources are
+/// available to mine here (资源矿藏 bounds the mining area).
+#[derive(Serialize)]
+struct AgentSettlement {
+    ecological_capacity: f64,
+    construction_speed_mod: f64,
+    construction_resource_mod: f64,
+    /// Mineable deposits: (display name, area). `area` caps the mining area.
+    deposits: Vec<AgentDeposit>,
+}
+
+#[derive(Serialize)]
+struct AgentDeposit {
+    resource: String,
+    area: f64,
 }
 
 #[derive(Serialize)]
@@ -75,6 +190,8 @@ struct AgentCity {
     defense: f64,
     /// Ship class currently being built (建造点 queue).
     building: String,
+    /// Progress toward finishing the current `building` (in build points).
+    ship_build_progress: f64,
     buildings: Vec<AgentBuilding>,
 }
 
@@ -151,7 +268,25 @@ impl AgentState {
                 id: b.id,
                 name: b.name.clone(),
                 position: [r2(b.position[0]), r2(b.position[1])],
+                orbit: AgentOrbit {
+                    perihelion: r2(b.orbit.perihelion_distance as f64),
+                    aphelion: r2(b.orbit.aphelion_distance as f64),
+                    period: r2(b.orbit.period as f64),
+                },
                 settlement_area: b.settlement.as_ref().map(|s| r2(s.total_area)),
+                settlement: b.settlement.as_ref().map(|s| AgentSettlement {
+                    ecological_capacity: r2(s.ecological_capacity),
+                    construction_speed_mod: r2(s.construction_speed_mod),
+                    construction_resource_mod: r2(s.construction_resource_mod),
+                    deposits: s
+                        .resources
+                        .iter()
+                        .map(|d| AgentDeposit {
+                            resource: config.resource_name(&d.resource),
+                            area: r2(d.area),
+                        })
+                        .collect(),
+                }),
             })
             .collect();
 
@@ -170,6 +305,7 @@ impl AgentState {
                 population: c.population,
                 defense: r2(c.defense),
                 building: c.ship_build.target_class.clone(),
+                ship_build_progress: r2(c.ship_build.progress),
                 buildings: c
                     .buildings
                     .iter()

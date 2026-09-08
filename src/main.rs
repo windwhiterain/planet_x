@@ -92,6 +92,9 @@ State::scope 是一棵作用域树（全局→势力→天体→城市），决�
   文件里出现的势力/叶子；叶子内省略 value/behavior 保留当前值、省略 mode 保留当前模式（mode:null=继承）；\n\
   整叶不出现则完全不动。既可只移动一条船，也可整体替换一个势力。\n\
 - `advance [n]` 推进 n 回合（默认 1）；`--query <jq>` 或 `q <jq>` 对当前状态执行 jq 过滤；`summary` 打印雷达。\n\
+- `meta`（或 `--meta`）输出整份游戏配置 JSON：resources（raw key→中文名）、buildings/ships 全表、\n\
+  economy/combat/diplomacy 常量——即 agent 的规则字典，也是状态中文名↔control 原始 key 的映射表；\n\
+  可跟 `meta <jq>` 过滤。\n\
 - 每一行 JSON 是 `{round,time_month,factions,bodies,cities,ships}`，字段固定、引用一律用整数 id、名称字段便于直读；\n\
   飞船 order 为 tag 联合 `{type:\"idle\"|\"move\"|\"target_ship\"|\"target_settlement\",...}`。",
     after_help = "agent 专用：stdout 只输出零噪声 JSON Lines（或每条 REPL 命令一个 JSON 值），无颜色/星图/表格/散文。--round N 输出 N+1 行 JSON（回合 0 + N 回合）；不带 --round 时进入查询 REPL。--apply 在开始时叠加可控制状态 diff，--script 从文件非交互执行 REPL 命令。"
@@ -114,6 +117,12 @@ struct Cli {
     #[arg(long, value_name = "JQ")]
     query: Option<String>,
 
+    /// 输出整份游戏配置（resources/buildings/ships/economy/combat/diplomacy）为一行
+    /// JSON，然后退出。这是 agent 的规则字典：资源的 raw key→中文名映射，以及建造/舰船
+    /// 数值规则。可配合 --query 对 config 做 jq 过滤。
+    #[arg(long)]
+    meta: bool,
+
     /// 从文件读取一段 REPL 命令脚本，非交互式执行后退出。stdout 仍只输出
     /// JSON Lines；配合 --start/--apply 可串联成一个回合的 agent 决策循环。
     #[arg(long, visible_alias = "commands", value_name = "FILE")]
@@ -134,6 +143,28 @@ fn main() {
 
     let config = load_config();
     let seed = parse_seed(&cli.seed);
+
+    // --meta: dump the game config (rules dictionary) and exit. Doesn't need a
+    // world. Honors --query <jq> to filter the meta value; otherwise prints it
+    // whole as a single JSON line.
+    if cli.meta {
+        let input = agent::meta_value(&config);
+        match &cli.query {
+            Some(filter) => match query::apply_lines(&input, filter) {
+                Ok(lines) => {
+                    if !lines.is_empty() {
+                        emit(&lines);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}", json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()}));
+                    std::process::exit(10);
+                }
+            },
+            None => emit(&input.to_string()),
+        }
+        return;
+    }
 
     // Initial state: from a file, or generated procedurally.
     let mut state = match &cli.start {
@@ -232,6 +263,26 @@ fn print_query(state: &State, config: &GameConfig, filter: &str) {
     }
 }
 
+/// Dump the game config (rules dictionary). With `filter` (Some), run a jq
+/// filter over the meta value; otherwise emit the whole document as one line.
+fn print_meta(config: &GameConfig, filter: Option<&str>) {
+    let input = agent::meta_value(config);
+    match filter {
+        Some(f) => match query::apply_lines(&input, f) {
+            Ok(lines) => {
+                if !lines.is_empty() {
+                    emit(&lines);
+                }
+            }
+            Err(e) => eprintln!(
+                "{}",
+                json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()})
+            ),
+        },
+        None => emit(&input.to_string()),
+    }
+}
+
 /// Structured command catalog returned by `guide`/`help` (progressive discovery).
 fn guide_json() -> String {
     json!({
@@ -241,6 +292,7 @@ fn guide_json() -> String {
             "summary": {"usage": "summary",   "desc": "compact radar of the current round (alias s)"},
             "advance": {"usage": "advance [n]", "desc": "advance n rounds (default 1), then print summary (alias a)"},
             "control": {"usage": "control",   "desc": "dump the editable control surface (control+scope) as JSON — the template to edit into a diff"},
+            "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
             "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface"},
             "cities": {"usage": "cities",     "desc": "list cities"},
             "ships":  {"usage": "ships",      "desc": "list ships"},
@@ -312,6 +364,7 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
 
             // --- editable control surface --------------------------------------
             "control" => emit(&web::control_surface(state).to_string()),
+            "meta" => print_meta(config, if rest.is_empty() { None } else { Some(rest) }),
             "apply" => {
                 if rest.is_empty() {
                     eprintln!(
