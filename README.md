@@ -14,42 +14,24 @@ cargo build --release       # 产物在 target/release/planet_x
 
 ---
 
-## 三种运行模式
+## 唯一模式：Agent 零噪声
 
-`planet_x` 有四种消费方式：**交互式**（人看）、**批量回放**（人看 + 存轨迹）、**agent 零噪声**（LLM 读取）、**查询/REPL**（按需下钻）。
+`planet_x` 只服务 LLM agent：**stdout 只输出 JSON Lines**，无颜色、无星图、无表格、无中文散文、无无关输出；浮点四舍五入到 2 位小数，低于阈值的资源被丢弃。确定性：同一种子输出逐字节一致。它没有 `--agent` 参数——零噪声机器输出就是它唯一的行为。
 
-### 1. 交互模式（默认）
+**批量编年史**（`--round N`）：每回合输出一行紧凑、稳定的状态 JSON（回合 0 先，之后每回合一个）。
 
-不带 `--round` 时进入交互模式。**每按一次回车推进一个回合**，打印 ASCII 星图、天体/城市/飞船/势力表、以及各势力可控状态（= 指令）的 diff。
+```bash
+# N+1 行 JSON（回合 0 + N 个回合），一整份编年史
+planet_x --seed 42 --rounds 10
+```
+
+**查询 REPL**（不带 `--round`）：状态留在进程内，每条命令返回一个 JSON 值，可下钻，避免把整份世界态灌给 agent。
 
 ```bash
 planet_x --seed 42
-# 回车  -> 进入下一回合
-# q / quit / exit  -> 退出
 ```
 
-### 2. 批量回放模式（`--round N`）
-
-运行 `N` 个回合，把每回合的完整世界快照（**含回合 0 初始状态**）写成 `trajectory/state_round_NNNN.ron`，并打印每回合的「可控状态 diff」。`seed.txt` 记录本次种子以复现。
-
-```bash
-planet_x --seed 42 --round 10      # 默认 seed 随机
-planet_x --seed 7 --rounds 5       # --rounds 是 --round 的别名
-```
-
-### 3. Agent 零噪声模式（`--agent`）
-
-为 LLM agent 设计：**stdout 只输出 JSON Lines**，每回合一个紧凑、稳定的 JSON 对象（回合 0 先，之后每回合一个）。无颜色、无星图、无表格、无中文散文、无无关输出；浮点四舍五入到 2 位小数，低于阈值的资源被丢弃。确定性：同一种子输出逐字节一致。
-
-```bash
-# 批量：N+1 行 JSON（回合 0 + N 个回合），一整份编年史
-planet_x --agent --seed 42 --rounds 10
-
-# 不带 --round 时进入「查询 REPL」：stdin 发命令，stdout 回 JSON（见下一节）
-planet_x --agent --seed 42
-```
-
-### 4. 查询与 REPL（`--query` / 命令式）
+### 1. 查询与 REPL（`--query` / 命令式）
 
 分层、按需获取信息，避免把整份世界态灌给 agent。
 
@@ -57,19 +39,19 @@ planet_x --agent --seed 42
 
 ```bash
 # 筛城市：中国的城市
-planet_x --agent --seed 42 --query '.cities[] | select(.owner_name=="中国") | {name, population, defense}'
+planet_x --seed 42 --query '.cities[] | select(.owner_name=="中国") | {name, population, defense}'
 
 # 打完 5 回合后，看受伤的船
-planet_x --agent --seed 42 --rounds 5 --query '[.ships[]] | map(select(.hull < .hull_max)) | .[] | {name, hull}'
+planet_x --seed 42 --rounds 5 --query '[.ships[]] | map(select(.hull < .hull_max)) | .[] | {name, hull}'
 
 # 打完 8 回合后，看被攻打的城
-planet_x --agent --seed 42 --rounds 8 --query '.cities[] | select(.defense < 40.0) | {name, owner_name, defense}'
+planet_x --seed 42 --rounds 8 --query '.cities[] | select(.defense < 40.0) | {name, owner_name, defense}'
 
 # 势力名单 / 交战对象
-planet_x --agent --seed 42 --query '.factions[] | select(.wars | length > 0) | .name'
+planet_x --seed 42 --query '.factions[] | select(.wars | length > 0) | .name'
 ```
 
-**查询 REPL**（`planet_x --agent`，无 `--round`）：状态留在进程内，每条命令返回 JSON，可下钻。
+**查询 REPL**（`planet_x`，无 `--round`）：stdin 发命令，stdout 回 JSON。
 
 ```
 q <jq>                  # 对当前状态执行任意 jq 过滤（JSON Lines）
@@ -83,16 +65,16 @@ guide / help            # 命令目录（JSON）；q/query、s/summary、a/advan
 quit / exit
 ```
 
-`--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在进入任何模式前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
+`--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 
 ```bash
 printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, order}\nquit\n' \
-  | planet_x --agent --seed 42
+  | planet_x --seed 42
 ```
 
 支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。
 
-### 4.1 下发指令（可控制状态 diff）
+### 1.1 下发指令（可控制状态 diff）
 
 模块化约束把「可控制状态」（指令）与「实体演化结果」分开：`State::control` 是每个势力的
 （舰船指令 `ship_orders` / 资源预算 `budget` / 建设投资权重 `invest_weights`），每个叶子带 `mode`
@@ -102,20 +84,21 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
 `apply <file>` 会**结构化、多层级**地应用它——**只触碰文件里出现的势力/叶子**：
 
 ```bash
-# 圆 0：读取模板，然后把中国(3)的 0 号舰改成「玩家控制、攻击 2 号美舰」
-planet_x --agent --seed 42 --script control.txt        # control.txt: `control\nquit`
+# 圆 0：读取模板，然后把中国(3) 的 0 号舰改成「玩家控制、攻击 2 号美舰」
+planet_x --seed 42 --script control.txt        # control.txt: `control\nquit`
 # 写 diff.json：
 # {"control":[{"faction_id":3,"ship_orders":[{"ship":0,"behavior":{"TargetShip":{"ship":2,"attack":true}},"mode":"Player"}]}]}
 
 # 应用 diff，推进 6 回合，输出编年史
-planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.json --rounds 6
+planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 ```
 
 **最小修改语义**：只列出想改的叶子即可；某叶子里省略 `value`/`behavior` 保留其当前值，省略
 `mode` 保留其当前模式；整叶不出现则完全不动。既可只移动一条船，也可整体替换一个势力，
 或任何中间层级。`mode: null` 表示继承上层作用域。
 
-> `--agent` 与 `--round` 可同时使用；也常与 `--start` 搭配从指定状态续玩。
+> 在 agent 语义下 `--round N` 只输出 JSON Lines，不写 `trajectory/*.ron`。需要从某回合续玩时，
+> 预先用 `--start` 指定的 `.ron` 状态文件（可由 web 端 `PLANET_X_START` 或外部工具生成）。
 
 ---
 
@@ -125,11 +108,10 @@ planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.
 |---|---|
 | `--seed <SEED>` | 确定性随机种子。数字或 `random` / `随机`（默认），默认随机生成。 |
 | `--start <PATH>` | 从指定的初始 `State`（`.ron`）加载；不传则程序化生成默认太阳系。 |
-| `--round <N>` | 运行 `N` 回合并把每回合快照写入 `trajectory/`；别名 `--rounds`。 |
-| `--agent` | 零噪声机器输出：stdout 仅输出 JSON；无 `--round` 时进入查询 REPL。 |
+| `--round <N>` | 运行 `N` 个回合并把每个回合输出为一行 JSON（回合 0 先）；别名 `--rounds`。 |
 | `--query <JQ>` | 对 agent 状态执行一个 jq 过滤并输出 JSON Lines；带 `--round N` 先推进 N 回合。 |
 | `--apply <PATH>` | 把一份控制状态 diff（JSON，同 web `POST /api/command` 的 `{control,scope}` 形状）结构化成多层级补丁叠加到状态，再继续其它模式。 |
-| `--script <FILE>` |（别名 `--commands`）从文件非交互读取 REPL 命令执行后退出；配合 `--agent` 时 stdout 为纯 JSON Lines。 |
+| `--script <FILE>` |（别名 `--commands`）从文件非交互读取 REPL 命令执行后退出；stdout 为纯 JSON Lines。 |
 
 其它：配置文件路径由 `PLANET_X_CONFIG` 环境变量指定，默认 `config/game.ron`。
 
@@ -179,16 +161,15 @@ planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.
 ## 快速上手示例
 
 ```bash
-# 看一次从头开始的战役（human）
+# 给 agent 读：20 回合 + 初始，共 21 行 JSON
+planet_x --seed 42 --rounds 20
+
+# 一次性的 jq 提问
+planet_x --seed 42 --query '.factions[] | select(.id==3) | {id, name, wars}'
+
+# 交互式查询 REPL（stdin 发命令，stdout 回 JSON）
 planet_x --seed 42
 
-# 生成 20 回合轨迹文件 + 每回合指令 diff
-planet_x --seed 42 --round 20
-
-# 给 agent 读：20 回合 + 初始，共 21 行 JSON
-planet_x --agent --seed 42 --rounds 20
-
 # 从保存的回合状态续玩（继续推进 5 回合）
-planet_x --start trajectory/state_round_0020.ron --round 5
-planet_x --start trajectory/state_round_0020.ron --agent --rounds 5
+planet_x --start state_round_0020.ron --round 5
 ```
