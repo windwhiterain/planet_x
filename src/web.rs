@@ -140,6 +140,12 @@ pub struct StateView {
     pub ships: Vec<Ship>,
     pub control: Vec<FactionControlView>,
     pub scope: ScopeView,
+    /// 本回合事件流水（who attacked / ships lost / razed cities / wars / story beats …）。
+    #[serde(default)]
+    pub events: Vec<GameEvent>,
+    /// 剧情编年史：整段已展开的叙事弧。
+    #[serde(default)]
+    pub chronicle: Vec<ChronicleEntry>,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +362,8 @@ pub fn state_view(world: &GameWorld) -> StateView {
         ships: s.ships.clone(),
         control,
         scope: scope_view(&s.scope),
+        events: s.events.clone(),
+        chronicle: s.chronicle.clone(),
     }
 }
 

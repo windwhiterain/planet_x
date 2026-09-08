@@ -554,7 +554,8 @@ fn guide_json() -> String {
             "order": {"usage": "order <ship> attack|guard|siege|move|dock|colonize|idle ...", "desc": "one-shot ship command (Player mode). attack <enemy> chases+fires; guard <friend> escorts; dock <body> parks in orbit of a body (follows it); idle holds position. e.g. order 0 attack 3 | order 3 guard 1 | order 8 dock 9 | order 6 idle"},
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
-            "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},
+            "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders, wars started/ended, story beats)"},
+            "story": {"usage": "story [<jq>]", "desc": "print the story chronicle (the unfolding narrative arc) — one beat per JSON line by default, or pipe through a jq filter (e.g. `story .[] | select(.round > 10)`). Each beat carries the round it fired, its id/title/body and participants."},
             "delta": {"usage": "delta [n]",   "desc": "advance n rounds (default 1) and print a compact semantic state diff over that window: new/destroyed ships, city owner/razed/population changes, per-faction resource stockpile deltas, and wars that crossed the threshold. Complements `events` (what happened) with `delta` (what the state changed to)."},
             "save": {"usage": "save <file.ron>", "desc": "write a deterministic checkpoint: the current State plus the PRNG position. Resume later with `load` here or `--start <file>` in a new process; a resumed run reproduces the same future rounds."},
             "load": {"usage": "load <file.ron>", "desc": "replace the in-memory state with a checkpoint saved by `save` / `--save`, restoring the RNG position too (alias resume)."},
@@ -671,6 +672,22 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
 
             // --- high-level command shortcuts ----------------------------------
             "events" => print_query(state, config, ".events"),
+            "story" => {
+                // 剧情编年史：每条叙事事件一行 JSON（默认），可跟 jq 过滤整段弧。
+                let input = agent::story_value(state);
+                let filter = if rest.is_empty() { ".[]" } else { rest };
+                match query::apply_lines(&input, filter) {
+                    Ok(lines) => {
+                        if !lines.is_empty() {
+                            emit(&lines);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()})
+                    ),
+                }
+            }
             "save" | "save_state" => {
                 if rest.is_empty() {
                     eprintln!(

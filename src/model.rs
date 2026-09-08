@@ -278,6 +278,12 @@ pub enum GameEvent {
     ColonyFounded { city: CityId, owner: FactionId, body: BodyId, seeded_ship_class: String },
     /// 玩家指令因目标失效而降级（陈旧目标 / 城被夷平 / 无定居点），避免船飞向原点。
     StaleOrder { ship: ShipId, reason: String },
+    /// 外交事件：一对势力本回合跨越战争阈值进入交战（war ≤ threshold）。
+    WarStarted { a: FactionId, b: FactionId },
+    /// 外交事件：一对势力本回合停战（从交战回到和平）。
+    WarEnded { a: FactionId, b: FactionId },
+    /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
+    Story { id: String, title: String },
 }
 
 /// A spaceship. Always owned by a faction.
@@ -361,6 +367,11 @@ pub struct State {
     /// 本回合事件日志（`#[serde(default)]` 以便旧状态/旧 .ron 加载时缺字段不报错）。
     #[serde(default)]
     pub events: Vec<GameEvent>,
+    /// 剧情编年史：本局已发生的叙事事件（按发生先后追加）。这是「剧情丰富」的载体——
+    /// agent 用 `story` 命令/查询即可读到整段已展开的故事弧；`#[serde(default)]` 让旧的
+    /// `.ron` 状态缺字段也能正常加载。
+    #[serde(default)]
+    pub chronicle: Vec<ChronicleEntry>,
 }
 
 impl State {
@@ -678,6 +689,69 @@ pub struct MarketConfig {
     pub spread: f64,
 }
 
+/// 一条剧情编年史记录：回合里发生的一次「叙事事件」，带标题、正文与参与方。
+///
+/// 这是「剧情丰富」的可读载体——一条 `Story` 剧情事件在本回合触发时，除了记入
+/// [`State::events`]（本回合流水），还把这个完整条目追加进 [`State::chronicle`]，
+/// 供 agent 随时查询整段已展开的故事弧。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChronicleEntry {
+    /// 触发时的回合号（时间戳）。
+    pub round: u32,
+    /// 事件模板 id（config/game.ron 的 `story` 表键）。
+    pub id: String,
+    /// 标题（如「外来的回响」）。
+    pub title: String,
+    /// 正文（一段叙事）。
+    pub body: String,
+    /// 参与方可读名（如「中国」「行星X崇拜教」），便于 agent 直读。
+    pub participants: Vec<String>,
+}
+
+/// 一条剧情事件何时触发。数据驱动，全部可确定复现；一次事件默认只触发一次。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum StoryTrigger {
+    /// 到达或超过某回合时触发（时间线上的「节拍」）。
+    RoundAt { round: u32 },
+    /// 世界上第一次出现任何交战时触发。
+    FirstWar,
+    /// 第一次有城市被夷平（razed）时触发。
+    FirstRaze,
+    /// 第一次建立/再殖民城市触发的殖民事件时触发。
+    FirstColony,
+    /// 指定两势力第一次进入交战时触发。
+    WarBetween { a: FactionId, b: FactionId },
+    /// 指定势力第一次与任何势力交战时触发。
+    FactionAtWar { faction: FactionId },
+    /// a 对 b 的关系跌破 `value` 时触发（如某势力失和、阵营反目）。
+    RelationBelow { a: FactionId, b: FactionId, value: f64 },
+}
+
+/// 剧情事件的机械后果（可选；刻意保持小幅、确定性，避免扰动经济/军事平衡太久）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum StoryEffect {
+    /// 调整 a↔b 的关系（双向）。
+    Relations { a: FactionId, b: FactionId, delta: f64 },
+    /// 给某势力注入一定量资源（key 为 config 原始资源 key）。
+    GrantResources { faction: FactionId, resource: String, amount: f64 },
+}
+
+/// 一条剧情事件模板，来自 config/game.ron 的 `story` 表。
+///
+/// `trigger` 决定何时火（见 [`StoryTrigger`]）；`effects` 是可选的小幅机械后果；
+/// `participants` 是可读参与方名。整张表数据驱动，模拟只按它触发即可复现地展开剧情。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StoryEvent {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub trigger: StoryTrigger,
+    #[serde(default)]
+    pub participants: Vec<String>,
+    #[serde(default)]
+    pub effects: Vec<StoryEffect>,
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -695,6 +769,9 @@ pub struct GameConfig {
     pub ships: BTreeMap<String, ShipSpec>,
     /// Building statistics, keyed by building kind name.
     pub buildings: BTreeMap<String, BuildingSpec>,
+    /// 剧情事件表（编年史/叙事弧）。`#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub story: Vec<StoryEvent>,
 }
 
 impl GameConfig {

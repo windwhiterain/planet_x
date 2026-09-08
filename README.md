@@ -4,6 +4,8 @@
 
 **动态国际关系**：**开局和平**（无战争状态），关系由 `sim::step_diplomacy` 驱动波动——每对势力按意识形态 `alignment` 的静息亲和漂移（同阵营靠拢、异己升温），好战 `aggression` 加速敌对化；开火/占领压关系入战争，停战后经战争疲态向停战线回落、可再升温。**星际市场**（`sim::step_market`）：每势力自动把富余矿物按参考价值兑换成所缺的关键矿物——解决资源分布不均（如中国 700 铁却缺碳、欧盟不产工业三矿），也提供资源池；**维护费**（`sim::step_upkeep`，每舰每回合按舰级扣资源）则给舰队设上限、避免无限膨胀。
 
+**剧情编年史**：一局不只是状态机——`config/game.ron` 的 `story` 表定义了一条**数据驱动的叙事弧**（`sim::step_story` 每回合评估触发）。每条剧情事件有一个 `trigger`（`RoundAt` 节拍，或 `FirstWar`/`FirstRaze`/`FirstColony`/`WarBetween`/`FactionAtWar`/`RelationBelow` 这类**事件型**触发）——事件型触发恰好落在对应历史事件发生的那个回合，形成「剧情与局势同步」。每条带标题/正文/参与方，并可附带**小幅确定性**机械后果（`Relations` 关系 / `GrantResources` 资源）。触发的剧情记入 `State::chronicle` 编年史（agent 用 `story` 命令或 `--query '.story'` 读取整段弧），也作为一条 `events` 里的 `story` 事件在本回合流水出现。外交跃迁（开战 `war_started` / 停战 `war_ended`）同样作为事件暴露。
+
 ---
 
 ## 构建
@@ -65,7 +67,9 @@ apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后
 order <ship> attack|guard|siege|move|dock|colonize|idle ...   # 一键下舰指令（Player 模式）。attack <敌舰> 追袭开火；guard <友舰> 守卫；dock <天体> 停泊轨道（随其巡航）；idle 待命原地。
 budget <faction> <resource> <value>   # 设该势力「建设建筑」投资预算叶子（Player）
 build  <faction> <resource> <value>   # 设该势力「造舰」建造预算叶子（Player）
-events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级）
+events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级/开战停战/剧情）
+story [<jq>]            # 打印剧情编年史：每条叙事事件一行 JSON（round/id/title/body/participants），
+                        # 可跟 jq 过滤整段弧（如 `story .[] | select(.round>10)`）。
 delta [n]               # 推进 n 回合（默认 1）并打印一段紧凑的状态语义差分：新舰/被毁舰、城归属/夷平/人口变化、各势力资源增量、跨越战争阈值的关系。
 save <file.ron>         # 写 checkpoint：当前 State + PRNG 位置（续玩可复现后续回合）
 load <file.ron>         # 从 checkpoint 恢复状态与 PRNG 位置（别名 resume）
@@ -85,7 +89,7 @@ quit / exit
 > **作用域接管**：AI 不再把 `mode:"Ai"` 写死进每个叶子，而是写 `mode:null`（继承），所以
 > `{"scope":{"factions":[[3,"Player"]]}}` 就能真正整体接管中国（默认 `mode:null` + 全 None 作用域仍归 AI；
 > 想单独把某叶子钉成 `Ai`/`Player` 仍可显式设 `mode`）。
-> **`events` vs `delta`**：`events` 记「这回合发生了什么」（开火/被毁/夷平/殖民/陈旧指令）；
+> **`events` vs `delta`**：`events` 记「这回合发生了什么」（开火/被毁/夷平/殖民/陈旧指令/开战停战/剧情故事）；
 > `delta` 记「状态变成了什么样」——两快照间的语义差分。想看一层楼到底改了什么用 `delta`，
 > 想看事件流水用 `events`。
 > **守卫**：`TargetShip{ship,attack:false}` 是守卫——护住一艘**友舰**：靠近它并拦截进入自身
@@ -252,6 +256,14 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 ```
 
 - `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`dock`、`colonize`。
+- `events`（每回合一条，`type` tag）：`attack` / `ship_destroyed` / `siege` / `city_razed` /
+  `ship_spawned` / `colony_founded` / `stale_order` / `war_started` / `war_ended` / `story`
+  （`story` 事件只带 id/title，完整叙事在编年史 `.story`）。外交跃迁 `war_started`/`war_ended`
+  在任一势力跨越战争阈值的回合发出。
+- `story`：仅在 `--query` / `q`/`story` 命令给出的状态下作为顶层字段出现（`render_state`
+  的每回合 JSON 为了省 token **不含**整段编年史；要看本回合剧情看 `events` 里的 `story`，
+  要看整段弧用 `story` 命令或 `--query '.story'`）。每条编年史为
+  `{ round, id, title, body, participants:[…] }`。
 - 定居点 ↔ 城市**一一对应**：`bodies[].settlements` 是天体上的定居点列表（含名字/面积/矿藏），
   `cities[]` 用 `settlement_index` 指向自己占据的那个定居点；一座定居点至多一座城市，
   城市被夷平（razed）后仍占位，只能被**再殖民**回填，不会被叠第二座城。

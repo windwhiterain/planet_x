@@ -37,6 +37,8 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     state.time_month += 1.0;
     // 本回合事件日志从空开始，回合演化中追加。
     state.events.clear();
+    // 记录回合开始的交战状态，用于在本回合结束时检测「开战 / 停战」跃迁。
+    let wars_before = war_pairs(state, config);
 
     // Update each body's current position (当前位置) from its orbit.
     for b in &mut state.bodies {
@@ -49,6 +51,33 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     step_construction(state, config, rng);
     step_military(state, config, rng);
     step_diplomacy(state, config, rng);
+
+    // 外交跃迁：任何一对势力跨越战争阈值（开战 / 停战）都在本回合记一条事件。
+    let wars_after = war_pairs(state, config);
+    for (a, b) in wars_after.difference(&wars_before) {
+        ev(state, GameEvent::WarStarted { a: *a, b: *b });
+    }
+    for (a, b) in wars_before.difference(&wars_after) {
+        ev(state, GameEvent::WarEnded { a: *a, b: *b });
+    }
+
+    // 剧情：推进叙事弧/编年史（数据驱动，见 config/game.ron 的 `story` 表）。
+    step_story(state, config);
+}
+
+/// The set of unordered faction pairs currently at war (relation ≤ war_threshold).
+fn war_pairs(state: &State, config: &GameConfig) -> BTreeSet<(FactionId, FactionId)> {
+    let mut pairs = BTreeSet::new();
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            let (a, b) = (ids[i], ids[j]);
+            if hostile(state, config, a, b) {
+                pairs.insert((a.min(b), a.max(b)));
+            }
+        }
+    }
+    pairs
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -1469,6 +1498,74 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     }
 }
 
+// --- story / chronicle -------------------------------------------------------
+
+/// 剧情步进：评估 config 的 `story` 表，把满足触发条件的剧情事件火出，写入
+/// [`State::chronicle`] 编年史并记一条 [`GameEvent::Story`]，同时应用可选的小幅
+/// 机械后果（关系/资源）。确定性：无 RNG，同一种子触发完全一致。
+///
+/// 每个事件默认只触发一次（id 已入编年史则跳过）。触发条件见 [`StoryTrigger`]；
+/// 事件型条件（`FirstWar`/`FirstRaze`/`FirstColony`/`WarBetween`/`FactionAtWar`）
+/// 依据本回合已产生的事件（含开战/停战/夷平/殖民）判定——因此这些剧情节拍正好落在
+/// 对应历史事件发生的那个回合，形成「剧情与局势同步」的叙事弧。
+fn step_story(state: &mut State, config: &GameConfig) {
+    for spec in &config.story {
+        // 每个剧情事件只触发一次：已进编年史则跳过。
+        if state.chronicle.iter().any(|c| c.id == spec.id) {
+            continue;
+        }
+        if !story_trigger_fired(state, &spec.trigger) {
+            continue;
+        }
+        // 机械后果（小幅、确定性）。
+        for effect in &spec.effects {
+            match effect {
+                StoryEffect::Relations { a, b, delta } => {
+                    adjust_relation(state, *a, *b, *delta);
+                }
+                StoryEffect::GrantResources { faction, resource, amount } => {
+                    if let Some(f) = state.faction_mut(*faction) {
+                        *f.resources.entry(resource.clone()).or_insert(0.0) += *amount;
+                    }
+                }
+            }
+        }
+        // 记入编年史 + 本回合故事事件。
+        let entry = ChronicleEntry {
+            round: state.round,
+            id: spec.id.clone(),
+            title: spec.title.clone(),
+            body: spec.body.clone(),
+            participants: spec.participants.clone(),
+        };
+        ev(state, GameEvent::Story { id: spec.id.clone(), title: spec.title.clone() });
+        state.chronicle.push(entry);
+    }
+}
+
+/// 判断一条剧情触发条件是否已满足。
+fn story_trigger_fired(state: &State, trigger: &StoryTrigger) -> bool {
+    match trigger {
+        StoryTrigger::RoundAt { round } => state.round >= *round,
+        StoryTrigger::FirstWar => state.events.iter().any(|e| matches!(e, GameEvent::WarStarted { .. })),
+        StoryTrigger::FirstRaze => state.events.iter().any(|e| matches!(e, GameEvent::CityRazed { .. })),
+        StoryTrigger::FirstColony => state.events.iter().any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
+        StoryTrigger::WarBetween { a, b } => state.events.iter().any(|e| match e {
+            GameEvent::WarStarted { a: x, b: y } => {
+                let (lo, hi) = (x.min(y), x.max(y));
+                let (plo, phi) = (a.min(b), a.max(b));
+                lo == plo && hi == phi
+            }
+            _ => false,
+        }),
+        StoryTrigger::FactionAtWar { faction } => state.events.iter().any(|e| match e {
+            GameEvent::WarStarted { a, b } => *a == *faction || *b == *faction,
+            _ => false,
+        }),
+        StoryTrigger::RelationBelow { a, b, value } => relation(state, *a, *b) < *value,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1728,5 +1825,61 @@ mod tests {
         let cn = earth.settlements[0].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
         assert!(cn.contains(&"iron"), "长三角 settlement has 铁");
         assert!(cn.contains(&"silicon") && cn.contains(&"water_ice"), "长三角 has 硅/水冰");
+    }
+
+    /// 剧情编年史：RoundAt 节拍按回合触发、编年史按发生先后单调增长、id 唯一，且
+    /// 同一种子完全确定（重跑逐字节一致）。
+    #[test]
+    fn story_chronicle_grows_deterministically() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        // Round-at beats: prologue fires round 1, planet_x_arrives round 60.
+        for _ in 0..60 {
+            advance(&mut state, &config, &mut rng);
+        }
+        let ids: Vec<&str> = state.chronicle.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"prologue"), "prologue (RoundAt 1) must fire");
+        assert!(ids.contains(&"planet_x_arrives"), "planet_x_arrives (RoundAt 60) must fire");
+
+        // The chronicle records the round it fired, in non-decreasing order.
+        let rounds: Vec<u32> = state.chronicle.iter().map(|c| c.round).collect();
+        let mut sorted = rounds.clone();
+        sorted.sort_unstable();
+        assert_eq!(rounds, sorted, "chronicle must be sorted by firing round");
+
+        // ids are unique (each event fires once).
+        let mut dedup = ids.clone();
+        dedup.sort_unstable();
+        let before_n = dedup.len();
+        dedup.dedup();
+        assert_eq!(before_n, dedup.len(), "each story id fires at most once");
+
+        // Determinism: re-running the same seed reproduces the identical chronicle.
+        let (_, mut state2) = fresh_world(42);
+        let mut rng2 = Prng::new(42);
+        for _ in 0..60 {
+            advance(&mut state2, &config, &mut rng2);
+        }
+        assert_eq!(
+            state.chronicle.iter().map(|c| (c.round, c.id.clone(), c.title.clone())).collect::<Vec<_>>(),
+            state2.chronicle.iter().map(|c| (c.round, c.id.clone(), c.title.clone())).collect::<Vec<_>>(),
+            "same seed must produce the same story arc"
+        );
+    }
+
+    /// 剧情机械后果：prologue 给无国界科学组织(6)注入氦-3，并拉低它与行星X崇拜教(8)的关系。
+    #[test]
+    fn story_effects_apply() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        let helium_before = state.faction(6).map(|f| f.resources.get("helium3").copied().unwrap_or(0.0)).unwrap_or(0.0);
+        let rel_before = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
+
+        advance(&mut state, &config, &mut rng);
+
+        let helium_after = state.faction(6).map(|f| f.resources.get("helium3").copied().unwrap_or(0.0)).unwrap_or(0.0);
+        assert!(helium_after > helium_before, "prologue grants science 氦-3 (effect)");
+        let rel_after = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
+        assert!(rel_after < rel_before, "prologue must lower science↔cult relation (effect)");
     }
 }

@@ -22,9 +22,24 @@ fn r2(v: f64) -> f64 {
 }
 
 /// The agent state as a `serde_json::Value`, for in-process querying.
+///
+/// Query mode (`--query` / `q`) additionally attaches the full story chronicle
+/// as a top-level `story` field, so an agent can read the narrative arc with
+/// `.story` (or `.story[] | select(...)`). The per-round `render_state` stays
+/// lean and only carries the chapter's own `events`.
 pub fn state_value(state: &State, config: &GameConfig) -> serde_json::Value {
     let doc = AgentState::from_state(state, config);
-    serde_json::to_value(doc).expect("agent state is serializable")
+    let mut v = serde_json::to_value(doc).expect("agent state is serializable");
+    if let serde_json::Value::Object(ref mut m) = v {
+        m.insert("story".to_string(), story_value(state));
+    }
+    v
+}
+
+/// The story chronicle (`State::chronicle`) as a JSON array, for `story` /
+/// `.story` queries. This is the full, growing narrative arc of the run.
+pub fn story_value(state: &State) -> serde_json::Value {
+    serde_json::to_value(&state.chronicle).expect("chronicle is serializable")
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
@@ -150,6 +165,24 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                 .map(|(k, r)| (k.clone(), r2(r.value)))
                 .collect::<BTreeMap<_, _>>(),
         },
+        "story": config
+            .story
+            .iter()
+            .map(|s| {
+                let trigger = match &s.trigger {
+                    StoryTrigger::RoundAt { round } => json!({"kind": "round_at", "round": round}),
+                    StoryTrigger::FirstWar => json!({"kind": "first_war"}),
+                    StoryTrigger::FirstRaze => json!({"kind": "first_raze"}),
+                    StoryTrigger::FirstColony => json!({"kind": "first_colony"}),
+                    StoryTrigger::WarBetween { a, b } => json!({"kind": "war_between", "a": a, "b": b}),
+                    StoryTrigger::FactionAtWar { faction } => json!({"kind": "faction_at_war", "faction": faction}),
+                    StoryTrigger::RelationBelow { a, b, value } => {
+                        json!({"kind": "relation_below", "a": a, "b": b, "value": r2(*value)})
+                    }
+                };
+                json!({"id": s.id, "title": s.title, "trigger": trigger})
+            })
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -459,6 +492,15 @@ fn game_event_value(e: &GameEvent) -> serde_json::Value {
         }
         StaleOrder { ship, reason } => {
             json!({"type":"stale_order", "ship": ship, "reason": reason})
+        }
+        WarStarted { a, b } => {
+            json!({"type":"war_started", "a": a, "b": b})
+        }
+        WarEnded { a, b } => {
+            json!({"type":"war_ended", "a": a, "b": b})
+        }
+        Story { id, title } => {
+            json!({"type":"story", "id": id, "title": title})
         }
     }
 }

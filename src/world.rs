@@ -670,5 +670,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         control,
         scope,
         events: Vec::new(),
+        chronicle: Vec::new(),
     }
 }

@@ -187,3 +187,28 @@
     - 伤害：高
     - 攻击距离：中
     - 资源：低，稀有
+
+## 剧情（编年史）
+
+- 配置文件 `story` 表定义一条**数据驱动的叙事弧**，每条剧情事件有：
+  - `id`：稳定标识
+  - `title` / `body`：标题与叙事正文
+  - `participants`：参与方可读名
+  - `trigger`：触发条件
+    - `RoundAt(round)`：到达某回合（时间线节拍）
+    - `FirstWar`：世界第一次出现交战
+    - `FirstRaze`：第一次有城市被夷平
+    - `FirstColony`：第一次建立/再殖民城市
+    - `WarBetween(a,b)`：指定两势力第一次交战
+    - `FactionAtWar(faction)`：指定势力第一次与任何人交战
+    - `RelationBelow(a,b,value)`：a 对 b 关系跌破某值
+  - `effects`：可选小幅、确定性机械后果（`Relations(a,b,delta)` 关系 / `GrantResources(faction,resource,amount)` 资源）
+- 模拟每回合评估触发（`sim::step_story`），事件型触发恰好落在对应历史事件发生的回合。
+- 触发后写入 `State::chronicle` 编年史（可查询整段弧），并作为 `events` 里的 `story` 事件出现在本回合流水。
+- **确定性**：剧情全无 RNG，同一种子触发完全一致；checkpoint 续玩仍复现。
+- 外交跃迁（开战 `war_started` / 停战 `war_ended`）作为事件暴露。
+
+## 复现与续玩
+
+- 同一种子 + 相同配置 + 相同回合数 → 输出逐字节一致。
+- `--save` / `save` 写出 checkpoint（State + PRNG 位置）；`--start` / `load` 恢复，续玩复现后续回合（剧情编年史一并保存/恢复）。
