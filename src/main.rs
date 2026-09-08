@@ -51,6 +51,49 @@ use std::path::{Path, PathBuf};
     name = "planet_x",
     version,
     about = "行星X——太空沙盘轨迹生成器",
+    long_about = "《行星X》是一个回合制太阳系沙盘轨迹生成器：每回合 = 1 个月，整个游戏由一个可确定复现的\n\
+State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码。\n\
+\n\
+【世界与实体】\n\
+- 天体 body：绕太阳做 2D 椭圆轨道（给定近日点/远日点距离、远日点方向、公转周期），每回合位置\n\
+  按轨道重算。部分天体有定居点 settlement：含有限总面积（settlement_area）、生态容量（人口/面积）、\n\
+  建设速度修正、建设资源修正，以及若干资源矿藏（类型 + 面积，限定采矿上限）。\n\
+- 城市 city：建在定居点上、由一个势力控制，内有若干连续面积分配的 建筑，并有人口（限制生产效率）、\n\
+  防御值 defense（围城伤害累积于此，被攻占后重置）和一条造船队列 ship_build（建造点面积推动进度）。\n\
+- 建筑 building：非原子，是一个连续面积分配（计划 area 与实际 deployed），总和不超定居点总面积。三种角色：\n\
+  residential 居住点（提供人口容量）、mining 开采点（采对应矿藏资源）、construction 建造点（船坞，造舰）。\n\
+- 势力 faction：拥有城市与飞船，库存各资源，并与其它势力两两外交（关系 relations）。\n\
+- 飞船 ship：必属某一势力，从城市出厂，在 2D 平面移动，可按指令开火/围城。舰级参数（护甲/攻击/速度/\n\
+  攻击距离/建造点/建造成本）由 config 定义：护卫舰 corvette、巡洋舰 cruiser、运输舰 transport。\n\
+\n\
+【资源】11 种：水冰 water_ice、氦-3 helium3、铀 uranium、钍 thorium、金 gold、铂 platinum、铁 iron、\n\
+氢 hydrogen、甲烷 methane、碳 carbon、硅 silicon。\n\
+\n\
+【每回合演化（sim::advance）】\n\
+1. 天体位置按轨道重算。\n\
+2. 经济：开采点按 面积×劳动力×生产率 产出资源；人口向住房容量增长（增长比例受 pop_growth 控制）。\n\
+3. 建设：建筑按各自投资权重竞争本轮资源预算（默认每资源最多拿出库存的 invest_fraction=0.3 投入建设）；\n\
+   连续地把计划面积建成 deployed；船坞按面积×劳动力 累积造船进度，够了就付建造成本造出新舰。\n\
+4. 军事：每艘舰按指令 移动/开火/围城。开火削减目标舰 hull；围城削减城市 defense；defense≤0 则城市被\n\
+   攻占（守备重置、人口×0.6、改由攻击方控制）。关系 ≤ 战争阈值（war_threshold=-20）即视为敌对（wars）。\n\
+5. 外交：攻击/占领会加重敌对（attack_delta/capture_delta）；非战争关系每回合向中性回落（relax_rate）。\n\
+\n\
+【控制模型 = 指令】每个势力有一份可控状态 State::control：\n\
+- ship_orders：本方各舰的 行为（ShipBehavior）：Idle（待命）、Move{position}（前往某位置）、\n\
+  TargetShip{ship,attack}（追袭某舰，attack 表示是否开火）、TargetSettlement{city,bombard}（围攻某城）。\n\
+- budget：每种资源每回合的投资预算（决定拿出多少资源用于建设）。\n\
+- invest_weights：本方各建筑的 建设投资权重（决定建造优先级）。\n\
+每个可控叶子带一个 mode：Ai（系统自动决策/改写）| Player（玩家指令，系统只读不改写）| None（继承上层）。\n\
+State::scope 是一棵作用域树（全局→势力→天体→城市），决定某叶子由谁控制：沿链上溯、取最具体者，全 None 默认 Ai。\n\
+\n\
+【agent 怎么玩】stdout 只输出零噪声 JSON Lines（无颜色/星图/表格/散文，浮点四舍五入到 2 位）。\n\
+- `control` 命令读出当前可编辑的控制面（control + scope）JSON，即你要改写的模板；\n\
+- 只改想动的叶子，把结果作为 diff 用 `--apply <file>` 或 REPL `apply <file>` 结构化、多层级叠加：只触碰\n\
+  文件里出现的势力/叶子；叶子内省略 value/behavior 保留当前值、省略 mode 保留当前模式（mode:null=继承）；\n\
+  整叶不出现则完全不动。既可只移动一条船，也可整体替换一个势力。\n\
+- `advance [n]` 推进 n 回合（默认 1）；`--query <jq>` 或 `q <jq>` 对当前状态执行 jq 过滤；`summary` 打印雷达。\n\
+- 每一行 JSON 是 `{round,time_month,factions,bodies,cities,ships}`，字段固定、引用一律用整数 id、名称字段便于直读；\n\
+  飞船 order 为 tag 联合 `{type:\"idle\"|\"move\"|\"target_ship\"|\"target_settlement\",...}`。",
     after_help = "agent 专用：stdout 只输出零噪声 JSON Lines（或每条 REPL 命令一个 JSON 值），无颜色/星图/表格/散文。--round N 输出 N+1 行 JSON（回合 0 + N 回合）；不带 --round 时进入查询 REPL。--apply 在开始时叠加可控制状态 diff，--script 从文件非交互执行 REPL 命令。"
 )]
 struct Cli {
