@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>行星X · WebUI</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <h1>行星X <span class="sub">太空沙盘 · WebUI</span></h1>
+    <div class="bar">
+      <span id="metaRound">回合 0 · 0 个月</span>
+      <label>推进
+        <select id="advanceN">
+          <option value="1">1</option>
+          <option value="5">5</option>
+          <option value="20">20</option>
+        </select>
+      </label>
+      <button id="advanceBtn">▶ 推进</button>
+      <label class="inp">种子 <input id="seedInput" placeholder="random" /></label>
+      <button id="newBtn">↺ 重建</button>
+      <span id="status"></span>
+    </div>
+  </header>
+
+  <main>
+    <section id="mapPanel">
+      <svg id="map"></svg>
+      <div id="readout"></div>
+    </section>
+
+    <aside id="side">
+      <div id="factionBar"></div>
+
+      <div class="panel" id="shipPanel">
+        <h2>舰指令 <span class="hint">(每艘舰 · AI/玩家)</span></h2>
+        <div id="shipList"></div>
+      </div>
+
+      <div class="panel" id="budgetPanel">
+        <h2>资源预算 <span class="hint">(每资源 · AI/玩家)</span></h2>
+        <div id="budgetList"></div>
+      </div>
+
+      <div class="panel" id="investPanel">
+        <h2>建筑投资权重 <span class="hint">(每建筑 · AI/玩家)</span></h2>
+        <div id="investList"></div>
+      </div>
+
+      <div class="panel" id="scopePanel">
+        <h2>作用域 <span class="hint">(全局/势力/天体/城市)</span></h2>
+        <div id="scopeList"></div>
+      </div>
+
+      <button id="applyBtn" class="primary">✓ 应用到服务器</button>
+    </aside>
+  </main>
+
+  <footer id="diffBar"></footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
