@@ -949,6 +949,11 @@ pub struct CombatConfig {
     /// 而不是满血抗到壳破。0 = 关闭。
     #[serde(default = "default_component_spill")]
     pub component_spill: f64,
+    /// 模块修复：每回合按此比例恢复组件完整度（占组件初始完整度的百分比）。受损舰在
+    /// 友方本土/母港（首都 `home_radius` 内）修理得**更快**——与自保撤退闭环：打残→撤
+    /// →修→再来。0 = 关闭。
+    #[serde(default = "default_component_repair")]
+    pub component_repair: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -961,6 +966,10 @@ fn default_retreat_min_dist() -> f64 {
 
 fn default_component_spill() -> f64 {
     0.12
+}
+
+fn default_component_repair() -> f64 {
+    0.04
 }
 
 /// Building structure attribute (混凝土 / 钢结构).

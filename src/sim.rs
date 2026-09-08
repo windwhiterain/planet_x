@@ -1338,11 +1338,22 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     // 个比例（不消耗资源、不复活已毁舰）。处于本方本土防御半径内的舰获得额外
     // home_regen_bonus 再生（cult 的 MOND 异常使其圣所旁舰只极难被消耗）。
     // 先读出每艘舰的本土再生加成，再统一修改（避免与 ships 的可变借用冲突）。
-    let bonuses: Vec<f64> = state
+    let (bonuses, friendly): (Vec<f64>, Vec<bool>) = state
         .ships
         .iter()
-        .map(|s| if s.hull > 0.0 { home_regen_bonus(state, s.faction_id, s.position) } else { 0.0 })
-        .collect();
+        .map(|s| {
+            if s.hull > 0.0 {
+                let f = state
+                    .faction(s.faction_id)
+                    .map(|fac| dist(s.position, state.body_position(fac.capital_body)) <= fac.home_radius)
+                    .unwrap_or(false);
+                (home_regen_bonus(state, s.faction_id, s.position), f)
+            } else {
+                (0.0, false)
+            }
+        })
+        .unzip();
+    let comp_repair = config.combat.component_repair;
     for (i, s) in state.ships.iter_mut().enumerate() {
         if s.hull > 0.0 {
             let panel = ship_panel(config, s);
@@ -1350,6 +1361,19 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             // 能量护盾每回合再生（护盾组件）：护盾优先吸收、损毁后再生，是防御组件的关键。
             if panel.shield_max > 0.0 {
                 s.shield = (s.shield + panel.shield_max * panel.shield_regen).min(panel.shield_max);
+            }
+            // 模块修复：受损组件在母港/友方本土修得更快（与自保撤退闭环：打残→撤→修→再来）。
+            if comp_repair > 0.0 && !s.components.is_empty() {
+                if s.component_hp.len() != s.components.len() {
+                    s.component_hp = s.components.iter().map(|c| component_integrity(config, c)).collect();
+                }
+                let rate = comp_repair * if friendly[i] { 2.5 } else { 1.0 };
+                for (j, c) in s.components.iter().enumerate() {
+                    let max = component_integrity(config, c);
+                    if s.component_hp[j] < max {
+                        s.component_hp[j] = (s.component_hp[j] + max * rate).min(max);
+                    }
+                }
             }
         }
     }
@@ -3301,6 +3325,28 @@ mod tests {
         );
         // 被击毁后不贡献面板：把目标组件打掉，验证攻击/护盾面板下降。
         let _ = panel_before;
+    }
+
+    /// 母港/友方本土修船（拟人「打残→撤→修→再来」闭环）：受损组件的完整度每回合修复，
+    /// 且在本土（首都 home_radius 内）修得更快。
+    #[test]
+    fn damaged_components_repair_in_friendly_territory() {
+        let (config, mut state) = fresh_world(42);
+        // China ship 0 停在其首都（Earth, body 2），组件受损。
+        let cap_pos = state.body_position(2);
+        if let Some(s) = state.ship_mut(0) {
+            s.position = cap_pos;
+            s.components = vec!["railgun".to_string()];
+            s.component_hp = vec![5.0];
+            s.hull = s.hull.max(5.0);
+        }
+        let before = state.ship(0).map(|s| s.component_hp.first().copied().unwrap_or(0.0)).unwrap_or(0.0);
+        advance(&mut state, &config, &mut Prng::new(42));
+        let after = state.ship(0).map(|s| s.component_hp.first().copied()).flatten().unwrap_or(before);
+        assert!(
+            after > before,
+            "a damaged component should repair over rounds; before={before} after={after}"
+        );
     }
 
     /// 造舰选装必须**确定**并且**总量可负担**（资源→组件 的确定性链接）。
