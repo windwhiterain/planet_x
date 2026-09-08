@@ -16,7 +16,7 @@ cargo build --release       # 产物在 target/release/planet_x
 
 ## 三种运行模式
 
-`planet_x` 有三种消费方式：**交互式**（人看）、**批量回放**（人看 + 存轨迹）、**agent 零噪声**（LLM 读取）。
+`planet_x` 有四种消费方式：**交互式**（人看）、**批量回放**（人看 + 存轨迹）、**agent 零噪声**（LLM 读取）、**查询/REPL**（按需下钻）。
 
 ### 1. 交互模式（默认）
 
@@ -42,13 +42,51 @@ planet_x --seed 7 --rounds 5       # --rounds 是 --round 的别名
 为 LLM agent 设计：**stdout 只输出 JSON Lines**，每回合一个紧凑、稳定的 JSON 对象（回合 0 先，之后每回合一个）。无颜色、无星图、无表格、无中文散文、无无关输出；浮点四舍五入到 2 位小数，低于阈值的资源被丢弃。确定性：同一种子输出逐字节一致。
 
 ```bash
-# 批量：N+1 行 JSON（回合 0 + N 个回合）
+# 批量：N+1 行 JSON（回合 0 + N 个回合），一整份编年史
 planet_x --agent --seed 42 --rounds 10
 
-# 流式：先打印回合 0，此后 stdin 每输入一行推进一个回合
-printf 'go\ngo\nq\n' | planet_x --agent --seed 7
-#   空行被忽略；q/quit/exit 退出
+# 不带 --round 时进入「查询 REPL」：stdin 发命令，stdout 回 JSON（见下一节）
+planet_x --agent --seed 42
 ```
+
+### 4. 查询与 REPL（`--query` / 命令式）
+
+分层、按需获取信息，避免把整份世界态灌给 agent。
+
+**一次性的 jq 管道**（`--query`）：对 agent 状态执行一个 jq 过滤并输出 JSON Lines。带 `--round N` 时会先推进 N 回合，因此可对「回合末」状态提问。
+
+```bash
+# 筛城市：中国的城市
+planet_x --agent --seed 42 --query '.cities[] | select(.owner_name=="中国") | {name, population, defense}'
+
+# 打完 5 回合后，看受伤的船
+planet_x --agent --seed 42 --rounds 5 --query '[.ships[]] | map(select(.hull < .hull_max)) | .[] | {name, hull}'
+
+# 打完 8 回合后，看被攻打的城
+planet_x --agent --seed 42 --rounds 8 --query '.cities[] | select(.defense < 40.0) | {name, owner_name, defense}'
+
+# 势力名单 / 交战对象
+planet_x --agent --seed 42 --query '.factions[] | select(.wars | length > 0) | .name'
+```
+
+**查询 REPL**（`planet_x --agent`，无 `--round`）：状态留在进程内，每条命令返回 JSON，可下钻。
+
+```
+summary                 # 紧凑雷达（回合/时间/计数/各势力交战）
+q <jq>                  # 对当前状态执行任意 jq 过滤（JSON Lines）
+advance [n]             # 推进 n 回合（默认 1），然后打印 summary
+cities / ships / factions / bodies
+city <id> / ship <id> / faction <id> / body <id>   # 单实体详情
+guide / help            # 命令目录（JSON）
+quit / exit
+```
+
+```bash
+printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, order}\nquit\n' \
+  | planet_x --agent --seed 42
+```
+
+支持的 jq 子集：管道 `|`、路径 `.a.b` / `.[]` / `[0]` / 切片、`select` / `map` / `map_values`、`{..}` 对象构造（含简写）、数组 `[..]`、`sort` / `sort_by` / `reverse` / `length` / `keys` / `unique` / `add` / `first` / `contains` / `startswith` / `endswith` / `type` / `empty`，比较与逻辑运算 `== != < <= > >= and or not`、算术 `+ - * /`、`//`。字符串与数字字面量，数字按值比较（`2 == 2.0`）。
 
 > `--agent` 与 `--round` 可同时使用；也常与 `--start` 搭配从指定状态续玩。
 
@@ -61,7 +99,8 @@ printf 'go\ngo\nq\n' | planet_x --agent --seed 7
 | `--seed <SEED>` | 确定性随机种子。数字或 `random` / `随机`（默认），默认随机生成。 |
 | `--start <PATH>` | 从指定的初始 `State`（`.ron`）加载；不传则程序化生成默认太阳系。 |
 | `--round <N>` | 运行 `N` 回合并把每回合快照写入 `trajectory/`；别名 `--rounds`。 |
-| `--agent` | 零噪声机器输出：stdout 仅输出每回合一个 JSON 对象（JSON Lines）。 |
+| `--agent` | 零噪声机器输出：stdout 仅输出 JSON；无 `--round` 时进入查询 REPL。 |
+| `--query <JQ>` | 对 agent 状态执行一个 jq 过滤并输出 JSON Lines；带 `--round N` 先推进 N 回合。 |
 
 其它：配置文件路径由 `PLANET_X_CONFIG` 环境变量指定，默认 `config/game.ron`。
 

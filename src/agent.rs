@@ -20,6 +20,12 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// The agent state as a `serde_json::Value`, for in-process querying.
+pub fn state_value(state: &State, config: &GameConfig) -> serde_json::Value {
+    let doc = AgentState::from_state(state, config);
+    serde_json::to_value(doc).expect("agent state is serializable")
+}
+
 /// Zero-noise rendering of one state as a single-line JSON object.
 pub fn render_state(state: &State, config: &GameConfig) -> String {
     let doc = AgentState::from_state(state, config);
