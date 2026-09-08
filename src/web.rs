@@ -3,7 +3,7 @@
 //! The server owns the authoritative world state and the deterministic RNG and
 //! exposes a hotseat-style interface:
 //!
-//! * `GET  /api/meta`      resource/building/ship metadata for the frontend.
+//! * `GET  /api/meta`      resource/building/structure/ship metadata.
 //! * `GET  /api/state`     the current world (bodies, cities, factions, ships,
 //!                         per-faction controllable state, control scope).
 //! * `POST /api/advance`   run `n` rounds, return the new world.
@@ -39,6 +39,7 @@ pub type Shared = Arc<Mutex<GameWorld>>;
 #[derive(Serialize)]
 pub struct MetaView {
     pub resources: BTreeMap<String, ResourceDef>,
+    pub structures: BTreeMap<String, StructureSpec>,
     pub buildings: BTreeMap<String, BuildingMeta>,
     pub ships: BTreeMap<String, ShipSpec>,
 }
@@ -48,10 +49,10 @@ pub struct BuildingMeta {
     pub label: String,
     pub role: String,
     pub default_invest_weight: f64,
+    pub default_build_weight: f64,
 }
 
-/// One faction as the frontend needs it. `resources`/`relations` are keyed by
-/// strings/ids on the wire (JSON objects), not by the internal map key types.
+/// One faction as the frontend needs it.
 #[derive(Serialize, Clone)]
 pub struct FactionView {
     pub id: FactionId,
@@ -59,7 +60,8 @@ pub struct FactionView {
     pub color: String,
     pub resources: Vec<(String, f64)>,
     pub relations: Vec<(FactionId, f64)>,
-    pub budget: Vec<(String, f64)>,
+    pub investment_budget: Vec<(String, f64)>,
+    pub construction_budget: Vec<(String, f64)>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -79,8 +81,20 @@ pub struct BudgetEntry {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InvestWeightEntry {
     pub city: CityId,
+    pub building: BuildingId,
     pub kind: String,
     pub resource: Option<String>,
+    pub ship_type: Option<String>,
+    pub structure: String,
+    pub value: f64,
+    pub mode: Option<ControlMode>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BuildWeightEntry {
+    pub city: CityId,
+    pub building: BuildingId,
+    pub ship_type: Option<String>,
     pub value: f64,
     pub mode: Option<ControlMode>,
 }
@@ -89,8 +103,10 @@ pub struct InvestWeightEntry {
 pub struct FactionControlView {
     pub faction_id: FactionId,
     pub ship_orders: Vec<ShipOrderEntry>,
-    pub budget: Vec<BudgetEntry>,
+    pub investment_budget: Vec<BudgetEntry>,
+    pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
+    pub build_weights: Vec<BuildWeightEntry>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -129,21 +145,6 @@ pub struct AdvanceReq {
 }
 
 // --- presence-aware control patches (the "diff" the agent writes) ----------
-//
-// The read/template side uses FactionControlView (full leaves with a concrete
-// mode). The *apply* side is a structural multi-level patch: you may target a
-// whole faction, a category (ships / budget / invest), or an individual leaf,
-// and within a leaf you may set only the value, only the mode, or both.
-//
-// Presence is tracked so that an *absent* field is left unchanged instead of
-// being reset:
-//   * `behavior` / `value` absent  -> keep the leaf's current value.
-//   * `mode` absent                -> keep the leaf's current mode.
-//   * `mode: null`                 -> set mode to inherit (None).
-//   * `mode: "Ai"|"Player"`        -> set mode explicitly.
-// A leaf that is entirely absent from the diff is untouched (recursion stops
-// at the finest granularity present). This is what lets the agent edit just the
-// one ship it wants to move.
 
 #[derive(Deserialize, Default)]
 pub struct ShipOrderPatch {
@@ -166,12 +167,51 @@ pub struct BudgetPatch {
 #[derive(Deserialize, Default)]
 pub struct InvestWeightPatch {
     pub city: CityId,
-    pub kind: String,
-    pub resource: Option<String>,
+    pub building: BuildingId,
     #[serde(default)]
     pub value: Option<f64>,
     #[serde(default)]
     pub mode: Option<Option<ControlMode>>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct BuildWeightPatch {
+    pub city: CityId,
+    pub building: BuildingId,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
+/// A structural building patch: add a new building, remove an existing one, or
+/// change an existing building's attributes (structure / ship_type / kind).
+#[derive(Deserialize, Default)]
+pub struct BuildingPatch {
+    /// Which city to add to / remove from.
+    #[serde(default)]
+    pub city: Option<CityId>,
+    /// Some(id) = target an existing building; None = add a new one.
+    #[serde(default)]
+    pub building: Option<BuildingId>,
+    /// For a new building: kind key (residential | mining | construction).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// For a new (mining) building: the mined resource key.
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// For a new (建造区) building: the ship class it produces.
+    #[serde(default)]
+    pub ship_type: Option<String>,
+    /// For a new or modified building: structure key (concrete | steel).
+    #[serde(default)]
+    pub structure: Option<String>,
+    /// For a new building: planned area.
+    #[serde(default)]
+    pub area: Option<f64>,
+    /// Remove the referenced building.
+    #[serde(default)]
+    pub remove: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -180,9 +220,15 @@ pub struct FactionControlPatch {
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
     #[serde(default)]
-    pub budget: Vec<BudgetPatch>,
+    pub investment_budget: Vec<BudgetPatch>,
+    #[serde(default)]
+    pub construction_budget: Vec<BudgetPatch>,
     #[serde(default)]
     pub invest_weights: Vec<InvestWeightPatch>,
+    #[serde(default)]
+    pub build_weights: Vec<BuildWeightPatch>,
+    #[serde(default)]
+    pub buildings: Vec<BuildingPatch>,
 }
 
 #[derive(Deserialize)]
@@ -215,33 +261,66 @@ fn faction_view(f: &Faction) -> FactionView {
         color: f.color.clone(),
         resources: f.resources.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         relations: f.relations.iter().map(|(k, v)| (*k, *v)).collect(),
-        budget: Vec::new(),
+        investment_budget: Vec::new(),
+        construction_budget: Vec::new(),
     }
 }
 
-fn control_view(fid: FactionId, c: &ControllableState) -> FactionControlView {
+fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> FactionControlView {
     let ship_orders = c
         .ship_orders
         .iter()
         .map(|(sid, ctrl)| ShipOrderEntry { ship: *sid, behavior: ctrl.value, mode: ctrl.mode })
         .collect();
-    let budget = c
-        .budget
+    let investment_budget = c
+        .investment_budget
+        .iter()
+        .map(|(rt, ctrl)| BudgetEntry { resource: rt.clone(), value: ctrl.value, mode: ctrl.mode })
+        .collect();
+    let construction_budget = c
+        .construction_budget
         .iter()
         .map(|(rt, ctrl)| BudgetEntry { resource: rt.clone(), value: ctrl.value, mode: ctrl.mode })
         .collect();
     let invest_weights = c
         .invest_weights
         .iter()
-        .map(|((cid, kind, res), ctrl)| InvestWeightEntry {
-            city: *cid,
-            kind: kind.clone(),
-            resource: res.clone(),
-            value: ctrl.value,
-            mode: ctrl.mode,
+        .map(|((cid, bid), ctrl)| {
+            let b = state.city(*cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            InvestWeightEntry {
+                city: *cid,
+                building: *bid,
+                kind: b.map(|x| x.kind.clone()).unwrap_or_default(),
+                resource: b.and_then(|x| x.resource.clone()),
+                ship_type: b.and_then(|x| x.ship_type.clone()),
+                structure: b.map(|x| x.structure.clone()).unwrap_or_default(),
+                value: ctrl.value,
+                mode: ctrl.mode,
+            }
         })
         .collect();
-    FactionControlView { faction_id: fid, ship_orders, budget, invest_weights }
+    let build_weights = c
+        .build_weights
+        .iter()
+        .map(|((cid, bid), ctrl)| {
+            let b = state.city(*cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            BuildWeightEntry {
+                city: *cid,
+                building: *bid,
+                ship_type: b.and_then(|x| x.ship_type.clone()),
+                value: ctrl.value,
+                mode: ctrl.mode,
+            }
+        })
+        .collect();
+    FactionControlView {
+        faction_id: fid,
+        ship_orders,
+        investment_budget,
+        construction_budget,
+        invest_weights,
+        build_weights,
+    }
 }
 
 fn scope_view(s: &ControlScope) -> ScopeView {
@@ -256,21 +335,14 @@ fn scope_view(s: &ControlScope) -> ScopeView {
 pub fn state_view(world: &GameWorld) -> StateView {
     let s = &world.state;
     let mut factions: Vec<FactionView> = s.factions.iter().map(faction_view).collect();
-    // Attach the (effective) per-round budget to each faction view for display.
+    // Attach the (effective) budgets to each faction view for display.
     for f in factions.iter_mut() {
         if let Some(c) = s.control.get(&f.id) {
-            f.budget = c
-                .budget
-                .iter()
-                .map(|(rt, ctrl)| (rt.clone(), ctrl.value))
-                .collect();
+            f.investment_budget = c.investment_budget.iter().map(|(rt, ctrl)| (rt.clone(), ctrl.value)).collect();
+            f.construction_budget = c.construction_budget.iter().map(|(rt, ctrl)| (rt.clone(), ctrl.value)).collect();
         }
     }
-    let control = s
-        .control
-        .iter()
-        .map(|(fid, c)| control_view(*fid, c))
-        .collect();
+    let control = s.control.iter().map(|(fid, c)| control_view(s, *fid, c)).collect();
     StateView {
         round: s.round,
         time_month: s.time_month,
@@ -317,15 +389,25 @@ fn round_view(v: FactionControlView) -> FactionControlView {
             .into_iter()
             .map(|o| ShipOrderEntry { ship: o.ship, behavior: round_behavior(o.behavior), mode: o.mode })
             .collect(),
-        budget: v
-            .budget
+        investment_budget: v
+            .investment_budget
+            .into_iter()
+            .map(|b| BudgetEntry { resource: b.resource, value: r2(b.value), mode: b.mode })
+            .collect(),
+        construction_budget: v
+            .construction_budget
             .into_iter()
             .map(|b| BudgetEntry { resource: b.resource, value: r2(b.value), mode: b.mode })
             .collect(),
         invest_weights: v
             .invest_weights
             .into_iter()
-            .map(|i| InvestWeightEntry { city: i.city, kind: i.kind, resource: i.resource, value: r2(i.value), mode: i.mode })
+            .map(|i| InvestWeightEntry { value: r2(i.value), ..i })
+            .collect(),
+        build_weights: v
+            .build_weights
+            .into_iter()
+            .map(|i| BuildWeightEntry { value: r2(i.value), ..i })
             .collect(),
     }
 }
@@ -337,7 +419,7 @@ pub fn control_surface(state: &State) -> serde_json::Value {
     let control = state
         .control
         .iter()
-        .map(|(fid, c)| round_view(control_view(*fid, c)))
+        .map(|(fid, c)| round_view(control_view(state, *fid, c)))
         .collect();
     let surface = ControlSurface { control, scope: scope_view(&state.scope) };
     serde_json::to_value(surface).expect("control surface is serializable")
@@ -347,7 +429,7 @@ pub fn control_surface(state: &State) -> serde_json::Value {
 /// `state`. Only the factions and leaves present in `req` are modified; for a
 /// leaf that is present, an omitted `value`/`behavior` keeps the current value
 /// and an omitted `mode` keeps the current mode. `scope` is overlaid when given.
-pub fn apply_diff(state: &mut State, req: &CommandReq) {
+pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
     for fac in &req.control {
         let c = state.control.entry(fac.faction_id).or_default();
         for sp in &fac.ship_orders {
@@ -362,8 +444,20 @@ pub fn apply_diff(state: &mut State, req: &CommandReq) {
                 ctrl.mode = m;
             }
         }
-        for bp in &fac.budget {
-            let ctrl = c.budget.entry(bp.resource.clone()).or_insert_with(|| Control {
+        for bp in &fac.investment_budget {
+            let ctrl = c.investment_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
+                value: bp.value.unwrap_or(0.0),
+                mode: bp.mode.flatten(),
+            });
+            if let Some(v) = bp.value {
+                ctrl.value = v;
+            }
+            if let Some(m) = bp.mode {
+                ctrl.mode = m;
+            }
+        }
+        for bp in &fac.construction_budget {
+            let ctrl = c.construction_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
                 value: bp.value.unwrap_or(0.0),
                 mode: bp.mode.flatten(),
             });
@@ -375,7 +469,7 @@ pub fn apply_diff(state: &mut State, req: &CommandReq) {
             }
         }
         for ip in &fac.invest_weights {
-            let key = (ip.city, ip.kind.clone(), ip.resource.clone());
+            let key = (ip.city, ip.building);
             let ctrl = c.invest_weights.entry(key).or_insert_with(|| Control {
                 value: ip.value.unwrap_or(0.0),
                 mode: ip.mode.flatten(),
@@ -387,19 +481,122 @@ pub fn apply_diff(state: &mut State, req: &CommandReq) {
                 ctrl.mode = m;
             }
         }
+        for bp in &fac.build_weights {
+            let key = (bp.city, bp.building);
+            let ctrl = c.build_weights.entry(key).or_insert_with(|| Control {
+                value: bp.value.unwrap_or(0.0),
+                mode: bp.mode.flatten(),
+            });
+            if let Some(v) = bp.value {
+                ctrl.value = v;
+            }
+            if let Some(m) = bp.mode {
+                ctrl.mode = m;
+            }
+        }
+        for bpatch in &fac.buildings {
+            apply_building_patch(state, config, fac.faction_id, bpatch);
+        }
     }
     if let Some(sv) = &req.scope {
         state.scope.overlay(&scope_from_view(sv));
     }
 }
 
+/// Apply a single structural building patch: add / remove / modify a building.
+fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, patch: &BuildingPatch) {
+    let Some(cid) = patch.city else { return };
+
+    if patch.building.is_none() {
+        // Add a new building.
+        let kind = patch.kind.clone().unwrap_or_else(|| "residential".to_string());
+        let Some(spec) = config.buildings.get(&kind) else { return };
+        if state.city(cid).map(|c| c.faction_id) != Some(fid) {
+            return;
+        }
+        let structure = patch.structure.clone().unwrap_or_else(|| "concrete".to_string());
+        if !config.structures.contains_key(&structure) {
+            return;
+        }
+        let area = patch.area.unwrap_or(4.0).max(0.0);
+        let id = state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1);
+        let resource = if kind == "mining" { patch.resource.clone() } else { None };
+        let ship_type = if kind == "construction" { patch.ship_type.clone().or_else(|| Some("corvette".to_string())) } else { None };
+        let b = Building {
+            id,
+            kind: kind.clone(),
+            resource,
+            ship_type,
+            structure: structure.clone(),
+            area,
+            deployed: 0.0,
+            armor: 0.0,
+        };
+        if let Some(city) = state.city_mut(cid) {
+            city.buildings.push(b);
+        }
+        let ctrl = state.control.entry(fid).or_default();
+        ctrl.invest_weights.insert((cid, id), Control::player(spec.default_invest_weight));
+        if kind == "construction" {
+            ctrl.build_weights.insert((cid, id), Control::player(spec.default_build_weight));
+        }
+        return;
+    }
+
+    let bid = patch.building.unwrap_or(u32::MAX);
+    if patch.remove {
+        if let Some(city) = state.city_mut(cid) {
+            city.buildings.retain(|b| b.id != bid);
+        }
+        if let Some(c) = state.control_mut(fid) {
+            c.invest_weights.remove(&(cid, bid));
+            c.build_weights.remove(&(cid, bid));
+        }
+        return;
+    }
+
+    // Modify an existing building's attributes (e.g. structure / ship_type).
+    if let Some(city) = state.city_mut(cid) {
+        if let Some(b) = city.buildings.iter_mut().find(|b| b.id == bid) {
+            if let Some(s) = &patch.structure {
+                if config.structures.contains_key(s) {
+                    b.structure = s.clone();
+                }
+            }
+            if let Some(s) = &patch.ship_type {
+                if b.is_shipyard() {
+                    b.ship_type = Some(s.clone());
+                }
+            }
+            if let Some(k) = &patch.kind {
+                if config.buildings.contains_key(k) {
+                    b.kind = k.clone();
+                }
+            }
+            if let Some(r) = &patch.resource {
+                if b.kind == "mining" {
+                    b.resource = Some(r.clone());
+                }
+            }
+            if let Some(a) = patch.area {
+                b.area = a.max(0.0);
+            }
+        }
+    }
+}
+
 /// Parse a control diff file (JSON) and apply it to `state` as a structural
 /// multi-level patch. Accepts the same shape as `POST /api/command`
 /// (`{control:[...],scope:{...}}`).
-pub fn apply_patch(state: &mut State, value: &serde_json::Value) -> Result<(), String> {
+pub fn apply_patch(state: &mut State, config: &GameConfig, value: &serde_json::Value) -> Result<(), String> {
     let req: CommandReq =
         serde_json::from_value(value.clone()).map_err(|e| format!("invalid control diff: {e}"))?;
-    apply_diff(state, &req);
+    apply_diff(state, config, &req);
     Ok(())
 }
 
@@ -418,12 +615,14 @@ async fn get_meta(AxState(shared): AxState<Shared>) -> Json<MetaView> {
                     label: spec.label.clone(),
                     role: spec.role.clone(),
                     default_invest_weight: spec.default_invest_weight,
+                    default_build_weight: spec.default_build_weight,
                 },
             )
         })
         .collect();
     Json(MetaView {
         resources: world.config.resources.clone(),
+        structures: world.config.structures.clone(),
         buildings,
         ships: world.config.ships.clone(),
     })
@@ -444,14 +643,10 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
 }
 
 async fn command(AxState(shared): AxState<Shared>, Json(req): Json<CommandReq>) -> Json<StateView> {
-    let mut world = shared.lock().unwrap();
-    // Structural multi-level patch (a true diff): only the factions/leaves
-    // present in the payload are touched; unlisted ones are left unchanged.
-    // The frontend sends the full surface so this is equivalent to a full
-    // replace for it, while a partial "command" payload is now safely applied
-    // instead of silently dropping the unlisted leaves.
-    apply_diff(&mut world.state, &req);
-    Json(state_view(&world))
+    let mut guard = shared.lock().unwrap();
+    let world = &mut *guard;
+    apply_diff(&mut world.state, &world.config, &req);
+    Json(state_view(world))
 }
 
 async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> Json<StateView> {

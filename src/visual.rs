@@ -63,10 +63,15 @@ fn faction_name(state: &State, id: FactionId) -> String {
 
 fn building_label(config: &GameConfig, b: &Building) -> String {
     let spec = config.building_spec(&b.kind);
-    match &b.resource {
-        Some(r) => format!("{}·{}×{:.1}", spec.label, config.resource_name(r), b.deployed),
-        None => format!("{}×{:.1}", spec.label, b.deployed),
+    let mut s = spec.label.clone();
+    if let Some(r) = &b.resource {
+        s.push_str(&format!("·{}", config.resource_name(r)));
     }
+    if let Some(cls) = &b.ship_type {
+        s.push_str(&format!("·{}", cls));
+    }
+    s.push_str(&format!("·{}", config.structure_name(&b.structure)));
+    format!("{}×{:.1}", s, b.deployed)
 }
 
 /// Render a colored ASCII map of the system at the current time.
@@ -221,7 +226,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     // --- Cities ---
     s.push_str(&heading("城市"));
     let mut t = new_table();
-    t.set_header(vec!["名称", "控制势力", "人口", "防御", "建筑 (面积)"]);
+    t.set_header(vec!["名称", "势力", "人口", "硬度", "状态", "建筑"]);
     for c in &state.cities {
         let buildings: String = c
             .buildings
@@ -229,11 +234,14 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             .map(|b| building_label(config, b))
             .collect::<Vec<_>>()
             .join("  ");
+        let armor: f64 = c.buildings.iter().map(|b| b.armor).sum();
+        let owner = if c.razed { "—".to_string() } else { faction_name(state, c.faction_id) };
         t.add_row(vec![
             cell(c.name.clone()),
-            cell(faction_name(state, c.faction_id)),
+            cell(owner),
             cell(c.population.to_string()),
-            cell(format!("{:.0}", c.defense)),
+            cell(format!("{:.0}", armor)),
+            cell(if c.razed { "空白".to_string() } else { "—".to_string() }),
             cell(buildings),
         ]);
     }
@@ -248,6 +256,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
         let target = match state.ship_behavior(sh.id) {
             Some(ShipBehavior::TargetShip { ship, .. }) => format!("船#{}", ship),
             Some(ShipBehavior::TargetSettlement { city, .. }) => format!("城#{}", city),
+            Some(ShipBehavior::Colonize { body }) => format!("殖民#{}", body),
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
             Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
@@ -322,15 +331,27 @@ pub fn render_control_diff(
             behavior_str,
         ));
         lines.extend(render_control_map_diff(
-            &prev.budget,
-            &curr.budget,
-            |k| format!("资源预算·{}", config.resource_name(k)),
+            &prev.investment_budget,
+            &curr.investment_budget,
+            |k| format!("投资预算·{}", config.resource_name(k)),
+            |v| format!("{:.2}", v),
+        ));
+        lines.extend(render_control_map_diff(
+            &prev.construction_budget,
+            &curr.construction_budget,
+            |k| format!("建造预算·{}", config.resource_name(k)),
             |v| format!("{:.2}", v),
         ));
         lines.extend(render_control_map_diff(
             &prev.invest_weights,
             &curr.invest_weights,
-            |k| format!("权重·{}", invest_key_str(config, state, k)),
+            |k| format!("建设权重·{}", invest_key_str(config, state, k)),
+            |v| format!("{:.2}", v),
+        ));
+        lines.extend(render_control_map_diff(
+            &prev.build_weights,
+            &curr.build_weights,
+            |k| format!("建造权重·{}", build_key_str(config, state, k)),
             |v| format!("{:.2}", v),
         ));
 
@@ -399,19 +420,38 @@ fn behavior_str(b: &ShipBehavior) -> String {
         ShipBehavior::TargetSettlement { city, bombard } => {
             format!("舰→城#{}{}", city, if *bombard { "·轰" } else { "" })
         }
+        ShipBehavior::Colonize { body } => format!("舰→天体#{}(殖民)", body),
         ShipBehavior::Idle => "待命".to_string(),
     }
 }
 
-fn invest_key_str(config: &GameConfig, state: &State, key: &InvestKey) -> String {
-    let (cid, kind, res) = key;
+fn building_ref_str(config: &GameConfig, state: &State, cid: &CityId, bid: &BuildingId) -> String {
     let city = state
         .city(*cid)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format!("城#{}", cid));
-    let label = &config.building_spec(kind).label;
-    match res {
-        Some(r) => format!("{}·{}·{}", city, label, config.resource_name(r)),
-        None => format!("{}·{}", city, label),
-    }
+    let b = state.city(*cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let label = b
+        .map(|bb| config.building_spec(&bb.kind).label.clone())
+        .unwrap_or_else(|| format!("#{}", bid));
+    format!("{}·{}", city, label)
+}
+
+fn invest_key_str(config: &GameConfig, state: &State, key: &InvestKey) -> String {
+    let (cid, bid) = key;
+    building_ref_str(config, state, cid, bid)
+}
+
+#[allow(unused_variables)]
+fn build_key_str(config: &GameConfig, state: &State, key: &BuildKey) -> String {
+    let (cid, bid) = key;
+    let city = state
+        .city(*cid)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format!("城#{}", cid));
+    let b = state.city(*cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let cls = b
+        .and_then(|bb| bb.ship_type.clone())
+        .unwrap_or_else(|| format!("#{}", bid));
+    format!("{}·造·{}", city, cls)
 }

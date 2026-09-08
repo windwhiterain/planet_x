@@ -97,6 +97,13 @@ main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
 }
 .ship-editor label, .leaf-val label { color: var(--muted); font-size: 12px; }
 .ship-editor input[type="checkbox"] { accent-color: var(--accent); }
+.add-bld { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 8px; }
+.add-bld button, .ship-editor .rm {
+  background: #14203c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 12px;
+}
+.ship-editor .rm { color: #fca5a5; }
+.add-bld button:hover, .ship-editor .rm:hover { border-color: var(--accent); }
 
 /* apply button */
 #applyBtn { align-self: stretch; padding: 10px; font-size: 14px; }
