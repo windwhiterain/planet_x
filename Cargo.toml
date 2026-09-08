@@ -1,0 +1,15 @@
+[package]
+name = "planet_x"
+version = "0.1.0"
+edition = "2024"
+description = "A turn-based solar-system sandbox trajectory generator for the Planet X game."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+colored = "2"
+
+[profile.release]
+opt-level = 3

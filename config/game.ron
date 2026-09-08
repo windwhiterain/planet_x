@@ -1,0 +1,48 @@
+(
+    economy: (
+        production_rate: 0.35,
+        pop_growth: 0.04,
+        min_efficiency: 0.1,
+    ),
+    combat: (
+        war_threshold: -20.0,
+        siege_range: 0.25,
+        arrival_eps: 0.06,
+        defense_initial: 40.0,
+        defense_reset: 35.0,
+    ),
+    diplomacy: (
+        attack_delta: -3.0,
+        capture_delta: -25.0,
+        relax_rate: 0.5,
+    ),
+    ships: {
+        Corvette: (
+            label: "护卫舰",
+            hull: 12.0,
+            attack: 5.0,
+            speed: 1.6,
+            attack_range: 0.4,
+            build_points: 15.0,
+            build_cost: [(Iron, 6.0), (Carbon, 3.0)],
+        ),
+        Cruiser: (
+            label: "巡洋舰",
+            hull: 38.0,
+            attack: 15.0,
+            speed: 0.9,
+            attack_range: 0.6,
+            build_points: 45.0,
+            build_cost: [(Iron, 14.0), (Carbon, 6.0), (Uranium, 3.0)],
+        ),
+        Transport: (
+            label: "运输舰",
+            hull: 20.0,
+            attack: 1.0,
+            speed: 1.2,
+            attack_range: 0.2,
+            build_points: 26.0,
+            build_cost: [(Iron, 4.0), (Carbon, 12.0)],
+        ),
+    },
+)
