@@ -268,8 +268,8 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             cell(faction_name(state, sh.faction_id).color(color).to_string()),
             cell(fmt_pos(sh.position)),
             cell(target),
-            cell(format!("{:.2}", spec.speed)),
-            cell(format!("{:.0}", (sh.hull / spec.hull * 100.0).clamp(0.0, 100.0))),
+            cell(format!("{:.2}", crate::model::ship_panel(config, sh).speed)),
+            cell(format!("{:.0}", (sh.hull / sh.hull_max.clamp(1e-9, f64::MAX) * 100.0).clamp(0.0, 100.0))),
         ]);
     }
     if !state.ships.is_empty() {

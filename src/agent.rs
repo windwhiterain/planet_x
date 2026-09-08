@@ -120,6 +120,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                     "build_points": r2(s.build_points),
                     "build_cost": to_cost(&s.build_cost),
                     "upkeep": r2(s.upkeep),
+                    "slots": s.slots,
                 }),
             )
         })
@@ -129,6 +130,35 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
         "structures": structures,
         "buildings": buildings,
         "ships": ships,
+        // 舰船定制组件：每件武器的伤害类型/射程/追踪/盾甲倍率，防御的护盾池/装甲/点防，
+        // 推进的速度。AI 可据此理解「每支舰队怎么打」以及哪家势力（资源优势）能造什么。
+        "components": config
+            .components
+            .iter()
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    json!({
+                        "label": c.label,
+                        "category": c.category,
+                        "damage": r2(c.damage),
+                        "damage_type": c.damage_type,
+                        "range": r2(c.range),
+                        "tracking": r2(c.tracking),
+                        "shield_mult": r2(c.shield_mult),
+                        "hull_mult": r2(c.hull_mult),
+                        "shield": r2(c.shield),
+                        "shield_regen": r2(c.shield_regen),
+                        "hull": r2(c.hull),
+                        "intercept": r2(c.intercept),
+                        "speed": r2(c.speed),
+                        "hull_regen": r2(c.hull_regen),
+                        "upkeep": r2(c.upkeep),
+                        "cost": to_cost(&c.cost),
+                    }),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
         "economy": {
             "production_rate": r2(config.economy.production_rate),
             "pop_growth": r2(config.economy.pop_growth),
@@ -377,6 +407,18 @@ struct AgentShip {
     position: [f64; 2],
     hull: f64,
     hull_max: f64,
+    /// 当前能量护盾值。
+    shield: f64,
+    /// 最大能量护盾（无护盾组件为 0）。
+    shield_max: f64,
+    /// 有效作战面板（class + 组件）：攻击、射程、速度、护甲再生、维护费。
+    attack: f64,
+    range: f64,
+    speed: f64,
+    hull_regen: f64,
+    upkeep: f64,
+    /// 本舰装配的定制组件 id（舰船定制）；空 = 裸舰。
+    components: Vec<String>,
     order: AgentOrder,
 }
 
@@ -510,29 +552,40 @@ impl AgentState {
         let ships = state
             .ships
             .iter()
-            .map(|s| AgentShip {
-                id: s.id,
-                name: s.name.clone(),
-                class: s.class.clone(),
-                owner: s.faction_id,
-                owner_name: faction_name(state, s.faction_id),
-                position: [r2(s.position[0]), r2(s.position[1])],
-                hull: r2(s.hull),
-                hull_max: r2(config.ship_spec(&s.class).hull),
-                order: match state.ship_behavior(s.id) {
-                    Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
-                    Some(ShipBehavior::Move { position }) => AgentOrder::Move {
-                        position: [r2(position[0]), r2(position[1])],
+            .map(|s| {
+                let panel = crate::model::ship_panel(config, s);
+                AgentShip {
+                    id: s.id,
+                    name: s.name.clone(),
+                    class: s.class.clone(),
+                    owner: s.faction_id,
+                    owner_name: faction_name(state, s.faction_id),
+                    position: [r2(s.position[0]), r2(s.position[1])],
+                    hull: r2(s.hull),
+                    hull_max: r2(s.hull_max),
+                    shield: r2(s.shield),
+                    shield_max: r2(s.shield_max),
+                    attack: r2(panel.attack),
+                    range: r2(panel.attack_range),
+                    speed: r2(panel.speed),
+                    hull_regen: r2(panel.hull_regen),
+                    upkeep: r2(panel.upkeep),
+                    components: s.components.clone(),
+                    order: match state.ship_behavior(s.id) {
+                        Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
+                        Some(ShipBehavior::Move { position }) => AgentOrder::Move {
+                            position: [r2(position[0]), r2(position[1])],
+                        },
+                        Some(ShipBehavior::TargetShip { ship, attack }) => {
+                            AgentOrder::TargetShip { ship, attack }
+                        }
+                        Some(ShipBehavior::TargetSettlement { city, bombard }) => {
+                            AgentOrder::TargetSettlement { city, bombard }
+                        }
+                        Some(ShipBehavior::Dock { body }) => AgentOrder::Dock { body },
+                        Some(ShipBehavior::Colonize { body }) => AgentOrder::Colonize { body },
                     },
-                    Some(ShipBehavior::TargetShip { ship, attack }) => {
-                        AgentOrder::TargetShip { ship, attack }
-                    }
-                    Some(ShipBehavior::TargetSettlement { city, bombard }) => {
-                        AgentOrder::TargetSettlement { city, bombard }
-                    }
-                    Some(ShipBehavior::Dock { body }) => AgentOrder::Dock { body },
-                    Some(ShipBehavior::Colonize { body }) => AgentOrder::Colonize { body },
-                },
+                }
             })
             .collect();
 

@@ -609,6 +609,10 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             faction_id: faction,
             position: [pos[0] + rng.range_f64(-0.05, 0.05), pos[1] + rng.range_f64(-0.05, 0.05)],
             hull: spec.hull,
+            hull_max: spec.hull,
+            shield: 0.0,
+            shield_max: 0.0,
+            components: Vec::new(),
         });
         next_ship += 1;
     };

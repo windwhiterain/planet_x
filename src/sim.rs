@@ -304,7 +304,7 @@ fn step_upkeep(state: &mut State, config: &GameConfig) {
             .ships
             .iter()
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
-            .map(|s| config.ship_spec(&s.class).upkeep)
+            .map(|s| ship_panel(config, s).upkeep)
             .sum();
         if upkeep_total <= 1e-9 {
             continue;
@@ -331,7 +331,7 @@ fn step_upkeep(state: &mut State, config: &GameConfig) {
                 if s.faction_id != fid || s.hull <= 0.0 {
                     continue;
                 }
-                let rust = config.ship_spec(&s.class).hull * frac;
+                let rust = ship_panel(config, s).hull_max * frac;
                 s.hull = (s.hull - rust).max(0.0);
                 if s.hull <= 0.0 {
                     scrap.push(s.id);
@@ -599,6 +599,70 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
     }
 }
 
+/// Deterministically pick a ship component loadout (舰船定制) for a faction building
+/// a ship of `class` — the **resource → military** link. Components whose rare inputs
+/// the faction has in abundance score highest; components it cannot fully pay for are
+/// dropped. A faction that controls 金/铂/铀/氦-3 fields genuinely better-armed and
+/// better-protected ships than one scraping by on iron & carbon, so hard-to-get
+/// minerals matter on the battlefield, not just on the ledger.
+///
+/// Deterministic (no RNG): the score is a pure function of the stockpile + config,
+/// and ties break on component id. Returns ≤ `ShipSpec::slots` component ids that are
+/// cumulatively affordable.
+fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
+    let slots = config.ship_spec(class).slots as usize;
+    if slots == 0 {
+        return Vec::new();
+    }
+    let Some(f) = state.faction(fid) else { return Vec::new() };
+    let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
+
+    // Normalized resource abundance by market value in the stockpile.
+    let mut max_ab = 0.0f64;
+    for (r, v) in &f.resources {
+        max_ab = max_ab.max(*v * value_of(r));
+    }
+    if max_ab <= 1e-9 {
+        return Vec::new();
+    }
+    let abund = |r: &str| f.resources.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0);
+
+    // Score every candidate component by (a) resource fit — how much of its rare
+    // inputs the faction can comfortably supply — plus (b) a small raw combat-gain
+    // tiebreak, minus (c) an upkeep drag so components that are strong but too costly
+    // to maintain get deprioritized.
+    let mut cands: Vec<(String, f64)> = Vec::new();
+    for (id, cs) in &config.components {
+        let fit: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r) * abund(r)).sum();
+        let gain = cs.damage * 4.0 + cs.shield * 0.8 + cs.hull * 0.8 + cs.hull_regen * 120.0
+            + cs.shield_regen * 60.0 + cs.speed * 3.0 + cs.intercept * 2.0 + cs.range * 12.0;
+        let score = fit + gain * 0.03 - cs.upkeep * 2.0;
+        if score > 0.0 {
+            cands.push((id.clone(), score));
+        }
+    }
+    cands.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    // Greedily fill the slots while the cumulative component cost stays affordable
+    // (we cannot fit a loadout we can't pay for), one of each id (no stacking).
+    let mut chosen: Vec<String> = Vec::new();
+    let mut remaining = f.resources.clone();
+    for (id, _) in cands {
+        if chosen.len() >= slots {
+            break;
+        }
+        let cs = config.component_spec(&id);
+        let pay = cs.cost.iter().all(|(r, c)| remaining.get(r).copied().unwrap_or(0.0) >= *c);
+        if pay {
+            chosen.push(id.clone());
+            for (r, c) in &cs.cost {
+                *remaining.entry(r.clone()).or_insert(0.0) -= c;
+            }
+        }
+    }
+    chosen
+}
+
 fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let mut next_ship_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
@@ -858,15 +922,37 @@ fn build_city(
         commit_spend(state, fid, con_spent, &cost);
         *to_write_progress.entry(cls.clone()).or_insert(0.0) += increment;
         // Spawn ships as their build points fill (the cost was paid as progress).
+        // On launch, the ship is fitted with a deterministic component loadout chosen
+        // from the faction's resource advantage (see `choose_loadout`); the component
+        // cost is paid out of the stockpile and the effective panel (hull_max, etc.)
+        // is computed from class + components.
         while to_write_progress.get(cls).copied().unwrap_or(0.0) >= bp - 1e-9 {
-            state.ships.push(Ship {
+            let components = choose_loadout(state, config, fid, cls);
+            let mut ship = Ship {
                 id: *next_ship_id,
                 name: format!("{}-{}", spec.label, fid),
                 class: cls.clone(),
                 faction_id: fid,
                 position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
-                hull: spec.hull,
-            });
+                hull: 0.0,
+                hull_max: 0.0,
+                shield: 0.0,
+                shield_max: 0.0,
+                components,
+            };
+            let panel = ship_panel(config, &ship);
+            ship.hull = panel.hull_max;
+            ship.hull_max = panel.hull_max;
+            ship.shield = panel.shield_max;
+            ship.shield_max = panel.shield_max;
+            state.ships.push(ship);
+            // Pay the (validated-affordable) component cost.
+            let mut spent0 = std::collections::BTreeMap::new();
+            let comp_cost: Vec<(String, f64)> = state
+                .ship(*next_ship_id)
+                .map(|s| s.components.iter().flat_map(|c| config.component_spec(c).cost.clone()).collect())
+                .unwrap_or_default();
+            commit_spend(state, fid, &mut spent0, &comp_cost);
             ev(state, GameEvent::ShipSpawned { ship: *next_ship_id, owner: fid, class: cls.clone(), city: cid });
             *next_ship_id += 1;
             *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
@@ -931,7 +1017,8 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         let owner = ship.faction_id;
         let class = ship.class.clone();
         let pos = ship.position;
-        let range = config.ship_spec(&class).attack_range;
+        // 有效交战距离 = 舰级炮台 + 武器组件的最大射程（远程组件让舰在前置位置先开火）。
+        let range = ship_panel(config, ship).attack_range;
         let focus = focus_of.get(&owner).copied().flatten();
 
         let is_ai = state.ship_control(ship_id) == ControlMode::Ai;
@@ -1100,8 +1187,12 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .collect();
     for (i, s) in state.ships.iter_mut().enumerate() {
         if s.hull > 0.0 {
-            let spec = config.ship_spec(&s.class);
-            s.hull = (s.hull + spec.hull * (spec.hull_regen + bonuses[i])).min(spec.hull);
+            let panel = ship_panel(config, s);
+            s.hull = (s.hull + panel.hull_max * (panel.hull_regen + bonuses[i])).min(panel.hull_max);
+            // 能量护盾每回合再生（护盾组件）：护盾优先吸收、损毁后再生，是防御组件的关键。
+            if panel.shield_max > 0.0 {
+                s.shield = (s.shield + panel.shield_max * panel.shield_regen).min(panel.shield_max);
+            }
         }
     }
 
@@ -1206,6 +1297,10 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             faction_id: fid,
             position: [pos[0] + 0.05, pos[1] + 0.05],
             hull: spec.hull,
+            hull_max: spec.hull,
+            shield: 0.0,
+            shield_max: 0.0,
+            components: Vec::new(),
         });
         state
             .control
@@ -1318,15 +1413,18 @@ fn step_governance(state: &mut State, config: &GameConfig) {
 }
 
 /// Move a ship one round's step toward `dest`, capped by its class speed.
-fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, class: &str, dest: [f64; 2]) {
-    let Some((pos, fid)) = state.ship(ship_id).map(|s| (s.position, s.faction_id)) else { return };
+fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, _class: &str, dest: [f64; 2]) {
+    let Some(ship) = state.ship(ship_id).cloned() else { return };
+    let pos = ship.position;
+    let fid = ship.faction_id;
     // MOND 异常区：没有掌握修正引力的势力把指令坐标「算错」，实际航向产生偏移。
     let dest = mond_drift(config, fid, dest);
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;
     }
-    let speed = config.ship_spec(class).speed;
+    // 有效速度 = 舰级基础速度 + 推进组件加成（舰船定制）。
+    let speed = ship_panel(config, &ship).speed;
     let step = if distance <= config.combat.arrival_eps { 0.0 } else { speed.min(distance) };
     if step > 0.0 {
         let nx = (dest[0] - pos[0]) / distance;
@@ -1385,28 +1483,77 @@ fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos:
     best.map(|(_, _, id)| id)
 }
 
+/// 确定性命中率：武器追踪能力 `tracking`（AU/月）越高，越能咬住高速目标。目标速度
+/// `target_speed` 越高，对低追踪武器的规避越强——所以推进组件 = 生存能力和抢先战位。
+/// 无 RNG：命中定义为「伤害折减」而非「命中/未命中」的随机判定，保持确定性。
+fn hit_factor(tracking: f64, target_speed: f64) -> f64 {
+    if tracking <= 0.0 {
+        return 0.3;
+    }
+    let evade = (target_speed / (tracking + target_speed)).min(1.0) * 0.6;
+    (1.0 - evade).clamp(0.2, 1.0)
+}
+
+/// Resolve a single ship-vs-ship engagement. Each weapon of the attacker that is
+/// within its own `range` fires; the target's defences (energy shield pool first,
+/// then hull) and its speed (evasion) decide the result. Missiles are homing (hard
+/// to evade) but are met by the target's point-defence interceptors. Damage is the
+/// weapon's damage type vs shield/hull multipliers, all deterministic.
 fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId) {
-    let (base_dmg, afac) = {
+    let (afac, apos, weapons, tclass) = {
         let a = state.ship(attacker_id).expect("attacker gone");
-        (config.ship_spec(&a.class).attack, a.faction_id)
+        let w = ship_weapons(config, a);
+        (
+            a.faction_id,
+            a.position,
+            w,
+            state.ship(target_id).map(|t| t.class.clone()).unwrap_or_default(),
+        )
     };
-    let (tfac, hull, tpos) = {
+    let (tfac, mut hull, mut shield, tpos, tspeed, tpanel) = {
         let t = state.ship(target_id).expect("target gone");
-        (t.faction_id, t.hull, t.position)
+        let panel = ship_panel(config, t);
+        (t.faction_id, t.hull, t.shield, t.position, panel.speed, panel)
     };
-    // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标位于其势力首都的本土防御
-    // 半径内时，受到的伤害被削弱。
-    let dmg = base_dmg * home_defense_mult(state, tfac, tpos);
-    let new_hull = hull - dmg;
-    let destroyed = new_hull <= 0.0;
+    // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标在其首都本土防御半径内被削弱。
+    let def_mult = home_defense_mult(state, tfac, tpos);
+    let pd = tpanel.intercept;
+
+    let mut total_damage = 0.0;
+    for w in &weapons {
+        let d = dist(apos, tpos);
+        if d > w.range {
+            continue; // weapon out of range — positional, not a stat
+        }
+        let hit = hit_factor(w.tracking, tspeed);
+        let mut dmg = w.damage * hit * def_mult;
+        // 导弹是制导的（对高速目标规避弱），但会被目标点防御拦截。
+        if w.kind == WEAPON_MISSILE && pd > 0.0 {
+            dmg *= 1.0 - (pd / (pd + w.damage)).min(0.8);
+        }
+        // 护盾优先吸收（按 shield_mult），溢出与 hull_mult 部分进船体；满护盾削弱船体伤害。
+        let shield_dmg = dmg * w.shield_mult;
+        let hull_dmg = dmg * w.hull_mult;
+        let absorbed = shield.min(shield_dmg);
+        shield -= absorbed;
+        let soak = if shield_dmg > 1e-9 { absorbed / shield_dmg } else { 1.0 };
+        let hull_pen = hull_dmg * (1.0 - 0.5 * soak);
+        hull -= hull_pen;
+        total_damage += dmg;
+    }
+
+    let destroyed = hull <= 0.0;
     if let Some(t) = state.ship_mut(target_id) {
-        t.hull = if destroyed { 0.0 } else { new_hull };
+        t.hull = if destroyed { 0.0 } else { hull.max(0.0) };
+        t.shield = shield.max(0.0);
     }
-    ev(state, GameEvent::Attack { attacker: attacker_id, target: target_id, damage: dmg });
+    if total_damage > 1e-9 {
+        ev(state, GameEvent::Attack { attacker: attacker_id, target: target_id, damage: total_damage });
+        adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
+    }
     if destroyed {
-        ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: state.ship(target_id).map(|s| s.class.clone()).unwrap_or_default() });
+        ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: tclass });
     }
-    adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
 }
 
 /// 本土防御伤害倍率：`pos` 位于 `faction` 首都的 `home_radius` 之内时返回该势力的
@@ -1555,17 +1702,20 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
 /// buildings are destroyed the city is razed to a blank (colonizable) settlement
 /// — it is never captured.
 fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: CityId) {
-    let (base_dmg, attacker) = {
+    let (attacker, weapons) = {
         let s = state.ship(ship_id).expect("ship gone");
-        (config.ship_spec(&s.class).attack, s.faction_id)
+        (s.faction_id, ship_weapons(config, s))
     };
     let (old_owner, cpos) = {
         let c = state.city(cid).expect("city gone");
         (c.faction_id, state.body_position(c.body_id))
     };
+    // 城市是静止的大型目标（无护盾、只有建筑装甲），轰炸用「每件武器 × 对甲倍率」的总
+    // 齐射——导弹/重炮拆城，近防炮对城伤害低。命中视为全中（城市不规避）。
+    let hull_attack: f64 = weapons.iter().map(|w| w.damage * w.hull_mult).sum();
     // 本土防御（首都即强弩 + cult 的 MOND 异常）：城市位于其势力首都的本土防御
     // 半径内时，受到的轰炸伤害被削弱。
-    let dmg = base_dmg * home_defense_mult(state, old_owner, cpos);
+    let dmg = hull_attack * home_defense_mult(state, old_owner, cpos);
     let razed = {
         let c = state.city_mut(cid).expect("city gone");
         let total_deployed: f64 = c.buildings.iter().map(|b| b.deployed).sum();
@@ -1852,7 +2002,7 @@ pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMa
     let b = &config.balance;
     let wp = b.power_city_weight + b.power_fleet_weight;
     let total_cities = state.cities.iter().filter(|c| !c.razed).count() as f64;
-    let total_fleet: f64 = state.ships.iter().map(|s| config.ship_spec(&s.class).hull).sum();
+    let total_fleet: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
     if wp <= 0.0 || (total_cities <= 0.0 && total_fleet <= 0.0) {
         return state.factions.iter().map(|f| (f.id, 0.0)).collect();
     }
@@ -1863,7 +2013,7 @@ pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMa
             .ships
             .iter()
             .filter(|s| s.faction_id == f.id)
-            .map(|s| config.ship_spec(&s.class).hull)
+            .map(|s| ship_panel(config, s).hull_max)
             .sum();
         let city_share = if total_cities > 0.0 { cities / total_cities } else { 0.0 };
         let fleet_share = if total_fleet > 0.0 { fleet / total_fleet } else { 0.0 };
@@ -2210,6 +2360,10 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
         faction_id: faction,
         position: [pos[0] + 0.05, pos[1] + 0.05],
         hull: spec.hull,
+        hull_max: spec.hull,
+        shield: 0.0,
+        shield_max: 0.0,
+        components: Vec::new(),
     });
     state.control.entry(faction).or_default().ship_orders.insert(next_id, Control::inherit(ShipBehavior::Idle));
 }
@@ -2704,5 +2858,119 @@ mod tests {
         assert!(mult_near < 1.0, "near the capital should be defended (mult {mult_near})");
         let mult_far = home_defense_mult(&state, 3, [80.0, 80.0]);
         assert_eq!(mult_far, 1.0, "far from the capital should have no home-field defense");
+    }
+
+    /// 舰船定制面板：装了护盾+轨道炮的舰，其 effective 面板反映组件的护盾池/装甲/火力/射程。
+    #[test]
+    fn ship_panel_reflects_fitted_components() {
+        let (config, mut state) = fresh_world(42);
+        let base = config.ship_spec("corvette");
+        if let Some(s) = state.ship_mut(0) {
+            s.components = vec!["shield".to_string(), "railgun".to_string()];
+        }
+        let s = state.ship(0).unwrap();
+        let panel = ship_panel(&config, s);
+        assert!((panel.hull_max - base.hull - config.component_spec("shield").hull).abs() < 1e-9);
+        assert!((panel.shield_max - config.component_spec("shield").shield).abs() < 1e-9);
+        assert!(panel.attack > base.attack, "railgun should add firepower");
+        assert!(
+            panel.attack_range > base.attack_range,
+            "railgun's long range should extend the engage window"
+        );
+        assert!(panel.upkeep > base.upkeep, "components should raise maintenance");
+    }
+
+    /// 造舰选装必须**确定**并且**总量可负担**（资源→组件 的确定性链接）。
+    #[test]
+    fn choose_loadout_is_deterministic_and_affordable() {
+        let (config, mut state) = fresh_world(42);
+        // Give China (3) a fat rare-mineral stack so it can afford a real loadout.
+        if let Some(f) = state.faction_mut(3) {
+            for (r, amt) in [
+                ("uranium", 200.0), ("gold", 200.0), ("helium3", 200.0),
+                ("platinum", 200.0), ("hydrogen", 200.0), ("thorium", 200.0),
+                ("iron", 200.0), ("carbon", 200.0), ("silicon", 200.0),
+            ] {
+                *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
+            }
+        }
+        let slots = config.ship_spec("battleship").slots as usize;
+        let a = choose_loadout(&state, &config, 3, "battleship");
+        let b = choose_loadout(&state, &config, 3, "battleship");
+        assert_eq!(a, b, "loadout must be deterministic");
+        assert!(a.len() <= slots, "must not exceed slot cap ({slots})");
+        // The whole chosen set must be cumulatively affordable out of the stockpile.
+        let mut pool = state.faction(3).unwrap().resources.clone();
+        for c in &a {
+            for (r, amt) in &config.component_spec(c).cost {
+                assert!(
+                    pool.get(r).copied().unwrap_or(0.0) >= *amt,
+                    "loadout {c} must be affordable for resource {r}"
+                );
+                *pool.entry(r.clone()).or_insert(0.0) -= *amt;
+            }
+        }
+        // A resource-rich faction should fill more than a token slot.
+        assert!(a.len() >= 2, "rich faction should field a real loadout, got {a:?}");
+    }
+
+    /// 战斗拟真：护盾池优先吸收，快速目标对低追踪武器规避更强（确定性命中折减）。
+    #[test]
+    fn combat_respects_shields_and_speed_evasion() {
+        let (config, mut state) = fresh_world(42);
+        // Attacker: China corvette (id 0) fitted with a railgun; target: US destroyer (id 3)
+        // fitted with an energy shield. Both pinned far from any capital so home-field
+        // defense is neutral (mult = 1.0). Hostile so the volley is a real attack.
+        if let Some(s) = state.ship_mut(0) {
+            s.position = [80.0, 80.0];
+            s.components = vec!["railgun".to_string()];
+        }
+        if let Some(s) = state.ship_mut(3) {
+            s.position = [80.4, 80.0];
+            s.components = vec!["shield".to_string()];
+            s.hull = 24.0;
+            s.hull_max = 24.0;
+            s.shield = 12.0;
+            s.shield_max = 12.0;
+        }
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+
+        let shield_before = state.ship(3).map(|s| s.shield).unwrap();
+        let hull_before = state.ship(3).map(|s| s.hull).unwrap();
+        fire(&mut state, &config, 0, 3);
+
+        let shield_after = state.ship(3).map(|s| s.shield).unwrap();
+        let hull_after = state.ship(3).map(|s| s.hull).unwrap();
+        assert!(shield_after < shield_before, "shield pool must absorb damage");
+        assert!(hull_after < hull_before, "hull should take spill damage too");
+        assert!(hull_after > 0.0, "a single volley on a destroyer should not one-shot it");
+
+        // Evasion: a fast target is hit less by a low-tracking weapon than a slow one.
+        let fast_hit = hit_factor(2.0, 2.6); // corvette speed
+        let slow_hit = hit_factor(2.0, 1.2); // destroyer speed
+        assert!(
+            fast_hit < slow_hit,
+            "fast ship should evade a low-tracking weapon more (fast {fast_hit} vs slow {slow_hit})"
+        );
+    }
+
+    /// 功能性验证：长局里确实会出现「定制化」舰（资源→组件选择真的被 AI 执行）。
+    #[test]
+    fn long_run_produces_customized_ships() {
+        let config = load_config();
+        let mut customized = 0usize;
+        for seed in [7u64, 42] {
+            let mut state = default_state(&config, seed);
+            let mut rng = Prng::new(seed);
+            for _ in 0..400u32 {
+                advance(&mut state, &config, &mut rng);
+            }
+            customized += state.ships.iter().filter(|s| !s.components.is_empty()).count();
+        }
+        assert!(
+            customized > 0,
+            "customized (component-fitted) ships should appear over a long run, got {customized}"
+        );
     }
 }

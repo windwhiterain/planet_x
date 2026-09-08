@@ -80,6 +80,9 @@ fn count_nonfinite(state: &State, _config: &GameConfig) -> (usize, Vec<String>) 
         check(format!("ship[{}].pos.0", s.id), s.position[0]);
         check(format!("ship[{}].pos.1", s.id), s.position[1]);
         check(format!("ship[{}].hull", s.id), s.hull);
+        check(format!("ship[{}].hull_max", s.id), s.hull_max);
+        check(format!("ship[{}].shield", s.id), s.shield);
+        check(format!("ship[{}].shield_max", s.id), s.shield_max);
     }
 
     for (fid, c) in &state.control {

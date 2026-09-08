@@ -236,6 +236,182 @@ pub struct ShipSpec {
     /// Per-round maintenance (in market value / credits) per ship — a continuous
     /// sink that caps fleet growth and makes big fleets expensive to sustain.
     pub upkeep: f64,
+    /// 组件槽位数：本舰级可同时装配多少个「定制组件」（武器/防御/推进/辅助）。
+    /// 0 = 不可定制（裸舰，仅按 class 基础面板）。这是「飞船定制化」的能力上限——
+    /// 更大的舰级能承载更多组件，把资源优势转化为战斗力。
+    #[serde(default)]
+    pub slots: u32,
+}
+
+/// A ship component (舰船定制组件) keyed by id in the config. Fitting a component
+/// onto a ship (during production) **changes what the ship can actually do in
+/// combat**, not just a stat delta:
+///
+/// * weapon systems (`category="weapon"`) introduce a weapon with its own damage
+///   **type** (kinetic/plasma/missile), engagement `range`, `tracking` (how well it
+///   leads a fast target), and shield/hull multipliers. Choosing *which* weapons
+///   you fit decides how you fight — so a 铀-rich faction fields anti-armor railguns,
+///   a 金/铂-rich one fields shields + plasma, a 氦-3/氢-rich one fields fast
+///   missile skirmishers. This is the resource→military link, and it is qualitative.
+/// * defense (`category="defense"`) adds an energy **shield pool** (soaks damage
+///   preferentially, regenerates), extra **hull** armor, or **point-defense**
+///   interceptors that shoot down incoming missiles.
+/// * thrust / utility (`category="thrust"|"utility"`) add speed, regen, etc.
+///
+/// The offensive baseline (a ship's class gun battery) is always present; the
+/// fitted components are layered on top. All values are deterministic (no RNG in
+/// combat; evasion is a deterministic function of target speed vs weapon tracking).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ComponentSpec {
+    pub label: String,
+    /// 组件类别：`"weapon"` / `"defense"` / `"thrust"` / `"utility"`——决定它在
+    /// 战斗里扮演的角色（类别不直接进数值，数值由下列字段决定）。
+    pub category: String,
+    /// 武器伤害（非武器为 0）。对舰/对城都按「伤害类型 × 防御」结算。
+    pub damage: f64,
+    /// 武器伤害类型：`"kinetic"` / `"plasma"` / `"missile"`；非武器为 `""`。
+    pub damage_type: String,
+    /// 武器交战距离（AU）：只有目标进入此距离该武器才参与齐射——所以「射程」是
+    /// 真实的战位选择，而非一个加分项。
+    pub range: f64,
+    /// 武器追踪能力（AU/月）：越高的武器越能咬住高速目标（跑得快的船对低追踪
+    /// 武器规避强）。deterministic 命中 = 1 - evasion(target_speed, tracking)。
+    pub tracking: f64,
+    /// 武器对能量护盾的伤害倍率（护盾先吸收；kinetic×低、plasma×高）。
+    pub shield_mult: f64,
+    /// 武器对船体（装甲）的伤害倍率。
+    pub hull_mult: f64,
+    /// 能量护盾池（防御组件加）：0 = 无护盾。护盾池每回合再生。
+    pub shield: f64,
+    /// 护盾再生（占 shield_max / 月）。
+    pub shield_regen: f64,
+    /// 额外船体护甲（防御组件加）。
+    pub hull: f64,
+    /// 点防御拦截强度（防御组件加）：拦下来袭导弹（确定性按强度折算导弹伤害）。
+    pub intercept: f64,
+    /// 额外速度（AU/月）。
+    pub speed: f64,
+    /// 额外船体再生（占 hull_max / 月）。
+    pub hull_regen: f64,
+    /// 额外每回合维护费（市场价值/舰）。组件越强，舰队越难养——抑制无脑堆强组件。
+    pub upkeep: f64,
+    /// 一次性装配成本（在造舰出厂时从势力库存扣除）。绑定资源优势的落点。
+    pub cost: ResourceMap,
+}
+
+/// A concrete weapon a ship fields (its class battery plus any fitted weapon
+/// components). `Copy` so the hot combat path iterates it cheaply.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct Weapon {
+    /// 单发齐射伤害。
+    pub damage: f64,
+    /// 交战距离（AU）。
+    pub range: f64,
+    /// 追踪能力（AU/月）——越高越难被高速目标规避。
+    pub tracking: f64,
+    /// 对护盾伤害倍率。
+    pub shield_mult: f64,
+    /// 对船体伤害倍率。
+    pub hull_mult: f64,
+    /// 伤害类型（0=kinetic, 1=plasma, 2=missile）。
+    pub kind: u8,
+}
+
+/// The effective combat panel of a ship after its fitted components are applied.
+/// Aggregated so movement / upkeep / regen read one struct; per-weapon resolution
+/// (which weapon fires, at what damage, vs shield vs hull) is handled separately by
+/// [`ship_weapons`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct ShipPanel {
+    /// 舰级炮台+组件的总攻击（用于对城轰炸的简化结算与报告）。
+    pub attack: f64,
+    pub attack_range: f64,
+    pub speed: f64,
+    pub hull_max: f64,
+    pub hull_regen: f64,
+    pub shield_max: f64,
+    pub shield_regen: f64,
+    pub intercept: f64,
+    pub upkeep: f64,
+}
+
+/// Damage type tags used in weapon resolution.
+pub const WEAPON_KINETIC: u8 = 0;
+pub const WEAPON_PLASMA: u8 = 1;
+pub const WEAPON_MISSILE: u8 = 2;
+
+fn weapon_kind(t: &str) -> u8 {
+    match t {
+        "plasma" => WEAPON_PLASMA,
+        "missile" => WEAPON_MISSILE,
+        _ => WEAPON_KINETIC,
+    }
+}
+
+/// Compute a ship's effective combat panel from its class spec plus its fitted
+/// components. Pure & deterministic (no RNG); cheap enough for the hot loop.
+pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
+    let base = config.ship_spec(&ship.class);
+    let mut p = ShipPanel {
+        attack: base.attack,
+        attack_range: base.attack_range,
+        speed: base.speed,
+        hull_max: base.hull,
+        hull_regen: base.hull_regen,
+        shield_max: 0.0,
+        shield_regen: 0.0,
+        intercept: 0.0,
+        upkeep: base.upkeep,
+    };
+    for c in &ship.components {
+        if let Some(cs) = config.components.get(c) {
+            p.attack += cs.damage;
+            p.speed += cs.speed;
+            p.hull_max += cs.hull;
+            p.hull_regen += cs.hull_regen;
+            p.shield_max += cs.shield;
+            p.shield_regen += cs.shield_regen;
+            if cs.range > p.attack_range {
+                p.attack_range = cs.range;
+            }
+            p.intercept += cs.intercept;
+            p.upkeep += cs.upkeep;
+        }
+    }
+    p
+}
+
+/// Enumerate the weapons a ship fields: always its class gun battery (a kinetic
+/// array) plus each fitted weapon component. `kind` marks the damage type so the
+/// combat resolver can apply shield/hull multipliers and missile interception.
+pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
+    let base = config.ship_spec(&ship.class);
+    let mut ws = Vec::new();
+    if base.attack > 0.0 {
+        ws.push(Weapon {
+            damage: base.attack,
+            range: base.attack_range,
+            tracking: 2.0, // 舰级炮台 = 中等追踪（快船能规避）
+            shield_mult: 0.6,
+            hull_mult: 1.0,
+            kind: WEAPON_KINETIC,
+        });
+    }
+    for c in &ship.components {
+        if let Some(cs) = config.components.get(c) {
+            if cs.category == "weapon" && cs.damage > 0.0 {
+                ws.push(Weapon {
+                    damage: cs.damage,
+                    range: cs.range,
+                    tracking: cs.tracking,
+                    shield_mult: cs.shield_mult,
+                    hull_mult: cs.hull_mult,
+                    kind: weapon_kind(&cs.damage_type),
+                });
+            }
+        }
+    }
+    ws
 }
 
 /// A ship's controllable behavior — the instruction a faction issues to one
@@ -309,7 +485,25 @@ pub struct Ship {
     pub faction_id: FactionId,
     /// Position in AU (same plane as the orbits).
     pub position: [f64; 2],
+    /// Current hull (armor) — must never exceed [`Self::hull_max`].
     pub hull: f64,
+    /// 本舰最大护甲（含组件加成）。`hull` 是当前值；再生/损毁以 `hull_max` 为上限。
+    #[serde(default = "default_hull_max")]
+    pub hull_max: f64,
+    /// 当前能量护盾值（护盾优先吸收、每回合再生，见 `shield_regen`）。
+    #[serde(default)]
+    pub shield: f64,
+    /// 最大能量护盾（护盾组件的 `shield` 加总；无护盾组件为 0）。
+    #[serde(default)]
+    pub shield_max: f64,
+    /// 本舰装配的组件 id（舰船定制）。空 = 裸舰（仅按 class 基础面板）。
+    /// 由模拟在造舰出厂时确定性挑选并扣成本；agent 可直读以了解舰队构成。
+    #[serde(default)]
+    pub components: Vec<String>,
+}
+
+fn default_hull_max() -> f64 {
+    0.0
 }
 
 /// A city occupying one 定居点 (settlement) on a body, controlled by a faction.
@@ -978,6 +1172,9 @@ pub struct GameConfig {
     pub structures: BTreeMap<String, StructureSpec>,
     /// Ship statistics, keyed by class name.
     pub ships: BTreeMap<String, ShipSpec>,
+    /// Ship components (舰船定制组件), keyed by id. `#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub components: BTreeMap<String, ComponentSpec>,
     /// Building statistics, keyed by building kind name.
     pub buildings: BTreeMap<String, BuildingSpec>,
     /// 剧情事件表（编年史/叙事弧）。`#[serde(default)]` 容忍旧配置无此节。
@@ -990,6 +1187,12 @@ impl GameConfig {
         self.ships
             .get(class)
             .expect("game config is missing a ship class")
+    }
+
+    pub fn component_spec(&self, id: &str) -> &ComponentSpec {
+        self.components
+            .get(id)
+            .expect("game config is missing a ship component")
     }
 
     pub fn building_spec(&self, kind: &str) -> &BuildingSpec {

@@ -160,6 +160,7 @@
             build_points: 15.0,
             build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：低，常见
             upkeep: 1.5,
+            slots: 1,            // 小舰只有一个定制槽（轻装游骑）
         ),
         "destroyer": (
             label: "驱逐舰",
@@ -171,6 +172,7 @@
             build_points: 26.0,
             build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
             upkeep: 2.5,
+            slots: 2,
         ),
         "cruiser": (
             label: "巡洋舰",
@@ -182,6 +184,7 @@
             build_points: 44.0,
             build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：高，常见
             upkeep: 6.0,
+            slots: 3,            // 中型舰：火力+防护+推进
         ),
         "carrier": (
             label: "航空母舰",
@@ -193,6 +196,7 @@
             build_points: 58.0,
             build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
             upkeep: 7.5,
+            slots: 3,
         ),
         "battleship": (
             label: "战列舰",
@@ -204,6 +208,133 @@
             build_points: 40.0,
             build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：低，稀有
             upkeep: 6.5,
+            slots: 4,            // 主力舰能叠最多组件（资源→战斗力）
+        ),
+    },
+    // 舰船定制组件（飞船定制化 ↔ 资源优势）——把「多稀缺资源」换成「不一样的作战
+    // 打法」，而不是把面板数字拉高。每件武器有**伤害类型**（kinetic/plasma/missile）、
+    // 交战距离、追踪力、对盾/对甲倍率；防御有**护盾池**（优先吸收、可再生）、额外
+    // 装甲、点防御（拦导弹）。选装谁决定你怎么打：铀→磁轨/重炮拆甲；金铂→护盾+等
+    // 离子；氦-3/氢→高速导弹袭扰。这就是资源优势→真实战斗力，全程确定性、无 RNG。
+    components: {
+        // --- 武器（伤害类型 × 防御 的取舍） ------------------------------------
+        "kinetic": (
+            label: "磁轨炮",
+            category: "weapon",
+            damage: 4.0,
+            damage_type: "kinetic",
+            range: 0.4,
+            tracking: 2.0,
+            shield_mult: 0.6,
+            hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 0.6,
+            cost: { "iron": 4.0, "carbon": 2.0 },   // 常见矿：入门火力（拆甲）
+        ),
+        "plasma": (
+            label: "等离子炮",
+            category: "weapon",
+            damage: 8.0,
+            damage_type: "plasma",
+            range: 0.9,
+            tracking: 1.6,
+            shield_mult: 1.5,
+            hull_mult: 0.85,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.4,
+            cost: { "helium3": 3.0, "gold": 1.5 }, // 稀有：对盾强、射程远
+        ),
+        "railgun": (
+            label: "电磁轨道炮",
+            category: "weapon",
+            damage: 14.0,
+            damage_type: "kinetic",
+            range: 1.2,
+            tracking: 2.6,
+            shield_mult: 0.7,
+            hull_mult: 1.3,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 2.2,
+            cost: { "uranium": 3.0, "iron": 2.0 }, // 稀有：远程拆甲重炮
+        ),
+        "missile": (
+            label: "集束导弹",
+            category: "weapon",
+            damage: 9.0,
+            damage_type: "missile",
+            range: 2.4,
+            tracking: 3.0,   // 制导：高速目标难规避，但会被点防御拦截
+            shield_mult: 1.0,
+            hull_mult: 1.2,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.6,
+            cost: { "hydrogen": 3.0, "carbon": 2.0 }, // 超远射程，吃氢
+        ),
+        // --- 防御（护盾池 / 装甲 / 点防御） ------------------------------------
+        "shield": (
+            label: "能量护盾",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 12.0, shield_regen: 0.15, hull: 2.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 2.0,
+            cost: { "platinum": 2.0, "helium3": 1.0 }, // 铂金级护盾
+        ),
+        "armor": (
+            label: "装甲夹层",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hull: 14.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 0.9,
+            cost: { "iron": 5.0, "carbon": 3.0 },    // 常见：加厚船壳
+        ),
+        "composite": (
+            label: "复合装甲",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hull: 26.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.8,
+            cost: { "silicon": 4.0, "thorium": 2.0 }, // 高级防护（钍）
+        ),
+        "point_defense": (
+            label: "近防炮阵",
+            category: "defense",
+            damage: 2.0, damage_type: "kinetic", range: 0.3, tracking: 8.0, // 近防=几乎必中快目标
+            shield_mult: 0.8, hull_mult: 0.8,
+            shield: 0.0, shield_regen: 0.0, hull: 3.0, intercept: 6.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.0,
+            cost: { "gold": 2.0, "silicon": 1.0 }, // 拦导弹 + 防快船
+        ),
+        // --- 推进（速度=规避 + 抢占战位） -------------------------------------
+        "ion_drive": (
+            label: "离子推进器",
+            category: "thrust",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 0.8, hull_regen: 0.0, upkeep: 1.0,
+            cost: { "helium3": 1.5, "iron": 1.0 },
+        ),
+        "fusion_torch": (
+            label: "聚变推进器",
+            category: "thrust",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            speed: 1.6, hull_regen: 0.0, upkeep: 2.4,
+            cost: { "hydrogen": 3.0, "thorium": 1.0 }, // 氢/钍：极速引擎
+        ),
+        // --- 辅助（再生 = 持久战） --------------------------------------------
+        "reactor": (
+            label: "聚变反应堆",
+            category: "utility",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.04, hull: 0.0, intercept: 0.0,
+            speed: 0.2, hull_regen: 0.05, upkeep: 1.2,
+            cost: { "uranium": 2.0, "hydrogen": 1.0 },
         ),
     },
     buildings: {
