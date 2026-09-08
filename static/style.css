@@ -56,9 +56,13 @@ main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
 .panel .hint { color: var(--muted); font-size: 11px; }
 .row {
   display: flex; align-items: center; gap: 8px; justify-content: space-between;
-  padding: 4px 0; border-bottom: 1px solid #1c2745;
+  padding: 4px 0; border-bottom: 1px solid #1c2745; flex-wrap: wrap;
 }
 .row:last-child { border-bottom: none; }
+.ship-editor {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 0 10px 8px;
+}
 .row .label { flex: 1; color: var(--text); }
 .row input, .row select {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);

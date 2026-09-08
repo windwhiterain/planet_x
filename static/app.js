@@ -242,16 +242,19 @@ function renderShips() {
   if (!ships.length) { box.textContent = '该势力暂无飞船'; return; }
   ships.forEach((ord, i) => {
     const info = world.ships.find((s) => s.id === ord.ship);
+
+    // Header row: ship name + behavior summary on the left, mode toggle right.
     const row = el('div', { class: 'row' });
     const label = el('div', { class: 'label' });
     label.textContent = (info ? info.name : '船#' + ord.ship) + ' · ' + behaviorSummary(ord.behavior, world);
     row.appendChild(label);
-
     const modeSel = modeSelect(ord, () => renderShips(), i);
     row.appendChild(modeSel);
+    box.appendChild(row);
 
+    // Behavior editor goes on its OWN line (full width) so it never squeezes
+    // the mode toggle out of view.
     if (ord.mode === 'Player') {
-      // behavior editor
       const edit = el('div', { class: 'ship-editor' });
       const t = behaviorType(ord.behavior);
       const d = behaviorToInput(ord.behavior);
@@ -282,10 +285,8 @@ function renderShips() {
         cb.addEventListener('change', () => { d.bombard = cb.checked; ord.behavior = behaviorFromInput(t, d); });
         bomb.appendChild(cb); edit.appendChild(bomb);
       }
-      row.appendChild(edit);
+      box.appendChild(edit);
     }
-
-    box.appendChild(row);
   });
 }
 
