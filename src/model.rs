@@ -23,6 +23,7 @@ pub type FactionId = u32;
 pub type BodyId = u32;
 pub type CityId = u32;
 pub type ShipId = u32;
+pub type BuildingId = u32;
 
 /// A resource bundle: resource key -> amount. Resource keys are configurable
 /// and resolved against [`GameConfig::resources`].
@@ -150,21 +151,50 @@ pub struct Body {
 
 /// A single continuous-area building allocation on a city. Not an atom:
 /// `area` is the planned extent and `deployed` is how much is actually built.
-/// `kind` is a config key (open-ended), and a mining building carries the
-/// mined resource key in `resource`. The command-controlled investment weight
-/// lives in [`ControllableState::invest_weights`] (keyed by [`InvestKey`]),
-/// not here.
+///
+/// `kind` is a config key (open-ended): `"residential"` (居住区),
+/// `"mining"` (开采区) or `"construction"` (建造区). The district's
+/// characteristic attributes live here next to the kind:
+///   * a mining building (`kind == "mining"`) carries the mined resource key
+///     in `resource`;
+///   * a shipyard building (`kind == "construction"`) carries the ship class it
+///     produces in `ship_type` (a command-controlled attribute);
+///   * every building carries a `structure` ("concrete" | "steel"), the
+///     building's own attribute controlling its hardness/armor and cost.
+///
+/// Buildings are identified by a stable [`BuildingId`] so a city can hold
+/// several shipyards (one per `ship_type`). The command-controlled investment
+/// weights live in [`ControllableState`] (keyed by [`InvestKey`]/[`BuildKey`]).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Building {
+    pub id: BuildingId,
     pub kind: String,
+    /// Mined resource key, for a mining (开采区) building.
     pub resource: Option<String>,
+    /// Ship class produced, for a shipyard (建造区) building.
+    pub ship_type: Option<String>,
+    /// Building's own structure attribute: "concrete" 混凝土 | "steel" 钢结构.
+    pub structure: String,
     pub area: f64,
     pub deployed: f64,
+    /// Current hardness (armor). Max approaches `deployed × armor_per_area`.
+    pub armor: f64,
 }
 
 impl Building {
     pub fn under_construction(&self) -> bool {
         self.deployed < self.area - 1e-9
+    }
+
+    /// Is this building a shipyard (建造区)?
+    pub fn is_shipyard(&self) -> bool {
+        self.kind == "construction"
+    }
+
+    /// The maximum hardness for the currently deployed area, using the config's
+    /// per-structure armor-per-area table.
+    pub fn armor_max(&self, config: &GameConfig) -> f64 {
+        self.deployed * config.structure_spec(&self.structure).armor_per_area
     }
 }
 
@@ -197,6 +227,8 @@ pub enum ShipBehavior {
     TargetShip { ship: ShipId, attack: bool },
     /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
     TargetSettlement { city: CityId, bombard: bool },
+    /// 殖民：前往定居点天体并（再）建立一座城市。
+    Colonize { body: BodyId },
     /// 无（待命）。
     Idle,
 }
@@ -213,16 +245,12 @@ pub struct Ship {
     pub hull: f64,
 }
 
-/// A city's ship-production queue. Progress is accrued from the combined area
-/// of its shipyard buildings (建造点) each round.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ShipBuild {
-    pub progress: f64,
-    pub target_class: String,
-}
-
 /// A city on a settlement, controlled by a faction. Its area is split among a
 /// set of continuous-area [`Building`]s.
+///
+/// Ship production (`ship_progress`) is **per city**, keyed by the ship class
+/// (舰型). Each 建造区 (shipyard building) contributes to its class's rate; the
+/// rates of every shipyard in the city keep contributing into that city pool.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct City {
     pub id: CityId,
@@ -232,9 +260,10 @@ pub struct City {
     /// 人口, limits production efficiency.
     pub population: u32,
     pub buildings: Vec<Building>,
-    pub ship_build: ShipBuild,
-    /// Siege damage that has built up against this city.
-    pub defense: f64,
+    /// 建造进度 (以城市为单位): ship class -> progress.
+    pub ship_progress: BTreeMap<String, f64>,
+    /// 被夷平为空白 (razed): no buildings / population; colonizable again.
+    pub razed: bool,
 }
 
 /// A faction (势力) with diplomatic stances toward every other faction.
@@ -340,17 +369,35 @@ impl State {
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
-    /// 决定某一资源预算由谁控制：资源 → 势力 → 全局。
-    pub fn budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = self.control(fid).and_then(|c| c.budget.get(resource)).and_then(|c| c.mode);
+    /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
+    pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
+        let leaf = self.control(fid).and_then(|c| c.investment_budget.get(resource)).and_then(|c| c.mode);
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
-    /// 决定某建筑投资权重由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
+    /// 决定某建造预算（造舰用）由谁控制：资源 → 势力 → 全局。
+    pub fn construction_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
+        let leaf = self.control(fid).and_then(|c| c.construction_budget.get(resource)).and_then(|c| c.mode);
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, faction, self.scope.global])
+    }
+
+    /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
     pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
-        let (cid, _, _) = key;
+        let (cid, _) = key;
         let leaf = self.control(fid).and_then(|c| c.invest_weights.get(key)).and_then(|c| c.mode);
+        let city = self.scope.cities.get(cid).copied().flatten();
+        let body_id = self.city(*cid).map(|c| c.body_id);
+        let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+
+    /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力 → 全局。
+    pub fn build_control(&self, fid: FactionId, key: &BuildKey) -> ControlMode {
+        let (cid, _) = key;
+        let leaf = self.control(fid).and_then(|c| c.build_weights.get(key)).and_then(|c| c.mode);
         let city = self.scope.cities.get(cid).copied().flatten();
         let body_id = self.city(*cid).map(|c| c.body_id);
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
@@ -381,9 +428,10 @@ impl ControlScope {
 
 // --- 可控状态 (controllable / command-controlled state) --------------------
 
-/// 建筑投资权重定位键：(城市, 建筑 kind, 资源)。同一城市内一个
-/// (kind, resource) 组合至多对应一栋建筑。
-pub type InvestKey = (CityId, String, Option<String>);
+/// 建筑「建设投资权重」定位键：(城市, 建筑)。同一座城的每栋建筑一个值。
+pub type InvestKey = (CityId, BuildingId);
+/// 建造区「建造投资权重」定位键：(城市, 建造区建筑)。每座城的每个建造区一个值。
+pub type BuildKey = (CityId, BuildingId);
 
 /// 一个可控字段由「谁决定」：AI（系统每回合自动决策/改写）还是
 /// Player（玩家指令，系统只读不改写）。
@@ -446,10 +494,16 @@ pub struct ControlScope {
 pub struct ControllableState {
     /// 本方各飞船的当前指令（每艘舰一个 Control）。
     pub ship_orders: BTreeMap<ShipId, Control<ShipBehavior>>,
-    /// 本方资源预算（资源/时间）：决定拿出多少资源用于投资（每资源一个 Control）。
-    pub budget: BTreeMap<String, Control<f64>>,
-    /// 本方各建筑的投资权重（每建筑一个 Control）。
+    /// 投资预算（资源/时间）：决定拿出多少资源用于「建设（建筑）」，按各建筑
+    /// 建设投资权重竞争（每资源一个 Control）。
+    pub investment_budget: BTreeMap<String, Control<f64>>,
+    /// 建造预算（资源/时间）：决定拿出多少资源用于「造舰」，按各建造区建造
+    /// 投资权重竞争（每资源一个 Control）。
+    pub construction_budget: BTreeMap<String, Control<f64>>,
+    /// 本方各建筑的「建设投资权重」（每建筑一个 Control）。
     pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
+    /// 本方各建造区的「建造投资权重」（每建造区一个 Control）。
+    pub build_weights: BTreeMap<BuildKey, Control<f64>>,
 }
 
 /// Economy tuning (production and population).
@@ -469,7 +523,9 @@ pub struct EconomyConfig {
     pub housing_buffer: f64,
 }
 
-/// Combat tuning.
+/// Combat tuning. Cities have no separate defense pool: a city's hardness is
+/// the sum of its buildings' armor and bombardment destroys buildings (by area
+/// share) until the city is razed to blank.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CombatConfig {
     /// A relation at or below this value is treated as hostile (war).
@@ -478,10 +534,26 @@ pub struct CombatConfig {
     pub siege_range: f64,
     /// Distance, in AU, at which a ship is considered to have arrived.
     pub arrival_eps: f64,
-    /// Starting garrison/defense value of a freshly built city.
-    pub defense_initial: f64,
-    /// Defense value a city is reset to after being captured.
-    pub defense_reset: f64,
+    /// Fraction of a building's lost armor repaired each round when not under
+    /// bombardment.
+    pub armor_regen: f64,
+    /// Fraction of the settlement area a freshly founded (colonized) city may
+    /// claim, capped for the initial footprint.
+    pub colony_footprint: f64,
+}
+
+/// Building structure attribute (混凝土 / 钢结构).
+///
+/// Structures are an attribute *of the building itself* — they modify the
+/// building's hardness (armor-per-area) and its construction cost. Not a
+/// cross-cutting material multiplier: each building carries exactly one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StructureSpec {
+    pub name: String,
+    /// 护甲 per unit deployed area.
+    pub armor_per_area: f64,
+    /// Construction-cost multiplier for this structure.
+    pub cost_mult: f64,
 }
 
 /// Diplomacy tuning.
@@ -504,6 +576,9 @@ pub struct GameConfig {
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,
+    /// Building-structure definitions (混凝土 / 钢结构). Source of truth for
+    /// which structure keys exist.
+    pub structures: BTreeMap<String, StructureSpec>,
     /// Ship statistics, keyed by class name.
     pub ships: BTreeMap<String, ShipSpec>,
     /// Building statistics, keyed by building kind name.
@@ -521,6 +596,19 @@ impl GameConfig {
         self.buildings
             .get(kind)
             .expect("game config is missing a building kind")
+    }
+
+    pub fn structure_spec(&self, structure: &str) -> &StructureSpec {
+        self.structures
+            .get(structure)
+            .expect("game config is missing a building structure")
+    }
+
+    pub fn structure_name(&self, key: &str) -> String {
+        self.structures
+            .get(key)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| key.to_string())
     }
 
     pub fn resource_name(&self, key: &str) -> String {
@@ -550,4 +638,6 @@ pub struct BuildingSpec {
     pub productivity: f64,
     /// Default 建设投资权重 for buildings of this kind.
     pub default_invest_weight: f64,
+    /// Default 建造投资权重 for shipyard (建造区) buildings of this kind.
+    pub default_build_weight: f64,
 }

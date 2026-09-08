@@ -1,6 +1,6 @@
 # 行星X — 太空沙盘
 
-《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设）、飞船战斗、围城、外交全部在一个可确定复现的模拟器里推进。天体、资源、建筑、舰船均由 `config/game.ron` 数据驱动，不硬编码。
+《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。
 
 ---
 
@@ -63,7 +63,7 @@ planet_x --agent --seed 42 --query '.cities[] | select(.owner_name=="中国") | 
 planet_x --agent --seed 42 --rounds 5 --query '[.ships[]] | map(select(.hull < .hull_max)) | .[] | {name, hull}'
 
 # 打完 8 回合后，看被攻打的城
-planet_x --agent --seed 42 --rounds 8 --query '.cities[] | select(.defense < 40.0) | {name, owner_name, defense}'
+planet_x --agent --seed 42 --rounds 8 --query '.cities[] | select(.razed == false and .armor < 15.0) | {name, owner_name, armor, razed}'
 
 # 势力名单 / 交战对象
 planet_x --agent --seed 42 --query '.factions[] | select(.wars | length > 0) | .name'
@@ -95,8 +95,12 @@ printf 'summary\nadvance 1\nq .ships[] | select(.order.type != "idle") | {name, 
 ### 4.1 下发指令（可控制状态 diff）
 
 模块化约束把「可控制状态」（指令）与「实体演化结果」分开：`State::control` 是每个势力的
-（舰船指令 `ship_orders` / 资源预算 `budget` / 建设投资权重 `invest_weights`），每个叶子带 `mode`
+（舰船指令 `ship_orders` / 投资预算 `investment_budget` / 建造预算 `construction_budget` /
+建设投资权重 `invest_weights` / 建造投资权重 `build_weights`），每个叶子带 `mode`
 （`Ai`|`Player`|`null`=继承）；`State::scope` 是一棵「谁负责决策」的作用域树（全局→势力→天体→城市）。
+
+**双层预算**：势力有 `investment_budget`（建设，按各建筑建设投资权重竞争）与 `construction_budget`
+（造舰，按各建造区建造投资权重竞争），两者独立、直接设置、不互相竞争。
 
 用 `control` 读出可编辑模板，改动后以同一 JSON 形状写回，`--apply file.json` 或 REPL 的
 `apply <file>` 会**结构化、多层级**地应用它——**只触碰文件里出现的势力/叶子**：
@@ -109,6 +113,18 @@ planet_x --agent --seed 42 --script control.txt        # control.txt: `control\n
 
 # 应用 diff，推进 6 回合，输出编年史
 planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.json --rounds 6
+```
+
+**建筑增删改（结构命令）**：`control[].buildings` 可增删/改建筑。`remove: true` 删除指定建筑；
+`building: null` 表示新增（指定 `kind`/`structure`/`ship_type`/`resource`/`area`）；`building: <id>`
+表示改属性（如 `structure` 混凝土/钢结构、建造区 `ship_type` 舰型）。
+
+```jsonc
+{"control":[{"faction_id":3,"buildings":[
+  {"city":0,"building":null,"kind":"construction","structure":"steel","ship_type":"cruiser","area":6},
+  {"city":0,"building":3,"structure":"steel"},
+  {"city":0,"building":1,"remove":true}
+]},"scope":null}
 ```
 
 **最小修改语义**：只列出想改的叶子即可；某叶子里省略 `value`/`behavior` 保留其当前值，省略
@@ -151,20 +167,24 @@ planet_x --agent --seed 42 --start trajectory/state_round_0000.ron --apply diff.
   "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65], "settlement_area": 120.0 }],
   "cities": [{
     "id": 0, "name": "长三角城市群", "body": "地球",
-    "owner": 3, "owner_name": "中国", "population": 1400, "defense": 40.0,
-    "building": "corvette",                                            // 当前建造的舰级
-    "buildings": [{ "kind": "residential", "resource": null, "area": 56.0, "deployed": 56.0 }]
+    "owner": 3, "owner_name": "中国", "population": 1400,
+    "razed": false,                                                    // 被夷平为空白，可再殖民
+    "armor": 60.0,                                                     // 城市总硬度 = Σ building armor（无独立城防）
+    "ship_progress": { "corvette": 30.0 },                             // 建造进度以城市为单位，按舰型
+    "buildings": [{ "id": 0, "kind": "residential", "structure": "concrete",
+      "resource": null, "ship_type": null, "area": 56.0, "deployed": 56.0,
+      "armor": 28.0, "armor_max": 28.0 }]                             // structure: concrete 混凝土 | steel 钢结构
   }],
   "ships": [{
     "id": 0, "name": "护卫舰-3", "class": "corvette",
     "owner": 3, "owner_name": "中国", "position": [-0.52, -0.67],
     "hull": 12.0, "hull_max": 12.0,
-    "order": { "type": "target_ship", "ship": 2, "attack": true }      // tag 联合：idle / move / target_ship / target_settlement
+    "order": { "type": "target_ship", "ship": 2, "attack": true }      // tag 联合：idle / move / target_ship / target_settlement / colonize
   }]
 }
 ```
 
-- `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`。
+- `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`colonize`。
 - `settlement_area` 非定居点天体为 `null`。
 - 引用一律用整数 id（`faction` / `body` / `city` / `ship`），名称字段便于直读。
 

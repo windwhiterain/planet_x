@@ -72,19 +72,29 @@ struct AgentCity {
     owner: FactionId,
     owner_name: String,
     population: u32,
-    defense: f64,
-    /// Ship class currently being built (建造点 queue).
-    building: String,
+    /// 被夷平为空白 (razed) — a city with no buildings, colonizable again.
+    razed: bool,
+    /// 城市总硬度 = Σ building armor (no separate city defense).
+    armor: f64,
+    /// Per-class ship production progress (建造区各舰型进度累加).
+    ship_progress: BTreeMap<String, f64>,
     buildings: Vec<AgentBuilding>,
 }
 
 #[derive(Serialize)]
 struct AgentBuilding {
+    id: BuildingId,
     kind: String,
+    /// 建筑自身属性: concrete 混凝土 | steel 钢结构.
+    structure: String,
     /// Mined resource display name, when this building mines one.
     resource: Option<String>,
+    /// Ship class produced, when this building is a 建造区.
+    ship_type: Option<String>,
     area: f64,
     deployed: f64,
+    armor: f64,
+    armor_max: f64,
 }
 
 #[derive(Serialize)]
@@ -108,6 +118,7 @@ enum AgentOrder {
     Move { position: [f64; 2] },
     TargetShip { ship: ShipId, attack: bool },
     TargetSettlement { city: CityId, bombard: bool },
+    Colonize { body: BodyId },
 }
 
 impl AgentState {
@@ -168,16 +179,22 @@ impl AgentState {
                 owner: c.faction_id,
                 owner_name: faction_name(state, c.faction_id),
                 population: c.population,
-                defense: r2(c.defense),
-                building: c.ship_build.target_class.clone(),
+                razed: c.razed,
+                armor: r2(c.buildings.iter().map(|b| b.armor).sum::<f64>()),
+                ship_progress: c.ship_progress.iter().map(|(k, v)| (k.clone(), r2(*v))).collect(),
                 buildings: c
                     .buildings
                     .iter()
                     .map(|b| AgentBuilding {
+                        id: b.id,
                         kind: b.kind.clone(),
+                        structure: b.structure.clone(),
                         resource: b.resource.as_ref().map(|r| config.resource_name(r)),
+                        ship_type: b.ship_type.clone(),
                         area: r2(b.area),
                         deployed: r2(b.deployed),
+                        armor: r2(b.armor),
+                        armor_max: r2(b.armor_max(config)),
                     })
                     .collect(),
             })
@@ -206,6 +223,7 @@ impl AgentState {
                     Some(ShipBehavior::TargetSettlement { city, bombard }) => {
                         AgentOrder::TargetSettlement { city, bombard }
                     }
+                    Some(ShipBehavior::Colonize { body }) => AgentOrder::Colonize { body },
                 },
             })
             .collect();

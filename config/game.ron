@@ -12,8 +12,10 @@
         war_threshold: -20.0,
         siege_range: 0.25,
         arrival_eps: 0.06,
-        defense_initial: 40.0,
-        defense_reset: 35.0,
+        // 建筑护甲每回合回修复比例。
+        armor_regen: 0.25,
+        // 刚殖民建立的新城最多占用定居点总面积的比例。
+        colony_footprint: 0.2,
     ),
     diplomacy: (
         attack_delta: -3.0,
@@ -32,6 +34,10 @@
         "methane":   (name: "甲烷"),
         "carbon":    (name: "碳"),
         "silicon":   (name: "硅"),
+    },
+    structures: {
+        "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
+        "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
     },
     ships: {
         "corvette": (
@@ -64,31 +70,34 @@
     },
     buildings: {
         "residential": (
-            label: "居住点",
+            label: "居住区",
             role: "housing",
             construction_speed: 1.0,
             build_cost: { "silicon": 0.3, "iron": 0.2 },
             staff_per_area: 0.0,
             productivity: 1.0,
             default_invest_weight: 1.5,
+            default_build_weight: 0.0,
         ),
         "mining": (
-            label: "开采点",
+            label: "开采区",
             role: "mining",
             construction_speed: 1.0,
             build_cost: { "iron": 0.4 },
             staff_per_area: 4.0,
             productivity: 1.0,
             default_invest_weight: 1.0,
+            default_build_weight: 0.0,
         ),
         "construction": (
-            label: "建造点",
+            label: "建造区",
             role: "shipyard",
             construction_speed: 0.8,
             build_cost: { "iron": 0.4, "carbon": 0.3, "silicon": 0.2 },
             staff_per_area: 6.0,
             productivity: 1.0,
             default_invest_weight: 0.8,
+            default_build_weight: 1.0,
         ),
     },
 )

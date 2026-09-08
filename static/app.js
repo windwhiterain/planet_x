@@ -56,6 +56,7 @@ function behaviorType(b) {
   if (b && b.Move) return 'move';
   if (b && b.TargetShip) return 'ship';
   if (b && b.TargetSettlement) return 'settlement';
+  if (b && b.Colonize) return 'colonize';
   return 'idle';
 }
 function behaviorSummary(b, world) {
@@ -66,6 +67,10 @@ function behaviorSummary(b, world) {
     case 'move': return '移动(' + (b.Move.position[0] | 0) + ',' + (b.Move.position[1] | 0) + ')';
     case 'ship': return '→' + shipName(b.TargetShip.ship) + (b.TargetShip.attack ? '·攻' : '');
     case 'settlement': return '→' + cityName(b.TargetSettlement.city) + (b.TargetSettlement.bombard ? '·轰' : '');
+    case 'colonize': {
+      const bd = world.bodies.find((x) => x.id === b.Colonize.body);
+      return '→' + (bd ? bd.name : '天体#' + b.Colonize.body) + '·殖民';
+    }
     default: return '待命';
   }
 }
@@ -74,6 +79,7 @@ function behaviorToInput(b) {
     case 'move': return { x: b.Move.position[0], y: b.Move.position[1] };
     case 'ship': return { ship: b.TargetShip.ship, attack: b.TargetShip.attack };
     case 'settlement': return { city: b.TargetSettlement.city, bombard: b.TargetSettlement.bombard };
+    case 'colonize': return { body: b.Colonize.body };
     default: return {};
   }
 }
@@ -82,6 +88,7 @@ function behaviorFromInput(type, d) {
     case 'move': return { Move: { position: [+d.x || 0, +d.y || 0] } };
     case 'ship': return { TargetShip: { ship: +d.ship || 0, attack: !!d.attack } };
     case 'settlement': return { TargetSettlement: { city: +d.city || 0, bombard: !!d.bombard } };
+    case 'colonize': return { Colonize: { body: +d.body || 0 } };
     default: return 'Idle';
   }
 }
@@ -108,10 +115,11 @@ const KIND = {
   faction:  { childMode: 'tabs', scope: 'factions', selectFaction: true },
   group:    { childMode: 'list', scope: null },
   body:     { childMode: 'tabs', scope: 'bodies' },
-  city:     { childMode: 'tabs', scope: 'cities' },
+  city:     { childMode: 'list', scope: 'cities' },
   ship:     { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
-  resource: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '预算/回合' },
-  building: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '权重' },
+  resource: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '投资预算/回合' },
+  conbudget:{ childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '建造预算/回合' },
+  building: { childMode: 'leaf', scope: 'leaf', editor: 'building' },
 };
 
 // Resolve the read/write accessors for a node's AI/玩家 toggle, or null if it
@@ -120,7 +128,7 @@ function scopeAccess(node) {
   const spec = KIND[node.kind] || {};
   const s = spec.scope;
   if (s === null || s === undefined) return null;
-  if (s === 'leaf') return { get: () => node.leaf.mode, set: (v) => { node.leaf.mode = v; } };
+  if (s === 'leaf') return node.leaf ? { get: () => node.leaf.mode, set: (v) => { node.leaf.mode = v; } } : null;
   if (s === 'global') return { get: () => edScope.global, set: (v) => { edScope.global = v; } };
   // s is a scope list key ('factions' | 'bodies' | 'cities')
   return {
@@ -143,6 +151,9 @@ async function init() {
 function buildEdits() {
   edControl = structuredClone(world.control || []);
   edScope = structuredClone(world.scope);
+  // Each faction holds a transient list of structural building commands
+  // (add / remove / modify). Cleared after every successful apply.
+  edControl.forEach((c) => { c.buildings = c.buildings || []; });
 }
 
 function setFaction(fid) {
@@ -156,7 +167,15 @@ function setFaction(fid) {
 function getControl(fid) {
   let c = edControl.find((x) => x.faction_id === fid);
   if (!c) {
-    c = { faction_id: fid, ship_orders: [], budget: [], invest_weights: [] };
+    c = {
+      faction_id: fid,
+      ship_orders: [],
+      investment_budget: [],
+      construction_budget: [],
+      invest_weights: [],
+      build_weights: [],
+      buildings: [],
+    };
     edControl.push(c);
   }
   return c;
@@ -173,11 +192,25 @@ function setScopeVal(list, id, val) {
 }
 
 function resName(r) { return meta.resources[r] ? meta.resources[r].name : r; }
-function buildingName(e) {
-  const city = world.cities.find((c) => c.id === e.city);
-  const cn = city ? city.name : '城#' + e.city;
-  const kn = meta.buildings[e.kind] ? meta.buildings[e.kind].label : e.kind;
-  return cn + '·' + kn + (e.resource ? '·' + resName(e.resource) : '');
+function structName(s) { return meta.structures[s] ? meta.structures[s].name : s; }
+function kindName(k) { return meta.buildings[k] ? meta.buildings[k].label : k; }
+function shipClassName(c) { return meta.ships[c] ? meta.ships[c].label : c; }
+
+// Look up a building's controllables within a faction's control view.
+function investLeaf(fc, city, bid) {
+  return (fc.invest_weights || []).find((e) => e.city === city && e.building === bid);
+}
+function buildLeaf(fc, city, bid) {
+  return (fc.build_weights || []).find((e) => e.city === city && e.building === bid);
+}
+// The naming for a building node, in the body->city->building story.
+function buildingLabel(b) {
+  let s = kindName(b.kind);
+  if (b.resource) s += '·' + resName(b.resource);
+  if (b.ship_type) s += '·' + shipClassName(b.ship_type);
+  s += '·' + structName(b.structure);
+  s += '×' + (b.deployed || 0).toFixed(1);
+  return s;
 }
 
 // --- main render ------------------------------------------------------------
@@ -272,14 +305,24 @@ function buildTree() {
       return { key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid };
     });
 
-    // budget resources of this faction (leaves)
-    const resLeaves = (fc.budget || []).map((e) => ({
-      key: 'res' + fid + ':' + e.resource,
+    // budgets of this faction (投资预算 / 建造预算 leaves)
+    const invLeaves = (fc.investment_budget || []).map((e) => ({
+      key: 'inv' + fid + ':' + e.resource,
       kind: 'resource',
       name: resName(e.resource),
       leaf: e,
       fid,
     }));
+    const conLeaves = (fc.construction_budget || []).map((e) => ({
+      key: 'con' + fid + ':' + e.resource,
+      kind: 'conbudget',
+      name: resName(e.resource),
+      leaf: e,
+      fid,
+    }));
+    const budgetKids = [];
+    if (invLeaves.length) budgetKids.push({ key: 'gi' + fid, kind: 'group', name: '投资预算', fid, children: invLeaves });
+    if (conLeaves.length) budgetKids.push({ key: 'gc' + fid, kind: 'group', name: '建造预算', fid, children: conLeaves });
 
     // bodies where this faction has cities -> cities -> buildings
     const bodyNodes = [];
@@ -291,11 +334,19 @@ function buildTree() {
         bn = { key: 'b' + fid + '-' + bid, kind: 'body', id: bid, name: (b ? b.name : '天体#' + bid), children: [], fid };
         bodyNodes.push(bn);
       }
-      const cn = { key: 'c' + ci.id, kind: 'city', id: ci.id, name: ci.name, children: [], fid };
-      (fc.invest_weights || []).forEach((e) => {
-        if (e.city === ci.id) {
-          cn.children.push({ key: 'iw' + e.city + ':' + e.kind + ':' + (e.resource || ''), kind: 'building', name: buildingName(e), leaf: e, fid });
-        }
+      const cn = { key: 'c' + ci.id, kind: 'city', id: ci.id, name: ci.name, children: [], fid, cityId: ci.id };
+      (ci.buildings || []).forEach((b) => {
+        cn.children.push({
+          key: 'bld' + fid + ':' + ci.id + ':' + b.id,
+          kind: 'building',
+          id: b.id,
+          name: buildingLabel(b),
+          leaf: investLeaf(fc, ci.id, b.id),
+          buildLeaf: buildLeaf(fc, ci.id, b.id),
+          b,
+          fid,
+          cityId: ci.id,
+        });
       });
       bn.children.push(cn);
     });
@@ -303,7 +354,7 @@ function buildTree() {
     // category tabs under a faction (only present categories)
     const cats = [];
     if (shipLeaves.length) cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: shipLeaves });
-    if (resLeaves.length) cats.push({ key: 'gr' + fid, kind: 'group', name: '资源', fid, children: resLeaves });
+    if (budgetKids.length) cats.push({ key: 'gbd' + fid, kind: 'group', name: '预算', fid, children: budgetKids });
     if (bodyNodes.length) cats.push({ key: 'gb' + fid, kind: 'group', name: '天体', fid, children: bodyNodes });
     fn.children = cats;
 
@@ -342,11 +393,10 @@ function renderNode(node) {
 
   // category group: stack ALL its children
   if (spec.childMode === 'list') {
-    if (hasKids) {
-      const kids = el('div', { class: 'tnode-kids' });
-      node.children.forEach((ch) => kids.appendChild(renderNode(ch)));
-      wrap.appendChild(kids);
-    }
+    const kids = el('div', { class: 'tnode-kids' });
+    if (hasKids) node.children.forEach((ch) => kids.appendChild(renderNode(ch)));
+    if (node.kind === 'city') kids.appendChild(addBuildingButton(node));
+    wrap.appendChild(kids);
     return wrap;
   }
 
@@ -379,6 +429,8 @@ function renderNode(node) {
     if (node.leaf.mode === 'Player') wrap.appendChild(shipEditor(node.leaf));
   } else if (spec.editor === 'value') {
     wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel));
+  } else if (spec.editor === 'building') {
+    wrap.appendChild(buildingEditor(node));
   }
   return wrap;
 }
@@ -409,7 +461,7 @@ function shipEditor(leaf) {
   const d = behaviorToInput(leaf.behavior);
 
   const typeSel = el('select');
-  [['idle', '待命'], ['move', '移动'], ['ship', '攻击舰'], ['settlement', '轰炸城']].forEach(([v, lbl]) => {
+  [['idle', '待命'], ['move', '移动'], ['ship', '攻击舰'], ['settlement', '轰炸城'], ['colonize', '殖民']].forEach(([v, lbl]) => {
     const o = el('option', { value: v }); o.textContent = lbl; o.selected = t === v; typeSel.appendChild(o);
   });
   typeSel.addEventListener('change', () => { leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
@@ -418,6 +470,13 @@ function shipEditor(leaf) {
   if (t === 'move') {
     edit.appendChild(inputNum('x', d.x, (v) => { d.x = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
     edit.appendChild(inputNum('y', d.y, (v) => { d.y = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
+  } else if (t === 'colonize') {
+    const bSel = el('select');
+    world.bodies.filter((x) => x.settlement_area != null).forEach((bd) => {
+      const o = el('option', { value: bd.id }); o.textContent = bd.name; o.selected = d.body === bd.id; bSel.appendChild(o);
+    });
+    bSel.addEventListener('change', () => { d.body = +bSel.value; leaf.behavior = behaviorFromInput(t, d); renderTree(); });
+    edit.appendChild(bSel);
   } else if (t === 'ship') {
     edit.appendChild(inputNum('舰#', d.ship, (v) => { d.ship = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
     const l = el('label'); l.textContent = '攻';
@@ -452,6 +511,101 @@ function leafValueEditor(leaf, label) {
   inp.addEventListener('input', () => { if (!inp.disabled) leaf.value = +inp.value || 0; });
   wrap.appendChild(t);
   wrap.appendChild(inp);
+  return wrap;
+}
+
+// --- building editor helpers ------------------------------------------------
+function optSelect(metaMap, keys, value, onChange) {
+  const s = el('select');
+  keys.forEach((k) => {
+    const o = el('option', { value: k });
+    const m = metaMap[k];
+    o.textContent = m ? (m.name || m.label || k) : k;
+    o.selected = k === value;
+    s.appendChild(o);
+  });
+  s.value = value || keys[0];
+  s.addEventListener('change', () => onChange(s.value));
+  return s;
+}
+function labelWrap(label, control) {
+  const w = el('span', { class: 'leaf-val' });
+  w.appendChild(el('span', { class: 'lv-label' }, label + ' '));
+  w.appendChild(control);
+  return w;
+}
+// Queue a structural building modify patch on a faction's control entry.
+function pushModify(fid, cityId, bid, attrs) {
+  const fc = getControl(fid);
+  const i = fc.buildings.findIndex((p) => p.building === bid && !p.remove);
+  if (i >= 0) fc.buildings[i] = Object.assign({}, fc.buildings[i], attrs, { city: cityId, building: bid });
+  else fc.buildings.push(Object.assign({ city: cityId, building: bid }, attrs));
+}
+
+function buildingEditor(node) {
+  const wrap = el('div', { class: 'ship-editor' });
+  const b = node.b;
+  const fid = node.fid;
+  const cityId = node.cityId;
+
+  // structure attribute (混凝土 / 钢结构) — a building's own attribute.
+  wrap.appendChild(labelWrap('结构', optSelect(meta.structures, Object.keys(meta.structures || {}), b.structure, (v) => {
+    b.structure = v;
+    pushModify(fid, cityId, b.id, { structure: v });
+    renderTree();
+  })));
+
+  // shipyard (建造区): the ship class it produces + its 建造投资权重.
+  const spec = meta.buildings[b.kind];
+  if (spec && spec.role === 'shipyard') {
+    wrap.appendChild(labelWrap('舰型', optSelect(meta.ships, Object.keys(meta.ships || {}), b.ship_type, (v) => {
+      b.ship_type = v;
+      pushModify(fid, cityId, b.id, { ship_type: v });
+      renderTree();
+    })));
+    if (node.buildLeaf) wrap.appendChild(leafValueEditor(node.buildLeaf, '建造权重'));
+  }
+
+  if (node.leaf) wrap.appendChild(leafValueEditor(node.leaf, '建设权重'));
+
+  const rm = el('button', { class: 'rm' }, '移除');
+  rm.addEventListener('click', () => {
+    const fc = getControl(fid);
+    fc.buildings.push({ city: cityId, building: b.id, remove: true });
+    applyControl();
+  });
+  wrap.appendChild(rm);
+  return wrap;
+}
+
+function addBuildingButton(node) {
+  const wrap = el('div', { class: 'add-bld' });
+  wrap.appendChild(el('span', { class: 'tnode-label', style: 'font-weight:600' }, '+ 新建'));
+
+  const buildKeys = Object.keys(meta.buildings || {});
+  const kindSel = optSelect(meta.buildings, buildKeys, 'mining', () => {});
+  const structSel = optSelect(meta.structures, Object.keys(meta.structures || {}), 'concrete', () => {});
+  const shipSel = optSelect(meta.ships, Object.keys(meta.ships || {}), (Object.keys(meta.ships || {})[0] || 'corvette'), () => {});
+  const resSel = optSelect(meta.resources, Object.keys(meta.resources || {}), (Object.keys(meta.resources || {})[0] || 'iron'), () => {});
+  const areaInp = el('input', { type: 'number', class: 'num', value: '4', step: '1' });
+
+  wrap.appendChild(kindSel);
+  wrap.appendChild(structSel);
+  wrap.appendChild(shipSel);
+  wrap.appendChild(resSel);
+  wrap.appendChild(labelWrap('面积', areaInp));
+
+  const add = el('button', {}, '添加');
+  add.addEventListener('click', () => {
+    const kind = kindSel.value;
+    const fc = getControl(node.fid);
+    const patch = { city: node.cityId, building: null, kind, structure: structSel.value, area: +areaInp.value || 4 };
+    if (kind === 'mining') patch.resource = resSel.value;
+    if (kind === 'construction') patch.ship_type = shipSel.value;
+    fc.buildings.push(patch);
+    applyControl();
+  });
+  wrap.appendChild(add);
   return wrap;
 }
 

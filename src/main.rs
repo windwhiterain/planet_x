@@ -180,7 +180,8 @@ fn apply_diff(state: &mut State, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
-    web::apply_patch(state, &value)
+    let config = load_config();
+    web::apply_patch(state, &config, &value)
 }
 
 fn print_state(state: &State, config: &GameConfig) {
@@ -310,7 +311,7 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
             }
 
             // --- entity lists ---------------------------------------------------
-            "cities" => print_query(state, config, ".cities[] | {id,name,body,owner_name,population,defense,building}"),
+            "cities" => print_query(state, config, ".cities[] | {id,name,body,owner_name,population,razed,armor,ship_progress}"),
             "ships" => print_query(state, config, ".ships[] | {id,name,class,owner_name,position,hull,hull_max,order}"),
             "factions" => print_query(state, config, ".factions[] | {id,name,resources,wars}"),
             "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlement_area}"),

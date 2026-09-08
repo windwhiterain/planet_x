@@ -70,18 +70,43 @@ fn settlement(total_area: f64, ecocap: f64, speed: f64, res_mod: f64, resources:
     }
 }
 
+/// Build a single building allocation with the district attributes it carries
+/// (kind, mined resource, shipyard ship_type, structure) and initial armor.
+fn new_building(
+    id: BuildingId,
+    kind: &str,
+    resource: Option<String>,
+    ship_type: Option<String>,
+    structure: &str,
+    area: f64,
+    deployed: f64,
+    config: &GameConfig,
+) -> Building {
+    let armor = deployed * config.structure_spec(structure).armor_per_area;
+    Building {
+        id,
+        kind: kind.to_string(),
+        resource,
+        ship_type,
+        structure: structure.to_string(),
+        area,
+        deployed,
+        armor,
+    }
+}
+
 /// Seed a city's initial building footprint from its settlement's deposits,
 /// sized so population is housed and a bit of mining/industry is up and running.
-fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
+fn seed_buildings(s: &Settlement, population: u32, ship_class: &str, config: &GameConfig, next_id: &mut BuildingId) -> Vec<Building> {
     let mut buildings = Vec::new();
+    let mut alloc = |kind: &str, resource: Option<String>, ship_type: Option<String>, area: f64, deployed: f64| -> Building {
+        let b = new_building(*next_id, kind, resource, ship_type, "concrete", area, deployed, config);
+        *next_id += 1;
+        b
+    };
 
     let resid = (population as f64 / s.ecological_capacity).max(4.0);
-    buildings.push(Building {
-        kind: "residential".to_string(),
-        resource: None,
-        area: resid,
-        deployed: resid,
-    });
+    buildings.push(alloc("residential", None, None, resid, resid));
 
     let construction = (s.total_area * 0.15).clamp(3.0, 10.0);
     let mut budget = (s.total_area - resid - construction).max(0.0);
@@ -91,21 +116,11 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
         }
         let area = d.area.min(budget);
         if area > 0.0 {
-            buildings.push(Building {
-                kind: "mining".to_string(),
-                resource: Some(d.resource.clone()),
-                area,
-                deployed: area,
-            });
+            buildings.push(alloc("mining", Some(d.resource.clone()), None, area, area));
             budget -= area;
         }
     }
-    buildings.push(Building {
-        kind: "construction".to_string(),
-        resource: None,
-        area: construction,
-        deployed: construction,
-    });
+    buildings.push(alloc("construction", None, Some(ship_class.to_string()), construction, construction));
     buildings
 }
 
@@ -117,19 +132,21 @@ fn city(
     population: u32,
     settlement: &Settlement,
     ship_class: &str,
+    config: &GameConfig,
+    next_id: &mut BuildingId,
 ) -> City {
+    let buildings = seed_buildings(settlement, population, ship_class, config, next_id);
+    let mut ship_progress = BTreeMap::new();
+    ship_progress.insert(ship_class.to_string(), 0.0);
     City {
         id,
         name: name.to_string(),
         body_id,
         faction_id: faction,
         population,
-        buildings: seed_buildings(settlement, population),
-        ship_build: ShipBuild {
-            progress: 0.0,
-            target_class: ship_class.to_string(),
-        },
-        defense: 40.0,
+        buildings,
+        ship_progress,
+        razed: false,
     }
 }
 
@@ -379,16 +396,17 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let haumea = bodies[12].settlement.as_ref().unwrap();
     let ixion = bodies[14].settlement.as_ref().unwrap();
 
+    let mut next_building_id: BuildingId = 0;
     let cities = vec![
-        city(0, "长三角城市群", 2, F_CN, 1400, earth, "corvette"),
-        city(1, "珠三角城市群", 2, F_CN, 1100, earth, "cruiser"),
-        city(2, "奥林匹斯港", 3, F_US, 1000, mars, "cruiser"),
-        city(3, "盖亚站", 3, F_UN, 600, mars, "corvette"),
-        city(4, "谷神星采矿站", 4, F_MINING, 500, ceres, "transport"),
-        city(5, "冥王星前哨", 9, F_RU, 360, pluto, "corvette"),
-        city(6, "埃里斯前哨", 11, F_SCIENCE, 240, eris, "corvette"),
-        city(7, "妊神星转运站", 12, F_TRANSPORT, 280, haumea, "transport"),
-        city(8, "伊克西翁圣所", 14, F_CULT, 200, ixion, "cruiser"),
+        city(0, "长三角城市群", 2, F_CN, 1400, earth, "corvette", config, &mut next_building_id),
+        city(1, "珠三角城市群", 2, F_CN, 1100, earth, "cruiser", config, &mut next_building_id),
+        city(2, "奥林匹斯港", 3, F_US, 1000, mars, "cruiser", config, &mut next_building_id),
+        city(3, "盖亚站", 3, F_UN, 600, mars, "corvette", config, &mut next_building_id),
+        city(4, "谷神星采矿站", 4, F_MINING, 500, ceres, "transport", config, &mut next_building_id),
+        city(5, "冥王星前哨", 9, F_RU, 360, pluto, "corvette", config, &mut next_building_id),
+        city(6, "埃里斯前哨", 11, F_SCIENCE, 240, eris, "corvette", config, &mut next_building_id),
+        city(7, "妊神星转运站", 12, F_TRANSPORT, 280, haumea, "transport", config, &mut next_building_id),
+        city(8, "伊克西翁圣所", 14, F_CULT, 200, ixion, "cruiser", config, &mut next_building_id),
     ];
 
     // --- Starting navy ------------------------------------------------------
@@ -425,12 +443,18 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 
     // --- 可控状态 (command-controlled state) --------------------------------
     // Populate each faction's controllable state from the config: per-round
-    // investment budget, default per-building invest weights, and an idle
-    // behavior for every starting ship.
+    // investment (建设) and construction (建造) budgets, default per-building
+    // invest/build weights, and an idle behavior for every starting ship.
     let mut control: BTreeMap<FactionId, ControllableState> = BTreeMap::new();
     for f in &factions {
         let mut c = ControllableState::default();
-        c.budget = f
+        c.investment_budget = f
+            .resources
+            .iter()
+            .map(|(k, v)| (k.clone(), Control::ai(*v * config.economy.invest_fraction)))
+            .collect();
+        // 建造预算默认与投资预算相等，作为造舰的资金池。
+        c.construction_budget = f
             .resources
             .iter()
             .map(|(k, v)| (k.clone(), Control::ai(*v * config.economy.invest_fraction)))
@@ -440,9 +464,14 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     for city in &cities {
         let c = control.entry(city.faction_id).or_default();
         for b in &city.buildings {
-            let key = (city.id, b.kind.clone(), b.resource.clone());
+            let ikey = (city.id, b.id);
             c.invest_weights
-                .insert(key, Control::ai(config.building_spec(&b.kind).default_invest_weight));
+                .insert(ikey, Control::ai(config.building_spec(&b.kind).default_invest_weight));
+            if b.is_shipyard() {
+                let bkey = (city.id, b.id);
+                c.build_weights
+                    .insert(bkey, Control::ai(config.building_spec(&b.kind).default_build_weight));
+            }
         }
     }
     for s in &ships {
