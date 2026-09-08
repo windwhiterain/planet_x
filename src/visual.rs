@@ -108,7 +108,7 @@ pub fn render_map(state: &State) -> String {
     }
     for s in &state.ships {
         if let Some((c, r)) = map_to_grid([tx(s.position[0]), tx(s.position[1])], minx, spanx, maxy, spany) {
-            let ch = state.faction(s.faction_id).map(|f| f.color).unwrap_or('?');
+            let ch = state.faction(s.faction_id).map(|f| f.symbol).unwrap_or('?');
             let color = faction_color(s.faction_id);
             put(&mut grid, c, r, ch.to_string().color(color).to_string());
         }
@@ -144,7 +144,7 @@ fn render_legend(state: &State) -> String {
         .map(|f| {
             format!(
                 "{}=[{}]",
-                f.color.to_string().color(faction_color(f.id)),
+                f.symbol.to_string().color(faction_color(f.id)),
                 f.name
             )
         })
@@ -282,7 +282,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
         t.add_row(vec![
             cell(format!(
                 "{}=[{}]",
-                f.color.to_string().color(faction_color(f.id)),
+                f.symbol.to_string().color(faction_color(f.id)),
                 f.name
             )),
             cell(fmt_resource_map(config, &f.resources)),

@@ -137,11 +137,12 @@ fn stockpile(items: &[(&str, f64)]) -> ResourceMap {
     items.iter().map(|(k, v)| (k.to_string(), *v)).collect()
 }
 
-fn faction(id: FactionId, name: &str, color: char, resources: ResourceMap) -> Faction {
+fn faction(id: FactionId, name: &str, symbol: char, color: &str, resources: ResourceMap) -> Faction {
     Faction {
         id,
         name: name.to_string(),
-        color,
+        symbol,
+        color: color.to_string(),
         resources,
         relations: std::collections::BTreeMap::new(),
     }
@@ -299,48 +300,55 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 
     // --- Factions -----------------------------------------------------------
     let mut factions = vec![
-        faction(F_UN, "联合国", 'U', stockpile(&[("iron", 4.0), ("carbon", 4.0)])),
+        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0)])),
         faction(
             F_US,
             "美国",
             'A',
+            "#06b6d4",
             stockpile(&[("iron", 6.0), ("carbon", 5.0), ("uranium", 1.0)]),
         ),
-        faction(F_EU, "欧盟", 'E', stockpile(&[("iron", 5.0), ("carbon", 5.0)])),
+        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0)])),
         faction(
             F_CN,
             "中国",
             'C',
+            "#ef4444",
             stockpile(&[("iron", 7.0), ("carbon", 6.0), ("silicon", 2.0)]),
         ),
         faction(
             F_RU,
             "俄罗斯",
             'R',
+            "#ec4899",
             stockpile(&[("iron", 5.0), ("carbon", 4.0), ("uranium", 2.0)]),
         ),
         faction(
             F_MINING,
             "星系矿业",
             'M',
+            "#eab308",
             stockpile(&[("iron", 6.0), ("gold", 2.0), ("platinum", 1.0)]),
         ),
         faction(
             F_SCIENCE,
             "无国界科学组织",
             'S',
+            "#22c55e",
             stockpile(&[("silicon", 4.0), ("helium3", 3.0), ("carbon", 2.0)]),
         ),
         faction(
             F_TRANSPORT,
             "深空运输联盟",
             'T',
+            "#f8fafc",
             stockpile(&[("carbon", 6.0), ("hydrogen", 3.0), ("iron", 2.0)]),
         ),
         faction(
             F_CULT,
             "行星X崇拜教",
             'X',
+            "#d946ef",
             stockpile(&[("uranium", 3.0), ("thorium", 2.0), ("gold", 1.0)]),
         ),
     ];

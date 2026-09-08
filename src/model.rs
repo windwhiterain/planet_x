@@ -245,7 +245,11 @@ pub struct City {
 pub struct Faction {
     pub id: FactionId,
     pub name: String,
-    pub color: char,
+    /// Marker glyph on the CLI ASCII map (e.g. 'U').
+    pub symbol: char,
+    /// Display colour (CSS hex string) shown in the web UI, defined directly
+    /// on the faction itself.
+    pub color: String,
     /// Stockpiled resources (key -> amount).
     pub resources: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
