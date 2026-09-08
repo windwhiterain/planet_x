@@ -251,6 +251,8 @@ enum AgentOrder {
     Move { position: [f64; 2] },
     TargetShip { ship: ShipId, attack: bool },
     TargetSettlement { city: CityId, bombard: bool },
+    Dock { body: BodyId },
+    None,
     Colonize { body: BodyId },
 }
 
@@ -365,6 +367,7 @@ impl AgentState {
                 hull_max: r2(config.ship_spec(&s.class).hull),
                 order: match state.ship_behavior(s.id) {
                     Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
+                    Some(ShipBehavior::None) => AgentOrder::None,
                     Some(ShipBehavior::Move { position }) => AgentOrder::Move {
                         position: [r2(position[0]), r2(position[1])],
                     },
@@ -374,6 +377,7 @@ impl AgentState {
                     Some(ShipBehavior::TargetSettlement { city, bombard }) => {
                         AgentOrder::TargetSettlement { city, bombard }
                     }
+                    Some(ShipBehavior::Dock { body }) => AgentOrder::Dock { body },
                     Some(ShipBehavior::Colonize { body }) => AgentOrder::Colonize { body },
                 },
             })
