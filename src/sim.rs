@@ -837,6 +837,69 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             );
         }
     }
+    // 威胁响应（整支舰队随威胁重构）：战时把过度生产的「轻舰」船坞按战况重定向到更重/更
+    // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
+    let retool_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    for fid in retool_ids {
+        retool_shipyards(state, config, fid, rng);
+    }
+}
+
+/// 威胁响应（海军随威胁重构）：交战中，若某势力的舰队被单一舰型统治（占比 > `over_share`），
+/// 就把它产出该舰型的最小 id 船坞重定向到 `choose_next_class` 选出的**战局感知新舰型**
+/// （战争加分——多造重舰；去重加分——避免单调）。和平时不重定向（船坞保持生产既有舰型）。
+/// 每次至多重定向一个船坞、且只在明显过度生产时触发，避免抖振。确定性（seeded RNG）。
+fn retool_shipyards(state: &mut State, config: &GameConfig, fid: FactionId, rng: &mut Prng) {
+    if !faction_at_war(state, config, fid) {
+        return;
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total = 0usize;
+    for s in &state.ships {
+        if s.faction_id == fid && s.hull > 0.0 {
+            *counts.entry(s.class.clone()).or_insert(0) += 1;
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return;
+    }
+    let (over_class, over_count) = counts.iter().max_by_key(|(_, n)| **n).map(|(k, n)| (k.clone(), *n)).unwrap();
+    // 舰队不是被单一舰型**严重**统治就不重定向（保守：只在极度单一时触发，避免扰动
+    // 权力平衡与「霸权→联盟」的合纵连横节奏）。
+    if (over_count as f64) / (total as f64) < 0.60 {
+        return;
+    }
+    let new_class = choose_next_class(state, fid, config, rng);
+    if new_class == over_class {
+        return;
+    }
+    // 找到产出 over_class 的最小 id 船坞（按城市 id、再按建筑 id）。
+    let mut target: Option<(CityId, BuildingId)> = None;
+    for c in &state.cities {
+        if c.faction_id != fid {
+            continue;
+        }
+        for b in &c.buildings {
+            if b.is_shipyard() && b.ship_type.as_deref() == Some(over_class.as_str()) {
+                target = Some((c.id, b.id));
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    if let Some((cid, bid)) = target {
+        if let Some(c) = state.city_mut(cid) {
+            for b in &mut c.buildings {
+                if b.id == bid {
+                    b.ship_type = Some(new_class.clone());
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3456,6 +3519,41 @@ mod tests {
         assert!(
             war > peace,
             "at war the AI should build more heavy hulls (war {war} > peace {peace})"
+        );
+    }
+
+    /// 威胁响应（海军随威胁重构）：交战中，被单一舰型过度统治的势力会把一个船坞重定向到
+    /// 战局感知的新舰型（多造重舰），让威胁响应作用于整支舰队而不仅是新建舰厂。
+    #[test]
+    fn war_retools_over_abundant_shipyard_toward_a_war_class() {
+        let (config, mut state) = fresh_world(42);
+        let shipyard_types = |st: &State, f: FactionId| -> std::collections::BTreeSet<(CityId, String)> {
+            st.cities
+                .iter()
+                .filter(|c| c.faction_id == f)
+                .flat_map(|c| {
+                    c.buildings
+                        .iter()
+                        .filter(|b| b.is_shipyard() && b.ship_type.is_some())
+                        .map(|b| (c.id, b.ship_type.clone().unwrap()))
+                })
+                .collect()
+        };
+        // China (3) 舰队全护卫（过度单一），并让其与 US (1) 交战。
+        for s in state.ships.iter_mut() {
+            if s.faction_id == 3 {
+                s.class = "corvette".to_string();
+            }
+        }
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let before = shipyard_types(&state, 3);
+        let mut rng = Prng::new(7);
+        retool_shipyards(&mut state, &config, 3, &mut rng);
+        let after = shipyard_types(&state, 3);
+        assert!(
+            after.iter().any(|(_, t)| t != "corvette"),
+            "a corvette-dominated wartime fleet should retool a shipyard into a war class; before={before:?} after={after:?}"
         );
     }
 
