@@ -382,3 +382,45 @@ fn probe_sanction() {
         println!("seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}");
     }
 }
+
+/// 观测：在最高城占那一回合，最强势力各城到其首都的距离分布（看峰值是「紧凑区域帝国」
+/// 还是「四处扩张」造成的——据此判断过度扩张制裁是否有效）。`--ignored`。
+#[test]
+#[ignore]
+fn probe_peak() {
+    let config = load_config();
+    for seed in [1u64, 42, 12345] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let (mut peak_top, mut peak_share, mut peak_round) = (0u32, 0.0f64, 0u32);
+        for _ in 0..1200u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            let (top, share) = top_city_share(&state);
+            if share > peak_share {
+                peak_share = share;
+                peak_top = top;
+                peak_round = state.round;
+            }
+        }
+        // Re-run to the peak round and dump the leader's cities.
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        for _ in 0..peak_round {
+            sim::advance(&mut state, &config, &mut rng);
+        }
+        let mut ds: Vec<f64> = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == peak_top && !c.razed)
+            .map(|c| planet_x::agent::governance_distance(&state, peak_top, c.body_id))
+            .collect();
+        ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let far = ds.iter().filter(|&&d| d > 18.0).count();
+        println!(
+            "seed {seed}: peak r{peak_round} top={peak_top} share={peak_share:.3} cities={} dist_range=[{:?} .. {:?}] far(>18)={far}",
+            ds.len(),
+            ds.first().copied().unwrap_or(0.0),
+            ds.last().copied().unwrap_or(0.0)
+        );
+    }
+}

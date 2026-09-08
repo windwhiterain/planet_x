@@ -273,11 +273,13 @@
     对霸权的关系骤降 `collective_defense_delta`——「攻其一方 = 与全体为敌」，弱者联盟
     群起而攻之。此时结盟势力的舰只**优先集火该霸权**（`sim::coalition_war_focus` 接
     `nearest_enemy_ship`/`pick_target`），使集体防御真的打得赢（不再是各自就近乱打）。
-  - **经济制裁**：当一个反制联盟（≥ `min_members` 个疏远成员）成立时，被封锁的霸权的
-    自动市场交易额度按 `sanction_trade_mult`（如 0.3）缩水——它难以再靠市场兑换短缺
-    矿物（铀/氦-3/铂），产业受抑，形成「多国资源封锁 & 资源失衡」；同时其**维持帝国
-    （行政 + 娱乐）的成本按 `sanction_cost_mult`（如 1.45）放大**——被孤立的大国要花
-    更多资源养边地、治安成本上升，远端/边缘殖民地更难养、更易离心叛乱，体量自然回落。
+  - **经济制裁**：只要某势力**已称霸（实力占比达标）且至少有一个弱者倒向联盟**（关系 ≤
+    `coalition_estrange`），就被多国封锁——不必等联盟完全成形（`sim::sanctioned_hegemon`）。
+    被封锁的霸权的自动市场交易额度按 `sanction_trade_mult`（如 0.3）缩水——它难以再靠
+    市场兑换短缺矿物（铀/氦-3/铂），产业受抑，形成「多国资源封锁 & 资源失衡」；同时其
+    **维持帝国（行政 + 娱乐）的成本按 `sanction_cost_mult`（如 1.45）放大**——被孤立的
+    大国要花更多资源养边地、治安成本上升，远端/边缘殖民地更难养、更易离心叛乱，体量
+    自然回落。
 - 事件：联盟成立/解体记为 `CoalitionFormed`/`CoalitionEnded`（`members` 为成员）。当前
   格局（`hegemon`/`members`/`power_share`）暴露在 agent 的每回合 `coalition` 字段与
   `meta` 的 `balance` 配置里，供 AI 读出「谁在出头、谁在联合制衡」；每座城还带 `loyalty` 与 `gov_distance`（到首都距离），

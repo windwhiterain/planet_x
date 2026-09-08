@@ -615,7 +615,7 @@ fn faction_name(state: &State, id: FactionId) -> String {
 
 /// 一座城（其宿主天体 `body_id`）到其统治势力首都天体的距离（AU）——可读的治理压力
 /// 信号：越远，管理越难、忠诚越易跌破叛变阈值。无主/首都缺失时返回 0。
-fn governance_distance(state: &State, owner: FactionId, body_id: BodyId) -> f64 {
+pub fn governance_distance(state: &State, owner: FactionId, body_id: BodyId) -> f64 {
     let Some(capital) = state.faction(owner).map(|f| f.capital_body) else { return 0.0 };
     let bpos = state.body_position(body_id);
     let cpos = state.body_position(capital);

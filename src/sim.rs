@@ -364,11 +364,12 @@ fn step_market(state: &mut State, config: &GameConfig) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
-    // 经济制裁：若有一个活跃反制联盟针对某个「霸权」，该霸权被多国资源封锁，其自动
-    // 市场交易额度按 `sanction_trade_mult` 缩水——难以靠市场兑换短缺矿物，产业受抑。
-    let sanctioned_hegemon = active_coalition_hegemon(state, config);
+    // 经济制裁：若有一个已「坐大」的霸权（实力占比达标且至少一弱者倒向联盟），该霸权
+    // 被多国资源封锁，其自动市场交易额度按 `sanction_trade_mult` 缩水——难以靠市场兑换
+    // 短缺矿物，产业受抑。
+    let sanctioned = sanctioned_hegemon(state, config);
     let trade_limit_of = |fid: FactionId| -> f64 {
-        if sanctioned_hegemon == Some(fid) {
+        if sanctioned == Some(fid) {
             m.auto_trade_limit * config.balance.sanction_trade_mult
         } else {
             m.auto_trade_limit
@@ -1890,10 +1891,10 @@ fn coalition_of(state: &State, config: &GameConfig, hegemon: FactionId, members:
         .collect()
 }
 
-/// 当前一个活跃反制联盟针对的「霸权」：某势力综合实力占比达阈值，且已有 ≥
-/// [`BalanceOfPowerConfig::min_members`] 个非霸权势力结成对它的反制联盟。返回该霸权
-/// id；无则返回 `None`。用于经济制裁判定（市场限制）与政治上报。
-pub(crate) fn active_coalition_hegemon(state: &State, config: &GameConfig) -> Option<FactionId> {
+/// 当前综合实力占比最高的「霸权」及其已倒向联盟的成员（关系 ≤ `coalition_estrange`）。
+/// 只负责判定「谁是最强、谁在抱团」，实力占比未达 [`BalanceOfPowerConfig::hegemon_power`]
+/// 时返回 `None`。
+fn dominant_hegemon(state: &State, config: &GameConfig) -> Option<(FactionId, Vec<FactionId>)> {
     let b = &config.balance;
     if b.hegemon_power > 1.0 {
         return None;
@@ -1912,18 +1913,32 @@ pub(crate) fn active_coalition_hegemon(state: &State, config: &GameConfig) -> Op
         return None;
     }
     let members: Vec<FactionId> = ids.iter().cloned().filter(|x| *x != hegemon).collect();
-    if coalition_of(state, config, hegemon, &members).len() >= b.min_members {
-        Some(hegemon)
-    } else {
-        None
-    }
+    let estranged = coalition_of(state, config, hegemon, &members);
+    Some((hegemon, estranged))
 }
 
-/// 经济制裁的「治理代价」倍率：若 `fid` 正是被活跃反制联盟锁定的霸权，则其维持帝国
+/// 当前一个活跃反制联盟（≥ [`BalanceOfPowerConfig::min_members`] 个疏远成员）针对的
+/// 「霸权」；用于政治上报（`coalition` 字段）与联盟跃迁事件。
+pub(crate) fn active_coalition_hegemon(state: &State, config: &GameConfig) -> Option<FactionId> {
+    dominant_hegemon(state, config)
+        .filter(|(_, m)| m.len() >= config.balance.min_members)
+        .map(|(h, _)| h)
+}
+
+/// 经济制裁针对的「霸权」：只要势力**已称霸（实力占比达标）且至少有一个弱者倒向联盟**
+/// 就实施封锁——不必等联盟完全成形。这使「人缘好但已坐大」的紧凑区域帝国也能被压缩
+/// （否则它不招人恨就没人封锁它），且比 war 更拟真、不引发夷平/僵尸。
+fn sanctioned_hegemon(state: &State, config: &GameConfig) -> Option<FactionId> {
+    dominant_hegemon(state, config)
+        .filter(|(_, m)| !m.is_empty())
+        .map(|(h, _)| h)
+}
+
+/// 经济制裁的「治理代价」倍率：若 `fid` 正是被经济封锁的霸权，则其维持帝国
 /// （行政 + 娱乐）的成本按 `sanction_cost_mult` 放大；否则 1.0（不碰别国）。这使被
 /// 多国封锁的大国要花更多资源维持领地与治安——边缘殖民地更难养、更易离心。
 fn sanction_cost_mult(state: &State, config: &GameConfig, fid: FactionId) -> f64 {
-    if active_coalition_hegemon(state, config) == Some(fid) {
+    if sanctioned_hegemon(state, config) == Some(fid) {
         config.balance.sanction_cost_mult
     } else {
         1.0
