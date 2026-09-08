@@ -70,6 +70,7 @@
             build_cost: { "silicon": 0.3, "iron": 0.2 },
             staff_per_area: 0.0,
             productivity: 1.0,
+            default_invest_weight: 1.5,
         ),
         "mining": (
             label: "开采点",
@@ -78,6 +79,7 @@
             build_cost: { "iron": 0.4 },
             staff_per_area: 4.0,
             productivity: 1.0,
+            default_invest_weight: 1.0,
         ),
         "construction": (
             label: "建造点",
@@ -86,6 +88,7 @@
             build_cost: { "iron": 0.4, "carbon": 0.3, "silicon": 0.2 },
             staff_per_area: 6.0,
             productivity: 1.0,
+            default_invest_weight: 0.8,
         ),
     },
 )

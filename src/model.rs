@@ -143,19 +143,23 @@ pub struct Body {
     pub id: BodyId,
     pub name: String,
     pub orbit: Orbit,
+    /// 当前位置 (current position in AU, recomputed each round from `orbit`).
+    pub position: [f64; 2],
     pub settlement: Option<Settlement>,
 }
 
 /// A single continuous-area building allocation on a city. Not an atom:
 /// `area` is the planned extent and `deployed` is how much is actually built.
 /// `kind` is a config key (open-ended), and a mining building carries the
-/// mined resource key in `resource`.
+/// mined resource key in `resource`. `invest_weight` is the command-controlled
+/// priority used to ration the faction's construction budget.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Building {
     pub kind: String,
     pub resource: Option<String>,
     pub area: f64,
     pub deployed: f64,
+    pub invest_weight: f64,
 }
 
 impl Building {
@@ -235,6 +239,9 @@ pub struct Faction {
     pub color: char,
     /// Stockpiled resources (key -> amount).
     pub resources: ResourceMap,
+    /// 各类资源预算（资源/时间）: per-round investment budget, command-controlled.
+    /// The faction's policy recomputes this each round.
+    pub budget: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
     pub relations: BTreeMap<FactionId, f64>,
 }
@@ -281,11 +288,10 @@ impl State {
         self.factions.iter_mut().find(|f| f.id == id)
     }
 
-    /// Resolve the current world position of a body, as a plain AU pair.
+    /// Resolve the current world position of a body. Uses the stored
+    /// `position` field, which the simulation keeps current.
     pub fn body_position(&self, id: BodyId) -> [f64; 2] {
-        self.body(id)
-            .map(|b| b.orbit.position(self.time_month as f32))
-            .unwrap_or([0.0, 0.0])
+        self.body(id).map(|b| b.position).unwrap_or([0.0, 0.0])
     }
 }
 
@@ -385,4 +391,6 @@ pub struct BuildingSpec {
     pub staff_per_area: f64,
     /// 幸福度/生产效率修正 (productivity multiplier).
     pub productivity: f64,
+    /// Default 建设投资权重 for buildings of this kind.
+    pub default_invest_weight: f64,
 }

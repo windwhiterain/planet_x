@@ -20,6 +20,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Vec<St
     state.round += 1;
     state.time_month += 1.0;
 
+    // Update each body's current position (当前位置) from its orbit.
+    for b in &mut state.bodies {
+        b.position = b.orbit.position(state.time_month as f32);
+    }
+
     let mut events = Vec::new();
     step_production(state, config);
     step_construction(state, config, rng, &mut events);
@@ -239,19 +244,23 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, eve
     let mut next_ship_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
 
     for fid in faction_ids {
-        // Command-controlled per-round construction budget.
-        let limit: ResourceMap = state
+        // Command-controlled per-round investment budget (各类资源预算), stored
+        // on the faction and used as this round's construction spending cap.
+        let budget: ResourceMap = state
             .faction(fid)
             .unwrap()
             .resources
             .iter()
             .map(|(rt, v)| (rt.clone(), *v * config.economy.invest_fraction))
             .collect();
+        if let Some(f) = state.faction_mut(fid) {
+            f.budget = budget.clone();
+        }
         let mut spent: ResourceMap = ResourceMap::new();
 
         let city_ids: Vec<CityId> = state.cities.iter().filter(|c| c.faction_id == fid).map(|c| c.id).collect();
         for cid in city_ids {
-            next_ship_id = build_city(state, config, cid, fid, &limit, &mut spent, &mut next_ship_id, rng, events);
+            next_ship_id = build_city(state, config, cid, fid, &budget, &mut spent, &mut next_ship_id, rng, events);
         }
     }
 }
@@ -301,7 +310,7 @@ fn build_city(
             .unwrap_or(0.0)
     }
 
-    fn raise_area(buildings: &mut Vec<Building>, kind: &str, resource: Option<&str>, add: f64) {
+    fn raise_area(buildings: &mut Vec<Building>, kind: &str, resource: Option<&str>, add: f64, config: &GameConfig) {
         if add <= 1e-9 {
             return;
         }
@@ -320,6 +329,7 @@ fn build_city(
                 resource: resource.map(str::to_string),
                 area: add,
                 deployed: 0.0,
+                invest_weight: config.building_spec(kind).default_invest_weight,
             }),
         }
     }
@@ -331,7 +341,7 @@ fn build_city(
     let res_area = find_area(&buildings, "residential", None);
     if res_area < desired_res - 1e-9 && planning_remaining > 0.0 {
         let add = (desired_res - res_area).min(planning_remaining);
-        raise_area(&mut buildings, "residential", None, add);
+        raise_area(&mut buildings, "residential", None, add, config);
         planning_remaining -= add;
     }
 
@@ -339,7 +349,7 @@ fn build_city(
     let con_area = find_area(&buildings, "construction", None);
     if con_area < con_target - 1e-9 && planning_remaining > 0.0 {
         let add = (con_target - con_area).min(planning_remaining);
-        raise_area(&mut buildings, "construction", None, add);
+        raise_area(&mut buildings, "construction", None, add, config);
         planning_remaining -= add;
     }
 
@@ -350,12 +360,14 @@ fn build_city(
         let cur = find_area(&buildings, "mining", Some(rt));
         if cur < *darea - 1e-9 {
             let add = (*darea - cur).min(planning_remaining);
-            raise_area(&mut buildings, "mining", Some(rt), add);
+            raise_area(&mut buildings, "mining", Some(rt), add, config);
             planning_remaining -= add;
         }
     }
 
     // 2) Build: grow deployed toward the planned area, spending resources.
+    // Higher invest_weight builds first (its share of the budget gets priority).
+    buildings.sort_by(|a, b| b.invest_weight.total_cmp(&a.invest_weight));
     for b in buildings.iter_mut() {
         if !b.under_construction() {
             continue;

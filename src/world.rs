@@ -47,6 +47,7 @@ fn body(
         id,
         name: name.to_string(),
         orbit,
+        position: orbit.position(0.0),
         settlement,
     }
 }
@@ -79,6 +80,7 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
         resource: None,
         area: resid,
         deployed: resid,
+        invest_weight: 1.0,
     });
 
     let construction = (s.total_area * 0.15).clamp(3.0, 10.0);
@@ -94,6 +96,7 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
                 resource: Some(d.resource.clone()),
                 area,
                 deployed: area,
+                invest_weight: 1.0,
             });
             budget -= area;
         }
@@ -103,6 +106,7 @@ fn seed_buildings(s: &Settlement, population: u32) -> Vec<Building> {
         resource: None,
         area: construction,
         deployed: construction,
+        invest_weight: 1.0,
     });
     buildings
 }
@@ -141,6 +145,7 @@ fn faction(id: FactionId, name: &str, color: char, resources: ResourceMap) -> Fa
         name: name.to_string(),
         color,
         resources,
+        budget: ResourceMap::new(),
         relations: std::collections::BTreeMap::new(),
     }
 }
@@ -369,7 +374,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let haumea = bodies[12].settlement.as_ref().unwrap();
     let ixion = bodies[14].settlement.as_ref().unwrap();
 
-    let cities = vec![
+    let mut cities = vec![
         city(0, "长三角城市群", 2, F_CN, 1400, earth, "corvette"),
         city(1, "珠三角城市群", 2, F_CN, 1100, earth, "cruiser"),
         city(2, "奥林匹斯港", 3, F_US, 1000, mars, "cruiser"),
@@ -380,6 +385,21 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         city(7, "妊神星转运站", 12, F_TRANSPORT, 280, haumea, "transport"),
         city(8, "伊克西翁圣所", 14, F_CULT, 200, ixion, "cruiser"),
     ];
+
+    // Fill the new data-driven fields from the config: a per-round investment
+    // budget for each faction and a default invest-weight per building.
+    for f in &mut factions {
+        f.budget = f
+            .resources
+            .iter()
+            .map(|(k, v)| (k.clone(), *v * config.economy.invest_fraction))
+            .collect();
+    }
+    for c in &mut cities {
+        for b in &mut c.buildings {
+            b.invest_weight = config.building_spec(&b.kind).default_invest_weight;
+        }
+    }
 
     // --- Starting navy ------------------------------------------------------
     let mut ships = Vec::new();
