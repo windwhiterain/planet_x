@@ -100,6 +100,13 @@ pub struct BuildWeightEntry {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct LoyaltyBudgetEntry {
+    pub city: CityId,
+    pub value: f64,
+    pub mode: Option<ControlMode>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FactionControlView {
     pub faction_id: FactionId,
     pub ship_orders: Vec<ShipOrderEntry>,
@@ -107,6 +114,7 @@ pub struct FactionControlView {
     pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
     pub build_weights: Vec<BuildWeightEntry>,
+    pub loyalty_budget: Vec<LoyaltyBudgetEntry>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -194,6 +202,15 @@ pub struct BuildWeightPatch {
     pub mode: Option<Option<ControlMode>>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct LoyaltyBudgetPatch {
+    pub city: CityId,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
 /// A structural building patch: add a new building, remove an existing one, or
 /// change an existing building's attributes (structure / ship_type / kind).
 #[derive(Deserialize, Default)]
@@ -237,6 +254,8 @@ pub struct FactionControlPatch {
     pub invest_weights: Vec<InvestWeightPatch>,
     #[serde(default)]
     pub build_weights: Vec<BuildWeightPatch>,
+    #[serde(default)]
+    pub loyalty_budget: Vec<LoyaltyBudgetPatch>,
     #[serde(default)]
     pub buildings: Vec<BuildingPatch>,
 }
@@ -323,6 +342,11 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
             }
         })
         .collect();
+    let loyalty_budget = c
+        .loyalty_budget
+        .iter()
+        .map(|(cid, ctrl)| LoyaltyBudgetEntry { city: *cid, value: ctrl.value, mode: ctrl.mode })
+        .collect();
     FactionControlView {
         faction_id: fid,
         ship_orders,
@@ -330,6 +354,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         construction_budget,
         invest_weights,
         build_weights,
+        loyalty_budget,
     }
 }
 
@@ -421,6 +446,11 @@ fn round_view(v: FactionControlView) -> FactionControlView {
             .into_iter()
             .map(|i| BuildWeightEntry { value: r2(i.value), ..i })
             .collect(),
+        loyalty_budget: v
+            .loyalty_budget
+            .into_iter()
+            .map(|l| LoyaltyBudgetEntry { value: r2(l.value), ..l })
+            .collect(),
     }
 }
 
@@ -503,6 +533,18 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
                 ctrl.value = v;
             }
             if let Some(m) = bp.mode {
+                ctrl.mode = m;
+            }
+        }
+        for lp in &fac.loyalty_budget {
+            let ctrl = c.loyalty_budget.entry(lp.city).or_insert_with(|| Control {
+                value: lp.value.unwrap_or(0.0),
+                mode: lp.mode.flatten(),
+            });
+            if let Some(v) = lp.value {
+                ctrl.value = v;
+            }
+            if let Some(m) = lp.mode {
                 ctrl.mode = m;
             }
         }
@@ -819,5 +861,24 @@ mod tests {
         });
         apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
         assert_eq!(state.ship_control(0), ControlMode::Ai, "explicit Ai leaf beats Player scope");
+    }
+
+    /// 娱乐/福利预算：一座城的忠诚度投入是一个可控叶子。按 Player 覆盖后，治理模型
+    /// 会读取它；省略 value 时保留当前值、省略 mode 时保留当前模式。
+    #[test]
+    fn apply_loyalty_budget_patch() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let diff = serde_json::json!({
+            "control": [{"faction_id": 3, "loyalty_budget": [{"city": 0, "value": 40.0, "mode": "Player"}]}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("loyalty budget diff applies");
+        assert_eq!(state.loyalty_budget_control(3, 0), ControlMode::Player);
+        let v = state
+            .control(3)
+            .and_then(|c| c.loyalty_budget.get(&0))
+            .map(|c| c.value)
+            .unwrap_or(f64::NAN);
+        assert!((v - 40.0).abs() < 1e-7, "loyalty budget value should be 40.0, got {v}");
     }
 }

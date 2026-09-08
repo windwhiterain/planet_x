@@ -165,6 +165,31 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                 .map(|(k, r)| (k.clone(), r2(r.value)))
                 .collect::<BTreeMap<_, _>>(),
         },
+        // 光速治理：以「距离首都 × 人口超载」为代价的管理/忠诚度。城市远离首都、
+        // 或势力人口过多，管理越难；治理不到位（欠费）时忠诚度暴跌，跌破
+        // loyalty_revolt 即爆发离心叛乱（城市夷平为空白）。投入娱乐预算
+        // (`loyalty_budget`) 可提升忠诚度、对冲距离/人口。
+        "governance": {
+            "admin_base": r2(config.governance.admin_base),
+            "admin_per_au": r2(config.governance.admin_per_au),
+            "admin_range": r2(config.governance.admin_range),
+            "loyalty_recover": r2(config.governance.loyalty_recover),
+            "loyalty_penalty": r2(config.governance.loyalty_penalty),
+            "loyalty_distance": r2(config.governance.loyalty_distance),
+            "loyalty_range": r2(config.governance.loyalty_range),
+            "loyalty_revolt": r2(config.governance.loyalty_revolt),
+            "population_capacity": r2(config.governance.population_capacity),
+            "default_entertainment": r2(config.governance.default_entertainment),
+            "entertainment_cost": r2(config.governance.entertainment_cost),
+        },
+        // MOND / 柯伊伯引力异常：距太阳超过 radius 的深空进入异常区；除 masters
+        // 之外的势力在异常区内轨道计算错误，指令坐标与实际坐标偏移——无法精确轰炸/
+        // 殖民/停靠深处目标。掌握了 MOND 的势力（cult）在异常区内指哪打哪。
+        "mond": {
+            "radius": r2(config.mond.radius),
+            "drift_per_au": r2(config.mond.drift_per_au),
+            "masters": config.mond.masters.clone(),
+        },
         "story": config
             .story
             .iter()
@@ -228,6 +253,14 @@ struct AgentFaction {
     relations: BTreeMap<String, f64>,
     /// Names of factions at or below the war threshold.
     wars: Vec<String>,
+    /// 首都天体（治理/忠诚度锚点）。
+    capital_body: BodyId,
+    /// 本土防御半径（AU）：本方城市/舰在此半径内获得本土防御。
+    home_radius: f64,
+    /// 在本方本土区域内，敌方造成的伤害倍率（<1 = 削弱入侵者）。
+    home_attack_mult: f64,
+    /// 在本方本土区域内，本方舰只的额外护甲再生（占最大护甲/回合）。
+    home_regen_bonus: f64,
 }
 
 #[derive(Serialize)]
@@ -289,6 +322,9 @@ struct AgentCity {
     /// Per-class ship production progress (建造区各舰型进度累加).
     ship_progress: BTreeMap<String, f64>,
     buildings: Vec<AgentBuilding>,
+    /// 忠诚度 (0..1)：城市对其统治势力的向心力。治理不到位/太远/人口过多时下降，
+    /// 跌破叛变阈值即离心叛乱（夷平为空白）。投入娱乐预算可提升。
+    loyalty: f64,
 }
 
 #[derive(Serialize)]
@@ -365,6 +401,10 @@ impl AgentState {
                     .filter(|(_, v)| **v <= config.combat.war_threshold)
                     .map(|(id, _)| state.faction(*id).map(|x| x.name.clone()).unwrap_or_else(|| format!("#{id}")))
                     .collect(),
+                capital_body: f.capital_body,
+                home_radius: r2(f.home_radius),
+                home_attack_mult: r2(f.home_attack_mult),
+                home_regen_bonus: r2(f.home_regen_bonus),
             })
             .collect();
 
@@ -422,6 +462,7 @@ impl AgentState {
                 population: c.population,
                 razed: c.razed,
                 armor: r2(c.buildings.iter().map(|b| b.armor).sum::<f64>()),
+                loyalty: r2(c.loyalty),
                 ship_progress: c.ship_progress.iter().map(|(k, v)| (k.clone(), r2(*v))).collect(),
                 buildings: c
                     .buildings
@@ -516,6 +557,12 @@ fn game_event_value(e: &GameEvent) -> serde_json::Value {
         }
         Story { id, title, participants } => {
             json!({"type":"story", "id": id, "title": title, "participants": participants})
+        }
+        Resurgence { faction, body, ship } => {
+            json!({"type":"resurgence", "faction": faction, "body": body, "ship": ship})
+        }
+        Revolt { city, faction } => {
+            json!({"type":"revolt", "city": city, "faction": faction})
         }
     }
 }

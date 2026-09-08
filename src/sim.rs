@@ -50,6 +50,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     step_market(state, config);
     step_construction(state, config, rng);
     step_military(state, config, rng);
+    // 光速治理：以距离首都为代价的管理/忠诚度，给超大帝国一个自然上限。
+    step_governance(state, config);
+    // 重建（反僵尸/反垄断）：趁着本回合只剩「残骸」的势力还没被永久旁观，先让它在
+    // 自己的残骸足迹上重新立足。放在治理之后：被叛乱夷平到零的势力也能当回合重建。
+    step_resurgence(state, config, rng);
     step_diplomacy(state, config, rng);
 
     // 外交跃迁：任何一对势力跨越战争阈值（开战 / 停战）都在本回合记一条事件。
@@ -162,6 +167,20 @@ fn build_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId,
             .and_then(|c| c.build_weights.get(&key))
             .map(|c| c.value)
             .unwrap_or_else(|| config.building_spec(&b.kind).default_build_weight),
+    }
+}
+
+/// The command-controlled 娱乐/福利预算 of a city (its loyalty spending per round,
+/// in market value). Follows the control scope: AI uses the config default, a
+/// Player-commanded city uses the commanded value.
+fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, cid: CityId) -> f64 {
+    match state.loyalty_budget_control(fid, cid) {
+        ControlMode::Ai => config.governance.default_entertainment,
+        ControlMode::Player => state
+            .control(fid)
+            .and_then(|c| c.loyalty_budget.get(&cid))
+            .map(|c| c.value)
+            .unwrap_or(config.governance.default_entertainment),
     }
 }
 
@@ -1046,11 +1065,18 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     }
 
     // 护甲再生（%/时间）：每回合幸存舰只按舰级 hull_regen 恢复其最大护甲的一
-    // 个比例（不消耗资源、不复活已毁舰）。
-    for s in state.ships.iter_mut() {
+    // 个比例（不消耗资源、不复活已毁舰）。处于本方本土防御半径内的舰获得额外
+    // home_regen_bonus 再生（cult 的 MOND 异常使其圣所旁舰只极难被消耗）。
+    // 先读出每艘舰的本土再生加成，再统一修改（避免与 ships 的可变借用冲突）。
+    let bonuses: Vec<f64> = state
+        .ships
+        .iter()
+        .map(|s| if s.hull > 0.0 { home_regen_bonus(state, s.faction_id, s.position) } else { 0.0 })
+        .collect();
+    for (i, s) in state.ships.iter_mut().enumerate() {
         if s.hull > 0.0 {
             let spec = config.ship_spec(&s.class);
-            s.hull = (s.hull + spec.hull * spec.hull_regen).min(spec.hull);
+            s.hull = (s.hull + spec.hull * (spec.hull_regen + bonuses[i])).min(spec.hull);
         }
     }
 
@@ -1062,9 +1088,215 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     }
 }
 
+// --- resurgence (anti-zombie / anti-monopoly) -------------------------------
+
+/// If a faction ends a round with no ship and no living city, it has become a
+/// permanent bystander (「僵尸」): with no city it can never build a ship, and with
+/// no ship it can never re-colonize a razed city. Over a long horizon this
+/// shrinks the board to a handful of power blocs and leaves the rest frozen —
+/// the world stops being a game.
+///
+/// 重建 (resurgence) breaks that trap: on the round a faction reaches 0 ships +
+/// 0 living cities, it re-establishes a foothold on its own lowest-id razed city
+/// (a *diaspora claim* — a razed city keeps its last owner's `faction_id` until
+/// someone else re-colonizes it) and launches one affordable colony ship there.
+/// Deterministic: no RNG beyond the existing affordable-class pick. A faction
+/// that has been fully absorbed (has no footprint anywhere) is left eliminated —
+/// the rare, legitimate end of a civ.
+fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    for fid in faction_ids {
+        // Already a participant (has a ship or a living city)? Nothing to do.
+        let has_ship = state.ships.iter().any(|s| s.faction_id == fid && s.hull > 0.0);
+        if has_ship {
+            continue;
+        }
+        let has_living_city = state.cities.iter().any(|c| c.faction_id == fid && !c.razed);
+        if has_living_city {
+            continue;
+        }
+
+        // Anchor: this faction's own lowest-id city footprint (a diaspora claim —
+        // a razed city keeps its last owner's `faction_id` until re-colonized).
+        // If the faction has been fully absorbed (no footprint anywhere), fall back
+        // to emigrating onto the lowest-id razed settlement in the whole system —
+        // a refugee refuge — so a wiped civ can always re-enter the game.
+        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.id).map(|c| c.id);
+        let Some(anchor_id) = anchor.or_else(|| {
+            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.id).map(|c| c.id)
+        }) else {
+            continue; // no footprint and no razed refuge anywhere — leave eliminated.
+        };
+
+        // Read everything we need before mutating borrows.
+        let Some(settlement) = state.city_settlement(anchor_id).cloned() else { continue };
+        let body = state.city(anchor_id).map(|c| c.body_id).unwrap_or(0);
+        let seeded_ship_class = choose_next_class(state, fid, config, rng);
+        let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+        let mut next_bid = state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1);
+        let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_bid);
+
+        // Re-seed the city (mirrors `colonize`'s razed-city path).
+        if let Some(c) = state.city_mut(anchor_id) {
+            c.razed = false;
+            c.faction_id = fid;
+            c.population = pop;
+            c.buildings = buildings;
+            c.ship_progress.clear();
+            c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
+            c.loyalty = 1.0;
+        }
+
+        // Ensure the re-seeded buildings have invest/build-weight entries.
+        let city_buildings = state.city(anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
+        if let Some(ctrl) = state.control_mut(fid) {
+            for b in &city_buildings {
+                let ikey = (anchor_id, b.id);
+                ctrl.invest_weights.entry(ikey).or_insert_with(|| {
+                    Control::inherit(config.building_spec(&b.kind).default_invest_weight)
+                });
+                if b.is_shipyard() {
+                    let bkey = (anchor_id, b.id);
+                    ctrl.build_weights.entry(bkey).or_insert_with(|| {
+                        Control::inherit(config.building_spec(&b.kind).default_build_weight)
+                    });
+                }
+            }
+        }
+
+        // Launch one affordable colony ship from the rebuilt city. Ordered Idle;
+        // the AI picks its behavior next round. Deterministic (id = max+1).
+        let pos = state.body_position(body);
+        let next_ship = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
+        let spec = config.ship_spec(&seeded_ship_class);
+        state.ships.push(Ship {
+            id: next_ship,
+            name: format!("{}-{}", spec.label, fid),
+            class: seeded_ship_class.clone(),
+            faction_id: fid,
+            position: [pos[0] + 0.05, pos[1] + 0.05],
+            hull: spec.hull,
+        });
+        state
+            .control
+            .entry(fid)
+            .or_default()
+            .ship_orders
+            .insert(next_ship, Control::inherit(ShipBehavior::Idle));
+        ev(state, GameEvent::Resurgence { faction: fid, body, ship: next_ship });
+    }
+}
+
+// --- governance (light-speed management) -------------------------------------
+
+/// 光速治理：每座城按其与统治势力首都的距离产生一笔治理开销（距离越远、管辖越难）。
+/// 势力从库存按价值支付；付得起时城市忠诚度向距离目标恢复（远则低），付不起（欠费）
+/// 时忠诚度暴跌。忠诚度跌破 [`GovernanceConfig::loyalty_revolt`] 即爆发离心叛乱，城市
+/// 被夷平为空白（可再殖民）。这给超大帝国一个自然上限——既能管的领地有限，遥远的
+/// 殖民地在治理失败时丢失，使世界在上千回合后保持多方参与。
+fn step_governance(state: &mut State, config: &GameConfig) {
+    let g = &config.governance;
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
+    for fid in faction_ids {
+        let capital = state.faction(fid).map(|f| f.capital_body);
+        let Some(capital) = capital else { continue };
+        let cap_pos = state.body_position(capital);
+
+        // 该势力所有活城 + 每城到首都的距离 + 每城想投入的娱乐/福利预算。
+        let mut cities: Vec<(CityId, f64, f64)> = Vec::new(); // (id, distance, ent_budget)
+        let mut total_pop = 0u64;
+        for c in &state.cities {
+            if c.faction_id != fid || c.razed {
+                continue;
+            }
+            total_pop += c.population as u64;
+            let d = dist(state.body_position(c.body_id), cap_pos);
+            let ent = city_loyalty_budget(state, config, fid, c.id);
+            cities.push((c.id, d, ent));
+        }
+        if cities.is_empty() {
+            continue;
+        }
+        // 人口越多，管理能力越分散——人口超载放大远距离治理难度（与距离叠加）。
+        let overload = (total_pop as f64 / g.population_capacity.max(1e-6) - 1.0).max(0.0);
+        let scale = 1.0 + overload;
+        let mut total_admin = 0.0;
+        let mut ent_total = 0.0;
+        for (_, d, ent) in &cities {
+            let a = (d - g.admin_range).max(0.0);
+            total_admin += (g.admin_base + g.admin_per_au * a) * scale;
+            ent_total += ent;
+        }
+        let governance_total = total_admin + ent_total;
+
+        // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
+        // 治理是否到位以及娱乐投入是否真正落地。
+        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
+        let pay = governance_total.min(total_value);
+        if pay > 1e-9 {
+            let ratio = (pay / total_value).min(1.0);
+            if let Some(f) = state.faction_mut(fid) {
+                for (k, v) in stock.iter() {
+                    let new = (*v - *v * ratio).max(0.0);
+                    f.resources.insert(k.clone(), new);
+                }
+            }
+        }
+        let coverage = if governance_total > 1e-9 {
+            (total_value / governance_total).min(1.0)
+        } else {
+            1.0
+        };
+
+        // 忠诚度向「距离目标 + 娱乐加成」恢复/下降，并标记叛乱（距离 × 人口超载
+        // 与娱乐投入叠加）。娱乐投入越高，就越能对冲距离/人口带来的离心倾向。
+        let mut to_revolt = Vec::new();
+        for (cid, d, ent) in &cities {
+            let a = (d - g.loyalty_range).max(0.0);
+            let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
+            let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
+            let target_eff = (target_base + ent_bonus).clamp(0.0, 1.0);
+            let cur = state.city(*cid).map(|c| c.loyalty).unwrap_or(1.0);
+            let new = if coverage >= 1.0 - 1e-6 {
+                (cur + (target_eff - cur) * g.loyalty_recover).clamp(0.0, 1.0)
+            } else {
+                (cur - g.loyalty_penalty * (1.0 - coverage)).max(0.0)
+            };
+            if let Some(c) = state.city_mut(*cid) {
+                c.loyalty = new;
+            }
+            if new < g.loyalty_revolt {
+                to_revolt.push(*cid);
+            }
+        }
+
+        // 叛乱：夷平为空白（可再殖民）。
+        for cid in to_revolt {
+            if let Some(c) = state.city_mut(cid) {
+                c.razed = true;
+                c.population = 0;
+                c.buildings.clear();
+                c.ship_progress.clear();
+                c.loyalty = 0.0;
+            }
+            ev(state, GameEvent::Revolt { city: cid, faction: fid });
+        }
+    }
+}
+
 /// Move a ship one round's step toward `dest`, capped by its class speed.
 fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, class: &str, dest: [f64; 2]) {
-    let Some(pos) = state.ship(ship_id).map(|s| s.position) else { return };
+    let Some((pos, fid)) = state.ship(ship_id).map(|s| (s.position, s.faction_id)) else { return };
+    // MOND 异常区：没有掌握修正引力的势力把指令坐标「算错」，实际航向产生偏移。
+    let dest = mond_drift(config, fid, dest);
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;
@@ -1078,6 +1310,28 @@ fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, class: &
             s.position = [s.position[0] + nx * step, s.position[1] + ny * step];
         }
     }
+}
+
+/// MOND 主力导航偏移：舰船所在势力未掌握 MOND 修正引力（见 [`MondConfig::masters`]）
+/// 且目标点进入异常区（距太阳超过 `mond.radius`）时，返回一个沿切向偏移的伪目标。
+/// 非 master 舰因此无法精确机动到深处目标（难以轰炸/殖民/停靠），体现「指令坐标与
+/// 实际坐标产生偏移」。确定性（无 RNG）。
+fn mond_drift(config: &GameConfig, fid: FactionId, dest: [f64; 2]) -> [f64; 2] {
+    let m = &config.mond;
+    if m.drift_per_au <= 0.0 || m.masters.contains(&fid) {
+        return dest;
+    }
+    let r = (dest[0] * dest[0] + dest[1] * dest[1]).sqrt();
+    let depth = (r - m.radius).max(0.0);
+    if depth <= 0.0 {
+        return dest;
+    }
+    let drift = depth * m.drift_per_au;
+    // 切向（垂直于径向），确定性方向；代表轨道力学计算错误。
+    let inv = if r > 1e-9 { 1.0 / r } else { 0.0 };
+    let tx = -dest[1] * inv;
+    let ty = dest[0] * inv;
+    [dest[0] + tx * drift, dest[1] + ty * drift]
 }
 
 fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64) -> Option<ShipId> {
@@ -1094,14 +1348,17 @@ fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos:
 }
 
 fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId) {
-    let (dmg, afac) = {
+    let (base_dmg, afac) = {
         let a = state.ship(attacker_id).expect("attacker gone");
         (config.ship_spec(&a.class).attack, a.faction_id)
     };
-    let (tfac, hull) = {
+    let (tfac, hull, tpos) = {
         let t = state.ship(target_id).expect("target gone");
-        (t.faction_id, t.hull)
+        (t.faction_id, t.hull, t.position)
     };
+    // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标位于其势力首都的本土防御
+    // 半径内时，受到的伤害被削弱。
+    let dmg = base_dmg * home_defense_mult(state, tfac, tpos);
     let new_hull = hull - dmg;
     let destroyed = new_hull <= 0.0;
     if let Some(t) = state.ship_mut(target_id) {
@@ -1112,6 +1369,39 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: state.ship(target_id).map(|s| s.class.clone()).unwrap_or_default() });
     }
     adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
+}
+
+/// 本土防御伤害倍率：`pos` 位于 `faction` 首都的 `home_radius` 之内时返回该势力的
+/// `home_attack_mult`（<1 = 削弱入侵者），否则 1.0（无削弱）。
+///
+/// 这使得每个有首都的势力在自己的核心区难啃（超大国空降别人家里要付代价），而
+/// cult 因 MOND 异常拥有超大半径/强削减，能够在被围攻的柯伊伯带圣所自保。
+fn home_defense_mult(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
+    let Some(f) = state.faction(faction) else { return 1.0 };
+    if f.home_radius <= 0.0 {
+        return 1.0;
+    }
+    let cap = state.body_position(f.capital_body);
+    if dist(pos, cap) <= f.home_radius {
+        f.home_attack_mult
+    } else {
+        1.0
+    }
+}
+
+/// 本土防御额外再生：`pos` 位于 `faction` 首都的 `home_radius` 之内时，返回该势力
+/// 的 `home_regen_bonus`，否则 0.0。
+fn home_regen_bonus(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
+    let Some(f) = state.faction(faction) else { return 0.0 };
+    if f.home_radius <= 0.0 {
+        return 0.0;
+    }
+    let cap = state.body_position(f.capital_body);
+    if dist(pos, cap) <= f.home_radius {
+        f.home_regen_bonus
+    } else {
+        0.0
+    }
 }
 
 fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: FactionId) -> bool {
@@ -1224,14 +1514,17 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
 /// buildings are destroyed the city is razed to a blank (colonizable) settlement
 /// — it is never captured.
 fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: CityId) {
-    let (dmg, attacker) = {
+    let (base_dmg, attacker) = {
         let s = state.ship(ship_id).expect("ship gone");
         (config.ship_spec(&s.class).attack, s.faction_id)
     };
-    let old_owner = {
+    let (old_owner, cpos) = {
         let c = state.city(cid).expect("city gone");
-        c.faction_id
+        (c.faction_id, state.body_position(c.body_id))
     };
+    // 本土防御（首都即强弩 + cult 的 MOND 异常）：城市位于其势力首都的本土防御
+    // 半径内时，受到的轰炸伤害被削弱。
+    let dmg = base_dmg * home_defense_mult(state, old_owner, cpos);
     let razed = {
         let c = state.city_mut(cid).expect("city gone");
         let total_deployed: f64 = c.buildings.iter().map(|b| b.deployed).sum();
@@ -1292,6 +1585,7 @@ fn colonize(
             c.buildings = buildings;
             c.ship_progress.clear();
             c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
+            c.loyalty = 1.0;
         }
         ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
         if let Some(c) = state.control_mut(faction) {
@@ -1338,6 +1632,7 @@ fn colonize(
             m
         },
         razed: false,
+        loyalty: 1.0,
     };
     let ctrl = state.control.entry(faction).or_default();
     for b in &city.buildings {
@@ -1879,7 +2174,7 @@ mod tests {
     /// 定居点隔离（巴黎只产 铀/铂，不再共享整个地球的矿藏池）。
     #[test]
     fn settlements_and_cities_are_one_to_one() {
-        let (config, state) = fresh_world(42);
+        let (_config, state) = fresh_world(42);
         for b in &state.bodies {
             let cities: Vec<&City> = state.cities.iter().filter(|c| c.body_id == b.id).collect();
             assert!(
@@ -2056,5 +2351,73 @@ mod tests {
         if let Some(pro) = find("prologue") {
             assert_eq!(pro.participants, vec!["无国界科学组织".to_string(), "行星X崇拜教".to_string()]);
         }
+    }
+
+    /// 娱乐/福利预算（忠诚度）：一座远离首都的城市，其距离目标忠诚度本应很低；但若
+    /// 治理势力投入足够的娱乐预算，忠诚度仍能维持/回升，而非立刻爆发离心叛乱。
+    #[test]
+    fn entertainment_holds_a_distant_city() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        // 深口袋：让星系矿业(5)付得起治理 + 娱乐开销，覆盖率=1。
+        if let Some(f) = state.faction_mut(5) {
+            for k in [
+                "iron", "carbon", "silicon", "water_ice", "uranium", "platinum", "gold",
+                "helium3", "thorium", "hydrogen", "methane",
+            ] {
+                f.resources.insert(k.to_string(), 100_000.0);
+            }
+        }
+        // 妊神星转运站 (city 19, body 15) 远离矿业首都(泰坦, body 9)，距离目标忠诚度≈0。
+        if let Some(c) = state.city_mut(19) {
+            c.loyalty = 0.35; // 略高于叛变阈值，但本应继续下滑。
+        }
+        let loy0 = state.city(19).map(|c| c.loyalty).unwrap();
+        // 重金投入该城娱乐预算（Player 覆盖）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": 5, "loyalty_budget": [{"city": 19, "value": 500.0, "mode": "Player"}]}]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply loyalty budget");
+
+        advance(&mut state, &config, &mut rng);
+
+        let loy1 = state.city(19).map(|c| c.loyalty).unwrap_or(0.0);
+        assert!(
+            loy1 >= loy0,
+            "heavy entertainment funding should keep a distant city loyal (started {loy0}, now {loy1})"
+        );
+        assert_eq!(
+            state.city(19).map(|c| c.razed),
+            Some(false),
+            "a well-funded distant city must not revolt"
+        );
+    }
+
+    /// MOND 引力异常：落入异常区（深空）时，未掌握 MOND 修正引力的势力在导航上产生
+    /// 切向偏移（指令坐标与实际坐标分离），而掌握它的 cult 指哪打哪。
+    #[test]
+    fn mond_drift_misses_in_anomaly_but_masters_are_exact() {
+        let (config, _state) = fresh_world(42);
+        let dest = [60.0, 0.0]; // 距太阳 60 AU，深入柯伊伯异常区。
+        // 非 MOND 势力（中国=3）：目标被切向偏移，无法精确到达。
+        let d = mond_drift(&config, 3, dest);
+        assert!(
+            (d[0] - dest[0]).abs() > 1e-6 || (d[1] - dest[1]).abs() > 1e-6,
+            "a non-master ship must drift inside the anomaly, got {d:?}"
+        );
+        // MOND 势力（行星X崇拜教=8）：掌握修正引力，无偏移、指哪打哪。
+        let m = mond_drift(&config, 8, dest);
+        assert_eq!(m, dest, "a MOND master must compute the destination exactly");
+    }
+
+    /// 本土防御（首都即强弩）：靠近首都的目标被削弱，远离首都的没有。
+    #[test]
+    fn home_field_weakens_attackers_near_the_capital() {
+        let (_config, state) = fresh_world(42);
+        let cap = state.body_position(2); // 地球（中国首都）。
+        let mult_near = home_defense_mult(&state, 3, cap);
+        assert!(mult_near < 1.0, "near the capital should be defended (mult {mult_near})");
+        let mult_far = home_defense_mult(&state, 3, [80.0, 80.0]);
+        assert_eq!(mult_far, 1.0, "far from the capital should have no home-field defense");
     }
 }

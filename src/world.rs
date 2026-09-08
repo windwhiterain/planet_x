@@ -155,6 +155,7 @@ fn city(
         buildings,
         ship_progress,
         razed: false,
+        loyalty: 1.0,
     }
 }
 
@@ -170,7 +171,9 @@ fn faction(
     resources: ResourceMap,
     alignment: f64,
     aggression: f64,
+    capital: BodyId,
 ) -> Faction {
+    let (home_radius, home_attack_mult, home_regen_bonus) = home_for(id);
     Faction {
         id,
         name: name.to_string(),
@@ -180,6 +183,22 @@ fn faction(
         relations: std::collections::BTreeMap::new(),
         alignment,
         aggression,
+        capital_body: capital,
+        home_radius,
+        home_attack_mult,
+        home_regen_bonus,
+    }
+}
+
+/// Per-faction 本土防御 (home-field) parameters. The cult's are the MOND anomaly
+/// (huge radius + strong damage reduction + strong regen), so the pariah can
+/// survive being besieged at its isolated Kuiper-belt sanctuary — it *mastered the
+/// correct Newtonian-corrected gravity* (MOND). Everyone else gets a modest core
+/// stronghold so conquering near someone's capital costs extra.
+fn home_for(id: FactionId) -> (f64, f64, f64) {
+    match id {
+        F_CULT => (30.0, 0.35, 0.12),
+        _ => (6.0, 0.85, 0.02),
     }
 }
 
@@ -442,7 +461,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0), ("helium3", 2.0)]), 0.4, 0.10),
+        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0), ("helium3", 2.0)]), 0.4, 0.10, 3),
         faction(
             F_US,
             "美国",
@@ -451,8 +470,9 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("iron", 6.0), ("carbon", 5.0), ("uranium", 1.0)]),
             1.0,
             0.60,
+            4,
         ),
-        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0), ("uranium", 1.0)]), 0.9, 0.30),
+        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0), ("uranium", 1.0)]), 0.9, 0.30, 2),
         faction(
             F_CN,
             "中国",
@@ -461,6 +481,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("iron", 7.0), ("carbon", 6.0), ("silicon", 2.0)]),
             -1.0,
             0.50,
+            2,
         ),
         faction(
             F_RU,
@@ -470,6 +491,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("iron", 5.0), ("carbon", 4.0), ("uranium", 2.0)]),
             -0.9,
             0.45,
+            2,
         ),
         faction(
             F_MINING,
@@ -479,6 +501,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("iron", 6.0), ("gold", 2.0), ("platinum", 1.0)]),
             0.0,
             0.20,
+            9,
         ),
         faction(
             F_SCIENCE,
@@ -488,6 +511,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("silicon", 4.0), ("helium3", 3.0), ("carbon", 2.0)]),
             0.2,
             0.05,
+            6,
         ),
         faction(
             F_TRANSPORT,
@@ -497,6 +521,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("carbon", 6.0), ("hydrogen", 3.0), ("iron", 2.0)]),
             -0.1,
             0.15,
+            5,
         ),
         faction(
             F_CULT,
@@ -506,6 +531,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("uranium", 3.0), ("thorium", 2.0), ("gold", 1.0)]),
             -3.0,
             0.90,
+            14,
         ),
     ];
 

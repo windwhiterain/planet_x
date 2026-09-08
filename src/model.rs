@@ -285,6 +285,13 @@ pub enum GameEvent {
     /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
     /// `participants` 是参与方可读名（事件型触发时为具体对象）。
     Story { id: String, title: String, participants: Vec<String> },
+    /// 重建（反僵尸/反垄断）：一支被彻底消灭（既无舰又无活城）的势力在一处它仍
+    /// 拥有残骸足迹的定居点上重新建立前进基地，并获一艘种子舰。这保证游戏在上千
+    /// 回合后仍是多方参与的局面，而不是收敛成少数几个永久旁观者。
+    Resurgence { faction: FactionId, body: BodyId, ship: ShipId },
+    /// 离心叛乱（光速治理的代价）：城市忠诚度跌破叛变阈值，居民脱离其统治势力，
+    /// 城市被夷平为空白（可再殖民）。这是超大帝国管理廉价的远方殖民地失败的结果。
+    Revolt { city: CityId, faction: FactionId },
 }
 
 /// A spaceship. Always owned by a faction.
@@ -324,6 +331,15 @@ pub struct City {
     pub ship_progress: BTreeMap<String, f64>,
     /// 被夷平为空白 (razed): no buildings / population; colonizable again.
     pub razed: bool,
+    /// 忠诚度 (0..1)：城市对其统治势力的向心力。治理到位（能付清光速管理费）时
+    /// 向「距离目标」恢复；欠费时下降；低于叛变阈值则爆发「离心叛乱」，城市被
+    /// 夷平为空白。这让超大帝国难以维持遥远殖民地——光速治理延迟的体现。
+    #[serde(default = "default_loyalty")]
+    pub loyalty: f64,
+}
+
+fn default_loyalty() -> f64 {
+    1.0
 }
 
 /// A faction (势力) with diplomatic stances toward every other faction.
@@ -348,6 +364,37 @@ pub struct Faction {
     pub alignment: f64,
     /// 好战度（0..1）：越高的势力越会加速与异己阵营走向敌对。
     pub aggression: f64,
+    /// 首都天体（光速治理的锚点）：治理开销随城市距此天体的距离递增，忠诚度随
+    /// 距离衰减——超大帝国难以远距离管辖其在远离首都的殖民地。
+    #[serde(default = "default_capital_body")]
+    pub capital_body: BodyId,
+    /// 本土防御半径（AU）：本方城市/舰在此半径（距 `capital_body`）内获得本土防御。
+    /// cult 的数值按 MOND 异常放大——它「掌握了正确的牛顿修正引力」，孤悬柯伊伯带，
+    /// 被围攻时依靠此异常自保。
+    #[serde(default = "default_home_radius")]
+    pub home_radius: f64,
+    /// 在本方本土区域内，敌方对其造成的伤害倍率（<1 = 削弱入侵者）。
+    #[serde(default = "default_home_attack_mult")]
+    pub home_attack_mult: f64,
+    /// 在本方本土区域内，本方舰只的额外护甲再生（占最大护甲/回合）。
+    #[serde(default = "default_home_regen_bonus")]
+    pub home_regen_bonus: f64,
+}
+
+fn default_capital_body() -> BodyId {
+    2 // 地球, the default anchor when a .ron state omits it.
+}
+
+fn default_home_radius() -> f64 {
+    0.0
+}
+
+fn default_home_attack_mult() -> f64 {
+    1.0
+}
+
+fn default_home_regen_bonus() -> f64 {
+    0.0
 }
 
 /// The complete world snapshot.
@@ -465,6 +512,16 @@ impl State {
         let leaf = self.control(fid).and_then(|c| c.construction_budget.get(resource)).and_then(|c| c.mode);
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, faction, self.scope.global])
+    }
+
+    /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
+        let leaf = self.control(fid).and_then(|c| c.loyalty_budget.get(&cid)).and_then(|c| c.mode);
+        let city = self.scope.cities.get(&cid).copied().flatten();
+        let body_id = self.city(cid).map(|c| c.body_id);
+        let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
+        let faction = self.scope.factions.get(&fid).copied().flatten();
+        resolve_chain(&[leaf, city, body, faction, self.scope.global])
     }
 
     /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
@@ -588,6 +645,11 @@ pub struct ControllableState {
     pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
     /// 本方各建造区的「建造投资权重」（每建造区一个 Control）。
     pub build_weights: BTreeMap<BuildKey, Control<f64>>,
+    /// 本方各城的「娱乐/福利预算」（每城一个 Control，市场价值/回合）：把资源投入
+    /// 城市娱乐以提升忠诚度。这是「枪支与黄油」的现实权衡——花钱安抚居民，就少了
+    /// 建设与造舰的预算；玩家/agent 用它来稳固对大/远城市的统治（见治理模型）。
+    #[serde(default)]
+    pub loyalty_budget: BTreeMap<CityId, Control<f64>>,
 }
 
 /// Economy tuning (production and population).
@@ -756,6 +818,69 @@ pub struct StoryEvent {
     pub effects: Vec<StoryEffect>,
 }
 
+/// 光速治理 (lightspeed governance) tuning。
+///
+/// 以「距离首都」为代价的行政管理开销与忠诚度：一座城越远离其统治势力的首都，
+/// 管理（通讯/后勤）越难。这给超大帝国一个自然的上限——既能管的领地有限，遥远的
+/// 殖民地在治理不到位时也会因「离心叛乱」而丢失，从而让游戏在上千回合后依然是
+/// 多方参与的格局，而不是收敛成少数几个永久霸权。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GovernanceConfig {
+    /// 每座城每回合的治理开销基数（市场价值/回合）。
+    pub admin_base: f64,
+    /// 治理开销随距离（超过 [`Self::admin_range`] 的部分，单位 AU）递增的系数。
+    pub admin_per_au: f64,
+    /// 治理「可达」半径（AU）：处于该半径内的城市没有距离带来的额外开销。
+    pub admin_range: f64,
+    /// 治理到位（能付清全数管理费）时，城市忠诚度每回合向其距离目标恢复的比例。
+    pub loyalty_recover: f64,
+    /// 治理不到位（欠费）时，城市忠诚度每回合的下降量（乘以欠费比例）。
+    pub loyalty_penalty: f64,
+    /// 忠诚度「距离目标」随距离（超过 [`Self::loyalty_range`] 的部分）递减的系数：
+    /// 目标忠诚 = clamp(1 - loyalty_distance * a, 0, 1)。
+    pub loyalty_distance: f64,
+    /// 忠诚度完全不受距离影响的半径（AU）。
+    pub loyalty_range: f64,
+    /// 忠诚度低于此值即爆发「离心叛乱」，城市被夷平为空白（可再殖民）。
+    pub loyalty_revolt: f64,
+    /// 治理「容量」：势力的总人口（跨所有活城）超过此值即进入「超载」，管理能力被
+    /// 人口分散，使远距离治理更难（与距离叠加）。这给超大/人口稠密帝国一个自然上限。
+    pub population_capacity: f64,
+    /// AI 默认每座城每回合投入的「娱乐/福利」预算（市场价值/回合），用于提升忠诚度。
+    /// 玩家可逐城覆盖（见 [`ControllableState::loyalty_budget`]）。
+    pub default_entertainment: f64,
+    /// 娱乐投入换算：投入「市场价值」使忠诚度目标 +1.0 所需的花费（即忠诚度来自娱乐
+    /// 的增量 = paid / entertainment_cost）。
+    pub entertainment_cost: f64,
+}
+
+/// 本土防御 (home-field defense) tuning——「首都即强弩」。
+///
+/// 在一座城距离其统治势力首都 `Faction::home_radius` AU 以内时，该势力获得本土
+/// 防御：敌人对它造成的伤害乘以 `Faction::home_attack_mult`（<1 = 敌弱我强），它
+/// 自己的舰获得额外 `Faction::home_regen_bonus` 的护甲再生。这让每个有首都的势力
+/// 在自己的核心区显得难啃，超大国空降别人家里会付出代价——自然遏制一家独大。
+/// cult（行星X崇拜教）的本土防御按 MOND 异常放大（见 `Faction` 的字段），使孤悬
+/// 柯伊伯带的它在被围攻时能自保。
+
+/// MOND / 柯伊伯引力异常 tuning。
+///
+/// 在「异常区」（距太阳超过 [`Self::radius`] 的深空）内，真实引力按 MOND（Modified
+/// Newtonian Dynamics）修正，偏离标准牛顿假定。没有掌握 MOND 修正引力的势力（即除
+/// [`Self::masters`] 之外的所有势力）在异常区内轨道计算错误，其指令坐标与实际到达
+/// 坐标产生偏移——舰船无法精确机动到目标点，因而难以精确轰炸/殖民/停靠深处目标。
+/// 这让 cult（掌握了 MOND 的势力）偏僻的柯伊伯带圣所成为天然堡垒：围攻者的舰队在
+/// 那里「迷航」，而 cult 自己的舰指哪打哪。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MondConfig {
+    /// 异常区起始半径（距太阳，AU）：超出此距离进入「柯伊伯异常区」。
+    pub radius: f64,
+    /// 非 master 势力在异常区内，每超出 [`Self::radius`] 1 AU 的导航偏移量（AU）。
+    pub drift_per_au: f64,
+    /// 掌握了 MOND 修正引力的势力 id（在异常区内无导航偏移）。
+    pub masters: Vec<FactionId>,
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -763,6 +888,8 @@ pub struct GameConfig {
     pub combat: CombatConfig,
     pub diplomacy: DiplomacyConfig,
     pub market: MarketConfig,
+    pub governance: GovernanceConfig,
+    pub mond: MondConfig,
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,
