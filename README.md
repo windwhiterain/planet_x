@@ -57,14 +57,23 @@ planet_x --seed 42 --query '.factions[] | select(.wars | length > 0) | .name'
 q <jq>                  # 对当前状态执行任意 jq 过滤（JSON Lines）
 summary                 # 紧凑雷达（回合/时间/计数/各势力交战）
 advance [n]             # 推进 n 回合（默认 1），然后打印 summary
-control                 # 输出当前可控制状态（control + scope）JSON，即 agent 可编辑的模板
+control [<faction_id>|<jq>]  # 输出可编辑控制面（control+scope）。裸→整面；control 3 → 只出中国；control <jq> → 对整面做 jq。
 meta [<jq>]             # 输出游戏配置（规则字典）：资源 raw key→中文名、建筑/舰船全表、经济/战斗/外交常量
 apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后回读 control
+order <ship> attack|chase|siege|move|colonize|idle ...   # 一键下舰指令（Player 模式）
+budget <faction> <resource> <value>   # 设该势力「建设建筑」投资预算叶子（Player）
+build  <faction> <resource> <value>   # 设该势力「造舰」建造预算叶子（Player）
+events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级）
 cities / ships / factions / bodies
 city <id> / ship <id> / faction <id> / body <id>   # 单实体详情
 guide / help            # 命令目录（JSON）；q/query、s/summary、a/advance、quit/exit
 quit / exit
 ```
+
+> `control` 的定向读取把「读模板」的 token 成本压到单个势力（实测 1700 vs 7578 字符）。
+> `order`/`budget`/`build` 是 `apply` 的高层薄封装，底层仍生成同一形状的 diff。
+> 玩家指令如果目标失效（目标舰被毁、城被夷平、无定居点），会自动降级为 `Idle`
+> 并记一条 `stale_order` 事件，而不是让船飞向太阳中心 `[0,0]`。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 

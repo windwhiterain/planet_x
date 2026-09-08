@@ -237,6 +237,83 @@ fn apply_diff(state: &mut State, path: &Path) -> Result<(), String> {
     web::apply_patch(state, &config, &value)
 }
 
+/// The editable control surface filtered to a single faction. A fraction of the
+/// token cost of the whole-surface dump, so an agent can read just the faction
+/// it is driving: `control <faction_id>`.
+fn control_for_faction(state: &State, fid: u32) -> serde_json::Value {
+    let mut v = web::control_surface(state);
+    if let Some(control) = v.get_mut("control").and_then(|c| c.as_array_mut()) {
+        control.retain(|c| c.get("faction_id").and_then(|x| x.as_u64()) == Some(fid as u64));
+    }
+    v
+}
+
+/// High-level ship command: `order <ship> attack|chase|siege|move|colonize|idle ...`.
+/// Builds the same `{control:[{ship_orders:[...]}]}` diff the agent writes by
+/// hand, so a human/agent can iterate quickly without writing nested JSON.
+fn cmd_order(state: &mut State, config: &GameConfig, rest: &str) -> Result<(), String> {
+    let mut t = rest.split_whitespace();
+    let ship: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: order <ship> attack|chase|siege|move|colonize|idle ...")?;
+    let verb = t.next().ok_or("missing verb")?.to_string();
+    let owner = state.ship(ship).map(|s| s.faction_id).ok_or_else(|| format!("no ship {ship}"))?;
+    let behavior = match verb.as_str() {
+        "attack" | "chase" => {
+            let target: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("attack/chase needs a target ship id")?;
+            json!({"TargetShip": {"ship": target, "attack": verb == "attack"}})
+        }
+        "siege" => {
+            let city: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("siege needs a city id")?;
+            json!({"TargetSettlement": {"city": city, "bombard": true}})
+        }
+        "move" => {
+            let x: f64 = t.next().and_then(|s| s.parse().ok()).ok_or("move needs x y")?;
+            let y: f64 = t.next().and_then(|s| s.parse().ok()).ok_or("move needs x y")?;
+            json!({"Move": {"position": [x, y]}})
+        }
+        "colonize" => {
+            let body: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("colonize needs a body id")?;
+            json!({"Colonize": {"body": body}})
+        }
+        "idle" => json!("Idle"),
+        other => return Err(format!("unknown verb '{other}'")),
+    };
+    if t.next().is_some() {
+        return Err("too many arguments".to_string());
+    }
+    let diff = json!({"control": [{"faction_id": owner, "ship_orders": [{"ship": ship, "behavior": behavior, "mode": "Player"}]}]});
+    web::apply_patch(state, config, &diff).map_err(|e| e.to_string())?;
+    emit(&control_for_faction(state, owner).to_string());
+    Ok(())
+}
+
+/// Set a per-faction per-resource budget to a Player value.
+/// `budget <faction> <resource> <value>`  -> investment_budget (建设建筑)
+/// `build  <faction> <resource> <value>`  -> construction_budget (造舰)
+fn cmd_budget(state: &mut State, config: &GameConfig, field: &str, rest: &str) -> Result<(), String> {
+    let mut t = rest.split_whitespace();
+    let fid: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: budget|build <faction> <resource> <value>")?;
+    let resource = t.next().ok_or("missing resource key")?;
+    let value: f64 = t.next().and_then(|s| s.parse().ok()).ok_or("missing numeric value")?;
+    if t.next().is_some() {
+        return Err("too many arguments".to_string());
+    }
+    let mut entry = serde_json::Map::new();
+    entry.insert("resource".to_string(), json!(resource));
+    entry.insert("value".to_string(), json!(value));
+    entry.insert("mode".to_string(), json!("Player"));
+    let mut faction = serde_json::Map::new();
+    faction.insert("faction_id".to_string(), json!(fid));
+    faction.insert(field.to_string(), json!([serde_json::Value::Object(entry)]));
+    let diff = serde_json::Value::Object({
+        let mut m = serde_json::Map::new();
+        m.insert("control".to_string(), json!([serde_json::Value::Object(faction)]));
+        m
+    });
+    web::apply_patch(state, config, &diff).map_err(|e| e.to_string())?;
+    emit(&control_for_faction(state, fid).to_string());
+    Ok(())
+}
+
 /// The built-in `summary` radar: a compact per-round overview.
 const SUMMARY_JQ: &str = "{round, time_month, counts:{factions:(.factions|length), cities:(.cities|length), ships:(.ships|length)}, factions:[.factions[]|{id,name,wars}]}";
 
@@ -287,14 +364,18 @@ fn print_meta(config: &GameConfig, filter: Option<&str>) {
 /// Structured command catalog returned by `guide`/`help` (progressive discovery).
 fn guide_json() -> String {
     json!({
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "commands": {
             "q":  {"usage": "q <jq>",        "desc": "run a jq filter over the current state; JSON Lines out (alias query)"},
             "summary": {"usage": "summary",   "desc": "compact radar of the current round (alias s)"},
             "advance": {"usage": "advance [n]", "desc": "advance n rounds (default 1), then print summary (alias a)"},
-            "control": {"usage": "control",   "desc": "dump the editable control surface (control+scope) as JSON — the template to edit into a diff"},
-            "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
+            "control": {"usage": "control [<faction_id>|<jq>]", "desc": "dump the editable control surface. Bare → whole surface; control <id> → one faction (cheaper); control <jq> → filter the surface. The template you edit into a diff."},
+            "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, structures/buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
             "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface"},
+            "order": {"usage": "order <ship> attack|chase|siege|move|colonize|idle ...", "desc": "one-shot ship command (Player mode). e.g. order 0 attack 2 | order 0 move -0.5 0.2 | order 8 colonize 9"},
+            "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
+            "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
+            "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},
             "cities": {"usage": "cities",     "desc": "list cities"},
             "ships":  {"usage": "ships",      "desc": "list ships"},
             "factions": {"usage": "factions", "desc": "list factions"},
@@ -364,7 +445,25 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
             }
 
             // --- editable control surface --------------------------------------
-            "control" => emit(&web::control_surface(state).to_string()),
+            "control" => {
+                if rest.is_empty() {
+                    emit(&web::control_surface(state).to_string());
+                } else if let Ok(fid) = rest.parse::<u32>() {
+                    emit(&control_for_faction(state, fid).to_string());
+                } else {
+                    match query::apply_lines(&web::control_surface(state), rest) {
+                        Ok(lines) => {
+                            if !lines.is_empty() {
+                                emit(&lines);
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "{}",
+                            json!({"ok": false, "code": "ERR_QUERY", "message": e.to_string()})
+                        ),
+                    }
+                }
+            }
             "meta" => print_meta(config, if rest.is_empty() { None } else { Some(rest) }),
             "apply" => {
                 if rest.is_empty() {
@@ -377,6 +476,24 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
                         Ok(()) => emit(&web::control_surface(state).to_string()),
                         Err(e) => eprintln!("{}", json!({"ok": false, "code": "ERR_APPLY", "message": e})),
                     }
+                }
+            }
+
+            // --- high-level command shortcuts ----------------------------------
+            "events" => print_query(state, config, ".events"),
+            "order" => {
+                if let Err(e) = cmd_order(state, config, rest) {
+                    eprintln!("{}", json!({"ok": false, "code": "ERR_ARGS", "message": e}));
+                }
+            }
+            "budget" => {
+                if let Err(e) = cmd_budget(state, config, "investment_budget", rest) {
+                    eprintln!("{}", json!({"ok": false, "code": "ERR_ARGS", "message": e}));
+                }
+            }
+            "build" => {
+                if let Err(e) = cmd_budget(state, config, "construction_budget", rest) {
+                    eprintln!("{}", json!({"ok": false, "code": "ERR_ARGS", "message": e}));
                 }
             }
 

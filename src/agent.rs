@@ -142,6 +142,8 @@ struct AgentState {
     bodies: Vec<AgentBody>,
     cities: Vec<AgentCity>,
     ships: Vec<AgentShip>,
+    /// 本回合事件（谁开火/被毁/城被夷平/殖民/陈旧指令降级），damage 已四舍五入。
+    events: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -384,6 +386,36 @@ impl AgentState {
             bodies,
             cities,
             ships,
+            events: state.events.iter().map(game_event_value).collect(),
+        }
+    }
+}
+
+/// Render one [`GameEvent`] as a clean, rounded tagged-union JSON value for the
+/// agent (damage rounded to 2 decimals, matching the rest of the agent output).
+fn game_event_value(e: &GameEvent) -> serde_json::Value {
+    use GameEvent::*;
+    match e {
+        Attack { attacker, target, damage } => {
+            json!({"type":"attack", "attacker": attacker, "target": target, "damage": r2(*damage)})
+        }
+        ShipDestroyed { ship, owner, class } => {
+            json!({"type":"ship_destroyed", "ship": ship, "owner": owner, "class": class})
+        }
+        Siege { attacker, city, damage } => {
+            json!({"type":"siege", "attacker": attacker, "city": city, "damage": r2(*damage)})
+        }
+        CityRazed { city, fallen_to } => {
+            json!({"type":"city_razed", "city": city, "fallen_to": fallen_to})
+        }
+        ShipSpawned { ship, owner, class, city } => {
+            json!({"type":"ship_spawned", "ship": ship, "owner": owner, "class": class, "city": city})
+        }
+        ColonyFounded { city, owner, body, seeded_ship_class } => {
+            json!({"type":"colony_founded", "city": city, "owner": owner, "body": body, "seeded_ship_class": seeded_ship_class})
+        }
+        StaleOrder { ship, reason } => {
+            json!({"type":"stale_order", "ship": ship, "reason": reason})
         }
     }
 }
