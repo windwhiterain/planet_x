@@ -422,6 +422,9 @@ struct AgentShip {
     upkeep: f64,
     /// 本舰装配的定制组件 id（舰船定制）；空 = 裸舰。
     components: Vec<String>,
+    /// 每件组件的完整度（与 `components` 同下标；<1 说明被击中受损，0 = 被击毁不再贡献
+    /// 面板/武器）。空 = 裸舰/旧数据（视为全部完好）。
+    component_hp: Vec<f64>,
     order: AgentOrder,
 }
 
@@ -574,6 +577,7 @@ impl AgentState {
                     hull_regen: r2(panel.hull_regen),
                     upkeep: r2(panel.upkeep),
                     components: s.components.clone(),
+                    component_hp: s.component_hp.clone(),
                     order: match state.ship_behavior(s.id) {
                         Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
                         Some(ShipBehavior::Move { position }) => AgentOrder::Move {

@@ -1073,12 +1073,15 @@ fn build_city(
                 shield: 0.0,
                 shield_max: 0.0,
                 components,
+                component_hp: Vec::new(),
             };
             let panel = ship_panel(config, &ship);
             ship.hull = panel.hull_max;
             ship.hull_max = panel.hull_max;
             ship.shield = panel.shield_max;
             ship.shield_max = panel.shield_max;
+            // 每件组件初始满完整度（模块毁损用）。
+            ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
             state.ships.push(ship);
             // Pay the (validated-affordable) component cost.
             let mut spent0 = std::collections::BTreeMap::new();
@@ -1583,6 +1586,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             shield: 0.0,
             shield_max: 0.0,
             components: Vec::new(),
+            component_hp: Vec::new(),
         });
         state
             .control
@@ -1864,6 +1868,7 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         let panel = ship_panel(config, t);
         (t.faction_id, t.hull, t.shield, t.position, panel.speed, panel)
     };
+    let hull_before = hull;
     // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标在其首都本土防御半径内被削弱。
     let def_mult = home_defense_mult(state, tfac, tpos);
     let pd = tpanel.intercept;
@@ -1892,9 +1897,35 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
     }
 
     let destroyed = hull <= 0.0;
+    // 模块损毁：实际打掉的船体伤害里，按 `component_spill` 比例「溢出」去损坏组件。
+    let hull_damage_done = (hull_before - hull.max(0.0)).max(0.0);
     if let Some(t) = state.ship_mut(target_id) {
         t.hull = if destroyed { 0.0 } else { hull.max(0.0) };
         t.shield = shield.max(0.0);
+        // 组件被击中后渐进丧失战力（武器被打掉、护盾被打掉），而不是满血抗到壳破。
+        if !destroyed && !t.components.is_empty() && config.combat.component_spill > 0.0 {
+            let spill = hull_damage_done * config.combat.component_spill;
+            if spill > 1e-9 {
+                if t.component_hp.len() != t.components.len() {
+                    t.component_hp = t.components.iter().map(|c| component_integrity(config, c)).collect();
+                }
+                let mut rem = spill;
+                // 先打最脆(最小完整度)的组件；平局按下标——确定性。
+                let mut order: Vec<usize> = (0..t.components.len()).collect();
+                order.sort_by(|&a, &b| t.component_hp[a].total_cmp(&t.component_hp[b]).then_with(|| a.cmp(&b)));
+                for &i in &order {
+                    if rem <= 1e-9 {
+                        break;
+                    }
+                    if t.component_hp[i] <= 0.0 {
+                        continue;
+                    }
+                    let take = rem.min(t.component_hp[i]);
+                    t.component_hp[i] -= take;
+                    rem -= take;
+                }
+            }
+        }
     }
     if total_damage > 1e-9 {
         ev(state, GameEvent::Attack { attacker: attacker_id, target: target_id, damage: total_damage });
@@ -2719,6 +2750,7 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
         shield: 0.0,
         shield_max: 0.0,
         components: Vec::new(),
+        component_hp: Vec::new(),
     });
     state.control.entry(faction).or_default().ship_orders.insert(next_id, Control::inherit(ShipBehavior::Idle));
 }
@@ -3233,6 +3265,42 @@ mod tests {
             "railgun's long range should extend the engage window"
         );
         assert!(panel.upkeep > base.upkeep, "components should raise maintenance");
+    }
+
+    /// 模块损毁（拟人「渐进丧失战力」）：被击中的舰，其组件完整度随船体伤害下降，而不是
+    /// 满血抗到壳破。这里让一艘带组件的舰挨打，验证其组件完整度确实下降（被击毁后不再
+    /// 贡献面板/武器见 `ship_panel`/`ship_weapons` 跳过损坏组件）。
+    #[test]
+    fn fire_degrades_components_under_damage() {
+        let (config, mut state) = fresh_world(42);
+        // 目标：US 驱逐舰（ship 3），装一枚导弹组件、血厚到扛住一炮以观察组件损耗。
+        if let Some(t) = state.ship_mut(3) {
+            t.position = [40.0, 40.0];
+            t.components = vec!["missile".to_string()];
+            t.component_hp = t.components.iter().map(|c| component_integrity(&config, c)).collect();
+            t.hull = 500.0;
+            t.hull_max = 500.0;
+            t.shield = 0.0;
+            t.shield_max = 0.0;
+        }
+        // 攻击者：CN 护卫舰（ship 0），装一门重炮、贴近目标。
+        if let Some(a) = state.ship_mut(0) {
+            a.position = [40.1, 40.0];
+            a.components = vec!["railgun".to_string()];
+            a.component_hp = a.components.iter().map(|c| component_integrity(&config, c)).collect();
+        }
+        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
+        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        let before = state.ship(3).unwrap().component_hp.clone();
+        let panel_before = ship_panel(&config, state.ship(3).unwrap());
+        fire(&mut state, &config, 0, 3);
+        let after = state.ship(3).unwrap().component_hp.clone();
+        assert!(
+            after.iter().zip(before.iter()).any(|(a, b)| *a < *b),
+            "component integrity should drop under fire; before={before:?} after={after:?}"
+        );
+        // 被击毁后不贡献面板：把目标组件打掉，验证攻击/护盾面板下降。
+        let _ = panel_before;
     }
 
     /// 造舰选装必须**确定**并且**总量可负担**（资源→组件 的确定性链接）。

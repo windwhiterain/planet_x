@@ -613,6 +613,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             shield: 0.0,
             shield_max: 0.0,
             components: Vec::new(),
+            component_hp: Vec::new(),
         });
         next_ship += 1;
     };

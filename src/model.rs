@@ -350,6 +350,28 @@ fn weapon_kind(t: &str) -> u8 {
 
 /// Compute a ship's effective combat panel from its class spec plus its fitted
 /// components. Pure & deterministic (no RNG); cheap enough for the hot loop.
+/// A component's 完整度 (integrity) when freshly installed: weapons/shields/armor each
+/// add to how long it survives battle damage, with a floor so trivial parts are not
+/// one-shot.
+pub fn component_integrity(config: &GameConfig, id: &str) -> f64 {
+    let cs = config.component_spec(id);
+    (cs.shield + cs.hull + cs.damage * 0.4).max(18.0)
+}
+
+/// A ship's component at index `i`'s effectiveness (0..1): its current integrity
+/// fraction. A damaged module contributes less (a shot-out weapon fires weaker) —
+/// the mechanical basis of gradual combat degradation. A missing `component_hp`
+/// (legacy / bare ships) is fully effective; an emptied one is dead (0). 
+pub fn component_effectiveness(config: &GameConfig, ship: &Ship, i: usize) -> f64 {
+    let Some(hp) = ship.component_hp.get(i) else {
+        return 1.0; // 无完整度记录（裸舰/旧数据）：视为完好。
+    };
+    if ship.components.get(i).map(|c| component_integrity(config, c)).unwrap_or(1.0) <= 1e-9 {
+        return 1.0;
+    }
+    (hp / component_integrity(config, &ship.components[i])).clamp(0.0, 1.0)
+}
+
 pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
     let base = config.ship_spec(&ship.class);
     let mut p = ShipPanel {
@@ -363,19 +385,23 @@ pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
         intercept: 0.0,
         upkeep: base.upkeep,
     };
-    for c in &ship.components {
+    for (i, c) in ship.components.iter().enumerate() {
+        let eff = component_effectiveness(config, ship, i);
+        if eff <= 1e-9 {
+            continue; // 彻底被击毁的组件不再贡献面板。
+        }
         if let Some(cs) = config.components.get(c) {
-            p.attack += cs.damage;
-            p.speed += cs.speed;
-            p.hull_max += cs.hull;
-            p.hull_regen += cs.hull_regen;
-            p.shield_max += cs.shield;
-            p.shield_regen += cs.shield_regen;
+            p.attack += cs.damage * eff;
+            p.speed += cs.speed * eff;
+            p.hull_max += cs.hull * eff;
+            p.hull_regen += cs.hull_regen * eff;
+            p.shield_max += cs.shield * eff;
+            p.shield_regen += cs.shield_regen * eff;
             if cs.range > p.attack_range {
                 p.attack_range = cs.range;
             }
-            p.intercept += cs.intercept;
-            p.upkeep += cs.upkeep;
+            p.intercept += cs.intercept * eff;
+            p.upkeep += cs.upkeep * eff;
         }
     }
     p
@@ -397,11 +423,15 @@ pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
             kind: WEAPON_KINETIC,
         });
     }
-    for c in &ship.components {
+    for (i, c) in ship.components.iter().enumerate() {
+        let eff = component_effectiveness(config, ship, i);
+        if eff <= 1e-9 {
+            continue; // 彻底被击毁的武器组件不再开火。
+        }
         if let Some(cs) = config.components.get(c) {
             if cs.category == "weapon" && cs.damage > 0.0 {
                 ws.push(Weapon {
-                    damage: cs.damage,
+                    damage: cs.damage * eff,
                     range: cs.range,
                     tracking: cs.tracking,
                     shield_mult: cs.shield_mult,
@@ -503,6 +533,11 @@ pub struct Ship {
     /// 由模拟在造舰出厂时确定性挑选并扣成本；agent 可直读以了解舰队构成。
     #[serde(default)]
     pub components: Vec<String>,
+    /// 每个组件的完整度（与 `components` 同下标）。战斗中被击中会「溢出」损坏组件——
+    /// 完整度 ≤0 即该组件被击毁，不贡献面板/武器（渐进丧失战力，而非满血抗到壳破）。
+    /// 空 = 旧数据/裸舰（视为全部完好）。
+    #[serde(default)]
+    pub component_hp: Vec<f64>,
 }
 
 fn default_hull_max() -> f64 {
@@ -909,6 +944,11 @@ pub struct CombatConfig {
     /// 防御与再生时，才值得后撤修整。
     #[serde(default = "default_retreat_min_dist")]
     pub retreat_min_dist: f64,
+    /// 模块损毁：被击中时，每点船体伤害中溢出去损坏组件的比例。组件完整度降到 0 即被
+    /// 击毁、不再贡献面板/武器——军舰随战况**渐进丧失战力**（武器被打掉、护盾被打掉），
+    /// 而不是满血抗到壳破。0 = 关闭。
+    #[serde(default = "default_component_spill")]
+    pub component_spill: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -917,6 +957,10 @@ fn default_retreat_hull() -> f64 {
 
 fn default_retreat_min_dist() -> f64 {
     1.5
+}
+
+fn default_component_spill() -> f64 {
+    0.12
 }
 
 /// Building structure attribute (混凝土 / 钢结构).
