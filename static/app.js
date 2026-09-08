@@ -1,9 +1,9 @@
 // 行星X WebUI frontend — vanilla JS + SVG. Talks to the JSON API in src/web.rs.
 //
-// The control panel is a hierarchical tree following the control-scope chain:
-//   全局 -> 势力 -> (舰 / 资源 / 天体 -> 城市 -> 建筑)
-// Each scope node (全局/势力/天体/城市) and each leaf (舰/资源/建筑) carries an
-// AI/玩家 toggle. Leaves are only shown under their real parent.
+// The control panel is a tab-driven hierarchy following the control-scope chain:
+//   全局 -> 势力 -> category(舰/资源/天体) -> 天体 -> 城市 -> 建筑
+// Every container node shows a tab strip and expands only the selected child.
+// Category groups list all their items; global/faction/body/city use tabs.
 
 let world = null;      // current StateView
 let meta = null;       // MetaView
@@ -12,7 +12,7 @@ let selShip = null;    // selected ship id (readout)
 let edControl = [];    // editable copy of ALL factions' control (FactionControlView[])
 let edScope = null;    // editable copy of the scope
 let prevState = null;  // for a simple diff footer
-let openSet = new Set(); // expanded tree node keys
+let selTab = new Map(); // parentKey -> active child key (one tab open per level)
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const el = (tag, attrs, html) => {
@@ -43,12 +43,12 @@ async function postJSON(url, body) {
   return r.json();
 }
 
-// Faction marker colors (the model stores a char, not a color).
-const PALETTE = [
-  '#3b82f6', '#06b6d4', '#8b5cf6', '#ef4444', '#ec4899',
-  '#eab308', '#22c55e', '#f8fafc', '#d946ef', '#fb923c',
-];
-function fracColor(fid) { return PALETTE[fid % PALETTE.length]; }
+// Faction display color comes from the backend (/api/state -> faction.color),
+// which sends a CSS hex string. Fallback grey for safety if unknown.
+function facColor(fid) {
+  const f = world.factions.find((x) => x.id === fid);
+  return (f && f.color) || '#8f9bb3';
+}
 
 // --- behavior helpers (serde JSON shape) ----------------------------------
 function behaviorType(b) {
@@ -86,6 +86,49 @@ function behaviorFromInput(type, d) {
   }
 }
 
+// --- node-kind registry ------------------------------------------------------
+// Centralises every per-kind behaviour so renderNode/modeToggleFor no longer
+// switch on a bare string. To support a new structural level, add one row here
+// (plus the matching entry in buildTree). Fields:
+//   childMode    'tabs'  -> container: tab strip, one active child expanded
+//                'list'  -> category group: all children stacked
+//                'leaf'  -> terminal node (no children)
+//   scope        source of the AI/玩家 toggle:
+//                null        no toggle (pure grouping container)
+//                'global'    edScope.global
+//                'factions'/'bodies'/'cities'  scopeVal(edScope[k], node.id)
+//                'leaf'      node.leaf.mode
+//   editor       'ship'  -> ship behavior editor (Player only)
+//                'value' -> numeric leaf editor, label = editorLabel
+//   editorLabel  label for the 'value' editor
+//   selectFaction   clicking the label switches selFaction
+//   decorateLabel   fn(node, world) -> suffix appended to the label text
+const KIND = {
+  global:   { childMode: 'tabs', scope: 'global' },
+  faction:  { childMode: 'tabs', scope: 'factions', selectFaction: true },
+  group:    { childMode: 'list', scope: null },
+  body:     { childMode: 'tabs', scope: 'bodies' },
+  city:     { childMode: 'tabs', scope: 'cities' },
+  ship:     { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
+  resource: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '预算/回合' },
+  building: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '权重' },
+};
+
+// Resolve the read/write accessors for a node's AI/玩家 toggle, or null if it
+// has none (scope: null). Returns {get, set}.
+function scopeAccess(node) {
+  const spec = KIND[node.kind] || {};
+  const s = spec.scope;
+  if (s === null || s === undefined) return null;
+  if (s === 'leaf') return { get: () => node.leaf.mode, set: (v) => { node.leaf.mode = v; } };
+  if (s === 'global') return { get: () => edScope.global, set: (v) => { edScope.global = v; } };
+  // s is a scope list key ('factions' | 'bodies' | 'cities')
+  return {
+    get: () => scopeVal(edScope[s], node.id),
+    set: (v) => setScopeVal(edScope[s], node.id, v),
+  };
+}
+
 // --- state load / selection -------------------------------------------------
 async function init() {
   meta = await fetchJSON('/api/meta');
@@ -100,22 +143,12 @@ async function init() {
 function buildEdits() {
   edControl = structuredClone(world.control || []);
   edScope = structuredClone(world.scope);
-  if (openSet.size === 0) seedOpen();
-}
-
-function seedOpen() {
-  openSet.add('g');
-  openSet.add('f' + selFaction);
-  world.cities.filter((c) => c.faction_id === selFaction).forEach((ci) => {
-    openSet.add('b' + selFaction + '-' + ci.body_id);
-    openSet.add('c' + ci.id);
-  });
 }
 
 function setFaction(fid) {
   if (fid === selFaction) return;
   selFaction = fid;
-  openSet.add('f' + fid);
+  selTab.set('g', 'f' + fid);
   renderTree();
   renderReadout();
 }
@@ -200,7 +233,7 @@ function renderMap() {
     t.textContent = b.name;
     svg.appendChild(t);
     world.cities.filter((ci) => ci.body_id === b.id).forEach((ci) => {
-      const r = svgEl('rect', { x: x - 13, y: y - 13, width: 7, height: 7, fill: fracColor(ci.faction_id), stroke: '#0f172a' });
+      const r = svgEl('rect', { x: x - 13, y: y - 13, width: 7, height: 7, fill: facColor(ci.faction_id), stroke: '#0f172a' });
       r.setAttribute('data-kind', 'city');
       r.setAttribute('data-ref', ci.id);
       r.addEventListener('click', () => { selShip = null; $('#readout').textContent = '城市 ' + ci.name; });
@@ -210,7 +243,7 @@ function renderMap() {
 
   world.ships.forEach((s) => {
     const x = X(tx(s.position[0])), y = Y(tx(s.position[1]));
-    const c = svgEl('circle', { cx: x, cy: y, r: 4, fill: fracColor(s.faction_id), stroke: '#0f172a', 'stroke-width': 1 });
+    const c = svgEl('circle', { cx: x, cy: y, r: 4, fill: facColor(s.faction_id), stroke: '#0f172a', 'stroke-width': 1 });
     c.setAttribute('data-kind', 'ship');
     c.setAttribute('data-ref', s.id);
     c.addEventListener('click', () => {
@@ -223,32 +256,40 @@ function renderMap() {
 }
 
 // --- hierarchy tree (control + scope) --------------------------------------
+// Tab drill-down: every container node shows a tab strip of its children and
+// only the active child is expanded. 全局 -> 势力 -> category(舰/资源/天体) ->
+// 天体 -> 城市 -> 建筑. Legacy openSet/expand arrows are gone.
 function buildTree() {
   const root = { key: 'g', kind: 'global', name: '全局', children: [] };
   world.factions.forEach((f) => {
     const fid = f.id;
     const fc = getControl(fid);
-    const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: fracColor(fid), fid, children: [] };
+    const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: f.color, fid, children: [] };
 
-    // ships owned by this faction
-    (fc.ship_orders || []).forEach((ord) => {
+    // ships owned by this faction (leaves)
+    const shipLeaves = (fc.ship_orders || []).map((ord) => {
       const s = world.ships.find((x) => x.id === ord.ship);
-      fn.children.push({ key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid });
+      return { key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid };
     });
 
-    // budget resources of this faction
-    (fc.budget || []).forEach((e) => {
-      fn.children.push({ key: 'res' + fid + ':' + e.resource, kind: 'resource', name: resName(e.resource), leaf: e, fid });
-    });
+    // budget resources of this faction (leaves)
+    const resLeaves = (fc.budget || []).map((e) => ({
+      key: 'res' + fid + ':' + e.resource,
+      kind: 'resource',
+      name: resName(e.resource),
+      leaf: e,
+      fid,
+    }));
 
     // bodies where this faction has cities -> cities -> buildings
+    const bodyNodes = [];
     world.cities.filter((c) => c.faction_id === fid).forEach((ci) => {
       const bid = ci.body_id;
-      let bn = fn.children.find((n) => n.kind === 'body' && n.id === bid);
+      let bn = bodyNodes.find((n) => n.id === bid);
       if (!bn) {
         const b = world.bodies.find((x) => x.id === bid);
         bn = { key: 'b' + fid + '-' + bid, kind: 'body', id: bid, name: (b ? b.name : '天体#' + bid), children: [], fid };
-        fn.children.push(bn);
+        bodyNodes.push(bn);
       }
       const cn = { key: 'c' + ci.id, kind: 'city', id: ci.id, name: ci.name, children: [], fid };
       (fc.invest_weights || []).forEach((e) => {
@@ -259,6 +300,13 @@ function buildTree() {
       bn.children.push(cn);
     });
 
+    // category tabs under a faction (only present categories)
+    const cats = [];
+    if (shipLeaves.length) cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: shipLeaves });
+    if (resLeaves.length) cats.push({ key: 'gr' + fid, kind: 'group', name: '资源', fid, children: resLeaves });
+    if (bodyNodes.length) cats.push({ key: 'gb' + fid, kind: 'group', name: '天体', fid, children: bodyNodes });
+    fn.children = cats;
+
     root.children.push(fn);
   });
   return root;
@@ -267,71 +315,79 @@ function buildTree() {
 function renderTree() {
   const tree = $('#tree');
   tree.innerHTML = '';
-  tree.appendChild(renderNode(buildTree(), 0));
+  tree.appendChild(renderNode(buildTree()));
 }
 
-function renderNode(node, depth) {
+function renderNode(node) {
+  const spec = KIND[node.kind] || {};
   const wrap = el('div', { class: 'tnode' });
   const head = el('div', { class: 'tnode-head' });
-  const hasKids = node.children && node.children.length;
-
-  const arrow = el('span', { class: 'arrow' });
-  if (hasKids) {
-    arrow.textContent = openSet.has(node.key) ? '▾' : '▸';
-    arrow.addEventListener('click', () => {
-      if (openSet.has(node.key)) openSet.delete(node.key); else openSet.add(node.key);
-      renderTree();
-    });
-  } else {
-    arrow.textContent = '·';
-    arrow.classList.add('leaf');
-  }
-  head.appendChild(arrow);
 
   const lbl = el('span', { class: 'tnode-label' });
   let labelText = node.name;
-  if (node.kind === 'ship') labelText += ' · ' + behaviorSummary(node.leaf.behavior, world);
+  if (spec.decorateLabel) labelText += spec.decorateLabel(node, world);
   lbl.textContent = labelText;
   if (node.color) lbl.style.color = node.color;
-  if (node.kind === 'faction') {
+  if (spec.selectFaction) {
     lbl.classList.add('clickable');
     lbl.addEventListener('click', () => setFaction(node.id));
   }
   head.appendChild(lbl);
 
-  head.appendChild(modeToggleFor(node));
+  const mt = modeToggleFor(node);
+  if (mt) head.appendChild(mt);
   wrap.appendChild(head);
 
-  if (hasKids && openSet.has(node.key)) {
-    const kids = el('div', { class: 'tnode-kids' });
-    node.children.forEach((ch) => kids.appendChild(renderNode(ch, depth + 1)));
-    wrap.appendChild(kids);
+  const hasKids = node.children && node.children.length;
+
+  // category group: stack ALL its children
+  if (spec.childMode === 'list') {
+    if (hasKids) {
+      const kids = el('div', { class: 'tnode-kids' });
+      node.children.forEach((ch) => kids.appendChild(renderNode(ch)));
+      wrap.appendChild(kids);
+    }
+    return wrap;
   }
 
-  // leaf-specific editors below the header
-  if (node.kind === 'ship' && node.leaf.mode === 'Player') {
-    wrap.appendChild(shipEditor(node.leaf));
-  } else if (node.kind === 'resource') {
-    wrap.appendChild(leafValueEditor(node.leaf, '预算/回合'));
-  } else if (node.kind === 'building') {
-    wrap.appendChild(leafValueEditor(node.leaf, '权重'));
+  // container node: tab strip of children, only the active one expands
+  if (spec.childMode === 'tabs') {
+    if (hasKids) {
+      const active = selTab.get(node.key) || node.children[0].key;
+      const tabs = el('div', { class: 'tnode-tabs' });
+      node.children.forEach((ch) => {
+        const tab = el('span', { class: 'tnode-tab' + (ch.key === active ? ' sel' : '') });
+        tab.textContent = ch.name;
+        tab.addEventListener('click', () => {
+          selTab.set(node.key, ch.key);
+          if ((KIND[ch.kind] || {}).selectFaction) selFaction = ch.id;
+          renderTree();
+          renderReadout();
+        });
+        tabs.appendChild(tab);
+      });
+      wrap.appendChild(tabs);
+
+      const activeChild = node.children.find((ch) => ch.key === active);
+      if (activeChild) wrap.appendChild(renderNode(activeChild));
+    }
+    return wrap;
+  }
+
+  // leaf editors below the header
+  if (spec.editor === 'ship') {
+    if (node.leaf.mode === 'Player') wrap.appendChild(shipEditor(node.leaf));
+  } else if (spec.editor === 'value') {
+    wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel));
   }
   return wrap;
 }
 
 function modeToggleFor(node) {
-  let mode, set;
-  if (node.kind === 'global') {
-    mode = edScope.global; set = (v) => { edScope.global = v; };
-  } else if (node.kind === 'faction') {
-    mode = scopeVal(edScope.factions, node.id); set = (v) => setScopeVal(edScope.factions, node.id, v);
-  } else if (node.kind === 'body') {
-    mode = scopeVal(edScope.bodies, node.id); set = (v) => setScopeVal(edScope.bodies, node.id, v);
-  } else if (node.kind === 'city') {
-    mode = scopeVal(edScope.cities, node.id); set = (v) => setScopeVal(edScope.cities, node.id, v);
-  } else {
-    mode = node.leaf.mode; set = (v) => { node.leaf.mode = v; };
-  }
+  const acc = scopeAccess(node);
+  if (!acc) return null;
+  const mode = acc.get();
+  const set = acc.set;
 
   const sel = el('select', { class: 'mode' });
   [['', '默认'], ['Ai', 'AI'], ['Player', '玩家']].forEach(([v, l]) => {
@@ -439,7 +495,7 @@ async function newGame() {
   prevState = null;
   world = await postJSON('/api/new', { seed });
   selFaction = world.factions.length ? world.factions[0].id : 0;
-  openSet = new Set();
+  selTab = new Map();
   buildEdits();
   renderAll();
   updateTop();

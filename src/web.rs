@@ -34,6 +34,16 @@ pub struct GameWorld {
 
 pub type Shared = Arc<Mutex<GameWorld>>;
 
+// Faction display colors, delivered as CSS hex strings so the frontend never has
+// to map ids itself. Keyed by FactionId (modulo the palette length).
+const FACTION_COLORS: &[&str] = &[
+    "#3b82f6", "#06b6d4", "#8b5cf6", "#ef4444", "#ec4899",
+    "#eab308", "#22c55e", "#f8fafc", "#d946ef", "#fb923c",
+];
+fn faction_color(fid: FactionId) -> String {
+    FACTION_COLORS[(fid as usize) % FACTION_COLORS.len()].to_string()
+}
+
 // --- wire types -------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -56,7 +66,7 @@ pub struct BuildingMeta {
 pub struct FactionView {
     pub id: FactionId,
     pub name: String,
-    pub color: char,
+    pub color: String,
     pub resources: Vec<(String, f64)>,
     pub relations: Vec<(FactionId, f64)>,
     pub budget: Vec<(String, f64)>,
@@ -145,7 +155,7 @@ fn faction_view(f: &Faction) -> FactionView {
     FactionView {
         id: f.id,
         name: f.name.clone(),
-        color: f.color,
+        color: faction_color(f.id),
         resources: f.resources.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         relations: f.relations.iter().map(|(k, v)| (*k, *v)).collect(),
         budget: Vec::new(),
