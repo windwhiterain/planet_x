@@ -74,6 +74,9 @@ quit / exit
 > `order`/`budget`/`build` 是 `apply` 的高层薄封装，底层仍生成同一形状的 diff。
 > 玩家指令如果目标失效（目标舰被毁、城被夷平、无定居点），会自动降级为 `Idle`
 > 并记一条 `stale_order` 事件，而不是让船飞向太阳中心 `[0,0]`。
+> `apply` 里舰的 `behavior` 两种写法都认：默认枚举形式（`{"TargetShip":{"ship":2,"attack":true}}`、
+> `"Idle"`），以及**状态视图里 `order` 的 tagged 形式**（`{"type":"target_ship","ship":2,"attack":true}`、
+> `{"type":"idle"}`）——所以你可以把 `order` 字段原样粘进 diff，无需手动翻译。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 

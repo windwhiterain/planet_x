@@ -371,7 +371,7 @@ fn guide_json() -> String {
             "advance": {"usage": "advance [n]", "desc": "advance n rounds (default 1), then print summary (alias a)"},
             "control": {"usage": "control [<faction_id>|<jq>]", "desc": "dump the editable control surface. Bare → whole surface; control <id> → one faction (cheaper); control <jq> → filter the surface. The template you edit into a diff."},
             "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, structures/buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
-            "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface"},
+            "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface. A ship behavior may be written in the default enum form ({\"TargetShip\":{...}}, \"Idle\") or the tagged state-view form ({\"type\":\"target_ship\",...}, {\"type\":\"idle\"}) — both are accepted."},
             "order": {"usage": "order <ship> attack|chase|siege|move|colonize|idle ...", "desc": "one-shot ship command (Player mode). e.g. order 0 attack 2 | order 0 move -0.5 0.2 | order 8 colonize 9"},
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
