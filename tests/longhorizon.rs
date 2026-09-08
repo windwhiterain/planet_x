@@ -297,3 +297,49 @@ fn same_seed_reproduces_identically() {
     );
     assert_eq!(a.round, b.round);
 }
+
+/// 多极与霸权制衡：合纵连横机制应让世界**不收敛成一家独大**——没有任何势力能长期
+/// 垄断全部城市（最高城占低于一致阈值），且反制联盟确实会成立（机制是活的，不是摆设）。
+/// 上千回合后游戏仍是多方参与，而非「一个霸主 + 一堆旁观者」。
+#[test]
+fn world_is_multipolar() {
+    let config = load_config();
+    for seed in [1u64, 42] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut max_top_share: f64 = 0.0;
+        let mut coalition_seen = false;
+        for _ in 0..1000u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            check_state(&state, &config);
+            let (_, share) = top_city_share(&state);
+            max_top_share = max_top_share.max(share);
+            if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
+                coalition_seen = true;
+            }
+        }
+        // 不统一：没有势力能吞并到接近 100% 的城市（峰值留出余量）。
+        assert!(
+            max_top_share < 0.85,
+            "seed {seed}: 单一势力城市占比峰值 {max_top_share:.3} —— 世界有被一家独大垄断的趋势"
+        );
+        // 制衡是活的：长局里应出现过反制联盟（合纵连横确实发生）。
+        assert!(coalition_seen, "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）");
+    }
+}
+
+fn top_city_share(state: &State) -> (FactionId, f64) {
+    let total = state.cities.iter().filter(|c| !c.razed).count() as f64;
+    if total <= 0.0 {
+        return (0, 0.0);
+    }
+    let mut best = (0u32, 0.0);
+    for f in &state.factions {
+        let n = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count() as f64;
+        let s = n / total;
+        if s > best.1 {
+            best = (f.id, s);
+        }
+    }
+    best
+}

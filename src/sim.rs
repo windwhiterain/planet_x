@@ -56,6 +56,9 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     // 自己的残骸足迹上重新立足。放在治理之后：被叛乱夷平到零的势力也能当回合重建。
     step_resurgence(state, config, rng);
     step_diplomacy(state, config, rng);
+    // 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力结成反制联盟——
+    // 军事上联手制衡，经济上多国资源封锁。这给「一家独大」一个自然的众矢之的。
+    step_balance_of_power(state, config);
 
     // 外交跃迁：任何一对势力跨越战争阈值（开战 / 停战）都在本回合记一条事件。
     let wars_after = war_pairs(state, config);
@@ -361,6 +364,17 @@ fn step_market(state: &mut State, config: &GameConfig) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
+    // 经济制裁：若有一个活跃反制联盟针对某个「霸权」，该霸权被多国资源封锁，其自动
+    // 市场交易额度按 `sanction_trade_mult` 缩水——难以靠市场兑换短缺矿物，产业受抑。
+    let sanctioned_hegemon = active_coalition_hegemon(state, config);
+    let trade_limit_of = |fid: FactionId| -> f64 {
+        if sanctioned_hegemon == Some(fid) {
+            m.auto_trade_limit * config.balance.sanction_trade_mult
+        } else {
+            m.auto_trade_limit
+        }
+    };
+
     for fid in faction_ids {
         // 1) Minerals this faction's shipyards need (union of build_cost keys).
         let mut need: BTreeSet<String> = BTreeSet::new();
@@ -415,9 +429,10 @@ fn step_market(state: &mut State, config: &GameConfig) {
             continue;
         }
 
-        // 4) Effective buy: capped by the trade limit and by what surplus sells.
+        // 4) Effective buy: capped by the trade limit (or the sanctioned cap) and
+        // by what surplus sells.
         let eff_buy = buy_value
-            .min(m.auto_trade_limit)
+            .min(trade_limit_of(fid))
             .min(surplus_value / (1.0 + m.spread));
         if eff_buy <= 1e-6 {
             continue;
@@ -1790,6 +1805,196 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 f.relations.insert(other, rel);
             }
         }
+    }
+}
+
+// --- balance of power (合纵连横 / 弱者联盟对抗霸权) ------------------------------
+
+/// 设置两个势力间的对称关系（带钳位），写入双方。
+fn set_relation_sym(state: &mut State, a: FactionId, b: FactionId, v: f64, config: &GameConfig) {
+    let v = v.clamp(config.diplomacy.hostility_floor, config.diplomacy.friendship_ceiling);
+    for f in state.factions.iter_mut().filter(|f| f.id == a || f.id == b) {
+        let other = if f.id == a { b } else { a };
+        f.relations.insert(other, v);
+    }
+}
+
+/// 综合实力占比：`power = (city_weight×城市份额 + fleet_weight×舰队份额) / (两权重之和)`。
+/// 城市份额 = 活城数/总活城数，舰队份额 = 舰艇引擎数值之和/总引擎数值之和。两份额各自
+/// 在 [0,1] 且对全势力求和为 1，故 power 也是合法的占比（0..1）。无活城且无舰时返回全 0。
+pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
+    let b = &config.balance;
+    let wp = b.power_city_weight + b.power_fleet_weight;
+    let total_cities = state.cities.iter().filter(|c| !c.razed).count() as f64;
+    let total_fleet: f64 = state.ships.iter().map(|s| config.ship_spec(&s.class).hull).sum();
+    if wp <= 0.0 || (total_cities <= 0.0 && total_fleet <= 0.0) {
+        return state.factions.iter().map(|f| (f.id, 0.0)).collect();
+    }
+    let mut powers = BTreeMap::new();
+    for f in &state.factions {
+        let cities = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count() as f64;
+        let fleet: f64 = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == f.id)
+            .map(|s| config.ship_spec(&s.class).hull)
+            .sum();
+        let city_share = if total_cities > 0.0 { cities / total_cities } else { 0.0 };
+        let fleet_share = if total_fleet > 0.0 { fleet / total_fleet } else { 0.0 };
+        let power = (b.power_city_weight * city_share + b.power_fleet_weight * fleet_share) / wp;
+        powers.insert(f.id, power);
+    }
+    powers
+}
+
+/// 当前的反制联盟成员：非霸权势力中，对霸权的**疏远**达到 [`BalanceOfPowerConfig::coalition_estrange`]
+/// （关系 ≤ 该值，即被遏制/疏远了霸权）、且彼此相互和平（互不交战）的一方。若 ≥
+/// [`BalanceOfPowerConfig::min_members`] 即视为联盟成立。遏制是冷战式的——成员未必与
+/// 霸权开战，但已脱离其影响、转而与弱国抱团。
+fn coalition_of(state: &State, config: &GameConfig, hegemon: FactionId, members: &[FactionId]) -> Vec<FactionId> {
+    let estrange = config.balance.coalition_estrange;
+    let estranged: Vec<FactionId> = members
+        .iter()
+        .cloned()
+        .filter(|m| relation(state, *m, hegemon) <= estrange)
+        .collect();
+    estranged
+        .iter()
+        .cloned()
+        .filter(|&m| estranged.iter().all(|&o| o == m || !hostile(state, config, m, o)))
+        .collect()
+}
+
+/// 当前一个活跃反制联盟针对的「霸权」：某势力综合实力占比达阈值，且已有 ≥
+/// [`BalanceOfPowerConfig::min_members`] 个非霸权势力结成对它的反制联盟。返回该霸权
+/// id；无则返回 `None`。用于经济制裁判定（市场限制）与政治上报。
+pub(crate) fn active_coalition_hegemon(state: &State, config: &GameConfig) -> Option<FactionId> {
+    let b = &config.balance;
+    if b.hegemon_power > 1.0 {
+        return None;
+    }
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    if ids.len() < 2 {
+        return None;
+    }
+    let powers = faction_power_share(state, config);
+    let (hegemon, max_power) = powers
+        .iter()
+        .max_by(|x, y| x.1.partial_cmp(y.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, v)| (*k, *v))
+        .unwrap_or((0, 0.0));
+    if max_power < b.hegemon_power {
+        return None;
+    }
+    let members: Vec<FactionId> = ids.iter().cloned().filter(|x| *x != hegemon).collect();
+    if coalition_of(state, config, hegemon, &members).len() >= b.min_members {
+        Some(hegemon)
+    } else {
+        None
+    }
+}
+
+/// 合纵连横格局快照：返回 (当前霸权(若有), 针对它的反制联盟成员, 各势力综合实力占比)。
+/// 供 agent 层读取政治格局（霸权是谁、谁在联合制衡、谁是当前最强）。
+pub fn balance_picture(
+    state: &State,
+    config: &GameConfig,
+) -> (Option<FactionId>, Vec<FactionId>, BTreeMap<FactionId, f64>) {
+    let powers = faction_power_share(state, config);
+    let hegemon = active_coalition_hegemon(state, config);
+    let members = match hegemon {
+        Some(h) => {
+            let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+            let members: Vec<FactionId> = ids.into_iter().filter(|x| *x != h).collect();
+            coalition_of(state, config, h, &members)
+        }
+        None => Vec::new(),
+    };
+    (hegemon, members, powers)
+}
+
+/// 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力被共同威胁推向彼此——
+/// 弱者-弱者向 [`BalanceOfPowerConfig::coalition_affinity`] 靠拢（合纵），弱者对霸权向
+/// [`BalanceOfPowerConfig::hegemon_affinity`] 靠拢（均势/疏远）。霸权对任一弱者开战时，
+/// 其余弱者对霸权关系骤降（集体安全）。全部确定性、无 RNG。
+fn step_balance_of_power(state: &mut State, config: &GameConfig) {
+    let b = &config.balance;
+    if b.hegemon_power > 1.0 {
+        return; // 关闭
+    }
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    if ids.len() < 2 {
+        return;
+    }
+
+    // 找综合实力占比最高的「霸权」；未达阈值则不触发机制。
+    let powers = faction_power_share(state, config);
+    let (hegemon, max_power) = powers
+        .iter()
+        .max_by(|x, y| x.1.partial_cmp(y.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, v)| (*k, *v))
+        .unwrap_or((0, 0.0));
+    if max_power < b.hegemon_power {
+        return;
+    }
+
+    // 威胁强度：霸权超越阈值越多，弱者靠拢得越急（scale ∈ [1, 2] 附近）。
+    let dom = (max_power - b.hegemon_power).max(0.0);
+    let scale = 1.0 + dom / (1.0 - b.hegemon_power).max(1e-9);
+
+    let members: Vec<FactionId> = ids.iter().cloned().filter(|x| *x != hegemon).collect();
+    if members.is_empty() {
+        return;
+    }
+
+    // 步骤前后联盟成员、及与霸权交战成员（用于跃迁/集体安全判定）。
+    let coalition_before = coalition_of(state, config, hegemon, &members);
+    let was_at_war: BTreeSet<FactionId> =
+        members.iter().cloned().filter(|m| hostile(state, config, *m, hegemon)).collect();
+
+    // 合纵：弱者-弱者相互靠拢（共同威胁把他们推向彼此）。
+    for i in 0..members.len() {
+        for j in (i + 1)..members.len() {
+            let (m1, m2) = (members[i], members[j]);
+            let rel = relation(state, m1, m2);
+            let nv = rel + b.coalition_rate * scale * (b.coalition_affinity - rel);
+            set_relation_sym(state, m1, m2, nv, config);
+        }
+    }
+
+    // 均势：「冷处理/遏制」——弱者对霸权的关系向 hegemon_affinity 下压，但**只在它比
+    // 该目标更暖时才往下压**，绝不自动把它推到交战阈值之下（不「无脑宣战」）。这模拟
+    // 现实中的遏制：弱国不再争相讨好霸权、甚至疏远它，但井水不犯河水，真正的共同军事
+    // 行动留给「集体安全」（霸权一旦动手打某弱者，其余弱者才群起而攻之）。
+    for &m in &members {
+        let rel = relation(state, m, hegemon);
+        if rel > b.hegemon_affinity {
+            let nv = rel + b.hegemon_rate * scale * (b.hegemon_affinity - rel);
+            set_relation_sym(state, m, hegemon, nv, config);
+        }
+    }
+
+    // 集体安全：任一弱者与霸权进入交战（本回合新跨入），其余尚未交战的弱者对霸权关系
+    // 骤降——「攻其一方 = 与全体为敌」的防御协定：霸权一旦开打，弱者联盟群起而攻之。
+    let now_at_war: BTreeSet<FactionId> =
+        members.iter().cloned().filter(|m| hostile(state, config, *m, hegemon)).collect();
+    if now_at_war.difference(&was_at_war).next().is_some() {
+        for &m in &members {
+            if !now_at_war.contains(&m) {
+                let rel = relation(state, m, hegemon);
+                set_relation_sym(state, m, hegemon, rel + b.collective_defense_delta, config);
+            }
+        }
+    }
+
+    // 联盟跃迁事件（只在成立/解体的当回合记一条，供 agent 直读政治格局）。
+    let coalition_after = coalition_of(state, config, hegemon, &members);
+    let before_active = coalition_before.len() >= b.min_members;
+    let after_active = coalition_after.len() >= b.min_members;
+    if before_active && !after_active {
+        ev(state, GameEvent::CoalitionEnded { hegemon, members: coalition_before });
+    } else if !before_active && after_active {
+        ev(state, GameEvent::CoalitionFormed { hegemon, members: coalition_after });
     }
 }
 

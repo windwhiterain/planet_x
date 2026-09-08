@@ -190,6 +190,24 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
             "drift_per_au": r2(config.mond.drift_per_au),
             "masters": config.mond.masters.clone(),
         },
+        // 合纵连横 / 均势外交：当一方综合实力占比≥hegemon_power 时被定为「霸权」，
+        // 其余较弱势力结成反制联盟——弱者相互亲近(向 coalition_affinity 靠拢)，弱者对
+        // 霸权疏远/敌意(向 hegemon_affinity 靠拢)；霸权对任一弱者开战触发集体安全
+        // (其余弱者对霸权关系骤降)；被封锁的霸权经济制裁(自动市场交易额度缩水到
+        // sanction_trade_mult)，造成资源封锁与失衡。min_members 为联盟成立的最小成员数。
+        "balance": {
+            "hegemon_power": r2(config.balance.hegemon_power),
+            "power_city_weight": r2(config.balance.power_city_weight),
+            "power_fleet_weight": r2(config.balance.power_fleet_weight),
+            "coalition_affinity": r2(config.balance.coalition_affinity),
+            "coalition_rate": r2(config.balance.coalition_rate),
+            "hegemon_affinity": r2(config.balance.hegemon_affinity),
+            "hegemon_rate": r2(config.balance.hegemon_rate),
+            "collective_defense_delta": r2(config.balance.collective_defense_delta),
+            "min_members": config.balance.min_members,
+            "coalition_estrange": r2(config.balance.coalition_estrange),
+            "sanction_trade_mult": r2(config.balance.sanction_trade_mult),
+        },
         "story": config
             .story
             .iter()
@@ -237,6 +255,8 @@ struct AgentState {
     ships: Vec<AgentShip>,
     /// 本回合事件（谁开火/被毁/城被夷平/殖民/陈旧指令降级），damage 已四舍五入。
     events: Vec<serde_json::Value>,
+    /// 合纵连横格局：当前霸权（若有）、各势力综合实力占比、以及针对霸权的反制联盟。
+    coalition: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -519,6 +539,14 @@ impl AgentState {
             cities,
             ships,
             events: state.events.iter().map(game_event_value).collect(),
+            coalition: {
+                let (hegemon, members, powers) = crate::sim::balance_picture(state, config);
+                json!({
+                    "hegemon": hegemon,
+                    "members": members,
+                    "power_share": powers.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
+                })
+            },
         }
     }
 }
@@ -563,6 +591,12 @@ fn game_event_value(e: &GameEvent) -> serde_json::Value {
         }
         Revolt { city, faction } => {
             json!({"type":"revolt", "city": city, "faction": faction})
+        }
+        CoalitionFormed { hegemon, members } => {
+            json!({"type":"coalition_formed", "hegemon": hegemon, "members": members})
+        }
+        CoalitionEnded { hegemon, members } => {
+            json!({"type":"coalition_ended", "hegemon": hegemon, "members": members})
         }
     }
 }

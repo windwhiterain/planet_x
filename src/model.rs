@@ -292,6 +292,12 @@ pub enum GameEvent {
     /// 离心叛乱（光速治理的代价）：城市忠诚度跌破叛变阈值，居民脱离其统治势力，
     /// 城市被夷平为空白（可再殖民）。这是超大帝国管理廉价的远方殖民地失败的结果。
     Revolt { city: CityId, faction: FactionId },
+    /// 合纵连横：一方势力被判定为「霸权」后，其余较弱势力结成反制联盟（`members`
+    /// 为联盟成员，不含霸权 `hegemon`）。这是「一家独大 → 众人围剿」的政治跃迁，
+    /// 让上千回合的博弈维持多方参与。
+    CoalitionFormed { hegemon: FactionId, members: Vec<FactionId> },
+    /// 合纵连横：既有的反制联盟解体（`members` 为解体时的成员）。
+    CoalitionEnded { hegemon: FactionId, members: Vec<FactionId> },
 }
 
 /// A spaceship. Always owned by a faction.
@@ -881,6 +887,71 @@ pub struct MondConfig {
     pub masters: Vec<FactionId>,
 }
 
+/// 合纵连横 / 均势外交 (balance-of-power) tuning——「弱者联盟对抗霸权」。
+///
+/// 当某个势力的综合实力占比（按其在星系内的城市数 + 舰队质量加权）达到
+/// [`Self::hegemon_power`] 时，它被判定为「霸权」。此时其余的较弱势力被同一个
+/// 「共同威胁」推向彼此：
+///   * 弱者-弱者之间的关系向 [`Self::coalition_affinity`] 靠拢（合纵——弱者团结）；
+///   * 弱者对霸权的关系向 [`Self::hegemon_affinity`] 靠拢（均势——联手制衡最强者）。
+/// 这天然产生「一家独大 → 众人围剿」的政治动力学，让上千回合的博弈不至于收敛成
+/// 「少数永久霸权 + 一堆旁观者」，而是维持多方参与。
+///
+/// 全部确定性、数据驱动：速率与目标都在配置里，agent 可调；不引入任何未播种随机。
+/// 此外当霸权对某一弱者开战时，其余弱者对霸权的关系施加 [`Self::collective_defense_delta`]
+/// 的骤降——「攻其一方 = 与全体为敌」的集体安全反应。把 [`Self::hegemon_power`] 设成
+/// >1 即整体关闭此机制（默认关闭，靠 config/game.ron 开启）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BalanceOfPowerConfig {
+    /// 霸权判定阈值：某势力的综合实力占比（0..1）达到此值即被视为「霸权」并引发弱者
+    /// 反制；>1 则关闭整个机制。
+    pub hegemon_power: f64,
+    /// 综合实力权重：城市数（领土/经济基础）在实力占比中的相对权重。
+    pub power_city_weight: f64,
+    /// 综合实力权重：舰队质量（各舰引擎数值之和）在实力占比中的相对权重。
+    pub power_fleet_weight: f64,
+    /// 弱者-弱者关系向此值靠拢（联盟目标亲和；彼此友好/结盟）。
+    pub coalition_affinity: f64,
+    /// 弱者-弱者向联盟靠拢的每回合比例（0..1）。
+    pub coalition_rate: f64,
+    /// 弱者对霸权的关系向此值靠拢（目标亲和；即疏远/敌意）。
+    pub hegemon_affinity: f64,
+    /// 弱者对霸权靠拢的每回合比例（0..1）。
+    pub hegemon_rate: f64,
+    /// 集体安全：霸权对任一弱者开战时，其余弱者对霸权的关系骤降幅度。
+    pub collective_defense_delta: f64,
+    /// 一个「联盟」至少需几个成员（不含霸权）才算成立，用于事件/上报判定。
+    pub min_members: usize,
+    /// 弱国「倒向联盟」的疏远阈值：某弱者对霸权的关系 ≤ 此值即视为已加入反制联盟
+    /// （被遏制/疏远了霸权、转而与弱国抱团）。与交战阈值（war_threshold）无关——
+    /// 遏制是冷战式的「疏远 + 经济封锁」，不必然导致开战。
+    pub coalition_estrange: f64,
+    /// 经济制裁：当一个反制联盟（≥ [`Self::min_members`]）成立并对霸权实施封锁时，
+    /// 霸权保留的自动市场交易额度比例（0..1；1 = 不制裁）。这会给一家独大的经济体
+    /// 造成资源封锁与失衡——它难以再靠市场兑换到短缺矿物（如铀/氦-3），产业受抑。
+    pub sanction_trade_mult: f64,
+}
+
+impl Default for BalanceOfPowerConfig {
+    /// 默认完全关闭合纵连横（`hegemon_power` 设为 >1，永不判定霸权），使不含
+    /// `balance` 字段的旧配置照常工作。
+    fn default() -> Self {
+        Self {
+            hegemon_power: 2.0,
+            power_city_weight: 1.0,
+            power_fleet_weight: 1.0,
+            coalition_affinity: 30.0,
+            coalition_rate: 0.08,
+            hegemon_affinity: -50.0,
+            hegemon_rate: 0.10,
+            collective_defense_delta: -15.0,
+            min_members: 2,
+            coalition_estrange: -10.0,
+            sanction_trade_mult: 1.0,
+        }
+    }
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -890,6 +961,9 @@ pub struct GameConfig {
     pub market: MarketConfig,
     pub governance: GovernanceConfig,
     pub mond: MondConfig,
+    /// 合纵连横 / 均势外交（弱者联盟对抗霸权）。`#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub balance: BalanceOfPowerConfig,
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,
