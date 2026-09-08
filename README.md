@@ -1,6 +1,6 @@
 # 行星X — 太空沙盘
 
-《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。
+《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。默认世界按 spec 天体表铺开：18 个天体共 **22 个定居点、22 座城**（定居点 ↔ 城市**一一对应**——气态巨行星的定居点为**轨道空间站**；地球坐拥 5 个定居点 = 长三角/珠三角/亚特兰大/巴黎/莫斯科，每城各有自己的区域矿藏）；舰船为 spec 五级（护卫舰/驱逐舰/巡洋舰/航空母舰/战列舰），每级带**护甲再生**（每月按最大护甲的百分比回血）。
 
 ---
 
@@ -39,7 +39,7 @@ planet_x --seed 42
 
 ```bash
 # 筛城市：中国的城市
-planet_x --seed 42 --query '.cities[] | select(.owner_name=="中国") | {name, population, defense}'
+planet_x --seed 42 --query '.cities[] | select(.owner_name=="中国") | {name, population, armor}'
 
 # 打完 5 回合后，看受伤的船
 planet_x --seed 42 --rounds 5 --query '[.ships[]] | map(select(.hull < .hull_max)) | .[] | {name, hull}'
@@ -60,7 +60,7 @@ advance [n]             # 推进 n 回合（默认 1），然后打印 summary
 control [<faction_id>|<jq>]  # 输出可编辑控制面（control+scope）。裸→整面；control 3 → 只出中国；control <jq> → 对整面做 jq。
 meta [<jq>]             # 输出游戏配置（规则字典）：资源 raw key→中文名、建筑/舰船全表、经济/战斗/外交常量
 apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后回读 control
-order <ship> attack|guard|siege|move|dock|colonize|none|idle ...   # 一键下舰指令（Player 模式）。attack <敌舰> 追袭开火；guard <友舰> 守卫；dock <天体> 停泊跟随；none 原地不动。
+order <ship> attack|guard|siege|move|dock|colonize|idle ...   # 一键下舰指令（Player 模式）。attack <敌舰> 追袭开火；guard <友舰> 守卫；dock <天体> 停泊轨道（随其巡航）；idle 待命原地。
 budget <faction> <resource> <value>   # 设该势力「建设建筑」投资预算叶子（Player）
 build  <faction> <resource> <value>   # 设该势力「造舰」建造预算叶子（Player）
 events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级）
@@ -89,9 +89,9 @@ quit / exit
 > **守卫**：`TargetShip{ship,attack:false}` 是守卫——护住一艘**友舰**：靠近它并拦截进入自身
 > 攻击距离的敌方舰，但**不会**向被保护舰开火。目标是友方（非敌对）舰才有效；敌舰被毁或友舰
 > 被毁都会降级为 `Idle` 并记一条 `stale_order`。`order <ship> guard <友舰>` 可一键下达。
-> **停泊/无**：`Dock{body}` 停泊——每回合重新驶向天体当前位置、随其轨道巡航；`None` 无——
-> 原地不动（保持当前坐标）。二者都不会降级为 `Idle`。`order <ship> dock <天体>` / `order <ship> none`
-> 可一键下达。
+> **停泊轨道 / 待命**：`Dock{body}` 停泊轨道——每回合重新驶向天体当前位置、随其轨道巡航；`Idle`
+> 待命——原地不动（保持当前坐标）。二者都不会降级、都安全。`order <ship> dock <天体>` / `order <ship> idle`
+> 可一键下达。spec 行为枚举已无「无/None」——原地停靠一律用 `idle`。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 
@@ -125,14 +125,14 @@ planet_x                      # 然后：meta .buildings.residential
 ```jsonc
 {
   "resources":  { "water_ice": "水冰", "iron": "铁", … },   // 原始 key → 中文名
-  "buildings":  { "residential": { "label":"居住点","role":"housing","construction_speed":1.0,
+  "buildings":  { "residential": { "label":"居住区","role":"housing","construction_speed":1.0,
                    "build_cost":{…},"staff_per_area":0.0,"productivity":1.0,"default_invest_weight":1.5 }, … },
-  "ships":      { "corvette": { "label":"护卫舰","hull":12.0,"attack":5.0,"speed":1.6,
-                   "attack_range":0.4,"build_points":15.0,"build_cost":{…} }, … },
+  "ships":      { "corvette": { "label":"护卫舰","hull":12.0,"hull_regen":0.04,"attack":5.0,
+                   "speed":1.6,"attack_range":0.4,"build_points":15.0,"build_cost":{…} }, … },
   "economy":    { "production_rate":0.5, "pop_growth":0.04, "min_efficiency":0.1,
                   "invest_fraction":0.3, "housing_buffer":1.25 },
   "combat":     { "war_threshold":-20.0, "siege_range":0.25, "arrival_eps":0.06,
-                  "defense_initial":40.0, "defense_reset":35.0 },
+                  "armor_regen":0.25, "colony_footprint":0.2 },
   "diplomacy":  { "attack_delta":-3.0, "capture_delta":-25.0, "relax_rate":0.5 }
 }
 ```
@@ -155,10 +155,10 @@ planet_x                      # 然后：meta .buildings.residential
 `apply <file>` 会**结构化、多层级**地应用它——**只触碰文件里出现的势力/叶子**：
 
 ```bash
-# 圆 0：读取模板，然后把中国(3) 的 0 号舰改成「玩家控制、攻击 2 号美舰」
+# 圆 0：读取模板，然后把中国(3) 的 0 号舰改成「玩家控制、攻击 3 号美舰」
 planet_x --seed 42 --script control.txt        # control.txt: `control\nquit`
 # 写 diff.json：
-# {"control":[{"faction_id":3,"ship_orders":[{"ship":0,"behavior":{"TargetShip":{"ship":2,"attack":true}},"mode":"Player"}]}]}
+# {"control":[{"faction_id":3,"ship_orders":[{"ship":0,"behavior":{"TargetShip":{"ship":3,"attack":true}},"mode":"Player"}]}]}
 
 # 应用 diff，推进 6 回合，输出编年史
 planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
@@ -221,12 +221,13 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
   }],
   "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65],
                "orbit": { "perihelion": 0.98, "aphelion": 1.02, "period": 12.0 },
-               "settlement_area": 120.0,
-               "settlement": { "ecological_capacity": 25.0, "construction_speed_mod": 2.4,
-                               "construction_resource_mod": 1.0,
-                               "deposits": [{ "resource": "水冰", "area": 40.0 }, … ] } }],
+               "settlements": [{ "name": "长三角", "total_area": 120.0,
+                                 "ecological_capacity": 25.0, "construction_speed_mod": 2.4,
+                                 "construction_resource_mod": 1.0,
+                                 "deposits": [{ "resource": "铁", "area": 40.0 }, … ] }, … ] }],
   "cities": [{
-    "id": 0, "name": "长三角城市群", "body": "地球",
+    "id": 0, "name": "长三角", "body": "地球",
+    "settlement_index": 0, "settlement_name": "长三角",          // 定居点 ↔ 城市 1:1
     "owner": 3, "owner_name": "中国", "population": 1400,
     "razed": false,                                                    // 被夷平为空白，可再殖民
     "armor": 60.0,                                                     // 城市总硬度 = Σ building armor（无独立城防）
@@ -239,13 +240,15 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
     "id": 0, "name": "护卫舰-3", "class": "corvette",
     "owner": 3, "owner_name": "中国", "position": [-0.52, -0.67],
     "hull": 12.0, "hull_max": 12.0,
-    "order": { "type": "target_ship", "ship": 2, "attack": true }      // tag 联合：idle / move / target_ship / target_settlement / colonize
+    "order": { "type": "target_ship", "ship": 3, "attack": true }      // tag 联合：idle / move / target_ship / target_settlement / dock / colonize
   }]
 }
 ```
 
-- `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`colonize`。
-- `settlement_area` 非定居点天体为 `null`。
+- `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`dock`、`colonize`。
+- 定居点 ↔ 城市**一一对应**：`bodies[].settlements` 是天体上的定居点列表（含名字/面积/矿藏），
+  `cities[]` 用 `settlement_index` 指向自己占据的那个定居点；一座定居点至多一座城市，
+  城市被夷平（razed）后仍占位，只能被**再殖民**回填，不会被叠第二座城。
 - 矿藏/资源在状态里用**中文名**直读；要写回 `control`（原始 key）时经 `meta.resources` 反查。
 - 引用一律用整数 id（`faction` / `body` / `city` / `ship`），名称字段便于直读。
 

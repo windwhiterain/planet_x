@@ -57,15 +57,16 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 \n\
 【世界与实体】\n\
 - 天体 body：绕太阳做 2D 椭圆轨道（给定近日点/远日点距离、远日点方向、公转周期），每回合位置\n\
-  按轨道重算。部分天体有定居点 settlement：含有限总面积（settlement_area）、生态容量（人口/面积）、\n\
-  建设速度修正、建设资源修正，以及若干资源矿藏（类型 + 面积，限定采矿上限）。\n\
-- 城市 city：建在定居点上、由一个势力控制，内有若干连续面积分配的 建筑，并有人口（限制生产效率）、\n\
-  防御值 defense（围城伤害累积于此，被攻占后重置）和一条造船队列 ship_build（建造点面积推动进度）。\n\
+  按轨道重算。18 个天体（spec 天体表）各有 1~5 个定居点 settlement（地球 5 城各占一个；\n\
+  气态巨行星的定居点为轨道空间站）。定居点与城市一一对应：每个定居点至多一座城市，含有限总面积、\n\
+  生态容量（人口/面积）、建设速度修正、建设资源修正，以及若干资源矿藏（类型 + 面积，限定采矿上限）。\n\
+- 城市 city：建在定居点上、由一个势力控制，内有若干连续面积分配的 建筑，并有人口（限制生产效率）；\n\
 - 建筑 building：非原子，是一个连续面积分配（计划 area 与实际 deployed），总和不超定居点总面积。三种角色：\n\
   residential 居住点（提供人口容量）、mining 开采点（采对应矿藏资源）、construction 建造点（船坞，造舰）。\n\
 - 势力 faction：拥有城市与飞船，库存各资源，并与其它势力两两外交（关系 relations）。\n\
-- 飞船 ship：必属某一势力，从城市出厂，在 2D 平面移动，可按指令开火/围城。舰级参数（护甲/攻击/速度/\n\
-  攻击距离/建造点/建造成本）由 config 定义：护卫舰 corvette、巡洋舰 cruiser、运输舰 transport。\n\
+- 飞船 ship：必属某一势力，从城市出厂，在 2D 平面移动，可按指令开火/围城。舰级参数（护甲 hull、护甲再生\n\
+  hull_regen、伤害、速度、攻击距离、建造点/建造成本）由 config 定义，spec 五级舰：护卫舰 corvette、\n\
+  驱逐舰 destroyer、巡洋舰 cruiser、航空母舰 carrier、战列舰 battleship。\n\
 \n\
 【资源】11 种：水冰 water_ice、氦-3 helium3、铀 uranium、钍 thorium、金 gold、铂 platinum、铁 iron、\n\
 氢 hydrogen、甲烷 methane、碳 carbon、硅 silicon。\n\
@@ -80,10 +81,10 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 5. 外交：攻击/占领会加重敌对（attack_delta/capture_delta）；非战争关系每回合向中性回落（relax_rate）。\n\
 \n\
 【控制模型 = 指令】每个势力有一份可控状态 State::control：\n\
-- ship_orders：本方各舰的 行为（ShipBehavior）：Idle（待命）、Move{position}（前往某位置）、\n\
+- ship_orders：本方各舰的 行为（ShipBehavior）：Idle（待命，原地）、Move{position}（前往某位置）、\n\
   TargetShip{ship,attack}（attack=true 追袭某舰并开火；attack=false 守卫：靠近并保护某友舰，\n\
   对近身敌方舰拦截开火，不攻击被保护舰）、TargetSettlement{city,bombard}（围攻某城）、\n\
-  Dock{body}（停泊：跟随某天体）、None（原地不动）。\n\
+  Dock{body}（停泊轨道：持续驶向某天体当前位置、随其巡航）。\n\
 - budget：每种资源每回合的投资预算（决定拿出多少资源用于建设）。\n\
 - invest_weights：本方各建筑的 建设投资权重（决定建造优先级）。\n\
 每个可控叶子带一个 mode：Ai（系统自动决策/改写）| Player（玩家指令，系统只读不改写）| None（继承上层）。\n\
@@ -261,12 +262,12 @@ fn control_for_faction(state: &State, fid: u32) -> serde_json::Value {
     v
 }
 
-/// High-level ship command: `order <ship> attack|guard|siege|move|dock|colonize|none|idle ...`.
+/// High-level ship command: `order <ship> attack|guard|siege|move|dock|colonize|idle ...`.
 /// Builds the same `{control:[{ship_orders:[...]}]}` diff the agent writes by
 /// hand, so a human/agent can iterate quickly without writing nested JSON.
 fn cmd_order(state: &mut State, config: &GameConfig, rest: &str) -> Result<(), String> {
     let mut t = rest.split_whitespace();
-    let ship: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: order <ship> attack|guard|siege|move|dock|colonize|none|idle ...")?;
+    let ship: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: order <ship> attack|guard|siege|move|dock|colonize|idle ...")?;
     let verb = t.next().ok_or("missing verb")?.to_string();
     let owner = state.ship(ship).map(|s| s.faction_id).ok_or_else(|| format!("no ship {ship}"))?;
     let behavior = match verb.as_str() {
@@ -295,7 +296,7 @@ fn cmd_order(state: &mut State, config: &GameConfig, rest: &str) -> Result<(), S
             let body: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("colonize needs a body id")?;
             json!({"Colonize": {"body": body}})
         }
-        "none" => json!("None"),
+        "none" => return Err("unknown verb 'none' (原地不动请用 idle 待命)".to_string()),
         "idle" => json!("Idle"),
         other => return Err(format!("unknown verb '{other}'")),
     };
@@ -544,7 +545,7 @@ fn guide_json() -> String {
             "control": {"usage": "control [<faction_id>|<jq>]", "desc": "dump the editable control surface. Bare → whole surface; control <id> → one faction (cheaper); control <jq> → filter the surface. The template you edit into a diff."},
             "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, structures/buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
             "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface. A ship behavior may be written in the default enum form ({\"TargetShip\":{...}}, \"Idle\") or the tagged state-view form ({\"type\":\"target_ship\",...}, {\"type\":\"idle\"}) — both are accepted."},
-            "order": {"usage": "order <ship> attack|guard|siege|move|dock|colonize|none|idle ...", "desc": "one-shot ship command (Player mode). attack <enemy> chases+fires; guard <friend> escorts; dock <body> follows a body; none holds position. e.g. order 0 attack 2 | order 3 guard 1 | order 8 dock 9 | order 6 none"},
+            "order": {"usage": "order <ship> attack|guard|siege|move|dock|colonize|idle ...", "desc": "one-shot ship command (Player mode). attack <enemy> chases+fires; guard <friend> escorts; dock <body> parks in orbit of a body (follows it); idle holds position. e.g. order 0 attack 3 | order 3 guard 1 | order 8 dock 9 | order 6 idle"},
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
             "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},
@@ -714,7 +715,7 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
             "cities" => print_query(state, config, ".cities[] | {id,name,body,owner_name,population,razed,armor,ship_progress}"),
             "ships" => print_query(state, config, ".ships[] | {id,name,class,owner_name,position,hull,hull_max,order}"),
             "factions" => print_query(state, config, ".factions[] | {id,name,resources,wars}"),
-            "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlement_area}"),
+            "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlements:[.settlements[]|{name,total_area}]}"),
 
             // --- entity detail --------------------------------------------------
             "city" | "ship" | "faction" | "body" => {

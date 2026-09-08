@@ -42,8 +42,9 @@ pub fn render_state(state: &State, config: &GameConfig) -> String {
 ///                (e.g. `"水冰"` → `"water_ice"`).
 /// * `buildings`  building *kind* → full spec (role, construction speed/cost,
 ///                staffing, productivity, default invest weight).
-/// * `ships`      ship *class* → full spec (hull, attack, speed, range, build
-///                points/cost). An agent needs these to decide what to build.
+/// * `ships`      ship *class* → full spec (hull, hull_regen, attack, speed,
+///                range, build points/cost). An agent needs these to decide
+///                what to build.
 /// * `economy` / `combat` / `diplomacy`  the numeric tuning constants
 ///                (`invest_fraction`, `war_threshold`, `production_rate`, …).
 ///
@@ -97,6 +98,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                 json!({
                     "label": s.label,
                     "hull": r2(s.hull),
+                    "hull_regen": r2(s.hull_regen),
                     "attack": r2(s.attack),
                     "speed": r2(s.speed),
                     "attack_range": r2(s.attack_range),
@@ -165,10 +167,8 @@ struct AgentBody {
     position: [f64; 2],
     /// Keplerian orbit, so the agent can reason about travel time.
     orbit: AgentOrbit,
-    /// Total buildable area, when this body has a settlement.
-    settlement_area: Option<f64>,
-    /// Full settlement detail (capacity, construction modifiers, deposits).
-    settlement: Option<AgentSettlement>,
+    /// 定居点列表（定居点 ↔ 城市 1:1；地球 5 个，其余天体各 1 个）。
+    settlements: Vec<AgentSettlement>,
 }
 
 /// A body's orbit, summarised to the numbers that matter for planning travel.
@@ -180,10 +180,13 @@ struct AgentOrbit {
     period: f64,
 }
 
-/// Settlement detail: how much can be built, how fast, and what resources are
-/// available to mine here (资源矿藏 bounds the mining area).
+/// One 定居点 (settlement site) on a body: how much can be built, how fast, and
+/// what resources are available to mine here (资源矿藏 bounds the mining area).
 #[derive(Serialize)]
 struct AgentSettlement {
+    name: String,
+    /// 总面积 (total buildable area of this site).
+    total_area: f64,
     ecological_capacity: f64,
     construction_speed_mod: f64,
     construction_resource_mod: f64,
@@ -202,6 +205,10 @@ struct AgentCity {
     id: CityId,
     name: String,
     body: String,
+    /// Index of the 定居点 this city occupies within its body's `settlements`.
+    settlement_index: usize,
+    /// 定居点名 (settlement ↔ city 1:1).
+    settlement_name: String,
     owner: FactionId,
     owner_name: String,
     population: u32,
@@ -252,7 +259,6 @@ enum AgentOrder {
     TargetShip { ship: ShipId, attack: bool },
     TargetSettlement { city: CityId, bombard: bool },
     Dock { body: BodyId },
-    None,
     Colonize { body: BodyId },
 }
 
@@ -302,20 +308,25 @@ impl AgentState {
                     aphelion: r2(b.orbit.aphelion_distance as f64),
                     period: r2(b.orbit.period as f64),
                 },
-                settlement_area: b.settlement.as_ref().map(|s| r2(s.total_area)),
-                settlement: b.settlement.as_ref().map(|s| AgentSettlement {
-                    ecological_capacity: r2(s.ecological_capacity),
-                    construction_speed_mod: r2(s.construction_speed_mod),
-                    construction_resource_mod: r2(s.construction_resource_mod),
-                    deposits: s
-                        .resources
-                        .iter()
-                        .map(|d| AgentDeposit {
-                            resource: config.resource_name(&d.resource),
-                            area: r2(d.area),
-                        })
-                        .collect(),
-                }),
+                settlements: b
+                    .settlements
+                    .iter()
+                    .map(|s| AgentSettlement {
+                        name: s.name.clone(),
+                        total_area: r2(s.total_area),
+                        ecological_capacity: r2(s.ecological_capacity),
+                        construction_speed_mod: r2(s.construction_speed_mod),
+                        construction_resource_mod: r2(s.construction_resource_mod),
+                        deposits: s
+                            .resources
+                            .iter()
+                            .map(|d| AgentDeposit {
+                                resource: config.resource_name(&d.resource),
+                                area: r2(d.area),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
             })
             .collect();
 
@@ -329,6 +340,11 @@ impl AgentState {
                     .body(c.body_id)
                     .map(|b| b.name.clone())
                     .unwrap_or_else(|| format!("#{}", c.body_id)),
+                settlement_index: c.settlement,
+                settlement_name: state
+                    .city_settlement(c.id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default(),
                 owner: c.faction_id,
                 owner_name: faction_name(state, c.faction_id),
                 population: c.population,
@@ -367,7 +383,6 @@ impl AgentState {
                 hull_max: r2(config.ship_spec(&s.class).hull),
                 order: match state.ship_behavior(s.id) {
                     Some(ShipBehavior::Idle) | None => AgentOrder::Idle,
-                    Some(ShipBehavior::None) => AgentOrder::None,
                     Some(ShipBehavior::Move { position }) => AgentOrder::Move {
                         position: [r2(position[0]), r2(position[1])],
                     },

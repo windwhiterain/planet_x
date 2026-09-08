@@ -56,6 +56,7 @@ function behaviorType(b) {
   if (b && b.Move) return 'move';
   if (b && b.TargetShip) return 'ship';
   if (b && b.TargetSettlement) return 'settlement';
+  if (b && b.Dock) return 'dock';
   if (b && b.Colonize) return 'colonize';
   return 'idle';
 }
@@ -67,6 +68,10 @@ function behaviorSummary(b, world) {
     case 'move': return '移动(' + (b.Move.position[0] | 0) + ',' + (b.Move.position[1] | 0) + ')';
     case 'ship': return '→' + shipName(b.TargetShip.ship) + (b.TargetShip.attack ? '·攻' : '');
     case 'settlement': return '→' + cityName(b.TargetSettlement.city) + (b.TargetSettlement.bombard ? '·轰' : '');
+    case 'dock': {
+      const bd = world.bodies.find((x) => x.id === b.Dock.body);
+      return '→' + (bd ? bd.name : '天体#' + b.Dock.body) + '·停泊';
+    }
     case 'colonize': {
       const bd = world.bodies.find((x) => x.id === b.Colonize.body);
       return '→' + (bd ? bd.name : '天体#' + b.Colonize.body) + '·殖民';
@@ -88,6 +93,7 @@ function behaviorFromInput(type, d) {
     case 'move': return { Move: { position: [+d.x || 0, +d.y || 0] } };
     case 'ship': return { TargetShip: { ship: +d.ship || 0, attack: !!d.attack } };
     case 'settlement': return { TargetSettlement: { city: +d.city || 0, bombard: !!d.bombard } };
+    case 'dock': return { Dock: { body: +d.body || 0 } };
     case 'colonize': return { Colonize: { body: +d.body || 0 } };
     default: return 'Idle';
   }
@@ -257,7 +263,7 @@ function renderMap() {
 
   world.bodies.forEach((b) => {
     const x = X(tx(b.position[0])), y = Y(tx(b.position[1]));
-    const c = svgEl('circle', { cx: x, cy: y, r: b.settlement ? 10 : 6, fill: '#334155', stroke: '#22d3ee', 'stroke-width': 1.5 });
+    const c = svgEl('circle', { cx: x, cy: y, r: (b.settlements && b.settlements.length) ? 10 : 6, fill: '#334155', stroke: '#22d3ee', 'stroke-width': 1.5 });
     c.setAttribute('data-kind', 'body');
     c.setAttribute('data-ref', b.id);
     c.addEventListener('click', () => { selShip = null; $('#readout').textContent = '天体 ' + b.name; });
@@ -461,22 +467,26 @@ function shipEditor(leaf) {
   const d = behaviorToInput(leaf.behavior);
 
   const typeSel = el('select');
-  [['idle', '待命'], ['move', '移动'], ['ship', '攻击舰'], ['settlement', '轰炸城'], ['colonize', '殖民']].forEach(([v, lbl]) => {
+  [['idle', '待命'], ['move', '移动'], ['ship', '攻击舰'], ['settlement', '轰炸城'], ['dock', '停泊轨道'], ['colonize', '殖民']].forEach(([v, lbl]) => {
     const o = el('option', { value: v }); o.textContent = lbl; o.selected = t === v; typeSel.appendChild(o);
   });
   typeSel.addEventListener('change', () => { leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
   edit.appendChild(typeSel);
 
+  const bodySel = () => {
+    const s = el('select');
+    world.bodies.filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
+      const o = el('option', { value: bd.id }); o.textContent = bd.name; o.selected = d.body === bd.id; s.appendChild(o);
+    });
+    s.addEventListener('change', () => { d.body = +s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
+    return s;
+  };
+
   if (t === 'move') {
     edit.appendChild(inputNum('x', d.x, (v) => { d.x = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
     edit.appendChild(inputNum('y', d.y, (v) => { d.y = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
-  } else if (t === 'colonize') {
-    const bSel = el('select');
-    world.bodies.filter((x) => x.settlement_area != null).forEach((bd) => {
-      const o = el('option', { value: bd.id }); o.textContent = bd.name; o.selected = d.body === bd.id; bSel.appendChild(o);
-    });
-    bSel.addEventListener('change', () => { d.body = +bSel.value; leaf.behavior = behaviorFromInput(t, d); renderTree(); });
-    edit.appendChild(bSel);
+  } else if (t === 'colonize' || t === 'dock') {
+    edit.appendChild(bodySel());
   } else if (t === 'ship') {
     edit.appendChild(inputNum('舰#', d.ship, (v) => { d.ship = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
     const l = el('label'); l.textContent = '攻';

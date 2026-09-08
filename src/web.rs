@@ -617,10 +617,6 @@ fn normalize_behavior(v: &mut serde_json::Value) {
             *v = serde_json::Value::String("Idle".to_string());
             return;
         }
-        "none" => {
-            *v = serde_json::Value::String("None".to_string());
-            return;
-        }
         "move" => "Move",
         "target_ship" => "TargetShip",
         "target_settlement" => "TargetSettlement",
@@ -805,8 +801,8 @@ mod tests {
         assert_eq!(state.ship_control(0), ControlMode::Player, "ship of a Player faction is player-owned");
         assert_eq!(state.investment_budget_control(3, "iron"), ControlMode::Player, "budget leaf follows scope");
         assert_eq!(state.construction_budget_control(3, "iron"), ControlMode::Player);
-        // Other factions are untouched (still Ai).
-        assert_eq!(state.ship_control(2), ControlMode::Ai, "untouched faction stays Ai");
+        // Other factions are untouched (still Ai): ship 3 is US (faction 1).
+        assert_eq!(state.ship_control(3), ControlMode::Ai, "untouched faction stays Ai");
 
         // An explicit leaf mode still overrides scope in the opposite direction:
         // force ship 0 back to Ai inside a Player faction.
