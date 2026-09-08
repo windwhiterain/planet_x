@@ -2116,11 +2116,41 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     }
     let weapons = state.ship(ship_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
     let picked = pick_target(state, config, owner, pos, rng, focus, &weapons);
-    let behavior = picked.unwrap_or(ShipBehavior::Idle);
+    let mut behavior = picked.unwrap_or(ShipBehavior::Idle);
+    // 护航（保护高价值旗舰）：交战时闲着、且距本势力旗舰（航母）在 escort_range 内的舰，
+    // 就近护卫它（贴近旗舰 + 拦截进射程之敌），防止高价值舰被轻易打掉。
+    if matches!(behavior, ShipBehavior::Idle)
+        && config.combat.escort_range > 0.0
+        && faction_at_war(state, config, owner)
+    {
+        if let Some(flag_id) = fleet_flag(state, owner) {
+            if flag_id != ship_id {
+                let fpos = state.ship(flag_id).map(|s| s.position).unwrap_or(pos);
+                if dist(pos, fpos) <= config.combat.escort_range {
+                    behavior = ShipBehavior::TargetShip { ship: flag_id, attack: false };
+                }
+            }
+        }
+    }
     if let Some(c) = state.control_mut(owner) {
         c.ship_orders.insert(ship_id, Control::inherit(behavior));
     }
-    picked
+    if matches!(behavior, ShipBehavior::Idle) {
+        None
+    } else {
+        Some(behavior)
+    }
+}
+
+/// 本势力的旗舰（高价值舰种）：第一艘航母（按 id 最小），否则 None。用于护航——AI 派
+/// 闲着的舰护卫它，防止高价值舰被轻易打掉。
+fn fleet_flag(state: &State, fid: FactionId) -> Option<ShipId> {
+    state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0 && s.class == "carrier")
+        .min_by_key(|s| s.id)
+        .map(|s| s.id)
 }
 
 fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>, weapons: &[Weapon]) -> Option<ShipBehavior> {
@@ -3555,6 +3585,18 @@ mod tests {
             after.iter().any(|(_, t)| t != "corvette"),
             "a corvette-dominated wartime fleet should retool a shipyard into a war class; before={before:?} after={after:?}"
         );
+    }
+
+    /// 护航目标：旗舰 = 本势力最小的航母（高价值舰种），用于让闲着的舰护卫它。
+    #[test]
+    fn fleet_flag_is_the_factions_first_carrier() {
+        let (_config, mut state) = fresh_world(42);
+        // China (3) ship 2 设为航母 → 成为旗舰。
+        if let Some(s) = state.ship_mut(2) {
+            s.class = "carrier".to_string();
+        }
+        assert_eq!(fleet_flag(&state, 3), Some(2));
+        // 没有航母 → 无旗舰（无护航）。
     }
 
     /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。

@@ -954,6 +954,11 @@ pub struct CombatConfig {
     /// →修→再来。0 = 关闭。
     #[serde(default = "default_component_repair")]
     pub component_repair: f64,
+    /// 护航半径（AU）：交战时，闲着且距本势力旗舰（航母）在此半径内的 AI 舰会就近护卫
+    /// 它（`TargetShip{attack:false}` 的守卫行为：贴近旗舰 + 拦截进入射程之敌），保护
+    /// 高价值舰种。0 = 关闭。
+    #[serde(default = "default_escort_range")]
+    pub escort_range: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -970,6 +975,10 @@ fn default_component_spill() -> f64 {
 
 fn default_component_repair() -> f64 {
     0.04
+}
+
+fn default_escort_range() -> f64 {
+    10.0
 }
 
 /// Building structure attribute (混凝土 / 钢结构).
