@@ -914,6 +914,14 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .max()
         .map_or(0, |m| m + 1);
 
+    // 联盟军事协同的「集火目标」：每回合每个势力各算一次（O(势力 × 实体)，摊薄到全军）。
+    // 结盟势力在霸权先动手时优先集火该霸权，而非各自就近乱打。
+    let focus_of: BTreeMap<FactionId, Option<FactionId>> = state
+        .factions
+        .iter()
+        .map(|f| (f.id, coalition_war_focus(state, config, f.id)))
+        .collect();
+
     for ship_id in order {
         let Some(ship) = state.ship(ship_id) else { continue };
         if ship.hull <= 0.0 {
@@ -923,6 +931,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         let class = ship.class.clone();
         let pos = ship.position;
         let range = config.ship_spec(&class).attack_range;
+        let focus = focus_of.get(&owner).copied().flatten();
 
         let is_ai = state.ship_control(ship_id) == ControlMode::Ai;
 
@@ -998,9 +1007,9 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                                 let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
                                 // Intercept the closest hostile in range, scanning
                                 // around the guard first, then the protected ship.
-                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range) {
+                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range, focus) {
                                     fire(state, config, ship_id, enemy);
-                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range) {
+                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range, focus) {
                                     fire(state, config, ship_id, e2);
                                 }
                             }
@@ -1029,7 +1038,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
 
         // --- AI-controlled: existing auto behavior ---
-        if let Some(target) = nearest_enemy_ship(state, config, owner, pos, range) {
+        if let Some(target) = nearest_enemy_ship(state, config, owner, pos, range, focus) {
             if let Some(c) = state.control_mut(owner) {
                 c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
             }
@@ -1037,7 +1046,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             continue;
         }
 
-        let Some(behavior) = resolve_target(state, config, ship_id, owner, pos, rng) else {
+        let Some(behavior) = resolve_target(state, config, ship_id, owner, pos, rng, focus) else {
             continue;
         };
 
@@ -1060,7 +1069,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
         if let Some(ship) = state.ship(ship_id) {
             let np = ship.position;
-            if let Some(target) = nearest_enemy_ship(state, config, owner, np, range) {
+            if let Some(target) = nearest_enemy_ship(state, config, owner, np, range, focus) {
                 if let Some(c) = state.control_mut(owner) {
                     c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
                 }
@@ -1349,17 +1358,30 @@ fn mond_drift(config: &GameConfig, fid: FactionId, dest: [f64; 2]) -> [f64; 2] {
     [dest[0] + tx * drift, dest[1] + ty * drift]
 }
 
-fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64) -> Option<ShipId> {
-    let mut best: Option<(f64, ShipId)> = None;
+fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64, focus: Option<FactionId>) -> Option<ShipId> {
+    let mut best: Option<(bool, f64, ShipId)> = None; // (is_focus, dist, id)
     for s in &state.ships {
         if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
             let d = dist(pos, s.position);
-            if d <= range && best.map(|(bd, _)| d < bd).unwrap_or(true) {
-                best = Some((d, s.id));
+            if d <= range {
+                let is_focus = focus == Some(s.faction_id);
+                let better = match best {
+                    None => true,
+                    Some((bf, bd, _)) => {
+                        if is_focus != bf {
+                            is_focus // 结盟集火：优先选择针对霸权的目标
+                        } else {
+                            d < bd
+                        }
+                    }
+                };
+                if better {
+                    best = Some((is_focus, d, s.id));
+                }
             }
         }
     }
-    best.map(|(_, id)| id)
+    best.map(|(_, _, id)| id)
 }
 
 fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId) {
@@ -1462,7 +1484,7 @@ fn has_blank_site(state: &State, body: BodyId) -> bool {
     (0..b.settlements.len()).any(|i| !occupied.contains(&i))
 }
 
-fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipBehavior> {
+fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
     let cur = state.ship_behavior(ship_id);
     // Keep an existing targeting behavior while it is still valid, so the
     // commander does not thrash between targets every round.
@@ -1473,7 +1495,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
             return Some(b);
         }
     }
-    let picked = pick_target(state, config, owner, pos, rng);
+    let picked = pick_target(state, config, owner, pos, rng, focus);
     let behavior = picked.unwrap_or(ShipBehavior::Idle);
     if let Some(c) = state.control_mut(owner) {
         c.ship_orders.insert(ship_id, Control::inherit(behavior));
@@ -1481,36 +1503,39 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     picked
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipBehavior> {
-    let mut best: Option<(f64, ShipBehavior)> = None;
-    let mut consider = |d: f64, b: ShipBehavior, best: &mut Option<(f64, ShipBehavior)>| {
+fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
+    let mut best: Option<(bool, f64, ShipBehavior)> = None;
+    let mut consider = |d: f64, is_focus: bool, b: ShipBehavior, best: &mut Option<(bool, f64, ShipBehavior)>| {
         let replace = match *best {
             None => true,
-            Some((bd, _)) => {
-                if d < bd - 1e-9 {
-                    true
+            Some((bf, bd, _)) => {
+                if is_focus != bf {
+                    is_focus // 结盟集火：针对霸权的目标优先
                 } else if (d - bd).abs() <= 1e-9 {
                     rng.range(2) == 0
                 } else {
-                    false
+                    d < bd
                 }
             }
         };
         if replace {
-            *best = Some((d, b));
+            *best = Some((is_focus, d, b));
         }
     };
 
-    // Combat first: prefer the nearest hostile ship / city.
+    // Combat first: prefer the nearest hostile ship / city, and when in a coalition
+    // war, prefer those belonging to the focused hegemon.
     for s in &state.ships {
         if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
-            consider(dist(pos, s.position), ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
+            let is_focus = focus == Some(s.faction_id);
+            consider(dist(pos, s.position), is_focus, ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
         }
     }
     for c in &state.cities {
         if !c.razed && hostile(state, config, owner, c.faction_id) {
+            let is_focus = focus == Some(c.faction_id);
             let p = city_position(state, c.id);
-            consider(dist(pos, p), ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
+            consider(dist(pos, p), is_focus, ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
         }
     }
     // If there is nothing to fight, re-colonize a nearby razed (blank) settlement.
@@ -1518,11 +1543,11 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
         for c in &state.cities {
             if c.razed {
                 let p = city_position(state, c.id);
-                consider(dist(pos, p), ShipBehavior::Colonize { body: c.body_id }, &mut best);
+                consider(dist(pos, p), false, ShipBehavior::Colonize { body: c.body_id }, &mut best);
             }
         }
     }
-    best.map(|(_, b)| b)
+    best.map(|(_, _, b)| b)
 }
 
 /// Bombard a city: damage is spread across its buildings by area share. When all
@@ -1902,6 +1927,35 @@ fn sanction_cost_mult(state: &State, config: &GameConfig, fid: FactionId) -> f64
         config.balance.sanction_cost_mult
     } else {
         1.0
+    }
+}
+
+/// 联盟军事协同的「集火目标」：若 `owner` 属于针对霸权 H 的活跃反制联盟（已倒向联盟、
+/// 关系 ≤ `coalition_estrange`），且 H 正与联盟内某一弱者交战（集体安全已触发——霸权
+/// 先动手了），则返回 Some(H)。这使结盟势力的舰只**优先集火 H**、而非各自就近乱打——
+/// 给「攻其一方、集体制衡」真正的军事牙齿。否则返回 None（不改变普通行为）。
+fn coalition_war_focus(state: &State, config: &GameConfig, owner: FactionId) -> Option<FactionId> {
+    let b = &config.balance;
+    if b.hegemon_power > 1.0 {
+        return None;
+    }
+    let Some(hegemon) = active_coalition_hegemon(state, config) else { return None };
+    if owner == hegemon {
+        return None;
+    }
+    // 该弱者是否已倒向联盟（疏远霸权）。未倒向则不集火。
+    if relation(state, owner, hegemon) > b.coalition_estrange {
+        return None;
+    }
+    // 霸权是否正与任一弱者交战（集体防御触发）——注意霸权自己对它与他人开战不作集火。
+    let war_on = state
+        .factions
+        .iter()
+        .any(|f| f.id != hegemon && hostile(state, config, f.id, hegemon));
+    if war_on {
+        Some(hegemon)
+    } else {
+        None
     }
 }
 

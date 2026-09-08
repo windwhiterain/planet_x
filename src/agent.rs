@@ -346,6 +346,9 @@ struct AgentCity {
     /// 忠诚度 (0..1)：城市对其统治势力的向心力。治理不到位/太远/人口过多时下降，
     /// 跌破叛变阈值即离心叛乱（夷平为空白）。投入娱乐预算可提升。
     loyalty: f64,
+    /// 该城到其统治势力首都天体的距离（AU，治理距离）。可读的「治理压力」信号——
+    /// AI 一眼看出哪些城在失稳边缘，好据此投娱乐预算 / 决定是否放弃远端殖民地。
+    gov_distance: f64,
 }
 
 #[derive(Serialize)]
@@ -484,6 +487,7 @@ impl AgentState {
                 razed: c.razed,
                 armor: r2(c.buildings.iter().map(|b| b.armor).sum::<f64>()),
                 loyalty: r2(c.loyalty),
+                gov_distance: r2(governance_distance(state, c.faction_id, c.body_id)),
                 ship_progress: c.ship_progress.iter().map(|(k, v)| (k.clone(), r2(*v))).collect(),
                 buildings: c
                     .buildings
@@ -607,4 +611,13 @@ fn faction_name(state: &State, id: FactionId) -> String {
         .faction(id)
         .map(|f| f.name.clone())
         .unwrap_or_else(|| format!("#{id}"))
+}
+
+/// 一座城（其宿主天体 `body_id`）到其统治势力首都天体的距离（AU）——可读的治理压力
+/// 信号：越远，管理越难、忠诚越易跌破叛变阈值。无主/首都缺失时返回 0。
+fn governance_distance(state: &State, owner: FactionId, body_id: BodyId) -> f64 {
+    let Some(capital) = state.faction(owner).map(|f| f.capital_body) else { return 0.0 };
+    let bpos = state.body_position(body_id);
+    let cpos = state.body_position(capital);
+    ((bpos[0] - cpos[0]).powi(2) + (bpos[1] - cpos[1]).powi(2)).sqrt()
 }
