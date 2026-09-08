@@ -223,7 +223,8 @@ pub struct ShipSpec {
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
     Move { position: [f64; 2] },
-    /// 目标飞船（attack 表示是否开火）。
+    /// 目标飞船：`attack: true` 表示追袭并开火；`attack: false` 表示**守卫**——
+    /// 靠近并保护这艘友方舰（对接近范围内的敌方舰开火拦截），而非攻击它。
     TargetShip { ship: ShipId, attack: bool },
     /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
     TargetSettlement { city: CityId, bombard: bool },

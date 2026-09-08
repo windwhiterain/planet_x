@@ -81,7 +81,8 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 \n\
 【控制模型 = 指令】每个势力有一份可控状态 State::control：\n\
 - ship_orders：本方各舰的 行为（ShipBehavior）：Idle（待命）、Move{position}（前往某位置）、\n\
-  TargetShip{ship,attack}（追袭某舰，attack 表示是否开火）、TargetSettlement{city,bombard}（围攻某城）。\n\
+  TargetShip{ship,attack}（attack=true 追袭某舰并开火；attack=false 守卫：靠近并保护某友舰，\n\
+  对近身敌方舰拦截开火，不攻击被保护舰）、TargetSettlement{city,bombard}（围攻某城）。\n\
 - budget：每种资源每回合的投资预算（决定拿出多少资源用于建设）。\n\
 - invest_weights：本方各建筑的 建设投资权重（决定建造优先级）。\n\
 每个可控叶子带一个 mode：Ai（系统自动决策/改写）| Player（玩家指令，系统只读不改写）| None（继承上层）。\n\
@@ -259,18 +260,22 @@ fn control_for_faction(state: &State, fid: u32) -> serde_json::Value {
     v
 }
 
-/// High-level ship command: `order <ship> attack|chase|siege|move|colonize|idle ...`.
+/// High-level ship command: `order <ship> attack|guard|siege|move|colonize|idle ...`.
 /// Builds the same `{control:[{ship_orders:[...]}]}` diff the agent writes by
 /// hand, so a human/agent can iterate quickly without writing nested JSON.
 fn cmd_order(state: &mut State, config: &GameConfig, rest: &str) -> Result<(), String> {
     let mut t = rest.split_whitespace();
-    let ship: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: order <ship> attack|chase|siege|move|colonize|idle ...")?;
+    let ship: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("usage: order <ship> attack|guard|siege|move|colonize|idle ...")?;
     let verb = t.next().ok_or("missing verb")?.to_string();
     let owner = state.ship(ship).map(|s| s.faction_id).ok_or_else(|| format!("no ship {ship}"))?;
     let behavior = match verb.as_str() {
-        "attack" | "chase" => {
-            let target: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("attack/chase needs a target ship id")?;
-            json!({"TargetShip": {"ship": target, "attack": verb == "attack"}})
+        "attack" => {
+            let target: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("attack needs a target ship id")?;
+            json!({"TargetShip": {"ship": target, "attack": true}})
+        }
+        "guard" => {
+            let target: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("guard needs a friendly ship id to protect")?;
+            json!({"TargetShip": {"ship": target, "attack": false}})
         }
         "siege" => {
             let city: u32 = t.next().and_then(|s| s.parse().ok()).ok_or("siege needs a city id")?;
@@ -533,7 +538,7 @@ fn guide_json() -> String {
             "control": {"usage": "control [<faction_id>|<jq>]", "desc": "dump the editable control surface. Bare → whole surface; control <id> → one faction (cheaper); control <jq> → filter the surface. The template you edit into a diff."},
             "meta": {"usage": "meta [<jq>]",  "desc": "dump the game config (resources raw-key→中文名, structures/buildings/ships specs, economy/combat/diplomacy tuning) — the rules dictionary. With a jq filter, filters the meta value."},
             "apply": {"usage": "apply <file.json>", "desc": "overlay a control diff file onto the state, then print the updated control surface. A ship behavior may be written in the default enum form ({\"TargetShip\":{...}}, \"Idle\") or the tagged state-view form ({\"type\":\"target_ship\",...}, {\"type\":\"idle\"}) — both are accepted."},
-            "order": {"usage": "order <ship> attack|chase|siege|move|colonize|idle ...", "desc": "one-shot ship command (Player mode). e.g. order 0 attack 2 | order 0 move -0.5 0.2 | order 8 colonize 9"},
+            "order": {"usage": "order <ship> attack|guard|siege|move|colonize|idle ...", "desc": "one-shot ship command (Player mode). attack <enemy> chases and fires; guard <friend> escorts a friendly ship and intercepts hostiles in range; e.g. order 0 attack 2 | order 3 guard 1 | order 8 colonize 9"},
             "budget": {"usage": "budget <faction> <resource> <value>", "desc": "set a faction's investment budget leaf (建设建筑) to a Player value"},
             "build":  {"usage": "build <faction> <resource> <value>",  "desc": "set a faction's construction budget leaf (造舰) to a Player value"},
             "events": {"usage": "events",     "desc": "print this round's event log (attacks, destroyed ships, razed cities, colonies, stale orders)"},

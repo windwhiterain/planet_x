@@ -60,7 +60,7 @@ advance [n]             # 推进 n 回合（默认 1），然后打印 summary
 control [<faction_id>|<jq>]  # 输出可编辑控制面（control+scope）。裸→整面；control 3 → 只出中国；control <jq> → 对整面做 jq。
 meta [<jq>]             # 输出游戏配置（规则字典）：资源 raw key→中文名、建筑/舰船全表、经济/战斗/外交常量
 apply <file.json>       # 把一份控制状态 diff 叠加到状态上，然后回读 control
-order <ship> attack|chase|siege|move|colonize|idle ...   # 一键下舰指令（Player 模式）
+order <ship> attack|guard|siege|move|colonize|idle ...   # 一键下舰指令（Player 模式）。attack <敌舰> 追袭开火；guard <友舰> 守卫：靠近并拦截近身敌方舰，不开火攻击被保护舰。
 budget <faction> <resource> <value>   # 设该势力「建设建筑」投资预算叶子（Player）
 build  <faction> <resource> <value>   # 设该势力「造舰」建造预算叶子（Player）
 events                  # 打印本回合事件（开火/被毁/城被夷平/殖民/陈旧指令降级）
@@ -86,6 +86,9 @@ quit / exit
 > **`events` vs `delta`**：`events` 记「这回合发生了什么」（开火/被毁/夷平/殖民/陈旧指令）；
 > `delta` 记「状态变成了什么样」——两快照间的语义差分。想看一层楼到底改了什么用 `delta`，
 > 想看事件流水用 `events`。
+> **守卫**：`TargetShip{ship,attack:false}` 是守卫——护住一艘**友舰**：靠近它并拦截进入自身
+> 攻击距离的敌方舰，但**不会**向被保护舰开火。目标是友方（非敌对）舰才有效；敌舰被毁或友舰
+> 被毁都会降级为 `Idle` 并记一条 `stale_order`。`order <ship> guard <友舰>` 可一键下达。
 
 `--script <file>` 从文件非交互读取上述命令并执行后退出（stdout 仍是纯 JSON Lines）。`--apply <file.json>` 在任何命令运行前把一份控制状态 diff 叠加到状态上，二者常与 `--start` 组合成一个回合的 agent 决策循环。
 

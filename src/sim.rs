@@ -698,7 +698,8 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             // event so the agent knows to re-issue. Move/Idle are always valid.
             if !behavior_is_valid(state, config, behavior, owner) {
                 let reason = match behavior {
-                    ShipBehavior::TargetShip { ship, .. } => format!("target ship {ship} gone"),
+                    ShipBehavior::TargetShip { attack: true, .. } => format!("target ship gone"),
+                    ShipBehavior::TargetShip { attack: false, .. } => format!("guarded ship gone"),
                     ShipBehavior::TargetSettlement { city, .. } => format!("target city {city} razed or not hostile"),
                     ShipBehavior::Colonize { body } => format!("body {body} has no settlement"),
                     _ => "invalid".to_string(),
@@ -726,20 +727,39 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 }
                 ShipBehavior::TargetShip { ship, attack } => {
                     if attack {
+                        // Attack: pursue the enemy and open fire once in range.
                         if let Some(t) = state.ship(ship) {
                             if t.hull > 0.0 && dist(pos, t.position) <= range {
                                 fire(state, config, ship_id, ship);
                                 continue;
                             }
                         }
-                    }
-                    move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
-                    if attack {
+                        move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
                         if let Some(t) = state.ship(ship) {
                             if t.hull > 0.0 {
                                 let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
                                 if dist(np, t.position) <= range {
                                     fire(state, config, ship_id, ship);
+                                }
+                            }
+                        }
+                    } else {
+                        // Guard: escort a friendly ship. Stay near it and intercept
+                        // any hostile that comes within our own attack range, but do
+                        // not fire at the protected ship itself. This is a defensive
+                        // station, not a pursuit.
+                        if let Some(t) = state.ship(ship) {
+                            if t.hull > 0.0 {
+                                let gpos = t.position;
+                                // Drift toward the protected ship.
+                                move_toward(state, config, ship_id, &class, gpos);
+                                let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+                                // Intercept the closest hostile in range, scanning
+                                // around the guard first, then the protected ship.
+                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range) {
+                                    fire(state, config, ship_id, enemy);
+                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range) {
+                                    fire(state, config, ship_id, e2);
                                 }
                             }
                         }
@@ -881,10 +901,18 @@ fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior,
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Colonize { body } => state.body(body).map(|b| b.settlement.is_some()).unwrap_or(false),
-        ShipBehavior::TargetShip { ship, .. } => state
-            .ship(ship)
-            .map(|s| s.hull > 0.0 && hostile(state, config, owner, s.faction_id))
-            .unwrap_or(false),
+        ShipBehavior::TargetShip { ship, attack } => {
+            let alive = state.ship(ship).map(|s| s.hull > 0.0).unwrap_or(false);
+            if !alive {
+                false
+            } else if attack {
+                // Attack mode: target must be a hostile ship.
+                state.ship(ship).map(|s| hostile(state, config, owner, s.faction_id)).unwrap_or(false)
+            } else {
+                // Guard mode: target must be a friendly (non-hostile) ship to protect.
+                state.ship(ship).map(|s| !hostile(state, config, owner, s.faction_id)).unwrap_or(false)
+            }
+        }
         ShipBehavior::TargetSettlement { city, .. } => state
             .city(city)
             .map(|c| !c.razed && hostile(state, config, owner, c.faction_id))
@@ -1171,7 +1199,7 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": 3,
-                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 2, "attack": false}}, "mode": "Player"}]
+                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 2, "attack": true}}, "mode": "Player"}]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
@@ -1196,6 +1224,62 @@ mod tests {
             "expected a StaleOrder event for ship 0, got {:?}",
             state.events
         );
+    }
+
+    /// Guard semantics: `TargetShip { attack: false }` escorts a *friendly* ship
+    /// and intercepts hostiles within attack range — it must not fire at the
+    /// protected ship itself, and it must protect the friendly even though the
+    /// target is not hostile.
+    #[test]
+    fn guard_escorts_friendly_and_intercepts_hostiles() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // China (3): ship 0 guards its own friendly ship 1. Co-located at [0,0].
+        // Friendly same-faction target => valid guard.
+        let diff = serde_json::json!({
+            "control": [{
+                "faction_id": 3,
+                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 1, "attack": false}}, "mode": "Player"}]
+            }]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply guard order");
+
+        // Pin positions: defender + protected friend at [0,0]; US (1) enemy ship 2
+        // just inside the corvette attack range (0.4) so the guard can fire. Move
+        // the US cruiser (3) far out so only the corvette engages (its damage 5
+        // won't one-shot the guard's hull 12, letting the guard retaliate).
+        for id in [0u32, 1u32] {
+            if let Some(s) = state.ship_mut(id) {
+                s.position = [0.0, 0.0];
+            }
+        }
+        if let Some(enemy) = state.ship_mut(2) {
+            enemy.position = [0.3, 0.0];
+        }
+        if let Some(cruiser) = state.ship_mut(3) {
+            cruiser.position = [50.0, 50.0];
+        }
+
+        advance(&mut state, &config, &mut rng);
+
+        // The guard must have opened fire on the enemy, not on the friend.
+        assert!(
+            state.events.iter().any(|e| matches!(
+                e,
+                GameEvent::Attack { attacker: 0, target, .. } if *target == 2
+            )),
+            "guard should fire at the hostile, got {:?}",
+            state.events
+        );
+        // The protected friend must be unharmed (no attack targeting ship 1).
+        assert!(
+            !state.events.iter().any(|e| matches!(e, GameEvent::Attack { target: 1, .. })),
+            "guard must not fire at its own protected ship, got {:?}",
+            state.events
+        );
+        // The order is still a valid guard (not degraded to Idle).
+        assert_eq!(state.ship_behavior(0), Some(ShipBehavior::TargetShip { ship: 1, attack: false }));
     }
 
     /// Events must populate as the world advances (growth / spurious events are
