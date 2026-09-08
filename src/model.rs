@@ -30,9 +30,15 @@ pub type BuildingId = u32;
 pub type ResourceMap = BTreeMap<String, f64>;
 
 /// A resource type definition (display metadata for a resource key).
+///
+/// `value` is the resource's market price per unit (abstract credits): rare
+/// minerals (氦-3/钍/铀/金/铂) are worth several times the common industrial
+/// ones (铁/碳/硅/氢/甲烷/水冰). The automatic market trades surpluses for the
+/// minerals a faction is short of, priced on these values.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ResourceDef {
     pub name: String,
+    pub value: f64,
 }
 
 /// A deposit of a single resource on a settlement. `area` bounds how much
@@ -227,6 +233,9 @@ pub struct ShipSpec {
     pub build_points: f64,
     /// Resource cost to fully build a ship of this class.
     pub build_cost: ResourceMap,
+    /// Per-round maintenance (in market value / credits) per ship — a continuous
+    /// sink that caps fleet growth and makes big fleets expensive to sustain.
+    pub upkeep: f64,
 }
 
 /// A ship's controllable behavior — the instruction a faction issues to one
@@ -327,6 +336,11 @@ pub struct Faction {
     pub resources: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
     pub relations: BTreeMap<FactionId, f64>,
+    /// 意识形态位置（约 -1..1；越负越「东方/教派」，越正越「西方/国际」）。
+    /// 由它推算出两两之间的静息亲和（阵营亲缘），驱动外交漂移，令国际关系波动。
+    pub alignment: f64,
+    /// 好战度（0..1）：越高的势力越会加速与异己阵营走向敌对。
+    pub aggression: f64,
 }
 
 /// The complete world snapshot.
@@ -614,15 +628,54 @@ pub struct StructureSpec {
     pub cost_mult: f64,
 }
 
-/// Diplomacy tuning.
+/// Diplomacy tuning. Drives a dynamic international-relations model: each pair
+/// drifts toward an "affinity" resting level derived from the two factions'
+/// ideologies (alignment), aggressive powers accelerate hostility with rivals,
+/// wars wind down via fatigue once fighting stops, and a little noise keeps
+/// relations fluctuating so wars both begin and end over time.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiplomacyConfig {
     /// Relation change caused by a hostile attack.
     pub attack_delta: f64,
     /// Relation change caused by capturing an enemy city.
     pub capture_delta: f64,
-    /// Drift of non-war relations back toward neutral each round.
-    pub relax_rate: f64,
+    /// Per-round pull toward each pair's resting affinity (bloc formation).
+    pub drift_rate: f64,
+    /// While at war and not currently fighting, pull relations toward
+    /// `ceasefire_relation` (war fatigue) so conflicts wind down to peace.
+    pub war_fatigue: f64,
+    /// Relation level a war cools toward when fighting stops (above the war
+    /// threshold, so the pair crosses back into peace).
+    pub ceasefire_relation: f64,
+    /// Resting affinity at maximum ideological distance (opposite blocs).
+    pub affinity_floor: f64,
+    /// Extra affinity at full ideological closeness (same bloc allies).
+    pub affinity_span: f64,
+    /// Random fluctuation per round, so relations oscillate and can cross the
+    /// war threshold.
+    pub noise: f64,
+    /// Lower clamp on any relation (bounded hostility).
+    pub hostility_floor: f64,
+    /// Upper clamp on any relation (bounded friendliness).
+    pub friendship_ceiling: f64,
+}
+
+/// Market tuning. An automatic interstellar exchange that lets each faction buy
+/// the minerals it is short of (so shipyards rarely stall on a single drought)
+/// by selling its scarce-value surpluses. This gives the economy a **sink** for
+/// surplus stockpiles and a **supply** that keeps a faction building even when
+/// it cannot mine a keystone mineral (e.g. carbon).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MarketConfig {
+    /// Per-round cap, in market value (credits), on how much a faction may
+    /// auto-trade. `0.0` disables the market entirely.
+    pub auto_trade_limit: f64,
+    /// Each yard-critical resource is kept at least this many units in stock;
+    /// the market tops it up when it falls short.
+    pub working_buffer: f64,
+    /// Market fee: a faction sells `(1+spread)`× worth to buy `1×` worth, a
+    /// small friction that stops trades from being perfect conversions.
+    pub spread: f64,
 }
 
 /// The whole game configuration, loaded from `config/game.ron`.
@@ -631,6 +684,7 @@ pub struct GameConfig {
     pub economy: EconomyConfig,
     pub combat: CombatConfig,
     pub diplomacy: DiplomacyConfig,
+    pub market: MarketConfig,
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,

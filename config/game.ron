@@ -18,84 +18,114 @@
         colony_footprint: 0.2,
     ),
     diplomacy: (
+        // 开火/占领 导致的关系变化（战争期间把关系压到阈值之下）。
         attack_delta: -3.0,
         capture_delta: -25.0,
-        relax_rate: 0.5,
+        // 每回合向「意识形态静息亲和」靠拢的比例（阵营形成/异己升温）。
+        drift_rate: 0.02,
+        // 已开战且本轮未交战时，向停战线回落的比例（战争疲态 → 战争有始有终）。
+        war_fatigue: 0.12,
+        // 停战目标关系（高于 war_threshold，故能跨回和平），停火冷却期间关系向它靠拢。
+        ceasefire_relation: -6.0,
+        // 静息亲和 = affinity_floor + affinity_span * (1 - |Δalignment|/2)。
+        // 同阵营 ~ -42+70 = +28（友）；异阵营(Δ=2) ~ -42（敌，最终走向战争）。
+        affinity_floor: -42.0,
+        affinity_span: 70.0,
+        // 每回合随机波动幅度：让关系波动而非单调收敛。
+        noise: 1.0,
+        // 关系钳位（有界敌意/友好）。
+        hostility_floor: -60.0,
+        friendship_ceiling: 40.0,
+    ),
+    market: (
+        // 每回合每势力自动兑换的「市场价值」上限（信用点）；0=关闭自动市场。
+        auto_trade_limit: 80.0,
+        // 关键工业矿物维持的工作缓冲（单位）：低于则用富余矿物兑换补齐。
+        working_buffer: 6.0,
+        // 兑换价差：卖 (1+spread)× 价值才能买到 1×，抑制无损耗套利。
+        spread: 0.15,
     ),
     resources: {
-        "water_ice": (name: "水冰"),
-        "helium3":   (name: "氦-3"),
-        "uranium":   (name: "铀"),
-        "thorium":   (name: "钍"),
-        "gold":      (name: "金"),
-        "platinum":  (name: "铂"),
-        "iron":      (name: "铁"),
-        "hydrogen":  (name: "氢"),
-        "methane":   (name: "甲烷"),
-        "carbon":    (name: "碳"),
-        "silicon":   (name: "硅"),
+        "water_ice": (name: "水冰", value: 1.0),
+        "helium3":   (name: "氦-3", value: 4.0),
+        "uranium":   (name: "铀", value: 5.0),
+        "thorium":   (name: "钍", value: 4.0),
+        "gold":      (name: "金", value: 5.0),
+        "platinum":  (name: "铂", value: 6.0),
+        "iron":      (name: "铁", value: 1.0),
+        "hydrogen":  (name: "氢", value: 0.8),
+        "methane":   (name: "甲烷", value: 0.8),
+        "carbon":    (name: "碳", value: 1.0),
+        "silicon":   (name: "硅", value: 1.2),
     },
     structures: {
         "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
         "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
     },
     // 舰船 5 级，属性按 spec 的 低/中/高 分档：
-    //   护甲 hull:        低≈12-16  中≈24   高≈40
-    //   护甲再生 hull_regen(每月回 max 的分数):  低≈0.04  中≈0.08  高≈0.16
-    //   速度(月/AU):      低≈0.9    中≈1.2   高≈1.6
-    //   伤害 attack:      低≈5      中≈12    高≈24
-    //   攻击距离 attack_range:     低≈0.4    中≈0.6   高≈0.9-1.0
+    //   护甲 hull:        低≈20-26  中≈24   高≈72
+    //   护甲再生 hull_regen(每月回 max 的分数):  低≈0.04  中≈0.08  高≈0.30
+    //   速度(月/AU):      低≈0.9    中≈1.2   高≈2.6
+    //   伤害 attack:      低≈6      中≈14    高≈48
+    //   攻击距离 attack_range:     低≈0.4    中≈0.6   高≈2.4
     //   资源(成本量+稀有度): 常见=铁/碳/硅/氢/甲烷/水冰；稀有=氦-3/钍/铀/金/铂
+    //   每级把 spec 的「招牌」数值拉到极高，使每级各有一席之地：
+    //   护卫舰=极速游骑；驱逐舰=高再生磨王；巡洋舰=重甲战列；航空母舰=超远程炮台；战列舰=一锤定音。
     ships: {
         "corvette": (
             label: "护卫舰",
             hull: 12.0,          // 低
             hull_regen: 0.04,    // 低
-            attack: 5.0,         // 低
-            speed: 1.6,          // 高
+            attack: 6.0,         // 低
+            speed: 2.6,          // 高（招牌：极速）
             attack_range: 0.4,   // 低
             build_points: 15.0,
             build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：低，常见
+            upkeep: 1.5,
         ),
         "destroyer": (
             label: "驱逐舰",
             hull: 24.0,          // 中
-            hull_regen: 0.16,    // 高
+            hull_regen: 0.30,    // 高（招牌：超强再生）
             attack: 6.0,         // 低
             speed: 1.2,          // 中
             attack_range: 0.6,   // 中
             build_points: 26.0,
             build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
+            upkeep: 2.5,
         ),
         "cruiser": (
             label: "巡洋舰",
-            hull: 40.0,          // 高
+            hull: 72.0,          // 高（招牌：重型装甲）
             hull_regen: 0.08,    // 中
-            attack: 12.0,        // 中
+            attack: 14.0,        // 中
             speed: 0.9,          // 低
             attack_range: 0.6,   // 中
             build_points: 44.0,
             build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：高，常见
+            upkeep: 6.0,
         ),
         "carrier": (
             label: "航空母舰",
-            hull: 14.0,          // 低
+            hull: 20.0,          // 低
             hull_regen: 0.08,    // 中
-            attack: 5.0,         // 低
+            attack: 8.0,         // 低
             speed: 0.9,          // 低
-            attack_range: 1.0,   // 高
+            attack_range: 2.4,   // 高（招牌：超远程炮台，敌舰难近身）
             build_points: 58.0,
             build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
+            upkeep: 7.5,
         ),
         "battleship": (
             label: "战列舰",
-            hull: 14.0,          // 低
+            hull: 26.0,          // 低（略抬以可抗一轮齐射）
             hull_regen: 0.04,    // 低
-            attack: 24.0,        // 高
+            attack: 48.0,        // 高（招牌：一锤定音）
             speed: 1.2,          // 中
             attack_range: 0.6,   // 中
             build_points: 40.0,
             build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：低，稀有
+            upkeep: 6.5,
         ),
     },
     buildings: {

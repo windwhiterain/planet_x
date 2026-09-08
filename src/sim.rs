@@ -28,7 +28,7 @@
 
 use crate::model::*;
 use crate::prng::Prng;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Advance the world by one round, writing the new controllable state into
 /// [`State::control`].
@@ -44,9 +44,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     }
 
     step_production(state, config);
+    step_upkeep(state, config);
+    step_market(state, config);
     step_construction(state, config, rng);
     step_military(state, config, rng);
-    step_diplomacy(state, config);
+    step_diplomacy(state, config, rng);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -228,6 +230,177 @@ fn step_production(state: &mut State, config: &GameConfig) {
             if let Some(f) = state.faction_mut(faction_id) {
                 *f.resources.entry(rt).or_insert(0.0) += output;
             }
+        }
+    }
+}
+
+// --- interstellar market (resource sink + keystone supply) -------------------
+
+/// Fleet upkeep: every ship costs its class's [`ShipSpec::upkeep`] (market value)
+/// per round to keep in service. The faction's total fleet maintenance is paid
+/// out of its stockpile (drained value-weighted across all minerals); if the
+/// faction cannot cover it, the shortfall rusts its fleet (ships lose hull
+/// proportionally, and ships driven to 0 are scrapped).
+///
+/// This is the continuous resource **sink** that bounds fleet size: big fleets
+/// need a big economy to sustain, so the navy grows only as fast as the
+/// economy feeds it rather than snowballing unboundedly.
+fn step_upkeep(state: &mut State, config: &GameConfig) {
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+    for fid in faction_ids {
+        let upkeep_total: f64 = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid && s.hull > 0.0)
+            .map(|s| config.ship_spec(&s.class).upkeep)
+            .sum();
+        if upkeep_total <= 1e-9 {
+            continue;
+        }
+        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
+        let pay = upkeep_total.min(total_value);
+        if pay > 1e-9 {
+            let ratio = (pay / total_value).min(1.0);
+            if let Some(f) = state.faction_mut(fid) {
+                for (k, v) in stock.iter() {
+                    let new = (*v - *v * ratio).max(0.0);
+                    f.resources.insert(k.clone(), new);
+                }
+            }
+        }
+        // Unpaid upkeep rusts the fleet; hull reaching 0 scrapped.
+        let short = (upkeep_total - total_value).max(0.0);
+        if short > 1e-9 {
+            let frac = (short / upkeep_total).min(1.0);
+            let frac = frac.max(0.2); // at least a visible rust when short
+            let mut scrap: Vec<ShipId> = Vec::new();
+            for s in state.ships.iter_mut() {
+                if s.faction_id != fid || s.hull <= 0.0 {
+                    continue;
+                }
+                let rust = config.ship_spec(&s.class).hull * frac;
+                s.hull = (s.hull - rust).max(0.0);
+                if s.hull <= 0.0 {
+                    scrap.push(s.id);
+                }
+            }
+            for sid in scrap {
+                ev(state, GameEvent::ShipDestroyed { ship: sid, owner: fid, class: state.ship(sid).map(|s| s.class.clone()).unwrap_or_default() });
+                if let Some(s) = state.ship_mut(sid) {
+                    s.hull = 0.0;
+                }
+            }
+        }
+    }
+}
+
+/// Automatic interstellar exchange. Every faction keeps each mineral its
+/// shipyards consume at least [`MarketConfig::working_buffer`] units in stock;
+/// when one falls short it buys the deficit by selling its surplus minerals
+/// (value-weighted), at a small [`MarketConfig::spread`] friction.
+///
+/// This gives the economy a downstream **sink** for surplus stockpiles (so they
+/// do not balloon unboundedly) and a **supply** so a faction that cannot mine a
+/// keystone mineral (e.g. carbon) can still build and sustain a fleet. Trade is
+/// deterministic (no RNG) and value-conserving modulo the spread fee.
+fn step_market(state: &mut State, config: &GameConfig) {
+    let m = &config.market;
+    if m.auto_trade_limit <= 0.0 {
+        return;
+    }
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
+    for fid in faction_ids {
+        // 1) Minerals this faction's shipyards need (union of build_cost keys).
+        let mut need: BTreeSet<String> = BTreeSet::new();
+        for c in &state.cities {
+            if c.faction_id != fid {
+                continue;
+            }
+            for b in &c.buildings {
+                if b.is_shipyard() {
+                    if let Some(cls) = b.ship_type.clone() {
+                        for (rt, _) in &config.ship_spec(&cls).build_cost {
+                            need.insert(rt.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if need.is_empty() {
+            continue;
+        }
+
+        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+
+        // 2) Deficits below the working buffer, and their cost.
+        let mut deficits: Vec<(String, f64)> = Vec::new();
+        let mut buy_value = 0.0;
+        for rt in &need {
+            let have = stock.get(rt).copied().unwrap_or(0.0);
+            if have < m.working_buffer {
+                let amt = m.working_buffer - have;
+                deficits.push((rt.clone(), amt));
+                buy_value += amt * value_of(rt);
+            }
+        }
+        if deficits.is_empty() {
+            continue;
+        }
+
+        // 3) Sellable surplus: minerals NOT in `need`, above the reserve floor.
+        let floor = m.working_buffer;
+        let mut surplus_value = 0.0;
+        for (rt2, amt) in &stock {
+            if need.contains(rt2) {
+                continue;
+            }
+            let over = amt - floor;
+            if over > 1e-6 {
+                surplus_value += over * value_of(rt2);
+            }
+        }
+        if surplus_value <= 1e-6 {
+            continue;
+        }
+
+        // 4) Effective buy: capped by the trade limit and by what surplus sells.
+        let eff_buy = buy_value
+            .min(m.auto_trade_limit)
+            .min(surplus_value / (1.0 + m.spread));
+        if eff_buy <= 1e-6 {
+            continue;
+        }
+        let scale = eff_buy / buy_value;
+        let actual_sell = eff_buy * (1.0 + m.spread);
+
+        // 5) Apply: top up deficits (scaled), drain surpluses by value share.
+        if let Some(f) = state.faction_mut(fid) {
+            let mut res = std::mem::take(&mut f.resources);
+            for (rt, amt) in &deficits {
+                *res.entry(rt.clone()).or_insert(0.0) += amt * scale;
+            }
+            for (rt2, amt) in &stock {
+                if need.contains(rt2) {
+                    continue;
+                }
+                let price = value_of(rt2);
+                if price <= 1e-9 {
+                    continue;
+                }
+                let over = amt - floor;
+                if over <= 1e-6 {
+                    continue;
+                }
+                let share = (over * price) / surplus_value;
+                let sell_amt = (actual_sell * share / price).min(res.get(rt2).copied().unwrap_or(0.0));
+                let cur = res.get(rt2).copied().unwrap_or(0.0);
+                res.insert(rt2.clone(), (cur - sell_amt).max(0.0));
+            }
+            f.resources = res;
         }
     }
 }
@@ -1211,17 +1384,86 @@ fn behavior_dest(state: &State, behavior: ShipBehavior) -> [f64; 2] {
 
 // --- diplomacy --------------------------------------------------------------
 
-fn step_diplomacy(state: &mut State, config: &GameConfig) {
-    let relax = config.diplomacy.relax_rate;
-    let war_abs = config.combat.war_threshold.abs();
-    for f in &mut state.factions {
-        for rel in f.relations.values_mut() {
-            if rel.abs() < war_abs {
-                if *rel > 0.0 {
-                    *rel = (*rel - relax).max(0.0);
-                } else if *rel < 0.0 {
-                    *rel = (*rel + relax).min(0.0);
-                }
+/// Dynamic international-relations step.
+///
+/// Each unordered faction pair independently:
+///   * drifts toward its **resting affinity** (bloc formation), derived from the
+///     two factions' `alignment`. Aggressive factions close in on a hostile
+///     affinity faster, so ideologically-distant powers escalate to war on their
+///     own (a build-up phase) and allies cohere.
+///   * if already at war and the pair did **not** fight this round, winds down
+///     toward `ceasefire_relation` (war fatigue) — so wars end once the fighting
+///     stops, and can later re-escalate.
+///   * gets a little `noise`, so relations fluctuate and cross the threshold
+///     irregularly rather than settling.
+///
+/// Hostile acts (`attack_delta` / `capture_delta` applied in [`adjust_relation`])
+/// still push relations down during combat, which is what keeps an active war hot.
+fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+    let d = &config.diplomacy;
+    let band = 2.0;
+
+    // Which (unordered) faction pairs engaged in hostilities this round, so war
+    // fatigue does not cancel out the combat-driven relation drops while a war
+    // is actually being fought.
+    let mut fought: BTreeSet<(FactionId, FactionId)> = BTreeSet::new();
+    let mut note_pair = |a: Option<FactionId>, b: Option<FactionId>| {
+        if let (Some(a), Some(b)) = (a, b) {
+            if a != b {
+                fought.insert((a.min(b), a.max(b)));
+            }
+        }
+    };
+    for e in &state.events {
+        match e {
+            GameEvent::Attack { attacker, target, .. } => {
+                note_pair(
+                    state.ship(*attacker).map(|s| s.faction_id),
+                    state.ship(*target).map(|s| s.faction_id),
+                );
+            }
+            GameEvent::Siege { attacker, city, .. } => {
+                note_pair(
+                    state.ship(*attacker).map(|s| s.faction_id),
+                    state.city(*city).map(|c| c.faction_id),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            let (a, b) = (ids[i], ids[j]);
+            let (align_a, align_b, aggr) = {
+                let fa = state.factions.iter().find(|f| f.id == a).expect("faction a gone");
+                let fb = state.factions.iter().find(|f| f.id == b).expect("faction b gone");
+                (fa.alignment, fb.alignment, fa.aggression.max(fb.aggression))
+            };
+            let mut rel = relation(state, a, b);
+            let aff = d.affinity_floor + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
+            let at_war = rel <= config.combat.war_threshold;
+            let clashing = fought.contains(&(a.min(b), a.max(b)));
+
+            if at_war && !clashing {
+                // War fatigue: cool the conflict toward ceasefire once the guns
+                // fall silent, so wars end rather than grind forever.
+                rel += d.war_fatigue * (d.ceasefire_relation - rel);
+            } else {
+                // Bloc drift toward resting affinity; aggressive powers close a
+                // hostile gap faster (they escalate, they do not befriend rivals).
+                let rate = if aff < 0.0 { 1.0 + aggr } else { 1.0 };
+                rel += d.drift_rate * rate * (aff - rel);
+            }
+
+            // Little random fluctuation so relations wobble and cross thresholds.
+            rel += rng.range_f64(-d.noise, d.noise);
+            rel = rel.clamp(d.hostility_floor, d.friendship_ceiling);
+
+            for f in state.factions.iter_mut().filter(|f| f.id == a || f.id == b) {
+                let other = if f.id == a { b } else { a };
+                f.relations.insert(other, rel);
             }
         }
     }
@@ -1316,6 +1558,15 @@ mod tests {
             if let Some(s) = state.ship_mut(far) {
                 s.position = [50.0, 50.0];
             }
+        }
+
+        // The default world now opens peacefully, so make US (1) explicitly
+        // hostile to China (3) for this guard scenario.
+        if let Some(f) = state.faction_mut(3) {
+            f.relations.insert(1, -35.0);
+        }
+        if let Some(f) = state.faction_mut(1) {
+            f.relations.insert(3, -35.0);
         }
 
         advance(&mut state, &config, &mut rng);

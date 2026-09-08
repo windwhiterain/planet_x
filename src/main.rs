@@ -65,8 +65,9 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
   residential 居住点（提供人口容量）、mining 开采点（采对应矿藏资源）、construction 建造点（船坞，造舰）。\n\
 - 势力 faction：拥有城市与飞船，库存各资源，并与其它势力两两外交（关系 relations）。\n\
 - 飞船 ship：必属某一势力，从城市出厂，在 2D 平面移动，可按指令开火/围城。舰级参数（护甲 hull、护甲再生\n\
-  hull_regen、伤害、速度、攻击距离、建造点/建造成本）由 config 定义，spec 五级舰：护卫舰 corvette、\n\
-  驱逐舰 destroyer、巡洋舰 cruiser、航空母舰 carrier、战列舰 battleship。\n\
+  hull_regen、伤害、速度、攻击距离、建造点/建造成本、维护费 upkeep）由 config 定义，spec 五级舰：护卫舰 corvette、\n\
+  驱逐舰 destroyer、巡洋舰 cruiser、航空母舰 carrier、战列舰 battleship；每级把 spec 的「招牌」数值拉到极高，\n\
+  使各级各有一席之地：护卫舰=极速游骑、驱逐舰=高再生磨王、巡洋舰=重甲战列、航空母舰=超远程炮台、战列舰=一锤定音。\n\
 \n\
 【资源】11 种：水冰 water_ice、氦-3 helium3、铀 uranium、钍 thorium、金 gold、铂 platinum、铁 iron、\n\
 氢 hydrogen、甲烷 methane、碳 carbon、硅 silicon。\n\
@@ -74,11 +75,16 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 【每回合演化（sim::advance）】\n\
 1. 天体位置按轨道重算。\n\
 2. 经济：开采点按 面积×劳动力×生产率 产出资源；人口向住房容量增长（增长比例受 pop_growth 控制）。\n\
-3. 建设：建筑按各自投资权重竞争本轮资源预算（默认每资源最多拿出库存的 invest_fraction=0.3 投入建设）；\n\
+3. 维护 upkeep：每艘幸存舰每回合按舰级 upkeep 从本方资源（按价值加权）扣除维护费；付不起则舰队锈蚀（扣 hull）。\n\
+4. 市场：每势力自动以「参考价值」把富余矿物兑换成其所缺的关键矿物（维持 working_buffer 工作库存，收 spread 价差），\n\
+   使资源分布不均不再卡死舰队——富余矿物有了下游消耗（资源池），缺 keymineral 也能继续造舰。\n\
+5. 建设：建筑按各自投资权重竞争本轮资源预算（默认每资源最多拿出库存的 invest_fraction=0.3 投入建设）；\n\
    连续地把计划面积建成 deployed；船坞按面积×劳动力 累积造船进度，够了就付建造成本造出新舰。\n\
-4. 军事：每艘舰按指令 移动/开火/围城。开火削减目标舰 hull；围城削减城市 defense；defense≤0 则城市被\n\
+6. 军事：每艘舰按指令 移动/开火/围城。开火削减目标舰 hull；围城削减城市 defense；defense≤0 则城市被\n\
    攻占（守备重置、人口×0.6、改由攻击方控制）。关系 ≤ 战争阈值（war_threshold=-20）即视为敌对（wars）。\n\
-5. 外交：攻击/占领会加重敌对（attack_delta/capture_delta）；非战争关系每回合向中性回落（relax_rate）。\n\
+7. 外交：开局和平（无战争状态），国际关系动态波动——每对势力按意识形态(alignment)静息亲和漂移（阵营靠拢/异己升温）、\n\
+   好战(aggression)加速敌对化；开火/占领会把关系(attack_delta/capture_delta)压到战争阈值(war_threshold=-20)之下进入战争；\n\
+   停战后关系经战争疲态(war_fatigue)向停战线(ceasefire_relation)回落，随后可再度升温——战争有始有终，而非永久僵局。\n\
 \n\
 【控制模型 = 指令】每个势力有一份可控状态 State::control：\n\
 - ship_orders：本方各舰的 行为（ShipBehavior）：Idle（待命，原地）、Move{position}（前往某位置）、\n\

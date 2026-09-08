@@ -162,7 +162,15 @@ fn stockpile(items: &[(&str, f64)]) -> ResourceMap {
     items.iter().map(|(k, v)| (k.to_string(), *v)).collect()
 }
 
-fn faction(id: FactionId, name: &str, symbol: char, color: &str, resources: ResourceMap) -> Faction {
+fn faction(
+    id: FactionId,
+    name: &str,
+    symbol: char,
+    color: &str,
+    resources: ResourceMap,
+    alignment: f64,
+    aggression: f64,
+) -> Faction {
     Faction {
         id,
         name: name.to_string(),
@@ -170,6 +178,8 @@ fn faction(id: FactionId, name: &str, symbol: char, color: &str, resources: Reso
         color: color.to_string(),
         resources,
         relations: std::collections::BTreeMap::new(),
+        alignment,
+        aggression,
     }
 }
 
@@ -426,22 +436,31 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     ];
 
     // --- Factions -----------------------------------------------------------
+    // Idéologie (alignment) & 好战度 (aggression) drive the dynamic international
+    // relations: alignment-distance sets each pair's resting affinity (bloc
+    // formation), aggression accelerates hostility with ideologically-distant
+    // factions. The cult sits far outside the political band so it rests hostile
+    // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0), ("helium3", 2.0)])),
+        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0), ("helium3", 2.0)]), 0.4, 0.10),
         faction(
             F_US,
             "美国",
             'A',
             "#06b6d4",
             stockpile(&[("iron", 6.0), ("carbon", 5.0), ("uranium", 1.0)]),
+            1.0,
+            0.60,
         ),
-        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0), ("uranium", 1.0)])),
+        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0), ("uranium", 1.0)]), 0.9, 0.30),
         faction(
             F_CN,
             "中国",
             'C',
             "#ef4444",
             stockpile(&[("iron", 7.0), ("carbon", 6.0), ("silicon", 2.0)]),
+            -1.0,
+            0.50,
         ),
         faction(
             F_RU,
@@ -449,6 +468,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             'R',
             "#ec4899",
             stockpile(&[("iron", 5.0), ("carbon", 4.0), ("uranium", 2.0)]),
+            -0.9,
+            0.45,
         ),
         faction(
             F_MINING,
@@ -456,6 +477,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             'M',
             "#eab308",
             stockpile(&[("iron", 6.0), ("gold", 2.0), ("platinum", 1.0)]),
+            0.0,
+            0.20,
         ),
         faction(
             F_SCIENCE,
@@ -463,6 +486,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             'S',
             "#22c55e",
             stockpile(&[("silicon", 4.0), ("helium3", 3.0), ("carbon", 2.0)]),
+            0.2,
+            0.05,
         ),
         faction(
             F_TRANSPORT,
@@ -470,6 +495,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             'T',
             "#f8fafc",
             stockpile(&[("carbon", 6.0), ("hydrogen", 3.0), ("iron", 2.0)]),
+            -0.1,
+            0.15,
         ),
         faction(
             F_CULT,
@@ -477,25 +504,38 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             'X',
             "#d946ef",
             stockpile(&[("uranium", 3.0), ("thorium", 2.0), ("gold", 1.0)]),
+            -3.0,
+            0.90,
         ),
     ];
 
-    // --- Diplomacy: set up a couple of live wars and a hostile cult --------
+    // --- Diplomacy: peaceful opening -----------------------------------------
+    // No pair starts at war (everything sits above the war threshold); each
+    // relation is seeded partway (30%) toward the pair's resting affinity with
+    // a little jitter. The dynamic model in sim::step_diplomacy then lets blocs
+    // coalesce and rivalries escalate on their own, giving a build-up phase
+    // before the first war and letting wars later wind down.
     let set_rel = |x: &mut [Faction], a: u32, b: u32, v: f64| {
         x[a as usize].relations.insert(b, v);
         x[b as usize].relations.insert(a, v);
     };
-    for f in 0..9 {
-        if f != F_CULT {
-            set_rel(&mut factions, F_CULT, f, -55.0 + rng.range_f64(-15.0, 15.0));
+    let affinity = |align_a: f64, align_b: f64| -> f64 {
+        let band = 2.0;
+        let d = (align_a - align_b).abs().min(band);
+        config.diplomacy.affinity_floor + config.diplomacy.affinity_span * (1.0 - d / band)
+    };
+    let mut seed_rel = |align_a: f64, align_b: f64| -> f64 {
+        let base = affinity(align_a, align_b) * 0.30;
+        let jitter = rng.range_f64(-3.0, 3.0);
+        (base + jitter).clamp(-15.0, 10.0)
+    };
+    for i in 0..factions.len() {
+        for j in (i + 1)..factions.len() {
+            let (ia, ib) = (factions[i].id, factions[j].id);
+            let va = seed_rel(factions[i].alignment, factions[j].alignment);
+            set_rel(&mut factions, ia, ib, va);
         }
     }
-    set_rel(&mut factions, F_US, F_CN, -38.0 + rng.range_f64(-8.0, 8.0));
-    set_rel(&mut factions, F_US, F_RU, -26.0 + rng.range_f64(-8.0, 8.0));
-    set_rel(&mut factions, F_US, F_EU, 6.0 + rng.range_f64(-3.0, 3.0));
-    set_rel(&mut factions, F_CN, F_RU, -12.0 + rng.range_f64(-6.0, 6.0));
-    set_rel(&mut factions, F_CN, F_EU, 8.0 + rng.range_f64(-3.0, 3.0));
-    set_rel(&mut factions, F_MINING, F_TRANSPORT, -14.0 + rng.range_f64(-6.0, 6.0));
 
     // --- Cities -------------------------------------------------------------
     // 定居点 ↔ 城市 一一对应: 每个城占据其天体上的一个定居点 (settlement 索引)。

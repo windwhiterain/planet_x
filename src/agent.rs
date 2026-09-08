@@ -104,6 +104,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                     "attack_range": r2(s.attack_range),
                     "build_points": r2(s.build_points),
                     "build_cost": to_cost(&s.build_cost),
+                    "upkeep": r2(s.upkeep),
                 }),
             )
         })
@@ -130,7 +131,24 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
         "diplomacy": {
             "attack_delta": r2(config.diplomacy.attack_delta),
             "capture_delta": r2(config.diplomacy.capture_delta),
-            "relax_rate": r2(config.diplomacy.relax_rate),
+            "drift_rate": r2(config.diplomacy.drift_rate),
+            "war_fatigue": r2(config.diplomacy.war_fatigue),
+            "ceasefire_relation": r2(config.diplomacy.ceasefire_relation),
+            "affinity_floor": r2(config.diplomacy.affinity_floor),
+            "affinity_span": r2(config.diplomacy.affinity_span),
+            "noise": r2(config.diplomacy.noise),
+            "hostility_floor": r2(config.diplomacy.hostility_floor),
+            "friendship_ceiling": r2(config.diplomacy.friendship_ceiling),
+        },
+        "market": {
+            "auto_trade_limit": r2(config.market.auto_trade_limit),
+            "working_buffer": r2(config.market.working_buffer),
+            "spread": r2(config.market.spread),
+            "resource_value": config
+                .resources
+                .iter()
+                .map(|(k, r)| (k.clone(), r2(r.value)))
+                .collect::<BTreeMap<_, _>>(),
         },
     })
 }
@@ -152,6 +170,10 @@ struct AgentState {
 struct AgentFaction {
     id: FactionId,
     name: String,
+    /// 意识形态位置 (-1..1；越正越「西方/国际」，越负越「东方/教派」)。
+    alignment: f64,
+    /// 好战度 (0..1)：越高越会加速与异己阵营敌对化。
+    aggression: f64,
     /// Nonzero resource stockpile (resource display name -> amount).
     resources: BTreeMap<String, f64>,
     /// Relations toward other factions (name -> relation, nonzero only).
@@ -270,6 +292,8 @@ impl AgentState {
             .map(|f| AgentFaction {
                 id: f.id,
                 name: f.name.clone(),
+                alignment: r2(f.alignment),
+                aggression: r2(f.aggression),
                 resources: f
                     .resources
                     .iter()

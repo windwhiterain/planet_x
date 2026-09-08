@@ -1,6 +1,8 @@
 # 行星X — 太空沙盘
 
-《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。默认世界按 spec 天体表铺开：18 个天体共 **22 个定居点、22 座城**（定居点 ↔ 城市**一一对应**——气态巨行星的定居点为**轨道空间站**；地球坐拥 5 个定居点 = 长三角/珠三角/亚特兰大/巴黎/莫斯科，每城各有自己的区域矿藏）；舰船为 spec 五级（护卫舰/驱逐舰/巡洋舰/航空母舰/战列舰），每级带**护甲再生**（每月按最大护甲的百分比回血）。
+《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。默认世界按 spec 天体表铺开：18 个天体共 **22 个定居点、22 座城**（定居点 ↔ 城市**一一对应**——气态巨行星的定居点为**轨道空间站**；地球坐拥 5 个定居点 = 长三角/珠三角/亚特兰大/巴黎/莫斯科，每城各有自己的区域矿藏）；舰船为 spec 五级（护卫舰/驱逐舰/巡洋舰/航空母舰/战列舰），每级**把自己的招牌数值拉到极高**（护卫舰=极速、驱逐舰=高再生、巡洋舰=重甲、航空母舰=超远程、战列舰=一锤定音）且带**护甲再生**与**维护费 upkeep**。
+
+**动态国际关系**：**开局和平**（无战争状态），关系由 `sim::step_diplomacy` 驱动波动——每对势力按意识形态 `alignment` 的静息亲和漂移（同阵营靠拢、异己升温），好战 `aggression` 加速敌对化；开火/占领压关系入战争，停战后经战争疲态向停战线回落、可再升温。**星际市场**（`sim::step_market`）：每势力自动把富余矿物按参考价值兑换成所缺的关键矿物——解决资源分布不均（如中国 700 铁却缺碳、欧盟不产工业三矿），也提供资源池；**维护费**（`sim::step_upkeep`，每舰每回合按舰级扣资源）则给舰队设上限、避免无限膨胀。
 
 ---
 
@@ -127,13 +129,17 @@ planet_x                      # 然后：meta .buildings.residential
   "resources":  { "water_ice": "水冰", "iron": "铁", … },   // 原始 key → 中文名
   "buildings":  { "residential": { "label":"居住区","role":"housing","construction_speed":1.0,
                    "build_cost":{…},"staff_per_area":0.0,"productivity":1.0,"default_invest_weight":1.5 }, … },
-  "ships":      { "corvette": { "label":"护卫舰","hull":12.0,"hull_regen":0.04,"attack":5.0,
-                   "speed":1.6,"attack_range":0.4,"build_points":15.0,"build_cost":{…} }, … },
+  "ships":      { "corvette": { "label":"护卫舰","hull":12.0,"hull_regen":0.04,"attack":6.0,
+                   "speed":2.6,"attack_range":0.4,"build_points":15.0,"build_cost":{…},"upkeep":1.5 }, … },
   "economy":    { "production_rate":0.5, "pop_growth":0.04, "min_efficiency":0.1,
                   "invest_fraction":0.3, "housing_buffer":1.25 },
   "combat":     { "war_threshold":-20.0, "siege_range":0.25, "arrival_eps":0.06,
                   "armor_regen":0.25, "colony_footprint":0.2 },
-  "diplomacy":  { "attack_delta":-3.0, "capture_delta":-25.0, "relax_rate":0.5 }
+  "diplomacy":  { "attack_delta":-3.0, "capture_delta":-25.0, "drift_rate":0.02, "war_fatigue":0.12,
+                  "ceasefire_relation":-6.0, "affinity_floor":-42.0, "affinity_span":70.0,
+                  "noise":1.0, "hostility_floor":-60.0, "friendship_ceiling":40.0 },
+  "market":     { "auto_trade_limit":80.0, "working_buffer":6.0, "spread":0.15,
+                  "resource_value": { "iron":1.0, "carbon":1.0, "uranium":5.0, … } }
 }
 ```
 
