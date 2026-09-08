@@ -122,10 +122,13 @@ fn normalize2(v: [f32; 2]) -> [f64; 2] {
     }
 }
 
-/// A habitable place on a body. Its area is finite, so cities built here must
-/// fit inside it, and its resource deposits bound how much mining can occur.
+/// A habitable place (定居点) on a body. 定居点与城市一一对应：一个定居点至多
+/// 容纳一座城市（见 [`City::settlement`]）。它的面积有限——坐落在其上的城市的
+/// 建筑必须装得下；它的资源矿藏限定本定居点上采矿的上限。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settlement {
+    /// 定居点名（地球的五大城市群各占一个定居点；气态巨行星的定居点为轨道空间站）。
+    pub name: String,
     /// 总面积 (total buildable area).
     pub total_area: f64,
     /// 生态容量 (population per unit area).
@@ -138,7 +141,9 @@ pub struct Settlement {
     pub resources: Vec<ResourceDeposit>,
 }
 
-/// A celestial body. Only some bodies host a [`Settlement`].
+/// A celestial body hosting zero or more 定居点 (settlement sites), each of which
+/// hosts **at most one** city (settlement ↔ city 1:1). A body's settlements are
+/// indexed; a city on this body points at its site via [`City::settlement`].
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Body {
     pub id: BodyId,
@@ -146,7 +151,13 @@ pub struct Body {
     pub orbit: Orbit,
     /// 当前位置 (current position in AU, recomputed each round from `orbit`).
     pub position: [f64; 2],
-    pub settlement: Option<Settlement>,
+    pub settlements: Vec<Settlement>,
+}
+
+impl Body {
+    pub fn settlement(&self, idx: usize) -> Option<&Settlement> {
+        self.settlements.get(idx)
+    }
 }
 
 /// A single continuous-area building allocation on a city. Not an atom:
@@ -272,8 +283,12 @@ pub struct Ship {
     pub hull: f64,
 }
 
-/// A city on a settlement, controlled by a faction. Its area is split among a
-/// set of continuous-area [`Building`]s.
+/// A city occupying one 定居点 (settlement) on a body, controlled by a faction.
+/// 定居点 ↔ 城市一一对应: `settlement` is the index (into `Body::settlements`)
+/// of the site this city sits on, and a settlement hosts at most one city — a
+/// razed city stays on its site as a blank, re-colonizable footprint until it
+/// is re-seeded. The city's area is split among a set of continuous-area
+/// [`Building`]s, bounded by its settlement's `total_area`.
 ///
 /// Ship production (`ship_progress`) is **per city**, keyed by the ship class
 /// (舰型). Each 建造区 (shipyard building) contributes to its class's rate; the
@@ -283,6 +298,8 @@ pub struct City {
     pub id: CityId,
     pub name: String,
     pub body_id: BodyId,
+    /// Index of this city's 定居点 within `body.settlements` (1:1 occupancy).
+    pub settlement: usize,
     pub faction_id: FactionId,
     /// 人口, limits production efficiency.
     pub population: u32,
@@ -365,6 +382,17 @@ impl State {
     /// `position` field, which the simulation keeps current.
     pub fn body_position(&self, id: BodyId) -> [f64; 2] {
         self.body(id).map(|b| b.position).unwrap_or([0.0, 0.0])
+    }
+
+    /// The 定居点 (settlement) a city occupies — settlement ↔ city 1:1.
+    pub fn city_settlement(&self, cid: CityId) -> Option<&Settlement> {
+        let c = self.city(cid)?;
+        self.body(c.body_id)?.settlement(c.settlement)
+    }
+
+    /// A body's settlement site at `idx`.
+    pub fn body_settlement(&self, bid: BodyId, idx: usize) -> Option<&Settlement> {
+        self.body(bid)?.settlement(idx)
     }
 
     /// Read one faction's controllable state.

@@ -1,6 +1,6 @@
 # 行星X — 太空沙盘
 
-《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。默认世界按 spec 天体表铺开：18 个天体各带定居点与矿藏（气态巨行星为**轨道空间站**）并按标注归属各族，地球坐拥 5 座都市（长三角/珠三角/亚特兰大/巴黎/莫斯科）；舰船为 spec 五级（护卫舰/驱逐舰/巡洋舰/航空母舰/战列舰），每级带**护甲再生**（每月按最大护甲的百分比回血）。
+《行星X》是一个回合制（每回合 = 1 个月）的太阳系沙盘轨迹生成器：经济（采矿 / 人口 / 建设 / 造舰）、飞船战斗、围城、外交、殖民可复现模拟。城市无独立城防——护甲就是其建筑（混凝土/钢结构）的硬度总和；围城直接削建筑、打空即夷平为空白（不攻占），可再殖民。势力有**投资**与**建造**两条独立预算，各按建设/建造投资权重内部竞争。天体、资源、建筑结构、舰船均由 `config/game.ron` 数据驱动，不硬编码。默认世界按 spec 天体表铺开：18 个天体共 **22 个定居点、22 座城**（定居点 ↔ 城市**一一对应**——气态巨行星的定居点为**轨道空间站**；地球坐拥 5 个定居点 = 长三角/珠三角/亚特兰大/巴黎/莫斯科，每城各有自己的区域矿藏）；舰船为 spec 五级（护卫舰/驱逐舰/巡洋舰/航空母舰/战列舰），每级带**护甲再生**（每月按最大护甲的百分比回血）。
 
 ---
 
@@ -221,12 +221,13 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
   }],
   "bodies": [{ "id": 2, "name": "地球", "position": [-0.74, -0.65],
                "orbit": { "perihelion": 0.98, "aphelion": 1.02, "period": 12.0 },
-               "settlement_area": 150.0,
-               "settlement": { "ecological_capacity": 25.0, "construction_speed_mod": 2.4,
-                               "construction_resource_mod": 1.0,
-                               "deposits": [{ "resource": "铁", "area": 36.0 }, … ] } }],
+               "settlements": [{ "name": "长三角", "total_area": 120.0,
+                                 "ecological_capacity": 25.0, "construction_speed_mod": 2.4,
+                                 "construction_resource_mod": 1.0,
+                                 "deposits": [{ "resource": "铁", "area": 40.0 }, … ] }, … ] }],
   "cities": [{
     "id": 0, "name": "长三角", "body": "地球",
+    "settlement_index": 0, "settlement_name": "长三角",          // 定居点 ↔ 城市 1:1
     "owner": 3, "owner_name": "中国", "population": 1400,
     "razed": false,                                                    // 被夷平为空白，可再殖民
     "armor": 60.0,                                                     // 城市总硬度 = Σ building armor（无独立城防）
@@ -245,7 +246,9 @@ planet_x --seed 42 --start state_round_0000.ron --apply diff.json --rounds 6
 ```
 
 - `order.type` 取值：`idle`、`move`、`target_ship`、`target_settlement`、`dock`、`colonize`。
-- 无定居点天体 `settlement_area` 为 `null`（默认世界 18 个天体全有定居点，因此不会出现）。
+- 定居点 ↔ 城市**一一对应**：`bodies[].settlements` 是天体上的定居点列表（含名字/面积/矿藏），
+  `cities[]` 用 `settlement_index` 指向自己占据的那个定居点；一座定居点至多一座城市，
+  城市被夷平（razed）后仍占位，只能被**再殖民**回填，不会被叠第二座城。
 - 矿藏/资源在状态里用**中文名**直读；要写回 `control`（原始 key）时经 `meta.resources` 反查。
 - 引用一律用整数 id（`faction` / `body` / `city` / `ship`），名称字段便于直读。
 

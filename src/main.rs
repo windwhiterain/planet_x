@@ -57,9 +57,9 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 \n\
 【世界与实体】\n\
 - 天体 body：绕太阳做 2D 椭圆轨道（给定近日点/远日点距离、远日点方向、公转周期），每回合位置\n\
-  按轨道重算。18 个天体（spec 天体表）都有定居点 settlement（气态巨行星为轨道空间站）：\n\
-  含有限总面积（settlement_area）、生态容量（人口/面积）、建设速度修正、建设资源修正，以及若干\n\
-  资源矿藏（类型 + 面积，限定采矿上限）。\n\
+  按轨道重算。18 个天体（spec 天体表）各有 1~5 个定居点 settlement（地球 5 城各占一个；\n\
+  气态巨行星的定居点为轨道空间站）。定居点与城市一一对应：每个定居点至多一座城市，含有限总面积、\n\
+  生态容量（人口/面积）、建设速度修正、建设资源修正，以及若干资源矿藏（类型 + 面积，限定采矿上限）。\n\
 - 城市 city：建在定居点上、由一个势力控制，内有若干连续面积分配的 建筑，并有人口（限制生产效率）；\n\
 - 建筑 building：非原子，是一个连续面积分配（计划 area 与实际 deployed），总和不超定居点总面积。三种角色：\n\
   residential 居住点（提供人口容量）、mining 开采点（采对应矿藏资源）、construction 建造点（船坞，造舰）。\n\
@@ -715,7 +715,7 @@ fn run_agent_repl(state: &mut State, config: &GameConfig, rng: &mut Prng, input:
             "cities" => print_query(state, config, ".cities[] | {id,name,body,owner_name,population,razed,armor,ship_progress}"),
             "ships" => print_query(state, config, ".ships[] | {id,name,class,owner_name,position,hull,hull_max,order}"),
             "factions" => print_query(state, config, ".factions[] | {id,name,resources,wars}"),
-            "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlement_area}"),
+            "bodies" => print_query(state, config, ".bodies[] | {id,name,position,settlements:[.settlements[]|{name,total_area}]}"),
 
             // --- entity detail --------------------------------------------------
             "city" | "ship" | "faction" | "body" => {

@@ -217,7 +217,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             cell(body_letter(b.id).to_string().cyan().to_string()),
             cell(b.name.clone()),
             cell(fmt_pos(p)),
-            cell(if b.settlement.is_some() { "定居点" } else { "无人" }),
+            cell(if b.settlements.is_empty() { "无人".to_string() } else { format!("{}个定居点", b.settlements.len()) }),
             cell(if cities.is_empty() { "—".to_string() } else { cities.join("、") }),
         ]);
     }

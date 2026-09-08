@@ -163,7 +163,7 @@ fn labor_ratio(state: &State, config: &GameConfig, cid: CityId) -> f64 {
 fn step_production(state: &mut State, config: &GameConfig) {
     let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.id).collect();
     for cid in city_ids {
-        let (body_id, faction_id, population, razed) = {
+        let (_body_id, faction_id, population, razed) = {
             let c = state.city(cid).expect("city disappeared");
             (c.body_id, c.faction_id, c.population, c.razed)
         };
@@ -171,7 +171,7 @@ fn step_production(state: &mut State, config: &GameConfig) {
             continue;
         }
         let (ecocap, deposits) = {
-            let s = state.body(body_id).and_then(|b| b.settlement.as_ref());
+            let s = state.city_settlement(cid);
             match s {
                 Some(s) => (
                     s.ecological_capacity,
@@ -414,12 +414,12 @@ fn build_city(
     next_building_id: &mut BuildingId,
     _rng: &mut Prng,
 ) {
-    let Some(body_id) = state.city(cid).map(|c| c.body_id) else { return };
     if state.city(cid).map(|c| c.razed).unwrap_or(true) {
         return;
     }
     let (ecocap, total_area, speed_mod, res_mod, deposits) = {
-        let s = state.body(body_id).and_then(|b| b.settlement.as_ref());
+        // 城市的定居点 = 它自己占据的那一个（1:1），面积/矿藏以该定居点为准。
+        let s = state.city_settlement(cid);
         match s {
             Some(s) => (
                 s.ecological_capacity,
@@ -606,6 +606,7 @@ fn build_city(
     // The construction budget is a per-round rate: it funds ship progress
     // incrementally (cost-per-progress × increment). A class completes a ship
     // once it has accrued `build_points`, at the city level.
+    let body_id = state.city(cid).map(|c| c.body_id).unwrap_or(0);
     let body_pos = state.body_position(body_id);
     let mut to_write_progress = city_progress;
     for (cls, rate, _) in &classes {
@@ -701,7 +702,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                     ShipBehavior::TargetShip { attack: true, .. } => format!("target ship gone"),
                     ShipBehavior::TargetShip { attack: false, .. } => format!("guarded ship gone"),
                     ShipBehavior::TargetSettlement { city, .. } => format!("target city {city} razed or not hostile"),
-                    ShipBehavior::Colonize { body } => format!("body {body} has no settlement"),
+                    ShipBehavior::Colonize { body } => format!("body {body} has no blank settlement"),
                     _ => "invalid".to_string(),
                 };
                 if let Some(c) = state.control_mut(owner) {
@@ -915,7 +916,7 @@ fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior,
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Dock { body } => state.body(body).is_some(),
-        ShipBehavior::Colonize { body } => state.body(body).map(|b| b.settlement.is_some()).unwrap_or(false),
+        ShipBehavior::Colonize { body } => has_blank_site(state, body),
         ShipBehavior::TargetShip { ship, attack } => {
             let alive = state.ship(ship).map(|s| s.hull > 0.0).unwrap_or(false);
             if !alive {
@@ -933,6 +934,25 @@ fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior,
             .map(|c| !c.razed && hostile(state, config, owner, c.faction_id))
             .unwrap_or(false),
     }
+}
+
+/// Does `body` have a colonizable 定居点 site? Yes iff it hosts a settlement
+/// whose city is razed (blank footprint, re-seedable) or a settlement no city
+/// occupies yet. Settlement ↔ city is 1:1, so a site with a live city never
+/// counts as blank.
+fn has_blank_site(state: &State, body: BodyId) -> bool {
+    let Some(b) = state.body(body) else { return false };
+    if b.settlements.is_empty() {
+        return false;
+    }
+    let has_razed = state.cities.iter().any(|c| c.body_id == body && c.razed);
+    if has_razed {
+        return true;
+    }
+    let mut occupied: Vec<usize> = state.cities.iter().filter(|c| c.body_id == body).map(|c| c.settlement).collect();
+    occupied.sort_unstable();
+    occupied.dedup();
+    (0..b.settlements.len()).any(|i| !occupied.contains(&i))
 }
 
 fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng) -> Option<ShipBehavior> {
@@ -1035,9 +1055,11 @@ fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: Ci
     }
 }
 
-/// Colonize a settlement. If the body hosts a razed city, re-seed it (re-colonize);
-/// otherwise found a new city if the settlement has room. The colony ship is
-/// spent (order reset to idle).
+/// Colonize a settlement site (定居点 ↔ 城市 1:1). If the body hosts a razed
+/// (blank) city, re-seed it on its own settlement (re-colonize); otherwise found
+/// a new city only on a 定居点 that no city occupies yet. A site already holding
+/// a live city can never take a second one — the colony ship is spent (order
+/// reset to idle) once a site is found, or stays put otherwise.
 fn colonize(
     state: &mut State,
     config: &GameConfig,
@@ -1047,25 +1069,20 @@ fn colonize(
     next_building_id: &mut BuildingId,
     next_city_id: &mut CityId,
 ) {
-    let (faction, body_name) = {
-        let s = state.ship(ship_id).expect("ship gone");
-        (s.faction_id, state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}")))
-    };
-    let settlement = state.body(body).and_then(|b| b.settlement.as_ref());
-    let Some(settlement) = settlement else {
-        if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
-        }
-        return;
-    };
-
+    let faction = state.ship(ship_id).map(|s| s.faction_id).expect("ship gone");
     let seeded_ship_class = choose_next_class(state, faction, config, rng);
-    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
 
-    // Re-colonize an existing razed city on this body.
+    // 1) A razed (blank) city keeps occupying its settlement: re-seed it there.
     let razed_cid = state.cities.iter().find(|c| c.body_id == body && c.razed).map(|c| c.id);
     if let Some(cid) = razed_cid {
-        let buildings = seed_colony_buildings(settlement, pop, &seeded_ship_class, config, next_building_id);
+        let Some(settlement) = state.city_settlement(cid).cloned() else {
+            if let Some(c) = state.control_mut(faction) {
+                c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+            }
+            return;
+        };
+        let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+        let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
         if let Some(c) = state.city_mut(cid) {
             c.razed = false;
             c.faction_id = faction;
@@ -1075,42 +1092,64 @@ fn colonize(
             c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
         }
         ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
-    } else {
-        // Find a new city if the settlement has room.
-        let city_count = state.cities.iter().filter(|c| c.body_id == body).count();
-        if (city_count as f64 + 1.0) * pop as f64 <= settlement.total_area * config.economy.housing_buffer {
-            let buildings = seed_colony_buildings(settlement, pop, &seeded_ship_class, config, next_building_id);
-            let cid = *next_city_id;
-            let city = City {
-                id: cid,
-                name: format!("{}-殖民地", body_name),
-                body_id: body,
-                faction_id: faction,
-                population: pop,
-                buildings,
-                ship_progress: {
-                    let mut m = BTreeMap::new();
-                    m.insert(seeded_ship_class.clone(), 0.0);
-                    m
-                },
-                razed: false,
-            };
-            let ctrl = state.control.entry(faction).or_default();
-            for b in &city.buildings {
-                let key = (cid, b.id);
-                ctrl.invest_weights
-                    .insert(key, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
-                if b.is_shipyard() {
-                    ctrl.build_weights
-                        .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
-                }
-            }
-            state.cities.push(city);
-            *next_city_id += 1;
-            ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
+        if let Some(c) = state.control_mut(faction) {
+            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
         }
+        return;
     }
 
+    // 2) No blank city: found a new city only on a settlement no city occupies.
+    let occupied: Vec<usize> = state.cities.iter().filter(|c| c.body_id == body).map(|c| c.settlement).collect();
+    let vacant_idx = state.body(body).and_then(|b| (0..b.settlements.len()).find(|i| !occupied.contains(i)));
+    let Some(idx) = vacant_idx else {
+        // Every settlement is occupied by a live city — nothing to colonize.
+        if let Some(c) = state.control_mut(faction) {
+            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        }
+        return;
+    };
+    let Some(settlement) = state.body_settlement(body, idx).cloned() else {
+        if let Some(c) = state.control_mut(faction) {
+            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        }
+        return;
+    };
+    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+    let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
+    let cid = *next_city_id;
+    let base = if settlement.name.is_empty() {
+        state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
+    } else {
+        settlement.name.clone()
+    };
+    let city = City {
+        id: cid,
+        name: format!("{}-殖民城", base),
+        body_id: body,
+        settlement: idx,
+        faction_id: faction,
+        population: pop,
+        buildings,
+        ship_progress: {
+            let mut m = BTreeMap::new();
+            m.insert(seeded_ship_class.clone(), 0.0);
+            m
+        },
+        razed: false,
+    };
+    let ctrl = state.control.entry(faction).or_default();
+    for b in &city.buildings {
+        let key = (cid, b.id);
+        ctrl.invest_weights
+            .insert(key, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+        if b.is_shipyard() {
+            ctrl.build_weights
+                .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
+        }
+    }
+    state.cities.push(city);
+    *next_city_id += 1;
+    ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
     if let Some(c) = state.control_mut(faction) {
         c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
     }
@@ -1394,5 +1433,49 @@ mod tests {
         let max1 = config.ship_spec(&state.ship(1).map(|s| s.class.clone()).unwrap()).hull;
         let hull1 = state.ship(1).map(|s| s.hull).unwrap();
         assert!((hull1 - max1).abs() < 1e-9, "full hull must not over-heal, got {hull1}");
+    }
+
+    /// 定居点 ↔ 城市 一一对应: 每个城市占据其天体上一个合法定居点；同一座城不会
+    /// 让一个定居点被两座城占用；地球恰好 5 个定居点各坐一座 spec 都市，矿藏按
+    /// 定居点隔离（巴黎只产 铀/铂，不再共享整个地球的矿藏池）。
+    #[test]
+    fn settlements_and_cities_are_one_to_one() {
+        let (config, state) = fresh_world(42);
+        for b in &state.bodies {
+            let cities: Vec<&City> = state.cities.iter().filter(|c| c.body_id == b.id).collect();
+            assert!(
+                cities.len() <= b.settlements.len(),
+                "body {}: {} cities must not exceed {} settlements",
+                b.name,
+                cities.len(),
+                b.settlements.len()
+            );
+            for c in cities {
+                assert!(
+                    c.settlement < b.settlements.len(),
+                    "city {} (body {}) points at an out-of-range settlement {}",
+                    c.name,
+                    b.name,
+                    c.settlement
+                );
+            }
+        }
+
+        let earth = &state.bodies[2];
+        assert_eq!(earth.settlements.len(), 5, "Earth has five spec metropolises");
+        let earth_cities = state.cities.iter().filter(|c| c.body_id == 2).count();
+        assert_eq!(earth_cities, 5, "five cities on five Earth settlements (1:1)");
+        // 巴黎 (settlement index 3) hosts only 铀/铂 — its own region's ores.
+        let paris = earth.settlements[3].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
+        assert_eq!(paris, vec!["uranium", "platinum"], "Paris settlement mines only its own ores");
+        assert_eq!(
+            state.cities.iter().find(|c| c.name == "巴黎").map(|c| c.settlement),
+            Some(3),
+            "巴黎 occupies settlement index 3"
+        );
+        // 长三角/珠三角 are distinct settlements, so both may mine 铁 independently.
+        let cn = earth.settlements[0].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
+        assert!(cn.contains(&"iron"), "长三角 settlement has 铁");
+        assert!(cn.contains(&"silicon") && cn.contains(&"water_ice"), "长三角 has 硅/水冰");
     }
 }
