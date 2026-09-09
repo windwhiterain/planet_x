@@ -416,11 +416,18 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
 
 ## 12. 语义化「视图/工具」API（把裸 jq 降为逃生舱） — `[ ]`
 
-- `[ ]` **命名语义工具集**（对应设计文档 Layer 2）：把 agent 主界面从「裸 jq 探 JSON」
+- `[~]` **命名语义工具集**（对应设计文档 Layer 2）：把 agent 主界面从「裸 jq 探 JSON」
   升级为稳定、有版本、参数化的语义操作，由模拟自己生成数据（复用 `sim.rs` 现有的
   `balance_picture`/`governance_distance` 等），不要求 agent 知道底层 JSON 树。候选：
   `view sitrep` / `view economy <faction>` / `view fleet <faction>` / `view frontier`
   （边缘失稳城）/ `view threat`（威胁评估）/ `view market`。`q`/`--query` 降为逃生舱。
+  **已落地一个零改动 Rust 的 PoC**（`play/jq/view_sitrep.jq`，另加 `view_profile.jq`）：
+  把一回合 33 KB 的裸 JSON 压成 **956 字节**的语义 sitrep
+  `{round,world{wars,factions[],top{share}}}`（wars 从 relations≤-20 推断、top 取城数最多者
+  及其占比），压缩 ~34×，agent 无需手写 join/计算、也不受 PowerShell 引号坑影响。
+  Rust 侧价值更大：把 `top_share` 换成真实 `balance_picture`、`frontier` 用
+  `governance_distance`/`loyalty` 列出边缘失稳城、`economy` 用 `resource_value` 加权库存，
+  并做成 `--view <name>` / `view <name>` 命令（带参数校验、版本化）。
 - `[ ]` **工具层校验**：语义工具做参数校验（如 `order 0 attack 99` 明确报「目标舰不存在」），
   把错误在工具层显式化，而不是丢给宽容的 jq。
 - `[ ]` **Layer 3 方向（长期/可选，非现在必须）**：ECS 组件化存储 + 事件溯源投影，把
@@ -456,8 +463,12 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
   `--start ckpt +--round 6` 与直跑 `--round 12` 的末行**逐字节一致**（确定性满足）。
 - `[ ]`（事实，非待办）**Web 玩家界面未动**：`planet_x_web` 保留有状态 advance/apply_patch
   交互；`web::control_surface`/`apply_patch` 与 CLI `--apply` 共享同一控制/diff 契约。
-- `[ ]` **`jq` 成为宿主运行时依赖**：agent 叙事/查询侧需宿主装 jq（本沙箱未装，无法在此
-  演示 `| jq` 管道；生成器输出已用 PowerShell 验证为合法 JSON Lines）。
+- `[x]` **`jq` 成为宿主运行时依赖**（本次已落地，`tools/jq.exe`）：主机未预装 jq 时，
+  `Invoke-WebRequest https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe`
+  下载独立二进制到 `tools/jq.exe`，`Get-Command jq` 前先 `& tools\jq.exe`（或加目录到 PATH）。
+  PowerShell 直传 jq 程序的**引号会被吞**（`"1"` 变 `1`、`"\(..)"` 变 `..`），**可靠做法是把
+  jq 过滤写成 `.jq` 文件再 `jq -s -f file.jq`**——已用此范式完成 `--round`/`--traj`/`--digest`
+  全量查询验证（脚本见 `play/jq/*.jq`）。
 - `[~]` §12 的「命名语义工具」仍可作为 Layer 2 方向，但有了外部 jq 的全量语法后，「裸 jq
   探 JSON」不再棘手；语义工具聚焦「稳定契约 + 参数校验 + 由模拟生成数据」，而非替代 jq。
 
@@ -522,8 +533,13 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
   有 attack/siege/revolt/…；`--traj 30 --every 5` → 7 帧。
 
 **候选（未做）**：
-- `[ ]` **极致「画像」**：只发一条极简标量时序（每窗口：城数/舰数/世界价值/最强势力份额），
-  几乎零上下文，适合先看走势。
+- `[~]` **极致「画像」**：只发一条极简标量时序（每窗口：城数/舰数/世界价值/最强势力份额），
+  几乎零上下文，适合先看走势。**已落地一个纯 jq 版**（`play/jq/view_profile.jq`，一并算出
+  wars 数）：`jq -cs -f play/jq/view_profile.jq traj.jsonl` → 每回合一行
+  `{round,cities,razed,ships,fleet_hull,top_name,top_share,wars}`。seed 7 240 回合：整条
+  轨迹从 **8.7 MB 压到 ~29 KB**，一眼看清「22 城→13 城(9 夷平)→再殖民→尾声 17 城 7 舰队」
+  的走势与 top_share 轮换（0.18→0.31→0.53(矿业)→0.5→…→0.53(中国)）。**Rust 侧**可把
+  `top_share` 换成真实 `balance_picture.power_share`、并加 `--profile K` 窗口化（见 §12）。
 - `[ ]` **分层缩放 CLI**：`--zoom from to --every k`（在已存 checkpoint 上精读某窗口）——
   现在可手工 `--start ckpt --round <span> --every k` 达成，值得包装成一条命令。
 - `[ ]` **窗口事件文案**：`--digest` 的 `events` 计数之外，附几条**一句话**事件摘要
@@ -539,6 +555,18 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
   （单一势力城占峰值 < 0.85，制衡联盟会发生），但**仍允许某势力在长局里长期占 ~55% 城镇
   份额**（制裁对自给自足的富矿大国收效有限、联盟缺协同牙齿）。多极还没真正达成，这是
   下一步（第 2 节）的主攻方向——重点放在「让抱团真的咬下去」与「超载/过度扩张更咬人」。
+- **seed 7 @ 240 回合实盘观测（本次 jq 查询，`play/traj_seed7.jsonl`）**：这是**轮换存在但末态
+  仍单极**的最直观证据。开场 22 城 9 势力大致均衡 → 第 5 回合爆发首战/教团之战、第 18 回合首城被
+  夷平、第 60 回合剧情弧收束于「行星X 现身」；随后出现真实霸权轮换：**中国(0.35) → 星系矿业
+  (0.59) → 中国/俄罗斯(0.50/0.36) → 中国(0.65)**（`world_is_multipolar` 的「最强≥2 个轮换」
+  能满足，峰值 0.65<0.85）。但**240 回合末又坍缩成 1 霸权 + 8 个 1 城旁观者 + 资源高度集中**：
+  中国 9/17 城(53%)、17/24 舰(71%)、564 船体，库存 硅109/铁66/水冰60/碳46；其余 8 势力各剩 1 城、
+  资源几乎全空（美国/欧盟/俄罗斯/星系矿业全 0），而**联合国坐拥 644.9 铁却只有 1 城 2 舰**、
+  **深空运输联盟囤着稀缺的 钍5.86/铂1.24 也不造舰**——「区域霸权 + 永久旁观者 + 财富不转化为
+  力量」在 seed 7 被完整复现。若要收紧「任意一方城占比长期均值 < 0.5」，先修「重建缺口」并让
+  「超载/过度扩张」按「城数×每城人口」更快触发，同时避免制裁只压弱国、放过大亨。
+  另：轮换本身在 seed 7 成立，说明**目前丢的不是「轮换」而是「末态均衡」**，宜作为 §2 的一条
+  独立可量化守卫（断言 240 回合末最强势力城占比 ≤ 0.5）。
 - **长局性能**：`tests/longhorizon.rs` 的 `diagnose_long_horizon`（3 种子 × 3000 回合）较慢
   （~1 分钟），已 `#[ignore]` 化；默认 `cargo test` 只跑快守卫（~13s），别把慢测得放回默认。
 - **确定性**：新增机制全部为确定性（无 RNG 或仅用种子 RNG）；`same_seed_reproduces_identically`

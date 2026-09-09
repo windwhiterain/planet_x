@@ -1,4 +1,5 @@
 /target
 /out
 /trajectory
-/play
+/play/*
+!/play/jq
