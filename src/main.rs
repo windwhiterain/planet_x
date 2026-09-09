@@ -64,7 +64,7 @@ use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{FactionId, GameConfig, GameEvent, RoundFlow, RoundMetrics, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
-use planet_x::{autocontrol, projection, sim, web, world};
+use planet_x::{autocontrol, control, projection, sim, world};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -207,7 +207,7 @@ fn main() {
         return;
     }
     if cli.control_schema {
-        emit(&web::control_schema_value().to_string());
+        emit(&control::control_schema_value().to_string());
         return;
     }
 
@@ -232,7 +232,7 @@ fn main() {
         return;
     }
     if cli.control {
-        emit(&web::control_surface(&state).to_string());
+        emit(&control::control_surface(&state).to_string());
         return;
     }
     match &cli.control_plan {
@@ -295,7 +295,7 @@ fn apply_diff(state: &mut State, config: &GameConfig, path: &Path) -> Result<(),
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
-    web::apply_patch(state, config, &value)
+    control::apply_patch(state, config, &value)
 }
 
 /// Write a line to stdout, ignoring broken-pipe errors so piping into `jq` (or an

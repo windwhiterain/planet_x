@@ -2659,7 +2659,7 @@ mod tests {
                 "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship3.clone()}}, "mode": "Player"}]
             }]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("apply order");
 
         // Simulate the target being destroyed before the round advances.
         if let Some(t) = state.ship_mut(&ship3) {
@@ -2704,7 +2704,7 @@ mod tests {
                 "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship1.clone()}}, "mode": "Player"}]
             }]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply follow order");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("apply follow order");
 
         // Pin positions: follower + followed friend at [0,0]; US (1) enemy
         // destroyer id=3 just inside the corvette attack range (0.4) so the
@@ -2793,7 +2793,7 @@ mod tests {
                 ]
             }]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply dock/idle order");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("apply dock/idle order");
 
         // Pin ship 0 away from the body so `Dock` must move it toward the body.
         if let Some(s) = state.ship_mut(&ship0) {
@@ -3073,7 +3073,7 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{"faction_id": "星系矿业", "loyalty_budget": [{"city": city19.clone(), "value": 500.0, "mode": "Player"}]}]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply loyalty budget");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("apply loyalty budget");
 
         advance(&mut state, &config, &mut rng);
 
@@ -3381,7 +3381,7 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{"faction_id": "中国", "capital": {"value": "水星"}}]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("set far capital");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
         assert_eq!(state.capital_body("中国"), "水星");
 
         step_capital(&mut state, &config);
@@ -3410,7 +3410,7 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Player"}}]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("player move capital");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("player move capital");
         assert_eq!(state.capital_body("中国"), "水星");
         assert_eq!(state.capital_control("中国"), ControlMode::Player);
 

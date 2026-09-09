@@ -1,0 +1,13 @@
+[package]
+name = "planet_x_web"
+version = "0.1.0"
+edition = "2024"
+description = "Planet X WebUI server — a JSON API + static frontend over the planet_x engine."
+
+[dependencies]
+planet_x = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs"] }

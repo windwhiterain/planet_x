@@ -547,12 +547,21 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "planet_x"
 version = "0.1.0"
 dependencies = [
- "axum",
  "clap",
  "colored",
  "comfy-table",
  "ron",
  "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "planet_x_web"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "planet_x",
  "serde",
  "serde_json",
  "tokio",
