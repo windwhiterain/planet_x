@@ -125,6 +125,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                     "accel_mult": r2(s.accel_mult),
                     "attack_mult": r2(s.attack_mult),
                     "range_mult": r2(s.range_mult),
+                    "pd_mult": r2(s.pd_mult),
                     "build_points": r2(s.build_points),
                     "build_cost": to_cost(&s.build_cost),
                     "upkeep": r2(s.upkeep),

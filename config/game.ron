@@ -164,28 +164,31 @@
     //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是
     //       本体的直接值）；另有槽位/造价/维护费。
     //   (2) 平台修正系数：armor_mult(护甲硬度) / shield_mult(护盾) /
-    //       shield_regen_mult(护盾再生) / speed_mult(速度) / accel_mult(加速度) /
-    //       attack_mult(伤害) / range_mult(攻击距离)，分别缩放所搭载的对应模块输出。
-    //       舰级身份由此体现（护卫=快、驱逐=再生、巡洋=重甲、航母=超远程、战列=一锤定音）。
+    //       shield_regen_mult(护盾再生) / speed_mult(速度上限) / accel_mult(加速度) /
+    //       attack_mult(伤害) / range_mult(攻击距离) / pd_mult(点防御)，分别缩放所搭载的
+    //       对应模块输出。舰级身份由此体现（护卫=快、驱逐=再生、巡洋=重甲、航母=超远程、
+    //       战列=一锤定音）。
     // 速度 / 加速度 / 攻击距离**没有舰级基础值**：它们完全来自推进/武器模块，所以
     // 「推进」和「武器」一样是必须的（没有推进模块就没有速度/攻击距离=0）。
     // 分档（直接属性）：hull 低≈12-26 高≈72；hull_regen 低≈0.04 高≈0.30。
+    // 修正系数分档：低≈0.9，中≈1.0，高≈1.3-1.5，极高≈1.8-2.0。
     ships: {
         "corvette": (
             label: "护卫舰",
             hull: 12.0,          // 低（直接船体）
             hull_regen: 0.04,    // 低（直接再生）
             build_points: 15.0,
-            build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：低，常见
+            build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：极低，常见
             upkeep: 1.5,
-            slots: 2,            // 至少「武器+推进」两个槽（轻装游骑）
-            armor_mult: 0.9,
-            shield_mult: 0.9,
-            shield_regen_mult: 1.0,
-            speed_mult: 1.3,     // 招牌：推进大幅放大 → 极速
-            accel_mult: 1.4,
-            attack_mult: 0.9,    // 轻火力游骑兵
-            range_mult: 0.9,
+            slots: 2,            // 至少「武器+推进」两个槽（轻装哨戒）
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 1.0,     // 中（哨戒：不追求飙速，而是高速加速机动）
+            accel_mult: 1.8,     // 招牌：极高加速度 → 抢位/盘旋（哨戒甩敌）
+            attack_mult: 0.9,    // 低
+            range_mult: 0.9,     // 低
+            pd_mult: 1.4,        // 招牌：点防御修正高 → 拦导弹的哨戒
         ),
         "destroyer": (
             label: "驱逐舰",
@@ -195,61 +198,65 @@
             build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
             upkeep: 2.5,
             slots: 2,
-            armor_mult: 1.0,
-            shield_mult: 1.1,
-            shield_regen_mult: 1.5,  // 招牌：护盾/辅助再生放大 → 持久磨王
-            speed_mult: 1.0,
-            accel_mult: 1.0,
-            attack_mult: 1.0,
-            range_mult: 1.0,
+            armor_mult: 1.0,     // 中
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 1.0, // 中（远洋部署：不靠盾，靠船体再生）
+            speed_mult: 1.3,     // 招牌：远洋部署 → 高速度巡航
+            accel_mult: 1.0,     // 中
+            attack_mult: 0.9,    // 低
+            range_mult: 1.0,     // 中
+            pd_mult: 1.0,        // 中
         ),
         "cruiser": (
             label: "巡洋舰",
             hull: 72.0,          // 高（直接船体，招牌：重型装甲）
-            hull_regen: 0.08,    // 中
+            hull_regen: 0.04,    // 低
             build_points: 44.0,
-            build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：高，常见
+            build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：极高，常见
             upkeep: 6.0,
             slots: 3,            // 中型舰：火力+防护+推进
-            armor_mult: 1.5,     // 重甲 → 护甲硬度放大
-            shield_mult: 1.3,
-            shield_regen_mult: 1.0,
-            speed_mult: 0.9,
-            accel_mult: 0.8,
-            attack_mult: 1.2,
-            range_mult: 1.0,
+            armor_mult: 1.5,     // 高（重甲 → 护甲硬度放大）
+            shield_mult: 1.3,    // 高
+            shield_regen_mult: 1.3, // 高（招牌：扛伤害，盾再生快）
+            speed_mult: 1.0,     // 中
+            accel_mult: 0.8,     // 低
+            attack_mult: 1.2,    // 中
+            range_mult: 1.0,     // 中
+            pd_mult: 0.9,        // 低
         ),
         "carrier": (
             label: "航空母舰",
             hull: 20.0,          // 低
-            hull_regen: 0.08,    // 中
+            hull_regen: 0.04,    // 低
             build_points: 58.0,
             build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
             upkeep: 7.5,
             slots: 3,
-            armor_mult: 1.0,
-            shield_mult: 1.0,
-            shield_regen_mult: 1.0,
-            speed_mult: 0.9,
-            accel_mult: 0.8,
-            attack_mult: 0.8,    // 单发不强，但射程极远
-            range_mult: 1.8,     // 招牌：射程放大器
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 1.0,     // 中
+            accel_mult: 1.0,     // 中
+            attack_mult: 0.9,    // 低（单发不强，但射程极远）
+            range_mult: 1.8,     // 招牌：极高射程 → 远程放风筝
+            pd_mult: 0.9,        // 低
         ),
         "battleship": (
             label: "战列舰",
-            hull: 26.0,          // 低（略抬以可抗一轮齐射）
+            hull: 30.0,          // 中（玻璃大炮：能抗一轮齐射即可）
             hull_regen: 0.04,    // 低
             build_points: 40.0,
-            build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：低，稀有
+            build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：中，稀有
             upkeep: 6.5,
-            slots: 4,            // 主力舰能叠最多组件（资源→战斗力）
-            armor_mult: 1.1,
-            shield_mult: 0.9,
-            shield_regen_mult: 0.9,
-            speed_mult: 1.0,
-            accel_mult: 1.0,
-            attack_mult: 2.0,    // 招牌：一锤定音 → 武器伤害大幅放大
-            range_mult: 1.0,
+            slots: 3,            // 主力舰三槽：火力+盾点防+推进
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 0.9,     // 低
+            accel_mult: 0.8,     // 低
+            attack_mult: 2.0,    // 招牌：极高伤害 → 一锤定音（玻璃大炮）
+            range_mult: 1.3,     // 高
+            pd_mult: 1.4,        // 招牌：点防御修正高 → 玻璃大炮自保拦导弹
         ),
     },
     // 舰船定制组件（飞船定制化 ↔ 资源优势）——把「多稀缺资源」换成「不一样的作战

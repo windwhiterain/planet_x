@@ -262,6 +262,11 @@ pub struct ShipSpec {
     /// 攻击距离修正：作用于武器模块的 range。
     #[serde(default = "default_mult")]
     pub range_mult: f64,
+    /// 点防御修正：作用于点防御模块（近防炮阵」)的 intercept（拦截量）。
+    /// 哨戒/玻璃大炮因需要成群导弹来袭时各自扛一点，点防修正可高于 1.0；它是「舰级 =
+    /// 平台修正器」的一环——把所搭载的点防模块输出按舰型缩放，而非给舰叠加独立面板。
+    #[serde(default = "default_mult")]
+    pub pd_mult: f64,
 }
 
 fn default_mult() -> f64 {
@@ -450,8 +455,8 @@ pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
                     p.shield_regen += cs.shield_regen * base.shield_regen_mult * eff;
                     // 护甲：让船体变硬（反比例减伤），被 armor_mult 缩放。
                     p.hardness += cs.hardness * base.armor_mult * eff;
-                    // 点防御：线性拦截导弹。
-                    p.intercept += cs.intercept * eff;
+                    // 点防御：线性拦截导弹，被舰级点防御修正 pd_mult 缩放。
+                    p.intercept += cs.intercept * base.pd_mult * eff;
                     // 一些防御组件也带附加速度（被 speed_mult 缩放）。
                     p.speed += cs.speed * base.speed_mult * eff;
                 }

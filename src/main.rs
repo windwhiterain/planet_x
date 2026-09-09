@@ -65,9 +65,10 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
   residential 居住点（提供人口容量）、mining 开采点（采对应矿藏资源）、construction 建造点（船坞，造舰）。\n\
 - 势力 faction：拥有城市与飞船，库存各资源，并与其它势力两两外交（关系 relations）。\n\
 - 飞船 ship：必属某一势力，从城市出厂，在 2D 平面移动，可按指令开火/围城。舰级参数（护甲 hull、护甲再生\n\
-  hull_regen、伤害、速度、攻击距离、建造点/建造成本、维护费 upkeep）由 config 定义，spec 五级舰：护卫舰 corvette、\n\
-  驱逐舰 destroyer、巡洋舰 cruiser、航空母舰 carrier、战列舰 battleship；每级把 spec 的「招牌」数值拉到极高，\n\
-  使各级各有一席之地：护卫舰=极速游骑、驱逐舰=高再生磨王、巡洋舰=重甲战列、航空母舰=超远程炮台、战列舰=一锤定音。\n\
+  hull_regen、伤害、速度、攻击距离、点防御修正、建造点/建造成本、维护费 upkeep）由 config 定义，spec 五级舰：\n\
+  护卫舰 corvette、驱逐舰 destroyer、巡洋舰 cruiser、航空母舰 carrier、战列舰 battleship；每级把 spec 的「招牌」\n\
+  数值拉到极高，使各级各有一席之地：护卫舰=高加速度+高雷达点防的哨戒、驱逐舰=高再生高速的远洋部署、\n\
+  巡洋舰=重甲重盾的扛伤害主力、航空母舰=超远程放风筝、战列舰=玻璃大炮（一锤定音）。\n\
 \n\
 【资源】11 种：水冰 water_ice、氦-3 helium3、铀 uranium、钍 thorium、金 gold、铂 platinum、铁 iron、\n\
 氢 hydrogen、甲烷 methane、碳 carbon、硅 silicon。\n\

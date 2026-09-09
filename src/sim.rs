@@ -742,7 +742,7 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
         let gain_regen = cs.shield_regen * spec.shield_regen_mult;
         let gain = gain_weapon * 4.0 + gain_shield * 0.8 + cs.hardness * spec.armor_mult * 3.0
             + gain_regen * 60.0 + gain_speed * 3.0 + gain_accel * 3.0
-            + cs.intercept * 2.0 + gain_range * 12.0;
+            + cs.intercept * spec.pd_mult * 2.0 + gain_range * 12.0;
         let mut score = fit + gain * 0.03 - cs.upkeep * 2.0;
         if at_war && cs.category == "weapon" {
             score += gain_weapon * 2.0; // 战时要火力。
@@ -3507,9 +3507,43 @@ mod tests {
         assert!((panel.hardness).abs() < 1e-9);
     }
 
-    /// 模块损毁（拟人「渐进丧失战力」）：被击中的舰，其组件完整度随船体伤害下降，而不是
-    /// 满血抗到壳破。这里让一艘带组件的舰挨打，验证其组件完整度确实下降（被击毁后不再
-    /// 贡献面板/武器见 `ship_panel`/`ship_weapons` 跳过损坏组件）。
+    /// 舰级「点防御修正 pd_mult」（spec 新增属性）应缩放所搭载点防模块的拦截强度：
+    /// 同一枚 point_defense 组件，装在高点防修正的舰（如战列 pd_mult>1）上比装在低点防
+    /// 修正的舰上拦截更强——「舰级=平台修正器」的一环，而不是给舰叠加独立点防面板。
+    #[test]
+    fn ship_panel_scales_intercept_by_class_pd_mult() {
+        let (config, mut state) = fresh_world(42);
+        let pd_spec = config.component_spec("point_defense");
+        // 从旗舰队里挑两艘从属不同舰级的舰，验证 intercept 恰为 组件 intercept × 该舰级 pd_mult。
+        // 用按 class 归类的方式选：一艘 pd_mult 高、一艘 pd_mult 低（若存在）最能证明缩放生效。
+        let mut tested = std::collections::BTreeMap::<String, f64>::new();
+        for s in state.ships.iter_mut() {
+            let class = s.class.clone();
+            tested.entry(class.clone()).or_insert_with(|| {
+                let spec = config.ship_spec(&class);
+                s.components = vec!["point_defense".to_string()];
+                s.component_hp = vec![component_integrity(&config, "point_defense")];
+                let pd_mult = spec.pd_mult;
+                let intercept = ship_panel(&config, s).intercept;
+                assert!(
+                    (intercept - pd_spec.intercept * pd_mult).abs() < 1e-9,
+                    "{class} intercept should be {:.3} × pd_mult {:.2}, got {intercept}",
+                    pd_spec.intercept,
+                    pd_mult
+                );
+                pd_mult
+            });
+        }
+        // 至少应有两点防修正不同的舰级，证明缩放不是常数（否则这个属性形同虚设）。
+        let distinct: std::collections::BTreeSet<String> =
+            tested.iter().map(|(c, m)| format!("{c}:{m:.3}")).collect();
+        assert!(
+            distinct.len() >= 2,
+            "expected ship classes to differ in pd_mult; got {tested:?}"
+        );
+    }
+
+
     #[test]
     fn fire_degrades_components_under_damage() {
         let (config, mut state) = fresh_world(42);
