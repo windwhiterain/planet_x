@@ -552,3 +552,183 @@ fn probe_zombies() {
     println!("never reached 3 zombies");
 }
 
+/// 【探针·debuff 行为】单种子快速观测：逐回合打印「最强势力 + 各势力思潮 debuff 惩罚」，
+/// 用于调 `IdeologyDebuffConfig` 系数（看哪个势力被打击、多狠、是否真能扳倒单极化）。
+/// `--ignored`。
+#[test]
+#[ignore]
+fn probe_debuff_behavior() {
+    let config = load_config();
+    for seed in [1u64, 42] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut leader = String::new();
+        let mut streak = 0u32;
+        for _ in 0..900u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            let (top, share) = top_power(&state, &config);
+            if top != leader {
+                if state.round >= 100 && state.round % 40 <= 1 {
+                    println!("seed {seed} r{} leader-> {top}", state.round);
+                }
+                leader = top.clone();
+                streak = 1;
+            } else {
+                streak += 1;
+            }
+            if state.round % 150 == 0 {
+                let p = total_ideology_penalty(&state, &config);
+                let mut s: Vec<String> = p
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v:.2}"))
+                    .collect();
+                s.sort();
+                println!("  seed {seed} r{}  top={top}({share:.2})  debts: {s:?}", state.round);
+            }
+        }
+        println!("== seed {seed} final leader={leader} streak={streak} ==");
+    }
+}
+
+// 临时：各势力思潮 debuff 惩罚（用 sim 公开的可观测接口）。
+fn total_ideology_penalty(state: &State, config: &GameConfig) -> std::collections::BTreeMap<String, f64> {
+    sim::faction_ideology_debuffs(state, config)
+}
+
+/// 【探针·技术 vs 科学 谁更优势】短局量化：量测 `science_tech` 轴两端（技术正端 / 科学负端）
+/// 与「实力占比」的关系——正端（开采 MOND 区资源的势力）是否普遍更强、更常坐上最强位。
+/// `--ignored`。
+#[test]
+#[ignore]
+fn probe_tech_vs_science() {
+    let config = load_config();
+    let seeds = [1u64, 2, 3, 4, 5, 7, 11];
+    const ROUNDS: u32 = 200;
+
+    let mut all: Vec<(f64, f64)> = Vec::new(); // (science_tech, power_share)
+    let mut tech_top = 0usize;
+    let mut sci_top = 0usize;
+    let mut tech_power_sum = 0.0;
+    let mut sci_power_sum = 0.0;
+    let mut tech_n = 0usize;
+    let mut sci_n = 0usize;
+
+    for seed in seeds {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        for _ in 0..ROUNDS {
+            sim::advance(&mut state, &config, &mut rng);
+        }
+        let m = sim::round_metrics(&state, &config, &planet_x::model::RoundFlow::default());
+        for f in &state.factions {
+            let st = f.ideology.science_tech;
+            if let Some(&ps) = m.power_share.get(&f.name) {
+                all.push((st, ps));
+                if st > 0.0 {
+                    tech_power_sum += ps;
+                    tech_n += 1;
+                } else if st < 0.0 {
+                    sci_power_sum += ps;
+                    sci_n += 1;
+                }
+            }
+        }
+        // 谁是最强位，落在哪端。
+        let top = m.power_share.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(k, _)| k.clone()).unwrap();
+        let st = state.faction(&top).map(|f| f.ideology.science_tech).unwrap_or(0.0);
+        let top_share = m.power_share.get(&top).copied().unwrap_or(0.0);
+        if st > 0.0 { tech_top += 1; } else { sci_top += 1; }
+        println!(
+            "seed {seed}: top={top} share={top_share:.2} science_tech_of_top={st:+.2}"
+        );
+    }
+
+    // 皮尔逊相关：science_tech 与 power_share。
+    let (n, sx, sy, sxx, syy, sxy) = all.iter().fold((0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |(n, sx, sy, sxx, syy, sxy), (x, y)| {
+        (n + 1.0, sx + x, sy + y, sxx + x * x, syy + y * y, sxy + x * y)
+    });
+    let corr = if n > 1.0 {
+        let denom = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
+        if denom > 1e-9 { (n * sxy - sx * sy) / denom } else { 0.0 }
+    } else { 0.0 };
+    println!(
+        "--- 汇总: tech端 n={tech_n}(均实力{:.3})  science端 n={sci_n}(均实力{:.3})  corr(science_tech,power)={corr:.3}  最强=n_tech:{tech_top} n_science:{sci_top}",
+        tech_power_sum / tech_n.max(1) as f64,
+        sci_power_sum / sci_n.max(1) as f64,
+    );
+}
+
+/// 【探针·单极化思潮画像】长局扫描：找出「单极化」结局（同一势力长时间霸占最强位），
+/// 记录该霸权在锁定期末的**思潮向量**，用于识别「优势思潮」（该给 debuff 的画像）。
+///
+/// 单极化判定：同一势力连续 ≥ `MIN_LOCK` 回合稳居 `top_power` 最强位。锁定时记录
+/// 霸权名、实力占比、4 条思潮轴均分（锁定期最近 [`AVG_WINDOW`] 回合的平均）。
+///
+/// 输出为行分隔 JSON：`{"span":..,"seed":..,"locked":true,"hegemon":..,"share":..,
+/// "pm":..,"st":..,"pe":..,"nc":..,"locklen":..}`；`locked=false` 表示该局未单极化。
+/// `--ignored`（不含默认测试，也不消耗常规 CI）。
+#[test]
+#[ignore]
+fn probe_polar_ideology() {
+    const MIN_LOCK: u32 = 120; // 连续同霸主的回合数阈值
+    const ROUNDS: u32 = 1000;
+    const AVG_WINDOW: usize = 40;
+    let spans = [0.0f64, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0];
+
+    for span in spans {
+        for seed in 1..=10u64 {
+            let mut config = load_config();
+            config.diplomacy.ideology_affinity_span = span;
+            let mut state = world::default_state(&config, seed);
+            let mut rng = Prng::new(seed);
+
+            // 逐回合记录最强位：谁是当前 #1、它已连续坐庄多少回合（截至当前回合）。
+            // 单极化判定：**末段**最强位由同一势力连续 ≥ MIN_LOCK 回合（截至末回合）——
+            // 这才是「单极化结局」，而非中途闪现的短暂锁。
+            let mut leader = String::new();
+            let mut streak = 0u32; // 当前 #1 已连续坐庄回合数
+            let mut max_streak = 0u32;
+            let mut buf: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // 末段 #1 的最近思潮
+
+            for _ in 0..ROUNDS {
+                sim::advance(&mut state, &config, &mut rng);
+                let (top, _share) = top_power(&state, &config);
+                if top == leader {
+                    streak += 1;
+                } else {
+                    leader = top.clone();
+                    streak = 1;
+                    buf.clear();
+                }
+                max_streak = max_streak.max(streak);
+                // 缓冲当前 #1 的思潮（仅当它已是本段 #1 且有望成为末段霸权的候选）。
+                if let Some(f) = state.faction(&leader) {
+                    buf.push((leader.clone(), f.ideology.peace_military, f.ideology.science_tech, f.ideology.people_elite, f.ideology.nature_colony));
+                }
+                if buf.len() > AVG_WINDOW {
+                    buf.remove(0);
+                }
+            }
+
+            // 末回合的 #1 及其连续坐庄长度 —— 达阈值即单极化结局。
+            let (terminal_top, terminal_share) = top_power(&state, &config);
+            let locked = terminal_top == leader && streak >= MIN_LOCK;
+            if locked {
+                let n = buf.len() as f64;
+                let (pm, st, pe, nc) = {
+                    let mut a = 0.0; let mut b = 0.0; let mut c = 0.0; let mut d = 0.0;
+                    for r in &buf { a += r.1; b += r.2; c += r.3; d += r.4; }
+                    (a / n, b / n, c / n, d / n)
+                };
+                println!(
+                    "{{\"span\":{span},\"seed\":{seed},\"locked\":true,\"hegemon\":\"{terminal_top}\",\"share\":{terminal_share:.3},\"pm\":{pm:.3},\"st\":{st:.3},\"pe\":{pe:.3},\"nc\":{nc:.3},\"locklen\":{streak}}}"
+                );
+            } else {
+                println!(
+                    "{{\"span\":{span},\"seed\":{seed},\"locked\":false,\"terminal\":\"{terminal_top}\",\"share\":{terminal_share:.3},\"max_streak\":{max_streak}}}"
+                );
+            }
+        }
+    }
+}
+

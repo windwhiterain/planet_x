@@ -89,7 +89,7 @@ pub fn write_index(
 
     // Global master table: body identity (name/orbit/settlements) — once, at round 0.
     for b in &state.bodies {
-        let o = b.orbit;
+        let o = &b.orbit;
         writeln!(
             bodies,
             "{}",
@@ -99,6 +99,8 @@ pub fn write_index(
                 "perihelion_distance": o.perihelion_distance,
                 "aphelion_distance": o.aphelion_distance,
                 "period": o.period,
+                // 母天体 id：None = 环绕太阳（日心行星），Some(名) = 该天体的卫星。
+                "parent": o.parent,
                 "x": r2(b.position[0]),
                 "y": r2(b.position[1]),
                 "settlement_count": b.settlements.len(),

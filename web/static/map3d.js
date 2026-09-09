@@ -467,14 +467,19 @@ function updateLod() {
   }
 }
 
-function orbitLine(orbit) {
+// 轨道路径：`orbit` 的局部（焦点中心）轨道，在 AU 里叠加 `anchor`（母天体的世界坐标，
+// 日心行星传入 [0,0] 即绕太阳）后做**径向压缩**，得到该天体在压缩平面上的真实路径——卫星
+// 的椭圆就包在它的母天体周围，而不是绕太阳。
+function orbitLine(orbit, anchor) {
   const pts = [];
   const period = Math.max(orbit.period, 1e-6);
   const n = 160;
+  const ax = anchor ? (anchor[0] || 0) : 0;
+  const ay = anchor ? (anchor[1] || 0) : 0;
   for (let i = 0; i <= n; i++) {
     const t = (i / n) * period;
-    const p = orbitPositionAt(orbit, t);
-    const [cx, cz] = compress(p);
+    const local = orbitPositionAt(orbit, t);
+    const [cx, cz] = compress([ax + local[0], ay + local[1]]);
     pts.push(new THREE.Vector3(cx * scale, 0, cz * scale));
   }
   const g = new THREE.BufferGeometry().setFromPoints(pts);
@@ -519,7 +524,11 @@ function renderBodies(group, world, visuals) {
     // 星环（intrinsic body 属性：土星/天王星）。
     if (b.ring) addRing(group, p, r, spec.accent);
 
-    group.add(orbitLine(b.orbit));
+    // 卫星的轨道画在它的母天体周围：anchor = 母天体的世界坐标（AU）；日心行星 anchor=[0,0]。
+    const anchor = b.orbit.parent
+      ? ((world.bodies.find((x) => x.name === b.orbit.parent) || {}).position || [0, 0])
+      : [0, 0];
+    group.add(orbitLine(b.orbit, anchor));
 
     const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 26);
     lbl.position.set(p.x, p.y + r + 3, p.z);

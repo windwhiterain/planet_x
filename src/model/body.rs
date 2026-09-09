@@ -3,20 +3,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::ResourceDeposit;
 
-/// 2D orbit around the central sun. The focus (sun) sits at the origin.
+/// 2D orbit around a focus. The focus is the **sun** (at the origin) for a
+/// planet, or a **parent body** for a satellite (moon).
 ///
-/// The aphelion direction is a unit vector pointing from the sun toward the
+/// The aphelion direction is a unit vector pointing from the focus toward the
 /// farthest point of the orbit; perihelion is the opposite direction.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema)]
+///
+/// A satellite's `perihelion_distance`/`aphelion_distance` are measured **from
+/// its parent body**, not the sun; `Orbit::position` yields the **local** offset
+/// from the focus, and the body's world (heliocentric) position is that offset
+/// plus its parent's world position (see [`resolve_positions`]).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Orbit {
-    /// 近日点距离 (perihelion distance), in AU.
+    /// 近日点距离 (perihelion distance), in AU. For a satellite, measured from
+    /// its parent body; for a planet, from the sun.
     pub perihelion_distance: f32,
-    /// 远日点距离 (aphelion distance), in AU.
+    /// 远日点距离 (aphelion distance), in AU. Same convention as perihelion.
     pub aphelion_distance: f32,
-    /// 远日点方向 (unit vector toward aphelion).
+    /// 远日点方向 (unit vector toward aphelion), in the shared world 2D axes.
     pub aphelion_direction: [f32; 2],
     /// 公转周期 in months.
     pub period: f32,
+    /// 本轨道环绕的**母天体名**（唯一名）；`None` = 环绕太阳（日心轨道）。卫星
+    /// （月球/欧罗巴/泰坦/卡戎）的 parent 是其所绕行星；其世界位置 = 母天体世界位置
+    /// + 本轨道局部位置。`#[serde(default)]` 容忍旧存档无此字段（一律视为环绕太阳）。
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 impl Orbit {
@@ -131,6 +143,28 @@ impl Body {
     /// Look up a 定居点 on this body by its unique **name** (settlement ↔ city 1:1).
     pub fn settlement(&self, name: &str) -> Option<&Settlement> {
         self.settlements.iter().find(|s| s.name == name)
+    }
+}
+
+/// 把每颗天体的 `position` 解析为**世界（日心）坐标**：`Orbit::position(months)` 只给出
+/// 相对本轨道焦点（太阳或母天体）的**局部**偏移，这里对每颗天体累加其母天体已经解析好的
+/// 世界位置得到实际坐标；无母天体的天体其世界位置即局部位置。
+///
+/// 调用前提：`bodies` 里母天体排在卫星之前（world 生成的 parent-first 顺序；本函数按
+/// 下标正序遍历，故能直接读到已解析的母天体位置）。对单层卫星系统（所有卫星的母天体都
+/// 是日心行星）这已足够；若要支持嵌套卫星，需按拓扑序迭代或递归解析。
+pub fn resolve_positions(bodies: &mut [Body], months: f32) {
+    for i in 0..bodies.len() {
+        let local = bodies[i].orbit.position(months);
+        let parent_pos = match bodies[i].orbit.parent.as_ref() {
+            Some(pname) => bodies
+                .iter()
+                .position(|b| &b.name == pname)
+                .map(|pi| bodies[pi].position)
+                .unwrap_or([0.0, 0.0]),
+            None => [0.0, 0.0],
+        };
+        bodies[i].position = [parent_pos[0] + local[0], parent_pos[1] + local[1]];
     }
 }
 

@@ -171,6 +171,14 @@ pub struct DiplomacyConfig {
     pub affinity_floor: f64,
     /// Extra affinity at full ideological closeness (same bloc allies).
     pub affinity_span: f64,
+    /// 思潮相似度对静息亲和的**对称**修正幅度：两方思潮越像，亲和越高；越对立，亲和越低。
+    /// 思潮相似度 = `1 − 四轴平均 |Δ|/2`（每轴 [-1,1]，故相似度在 [0,1]），
+    /// 该项对亲和的贡献 = `ideology_affinity_span × (2×相似度 − 1)`（在
+    /// `[-ideology_affinity_span, +ideology_affinity_span]` 对称）。0 = 关闭（只按
+    /// 静态 alignment 决定亲和）。与 alignment（历史静态阵营亲缘）叠加，构成
+    /// 「历史静态 + 思潮可变」双因子。
+    #[serde(default)]
+    pub ideology_affinity_span: f64,
     /// Random fluctuation per round, so relations oscillate and can cross the
     /// war threshold.
     pub noise: f64,
@@ -377,6 +385,61 @@ pub struct IdeologyConfig {
     pub area_ref: f64,
     /// 人均面积差换算为「殖民/自然」target 的系数。
     pub area_scale: f64,
+    /// 思潮「优势端」的自平衡 debuff（见 [`IdeologyDebuffConfig`]）。`#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub debuff: IdeologyDebuffConfig,
+}
+
+/// 思潮优势端的**自平衡 debuff** tuning——针对单极化（某优势思潮跑成一家独大）。
+///
+/// 机制：当某势力处于**优势端思潮**（军国/科学/精英/殖民）时，它会被一个**全国忠诚度
+/// 惩罚**打击——惩罚力度随**该势力在星系中的体量（活城人口占比，单极化坐大）连续上升**
+/// （`dom`），再乘上该势力「思潮 vs 行为不符」的连续程度（`violate`）。因此打击随单极化
+/// 持续、不随「行为一致化」消退。全函数用 `smoothstep` 连续成形，**无硬阈值断点**；且
+/// 打击只对「优势端思潮」生效，非该端势力不受影响（自指向，不误伤中立/对立端）。
+///
+/// 四条轴的「优势端 / 不符判定」：
+///   * 和平↔军国 → 优势端=**军国**(+)；不符 = 不战争 且 低军事实力占比。
+///   * 科学↔技术 → 优势端=**科学**(−)；不符 = 舰在 MOND 异常区占比低。
+///   * 人民↔精英 → 优势端=**精英**(+)；不符 = 精英（坐大体量由 `dom` 承担）。
+///   * 自然↔殖民 → 优势端=**殖民**(+)；不符 = 不殖民。
+///
+/// 忠诚度惩罚 = `max_loyalty_penalty × clamp01(dom × Σ_轴 w_轴 × violate_轴)`，再作为每城
+/// 忠诚目标的扣减（`target_eff −= penalty`）。`smoothstep(a,b,x)` 为 C¹ 连续斜坡：
+/// `t=clamp01((x−a)/(b−a))`，`t²(3−2t)`。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct IdeologyDebuffConfig {
+    /// 单势力**总忠诚度惩罚上限**（0..1，每回合从忠诚目标里扣的最大比例）。
+    pub max_loyalty_penalty: f64,
+    /// 体量斜坡**下界**：该势力活城人口占全星系比例低于此 = 完全不起效。
+    pub gate_lo: f64,
+    /// 体量斜坡**上界**：占比达此 = 对该势力全量惩罚（单极化坐大即被打）。
+    pub gate_hi: f64,
+    /// 战争强度平滑斜坡带宽（AU·关系档）：该势力与敌关系越低于交战阈值，战争强度越贴近 1。
+    pub war_band: f64,
+    /// 军事占比平滑中枢：某势力军事占比低于此 → 「低军事」不符度趋近 1。
+    pub mil_share_ref: f64,
+    /// 各轴惩罚权重（0..1），按轴微调力度。
+    pub w_military: f64,
+    pub w_science: f64,
+    pub w_elite: f64,
+    pub w_colony: f64,
+}
+
+impl Default for IdeologyDebuffConfig {
+    fn default() -> Self {
+        Self {
+            max_loyalty_penalty: 0.20,
+            gate_lo: 0.06,
+            gate_hi: 0.30,
+            war_band: 10.0,
+            mil_share_ref: 0.30,
+            w_military: 1.0,
+            w_science: 1.0,
+            w_elite: 1.0,
+            w_colony: 1.0,
+        }
+    }
 }
 
 impl Default for IdeologyConfig {
@@ -388,6 +451,7 @@ impl Default for IdeologyConfig {
             economy_scale: 25.0,
             area_ref: 0.15,
             area_scale: 8.0,
+            debuff: IdeologyDebuffConfig::default(),
         }
     }
 }

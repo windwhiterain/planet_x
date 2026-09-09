@@ -87,7 +87,7 @@ pub fn render_map(state: &State) -> String {
         .bodies
         .iter()
         .map(|b| {
-            let p = b.orbit.position(state.time_month as f32);
+            let p = b.position;
             [tx(p[0]), tx(p[1])]
         })
         .collect();
@@ -113,7 +113,7 @@ pub fn render_map(state: &State) -> String {
         put(&mut grid, c, r, "@".yellow().to_string());
     }
     for b in &state.bodies {
-        let p = b.orbit.position(state.time_month as f32);
+        let p = b.position;
         if let Some((c, r)) = map_to_grid([tx(p[0]), tx(p[1])], minx, spanx, maxy, spany) {
             put(&mut grid, c, r, body_letter(&b.name).to_string().cyan().to_string());
         }
@@ -213,7 +213,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     let mut t = new_table();
     t.set_header(vec!["编号", "名称", "位置 (AU)", "状态", "城市"]);
     for b in &state.bodies {
-        let p = b.orbit.position(state.time_month as f32);
+        let p = b.position;
         let cities: Vec<&str> = state
             .cities
             .iter()

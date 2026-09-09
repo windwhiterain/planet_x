@@ -38,6 +38,31 @@ fn body(
     dir_angle_deg: f64,
     settlements: Vec<Settlement>,
 ) -> Body {
+    build_body(name, semi_major, e, dir_angle_deg, None, settlements)
+}
+
+/// A satellite (moon) body: its orbit is centered on `parent` (a planet), and its
+/// `semi_major` is measured **from the parent**, not the sun. Its world position
+/// is resolved later by [`resolve_positions`] (parent + local offset).
+fn satellite_body(
+    name: &str,
+    semi_major: f64,
+    e: f64,
+    dir_angle_deg: f64,
+    parent: &str,
+    settlements: Vec<Settlement>,
+) -> Body {
+    build_body(name, semi_major, e, dir_angle_deg, Some(parent), settlements)
+}
+
+fn build_body(
+    name: &str,
+    semi_major: f64,
+    e: f64,
+    dir_angle_deg: f64,
+    parent: Option<&str>,
+    settlements: Vec<Settlement>,
+) -> Body {
     let a = semi_major;
     let peri = a * (1.0 - e);
     let aphe = a * (1.0 + e);
@@ -47,11 +72,14 @@ fn body(
         aphelion_distance: aphe as f32,
         aphelion_direction: [theta.cos() as f32, theta.sin() as f32],
         period: (a.powf(1.5) * 12.0) as f32,
+        parent: parent.map(|s| s.to_string()),
     };
+    // 占位局部位置；建好全部天体后由 resolve_positions 覆写为世界（日心）坐标。
+    let initial_position = orbit.position(0.0);
     Body {
         name: name.to_string(),
         orbit,
-        position: orbit.position(0.0),
+        position: initial_position,
         // 类型/星环在 bodies 建好后按名字统一赋值（见 body_kind_for / body_ring_for）。
         kind: "rocky".to_string(),
         ring: false,
@@ -337,12 +365,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 ),
             ],
         ),
-        // 月球（联合国）资源丰富：铁，氦-3
-        body(
+        // 月球（联合国）资源丰富：铁，氦-3 —— 地球的卫星，绕地球 0.35 AU。
+        satellite_body(
             "月球",
-            1.00,
-            0.055,
-            100.0,
+            0.35,
+            0.05,
+            240.0,
+            "地球",
             vec![settlement("宁静海基地", 44.0, 10.0, 1.4, vec![deposit("铁", 28.0), deposit("氦-3", 22.0)])],
         ),
         // 火星（美国）资源丰富：硅，铁，水冰
@@ -375,12 +404,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             30.0,
             vec![settlement("木星轨道空间站", 48.0, 12.0, 1.6, vec![deposit("氢", 46.0)])],
         ),
-        // 欧罗巴（美国）资源丰富：水冰
-        body(
+        // 欧罗巴（美国）资源丰富：水冰 —— 木星的卫星，绕木星 0.60 AU。
+        satellite_body(
             "欧罗巴",
-            5.22,
-            0.009,
-            60.0,
+            0.60,
+            0.03,
+            140.0,
+            "木星",
             vec![settlement("欧罗巴冰下港", 34.0, 9.0, 1.2, vec![deposit("水冰", 40.0)])],
         ),
         // 土星（无国界科学组织）资源丰富：氢，铂，金，水冰（包括星环）—— 轨道空间站
@@ -402,12 +432,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 ],
             )],
         ),
-        // 泰坦（星系矿业）资源丰富：硅，铁，铀
-        body(
+        // 泰坦（星系矿业）资源丰富：硅，铁，铀 —— 土星的卫星，绕土星 0.75 AU。
+        satellite_body(
             "泰坦",
-            9.58,
-            0.029,
-            120.0,
+            0.75,
+            0.03,
+            40.0,
+            "土星",
             vec![settlement(
                 "泰坦采矿城",
                 46.0,
@@ -446,12 +477,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 vec![deposit("水冰", 26.0), deposit("硅", 18.0), deposit("碳", 14.0)],
             )],
         ),
-        // 卡戎（俄罗斯）资源丰富：铁，金
-        body(
+        // 卡戎（俄罗斯）资源丰富：铁，金 —— 冥王星的卫星，绕冥王星 1.20 AU。
+        satellite_body(
             "卡戎",
-            39.48,
-            0.12,
-            55.0,
+            1.20,
+            0.06,
+            300.0,
+            "冥王星",
             vec![settlement("卡戎深空港", 24.0, 7.0, 1.0, vec![deposit("铁", 24.0), deposit("金", 10.0)])],
         ),
         // 伊克西翁（行星X崇拜教）资源丰富：碳
@@ -499,6 +531,10 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         b.kind = body_kind_for(&b.name).to_string();
         b.ring = body_ring_for(&b.name);
     }
+
+    // 解析每颗天体的**世界（日心）坐标**：卫星（有 parent）的位置 = 母天体世界位置 + 本
+    // 轨道局部偏移。父先子后，故单次正序遍历即得正确结果。
+    crate::model::resolve_positions(&mut bodies, 0.0);
 
     // --- Factions -----------------------------------------------------------
     // Idéologie (alignment) & 好战度 (aggression) drive the dynamic international
@@ -653,10 +689,12 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let mut ships = Vec::new();
     let mut ship_name_seq: BTreeMap<FactionId, u64> = BTreeMap::new();
     let mut add_ship = |ships: &mut Vec<Ship>, faction: &str, body_name: &str, class: &str| {
+        // 用已解析的**世界（日心）坐标**作母港位置（卫星的已是「母天体+局部」），开头舰
+        // 小扰动即可落在其本天体的真实位置上。
         let pos = bodies
             .iter()
             .find(|b| b.name == body_name)
-            .map(|b| b.orbit.position(0.0))
+            .map(|b| b.position)
             .unwrap_or([0.0, 0.0]);
         let spec = config.ship_spec(class);
         let seq = *ship_name_seq.entry(faction.to_string()).or_insert(0);

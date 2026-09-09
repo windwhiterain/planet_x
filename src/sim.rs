@@ -66,10 +66,10 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 记录回合开始的交战状态，用于在本回合结束时检测「开战 / 停战」跃迁。
     let wars_before = war_pairs(state, config);
 
-    // Update each body's current position (当前位置) from its orbit.
-    for b in &mut state.bodies {
-        b.position = b.orbit.position(state.time_month as f32);
-    }
+    // Update each body's current position (当前位置) from its orbit. The stored position is the
+    // **world (heliocentric)** coordinate: for a satellite (an orbit with a `parent`) it is the
+    // parent's world position plus the local orbit offset, so satellites orbit their planet.
+    crate::model::resolve_positions(&mut state.bodies, state.time_month as f32);
 
     let mut flow = RoundFlow::default();
     step_production(state, config, &mut flow);
@@ -173,6 +173,18 @@ fn adjust_relation(state: &mut State, a: &str, b: &str, delta: f64) {
             f.relations.insert(y.to_string(), v + delta);
         }
     }
+}
+
+/// 两方思潮的**相似度**（[0,1]）：`1 − 四轴平均 |Δ|/2`。每轴取 `[-1,1]`，故单轴归一化距离
+/// 为 `|Δ|/2`（同极=0、对极=1），再对 [`Ideology`] 的 4 条轴取平均。相似度越高两方思潮越像。
+/// 供外交静息亲和修正使用（思潮可变因子），与静态 alignment 叠加。
+pub(crate) fn ideology_similarity(a: &Ideology, b: &Ideology) -> f64 {
+    let dist = (0.5 * (a.peace_military - b.peace_military).abs()
+        + 0.5 * (a.science_tech - b.science_tech).abs()
+        + 0.5 * (a.people_elite - b.people_elite).abs()
+        + 0.5 * (a.nature_colony - b.nature_colony).abs())
+        / 4.0;
+    (1.0 - dist).clamp(0.0, 1.0)
 }
 
 /// Append a [`GameEvent`] to this round's log.
@@ -1315,6 +1327,162 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
 // --- governance (light-speed management) -------------------------------------
 
+// --- 思潮优势端自平衡 debuff（平滑、无硬阈值断点） ------------------------
+
+/// C¹ 连续斜坡：`t = clamp01((x−a)/(b−a))`，`t²(3−2t)`。输出 0..1，端点无跳变。
+fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// 全星系**活城总人口**（各势力所有未夷平城市的人口之和）。
+fn total_live_pop(state: &State) -> u64 {
+    state
+        .cities
+        .iter()
+        .filter(|c| !c.razed)
+        .map(|c| c.population as u64)
+        .sum()
+}
+
+/// 该势力**战争强度**（0..1）：与任何其他势力的最低关系相对交战阈值越深越贴近 1（平滑）。
+/// 关系远在交战阈值之上 → 0（没在打仗）；跌到阈值之下越深 → 趋近 1（在交战）。
+fn war_strength(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let wt = config.combat.war_threshold;
+    let mut worst: f64 = 0.0;
+    for o in &state.factions {
+        if o.name == fid {
+            continue;
+        }
+        worst = worst.min(relation(state, fid, &o.name));
+    }
+    let h = (wt - worst).max(0.0);
+    smoothstep(0.0, config.ideology.debuff.war_band, h)
+}
+
+/// 该势力的**军事实力占比**（舰队引擎数值之和 / 全星系舰队引擎数值之和），0..1。
+fn faction_military_share(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let total: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
+    if total <= 1e-9 {
+        return 0.0;
+    }
+    let mine: f64 = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid)
+        .map(|s| ship_panel(config, s).hull_max)
+        .sum();
+    mine / total
+}
+
+/// 该势力**舰在 MOND 异常区的占比**：距太阳 > `mond.radius` 的舰数 / 该势力总舰数（0..1）。
+/// 无舰 → 0（即完全没在探索异常区）。
+fn faction_mond_ship_share(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let r = config.mond.radius;
+    let ships: Vec<&Ship> = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .collect();
+    if ships.is_empty() {
+        return 0.0;
+    }
+    let in_mond = ships.iter().filter(|s| dist(s.position, [0.0, 0.0]) > r).count() as f64;
+    in_mond / ships.len() as f64
+}
+
+/// 该势力**活城人口占全星系比例**（0..1）。
+fn faction_pop_share(state: &State, fid: &str, p_total: f64) -> f64 {
+    let pop: u64 = state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+        .map(|c| c.population as u64)
+        .sum();
+    if p_total <= 1e-9 {
+        0.0
+    } else {
+        pop as f64 / p_total
+    }
+}
+
+/// 该势力**殖民活动强度**（0..1）：正在执行 `Colonize`（殖民）行为的舰数，用 `smoothstep`
+/// 连续成形（0 艘 → 0；≥2 艘 → 1），无突然跳变。无舰 → 0（完全不殖民）。
+fn faction_colonizing(state: &State, fid: &str) -> f64 {
+    let ships: Vec<&Ship> = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .collect();
+    if ships.is_empty() {
+        return 0.0;
+    }
+    let colonize = ships
+        .iter()
+        .filter(|s| {
+            state
+                .ship_behavior(s.name.clone())
+                .map(|b| matches!(b, ShipBehavior::Colonize { .. }))
+                .unwrap_or(false)
+        })
+        .count() as f64;
+    smoothstep(0.0, 2.0, colonize)
+}
+
+/// 该势力**思潮优势端自平衡 debuff** —— 返回全国忠诚度惩罚（0..`max_loyalty_penalty`）。
+///
+/// 打击强度由**该势力自身在星系中的体量**（活城人口占比 `dom`）驱动——越大越该被打，因此
+/// 随单极化持续、不随「行为一致化」消退。再乘上各轴「思潮 vs 行为不符」的连续度：
+///
+/// `penalty = max × clamp01(dom × Σ_轴 w_轴 × violate_轴)`：
+///   * `dom` = 该势力活城人口 / 全星系活城人口的 `smoothstep(gate_lo..gate_hi)`；
+///   * `violate_轴` = 该势力「优势端思潮 vs 行为不符」的连续度（见 [`IdeologyDebuffConfig`]）。
+///
+/// 全 C¹ 平滑、无硬阈值；只对优势端思潮本身生效（自指向，不误伤中立/对立端）。
+fn ideology_loyalty_debuff(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    p_total: f64,
+) -> f64 {
+    let d = &config.ideology.debuff;
+    let id = state
+        .faction(fid)
+        .map(|f| f.ideology)
+        .unwrap_or_default();
+    // 打击强度 = 该势力自身体量（单极化越坐大越该被打）。
+    let dom = smoothstep(d.gate_lo, d.gate_hi, faction_pop_share(state, fid, p_total));
+
+    // 轴1 和平↔军国，优势端=军国(+)：军国 且（不战争 且 低军事实力占比）。
+    let w = war_strength(state, config, fid);
+    let ml = faction_military_share(state, config, fid);
+    let viol_mil = smoothstep(0.0, 1.0, id.peace_military)
+        * (1.0 - w)
+        * (1.0 - smoothstep(0.0, d.mil_share_ref, ml));
+    // 轴2 科学↔技术，优势端=科学(−)：科学 且 舰在 MOND 区占比低。
+    let ms = faction_mond_ship_share(state, config, fid);
+    let viol_sci = smoothstep(0.0, 1.0, -id.science_tech) * (1.0 - smoothstep(0.0, 1.0, ms));
+    // 轴3 人民↔精英，优势端=精英(+)：精英 且 人口占全星系比例高（体量由 dom 承担，这里只看精英度）。
+    let viol_elite = smoothstep(0.0, 1.0, id.people_elite);
+    // 轴4 自然↔殖民，优势端=殖民(+)：殖民 且 不殖民。
+    let col = faction_colonizing(state, fid);
+    let viol_col = smoothstep(0.0, 1.0, id.nature_colony) * (1.0 - smoothstep(0.0, 1.0, col));
+
+    let raw = d.w_military * viol_mil + d.w_science * viol_sci + d.w_elite * viol_elite + d.w_colony * viol_col;
+    d.max_loyalty_penalty * (dom * raw).clamp(0.0, 1.0)
+}
+
+/// 本回合各势力的「思潮优势端自平衡 debuff」忠诚度惩罚（0..`max_loyalty_penalty`）。
+/// 纯观测（不推进世界），供 agent 视图与调参。与 `step_governance` 同源（同一公式）。
+pub fn faction_ideology_debuffs(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
+    let p_total = total_live_pop(state) as f64;
+    state
+        .factions
+        .iter()
+        .map(|f| (f.name.clone(), ideology_loyalty_debuff(state, config, &f.name, p_total)))
+        .collect()
+}
+
 /// 光速治理：每座城按其与统治势力首都的距离产生一笔治理开销（距离越远、管辖越难）。
 /// 势力从库存按价值支付；付得起时城市忠诚度向距离目标恢复（远则低），付不起（欠费）
 /// 时忠诚度暴跌。忠诚度跌破 [`GovernanceConfig::loyalty_revolt`] 即爆发离心叛乱，城市
@@ -1324,6 +1492,9 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
     let g = &config.governance;
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
+    // 思潮优势端自平衡 debuff 的输入：全星系活城人口（用于算「该势力体量」占比）。
+    let p_total = total_live_pop(state) as f64;
 
     for fid in faction_ids {
         let capital = state.capital_body(&fid);
@@ -1382,12 +1553,14 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
         // 首都人口占全势力的比例越高，全国向心力越强（每城目标忠诚更高）。用占比：把
         // 首都放在人口中心有真实收益，而不是无脑堆绝对人口。
         let cap_bonus = faction_capital_share(state, &fid) * g.capital_share_loyalty_buff;
+        // 思潮优势端自平衡 debuff：该势力若身处「垄断」的优势端思潮又「言行不符」，扣全国忠诚。
+        let ideo_penalty = ideology_loyalty_debuff(state, config, &fid, p_total);
         let mut to_revolt = Vec::new();
         for (cid, d, ent) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
             let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
-            let target_eff = (target_base + ent_bonus + cap_bonus).clamp(0.0, 1.0);
+            let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
             let cur = state.city(cid).map(|c| c.loyalty).unwrap_or(1.0);
             let new = if coverage >= 1.0 - 1e-6 {
                 (cur + (target_eff - cur) * g.loyalty_recover).clamp(0.0, 1.0)
@@ -2098,13 +2271,19 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     for i in 0..ids.len() {
         for j in (i + 1)..ids.len() {
             let (a, b) = (ids[i].clone(), ids[j].clone());
-            let (align_a, align_b, aggr) = {
+            let (align_a, align_b, aggr, ideo_a, ideo_b) = {
                 let fa = state.factions.iter().find(|f| f.name == a).expect("faction a gone");
                 let fb = state.factions.iter().find(|f| f.name == b).expect("faction b gone");
-                (fa.alignment, fb.alignment, fa.aggression.max(fb.aggression))
+                (fa.alignment, fb.alignment, fa.aggression.max(fb.aggression), fa.ideology, fb.ideology)
             };
             let mut rel = relation(state, &a, &b);
-            let aff = d.affinity_floor + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
+            let mut aff = d.affinity_floor + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
+            // 思潮相似度（可变化当代思潮）：相似 → 亲和上移，对立 → 亲和下移（对称修正）。
+            // 与 alignment（历史静态阵营亲缘）叠加，构成「历史静态 + 思潮可变」双因子。
+            if d.ideology_affinity_span != 0.0 {
+                let sim = ideology_similarity(&ideo_a, &ideo_b);
+                aff += d.ideology_affinity_span * (2.0 * sim - 1.0);
+            }
             let at_war = rel <= config.combat.war_threshold;
             let pair = if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
             let clashing = fought.contains(&pair);
@@ -3637,5 +3816,54 @@ mod tests {
                 assert!(v.is_finite() && (-1.0..=1.0).contains(&v), "{k} out of bounds: {v}");
             }
         }
+    }
+
+    /// 思潮相似度函数：同=1，全对极=0，中庸=0.5；单调随轴距离下降。
+    #[test]
+    fn ideology_similarity_ranges_and_is_monotonic() {
+        let a = Ideology { peace_military: 0.5, science_tech: -0.3, people_elite: 0.2, nature_colony: 0.4 };
+        let b = Ideology { peace_military: -0.5, science_tech: 0.3, people_elite: -0.2, nature_colony: -0.4 };
+        let same = Ideology { peace_military: 0.5, science_tech: -0.3, people_elite: 0.2, nature_colony: 0.4 };
+        assert_eq!(ideology_similarity(&a, &same), 1.0, "identical ideologies have unit similarity");
+        assert!(ideology_similarity(&a, &a) >= ideology_similarity(&a, &b), "similarity is monotonic in distance");
+        assert!((0.0..=1.0).contains(&ideology_similarity(&a, &b)));
+        assert_eq!(ideology_similarity(&a, &a), 1.0);
+    }
+
+    /// 思潮相似度影响外交：其它条件相同（同 seed、同 alignment、同起始关系、噪声关闭）下，
+    /// 思潮越像 → 静息亲和越高 → 关系向更友好靠拢；思潮越对立 → 越向敌对靠拢。
+    #[test]
+    fn ideology_similarity_shifts_diplomatic_affinity_directionally() {
+        let run = |ideo_a: Ideology, ideo_b: Ideology| -> f64 {
+            let (mut config, mut state) = fresh_world(42);
+            // 关掉噪声，让关系变化只反映静息亲和的差异（确定性）。
+            config.diplomacy.noise = 0.0;
+            let a = state.factions[0].name.clone();
+            let b = state.factions[1].name.clone();
+            {
+                let fa = state.faction_mut(&a).unwrap();
+                fa.alignment = 0.0; // 隔离 alignment：只留思潮相似度的独立影响
+                fa.ideology = ideo_a;
+                fa.relations.insert(b.clone(), 0.0);
+                let fb = state.faction_mut(&b).unwrap();
+                fb.alignment = 0.0;
+                fb.ideology = ideo_b;
+                fb.relations.insert(a.clone(), 0.0);
+            }
+            let mut rng = Prng::new(42);
+            step_diplomacy(&mut state, &config, &mut rng);
+            relation(&state, &a, &b)
+        };
+
+        // 全同极（相似度=1）vs 全对极（相似度=0）：同 seed、同 alignment、同起始关系，
+        // 唯一的差别就是思潮相似度 → 相似的一方关系必须更友好。
+        let same_pos = Ideology { peace_military: 1.0, science_tech: 1.0, people_elite: 1.0, nature_colony: 1.0 };
+        let opposite = Ideology { peace_military: -1.0, science_tech: -1.0, people_elite: -1.0, nature_colony: -1.0 };
+        let r_same = run(same_pos, same_pos);
+        let r_opp = run(same_pos, opposite);
+        assert!(
+            r_same > r_opp,
+            "similar ideologies must rest friendlier than opposite ones: same={r_same} opp={r_opp}"
+        );
     }
 }
