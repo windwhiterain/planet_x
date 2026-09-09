@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>行星X · WebUI</title>
   <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
   <header id="topbar">
@@ -27,7 +35,7 @@
 
   <main>
     <section id="mapPanel">
-      <svg id="map"></svg>
+      <div id="map"></div>
       <div id="readout"></div>
     </section>
 
@@ -42,6 +50,7 @@
 
   <footer id="diffBar"></footer>
 
+  <script type="module" src="map3d.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
