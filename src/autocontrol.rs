@@ -1026,7 +1026,7 @@ mod tests {
                 {"resource": "碳", "value": 10000.0, "mode": "Player"}
             ]}]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply construction over-commit");
+        crate::control::apply_patch(&mut state, &config, &diff).expect("apply construction over-commit");
 
         let plan2 = control_plan(&state, &config, "中国").expect("faction exists");
         assert!(

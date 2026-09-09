@@ -1,18 +1,20 @@
 //! `planet_x_web` — the WebUI server for Planet X.
 //!
-//! Serves a JSON API plus the static frontend (`static/`) from `static/`.
-//! It holds one authoritative world in memory. Run it and open the printed URL.
+//! Serves a JSON API plus the static frontend (`web/static/`) from the crate's
+//! `static/` directory. It holds one authoritative world in memory. Run it and
+//! open the printed URL.
 //!
 //! Environment overrides:
-//! * `PLANET_X_CONFIG`  path to `config/game.ron`.
-//! * `PLANET_X_START`   optional initial-state RON file.
-//! * `PLANET_X_SEED`    deterministic seed (a number or `random`).
-//! * `PLANET_X_WEB_PORT` listen port (default `3000`).
+//! * `PLANET_X_CONFIG`       path to `config/game.ron`.
+//! * `PLANET_X_START`        optional initial-state RON file.
+//! * `PLANET_X_SEED`         deterministic seed (a number or `random`).
+//! * `PLANET_X_WEB_PORT`     listen port (default `3000`).
+//! * `PLANET_X_WEB_STATIC`   static dir to serve (default `<crate>/static`).
 
 use planet_x::config::{load_config, load_state, parse_seed};
 use planet_x::prng::{random_seed, Prng};
-use planet_x::web::{router, GameWorld, Shared};
 use planet_x::world;
+use planet_x_web::{router, GameWorld, Shared};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
