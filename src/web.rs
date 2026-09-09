@@ -63,6 +63,8 @@ pub struct FactionView {
     pub relations: Vec<(FactionId, f64)>,
     pub investment_budget: Vec<(String, f64)>,
     pub construction_budget: Vec<(String, f64)>,
+    /// 有效首都天体（迁都唯一事实来源 [`State::capital_body`] 解析）。
+    pub capital_body: BodyId,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -110,6 +112,7 @@ pub struct LoyaltyBudgetEntry {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FactionControlView {
     pub faction_id: FactionId,
+    pub capital: Option<Control<BodyId>>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
@@ -253,11 +256,28 @@ pub struct BuildingPatch {
     pub remove: bool,
 }
 
+/// 迁都（首都天体）补丁：`value` 指定新的首都天体（BodyId = 天体唯一名）；
+/// `mode` 指定由谁决定（Ai/Player/显式 None）。缺省 `value` 保留现值、缺省 `mode`
+/// 保留现模式。迁都的唯一事实来源是 [`ControllableState::capital`]（无 shadow 双状态）。
+#[derive(Deserialize, Default, JsonSchema)]
+pub struct CapitalPatch {
+    /// 新的首都天体（天体唯一名）。缺省 = 保留现值。
+    #[serde(default)]
+    pub value: Option<BodyId>,
+    /// 由谁决定：Ai（系统周期性迁移）/Player（玩家，系统不改写，除非首都亡城强迁）/
+    /// 显式 None（沿作用域链上溯）。缺省 = 保留现模式。
+    #[serde(default)]
+    pub mode: Option<Option<ControlMode>>,
+}
+
 /// 单个势力的可控状态补丁（`--apply` / `POST /api/command` 的 `control[]` 元素）。
 /// 只改动**出现在这里**的叶片；缺省的 `Vec` 字段/`Option` 叶子一律保持不变。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct FactionControlPatch {
     pub faction_id: FactionId,
+    /// 迁都（首都天体）补丁。
+    #[serde(default)]
+    pub capital: Option<CapitalPatch>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
@@ -304,7 +324,7 @@ fn default_random_seed() -> String {
 
 // --- conversions ------------------------------------------------------------
 
-fn faction_view(f: &Faction) -> FactionView {
+fn faction_view(state: &State, f: &Faction) -> FactionView {
     FactionView {
         // Faction identity is its unique name; `id` carries that name now.
         id: f.name.clone(),
@@ -314,6 +334,7 @@ fn faction_view(f: &Faction) -> FactionView {
         relations: f.relations.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         investment_budget: Vec::new(),
         construction_budget: Vec::new(),
+        capital_body: state.capital_body(&f.name),
     }
 }
 
@@ -371,6 +392,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         .collect();
     FactionControlView {
         faction_id: fid,
+        capital: c.capital.clone(),
         ship_orders,
         investment_budget,
         construction_budget,
@@ -391,7 +413,7 @@ fn scope_view(s: &ControlScope) -> ScopeView {
 
 pub fn state_view(world: &GameWorld) -> StateView {
     let s = &world.state;
-    let mut factions: Vec<FactionView> = s.factions.iter().map(faction_view).collect();
+    let mut factions: Vec<FactionView> = s.factions.iter().map(|f| faction_view(s, f)).collect();
     // Attach the (effective) budgets to each faction view for display.
     for f in factions.iter_mut() {
         if let Some(c) = s.control.get(&f.id) {
@@ -443,6 +465,7 @@ fn round_behavior(b: ShipBehavior) -> ShipBehavior {
 fn round_view(v: FactionControlView) -> FactionControlView {
     FactionControlView {
         faction_id: v.faction_id,
+        capital: v.capital,
         ship_orders: v
             .ship_orders
             .into_iter()
@@ -592,6 +615,26 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
         }
         for bpatch in &fac.buildings {
             apply_building_patch(state, config, fac.faction_id.clone(), bpatch);
+        }
+    }
+    // 迁都：写「有效首都」的唯一事实来源（`ControllableState::capital`）。独立的循环
+    // 以拿到干净的借用：先做只读（当前首都、天体存在性），再在独立作用域里写控制。
+    // 只允许迁到真实存在的天体；若指向的天体上并无本势力活城，则由 sim 的亡城强迁
+    // 规则兜底，避免把首都钉在虚天体上。`mode` 沿作用域链与其它叶子一致。
+    for fac in &req.control {
+        if let Some(cap) = &fac.capital {
+            let cur = state.capital_body(&fac.faction_id);
+            let new_value = cap.value.as_ref().filter(|v| state.body(v).is_some()).cloned();
+            {
+                let ctrl = state.control.entry(fac.faction_id.clone()).or_default();
+                let ctrl = ctrl.capital.get_or_insert_with(|| Control::inherit(cur));
+                if let Some(v) = new_value {
+                    ctrl.value = v;
+                }
+                if let Some(m) = cap.mode {
+                    ctrl.mode = m;
+                }
+            }
         }
     }
     if let Some(sv) = &req.scope {

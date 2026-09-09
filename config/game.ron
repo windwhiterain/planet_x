@@ -94,6 +94,18 @@
         default_entertainment: 1.0,
         // 娱乐投入换算：投入该市场价值使忠诚度目标 +1.0（entertainment_bonus = paid/cost）。
         entertainment_cost: 20.0,
+        // 迁都（自动控制）评估周期：AI 每 12 回合重新评估一次首都选址；0=关闭自动迁都，
+        // 首都只在「亡城」时被强迁到人口最高的活城。带 mode=Player 的首都不会被覆盖。
+        capital_review_every: 12,
+        // 迁都须达到的「总治理距离成本」最小改善量（AU）：候选首都必须比当前首都低至少
+        // 这么多么才值得迁（避免反复横跳/无意义微调）。
+        capital_relocate_threshold: 1.0,
+        // 首都「人口占比」的全国忠诚度 buff：首都人口占全势力活城人口的比例 × 此系数 =
+        // 每座城的目标忠诚加成。首都=人口中心 → 全国向心力更强。
+        capital_share_loyalty_buff: 0.2,
+        // 迁都的全国忠诚度代价：旧首都人口占比 × 此系数 = 每座城的忠诚下降（迁离大都会
+        // 更动荡）。与 buff 互为反制，让迁都是为了省治理成本、却要以全国忠诚为赌注。
+        capital_share_relocate_cost: 0.5,
     ),
     // MOND / 柯伊伯引力异常：距太阳超过 radius 的深空进入「异常区」，真实引力偏离
     // 标准牛顿假定。没有掌握 MOND 修正引力的势力（除 masters 之外的所有势力）在

@@ -270,7 +270,7 @@ fn write_round(
                 "faction_id": f.name.clone(),
                 "name": f.name,
                 "symbol": f.symbol,
-                "capital_body": f.capital_body,
+                "capital_body": state.capital_body(&f.name),
                 "alignment": r2(f.alignment),
                 "aggression": r2(f.aggression),
                 "home_radius": r2(f.home_radius),

@@ -166,7 +166,6 @@ fn faction(
     resources: ResourceMap,
     alignment: f64,
     aggression: f64,
-    capital_body: &str,
 ) -> Faction {
     let (home_radius, home_attack_mult, home_regen_bonus) = home_for(name);
     Faction {
@@ -177,10 +176,27 @@ fn faction(
         relations: std::collections::BTreeMap::new(),
         alignment,
         aggression,
-        capital_body: capital_body.to_string(),
         home_radius,
         home_attack_mult,
         home_regen_bonus,
+    }
+}
+
+/// 各势力的**初始首都**天体（唯一事实来源 = 命令控制 `ControllableState::capital`，
+/// 开局在此播种；之后由迁都/迁都亡城逻辑维护）。`Faction` 不存首都可以下——单源无
+/// shadow 双状态。
+fn initial_capital(name: &str) -> &'static str {
+    match name {
+        F_UN => "月球",
+        F_US => "火星",
+        F_EU => "地球",
+        F_CN => "地球",
+        F_RU => "地球",
+        F_MINING => "泰坦",
+        F_SCIENCE => "木星",
+        F_TRANSPORT => "灶神星",
+        F_CULT => "伊克西翁",
+        _ => "地球",
     }
 }
 
@@ -437,7 +453,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, "月球"),
+        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10),
         faction(
             F_US,
             'A',
@@ -445,9 +461,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 6.0), ("碳", 5.0), ("铀", 1.0)]),
             1.0,
             0.60,
-            "火星",
         ),
-        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, "地球"),
+        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30),
         faction(
             F_CN,
             'C',
@@ -455,7 +470,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 7.0), ("碳", 6.0), ("硅", 2.0)]),
             -1.0,
             0.50,
-            "地球",
         ),
         faction(
             F_RU,
@@ -464,7 +478,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 5.0), ("碳", 4.0), ("铀", 2.0)]),
             -0.9,
             0.45,
-            "地球",
         ),
         faction(
             F_MINING,
@@ -473,7 +486,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 6.0), ("金", 2.0), ("铂", 1.0)]),
             0.0,
             0.20,
-            "泰坦",
         ),
         faction(
             F_SCIENCE,
@@ -482,7 +494,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("硅", 4.0), ("氦-3", 3.0), ("碳", 2.0)]),
             0.2,
             0.05,
-            "木星",
         ),
         faction(
             F_TRANSPORT,
@@ -491,7 +502,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("碳", 6.0), ("氢", 3.0), ("铁", 2.0)]),
             -0.1,
             0.15,
-            "灶神星",
         ),
         faction(
             F_CULT,
@@ -500,7 +510,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铀", 3.0), ("钍", 2.0), ("金", 1.0)]),
             -3.0,
             0.90,
-            "伊克西翁",
         ),
     ];
 
@@ -647,6 +656,10 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             .iter()
             .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
+        // 首都（唯一事实来源 = 命令控制 `ControllableState::capital`）：开局按势力
+        // 播种其初始首都天体，mode=inherit（None，沿作用域链上溯，默认 Ai）。之后由
+        // sim 的迁都步骤维护，`Faction` 不再存首都可以下（单源无 shadow 双状态）。
+        c.capital = Some(Control::inherit(initial_capital(&f.name).to_string()));
         // 建造预算默认与投资预算相等，作为造舰的资金池。
         c.construction_budget = f
             .resources

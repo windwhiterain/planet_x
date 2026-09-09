@@ -576,6 +576,10 @@ pub enum GameEvent {
     CoalitionFormed { hegemon: FactionId, members: Vec<FactionId> },
     /// 合纵连横：既有的反制联盟解体（`members` 为解体时的成员）。
     CoalitionEnded { hegemon: FactionId, members: Vec<FactionId> },
+    /// 迁都：势力把首都从 `from` 天体迁到 `to` 天体。`reason` 是触发原因
+    /// （`"destroyed"`=首都亡城自动切到人口最高活城；`"ai_review"`=周期性 AI 评估证明
+    /// 候选更优）。首都是光速治理/本土防御的锚点，迁都会即时改变治理距离与防御半径。
+    CapitalRelocated { faction: FactionId, from: BodyId, to: BodyId, reason: String },
 }
 
 /// A spaceship. Always owned by a faction.
@@ -722,11 +726,8 @@ pub struct Faction {
     pub alignment: f64,
     /// 好战度（0..1）：越高的势力越会加速与异己阵营走向敌对。
     pub aggression: f64,
-    /// 首都天体（光速治理的锚点）：治理开销随城市距此天体的距离递增，忠诚度随
-    /// 距离衰减——超大帝国难以远距离管辖其在远离首都的殖民地。
-    #[serde(default = "default_capital_body")]
-    pub capital_body: BodyId,
-    /// 本土防御半径（AU）：本方城市/舰在此半径（距 `capital_body`）内获得本土防御。
+    /// 本土防御半径（AU）：本方城市/舰在此半径（距有效首都，见
+    /// [`State::capital_body`]）内获得本土防御。
     /// cult 的数值按 MOND 异常放大——它「掌握了正确的牛顿修正引力」，孤悬柯伊伯带，
     /// 被围攻时依靠此异常自保。
     #[serde(default = "default_home_radius")]
@@ -966,6 +967,19 @@ impl State {
         self.control.get_mut(&fid)
     }
 
+    /// 该势力当前的**有效首都**天体——唯一的存量为命令控制的
+    /// [`ControllableState::capital`]（迁都的唯一事实来源，无 shadow 双状态）。若某
+    /// 势力尚未有任何首都控制（防御性兜底），回落到 [`default_capital_body`]。所有
+    /// 「首都」读法（光速治理距离、本土防御半径、舰的撤退目的地、投影展示）都应走
+    /// 这里，保证迁都即时生效。
+    pub fn capital_body(&self, fid: &str) -> BodyId {
+        self.control
+            .get(fid)
+            .and_then(|c| c.capital.as_ref())
+            .map(|c| c.value.clone())
+            .unwrap_or_else(default_capital_body)
+    }
+
     /// Current behavior (指令) of a ship, if any. `ship_id` is the ship's unique name.
     pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
         let s = self.ship(&ship_id)?;
@@ -1032,6 +1046,15 @@ impl State {
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+
+    /// 决定「迁都」由谁控制：首都叶子 → 势力 → 全局（沿作用域链上溯，最具体者优先）。
+    /// `Player` 时 sim 的周期迁移不覆盖（除非首都亡城——硬规则仍强迁）；`Ai` 或缺省
+    /// None 时由 sim 的周期迁都步骤重估。
+    pub fn capital_control(&self, fid: &str) -> ControlMode {
+        let leaf = self.control(fid.to_string()).and_then(|c| c.capital.as_ref()).and_then(|c| c.mode);
+        let faction = self.scope.factions.get(fid).copied().flatten();
+        resolve_chain(&[leaf, faction, self.scope.global])
     }
 }
 
@@ -1156,6 +1179,13 @@ pub struct ControllableState {
     /// 建设与造舰的预算；玩家/agent 用它来稳固对大/远城市的统治（见治理模型）。
     #[serde(default)]
     pub loyalty_budget: BTreeMap<CityId, Control<f64>>,
+    /// 迁都（首都被命控制）：本势力当前希望的首都天体。`mode=Player` 时玩家说了算、
+    /// 系统不改写（除非首都亡城——硬规则先于一切）；`mode=Ai`/`None` 时由 sim 的周期
+    /// 迁都步骤决定。`None` 表示未命令控制（回落到 [`default_capital_body`] 兜底）。
+    /// 「有效首都」的唯一事实来源就是这里，用 [`State::capital_body`] 解析——无 shadow
+    /// 双状态。
+    #[serde(default)]
+    pub capital: Option<Control<BodyId>>,
 }
 
 /// Economy tuning (production and population).
@@ -1431,6 +1461,41 @@ pub struct GovernanceConfig {
     /// 娱乐投入换算：投入「市场价值」使忠诚度目标 +1.0 所需的花费（即忠诚度来自娱乐
     /// 的增量 = paid / entertainment_cost）。
     pub entertainment_cost: f64,
+    /// 迁都（自动控制）的评估周期（回合）：AI 每这么多回合重新评估一次首都选址；0 =
+    /// 关闭会自动迁都，首都只在「亡城」时被强迁。确定性：只在证明候选更优（见
+    /// [`Self::capital_relocate_threshold`]）时才动，避免反复横跳。
+    #[serde(default = "default_capital_review_every")]
+    pub capital_review_every: u32,
+    /// 迁都须达到的「总治理距离成本」最小改善量（AU）：候选首都必须比当前首都低至少
+    /// 这么多么才值得迁。太高=迁都太保守，太低=频繁微调。
+    #[serde(default = "default_capital_relocate_threshold")]
+    pub capital_relocate_threshold: f64,
+    /// 首都「人口占比」带来的**全国忠诚度 buff**：首都人口占该势力全部活城人口的比例 ×
+    /// 此系数 = 每座城的目标忠诚加成（0..1）。首都人口稠密 = 强引力/强心，全国向心力更强；
+    /// 用占比而非绝对人口，是让「战略性地把首都放在人口中心」有真实收益。
+    #[serde(default = "default_capital_share_loyalty_buff")]
+    pub capital_share_loyalty_buff: f64,
+    /// 迁都的**全国忠诚度代价**：旧首都人口占比 × 此系数 = 每座城的忠诚下降（迁离大都会
+    /// 更动荡、动摇国本）。与首都 buff 互为反制：迁首都 = 用全国忠诚换治理距离收益，不是
+    /// 免费优化——这保住光速治理给超大帝国的自然上限。
+    #[serde(default = "default_capital_share_relocate_cost")]
+    pub capital_share_relocate_cost: f64,
+}
+
+fn default_capital_review_every() -> u32 {
+    12
+}
+
+fn default_capital_relocate_threshold() -> f64 {
+    1.0
+}
+
+fn default_capital_share_loyalty_buff() -> f64 {
+    0.2
+}
+
+fn default_capital_share_relocate_cost() -> f64 {
+    0.5
 }
 
 /// 本土防御 (home-field defense) tuning——「首都即强弩」。

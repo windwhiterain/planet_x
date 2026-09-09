@@ -494,6 +494,7 @@ fn event_counts(events: &[GameEvent]) -> BTreeMap<String, u32> {
             Revolt { .. } => "revolt",
             CoalitionFormed { .. } => "coalition_formed",
             CoalitionEnded { .. } => "coalition_ended",
+            CapitalRelocated { .. } => "capital_relocated",
         };
         *m.entry(label.to_string()).or_insert(0) += 1;
     }

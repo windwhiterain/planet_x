@@ -171,7 +171,15 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 | `invest_weights` | 各建设任务优先级 | 谁先吃投资预算 |
 | `build_weights` | 各建造区优先级 | 哪个船坞先造 |
 | `loyalty_budget` | 每城娱乐/福利（月） | 提「忠诚」压低叛乱 |
+| `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
 | `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type` |
+
+> **迁都的代价**：`mode=Player` 时你说的算、AI 不覆盖（除非首都亡城——硬规则仍强迁到
+> 人口最高的活城）。自动控制的势力每 `capital_review_every` 回合重估：候选=人口最高的活城，
+> 仅当它让全势力各城的总治理距离成本低 `capital_relocate_threshold` AU 以上才迁。迁都按
+> **旧首都人口占比**扣全国忠诚（`capital_share_relocate_cost`，占比越大越动荡）；首都人口
+> 占比越高，全国每城目标忠诚又加成（`capital_share_loyalty_buff`）。所以—想稳定就把首都
+> 放在人口中心，但迁都是豪赌不是免费优化。
 
 ### 三条必须懂的语义
 1. **两条预算独立、按权重竞争**：`investment_budget` 建「楼」，`construction_budget` 造「舰」；

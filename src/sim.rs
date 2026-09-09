@@ -69,6 +69,9 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundF
     // 重建（反僵尸/反垄断）：趁着本回合只剩「残骸」的势力还没被永久旁观，先让它在
     // 自己的残骸足迹上重新立足。放在治理之后：被叛乱夷平到零的势力也能当回合重建。
     step_resurgence(state, config, rng);
+    // 迁都：亡城强迁（首都天体失守→人口最高活城）+ 周期性 AI 评估。放在重建之后，
+    // 让重建出立足点的势力也能当回合被认领新首都。
+    step_capital(state, config);
     step_diplomacy(state, config, rng);
     // 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力结成反制联盟——
     // 军事上联手制衡，经济上多国资源封锁。这给「一家独大」一个自然的众矢之的。
@@ -1020,9 +1023,10 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .iter()
         .map(|s| {
             if s.hull > 0.0 {
+                let dest = state.body_position(&state.capital_body(&s.faction_id));
                 let f = state
                     .faction(&s.faction_id)
-                    .map(|fac| dist(s.position, state.body_position(&fac.capital_body)) <= fac.home_radius)
+                    .map(|fac| dist(s.position, dest) <= fac.home_radius)
                     .unwrap_or(false);
                 (home_regen_bonus(state, &s.faction_id, s.position), f)
             } else {
@@ -1321,8 +1325,7 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     for fid in faction_ids {
-        let capital = state.faction(&fid).map(|f| f.capital_body.clone());
-        let Some(capital) = capital else { continue };
+        let capital = state.capital_body(&fid);
         let cap_pos = state.body_position(&capital);
 
         // 该势力所有活城 + 每城到首都的距离 + 每城想投入的娱乐/福利预算。
@@ -1374,14 +1377,16 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
         // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率。
         flow.governance.insert(fid.clone(), GovernanceFlow { total: governance_total, coverage });
 
-        // 忠诚度向「距离目标 + 娱乐加成」恢复/下降，并标记叛乱（距离 × 人口超载
-        // 与娱乐投入叠加）。娱乐投入越高，就越能对冲距离/人口带来的离心倾向。
+        // 忠诚度向「距离目标 + 娱乐加成 + 首都人口占比 buff」恢复/下降，并标记叛乱。
+        // 首都人口占全势力的比例越高，全国向心力越强（每城目标忠诚更高）。用占比：把
+        // 首都放在人口中心有真实收益，而不是无脑堆绝对人口。
+        let cap_bonus = faction_capital_share(state, &fid) * g.capital_share_loyalty_buff;
         let mut to_revolt = Vec::new();
         for (cid, d, ent) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
             let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
-            let target_eff = (target_base + ent_bonus).clamp(0.0, 1.0);
+            let target_eff = (target_base + ent_bonus + cap_bonus).clamp(0.0, 1.0);
             let cur = state.city(cid).map(|c| c.loyalty).unwrap_or(1.0);
             let new = if coverage >= 1.0 - 1e-6 {
                 (cur + (target_eff - cur) * g.loyalty_recover).clamp(0.0, 1.0)
@@ -1408,6 +1413,139 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             ev(state, GameEvent::Revolt { city: cid, faction: fid.clone() });
         }
     }
+}
+
+// --- 迁都 (capital relocation) ----------------------------------------------
+
+/// 维护每个势力的「有效首都」的唯一事实来源（[`ControllableState::capital`]）。
+///
+/// 两个触发（都确定性、无 RNG）：
+/// * **亡城强迁（硬规则，先于一切）**：只要有效首都天体上已无本势力的活城（被夷平或
+///   被敌人殖民夺走），就把首都切到本势力**人口最高的活城**（并列取名字序）——不能让
+///   首都钉在已死的天体上。即使 Player 设过首都也强迁（死首都无效）。
+/// * **周期性 AI 评估**：非 Player 控制的首都（[`State::capital_control`] == Ai）每
+///   [`GovernanceConfig::capital_review_every`] 回合重估一次：候选 = 人口最高的活城；
+///   仅当它对全势力各城的「总治理距离成本」比当前首都低
+///   [`GovernanceConfig::capital_relocate_threshold`] AU 以上时才迁（避免反复横跳）。
+///
+/// 放在 [`step_resurgence`] 之后：刚重建出立足点的势力也能当回合被认领一个新首都。
+fn step_capital(state: &mut State, config: &GameConfig) {
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
+    let review_every = config.governance.capital_review_every.max(1);
+
+    for fid in faction_ids {
+        let cur = state.capital_body(&fid);
+        let living: Vec<CityId> = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid && !c.razed)
+            .map(|c| c.name.clone())
+            .collect();
+        if living.is_empty() {
+            continue; // 无活城：resurgence 会在后续回合重建，届时再定首都。
+        }
+
+        let cur_owned = living.iter().any(|cid| {
+            state.city(cid).map(|c| c.body_id == cur).unwrap_or(false)
+        });
+
+        let mut new_cap: Option<BodyId> = None;
+        let mut reason = "";
+
+        if !cur_owned {
+            // 亡城强迁 → 人口最高的活城（并列取名字序）。
+            new_cap = Some(highest_pop_city_body(state, &fid));
+            reason = "destroyed";
+        } else if state.capital_control(&fid) == ControlMode::Ai && state.round % review_every == 0 {
+            let best = highest_pop_city_body(state, &fid);
+            if best != cur {
+                let cur_cost = capital_anchor_cost(state, config, &fid, &cur);
+                let best_cost = capital_anchor_cost(state, config, &fid, &best);
+                if best_cost + config.governance.capital_relocate_threshold < cur_cost {
+                    new_cap = Some(best);
+                    reason = "ai_review";
+                }
+            }
+        }
+
+        if let Some(nc) = new_cap {
+            let from = cur.clone();
+            // 迁都的全国忠诚度代价：旧首都人口占比 × 系数 = 每座城忠诚下降。占比越高
+            // 迁离越动荡（国本动摇）；亡城强迁时旧首都已失（占比=0）→ 应急无忠诚代价。
+            let old_share = faction_capital_share(state, &fid);
+            let loyalty_cost = old_share * config.governance.capital_share_relocate_cost;
+            // 保留原 mode 标记（Player 仍归玩家、None 让作用域链决定）——迁都是换「值」，
+            // 不改变「由谁决定」的层次化粒度。
+            let prev_mode = state.control.get(&fid).and_then(|c| c.capital.as_ref()).and_then(|c| c.mode);
+            {
+                let ctrl = state.control.entry(fid.clone()).or_default();
+                ctrl.capital = Some(Control { value: nc.clone(), mode: prev_mode });
+            }
+            if loyalty_cost > 0.0 {
+                for cid in &living {
+                    if let Some(c) = state.city_mut(cid) {
+                        c.loyalty = (c.loyalty - loyalty_cost).max(0.0);
+                    }
+                }
+            }
+            ev(state, GameEvent::CapitalRelocated {
+                faction: fid.clone(),
+                from,
+                to: nc,
+                reason: reason.to_string(),
+            });
+        }
+    }
+}
+
+/// 该势力**有效首都**的人口占其全势力活城人口的比例（0..1）。首都占全势力人口的比例
+/// 越高 → 全国忠诚度 buff 越强；迁离占比高的首都 → 全国忠诚度代价越大。
+fn faction_capital_share(state: &State, fid: &str) -> f64 {
+    let cap = state.capital_body(fid);
+    let mut cap_pop = 0u64;
+    let mut total_pop = 0u64;
+    for c in &state.cities {
+        if c.faction_id != fid || c.razed {
+            continue;
+        }
+        let p = c.population as u64;
+        total_pop += p;
+        if c.body_id == cap {
+            cap_pop += p;
+        }
+    }
+    if total_pop == 0 {
+        0.0
+    } else {
+        cap_pop as f64 / total_pop as f64
+    }
+}
+
+/// 本势力**人口最高的活城**之天体（并列取名字序，确定性）。调用方保证该势力有活城。
+fn highest_pop_city_body(state: &State, fid: &str) -> BodyId {
+    state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+        .min_by_key(|c| (std::cmp::Reverse(c.population), c.name.clone()))
+        .map(|c| c.body_id.clone())
+        .expect("caller guarantees a living city")
+}
+
+/// 该势力若以 `cap` 为首都，其全部活城到它的「总治理距离成本」（AU）：
+/// Σ max(0, dist(body, cap) - admin_range)。用作迁都「是否更优」的判据（越小越好）。
+fn capital_anchor_cost(state: &State, config: &GameConfig, fid: &str, cap: &str) -> f64 {
+    let g = &config.governance;
+    let cap_pos = state.body_position(cap);
+    let mut total = 0.0;
+    for c in &state.cities {
+        if c.faction_id != fid || c.razed {
+            continue;
+        }
+        let d = dist(state.body_position(&c.body_id), cap_pos);
+        total += (d - g.admin_range).max(0.0);
+    }
+    total
 }
 
 /// Move a ship one round's step toward `dest`, capped by its class speed.
@@ -1616,7 +1754,7 @@ fn home_defense_mult(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     if f.home_radius <= 0.0 {
         return 1.0;
     }
-    let cap = state.body_position(&f.capital_body);
+    let cap = state.body_position(&state.capital_body(faction));
     if dist(pos, cap) <= f.home_radius {
         f.home_attack_mult
     } else {
@@ -1631,7 +1769,7 @@ fn home_regen_bonus(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     if f.home_radius <= 0.0 {
         return 0.0;
     }
-    let cap = state.body_position(&f.capital_body);
+    let cap = state.body_position(&state.capital_body(faction));
     if dist(pos, cap) <= f.home_radius {
         f.home_regen_bonus
     } else {
@@ -3188,6 +3326,103 @@ mod tests {
         assert!(
             customized > 0,
             "customized (component-fitted) ships should appear over a long run, got {customized}"
+        );
+    }
+
+    /// 迁都-亡城强迁：首都天体上已无本势力活城 → 自动切到**人口最高的活城**。
+    #[test]
+    fn capital_destroyed_auto_relocates_to_highest_population_city() {
+        let (config, mut state) = fresh_world(42);
+        // 中国初始首都=地球，其上活城 长三角(1400)/珠三角(1100)。把这两城夷平 → 首都亡。
+        assert_eq!(state.capital_body("中国"), "地球");
+        for cid in ["长三角".to_string(), "珠三角".to_string()] {
+            if let Some(c) = state.city_mut(&cid) {
+                c.razed = true;
+            }
+        }
+
+        step_capital(&mut state, &config);
+
+        // 剩余中国活城：水星熔炉基地(220,水星)、金星浮空之城(260,金星)。人口最高=金星浮空之城。
+        assert_eq!(
+            state.capital_body("中国"),
+            "金星",
+            "capital must snap to the highest-population remaining city (金星)"
+        );
+        assert!(
+            state.events.iter().any(|e| matches!(
+                e,
+                GameEvent::CapitalRelocated { faction, to, reason, .. } if faction == "中国" && to == "金星" && reason == "destroyed"
+            )),
+            "a destroyed-capital relocation event must be recorded, got {:?}",
+            state.events
+        );
+    }
+
+    /// 迁都-周期 AI 评估：首都 Population 中心更优（总治理距离成本显著更低）时，AI 迁过去。
+    #[test]
+    fn ai_periodic_review_relocates_capital_to_population_center() {
+        let (mut config, mut state) = fresh_world(42);
+        // 收窄治理可达半径 + 降低迁都门槛，让内行星间的距离差能体现「更优」。
+        config.governance.admin_range = 0.05;
+        config.governance.capital_relocate_threshold = 0.1;
+        assert_eq!(config.governance.capital_review_every, 12);
+
+        // 交圈数设为评估周期（12）：非 Player 首都在评估轮迁到人口中心。
+        state.round = 12;
+        // 把中国首都先钉到 水星（较远），保留现值 → mode 沿线默认 Ai。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "capital": {"value": "水星"}}]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("set far capital");
+        assert_eq!(state.capital_body("中国"), "水星");
+
+        step_capital(&mut state, &config);
+
+        // 中国人口最繁华城=长三角(1400,地球)；迁到地球显著降低总治理距离成本。
+        assert_eq!(
+            state.capital_body("中国"),
+            "地球",
+            "AI review should relocate the capital to the population center (地球)"
+        );
+        assert!(
+            state.events.iter().any(|e| matches!(
+                e,
+                GameEvent::CapitalRelocated { faction, reason, .. } if faction == "中国" && reason == "ai_review"
+            )),
+            "an AI-review relocation event must be recorded, got {:?}",
+            state.events
+        );
+    }
+
+    /// 迁都-Player 标记：mode=Player 的首都在评估轮不被 AI 覆盖（除非亡城硬规则）。
+    #[test]
+    fn player_capital_not_overridden_by_ai_review() {
+        let (config, mut state) = fresh_world(42);
+        // 玩家把首都迁到 水星 并标 Player；中国在 水星 仍有活城（水星熔炉基地），非亡城。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Player"}}]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("player move capital");
+        assert_eq!(state.capital_body("中国"), "水星");
+        assert_eq!(state.capital_control("中国"), ControlMode::Player);
+
+        // 评估轮：Player 控制的首都不被周期迁移覆盖。
+        state.round = 12;
+        step_capital(&mut state, &config);
+
+        assert_eq!(
+            state.capital_body("中国"),
+            "水星",
+            "a Player-chosen capital must survive the periodic AI review"
+        );
+        assert!(
+            !state.events.iter().any(|e| matches!(
+                e,
+                GameEvent::CapitalRelocated { faction, .. } if faction == "中国"
+            )),
+            "no relocation may fire for a Player-owned capital, got {:?}",
+            state.events
         );
     }
 }

@@ -640,16 +640,15 @@ pub(crate) fn ai_ship_turn(
     // 让战争有「打残→撤→养好→再来」的损耗与恢复循环，也避免一整支舰队白白送死。
     if let Some(target) = tgt {
         if my_hull / my_hull_max.max(1e-9) < config.combat.retreat_hull {
-            if let Some(cap_body) = state.faction(&owner).map(|f| f.capital_body.clone()) {
-                let cap_pos = state.body_position(&cap_body);
-                if sim::dist(pos, cap_pos) > config.combat.retreat_min_dist {
-                    if let Some(c) = state.control_mut(owner.clone()) {
-                        c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Move { position: cap_pos }));
-                    }
-                    sim::ev(state, GameEvent::Withdraw { ship: ship_id.to_string(), to_body: cap_body });
-                    sim::move_toward(state, config, ship_id, &class, cap_pos);
-                    return;
+            let cap_body = state.capital_body(&owner);
+            let cap_pos = state.body_position(&cap_body);
+            if sim::dist(pos, cap_pos) > config.combat.retreat_min_dist {
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Move { position: cap_pos }));
                 }
+                sim::ev(state, GameEvent::Withdraw { ship: ship_id.to_string(), to_body: cap_body });
+                sim::move_toward(state, config, ship_id, &class, cap_pos);
+                return;
             }
         }
         // 否则接战：集中火力打最残的敌舰（nearest_enemy_ship 已按受创程度排序）。
