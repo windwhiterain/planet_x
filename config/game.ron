@@ -160,75 +160,96 @@
         "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
         "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
     },
-    // 舰船 5 级，属性按 spec 的 低/中/高 分档：
-    //   护甲 hull:        低≈20-26  中≈24   高≈72
-    //   护甲再生 hull_regen(每月回 max 的分数):  低≈0.04  中≈0.08  高≈0.30
-    //   速度(月/AU):      低≈0.9    中≈1.2   高≈2.6
-    //   伤害 attack:      低≈6      中≈14    高≈48
-    //   攻击距离 attack_range:     低≈0.4    中≈0.6   高≈2.4
-    //   资源(成本量+稀有度): 常见=铁/碳/硅/氢/甲烷/水冰；稀有=氦-3/钍/铀/金/铂
-    //   每级把 spec 的「招牌」数值拉到极高，使每级各有一席之地：
-    //   护卫舰=极速游骑；驱逐舰=高再生磨王；巡洋舰=重甲战列；航空母舰=超远程炮台；战列舰=一锤定音。
+    // 舰船 5 级。舰级属性分两类：
+    //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是
+    //       本体的直接值）；另有槽位/造价/维护费。
+    //   (2) 平台修正系数：armor_mult(护甲硬度) / shield_mult(护盾) /
+    //       shield_regen_mult(护盾再生) / speed_mult(速度) / accel_mult(加速度) /
+    //       attack_mult(伤害) / range_mult(攻击距离)，分别缩放所搭载的对应模块输出。
+    //       舰级身份由此体现（护卫=快、驱逐=再生、巡洋=重甲、航母=超远程、战列=一锤定音）。
+    // 速度 / 加速度 / 攻击距离**没有舰级基础值**：它们完全来自推进/武器模块，所以
+    // 「推进」和「武器」一样是必须的（没有推进模块就没有速度/攻击距离=0）。
+    // 分档（直接属性）：hull 低≈12-26 高≈72；hull_regen 低≈0.04 高≈0.30。
     ships: {
         "corvette": (
             label: "护卫舰",
-            hull: 12.0,          // 低
-            hull_regen: 0.04,    // 低
-            attack: 6.0,         // 低
-            speed: 2.6,          // 高（招牌：极速）
-            attack_range: 0.4,   // 低
+            hull: 12.0,          // 低（直接船体）
+            hull_regen: 0.04,    // 低（直接再生）
             build_points: 15.0,
             build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：低，常见
             upkeep: 1.5,
-            slots: 1,            // 小舰只有一个定制槽（轻装游骑）
+            slots: 2,            // 至少「武器+推进」两个槽（轻装游骑）
+            armor_mult: 0.9,
+            shield_mult: 0.9,
+            shield_regen_mult: 1.0,
+            speed_mult: 1.3,     // 招牌：推进大幅放大 → 极速
+            accel_mult: 1.4,
+            attack_mult: 0.9,    // 轻火力游骑兵
+            range_mult: 0.9,
         ),
         "destroyer": (
             label: "驱逐舰",
-            hull: 24.0,          // 中
-            hull_regen: 0.30,    // 高（招牌：超强再生）
-            attack: 6.0,         // 低
-            speed: 1.2,          // 中
-            attack_range: 0.6,   // 中
+            hull: 24.0,          // 中（直接船体）
+            hull_regen: 0.30,    // 高（直接再生，招牌：超强再生）
             build_points: 26.0,
             build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
             upkeep: 2.5,
             slots: 2,
+            armor_mult: 1.0,
+            shield_mult: 1.1,
+            shield_regen_mult: 1.5,  // 招牌：护盾/辅助再生放大 → 持久磨王
+            speed_mult: 1.0,
+            accel_mult: 1.0,
+            attack_mult: 1.0,
+            range_mult: 1.0,
         ),
         "cruiser": (
             label: "巡洋舰",
-            hull: 72.0,          // 高（招牌：重型装甲）
+            hull: 72.0,          // 高（直接船体，招牌：重型装甲）
             hull_regen: 0.08,    // 中
-            attack: 14.0,        // 中
-            speed: 0.9,          // 低
-            attack_range: 0.6,   // 中
             build_points: 44.0,
             build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：高，常见
             upkeep: 6.0,
             slots: 3,            // 中型舰：火力+防护+推进
+            armor_mult: 1.5,     // 重甲 → 护甲硬度放大
+            shield_mult: 1.3,
+            shield_regen_mult: 1.0,
+            speed_mult: 0.9,
+            accel_mult: 0.8,
+            attack_mult: 1.2,
+            range_mult: 1.0,
         ),
         "carrier": (
             label: "航空母舰",
             hull: 20.0,          // 低
             hull_regen: 0.08,    // 中
-            attack: 8.0,         // 低
-            speed: 0.9,          // 低
-            attack_range: 2.4,   // 高（招牌：超远程炮台，敌舰难近身）
             build_points: 58.0,
             build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
             upkeep: 7.5,
             slots: 3,
+            armor_mult: 1.0,
+            shield_mult: 1.0,
+            shield_regen_mult: 1.0,
+            speed_mult: 0.9,
+            accel_mult: 0.8,
+            attack_mult: 0.8,    // 单发不强，但射程极远
+            range_mult: 1.8,     // 招牌：射程放大器
         ),
         "battleship": (
             label: "战列舰",
             hull: 26.0,          // 低（略抬以可抗一轮齐射）
             hull_regen: 0.04,    // 低
-            attack: 48.0,        // 高（招牌：一锤定音）
-            speed: 1.2,          // 中
-            attack_range: 0.6,   // 中
             build_points: 40.0,
             build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：低，稀有
             upkeep: 6.5,
             slots: 4,            // 主力舰能叠最多组件（资源→战斗力）
+            armor_mult: 1.1,
+            shield_mult: 0.9,
+            shield_regen_mult: 0.9,
+            speed_mult: 1.0,
+            accel_mult: 1.0,
+            attack_mult: 2.0,    // 招牌：一锤定音 → 武器伤害大幅放大
+            range_mult: 1.0,
         ),
     },
     // 舰船定制组件（飞船定制化 ↔ 资源优势）——把「多稀缺资源」换成「不一样的作战
@@ -247,7 +268,7 @@
             tracking: 2.0,
             shield_mult: 0.6,
             hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 0.6,
             cost: { "iron": 4.0, "carbon": 2.0 },   // 常见矿：入门火力（拆甲）
         ),
@@ -260,7 +281,7 @@
             tracking: 1.6,
             shield_mult: 1.5,
             hull_mult: 0.85,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 1.4,
             cost: { "helium3": 3.0, "gold": 1.5 }, // 稀有：对盾强、射程远
         ),
@@ -273,7 +294,7 @@
             tracking: 2.6,
             shield_mult: 0.7,
             hull_mult: 1.3,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 2.2,
             cost: { "uranium": 3.0, "iron": 2.0 }, // 稀有：远程拆甲重炮
         ),
@@ -286,7 +307,7 @@
             tracking: 3.0,   // 制导：高速目标难规避，但会被点防御拦截
             shield_mult: 1.0,
             hull_mult: 1.2,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 1.6,
             cost: { "hydrogen": 3.0, "carbon": 2.0 }, // 超远射程，吃氢
         ),
@@ -296,45 +317,45 @@
             category: "defense",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 12.0, shield_regen: 0.15, hull: 2.0, intercept: 0.0,
+            shield: 12.0, shield_regen: 0.15, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 2.0,
-            cost: { "platinum": 2.0, "helium3": 1.0 }, // 铂金级护盾
+            cost: { "platinum": 2.0, "helium3": 1.0 }, // 铂金级护盾（吸收池）
         ),
         "armor": (
             label: "装甲夹层",
             category: "defense",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.0, hull: 14.0, intercept: 0.0,
-            speed: 0.0, hull_regen: 0.0, upkeep: 0.9,
-            cost: { "iron": 5.0, "carbon": 3.0 },    // 常见：加厚船壳
+            shield: 0.0, shield_regen: 0.0, hardness: 10.0, intercept: 0.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 0.9,
+            cost: { "iron": 5.0, "carbon": 3.0 },    // 常见：让船体变硬（反比例减伤）
         ),
         "composite": (
             label: "复合装甲",
             category: "defense",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.0, hull: 26.0, intercept: 0.0,
-            speed: 0.0, hull_regen: 0.0, upkeep: 1.8,
-            cost: { "silicon": 4.0, "thorium": 2.0 }, // 高级防护（钍）
+            shield: 0.0, shield_regen: 0.0, hardness: 18.0, intercept: 0.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.8,
+            cost: { "silicon": 4.0, "thorium": 2.0 }, // 高级防护（钍，更硬）
         ),
         "point_defense": (
             label: "近防炮阵",
             category: "defense",
             damage: 2.0, damage_type: "kinetic", range: 0.3, tracking: 8.0, // 近防=几乎必中快目标
             shield_mult: 0.8, hull_mult: 0.8,
-            shield: 0.0, shield_regen: 0.0, hull: 3.0, intercept: 6.0,
-            speed: 0.0, hull_regen: 0.0, upkeep: 1.0,
-            cost: { "gold": 2.0, "silicon": 1.0 }, // 拦导弹 + 防快船
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 6.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.0,
+            cost: { "gold": 2.0, "silicon": 1.0 }, // 拦导弹（线性扣减）+ 防快船
         ),
-        // --- 推进（速度=规避 + 抢占战位） -------------------------------------
+        // --- 推进（速度+加速度 = 规避 + 抢先战位） ------------------------------
         "ion_drive": (
             label: "离子推进器",
             category: "thrust",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
-            speed: 0.8, hull_regen: 0.0, upkeep: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            speed: 0.8, accel: 0.6, hull_regen: 0.0, upkeep: 1.0,
             cost: { "helium3": 1.5, "iron": 1.0 },
         ),
         "fusion_torch": (
@@ -342,8 +363,8 @@
             category: "thrust",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.0, hull: 0.0, intercept: 0.0,
-            speed: 1.6, hull_regen: 0.0, upkeep: 2.4,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            speed: 1.6, accel: 1.2, hull_regen: 0.0, upkeep: 2.4,
             cost: { "hydrogen": 3.0, "thorium": 1.0 }, // 氢/钍：极速引擎
         ),
         // --- 辅助（再生 = 持久战） --------------------------------------------
@@ -352,8 +373,8 @@
             category: "utility",
             damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
             shield_mult: 1.0, hull_mult: 1.0,
-            shield: 0.0, shield_regen: 0.04, hull: 0.0, intercept: 0.0,
-            speed: 0.2, hull_regen: 0.05, upkeep: 1.2,
+            shield: 0.0, shield_regen: 0.04, hardness: 0.0, intercept: 0.0,
+            speed: 0.2, accel: 0.2, hull_regen: 0.05, upkeep: 1.2,
             cost: { "uranium": 2.0, "hydrogen": 1.0 },
         ),
     },

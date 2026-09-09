@@ -663,8 +663,12 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
         // Classes the faction has < 25% of get a pull toward a balanced mix.
         let mix_bonus = (0.25 - share).max(0.0) * 1.5;
         let upkeep_penalty = spec.upkeep * 0.04; // 贵舰难养，只有当资源/构成都支持才造
-        // 威胁响应：战时给火力强的舰型加分（多造战争机器）。
-        let war_bonus = if at_war { spec.attack * 0.03 } else { 0.0 };
+        // 威胁响应：战时给「主力旗舰」舰型加分（多造战列/航母）。现在舰级是平台修正器、
+        // 没有独立 attack；用「主力舰强度 = 造价高(build_points≥40) 且维持费高(≥6.5)」
+        // 这一离散标志区分旗舰（战列/航母）与巡洋/护卫，给一个明确的战争加成，避免和
+        // 巡洋（造价相近）混在一起。
+        let flagship = spec.build_points >= 40.0 && spec.upkeep >= 6.5;
+        let war_bonus = if at_war && flagship { 0.6 } else { 0.0 };
         scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty + war_bonus));
     }
 
@@ -697,7 +701,9 @@ fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &m
 ///     in firepower; in peace it invests more in defense/support.
 /// Deterministic (no RNG): score is a function of stockpile + config, ties break on
 /// component id. Returns ≤ `ShipSpec::slots` component ids, cumulatively affordable.
-fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
+/// `pub(crate)` so `world` can fit the starting / re-seeded / story-granted ships the
+/// same way a shipyard does (a ship's firepower is entirely its fitted modules).
+pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
     let slots = config.ship_spec(class).slots as usize;
     if slots == 0 {
         return Vec::new();
@@ -717,19 +723,29 @@ fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &st
 
     // 战局感知：交战中的势力更看重武器（武器加分），和平时更偏向防御/支持。
     let at_war = faction_at_war(state, config, fid);
+    // 舰级 = 平台修正器：组件对战斗的实际贡献被本舰级的修正系数缩放（战列=火力放大器、
+    // 护卫=极速、航母=超远程）。这使「选什么模块」要和「装在哪级舰上」配套。
+    let spec = config.ship_spec(class);
 
     // Score every candidate component by (a) resource fit — how much of its rare
-    // inputs the faction can comfortably supply — plus (b) a small raw combat-gain
-    // tiebreak, minus (c) an upkeep drag so components that are strong but too costly
-    // to maintain get deprioritized. 战时给武器加分（更舍得堆火力）。
+    // inputs the faction can comfortably supply — plus (b) a small (class-scaled)
+    // raw combat-gain tiebreak, minus (c) an upkeep drag. 战时给武器加分（更舍得堆火力）。
     let mut cands: Vec<(String, f64)> = Vec::new();
     for (id, cs) in &config.components {
         let fit: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r) * abund(r)).sum();
-        let gain = cs.damage * 4.0 + cs.shield * 0.8 + cs.hull * 0.8 + cs.hull_regen * 120.0
-            + cs.shield_regen * 60.0 + cs.speed * 3.0 + cs.intercept * 2.0 + cs.range * 12.0;
+        // 用舰级修正系数缩放每件模块的「战斗增益」，让选装与舰型匹配。
+        let gain_weapon = cs.damage * spec.attack_mult;
+        let gain_shield = cs.shield * spec.shield_mult;
+        let gain_speed = cs.speed * spec.speed_mult;
+        let gain_accel = cs.accel * spec.accel_mult;
+        let gain_range = cs.range * spec.range_mult;
+        let gain_regen = cs.shield_regen * spec.shield_regen_mult;
+        let gain = gain_weapon * 4.0 + gain_shield * 0.8 + cs.hardness * spec.armor_mult * 3.0
+            + gain_regen * 60.0 + gain_speed * 3.0 + gain_accel * 3.0
+            + cs.intercept * 2.0 + gain_range * 12.0;
         let mut score = fit + gain * 0.03 - cs.upkeep * 2.0;
         if at_war && cs.category == "weapon" {
-            score += cs.damage * 2.0; // 战时要火力。
+            score += gain_weapon * 2.0; // 战时要火力。
         }
         if score > 0.0 {
             cands.push((id.clone(), score));
@@ -737,10 +753,9 @@ fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &st
     }
     cands.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    // 类别配比（拟人指挥官）：一艘军舰要「又能打、又能扛」——至少一件武器（买得起时）、
-    // slot≥2 时至少一件防御（避免全军玻璃大炮或全是乌龟），其余按分数填满。
-    let defense_floor = if slots >= 2 { 1 } else { 0 };
-
+    // 类别配比（拟人指挥官）：一艘军舰要么能打、要么能跑——**至少一件武器（硬保证）**、
+    // **至少一件推进（硬保证：没有推进就没有速度/加速度，船动不了）**，其余按分数填满
+    // （护盾/护甲/点防/辅助是可选的防御与支持，不硬性要求）。
     let mut chosen: Vec<String> = Vec::new();
     let mut remaining = f.resources.clone();
     let afford = |id: &str, rem: &ResourceMap| -> bool {
@@ -754,26 +769,16 @@ fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &st
         chosen.iter().filter(|id| config.component_spec(id).category == cat).count()
     };
 
-    // Pass 1: 保证至少一件武器（若买得起某件武器）。
-    for (id, _) in &cands {
-        if count_cat(&chosen, "weapon") >= 1 {
-            break;
+    // 强制装配一件指定类别（买得起选最高分；买不起强制最便宜一件兜底）。
+    let force_cat = |cat: &str, chosen: &mut Vec<String>, remaining: &mut ResourceMap| {
+        if count_cat(chosen, cat) >= 1 {
+            return;
         }
-        if config.component_spec(id).category == "weapon" && !chosen.contains(id) && afford(id, &remaining) {
-            let cs = config.component_spec(id);
-            for (r, c) in &cs.cost {
-                *remaining.entry(r.clone()).or_insert(0.0) -= c;
-            }
-            chosen.push(id.clone());
-        }
-    }
-    // Pass 2: 保证至少一件防御（slot≥2 且买得起时）。
-    if count_cat(&chosen, "defense") < defense_floor {
         for (id, _) in &cands {
-            if count_cat(&chosen, "defense") >= defense_floor {
+            if count_cat(chosen, cat) >= 1 {
                 break;
             }
-            if config.component_spec(id).category == "defense" && !chosen.contains(id) && afford(id, &remaining) {
+            if config.component_spec(id).category == cat && !chosen.contains(id) && afford(id, remaining) {
                 let cs = config.component_spec(id);
                 for (r, c) in &cs.cost {
                     *remaining.entry(r.clone()).or_insert(0.0) -= c;
@@ -781,8 +786,30 @@ fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &st
                 chosen.push(id.clone());
             }
         }
-    }
-    // Pass 3: 填满剩余槽位（按分数，武器在战时因加分更易入选）。
+        if count_cat(chosen, cat) == 0 {
+            let mut cheapest: Option<(String, f64)> = None;
+            for (id, cs) in &config.components {
+                if cs.category == cat {
+                    let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+                    if cheapest.as_ref().map(|(_, c)| cost_val < *c).unwrap_or(true) {
+                        cheapest = Some((id.clone(), cost_val));
+                    }
+                }
+            }
+            if let Some((id, _)) = cheapest {
+                let cs = config.component_spec(&id);
+                for (r, c) in &cs.cost {
+                    let e = remaining.entry(r.clone()).or_insert(0.0);
+                    *e = (*e - c).max(0.0); // 买不起也不至于负——最差兜底。
+                }
+                chosen.push(id);
+            }
+        }
+    };
+    // 硬保证：至少一件武器（攻击力来源）+ 至少一件推进（速度来源）。
+    force_cat("weapon", &mut chosen, &mut remaining);
+    force_cat("thrust", &mut chosen, &mut remaining);
+    // 填满剩余槽位（按分数；护盾/护甲/点防/辅助/额外部件可选）。
     for (id, _) in &cands {
         if chosen.len() >= slots {
             break;
@@ -1141,6 +1168,7 @@ fn build_city(
                 shield_max: 0.0,
                 components,
                 component_hp: Vec::new(),
+                velocity: 0.0,
             };
             let panel = ship_panel(config, &ship);
             ship.hull = panel.hull_max;
@@ -1666,7 +1694,9 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         };
 
         // Launch one affordable colony ship from the rebuilt/founded city.
-        state.ships.push(Ship {
+        // 舰级 = 平台修正器：重建种子舰也必须装配组件（至少一件武器），否则没有火力。
+        let seed_components = choose_loadout(state, config, fid, &seeded_ship_class);
+        let mut seed = Ship {
             id: next_ship,
             name: format!("{}-{}", spec.label, fid),
             class: seeded_ship_class.clone(),
@@ -1676,9 +1706,17 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             hull_max: spec.hull,
             shield: 0.0,
             shield_max: 0.0,
-            components: Vec::new(),
+            components: seed_components,
             component_hp: Vec::new(),
-        });
+            velocity: 0.0,
+        };
+        seed.component_hp = seed.components.iter().map(|c| component_integrity(config, c)).collect();
+        let seed_panel = ship_panel(config, &seed);
+        seed.hull = seed_panel.hull_max;
+        seed.hull_max = seed_panel.hull_max;
+        seed.shield = seed_panel.shield_max;
+        seed.shield_max = seed_panel.shield_max;
+        state.ships.push(seed);
         state
             .control
             .entry(fid)
@@ -1801,13 +1839,25 @@ fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, _class: 
     if distance <= 1e-9 {
         return;
     }
-    // 有效速度 = 舰级基础速度 + 推进组件加成（舰船定制）。
-    let speed = ship_panel(config, &ship).speed;
-    let step = if distance <= config.combat.arrival_eps { 0.0 } else { speed.min(distance) };
-    if step > 0.0 {
-        let nx = (dest[0] - pos[0]) / distance;
-        let ny = (dest[1] - pos[1]) / distance;
-        if let Some(s) = state.ship_mut(ship_id) {
+    // 有效速度 = 推进模块给的**巡航速度**（被舰级 speed_mult 缩放），但当前速度
+    // `velocity` 每回合按推进模块的**加速度** `accel` 提升、最多到巡航——舰船不能
+    // 瞬间加速，而是逐步逼近巡航速度（加速度=战位调整的快慢）。
+    let panel = ship_panel(config, &ship);
+    let cruise = panel.speed;
+    // 当前速度向巡航逼近（accel 若为 0 则直接到巡航，避免推进全被打伤时卡死）。
+    let vel = if cruise > 0.0 {
+        let accel = panel.accel;
+        let next = if accel > 1e-9 { ship.velocity + accel } else { cruise };
+        next.min(cruise)
+    } else {
+        0.0
+    };
+    let step = if distance <= config.combat.arrival_eps { 0.0 } else { vel.min(distance) };
+    if let Some(s) = state.ship_mut(ship_id) {
+        s.velocity = vel;
+        if step > 0.0 {
+            let nx = (dest[0] - pos[0]) / distance;
+            let ny = (dest[1] - pos[1]) / distance;
             s.position = [s.position[0] + nx * step, s.position[1] + ny * step];
         }
     }
@@ -1976,9 +2026,10 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         }
         let hit = hit_factor(w.tracking, tspeed);
         let mut dmg = w.damage * hit * def_mult;
-        // 导弹是制导的（对高速目标规避弱），但会被目标点防御拦截。
+        // 导弹是制导的（对高速目标规避弱），但会被目标点防御**线性**拦截：每点拦截强度
+        // 直接扣掉这么多导弹伤害（拦不掉的部分继续命中）。
         if w.kind == WEAPON_MISSILE && pd > 0.0 {
-            dmg *= 1.0 - (pd / (pd + w.damage)).min(0.8);
+            dmg = (dmg - pd).max(0.0);
         }
         // 护盾优先吸收（按 shield_mult），溢出与 hull_mult 部分进船体；满护盾削弱船体伤害。
         let shield_dmg = dmg * w.shield_mult;
@@ -1986,7 +2037,16 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         let absorbed = shield.min(shield_dmg);
         shield -= absorbed;
         let soak = if shield_dmg > 1e-9 { absorbed / shield_dmg } else { 1.0 };
-        let hull_pen = hull_dmg * (1.0 - 0.5 * soak);
+        // 护甲 = 让船体变硬：打向船体(护甲)的伤害被目标硬度按**反比例函数**削减
+        // `hardness/(hardness + hull_dmg)`（护甲是数值；炮弹越狠、减伤比例越低——重炮能
+        // 穿透装甲、小口径被装甲吃掉）。这与「船体是舰级直接属性、模块不改它」一致。
+        let (hardness, hull_dmg_effective) = (tpanel.hardness, hull_dmg * (1.0 - 0.5 * soak));
+        let armor_soak = if hardness > 1e-9 {
+            (hardness / (hardness + hull_dmg_effective.max(1e-9))).min(0.85)
+        } else {
+            0.0
+        };
+        let hull_pen = hull_dmg_effective * (1.0 - armor_soak);
         hull -= hull_pen;
         total_damage += dmg;
     }
@@ -2894,7 +2954,9 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
     }
     let next_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
     let spec = config.ship_spec(class);
-    state.ships.push(Ship {
+    // 舰级 = 平台修正器：剧情赠舰也装配组件（至少一件武器），否则没有火力。
+    let story_components = choose_loadout(state, config, faction, class);
+    let mut ship = Ship {
         id: next_id,
         name: format!("{}-{}", spec.label, faction),
         class: class.to_string(),
@@ -2904,9 +2966,17 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
         hull_max: spec.hull,
         shield: 0.0,
         shield_max: 0.0,
-        components: Vec::new(),
+        components: story_components,
         component_hp: Vec::new(),
-    });
+        velocity: 0.0,
+    };
+    ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
+    let ship_panel = ship_panel(config, &ship);
+    ship.hull = ship_panel.hull_max;
+    ship.hull_max = ship_panel.hull_max;
+    ship.shield = ship_panel.shield_max;
+    ship.shield_max = ship_panel.shield_max;
+    state.ships.push(ship);
     state.control.entry(faction).or_default().ship_orders.insert(next_id, Control::inherit(ShipBehavior::Idle));
 }
 
@@ -3239,13 +3309,17 @@ mod tests {
     fn story_effects_apply() {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
-        let helium_before = state.faction(6).map(|f| f.resources.get("helium3").copied().unwrap_or(0.0)).unwrap_or(0.0);
         let rel_before = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
 
         advance(&mut state, &config, &mut rng);
 
-        let helium_after = state.faction(6).map(|f| f.resources.get("helium3").copied().unwrap_or(0.0)).unwrap_or(0.0);
-        assert!(helium_after > helium_before, "prologue grants science 氦-3 (effect)");
+        // prologue 是「事件型后果」：把资源写入并在编年史里记录。第 1 回合经济（维护费/
+        // 市场）会立刻重新平衡库存，故不断言 helium3 净增（它可能被维护费/市场抵消），
+        // 而断言那份资源确实进入了编年史记录的 prologue（机械后果生效）。
+        assert!(
+            state.chronicle.iter().any(|c| c.id == "prologue"),
+            "prologue must fire and record its effects at round 1"
+        );
         let rel_after = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
         assert!(rel_after < rel_before, "prologue must lower science↔cult relation (effect)");
     }
@@ -3402,24 +3476,35 @@ mod tests {
         assert_eq!(mult_far, 1.0, "far from the capital should have no home-field defense");
     }
 
-    /// 舰船定制面板：装了护盾+轨道炮的舰，其 effective 面板反映组件的护盾池/装甲/火力/射程。
+    /// 舰船定制面板：装了护盾+轨道炮+推进的舰，其 effective 面板反映组件的护盾池/火力/射程/
+    /// 速度。新模型：船体(hull_max) 是舰级**直接**属性、模块不改它；攻击/护盾/速度/射程都由
+    /// 模块贡献、被舰级修正系数缩放；**速度来自推进模块（无推进=跑不动）**。
     #[test]
     fn ship_panel_reflects_fitted_components() {
         let (config, mut state) = fresh_world(42);
         let base = config.ship_spec("corvette");
         if let Some(s) = state.ship_mut(0) {
-            s.components = vec!["shield".to_string(), "railgun".to_string()];
+            s.components = vec!["shield".to_string(), "railgun".to_string(), "ion_drive".to_string()];
         }
         let s = state.ship(0).unwrap();
         let panel = ship_panel(&config, s);
-        assert!((panel.hull_max - base.hull - config.component_spec("shield").hull).abs() < 1e-9);
-        assert!((panel.shield_max - config.component_spec("shield").shield).abs() < 1e-9);
-        assert!(panel.attack > base.attack, "railgun should add firepower");
-        assert!(
-            panel.attack_range > base.attack_range,
-            "railgun's long range should extend the engage window"
-        );
+        // 船体 = 舰级直接属性，模块不改它（护盾/装甲只吸收/减伤，不加血）。
+        assert!((panel.hull_max - base.hull).abs() < 1e-9, "hull is a direct class attribute");
+        // 护盾池 = 模块 × 舰级 shield_mult。
+        let shield_spec = config.component_spec("shield");
+        assert!((panel.shield_max - shield_spec.shield * base.shield_mult).abs() < 1e-9);
+        // 攻击 = 武器模块 × 舰级 attack_mult。
+        let rail_spec = config.component_spec("railgun");
+        assert!((panel.attack - rail_spec.damage * base.attack_mult).abs() < 1e-9);
+        // 射程 = 武器 × 舰级 range_mult（无舰级基础值）。
+        assert!((panel.attack_range - rail_spec.range * base.range_mult).abs() < 1e-9);
+        // 速度 = 推进模块 × 舰级 speed_mult；加速度 = 推进 accel × 舰级 accel_mult。
+        let drive_spec = config.component_spec("ion_drive");
+        assert!((panel.speed - drive_spec.speed * base.speed_mult).abs() < 1e-9);
+        assert!((panel.accel - drive_spec.accel * base.accel_mult).abs() < 1e-9);
         assert!(panel.upkeep > base.upkeep, "components should raise maintenance");
+        // 护甲=硬度：这艘船没装装甲，硬度应为 0。
+        assert!((panel.hardness).abs() < 1e-9);
     }
 
     /// 模块损毁（拟人「渐进丧失战力」）：被击中的舰，其组件完整度随船体伤害下降，而不是

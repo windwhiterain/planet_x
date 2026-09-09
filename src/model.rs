@@ -220,15 +220,12 @@ impl Building {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ShipSpec {
     pub label: String,
-    /// 护甲 (hull points).
+    /// 船体 (hull points) —— **舰级直接属性**。模块**不能**改变它：护甲只是让船体变硬
+    /// （减伤）、护盾提供吸收池，二者都不改这条基准。这是「船体 = 平台本体」。
     pub hull: f64,
-    /// 护甲再生 (%/时间): fraction of the max hull restored per round.
+    /// 船体再生 (%/时间): fraction of the max hull restored per round —— 同样直接、不被
+    /// 模块改变（模块的再生走护盾再生 `shield_regen`）。
     pub hull_regen: f64,
-    pub attack: f64,
-    /// Distance covered per round, in AU.
-    pub speed: f64,
-    /// Engagement distance, in AU.
-    pub attack_range: f64,
     /// Build points required to finish this class at a shipyard.
     pub build_points: f64,
     /// Resource cost to fully build a ship of this class.
@@ -236,11 +233,39 @@ pub struct ShipSpec {
     /// Per-round maintenance (in market value / credits) per ship — a continuous
     /// sink that caps fleet growth and makes big fleets expensive to sustain.
     pub upkeep: f64,
-    /// 组件槽位数：本舰级可同时装配多少个「定制组件」（武器/防御/推进/辅助）。
-    /// 0 = 不可定制（裸舰，仅按 class 基础面板）。这是「飞船定制化」的能力上限——
-    /// 更大的舰级能承载更多组件，把资源优势转化为战斗力。
+    /// 组件槽位数：本舰级可同时装配多少个「定制组件」（武器/护盾/护甲/推进/辅助）。
+    /// 这是「飞船定制化」的能力上限——更大的舰级能承载更多组件，把资源优势转化为战斗力。
     #[serde(default)]
     pub slots: u32,
+    // --- 舰级 = 平台修正器：这些系数**缩放它所搭载的模块**，而不是给舰叠加独立的
+    // 面板数字。舰级身份（护卫=快、战列=重火力、航母=超远程）就体现在系数分布上。
+    // 速度/加速度/攻击距离没有舰级基础值——它们完全来自推进/武器模块，故「推进」和
+    // `武器`一样是必须的（没有推进模块就没有速度）。 ---
+    /// 护甲硬度修正：作用于护甲模块的 hardness（反比例减伤）。
+    #[serde(default = "default_mult")]
+    pub armor_mult: f64,
+    /// 护盾池修正：作用于护盾模块的 shield（吸收池）。
+    #[serde(default = "default_mult")]
+    pub shield_mult: f64,
+    /// 护盾再生修正：作用于护盾/辅助模块的 shield_regen。
+    #[serde(default = "default_mult")]
+    pub shield_regen_mult: f64,
+    /// 速度修正：作用于推进模块的巡航速度 `speed`。
+    #[serde(default = "default_mult")]
+    pub speed_mult: f64,
+    /// 加速度修正：作用于推进模块的加速度 `accel`（每回合提升当前速度，最多到巡航）。
+    #[serde(default = "default_mult")]
+    pub accel_mult: f64,
+    /// 伤害修正：作用于武器模块的 damage。
+    #[serde(default = "default_mult")]
+    pub attack_mult: f64,
+    /// 攻击距离修正：作用于武器模块的 range。
+    #[serde(default = "default_mult")]
+    pub range_mult: f64,
+}
+
+fn default_mult() -> f64 {
+    1.0
 }
 
 /// A ship component (舰船定制组件) keyed by id in the config. Fitting a component
@@ -285,12 +310,18 @@ pub struct ComponentSpec {
     pub shield: f64,
     /// 护盾再生（占 shield_max / 月）。
     pub shield_regen: f64,
-    /// 额外船体护甲（防御组件加）。
-    pub hull: f64,
-    /// 点防御拦截强度（防御组件加）：拦下来袭导弹（确定性按强度折算导弹伤害）。
+    /// 船体硬度（数值）：按**反比例函数**削减打向船体的伤害——「护甲让船体变硬」，
+    /// 是减伤系数，**不是加血**。舰级的 base hull 是直接属性，模块不能改它。
+    #[serde(default)]
+    pub hardness: f64,
+    /// 点防御拦截强度（数值）：**线性**扣减来袭导弹的伤害（拦掉 `intercept` 点）。
     pub intercept: f64,
-    /// 额外速度（AU/月）。
+    /// 推进模块的**巡航速度**（AU/月）：由舰级 `speed_mult` 缩放。没有推进就没速度。
     pub speed: f64,
+    /// 推进模块的**加速度**（AU/月²）：每回合把当前速度提升这么多，最多到巡航速度
+    /// `speed`——由舰级 `accel_mult` 缩放。体现「加速到巡航需要时间」。
+    #[serde(default)]
+    pub accel: f64,
     /// 额外船体再生（占 hull_max / 月）。
     pub hull_regen: f64,
     /// 额外每回合维护费（市场价值/舰）。组件越强，舰队越难养——抑制无脑堆强组件。
@@ -323,15 +354,24 @@ pub struct Weapon {
 /// [`ship_weapons`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct ShipPanel {
-    /// 舰级炮台+组件的总攻击（用于对城轰炸的简化结算与报告）。
+    /// 全武器模块的总攻击（用于对城轰炸的简化结算与报告）。
     pub attack: f64,
+    /// 有效攻击距离：`max(武器.range × range_mult)`（来自武器模块，无舰级基础值）。
     pub attack_range: f64,
+    /// 巡航速度：`Σ(推进.speed × speed_mult)`（来自推进模块，无舰级基础值）。
     pub speed: f64,
+    /// 加速度：`Σ(推进.accel × accel_mult)`（来自推进模块）。
+    pub accel: f64,
+    /// 舰级的 base hull（直接属性，模块不改）。
     pub hull_max: f64,
+    /// 舰级的 base hull_regen（直接属性，模块不改）。
     pub hull_regen: f64,
     pub shield_max: f64,
     pub shield_regen: f64,
+    /// 点防御拦截强度（线性，直接扣减来袭导弹伤害）。
     pub intercept: f64,
+    /// 舰体硬度（来自护甲组件，反比例减伤）：削减打向船体的伤害。
+    pub hardness: f64,
     pub upkeep: f64,
 }
 
@@ -355,7 +395,7 @@ fn weapon_kind(t: &str) -> u8 {
 /// one-shot.
 pub fn component_integrity(config: &GameConfig, id: &str) -> f64 {
     let cs = config.component_spec(id);
-    (cs.shield + cs.hull + cs.damage * 0.4).max(18.0)
+    (cs.shield + cs.hardness * 40.0 + cs.damage * 0.4).max(18.0)
 }
 
 /// A ship's component at index `i`'s effectiveness (0..1): its current integrity
@@ -374,15 +414,20 @@ pub fn component_effectiveness(config: &GameConfig, ship: &Ship, i: usize) -> f6
 
 pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
     let base = config.ship_spec(&ship.class);
+    // 舰级 = 平台修正器 + 直接船体属性。船体值(hull/hull_regen)是**直接**的，模块不改它；
+    // 其余战斗属性（攻击/射程/速度/护盾/硬度/点防）全部由模块贡献、被舰级修正系数缩放。
+    // 所以「推进」和「武器」一样是必须的：没有推进模块就没有速度、没有武器就没有攻击力。
     let mut p = ShipPanel {
-        attack: base.attack,
-        attack_range: base.attack_range,
-        speed: base.speed,
+        attack: 0.0,
+        attack_range: 0.0,
+        speed: 0.0,
+        accel: 0.0,
         hull_max: base.hull,
         hull_regen: base.hull_regen,
         shield_max: 0.0,
         shield_regen: 0.0,
         intercept: 0.0,
+        hardness: 0.0,
         upkeep: base.upkeep,
     };
     for (i, c) in ship.components.iter().enumerate() {
@@ -391,38 +436,51 @@ pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {
             continue; // 彻底被击毁的组件不再贡献面板。
         }
         if let Some(cs) = config.components.get(c) {
-            p.attack += cs.damage * eff;
-            p.speed += cs.speed * eff;
-            p.hull_max += cs.hull * eff;
-            p.hull_regen += cs.hull_regen * eff;
-            p.shield_max += cs.shield * eff;
-            p.shield_regen += cs.shield_regen * eff;
-            if cs.range > p.attack_range {
-                p.attack_range = cs.range;
+            match cs.category.as_str() {
+                "weapon" => {
+                    p.attack += cs.damage * base.attack_mult * eff;
+                    let r = cs.range * base.range_mult;
+                    if r > p.attack_range {
+                        p.attack_range = r;
+                    }
+                }
+                "defense" => {
+                    // 护盾池：吸收伤害，被 shield_mult 缩放。
+                    p.shield_max += cs.shield * base.shield_mult * eff;
+                    p.shield_regen += cs.shield_regen * base.shield_regen_mult * eff;
+                    // 护甲：让船体变硬（反比例减伤），被 armor_mult 缩放。
+                    p.hardness += cs.hardness * base.armor_mult * eff;
+                    // 点防御：线性拦截导弹。
+                    p.intercept += cs.intercept * eff;
+                    // 一些防御组件也带附加速度（被 speed_mult 缩放）。
+                    p.speed += cs.speed * base.speed_mult * eff;
+                }
+                "thrust" => {
+                    // 推进 = 速度/加速度的**直接来源**，被舰级 speed_mult/accel_mult 缩放。
+                    // 没有推进模块就没有速度。
+                    p.speed += cs.speed * base.speed_mult * eff;
+                    p.accel += cs.accel * base.accel_mult * eff;
+                }
+                "utility" => {
+                    p.shield_regen += cs.shield_regen * base.shield_regen_mult * eff;
+                    p.speed += cs.speed * base.speed_mult * eff;
+                    p.accel += cs.accel * base.accel_mult * eff;
+                }
+                _ => {}
             }
-            p.intercept += cs.intercept * eff;
             p.upkeep += cs.upkeep * eff;
         }
     }
     p
 }
 
-/// Enumerate the weapons a ship fields: always its class gun battery (a kinetic
-/// array) plus each fitted weapon component. `kind` marks the damage type so the
-/// combat resolver can apply shield/hull multipliers and missile interception.
+/// Enumerate the weapons a ship fields: each fitted weapon component. `kind` marks
+/// the damage type so the combat resolver can apply shield/hull multipliers and
+/// missile interception. There is **no class gun battery** — a ship's firepower is
+/// entirely the weapon modules it carries, scaled by its class `attack_mult`.
 pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
     let base = config.ship_spec(&ship.class);
     let mut ws = Vec::new();
-    if base.attack > 0.0 {
-        ws.push(Weapon {
-            damage: base.attack,
-            range: base.attack_range,
-            tracking: 2.0, // 舰级炮台 = 中等追踪（快船能规避）
-            shield_mult: 0.6,
-            hull_mult: 1.0,
-            kind: WEAPON_KINETIC,
-        });
-    }
     for (i, c) in ship.components.iter().enumerate() {
         let eff = component_effectiveness(config, ship, i);
         if eff <= 1e-9 {
@@ -431,8 +489,8 @@ pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
         if let Some(cs) = config.components.get(c) {
             if cs.category == "weapon" && cs.damage > 0.0 {
                 ws.push(Weapon {
-                    damage: cs.damage * eff,
-                    range: cs.range,
+                    damage: cs.damage * base.attack_mult * eff,
+                    range: cs.range * base.range_mult,
                     tracking: cs.tracking,
                     shield_mult: cs.shield_mult,
                     hull_mult: cs.hull_mult,
@@ -538,6 +596,10 @@ pub struct Ship {
     /// 空 = 旧数据/裸舰（视为全部完好）。
     #[serde(default)]
     pub component_hp: Vec<f64>,
+    /// 当前速度（AU/月）：每回合按推进模块的 `accel` 提升、最多到巡航速度 `speed`。
+    /// 体现「加速到巡航需要时间」——推进模块给的加速度决定多快抵达战术位置。
+    #[serde(default)]
+    pub velocity: f64,
 }
 
 fn default_hull_max() -> f64 {

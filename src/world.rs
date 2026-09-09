@@ -614,6 +614,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             shield_max: 0.0,
             components: Vec::new(),
             component_hp: Vec::new(),
+            velocity: 0.0,
         });
         next_ship += 1;
     };
@@ -691,7 +692,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // Default control scopes: everything AI until the player flips fields.
     let scope = ControlScope::default();
 
-    State {
+    let mut state = State {
         round: 0,
         time_month: 0.0,
         bodies,
@@ -702,5 +703,32 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         scope,
         events: Vec::new(),
         chronicle: Vec::new(),
+    };
+
+    // --- 开局舰队装配（消灭裸舰）---------------------------------------------
+    // 舰级现在是「平台修正器」，攻击力完全来自所装配的武器模块。因此开局预置舰
+    // （初始造舰时是建在 State 组装前的裸舰）必须在世界生成后按资源优势补装配组件，
+    // 否则它们没有火力。预置舰的组件视为开局已内置（**不扣**库存——否则会掏空第
+    // 一回合的经济，而「预置即已装备」在概念上更合理）。
+    let fleet: Vec<(u32, String, FactionId)> = state
+        .ships
+        .iter()
+        .filter(|s| s.components.is_empty())
+        .map(|s| (s.id, s.class.clone(), s.faction_id))
+        .collect();
+    for (sid, class, fid) in fleet {
+        let comps = crate::sim::choose_loadout(&state, &config, fid, &class);
+        if let Some(s) = state.ships.iter_mut().find(|s| s.id == sid) {
+            s.components = comps;
+            s.component_hp = s.components.iter().map(|c| component_integrity(&config, c)).collect();
+            // 组件可能会加护盾池/硬度/速度，重算并钳制当前值到新上限。
+            let panel = ship_panel(&config, s);
+            s.hull_max = panel.hull_max;
+            s.hull = s.hull.min(panel.hull_max);
+            s.shield_max = panel.shield_max;
+            s.shield = panel.shield_max;
+        }
     }
+
+    state
 }

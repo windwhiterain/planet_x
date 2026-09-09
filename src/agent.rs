@@ -114,13 +114,20 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                     "label": s.label,
                     "hull": r2(s.hull),
                     "hull_regen": r2(s.hull_regen),
-                    "attack": r2(s.attack),
-                    "speed": r2(s.speed),
-                    "attack_range": r2(s.attack_range),
+                    "slots": s.slots,
+                    // 舰级 = 平台修正器：这些系数缩放模块输出（护甲/护盾/护盾再生/速度/加速度/
+                    // 伤害/攻击距离）。速度/加速度/攻击距离**没有舰级基础值**——它们完全来自
+                    // 推进/武器模块，所以「推进」和「武器」一样是必须的。
+                    "armor_mult": r2(s.armor_mult),
+                    "shield_mult": r2(s.shield_mult),
+                    "shield_regen_mult": r2(s.shield_regen_mult),
+                    "speed_mult": r2(s.speed_mult),
+                    "accel_mult": r2(s.accel_mult),
+                    "attack_mult": r2(s.attack_mult),
+                    "range_mult": r2(s.range_mult),
                     "build_points": r2(s.build_points),
                     "build_cost": to_cost(&s.build_cost),
                     "upkeep": r2(s.upkeep),
-                    "slots": s.slots,
                 }),
             )
         })
@@ -149,7 +156,8 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
                         "hull_mult": r2(c.hull_mult),
                         "shield": r2(c.shield),
                         "shield_regen": r2(c.shield_regen),
-                        "hull": r2(c.hull),
+                        // 护甲 = 让船体变硬（减伤系数），不是加血。
+                        "hardness": r2(c.hardness),
                         "intercept": r2(c.intercept),
                         "speed": r2(c.speed),
                         "hull_regen": r2(c.hull_regen),
