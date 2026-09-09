@@ -72,6 +72,15 @@ pub struct ShipOrderEntry {
     pub mode: Option<ControlMode>,
 }
 
+/// 一艘舰的行为风格（per-舰 可配置）读面：三条轴各取 [-1,1]，0 = 基线。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ShipDoctrineEntry {
+    pub ship: ShipId,
+    pub aggression: f64,
+    pub temper: f64,
+    pub lone_wolf: f64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BudgetEntry {
     pub resource: String,
@@ -111,6 +120,7 @@ pub struct LoyaltyBudgetEntry {
 pub struct FactionControlView {
     pub faction_id: FactionId,
     pub ship_orders: Vec<ShipOrderEntry>,
+    pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
@@ -176,6 +186,20 @@ pub struct ShipOrderPatch {
     /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
     #[serde(default)]
     pub mode: Option<Option<ControlMode>>,
+}
+
+/// 一艘舰的行为风格补丁（per-舰 可配置）：覆盖 `ship` 的某条轴；缺省轴保留现值。
+/// 每条轴会被钳制到 [-1,1]（技能就是在这个区间里取值的）。
+#[derive(Deserialize, Default, JsonSchema)]
+pub struct ShipDoctrinePatch {
+    /// 目标舰（唯一名 identity）。
+    pub ship: ShipId,
+    #[serde(default)]
+    pub aggression: Option<f64>,
+    #[serde(default)]
+    pub temper: Option<f64>,
+    #[serde(default)]
+    pub lone_wolf: Option<f64>,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -261,6 +285,9 @@ pub struct FactionControlPatch {
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
+    /// 本势力各舰的行为风格补丁（per-舰 可配置）。
+    #[serde(default)]
+    pub ship_doctrine: Vec<ShipDoctrinePatch>,
     /// 投资预算补丁（建设）。
     #[serde(default)]
     pub investment_budget: Vec<BudgetPatch>,
@@ -323,6 +350,18 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         .iter()
         .map(|(sid, ctrl)| ShipOrderEntry { ship: sid.clone(), behavior: ctrl.value.clone(), mode: ctrl.mode })
         .collect();
+    // 读面：本势力每艘舰当前的行为风格（per-舰 可配置）。
+    let ship_doctrine = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid)
+        .map(|s| ShipDoctrineEntry {
+            ship: s.name.clone(),
+            aggression: s.doctrine.aggression,
+            temper: s.doctrine.temper,
+            lone_wolf: s.doctrine.lone_wolf,
+        })
+        .collect();
     let investment_budget = c
         .investment_budget
         .iter()
@@ -372,6 +411,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
     FactionControlView {
         faction_id: fid,
         ship_orders,
+        ship_doctrine,
         investment_budget,
         construction_budget,
         invest_weights,
@@ -447,6 +487,16 @@ fn round_view(v: FactionControlView) -> FactionControlView {
             .ship_orders
             .into_iter()
             .map(|o| ShipOrderEntry { ship: o.ship, behavior: round_behavior(o.behavior), mode: o.mode })
+            .collect(),
+        ship_doctrine: v
+            .ship_doctrine
+            .into_iter()
+            .map(|d| ShipDoctrineEntry {
+                ship: d.ship,
+                aggression: r2(d.aggression),
+                temper: r2(d.temper),
+                lone_wolf: r2(d.lone_wolf),
+            })
             .collect(),
         investment_budget: v
             .investment_budget
@@ -526,6 +576,25 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             }
             if let Some(m) = sp.mode {
                 ctrl.mode = m;
+            }
+        }
+        // 行为风格补丁：只作用于本势力确实拥有的舰；每条轴钳制到 [-1,1]。
+        for d in &fac.ship_doctrine {
+            let Some(ship) = state
+                .ships
+                .iter_mut()
+                .find(|s| s.name == d.ship && s.faction_id == fac.faction_id)
+            else {
+                continue;
+            };
+            if let Some(v) = d.aggression {
+                ship.doctrine.aggression = v.clamp(-1.0, 1.0);
+            }
+            if let Some(v) = d.temper {
+                ship.doctrine.temper = v.clamp(-1.0, 1.0);
+            }
+            if let Some(v) = d.lone_wolf {
+                ship.doctrine.lone_wolf = v.clamp(-1.0, 1.0);
             }
         }
         for bp in &fac.investment_budget {
@@ -879,6 +948,29 @@ mod tests {
         apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
         let b = state.ship_behavior("长城".to_string()).expect("长城 has an order");
         assert_eq!(b, ShipBehavior::TargetShip { ship: "华盛顿".to_string(), attack: true });
+    }
+
+    /// Applying a ship-doctrine patch sets only the given axes on the faction's
+    /// own ships, clamps each axis to [-1,1], and ignores other-faction / unknown
+    /// ships (per-舰 可配置覆写).
+    #[test]
+    fn apply_ship_doctrine_patch() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "ship_doctrine": [
+                {"ship": "长城", "aggression": 1.0, "temper": -1.0, "lone_wolf": 3.0},
+                {"ship": "华盛顿", "temper": 1.0}
+            ]}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("doctrine patch applies");
+        let d = state.ship("长城").expect("长城 exists").doctrine;
+        assert_eq!(d.aggression, 1.0);
+        assert_eq!(d.temper, -1.0);
+        assert_eq!(d.lone_wolf, 1.0, "axis must be clamped to [-1,1]");
+        // 华盛顿 belongs to 美国, not 中国 → the 中国 patch must be a no-op.
+        let w = state.ship("华盛顿").expect("华盛顿 exists").doctrine;
+        assert_eq!(w.temper, 0.0, "other-faction ship must be untouched");
     }
 
     /// Setting a faction's scope to Player must actually take over its leaves
