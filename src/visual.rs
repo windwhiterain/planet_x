@@ -261,8 +261,8 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     for sh in &state.ships {
         let spec = config.ship_spec(&sh.class);
         let target = match state.ship_behavior(sh.name.clone()) {
-            Some(ShipBehavior::TargetShip { ship, .. }) => format!("船#{}", ship),
-            Some(ShipBehavior::TargetSettlement { city, .. }) => format!("城#{}", city),
+            Some(ShipBehavior::Follow { ship }) => format!("船#{}", ship),
+            Some(ShipBehavior::DockCity { city }) => format!("城#{}", city),
             Some(ShipBehavior::Dock { body }) => format!("停泊#{}", body),
             Some(ShipBehavior::Colonize { body }) => format!("殖民#{}", body),
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
@@ -423,12 +423,8 @@ where
 fn behavior_str(b: &ShipBehavior) -> String {
     match b {
         ShipBehavior::Move { position } => format!("移动({:+.1},{:+.1})", position[0], position[1]),
-        ShipBehavior::TargetShip { ship, attack } => {
-            format!("舰→船#{}{}", ship, if *attack { "·攻" } else { "·守" })
-        }
-        ShipBehavior::TargetSettlement { city, bombard } => {
-            format!("舰→城#{}{}", city, if *bombard { "·轰" } else { "" })
-        }
+        ShipBehavior::Follow { ship } => format!("舰→船#{}(跟随)", ship),
+        ShipBehavior::DockCity { city } => format!("舰→城#{}(停泊/包围)", city),
         ShipBehavior::Dock { body } => format!("舰→天体#{}(停泊轨道)", body),
         ShipBehavior::Colonize { body } => format!("舰→天体#{}(殖民)", body),
         ShipBehavior::Idle => "待命".to_string(),

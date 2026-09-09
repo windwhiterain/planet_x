@@ -823,6 +823,7 @@ fn build_city(
                 component_hp: Vec::new(),
                 velocity: 0.0,
                 doctrine: spec.default_doctrine,
+                kiting: spec.default_kiting,
                 attack_hist: BTreeMap::new(),
             };
             let panel = ship_panel(config, &ship);
@@ -928,24 +929,20 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         let owner = ship.faction_id.clone();
         let class = ship.class.clone();
         let pos = ship.position;
-        // 有效交战距离 = 舰级炮台 + 武器组件的最大射程（远程组件让舰在前置位置先开火）。
-        let range = ship_panel(config, ship).attack_range;
-        let focus = focus_of.get(&owner).cloned().flatten();
 
         let is_ai = state.ship_control(ship_id.clone()) == ControlMode::Ai;
 
         if !is_ai {
             // --- player-controlled: execute the commanded behavior literally ---
             let mut behavior = state.ship_behavior(ship_id.clone()).unwrap_or(ShipBehavior::Idle);
-            // A stale targeting/colonize order (target destroyed, city razed, or
-            // a body with no settlement) must not send the ship drifting toward
-            // the origin ([0,0]); degrade it to Idle and record a StaleOrder
+            // A stale Follow/DockCity/Colonize order (followed ship destroyed, target
+            // city razed, or a body with no settlement) must not send the ship drifting
+            // toward the origin ([0,0]); degrade it to Idle and record a StaleOrder
             // event so the agent knows to re-issue. Move/Idle are always valid.
             if !behavior_is_valid(state, config, behavior.clone(), &owner) {
                 let reason = match behavior {
-                    ShipBehavior::TargetShip { attack: true, .. } => format!("target ship gone"),
-                    ShipBehavior::TargetShip { attack: false, .. } => format!("guarded ship gone"),
-                    ShipBehavior::TargetSettlement { city, .. } => format!("target city {city} razed or not hostile"),
+                    ShipBehavior::Follow { ship } => format!("followed ship {ship} gone"),
+                    ShipBehavior::DockCity { city } => format!("target city {city} razed"),
                     ShipBehavior::Colonize { body } => format!("body {body} has no blank settlement"),
                     _ => "invalid".to_string(),
                 };
@@ -955,13 +952,9 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 ev(state, GameEvent::StaleOrder { ship: ship_id.clone(), reason });
                 behavior = ShipBehavior::Idle;
             }
+            // 行为 = 纯移动/停泊指令：攻击与轰炸都不再是行为——射程内有敌舰/敌城即自动发生。
+            // （待命 Idle = 原地保持「不移动」，但仍会落到下面的自动接战/轰炸。）
             match &behavior {
-                // Idle (待命): hold position, no movement this round.
-                ShipBehavior::Idle => continue,
-                ShipBehavior::Dock { .. } => {
-                    // 停泊：跟随天体——每回合重新取天体当前位置并驶向它。
-                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
-                }
                 ShipBehavior::Colonize { body } => {
                     let bpos = state.body_position(body);
                     if dist(pos, bpos) <= config.combat.arrival_eps {
@@ -972,67 +965,23 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                     let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                     if dist(np, bpos) <= config.combat.arrival_eps {
                         colonize(state, config, rng, &ship_id, body, &mut next_building_id);
-                    }
-                    continue;
-                }
-                ShipBehavior::TargetShip { ship, attack } => {
-                    if *attack {
-                        // Attack: pursue the enemy and open fire once in range.
-                        if let Some(t) = state.ship(ship) {
-                            if t.hull > 0.0 && dist(pos, t.position) <= range {
-                                fire_concentrate(state, config, &ship_id, ship);
-                                continue;
-                            }
-                        }
-                        move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
-                        if let Some(t) = state.ship(ship) {
-                            if t.hull > 0.0 {
-                                let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
-                                if dist(np, t.position) <= range {
-                                    fire_concentrate(state, config, &ship_id, ship);
-                                }
-                            }
-                        }
-                    } else {
-                        // Guard: escort a friendly ship. Stay near it and intercept
-                        // any hostile that comes within our own attack range, but do
-                        // not fire at the protected ship itself. This is a defensive
-                        // station, not a pursuit.
-                        if let Some(t) = state.ship(ship) {
-                            if t.hull > 0.0 {
-                                let gpos = t.position;
-                                // Drift toward the protected ship.
-                                move_toward(state, config, &ship_id, &class, gpos);
-                                let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
-                                // Intercept the closest hostile in range, scanning
-                                // around the guard first, then the protected ship.
-                                if let Some(enemy) = autocontrol::nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), &ship_id) {
-                                    fire_concentrate(state, config, &ship_id, &enemy);
-                                } else if let Some(e2) = autocontrol::nearest_enemy_ship(state, config, &owner, gpos, range, focus.clone(), &ship_id) {
-                                    fire_concentrate(state, config, &ship_id, &e2);
-                                }
-                            }
-                        }
-                    }
-                }
-                ShipBehavior::TargetSettlement { city, bombard } => {
-                    let cpos = city_position(state, city);
-                    if *bombard && dist(pos, cpos) <= config.combat.siege_range {
-                        bombard_city(state, config, &ship_id, city);
                         continue;
                     }
-                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
-                    if *bombard {
-                        let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
-                        if dist(np, cpos) <= config.combat.siege_range {
-                            bombard_city(state, config, &ship_id, city);
-                        }
-                    }
                 }
-                ShipBehavior::Move { .. } => {
-                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
+                ShipBehavior::Idle => {
+                    // 待命：软目标——原地保持；但附近有敌舰时按 kiting 姿态自动软移动（风筝拉开/贴脸压近）。
+                    let dest = autocontrol::kiting_dest(state, config, &ship_id).unwrap_or(pos);
+                    move_toward(state, config, &ship_id, &class, dest);
+                }
+                _ => {
+                    // Move / Follow / DockCity / Dock：驶向行为目的地（软目标）；附近有敌舰时由 kiting 姿态调整。
+                    let base = behavior_dest(state, &behavior);
+                    let dest = autocontrol::kiting_dest(state, config, &ship_id).unwrap_or(base);
+                    move_toward(state, config, &ship_id, &class, dest);
                 }
             }
+            // --- 自动战斗：攻击与轰炸不需要行为（射程内自动发生）---
+            autocontrol::auto_combat(state, config, &ship_id, &owner);
             continue;
         }
 
@@ -1322,6 +1271,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             component_hp: Vec::new(),
             velocity: 0.0,
             doctrine: spec.default_doctrine,
+            kiting: spec.default_kiting,
             attack_hist: BTreeMap::new(),
         };
         seed.component_hp = seed.components.iter().map(|c| component_integrity(config, c)).collect();
@@ -1694,7 +1644,8 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, pl
 }
 
 /// 把本舰所有武器的一次齐射（每武器 `fire_rate` 发）全打向**一个**目标——集中火力的
-/// 便捷入口（玩家指令路径 / 测试用）。等价的逐发 plan 版本见 [`fire`]。
+/// 便捷入口（测试用；玩家/ AI 都走 [`fire`] 的统一基本权重 plan）。保留为引擎原语。
+#[allow(dead_code)]
 pub(crate) fn fire_concentrate(state: &mut State, config: &GameConfig, attacker_id: &str, target_id: &str) {
     let weapons = state.ship(attacker_id).map(|a| ship_weapons(config, a)).unwrap_or_default();
     let plan: Vec<(usize, ShipId)> = weapons
@@ -1843,27 +1794,15 @@ fn home_regen_bonus(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     }
 }
 
-pub(crate) fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: &str) -> bool {
+pub(crate) fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: ShipBehavior, _owner: &str) -> bool {
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Dock { body } => state.body(&body).is_some(),
+        // 跟随舰船：所随舰还活着即可（友方护航 / 敌方追袭皆可）。
+        ShipBehavior::Follow { ship } => state.ship(&ship).map(|s| s.hull > 0.0).unwrap_or(false),
+        // 停泊城市：城还活着即可停靠/包围；是敌城则会在围城射程内自动轰炸。
+        ShipBehavior::DockCity { city } => state.city(&city).map(|c| !c.razed).unwrap_or(false),
         ShipBehavior::Colonize { body } => has_blank_site(state, &body),
-        ShipBehavior::TargetShip { ship, attack } => {
-            let alive = state.ship(&ship).map(|s| s.hull > 0.0).unwrap_or(false);
-            if !alive {
-                false
-            } else if attack {
-                // Attack mode: target must be a hostile ship.
-                state.ship(&ship).map(|s| hostile(state, config, owner, &s.faction_id)).unwrap_or(false)
-            } else {
-                // Guard mode: target must be a friendly (non-hostile) ship to protect.
-                state.ship(&ship).map(|s| !hostile(state, config, owner, &s.faction_id)).unwrap_or(false)
-            }
-        }
-        ShipBehavior::TargetSettlement { city, .. } => state
-            .city(&city)
-            .map(|c| !c.razed && hostile(state, config, owner, &c.faction_id))
-            .unwrap_or(false),
     }
 }
 
@@ -2075,8 +2014,8 @@ fn seed_colony_buildings(
 pub(crate) fn behavior_dest(state: &State, behavior: &ShipBehavior) -> [f64; 2] {
     match behavior {
         ShipBehavior::Move { position } => *position,
-        ShipBehavior::TargetShip { ship, .. } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
-        ShipBehavior::TargetSettlement { city, .. } => city_position(state, city),
+        ShipBehavior::Follow { ship } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
+        ShipBehavior::DockCity { city } => city_position(state, city),
         ShipBehavior::Dock { body } | ShipBehavior::Colonize { body } => state.body_position(body),
         ShipBehavior::Idle => [0.0, 0.0],
     }
@@ -2648,6 +2587,7 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
         component_hp: Vec::new(),
         velocity: 0.0,
         doctrine: spec.default_doctrine,
+        kiting: spec.default_kiting,
         attack_hist: BTreeMap::new(),
     };
     ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
@@ -2702,21 +2642,21 @@ mod tests {
         (config, state)
     }
 
-    /// A player-facing regression guard for the "stale target" bug: a player
-    /// ship ordered to attack an already-destroyed target must degrade to Idle,
+    /// A player-facing regression guard for the "stale follow" bug: a player
+    /// ship ordered to Follow an already-destroyed ship must degrade to Idle,
     /// never drift toward the origin ([0,0]).
     #[test]
-    fn player_stale_target_degrades_to_idle_and_does_not_drift() {
+    fn player_stale_follow_degrades_to_idle_and_does_not_drift() {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
 
-        // China (3) corvette id=0 is Player-ordered to approach US (1) destroyer id=3.
+        // China (3) corvette id=0 is Player-ordered to Follow US (1) destroyer id=3.
         let ship0 = state.ships[0].name.clone();
         let ship3 = state.ships[3].name.clone();
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": "中国",
-                "ship_orders": [{"ship": ship0.clone(), "behavior": {"TargetShip": {"ship": ship3.clone(), "attack": true}}, "mode": "Player"}]
+                "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship3.clone()}}, "mode": "Player"}]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
@@ -2743,17 +2683,16 @@ mod tests {
         );
     }
 
-    /// Guard semantics: `TargetShip { attack: false }` escorts a *friendly* ship
-    /// and intercepts hostiles within attack range — it must not fire at the
-    /// protected ship itself, and it must protect the friendly even though the
-    /// target is not hostile.
+    /// Follow semantics: `Follow { ship }` escorts/drives the ship — it is a pure
+    /// movement behavior. Combat is now automatic: when any hostile is inside the
+    /// ship's own attack range it auto-fires (via the unified base-weight targeting),
+    /// so a Follow ship still defends itself but never fires at the followed friend.
     #[test]
-    fn guard_escorts_friendly_and_intercepts_hostiles() {
+    fn follow_ship_auto_attacks_hostile_but_not_the_followed_friend() {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
 
-        // China (3): ship 0 guards its own friendly ship 1. Co-located at [0,0].
-        // Friendly same-faction target => valid guard.
+        // China (3): ship 0 Follows its own friendly ship 1. Co-located at [0,0].
         let ship0 = state.ships[0].name.clone();
         let ship1 = state.ships[1].name.clone();
         let ship3 = state.ships[3].name.clone();
@@ -2762,16 +2701,16 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": "中国",
-                "ship_orders": [{"ship": ship0.clone(), "behavior": {"TargetShip": {"ship": ship1.clone(), "attack": false}}, "mode": "Player"}]
+                "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship1.clone()}}, "mode": "Player"}]
             }]
         });
-        crate::web::apply_patch(&mut state, &config, &diff).expect("apply guard order");
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply follow order");
 
-        // Pin positions: defender + protected friend at [0,0]; US (1) enemy
-        // destroyer id=3 just inside the corvette attack range (0.4) so the guard
-        // can fire. Move the other US ships (4 destroyer, 5 cruiser) far out so
-        // only ship 3 engages (its damage 6 won't one-shot the guard's hull 12,
-        // letting the guard retaliate).
+        // Pin positions: follower + followed friend at [0,0]; US (1) enemy
+        // destroyer id=3 just inside the corvette attack range (0.4) so the
+        // auto-attack can fire. Move the other US ships (4 destroyer, 5 cruiser)
+        // far out so only ship 3 engages (its damage 6 won't one-shot the follower's
+        // hull 12, letting it retaliate).
         if let Some(s) = state.ship_mut(&ship0) {
             s.position = [0.0, 0.0];
         }
@@ -2789,7 +2728,7 @@ mod tests {
         }
 
         // The default world now opens peacefully, so make US (1) explicitly
-        // hostile to China (3) for this guard scenario.
+        // hostile to China (3) for this scenario.
         if let Some(f) = state.faction_mut("中国") {
             f.relations.insert("美国".to_string(), -35.0);
         }
@@ -2799,25 +2738,25 @@ mod tests {
 
         advance(&mut state, &config, &mut rng);
 
-        // The guard must have opened fire on the enemy, not on the friend.
+        // The ship must auto-fire on the hostile, not on the friend.
         assert!(
             state.events.iter().any(|e| matches!(
                 e,
                 GameEvent::Attack { attacker, target, .. } if attacker == &ship0 && target == &ship3
             )),
-            "guard should fire at the hostile, got {:?}",
+            "ship should auto-attack the hostile, got {:?}",
             state.events
         );
-        // The protected friend must be unharmed (no attack targeting ship 1).
+        // The followed friend must be unharmed (no attack targeting ship 1).
         assert!(
             !state.events.iter().any(|e| matches!(e, GameEvent::Attack { target, .. } if target == &ship1)),
-            "guard must not fire at its own protected ship, got {:?}",
+            "ship must not fire at its own followed friend, got {:?}",
             state.events
         );
-        // The order is still a valid guard (not degraded to Idle).
+        // The order is still a valid Follow (not degraded to Idle).
         assert_eq!(
             state.ship_behavior(ship0.clone()),
-            Some(ShipBehavior::TargetShip { ship: ship1.clone(), attack: false })
+            Some(ShipBehavior::Follow { ship: ship1.clone() })
         );
     }
 

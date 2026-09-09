@@ -573,7 +573,7 @@ fn fleet_flag(state: &State, fid: &str) -> Option<ShipId> {
 /// 本舰本回合的开火计划：每件武器的每一发都**独立索敌**——按行为风格层挑一个射程内的活
 /// 敌舰。攻击历史用本地副本随时更新（打过的刷新到 1），使「雨露均沾」武器在**同回合内**
 /// 就能把多发摊到不同目标。确定性。
-fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str) -> Vec<(usize, ShipId)> {
+pub(crate) fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str) -> Vec<(usize, ShipId)> {
     let Some(ship) = state.ship(ship_id) else { return Vec::new() };
     let weapons = ship_weapons(config, ship);
     if weapons.is_empty() {
@@ -591,6 +591,82 @@ fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str) -> Vec<(us
         }
     }
     plan
+}
+
+/// 就近的敌对城（在围城射程内）：进攻自动化（轰炸不需要行为）的目标候选。
+fn nearest_hostile_city_in_siege_range(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2]) -> Option<CityId> {
+    let mut best: Option<(f64, CityId)> = None;
+    for c in &state.cities {
+        if c.razed || !sim::hostile(state, config, owner, &c.faction_id) {
+            continue;
+        }
+        let p = sim::city_position(state, &c.name);
+        let d = sim::dist(pos, p);
+        if d > config.combat.siege_range {
+            continue;
+        }
+        let score = -d; // 就近。
+        if best.as_ref().map_or(true, |&(bs, _)| score > bs) {
+            best = Some((score, c.name.clone()));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// 自动轰炸：若 `owner` 的敌对城进入 `pos` 的围城射程，就轰炸最近的那座；返回是否轰炸。
+/// 无行为需求——凡在围城射程内的敌对城即触发。
+fn auto_bombard(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2]) -> bool {
+    if let Some(city) = nearest_hostile_city_in_siege_range(state, config, owner, pos) {
+        sim::bombard_city(state, config, ship_id, &city);
+        true
+    } else {
+        false
+    }
+}
+
+/// 自动战斗（攻击/轰炸都不需要行为）：射程内有敌对舰就按统一基本权重逐发索敌开火；
+/// 否则若有敌对城进入围城射程则就地轰炸。对玩家与 AI 共用。不修改该舰的指令（行为保留）。
+pub(crate) fn auto_combat(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str) {
+    let pos = state.ship(ship_id).map(|s| s.position).unwrap_or([0.0, 0.0]);
+    let plan = build_fire_plan(state, config, ship_id);
+    if !plan.is_empty() {
+        sim::fire(state, config, ship_id, &plan);
+        return;
+    }
+    auto_bombard(state, config, ship_id, owner, pos);
+}
+
+/// 本舰的**软移动目的地**（风筝<->贴脸姿态）：在附近有敌舰时按 `kiting` 重新定距离——
+/// `kiting<0`(风筝)把舰钉在**最远武器射程**、敌近则拉开；`kiting>0`(贴脸)把舰**压近**到最小
+/// 交战距离。`kiting=0`(基线)无调整。返回 `None` 表示不调整（调用方照用其软目标 `base`）。
+/// Move/Follow/Dock/Idle 都是**软目标**——即使玩家也不能硬控制它：附近有敌舰时此姿态自动
+/// 生效，对玩家与 AI 一视同仁。引擎结算不读它。
+pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> Option<[f64; 2]> {
+    let Some(ship) = state.ship(ship_id) else { return None };
+    if ship.kiting.abs() < 1e-9 {
+        return None; // 基线：无软调整。
+    }
+    let owner = ship.faction_id.clone();
+    let pos = ship.position;
+    let range = ship_panel(config, ship).attack_range;
+    // 感知半径：只对**附近**敌舰生效（武器射程 + 一点缓冲），不越全图。
+    let awareness = range + 0.5;
+    let Some(enemy) = nearest_enemy_ship(state, config, &owner, pos, awareness, None, ship_id) else {
+        return None;
+    };
+    let epos = state.ship(&enemy).map(|s| s.position).unwrap_or(pos);
+    let d = sim::dist(pos, epos);
+    if d < 1e-9 {
+        return None;
+    }
+    // unit: 从敌舰指向本舰的单位向量——把目的地放在「本舰当前这一侧、距敌 desired_r」处。
+    let unit = [(pos[0] - epos[0]) / d, (pos[1] - epos[1]) / d];
+    let desired_r = if ship.kiting < 0.0 {
+        range // 风筝：保持在最远武器射程。
+    } else {
+        config.combat.min_engage_range.max(0.0) // 贴脸：压近到最小交战距离。
+    };
+    Some([epos[0] + unit[0] * desired_r, epos[1] + unit[1] * desired_r])
 }
 
 fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _rng: &mut Prng, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipBehavior> {
@@ -614,9 +690,9 @@ fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _
         }
     }
     if let Some((_, s)) = best_ship {
-        return Some(ShipBehavior::TargetShip { ship: s, attack: true });
+        return Some(ShipBehavior::Follow { ship: s });
     }
-    // 城市轰炸：无追得上的敌舰时，就近围攻敌对城。
+    // 城市：无追得上的敌舰时，驶向最近的敌对城（到围城射程内便自动轰炸）。
     let mut best_city: Option<(f64, CityId)> = None;
     for c in &state.cities {
         if c.razed || !sim::hostile(state, config, owner, &c.faction_id) {
@@ -624,13 +700,13 @@ fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _
         }
         let p = sim::city_position(state, &c.name);
         let d = sim::dist(pos, p);
-        let score = 1.0 - (d / config.combat.siege_range).clamp(0.0, 1.0);
+        let score = -d;
         if best_city.as_ref().map_or(true, |&(bs, _)| score > bs) {
             best_city = Some((score, c.name.clone()));
         }
     }
     if let Some((_, c)) = best_city {
-        return Some(ShipBehavior::TargetSettlement { city: c, bombard: true });
+        return Some(ShipBehavior::DockCity { city: c });
     }
     // 无仗可打：就近（重建）殖民一处被夷平的定居点。
     for c in &state.cities {
@@ -643,9 +719,9 @@ fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _
 
 fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
     let cur = state.ship_behavior(ship_id.to_string());
-    // 保持一个仍有效的追击/围城行为，避免指挥官每回合在目标间抖动。
+    // 保持一个仍有效的跟随/围城行为，避免指挥官每回合在目标间抖动。
     if let Some(b) = cur {
-        if matches!(b, ShipBehavior::TargetShip { .. } | ShipBehavior::TargetSettlement { .. })
+        if matches!(b, ShipBehavior::Follow { .. } | ShipBehavior::DockCity { .. })
             && sim::behavior_is_valid(state, config, b.clone(), owner)
         {
             return Some(b);
@@ -653,7 +729,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
     }
     let picked = pick_target(state, config, &owner, pos, rng, focus, ship_id);
     let mut behavior = picked.unwrap_or(ShipBehavior::Idle);
-    // 护航/独狼：交战时闲着、且**不是独狼**（`lone_wolf < 0`）的舰，就近护卫本势力旗舰
+    // 护航/独狼：交战时闲着、且**不是独狼**（`lone_wolf < 0`）的舰，就近跟随本势力旗舰
     // （航母）。独狼（`lone_wolf` 高）空闲时保持自由接战（`pick_target` 已挑最近的敌舰）。
     if matches!(behavior, ShipBehavior::Idle)
         && config.combat.escort_range > 0.0
@@ -665,7 +741,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
                 if flag_id != ship_id {
                     let fpos = state.ship(&flag_id).map(|s| s.position).unwrap_or(pos);
                     if sim::dist(pos, fpos) <= config.combat.escort_range {
-                        behavior = ShipBehavior::TargetShip { ship: flag_id, attack: false };
+                        behavior = ShipBehavior::Follow { ship: flag_id };
                     }
                 }
             }
@@ -681,10 +757,10 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
     }
 }
 
-/// 警惕<->激进（风筝<->贴脸）影响自保撤退阈值：警惕(negative)更早撤(阈值更高)，
-/// 激进(positive)打得更久再撤(阈值更低)。
-fn effective_retreat_hull(config: &GameConfig, aggression: f64) -> f64 {
-    (config.combat.retreat_hull + 0.14 * -aggression).clamp(0.02, 0.9)
+/// 风筝<->贴脸影响自保撤退阈值：风筝(negative)更早撤(阈值更高)，贴脸(positive)打得更久
+/// 再撤(阈值更低)。同一姿态也驱动 `kiting_dest` 的软移动（敌近则拉开/压近）。
+fn effective_retreat_hull(config: &GameConfig, kiting: f64) -> f64 {
+    (config.combat.retreat_hull + 0.14 * -kiting).clamp(0.02, 0.9)
 }
 
 // --- 单舰 AI 回合（从 sim::step_military 的 is_ai 分支抽出） ------------------
@@ -712,14 +788,14 @@ pub(crate) fn ai_ship_turn(
     let my_hull = ship.hull;
     let my_hull_max = ship.hull_max;
     let focus = focus_of.get(&owner).cloned().flatten();
-    let doc = ship.doctrine;
+    let kiting = ship.kiting;
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
     // 自保撤退（拟人的「别送死」，激进更晚撤）：舰已受重创、敌在本舰射程内、且离首都有
     // 一定距离时，后撤回首都/本土修整充能。让战争有「打残→撤→养好→再来」的损耗循环。
     if let Some(target) = tgt {
-        let retreat_hull = effective_retreat_hull(config, doc.aggression);
+        let retreat_hull = effective_retreat_hull(config, kiting);
         if my_hull / my_hull_max.max(1e-9) < retreat_hull {
             let cap_body = state.capital_body(&owner);
             let cap_pos = state.body_position(&cap_body);
@@ -736,7 +812,7 @@ pub(crate) fn ai_ship_turn(
         let plan = build_fire_plan(state, config, ship_id);
         if !plan.is_empty() {
             if let Some(c) = state.control_mut(owner.clone()) {
-                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
             }
             sim::fire(state, config, ship_id, &plan);
         }
@@ -747,13 +823,7 @@ pub(crate) fn ai_ship_turn(
         return;
     };
 
-    if let ShipBehavior::TargetSettlement { city, bombard } = &behavior {
-        let cpos = sim::city_position(state, city);
-        if *bombard && sim::dist(pos, cpos) <= config.combat.siege_range {
-            sim::bombard_city(state, config, ship_id, city);
-            return;
-        }
-    }
+    // 殖民：到达定居点天体即刻建城（优先于自动接战/轰炸）。
     if let ShipBehavior::Colonize { body } = &behavior {
         let bpos = state.body_position(body);
         if sim::dist(pos, bpos) <= config.combat.arrival_eps {
@@ -761,25 +831,31 @@ pub(crate) fn ai_ship_turn(
             return;
         }
     }
+    // 自动轰炸：原地附近若有敌对城在围城射程内，先轰炸（轰炸不需要行为）。
+    if auto_bombard(state, config, ship_id, &owner, pos) {
+        return;
+    }
 
-    sim::move_toward(state, config, ship_id, &class, sim::behavior_dest(state, &behavior));
+    let base = sim::behavior_dest(state, &behavior);
+    sim::move_toward(state, config, ship_id, &class, kiting_dest(state, config, ship_id).unwrap_or(base));
 
+    // 移动后：自动接战（攻击不要行为）→ 自动轰炸 → 殖民落地。
     if let Some(ship) = state.ship(ship_id) {
         let np = ship.position;
         if let Some(target) = nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), ship_id) {
             let plan = build_fire_plan(state, config, ship_id);
             if !plan.is_empty() {
                 if let Some(c) = state.control_mut(owner.clone()) {
-                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
                 }
                 sim::fire(state, config, ship_id, &plan);
+                return;
             }
-        } else if let ShipBehavior::TargetSettlement { city, bombard } = &behavior {
-            let cpos = sim::city_position(state, city);
-            if *bombard && sim::dist(np, cpos) <= config.combat.siege_range {
-                sim::bombard_city(state, config, ship_id, city);
-            }
-        } else if let ShipBehavior::Colonize { body } = &behavior {
+        }
+        if auto_bombard(state, config, ship_id, &owner, np) {
+            return;
+        }
+        if let ShipBehavior::Colonize { body } = &behavior {
             let bpos = state.body_position(body);
             if sim::dist(np, bpos) <= config.combat.arrival_eps {
                 sim::colonize(state, config, rng, ship_id, body, next_building_id);
@@ -1132,11 +1208,62 @@ mod tests {
         state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
         let picked = pick_target(&state, &config, "中国", [40.0, 40.0], &mut Prng::new(1), None, &ship0);
         // 远处那艘敌舰不应被选中（超出追击半径）；可能选中更近的目标或城市/空。
-        let chased = matches!(picked, Some(ShipBehavior::TargetShip { ship: ref s, .. }) if *s == ship5);
+        let chased = matches!(picked, Some(ShipBehavior::Follow { ship: ref s }) if *s == ship5);
         assert!(
             !chased,
             "a hostile beyond pursuit_range should not be chased; got {picked:?}"
         );
+    }
+
+    /// 风筝<->贴脸（kiting）软移动：附近有敌舰时，`kiting<0` 的舰被推到「最远武器射程」处
+    /// （敌近则拉开），`kiting>0` 的舰压近到目标；`kiting=0`（基线）不调整（None）。
+    #[test]
+    fn kiting_repositions_relative_to_nearby_enemy() {
+        let (config, mut state) = fresh_world(42);
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        let ship4 = state.ships[4].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.position = [0.0, 0.0];
+            s.kiting = -1.0; // 风筝
+        }
+        if let Some(e) = state.ship_mut(&ship3) {
+            e.position = [0.3, 0.0];
+        }
+        // 其余美国舰挪远，确保最近敌舰就是 ship3。
+        if let Some(s) = state.ship_mut(&ship4) {
+            s.position = [50.0, 50.0];
+        }
+        if let Some(s) = state.ship_mut(&ship5) {
+            s.position = [50.0, 50.0];
+        }
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let range = crate::model::ship_panel(&config, state.ship(&ship0).unwrap()).attack_range;
+        let en = state.ship(&ship3).unwrap().position;
+        // 风筝：目的地的敌我距离应拉到「最远武器射程」处（敌更近则被推开）。
+        let kite = kiting_dest(&state, &config, &ship0).expect("kite ship has a dest");
+        assert!(
+            dist(kite, en) >= range - 1e-9,
+            "kite ship should hold at weapon range; dest={kite:?} enemy={en:?} range={range}"
+        );
+        // 贴脸：压近到目标。
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.kiting = 1.0;
+        }
+        let close = kiting_dest(&state, &config, &ship0).expect("face-hug ship has a dest");
+        let d_now = dist([0.0, 0.0], en);
+        let d_close = dist(close, en);
+        assert!(
+            d_close <= d_now,
+            "face-hug ship should close in; dest={close:?} d_now={d_now} d_close={d_close}"
+        );
+        // 基线：kiting=0 不调整。
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.kiting = 0.0;
+        }
+        assert!(kiting_dest(&state, &config, &ship0).is_none(), "baseline kiting must be None");
     }
 
     /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。

@@ -277,6 +277,10 @@ pub struct ShipSpec {
     /// `ShipDoctrine`。全 0 = 基线（与旧行为一致）。`--apply` 可再按单舰覆写。
     #[serde(default)]
     pub default_doctrine: ShipDoctrine,
+    /// 本舰级出厂时的**默认风筝<->贴脸姿态**（普通舰船控制属性，非行为风格）：舰出厂时
+    /// 继承这一份 `kiting`。全 0 = 基线。`--apply` 可再按单舰覆写。
+    #[serde(default)]
+    pub default_kiting: f64,
 }
 
 fn default_mult() -> f64 {
@@ -419,16 +423,13 @@ pub struct ShipPanel {
 /// 「AI 想怎么打」的决策,是自动控制模块的输入。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, JsonSchema)]
 pub struct ShipDoctrine {
-    /// 警惕<->激进 (风筝<->贴脸): `<0` 倾向站在最远射程风筝、更早撤;`>0` 倾向贴脸逼近、
-    /// 更晚撤。0 = 基线(按配置的撤退/交战默认)。
-    #[serde(default)]
-    pub aggression: f64,
     /// 理智<->热血 (欺软怕硬<->飞蛾扑火): `<0` 倾向攻击威慑**低于**自己的目标;`>0` 倾向
     /// 攻击威慑**高于**自己的目标。0 = 基线(无视威慑,按基本权重选目标)。
     #[serde(default)]
     pub temper: f64,
     /// 护航<->独狼: `<0` 空闲舰贴旗舰护航(结伴);`>0` 空闲舰独自就近接战(独狼)。
-    /// 0 = 基线(按配置的护航半径)。
+    /// 0 = 基线(按配置的护航半径)。〈风筝<->贴脸〉已从行为风格降级为普通舰船控制属性
+    /// [`Ship::kiting`]。
     #[serde(default)]
     pub lone_wolf: f64,
 }
@@ -586,11 +587,12 @@ fn weapon_seed(ship: &str, component: &str, idx: usize) -> u64 {
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
     Move { position: [f64; 2] },
-    /// 目标飞船：`attack: true` 表示追袭并开火；`attack: false` 表示**守卫**——
-    /// 靠近并保护这艘友方舰（对接近范围内的敌方舰开火拦截），而非攻击它。
-    TargetShip { ship: ShipId, attack: bool },
-    /// 目标定居点上的城市（bombard 表示是否轰炸/围攻）。
-    TargetSettlement { city: CityId, bombard: bool },
+    /// 跟随舰船：持续驶向目标舰的当前位置。所随的舰**可以是友方**（护航/护卫）**也可以是
+    /// 敌方**（追袭/接战）——跟随本身**不主动开火**；攻击/轰炸在射程内**自动**发生。任何
+    /// 敌舰进入自身攻击半径都会自动开火，与行为无关。
+    Follow { ship: ShipId },
+    /// 停泊城市：驶向某城——若该城为敌对势力且进入围城射程则**自动轰炸**；否则仅停靠/巡航。
+    DockCity { city: CityId },
     /// 停泊轨道：跟随某个天体——持续向该天体当前位置移动，随其轨道巡航/停靠。
     Dock { body: BodyId },
     /// 殖民：前往定居点天体并（再）建立一座城市。
@@ -687,6 +689,12 @@ pub struct Ship {
     /// 覆写。仅影响自动控制怎么打；引擎结算不读它。
     #[serde(default)]
     pub doctrine: ShipDoctrine,
+    /// 本舰的「风筝<->贴脸」姿态（per-舰 普通控制属性，非行为风格）：`[-1,1]`，`<0` =
+    /// 风筝（保持武器射程、敌近则拉开、更早撤），`>0` = 贴脸（贴近敌舰、打完再撤）。
+    /// `0` = 基线。**软目标**：Move/Follow/Dock/Idle 都是软目标——附近有敌舰时此姿态会
+    /// 自动调整本舰移动（对玩家与 AI 一视同仁），不构成硬命令。引擎结算不读它，仅自动控制读。
+    #[serde(default)]
+    pub kiting: f64,
     /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
     /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
     /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
@@ -1300,6 +1308,10 @@ pub struct CombatConfig {
     pub siege_range: f64,
     /// Distance, in AU, at which a ship is considered to have arrived.
     pub arrival_eps: f64,
+    /// 贴脸（face-hug，`kiting>0`）时舰对敌的**最小交战距离**（AU）：贴脸舰压近到这
+    /// 一距离；0 = 贴近到接触（在 `arrival_eps` 停）。默认 0。
+    #[serde(default = "default_min_engage_range")]
+    pub min_engage_range: f64,
     /// Fraction of a building's lost armor repaired each round when not under
     /// bombardment.
     pub armor_regen: f64,
@@ -1327,7 +1339,7 @@ pub struct CombatConfig {
     #[serde(default = "default_component_repair")]
     pub component_repair: f64,
     /// 护航半径（AU）：交战时，闲着且距本势力旗舰（航母）在此半径内的 AI 舰会就近护卫
-    /// 它（`TargetShip{attack:false}` 的守卫行为：贴近旗舰 + 拦截进入射程之敌），保护
+    /// 它（`Follow{旗舰}` 的跟随行为：贴近旗舰）。攻击/拦截由射程内自动接战完成。保护
     /// 高价值舰种。0 = 关闭。
     #[serde(default = "default_escort_range")]
     pub escort_range: f64,
@@ -1358,6 +1370,10 @@ fn default_retreat_hull() -> f64 {
 
 fn default_retreat_min_dist() -> f64 {
     1.5
+}
+
+fn default_min_engage_range() -> f64 {
+    0.0
 }
 
 fn default_component_spill() -> f64 {
