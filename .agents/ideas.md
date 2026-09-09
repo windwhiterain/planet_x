@@ -642,9 +642,12 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
   依赖；当前先 JSON Lines 起步。
 - `[ ]` **更多 lazy 字段**：真正的重型字段如 `ships[].components/component_hp`、`cities[].buildings`
   （可再拆一层 building 子表）、`events`/`chronicle` 到巨量时也标 lazy。
-- `[ ]` **统计函数库**（Python 侧，`planet_xq` 内）：`series(faction,metric,every)`、
-  `rolling_mean/max`、`histogram(metric,bins)`、`hegemon_timeline()`、`leader_rotation(metric)`、
-  `war_durations()`、`gini(stockpile)`——把「方便做统计」做成库而非让 agent 每次手写 pandas。
+- `[x]` **统计函数库**（Python 侧，`planet_xq` 内）——先落了**取数 + 窗口平均**：`metric_series(path)`
+  （逐月序列，index=round）、`window_avg(path,size,agg)`（按 size 回合/窗口聚合，默认 mean）、
+  `yearly_avg(path)`（12 月=1 年）、`decadal_avg(path)`（120 月=10 年）。`path` 为点分路径，
+  可指世界量（`metrics.population`）或势力量（`metrics.factions.中国.production_value`）。
+  仍开：`rolling_mean/max`、`histogram`、`hegemon_timeline`、`leader_rotation`、`war_durations`、
+  `gini(stockpile)`——把「方便做统计」做成库而非让 agent 每次手写 pandas。
 - `[ ]` **eager 单对象模式**（保留短跑 `--round`/`--traj` 全量快照）与索引模式并存，同一份
   schema 投影，两路都保持。
 

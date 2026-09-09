@@ -32,11 +32,17 @@ fn r2(v: f64) -> f64 {
 /// agent reads the world here, and steers it separately via `--apply`.
 #[derive(Serialize, JsonSchema)]
 pub struct Trajectory {
+    /// 当前回合（从 0 起：回合 0 = 初始世界，之后每步 +1）。
     pub round: u32,
+    /// 已流逝的总月数（= round，浮点，便于与时间序列计算）。
     pub time_month: f64,
+    /// 天体：轨道 + 定居点 + 已建城市（每个 body 一对象）。
     pub bodies: Vec<Body>,
+    /// 城市：位置/人口/建筑/所属（每个 city 一对象）。
     pub cities: Vec<City>,
+    /// 势力：资源库存/外交关系/投资与建造预算（每个 faction 一对象）。
     pub factions: Vec<Faction>,
+    /// 飞船：坐标/舰级/耐久/阵营/当前命中与目标（每艘 ship 一对象）。
     pub ships: Vec<Ship>,
     /// 本回合事件（谁开火/被毁/城被夷平/殖民/战争/剧情…）。
     pub events: Vec<GameEvent>,
@@ -158,6 +164,12 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
     }
 
     json!({
+        "notes": [
+            "budget：造舰预算 construction_budget = 库存×invest_fraction，但**先留维护底线**：从库存里预留 upkeep×upkeep_reserve_mult 的市场价值，只把超出部分用于造舰（'把海军养在经济能承受的规模'）。投资预算 investment_budget = 库存×invest_fraction，不受该保留约束。只有叶子的 mode=Player 时命令的 value 才被采用；mode=Ai 时系统每回合按上式重算。",
+            "每回合净流 ≈ 产出 production_value − 舰队维护 upkeep − 治理开销 governance_cost。为负则库存持续下降（清算），最终舰队生锈（护甲扣到 0 报废）、城市治理不到位而降忠诚→叛乱夷平。用 --control-plan [faction] 看该势力的剖面（净流/可养舰队上限/清算前剩余回合）。",
+            "生产 production：采矿建筑按面积×labor×productivity×production_rate 出矿；人口限制劳动效率（min_efficiency 下限）。治理 governance：行政成本 = (admin_base + admin_per_au×距首都距离)×人口超载倍率 + 娱乐预算，用库存按价值加权支付，覆盖率<1 则忠诚下跌。",
+            "实体身份=唯一名字（WYSIWYG 资源 key 即可读中文名），无 numeric shadow id；schema 由同一批结构体派生（--schema / --control-schema 自描述）。"
+        ],
         "structures": config_json(&config.structures),
         "buildings": config_json(&config.buildings),
         "ships": config_json(&config.ships),

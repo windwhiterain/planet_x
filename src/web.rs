@@ -20,6 +20,7 @@ use crate::world;
 use axum::extract::State as AxState;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -117,7 +118,7 @@ pub struct FactionControlView {
     pub loyalty_budget: Vec<LoyaltyBudgetEntry>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct ScopeView {
     #[serde(default)]
     pub global: Option<ControlMode>,
@@ -164,25 +165,34 @@ pub struct AdvanceReq {
 
 // --- presence-aware control patches (the "diff" the agent writes) ----------
 
-#[derive(Deserialize, Default)]
+/// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipOrderPatch {
+    /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
+    /// 新行为（Idle/Move/TargetShip/TargetSettlement/Dock/Colonize）。缺省 = 保留现值。
     #[serde(default)]
     pub behavior: Option<ShipBehavior>,
+    /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
     #[serde(default)]
     pub mode: Option<Option<ControlMode>>,
 }
 
-#[derive(Deserialize, Default)]
+/// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct BudgetPatch {
+    /// 资源 raw-key（见 --meta 的 resources：raw-key→中文名）。
     pub resource: String,
+    /// 新的预算额（资源投放量）。缺省 = 保留现值。
     #[serde(default)]
     pub value: Option<f64>,
+    /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
     #[serde(default)]
     pub mode: Option<Option<ControlMode>>,
 }
 
-#[derive(Deserialize, Default)]
+/// 某城某「建设投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct InvestWeightPatch {
     pub city: CityId,
     pub building: BuildingId,
@@ -192,7 +202,8 @@ pub struct InvestWeightPatch {
     pub mode: Option<Option<ControlMode>>,
 }
 
-#[derive(Deserialize, Default)]
+/// 某城某建造区「建造投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct BuildWeightPatch {
     pub city: CityId,
     pub building: BuildingId,
@@ -202,7 +213,8 @@ pub struct BuildWeightPatch {
     pub mode: Option<Option<ControlMode>>,
 }
 
-#[derive(Deserialize, Default)]
+/// 某城「娱乐/福利预算」补丁：`value` 替换预算额，`mode` 指定由谁决定。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct LoyaltyBudgetPatch {
     pub city: CityId,
     #[serde(default)]
@@ -213,7 +225,7 @@ pub struct LoyaltyBudgetPatch {
 
 /// A structural building patch: add a new building, remove an existing one, or
 /// change an existing building's attributes (structure / ship_type / kind).
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct BuildingPatch {
     /// Which city to add to / remove from.
     #[serde(default)]
@@ -241,26 +253,35 @@ pub struct BuildingPatch {
     pub remove: bool,
 }
 
-#[derive(Deserialize, Default)]
+/// 单个势力的可控状态补丁（`--apply` / `POST /api/command` 的 `control[]` 元素）。
+/// 只改动**出现在这里**的叶片；缺省的 `Vec` 字段/`Option` 叶子一律保持不变。
+#[derive(Deserialize, Default, JsonSchema)]
 pub struct FactionControlPatch {
     pub faction_id: FactionId,
+    /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
+    /// 投资预算补丁（建设）。
     #[serde(default)]
     pub investment_budget: Vec<BudgetPatch>,
+    /// 建造预算补丁（造舰）。
     #[serde(default)]
     pub construction_budget: Vec<BudgetPatch>,
+    /// 建设投资权重补丁。
     #[serde(default)]
     pub invest_weights: Vec<InvestWeightPatch>,
+    /// 建造投资权重补丁。
     #[serde(default)]
     pub build_weights: Vec<BuildWeightPatch>,
+    /// 娱乐/福利预算补丁。
     #[serde(default)]
     pub loyalty_budget: Vec<LoyaltyBudgetPatch>,
+    /// 结构性建筑补丁（新增/删除/改属性）。
     #[serde(default)]
     pub buildings: Vec<BuildingPatch>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 pub struct CommandReq {
     /// Factions' controllable-state patches. Only the factions/leaves that are
     /// present are touched; everything else is left as-is.
@@ -466,6 +487,15 @@ pub fn control_surface(state: &State) -> serde_json::Value {
         .collect();
     let surface = ControlSurface { control, scope: scope_view(&state.scope) };
     serde_json::to_value(surface).expect("control surface is serializable")
+}
+
+/// The machine-readable JSON Schema for the **control/`--apply` diff**
+/// ([`CommandReq`]). Handed to the agent so it can write a steering diff without
+/// memorising the contract. Auto-derived from the same structs the diff is
+/// deserialised into, so it can never drift from `apply_patch`'s shape.
+pub fn control_schema_value() -> serde_json::Value {
+    let schema = schemars::schema_for!(CommandReq);
+    serde_json::to_value(schema).expect("control schema is serializable")
 }
 
 /// Apply a presence-aware control patch (a structural multi-level diff) to

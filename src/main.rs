@@ -10,7 +10,7 @@
 //!
 //! Usage: `planet_x [--seed <s|random>] [--start <path.ron>]`
 //! `[--apply <file.json>] [--round <n>] [--traj <n>] [--save <path.ron>]`
-//! `[--meta] [--schema] [--story] [--control]`
+//! `[--meta] [--schema] [--control-schema] [--story] [--control] [--control-plan <faction>]`
 //!
 //! * `--start`  load an initial `State` from a RON checkpoint (state + RNG); else
 //!              generate the default procedural solar system.
@@ -41,6 +41,19 @@
 //!              full narrative arc (round, id, title, body, participants).
 //! * `--control` dump the editable control surface (control + scope) — the template
 //!              an agent edits into an `--apply` diff.
+//! * `--control-schema` dump a machine-readable JSON Schema for the control / `--apply`
+//!              diff (auto-derived from the same patch structs `--apply` parses), so an
+//!              agent knows what it may write: `control[]` per faction with
+//!              ship_orders/budgets/invest_weights/build_weights/loyalty_budget/buildings,
+//!              plus the optional `scope`. Mirrors `--schema` (which describes the read
+//!              side), this one describes the write side.
+//! * `--control-plan [<faction>]` compute a **cost → benefit preview** for a faction's
+//!              current control surface: per-round production vs fleet upkeep vs governance,
+//!              the commanded construction/investment budgets, the AI's conservative cap,
+//!              the net flow, the fleet upkeep you can sustain, and how many rounds before
+//!              insolvency. With no faction it runs all factions (a map keyed by faction id).
+//!              A pure analytical dry-run (one real `advance` on a clone, no RNG consumed),
+//!              so an agent sees the cost of a budget *before* committing it.
 //!
 //! Determinism: the same seed / checkpoint always reproduces the same trajectory.
 //! The tool is purely a generator; the `planet_x_web` binary is the separate,
@@ -90,10 +103,11 @@ Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继�
 - `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
 - `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
 - `planet_x --traj 240`                            # 一键拿故事封包（含 `.story` 编年史）\n\
-- 先 `--schema` 查字段、`--meta` 查规则；分析用 `--index` + `play/planet_xq`，别用 jq。",
+- 先 `--schema` 查视图字段、`--control-schema` 查 --apply 能写啥、`--meta` 查规则；分析用\n\
+  `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
 --round N 输出 N+1 行 JSON（回合 0 + N 回合）；--traj N 输出一个自包含 story pack；\n\
---meta/--schema/--story/--control 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
+--meta/--schema/--control-schema/--story/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -139,6 +153,20 @@ struct Cli {
     #[arg(long)]
     control: bool,
 
+    /// 输出 control/`--apply` diff 的机器可读 JSON Schema（由解析同一批补丁结构体
+    /// 派生）：告诉 agent 能往 --apply 里写哪些字段、各自的类型/含义。与 --schema
+    /// 互为镜像（--schema 描述 agent 视图，--control-schema 描述 agent 写入的 diff）。
+    #[arg(long)]
+    control_schema: bool,
+
+    /// 给势力算**成本→收益预览**（当前控制面下的每回合经济平衡：产出 vs 舰队维护 vs
+    /// 治理，含命令的建造/投资预算、AI 保守上限、净流、可养舰队上限、清算前剩余回合）。
+    /// 缺省不带参数 = 给所有势力各出一份（map：势力名→剖面）；`--control-plan <faction>`
+    /// 只出指定势力。纯分析（干跑一轮真实 advance、无 RNG 消耗），agent 据此在写 diff 前看到
+    /// 代价，而不是提交后观崩盘。可和 --apply 连用：先叠加候选 diff 再看它的后果。
+    #[arg(long, num_args = 0..=1, value_name = "FACTION")]
+    control_plan: Option<Option<String>>,
+
     /// 降采样步长：与 --round/--traj 连用，每 K 回合取一个快照（1 = 每回合）。用于把
     /// 超长轨迹变成可读的粗粒度采样，避免几千行全量 JSON 撑爆上下文。
     #[arg(long, value_name = "K", default_value_t = 1)]
@@ -177,6 +205,10 @@ fn main() {
         emit(&agent::schema_value().to_string());
         return;
     }
+    if cli.control_schema {
+        emit(&web::control_schema_value().to_string());
+        return;
+    }
 
     // Build the world: from a checkpoint (state + RNG) or generated procedurally.
     let seed = parse_seed(&cli.seed);
@@ -200,6 +232,25 @@ fn main() {
     }
     if cli.control {
         emit(&web::control_surface(&state).to_string());
+        return;
+    }
+    match &cli.control_plan {
+        Some(Some(fid)) => {
+            match sim::control_plan(&state, &config, fid) {
+                Some(v) => emit(&v.to_string()),
+                None => {
+                    eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_PLAN_FACTION", "message": format!("--control-plan 未知势力: {fid}（用 --control 或 --schema 看有哪些势力）")})
+                    );
+                    std::process::exit(10);
+                }
+            }
+        }
+        Some(None) => emit(&json!({"factions": sim::control_plan_all(&state, &config)}).to_string()),
+        None => {}
+    }
+    if cli.control_plan.is_some() {
         return;
     }
 
@@ -232,7 +283,7 @@ fn main() {
 
     eprintln!(
         "{}",
-        json!({"ok": false, "code": "ERR_USAGE", "message": "nothing to do: specify --round N, --traj N, or a dump flag (--meta/--schema/--story/--control)"})
+        json!({"ok": false, "code": "ERR_USAGE", "message": "nothing to do: specify --round N, --traj N, or a dump flag (--meta/--schema/--control-schema/--story/--control/--control-plan [<faction>])"})
     );
     std::process::exit(10);
 }
