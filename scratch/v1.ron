@@ -1,0 +1,562 @@
+(
+    economy: (
+        production_rate: 0.5,
+        pop_growth: 0.04,
+        min_efficiency: 0.1,
+        // 指令控制:每回合最多用各资源库存的 30% 投入建设。
+        invest_fraction: 0.3,
+        // AI 造舰维护费保留：建新舰前先从库存预留 4× 舰队维护费，只把超出部分用于造舰
+        // （把海军养在经济能承受的规模，避免无脑大建→维护费拖垮经济→军备崩盘）。
+        upkeep_reserve_mult: 4.0,
+        // 住宅目标余量:住宅面积维持在 (人口/生态容量)*1.25。
+        housing_buffer: 1.25,
+    ),
+    combat: (
+        war_threshold: -20.0,
+        siege_range: 0.25,
+        arrival_eps: 0.06,
+        // 建筑护甲每回合回修复比例。
+        armor_regen: 0.25,
+        // 刚殖民建立的新城最多占用定居点总面积的比例。
+        colony_footprint: 0.2,
+        // 自动指挥舰自保撤退阈值：护甲低于此比例且敌在射程内时后撤修整（拟人的「别送死」）。
+        retreat_hull: 0.20,
+        // 距首都小于此距离时不撤退（主场驻防/充能，避免「已到家还一直撤退不还手」）。
+        retreat_min_dist: 3.0,
+        // 模块损毁：每点船体伤害中溢出去损坏组件的比例（0.05=约每 20 点伤害掉一点组件，
+        // 军舰随战况渐进丧失武器/护盾，而非满血抗到壳破）。
+        component_spill: 0.05,
+        // 模块修复：每回合按 0.04 恢复组件完整度；在友方本土/母港内修得更快（与自保撤退
+        // 闭环：打残→撤→修→再来）。
+        component_repair: 0.04,
+        // 护航半径：交战时闲着的 AI 舰在此半径内就近护卫旗舰（航母），保护高价值舰种。
+        escort_range: 10.0,
+        // 追击半径：AI 舰只在此半径内追敌对舰（不跨全图追远逃的敌舰，避免过度延伸漂移）；
+        // 超过则转而轰炸城市/殖民/护卫。
+        pursuit_range: 12.0,
+        // 舰队防空半径：舰的点防御在 3 AU 内也会替附近友舰拦截导弹（防空屏护，随距离衰减）。
+        pd_radius: 3.0,
+    ),
+    diplomacy: (
+        // 开火/占领 导致的关系变化（战争期间把关系压到阈值之下）。
+        attack_delta: -3.0,
+        capture_delta: -25.0,
+        // 每回合向「意识形态静息亲和」靠拢的比例（阵营形成/异己升温）。
+        drift_rate: 0.02,
+        // 已开战且本轮未交战时，向停战线回落的比例（战争疲态 → 战争有始有终）。
+        war_fatigue: 0.12,
+        // 停战目标关系（高于 war_threshold，故能跨回和平），停火冷却期间关系向它靠拢。
+        ceasefire_relation: -6.0,
+        // 静息亲和 = affinity_floor + affinity_span * (1 - |Δalignment|/2)。
+        // 同阵营 ~ -42+70 = +28（友）；异阵营(Δ=2) ~ -42（敌，最终走向战争）。
+        affinity_floor: -42.0,
+        affinity_span: 70.0,
+        // 每回合随机波动幅度：让关系波动而非单调收敛。
+        noise: 1.0,
+        // 关系钳位（有界敌意/友好）。
+        hostility_floor: -60.0,
+        friendship_ceiling: 40.0,
+    ),
+    market: (
+        // 每回合每势力自动兑换的「市场价值」上限（信用点）；0=关闭自动市场。
+        auto_trade_limit: 80.0,
+        // 关键工业矿物维持的工作缓冲（单位）：低于则用富余矿物兑换补齐。
+        working_buffer: 6.0,
+        // 兑换价差：卖 (1+spread)× 价值才能买到 1×，抑制无损耗套利。
+        spread: 0.15,
+    ),
+    // 光速治理：以「距离首都」为代价的行政管理与忠诚度。这给超大帝国一个自然上限，
+    // 让游戏在上千回合后仍是多方参与，而不是收敛成少数几个永久霸权。一座城离统治
+    // 势力首都越远，管理费越高、忠诚度越低；治理不到位（欠费）时忠诚度暴跌，爆发
+    // 离心叛乱，城市被夷平为空白。
+    governance: (
+        // 每座城每回合的治理开销基数（市场价值/回合）。
+        admin_base: 0.2,
+        // 治理开销随距离（超过 admin_range 的部分，AU）递增的系数。
+        admin_per_au: 0.04,
+        // 治理「可达」半径（AU）：该半径内没有距离带来的额外开销。
+        admin_range: 6.0,
+        // 治理到位时，忠诚度每回合向距离目标恢复的比例。
+        loyalty_recover: 0.06,
+        // 治理不到位时，忠诚度每回合的下降量（乘欠费比例）。
+        loyalty_penalty: 0.25,
+        // 忠诚度距离目标随距离（超过 loyalty_range 的部分）递减的系数：
+        // 目标忠诚 = clamp(1 - loyalty_distance * a, 0, 1)。超过约 21.6 AU 的
+        // 殖民地目标忠诚已低于叛变阈值——即使治理到位也会最终离心叛乱。
+        loyalty_distance: 0.045,
+        // 忠诚度不受距离影响的半径（AU）。
+        loyalty_range: 6.0,
+        // 忠诚度低于此值即爆发「离心叛乱」，城市被夷平为空白。
+        loyalty_revolt: 0.30,
+        // 治理容量：势力总人口超过此值即超载，管理能力被人口分散（与距离叠加）。
+        population_capacity: 3000,
+        // AI 默认每座城每回合投入的娱乐/福利预算（市场价值/回合），用于提升忠诚度。
+        default_entertainment: 1.0,
+        // 娱乐投入换算：投入该市场价值使忠诚度目标 +1.0（entertainment_bonus = paid/cost）。
+        entertainment_cost: 20.0,
+        // 迁都（自动控制）评估周期：AI 每 12 回合重新评估一次首都选址；0=关闭自动迁都，
+        // 首都只在「亡城」时被强迁到人口最高的活城。带 mode=Player 的首都不会被覆盖。
+        capital_review_every: 12,
+        // 迁都须达到的「总治理距离成本」最小改善量（AU）：候选首都必须比当前首都低至少
+        // 这么多么才值得迁（避免反复横跳/无意义微调）。
+        capital_relocate_threshold: 1.0,
+        // 首都「人口占比」的全国忠诚度 buff：首都人口占全势力活城人口的比例 × 此系数 =
+        // 每座城的目标忠诚加成。首都=人口中心 → 全国向心力更强。
+        capital_share_loyalty_buff: 0.2,
+        // 迁都的全国忠诚度代价：旧首都人口占比 × 此系数 = 每座城的忠诚下降（迁离大都会
+        // 更动荡）。与 buff 互为反制，让迁都是为了省治理成本、却要以全国忠诚为赌注。
+        capital_share_relocate_cost: 0.5,
+    ),
+    // MOND / 柯伊伯引力异常：距太阳超过 radius 的深空进入「异常区」，真实引力偏离
+    // 标准牛顿假定。没有掌握 MOND 修正引力的势力（除 masters 之外的所有势力）在
+    // 异常区内轨道计算错误，指令坐标与实际到达坐标产生偏移——舰无法精确轰炸/殖民/
+    // 停靠深处目标。这让 cult 偏僻的柯伊伯带圣所成为天然堡垒：围攻者在那里「迷航」。
+    mond: (
+        // 异常区起始半径（距太阳，AU）。
+        radius: 28.0,
+        // 非 master 势力在异常区内，每超出 radius 1 AU 的导航偏移量（AU）。
+        drift_per_au: 0.03,
+        // 掌握了 MOND 修正引力的势力（在异常区内无导航偏移）。
+        masters: ["行星X崇拜教"],
+    ),
+    // 合纵连横 / 均势外交：当某势力的综合实力占比（城市数 + 舰队质量加权）达到
+    // hegemon_power 时被判定为「霸权」，其余较弱势力被共同威胁推向彼此——弱者相互
+    // 结盟（向 coalition_affinity 靠拢），弱者对霸权疏远/敌意（向 hegemon_affinity
+    // 靠拢）。霸权对任一弱者开战则触发集体安全（其他弱者对霸权关系骤降）。这给
+    // 「一家独大」一个众矢之的：军事联手制衡 + 经济多国资源封锁，使上千回合后的世界
+    // 维持多方参与，而非收敛成少数永久霸权。全部确定性、数据驱动。
+    balance: (
+        // 霸权判定阈值：综合实力占比达到此值即被定为「霸权」并引发弱者反制。
+        hegemon_power: 0.27,
+        // 综合实力权重：城市数（领土/经济基础）与舰队质量（舰艇引擎数值）。
+        power_city_weight: 1.0,
+        power_fleet_weight: 1.0,
+        // 弱者-弱者关系向此值靠拢（联盟目标亲和，彼此友好/结盟）。
+        coalition_affinity: 15.0,
+        // 弱者-弱者向联盟靠拢的每回合比例。
+        coalition_rate: 0.06,
+        // 「遏制」目标亲和：弱者对霸权的关系被下压到接近、但通常仍在交战阈值之上
+        // （-20）——它们不 «无脑宣战»，而是疏远/提防霸权（冷战式遏制 + 经济封锁）。
+        // 真正的共同军事行动留给「集体安全」：霸权一旦开打某弱者，其余弱者群起而攻之。
+        hegemon_affinity: -18.0,
+        // 弱者对霸权下压的每回合比例。
+        hegemon_rate: 0.08,
+        // 集体安全：霸权对任一弱者开战时，其余弱者对霸权的关系骤降幅度（触发共同防御）。
+        collective_defense_delta: -12.0,
+        // 联盟至少需几个成员（不含霸权）才成立。
+        min_members: 2,
+        // 弱国「倒向联盟」的疏远阈值：对霸权关系 ≤ 此值即视为已加入反制联盟（遏制是
+        // 冷战式的疏远 + 经济封锁，不必然导致开战）。
+        coalition_estrange: -10.0,
+        // 经济制裁：被反制联盟封锁的霸权保留的自动市场交易额度比例（<1 造成资源封锁
+        // 与失衡——难以靠市场兑换短缺矿物，产业受抑）。1.0 = 不制裁。
+        sanction_trade_mult: 0.3,
+        // 经济制裁的「治理代价」：被封锁的霸权维持帝国（行政+娱乐）的成本倍率（>1 =
+        // 被孤立的大国要花更多资源养边地，远端殖民地更易离心叛乱→体量自然回落）。
+        sanction_cost_mult: 1.45,
+    ),
+    resources: {
+        "水冰": (name: "水冰", value: 1.0),
+        "氦-3":   (name: "氦-3", value: 4.0),
+        "铀":   (name: "铀", value: 5.0),
+        "钍":   (name: "钍", value: 4.0),
+        "金":      (name: "金", value: 5.0),
+        "铂":  (name: "铂", value: 6.0),
+        "铁":      (name: "铁", value: 1.0),
+        "氢":  (name: "氢", value: 0.8),
+        "甲烷":   (name: "甲烷", value: 0.8),
+        "碳":    (name: "碳", value: 1.0),
+        "硅":   (name: "硅", value: 1.2),
+    },
+    structures: {
+        "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
+        "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
+    },
+    // 舰船 5 级。舰级属性分两类：
+    //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是
+    //       本体的直接值）；另有槽位/造价/维护费。
+    //   (2) 平台修正系数：armor_mult(护甲硬度) / shield_mult(护盾) /
+    //       shield_regen_mult(护盾再生) / speed_mult(速度上限) / accel_mult(加速度) /
+    //       attack_mult(伤害) / range_mult(攻击距离) / pd_mult(点防御)，分别缩放所搭载的
+    //       对应模块输出。舰级身份由此体现（护卫=快、驱逐=再生、巡洋=重甲、航母=超远程、
+    //       战列=一锤定音）。
+    // 速度 / 加速度 / 攻击距离**没有舰级基础值**：它们完全来自推进/武器模块，所以
+    // 「推进」和「武器」一样是必须的（没有推进模块就没有速度/攻击距离=0）。
+    // 分档（直接属性）：hull 低≈12-26 高≈72；hull_regen 低≈0.04 高≈0.30。
+    // 修正系数分档：低≈0.9，中≈1.0，高≈1.3-1.5，极高≈1.8-2.0。
+    ships: {
+        "corvette": (
+            label: "护卫舰",
+            hull: 12.0,          // 低（直接船体）
+            hull_regen: 0.04,    // 低（直接再生）
+            build_points: 15.0,
+            build_cost: { "铁": 6.0, "碳": 3.0 },   // 资源：极低，常见
+            upkeep: 1.5,
+            slots: 2,            // 至少「武器+推进」两个槽（轻装哨戒）
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 1.0,     // 中（哨戒：不追求飙速，而是高速加速机动）
+            accel_mult: 1.8,     // 招牌：极高加速度 → 抢位/盘旋（哨戒甩敌）
+            attack_mult: 0.9,    // 低
+            range_mult: 0.9,     // 低
+            pd_mult: 1.4,        // 招牌：点防御修正高 → 拦导弹的哨戒
+        ),
+        "destroyer": (
+            label: "驱逐舰",
+            hull: 24.0,          // 中（直接船体）
+            hull_regen: 0.30,    // 高（直接再生，招牌：超强再生）
+            build_points: 26.0,
+            build_cost: { "铁": 12.0, "碳": 7.0 },  // 资源：中，常见
+            upkeep: 2.5,
+            slots: 2,
+            armor_mult: 1.0,     // 中
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 1.0, // 中（远洋部署：不靠盾，靠船体再生）
+            speed_mult: 1.3,     // 招牌：远洋部署 → 高速度巡航
+            accel_mult: 1.0,     // 中
+            attack_mult: 0.9,    // 低
+            range_mult: 1.0,     // 中
+            pd_mult: 1.0,        // 中
+        ),
+        "cruiser": (
+            label: "巡洋舰",
+            hull: 72.0,          // 高（直接船体，招牌：重型装甲）
+            hull_regen: 0.04,    // 低
+            build_points: 44.0,
+            build_cost: { "铁": 18.0, "碳": 10.0, "硅": 6.0 },  // 资源：极高，常见
+            upkeep: 6.0,
+            slots: 3,            // 中型舰：火力+防护+推进
+            armor_mult: 1.5,     // 高（重甲 → 护甲硬度放大）
+            shield_mult: 1.3,    // 高
+            shield_regen_mult: 1.3, // 高（招牌：扛伤害，盾再生快）
+            speed_mult: 1.0,     // 中
+            accel_mult: 0.8,     // 低
+            attack_mult: 1.2,    // 中
+            range_mult: 1.0,     // 中
+            pd_mult: 0.9,        // 低
+        ),
+        "carrier": (
+            label: "航空母舰",
+            hull: 20.0,          // 低
+            hull_regen: 0.04,    // 低
+            build_points: 58.0,
+            build_cost: { "铁": 12.0, "碳": 8.0, "氦-3": 4.0, "铂": 3.0, "金": 2.0 },  // 资源：高，稀有
+            upkeep: 7.5,
+            slots: 3,
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 1.0,     // 中
+            accel_mult: 1.0,     // 中
+            attack_mult: 0.9,    // 低（单发不强，但射程极远）
+            range_mult: 1.8,     // 招牌：极高射程 → 远程放风筝
+            pd_mult: 0.9,        // 低
+        ),
+        "battleship": (
+            label: "战列舰",
+            hull: 30.0,          // 中（玻璃大炮：能抗一轮齐射即可）
+            hull_regen: 0.04,    // 低
+            build_points: 40.0,
+            build_cost: { "铁": 10.0, "铀": 4.0 },  // 资源：中，稀有
+            upkeep: 6.5,
+            slots: 3,            // 主力舰三槽：火力+盾点防+推进
+            armor_mult: 0.9,     // 低
+            shield_mult: 0.9,    // 低
+            shield_regen_mult: 0.9, // 低
+            speed_mult: 0.9,     // 低
+            accel_mult: 0.8,     // 低
+            attack_mult: 2.0,    // 招牌：极高伤害 → 一锤定音（玻璃大炮）
+            range_mult: 1.3,     // 高
+            pd_mult: 1.4,        // 招牌：点防御修正高 → 玻璃大炮自保拦导弹
+        ),
+    },
+    // 舰船定制组件（飞船定制化 ↔ 资源优势）——把「多稀缺资源」换成「不一样的作战
+    // 打法」，而不是把面板数字拉高。每件武器有**伤害类型**（kinetic/plasma/missile）、
+    // 交战距离、追踪力、对盾/对甲倍率；防御有**护盾池**（优先吸收、可再生）、额外
+    // 装甲、点防御（拦导弹）。选装谁决定你怎么打：铀→磁轨/重炮拆甲；金铂→护盾+等
+    // 离子；氦-3/氢→高速导弹袭扰。这就是资源优势→真实战斗力，全程确定性、无 RNG。
+    components: {
+        // --- 武器（伤害类型 × 防御 的取舍） ------------------------------------
+        "kinetic": (
+            label: "磁轨炮",
+            category: "weapon",
+            damage: 4.0,
+            damage_type: "kinetic",
+            range: 0.4,
+            tracking: 2.0,
+            shield_mult: 0.6,
+            hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 0.6,
+            cost: { "铁": 4.0, "碳": 2.0 },   // 常见矿：入门火力（拆甲）
+        ),
+        "plasma": (
+            label: "等离子炮",
+            category: "weapon",
+            damage: 8.0,
+            damage_type: "plasma",
+            range: 0.9,
+            tracking: 1.6,
+            shield_mult: 1.5,
+            hull_mult: 0.85,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.4,
+            cost: { "氦-3": 3.0, "金": 1.5 }, // 稀有：对盾强、射程远
+        ),
+        "railgun": (
+            label: "电磁轨道炮",
+            category: "weapon",
+            damage: 14.0,
+            damage_type: "kinetic",
+            range: 1.2,
+            tracking: 2.6,
+            shield_mult: 0.7,
+            hull_mult: 1.3,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 2.2,
+            cost: { "铀": 3.0, "铁": 2.0 }, // 稀有：远程拆甲重炮
+        ),
+        "missile": (
+            label: "集束导弹",
+            category: "weapon",
+            damage: 9.0,
+            damage_type: "missile",
+            range: 2.4,
+            tracking: 3.0,   // 制导：高速目标难规避，但会被点防御拦截
+            shield_mult: 1.0,
+            hull_mult: 1.2,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 1.6,
+            cost: { "氢": 3.0, "碳": 2.0 }, // 超远射程，吃氢
+        ),
+        // --- 防御（护盾池 / 装甲 / 点防御） ------------------------------------
+        "shield": (
+            label: "能量护盾",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 12.0, shield_regen: 0.15, hardness: 0.0, intercept: 0.0,
+            speed: 0.0, hull_regen: 0.0, upkeep: 2.0,
+            cost: { "铂": 2.0, "氦-3": 1.0 }, // 铂金级护盾（吸收池）
+        ),
+        "armor": (
+            label: "装甲夹层",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 10.0, intercept: 0.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 0.9,
+            cost: { "铁": 5.0, "碳": 3.0 },    // 常见：让船体变硬（反比例减伤）
+        ),
+        "composite": (
+            label: "复合装甲",
+            category: "defense",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 18.0, intercept: 0.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.8,
+            cost: { "硅": 4.0, "钍": 2.0 }, // 高级防护（钍，更硬）
+        ),
+        "point_defense": (
+            label: "近防炮阵",
+            category: "defense",
+            damage: 2.0, damage_type: "kinetic", range: 0.3, tracking: 8.0, // 近防=几乎必中快目标
+            shield_mult: 0.8, hull_mult: 0.8,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 6.0,
+            speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.0,
+            cost: { "金": 2.0, "硅": 1.0 }, // 拦导弹（线性扣减）+ 防快船
+        ),
+        // --- 推进（速度+加速度 = 规避 + 抢先战位） ------------------------------
+        "ion_drive": (
+            label: "离子推进器",
+            category: "thrust",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 0.8, accel: 0.6, hull_regen: 0.0, upkeep: 1.0,
+            cost: { "氦-3": 1.5, "铁": 1.0 },
+        ),
+        "fusion_torch": (
+            label: "聚变推进器",
+            category: "thrust",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
+            fire_rate: 1.0, fire_spread: 0.0,
+            speed: 1.6, accel: 1.2, hull_regen: 0.0, upkeep: 2.4,
+            cost: { "氢": 3.0, "钍": 1.0 }, // 氢/钍：极速引擎
+        ),
+        // --- 辅助（再生 = 持久战） --------------------------------------------
+        "reactor": (
+            label: "聚变反应堆",
+            category: "utility",
+            damage: 0.0, damage_type: "", range: 0.0, tracking: 0.0,
+            shield_mult: 1.0, hull_mult: 1.0,
+            shield: 0.0, shield_regen: 0.04, hardness: 0.0, intercept: 0.0,
+            speed: 0.2, accel: 0.2, hull_regen: 0.05, upkeep: 1.2,
+            cost: { "铀": 2.0, "氢": 1.0 },
+        ),
+    },
+    buildings: {
+        "residential": (
+            label: "居住区",
+            role: "housing",
+            construction_speed: 1.0,
+            build_cost: { "硅": 0.3, "铁": 0.2 },
+            staff_per_area: 0.0,
+            productivity: 1.0,
+            default_invest_weight: 1.5,
+            default_build_weight: 0.0,
+        ),
+        "mining": (
+            label: "开采区",
+            role: "mining",
+            construction_speed: 1.0,
+            build_cost: { "铁": 0.4 },
+            staff_per_area: 4.0,
+            productivity: 1.0,
+            default_invest_weight: 1.0,
+            default_build_weight: 0.0,
+        ),
+        "construction": (
+            label: "建造区",
+            role: "shipyard",
+            construction_speed: 0.8,
+            build_cost: { "铁": 0.4, "碳": 0.3, "硅": 0.2 },
+            staff_per_area: 6.0,
+            productivity: 1.0,
+            default_invest_weight: 0.8,
+            default_build_weight: 1.0,
+        ),
+    },
+    // 剧情事件表（编年史/叙事弧）。每条的 `trigger` 决定何时火（只火一次），
+    // `effects` 是可选的小幅、确定性机械后果（关系/资源）。id 稳定；参与方是可读名。
+    // 事件型触发（first_war / first_raze / first_colony / war_between / faction_at_war）
+    // 恰好落在对应历史事件发生的那个回合，形成「剧情与局势同步」的叙事弧。
+    story: [
+        (
+            id: "prologue",
+            title: "外来的回响",
+            body: "无国界科学组织的深空阵列在柯伊伯带之外捕捉到一段规律的引力涟漪——一个重型天体正沿一条极偏心的轨道缓缓内插。行星X崇拜教立即宣称这是「行星X」归来的先兆；科学组织则坚持那只是一颗未编目的大天体。两派就此划下鸿沟。",
+            trigger: RoundAt(round: 1),
+            participants: ["无国界科学组织", "行星X崇拜教"],
+            effects: [Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -2.0), GrantResources(faction: "无国界科学组织", resource: "氦-3", amount: 2.0)],
+        ),
+        (
+            id: "solar_max",
+            title: "太阳活动峰年",
+            body: "太阳活动进入峰年，强烈的日冕抛射让深空信号陷入混沌。各势力临时收紧通讯；深空运输联盟被迫重划所有航线以避开高辐射带，却意外在勘察中发现一片富集的金矿带。",
+            trigger: RoundAt(round: 6),
+            participants: ["深空运输联盟"],
+            effects: [GrantResources(faction: "深空运输联盟", resource: "金", amount: 4.0)],
+        ),
+        (
+            id: "un_convokes",
+            title: "联合国外交大会",
+            body: "联合国在月球宁静海基地召集外交大会，呼吁各国就「外来的回响」共享观测数据。美国与欧盟主张联手戒备；中国与俄罗斯则怀疑这是一场以情报为名的渗透。唯有无国界科学组织发布了首批完整数据，赢得中立阵营的赞赏。",
+            trigger: RoundAt(round: 12),
+            participants: ["联合国", "美国", "欧盟", "中国", "俄罗斯", "无国界科学组织"],
+            effects: [Relations(a: "联合国", b: "无国界科学组织", delta: 3.0), Relations(a: "联合国", b: "星系矿业", delta: 2.0), Relations(a: "联合国", b: "深空运输联盟", delta: 2.0)],
+        ),
+        (
+            id: "kuiper_boom",
+            title: "柯伊伯淘金热",
+            body: "星系矿业的高层嗅到了外缘陨石的丰厚回报，宣布启动「柯伊伯淘金热」——数百艘采矿船冲向妊神星、创神星与阋神星的冰封矿带。随即，他们把一船船铂金与铁运回内太阳系，隐约有垄断稀有金属之势。",
+            trigger: RoundAt(round: 24),
+            participants: ["星系矿业"],
+            effects: [GrantResources(faction: "星系矿业", resource: "铂", amount: 3.0), GrantResources(faction: "星系矿业", resource: "铁", amount: 8.0), GrantShip(faction: "星系矿业", class: "cruiser", body: "泰坦")],
+        ),
+        (
+            id: "first_war",
+            title: "第一次冲突",
+            body: "历史齿轮咬合。两股长期对峙的力量终于越过底线，第一场战争在太阳系爆发——战争不再是谣传，而成了每个势力都必须面对的现实。",
+            trigger: FirstWar,
+            participants: [],
+            effects: [],
+        ),
+        (
+            id: "first_colony",
+            title: "拓荒纪元",
+            body: "一波殖民浪潮席卷外域。人们不再满足于母星，而是把星图上的每一个空白定居点都当成新的起点——第一个离开母星的殖民地宣告成立，深空从此有了人的足迹。",
+            trigger: FirstColony,
+            participants: [],
+            effects: [],
+        ),
+        (
+            id: "first_raze",
+            title: "焚城之痛",
+            body: "第一座城市在炮火中被夷为平地。当尘埃落定，人们第一次意识到：战争不仅摧毁舰队，也会把曾经灯火通明的家园从星图上永远抹去。",
+            trigger: FirstRaze,
+            participants: [],
+            effects: [],
+        ),
+        (
+            id: "cult_war",
+            title: "异端之怒",
+            body: "行星X崇拜教正式与主流势力兵戎相见。教众视战争为「行星X」净化的前奏；常规势力则把这个太阳系边缘的狂热教团视作必须剪除的脓疮——世界骤然多了一个共同的敌人。",
+            trigger: FactionAtWar(faction: "行星X崇拜教"),
+            participants: ["行星X崇拜教"],
+            effects: [Relations(a: "联合国", b: "行星X崇拜教", delta: -4.0), Relations(a: "欧盟", b: "行星X崇拜教", delta: -4.0), Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -4.0)],
+        ),
+        (
+            id: "cn_us_rivalry",
+            title: "巨头对峙",
+            body: "中国与美国——这颗星球上两支最庞大、最富有的力量——终于正面对撞。地球轨道上空的旗舰遥相对峙，整个太阳系的目光都聚焦在两大巨头之间即将展开的较量。",
+            trigger: WarBetween(a: "中国", b: "美国"),
+            participants: ["中国", "美国"],
+            effects: [Relations(a: "联合国", b: "中国", delta: -2.0), Relations(a: "联合国", b: "美国", delta: -2.0)],
+        ),
+        (
+            id: "northern_watch",
+            title: "北方警戒",
+            body: "欧盟与俄罗斯的关系跌入冰点。欧洲理事会启动「北方警戒」，将多支舰队前移到波罗的海与高加索方向，并与美国的火星防线相互呼应。",
+            trigger: WarBetween(a: "欧盟", b: "俄罗斯"),
+            participants: ["欧盟", "俄罗斯"],
+            effects: [Relations(a: "欧盟", b: "美国", delta: 2.0), Relations(a: "欧盟", b: "俄罗斯", delta: -3.0)],
+        ),
+        (
+            id: "jupiter_colloquy",
+            title: "木星科学会议",
+            body: "无国界科学组织在木星轨道空间站召开一场横跨内外的科学会议，公布了对那颗外来天体的轨道精测：它不会撞击任何行星，却会在数十年后掠过大气的边缘。结论尚无定论，但与会各方都感到，某种比战争更根本的东西正在逼近。",
+            trigger: RoundAt(round: 36),
+            participants: ["无国界科学组织", "联合国", "美国", "欧盟", "中国", "俄罗斯"],
+            effects: [Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -3.0), Relations(a: "联合国", b: "无国界科学组织", delta: 5.0)],
+        ),
+        (
+            id: "arms_race",
+            title: "军备竞赛",
+            body: "美中的对峙催生了一场军备竞赛。两国几乎同步开工新的战列舰——仿佛谁先凑齐一支无敌舰队，谁就能在谈判桌尽头占有整个太阳系。",
+            trigger: RoundAt(round: 48),
+            participants: ["美国", "中国"],
+            effects: [GrantShip(faction: "美国", class: "battleship", body: "火星"), GrantShip(faction: "中国", class: "battleship", body: "地球"), Relations(a: "美国", b: "中国", delta: -2.0)],
+        ),
+        (
+            id: "planet_x_arrives",
+            title: "行星X 现身",
+            body: "那颗外来的天体终于越过柯伊伯带、进入内太阳系的视野。无论是崇拜教的欢腾，还是科学组织的冷静测算，所有人都将无法回避一个事实：太阳系，已不再是他们以为的那个太阳系。",
+            trigger: RoundAt(round: 60),
+            participants: ["无国界科学组织", "行星X崇拜教", "联合国"],
+            effects: [GrantShip(faction: "无国界科学组织", class: "battleship", body: "木星"), GrantShip(faction: "行星X崇拜教", class: "battleship", body: "伊克西翁")],
+        ),
+    ],
+    // 「名字即唯一 key」：每个势力一坨名字库，势力所属实体（舰只等）从库里确定性取一个
+    // 唯一名。各库的用词刻意**不重叠**，因此舰名天然全局唯一（无需再靠编号区分）。
+    // 库轮空后，舰名追加「·世代数」后缀（如「长城2」）以保持唯一性（见 ship_display_name）。
+    name_pool: {
+        "联合国": ["和平", "使者", "环球", "守望", "蓝天", "星环", "曙光"],
+        "美国": ["华盛顿", "自由", "大西洋", "星条", "联邦", "鹰隼", "落基", "总统"],
+        "欧盟": ["欧罗巴", "晨曦", "骑士", "凯旋", "大陆", "联盟", "莱茵", "福煦"],
+        "中国": ["长城", "玉衡", "长风", "破晓", "沧海", "昆仑", "扶摇", "天工", "镇岳", "北辰", "北斗", "赤霄"],
+        "俄罗斯": ["北极", "风雪", "伏尔加", "西伯利亚", "红场", "冰山", "乌拉尔", "喀山"],
+        "星系矿业": ["矿脉", "掘金", "金刚石", "赤铁", "富矿", "钻头", "熔炉", "勘探"],
+        "无国界科学组织": ["求知", "星河", "伽利略", "深空", "引力波", "仰望", "光谱", "红移"],
+        "深空运输联盟": ["快递", "驿马", "货运", "远航", "航道", "月舟", "摆渡", "超载"],
+        "行星X崇拜教": ["圣歌", "净化", "先知", "回归", "朝圣", "救赎", "方舟", "天启"],
+    },
+)

@@ -860,6 +860,11 @@ pub struct RoundMetrics {
     pub population: u64,
     /// 各势力综合实力占比（0..1，全势力求和≈1）——均势/霸权判定的中间量。
     pub power_share: BTreeMap<FactionId, f64>,
+    /// 各势力**综合实力**（`city_weight×城市份额 + fleet_weight×舰队份额`，未归一化为占比，
+    /// 即 `power_share` 的分子）。这是“谁最强”的**单一权威**统计：一次算好，供游戏逻辑
+    /// （`step_balance_of_power`/`sanction_cost_mult`）与观测/测试共同读取，杜绝「测试以为
+    /// 的霸权 ≠ 游戏针对的霸权」这类不一致。语义同舰只的 `deterrence`：派生、非持久实体字段。
+    pub faction_power: BTreeMap<FactionId, f64>,
     /// 当前「霸权」：综合实力占比达阈值的最大势力；无则 None。
     pub hegemon: Option<FactionId>,
     /// 针对霸权的反制联盟成员（关系 ≤ coalition_estrange 的弱者，且彼此不交战）。
@@ -872,6 +877,25 @@ pub struct RoundMetrics {
     pub factions: BTreeMap<FactionId, FactionMetrics>,
     /// 每座活城的本回合产出（`cities` 的细分）：人口、忠诚与按资源开采量。
     pub city_production: BTreeMap<CityId, CityMetrics>,
+}
+
+impl Default for RoundMetrics {
+    fn default() -> Self {
+        RoundMetrics {
+            cities: 0,
+            ships: 0,
+            fleet_value: 0.0,
+            population: 0,
+            power_share: BTreeMap::new(),
+            faction_power: BTreeMap::new(),
+            hegemon: None,
+            coalition_members: Vec::new(),
+            sanctioned: None,
+            wars: Vec::new(),
+            factions: BTreeMap::new(),
+            city_production: BTreeMap::new(),
+        }
+    }
 }
 
 /// 单势力的聚合总结指标（`RoundMetrics::factions` 的一项）。
@@ -979,6 +1003,44 @@ pub struct State {
     /// 纯显示用（不参与战斗/经济语义）；`#[serde(default)]` 让旧档缺字段也能加载。
     #[serde(default)]
     pub ship_name_seq: BTreeMap<FactionId, u64>,
+}
+
+/// 一个回合的**全部派生态**（合并旧 `RoundFlow` 的“流量”与旧 `RoundMetrics` 的“总结”）。
+/// 这是所有 derived 数据的**唯一结构**：不再有 `RoundFlow` + `RoundMetrics` 两套。
+/// * `flow`   —— 本回合**流量**中间量（每城/每势力产出、舰队维护费、治理总成本/覆盖率）。
+/// * `metrics`—— 本回合**存量/政治**总结（世界总量、实力占比/霸权/联盟/制裁/战争、各势力
+///   聚合、各城产出），其中 [`RoundMetrics::faction_power`] 是“谁最强”的**单一权威**统计。
+///
+/// 一个结构装下全部派生数据；同一个结构既用作 `RoundState::pre`（依赖 rng 的随机决策快照）
+/// 也用作 `RoundState::post`（依赖 state 的纯观测快照）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Derived {
+    /// 本回合**流量**中间量（原本的 [`RoundFlow`]）。
+    pub flow: RoundFlow,
+    /// 本回合**存量/政治**总结，含单一权威的 `faction_power`（原本的 [`RoundMetrics`]）。
+    pub metrics: RoundMetrics,
+}
+
+/// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
+/// 整个结构落盘（`--save`/`--start`）。`advance` 就地改 `state` 并把本回合的 `pre`/`post`
+/// 写回这两个字段。
+///
+/// * **`pre`**：依赖本次 rng **掷出的随机决策**的快照（造什么舰、海军重组、出战顺序、外交
+///   扰动……），是 `(state, rng)` 的函数。**不当作冻结的真理**——回退到某回合、换一个 rng，
+///   `pre` 就按新 rng 重算，故事自然分叉。这就是 `rng → pre_derived` 的关系。
+/// * **`post`**：依赖**当前 `state`** 的纯观测（实力占比/霸权/联盟/制裁/战争/产量/维护费/
+///   治理……），是 `state` 的函数。同一 `state` 恒定，供 agent 与测试读取。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RoundState {
+    /// 状态/schema 版本（同 [`State::schema_version`] 语义）。
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// 规范的持久世界（实体）：天体/城/势力/舰/控制面/作用域/事件/编年史。
+    pub state: State,
+    /// 本回合依赖 rng 的随机决策快照（`(state, rng)` 的函数，换 rng 即重算）。
+    pub pre: Derived,
+    /// 本回合依赖 state 的纯观测快照（`state` 的函数）。
+    pub post: Derived,
 }
 
 impl State {

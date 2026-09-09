@@ -320,7 +320,7 @@ fn world_is_multipolar() {
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
             check_state(&state, &config);
-            let (top, share) = top_city_share(&state);
+            let (top, share) = top_power(&state, &config);
             max_top_share = max_top_share.max(share);
             if state.round >= 500 {
                 leaders.insert(top);
@@ -343,20 +343,16 @@ fn world_is_multipolar() {
     }
 }
 
-fn top_city_share(state: &State) -> (FactionId, f64) {
-    let total = state.cities.iter().filter(|c| !c.razed).count() as f64;
-    if total <= 0.0 {
-        return (String::new(), 0.0);
-    }
-    let mut best = (String::new(), 0.0);
-    for f in &state.factions {
-        let n = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
-        let s = n / total;
-        if s > best.1 {
-            best = (f.name.clone(), s);
-        }
-    }
-    best
+/// 当前综合实力最强的势力及其**占比**——按游戏的**单一权威**统计（`round_metrics` 的
+/// `power_share`，即 `sim::faction_power` 归一化），而非纯数城市。这样测试读到的是游戏
+/// 合纵/遏制/制裁真正针对的那个「霸权」，不再有「测试以为的霸权 ≠ 游戏针对的霸权」分歧。
+fn top_power(state: &State, config: &GameConfig) -> (FactionId, f64) {
+    let m = sim::round_metrics(state, config, &RoundFlow::default());
+    m.power_share
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, v)| (k.clone(), *v))
+        .unwrap_or((String::new(), 0.0))
 }
 
 /// 观测：合纵连横制裁严苛度调参（`--ignored`）。
@@ -373,9 +369,9 @@ fn probe_sanction() {
         let mut top_count = 0u32;
         let mut sm = std::collections::BTreeSet::new();
         for _ in 0..1200u32 {
-            sim::advance(&mut state, &config, &mut rng);
+            let flow = sim::advance(&mut state, &config, &mut rng);
             let dead = zombie_count(&state);
-            let (top, share) = top_city_share(&state);
+            let (top, share) = top_power(&state, &config);
             max_dead = max_dead.max(dead);
             max_top_share = max_top_share.max(share);
             if state.round >= 600 {
@@ -383,6 +379,7 @@ fn probe_sanction() {
                 top_count += 1;
                 sm.insert(top);
             }
+            let _ = flow;
         }
         let avg = top_sum / top_count as f64;
         println!("seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}");
@@ -412,7 +409,7 @@ fn probe_multipolar() {
         let mut rotations = 0u32;
         for _ in 0..3000u32 {
             sim::advance(&mut state, &config, &mut rng);
-            let (top, share) = top_city_share(&state);
+            let (top, share) = top_power(&state, &config);
             top_sum += share;
             top_count += 1;
             max_zombies = max_zombies.max(zombie_count(&state));
@@ -423,7 +420,7 @@ fn probe_multipolar() {
                 leader = top;
             }
         }
-        let (_, terminal_top) = top_city_share(&state);
+        let (_, terminal_top) = top_power(&state, &config);
         let alive = state.factions.iter().filter(|f| state.cities.iter().any(|c| c.faction_id == f.name && !c.razed)).count();
         // 吉尼：排序末回合各势力城占比，算基尼系数。
         let mut shares: Vec<f64> = state
@@ -455,46 +452,35 @@ fn probe_multipolar() {
     }
 }
 
-/// 一致性诊断 (`--ignored`)：验证「测试的『谁最强』统计」与「游戏国际关系逻辑的『谁是霸权』
-/// 统计」是否**同源**。游戏判定霸权（合纵/遏制/制裁）用的是 `sim::faction_power_share`
-/// （城占比 + 舰队占比加权），而本 harness 早期用的 `top_city_share` 只数城市。如果两者对
-/// 「当前最强势力」的排序不一致，测试就会验收一个**系统实际不针对**的霸权——这是设计性的
-/// 不一致。本探针逐回合报告：
-///   * `city_top`   ：按 `top_city_share`（纯城数）判定的最强势力。
-///   * `pow_top`    ：按 `sim::balance_picture` 的 `power_share`（城+舰队加权，游戏逻辑
-///     真正用来判定谁被合纵/遏制/制裁的那一套）判定的最强势力。
-///   * `agree`      ：两者本轮是否一致（1=一致，0=不一致）。
-/// 并汇总一整局的不一致率。目标是让测试统计与游戏逻辑统计**同一套**。
+/// 一致性守卫：测试的「谁最强」统计与游戏国际关系逻辑的「谁是霸权」统计必须**同源**。
+///
+/// `world_is_multipolar` 等测试用 [`top_power`]（读 `round_metrics.power_share`，即
+/// `sim::faction_power` 归一化）判定最强势力——这与 `step_balance_of_power`/`sanction_cost_mult`
+/// 判定并针对的霸权**同一公式**。若两者再次分裂（例如测试又改回纯数城市、而游戏用城+舰队
+/// 加权），测试就会验收一个系统实际不针对的「霸权」。本守卫逐回合断言二者一致。
 #[test]
-#[ignore]
-fn probe_power_consistency() {
+fn test_power_statistic_matches_game_logic() {
     let config = load_config();
-    for seed in [1u64, 42, 12345] {
+    for seed in [1u64, 42] {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
-        let mut mismatch = 0u32;
-        let mut checked = 0u32;
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
-            let (_, city_share) = top_city_share(&state);
-            // 游戏逻辑的权威统计：balance_picture → power_share（城+舰队加权）。
+            // 测试用的权威统计（round_metrics → power_share）。
+            let (test_top, _) = top_power(&state, &config);
+            // 游戏国际关系逻辑真正读的权威统计：balance_picture → power_share（同一函数）。
             let (_, _, powers) = sim::balance_picture(&state, &config);
-            let (pow_top, pow_share) = powers
+            let (game_top, _) = powers
                 .iter()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(k, v)| (k.clone(), *v))
                 .unwrap_or((String::new(), 0.0));
-            let (city_top, _) = top_city_share(&state);
-            checked += 1;
-            if city_top != pow_top {
-                mismatch += 1;
-                if mismatch <= 5 {
-                    println!("  r{}: city_top={city_top} ({city_share:.3}) pow_top={pow_top} ({pow_share:.3}) MISMATCH", state.round);
-                }
-            }
+            assert_eq!(
+                test_top, game_top,
+                "seed {seed} r{}: 测试认为最强是 {test_top}，游戏逻辑却针对 {game_top} —— 统计分裂",
+                state.round
+            );
         }
-        let rate = mismatch as f64 / checked as f64;
-        println!("seed {seed}: mismatch={mismatch}/{checked} (rate={rate:.3}) — 测试(纯城) vs 游戏逻辑(城+舰队) 最强势力判定不一致率");
     }
 }
 
@@ -510,7 +496,7 @@ fn probe_peak() {
         let (mut peak_top, mut peak_share, mut peak_round) = (String::new(), 0.0f64, 0u32);
         for _ in 0..1200u32 {
             sim::advance(&mut state, &config, &mut rng);
-            let (top, share) = top_city_share(&state);
+            let (top, share) = top_power(&state, &config);
             if share > peak_share {
                 peak_share = share;
                 peak_top = top;

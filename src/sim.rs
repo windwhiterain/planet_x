@@ -2120,18 +2120,19 @@ fn set_relation_sym(state: &mut State, a: FactionId, b: FactionId, v: f64, confi
     }
 }
 
-/// 综合实力占比：`power = (city_weight×城市份额 + fleet_weight×舰队份额) / (两权重之和)`。
-/// 城市份额 = 活城数/总活城数，舰队份额 = 舰艇引擎数值之和/总引擎数值之和。两份额各自
-/// 在 [0,1] 且对全势力求和为 1，故 power 也是合法的占比（0..1）。无活城且无舰时返回全 0。
-pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
+/// 各势力**综合实力**（幂：`city_weight×城市份额 + fleet_weight×舰队份额`，未除以两权重之和）。
+/// 这是“谁最强”的**单一权威**统计：`faction_power_share` 由它归一化而来，观测
+/// （[`round_metrics`] 的 `faction_power`）与游戏逻辑（`step_balance_of_power`/
+/// `sanction_cost_mult`）都读同一份。城市份额 = 活城数/总活城数，舰队份额 = 舰艇引擎数值
+/// 之和/总引擎数值之和。无活城且无舰时全 0。
+pub(crate) fn faction_power(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
     let b = &config.balance;
-    let wp = b.power_city_weight + b.power_fleet_weight;
     let total_cities = state.cities.iter().filter(|c| !c.razed).count() as f64;
     let total_fleet: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
-    if wp <= 0.0 || (total_cities <= 0.0 && total_fleet <= 0.0) {
+    let mut powers = BTreeMap::new();
+    if total_cities <= 0.0 && total_fleet <= 0.0 {
         return state.factions.iter().map(|f| (f.name.clone(), 0.0)).collect();
     }
-    let mut powers = BTreeMap::new();
     for f in &state.factions {
         let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
         let fleet: f64 = state
@@ -2142,10 +2143,23 @@ pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMa
             .sum();
         let city_share = if total_cities > 0.0 { cities / total_cities } else { 0.0 };
         let fleet_share = if total_fleet > 0.0 { fleet / total_fleet } else { 0.0 };
-        let power = (b.power_city_weight * city_share + b.power_fleet_weight * fleet_share) / wp;
-        powers.insert(f.name.clone(), power);
+        powers.insert(f.name.clone(), b.power_city_weight * city_share + b.power_fleet_weight * fleet_share);
     }
     powers
+}
+
+/// 综合实力占比：`power = faction_power / (city_weight + fleet_weight)`。
+/// 两份额各自在 [0,1] 且对全势力求和为 1，故 power 也是合法的占比（0..1）。
+pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
+    let b = &config.balance;
+    let wp = b.power_city_weight + b.power_fleet_weight;
+    if wp <= 0.0 {
+        return state.factions.iter().map(|f| (f.name.clone(), 0.0)).collect();
+    }
+    faction_power(state, config)
+        .into_iter()
+        .map(|(k, v)| (k, v / wp))
+        .collect()
 }
 
 /// 当前的反制联盟成员：非霸权势力中，对霸权的**疏远**达到 [`BalanceOfPowerConfig::coalition_estrange`]
@@ -2349,6 +2363,7 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
         fleet_value: world_fleet,
         population: total_population,
         power_share: powers,
+        faction_power: faction_power(state, config),
         hegemon,
         coalition_members: members,
         sanctioned,
