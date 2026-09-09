@@ -12,9 +12,12 @@ Directory layout written by ``planet_x --round N --index DIR``:
                          market.resource_value, economy/combat/diplomacy/… tuning) — same source
                          as `--meta`
     DIR/main.jsonl       one lean fact row per round
-    DIR/idx/ships.jsonl  (round, ship_id, ...)  per-round ship detail
-    DIR/idx/cities.jsonl (round, city_id, ...)  per-round city detail
-    DIR/idx/bodies.jsonl (body_id, ...)         global master table
+    DIR/idx/ships.jsonl  (round, ship_id, ...)        per-round ship detail (+ effective panel)
+    DIR/idx/cities.jsonl (round, city_id, ...)        per-round city detail (+ buildings list)
+    DIR/idx/factions.jsonl (round, faction_id, ...)   per-round faction detail (resources/relations/
+                                                      own cities/ships)
+    DIR/idx/bodies.jsonl (body_id, ...)               global master table
+    DIR/idx/settlements.jsonl (settlement_id, ...)    global 定居点 master
 
 Typical use::
 
@@ -23,12 +26,19 @@ Typical use::
     q.facts                 # pandas DataFrame: the lean main stream
     q.ships(round=10)       # ships at round 10 (from the index, joined by id)
     q.cities(round=10)
+    q.factions(round=10)    # per-faction resources + relations + own city/ship ids
+    q.faction_snapshot(10, "中国")  # one-call decision view (meta + stockpile + relations)
     q.bodies()              # global master
+    q.settlements()         # global 定居点 master
     q.join("ships", round=10)  # explode main.ship_ids and merge with the ship detail table
     q.ships_spec()          # config: ship class -> spec as a DataFrame (joinable with q.facts)
     q.resource_value()      # config: resource key (可读名) -> value
     q.yearly_avg("metrics.cities")              # 年均 (round = 1 month, 12/年)
     q.decadal_avg("metrics.factions.中国.market_value")  # 十年均 (120 月)
+
+Entity identity: every id (ship/city/building/faction/body/settlement) is a **string name**,
+never an integer offset — ``q.ids("ships", r)`` returns a list of names, and ``--apply`` diff ids
+use the same names.
 """
 from __future__ import annotations
 
@@ -73,11 +83,71 @@ class PlanetXQ:
     def cities(self, round: int | None = None) -> pd.DataFrame:
         return self.table("cities", round)
 
+    def factions(self, round: int | None = None) -> pd.DataFrame:
+        """Factions per round: identity + 库存(resources) + 外交(relations) + 自有城/舰清单。
+        ``relations``/``resources``/``city_ids``/``ship_ids`` stay dict- / list-valued cells
+        (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read)."""
+        return self.table("factions", round)
+
     def bodies(self) -> pd.DataFrame:
         return self.table("bodies")
 
-    def ids(self, field: str, round: int) -> list[int]:
-        """The id-array of a lazy field for one round (from the lean main row)."""
+    def settlements(self) -> pd.DataFrame:
+        """Global 定居点 master table (site name / area / ecological capacity / 建设修正 / 矿藏)."""
+        return self.table("settlements")
+
+    def faction(self, round: int, name: str) -> dict | None:
+        """One faction's row at a round, as a plain dict (relations / resources / city/ship ids)."""
+        df = self.factions(round)
+        if df.empty:
+            return None
+        row = df[df["faction_id"] == name]
+        return row.iloc[0].to_dict() if len(row) else None
+
+    def faction_snapshot(self, round: int, name: str) -> dict:
+        """A single faction's decision view at a round: the lean ``metrics.factions`` numbers
+        merged with the ``factions`` detail (stockpile + relations + its city/ship ids). This is
+        the one-call "what's on my mind" — resources, diplomacy, economy, fleet and cities."""
+        frow = self.faction(round, name)
+        if frow is None:
+            return {"faction": name, "exists": False}
+        out = dict(frow)
+        out["exists"] = True
+        # lean metrics per faction (if the main row carries them)
+        fact = self.facts[self.facts["round"] == round]
+        if len(fact):
+            m = fact.iloc[0].get("metrics") or {}
+            out["metrics"] = (m.get("factions") or {}).get(name, {})
+        return out
+
+    def fleet(self, round: int | None, faction: str) -> pd.DataFrame:
+        """A faction's ships at a round, with the effective panel columns the projection now carries."""
+        return self.ships(round).query("faction_id == @faction")
+
+    def city_buildings(self, round: int | None, faction: str) -> pd.DataFrame:
+        """A faction's cities at a round, including each city's ``buildings`` list (dict-valued)."""
+        return self.cities(round).query("faction_id == @faction")
+
+    def relations(self, round: int | None = None) -> pd.DataFrame:
+        """Every faction's diplomacy as a **long** table: ``(round, faction_id, other, relation)``.
+
+        ``relations`` in the factions table is a dict-valued cell; this explodes it into one row
+        per (source faction → target faction) so you can query "who is hostile to whom" directly,
+        e.g. ``q.relations(round=12).query("faction_id=='中国' and relation < -20")``.
+        """
+        df = self.factions(round)
+        if df.empty:
+            return df
+        rows = []
+        for _, r in df.iterrows():
+            rel = r.get("relations") or {}
+            for other, v in rel.items():
+                rows.append({"round": r["round"], "faction_id": r["faction_id"], "other": other, "relation": v})
+        return pd.DataFrame(rows, columns=["round", "faction_id", "other", "relation"])
+
+    def ids(self, field: str, round: int) -> list[str]:
+        """The id-array of a lazy field for one round (from the lean main row). Ids are **names**
+        (strings), never integers: city/building/faction/ship identity = its unique name."""
         cfg = self.schema["lazy"][field]
         row = self.facts[self.facts["round"] == round]
         return list(row[cfg["id_col"]].iloc[0]) if len(row) else []

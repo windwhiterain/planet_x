@@ -58,6 +58,7 @@ struct LazyField {
 const LAZY: &[LazyField] = &[
     LazyField { name: "ships", table: "idx/ships.jsonl", key: "ship_id", id_col: "ship_ids", round: true },
     LazyField { name: "cities", table: "idx/cities.jsonl", key: "city_id", id_col: "city_ids", round: true },
+    LazyField { name: "factions", table: "idx/factions.jsonl", key: "faction_id", id_col: "faction_ids", round: true },
     LazyField { name: "bodies", table: "idx/bodies.jsonl", key: "body_id", id_col: "body_ids", round: false },
     LazyField { name: "settlements", table: "idx/settlements.jsonl", key: "settlement_id", id_col: "settlement_ids", round: false },
 ];
@@ -82,6 +83,7 @@ pub fn write_index(
     let mut main = BufWriter::new(File::create(dir.join(MAIN)).map_err(|e| e.to_string())?);
     let mut ships = BufWriter::new(File::create(dir.join(idx_file("ships"))).map_err(|e| e.to_string())?);
     let mut cities = BufWriter::new(File::create(dir.join(idx_file("cities"))).map_err(|e| e.to_string())?);
+    let mut factions = BufWriter::new(File::create(dir.join(idx_file("factions"))).map_err(|e| e.to_string())?);
     let mut bodies = BufWriter::new(File::create(dir.join(idx_file("bodies"))).map_err(|e| e.to_string())?);
     let mut settlements = BufWriter::new(File::create(dir.join(idx_file("settlements"))).map_err(|e| e.to_string())?);
 
@@ -129,23 +131,24 @@ pub fn write_index(
     }
 
     // Round 0 (start state) then each advancing round.
-    write_round(&mut main, &mut ships, &mut cities, state, config, &RoundFlow::default())?;
+    write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &RoundFlow::default())?;
     for _ in 0..rounds {
         let flow = sim::advance(state, config, rng);
-        write_round(&mut main, &mut ships, &mut cities, state, config, &flow)?;
+        write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &flow)?;
     }
 
-    for w in [&mut main, &mut ships, &mut cities, &mut bodies, &mut settlements] {
+    for w in [&mut main, &mut ships, &mut cities, &mut factions, &mut bodies, &mut settlements] {
         w.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-/// Write one round's main line, ship rows, and city rows.
+/// Write one round's main line, ship rows, city rows, and faction rows.
 fn write_round(
     main: &mut BufWriter<File>,
     ships: &mut BufWriter<File>,
     cities: &mut BufWriter<File>,
+    factions: &mut BufWriter<File>,
     state: &State,
     config: &GameConfig,
     flow: &RoundFlow,
@@ -159,6 +162,7 @@ fn write_round(
         "metrics": metrics,
         "ship_ids": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
         "city_ids": state.cities.iter().filter(|c| !c.razed).map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "faction_ids": state.factions.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
         "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
         "settlement_ids": state.bodies
             .iter()
@@ -168,6 +172,7 @@ fn write_round(
     writeln!(main, "{row}").map_err(|e| e.to_string())?;
 
     for s in &state.ships {
+        let p = ship_panel(config, s);
         writeln!(
             ships,
             "{}",
@@ -184,6 +189,17 @@ fn write_round(
                 "shield": r2(s.shield),
                 "shield_max": r2(s.shield_max),
                 "velocity": r2(s.velocity),
+                "components": s.components,
+                "component_hp": s.component_hp.iter().map(|v| r2(*v)).collect::<Vec<_>>(),
+                "attack": r2(p.attack),
+                "attack_range": r2(p.attack_range),
+                "speed": r2(p.speed),
+                "accel": r2(p.accel),
+                "hardness": r2(p.hardness),
+                "intercept": r2(p.intercept),
+                "shield_regen": r2(p.shield_regen),
+                "hull_regen": r2(p.hull_regen),
+                "upkeep": r2(p.upkeep),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -191,6 +207,22 @@ fn write_round(
 
     for c in &state.cities {
         let deployed: f64 = c.buildings.iter().map(|b| b.deployed).sum();
+        let buildings: Vec<serde_json::Value> = c
+            .buildings
+            .iter()
+            .map(|b| {
+                json!({
+                    "id": b.id,
+                    "kind": b.kind,
+                    "resource": b.resource,
+                    "ship_type": b.ship_type,
+                    "structure": b.structure,
+                    "area": r2(b.area),
+                    "deployed": r2(b.deployed),
+                    "armor": r2(b.armor),
+                })
+            })
+            .collect();
         writeln!(
             cities,
             "{}",
@@ -206,6 +238,43 @@ fn write_round(
                 "razed": c.razed,
                 "deployed_area": r2(deployed),
                 "building_count": c.buildings.len(),
+                "buildings": buildings,
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    for f in &state.factions {
+        let city_ids: Vec<String> = state
+            .cities
+            .iter()
+            .filter(|c| !c.razed && c.faction_id == f.name)
+            .map(|c| c.name.clone())
+            .collect();
+        let ship_ids: Vec<String> = state
+            .ships
+            .iter()
+            .filter(|s| s.hull > 0.0 && s.faction_id == f.name)
+            .map(|s| s.name.clone())
+            .collect();
+        writeln!(
+            factions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": f.name.clone(),
+                "name": f.name,
+                "symbol": f.symbol,
+                "capital_body": f.capital_body,
+                "alignment": r2(f.alignment),
+                "aggression": r2(f.aggression),
+                "home_radius": r2(f.home_radius),
+                "home_attack_mult": r2(f.home_attack_mult),
+                "home_regen_bonus": r2(f.home_regen_bonus),
+                "resources": f.resources,
+                "relations": f.relations,
+                "city_ids": city_ids,
+                "ship_ids": ship_ids,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -224,13 +293,18 @@ pub fn projection_schema() -> serde_json::Value {
         let entry = match f.name {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number"},
+                "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等），随回合变化。按 (round, ship_id) 索引。",
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number"},
             }),
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "城的完整对象（人口/忠诚/建筑/迭代进度），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer"},
+                "description": "城的完整对象（人口/忠诚/建筑清单/迭代进度），随回合变化。按 (round, city_id) 索引。",
+                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array"},
+            }),
+            "factions" => json!({
+                "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
+                "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","resources":"object","relations":"object","city_ids":"array","ship_ids":"array"},
             }),
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
@@ -249,7 +323,7 @@ pub fn projection_schema() -> serde_json::Value {
 
     json!({
         "title": "planet_x 投影：lean 主流 + lazy id 索引表",
-        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/body_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。",
+        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/faction_ids/body_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。",
         "generator": "planet_x",
         "schema_version": 1,
         "main_stream": MAIN,
@@ -262,6 +336,7 @@ pub fn projection_schema() -> serde_json::Value {
             "metrics":    {"type": "object", "description": "总结指标（与 --schema 的 Trajectory.metrics 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 各势力·各城产出/维护/治理。这是 agent 的轻量决策视图。"},
             "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
             "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合活城 id（=城名，join cities 表用）。"},
+            "faction_ids": {"type": "array", "items": {"type": "string"}, "description": "本回合势力 id（=势力名，join factions 表用）。"},
             "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"},
             "settlement_ids": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点 id（=定居点名，join settlements 表用）。"}
         },
@@ -269,7 +344,8 @@ pub fn projection_schema() -> serde_json::Value {
         "read_order": [
             "先读 schema.json，分清 eager（内联）vs lazy（索引）字段；",
             "读 main.jsonl 的 eager + metrics（轻量决策视图），按需拿 id；",
-            "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)。",
+            "看外交/经济/军力全貌：q.factions(round=r)（势力主表：relations/resources/自有城与舰）；",
+            "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)；",
             "要规则（舰级/建筑/组件/资源价值）时读 meta.json：Python kit 里 q.meta / q.ships_spec() / q.buildings_spec() / q.components_spec() / q.resource_value() —— 规则表可当 DataFrame 与 facts join。"
         ]
     })
@@ -285,7 +361,7 @@ mod tests {
 
     /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
     const MAJOR_EAGER: &[&str] = &[
-        "round", "time_month", "events", "chronicle", "metrics", "ship_ids", "city_ids", "body_ids", "settlement_ids",
+        "round", "time_month", "events", "chronicle", "metrics", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
     ];
 
     /// A scratch dir for one test, removed on drop.
@@ -339,7 +415,7 @@ mod tests {
         assert_eq!(main.len(), 7, "main.jsonl should have round 0 + 6 rounds");
         assert_eq!(main[0]["round"], 0);
         for row in &main {
-            for obj in ["ships", "cities", "bodies", "settlements"] {
+            for obj in ["ships", "cities", "factions", "bodies", "settlements"] {
                 assert!(!row.as_object().unwrap().contains_key(obj), "main 不应内联 {obj}");
             }
             let ids = row["ship_ids"].as_array().unwrap();
@@ -349,11 +425,19 @@ mod tests {
         // lazy tables actually written.
         assert!(s.0.join("idx/ships.jsonl").exists());
         assert!(s.0.join("idx/cities.jsonl").exists());
+        assert!(s.0.join("idx/factions.jsonl").exists());
         assert!(s.0.join("idx/bodies.jsonl").exists());
         assert!(s.0.join("idx/settlements.jsonl").exists());
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
         assert!(!ships.is_empty());
         assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");
+        assert!(ships[0].get("components").is_some(), "ships 表要有 components 列");
+        // factions table: has relations + resources, and its own city/ship id lists.
+        let factions = jsonl(&s.0.join("idx/factions.jsonl"));
+        assert!(!factions.is_empty());
+        assert!(factions[0].get("faction_id").is_some(), "factions 表要有 faction_id 列");
+        assert!(factions[0].get("relations").is_some(), "factions 表要有 relations");
+        assert!(factions[0].get("resources").is_some(), "factions 表要有 resources（库存）");
     }
 
     /// The projection is deterministic: the same seed → byte-identical `main.jsonl`.
