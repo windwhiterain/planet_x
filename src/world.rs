@@ -177,6 +177,8 @@ fn city(
         buildings,
         ship_progress,
         razed: false,
+        // 地面/空间站由 default_state 里的天体类型循环覆写（此处先默认地面）。
+        space_station: false,
         loyalty: 1.0,
     }
 }
@@ -579,7 +581,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // 地球有 5 个定居点（对应 spec 五大城市群），其余天体各 1 个。
     let earth = &bodies[2];
     let mut next_building_id: BuildingId = 0;
-    let cities = vec![
+    let mut cities = vec![
         // 地球/城市（spec 命名；长三角/珠三角=中国、亚特兰大=美国、巴黎=欧盟、莫斯科=俄罗斯）
         city("长三角", "地球", F_CN, 1400, &earth.settlements[0], "corvette", config, &mut next_building_id),
         city("珠三角", "地球", F_CN, 1100, &earth.settlements[1], "destroyer", config, &mut next_building_id),
@@ -605,6 +607,17 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         city("创神星采矿站", "创神星", F_MINING, 240, &bodies[16].settlements[0], "corvette", config, &mut next_building_id),
         city("阋神星前哨", "阋神星", F_MINING, 220, &bodies[17].settlements[0], "corvette", config, &mut next_building_id),
     ];
+
+    // 城市形态 = 空间站 还是 地面：建在气态/冰巨行星（体积上没有固体表面）上的定居点
+    // 是轨道空间站；其余（固体天体表面）是地面城市。供前端按行星相对坐标放模型。
+    for c in &mut cities {
+        let kind = bodies
+            .iter()
+            .find(|b| b.name == c.body_id)
+            .map(|b| b.kind.as_str())
+            .unwrap_or("rocky");
+        c.space_station = matches!(kind, "gas_giant" | "ice_giant");
+    }
 
     // --- Starting navy ------------------------------------------------------
     // One ship per entry, id assigned in order; jittered around its home body.

@@ -1217,6 +1217,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                         m
                     },
                     razed: false,
+                    space_station: false,
                     loyalty: 1.0,
                 };
                 let ctrl = state.control.entry(fid.clone()).or_default();
@@ -1964,6 +1965,7 @@ pub(crate) fn colonize(
             m
         },
         razed: false,
+        space_station: false,
         loyalty: 1.0,
     };
     let cctrl = state.control.entry(faction.clone()).or_default();

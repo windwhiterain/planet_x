@@ -1,6 +1,6 @@
 :root {
-  --bg: #0d1220;
-  --panel: #141a2e;
+  --bg: #060a16;
+  --panel: rgba(16, 22, 42, 0.92);
   --panel2: #1b2340;
   --line: #2a3354;
   --text: #cdd6f4;
@@ -10,18 +10,47 @@
   --player: #f59e0b;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body {
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, "Segoe UI", sans-serif;
   font-size: 14px;
-  display: flex;
-  flex-direction: column;
 }
 
-/* top bar */
-#topbar { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+/* 全屏地图：铺满整个视口 */
+#map { position: fixed; inset: 0; z-index: 0; overflow: hidden; }
+#map canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+/* ---- 边缘 bar（默认收起，手动展开） ------------------------------------ */
+.edge-toggle {
+  position: fixed; z-index: 20;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--line); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; padding: 0; user-select: none;
+  transition: border-color .15s, color .15s;
+}
+.edge-toggle:hover { border-color: var(--accent); color: var(--text); }
+.edge-toggle.top    { top: 10px; left: 50%; transform: translateX(-50%); width: 58px; height: 22px; border-radius: 6px 6px 0 0; }
+.edge-toggle.left   { left: 10px; top: 50%; transform: translateY(-50%); width: 22px; height: 58px; border-radius: 6px 0 0 6px; }
+.edge-toggle.bottom { bottom: 10px; left: 50%; transform: translateX(-50%); width: 58px; height: 22px; border-radius: 0 0 6px 6px; }
+
+.edge-panel {
+  position: fixed; z-index: 15;
+  transition: transform .22s ease, opacity .22s ease;
+  opacity: 0.98;
+}
+.edge-panel.top    { top: 0; left: 0; right: 0; transform: translateY(-100%); }
+.edge-panel.left   { top: 0; bottom: 0; left: 0; width: 430px; transform: translateX(-100%); }
+.edge-panel.bottom { bottom: 0; left: 0; right: 0; transform: translateY(100%); }
+
+.edge-panel.open.top    { transform: translateY(0); }
+.edge-panel.open.left   { transform: translateX(0); }
+.edge-panel.open.bottom { transform: translateY(0); }
+
+/* 顶部 bar body */
+#topbar { background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px 12px; backdrop-filter: blur(4px); }
 #topbar h1 { display: inline; font-size: 18px; }
 #topbar .sub { color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 8px; }
 .bar { display: flex; gap: 14px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
@@ -33,43 +62,30 @@ body {
 .bar button:hover { border-color: var(--accent); }
 .bar .inp input { width: 90px; }
 
-/* layout */
-main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
-#mapPanel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-#map { position: relative; background: #060a16; border: 1px solid var(--line); border-radius: 8px; flex: 1; width: 100%; display: block; min-height: 320px; overflow: hidden; }
-#map canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-#readout { margin-top: 8px; color: var(--muted); font-size: 12px; min-height: 18px; }
-
-#side { width: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 2px; }
-
-/* faction bar */
-#factionBar { display: flex; flex-wrap: wrap; gap: 6px; }
-.fac-btn {
-  padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line);
-  background: var(--panel2); cursor: pointer; color: var(--text);
+/* 左侧 bar body */
+#side {
+  background: var(--panel); border-right: 1px solid var(--line);
+  padding: 12px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; backdrop-filter: blur(4px);
 }
-.fac-btn.sel { border-color: var(--accent); background: #1e3a6b; font-weight: 600; }
 
-/* panels */
-.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+/* 底部 bar body */
+#diffBar { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 16px; backdrop-filter: blur(4px); }
+#readout { color: var(--text); font-size: 12px; min-height: 16px; }
+#diffText { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+/* panels / tree */
+.panel { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .panel h2 { margin: 0 0 8px; font-size: 13px; }
 .panel .hint { color: var(--muted); font-size: 11px; }
-/* hierarchy tree (control + scope) — nested boxes, no indentation */
 .tnode {
   border: 1px solid var(--line); border-radius: 6px;
   margin: 4px 0; background: rgba(0, 0, 0, .18);
 }
-.tnode-head {
-  display: flex; align-items: center; gap: 6px; padding: 4px 8px;
-  border-radius: 5px;
-}
+.tnode-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 5px; }
 .tnode-head:hover { background: #18224a; }
 .tnode-label { flex: 1; display: block; cursor: default; }
 .tnode-label.clickable { cursor: pointer; }
-/* tab strip — each container node picks one child to expand */
-.tnode-tabs {
-  display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px 2px;
-}
+.tnode-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px 2px; }
 .tnode-tab {
   padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px;
   background: var(--panel2); color: var(--muted); font-size: 12px;
@@ -82,14 +98,8 @@ main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 4px; font-size: 12px; flex: none;
 }
-.ship-editor {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 2px 8px 8px;
-}
-.leaf-val {
-  display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px;
-  color: var(--muted);
-}
+.ship-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; }
+.leaf-val { display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px; color: var(--muted); }
 .leaf-val .lv-label { font-size: 12px; }
 .tnode .num, .ship-editor input[type="number"], .leaf-val input[type="number"] {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
@@ -105,14 +115,12 @@ main { flex: 1; display: flex; gap: 14px; padding: 14px; overflow: hidden; }
 .ship-editor .rm { color: #fca5a5; }
 .add-bld button:hover, .ship-editor .rm:hover { border-color: var(--accent); }
 
-/* apply button */
-#applyBtn { align-self: stretch; padding: 10px; font-size: 14px; }
+#applyBtn { padding: 10px; font-size: 14px; }
 button.primary { background: #1d4ed8; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
 button.primary:hover { background: #2563eb; }
 
-#diffBar {
-  border-top: 1px solid var(--line); background: var(--panel); padding: 8px 16px;
-  color: var(--muted); font-size: 12px; max-height: 130px; overflow-y: auto; white-space: pre-wrap;
-}
-
 #status { color: var(--muted); }
+
+@media (max-width: 720px) {
+  .edge-panel.left { width: 100%; }
+}

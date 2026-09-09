@@ -15,7 +15,12 @@
   </script>
 </head>
 <body>
-  <header id="topbar">
+  <!-- 全屏 3D 地图：铺满整个视口，UI 靠边缘的 bar 手动展开 -->
+  <div id="map"></div>
+
+  <!-- 顶部边缘 bar：回合/种子/推进/重建（默认收起） -->
+  <button id="toggleTop" class="edge-toggle top" title="展开/收起顶部控制" data-closed-arrow="▼" data-open-arrow="▲">▼</button>
+  <header id="topbar" class="edge-panel top">
     <h1>行星X <span class="sub">太空沙盘 · WebUI</span></h1>
     <div class="bar">
       <span id="metaRound">回合 0 · 0 个月</span>
@@ -33,22 +38,22 @@
     </div>
   </header>
 
-  <main>
-    <section id="mapPanel">
-      <div id="map"></div>
-      <div id="readout"></div>
-    </section>
+  <!-- 左侧边缘 bar：控制层级树 + 应用（默认收起） -->
+  <button id="toggleSide" class="edge-toggle left" title="展开/收起控制层级" data-closed-arrow="▶" data-open-arrow="◀">▶</button>
+  <aside id="side" class="edge-panel left">
+    <div class="panel" id="treePanel">
+      <h2>控制层级 <span class="hint">全局 · 势力 · 天体 · 城市 · 叶片</span></h2>
+      <div id="tree"></div>
+    </div>
+    <button id="applyBtn" class="primary">✓ 应用到服务器</button>
+  </aside>
 
-    <aside id="side">
-      <div class="panel" id="treePanel">
-        <h2>控制层级 <span class="hint">全局 · 势力 · 天体 · 城市 · 叶片</span></h2>
-        <div id="tree"></div>
-      </div>
-      <button id="applyBtn" class="primary">✓ 应用到服务器</button>
-    </aside>
-  </main>
-
-  <footer id="diffBar"></footer>
+  <!-- 底部边缘 bar：选中读面 + 回合 diff（默认收起） -->
+  <button id="toggleDiff" class="edge-toggle bottom" title="展开/收起状态" data-closed-arrow="▲" data-open-arrow="▼">▲</button>
+  <footer id="diffBar" class="edge-panel bottom">
+    <div id="readout"></div>
+    <div id="diffText"></div>
+  </footer>
 
   <script type="module" src="map3d.js"></script>
   <script src="app.js"></script>

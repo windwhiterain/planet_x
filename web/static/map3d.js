@@ -20,11 +20,15 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 let scene, camera, renderer, controls, raycaster, pointer;
 let bodiesG, citiesG, shipsG, spinners = [];
+let lodItems = [];    // 需按相机距离做「小模型 <-> 恒定尺寸 billboard」切换的对象
 let fitted = false;   // 相机是否已按首帧适配（advance 不再重置视角）
 let scale = 110;      // 世界单位：最远天体径向压缩后 ≈ `scale` 单位
 let currentWorld = null;
 let currentVisuals = null;
 let sun = null;
+
+// 相机远离到超过此距离（世界单位）时，城市/舰的小模型换成恒定尺寸 billboard。
+const LOD_SWITCH_DIST = 30;
 
 // 兜底的天体类型（config body_kinds 缺该项/未传时用）：中性岩石外观。
 const DEFAULT_KIND = {
@@ -359,8 +363,9 @@ function disposeGroup(g) {
   g.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
     if (o.material) {
-      if (Array.isArray(o.material)) o.material.forEach((m) => { m.dispose(); if (m.map) m.map.dispose(); });
-      else { o.material.dispose(); if (o.material.map) o.material.map.dispose(); }
+      // 共享纹理（billboard 缓存）标记了 userData.shared → 不随单次释放销毁。
+      if (Array.isArray(o.material)) o.material.forEach((m) => { m.dispose(); if (m.map && !m.map.userData.shared) m.map.dispose(); });
+      else { o.material.dispose(); if (o.material.map && !o.material.map.userData.shared) o.material.map.dispose(); }
     }
   });
   while (g.children.length) g.remove(g.children[0]);
@@ -381,6 +386,63 @@ function specFor(visuals, body) {
   return (visuals && visuals[body.kind]) || DEFAULT_KIND;
 }
 
+// --- 恒定尺寸 billboard（镜头拉远、城市/舰的小模型退化为固定像素大小的点） -----
+const shapeTex = {};
+function makeShapeTexture(shape) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ffffff';
+  if (shape === 'dot') {
+    ctx.beginPath(); ctx.arc(32, 32, 26, 0, Math.PI * 2); ctx.fill();
+  } else if (shape === 'diamond') {
+    ctx.beginPath(); ctx.moveTo(32, 4); ctx.lineTo(60, 32); ctx.lineTo(32, 60); ctx.lineTo(4, 32); ctx.closePath(); ctx.fill();
+  } else if (shape === 'ring') {
+    ctx.beginPath(); ctx.arc(32, 32, 22, 0, Math.PI * 2); ctx.lineWidth = 8; ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.userData.shared = true;   // 多个 billboard 共享，不随单个释放销毁
+  tex.anisotropy = 4;
+  return tex;
+}
+function makeBillboard(shape, colorHex, px) {
+  const tex = shapeTex[shape] || (shapeTex[shape] = makeShapeTexture(shape));
+  const mat = new THREE.SpriteMaterial({ map: tex, color: new THREE.Color(colorHex || '#8f9bb3'), transparent: true, depthTest: true, depthWrite: false });
+  const sp = new THREE.Sprite(mat);
+  sp.userData.px = px;
+  return sp;
+}
+
+// 城市在行星上的确定性方位：`elev` 为距 +Y 极轴的极角（0=顶，π/2=赤道），返回单位方向。
+function cityDir(idx, count, elev) {
+  const az = (idx / Math.max(count, 1)) * Math.PI * 2 + 0.6;
+  const horiz = Math.sin(elev);
+  const y = Math.cos(elev);
+  return [Math.cos(az) * horiz, y, Math.sin(az) * horiz];
+}
+
+// 每帧按相机距离切换：远 → 恒定尺寸 billboard；近 → 小模型。#
+function updateLod() {
+  if (!camera || !renderer) return;
+  const fov = camera.fov * Math.PI / 180;
+  const vh = renderer.domElement.clientHeight || 600;
+  for (const it of lodItems) {
+    const dist = camera.position.distanceTo(it.pos);
+    if (dist > LOD_SWITCH_DIST) {
+      const px = it.billboard.userData.px || 10;
+      const s = px * 2 * dist * Math.tan(fov / 2) / vh;   // 让投影后的屏幕像素 ≈ px
+      it.billboard.scale.set(s, s, 1);
+      it.billboard.visible = true;
+      it.mesh.visible = false;
+    } else {
+      it.billboard.visible = false;
+      it.mesh.visible = true;
+    }
+  }
+}
+
 function orbitLine(orbit) {
   const pts = [];
   const period = Math.max(orbit.period, 1e-6);
@@ -392,7 +454,8 @@ function orbitLine(orbit) {
     pts.push(new THREE.Vector3(cx * scale, 0, cz * scale));
   }
   const g = new THREE.BufferGeometry().setFromPoints(pts);
-  const m = new THREE.LineBasicMaterial({ color: 0x3b4a75, transparent: true, opacity: 0.5 });
+  // 轨道画得细而淡，避免与行星/标记抢视觉（减少重叠感）。
+  const m = new THREE.LineBasicMaterial({ color: 0x2c3a5f, transparent: true, opacity: 0.22 });
   return new THREE.LineLoop(g, m);
 }
 
@@ -434,30 +497,55 @@ function renderBodies(group, world, visuals) {
 
     group.add(orbitLine(b.orbit));
 
-    const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 40);
-    lbl.position.set(p.x, p.y + r + 5, p.z);
+    const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 32);
+    lbl.position.set(p.x, p.y + r + 4, p.z);
     group.add(lbl);
   });
 }
 
-function renderCities(group, world) {
+// 城市模型很小；相对其所属天体定位——
+//   地面城市：贴在天体表面的确定性点（按城市在整群里的序号给方位）。
+//   空间站：悬在这颗天体更高的轨道上。
+// 每个城市 = 一个小模型 + 一个恒定尺寸 billboard（LOD 切换），都挂在以天体中心为原点的
+// 小组里，因此随天体一起移动（"关于星球的坐标"）。
+function renderCities(group, world, visuals) {
   const byBody = {};
   world.cities.forEach((c) => { (byBody[c.body_id] = byBody[c.body_id] || []).push(c); });
   Object.entries(byBody).forEach(([bodyName, cities]) => {
     const body = world.bodies.find((b) => b.name === bodyName);
     if (!body) return;
-    const p = wp(body.position);
-    const off = bodyRadius(body, specFor(null, body)) + 3.6;
+    const P = wp(body.position);
+    const spec = specFor(visuals, body);
+    const r = bodyRadius(body, spec);
     cities.forEach((c, idx) => {
-      const ang = (idx / cities.length) * Math.PI * 2;
-      const px = p.x + Math.cos(ang) * off;
-      const pz = p.z + Math.sin(ang) * off;
-      const geo = new THREE.BoxGeometry(3.2, 3.2, 3.2);
-      const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(facColorFor(world, c.faction_id)), roughness: 0.4, metalness: 0.3 });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(px, 1.6, pz);
-      mesh.userData = { kind: 'city', name: c.name };
-      group.add(mesh);
+      const color = facColorFor(world, c.faction_id);
+      const g = new THREE.Group();
+      g.userData = { kind: 'city', name: c.name };
+      let mesh, bbShape, bx = 0, by = 0, bz = 0;
+      if (c.space_station) {
+        // 空间站：轨道半径略大于行星，绕行星一圈分布。
+        const az = (idx / Math.max(cities.length, 1)) * Math.PI * 2 + 1.7;
+        const orbR = r * 1.9;
+        bx = Math.cos(az) * orbR; bz = Math.sin(az) * orbR; by = r * 0.55;
+        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.5, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.4, metalness: 0.5 }));
+        bbShape = 'ring';
+      } else {
+        // 地面城市：贴在天体表面，朝表面法线方向直立。
+        const dir = cityDir(idx, cities.length, 0.95);
+        const rs = r * 0.98;
+        bx = dir[0] * rs; by = dir[1] * rs; bz = dir[2] * rs;
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.5, metalness: 0.25 }));
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dir[0], dir[1], dir[2]));
+        bbShape = 'dot';
+      }
+      mesh.position.set(bx, by, bz);
+      g.add(mesh);
+      const bb = makeBillboard(bbShape, color, c.space_station ? 13 : 11);
+      bb.position.set(bx, by, bz);
+      g.add(bb);
+      g.position.set(P.x, P.y, P.z);
+      group.add(g);
+      lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(P.x + bx, P.y + by, P.z + bz) });
     });
   });
 }
@@ -465,12 +553,19 @@ function renderCities(group, world) {
 function renderShips(group, world) {
   world.ships.forEach((s) => {
     const p = wp(s.position);
-    const geo = new THREE.IcosahedronGeometry(1.4, 0);
-    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(facColorFor(world, s.faction_id)), roughness: 0.35, metalness: 0.5 });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(p.x, 2.8, p.z);
-    mesh.userData = { kind: 'ship', name: s.name };
-    group.add(mesh);
+    const color = facColorFor(world, s.faction_id);
+    const g = new THREE.Group();
+    g.userData = { kind: 'ship', name: s.name };
+    const y = 0.6;
+    const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.35, metalness: 0.5 }));
+    mesh.position.set(0, y, 0);
+    g.add(mesh);
+    const bb = makeBillboard('diamond', color, 9);
+    bb.position.set(0, y, 0);
+    g.add(bb);
+    g.position.set(p.x, 0, p.z);
+    group.add(g);
+    lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(p.x, y, p.z) });
   });
 }
 
@@ -522,8 +617,15 @@ function makeSun() {
 // --- 相机适配 ---------------------------------------------------------------
 function fitCamera(world) {
   scale = systemScale(world);
-  const s = 110;
-  camera.position.set(s * 1.5, s * 1.75, s * 1.05);
+  // 让最外轨道（半径 = 110 世界单位，见 systemScale）撑满约 78% 的视口宽度，
+  // 使全屏视图里太阳系不挤在中央一小块。（略留边距，避免最外轨道被裁切。）
+  const R = 110;
+  const fov = camera.fov * Math.PI / 180;
+  const aspect = camera.aspect || 1.6;
+  const halfW = Math.tan(fov / 2) * aspect;
+  const dist = R / (halfW * 0.78);
+  const dir = new THREE.Vector3(0.60, 0.70, 0.42).normalize();
+  camera.position.copy(dir.multiplyScalar(dist));
   camera.near = 1;
   camera.far = 6000;
   camera.updateProjectionMatrix();
@@ -556,6 +658,7 @@ function tick() {
   controls.update();
   const t = performance.now() * 0.001;
   for (const s of spinners) s.mesh.rotation.y = (t * s.speed) % (Math.PI * 2);
+  updateLod();
   renderer.render(scene, camera);
 }
 
@@ -622,9 +725,11 @@ function setWorld(world, visuals) {
   disposeGroup(citiesG);
   disposeGroup(shipsG);
   clearSpinners();
+  lodItems = [];
   renderBodies(bodiesG, world, visuals);
-  renderCities(citiesG, world);
+  renderCities(citiesG, world, visuals);
   renderShips(shipsG, world);
+  updateLod();
 }
 
 function resetView(world) {

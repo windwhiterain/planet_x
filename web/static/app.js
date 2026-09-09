@@ -547,11 +547,24 @@ function renderReadout() {
 }
 
 function renderDiff() {
-  const box = $('#diffBar');
+  const box = $('#diffText');
+  if (!box) return;
   if (!prevState) { box.textContent = ''; return; }
   box.textContent = '上回合: ' + prevState.round + ' → ' + world.round +
     '  舰 ' + prevState.ships.length + '→' + world.ships.length +
     '  城 ' + prevState.cities.length + '→' + world.cities.length;
+}
+
+// --- 边缘 bar 展开/收起 ----------------------------------------------------
+function toggleBar(btnId, panelId) {
+  const btn = $(btnId);
+  const panel = $(panelId);
+  if (!btn || !panel) return;
+  btn.addEventListener('click', () => {
+    panel.classList.toggle('open');
+    // 小箭头方向随开/收翻转。
+    btn.textContent = panel.classList.contains('open') ? btn.dataset.openArrow : btn.dataset.closedArrow;
+  });
 }
 
 // --- 动作 ------------------------------------------------------------------
@@ -589,5 +602,9 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#advanceBtn').addEventListener('click', () => advance(+$('#advanceN').value));
   $('#newBtn').addEventListener('click', newGame);
   $('#applyBtn').addEventListener('click', applyControl);
+  // 边缘 bar 手动展开/收起（默认收起，地图全屏）。
+  toggleBar('#toggleTop', '#topbar');
+  toggleBar('#toggleSide', '#side');
+  toggleBar('#toggleDiff', '#diffBar');
   init();
 });
