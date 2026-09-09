@@ -608,6 +608,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             component_hp: Vec::new(),
             velocity: 0.0,
             doctrine: spec.default_doctrine,
+            kiting: spec.default_kiting,
             attack_hist: BTreeMap::new(),
         });
     };

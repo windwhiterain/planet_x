@@ -834,8 +834,8 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 
 > 用户裁决：每条风格轴取 `[-1,1]`、`0`=基线；**火力分配是武器自身可控属性（非舰船风格）**；**attack 是 per-武器**（每件武器是独立索敌单位）。目标选择所有自动逻辑通用一个基本权重：**距离 + 克制 + per-武器确定性随机扰动**；火力分配是叠在基本权重之上的一个层（本舰攻击历史新鲜度 × 武器 `fire_spread`）。
 
-- **`ShipDoctrine{aggression,temper,lone_wolf}`**（per-舰，`ShipSpec.default_doctrine` 类默认、`Ship.doctrine` 实例值、`Ship.attack_hist` 火力分配记忆）。每条轴 `[-1,1]`，`0`=基线。
-  - `aggression`（警惕↔激进/风筝↔贴脸）：`effective_retreat_hull` 收缩（激进更晚撤）。
+- **`ShipDoctrine{temper,lone_wolf}`**（per-舰，`ShipSpec.default_doctrine` 类默认、`Ship.doctrine` 实例值、`Ship.attack_hist` 火力分配记忆）。每条轴 `[-1,1]`，`0`=基线。〈警惕↔激进/风筝↔贴脸〉已**从行为风格降级**为普通舰船控制属性 `Ship.kiting`（见下），不再是风格轴。
+- **`Ship.kiting`（风筝<->贴脸，普通舰船控制属性而非风格轴）**：`[-1,1]`、`0`=基线。**软目标**——Move/Follow/Dock/Idle 皆为软目标：附近有敌舰时此姿态**自动**移动本舰（对玩家 AI 一视同仁，玩家也不能硬控制）。`effective_retreat_hull` 收缩（风筝更早撤、贴脸更晚撤）；`kiting_dest` 做软移动（风筝钉在最远武器射程、敌近则拉开；贴脸压近到 `min_engage_range`）。`ShipSpec.default_kiting` 类默认；`web` 暴露 `ship_kiting`（读/写、钳 `[-1,1]`）。
   - `temper`（理智↔热血/欺软怕硬↔飞蛾扑火）：按**威慑对比**挑目标（用 `ln((my_det+1)/(tg_det+1))` 的 log-ratio，避免 `(my-tg)/(my+tg)` 在 my≫tg 时失去区分度）。
   - `lone_wolf`（护航↔独狼）：空闲舰是否护卫旗舰（`lone_wolf<0` 结伴护航，`>0` 独自就近接战）。
 - **威慑 `sim::deterrence(ship)`**：综合战力（`attack×4+hull_max+shield_max×0.8+hardness×3+intercept×2`）+ `deterrence_radius`（默认 8 AU）内同势力友舰叠加。**注意**：同一簇里各舰的威慑相同（叠加成簇总量），所以 temper 区分的是「不同簇/整体强弱」而非簇内单舰——测试需把两目标放到**不同簇**才见分晓。
@@ -843,5 +843,5 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - **统一基本权重**（`autocontrol`）：`W_DIST×dist_score + W_CTR×weapon_counter + per-weapon noise`。`weapon_counter` 是**单件武器**克制（导弹 vs 点防、动能 vs 盾）。`weapon_noise` 由（武器 seed, 目标名）哈希、±0.06，确定性。
 - **`web.rs`**：`ShipDoctrineEntry`（读）+ `ShipDoctrinePatch`（写，轴钳到 `[-1,1]`、只改本势力舰），`--control`/`--apply`/`--control-schema` 均含 `ship_doctrine`。
 - **验证**：`cargo build --all-targets` 无警告；`cargo test` 44 lib（含 `spread_weapon_distributes_fire_across_targets`、`temper_biases_toward_weaker_or_stronger_deterrence`、`apply_ship_doctrine_patch`）+ 5 黑盒长局（`same_seed_reproduces_identically` 等）全绿；`--seed 42 --traj 8` 世界照常推进（有交战胜负、舰出厂/击毁）。`config/game.ron` 武器带 `fire_rate:1.0, fire_spread:0.0`（基线不变）。
-- `[ ]`（未做，spec §95 行为枚举）**行为枚举重定义**：按新 spec，攻击不需要行为（范围内有敌人自动攻击），轰炸也自动；行为收敛为 `目标地点(Move)/跟随舰船(Follow)/停泊城市(DockCity)/停泊天体(Dock)/待命(Idle)`——需从 `ShipBehavior` 移除 `TargetShip{attack:true}`、`TargetSettlement{bombard}`（轰炸改自动），新增 `DockCity`，并同步 `step_military` 玩家路径、`behavior_is_valid`、`resolve_target`、web schema 与相关测试。
 - `[ ]`（可选）**把 doctrine 扩展到经济/造舰**（护航↔独狼、保守↔扩张等轴涉及舰队编成/资源投入），当前只影响战斗决策。
+- `[x]`（branch `feature/behavior-redesign`）**行为枚举重定义**（spec §96 行为）：攻击/轰炸都不需要行为，射程内自动发生。`ShipBehavior` 收敛为 `Move/Follow/DockCity/Dock/Colonize/Idle`（移除 `TargetShip{attack}`、`TargetSettlement{bombard}`；新增 `Follow(跟随舰船)`、`DockCity(停泊城市)`）。`Follow` 纯护航/追袭（所随舰**可是友方也可是敌方**），不拦截、不开火——攻击由统一基本权重自动接战完成；`DockCity` 驶向某城，敌对城在围城射程内自动轰炸。玩家路径与 AI 路径统一走 `autocontrol::auto_combat`（射程内自动开火/轰炸）。注意：kiting 是**软移动**（见上），连 Idle 舰在敌近时也会自动软移动，玩家不能硬控制。

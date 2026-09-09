@@ -74,13 +74,21 @@ pub struct ShipOrderEntry {
     pub mode: Option<ControlMode>,
 }
 
-/// 一艘舰的行为风格（per-舰 可配置）读面：三条轴各取 [-1,1]，0 = 基线。
+/// 一艘舰的行为风格（per-舰 可配置）读面：两条轴各取 [-1,1]，0 = 基线。
+/// 〈风筝<->贴脸〉不在行为风格里，是普通舰船控制属性 [`ShipKitingEntry`]。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipDoctrineEntry {
     pub ship: ShipId,
-    pub aggression: f64,
     pub temper: f64,
     pub lone_wolf: f64,
+}
+
+/// 一艘舰的风筝<->贴脸姿态（普通舰船控制属性，per-舰）：[-1,1]，0 = 基线。它是软属性——
+/// Move/Follow/Dock/Idle 皆为软目标，附近有敌舰时自动按它软移动（玩家也不能硬控制）。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ShipKitingEntry {
+    pub ship: ShipId,
+    pub kiting: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -124,6 +132,7 @@ pub struct FactionControlView {
     pub capital: Option<Control<BodyId>>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
+    pub ship_kiting: Vec<ShipKitingEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
@@ -183,7 +192,7 @@ pub struct AdvanceReq {
 pub struct ShipOrderPatch {
     /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
-    /// 新行为（Idle/Move/TargetShip/TargetSettlement/Dock/Colonize）。缺省 = 保留现值。
+    /// 新行为（Idle/Move/Follow/DockCity/Dock/Colonize）。缺省 = 保留现值。
     #[serde(default)]
     pub behavior: Option<ShipBehavior>,
     /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
@@ -198,11 +207,19 @@ pub struct ShipDoctrinePatch {
     /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
     #[serde(default)]
-    pub aggression: Option<f64>,
-    #[serde(default)]
     pub temper: Option<f64>,
     #[serde(default)]
     pub lone_wolf: Option<f64>,
+}
+
+/// 一艘舰的风筝<->贴脸姿态补丁（普通舰船控制属性，per-舰）：覆盖 `ship` 的 `kiting`；
+/// 被钳制到 [-1,1]。缺省 = 保留现值。
+#[derive(Deserialize, Default, JsonSchema)]
+pub struct ShipKitingPatch {
+    /// 目标舰（唯一名 identity）。
+    pub ship: ShipId,
+    #[serde(default)]
+    pub kiting: Option<f64>,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -308,6 +325,9 @@ pub struct FactionControlPatch {
     /// 本势力各舰的行为风格补丁（per-舰 可配置）。
     #[serde(default)]
     pub ship_doctrine: Vec<ShipDoctrinePatch>,
+    /// 本势力各舰的风筝<->贴脸姿态补丁（per-舰 普通控制属性）。
+    #[serde(default)]
+    pub ship_kiting: Vec<ShipKitingPatch>,
     /// 投资预算补丁（建设）。
     #[serde(default)]
     pub investment_budget: Vec<BudgetPatch>,
@@ -378,10 +398,15 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         .filter(|s| s.faction_id == fid)
         .map(|s| ShipDoctrineEntry {
             ship: s.name.clone(),
-            aggression: s.doctrine.aggression,
             temper: s.doctrine.temper,
             lone_wolf: s.doctrine.lone_wolf,
         })
+        .collect();
+    let ship_kiting = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid)
+        .map(|s| ShipKitingEntry { ship: s.name.clone(), kiting: s.kiting })
         .collect();
     let investment_budget = c
         .investment_budget
@@ -434,6 +459,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         capital: c.capital.clone(),
         ship_orders,
         ship_doctrine,
+        ship_kiting,
         investment_budget,
         construction_budget,
         invest_weights,
@@ -516,10 +542,14 @@ fn round_view(v: FactionControlView) -> FactionControlView {
             .into_iter()
             .map(|d| ShipDoctrineEntry {
                 ship: d.ship,
-                aggression: r2(d.aggression),
                 temper: r2(d.temper),
                 lone_wolf: r2(d.lone_wolf),
             })
+            .collect(),
+        ship_kiting: v
+            .ship_kiting
+            .into_iter()
+            .map(|k| ShipKitingEntry { ship: k.ship, kiting: r2(k.kiting) })
             .collect(),
         investment_budget: v
             .investment_budget
@@ -610,14 +640,24 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             else {
                 continue;
             };
-            if let Some(v) = d.aggression {
-                ship.doctrine.aggression = v.clamp(-1.0, 1.0);
-            }
             if let Some(v) = d.temper {
                 ship.doctrine.temper = v.clamp(-1.0, 1.0);
             }
             if let Some(v) = d.lone_wolf {
                 ship.doctrine.lone_wolf = v.clamp(-1.0, 1.0);
+            }
+        }
+        // 风筝<->贴脸姿态补丁：普通舰船控制属性，只作用于本势力确实拥有的舰；钳制到 [-1,1]。
+        for k in &fac.ship_kiting {
+            let Some(ship) = state
+                .ships
+                .iter_mut()
+                .find(|s| s.name == k.ship && s.faction_id == fac.faction_id)
+            else {
+                continue;
+            };
+            if let Some(v) = k.kiting {
+                ship.kiting = v.clamp(-1.0, 1.0);
             }
         }
         for bp in &fac.investment_budget {
@@ -801,9 +841,9 @@ fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, 
 }
 
 /// Normalize a single ship `behavior` value so `apply` accepts BOTH shapes:
-///   * the default serde enum form (`{"TargetShip":{"ship":"华盛顿","attack":true}}`,
+///   * the default serde enum form (`{"Follow":{"ship":"华盛顿"}}`,
 ///     `"Idle"`) — what the `control` template emits and what `.ron` uses; and
-///   * the tagged agent-state form (`{"type":"target_ship","ship":"华盛顿","attack":true}`,
+///   * the tagged agent-state form (`{"type":"follow","ship":"华盛顿"}`,
 ///     `{"type":"idle"}`) — exactly what an agent sees in a ship's `order`.
 /// The latter is rewritten into the former so the rest of the pipeline stays
 /// unchanged. Unknown tags are left as-is (they'll fail downstream cleanly).
@@ -824,8 +864,8 @@ fn normalize_behavior(v: &mut serde_json::Value) {
             return;
         }
         "move" => "Move",
-        "target_ship" => "TargetShip",
-        "target_settlement" => "TargetSettlement",
+        "follow" => "Follow",
+        "dock_city" => "DockCity",
         "dock" => "Dock",
         "colonize" => "Colonize",
         _ => return,
@@ -944,12 +984,12 @@ mod tests {
         let cases = [
             (serde_json::json!({"type":"idle"}), serde_json::json!("Idle")),
             (
-                serde_json::json!({"type":"target_ship","ship":"华盛顿","attack":true}),
-                serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}}),
+                serde_json::json!({"type":"follow","ship":"华盛顿"}),
+                serde_json::json!({"Follow":{"ship":"华盛顿"}}),
             ),
             (
-                serde_json::json!({"type":"target_settlement","city":"长三角","bombard":true}),
-                serde_json::json!({"TargetSettlement":{"city":"长三角","bombard":true}}),
+                serde_json::json!({"type":"dock_city","city":"长三角"}),
+                serde_json::json!({"DockCity":{"city":"长三角"}}),
             ),
             (
                 serde_json::json!({"type":"move","position":[-0.5,0.3]}),
@@ -970,9 +1010,9 @@ mod tests {
     /// The default form must pass through unchanged.
     #[test]
     fn normalize_behavior_keeps_default_form() {
-        let mut v = serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}});
+        let mut v = serde_json::json!({"Follow":{"ship":"华盛顿"}});
         normalize_behavior(&mut v);
-        assert_eq!(v, serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}}));
+        assert_eq!(v, serde_json::json!({"Follow":{"ship":"华盛顿"}}));
     }
 
     /// Applying a tagged-form diff to a real world must produce the same
@@ -985,12 +1025,12 @@ mod tests {
         let tagged = serde_json::json!({
             "control": [{
                 "faction_id": "中国",
-                "ship_orders": [{"ship": "长城", "behavior": {"type": "target_ship", "ship": "华盛顿", "attack": true}, "mode": "Player"}]
+                "ship_orders": [{"ship": "长城", "behavior": {"type": "follow", "ship": "华盛顿"}, "mode": "Player"}]
             }]
         });
         apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
         let b = state.ship_behavior("长城".to_string()).expect("长城 has an order");
-        assert_eq!(b, ShipBehavior::TargetShip { ship: "华盛顿".to_string(), attack: true });
+        assert_eq!(b, ShipBehavior::Follow { ship: "华盛顿".to_string() });
     }
 
     /// Applying a ship-doctrine patch sets only the given axes on the faction's
@@ -1001,19 +1041,26 @@ mod tests {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
         let diff = serde_json::json!({
-            "control": [{"faction_id": "中国", "ship_doctrine": [
-                {"ship": "长城", "aggression": 1.0, "temper": -1.0, "lone_wolf": 3.0},
-                {"ship": "华盛顿", "temper": 1.0}
-            ]}]
+            "control": [{"faction_id": "中国",
+                "ship_doctrine": [
+                    {"ship": "长城", "temper": -1.0, "lone_wolf": 3.0},
+                    {"ship": "华盛顿", "temper": 1.0}
+                ],
+                "ship_kiting": [
+                    {"ship": "长城", "kiting": -0.5},
+                    {"ship": "华盛顿", "kiting": 1.0}
+                ]
+            }]
         });
         apply_patch(&mut state, &config, &diff).expect("doctrine patch applies");
         let d = state.ship("长城").expect("长城 exists").doctrine;
-        assert_eq!(d.aggression, 1.0);
         assert_eq!(d.temper, -1.0);
         assert_eq!(d.lone_wolf, 1.0, "axis must be clamped to [-1,1]");
+        assert_eq!(state.ship("长城").unwrap().kiting, -0.5);
         // 华盛顿 belongs to 美国, not 中国 → the 中国 patch must be a no-op.
         let w = state.ship("华盛顿").expect("华盛顿 exists").doctrine;
         assert_eq!(w.temper, 0.0, "other-faction ship must be untouched");
+        assert_eq!(state.ship("华盛顿").unwrap().kiting, 0.0, "other-faction ship must be untouched");
     }
 
     /// Setting a faction's scope to Player must actually take over its leaves

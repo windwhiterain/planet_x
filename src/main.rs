@@ -93,8 +93,9 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 【每回合演化 sim::advance】天体重算 → 经济（开采/人口）→ 维护 upkeep → 市场（自动兑换富余\n\
 矿物）→ 建设（建筑/造舰）→ 军事（移动/开火/围城/攻占）→ 外交（关系漂移/战争/停战）。\n\
 \n\
-【控制模型 = 指令】每势力有可控状态 State::control：ship_orders（Idle/Move/TargetShip/\n\
-TargetSettlement/Dock/Colonize）、budget（投资预算）、invest_weights。每个叶子带 mode：\n\
+【控制模型 = 指令】每势力有可控状态 State::control：ship_orders（Idle/Move/Follow/DockCity/\n\
+Dock/Colonize；攻击与轰炸不需要行为，射程内自动发生）、doctrine/kiting（行为风格与风筝<->贴脸）、\n\
+budget（投资预算）、invest_weights。每个叶子带 mode：\n\
 Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继承上层）。State::scope 是一棵\n\
 作用域树（全局→势力→天体→城市），决定某叶子由谁控制。agent 用 --apply 写 diff 定向故事。\n\
 \n\
