@@ -219,10 +219,10 @@ fn emit(s: &str) {
 /// then one per round) as JSON Lines — the **trajectory body** that external `jq`
 /// queries. Optionally persist a deterministic checkpoint (state + RNG position).
 fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, save: Option<&Path>) {
-    emit(&agent::render_state(state, config));
+    emit(&agent::render_state(state));
     for _ in 0..n {
         sim::advance(state, config, rng);
-        emit(&agent::render_state(state, config));
+        emit(&agent::render_state(state));
     }
     if let Some(path) = save {
         if let Err(e) = save_checkpoint(path, state, rng) {
@@ -236,10 +236,10 @@ fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, sa
 /// `{schema_version, meta, story, trajectory:[...round snapshots...]}` — a packaged
 /// "story pack" with the timeline, the narrative arc and the rules in a single value.
 fn run_trajectory(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, save: Option<&Path>) {
-    let mut snaps = vec![agent::state_json(state, config)];
+    let mut snaps = vec![agent::state_json(state)];
     for _ in 0..n {
         sim::advance(state, config, rng);
-        snaps.push(agent::state_json(state, config));
+        snaps.push(agent::state_json(state));
     }
     let pack = json!({
         "schema_version": SCHEMA_VERSION,

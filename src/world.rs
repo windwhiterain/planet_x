@@ -1,4 +1,4 @@
-//! Procedural generation of a default start state (`--start` not given).
+﻿//! Procedural generation of a default start state (`--start` not given).
 //!
 //! This builds the Solar-system sandbox fixed by the design spec's 天体表: every
 //! one of the 18 listed bodies hosts at least one 定居点 (settlement — on the
@@ -221,7 +221,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.39,
             0.206,
             20.0,
-            vec![settlement("水星熔炉基地", 34.0, 6.0, 1.2, vec![deposit("iron", 32.0), deposit("platinum", 8.0)])],
+            vec![settlement("水星熔炉基地", 34.0, 6.0, 1.2, vec![deposit("铁", 32.0), deposit("铂", 8.0)])],
         ),
         // 金星（中国）资源丰富：碳
         body(
@@ -230,7 +230,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.72,
             0.007,
             95.0,
-            vec![settlement("金星浮空之城", 40.0, 8.0, 1.2, vec![deposit("carbon", 40.0)])],
+            vec![settlement("金星浮空之城", 40.0, 8.0, 1.2, vec![deposit("碳", 40.0)])],
         ),
         // 地球/城市 — 五大城市群各自占一个定居点（1:1），矿藏按 spec 各自列出。
         body(
@@ -246,7 +246,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     120.0,
                     25.0,
                     2.4,
-                    vec![deposit("iron", 40.0), deposit("silicon", 32.0), deposit("water_ice", 36.0)],
+                    vec![deposit("铁", 40.0), deposit("硅", 32.0), deposit("水冰", 36.0)],
                 ),
                 // 珠三角（中国）资源丰富：铁，硅，水冰
                 settlement(
@@ -254,7 +254,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     120.0,
                     25.0,
                     2.4,
-                    vec![deposit("iron", 40.0), deposit("silicon", 32.0), deposit("water_ice", 36.0)],
+                    vec![deposit("铁", 40.0), deposit("硅", 32.0), deposit("水冰", 36.0)],
                 ),
                 // 亚特兰大（美国）资源丰富：水冰，碳，金
                 settlement(
@@ -262,7 +262,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     100.0,
                     25.0,
                     2.4,
-                    vec![deposit("water_ice", 40.0), deposit("carbon", 30.0), deposit("gold", 10.0)],
+                    vec![deposit("水冰", 40.0), deposit("碳", 30.0), deposit("金", 10.0)],
                 ),
                 // 巴黎（欧盟）资源丰富：铀，铂
                 settlement(
@@ -270,7 +270,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     90.0,
                     25.0,
                     2.4,
-                    vec![deposit("uranium", 20.0), deposit("platinum", 14.0)],
+                    vec![deposit("铀", 20.0), deposit("铂", 14.0)],
                 ),
                 // 莫斯科（俄罗斯）资源丰富：碳，钍
                 settlement(
@@ -278,7 +278,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     100.0,
                     25.0,
                     2.4,
-                    vec![deposit("carbon", 40.0), deposit("thorium", 16.0)],
+                    vec![deposit("碳", 40.0), deposit("钍", 16.0)],
                 ),
             ],
         ),
@@ -289,7 +289,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             1.00,
             0.055,
             100.0,
-            vec![settlement("宁静海基地", 44.0, 10.0, 1.4, vec![deposit("iron", 28.0), deposit("helium3", 22.0)])],
+            vec![settlement("宁静海基地", 44.0, 10.0, 1.4, vec![deposit("铁", 28.0), deposit("氦-3", 22.0)])],
         ),
         // 火星（美国）资源丰富：硅，铁，水冰
         body(
@@ -303,7 +303,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 70.0,
                 16.0,
                 1.8,
-                vec![deposit("silicon", 30.0), deposit("iron", 30.0), deposit("water_ice", 20.0)],
+                vec![deposit("硅", 30.0), deposit("铁", 30.0), deposit("水冰", 20.0)],
             )],
         ),
         // 灶神星（深空运输联盟）资源丰富：硅，钍
@@ -313,7 +313,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             2.36,
             0.089,
             220.0,
-            vec![settlement("灶神星转运港", 30.0, 9.0, 1.3, vec![deposit("silicon", 30.0), deposit("thorium", 12.0)])],
+            vec![settlement("灶神星转运港", 30.0, 9.0, 1.3, vec![deposit("硅", 30.0), deposit("钍", 12.0)])],
         ),
         // 木星（无国界科学组织）资源丰富：氢 —— 轨道空间站
         body(
@@ -322,7 +322,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             5.20,
             0.049,
             30.0,
-            vec![settlement("木星轨道空间站", 48.0, 12.0, 1.6, vec![deposit("hydrogen", 46.0)])],
+            vec![settlement("木星轨道空间站", 48.0, 12.0, 1.6, vec![deposit("氢", 46.0)])],
         ),
         // 欧罗巴（美国）资源丰富：水冰
         body(
@@ -331,7 +331,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             5.22,
             0.009,
             60.0,
-            vec![settlement("欧罗巴冰下港", 34.0, 9.0, 1.2, vec![deposit("water_ice", 40.0)])],
+            vec![settlement("欧罗巴冰下港", 34.0, 9.0, 1.2, vec![deposit("水冰", 40.0)])],
         ),
         // 土星（无国界科学组织）资源丰富：氢，铂，金，水冰（包括星环）—— 轨道空间站
         body(
@@ -346,10 +346,10 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 12.0,
                 1.6,
                 vec![
-                    deposit("hydrogen", 40.0),
-                    deposit("platinum", 6.0),
-                    deposit("gold", 6.0),
-                    deposit("water_ice", 20.0),
+                    deposit("氢", 40.0),
+                    deposit("铂", 6.0),
+                    deposit("金", 6.0),
+                    deposit("水冰", 20.0),
                 ],
             )],
         ),
@@ -365,7 +365,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 46.0,
                 11.0,
                 1.4,
-                vec![deposit("silicon", 28.0), deposit("iron", 24.0), deposit("uranium", 14.0)],
+                vec![deposit("硅", 28.0), deposit("铁", 24.0), deposit("铀", 14.0)],
             )],
         ),
         // 天王星（欧盟）资源丰富：甲烷，氢 —— 轨道空间站
@@ -375,7 +375,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             19.2,
             0.046,
             120.0,
-            vec![settlement("天王星轨道站", 40.0, 10.0, 1.5, vec![deposit("methane", 32.0), deposit("hydrogen", 20.0)])],
+            vec![settlement("天王星轨道站", 40.0, 10.0, 1.5, vec![deposit("甲烷", 32.0), deposit("氢", 20.0)])],
         ),
         // 海王星（欧盟）资源丰富：水冰，甲烷 —— 轨道空间站
         body(
@@ -384,7 +384,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             30.05,
             0.009,
             200.0,
-            vec![settlement("海王星轨道站", 36.0, 9.0, 1.5, vec![deposit("water_ice", 30.0), deposit("methane", 22.0)])],
+            vec![settlement("海王星轨道站", 36.0, 9.0, 1.5, vec![deposit("水冰", 30.0), deposit("甲烷", 22.0)])],
         ),
         // 冥王星（俄罗斯）资源丰富：水冰，硅，碳
         body(
@@ -398,7 +398,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 26.0,
                 7.0,
                 1.0,
-                vec![deposit("water_ice", 26.0), deposit("silicon", 18.0), deposit("carbon", 14.0)],
+                vec![deposit("水冰", 26.0), deposit("硅", 18.0), deposit("碳", 14.0)],
             )],
         ),
         // 卡戎（俄罗斯）资源丰富：铁，金
@@ -408,7 +408,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             39.48,
             0.12,
             55.0,
-            vec![settlement("卡戎深空港", 24.0, 7.0, 1.0, vec![deposit("iron", 24.0), deposit("gold", 10.0)])],
+            vec![settlement("卡戎深空港", 24.0, 7.0, 1.0, vec![deposit("铁", 24.0), deposit("金", 10.0)])],
         ),
         // 伊克西翁（行星X崇拜教）资源丰富：碳
         body(
@@ -417,7 +417,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             39.70,
             0.24,
             330.0,
-            vec![settlement("伊克西翁圣所", 20.0, 5.0, 0.9, vec![deposit("carbon", 24.0)])],
+            vec![settlement("伊克西翁圣所", 20.0, 5.0, 0.9, vec![deposit("碳", 24.0)])],
         ),
         // 妊神星（星系矿业）资源丰富：水冰，硅，铂
         body(
@@ -431,7 +431,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 22.0,
                 6.0,
                 1.0,
-                vec![deposit("water_ice", 22.0), deposit("silicon", 12.0), deposit("platinum", 8.0)],
+                vec![deposit("水冰", 22.0), deposit("硅", 12.0), deposit("铂", 8.0)],
             )],
         ),
         // 创神星（星系矿业）资源丰富：铁，铂
@@ -441,7 +441,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             45.43,
             0.16,
             300.0,
-            vec![settlement("创神星采矿站", 22.0, 6.0, 1.0, vec![deposit("iron", 20.0), deposit("platinum", 9.0)])],
+            vec![settlement("创神星采矿站", 22.0, 6.0, 1.0, vec![deposit("铁", 20.0), deposit("铂", 9.0)])],
         ),
         // 阋神星（星系矿业）资源丰富：硅，铀
         body(
@@ -450,7 +450,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             67.78,
             0.44,
             160.0,
-            vec![settlement("阋神星前哨", 24.0, 5.0, 0.8, vec![deposit("silicon", 16.0), deposit("uranium", 12.0)])],
+            vec![settlement("阋神星前哨", 24.0, 5.0, 0.8, vec![deposit("硅", 16.0), deposit("铀", 12.0)])],
         ),
     ];
 
@@ -461,24 +461,24 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("iron", 4.0), ("carbon", 4.0), ("helium3", 2.0)]), 0.4, 0.10, 3),
+        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, 3),
         faction(
             F_US,
             "美国",
             'A',
             "#06b6d4",
-            stockpile(&[("iron", 6.0), ("carbon", 5.0), ("uranium", 1.0)]),
+            stockpile(&[("铁", 6.0), ("碳", 5.0), ("铀", 1.0)]),
             1.0,
             0.60,
             4,
         ),
-        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("iron", 5.0), ("carbon", 5.0), ("uranium", 1.0)]), 0.9, 0.30, 2),
+        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, 2),
         faction(
             F_CN,
             "中国",
             'C',
             "#ef4444",
-            stockpile(&[("iron", 7.0), ("carbon", 6.0), ("silicon", 2.0)]),
+            stockpile(&[("铁", 7.0), ("碳", 6.0), ("硅", 2.0)]),
             -1.0,
             0.50,
             2,
@@ -488,7 +488,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             "俄罗斯",
             'R',
             "#ec4899",
-            stockpile(&[("iron", 5.0), ("carbon", 4.0), ("uranium", 2.0)]),
+            stockpile(&[("铁", 5.0), ("碳", 4.0), ("铀", 2.0)]),
             -0.9,
             0.45,
             2,
@@ -498,7 +498,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             "星系矿业",
             'M',
             "#eab308",
-            stockpile(&[("iron", 6.0), ("gold", 2.0), ("platinum", 1.0)]),
+            stockpile(&[("铁", 6.0), ("金", 2.0), ("铂", 1.0)]),
             0.0,
             0.20,
             9,
@@ -508,7 +508,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             "无国界科学组织",
             'S',
             "#22c55e",
-            stockpile(&[("silicon", 4.0), ("helium3", 3.0), ("carbon", 2.0)]),
+            stockpile(&[("硅", 4.0), ("氦-3", 3.0), ("碳", 2.0)]),
             0.2,
             0.05,
             6,
@@ -518,7 +518,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             "深空运输联盟",
             'T',
             "#f8fafc",
-            stockpile(&[("carbon", 6.0), ("hydrogen", 3.0), ("iron", 2.0)]),
+            stockpile(&[("碳", 6.0), ("氢", 3.0), ("铁", 2.0)]),
             -0.1,
             0.15,
             5,
@@ -528,7 +528,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             "行星X崇拜教",
             'X',
             "#d946ef",
-            stockpile(&[("uranium", 3.0), ("thorium", 2.0), ("gold", 1.0)]),
+            stockpile(&[("铀", 3.0), ("钍", 2.0), ("金", 1.0)]),
             -3.0,
             0.90,
             14,

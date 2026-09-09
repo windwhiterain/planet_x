@@ -144,17 +144,17 @@
         sanction_cost_mult: 1.45,
     ),
     resources: {
-        "water_ice": (name: "水冰", value: 1.0),
-        "helium3":   (name: "氦-3", value: 4.0),
-        "uranium":   (name: "铀", value: 5.0),
-        "thorium":   (name: "钍", value: 4.0),
-        "gold":      (name: "金", value: 5.0),
-        "platinum":  (name: "铂", value: 6.0),
-        "iron":      (name: "铁", value: 1.0),
-        "hydrogen":  (name: "氢", value: 0.8),
-        "methane":   (name: "甲烷", value: 0.8),
-        "carbon":    (name: "碳", value: 1.0),
-        "silicon":   (name: "硅", value: 1.2),
+        "水冰": (name: "水冰", value: 1.0),
+        "氦-3":   (name: "氦-3", value: 4.0),
+        "铀":   (name: "铀", value: 5.0),
+        "钍":   (name: "钍", value: 4.0),
+        "金":      (name: "金", value: 5.0),
+        "铂":  (name: "铂", value: 6.0),
+        "铁":      (name: "铁", value: 1.0),
+        "氢":  (name: "氢", value: 0.8),
+        "甲烷":   (name: "甲烷", value: 0.8),
+        "碳":    (name: "碳", value: 1.0),
+        "硅":   (name: "硅", value: 1.2),
     },
     structures: {
         "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
@@ -178,7 +178,7 @@
             hull: 12.0,          // 低（直接船体）
             hull_regen: 0.04,    // 低（直接再生）
             build_points: 15.0,
-            build_cost: { "iron": 6.0, "carbon": 3.0 },   // 资源：极低，常见
+            build_cost: { "铁": 6.0, "碳": 3.0 },   // 资源：极低，常见
             upkeep: 1.5,
             slots: 2,            // 至少「武器+推进」两个槽（轻装哨戒）
             armor_mult: 0.9,     // 低
@@ -195,7 +195,7 @@
             hull: 24.0,          // 中（直接船体）
             hull_regen: 0.30,    // 高（直接再生，招牌：超强再生）
             build_points: 26.0,
-            build_cost: { "iron": 12.0, "carbon": 7.0 },  // 资源：中，常见
+            build_cost: { "铁": 12.0, "碳": 7.0 },  // 资源：中，常见
             upkeep: 2.5,
             slots: 2,
             armor_mult: 1.0,     // 中
@@ -212,7 +212,7 @@
             hull: 72.0,          // 高（直接船体，招牌：重型装甲）
             hull_regen: 0.04,    // 低
             build_points: 44.0,
-            build_cost: { "iron": 18.0, "carbon": 10.0, "silicon": 6.0 },  // 资源：极高，常见
+            build_cost: { "铁": 18.0, "碳": 10.0, "硅": 6.0 },  // 资源：极高，常见
             upkeep: 6.0,
             slots: 3,            // 中型舰：火力+防护+推进
             armor_mult: 1.5,     // 高（重甲 → 护甲硬度放大）
@@ -229,7 +229,7 @@
             hull: 20.0,          // 低
             hull_regen: 0.04,    // 低
             build_points: 58.0,
-            build_cost: { "iron": 12.0, "carbon": 8.0, "helium3": 4.0, "platinum": 3.0, "gold": 2.0 },  // 资源：高，稀有
+            build_cost: { "铁": 12.0, "碳": 8.0, "氦-3": 4.0, "铂": 3.0, "金": 2.0 },  // 资源：高，稀有
             upkeep: 7.5,
             slots: 3,
             armor_mult: 0.9,     // 低
@@ -246,7 +246,7 @@
             hull: 30.0,          // 中（玻璃大炮：能抗一轮齐射即可）
             hull_regen: 0.04,    // 低
             build_points: 40.0,
-            build_cost: { "iron": 10.0, "uranium": 4.0 },  // 资源：中，稀有
+            build_cost: { "铁": 10.0, "铀": 4.0 },  // 资源：中，稀有
             upkeep: 6.5,
             slots: 3,            // 主力舰三槽：火力+盾点防+推进
             armor_mult: 0.9,     // 低
@@ -277,7 +277,7 @@
             hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 0.6,
-            cost: { "iron": 4.0, "carbon": 2.0 },   // 常见矿：入门火力（拆甲）
+            cost: { "铁": 4.0, "碳": 2.0 },   // 常见矿：入门火力（拆甲）
         ),
         "plasma": (
             label: "等离子炮",
@@ -290,7 +290,7 @@
             hull_mult: 0.85,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 1.4,
-            cost: { "helium3": 3.0, "gold": 1.5 }, // 稀有：对盾强、射程远
+            cost: { "氦-3": 3.0, "金": 1.5 }, // 稀有：对盾强、射程远
         ),
         "railgun": (
             label: "电磁轨道炮",
@@ -303,7 +303,7 @@
             hull_mult: 1.3,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 2.2,
-            cost: { "uranium": 3.0, "iron": 2.0 }, // 稀有：远程拆甲重炮
+            cost: { "铀": 3.0, "铁": 2.0 }, // 稀有：远程拆甲重炮
         ),
         "missile": (
             label: "集束导弹",
@@ -316,7 +316,7 @@
             hull_mult: 1.2,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 1.6,
-            cost: { "hydrogen": 3.0, "carbon": 2.0 }, // 超远射程，吃氢
+            cost: { "氢": 3.0, "碳": 2.0 }, // 超远射程，吃氢
         ),
         // --- 防御（护盾池 / 装甲 / 点防御） ------------------------------------
         "shield": (
@@ -326,7 +326,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 12.0, shield_regen: 0.15, hardness: 0.0, intercept: 0.0,
             speed: 0.0, hull_regen: 0.0, upkeep: 2.0,
-            cost: { "platinum": 2.0, "helium3": 1.0 }, // 铂金级护盾（吸收池）
+            cost: { "铂": 2.0, "氦-3": 1.0 }, // 铂金级护盾（吸收池）
         ),
         "armor": (
             label: "装甲夹层",
@@ -335,7 +335,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.0, hardness: 10.0, intercept: 0.0,
             speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 0.9,
-            cost: { "iron": 5.0, "carbon": 3.0 },    // 常见：让船体变硬（反比例减伤）
+            cost: { "铁": 5.0, "碳": 3.0 },    // 常见：让船体变硬（反比例减伤）
         ),
         "composite": (
             label: "复合装甲",
@@ -344,7 +344,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.0, hardness: 18.0, intercept: 0.0,
             speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.8,
-            cost: { "silicon": 4.0, "thorium": 2.0 }, // 高级防护（钍，更硬）
+            cost: { "硅": 4.0, "钍": 2.0 }, // 高级防护（钍，更硬）
         ),
         "point_defense": (
             label: "近防炮阵",
@@ -353,7 +353,7 @@
             shield_mult: 0.8, hull_mult: 0.8,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 6.0,
             speed: 0.0, accel: 0.0, hull_regen: 0.0, upkeep: 1.0,
-            cost: { "gold": 2.0, "silicon": 1.0 }, // 拦导弹（线性扣减）+ 防快船
+            cost: { "金": 2.0, "硅": 1.0 }, // 拦导弹（线性扣减）+ 防快船
         ),
         // --- 推进（速度+加速度 = 规避 + 抢先战位） ------------------------------
         "ion_drive": (
@@ -363,7 +363,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 0.8, accel: 0.6, hull_regen: 0.0, upkeep: 1.0,
-            cost: { "helium3": 1.5, "iron": 1.0 },
+            cost: { "氦-3": 1.5, "铁": 1.0 },
         ),
         "fusion_torch": (
             label: "聚变推进器",
@@ -372,7 +372,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.0, hardness: 0.0, intercept: 0.0,
             speed: 1.6, accel: 1.2, hull_regen: 0.0, upkeep: 2.4,
-            cost: { "hydrogen": 3.0, "thorium": 1.0 }, // 氢/钍：极速引擎
+            cost: { "氢": 3.0, "钍": 1.0 }, // 氢/钍：极速引擎
         ),
         // --- 辅助（再生 = 持久战） --------------------------------------------
         "reactor": (
@@ -382,7 +382,7 @@
             shield_mult: 1.0, hull_mult: 1.0,
             shield: 0.0, shield_regen: 0.04, hardness: 0.0, intercept: 0.0,
             speed: 0.2, accel: 0.2, hull_regen: 0.05, upkeep: 1.2,
-            cost: { "uranium": 2.0, "hydrogen": 1.0 },
+            cost: { "铀": 2.0, "氢": 1.0 },
         ),
     },
     buildings: {
@@ -390,7 +390,7 @@
             label: "居住区",
             role: "housing",
             construction_speed: 1.0,
-            build_cost: { "silicon": 0.3, "iron": 0.2 },
+            build_cost: { "硅": 0.3, "铁": 0.2 },
             staff_per_area: 0.0,
             productivity: 1.0,
             default_invest_weight: 1.5,
@@ -400,7 +400,7 @@
             label: "开采区",
             role: "mining",
             construction_speed: 1.0,
-            build_cost: { "iron": 0.4 },
+            build_cost: { "铁": 0.4 },
             staff_per_area: 4.0,
             productivity: 1.0,
             default_invest_weight: 1.0,
@@ -410,7 +410,7 @@
             label: "建造区",
             role: "shipyard",
             construction_speed: 0.8,
-            build_cost: { "iron": 0.4, "carbon": 0.3, "silicon": 0.2 },
+            build_cost: { "铁": 0.4, "碳": 0.3, "硅": 0.2 },
             staff_per_area: 6.0,
             productivity: 1.0,
             default_invest_weight: 0.8,
@@ -428,7 +428,7 @@
             body: "无国界科学组织的深空阵列在柯伊伯带之外捕捉到一段规律的引力涟漪——一个重型天体正沿一条极偏心的轨道缓缓内插。行星X崇拜教立即宣称这是「行星X」归来的先兆；科学组织则坚持那只是一颗未编目的大天体。两派就此划下鸿沟。",
             trigger: RoundAt(round: 1),
             participants: ["无国界科学组织", "行星X崇拜教"],
-            effects: [Relations(a: 6, b: 8, delta: -2.0), GrantResources(faction: 6, resource: "helium3", amount: 2.0)],
+            effects: [Relations(a: 6, b: 8, delta: -2.0), GrantResources(faction: 6, resource: "氦-3", amount: 2.0)],
         ),
         (
             id: "solar_max",
@@ -436,7 +436,7 @@
             body: "太阳活动进入峰年，强烈的日冕抛射让深空信号陷入混沌。各势力临时收紧通讯；深空运输联盟被迫重划所有航线以避开高辐射带，却意外在勘察中发现一片富集的金矿带。",
             trigger: RoundAt(round: 6),
             participants: ["深空运输联盟"],
-            effects: [GrantResources(faction: 7, resource: "gold", amount: 4.0)],
+            effects: [GrantResources(faction: 7, resource: "金", amount: 4.0)],
         ),
         (
             id: "un_convokes",
@@ -452,7 +452,7 @@
             body: "星系矿业的高层嗅到了外缘陨石的丰厚回报，宣布启动「柯伊伯淘金热」——数百艘采矿船冲向妊神星、创神星与阋神星的冰封矿带。随即，他们把一船船铂金与铁运回内太阳系，隐约有垄断稀有金属之势。",
             trigger: RoundAt(round: 24),
             participants: ["星系矿业"],
-            effects: [GrantResources(faction: 5, resource: "platinum", amount: 3.0), GrantResources(faction: 5, resource: "iron", amount: 8.0), GrantShip(faction: 5, class: "cruiser", body: 9)],
+            effects: [GrantResources(faction: 5, resource: "铂", amount: 3.0), GrantResources(faction: 5, resource: "铁", amount: 8.0), GrantShip(faction: 5, class: "cruiser", body: 9)],
         ),
         (
             id: "first_war",

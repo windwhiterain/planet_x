@@ -14,6 +14,7 @@
 //! combination of housing / mining / shipyard), but the total area is finite,
 //! so the numbers above all stay continuous.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -43,7 +44,7 @@ pub struct ResourceDef {
 
 /// A deposit of a single resource on a settlement. `area` bounds how much
 /// mining may be carved out of this deposit.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ResourceDeposit {
     pub resource: String,
     pub area: f64,
@@ -53,7 +54,7 @@ pub struct ResourceDeposit {
 ///
 /// The aphelion direction is a unit vector pointing from the sun toward the
 /// farthest point of the orbit; perihelion is the opposite direction.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema)]
 pub struct Orbit {
     /// 近日点距离 (perihelion distance), in AU.
     pub perihelion_distance: f32,
@@ -131,7 +132,7 @@ fn normalize2(v: [f32; 2]) -> [f64; 2] {
 /// A habitable place (定居点) on a body. 定居点与城市一一对应：一个定居点至多
 /// 容纳一座城市（见 [`City::settlement`]）。它的面积有限——坐落在其上的城市的
 /// 建筑必须装得下；它的资源矿藏限定本定居点上采矿的上限。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Settlement {
     /// 定居点名（地球的五大城市群各占一个定居点；气态巨行星的定居点为轨道空间站）。
     pub name: String,
@@ -150,7 +151,7 @@ pub struct Settlement {
 /// A celestial body hosting zero or more 定居点 (settlement sites), each of which
 /// hosts **at most one** city (settlement ↔ city 1:1). A body's settlements are
 /// indexed; a city on this body points at its site via [`City::settlement`].
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Body {
     pub id: BodyId,
     pub name: String,
@@ -182,7 +183,7 @@ impl Body {
 /// Buildings are identified by a stable [`BuildingId`] so a city can hold
 /// several shipyards (one per `ship_type`). The command-controlled investment
 /// weights live in [`ControllableState`] (keyed by [`InvestKey`]/[`BuildKey`]).
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Building {
     pub id: BuildingId,
     pub kind: String,
@@ -530,7 +531,7 @@ pub enum ShipBehavior {
 
 /// 一回合内发生的、值得 agent 知道的事件。每回合开始时被清空、回合演化中被
 /// 追加；agent 无需反推状态差即可得知「谁开火/谁被毁/哪城被夷平/谁殖民」。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEvent {
     /// 开火：攻击者对目标舰造成 damage 伤害。
@@ -573,7 +574,7 @@ pub enum GameEvent {
 }
 
 /// A spaceship. Always owned by a faction.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Ship {
     pub id: ShipId,
     pub name: String,
@@ -621,7 +622,7 @@ fn default_hull_max() -> f64 {
 /// Ship production (`ship_progress`) is **per city**, keyed by the ship class
 /// (舰型). Each 建造区 (shipyard building) contributes to its class's rate; the
 /// rates of every shipyard in the city keep contributing into that city pool.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct City {
     pub id: CityId,
     pub name: String,
@@ -651,7 +652,7 @@ fn default_loyalty() -> f64 {
 ///
 /// The command-controlled budget lives in [`ControllableState::budget`], not
 /// here.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Faction {
     pub id: FactionId,
     pub name: String,
@@ -1168,7 +1169,7 @@ pub struct MarketConfig {
 /// 这是「剧情丰富」的可读载体——一条 `Story` 剧情事件在本回合触发时，除了记入
 /// [`State::events`]（本回合流水），还把这个完整条目追加进 [`State::chronicle`]，
 /// 供 agent 随时查询整段已展开的故事弧。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ChronicleEntry {
     /// 触发时的回合号（时间戳）。
     pub round: u32,

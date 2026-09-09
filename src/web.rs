@@ -1,4 +1,4 @@
-//! HTTP server for the WebUI: a small JSON API over one in-memory [`State`].
+﻿//! HTTP server for the WebUI: a small JSON API over one in-memory [`State`].
 //!
 //! The server owns the authoritative world state and the deterministic RNG and
 //! exposes a hotseat-style interface:
@@ -849,8 +849,8 @@ mod tests {
         let scope_diff = serde_json::json!({"scope": {"factions": [[3, "Player"]]}});
         apply_patch(&mut state, &config, &scope_diff).expect("scope diff applies");
         assert_eq!(state.ship_control(0), ControlMode::Player, "ship of a Player faction is player-owned");
-        assert_eq!(state.investment_budget_control(3, "iron"), ControlMode::Player, "budget leaf follows scope");
-        assert_eq!(state.construction_budget_control(3, "iron"), ControlMode::Player);
+        assert_eq!(state.investment_budget_control(3, "铁"), ControlMode::Player, "budget leaf follows scope");
+        assert_eq!(state.construction_budget_control(3, "铁"), ControlMode::Player);
         // Other factions are untouched (still Ai): ship 3 is US (faction 1).
         assert_eq!(state.ship_control(3), ControlMode::Ai, "untouched faction stays Ai");
 

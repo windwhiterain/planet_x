@@ -485,3 +485,23 @@ planet_x --round 240 | jq -s '[ .[] | .ships[] ] | group_by(.owner_name) | map({
 | 未知字段防护 | strict（但治标） | 靠 P0/P1 + `--schema`（治本） |
 | 单二进制零依赖 | ✅ | ✗（需 jq） |
 | agent 定向故事 | 有状态 REPL | `--start`/`--apply`/`--round`/`--save` 分段 |
+
+### 10.8 权威 schema 贯彻（auth-schema worktree）：WYSIWYG key + 拆掉 `AgentState` 镜像
+
+遵循 §3.1 Layer 1 与 §9 的结论，真正「贯彻」了两点（见 `.agents/ideas.md` §14）：
+
+- **资源 key = 可读名（WYSIWYG）**：把 `config/game.ron`、`State`、控制面、world/测试里的
+  资源 key 全部从 raw（`water_ice`）改成显示名（`水冰`）。于是「看到什么 key 就是什么 key」，
+  `meta.resources` 的 raw→中文 翻译表删除，agent 在状态视图看到的就是它能在 `--apply` 里写的。
+- **拆掉 `AgentState` 镜像，agent 视图 = 权威 `Trajectory`**：删除 10 个镜像 struct + `from_state`，
+  用一个 `#[derive(Serialize, JsonSchema)] pub struct Trajectory`——字段直接复用权威类型
+  `Vec<Body>/Vec<City>/Vec<Faction>/Vec<Ship>` + `Vec<GameEvent>/Vec<ChronicleEntry>`，不含
+  控制面。`schema_value()` = `schemars::schema_for!(Trajectory)`，schema 与发射 JSON 同源、不会漂移。
+  ——这回答了「agent view 还有必要吗」：**没必要用手写镜像**，因为外部 jq 就是查询层；
+  保留的只是一个从权威类型直接复用字段的 `Trajectory`（单一来源）。
+- **代价/须知**：不再预计算派生字段（舰 `panel`、城 `armor`/`gov_distance`、`owner_name`/
+  body 名、relations 从「按名字」变「按 id」）。agent 用 jq 现场 join/计算（`--meta`/`--schema`
+  提供规则与字段）；后续可加 Layer-2 语义视图补省事。
+- **守卫**：`meta_value_covers_every_config_section`（meta 覆盖每个 config 段）+ 
+  `agent_view_is_self_described_by_schema`（schema 自描述发射的视图）——把「单源 + 自描述」
+  用测试钉死，防止未来换生产者时悄悄漂移。

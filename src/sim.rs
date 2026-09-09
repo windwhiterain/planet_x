@@ -1,4 +1,4 @@
-//! Round-stepping simulation engine.
+﻿//! Round-stepping simulation engine.
 //!
 //! [`advance`] moves the world forward by one round (month). Everything that
 //! affects game balance is read from the [`GameConfig`]; no magic numbers live
@@ -3252,7 +3252,7 @@ mod tests {
         assert_eq!(earth_cities, 5, "five cities on five Earth settlements (1:1)");
         // 巴黎 (settlement index 3) hosts only 铀/铂 — its own region's ores.
         let paris = earth.settlements[3].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
-        assert_eq!(paris, vec!["uranium", "platinum"], "Paris settlement mines only its own ores");
+        assert_eq!(paris, vec!["铀", "铂"], "Paris settlement mines only its own ores");
         assert_eq!(
             state.cities.iter().find(|c| c.name == "巴黎").map(|c| c.settlement),
             Some(3),
@@ -3260,8 +3260,8 @@ mod tests {
         );
         // 长三角/珠三角 are distinct settlements, so both may mine 铁 independently.
         let cn = earth.settlements[0].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
-        assert!(cn.contains(&"iron"), "长三角 settlement has 铁");
-        assert!(cn.contains(&"silicon") && cn.contains(&"water_ice"), "长三角 has 硅/水冰");
+        assert!(cn.contains(&"铁"), "长三角 settlement has 铁");
+        assert!(cn.contains(&"硅") && cn.contains(&"水冰"), "长三角 has 硅/水冰");
     }
 
     /// 剧情编年史：RoundAt 节拍按回合触发、编年史按发生先后单调增长、id 唯一，且
@@ -3417,8 +3417,8 @@ mod tests {
         // 深口袋：让星系矿业(5)付得起治理 + 娱乐开销，覆盖率=1。
         if let Some(f) = state.faction_mut(5) {
             for k in [
-                "iron", "carbon", "silicon", "water_ice", "uranium", "platinum", "gold",
-                "helium3", "thorium", "hydrogen", "methane",
+                "铁", "碳", "硅", "水冰", "铀", "铂", "金",
+                "氦-3", "钍", "氢", "甲烷",
             ] {
                 f.resources.insert(k.to_string(), 100_000.0);
             }
@@ -3606,9 +3606,9 @@ mod tests {
         // Give China (3) a fat rare-mineral stack so it can afford a real loadout.
         if let Some(f) = state.faction_mut(3) {
             for (r, amt) in [
-                ("uranium", 200.0), ("gold", 200.0), ("helium3", 200.0),
-                ("platinum", 200.0), ("hydrogen", 200.0), ("thorium", 200.0),
-                ("iron", 200.0), ("carbon", 200.0), ("silicon", 200.0),
+                ("铀", 200.0), ("金", 200.0), ("氦-3", 200.0),
+                ("铂", 200.0), ("氢", 200.0), ("钍", 200.0),
+                ("铁", 200.0), ("碳", 200.0), ("硅", 200.0),
             ] {
                 *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
             }
@@ -3640,9 +3640,9 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         if let Some(f) = state.faction_mut(3) {
             for (r, amt) in [
-                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
-                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
-                ("silicon", 300.0),
+                ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
+                ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+                ("硅", 300.0),
             ] {
                 *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
             }
@@ -3671,9 +3671,9 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         if let Some(f) = state.faction_mut(3) {
             for (r, amt) in [
-                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
-                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
-                ("silicon", 300.0),
+                ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
+                ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+                ("硅", 300.0),
             ] {
                 *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
             }
@@ -3805,9 +3805,9 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         if let Some(f) = state.faction_mut(3) {
             for (r, amt) in [
-                ("uranium", 300.0), ("gold", 300.0), ("helium3", 300.0), ("platinum", 300.0),
-                ("hydrogen", 300.0), ("thorium", 300.0), ("iron", 300.0), ("carbon", 300.0),
-                ("silicon", 300.0),
+                ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
+                ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+                ("硅", 300.0),
             ] {
                 *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
             }
