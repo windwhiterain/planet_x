@@ -376,7 +376,7 @@ function makeLabel(text, color = '#cdd6f4', fontPx = 42) {
   tex.minFilter = THREE.LinearFilter;
   const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
   const sp = new THREE.Sprite(mat);
-  sp.scale.set(w / 12, h / 12, 1);
+  sp.scale.set(w / 16, h / 16, 1);   // 标签更小，减少天体间文字互相挤叠
   return sp;
 }
 
@@ -430,9 +430,10 @@ function makeShapeTexture(shape) {
   tex.anisotropy = 4;
   return tex;
 }
-function makeBillboard(shape, colorHex, px) {
+function makeBillboard(shape, colorHex, px, onTop) {
   const tex = shapeTex[shape] || (shapeTex[shape] = makeShapeTexture(shape));
-  const mat = new THREE.SpriteMaterial({ map: tex, color: new THREE.Color(colorHex || '#8f9bb3'), transparent: true, depthTest: true, depthWrite: false });
+  // depthTest:false → 标记永远画在最上层（像标签一样），不会被所在天体/其他天体挡住。
+  const mat = new THREE.SpriteMaterial({ map: tex, color: new THREE.Color(colorHex || '#8f9bb3'), transparent: true, depthTest: !onTop, depthWrite: false });
   const sp = new THREE.Sprite(mat);
   sp.userData.px = px;
   return sp;
@@ -520,8 +521,8 @@ function renderBodies(group, world, visuals) {
 
     group.add(orbitLine(b.orbit));
 
-    const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 32);
-    lbl.position.set(p.x, p.y + r + 4, p.z);
+    const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 26);
+    lbl.position.set(p.x, p.y + r + 3, p.z);
     group.add(lbl);
   });
 }
@@ -544,31 +545,36 @@ function renderCities(group, world, visuals) {
       const color = facColorFor(world, c.faction_id);
       const g = new THREE.Group();
       g.userData = { kind: 'city', name: c.name };
-      let mesh, bbShape, bx = 0, by = 0, bz = 0;
+      let mesh, bbShape, bx = 0, by = 0, bz = 0, bbx = 0, bby = 0, bbz = 0;
       if (c.space_station) {
         // 空间站：轨道半径略大于行星，绕行星一圈分布。
         const az = (idx / Math.max(cities.length, 1)) * Math.PI * 2 + 1.7;
         const orbR = r * 1.9;
         bx = Math.cos(az) * orbR; bz = Math.sin(az) * orbR; by = r * 0.55;
-        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.5, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.4, metalness: 0.5 }));
+        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.5, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.55, metalness: 0.15 }));
         bbShape = 'ring';
+        bbx = bx; bby = by; bbz = bz;
       } else {
         // 地面城市：贴在天体表面，朝表面法线方向直立。
         const dir = cityDir(idx, cities.length, 0.95);
         const rs = r * 0.98;
         bx = dir[0] * rs; by = dir[1] * rs; bz = dir[2] * rs;
-        mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.5, metalness: 0.25 }));
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.7, metalness: 0.05 }));
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dir[0], dir[1], dir[2]));
         bbShape = 'dot';
+        // billboard 抬到半径之外并置顶绘制，让它贴在天体表面外缘而不被球体自遮挡。
+        const rbb = r * 1.06;
+        bbx = dir[0] * rbb; bby = dir[1] * rbb; bbz = dir[2] * rbb;
       }
       mesh.position.set(bx, by, bz);
       g.add(mesh);
-      const bb = makeBillboard(bbShape, color, c.space_station ? 13 : 11);
-      bb.position.set(bx, by, bz);
+      // 地面城市 billboard: 抬出表面 + 最上层；空间站/舰 billboard: 保持深度测试。
+      const bb = makeBillboard(bbShape, color, c.space_station ? 13 : 11, !c.space_station);
+      bb.position.set(bbx, bby, bbz);
       g.add(bb);
       g.position.set(P.x, P.y, P.z);
       group.add(g);
-      lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(P.x + bx, P.y + by, P.z + bz) });
+      lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(P.x + bbx, P.y + bby, P.z + bbz) });
     });
   });
 }
@@ -580,7 +586,7 @@ function renderShips(group, world) {
     const g = new THREE.Group();
     g.userData = { kind: 'ship', name: s.name };
     const y = 0.6;
-    const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.35, metalness: 0.5 }));
+    const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.7, metalness: 0.1 }));
     mesh.position.set(0, y, 0);
     g.add(mesh);
     const bb = makeBillboard('diamond', color, 9);
@@ -628,8 +634,10 @@ function makeSun() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 256, 256);
   const tex = new THREE.CanvasTexture(c);
-  const haloSp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, color: 0xffd98a, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }));
-  haloSp.scale.set(66, 66, 1);
+  // 光晕小一点、淡一点：过大的 additive 光晕在相机贴近太阳系时会铺满全屏，
+  // 把整幅画面染成金色（行星看起来像黄铜）。只保留贴近太阳的柔和日冕辉光。
+  const haloSp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, color: 0xffd98a, transparent: true, opacity: 0.38, depthWrite: false, blending: THREE.AdditiveBlending }));
+  haloSp.scale.set(22, 22, 1);
 
   const g = new THREE.Group();
   g.add(core);
@@ -708,8 +716,9 @@ function init(container) {
 
   scene.add(new THREE.AmbientLight(0x8890b0, 0.5));
   // 太阳点光源：decay=0 无距离衰减，整幅系统均匀受光（星际尺度下不做物理衰减）。
-  // 行星的 shader 自算太阳方向漫反射；此灯主要照亮城市/舰标记。
-  const sunLight = new THREE.PointLight(0xfff2d0, 1.5, 0, 0);
+  // 行星的 shader 自算太阳方向漫反射；此灯主要照亮城市/舰标记。降强度、去暖色，
+  // 避免标记过曝/发黄（金属感）。
+  const sunLight = new THREE.PointLight(0xfff6e8, 0.9, 0, 0);
   sunLight.position.set(0, 0, 0);
   scene.add(sunLight);
 
