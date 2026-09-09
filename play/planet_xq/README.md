@@ -114,11 +114,12 @@ q.view_frontier(12, "中国")       # my risky cities (loyalty / gov_distance / 
 q.view_frontier(12, min_loyalty=0.5)   # any city about to revolt
 q.view_market(12, "中国")         # my stockpile valued at market prices (per-resource + total)
 q.view_economy(12, "中国")        # production vs upkeep vs governance, net flow, coverage, bleeding flag
+q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, indexed by round) — e.g. is it being drained?
 ```
 
-- `view_sitrep` / `view_frontier` / `view_market` / `view_economy` are all **pure retrieval** —
-  they re-read `metrics`/lazy tables and do trivial arithmetic (`net = production − upkeep −
-  governance`).
+- `view_sitrep` / `view_frontier` / `view_market` / `view_economy` / `resource_series` are all
+  **pure retrieval** — they re-read `metrics`/lazy tables and do trivial arithmetic
+  (`net = production − upkeep − governance`).
 - The one thing they deliberately **don't** judge is *"is my commanded build budget sustainable?"*
   — that's `planet_x --control-plan <faction>` (game logic: the upkeep-reserve cap + a dry-run
   `advance`). Python `view_economy` gives the raw flow; the verdict comes from Rust.

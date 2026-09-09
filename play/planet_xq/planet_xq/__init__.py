@@ -243,6 +243,22 @@ class PlanetXQ:
             "at_war": fm.get("at_war"),
         }
 
+    def resource_series(self, faction: str, resource: str) -> pd.Series:
+        """A faction's stockpile of one resource over time (monthly, indexed by ``round``).
+
+        Pure retrieval: reads the ``resources`` dict cell in the per-round ``factions`` table.
+        Good for spotting a scarcity/hoard trend (e.g. "is my 铁 stockpile being drained?")."""
+        df = self.factions()
+        if df.empty:
+            return pd.Series(dtype=float, name=resource)
+        sub = df[df["faction_id"] == faction]
+        s = pd.Series(
+            [ (r.get("resources") or {}).get(resource, 0.0) for _, r in sub.iterrows() ],
+            index=sub["round"].to_numpy(),
+            name=resource,
+        )
+        return s
+
     def ids(self, field: str, round: int) -> list[str]:
         """The id-array of a lazy field for one round (from the lean main row). Ids are **names**
         (strings), never integers: city/building/faction/ship identity = its unique name."""
