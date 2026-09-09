@@ -29,6 +29,7 @@ use std::path::Path;
 
 const MAIN: &str = "main.jsonl";
 const SCHEMA: &str = "schema.json";
+const META: &str = "meta.json";
 const IDX_DIR: &str = "idx";
 
 /// Round a float to 2 decimals (token-noise reduction); `+ 0.0` normalizes IEEE `-0.0`.
@@ -51,12 +52,14 @@ struct LazyField {
 }
 
 /// The heavy fields that are indexed rather than inlined. Add a field here and the emitter +
-/// schema follow automatically. `bodies` is `round == false`: a global master table (a body's
-/// orbit/settlements are essentially static), so it is written once and joined by `body_id`.
+/// schema follow automatically. `bodies`/`settlements` are `round == false`: global master tables
+/// (a body's orbit and its settlements are essentially static), so they are written once and
+/// joined by `body_id` / `settlement_id`.
 const LAZY: &[LazyField] = &[
     LazyField { name: "ships", table: "idx/ships.jsonl", key: "ship_id", id_col: "ship_ids", round: true },
     LazyField { name: "cities", table: "idx/cities.jsonl", key: "city_id", id_col: "city_ids", round: true },
     LazyField { name: "bodies", table: "idx/bodies.jsonl", key: "body_id", id_col: "body_ids", round: false },
+    LazyField { name: "settlements", table: "idx/settlements.jsonl", key: "settlement_id", id_col: "settlement_ids", round: false },
 ];
 
 /// Emit the index projection of `rounds` rounds (round 0 then `rounds` steps) into `dir`.
@@ -72,11 +75,15 @@ pub fn write_index(
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir.join(IDX_DIR)).map_err(|e| e.to_string())?;
     fs::write(dir.join(SCHEMA), projection_schema().to_string()).map_err(|e| e.to_string())?;
+    // Static rules dictionary (same renderer as `--meta`), so `load(dir)` = world + rules +
+    // join helpers in one directory; the Python kit reads it into `q.meta` + spec tables.
+    fs::write(dir.join(META), crate::agent::meta_value(config).to_string()).map_err(|e| e.to_string())?;
 
     let mut main = BufWriter::new(File::create(dir.join(MAIN)).map_err(|e| e.to_string())?);
     let mut ships = BufWriter::new(File::create(dir.join(idx_file("ships"))).map_err(|e| e.to_string())?);
     let mut cities = BufWriter::new(File::create(dir.join(idx_file("cities"))).map_err(|e| e.to_string())?);
     let mut bodies = BufWriter::new(File::create(dir.join(idx_file("bodies"))).map_err(|e| e.to_string())?);
+    let mut settlements = BufWriter::new(File::create(dir.join(idx_file("settlements"))).map_err(|e| e.to_string())?);
 
     // Global master table: body identity (name/orbit/settlements) — once, at round 0.
     for b in &state.bodies {
@@ -98,6 +105,29 @@ pub fn write_index(
         .map_err(|e| e.to_string())?;
     }
 
+    // Global master table: each body's 定居点 (site name/area/capacity/resources) — once. The
+    // heavy site collection is not inlined into `bodies`; the agent joins `settlements` by id.
+    for b in &state.bodies {
+        for (i, s) in b.settlements.iter().enumerate() {
+            writeln!(
+                settlements,
+                "{}",
+                json!({
+                    "settlement_id": s.name.clone(),
+                    "body_id": b.name.clone(),
+                    "index": i,
+                    "name": s.name.clone(),
+                    "total_area": s.total_area,
+                    "ecological_capacity": s.ecological_capacity,
+                    "construction_speed_mod": s.construction_speed_mod,
+                    "construction_resource_mod": s.construction_resource_mod,
+                    "resources": s.resources,
+                })
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
     // Round 0 (start state) then each advancing round.
     write_round(&mut main, &mut ships, &mut cities, state, config, &RoundFlow::default())?;
     for _ in 0..rounds {
@@ -105,7 +135,7 @@ pub fn write_index(
         write_round(&mut main, &mut ships, &mut cities, state, config, &flow)?;
     }
 
-    for w in [&mut main, &mut ships, &mut cities, &mut bodies] {
+    for w in [&mut main, &mut ships, &mut cities, &mut bodies, &mut settlements] {
         w.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -130,6 +160,10 @@ fn write_round(
         "ship_ids": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
         "city_ids": state.cities.iter().filter(|c| !c.razed).map(|c| c.name.clone()).collect::<Vec<_>>(),
         "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
+        "settlement_ids": state.bodies
+            .iter()
+            .flat_map(|b| b.settlements.iter().map(|s| s.name.clone()))
+            .collect::<Vec<_>>(),
     });
     writeln!(main, "{row}").map_err(|e| e.to_string())?;
 
@@ -165,6 +199,7 @@ fn write_round(
                 "city_id": c.name.clone(),
                 "name": c.name,
                 "body_id": c.body_id,
+                "settlement": c.settlement.clone(),
                 "faction_id": c.faction_id,
                 "population": c.population,
                 "loyalty": r2(c.loyalty),
@@ -195,12 +230,17 @@ pub fn projection_schema() -> serde_json::Value {
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "城的完整对象（人口/忠诚/建筑/迭代进度），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer"},
+                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer"},
             }),
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "天体主表（name/轨道/定居点数），几乎不变，全局一次。按 body_id 索引。",
                 "columns": {"body_id":"string","name":"string","perihelion_distance":"number","aphelion_distance":"number","period":"number","x":"number","y":"number","settlement_count":"integer"},
+            }),
+            "settlements" => json!({
+                "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
+                "description": "定居点主表（每个天体上的空间位：名字/面积/生态容量/建设修正/资源矿藏），几乎不变，全局一次。按 body_id 过滤 + settlement_id 索引。",
+                "columns": {"settlement_id":"string","body_id":"string","index":"integer","name":"string","total_area":"number","ecological_capacity":"number","construction_speed_mod":"number","construction_resource_mod":"number","resources":"array"},
             }),
             _ => continue,
         };
@@ -213,6 +253,7 @@ pub fn projection_schema() -> serde_json::Value {
         "generator": "planet_x",
         "schema_version": 1,
         "main_stream": MAIN,
+        "meta": META,
         "eager": {
             "round":      {"type": "integer", "description": "回合号（月）。"},
             "time_month": {"type": "number", "description": "累计时间（月）。"},
@@ -221,13 +262,15 @@ pub fn projection_schema() -> serde_json::Value {
             "metrics":    {"type": "object", "description": "总结指标（与 --schema 的 Trajectory.metrics 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 各势力·各城产出/维护/治理。这是 agent 的轻量决策视图。"},
             "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
             "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合活城 id（=城名，join cities 表用）。"},
-            "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"}
+            "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"},
+            "settlement_ids": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点 id（=定居点名，join settlements 表用）。"}
         },
         "lazy": lazy,
         "read_order": [
             "先读 schema.json，分清 eager（内联）vs lazy（索引）字段；",
             "读 main.jsonl 的 eager + metrics（轻量决策视图），按需拿 id；",
-            "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)。"
+            "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)。",
+            "要规则（舰级/建筑/组件/资源价值）时读 meta.json：Python kit 里 q.meta / q.ships_spec() / q.buildings_spec() / q.components_spec() / q.resource_value() —— 规则表可当 DataFrame 与 facts join。"
         ]
     })
 }
@@ -242,7 +285,7 @@ mod tests {
 
     /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
     const MAJOR_EAGER: &[&str] = &[
-        "round", "time_month", "events", "chronicle", "metrics", "ship_ids", "city_ids", "body_ids",
+        "round", "time_month", "events", "chronicle", "metrics", "ship_ids", "city_ids", "body_ids", "settlement_ids",
     ];
 
     /// A scratch dir for one test, removed on drop.
@@ -296,7 +339,7 @@ mod tests {
         assert_eq!(main.len(), 7, "main.jsonl should have round 0 + 6 rounds");
         assert_eq!(main[0]["round"], 0);
         for row in &main {
-            for obj in ["ships", "cities", "bodies"] {
+            for obj in ["ships", "cities", "bodies", "settlements"] {
                 assert!(!row.as_object().unwrap().contains_key(obj), "main 不应内联 {obj}");
             }
             let ids = row["ship_ids"].as_array().unwrap();
@@ -307,6 +350,7 @@ mod tests {
         assert!(s.0.join("idx/ships.jsonl").exists());
         assert!(s.0.join("idx/cities.jsonl").exists());
         assert!(s.0.join("idx/bodies.jsonl").exists());
+        assert!(s.0.join("idx/settlements.jsonl").exists());
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
         assert!(!ships.is_empty());
         assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");

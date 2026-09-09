@@ -30,6 +30,15 @@ use crate::model::*;
 use crate::prng::Prng;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Round a float to 2 decimals (token-noise reduction); `+ 0.0` normalizes IEEE `-0.0`.
+fn r2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0 + 0.0
+}
+
+/// Fixed seed for the [`control_plan`] dry-run ("PLAN"). Production / upkeep / governance are
+/// RNG-independent, so this just keeps the preview deterministic across runs.
+const PLAN_SEED: u64 = 0x50514f4e;
+
 /// Advance the world by one round, writing the new controllable state into
 /// [`State::control`].
 ///
@@ -1512,22 +1521,22 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// that has been fully absorbed (has no footprint anywhere) is left eliminated —
 /// the rare, legitimate end of a civ.
 /// 找一个「尚无任何城市占据」的定居点（含空白/从未殖民）；城市占用即排除。返回
-/// (body_id, settlement_idx)。用于反僵尸重建的**强制立足点**兜底：当世界暂时没有空白
+/// (body_id, settlement_name)。用于反僵尸重建的**强制立足点**兜底：当世界暂时没有空白
 /// 城足迹、又必须给被灭势力一个落脚点时，就在未占用定居点上新建一座城。
-fn find_vacant_settlement(state: &State) -> Option<(BodyId, usize)> {
+fn find_vacant_settlement(state: &State) -> Option<(BodyId, String)> {
     for b in &state.bodies {
         if b.settlements.is_empty() {
             continue;
         }
-        let occupied: BTreeSet<usize> = state
+        let occupied: BTreeSet<String> = state
             .cities
             .iter()
             .filter(|c| c.body_id == b.name)
-            .map(|c| c.settlement)
+            .map(|c| c.settlement.clone())
             .collect();
-        for idx in 0..b.settlements.len() {
-            if !occupied.contains(&idx) {
-                return Some((b.name.clone(), idx));
+        for s in &b.settlements {
+            if !occupied.contains(&s.name) {
+                return Some((b.name.clone(), s.name.clone()));
             }
         }
     }
@@ -1631,8 +1640,8 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             // First try to found a brand-new city on a never-occupied settlement; if
             // the world is entirely full, a diaspora refugee overruns the strongest
             // colonizer's lowest-id fringe city. Either way a wiped civ re-enters.
-            if let Some((body, idx)) = find_vacant_settlement(state) {
-                let Some(settlement) = state.body_settlement(&body, idx).cloned() else { continue };
+            if let Some((body, sname)) = find_vacant_settlement(state) {
+                let Some(settlement) = state.body_settlement(&body, &sname).cloned() else { continue };
                 let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
                 let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
                 let base = if settlement.name.is_empty() {
@@ -1643,7 +1652,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 let city = City {
                     name: format!("{}-收容所", base),
                     body_id: body.clone(),
-                    settlement: idx,
+                    settlement: settlement.name.clone(),
                     faction_id: fid.clone(),
                     population: pop,
                     buildings,
@@ -2201,10 +2210,13 @@ fn has_blank_site(state: &State, body: &str) -> bool {
     if has_razed {
         return true;
     }
-    let mut occupied: Vec<usize> = state.cities.iter().filter(|c| c.body_id == body).map(|c| c.settlement).collect();
-    occupied.sort_unstable();
-    occupied.dedup();
-    (0..b.settlements.len()).any(|i| !occupied.contains(&i))
+    let occupied: BTreeSet<String> = state
+        .cities
+        .iter()
+        .filter(|c| c.body_id == body)
+        .map(|c| c.settlement.clone())
+        .collect();
+    b.settlements.iter().any(|s| !occupied.contains(&s.name))
 }
 
 fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
@@ -2401,16 +2413,12 @@ fn colonize(
     }
 
     // 2) No blank city: found a new city only on a settlement no city occupies.
-    let occupied: Vec<usize> = state.cities.iter().filter(|c| c.body_id == body).map(|c| c.settlement).collect();
-    let vacant_idx = state.body(body).and_then(|b| (0..b.settlements.len()).find(|i| !occupied.contains(i)));
-    let Some(idx) = vacant_idx else {
+    let occupied: BTreeSet<String> = state.cities.iter().filter(|c| c.body_id == body).map(|c| c.settlement.clone()).collect();
+    let Some(settlement) = state
+        .body(body)
+        .and_then(|b| b.settlements.iter().find(|s| !occupied.contains(&s.name)).cloned())
+    else {
         // Every settlement is occupied by a live city — nothing to colonize.
-        if let Some(c) = state.control_mut(faction.clone()) {
-            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
-        }
-        return;
-    };
-    let Some(settlement) = state.body_settlement(body, idx).cloned() else {
         if let Some(c) = state.control_mut(faction.clone()) {
             c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
         }
@@ -2426,7 +2434,7 @@ fn colonize(
     let city = City {
         name: format!("{}-殖民城", base),
         body_id: body.to_string(),
-        settlement: idx,
+        settlement: settlement.name.clone(),
         faction_id: faction.clone(),
         population: pop,
         buildings,
@@ -2847,6 +2855,123 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
     }
 }
 
+/// A **cost → benefit preview** for one faction's current control surface: the per-round
+/// economy balance the simulation will produce next round (production vs fleet upkeep vs
+/// governance), the commanded construction/investment budgets, and a verdict on whether the
+/// faction is over-extending its economy.
+///
+/// The numbers are the **simulation's own**: it dry-runs one real [`advance`] on a clone with a
+/// fixed RNG seed, then reads the captured [`RoundFlow`] through [`round_metrics`] — so there is
+/// zero drift between the preview and what [`advance`] would actually do. (Production, upkeep and
+/// governance are RNG-independent, so the fixed seed is just for determinism.) Purely analytical:
+/// it never mutates the caller's state and never consumes the caller's RNG.
+///
+/// Exposed via the agent CLI `--control-plan <faction>`; callers use it to see the cost of a
+/// budget before committing it, instead of discovering a collapse by trial and error.
+pub fn control_plan(state: &State, config: &GameConfig, fid: &str) -> Option<serde_json::Value> {
+    if !state.factions.iter().any(|f| f.name == fid) {
+        return None;
+    }
+    let metrics = dry_metrics(state, config);
+    plan_core(state, config, &metrics, fid)
+}
+
+/// The same cost→benefit preview for **every** faction, from a single dry-run (one clone +
+/// one [`advance`]); the returned map is keyed by faction id. Exposed via
+/// `--control-plan` (no faction argument).
+pub fn control_plan_all(state: &State, config: &GameConfig) -> BTreeMap<String, serde_json::Value> {
+    let metrics = dry_metrics(state, config);
+    state
+        .factions
+        .iter()
+        .filter_map(|f| plan_core(state, config, &metrics, &f.name).map(|v| (f.name.clone(), v)))
+        .collect()
+}
+
+/// Dry-run one real [`advance`] on a clone (fixed seed) and return the captured [`round_metrics`]
+/// — the simulation's own per-round numbers, never re-derived. The caller's state and RNG are
+/// untouched.
+fn dry_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
+    let mut s = state.clone();
+    let mut r = Prng::new(PLAN_SEED);
+    let flow = advance(&mut s, config, &mut r);
+    round_metrics(&s, config, &flow)
+}
+
+/// Build one faction's profile from the real `state` (commands / stockpile) and the
+/// dry-run `metrics` (production / upkeep / governance for the coming round).
+fn plan_core(state: &State, config: &GameConfig, metrics: &RoundMetrics, fid: &str) -> Option<serde_json::Value> {
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
+    // 库存市场价值（当前、未推进）。
+    let stock_value: f64 = state
+        .faction(fid)
+        .map(|f| f.resources.iter().map(|(k, v)| v * value_of(k)).sum())
+        .unwrap_or(0.0);
+    // 当前舰队维护费（step_upkeep / read_budget 用的同一口径）。
+    let upkeep_now: f64 = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .map(|s| ship_panel(config, s).upkeep)
+        .sum();
+
+    // 本回合订单（按当前 mode：Ai 重算 / Player 用命令），已含造舰维护保留上限。
+    let (con_budget, _) = read_budget(state, config, fid.to_string(), BudgetKind::Construction);
+    let (inv_budget, _) = read_budget(state, config, fid.to_string(), BudgetKind::Investment);
+    let con_value: f64 = con_budget.iter().map(|(k, v)| v * value_of(k)).sum();
+    let inv_value: f64 = inv_budget.iter().map(|(k, v)| v * value_of(k)).sum();
+    // AI 自己的保守造舰上限（维护保留后）：用于对比「命令的预算」是否更激进。
+    let ai_cap = (stock_value * config.economy.invest_fraction)
+        .min((stock_value - upkeep_now * config.economy.upkeep_reserve_mult).max(0.0));
+
+    let Some(fm) = metrics.factions.get(fid) else { return None };
+
+    let production = fm.production_value;
+    let upkeep = fm.upkeep;
+    let governance = fm.governance_cost;
+    let net = production - upkeep - governance;
+    let feed_cap = (production - governance).max(0.0); // 扣掉治理后能养得起的舰队维护。
+    let fleet_overextended = upkeep > feed_cap + 1e-9;
+    let over_committed = con_value > ai_cap + 1e-9;
+    let net_negative = net < -1e-9;
+    let rounds = if net_negative {
+        Some((stock_value / -net).max(0.0))
+    } else {
+        None
+    };
+    let verdict = if net_negative {
+        "bleeding"
+    } else if over_committed {
+        "over-committed"
+    } else {
+        "healthy"
+    };
+
+    Some(serde_json::json!({
+        "faction": fid,
+        "round": state.round,
+        "production_value": r2(production),
+        "upkeep": r2(upkeep),
+        "governance_cost": r2(governance),
+        "governance_coverage": r2(fm.governance_coverage),
+        "net_flow": r2(net),
+        "stock_market_value": r2(stock_value),
+        "construction_budget_value": r2(con_value),
+        "investment_budget_value": r2(inv_value),
+        "ai_construction_cap": r2(ai_cap),
+        "over_committed_construction": over_committed,
+        "fleet_upkeep_cap": r2(feed_cap),
+        "fleet_overextended": fleet_overextended,
+        "fleet_value": r2(fm.fleet_value),
+        "ship_count": fm.ship_count,
+        "city_count": fm.city_count,
+        "population": fm.population,
+        "rounds_before_insolvent": rounds.map(r2),
+        "verdict": verdict,
+    }))
+}
+
 /// 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力被共同威胁推向彼此——
 /// 弱者-弱者向 [`BalanceOfPowerConfig::coalition_affinity`] 靠拢（合纵），弱者对霸权向
 /// [`BalanceOfPowerConfig::hegemon_affinity`] 靠拢（均势/疏远）。霸权对任一弱者开战时，
@@ -3127,6 +3252,46 @@ mod tests {
         (config, state)
     }
 
+    /// Guard: the cost→benefit preview reports the current economy balance
+    /// (`net = production − upkeep − governance`) and, when the agent commands an
+    /// over-committed construction budget, flags it *before* it collapses — the
+    /// reported "建造预算拉满 → 维护 > 产出 → 城清零" footgun.
+    #[test]
+    fn control_plan_balances_and_flags_over_committed_construction() {
+        let (config, mut state) = fresh_world(42);
+
+        // Baseline: 中国 self-sustaining at the start.
+        let plan = control_plan(&state, &config, "中国").expect("faction exists");
+        let p = plan["production_value"].as_f64().unwrap();
+        let u = plan["upkeep"].as_f64().unwrap();
+        let g = plan["governance_cost"].as_f64().unwrap();
+        let net = plan["net_flow"].as_f64().unwrap();
+        assert!((net - (p - u - g)).abs() < 0.05, "net must ≈ production − upkeep − governance");
+        assert_eq!(plan["verdict"].as_str().unwrap(), "healthy");
+        assert!(!plan["over_committed_construction"].as_bool().unwrap());
+        assert!(plan["rounds_before_insolvent"].is_null());
+
+        // Command a huge construction budget on a held resource with mode=Player.
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "construction_budget": [
+                {"resource": "铁", "value": 10000.0, "mode": "Player"},
+                {"resource": "碳", "value": 10000.0, "mode": "Player"}
+            ]}]
+        });
+        crate::web::apply_patch(&mut state, &config, &diff).expect("apply construction over-commit");
+
+        let plan2 = control_plan(&state, &config, "中国").expect("faction exists");
+        assert!(
+            plan2["construction_budget_value"].as_f64().unwrap() > 0.0,
+            "commanded construction budget must be non-zero"
+        );
+        assert!(
+            plan2["over_committed_construction"].as_bool().unwrap(),
+            "over-committed construction must be flagged"
+        );
+        assert_ne!(plan2["verdict"].as_str().unwrap(), "healthy");
+    }
+
     /// A player-facing regression guard for the "stale target" bug: a player
     /// ship ordered to attack an already-destroyed target must degrade to Idle,
     /// never drift toward the origin ([0,0]).
@@ -3363,8 +3528,8 @@ mod tests {
             );
             for c in cities {
                 assert!(
-                    c.settlement < b.settlements.len(),
-                    "city {} (body {}) points at an out-of-range settlement {}",
+                    b.settlements.iter().any(|s| s.name == c.settlement),
+                    "city {} (body {}) points at an unknown settlement {}",
                     c.name,
                     b.name,
                     c.settlement
@@ -3376,13 +3541,13 @@ mod tests {
         assert_eq!(earth.settlements.len(), 5, "Earth has five spec metropolises");
         let earth_cities = state.cities.iter().filter(|c| c.body_id == "地球").count();
         assert_eq!(earth_cities, 5, "five cities on five Earth settlements (1:1)");
-        // 巴黎 (settlement index 3) hosts only 铀/铂 — its own region's ores.
+        // 巴黎 (settlement named 巴黎) hosts only 铀/铂 — its own region's ores.
         let paris = earth.settlements[3].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
         assert_eq!(paris, vec!["铀", "铂"], "Paris settlement mines only its own ores");
         assert_eq!(
-            state.cities.iter().find(|c| c.name == "巴黎").map(|c| c.settlement),
-            Some(3),
-            "巴黎 occupies settlement index 3"
+            state.cities.iter().find(|c| c.name == "巴黎").map(|c| c.settlement.as_str()),
+            Some("巴黎"),
+            "巴黎 occupies the settlement named 巴黎"
         );
         // 长三角/珠三角 are distinct settlements, so both may mine 铁 independently.
         let cn = earth.settlements[0].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();

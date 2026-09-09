@@ -154,7 +154,8 @@ pub struct Settlement {
 
 /// A celestial body hosting zero or more 定居点 (settlement sites), each of which
 /// hosts **at most one** city (settlement ↔ city 1:1). A body's settlements are
-/// indexed; a city on this body points at its site via [`City::settlement`].
+/// keyed by their unique **name**; a city on this body points at its site via
+/// [`City::settlement`] (the settlement's name).
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Body {
     pub name: String,
@@ -165,8 +166,9 @@ pub struct Body {
 }
 
 impl Body {
-    pub fn settlement(&self, idx: usize) -> Option<&Settlement> {
-        self.settlements.get(idx)
+    /// Look up a 定居点 on this body by its unique **name** (settlement ↔ city 1:1).
+    pub fn settlement(&self, name: &str) -> Option<&Settlement> {
+        self.settlements.iter().find(|s| s.name == name)
     }
 }
 
@@ -515,7 +517,7 @@ pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
 /// of its ships. This is command-controlled state (see [`ControllableState`]),
 /// not an event: the simulation merely reads this to decide where to move and
 /// what to fire/bombard.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
     Move { position: [f64; 2] },
@@ -678,8 +680,8 @@ pub fn ship_display_name(pool: &[String], seq: u64) -> String {
 pub struct City {
     pub name: String,
     pub body_id: BodyId,
-    /// Index of this city's 定居点 within `body.settlements` (1:1 occupancy).
-    pub settlement: usize,
+    /// 定居点名：本城占据的定居点（定居点 ↔ 城市 1:1，按**名字**引用）。
+    pub settlement: String,
     pub faction_id: FactionId,
     /// 人口, limits production efficiency.
     pub population: u32,
@@ -946,12 +948,12 @@ impl State {
     /// The 定居点 (settlement) a city occupies — settlement ↔ city 1:1.
     pub fn city_settlement(&self, cname: &str) -> Option<&Settlement> {
         let c = self.city(cname)?;
-        self.body(&c.body_id)?.settlement(c.settlement)
+        self.body(&c.body_id)?.settlement(&c.settlement)
     }
 
-    /// A body's settlement site at `idx`.
-    pub fn body_settlement(&self, bname: &str, idx: usize) -> Option<&Settlement> {
-        self.body(bname)?.settlement(idx)
+    /// A body's settlement site at settlement name `sname` (唯一 key).
+    pub fn body_settlement(&self, bname: &str, sname: &str) -> Option<&Settlement> {
+        self.body(bname)?.settlement(sname)
     }
 
     /// Read one faction's controllable state.
@@ -1080,7 +1082,7 @@ pub type BuildKey = (CityId, BuildingId);
 
 /// 一个可控字段由「谁决定」：AI（系统每回合自动决策/改写）还是
 /// Player（玩家指令，系统只读不改写）。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, JsonSchema)]
 pub enum ControlMode {
     /// 系统自动决策（现有行为）。
     #[default]

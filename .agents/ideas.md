@@ -622,6 +622,14 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
   全局表按 `key` join）。`demo.py` 演示 agent 读 schema → 按 id join。
 - `[x]` **uv 布局**：`play/planet_xq/` 是独立 uv 项目；`.gitignore` 放行 `play/planet_xq`、
   忽略其 `.venv`/`__pycache__`；`uv.lock` 入库。`uv sync` + `uv run planet-xq <dir>` / `uv run python demo.py <dir>`。
+- `[x]` **config 进投影（规则×事实同会话查询）**：`--index` 投影额外写一份 `meta.json`
+  （复用 `--meta` 的同一渲染器 `agent::meta_value`），`schema.json` 加 `meta:"meta.json"`
+  并更新 `read_order`。`planet_xq` 自动读它：`q.meta`（原始 dict）+ `q.spec(section)` +
+  `q.ships_spec()`/`q.buildings_spec()`/`q.components_spec()`/`q.structures_spec()`/
+  `q.resource_value()`（各规则表平铺成 DataFrame，index=规格名；`build_cost`/`cost` 这类
+  嵌套 dict 保留为 object 单元格，可用 `.meta` 取原始）。于是 agent 在**同一个 pandas 会话**
+  里能 `q.ships_spec().merge(q.join('ships',round=r), ...)` 算「舰队维护」「造得起几艘」，
+  不用再把 `--meta` 当游离 JSON 手读。`demo.py` 增加「规则×事实」示例（round 6 舰队维护/月）。
 - `[x]` **确定性 + 守卫**：`projection_writes_lean_main_and_indexed_tables`（main 每行不内联
   ships/cities/bodies、只带 id；schema 声明 eager/lazy；各索引表写出且带 key 列）、
   `projection_is_deterministic`（同 seed → main.jsonl 逐字节一致）。
@@ -698,21 +706,40 @@ agent 为下一次 `--apply` 决策，要手写 `control/scope` 且背一堆整�
   - `--loyalty <faction> <city> <value>`：`loyalty_budget`。
   - 原则：**每个命令只出它改的那几片叶子**，返回「实际落地的 diff + 每条的稳定可读 id」，让
     agent 不用记整数 id 与 JSON 树。
-- `[ ]` **`--schema-control`**：`--schema` 现只描述 `Trajectory`（状态视图），**没有描述控制面/
-  diff**（`CommandReq`/`FactionControlPatch`/`scope`/behavior 的两种写法）。给控制面也派一个
-  JSON Schema（`schemars` 派生，同 §11 P1 思路），agent 据此写 diff 而不是靠背。
+- `[x]` **`--schema-control`（落地为 `--control-schema`）**：`--schema` 现只描述 `Trajectory`
+  （状态视图），**没有描述控制面/diff**（`CommandReq`/`FactionControlPatch`/`scope`/behavior 的
+  两种写法）。给控制面也派一个 JSON Schema（`schemars` 派生，同 §11 P1 思路），agent 据此写
+  diff 而不是靠背。落地：`web.rs` 给 `CommandReq`/`FactionControlPatch`/`ShipOrderPatch`/
+  `BudgetPatch`/`InvestWeightPatch`/`BuildWeightPatch`/`LoyaltyBudgetPatch`/`BuildingPatch`/
+  `ScopeView` 加 `#[derive(JsonSchema)]`，`model.rs` 给 `ControlMode`/`ShipBehavior` 加
+  `#[derive(JsonSchema)]`；`web::control_schema_value()` = `schemars::schema_for!(CommandReq)`；
+  `main.rs` 加 `--control-schema`（与 `--schema` 镜像：读面 vs 写面）。**注释跟着 `///` 走**：
+  补了字段 doc comment 的，schema 自动带 `description`（agent 视图 `--schema` 同理——`round`/
+  `time_month` 等没写 `///` 的字段就没有 description）。
 
 ### 18.2 预算语义黑盒、无「成本→收益」预览
 实测把 `construction_budget` 拉满 → 维护费 79/月 > 产出 65/月 → 经济崩、共和国溃散（第 15 月
 城清零）。agent 只能靠试错才知道「这个预算养得起几艘舰」。
 
-- `[ ]` **`--control-plan <faction>`**：给当前控制面算**稳态剖面**——该势力在此预算/权重下
+- `[x]` **`--control-plan <faction>`**：给当前控制面算**稳态剖面**——该势力在此预算/权重下
   「每回合产入 vs 维护 vs 治理开销 vs 可造舰上限」，并给出 `fleet_value`/`upkeep`/`city_count`
-  的近似平衡点，让 agent 在写 diff 前看到代价，而不是提交后观崩盘。复用 `read_budget`/
-  `ship_panel`/`round_metrics` 现有计算，纯函数、无 RNG。
-- `[~]` **预算语义入 `--meta`**：`meta.economy` 已有 `upkeep_reserve_mult`/`invest_fraction`/
+  的近似平衡点，让 agent 在写 diff 前看到代价，而不是提交后观崩盘。落地：`sim::control_plan`
+  ——**干跑一轮真实 `advance`**（克隆 state + 固定 RNG 种子，产出/维护/治理都不吃 RNG），
+  取模拟自身上一步的 `RoundFlow` 经 `round_metrics`，零漂移；另读 `read_budget`（含造舰
+  维护保留上限）+ 报告 AI 保守上限以对比是否过度投入。字段：`production_value/upkeep/
+  governance_cost/net_flow/stock_market_value/construction_budget_value/investment_budget_value/
+  ai_construction_cap/over_committed_construction/fleet_upkeep_cap/fleet_overextended/
+  rounds_before_insolvent/verdict(healthy|over-committed|bleeding)`。`main.rs` 加
+  `--control-plan [<faction>]`（**不带参数 = 给所有势力各出一份 map**，带参数 = 单势力；可与
+  `--apply <diff>` 连用：先叠候选 diff 再看后果）。
+  `sim::tests::control_plan_balances_and_flags_over_committed_construction` 守卫。实测：把
+  construction_budget 拉满（mode=Player）→ round 0 即标 over-committed，run 到 r16 upkeep
+  67.5 > 产出 64.8、库存跌破 0、城 4→1（正是本节报告的溃散）——预览在提交前抓到它。
+- `[x]` **预算语义入 `--meta`**：`meta.economy` 已有 `upkeep_reserve_mult`/`invest_fraction`/
   `production_rate`；把「造舰预算 = 库存×invest_fraction，但先留 upkeep×4」这一换算写进 `meta`
-  的说明或示例，agent 能直接按公式推，不必反推代码。
+  的说明或示例，agent 能直接按公式推，不必反推代码。落地：`agent::meta_value` 增加顶层
+  `notes` 数组（budget 换算 / 每回合净流=产出−维护−治理 及其后果 / 生产与治理的公式 /
+  WYSIWYG 身份约定）。
 
 ### 18.3 从「aggregate」到「该干嘛」缺一座桥
 `metrics` 告诉 agent 城数/产出/份额，但要"哪座城是我的短板（低忠诚/高治理距离）""哪个邻居是
@@ -768,10 +795,24 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 
 > 用户裁决：**schema 必须唯一权威、不能有 shadow 结构，因此统一用名字做唯一 key**；**只换有真实名字的实体**，没名字的（Building/Settlement）保留父实体内的下标注记。已在独立 worktree 完成并验证。
 
-- **类型别名全改 `String`**：`FactionId`/`BodyId`/`CityId`/`ShipId` 都 = 实体唯一名。`Faction`/`Body`/`City`/`Ship` **删掉 `id` 字段**，`name` 即唯一身份；`Building`（`id`=u32 下标注记）/`Settlement` 未动。
+- **类型别名全改 `String`**：`FactionId`/`BodyId`/`CityId`/`ShipId` 都 = 实体唯一名。`Faction`/`Body`/`City`/`Ship` **删掉 `id` 字段**，`name` 即唯一身份；`Building`（`id`=u32 下标注记）未动；`Settlement` 随后也迁到名字 key（见 §20）。
 - **外键/关系/作用域全按名字**：`Ship.faction_id`/`City.faction_id/body_id` = 名字；`relations`/`ship_orders`/`ControlScope::{factions,bodies,cities}` 的 key 全为名字；`GameEvent` 里 ship/city/faction/body 引用全用名字；`ShipBehavior::TargetShip{ship: String}`（target=舰名，枚举改 `Clone` 去 `Copy`）。
 - **accessor 按名字**：`state.faction/city/body/ship(&str)` 及 `*_mut`；`body_position/city_settlement/body_settlement` 同步 `&str`。
 - **每势力名字库**：`config/game.ron` 新增 `name_pool`（各势力一坨、用词不重叠→天然全局唯一）；`ship_display_name(pool, seq)` 用「互素步长打乱轮转 + 世代数后缀」确定性取名，`State.ship_name_seq` per-faction 单调计数器保证舰名唯一且击毁后不复用。
 - **config/story/剧情引用全改名字**：`mond.masters`、`Relations(a,b)`、`GrantShip(faction,body)`、`GrantResources(faction)`、`WarBetween(a,b)`、`FactionAtWar(faction)` 等全部用势力名/天体名。
 - **验证**：`cargo build` ×2 绿；`cargo test --lib` 39 passed；`cargo test --test longhorizon` 5 passed/4 ignored（含 `same_seed_reproduces_identically`、`world_is_multipolar`、`no_nonfinite_over_long_run`）；smoke `--seed 7 --round 0` 舰名如 `长城/赤霄/北斗`(中国)、`华盛顿/总统/落基`(美国)，`Ship` 无 `id` 字段、`faction_id`/`relations` key 为名字。**注意**：`config/game.ron` 与 `.ron` checkpoint 的实体身份从数字 id 换成名字，旧档不再兼容（符合「不考虑向前兼容」）。
 - `[ ]`（后续可做）**数字 id 彻底移除后的收敛**：`web.rs` 的 `StateView`/`MetaView` 仍属独立投影，可再复用同源；`agent` 未预计算派生字段（舰 panel/城 armor 等）仍靠 `--meta`/语义视图。
+
+---
+
+## 20. 定居点也迁到「名字即唯一 key」+ 投影的 `settlements` 懒表 — `[x]`
+
+> 延续 §19 的裁决：`Settlement` 有真实中文名却仍按下标引用（`City.settlement: usize`）。把最后的数字 id 也去掉，并把「每个天体的定居点」做成 projection 的懒表。
+
+- **`City.settlement: usize` → `String`（定居点名）**：`Settlement` 与 `City` 1:1，但殖民地城的城名是 `{定居点名}-殖民城`（≠ 定居点名），所以必须显式按**名字**引用，不能从城名推导。
+- **accessor 按名字**：`Body::settlement(&self, name)` 按名查找；`state.city_settlement(cname)`/`state.body_settlement(bname, sname)` 全用 `&str` 名。
+- **占用判断改为名字集**：`find_vacant_settlement`/`has_blank_site`/colonize 的 `occupied: BTreeSet<String>`（定居点名）；空白位 = 名字不在 occupied 里的定居点；建城 `settlement = settlement.name`。
+- **`world.rs city()` 去掉 `site: usize`**：直接从传入的 `&Settlement` 取 `settlement.name`（22 处调用同步去参）。
+- **projection：新增 `settlements` 懒表**（`idx/settlements.jsonl`，`round:false` 全局主表）：每 body 的每个定居点一行（`settlement_id`=名、`body_id`、`index`、`name`、面积/生态容量/建设修正/资源矿藏）；主流新增 `settlement_ids` 数组；`cities` 表新增 `settlement`（=定居点名）列。Python kit `q.join('settlements')` 直接可用。
+- **验证**：`cargo build --bins` 绿；`cargo test --lib` 42 passed（含 `settlements_and_cities_are_one_to_one`、`projection_writes_lean_main_and_indexed_tables`）；`cargo test --test longhorizon` 5 passed/4 ignored；smoke `--seed 7 --round 2 --index` → `idx/settlements.jsonl` 正常、`planet_xq` 可 join。
+- **注意**：`.ron` state 的 `City.settlement`/`Body.settlements` 结构改变，旧档不兼容（符合「不考虑向前兼容」）。
