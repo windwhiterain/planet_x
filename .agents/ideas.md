@@ -845,3 +845,8 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - **验证**：`cargo build --all-targets` 无警告；`cargo test` 44 lib（含 `spread_weapon_distributes_fire_across_targets`、`temper_biases_toward_weaker_or_stronger_deterrence`、`apply_ship_doctrine_patch`）+ 5 黑盒长局（`same_seed_reproduces_identically` 等）全绿；`--seed 42 --traj 8` 世界照常推进（有交战胜负、舰出厂/击毁）。`config/game.ron` 武器带 `fire_rate:1.0, fire_spread:0.0`（基线不变）。
 - `[ ]`（可选）**把 doctrine 扩展到经济/造舰**（护航↔独狼、保守↔扩张等轴涉及舰队编成/资源投入），当前只影响战斗决策。
 - `[x]`（branch `feature/behavior-redesign`）**行为枚举重定义**（spec §96 行为）：攻击/轰炸都不需要行为，射程内自动发生。`ShipBehavior` 收敛为 `Move/Follow/DockCity/Dock/Colonize/Idle`（移除 `TargetShip{attack}`、`TargetSettlement{bombard}`；新增 `Follow(跟随舰船)`、`DockCity(停泊城市)`）。`Follow` 纯护航/追袭（所随舰**可是友方也可是敌方**），不拦截、不开火——攻击由统一基本权重自动接战完成；`DockCity` 驶向某城，敌对城在围城射程内自动轰炸。玩家路径与 AI 路径统一走 `autocontrol::auto_combat`（射程内自动开火/轰炸）。注意：kiting 是**软移动**（见上），连 Idle 舰在敌近时也会自动软移动，玩家不能硬控制。
+- `[ ]` **政治系统：议题—立场—关切度 + 三因素关系模型**（完整设计见
+  `.agents/political-system-design.md`；核心：关系 = 历史(静态) + 思潮(可变) + 利益(实时) + 均势；
+  以「世界级议题」给权力关系提供目的，MOND 为第一实例。用户已裁决 4 处设计点：
+  ①通用议题框架（MOND 首例）②分离「位置分歧 vs 零和竞逐」③历史静态 / 思潮可变 / 利益实时
+  ④基座+记忆都要。M1=议题框架+基座+动机分解；M2=思潮漂移+大战略/政策；M3=零和竞逐+MOND 相位）。
