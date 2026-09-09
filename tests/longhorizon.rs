@@ -389,6 +389,115 @@ fn probe_sanction() {
     }
 }
 
+/// 多极「科学测量」(`--ignored`)：不再只看「峰值 < 0.85 + 会轮换」，而是量化 ideas.md §2
+/// 的真正目标——
+///   * `avg_top`       ：全局**长期**最强势力城占比（不是只看后半程，是整条轨迹逐回合平均）。
+///   * `terminal_top`  ：最末回合最强势力城占比（末态是否又坍缩成一家独大 + 一堆旁观者）。
+///   * `alive`         ：末回合仍有活城的势力数（>1 才叫「多方参与」，越多越好）。
+///   * `zombies`       ：全局最大僵尸数（无舰无活城，永久旁观者）——越小越好。
+///   * `gini`          ：末回合各势力「城占比」的基尼系数（0=完全均分，1=一家垄断）。
+///   * `rotations`     ：最强势力每变化一次的次数（>1 才叫「轮换」，越多越不锁死）。
+/// 把这些一次性打印成可比较的「多极健康报告」，供调参（平衡/治理/制裁）后横向对比。
+#[test]
+#[ignore]
+fn probe_multipolar() {
+    let config = load_config();
+    for seed in [1u64, 42, 12345] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut top_sum = 0.0f64;
+        let mut top_count = 0u32;
+        let mut max_zombies = 0usize;
+        let mut leader = String::new();
+        let mut rotations = 0u32;
+        for _ in 0..3000u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            let (top, share) = top_city_share(&state);
+            top_sum += share;
+            top_count += 1;
+            max_zombies = max_zombies.max(zombie_count(&state));
+            if top != leader {
+                if !leader.is_empty() {
+                    rotations += 1;
+                }
+                leader = top;
+            }
+        }
+        let (_, terminal_top) = top_city_share(&state);
+        let alive = state.factions.iter().filter(|f| state.cities.iter().any(|c| c.faction_id == f.name && !c.razed)).count();
+        // 吉尼：排序末回合各势力城占比，算基尼系数。
+        let mut shares: Vec<f64> = state
+            .factions
+            .iter()
+            .map(|f| {
+                let n = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
+                n / state.cities.iter().filter(|c| !c.razed).count().max(1) as f64
+            })
+            .collect();
+        shares.retain(|&s| s > 0.0);
+        shares.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = shares.len().max(1) as f64;
+        let gini = if shares.is_empty() {
+            0.0
+        } else {
+            let mut cum = 0.0;
+            let mut sum = 0.0;
+            for (i, &s) in shares.iter().enumerate() {
+                cum += s;
+                sum += (i as f64 + 1.0) * s;
+            }
+            (2.0 * sum / cum / n - (n + 1.0) / n).max(0.0)
+        };
+        println!(
+            "seed {seed}: avg_top={:.3} terminal_top={:.3} rotations={rotations} alive={alive} zombies={max_zombies} gini={gini:.3}",
+            top_sum / top_count as f64, terminal_top
+        );
+    }
+}
+
+/// 一致性诊断 (`--ignored`)：验证「测试的『谁最强』统计」与「游戏国际关系逻辑的『谁是霸权』
+/// 统计」是否**同源**。游戏判定霸权（合纵/遏制/制裁）用的是 `sim::faction_power_share`
+/// （城占比 + 舰队占比加权），而本 harness 早期用的 `top_city_share` 只数城市。如果两者对
+/// 「当前最强势力」的排序不一致，测试就会验收一个**系统实际不针对**的霸权——这是设计性的
+/// 不一致。本探针逐回合报告：
+///   * `city_top`   ：按 `top_city_share`（纯城数）判定的最强势力。
+///   * `pow_top`    ：按 `sim::balance_picture` 的 `power_share`（城+舰队加权，游戏逻辑
+///     真正用来判定谁被合纵/遏制/制裁的那一套）判定的最强势力。
+///   * `agree`      ：两者本轮是否一致（1=一致，0=不一致）。
+/// 并汇总一整局的不一致率。目标是让测试统计与游戏逻辑统计**同一套**。
+#[test]
+#[ignore]
+fn probe_power_consistency() {
+    let config = load_config();
+    for seed in [1u64, 42, 12345] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut mismatch = 0u32;
+        let mut checked = 0u32;
+        for _ in 0..1000u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            let (_, city_share) = top_city_share(&state);
+            // 游戏逻辑的权威统计：balance_picture → power_share（城+舰队加权）。
+            let (_, _, powers) = sim::balance_picture(&state, &config);
+            let (pow_top, pow_share) = powers
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(k, v)| (k.clone(), *v))
+                .unwrap_or((String::new(), 0.0));
+            let (city_top, _) = top_city_share(&state);
+            checked += 1;
+            if city_top != pow_top {
+                mismatch += 1;
+                if mismatch <= 5 {
+                    println!("  r{}: city_top={city_top} ({city_share:.3}) pow_top={pow_top} ({pow_share:.3}) MISMATCH", state.round);
+                }
+            }
+        }
+        let rate = mismatch as f64 / checked as f64;
+        println!("seed {seed}: mismatch={mismatch}/{checked} (rate={rate:.3}) — 测试(纯城) vs 游戏逻辑(城+舰队) 最强势力判定不一致率");
+    }
+}
+
 /// 观测：在最高城占那一回合，最强势力各城到其首都的距离分布（看峰值是「紧凑区域帝国」
 /// 还是「四处扩张」造成的——据此判断过度扩张制裁是否有效）。`--ignored`。
 #[test]
