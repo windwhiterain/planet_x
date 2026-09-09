@@ -1575,18 +1575,115 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             }
         }
 
-        // 叛乱：夷平为空白（可再殖民）。
+        // 离心叛乱：低忠诚城市**改旗易帜**——不夷为荒地，而是倒戈到「思潮与旧主最对立」
+        // 的势力（见 [`most_ideologically_distant_faction`]/[`defect_city`]）。这既让过度扩张
+        // 的大帝国体量回落，又让旁观/小势力能接盘城市、成长为多极棋子。找不到可倒戈目标
+        // （世界只剩一家）时兜底夷为空白（可再殖民，旧行为）。
         for cid in to_revolt {
-            if let Some(c) = state.city_mut(&cid) {
-                c.razed = true;
-                c.population = 0;
-                c.buildings.clear();
-                c.ship_progress.clear();
-                c.loyalty = 0.0;
+            let target = most_ideologically_distant_faction(state, &fid)
+                .filter(|to| to != &fid);
+            if let Some(to) = target {
+                defect_city(state, config, &cid, &fid, &to);
+                ev(state, GameEvent::CityDefected { city: cid, from: fid.clone(), to });
+            } else {
+                if let Some(c) = state.city_mut(&cid) {
+                    c.razed = true;
+                    c.population = 0;
+                    c.buildings.clear();
+                    c.ship_progress.clear();
+                    c.loyalty = 0.0;
+                }
+                ev(state, GameEvent::Revolt { city: cid, faction: fid.clone() });
             }
-            ev(state, GameEvent::Revolt { city: cid, faction: fid.clone() });
         }
     }
+}
+
+// --- 离心「改旗易帜」(loyalty-driven defection) -----------------------------
+
+/// 两股思潮的**对立度**：4 条轴上的 L1 距离（`|Δ|` 之和），范围 [0,8]。
+/// 越大代表两国的当代思潮越对立。
+fn ideology_distance(a: &Ideology, b: &Ideology) -> f64 {
+    (a.peace_military - b.peace_military).abs()
+        + (a.science_tech - b.science_tech).abs()
+        + (a.people_elite - b.people_elite).abs()
+        + (a.nature_colony - b.nature_colony).abs()
+}
+
+/// 与 `owner` **思潮最对立**的势力（取其当前 [`Faction::ideology`]）：这是低忠诚城市
+/// 「改旗易帜」的倒戈目标——居民不认同旧主的思潮，投向与其最对立的强权。确定性、无
+/// RNG：距离最大者胜，并列取名字序最小。`owner` 自身排除；世界只剩一家时返回 `None`。
+fn most_ideologically_distant_faction(state: &State, owner: &str) -> Option<FactionId> {
+    let owner_ideo = state.faction(owner).map(|f| f.ideology)?;
+    let mut best: Option<(f64, FactionId)> = None;
+    for f in &state.factions {
+        if f.name == owner {
+            continue;
+        }
+        let d = ideology_distance(&owner_ideo, &f.ideology);
+        let better = match &best {
+            None => true,
+            Some((bd, bn)) => d > *bd || (d == *bd && f.name < *bn),
+        };
+        if better {
+            best = Some((d, f.name.clone()));
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
+/// 把一座城从 `from` 倒戈给 `to`：城市换主、居民重燃对新主的认同（忠诚重置为 1.0，
+/// 不再立刻叛变）、人口/建筑/船坞/空间站全部保留（这是一次**改旗易帜**，不是夷平）。
+/// 同时把旧主对该城建筑/娱乐预算的控制叶子迁到新主名下，使新主的 AI 确实能治理这座
+/// 城；并对旧主↔新主施加「夺城」级的关系打击（倒戈在旧主眼中几近叛国）。
+fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &str, to: &str) {
+    // 先收集该城建筑 id（避免在可变借权时再读 state.city）。
+    let building_ids: Vec<BuildingId> = state
+        .city(city)
+        .map(|c| c.buildings.iter().map(|b| b.id).collect())
+        .unwrap_or_default();
+
+    // 换主 + 忠诚重置。
+    if let Some(c) = state.city_mut(city) {
+        c.faction_id = to.to_string();
+        c.loyalty = 1.0;
+        c.razed = false;
+    }
+
+    // 控制转移：把旧主控制面里 keyed-by-(city, building) 的叶子搬到新主名下。
+    let mut moved_invest: Vec<(InvestKey, Control<f64>)> = Vec::new();
+    let mut moved_build: Vec<(BuildKey, Control<f64>)> = Vec::new();
+    let mut moved_loyalty: Option<(CityId, Control<f64>)> = None;
+    if let Some(o) = state.control_mut(from.to_string()) {
+        for bid in &building_ids {
+            let ikey = (city.to_string(), *bid);
+            if let Some(v) = o.invest_weights.remove(&ikey) {
+                moved_invest.push((ikey, v));
+            }
+            let bkey = (city.to_string(), *bid);
+            if let Some(v) = o.build_weights.remove(&bkey) {
+                moved_build.push((bkey, v));
+            }
+        }
+        if let Some(v) = o.loyalty_budget.remove(city) {
+            moved_loyalty = Some((city.to_string(), v));
+        }
+    }
+    if let Some(n) = state.control_mut(to.to_string()) {
+        for (k, v) in moved_invest {
+            n.invest_weights.insert(k, v);
+        }
+        for (k, v) in moved_build {
+            n.build_weights.insert(k, v);
+        }
+        if let Some((k, v)) = moved_loyalty {
+            n.loyalty_budget.insert(k, v);
+        }
+    }
+
+    // 外交：倒戈 = 夺城级的关系下压（旧主视新主为敌）。
+    let cur = relation(state, from, to);
+    set_relation_sym(state, from.to_string(), to.to_string(), cur + config.diplomacy.capture_delta, config);
 }
 
 // --- 迁都 (capital relocation) ----------------------------------------------
@@ -3420,6 +3517,83 @@ mod tests {
             Some(false),
             "a well-funded distant city must not revolt"
         );
+    }
+
+    /// 离心「改旗易帜」：低忠诚城市不再被夷为荒地，而是倒戈到**思潮与旧主最对立**的势力，
+    /// 城市连同其人口/建筑/控制面一起易主（旧主失去一城、新主获得一城）——这是给旁观/
+    /// 小势力接盘城市、避免「永久 1 城旁观者」的机制。
+    #[test]
+    fn low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+
+        // 珠三角 (city 1) 属中国，位于其首都(地球)上——但把忠诚压到叛变阈值之下。
+        let city = state.cities[1].name.clone();
+        let owner = "中国".to_string();
+
+        // 中国 → 极端（军国+技术+精英+殖民），无国界科学组织 → 相反极，其余全中立。
+        // 于是无国界科学组织与中国的思潮距离 = 8（唯一最大），倒戈目标唯一确定。
+        let extreme = Ideology { peace_military: 1.0, science_tech: 1.0, people_elite: 1.0, nature_colony: 1.0 };
+        let oppose = Ideology { peace_military: -1.0, science_tech: -1.0, people_elite: -1.0, nature_colony: -1.0 };
+        if let Some(f) = state.faction_mut("中国") {
+            f.ideology = extreme;
+        }
+        if let Some(f) = state.faction_mut("无国界科学组织") {
+            f.ideology = oppose;
+        }
+        for f in &mut state.factions {
+            if f.name != "中国" && f.name != "无国界科学组织" {
+                f.ideology = Ideology::default();
+            }
+        }
+        // 忠诚压到叛变阈值之下（0.30）。
+        if let Some(c) = state.city_mut(&city) {
+            c.loyalty = 0.05;
+        }
+        let pop_before = state.city(&city).map(|c| c.population).unwrap_or(0);
+        let buildings_before = state.city(&city).map(|c| c.buildings.len()).unwrap_or(0);
+
+        advance(&mut state, &config, &mut rng);
+
+        let c = state.city(&city).expect("defected city must survive (not razed)");
+        assert_eq!(
+            c.faction_id, "无国界科学组织",
+            "low-loyalty city must defect to the most ideologically-opposed faction"
+        );
+        assert!(!c.razed, "defected city must not be razed to blank");
+        assert_eq!(c.population, pop_before, "defected city keeps its population");
+        assert_eq!(c.buildings.len(), buildings_before, "defected city keeps its buildings");
+        // 忠诚在倒戈时被重置为满，随后同回合新主的治理会重新计量；断言它仍高于叛变阈值，
+        // 证明这次倒戈给了城市一个「新开始」（没有立刻又叛变/再被夷平）。
+        assert!(
+            c.loyalty > 0.05,
+            "defected city must get a fresh loyalty start (was 0.05, now {}), not stay near zero",
+            c.loyalty
+        );
+
+        // 事件必须是 CityDefected（旧主→新主），不是 Revolt。
+        assert!(
+            state.events.iter().any(|e| matches!(
+                e,
+                GameEvent::CityDefected { city: cid, from, to }
+                    if *cid == city && *from == owner && *to == "无国界科学组织"
+            )),
+            "expected a CityDefected event, got {:?}",
+            state.events
+        );
+
+        // 控制转移：新主(无国界科学组织)的控制面应接管这座城（invest/build 权重按 (城,建筑) 迁入）。
+        if let Some(n) = state.control("无国界科学组织".to_string()) {
+            let owned_build_keys: bool = state
+                .city(&city)
+                .map(|c| c.buildings.iter().any(|b| n.build_weights.contains_key(&(city.clone(), b.id))))
+                .unwrap_or(false);
+            assert!(
+                n.invest_weights.keys().any(|(cid, _)| cid == &city) || n.build_weights.keys().any(|(cid, _)| cid == &city),
+                "new owner control must include the defected city's buildings"
+            );
+            let _ = owned_build_keys;
+        }
     }
 
     /// MOND 引力异常：落入异常区（深空）时，未掌握 MOND 修正引力的势力在导航上产生

@@ -520,6 +520,7 @@ fn event_counts(events: &[GameEvent]) -> BTreeMap<String, u32> {
             Story { .. } => "story",
             Resurgence { .. } => "resurgence",
             Revolt { .. } => "revolt",
+            CityDefected { .. } => "city_defected",
             CoalitionFormed { .. } => "coalition_formed",
             CoalitionEnded { .. } => "coalition_ended",
             CapitalRelocated { .. } => "capital_relocated",
