@@ -102,6 +102,10 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 剧情：推进叙事弧/编年史（数据驱动，见 config/game.ron 的 `story` 表）。
     step_story(state, config);
 
+    // 思潮（可变化意识形态）：按「变化因素」（战争得失/MOND 接触/经济好坏/人均面积）驱动。
+    // 放在回合末：此时事件（战争得失/城夷平/叛乱）与流量（产出/维护/治理）均已就位。
+    step_ideology(state, config, &flow);
+
     // 结回合：把所有派生数据装进一个 `Derived`（flow 中间量 + post 观测/总结）。`post`
     // 由 `round_metrics` 汇总（复用 `balance_picture`/`sanctioned_hegemon`/`faction_power`
     // 等 step 同源计算），因此观测与游戏逻辑**严格一致**；`faction_power` 是单一权威。
@@ -2478,6 +2482,122 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     }
 }
 
+// --- 思潮 (ideology) ----------------------------------------------------------
+
+/// 按「变化因素」驱动各势力 4 条思潮轴。每条轴先算**本回合的信号 target**（[-1,1]），
+/// 再把当前值按 `drift_rate` 向 target 靠拢并钳到 [-1,1]。确定性、无 RNG。
+///
+/// 变化因素（见 spec「势力.各类思潮偏向」）：
+///   * 和平↔军国：战争得失——敌舰被击毁+夷平敌城（得利→军国）减 我舰被击毁+城损失（失利→和平）。
+///   * 科学↔技术：飞船在 MOND 异常区（→科学）vs 开采 MOND 区资源（→技术，按异常区城数计）。
+///   * 人民↔精英：经济好坏——净流（产出−维护−治理）为正→精英，为负→人民。
+///   * 自然↔殖民：人均面积——拥挤（低于参考）→殖民，宽敞→自然。
+fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
+    let ic = &config.ideology;
+    let r = config.mond.radius;
+    // 击毁归属：本回合某舰被谁击毁——由「攻击它的那一方」领功（近似取最后一个攻击者）。
+    let mut killer_of: BTreeMap<ShipId, FactionId> = BTreeMap::new();
+    for e in &state.events {
+        if let GameEvent::Attack { attacker, target, .. } = e {
+            if let Some(a) = state.ship(attacker) {
+                killer_of.insert(target.clone(), a.faction_id.clone());
+            }
+        }
+    }
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
+    // Pass 1（只读 state/flow）：算出每势力的信号 target。
+    let mut targets: BTreeMap<FactionId, Ideology> = BTreeMap::new();
+    for f in &state.factions {
+        let name = f.name.clone();
+        // 战争得失
+        let mut mil = 0.0;
+        for e in &state.events {
+            match e {
+                GameEvent::ShipDestroyed { ship, owner, .. } => {
+                    if owner == &name {
+                        mil -= 1.0;
+                    } else if let Some(k) = killer_of.get(ship) {
+                        if k == &name {
+                            mil += 1.0;
+                        }
+                    }
+                }
+                GameEvent::CityRazed { city, fallen_to } => {
+                    if fallen_to == &name {
+                        mil += 1.0;
+                    } else if let Some(c) = state.city(city) {
+                        if c.faction_id == name {
+                            mil -= 1.0;
+                        }
+                    }
+                }
+                GameEvent::Revolt { faction, .. } => {
+                    if faction == &name {
+                        mil -= 1.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // MOND 接触：到访异常区舰数（→科学） vs 开采异常区资源（→技术，按异常区城数计）。
+        let mut sci_ships = 0u32;
+        let mut tech_cities = 0u32;
+        for s in &state.ships {
+            if s.faction_id == name && s.hull > 0.0 && dist(s.position, [0.0, 0.0]) > r {
+                sci_ships += 1;
+            }
+        }
+        for c in &state.cities {
+            if c.faction_id == name && !c.razed && dist(state.body_position(&c.body_id), [0.0, 0.0]) > r {
+                tech_cities += 1;
+            }
+        }
+        // 经济净流
+        let prod: f64 = flow
+            .faction_production
+            .get(&name)
+            .map(|m| m.iter().map(|(k, v)| v * value_of(k)).sum())
+            .unwrap_or(0.0);
+        let upkeep = flow.upkeep.get(&name).copied().unwrap_or(0.0);
+        let gov = flow.governance.get(&name).map(|g| g.total).unwrap_or(0.0);
+        let net = prod - upkeep - gov;
+        // 人均面积（全部定居点面积 / 总人口）
+        let area: f64 = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == name && !c.razed)
+            .filter_map(|c| state.city_settlement(&c.name).map(|s| s.total_area))
+            .sum();
+        let pop: u64 = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == name && !c.razed)
+            .map(|c| c.population as u64)
+            .sum();
+        let pca = if pop > 0 { area / pop as f64 } else { 0.0 };
+
+        let t = Ideology {
+            peace_military: (mil * ic.military_scale).clamp(-1.0, 1.0),
+            science_tech: ((tech_cities as f64 - sci_ships as f64) * ic.mond_scale).clamp(-1.0, 1.0),
+            people_elite: (net / ic.economy_scale.max(1e-6)).clamp(-1.0, 1.0),
+            nature_colony: ((ic.area_ref - pca) * ic.area_scale).clamp(-1.0, 1.0),
+        };
+        targets.insert(name, t);
+    }
+
+    // Pass 2（可变 state）：把各势力思潮向 target 靠拢（确定性；钳 [-1,1]）。
+    for f in &mut state.factions {
+        let Some(target) = targets.get(&f.name) else { continue };
+        let dr = ic.drift_rate;
+        let converge = |cur: f64, tgt: f64| (cur + dr * (tgt - cur)).clamp(-1.0, 1.0);
+        f.ideology.peace_military = converge(f.ideology.peace_military, target.peace_military);
+        f.ideology.science_tech = converge(f.ideology.science_tech, target.science_tech);
+        f.ideology.people_elite = converge(f.ideology.people_elite, target.people_elite);
+        f.ideology.nature_colony = converge(f.ideology.nature_colony, target.nature_colony);
+    }
+}
+
 // --- story / chronicle -------------------------------------------------------
 
 /// 剧情步进：评估 config 的 `story` 表，把满足触发条件的剧情事件火出，写入
@@ -3465,5 +3585,57 @@ mod tests {
             "no relocation may fire for a Player-owned capital, got {:?}",
             state.events
         );
+    }
+
+    /// 思潮：战争得利把「和平↔军国」推向军国端。
+    #[test]
+    fn ideology_military_win_drives_toward_militarism() {
+        let (config, mut state) = fresh_world(42);
+        let fname = state.factions[2].name.clone(); // 欧盟（开局有舰，且初始偏和平端）
+        let my_ship = state.ships.iter().find(|s| s.faction_id == fname).map(|s| s.name.clone()).expect("a ship");
+        let enemy = state.ships.iter().find(|s| s.faction_id != fname).map(|s| (s.name.clone(), s.faction_id.clone())).expect("enemy ship");
+        let start = state.faction(&fname).unwrap().ideology.peace_military;
+
+        // 注入一回合「战争得利」：我方舰击毁一艘敌舰。击毁归属由 Attack→ShipDestroyed 反推。
+        state.events.push(GameEvent::Attack { attacker: my_ship.clone(), target: enemy.0.clone(), damage: 10.0 });
+        state.events.push(GameEvent::ShipDestroyed { ship: enemy.0.clone(), owner: enemy.1.clone(), class: "corvette".to_string() });
+        step_ideology(&mut state, &config, &RoundFlow::default());
+
+        let after = state.faction(&fname).unwrap().ideology.peace_military;
+        assert!(
+            after > start,
+            "war victory must push 和平↔军国 toward 军国: start={start} after={after}"
+        );
+    }
+
+    /// 思潮：经济转负把「人民↔精英」推向人民端；且所有轴恒可有界、有限。
+    #[test]
+    fn ideology_economy_bad_drives_toward_populism_and_stays_bounded() {
+        let (config, mut state) = fresh_world(42);
+        let fname = state.factions[1].name.clone();
+        let start = state.faction(&fname).unwrap().ideology.people_elite;
+
+        // 经济转负：净流 = 产出(0) − 维护(100) − 治理(0) < 0 → 人民（民粹反弹）。
+        let mut flow = RoundFlow::default();
+        flow.upkeep.insert(fname.clone(), 100.0);
+        step_ideology(&mut state, &config, &flow);
+
+        let after = state.faction(&fname).unwrap().ideology.people_elite;
+        assert!(
+            after < start,
+            "economic bust must push 人民↔精英 toward 人民: start={start} after={after}"
+        );
+        // 所有势力的所有轴都应是有界、有限的。
+        for f in &state.factions {
+            let i = &f.ideology;
+            for (k, v) in [
+                ("peace_military", i.peace_military),
+                ("science_tech", i.science_tech),
+                ("people_elite", i.people_elite),
+                ("nature_colony", i.nature_colony),
+            ] {
+                assert!(v.is_finite() && (-1.0..=1.0).contains(&v), "{k} out of bounds: {v}");
+            }
+        }
     }
 }

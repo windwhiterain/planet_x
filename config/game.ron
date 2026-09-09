@@ -155,6 +155,17 @@
         // 被孤立的大国要花更多资源养边地，远端殖民地更易离心叛乱→体量自然回落）。
         sanction_cost_mult: 1.45,
     ),
+    // 思潮（可变化意识形态）：4 条轴逐回合按「变化因素」向信号 target 靠拢。
+    // 变化因素：和平↔军国=战争得失；科学↔技术=飞船在 MOND 区 vs 开采 MOND 区资源；
+    // 人民↔精英=经济好坏；自然↔殖民=人均面积高低。数值为换算系数，可按长局观测调。
+    ideology: (
+        drift_rate: 0.05,
+        military_scale: 0.5,
+        mond_scale: 0.4,
+        economy_scale: 25.0,
+        area_ref: 0.15,
+        area_scale: 8.0,
+    ),
     resources: {
         "水冰": (name: "水冰", value: 1.0),
         "氦-3":   (name: "氦-3", value: 4.0),

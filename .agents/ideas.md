@@ -845,3 +845,20 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - **验证**：`cargo build --all-targets` 无警告；`cargo test` 44 lib（含 `spread_weapon_distributes_fire_across_targets`、`temper_biases_toward_weaker_or_stronger_deterrence`、`apply_ship_doctrine_patch`）+ 5 黑盒长局（`same_seed_reproduces_identically` 等）全绿；`--seed 42 --traj 8` 世界照常推进（有交战胜负、舰出厂/击毁）。`config/game.ron` 武器带 `fire_rate:1.0, fire_spread:0.0`（基线不变）。
 - `[ ]`（可选）**把 doctrine 扩展到经济/造舰**（护航↔独狼、保守↔扩张等轴涉及舰队编成/资源投入），当前只影响战斗决策。
 - `[x]`（branch `feature/behavior-redesign`）**行为枚举重定义**（spec §96 行为）：攻击/轰炸都不需要行为，射程内自动发生。`ShipBehavior` 收敛为 `Move/Follow/DockCity/Dock/Colonize/Idle`（移除 `TargetShip{attack}`、`TargetSettlement{bombard}`；新增 `Follow(跟随舰船)`、`DockCity(停泊城市)`）。`Follow` 纯护航/追袭（所随舰**可是友方也可是敌方**），不拦截、不开火——攻击由统一基本权重自动接战完成；`DockCity` 驶向某城，敌对城在围城射程内自动轰炸。玩家路径与 AI 路径统一走 `autocontrol::auto_combat`（射程内自动开火/轰炸）。注意：kiting 是**软移动**（见上），连 Idle 舰在敌近时也会自动软移动，玩家不能硬控制。
+- `[ ]` **政治系统：议题—立场—关切度 + 三因素关系模型**（完整设计见
+  `.agents/political-system-design.md`；核心：关系 = 历史(静态) + 思潮(可变) + 利益(实时) + 均势；
+  以「世界级议题」给权力关系提供目的，MOND 为第一实例。用户已裁决 4 处设计点：
+  ①通用议题框架（MOND 首例）②分离「位置分歧 vs 零和竞逐」③历史静态 / 思潮可变 / 利益实时
+  ④基座+记忆都要。M1=议题框架+基座+动机分解；M2=思潮漂移+大战略/政策；M3=零和竞逐+MOND 相位。）
+- `[x]` **思潮最小功能实验（`Ideology`）**（branch `feature/ideology`，`src/model/faction.rs` 的
+  `Ideology` + `Faction.ideology`，`src/model/game_config.rs::IdeologyConfig`，`src/sim.rs::step_ideology`，
+  `src/world.rs` 播种、`src/projection.rs` 暴露）：4 条思潮轴（和平↔军国 / 科学↔技术 / 人民↔精英 /
+  自然↔殖民，各 `[-1,1]`、`0`=均衡）逐回合按 spec 的「变化因素」向信号 target 靠拢并钳 `[-1,1]`：
+  ①战争得失→军国/和平（敌舰被击毁+夷平敌城 − 我舰被击毁−我的城损失） ②飞船在 MOND 区(→科学) vs
+  开采 MOND 区资源(→技术) ③经济净流(产出−维护−治理)→精英/人民 ④人均面积(总定居点面积/人口)→
+  自然/殖民（`area_ref=0.15` 分出「拥挤大帝国→殖民 / 边地小势力→自然」）。确定性、无 RNG；agent 视图
+  （`--round`/`--traj` 复用权威 `Faction`）与 `--index` 投影均暴露。验证：`cargo test --lib` 50 passed
+  （+2 思潮守卫）、`cargo test --test longhorizon` 6 passed/5 ignored、`cargo build --workspace` 绿（lib+web）。
+  seed 7 @ r30 各势力思潮收敛到可辨识画像（联合国=和平+科学+自然、欧盟=很精英、中国/美国=军国+殖民、
+  科学组织=科学+自然、教团=人民+反殖民）。**目前思潮只是可读状态（尚无机械后果）**——下一步把轴线
+  接进军事/科技/治理/经济修正（见政治系统设计 M2/M3）。

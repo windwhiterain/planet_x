@@ -4,6 +4,29 @@ use std::collections::BTreeMap;
 
 use crate::model::{BodyId, FactionId, ResourceMap};
 
+/// 一个势力的「思潮偏向」——4 条轴，每条取 `[-1,1]`，`0` = 均衡。负 = 左端，正 = 右端。
+///
+/// * `peace_military`：和平(-1) ⟷ 军国(+1)
+/// * `science_tech`  ：科学(-1) ⟷ 技术(+1)
+/// * `people_elite`  ：人民(-1) ⟷ 精英(+1)
+/// * `nature_colony` ：自然(-1) ⟷ 殖民(+1)
+///
+/// 这是**可变化的当代思潮**（区别于文明的 `alignment`/`aggression` 身份）：它由
+/// `sim::step_ideology` 逐回合按「变化因素」驱动——战争得失（和平↔军国）、飞船在 MOND
+/// 区域 vs 开采 MOND 区资源（科学↔技术）、经济好坏（人民↔精英）、人均面积高低
+/// （自然↔殖民），并钳到 `[-1,1]`。agent 可直读以判断一国的**当下倾向**。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, JsonSchema)]
+pub struct Ideology {
+    #[serde(default)]
+    pub peace_military: f64,
+    #[serde(default)]
+    pub science_tech: f64,
+    #[serde(default)]
+    pub people_elite: f64,
+    #[serde(default)]
+    pub nature_colony: f64,
+}
+
 /// A faction (势力) with diplomatic stances toward every other faction.
 ///
 /// The command-controlled budget lives in [`ControllableState::budget`], not
@@ -37,6 +60,9 @@ pub struct Faction {
     /// 在本方本土区域内，本方舰只的额外护甲再生（占最大护甲/回合）。
     #[serde(default = "default_home_regen_bonus")]
     pub home_regen_bonus: f64,
+    /// 当前的思潮偏向（可变化）。见 [`Ideology`]。
+    #[serde(default)]
+    pub ideology: Ideology,
 }
 
 pub(crate) fn default_capital_body() -> BodyId {

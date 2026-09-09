@@ -194,6 +194,7 @@ fn faction(
     resources: ResourceMap,
     alignment: f64,
     aggression: f64,
+    ideology: Ideology,
 ) -> Faction {
     let (home_radius, home_attack_mult, home_regen_bonus) = home_for(name);
     Faction {
@@ -207,6 +208,25 @@ fn faction(
         home_radius,
         home_attack_mult,
         home_regen_bonus,
+        ideology,
+    }
+}
+
+/// 各势力的**初始思潮**（可变化意识形态的起点；之后由 `sim::step_ideology` 按
+/// 「变化因素」驱动）。按身份拟定：教团=圣战+人民+反殖民；科学组织=和平+科学+精英+自然；
+/// 矿业=军+技术+精英+殖民（采掘）；大国相应偏向。见 `Ideology` 的轴定义。
+fn ideology(name: &str) -> Ideology {
+    match name {
+        F_UN => Ideology { peace_military: -0.4, science_tech: -0.5, people_elite: 0.5, nature_colony: -0.2 },
+        F_US => Ideology { peace_military: 0.5, science_tech: 0.5, people_elite: 0.3, nature_colony: 0.6 },
+        F_EU => Ideology { peace_military: -0.2, science_tech: 0.1, people_elite: 0.6, nature_colony: -0.3 },
+        F_CN => Ideology { peace_military: 0.4, science_tech: 0.7, people_elite: -0.3, nature_colony: 0.5 },
+        F_RU => Ideology { peace_military: 0.6, science_tech: 0.4, people_elite: 0.2, nature_colony: 0.4 },
+        F_MINING => Ideology { peace_military: 0.3, science_tech: 0.8, people_elite: 0.5, nature_colony: 0.8 },
+        F_SCIENCE => Ideology { peace_military: -0.6, science_tech: -0.8, people_elite: 0.2, nature_colony: -0.4 },
+        F_TRANSPORT => Ideology { peace_military: -0.2, science_tech: 0.5, people_elite: 0.4, nature_colony: 0.3 },
+        F_CULT => Ideology { peace_military: 0.7, science_tech: -0.1, people_elite: -0.4, nature_colony: -0.6 },
+        _ => Ideology::default(),
     }
 }
 
@@ -487,7 +507,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10),
+        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, ideology(F_UN)),
         faction(
             F_US,
             'A',
@@ -495,8 +515,9 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 6.0), ("碳", 5.0), ("铀", 1.0)]),
             1.0,
             0.60,
+            ideology(F_US),
         ),
-        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30),
+        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, ideology(F_EU)),
         faction(
             F_CN,
             'C',
@@ -504,6 +525,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 7.0), ("碳", 6.0), ("硅", 2.0)]),
             -1.0,
             0.50,
+            ideology(F_CN),
         ),
         faction(
             F_RU,
@@ -512,6 +534,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 5.0), ("碳", 4.0), ("铀", 2.0)]),
             -0.9,
             0.45,
+            ideology(F_RU),
         ),
         faction(
             F_MINING,
@@ -520,6 +543,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铁", 6.0), ("金", 2.0), ("铂", 1.0)]),
             0.0,
             0.20,
+            ideology(F_MINING),
         ),
         faction(
             F_SCIENCE,
@@ -528,6 +552,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("硅", 4.0), ("氦-3", 3.0), ("碳", 2.0)]),
             0.2,
             0.05,
+            ideology(F_SCIENCE),
         ),
         faction(
             F_TRANSPORT,
@@ -536,6 +561,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("碳", 6.0), ("氢", 3.0), ("铁", 2.0)]),
             -0.1,
             0.15,
+            ideology(F_TRANSPORT),
         ),
         faction(
             F_CULT,
@@ -544,6 +570,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             stockpile(&[("铀", 3.0), ("钍", 2.0), ("金", 1.0)]),
             -3.0,
             0.90,
+            ideology(F_CULT),
         ),
     ];
 

@@ -276,6 +276,12 @@ fn write_round(
                 "home_radius": r2(f.home_radius),
                 "home_attack_mult": r2(f.home_attack_mult),
                 "home_regen_bonus": r2(f.home_regen_bonus),
+                "ideology": {
+                    "peace_military": r2(f.ideology.peace_military),
+                    "science_tech": r2(f.ideology.science_tech),
+                    "people_elite": r2(f.ideology.people_elite),
+                    "nature_colony": r2(f.ideology.nature_colony),
+                },
                 "resources": f.resources,
                 "relations": f.relations,
                 "city_ids": city_ids,
@@ -309,7 +315,7 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","resources":"object","relations":"object","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","city_ids":"array","ship_ids":"array"},
             }),
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,

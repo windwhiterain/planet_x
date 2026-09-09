@@ -362,6 +362,36 @@ impl Default for BalanceOfPowerConfig {
         }
     }
 }
+/// 思潮（Ideology）驱动 tuning——4 条轴逐回合按「变化因素」向信号 target 靠拢。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct IdeologyConfig {
+    /// 每回合思潮向信号 target 靠拢的比例（0..1）。
+    pub drift_rate: f64,
+    /// 军事净信号（敌舰被击毁+夷平敌城 − 我舰被击毁−我的城损失）换算为「军国」target 的系数。
+    pub military_scale: f64,
+    /// MOND 接触换算：（开采异常区城数 − 到访异常区舰数）× 此系数 = 技术/科学 target。
+    pub mond_scale: f64,
+    /// 经济净流（产出 − 维护 − 治理）换算为「精英/人民」target 的分母（净流 / 此值归一化）。
+    pub economy_scale: f64,
+    /// 人均面积参考（面积/人口）：高于它 → 自然，低于它 → 殖民。
+    pub area_ref: f64,
+    /// 人均面积差换算为「殖民/自然」target 的系数。
+    pub area_scale: f64,
+}
+
+impl Default for IdeologyConfig {
+    fn default() -> Self {
+        Self {
+            drift_rate: 0.05,
+            military_scale: 0.5,
+            mond_scale: 0.4,
+            economy_scale: 25.0,
+            area_ref: 0.15,
+            area_scale: 8.0,
+        }
+    }
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -374,6 +404,9 @@ pub struct GameConfig {
     /// 合纵连横 / 均势外交（弱者联盟对抗霸权）。`#[serde(default)]` 容忍旧配置无此节。
     #[serde(default)]
     pub balance: BalanceOfPowerConfig,
+    /// 思潮（可变化意识形态）驱动 tuning。`#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub ideology: IdeologyConfig,
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,
