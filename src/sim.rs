@@ -819,6 +819,8 @@ fn build_city(
                 components,
                 component_hp: Vec::new(),
                 velocity: 0.0,
+                doctrine: spec.default_doctrine,
+                attack_hist: BTreeMap::new(),
             };
             let panel = ship_panel(config, &ship);
             ship.hull = panel.hull_max;
@@ -867,6 +869,31 @@ fn build_city(
 }
 
 // --- military ---------------------------------------------------------------
+
+/// 威慑（自动计算）：某舰的威慑 = 本舰**综合战力** + `deterrence_radius` 内同势力友舰
+/// 战力之和——「威慑 = 综合战力 + 附近同势力战力互相叠加」。这是「理智<->热血」选目标的
+/// 依据：欺软怕硬打威慑低于自己的、飞蛾扑火打威慑高于自己的。确定性（无 RNG）。
+pub(crate) fn deterrence(state: &State, config: &GameConfig, ship_id: &str) -> f64 {
+    let Some(me) = state.ship(ship_id) else { return 0.0 };
+    let r = config.combat.deterrence_radius;
+    let mut d = ship_power(config, me);
+    if r > 0.0 {
+        for s in &state.ships {
+            if s.name != ship_id && s.faction_id == me.faction_id && s.hull > 0.0
+                && dist(me.position, s.position) <= r {
+                d += ship_power(config, s);
+            }
+        }
+    }
+    d
+}
+
+/// 综合战力：把一艘舰的当前有效面板折算成一个标量（威慑 / 目标价值用）。权重与选装评分
+/// 一致（攻击最重、护甲/点防次之），让「威慑」是真实的火力估值而非拍脑袋。
+fn ship_power(config: &GameConfig, ship: &Ship) -> f64 {
+    let p = ship_panel(config, ship);
+    p.attack * 4.0 + p.hull_max * 1.0 + p.shield_max * 0.8 + p.hardness * 3.0 + p.intercept * 2.0
+}
 
 fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let mut order: Vec<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
@@ -950,7 +977,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                         // Attack: pursue the enemy and open fire once in range.
                         if let Some(t) = state.ship(ship) {
                             if t.hull > 0.0 && dist(pos, t.position) <= range {
-                                fire(state, config, &ship_id, ship);
+                                fire_concentrate(state, config, &ship_id, ship);
                                 continue;
                             }
                         }
@@ -959,7 +986,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                             if t.hull > 0.0 {
                                 let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                                 if dist(np, t.position) <= range {
-                                    fire(state, config, &ship_id, ship);
+                                    fire_concentrate(state, config, &ship_id, ship);
                                 }
                             }
                         }
@@ -977,9 +1004,9 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                                 // Intercept the closest hostile in range, scanning
                                 // around the guard first, then the protected ship.
                                 if let Some(enemy) = autocontrol::nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), &ship_id) {
-                                    fire(state, config, &ship_id, &enemy);
+                                    fire_concentrate(state, config, &ship_id, &enemy);
                                 } else if let Some(e2) = autocontrol::nearest_enemy_ship(state, config, &owner, gpos, range, focus.clone(), &ship_id) {
-                                    fire(state, config, &ship_id, &e2);
+                                    fire_concentrate(state, config, &ship_id, &e2);
                                 }
                             }
                         }
@@ -1290,6 +1317,8 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             components: seed_components,
             component_hp: Vec::new(),
             velocity: 0.0,
+            doctrine: spec.default_doctrine,
+            attack_hist: BTreeMap::new(),
         };
         seed.component_hp = seed.components.iter().map(|c| component_integrity(config, c)).collect();
         let seed_panel = ship_panel(config, &seed);
@@ -1478,71 +1507,115 @@ fn hit_factor(tracking: f64, target_speed: f64) -> f64 {
     (1.0 - evade).clamp(0.2, 1.0)
 }
 
-/// Resolve a single ship-vs-ship engagement. Each weapon of the attacker that is
-/// within its own `range` fires; the target's defences (energy shield pool first,
-/// then hull) and its speed (evasion) decide the result. Missiles are homing (hard
-/// to evade) but are met by the target's point-defence interceptors. Damage is the
-/// weapon's damage type vs shield/hull multipliers, all deterministic.
-pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, target_id: &str) {
-    let (afac, apos, weapons, tclass) = {
-        let a = state.ship(attacker_id).expect("attacker gone");
-        let w = ship_weapons(config, a);
-        (
-            a.faction_id.clone(),
-            a.position,
-            w,
-            state.ship(target_id).map(|t| t.class.clone()).unwrap_or_default(),
-        )
-    };
-    let (tfac, mut hull, mut shield, tpos, tspeed, tpanel) = {
+/// 开火：本舰的每件武器**独立索敌**、逐发射击（`fire_rate` 发/时间）。`plan` 给出一发
+/// 打向哪个目标（每发条目 = 武器下标）。每发独立结算（命中 × 防御 × 护盾/护甲），一回合
+/// 内多发可打在**不同**目标上（火力分配）。伤害按目标**聚合**——每个目标累计伤害 > 0 才发
+/// 一次 `Attack` 事件、调一次关系（避免逐发打、关系掉得过快）。本舰攻击某目标后把它在该舰
+/// `attack_hist` 里的新鲜度刷到 1（供火力分配层读，跨回合记忆）。确定性（无 RNG）。
+pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(usize, ShipId)]) {
+    let afac = state.ship(attacker_id).map(|a| a.faction_id.clone()).unwrap_or_default();
+    let weapons = state.ship(attacker_id).map(|a| ship_weapons(config, a)).unwrap_or_default();
+    let mut damage_acc: BTreeMap<ShipId, f64> = BTreeMap::new();
+    let mut destroyed: Vec<(ShipId, FactionId, String)> = Vec::new();
+    // 攻击历史新鲜度：本舰打过谁。逐发结算后刷新，使同回合后续发能按「越近越降权重」改选。
+    let mut hist: BTreeMap<ShipId, f64> = BTreeMap::new();
+
+    for (wi, target_id) in plan {
+        let Some(w) = weapons.get(*wi) else { continue };
+        if !state.ship(target_id).map(|s| s.hull > 0.0).unwrap_or(false) {
+            continue; // 目标已被本回合其它发击毁——跳过这发（火力补刀不浪费）。
+        }
+        let dmg = resolve_shot(state, config, attacker_id, w, target_id);
+        let dead = state.ship(target_id).map(|s| s.hull <= 0.0).unwrap_or(false);
+        if dead && !destroyed.iter().any(|(n, _, _)| n == target_id) {
+            if let Some(ts) = state.ship(target_id) {
+                destroyed.push((target_id.clone(), ts.faction_id.clone(), ts.class.clone()));
+            }
+        }
+        // 本发是「攻击」：把该目标新鲜度刷到 1（哪怕全被护盾/拦截吃掉）。
+        hist.entry(target_id.clone()).or_insert(0.0);
+        *hist.get_mut(target_id).unwrap() = 1.0;
+        *damage_acc.entry(target_id.clone()).or_insert(0.0) += dmg;
+    }
+    // 攻击历史写回（火力分配跨回合记忆）。
+    if let Some(a) = state.ship_mut(attacker_id) {
+        for (t, v) in hist {
+            a.attack_hist.insert(t, v);
+        }
+    }
+    for (t, dmg) in &damage_acc {
+        if *dmg > 1e-9 {
+            let tfac = state.ship(t).map(|s| s.faction_id.clone()).unwrap_or_default();
+            ev(state, GameEvent::Attack { attacker: attacker_id.to_string(), target: t.clone(), damage: *dmg });
+            adjust_relation(state, &afac, &tfac, config.diplomacy.attack_delta);
+        }
+    }
+    for (t, owner, cls) in destroyed {
+        ev(state, GameEvent::ShipDestroyed { ship: t, owner, class: cls });
+    }
+}
+
+/// 把本舰所有武器的一次齐射（每武器 `fire_rate` 发）全打向**一个**目标——集中火力的
+/// 便捷入口（玩家指令路径 / 测试用）。等价的逐发 plan 版本见 [`fire`]。
+pub(crate) fn fire_concentrate(state: &mut State, config: &GameConfig, attacker_id: &str, target_id: &str) {
+    let weapons = state.ship(attacker_id).map(|a| ship_weapons(config, a)).unwrap_or_default();
+    let plan: Vec<(usize, ShipId)> = weapons
+        .iter()
+        .enumerate()
+        .flat_map(|(i, w)| {
+            let shots = (w.fire_rate.round()).max(1.0) as usize;
+            (0..shots).map(move |_| (i, target_id.to_string()))
+        })
+        .collect();
+    fire(state, config, attacker_id, &plan);
+}
+
+/// 结算单件武器的一发打击：对一个活目标应用「命中 × 本土防御 × 护盾/护甲」伤害并修改
+/// 目标的 hull/shield/组件完整度，返回造成的伤害（护盾吸收 + 船体）。这是「每发独立结算」，
+/// 让一回合内多发可打在**不同**目标上。确定性。
+fn resolve_shot(state: &mut State, config: &GameConfig, attacker_id: &str, w: &Weapon, target_id: &str) -> f64 {
+    let apos = state.ship(attacker_id).map(|a| a.position).unwrap_or([0.0, 0.0]);
+    let (tfac, tpos, tspeed, tpanel) = {
         let t = state.ship(target_id).expect("target gone");
         let panel = ship_panel(config, t);
-        (t.faction_id.clone(), t.hull, t.shield, t.position, panel.speed, panel)
+        (t.faction_id.clone(), t.position, panel.speed, panel)
     };
-    let hull_before = hull;
-    // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标在其首都本土防御半径内被削弱。
+    let d = dist(apos, tpos);
+    if d > w.range {
+        return 0.0; // weapon out of range — positional, not a stat
+    }
     let def_mult = home_defense_mult(state, &tfac, tpos);
-    // 点防御 = 目标自身拦截 + 附近友舰的防空屏护（只对导弹有意义——导弹才是会被拦截的）。
-    // 攻击方没有导弹武器时跳过防空扫描（省去每击一次 O(舰队) 的额外开销）。
-    let has_missiles = weapons.iter().any(|w| w.kind == WEAPON_MISSILE);
-    let pd = tpanel.intercept
-        + if has_missiles { cluster_pd_cover(state, config, target_id, &tfac, tpos) } else { 0.0 };
-
-    let mut total_damage = 0.0;
-    for w in &weapons {
-        let d = dist(apos, tpos);
-        if d > w.range {
-            continue; // weapon out of range — positional, not a stat
-        }
-        let hit = hit_factor(w.tracking, tspeed);
-        let mut dmg = w.damage * hit * def_mult;
-        // 导弹是制导的（对高速目标规避弱），但会被目标点防御**线性**拦截：每点拦截强度
-        // 直接扣掉这么多导弹伤害（拦不掉的部分继续命中）。
-        if w.kind == WEAPON_MISSILE && pd > 0.0 {
+    let hit = hit_factor(w.tracking, tspeed);
+    let mut dmg = w.damage * hit * def_mult;
+    // 导弹是制导的（对高速目标规避弱），但会被目标点防御**线性**拦截（自身 + 附近友舰。
+    if w.kind == WEAPON_MISSILE {
+        let pd = tpanel.intercept + cluster_pd_cover(state, config, target_id, &tfac, tpos);
+        if pd > 0.0 {
             dmg = (dmg - pd).max(0.0);
         }
-        // 护盾优先吸收（按 shield_mult），溢出与 hull_mult 部分进船体；满护盾削弱船体伤害。
-        let shield_dmg = dmg * w.shield_mult;
-        let hull_dmg = dmg * w.hull_mult;
-        let absorbed = shield.min(shield_dmg);
-        shield -= absorbed;
-        let soak = if shield_dmg > 1e-9 { absorbed / shield_dmg } else { 1.0 };
-        // 护甲 = 让船体变硬：打向船体(护甲)的伤害被目标硬度按**反比例函数**削减
-        // `hardness/(hardness + hull_dmg)`（护甲是数值；炮弹越狠、减伤比例越低——重炮能
-        // 穿透装甲、小口径被装甲吃掉）。这与「船体是舰级直接属性、模块不改它」一致。
-        let (hardness, hull_dmg_effective) = (tpanel.hardness, hull_dmg * (1.0 - 0.5 * soak));
-        let armor_soak = if hardness > 1e-9 {
-            (hardness / (hardness + hull_dmg_effective.max(1e-9))).min(0.85)
-        } else {
-            0.0
-        };
-        let hull_pen = hull_dmg_effective * (1.0 - armor_soak);
-        hull -= hull_pen;
-        total_damage += dmg;
     }
-
+    let (mut hull, mut shield) = {
+        let t = state.ship(target_id).unwrap();
+        (t.hull, t.shield)
+    };
+    let hull_before = hull;
+    // 护盾优先吸收（按 shield_mult），溢出与 hull_mult 部分进船体；满护盾削弱船体伤害。
+    let shield_dmg = dmg * w.shield_mult;
+    let hull_dmg = dmg * w.hull_mult;
+    let absorbed = shield.min(shield_dmg);
+    shield -= absorbed;
+    let soak = if shield_dmg > 1e-9 { absorbed / shield_dmg } else { 1.0 };
+    // 护甲 = 让船体变硬：打向船体(护甲)的伤害被目标硬度按**反比例函数**削减。
+    let hardness = tpanel.hardness;
+    let hull_dmg_effective = hull_dmg * (1.0 - 0.5 * soak);
+    let armor_soak = if hardness > 1e-9 {
+        (hardness / (hardness + hull_dmg_effective.max(1e-9))).min(0.85)
+    } else {
+        0.0
+    };
+    let hull_pen = hull_dmg_effective * (1.0 - armor_soak);
+    hull -= hull_pen;
     let destroyed = hull <= 0.0;
-    // 模块损毁：实际打掉的船体伤害里，按 `component_spill` 比例「溢出」去损坏组件。
     let hull_damage_done = (hull_before - hull.max(0.0)).max(0.0);
     if let Some(t) = state.ship_mut(target_id) {
         t.hull = if destroyed { 0.0 } else { hull.max(0.0) };
@@ -1555,7 +1628,6 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, ta
                     t.component_hp = t.components.iter().map(|c| component_integrity(config, c)).collect();
                 }
                 let mut rem = spill;
-                // 先打最脆(最小完整度)的组件；平局按下标——确定性。
                 let mut order: Vec<usize> = (0..t.components.len()).collect();
                 order.sort_by(|&a, &b| t.component_hp[a].total_cmp(&t.component_hp[b]).then_with(|| a.cmp(&b)));
                 for &i in &order {
@@ -1572,13 +1644,7 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, ta
             }
         }
     }
-    if total_damage > 1e-9 {
-        ev(state, GameEvent::Attack { attacker: attacker_id.to_string(), target: target_id.to_string(), damage: total_damage });
-        adjust_relation(state, &afac, &tfac, config.diplomacy.attack_delta);
-    }
-    if destroyed {
-        ev(state, GameEvent::ShipDestroyed { ship: target_id.to_string(), owner: tfac, class: tclass });
-    }
+    dmg // 本次造成的总伤害（护盾 + 船体）；用于事件/关系/攻击历史。
 }
 
 /// 舰队防空（防空屏护）：目标（`target_faction` 阵营、`tpos` 处）附近 `pd_radius` 内的友舰，
@@ -2443,6 +2509,8 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
         components: story_components,
         component_hp: Vec::new(),
         velocity: 0.0,
+        doctrine: spec.default_doctrine,
+        attack_hist: BTreeMap::new(),
     };
     ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
     let ship_panel = ship_panel(config, &ship);
@@ -3066,7 +3134,7 @@ mod tests {
         state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
         let before = state.ship(&ship3).unwrap().component_hp.clone();
         let panel_before = ship_panel(&config, state.ship(&ship3).unwrap());
-        fire(&mut state, &config, &ship0, &ship3);
+        fire_concentrate(&mut state, &config, &ship0, &ship3);
         let after = state.ship(&ship3).unwrap().component_hp.clone();
         assert!(
             after.iter().zip(before.iter()).any(|(a, b)| *a < *b),
@@ -3155,7 +3223,7 @@ mod tests {
 
         let shield_before = state.ship(&ship3).map(|s| s.shield).unwrap();
         let hull_before = state.ship(&ship3).map(|s| s.hull).unwrap();
-        fire(&mut state, &config, &ship0, &ship3);
+        fire_concentrate(&mut state, &config, &ship0, &ship3);
 
         let shield_after = state.ship(&ship3).map(|s| s.shield).unwrap();
         let hull_after = state.ship(&ship3).map(|s| s.hull).unwrap();

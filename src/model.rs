@@ -273,9 +273,17 @@ pub struct ShipSpec {
     /// 平台修正器」的一环——把所搭载的点防模块输出按舰型缩放，而非给舰叠加独立面板。
     #[serde(default = "default_mult")]
     pub pd_mult: f64,
+    /// 本舰级出厂时的**默认行为风格**（per-舰 配置的类默认）：舰出厂时继承这一份
+    /// `ShipDoctrine`。全 0 = 基线（与旧行为一致）。`--apply` 可再按单舰覆写。
+    #[serde(default)]
+    pub default_doctrine: ShipDoctrine,
 }
 
 fn default_mult() -> f64 {
+    1.0
+}
+
+fn default_fire_rate() -> f64 {
     1.0
 }
 
@@ -317,6 +325,17 @@ pub struct ComponentSpec {
     pub shield_mult: f64,
     /// 武器对船体（装甲）的伤害倍率。
     pub hull_mult: f64,
+    /// 武器射速（发/时间）：每回合该武器**独立**发射这么多发。**每一发独立索敌**——
+    /// 单回合内多发可以火力分配（打不同目标），是「武器 = 独立索敌单位」的机制载体。
+    /// 非武器组件（防御/推进/辅助）此值无意义（默认 1，但它们不开火）。
+    #[serde(default = "default_fire_rate")]
+    pub fire_rate: f64,
+    /// 武器火力分配 单一目标<->雨露均沾（**武器自身可控属性**，非舰船风格）：`<0` 每发
+    /// 都死磕一个目标（越近打过的越加分，集中火力补刀）；`>0` 越近的攻击历史越**降低**
+    /// 那目标权重、把多发摊给不同目标；`0` = 不偏置（攻击历史不改目标权重）。它工作在
+    /// 目标选择**基本权重**（距离 + 克制 + per-武器噪声）之上。
+    #[serde(default)]
+    pub fire_spread: f64,
     /// 能量护盾池（防御组件加）：0 = 无护盾。护盾池每回合再生。
     pub shield: f64,
     /// 护盾再生（占 shield_max / 月）。
@@ -357,6 +376,14 @@ pub struct Weapon {
     pub hull_mult: f64,
     /// 伤害类型（0=kinetic, 1=plasma, 2=missile）。
     pub kind: u8,
+    /// 射速（发/时间），来自组件；每发独立索敌。
+    pub fire_rate: f64,
+    /// 火力分配 单一目标<->雨露均沾：来自组件；作用于本武器每发的目标选择（见
+    /// [`ComponentSpec::fire_spread`]）。
+    pub fire_spread: f64,
+    /// 本武器实例的稳定身份（由舰名 + 组件 id + 组件序号哈希），用于 per-weapon
+    /// 确定性噪声——每件武器各有一点点不同的目标偏好。
+    pub seed: u64,
 }
 
 /// The effective combat panel of a ship after its fitted components are applied.
@@ -384,6 +411,26 @@ pub struct ShipPanel {
     /// 舰体硬度（来自护甲组件，反比例减伤）：削减打向船体的伤害。
     pub hardness: f64,
     pub upkeep: f64,
+}
+
+/// 一艘舰的「行为风格」——自动控制(`autocontrol`)读取它来决定怎么打。每条轴取 `[-1,1]`，
+/// **0 = 基线**(与旧行为一致)。这是 **per-舰** 的配置,不是全局值:舰出厂时继承所属舰级的
+/// [`ShipSpec::default_doctrine`],也可由 `--apply` 按舰覆写。引擎本身不读它——它只影响
+/// 「AI 想怎么打」的决策,是自动控制模块的输入。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, JsonSchema)]
+pub struct ShipDoctrine {
+    /// 警惕<->激进 (风筝<->贴脸): `<0` 倾向站在最远射程风筝、更早撤;`>0` 倾向贴脸逼近、
+    /// 更晚撤。0 = 基线(按配置的撤退/交战默认)。
+    #[serde(default)]
+    pub aggression: f64,
+    /// 理智<->热血 (欺软怕硬<->飞蛾扑火): `<0` 倾向攻击威慑**低于**自己的目标;`>0` 倾向
+    /// 攻击威慑**高于**自己的目标。0 = 基线(无视威慑,按基本权重选目标)。
+    #[serde(default)]
+    pub temper: f64,
+    /// 护航<->独狼: `<0` 空闲舰贴旗舰护航(结伴);`>0` 空闲舰独自就近接战(独狼)。
+    /// 0 = 基线(按配置的护航半径)。
+    #[serde(default)]
+    pub lone_wolf: f64,
 }
 
 /// Damage type tags used in weapon resolution.
@@ -506,11 +553,29 @@ pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
                     shield_mult: cs.shield_mult,
                     hull_mult: cs.hull_mult,
                     kind: weapon_kind(&cs.damage_type),
+                    fire_rate: cs.fire_rate,
+                    fire_spread: cs.fire_spread,
+                    seed: weapon_seed(&ship.name, c, i),
                 });
             }
         }
     }
     ws
+}
+
+/// 本武器实例的稳定身份：由（舰名、组件 id、组件序号）哈希出一个 u64。舰名与组件表都
+/// 在回合间不变，故每件武器各有一个**确定性 noise 种子**——不同武器对同一目标各带一点
+/// 不同的偏好，舰队火力才不会整齐划一。
+fn weapon_seed(ship: &str, component: &str, idx: usize) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in ship.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    for b in component.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    h = (h ^ (idx as u64)).wrapping_mul(0x100_0000_01b3);
+    h
 }
 
 /// A ship's controllable behavior — the instruction a faction issues to one
@@ -614,6 +679,15 @@ pub struct Ship {
     /// 体现「加速到巡航需要时间」——推进模块给的加速度决定多快抵达战术位置。
     #[serde(default)]
     pub velocity: f64,
+    /// 本舰行为风格（per-舰）：出厂继承 `ShipSpec::default_doctrine`，`--apply` 可按舰
+    /// 覆写。仅影响自动控制怎么打；引擎结算不读它。
+    #[serde(default)]
+    pub doctrine: ShipDoctrine,
+    /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
+    /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
+    /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
+    #[serde(default)]
+    pub attack_hist: BTreeMap<ShipId, f64>,
 }
 
 fn default_hull_max() -> f64 {
@@ -1237,6 +1311,15 @@ pub struct CombatConfig {
     /// 友舰——与护航行为衔接。0 = 只护自己。
     #[serde(default = "default_pd_radius")]
     pub pd_radius: f64,
+    /// 威慑叠加半径（AU）：计算某舰威慑时，与其**同势力**、在此半径内的友舰战力会叠加上来
+    /// ——「威慑 = 综合战力 + 附近同势力战力互相叠加」。理智<->热血据此挑「威慑低于自己
+    /// 的」或「威慑高于自己的」目标打。
+    #[serde(default = "default_deterrence_radius")]
+    pub deterrence_radius: f64,
+    /// 攻击历史的衰减因子（每回合）：本舰攻击某目标后，该目标的新鲜度会被刷新到 1，
+    /// 之后每回合乘以此因子衰减（越久越淡）。越小「记仇」越短。
+    #[serde(default = "default_attack_hist_decay")]
+    pub attack_hist_decay: f64,
 }
 
 fn default_retreat_hull() -> f64 {
@@ -1265,6 +1348,14 @@ fn default_pursuit_range() -> f64 {
 
 fn default_pd_radius() -> f64 {
     3.0
+}
+
+fn default_deterrence_radius() -> f64 {
+    8.0
+}
+
+fn default_attack_hist_decay() -> f64 {
+    0.6
 }
 
 /// Building structure attribute (混凝土 / 钢结构).
