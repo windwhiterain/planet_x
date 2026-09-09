@@ -703,6 +703,52 @@ fn default_home_regen_bonus() -> f64 {
     0.0
 }
 
+/// 一回合的**总结指标**：游戏步进函数（`sim::advance` 及其各 step）里实际计算的那些
+/// 中间聚合量。agent 除了读到直接状态（`Trajectory` 的实体字段），还拿到这些「总结」——
+/// 它们由 [`crate::sim::round_metrics`] 汇总，**复用步进函数本身所用的同一套计算**
+/// （`faction_power_share`/`coalition_of`/`sanctioned_hegemon`/`war_pairs`），因此与直接
+/// 状态**严格一致**，不会像一份独立重算的汇总那样与模拟漂移。纯数据、无 RNG。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct RoundMetrics {
+    /// 世界级总量：活城数。
+    pub cities: usize,
+    /// 世界级总量：当前存在的舰数。
+    pub ships: usize,
+    /// 世界级总量：舰队价值（当前船体总和）。
+    pub fleet_value: f64,
+    /// 世界级总量：活城人口总和。
+    pub population: u64,
+    /// 各势力综合实力占比（0..1，全势力求和≈1）——均势/霸权判定的中间量。
+    pub power_share: BTreeMap<FactionId, f64>,
+    /// 当前「霸权」：综合实力占比达阈值的最大势力；无则 None。
+    pub hegemon: Option<FactionId>,
+    /// 针对霸权的反制联盟成员（关系 ≤ coalition_estrange 的弱者，且彼此不交战）。
+    pub coalition_members: Vec<FactionId>,
+    /// 被多国经济制裁的霸权（已有至少一个弱者倒向联盟即封锁）；无则 None。
+    pub sanctioned: Option<FactionId>,
+    /// 当前交战中的势力对（关系 ≤ war_threshold，无序归一化）。
+    pub wars: Vec<(FactionId, FactionId)>,
+    /// 各势力聚合指标（key = faction id）。
+    pub factions: BTreeMap<FactionId, FactionMetrics>,
+}
+
+/// 单势力的聚合总结指标（`RoundMetrics::factions` 的一项）。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct FactionMetrics {
+    /// 活城数（未 razed）。
+    pub city_count: usize,
+    /// 当前存在的舰数。
+    pub ship_count: usize,
+    /// 舰队价值（当前船体总和）。
+    pub fleet_value: f64,
+    /// 人口总和（其所有活城）。
+    pub population: u64,
+    /// 库存市场价值（资源量 × 单价）。
+    pub market_value: f64,
+    /// 该势力当前是否与任意其他势力交战。
+    pub at_war: bool,
+}
+
 /// The current persisted `State` schema version. Bump this whenever `State`'s
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —

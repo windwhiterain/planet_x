@@ -293,8 +293,8 @@ fn same_seed_reproduces_identically() {
         sim::advance(&mut a, &config, &mut ra);
         sim::advance(&mut b, &config, &mut rb);
     }
-    let sa = planet_x::agent::render_state(&a);
-    let sb = planet_x::agent::render_state(&b);
+    let sa = planet_x::agent::render_state(&a, &config);
+    let sb = planet_x::agent::render_state(&b, &config);
     assert_eq!(
         sa, sb,
         "same seed 42 at round 200 must reproduce identical agent state"

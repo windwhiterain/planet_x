@@ -1,4 +1,4 @@
-﻿//! Round-stepping simulation engine.
+//! Round-stepping simulation engine.
 //!
 //! [`advance`] moves the world forward by one round (month). Everything that
 //! affects game balance is read from the [`GameConfig`]; no magic numbers live
@@ -2742,6 +2742,65 @@ pub fn balance_picture(
         None => Vec::new(),
     };
     (hegemon, members, powers)
+}
+
+/// 一局世界在某回合结束时的**总结指标**（agent 的「总结」视图，`RoundMetrics`）。
+///
+/// 这些数字**就是步进函数本身用的中间计算量**：它复用一次 `balance_picture`
+/// （内部是 `faction_power_share` + `coalition_of`）、一次 `sanctioned_hegemon`
+/// 与 `war_pairs`，再补上世界/各势力的城市/舰/兵力/人口/库存价值聚合。因此直接状态
+/// （`State` 的实体字段）与此视图**严格同源、永不漂移**——不会像其它地方独立重算的
+/// 汇总那样与模拟脱节。
+///
+/// 纯函数、无 RNG，同一种子完全复现；O(势力 + 舰 + 城) 一次遍历，足够在每回合轻量调用。
+pub fn round_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+    let (hegemon, members, powers) = balance_picture(state, config);
+    let sanctioned = sanctioned_hegemon(state, config);
+    let wars: Vec<(FactionId, FactionId)> = war_pairs(state, config).into_iter().collect();
+
+    let mut factions = BTreeMap::new();
+    let mut total_population = 0u64;
+    let mut world_cities = 0;
+    let mut world_fleet = 0.0;
+    for f in &state.factions {
+        let fid = f.id;
+        let living: Vec<&City> = state.cities.iter().filter(|c| c.faction_id == fid && !c.razed).collect();
+        let city_count = living.len();
+        let population: u64 = living.iter().map(|c| c.population as u64).sum();
+        total_population += population;
+        world_cities += city_count;
+        let ships = state.ships.iter().filter(|s| s.faction_id == fid);
+        let ship_count = ships.clone().count();
+        let fleet_value: f64 = ships.clone().map(|s| s.hull).sum();
+        world_fleet += fleet_value;
+        let market_value: f64 = f.resources.iter().map(|(k, v)| v * value_of(k)).sum();
+        let at_war = state.factions.iter().any(|o| o.id != fid && hostile(state, config, fid, o.id));
+        factions.insert(
+            fid,
+            FactionMetrics {
+                city_count,
+                ship_count,
+                fleet_value,
+                population,
+                market_value,
+                at_war,
+            },
+        );
+    }
+
+    RoundMetrics {
+        cities: world_cities,
+        ships: state.ships.len(),
+        fleet_value: world_fleet,
+        population: total_population,
+        power_share: powers,
+        hegemon,
+        coalition_members: members,
+        sanctioned,
+        wars,
+        factions,
+    }
 }
 
 /// 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力被共同威胁推向彼此——

@@ -17,9 +17,10 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
-/// Round a float to 2 decimals (token-noise reduction).
+/// Round a float to 2 decimals (token-noise reduction). `+ 0.0` normalizes the IEEE
+/// `-0.0` that `f64::round` preserves (negative zero reads as `-0.0` to an agent).
 fn r2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
+    (v * 100.0).round() / 100.0 + 0.0
 }
 
 /// The agent-facing view of one world state: the **authoritative world fields**,
@@ -41,6 +42,10 @@ pub struct Trajectory {
     pub events: Vec<GameEvent>,
     /// 剧情编年史：整段已展开的叙事弧。
     pub chronicle: Vec<ChronicleEntry>,
+    /// 本回合的**总结指标**（[`crate::sim::round_metrics`] 计算的中间聚合量：实力占比/
+    /// 霸权/联盟/制裁/交战 + 各势力城市·舰队·人口·库存价值）。与直接状态同源自
+    /// 步进函数，故与本节实体字段**严格一致**。
+    pub metrics: RoundMetrics,
 }
 
 /// The canonical, atomic per-round agent view as a `serde_json::Value` — one line
@@ -50,7 +55,7 @@ pub struct Trajectory {
 /// copy of the narrative in every snapshot; the chronicle is delivered separately
 /// as `--story` / the `story` field of the `--traj` pack. Floats are rounded to 2
 /// decimals for token-noise reduction.
-pub fn state_json(state: &State) -> serde_json::Value {
+pub fn state_json(state: &State, config: &GameConfig) -> serde_json::Value {
     let t = Trajectory {
         round: state.round,
         time_month: state.time_month,
@@ -60,6 +65,7 @@ pub fn state_json(state: &State) -> serde_json::Value {
         ships: state.ships.clone(),
         events: state.events.clone(),
         chronicle: state.chronicle.clone(),
+        metrics: crate::sim::round_metrics(state, config),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
     round_value(&mut v);
@@ -82,8 +88,8 @@ pub fn schema_value() -> serde_json::Value {
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
-pub fn render_state(state: &State) -> String {
-    state_json(state).to_string()
+pub fn render_state(state: &State, config: &GameConfig) -> String {
+    state_json(state, config).to_string()
 }
 
 /// The game's full tunable configuration, rendered as one JSON object for the
@@ -114,7 +120,8 @@ fn round_value(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Number(n) if n.is_f64() => {
             if let Some(f) = n.as_f64() {
-                *v = serde_json::Value::from((f * 100.0).round() / 100.0);
+                // + 0.0 规整 -0.0 → +0.0（round 保留负零）。
+                *v = serde_json::Value::from((f * 100.0).round() / 100.0 + 0.0);
             }
         }
         serde_json::Value::Array(a) => a.iter_mut().for_each(round_value),
@@ -273,7 +280,7 @@ mod tests {
     fn agent_view_is_self_described_by_schema() {
         let cfg = config::load_config();
         let state = crate::world::default_state(&cfg, 42);
-        let v = state_json(&state);
+        let v = state_json(&state, &cfg);
         let schema = schema_value();
         let props = schema.get("properties").and_then(|p| p.as_object()).expect("schema.properties");
         let emit_keys = v
@@ -283,8 +290,13 @@ mod tests {
         let schema_keys = props.keys().cloned().collect::<std::collections::BTreeSet<_>>();
         let missing: Vec<_> = emit_keys.difference(&schema_keys).cloned().collect();
         assert!(missing.is_empty(), "agent 视图发射了 schema 未描述的字段: {missing:?}");
-        for k in ["bodies", "cities", "factions", "ships", "events", "chronicle"] {
+        for k in ["bodies", "cities", "factions", "ships", "events", "chronicle", "metrics"] {
             assert!(props.contains_key(k), "schema 缺字段 {k}");
         }
+        // 总结指标 `metrics` 必须真的出现在发射的 JSON 里（不是空壳），且是实体视图的一部分。
+        assert!(
+            v.get("metrics").is_some_and(|m| m.get("factions").is_some()),
+            "agent 视图必须携带 metrics 总结（含各势力聚合）"
+        );
     }
 }
