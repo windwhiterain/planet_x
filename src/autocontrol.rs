@@ -409,96 +409,154 @@ pub(crate) fn retool_shipyards(state: &mut State, config: &GameConfig, fid: &str
 
 // --- 战术选目标（AI 决定打谁） ------------------------------------------------
 
-/// 集中火力阈值：敌舰**护甲占比低于此值**视为「已打成残血」，此时舰队应集中火力将其
-/// 打掉（打死一艘就少一个输出点）；高于此值的敌舰仍按就近接战（避免一开局就把一团
-/// 健康舰队打得只剩几艘、造成过度军备消耗）。拟人：先瞄准、再集火补刀。
-const FOCUS_FINISH: f64 = 0.5;
+// 统一的基本权重：**距离 + 克制 + per-武器随机扰动**，所有自动逻辑共用。克制权重
+// > 距离权重（把火力用在打得动的目标上，比贴着打更划算）；扰动是小量，让每件武器
+// 各有一点点稳定的偏好（舰队火力不整齐划一）。
+const W_DIST: f64 = 1.0;
+const W_CTR: f64 = 1.5;
+/// 理智<->热血层权重：把「威慑对比」折算进基本权重的强度。
+const W_TEMPER: f64 = 0.35;
+/// per-武器确定性噪声幅度 (±)。
+const NOISE_AMP: f64 = 0.06;
+/// 结盟集火(coalition focus)加成。
+const FOCUS_BONUS: f64 = 0.5;
 
-fn focus_priority(wound: f64) -> u8 {
-    if wound < FOCUS_FINISH {
-        0 // 残血：优先集中打掉
-    } else {
-        1 // 健康：按就近
-    }
-}
-
-/// 集中火力排序（拟人）：结盟集火(focus) > **武器克制**(选自己的武器打得动的目标) >
-/// 打残敌(priority 0) > 就近。武器克制在先：别把导弹浪费在点防重镇上、别拿动能打高盾
-/// ——这比「先补刀残血」更能避免被对面用克制武器拖入消耗战。返回 true 表示 `new` 应
-/// 替换 `cur`（确定性，无 RNG）。
-fn prefer_target(new_focus: bool, new_fit: f64, new_wound: f64, new_dist: f64, cur_focus: bool, cur_fit: f64, cur_wound: f64, cur_dist: f64) -> bool {
-    if new_focus != cur_focus {
-        return new_focus;
-    }
-    // 武器克制：能有效杀伤的目标优先。
-    if (new_fit - cur_fit).abs() > 1e-3 {
-        return new_fit > cur_fit;
-    }
-    let np = focus_priority(new_wound);
-    let cp = focus_priority(cur_wound);
-    if np != cp {
-        return np < cp;
-    }
-    if np == 0 {
-        return new_wound < cur_wound; // 都残：打更残的（更快打掉输出点）
-    }
-    new_dist < cur_dist // 都健康：打更近的
-}
-
-/// 武器克制评分（0..1）：攻击者的武器对这一目标的**命中效率**——导弹会被目标点防御
-/// 拦截而大打折扣（导弹 vs 点防 克制），动能对高护盾目标较弱（动能 vs 护盾 克制）。AI
-/// 据此挑「自己能有效杀伤」的目标打，而不是把导弹浪费在全套点防御的堡垒上。确定性。
-fn weapon_fit(weapons: &[Weapon], config: &GameConfig, target: &Ship) -> f64 {
+/// 武器克制评分（0..1）：**这一件**武器对目标的有效杀伤效率——导弹被目标点防御拦截而
+/// 大打折扣（导弹 vs 点防），动能对高护盾目标较弱（动能 vs 护盾）。AI 据此挑「自己能有效
+/// 杀伤」的目标，而不是把导弹浪费在全套点防御的堡垒上。确定性。
+fn weapon_counter(weapon: &Weapon, config: &GameConfig, target: &Ship) -> f64 {
     let panel = ship_panel(config, target);
-    let total: f64 = weapons.iter().map(|w| w.damage).sum();
-    if total <= 1e-9 {
-        return 1.0;
-    }
+    let wd = weapon.damage.max(1e-9);
     let shield_share = panel.shield_max / (panel.shield_max + panel.hull_max).max(1e-9);
-    let mut missile_dmg = 0.0;
-    let mut kin_dmg = 0.0;
-    for w in weapons {
-        match w.kind {
-            WEAPON_MISSILE => missile_dmg += w.damage,
-            WEAPON_KINETIC => kin_dmg += w.damage,
-            _ => {}
+    let mut score = 1.0;
+    match weapon.kind {
+        WEAPON_MISSILE => {
+            let intercept_frac = if panel.intercept > 0.0 {
+                (panel.intercept / (panel.intercept + wd)).min(0.8)
+            } else {
+                0.0
+            };
+            score -= intercept_frac;
         }
+        WEAPON_KINETIC => {
+            score -= shield_share * 0.4;
+        }
+        _ => {}
     }
-    // 导弹被目标点防御拦截（拦截越强，导弹伤害越低）。
-    let intercept_frac = if panel.intercept > 0.0 {
-        (panel.intercept / (panel.intercept + total)).min(0.8)
+    score.clamp(0.0, 1.0)
+}
+
+/// 距离分值（0..1）：越近越高——目标进入本武器射程时是正向奖励，贴脸趋近 1。
+fn dist_score(d: f64, range: f64) -> f64 {
+    if range > 1e-9 {
+        (1.0 - (d / range).clamp(0.0, 1.0)).clamp(0.0, 1.0)
     } else {
         0.0
-    };
-    let missile_blunt = (missile_dmg / total) * intercept_frac;
-    // 动能对高护盾目标较弱（护盾吸掉一部分）。
-    let kin_blunt = (kin_dmg / total) * shield_share * 0.4;
-    (1.0 - missile_blunt - kin_blunt).clamp(0.0, 1.0)
+    }
+}
+
+/// per-武器确定性随机扰动：由（武器 seed、目标名）哈希出 ±`NOISE_AMP` 的小偏置，稳定
+/// 可复现。每件武器对每个目标各有一点点不同的偏好（独立索敌单位的体现）。
+fn weapon_noise(seed: u64, target: &str) -> f64 {
+    let mut h = seed;
+    for b in target.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+    }
+    let u01 = (h >> 11) as f64 / (1u64 << 53) as f64;
+    (u01 - 0.5) * 2.0 * NOISE_AMP
+}
+
+/// 基本权重（所有自动逻辑通用）：距离 + 克制 + per-武器随机扰动。
+fn basic_weight(d: f64, weapon: &Weapon, target: &Ship, config: &GameConfig) -> f64 {
+    W_DIST * dist_score(d, weapon.range) + W_CTR * weapon_counter(weapon, config, target) + weapon_noise(weapon.seed, &target.name)
+}
+
+/// 行为风格层（在基本权重之上）：理智<->热血按「威慑对比」偏置、火力分配按「攻击历史
+/// 新鲜度 × 武器 fire_spread」把最近打过的目标权重修正。`hist` 是本舰的攻击历史（可能带
+/// 本回合已打的本地更新）。
+fn doctrine_weight(
+    state: &State,
+    config: &GameConfig,
+    attacker: &Ship,
+    weapon: &Weapon,
+    target: &Ship,
+    hist: &BTreeMap<ShipId, f64>,
+    d: f64,
+) -> f64 {
+    let mut s = basic_weight(d, weapon, target, config);
+    // 理智<->热血：`temper<0` 欺软怕硬(打威慑低于自己的)，`>0` 飞蛾扑火(打威慑高于自己的)。
+    // 用「威慑比」的对数来量化敌我差距：即使本舰威慑远大于目标，弱目标之间仍能分清高下
+    // （避免 `(my-tg)/(my+tg)` 在 my≫tg 时把所有弱目标压成 ~1、失去区分度）。
+    let temper = attacker.doctrine.temper;
+    if temper.abs() > 1e-9 {
+        let my_det = sim::deterrence(state, config, &attacker.name);
+        let tg_det = sim::deterrence(state, config, &target.name);
+        let rel = ((my_det + 1.0) / (tg_det + 1.0)).ln().clamp(-4.0, 4.0);
+        s += W_TEMPER * -temper * rel;
+    }
+    // 火力分配（在基本权重之上）：`fire_spread>0` 越近打过的权重越低(雨露均沾)，`<0` 越高
+    // (死磕补刀)。
+    let recency = hist.get(&target.name).copied().unwrap_or(0.0);
+    if weapon.fire_spread.abs() > 1e-9 && recency > 1e-9 {
+        s *= 1.0 - weapon.fire_spread * recency;
+    }
+    s
+}
+
+/// 一件武器在**射程内**挑得分最高的活敌舰（按基本权重 + 行为风格层）。
+fn best_target_in_range(state: &State, config: &GameConfig, attacker: &Ship, weapon: &Weapon, hist: &BTreeMap<ShipId, f64>) -> Option<ShipId> {
+    let mut best: Option<(f64, ShipId)> = None;
+    for s in &state.ships {
+        if s.hull <= 0.0 || !sim::hostile(state, config, &attacker.faction_id, &s.faction_id) {
+            continue;
+        }
+        let d = sim::dist(attacker.position, s.position);
+        if d > weapon.range {
+            continue;
+        }
+        let score = doctrine_weight(state, config, attacker, weapon, s, hist, d);
+        if best.as_ref().map_or(true, |&(bs, _)| score > bs) {
+            best = Some((score, s.name.clone()));
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
+/// 一艘舰对目标 `s` 的**综合得分**（追击/选主目标用）：取各武器行为风格得分的最大，叠加
+/// 结盟集火加成。用于判断「该追谁」/撤退判定。
+fn target_ship_score(state: &State, config: &GameConfig, attacker: &Ship, s: &Ship, d: f64) -> f64 {
+    let weapons = ship_weapons(config, attacker);
+    let hist = attacker.attack_hist.clone();
+    let mut score = 0.0f64;
+    for w in &weapons {
+        score = score.max(doctrine_weight(state, config, attacker, w, s, &hist, d));
+    }
+    if weapons.is_empty() {
+        score = 10.0 / (d + 1.0);
+    }
+    score
 }
 
 pub(crate) fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], range: f64, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipId> {
-    // 攻击者的武器构成（决定它对各目标的有效杀伤——武器克制）。
-    let weapons = state.ship(attacker_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
-    let mut best: Option<(bool, f64, f64, f64, ShipId)> = None; // (is_focus, fit, wound, dist, name)
+    let Some(attacker) = state.ship(attacker_id) else { return None };
+    let mut best: Option<(f64, ShipId)> = None; // (score, name)
     for s in &state.ships {
-        if s.hull > 0.0 && sim::hostile(state, config, owner, &s.faction_id) {
-            let d = sim::dist(pos, s.position);
-            if d <= range {
-                // 集中火力（拟人）：结盟集火 > 武器克制 > 打残血敌舰 > 就近。
-                let is_focus = focus.as_ref() == Some(&s.faction_id);
-                let wound = s.hull / s.hull_max.max(1e-9);
-                let fit = weapon_fit(&weapons, config, s);
-                let better = match best {
-                    None => true,
-                    Some((bf, bfit, bw, bd, _)) => prefer_target(is_focus, fit, wound, d, bf, bfit, bw, bd),
-                };
-                if better {
-                    best = Some((is_focus, fit, wound, d, s.name.clone()));
-                }
-            }
+        if s.hull <= 0.0 || !sim::hostile(state, config, owner, &s.faction_id) {
+            continue;
+        }
+        let d = sim::dist(pos, s.position);
+        if d > range {
+            continue;
+        }
+        let mut score = target_ship_score(state, config, attacker, s, d);
+        if focus.as_ref() == Some(&s.faction_id) {
+            score += FOCUS_BONUS;
+        }
+        if best.as_ref().map_or(true, |&(bs, _)| score > bs) {
+            best = Some((score, s.name.clone()));
         }
     }
-    best.map(|(_, _, _, _, name)| name)
+    best.map(|(_, n)| n)
 }
 
 /// 本势力的旗舰（高价值舰种）：第一艘航母（按名字最小），否则 None。用于护航——AI 派
@@ -512,67 +570,80 @@ fn fleet_flag(state: &State, fid: &str) -> Option<ShipId> {
         .map(|s| s.name.clone())
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>, weapons: &[Weapon]) -> Option<ShipBehavior> {
-    let mut best: Option<(bool, f64, f64, f64, ShipBehavior)> = None; // (is_focus, fit, wound, dist, behavior)
-    let mut consider = |d: f64, is_focus: bool, fit: f64, wound: f64, b: ShipBehavior, best: &mut Option<(bool, f64, f64, f64, ShipBehavior)>| {
-        let replace = match *best {
-            None => true,
-            Some((bf, bfit, bw, bd, _)) => {
-                if prefer_target(is_focus, fit, wound, d, bf, bfit, bw, bd) {
-                    true
-                } else if (d - bd).abs() <= 1e-9 {
-                    rng.range(2) == 0
-                } else {
-                    false
-                }
+/// 本舰本回合的开火计划：每件武器的每一发都**独立索敌**——按行为风格层挑一个射程内的活
+/// 敌舰。攻击历史用本地副本随时更新（打过的刷新到 1），使「雨露均沾」武器在**同回合内**
+/// 就能把多发摊到不同目标。确定性。
+fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str) -> Vec<(usize, ShipId)> {
+    let Some(ship) = state.ship(ship_id) else { return Vec::new() };
+    let weapons = ship_weapons(config, ship);
+    if weapons.is_empty() {
+        return Vec::new();
+    }
+    let mut hist = ship.attack_hist.clone();
+    let mut plan = Vec::new();
+    for (i, w) in weapons.iter().enumerate() {
+        let shots = (w.fire_rate.round()).max(1.0) as usize;
+        for _ in 0..shots {
+            if let Some(t) = best_target_in_range(state, config, ship, w, &hist) {
+                plan.push((i, t.clone()));
+                hist.insert(t, 1.0); // 本回合内后续发能看到这次的「新鲜攻击」。
             }
-        };
-        if replace {
-            *best = Some((is_focus, fit, wound, d, b));
         }
-    };
+    }
+    plan
+}
 
-    // Combat first: prefer the nearest hostile ship / city, and when in a coalition
-    // war, prefer those belonging to the focused hegemon. Among hostile **ships**
-    // the AI concentrates fire on the **hittable + most-wounded** one (it avoids
-    // wasting missiles on point-defense-heavy targets; wound = hull/hull_max);
-    // cities are stationary large targets (neutral fit/wound=1.0, decided by distance).
+fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _rng: &mut Prng, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipBehavior> {
+    let Some(attacker) = state.ship(attacker_id) else { return None };
+    // 对舰：在追击半径内选综合得分最高的敌舰（基本权重 + 行为风格层 + 集火加成）。
+    let mut best_ship: Option<(f64, ShipId)> = None;
     for s in &state.ships {
-        // 拟人的「不追远敌」：超过追击半径的敌舰不在追击范围（避免跨全图去追远逃的敌舰、
-        // 过度延伸漂移）。城市（轰炸/殖民）不受此限制——征服仍然值得远征。
-        if s.hull > 0.0
-            && sim::hostile(state, config, owner, &s.faction_id)
-            && (config.combat.pursuit_range <= 0.0 || sim::dist(pos, s.position) <= config.combat.pursuit_range)
-        {
-            let is_focus = focus.as_ref() == Some(&s.faction_id);
-            let wound = s.hull / s.hull_max.max(1e-9);
-            let fit = weapon_fit(weapons, config, s);
-            consider(sim::dist(pos, s.position), is_focus, fit, wound, ShipBehavior::TargetShip { ship: s.name.clone(), attack: true }, &mut best);
+        if s.hull <= 0.0 || !sim::hostile(state, config, owner, &s.faction_id) {
+            continue;
+        }
+        let d = sim::dist(pos, s.position);
+        if config.combat.pursuit_range > 0.0 && d > config.combat.pursuit_range {
+            continue;
+        }
+        let mut score = target_ship_score(state, config, attacker, s, d);
+        if focus.as_ref() == Some(&s.faction_id) {
+            score += FOCUS_BONUS;
+        }
+        if best_ship.as_ref().map_or(true, |&(bs, _)| score > bs) {
+            best_ship = Some((score, s.name.clone()));
         }
     }
+    if let Some((_, s)) = best_ship {
+        return Some(ShipBehavior::TargetShip { ship: s, attack: true });
+    }
+    // 城市轰炸：无追得上的敌舰时，就近围攻敌对城。
+    let mut best_city: Option<(f64, CityId)> = None;
     for c in &state.cities {
-        if !c.razed && sim::hostile(state, config, owner, &c.faction_id) {
-            let is_focus = focus.as_ref() == Some(&c.faction_id);
-            let p = sim::city_position(state, &c.name);
-            consider(sim::dist(pos, p), is_focus, 1.0, 1.0, ShipBehavior::TargetSettlement { city: c.name.clone(), bombard: true }, &mut best);
+        if c.razed || !sim::hostile(state, config, owner, &c.faction_id) {
+            continue;
+        }
+        let p = sim::city_position(state, &c.name);
+        let d = sim::dist(pos, p);
+        let score = 1.0 - (d / config.combat.siege_range).clamp(0.0, 1.0);
+        if best_city.as_ref().map_or(true, |&(bs, _)| score > bs) {
+            best_city = Some((score, c.name.clone()));
         }
     }
-    // If there is nothing to fight, re-colonize a nearby razed (blank) settlement.
-    if best.is_none() {
-        for c in &state.cities {
-            if c.razed {
-                let p = sim::city_position(state, &c.name);
-                consider(sim::dist(pos, p), false, 1.0, 1.0, ShipBehavior::Colonize { body: c.body_id.clone() }, &mut best);
-            }
+    if let Some((_, c)) = best_city {
+        return Some(ShipBehavior::TargetSettlement { city: c, bombard: true });
+    }
+    // 无仗可打：就近（重建）殖民一处被夷平的定居点。
+    for c in &state.cities {
+        if c.razed {
+            return Some(ShipBehavior::Colonize { body: c.body_id.clone() });
         }
     }
-    best.map(|(_, _, _, _, b)| b)
+    None
 }
 
 fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
     let cur = state.ship_behavior(ship_id.to_string());
-    // Keep an existing targeting behavior while it is still valid, so the
-    // commander does not thrash between targets every round.
+    // 保持一个仍有效的追击/围城行为，避免指挥官每回合在目标间抖动。
     if let Some(b) = cur {
         if matches!(b, ShipBehavior::TargetShip { .. } | ShipBehavior::TargetSettlement { .. })
             && sim::behavior_is_valid(state, config, b.clone(), owner)
@@ -580,20 +651,22 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
             return Some(b);
         }
     }
-    let weapons = state.ship(ship_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
-    let picked = pick_target(state, config, &owner, pos, rng, focus, &weapons);
+    let picked = pick_target(state, config, &owner, pos, rng, focus, ship_id);
     let mut behavior = picked.unwrap_or(ShipBehavior::Idle);
-    // 护航（保护高价值旗舰）：交战时闲着、且距本势力旗舰（航母）在 escort_range 内的舰，
-    // 就近护卫它（贴近旗舰 + 拦截进射程之敌），防止高价值舰被轻易打掉。
+    // 护航/独狼：交战时闲着、且**不是独狼**（`lone_wolf < 0`）的舰，就近护卫本势力旗舰
+    // （航母）。独狼（`lone_wolf` 高）空闲时保持自由接战（`pick_target` 已挑最近的敌舰）。
     if matches!(behavior, ShipBehavior::Idle)
         && config.combat.escort_range > 0.0
         && sim::faction_at_war(state, config, owner)
     {
-        if let Some(flag_id) = fleet_flag(state, &owner) {
-            if flag_id != ship_id {
-                let fpos = state.ship(&flag_id).map(|s| s.position).unwrap_or(pos);
-                if sim::dist(pos, fpos) <= config.combat.escort_range {
-                    behavior = ShipBehavior::TargetShip { ship: flag_id, attack: false };
+        let lone_wolf = state.ship(ship_id).map(|s| s.doctrine.lone_wolf).unwrap_or(0.0);
+        if lone_wolf < -0.01 {
+            if let Some(flag_id) = fleet_flag(state, &owner) {
+                if flag_id != ship_id {
+                    let fpos = state.ship(&flag_id).map(|s| s.position).unwrap_or(pos);
+                    if sim::dist(pos, fpos) <= config.combat.escort_range {
+                        behavior = ShipBehavior::TargetShip { ship: flag_id, attack: false };
+                    }
                 }
             }
         }
@@ -608,11 +681,18 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
     }
 }
 
+/// 警惕<->激进（风筝<->贴脸）影响自保撤退阈值：警惕(negative)更早撤(阈值更高)，
+/// 激进(positive)打得更久再撤(阈值更低)。
+fn effective_retreat_hull(config: &GameConfig, aggression: f64) -> f64 {
+    (config.combat.retreat_hull + 0.14 * -aggression).clamp(0.02, 0.9)
+}
+
 // --- 单舰 AI 回合（从 sim::step_military 的 is_ai 分支抽出） ------------------
 
-/// 一艘 AI 舰在本回合的行为：接战（集中火力打最残的敌舰）、自保撤退、护航、殖民、
-/// 轰炸——并把它实际执行的指令写回可控状态（`Control::inherit`），使逐回合 diff 能反映
-/// 系统真正做了什么。执行所需的引擎原语（移动/开火/轰炸/殖民）借自 [`crate::sim`]。
+/// 一艘 AI 舰在本回合的行为：接战（逐发独立索敌、火力分配）、自保撤退（激进更晚撤）、
+/// 护航/独狼、殖民、轰炸——并把它实际执行的指令写回可控状态（`Control::inherit`），使
+/// 逐回合 diff 能反映系统真正做了什么。执行所需的引擎原语（移动/开火/轰炸/殖民）借自
+/// [`crate::sim`]。
 pub(crate) fn ai_ship_turn(
     state: &mut State,
     config: &GameConfig,
@@ -632,14 +712,15 @@ pub(crate) fn ai_ship_turn(
     let my_hull = ship.hull;
     let my_hull_max = ship.hull_max;
     let focus = focus_of.get(&owner).cloned().flatten();
+    let doc = ship.doctrine;
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
-    // 自保撤退（拟人的「别送死」）：舰已受重创、敌在本舰射程内、且离首都有一定距离
-    // 时，不再死战，而是后撤回首都/本土修整充能（远离本土难以获得再生与防御）。这
-    // 让战争有「打残→撤→养好→再来」的损耗与恢复循环，也避免一整支舰队白白送死。
+    // 自保撤退（拟人的「别送死」，激进更晚撤）：舰已受重创、敌在本舰射程内、且离首都有
+    // 一定距离时，后撤回首都/本土修整充能。让战争有「打残→撤→养好→再来」的损耗循环。
     if let Some(target) = tgt {
-        if my_hull / my_hull_max.max(1e-9) < config.combat.retreat_hull {
+        let retreat_hull = effective_retreat_hull(config, doc.aggression);
+        if my_hull / my_hull_max.max(1e-9) < retreat_hull {
             let cap_body = state.capital_body(&owner);
             let cap_pos = state.body_position(&cap_body);
             if sim::dist(pos, cap_pos) > config.combat.retreat_min_dist {
@@ -651,11 +732,14 @@ pub(crate) fn ai_ship_turn(
                 return;
             }
         }
-        // 否则接战：集中火力打最残的敌舰（nearest_enemy_ship 已按受创程度排序）。
-        if let Some(c) = state.control_mut(owner.clone()) {
-            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+        // 接战：每件武器逐发独立索敌（火力分配 / 克制 / 理智热血都作用于目标选择）。
+        let plan = build_fire_plan(state, config, ship_id);
+        if !plan.is_empty() {
+            if let Some(c) = state.control_mut(owner.clone()) {
+                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+            }
+            sim::fire(state, config, ship_id, &plan);
         }
-        sim::fire(state, config, ship_id, &target);
         return;
     }
 
@@ -683,10 +767,13 @@ pub(crate) fn ai_ship_turn(
     if let Some(ship) = state.ship(ship_id) {
         let np = ship.position;
         if let Some(target) = nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), ship_id) {
-            if let Some(c) = state.control_mut(owner.clone()) {
-                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+            let plan = build_fire_plan(state, config, ship_id);
+            if !plan.is_empty() {
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
+                }
+                sim::fire(state, config, ship_id, &plan);
             }
-            sim::fire(state, config, ship_id, &target);
         } else if let ShipBehavior::TargetSettlement { city, bombard } = &behavior {
             let cpos = sim::city_position(state, city);
             if *bombard && sim::dist(np, cpos) <= config.combat.siege_range {
@@ -1043,8 +1130,7 @@ mod tests {
         }
         state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
         state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
-        let weapons = ship_weapons(&config, state.ship(&ship0).unwrap());
-        let picked = pick_target(&state, &config, "中国", [40.0, 40.0], &mut Prng::new(1), None, &weapons);
+        let picked = pick_target(&state, &config, "中国", [40.0, 40.0], &mut Prng::new(1), None, &ship0);
         // 远处那艘敌舰不应被选中（超出追击半径）；可能选中更近的目标或城市/空。
         let chased = matches!(picked, Some(ShipBehavior::TargetShip { ship: ref s, .. }) if *s == ship5);
         assert!(
@@ -1088,34 +1174,91 @@ mod tests {
         );
     }
 
-    /// 集中火力（拟人）：同一射程内，优先打**已受重创**的敌舰（hull/hull_max 更低者），
-    /// 把火力压到一个目标上将其打掉，而不是各自就近乱打。
+    /// 火力分配（雨露均沾）：一件 `fire_spread>0`、`fire_rate>1` 的武器，会把本回合的多发
+    /// 摊给**多个**目标——按攻击历史新鲜度，刚打过的目标在下一次选择时权重被降低。
     #[test]
-    fn combat_concentrates_fire_on_wounded_enemy() {
-        let (config, mut state) = fresh_world(42);
-        // China (3) looks from [40,40]; two hostile US (1) ships sit inside its 0.4 range.
-        // Ship 3 (destroyer, hull 24) is healthy; ship 5 (cruiser, hull 5/72) is badly wounded.
+    fn spread_weapon_distributes_fire_across_targets() {
+        let (mut config, mut state) = fresh_world(42);
+        // 让导弹变成「雨露均沾 + 两连发」，攻击舰装它、站在 [40,40]。
+        if let Some(c) = config.components.get_mut("missile") {
+            c.fire_rate = 2.0;
+            c.fire_spread = 1.0;
+        }
         let ship0 = state.ships[0].name.clone();
         let ship3 = state.ships[3].name.clone();
         let ship5 = state.ships[5].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.position = [40.0, 40.0];
+            s.components = vec!["missile".to_string()];
+        }
         if let Some(s) = state.ship_mut(&ship3) {
-            s.position = [40.2, 40.0];
-            s.hull = 24.0;
-            s.hull_max = 24.0;
+            s.position = [40.1, 40.0];
         }
         if let Some(s) = state.ship_mut(&ship5) {
-            s.position = [40.3, 40.0];
-            s.hull = 5.0;
-            s.hull_max = 72.0;
+            s.position = [40.2, 40.0];
         }
         state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
         state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
-        let target = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 0.4, None, &ship0);
-        assert_eq!(
-            target,
-            Some(ship5),
-            "should concentrate fire on the wounded enemy (5), got {target:?}"
+        let plan = build_fire_plan(&state, &config, &ship0);
+        assert_eq!(plan.len(), 2, "a fire_rate=2 weapon should fire 2 shots, got {plan:?}");
+        let first = plan[0].1.clone();
+        let second = plan[1].1.clone();
+        assert!(
+            first != second,
+            "a 雨露均沾 (fire_spread>0) weapon should spread its 2 shots across 2 targets, got {plan:?}"
         );
+    }
+
+    /// 理智<->热血（威慑对比）：一个热血(temper>0)的舰应倾向攻击**威慑高于自己**的目标
+    /// （飞蛾扑火），而理智(temper<0)应倾向攻击威慑低于自己的目标（欺软怕硬）。
+    #[test]
+    fn temper_biases_toward_weaker_or_stronger_deterrence() {
+        let (mut config, mut state) = fresh_world(42);
+        // 让导弹射程极大（能同时看到两处**分离**的敌群），并把两群目标放到不同簇（相隔
+        // 远超 deterrence_radius），使它们的「舰队威慑」真正不同。
+        if let Some(c) = config.components.get_mut("missile") {
+            c.range = 200.0;
+        }
+        let ship0 = state.ships[0].name.clone();
+        let ship1 = state.ships[1].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        let ship4 = state.ships[4].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        // 攻击舰 ship0 装导弹、站在 [40,40]；把中国队其它舰移远以免污染攻击方威慑。
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.position = [40.0, 40.0];
+            s.components = vec!["missile".to_string()];
+        }
+        if let Some(s) = state.ship_mut(&ship1) {
+            s.position = [600.0, 600.0];
+        }
+        // 弱目标 ship3：孤立、空载（威慑低）。强目标 ship5：重装（威慑高）。
+        // 两簇相隔 ~120 AU（远超 deterrence_radius 8），舰队的威慑互不叠加。
+        if let Some(s) = state.ship_mut(&ship3) {
+            s.position = [40.0, 40.0];
+            s.components = Vec::new();
+        }
+        if let Some(s) = state.ship_mut(&ship4) {
+            s.position = [600.0, 600.0];
+        }
+        if let Some(s) = state.ship_mut(&ship5) {
+            s.position = [60.0, 40.0];
+            s.components = vec!["railgun".to_string()];
+        }
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        // 理智(tempter<0)：欺软怕硬 → 挑威慑低的 ship3。
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.doctrine.temper = -1.0;
+        }
+        let rational = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 200.0, None, &ship0);
+        assert_eq!(rational, Some(ship3), "理智 should pick the weaker 威慑 target, got {rational:?}");
+        // 热血(temper>0)：飞蛾扑火 → 挑威慑高的 ship5。
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.doctrine.temper = 1.0;
+        }
+        let hot = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 200.0, None, &ship0);
+        assert_eq!(hot, Some(ship5), "热血 should pick the stronger 威慑 target, got {hot:?}");
     }
 
     /// 武器克制选目标（拟人「别浪费导弹打点防重镇」）：一舰有导弹时，应优先攻击**没有**
