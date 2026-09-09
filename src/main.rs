@@ -3,9 +3,10 @@
 //! This is the **agent-facing** tool. It emits zero-noise machine-readable data
 //! so an LLM can run a *story*: it produces a linear trajectory (one JSON object
 //! per round, all values rounded to 2 decimals), plus the self-describing rules /
-//! schema / narrative artifacts. There is **no in-process jq** and no interactive
-//! query REPL — arbitrary queries over the trajectory are done with **external
-//! `jq`** (a required runtime dependency) piped over the emitted JSON Lines.
+//! schema / narrative artifacts. There is **no interactive query REPL** — the
+//! agent reads the world via `--index` projections (lean main stream + id-indexed
+//! lazy tables) through the `play/planet_xq` Python kit (uv / pandas); `jq` is
+//! removed and is no longer a dependency.
 //!
 //! Usage: `planet_x [--seed <s|random>] [--start <path.ron>]`
 //! `[--apply <file.json>] [--round <n>] [--traj <n>] [--save <path.ron>]`
@@ -21,8 +22,9 @@
 //!              touched, and omitted `value`/`behavior` keep the current value
 //!              while an omitted `mode` keeps the current mode.
 //! * `--round`  run `n` rounds, emitting one JSON object per round (round 0 first,
-//!              then one per round) as JSON Lines. This is the **trajectory body**:
-//!              pipe it into external `jq` to query across time.
+//!              then one per round) as JSON Lines. This is the **trajectory body**;
+//!              read it back with `--index` + `play/planet_xq` (or `--digest` for a
+//!              coarse storyboard) rather than a JSON query tool.
 //! * `--traj`   run `n` rounds and emit ONE self-contained JSON document:
 //!              `{schema_version, meta, story, trajectory:[...round snapshots...]}` —
 //!              a packaged "story pack" with the timeline, the narrative beats and
@@ -62,8 +64,8 @@ use std::path::{Path, PathBuf};
     about = "行星X——太空沙盘轨迹生成器（agent 讲故事用）",
     long_about = "《行星X》是一个回合制太阳系沙盘轨迹生成器：每回合 = 1 个月，整个游戏由一个可确定复现的\n\
 State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码。这个 CLI 是面向 agent 的\n\
-零噪声轨迹生成器：无进程内 jq、无交互查询 REPL——任意查询用**外部 jq**（必选依赖）对着\n\
-输出的 JSON Lines 做。\n\
+零噪声轨迹生成器：无交互查询 REPL——agent 用 **`--index` 投影** + `play/planet_xq`（uv/pandas）\n\
+读世界（jq 已移除、不再是依赖）。\n\
 \n\
 【世界】\n\
 - 天体 body：绕太阳 2D 椭圆轨道（近日点/远日点距离、远日点方向、公转周期），每回合重算位置。\n\
@@ -84,14 +86,14 @@ Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继�
 作用域树（全局→势力→天体→城市），决定某叶子由谁控制。agent 用 --apply 写 diff 定向故事。\n\
 \n\
 【讲故事流程】\n\
-- `planet_x --seed 42 --round 240 > traj.jsonl`   # 跑一段轨迹（JSON Lines）\n\
-- `jq -s '[ .[] | {round, nship:(.ships|length)} ]' traj.jsonl`   # 任意时间轴查询\n\
+- `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
+- `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
 - `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
-- `planet_x --traj 240 | jq '.story'`                             # 一键拿叙事弧\n\
-- 先 `--schema` 查字段、`--meta` 查规则，再写查询，避免凭记忆。",
+- `planet_x --traj 240`                            # 一键拿故事封包（含 `.story` 编年史）\n\
+- 先 `--schema` 查字段、`--meta` 查规则；分析用 `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
 --round N 输出 N+1 行 JSON（回合 0 + N 回合）；--traj N 输出一个自包含 story pack；\n\
---meta/--schema/--story/--control 各自输出一个 JSON 值。查询一律用外部 jq 对输出做。"
+--meta/--schema/--story/--control 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -102,7 +104,7 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     start: Option<PathBuf>,
 
-    /// 运行 n 个回合并把每个回合输出为一行 JSON（回合 0 先），供外部 jq 查询
+    /// 运行 n 个回合并把每个回合输出为一行 JSON（回合 0 先），供外部分析（--index/--digest）
     #[arg(long = "round", visible_alias = "rounds", value_name = "N")]
     round: Option<u32>,
 
@@ -121,7 +123,7 @@ struct Cli {
     save: Option<PathBuf>,
 
     /// 输出整份游戏配置（resources/buildings/ships/components/economy/combat/diplomacy…）
-    /// 为一行 JSON。这是 agent 的规则字典；再用外部 jq 过滤。
+    /// 为一行 JSON。这是 agent 的规则字典；配合 --index + planet_xq 使用。
     #[arg(long)]
     meta: bool,
 
