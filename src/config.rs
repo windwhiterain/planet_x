@@ -2,7 +2,7 @@
 //! initial-state RON file, and seed parsing. Used by both the CLI and the web
 //! server so the two entry points behave identically.
 
-use crate::model::{migrate, GameConfig, State};
+use crate::model::{migrate, GameConfig, RoundState, State};
 use crate::prng::{self, Prng};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -47,12 +47,13 @@ pub fn load_state(path: &Path) -> State {
     state
 }
 
-/// A serializable session checkpoint: the full `State` plus the exact PRNG
-/// position, so a saved run can be resumed deterministically.
+/// A serializable session checkpoint: the full [`RoundState`] (canonical world +
+/// this round's `pre`/`post` derived records) plus the exact PRNG position, so a
+/// saved run can be resumed deterministically.
 #[derive(Serialize, Deserialize)]
 pub struct Checkpoint {
     pub prng_state: u64,
-    pub state: State,
+    pub round_state: RoundState,
 }
 
 /// Serialize the current `State` to a RON file (no RNG position). Use
@@ -62,27 +63,29 @@ pub fn save_state(path: &Path, state: &State) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Serialize a session checkpoint (state + RNG position) to a RON file.
-pub fn save_checkpoint(path: &Path, state: &State, rng: &Prng) -> Result<(), String> {
-    let cp = Checkpoint { prng_state: rng.state(), state: state.clone() };
+/// Serialize a session checkpoint (round_state + RNG position) to a RON file.
+pub fn save_checkpoint(path: &Path, round_state: &RoundState, rng: &Prng) -> Result<(), String> {
+    let cp = Checkpoint { prng_state: rng.state(), round_state: round_state.clone() };
     let text = ron::to_string(&cp).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Load a checkpoint, returning the `State` and the resumable `Prng`.
-pub fn load_checkpoint(path: &Path) -> Result<(State, Prng), String> {
+/// Load a checkpoint, returning the [`RoundState`] and the resumable [`Prng`].
+pub fn load_checkpoint(path: &Path) -> Result<(RoundState, Prng), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错。
-    migrate(&mut cp.state)?;
-    Ok((cp.state, Prng::from_state(cp.prng_state)))
+    migrate(&mut cp.round_state.state)?;
+    Ok((cp.round_state, Prng::from_state(cp.prng_state)))
 }
 
-/// `--start` style initial load: prefers a session checkpoint (state + RNG), and
-/// falls back to a bare `State` RON file (fresh RNG from `seed`).
+/// `--start` style initial load: prefers a session checkpoint ([`RoundState`] + RNG),
+/// and falls back to a bare `State` RON file (fresh RNG from `seed`). Returns the
+/// canonical `State` and the resumable RNG; the checkpoint's `pre`/`post` derived records
+/// are ignored for continuation (the next `advance` recomputes its own `pre`).
 pub fn load_initial(path: &Path, seed: u64) -> (State, Prng) {
-    if let Ok((state, rng)) = load_checkpoint(path) {
-        return (state, rng);
+    if let Ok((round_state, rng)) = load_checkpoint(path) {
+        return (round_state.state, rng);
     }
     // Not a checkpoint; treat as a bare initial state.
     (load_state(path), Prng::new(seed))

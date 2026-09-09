@@ -62,7 +62,7 @@ pub struct Trajectory {
 /// copy of the narrative in every snapshot; the chronicle is delivered separately
 /// as `--story` / the `story` field of the `--traj` pack. Floats are rounded to 2
 /// decimals for token-noise reduction.
-pub fn state_json(state: &State, config: &GameConfig, flow: &RoundFlow) -> serde_json::Value {
+pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
     let t = Trajectory {
         round: state.round,
         time_month: state.time_month,
@@ -72,7 +72,8 @@ pub fn state_json(state: &State, config: &GameConfig, flow: &RoundFlow) -> serde
         ships: state.ships.clone(),
         events: state.events.clone(),
         chronicle: state.chronicle.clone(),
-        metrics: crate::sim::round_metrics(state, config, flow),
+        // `metrics` 直接取自 `advance` 已算好的 `Derived::metrics`（单一来源），不再重算一遍。
+        metrics: derived.metrics.clone(),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
     round_value(&mut v);
@@ -95,8 +96,8 @@ pub fn schema_value() -> serde_json::Value {
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
-pub fn render_state(state: &State, config: &GameConfig, flow: &RoundFlow) -> String {
-    state_json(state, config, flow).to_string()
+pub fn render_state(state: &State, derived: &Derived) -> String {
+    state_json(state, derived).to_string()
 }
 
 /// The game's full tunable configuration, rendered as one JSON object for the
@@ -296,7 +297,7 @@ mod tests {
     fn agent_view_is_self_described_by_schema() {
         let cfg = config::load_config();
         let state = crate::world::default_state(&cfg, 42);
-        let v = state_json(&state, &cfg, &crate::model::RoundFlow::default());
+        let v = state_json(&state, &crate::sim::derived_from_state(&state, &cfg));
         let schema = schema_value();
         let props = schema.get("properties").and_then(|p| p.as_object()).expect("schema.properties");
         let emit_keys = v
