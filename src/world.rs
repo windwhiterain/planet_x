@@ -704,7 +704,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         .map(|s| (s.name.clone(), s.class.clone(), s.faction_id.clone()))
         .collect();
     for (sname, class, fid) in fleet {
-        let comps = crate::sim::choose_loadout(&state, &config, fid, &class);
+        let comps = crate::autocontrol::choose_loadout(&state, &config, fid, &class);
         if let Some(s) = state.ships.iter_mut().find(|s| s.name == sname) {
             s.components = comps;
             s.component_hp = s.components.iter().map(|c| component_integrity(&config, c)).collect();

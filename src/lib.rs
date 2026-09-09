@@ -5,6 +5,7 @@
 //! `planet_x_web` server binary are thin shells over it.
 
 pub mod agent;
+pub mod autocontrol;
 pub mod config;
 pub mod model;
 pub mod projection;

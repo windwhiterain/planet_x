@@ -64,7 +64,7 @@ use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{FactionId, GameConfig, GameEvent, RoundFlow, RoundMetrics, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
-use planet_x::{projection, sim, web, world};
+use planet_x::{autocontrol, projection, sim, web, world};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -236,7 +236,7 @@ fn main() {
     }
     match &cli.control_plan {
         Some(Some(fid)) => {
-            match sim::control_plan(&state, &config, fid) {
+            match autocontrol::control_plan(&state, &config, fid) {
                 Some(v) => emit(&v.to_string()),
                 None => {
                     eprintln!(
@@ -247,7 +247,7 @@ fn main() {
                 }
             }
         }
-        Some(None) => emit(&json!({"factions": sim::control_plan_all(&state, &config)}).to_string()),
+        Some(None) => emit(&json!({"factions": autocontrol::control_plan_all(&state, &config)}).to_string()),
         None => {}
     }
     if cli.control_plan.is_some() {
