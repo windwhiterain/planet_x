@@ -827,3 +827,21 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - **projection：新增 `settlements` 懒表**（`idx/settlements.jsonl`，`round:false` 全局主表）：每 body 的每个定居点一行（`settlement_id`=名、`body_id`、`index`、`name`、面积/生态容量/建设修正/资源矿藏）；主流新增 `settlement_ids` 数组；`cities` 表新增 `settlement`（=定居点名）列。Python kit `q.join('settlements')` 直接可用。
 - **验证**：`cargo build --bins` 绿；`cargo test --lib` 42 passed（含 `settlements_and_cities_are_one_to_one`、`projection_writes_lean_main_and_indexed_tables`）；`cargo test --test longhorizon` 5 passed/4 ignored；smoke `--seed 7 --round 2 --index` → `idx/settlements.jsonl` 正常、`planet_xq` 可 join。
 - **注意**：`.ron` state 的 `City.settlement`/`Body.settlements` 结构改变，旧档不兼容（符合「不考虑向前兼容」）。
+
+---
+
+## 21. 战斗系统 per-舰 行为风格 + 威慑 + 逐武器索敌（spec「控制属性.舰船.行为风格」） — `[x]`（branch `feature/combat-overhaul`）
+
+> 用户裁决：每条风格轴取 `[-1,1]`、`0`=基线；**火力分配是武器自身可控属性（非舰船风格）**；**attack 是 per-武器**（每件武器是独立索敌单位）。目标选择所有自动逻辑通用一个基本权重：**距离 + 克制 + per-武器确定性随机扰动**；火力分配是叠在基本权重之上的一个层（本舰攻击历史新鲜度 × 武器 `fire_spread`）。
+
+- **`ShipDoctrine{aggression,temper,lone_wolf}`**（per-舰，`ShipSpec.default_doctrine` 类默认、`Ship.doctrine` 实例值、`Ship.attack_hist` 火力分配记忆）。每条轴 `[-1,1]`，`0`=基线。
+  - `aggression`（警惕↔激进/风筝↔贴脸）：`effective_retreat_hull` 收缩（激进更晚撤）。
+  - `temper`（理智↔热血/欺软怕硬↔飞蛾扑火）：按**威慑对比**挑目标（用 `ln((my_det+1)/(tg_det+1))` 的 log-ratio，避免 `(my-tg)/(my+tg)` 在 my≫tg 时失去区分度）。
+  - `lone_wolf`（护航↔独狼）：空闲舰是否护卫旗舰（`lone_wolf<0` 结伴护航，`>0` 独自就近接战）。
+- **威慑 `sim::deterrence(ship)`**：综合战力（`attack×4+hull_max+shield_max×0.8+hardness×3+intercept×2`）+ `deterrence_radius`（默认 8 AU）内同势力友舰叠加。**注意**：同一簇里各舰的威慑相同（叠加成簇总量），所以 temper 区分的是「不同簇/整体强弱」而非簇内单舰——测试需把两目标放到**不同簇**才见分晓。
+- **逐武器独立索敌**：`ComponentSpec.fire_rate`（发/时间，默认 1）+ `Weapon.fire_rate/fire_spread/seed`；`sim::fire` 改为**逐发 plan**（每发独立挑目标、按目标聚合伤害后再发事件/调关系，避免逐发关系掉太快）；`sim::fire_concentrate` 供集中火力便捷入口。`fire_spread`：`>0` 雨露均沾（越近打过的权重越低）、`<0` 死磕补刀、`0` 无偏置（基线）。
+- **统一基本权重**（`autocontrol`）：`W_DIST×dist_score + W_CTR×weapon_counter + per-weapon noise`。`weapon_counter` 是**单件武器**克制（导弹 vs 点防、动能 vs 盾）。`weapon_noise` 由（武器 seed, 目标名）哈希、±0.06，确定性。
+- **`web.rs`**：`ShipDoctrineEntry`（读）+ `ShipDoctrinePatch`（写，轴钳到 `[-1,1]`、只改本势力舰），`--control`/`--apply`/`--control-schema` 均含 `ship_doctrine`。
+- **验证**：`cargo build --all-targets` 无警告；`cargo test` 44 lib（含 `spread_weapon_distributes_fire_across_targets`、`temper_biases_toward_weaker_or_stronger_deterrence`、`apply_ship_doctrine_patch`）+ 5 黑盒长局（`same_seed_reproduces_identically` 等）全绿；`--seed 42 --traj 8` 世界照常推进（有交战胜负、舰出厂/击毁）。`config/game.ron` 武器带 `fire_rate:1.0, fire_spread:0.0`（基线不变）。
+- `[ ]`（未做，spec §95 行为枚举）**行为枚举重定义**：按新 spec，攻击不需要行为（范围内有敌人自动攻击），轰炸也自动；行为收敛为 `目标地点(Move)/跟随舰船(Follow)/停泊城市(DockCity)/停泊天体(Dock)/待命(Idle)`——需从 `ShipBehavior` 移除 `TargetShip{attack:true}`、`TargetSettlement{bombard}`（轰炸改自动），新增 `DockCity`，并同步 `step_military` 玩家路径、`behavior_is_valid`、`resolve_target`、web schema 与相关测试。
+- `[ ]`（可选）**把 doctrine 扩展到经济/造舰**（护航↔独狼、保守↔扩张等轴涉及舰队编成/资源投入），当前只影响战斗决策。
