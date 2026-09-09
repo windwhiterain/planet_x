@@ -62,7 +62,7 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{FactionId, GameConfig, GameEvent, RoundFlow, RoundMetrics, State, SCHEMA_VERSION};
+use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, projection, sim, web, world};
 use serde_json::json;
@@ -325,11 +325,11 @@ fn run_rounds(
         return;
     }
     let every = every.max(1);
-    emit(&agent::render_state(state, config, &RoundFlow::default())); // round 0 / start
+    emit(&agent::render_state(state, &sim::derived_from_state(state, config))); // round 0 / start
     for _ in 0..n {
-        let flow = sim::advance(state, config, rng);
+        let derived = sim::advance(state, config, rng);
         if state.round % every == 0 {
-            emit(&agent::render_state(state, config, &flow));
+            emit(&agent::render_state(state, &derived));
         }
     }
     save_if_requested(save, state, rng);
@@ -348,11 +348,11 @@ fn run_trajectory(
     save: Option<&Path>,
 ) {
     let every = every.max(1);
-    let mut snaps = vec![agent::state_json(state, config, &RoundFlow::default())];
+    let mut snaps = vec![agent::state_json(state, &sim::derived_from_state(state, config))];
     for _ in 0..n {
-        let flow = sim::advance(state, config, rng);
+        let derived = sim::advance(state, config, rng);
         if state.round % every == 0 {
-            snaps.push(agent::state_json(state, config, &flow));
+            snaps.push(agent::state_json(state, &derived));
         }
     }
     let pack = json!({
@@ -386,11 +386,11 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
     let mut prod_acc: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut story_idx = state.chronicle.len();
     for _ in 0..n {
-        let flow = sim::advance(state, config, rng);
+        let derived = sim::advance(state, config, rng);
         events_acc.extend(state.events.iter().cloned());
         // 累计本窗口各方产出（窗口级总开采价值），让 digest 的 `production` 是**窗口总量**，
         // 而非某一点时值。
-        for (fid, res) in &flow.faction_production {
+        for (fid, res) in &derived.flow.faction_production {
             let v: f64 = res
                 .iter()
                 .map(|(k, amt)| amt * config.resources.get(k).map(|r| r.value).unwrap_or(1.0))
@@ -400,10 +400,10 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
         if state.round - win_start >= window {
             let story: Vec<String> =
                 state.chronicle[story_idx..].iter().map(|c| c.id.clone()).collect();
-            // 窗口末态的「总结指标」直接取自同源的 step 计算（与逐回合 agent 视图一致），
-            // 不再在 digest 里独立重算一遍。
-            let metrics = sim::round_metrics(state, config, &flow);
-            emit(&digest_value(state, &metrics, &prod_acc, win_start, state.round, &events_acc, &story).to_string());
+            // 窗口末态的「总结指标」直接取自 `advance` 已算好的 `Derived::metrics`
+            // （与逐回合 agent 视图同源），不再在 digest 里独立重算一遍。
+            let metrics = &derived.metrics;
+            emit(&digest_value(state, metrics, &prod_acc, win_start, state.round, &events_acc, &story).to_string());
             win_start = state.round;
             events_acc.clear();
             prod_acc.clear();

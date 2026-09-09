@@ -289,15 +289,15 @@ fn same_seed_reproduces_identically() {
     let mut ra = Prng::new(42);
     let mut b = world::default_state(&config, 42);
     let mut rb = Prng::new(42);
-    let mut flow_a = RoundFlow::default();
-    let mut flow_b = RoundFlow::default();
+    let mut derived_a = Derived::default();
+    let mut derived_b = Derived::default();
     for _ in 0..200 {
-        flow_a = sim::advance(&mut a, &config, &mut ra);
-        flow_b = sim::advance(&mut b, &config, &mut rb);
+        derived_a = sim::advance(&mut a, &config, &mut ra);
+        derived_b = sim::advance(&mut b, &config, &mut rb);
     }
-    // 用最后一回合的 flow 渲染（携带产出/维护/治理流），验证这些中间量同样可复现。
-    let sa = planet_x::agent::render_state(&a, &config, &flow_a);
-    let sb = planet_x::agent::render_state(&b, &config, &flow_b);
+    // 用最后一回合的 Derived 渲染（携带产出/维护/治理流 + 总结指标），验证这些中间量同样可复现。
+    let sa = planet_x::agent::render_state(&a, &derived_a);
+    let sb = planet_x::agent::render_state(&b, &derived_b);
     assert_eq!(
         sa, sb,
         "same seed 42 at round 200 must reproduce identical agent state"

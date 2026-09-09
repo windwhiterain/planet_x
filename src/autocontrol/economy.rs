@@ -51,8 +51,8 @@ pub fn control_plan_all(state: &State, config: &GameConfig) -> BTreeMap<String, 
 fn dry_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
     let mut s = state.clone();
     let mut r = Prng::new(PLAN_SEED);
-    let flow = sim::advance(&mut s, config, &mut r);
-    sim::round_metrics(&s, config, &flow)
+    let derived = sim::advance(&mut s, config, &mut r);
+    derived.metrics
 }
 
 /// Build one faction's profile from the real `state` (commands / stockpile) and the

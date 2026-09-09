@@ -131,10 +131,10 @@ pub fn write_index(
     }
 
     // Round 0 (start state) then each advancing round.
-    write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &RoundFlow::default())?;
+    write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &sim::derived_from_state(state, config))?;
     for _ in 0..rounds {
-        let flow = sim::advance(state, config, rng);
-        write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &flow)?;
+        let derived = sim::advance(state, config, rng);
+        write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &derived)?;
     }
 
     for w in [&mut main, &mut ships, &mut cities, &mut factions, &mut bodies, &mut settlements] {
@@ -151,9 +151,9 @@ fn write_round(
     factions: &mut BufWriter<File>,
     state: &State,
     config: &GameConfig,
-    flow: &RoundFlow,
+    derived: &Derived,
 ) -> Result<(), String> {
-    let metrics = sim::round_metrics(state, config, flow);
+    let metrics = &derived.metrics;
     let row = json!({
         "round": state.round,
         "time_month": r2(state.time_month),

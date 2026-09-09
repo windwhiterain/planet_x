@@ -37,15 +37,28 @@ use crate::model::*;
 use crate::prng::Prng;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// 构建一个「未推进」状态的 [`Derived`]：流量为空（尚无生产/维护/治理），但 `metrics` 用
+/// [`round_metrics`] 从**真实 state** 汇总（含各势力聚合、实力占比/霸权/战争等存量政治）。
+/// 用于回合 0、`--start` 载入的 checkpoint、以及任何「只看当前世界观测、不推进」的场合，
+/// 使 agent 视图的 `metrics` 不是空壳，且与游戏逻辑同源。
+pub fn derived_from_state(state: &State, config: &GameConfig) -> Derived {
+    let metrics = round_metrics(state, config, &RoundFlow::default());
+    Derived { flow: RoundFlow::default(), metrics }
+}
+
 /// Advance the world by one round, writing the new controllable state into
 /// [`State::control`].
 ///
-/// Returns the [`RoundFlow`] captured during stepping — the **intermediate computation
-/// variables** the step functions actually used (per-city/per-faction resource production,
-/// fleet upkeep, governance cost/coverage) that do not land in the persisted state. Callers
-/// hand this to [`round_metrics`] so the agent's "summary" matches the simulation's numbers
-/// exactly rather than being re-derived from the post-round state.
-pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundFlow {
+/// Returns the unified [`Derived`] record for this round — the **single structure** holding
+/// both the flow intermediates (`flow`: per-city/per-faction production, fleet upkeep,
+/// governance cost/coverage) that the step functions actually used and did not land in the
+/// persisted state, **and** the post-round summary/metrics (`metrics`: world totals,
+/// power_share, hegemon, coalition, sanctioned, wars, per-faction aggregation, and the
+/// single-source `faction_power`). Callers read everything derived from this one value, so the
+/// agent's "summary" matches the simulation's numbers exactly (never re-derived twice). This
+/// is the `(state, rng) -> (state', rng', Derived)` data-flow principle: `state` is mutated in
+/// place, `rng` is consumed via `&mut`, and all derived data rides out in one `Derived`.
+pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derived {
     state.round += 1;
     state.time_month += 1.0;
     // 本回合事件日志从空开始，回合演化中追加。
@@ -89,7 +102,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundF
     // 剧情：推进叙事弧/编年史（数据驱动，见 config/game.ron 的 `story` 表）。
     step_story(state, config);
 
-    flow
+    // 结回合：把所有派生数据装进一个 `Derived`（flow 中间量 + post 观测/总结）。`post`
+    // 由 `round_metrics` 汇总（复用 `balance_picture`/`sanctioned_hegemon`/`faction_power`
+    // 等 step 同源计算），因此观测与游戏逻辑**严格一致**；`faction_power` 是单一权威。
+    let metrics = round_metrics(state, config, &flow);
+    Derived { flow, metrics }
 }
 
 /// The set of unordered faction pairs currently at war (relation ≤ war_threshold).
