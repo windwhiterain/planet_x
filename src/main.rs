@@ -47,7 +47,7 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{GameConfig, GameEvent, State, SCHEMA_VERSION};
+use planet_x::model::{FactionId, GameConfig, GameEvent, RoundFlow, RoundMetrics, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{sim, web, world};
 use serde_json::json;
@@ -246,11 +246,11 @@ fn run_rounds(
         return;
     }
     let every = every.max(1);
-    emit(&agent::render_state(state)); // round 0 / start
+    emit(&agent::render_state(state, config, &RoundFlow::default())); // round 0 / start
     for _ in 0..n {
-        sim::advance(state, config, rng);
+        let flow = sim::advance(state, config, rng);
         if state.round % every == 0 {
-            emit(&agent::render_state(state));
+            emit(&agent::render_state(state, config, &flow));
         }
     }
     save_if_requested(save, state, rng);
@@ -269,11 +269,11 @@ fn run_trajectory(
     save: Option<&Path>,
 ) {
     let every = every.max(1);
-    let mut snaps = vec![agent::state_json(state)];
+    let mut snaps = vec![agent::state_json(state, config, &RoundFlow::default())];
     for _ in 0..n {
-        sim::advance(state, config, rng);
+        let flow = sim::advance(state, config, rng);
         if state.round % every == 0 {
-            snaps.push(agent::state_json(state));
+            snaps.push(agent::state_json(state, config, &flow));
         }
     }
     let pack = json!({
@@ -304,16 +304,30 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
     let window = window.max(1);
     let mut win_start = state.round;
     let mut events_acc: Vec<GameEvent> = Vec::new();
+    let mut prod_acc: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut story_idx = state.chronicle.len();
     for _ in 0..n {
-        sim::advance(state, config, rng);
+        let flow = sim::advance(state, config, rng);
         events_acc.extend(state.events.iter().cloned());
+        // 累计本窗口各方产出（窗口级总开采价值），让 digest 的 `production` 是**窗口总量**，
+        // 而非某一点时值。
+        for (fid, res) in &flow.faction_production {
+            let v: f64 = res
+                .iter()
+                .map(|(k, amt)| amt * config.resources.get(k).map(|r| r.value).unwrap_or(1.0))
+                .sum();
+            *prod_acc.entry(*fid).or_default() += v;
+        }
         if state.round - win_start >= window {
             let story: Vec<String> =
                 state.chronicle[story_idx..].iter().map(|c| c.id.clone()).collect();
-            emit(&digest_value(state, config, win_start, state.round, &events_acc, &story).to_string());
+            // 窗口末态的「总结指标」直接取自同源的 step 计算（与逐回合 agent 视图一致），
+            // 不再在 digest 里独立重算一遍。
+            let metrics = sim::round_metrics(state, config, &flow);
+            emit(&digest_value(state, &metrics, &prod_acc, win_start, state.round, &events_acc, &story).to_string());
             win_start = state.round;
             events_acc.clear();
+            prod_acc.clear();
             story_idx = state.chronicle.len();
         }
     }
@@ -321,72 +335,64 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
 }
 
 fn r2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
+    // + 0.0 把 IEEE 的 -0.0 规整成 +0.0（round 保留负零），避免 agent 看到 `-0.0`。
+    (v * 100.0).round() / 100.0 + 0.0
 }
 
-/// The coarse per-window summary value.
+/// The coarse per-window summary value. State-derived fields (world totals, per-faction
+/// city/ship/fleet, power share, hegemon/coalition/sanction, wars) are taken directly from
+/// the [`RoundMetrics`] the step functions computed at this window's end — the same numbers
+/// the per-round agent view carries — so the digest can never drift from the simulation.
+/// Only the window-accumulated fields (event counts, story beats) are built here.
 fn digest_value(
     state: &State,
-    config: &GameConfig,
+    metrics: &RoundMetrics,
+    production: &BTreeMap<FactionId, f64>,
     from: u32,
     to: u32,
     events_acc: &[GameEvent],
     story: &[String],
 ) -> serde_json::Value {
-    // 各势力：城市/舰/舰队价值 + 实力占比。
-    let factions: Vec<serde_json::Value> = state
+    let factions: Vec<serde_json::Value> = metrics
         .factions
         .iter()
-        .map(|f| {
-            let ships = state.ships.iter().filter(|s| s.faction_id == f.id);
-            let fleet_value: f64 = ships.clone().map(|s| s.hull).sum();
+        .map(|(fid, m)| {
             json!({
-                "id": f.id,
-                "name": f.name,
-                "city_count": state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count(),
-                "ship_count": state.ships.iter().filter(|s| s.faction_id == f.id).count(),
-                "fleet_value": r2(fleet_value),
+                "id": fid,
+                "name": state.faction(*fid).map(|f| f.name.clone()).unwrap_or_default(),
+                "city_count": m.city_count,
+                "ship_count": m.ship_count,
+                "fleet_value": r2(m.fleet_value),
+                "population": m.population,
+                "market_value": r2(m.market_value),
+                "at_war": m.at_war,
+                // 窗口累计开采产出（价值），由逐回合 flow 累加而来，与模拟一致。
+                "production": r2(production.get(fid).copied().unwrap_or(0.0)),
+                "upkeep": r2(m.upkeep),
+                "governance_cost": r2(m.governance_cost),
+                "governance_coverage": r2(m.governance_coverage),
             })
         })
         .collect();
-    let (hegemon, members, powers) = crate::sim::balance_picture(state, config);
     json!({
         "from": from,
         "to": to,
         "rounds": to.saturating_sub(from),
         "world": {
-            "cities": state.cities.iter().filter(|c| !c.razed).count(),
-            "ships": state.ships.len(),
-            "fleet_value": r2(state.ships.iter().map(|s| s.hull).sum::<f64>()),
+            "cities": metrics.cities,
+            "ships": metrics.ships,
+            "fleet_value": r2(metrics.fleet_value),
+            "population": metrics.population,
         },
         "factions": factions,
-        "power_share": powers.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
-        "hegemon": hegemon,
-        "coalition_members": members,
-        "wars": active_war_pairs(state, config),
+        "power_share": metrics.power_share.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
+        "hegemon": metrics.hegemon,
+        "coalition_members": metrics.coalition_members,
+        "sanctioned": metrics.sanctioned,
+        "wars": metrics.wars,
         "events": event_counts(events_acc),
         "story": story,
     })
-}
-
-/// Active war pairs (relation ≤ war_threshold), unordered-normalized.
-fn active_war_pairs(state: &State, config: &GameConfig) -> Vec<(u32, u32)> {
-    let mut pairs = Vec::new();
-    let ids: Vec<u32> = state.factions.iter().map(|f| f.id).collect();
-    for i in 0..ids.len() {
-        for j in (i + 1)..ids.len() {
-            let (a, b) = (ids[i], ids[j]);
-            let hostile = state
-                .faction(a)
-                .and_then(|f| f.relations.get(&b))
-                .map(|rel| *rel <= config.combat.war_threshold)
-                .unwrap_or(false);
-            if hostile {
-                pairs.push((a.min(b), a.max(b)));
-            }
-        }
-    }
-    pairs
 }
 
 /// Count the GameEvent variants in a window, keyed by their `type` label.
