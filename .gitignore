@@ -3,3 +3,9 @@
 /trajectory
 /play/*
 !/play/jq
+!/play/planet_xq
+# Python (uv) artifacts — never committed; the kit source + uv.lock are.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/

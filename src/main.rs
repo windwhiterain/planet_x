@@ -49,7 +49,7 @@ use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{FactionId, GameConfig, GameEvent, RoundFlow, RoundMetrics, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
-use planet_x::{sim, web, world};
+use planet_x::{projection, sim, web, world};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -147,6 +147,14 @@ struct Cli {
     /// 快照——超长轨迹的「故事板」。`--digest 100 --round 3000` → 30 行。
     #[arg(long, value_name = "K")]
     digest: Option<u32>,
+
+    /// 索引投影模式：与 --round N 连用，把 N+1 回合投影成一份**lean 主流**（main.jsonl，
+    /// 每回合一行：eager 字段 + metrics + id 数组）+ 按 id 索引的 **lazy 表**（idx/*.jsonl，
+    /// ships/cities/bodies 的完整对象）+ **agent 可读的投影 schema**（schema.json，声明哪些
+    /// 字段 eager / 哪些 lazy 及其表/key/列类型）。重型字段不再内联；agent 用 Python kit
+    /// （play/planet_xq，uv 管理）按 id join。确定性：同 seed 复现字节一致。
+    #[arg(long, value_name = "DIR")]
+    index: Option<PathBuf>,
 }
 
 fn main() {
@@ -190,6 +198,23 @@ fn main() {
     }
     if cli.control {
         emit(&web::control_surface(&state).to_string());
+        return;
+    }
+
+    // 索引投影模式：写 lean 主流 + lazy 表，不输出 stdout 单条流。
+    if let Some(dir) = &cli.index {
+        let Some(n) = cli.round else {
+            eprintln!(
+                "{}",
+                json!({"ok": false, "code": "ERR_INDEX_ROUND", "message": "--index DIR 需要 --round N（投影的回合数）"})
+            );
+            std::process::exit(10);
+        };
+        if let Err(e) = projection::write_index(&mut state, &config, &mut rng, n, dir) {
+            eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
+            std::process::exit(10);
+        }
+        save_if_requested(cli.save.as_deref(), &state, &rng);
         return;
     }
 

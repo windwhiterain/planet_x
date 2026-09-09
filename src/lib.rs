@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod config;
 pub mod model;
+pub mod projection;
 pub mod prng;
 pub mod sim;
 pub mod visual;

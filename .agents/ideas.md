@@ -601,7 +601,46 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
 
 ---
 
-## 当前已知问题（实现新点子前务必继承）
+## 17. Lazy 间接索引 + agent 可读 schema + Python/pandas（uv）分析层 — `[x]`（feature/lazy-index 原型）
+
+> 方向：未来 object 字段会带巨量数据，不能全量内联；要把重型字段**间接索引**（按 id 拆到表），
+> agent 必须按 id join。分析层不 embed、用 Python/pandas（LLM 熟），Python 项目管理用 **uv**。
+
+**已落地一个最小闭环（`src/projection.rs` + `play/planet_xq`）**：
+- `[x]` **`planet_x --seed S --round N --index DIR`**（`src/projection.rs`）：把 N+1 回合投影成——
+  - `DIR/main.jsonl`：**lean 主流**，每回合一行 `{round,time_month,events,chronicle,metrics,
+    ship_ids[],city_ids[],body_ids[]}`（重型实体不内联，只带 id）。
+  - `DIR/idx/{ships,cities}.jsonl`：**per-round 表** `(round, key_id, ...)` 完整对象。
+  - `DIR/idx/bodies.jsonl`：**全局主表**（天体 name/轨道/定居点，几乎不变），一次性。
+  - `DIR/schema.json`：**agent 可读的投影契约**——声明 `eager`（内联字段）vs `lazy`（索引字段），
+    每个 lazy 字段的 `table/key/id_col/round`、`columns` 类型、`description`、`read_order` 阅读顺序。
+- `[x]` **lazy 表由 `LAZY` 常量声明式驱动**：加一个重型字段，Emit + schema 自动跟上，零特判。
+- `[x]` **Python kit `play/planet_xq`（uv 管理）**：`pyproject.toml` + `planet_xq` 包。读
+  `schema.json` 认清 eager/lazy，`load()` 出 `main.jsonl` + 各索引表 DataFrame；暴露
+  `q.facts`/`q.ships(round)`/`q.cities(round)`/`q.bodies()`/`q.ids(field,round)`/
+  `q.join(field,round)`（explode 主流 id-数组 + 按 id merge；per-round 表按 `(round,key)` join，
+  全局表按 `key` join）。`demo.py` 演示 agent 读 schema → 按 id join。
+- `[x]` **uv 布局**：`play/planet_xq/` 是独立 uv 项目；`.gitignore` 放行 `play/planet_xq`、
+  忽略其 `.venv`/`__pycache__`；`uv.lock` 入库。`uv sync` + `uv run planet-xq <dir>` / `uv run python demo.py <dir>`。
+- `[x]` **确定性 + 守卫**：`projection_writes_lean_main_and_indexed_tables`（main 每行不内联
+  ships/cities/bodies、只带 id；schema 声明 eager/lazy；各索引表写出且带 key 列）、
+  `projection_is_deterministic`（同 seed → main.jsonl 逐字节一致）。
+- 验证：`cargo build` 无 warning；`cargo test --lib` 41 passed（+2 投影守卫）；longhorizon
+  5 passed / 4 ignored。端到端（`--seed 7 --round 12`）：main.jsonl 13 行 lean（8 列），
+  `ships(round=6)`/`join('ships',round=6)` 出 8 艘舰、`cities(round=6)` 22 行、`bodies()` 18 行。
+
+**候选（留待后续）**：
+- `[ ]` **parquet**：巨量时换列式存储（pandas 原生读 `read_parquet`），Rust 侧加 arrow/parquet
+  依赖；当前先 JSON Lines 起步。
+- `[ ]` **更多 lazy 字段**：真正的重型字段如 `ships[].components/component_hp`、`cities[].buildings`
+  （可再拆一层 building 子表）、`events`/`chronicle` 到巨量时也标 lazy。
+- `[ ]` **统计函数库**（Python 侧，`planet_xq` 内）：`series(faction,metric,every)`、
+  `rolling_mean/max`、`histogram(metric,bins)`、`hegemon_timeline()`、`leader_rotation(metric)`、
+  `war_durations()`、`gini(stockpile)`——把「方便做统计」做成库而非让 agent 每次手写 pandas。
+- `[ ]` **eager 单对象模式**（保留短跑 `--round`/`--traj` 全量快照）与索引模式并存，同一份
+  schema 投影，两路都保持。
+
+---
 
 - **区域性霸权**：治理 + 本土防御 + MOND + 合纵连横让世界有了地理与外交结构、也**不再统一**
   （单一势力城占峰值 < 0.85，制衡联盟会发生），但**仍允许某势力在长局里长期占 ~55% 城镇
