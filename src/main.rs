@@ -62,7 +62,7 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, State, SCHEMA_VERSION};
+use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, projection, sim, web, world};
 use serde_json::json;
@@ -268,7 +268,9 @@ fn main() {
             eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
             std::process::exit(10);
         }
-        save_if_requested(cli.save.as_deref(), &state, &rng);
+        let last = sim::derived_from_state(&state, &config);
+        let round_state = RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last.clone(), post: last };
+        save_if_requested(cli.save.as_deref(), &round_state, &rng);
         return;
     }
 
@@ -326,13 +328,22 @@ fn run_rounds(
     }
     let every = every.max(1);
     emit(&agent::render_state(state, &sim::derived_from_state(state, config))); // round 0 / start
+    let mut last_pre = sim::derived_from_state(state, config);
+    let mut last_post = last_pre.clone();
     for _ in 0..n {
+        // `pre` = 本回合开头的世界快照（要掷的随机还没落地）；`post` = 结尾的观测。
+        last_pre = sim::derived_from_state(state, config);
         let derived = sim::advance(state, config, rng);
+        last_post = derived;
         if state.round % every == 0 {
-            emit(&agent::render_state(state, &derived));
+            emit(&agent::render_state(state, &last_post));
         }
     }
-    save_if_requested(save, state, rng);
+    save_if_requested(
+        save,
+        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        rng,
+    );
 }
 
 /// Run `n` rounds and emit ONE self-contained JSON document:
@@ -349,10 +360,14 @@ fn run_trajectory(
 ) {
     let every = every.max(1);
     let mut snaps = vec![agent::state_json(state, &sim::derived_from_state(state, config))];
+    let mut last_pre = sim::derived_from_state(state, config);
+    let mut last_post = last_pre.clone();
     for _ in 0..n {
+        last_pre = sim::derived_from_state(state, config);
         let derived = sim::advance(state, config, rng);
+        last_post = derived;
         if state.round % every == 0 {
-            snaps.push(agent::state_json(state, &derived));
+            snaps.push(agent::state_json(state, &last_post));
         }
     }
     let pack = json!({
@@ -362,12 +377,16 @@ fn run_trajectory(
         "trajectory": snaps,
     });
     emit(&pack.to_string());
-    save_if_requested(save, state, rng);
+    save_if_requested(
+        save,
+        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        rng,
+    );
 }
 
-fn save_if_requested(save: Option<&Path>, state: &State, rng: &Prng) {
+fn save_if_requested(save: Option<&Path>, round_state: &RoundState, rng: &Prng) {
     if let Some(path) = save {
-        if let Err(e) = save_checkpoint(path, state, rng) {
+        if let Err(e) = save_checkpoint(path, round_state, rng) {
             eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
             std::process::exit(10);
         }
@@ -385,7 +404,10 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
     let mut events_acc: Vec<GameEvent> = Vec::new();
     let mut prod_acc: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut story_idx = state.chronicle.len();
+    let mut last_pre = sim::derived_from_state(state, config);
+    let mut last_post = last_pre.clone();
     for _ in 0..n {
+        last_pre = sim::derived_from_state(state, config);
         let derived = sim::advance(state, config, rng);
         events_acc.extend(state.events.iter().cloned());
         // 累计本窗口各方产出（窗口级总开采价值），让 digest 的 `production` 是**窗口总量**，
@@ -409,8 +431,13 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
             prod_acc.clear();
             story_idx = state.chronicle.len();
         }
+        last_post = derived;
     }
-    save_if_requested(save, state, rng);
+    save_if_requested(
+        save,
+        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        rng,
+    );
 }
 
 fn r2(v: f64) -> f64 {
