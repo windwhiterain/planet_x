@@ -47,10 +47,11 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{GameConfig, State, SCHEMA_VERSION};
+use planet_x::model::{GameConfig, GameEvent, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{sim, web, world};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -135,6 +136,17 @@ struct Cli {
     /// 输出可编辑控制面（control + scope）JSON——agent 写 --apply diff 的模板。
     #[arg(long)]
     control: bool,
+
+    /// 降采样步长：与 --round/--traj 连用，每 K 回合取一个快照（1 = 每回合）。用于把
+    /// 超长轨迹变成可读的粗粒度采样，避免几千行全量 JSON 撑爆上下文。
+    #[arg(long, value_name = "K", default_value_t = 1)]
+    every: u32,
+
+    /// 粗粒度「编年史窗口」：与 --round 连用，每 K 回合输出**一行语义摘要**（该窗口的
+    /// 各势力军力/城市/实力占比、战争、事件类型计数、剧情节拍 id），而不是逐回合全量
+    /// 快照——超长轨迹的「故事板」。`--digest 100 --round 3000` → 30 行。
+    #[arg(long, value_name = "K")]
+    digest: Option<u32>,
 }
 
 fn main() {
@@ -183,11 +195,11 @@ fn main() {
 
     // Trajectory runs.
     if let Some(n) = cli.traj {
-        run_trajectory(&mut state, &config, &mut rng, n, cli.save.as_deref());
+        run_trajectory(&mut state, &config, &mut rng, n, cli.every, cli.save.as_deref());
         return;
     }
     if let Some(n) = cli.round {
-        run_rounds(&mut state, &config, &mut rng, n, cli.save.as_deref());
+        run_rounds(&mut state, &config, &mut rng, n, cli.every, cli.digest, cli.save.as_deref());
         return;
     }
 
@@ -215,31 +227,54 @@ fn emit(s: &str) {
     let _ = out.flush();
 }
 
-/// Run `n` rounds, emitting one agent-view JSON object per round (round 0 first,
-/// then one per round) as JSON Lines — the **trajectory body** that external `jq`
-/// queries. Optionally persist a deterministic checkpoint (state + RNG position).
-fn run_rounds(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, save: Option<&Path>) {
-    emit(&agent::render_state(state));
+/// Run `n` rounds. Depending on `digest`, either emit one semantic digest line per
+/// `digest`-round window (a coarse "storyboard"), or emit one agent-view JSON object
+/// per round sampled at `every` (downsampling: rounds 0, K, 2K, …). Each line is
+/// JSON Lines queryable by external `jq`. Optionally persist a deterministic
+/// checkpoint (state + RNG position).
+fn run_rounds(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    n: u32,
+    every: u32,
+    digest: Option<u32>,
+    save: Option<&Path>,
+) {
+    if let Some(window) = digest {
+        run_digest(state, config, rng, n, window, save);
+        return;
+    }
+    let every = every.max(1);
+    emit(&agent::render_state(state)); // round 0 / start
     for _ in 0..n {
         sim::advance(state, config, rng);
-        emit(&agent::render_state(state));
-    }
-    if let Some(path) = save {
-        if let Err(e) = save_checkpoint(path, state, rng) {
-            eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
-            std::process::exit(10);
+        if state.round % every == 0 {
+            emit(&agent::render_state(state));
         }
     }
+    save_if_requested(save, state, rng);
 }
 
 /// Run `n` rounds and emit ONE self-contained JSON document:
 /// `{schema_version, meta, story, trajectory:[...round snapshots...]}` — a packaged
 /// "story pack" with the timeline, the narrative arc and the rules in a single value.
-fn run_trajectory(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, save: Option<&Path>) {
+/// `every > 1` downsamples the `trajectory` array (round 0 then every K-th).
+fn run_trajectory(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    n: u32,
+    every: u32,
+    save: Option<&Path>,
+) {
+    let every = every.max(1);
     let mut snaps = vec![agent::state_json(state)];
     for _ in 0..n {
         sim::advance(state, config, rng);
-        snaps.push(agent::state_json(state));
+        if state.round % every == 0 {
+            snaps.push(agent::state_json(state));
+        }
     }
     let pack = json!({
         "schema_version": SCHEMA_VERSION,
@@ -248,10 +283,135 @@ fn run_trajectory(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32
         "trajectory": snaps,
     });
     emit(&pack.to_string());
+    save_if_requested(save, state, rng);
+}
+
+fn save_if_requested(save: Option<&Path>, state: &State, rng: &Prng) {
     if let Some(path) = save {
         if let Err(e) = save_checkpoint(path, state, rng) {
             eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
             std::process::exit(10);
         }
     }
+}
+
+/// Emit one **semantic digest** line per `window`-round window: a coarse
+/// per-window summary (each faction's city/ship/fleet totals + power share, the
+/// active wars, event-type counts, and the story beats fired). This is the
+/// "storyboard" an agent reads for a very long run without wading through
+/// thousands of full snapshots. Only complete windows are emitted.
+fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, window: u32, save: Option<&Path>) {
+    let window = window.max(1);
+    let mut win_start = state.round;
+    let mut events_acc: Vec<GameEvent> = Vec::new();
+    let mut story_idx = state.chronicle.len();
+    for _ in 0..n {
+        sim::advance(state, config, rng);
+        events_acc.extend(state.events.iter().cloned());
+        if state.round - win_start >= window {
+            let story: Vec<String> =
+                state.chronicle[story_idx..].iter().map(|c| c.id.clone()).collect();
+            emit(&digest_value(state, config, win_start, state.round, &events_acc, &story).to_string());
+            win_start = state.round;
+            events_acc.clear();
+            story_idx = state.chronicle.len();
+        }
+    }
+    save_if_requested(save, state, rng);
+}
+
+fn r2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// The coarse per-window summary value.
+fn digest_value(
+    state: &State,
+    config: &GameConfig,
+    from: u32,
+    to: u32,
+    events_acc: &[GameEvent],
+    story: &[String],
+) -> serde_json::Value {
+    // 各势力：城市/舰/舰队价值 + 实力占比。
+    let factions: Vec<serde_json::Value> = state
+        .factions
+        .iter()
+        .map(|f| {
+            let ships = state.ships.iter().filter(|s| s.faction_id == f.id);
+            let fleet_value: f64 = ships.clone().map(|s| s.hull).sum();
+            json!({
+                "id": f.id,
+                "name": f.name,
+                "city_count": state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count(),
+                "ship_count": state.ships.iter().filter(|s| s.faction_id == f.id).count(),
+                "fleet_value": r2(fleet_value),
+            })
+        })
+        .collect();
+    let (hegemon, members, powers) = crate::sim::balance_picture(state, config);
+    json!({
+        "from": from,
+        "to": to,
+        "rounds": to.saturating_sub(from),
+        "world": {
+            "cities": state.cities.iter().filter(|c| !c.razed).count(),
+            "ships": state.ships.len(),
+            "fleet_value": r2(state.ships.iter().map(|s| s.hull).sum::<f64>()),
+        },
+        "factions": factions,
+        "power_share": powers.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
+        "hegemon": hegemon,
+        "coalition_members": members,
+        "wars": active_war_pairs(state, config),
+        "events": event_counts(events_acc),
+        "story": story,
+    })
+}
+
+/// Active war pairs (relation ≤ war_threshold), unordered-normalized.
+fn active_war_pairs(state: &State, config: &GameConfig) -> Vec<(u32, u32)> {
+    let mut pairs = Vec::new();
+    let ids: Vec<u32> = state.factions.iter().map(|f| f.id).collect();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            let (a, b) = (ids[i], ids[j]);
+            let hostile = state
+                .faction(a)
+                .and_then(|f| f.relations.get(&b))
+                .map(|rel| *rel <= config.combat.war_threshold)
+                .unwrap_or(false);
+            if hostile {
+                pairs.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    pairs
+}
+
+/// Count the GameEvent variants in a window, keyed by their `type` label.
+fn event_counts(events: &[GameEvent]) -> BTreeMap<String, u32> {
+    use GameEvent::*;
+    let mut m = BTreeMap::new();
+    for e in events {
+        let label = match e {
+            Attack { .. } => "attack",
+            ShipDestroyed { .. } => "ship_destroyed",
+            Siege { .. } => "siege",
+            CityRazed { .. } => "city_razed",
+            ShipSpawned { .. } => "ship_spawned",
+            ColonyFounded { .. } => "colony_founded",
+            StaleOrder { .. } => "stale_order",
+            Withdraw { .. } => "withdraw",
+            WarStarted { .. } => "war_started",
+            WarEnded { .. } => "war_ended",
+            Story { .. } => "story",
+            Resurgence { .. } => "resurgence",
+            Revolt { .. } => "revolt",
+            CoalitionFormed { .. } => "coalition_formed",
+            CoalitionEnded { .. } => "coalition_ended",
+        };
+        *m.entry(label.to_string()).or_insert(0) += 1;
+    }
+    m
 }
