@@ -207,10 +207,12 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
 
 /// 一座城（其宿主天体 `body_id`）到其统治势力首都天体的距离（AU）——可读的治理压力
 /// 信号：越远，管理越难、忠诚越易跌破叛变阈值。无主/首都缺失时返回 0。
-pub fn governance_distance(state: &State, owner: FactionId, body_id: BodyId) -> f64 {
-    let Some(capital) = state.faction(owner).map(|f| f.capital_body) else { return 0.0 };
-    let bpos = state.body_position(body_id);
-    let cpos = state.body_position(capital);
+///
+/// 身份即名字：`owner`/`body_id` 都是势力的名字/天体名（唯一 key）。
+pub fn governance_distance(state: &State, owner: &str, body_id: &str) -> f64 {
+    let Some(capital) = state.faction(owner).map(|f| f.capital_body.clone()) else { return 0.0 };
+    let bpos = state.body(body_id).map(|b| b.position).unwrap_or([0.0, 0.0]);
+    let cpos = state.body(&capital).map(|b| b.position).unwrap_or([0.0, 0.0]);
     ((bpos[0] - cpos[0]).powi(2) + (bpos[1] - cpos[1]).powi(2)).sqrt()
 }
 

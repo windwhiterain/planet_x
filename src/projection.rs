@@ -85,7 +85,7 @@ pub fn write_index(
             bodies,
             "{}",
             json!({
-                "body_id": b.id,
+                "body_id": b.name.clone(),
                 "name": b.name,
                 "perihelion_distance": o.perihelion_distance,
                 "aphelion_distance": o.aphelion_distance,
@@ -127,9 +127,9 @@ fn write_round(
         "events": state.events,
         "chronicle": state.chronicle,
         "metrics": metrics,
-        "ship_ids": state.ships.iter().map(|s| s.id).collect::<Vec<_>>(),
-        "city_ids": state.cities.iter().filter(|c| !c.razed).map(|c| c.id).collect::<Vec<_>>(),
-        "body_ids": state.bodies.iter().map(|b| b.id).collect::<Vec<_>>(),
+        "ship_ids": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        "city_ids": state.cities.iter().filter(|c| !c.razed).map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
     });
     writeln!(main, "{row}").map_err(|e| e.to_string())?;
 
@@ -139,7 +139,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "ship_id": s.id,
+                "ship_id": s.name.clone(),
                 "faction_id": s.faction_id,
                 "class": s.class,
                 "name": s.name,
@@ -162,7 +162,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "city_id": c.id,
+                "city_id": c.name.clone(),
                 "name": c.name,
                 "body_id": c.body_id,
                 "faction_id": c.faction_id,
@@ -190,17 +190,17 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"integer","faction_id":"integer","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number"},
             }),
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "城的完整对象（人口/忠诚/建筑/迭代进度），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"integer","name":"string","body_id":"integer","faction_id":"integer","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer"},
+                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer"},
             }),
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "天体主表（name/轨道/定居点数），几乎不变，全局一次。按 body_id 索引。",
-                "columns": {"body_id":"integer","name":"string","perihelion_distance":"number","aphelion_distance":"number","period":"number","x":"number","y":"number","settlement_count":"integer"},
+                "columns": {"body_id":"string","name":"string","perihelion_distance":"number","aphelion_distance":"number","period":"number","x":"number","y":"number","settlement_count":"integer"},
             }),
             _ => continue,
         };
@@ -219,9 +219,9 @@ pub fn projection_schema() -> serde_json::Value {
             "events":     {"type": "array", "description": "本回合事件（type + 引用 ship/city id：开火/被毁/城夷平/殖民/开战/停战/剧情）。"},
             "chronicle":  {"type": "array", "description": "剧情编年史（round id title body participants，累计叙事）。"},
             "metrics":    {"type": "object", "description": "总结指标（与 --schema 的 Trajectory.metrics 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 各势力·各城产出/维护/治理。这是 agent 的轻量决策视图。"},
-            "ship_ids":   {"type": "array", "items": {"type": "integer"}, "description": "本回合存在的舰 id（join ships 表用）。"},
-            "city_ids":   {"type": "array", "items": {"type": "integer"}, "description": "本回合活城 id（join cities 表用）。"},
-            "body_ids":   {"type": "array", "items": {"type": "integer"}, "description": "天体 id（join bodies 表用）。"}
+            "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
+            "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合活城 id（=城名，join cities 表用）。"},
+            "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"}
         },
         "lazy": lazy,
         "read_order": [

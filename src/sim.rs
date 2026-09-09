@@ -70,10 +70,10 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundF
     // 外交跃迁：任何一对势力跨越战争阈值（开战 / 停战）都在本回合记一条事件。
     let wars_after = war_pairs(state, config);
     for (a, b) in wars_after.difference(&wars_before) {
-        ev(state, GameEvent::WarStarted { a: *a, b: *b });
+        ev(state, GameEvent::WarStarted { a: a.clone(), b: b.clone() });
     }
     for (a, b) in wars_before.difference(&wars_after) {
-        ev(state, GameEvent::WarEnded { a: *a, b: *b });
+        ev(state, GameEvent::WarEnded { a: a.clone(), b: b.clone() });
     }
 
     // 剧情：推进叙事弧/编年史（数据驱动，见 config/game.ron 的 `story` 表）。
@@ -85,12 +85,12 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundF
 /// The set of unordered faction pairs currently at war (relation ≤ war_threshold).
 fn war_pairs(state: &State, config: &GameConfig) -> BTreeSet<(FactionId, FactionId)> {
     let mut pairs = BTreeSet::new();
-    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for i in 0..ids.len() {
         for j in (i + 1)..ids.len() {
-            let (a, b) = (ids[i], ids[j]);
-            if hostile(state, config, a, b) {
-                pairs.insert((a.min(b), a.max(b)));
+            let (a, b) = (ids[i].clone(), ids[j].clone());
+            if hostile(state, config, &a, &b) {
+                if a <= b { pairs.insert((a, b)); } else { pairs.insert((b, a)); }
             }
         }
     }
@@ -105,14 +105,14 @@ fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn city_position(state: &State, cid: CityId) -> [f64; 2] {
+fn city_position(state: &State, cid: &str) -> [f64; 2] {
     state
         .city(cid)
-        .map(|c| state.body_position(c.body_id))
+        .map(|c| state.body_position(&c.body_id))
         .unwrap_or([0.0, 0.0])
 }
 
-fn hostile(state: &State, config: &GameConfig, a: FactionId, b: FactionId) -> bool {
+fn hostile(state: &State, config: &GameConfig, a: &str, b: &str) -> bool {
     if a == b {
         return false;
     }
@@ -121,25 +121,25 @@ fn hostile(state: &State, config: &GameConfig, a: FactionId, b: FactionId) -> bo
 
 /// 该势力当前是否处于交战状态：与任意其他势力的关系已达到交战阈值。
 /// 用于「造舰按威胁响应」——战时倾向多造战争机器，和平时倾向多造殖民/经济舰。
-fn faction_at_war(state: &State, config: &GameConfig, fid: FactionId) -> bool {
-    state.factions.iter().any(|o| o.id != fid && hostile(state, config, fid, o.id))
+fn faction_at_war(state: &State, config: &GameConfig, fid: &str) -> bool {
+    state.factions.iter().any(|o| o.name != fid && hostile(state, config, fid, &o.name))
 }
 
-fn relation(state: &State, a: FactionId, b: FactionId) -> f64 {
+fn relation(state: &State, a: &str, b: &str) -> f64 {
     state
         .faction(a)
-        .and_then(|f| f.relations.get(&b).copied())
+        .and_then(|f| f.relations.get(b).copied())
         .unwrap_or(0.0)
 }
 
-fn adjust_relation(state: &mut State, a: FactionId, b: FactionId, delta: f64) {
+fn adjust_relation(state: &mut State, a: &str, b: &str, delta: f64) {
     if a == b {
         return;
     }
     for (x, y) in [(a, b), (b, a)] {
         if let Some(f) = state.faction_mut(x) {
-            let v = f.relations.get(&y).copied().unwrap_or(0.0);
-            f.relations.insert(y, v + delta);
+            let v = f.relations.get(y).copied().unwrap_or(0.0);
+            f.relations.insert(y.to_string(), v + delta);
         }
     }
 }
@@ -163,12 +163,12 @@ fn building_health(b: &Building, config: &GameConfig) -> f64 {
 /// The command-controlled 建设投资权重 of a building (its build priority).
 /// Follows the control scope: an AI-controlled building uses the config default,
 /// while a player-controlled building uses the commanded value.
-fn invest_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId, b: &Building) -> f64 {
-    let key = (cid, b.id);
-    match state.invest_control(fid, &key) {
+fn invest_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b: &Building) -> f64 {
+    let key = (cid.to_string(), b.id);
+    match state.invest_control(fid.to_string(), &key) {
         ControlMode::Ai => config.building_spec(&b.kind).default_invest_weight,
         ControlMode::Player => state
-            .control(fid)
+            .control(fid.to_string())
             .and_then(|c| c.invest_weights.get(&key))
             .map(|c| c.value)
             .unwrap_or_else(|| config.building_spec(&b.kind).default_invest_weight),
@@ -176,12 +176,12 @@ fn invest_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId
 }
 
 /// The command-controlled 建造投资权重 of a 建造区 (shipyard) building.
-fn build_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId, b: &Building) -> f64 {
-    let key = (cid, b.id);
-    match state.build_control(fid, &key) {
+fn build_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b: &Building) -> f64 {
+    let key = (cid.to_string(), b.id);
+    match state.build_control(fid.to_string(), &key) {
         ControlMode::Ai => config.building_spec(&b.kind).default_build_weight,
         ControlMode::Player => state
-            .control(fid)
+            .control(fid.to_string())
             .and_then(|c| c.build_weights.get(&key))
             .map(|c| c.value)
             .unwrap_or_else(|| config.building_spec(&b.kind).default_build_weight),
@@ -192,10 +192,10 @@ fn build_weight(state: &State, config: &GameConfig, fid: FactionId, cid: CityId,
 /// in market value). Follows the control scope: AI uses the config default, a
 /// Player-commanded city uses the commanded value.
 fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, cid: CityId) -> f64 {
-    match state.loyalty_budget_control(fid, cid) {
+    match state.loyalty_budget_control(fid.clone(), cid.clone()) {
         ControlMode::Ai => config.governance.default_entertainment,
         ControlMode::Player => state
-            .control(fid)
+            .control(fid.clone())
             .and_then(|c| c.loyalty_budget.get(&cid))
             .map(|c| c.value)
             .unwrap_or(config.governance.default_entertainment),
@@ -213,7 +213,7 @@ fn deposit_area(deposits: &[(String, f64)], rt: &str) -> f64 {
 }
 
 /// A city's labour ratio: population vs. total staff required by its buildings.
-fn labor_ratio(state: &State, config: &GameConfig, cid: CityId) -> f64 {
+fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
     let population = state.city(cid).map(|c| c.population as f64).unwrap_or(0.0);
     let mut staff_req = 0.0;
     if let Some(c) = state.city(cid) {
@@ -229,17 +229,17 @@ fn labor_ratio(state: &State, config: &GameConfig, cid: CityId) -> f64 {
 }
 
 fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
-    let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.id).collect();
+    let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.name.clone()).collect();
     for cid in city_ids {
         let (_body_id, faction_id, population, razed) = {
-            let c = state.city(cid).expect("city disappeared");
-            (c.body_id, c.faction_id, c.population, c.razed)
+            let c = state.city(&cid).expect("city disappeared");
+            (c.body_id.clone(), c.faction_id.clone(), c.population, c.razed)
         };
         if razed {
             continue;
         }
         let (ecocap, deposits) = {
-            let s = state.city_settlement(cid);
+            let s = state.city_settlement(&cid);
             match s {
                 Some(s) => (
                     s.ecological_capacity,
@@ -252,7 +252,7 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
         let mut housing_area = 0.0;
         let mut staff_req = 0.0;
         let mut mines: Vec<(String, f64)> = Vec::new();
-        for b in &state.city(cid).expect("city disappeared").buildings {
+        for b in &state.city(&cid).expect("city disappeared").buildings {
             let spec = config.building_spec(&b.kind);
             staff_req += b.deployed * spec.staff_per_area;
             let health = building_health(b, config);
@@ -273,7 +273,7 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
         if housing_capacity > population as f64 {
             let delta = ((housing_capacity - population as f64) * config.economy.pop_growth).round() as i64;
             if delta > 0 {
-                if let Some(c) = state.city_mut(cid) {
+                if let Some(c) = state.city_mut(&cid) {
                     c.population = ((c.population as i64 + delta).min(housing_capacity as i64).max(0)) as u32;
                 }
             }
@@ -295,9 +295,9 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             let output = effective * labor * spec.productivity * config.economy.production_rate;
             // 记录本回合产出（step_production 的「中间量」），供 round_metrics 做 agent 总结：
             // 每城 + 每势力各记一份；随后仍照旧把产出写进势力库存。
-            *flow.city_production.entry(cid).or_default().entry(rt.clone()).or_insert(0.0) += output;
-            *flow.faction_production.entry(faction_id).or_default().entry(rt.clone()).or_insert(0.0) += output;
-            if let Some(f) = state.faction_mut(faction_id) {
+            *flow.city_production.entry(cid.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
+            *flow.faction_production.entry(faction_id.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
+            if let Some(f) = state.faction_mut(&faction_id) {
                 *f.resources.entry(rt).or_insert(0.0) += output;
             }
         }
@@ -316,7 +316,7 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
 /// need a big economy to sustain, so the navy grows only as fast as the
 /// economy feeds it rather than snowballing unboundedly.
 fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
     for fid in faction_ids {
         let upkeep_total: f64 = state
@@ -326,16 +326,16 @@ fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
             .map(|s| ship_panel(config, s).upkeep)
             .sum();
         // 记录本回合舰队维护费（step_upkeep 的「中间量」）。
-        flow.upkeep.insert(fid, upkeep_total);
+        flow.upkeep.insert(fid.clone(), upkeep_total);
         if upkeep_total <= 1e-9 {
             continue;
         }
-        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
         let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
         let pay = upkeep_total.min(total_value);
         if pay > 1e-9 {
             let ratio = (pay / total_value).min(1.0);
-            if let Some(f) = state.faction_mut(fid) {
+            if let Some(f) = state.faction_mut(&fid) {
                 for (k, v) in stock.iter() {
                     let new = (*v - *v * ratio).max(0.0);
                     f.resources.insert(k.clone(), new);
@@ -355,12 +355,12 @@ fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 let rust = ship_panel(config, s).hull_max * frac;
                 s.hull = (s.hull - rust).max(0.0);
                 if s.hull <= 0.0 {
-                    scrap.push(s.id);
+                    scrap.push(s.name.clone());
                 }
             }
             for sid in scrap {
-                ev(state, GameEvent::ShipDestroyed { ship: sid, owner: fid, class: state.ship(sid).map(|s| s.class.clone()).unwrap_or_default() });
-                if let Some(s) = state.ship_mut(sid) {
+                ev(state, GameEvent::ShipDestroyed { ship: sid.clone(), owner: fid.clone(), class: state.ship(&sid).map(|s| s.class.clone()).unwrap_or_default() });
+                if let Some(s) = state.ship_mut(&sid) {
                     s.hull = 0.0;
                 }
             }
@@ -382,7 +382,7 @@ fn step_market(state: &mut State, config: &GameConfig) {
     if m.auto_trade_limit <= 0.0 {
         return;
     }
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     // 经济制裁：若有一个已「坐大」的霸权（实力占比达标且至少一弱者倒向联盟），该霸权
@@ -418,7 +418,7 @@ fn step_market(state: &mut State, config: &GameConfig) {
             continue;
         }
 
-        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
 
         // 2) Deficits below the working buffer, and their cost.
         let mut deficits: Vec<(String, f64)> = Vec::new();
@@ -454,7 +454,7 @@ fn step_market(state: &mut State, config: &GameConfig) {
         // 4) Effective buy: capped by the trade limit (or the sanctioned cap) and
         // by what surplus sells.
         let eff_buy = buy_value
-            .min(trade_limit_of(fid))
+            .min(trade_limit_of(fid.clone()))
             .min(surplus_value / (1.0 + m.spread));
         if eff_buy <= 1e-6 {
             continue;
@@ -463,7 +463,7 @@ fn step_market(state: &mut State, config: &GameConfig) {
         let actual_sell = eff_buy * (1.0 + m.spread);
 
         // 5) Apply: top up deficits (scaled), drain surpluses by value share.
-        if let Some(f) = state.faction_mut(fid) {
+        if let Some(f) = state.faction_mut(&fid) {
             let mut res = std::mem::take(&mut f.resources);
             for (rt, amt) in &deficits {
                 *res.entry(rt.clone()).or_insert(0.0) += amt * scale;
@@ -508,7 +508,7 @@ fn read_budget(
     kind: BudgetKind,
 ) -> (ResourceMap, Vec<(String, ControlMode)>) {
     let stockpile: ResourceMap = state
-        .faction(fid)
+        .faction(&fid)
         .map(|f| f.resources.clone())
         .unwrap_or_default();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
@@ -546,13 +546,13 @@ fn read_budget(
     for (rt, v) in &stockpile {
         let ai_value = *v * config.economy.invest_fraction;
         let mode = match kind {
-            BudgetKind::Investment => state.investment_budget_control(fid, rt),
-            BudgetKind::Construction => state.construction_budget_control(fid, rt),
+            BudgetKind::Investment => state.investment_budget_control(fid.clone(), rt),
+            BudgetKind::Construction => state.construction_budget_control(fid.clone(), rt),
         };
         let value = match mode {
             ControlMode::Ai => ai_value * con_scale,
             ControlMode::Player => state
-                .control(fid)
+                .control(fid.clone())
                 .and_then(|c| match kind {
                     BudgetKind::Investment => c.investment_budget.get(rt),
                     BudgetKind::Construction => c.construction_budget.get(rt),
@@ -575,7 +575,7 @@ fn write_budget(
     budget: &ResourceMap,
     modes: &[(String, ControlMode)],
 ) {
-    if let Some(c) = state.control_mut(fid) {
+    if let Some(c) = state.control_mut(fid.clone()) {
         for (rt, value) in budget {
             let mode = modes.iter().find(|(r, _)| r == rt).map(|(_, m)| *m).unwrap_or(ControlMode::Ai);
             let slot = match kind {
@@ -618,7 +618,7 @@ fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, spen
     inc.max(0.0)
 }
 
-fn commit_spend(state: &mut State, fid: FactionId, spent: &mut ResourceMap, cost: &[(String, f64)]) {
+fn commit_spend(state: &mut State, fid: &str, spent: &mut ResourceMap, cost: &[(String, f64)]) {
     for (rt, c) in cost {
         if let Some(f) = state.faction_mut(fid) {
             let e = f.resources.entry(rt.clone()).or_insert(0.0);
@@ -635,7 +635,7 @@ fn commit_spend(state: &mut State, fid: FactionId, spent: &mut ResourceMap, cost
 /// prefers classes it currently has few of. So the fleet grows into a **mixed navy**
 /// (screens + warships + carriers), not a one-class blob. Deterministic: the seeded
 /// RNG drives a weighted pick over class scores (variety), reproducible per seed.
-fn choose_next_class(state: &State, fid: FactionId, config: &GameConfig, rng: &mut Prng) -> String {
+fn choose_next_class(state: &State, fid: &str, config: &GameConfig, rng: &mut Prng) -> String {
     let Some(f) = state.faction(fid) else { return "corvette".to_string() };
     let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
     let mut max_res = 0.0f64;
@@ -723,7 +723,7 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     if slots == 0 {
         return Vec::new();
     }
-    let Some(f) = state.faction(fid) else { return Vec::new() };
+    let Some(f) = state.faction(&fid) else { return Vec::new() };
     let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
 
     // Normalized resource abundance by market value in the stockpile.
@@ -737,7 +737,7 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     let abund = |r: &str| f.resources.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0);
 
     // 战局感知：交战中的势力更看重武器（武器加分），和平时更偏向防御/支持。
-    let at_war = faction_at_war(state, config, fid);
+    let at_war = faction_at_war(state, config, &fid);
     // 舰级 = 平台修正器：组件对战斗的实际贡献被本舰级的修正系数缩放（战列=火力放大器、
     // 护卫=极速、航母=超远程）。这使「选什么模块」要和「装在哪级舰上」配套。
     let spec = config.ship_spec(class);
@@ -844,8 +844,7 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
 }
 
 fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
-    let mut next_ship_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let mut next_building_id = state
         .cities
         .iter()
@@ -854,26 +853,25 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .map_or(0, |m| m + 1);
 
     for fid in faction_ids {
-        let (investment, inv_modes) = read_budget(state, config, fid, BudgetKind::Investment);
-        let (construction, con_modes) = read_budget(state, config, fid, BudgetKind::Construction);
-        write_budget(state, fid, BudgetKind::Investment, &investment, &inv_modes);
-        write_budget(state, fid, BudgetKind::Construction, &construction, &con_modes);
+        let (investment, inv_modes) = read_budget(state, config, fid.clone(), BudgetKind::Investment);
+        let (construction, con_modes) = read_budget(state, config, fid.clone(), BudgetKind::Construction);
+        write_budget(state, fid.clone(), BudgetKind::Investment, &investment, &inv_modes);
+        write_budget(state, fid.clone(), BudgetKind::Construction, &construction, &con_modes);
 
         let mut inv_spent: ResourceMap = ResourceMap::new();
         let mut con_spent: ResourceMap = ResourceMap::new();
 
-        let city_ids: Vec<CityId> = state.cities.iter().filter(|c| c.faction_id == fid).map(|c| c.id).collect();
+        let city_ids: Vec<CityId> = state.cities.iter().filter(|c| c.faction_id == fid).map(|c| c.name.clone()).collect();
         for cid in city_ids {
             build_city(
                 state,
                 config,
                 cid,
-                fid,
+                fid.clone(),
                 &investment,
                 &construction,
                 &mut inv_spent,
                 &mut con_spent,
-                &mut next_ship_id,
                 &mut next_building_id,
                 rng,
             );
@@ -881,9 +879,9 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     }
     // 威胁响应（整支舰队随威胁重构）：战时把过度生产的「轻舰」船坞按战况重定向到更重/更
     // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
-    let retool_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let retool_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for fid in retool_ids {
-        retool_shipyards(state, config, fid, rng);
+        retool_shipyards(state, config, &fid, rng);
     }
 }
 
@@ -891,7 +889,7 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// 就把它产出该舰型的最小 id 船坞重定向到 `choose_next_class` 选出的**战局感知新舰型**
 /// （战争加分——多造重舰；去重加分——避免单调）。和平时不重定向（船坞保持生产既有舰型）。
 /// 每次至多重定向一个船坞、且只在明显过度生产时触发，避免抖振。确定性（seeded RNG）。
-fn retool_shipyards(state: &mut State, config: &GameConfig, fid: FactionId, rng: &mut Prng) {
+fn retool_shipyards(state: &mut State, config: &GameConfig, fid: &str, rng: &mut Prng) {
     if !faction_at_war(state, config, fid) {
         return;
     }
@@ -924,7 +922,7 @@ fn retool_shipyards(state: &mut State, config: &GameConfig, fid: FactionId, rng:
         }
         for b in &c.buildings {
             if b.is_shipyard() && b.ship_type.as_deref() == Some(over_class.as_str()) {
-                target = Some((c.id, b.id));
+                target = Some((c.name.clone(), b.id));
                 break;
             }
         }
@@ -933,7 +931,7 @@ fn retool_shipyards(state: &mut State, config: &GameConfig, fid: FactionId, rng:
         }
     }
     if let Some((cid, bid)) = target {
-        if let Some(c) = state.city_mut(cid) {
+        if let Some(c) = state.city_mut(&cid) {
             for b in &mut c.buildings {
                 if b.id == bid {
                     b.ship_type = Some(new_class.clone());
@@ -954,16 +952,15 @@ fn build_city(
     con_limit: &ResourceMap,
     inv_spent: &mut ResourceMap,
     con_spent: &mut ResourceMap,
-    next_ship_id: &mut u32,
     next_building_id: &mut BuildingId,
     _rng: &mut Prng,
 ) {
-    if state.city(cid).map(|c| c.razed).unwrap_or(true) {
+    if state.city(&cid).map(|c| c.razed).unwrap_or(true) {
         return;
     }
     let (ecocap, total_area, speed_mod, res_mod, deposits) = {
         // 城市的定居点 = 它自己占据的那一个（1:1），面积/矿藏以该定居点为准。
-        let s = state.city_settlement(cid);
+        let s = state.city_settlement(&cid);
         match s {
             Some(s) => (
                 s.ecological_capacity,
@@ -976,9 +973,9 @@ fn build_city(
         }
     };
 
-    let mut buildings: Vec<Building> = state.city(cid).expect("city gone").buildings.clone();
-    let population = state.city(cid).map(|c| c.population as f64).unwrap_or(0.0);
-    let labor = labor_ratio(state, config, cid);
+    let mut buildings: Vec<Building> = state.city(&cid).expect("city gone").buildings.clone();
+    let population = state.city(&cid).map(|c| c.population as f64).unwrap_or(0.0);
+    let labor = labor_ratio(state, config, &cid);
 
     fn new_b(id: BuildingId, kind: &str, resource: Option<String>, ship_type: Option<String>, structure: &str, area: f64, deployed: f64, config: &GameConfig) -> Building {
         let armor = deployed * config.structure_spec(structure).armor_per_area;
@@ -1084,7 +1081,7 @@ fn build_city(
     // 2) Build: grow deployed toward the planned area, spending the investment
     // budget. Higher invest weight builds first.
     buildings.sort_by(|a, b| {
-        invest_weight(state, config, fid, cid, b).total_cmp(&invest_weight(state, config, fid, cid, a))
+        invest_weight(state, config, &fid, &cid, b).total_cmp(&invest_weight(state, config, &fid, &cid, a))
     });
     for b in buildings.iter_mut() {
         if !b.under_construction() {
@@ -1099,7 +1096,7 @@ fn build_city(
             continue;
         }
         let cost: Vec<(String, f64)> = per_area.iter().map(|(rt, c)| (rt.clone(), *c * inc)).collect();
-        commit_spend(state, fid, inv_spent, &cost);
+        commit_spend(state, &fid, inv_spent, &cost);
         b.deployed += inc;
     }
 
@@ -1123,14 +1120,14 @@ fn build_city(
             if let Some(cls) = b.ship_type.clone() {
                 let area = b.deployed;
                 if area > 1e-9 {
-                    shipyards.push((i, cls, build_weight(state, config, fid, cid, b), area));
+                    shipyards.push((i, cls, build_weight(state, config, &fid, &cid, b), area));
                 }
             }
         }
     }
     shipyards.sort_by(|a, b| b.2.total_cmp(&a.2));
 
-    let city_progress: BTreeMap<String, f64> = state.city(cid).map(|c| c.ship_progress.clone()).unwrap_or_default();
+    let city_progress: BTreeMap<String, f64> = state.city(&cid).map(|c| c.ship_progress.clone()).unwrap_or_default();
 
     // Aggregate per-class production rate (all 建造区 of a class add up toward the
     // city pool) and per-class build priority (max of its shipyards' weights).
@@ -1150,8 +1147,8 @@ fn build_city(
     // The construction budget is a per-round rate: it funds ship progress
     // incrementally (cost-per-progress × increment). A class completes a ship
     // once it has accrued `build_points`, at the city level.
-    let body_id = state.city(cid).map(|c| c.body_id).unwrap_or(0);
-    let body_pos = state.body_position(body_id);
+    let body_id = state.city(&cid).map(|c| c.body_id.clone()).unwrap_or_default();
+    let body_pos = state.body_position(&body_id);
     let mut to_write_progress = city_progress;
     for (cls, rate, _) in &classes {
         let spec = config.ship_spec(cls);
@@ -1162,7 +1159,7 @@ fn build_city(
             continue;
         }
         let cost: Vec<(String, f64)> = per_progress.iter().map(|(rt, c)| (rt.clone(), *c * increment)).collect();
-        commit_spend(state, fid, con_spent, &cost);
+        commit_spend(state, &fid, con_spent, &cost);
         *to_write_progress.entry(cls.clone()).or_insert(0.0) += increment;
         // Spawn ships as their build points fill (the cost was paid as progress).
         // On launch, the ship is fitted with a deterministic component loadout chosen
@@ -1170,12 +1167,16 @@ fn build_city(
         // cost is paid out of the stockpile and the effective panel (hull_max, etc.)
         // is computed from class + components.
         while to_write_progress.get(cls).copied().unwrap_or(0.0) >= bp - 1e-9 {
-            let components = choose_loadout(state, config, fid, cls);
+            let components = choose_loadout(state, config, fid.clone(), cls);
+            // 舰名 = 从本势力名字库确定性取的一个唯一名（名字即唯一 key）。
+            let seq = *state.ship_name_seq.entry(fid.clone()).or_insert(0);
+            state.ship_name_seq.insert(fid.clone(), seq + 1);
+            let fname = state.faction(&fid).map(|f| f.name.clone()).unwrap_or_default();
+            let name = ship_display_name(config.ship_pool(&fname), seq);
             let mut ship = Ship {
-                id: *next_ship_id,
-                name: format!("{}-{}", spec.label, fid),
+                name,
                 class: cls.clone(),
-                faction_id: fid,
+                faction_id: fid.clone(),
                 position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
                 hull: 0.0,
                 hull_max: 0.0,
@@ -1192,32 +1193,32 @@ fn build_city(
             ship.shield_max = panel.shield_max;
             // 每件组件初始满完整度（模块毁损用）。
             ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
-            state.ships.push(ship);
             // Pay the (validated-affordable) component cost.
-            let mut spent0 = std::collections::BTreeMap::new();
-            let comp_cost: Vec<(String, f64)> = state
-                .ship(*next_ship_id)
-                .map(|s| s.components.iter().flat_map(|c| config.component_spec(c).cost.clone()).collect())
-                .unwrap_or_default();
-            commit_spend(state, fid, &mut spent0, &comp_cost);
-            ev(state, GameEvent::ShipSpawned { ship: *next_ship_id, owner: fid, class: cls.clone(), city: cid });
-            *next_ship_id += 1;
-            *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
-            if let Some(c) = state.control_mut(fid) {
-                c.ship_orders.insert(*next_ship_id - 1, Control::inherit(ShipBehavior::Idle));
+            let comp_cost: Vec<(String, f64)> = ship
+                .components
+                .iter()
+                .flat_map(|c| config.component_spec(c).cost.clone())
+                .collect();
+            let mut spent0: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+            commit_spend(state, &fid, &mut spent0, &comp_cost);
+            ev(state, GameEvent::ShipSpawned { ship: ship.name.clone(), owner: fid.clone(), class: cls.clone(), city: cid.clone() });
+            if let Some(c) = state.control_mut(fid.clone()) {
+                c.ship_orders.insert(ship.name.clone(), Control::inherit(ShipBehavior::Idle));
             }
+            state.ships.push(ship);
+            *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
         }
     }
-    if let Some(city) = state.city_mut(cid) {
+    if let Some(city) = state.city_mut(&cid) {
         city.ship_progress = to_write_progress;
     }
 
     // 4) Write back, and ensure every building has invest/build-weight entries.
-    if let Some(c) = state.control_mut(fid) {
+    if let Some(c) = state.control_mut(fid.clone()) {
         for b in &buildings {
-            let key = (cid, b.id);
+            let key = (cid.clone(), b.id);
             c.invest_weights
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| Control::inherit(config.building_spec(&b.kind).default_invest_weight));
             if b.is_shipyard() {
                 c.build_weights
@@ -1226,7 +1227,7 @@ fn build_city(
             }
         }
     }
-    if let Some(city) = state.city_mut(cid) {
+    if let Some(city) = state.city_mut(&cid) {
         city.buildings = buildings;
     }
 }
@@ -1234,13 +1235,12 @@ fn build_city(
 // --- military ---------------------------------------------------------------
 
 fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
-    let mut order: Vec<ShipId> = state.ships.iter().map(|s| s.id).collect();
+    let mut order: Vec<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
     for i in (1..order.len()).rev() {
         let j = rng.range(i as u64 + 1) as usize;
         order.swap(i, j);
     }
 
-    let mut next_city_id = state.cities.iter().map(|c| c.id).max().map_or(0, |m| m + 1);
     let mut next_building_id = state
         .cities
         .iter()
@@ -1253,33 +1253,33 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let focus_of: BTreeMap<FactionId, Option<FactionId>> = state
         .factions
         .iter()
-        .map(|f| (f.id, coalition_war_focus(state, config, f.id)))
+        .map(|f| (f.name.clone(), coalition_war_focus(state, config, &f.name)))
         .collect();
 
     for ship_id in order {
-        let Some(ship) = state.ship(ship_id) else { continue };
+        let Some(ship) = state.ship(&ship_id) else { continue };
         if ship.hull <= 0.0 {
             continue;
         }
-        let owner = ship.faction_id;
+        let owner = ship.faction_id.clone();
         let class = ship.class.clone();
         let pos = ship.position;
         // 有效交战距离 = 舰级炮台 + 武器组件的最大射程（远程组件让舰在前置位置先开火）。
         let range = ship_panel(config, ship).attack_range;
         let my_hull = ship.hull;
         let my_hull_max = ship.hull_max;
-        let focus = focus_of.get(&owner).copied().flatten();
+        let focus = focus_of.get(&owner).cloned().flatten();
 
-        let is_ai = state.ship_control(ship_id) == ControlMode::Ai;
+        let is_ai = state.ship_control(ship_id.clone()) == ControlMode::Ai;
 
         if !is_ai {
             // --- player-controlled: execute the commanded behavior literally ---
-            let mut behavior = state.ship_behavior(ship_id).unwrap_or(ShipBehavior::Idle);
+            let mut behavior = state.ship_behavior(ship_id.clone()).unwrap_or(ShipBehavior::Idle);
             // A stale targeting/colonize order (target destroyed, city razed, or
             // a body with no settlement) must not send the ship drifting toward
             // the origin ([0,0]); degrade it to Idle and record a StaleOrder
             // event so the agent knows to re-issue. Move/Idle are always valid.
-            if !behavior_is_valid(state, config, behavior, owner) {
+            if !behavior_is_valid(state, config, behavior.clone(), &owner) {
                 let reason = match behavior {
                     ShipBehavior::TargetShip { attack: true, .. } => format!("target ship gone"),
                     ShipBehavior::TargetShip { attack: false, .. } => format!("guarded ship gone"),
@@ -1287,47 +1287,47 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                     ShipBehavior::Colonize { body } => format!("body {body} has no blank settlement"),
                     _ => "invalid".to_string(),
                 };
-                if let Some(c) = state.control_mut(owner) {
-                    c.ship_orders.insert(ship_id, Control::player(ShipBehavior::Idle));
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.clone(), Control::player(ShipBehavior::Idle));
                 }
-                ev(state, GameEvent::StaleOrder { ship: ship_id, reason });
+                ev(state, GameEvent::StaleOrder { ship: ship_id.clone(), reason });
                 behavior = ShipBehavior::Idle;
             }
-            match behavior {
+            match &behavior {
                 // Idle (待命): hold position, no movement this round.
                 ShipBehavior::Idle => continue,
                 ShipBehavior::Dock { .. } => {
                     // 停泊：跟随天体——每回合重新取天体当前位置并驶向它。
-                    move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
+                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
                 }
                 ShipBehavior::Colonize { body } => {
                     let bpos = state.body_position(body);
                     if dist(pos, bpos) <= config.combat.arrival_eps {
-                        colonize(state, config, rng, ship_id, body, &mut next_building_id, &mut next_city_id);
+                        colonize(state, config, rng, &ship_id, body, &mut next_building_id);
                         continue;
                     }
-                    move_toward(state, config, ship_id, &class, bpos);
-                    let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+                    move_toward(state, config, &ship_id, &class, bpos);
+                    let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                     if dist(np, bpos) <= config.combat.arrival_eps {
-                        colonize(state, config, rng, ship_id, body, &mut next_building_id, &mut next_city_id);
+                        colonize(state, config, rng, &ship_id, body, &mut next_building_id);
                     }
                     continue;
                 }
                 ShipBehavior::TargetShip { ship, attack } => {
-                    if attack {
+                    if *attack {
                         // Attack: pursue the enemy and open fire once in range.
                         if let Some(t) = state.ship(ship) {
                             if t.hull > 0.0 && dist(pos, t.position) <= range {
-                                fire(state, config, ship_id, ship);
+                                fire(state, config, &ship_id, ship);
                                 continue;
                             }
                         }
-                        move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
+                        move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
                         if let Some(t) = state.ship(ship) {
                             if t.hull > 0.0 {
-                                let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+                                let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                                 if dist(np, t.position) <= range {
-                                    fire(state, config, ship_id, ship);
+                                    fire(state, config, &ship_id, ship);
                                 }
                             }
                         }
@@ -1340,14 +1340,14 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                             if t.hull > 0.0 {
                                 let gpos = t.position;
                                 // Drift toward the protected ship.
-                                move_toward(state, config, ship_id, &class, gpos);
-                                let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+                                move_toward(state, config, &ship_id, &class, gpos);
+                                let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                                 // Intercept the closest hostile in range, scanning
                                 // around the guard first, then the protected ship.
-                                if let Some(enemy) = nearest_enemy_ship(state, config, owner, np, range, focus, ship_id) {
-                                    fire(state, config, ship_id, enemy);
-                                } else if let Some(e2) = nearest_enemy_ship(state, config, owner, gpos, range, focus, ship_id) {
-                                    fire(state, config, ship_id, e2);
+                                if let Some(enemy) = nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), &ship_id) {
+                                    fire(state, config, &ship_id, &enemy);
+                                } else if let Some(e2) = nearest_enemy_ship(state, config, &owner, gpos, range, focus.clone(), &ship_id) {
+                                    fire(state, config, &ship_id, &e2);
                                 }
                             }
                         }
@@ -1355,90 +1355,90 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 }
                 ShipBehavior::TargetSettlement { city, bombard } => {
                     let cpos = city_position(state, city);
-                    if bombard && dist(pos, cpos) <= config.combat.siege_range {
-                        bombard_city(state, config, ship_id, city);
+                    if *bombard && dist(pos, cpos) <= config.combat.siege_range {
+                        bombard_city(state, config, &ship_id, city);
                         continue;
                     }
-                    move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
-                    if bombard {
-                        let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
+                    if *bombard {
+                        let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                         if dist(np, cpos) <= config.combat.siege_range {
-                            bombard_city(state, config, ship_id, city);
+                            bombard_city(state, config, &ship_id, city);
                         }
                     }
                 }
                 ShipBehavior::Move { .. } => {
-                    move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
+                    move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
                 }
             }
             continue;
         }
 
         // --- AI-controlled: existing auto behavior ---
-        let tgt = nearest_enemy_ship(state, config, owner, pos, range, focus, ship_id);
+        let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), &ship_id);
 
         // 自保撤退（拟人的「别送死」）：舰已受重创、敌在本舰射程内、且离首都有一定距离
         // 时，不再死战，而是后撤回首都/本土修整充能（远离本土难以获得再生与防御）。这
         // 让战争有「打残→撤→养好→再来」的损耗与恢复循环，也避免一整支舰队白白送死。
         if let Some(target) = tgt {
             if my_hull / my_hull_max.max(1e-9) < config.combat.retreat_hull {
-                if let Some(cap_body) = state.faction(owner).map(|f| f.capital_body) {
-                    let cap_pos = state.body_position(cap_body);
+                if let Some(cap_body) = state.faction(&owner).map(|f| f.capital_body.clone()) {
+                    let cap_pos = state.body_position(&cap_body);
                     if dist(pos, cap_pos) > config.combat.retreat_min_dist {
-                        if let Some(c) = state.control_mut(owner) {
-                            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Move { position: cap_pos }));
+                        if let Some(c) = state.control_mut(owner.clone()) {
+                            c.ship_orders.insert(ship_id.clone(), Control::inherit(ShipBehavior::Move { position: cap_pos }));
                         }
-                        ev(state, GameEvent::Withdraw { ship: ship_id, to_body: cap_body });
-                        move_toward(state, config, ship_id, &class, cap_pos);
+                        ev(state, GameEvent::Withdraw { ship: ship_id.clone(), to_body: cap_body });
+                        move_toward(state, config, &ship_id, &class, cap_pos);
                         continue;
                     }
                 }
             }
             // 否则接战：集中火力打最残的敌舰（nearest_enemy_ship 已按受创程度排序）。
-            if let Some(c) = state.control_mut(owner) {
-                c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
+            if let Some(c) = state.control_mut(owner.clone()) {
+                c.ship_orders.insert(ship_id.clone(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
             }
-            fire(state, config, ship_id, target);
+            fire(state, config, &ship_id, &target);
             continue;
         }
 
-        let Some(behavior) = resolve_target(state, config, ship_id, owner, pos, rng, focus) else {
+        let Some(behavior) = resolve_target(state, config, &ship_id, &owner, pos, rng, focus.clone()) else {
             continue;
         };
 
-        if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
+        if let ShipBehavior::TargetSettlement { city, bombard } = &behavior {
             let cpos = city_position(state, city);
-            if bombard && dist(pos, cpos) <= config.combat.siege_range {
-                bombard_city(state, config, ship_id, city);
+            if *bombard && dist(pos, cpos) <= config.combat.siege_range {
+                bombard_city(state, config, &ship_id, city);
                 continue;
             }
         }
-        if let ShipBehavior::Colonize { body } = behavior {
+        if let ShipBehavior::Colonize { body } = &behavior {
             let bpos = state.body_position(body);
             if dist(pos, bpos) <= config.combat.arrival_eps {
-                colonize(state, config, rng, ship_id, body, &mut next_building_id, &mut next_city_id);
+                colonize(state, config, rng, &ship_id, body, &mut next_building_id);
                 continue;
             }
         }
 
-        move_toward(state, config, ship_id, &class, behavior_dest(state, behavior));
+        move_toward(state, config, &ship_id, &class, behavior_dest(state, &behavior));
 
-        if let Some(ship) = state.ship(ship_id) {
+        if let Some(ship) = state.ship(&ship_id) {
             let np = ship.position;
-            if let Some(target) = nearest_enemy_ship(state, config, owner, np, range, focus, ship_id) {
-                if let Some(c) = state.control_mut(owner) {
-                    c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::TargetShip { ship: target, attack: true }));
+            if let Some(target) = nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), &ship_id) {
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.clone(), Control::inherit(ShipBehavior::TargetShip { ship: target.clone(), attack: true }));
                 }
-                fire(state, config, ship_id, target);
-            } else if let ShipBehavior::TargetSettlement { city, bombard } = behavior {
+                fire(state, config, &ship_id, &target);
+            } else if let ShipBehavior::TargetSettlement { city, bombard } = &behavior {
                 let cpos = city_position(state, city);
-                if bombard && dist(np, cpos) <= config.combat.siege_range {
-                    bombard_city(state, config, ship_id, city);
+                if *bombard && dist(np, cpos) <= config.combat.siege_range {
+                    bombard_city(state, config, &ship_id, city);
                 }
-            } else if let ShipBehavior::Colonize { body } = behavior {
+            } else if let ShipBehavior::Colonize { body } = &behavior {
                 let bpos = state.body_position(body);
                 if dist(np, bpos) <= config.combat.arrival_eps {
-                    colonize(state, config, rng, ship_id, body, &mut next_building_id, &mut next_city_id);
+                    colonize(state, config, rng, &ship_id, body, &mut next_building_id);
                 }
             }
         }
@@ -1454,10 +1454,10 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .map(|s| {
             if s.hull > 0.0 {
                 let f = state
-                    .faction(s.faction_id)
-                    .map(|fac| dist(s.position, state.body_position(fac.capital_body)) <= fac.home_radius)
+                    .faction(&s.faction_id)
+                    .map(|fac| dist(s.position, state.body_position(&fac.capital_body)) <= fac.home_radius)
                     .unwrap_or(false);
-                (home_regen_bonus(state, s.faction_id, s.position), f)
+                (home_regen_bonus(state, &s.faction_id, s.position), f)
             } else {
                 (0.0, false)
             }
@@ -1490,7 +1490,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
     // Drop destroyed ships and prune their behaviors from the controllable state.
     state.ships.retain(|s| s.hull > 0.0);
-    let alive: std::collections::BTreeSet<ShipId> = state.ships.iter().map(|s| s.id).collect();
+    let alive: std::collections::BTreeSet<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
     for c in state.control.values_mut() {
         c.ship_orders.retain(|sid, _| alive.contains(sid));
     }
@@ -1522,12 +1522,12 @@ fn find_vacant_settlement(state: &State) -> Option<(BodyId, usize)> {
         let occupied: BTreeSet<usize> = state
             .cities
             .iter()
-            .filter(|c| c.body_id == b.id)
+            .filter(|c| c.body_id == b.name)
             .map(|c| c.settlement)
             .collect();
         for idx in 0..b.settlements.len() {
             if !occupied.contains(&idx) {
-                return Some((b.id, idx));
+                return Some((b.name.clone(), idx));
             }
         }
     }
@@ -1543,16 +1543,16 @@ fn displace_city_for_refugee(state: &State) -> Option<CityId> {
     let mut counts: BTreeMap<FactionId, usize> = BTreeMap::new();
     for c in &state.cities {
         if !c.razed {
-            *counts.entry(c.faction_id).or_insert(0) += 1;
+            *counts.entry(c.faction_id.clone()).or_insert(0) += 1;
         }
     }
-    let holder = counts.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k)?;
+    let holder = counts.iter().max_by_key(|(_, n)| **n).map(|(k, _)| k.clone())?;
     state
         .cities
         .iter()
         .filter(|c| c.faction_id == holder && !c.razed)
-        .min_by_key(|c| c.id)
-        .map(|c| c.id)
+        .min_by_key(|c| c.name.clone())
+        .map(|c| c.name.clone())
 }
 
 /// 反僵尸重建（`Resurgence` 事件）。若一支势力在一回合结束时**既无舰又无活城**（已被
@@ -1565,9 +1565,7 @@ fn displace_city_for_refugee(state: &State) -> Option<CityId> {
 /// 2. 全系统最低 id 的任意空白城（难民避风港）；
 /// 3. 若无任何空白城，则在一个**从未被占据**的定居点上新建一座城（强制立足点）。
 fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
-    let mut next_ship = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
-    let mut next_city = state.cities.iter().map(|c| c.id).max().map_or(0, |m| m + 1);
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let mut next_building = state
         .cities
         .iter()
@@ -1586,24 +1584,24 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             continue;
         }
 
-        let seeded_ship_class = choose_next_class(state, fid, config, rng);
+        let seeded_ship_class = choose_next_class(state, &fid, config, rng);
         let spec = config.ship_spec(&seeded_ship_class);
 
-        // Anchor 1/2: this faction's own lowest-id footprint, else any razed refuge.
-        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.id).map(|c| c.id);
+        // Anchor 1/2: this faction's own lowest-name footprint, else any razed refuge.
+        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.name.clone()).map(|c| c.name.clone());
         let anchor_id = anchor.or_else(|| {
-            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.id).map(|c| c.id)
+            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.name.clone()).map(|c| c.name.clone())
         });
 
         let (body, pos) = if let Some(anchor_id) = anchor_id {
             // Re-seed the anchor's city (diaspora claim / refugee refuge).
-            let Some(settlement) = state.city_settlement(anchor_id).cloned() else { continue };
-            let body = state.city(anchor_id).map(|c| c.body_id).unwrap_or(0);
+            let Some(settlement) = state.city_settlement(&anchor_id).cloned() else { continue };
+            let body = state.city(&anchor_id).map(|c| c.body_id.clone()).unwrap_or_default();
             let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
             let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
-            if let Some(c) = state.city_mut(anchor_id) {
+            if let Some(c) = state.city_mut(&anchor_id) {
                 c.razed = false;
-                c.faction_id = fid;
+                c.faction_id = fid.clone();
                 c.population = pop;
                 c.buildings = buildings;
                 c.ship_progress.clear();
@@ -1611,22 +1609,22 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 c.loyalty = 1.0;
             }
             // Ensure the re-seeded buildings have invest/build-weight entries.
-            let city_buildings = state.city(anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
-            if let Some(ctrl) = state.control_mut(fid) {
+            let city_buildings = state.city(&anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
+            if let Some(ctrl) = state.control_mut(fid.clone()) {
                 for b in &city_buildings {
-                    let ikey = (anchor_id, b.id);
+                    let ikey = (anchor_id.clone(), b.id);
                     ctrl.invest_weights.entry(ikey).or_insert_with(|| {
                         Control::inherit(config.building_spec(&b.kind).default_invest_weight)
                     });
                     if b.is_shipyard() {
-                        let bkey = (anchor_id, b.id);
+                        let bkey = (anchor_id.clone(), b.id);
                         ctrl.build_weights.entry(bkey).or_insert_with(|| {
                             Control::inherit(config.building_spec(&b.kind).default_build_weight)
                         });
                     }
                 }
             }
-            let cpos = state.body_position(body);
+            let cpos = state.body_position(&body);
             (body, [cpos[0] + 0.05, cpos[1] + 0.05])
         } else {
             // Anchor 3/4 (last resort): no razed footprint and no vacant settlement.
@@ -1634,20 +1632,19 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             // the world is entirely full, a diaspora refugee overruns the strongest
             // colonizer's lowest-id fringe city. Either way a wiped civ re-enters.
             if let Some((body, idx)) = find_vacant_settlement(state) {
-                let Some(settlement) = state.body_settlement(body, idx).cloned() else { continue };
+                let Some(settlement) = state.body_settlement(&body, idx).cloned() else { continue };
                 let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
                 let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
                 let base = if settlement.name.is_empty() {
-                    state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
+                    state.body(&body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
                 } else {
                     settlement.name.clone()
                 };
                 let city = City {
-                    id: next_city,
                     name: format!("{}-收容所", base),
-                    body_id: body,
+                    body_id: body.clone(),
                     settlement: idx,
-                    faction_id: fid,
+                    faction_id: fid.clone(),
                     population: pop,
                     buildings,
                     ship_progress: {
@@ -1658,64 +1655,66 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                     razed: false,
                     loyalty: 1.0,
                 };
-                let ctrl = state.control.entry(fid).or_default();
+                let ctrl = state.control.entry(fid.clone()).or_default();
                 for b in &city.buildings {
-                    let key = (city.id, b.id);
+                    let key = (city.name.clone(), b.id);
                     ctrl.invest_weights
-                        .insert(key, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+                        .insert(key.clone(), Control::inherit(config.building_spec(&b.kind).default_invest_weight));
                     if b.is_shipyard() {
                         ctrl.build_weights
                             .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
                     }
                 }
                 state.cities.push(city);
-                next_city += 1;
-                let cpos = state.body_position(body);
+                let cpos = state.body_position(&body);
                 (body, [cpos[0] + 0.05, cpos[1] + 0.05])
             } else {
                 // 世界完全满员：难民夺取最强殖民者的最小 id 边缘城。
                 let Some(host_cid) = displace_city_for_refugee(state) else { continue };
-                let Some(settlement) = state.city_settlement(host_cid).cloned() else { continue };
-                let body = state.city(host_cid).map(|c| c.body_id).unwrap_or(0);
+                let Some(settlement) = state.city_settlement(&host_cid).cloned() else { continue };
+                let body = state.city(&host_cid).map(|c| c.body_id.clone()).unwrap_or_default();
                 let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
                 let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
-                if let Some(c) = state.city_mut(host_cid) {
+                if let Some(c) = state.city_mut(&host_cid) {
                     c.razed = false;
-                    c.faction_id = fid;
+                    c.faction_id = fid.clone();
                     c.population = pop;
                     c.buildings = buildings;
                     c.ship_progress.clear();
                     c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
                     c.loyalty = 1.0;
                 }
-                let city_buildings = state.city(host_cid).map(|c| c.buildings.clone()).unwrap_or_default();
-                if let Some(ctrl) = state.control_mut(fid) {
+                let city_buildings = state.city(&host_cid).map(|c| c.buildings.clone()).unwrap_or_default();
+                if let Some(ctrl) = state.control_mut(fid.clone()) {
                     for b in &city_buildings {
-                        let ikey = (host_cid, b.id);
+                        let ikey = (host_cid.clone(), b.id);
                         ctrl.invest_weights.entry(ikey).or_insert_with(|| {
                             Control::inherit(config.building_spec(&b.kind).default_invest_weight)
                         });
                         if b.is_shipyard() {
-                            let bkey = (host_cid, b.id);
+                            let bkey = (host_cid.clone(), b.id);
                             ctrl.build_weights.entry(bkey).or_insert_with(|| {
                                 Control::inherit(config.building_spec(&b.kind).default_build_weight)
                             });
                         }
                     }
                 }
-                let cpos = state.body_position(body);
+                let cpos = state.body_position(&body);
                 (body, [cpos[0] + 0.05, cpos[1] + 0.05])
             }
         };
 
         // Launch one affordable colony ship from the rebuilt/founded city.
         // 舰级 = 平台修正器：重建种子舰也必须装配组件（至少一件武器），否则没有火力。
-        let seed_components = choose_loadout(state, config, fid, &seeded_ship_class);
+        let seed_components = choose_loadout(state, config, fid.clone(), &seeded_ship_class);
+        let seq = *state.ship_name_seq.entry(fid.clone()).or_insert(0);
+        state.ship_name_seq.insert(fid.clone(), seq + 1);
+        let fname = state.faction(&fid).map(|f| f.name.clone()).unwrap_or_default();
+        let name = ship_display_name(config.ship_pool(&fname), seq);
         let mut seed = Ship {
-            id: next_ship,
-            name: format!("{}-{}", spec.label, fid),
+            name,
             class: seeded_ship_class.clone(),
-            faction_id: fid,
+            faction_id: fid.clone(),
             position: pos,
             hull: spec.hull,
             hull_max: spec.hull,
@@ -1731,15 +1730,14 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         seed.hull_max = seed_panel.hull_max;
         seed.shield = seed_panel.shield_max;
         seed.shield_max = seed_panel.shield_max;
-        state.ships.push(seed);
         state
             .control
-            .entry(fid)
+            .entry(fid.clone())
             .or_default()
             .ship_orders
-            .insert(next_ship, Control::inherit(ShipBehavior::Idle));
-        ev(state, GameEvent::Resurgence { faction: fid, body, ship: next_ship });
-        next_ship += 1;
+            .insert(seed.name.clone(), Control::inherit(ShipBehavior::Idle));
+        ev(state, GameEvent::Resurgence { faction: fid, body, ship: seed.name.clone() });
+        state.ships.push(seed);
     }
 }
 
@@ -1752,25 +1750,25 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// 殖民地在治理失败时丢失，使世界在上千回合后保持多方参与。
 fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let g = &config.governance;
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     for fid in faction_ids {
-        let capital = state.faction(fid).map(|f| f.capital_body);
+        let capital = state.faction(&fid).map(|f| f.capital_body.clone());
         let Some(capital) = capital else { continue };
-        let cap_pos = state.body_position(capital);
+        let cap_pos = state.body_position(&capital);
 
         // 该势力所有活城 + 每城到首都的距离 + 每城想投入的娱乐/福利预算。
-        let mut cities: Vec<(CityId, f64, f64)> = Vec::new(); // (id, distance, ent_budget)
+        let mut cities: Vec<(CityId, f64, f64)> = Vec::new(); // (name, distance, ent_budget)
         let mut total_pop = 0u64;
         for c in &state.cities {
             if c.faction_id != fid || c.razed {
                 continue;
             }
             total_pop += c.population as u64;
-            let d = dist(state.body_position(c.body_id), cap_pos);
-            let ent = city_loyalty_budget(state, config, fid, c.id);
-            cities.push((c.id, d, ent));
+            let d = dist(state.body_position(&c.body_id), cap_pos);
+            let ent = city_loyalty_budget(state, config, fid.clone(), c.name.clone());
+            cities.push((c.name.clone(), d, ent));
         }
         if cities.is_empty() {
             continue;
@@ -1785,16 +1783,16 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             total_admin += (g.admin_base + g.admin_per_au * a) * scale;
             ent_total += ent;
         }
-        let governance_total = (total_admin + ent_total) * sanction_cost_mult(state, config, fid);
+        let governance_total = (total_admin + ent_total) * sanction_cost_mult(state, config, &fid);
 
         // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
         // 治理是否到位以及娱乐投入是否真正落地。
-        let stock = state.faction(fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
         let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
         let pay = governance_total.min(total_value);
         if pay > 1e-9 {
             let ratio = (pay / total_value).min(1.0);
-            if let Some(f) = state.faction_mut(fid) {
+            if let Some(f) = state.faction_mut(&fid) {
                 for (k, v) in stock.iter() {
                     let new = (*v - *v * ratio).max(0.0);
                     f.resources.insert(k.clone(), new);
@@ -1807,7 +1805,7 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             1.0
         };
         // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率。
-        flow.governance.insert(fid, GovernanceFlow { total: governance_total, coverage });
+        flow.governance.insert(fid.clone(), GovernanceFlow { total: governance_total, coverage });
 
         // 忠诚度向「距离目标 + 娱乐加成」恢复/下降，并标记叛乱（距离 × 人口超载
         // 与娱乐投入叠加）。娱乐投入越高，就越能对冲距离/人口带来的离心倾向。
@@ -1817,41 +1815,41 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus).clamp(0.0, 1.0);
-            let cur = state.city(*cid).map(|c| c.loyalty).unwrap_or(1.0);
+            let cur = state.city(cid).map(|c| c.loyalty).unwrap_or(1.0);
             let new = if coverage >= 1.0 - 1e-6 {
                 (cur + (target_eff - cur) * g.loyalty_recover).clamp(0.0, 1.0)
             } else {
                 (cur - g.loyalty_penalty * (1.0 - coverage)).max(0.0)
             };
-            if let Some(c) = state.city_mut(*cid) {
+            if let Some(c) = state.city_mut(cid) {
                 c.loyalty = new;
             }
             if new < g.loyalty_revolt {
-                to_revolt.push(*cid);
+                to_revolt.push(cid.clone());
             }
         }
 
         // 叛乱：夷平为空白（可再殖民）。
         for cid in to_revolt {
-            if let Some(c) = state.city_mut(cid) {
+            if let Some(c) = state.city_mut(&cid) {
                 c.razed = true;
                 c.population = 0;
                 c.buildings.clear();
                 c.ship_progress.clear();
                 c.loyalty = 0.0;
             }
-            ev(state, GameEvent::Revolt { city: cid, faction: fid });
+            ev(state, GameEvent::Revolt { city: cid, faction: fid.clone() });
         }
     }
 }
 
 /// Move a ship one round's step toward `dest`, capped by its class speed.
-fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, _class: &str, dest: [f64; 2]) {
+fn move_toward(state: &mut State, config: &GameConfig, ship_id: &str, _class: &str, dest: [f64; 2]) {
     let Some(ship) = state.ship(ship_id).cloned() else { return };
     let pos = ship.position;
-    let fid = ship.faction_id;
+    let fid = ship.faction_id.clone();
     // MOND 异常区：没有掌握修正引力的势力把指令坐标「算错」，实际航向产生偏移。
-    let dest = mond_drift(config, fid, dest);
+    let dest = mond_drift(config, &fid, dest);
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;
@@ -1884,9 +1882,9 @@ fn move_toward(state: &mut State, config: &GameConfig, ship_id: ShipId, _class: 
 /// 且目标点进入异常区（距太阳超过 `mond.radius`）时，返回一个沿切向偏移的伪目标。
 /// 非 master 舰因此无法精确机动到深处目标（难以轰炸/殖民/停靠），体现「指令坐标与
 /// 实际坐标产生偏移」。确定性（无 RNG）。
-fn mond_drift(config: &GameConfig, fid: FactionId, dest: [f64; 2]) -> [f64; 2] {
+fn mond_drift(config: &GameConfig, fid: &str, dest: [f64; 2]) -> [f64; 2] {
     let m = &config.mond;
-    if m.drift_per_au <= 0.0 || m.masters.contains(&fid) {
+    if m.drift_per_au <= 0.0 || m.masters.iter().any(|x| x == fid) {
         return dest;
     }
     let r = (dest[0] * dest[0] + dest[1] * dest[1]).sqrt();
@@ -1969,16 +1967,16 @@ fn weapon_fit(weapons: &[Weapon], config: &GameConfig, target: &Ship) -> f64 {
     (1.0 - missile_blunt - kin_blunt).clamp(0.0, 1.0)
 }
 
-fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], range: f64, focus: Option<FactionId>, attacker_id: ShipId) -> Option<ShipId> {
+fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], range: f64, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipId> {
     // 攻击者的武器构成（决定它对各目标的有效杀伤——武器克制）。
     let weapons = state.ship(attacker_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
-    let mut best: Option<(bool, f64, f64, f64, ShipId)> = None; // (is_focus, fit, wound, dist, id)
+    let mut best: Option<(bool, f64, f64, f64, ShipId)> = None; // (is_focus, fit, wound, dist, name)
     for s in &state.ships {
-        if s.hull > 0.0 && hostile(state, config, owner, s.faction_id) {
+        if s.hull > 0.0 && hostile(state, config, owner, &s.faction_id) {
             let d = dist(pos, s.position);
             if d <= range {
                 // 集中火力（拟人）：结盟集火 > 武器克制 > 打残血敌舰 > 就近。
-                let is_focus = focus == Some(s.faction_id);
+                let is_focus = focus.as_ref() == Some(&s.faction_id);
                 let wound = s.hull / s.hull_max.max(1e-9);
                 let fit = weapon_fit(&weapons, config, s);
                 let better = match best {
@@ -1986,12 +1984,12 @@ fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: FactionId, pos:
                     Some((bf, bfit, bw, bd, _)) => prefer_target(is_focus, fit, wound, d, bf, bfit, bw, bd),
                 };
                 if better {
-                    best = Some((is_focus, fit, wound, d, s.id));
+                    best = Some((is_focus, fit, wound, d, s.name.clone()));
                 }
             }
         }
     }
-    best.map(|(_, _, _, _, id)| id)
+    best.map(|(_, _, _, _, name)| name)
 }
 
 /// 确定性命中率：武器追踪能力 `tracking`（AU/月）越高，越能咬住高速目标。目标速度
@@ -2010,12 +2008,12 @@ fn hit_factor(tracking: f64, target_speed: f64) -> f64 {
 /// then hull) and its speed (evasion) decide the result. Missiles are homing (hard
 /// to evade) but are met by the target's point-defence interceptors. Damage is the
 /// weapon's damage type vs shield/hull multipliers, all deterministic.
-fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: ShipId) {
+fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, target_id: &str) {
     let (afac, apos, weapons, tclass) = {
         let a = state.ship(attacker_id).expect("attacker gone");
         let w = ship_weapons(config, a);
         (
-            a.faction_id,
+            a.faction_id.clone(),
             a.position,
             w,
             state.ship(target_id).map(|t| t.class.clone()).unwrap_or_default(),
@@ -2024,16 +2022,16 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
     let (tfac, mut hull, mut shield, tpos, tspeed, tpanel) = {
         let t = state.ship(target_id).expect("target gone");
         let panel = ship_panel(config, t);
-        (t.faction_id, t.hull, t.shield, t.position, panel.speed, panel)
+        (t.faction_id.clone(), t.hull, t.shield, t.position, panel.speed, panel)
     };
     let hull_before = hull;
     // 本土防御（首都即强弩 + cult 的 MOND 异常）：目标在其首都本土防御半径内被削弱。
-    let def_mult = home_defense_mult(state, tfac, tpos);
+    let def_mult = home_defense_mult(state, &tfac, tpos);
     // 点防御 = 目标自身拦截 + 附近友舰的防空屏护（只对导弹有意义——导弹才是会被拦截的）。
     // 攻击方没有导弹武器时跳过防空扫描（省去每击一次 O(舰队) 的额外开销）。
     let has_missiles = weapons.iter().any(|w| w.kind == WEAPON_MISSILE);
     let pd = tpanel.intercept
-        + if has_missiles { cluster_pd_cover(state, config, target_id, tfac, tpos) } else { 0.0 };
+        + if has_missiles { cluster_pd_cover(state, config, target_id, &tfac, tpos) } else { 0.0 };
 
     let mut total_damage = 0.0;
     for w in &weapons {
@@ -2100,25 +2098,25 @@ fn fire(state: &mut State, config: &GameConfig, attacker_id: ShipId, target_id: 
         }
     }
     if total_damage > 1e-9 {
-        ev(state, GameEvent::Attack { attacker: attacker_id, target: target_id, damage: total_damage });
-        adjust_relation(state, afac, tfac, config.diplomacy.attack_delta);
+        ev(state, GameEvent::Attack { attacker: attacker_id.to_string(), target: target_id.to_string(), damage: total_damage });
+        adjust_relation(state, &afac, &tfac, config.diplomacy.attack_delta);
     }
     if destroyed {
-        ev(state, GameEvent::ShipDestroyed { ship: target_id, owner: tfac, class: tclass });
+        ev(state, GameEvent::ShipDestroyed { ship: target_id.to_string(), owner: tfac, class: tclass });
     }
 }
 
 /// 舰队防空（防空屏护）：目标（`target_faction` 阵营、`tpos` 处）附近 `pd_radius` 内的友舰，
 /// 其点防御拦截能力会为它**替拦导弹**——随距离线性衰减、封顶。让有 PD 的舰组成防空圈，
 /// 能护卫航母/友舰（与护航行为衔接：护航舰贴近旗舰时提供防空）。确定性（无 RNG）。
-fn cluster_pd_cover(state: &State, config: &GameConfig, target_id: ShipId, target_faction: FactionId, tpos: [f64; 2]) -> f64 {
+fn cluster_pd_cover(state: &State, config: &GameConfig, target_id: &str, target_faction: &str, tpos: [f64; 2]) -> f64 {
     let r = config.combat.pd_radius;
     if r <= 0.0 {
         return 0.0;
     }
     let mut cover = 0.0;
     for s in &state.ships {
-        if s.id == target_id || s.faction_id != target_faction || s.hull <= 0.0 {
+        if s.name == target_id || s.faction_id != target_faction || s.hull <= 0.0 {
             continue;
         }
         let d = dist(s.position, tpos);
@@ -2138,12 +2136,12 @@ fn cluster_pd_cover(state: &State, config: &GameConfig, target_id: ShipId, targe
 ///
 /// 这使得每个有首都的势力在自己的核心区难啃（超大国空降别人家里要付代价），而
 /// cult 因 MOND 异常拥有超大半径/强削减，能够在被围攻的柯伊伯带圣所自保。
-fn home_defense_mult(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
+fn home_defense_mult(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     let Some(f) = state.faction(faction) else { return 1.0 };
     if f.home_radius <= 0.0 {
         return 1.0;
     }
-    let cap = state.body_position(f.capital_body);
+    let cap = state.body_position(&f.capital_body);
     if dist(pos, cap) <= f.home_radius {
         f.home_attack_mult
     } else {
@@ -2153,12 +2151,12 @@ fn home_defense_mult(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
 
 /// 本土防御额外再生：`pos` 位于 `faction` 首都的 `home_radius` 之内时，返回该势力
 /// 的 `home_regen_bonus`，否则 0.0。
-fn home_regen_bonus(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
+fn home_regen_bonus(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     let Some(f) = state.faction(faction) else { return 0.0 };
     if f.home_radius <= 0.0 {
         return 0.0;
     }
-    let cap = state.body_position(f.capital_body);
+    let cap = state.body_position(&f.capital_body);
     if dist(pos, cap) <= f.home_radius {
         f.home_regen_bonus
     } else {
@@ -2166,26 +2164,26 @@ fn home_regen_bonus(state: &State, faction: FactionId, pos: [f64; 2]) -> f64 {
     }
 }
 
-fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: FactionId) -> bool {
+fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior, owner: &str) -> bool {
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
-        ShipBehavior::Dock { body } => state.body(body).is_some(),
-        ShipBehavior::Colonize { body } => has_blank_site(state, body),
+        ShipBehavior::Dock { body } => state.body(&body).is_some(),
+        ShipBehavior::Colonize { body } => has_blank_site(state, &body),
         ShipBehavior::TargetShip { ship, attack } => {
-            let alive = state.ship(ship).map(|s| s.hull > 0.0).unwrap_or(false);
+            let alive = state.ship(&ship).map(|s| s.hull > 0.0).unwrap_or(false);
             if !alive {
                 false
             } else if attack {
                 // Attack mode: target must be a hostile ship.
-                state.ship(ship).map(|s| hostile(state, config, owner, s.faction_id)).unwrap_or(false)
+                state.ship(&ship).map(|s| hostile(state, config, owner, &s.faction_id)).unwrap_or(false)
             } else {
                 // Guard mode: target must be a friendly (non-hostile) ship to protect.
-                state.ship(ship).map(|s| !hostile(state, config, owner, s.faction_id)).unwrap_or(false)
+                state.ship(&ship).map(|s| !hostile(state, config, owner, &s.faction_id)).unwrap_or(false)
             }
         }
         ShipBehavior::TargetSettlement { city, .. } => state
-            .city(city)
-            .map(|c| !c.razed && hostile(state, config, owner, c.faction_id))
+            .city(&city)
+            .map(|c| !c.razed && hostile(state, config, owner, &c.faction_id))
             .unwrap_or(false),
     }
 }
@@ -2194,7 +2192,7 @@ fn behavior_is_valid(state: &State, config: &GameConfig, behavior: ShipBehavior,
 /// whose city is razed (blank footprint, re-seedable) or a settlement no city
 /// occupies yet. Settlement ↔ city is 1:1, so a site with a live city never
 /// counts as blank.
-fn has_blank_site(state: &State, body: BodyId) -> bool {
+fn has_blank_site(state: &State, body: &str) -> bool {
     let Some(b) = state.body(body) else { return false };
     if b.settlements.is_empty() {
         return false;
@@ -2209,19 +2207,19 @@ fn has_blank_site(state: &State, body: BodyId) -> bool {
     (0..b.settlements.len()).any(|i| !occupied.contains(&i))
 }
 
-fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
-    let cur = state.ship_behavior(ship_id);
+fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
+    let cur = state.ship_behavior(ship_id.to_string());
     // Keep an existing targeting behavior while it is still valid, so the
     // commander does not thrash between targets every round.
     if let Some(b) = cur {
         if matches!(b, ShipBehavior::TargetShip { .. } | ShipBehavior::TargetSettlement { .. })
-            && behavior_is_valid(state, config, b, owner)
+            && behavior_is_valid(state, config, b.clone(), owner)
         {
             return Some(b);
         }
     }
     let weapons = state.ship(ship_id).map(|s| ship_weapons(config, s)).unwrap_or_default();
-    let picked = pick_target(state, config, owner, pos, rng, focus, &weapons);
+    let picked = pick_target(state, config, &owner, pos, rng, focus, &weapons);
     let mut behavior = picked.unwrap_or(ShipBehavior::Idle);
     // 护航（保护高价值旗舰）：交战时闲着、且距本势力旗舰（航母）在 escort_range 内的舰，
     // 就近护卫它（贴近旗舰 + 拦截进射程之敌），防止高价值舰被轻易打掉。
@@ -2229,17 +2227,17 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
         && config.combat.escort_range > 0.0
         && faction_at_war(state, config, owner)
     {
-        if let Some(flag_id) = fleet_flag(state, owner) {
+        if let Some(flag_id) = fleet_flag(state, &owner) {
             if flag_id != ship_id {
-                let fpos = state.ship(flag_id).map(|s| s.position).unwrap_or(pos);
+                let fpos = state.ship(&flag_id).map(|s| s.position).unwrap_or(pos);
                 if dist(pos, fpos) <= config.combat.escort_range {
                     behavior = ShipBehavior::TargetShip { ship: flag_id, attack: false };
                 }
             }
         }
     }
-    if let Some(c) = state.control_mut(owner) {
-        c.ship_orders.insert(ship_id, Control::inherit(behavior));
+    if let Some(c) = state.control_mut(owner.to_string()) {
+        c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
     }
     if matches!(behavior, ShipBehavior::Idle) {
         None
@@ -2248,18 +2246,18 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: ShipId, owner
     }
 }
 
-/// 本势力的旗舰（高价值舰种）：第一艘航母（按 id 最小），否则 None。用于护航——AI 派
+/// 本势力的旗舰（高价值舰种）：第一艘航母（按名字最小），否则 None。用于护航——AI 派
 /// 闲着的舰护卫它，防止高价值舰被轻易打掉。
-fn fleet_flag(state: &State, fid: FactionId) -> Option<ShipId> {
+fn fleet_flag(state: &State, fid: &str) -> Option<ShipId> {
     state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0 && s.class == "carrier")
-        .min_by_key(|s| s.id)
-        .map(|s| s.id)
+        .min_by_key(|s| s.name.clone())
+        .map(|s| s.name.clone())
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>, weapons: &[Weapon]) -> Option<ShipBehavior> {
+fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>, weapons: &[Weapon]) -> Option<ShipBehavior> {
     let mut best: Option<(bool, f64, f64, f64, ShipBehavior)> = None; // (is_focus, fit, wound, dist, behavior)
     let mut consider = |d: f64, is_focus: bool, fit: f64, wound: f64, b: ShipBehavior, best: &mut Option<(bool, f64, f64, f64, ShipBehavior)>| {
         let replace = match *best {
@@ -2288,28 +2286,28 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
         // 拟人的「不追远敌」：超过追击半径的敌舰不在追击范围（避免跨全图去追远逃的敌舰、
         // 过度延伸漂移）。城市（轰炸/殖民）不受此限制——征服仍然值得远征。
         if s.hull > 0.0
-            && hostile(state, config, owner, s.faction_id)
+            && hostile(state, config, owner, &s.faction_id)
             && (config.combat.pursuit_range <= 0.0 || dist(pos, s.position) <= config.combat.pursuit_range)
         {
-            let is_focus = focus == Some(s.faction_id);
+            let is_focus = focus.as_ref() == Some(&s.faction_id);
             let wound = s.hull / s.hull_max.max(1e-9);
             let fit = weapon_fit(weapons, config, s);
-            consider(dist(pos, s.position), is_focus, fit, wound, ShipBehavior::TargetShip { ship: s.id, attack: true }, &mut best);
+            consider(dist(pos, s.position), is_focus, fit, wound, ShipBehavior::TargetShip { ship: s.name.clone(), attack: true }, &mut best);
         }
     }
     for c in &state.cities {
-        if !c.razed && hostile(state, config, owner, c.faction_id) {
-            let is_focus = focus == Some(c.faction_id);
-            let p = city_position(state, c.id);
-            consider(dist(pos, p), is_focus, 1.0, 1.0, ShipBehavior::TargetSettlement { city: c.id, bombard: true }, &mut best);
+        if !c.razed && hostile(state, config, owner, &c.faction_id) {
+            let is_focus = focus.as_ref() == Some(&c.faction_id);
+            let p = city_position(state, &c.name);
+            consider(dist(pos, p), is_focus, 1.0, 1.0, ShipBehavior::TargetSettlement { city: c.name.clone(), bombard: true }, &mut best);
         }
     }
     // If there is nothing to fight, re-colonize a nearby razed (blank) settlement.
     if best.is_none() {
         for c in &state.cities {
             if c.razed {
-                let p = city_position(state, c.id);
-                consider(dist(pos, p), false, 1.0, 1.0, ShipBehavior::Colonize { body: c.body_id }, &mut best);
+                let p = city_position(state, &c.name);
+                consider(dist(pos, p), false, 1.0, 1.0, ShipBehavior::Colonize { body: c.body_id.clone() }, &mut best);
             }
         }
     }
@@ -2319,21 +2317,21 @@ fn pick_target(state: &State, config: &GameConfig, owner: FactionId, pos: [f64; 
 /// Bombard a city: damage is spread across its buildings by area share. When all
 /// buildings are destroyed the city is razed to a blank (colonizable) settlement
 /// — it is never captured.
-fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: CityId) {
+fn bombard_city(state: &mut State, config: &GameConfig, ship_id: &str, cid: &str) {
     let (attacker, weapons) = {
         let s = state.ship(ship_id).expect("ship gone");
-        (s.faction_id, ship_weapons(config, s))
+        (s.faction_id.clone(), ship_weapons(config, s))
     };
     let (old_owner, cpos) = {
         let c = state.city(cid).expect("city gone");
-        (c.faction_id, state.body_position(c.body_id))
+        (c.faction_id.clone(), state.body_position(&c.body_id))
     };
     // 城市是静止的大型目标（无护盾、只有建筑装甲），轰炸用「每件武器 × 对甲倍率」的总
     // 齐射——导弹/重炮拆城，近防炮对城伤害低。命中视为全中（城市不规避）。
     let hull_attack: f64 = weapons.iter().map(|w| w.damage * w.hull_mult).sum();
     // 本土防御（首都即强弩 + cult 的 MOND 异常）：城市位于其势力首都的本土防御
     // 半径内时，受到的轰炸伤害被削弱。
-    let dmg = hull_attack * home_defense_mult(state, old_owner, cpos);
+    let dmg = hull_attack * home_defense_mult(state, &old_owner, cpos);
     let razed = {
         let c = state.city_mut(cid).expect("city gone");
         let total_deployed: f64 = c.buildings.iter().map(|b| b.deployed).sum();
@@ -2351,11 +2349,11 @@ fn bombard_city(state: &mut State, config: &GameConfig, ship_id: ShipId, cid: Ci
             false
         }
     };
-    adjust_relation(state, attacker, old_owner, config.diplomacy.attack_delta);
-    ev(state, GameEvent::Siege { attacker: ship_id, city: cid, damage: dmg });
+    adjust_relation(state, &attacker, &old_owner, config.diplomacy.attack_delta);
+    ev(state, GameEvent::Siege { attacker: ship_id.to_string(), city: cid.to_string(), damage: dmg });
     if razed {
-        adjust_relation(state, attacker, old_owner, config.diplomacy.capture_delta);
-        ev(state, GameEvent::CityRazed { city: cid, fallen_to: attacker });
+        adjust_relation(state, &attacker, &old_owner, config.diplomacy.capture_delta);
+        ev(state, GameEvent::CityRazed { city: cid.to_string(), fallen_to: attacker });
     }
 }
 
@@ -2368,37 +2366,36 @@ fn colonize(
     state: &mut State,
     config: &GameConfig,
     rng: &mut Prng,
-    ship_id: ShipId,
-    body: BodyId,
+    ship_id: &str,
+    body: &str,
     next_building_id: &mut BuildingId,
-    next_city_id: &mut CityId,
 ) {
-    let faction = state.ship(ship_id).map(|s| s.faction_id).expect("ship gone");
-    let seeded_ship_class = choose_next_class(state, faction, config, rng);
+    let faction = state.ship(ship_id).map(|s| s.faction_id.clone()).expect("ship gone");
+    let seeded_ship_class = choose_next_class(state, &faction, config, rng);
 
     // 1) A razed (blank) city keeps occupying its settlement: re-seed it there.
-    let razed_cid = state.cities.iter().find(|c| c.body_id == body && c.razed).map(|c| c.id);
+    let razed_cid = state.cities.iter().find(|c| c.body_id == body && c.razed).map(|c| c.name.clone());
     if let Some(cid) = razed_cid {
-        let Some(settlement) = state.city_settlement(cid).cloned() else {
-            if let Some(c) = state.control_mut(faction) {
-                c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        let Some(settlement) = state.city_settlement(&cid).cloned() else {
+            if let Some(c) = state.control_mut(faction.clone()) {
+                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
             }
             return;
         };
         let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
         let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
-        if let Some(c) = state.city_mut(cid) {
+        if let Some(c) = state.city_mut(&cid) {
             c.razed = false;
-            c.faction_id = faction;
+            c.faction_id = faction.clone();
             c.population = pop;
             c.buildings = buildings;
             c.ship_progress.clear();
             c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
             c.loyalty = 1.0;
         }
-        ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
-        if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        ev(state, GameEvent::ColonyFounded { city: cid, owner: faction.clone(), body: body.to_string(), seeded_ship_class: seeded_ship_class.clone() });
+        if let Some(c) = state.control_mut(faction.clone()) {
+            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
         }
         return;
     }
@@ -2408,31 +2405,29 @@ fn colonize(
     let vacant_idx = state.body(body).and_then(|b| (0..b.settlements.len()).find(|i| !occupied.contains(i)));
     let Some(idx) = vacant_idx else {
         // Every settlement is occupied by a live city — nothing to colonize.
-        if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        if let Some(c) = state.control_mut(faction.clone()) {
+            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
         }
         return;
     };
     let Some(settlement) = state.body_settlement(body, idx).cloned() else {
-        if let Some(c) = state.control_mut(faction) {
-            c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+        if let Some(c) = state.control_mut(faction.clone()) {
+            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
         }
         return;
     };
     let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
     let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
-    let cid = *next_city_id;
     let base = if settlement.name.is_empty() {
         state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
     } else {
         settlement.name.clone()
     };
     let city = City {
-        id: cid,
         name: format!("{}-殖民城", base),
-        body_id: body,
+        body_id: body.to_string(),
         settlement: idx,
-        faction_id: faction,
+        faction_id: faction.clone(),
         population: pop,
         buildings,
         ship_progress: {
@@ -2443,21 +2438,21 @@ fn colonize(
         razed: false,
         loyalty: 1.0,
     };
-    let ctrl = state.control.entry(faction).or_default();
+    let cctrl = state.control.entry(faction.clone()).or_default();
     for b in &city.buildings {
-        let key = (cid, b.id);
-        ctrl.invest_weights
-            .insert(key, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+        let key = (city.name.clone(), b.id);
+        cctrl.invest_weights
+            .insert(key.clone(), Control::inherit(config.building_spec(&b.kind).default_invest_weight));
         if b.is_shipyard() {
-            ctrl.build_weights
+            cctrl.build_weights
                 .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
         }
     }
+    let cname = city.name.clone();
     state.cities.push(city);
-    *next_city_id += 1;
-    ev(state, GameEvent::ColonyFounded { city: cid, owner: faction, body, seeded_ship_class: seeded_ship_class.clone() });
-    if let Some(c) = state.control_mut(faction) {
-        c.ship_orders.insert(ship_id, Control::inherit(ShipBehavior::Idle));
+    ev(state, GameEvent::ColonyFounded { city: cname, owner: faction.clone(), body: body.to_string(), seeded_ship_class: seeded_ship_class.clone() });
+    if let Some(c) = state.control_mut(faction.clone()) {
+        c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
     }
 }
 
@@ -2505,9 +2500,9 @@ fn seed_colony_buildings(
     buildings
 }
 
-fn behavior_dest(state: &State, behavior: ShipBehavior) -> [f64; 2] {
+fn behavior_dest(state: &State, behavior: &ShipBehavior) -> [f64; 2] {
     match behavior {
-        ShipBehavior::Move { position } => position,
+        ShipBehavior::Move { position } => *position,
         ShipBehavior::TargetShip { ship, .. } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
         ShipBehavior::TargetSettlement { city, .. } => city_position(state, city),
         ShipBehavior::Dock { body } | ShipBehavior::Colonize { body } => state.body_position(body),
@@ -2543,7 +2538,7 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let mut note_pair = |a: Option<FactionId>, b: Option<FactionId>| {
         if let (Some(a), Some(b)) = (a, b) {
             if a != b {
-                fought.insert((a.min(b), a.max(b)));
+                if a <= b { fought.insert((a, b)); } else { fought.insert((b, a)); }
             }
         }
     };
@@ -2551,33 +2546,34 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         match e {
             GameEvent::Attack { attacker, target, .. } => {
                 note_pair(
-                    state.ship(*attacker).map(|s| s.faction_id),
-                    state.ship(*target).map(|s| s.faction_id),
+                    state.ship(attacker).map(|s| s.faction_id.clone()),
+                    state.ship(target).map(|s| s.faction_id.clone()),
                 );
             }
             GameEvent::Siege { attacker, city, .. } => {
                 note_pair(
-                    state.ship(*attacker).map(|s| s.faction_id),
-                    state.city(*city).map(|c| c.faction_id),
+                    state.ship(attacker).map(|s| s.faction_id.clone()),
+                    state.city(city).map(|c| c.faction_id.clone()),
                 );
             }
             _ => {}
         }
     }
 
-    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for i in 0..ids.len() {
         for j in (i + 1)..ids.len() {
-            let (a, b) = (ids[i], ids[j]);
+            let (a, b) = (ids[i].clone(), ids[j].clone());
             let (align_a, align_b, aggr) = {
-                let fa = state.factions.iter().find(|f| f.id == a).expect("faction a gone");
-                let fb = state.factions.iter().find(|f| f.id == b).expect("faction b gone");
+                let fa = state.factions.iter().find(|f| f.name == a).expect("faction a gone");
+                let fb = state.factions.iter().find(|f| f.name == b).expect("faction b gone");
                 (fa.alignment, fb.alignment, fa.aggression.max(fb.aggression))
             };
-            let mut rel = relation(state, a, b);
+            let mut rel = relation(state, &a, &b);
             let aff = d.affinity_floor + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
             let at_war = rel <= config.combat.war_threshold;
-            let clashing = fought.contains(&(a.min(b), a.max(b)));
+            let pair = if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+            let clashing = fought.contains(&pair);
 
             if at_war && !clashing {
                 // War fatigue: cool the conflict toward ceasefire once the guns
@@ -2594,8 +2590,8 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             rel += rng.range_f64(-d.noise, d.noise);
             rel = rel.clamp(d.hostility_floor, d.friendship_ceiling);
 
-            for f in state.factions.iter_mut().filter(|f| f.id == a || f.id == b) {
-                let other = if f.id == a { b } else { a };
+            for f in state.factions.iter_mut().filter(|f| f.name == a || f.name == b) {
+                let other = if f.name == a { b.clone() } else { a.clone() };
                 f.relations.insert(other, rel);
             }
         }
@@ -2607,8 +2603,8 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// 设置两个势力间的对称关系（带钳位），写入双方。
 fn set_relation_sym(state: &mut State, a: FactionId, b: FactionId, v: f64, config: &GameConfig) {
     let v = v.clamp(config.diplomacy.hostility_floor, config.diplomacy.friendship_ceiling);
-    for f in state.factions.iter_mut().filter(|f| f.id == a || f.id == b) {
-        let other = if f.id == a { b } else { a };
+    for f in state.factions.iter_mut().filter(|f| f.name == a || f.name == b) {
+        let other = if f.name == a { b.clone() } else { a.clone() };
         f.relations.insert(other, v);
     }
 }
@@ -2622,21 +2618,21 @@ pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMa
     let total_cities = state.cities.iter().filter(|c| !c.razed).count() as f64;
     let total_fleet: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
     if wp <= 0.0 || (total_cities <= 0.0 && total_fleet <= 0.0) {
-        return state.factions.iter().map(|f| (f.id, 0.0)).collect();
+        return state.factions.iter().map(|f| (f.name.clone(), 0.0)).collect();
     }
     let mut powers = BTreeMap::new();
     for f in &state.factions {
-        let cities = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count() as f64;
+        let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
         let fleet: f64 = state
             .ships
             .iter()
-            .filter(|s| s.faction_id == f.id)
+            .filter(|s| s.faction_id == f.name)
             .map(|s| ship_panel(config, s).hull_max)
             .sum();
         let city_share = if total_cities > 0.0 { cities / total_cities } else { 0.0 };
         let fleet_share = if total_fleet > 0.0 { fleet / total_fleet } else { 0.0 };
         let power = (b.power_city_weight * city_share + b.power_fleet_weight * fleet_share) / wp;
-        powers.insert(f.id, power);
+        powers.insert(f.name.clone(), power);
     }
     powers
 }
@@ -2645,17 +2641,17 @@ pub(crate) fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMa
 /// （关系 ≤ 该值，即被遏制/疏远了霸权）、且彼此相互和平（互不交战）的一方。若 ≥
 /// [`BalanceOfPowerConfig::min_members`] 即视为联盟成立。遏制是冷战式的——成员未必与
 /// 霸权开战，但已脱离其影响、转而与弱国抱团。
-fn coalition_of(state: &State, config: &GameConfig, hegemon: FactionId, members: &[FactionId]) -> Vec<FactionId> {
+fn coalition_of(state: &State, config: &GameConfig, hegemon: &str, members: &[FactionId]) -> Vec<FactionId> {
     let estrange = config.balance.coalition_estrange;
     let estranged: Vec<FactionId> = members
         .iter()
         .cloned()
-        .filter(|m| relation(state, *m, hegemon) <= estrange)
+        .filter(|m| relation(state, m, hegemon) <= estrange)
         .collect();
     estranged
         .iter()
         .cloned()
-        .filter(|&m| estranged.iter().all(|&o| o == m || !hostile(state, config, m, o)))
+        .filter(|m| estranged.iter().all(|o| o == m || !hostile(state, config, m, o)))
         .collect()
 }
 
@@ -2667,7 +2663,7 @@ fn dominant_hegemon(state: &State, config: &GameConfig) -> Option<(FactionId, Ve
     if b.hegemon_power > 1.0 {
         return None;
     }
-    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     if ids.len() < 2 {
         return None;
     }
@@ -2675,13 +2671,13 @@ fn dominant_hegemon(state: &State, config: &GameConfig) -> Option<(FactionId, Ve
     let (hegemon, max_power) = powers
         .iter()
         .max_by(|x, y| x.1.partial_cmp(y.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(k, v)| (*k, *v))
-        .unwrap_or((0, 0.0));
+        .map(|(k, v)| (k.clone(), *v))
+        .unwrap_or((String::new(), 0.0));
     if max_power < b.hegemon_power {
         return None;
     }
     let members: Vec<FactionId> = ids.iter().cloned().filter(|x| *x != hegemon).collect();
-    let estranged = coalition_of(state, config, hegemon, &members);
+    let estranged = coalition_of(state, config, &hegemon, &members);
     Some((hegemon, estranged))
 }
 
@@ -2705,8 +2701,8 @@ fn sanctioned_hegemon(state: &State, config: &GameConfig) -> Option<FactionId> {
 /// 经济制裁的「治理代价」倍率：若 `fid` 正是被经济封锁的霸权，则其维持帝国
 /// （行政 + 娱乐）的成本按 `sanction_cost_mult` 放大；否则 1.0（不碰别国）。这使被
 /// 多国封锁的大国要花更多资源维持领地与治安——边缘殖民地更难养、更易离心。
-fn sanction_cost_mult(state: &State, config: &GameConfig, fid: FactionId) -> f64 {
-    if sanctioned_hegemon(state, config) == Some(fid) {
+fn sanction_cost_mult(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    if sanctioned_hegemon(state, config).as_deref() == Some(fid) {
         config.balance.sanction_cost_mult
     } else {
         1.0
@@ -2717,24 +2713,24 @@ fn sanction_cost_mult(state: &State, config: &GameConfig, fid: FactionId) -> f64
 /// 关系 ≤ `coalition_estrange`），且 H 正与联盟内某一弱者交战（集体安全已触发——霸权
 /// 先动手了），则返回 Some(H)。这使结盟势力的舰只**优先集火 H**、而非各自就近乱打——
 /// 给「攻其一方、集体制衡」真正的军事牙齿。否则返回 None（不改变普通行为）。
-fn coalition_war_focus(state: &State, config: &GameConfig, owner: FactionId) -> Option<FactionId> {
+fn coalition_war_focus(state: &State, config: &GameConfig, owner: &str) -> Option<FactionId> {
     let b = &config.balance;
     if b.hegemon_power > 1.0 {
         return None;
     }
     let Some(hegemon) = active_coalition_hegemon(state, config) else { return None };
-    if owner == hegemon {
+    if owner == hegemon.as_str() {
         return None;
     }
     // 该弱者是否已倒向联盟（疏远霸权）。未倒向则不集火。
-    if relation(state, owner, hegemon) > b.coalition_estrange {
+    if relation(state, owner, &hegemon) > b.coalition_estrange {
         return None;
     }
     // 霸权是否正与任一弱者交战（集体防御触发）——注意霸权自己对它与他人开战不作集火。
     let war_on = state
         .factions
         .iter()
-        .any(|f| f.id != hegemon && hostile(state, config, f.id, hegemon));
+        .any(|f| f.name != hegemon && hostile(state, config, &f.name, &hegemon));
     if war_on {
         Some(hegemon)
     } else {
@@ -2750,10 +2746,10 @@ pub fn balance_picture(
 ) -> (Option<FactionId>, Vec<FactionId>, BTreeMap<FactionId, f64>) {
     let powers = faction_power_share(state, config);
     let hegemon = active_coalition_hegemon(state, config);
-    let members = match hegemon {
+    let members = match &hegemon {
         Some(h) => {
-            let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
-            let members: Vec<FactionId> = ids.into_iter().filter(|x| *x != h).collect();
+            let ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
+            let members: Vec<FactionId> = ids.into_iter().filter(|x| *x != *h).collect();
             coalition_of(state, config, h, &members)
         }
         None => Vec::new(),
@@ -2783,7 +2779,7 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
     let mut world_cities = 0;
     let mut world_fleet = 0.0;
     for f in &state.factions {
-        let fid = f.id;
+        let fid = f.name.clone();
         let living: Vec<&City> = state.cities.iter().filter(|c| c.faction_id == fid && !c.razed).collect();
         let city_count = living.len();
         let population: u64 = living.iter().map(|c| c.population as u64).sum();
@@ -2794,13 +2790,13 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
         let fleet_value: f64 = ships.clone().map(|s| s.hull).sum();
         world_fleet += fleet_value;
         let market_value: f64 = f.resources.iter().map(|(k, v)| v * value_of(k)).sum();
-        let at_war = state.factions.iter().any(|o| o.id != fid && hostile(state, config, fid, o.id));
+        let at_war = state.factions.iter().any(|o| o.name != fid && hostile(state, config, &fid, &o.name));
         let production: ResourceMap = flow.faction_production.get(&fid).cloned().unwrap_or_default();
         let production_value: f64 = production.iter().map(|(k, v)| v * value_of(k)).sum();
         let governance_cost = flow.governance.get(&fid).map(|g| g.total).unwrap_or(0.0);
         let governance_coverage = flow.governance.get(&fid).map(|g| g.coverage).unwrap_or(1.0);
         factions.insert(
-            fid,
+            fid.clone(),
             FactionMetrics {
                 city_count,
                 ship_count,
@@ -2823,10 +2819,10 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
         if c.razed {
             continue;
         }
-        let production = flow.city_production.get(&c.id).cloned().unwrap_or_default();
+        let production = flow.city_production.get(&c.name).cloned().unwrap_or_default();
         let production_value = production.iter().map(|(k, v)| v * value_of(k)).sum::<f64>();
         city_production.insert(
-            c.id,
+            c.name.clone(),
             CityMetrics {
                 population: c.population,
                 loyalty: c.loyalty,
@@ -2860,7 +2856,7 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     if b.hegemon_power > 1.0 {
         return; // 关闭
     }
-    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
+    let ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     if ids.len() < 2 {
         return;
     }
@@ -2870,8 +2866,8 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     let (hegemon, max_power) = powers
         .iter()
         .max_by(|x, y| x.1.partial_cmp(y.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(k, v)| (*k, *v))
-        .unwrap_or((0, 0.0));
+        .map(|(k, v)| (k.clone(), *v))
+        .unwrap_or((String::new(), 0.0));
     if max_power < b.hegemon_power {
         return;
     }
@@ -2886,15 +2882,15 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     }
 
     // 步骤前后联盟成员、及与霸权交战成员（用于跃迁/集体安全判定）。
-    let coalition_before = coalition_of(state, config, hegemon, &members);
+    let coalition_before = coalition_of(state, config, &hegemon, &members);
     let was_at_war: BTreeSet<FactionId> =
-        members.iter().cloned().filter(|m| hostile(state, config, *m, hegemon)).collect();
+        members.iter().cloned().filter(|m| hostile(state, config, m, &hegemon)).collect();
 
     // 合纵：弱者-弱者相互靠拢（共同威胁把他们推向彼此）。
     for i in 0..members.len() {
         for j in (i + 1)..members.len() {
-            let (m1, m2) = (members[i], members[j]);
-            let rel = relation(state, m1, m2);
+            let (m1, m2) = (members[i].clone(), members[j].clone());
+            let rel = relation(state, &m1, &m2);
             let nv = rel + b.coalition_rate * scale * (b.coalition_affinity - rel);
             set_relation_sym(state, m1, m2, nv, config);
         }
@@ -2904,29 +2900,29 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     // 该目标更暖时才往下压**，绝不自动把它推到交战阈值之下（不「无脑宣战」）。这模拟
     // 现实中的遏制：弱国不再争相讨好霸权、甚至疏远它，但井水不犯河水，真正的共同军事
     // 行动留给「集体安全」（霸权一旦动手打某弱者，其余弱者才群起而攻之）。
-    for &m in &members {
-        let rel = relation(state, m, hegemon);
+    for m in &members {
+        let rel = relation(state, m, &hegemon);
         if rel > b.hegemon_affinity {
             let nv = rel + b.hegemon_rate * scale * (b.hegemon_affinity - rel);
-            set_relation_sym(state, m, hegemon, nv, config);
+            set_relation_sym(state, m.clone(), hegemon.clone(), nv, config);
         }
     }
 
     // 集体安全：任一弱者与霸权进入交战（本回合新跨入），其余尚未交战的弱者对霸权关系
     // 骤降——「攻其一方 = 与全体为敌」的防御协定：霸权一旦开打，弱者联盟群起而攻之。
     let now_at_war: BTreeSet<FactionId> =
-        members.iter().cloned().filter(|m| hostile(state, config, *m, hegemon)).collect();
+        members.iter().cloned().filter(|m| hostile(state, config, m, &hegemon)).collect();
     if now_at_war.difference(&was_at_war).next().is_some() {
-        for &m in &members {
-            if !now_at_war.contains(&m) {
-                let rel = relation(state, m, hegemon);
-                set_relation_sym(state, m, hegemon, rel + b.collective_defense_delta, config);
+        for m in &members {
+            if !now_at_war.contains(m) {
+                let rel = relation(state, m, &hegemon);
+                set_relation_sym(state, m.clone(), hegemon.clone(), rel + b.collective_defense_delta, config);
             }
         }
     }
 
     // 联盟跃迁事件（只在成立/解体的当回合记一条，供 agent 直读政治格局）。
-    let coalition_after = coalition_of(state, config, hegemon, &members);
+    let coalition_after = coalition_of(state, config, &hegemon, &members);
     let before_active = coalition_before.len() >= b.min_members;
     let after_active = coalition_after.len() >= b.min_members;
     if before_active && !after_active {
@@ -2959,15 +2955,15 @@ fn step_story(state: &mut State, config: &GameConfig) {
         for effect in &spec.effects {
             match effect {
                 StoryEffect::Relations { a, b, delta } => {
-                    adjust_relation(state, *a, *b, *delta);
+                    adjust_relation(state, a, b, *delta);
                 }
                 StoryEffect::GrantResources { faction, resource, amount } => {
-                    if let Some(f) = state.faction_mut(*faction) {
+                    if let Some(f) = state.faction_mut(faction) {
                         *f.resources.entry(resource.clone()).or_insert(0.0) += *amount;
                     }
                 }
                 StoryEffect::GrantShip { faction, class, body } => {
-                    grant_story_ship(state, config, *faction, class, *body);
+                    grant_story_ship(state, config, faction.clone(), class, body.clone());
                 }
             }
         }
@@ -3000,10 +2996,10 @@ fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
     };
     let find_war = |state: &State, faction: Option<FactionId>| -> Option<(FactionId, FactionId)> {
         state.events.iter().find_map(|e| match e {
-            GameEvent::WarStarted { a, b } => match faction {
-                Some(f) if *a == f || *b == f => Some((*a, *b)),
+            GameEvent::WarStarted { a, b } => match &faction {
+                Some(f) if a == f || b == f => Some((a.clone(), b.clone())),
                 Some(_) => None,
-                None => Some((*a, *b)),
+                None => Some((a.clone(), b.clone())),
             },
             _ => None,
         })
@@ -3011,38 +3007,38 @@ fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
     match &spec.trigger {
         StoryTrigger::FirstWar => {
             if let Some((a, b)) = find_war(state, None) {
-                add(&mut parts, state.faction(a).map(|f| f.name.clone()));
-                add(&mut parts, state.faction(b).map(|f| f.name.clone()));
+                add(&mut parts, state.faction(&a).map(|f| f.name.clone()));
+                add(&mut parts, state.faction(&b).map(|f| f.name.clone()));
             }
         }
         StoryTrigger::FactionAtWar { faction } => {
-            add(&mut parts, state.faction(*faction).map(|f| f.name.clone()));
-            if let Some((a, b)) = find_war(state, Some(*faction)) {
+            add(&mut parts, state.faction(faction).map(|f| f.name.clone()));
+            if let Some((a, b)) = find_war(state, Some(faction.clone())) {
                 let other = if a == *faction { b } else { a };
-                add(&mut parts, state.faction(other).map(|f| f.name.clone()));
+                add(&mut parts, state.faction(&other).map(|f| f.name.clone()));
             }
         }
         StoryTrigger::FirstRaze => {
             if let Some((city, fallen)) = state.events.iter().find_map(|e| match e {
-                GameEvent::CityRazed { city, fallen_to } => Some((*city, *fallen_to)),
+                GameEvent::CityRazed { city, fallen_to } => Some((city.clone(), fallen_to.clone())),
                 _ => None,
             }) {
-                add(&mut parts, state.city(city).map(|c| c.name.clone()));
-                add(&mut parts, state.faction(fallen).map(|f| f.name.clone()));
+                add(&mut parts, state.city(&city).map(|c| c.name.clone()));
+                add(&mut parts, state.faction(&fallen).map(|f| f.name.clone()));
             }
         }
         StoryTrigger::FirstColony => {
             if let Some((owner, body)) = state.events.iter().find_map(|e| match e {
-                GameEvent::ColonyFounded { owner, body, .. } => Some((*owner, *body)),
+                GameEvent::ColonyFounded { owner, body, .. } => Some((owner.clone(), body.clone())),
                 _ => None,
             }) {
-                add(&mut parts, state.faction(owner).map(|f| f.name.clone()));
-                add(&mut parts, state.body(body).map(|b| b.name.clone()));
+                add(&mut parts, state.faction(&owner).map(|f| f.name.clone()));
+                add(&mut parts, state.body(&body).map(|b| b.name.clone()));
             }
         }
         StoryTrigger::WarBetween { a, b } => {
-            add(&mut parts, state.faction(*a).map(|f| f.name.clone()));
-            add(&mut parts, state.faction(*b).map(|f| f.name.clone()));
+            add(&mut parts, state.faction(a).map(|f| f.name.clone()));
+            add(&mut parts, state.faction(b).map(|f| f.name.clone()));
         }
         _ => {}
     }
@@ -3055,19 +3051,21 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
     if !config.ships.contains_key(class) {
         return;
     }
-    let pos = state.body_position(body);
-    if state.body(body).is_none() {
+    let pos = state.body_position(&body);
+    if state.body(&body).is_none() {
         return;
     }
-    let next_id = state.ships.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
     let spec = config.ship_spec(class);
     // 舰级 = 平台修正器：剧情赠舰也装配组件（至少一件武器），否则没有火力。
-    let story_components = choose_loadout(state, config, faction, class);
+    let story_components = choose_loadout(state, config, faction.clone(), class);
+    let seq = *state.ship_name_seq.entry(faction.clone()).or_insert(0);
+    state.ship_name_seq.insert(faction.clone(), seq + 1);
+    let fname = state.faction(&faction).map(|f| f.name.clone()).unwrap_or_default();
+    let name = ship_display_name(config.ship_pool(&fname), seq);
     let mut ship = Ship {
-        id: next_id,
-        name: format!("{}-{}", spec.label, faction),
+        name,
         class: class.to_string(),
-        faction_id: faction,
+        faction_id: faction.clone(),
         position: [pos[0] + 0.05, pos[1] + 0.05],
         hull: spec.hull,
         hull_max: spec.hull,
@@ -3083,8 +3081,13 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
     ship.hull_max = ship_panel.hull_max;
     ship.shield = ship_panel.shield_max;
     ship.shield_max = ship_panel.shield_max;
+    state
+        .control
+        .entry(faction.clone())
+        .or_default()
+        .ship_orders
+        .insert(ship.name.clone(), Control::inherit(ShipBehavior::Idle));
     state.ships.push(ship);
-    state.control.entry(faction).or_default().ship_orders.insert(next_id, Control::inherit(ShipBehavior::Idle));
 }
 
 /// 判断一条剧情触发条件是否已满足。
@@ -3106,7 +3109,7 @@ fn story_trigger_fired(state: &State, trigger: &StoryTrigger) -> bool {
             GameEvent::WarStarted { a, b } => *a == *faction || *b == *faction,
             _ => false,
         }),
-        StoryTrigger::RelationBelow { a, b, value } => relation(state, *a, *b) < *value,
+        StoryTrigger::RelationBelow { a, b, value } => relation(state, a, b) < *value,
     }
 }
 
@@ -3133,31 +3136,33 @@ mod tests {
         let mut rng = Prng::new(42);
 
         // China (3) corvette id=0 is Player-ordered to approach US (1) destroyer id=3.
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
         let diff = serde_json::json!({
             "control": [{
-                "faction_id": 3,
-                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 3, "attack": true}}, "mode": "Player"}]
+                "faction_id": "中国",
+                "ship_orders": [{"ship": ship0.clone(), "behavior": {"TargetShip": {"ship": ship3.clone(), "attack": true}}, "mode": "Player"}]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply order");
 
         // Simulate the target being destroyed before the round advances.
-        if let Some(t) = state.ship_mut(3) {
+        if let Some(t) = state.ship_mut(&ship3) {
             t.hull = 0.0;
         }
-        let pos_before = state.ship(0).map(|s| s.position).unwrap();
+        let pos_before = state.ship(&ship0).map(|s| s.position).unwrap();
 
         advance(&mut state, &config, &mut rng);
 
         // The order must have degraded to Idle ...
-        let order = state.ship_behavior(0);
+        let order = state.ship_behavior(ship0.clone());
         assert_eq!(order, Some(ShipBehavior::Idle), "stale order must degrade to Idle");
         // ... without moving the ship toward the origin.
-        let pos_after = state.ship(0).map(|s| s.position).unwrap();
+        let pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
         assert_eq!(pos_after, pos_before, "ship must not drift (target is dead)");
         // ... and a StaleOrder event must be recorded.
         assert!(
-            state.events.iter().any(|e| matches!(e, GameEvent::StaleOrder { ship: 0, .. })),
+            state.events.iter().any(|e| matches!(e, GameEvent::StaleOrder { ship: s, .. } if *s == ship0)),
             "expected a StaleOrder event for ship 0, got {:?}",
             state.events
         );
@@ -3174,10 +3179,15 @@ mod tests {
 
         // China (3): ship 0 guards its own friendly ship 1. Co-located at [0,0].
         // Friendly same-faction target => valid guard.
+        let ship0 = state.ships[0].name.clone();
+        let ship1 = state.ships[1].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        let ship4 = state.ships[4].name.clone();
+        let ship5 = state.ships[5].name.clone();
         let diff = serde_json::json!({
             "control": [{
-                "faction_id": 3,
-                "ship_orders": [{"ship": 0, "behavior": {"TargetShip": {"ship": 1, "attack": false}}, "mode": "Player"}]
+                "faction_id": "中国",
+                "ship_orders": [{"ship": ship0.clone(), "behavior": {"TargetShip": {"ship": ship1.clone(), "attack": false}}, "mode": "Player"}]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply guard order");
@@ -3187,27 +3197,29 @@ mod tests {
         // can fire. Move the other US ships (4 destroyer, 5 cruiser) far out so
         // only ship 3 engages (its damage 6 won't one-shot the guard's hull 12,
         // letting the guard retaliate).
-        for id in [0u32, 1u32] {
-            if let Some(s) = state.ship_mut(id) {
-                s.position = [0.0, 0.0];
-            }
+        if let Some(s) = state.ship_mut(&ship0) {
+            s.position = [0.0, 0.0];
         }
-        if let Some(enemy) = state.ship_mut(3) {
+        if let Some(s) = state.ship_mut(&ship1) {
+            s.position = [0.0, 0.0];
+        }
+        if let Some(enemy) = state.ship_mut(&ship3) {
             enemy.position = [0.3, 0.0];
         }
-        for far in [4u32, 5u32] {
-            if let Some(s) = state.ship_mut(far) {
-                s.position = [50.0, 50.0];
-            }
+        if let Some(s) = state.ship_mut(&ship4) {
+            s.position = [50.0, 50.0];
+        }
+        if let Some(s) = state.ship_mut(&ship5) {
+            s.position = [50.0, 50.0];
         }
 
         // The default world now opens peacefully, so make US (1) explicitly
         // hostile to China (3) for this guard scenario.
-        if let Some(f) = state.faction_mut(3) {
-            f.relations.insert(1, -35.0);
+        if let Some(f) = state.faction_mut("中国") {
+            f.relations.insert("美国".to_string(), -35.0);
         }
-        if let Some(f) = state.faction_mut(1) {
-            f.relations.insert(3, -35.0);
+        if let Some(f) = state.faction_mut("美国") {
+            f.relations.insert("中国".to_string(), -35.0);
         }
 
         advance(&mut state, &config, &mut rng);
@@ -3216,19 +3228,22 @@ mod tests {
         assert!(
             state.events.iter().any(|e| matches!(
                 e,
-                GameEvent::Attack { attacker: 0, target, .. } if *target == 3
+                GameEvent::Attack { attacker, target, .. } if attacker == &ship0 && target == &ship3
             )),
             "guard should fire at the hostile, got {:?}",
             state.events
         );
         // The protected friend must be unharmed (no attack targeting ship 1).
         assert!(
-            !state.events.iter().any(|e| matches!(e, GameEvent::Attack { target: 1, .. })),
+            !state.events.iter().any(|e| matches!(e, GameEvent::Attack { target, .. } if target == &ship1)),
             "guard must not fire at its own protected ship, got {:?}",
             state.events
         );
         // The order is still a valid guard (not degraded to Idle).
-        assert_eq!(state.ship_behavior(0), Some(ShipBehavior::TargetShip { ship: 1, attack: false }));
+        assert_eq!(
+            state.ship_behavior(ship0.clone()),
+            Some(ShipBehavior::TargetShip { ship: ship1.clone(), attack: false })
+        );
     }
 
     /// Events must populate as the world advances (growth / spurious events are
@@ -3253,41 +3268,43 @@ mod tests {
         let mut rng = Prng::new(42);
 
         // China (3) corvette id=0 docks body 4 (火星); id=1 is ordered Idle.
+        let ship0 = state.ships[0].name.clone();
+        let ship1 = state.ships[1].name.clone();
         let diff = serde_json::json!({
             "control": [{
-                "faction_id": 3,
+                "faction_id": "中国",
                 "ship_orders": [
-                    {"ship": 0, "behavior": {"Dock": {"body": 4}}, "mode": "Player"},
-                    {"ship": 1, "behavior": "Idle", "mode": "Player"}
+                    {"ship": ship0.clone(), "behavior": {"Dock": {"body": "火星"}}, "mode": "Player"},
+                    {"ship": ship1.clone(), "behavior": "Idle", "mode": "Player"}
                 ]
             }]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply dock/idle order");
 
         // Pin ship 0 away from the body so `Dock` must move it toward the body.
-        if let Some(s) = state.ship_mut(0) {
+        if let Some(s) = state.ship_mut(&ship0) {
             s.position = [5.0, 5.0];
         }
-        if let Some(s) = state.ship_mut(1) {
+        if let Some(s) = state.ship_mut(&ship1) {
             s.position = [3.0, 3.0];
         }
-        let dock_pos_before = state.ship(0).map(|s| s.position).unwrap();
-        let idle_pos_before = state.ship(1).map(|s| s.position).unwrap();
+        let dock_pos_before = state.ship(&ship0).map(|s| s.position).unwrap();
+        let idle_pos_before = state.ship(&ship1).map(|s| s.position).unwrap();
 
         advance(&mut state, &config, &mut rng);
 
         // Dock: the ship moved toward the body (not froze, not degraded).
-        let dock_pos_after = state.ship(0).map(|s| s.position).unwrap();
+        let dock_pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
         assert_ne!(dock_pos_after, dock_pos_before, "docked ship should move toward the body");
         assert_eq!(
-            state.ship_behavior(0),
-            Some(ShipBehavior::Dock { body: 4 }),
+            state.ship_behavior(ship0.clone()),
+            Some(ShipBehavior::Dock { body: "火星".to_string() }),
             "dock order must persist (not degrade to Idle)"
         );
         // Idle: the ship did not move.
-        let idle_pos_after = state.ship(1).map(|s| s.position).unwrap();
+        let idle_pos_after = state.ship(&ship1).map(|s| s.position).unwrap();
         assert_eq!(idle_pos_after, idle_pos_before, "Idle must hold position");
-        assert_eq!(state.ship_behavior(1), Some(ShipBehavior::Idle));
+        assert_eq!(state.ship_behavior(ship1.clone()), Some(ShipBehavior::Idle));
     }
 
     /// 护甲再生 (ShipSpec.hull_regen): a damaged ship regains a fraction of its
@@ -3300,16 +3317,18 @@ mod tests {
         // Take China's Earth corvette (id 0, hull_max 12, hull_regen 0.04) and
         // damage it to exactly half; pin it away from all hostiles so the round
         // is quiet and only regeneration acts on it.
-        if let Some(s) = state.ship_mut(0) {
+        let ship0 = state.ships[0].name.clone();
+        let ship1 = state.ships[1].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
             s.hull = 6.0;
             s.position = [80.0, 80.0];
         }
-        let class = state.ship(0).map(|s| s.class.clone()).unwrap();
+        let class = state.ship(&ship0).map(|s| s.class.clone()).unwrap();
         let regen = config.ship_spec(&class).hull_regen;
 
         advance(&mut state, &config, &mut rng);
 
-        let hull = state.ship(0).map(|s| s.hull).expect("ship 0 still alive");
+        let hull = state.ship(&ship0).map(|s| s.hull).expect("ship 0 still alive");
         let expected = (6.0 + 12.0 * regen).min(12.0);
         assert!(
             (hull - expected).abs() < 1e-9,
@@ -3317,13 +3336,13 @@ mod tests {
         );
 
         // A full-hull ship stays capped (no over-heal).
-        if let Some(s) = state.ship_mut(1) {
+        if let Some(s) = state.ship_mut(&ship1) {
             s.hull = config.ship_spec(&s.class).hull;
             s.position = [80.0, 80.0];
         }
         advance(&mut state, &config, &mut rng);
-        let max1 = config.ship_spec(&state.ship(1).map(|s| s.class.clone()).unwrap()).hull;
-        let hull1 = state.ship(1).map(|s| s.hull).unwrap();
+        let max1 = config.ship_spec(&state.ship(&ship1).map(|s| s.class.clone()).unwrap()).hull;
+        let hull1 = state.ship(&ship1).map(|s| s.hull).unwrap();
         assert!((hull1 - max1).abs() < 1e-9, "full hull must not over-heal, got {hull1}");
     }
 
@@ -3334,7 +3353,7 @@ mod tests {
     fn settlements_and_cities_are_one_to_one() {
         let (_config, state) = fresh_world(42);
         for b in &state.bodies {
-            let cities: Vec<&City> = state.cities.iter().filter(|c| c.body_id == b.id).collect();
+            let cities: Vec<&City> = state.cities.iter().filter(|c| c.body_id == b.name).collect();
             assert!(
                 cities.len() <= b.settlements.len(),
                 "body {}: {} cities must not exceed {} settlements",
@@ -3355,7 +3374,7 @@ mod tests {
 
         let earth = &state.bodies[2];
         assert_eq!(earth.settlements.len(), 5, "Earth has five spec metropolises");
-        let earth_cities = state.cities.iter().filter(|c| c.body_id == 2).count();
+        let earth_cities = state.cities.iter().filter(|c| c.body_id == "地球").count();
         assert_eq!(earth_cities, 5, "five cities on five Earth settlements (1:1)");
         // 巴黎 (settlement index 3) hosts only 铀/铂 — its own region's ores.
         let paris = earth.settlements[3].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
@@ -3416,7 +3435,7 @@ mod tests {
     fn story_effects_apply() {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
-        let rel_before = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
+        let rel_before = state.faction("无国界科学组织").and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied()).unwrap_or(0.0);
 
         advance(&mut state, &config, &mut rng);
 
@@ -3427,7 +3446,7 @@ mod tests {
             state.chronicle.iter().any(|c| c.id == "prologue"),
             "prologue must fire and record its effects at round 1"
         );
-        let rel_after = state.faction(6).and_then(|f| f.relations.get(&8).copied()).unwrap_or(0.0);
+        let rel_after = state.faction("无国界科学组织").and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied()).unwrap_or(0.0);
         assert!(rel_after < rel_before, "prologue must lower science↔cult relation (effect)");
     }
 
@@ -3451,18 +3470,18 @@ mod tests {
         );
 
         // The granted cruiser is at exactly body 9 (泰坦) position + the deterministic offset.
-        let bpos = state.body_position(9);
+        let bpos = state.body_position("泰坦");
         let granted = state
             .ships
             .iter()
             .find(|s| {
-                s.faction_id == 5
+                s.faction_id == "星系矿业"
                     && s.class == "cruiser"
                     && (s.position[0] - (bpos[0] + 0.05)).abs() < 1e-9
                     && (s.position[1] - (bpos[1] + 0.05)).abs() < 1e-9
             })
             .expect("kuiper_boom must grant 星系矿业 a cruiser parked at 泰坦");
-        assert_eq!(state.ship_behavior(granted.id), Some(ShipBehavior::Idle), "granted ship starts Idle");
+        assert_eq!(state.ship_behavior(granted.name.clone()), Some(ShipBehavior::Idle), "granted ship starts Idle");
 
         // Determinism: re-running reproduces the identical granted fleet.
         let (_, mut state2) = fresh_world(42);
@@ -3470,17 +3489,17 @@ mod tests {
         for _ in 0..24 {
             advance(&mut state2, &config, &mut rng2);
         }
-        let fleet_a: Vec<(u32, String)> = state
+        let fleet_a: Vec<(String, String)> = state
             .ships
             .iter()
-            .filter(|s| s.faction_id == 5)
-            .map(|s| (s.id, s.class.clone()))
+            .filter(|s| s.faction_id == "星系矿业")
+            .map(|s| (s.name.clone(), s.class.clone()))
             .collect();
-        let fleet_b: Vec<(u32, String)> = state2
+        let fleet_b: Vec<(String, String)> = state2
             .ships
             .iter()
-            .filter(|s| s.faction_id == 5)
-            .map(|s| (s.id, s.class.clone()))
+            .filter(|s| s.faction_id == "星系矿业")
+            .map(|s| (s.name.clone(), s.class.clone()))
             .collect();
         assert_eq!(fleet_a, fleet_b, "same seed must reproduce the same granted fleet");
     }
@@ -3522,7 +3541,7 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         let mut rng = Prng::new(42);
         // 深口袋：让星系矿业(5)付得起治理 + 娱乐开销，覆盖率=1。
-        if let Some(f) = state.faction_mut(5) {
+        if let Some(f) = state.faction_mut("星系矿业") {
             for k in [
                 "铁", "碳", "硅", "水冰", "铀", "铂", "金",
                 "氦-3", "钍", "氢", "甲烷",
@@ -3531,25 +3550,26 @@ mod tests {
             }
         }
         // 妊神星转运站 (city 19, body 15) 远离矿业首都(泰坦, body 9)，距离目标忠诚度≈0。
-        if let Some(c) = state.city_mut(19) {
+        let city19 = state.cities[19].name.clone();
+        if let Some(c) = state.city_mut(&city19) {
             c.loyalty = 0.35; // 略高于叛变阈值，但本应继续下滑。
         }
-        let loy0 = state.city(19).map(|c| c.loyalty).unwrap();
+        let loy0 = state.city(&city19).map(|c| c.loyalty).unwrap();
         // 重金投入该城娱乐预算（Player 覆盖）。
         let diff = serde_json::json!({
-            "control": [{"faction_id": 5, "loyalty_budget": [{"city": 19, "value": 500.0, "mode": "Player"}]}]
+            "control": [{"faction_id": "星系矿业", "loyalty_budget": [{"city": city19.clone(), "value": 500.0, "mode": "Player"}]}]
         });
         crate::web::apply_patch(&mut state, &config, &diff).expect("apply loyalty budget");
 
         advance(&mut state, &config, &mut rng);
 
-        let loy1 = state.city(19).map(|c| c.loyalty).unwrap_or(0.0);
+        let loy1 = state.city(&city19).map(|c| c.loyalty).unwrap_or(0.0);
         assert!(
             loy1 >= loy0,
             "heavy entertainment funding should keep a distant city loyal (started {loy0}, now {loy1})"
         );
         assert_eq!(
-            state.city(19).map(|c| c.razed),
+            state.city(&city19).map(|c| c.razed),
             Some(false),
             "a well-funded distant city must not revolt"
         );
@@ -3562,13 +3582,13 @@ mod tests {
         let (config, _state) = fresh_world(42);
         let dest = [60.0, 0.0]; // 距太阳 60 AU，深入柯伊伯异常区。
         // 非 MOND 势力（中国=3）：目标被切向偏移，无法精确到达。
-        let d = mond_drift(&config, 3, dest);
+        let d = mond_drift(&config, "中国", dest);
         assert!(
             (d[0] - dest[0]).abs() > 1e-6 || (d[1] - dest[1]).abs() > 1e-6,
             "a non-master ship must drift inside the anomaly, got {d:?}"
         );
         // MOND 势力（行星X崇拜教=8）：掌握修正引力，无偏移、指哪打哪。
-        let m = mond_drift(&config, 8, dest);
+        let m = mond_drift(&config, "行星X崇拜教", dest);
         assert_eq!(m, dest, "a MOND master must compute the destination exactly");
     }
 
@@ -3576,10 +3596,10 @@ mod tests {
     #[test]
     fn home_field_weakens_attackers_near_the_capital() {
         let (_config, state) = fresh_world(42);
-        let cap = state.body_position(2); // 地球（中国首都）。
-        let mult_near = home_defense_mult(&state, 3, cap);
+        let cap = state.body_position("地球"); // 地球（中国首都）。
+        let mult_near = home_defense_mult(&state, "中国", cap);
         assert!(mult_near < 1.0, "near the capital should be defended (mult {mult_near})");
-        let mult_far = home_defense_mult(&state, 3, [80.0, 80.0]);
+        let mult_far = home_defense_mult(&state, "中国", [80.0, 80.0]);
         assert_eq!(mult_far, 1.0, "far from the capital should have no home-field defense");
     }
 
@@ -3590,10 +3610,11 @@ mod tests {
     fn ship_panel_reflects_fitted_components() {
         let (config, mut state) = fresh_world(42);
         let base = config.ship_spec("corvette");
-        if let Some(s) = state.ship_mut(0) {
+        let ship0 = state.ships[0].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
             s.components = vec!["shield".to_string(), "railgun".to_string(), "ion_drive".to_string()];
         }
-        let s = state.ship(0).unwrap();
+        let s = state.ship(&ship0).unwrap();
         let panel = ship_panel(&config, s);
         // 船体 = 舰级直接属性，模块不改它（护盾/装甲只吸收/减伤，不加血）。
         assert!((panel.hull_max - base.hull).abs() < 1e-9, "hull is a direct class attribute");
@@ -3654,8 +3675,10 @@ mod tests {
     #[test]
     fn fire_degrades_components_under_damage() {
         let (config, mut state) = fresh_world(42);
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
         // 目标：US 驱逐舰（ship 3），装一枚导弹组件、血厚到扛住一炮以观察组件损耗。
-        if let Some(t) = state.ship_mut(3) {
+        if let Some(t) = state.ship_mut(&ship3) {
             t.position = [40.0, 40.0];
             t.components = vec!["missile".to_string()];
             t.component_hp = t.components.iter().map(|c| component_integrity(&config, c)).collect();
@@ -3665,17 +3688,17 @@ mod tests {
             t.shield_max = 0.0;
         }
         // 攻击者：CN 护卫舰（ship 0），装一门重炮、贴近目标。
-        if let Some(a) = state.ship_mut(0) {
+        if let Some(a) = state.ship_mut(&ship0) {
             a.position = [40.1, 40.0];
             a.components = vec!["railgun".to_string()];
             a.component_hp = a.components.iter().map(|c| component_integrity(&config, c)).collect();
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let before = state.ship(3).unwrap().component_hp.clone();
-        let panel_before = ship_panel(&config, state.ship(3).unwrap());
-        fire(&mut state, &config, 0, 3);
-        let after = state.ship(3).unwrap().component_hp.clone();
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let before = state.ship(&ship3).unwrap().component_hp.clone();
+        let panel_before = ship_panel(&config, state.ship(&ship3).unwrap());
+        fire(&mut state, &config, &ship0, &ship3);
+        let after = state.ship(&ship3).unwrap().component_hp.clone();
         assert!(
             after.iter().zip(before.iter()).any(|(a, b)| *a < *b),
             "component integrity should drop under fire; before={before:?} after={after:?}"
@@ -3690,16 +3713,17 @@ mod tests {
     fn damaged_components_repair_in_friendly_territory() {
         let (config, mut state) = fresh_world(42);
         // China ship 0 停在其首都（Earth, body 2），组件受损。
-        let cap_pos = state.body_position(2);
-        if let Some(s) = state.ship_mut(0) {
+        let cap_pos = state.body_position("地球");
+        let ship0 = state.ships[0].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
             s.position = cap_pos;
             s.components = vec!["railgun".to_string()];
             s.component_hp = vec![5.0];
             s.hull = s.hull.max(5.0);
         }
-        let before = state.ship(0).map(|s| s.component_hp.first().copied().unwrap_or(0.0)).unwrap_or(0.0);
+        let before = state.ship(&ship0).map(|s| s.component_hp.first().copied().unwrap_or(0.0)).unwrap_or(0.0);
         advance(&mut state, &config, &mut Prng::new(42));
-        let after = state.ship(0).map(|s| s.component_hp.first().copied()).flatten().unwrap_or(before);
+        let after = state.ship(&ship0).map(|s| s.component_hp.first().copied()).flatten().unwrap_or(before);
         assert!(
             after > before,
             "a damaged component should repair over rounds; before={before} after={after}"
@@ -3711,7 +3735,7 @@ mod tests {
     fn choose_loadout_is_deterministic_and_affordable() {
         let (config, mut state) = fresh_world(42);
         // Give China (3) a fat rare-mineral stack so it can afford a real loadout.
-        if let Some(f) = state.faction_mut(3) {
+        if let Some(f) = state.faction_mut("中国") {
             for (r, amt) in [
                 ("铀", 200.0), ("金", 200.0), ("氦-3", 200.0),
                 ("铂", 200.0), ("氢", 200.0), ("钍", 200.0),
@@ -3721,12 +3745,12 @@ mod tests {
             }
         }
         let slots = config.ship_spec("battleship").slots as usize;
-        let a = choose_loadout(&state, &config, 3, "battleship");
-        let b = choose_loadout(&state, &config, 3, "battleship");
+        let a = choose_loadout(&state, &config, "中国".to_string(), "battleship");
+        let b = choose_loadout(&state, &config, "中国".to_string(), "battleship");
         assert_eq!(a, b, "loadout must be deterministic");
         assert!(a.len() <= slots, "must not exceed slot cap ({slots})");
         // The whole chosen set must be cumulatively affordable out of the stockpile.
-        let mut pool = state.faction(3).unwrap().resources.clone();
+        let mut pool = state.faction("中国").unwrap().resources.clone();
         for c in &a {
             for (r, amt) in &config.component_spec(c).cost {
                 assert!(
@@ -3745,7 +3769,7 @@ mod tests {
     #[test]
     fn choose_next_class_diversifies_toward_a_mix() {
         let (config, mut state) = fresh_world(42);
-        if let Some(f) = state.faction_mut(3) {
+        if let Some(f) = state.faction_mut("中国") {
             for (r, amt) in [
                 ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
                 ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
@@ -3756,14 +3780,14 @@ mod tests {
         }
         // 强制这支势力的现役舰队全部是护卫舰——其余舰型因此「欠份额」，得到去重加分。
         for s in state.ships.iter_mut() {
-            if s.faction_id == 3 {
+            if s.faction_id == "中国" {
                 s.class = "corvette".to_string();
             }
         }
         let mut rng = Prng::new(7);
         let mut got = std::collections::BTreeSet::new();
         for _ in 0..60 {
-            got.insert(choose_next_class(&state, 3, &config, &mut rng));
+            got.insert(choose_next_class(&state, "中国", &config, &mut rng));
         }
         assert!(
             got.len() >= 3,
@@ -3776,7 +3800,7 @@ mod tests {
     #[test]
     fn choose_next_class_builds_heavier_navy_at_war() {
         let (config, mut state) = fresh_world(42);
-        if let Some(f) = state.faction_mut(3) {
+        if let Some(f) = state.faction_mut("中国") {
             for (r, amt) in [
                 ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
                 ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
@@ -3787,7 +3811,7 @@ mod tests {
         }
         // 舰队全部护卫舰，让去重加分对各舰型一视同仁。
         for s in state.ships.iter_mut() {
-            if s.faction_id == 3 {
+            if s.faction_id == "中国" {
                 s.class = "corvette".to_string();
             }
         }
@@ -3795,7 +3819,7 @@ mod tests {
             let mut rng = Prng::new(99);
             let mut heavy = 0;
             for _ in 0..240 {
-                let c = choose_next_class(st, 3, &config, &mut rng);
+                let c = choose_next_class(st, "中国", &config, &mut rng);
                 if c == "battleship" || c == "carrier" {
                     heavy += 1;
                 }
@@ -3803,8 +3827,8 @@ mod tests {
             heavy
         };
         let peace = sample_heavy(&state);
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
         let war = sample_heavy(&state);
         assert!(
             war > peace,
@@ -3825,22 +3849,22 @@ mod tests {
                     c.buildings
                         .iter()
                         .filter(|b| b.is_shipyard() && b.ship_type.is_some())
-                        .map(|b| (c.id, b.ship_type.clone().unwrap()))
+                        .map(|b| (c.name.clone(), b.ship_type.clone().unwrap()))
                 })
                 .collect()
         };
         // China (3) 舰队全护卫（过度单一），并让其与 US (1) 交战。
         for s in state.ships.iter_mut() {
-            if s.faction_id == 3 {
+            if s.faction_id == "中国" {
                 s.class = "corvette".to_string();
             }
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let before = shipyard_types(&state, 3);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let before = shipyard_types(&state, "中国".to_string());
         let mut rng = Prng::new(7);
-        retool_shipyards(&mut state, &config, 3, &mut rng);
-        let after = shipyard_types(&state, 3);
+        retool_shipyards(&mut state, &config, "中国", &mut rng);
+        let after = shipyard_types(&state, "中国".to_string());
         assert!(
             after.iter().any(|(_, t)| t != "corvette"),
             "a corvette-dominated wartime fleet should retool a shipyard into a war class; before={before:?} after={after:?}"
@@ -3852,10 +3876,11 @@ mod tests {
     fn fleet_flag_is_the_factions_first_carrier() {
         let (_config, mut state) = fresh_world(42);
         // China (3) ship 2 设为航母 → 成为旗舰。
-        if let Some(s) = state.ship_mut(2) {
+        let ship2 = state.ships[2].name.clone();
+        if let Some(s) = state.ship_mut(&ship2) {
             s.class = "carrier".to_string();
         }
-        assert_eq!(fleet_flag(&state, 3), Some(2));
+        assert_eq!(fleet_flag(&state, "中国"), Some(ship2));
         // 没有航母 → 无旗舰（无护航）。
     }
 
@@ -3864,16 +3889,19 @@ mod tests {
     fn ships_do_not_chase_enemies_beyond_pursuit_range() {
         let (config, mut state) = fresh_world(42);
         // 中国 ship 0 在 [40,40]；把 US 的 ship 5 放到远处（远超 pursuit_range 12）。
-        if let Some(s) = state.ship_mut(5) {
+        let ship0 = state.ships[0].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        if let Some(s) = state.ship_mut(&ship5) {
             s.position = [140.0, 40.0];
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let weapons = ship_weapons(&config, state.ship(0).unwrap());
-        let picked = pick_target(&state, &config, 3, [40.0, 40.0], &mut Prng::new(1), None, &weapons);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let weapons = ship_weapons(&config, state.ship(&ship0).unwrap());
+        let picked = pick_target(&state, &config, "中国", [40.0, 40.0], &mut Prng::new(1), None, &weapons);
         // 远处那艘敌舰不应被选中（超出追击半径）；可能选中更近的目标或城市/空。
+        let chased = matches!(picked, Some(ShipBehavior::TargetShip { ship: ref s, .. }) if *s == ship5);
         assert!(
-            !matches!(picked, Some(ShipBehavior::TargetShip { ship: 5, .. })),
+            !chased,
             "a hostile beyond pursuit_range should not be chased; got {picked:?}"
         );
     }
@@ -3884,22 +3912,24 @@ mod tests {
     fn fleet_air_defense_covers_nearby_missile_targets() {
         let (config, mut state) = fresh_world(42);
         // 目标：US (1) ship 5 在 [40,40]，自身无 PD。
-        if let Some(t) = state.ship_mut(5) {
+        let ship3 = state.ships[3].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        if let Some(t) = state.ship_mut(&ship5) {
             t.position = [40.0, 40.0];
             t.components = Vec::new();
             t.component_hp = Vec::new();
         }
         // 友舰：US ship 3 在 [41,40]，装点防御。
-        if let Some(g) = state.ship_mut(3) {
+        if let Some(g) = state.ship_mut(&ship3) {
             g.position = [41.0, 40.0];
             g.components = vec!["point_defense".to_string()];
             g.component_hp = g.components.iter().map(|c| component_integrity(&config, c)).collect();
         }
-        let cover_with = cluster_pd_cover(&state, &config, 5, 1, [40.0, 40.0]);
+        let cover_with = cluster_pd_cover(&state, &config, &ship5, "美国", [40.0, 40.0]);
         assert!(cover_with > 0.0, "a nearby PD ship should give air-defense cover; got {cover_with}");
         // 把 PD 舰移远 → 覆盖应下降。
-        state.ship_mut(3).unwrap().position = [100.0, 100.0];
-        let cover_far = cluster_pd_cover(&state, &config, 5, 1, [40.0, 40.0]);
+        state.ship_mut(&ship3).unwrap().position = [100.0, 100.0];
+        let cover_far = cluster_pd_cover(&state, &config, &ship5, "美国", [40.0, 40.0]);
         assert!(
             cover_far < cover_with,
             "cover should drop once the PD ship is far (with {cover_with}, far {cover_far})"
@@ -3910,7 +3940,7 @@ mod tests {
     #[test]
     fn choose_loadout_is_balanced_and_threat_aware() {
         let (config, mut state) = fresh_world(42);
-        if let Some(f) = state.faction_mut(3) {
+        if let Some(f) = state.faction_mut("中国") {
             for (r, amt) in [
                 ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
                 ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
@@ -3920,7 +3950,7 @@ mod tests {
             }
         }
         // 和平：一艘巡洋舰（slot≥2）应至少各有一件武器与防御。
-        let peace = choose_loadout(&state, &config, 3, "cruiser");
+        let peace = choose_loadout(&state, &config, "中国".to_string(), "cruiser");
         assert!(
             peace.iter().any(|c| config.component_spec(c).category == "weapon"),
             "a ship should field a weapon (got {peace:?})"
@@ -3930,9 +3960,9 @@ mod tests {
             "a ship should field a defense (got {peace:?})"
         );
         // 开战：武器数不应比和平少（战时要火力的偏置）。
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let war = choose_loadout(&state, &config, 3, "cruiser");
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let war = choose_loadout(&state, &config, "中国".to_string(), "cruiser");
         let peace_w = peace.iter().filter(|c| config.component_spec(c).category == "weapon").count();
         let war_w = war.iter().filter(|c| config.component_spec(c).category == "weapon").count();
         assert!(
@@ -3948,11 +3978,13 @@ mod tests {
         // Attacker: China corvette (id 0) fitted with a railgun; target: US destroyer (id 3)
         // fitted with an energy shield. Both pinned far from any capital so home-field
         // defense is neutral (mult = 1.0). Hostile so the volley is a real attack.
-        if let Some(s) = state.ship_mut(0) {
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
             s.position = [80.0, 80.0];
             s.components = vec!["railgun".to_string()];
         }
-        if let Some(s) = state.ship_mut(3) {
+        if let Some(s) = state.ship_mut(&ship3) {
             s.position = [80.4, 80.0];
             s.components = vec!["shield".to_string()];
             s.hull = 24.0;
@@ -3960,15 +3992,15 @@ mod tests {
             s.shield = 12.0;
             s.shield_max = 12.0;
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
 
-        let shield_before = state.ship(3).map(|s| s.shield).unwrap();
-        let hull_before = state.ship(3).map(|s| s.hull).unwrap();
-        fire(&mut state, &config, 0, 3);
+        let shield_before = state.ship(&ship3).map(|s| s.shield).unwrap();
+        let hull_before = state.ship(&ship3).map(|s| s.hull).unwrap();
+        fire(&mut state, &config, &ship0, &ship3);
 
-        let shield_after = state.ship(3).map(|s| s.shield).unwrap();
-        let hull_after = state.ship(3).map(|s| s.hull).unwrap();
+        let shield_after = state.ship(&ship3).map(|s| s.shield).unwrap();
+        let hull_after = state.ship(&ship3).map(|s| s.hull).unwrap();
         assert!(shield_after < shield_before, "shield pool must absorb damage");
         assert!(hull_after < hull_before, "hull should take spill damage too");
         assert!(hull_after > 0.0, "a single volley on a destroyer should not one-shot it");
@@ -4008,22 +4040,25 @@ mod tests {
         let (config, mut state) = fresh_world(42);
         // China (3) looks from [40,40]; two hostile US (1) ships sit inside its 0.4 range.
         // Ship 3 (destroyer, hull 24) is healthy; ship 5 (cruiser, hull 5/72) is badly wounded.
-        if let Some(s) = state.ship_mut(3) {
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        if let Some(s) = state.ship_mut(&ship3) {
             s.position = [40.2, 40.0];
             s.hull = 24.0;
             s.hull_max = 24.0;
         }
-        if let Some(s) = state.ship_mut(5) {
+        if let Some(s) = state.ship_mut(&ship5) {
             s.position = [40.3, 40.0];
             s.hull = 5.0;
             s.hull_max = 72.0;
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let target = nearest_enemy_ship(&state, &config, 3, [40.0, 40.0], 0.4, None, 0);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let target = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 0.4, None, &ship0);
         assert_eq!(
             target,
-            Some(5),
+            Some(ship5),
             "should concentrate fire on the wounded enemy (5), got {target:?}"
         );
     }
@@ -4036,23 +4071,26 @@ mod tests {
         // China (3) fields a missile-armed attacker (ship 0). Two hostile US (1)
         // targets sit in range: ship 3 has point-defense (intercepts missiles),
         // ship 5 has none — the missile attacker should prefer ship 5.
-        if let Some(s) = state.ship_mut(0) {
+        let ship0 = state.ships[0].name.clone();
+        let ship3 = state.ships[3].name.clone();
+        let ship5 = state.ships[5].name.clone();
+        if let Some(s) = state.ship_mut(&ship0) {
             s.position = [40.0, 40.0];
             s.components = vec!["missile".to_string()];
         }
-        if let Some(s) = state.ship_mut(3) {
+        if let Some(s) = state.ship_mut(&ship3) {
             s.position = [40.2, 40.0];
             s.components = vec!["point_defense".to_string()];
         }
-        if let Some(s) = state.ship_mut(5) {
+        if let Some(s) = state.ship_mut(&ship5) {
             s.position = [40.3, 40.0];
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
-        let target = nearest_enemy_ship(&state, &config, 3, [40.0, 40.0], 0.4, None, 0);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let target = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 0.4, None, &ship0);
         assert_eq!(
             target,
-            Some(5),
+            Some(ship5),
             "a missile attacker should shun the point-defense ship (5), got {target:?}"
         );
     }
@@ -4062,30 +4100,32 @@ mod tests {
     #[test]
     fn damaged_far_ai_ship_withdraws_to_heal() {
         let (config, mut state) = fresh_world(42);
-        let home = state.body_position(2); // 地球（中国首都）。
+        let home = state.body_position("地球"); // 地球（中国首都）。
+        let ship2 = state.ships[2].name.clone();
+        let ship3 = state.ships[3].name.clone();
         // China (3) destroyer id 2: badly wounded (hull 5/24) and far from its capital.
-        if let Some(s) = state.ship_mut(2) {
+        if let Some(s) = state.ship_mut(&ship2) {
             s.position = [40.0, 40.0];
             s.hull = 5.0;
             s.hull_max = 24.0;
         }
         // A hostile US (1) ship within the destroyer's attack range.
-        if let Some(s) = state.ship_mut(3) {
+        if let Some(s) = state.ship_mut(&ship3) {
             s.position = [40.3, 40.0];
         }
-        state.faction_mut(3).unwrap().relations.insert(1, -35.0);
-        state.faction_mut(1).unwrap().relations.insert(3, -35.0);
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
 
         let d_before = dist([40.0, 40.0], home);
         let mut rng = Prng::new(42);
         advance(&mut state, &config, &mut rng);
 
         assert!(
-            state.events.iter().any(|e| matches!(e, GameEvent::Withdraw { ship: 2, .. })),
+            state.events.iter().any(|e| matches!(e, GameEvent::Withdraw { ship: s, .. } if *s == ship2)),
             "a damaged far-from-home ship must withdraw, events={:?}",
             state.events
         );
-        let s = state.ship(2).expect("withdrawing ship must survive");
+        let s = state.ship(&ship2).expect("withdrawing ship must survive");
         let d_after = dist(s.position, home);
         assert!(
             d_after < d_before,

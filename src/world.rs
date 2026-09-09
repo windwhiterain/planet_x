@@ -1,4 +1,4 @@
-﻿//! Procedural generation of a default start state (`--start` not given).
+//! Procedural generation of a default start state (`--start` not given).
 //!
 //! This builds the Solar-system sandbox fixed by the design spec's 天体表: every
 //! one of the 18 listed bodies hosts at least one 定居点 (settlement — on the
@@ -19,19 +19,19 @@ use crate::model::*;
 use crate::prng::Prng;
 use std::collections::BTreeMap;
 
-// Named faction ids so the world is easy to read and stable across seeds.
-pub const F_UN: u32 = 0;
-pub const F_US: u32 = 1;
-pub const F_EU: u32 = 2;
-pub const F_CN: u32 = 3;
-pub const F_RU: u32 = 4;
-pub const F_MINING: u32 = 5;
-pub const F_SCIENCE: u32 = 6;
-pub const F_TRANSPORT: u32 = 7;
-pub const F_CULT: u32 = 8;
+// Faction identity = the faction's unique **name** (per the schema). These constants
+// are the names themselves so the world is easy to read and stable across seeds.
+pub const F_UN: &str = "联合国";
+pub const F_US: &str = "美国";
+pub const F_EU: &str = "欧盟";
+pub const F_CN: &str = "中国";
+pub const F_RU: &str = "俄罗斯";
+pub const F_MINING: &str = "星系矿业";
+pub const F_SCIENCE: &str = "无国界科学组织";
+pub const F_TRANSPORT: &str = "深空运输联盟";
+pub const F_CULT: &str = "行星X崇拜教";
 
 fn body(
-    id: BodyId,
     name: &str,
     semi_major: f64,
     e: f64,
@@ -49,7 +49,6 @@ fn body(
         period: (a.powf(1.5) * 12.0) as f32,
     };
     Body {
-        id,
         name: name.to_string(),
         orbit,
         position: orbit.position(0.0),
@@ -129,13 +128,12 @@ fn seed_buildings(s: &Settlement, population: u32, ship_class: &str, config: &Ga
     buildings
 }
 
-/// A city occupying settlement site `site` (1:1) of `body_id`.
+/// A city occupying settlement site `site` (1:1) of the body named `body_name`.
 fn city(
-    id: CityId,
     name: &str,
-    body_id: BodyId,
+    body_name: &str,
     site: usize,
-    faction: FactionId,
+    faction: &str,
     population: u32,
     settlement: &Settlement,
     ship_class: &str,
@@ -146,11 +144,10 @@ fn city(
     let mut ship_progress = BTreeMap::new();
     ship_progress.insert(ship_class.to_string(), 0.0);
     City {
-        id,
         name: name.to_string(),
-        body_id,
+        body_id: body_name.to_string(),
         settlement: site,
-        faction_id: faction,
+        faction_id: faction.to_string(),
         population,
         buildings,
         ship_progress,
@@ -164,18 +161,16 @@ fn stockpile(items: &[(&str, f64)]) -> ResourceMap {
 }
 
 fn faction(
-    id: FactionId,
     name: &str,
     symbol: char,
     color: &str,
     resources: ResourceMap,
     alignment: f64,
     aggression: f64,
-    capital: BodyId,
+    capital_body: &str,
 ) -> Faction {
-    let (home_radius, home_attack_mult, home_regen_bonus) = home_for(id);
+    let (home_radius, home_attack_mult, home_regen_bonus) = home_for(name);
     Faction {
-        id,
         name: name.to_string(),
         symbol,
         color: color.to_string(),
@@ -183,7 +178,7 @@ fn faction(
         relations: std::collections::BTreeMap::new(),
         alignment,
         aggression,
-        capital_body: capital,
+        capital_body: capital_body.to_string(),
         home_radius,
         home_attack_mult,
         home_regen_bonus,
@@ -195,9 +190,9 @@ fn faction(
 /// survive being besieged at its isolated Kuiper-belt sanctuary — it *mastered the
 /// correct Newtonian-corrected gravity* (MOND). Everyone else gets a modest core
 /// stronghold so conquering near someone's capital costs extra.
-fn home_for(id: FactionId) -> (f64, f64, f64) {
-    match id {
-        F_CULT => (30.0, 0.35, 0.12),
+fn home_for(name: &str) -> (f64, f64, f64) {
+    match name {
+        "行星X崇拜教" => (30.0, 0.35, 0.12),
         _ => (6.0, 0.85, 0.02),
     }
 }
@@ -216,7 +211,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let bodies = vec![
         // 水星（中国）资源丰富：铁，铂
         body(
-            0,
             "水星",
             0.39,
             0.206,
@@ -225,7 +219,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 金星（中国）资源丰富：碳
         body(
-            1,
             "金星",
             0.72,
             0.007,
@@ -234,7 +227,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 地球/城市 — 五大城市群各自占一个定居点（1:1），矿藏按 spec 各自列出。
         body(
-            2,
             "地球",
             1.00,
             0.017,
@@ -284,7 +276,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 月球（联合国）资源丰富：铁，氦-3
         body(
-            3,
             "月球",
             1.00,
             0.055,
@@ -293,7 +284,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 火星（美国）资源丰富：硅，铁，水冰
         body(
-            4,
             "火星",
             1.52,
             0.093,
@@ -308,7 +298,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 灶神星（深空运输联盟）资源丰富：硅，钍
         body(
-            5,
             "灶神星",
             2.36,
             0.089,
@@ -317,7 +306,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 木星（无国界科学组织）资源丰富：氢 —— 轨道空间站
         body(
-            6,
             "木星",
             5.20,
             0.049,
@@ -326,7 +314,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 欧罗巴（美国）资源丰富：水冰
         body(
-            7,
             "欧罗巴",
             5.22,
             0.009,
@@ -335,7 +322,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 土星（无国界科学组织）资源丰富：氢，铂，金，水冰（包括星环）—— 轨道空间站
         body(
-            8,
             "土星",
             9.58,
             0.057,
@@ -355,7 +341,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 泰坦（星系矿业）资源丰富：硅，铁，铀
         body(
-            9,
             "泰坦",
             9.58,
             0.029,
@@ -370,7 +355,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 天王星（欧盟）资源丰富：甲烷，氢 —— 轨道空间站
         body(
-            10,
             "天王星",
             19.2,
             0.046,
@@ -379,7 +363,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 海王星（欧盟）资源丰富：水冰，甲烷 —— 轨道空间站
         body(
-            11,
             "海王星",
             30.05,
             0.009,
@@ -388,7 +371,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 冥王星（俄罗斯）资源丰富：水冰，硅，碳
         body(
-            12,
             "冥王星",
             39.48,
             0.249,
@@ -403,7 +385,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 卡戎（俄罗斯）资源丰富：铁，金
         body(
-            13,
             "卡戎",
             39.48,
             0.12,
@@ -412,7 +393,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 伊克西翁（行星X崇拜教）资源丰富：碳
         body(
-            14,
             "伊克西翁",
             39.70,
             0.24,
@@ -421,7 +401,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 妊神星（星系矿业）资源丰富：水冰，硅，铂
         body(
-            15,
             "妊神星",
             43.22,
             0.19,
@@ -436,7 +415,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 创神星（星系矿业）资源丰富：铁，铂
         body(
-            16,
             "创神星",
             45.43,
             0.16,
@@ -445,7 +423,6 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         ),
         // 阋神星（星系矿业）资源丰富：硅，铀
         body(
-            17,
             "阋神星",
             67.78,
             0.44,
@@ -461,77 +438,70 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, "联合国", 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, 3),
+        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, "月球"),
         faction(
             F_US,
-            "美国",
             'A',
             "#06b6d4",
             stockpile(&[("铁", 6.0), ("碳", 5.0), ("铀", 1.0)]),
             1.0,
             0.60,
-            4,
+            "火星",
         ),
-        faction(F_EU, "欧盟", 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, 2),
+        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, "地球"),
         faction(
             F_CN,
-            "中国",
             'C',
             "#ef4444",
             stockpile(&[("铁", 7.0), ("碳", 6.0), ("硅", 2.0)]),
             -1.0,
             0.50,
-            2,
+            "地球",
         ),
         faction(
             F_RU,
-            "俄罗斯",
             'R',
             "#ec4899",
             stockpile(&[("铁", 5.0), ("碳", 4.0), ("铀", 2.0)]),
             -0.9,
             0.45,
-            2,
+            "地球",
         ),
         faction(
             F_MINING,
-            "星系矿业",
             'M',
             "#eab308",
             stockpile(&[("铁", 6.0), ("金", 2.0), ("铂", 1.0)]),
             0.0,
             0.20,
-            9,
+            "泰坦",
         ),
         faction(
             F_SCIENCE,
-            "无国界科学组织",
             'S',
             "#22c55e",
             stockpile(&[("硅", 4.0), ("氦-3", 3.0), ("碳", 2.0)]),
             0.2,
             0.05,
-            6,
+            "木星",
         ),
         faction(
             F_TRANSPORT,
-            "深空运输联盟",
             'T',
             "#f8fafc",
             stockpile(&[("碳", 6.0), ("氢", 3.0), ("铁", 2.0)]),
             -0.1,
             0.15,
-            5,
+            "灶神星",
         ),
         faction(
             F_CULT,
-            "行星X崇拜教",
             'X',
             "#d946ef",
             stockpile(&[("铀", 3.0), ("钍", 2.0), ("金", 1.0)]),
             -3.0,
             0.90,
-            14,
+            "伊克西翁",
         ),
     ];
 
@@ -541,9 +511,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // a little jitter. The dynamic model in sim::step_diplomacy then lets blocs
     // coalesce and rivalries escalate on their own, giving a build-up phase
     // before the first war and letting wars later wind down.
-    let set_rel = |x: &mut [Faction], a: u32, b: u32, v: f64| {
-        x[a as usize].relations.insert(b, v);
-        x[b as usize].relations.insert(a, v);
+    let set_rel = |x: &mut [Faction], a: usize, b: usize, v: f64| {
+        let na = x[a].name.clone();
+        let nb = x[b].name.clone();
+        x[a].relations.insert(nb, v);
+        x[b].relations.insert(na, v);
     };
     let affinity = |align_a: f64, align_b: f64| -> f64 {
         let band = 2.0;
@@ -557,9 +529,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     };
     for i in 0..factions.len() {
         for j in (i + 1)..factions.len() {
-            let (ia, ib) = (factions[i].id, factions[j].id);
             let va = seed_rel(factions[i].alignment, factions[j].alignment);
-            set_rel(&mut factions, ia, ib, va);
+            set_rel(&mut factions, i, j, va);
         }
     }
 
@@ -570,43 +541,56 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let mut next_building_id: BuildingId = 0;
     let cities = vec![
         // 地球/城市（spec 命名；长三角/珠三角=中国、亚特兰大=美国、巴黎=欧盟、莫斯科=俄罗斯）
-        city(0, "长三角", 2, 0, F_CN, 1400, &earth.settlements[0], "corvette", config, &mut next_building_id),
-        city(1, "珠三角", 2, 1, F_CN, 1100, &earth.settlements[1], "destroyer", config, &mut next_building_id),
-        city(2, "亚特兰大", 2, 2, F_US, 900, &earth.settlements[2], "destroyer", config, &mut next_building_id),
-        city(3, "巴黎", 2, 3, F_EU, 700, &earth.settlements[3], "cruiser", config, &mut next_building_id),
-        city(4, "莫斯科", 2, 4, F_RU, 800, &earth.settlements[4], "battleship", config, &mut next_building_id),
+        city("长三角", "地球", 0, F_CN, 1400, &earth.settlements[0], "corvette", config, &mut next_building_id),
+        city("珠三角", "地球", 1, F_CN, 1100, &earth.settlements[1], "destroyer", config, &mut next_building_id),
+        city("亚特兰大", "地球", 2, F_US, 900, &earth.settlements[2], "destroyer", config, &mut next_building_id),
+        city("巴黎", "地球", 3, F_EU, 700, &earth.settlements[3], "cruiser", config, &mut next_building_id),
+        city("莫斯科", "地球", 4, F_RU, 800, &earth.settlements[4], "battleship", config, &mut next_building_id),
         // 各族主星（spec 天体归属，定居点 ↔ 城 1:1）
-        city(5, "水星熔炉基地", 0, 0, F_CN, 220, &bodies[0].settlements[0], "corvette", config, &mut next_building_id),
-        city(6, "金星浮空之城", 1, 0, F_CN, 260, &bodies[1].settlements[0], "corvette", config, &mut next_building_id),
-        city(7, "宁静海基地", 3, 0, F_UN, 420, &bodies[3].settlements[0], "corvette", config, &mut next_building_id),
-        city(8, "奥林匹斯港", 4, 0, F_US, 1000, &bodies[4].settlements[0], "cruiser", config, &mut next_building_id),
-        city(9, "灶神星转运港", 5, 0, F_TRANSPORT, 280, &bodies[5].settlements[0], "corvette", config, &mut next_building_id),
-        city(10, "大红斑科学站", 6, 0, F_SCIENCE, 520, &bodies[6].settlements[0], "carrier", config, &mut next_building_id),
-        city(11, "欧罗巴冰下港", 7, 0, F_US, 300, &bodies[7].settlements[0], "corvette", config, &mut next_building_id),
-        city(12, "土星环科学站", 8, 0, F_SCIENCE, 480, &bodies[8].settlements[0], "corvette", config, &mut next_building_id),
-        city(13, "泰坦采矿城", 9, 0, F_MINING, 460, &bodies[9].settlements[0], "cruiser", config, &mut next_building_id),
-        city(14, "天王星轨道站", 10, 0, F_EU, 380, &bodies[10].settlements[0], "cruiser", config, &mut next_building_id),
-        city(15, "海王星轨道站", 11, 0, F_EU, 340, &bodies[11].settlements[0], "corvette", config, &mut next_building_id),
-        city(16, "冥王星前哨", 12, 0, F_RU, 360, &bodies[12].settlements[0], "cruiser", config, &mut next_building_id),
-        city(17, "卡戎深空港", 13, 0, F_RU, 260, &bodies[13].settlements[0], "corvette", config, &mut next_building_id),
-        city(18, "伊克西翁圣所", 14, 0, F_CULT, 200, &bodies[14].settlements[0], "cruiser", config, &mut next_building_id),
-        city(19, "妊神星转运站", 15, 0, F_MINING, 260, &bodies[15].settlements[0], "corvette", config, &mut next_building_id),
-        city(20, "创神星采矿站", 16, 0, F_MINING, 240, &bodies[16].settlements[0], "corvette", config, &mut next_building_id),
-        city(21, "阋神星前哨", 17, 0, F_MINING, 220, &bodies[17].settlements[0], "corvette", config, &mut next_building_id),
+        city("水星熔炉基地", "水星", 0, F_CN, 220, &bodies[0].settlements[0], "corvette", config, &mut next_building_id),
+        city("金星浮空之城", "金星", 0, F_CN, 260, &bodies[1].settlements[0], "corvette", config, &mut next_building_id),
+        city("宁静海基地", "月球", 0, F_UN, 420, &bodies[3].settlements[0], "corvette", config, &mut next_building_id),
+        city("奥林匹斯港", "火星", 0, F_US, 1000, &bodies[4].settlements[0], "cruiser", config, &mut next_building_id),
+        city("灶神星转运港", "灶神星", 0, F_TRANSPORT, 280, &bodies[5].settlements[0], "corvette", config, &mut next_building_id),
+        city("大红斑科学站", "木星", 0, F_SCIENCE, 520, &bodies[6].settlements[0], "carrier", config, &mut next_building_id),
+        city("欧罗巴冰下港", "欧罗巴", 0, F_US, 300, &bodies[7].settlements[0], "corvette", config, &mut next_building_id),
+        city("土星环科学站", "土星", 0, F_SCIENCE, 480, &bodies[8].settlements[0], "corvette", config, &mut next_building_id),
+        city("泰坦采矿城", "泰坦", 0, F_MINING, 460, &bodies[9].settlements[0], "cruiser", config, &mut next_building_id),
+        city("天王星轨道站", "天王星", 0, F_EU, 380, &bodies[10].settlements[0], "cruiser", config, &mut next_building_id),
+        city("海王星轨道站", "海王星", 0, F_EU, 340, &bodies[11].settlements[0], "corvette", config, &mut next_building_id),
+        city("冥王星前哨", "冥王星", 0, F_RU, 360, &bodies[12].settlements[0], "cruiser", config, &mut next_building_id),
+        city("卡戎深空港", "卡戎", 0, F_RU, 260, &bodies[13].settlements[0], "corvette", config, &mut next_building_id),
+        city("伊克西翁圣所", "伊克西翁", 0, F_CULT, 200, &bodies[14].settlements[0], "cruiser", config, &mut next_building_id),
+        city("妊神星转运站", "妊神星", 0, F_MINING, 260, &bodies[15].settlements[0], "corvette", config, &mut next_building_id),
+        city("创神星采矿站", "创神星", 0, F_MINING, 240, &bodies[16].settlements[0], "corvette", config, &mut next_building_id),
+        city("阋神星前哨", "阋神星", 0, F_MINING, 220, &bodies[17].settlements[0], "corvette", config, &mut next_building_id),
     ];
 
     // --- Starting navy ------------------------------------------------------
     // One ship per entry, id assigned in order; jittered around its home body.
+    // Each faction's ships are named deterministically from its 名字库 (name pool) so
+    // the ship *name* is a unique, meaningful key (per the design philosophy).
     let mut ships = Vec::new();
-    let mut next_ship = 0u32;
-    let mut add_ship = |ships: &mut Vec<Ship>, faction: FactionId, body_id: BodyId, class: &str| {
-        let pos = bodies[body_id as usize].orbit.position(0.0);
+    let mut ship_name_seq: BTreeMap<FactionId, u64> = BTreeMap::new();
+    let mut add_ship = |ships: &mut Vec<Ship>, faction: &str, body_name: &str, class: &str| {
+        let pos = bodies
+            .iter()
+            .find(|b| b.name == body_name)
+            .map(|b| b.orbit.position(0.0))
+            .unwrap_or([0.0, 0.0]);
         let spec = config.ship_spec(class);
+        let seq = *ship_name_seq.entry(faction.to_string()).or_insert(0);
+        ship_name_seq.insert(faction.to_string(), seq + 1);
+        let fname = factions
+            .iter()
+            .find(|f| f.name == faction)
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        let name = ship_display_name(config.ship_pool(&fname), seq);
         ships.push(Ship {
-            id: next_ship,
-            name: format!("{}-{}", spec.label, faction),
+            name,
             class: class.to_string(),
-            faction_id: faction,
+            faction_id: faction.to_string(),
             position: [pos[0] + rng.range_f64(-0.05, 0.05), pos[1] + rng.range_f64(-0.05, 0.05)],
             hull: spec.hull,
             hull_max: spec.hull,
@@ -616,39 +600,41 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             component_hp: Vec::new(),
             velocity: 0.0,
         });
-        next_ship += 1;
     };
 
     // 中国：长三角/珠三角 + 水星（护卫×2、驱逐×1）
-    add_ship(&mut ships, F_CN, 2, "corvette");
-    add_ship(&mut ships, F_CN, 2, "corvette");
-    add_ship(&mut ships, F_CN, 0, "destroyer");
+    add_ship(&mut ships, F_CN, "地球", "corvette");
+    add_ship(&mut ships, F_CN, "地球", "corvette");
+    add_ship(&mut ships, F_CN, "水星", "destroyer");
     // 美国：火星（驱逐×2、巡洋×1）
-    add_ship(&mut ships, F_US, 4, "destroyer");
-    add_ship(&mut ships, F_US, 4, "destroyer");
-    add_ship(&mut ships, F_US, 4, "cruiser");
+    add_ship(&mut ships, F_US, "火星", "destroyer");
+    add_ship(&mut ships, F_US, "火星", "destroyer");
+    add_ship(&mut ships, F_US, "火星", "cruiser");
     // 欧盟：地球/巴黎 + 天王星（巡洋×1、护卫×1）
-    add_ship(&mut ships, F_EU, 2, "cruiser");
-    add_ship(&mut ships, F_EU, 10, "corvette");
+    add_ship(&mut ships, F_EU, "地球", "cruiser");
+    add_ship(&mut ships, F_EU, "天王星", "corvette");
     // 俄罗斯：冥王星（巡洋×1、战列×1）
-    add_ship(&mut ships, F_RU, 12, "cruiser");
-    add_ship(&mut ships, F_RU, 12, "battleship");
+    add_ship(&mut ships, F_RU, "冥王星", "cruiser");
+    add_ship(&mut ships, F_RU, "冥王星", "battleship");
     // 联合国：月球（护卫×2）
-    add_ship(&mut ships, F_UN, 3, "corvette");
-    add_ship(&mut ships, F_UN, 3, "corvette");
+    add_ship(&mut ships, F_UN, "月球", "corvette");
+    add_ship(&mut ships, F_UN, "月球", "corvette");
     // 星系矿业：泰坦 + 创神星（护卫×1、巡洋×1）
-    add_ship(&mut ships, F_MINING, 9, "corvette");
-    add_ship(&mut ships, F_MINING, 9, "cruiser");
+    add_ship(&mut ships, F_MINING, "泰坦", "corvette");
+    add_ship(&mut ships, F_MINING, "泰坦", "cruiser");
     // 无国界科学组织：木星（航空母舰×1、护卫×1）
-    add_ship(&mut ships, F_SCIENCE, 6, "carrier");
-    add_ship(&mut ships, F_SCIENCE, 6, "corvette");
+    add_ship(&mut ships, F_SCIENCE, "木星", "carrier");
+    add_ship(&mut ships, F_SCIENCE, "木星", "corvette");
     // 深空运输联盟：灶神星（护卫×2）
-    add_ship(&mut ships, F_TRANSPORT, 5, "corvette");
-    add_ship(&mut ships, F_TRANSPORT, 5, "corvette");
+    add_ship(&mut ships, F_TRANSPORT, "灶神星", "corvette");
+    add_ship(&mut ships, F_TRANSPORT, "灶神星", "corvette");
     // 行星X崇拜教：伊克西翁（巡洋×2、护卫×1）
-    add_ship(&mut ships, F_CULT, 14, "cruiser");
-    add_ship(&mut ships, F_CULT, 14, "cruiser");
-    add_ship(&mut ships, F_CULT, 14, "corvette");
+    add_ship(&mut ships, F_CULT, "伊克西翁", "cruiser");
+    add_ship(&mut ships, F_CULT, "伊克西翁", "cruiser");
+    add_ship(&mut ships, F_CULT, "伊克西翁", "corvette");
+    // Release the closure's borrows (factions / ship_name_seq / rng) so the control
+    // setup and the State literal can use them.
+    drop(add_ship);
 
     // --- 可控状态 (command-controlled state) --------------------------------
     // Populate each faction's controllable state from the config: per-round
@@ -668,16 +654,16 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             .iter()
             .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
-        control.insert(f.id, c);
+        control.insert(f.name.clone(), c);
     }
     for city in &cities {
-        let c = control.entry(city.faction_id).or_default();
+        let c = control.entry(city.faction_id.clone()).or_default();
         for b in &city.buildings {
-            let ikey = (city.id, b.id);
+            let ikey = (city.name.clone(), b.id);
             c.invest_weights
                 .insert(ikey, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
             if b.is_shipyard() {
-                let bkey = (city.id, b.id);
+                let bkey = (city.name.clone(), b.id);
                 c.build_weights
                     .insert(bkey, Control::inherit(config.building_spec(&b.kind).default_build_weight));
             }
@@ -685,7 +671,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     }
     for s in &ships {
         if let Some(c) = control.get_mut(&s.faction_id) {
-            c.ship_orders.insert(s.id, Control::inherit(ShipBehavior::Idle));
+            c.ship_orders.insert(s.name.clone(), Control::inherit(ShipBehavior::Idle));
         }
     }
 
@@ -704,6 +690,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         scope,
         events: Vec::new(),
         chronicle: Vec::new(),
+        ship_name_seq,
     };
 
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------
@@ -711,15 +698,15 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // （初始造舰时是建在 State 组装前的裸舰）必须在世界生成后按资源优势补装配组件，
     // 否则它们没有火力。预置舰的组件视为开局已内置（**不扣**库存——否则会掏空第
     // 一回合的经济，而「预置即已装备」在概念上更合理）。
-    let fleet: Vec<(u32, String, FactionId)> = state
+    let fleet: Vec<(String, String, FactionId)> = state
         .ships
         .iter()
         .filter(|s| s.components.is_empty())
-        .map(|s| (s.id, s.class.clone(), s.faction_id))
+        .map(|s| (s.name.clone(), s.class.clone(), s.faction_id.clone()))
         .collect();
-    for (sid, class, fid) in fleet {
+    for (sname, class, fid) in fleet {
         let comps = crate::sim::choose_loadout(&state, &config, fid, &class);
-        if let Some(s) = state.ships.iter_mut().find(|s| s.id == sid) {
+        if let Some(s) = state.ships.iter_mut().find(|s| s.name == sname) {
             s.components = comps;
             s.component_hp = s.components.iter().map(|c| component_integrity(&config, c)).collect();
             // 组件可能会加护盾池/硬度/速度，重算并钳制当前值到新上限。

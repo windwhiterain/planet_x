@@ -1,4 +1,4 @@
-﻿//! HTTP server for the WebUI: a small JSON API over one in-memory [`State`].
+//! HTTP server for the WebUI: a small JSON API over one in-memory [`State`].
 //!
 //! The server owns the authoritative world state and the deterministic RNG and
 //! exposes a hotseat-style interface:
@@ -285,11 +285,12 @@ fn default_random_seed() -> String {
 
 fn faction_view(f: &Faction) -> FactionView {
     FactionView {
-        id: f.id,
+        // Faction identity is its unique name; `id` carries that name now.
+        id: f.name.clone(),
         name: f.name.clone(),
         color: f.color.clone(),
         resources: f.resources.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        relations: f.relations.iter().map(|(k, v)| (*k, *v)).collect(),
+        relations: f.relations.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         investment_budget: Vec::new(),
         construction_budget: Vec::new(),
     }
@@ -299,7 +300,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
     let ship_orders = c
         .ship_orders
         .iter()
-        .map(|(sid, ctrl)| ShipOrderEntry { ship: *sid, behavior: ctrl.value, mode: ctrl.mode })
+        .map(|(sid, ctrl)| ShipOrderEntry { ship: sid.clone(), behavior: ctrl.value.clone(), mode: ctrl.mode })
         .collect();
     let investment_budget = c
         .investment_budget
@@ -315,9 +316,9 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         .invest_weights
         .iter()
         .map(|((cid, bid), ctrl)| {
-            let b = state.city(*cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            let b = state.city(cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
             InvestWeightEntry {
-                city: *cid,
+                city: cid.clone(),
                 building: *bid,
                 kind: b.map(|x| x.kind.clone()).unwrap_or_default(),
                 resource: b.and_then(|x| x.resource.clone()),
@@ -332,9 +333,9 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
         .build_weights
         .iter()
         .map(|((cid, bid), ctrl)| {
-            let b = state.city(*cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            let b = state.city(cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
             BuildWeightEntry {
-                city: *cid,
+                city: cid.clone(),
                 building: *bid,
                 ship_type: b.and_then(|x| x.ship_type.clone()),
                 value: ctrl.value,
@@ -345,7 +346,7 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
     let loyalty_budget = c
         .loyalty_budget
         .iter()
-        .map(|(cid, ctrl)| LoyaltyBudgetEntry { city: *cid, value: ctrl.value, mode: ctrl.mode })
+        .map(|(cid, ctrl)| LoyaltyBudgetEntry { city: cid.clone(), value: ctrl.value, mode: ctrl.mode })
         .collect();
     FactionControlView {
         faction_id: fid,
@@ -361,9 +362,9 @@ fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Faction
 fn scope_view(s: &ControlScope) -> ScopeView {
     ScopeView {
         global: s.global,
-        factions: s.factions.iter().map(|(k, v)| (*k, *v)).collect(),
-        bodies: s.bodies.iter().map(|(k, v)| (*k, *v)).collect(),
-        cities: s.cities.iter().map(|(k, v)| (*k, *v)).collect(),
+        factions: s.factions.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        bodies: s.bodies.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        cities: s.cities.iter().map(|(k, v)| (k.clone(), *v)).collect(),
     }
 }
 
@@ -377,7 +378,7 @@ pub fn state_view(world: &GameWorld) -> StateView {
             f.construction_budget = c.construction_budget.iter().map(|(rt, ctrl)| (rt.clone(), ctrl.value)).collect();
         }
     }
-    let control = s.control.iter().map(|(fid, c)| control_view(s, *fid, c)).collect();
+    let control = s.control.iter().map(|(fid, c)| control_view(s, fid.clone(), c)).collect();
     StateView {
         round: s.round,
         time_month: s.time_month,
@@ -461,7 +462,7 @@ pub fn control_surface(state: &State) -> serde_json::Value {
     let control = state
         .control
         .iter()
-        .map(|(fid, c)| round_view(control_view(state, *fid, c)))
+        .map(|(fid, c)| round_view(control_view(state, fid.clone(), c)))
         .collect();
     let surface = ControlSurface { control, scope: scope_view(&state.scope) };
     serde_json::to_value(surface).expect("control surface is serializable")
@@ -473,14 +474,25 @@ pub fn control_surface(state: &State) -> serde_json::Value {
 /// and an omitted `mode` keeps the current mode. `scope` is overlaid when given.
 pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
     for fac in &req.control {
-        let c = state.control.entry(fac.faction_id).or_default();
+        let c = state.control.entry(fac.faction_id.clone()).or_default();
         for sp in &fac.ship_orders {
-            let ctrl = c.ship_orders.entry(sp.ship).or_insert_with(|| Control {
-                value: sp.behavior.unwrap_or(ShipBehavior::Idle),
+            // Resolve the ship by its **name** (the unique key): an order only
+            // applies to a ship that exists and that this faction actually owns,
+            // so ordering another faction's ship (or a vanished one) is a no-op.
+            let Some(ship_name) = state
+                .ships
+                .iter()
+                .find(|s| s.name == sp.ship && s.faction_id == fac.faction_id)
+                .map(|s| s.name.clone())
+            else {
+                continue;
+            };
+            let ctrl = c.ship_orders.entry(ship_name).or_insert_with(|| Control {
+                value: sp.behavior.clone().unwrap_or(ShipBehavior::Idle),
                 mode: sp.mode.flatten(),
             });
-            if let Some(v) = sp.behavior {
-                ctrl.value = v;
+            if let Some(v) = &sp.behavior {
+                ctrl.value = v.clone();
             }
             if let Some(m) = sp.mode {
                 ctrl.mode = m;
@@ -511,7 +523,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             }
         }
         for ip in &fac.invest_weights {
-            let key = (ip.city, ip.building);
+            let key = (ip.city.clone(), ip.building);
             let ctrl = c.invest_weights.entry(key).or_insert_with(|| Control {
                 value: ip.value.unwrap_or(0.0),
                 mode: ip.mode.flatten(),
@@ -524,7 +536,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             }
         }
         for bp in &fac.build_weights {
-            let key = (bp.city, bp.building);
+            let key = (bp.city.clone(), bp.building);
             let ctrl = c.build_weights.entry(key).or_insert_with(|| Control {
                 value: bp.value.unwrap_or(0.0),
                 mode: bp.mode.flatten(),
@@ -537,7 +549,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             }
         }
         for lp in &fac.loyalty_budget {
-            let ctrl = c.loyalty_budget.entry(lp.city).or_insert_with(|| Control {
+            let ctrl = c.loyalty_budget.entry(lp.city.clone()).or_insert_with(|| Control {
                 value: lp.value.unwrap_or(0.0),
                 mode: lp.mode.flatten(),
             });
@@ -549,7 +561,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
             }
         }
         for bpatch in &fac.buildings {
-            apply_building_patch(state, config, fac.faction_id, bpatch);
+            apply_building_patch(state, config, fac.faction_id.clone(), bpatch);
         }
     }
     if let Some(sv) = &req.scope {
@@ -559,13 +571,15 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) {
 
 /// Apply a single structural building patch: add / remove / modify a building.
 fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, patch: &BuildingPatch) {
-    let Some(cid) = patch.city else { return };
+    let Some(cid) = patch.city.clone() else { return };
 
     if patch.building.is_none() {
         // Add a new building.
         let kind = patch.kind.clone().unwrap_or_else(|| "residential".to_string());
         let Some(spec) = config.buildings.get(&kind) else { return };
-        if state.city(cid).map(|c| c.faction_id) != Some(fid) {
+        // City identity = its unique name; the new building only lands in a city
+        // owned by this faction.
+        if state.city(&cid).map(|c| c.faction_id.as_str()) != Some(fid.as_str()) {
             return;
         }
         let structure = patch.structure.clone().unwrap_or_else(|| "concrete".to_string());
@@ -591,31 +605,31 @@ fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, 
             deployed: 0.0,
             armor: 0.0,
         };
-        if let Some(city) = state.city_mut(cid) {
+        if let Some(city) = state.city_mut(&cid) {
             city.buildings.push(b);
         }
-        let ctrl = state.control.entry(fid).or_default();
-        ctrl.invest_weights.insert((cid, id), Control::player(spec.default_invest_weight));
+        let ctrl = state.control.entry(fid.clone()).or_default();
+        ctrl.invest_weights.insert((cid.clone(), id), Control::player(spec.default_invest_weight));
         if kind == "construction" {
-            ctrl.build_weights.insert((cid, id), Control::player(spec.default_build_weight));
+            ctrl.build_weights.insert((cid.clone(), id), Control::player(spec.default_build_weight));
         }
         return;
     }
 
     let bid = patch.building.unwrap_or(u32::MAX);
     if patch.remove {
-        if let Some(city) = state.city_mut(cid) {
+        if let Some(city) = state.city_mut(&cid) {
             city.buildings.retain(|b| b.id != bid);
         }
-        if let Some(c) = state.control_mut(fid) {
-            c.invest_weights.remove(&(cid, bid));
-            c.build_weights.remove(&(cid, bid));
+        if let Some(c) = state.control_mut(fid.clone()) {
+            c.invest_weights.remove(&(cid.clone(), bid));
+            c.build_weights.remove(&(cid.clone(), bid));
         }
         return;
     }
 
     // Modify an existing building's attributes (e.g. structure / ship_type).
-    if let Some(city) = state.city_mut(cid) {
+    if let Some(city) = state.city_mut(&cid) {
         if let Some(b) = city.buildings.iter_mut().find(|b| b.id == bid) {
             if let Some(s) = &patch.structure {
                 if config.structures.contains_key(s) {
@@ -645,9 +659,9 @@ fn apply_building_patch(state: &mut State, config: &GameConfig, fid: FactionId, 
 }
 
 /// Normalize a single ship `behavior` value so `apply` accepts BOTH shapes:
-///   * the default serde enum form (`{"TargetShip":{"ship":2,"attack":true}}`,
+///   * the default serde enum form (`{"TargetShip":{"ship":"华盛顿","attack":true}}`,
 ///     `"Idle"`) — what the `control` template emits and what `.ron` uses; and
-///   * the tagged agent-state form (`{"type":"target_ship","ship":2,"attack":true}`,
+///   * the tagged agent-state form (`{"type":"target_ship","ship":"华盛顿","attack":true}`,
 ///     `{"type":"idle"}`) — exactly what an agent sees in a ship's `order`.
 /// The latter is rewritten into the former so the rest of the pipeline stays
 /// unchanged. Unknown tags are left as-is (they'll fail downstream cleanly).
@@ -788,20 +802,20 @@ mod tests {
         let cases = [
             (serde_json::json!({"type":"idle"}), serde_json::json!("Idle")),
             (
-                serde_json::json!({"type":"target_ship","ship":2,"attack":true}),
-                serde_json::json!({"TargetShip":{"ship":2,"attack":true}}),
+                serde_json::json!({"type":"target_ship","ship":"华盛顿","attack":true}),
+                serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}}),
             ),
             (
-                serde_json::json!({"type":"target_settlement","city":0,"bombard":true}),
-                serde_json::json!({"TargetSettlement":{"city":0,"bombard":true}}),
+                serde_json::json!({"type":"target_settlement","city":"长三角","bombard":true}),
+                serde_json::json!({"TargetSettlement":{"city":"长三角","bombard":true}}),
             ),
             (
                 serde_json::json!({"type":"move","position":[-0.5,0.3]}),
                 serde_json::json!({"Move":{"position":[-0.5,0.3]}}),
             ),
             (
-                serde_json::json!({"type":"colonize","body":9}),
-                serde_json::json!({"Colonize":{"body":9}}),
+                serde_json::json!({"type":"colonize","body":"地球"}),
+                serde_json::json!({"Colonize":{"body":"地球"}}),
             ),
         ];
         for (tagged, expected) in cases {
@@ -814,9 +828,9 @@ mod tests {
     /// The default form must pass through unchanged.
     #[test]
     fn normalize_behavior_keeps_default_form() {
-        let mut v = serde_json::json!({"TargetShip":{"ship":2,"attack":true}});
+        let mut v = serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}});
         normalize_behavior(&mut v);
-        assert_eq!(v, serde_json::json!({"TargetShip":{"ship":2,"attack":true}}));
+        assert_eq!(v, serde_json::json!({"TargetShip":{"ship":"华盛顿","attack":true}}));
     }
 
     /// Applying a tagged-form diff to a real world must produce the same
@@ -825,15 +839,16 @@ mod tests {
     fn apply_patch_accepts_tagged_ship_order() {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
+        // 长城 = 中国 (faction 3) 的起始护卫舰；华盛顿 = 美国的一艘舰。舰名即唯一 key。
         let tagged = serde_json::json!({
             "control": [{
-                "faction_id": 3,
-                "ship_orders": [{"ship": 0, "behavior": {"type": "target_ship", "ship": 2, "attack": true}, "mode": "Player"}]
+                "faction_id": "中国",
+                "ship_orders": [{"ship": "长城", "behavior": {"type": "target_ship", "ship": "华盛顿", "attack": true}, "mode": "Player"}]
             }]
         });
         apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
-        let b = state.ship_behavior(0).expect("ship 0 has an order");
-        assert_eq!(b, ShipBehavior::TargetShip { ship: 2, attack: true });
+        let b = state.ship_behavior("长城".to_string()).expect("长城 has an order");
+        assert_eq!(b, ShipBehavior::TargetShip { ship: "华盛顿".to_string(), attack: true });
     }
 
     /// Setting a faction's scope to Player must actually take over its leaves
@@ -843,24 +858,24 @@ mod tests {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
         // Default scope (all None) → everything resolves to Ai.
-        assert_eq!(state.ship_control(0), ControlMode::Ai, "default scope is Ai");
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Ai, "default scope is Ai");
 
-        // Take over faction 3 (中国) via a scope-only diff.
-        let scope_diff = serde_json::json!({"scope": {"factions": [[3, "Player"]]}});
+        // Take over faction 中国 via a scope-only diff.
+        let scope_diff = serde_json::json!({"scope": {"factions": [["中国", "Player"]]}});
         apply_patch(&mut state, &config, &scope_diff).expect("scope diff applies");
-        assert_eq!(state.ship_control(0), ControlMode::Player, "ship of a Player faction is player-owned");
-        assert_eq!(state.investment_budget_control(3, "铁"), ControlMode::Player, "budget leaf follows scope");
-        assert_eq!(state.construction_budget_control(3, "铁"), ControlMode::Player);
-        // Other factions are untouched (still Ai): ship 3 is US (faction 1).
-        assert_eq!(state.ship_control(3), ControlMode::Ai, "untouched faction stays Ai");
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Player, "ship of a Player faction is player-owned");
+        assert_eq!(state.investment_budget_control("中国".to_string(), "铁"), ControlMode::Player, "budget leaf follows scope");
+        assert_eq!(state.construction_budget_control("中国".to_string(), "铁"), ControlMode::Player);
+        // Other factions are untouched (still Ai): 华盛顿 is a US ship (美国).
+        assert_eq!(state.ship_control("华盛顿".to_string()), ControlMode::Ai, "untouched faction stays Ai");
 
         // An explicit leaf mode still overrides scope in the opposite direction:
-        // force ship 0 back to Ai inside a Player faction.
+        // force 长城 back to Ai inside a Player faction.
         let leaf_diff = serde_json::json!({
-            "control": [{"faction_id": 3, "ship_orders": [{"ship": 0, "mode": "Ai"}]}]
+            "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Ai"}]}]
         });
         apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
-        assert_eq!(state.ship_control(0), ControlMode::Ai, "explicit Ai leaf beats Player scope");
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Ai, "explicit Ai leaf beats Player scope");
     }
 
     /// 娱乐/福利预算：一座城的忠诚度投入是一个可控叶子。按 Player 覆盖后，治理模型
@@ -870,13 +885,13 @@ mod tests {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
         let diff = serde_json::json!({
-            "control": [{"faction_id": 3, "loyalty_budget": [{"city": 0, "value": 40.0, "mode": "Player"}]}]
+            "control": [{"faction_id": "中国", "loyalty_budget": [{"city": "长三角", "value": 40.0, "mode": "Player"}]}]
         });
         apply_patch(&mut state, &config, &diff).expect("loyalty budget diff applies");
-        assert_eq!(state.loyalty_budget_control(3, 0), ControlMode::Player);
+        assert_eq!(state.loyalty_budget_control("中国".to_string(), "长三角".to_string()), ControlMode::Player);
         let v = state
-            .control(3)
-            .and_then(|c| c.loyalty_budget.get(&0))
+            .control("中国".to_string())
+            .and_then(|c| c.loyalty_budget.get("长三角"))
             .map(|c| c.value)
             .unwrap_or(f64::NAN);
         assert!((v - 40.0).abs() < 1e-7, "loyalty budget value should be 40.0, got {v}");

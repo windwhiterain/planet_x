@@ -343,7 +343,7 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
                 .iter()
                 .map(|(k, amt)| amt * config.resources.get(k).map(|r| r.value).unwrap_or(1.0))
                 .sum();
-            *prod_acc.entry(*fid).or_default() += v;
+            *prod_acc.entry(fid.clone()).or_default() += v;
         }
         if state.round - win_start >= window {
             let story: Vec<String> =
@@ -386,7 +386,7 @@ fn digest_value(
         .map(|(fid, m)| {
             json!({
                 "id": fid,
-                "name": state.faction(*fid).map(|f| f.name.clone()).unwrap_or_default(),
+                "name": state.faction(fid).map(|f| f.name.clone()).unwrap_or_default(),
                 "city_count": m.city_count,
                 "ship_count": m.ship_count,
                 "fleet_value": r2(m.fleet_value),

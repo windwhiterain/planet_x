@@ -18,12 +18,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Identifiers are plain integers. References between entities use these ids so
-/// that snapshots stay compact and easy to diff.
-pub type FactionId = u32;
-pub type BodyId = u32;
-pub type CityId = u32;
-pub type ShipId = u32;
+/// Entity identity = the entity's unique **name** (single authoritative schema
+/// key; no numeric shadow id). References between entities use these names so the
+/// world has one source of truth. Entities without a meaningful name (Building,
+/// Settlement) keep an index within their parent and are NOT name-keyed.
+pub type FactionId = String;
+pub type BodyId = String;
+pub type CityId = String;
+/// The ship's identity is its unique, meaningful **name** — the single authoritative
+/// key for the schema (no numeric shadow id).
+pub type ShipId = String;
 pub type BuildingId = u32;
 
 /// A resource bundle: resource key -> amount. Resource keys are configurable
@@ -153,7 +157,6 @@ pub struct Settlement {
 /// indexed; a city on this body points at its site via [`City::settlement`].
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Body {
-    pub id: BodyId,
     pub name: String,
     pub orbit: Orbit,
     /// 当前位置 (current position in AU, recomputed each round from `orbit`).
@@ -512,7 +515,7 @@ pub fn ship_weapons(config: &GameConfig, ship: &Ship) -> Vec<Weapon> {
 /// of its ships. This is command-controlled state (see [`ControllableState`]),
 /// not an event: the simulation merely reads this to decide where to move and
 /// what to fire/bombard.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
     Move { position: [f64; 2] },
@@ -574,9 +577,12 @@ pub enum GameEvent {
 }
 
 /// A spaceship. Always owned by a faction.
+///
+/// `name` is the **unique identity** (the schema's authoritative key, per the
+/// design philosophy: "name is the unique key"). There is deliberately no separate
+/// numeric id — a single source of truth, no shadow structure.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Ship {
-    pub id: ShipId,
     pub name: String,
     pub class: String,
     pub faction_id: FactionId,
@@ -612,6 +618,52 @@ fn default_hull_max() -> f64 {
     0.0
 }
 
+/// A step coprime to `len`, used to scramble the round-robin walk so names read as
+/// "random" while staying deterministic. Falls back to 1 (plain round-robin) if no
+/// odd step below `len` is coprime to it.
+fn coprime_step(len: usize) -> usize {
+    if len <= 1 {
+        return 1;
+    }
+    (3..len)
+        .rev()
+        .find(|&s| gcd(s, len) == 1)
+        .unwrap_or(1)
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Deterministic, unique-per-faction ship name drawn from a faction's name pool.
+///
+/// `seq` is a per-faction monotonic counter (never reused, so a destroyed ship's
+/// name is never handed to a replacement). The pool is walked in a *scrambled*
+/// round-robin (coprime step) — so the first `pool.len()` ships use each word once in
+/// a non-alphabetical order, and wrapping the pool appends a generation numeral to
+/// keep the name unique. Pure function of `(pool, seq)`: no RNG, no shared state.
+///
+/// This is what makes the ship *name* a usable unique key, per the design philosophy.
+pub fn ship_display_name(pool: &[String], seq: u64) -> String {
+    if pool.is_empty() {
+        return format!("舰-{}", seq + 1);
+    }
+    let len = pool.len();
+    let step = coprime_step(len);
+    let idx = ((seq as usize).wrapping_mul(step)) % len;
+    let word = &pool[idx];
+    let generation_num = seq / (len as u64);
+    if generation_num == 0 {
+        word.clone()
+    } else {
+        format!("{}{}", word, generation_num + 1)
+    }
+}
+
 /// A city occupying one 定居点 (settlement) on a body, controlled by a faction.
 /// 定居点 ↔ 城市一一对应: `settlement` is the index (into `Body::settlements`)
 /// of the site this city sits on, and a settlement hosts at most one city — a
@@ -624,7 +676,6 @@ fn default_hull_max() -> f64 {
 /// rates of every shipyard in the city keep contributing into that city pool.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct City {
-    pub id: CityId,
     pub name: String,
     pub body_id: BodyId,
     /// Index of this city's 定居点 within `body.settlements` (1:1 occupancy).
@@ -654,7 +705,6 @@ fn default_loyalty() -> f64 {
 /// here.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Faction {
-    pub id: FactionId,
     pub name: String,
     /// Marker glyph on the CLI ASCII map (e.g. 'U').
     pub symbol: char,
@@ -688,7 +738,7 @@ pub struct Faction {
 }
 
 fn default_capital_body() -> BodyId {
-    2 // 地球, the default anchor when a .ron state omits it.
+    "地球".to_string() // 地球, the default anchor when a .ron state omits it.
 }
 
 fn default_home_radius() -> f64 {
@@ -840,52 +890,68 @@ pub struct State {
     /// `.ron` 状态缺字段也能正常加载。
     #[serde(default)]
     pub chronicle: Vec<ChronicleEntry>,
+    /// 每势力「已命名舰只」的单调计数器（名字库轮转、保证舰名唯一且不复用）。
+    /// 纯显示用（不参与战斗/经济语义）；`#[serde(default)]` 让旧档缺字段也能加载。
+    #[serde(default)]
+    pub ship_name_seq: BTreeMap<FactionId, u64>,
 }
 
 impl State {
-    pub fn body(&self, id: BodyId) -> Option<&Body> {
-        self.bodies.iter().find(|b| b.id == id)
+    /// Look up a body by its unique **name** (the schema's identity key).
+    pub fn body(&self, name: &str) -> Option<&Body> {
+        self.bodies.iter().find(|b| b.name == name)
     }
 
-    pub fn city(&self, id: CityId) -> Option<&City> {
-        self.cities.iter().find(|c| c.id == id)
+    /// Mutably borrow a body by its unique **name**.
+    pub fn body_mut(&mut self, name: &str) -> Option<&mut Body> {
+        self.bodies.iter_mut().find(|b| b.name == name)
     }
 
-    pub fn city_mut(&mut self, id: CityId) -> Option<&mut City> {
-        self.cities.iter_mut().find(|c| c.id == id)
+    /// Look up a city by its unique **name** (the schema's identity key).
+    pub fn city(&self, name: &str) -> Option<&City> {
+        self.cities.iter().find(|c| c.name == name)
     }
 
-    pub fn ship(&self, id: ShipId) -> Option<&Ship> {
-        self.ships.iter().find(|s| s.id == id)
+    /// Mutably borrow a city by its unique **name**.
+    pub fn city_mut(&mut self, name: &str) -> Option<&mut City> {
+        self.cities.iter_mut().find(|c| c.name == name)
     }
 
-    pub fn ship_mut(&mut self, id: ShipId) -> Option<&mut Ship> {
-        self.ships.iter_mut().find(|s| s.id == id)
+    /// Look up a ship by its unique **name** (the schema's identity key).
+    pub fn ship(&self, name: &str) -> Option<&Ship> {
+        self.ships.iter().find(|s| s.name == name)
     }
 
-    pub fn faction(&self, id: FactionId) -> Option<&Faction> {
-        self.factions.iter().find(|f| f.id == id)
+    /// Mutably borrow a ship by its unique **name**.
+    pub fn ship_mut(&mut self, name: &str) -> Option<&mut Ship> {
+        self.ships.iter_mut().find(|s| s.name == name)
     }
 
-    pub fn faction_mut(&mut self, id: FactionId) -> Option<&mut Faction> {
-        self.factions.iter_mut().find(|f| f.id == id)
+    /// Look up a faction by its unique **name** (the schema's identity key).
+    pub fn faction(&self, name: &str) -> Option<&Faction> {
+        self.factions.iter().find(|f| f.name == name)
+    }
+
+    /// Mutably borrow a faction by its unique **name**.
+    pub fn faction_mut(&mut self, name: &str) -> Option<&mut Faction> {
+        self.factions.iter_mut().find(|f| f.name == name)
     }
 
     /// Resolve the current world position of a body. Uses the stored
     /// `position` field, which the simulation keeps current.
-    pub fn body_position(&self, id: BodyId) -> [f64; 2] {
-        self.body(id).map(|b| b.position).unwrap_or([0.0, 0.0])
+    pub fn body_position(&self, name: &str) -> [f64; 2] {
+        self.body(name).map(|b| b.position).unwrap_or([0.0, 0.0])
     }
 
     /// The 定居点 (settlement) a city occupies — settlement ↔ city 1:1.
-    pub fn city_settlement(&self, cid: CityId) -> Option<&Settlement> {
-        let c = self.city(cid)?;
-        self.body(c.body_id)?.settlement(c.settlement)
+    pub fn city_settlement(&self, cname: &str) -> Option<&Settlement> {
+        let c = self.city(cname)?;
+        self.body(&c.body_id)?.settlement(c.settlement)
     }
 
     /// A body's settlement site at `idx`.
-    pub fn body_settlement(&self, bid: BodyId, idx: usize) -> Option<&Settlement> {
-        self.body(bid)?.settlement(idx)
+    pub fn body_settlement(&self, bname: &str, idx: usize) -> Option<&Settlement> {
+        self.body(bname)?.settlement(idx)
     }
 
     /// Read one faction's controllable state.
@@ -898,47 +964,47 @@ impl State {
         self.control.get_mut(&fid)
     }
 
-    /// Current behavior (指令) of a ship, if any.
+    /// Current behavior (指令) of a ship, if any. `ship_id` is the ship's unique name.
     pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
-        let s = self.ship(ship_id)?;
-        self.control(s.faction_id)?
+        let s = self.ship(&ship_id)?;
+        self.control(s.faction_id.clone())?
             .ship_orders
             .get(&ship_id)
-            .map(|c| c.value)
+            .map(|c| c.value.clone())
     }
 
     // --- 控制模式判定（沿作用域链上溯，最具体者优先） ----------------------
 
     /// 决定一艘舰的指令由谁控制：舰 → 势力 → 全局。
     pub fn ship_control(&self, ship_id: ShipId) -> ControlMode {
-        let Some(s) = self.ship(ship_id) else {
+        let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Ai;
         };
-        let fid = s.faction_id;
-        let leaf = self.control(fid).and_then(|c| c.ship_orders.get(&ship_id)).and_then(|c| c.mode);
+        let fid = s.faction_id.clone();
+        let leaf = self.control(fid.clone()).and_then(|c| c.ship_orders.get(&ship_id)).and_then(|c| c.mode);
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
     pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = self.control(fid).and_then(|c| c.investment_budget.get(resource)).and_then(|c| c.mode);
+        let leaf = self.control(fid.clone()).and_then(|c| c.investment_budget.get(resource)).and_then(|c| c.mode);
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某建造预算（造舰用）由谁控制：资源 → 势力 → 全局。
     pub fn construction_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = self.control(fid).and_then(|c| c.construction_budget.get(resource)).and_then(|c| c.mode);
+        let leaf = self.control(fid.clone()).and_then(|c| c.construction_budget.get(resource)).and_then(|c| c.mode);
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
     pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
-        let leaf = self.control(fid).and_then(|c| c.loyalty_budget.get(&cid)).and_then(|c| c.mode);
+        let leaf = self.control(fid.clone()).and_then(|c| c.loyalty_budget.get(&cid)).and_then(|c| c.mode);
         let city = self.scope.cities.get(&cid).copied().flatten();
-        let body_id = self.city(cid).map(|c| c.body_id);
+        let body_id = self.city(&cid).map(|c| c.body_id.clone());
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, city, body, faction, self.scope.global])
@@ -947,9 +1013,9 @@ impl State {
     /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
     pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = self.control(fid).and_then(|c| c.invest_weights.get(key)).and_then(|c| c.mode);
+        let leaf = self.control(fid.clone()).and_then(|c| c.invest_weights.get(key)).and_then(|c| c.mode);
         let city = self.scope.cities.get(cid).copied().flatten();
-        let body_id = self.city(*cid).map(|c| c.body_id);
+        let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, city, body, faction, self.scope.global])
@@ -958,9 +1024,9 @@ impl State {
     /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力 → 全局。
     pub fn build_control(&self, fid: FactionId, key: &BuildKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = self.control(fid).and_then(|c| c.build_weights.get(key)).and_then(|c| c.mode);
+        let leaf = self.control(fid.clone()).and_then(|c| c.build_weights.get(key)).and_then(|c| c.mode);
         let city = self.scope.cities.get(cid).copied().flatten();
-        let body_id = self.city(*cid).map(|c| c.body_id);
+        let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, city, body, faction, self.scope.global])
@@ -999,9 +1065,9 @@ impl ControlScope {
         if other.global.is_some() {
             self.global = other.global;
         }
-        self.factions.extend(other.factions.iter().map(|(k, v)| (*k, *v)));
-        self.bodies.extend(other.bodies.iter().map(|(k, v)| (*k, *v)));
-        self.cities.extend(other.cities.iter().map(|(k, v)| (*k, *v)));
+        self.factions.extend(other.factions.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.bodies.extend(other.bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.cities.extend(other.cities.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 }
 
@@ -1491,6 +1557,19 @@ pub struct GameConfig {
     /// 剧情事件表（编年史/叙事弧）。`#[serde(default)]` 容忍旧配置无此节。
     #[serde(default)]
     pub story: Vec<StoryEvent>,
+    /// 每势力的「名字库」（舰船等实体取名用）：faction 名 → 候选名字数组。
+    /// 「名字即唯一 key」——势力所属实体从本库中**确定性取一个唯一名**。`#[serde(default)]`
+    /// 容忍旧配置无此节（缺库的势力退回通用名，见 [`GameConfig::ship_pool`] / [`ship_display_name`]）。
+    #[serde(default)]
+    pub name_pool: BTreeMap<String, Vec<String>>,
+}
+
+impl GameConfig {
+    /// 某势力的名字库（按势力名查）。库里为空/未配置时返回空切片——
+    /// 由 [`ship_display_name`] 退回到「舰-{序列}」这种唯一但无含义的名字。
+    pub fn ship_pool(&self, faction_name: &str) -> &[String] {
+        self.name_pool.get(faction_name).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 impl GameConfig {
