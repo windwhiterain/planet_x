@@ -42,9 +42,10 @@ pub struct Trajectory {
     pub events: Vec<GameEvent>,
     /// 剧情编年史：整段已展开的叙事弧。
     pub chronicle: Vec<ChronicleEntry>,
-    /// 本回合的**总结指标**（[`crate::sim::round_metrics`] 计算的中间聚合量：实力占比/
-    /// 霸权/联盟/制裁/交战 + 各势力城市·舰队·人口·库存价值）。与直接状态同源自
-    /// 步进函数，故与本节实体字段**严格一致**。
+    /// 本回合的**总结指标**（[`crate::sim::round_metrics`] 计算的中间聚合量）：存量/政治
+    /// （实力占比/霸权/联盟/制裁/交战/世界总量）+ **流量**（各势力·各城的开采产出、舰队
+    /// 维护费、治理开销与覆盖率——由步进时捕获的中间量，与模拟逐回合一致）。与直接状态
+    /// 同源自步进函数，故与本节实体字段**严格一致**。
     pub metrics: RoundMetrics,
 }
 
@@ -55,7 +56,7 @@ pub struct Trajectory {
 /// copy of the narrative in every snapshot; the chronicle is delivered separately
 /// as `--story` / the `story` field of the `--traj` pack. Floats are rounded to 2
 /// decimals for token-noise reduction.
-pub fn state_json(state: &State, config: &GameConfig) -> serde_json::Value {
+pub fn state_json(state: &State, config: &GameConfig, flow: &RoundFlow) -> serde_json::Value {
     let t = Trajectory {
         round: state.round,
         time_month: state.time_month,
@@ -65,7 +66,7 @@ pub fn state_json(state: &State, config: &GameConfig) -> serde_json::Value {
         ships: state.ships.clone(),
         events: state.events.clone(),
         chronicle: state.chronicle.clone(),
-        metrics: crate::sim::round_metrics(state, config),
+        metrics: crate::sim::round_metrics(state, config, flow),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
     round_value(&mut v);
@@ -88,8 +89,8 @@ pub fn schema_value() -> serde_json::Value {
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
-pub fn render_state(state: &State, config: &GameConfig) -> String {
-    state_json(state, config).to_string()
+pub fn render_state(state: &State, config: &GameConfig, flow: &RoundFlow) -> String {
+    state_json(state, config, flow).to_string()
 }
 
 /// The game's full tunable configuration, rendered as one JSON object for the
@@ -280,7 +281,7 @@ mod tests {
     fn agent_view_is_self_described_by_schema() {
         let cfg = config::load_config();
         let state = crate::world::default_state(&cfg, 42);
-        let v = state_json(&state, &cfg);
+        let v = state_json(&state, &cfg, &crate::model::RoundFlow::default());
         let schema = schema_value();
         let props = schema.get("properties").and_then(|p| p.as_object()).expect("schema.properties");
         let emit_keys = v
@@ -298,5 +299,17 @@ mod tests {
             v.get("metrics").is_some_and(|m| m.get("factions").is_some()),
             "agent 视图必须携带 metrics 总结（含各势力聚合）"
         );
+        // metrics 必须携带新增的**流量**字段（产出/维护/治理 + 每城产出）。
+        let m = &v["metrics"];
+        let sample_fac = m
+            .get("factions")
+            .and_then(|f| f.as_object())
+            .and_then(|o| o.values().next())
+            .cloned()
+            .unwrap_or_default();
+        for k in ["production_value", "production", "upkeep", "governance_cost", "governance_coverage"] {
+            assert!(sample_fac.get(k).is_some(), "metrics.factions 缺流量字段 {k}");
+        }
+        assert!(m.get("city_production").is_some(), "metrics 缺每城产出 city_production");
     }
 }

@@ -32,7 +32,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Advance the world by one round, writing the new controllable state into
 /// [`State::control`].
-pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+///
+/// Returns the [`RoundFlow`] captured during stepping — the **intermediate computation
+/// variables** the step functions actually used (per-city/per-faction resource production,
+/// fleet upkeep, governance cost/coverage) that do not land in the persisted state. Callers
+/// hand this to [`round_metrics`] so the agent's "summary" matches the simulation's numbers
+/// exactly rather than being re-derived from the post-round state.
+pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundFlow {
     state.round += 1;
     state.time_month += 1.0;
     // 本回合事件日志从空开始，回合演化中追加。
@@ -45,13 +51,14 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         b.position = b.orbit.position(state.time_month as f32);
     }
 
-    step_production(state, config);
-    step_upkeep(state, config);
+    let mut flow = RoundFlow::default();
+    step_production(state, config, &mut flow);
+    step_upkeep(state, config, &mut flow);
     step_market(state, config);
     step_construction(state, config, rng);
     step_military(state, config, rng);
     // 光速治理：以距离首都为代价的管理/忠诚度，给超大帝国一个自然上限。
-    step_governance(state, config);
+    step_governance(state, config, &mut flow);
     // 重建（反僵尸/反垄断）：趁着本回合只剩「残骸」的势力还没被永久旁观，先让它在
     // 自己的残骸足迹上重新立足。放在治理之后：被叛乱夷平到零的势力也能当回合重建。
     step_resurgence(state, config, rng);
@@ -71,6 +78,8 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
     // 剧情：推进叙事弧/编年史（数据驱动，见 config/game.ron 的 `story` 表）。
     step_story(state, config);
+
+    flow
 }
 
 /// The set of unordered faction pairs currently at war (relation ≤ war_threshold).
@@ -219,7 +228,7 @@ fn labor_ratio(state: &State, config: &GameConfig, cid: CityId) -> f64 {
     }
 }
 
-fn step_production(state: &mut State, config: &GameConfig) {
+fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.id).collect();
     for cid in city_ids {
         let (_body_id, faction_id, population, razed) = {
@@ -284,6 +293,10 @@ fn step_production(state: &mut State, config: &GameConfig) {
             }
             let spec = config.building_spec("mining");
             let output = effective * labor * spec.productivity * config.economy.production_rate;
+            // 记录本回合产出（step_production 的「中间量」），供 round_metrics 做 agent 总结：
+            // 每城 + 每势力各记一份；随后仍照旧把产出写进势力库存。
+            *flow.city_production.entry(cid).or_default().entry(rt.clone()).or_insert(0.0) += output;
+            *flow.faction_production.entry(faction_id).or_default().entry(rt.clone()).or_insert(0.0) += output;
             if let Some(f) = state.faction_mut(faction_id) {
                 *f.resources.entry(rt).or_insert(0.0) += output;
             }
@@ -302,7 +315,7 @@ fn step_production(state: &mut State, config: &GameConfig) {
 /// This is the continuous resource **sink** that bounds fleet size: big fleets
 /// need a big economy to sustain, so the navy grows only as fast as the
 /// economy feeds it rather than snowballing unboundedly.
-fn step_upkeep(state: &mut State, config: &GameConfig) {
+fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
     for fid in faction_ids {
@@ -312,6 +325,8 @@ fn step_upkeep(state: &mut State, config: &GameConfig) {
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
             .map(|s| ship_panel(config, s).upkeep)
             .sum();
+        // 记录本回合舰队维护费（step_upkeep 的「中间量」）。
+        flow.upkeep.insert(fid, upkeep_total);
         if upkeep_total <= 1e-9 {
             continue;
         }
@@ -1735,7 +1750,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// 时忠诚度暴跌。忠诚度跌破 [`GovernanceConfig::loyalty_revolt`] 即爆发离心叛乱，城市
 /// 被夷平为空白（可再殖民）。这给超大帝国一个自然上限——既能管的领地有限，遥远的
 /// 殖民地在治理失败时丢失，使世界在上千回合后保持多方参与。
-fn step_governance(state: &mut State, config: &GameConfig) {
+fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let g = &config.governance;
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.id).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
@@ -1791,6 +1806,8 @@ fn step_governance(state: &mut State, config: &GameConfig) {
         } else {
             1.0
         };
+        // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率。
+        flow.governance.insert(fid, GovernanceFlow { total: governance_total, coverage });
 
         // 忠诚度向「距离目标 + 娱乐加成」恢复/下降，并标记叛乱（距离 × 人口超载
         // 与娱乐投入叠加）。娱乐投入越高，就越能对冲距离/人口带来的离心倾向。
@@ -2752,8 +2769,10 @@ pub fn balance_picture(
 /// （`State` 的实体字段）与此视图**严格同源、永不漂移**——不会像其它地方独立重算的
 /// 汇总那样与模拟脱节。
 ///
-/// 纯函数、无 RNG，同一种子完全复现；O(势力 + 舰 + 城) 一次遍历，足够在每回合轻量调用。
-pub fn round_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
+/// `flow` 携带本回合的**流量**中间量（产出/维护/治理，见 [`RoundFlow`]）；`state` 提供
+/// 存量/政治快照。纯函数、无 RNG，同一种子完全复现；O(势力 + 舰 + 城) 一次遍历，足够在
+/// 每回合轻量调用。
+pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> RoundMetrics {
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
     let (hegemon, members, powers) = balance_picture(state, config);
     let sanctioned = sanctioned_hegemon(state, config);
@@ -2776,6 +2795,10 @@ pub fn round_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
         world_fleet += fleet_value;
         let market_value: f64 = f.resources.iter().map(|(k, v)| v * value_of(k)).sum();
         let at_war = state.factions.iter().any(|o| o.id != fid && hostile(state, config, fid, o.id));
+        let production: ResourceMap = flow.faction_production.get(&fid).cloned().unwrap_or_default();
+        let production_value: f64 = production.iter().map(|(k, v)| v * value_of(k)).sum();
+        let governance_cost = flow.governance.get(&fid).map(|g| g.total).unwrap_or(0.0);
+        let governance_coverage = flow.governance.get(&fid).map(|g| g.coverage).unwrap_or(1.0);
         factions.insert(
             fid,
             FactionMetrics {
@@ -2785,6 +2808,30 @@ pub fn round_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
                 population,
                 market_value,
                 at_war,
+                production_value,
+                production,
+                upkeep: flow.upkeep.get(&fid).copied().unwrap_or(0.0),
+                governance_cost,
+                governance_coverage,
+            },
+        );
+    }
+
+    // 每座活城的本回合产出（step_production 的「中间量」）。
+    let mut city_production = BTreeMap::new();
+    for c in &state.cities {
+        if c.razed {
+            continue;
+        }
+        let production = flow.city_production.get(&c.id).cloned().unwrap_or_default();
+        let production_value = production.iter().map(|(k, v)| v * value_of(k)).sum::<f64>();
+        city_production.insert(
+            c.id,
+            CityMetrics {
+                population: c.population,
+                loyalty: c.loyalty,
+                production_value,
+                production,
             },
         );
     }
@@ -2800,6 +2847,7 @@ pub fn round_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
         sanctioned,
         wars,
         factions,
+        city_production,
     }
 }
 

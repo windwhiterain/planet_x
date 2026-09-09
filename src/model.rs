@@ -708,6 +708,11 @@ fn default_home_regen_bonus() -> f64 {
 /// 它们由 [`crate::sim::round_metrics`] 汇总，**复用步进函数本身所用的同一套计算**
 /// （`faction_power_share`/`coalition_of`/`sanctioned_hegemon`/`war_pairs`），因此与直接
 /// 状态**严格一致**，不会像一份独立重算的汇总那样与模拟漂移。纯数据、无 RNG。
+///
+/// `cities`/`ships`/`fleet_value`/`population`/`power_share`/`hegemon`/`coalition_members`/
+/// `sanctioned`/`wars` 是「存量/政治」快照；`factions[].production_*`、`upkeep`、
+/// `governance_*` 与 `city_production` 是「流量」——由 [`crate::sim::RoundFlow`] 在步进时
+/// 捕获，逐回合与模拟所用数值一致。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct RoundMetrics {
     /// 世界级总量：活城数。
@@ -730,6 +735,8 @@ pub struct RoundMetrics {
     pub wars: Vec<(FactionId, FactionId)>,
     /// 各势力聚合指标（key = faction id）。
     pub factions: BTreeMap<FactionId, FactionMetrics>,
+    /// 每座活城的本回合产出（`cities` 的细分）：人口、忠诚与按资源开采量。
+    pub city_production: BTreeMap<CityId, CityMetrics>,
 }
 
 /// 单势力的聚合总结指标（`RoundMetrics::factions` 的一项）。
@@ -747,6 +754,52 @@ pub struct FactionMetrics {
     pub market_value: f64,
     /// 该势力当前是否与任意其他势力交战。
     pub at_war: bool,
+    /// 本回合开采产出的市场价值（= 其城之和，step_production 的中间量）。
+    pub production_value: f64,
+    /// 本回合开采产出，按资源（step_production 的中间量）。
+    pub production: ResourceMap,
+    /// 本回合舰队维护费（市场价值，step_upkeep 的中间量）。
+    pub upkeep: f64,
+    /// 本回合治理总开销（行政 + 娱乐，含制裁倍率；step_governance 的中间量）。
+    pub governance_cost: f64,
+    /// 治理覆盖率（0..1：库存能覆盖治理开销的比例；<1 = 治理不到位/忠诚在跌）。
+    pub governance_coverage: f64,
+}
+
+/// 单座城的本回合产出（`RoundMetrics::city_production` 的一项）。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct CityMetrics {
+    pub population: u32,
+    /// 忠诚度（0..1）。
+    pub loyalty: f64,
+    /// 本回合开采产出的市场价值。
+    pub production_value: f64,
+    /// 本回合开采产出，按资源。
+    pub production: ResourceMap,
+}
+
+/// 一回合的**流动性中间量捕获**：各 step 计算并应用、但不落到持久状态、原本不对外暴露的
+/// 量。`advance` 把 `RoundFlow` 带回 `round_metrics`，使 agent 的「流量总结」（产出/维护/
+/// 治理）与模拟**逐回合完全一致**——不是事后从状态反推的近似值。纯数据、无 RNG。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RoundFlow {
+    /// 每城每资源的本回合开采产出。
+    pub city_production: BTreeMap<CityId, ResourceMap>,
+    /// 每势力每资源的本回合开采产出。
+    pub faction_production: BTreeMap<FactionId, ResourceMap>,
+    /// 每势力本回合舰队维护费（市场价值）。
+    pub upkeep: BTreeMap<FactionId, f64>,
+    /// 每势力本回合治理流（总成本 / 覆盖率）。
+    pub governance: BTreeMap<FactionId, GovernanceFlow>,
+}
+
+/// 一个势力的本回合治理流（`RoundFlow::governance` 的一项）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct GovernanceFlow {
+    /// 治理总开销（行政 + 娱乐，含制裁倍率）。
+    pub total: f64,
+    /// 治理覆盖率（0..1）。
+    pub coverage: f64,
 }
 
 /// The current persisted `State` schema version. Bump this whenever `State`'s
