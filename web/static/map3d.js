@@ -315,10 +315,11 @@ function ringMaterial(rgb) {
       varying vec2 vUv;
       uniform vec3 uCol;
       void main(){
-        float t = vUv.x;                    // 0=内缘 … 1=外缘
+        // RingGeometry 的 uv：x = 环角度（0..1 绕一圈），y = 半径方向（0=内缘 … 1=外缘）。
+        float t = vUv.y;                     // 径向坐标，做同心环
         float alpha = smoothstep(0.0, 0.14, t) * (1.0 - smoothstep(0.82, 1.0, t));
-        alpha *= 0.62 + 0.22 * sin(t * 60.0);   // 细密的环缝
-        alpha *= 1.0 - 0.65 * smoothstep(0.40, 0.44, t) * (1.0 - smoothstep(0.46, 0.50, t)); // 卡西尼缝
+        alpha *= 0.66 + 0.20 * sin(t * 90.0);   // 细密的同心环缝
+        alpha *= 1.0 - 0.7 * smoothstep(0.40, 0.43, t) * (1.0 - smoothstep(0.45, 0.48, t)); // 卡西尼缝（同心）
         gl_FragColor = vec4(uCol, alpha);
       }
     `,
@@ -465,8 +466,8 @@ function facColorFor(world, fid) {
 }
 
 function addRing(parent, position, r, colorHex) {
-  const inner = r * 1.45;
-  const outer = r * 2.75;
+  const inner = r * 1.35;
+  const outer = r * 2.5;
   const geo = new THREE.RingGeometry(inner, outer, 128, 1);
   const [cr, cg, cb] = lighten(colorHex || '#c9b08a', 0.18);
   const mesh = new THREE.Mesh(geo, ringMaterial([cr, cg, cb]));
