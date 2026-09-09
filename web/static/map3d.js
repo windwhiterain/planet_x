@@ -300,30 +300,52 @@ function planetMaterial(spec) {
   });
 }
 
-// 星环材质：半透明环带（土星/天王星），带径向 alpha 渐变 + 细密环缝（卡西尼缝式暗隙）。
-function ringMaterial(rgb) {
+// 星环材质：半透明环带（土星/天王星），带径向 alpha 渐变 + 细密同心环缝（卡西尼缝式暗隙）。
+// 注意：three.js 的 RingGeometry **不**用极坐标 UV —— 它用平面/矩形映射：
+//   uv.x = (x/outer+1)/2，uv.y = (y/outer+1)/2（各自是局部 X/Y 的线性函数）。
+// 因此不能把 uv（任一分量）当「径向」。这里改为由顶点的**局部位置**直接算半径：
+//   r = length(position.xy)，再按 inner/outer 归一化到 0..1 得到真正的径向 t。
+// 这样 `sin(t*…)` 的环缝与卡西尼缝都是严格**同心**的，不会再画出斜向条纹。
+function ringMaterial(inner, outer, rgb) {
   const [r, g, b] = rgb;
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
     vertexShader: `
-      varying vec2 vUv;
-      void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      varying vec2 vPos;
+      void main(){ vPos = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
     `,
     fragmentShader: `
-      varying vec2 vUv;
+      varying vec2 vPos;
       uniform vec3 uCol;
+      uniform float uInner;
+      uniform float uOuter;
+      // 值噪声：让环缝密度/亮度略有随机变化，避免「黑胶唱片」式的绝对均匀。
+      float hash(float n){ return fract(sin(n * 91.3458) * 47453.5453); }
       void main(){
-        // RingGeometry 的 uv：x = 环角度（0..1 绕一圈），y = 半径方向（0=内缘 … 1=外缘）。
-        float t = vUv.y;                     // 径向坐标，做同心环
-        float alpha = smoothstep(0.0, 0.14, t) * (1.0 - smoothstep(0.82, 1.0, t));
-        alpha *= 0.66 + 0.20 * sin(t * 90.0);   // 细密的同心环缝
-        alpha *= 1.0 - 0.7 * smoothstep(0.40, 0.43, t) * (1.0 - smoothstep(0.45, 0.48, t)); // 卡西尼缝（同心）
+        // 真正的径向坐标：由环内某点的局部半径（position.xy 的模）在 [inner, outer] 内归一化。
+        float rad = length(vPos);
+        float t = (rad - uInner) / max(uOuter - uInner, 1e-4);   // 0=内缘 … 1=外缘
+        // 基础 alpha：内缘/外缘淡出，主体较实。
+        float alpha = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.86, 1.0, t));
+        // C 环（最内区较暗、半透明）。
+        alpha *= 0.55 + 0.45 * smoothstep(0.06, 0.30, t);
+        // 细密同心环缝：径向高频，但幅度随噪声起伏 → 有疏密变化而非等距条纹。
+        float ringlets = 0.5 + 0.5 * sin(t * 120.0 + hash(floor(t * 34.0)) * 6.28);
+        alpha *= (0.78 + 0.22 * ringlets);
+        // 卡西尼缝（明显）：t 在 ~0.42–0.47 断掉。
+        alpha *= 1.0 - 0.85 * smoothstep(0.415, 0.445, t) * (1.0 - smoothstep(0.475, 0.505, t));
+        // 恩克缝（外侧细缝）。
+        alpha *= 1.0 - 0.5 * smoothstep(0.86, 0.875, t) * (1.0 - smoothstep(0.89, 0.905, t));
         gl_FragColor = vec4(uCol, alpha);
       }
     `,
-    uniforms: { uCol: { value: new THREE.Vector3(r, g, b) } },
+    uniforms: {
+      uCol: { value: new THREE.Vector3(r, g, b) },
+      uInner: { value: inner },
+      uOuter: { value: outer },
+    },
   });
 }
 
@@ -470,7 +492,7 @@ function addRing(parent, position, r, colorHex) {
   const outer = r * 2.5;
   const geo = new THREE.RingGeometry(inner, outer, 128, 1);
   const [cr, cg, cb] = lighten(colorHex || '#c9b08a', 0.18);
-  const mesh = new THREE.Mesh(geo, ringMaterial([cr, cg, cb]));
+  const mesh = new THREE.Mesh(geo, ringMaterial(inner, outer, [cr, cg, cb]));
   mesh.rotation.x = -Math.PI / 2;          // 铺平到地图平面（XZ）
   mesh.position.copy(position);            // 放到该天体（而非太阳）处
   parent.add(mesh);
