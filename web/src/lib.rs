@@ -50,6 +50,9 @@ pub struct MetaView {
     pub structures: BTreeMap<String, StructureSpec>,
     pub buildings: BTreeMap<String, BuildingMeta>,
     pub ships: BTreeMap<String, ShipSpec>,
+    /// 天体/行星**类型**表（`BodyKindSpec`）：`state` 天体只带 `kind` key，前端据本表
+    /// 解析出颜色/尺寸/类别/星环/着色器分支等视觉属性。
+    pub body_kinds: BTreeMap<String, BodyKindSpec>,
 }
 
 #[derive(Serialize, Clone)]
@@ -174,6 +177,7 @@ async fn get_meta(AxState(shared): AxState<Shared>) -> Json<MetaView> {
         structures: world.config.structures.clone(),
         buildings,
         ships: world.config.ships.clone(),
+        body_kinds: world.config.body_kinds.clone(),
     })
 }
 

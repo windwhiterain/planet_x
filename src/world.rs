@@ -52,8 +52,34 @@ fn body(
         name: name.to_string(),
         orbit,
         position: orbit.position(0.0),
+        // 类型/星环在 bodies 建好后按名字统一赋值（见 body_kind_for / body_ring_for）。
+        kind: "rocky".to_string(),
+        ring: false,
         settlements,
     }
+}
+
+/// 天体 → `config/game.ron` `body_kinds` 表里的类型 key。state 每个 body 只存这个引用，
+/// 类型/视觉数据由 config 提供（见 [`crate::model::Body::kind`] 与 `BodyKindSpec`）。
+fn body_kind_for(name: &str) -> &'static str {
+    match name {
+        "水星" | "灶神星" => "rocky",
+        "金星" => "venusian",
+        "地球" => "terran",
+        "月球" => "lunar",
+        "火星" => "martian",
+        "木星" | "土星" => "gas_giant",
+        "欧罗巴" => "ice_world",
+        "泰坦" => "titan",
+        "天王星" | "海王星" => "ice_giant",
+        "冥王星" | "卡戎" | "伊克西翁" | "妊神星" | "创神星" | "阋神星" => "dwarf",
+        _ => "rocky",
+    }
+}
+
+/// 是否渲染星环（intrinsic body 特征）：土星显著、天王星细环。其余无环。
+fn body_ring_for(name: &str) -> bool {
+    matches!(name, "土星" | "天王星")
 }
 
 fn deposit(rt: &str, area: f64) -> ResourceDeposit {
@@ -223,7 +249,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // Ids are in orbital-radius order so the list reads like a real system.
     // 水星/金星/地球/月球/火星/灶神星/木星/欧罗巴/土星/泰坦/天王星/海王星/
     // 冥王星/卡戎/伊克西翁/妊神星/创神星/阋神星  (18 bodies).
-    let bodies = vec![
+    let mut bodies = vec![
         // 水星（中国）资源丰富：铁，铂
         body(
             "水星",
@@ -445,6 +471,12 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             vec![settlement("阋神星前哨", 24.0, 5.0, 0.8, vec![deposit("硅", 16.0), deposit("铀", 12.0)])],
         ),
     ];
+
+    // 按名字给每个天体分配类型 key 与星环（视觉/类型引用，见 Body::kind / Body::ring）。
+    for b in &mut bodies {
+        b.kind = body_kind_for(&b.name).to_string();
+        b.ring = body_ring_for(&b.name);
+    }
 
     // --- Factions -----------------------------------------------------------
     // Idéologie (alignment) & 好战度 (aggression) drive the dynamic international

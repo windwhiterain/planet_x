@@ -172,6 +172,27 @@
         "concrete": (name: "混凝土", armor_per_area: 0.5, cost_mult: 1.0),
         "steel":    (name: "钢结构", armor_per_area: 1.6, cost_mult: 2.2),
     },
+    // 天体/行星**类型**表——视觉与类型元数据（纯展示）。每个 `state` 天体只存一个
+    // 类型 key（`Body::kind`），本表由前端经 `/api/meta` 读出渲染（three.js/着色器）。
+    // 引擎模拟从不读它：它只是「星系长什么样」的数据化。class 是前端选 shader 的分支：
+    //   rock(陨石/岩石) / terran(类地宜居) / venus(浓厚大气) / martian(红色荒漠) /
+    //   lunar(灰岩卫星) / gas(气态巨行星,可 banded) / ice(冰封,可 banded) /
+    //   titan(雾霾卫星) / dwarf(柯伊伯矮行星)。
+    // radius 是相对类地行星(1.0)的显示尺寸；banded=横向色带；emissive=自发光 0..1；
+    // atmosphere=边缘光/大气辉光色；roughness/metalness 为材质参数。星环是 intrinsic
+    // body 属性(见 `Body::ring`，土星/天王星有)，不属于类型。
+    body_kinds: {
+        "terran":    (label: "类地行星", class: "terran",   color: "#2a6cc8", accent: "#bcd6e8", atmosphere: "#7db7e8", radius: 1.00, banded: false, emissive: 0.06, roughness: 0.75, metalness: 0.0),
+        "venusian":  (label: "浓厚大气", class: "venus",    color: "#e6c07a", accent: "#c98a3f", atmosphere: "#f2d9a0", radius: 0.95, banded: false, emissive: 0.04, roughness: 0.90, metalness: 0.0),
+        "martian":   (label: "红色荒漠", class: "martian",  color: "#c1440e", accent: "#7c3526", atmosphere: "#e08a5f", radius: 0.85, banded: false, emissive: 0.02, roughness: 0.90, metalness: 0.05),
+        "rocky":     (label: "岩石行星", class: "rock",     color: "#a8977f", accent: "#6d5f4e", atmosphere: "#141210", radius: 0.55, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.10),
+        "lunar":     (label: "灰岩卫星", class: "lunar",    color: "#c8c8d2", accent: "#9d9da8", atmosphere: "#101014", radius: 0.40, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.0),
+        "gas_giant": (label: "气态巨行星", class: "gas",    color: "#d8b18c", accent: "#a97a52", atmosphere: "#f0d9b0", radius: 2.60, banded: true,  emissive: 0.02, roughness: 0.85, metalness: 0.0),
+        "ice_giant": (label: "冰巨星",   class: "ice",     color: "#7cc4e8", accent: "#2f6aa0", atmosphere: "#a8d8f0", radius: 1.80, banded: true,  emissive: 0.0,  roughness: 0.60, metalness: 0.05),
+        "ice_world": (label: "冰封卫星", class: "ice",     color: "#e8f4ff", accent: "#b7d6ea", atmosphere: "#cfe8ff", radius: 0.55, banded: false, emissive: 0.0,  roughness: 0.50, metalness: 0.05),
+        "titan":     (label: "雾霾卫星", class: "titan",   color: "#e0a15e", accent: "#b87840", atmosphere: "#f0c080", radius: 0.60, banded: false, emissive: 0.03, roughness: 0.85, metalness: 0.0),
+        "dwarf":     (label: "矮行星",   class: "dwarf",   color: "#d6cdb8", accent: "#8f8571", atmosphere: "#9a8f7a", radius: 0.35, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.0),
+    },
     // 舰船 5 级。舰级属性分两类：
     //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是
     //       本体的直接值）；另有槽位/造价/维护费。

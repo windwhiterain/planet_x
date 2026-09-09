@@ -162,7 +162,20 @@ pub struct Body {
     pub orbit: Orbit,
     /// 当前位置 (current position in AU, recomputed each round from `orbit`).
     pub position: [f64; 2],
+    /// 天体类型 key（config `body_kinds` 表）。**state 只存一个类型 key**，类型/视觉元数据
+    /// （颜色/尺寸/类别/星环等）由 `config/game.ron` 的 `body_kinds` 表提供——这就是
+    /// 「视觉属性数据化、body 引用」：引擎不内联任何视觉数据，只记录引用。
+    #[serde(default = "default_body_kind")]
+    pub kind: String,
+    /// 本天体是否渲染星环（如土星的显著环、天王星/海王星的细环）。**intrinsic body 属性**：
+    /// 是这颗天体本身的特征（而非类型属性——同为气态巨行星的木星无环），故落在 body 上。
+    #[serde(default)]
+    pub ring: bool,
     pub settlements: Vec<Settlement>,
+}
+
+fn default_body_kind() -> String {
+    "rocky".to_string()
 }
 
 impl Body {
@@ -170,6 +183,37 @@ impl Body {
     pub fn settlement(&self, name: &str) -> Option<&Settlement> {
         self.settlements.iter().find(|s| s.name == name)
     }
+}
+
+/// 一个天体/行星**类型**的视觉与类型元数据，定义在 `config/game.ron` 的 `body_kinds` 表。
+///
+/// 引擎只在每个 [`Body`] 上存 **类型 key**（见 [`Body::kind`]）；这张表携带前端（three.js）
+/// 用它渲染该类型的展示属性。类型是一种「分类」——很多天体共享一个条目却仍能像真实星系
+/// （terran / rocky / gas_giant / ice_giant / dwarf …）。纯展示数据：模拟从不读它，只经
+/// `/api/meta` 暴露给前端。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct BodyKindSpec {
+    /// 中文类型名（如「气态巨行星」「矮行星」）。
+    pub label: String,
+    /// 渲染风格 / 着色器分支：`rock` | `terran` | `venus` | `martian` |
+    /// `lunar` | `gas` | `ice` | `titan` | `dwarf` —— 前端据此选 shader。
+    pub class: String,
+    /// 基色（CSS hex）——行星表面主色。
+    pub color: String,
+    /// 补充色（用于条纹 / 渐变 / 云带 / 极冠）。
+    pub accent: String,
+    /// 大气辉光 / 边缘光颜色（hex）。
+    pub atmosphere: String,
+    /// 显示半径乘数（相对 1.0 的类地行星）。随类型给出「合理相对尺寸」。
+    pub radius: f64,
+    /// 气态巨行星 / 冰巨星的横向色带（由 `class == "gas"` / `"ice"` 的 shader 绘制）。
+    pub banded: bool,
+    /// 自发光强度 0..1（城市灯光 / 热核地表 / 潮湿大气折射等）。
+    pub emissive: f64,
+    /// 材质粗糙度 0..1。
+    pub roughness: f64,
+    /// 材质金属度 0..1。
+    pub metalness: f64,
 }
 
 /// A single continuous-area building allocation on a city. Not an atom:
@@ -1783,6 +1827,11 @@ pub struct GameConfig {
     /// Building-structure definitions (混凝土 / 钢结构). Source of truth for
     /// which structure keys exist.
     pub structures: BTreeMap<String, StructureSpec>,
+    /// 天体/行星**类型**表（`BodyKindSpec`）：视觉与类型元数据（颜色/尺寸/类别/星环/着色器
+    /// 分支）。每个 [`Body`] 只存一个 **类型 key**（`Body::kind`），由前端经 `/api/meta` 读本表
+    /// 解析出实际视觉。纯展示数据。`#[serde(default)]` 容忍旧配置无此节（天体退回默认类型）。
+    #[serde(default)]
+    pub body_kinds: BTreeMap<String, BodyKindSpec>,
     /// Ship statistics, keyed by class name.
     pub ships: BTreeMap<String, ShipSpec>,
     /// Ship components (舰船定制组件), keyed by id. `#[serde(default)]` 容忍旧配置无此节。
@@ -1837,6 +1886,21 @@ impl GameConfig {
         self.structures
             .get(key)
             .map(|s| s.name.clone())
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    /// Look up a body/planet type spec by its kind key. `None` when the kind is
+    /// unknown (e.g. an old `.ron`/config without a configured type) — the front
+    /// end falls back to a generic spec. The engine simulation never reads this.
+    pub fn body_kind(&self, key: &str) -> Option<&BodyKindSpec> {
+        self.body_kinds.get(key)
+    }
+
+    /// A body/planet type's label, falling back to the key itself when unknown.
+    pub fn body_kind_name(&self, key: &str) -> String {
+        self.body_kinds
+            .get(key)
+            .map(|s| s.label.clone())
             .unwrap_or_else(|| key.to_string())
     }
 

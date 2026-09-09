@@ -204,9 +204,10 @@ function updateTop() {
   $('#metaRound').textContent = '回合 ' + world.round + ' · ' + world.time_month + ' 个月';
 }
 
-// 地图：把当前 world 交给 three.js 场景（map3d.js）。
+// 地图：把当前 world 交给 three.js 场景（map3d.js）。同时把 config 的天体类型表
+// (/api/meta -> body_kinds) 一并交给地图，供它按 body.kind 解析视觉（颜色/尺寸/shader）。
 function renderMap() {
-  if (window.PlanetXMap && window.PlanetXMap.setWorld) window.PlanetXMap.setWorld(world);
+  if (window.PlanetXMap && window.PlanetXMap.setWorld) window.PlanetXMap.setWorld(world, meta && meta.body_kinds);
 }
 
 // 地图点击回调，更新读面 + 选中舰。
