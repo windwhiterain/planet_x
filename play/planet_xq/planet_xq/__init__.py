@@ -145,6 +145,104 @@ class PlanetXQ:
                 rows.append({"round": r["round"], "faction_id": r["faction_id"], "other": other, "relation": v})
         return pd.DataFrame(rows, columns=["round", "faction_id", "other", "relation"])
 
+    def _faction_metrics(self, round: int, name: str) -> dict:
+        """The lean ``metrics.factions[name]`` numbers for one round (sim-computed)."""
+        fact = self.facts[self.facts["round"] == round]
+        if len(fact) == 0:
+            return {}
+        return (fact.iloc[0].get("metrics") or {}).get("factions", {}).get(name, {})
+
+    # --- semantic views (pure retrieval: pack the sim's own computed output) -----------------
+    # These only re-read what the simulation already computed and wrote into `metrics` / the lazy
+    # tables. They never re-derive a game rule (power_share/coalition/governance budget verdicts
+    # stay in Rust — see `--control-plan`); they are the "common read" layer.
+
+    def view_sitrep(self, round: int) -> dict | None:
+        """The world political picture at a round (sim's own aggregate): totals + hegemon /
+        coalition / sanction / wars / power_share + one row per faction."""
+        fact = self.facts[self.facts["round"] == round]
+        if len(fact) == 0:
+            return None
+        m = fact.iloc[0].get("metrics") or {}
+        fid_f = fact.iloc[0].get("faction_ids") or []
+        factions = []
+        for fid in fid_f:
+            fm = (m.get("factions") or {}).get(fid, {})
+            factions.append({
+                "faction": fid,
+                "city_count": fm.get("city_count"),
+                "ship_count": fm.get("ship_count"),
+                "fleet_value": fm.get("fleet_value"),
+                "production_value": fm.get("production_value"),
+                "upkeep": fm.get("upkeep"),
+                "governance_cost": fm.get("governance_cost"),
+                "market_value": fm.get("market_value"),
+                "at_war": fm.get("at_war"),
+            })
+        return {
+            "round": round,
+            "cities": m.get("cities"), "ships": m.get("ships"),
+            "fleet_value": m.get("fleet_value"), "population": m.get("population"),
+            "power_share": m.get("power_share"),
+            "hegemon": m.get("hegemon"), "sanctioned": m.get("sanctioned"),
+            "coalition_members": m.get("coalition_members"), "wars": m.get("wars"),
+            "factions": factions,
+        }
+
+    def view_frontier(self, round: int, faction: str | None = None, min_loyalty: float | None = None) -> pd.DataFrame:
+        """Cities at governance risk (a "frontier" read). Filters by ``faction`` and/or
+        ``loyalty <= min_loyalty``, sorted ascending by loyalty. Uses the sim-emitted ``loyalty``
+        / ``gov_distance`` / ``revolt_risk`` — never recomputed here."""
+        c = self.cities(round)
+        if c is None or c.empty:
+            return c
+        if faction is not None:
+            c = c[c["faction_id"] == faction]
+        if min_loyalty is not None:
+            c = c[c["loyalty"] <= min_loyalty]
+        return c.sort_values("loyalty")
+
+    def view_market(self, round: int, faction: str) -> dict | None:
+        """A faction's stockpile valued at market prices: per-resource amount & value + total.
+        Reads ``resources`` (sim stockpile) and the ``meta.resource_value`` table."""
+        frow = self.faction(round, faction)
+        if frow is None:
+            return None
+        res = frow.get("resources") or {}
+        rv = self.resource_value()
+        rv_map = rv["value"].to_dict() if rv is not None and len(rv) else {}
+        entries = []
+        for k, v in sorted(res.items(), key=lambda kv: -kv[1] * rv_map.get(kv[0], 1.0)):
+            value = rv_map.get(k, 1.0)
+            entries.append({"resource": k, "amount": v, "unit_value": value, "value": v * value})
+        return {
+            "round": round, "faction": faction,
+            "resources": entries,
+            "total_value": sum(e["value"] for e in entries),
+        }
+
+    def view_economy(self, round: int, faction: str) -> dict:
+        """A faction's economy read (sim-computed numbers + trivial arithmetic): production vs
+        upkeep vs governance, net flow, market value, governance coverage. `net < 0` means the
+        current fleet/governance is outrunning production (a bleed). NOTE: the *judgement* of
+        whether a commanded build budget is sustainable (verdict / sustainable-upkeep /
+        rounds-to-insolvency) is game logic — read it from the Rust `--control-plan`, not here."""
+        fm = self._faction_metrics(round, faction)
+        prod = fm.get("production_value", 0.0) or 0.0
+        upkeep = fm.get("upkeep", 0.0) or 0.0
+        gov = fm.get("governance_cost", 0.0) or 0.0
+        net = prod - upkeep - gov
+        return {
+            "round": round, "faction": faction,
+            "production_value": prod, "upkeep": upkeep, "governance_cost": gov,
+            "net_flow": net, "bleeding": net < -1e-9,
+            "market_value": fm.get("market_value"),
+            "governance_coverage": fm.get("governance_coverage"),
+            "fleet_value": fm.get("fleet_value"),
+            "city_count": fm.get("city_count"), "ship_count": fm.get("ship_count"),
+            "at_war": fm.get("at_war"),
+        }
+
     def ids(self, field: str, round: int) -> list[str]:
         """The id-array of a lazy field for one round (from the lean main row). Ids are **names**
         (strings), never integers: city/building/faction/ship identity = its unique name."""

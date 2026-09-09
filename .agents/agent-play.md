@@ -116,6 +116,13 @@ q.join("cities", round=12).query("faction_id=='中国' and loyalty < 0.5")
 snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 ```
 
+> **语义视图（纯读取，把模拟算好的打包给你）**：`q.view_sitrep(12)`（世界政治：霸权/联盟/制裁/战争/
+> 实力占比/各势力）；`q.view_frontier(12, "中国")`（我的失稳城，含 sim 算好的 `loyalty`/
+> `gov_distance`/`revolt_risk`）；`q.view_market(12, "中国")`（库存按市场价）；`q.view_economy(12, "中国")`
+> （产/维护/治理/净流/止血标记）。**这些只读、不重算游戏公式**。唯一要「游戏逻辑」判断的
+> ——「我下令的造舰预算可持续吗？」——用 Rust 的 `--control-plan <faction>` 看 `verdict`，
+> 不要在 Python 里自己估。
+
 > 先 `--digest K --round N` 看整段走势的故事板，再对感兴趣窗口 `--index` 精读，别一把梭全量。
 
 ---

@@ -239,6 +239,11 @@ fn write_round(
                 "deployed_area": r2(deployed),
                 "building_count": c.buildings.len(),
                 "buildings": buildings,
+                // 治理到首都的距离（AU，游戏规则：距 capital_body 越远治理越费、忠诚越低）。
+                // 由模拟算出（复用 agent::governance_distance），agent 只读；夷平城无主，置 0。
+                "gov_distance": r2(if c.razed { 0.0 } else { crate::agent::governance_distance(state, &c.faction_id, &c.body_id) }),
+                // 离心风险：忠诚低于叛变阈值即爆发 Revolt（夷平为空白）。模拟算好的信号。
+                "revolt_risk": !c.razed && c.loyalty <= config.governance.loyalty_revolt,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -298,8 +303,8 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "城的完整对象（人口/忠诚/建筑清单/迭代进度），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array"},
+                "description": "城的完整对象（人口/忠诚/治理距离/建筑清单/离心风险），随回合变化。按 (round, city_id) 索引。",
+                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array","gov_distance":"number","revolt_risk":"boolean"},
             }),
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
@@ -438,6 +443,11 @@ mod tests {
         assert!(factions[0].get("faction_id").is_some(), "factions 表要有 faction_id 列");
         assert!(factions[0].get("relations").is_some(), "factions 表要有 relations");
         assert!(factions[0].get("resources").is_some(), "factions 表要有 resources（库存）");
+        // cities table: governance distance + revolt-risk are game-derived but emitted for the agent.
+        let cities = jsonl(&s.0.join("idx/cities.jsonl"));
+        assert!(!cities.is_empty());
+        assert!(cities[0].get("gov_distance").is_some(), "cities 表要有 gov_distance（治理距离）");
+        assert!(cities[0].get("revolt_risk").is_some(), "cities 表要有 revolt_risk（离心风险）");
     }
 
     /// The projection is deterministic: the same seed → byte-identical `main.jsonl`.

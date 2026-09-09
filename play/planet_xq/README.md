@@ -100,3 +100,28 @@ Key ideas:
 > read `faction_snapshot` → write a control diff → `planet_x --start ckpt.ron --apply diff.json
 > --round K --save ckpt.ron` → re-read → adjust. Checkpoints preserve the RNG, so the run is
 > deterministic and rewindable.
+
+## Semantic views: the "common read" in Python, "game logic" in Rust
+
+The split is a hard boundary. **Python views only pack what the simulation already computed and
+wrote into `metrics` / the lazy tables** (pure retrieval, can never drift from the rules). **Any
+judgement that needs a game formula stays in Rust** (`--control-plan` for the economy-sustainability
+verdict; governance-distance / power-share / coalition are computed & emitted by the sim itself).
+
+```python
+q.view_sitrep(12)                # world politics: totals + hegemon/coalition/sanction/wars/power_share + per-faction
+q.view_frontier(12, "中国")       # my risky cities (loyalty / gov_distance / revolt_risk), sorted by loyalty
+q.view_frontier(12, min_loyalty=0.5)   # any city about to revolt
+q.view_market(12, "中国")         # my stockpile valued at market prices (per-resource + total)
+q.view_economy(12, "中国")        # production vs upkeep vs governance, net flow, coverage, bleeding flag
+```
+
+- `view_sitrep` / `view_frontier` / `view_market` / `view_economy` are all **pure retrieval** —
+  they re-read `metrics`/lazy tables and do trivial arithmetic (`net = production − upkeep −
+  governance`).
+- The one thing they deliberately **don't** judge is *"is my commanded build budget sustainable?"*
+  — that's `planet_x --control-plan <faction>` (game logic: the upkeep-reserve cap + a dry-run
+  `advance`). Python `view_economy` gives the raw flow; the verdict comes from Rust.
+- `revolt_risk` / `gov_distance` on each city are game-derived and **emitted by the simulation**
+  (`agent::governance_distance`), so the Python frontier view stays correct without re-deriving the
+  governance distance formula.
