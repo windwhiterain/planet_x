@@ -8,7 +8,6 @@ pub mod agent;
 pub mod config;
 pub mod model;
 pub mod prng;
-pub mod query;
 pub mod sim;
 pub mod visual;
 pub mod web;

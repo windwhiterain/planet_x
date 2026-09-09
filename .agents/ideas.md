@@ -122,6 +122,11 @@
   agent 可调，无需改代码。
 - `[ ]` **harness**：长局里断言「行星X 至少回归 X 次」「每次回归都产生全球性事件」，保证
   「行星X」不是一次性噱头，而是贯穿上千回合的主线。
+- `[ ]` **实盘诊断（seed 7 @ `--traj 60`）**：剧情弧恰好在第 60 回合以「行星X 现身」收尾，
+  但该节拍**纯属散文**——轨迹里它只写入 `chronicle`，对关系/轨道/经济/市场**零机械影响**
+  （`State` 无第 19 号天体、无回归效应）。这印证了「把行星X 做成真实长周期天体 + 回归效应」
+  的必要性：目前这个**命名核心的高潮在数值上没有任何落点**，文案说「太阳系已不再是以往那个
+  太阳系」，数值却纹丝不动。
 
 ## 4. MOND / 柯伊伯引力异常 — `[~]`
 
@@ -167,6 +172,16 @@
   世界玩没人）。
 - `[ ]` **阵营/派系内政**：`alignment`/`aggression` 之外，再加一维「民粹/建制」，影响势力
   对外开战倾向与盟友选择，让外交不只由一条意识形态轴决定。
+- `[ ]` **主线节拍的机械落点**：剧情弧里「巨头对峙/军备竞赛」这类**标题性节拍**目前只进
+  `chronicle`，不产生对应机制（seed 7 @ `--traj 60`：`arms_race` 只是文字，美中并未真的
+  同步下水新战列舰）。建议给这类节拍加**机械后果**（`GrantShip` 一艘对应旗舰、`Relations`
+  定向压向战争、`GrantResources` 注入造舰材料），让「讲故事的高潮」在 `State` 里有具体
+  形状，而不是只改一行标题。
+- `[ ]` **「共同敌人」联盟化检验**：`cult_war` 文案称「世界骤然多了一个共同的敌人」，但
+  seed 7 里教团末态仅与中国交战、1 城，**并未被围攻成联盟**。可给剧情条目加一个
+  `common_enemy` 触发：某势力被剧情标记为「共同威胁」时，其余势力关系向「遏制」聚拢（复用
+  `sim::step_balance_of_power` 的 coalition/遏制逻辑），让「共同敌人」在数值上也真的被抱团
+  针对，而不是只活在标题里。
 
 ## 8. AI 游玩体验（agent 控制面） — `[~]`
 
@@ -358,6 +373,96 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
 
 ---
 
+## 11. Schema/查询架构再造（降低「schema 查询维护」心智负担） — `[ ]`
+
+> 调研设计文档见 `.agents/schema-query-architecture.md`（诊断+分层方案俱全）。此节只列
+> 「未落地的候选改造」，供下一步直接照做。**现状四痛点**：① `State` 真身之外还有 4 套
+> 并行手写投影（`agent.rs` 的 `AgentState`、`meta_value`，`web.rs` 的 `MetaView` 等，
+> control/diff 面）；② schema 隐式，agent 要背；③ query 引擎宽容（缺字段→null，漂移
+> 静默失效）；④ 无 `schema_version`/迁移，旧 `.ron` 语义变化被静默错载。
+
+- `[x]` **P0 修 `meta_value` 漂移（先止血）**（已落地，`src/agent.rs`）：`meta_value` 的
+  `economy/combat/diplomacy/market/governance/mond/balance` 与 `structures/buildings/ships/
+  components` 段改用 `config_json`（`serde_json::to_value` + 递归浮点圆整）从各 `GameConfig`
+  子结构**直接派生**，删手写字段清单。**已知漂移**（已修）：`combat` 原来漏了
+  `component_spill`/`component_repair`/`escort_range`/`pursuit_range`/`pd_radius` 这 5 个
+  近期字段，现在都出现在 meta 里。整数型字段（`slots`/`min_members`/id）保持整数不被圆整。
+  `resources`（raw key→中文名）与 `story`（平铺 trigger/effects）仍为刻意保留：前者是
+  显示名翻译表、后者是真转换。新增守卫单测
+  `agent::tests::meta_derives_all_combat_fields_and_keeps_ints`。**未做**：`web.rs` 的
+  `MetaView` 仍是独立一套（可后续复用同源）。
+- `[x]` **P1 schema 自描述**（已落地，`src/agent.rs` + `src/main.rs` + `Cargo.toml`）：
+  `Cargo.toml` 加 `schemars = 0.8`（derive）；agent 视图类型（`AgentState`/`AgentCity`/…/
+  `AgentOrder`）加 `#[derive(Serialize, JsonSchema)]`；`agent::schema_value()` 用
+  `schemars::schema_for!(AgentState)` 生成 JSON Schema；`main.rs` 加 `schema [<jq>]` REPL
+  命令。agent 从「背 schema」变「查 schema」（嵌套类型走 `$ref`/`$defs`）。`meta`/`state`
+  顶层**未**塞 schema（避免每回合行肿胀），独立命令即可。
+- `[x]` **P2 查询响亮失败**（已落地，`src/query.rs` + `src/main.rs`）：`query.rs` 加
+  `apply_strict`/`apply_strict_lines`，strict 模式下 `Path` 访问不存在字段 / 越界索引返回
+  `Err(unknown field …)`（而非 null）；CLI 加 `--strict`，REPL `q --strict <jq>`，默认仍
+  宽容。新增 3 个守卫单测（未知字段报错 / 存在字段通过 / 越界索引报错）。让 schema 漂移
+  立即可见、不静默。
+- `[x]` **P3 版本化+迁移**（已落地，`src/model.rs` + `src/config.rs` + `src/world.rs`）：
+  `State` 加 `schema_version: u32`（`#[serde(default)]`，旧档为 0）+ `SCHEMA_VERSION = 1`；
+  `config.rs` 的 `load_state`/`load_checkpoint` 解析后调 `model::migrate(&mut state)` 逐档
+  升级；版本过新则显式报错（宁抛错不错载）。`world::default_state` 写 `schema_version`。
+- `[ ]` **P4 收敛并行投影**：把 `agent.rs` 的 `AgentState`/`AgentCity`/… 镜像 struct
+  拆掉，改为对真身 `State` 用 serde 属性（`skip_serializing_if`/`rename`/`serialize_with`）
+  做用户态裁剪；至少先做到「从真身 derive/生成、不手抄」。工作量最大，建议后续渐进
+  （先拆 `AgentShip` 再拆 `AgentCity`…）。P1 已给这些镜像 struct 加了 `JsonSchema`
+  derive——若最终拆掉它们，`schema_value()` 的生成目标也要换成新派生视图。
+
+---
+
+## 12. 语义化「视图/工具」API（把裸 jq 降为逃生舱） — `[ ]`
+
+- `[ ]` **命名语义工具集**（对应设计文档 Layer 2）：把 agent 主界面从「裸 jq 探 JSON」
+  升级为稳定、有版本、参数化的语义操作，由模拟自己生成数据（复用 `sim.rs` 现有的
+  `balance_picture`/`governance_distance` 等），不要求 agent 知道底层 JSON 树。候选：
+  `view sitrep` / `view economy <faction>` / `view fleet <faction>` / `view frontier`
+  （边缘失稳城）/ `view threat`（威胁评估）/ `view market`。`q`/`--query` 降为逃生舱。
+- `[ ]` **工具层校验**：语义工具做参数校验（如 `order 0 attack 99` 明确报「目标舰不存在」），
+  把错误在工具层显式化，而不是丢给宽容的 jq。
+- `[ ]` **Layer 3 方向（长期/可选，非现在必须）**：ECS 组件化存储 + 事件溯源投影，把
+  「资源/建筑/舰级用字符串键+配置表」这套数据驱动模式推广到实体属性；新增机制=加组件
+  +加 system/投影，不动既有结构体。投入大、破坏 `.ron` 可读性，仅当扩展需求真正爆了才做。
+
+---
+
+## 13. Agent 讲故事模式：轨迹生成器 + 外部 jq（已落地） — `[x]`
+
+> 形态转变：agent 从「玩家（每回合 advance→读→apply diff）」变成「**导演/说书人**」——
+> 跑一段轨迹、**任意时间轴查询**、讲给用户看。已决定并实现：**外部 jq 为必选依赖；
+> 删掉自研 jq 引擎与查询 REPL；agent 仍可用 `--apply` diff 影响故事走向；Web
+> （`planet_x_web`）是玩家界面，完整保留。** 落地设计见
+> `.agents/schema-query-architecture.md` §10。
+
+- `[x]` **删掉自研 jq 引擎**（`src/query.rs` 整文件 + `lib.rs` 的 `pub mod query` + 其全部
+  12 个单测）。raw 任意查询全权交给外部 jq。
+- `[x]` **删掉查询 REPL 与 `--query`/`--strict`/`--script`**；`main.rs` 重写为**批次轨迹
+  生成器**：
+  - `--round N`：输出 JSON Lines（回合 0 先，之后每回合一行 agent 视图，含 `.events`）——
+    `| jq` 任意时间轴查询（`jq -s` 可整段收集）。
+  - `--traj N`：输出一个自包含 `{schema_version, meta, story, trajectory:[...]}`（story pack）。
+  - `--meta`/`--schema`/`--story`/`--control`：各自输出一个 JSON 值（规则字典 / agent 视图
+    schema / 编年史 / 可编辑控制面模板）。
+  - `--apply <diff>`：叠加控制 diff 定向故事；`--start <ckpt>`+`--save <ckpt>` 分段续玩
+    （每段纯函数，seed/checkpoint 保证可复现）。
+- `[x]` **验证**：`cargo build` 全目标成功；`cargo test --lib` 37 passed（原 49 = 删掉
+  query 模块 12 个单测）；`cargo test --test longhorizon` 5 passed / 4 ignored。smoke：
+  `--round 30 | jq` 时间序列、`--traj` pack（schema_version=1、trajectory_len=13、
+  story_len=7）、`--schema`（title=AgentState）、`--control`（control+scope）、`--apply`
+  定向（faction0 iron budget=999 mode=Player 确实落入控制面）、分段
+  `--start ckpt +--round 6` 与直跑 `--round 12` 的末行**逐字节一致**（确定性满足）。
+- `[ ]`（事实，非待办）**Web 玩家界面未动**：`planet_x_web` 保留有状态 advance/apply_patch
+  交互；`web::control_surface`/`apply_patch` 与 CLI `--apply` 共享同一控制/diff 契约。
+- `[ ]` **`jq` 成为宿主运行时依赖**：agent 叙事/查询侧需宿主装 jq（本沙箱未装，无法在此
+  演示 `| jq` 管道；生成器输出已用 PowerShell 验证为合法 JSON Lines）。
+- `[~]` §12 的「命名语义工具」仍可作为 Layer 2 方向，但有了外部 jq 的全量语法后，「裸 jq
+  探 JSON」不再棘手；语义工具聚焦「稳定契约 + 参数校验 + 由模拟生成数据」，而非替代 jq。
+
+---
+
 ## 当前已知问题（实现新点子前务必继承）
 
 - **区域性霸权**：治理 + 本土防御 + MOND + 合纵连横让世界有了地理与外交结构、也**不再统一**
@@ -376,4 +481,5 @@ agent 每舰暴露 components 与 effective 面板，meta 暴露组件表。
 - 单元测试：`cargo test --lib`
 - 长局快守卫：`cargo test --test longhorizon`
 - 长局诊断（慢，可打印）：`cargo test --test longhorizon diagnose_long_horizon -- --ignored --nocapture`
-- 一次简短观察：`cargo run --bin planet_x -- --seed 7 --round 30 --query '{round,counts:{ships:(.ships|length)}}'`
+- 一次简短观察（外部 jq）：`cargo run --bin planet_x -- --seed 7 --round 30 | jq -c 'select(.round % 10 == 0) | {round, nships:(.ships|length)}'`
+- 一键拿故事素材：`cargo run --bin planet_x -- --seed 7 --traj 60 | jq '.story'`

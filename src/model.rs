@@ -702,9 +702,24 @@ fn default_home_regen_bonus() -> f64 {
     0.0
 }
 
+/// The current persisted `State` schema version. Bump this whenever `State`'s
+/// field structure or semantics change, and add a matching arm to [`migrate`] so
+/// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
+/// instead of being silently loaded under new semantics.
+pub const SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    0
+}
+
 /// The complete world snapshot.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct State {
+    /// 状态/schema 版本。每次改动 `State` 的**语义/字段结构**时递增（见 [`SCHEMA_VERSION`]
+    /// 与 [`migrate`]）；旧 `.ron` 缺该字段时 serde default 为 0，由 [`migrate`] 逐档升级，
+    /// 避免「旧档案被按新语义静默错载」。
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// Current round number (0 = the start state).
     pub round: u32,
     /// Total elapsed time in months.
@@ -849,6 +864,24 @@ impl State {
         let body = body_id.and_then(|bid| self.scope.bodies.get(&bid).copied().flatten());
         let faction = self.scope.factions.get(&fid).copied().flatten();
         resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+}
+
+/// 把 `State` 从 `schema_version` 逐档升级到 [`SCHEMA_VERSION`]。在加载 `.ron` /
+/// checkpoint 之后调用；无法迁移或版本比当前二进制还新则返回显式 `Err`（宁抛错，
+/// 不错载）。v0 → v1：`schema_version` 字段本身就是 v1 引入的——旧档案缺字段由 serde
+/// default 填 0，其既有字段无需任何数据变换（所有 v1 新字段都带 serde default）。
+/// 真正的语义迁移（改字段含义/重算派生值）在将来某版本于此处补档。
+pub fn migrate(state: &mut State) -> Result<(), String> {
+    match state.schema_version {
+        0 => {
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        v if v == SCHEMA_VERSION => Ok(()),
+        v => Err(format!(
+            "cannot load state: schema_version {v} is newer than this binary ({SCHEMA_VERSION})"
+        )),
     }
 }
 

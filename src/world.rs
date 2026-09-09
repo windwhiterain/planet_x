@@ -693,6 +693,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let scope = ControlScope::default();
 
     let mut state = State {
+        schema_version: SCHEMA_VERSION,
         round: 0,
         time_month: 0.0,
         bodies,

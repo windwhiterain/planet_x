@@ -2,7 +2,7 @@
 //! initial-state RON file, and seed parsing. Used by both the CLI and the web
 //! server so the two entry points behave identically.
 
-use crate::model::{GameConfig, State};
+use crate::model::{migrate, GameConfig, State};
 use crate::prng::{self, Prng};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -35,10 +35,16 @@ pub fn load_state(path: &Path) -> State {
         eprintln!("{} 无法读取初始状态 {}: {e}", "[错误]".red().bold(), path.display());
         std::process::exit(1);
     });
-    ron::from_str(&text).unwrap_or_else(|e| {
+    let mut state: State = ron::from_str(&text).unwrap_or_else(|e| {
         eprintln!("{} 初始状态 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
         std::process::exit(1);
-    })
+    });
+    // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错退出，而不是静默错载。
+    if let Err(e) = migrate(&mut state) {
+        eprintln!("{} 初始状态 {} 迁移失败: {e}", "[错误]".red().bold(), path.display());
+        std::process::exit(1);
+    }
+    state
 }
 
 /// A serializable session checkpoint: the full `State` plus the exact PRNG
@@ -66,7 +72,9 @@ pub fn save_checkpoint(path: &Path, state: &State, rng: &Prng) -> Result<(), Str
 /// Load a checkpoint, returning the `State` and the resumable `Prng`.
 pub fn load_checkpoint(path: &Path) -> Result<(State, Prng), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错。
+    migrate(&mut cp.state)?;
     Ok((cp.state, Prng::from_state(cp.prng_state)))
 }
 

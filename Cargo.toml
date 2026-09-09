@@ -6,6 +6,10 @@ description = "A turn-based solar-system sandbox trajectory generator for the Pl
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Generate a machine-readable JSON Schema for the agent's state view, so the
+# agent can *introspect* the schema (`schema` / `meta.schema`) instead of
+# memorising it — the "self-describing schema" piece of the architecture.
+schemars = { version = "0.8", features = ["derive"] }
 ron = "0.8"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"

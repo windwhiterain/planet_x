@@ -12,6 +12,7 @@
 //! dropped so the document stays small.
 
 use crate::model::*;
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -21,25 +22,43 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-/// The agent state as a `serde_json::Value`, for in-process querying.
-///
-/// Query mode (`--query` / `q`) additionally attaches the full story chronicle
-/// as a top-level `story` field, so an agent can read the narrative arc with
-/// `.story` (or `.story[] | select(...)`). The per-round `render_state` stays
-/// lean and only carries the chapter's own `events`.
+/// The agent state as a `serde_json::Value`, with the full story chronicle attached
+/// as a top-level `story` field, so an agent can read the narrative arc alongside
+/// the current snapshot. The per-round [`render_state`] / [`state_json`] stay lean
+/// and only carry the chapter's own `events` — use this when you want the whole
+/// story in one document.
 pub fn state_value(state: &State, config: &GameConfig) -> serde_json::Value {
-    let doc = AgentState::from_state(state, config);
-    let mut v = serde_json::to_value(doc).expect("agent state is serializable");
+    let mut v = state_json(state, config);
     if let serde_json::Value::Object(ref mut m) = v {
         m.insert("story".to_string(), story_value(state));
     }
     v
 }
 
+/// The agent state view as a `serde_json::Value`, without the story chronicle.
+///
+/// This is the atomic per-round snapshot used to build a **trajectory**: a linear
+/// timeline of agent views, one per round, that the agent can index and query over
+/// time. Kept separate from [`state_value`] so a trajectory of thousands of rounds
+/// doesn't drag along a copy of the whole `story` chronicle in every snapshot.
+pub fn state_json(state: &State, config: &GameConfig) -> serde_json::Value {
+    serde_json::to_value(AgentState::from_state(state, config)).expect("agent state is serializable")
+}
+
 /// The story chronicle (`State::chronicle`) as a JSON array, for `story` /
 /// `.story` queries. This is the full, growing narrative arc of the run.
 pub fn story_value(state: &State) -> serde_json::Value {
     serde_json::to_value(&state.chronicle).expect("chronicle is serializable")
+}
+
+/// A JSON Schema for the agent's per-round state view (`AgentState`), so an agent
+/// can introspect the exact field names / types it may query — instead of
+/// memorising the schema. It stays in sync because it is *derived* from the same
+/// `#[derive(Serialize, JsonSchema)]` structs the state is rendered from. Expose
+/// via the `schema` REPL command (optionally piped through a jq filter).
+pub fn schema_value() -> serde_json::Value {
+    let schema = schemars::schema_for!(AgentState);
+    serde_json::to_value(schema).expect("schema is serializable")
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
@@ -66,191 +85,72 @@ pub fn render_state(state: &State, config: &GameConfig) -> String {
 /// Every key here is a raw config key (not a display name), so it lines up
 /// directly with the `control` template and the machine keys; the `resources`
 /// table is the single place that maps raw key ↔ 中文名.
-pub fn meta_value(config: &GameConfig) -> serde_json::Value {
-    let to_cost = |m: &BTreeMap<String, f64>| m.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>();
+///
+/// Everything below except `resources`/`story` is rendered by [`config_json`],
+/// i.e. derived straight from the config structs — so the rules dictionary can
+/// never drift from `config/game.ron`. (The old hand-written field lists already
+/// omitted `combat.component_spill`, `component_repair`, `escort_range`,
+/// `pursuit_range` and `pd_radius`.) `resources` is the intentional raw-key →
+/// 中文名 translation table; `story` maps trigger/effects into a flat readable
+/// shape.
+///
+/// Round every float in a JSON tree to 2 decimals (agent token-noise reduction).
+/// Integer numbers (ids, `slots`, `min_members`, …) are left untouched so they
+/// don't render as `3.0`.
+fn round_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Number(n) if n.is_f64() => {
+            if let Some(f) = n.as_f64() {
+                *v = serde_json::Value::from((f * 100.0).round() / 100.0);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(round_value),
+        serde_json::Value::Object(m) => m.values_mut().for_each(round_value),
+        _ => {}
+    }
+}
 
+/// Serialize any serializable config value to JSON with floats already rounded
+/// to 2 decimals. This is the single-source renderer for `meta_value`'s config
+/// sections: derive from the struct, never transcribe a field list.
+fn config_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    let mut v = serde_json::to_value(value).expect("config value is serializable");
+    round_value(&mut v);
+    v
+}
+
+pub fn meta_value(config: &GameConfig) -> serde_json::Value {
     let resources: BTreeMap<String, String> =
         config.resources.iter().map(|(k, d)| (k.clone(), d.name.clone())).collect();
-    let buildings: BTreeMap<String, serde_json::Value> = config
-        .buildings
-        .iter()
-        .map(|(k, b)| {
-            (
-                k.clone(),
-                json!({
-                    "label": b.label,
-                    "role": b.role,
-                    "construction_speed": r2(b.construction_speed),
-                    "build_cost": to_cost(&b.build_cost),
-                    "staff_per_area": r2(b.staff_per_area),
-                    "productivity": r2(b.productivity),
-                    "default_invest_weight": r2(b.default_invest_weight),
-                    "default_build_weight": r2(b.default_build_weight),
-                }),
-            )
-        })
-        .collect();
-    let structures: BTreeMap<String, serde_json::Value> = config
-        .structures
-        .iter()
-        .map(|(k, s)| {
-            (
-                k.clone(),
-                json!({
-                    "name": s.name,
-                    "armor_per_area": r2(s.armor_per_area),
-                    "cost_mult": r2(s.cost_mult),
-                }),
-            )
-        })
-        .collect();
-    let ships: BTreeMap<String, serde_json::Value> = config
-        .ships
-        .iter()
-        .map(|(k, s)| {
-            (
-                k.clone(),
-                json!({
-                    "label": s.label,
-                    "hull": r2(s.hull),
-                    "hull_regen": r2(s.hull_regen),
-                    "slots": s.slots,
-                    // 舰级 = 平台修正器：这些系数缩放模块输出（护甲/护盾/护盾再生/速度/加速度/
-                    // 伤害/攻击距离）。速度/加速度/攻击距离**没有舰级基础值**——它们完全来自
-                    // 推进/武器模块，所以「推进」和「武器」一样是必须的。
-                    "armor_mult": r2(s.armor_mult),
-                    "shield_mult": r2(s.shield_mult),
-                    "shield_regen_mult": r2(s.shield_regen_mult),
-                    "speed_mult": r2(s.speed_mult),
-                    "accel_mult": r2(s.accel_mult),
-                    "attack_mult": r2(s.attack_mult),
-                    "range_mult": r2(s.range_mult),
-                    "pd_mult": r2(s.pd_mult),
-                    "build_points": r2(s.build_points),
-                    "build_cost": to_cost(&s.build_cost),
-                    "upkeep": r2(s.upkeep),
-                }),
-            )
-        })
-        .collect();
+
+    // `market` = 当前配置结构 + 由资源定义派生的每资源价值表。
+    let mut market = config_json(&config.market);
+    if let serde_json::Value::Object(m) = &mut market {
+        m.insert(
+            "resource_value".to_string(),
+            config_json(
+                &config
+                    .resources
+                    .iter()
+                    .map(|(k, r)| (k.clone(), r.value))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+        );
+    }
+
     json!({
         "resources": resources,
-        "structures": structures,
-        "buildings": buildings,
-        "ships": ships,
-        // 舰船定制组件：每件武器的伤害类型/射程/追踪/盾甲倍率，防御的护盾池/装甲/点防，
-        // 推进的速度。AI 可据此理解「每支舰队怎么打」以及哪家势力（资源优势）能造什么。
-        "components": config
-            .components
-            .iter()
-            .map(|(k, c)| {
-                (
-                    k.clone(),
-                    json!({
-                        "label": c.label,
-                        "category": c.category,
-                        "damage": r2(c.damage),
-                        "damage_type": c.damage_type,
-                        "range": r2(c.range),
-                        "tracking": r2(c.tracking),
-                        "shield_mult": r2(c.shield_mult),
-                        "hull_mult": r2(c.hull_mult),
-                        "shield": r2(c.shield),
-                        "shield_regen": r2(c.shield_regen),
-                        // 护甲 = 让船体变硬（减伤系数），不是加血。
-                        "hardness": r2(c.hardness),
-                        "intercept": r2(c.intercept),
-                        "speed": r2(c.speed),
-                        "hull_regen": r2(c.hull_regen),
-                        "upkeep": r2(c.upkeep),
-                        "cost": to_cost(&c.cost),
-                    }),
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
-        "economy": {
-            "production_rate": r2(config.economy.production_rate),
-            "pop_growth": r2(config.economy.pop_growth),
-            "min_efficiency": r2(config.economy.min_efficiency),
-            "invest_fraction": r2(config.economy.invest_fraction),
-            "housing_buffer": r2(config.economy.housing_buffer),
-            "upkeep_reserve_mult": r2(config.economy.upkeep_reserve_mult),
-        },
-        "combat": {
-            "war_threshold": r2(config.combat.war_threshold),
-            "siege_range": r2(config.combat.siege_range),
-            "arrival_eps": r2(config.combat.arrival_eps),
-            "armor_regen": r2(config.combat.armor_regen),
-            "colony_footprint": r2(config.combat.colony_footprint),
-            "retreat_hull": r2(config.combat.retreat_hull),
-            "retreat_min_dist": r2(config.combat.retreat_min_dist),
-        },
-        "diplomacy": {
-            "attack_delta": r2(config.diplomacy.attack_delta),
-            "capture_delta": r2(config.diplomacy.capture_delta),
-            "drift_rate": r2(config.diplomacy.drift_rate),
-            "war_fatigue": r2(config.diplomacy.war_fatigue),
-            "ceasefire_relation": r2(config.diplomacy.ceasefire_relation),
-            "affinity_floor": r2(config.diplomacy.affinity_floor),
-            "affinity_span": r2(config.diplomacy.affinity_span),
-            "noise": r2(config.diplomacy.noise),
-            "hostility_floor": r2(config.diplomacy.hostility_floor),
-            "friendship_ceiling": r2(config.diplomacy.friendship_ceiling),
-        },
-        "market": {
-            "auto_trade_limit": r2(config.market.auto_trade_limit),
-            "working_buffer": r2(config.market.working_buffer),
-            "spread": r2(config.market.spread),
-            "resource_value": config
-                .resources
-                .iter()
-                .map(|(k, r)| (k.clone(), r2(r.value)))
-                .collect::<BTreeMap<_, _>>(),
-        },
-        // 光速治理：以「距离首都 × 人口超载」为代价的管理/忠诚度。城市远离首都、
-        // 或势力人口过多，管理越难；治理不到位（欠费）时忠诚度暴跌，跌破
-        // loyalty_revolt 即爆发离心叛乱（城市夷平为空白）。投入娱乐预算
-        // (`loyalty_budget`) 可提升忠诚度、对冲距离/人口。
-        "governance": {
-            "admin_base": r2(config.governance.admin_base),
-            "admin_per_au": r2(config.governance.admin_per_au),
-            "admin_range": r2(config.governance.admin_range),
-            "loyalty_recover": r2(config.governance.loyalty_recover),
-            "loyalty_penalty": r2(config.governance.loyalty_penalty),
-            "loyalty_distance": r2(config.governance.loyalty_distance),
-            "loyalty_range": r2(config.governance.loyalty_range),
-            "loyalty_revolt": r2(config.governance.loyalty_revolt),
-            "population_capacity": r2(config.governance.population_capacity),
-            "default_entertainment": r2(config.governance.default_entertainment),
-            "entertainment_cost": r2(config.governance.entertainment_cost),
-        },
-        // MOND / 柯伊伯引力异常：距太阳超过 radius 的深空进入异常区；除 masters
-        // 之外的势力在异常区内轨道计算错误，指令坐标与实际坐标偏移——无法精确轰炸/
-        // 殖民/停靠深处目标。掌握了 MOND 的势力（cult）在异常区内指哪打哪。
-        "mond": {
-            "radius": r2(config.mond.radius),
-            "drift_per_au": r2(config.mond.drift_per_au),
-            "masters": config.mond.masters.clone(),
-        },
-        // 合纵连横 / 均势外交：当一方综合实力占比≥hegemon_power 时被定为「霸权」，
-        // 其余较弱势力结成反制联盟——弱者相互亲近(向 coalition_affinity 靠拢)，弱者对
-        // 霸权疏远/敌意(向 hegemon_affinity 靠拢)；霸权对任一弱者开战触发集体安全
-        // (其余弱者对霸权关系骤降)；被封锁的霸权经济制裁(自动市场交易额度缩水到
-        // sanction_trade_mult)，造成资源封锁与失衡。min_members 为联盟成立的最小成员数。
-        "balance": {
-            "hegemon_power": r2(config.balance.hegemon_power),
-            "power_city_weight": r2(config.balance.power_city_weight),
-            "power_fleet_weight": r2(config.balance.power_fleet_weight),
-            "coalition_affinity": r2(config.balance.coalition_affinity),
-            "coalition_rate": r2(config.balance.coalition_rate),
-            "hegemon_affinity": r2(config.balance.hegemon_affinity),
-            "hegemon_rate": r2(config.balance.hegemon_rate),
-            "collective_defense_delta": r2(config.balance.collective_defense_delta),
-            "min_members": config.balance.min_members,
-            "coalition_estrange": r2(config.balance.coalition_estrange),
-            "sanction_trade_mult": r2(config.balance.sanction_trade_mult),
-            "sanction_cost_mult": r2(config.balance.sanction_cost_mult),
-        },
+        "structures": config_json(&config.structures),
+        "buildings": config_json(&config.buildings),
+        "ships": config_json(&config.ships),
+        "components": config_json(&config.components),
+        "economy": config_json(&config.economy),
+        "combat": config_json(&config.combat),
+        "diplomacy": config_json(&config.diplomacy),
+        "market": market,
+        "governance": config_json(&config.governance),
+        "mond": config_json(&config.mond),
+        "balance": config_json(&config.balance),
         "story": config
             .story
             .iter()
@@ -288,7 +188,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
 }
 
 /// The compact, decision-relevant view of a round.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentState {
     round: u32,
     time_month: f64,
@@ -302,7 +202,7 @@ struct AgentState {
     coalition: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentFaction {
     id: FactionId,
     name: String,
@@ -326,7 +226,7 @@ struct AgentFaction {
     home_regen_bonus: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentBody {
     id: BodyId,
     name: String,
@@ -338,7 +238,7 @@ struct AgentBody {
 }
 
 /// A body's orbit, summarised to the numbers that matter for planning travel.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentOrbit {
     perihelion: f64,
     aphelion: f64,
@@ -348,7 +248,7 @@ struct AgentOrbit {
 
 /// One 定居点 (settlement site) on a body: how much can be built, how fast, and
 /// what resources are available to mine here (资源矿藏 bounds the mining area).
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentSettlement {
     name: String,
     /// 总面积 (total buildable area of this site).
@@ -360,13 +260,13 @@ struct AgentSettlement {
     deposits: Vec<AgentDeposit>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentDeposit {
     resource: String,
     area: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentCity {
     id: CityId,
     name: String,
@@ -393,7 +293,7 @@ struct AgentCity {
     gov_distance: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentBuilding {
     id: BuildingId,
     kind: String,
@@ -409,7 +309,7 @@ struct AgentBuilding {
     armor_max: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct AgentShip {
     id: ShipId,
     name: String,
@@ -438,7 +338,7 @@ struct AgentShip {
 }
 
 /// A ship's current command, as a tagged union for clean parsing.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentOrder {
     Idle,
@@ -692,4 +592,32 @@ pub fn governance_distance(state: &State, owner: FactionId, body_id: BodyId) -> 
     let bpos = state.body_position(body_id);
     let cpos = state.body_position(capital);
     ((bpos[0] - cpos[0]).powi(2) + (bpos[1] - cpos[1]).powi(2)).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+
+    /// `meta_value` 是让 agent 读的「规则字典」。它必须从 config 结构体**派生**，
+    /// 而不是手写字段清单——此守卫确保新增的 config 字段（尤其是 `combat` 那些）
+    /// 一定出现在 meta 里，防止再次像 `component_spill` 那样「配置有、meta 无」。
+    #[test]
+    fn meta_derives_all_combat_fields_and_keeps_ints() {
+        let cfg = config::load_config();
+        let m = meta_value(&cfg);
+        let combat = m.get("combat").and_then(|v| v.as_object()).expect("combat section");
+        for f in [
+            "component_spill",
+            "component_repair",
+            "escort_range",
+            "pursuit_range",
+            "pd_radius",
+        ] {
+            assert!(combat.contains_key(f), "meta.combat 缺少 {f}（曾被手写清单漏掉）");
+        }
+        // 整数型配置字段必须保持整数，不能因圆整变成 `2.0`。
+        let slots = &m["ships"]["corvette"]["slots"];
+        assert!(slots.is_i64() || slots.is_u64(), "slots 应为整数，实为 {slots}");
+    }
 }
