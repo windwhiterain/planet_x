@@ -105,7 +105,7 @@
         // 非 master 势力在异常区内，每超出 radius 1 AU 的导航偏移量（AU）。
         drift_per_au: 0.03,
         // 掌握了 MOND 修正引力的势力（在异常区内无导航偏移）。
-        masters: [8],
+        masters: ["行星X崇拜教"],
     ),
     // 合纵连横 / 均势外交：当某势力的综合实力占比（城市数 + 舰队质量加权）达到
     // hegemon_power 时被判定为「霸权」，其余较弱势力被共同威胁推向彼此——弱者相互
@@ -428,7 +428,7 @@
             body: "无国界科学组织的深空阵列在柯伊伯带之外捕捉到一段规律的引力涟漪——一个重型天体正沿一条极偏心的轨道缓缓内插。行星X崇拜教立即宣称这是「行星X」归来的先兆；科学组织则坚持那只是一颗未编目的大天体。两派就此划下鸿沟。",
             trigger: RoundAt(round: 1),
             participants: ["无国界科学组织", "行星X崇拜教"],
-            effects: [Relations(a: 6, b: 8, delta: -2.0), GrantResources(faction: 6, resource: "氦-3", amount: 2.0)],
+            effects: [Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -2.0), GrantResources(faction: "无国界科学组织", resource: "氦-3", amount: 2.0)],
         ),
         (
             id: "solar_max",
@@ -436,7 +436,7 @@
             body: "太阳活动进入峰年，强烈的日冕抛射让深空信号陷入混沌。各势力临时收紧通讯；深空运输联盟被迫重划所有航线以避开高辐射带，却意外在勘察中发现一片富集的金矿带。",
             trigger: RoundAt(round: 6),
             participants: ["深空运输联盟"],
-            effects: [GrantResources(faction: 7, resource: "金", amount: 4.0)],
+            effects: [GrantResources(faction: "深空运输联盟", resource: "金", amount: 4.0)],
         ),
         (
             id: "un_convokes",
@@ -444,7 +444,7 @@
             body: "联合国在月球宁静海基地召集外交大会，呼吁各国就「外来的回响」共享观测数据。美国与欧盟主张联手戒备；中国与俄罗斯则怀疑这是一场以情报为名的渗透。唯有无国界科学组织发布了首批完整数据，赢得中立阵营的赞赏。",
             trigger: RoundAt(round: 12),
             participants: ["联合国", "美国", "欧盟", "中国", "俄罗斯", "无国界科学组织"],
-            effects: [Relations(a: 0, b: 6, delta: 3.0), Relations(a: 0, b: 5, delta: 2.0), Relations(a: 0, b: 7, delta: 2.0)],
+            effects: [Relations(a: "联合国", b: "无国界科学组织", delta: 3.0), Relations(a: "联合国", b: "星系矿业", delta: 2.0), Relations(a: "联合国", b: "深空运输联盟", delta: 2.0)],
         ),
         (
             id: "kuiper_boom",
@@ -452,7 +452,7 @@
             body: "星系矿业的高层嗅到了外缘陨石的丰厚回报，宣布启动「柯伊伯淘金热」——数百艘采矿船冲向妊神星、创神星与阋神星的冰封矿带。随即，他们把一船船铂金与铁运回内太阳系，隐约有垄断稀有金属之势。",
             trigger: RoundAt(round: 24),
             participants: ["星系矿业"],
-            effects: [GrantResources(faction: 5, resource: "铂", amount: 3.0), GrantResources(faction: 5, resource: "铁", amount: 8.0), GrantShip(faction: 5, class: "cruiser", body: 9)],
+            effects: [GrantResources(faction: "星系矿业", resource: "铂", amount: 3.0), GrantResources(faction: "星系矿业", resource: "铁", amount: 8.0), GrantShip(faction: "星系矿业", class: "cruiser", body: "泰坦")],
         ),
         (
             id: "first_war",
@@ -482,25 +482,25 @@
             id: "cult_war",
             title: "异端之怒",
             body: "行星X崇拜教正式与主流势力兵戎相见。教众视战争为「行星X」净化的前奏；常规势力则把这个太阳系边缘的狂热教团视作必须剪除的脓疮——世界骤然多了一个共同的敌人。",
-            trigger: FactionAtWar(faction: 8),
+            trigger: FactionAtWar(faction: "行星X崇拜教"),
             participants: ["行星X崇拜教"],
-            effects: [Relations(a: 0, b: 8, delta: -4.0), Relations(a: 2, b: 8, delta: -4.0), Relations(a: 6, b: 8, delta: -4.0)],
+            effects: [Relations(a: "联合国", b: "行星X崇拜教", delta: -4.0), Relations(a: "欧盟", b: "行星X崇拜教", delta: -4.0), Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -4.0)],
         ),
         (
             id: "cn_us_rivalry",
             title: "巨头对峙",
             body: "中国与美国——这颗星球上两支最庞大、最富有的力量——终于正面对撞。地球轨道上空的旗舰遥相对峙，整个太阳系的目光都聚焦在两大巨头之间即将展开的较量。",
-            trigger: WarBetween(a: 3, b: 1),
+            trigger: WarBetween(a: "中国", b: "美国"),
             participants: ["中国", "美国"],
-            effects: [Relations(a: 0, b: 3, delta: -2.0), Relations(a: 0, b: 1, delta: -2.0)],
+            effects: [Relations(a: "联合国", b: "中国", delta: -2.0), Relations(a: "联合国", b: "美国", delta: -2.0)],
         ),
         (
             id: "northern_watch",
             title: "北方警戒",
             body: "欧盟与俄罗斯的关系跌入冰点。欧洲理事会启动「北方警戒」，将多支舰队前移到波罗的海与高加索方向，并与美国的火星防线相互呼应。",
-            trigger: WarBetween(a: 2, b: 4),
+            trigger: WarBetween(a: "欧盟", b: "俄罗斯"),
             participants: ["欧盟", "俄罗斯"],
-            effects: [Relations(a: 2, b: 1, delta: 2.0), Relations(a: 2, b: 4, delta: -3.0)],
+            effects: [Relations(a: "欧盟", b: "美国", delta: 2.0), Relations(a: "欧盟", b: "俄罗斯", delta: -3.0)],
         ),
         (
             id: "jupiter_colloquy",
@@ -508,7 +508,7 @@
             body: "无国界科学组织在木星轨道空间站召开一场横跨内外的科学会议，公布了对那颗外来天体的轨道精测：它不会撞击任何行星，却会在数十年后掠过大气的边缘。结论尚无定论，但与会各方都感到，某种比战争更根本的东西正在逼近。",
             trigger: RoundAt(round: 36),
             participants: ["无国界科学组织", "联合国", "美国", "欧盟", "中国", "俄罗斯"],
-            effects: [Relations(a: 6, b: 8, delta: -3.0), Relations(a: 0, b: 6, delta: 5.0)],
+            effects: [Relations(a: "无国界科学组织", b: "行星X崇拜教", delta: -3.0), Relations(a: "联合国", b: "无国界科学组织", delta: 5.0)],
         ),
         (
             id: "arms_race",
@@ -516,7 +516,7 @@
             body: "美中的对峙催生了一场军备竞赛。两国几乎同步开工新的战列舰——仿佛谁先凑齐一支无敌舰队，谁就能在谈判桌尽头占有整个太阳系。",
             trigger: RoundAt(round: 48),
             participants: ["美国", "中国"],
-            effects: [GrantShip(faction: 1, class: "battleship", body: 4), GrantShip(faction: 3, class: "battleship", body: 2), Relations(a: 1, b: 3, delta: -2.0)],
+            effects: [GrantShip(faction: "美国", class: "battleship", body: "火星"), GrantShip(faction: "中国", class: "battleship", body: "地球"), Relations(a: "美国", b: "中国", delta: -2.0)],
         ),
         (
             id: "planet_x_arrives",
@@ -524,7 +524,21 @@
             body: "那颗外来的天体终于越过柯伊伯带、进入内太阳系的视野。无论是崇拜教的欢腾，还是科学组织的冷静测算，所有人都将无法回避一个事实：太阳系，已不再是他们以为的那个太阳系。",
             trigger: RoundAt(round: 60),
             participants: ["无国界科学组织", "行星X崇拜教", "联合国"],
-            effects: [GrantShip(faction: 6, class: "battleship", body: 6), GrantShip(faction: 8, class: "battleship", body: 14)],
+            effects: [GrantShip(faction: "无国界科学组织", class: "battleship", body: "木星"), GrantShip(faction: "行星X崇拜教", class: "battleship", body: "伊克西翁")],
         ),
     ],
+    // 「名字即唯一 key」：每个势力一坨名字库，势力所属实体（舰只等）从库里确定性取一个
+    // 唯一名。各库的用词刻意**不重叠**，因此舰名天然全局唯一（无需再靠编号区分）。
+    // 库轮空后，舰名追加「·世代数」后缀（如「长城2」）以保持唯一性（见 ship_display_name）。
+    name_pool: {
+        "联合国": ["和平", "使者", "环球", "守望", "蓝天", "星环", "曙光"],
+        "美国": ["华盛顿", "自由", "大西洋", "星条", "联邦", "鹰隼", "落基", "总统"],
+        "欧盟": ["欧罗巴", "晨曦", "骑士", "凯旋", "大陆", "联盟", "莱茵", "福煦"],
+        "中国": ["长城", "玉衡", "长风", "破晓", "沧海", "昆仑", "扶摇", "天工", "镇岳", "北辰", "北斗", "赤霄"],
+        "俄罗斯": ["北极", "风雪", "伏尔加", "西伯利亚", "红场", "冰山", "乌拉尔", "喀山"],
+        "星系矿业": ["矿脉", "掘金", "金刚石", "赤铁", "富矿", "钻头", "熔炉", "勘探"],
+        "无国界科学组织": ["求知", "星河", "伽利略", "深空", "引力波", "仰望", "光谱", "红移"],
+        "深空运输联盟": ["快递", "驿马", "货运", "远航", "航道", "月舟", "摆渡", "超载"],
+        "行星X崇拜教": ["圣歌", "净化", "先知", "回归", "朝圣", "救赎", "方舟", "天启"],
+    },
 )

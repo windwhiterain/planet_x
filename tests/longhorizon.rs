@@ -42,10 +42,10 @@ fn count_nonfinite(state: &State, _config: &GameConfig) -> (usize, Vec<String>) 
     };
 
     for b in &state.bodies {
-        check(format!("body[{}].position.0", b.id), b.position[0]);
-        check(format!("body[{}].position.1", b.id), b.position[1]);
-        check(format!("body[{}].orbit.peri", b.id), b.orbit.perihelion_distance as f64);
-        check(format!("body[{}].orbit.aphe", b.id), b.orbit.aphelion_distance as f64);
+        check(format!("body[{}].position.0", b.name), b.position[0]);
+        check(format!("body[{}].position.1", b.name), b.position[1]);
+        check(format!("body[{}].orbit.peri", b.name), b.orbit.perihelion_distance as f64);
+        check(format!("body[{}].orbit.aphe", b.name), b.orbit.aphelion_distance as f64);
         for s in &b.settlements {
             check(format!("settlement.{}area", s.name), s.total_area);
             for d in &s.resources {
@@ -56,33 +56,33 @@ fn count_nonfinite(state: &State, _config: &GameConfig) -> (usize, Vec<String>) 
 
     for f in &state.factions {
         for (k, v) in &f.resources {
-            check(format!("faction[{}].res.{k}", f.id), *v);
+            check(format!("faction[{}].res.{k}", f.name), *v);
         }
         for (o, v) in &f.relations {
-            check(format!("faction[{}].rel.{o}", f.id), *v);
+            check(format!("faction[{}].rel.{o}", f.name), *v);
         }
-        check(format!("faction[{}].alignment", f.id), f.alignment);
-        check(format!("faction[{}].aggression", f.id), f.aggression);
+        check(format!("faction[{}].alignment", f.name), f.alignment);
+        check(format!("faction[{}].aggression", f.name), f.aggression);
     }
 
     for c in &state.cities {
         for b in &c.buildings {
-            check(format!("city[{}].bld[{}].area", c.id, b.id), b.area);
-            check(format!("city[{}].bld[{}].deployed", c.id, b.id), b.deployed);
-            check(format!("city[{}].bld[{}].armor", c.id, b.id), b.armor);
+            check(format!("city[{}].bld[{}].area", c.name, b.id), b.area);
+            check(format!("city[{}].bld[{}].deployed", c.name, b.id), b.deployed);
+            check(format!("city[{}].bld[{}].armor", c.name, b.id), b.armor);
         }
         for (cls, p) in &c.ship_progress {
-            check(format!("city[{}].progress.{cls}", c.id), *p);
+            check(format!("city[{}].progress.{cls}", c.name), *p);
         }
     }
 
     for s in &state.ships {
-        check(format!("ship[{}].pos.0", s.id), s.position[0]);
-        check(format!("ship[{}].pos.1", s.id), s.position[1]);
-        check(format!("ship[{}].hull", s.id), s.hull);
-        check(format!("ship[{}].hull_max", s.id), s.hull_max);
-        check(format!("ship[{}].shield", s.id), s.shield);
-        check(format!("ship[{}].shield_max", s.id), s.shield_max);
+        check(format!("ship[{}].pos.0", s.name), s.position[0]);
+        check(format!("ship[{}].pos.1", s.name), s.position[1]);
+        check(format!("ship[{}].hull", s.name), s.hull);
+        check(format!("ship[{}].hull_max", s.name), s.hull_max);
+        check(format!("ship[{}].shield", s.name), s.shield);
+        check(format!("ship[{}].shield_max", s.name), s.shield_max);
     }
 
     for (fid, c) in &state.control {
@@ -118,13 +118,13 @@ fn health_report(state: &State, config: &GameConfig) -> String {
 
     // Per-faction summary where it is interesting.
     for f in &state.factions {
-        let ships = state.ships.iter().filter(|s| s.faction_id == f.id).count();
-        let cities = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count();
+        let ships = state.ships.iter().filter(|s| s.faction_id == f.name).count();
+        let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count();
         let val = faction_value(f, config);
         let at_war = state
             .factions
             .iter()
-            .filter(|o| o.id != f.id && hostile_p(f, o, config))
+            .filter(|o| o.name != f.name && hostile_p(f, o, config))
             .count();
         lines.push(format!(
             "   {:>6} ships={:>3} cities={:>2} value={:>12.2} wars={:>2}",
@@ -135,10 +135,10 @@ fn health_report(state: &State, config: &GameConfig) -> String {
 }
 
 fn hostile_p(a: &Faction, b: &Faction, config: &GameConfig) -> bool {
-    if a.id == b.id {
+    if a.name == b.name {
         return false;
     }
-    a.relations.get(&b.id).copied().unwrap_or(0.0) <= config.combat.war_threshold
+    a.relations.get(&b.name).copied().unwrap_or(0.0) <= config.combat.war_threshold
 }
 
 /// A "zombie" faction: no ships and no living city — it can produce nothing,
@@ -150,7 +150,7 @@ fn is_zombie(state: &State, fid: FactionId) -> bool {
 }
 
 fn zombie_count(state: &State) -> usize {
-    state.factions.iter().filter(|f| is_zombie(state, f.id)).count()
+    state.factions.iter().filter(|f| is_zombie(state, f.name.clone())).count()
 }
 
 fn count_wars(state: &State, config: &GameConfig) -> usize {
@@ -346,14 +346,14 @@ fn world_is_multipolar() {
 fn top_city_share(state: &State) -> (FactionId, f64) {
     let total = state.cities.iter().filter(|c| !c.razed).count() as f64;
     if total <= 0.0 {
-        return (0, 0.0);
+        return (String::new(), 0.0);
     }
-    let mut best = (0u32, 0.0);
+    let mut best = (String::new(), 0.0);
     for f in &state.factions {
-        let n = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count() as f64;
+        let n = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
         let s = n / total;
         if s > best.1 {
-            best = (f.id, s);
+            best = (f.name.clone(), s);
         }
     }
     best
@@ -398,7 +398,7 @@ fn probe_peak() {
     for seed in [1u64, 42, 12345] {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
-        let (mut peak_top, mut peak_share, mut peak_round) = (0u32, 0.0f64, 0u32);
+        let (mut peak_top, mut peak_share, mut peak_round) = (String::new(), 0.0f64, 0u32);
         for _ in 0..1200u32 {
             sim::advance(&mut state, &config, &mut rng);
             let (top, share) = top_city_share(&state);
@@ -418,7 +418,7 @@ fn probe_peak() {
             .cities
             .iter()
             .filter(|c| c.faction_id == peak_top && !c.razed)
-            .map(|c| planet_x::agent::governance_distance(&state, peak_top, c.body_id))
+            .map(|c| planet_x::agent::governance_distance(&state, &peak_top, &c.body_id))
             .collect();
         ds.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let far = ds.iter().filter(|&&d| d > 18.0).count();
@@ -443,9 +443,9 @@ fn probe_zombies() {
         if zombie_count(&state) >= 3 {
             println!("--- round {} dead {} ---", state.round, zombie_count(&state));
             for f in &state.factions {
-                let ships = state.ships.iter().filter(|s| s.faction_id == f.id).count();
-                let cities = state.cities.iter().filter(|c| c.faction_id == f.id && !c.razed).count();
-                let razed = state.cities.iter().filter(|c| c.faction_id == f.id && c.razed).count();
+                let ships = state.ships.iter().filter(|s| s.faction_id == f.name).count();
+                let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count();
+                let razed = state.cities.iter().filter(|c| c.faction_id == f.name && c.razed).count();
                 println!("  {} ships={ships} cities={cities} own_razed={razed}", f.name);
             }
             let total_settlements: usize = state.bodies.iter().map(|b| b.settlements.len()).sum();

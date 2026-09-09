@@ -10,7 +10,7 @@ use crate::model::*;
 const COLS: usize = 66;
 const ROWS: usize = 22;
 
-/// Distinct marker colors per faction id.
+/// Distinct marker colors per faction (indexed by the faction's unique name).
 const PALETTE: [Color; 9] = [
     Color::BrightBlue,
     Color::Blue,
@@ -33,8 +33,12 @@ fn tx(v: f64) -> f64 {
     }
 }
 
-fn body_letter(id: BodyId) -> char {
-    (b'A' + (id % 26) as u8) as char
+/// A stable, deterministic per-body marker letter. The body's **name** is its
+/// unique key, so the letter is derived from the name (deterministic; no RNG)
+/// rather than any numeric id.
+fn body_letter(name: &str) -> char {
+    let h = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    (b'A' + (h % 26) as u8) as char
 }
 
 fn map_to_grid(p: [f64; 2], minx: f64, spanx: f64, maxy: f64, spany: f64) -> Option<(usize, usize)> {
@@ -50,11 +54,14 @@ fn map_to_grid(p: [f64; 2], minx: f64, spanx: f64, maxy: f64, spany: f64) -> Opt
     }
 }
 
-fn faction_color(fid: FactionId) -> Color {
-    PALETTE[(fid as usize) % PALETTE.len()]
+/// A stable palette index for a faction, derived from its **name** (the unique
+/// key). Deterministic, so a faction keeps its colour across snapshots.
+fn faction_color(name: &str) -> Color {
+    let h = name.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+    PALETTE[h % PALETTE.len()]
 }
 
-fn faction_name(state: &State, id: FactionId) -> String {
+fn faction_name(state: &State, id: &str) -> String {
     state
         .faction(id)
         .map(|f| f.name.clone())
@@ -108,13 +115,13 @@ pub fn render_map(state: &State) -> String {
     for b in &state.bodies {
         let p = b.orbit.position(state.time_month as f32);
         if let Some((c, r)) = map_to_grid([tx(p[0]), tx(p[1])], minx, spanx, maxy, spany) {
-            put(&mut grid, c, r, body_letter(b.id).to_string().cyan().to_string());
+            put(&mut grid, c, r, body_letter(&b.name).to_string().cyan().to_string());
         }
     }
     for s in &state.ships {
         if let Some((c, r)) = map_to_grid([tx(s.position[0]), tx(s.position[1])], minx, spanx, maxy, spany) {
-            let ch = state.faction(s.faction_id).map(|f| f.symbol).unwrap_or('?');
-            let color = faction_color(s.faction_id);
+            let ch = state.faction(&s.faction_id).map(|f| f.symbol).unwrap_or('?');
+            let color = faction_color(&s.faction_id);
             put(&mut grid, c, r, ch.to_string().color(color).to_string());
         }
     }
@@ -138,7 +145,7 @@ fn render_legend(state: &State) -> String {
     let mut bodies: Vec<String> = state
         .bodies
         .iter()
-        .map(|b| format!("{}={}", body_letter(b.id).to_string().cyan(), b.name))
+        .map(|b| format!("{}={}", body_letter(&b.name).to_string().cyan(), b.name))
         .collect();
     bodies.push(format!("{}={}", "@".yellow(), "太阳"));
     out.push_str(&format!("  天体: {}\n", bodies.join("  ")));
@@ -149,7 +156,7 @@ fn render_legend(state: &State) -> String {
         .map(|f| {
             format!(
                 "{}=[{}]",
-                f.symbol.to_string().color(faction_color(f.id)),
+                f.symbol.to_string().color(faction_color(&f.name)),
                 f.name
             )
         })
@@ -210,11 +217,11 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
         let cities: Vec<&str> = state
             .cities
             .iter()
-            .filter(|c| c.body_id == b.id)
+            .filter(|c| c.body_id == b.name)
             .map(|c| c.name.as_str())
             .collect();
         t.add_row(vec![
-            cell(body_letter(b.id).to_string().cyan().to_string()),
+            cell(body_letter(&b.name).to_string().cyan().to_string()),
             cell(b.name.clone()),
             cell(fmt_pos(p)),
             cell(if b.settlements.is_empty() { "无人".to_string() } else { format!("{}个定居点", b.settlements.len()) }),
@@ -235,7 +242,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             .collect::<Vec<_>>()
             .join("  ");
         let armor: f64 = c.buildings.iter().map(|b| b.armor).sum();
-        let owner = if c.razed { "—".to_string() } else { faction_name(state, c.faction_id) };
+        let owner = if c.razed { "—".to_string() } else { faction_name(state, &c.faction_id) };
         t.add_row(vec![
             cell(c.name.clone()),
             cell(owner),
@@ -253,7 +260,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     t.set_header(vec!["ID", "名称", "势力", "位置 (AU)", "目标", "航速", "耐久%"]);
     for sh in &state.ships {
         let spec = config.ship_spec(&sh.class);
-        let target = match state.ship_behavior(sh.id) {
+        let target = match state.ship_behavior(sh.name.clone()) {
             Some(ShipBehavior::TargetShip { ship, .. }) => format!("船#{}", ship),
             Some(ShipBehavior::TargetSettlement { city, .. }) => format!("城#{}", city),
             Some(ShipBehavior::Dock { body }) => format!("停泊#{}", body),
@@ -261,11 +268,12 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
             Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
-        let color = faction_color(sh.faction_id);
+        let color = faction_color(&sh.faction_id);
+        // Ship identity = its unique name; the class label sits in the 名称 column.
         t.add_row(vec![
-            cell(format!("#{}", sh.id)),
-            cell(format!("{}-{}", spec.label, sh.faction_id)),
-            cell(faction_name(state, sh.faction_id).color(color).to_string()),
+            cell(sh.name.clone()),
+            cell(spec.label.clone()),
+            cell(faction_name(state, &sh.faction_id).color(color).to_string()),
             cell(fmt_pos(sh.position)),
             cell(target),
             cell(format!("{:.2}", crate::model::ship_panel(config, sh).speed)),
@@ -287,12 +295,12 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             .relations
             .iter()
             .filter(|(_, v)| **v <= config.combat.war_threshold)
-            .map(|(id, v)| format!("{} ({:.0})", faction_name(state, *id), v))
+            .map(|(id, v)| format!("{} ({:.0})", faction_name(state, id), v))
             .collect();
         t.add_row(vec![
             cell(format!(
                 "{}=[{}]",
-                f.symbol.to_string().color(faction_color(f.id)),
+                f.symbol.to_string().color(faction_color(&f.name)),
                 f.name
             )),
             cell(fmt_resource_map(config, &f.resources)),
@@ -361,8 +369,8 @@ pub fn render_control_diff(
                 out.push_str(&heading("各势力行为 · 可控状态 diff"));
                 header_printed = true;
             }
-            let color = faction_color(*fid);
-            out.push_str(&format!("  {}\n", faction_name(state, *fid).color(color).bold()));
+            let color = faction_color(fid);
+            out.push_str(&format!("  {}\n", faction_name(state, fid).color(color).bold()));
             for l in lines {
                 out.push_str(&l);
                 out.push('\n');
@@ -429,10 +437,10 @@ fn behavior_str(b: &ShipBehavior) -> String {
 
 fn building_ref_str(config: &GameConfig, state: &State, cid: &CityId, bid: &BuildingId) -> String {
     let city = state
-        .city(*cid)
+        .city(cid)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format!("城#{}", cid));
-    let b = state.city(*cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let b = state.city(cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
     let label = b
         .map(|bb| config.building_spec(&bb.kind).label.clone())
         .unwrap_or_else(|| format!("#{}", bid));
@@ -448,10 +456,10 @@ fn invest_key_str(config: &GameConfig, state: &State, key: &InvestKey) -> String
 fn build_key_str(config: &GameConfig, state: &State, key: &BuildKey) -> String {
     let (cid, bid) = key;
     let city = state
-        .city(*cid)
+        .city(cid)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format!("城#{}", cid));
-    let b = state.city(*cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let b = state.city(cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
     let cls = b
         .and_then(|bb| bb.ship_type.clone())
         .unwrap_or_else(|| format!("#{}", bid));
