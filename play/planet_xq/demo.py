@@ -1,8 +1,9 @@
 """Run me from the project dir: `uv run python demo.py <projection-dir>`.
 
 Shows how an agent reads the projection schema (which fields are lazy), then fetches heavy
-detail by id from the index and joins it back onto the lean main stream — and how the static
-rules dictionary (``meta.json``, same source as ``--meta``) is loadable as DataFrames so you
+detail by id from the index and joins it back onto the lean main stream — the per-faction
+diplomacy/economy/fleet view, a faction's cities/buildings, and a ship's effective panel.
+Also shows how the static rules dictionary (``meta.json``) is loadable as DataFrames so you
 can cross-query rules against world facts in the same session.
 """
 import sys
@@ -34,9 +35,22 @@ print("rounds:", list(q.facts["round"]))
 print("one fact row keys:", list(q.facts.columns))
 
 print()
-print("--- join('ships', round=6): main fact row exploded onto ship detail ---")
+print("--- faction snapshot (diplomacy + economy + fleet in one call) ---")
+rid = int(q.facts.iloc[0]["round"])
+snap = q.faction_snapshot(rid, "中国")
+if snap.get("exists"):
+    print("中国 @ round", rid)
+    print("  resources:", snap.get("resources"))
+    print("  relations:", snap.get("relations"))
+    print("  metrics:", snap.get("metrics"))
+    print("  cities:", snap.get("city_ids"), "ships:", snap.get("ship_ids"))
+else:
+    print("no 中国 row (or projection produced before factions existed)")
+
+print()
+print("--- join('ships', round=6): main fact row exploded onto ship detail (with panel) ---")
 merged = q.join("ships", round=6)
-cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "hull_max", "x", "y") if c in merged.columns]
+cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "hull_max", "attack", "upkeep", "x", "y") if c in merged.columns]
 print(merged[cols].head(8).to_string(index=False))
 
 print()
@@ -51,14 +65,13 @@ ids = q.ids("ships", 3)
 print("ship_ids at round 3:", ids[:8], "… total", len(ids))
 print("q.cities(round=6):", q.cities(round=6).shape)
 print("q.bodies():", q.bodies().shape, "cols", list(q.bodies().columns))
+print("q.settlements():", q.settlements().shape, "cols", list(q.settlements().columns))
 
 print()
 print("--- long-run stats: 年均 / 十年均 (round = 1 month) ---")
-# World metrics (metrics.population / metrics.cities / metrics.fleet_value …) via dotted path.
 cities = q.yearly_avg("metrics.cities")
 print("年均 world cities:", {int(y): round(float(v), 2) for y, v in cities.items()} if len(cities) else "…")
 print("十年均 world cities:", {int(y): round(float(v), 2) for y, v in q.decadal_avg("metrics.cities").items()})
-# Per-faction metric: path = metrics.factions.<faction>.<metric>.
 fak = (q.facts.iloc[0].get("metrics") or {}).get("factions", {})
 if fak:
     fid = next(iter(fak))
