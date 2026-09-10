@@ -120,6 +120,10 @@ fn settlements_and_cities_are_one_to_one() {
 /// 在势力 `fid` 的**第一座有建造区的城**上挂一张图，并把该舰级的进度池准备好。
 ///
 /// 返回 `(城名, 建筑下标, 舰级)`。`progress` 给 `build_points` 就下一回合必下水。
+///
+/// `stance` = 图上的**倾向三轴**（`(doctrine, kiting, role)`，各自 `None` = 本图对该轴沉默）。
+/// ⚠ 图**不再**携带指令（2026-10 裁决）：`ShipBehavior` 只走逐舰叶。
+#[allow(clippy::too_many_arguments)]
 fn attach_blueprint(
     state: &mut State,
     config: &GameConfig,
@@ -127,7 +131,7 @@ fn attach_blueprint(
     bp_name: &str,
     class: &str,
     components: &[&str],
-    order: Option<ShipBehavior>,
+    stance: (Option<ShipDoctrine>, Option<f64>, Option<ShipRole>),
     mode: ControlMode,
 ) -> (CityId, BuildingId, String) {
     state
@@ -141,7 +145,9 @@ fn attach_blueprint(
                 value: Blueprint {
                     class: class.to_string(),
                     components: components.iter().map(|c| c.to_string()).collect(),
-                    order,
+                    doctrine: stance.0,
+                    kiting: stance.1,
+                    role: stance.2,
                 },
                 mode,
             },

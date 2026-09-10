@@ -9,6 +9,16 @@
 > 四条语义已拍板）、`control-live-layers.md`（控制属性=活层，本规格是它的对偶）、
 > `engine-data-plane.md`（读面/投影契约）、`agent-control-long-game.md` §6（`ship_type` 被 AI 重估）
 >
+> ## ⚠ 2026-10 修订：图**不再携带指令**
+>
+> 用户裁决（**指令是即时操作，风格/角色才是长期控制项**）覆盖本规格里的这一处：
+> **`Blueprint.order` 已删除**，图改带**倾向三轴** `doctrine` / `kiting` / `role`；
+> 势力级 `default_ship_order` 也一并删除。判据、实测与三端改动见
+> [`blueprint-stance.md`](blueprint-stance.md)。**本文档里所有出现 `order` 的地方**
+> （Q1(c)「图的意图轴」、§4.3 的取值链、§4.4 的 diff 例、§9 的读面列、§11 的测试清单）
+> **都按这一条读**：把「意图」换成「倾向三轴（逐轴独立）」，把「舰队默认」那一段删掉。
+> 下面保留原文以存裁决历史。
+>
 > **验收（2026-10）**：`--seed 7 --round 240 --digest 20` 的 12 行 JSON 与基线**逐字节相同**
 > （sha256 `395E7D01…61DC8D`）；「v9 旧档 + 新二进制」与「v9 旧档 + 旧二进制」
 > `--digest` 同一 sha256（`3FF7B191…72A9FD`）；`cargo test --workspace` 全绿
@@ -303,12 +313,13 @@ pub struct Blueprint {
     // · 归属（mode）不在这里给：种子一律以 `Inherit`（这一层没有说话）写入，
     //   由 `scope` 链解析（默认落到 `Auto`）。想让某张图开局就归玩家，用 `--apply` 钉。
     // · `components` 空 = 交给生成器（Auto）；非空 = 这张图的选装就是它。
-    // · `order` 省略 = 本图对意图没有说话（落到舰队默认）。
+    // · `role`/`doctrine`/`kiting` 省略 = 本图对**那条轴**没有说话（落到舰队默认/出厂快照）。
+    //   ⚠ `order`（指令）**已删除**（2026-10，见顶部修订）。
     blueprints: {
         "中国": [
             (name: "护卫-守家", class: "corvette",
              components: ["kinetic", "ion_drive"],
-             order: Some(Dock(body: "地球"))),
+             role: Some(War)),
             (name: "巡洋-殖民", class: "cruiser",
              components: ["kinetic", "shield", "ion_drive"],
              order: Some(Colonize(body: "火星"))),
@@ -357,7 +368,8 @@ pub struct Blueprint {
     { "name": "护卫-守家",
       "class": "corvette",
       "components": ["kinetic", "ion_drive"],
-      "order": { "type": "dock", "body": "地球" },   // 或 null
+      "role": "War",                                 // 倾向三轴，各自 null = 该轴沉默
+      "kiting": -0.5,
       "mode": "Player",
       "ship_count": 3 }                              // 读面附加：本图造了多少艘（引擎算）
   ]
@@ -418,33 +430,32 @@ pub struct Blueprint {
         let c = self.control(s.faction_id.clone())?;
         let leaf = c.ship_orders.get(&ship_id);
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
-            // ① 舰级层：本舰出厂那张图的默认意图（**只在图叶是 Player 时取值**——
-            //    Auto 图的 order 是流水，不能当指令，与舰队默认同一条规则）。
-            if let Some(bp) = s.blueprint.as_ref().and_then(|id| c.blueprints.get(id)) {
-                if bp.mode.is_player() {
-                    if let Some(o) = &bp.value.order { return Some(o.clone()); }
-                }
-            }
-            // ② 势力级舰队默认（现状不变）
-            if let Some(d) = &c.default_ship_order {
-                if d.mode.is_player() { return Some(d.value.clone()); }
+            // ① 舰级层：本舰出厂那张图**这条轴**的倾向（**只在图叶是 Player 时取值**——
+            //    Auto 图上的是流水，不能当表态，与舰队默认同一条规则）。
+            //    ⚠ 这一段现在属于 `State::ship_doctrine` / `ship_kiting` / `ship_role`，
+            //    **不在** `ship_behavior` 里（指令链 2026-10 起只剩逐舰叶）。
+            if let Some(v) = self.blueprint_stance_role(s) { return v; }
+            // ② 势力级舰队默认（同一形状；`default_ship_order` 已删）
+            if let Some(d) = &c.default_role {
+                if d.mode.is_player() { return d.value; }
             }
         }
-        leaf.map(|l| l.value.clone())
+        leaf.map(|l| l.value).unwrap_or(record)
     }
 ```
 
 两条候选语义（**必须二选一**，见 Q2）：
 
-* **(a) 快照式**：出厂时把图的 `order` **写进该舰的指令叶**（`mode` 照图叶），之后图改了老舰
-  不跟随。⇒ 与「非控制属性 = 快照」一致；「按舰级默认」变成一次性动作。
-* **(b) 活层式（推荐）**：舰上只记 `blueprint` 名，取值时查图（上面的代码）。
-  ⇒ 「意图」本来就是控制属性（项目的第一性区分：控制属性=活层、非控制属性=快照，
-  `control-live-layers.md:14-15`），所以改图立刻对该图的所有舰（叶沉默者）生效，
+* **(a) 快照式**：出厂时把图上的倾向**写进该舰的叶**（`mode` 照图叶），之后图改了老舰不跟随。
+  ⇒ 与「非控制属性 = 快照」一致；「按舰级默认」变成一次性动作。
+* **(b) 活层式（用户裁决，已实现）**：舰上只记 `blueprint` 名，取值时查图（上面的代码）。
+  ⇒ 「倾向」本来就是控制属性（项目的第一性区分：控制属性=活层、非控制属性=快照，
+  `control-live-layers.md:14-15`），所以改图立刻对该图的所有舰（**该轴**叶沉默者）生效，
   而**面板/组件仍是快照**。
-  ⚠ `Auto` 图的 `order` 永远不会被采用（值规则），所以「AI 决定舰级默认意图」这件事**不会**
-  自动发生——AI 依然靠逐舰叶写流水（`tactics.rs:355-357/407-409/418-420`）；这符合
+  ⚠ `Auto` 图上的倾向永远不会被采用（值规则），所以「AI 决定舰级倾向」这件事**不会**
+  自动发生——AI 依然靠逐舰叶写流水（`tactics.rs`、`freight.rs`）；这符合
   `control-live-layers.md:54-56` 那条「AI 写回的是流水不是指令」的推论。
+  ⚠ **逐轴独立**：图上写了 `role` 不影响 `doctrine`/`kiting`（2026-10）。
 
 ### 4.4 写面：diff 的四种形状（可以直接抄进 `--apply`）
 

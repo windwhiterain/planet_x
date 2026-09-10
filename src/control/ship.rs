@@ -1,54 +1,10 @@
-//! 逐舰叶片 + 舰队默认叶（order / doctrine / kiting / freighter）的写入。
+//! 逐舰叶片 + 舰队默认叶（doctrine / kiting / role）的写入。
+//!
+//! ⚠ **没有"舰队默认指令"这片叶了**（2026-10 删除，用户裁决）：指令是**即时操作**，
+//! 只写逐舰叶；舰队级只留**长期倾向**三片。原 `apply_default_ship_order` 连同
+//! `DefaultShipOrder` 一起删掉（理由见 `State::ship_behavior` 的文档）。
 
 use super::*;
-
-/// 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
-pub fn apply_default_ship_order(
-    state: &mut State,
-    fid: &FactionId,
-    d: &DefaultShipOrder,
-    report: &mut ApplyReport,
-) {
-    let path = format!("{fid}.default_ship_order");
-    let mut present = Vec::new();
-    if d.behavior.is_some() {
-        present.push("behavior");
-    }
-    if d.mode.is_some() {
-        present.push("mode");
-    }
-    if remove_conflicts(d.remove, &present, &path, report) {
-        return;
-    }
-    if d.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .default_ship_order
-            .take()
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
-    let c = state.control.entry(fid.clone()).or_default();
-    let ctrl = c
-        .default_ship_order
-        .get_or_insert_with(|| Control::inherit(ShipBehavior::Idle));
-    if let Some(v) = &d.behavior {
-        ctrl.value = v.clone();
-    }
-    // 写值即接管（与叶子同一条规则）：只写默认行为、没写 mode，就是「这是我的默认」。
-    match (d.mode, d.behavior.is_some()) {
-        (Some(m), _) => ctrl.mode = m,
-        (None, true) => {
-            ctrl.mode = ControlMode::Player;
-            report.took_over(path);
-        }
-        (None, false) => {}
-    }
-    report.applied += 1;
-}
 
 /// 舰队默认**行为风格**（势力级，两片之一）：与「写值即接管」同一条规则，外加一条
 /// **两轴叶**的额外守卫（见 `partial_doctrine_leaf`）。

@@ -668,7 +668,9 @@ fn derived_tables_are_written_and_declared() {
             crate::model::Control::player(crate::model::Blueprint {
                 class: "corvette".to_string(),
                 components: vec!["kinetic".to_string()],
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             }),
         );
     if let Some(city) = state.city_mut(&cid) {
@@ -723,18 +725,22 @@ fn derived_tables_are_written_and_declared() {
     let ships = jsonl(&s.0.join("idx/ships.jsonl"));
     for col in [
         "order_leaf_mode",
-        "order_default_mode",
         "order_effective_mode",
         "order_effective",
-        // 设计图那一轮新增的五列（缺一列 = 读面少一个答案）。
+        // 设计图那一轮新增的列（缺一列 = 读面少一个答案）。
         "order_source",
         "blueprint",
         "blueprint_mode",
-        "order_blueprint_mode",
         "spawned_round",
     ] {
         assert!(ships[0].get(col).is_some(), "ships 表缺 {col}");
     }
+    // ⚠ `order_default_mode` / `order_blueprint_mode` 已删（2026-10：指令只剩逐舰叶，
+    // 舰队默认指令与图上的 order 两片叶都不存在了）——留着它们就是两列永远为 Inherit 的谎。
+    assert!(
+        ships[0].get("order_default_mode").is_none() && ships[0].get("order_blueprint_mode").is_none(),
+        "指令链上那两层已消失 ⇒ 这两列不该再出现"
+    );
     // `cities` 表的内联 `buildings[]` 要能看出「哪个下标在造哪张图」。
     let cities = jsonl(&s.0.join("idx/cities.jsonl"));
     let has_bp_key = cities.iter().any(|c| {
@@ -770,9 +776,10 @@ fn blueprints_table_matches_the_control_face() {
             crate::model::Control::player(crate::model::Blueprint {
                 class: "corvette".to_string(),
                 components: vec!["kinetic".to_string(), "ion_drive".to_string()],
-                order: Some(ShipBehavior::Dock {
-                    body: "地球".to_string(),
-                }),
+                // 图上表态的是**长期倾向**（角色 = 运输舰），不是指令。
+                doctrine: None,
+                kiting: None,
+                role: Some(ShipRole::Freight),
             }),
         );
         c.blueprints.insert(
@@ -780,7 +787,9 @@ fn blueprints_table_matches_the_control_face() {
             crate::model::Control::auto(crate::model::Blueprint {
                 class: "cruiser".to_string(),
                 components: Vec::new(),
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             }),
         );
     }
@@ -850,18 +859,41 @@ fn blueprints_table_matches_the_control_face() {
                 state.blueprint_control(fid, id).name(),
                 "{fid}/{id} 的 effective_mode 必须是引擎解析的答案"
             );
+            // 图上的**倾向三轴**（默认枚举/标量形式，与 control 表一致；null = 该轴沉默）。
+            assert_eq!(
+                row["doctrine"],
+                json!(leaf.value.doctrine),
+                "{fid}/{id} 的 doctrine 不一致"
+            );
+            assert_eq!(
+                row["kiting"],
+                json!(leaf.value.kiting),
+                "{fid}/{id} 的 kiting 不一致"
+            );
+            assert_eq!(
+                row["role"],
+                json!(leaf.value.role),
+                "{fid}/{id} 的 role 不一致"
+            );
             if id == "重甲护卫" {
                 assert_eq!(row["ship_count"], json!(1), "本图造了多少艘（引擎算）");
                 assert_eq!(row["class_slots"], json!(2), "corvette 的槽位上限");
                 assert_eq!(
-                    row["order"],
-                    json!({"Dock": {"body": "地球"}}),
-                    "默认枚举形式（与 control 表一致）"
+                    row["role"],
+                    json!("Freight"),
+                    "图上表态的是**长期倾向**（角色），不是指令"
+                );
+                assert!(
+                    row["doctrine"].is_null() && row["kiting"].is_null(),
+                    "另外两条轴沉默 ⇒ null"
                 );
                 assert_eq!(row["launch_waiting"], json!(false), "没有满进度 ⇒ 不在等钱");
             }
             if id == "auto:cruiser" {
-                assert!(row["order"].is_null(), "本图对意图没有说话 ⇒ null");
+                assert!(
+                    row["doctrine"].is_null() && row["kiting"].is_null() && row["role"].is_null(),
+                    "本图对三条倾向轴都没说话 ⇒ 全 null"
+                );
                 assert_eq!(row["components"], json!([]));
             }
         }
@@ -1129,12 +1161,16 @@ fn control_table_holds_every_leaf() {
             },
         );
     }
-    c.default_ship_order = Some(Control {
-        value: ShipBehavior::Idle,
+    c.default_doctrine = Some(Control {
+        value: crate::model::ShipDoctrine {
+            temper: 0.2,
+            lone_wolf: -0.3,
+        },
         mode: ControlMode::Player,
     });
-    // 风格四片叶（`control-live-layers.md` §3 那条候选）：四片都要出现在表里——
+    // 风格三轴的六片叶（`control-live-layers.md` §3 那条候选）：这些都要出现在表里——
     // 少了它们，「这艘舰的风格是它自己钉的，还是跟着舰队默认走」在表里就查不出来。
+    // ⚠ 舰队默认**指令**那一片已删（2026-10）：指令是即时操作，只写逐舰叶。
     if let Some(ship) = &ship {
         c.ship_doctrine.insert(
             ship.clone(),
@@ -1187,8 +1223,11 @@ fn control_table_holds_every_leaf() {
         rows.iter()
             .any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid))
     };
-    assert!(has("default_ship_order"), "缺舰队默认指令行");
     assert!(has("construction_budget"), "缺预算行");
+    assert!(
+        !has("default_ship_order"),
+        "`default_ship_order` 已删（2026-10）⇒ 控制表里不该再有这一行"
+    );
     // 风格四片叶：值与**自己的** mode 都要在（不是有效值、不是有效归属）。
     let doc = rows
         .iter()

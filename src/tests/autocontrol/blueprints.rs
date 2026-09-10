@@ -64,7 +64,10 @@ fn the_ai_creates_a_design_for_every_yard_it_owns() {
             ControlMode::Inherit,
             "AI 写的是流水（这一层没有说话）"
         );
-        assert!(leaf.value.order.is_none(), "建图 ≠ 表态：AI 不写意图轴");
+        assert!(
+            leaf.value.doctrine.is_none() && leaf.value.kiting.is_none() && leaf.value.role.is_none(),
+            "建图 ≠ 表态：AI 不写任何倾向轴"
+        );
         assert!(
             name.starts_with(DESIGN_PREFIX),
             "自建图的名字该带 AI 前缀（回收只碰自己造的东西）：{name}"
@@ -225,7 +228,9 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
         Control::player(Blueprint {
             class: "corvette".to_string(),
             components: vec![],
-            order: None,
+            doctrine: None,
+            kiting: None,
+            role: None,
         }),
     );
     let mut out = Vec::new();

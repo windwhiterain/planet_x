@@ -82,14 +82,16 @@ diff。** 通配、编制表、统计筛选、配方、verify——全部是 Pyt
 
 ```rust
 if leaf.mode == Inherit {
-    if let Some(d) = &c.default_ship_order { if d.mode.is_player() { return Some(d.value) } }
+    if let Some(d) = &c.default_role { if d.mode.is_player() { return d.value } }   // ← 现在是**倾向**的层；指令那片舰队默认叶 2026-10 已删
 }
 leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
 ```
 
 * 归属是 `Auto` 时**自愈**：系统下一回合按自己的逻辑重写这片叶，陈旧值只是短暂的。
 * 归属是 `Player` 而舰队默认不是 `Player` 时**会长期显示旧值**。
-* kit 的处理：凡"释放到上层"，通常**同时**把 `default_ship_order` 写成 `Player`（一片叶），语义闭合。
+* kit 的处理：凡"释放到上层"，通常**同时**把该轴的舰队默认写成 `Player`（一片叶），语义闭合。
+  ⚠ **指令没有舰队默认叶了**（2026-10，见 `blueprint-stance.md`）：释放指令 = 叶里的旧值继续算数，
+  想让它干活就**写**（`Idle` 也是一个值），不要靠删叶。
 
 ## 5. 落地状态（用户授权自行决定顺序）
 

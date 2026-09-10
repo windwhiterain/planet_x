@@ -44,7 +44,10 @@ pub fn yard_ship_type_intent(fac: &FactionControlPatch) -> BTreeMap<(CityId, Bui
     m
 }
 
-/// **设计图**补丁：新建 / 改值（舰级、选装、意图）/ 改归属 / 删图。
+/// **设计图**补丁：新建 / 改值（舰级、选装、**倾向三轴**）/ 改归属 / 删图。
+///
+/// ⚠ 图能表态的是**长期倾向**（风格 / 姿态 / 角色），**不是指令**（2026-10 裁决：
+/// 指令是即时操作，只写逐舰叶）——原来的 `order` 字段已删。
 ///
 /// 校验与丢弃码见 [`BlueprintPatch`] 与 `.agents/notes/ship-blueprint-spec.md` §4.6。
 /// 顺序与其它叶一致：**删叶（含冲突检查）→ 校验 → 写**。
@@ -65,8 +68,14 @@ pub fn apply_blueprint(
     if patch.components.is_some() {
         present.push("components");
     }
-    if patch.order.is_some() {
-        present.push("order");
+    if patch.doctrine.is_some() {
+        present.push("doctrine");
+    }
+    if patch.kiting.is_some() {
+        present.push("kiting");
+    }
+    if patch.role.is_some() {
+        present.push("role");
     }
     if patch.mode.is_some() {
         present.push("mode");
@@ -90,7 +99,11 @@ pub fn apply_blueprint(
         .control(fid.clone())
         .and_then(|c| c.blueprints.get(&patch.name))
         .cloned();
-    let wrote_value = patch.class.is_some() || patch.components.is_some() || patch.order.is_some();
+    let wrote_value = patch.class.is_some()
+        || patch.components.is_some()
+        || patch.doctrine.is_some()
+        || patch.kiting.is_some()
+        || patch.role.is_some();
     // 图名不存在 + 没有写任何值 ⇒ **绝不凭空造图**（同 `no_such_faction` 防幽灵势力的理由：
     // 一个错别字会造出一张谁都不认识的图，它随后出现在读面里，看起来像真的）。
     if current.is_none() && !wrote_value {
@@ -208,15 +221,23 @@ pub fn apply_blueprint(
             Control::inherit(Blueprint {
                 class: class.clone(),
                 components: Vec::new(),
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             })
         });
     leaf.value.class = class;
     leaf.value.components = components;
-    if let Some(order) = &patch.order {
-        // `Some(None)` = 本图对**意图**没有说话（清空这一层，链继续往下降到舰队默认）；
-        // `Some(Some(v))` = 表态。缺席 = 不动。
-        leaf.value.order = order.clone();
+    // 倾向三轴：`Some(None)` = 本图对**这条轴**没有说话（清空这一层，链继续往下降到舰队默认）；
+    // `Some(Some(v))` = 表态；缺席 = 不动。
+    if let Some(doctrine) = patch.doctrine {
+        leaf.value.doctrine = doctrine;
+    }
+    if let Some(kiting) = patch.kiting {
+        leaf.value.kiting = kiting;
+    }
+    if let Some(role) = patch.role {
+        leaf.value.role = role;
     }
     write_mode_leaf(&mut leaf.mode, patch.mode, wrote_value, path, report);
     report.applied += 1;

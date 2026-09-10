@@ -8,6 +8,13 @@
 > `control-live-layers.md`（它的对偶：控制属性=活层）、`eras-technology.md`（「设计图分支」
 > 剩余项就是它）、`military-combat.md`（换模块/再装配剩余项）、`agent-control-long-game.md`
 > §6（结构性叶片的所有权不明）、`combat-behavior-doctrine.md`、`spawn_ship`（唯一的造舰漏斗）
+>
+> ## ⚠ 2026-10 修订：图带**倾向**，不带指令
+>
+> 用户裁决「蓝图不需要指定指令，可以指定 风格/角色」覆盖本文的 Q1/Q2：图的 `order` 换成
+> **倾向三轴** `doctrine` / `kiting` / `role`（各自 `None` = 该轴沉默，逐轴独立），
+> 舰队级 `default_ship_order` 同时删除。判据、实测与三端改动：
+> [`blueprint-stance.md`](blueprint-stance.md)。下面保留原文以存裁决历史。
 
 ## 0. 一句话
 
@@ -110,7 +117,8 @@ pub struct Blueprint {
 在 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；**十条开放问题已逐条裁决**（同篇 §8.0）。
 三条关键结论：
 
-* **Q1 = (c)**：链插一层 `叶 → 图 → 舰队默认 → 势力 → 全局`，但**图的意图轴默认 `Inherit`**
+* **Q1 = (c)**（⚠ 2026-10 修订：**指令**链已无图层与舰队默认；这一条现在描述**倾向三轴**的链
+  `叶 → 图 → 舰队默认 → 势力 → 记录值`）：链插一层，但**图上的每条轴默认沉默**
   ——建图不等于表态；`Auto` 也算"有意见"，所以更要小心（加上 §3.2 那条：意图类叶片今天没有
   AI 写入者，"再加一个 Auto"必须先有执行者）。
 * **Q2 = (b) 活层** + 读面加**出处列**（`order_source`）：一处改图、全级跟随，代价是必须能回答

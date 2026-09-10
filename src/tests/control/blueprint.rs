@@ -376,9 +376,9 @@ fn blueprint_and_yard_class_must_be_changed_together() {
     );
 }
 
-/// 「让图的**意图轴**沉默」（`order: null`）与「删掉这张图」（`remove: true`）是两件事。
+/// 「让图的**某条倾向轴**沉默」（`role: null`）与「删掉这张图」（`remove: true`）是两件事。
 #[test]
-fn silencing_the_order_axis_is_not_deleting_the_blueprint() {
+fn silencing_a_stance_axis_is_not_deleting_the_blueprint() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let (cid, bid) = pin_blueprint(
@@ -390,23 +390,21 @@ fn silencing_the_order_axis_is_not_deleting_the_blueprint() {
         "Player",
     );
     let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫-守家", "order": {"type": "dock", "body": "地球"}}]}]});
+        {"name": "护卫-守家", "role": "Freight"}]}]});
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     assert_eq!(
-        state.control["中国"].blueprints["护卫-守家"].value.order,
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string()
-        }),
-        "tagged 写法的意图要被认下来（与 default_ship_order.behavior 同一套）"
+        state.control["中国"].blueprints["护卫-守家"].value.role,
+        Some(ShipRole::Freight),
+        "图上的倾向轴要写得进去（这里是角色：这张图造的舰一出来就跑运输）"
     );
 
-    // 清空意图轴：图还在、指针还在，只是这一层不再说话。
+    // 清空这条轴：图还在、指针还在，只是这一层不再说话。
     let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫-守家", "order": null}]}]});
+        {"name": "护卫-守家", "role": null}]}]});
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     assert_eq!(
-        state.control["中国"].blueprints["护卫-守家"].value.order, None,
-        "意图轴沉默"
+        state.control["中国"].blueprints["护卫-守家"].value.role, None,
+        "这条轴沉默了"
     );
     assert!(
         state.control["中国"].blueprints.contains_key("护卫-守家"),
@@ -423,7 +421,7 @@ fn silencing_the_order_axis_is_not_deleting_the_blueprint() {
             .blueprint
             .as_deref(),
         Some("护卫-守家"),
-        "指针还在（= 选装仍按图装配，只有意图那一层交还给下层）"
+        "指针还在（= 选装仍按图装配，只有倾向那一层交还给下层）"
     );
 }
 
@@ -442,7 +440,9 @@ fn blueprint_ownership_follows_the_scope_chain() {
             Control::inherit(Blueprint {
                 class: "corvette".to_string(),
                 components: vec![],
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             }),
         );
     let fid = "中国".to_string();

@@ -62,7 +62,8 @@ function facColor(fid) {
 // {Dock:{body}} / {Colonize:{body}} —— 实体一律用「唯一名」作为 key。
 //
 // ⚠ `null` 是**第四种**情况，不是「待命」：指令读面给的是**有效值**，而 `null` 的意思是
-// **链上没有任何一层说话**（叶不存在 + 出厂图没写意图 + 舰队默认不是玩家的）。这时引擎
+// **链上没有任何一层说话**（叶不存在；⚠ 指令链上 2026-10 起**没有**更高的一层了——
+// 舰队默认指令与图上 order 两片叶都已删）。这时引擎
 // 才按 `Idle` 兜底——把它显示成「待命」是拿兜底值冒充"有人说了待命"，所以单独一个 `unset`。
 function behaviorType(b) {
   if (b === null || b === undefined) return 'unset';
@@ -256,7 +257,6 @@ const KIND = {
   // 势力级**三条默认**：指令 / 风格 / 风筝姿态。它们是「舰」这一组的前提（先定默认，例外才少写）。
   // 后两片与「舰队默认指令」同形，只是「风格」有两个轴：doctrine = 理智↔热血 + 护航↔独狼，
   // kiting = 风筝↔贴脸。摘要见 fleetStyleLabel（没表态就不显示数——那两个数还不算数）。
-  fleetorder:    { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
   fleetdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => fleetStyleLabel(n.leaf, doctrineSummary) },
   fleetkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => fleetStyleLabel(n.leaf, kitingSummary) },
   // 第三条风格轴**角色**（战舰 / 运输舰 / 观测舰）。两行与上面同形，但有一条轴间差别：逐舰那片叶
@@ -269,7 +269,7 @@ const KIND = {
   building:  { childMode: 'leaf', scope: 'leaf', editor: 'building' },
   // **设计图库**（势力级）：本势力「还不存在的舰」的出厂规格。一组 = 一张图一行 +
   // 末尾一条「＋ 新建设计图」。建造区那一行只写**指针**（指到库里的一张图），
-  // 图的内容（舰级/选装/意图/归属）都在这里改。
+  // 图的内容（舰级/选装/**倾向三轴**/归属）都在这里改。
   bpgroup:   { childMode: 'list' },
   blueprint: { childMode: 'leaf', scope: 'leaf', editor: 'blueprint' },
 };
@@ -602,7 +602,6 @@ function buildEdits() {
 // 实体属性（它们属于 state，不属于控制面）。
 const LEAF_SPEC = {
   capital:             { keys: [],                values: ['value'] },
-  default_ship_order:  { keys: [],                values: ['behavior'] },
   default_doctrine:    { keys: [],                values: ['temper', 'lone_wolf'] },
   default_kiting:      { keys: [],                values: ['kiting'] },
   default_role:   { keys: [],                values: ['role'] },
@@ -615,13 +614,13 @@ const LEAF_SPEC = {
   invest_weights:      { keys: ['city', 'building'], values: ['value'] },
   build_weights:       { keys: ['city', 'building'], values: ['value'] },
   loyalty_budget:      { keys: ['city'],          values: ['value'] },
-  // 设计图：身份键 = 图名（势力内的唯一 key）；值 = 舰级 + 选装 + 意图（可空）。
+  // 设计图：身份键 = 图名（势力内的唯一 key）；值 = 舰级 + 选装 + **倾向三轴**（各自可空 = 该轴沉默）。
   // `ship_count` / `launch_waiting` 是**只读派生列**（引擎现算），不进值字段——它们不出现在
   // 回传的叶里（写了引擎也不看，见 `BlueprintPatch`）。
-  blueprints:          { keys: ['name'],          values: ['class', 'components', 'order'] },
+  blueprints:          { keys: ['name'],          values: ['class', 'components', 'doctrine', 'kiting', 'role'] },
 };
 /// 势力级那几片叶子（`Option<...>` 字段，不是数组）。
-const LEAF_OPTIONS = ['capital', 'default_ship_order', 'default_doctrine', 'default_kiting', 'default_role'];
+const LEAF_OPTIONS = ['capital', 'default_doctrine', 'default_kiting', 'default_role'];
 
 /// 记下一片叶的原值。**不覆盖**已经记过的：读面里的叶在 [`pairOrigins`] 里配过对。
 function rememberOrigin(leaf, fields, spec, shell) {
@@ -983,13 +982,14 @@ function buildTree() {
     const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: f.color, fid, children: [] };
 
     const shipNodes = (fc.ship_orders || []).map((ord) => shipNode(fc, ord));
-    // 势力级**四条默认**（指令 / 风格 / 风筝姿态 / 角色）也是可编辑叶片：新舰出生就继承它们，
-    // 一次性指令收尾也回落到它们。它们排在「舰」分组**之前**——因为它们是这一组的前提
-    // （先定默认，例外才少写）。读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的**壳**
-    // 让它出现在树上（与作用域里「没列出的层 ≡ 继承」同义）。壳只用于显示：没被动过就不会
-    // 进回传 diff，动过就按「新建这片叶」整片发出去（见 shellLeaf）。
-    const fleetOrder = shellLeaf(fc.default_ship_order = fc.default_ship_order
-      || { behavior: 'Idle', mode: 'Inherit' }, LEAF_SPEC.default_ship_order);
+    // 势力级**三条长期倾向**（风格 / 风筝姿态 / 角色）是可编辑叶片：新舰出生就继承它们。
+    // 它们排在「舰」分组**之前**——因为它们是这一组的前提（先定倾向，例外才少写）。
+    // 读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的**壳**让它出现在树上（与作用域里
+    // 「没列出的层 ≡ 继承」同义）。壳只用于显示：没被动过就不会进回传 diff，动过就按
+    // 「新建这片叶」整片发出去（见 shellLeaf）。
+    //
+    // ⚠ **指令**没有势力级那一片了（2026-10 用户裁决）：指令是**即时操作**，
+    // 只写逐舰叶；舰队级只留长期倾向这三片。
     const fleetDoctrine = shellLeaf(fc.default_doctrine = fc.default_doctrine
       || { temper: 0, lone_wolf: 0, mode: 'Inherit' }, LEAF_SPEC.default_doctrine);
     const fleetKiting = shellLeaf(fc.default_kiting = fc.default_kiting
@@ -1036,9 +1036,8 @@ function buildTree() {
       key: 'gbp' + fid, kind: 'bpgroup', id: fid, fid,
       name: '设计图库（' + bpNodes.length + ' 张）', children: bpNodes,
     });
-    if (shipNodes.length || fleetOrder) {
+    if (shipNodes.length || fleetDoctrine) {
       const kids = [
-        { key: 'fleet' + fid, kind: 'fleetorder', id: fid, name: '舰队默认指令', leaf: fleetOrder, fid },
         { key: 'fleetdoc' + fid, kind: 'fleetdoctrine', id: fid, name: '舰队默认风格', leaf: fleetDoctrine, fid },
         { key: 'fleetkit' + fid, kind: 'fleetkiting', id: fid, name: '舰队默认风筝姿态', leaf: fleetKiting, fid },
         { key: 'fleetfrt' + fid, kind: 'fleetrole', id: fid, name: '舰队默认角色', leaf: fleetRole, fid },
@@ -1059,7 +1058,7 @@ function buildTree() {
 // 「归谁」的下拉跟着子叶走。
 //
 // **四片叶的读面都「每舰一行」**（哪怕状态里根本没有那片叶），口径也一致：
-// 值 = **有效值**（指令：叶 → 出厂图 → 舰队默认；风格/角色：叶 → 舰队默认 → 舰上记录值）、
+// 值 = **有效值**（指令：只有叶；风格/角色：叶 → 出厂图 → 舰队默认 → 舰上记录值）、
 // mode = 这片叶自己的表态（没有叶 = `Inherit`）。所以这里显示的就是「这艘舰现在实际用的」。
 // ⚠ 这条对**指令**（`ship_orders`）以前不成立：那片叶只列**有叶的舰**，于是「恢复出厂值」
 // 一按，这艘舰**整行**（连风格 / 角色）就从控制树里消失——现在也不会了。
@@ -1159,7 +1158,7 @@ function renderNode(node) {
     if (node.kind === 'city') kids.appendChild(addBuildingButton(node));
     if (node.kind === 'bpgroup') {
       if (!hasKids) {
-        kids.appendChild(hintLine('库里还没有图：在下面建一张（图名 / 舰级 / 选装 / 意图），再到底下「天体 → 城 → 建造区」那一行的「设计图」下拉把它指过去——先有库，才有指针。'));
+        kids.appendChild(hintLine('库里还没有图：在下面建一张（图名 / 舰级 / 选装 / 角色 / 风格 / 风筝姿态），再到底下「天体 → 城 → 建造区」那一行的「设计图」下拉把它指过去——先有库，才有指针。'));
       }
       kids.appendChild(addBlueprintButton(node));
     }
@@ -1320,7 +1319,6 @@ const RAW_LEAF = {
   shipdoctrine:  { list: 'ship_doctrine', key: (n) => n.id },
   shipkiting:    { list: 'ship_kiting', key: (n) => n.id },
   shiprole:      { list: 'ship_role', key: (n) => n.id },
-  fleetorder:    { list: 'default_ship_order' },
   fleetdoctrine: { list: 'default_doctrine' },
   fleetkiting:   { list: 'default_kiting' },
   fleetrole:     { list: 'default_role' },
@@ -1356,14 +1354,14 @@ function removeLeafButton(node, label, title) {
 }
 
 /// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 全局。
-/// 这是 `State::ship_control` / `ship_doctrine_control` / `ship_kiting_control` 在前端的
-/// 对应读法，UI 用它决定「这片叶子现在归谁、能不能编辑」。
+/// 这是 `State::ship_control` / `ship_doctrine_control` / `ship_kiting_control` /
+/// `ship_role_control` 在前端的对应读法，UI 用它决定「这片叶子现在归谁、能不能编辑」。
 ///
-/// 「该轴对应的默认叶」不是写死的 `default_ship_order`：引擎里三条轴各有一片势力级默认
-/// （指令 → `default_ship_order`、风格 → `default_doctrine`、风筝姿态 → `default_kiting`、
-/// 角色 → `default_role`），见 [`DEFAULT_LEAF`]。
+/// ⚠ **指令没有舰队默认叶**（2026-10 裁决）：它是即时操作，链上是 叶 → 势力 → 全局；
+/// 风格/姿态/角色三条长期倾向各有一片势力级默认（见 [`DEFAULT_LEAF`]）。
+/// 出厂图那一层 UI 不重算（读面给的 `mode` 是叶自己的表态，图层的归属由引擎解析）——
+/// 这里少一层只会让 UI **更保守**（少显示一次「已归玩家」），不会让编辑误伤引擎。
 const DEFAULT_LEAF = {
-  shiporder: 'default_ship_order',
   shipdoctrine: 'default_doctrine',
   shipkiting: 'default_kiting',
   shiprole: 'default_role',
@@ -1658,11 +1656,17 @@ function pushModify(fid, cityId, bid, attrs) {
 
 // --- 设计图库（势力级） ------------------------------------------------------
 // 一张设计图 = 势力库里的一片叶（`blueprints`），**建造区只拿一个指针指向它**。
-// 读面那一行给的是 `{name, class, components, order, mode, ship_count, launch_waiting}`：
-//   * `class` / `components` / `order` = 图的值（写面 presence-aware：只报变过的字段）；
+// 读面那一行给的是
+// `{name, class, components, doctrine, kiting, role, mode, ship_count, launch_waiting}`：
+//   * `class` / `components` / `doctrine` / `kiting` / `role` = 图的值
+//     （写面 presence-aware：只报变过的字段）；
 //   * `mode`  = **图叶自己的表态**（三态；有效归属还要往势力/全局作用域上溯）；
 //   * `ship_count` / `launch_waiting` = **引擎现算的只读派生列**（本图造了多少艘 / 此刻是不是
 //     「买不起 ⇒ 没下水」）。它们只用于显示，回传时不发（发了引擎也不看）。
+//
+// ⚠ **图能表态的是长期倾向（风格 / 风筝姿态 / 角色），不是指令**（2026-10 用户裁决）：
+// 指令是即时操作（去那里 / 跟随那艘船），没有"出厂默认"可言；玩家的"这型舰干什么"
+// 写在**角色**上（运输舰图 = 它一造出来就被派去跑集货路线）。原来那片 `order` 已删。
 //
 // 一条口径 A 的硬约束（`blueprint_class_mismatch`）：图的 `class` 必须与**挂它的每个建造区**
 // 的 `ship_type` 相等。它是**正确的守卫**，所以这里不是"避免触发"而是**把它显示出来**
@@ -1671,7 +1675,10 @@ function pushModify(fid, cityId, bid, attrs) {
 // ⚠ 模板必须走**工厂**（每次给新对象、新数组）：模块级常量一旦被 `push` 过就再也洗不干净——
 // 「新建表单里上次勾的组件还在」和「壳的原值被同一只数组改掉 ⇒ 补丁发不出去」都是它造成的。
 function bpDraft(name) {
-  return { name: name || '', class: '', components: [], order: null, mode: 'Inherit' };
+  return {
+    name: name || '', class: '', components: [],
+    doctrine: null, kiting: null, role: null, mode: 'Inherit',
+  };
 }
 
 function compName(id) { return (cfg.components && cfg.components[id] && cfg.components[id].label) || id; }
@@ -1702,16 +1709,21 @@ function yardCountText(fid, name) {
 function blueprintYardMismatch(fid, name, cls) {
   return blueprintYards(fid, name).filter((y) => y.ship_type !== cls);
 }
-/// 意图摘要（`order` 可空 = 本图对意图**没有说话**，链继续往下降到舰队默认）。
-function orderSummary(order) {
-  return order == null ? '不表态' : behaviorSummary(order, st);
+/// 倾向摘要：图上这条轴**没有说话**（`null`）时明说，而不是显示成"默认值"。
+/// 它就是引擎里 `role: null` / `doctrine: null` 的意思：这一层沉默，链往下降到舰队默认。
+function stanceSummary(bp) {
+  const bits = [];
+  if (bp.role != null) bits.push('角色 ' + roleSummary(bp));
+  if (bp.doctrine != null) bits.push('风格 ' + doctrineSummary(bp.doctrine));
+  if (bp.kiting != null) bits.push('姿态 ' + kitingSummary(bp.kiting));
+  return bits.length ? bits.join(' · ') : '倾向不表态（交给舰队默认）';
 }
 function blueprintSummary(fid, bp) {
   const comps = (bp.components && bp.components.length)
     ? bp.components.map(compName).join('＋')
     : '空装（交给生成器）';
   const yards = blueprintYards(fid, bp.name).length;
-  return ' · ' + shipClassName(bp.class) + ' · ' + comps + ' · 意图 ' + orderSummary(bp.order)
+  return ' · ' + shipClassName(bp.class) + ' · ' + comps + ' · ' + stanceSummary(bp)
     + ' · ' + (bp.ship_count || 0) + ' 艘（本图造过）'
     + (yards ? ' · 挂在 ' + yards + ' 个建造区' : ' · 还没挂到任何建造区');
 }
@@ -1756,7 +1768,8 @@ function blueprintOwnershipHint(node) {
     + '要钉死成你写的配方，把归属改成「玩家」。');
 }
 
-/// 设计图的编辑器：舰级下拉 + 组件多选 + 意图（复用「指令」编辑器形状）。
+/// 设计图的编辑器：舰级下拉 + 组件多选 + **倾向三轴**（角色 / 风格 / 风筝姿态）。
+/// ⚠ 图上**不能**写指令（2026-10 裁决：指令是即时操作，只写逐舰叶）。
 ///
 /// 组件多选的两条纪律都在下拉里就守住（引擎那两条守卫仍然在，且报错会被显示出来）：
 /// 一件组件一个槽位（勾选框天然不重复）、到槽位上限就把没勾的禁用。
@@ -1792,8 +1805,10 @@ function blueprintEditor(node) {
   // ② 组件多选（`components`：顺序 = 槽位顺序；`[]` = 交给生成器）。
   box.appendChild(componentPicker(leaf));
 
-  // ③ 意图（`order`：可选；`null` = 本图对意图没有说话，与"删掉这张图"完全不同）。
-  box.appendChild(orderEditor(leaf));
+  // ③ **倾向**（角色 / 风格 / 风筝姿态）：图上能表态的就是这三条**长期**轴。
+  //    ⚠ 指令**不在**这里（2026-10 裁决）：它是即时操作，要去「舰」分组里逐舰下命令，
+  //    或者用**角色**影响这型舰将来干什么。
+  box.appendChild(stanceEditor(leaf));
 
   if (node.bp && node.bp.launch_waiting) {
     box.appendChild(hintLine('⚠ 买不起 ⇒ 未下水：挂着这张图的那座城进度已经攒够，却因为这张图的选装买不起而没有放舰下水（进度不会丢，攒够钱就下水）。'));
@@ -1856,74 +1871,94 @@ function componentPicker(leaf, opts) {
   return wrap;
 }
 
-/// 意图编辑器：**与「指令」编辑器同形**（同一套 `ShipBehavior` 形状、同一套天体/城/舰下拉），
-/// 只多一格「不表态」——那是引擎里 `order: null` 的意思：**本图对意图没有说话**，链继续往下降
-/// 到舰队默认。它和「删掉这张图」（`remove: true`）是两回事：删图会让建造区悬空停产。
-function orderEditor(leaf) {
-  const box = el('div', { class: 'bp-order' });
-  const has = leaf.order != null;
-  const t = has ? behaviorType(leaf.order) : '';
-  const d = behaviorToInput(leaf.order || 'Idle');
-  const commit = (b) => { leaf.order = b; wroteValue(leaf); renderTree(); };
+/// **倾向编辑器**：图上能表态的三条轴——**角色 / 风格 / 风筝姿态**。
+///
+/// ⚠ 图**不再**能指定"指令"（2026-10 用户裁决）：指令是**即时操作**（去那里 / 跟随那艘船），
+/// 不是"这型舰是什么"。玩家要"这型舰一造出来就跑运输"，写的是**角色**（运输舰）；
+/// 要它更凶/更谨慎，写的是**风格**；要它贴着打/放风筝，写的是**风筝姿态**。
+///
+/// 每条轴都有「**不表态**」这一档，它就是引擎里的 `null`：**本图对这条轴没有说话** ⇒
+/// 链继续往下降到舰队默认。它和「删掉这张图」（`remove: true`）是两回事——删图会让
+/// 建造区悬空停产。三条轴**逐轴独立**：表态一条不影响另两条。
+///
+/// ⚠ 图能供值还有一个前提（引擎侧）：这张图的**归属解析为 `Player`**。图是 `Auto` 时，
+/// 上面写的值只是"当前值"，链不会拿它当玩家的表态（与舰队默认叶同一条规则）。
+function stanceEditor(leaf) {
+  const box = el('div', { class: 'bp-stance' });
+  const commit = () => { wroteValue(leaf); renderTree(); };
 
-  const typeSel = el('select', { 'data-role': 'bp-order-type' });
-  [['', '不表态（交给舰队默认）'], ['idle', '待命'], ['move', '移动'], ['follow', '跟随舰'],
-   ['dock_city', '停泊城'], ['dock', '停泊轨道'], ['colonize', '殖民']].forEach(([v, lbl]) => {
-    const o = el('option', { value: v });
-    o.textContent = lbl;
-    o.selected = t === v;
-    typeSel.appendChild(o);
+  // ① 角色（三值枚举）：**"新舰出厂就干什么"最有用的一片**。
+  const roleSel = el('select', { 'data-role': 'bp-role' });
+  [['', '不表态（交给舰队默认）'], ['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']]
+    .forEach(([v, lbl]) => {
+      const o = el('option', { value: v });
+      o.textContent = v ? lbl + '（' + roleHint(v) + '）' : lbl;
+      o.selected = (leaf.role || '') === v;
+      roleSel.appendChild(o);
+    });
+  roleSel.title = '这型舰的**角色**：战舰找仗打、运输舰按积压跑集货路线、观测舰驻到太阳系外缘的引力异常区。'
+    + '选了它，之后按这张图造出来的新舰一出厂就是这个角色（角色是活层：改这张图，角色叶沉默的老舰也一起跟）。'
+    + '「不表态」= 引擎里的 `role: null`：这一层没有说话，链往下降到舰队默认角色。';
+  roleSel.addEventListener('change', () => {
+    leaf.role = roleSel.value || null; // 空串 = 明确写 null（这一轴回到沉默；缺席才是"不动这一格"）
+    commit();
   });
-  typeSel.title = '本图给新舰的默认意图。选「不表态」= 引擎里的 `order: null`（这一层没有说话，链往下降到舰队默认）——它不是"删掉这张图"。';
-  typeSel.addEventListener('change', () => {
-    const v = typeSel.value;
-    if (!v) { commit(null); return; } // 明确写 null：意图轴回到沉默（缺席 = 不动这一格）
-    if (v === 'move') { d.x = +d.x || 0; d.y = +d.y || 0; }
-    if (v === 'dock' || v === 'colonize') d.body = d.body || firstBodyWithSettlement();
-    if (v === 'dock_city') d.city = d.city || firstCityName();
-    if (v === 'follow') d.ship = d.ship || firstShipName();
-    commit(behaviorFromInput(v, d));
-  });
-  box.appendChild(labelWrap('意图', typeSel));
+  box.appendChild(labelWrap('角色', roleSel));
 
-  if (t === 'move') {
-    box.appendChild(inputNum('x', d.x, (v) => { d.x = +v; commit(behaviorFromInput('move', d)); }));
-    box.appendChild(inputNum('y', d.y, (v) => { d.y = +v; commit(behaviorFromInput('move', d)); }));
-  } else if (t === 'dock' || t === 'colonize') {
-    const s = el('select', { 'data-role': 'bp-order-target' });
-    (st.bodies || []).filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
-      const o = el('option', { value: bd.name });
-      o.textContent = bd.name;
-      o.selected = d.body === bd.name;
-      s.appendChild(o);
-    });
-    s.addEventListener('change', () => { d.body = s.value; commit(behaviorFromInput(t, d)); });
-    box.appendChild(labelWrap('目标天体', s));
-  } else if (t === 'dock_city') {
-    const s = el('select', { 'data-role': 'bp-order-target' });
-    (st.cities || []).forEach((c) => {
-      const o = el('option', { value: c.name });
-      o.textContent = c.name + '（' + c.faction_id + '）';
-      o.selected = d.city === c.name;
-      s.appendChild(o);
-    });
-    s.addEventListener('change', () => { d.city = s.value; commit(behaviorFromInput('dock_city', d)); });
-    box.appendChild(labelWrap('目标城', s));
-  } else if (t === 'follow') {
-    const s = el('select', { 'data-role': 'bp-order-target' });
-    (st.ships || []).forEach((sh) => {
-      const o = el('option', { value: sh.name });
-      o.textContent = sh.name + '（' + sh.faction_id + '）';
-      o.selected = d.ship === sh.name;
-      s.appendChild(o);
-    });
-    s.addEventListener('change', () => { d.ship = s.value; commit(behaviorFromInput('follow', d)); });
-    box.appendChild(labelWrap('目标舰', s));
-  }
-  if (has) box.appendChild(hintLine('图里写了意图 ⇒ 之后按这张图造出来的新舰出厂就带这条指令（意图是活层：改这张图，叶沉默的老舰也一起跟）。'));
+  // ② 风格（两轴一片叶：理智↔热血 + 护航↔独狼）。
+  const docOn = el('input', { type: 'checkbox', 'data-role': 'bp-doctrine-on' });
+  docOn.checked = leaf.doctrine != null;
+  const docFields = el('span', { class: 'style-field' });
+  const docVals = leaf.doctrine || { temper: 0, lone_wolf: 0 };
+  const temperInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+docVals.temper || 0).toFixed(2), 'data-axis': 'temper' });
+  temperInp.title = '负 = 欺软怕硬（挑威慑比自己低的）；正 = 飞蛾扑火（挑威慑比自己高的）；0 = 基线';
+  const wolfInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+docVals.lone_wolf || 0).toFixed(2), 'data-axis': 'lone_wolf' });
+  wolfInp.title = '负 = 空闲时贴本势力旗舰护航；正 = 独狼（空闲时自行就近接战）；0 = 基线';
+  const pushDoctrine = () => {
+    if (!docOn.checked) { leaf.doctrine = null; return; }
+    leaf.doctrine = {
+      temper: Math.max(-1, Math.min(1, +temperInp.value || 0)),
+      lone_wolf: Math.max(-1, Math.min(1, +wolfInp.value || 0)),
+    };
+  };
+  docOn.addEventListener('change', () => {
+    pushDoctrine();
+    docFields.hidden = !docOn.checked;
+    commit();
+  });
+  temperInp.addEventListener('input', () => { pushDoctrine(); });
+  wolfInp.addEventListener('input', () => { pushDoctrine(); });
+  temperInp.addEventListener('change', commit);
+  wolfInp.addEventListener('change', commit);
+  docFields.hidden = !docOn.checked;
+  docFields.append(el('span', { class: 'lv-label' }, '理智↔热血 '), temperInp,
+    el('span', { class: 'lv-label' }, ' 护航↔独狼 '), wolfInp);
+  const docWrap = el('span', { class: 'bp-stance-row' });
+  docWrap.append(docOn, docFields);
+  docWrap.title = '这片叶是**两轴一片**：勾上就是给两条轴都表态（引擎不接受只给一条——另一条会被静默当成 0.0 = 基线）。';
+  box.appendChild(labelWrap('风格', docWrap));
+
+  // ③ 风筝姿态（单值轴）。
+  const kitOn = el('input', { type: 'checkbox', 'data-role': 'bp-kiting-on' });
+  kitOn.checked = leaf.kiting != null;
+  const kitInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+leaf.kiting || 0).toFixed(2), 'data-axis': 'kiting' });
+  kitInp.title = '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线';
+  const pushKiting = () => {
+    leaf.kiting = kitOn.checked ? Math.max(-1, Math.min(1, +kitInp.value || 0)) : null;
+  };
+  kitOn.addEventListener('change', () => { pushKiting(); kitInp.hidden = !kitOn.checked; commit(); });
+  kitInp.addEventListener('input', pushKiting);
+  kitInp.addEventListener('change', commit);
+  kitInp.hidden = !kitOn.checked;
+  const kitWrap = el('span', { class: 'bp-stance-row' });
+  kitWrap.append(kitOn, kitInp);
+  box.appendChild(labelWrap('风筝姿态', kitWrap));
+
+  box.appendChild(hintLine('图上写了某条轴 ⇒ 之后按这张图造出来的新舰出厂就带这条倾向'
+    + '（倾向是活层：改这张图，**该轴叶沉默**的老舰也一起跟）。'
+    + '⚠ 前提是这张图归**玩家**：图是「自动」时，上面的值只是当前值，引擎不把它当玩家的表态。'));
   return box;
 }
-
 function firstBodyWithSettlement() {
   const b = (st.bodies || []).find((x) => x.settlements && x.settlements.length);
   return b ? b.name : '';
@@ -1931,11 +1966,11 @@ function firstBodyWithSettlement() {
 function firstCityName() { return ((st.cities || [])[0] || {}).name || ''; }
 function firstShipName() { return ((st.ships || [])[0] || {}).name || ''; }
 
-/// 「＋ 新建设计图」：一行表单（图名 + 舰级 + 组件 + 意图 + 归属）→ 点「新建」把它加进
+/// 「＋ 新建设计图」：一行表单（图名 + 舰级 + 组件 + 角色 + 风格 + 风筝姿态 + 归属）→ 点「新建」把它加进
 /// **编辑面**（还不是服务器上的图：点「应用到服务器」才真的落地）。
 ///
 /// 它进 diff 的方式与其它叶一样是 presence-aware 的：新建的图在编辑面里是一片**壳**
-/// （读面里没有它），壳一旦被碰过就**整片**发出去（名字 + 舰级 + 选装 + 意图 + 归属），
+/// （读面里没有它），壳一旦被碰过就**整片**发出去（名字 + 舰级 + 选装 + 倾向三轴 + 归属），
 /// 于是「建图 + 挂指针」可以放同一份 diff 一次成功（引擎按这个顺序应用，spec §4.4 例 1）。
 function addBlueprintButton(node) {
   const fid = node.fid;
@@ -1974,19 +2009,40 @@ function addBlueprintButton(node) {
   syncModeHint();
   modeSel.addEventListener('change', syncModeHint);
 
-  const orderSel = el('select', { 'data-role': 'bp-new-order' });
-  [['', '不表态'], ['idle', '待命'], ['dock', '停泊轨道'], ['dock_city', '停泊城'], ['colonize', '殖民'], ['move', '移动'], ['follow', '跟随舰']].forEach(([v, l]) => {
+  // 新建表单也要能写**倾向**（用户 2026-10 的诉求：图能指定的是风格/角色，不是指令）。
+  // 三格：角色（枚举，含「不表态」）/ 风格（两轴一片）/ 风筝姿态。
+  const roleSel = el('select', { 'data-role': 'bp-new-role' });
+  [['', '不表态'], ['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']].forEach(([v, l]) => {
     const o = el('option', { value: v });
-    o.textContent = '意图：' + l;
+    o.textContent = '角色：' + l;
     o.selected = v === '';
-    orderSel.appendChild(o);
+    roleSel.appendChild(o);
   });
-  orderSel.title = '本图给新舰的默认意图（可选）。不表态 = 引擎里的 `order: null`：这一层没有说话，链往下降到舰队默认。';
+  roleSel.title = '这型舰的**角色**：战舰找仗打、运输舰按积压跑集货路线、观测舰驻到引力异常区。'
+    + '不表态 = 引擎里的 `role: null`：这一层没有说话，链往下降到舰队默认角色。';
+
+  const docOn = el('input', { type: 'checkbox', 'data-role': 'bp-new-doctrine-on' });
+  const docTemper = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'temper' });
+  const docWolf = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'lone_wolf' });
+  docTemper.title = '理智↔热血：负 = 欺软怕硬；正 = 飞蛾扑火；0 = 基线';
+  docWolf.title = '护航↔独狼：负 = 空闲时贴旗舰护航；正 = 独狼；0 = 基线';
+  const docWrap = el('span', { class: 'bp-stance-row' });
+  docWrap.append(docOn, el('span', { class: 'lv-label' }, '理智↔热血 '), docTemper,
+    el('span', { class: 'lv-label' }, ' 护航↔独狼 '), docWolf);
+  docWrap.title = '勾上才表态（两轴必须一起给：只给一条时另一条会被引擎静默当成 0.0）。';
+
+  const kitOn = el('input', { type: 'checkbox', 'data-role': 'bp-new-kiting-on' });
+  const kitInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'kiting' });
+  kitInp.title = '风筝↔贴脸：负 = 风筝（保持最远射程、更早撤）；正 = 贴脸；0 = 基线';
+  const kitWrap = el('span', { class: 'bp-stance-row' });
+  kitWrap.append(kitOn, kitInp);
 
   wrap.appendChild(labelWrap('名字', nameInp));
   wrap.appendChild(labelWrap('舰级', classSel));
   wrap.appendChild(labelWrap('归属', modeSel));
-  wrap.appendChild(labelWrap('意图', orderSel));
+  wrap.appendChild(labelWrap('角色', roleSel));
+  wrap.appendChild(labelWrap('风格', docWrap));
+  wrap.appendChild(labelWrap('风筝姿态', kitWrap));
 
   // 组件多选用一片**独立草稿**（草稿不在编辑面里 ⇒ 不能进 diff，所以它不共用 componentPicker
   // 的「写值即接管」路径；点「新建」时把那几件一次性写进新叶）。`inPlace` = 勾选不重画整棵树。
@@ -2019,9 +2075,13 @@ function addBlueprintButton(node) {
     fc.blueprints.push(entry);
     entry.class = classSel.value;
     entry.components = (draftLeaf.components || []).slice();
-    entry.order = orderSel.value ? behaviorFromInput(orderSel.value, {
-      x: 0, y: 0, body: firstBodyWithSettlement(), city: firstCityName(), ship: firstShipName(),
-    }) : null;
+    // 倾向三轴：空 = **明确写 `null`**（这一层没有说话；缺席才是"不动这一格"）。
+    entry.role = roleSel.value || null;
+    entry.doctrine = docOn.checked ? {
+      temper: Math.max(-1, Math.min(1, +docTemper.value || 0)),
+      lone_wolf: Math.max(-1, Math.min(1, +docWolf.value || 0)),
+    } : null;
+    entry.kiting = kitOn.checked ? Math.max(-1, Math.min(1, +kitInp.value || 0)) : null;
     // 归属**显式**写出来（默认「玩家」）。不靠引擎的「写值即接管」兜底：那条规则会让界面
     // 显示「继承」而叶其实归了玩家——正是这个仓库反复反对的那种"界面骗人"。
     entry.mode = modeSel.value;
@@ -2089,7 +2149,7 @@ function buildingEditor(node) {
     //
     // 读面（`world.control[势力].blueprints`）给的是图库；这一行只写**指针**
     // （`buildings[].blueprint`）——「（无：自动选装）」= 拆掉指针（写 `null`，不是
-    // 缺席：缺席 = 不动这一格，两者后果不同）。图的内容（选装/意图/归属）在图上改，
+    // 缺席：缺席 = 不动这一格，两者后果不同）。图的内容（选装/倾向/归属）在图上改，
     // 引擎会在 `--apply` 时报 `blueprint_class_mismatch`（图的舰级必须与舰型相等）。
     const bps = fc.blueprints || [];
     const bpSel = el('select', { 'data-key': 'blueprint-' + cityId + '-' + b.id });

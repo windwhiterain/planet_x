@@ -38,7 +38,7 @@ import planet_x_ctl as ctl
 
 s = ctl.surface("ckpt_r12.ron")            # 控制面（= `--control` 的读面，读面即写面）
 s.factions                                  # 势力名列表
-s.faction("中国")                            # 该势力的叶片：ship_orders / default_ship_order /
+s.faction("中国")                            # 该势力的叶片：ship_orders / default_role /
                                             # 预算 / 权重 / loyalty_budget / buildings / capital
 s.leaf("中国", "ship_orders", "长城")        # 单叶：值 + mode（三态）
 
@@ -50,7 +50,7 @@ mine = ships.query("faction_id == '中国' and hull > 0")
 # —— 通配：引擎没有通配，这里展开成显式叶（同一个东西，只是不用手抄）——
 s.set_mode(mine, "Auto")                    # 全舰队交回系统（`{ship, mode:"Auto"}` 逐条）
 s.set_mode(mine, "Player")                   # 全舰队归我
-s.set_default_ship_order("中国", behavior="Dock:地球", mode="Player")  # 一片叶，新舰自动跟随
+s.set_default_role("中国", "Freight", mode="Player")   # 一片叶：全舰队转运输（**长期倾向**才有舰队级默认）
 s.set_kiting(mine.query("class == 'battleship'"), -1.0)                # 贴脸
 s.set_budget("中国", "construction_budget", {"铁": 4.0, "硅": 2.5})     # 值 + 隐含接管
 
@@ -100,7 +100,8 @@ ctl.verify("ckpt_r12.ron", "steer.json")    # 只读试算：前后读面 + 回�
 「交回上层」（`mode:"Inherit"`）**只在舰队默认是 `Player` 时才是干净的**：`ship_behavior`
 （`src/model/state.rs:186-193`）在"叶 Inherit + 舰队默认非 Player"时**回落到叶上那个可能已过期的
 记录值**。归属是 `Auto` 时自愈（系统下回合重写）；归属是 `Player` 时会长期显示旧值。
-处理：凡"释放到上层"，**同时**把 `default_ship_order` 写成 `Player`（一片叶），语义闭合。
+处理：凡"释放到上层"，**同时**把该轴的舰队默认写成 `Player`（一片叶），语义闭合。
+⚠ **指令例外**：它没有舰队默认叶（2026-10 删除，见 `blueprint-stance.md`），释放只是"叶里那句旧值继续算数"。
 
 ### 1.3 边界（别让 kit 变成"每回合重跑的假公式"）
 

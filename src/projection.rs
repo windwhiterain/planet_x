@@ -508,28 +508,26 @@ fn write_round(
                 "upkeep": r2(p.upkeep),
                 // —— 指令归属的**引擎解析结果**（别让 Python 自己重实现链：那是漂移源）——
                 // `order_leaf_mode`：本舰叶片自己的表态（没有叶片 = Inherit）；
-                // `order_default_mode`：势力级舰队默认的表态；
-                // `order_effective_mode`：`State::ship_control` 的答案（叶 → 默认 → 势力 → 全局）；
+                // `order_effective_mode`：`State::ship_control` 的答案（叶 → 势力 → 全局）；
                 // `order_effective`：`State::ship_behavior` 的答案（有效指令；null = 无人说话）。
+                // ⚠ 2026-10 起指令**只有逐舰叶**这一个供值者（舰队默认指令与图上的 order 两片叶
+                // 已删除 ⇒ 原来的 `order_default_mode` / `order_blueprint_mode` 两列一并删掉）。
                 "order_leaf_mode": leaf_mode_of(state, &s.faction_id, &s.name),
-                "order_default_mode": default_mode_of(state, &s.faction_id),
                 "order_effective_mode": state.ship_control(s.name.clone()),
                 "order_effective": state.ship_behavior(s.name.clone()),
-                // —— 设计图（出厂规格）在**这艘舰**上的三个读数 ——
+                // —— 设计图（出厂规格）在**这艘舰**上的两个读数 ——
                 // `blueprint`：本舰出厂所用图名（快照的溯源；null = 无图）。
                 // `blueprint_mode`：那张图**在势力库里的叶表态**（缺图 = Inherit）。
-                // `order_blueprint_mode`：图给新舰的默认意图（`order`）那一层的表态：
-                //   缺图 / 图上没写 order = Inherit（= 这一层没有说话）。⚠ 它是**图叶自己**
-                //   的表态，不是链解析结果——所以你可能在这里看到 Inherit，而
-                //   `order_effective_mode` 却是 Player（那来自舰队默认叶或作用域）。
+                // ⚠ 图不再对**指令**表态（2026-10：图带的是长期倾向，见 `blueprints` 表的
+                // `doctrine`/`kiting`/`role` 三列），所以原来那列 `order_blueprint_mode` 已删；
+                // 图叶自己的表态仍然是 `blueprint_mode`，而**风格三轴**的有效值在
+                // `doctrine`/`kiting`/`role` 三列（它们现在也走"叶 → 图 → 舰队默认 → 记录值"）。
                 "blueprint": s.blueprint,
                 "blueprint_mode": blueprint_mode_of(state, &s.faction_id, s.blueprint.as_deref()),
-                "order_blueprint_mode": order_blueprint_mode_of(state, &s.faction_id, s.blueprint.as_deref()),
-                // **这条有效意图是谁供的值**（Q2=(b) 的出处列）：leaf / blueprint:<图名> /
-                // fleet_default / scope / record。`scope`/`record` 在**指令链上不会出现**
+                // **这条有效意图是谁供的值**（Q2=(b) 的出处列）。
+                // ⚠ 2026-10 起指令链**只剩逐舰叶**（舰队默认指令与图上的 `order` 两片叶都已
+                // 删除）⇒ 实际只会出现 `leaf` 或 null；`scope`/`record` **在指令链上不会出现**
                 // （作用域不携带值、指令没有出厂记录值），见 `column_docs`。
-                // ⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`
-                // （那时值真的来自那片叶），前者才可能落到 `blueprint:*`/`fleet_default`。
                 "order_source": state.ship_behavior_source(s.name.clone()).map(|src| src.label()),
                 // 下水回合（编制表的确定性 tie-break：「同分取最老的」）。旧档缺字段 ⇒ null
                 // = **未知**（读者要回落名字序，不能当成第 0 回合）。
@@ -879,15 +877,6 @@ fn write_round(
                 leaf.mode,
             )?;
         }
-        if let Some(d) = &c.default_ship_order {
-            row(
-                "default_ship_order",
-                json!(""),
-                json!(null),
-                json!(d.value),
-                d.mode,
-            )?;
-        }
         // —— 风格三轴的六片叶（`control-live-layers.md` §3 那条候选 + 运输分支的角色轴）——
         //
         // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`/`role`
@@ -1040,9 +1029,11 @@ fn write_round(
                     "class": leaf.value.class,
                     // 选装：**全量**输出（空数组 = 交给生成器现算），与 `--control` 一致。
                     "components": leaf.value.components,
-                    // `order` = 本图给新舰的默认意图（**默认枚举形式**，与 `control` 表一致；
-                    // null = 本图对意图没有说话）。
-                    "order": leaf.value.order,
+                    // `doctrine`/`kiting`/`role` = 本图给这型舰的**长期倾向**三轴
+                    // （null = 本图对该轴没有说话）。⚠ 图**不再**对指令表态（2026-10）。
+                    "doctrine": leaf.value.doctrine,
+                    "kiting": leaf.value.kiting,
+                    "role": leaf.value.role,
                     "mode": leaf.mode,
                     "effective_mode": state.blueprint_control(fid, id),
                     "ship_count": ship_count,
@@ -1266,38 +1257,12 @@ fn leaf_mode_of(state: &State, fid: &FactionId, ship: &ShipId) -> ControlMode {
         .unwrap_or_default()
 }
 
-/// 势力级**舰队默认指令**的表态（没有这片叶 = `Inherit`）。
-fn default_mode_of(state: &State, fid: &FactionId) -> ControlMode {
-    state
-        .control(fid.clone())
-        .and_then(|c| c.default_ship_order.as_ref())
-        .map(|d| d.mode)
-        .unwrap_or_default()
-}
-
 /// 本舰出厂那张图**在势力库里的叶表态**（没有图 / 图不存在 = `Inherit` = 这一层没有说话）。
 fn blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> ControlMode {
     bp.and_then(|id| {
         state
             .control(fid.clone())
             .and_then(|c| c.blueprints.get(id))
-            .map(|l| l.mode)
-    })
-    .unwrap_or_default()
-}
-
-/// 本舰出厂图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）
-/// 就是 `Inherit`（Q1(c)：图的意图轴默认沉默）。
-///
-/// ⚠ 这是**图叶自己的**表态，不是链解析结果：`order_effective_mode`（`State::ship_control`）
-/// 才是「谁说了算」。两者可能不一致，而且那正是有信息的地方（例如图叶是 `Inherit`、
-/// 但舰队默认叶是 `Player` ⇒ 图上这层说话与否都不影响结果）。
-fn order_blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> ControlMode {
-    bp.and_then(|id| {
-        state
-            .control(fid.clone())
-            .and_then(|c| c.blueprints.get(id))
-            .filter(|l| l.value.order.is_some())
             .map(|l| l.mode)
     })
     .unwrap_or_default()
@@ -1314,20 +1279,18 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","order_blueprint_mode":"string","spawned_round":"integer"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","spawned_round":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
-                    "order_default_mode": "势力级**舰队默认指令**的表态（没有这片叶 = Inherit）。",
-                    "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → **出厂图**（图上真写了 `order` 时）→ 舰队默认 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。",
-                    "order_effective": "**有效指令**：`State::ship_behavior` 的答案（null = 没有任何一层说话，调用方按 Idle 兜底）。注意「叶 Inherit + 舰队默认不是 Player」时会回落到叶上的记录值——这是引擎的既有取值规则，Python 侧不要自己重算。",
-                    "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）：`leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）/ `blueprint:<图名>`（值来自本舰出厂那张图上的 `order`）/ `fleet_default`（势力级舰队默认叶）/ `scope` / `record`。⚠ 后两个取值在**指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`role` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`（那时值真的来自那片叶，`leaf.map(|l| l.value)`），只有叶不存在才可能落到 `blueprint:*`/`fleet_default`。",
+                    "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
+                    "order_effective": "**有效指令**：`State::ship_behavior` 的答案——2026-10 起就是**那片逐舰叶里的值**（叶不存在 ⇒ null，调用方按 Idle 兜底）。Python 侧不要自己重算。",
+                    "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）。⚠ 2026-10 起指令链**只剩逐舰叶**（舰队默认指令与图上的 order 两片叶已删）⇒ 实际只会出现 `leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）或 null（叶不存在 = 没人说话）；`scope`/`record` **在指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`role` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。",
                     "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
                     "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
                     "role": "**有效角色**（`State::ship_role`，同一条链，**三态字符串**）：`War` = 战舰（找仗打）、`Freight` = 运输舰（自动控制给它排集货路线）、`Observe` = **观测舰**（自动控制把它派去引力异常区蹲着，喂 MOND 掌握度那条知识渠道）。**它只管自动控制派哪种活**——不解除武装，任何角色的舰在射程内照样自动开火、照样按 `kiting` 软移动。⚠ 三态**互斥**（一艘舰同一时刻只有一种活），优先级是**观测 > 运输 > 战斗**。",
                     "role_mode": "角色那片叶的**有效归属**（`State::ship_role_control`）：Auto = 这条结论是自动控制写的（它每回合按积压 + 观测需求定编），Player = 玩家钉的、AI 不碰。",
                     "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
-                    "order_blueprint_mode": "图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）= Inherit（Q1(c)：图的意图轴默认沉默）。⚠ 这是**图叶自己**的表态，不是链解析结果——与 `order_effective_mode` 不一致是正常的（例如图叶 Inherit、舰队默认叶 Player）。",
                     "spawned_round": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
                 },
             }),
@@ -1459,11 +1422,11 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "control" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
+                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认倾向三片 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_ship_order / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。⚠ `default_ship_order` 已删（2026-10：指令是即时操作，只写逐舰叶）。",
+                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
                     "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是三值字符串（War/Freight/Observe）、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`role` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
@@ -1471,7 +1434,7 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "scope" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**作用域树的显式表态**：谁负责 AI 决策（全局 / 势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。舰的归属链是 叶 → 出厂图 → 舰队默认 → 势力 → 全局。",
+                "description": "**作用域树的显式表态**：谁负责 AI 决策（全局 / 势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。归属链：**指令** = 叶 → 势力 → 全局；**风格三轴** = 叶 → 出厂图 → 舰队默认 → 势力 → 全局。",
                 "columns": {"round":"integer","level":"string","key":"string","mode":"string"},
                 "column_docs": {
                     "level": "节点层级：global / faction / body / city（`global` 的 key 为 `\"\"`）。",
@@ -1480,12 +1443,14 @@ pub fn projection_schema() -> serde_json::Value {
             "blueprints" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `RoundView`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
-                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","order":"object","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
+                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","doctrine":"object","kiting":"number","role":"string","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
                 "column_docs": {
                     "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
                     "class": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
                     "components": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器；非空 ⇒ **出厂就按它装配**（与图的归属无关：归属只管「谁能改这张图」）。",
-                    "order": "本图给**新舰**的默认意图（`ShipBehavior`，默认枚举形式；null = 本图对意图没有说话）。⚠ 链上只在该图的归属解析为 `Player` 时取值。AI 建的图**从不**写它（建图 ≠ 表态，Q1(c)）。",
+                    "doctrine": "本图给这型舰的**行为风格**（`{temper, lone_wolf}`；null = 本图对该轴沉默）。⚠ 只在图的归属解析为 `Player` 时供值。",
+                    "kiting": "本图给这型舰的**风筝↔贴脸姿态**（[-1,1]；null = 本图对该轴沉默）。",
+                    "role": "本图给这型舰的**角色**（War/Freight/Observe；null = 本图对该轴沉默）。这是「新舰一造出来就干什么」的落点。",
                     "mode": "图叶**自己的**表态：Inherit（没有说话——**AI 建的图就是这个**：流水，不是表态）/ Auto（系统可重估：`retool_shipyards` 改舰级、`autocontrol::blueprints` 重估选装）/ Player（系统不许动）。",
                     "effective_mode": "**有效归属**（`State::blueprint_control`：图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，别在 Python 里重算。",
                     "ship_count": "世界上 `Ship.blueprint == blueprint_id` 的舰数（引擎算）。",

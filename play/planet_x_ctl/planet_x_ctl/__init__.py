@@ -16,7 +16,7 @@ Tri-state ownership (``.agents/notes/control-live-layers.md``)
 
 Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing) / ``Auto`` (the
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
-``leaf → faction default_ship_order → faction scope → global scope``; the most specific layer that
+``leaf → faction scope → global scope``; the most specific layer that
 is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The **three style** axes have the
 same shape with their own faction-level default: ``ship_doctrine → default_doctrine``,
 ``ship_kiting → default_kiting`` and ``ship_role → default_role`` (角色：``War`` 战舰 / ``Freight``
@@ -58,7 +58,7 @@ Typical use::
 
     s.set_mode(mine, "Auto")                 # wildcard, client-side: N × {ship, mode}
     s.set_behavior(mine, "Dock:地球", mode="Player")
-    s.set_default_ship_order("中国", behavior="Idle", mode="Player")
+    s.set_default_role("中国", role="Freight", mode="Player")   # 长期倾向才有舰队级默认
     s.set_budget("中国", "construction_budget", {"硅": 4.0}, mode="Player")
 
     diff = s.emit()                          # {"control":[…], "scope":{…}} → `--apply`
@@ -106,10 +106,12 @@ MODES = (INHERIT, AUTO, PLAYER)
 #: ``()`` = the kind is a single per-faction leaf (an object, not a list).
 LEAF_KINDS: dict[str, tuple[str, ...]] = {
     "capital": (),
-    "default_ship_order": (),
-    # 势力级默认风格两片（`control-live-layers.md` §4.1）：与 `default_ship_order` 同形，
-    # 只是各有自己的轴——`default_doctrine` 是 temper/lone_wolf，`default_kiting` 是 kiting。
-    # ⚠ 少了这两项时**不会报错**，只会静静地从 surface() 里消失（读面有、这里看不见）——
+    # ⚠ **没有 `default_ship_order` 了**（2026-10 用户裁决）：指令是**即时操作**，只写逐舰叶
+    # （`ship_orders`）；势力级只留**长期倾向**三片。往这一档写东西会被引擎当成未知字段**拒掉**。
+    #
+    # 势力级默认倾向三片：各有自己的轴——`default_doctrine` 是 temper/lone_wolf、
+    # `default_kiting` 是 kiting、`default_role` 是 War/Freight/Observe。
+    # ⚠ 少了这几项时**不会报错**，只会静静地从 surface() 里消失（读面有、这里看不见）——
     # 那正是 `engine-data-plane.md` §8.1 的教训：契约是发射端 + 消费者两处。
     "default_doctrine": (),
     "default_kiting": (),
@@ -142,19 +144,21 @@ LEAF_KINDS: dict[str, tuple[str, ...]] = {
 _KIND_ORDER = tuple(LEAF_KINDS)
 _KEY_FIELDS = frozenset({"ship", "city", "building", "resource", "name"})
 #: Which read-face field carries a leaf's **value**. Three kinds spell it something other than
-#: ``value``: `ShipOrderPatch`/`DefaultShipOrder` write ``behavior``, `ShipKitingPatch`/`DefaultKiting`
+#: ``value``: `ShipOrderPatch` writes ``behavior`` (the **only** carrier of a behavior now —
+#: `default_ship_order` is gone), `ShipKitingPatch`/`DefaultKiting`
 #: write ``kiting``, `ShipRolePatch`/`DefaultShipRole` write ``role`` (a three-valued **string**,
 #: not the old boolean). `ShipDoctrinePatch`/`DefaultDoctrine` have two axes at once
-#: (``temper`` / ``lone_wolf``), and ``blueprints`` is a **composite** (class + components + order).
-_VALUE_FIELD = {"ship_orders": "behavior", "default_ship_order": "behavior",
+#: (``temper`` / ``lone_wolf``), and ``blueprints`` is a **composite**
+#: (class + components + doctrine/kiting/role).
+_VALUE_FIELD = {"ship_orders": "behavior",
                 "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value",
                 "ship_role": "role", "default_role": "role"}
 
 _TWO_AXIS_KINDS = ("ship_doctrine", "default_doctrine")
-#: 复合值叶（一张设计图 = 舰级 + 选装 + 意图）。与两轴风格叶同理：值不止一个字段，所以
-#: `_leaf_value` 不能靠一个字段名取。
+#: 复合值叶（一张设计图 = 舰级 + 选装 + **倾向三轴**）。与两轴风格叶同理：值不止一个字段，
+#: 所以 `_leaf_value` 不能靠一个字段名取。
 _COMPOSITE_KINDS = ("blueprints",)
-_BLUEPRINT_FIELDS = ("class", "components", "order")
+_BLUEPRINT_FIELDS = ("class", "components", "doctrine", "kiting", "role")
 
 
 def _leaf_value(kind: str, entry: Mapping) -> Any:
@@ -507,6 +511,24 @@ def _check_role(v: Any, what: str) -> str:
     return v
 
 
+def _check_doctrine(v: Any, what: str) -> dict:
+    """风格轴的**两轴一片**：必须两条一起给（``{"temper": …, "lone_wolf": …}``）。
+
+    ⚠ 只给一条时另一条会被引擎静默当成 ``0.0``（= 基线）——而 ``0.0`` 是个**正常取值**，
+    事后从读面完全看不出"这是没写"还是"就想要基线"。所以这里当场拒绝，与引擎的
+    `partial_doctrine_leaf` 守卫同一条纪律。
+    """
+    if not isinstance(v, Mapping):
+        raise ValueError(f"{what} 要一个 {{'temper': …, 'lone_wolf': …}} 映射（收到 {v!r}）")
+    missing = [k for k in ("temper", "lone_wolf") if k not in v]
+    if missing:
+        raise ValueError(
+            f"{what} 缺 {'、'.join(missing)}：这片叶是**两轴一片**，只给一条会把另一条静默设成 "
+            "0.0（= 基线，而 0.0 是正常取值，事后看不出来）。"
+        )
+    return {"temper": _clamp(v["temper"]), "lone_wolf": _clamp(v["lone_wolf"])}
+
+
 def normalize_behavior(behavior: Any) -> Any:
     """Normalize a ship behavior to the engine's wire form.
 
@@ -714,7 +736,7 @@ class Surface:
         ``key`` is the leaf's identity — the ship name for ``ship_orders``/``ship_doctrine``/
         ``ship_kiting``, the resource key for the budgets, the city name for ``loyalty_budget``, a
         ``(city, building)`` tuple for the weight kinds, and ``None`` for the per-faction singletons
-        ``default_ship_order`` / ``capital``.
+        ``default_doctrine`` / ``default_kiting`` / ``default_role`` / ``capital``.
 
         A leaf the read face did not list is **not an error**: it means "nobody has spoken here"
         (``mode == "Inherit"``), which is the same as an explicitly-written ``Inherit``.
@@ -989,7 +1011,8 @@ class Surface:
         * ``"Auto"``   → hand the fleet back to the system (it rewrites the leaves each round);
         * ``"Player"`` → claim it (the system stops overwriting);
         * ``"Inherit"``→ this layer withdraws its opinion (it then falls through to the faction's
-          ``default_ship_order`` / scope — see the README pitfall §1.2).
+          scope — see the README pitfall §1.2). ⚠ 指令链上**没有舰队默认叶了**（2026-10 裁决：
+          指令是即时操作，只写逐舰叶；势力级只剩长期倾向三片）。
         """
         mode = _check_mode(mode)
         for faction, ship in self._ship_pairs(selection):
@@ -1008,33 +1031,11 @@ class Surface:
             self._add(faction, "ship_orders", (ship,), patch)
         return self
 
-    def set_default_ship_order(self, faction: str, behavior: Any = None,
-                               *, mode: str | None = None, take_over: bool = False) -> "Surface":
-        """The faction-level fleet default — **one leaf** that new ships inherit.
-
-        This is what makes "意图" survive name generations, and the answer to "一次性指令收尾有去处":
-        a leaf saying ``Inherit`` (or a brand-new ship with no leaf at all) resolves to this value.
-        At least one of ``behavior`` / ``mode`` must be given.
-        """
-        if behavior is None and mode is None:
-            raise ValueError("set_default_ship_order 至少要给 behavior= 或 mode= 之一")
-        patch: dict = {}
-        if behavior is not None:
-            patch["behavior"] = normalize_behavior(behavior)
-        if mode is not None:
-            patch["mode"] = _check_mode(mode)
-        else:
-            m = self._mode_or_takeover(None, take_over, f"set_default_ship_order({faction!r})")
-            if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
-                patch["mode"] = m
-        self._add(faction, "default_ship_order", (), patch)
-        return self
-
     def set_default_kiting(self, faction: str, kiting: float | None = None, *,
                            mode: str | None = None, take_over: bool = False) -> "Surface":
         """势力级默认风筝姿态——**一片叶**管住全舰队里「没有自己表态」的舰（含新下水的）。
 
-        与 :meth:`set_default_ship_order` 同形（同一层、同样的三态）。只写值必须明说归属：
+        与另两条舰队默认轴同形（同一层、同样的三态）。只写值必须明说归属：
         要么 ``mode=``，要么 ``take_over=True``（引擎会回 ``NOTE_APPLY_TOOKOVER``）；
         只写 ``mode`` 是合法的（值不动）——那正是"整支舰队交还/收回"的用法，一片叶顶 N 片。
         """
@@ -1349,16 +1350,28 @@ class Surface:
         return self
 
     def remove_default_ship_order(self, faction: str) -> "Surface":
-        """势力级：删掉**舰队默认指令叶** ⇒ 没有自己叶片的舰回落到 `Idle` / 作用域链。"""
-        self._add(faction, "default_ship_order", (), {"remove": True})
-        return self
+        """**已删除**：舰队默认指令那一片叶不存在了（2026-10 用户裁决）。
+
+        指令是**即时操作**（去那里 / 跟随那艘船），没有"势力级默认"可言；实测那片叶也不是
+        "默认值"而是**全舰队接管开关**（写它 ⇒ 全舰队归属变 `Player` ⇒ 自动控制的
+        style/freight/contract 闸门全跳过、连自保撤退都不再生效）。长期倾向（风格 / 风筝姿态 /
+        角色）仍有舰队级默认，见 :meth:`set_default_role` 等。
+
+        保留这个方法名只为**响亮地失败**：它还在这里，脚本一跑就知道自己过时了。
+        """
+        raise AttributeError(
+            "remove_default_ship_order 已删除：`default_ship_order` 那片叶不存在了（2026-10 裁决："
+            "指令是即时操作，只写逐舰叶）。想让整支舰队干同一件事，用 `order(...)` 逐个点名，"
+            "或者用 `set_default_role(...)` 这类**长期倾向**的舰队级默认。"
+        )
 
     # -- 设计图（还不存在的舰的出厂规格）----------------------------------------------
 
     def set_blueprint(self, faction: str, name: str, *, class_: str | None = None,
-                      components: Sequence[str] | None = None, order: Any = None,
+                      components: Sequence[str] | None = None, doctrine: Mapping | None = None,
+                      kiting: float | None = None, role: str | None = None,
                       mode: str | None = None, take_over: bool = False) -> "Surface":
-        """建/改一张**设计图**：舰级 + 选装 + 该图给新舰的默认意图。
+        """建/改一张**设计图**：舰级 + 选装 + 该图给这型舰的**倾向**（风格 / 风筝姿态 / 角色）。
 
         * ``class_``：舰级（``ShipSpec`` 的 key）。**新建时必须给**，而且必须与该建造区的
           ``ship_type`` 相等——口径 A：``Building.ship_type`` 仍是「这个区造哪一级」的
@@ -1367,9 +1380,13 @@ class Surface:
         * ``components``：选装（组件 id 顺序 = 槽位）。**空列表 = 交给生成器**
           （``choose_loadout`` 在出厂那一刻按当时库存现算）。不许重复（``duplicate_component``），
           不许超过该舰级的槽位（``too_many_components``），组件必须存在（``no_such_component``）。
-        * ``order``：本图给**新舰**的默认意图（``{"type":"dock","body":"地球"}`` 这种 tagged
-          写法与 ``"Idle"`` 都收）。⚠ 图的**意图轴默认沉默**——只有真写了它（且图的归属是
-          ``Player``）才遮住舰队默认。要**清空**这一层（回到沉默）用 :meth:`silence_blueprint_order`。
+        * ``doctrine`` / ``kiting`` / ``role``：本图给这型舰的**长期倾向**——风格两轴
+          （``{"temper": …, "lone_wolf": …}``，**两条一起给**）、风筝姿态（``-1..1``）、
+          角色（``"War"`` / ``"Freight"`` / ``"Observe"``）。
+          ⚠ **图不能指定"指令"**（2026-10 用户裁决）：指令是即时操作，只走 :meth:`order`
+          那份逐舰叶；"这型舰一造出来就跑运输"写的是 ``role="Freight"``。
+          ⚠ 每条轴**默认沉默**——只有真写了它（且图的归属解析为 ``Player``）才在**那条轴**的
+          链上遮住舰队默认。要清空某条轴（回到沉默）用 :meth:`silence_blueprint_stance`。
         * 写值必须明说归属（``mode=…`` 或 ``take_over=True``）——「写值即接管」的守卫。
 
         新建图必须把 ``class_`` 一起给（引擎只写 `mode` 时不会凭空造图，会报
@@ -1384,8 +1401,14 @@ class Surface:
         if components is not None:
             patch["components"] = [_component_id(c) for c in components]
             wrote = True
-        if order is not None:
-            patch["order"] = normalize_behavior(order)
+        if doctrine is not None:
+            patch["doctrine"] = _check_doctrine(doctrine, f"set_blueprint({name!r})")
+            wrote = True
+        if kiting is not None:
+            patch["kiting"] = _clamp(kiting)
+            wrote = True
+        if role is not None:
+            patch["role"] = _check_role(role, f"set_blueprint({name!r})")
             wrote = True
         m = self._mode_or_takeover(mode, take_over, f"set_blueprint({name!r})") if wrote else (
             _check_mode(mode) if mode is not None else None)
@@ -1394,15 +1417,40 @@ class Surface:
         self._add(faction, "blueprints", (name,), patch)
         return self
 
-    def silence_blueprint_order(self, faction: str, name: str) -> "Surface":
-        """让这张图的**意图轴沉默**（写 ``"order": null``）——建图时没写、现在收回这一层。
+    def silence_blueprint_stance(self, faction: str, name: str, *,
+                                 doctrine: bool = False, kiting: bool = False,
+                                 role: bool = False) -> "Surface":
+        """让这张图的某几条**倾向轴沉默**（写 ``"role": null`` 这种）——建图时没写、现在收回这一层。
 
-        ⚠ 这与 :meth:`remove_blueprint` 是**两件事**：清空 ``order`` 只是这一层不再说话
-        （链继续往下降到舰队默认），图与建造区指针都还在；删图会让挂它的建造区变成
+        ⚠ 一条都不勾会**抛错**（发一份什么也不做的空补丁，看起来却像成功——本仓库最忌这个）。
+
+        ⚠ 这与 :meth:`remove_blueprint` 是**两件事**：清空某条轴只是这一层不再说话
+        （那条轴的链继续往下降到舰队默认），图与建造区指针都还在；删图会让挂它的建造区变成
         **悬空指针 ⇒ 停产**。
         """
-        self._add(faction, "blueprints", (name,), {"name": name, "order": None})
+        patch: dict = {"name": name}
+        if doctrine:
+            patch["doctrine"] = None
+        if kiting:
+            patch["kiting"] = None
+        if role:
+            patch["role"] = None
+        if len(patch) == 1:
+            raise ValueError("silence_blueprint_stance 至少要勾一条轴（doctrine= / kiting= / role=）")
+        self._add(faction, "blueprints", (name,), patch)
         return self
+
+    def silence_blueprint_order(self, faction: str, name: str) -> "Surface":
+        """**已删除**：图不再携带"指令"（2026-10 用户裁决），所以没有这条轴可沉默。
+
+        保留这个方法名只为**响亮地失败**（旧脚本一跑就知道自己过时了）。倾向三轴的清空走
+        :meth:`silence_blueprint_stance`。
+        """
+        raise AttributeError(
+            "silence_blueprint_order 已删除：图不能指定指令（2026-10 裁决：指令是即时操作，"
+            "只走逐舰叶）。要清空图上的**倾向**用 silence_blueprint_stance(faction, name, role=True) "
+            "这种写法。"
+        )
 
     def remove_blueprint(self, faction: str, name: str) -> "Surface":
         """删掉**整张图**（= 改名/换代的正规路径）。
@@ -1430,7 +1478,8 @@ class Surface:
 
     def set_blueprint_and_retool(self, faction: str, name: str, *, class_: str, city: str,
                                  building: Any, components: Sequence[str] | None = None,
-                                 order: Any = None, mode: str | None = None,
+                                 doctrine: Mapping | None = None, kiting: float | None = None,
+                                 role: str | None = None, mode: str | None = None,
                                  take_over: bool = False) -> "Surface":
         """**一条命令把图与建造区的舰级一起改**（口径 A 的正解：两处一起写）。
 
@@ -1438,7 +1487,8 @@ class Surface:
         ``blueprint_class_mismatch``——因为那会让图与它自己的建造区对不上（= 把玩家的图作废）。
         这两笔必须在**同一份 diff** 里，所以这里合成一个调用。
         """
-        self.set_blueprint(faction, name, class_=class_, components=components, order=order,
+        self.set_blueprint(faction, name, class_=class_, components=components,
+                           doctrine=doctrine, kiting=kiting, role=role,
                            mode=mode, take_over=take_over)
         idx = self.resolve_building(city, building)
         self._require_faction(faction)
@@ -1453,9 +1503,9 @@ class Surface:
         """Edit the scope tree (谁负责 — the layer that decides ownership, not values).
 
         ⚠ A scope node **carries no value** (``ControlScope`` is ownership-only): setting a faction's
-        scope to ``Player`` hands new ships to you but leaves them recording ``Idle`` until a leaf (or
-        the fleet default) says otherwise. That is exactly why the fleet-level
-        ``default_ship_order`` leaf exists.
+        scope to ``Player`` hands new ships to you but leaves them recording ``Idle`` until a leaf
+        says otherwise. ⚠ 指令**只有逐舰叶**（2026-10 裁决：舰队默认指令那片叶已删）；势力级只剩
+        **长期倾向**三片（``default_doctrine`` / ``default_kiting`` / ``default_role``）。
         """
         if global_mode is not None:
             self._scope_pending["global"] = _check_mode(global_mode)
@@ -1675,7 +1725,7 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
 
     Per ship: ``ship_id``/``name``/``class``/``faction_id``/``hull`` + the ship's own order leaf
     (``order_leaf`` / ``order_mode`` / ``order_value`` / ``order_behavior``) + the faction's
-    ``default_ship_order_mode`` / ``default_ship_order_value`` + the **effective** style axes
+    ``default_role_mode`` / ``default_role_value``（舰队默认**角色**叶）+ the **effective** style axes
     (``doctrine_temper`` / ``doctrine_lone_wolf`` / ``kiting`` / ``role``).
 
     ⚠ ``role`` 是引擎算完的**有效角色**，值是三值字符串（``"War"`` / ``"Freight"`` / ``"Observe"``，
@@ -1723,12 +1773,12 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     def L(fac, kind, key):
         return leaves.get((fac, kind, key))
 
-    defaults = {f: s.leaf(f, "default_ship_order") for f in s.factions}
+    defaults = {f: s.leaf(f, "default_role") for f in s.factions}
     gscope = s.scope_of("global")
     fscope = {f: s.scope_of("factions", f) for f in s.factions}
 
     order_leaf_, order_mode, order_value, order_behavior = [], [], [], []
-    dso_mode, dso_value = [], []
+    dso_mode, dso_value = [], []  # 舰队默认**角色**叶（指令没有舰队默认叶了）
     dt, dlw, kit = [], [], []
     eff_mode, eff_value, eff_auth = [], [], []
     for _, row in df.iterrows():
@@ -1743,30 +1793,25 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         order_behavior.append(behavior_str(oval))
         d = defaults.get(fac)
         dso_mode.append(d.mode if d is not None else INHERIT)
-        dso_value.append(behavior_str(d.value) if d is not None else None)
+        dso_value.append(d.value if d is not None else None)
         doc = L(fac, "ship_doctrine", (ship,))
         dt.append((doc.raw or {}).get("temper") if doc is not None and doc.exists else None)
         dlw.append((doc.raw or {}).get("lone_wolf") if doc is not None and doc.exists else None)
         kk = L(fac, "ship_kiting", (ship,))
         kit.append(kk.value if kk is not None and kk.exists else None)
         # ---- local approximation (fallback only: 旧索引目录没有引擎那几列) ----
-        # `leaf → fleet default → faction scope → global`，**不建模设计图层**。
+        # `leaf → faction scope → global`（指令链，**不建模**已删除的舰队默认叶与图层——
+        # 这两层在 2026-10 之后对**指令**都不存在了）。
         if omode != INHERIT:
             authority, mode = "leaf", omode
-        elif d is not None and d.mode != INHERIT:
-            authority, mode = "fleet_default", d.mode
         elif fscope.get(fac, INHERIT) != INHERIT:
             authority, mode = "faction_scope", fscope[fac]
         elif gscope != INHERIT:
             authority, mode = "global_scope", gscope
         else:
             authority, mode = "auto_fallback", AUTO
-        # value rule (`State::ship_behavior`): an Inherit leaf only takes the fleet default's VALUE
-        # when that default is itself `Player`; otherwise the leaf's (possibly stale) record is used.
-        if omode == INHERIT and d is not None and d.mode == PLAYER:
-            eff_val = behavior_str(d.value)
-        else:
-            eff_val = behavior_str(oval)
+        # 取值：叶里的值就是有效值（没有更高的一层能覆盖它）。
+        eff_val = behavior_str(oval)
         eff_mode.append(mode)
         eff_value.append(eff_val)
         eff_auth.append(authority)
@@ -1775,8 +1820,8 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     df["order_mode"] = order_mode
     df["order_value"] = order_value
     df["order_behavior"] = order_behavior
-    df["default_ship_order_mode"] = dso_mode
-    df["default_ship_order_value"] = dso_value
+    df["default_role_mode"] = dso_mode
+    df["default_role_value"] = dso_value
     df["doctrine_temper"] = dt
     df["doctrine_lone_wolf"] = dlw
     # 风格三轴的**有效值**在引擎的 ships 表里（`doctrine` / `kiting` / `role`，都是
@@ -2505,7 +2550,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "roster":
         df = ships(a.ckpt)
         cols = [c for c in ("ship_id", "faction_id", "class", "hull", "hull_max",
-                            "order_mode", "order_behavior", "default_ship_order_mode")
+                            "order_mode", "order_behavior", "default_role_mode")
                 if c in df.columns]
         print(df[cols].to_string(index=False))
         return 0

@@ -110,18 +110,18 @@ fn fleet_default_style_covers_ships_without_leaves() {
     );
 }
 
-/// 舰队默认指令（`default_ship_order`）：**新舰出生就有意图**，而且**一个叶片改全舰队**。
+/// **指令只剩逐舰叶**（2026-10 裁决）：没有叶 = 没有任何一层说话（调用方按 `Idle` 兜底），
+/// 而**陈旧叶**就是有效值（不再有"舰队默认"或"图上意图"能把它盖掉）。
 ///
-/// 这是 note `agent-control-long-game.md` §5 的正解：以前新下水的舰不在任何 diff 里
-/// → 默认归系统 → 玩家每段都要重新枚举活舰名（而舰名会换代）。现在归属与意图都在
-/// 更宽的那一层有答案，点名单舰只剩「例外」一种用途。
+/// 这是 `default_ship_order` 与 `Blueprint::order` 两片叶删除之后的行为基线：
+/// * 归属链：叶 → 势力 → 全局；
+/// * 取值：叶里的值就是有效值；叶不存在 ⇒ `None`。
 #[test]
-fn fleet_default_order_covers_new_ships() {
+fn orders_come_only_from_the_per_ship_leaf() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let fid = "中国".to_string();
 
-    // 造一艘锚点：舰队默认是**势力级**的，所以先只对「没有任何叶片的舰」验证语义。
     // 拿一艘中国的舰、**删掉它的叶片**来模拟「刚下水、还没人点名」。
     let ship = state
         .ships
@@ -137,75 +137,75 @@ fn fleet_default_order_covers_new_ships() {
     assert_eq!(
         state.ship_control(ship.clone()),
         ControlMode::Auto,
-        "no leaf, no default → system"
+        "没有叶 ⇒ 归属沿作用域链走到 Auto（自动控制下一回合会给它写一条）"
     );
     assert_eq!(
         state.ship_behavior(ship.clone()),
         None,
-        "no leaf, no default → no order at all"
+        "没有叶 ⇒ 没有任何一层说话（调用方按 Idle 兜底）"
     );
+    assert_eq!(state.ship_behavior_source(ship.clone()), None);
 
-    // 写一个舰队默认（不带 mode → 写值即接管 = Player）。
+    // 逐舰写一条（写值即接管 = Player）：这就是**唯一**的下指令方式。
     let diff = serde_json::json!({
         "control": [{"faction_id": "中国",
-            "default_ship_order": {"behavior": {"type": "dock", "body": "地球"}}
+            "ship_orders": [{"ship": ship.clone(), "behavior": {"type": "dock", "body": "地球"}}]
         }]
     });
-    apply_patch(&mut state, &config, &diff).expect("fleet default applies");
-
+    apply_patch(&mut state, &config, &diff).expect("per-ship order applies");
     assert_eq!(
         state.ship_control(ship.clone()),
         ControlMode::Player,
-        "a ship with no leaf inherits the faction default's ownership"
+        "写值即接管"
     );
     assert_eq!(
         state.ship_behavior(ship.clone()),
         Some(ShipBehavior::Dock {
             body: "地球".to_string()
-        }),
-        "…and its intent (this is the whole point: the new ship has orders without being named)"
+        })
     );
-
-    // 单舰特例仍然压过舰队默认（更具体的层优先）——而且这是「改主意」的批量手段：
-    // 改**一个**势力级叶片 = 全舰队改主意（B 不需要了）。
-    let batch = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "default_ship_order": {"behavior": {"type": "idle"}, "mode": "Player"}
-        }]
-    });
-    apply_patch(&mut state, &config, &batch).expect("fleet default retarget applies");
     assert_eq!(
-        state.ship_behavior(ship.clone()),
-        Some(ShipBehavior::Idle),
-        "one leaf, whole fleet"
+        state.ship_behavior_source(ship.clone()),
+        Some(OrderSource::Leaf),
+        "出处就是那片叶"
     );
 
-    let exception = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": ship.clone(), "behavior": {"type": "colonize", "body": "火星"}, "mode": "Player"}]
-        }]
-    });
-    apply_patch(&mut state, &config, &exception).expect("per-ship exception applies");
-    assert_eq!(
-        state.ship_behavior(ship.clone()),
-        Some(ShipBehavior::Colonize {
-            body: "火星".to_string()
-        }),
-        "a named ship overrides the fleet default"
-    );
-
-    // 舰队默认读面即写面：`--control` 里看得见它，且值能原样回传。
+    // 读面即写面：`--control` 里看得见它，且值能原样回传。
     let view = control_view(
         &state,
         &config,
         fid.clone(),
         state.control(fid.clone()).expect("control"),
     );
-    let d = view
-        .default_ship_order
-        .expect("the fleet default is part of the read surface");
-    assert_eq!(d.mode, Some(ControlMode::Player));
-    assert_eq!(d.behavior, Some(ShipBehavior::Idle));
+    let row = view
+        .ship_orders
+        .iter()
+        .find(|o| o.ship == ship)
+        .expect("逐舰指令在读面里");
+    assert_eq!(row.mode, ControlMode::Player);
+    assert_eq!(
+        row.behavior,
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        })
+    );
+}
+
+/// **舰队级那一片"默认指令"已经不存在**：写它必须**响亮**失败（`deny_unknown_fields`），
+/// 而不是被静默吞掉（"失败不能看起来像成功"）。
+#[test]
+fn the_fleet_default_order_leaf_is_gone() {
+    let config = crate::config::load_config();
+    let mut state = crate::world::default_state(&config, 42);
+    let diff = serde_json::json!({
+        "control": [{"faction_id": "中国",
+            "default_ship_order": {"behavior": {"type": "idle"}}
+        }]
+    });
+    assert!(
+        apply_patch(&mut state, &config, &diff).is_err(),
+        "未知字段必须报错（旧的舰队默认指令驱动脚本会立刻发现自己过时了）"
+    );
 }
 
 /// **第三条风格轴（角色）也守同一套删叶规矩**——并且它有一条另两条轴没有的含义：

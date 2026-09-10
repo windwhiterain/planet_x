@@ -207,6 +207,10 @@ button.primary:hover { background: #2563eb; }
 .bp-comp.full { opacity: .45; cursor: not-allowed; }
 .bp-comp input[type="checkbox"] { accent-color: var(--accent); }
 .bp-order { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; width: 100%; }
+/* 倾向编辑器（图的 角色/风格/风筝姿态 三行）：与「意图」同一条排布，只是现在是三条轴。 */
+.bp-stance { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.bp-stance-row { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.bp-stance-row .num { width: 62px; }
 /* **买不起 ⇒ 未下水**（Q4(b) 的可见标记）：建造区那一行上的常亮小牌。 */
 .bp-waiting {
   color: #ffd479; background: #3a2c0a; border: 1px solid #a16207; border-radius: 4px;

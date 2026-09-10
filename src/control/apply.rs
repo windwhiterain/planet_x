@@ -146,9 +146,6 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 每片叶一个 `apply_*` 助手：它们各自处理「删叶 / 写值 / 写归属」三件事，
         // 顺序统一是 **删叶（含冲突检查）→ 实体校验 → 写**。抽出来的原因不是行数：
         // `remove` 的冲突检查与幂等语义要在**每一片**叶上完全一致。
-        if let Some(d) = &fac.default_ship_order {
-            apply_default_ship_order(state, &fid, d, &mut report);
-        }
         if let Some(d) = &fac.default_doctrine {
             apply_default_doctrine(state, &fid, d, &mut report);
         }

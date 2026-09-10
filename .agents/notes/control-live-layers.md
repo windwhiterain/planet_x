@@ -46,10 +46,15 @@ pub enum ControlMode { Inherit, Auto, Player }   // #[default] Inherit
 
 * 叶自己有意见（`Player`/`Auto`）→ 取**叶值**（权威就是叶子；`Auto` 时叶值 = 系统写的
   **流水记录**）；
-* 叶没有说话（`Inherit`/缺叶）→ 取势力级 `default_ship_order` 的值，**但只在它自己是
-  `Player` 时**。若舰队默认是 `Auto`，值应当由系统每回合现写，不能去用高层里那个可能早已
-  过期的值；
+* 叶没有说话（`Inherit`/缺叶）→ 取势力级默认的值，**但只在它自己是 `Player` 时**。若舰队默认
+  是 `Auto`，值应当由系统每回合现写，不能去用高层里那个可能早已过期的值；
 * 都没有 → `None`（调用方按 `Idle` 兜底）。
+
+> ⚠ **2026-10 修订**（`blueprint-stance.md`）：**指令**已经没有"更高的一层"了——舰队级
+> `default_ship_order` 与图上的 `order` **两片叶都已删除**（用户裁决：指令是即时操作），
+> 所以指令的有效值**就是那片逐舰叶里的值**，叶不存在 ⇒ `None`。
+> 上面这三行现在只描述**长期倾向三轴**（风格 / 风筝姿态 / 角色），而且那三条链多了一层：
+> `叶 → 出厂图 → 舰队默认 → 势力 scope → 记录值`。
 
 **推论（必须守住）**：AI 每回合写回的 `Control::inherit(...)` 是**流水，不是指令**
 （`autocontrol/tactics.rs:351/402/413/447`）。不认这一条，`scope=Player` 就会把整队冻结在
@@ -70,20 +75,24 @@ AI 最后写的行为上——那是「活层」最危险的坑。
   实测：旧档 `play/exp2/ckpt_r12.ron` 加载后归属逐值一致。
 * `[x]` **作用域树读面即写面**：`ScopeView` 并入 `ControlScopePatch`，读面只列**有意见**的
   节点 → 「dump → 改 → 回传」不会静默清掉没列出的层。
-* `[x]` **势力级舰队默认指令** `ControllableState::default_ship_order: Option<Control<ShipBehavior>>`
-  （读面即写面：`DefaultShipOrder{behavior, mode}`）。归属链变成
-  `叶 → 舰队默认 → 势力 scope → 全局`；值规则见 §1.3。**这就是「新舰出厂就有意图、
-  一次性指令收尾有去处」的答案**（`agent-control-long-game.md` §5）。
+* `[x]` ~~**势力级舰队默认指令** `ControllableState::default_ship_order`~~ —— **2026-10 删除**
+  （`blueprint-stance.md`）：实测它不是"默认值"而是**全舰队接管开关**（写它 ⇒ 全舰队归属变
+  `Player` ⇒ 自动控制的 style/freight/contract 闸门全跳过、连自保撤退都不生效，而全舰队被钉死在
+  同一条站桩指令上），而指令本身是**即时操作**、不该有"势力级默认"。
+  舰队级只剩**长期倾向三片**（`default_doctrine` / `default_kiting` / `default_role`）；
+  "新舰出厂是什么"改由**设计图的倾向三轴**回答。
 * `[x]` **一次性指令不再脱手归属**：`sim.rs::reset_order_keep_mode`（殖民收尾只换值不换
   `mode`）；此前玩家点名的殖民舰建完城就被静默交还给系统。
 * `[x]` **写值即接管**：只写值、不写 `mode` 的补丁 = `mode: Player`，覆盖
-  `ship_orders` / `default_ship_order` / 两类预算 / 两类权重 / `loyalty_budget` / `capital`
+  `ship_orders` / `default_doctrine` / `default_kiting` / `default_role` / 两类预算 / 两类权重 /
+  `loyalty_budget` / `capital`
   （`control.rs::write_value_leaf` + 各写点）。回执：`ApplyReport.took_over` +
   CLI stderr 的 `NOTE_APPLY_TOOKOVER`。理由：值写进去而归属仍解析成 `Auto`，系统下一回合
   就按自己的逻辑覆盖它，而 stdout/退出码一切正常 = 又一次「失败看起来像成功」。
   ⚠ 副作用：`agent-play.md`「省略 mode 保留当前模式」的旧说法对**值**不再成立（对
   「只写 mode」仍然成立）；显式写 `mode: Inherit` 是「撤回表态」，**不算**接管。
-* `[x]` **web**：势力「舰」分组新增「舰队默认指令」一行（同形编辑器）；编辑器按**有效归属**
+* `[x]` ~~**web**：势力「舰」分组新增「舰队默认指令」一行~~ —— 那一行**2026-10 已删**
+  （`blueprint-stance.md`；舰队级只剩三条倾向默认）。原文如下（保留作历史）：编辑器按**有效归属**
   （叶 → 舰队默认 → 势力 → 全局，`app.js::effectiveMode`）开放；改行为/改值即把该叶钉成
   `Player`；不可编辑时给一行说明（`.tnode-hint`）。三态下拉是「继承/自动/玩家」。
   ⚠ **只跑了 crate 测试与 round-trip 守卫，没实机点过**（未按 `scripts/web.ps1` 起服务）。
@@ -227,20 +236,21 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 
 只动前端（`web/static/app.js`、`web/static/style.css`）与 web crate 的测试；**引擎一行没动**。
 
-* **势力级三行默认**：`舰` 分组的第一组子项从「舰队默认指令」一行变成三行——`舰队默认指令`
-  （`default_ship_order`）/ `舰队默认风格`（`default_doctrine`：理智↔热血 + 护航↔独狼）/
-  `舰队默认风筝姿态`（`default_kiting`：风筝↔贴脸）。三行同一套惯例：节点 kind 各一种
-  （`fleetorder`/`fleetdoctrine`/`fleetkiting`）、同样的 `scope: 'leaf'` 三态下拉
+* **势力级三行默认**：`舰` 分组的第一组子项是**三条长期倾向**——`舰队默认风格`
+  （`default_doctrine`：理智↔热血 + 护航↔独狼）/ `舰队默认风筝姿态`（`default_kiting`：风筝↔贴脸）
+  / `舰队默认角色`（`default_role`）。~~原来是四行，头一行是「舰队默认指令」~~ —— 那一行
+  **2026-10 已删**（`blueprint-stance.md`：指令是即时操作，没有势力级默认）。三行同一套惯例：
+  节点 kind 各一种（`fleetdoctrine`/`fleetkiting`/`fleetrole`）、同样的 `scope: 'leaf'` 三态下拉
   （继承/自动/玩家）、同样的「有效归属是玩家才给编辑器、否则一行 `.tnode-hint`」。
   读面里没有这两片叶（开局就是）时前端补一片 `Inherit` 的叶让行出现，与作用域「没列出的层 ≡
   继承」同义；回传等价于「这一层没有意见」（引擎声明的「模板原样回传安全」）。
 * **摘要诚实**：势力级默认行的摘要只在**它自己是 `Player`** 时显示那几个数（`Auto` 显示
   「自动（值由系统写）」、`Inherit` 显示「未表态」）——引擎的取值规则就是「默认叶只在自身是
   Player 时供值」，把没表态的存储值显示成"当前风格"会骗人。
-* **`effectiveMode()` 按轴选默认叶**：新增 `DEFAULT_LEAF` 映射
-  `shiporder → default_ship_order`、`shipdoctrine → default_doctrine`、`shipkiting →
-  default_kiting`（对应引擎 `ship_control` / `ship_doctrine_control` / `ship_kiting_control`）。
-  以前只认 `default_ship_order`。
+* **`effectiveMode()` 按轴选默认叶**：`DEFAULT_LEAF` 映射 `shipdoctrine → default_doctrine`、
+  `shipkiting → default_kiting`、`shiprole → default_role`（对应引擎 `ship_doctrine_control` /
+  `ship_kiting_control` / `ship_role_control`）。~~`shiporder → default_ship_order`~~ 那一项
+  **2026-10 已删**（指令链上没有默认叶了）。
 * **逐舰风格叶**：一条舰从「一片叶」变成**三叶容器**（tabs：指令 / 风格 / 风筝姿态）。三片叶的
   归属链各自独立，所以三态下拉跟着子叶走。风格两叶写的是**叶片**
   （`ship_doctrine`/`ship_kiting`），**不碰** `Ship.doctrine`/`Ship.kiting`——那是记录值，
@@ -428,7 +438,7 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
   行号引用本轮一并修正了。
 * **一个读面缺口**（不是本轮引入的）：`ship_orders` 的读面**只列有叶的舰**（`control_view` 遍历
   `c.ship_orders`，而逐舰风格那两条遍历的是 `state.ships`），所以**从没被点名过的舰在控制树里
-  根本不出现**——它悄悄地跟着舰队默认指令，而你没法在界面上给它单独设归属。要补就是让
+  根本不出现**——它悄悄地跟着那一层默认走，而你没法在界面上给它单独设归属。要补就是让
   `ship_orders` 也"每舰一行"（与风格两叶同形），但那会改变 `--control` 模板的形状 ⇒ 留给 ③
   （蓝图那一步本来就要把 `order_source` 摆到读面上）。
 * **一个与本题无关的编译警告**（`main` 上就有，来自 MOND 概率化那次合并）：
@@ -603,6 +613,9 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 实现记录见 [`ship-blueprint.md`](ship-blueprint.md) §6。这一步把本篇的活层模型往「还不存在的舰」
 那一侧推了一格：设计图是**图（舰级层）**，链变成 `叶 → 图 → 舰队默认 → 势力 → 全局`，
 但**图的意图轴默认沉默**（建图 ≠ 表态）——正是 §3.2 那条「Auto 必须是真执行者」的延伸。
+⚠ **2026-10 修订**（`blueprint-stance.md`）：图**不再携带指令**（`order` 删除），它携带的是
+**倾向三轴**（风格 / 风筝姿态 / 角色），链也改成 `叶 → 出厂图 → 舰队默认 → 势力 → 记录值`；
+指令链则缩成 `叶 → 势力 → 全局`。
 
 再往后是排队项（方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者、
 `ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的 `effective`/`order_source`）。

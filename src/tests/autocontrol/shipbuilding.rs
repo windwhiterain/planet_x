@@ -327,7 +327,9 @@ fn player_pinned_blueprint_is_not_retooled() {
             Control::player(Blueprint {
                 class: "corvette".to_string(),
                 components: vec!["kinetic".to_string(), "ion_drive".to_string()],
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             }),
         );
     if let Some(city) = state.city_mut(&first.0) {
@@ -405,7 +407,9 @@ fn an_auto_blueprint_is_retooled_as_a_blueprint() {
             Control::auto(Blueprint {
                 class: "corvette".to_string(),
                 components: Vec::new(),
-                order: None,
+                doctrine: None,
+                kiting: None,
+                role: None,
             }),
         );
     if let Some(city) = state.city_mut(&first.0) {

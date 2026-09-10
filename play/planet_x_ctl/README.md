@@ -68,7 +68,7 @@ s.leaf("中国", "ship_orders", "长城")   # one leaf: `.value` + `.mode` (+ `.
 s.leaf("中国", "build_weights", ("珠三角", 7))
 s.scope_of("factions", "中国")         # the scope tree's opinion at one node (Inherit if silent)
 
-ships  = ctl.ships(ckpt)              # projection ships × their control leaves (+ faction default)
+ships  = ctl.ships(ckpt)              # projection ships × their control leaves (+ faction default role)
                                       # ⚠ the **effective order** columns are the ENGINE's answer
                                       #   (`effective_order_mode` / `effective_order_value` /
                                       #   `order_source`) — see §"effective columns" below
@@ -81,7 +81,8 @@ mine = ctl.query(ships, "faction_id == '中国' and hull > 0")   # `class` is au
 s.set_mode(mine, "Auto")                                       # 通配：N × {ship, mode}
 s.set_mode(mine, "Player")
 s.set_behavior(mine, "Dock:地球", mode="Player")                # "Idle" / "Follow:星环" / "Move:1.5,-2.0"
-s.set_default_ship_order("中国", behavior="Dock:地球", mode="Player")   # ONE leaf, new ships follow
+# ⚠ 指令**没有**势力级默认叶（2026-10 裁决：指令是**即时操作**）——"全舰队听我的"就是下面这行：
+#   `set_behavior` 把同一句话写给**每一艘**舰（通配选择器展开成 N 片叶）。
 s.set_kiting(mine, -1.0)                                        # 贴脸（clamped to [-1, 1]）
 s.set_doctrine(mine, temper=0.4)
 s.set_role(mine, "Freight", mode="Player")                      # 角色：三值字符串 ——
@@ -94,16 +95,18 @@ s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, m
 s.set_capital("中国", "月球", mode="Player")
 s.set_scope(factions={"中国": "Player"})                        # scope nodes carry ownership, not values
 
-# **设计图（blueprint）** —— 「还不存在的舰」的出厂规格：舰级 + 选装 + 该图给新舰的默认意图。
+# **设计图（blueprint）** —— 「还不存在的舰」的出厂规格：舰级 + 选装 + 该图给这型舰的**倾向**
+# （角色 / 风格 / 风筝姿态）。⚠ 图**不能**指定"指令"（2026-10 裁决：指令是即时操作）——
+# "这型舰一造出来就跑运输"写的是 `role="Freight"`；具体去哪、跟随谁，逐舰现下。
 # 建造区**指向**一张图（结构叶），下水那一刻把图**印成**一艘舰（`components` 是快照，
 # 之后改图**不动**已有的舰）。口径 A：图的 `class` 必须 == 该建造区的 `ship_type`，
 # 所以**图与建造区要一起写**（`set_blueprint_and_retool` 就是那条正解）。
 s.set_blueprint("中国", "重甲护卫", class_="corvette", components=["kinetic", "ion_drive"],
                 mode="Player")                                  # 写值必须明说归属（写值即接管）
-s.set_blueprint("中国", "守家护卫", class_="corvette", order="Dock:地球", mode="Player")
+s.set_blueprint("中国", "守家护卫", class_="corvette", role="Freight", mode="Player")
 s.set_blueprint_and_retool("中国", "重甲护卫", class_="destroyer",
                            city="珠三角", building=7, mode="Player")   # 图 + 该区的 ship_type 一起改
-s.silence_blueprint_order("中国", "守家护卫")                    # 意图轴回到沉默（**不是**删图！）
+s.silence_blueprint_stance("中国", "守家护卫", role=True)         # 某条倾向轴回到沉默（**不是**删图！）
 s.set_blueprint_pointer("中国", "珠三角", 7, "重甲护卫")           # 指过去
 s.set_blueprint_pointer("中国", "珠三角", 7, None)                # 拆掉指针（写 `null`，不是"缺席"）
 s.remove_blueprint("中国", "重甲护卫")                            # 删整张图（⚠ 挂它的区变悬空指针 ⇒ 停产）
@@ -116,7 +119,6 @@ s.remove_kiting(mine)
 s.remove_role(mine)                                             # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
 s.remove_default_doctrine("中国")                                # 势力级默认叶：删了就不再供值
 s.remove_default_role("中国")
-s.remove_default_ship_order("中国")
 
 diff = s.emit()                       # {"control": […], "scope": {…}} → ready for `--apply`
 ctl.write(diff, "steer.json")         # canonical, deterministic JSON (byte-identical on replay)
@@ -221,40 +223,42 @@ engine will skip), unknown resources, cities that belong to another faction, and
 
 ## Two pitfalls you must know (`python-control-authoring.md` §1.2 / §1.3)
 
-### §1.2 — a leaf saying `Inherit` falls back to a *stale recorded value*
+### §1.2 — 指令**没有**更高的一层了；倾向三轴有（而且图在最前面）
 
-`State::ship_behavior` reads:
+**指令**（`ship_orders`）的取值链在 2026-10 之后只剩**那一片逐舰叶**（用户裁决：指令是**即时操作**）：
 
 ```rust
-if leaf.mode == Inherit {
-    // ① 舰级层：本舰出厂那张**设计图**上的 order（图上写了它、且那张图归 Player）
-    if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-        if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player() {
-            return bp.value.order.clone();
-        }
-    }
-    // ② 势力级舰队默认（只在它自己是 Player 时供值）
-    if let Some(d) = &c.default_ship_order { if d.mode.is_player() { return Some(d.value) } }
-}
-leaf.value      // ← otherwise: the leaf's own record, which may be an expired AI writing
+// State::ship_behavior
+c.ship_orders.get(&ship_id).map(|l| l.value.clone())
 ```
 
-So **"release to the upper layer" (`mode: "Inherit"`) is only clean when the fleet default is itself
-`Player`.** When ownership is `Auto` the stale value self-heals (the system rewrites the leaf next
-round); when the leaf is `Player` but the fleet default is **not** `Player`, the old value lingers on
-screen for a long time — looking like an order nobody gave.
+于是两条推论，都很容易踩：
 
-**Do not re-derive that chain in Python.** `ships()` hands you the engine's answer
-(`effective_order_value` + `order_source`, see the note above) — that is the whole point of the
-engine/kit split. The kit's own job here is only to make releasing say **both** leaves:
+* **叶里写着什么，就是这艘舰在干什么**（与 `mode` 无关）。`Inherit` 不是"回到上层"，而是"叶里那句旧记录继续算数" ——
+  旧的「舰队默认指令」与「图上 order」两片叶都已删除，**没有东西能盖掉它**。
+* **叶不存在** = 没有任何一层说话 ⇒ 有效值是空的，调用方按 `Idle` 兜底（读面 `order_effective` / `effective_order_value` 给 `null`）。
+  想表达"待命"就**明确写** `Idle`，不要靠删叶。
+
+**风格 / 风筝姿态 / 角色**（长期倾向）则**有**更高的层，而且是**三层**：
+
+```rust
+// State::ship_doctrine / ship_kiting / ship_role（三条轴同形）
+if leaf.mode == Inherit {
+    // ① 出厂图上这条轴（图上写了它、且那张图归 Player）
+    // ② 势力级舰队默认叶（只在它自己是 Player 时供值）
+}
+leaf.map(|l| l.value).unwrap_or(record)   // ← 叶**存在**就用叶里的值（与 mode 无关）
+```
+
+所以那边仍然有"叶在、叶说 `Inherit`，但叶里躺着一句旧值"的现象。**别在 Python 里重算这条链**：
+`ships()` 直接给引擎的答案（`effective_order_value` + `order_source`，见下一节）。
+
+要让一队舰真的"跟着舰队默认走"，两件事都要做（`ships()` 的 `order_source` 会告诉你现在是谁在供值）：
 
 ```python
-s.set_default_ship_order(fac, mode="Player")                 # the layer that will now speak…
-s.set_mode(fleet, "Inherit")                                 # …and the leaves that stop speaking
+s.set_default_role(fac, "Freight", mode="Player")   # 现在说话的那一层…
+s.remove_role(fleet)                                # …以及**不再供值**的那些叶（删叶，不是写 Inherit）
 ```
-
-And when you want the *value* back from the factory record, releasing is **not enough** — see the
-next subsection.
 
 ### 删叶 (`remove`): `mode: "Inherit"` 撤不掉叶里的值
 
@@ -318,19 +322,18 @@ it**). Which brings us to the next warning.
 > The authoritative existence face is **`derived.control`**; a projection old enough to lack the
 > `derived` section raises there instead of guessing.
 >
-> Having both groups on one frame is what makes 「叶里的记录值 ≠ 有效值」 readable: a ship whose leaf
-> says `Inherit` while the faction's fleet default is `Player` shows the old record in
-> `order_behavior`, the default's order in `effective_order_value`, and `order_source ==
-> "fleet_default"`. `demo.py` §[4d] asserts exactly that, including a **deleted** leaf
-> (`order_leaf == False` while the effective value still comes from the fleet default).
+> ⚠ **对指令而言，两组列现在是同一个答案**（2026-10：舰队默认指令与图上 `order` 两片叶都已删除）：
+> `order_behavior` 与 `effective_order_value` 逐行相同、`order_source` 只会是 `leaf` 或空。
+> `demo.py` §[4d] 钉的就是这条新不变式（还有「删叶 ⇒ 有效值变空、**没有**任何一层接手」）。
+> 两组列在**倾向三轴**上仍然是两件事（那边的链有图层与舰队默认，见 §1.2）。
 
 > ### `ships()`: the effective columns are the **engine's** answer (the `*_approx` hole is closed)
 >
 > `effective_order_mode` / `effective_order_value` / `order_source` are read **straight off** the
 > projection's own ships columns `order_effective_mode` / `order_effective` / `order_source` —
 > i.e. `State::ship_control` / `State::ship_behavior` / `State::ship_behavior_source`. That code
-> knows the **design-blueprint layer** (`叶 → 出厂图 → 舰队默认 → 势力 → 全局`), so it is the only
-> correct answer for a ship that was **built from a blueprint**.
+> knows the real chains (指令：`叶 → 势力 → 全局`；倾向三轴：`叶 → 出厂图 → 舰队默认 → 势力 → 全局`),
+> so it is the only correct answer — never re-derive it in Python.
 >
 > This kit used to **re-implement** that chain in Python and hand back the result as
 > `effective_order_*_approx` / `effective_authority_approx`. That re-implementation predated the
@@ -353,8 +356,8 @@ it**). Which brings us to the next warning.
 > `effective_authority_approx` and `effective_order_mode_approx` were **two columns answering one
 > question**, and neither was the engine's; in the engine branch they are replaced by the single pair
 > (`order_source` = who supplied the **value**, `effective_order_mode` = who **owns** the ship).
-> The engine's `order_source` also separates「叶**不存在**」from「叶写着 `Inherit`」— the former can
-> fall through to `blueprint:<名>` / `fleet_default`, the latter honestly reports `leaf`.
+> The engine's `order_source` also separates「叶**不存在**」from「叶写着 `Inherit`」— the former is
+> `null` (nobody spoke), the latter honestly reports `leaf`（值就是叶里那个值）。
 
 ### §1.3 — the kit can only produce **one-shot numbers**
 

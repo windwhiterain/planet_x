@@ -139,9 +139,9 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 |---|---|---|---|
 | `faction_process` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`view.factions[<势力>]` 是**同一个来源**的另一份读法，这是可 join 的平铺版） |
 | `city_process` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
-| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/default_ship_order/default_doctrine/default_kiting/各类预算与权重/capital）。⚠ **设计图不在本表**（它是结构叶，见下一行） |
+| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/ship_doctrine/ship_kiting/ship_role/default_doctrine/default_kiting/default_role/各类预算与权重/capital）。⚠ **没有 `default_ship_order`**（2026-10 删除：指令是即时操作，只写逐舰叶）。⚠ **设计图不在本表**（它是结构叶，见下一行） |
 | `scope` | 每回合 × 显式节点 | `level(global/faction/body/city) key mode` | 作用域树里谁有意见 |
-| `blueprints` | 每回合 × 设计图 | `faction_id blueprint_id class components[] order mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + 新舰默认意图）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
+| `blueprints` | 每回合 × 设计图 | `faction_id blueprint_id class components[] doctrine{} kiting role mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + **倾向三轴**：风格 / 风筝姿态 / 角色）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
 
 `ships` 表另有几列是**引擎解析后的答案**，别自己重算链：`order_leaf_mode`、
 `order_default_mode`、`order_effective_mode`、`order_effective`、**`order_source`**
@@ -234,16 +234,16 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 
 **归属链（舰的指令与风格都是这条）**：`叶 → 出厂图（设计图）→ 舰队默认 → 势力 scope → 全局 scope`，
 最具体的那层**有意见**（`Player`/`Auto`）就它说了算；一路 `Inherit` 就到 `Auto`。
-所以「新舰出厂归谁、干什么」的答案是**舰队默认**（要按舰级分开编排，就写一张图的 `order`——
-见 §3 的 `blueprints`），不必逐舰点名。
-⚠ 图的**意图轴默认沉默**：建图（哪怕归玩家）**不等于**表态，只有图上真写了 `order`，那层才参与；
-而且它只在该图的归属解析为 `Player` 时才供值。
+所以「新舰出厂**归谁**」的答案是**作用域链**（默认全归 AI）；而「新舰出厂**是什么**」的答案是
+**设计图的倾向三轴**（角色 / 风格 / 姿态，见 §3 的 `blueprints`）——**不是**指令：
+指令是**即时操作**（2026-10 用户裁决），只写逐舰叶，谁都没说话就是 `Idle` + 等 AI 接手。
+⚠ 图的每条倾向轴**默认沉默**：建图（哪怕归玩家）**不等于**表态，只有图上真写了那条轴，
+它才参与；而且只在该图的归属解析为 `Player` 时才供值。
 
 | 指令面 | 含义 | 关键点 |
 |---|---|---|
 | `ship_orders` | 每艘舰的**移动/停泊**行为 | `Idle / Move / Follow / DockCity / Dock / Colonize`（见下） |
-| `default_ship_order` | **舰队默认指令**（势力级一片） | `{"behavior":…,"mode":…}`。**新舰出生就继承它**；一次性指令执行完也回落到它 |
-| `default_doctrine` | **舰队默认行为风格**（势力级一片） | `{"temper":…,"lone_wolf":…,"mode":…}`。全舰队一个风格 = 一片叶 |
+| `default_doctrine` | **舰队默认行为风格**（势力级一片，长期倾向） | `{"temper":…,"lone_wolf":…,"mode":…}`。全舰队一个风格 = 一片叶 |
 | `default_kiting` | **舰队默认风筝↔贴脸**（势力级一片） | `{"kiting":…,"mode":…}` |
 | `ship_doctrine` | 每舰**行为风格**（per-舰叶片） | `temper`（理智↔热血，欺软怕硬↔飞蛾扑火）、`lone_wolf`（护航↔独狼），各 `[-1,1]`、`0`=基线 |
 | `ship_kiting` | 每舰**风筝↔贴脸**姿态（per-舰叶片） | `[-1,1]`、`0`=基线。**软属性**：Move/Follow/Dock/Idle 都是软目标，附近有敌舰时自动微调位置，**玩家也不能硬控制** |
@@ -254,12 +254,12 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 | `loyalty_budget` | 每城娱乐/福利（月） | 提「忠诚」压低叛乱 |
 | `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
 | `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效）、**挂/拆设计图指针**（`{"city":…,"building":…,"blueprint":"<图名>"}`；`"blueprint": null` = 拆掉指针回到自动选装） |
-| `blueprints` | **设计图库**（势力级，一张图一片叶） | `{"name":"<图名>","class":"<舰级>","components":[…],"order":{…},"mode":…}`——见 §3 末尾 |
+| `blueprints` | **设计图库**（势力级，一张图一片叶） | `{"name":"<图名>","class":"<舰级>","components":[…],"role":"War","kiting":-0.5,"doctrine":{"temper":0,"lone_wolf":0},"mode":…}`——见 §3 末尾。⚠ 图上**不能**写指令（`"order"` 是未知字段） |
 
 > **设计图（blueprint）= 「还不存在的舰」的出厂规格**：建造区**指向**一张图
 > （`buildings[].blueprint`），下水那一刻把图**印成**一艘舰（`components` 是**快照**，
 > 之后改图**不动**已有的舰）。`mode`：`Player` = 系统不许重估这张图（出厂按图装配，
-> 图上写了 `order` 时那艘舰的意图也归你）/ `Auto` = 系统可重估（`retool_shipyards` 会改它的
+> 图上写了某条**倾向轴**时那条轴也归你）/ `Auto` = 系统可重估（`retool_shipyards` 会改它的
 > 舰级）/ `Inherit` = 这一层没说话（沿 scope 链解析）。
 > **四条硬规则**（违反了会被点名丢弃）：
 > * 口径 A：图的 `class` 必须 == 该建造区的 `ship_type` ⇒ **图与区要一起写**（`blueprint_class_mismatch`）；
@@ -321,13 +321,15 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 
 > 想**整体接管**一个势力：`{"scope":{"factions":[["中国","Player"]]}}` —— 但这**管不了已经
 > 自己有叶片的舰**（叶比 scope 更具体）。要让全舰队真正听话，两条一起做：
-> ① 势力级**舰队默认**（`default_ship_order` / `default_doctrine` / `default_kiting`）=
-> 新舰与"没说话"的舰的答案；② 逐舰把叶片交回上层（`{"ship":"长城","mode":"Inherit"}`，
-> 只写 mode 不动值）或钉成 `Player`。
+> ① 势力级**长期倾向的默认**（`default_doctrine` / `default_kiting` / `default_role`）=
+> "没说话"的舰的答案（⚠ **指令没有**势力级默认：它是即时操作，只写逐舰叶）；② 逐舰把叶片
+> 交回上层（`{"ship":"长城","mode":"Inherit"}`，只写 mode 不动值）或钉成 `Player`；
+> ③ 想让全舰队去干同一件事就**逐舰点名**（`{"ship":"…","behavior":…}` 多写几行——这是唯一的路）。
 > **写值即接管**：diff 里只写值、不写 `mode` ⇒ 那片叶变 `Player`（回执 `NOTE_APPLY_TOOKOVER`
 > 会点名）。想只改"流水记录"而不接管，显式写 `"mode":"Auto"`/`"Inherit"`。
-> 旧手册那句「注意这会让新造出来的舰默认 Idle」现在有了正解：**给势力设舰队默认**，
-> 新舰出厂就继承意图，不必每段重新点名。
+> 旧手册那句「注意这会让新造出来的舰默认 Idle」的答案现在是：**新舰出厂默认归 AI**
+> （作用域链），它会自己决定干什么；要它按你的意思来，就在**设计图**上写**角色**
+> （运输舰图 / 战舰图）——那是"这型舰是什么"，而不是"这艘舰现在去哪"。
 
 ---
 
@@ -373,29 +375,35 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
   舰"北斗"**守卫**"赤霄"（`follow` 一艘**友**舰 = 护航）。
 - "赤霄"自己 `dock` 地球 = 回本土驻守。**三艘舰都在射程内自动开火**——你不需要（也不能）
   写「攻击」。
-- ⚠ **新造出来的舰不在 diff 里**：它们的指令取决于**舰队默认**（`default_ship_order`）。
-  只接管几艘舰时，"新舰谁来指挥"由那一片叶回答——所以**接管单个势力时，第一件事通常是
-  写一片舰队默认**：
+- ⚠ **新造出来的舰不在 diff 里**：它出厂时**归 AI**（作用域链），指令是空的（`Idle`）。
+  只接管几艘舰时，"新舰干什么"由**图的角色**回答（"这型舰是运输舰" ⇒ 它一出来就被派去跑
+  集货路线）；要它去某个具体地方，就**逐舰下指令**（一次写一队也行：`ship_orders` 里多写几行）：
   ```jsonc
   {"control":[{"faction_id":"中国",
-    "default_ship_order":{"behavior":{"type":"dock","body":"地球"},"mode":"Player"},
+    "ship_orders":[{"ship":"长城","behavior":{"type":"dock","body":"地球"}},
+                   {"ship":"北斗","behavior":{"type":"dock","body":"地球"}}],
     "default_kiting":{"kiting":-1.0,"mode":"Player"}
   }]}
   ```
-  这两片一写：**所有"没有说话"的舰（含以后下水的）都按它走**，单舰特例仍写在 `ship_orders`。
+  ⚠ **指令没有"舰队默认"那一片叶**（2026-10 裁决：它是即时操作）——写 `default_ship_order`
+  会被引擎**拒绝**（未知字段）。舰队级只剩长期倾向三片（`default_doctrine` / `default_kiting` /
+  `default_role`），写了它们，**所有"没有说话"的舰（含以后下水的）**在那三条轴上按它走。
 - **按舰级编排**（"新造的护卫舰守家、巡洋舰远征"）用**设计图**，而不是给每艘舰点名：
   ```jsonc
   {"control":[{"faction_id":"中国",
     "blueprints":[{"name":"护卫-守家","class":"corvette",
                    "components":["kinetic","ion_drive"],      // 空数组 = 出厂时交给生成器现算
-                   "order":{"type":"dock","body":"地球"},       // 图上写了它，这一层才参与
+                   "role":"War",                                // 图上写了它，这条轴才参与
+                   "kiting":-0.5,                               // 第二条轴：稍微贴脸一点
                    "mode":"Player"}],
     "buildings":[{"city":"珠三角","building":7,"ship_type":"corvette","blueprint":"护卫-守家"}]
   }]}
   ```
-  这一份 diff 说：`珠三角` 的 7 号建造区以后按「护卫-守家」出厂（选装钉死 + 新舰默认守地球），
-  而且这张图**归玩家**——AI 不许重估它。**图与建造区的舰级必须一起写**（口径 A）。
-  想让这张图只钉选装、意图仍跟随舰队默认 ⇒ **别写 `order`**（或写 `"order": null` 收回这一层）。
+  这一份 diff 说：`珠三角` 的 7 号建造区以后按「护卫-守家」出厂（选装钉死 + 这型舰是**战舰**、
+  稍微贴脸），而且这张图**归玩家**——AI 不许重估它。**图与建造区的舰级必须一起写**（口径 A）。
+  ⚠ 图上**不能**写指令（`"order"` 已是未知字段）：要"这型舰守地球"，就写 `"role":"War"` 让它去
+  找仗打、再用**逐舰** `ship_orders` 点几艘名；或者干脆把那张图当作"选装模板"，倾向全留空
+  （`"role": null` 这种 = 该轴沉默，交给舰队默认 / 出厂快照）。
 - 若想**整体接管**一个势力（所有叶子都归你），写
   `{"scope":{"factions":[["中国","Player"]]}}`。注意**叶比 scope 更具体**：已经自己有叶片的舰
   不会被 scope 翻转，要逐舰写 `{"ship":"长城","mode":"Player"}`（只写 mode，不动值）或

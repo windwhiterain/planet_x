@@ -51,7 +51,18 @@ use crate::model::*;
 /// **输入面** [`RoundInputs`]（掷出的随机数 + 判定输入；C7 解算顺序 / C13 关系噪声已接）。
 /// `State` 一个字段没动，但**档的形状变了**：旧档的 `pre` 里是观测，新档里是输入——按本仓库
 /// 的惯例（读面/档的形状变化也推号，见 v18/v19 那两档）推号，让「旧档在这一面上不保真」明摆着。
-pub const SCHEMA_VERSION: u32 = 21;
+/// **v22 = 指令只剩逐舰叶；图改带倾向**（`feature/blueprint-stance`，用户裁决 2026-10）：
+/// * **删** `ControllableState::default_ship_order`（舰队默认指令）与 [`Blueprint::order`]；
+/// * **加** `Blueprint::{doctrine, kiting, role}`（图能表态的是**长期倾向**，不是指令），
+///   三条风格链变成 `叶 → 出厂图 → 舰队默认 → 舰上记录值`。
+///
+/// **这一档旧档会丢东西**（不迁移）：旧档里那两片叶**没有等价物**——`default_ship_order`
+/// 的价值（"全舰队一条站桩令"）正是被裁决删掉的东西，而图上的 `order` 换成了三条倾向轴、
+/// 语义不同（不是改名）。按本仓库「不考虑向前兼容」的约定：旧 `.ron` 里那两个键**会被
+/// serde 忽略**（`Blueprint` 多出的三轴 `#[serde(default)]` ⇒ `None` = 图对倾向沉默），
+/// 于是**旧档能加载**，但**旧的指令归属会回到作用域链**（`Auto`）：那些依赖"全舰队默认"
+/// 的局面会在这一档改变行为。要让旧局面对齐，把指令**逐舰**重写一遍（或在图上写角色）。
+pub const SCHEMA_VERSION: u32 = 22;
 fn default_schema_version() -> u32 {
     0
 }
@@ -352,85 +363,45 @@ impl State {
             .unwrap_or_else(default_capital_body)
     }
 
-    /// 这艘舰当前的**有效指令**——由「归属」决定取哪一层的值：
+    /// 这艘舰当前的**有效指令**——**只有逐舰那片叶**能供值。
     ///
-    /// * 叶子自己有意见（`Player`/`Auto`）→ 取**叶子**的值（单舰特例，最具体）；
-    /// * 叶子没有说话（`Inherit` / 压根没有叶片——**新下水的舰就是这样**）→ 取
-    ///   **舰级层**（本舰出厂那张设计图的 `order`，只有图上真写了它、且那张图归属解析为
-    ///   `Player` 时才供值）→ 再取势力级
-    ///   [`default_ship_order`](ControllableState::default_ship_order) 的值；
-    /// * 都没有 → `None`（调用方按 `Idle` 兜底）。
+    /// * 叶存在 → 取**叶里**的值（与 `mode` 无关：叶写着 `Inherit` 也算"叶里有这个数"）；
+    /// * 叶不存在 → `None`（调用方按 `Idle` 兜底，自动控制下一回合会给它写一条）。
     ///
-    /// 这条规则是「新舰默认归 AI、每段必须重新点名」的正解：舰的归属与意图都在更宽的
-    /// 那一层有答案，所以**点名单舰只剩「例外」这一种用途**。
+    /// # 为什么指令没有"更高的一层"（用户裁决 2026-10）
     ///
-    /// **舰级层（设计图）的三个前置条件**（三者缺一，这一层就等于没有说话）：
-    /// 1. 本舰有出厂图（`Ship.blueprint`，旧档/预置舰队/剧情赠舰都是 `None`）；
-    /// 2. 图上真写了 `order`（Q1(c)：**图的意图轴默认 `Inherit`——建图 ≠ 表态**）；
-    /// 3. 那张图的**归属解析为 `Player`**（Q2=(b) 的活层 + §4.2 的归属链；`Auto` 图上的
-    ///    `order` 是流水，不能当指令——与舰队默认叶同一条规则）。
+    /// 指令是**即时操作**（去那里 / 跟随那艘船 / 跑哪条运输线），不是"这型舰是什么"。
+    /// 于是"舰队默认指令"（`default_ship_order`）与设计图上的 `order` 两片叶**都已删除**：
     ///
-    /// ⚠ 「叶不存在」与「叶写着 `Inherit`」在**归属**上等价、在**取值**上**不等价**
-    /// （最后一行 `leaf.map(|l| l.value)`：叶存在就用叶里的值，与 `mode` 无关）。
-    /// 想知道这条意图**是谁供的值**，读 [`State::ship_behavior_source`]。
+    /// * 前者实测不是"默认值"而是**全舰队接管开关**——写它 ⇒ 全舰队归属解析成 `Player`
+    ///   ⇒ `autocontrol` 的 style/freight/contract 闸门全部跳过这些舰、连自保撤退也不生效，
+    ///   而全舰队被钉死在同一条站桩指令上（名字与作用不符，且会给几十回合后的新舰继承一条
+    ///   过期命令）；
+    /// * 后者**语义错位**：图描述的是"这型舰是什么"（长期倾向），于是它改为携带**风格/角色**
+    ///   （见 [`Blueprint`] 与 [`State::ship_doctrine`]）。
+    ///
+    /// 长期倾向（风格两轴 + 角色）依旧有舰队级默认叶与图层；**行为**只有逐舰叶 + 自动控制的
+    /// 每回合现写。
     pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
         let s = self.ship(&ship_id)?;
         let c = self.control(s.faction_id.clone())?;
-        let leaf = c.ship_orders.get(&ship_id);
-        // 叶子没有说话 → 高层（舰级图 / 舰队默认）说了算——但**只在高层是玩家的表态时取值**：
-        // 高层若说「自动」，那么这一艘的值应当由系统每回合现写（叶子上的记录值），
-        // 而不是去用高层里那个可能早已过期的值。
-        if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
-            // ① 舰级层：本舰出厂那张图的默认意图（Q1(c) 插在舰队默认**之前**）。
-            if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
-                {
-                    return bp.value.order.clone();
-                }
-            }
-            // ② 势力级舰队默认（现状不变）
-            if let Some(d) = &c.default_ship_order {
-                if d.mode.is_player() {
-                    return Some(d.value.clone());
-                }
-            }
-        }
-        leaf.map(|l| l.value.clone())
+        c.ship_orders.get(&ship_id).map(|l| l.value.clone())
     }
 
-    /// **这条有效指令是谁供的值**——Q2=(b) 那条「读面必须能回答『这条意图是谁下的』」。
+    /// **这条有效指令是谁供的值**——读面要能回答「这条意图是谁下的」。
     ///
-    /// 取值（与 [`State::ship_behavior`] 的取值路径逐条对应）：
-    /// * `leaf` —— 本舰的指令叶**存在**（`mode` 是 `Inherit` 也算：叶存在就用叶里的值）；
-    /// * `blueprint:<图名>` —— 值来自本舰**出厂那张图**上的 `order`（图上写了它，且那张图
-    ///   的归属解析为 `Player`）；
-    /// * `fleet_default` —— 值来自势力级舰队默认叶（`Player`）；
-    /// * `scope` / `record` —— **在指令链上不会出现**：作用域节点只表态「谁负责」、不携带值；
-    ///   而指令没有「出厂记录值」（那是风格三轴的兜底，见 [`State::ship_doctrine`]）。
-    ///   这两个取值留在**取值域**里是为了让读面的枚举与「控制属性的层次链」一一对应，
-    ///   不是漏了分支（投影的 `column_docs` 里也写明这一点，免得后人以为是 bug）。
+    /// 指令只剩逐舰叶这一个供值者（见 [`State::ship_behavior`] 的说明），所以：
+    /// * `leaf` —— 本舰的指令叶**存在**（`mode` 是 `Inherit` 也算：叶存在，值就来自它）；
+    /// * `None` —— **没有任何一层说话**（调用方按 `Idle` 兜底）。
     ///
-    /// `None` = **没有任何一层说话**（调用方按 `Idle` 兜底）——这正是「叶不存在」那一侧；
-    /// 而「叶存在但写着 `Inherit`」会诚实地报 `leaf`，因为那时**值真的来自那片叶**。
+    /// `scope` / `record` 两个取值**在指令链上不会出现**（作用域节点只表态「谁负责」、
+    /// 不携带值；指令没有"出厂记录值"——那是风格三轴的兜底，见 [`State::ship_doctrine`]）。
+    /// 它们留在**取值域**里是为了让读面的枚举与「控制属性的层次链」一一对应，不是漏了分支
+    /// （投影的 `column_docs` 里也写明这一点，免得后人以为是 bug）。
     pub fn ship_behavior_source(&self, ship_id: ShipId) -> Option<OrderSource> {
         let s = self.ship(&ship_id)?;
         let c = self.control(s.faction_id.clone())?;
-        let leaf = c.ship_orders.get(&ship_id);
-        if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
-            if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
-                {
-                    return Some(OrderSource::Blueprint(id.clone()));
-                }
-            }
-            if let Some(d) = &c.default_ship_order {
-                if d.mode.is_player() {
-                    return Some(OrderSource::FleetDefault);
-                }
-            }
-        }
-        // 叶存在 ⇒ 值（哪怕是叶里的旧值）来自它；叶不存在且上面没人供值 ⇒ 没有来源。
-        leaf.map(|_| OrderSource::Leaf)
+        c.ship_orders.get(&ship_id).map(|_| OrderSource::Leaf)
     }
 
     /// 本舰出厂那张图**在势力库里的那一片叶**（图不存在 / 没有出厂图 ⇒ `None`）。
@@ -444,30 +415,23 @@ impl State {
         Some((id, leaf))
     }
 
-    /// 决定一艘舰的指令由谁控制：叶子 → **出厂图** → 舰队默认 → 势力 → 全局。
+    /// 决定一艘舰的指令由谁控制：**叶子 → 势力 → 全局**。
     ///
-    /// 新增的「出厂图」那一层**只在图上真写了 `order` 时才参与**（Q1(c)：图的意图轴默认
-    /// `Inherit`——建图 ≠ 表态）。否则「钉死选装」会连带把整支舰队的指令权都收走
-    /// （钉了 `Player` 的图 ⇒ `ship_control` 变 `Player` ⇒ AI 不再给这些舰写指令叶 ⇒
-    /// 舰队停在 `Idle`），而 Q5 明确说那个耦合**只应该在「真想连意图一起钉」时出现**。
+    /// 指令是即时操作，所以链上没有"舰队默认"也没有"出厂图"（两片叶都已删除，见
+    /// [`State::ship_behavior`]）。⚠ 这里刻意**不看图上写没写倾向**：钉死选装（把图设为
+    /// `Player`）**不该**连带把整支舰队的指令权收走（Q5）——玩家的图只决定"这型舰是什么"，
+    /// 不决定"这艘舰现在去干什么"。
     pub fn ship_control(&self, ship_id: ShipId) -> ControlMode {
         let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Auto;
         };
         let fid = s.faction_id.clone();
-        let (leaf, default) = match self.control(fid.clone()) {
-            Some(c) => (
-                leaf_mode(c.ship_orders.get(&ship_id)),
-                leaf_mode(c.default_ship_order.as_ref()),
-            ),
-            None => (ControlMode::Inherit, ControlMode::Inherit),
-        };
-        let blueprint = match self.ship_blueprint_leaf(s) {
-            Some((id, bp)) if bp.value.order.is_some() => self.blueprint_control(&fid, id),
-            _ => ControlMode::Inherit,
-        };
+        let leaf = self
+            .control(fid.clone())
+            .map(|c| leaf_mode(c.ship_orders.get(&ship_id)))
+            .unwrap_or(ControlMode::Inherit);
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, blueprint, default, faction, self.scope.global])
+        resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 谁负责**这张设计图**：图叶 → 势力 scope → 全局（**没有**「舰队默认」这一档——
@@ -488,11 +452,14 @@ impl State {
     // 算它的；一路「继承」到全局也没人说话，就落到 `Auto`（系统自动决定）。所以
     // 「叶子/作用域不存在」与「显式写着 Inherit」完全等价——都是没有说话。
 
-    /// 这艘舰当前的**有效行为风格**：叶 → 舰队默认 → **舰上的记录值**（出厂快照）。
+    /// 这艘舰当前的**有效行为风格**：叶 → **出厂图** → 舰队默认 → **舰上的记录值**。
     ///
-    /// 与 [`State::ship_behavior`] 同一条取值规则（叶 Inherit + 舰队默认是 `Player` ⇒ 取默认值；
-    /// 否则取叶上的值），只是最后兜底到 `Ship.doctrine`——因为 `doctrine` 出厂时就有一份
-    /// 快照，而指令没有。这条兜底让「老存档里只写过 `Ship.doctrine`」的行为完全不变。
+    /// 链比指令多两层，因为风格是**长期倾向**（"这型舰是什么"）：
+    /// * **出厂图**（本舰下水那张图上的 `doctrine`，只有图上真写了这条轴、且那张图归属解析为
+    ///   `Player` 时才供值）——它比舰队默认**更具体**（"这型舰" 比 "全势力默认" 具体），
+    ///   所以插在舰队默认**之前**（与原行为链 ① ② 同序）；
+    /// * 最后兜底到 `Ship.doctrine`——因为 `doctrine` 出厂时就有一份快照（继承舰级的
+    ///   [`ShipSpec::default_doctrine`](crate::model::ShipSpec::default_doctrine)）。
     pub fn ship_doctrine(&self, ship_id: ShipId) -> ShipDoctrine {
         let Some(s) = self.ship(&ship_id) else {
             return ShipDoctrine::default();
@@ -503,6 +470,11 @@ impl State {
         };
         let leaf = c.ship_doctrine.get(&ship_id);
         if leaf_mode(leaf) == ControlMode::Inherit {
+            // ① 出厂图（"这型舰是什么"，比舰队默认更具体）
+            if let Some(v) = self.blueprint_stance_doctrine(s) {
+                return v;
+            }
+            // ② 势力级舰队默认
             if let Some(d) = &c.default_doctrine {
                 if d.mode.is_player() {
                     return d.value;
@@ -512,7 +484,7 @@ impl State {
         leaf.map(|l| l.value).unwrap_or(record)
     }
 
-    /// 这艘舰当前的**有效风筝<->贴脸姿态**：叶 → 舰队默认 → 舰上的记录值。
+    /// 这艘舰当前的**有效风筝<->贴脸姿态**：叶 → 出厂图 → 舰队默认 → 舰上的记录值。
     pub fn ship_kiting(&self, ship_id: ShipId) -> f64 {
         let Some(s) = self.ship(&ship_id) else {
             return 0.0;
@@ -523,6 +495,9 @@ impl State {
         };
         let leaf = c.ship_kiting.get(&ship_id);
         if leaf_mode(leaf) == ControlMode::Inherit {
+            if let Some(v) = self.blueprint_stance_kiting(s) {
+                return v;
+            }
             if let Some(d) = &c.default_kiting {
                 if d.mode.is_player() {
                     return d.value;
@@ -533,7 +508,7 @@ impl State {
     }
 
     /// 这艘舰当前的**有效角色**（[`ShipRole`]：打仗 / 跑运输 / 观测）。取值规则与前两条
-    /// 风格轴完全同形：叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
+    /// 风格轴完全同形：叶 → 出厂图 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
     /// [`ShipSpec::default_role`](crate::model::ShipSpec::default_role)）。
     ///
     /// ⚠ **它只管「自动控制的活是哪一种」**：不影响自动开火（射程内的敌舰照打），
@@ -550,6 +525,9 @@ impl State {
         };
         let leaf = c.ship_role.get(&ship_id);
         if leaf_mode(leaf) == ControlMode::Inherit {
+            if let Some(v) = self.blueprint_stance_role(s) {
+                return v;
+            }
             if let Some(d) = &c.default_role {
                 if d.mode.is_player() {
                     return d.value;
@@ -559,23 +537,62 @@ impl State {
         leaf.map(|l| l.value).unwrap_or(record)
     }
 
-    /// 决定这艘舰的**行为风格**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    // --- 出厂图的**倾向**（三条风格轴共用的一层） ------------------------------
+    //
+    // 图能表态的是"这型舰是什么"，不是"这艘舰现在去干什么"（用户裁决 2026-10）。
+    // 三个前置条件与原来那片 `order` 逐条相同（缺一即"这一层没有说话"）：
+    //   ① 本舰有出厂图（`Ship.blueprint`；旧档/预置舰队/剧情赠舰都是 `None`）；
+    //   ② 图上真写了这条轴（`None` = 本图对该轴沉默——建图 ≠ 表态，Q1(c)）；
+    //   ③ 那张图的**归属解析为 `Player`**（`Auto` 图上的倾向是 AI 重估出来的流水，
+    //      不能当玩家的表态——与舰队默认叶同一条规则）。
+
+    fn blueprint_stance_doctrine(&self, s: &Ship) -> Option<ShipDoctrine> {
+        let (id, bp) = self.ship_blueprint_leaf(s)?;
+        let v = bp.value.doctrine?;
+        self.blueprint_control(&s.faction_id, id).is_player().then_some(v)
+    }
+
+    fn blueprint_stance_kiting(&self, s: &Ship) -> Option<f64> {
+        let (id, bp) = self.ship_blueprint_leaf(s)?;
+        let v = bp.value.kiting?;
+        self.blueprint_control(&s.faction_id, id).is_player().then_some(v)
+    }
+
+    fn blueprint_stance_role(&self, s: &Ship) -> Option<ShipRole> {
+        let (id, bp) = self.ship_blueprint_leaf(s)?;
+        let v = bp.value.role?;
+        self.blueprint_control(&s.faction_id, id).is_player().then_some(v)
+    }
+
+    /// 这张图**这条轴有没有在说话**（图上写了该轴）——归属链用它决定要不要插图层。
+    fn blueprint_speaks(&self, s: &Ship, axis: StyleAxis) -> bool {
+        match self.ship_blueprint_leaf(s) {
+            Some((_, bp)) => match axis {
+                StyleAxis::Doctrine => bp.value.doctrine.is_some(),
+                StyleAxis::Kiting => bp.value.kiting.is_some(),
+                StyleAxis::Role => bp.value.role.is_some(),
+            },
+            None => false,
+        }
+    }
+
+    /// 决定这艘舰的**行为风格**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
     pub fn ship_doctrine_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Doctrine)
     }
 
-    /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
     pub fn ship_kiting_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Kiting)
     }
 
-    /// 决定这艘舰的**角色**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    /// 决定这艘舰的**角色**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
     /// 自动控制据此判断「这片叶能不能写」（`Player` = 玩家说了算，AI 不碰）。
     pub fn ship_role_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Role)
     }
 
-    /// 三条风格轴共用的归属链。
+    /// 三条风格轴共用的归属链：叶子 → **出厂图**（图上写了这条轴时）→ 舰队默认 → 势力 → 全局。
     fn ship_style_chain(&self, ship_id: ShipId, axis: StyleAxis) -> ControlMode {
         let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Auto;
@@ -598,8 +615,14 @@ impl State {
             },
             None => (ControlMode::Inherit, ControlMode::Inherit),
         };
+        // 图层**只在图上真写了这条轴时才参与**（建图 ≠ 表态）：否则「钉死选装」会把整支
+        // 舰队的倾向权一起收走（Q5 明确说那个耦合不该出现）。
+        let blueprint = match self.ship_blueprint_leaf(s) {
+            Some((id, _)) if self.blueprint_speaks(s, axis) => self.blueprint_control(&fid, id),
+            _ => ControlMode::Inherit,
+        };
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, default, faction, self.scope.global])
+        resolve_chain(&[leaf, blueprint, default, faction, self.scope.global])
     }
 
     /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
@@ -691,14 +714,15 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
 ///
 /// 读面（投影 `ships.order_source` 列）给的是**引擎解析后的答案**——Python 侧不要自己
 /// 重实现这条链（那是漂移源，见 `.agents/notes/engine-data-plane.md`）。
+///
+/// ⚠ **2026-10 起指令链只剩逐舰叶这一个供值者**（舰队默认指令与图上的 `order` 两片叶都已
+/// 删除，见 [`State::ship_behavior`]），所以实际只会出现 `Leaf`；`Scope`/`Record` 两个取值
+/// 留在**取值域**里，是为了让读面的枚举与「控制属性的层次链」一一对应（投影的
+/// `column_docs` 也写明这一点，免得后人以为是 bug）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrderSource {
     /// 本舰的指令叶**存在**（`mode` 是 `Inherit` 也算——叶存在就用叶里的值）。
     Leaf,
-    /// 本舰**出厂那张设计图**上的 `order`（图上写了它，且那张图的归属解析为 `Player`）。
-    Blueprint(BlueprintId),
-    /// 势力级**舰队默认指令**叶（`Player`）。
-    FleetDefault,
     /// 作用域节点——**指令链上不会出现**（作用域只表态「谁负责」，不携带值）。
     Scope,
     /// 舰上的出厂记录值——**指令链上不会出现**（指令没有记录值，那是风格三轴的兜底）。
@@ -706,12 +730,10 @@ pub enum OrderSource {
 }
 
 impl OrderSource {
-    /// 读面的稳定拼写：`leaf` / `blueprint:<图名>` / `fleet_default` / `scope` / `record`。
+    /// 读面的稳定拼写：`leaf` / `scope` / `record`。
     pub fn label(&self) -> String {
         match self {
             OrderSource::Leaf => "leaf".to_string(),
-            OrderSource::Blueprint(id) => format!("blueprint:{id}"),
-            OrderSource::FleetDefault => "fleet_default".to_string(),
             OrderSource::Scope => "scope".to_string(),
             OrderSource::Record => "record".to_string(),
         }
@@ -882,10 +904,13 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // v21（B5）就更轻：`State` 没动，动的是**档里 `pre` 那一格的含义**（观测 → 输入面）。
         // 旧档的 `pre` 会被 serde 当成「全是未知字段」而忽略 ⇒ 输入面读出来是空的。
         // 这与它的真相同义（那些档本来就没记过掷骰），所以**不补任何东西**。
-        // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
-        // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
-        // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 => {
+        // v22（`feature/blueprint-stance`）：`default_ship_order` 与图上的 `order` 两片叶
+        // **没有等价物**（正是被裁决删掉的东西）——旧档的这两个键会被 serde 忽略（拒绝未知
+        // 字段只在 `--control` 的补丁面，不在 `State` 上），归属因此回到作用域链（`Auto`）。
+        // 这是**有意的行为变化**，不是迁移漏了：要复原旧局面的做法是**逐舰重写指令**。
+        // **这里不做「把舰队默认摊到每艘舰」的补丁**：那会把一条早就过期的站桩令**变成**
+        // 全舰队的显式指令叶（玩家以后再也看不出它是哪来的），比丢失它更糟。
+        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
