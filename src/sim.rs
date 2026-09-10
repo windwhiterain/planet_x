@@ -75,8 +75,8 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     step_production(state, config, &mut flow);
     step_upkeep(state, config, &mut flow);
     step_market(state, config, &mut flow);
-    step_construction(state, config, rng);
-    step_military(state, config, rng);
+    step_construction(state, config, rng, &mut flow);
+    step_military(state, config, rng, &mut flow);
     // 光速治理：以距离首都为代价的管理/忠诚度，给超大帝国一个自然上限。
     step_governance(state, config, &mut flow);
     // 重建没有「步进」了：唯一的重建路径是**殖民舰开到空白定居点**（见 `sim::colonize`，
@@ -1211,7 +1211,7 @@ fn commit_spend(state: &mut State, fid: &str, spent: &mut ResourceMap, cost: &[(
     }
 }
 
-fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundFlow) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let mut next_building_id = state
         .cities
@@ -1249,7 +1249,7 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
     let retool_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for fid in retool_ids {
-        autocontrol::retool_shipyards(state, config, &fid, rng);
+        autocontrol::retool_shipyards(state, config, &fid, rng, &mut flow.decisions.retools);
     }
 }
 
@@ -1541,7 +1541,7 @@ fn ship_power(config: &GameConfig, ship: &Ship) -> f64 {
     p.attack * 4.0 + p.hull_max * 1.0 + p.shield_max * 0.8 + p.hardness * 3.0 + p.intercept * 2.0
 }
 
-fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundFlow) {
     // 进入本步进时**还活着**的舰：漏斗兜底的断言只对它们成立（见 `sweep_dead_ships`）。
     let alive_at_step_start: BTreeSet<ShipId> = state
         .ships
@@ -1635,7 +1635,15 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
 
         // --- AI-controlled: the auto-control brain decides and executes ---
-        autocontrol::ai_ship_turn(state, config, rng, &ship_id, &focus_of, &mut next_building_id);
+        autocontrol::ai_ship_turn(
+            state,
+            config,
+            rng,
+            &ship_id,
+            &focus_of,
+            &mut next_building_id,
+            &mut flow.decisions.ships,
+        );
         continue;
     }
 

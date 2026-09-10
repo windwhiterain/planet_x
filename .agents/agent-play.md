@@ -140,6 +140,13 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 `{round, source, pre, post}`（`post.flow` 就是上面那张 flow 表的来源；没档时会按当前状态重算
 并附 `note`，那种情况下 flow 是空的）。
 
+**「我的舰为什么跑到那儿去送死？」** —— 那条指令是 AI 写的，判定过程**不发事件也不落状态**，
+只有 `decisions` 表有：一行一条判定（`verdict` = `withdraw`/`engage`/`colonize`/`bombard`/
+`move`/**`hold`**，`hold` = 这回合 AI **没给它派活**），`detail` 里是判定的**输入**
+（`hull_ratio` vs `retreat_hull`、`kiting`、`enemy_in_range`）——"为什么"是这些数，不是它的自述。
+`q.decisions(round=12)`；注意一艘舰一回合**最多两行**（先机动、到位后再判一次），
+聚合前看 `detail.after_move`。
+
 ### planet_xq 快速配方
 ```python
 import planet_xq
@@ -151,6 +158,7 @@ q.faction_snapshot(12, "中国")           # 一键决策视图（metrics+库存
 q.ships(round=12)                        # 第 12 月全部舰（含 effective 面板）
 q.cities(round=12)                       # 第 12 月全部城（含 buildings 清单）
 q.bodies() ; q.settlements()             # 天体 / 定居点主表
+q.decisions(round=12)                    # 本回合 AI 的判定（逐舰 verdict + 判定的输入 + 船坞改装）
 q.fleet(12, "中国") ; q.city_buildings(12, "中国")   # 某势力的舰 / 城
 q.ids("ships", 12)                       # 第 12 月的 ship_id（=舰名）数组
 q.join("ships", round=12)                # explode 主流 ship_ids 并按 (round,id) merge 完整对象
@@ -470,11 +478,11 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
 | `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
-| `--derived` | 这一回合存下来的派生态 `{round, source, pre, post}`（`post.flow` = 本回合产出/维护/治理的中间量；与 `--index` 的 `derived.flow` 同值） |
+| `--derived` | 这一回合存下来的派生态 `{round, source, pre, post}`（`post.flow` = 本回合产出/维护/治理的中间量；`post.flow.decisions` = **本回合 AI 的判定**；与 `--index` 的同名派生表同值） |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |
 | `--every <K>` | 每 K 回合一个全量快照（降采样） |
 | `--digest <K>` | 每 K 回合一行语义故事板（世界/各势力/战争/事件计数/剧情节拍） |
-| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（flow/city_flow/control/scope）+ schema.json（planet_xq 读） |
+| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（flow/city_flow/control/scope/decisions）+ schema.json（planet_xq 读） |
 
 > 注意：**没有交互式 REPL**、没有 `--query`。这正是设计：stdout 零噪声、确定性、可复现；
 > 分析在外部（planet_xq / pandas）做，控制走 `--apply` diff。

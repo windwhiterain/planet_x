@@ -32,6 +32,7 @@
 //! * [`faction`]    — a faction/state actor.
 //! * [`event`]      — per-round game events + the story/chronicle system.
 //! * [`metrics`]    — derived round data (flows + metric summaries).
+//! * [`decisions`]  — 本回合 AI 的判定（“掷了什么”）：不落状态、不发事件的中间量。
 //! * [`state`]      — the world snapshot, schema version + migration.
 //! * [`control`]    — the command-controlled (controllable) state.
 //! * [`game_config`]— the tuning tables loaded from `config/game.ron`.
@@ -44,6 +45,7 @@ mod body;
 mod building;
 mod city;
 mod control;
+mod decisions;
 mod event;
 mod faction;
 mod game_config;
@@ -58,6 +60,7 @@ pub use body::*;
 pub use building::*;
 pub use city::*;
 pub use control::*;
+pub use decisions::*;
 pub use event::*;
 pub use faction::*;
 pub use game_config::*;

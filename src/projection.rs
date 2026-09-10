@@ -94,6 +94,7 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable { name: "city_flow", table: "idx/city_flow.jsonl", key: "city_id", join_on: "city_ids", round: true },
     DerivedTable { name: "control", table: "idx/control.jsonl", key: "key", join_on: "faction_ids", round: true },
     DerivedTable { name: "scope", table: "idx/scope.jsonl", key: "key", join_on: "", round: true },
+    DerivedTable { name: "decisions", table: "idx/decisions.jsonl", key: "actor", join_on: "faction_ids", round: true },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -107,6 +108,7 @@ struct Writers {
     city_flow: BufWriter<File>,
     control: BufWriter<File>,
     scope: BufWriter<File>,
+    decisions: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
 }
@@ -126,6 +128,7 @@ impl Writers {
             city_flow: open("city_flow")?,
             control: open("control")?,
             scope: open("scope")?,
+            decisions: open("decisions")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
         })
@@ -545,6 +548,55 @@ fn write_round(
             .map_err(|e| e.to_string())?;
     }
 
+    // —— 判定：本回合 **AI 选了什么、为什么**（`Derived.flow.decisions`）——
+    //
+    // 两种 `kind` 共用一组固定列；`actor` = 谁（舰名 / 船坞所在城）是 join 键。共用列之外
+    // 的差异（逐舰判定的输入 vs 改装的前后舰级）都进 `detail` 对象——这样 Python 侧列类型
+    // 稳定，而各 kind 的专属信息不丢。
+    //
+    // ⚠ 空白是**有信息**的：`verdict: "hold"` 行 = 这回合 AI 没给这艘舰派活（叶上那条值
+    // 可能是很久以前的），不是"它在待命"。
+    for d in &derived.flow.decisions.ships {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": d.faction,
+                "kind": "ship_order",
+                "actor": d.ship,
+                "verdict": d.verdict,
+                "target": d.target,
+                "detail": {
+                    "hull_ratio": d.hull_ratio,
+                    "retreat_hull": d.retreat_hull,
+                    "kiting": d.kiting,
+                    "enemy_in_range": d.enemy_in_range,
+                    "after_move": d.after_move,
+                    "destination": d.destination,
+                    "order": d.order,
+                },
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for r in &derived.flow.decisions.retools {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": r.faction,
+                "kind": "retool",
+                "actor": r.city,
+                "verdict": "retool",
+                "target": r.to,
+                "detail": {"building": r.building, "from": r.from},
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -673,6 +725,18 @@ pub fn projection_schema() -> serde_json::Value {
                     "level": "节点层级：global / faction / body / city（`global` 的 key 为 `\"\"`）。",
                 },
             }),
+            "decisions" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**本回合 AI 的判定**（`Derived.flow.decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
+                "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
+                "column_docs": {
+                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）。",
+                    "actor": "作判定的一方：舰名（ship_order）/ 船坞所在城名（retool）。",
+                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ **hold（没派活）**；retool 固定为 retool。",
+                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）；纯位置机动为 null（看 `detail.destination`）。",
+                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。",
+                },
+            }),
             _ => continue,
         };
         derived_tables.insert(t.name.to_string(), entry);
@@ -705,6 +769,7 @@ pub fn projection_schema() -> serde_json::Value {
             "看外交/经济/军力全貌：q.factions(round=r)（势力主表：relations/resources/自有城与舰）；",
             "要「这回合产出/维护/治理到底是多少」：读 derived.flow / derived.city_flow（引擎内部中间量，状态里没有）；",
             "要「谁在控制什么」：读 derived.control（每个叶片一行）+ derived.scope（显式作用域节点），舰的有效指令看 ships 表的 order_effective* 列；",
+            "要「AI 为什么这么决定」：读 derived.decisions（逐舰判定 withdraw/engage/colonize/bombard/move/hold + 当时的关键输入，以及船坞改装）——它既不发事件也不落状态，只有这里能读到；",
             "查「某城/某舰/某势力发生过什么」：用事件历史表——q.history('city', 城名) / q.history('ship', 舰名)（归一化参与方槽位，任意实体都能 join），或按类型直取稠密帧 q.events(type='city_razed')；",
             "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)；",
             "要规则（舰级/建筑/组件/资源价值）时读 meta.json：Python kit 里 q.meta / q.ships_spec() / q.buildings_spec() / q.components_spec() / q.resource_value() —— 规则表可当 DataFrame 与 facts join。"

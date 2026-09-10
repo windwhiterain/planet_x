@@ -108,7 +108,32 @@ AI 最后写的行为上——那是「活层」最危险的坑。
   模式」要补一句「但写值即接管」；另外要补 `--derived` 与四张派生表。
 * `[ ]` **web 侧还差两行**：`default_doctrine`/`default_kiting` 没进 `web/static/app.js`
   （「舰队默认指令」那一行是现成的模板，照抄即可）。⚠ 本轮 web 改动**仍只跑了 crate 测试**，
-  没按 `scripts/web.ps1` 实机点过。
+  没按 `scripts/web.ps1` 实机点过。（→ 分支 `feature/web-fleet-defaults-style` 在做，含首次实机点击验证。）
+
+### 3.1 一个被 kit 撞出来的语义坑：**单轴写「还不存在的两轴叶」**
+
+**事实**（`src/control.rs:762-770`）：`default_doctrine` / `ship_doctrine` 是**一片叶装两条轴**
+（`temper` + `lone_wolf`）。当这片叶**还不存在**时，引擎用
+`Control::inherit(ShipDoctrine::default())` 把它建出来 —— 也就是**你没写的那条轴变成 `0.0`**，
+而不是「保留舰上的记录值」。
+
+**为什么它是坑**：`0.0` 是个**正常取值**（"理智/不独"），事后从读面完全看不出问题，而它已经
+把全舰队的 `temper` 从出厂值（中国舰队实测 `0.71`）静默改成了 `0`。复现（kit 侧）：
+
+```python
+s = ctl.surface(ckpt)
+s.set_default_doctrine("中国", lone_wolf=-0.4, take_over=True)   # 只写一条轴
+# → 落地后 default_doctrine.value == {"temper": 0.0, "lone_wolf": -0.4}
+```
+
+**已做**：`planet_x_ctl` 的 `Surface._require_both_axes` 在**配方期**拒绝「单轴新建叶」
+（叶已存在时仍然允许只改一条轴，那时"缺省 = 保留现值"是真的）。这条与
+`agent-play-friction.md` 的「宁可在配方期报错」同源。
+
+* `[ ]` **待裁决（引擎侧）**：要不要让引擎自己把缺的轴**初始化成"出厂记录值"**，或者把叶值
+  改成两轴各自 `Option`？两条路的代价：前者要求引擎在建叶时能拿到该势力/该舰的现有风格
+  （势力级默认更麻烦——舰队里各舰记录值可能不同），后者动到叶值的形状、读面与迁移。
+  在裁决之前，**kit 的拒绝就是当前的正确答案**（响亮失败 > 静默改数值）。
 
 ## 4. 裁决（✅ 用户已确认，且 §4.1/4.2/4.4 已实现）
 

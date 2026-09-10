@@ -37,12 +37,14 @@ without reverse-engineering the JSON. Since the **derived** tables landed it als
 
 ## Derived tables: what the engine computed (not state it stored)
 
-`idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl` are **not** lazy
+`idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl`,
+`idx/decisions.jsonl` are **not** lazy
 fields: they are not reached by exploding an id-array from `main.jsonl`, because their data
 **is not in the state at all** — it is what the round's step functions computed and applied
-(production, fleet upkeep, governance cost/coverage) plus the control surface (who owns which
-leaf). Their schema entry therefore carries `join_on` (a column that *already exists* in
-`main.jsonl`, usually `faction_ids`/`city_ids`) instead of `id_col`.
+(production, fleet upkeep, governance cost/coverage), the control surface (who owns which
+leaf), and **the AI's own judgments** (`decisions`: why a ship withdrew / engaged / did nothing,
+and which shipyard was retooled). Their schema entry therefore carries `join_on` (a column that
+*already exists* in `main.jsonl`, usually `faction_ids`/`city_ids`) instead of `id_col`.
 
 ```python
 q = planet_xq.load("out")
@@ -51,7 +53,14 @@ q.flow(round=12)               # per-round × faction: production{} / upkeep / g
 q.city_flow(round=12)          # per-round × city: production{} (razed cities included, `razed` column)
 q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
 q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
+q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict / target / detail
 ```
+
+`decisions` is the one table that answers "**why** did my ship do that": `verdict` is one of
+`withdraw` / `engage` / `colonize` / `bombard` / `move` / `hold` (`hold` = the AI **did not give
+this ship an order** this round — not "it is idling"), and `detail` carries the inputs that decided
+it (`hull_ratio` vs `retreat_hull`, `kiting`, `enemy_in_range`). A ship can appear **twice** in one
+round (it moved, then re-judged on arrival) — check `detail.after_move` before aggregating.
 
 Two things worth knowing:
 
