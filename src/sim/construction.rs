@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundFlow) {
+pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundSink) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let mut next_building_id = state
         .cities

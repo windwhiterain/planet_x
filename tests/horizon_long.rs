@@ -403,7 +403,7 @@ fn coalition_mechanism_is_alive() {
             if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
                 coalition_seen = true;
             }
-            let m = sim::round_metrics(&state, &config, &RoundFlow::default());
+            let m = sim::observe(&state, &config, &RoundSink::default());
             if m.hegemon.is_some() && m.coalition_members.len() >= min_members {
                 coalition_seen = true;
             }
@@ -458,11 +458,11 @@ fn world_is_multipolar() {
     }
 }
 
-/// 当前综合实力最强的势力及其**占比**——按游戏的**单一权威**统计（`round_metrics` 的
+/// 当前综合实力最强的势力及其**占比**——按游戏的**单一权威**统计（`observe` 的
 /// `power_share`，即 `sim::faction_power` 归一化），而非纯数城市。这样测试读到的是游戏
 /// 合纵/遏制/制裁真正针对的那个「霸权」，不再有「测试以为的霸权 ≠ 游戏针对的霸权」分歧。
 fn top_power(state: &State, config: &GameConfig) -> (FactionId, f64) {
-    let m = sim::round_metrics(state, config, &RoundFlow::default());
+    let m = sim::observe(state, config, &RoundSink::default());
     m.power_share
         .iter()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -569,7 +569,7 @@ fn probe_multipolar() {
 
 /// 一致性守卫：测试的「谁最强」统计与游戏国际关系逻辑的「谁是霸权」统计必须**同源**。
 ///
-/// `world_is_multipolar` 等测试用 [`top_power`]（读 `round_metrics.power_share`，即
+/// `world_is_multipolar` 等测试用 [`top_power`]（读 `observe.power_share`，即
 /// `sim::faction_power` 归一化）判定最强势力——这与 `step_balance_of_power`/`sanction_cost_mult`
 /// 判定并针对的霸权**同一公式**。若两者再次分裂（例如测试又改回纯数城市、而游戏用城+舰队
 /// 加权），测试就会验收一个系统实际不针对的「霸权」。本守卫逐回合断言二者一致。
@@ -581,7 +581,7 @@ fn test_power_statistic_matches_game_logic() {
         let mut rng = Prng::new(seed);
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
-            // 测试用的权威统计（round_metrics → power_share）。
+            // 测试用的权威统计（observe → power_share）。
             let (test_top, _) = top_power(&state, &config);
             // 游戏国际关系逻辑真正读的权威统计：balance_picture → power_share（同一函数）。
             let (_, _, powers) = sim::balance_picture(&state, &config);
@@ -734,7 +734,7 @@ fn probe_tech_vs_science() {
         for _ in 0..ROUNDS {
             sim::advance(&mut state, &config, &mut rng);
         }
-        let m = sim::round_metrics(&state, &config, &planet_x::model::RoundFlow::default());
+        let m = sim::observe(&state, &config, &planet_x::model::RoundSink::default());
         for f in &state.factions {
             let st = f.ideology.science_tech;
             if let Some(&ps) = m.power_share.get(&f.name) {

@@ -11,20 +11,38 @@ use std::collections::BTreeMap;
 fn tuple_keys_become_strings() {
     let mut state = crate::world::default_state(&load_config(), 42);
     let fid = "中国".to_string();
-    let city = state.cities.iter().find(|c| c.faction_id == fid).expect("a city").name.clone();
+    let city = state
+        .cities
+        .iter()
+        .find(|c| c.faction_id == fid)
+        .expect("a city")
+        .name
+        .clone();
     let ctrl = state.control.entry(fid.clone()).or_default();
-    ctrl.invest_weights.insert((city.clone(), 7), Control::player(1.5));
-    ctrl.build_weights.insert((city.clone(), 7), Control::auto(2.5));
+    ctrl.invest_weights
+        .insert((city.clone(), 7), Control::player(1.5));
+    ctrl.build_weights
+        .insert((city.clone(), 7), Control::auto(2.5));
 
     let v = to_value(&state).expect("a tuple-keyed state must dump to JSON");
     let inv = &v["control"][fid.as_str()]["invest_weights"];
     let key = format!("{city}|7");
-    assert_eq!(inv[&key]["value"], serde_json::json!(1.5), "tuple key must be `城市|建筑id`");
+    assert_eq!(
+        inv[&key]["value"],
+        serde_json::json!(1.5),
+        "tuple key must be `城市|建筑id`"
+    );
     assert_eq!(inv[&key]["mode"], serde_json::json!("Player"));
-    assert!(inv.get("value").is_none(), "the tuple key must not collapse into the map");
+    assert!(
+        inv.get("value").is_none(),
+        "the tuple key must not collapse into the map"
+    );
 
     // 原生 serde_json 确实做不了这件事（守住这条测试的动机）。
-    assert!(serde_json::to_value(&state).is_err(), "serde_json cannot key a map by a tuple");
+    assert!(
+        serde_json::to_value(&state).is_err(),
+        "serde_json cannot key a map by a tuple"
+    );
 }
 
 /// 整份模型（State / GameConfig / Derived）都必须可以**无手工投影**地 dump：
@@ -33,18 +51,47 @@ fn tuple_keys_become_strings() {
 fn whole_models_dump_with_every_field() {
     let config = load_config();
     let state = crate::world::default_state(&config, 42);
-    let derived = crate::sim::derived_from_state(&state, &config);
+    let derived = crate::sim::view_from_state(&state, &config);
 
     let s = to_value(&state).unwrap();
-    for k in ["round", "time_month", "bodies", "cities", "factions", "ships", "control", "scope", "events", "chronicle", "ship_name_seq", "schema_version"] {
+    for k in [
+        "round",
+        "time_month",
+        "bodies",
+        "cities",
+        "factions",
+        "ships",
+        "control",
+        "scope",
+        "events",
+        "chronicle",
+        "ship_name_seq",
+        "schema_version",
+    ] {
         assert!(s.get(k).is_some(), "State field `{k}` must be in the dump");
     }
     let c = to_value(&config).unwrap();
-    for k in ["economy", "name_pool", "story", "ships", "buildings", "body_kinds"] {
-        assert!(c.get(k).is_some(), "GameConfig section `{k}` must be in the dump");
+    for k in [
+        "economy",
+        "name_pool",
+        "story",
+        "ships",
+        "buildings",
+        "body_kinds",
+    ] {
+        assert!(
+            c.get(k).is_some(),
+            "GameConfig section `{k}` must be in the dump"
+        );
     }
+    // 视图是**一个对象**（观测 + 本回合过程量同处其中），不再分 `flow` / `metrics` 两段。
     let d = to_value(&derived).unwrap();
-    assert!(d.get("flow").is_some() && d.get("metrics").is_some());
+    for k in ["factions", "cities", "power_share", "decisions"] {
+        assert!(
+            d.get(k).is_some(),
+            "RoundView field `{k}` must be in the dump"
+        );
+    }
 }
 
 /// 标量/元组/枚举键与「键字符串化」的通用规则。
@@ -64,9 +111,17 @@ fn key_rules_are_general() {
     enums.insert(E::B(3), 2);
     let v = to_value(&enums).unwrap();
     assert_eq!(v["A"], serde_json::json!(1));
-    assert_eq!(v["B:3"], serde_json::json!(2), "newtype-variant keys keep their payload");
+    assert_eq!(
+        v["B:3"],
+        serde_json::json!(2),
+        "newtype-variant keys keep their payload"
+    );
 
     let mut nested: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
     nested.insert("a", vec![1.0, f64::NAN]);
-    assert_eq!(to_value(&nested).unwrap(), serde_json::json!({"a": [1.0, null]}), "NaN has no JSON form");
+    assert_eq!(
+        to_value(&nested).unwrap(),
+        serde_json::json!({"a": [1.0, null]}),
+        "NaN has no JSON form"
+    );
 }

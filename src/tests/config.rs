@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::model::{
-    DeathCause, FoundingHow, GameEvent, Killer, RoundState, SpawnVia, State, SCHEMA_VERSION,
+    DeathCause, FoundingHow, GameEvent, Killer, RoundState, SCHEMA_VERSION, SpawnVia, State,
 };
 use crate::sim;
 use crate::world;
@@ -35,7 +35,7 @@ fn checkpoint_survives_save_and_resume_identically() {
     for _ in 0..3 {
         sim::advance(&mut a, &config, &mut rng_a);
     }
-    let derived = sim::derived_from_state(&a, &config);
+    let derived = sim::view_from_state(&a, &config);
     let rs = RoundState {
         schema_version: SCHEMA_VERSION,
         state: a.clone(),
@@ -59,8 +59,8 @@ fn checkpoint_survives_save_and_resume_identically() {
     }
     assert_eq!(resumed.round, straight.round);
     assert_eq!(
-        crate::agent::render_state(&resumed, &sim::derived_from_state(&resumed, &config)),
-        crate::agent::render_state(&straight, &sim::derived_from_state(&straight, &config)),
+        crate::agent::render_state(&resumed, &sim::view_from_state(&resumed, &config)),
+        crate::agent::render_state(&straight, &sim::view_from_state(&straight, &config)),
         "分段续玩必须与一路跑到底逐字节一致"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -89,9 +89,12 @@ fn every_game_event_variant_round_trips_through_ron() {
         let back_js: GameEvent = serde_json::from_str(&js).expect("json round-trip");
         assert_eq!(&back_js, ev);
     }
-    assert!(samples.len() >= 18, "样本数 {} 应覆盖全部变体", samples.len());
+    assert!(
+        samples.len() >= 18,
+        "样本数 {} 应覆盖全部变体",
+        samples.len()
+    );
 }
-
 
 /// `GameEvent::weight` 的**量纲**必须保持文档承诺的 **0–9 序数阶梯**，不是 0–100 分数。
 ///
@@ -118,7 +121,10 @@ fn weight_ladder_stays_a_documented_zero_to_nine_scale() {
     // 阶梯本身：逐发流水 < 撤退 < 舰存亡 < 剧情 <= 城市易主 <= 世界格局。
     // （「重建」那一档随 `step_resurgence` 删除而消失——现在**没有**任何「势力复活」
     // 事件：重建走殖民舰，记的是 `colony_founded`，属于城市易主档。）
-    assert!(by_kind("attack") < by_kind("withdraw"), "逐发流水必须在阶梯底部");
+    assert!(
+        by_kind("attack") < by_kind("withdraw"),
+        "逐发流水必须在阶梯底部"
+    );
     assert!(by_kind("withdraw") < by_kind("ship_destroyed"));
     assert!(by_kind("ship_destroyed") < by_kind("story"));
     assert!(by_kind("story") <= by_kind("city_razed"));
@@ -133,89 +139,182 @@ fn weight_ladder_stays_a_documented_zero_to_nine_scale() {
 /// 全部 `GameEvent` 变体各一个样本。
 fn samples() -> Vec<GameEvent> {
     vec![
-        GameEvent::Attack { attacker: "a".into(), target: "b".into(), damage: 1.5 },
+        GameEvent::Attack {
+            attacker: "a".into(),
+            target: "b".into(),
+            damage: 1.5,
+        },
         GameEvent::ShipDestroyed {
-            ship: "s".into(), owner: "f".into(), class: "corvette".into(),
+            ship: "s".into(),
+            owner: "f".into(),
+            class: "corvette".into(),
             cause: DeathCause::Combat,
-            by: Some(Killer { ship: "k".into(), faction: "g".into(), weapon: "kinetic".into() }),
+            by: Some(Killer {
+                ship: "k".into(),
+                faction: "g".into(),
+                weapon: "kinetic".into(),
+            }),
         },
         // 无凶手的战沉（测试/兜底路径）与**非战沉**（锈蚀）都要覆盖。
         GameEvent::ShipDestroyed {
-            ship: "s".into(), owner: "f".into(), class: "corvette".into(),
-            cause: DeathCause::UpkeepShortfall, by: None,
+            ship: "s".into(),
+            owner: "f".into(),
+            class: "corvette".into(),
+            cause: DeathCause::UpkeepShortfall,
+            by: None,
         },
         GameEvent::ShipDestroyed {
-            ship: "s".into(), owner: "f".into(), class: "corvette".into(),
-            cause: DeathCause::Scrapped, by: None,
+            ship: "s".into(),
+            owner: "f".into(),
+            class: "corvette".into(),
+            cause: DeathCause::Scrapped,
+            by: None,
         },
-        GameEvent::Siege { attacker: "a".into(), city: "c".into(), damage: 2.0 },
+        GameEvent::Siege {
+            attacker: "a".into(),
+            city: "c".into(),
+            damage: 2.0,
+        },
         GameEvent::CityRazed {
-            city: "c".into(), owner: "f".into(), fallen_to: "g".into(),
-            by_ship: "a".into(), damage: 9.0, pop_before: 120,
+            city: "c".into(),
+            owner: "f".into(),
+            fallen_to: "g".into(),
+            by_ship: "a".into(),
+            damage: 9.0,
+            pop_before: 120,
         },
         GameEvent::ShipSpawned {
-            ship: "s".into(), owner: "f".into(), class: "corvette".into(),
-            city: Some("c".into()), via: SpawnVia::Shipyard,
+            ship: "s".into(),
+            owner: "f".into(),
+            class: "corvette".into(),
+            city: Some("c".into()),
+            via: SpawnVia::Shipyard,
             blueprint: None,
         },
         GameEvent::ShipSpawned {
-            ship: "s".into(), owner: "f".into(), class: "corvette".into(),
-            city: None, via: SpawnVia::Story,
+            ship: "s".into(),
+            owner: "f".into(),
+            class: "corvette".into(),
+            city: None,
+            via: SpawnVia::Story,
             blueprint: None,
         },
         GameEvent::ColonyFounded {
-            city: "c".into(), owner: "f".into(), body: "地球".into(),
-            seeded_ship_class: "corvette".into(), how: FoundingHow::NewSite, prev_owner: None,
+            city: "c".into(),
+            owner: "f".into(),
+            body: "地球".into(),
+            seeded_ship_class: "corvette".into(),
+            how: FoundingHow::NewSite,
+            prev_owner: None,
         },
         GameEvent::ColonyFounded {
-            city: "c".into(), owner: "f".into(), body: "地球".into(),
-            seeded_ship_class: "corvette".into(), how: FoundingHow::Refounded,
+            city: "c".into(),
+            owner: "f".into(),
+            body: "地球".into(),
+            seeded_ship_class: "corvette".into(),
+            how: FoundingHow::Refounded,
             prev_owner: Some("g".into()),
         },
-        GameEvent::StaleOrder { ship: "s".into(), reason: "gone".into() },
-        GameEvent::Withdraw { ship: "s".into(), to_body: "地球".into() },
-        GameEvent::WarStarted { a: "f".into(), b: "g".into() },
-        GameEvent::WarEnded { a: "f".into(), b: "g".into() },
-        GameEvent::Story { id: "p".into(), title: "序章".into(), participants: vec!["f".into()] },
-        GameEvent::Revolt { city: "c".into(), faction: "f".into(), loyalty: 0.0 },
-        GameEvent::CityDefected {
-            city: "c".into(), from: "f".into(), to: "g".into(), loyalty: 0.2,
+        GameEvent::StaleOrder {
+            ship: "s".into(),
+            reason: "gone".into(),
         },
-        GameEvent::CoalitionFormed { hegemon: "f".into(), members: vec!["g".into(), "h".into()] },
-        GameEvent::CoalitionEnded { hegemon: "f".into(), members: vec!["g".into()] },
+        GameEvent::Withdraw {
+            ship: "s".into(),
+            to_body: "地球".into(),
+        },
+        GameEvent::WarStarted {
+            a: "f".into(),
+            b: "g".into(),
+        },
+        GameEvent::WarEnded {
+            a: "f".into(),
+            b: "g".into(),
+        },
+        GameEvent::Story {
+            id: "p".into(),
+            title: "序章".into(),
+            participants: vec!["f".into()],
+        },
+        GameEvent::Revolt {
+            city: "c".into(),
+            faction: "f".into(),
+            loyalty: 0.0,
+        },
+        GameEvent::CityDefected {
+            city: "c".into(),
+            from: "f".into(),
+            to: "g".into(),
+            loyalty: 0.2,
+        },
+        GameEvent::CoalitionFormed {
+            hegemon: "f".into(),
+            members: vec!["g".into(), "h".into()],
+        },
+        GameEvent::CoalitionEnded {
+            hegemon: "f".into(),
+            members: vec!["g".into()],
+        },
         GameEvent::CapitalRelocated {
-            faction: "f".into(), from: "地球".into(), to: "火星".into(),
+            faction: "f".into(),
+            from: "地球".into(),
+            to: "火星".into(),
             reason: "destroyed".into(),
         },
         GameEvent::CargoLoaded {
-            ship: "长征".into(), faction: "中国".into(), owner: "中国".into(),
+            ship: "长征".into(),
+            faction: "中国".into(),
+            owner: "中国".into(),
             body: "金星".into(),
             cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
         },
         GameEvent::CargoDelivered {
-            ship: "长征".into(), faction: "中国".into(), owner: "中国".into(),
+            ship: "长征".into(),
+            faction: "中国".into(),
+            owner: "中国".into(),
             body: "地球".into(),
             cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
             into_pool: true,
         },
         GameEvent::ContractPosted {
-            contract: 0, shipper: "中国".into(), resource: "碳".into(), capacity: 3.0,
-            from: "金星".into(), to: "地球".into(), share: 0.15,
+            contract: 0,
+            shipper: "中国".into(),
+            resource: "碳".into(),
+            capacity: 3.0,
+            from: "金星".into(),
+            to: "地球".into(),
+            share: 0.15,
         },
         GameEvent::ContractAccepted {
-            contract: 0, shipper: "中国".into(), carrier: "美国".into(),
-            resource: "碳".into(), capacity: 3.0, from: "金星".into(), to: "地球".into(),
+            contract: 0,
+            shipper: "中国".into(),
+            carrier: "美国".into(),
+            resource: "碳".into(),
+            capacity: 3.0,
+            from: "金星".into(),
+            to: "地球".into(),
         },
         GameEvent::ContractDelivered {
-            contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
-            resource: "碳".into(), amount: 10.2, cut: 1.8,
+            contract: 0,
+            shipper: "中国".into(),
+            carrier: "美国".into(),
+            ship: "自由号".into(),
+            resource: "碳".into(),
+            amount: 10.2,
+            cut: 1.8,
         },
         GameEvent::ContractReviewed {
-            contract: 0, shipper: "中国".into(), carrier: "美国".into(),
-            ratio: 1.2, good: true, delta: 0.08,
+            contract: 0,
+            shipper: "中国".into(),
+            carrier: "美国".into(),
+            ratio: 1.2,
+            good: true,
+            delta: 0.08,
         },
         GameEvent::ContractEnded {
-            contract: 0, shipper: "中国".into(), carrier: "美国".into(),
+            contract: 0,
+            shipper: "中国".into(),
+            carrier: "美国".into(),
             reason: "term".into(),
         },
     ]
@@ -254,13 +353,34 @@ fn variant_checklist(e: &GameEvent) {
 /// `data.cause`、WebUI 都吃这一份）。字符串化只是为了修 RON，不该动 JSON。
 #[test]
 fn unit_enums_keep_their_json_shape() {
-    assert_eq!(serde_json::to_string(&DeathCause::UpkeepShortfall).unwrap(), "\"upkeep_shortfall\"");
-    assert_eq!(serde_json::to_string(&DeathCause::Combat).unwrap(), "\"combat\"");
-    assert_eq!(serde_json::to_string(&DeathCause::Scrapped).unwrap(), "\"scrapped\"");
-    assert_eq!(serde_json::to_string(&SpawnVia::Shipyard).unwrap(), "\"shipyard\"");
-    assert_eq!(serde_json::to_string(&SpawnVia::Story).unwrap(), "\"story\"");
-    assert_eq!(serde_json::to_string(&FoundingHow::NewSite).unwrap(), "\"new_site\"");
-    assert_eq!(serde_json::to_string(&FoundingHow::Refounded).unwrap(), "\"refounded\"");
+    assert_eq!(
+        serde_json::to_string(&DeathCause::UpkeepShortfall).unwrap(),
+        "\"upkeep_shortfall\""
+    );
+    assert_eq!(
+        serde_json::to_string(&DeathCause::Combat).unwrap(),
+        "\"combat\""
+    );
+    assert_eq!(
+        serde_json::to_string(&DeathCause::Scrapped).unwrap(),
+        "\"scrapped\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SpawnVia::Shipyard).unwrap(),
+        "\"shipyard\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SpawnVia::Story).unwrap(),
+        "\"story\""
+    );
+    assert_eq!(
+        serde_json::to_string(&FoundingHow::NewSite).unwrap(),
+        "\"new_site\""
+    );
+    assert_eq!(
+        serde_json::to_string(&FoundingHow::Refounded).unwrap(),
+        "\"refounded\""
+    );
     // 认不出的标签要**明确报错**，不退回默认变体。
     assert!(serde_json::from_str::<DeathCause>("\"nonsense\"").is_err());
 }
@@ -276,7 +396,10 @@ fn history_layers_are_assigned_by_reader_need_not_importance() {
     let config = load_config();
     let seed = 7u64;
     let window = config.history.notable_window;
-    assert!(window > 0, "窗口默认值应当是有限的（0 = 不裁剪，会让判据失去意义）");
+    assert!(
+        window > 0,
+        "窗口默认值应当是有限的（0 = 不裁剪，会让判据失去意义）"
+    );
     let mut state = world::default_state(&config, seed);
     let mut rng = crate::prng::Prng::new(seed);
     for _ in 0..20 {
@@ -290,11 +413,17 @@ fn history_layers_are_assigned_by_reader_need_not_importance() {
          若有新读者出现，请同时更新 GameEvent::salience 的读者盘点表",
         state.milestones.entries.len()
     );
-    assert!(state.milestones.is_complete(), "空的里程碑层不应声称丢过东西");
+    assert!(
+        state.milestones.is_complete(),
+        "空的里程碑层不应声称丢过东西"
+    );
 
     // 2. 窗口层：非空、只装战争、且全部落在窗口内。
     let nb = &state.notables.entries;
-    assert!(!nb.is_empty(), "20 回合里没记下任何窗口事件，窗口层可能没在记");
+    assert!(
+        !nb.is_empty(),
+        "20 回合里没记下任何窗口事件，窗口层可能没在记"
+    );
     assert!(
         nb.iter().all(|e| matches!(
             e.event,
@@ -338,7 +467,10 @@ fn history_layers_are_assigned_by_reader_need_not_importance() {
 fn milestones_trim_reports_truncation_visibly() {
     let mk = |round: u32| crate::model::HistoryEntry {
         round,
-        event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        event: GameEvent::WarStarted {
+            a: "甲".into(),
+            b: "乙".into(),
+        },
     };
     let mut ms = crate::model::Milestones::default();
     for r in 1..=25u32 {
@@ -366,7 +498,10 @@ fn milestones_trim_reports_truncation_visibly() {
 fn notables_keep_exactly_the_window() {
     let mk = |round: u32| crate::model::HistoryEntry {
         round,
-        event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        event: GameEvent::WarStarted {
+            a: "甲".into(),
+            b: "乙".into(),
+        },
     };
     let mut nb = crate::model::Notables::default();
     for r in 1..=25u32 {
@@ -401,7 +536,10 @@ fn notables_keep_exactly_the_window() {
 #[test]
 fn each_layer_only_takes_its_own_salience() {
     use crate::model::{Notables, Salience};
-    let war = GameEvent::WarStarted { a: "甲".into(), b: "乙".into() };
+    let war = GameEvent::WarStarted {
+        a: "甲".into(),
+        b: "乙".into(),
+    };
     let raze = GameEvent::CityRazed {
         city: "城".into(),
         owner: "甲".into(),
@@ -411,7 +549,11 @@ fn each_layer_only_takes_its_own_salience() {
         pop_before: 1,
     };
     assert_eq!(war.salience(), Salience::Notable);
-    assert_eq!(raze.salience(), Salience::Detail, "城市事件当前没有窗口/无限读者");
+    assert_eq!(
+        raze.salience(),
+        Salience::Detail,
+        "城市事件当前没有窗口/无限读者"
+    );
 
     let mut nb = Notables::default();
     nb.push(3, war.clone());
@@ -442,11 +584,23 @@ fn bare_state_round_trips_through_ron() {
     };
     assert_eq!(back.round, state.round);
     assert_eq!(back.events.len(), state.events.len());
-    assert_eq!(back.milestones.entries.len(), state.milestones.entries.len());
+    assert_eq!(
+        back.milestones.entries.len(),
+        state.milestones.entries.len()
+    );
     assert_eq!(back.notables.entries.len(), state.notables.entries.len());
     assert_eq!(
-        back.notables.entries.iter().map(|e| e.round).collect::<Vec<_>>(),
-        state.notables.entries.iter().map(|e| e.round).collect::<Vec<_>>(),
+        back.notables
+            .entries
+            .iter()
+            .map(|e| e.round)
+            .collect::<Vec<_>>(),
+        state
+            .notables
+            .entries
+            .iter()
+            .map(|e| e.round)
+            .collect::<Vec<_>>(),
         "窗口层的回合号必须逐条读回来（记恨地板靠它算年龄）"
     );
 }

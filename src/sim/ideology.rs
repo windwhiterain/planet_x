@@ -53,7 +53,7 @@ pub fn most_ideologically_distant_faction(state: &State, owner: &str) -> Option<
 ///   * 科学↔技术：飞船在 MOND 异常区（→科学）vs 开采 MOND 区资源（→技术，按异常区城数计）。
 ///   * 人民↔精英：经济好坏——净流（产出−维护−治理）为正→精英，为负→人民。
 ///   * 自然↔殖民：人均面积——拥挤（低于参考）→殖民，宽敞→自然。
-pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
+pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
     let ic = &config.ideology;
     let r = config.mond.radius;
     // --- 军事信号：完全由**本回合的事件历史**推出，不再回读回合末的 state ---------------

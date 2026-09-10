@@ -161,5 +161,5 @@ planet_x --start play/exp2/ckpt_r12.ron --apply steer.json --control 2>receipt.j
 # 读派生表（引擎算出来的量）：
 planet_x --seed 7 --round 6 --index out/ && python -c "
 import planet_xq; q = planet_xq.load('out')
-print(q.flow(6)[['faction_id','upkeep']]); print(q.control(6)['kind'].value_counts())"
+print(q.derived('faction_process', 6)[['faction_id','upkeep']]); print(q.control(6)['kind'].value_counts())"
 ```

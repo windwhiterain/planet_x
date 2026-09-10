@@ -6,7 +6,7 @@
 //! round bloats the stream. So the emitter splits the world into:
 //!
 //! * **eager fields** — inline in `main.jsonl` (one lean fact row per round): `round`,
-//!   `time_month`, `events`, `chronicle`, `metrics` (the summary), plus the id-arrays
+//!   `time_month`, `events`, `chronicle`, `view` (the round view), plus the id-arrays
 //!   `ship_ids` / `city_ids` / `body_ids`.
 //! * **lazy fields** — NOT inline. The main row only carries the id-array; the full objects
 //!   live in a table keyed by id (`idx/ships.jsonl`, `idx/cities.jsonl`, `idx/bodies.jsonl`).
@@ -62,25 +62,67 @@ struct LazyField {
 /// (a body's orbit and its settlements are essentially static), so they are written once and
 /// joined by `body_id` / `settlement_id`.
 const LAZY: &[LazyField] = &[
-    LazyField { name: "ships", table: "idx/ships.jsonl", key: "ship_id", id_col: "ship_ids", round: true },
-    LazyField { name: "cities", table: "idx/cities.jsonl", key: "city_id", id_col: "city_ids", round: true },
-    LazyField { name: "factions", table: "idx/factions.jsonl", key: "faction_id", id_col: "faction_ids", round: true },
+    LazyField {
+        name: "ships",
+        table: "idx/ships.jsonl",
+        key: "ship_id",
+        id_col: "ship_ids",
+        round: true,
+    },
+    LazyField {
+        name: "cities",
+        table: "idx/cities.jsonl",
+        key: "city_id",
+        id_col: "city_ids",
+        round: true,
+    },
+    LazyField {
+        name: "factions",
+        table: "idx/factions.jsonl",
+        key: "faction_id",
+        id_col: "faction_ids",
+        round: true,
+    },
     // 承包挂单簿：**只留未完成的单子**（等人接的 + 正在履行的），所以它是「此刻在市场上
     // 的运力需求」的权威读面。完成/收回的单子不在这里——它们只留在 `events` 里。
-    LazyField { name: "contracts", table: "idx/contracts.jsonl", key: "contract_id", id_col: "contract_ids", round: true },
+    LazyField {
+        name: "contracts",
+        table: "idx/contracts.jsonl",
+        key: "contract_id",
+        id_col: "contract_ids",
+        round: true,
+    },
     // 事件历史：**归一化**的一行一事件（固定列 + 统一参与方槽位），取代此前内联在
     // main.jsonl 里的「serde 直接摊开的 tagged enum」——那种表 74.8% 的单元格是 null、
     // 且 `from`/`to` 一列两义（city_defected 是势力、capital_relocated 是天体）。
-    LazyField { name: "events", table: "idx/events.jsonl", key: "event_id", id_col: "event_ids", round: true },
-    LazyField { name: "bodies", table: "idx/bodies.jsonl", key: "body_id", id_col: "body_ids", round: false },
-    LazyField { name: "settlements", table: "idx/settlements.jsonl", key: "settlement_id", id_col: "settlement_ids", round: false },
+    LazyField {
+        name: "events",
+        table: "idx/events.jsonl",
+        key: "event_id",
+        id_col: "event_ids",
+        round: true,
+    },
+    LazyField {
+        name: "bodies",
+        table: "idx/bodies.jsonl",
+        key: "body_id",
+        id_col: "body_ids",
+        round: false,
+    },
+    LazyField {
+        name: "settlements",
+        table: "idx/settlements.jsonl",
+        key: "settlement_id",
+        id_col: "settlement_ids",
+        round: false,
+    },
 ];
 
 /// 一棵**派生表**的声明：不是状态里的重型字段，而是引擎算出来的量，agent 必须能 join
-/// （`flow`：本回合的产出/维护/治理中间量；`control`/`scope`：控制面的 tidy 行）。
+/// （`faction_process`/`city_process`：本回合的过程量；`control`/`scope`：控制面的 tidy 行）。
 ///
 /// 与 [`LAZY`] 的区别只有一处：lazy 字段的重型对象**不内联**、靠 main 的 id 数组 join；
-/// 派生表的数据**根本不在状态里**（`RoundFlow` 不落持久状态），只能由引擎产出。
+/// 派生表的数据**根本不在状态里**（`RoundSink` 不落持久状态），只能由引擎产出。
 struct DerivedTable {
     name: &'static str,
     table: &'static str,
@@ -93,17 +135,53 @@ struct DerivedTable {
 /// 派生表清单。加一张表要同时改三处：这里、`write_round` 的发射、[`projection_schema`] 的
 /// `derived` 条目（测试会断言三者一致）。
 const DERIVED: &[DerivedTable] = &[
-    DerivedTable { name: "flow", table: "idx/flow.jsonl", key: "faction_id", join_on: "faction_ids", round: true },
-    DerivedTable { name: "city_flow", table: "idx/city_flow.jsonl", key: "city_id", join_on: "city_ids", round: true },
-    DerivedTable { name: "control", table: "idx/control.jsonl", key: "key", join_on: "faction_ids", round: true },
-    DerivedTable { name: "scope", table: "idx/scope.jsonl", key: "key", join_on: "", round: true },
-    DerivedTable { name: "decisions", table: "idx/decisions.jsonl", key: "actor", join_on: "faction_ids", round: true },
+    DerivedTable {
+        name: "faction_process",
+        table: "idx/faction_process.jsonl",
+        key: "faction_id",
+        join_on: "faction_ids",
+        round: true,
+    },
+    DerivedTable {
+        name: "city_process",
+        table: "idx/city_process.jsonl",
+        key: "city_id",
+        join_on: "city_ids",
+        round: true,
+    },
+    DerivedTable {
+        name: "control",
+        table: "idx/control.jsonl",
+        key: "key",
+        join_on: "faction_ids",
+        round: true,
+    },
+    DerivedTable {
+        name: "scope",
+        table: "idx/scope.jsonl",
+        key: "key",
+        join_on: "",
+        round: true,
+    },
+    DerivedTable {
+        name: "decisions",
+        table: "idx/decisions.jsonl",
+        key: "actor",
+        join_on: "faction_ids",
+        round: true,
+    },
     // **舰船设计图库**（势力级）：一行 = 一张图。设计图是**结构叶**（`{class, components[],
     // order{}}`），塞进 `control` 表的通用 `value: any` 列会让列类型不稳、Python 侧还要
     // 二次解析 —— 所以给它一张有类型列的专用表（`engine-data-plane.md` §1 的「引擎给答案、
     // Python 只筛」）。⚠ `control` 派生表**不发** `kind="blueprint"` 的行（两份表示 = 漂移
     // 风险）：设计图只住这张表，`control` 表的描述里也写明了这一点。
-    DerivedTable { name: "blueprints", table: "idx/blueprints.jsonl", key: "blueprint_id", join_on: "faction_ids", round: true },
+    DerivedTable {
+        name: "blueprints",
+        table: "idx/blueprints.jsonl",
+        key: "blueprint_id",
+        join_on: "faction_ids",
+        round: true,
+    },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -114,8 +192,8 @@ struct Writers {
     cities: BufWriter<File>,
     factions: BufWriter<File>,
     contracts: BufWriter<File>,
-    flow: BufWriter<File>,
-    city_flow: BufWriter<File>,
+    faction_process: BufWriter<File>,
+    city_process: BufWriter<File>,
     control: BufWriter<File>,
     scope: BufWriter<File>,
     decisions: BufWriter<File>,
@@ -127,7 +205,9 @@ struct Writers {
 impl Writers {
     fn create(dir: &Path) -> Result<Self, String> {
         let open = |name: &str| -> Result<BufWriter<File>, String> {
-            File::create(dir.join(idx_file(name))).map(BufWriter::new).map_err(|e| e.to_string())
+            File::create(dir.join(idx_file(name)))
+                .map(BufWriter::new)
+                .map_err(|e| e.to_string())
         };
         Ok(Self {
             main: BufWriter::new(File::create(dir.join(MAIN)).map_err(|e| e.to_string())?),
@@ -136,8 +216,8 @@ impl Writers {
             cities: open("cities")?,
             factions: open("factions")?,
             contracts: open("contracts")?,
-            flow: open("flow")?,
-            city_flow: open("city_flow")?,
+            faction_process: open("faction_process")?,
+            city_process: open("city_process")?,
             control: open("control")?,
             scope: open("scope")?,
             decisions: open("decisions")?,
@@ -149,10 +229,19 @@ impl Writers {
 
     fn flush_all(&mut self) -> Result<(), String> {
         for w in [
-            &mut self.main, &mut self.events, &mut self.ships, &mut self.cities, &mut self.factions,
+            &mut self.main,
+            &mut self.events,
+            &mut self.ships,
+            &mut self.cities,
+            &mut self.factions,
             &mut self.contracts,
-            &mut self.flow, &mut self.city_flow, &mut self.control, &mut self.scope,
-            &mut self.blueprints, &mut self.bodies, &mut self.settlements,
+            &mut self.faction_process,
+            &mut self.city_process,
+            &mut self.control,
+            &mut self.scope,
+            &mut self.blueprints,
+            &mut self.bodies,
+            &mut self.settlements,
         ] {
             w.flush().map_err(|e| e.to_string())?;
         }
@@ -163,15 +252,15 @@ impl Writers {
 /// 投影产出的**收尾态**：本回合的 `pre`（推进前的观测）与 `post`（推进后的观测 + 流量）。
 ///
 /// 返回它们是为了 `--index --save` 能存下一份**没丢掉流量**的 checkpoint——否则
-/// `--index` 路径存出来的档里 `post.flow` 是空的，「同一回合两个读面各说各话」。
+/// `--index` 路径存出来的档里本回合的过程量是 0，「同一回合两个读面各说各话」。
 pub struct IndexOutcome {
-    pub pre: Derived,
-    pub post: Derived,
+    pub pre: RoundView,
+    pub post: RoundView,
 }
 
 /// Emit the index projection of `rounds` rounds (round 0 then `rounds` steps) into `dir`.
-/// Round 0 (the start state) uses an empty [`RoundFlow`] (no production yet); each later round
-/// uses the flow `sim::advance` captured.
+/// Round 0 (the start state) uses an empty [`RoundSink`] (no production yet); each later round
+/// uses the round process quantities `sim::advance` captured.
 pub fn write_index(
     state: &mut State,
     config: &GameConfig,
@@ -185,7 +274,7 @@ pub fn write_index(
 /// [`write_index`]，但允许把**起点回合的派生态**交进来。
 ///
 /// `--start <ckpt> --index` 时档里存着**产生当前状态的那一回合**的派生态：那一行的 state 就是
-/// 那一回合的结果，所以用档里的 `post` 比用 `derived_from_state`（`flow` 恒空、`metrics` 里
+/// 那一回合的结果，所以用档里的 `post` 比用 `view_from_state`（过程量为 0、观测里
 /// 的产出/维护/治理全被抹成 0）**更真**——否则「投影一份 checkpoint」会让 agent 看到「全世界
 /// 零产出、零维护」，而真相是这些量只在它是回合结果时才有。全新开局（`--seed`）没有这一对，
 /// 传 `None`（回合 0 就是初始世界，没有流量）。
@@ -195,14 +284,15 @@ pub fn write_index_seeded(
     rng: &mut Prng,
     rounds: u32,
     dir: &Path,
-    start: Option<Derived>,
+    start: Option<RoundView>,
 ) -> Result<IndexOutcome, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir.join(IDX_DIR)).map_err(|e| e.to_string())?;
     fs::write(dir.join(SCHEMA), projection_schema().to_string()).map_err(|e| e.to_string())?;
     // Static rules dictionary (same renderer as `--meta`), so `load(dir)` = world + rules +
     // join helpers in one directory; the Python kit reads it into `q.meta` + spec tables.
-    fs::write(dir.join(META), crate::agent::meta_value(config).to_string()).map_err(|e| e.to_string())?;
+    fs::write(dir.join(META), crate::agent::meta_value(config).to_string())
+        .map_err(|e| e.to_string())?;
 
     let mut w = Writers::create(dir)?;
 
@@ -257,14 +347,14 @@ pub fn write_index_seeded(
     let (mut pre, mut post) = match start {
         Some(s) => (s.clone(), s),
         None => {
-            let d = sim::derived_from_state(state, config);
+            let d = sim::view_from_state(state, config);
             (d.clone(), d)
         }
     };
     write_round(&mut w, state, config, &post)?;
     for _ in 0..rounds {
         // `pre` = 本回合开头的观测（随机决策尚未落地）；`post` = 结尾的观测 + 本回合流量。
-        pre = sim::derived_from_state(state, config);
+        pre = sim::view_from_state(state, config);
         post = sim::advance(state, config, rng);
         write_round(&mut w, state, config, &post)?;
     }
@@ -274,19 +364,19 @@ pub fn write_index_seeded(
 }
 
 /// Write one round's main line, event rows, ship rows, city rows, faction rows, and the
-/// derived tables (`flow` / `city_flow` / `control` / `scope`).
+/// derived tables (`faction_process` / `city_process` / `control` / `scope` / `decisions`).
 fn write_round(
     w: &mut Writers,
     state: &State,
     config: &GameConfig,
-    derived: &Derived,
+    view: &RoundView,
 ) -> Result<(), String> {
-    let metrics = &derived.metrics;
     let row = json!({
         "round": state.round,
         "time_month": r2(state.time_month),
         "chronicle": state.chronicle,
-        "metrics": metrics,
+        // 本回合的**视图**（`RoundView`）：观测 + 本回合过程量，整份内联。
+        "view": view,
         "event_ids": (0..state.events.len())
             .map(|i| event_id(state.round, i))
             .collect::<Vec<_>>(),
@@ -582,36 +672,38 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
 
-    // —— 派生表：本回合的流量中间量（引擎内部算过、但不落持久状态的量）——
-    // **不做 r2 舍入**：`--derived` 直接序列化同一个 `Derived`，两个读面必须给出相同的 JSON
+    // —— 派生表：本回合的**过程量**（引擎内部算过、但不落持久状态的量）——
+    //
+    // 这里是**视图每一行的可 join 平铺版**：同一批数在主流 `view.factions[]` / `view.cities[]`
+    // 里也有一份（嵌套形状），两边**同源**——都取自 `observe` 折出来的那份 `RoundView`。
+    // **不做 r2 舍入**：`--derived` 直接序列化同一份视图，两个读面必须给出相同的 JSON
     // 值（这是"同一回合两个读面不许各说各话"的可检查形式）。
     for f in &state.factions {
-        let prod = derived.flow.faction_production.get(&f.name).cloned().unwrap_or_default();
-        // 治理：**本回合没跑治理步骤**的势力（零城势力——`step_governance` 在 `cities.is_empty()`
-        // 时直接 `continue`，`src/sim.rs:1897`）在 `flow.governance` 里根本没有键。这里补的默认值
-        // 必须是**引擎自己的约定**（`src/sim.rs:1926`：`governance_total ≈ 0 ⇒ coverage = 1.0`），
-        // 不能图省事用 `GovernanceFlow::default()` 的 0.0 —— 否则同一回合的两个读面会各说各话：
-        // `flow.jsonl` 说「覆盖 0%」（读起来像治理崩了），而 `metrics.factions[].governance_coverage`
-        // 说 100%。零城势力的正确语义是「无账可付」，不是「付不起」。
-        let gov = derived.flow.governance.get(&f.name);
+        // **本回合没跑治理步骤**的势力（零城势力——`step_governance` 在 `cities.is_empty()` 时
+        // 直接 `continue`）在视图里拿到的默认值是**引擎自己的约定**（`governance_total ≈ 0 ⇒
+        // coverage = 1.0`），不是 `GovernanceFlow::default()` 的 0.0——否则这张表会说「覆盖 0%」
+        // （读起来像治理崩了），而 `view.factions[].governance_coverage` 说 100%。零城势力的正确
+        // 语义是「无账可付」，不是「付不起」。默认值由 `observe` 统一给出，两个读面因此永远一致。
+        let row = view.factions.get(&f.name);
         writeln!(
-            w.flow,
+            w.faction_process,
             "{}",
             json!({
                 "round": state.round,
                 "faction_id": f.name.clone(),
-                "production": prod,
-                "upkeep": derived.flow.upkeep.get(&f.name).copied().unwrap_or(0.0),
-                "governance_total": gov.map(|g| g.total).unwrap_or(0.0),
-                "governance_coverage": gov.map(|g| g.coverage).unwrap_or(1.0),
+                "production": row.map(|r| r.production.clone()).unwrap_or_default(),
+                "upkeep": row.map(|r| r.upkeep).unwrap_or(0.0),
+                "governance_total": row.map(|r| r.governance_cost).unwrap_or(0.0),
+                "governance_coverage": row.map(|r| r.governance_coverage).unwrap_or(1.0),
             })
         )
         .map_err(|e| e.to_string())?;
     }
     for c in &state.cities {
-        let prod = derived.flow.city_production.get(&c.name).cloned().unwrap_or_default();
+        // 含已夷平的空白城（产出为 `{}`）——与 `cities` 表逐行一致。
+        let prod = view.cities.get(&c.name).map(|r| r.production.clone()).unwrap_or_default();
         writeln!(
-            w.city_flow,
+            w.city_process,
             "{}",
             json!({
                 "round": state.round,
@@ -632,7 +724,12 @@ fn write_round(
     // `value`/`mode` 是叶自己的值与三态归属——**不是**有效值：有效值看 `ships` 表的
     // `order_effective*` 列（引擎解析），别在 Python 里重实现链。
     for (fid, c) in &state.control {
-        let mut row = |kind: &str, key: serde_json::Value, sub: serde_json::Value, value: serde_json::Value, mode: ControlMode| -> Result<(), String> {
+        let mut row = |kind: &str,
+                       key: serde_json::Value,
+                       sub: serde_json::Value,
+                       value: serde_json::Value,
+                       mode: ControlMode|
+         -> Result<(), String> {
             writeln!(
                 w.control,
                 "{}",
@@ -641,10 +738,22 @@ fn write_round(
             .map_err(|e| e.to_string())
         };
         for (ship, leaf) in &c.ship_orders {
-            row("ship_order", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "ship_order",
+                json!(ship),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         if let Some(d) = &c.default_ship_order {
-            row("default_ship_order", json!(""), json!(null), json!(d.value), d.mode)?;
+            row(
+                "default_ship_order",
+                json!(""),
+                json!(null),
+                json!(d.value),
+                d.mode,
+            )?;
         }
         // —— 风格三轴的六片叶（`control-live-layers.md` §3 那条候选 + 运输分支的角色轴）——
         //
@@ -654,40 +763,112 @@ fn write_round(
         // 靠这个区分）。`value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，
         // kiting 是数字，freighter 是布尔。
         for (ship, leaf) in &c.ship_doctrine {
-            row("ship_doctrine", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "ship_doctrine",
+                json!(ship),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for (ship, leaf) in &c.ship_kiting {
-            row("ship_kiting", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "ship_kiting",
+                json!(ship),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for (ship, leaf) in &c.ship_freighter {
-            row("ship_freighter", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "ship_freighter",
+                json!(ship),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         if let Some(d) = &c.default_doctrine {
-            row("default_doctrine", json!(""), json!(null), json!(d.value), d.mode)?;
+            row(
+                "default_doctrine",
+                json!(""),
+                json!(null),
+                json!(d.value),
+                d.mode,
+            )?;
         }
         if let Some(d) = &c.default_kiting {
-            row("default_kiting", json!(""), json!(null), json!(d.value), d.mode)?;
+            row(
+                "default_kiting",
+                json!(""),
+                json!(null),
+                json!(d.value),
+                d.mode,
+            )?;
         }
         if let Some(d) = &c.default_freighter {
-            row("default_freighter", json!(""), json!(null), json!(d.value), d.mode)?;
+            row(
+                "default_freighter",
+                json!(""),
+                json!(null),
+                json!(d.value),
+                d.mode,
+            )?;
         }
         for (res, leaf) in &c.investment_budget {
-            row("investment_budget", json!(res), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "investment_budget",
+                json!(res),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for (res, leaf) in &c.construction_budget {
-            row("construction_budget", json!(res), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "construction_budget",
+                json!(res),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for ((city, b), leaf) in &c.invest_weights {
-            row("invest_weight", json!(city), json!(b), json!(leaf.value), leaf.mode)?;
+            row(
+                "invest_weight",
+                json!(city),
+                json!(b),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for ((city, b), leaf) in &c.build_weights {
-            row("build_weight", json!(city), json!(b), json!(leaf.value), leaf.mode)?;
+            row(
+                "build_weight",
+                json!(city),
+                json!(b),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         for (city, leaf) in &c.loyalty_budget {
-            row("loyalty_budget", json!(city), json!(null), json!(leaf.value), leaf.mode)?;
+            row(
+                "loyalty_budget",
+                json!(city),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
         }
         if let Some(cap) = &c.capital {
-            row("capital", json!(""), json!(null), json!(cap.value), cap.mode)?;
+            row(
+                "capital",
+                json!(""),
+                json!(null),
+                json!(cap.value),
+                cap.mode,
+            )?;
         }
     }
     // —— 设计图库：每回合 × 每势力 × 每张图一行 ——
@@ -752,19 +933,31 @@ fn write_round(
     )
     .map_err(|e| e.to_string())?;
     for (fid, m) in &state.scope.factions {
-        writeln!(w.scope, "{}", json!({"round": state.round, "level": "faction", "key": fid, "mode": m}))
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            w.scope,
+            "{}",
+            json!({"round": state.round, "level": "faction", "key": fid, "mode": m})
+        )
+        .map_err(|e| e.to_string())?;
     }
     for (bid, m) in &state.scope.bodies {
-        writeln!(w.scope, "{}", json!({"round": state.round, "level": "body", "key": bid, "mode": m}))
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            w.scope,
+            "{}",
+            json!({"round": state.round, "level": "body", "key": bid, "mode": m})
+        )
+        .map_err(|e| e.to_string())?;
     }
     for (cid, m) in &state.scope.cities {
-        writeln!(w.scope, "{}", json!({"round": state.round, "level": "city", "key": cid, "mode": m}))
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            w.scope,
+            "{}",
+            json!({"round": state.round, "level": "city", "key": cid, "mode": m})
+        )
+        .map_err(|e| e.to_string())?;
     }
 
-    // —— 判定：本回合 **AI 选了什么、为什么**（`Derived.flow.decisions`）——
+    // —— 判定：本回合 **AI 选了什么、为什么**（`RoundView::decisions`）——
     //
     // 两种 `kind` 共用一组固定列；`actor` = 谁（舰名 / 船坞所在城）是 join 键。共用列之外
     // 的差异（逐舰判定的输入 vs 改装的前后舰级）都进 `detail` 对象——这样 Python 侧列类型
@@ -772,7 +965,7 @@ fn write_round(
     //
     // ⚠ 空白是**有信息**的：`verdict: "hold"` 行 = 这回合 AI 没给这艘舰派活（叶上那条值
     // 可能是很久以前的），不是"它在待命"。
-    for d in &derived.flow.decisions.ships {
+    for d in &view.decisions.ships {
         writeln!(
             w.decisions,
             "{}",
@@ -796,7 +989,7 @@ fn write_round(
         )
         .map_err(|e| e.to_string())?;
     }
-    for r in &derived.flow.decisions.retools {
+    for r in &view.decisions.retools {
         writeln!(
             w.decisions,
             "{}",
@@ -814,7 +1007,7 @@ fn write_round(
     }
     // 风格轴的**执行者**（`autocontrol::style`）：`Auto` 风格叶不是"值冻结"，它每回合被
     // 概率触发、朝战况目标走一步分布步长——所以"改了哪条轴、朝哪儿改、为什么"必须能回答。
-    for s in &derived.flow.decisions.styles {
+    for s in &view.decisions.styles {
         writeln!(
             w.decisions,
             "{}",
@@ -836,7 +1029,7 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
     // 设计图的**执行者**（`autocontrol::blueprints`）：建图/重估/复用/回收。
-    for d in &derived.flow.decisions.blueprints {
+    for d in &view.decisions.blueprints {
         writeln!(
             w.decisions,
             "{}",
@@ -913,7 +1106,8 @@ fn order_blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> 
 /// knows the table shape without guessing.
 pub fn projection_schema() -> serde_json::Value {
     let mut lazy = serde_json::Map::new();
-    for f in LAZY {        let entry = match f.name {
+    for f in LAZY {
+        let entry = match f.name {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
@@ -1016,20 +1210,20 @@ pub fn projection_schema() -> serde_json::Value {
     let mut derived_tables = serde_json::Map::new();
     for t in DERIVED {
         let entry = match t.name {
-            "flow" => json!({
+            "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合的流量中间量**（`Derived.flow`）：各势力本回合各资源产出、舰队维护费、治理总成本/覆盖率。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
+                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费、治理总成本/覆盖率。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
                 "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number"},
                 "column_docs": {
-                    "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。注意同一批数在主流 `metrics.factions[<势力>].production` 里也有一份（嵌套对象）；这张表是它的**可 join 平铺版**。",
+                    "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
                     "governance_total": "本回合治理总开销（行政 + 娱乐，含制裁倍率）。",
                     "governance_coverage": "治理覆盖率 0..1（覆盖不住就是离心风险的来源）。",
                 },
             }),
-            "city_flow" => json!({
+            "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各城的开采产出**（`Derived.flow.city_production`）：按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `metrics.city_production` 里也有一份（但那张表跳过了 razed 城）。",
+                "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出，按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
                 "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object"},
             }),
             "control" => json!({
@@ -1054,7 +1248,7 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "blueprints" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `Derived`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
+                "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `RoundView`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
                 "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","order":"object","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
                 "column_docs": {
                     "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
@@ -1071,7 +1265,7 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "decisions" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合 AI 的判定**（`Derived.flow.decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
+                "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
                 "column_docs": {
                     "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）。",
@@ -1098,7 +1292,7 @@ pub fn projection_schema() -> serde_json::Value {
             "time_month": {"type": "number", "description": "累计时间（月）。"},
             "event_ids":  {"type": "array", "items": {"type": "string"}, "description": "本回合事件 id（`<round>:<seq>`，join events 表用）。事件本体不再内联——见 lazy.events。"},
             "chronicle":  {"type": "array", "description": "剧情编年史（round id title body participants，累计叙事）。"},
-            "metrics":    {"type": "object", "description": "总结指标（与 --schema 的 Trajectory.metrics 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 各势力·各城产出/维护/治理。这是 agent 的轻量决策视图。"},
+            "view":       {"type": "object", "description": "**本回合的视图**（与 --derived 的 post、--schema 的 Trajectory.view 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 每势力一行/每城一行（观测 + 本回合过程量）+ 市场四表 + AI 判定流水。这就是 agent 的决策视图。"},
             "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
             "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合**全部**城 id（=城名，join cities 表用）。含已夷平的空白城（razed 列筛）；与 cities 表逐行一致。"},
             "faction_ids": {"type": "array", "items": {"type": "string"}, "description": "本回合势力 id（=势力名，join factions 表用）。"},
@@ -1110,9 +1304,9 @@ pub fn projection_schema() -> serde_json::Value {
         "derived": derived_tables,
         "read_order": [
             "先读 schema.json，分清 eager（内联）/ lazy（索引）/ derived（引擎算出来的量）三类字段；",
-            "读 main.jsonl 的 eager + metrics（轻量决策视图），按需拿 id；",
+            "读 main.jsonl 的 eager + view（决策视图），按需拿 id；",
             "看外交/经济/军力全貌：q.factions(round=r)（势力主表：relations/resources/自有城与舰）；",
-            "要「这回合产出/维护/治理到底是多少」：读 derived.flow / derived.city_flow（引擎内部中间量，状态里没有）；",
+            "要「这回合产出/维护/治理到底是多少」：读 derived.faction_process / derived.city_process（过程量的可 join 平铺版，状态里没有），或直接读 view.factions[] / view.cities[]；",
             "要「谁在控制什么」：读 derived.control（每个叶片一行）+ derived.scope（显式作用域节点），舰的有效指令看 ships 表的 order_effective* 列；",
             "要「AI 为什么这么决定」：读 derived.decisions（逐舰判定 withdraw/engage/colonize/bombard/move/hold + 当时的关键输入，以及船坞改装）——它既不发事件也不落状态，只有这里能读到；",
             "查「某城/某舰/某势力发生过什么」：用事件历史表——q.history('city', 城名) / q.history('ship', 舰名)（归一化参与方槽位，任意实体都能 join），或按类型直取稠密帧 q.events(type='city_razed')；",

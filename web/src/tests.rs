@@ -29,27 +29,69 @@ fn info_roots_are_whole_model_dumps() {
         &planet_x::json::to_value(&w.state).unwrap(),
         "the `state` root must be the raw State, not a projection"
     );
-    for k in ["schema_version", "ship_name_seq", "control", "scope", "events", "chronicle"] {
-        assert!(state.get(k).is_some(), "State field `{k}` missing from the info tree");
+    for k in [
+        "schema_version",
+        "ship_name_seq",
+        "control",
+        "scope",
+        "events",
+        "chronicle",
+    ] {
+        assert!(
+            state.get(k).is_some(),
+            "State field `{k}` missing from the info tree"
+        );
     }
     // 实体也要带**全部**字段（不是给地图用的那套拍平视图）。
     let ship = &state["ships"][0];
     for k in ["name", "faction_id", "doctrine", "kiting"] {
-        assert!(ship.get(k).is_some(), "Ship field `{k}` missing from the info tree");
+        assert!(
+            ship.get(k).is_some(),
+            "Ship field `{k}` missing from the info tree"
+        );
     }
 
     // 可控 state 也整份在树里（含 RON 特有的元组键 → "城市|建筑id" 字符串键）。
     let ctrl = &state["control"];
-    assert!(ctrl.is_object(), "control must be dumped as a map of faction -> ControllableState");
+    assert!(
+        ctrl.is_object(),
+        "control must be dumped as a map of faction -> ControllableState"
+    );
 
     for i in [1, 2] {
-        assert!(roots[i].value.get("flow").is_some(), "derived root must carry flow");
-        assert!(roots[i].value["metrics"].get("faction_power").is_some());
+        // `pre` / `post` 两个根**就是**那份视图本身（同形、拍平）：
+        // 观测（含权威的 `faction_power`）与过程量同处一个对象。
+        assert!(
+            roots[i].value.get("faction_power").is_some(),
+            "the round view must carry faction_power"
+        );
+        assert!(roots[i].value.get("factions").is_some());
+        assert!(roots[i].value.get("cities").is_some());
     }
 
     let config = &roots[3].value;
-    for k in ["economy", "combat", "diplomacy", "market", "governance", "mond", "balance", "ideology", "resources", "structures", "body_kinds", "ships", "components", "buildings", "story", "name_pool"] {
-        assert!(config.get(k).is_some(), "GameConfig section `{k}` missing from the info tree");
+    for k in [
+        "economy",
+        "combat",
+        "diplomacy",
+        "market",
+        "governance",
+        "mond",
+        "balance",
+        "ideology",
+        "resources",
+        "structures",
+        "body_kinds",
+        "ships",
+        "components",
+        "buildings",
+        "story",
+        "name_pool",
+    ] {
+        assert!(
+            config.get(k).is_some(),
+            "GameConfig section `{k}` missing from the info tree"
+        );
     }
 
     assert!(roots[4].value.get("rng_state").is_some());
@@ -57,14 +99,20 @@ fn info_roots_are_whole_model_dumps() {
 
 /// The info tree must survive a round of simulation (events/chronicle filled
 /// in) and stay serializable end-to-end — that is what `/api/state` returns.
-/// It must also carry the **real** per-round flow, which only `sim::advance`
+/// It must also carry the **real** per-round process quantities, which only `sim::advance`
 /// produces (production / upkeep / governance captured while stepping).
 #[test]
 fn info_tree_carries_real_round_flow_after_advance() {
     let mut w = world();
-    assert!(w.post.flow.faction_production.is_empty(), "round 0 has no flow yet");
+    assert!(
+        w.post
+            .factions
+            .values()
+            .all(|r| r.production.is_empty()),
+        "round 0 has no process quantities yet"
+    );
     for _ in 0..5 {
-        w.pre = sim::derived_from_state(&w.state, &w.config);
+        w.pre = sim::view_from_state(&w.state, &w.config);
         w.post = sim::advance(&mut w.state, &w.config, &mut w.rng);
     }
     let view = state_view(&w);
@@ -73,13 +121,28 @@ fn info_tree_carries_real_round_flow_after_advance() {
     assert!(json["info"][0]["value"]["events"].is_array());
     // 读面**不许**再有手工投影字段：响应的顶层只有写面（control/scope）与整份树。
     // 这条测试是「想再塞一个给前端用的拍平字段」时的守门人——要读什么，从树里取。
-    let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-    assert_eq!(keys, ["control", "info", "scope"], "StateView must stay control+scope+info");
-    let post = &json["info"][2]["value"];
-    assert!(!post["flow"]["faction_production"].as_object().unwrap().is_empty(), "the round flow must be real, not empty");
-    assert!(!post["flow"]["upkeep"].as_object().unwrap().is_empty());
-    assert!(!post["flow"]["governance"].as_object().unwrap().is_empty());
-    assert!(!post["metrics"]["power_share"].as_object().unwrap().is_empty());
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        ["control", "info", "scope"],
+        "StateView must stay control+scope+info"
+    );
+    let view = &json["info"][2]["value"];
+    // 视图是**一个对象**：`factions` / `cities` 每行都同时带观测与本回合过程量，
+    // 所以「过程量真的算过」的判据 = 至少有一个势力的产出/维护/治理不是空的/零。
+    let rows = view["factions"].as_object().unwrap();
+    assert!(
+        rows.values().any(|r| !r["production"].as_object().unwrap().is_empty()),
+        "the round's process quantities must be real, not empty"
+    );
+    assert!(rows.values().any(|r| r["upkeep"].as_f64().unwrap() > 0.0));
+    assert!(rows.values().any(|r| r["governance_cost"].as_f64().unwrap() > 0.0));
+    assert!(!view["power_share"].as_object().unwrap().is_empty());
 }
 
 /// 起始端口空着时，自动模式**必须**原样用它——「`3000` 空着就和从前一样」是这条
@@ -97,11 +160,16 @@ async fn bind_auto_keeps_the_base_port_when_it_is_free() {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
 
-        let listener = bind_auto("127.0.0.1", port, 16).await.expect("一个刚放手的端口能重绑");
+        let listener = bind_auto("127.0.0.1", port, 16)
+            .await
+            .expect("一个刚放手的端口能重绑");
         if listener.local_addr().unwrap().port() == port {
             return;
         }
-        assert!(attempt < 8, "连续 8 个「刚放手的端口」都被抢走了 —— 这不像是巧合");
+        assert!(
+            attempt < 8,
+            "连续 8 个「刚放手的端口」都被抢走了 —— 这不像是巧合"
+        );
     }
 }
 
@@ -112,7 +180,9 @@ async fn bind_auto_skips_a_busy_port() {
     let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let busy = held.local_addr().unwrap().port();
 
-    let listener = bind_auto("127.0.0.1", busy, 16).await.expect("邻居端口总有空的");
+    let listener = bind_auto("127.0.0.1", busy, 16)
+        .await
+        .expect("邻居端口总有空的");
     let picked = listener.local_addr().unwrap().port();
     assert_ne!(picked, busy, "自动模式不能把已经被占的端口当成自己的");
     assert!(picked >= busy, "自动模式只向上扫：{picked} < {busy}");
@@ -206,7 +276,10 @@ async fn ping_reports_identity() {
     assert_eq!(id.port, 3013);
     assert_eq!(id.owner_pid, Some(4242));
     assert_eq!(id.tabs, 1);
-    assert!(id.exe.ends_with(".exe") || !id.exe.is_empty(), "要报出在跑哪个文件");
+    assert!(
+        id.exe.ends_with(".exe") || !id.exe.is_empty(),
+        "要报出在跑哪个文件"
+    );
 }
 
 /// 3 条生命周期路由都要注册上（`/api/ping` GET，`/api/tab`、`/api/bye` POST）——
@@ -230,11 +303,20 @@ fn lifecycle_routes_are_mounted() {
 fn fleet_default_style_rows_round_trip_through_the_web_surface() {
     let mut w = world();
     let fid = w.state.factions[0].name.clone();
-    let fc_of = |v: &StateView| v.control.iter().find(|c| c.faction_id == fid).cloned().unwrap();
+    let fc_of = |v: &StateView| {
+        v.control
+            .iter()
+            .find(|c| c.faction_id == fid)
+            .cloned()
+            .unwrap()
+    };
 
     // 开局没有任何人表态：读面**不给**这两行（前端于是补一片 `Inherit` 的叶让行出现）。
     let fc = fc_of(&state_view(&w));
-    assert!(fc.default_doctrine.is_none() && fc.default_kiting.is_none(), "开局不该有默认风格叶");
+    assert!(
+        fc.default_doctrine.is_none() && fc.default_kiting.is_none(),
+        "开局不该有默认风格叶"
+    );
 
     // 第一步：前端把这两行的归属改成「玩家」——**只写 mode、不写值**是合法的（值不动），
     // 也不算「写值即接管」。
@@ -246,7 +328,11 @@ fn fleet_default_style_rows_round_trip_through_the_web_surface() {
     .expect("前端写的就是这个形状");
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "两条新行必须落地：{:?}", report.skipped);
-    assert!(report.took_over.is_empty(), "只写 mode 不算接管：{:?}", report.took_over);
+    assert!(
+        report.took_over.is_empty(),
+        "只写 mode 不算接管：{:?}",
+        report.took_over
+    );
 
     // 第二步：写值（编辑器里的两个数 / 一个数）。读面必须立刻回显——
     // 「点了应用、刷新页面还在」靠的就是这条链。
@@ -261,14 +347,28 @@ fn fleet_default_style_rows_round_trip_through_the_web_surface() {
 
     let fc = fc_of(&state_view(&w));
     let d = fc.default_doctrine.expect("势力级默认风格要在读面里");
-    assert_eq!((d.temper, d.lone_wolf, d.mode), (Some(0.4), Some(-0.6), Some(ControlMode::Player)));
+    assert_eq!(
+        (d.temper, d.lone_wolf, d.mode),
+        (Some(0.4), Some(-0.6), Some(ControlMode::Player))
+    );
     let k = fc.default_kiting.expect("势力级默认风筝姿态要在读面里");
     assert_eq!((k.kiting, k.mode), (Some(-1.0), Some(ControlMode::Player)));
 
     // 值真的生效：叶还 Inherit 的舰（开局就是这样，AI 从不写这两片叶）改用舰队默认。
-    let sid = w.state.ships.iter().find(|s| s.faction_id == fid).unwrap().name.clone();
+    let sid = w
+        .state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == fid)
+        .unwrap()
+        .name
+        .clone();
     let eff = w.state.ship_doctrine(sid.clone());
-    assert_eq!((eff.temper, eff.lone_wolf), (0.4, -0.6), "叶 Inherit + 默认是玩家 ⇒ 取默认值");
+    assert_eq!(
+        (eff.temper, eff.lone_wolf),
+        (0.4, -0.6),
+        "叶 Inherit + 默认是玩家 ⇒ 取默认值"
+    );
     assert_eq!(w.state.ship_kiting(sid.clone()), -1.0);
     assert_eq!(w.state.ship_doctrine_control(sid), ControlMode::Player);
 }
@@ -286,7 +386,7 @@ fn posting_the_read_surface_back_keeps_effective_style() {
     let mut w = world();
     // 先推几回合，让世界不是开局那一张脸（叶子上有 AI 流水、舰队有增减）。
     for _ in 0..3 {
-        w.pre = sim::derived_from_state(&w.state, &w.config);
+        w.pre = sim::view_from_state(&w.state, &w.config);
         w.post = sim::advance(&mut w.state, &w.config, &mut w.rng);
     }
     // 让舰队默认风格成为**玩家表态**：这样「叶 Inherit ⇒ 取默认值」这条路径也真的参与进来。
@@ -321,11 +421,15 @@ fn posting_the_read_surface_back_keeps_effective_style() {
     // 浏览器的那一次 POST：读面（写面模板）原样回传。
     let view = state_view(&w);
     let posted = serde_json::json!({ "control": view.control, "scope": view.scope });
-    let req: CommandReq = serde_json::from_value(posted)
-        .expect("读面必须能被写面接受——前端正是把这两段原样回传的");
+    let req: CommandReq =
+        serde_json::from_value(posted).expect("读面必须能被写面接受——前端正是把这两段原样回传的");
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.applied > 0, "回传总得碰到点什么");
-    assert_eq!(snap(&w), before, "读面原样回传不许改变任何舰的有效风格 / 归属");
+    assert_eq!(
+        snap(&w),
+        before,
+        "读面原样回传不许改变任何舰的有效风格 / 归属"
+    );
 }
 
 /// 前端「只回传差异」靠的就是引擎这条契约（note §8 第 3 条）：补丁写成什么形状，就**只有**
@@ -344,7 +448,7 @@ fn posting_the_read_surface_back_keeps_effective_style() {
 fn minimal_leaf_diffs_touch_only_what_changed() {
     let mut w = world();
     for _ in 0..3 {
-        w.pre = sim::derived_from_state(&w.state, &w.config);
+        w.pre = sim::view_from_state(&w.state, &w.config);
         w.post = sim::advance(&mut w.state, &w.config, &mut w.rng);
     }
     // 挑一个**有舰队**的势力（`factions[0]` 可能一艘舰都没有，那样证明不了"别的舰没被动"）。
@@ -355,13 +459,17 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
         .map(|f| f.name.clone())
         .find(|f| w.state.ships.iter().filter(|s| s.faction_id == *f).count() >= 2)
         .expect("世界里得有个有两艘以上舰的势力");
-    let ours: Vec<String> = w.state
+    let ours: Vec<String> = w
+        .state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid)
         .map(|s| s.name.clone())
         .collect();
-    assert!(ours.len() >= 2, "要两艘以上的舰才能证明「别的舰没被动」：{ours:?}");
+    assert!(
+        ours.len() >= 2,
+        "要两艘以上的舰才能证明「别的舰没被动」：{ours:?}"
+    );
     let ship = ours[0].clone();
 
     // 逐舰的「有效风格 + 有效归属」快照：任何一片叶被多写一下，这里就会变。
@@ -393,11 +501,19 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
         c.ship_kiting.clear();
     }
     assert!(
-        w.state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
+        w.state
+            .control
+            .get(&fid)
+            .and_then(|c| c.ship_doctrine.get(&ship))
+            .is_none(),
         "开局不该有风格叶，否则证明不了「新建」这条路径"
     );
     assert_ne!(
-        w.state.control.get(&fid).and_then(|c| c.default_doctrine.as_ref()).map(|d| d.mode),
+        w.state
+            .control
+            .get(&fid)
+            .and_then(|c| c.default_doctrine.as_ref())
+            .map(|d| d.mode),
         Some(ControlMode::Player),
         "前提：舰队默认风格不是玩家表态（否则取值会走默认而不是叶）"
     );
@@ -418,9 +534,18 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
     .unwrap();
     let r = apply_diff(&mut w.state, &w.config, &one);
     assert!(r.is_clean(), "{:?}", r.skipped);
-    assert_eq!(r.took_over.len(), 1, "写值即接管必须留一条回执：{:?}", r.took_over);
+    assert_eq!(
+        r.took_over.len(),
+        1,
+        "写值即接管必须留一条回执：{:?}",
+        r.took_over
+    );
     let leaf = w.state.control[&fid].ship_doctrine[&ship].clone();
-    assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.33, lone_before), "缺省的那条轴必须保留现值");
+    assert_eq!(
+        (leaf.value.temper, leaf.value.lone_wolf),
+        (0.33, lone_before),
+        "缺省的那条轴必须保留现值"
+    );
     assert_eq!(leaf.mode, ControlMode::Player);
 
     let after = snap(&w);
@@ -430,8 +555,14 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
             assert_eq!(b, a, "只改一艘舰的叶，别的舰不该被动");
         }
     }
-    let edited = |v: &Vec<(String, f64, f64, f64, ControlMode, ControlMode)>| v.iter().find(|x| x.0 == ship).cloned().unwrap();
-    assert_eq!(edited(&after).2, lone_before, "没写的那条轴的有效值也不许变");
+    let edited = |v: &Vec<(String, f64, f64, f64, ControlMode, ControlMode)>| {
+        v.iter().find(|x| x.0 == ship).cloned().unwrap()
+    };
+    assert_eq!(
+        edited(&after).2,
+        lone_before,
+        "没写的那条轴的有效值也不许变"
+    );
     assert_eq!(edited(&after).3, edited(&before).3, "风筝轴一个字都不该动");
     assert_eq!(edited(&after).4, ControlMode::Player, "接管之后归属是玩家");
 
@@ -443,11 +574,23 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
     .unwrap();
     let r = apply_diff(&mut w.state, &w.config, &back);
     assert!(r.is_clean(), "{:?}", r.skipped);
-    assert!(r.took_over.is_empty(), "只写 mode 不是接管：{:?}", r.took_over);
+    assert!(
+        r.took_over.is_empty(),
+        "只写 mode 不是接管：{:?}",
+        r.took_over
+    );
     let leaf = &w.state.control[&fid].ship_doctrine[&ship];
     assert_eq!(leaf.mode, ControlMode::Inherit);
-    assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.33, lone_before), "「恢复继承」的契约是值不动");
-    assert_eq!(w.state.ship_doctrine(ship.clone()).temper, 0.33, "叶存在就用叶里的值，哪怕它说 Inherit");
+    assert_eq!(
+        (leaf.value.temper, leaf.value.lone_wolf),
+        (0.33, lone_before),
+        "「恢复继承」的契约是值不动"
+    );
+    assert_eq!(
+        w.state.ship_doctrine(ship.clone()).temper,
+        0.33,
+        "叶存在就用叶里的值，哪怕它说 Inherit"
+    );
     assert_eq!(
         w.state.ship_doctrine_control(ship.clone()),
         edited(&before).4,
@@ -472,7 +615,10 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
     // 出厂记录值给成非零（`config/*.ron` 从没填过风格，开局是 {0,0}，那样分不出
     // "回到出厂值"和"钉在 0"）。
     for s in w.state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.doctrine = planet_x::model::ShipDoctrine { temper: 0.71, lone_wolf: -0.2 };
+        s.doctrine = planet_x::model::ShipDoctrine {
+            temper: 0.71,
+            lone_wolf: -0.2,
+        };
     }
     let record = w.state.ship(&ship).unwrap().doctrine;
 
@@ -493,16 +639,40 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
-    assert_eq!(report.removed.len(), 1, "删叶要有回执：{:?}", report.removed);
-    assert_eq!(w.state.ship_doctrine(ship.clone()), record, "删叶之后必须回到出厂记录值");
+    assert_eq!(
+        report.removed.len(),
+        1,
+        "删叶要有回执：{:?}",
+        report.removed
+    );
+    assert_eq!(
+        w.state.ship_doctrine(ship.clone()),
+        record,
+        "删叶之后必须回到出厂记录值"
+    );
     assert!(
-        w.state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
+        w.state
+            .control
+            .get(&fid)
+            .and_then(|c| c.ship_doctrine.get(&ship))
+            .is_none(),
         "这片叶必须真的没了（前端「当前跟随」那行会立刻改口）"
     );
     // 读面仍然给这艘舰一行（值 = 有效值 = 出厂值）——前端不必为"叶不存在"特判。
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
-    let row = fc.ship_doctrine.into_iter().find(|e| e.ship == ship).expect("每艘舰一行");
-    assert_eq!((row.temper, row.lone_wolf), (record.temper, record.lone_wolf));
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
+    let row = fc
+        .ship_doctrine
+        .into_iter()
+        .find(|e| e.ship == ship)
+        .expect("每艘舰一行");
+    assert_eq!(
+        (row.temper, row.lone_wolf),
+        (record.temper, record.lone_wolf)
+    );
     assert_eq!(row.mode, ControlMode::Inherit);
 }
 
@@ -522,8 +692,16 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         .expect("这个势力得有舰");
 
     // ① 读面：每艘舰都有一行角色（值 = 有效值，开局就是出厂记录值）。
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
-    let row = fc.ship_freighter.iter().find(|e| e.ship == ship).expect("每艘舰一行角色");
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
+    let row = fc
+        .ship_freighter
+        .iter()
+        .find(|e| e.ship == ship)
+        .expect("每艘舰一行角色");
     assert_eq!(row.freighter, w.state.ship(&ship).unwrap().freighter);
 
     // ② 写面：把一艘舰钉成运输舰（写值即接管 ⇒ 归属变 Player，AI 定编从此不碰它）。
@@ -534,7 +712,10 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
     assert!(w.state.ship_freighter(ship.clone()));
-    assert_eq!(w.state.ship_freighter_control(ship.clone()), ControlMode::Player);
+    assert_eq!(
+        w.state.ship_freighter_control(ship.clone()),
+        ControlMode::Player
+    );
 
     // ③ 前端那个「恢复出厂值」按钮发的补丁：只带身份键 + `remove`。
     let record = w.state.ship(&ship).unwrap().freighter;
@@ -544,10 +725,23 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
-    assert_eq!(report.removed.len(), 1, "删叶要有回执：{:?}", report.removed);
-    assert_eq!(w.state.ship_freighter(ship.clone()), record, "删叶之后回到出厂记录值");
+    assert_eq!(
+        report.removed.len(),
+        1,
+        "删叶要有回执：{:?}",
+        report.removed
+    );
+    assert_eq!(
+        w.state.ship_freighter(ship.clone()),
+        record,
+        "删叶之后回到出厂记录值"
+    );
     assert!(
-        w.state.control.get(&fid).and_then(|c| c.ship_freighter.get(&ship)).is_none(),
+        w.state
+            .control
+            .get(&fid)
+            .and_then(|c| c.ship_freighter.get(&ship))
+            .is_none(),
         "这片叶必须真的没了"
     );
     assert_ne!(
@@ -562,9 +756,16 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
     let d = fc.default_freighter.expect("势力级默认角色叶要在读面里");
-    assert_eq!((d.freighter, d.mode), (Some(true), Some(ControlMode::Player)));
+    assert_eq!(
+        (d.freighter, d.mode),
+        (Some(true), Some(ControlMode::Player))
+    );
 }
 
 /// **指令行（`ship_orders`）在 web 读面上「每舰一行」**——包括**没有叶**的舰。
@@ -596,15 +797,29 @@ fn the_order_read_face_lists_ships_without_a_leaf() {
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
 
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
     let rows: Vec<String> = fc.ship_orders.iter().map(|e| e.ship.clone()).collect();
-    assert_eq!(rows, ours, "指令读面必须每舰一行（含叶被删掉的舰），顺序同 `state.ships`");
+    assert_eq!(
+        rows, ours,
+        "指令读面必须每舰一行（含叶被删掉的舰），顺序同 `state.ships`"
+    );
 
     let row = fc.ship_orders.iter().find(|e| e.ship == vanished).unwrap();
-    assert_eq!(row.behavior, None, "链上没人说话 ⇒ `null`（前端据此显示「无人表态」）");
+    assert_eq!(
+        row.behavior, None,
+        "链上没人说话 ⇒ `null`（前端据此显示「无人表态」）"
+    );
     assert_eq!(row.mode, ControlMode::Inherit, "没有叶 ⇒ 这一层没有说话");
     for other in fc.ship_orders.iter().filter(|e| e.ship != vanished) {
-        assert!(other.behavior.is_some(), "「{}」的叶还在 ⇒ 有效值是一个真行为", other.ship);
+        assert!(
+            other.behavior.is_some(),
+            "「{}」的叶还在 ⇒ 有效值是一个真行为",
+            other.ship
+        );
     }
 
     // 前端「只回传差异」的载荷（身份键 + 只改过的字段）：给这艘没有叶的舰设归属必须落地。
@@ -614,10 +829,21 @@ fn the_order_read_face_lists_ships_without_a_leaf() {
         .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
     let row = fc.ship_orders.iter().find(|e| e.ship == vanished).unwrap();
-    assert_eq!(row.mode, ControlMode::Player, "叶被建出来了（只写表态不建叶的规则只管 Inherit）");
-    assert!(row.behavior.is_some(), "建叶时那份值就是当时的有效值兜底（`Idle`）");
+    assert_eq!(
+        row.mode,
+        ControlMode::Player,
+        "叶被建出来了（只写表态不建叶的规则只管 Inherit）"
+    );
+    assert!(
+        row.behavior.is_some(),
+        "建叶时那份值就是当时的有效值兜底（`Idle`）"
+    );
 }
 
 /// **设计图**在 web 的读写两面上走通：读面给出图库（`blueprints`，含引擎算的 `ship_count`）、
@@ -636,15 +862,22 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
         .iter()
         .filter(|c| c.faction_id == fid)
         .find_map(|c| {
-            c.buildings
-                .iter()
-                .find(|b| b.is_shipyard())
-                .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+            c.buildings.iter().find(|b| b.is_shipyard()).map(|b| {
+                (
+                    c.name.clone(),
+                    b.id,
+                    b.ship_type.clone().unwrap_or_default(),
+                )
+            })
         })
         .expect("这个势力得有建造区");
 
     // ① 开局：图库是空的（用户裁决 Q8：不预置标准图）。
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
     assert!(fc.blueprints.is_empty(), "开局不该有任何设计图");
 
     // ② 写面：建一张**舰级对得上**的图，并把建造区指过去（同一份 diff：一次成功）。
@@ -659,15 +892,37 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
     assert!(report.is_clean(), "{:?}", report.skipped);
 
     // ③ 读面：图库一行，选装**全量**给出（否则回传时会静默清空），指针在建造区上。
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
-    let row = fc.blueprints.iter().find(|b| b.name == "重甲护卫").expect("读面要给出图库");
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
+    let row = fc
+        .blueprints
+        .iter()
+        .find(|b| b.name == "重甲护卫")
+        .expect("读面要给出图库");
     assert_eq!(row.class, ship_type);
-    assert_eq!(row.components, vec!["kinetic".to_string(), "ion_drive".to_string()]);
+    assert_eq!(
+        row.components,
+        vec!["kinetic".to_string(), "ion_drive".to_string()]
+    );
     assert_eq!(row.mode, ControlMode::Player);
     assert_eq!(row.ship_count, 0, "还没造过 ⇒ 0（派生量，现算）");
-    assert!(!row.launch_waiting, "派生的「买不起 ⇒ 未下水」标记：刚建的图没人在等钱");
+    assert!(
+        !row.launch_waiting,
+        "派生的「买不起 ⇒ 未下水」标记：刚建的图没人在等钱"
+    );
     assert_eq!(
-        w.state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint.as_deref(),
+        w.state
+            .city(&cid)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == bid)
+            .unwrap()
+            .blueprint
+            .as_deref(),
         Some("重甲护卫")
     );
 
@@ -679,7 +934,14 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
     assert_eq!(
-        w.state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint,
+        w.state
+            .city(&cid)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == bid)
+            .unwrap()
+            .blueprint,
         None,
         "`null` 拆掉指针"
     );
@@ -692,7 +954,11 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
     assert_eq!(report.removed.len(), 1, "{:?}", report.removed);
-    let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+    let fc = state_view(&w)
+        .control
+        .into_iter()
+        .find(|c| c.faction_id == fid)
+        .unwrap();
     assert!(fc.blueprints.is_empty(), "图被删掉了");
 }
 
@@ -718,7 +984,11 @@ fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
     }))
     .unwrap();
     let view = apply_command(&mut w, &req);
-    assert!(view.report.as_ref().unwrap().is_clean(), "{:?}", view.report.as_ref().unwrap().skipped);
+    assert!(
+        view.report.as_ref().unwrap().is_clean(),
+        "{:?}",
+        view.report.as_ref().unwrap().skipped
+    );
     let waiting = |w: &GameWorld| -> bool {
         state_view(w)
             .control
@@ -735,7 +1005,11 @@ fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
 
     // 造出「进度攒够却没下水」：该城该舰级的进度写满 `build_points`，库存清零（买不起）。
     let bp = w.config.ship_spec(&ship_type).build_points;
-    w.state.city_mut(&cid).unwrap().ship_progress.insert(ship_type.clone(), bp);
+    w.state
+        .city_mut(&cid)
+        .unwrap()
+        .ship_progress
+        .insert(ship_type.clone(), bp);
     zero_resources(&mut w, &fid);
     assert!(
         waiting(&w),
@@ -747,7 +1021,10 @@ fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
     let face = state_view(&w);
     let posted = serde_json::json!({ "control": face.control, "scope": face.scope });
     let req: CommandReq = serde_json::from_value(posted).expect("读面必须能被写面收下");
-    assert!(apply_command(&mut w, &req).report.unwrap().is_clean(), "模板回传不该丢叶");
+    assert!(
+        apply_command(&mut w, &req).report.unwrap().is_clean(),
+        "模板回传不该丢叶"
+    );
 
     // 钱够了 ⇒ 下一回合真的下水，进度被扣掉 ⇒ 标记随之消失。
     // ⚠ 这条派生列的判据是「进度满 **且** 没下水」（不是"直接检查库存"）：买得起之后
@@ -756,8 +1033,15 @@ fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
     for (_, v) in w.state.faction_mut(&fid).unwrap().resources.iter_mut() {
         *v = 1e9;
     }
-    assert!(waiting(&w), "只补钱、没下水 ⇒ 进度仍然满着（标记照实说：还没下水）");
-    w.state.city_mut(&cid).unwrap().ship_progress.remove(&ship_type);
+    assert!(
+        waiting(&w),
+        "只补钱、没下水 ⇒ 进度仍然满着（标记照实说：还没下水）"
+    );
+    w.state
+        .city_mut(&cid)
+        .unwrap()
+        .ship_progress
+        .remove(&ship_type);
     assert!(!waiting(&w), "下水之后进度归零 ⇒ 不再等钱");
 }
 
@@ -776,7 +1060,10 @@ fn a_rejected_blueprint_patch_comes_back_in_the_command_report() {
 
     // `/api/state` 那条路（`state_view`）：没有回执键（`skip_serializing_if`）。
     let plain = serde_json::to_value(state_view(&w)).unwrap();
-    assert!(plain.get("report").is_none(), "只有跑过 diff 的响应才带 report");
+    assert!(
+        plain.get("report").is_none(),
+        "只有跑过 diff 的响应才带 report"
+    );
 
     // 先建一张**舰级对得上**的图并挂上指针（合法）。
     let ok: CommandReq = serde_json::from_value(serde_json::json!({
@@ -802,15 +1089,19 @@ fn a_rejected_blueprint_patch_comes_back_in_the_command_report() {
     .unwrap();
     let view = apply_command(&mut w, &bad);
     let json = serde_json::to_value(&view).unwrap();
-    let skipped = json["report"]["skipped"].as_array().expect("回执必须带着丢弃清单");
+    let skipped = json["report"]["skipped"]
+        .as_array()
+        .expect("回执必须带着丢弃清单");
     assert_eq!(skipped.len(), 1, "{json}");
     assert_eq!(skipped[0]["code"], "blueprint_class_mismatch");
     // reason 是人读的一句话，且指出**接下来怎么办**（"要么…要么…"）。
     let reason = skipped[0]["reason"].as_str().unwrap();
-    assert!(reason.contains("要么"), "reason 要给出出路（界面照实显示它）：{reason}");
+    assert!(
+        reason.contains("要么"),
+        "reason 要给出出路（界面照实显示它）：{reason}"
+    );
     assert_eq!(
-        w.state.control[&fid].blueprints["被拒的图"].value.class,
-        ship_type,
+        w.state.control[&fid].blueprints["被拒的图"].value.class, ship_type,
         "被拒 ⇒ 状态一个字节不动"
     );
 }
@@ -822,10 +1113,13 @@ fn first_shipyard(w: &GameWorld, fid: &str) -> (String, u32, String) {
         .iter()
         .filter(|c| c.faction_id == fid)
         .find_map(|c| {
-            c.buildings
-                .iter()
-                .find(|b| b.is_shipyard())
-                .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+            c.buildings.iter().find(|b| b.is_shipyard()).map(|b| {
+                (
+                    c.name.clone(),
+                    b.id,
+                    b.ship_type.clone().unwrap_or_default(),
+                )
+            })
         })
         .expect("这个势力得有建造区")
 }

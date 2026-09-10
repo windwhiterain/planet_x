@@ -129,10 +129,10 @@
 | `[~]` | [agent 控制面](notes/agent-control-api.md) | 已把 coalition 格局与城市 loyalty/距离暴露给 agent；summary 级联与目标模板仍缺。 | summary/delta 级联；control 目标模板命令 |
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
-| `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）；**有效指令的链只由引擎算**（kit 的 `*_approx` 降级为旧 index 目录的兜底）。 | 玩家舰的自动战斗判定；逐武器火力分配 |
+| `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`faction_process`/`city_process`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）；**有效指令的链只由引擎算**（kit 的 `*_approx` 降级为旧 index 目录的兜底）。 | 玩家舰的自动战斗判定；逐武器火力分配 |
 | `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**；**§12 = 角色轴补齐**；**§13 = 读面/写面两侧对齐已落地**（`feature/read-face-parity`：`ship_orders` 读面**每舰一行**、`behavior` 取有效值（`null` = 没人说话）+ 写面「`null` 行不建叶」+ kit 的 `_approx` 换成引擎的 `effective`/`order_source`，`order_*` 回到**真实的叶**）；**§16 = 风格三轴的真执行者**（`autocontrol::style`：按战况概率重估、分布步长、`derived_roll`、三道玩家闸门）、**§17 = `Auto` 设计图的执行者**（`autocontrol::blueprints`：AI 建图/重估/去重/回收，图库 `O(主题×舰级)`）——**§3.2 那条"风格轴没有执行者"的空头承诺已经还清**。 | 两个执行者都还不够平衡（§17.3 的"买不起不下水"扩到 AI 图、玩家图的选装复用、主题权重再标定）；方案 B **已否决**（见 [`control-value-rule.md`](notes/control-value-rule.md)）；文档收尾（把取值规则写全） |
 | `[x]` | [控制属性的取值规则](notes/control-value-rule.md) | **裁决：模型没有歧义，不改。** 归属与取值是同一条链上的同一件事（`Inherit` = 没意见、让位给上面的 `Player`；`Auto` 那一档的**值存在逐舰叶里**⇒「叶存在就供值」）。§1 六行实测表逐行由此推出；§3 结清三条"看起来像歧义"的旧账（恢复继承不还值 = 交互落差，出口是删叶；文档只写了归属那一半；势力默认叶 `Auto` 档没有存储）。 | 把 §1 写进 `src/control.rs` 顶部 + `agent-play.md`（文档收尾）；方案 B/B3 已否决 |
-| `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.flow()/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
+| `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.derived(...)/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
 | `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
 
 ## WebUI
@@ -155,7 +155,7 @@
 | `[ ]` | [Schema 查询重构（候选清单）](notes/schema-query-refactor.md) | 四痛点里的 P0–P3 已落地：`meta_value` 止血、schema 自描述、响亮失败、版本迁移。 | P4 收敛并行投影（拆 `AgentState` 镜像 struct） |
 | `[ ]` | [语义视图 API](notes/semantic-view-api.md) | 把裸 jq 降为逃生舱；语义 view 工具只在 jq 侧做了 PoC（压缩约 34×）。 | Rust 侧 `view` 命令；工具层参数校验 |
 | `[x]` | [定居点名字 key](notes/settlements-lazy-table.md) | `Settlement` 改按名字引用，投影新增懒表 `settlements`，测试全绿。 | — |
-| `[x]` | [统一总结指标](notes/unified-metrics.md) | 总结指标由步进中间量聚合，agent 视图与 `--digest` 同源、不再重算。 | 治理中间量并入 metrics；Web 是否复用待定 |
+| `[x]` | [统一总结指标](notes/unified-metrics.md) | 总结指标由步进中间量聚合，agent 视图与 `--digest` 同源、不再重算。 | 治理中间量并入 `RoundView`；Web 是否复用待定 |
 | `[x]` | [权威 schema 贯彻](notes/wysiwyg-resource-keys.md) | 资源 key 统一成中文可读名、删掉镜像结构，视图直用权威类型。 | 派生字段要 agent 现场 jq 计算（或加语义视图） |
 
 ---
@@ -166,6 +166,8 @@
 | --- | --- | --- | --- |
 | `[x]` | [代码布局：大文件拆小 + 单测搬出源码](notes/code-layout.md) | `sim.rs` 6341 → 170 行 `mod.rs` + 17 个子模块、`control.rs` 3863 → 85 + 8 个；18 个源文件的内联单测全搬到 `src/tests/`（`#[path]` 引入 ⇒ **零可见性放宽**）；纯搬运，digest 逐字节不变。 | 下一轮候选：`model/event.rs` 1141、`projection.rs` 1063、`model/game_config.rs` 992、`world.rs` 865、`autocontrol/shipbuilding.rs` 746 |
 | `[x]` | [测试按模拟时间分档](notes/test-tiers.md) | 用 `cargo nextest` 的 group/profile 按**推进回合数**分档：快档 178 条 / 4 s（原 110 s）、中档 184 / 30 s、全档 189 / 96 s；档位写在模块名 `horizon_mid`/`horizon_long` 里，加用例不用改配置。 | 读面契约用例（80–120 回合）仍留在快档的取舍与升级路径见该篇 §6 |
+| `[~]` | [测试墙钟：热点清单与待办](notes/test-wall-clock.md) | 测试走的是 dev 档（`opt-level = 0`）⇒ **P0 已加 `[profile.test] opt-level = 2` 并实测**：最重的长局 77.2 → **18.1 s（4.27×）**、快档 4.4 → 2.0 s、中档 29.7 → 8.0 s（全档只推算没实测）；行为中性的两条依据见该篇 §0.1。另附一份「每回合被重复算多次」的热点清单（带文件名/函数名，行号已删——见该篇 §2 开头）。 | P1 纯去重（`faction_power_share` 一回合约 10+ 次、索敌内层逐候选重算）／P2 深缓存／P3 测试侧改读 `advance` 返回的 `RoundView`；全档重测 + P1 的 digest 对账 |
+| `[x]` | [读面统一：只有 pre 和 post](notes/pre-post-unify.md) | 派生数据不再分 `flow`+`metrics` 两段，一回合只有**一份视图** `RoundView`（`pre`/`post` 同形）；`RoundFlow` 退成引擎内部的写入口袋 `RoundSink`；`--derived`/`--index`/轨迹/web 三处读面一起换名，`SCHEMA_VERSION` 13→14。 | 数据面（中间量捕获）的下一批见 `notes/pre-post-unify.md` §5 |
 
 ---
 

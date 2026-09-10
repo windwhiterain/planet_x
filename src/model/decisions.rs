@@ -26,12 +26,13 @@
 //! * 整段轨迹：`planet_x --index out/` → `out/idx/decisions.jsonl` 一行一条判定，
 //!   按 `round` / `faction_id` / `actor` join（Python: `planet_xq.load('out').decisions()`）。
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{BuildingId, CityId, FactionId, ShipBehavior, ShipId};
 
 /// 一艘 AI 舰本回合的判定结果。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipVerdict {
     /// **自保撤退**：受创（血量比 < 撤退阈值）+ 敌在射程内 + 离首都有一定距离 ⇒ 后撤回首都。
@@ -59,7 +60,7 @@ pub enum ShipVerdict {
 /// * **判定**：`verdict` / `target` / `destination` / `order`（AI 选了什么）；
 /// * **输入**：`hull_ratio` / `retreat_hull` / `kiting` / `enemy_in_range`（判定那一刻观察到的事实）
 ///   ——有了它们，「为什么」才是可复核的，而不是一句自述。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ShipDecision {
     pub ship: ShipId,
     pub faction: FactionId,
@@ -92,7 +93,7 @@ pub struct ShipDecision {
 /// 触发条件是「舰队被单一舰型统治 > 60% 且正在交战」，新舰型由 `choose_next_class`
 /// 用 seeded RNG 选出——这是**少数几个不留事件的 AI 决策之一**（事后只能从
 /// `ship_type` 的变化反推，且看不出是什么时候改的）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct RetoolDecision {
     pub faction: FactionId,
     /// 船坞所在城。
@@ -116,7 +117,7 @@ pub struct RetoolDecision {
 /// * `temper`：`war` / `win` / `damage` / `withdraw`；
 /// * `lone_wolf`：`neighbors`（护航半径内的友舰数）；
 /// * `kiting`：`power`（敌我火力比）/ `hardness`（硬度对比）/ `hurt`（挨打程度）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct StyleDecision {
     pub faction: FactionId,
     pub ship: ShipId,
@@ -135,7 +136,7 @@ pub struct StyleDecision {
 /// 设计图是「还不存在的舰的规则」的家（[`crate::model::Blueprint`]），而 `Auto` 图这一层的
 /// 执行者就是这里（`autocontrol::blueprints`）：按资源优势与战况生成设计，**按
 /// `(舰级, 选装签名)` 归并复用**（长局里图库不该爆炸），没人指向的自建图回收掉。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct BlueprintDecision {
     pub faction: FactionId,
     pub blueprint: String,
@@ -152,8 +153,8 @@ pub struct BlueprintDecision {
     pub building: Option<BuildingId>,
 }
 
-/// 本回合 AI 的判定集合（挂在 [`RoundFlow`](super::RoundFlow) 上随回合一起带出）。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+/// 本回合 AI 的判定集合（挂在 [`RoundSink`](super::RoundSink) 上随回合一起带出）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct RoundDecisions {
     /// 每艘 AI 舰本回合的判定（**玩家名下的舰不在里面**：它们的指令是你下的，
     /// 但注意玩家舰的自动接战/轰炸也走 `auto_combat`，那一层目前**没有**被记录——见笔记）。

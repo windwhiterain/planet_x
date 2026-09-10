@@ -648,8 +648,8 @@ q.cities(12).explode("buildings").assign(
 ).query("blueprint == '重甲巡洋'")                    # 哪些区在造这张图
 ```
 
-`planet_xq` 侧**无需新函数**（若想让 `q.blueprints()` 与 `q.flow()/q.control()` 同待遇，
-加一个三行便利函数即可）。真正要改的是**写侧套件** `planet_x_ctl`（见 §9.6）。
+`planet_xq` 侧**无需新函数**（若想让 `q.blueprints()` 与 `q.derived(...)`/`q.control()`
+那几个便利读法同待遇，加一个三行便利函数即可）。真正要改的是**写侧套件** `planet_x_ctl`（见 §9.6）。
 
 ### 5.5 `--control` / `--control-schema` / `--schema` / `--round` 的影响
 
@@ -660,8 +660,9 @@ q.cities(12).explode("buildings").assign(
 * `--schema`（agent 视图，`agent.rs:33-58`）：`Trajectory.ships: Vec<Ship>` 直接序列化
   ⇒ `Ship.blueprint` **自动出现在每艘舰的行里**（`agent.rs:74`），零改动。
   ⚠ 这会让 `--round`/`--traj` 的每一行多一个键（读面变化，不是模拟变化）。
-* `--derived`：**不含蓝图表**（它读的是 `RoundState.post: Derived`，蓝图表由 state 现算）
-  ⇒ 与 `flow` 那类「同一回合两个读面必须一致」的约束**不适用**；文档里要写明这一点，
+* `--derived`：**不含蓝图表**（它读的是 `RoundState.post`，一张**视图** `RoundView`——当时的名字是
+  `Derived`；蓝图表由 state 现算）
+  ⇒ 与 `faction_process`/`city_process` 那类「同一回合两个读面必须一致」的约束**不适用**；文档里要写明这一点，
   免得有人以为漏了一张表。
 
 ---
@@ -747,8 +748,8 @@ q.cities(12).explode("buildings").assign(
 15. `blueprints_table_matches_the_control_face`（新）：同一回合，
     `idx/blueprints.jsonl` 的行集 == `state.control[*].blueprints` 的键集，
     `mode`/`components` 逐值相等（防两张表各说各话）。
-16. 跨进程一致性：`tests/projection_derived.rs:90-176` 那套**不需要**为蓝图表扩展（它比的是
-    `--derived` 与 `--index` 共有的 `Derived` 数据，而蓝图表不在 `Derived` 里，见 §5.5）。
+16. 跨进程一致性：`tests/projection_derived.rs` 那套**不需要**为蓝图表扩展（它比的是
+    `--derived` 与 `--index` 共有的 `RoundView` 数据，而蓝图表不在 `RoundView` 里，见 §5.5）。
     在测试里加一行注释说明「为什么不在这里」，免得后人以为是漏的。
 
 ### 7.5 确定性 / 行为中性（**硬门槛，必须逐字**）
@@ -924,8 +925,9 @@ q.cities(12).explode("buildings").assign(
    （§2.5）⇒ 长局几百张图。**按 class 封顶**是硬要求。
 9. **不要在图里存数值**（面板/造价/维护）：config 一元真值（§2.3）。若将来要做「装甲型专精」，
    走新增组件，不要在图里加 `+armor` 这类字段。
-10. **`--derived` 与 `--index` 的一致性约束不适用于蓝图表**（它不在 `Derived` 里，§5.5）
-    ——写进文档，免得后人以为漏了一张表，或者反过来硬把它塞进 `Derived`（那会让
+10. **`--derived` 与 `--index` 的一致性约束不适用于蓝图表**（它不在 `RoundView` 里——当时的名字是
+    `Derived`；§5.5）
+    ——写进文档，免得后人以为漏了一张表，或者反过来硬把它塞进 `RoundView`（那会让
     `--derived` 也依赖 state 的额外计算，破坏「post 是 state 的函数」的既有理由）。
 11. **别忘 `agent-play.md` 要跟着改**（`control-live-layers.md:106-108` 已经欠着这一笔）：
     §3 的控制面表要加一行「设计图」；§4 的 diff 示例要加「按舰级定意图」；§2 的 lazy 表

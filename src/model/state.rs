@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::*;
 use super::control::resolve_chain;
 use super::faction::default_capital_body;
+use crate::model::*;
 
 /// The current persisted `State` schema version. Bump this whenever `State`'s
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
@@ -13,10 +13,21 @@ use super::faction::default_capital_body;
 /// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
 /// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
 /// 所以不能按号细判，只能整段按最保守的方式接）。
-/// **v14 = MOND 掌握度连续化**（`.agents/notes/tech-system.md`）：`Faction::mond_control`
-/// 取代 `config.mond.masters` 名单。v13 存档里没有这个量 ⇒ 按 serde 缺省 0（凡人）读入，
-/// 旧档在这条改动上**不保真**（用户裁决：不考虑向前兼容）。
-pub const SCHEMA_VERSION: u32 = 14;
+/// **v14 是一个被两条历史共用的号**（合并时发现，故合并后取 **15**）：
+/// - `feature/pre-post-unify`（已入 main）：**派生读面换代**——派生数据不再分
+///   `flow` + `metrics` 两段，只有**一回合一份视图** [`RoundView`]（`pre`/`post` 同形）；
+///   `--derived` 的 `{flow, metrics}` 变成 `{view}`、`--index` 的
+///   `idx/flow.jsonl`/`idx/city_flow.jsonl` 变成 `idx/faction_process.jsonl`/`idx/city_process.jsonl`。
+///   **世界状态本身（`State`）没有变**，变的是派生读面，故它自己不写迁移档（旧档照常读；旧派生态本来也不持久）。
+/// - `feature/tech-system-mond`（本分支）：**MOND 掌握度连续化**——`Faction::mond_control`
+///   取代 `config.mond.masters` 名单。
+///
+/// **v15 = 上面两条的汇合点**。因为 v14 在两条历史里含义不同（一条动读面、一条动状态），
+/// 号本身**不能再判语义** ⇒ `13 | 14` 整段按最保守的方式接：**推号即可**，`mond_control`
+/// 走 serde 缺省 **0（凡人）**。这意味着「本分支自己那一版 v14 存出来的档」读到新二进制会
+/// 丢掉掌握度——**不保真**，与用户裁决一致（不考虑向前兼容）；那些档只存在于本次开发的
+/// worktree 里，没有真实损失。
+pub const SCHEMA_VERSION: u32 = 15;
 fn default_schema_version() -> u32 {
     0
 }
@@ -110,9 +121,9 @@ pub struct RoundState {
     /// 规范的持久世界（实体）：天体/城/势力/舰/控制面/作用域/事件/编年史。
     pub state: State,
     /// 本回合依赖 rng 的随机决策快照（`(state, rng)` 的函数，换 rng 即重算）。
-    pub pre: Derived,
+    pub pre: RoundView,
     /// 本回合依赖 state 的纯观测快照（`state` 的函数）。
-    pub post: Derived,
+    pub post: RoundView,
 }
 impl State {
     /// Look up a body by its unique **name** (the schema's identity key).
@@ -290,8 +301,7 @@ impl State {
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
             // ① 舰级层：本舰出厂那张图的默认意图（Q1(c) 插在舰队默认**之前**）。
             if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some()
-                    && self.blueprint_control(&s.faction_id, id).is_player()
+                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
                 {
                     return bp.value.order.clone();
                 }
@@ -326,8 +336,7 @@ impl State {
         let leaf = c.ship_orders.get(&ship_id);
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
             if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some()
-                    && self.blueprint_control(&s.faction_id, id).is_player()
+                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
                 {
                     return Some(OrderSource::Blueprint(id.clone()));
                 }
@@ -512,21 +521,30 @@ impl State {
 
     /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
     pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.investment_budget.get(resource)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.investment_budget.get(resource)),
+        );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某建造预算（造舰用）由谁控制：资源 → 势力 → 全局。
     pub fn construction_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.construction_budget.get(resource)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.construction_budget.get(resource)),
+        );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
     pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.loyalty_budget.get(&cid)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.loyalty_budget.get(&cid)),
+        );
         let city = self.scope.cities.get(&cid).copied().unwrap_or_default();
         let body_id = self.city(&cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -539,7 +557,10 @@ impl State {
     /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
     pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.invest_weights.get(key)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.invest_weights.get(key)),
+        );
         let city = self.scope.cities.get(cid).copied().unwrap_or_default();
         let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -552,7 +573,10 @@ impl State {
     /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力 → 全局。
     pub fn build_control(&self, fid: FactionId, key: &BuildKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.build_weights.get(key)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.build_weights.get(key)),
+        );
         let city = self.scope.cities.get(cid).copied().unwrap_or_default();
         let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -566,7 +590,10 @@ impl State {
     /// `Player` 时 sim 的周期迁移不覆盖（除非首都亡城——硬规则仍强迁）；
     /// `Auto`/`Inherit` 时由 sim 的周期迁都步骤重估。
     pub fn capital_control(&self, fid: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.to_string()).and_then(|c| c.capital.as_ref()));
+        let leaf = leaf_mode(
+            self.control(fid.to_string())
+                .and_then(|c| c.capital.as_ref()),
+        );
         let faction = self.scope.factions.get(fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
@@ -764,11 +791,13 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
-        // v13：MOND 掌握度还不存在（`Faction::mond_control` 是 serde 新增字段，
-        // 缺省 0 = 凡人）。**这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份
-        // （`config.mond.initial`），而 `migrate` 拿不到 config；硬编码势力名会造出第二份
-        // 真相。旧 `.ron` 因此在这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 => {
+        // v13 = 设计图/承包市场汇流点；v14 = 被两条历史共用的号（读面换代 / 掌握度连续化，
+        // 见 [`SCHEMA_VERSION`] 的说明）。两档都**不动 `State` 字段**：v13 之前没有
+        // `mond_control`（serde 缺省 0 = 凡人），v14 读进来的档也一样按 0 起。
+        // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
+        // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
+        // v13/v14 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
+        13 | 14 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

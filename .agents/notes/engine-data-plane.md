@@ -6,13 +6,21 @@
 > `lazy-index-pandas.md`（投影 schema 契约）、`agent-play-friction.md` §45（`--control-plan` 的
 > 成本→收益预览：也是"引擎算、Python 只读"的既成例子）
 
+> ⚠ **本笔记里的读面名字大多已换代**（`feature/pre-post-unify`）：`flow` + `metrics` 两段已合并成
+> **一份视图** `RoundView`（`pre`/`post` 同形，每个数只有一个位置）；`RoundFlow` 退成**引擎内部的
+> 写入口袋** `RoundSink`（**不出现在读面上**）；`Derived` → `RoundView`、`derived_from_state` →
+> `view_from_state`、`round_metrics` → `observe`；表名 `idx/flow.jsonl`/`idx/city_flow.jsonl` →
+> `idx/faction_process.jsonl`/`idx/city_process.jsonl`，`main.jsonl` 每行的 `metrics` 键 → `view`。
+> 下文**保留当时的原话**（它是落地记录，不改写历史），凡遇到旧名请按这一条读；
+> 见 [`pre-post-unify.md`](pre-post-unify.md)。
+
 ## 0. 一句话
 
 **引擎只负责两件事：产出某种标准的统计学数据格式（tidy 表，按名字 join），以及接受同一形状的
 diff。** 通配、编制表、统计筛选、配方、verify——全部是 Python kit 的事，引擎不为它们加任何功能。
 
 这条分界线**和项目里已有的裁决同源**：`play/planet_xq/README.md` 的「Semantic views」一节写的就是
-「Python 视图只打包模拟**已经算好并写进 `metrics`/懒表**的量（纯检索，永不与规则漂移）；任何需要
+「Python 视图只打包模拟**已经算好并写进 `view`/懒表**的量（纯检索，永不与规则漂移）；任何需要
 游戏公式的判断都留在 Rust」。本 note 是它的**写侧对偶**，加上一条更硬的分界（见 §1）。
 
 ## 1. 分界线（用户裁决）
@@ -47,9 +55,9 @@ diff。** 通配、编制表、统计筛选、配方、verify——全部是 Pyt
 
 | 欠的东西 | 数据在哪 | 当时的状态（⚠ 见 §7.2 的修正） |
 | --- | --- | --- |
-| **`flow` 表**（`idx/flow.jsonl` 回合×势力：各资源产出 / `upkeep` / `governance.total` / `coverage`；`idx/city_flow.jsonl` 回合×城×资源产出） | `RoundFlow`（`src/model/metrics.rs:103`，文档原话："各 step 计算并应用、**不落到持久状态、原本不对外暴露的量**"） | 作为**表**确实一张都没发；但**数值**早已被 `round_metrics` 抄进 `metrics`（内联在 main 行里）——所以真实收益是**形状**不是数据，见 §7.2 |
-| **`pre` 段**（当时以为 = "本回合依赖 rng 的随机决策"） | `RoundState.pre: Derived`（`src/model/state.rs:85`） | ❌ 这个描述**是错的**：`pre` 只是"推进前的观测"（`flow` 恒空）。真正的"AI 掷了什么"任何地方都没记录，要新捕获，见 §7.4 |
-| **控制面 tidy 表 + 每实体 `effective`** | `State.control` / `State.scope` | 这条**是真的**：`--control` 有（读面即写面）但**不是投影里的表**，Python 要 join 得再起一次进程；`effective` 没有 → Python 只能自己重实现 `resolve_chain`（`src/model/state.rs:179-211`），**那是漂移源**。✅ 本轮已做 |
+| **`flow` 表**（`idx/flow.jsonl` 回合×势力：各资源产出 / `upkeep` / `governance.total` / `coverage`；`idx/city_flow.jsonl` 回合×城×资源产出） | `RoundFlow`（`src/model/metrics.rs`，文档原话："各 step 计算并应用、**不落到持久状态、原本不对外暴露的量**"） | 作为**表**确实一张都没发；但**数值**早已被 `round_metrics` 抄进 `metrics`（内联在 main 行里）——所以真实收益是**形状**不是数据，见 §7.2 |
+| **`pre` 段**（当时以为 = "本回合依赖 rng 的随机决策"） | `RoundState.pre: Derived`（当时的类型名；`src/model/state.rs`） | ❌ 这个描述**是错的**：`pre` 只是"推进前的观测"（`flow` 恒空）。真正的"AI 掷了什么"任何地方都没记录，要新捕获，见 §7.4 |
+| **控制面 tidy 表 + 每实体 `effective`** | `State.control` / `State.scope` | 这条**是真的**：`--control` 有（读面即写面）但**不是投影里的表**，Python 要 join 得再起一次进程；`effective` 没有 → Python 只能自己重实现 `resolve_chain`（`src/model/control.rs`），**那是漂移源**。✅ 本轮已做 |
 | **`--derived` 单点导出**（一个 ckpt → `{pre, post}`） | 同上 | 没有；不想为一次 join 跑整个 `--index`。✅ 本轮已做 |
 
 **硬约束（写成测试）**：`post` 是 `state` 的函数（同一 state 恒定），所以 **`--derived` 与 `--index`
@@ -102,7 +110,7 @@ leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
 
 ```bash
 cargo test --workspace
-cargo run --bin planet_x -- --seed 7 --round 6 --index out/          # 看 idx/{flow,city_flow,control,scope,decisions}.jsonl
+cargo run --bin planet_x -- --seed 7 --round 6 --index out/          # 看 idx/{faction_process,city_process,control,scope,decisions}.jsonl
 cargo run --bin planet_x -- --seed 7 --round 6 --index out/ --save ckpt.ron
 cargo run --bin planet_x -- --start ckpt.ron --derived               # 与上面同一回合，值必须完全相同
 # 行为中性（改捕获前后各跑一次，逐字节比对）：
@@ -121,7 +129,7 @@ cargo run --bin planet_x -- --seed 42 --round 240 --digest 20 | shasum -a 256
 * ships 表加四列：`order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective`
   ——**引擎解析的答案**，Python 不该自己重实现链。
 * `--derived`：打印这一回合存下来的 `{round, source, pre, post}`；有档就是**档里那一对**，
-  没档（或叠加了 `--apply`）就按当前状态重算并附 `note`（否则空 flow 会被误读成"本回合零产出"）。
+  没档（或叠加了 `--apply`）就按当前状态重算并附 `note`（否则空的过程量会被误读成"本回合零产出"）。
 * 顺手修掉两个"静默不实"：
   * `--index --save` 存出来的 checkpoint 里 `pre`/`post` 都是**丢了流量**的重算值
     （`write_index` 现在返回 `IndexOutcome{pre, post}`），于是同一回合的两个读面会对不上；
@@ -138,13 +146,15 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
 
 ### 7.3 `{}` vs `null` 的契约
 
-投影表**永远给对象**（没产出就是 `{}`，不是 null），这样 Python 侧列类型稳定；`Derived` 里没有
-这个势力的键时是 `null`。集成测试用一层 `res_map()` 翻译这两者——语义相同，形状不同。
+投影表**永远给对象**（没产出就是 `{}`，不是 null），这样 Python 侧列类型稳定；`RoundView` 里没有
+这个势力的键时是 `null`。集成测试当时用一层 `res_map()` 翻译这两者（语义相同，形状不同）——
+⚠ **那个翻译层已经删了**：两个读面读同一份视图之后不再需要它，见
+[`pre-post-unify.md`](pre-post-unify.md) §4。
 
 ### 7.4 `pre` 的真相（下一步的依据）
 
-`RoundState.pre` 现在是 `derived_from_state(推进前状态)`：`flow` **恒为空**、`metrics` 是推进前的
-观测。它**不是**"本回合 rng 掷出的随机决策"——那个东西**任何地方都没有被结构化记录**（AI 造了什么舰、
+`RoundState.pre` 现在是 `view_from_state(推进前状态)`：**过程量恒为 0/空**、观测部分是推进前的
+世界。它**不是**"本回合 rng 掷出的随机决策"——那个东西**任何地方都没有被结构化记录**（AI 造了什么舰、
 舰队怎么重组、谁接战了，只散在事件与状态差里）。想要"AI 在想什么"的读面，得在
 `sim`/`autocontrol` 的决策点补一次捕获（新的 `Decisions`），并且必须**行为中性**——
 判据：同 seed/同回合的 `--digest` 输出与捕获前**逐字相同**，长局 harness 全绿。
@@ -158,7 +168,7 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
 （是接战索敌还是自保撤退？当时的血量比与撤退阈值差多少？这回合它是不是**根本没被派活**？）
 全部发生在 `autocontrol` 内部，用完就丢。
 
-**形状**（`src/model/decisions.rs` → 挂在 `RoundFlow.decisions` → `Derived.flow.decisions` →
+**形状**（`src/model/decisions.rs` → 挂在 `RoundSink.decisions` → `RoundView.decisions` →
 `idx/decisions.jsonl`）：
 
 * `kind="ship_order"`：逐舰判定，`verdict` ∈ `withdraw` / `engage` / `colonize` / `bombard` /
@@ -192,11 +202,12 @@ retool 13 / colonize 3 / withdraw 1）。
    （不是 `lazy` 段——它们不是靠 main 的 id 数组索引，而是靠 `join_on` 指向 main 已有的列），
    而 `planet_xq.load()` 只读 `schema["lazy"]` ⇒ Python 侧**看不见**它们。
    修复：`planet_xq` 现在也读 `schema["derived"]`，并给 `q.derived(name, round)` +
-   `q.flow()/q.city_flow()/q.control()/q.scope()` 四个便利读法（缺表时报出"旧版投影没有这一段"）。
+   几个便利读法（当时叫 `q.flow()/q.city_flow()/q.control()/q.scope()`；两张过程量表现已改名
+   `faction_process`/`city_process`，缺表时报出"旧版投影没有这一段"）。
    **教训**：契约是"发射端 + 消费者"两处，光在 Rust 侧加 schema 段不算完。
 2. `[x]` **投影一份 checkpoint 时起点回合的流量是 0**（本轮修复）：`--start ckpt --round 0 --index`
-   走的是 `derived_from_state`（flow 恒空），于是 agent 看到"全世界零产出/零维护/零治理"——
-   数字自洽、语义骗人。修复：`projection::write_index_seeded(..., start: Option<Derived>)`，
+   走的是 `view_from_state`（过程量恒空），于是 agent 看到"全世界零产出/零维护/零治理"——
+   数字自洽、语义骗人。修复：`projection::write_index_seeded(..., start: Option<RoundView>)`，
    `--start` 时把档里存的 `post` 交给投影当**起点回合**的行（那一行的 state 就是那一回合的结果）；
    守卫：`tests/projection_derived.rs::projecting_a_checkpoint_keeps_that_rounds_flow`
    （含"至少一个势力维护费非零"的防空转断言）。全新开局仍然没有流量（初始世界没有"上一回合"）。

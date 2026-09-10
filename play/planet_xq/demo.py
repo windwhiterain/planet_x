@@ -30,7 +30,7 @@ else:
     print(q.ships_spec()[["label", "hull", "upkeep", "build_points"]].to_string())
 
 print()
-print("--- main facts (lean): rounds + metrics shape ---")
+print("--- main facts (lean): rounds + view shape ---")
 print("rounds:", list(q.facts["round"]))
 print("one fact row keys:", list(q.facts.columns))
 
@@ -42,7 +42,7 @@ if snap.get("exists"):
     print("中国 @ round", rid)
     print("  resources:", snap.get("resources"))
     print("  relations:", snap.get("relations"))
-    print("  metrics:", snap.get("metrics"))
+    print("  view (this faction's row):", snap.get("view"))
     print("  cities:", snap.get("city_ids"), "ships:", snap.get("ship_ids"))
 else:
     print("no 中国 row (or projection produced before factions existed)")
@@ -56,8 +56,21 @@ print(merged[cols].head(8).to_string(index=False))
 print()
 print("--- rules x facts: fleet upkeep on hand at round 6 ---")
 spec = q.ships_spec()
-fleet = merged.merge(spec[["upkeep"]], left_on="class", right_index=True)
-print("ships in fleet:", len(fleet), "| total upkeep/month:", round(float(fleet["upkeep"].sum()), 2))
+# ⚠ 两边都有 `upkeep` 列（ships 表带的是**实测面板**的维护费，spec 表带的是**规则**里的），
+# 直接 merge 会得到 `upkeep_x`/`upkeep_y`，然后 `fleet["upkeep"]` 当场 KeyError（这条踩过：
+# main 上一直是坏的，与本 demo 无关）。改名之后正好能顺手把「规则 vs 事实」对照打出来。
+fleet = merged.merge(
+    spec[["upkeep"]].rename(columns={"upkeep": "spec_upkeep"}),
+    left_on="class",
+    right_index=True,
+)
+print(
+    "ships in fleet:",
+    len(fleet),
+    "| total upkeep/month:",
+    round(float(fleet["upkeep"].sum()), 2),
+    f"(舰级基础值合计 {round(float(fleet['spec_upkeep'].sum()), 2)}——面板值含舰级/组件系数，故更大)",
+)
 
 print()
 print("--- pull a specific round's ship ids from the main stream, then the detail ---")
@@ -69,11 +82,11 @@ print("q.settlements():", q.settlements().shape, "cols", list(q.settlements().co
 
 print()
 print("--- long-run stats: 年均 / 十年均 (round = 1 month) ---")
-cities = q.yearly_avg("metrics.cities")
+cities = q.yearly_avg("view.city_count")
 print("年均 world cities:", {int(y): round(float(v), 2) for y, v in cities.items()} if len(cities) else "…")
-print("十年均 world cities:", {int(y): round(float(v), 2) for y, v in q.decadal_avg("metrics.cities").items()})
-fak = (q.facts.iloc[0].get("metrics") or {}).get("factions", {})
+print("十年均 world cities:", {int(y): round(float(v), 2) for y, v in q.decadal_avg("view.city_count").items()})
+fak = (q.facts.iloc[0].get("view") or {}).get("factions", {})
 if fak:
     fid = next(iter(fak))
-    p = q.yearly_avg(f"metrics.factions.{fid}.production_value")
+    p = q.yearly_avg(f"view.factions.{fid}.production_value")
     print(f"年均 {fid} production_value:", {int(y): round(float(v), 1) for y, v in p.items()})

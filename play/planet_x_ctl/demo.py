@@ -7,8 +7,9 @@ What it does (all on a **fixture checkpoint it generates itself**, so it is repr
 1. ``planet_x --seed 7 --round 12 --save ckpt.ron`` — a small but real world;
 2. bulk **ownership** on a whole fleet: every ship of one faction → ``Auto``, then back to
    ``Player`` (the "wildcard" that lives in Python, expanded to N explicit ``{ship, mode}`` leaves);
-3. a **statistical policy**: compare ``upkeep`` against ``production_value`` from the projection's
-   metrics and cap the construction budget of every faction that is over-extended;
+3. a **statistical policy**: compare ``upkeep`` against ``production_value`` from the round's
+   ``view`` in the projection and cap the construction budget of every faction that is
+   over-extended;
 4. one **deliberate** fleet-default takeover (``take_over=True``), so the receipt's takeover list is
    a known, intended set rather than a surprise;
 5. a **no-op** write (a value that already holds), reported as ``noop`` rather than as a failure;
@@ -99,15 +100,16 @@ def _old_engine_index(src, dst) -> Path:
 
 
 def economy_table(proj_dir) -> pd.DataFrame:
-    """Per-faction ``upkeep`` vs ``production_value``, straight out of the projection metrics.
+    """Per-faction ``upkeep`` vs ``production_value``, straight out of the round ``view``.
 
     Read from a projection that came out of a **real run** (``--index``), not from re-projecting the
-    checkpoint — see ``README`` §"投影的 flow 数字". Flow numbers (产出 / 维护 / 治理) only exist for
-    rounds the engine actually advanced.
+    checkpoint — see ``README`` §"过程量只在引擎真跑过的回合里才有". The process quantities
+    (产出 / 维护 / 治理 / 贸易 / 判定) only exist for rounds the engine actually advanced; in a
+    round's ``pre`` view they are 0/empty.
     """
-    metrics = (ctl.projection(proj_dir).facts.iloc[-1].get("metrics") or {}).get("factions") or {}
+    view = (ctl.projection(proj_dir).facts.iloc[-1].get("view") or {}).get("factions") or {}
     rows = []
-    for fid, m in metrics.items():
+    for fid, m in view.items():
         prod = float(m.get("production_value") or 0.0)
         up = float(m.get("upkeep") or 0.0)
         rows.append({"faction_id": fid, "production_value": prod, "upkeep": up,

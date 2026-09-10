@@ -75,7 +75,7 @@ pub fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
     }
 }
 
-pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
+pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.name.clone()).collect();
     for cid in city_ids {
         let (body_id, faction_id, population, razed) = {
@@ -144,7 +144,7 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundF
             }
             let spec = config.building_spec("mining");
             let output = effective * labor * spec.productivity * config.economy.production_rate;
-            // 记录本回合产出（step_production 的「中间量」），供 round_metrics 做 agent 总结：
+            // 记录本回合产出（step_production 的「中间量」），供 observe 做 agent 总结：
             // 每城 + 每势力各记一份；**记的是开采量**（不管它落在首都还是产地货栈）；
             // 随后按 `is_hub` 决定入库路径。
             *flow.city_production.entry(cid.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
@@ -178,7 +178,7 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundF
 /// （派船去空白定居点，见 `colonize`），所以流亡舰队必须先**活到**能开过去。
 /// 没有这条，实测 seed 1/7/42 跑到 1000 回合会**只剩 1-4 个势力有城、5-8 个永久亡国**
 /// ——战争拆掉最后一座城 → 无产出 → 库存被维护费抽干 → 全舰队生锈拆解 → 永远回不来。
-pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
+pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
     for fid in faction_ids {

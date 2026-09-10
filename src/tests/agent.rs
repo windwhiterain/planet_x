@@ -28,15 +28,23 @@ fn state_view_reports_effective_doctrine_and_kiting() {
     });
     crate::control::apply_patch(&mut state, &cfg, &diff).expect("默认风格 applies");
 
-    let v = state_json(&state, &crate::sim::derived_from_state(&state, &cfg));
+    let v = state_json(&state, &crate::sim::view_from_state(&state, &cfg));
     let row = v["ships"]
         .as_array()
         .unwrap()
         .iter()
         .find(|r| r["name"] == serde_json::json!(name))
         .expect("该舰在视图里");
-    assert_eq!(row["kiting"], serde_json::json!(-1.0), "视图必须给有效姿态（舰队默认）");
-    assert_eq!(row["doctrine"]["temper"], serde_json::json!(0.5), "视图必须给有效风格");
+    assert_eq!(
+        row["kiting"],
+        serde_json::json!(-1.0),
+        "视图必须给有效姿态（舰队默认）"
+    );
+    assert_eq!(
+        row["doctrine"]["temper"],
+        serde_json::json!(0.5),
+        "视图必须给有效风格"
+    );
     // 记录值不动（它仍是出厂快照）——这正是"视图不能直接序列化 Ship"的原因。
     assert_eq!(state.ship(&name).unwrap().kiting, record_kiting);
     assert_eq!(state.ship(&name).unwrap().doctrine, record_doctrine);
@@ -49,7 +57,10 @@ fn state_view_reports_effective_doctrine_and_kiting() {
 fn meta_derives_all_combat_fields_and_keeps_ints() {
     let cfg = config::load_config();
     let m = meta_value(&cfg);
-    let combat = m.get("combat").and_then(|v| v.as_object()).expect("combat section");
+    let combat = m
+        .get("combat")
+        .and_then(|v| v.as_object())
+        .expect("combat section");
     for f in [
         "component_spill",
         "component_repair",
@@ -57,11 +68,17 @@ fn meta_derives_all_combat_fields_and_keeps_ints() {
         "pursuit_range",
         "pd_radius",
     ] {
-        assert!(combat.contains_key(f), "meta.combat 缺少 {f}（曾被手写清单漏掉）");
+        assert!(
+            combat.contains_key(f),
+            "meta.combat 缺少 {f}（曾被手写清单漏掉）"
+        );
     }
     // 整数型配置字段必须保持整数，不能因圆整变成 `2.0`。
     let slots = &m["ships"]["corvette"]["slots"];
-    assert!(slots.is_i64() || slots.is_u64(), "slots 应为整数，实为 {slots}");
+    assert!(
+        slots.is_i64() || slots.is_u64(),
+        "slots 应为整数，实为 {slots}"
+    );
 }
 
 /// 规则字典 `meta` 必须**覆盖每一个配置段**（它从 config 派生，不手写）。任何 config
@@ -70,31 +87,56 @@ fn meta_derives_all_combat_fields_and_keeps_ints() {
 #[test]
 fn meta_value_covers_every_config_section() {
     fn key_set(v: &serde_json::Value) -> std::collections::BTreeSet<String> {
-        v.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default()
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
     }
     fn assert_covers(m: &serde_json::Value, key: &str, cfgv: &serde_json::Value) {
         let meta_sec = m.get(key).unwrap_or_else(|| panic!("meta 缺 {key} 段"));
         let cfg_keys = key_set(cfgv);
         let meta_keys = key_set(meta_sec);
         let missing: Vec<_> = cfg_keys.difference(&meta_keys).cloned().collect();
-        assert!(missing.is_empty(), "meta.{key} 遗漏 config 字段: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "meta.{key} 遗漏 config 字段: {missing:?}"
+        );
     }
     let cfg = config::load_config();
     let m = meta_value(&cfg);
     // 结构体段：meta 用 config_json 全量派生，key 集合必须覆盖 config 的集合。
     assert_covers(&m, "economy", &serde_json::to_value(&cfg.economy).unwrap());
     assert_covers(&m, "combat", &serde_json::to_value(&cfg.combat).unwrap());
-    assert_covers(&m, "diplomacy", &serde_json::to_value(&cfg.diplomacy).unwrap());
+    assert_covers(
+        &m,
+        "diplomacy",
+        &serde_json::to_value(&cfg.diplomacy).unwrap(),
+    );
     assert_covers(&m, "market", &serde_json::to_value(&cfg.market).unwrap());
     assert_covers(&m, "freight", &serde_json::to_value(&cfg.freight).unwrap());
-    assert_covers(&m, "governance", &serde_json::to_value(&cfg.governance).unwrap());
+    assert_covers(
+        &m,
+        "governance",
+        &serde_json::to_value(&cfg.governance).unwrap(),
+    );
     assert_covers(&m, "mond", &serde_json::to_value(&cfg.mond).unwrap());
     assert_covers(&m, "balance", &serde_json::to_value(&cfg.balance).unwrap());
     // 字符串键表段：meta 的段 key == config 表的 key。
-    assert_covers(&m, "structures", &serde_json::to_value(&cfg.structures).unwrap());
-    assert_covers(&m, "buildings", &serde_json::to_value(&cfg.buildings).unwrap());
+    assert_covers(
+        &m,
+        "structures",
+        &serde_json::to_value(&cfg.structures).unwrap(),
+    );
+    assert_covers(
+        &m,
+        "buildings",
+        &serde_json::to_value(&cfg.buildings).unwrap(),
+    );
     assert_covers(&m, "ships", &serde_json::to_value(&cfg.ships).unwrap());
-    assert_covers(&m, "components", &serde_json::to_value(&cfg.components).unwrap());
+    assert_covers(
+        &m,
+        "components",
+        &serde_json::to_value(&cfg.components).unwrap(),
+    );
 }
 
 /// agent 视图（`state_json` 发射的 JSON）必须被 `schema_value()` **自描述**：发射的
@@ -105,34 +147,64 @@ fn meta_value_covers_every_config_section() {
 fn agent_view_is_self_described_by_schema() {
     let cfg = config::load_config();
     let state = crate::world::default_state(&cfg, 42);
-    let v = state_json(&state, &crate::sim::derived_from_state(&state, &cfg));
+    let v = state_json(&state, &crate::sim::view_from_state(&state, &cfg));
     let schema = schema_value();
-    let props = schema.get("properties").and_then(|p| p.as_object()).expect("schema.properties");
+    let props = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("schema.properties");
     let emit_keys = v
         .as_object()
         .map(|o| o.keys().cloned().collect::<std::collections::BTreeSet<_>>())
         .unwrap_or_default();
-    let schema_keys = props.keys().cloned().collect::<std::collections::BTreeSet<_>>();
+    let schema_keys = props
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let missing: Vec<_> = emit_keys.difference(&schema_keys).cloned().collect();
-    assert!(missing.is_empty(), "agent 视图发射了 schema 未描述的字段: {missing:?}");
-    for k in ["bodies", "cities", "factions", "ships", "events", "chronicle", "metrics"] {
+    assert!(
+        missing.is_empty(),
+        "agent 视图发射了 schema 未描述的字段: {missing:?}"
+    );
+    for k in [
+        "bodies",
+        "cities",
+        "factions",
+        "ships",
+        "events",
+        "chronicle",
+        "view",
+    ] {
         assert!(props.contains_key(k), "schema 缺字段 {k}");
     }
-    // 总结指标 `metrics` 必须真的出现在发射的 JSON 里（不是空壳），且是实体视图的一部分。
+    // 视图 `view` 必须真的出现在发射的 JSON 里（不是空壳），且是实体视图的一部分。
     assert!(
-        v.get("metrics").is_some_and(|m| m.get("factions").is_some()),
-        "agent 视图必须携带 metrics 总结（含各势力聚合）"
+        v.get("view")
+            .is_some_and(|m| m.get("factions").is_some()),
+        "agent 视图必须携带 view（含各势力一行）"
     );
-    // metrics 必须携带新增的**流量**字段（产出/维护/治理 + 每城产出）。
-    let m = &v["metrics"];
+    // 每势力那一行必须同时带**观测**与**本回合过程量**（产出/维护/治理）。
+    let m = &v["view"];
     let sample_fac = m
         .get("factions")
         .and_then(|f| f.as_object())
         .and_then(|o| o.values().next())
         .cloned()
         .unwrap_or_default();
-    for k in ["production_value", "production", "upkeep", "governance_cost", "governance_coverage"] {
-        assert!(sample_fac.get(k).is_some(), "metrics.factions 缺流量字段 {k}");
+    for k in [
+        "production_value",
+        "production",
+        "upkeep",
+        "governance_cost",
+        "governance_coverage",
+    ] {
+        assert!(
+            sample_fac.get(k).is_some(),
+            "view.factions 缺过程量字段 {k}"
+        );
     }
-    assert!(m.get("city_production").is_some(), "metrics 缺每城产出 city_production");
+    assert!(
+        m.get("cities").is_some(),
+        "view 缺每城一行 cities"
+    );
 }

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
 const MAJOR_EAGER: &[&str] = &[
-    "round", "time_month", "event_ids", "chronicle", "metrics", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
+    "round", "time_month", "event_ids", "chronicle", "view", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
 ];
 
 /// A scratch dir for one test, removed on drop.
@@ -699,34 +699,33 @@ fn flow_table_matches_the_derived_record() {
     let s = Scratch::new("flow_match");
     let outcome = write_index(&mut state, &cfg, &mut rng, 8, &s.0).unwrap();
 
-    let flow = jsonl(&s.0.join("idx/flow.jsonl"));
+    let flow = jsonl(&s.0.join("idx/faction_process.jsonl"));
     let last_round = state.round;
     let last: Vec<&serde_json::Value> =
         flow.iter().filter(|r| r["round"] == json!(last_round)).collect();
-    assert!(!last.is_empty(), "最后一回合应有 flow 行");
+    assert!(!last.is_empty(), "最后一回合应有过程量行");
     let mut checked = 0usize;
     for row in last {
         let fid = row["faction_id"].as_str().unwrap();
-        let expect_upkeep = outcome.post.flow.upkeep.get(fid).copied().unwrap_or(0.0);
+        let expect_upkeep = outcome.post.factions.get(fid).map(|r| r.upkeep).unwrap_or(0.0);
         assert_eq!(
             row["upkeep"].as_f64().unwrap(),
             expect_upkeep,
-            "{fid} 的 upkeep 与 Derived.flow 不一致（读了两个不同的数）"
+            "{fid} 的 upkeep 与视图不一致（读了两个不同的数）"
         );
         let expect_prod = outcome
             .post
-            .flow
-            .faction_production
+            .factions
             .get(fid)
-            .cloned()
+            .map(|r| r.production.clone())
             .unwrap_or_default();
         assert_eq!(row["production"], serde_json::to_value(&expect_prod).unwrap(), "{fid} 的 production 不一致");
         checked += 1;
     }
-    assert!(checked >= 2, "只检查了 {checked} 个势力的 flow 行——守卫太空");
+    assert!(checked >= 2, "只检查了 {checked} 个势力的过程量行——守卫太空");
 
-    // city_flow 同理（挑一个真有产出的城，别拿空表当通过）。
-    let city_flow = jsonl(&s.0.join("idx/city_flow.jsonl"));
+    // 城的过程量表同理（挑一个真有产出的城，别拿空表当通过）。
+    let city_flow = jsonl(&s.0.join("idx/city_process.jsonl"));
     let with_prod: Vec<&serde_json::Value> = city_flow
         .iter()
         .filter(|r| r["round"] == json!(last_round))
@@ -737,10 +736,9 @@ fn flow_table_matches_the_derived_record() {
         let cid = row["city_id"].as_str().unwrap();
         let expect = outcome
             .post
-            .flow
-            .city_production
+            .cities
             .get(cid)
-            .cloned()
+            .map(|r| r.production.clone())
             .unwrap_or_default();
         assert_eq!(row["production"], serde_json::to_value(&expect).unwrap(), "{cid} 的产出不一致");
     }

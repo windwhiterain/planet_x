@@ -140,7 +140,7 @@ pub fn faction_ideology_debuffs(state: &State, config: &GameConfig) -> BTreeMap<
 /// 时忠诚度暴跌。忠诚度跌破 [`GovernanceConfig::loyalty_revolt`] 即爆发离心叛乱，城市
 /// 被夷平为空白（可再殖民）。这给超大帝国一个自然上限——既能管的领地有限，遥远的
 /// 殖民地在治理失败时丢失，使世界在上千回合后保持多方参与。
-pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
+pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     let g = &config.governance;
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);

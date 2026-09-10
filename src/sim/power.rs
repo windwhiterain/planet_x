@@ -22,7 +22,7 @@ pub fn war_strength(state: &State, config: &GameConfig, fid: &str) -> f64 {
 
 /// 各势力**综合实力**（幂：`city_weight×城市份额 + fleet_weight×舰队份额`，未除以两权重之和）。
 /// 这是“谁最强”的**单一权威**统计：`faction_power_share` 由它归一化而来，观测
-/// （[`round_metrics`] 的 `faction_power`）与游戏逻辑（`step_balance_of_power`/
+/// （[`observe`] 的 `faction_power`）与游戏逻辑（`step_balance_of_power`/
 /// `sanction_cost_mult`）都读同一份。城市份额 = 活城数/总活城数，舰队份额 = 舰艇引擎数值
 /// 之和/总引擎数值之和。无活城且无舰时全 0。
 pub fn faction_power(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {

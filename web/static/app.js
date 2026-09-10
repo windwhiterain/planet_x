@@ -10,7 +10,7 @@
 //   * 右侧「状态」    = **普通 state + 派生 + 配置**（只读全量）。
 //     它把后端给的 `world.info`（每个根 = 模型的整份 JSON dump）交给 jsonview.js 那个
 //     schema-agnostic widget 渲染：本文件不写任何字段名，只决定「渲染哪个根」，
-//     所以 State/GameConfig/Derived 怎么改都不用动前端。
+//     所以 State/GameConfig/RoundView 怎么改都不用动前端。
 
 let world = null;      // 当前 StateView（/api/state）= { control, scope, info }
 let st = null;         // info 的 `state` 根：规范世界的**原始** State（天体/定居点/城/势力/舰/…）

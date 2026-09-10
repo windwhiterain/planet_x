@@ -26,12 +26,12 @@
 
 use axum::extract::Extension as AxExtension;
 use axum::extract::State as AxState;
-use axum::http::{header, HeaderValue};
+use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use planet_x::config::parse_seed;
 use planet_x::control::{
-    apply_diff, control_view, scope_view, ApplyReport, CommandReq, FactionControlView,
+    ApplyReport, CommandReq, FactionControlView, apply_diff, control_view, scope_view,
 };
 use planet_x::model::*;
 use planet_x::prng::Prng;
@@ -55,20 +55,26 @@ pub struct GameWorld {
     pub config: GameConfig,
     pub rng: Prng,
     /// 上一回合开头（还没掷随机）的派生观测 `pre`。
-    pub pre: Derived,
-    /// 上一回合结束的派生态 `post`：`flow` 是步进函数**实际用过**的流量
+    pub pre: RoundView,
+    /// 上一回合结束的视图 `post`：它比 `pre` 多出「本回合**过程量**」（产出/维护/治理/贸易/判定）
     /// （每城/每势力产出、舰队维护费、治理成本/覆盖率），只有 [`sim::advance`] 的
-    /// 返回值才带得到；`metrics` 是该回合结束时的存量/政治总结。语义与 CLI `--save`
-    /// 的 [`RoundState`] 完全一致（round 0 / 新局时两者都是 [`sim::derived_from_state`]
+    /// ——那些量只有 `sim::advance` 的返回值才带得到；观测部分（世界总量/政治/每势力一行）与
+    /// 的 [`RoundState`] 完全一致（round 0 / 新局时两者都是 [`sim::view_from_state`]
     /// 的「无流量」观测）。
-    pub post: Derived,
+    pub post: RoundView,
 }
 
 impl GameWorld {
     /// 建一个世界：派生快照初始化为「只看当前 state、尚无流量」的观测。
     pub fn new(state: State, config: GameConfig, rng: Prng) -> Self {
-        let d = sim::derived_from_state(&state, &config);
-        GameWorld { state, config, rng, pre: d.clone(), post: d }
+        let d = sim::view_from_state(&state, &config);
+        GameWorld {
+            state,
+            config,
+            rng,
+            pre: d.clone(),
+            post: d,
+        }
     }
 }
 
@@ -79,7 +85,7 @@ pub type Shared = Arc<Mutex<GameWorld>>;
 /// 通用只读信息树的**一个根**：一个名字 + 一份任意 JSON。
 ///
 /// 前端用**同一个** schema-agnostic widget 渲染任意根——widget 不认识 `State` /
-/// `Derived` / `GameConfig` 的任何字段名，只认 JSON 的形状（对象/数组/标量）。
+/// `RoundView` / `GameConfig` 的任何字段名，只认 JSON 的形状（对象/数组/标量）。
 /// 因此模型加字段/改结构，前端**一个字符都不用改**：树自动变。
 ///
 /// 每个根的值都是 `serde_json::to_value` 出来的**模型本体**，没有任何手工投影
@@ -154,7 +160,7 @@ fn default_random_seed() -> String {
 /// * `pre` / `post` —— 上一回合的派生态（`RoundState` 的一对）：`post` 带**真实的
 ///   本回合流量**（每城/每势力产出、舰队维护费、治理成本/覆盖率）与回合末的存量/
 ///   政治总结（实力占比/霸权/联盟/制裁/战争…）；`pre` 是回合开头（随机未落地）
-///   的同构观测。由 [`sim::advance`] / [`sim::derived_from_state`] 产出，与 CLI
+///   的同构观测。由 [`sim::advance`] / [`sim::view_from_state`] 产出，与 CLI
 ///   `--save` 落盘的 checkpoint 同源、逐回合一致。
 /// * `config`  —— `config/game.ron` 的全部调参表（经济/战斗/外交/市场/治理/MOND/
 ///   均势/思潮 + 资源/结构/天体类型/舰/组件/建筑/剧情/名字库）。
@@ -165,12 +171,27 @@ fn default_random_seed() -> String {
 /// 非字符串 map key（如 `(城市, 建筑id)` 元组键）转成字符串，所以**整份模型**都能
 /// 落到 JSON，而不是只有被手工挑过、恰好 JSON-able 的那部分。
 fn info_roots(world: &GameWorld) -> Vec<InfoRoot> {
-    let root = |name: &str, value: serde_json::Value| InfoRoot { name: name.to_string(), value };
+    let root = |name: &str, value: serde_json::Value| InfoRoot {
+        name: name.to_string(),
+        value,
+    };
     vec![
-        root("state", planet_x::json::to_value(&world.state).expect("state is dumpable")),
-        root("pre", planet_x::json::to_value(&world.pre).expect("pre is dumpable")),
-        root("post", planet_x::json::to_value(&world.post).expect("post is dumpable")),
-        root("config", planet_x::json::to_value(&world.config).expect("config is dumpable")),
+        root(
+            "state",
+            planet_x::json::to_value(&world.state).expect("state is dumpable"),
+        ),
+        root(
+            "pre",
+            planet_x::json::to_value(&world.pre).expect("pre is dumpable"),
+        ),
+        root(
+            "post",
+            planet_x::json::to_value(&world.post).expect("post is dumpable"),
+        ),
+        root(
+            "config",
+            planet_x::json::to_value(&world.config).expect("config is dumpable"),
+        ),
         root(
             "session",
             serde_json::json!({
@@ -194,7 +215,12 @@ pub fn state_view(world: &GameWorld) -> StateView {
         .iter()
         .map(|(fid, c)| control_view(s, &world.config, fid.clone(), c))
         .collect();
-    StateView { control, scope: scope_view(&s.scope), info: info_roots(world), report: None }
+    StateView {
+        control,
+        scope: scope_view(&s.scope),
+        info: info_roots(world),
+        report: None,
+    }
 }
 
 // --- 服务生命周期：身份 / 页面登记 / 退出闸门 --------------------------------
@@ -235,7 +261,12 @@ pub struct ExitGate {
 impl ExitGate {
     fn channel() -> (ExitGate, oneshot::Receiver<String>) {
         let (tx, rx) = oneshot::channel();
-        (ExitGate { tx: Arc::new(Mutex::new(Some(tx))) }, rx)
+        (
+            ExitGate {
+                tx: Arc::new(Mutex::new(Some(tx))),
+            },
+            rx,
+        )
     }
 
     /// 请求退出；返回这次调用是否是**触发者**（重复请求返回 `false`，不再改理由）。
@@ -286,9 +317,14 @@ impl WebCtx {
     /// * `PLANET_X_WEB_CLOSE_GRACE_MS` 刷新窗口，默认 `500`（`0` = 关页面立刻退，
     ///   代价是**刷新会把服务带走**）。
     pub fn new(port: u16, owner_pid: Option<u32>) -> (Self, oneshot::Receiver<String>) {
-        let close_exit = parse_flag(std::env::var("PLANET_X_WEB_CLOSE_EXIT").ok().as_deref(), true);
-        let close_grace =
-            Duration::from_millis(parse_u64(std::env::var("PLANET_X_WEB_CLOSE_GRACE_MS").ok().as_deref(), 500));
+        let close_exit = parse_flag(
+            std::env::var("PLANET_X_WEB_CLOSE_EXIT").ok().as_deref(),
+            true,
+        );
+        let close_grace = Duration::from_millis(parse_u64(
+            std::env::var("PLANET_X_WEB_CLOSE_GRACE_MS").ok().as_deref(),
+            500,
+        ));
         WebCtx::with_close_policy(port, owner_pid, close_exit, close_grace)
     }
 
@@ -335,7 +371,10 @@ impl WebCtx {
             uptime_secs: self.inner.started.elapsed().as_secs(),
             exe: self.inner.exe.display().to_string(),
             exe_age_secs: self.inner.exe_mtime.and_then(|t| {
-                SystemTime::now().duration_since(t).ok().map(|d| d.as_secs())
+                SystemTime::now()
+                    .duration_since(t)
+                    .ok()
+                    .map(|d| d.as_secs())
             }),
             owner_pid: self.inner.owner_pid,
             tabs: self.tab_count(),
@@ -417,7 +456,7 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
     for _ in 0..req.n {
         // 与 CLI 同语义：`pre` = 回合开头（随机还没落地）的观测，`post` = advance 的返回
         // （带本回合真实流量）。两者都随最后一次推进更新，成为「当前回合记录」。
-        world.pre = sim::derived_from_state(&world.state, &world.config);
+        world.pre = sim::view_from_state(&world.state, &world.config);
         world.post = sim::advance(&mut world.state, &world.config, &mut world.rng);
     }
     Json(state_view(world))
@@ -447,7 +486,7 @@ async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> 
     let seed = parse_seed(&req.seed);
     world.state = world::default_state(&world.config, seed);
     world.rng = Prng::new(seed);
-    let d = sim::derived_from_state(&world.state, &world.config);
+    let d = sim::view_from_state(&world.state, &world.config);
     world.pre = d.clone();
     world.post = d;
     Json(state_view(&world))
@@ -477,8 +516,13 @@ async fn ping(AxExtension(web): AxExtension<WebCtx>) -> Json<Identity> {
 }
 
 /// `POST /api/tab` —— 一个页面报到了（载入时、以及从 bfcache 回来时）。
-async fn tab_open(AxExtension(web): AxExtension<WebCtx>, Json(req): Json<TabReq>) -> Json<TabCount> {
-    Json(TabCount { tabs: web.open_tab(&req.tab) })
+async fn tab_open(
+    AxExtension(web): AxExtension<WebCtx>,
+    Json(req): Json<TabReq>,
+) -> Json<TabCount> {
+    Json(TabCount {
+        tabs: web.open_tab(&req.tab),
+    })
 }
 
 /// `POST /api/bye` —— 一个页面走了；**最后一个**走的会触发服务自退（留一个刷新窗口）。
@@ -490,7 +534,9 @@ async fn tab_bye(AxExtension(web): AxExtension<WebCtx>, Json(req): Json<TabReq>)
         }
         Some(left) => Json(TabCount { tabs: left }),
         // 陌生 id：什么都不动（迟到/伪造的注销不该带走当前服务）。
-        None => Json(TabCount { tabs: web.tab_count() }),
+        None => Json(TabCount {
+            tabs: web.tab_count(),
+        }),
     }
 }
 
@@ -510,7 +556,9 @@ async fn tab_bye(AxExtension(web): AxExtension<WebCtx>, Json(req): Json<TabReq>)
 pub async fn bind_auto(host: &str, base: u16, attempts: u16) -> std::io::Result<TcpListener> {
     let mut busy: Option<std::io::Error> = None;
     for offset in 0..attempts {
-        let Some(port) = base.checked_add(offset) else { break };
+        let Some(port) = base.checked_add(offset) else {
+            break;
+        };
         match TcpListener::bind((host, port)).await {
             Ok(listener) => return Ok(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => busy = Some(e),

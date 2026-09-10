@@ -164,9 +164,11 @@ fn probe_mond_carrier() {
         for _ in 1..=n {
             let d = sim::advance(&mut state, &config, &mut rng);
             let mut any = false;
-            for (fid, v) in &d.flow.market_carrier_income {
-                *income.entry(fid.clone()).or_insert(0.0) += *v;
-                any = true;
+            for (fid, row) in &d.factions {
+                *income.entry(fid.clone()).or_insert(0.0) += row.carrier_income;
+                if row.carrier_income > 0.0 {
+                    any = true;
+                }
             }
             if any {
                 rounds_with_carrier += 1;

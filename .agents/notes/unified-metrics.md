@@ -2,6 +2,13 @@
 
 > 状态 `[x]`（feature/unified-metrics） ｜ 索引：[notes.md](../notes.md) ｜ 前身：`ideas.md` §16
 
+> ⚠ **本篇的类型名已换代**（`feature/pre-post-unify`）：这篇写的是「总结 = 步进中间量」那一次合并，
+> 当时的 `RoundMetrics` / `FactionMetrics` / `CityMetrics` / `RoundFlow` 已经不存在了——
+> `flow` + `metrics` 两段合并成**一份视图** `RoundView`（每势力一行 `FactionRow` / 每城一行
+> `CityRow`），`RoundFlow` 退成**引擎内部的写入口袋** `RoundSink`，聚合器 `round_metrics` 改名
+> `observe`。下文的**原话保留不改**（它是落地记录），凡遇到旧名请按这一条读；
+> 见 [`pre-post-unify.md`](pre-post-unify.md)。
+
 > 问题：agent 除了直接状态，还看到很多**总结**（实力占比/霸权/联盟/制裁/交战、各势力城市·
 > 舰队·人口·库存价值、世界总量）。这些总结其实就是**步进函数里算的那些中间变量**，不该由
 > `--digest` 或别处**独立重算**一遍——否则容易与模拟漂移、重复劳动。
@@ -45,7 +52,7 @@
   `--digest 12` 的 `factions[].production` 是窗口累计值（如 美国=347.45）。
 
 **候选（留待后续）**：
-- `[ ]` 把治理中间量（`governance_total`/`coverage`/距首都距离）也并入 `RoundMetrics`——给
+- `[ ]` 把治理中间量（`governance_total`/`coverage`/距首都距离）也并入 `RoundView`——给
   agent 一个「帝国为何要崩」的预警阅读，代价是每回合多一遍治理公式。
-- `[ ]` Web（玩家界面）要不要共享同一份 `round_metrics`（现在刻意不动它）——若玩家也想要
+- `[ ]` Web（玩家界面）要不要共享 `observe` 折出来的那份视图（现在刻意不动它）——若玩家也想要
   「世界一目了然的概览面板」可复用，但形状是面向玩家，另行设计。

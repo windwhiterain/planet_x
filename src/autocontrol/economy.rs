@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 /// faction is over-extending its economy.
 ///
 /// The numbers are the **simulation's own**: it dry-runs one real [`sim::advance`] on a clone
-/// with a fixed RNG seed, then reads the captured [`RoundFlow`] through [`sim::round_metrics`] —
+/// with a fixed RNG seed, then reads the captured [`RoundSink`] through [`sim::observe`] —
 /// so there is zero drift between the preview and what [`sim::advance`] would actually do.
 /// (Production, upkeep and governance are RNG-independent, so the fixed seed is just for
 /// determinism.) Purely analytical: it never mutates the caller's state and never consumes the
@@ -29,35 +29,34 @@ pub fn control_plan(state: &State, config: &GameConfig, fid: &str) -> Option<ser
     if !state.factions.iter().any(|f| f.name == fid) {
         return None;
     }
-    let metrics = dry_metrics(state, config);
-    plan_core(state, config, &metrics, fid)
+    let view = dry_view(state, config);
+    plan_core(state, config, &view, fid)
 }
 
 /// The same cost→benefit preview for **every** faction, from a single dry-run (one clone +
 /// one [`sim::advance`]); the returned map is keyed by faction id. Exposed via
 /// `--control-plan` (no faction argument).
 pub fn control_plan_all(state: &State, config: &GameConfig) -> BTreeMap<String, serde_json::Value> {
-    let metrics = dry_metrics(state, config);
+    let view = dry_view(state, config);
     state
         .factions
         .iter()
-        .filter_map(|f| plan_core(state, config, &metrics, &f.name).map(|v| (f.name.clone(), v)))
+        .filter_map(|f| plan_core(state, config, &view, &f.name).map(|v| (f.name.clone(), v)))
         .collect()
 }
 
-/// Dry-run one real [`sim::advance`] on a clone (fixed seed) and return the captured
-/// [`sim::round_metrics`] — the simulation's own per-round numbers, never re-derived. The
+/// Dry-run one real [`sim::advance`] on a clone (fixed seed) and return the round's
+/// [`RoundView`] — the simulation's own per-round numbers, never re-derived. The
 /// caller's state and RNG are untouched.
-fn dry_metrics(state: &State, config: &GameConfig) -> RoundMetrics {
+fn dry_view(state: &State, config: &GameConfig) -> RoundView {
     let mut s = state.clone();
     let mut r = Prng::new(PLAN_SEED);
-    let derived = sim::advance(&mut s, config, &mut r);
-    derived.metrics
+    sim::advance(&mut s, config, &mut r)
 }
 
 /// Build one faction's profile from the real `state` (commands / stockpile) and the
-/// dry-run `metrics` (production / upkeep / governance for the coming round).
-fn plan_core(state: &State, config: &GameConfig, metrics: &RoundMetrics, fid: &str) -> Option<serde_json::Value> {
+/// dry-run `view` (production / upkeep / governance for the coming round).
+fn plan_core(state: &State, config: &GameConfig, view: &RoundView, fid: &str) -> Option<serde_json::Value> {
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     // 库存市场价值（当前、未推进）。
@@ -82,7 +81,7 @@ fn plan_core(state: &State, config: &GameConfig, metrics: &RoundMetrics, fid: &s
     let ai_cap = (stock_value * config.economy.invest_fraction)
         .min((stock_value - upkeep_now * config.economy.upkeep_reserve_mult).max(0.0));
 
-    let Some(fm) = metrics.factions.get(fid) else { return None };
+    let Some(fm) = view.factions.get(fid) else { return None };
 
     let production = fm.production_value;
     let upkeep = fm.upkeep;
