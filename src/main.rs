@@ -371,7 +371,7 @@ fn main() {
         return;
     }
     if cli.control {
-        emit(&control::control_surface(&state).to_string());
+        emit(&control::control_surface(&state, &config).to_string());
         return;
     }
     match &cli.control_plan {
