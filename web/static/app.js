@@ -19,12 +19,16 @@ let selFaction = '';   // 选中势力（读面/聚焦）
 let sel = null;        // 选中对象 { kind, name }——底部读面用通用 widget 渲染它的完整记录
 let edControl = [];    // 所有势力的可编辑控制（FactionControlView[]）
 let edScope = null;    // 可编辑作用域
+let baseControl = [];  // 载入时的读面快照（回传 diff 的基准，见 buildCommandDiff）
+let baseScope = null;  // 同上，作用域那一段
 let prevState = null;  // 上一帧，用于 diff 页脚
 let selTab = new Map(); // parentKey -> 激活子 key（每层只开一个 tab）
 let infoTab = 0;       // 右侧面板当前显示的根（world.info 的下标）
 let infoFilter = '';   // 右侧面板的过滤串
 const infoExpanded = new Set(); // 右侧面板的展开状态（路径集合，跨渲染保留）
 const selExpanded = new Set();  // 底部读面的展开状态
+const leafOrigin = new Map();   // 编辑面里的叶 -> 原值（回传 diff 的基准，见 buildCommandDiff）
+let autoPinned = new WeakSet(); // 「写值即接管」钉成 Player 的叶（值改回原数时撤回，见 wroteValue）
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const el = (tag, attrs, html) => {
@@ -111,12 +115,48 @@ function num2(v) {
 function doctrineSummary(l) { return '理智↔热血 ' + num2(l.temper) + ' · 护航↔独狼 ' + num2(l.lone_wolf); }
 function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
 
+// 风格两轴上的「自动」是**空头承诺**：全仓没有一处生产代码写风格叶（`ship_doctrine`/
+// `ship_kiting` 的唯一写入者就是玩家/agent），所以系统**不会**来重估它。对照：指令轴的
+// `Auto` 是真的有执行者（AI 每回合往 `ship_orders` 写叶，所以那里照旧说「值由系统写」）。
+// 措辞必须分开——照抄「值由系统写」在风格轴上是假话（note：control-live-layers §3.2）。
+const AUTO_FROZEN = '自动（本轴暂无重估者：值冻结）';   // 逐舰风格叶：值在用，但没人会改它
+const AUTO_NO_VALUE = '自动（本轴暂无重估者：不给值）'; // 势力级默认叶：引擎只在它是玩家时供值
+const STYLE_KINDS = ['shipdoctrine', 'fleetdoctrine', 'shipkiting', 'fleetkiting'];
+
 // 势力级**默认风格**行的摘要：只有它自己是「玩家」时那个值才真的被采用（引擎的取值规则：
 // 默认叶为 `Inherit`/`Auto` 时不供值），所以这两种情况都不显示那几个数——显示了会骗人。
 function fleetStyleLabel(leaf, summary) {
   const m = normMode(leaf.mode);
   if (m === 'Player') return ' · ' + summary(leaf);
-  return m === 'Auto' ? ' · 自动（值由系统写）' : ' · 未表态';
+  return m === 'Auto' ? ' · ' + AUTO_NO_VALUE : ' · 未表态';
+}
+
+/// 逐舰风格叶的 `Auto` 补注：值是**在用**的（叶片自己的值优先），但没人会来重估它。
+function autoFrozen(leaf) { return normMode(leaf.mode) === 'Auto' ? ' · ' + AUTO_FROZEN : ''; }
+
+/// 「这个数现在是从哪来的」：引擎的取值链是
+///   叶 `Inherit` + 舰队默认是 `Player` ⇒ 舰队默认的值；否则叶自己的值；没有叶 ⇒ 舰上记录值
+/// （`State::ship_doctrine` / `ship_kiting`）。只在叶片**自己没表态**时显示——那时"你以为的
+/// 归属"与"实际的来源"最容易错位，而这正是「改舰队默认对某艘舰没用」的成因。
+function styleFollowHint(node) {
+  const leaf = node.leaf;
+  if (normMode(leaf.mode) !== 'Inherit') return null;
+  const doctrine = node.kind === 'shipdoctrine';
+  const summary = doctrine ? doctrineSummary : kitingSummary;
+  const fc = getControl(node.fid);
+  const d = fc[DEFAULT_LEAF[node.kind]];
+  if (d && normMode(d.mode) === 'Player') {
+    return hintLine('当前跟随：舰队默认（' + summary(d) + '）');
+  }
+  // 叶片**存在**但没有表态：引擎取的是叶里的值（`leaf.map(...)` 优先于记录值）——也就是说
+  // 「没表态」不等于「没值」：这个数已经被钉在叶里，改出厂/舰队默认都不会再影响它。
+  // ⚠ 「恢复继承」只撤**表态**、不动值（note §8 第 2 条），所以它**不会**把这个数放回出厂值
+  // ——今天没有任何接口能删掉一片叶（补丁只能新建/改写），说法必须写到这一步。
+  const raw = ((st.control || {})[node.fid] || {})[doctrine ? 'ship_doctrine' : 'ship_kiting'] || {};
+  const s = st.ships.find((x) => x.name === node.id);
+  if (raw[node.id]) return hintLine('当前跟随：本舰叶片里的数（没表态 ≠ 没值：引擎优先用叶里的值）');
+  const rec = s ? (doctrine ? s.doctrine : s.kiting) : null;
+  return hintLine('当前跟随：出厂快照' + (rec != null ? '（' + summary(rec) + '）' : ''));
 }
 
 // --- 节点类型注册表 ---------------------------------------------------------
@@ -138,12 +178,14 @@ const KIND = {
   body:      { childMode: 'tabs', scope: 'bodies' },
   city:      { childMode: 'list', scope: 'cities' },
   // 一条舰 = 一个**三叶容器**（指令 / 风格 / 风筝姿态）。三片叶的归属链各自独立
-  // （叶 → 舰队默认 → 势力 → 全局），所以「归谁」的下拉在子叶那一行，不在这容器上。
-  ship:      { childMode: 'tabs' },
+  // （叶 → 舰队默认 → 势力 → 全局），所以「归谁」的下拉在子叶那一行，不在这容器上；
+  // 容器这一行只留一个**便利**下拉（`bulkOwnership`）＝「这三片叶一起归谁」。
+  ship:      { childMode: 'tabs', bulkOwnership: true },
   shiporder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
   // 逐舰风格两叶：值 = **有效风格**（叶 → 舰队默认 → 舰上记录值），mode = 该叶自己的表态。
-  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) },
-  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) },
+  // `Auto` 时补一句实话（值在用，但风格轴没有重估者 ⇒ 它冻着；见 AUTO_FROZEN）。
+  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) + autoFrozen(n.leaf) },
+  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) + autoFrozen(n.leaf) },
   // 势力级**三条默认**：指令 / 风格 / 风筝姿态。它们是「舰」这一组的前提（先定默认，例外才少写）。
   // 后两片与「舰队默认指令」同形，只是「风格」有两个轴：doctrine = 理智↔热血 + 护航↔独狼，
   // kiting = 风筝↔贴脸。摘要见 fleetStyleLabel（没表态就不显示数——那两个数还不算数）。
@@ -227,6 +269,165 @@ function buildEdits() {
   edControl = structuredClone(world.control || []);
   edScope = structuredClone(world.scope);
   edControl.forEach((c) => { c.buildings = c.buildings || []; });
+  // 回传 diff 的基准 = **载入时**的读面（不是编辑面：编辑面里有界面自己补出来的壳）。
+  baseControl = structuredClone(world.control || []);
+  baseScope = structuredClone(world.scope || {});
+  pairOrigins();
+}
+
+// --- 控制面的「原值」与回传 diff ---------------------------------------------
+// 引擎的写面是 presence-aware diff：**只改动出现在补丁里的叶**，缺省的字段/叶一律保留
+// 现值（`FactionControlPatch` 的文档）。所以前端只回传差异就够——而"回传整份"是有害的：
+// 读面里的风格叶给的是**有效值**（叶 → 舰队默认 → 出厂记录值），整份回传会把
+// 「没有叶 ⇒ 兜底到出厂记录值」变成「叶钉住这个数」；将来记录值的语义一变（例如蓝图
+// 接管出厂风格），这些舰就**不再跟随**，而现象是「改图/改配置对这艘舰没用」——极难归因。
+// 只回传差异还让「应用」变成幂等的：没改过 ⇒ 空 diff ⇒ 什么都没动（见 note §8 第 3 条）。
+//
+// 下面这张表是 diff 的地基：每片叶的**身份键**（回传必须带着）+ **值字段**（值 vs 表态）。
+// 不能靠 `for (k in leaf)` 猜：读面里的条目还带着 `kind`/`structure`/`ship_type` 这类
+// 实体属性（它们属于 state，不属于控制面）。
+const LEAF_SPEC = {
+  capital:             { keys: [],                values: ['value'] },
+  default_ship_order:  { keys: [],                values: ['behavior'] },
+  default_doctrine:    { keys: [],                values: ['temper', 'lone_wolf'] },
+  default_kiting:      { keys: [],                values: ['kiting'] },
+  ship_orders:         { keys: ['ship'],          values: ['behavior'] },
+  ship_doctrine:       { keys: ['ship'],          values: ['temper', 'lone_wolf'] },
+  ship_kiting:         { keys: ['ship'],          values: ['kiting'] },
+  investment_budget:   { keys: ['resource'],      values: ['value'] },
+  construction_budget: { keys: ['resource'],      values: ['value'] },
+  invest_weights:      { keys: ['city', 'building'], values: ['value'] },
+  build_weights:       { keys: ['city', 'building'], values: ['value'] },
+  loyalty_budget:      { keys: ['city'],          values: ['value'] },
+};
+/// 势力级那几片叶子（`Option<...>` 字段，不是数组）。
+const LEAF_OPTIONS = ['capital', 'default_ship_order', 'default_doctrine', 'default_kiting'];
+
+/// 记下一片叶的原值。**不覆盖**已经记过的：读面里的叶在 [`pairOrigins`] 里配过对。
+function rememberOrigin(leaf, fields, spec, shell) {
+  if (leaf && !leafOrigin.has(leaf)) {
+    leafOrigin.set(leaf, { fields: fields, values: spec.values, shell: !!shell });
+  }
+  return leaf;
+}
+
+/// 界面**补出来**的叶（读面里没有它）：值只用于显示，原值就是这片壳的模板。
+///
+/// 壳一旦被**动过**，回传时按「新建这片叶」发出去，而且是**完整**的（两轴一起给）：
+/// 势力级两轴叶单轴新建会被引擎响亮拒绝（note §3.1）。没动过的壳不会进 diff。
+function shellLeaf(leaf, spec) { return rememberOrigin(leaf, Object.assign({}, leaf), spec, true); }
+
+/// 把编辑面里的每一片叶与读面里的**同一片叶**配成对：回传时只报这两者之间变了的字段。
+function pairOrigins() {
+  leafOrigin.clear();
+  autoPinned = new WeakSet();
+  edControl.forEach((fac) => {
+    const base = baseControl.find((b) => b.faction_id === fac.faction_id);
+    if (!base) return;
+    LEAF_OPTIONS.forEach((name) => {
+      if (fac[name] && base[name]) rememberOrigin(fac[name], Object.assign({}, base[name]), LEAF_SPEC[name], false);
+    });
+    Object.keys(LEAF_SPEC).forEach((name) => {
+      const spec = LEAF_SPEC[name];
+      if (!spec.keys.length) return;
+      const b = base[name] || [];
+      (fac[name] || []).forEach((e) => {
+        const o = b.find((x) => spec.keys.every((k) => x[k] === e[k]));
+        if (o) rememberOrigin(e, Object.assign({}, o), spec, false);
+      });
+    });
+  });
+}
+
+/// 一片叶现在与原值相比**值**有没有变（身份键与 `mode` 不算）。
+function leafValueChanged(leaf) {
+  const o = leafOrigin.get(leaf);
+  if (!o) return false;
+  return o.values.some((k) => JSON.stringify(leaf[k]) !== JSON.stringify(o.fields[k]));
+}
+
+/// 写值时的接管规则（note §8 第 2 条）：
+/// * 值**变了** ⇒ 写值即接管（这片叶本来是 `Inherit` 就钉成 `Player`，与 `--apply` 同一条规则）；
+/// * 值又变回**载入时那个数** ⇒ 这次编辑不算表态：把界面自己钉的 `Player` 撤回原来的表态。
+///   只撤**界面自己钉的**——你在下拉里显式选过的模式不会被值的变化推翻。
+function wroteValue(leaf) {
+  const o = leafOrigin.get(leaf);
+  if (!o) {
+    // 没有原值可参照（理论上不会发生）：退回「写值即接管」这条保守规则。
+    if (normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+    return;
+  }
+  if (leafValueChanged(leaf)) {
+    if (normMode(leaf.mode) === 'Inherit') { leaf.mode = 'Player'; autoPinned.add(leaf); }
+  } else if (autoPinned.has(leaf)) {
+    leaf.mode = normMode(o.fields.mode);
+    autoPinned.delete(leaf);
+  }
+}
+
+/// 一片叶的回传形态：身份键 + **变过的**字段（原值里没有别的字段能变）。
+/// 壳（读面里没有这片叶）被碰过 ⇒ 值字段**全给**：那是"新建这片叶"，缺一条轴会被拒。
+function diffLeaf(leaf, spec) {
+  const o = leafOrigin.get(leaf);
+  if (!o) return null; // 连原值都没有 ⇒ 不敢猜，宁可不回传
+  const out = {};
+  spec.keys.forEach((k) => { out[k] = leaf[k]; });
+  let changed = false;
+  spec.values.forEach((k) => {
+    if (JSON.stringify(leaf[k]) !== JSON.stringify(o.fields[k])) { out[k] = leaf[k]; changed = true; }
+    else if (o.shell) out[k] = leaf[k];
+  });
+  const mode = normMode(leaf.mode);
+  if (mode !== normMode(o.fields.mode)) { out.mode = mode; changed = true; }
+  else if (o.shell && changed) out.mode = mode;
+  return changed ? out : null;
+}
+
+/// 作用域的差异：只报**表态变过**的键（没列出过 = `Inherit`，与"没有说话"等价）。
+function buildScopeDiff() {
+  const cur = edScope || {};
+  const base = baseScope || {};
+  const out = {};
+  if (normMode(cur.global) !== normMode(base.global)) out.global = normMode(cur.global);
+  ['factions', 'bodies', 'cities'].forEach((k) => {
+    const kept = [];
+    (cur[k] || []).forEach((pair) => {
+      const hit = (base[k] || []).find((p) => p[0] === pair[0]);
+      const v = normMode(pair[1]);
+      if (v !== normMode(hit ? hit[1] : 'Inherit')) kept.push([pair[0], v]);
+    });
+    if (kept.length) out[k] = kept;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+/// 回传给 `/api/command` 的**差异**：只有真的被改过的叶、每片叶只带真的变过的字段。
+/// 没改过 ⇒ `{control: []}`（+ 可能为空的作用域段）⇒ 幂等。
+function buildCommandDiff() {
+  const control = [];
+  edControl.forEach((fac) => {
+    const out = { faction_id: fac.faction_id };
+    let n = 0;
+    LEAF_OPTIONS.forEach((name) => {
+      if (!fac[name]) return;
+      const d = diffLeaf(fac[name], LEAF_SPEC[name]);
+      if (d) { out[name] = d; n++; }
+    });
+    Object.keys(LEAF_SPEC).forEach((name) => {
+      if (!LEAF_SPEC[name].keys.length) return;
+      const kept = [];
+      (fac[name] || []).forEach((e) => { const d = diffLeaf(e, LEAF_SPEC[name]); if (d) kept.push(d); });
+      if (kept.length) { out[name] = kept; n++; }
+    });
+    // `buildings` 是**命令列表**（按下「新建 / 移除 / 改属性」才存在的一条条意图），不是快照：
+    // 里面的每一条本来就只该发一次，原样回传。
+    if (fac.buildings && fac.buildings.length) { out.buildings = fac.buildings; n++; }
+    if (n) control.push(out);
+  });
+  const req = { control: control };
+  const scope = buildScopeDiff();
+  if (scope) req.scope = scope;
+  return req;
 }
 
 function setFaction(fid) {
@@ -401,12 +602,15 @@ function buildTree() {
     const shipNodes = (fc.ship_orders || []).map((ord) => shipNode(fc, ord));
     // 势力级**三条默认**（指令 / 风格 / 风筝姿态）也是可编辑叶片：新舰出生就继承它们，
     // 一次性指令收尾也回落到它们。它们排在「舰」分组**之前**——因为它们是这一组的前提
-    // （先定默认，例外才少写）。读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的叶
-    // 让它出现在树上（与作用域里「没列出的层 ≡ 继承」同义；回传时值会落进一片 Inherit 的
-    // 叶，引擎刻意允许——「模板原样回传安全」，值不会被采用）。
-    const fleetOrder = (fc.default_ship_order = fc.default_ship_order || { behavior: 'Idle', mode: 'Inherit' });
-    const fleetDoctrine = (fc.default_doctrine = fc.default_doctrine || { temper: 0, lone_wolf: 0, mode: 'Inherit' });
-    const fleetKiting = (fc.default_kiting = fc.default_kiting || { kiting: 0, mode: 'Inherit' });
+    // （先定默认，例外才少写）。读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的**壳**
+    // 让它出现在树上（与作用域里「没列出的层 ≡ 继承」同义）。壳只用于显示：没被动过就不会
+    // 进回传 diff，动过就按「新建这片叶」整片发出去（见 shellLeaf）。
+    const fleetOrder = shellLeaf(fc.default_ship_order = fc.default_ship_order
+      || { behavior: 'Idle', mode: 'Inherit' }, LEAF_SPEC.default_ship_order);
+    const fleetDoctrine = shellLeaf(fc.default_doctrine = fc.default_doctrine
+      || { temper: 0, lone_wolf: 0, mode: 'Inherit' }, LEAF_SPEC.default_doctrine);
+    const fleetKiting = shellLeaf(fc.default_kiting = fc.default_kiting
+      || { kiting: 0, mode: 'Inherit' }, LEAF_SPEC.default_kiting);
 
     const invLeaves = (fc.investment_budget || []).map((e) => ({
       key: 'inv' + fid + ':' + e.resource, kind: 'resource', name: resName(e.resource), leaf: e, fid,
@@ -472,23 +676,30 @@ function shipNode(fc, ord) {
   if (s) {
     kids.push({
       key: 'doc' + name, kind: 'shipdoctrine', id: name, name: '风格', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_doctrine', name, { ship: name, temper: 0, lone_wolf: 0, mode: 'Inherit' }),
+      leaf: styleLeaf(fc, 'ship_doctrine', name, {
+        temper: +((s.doctrine || {}).temper) || 0,
+        lone_wolf: +((s.doctrine || {}).lone_wolf) || 0,
+      }),
     });
     kids.push({
       key: 'kit' + name, kind: 'shipkiting', id: name, name: '风筝姿态', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_kiting', name, { ship: name, kiting: 0, mode: 'Inherit' }),
+      leaf: styleLeaf(fc, 'ship_kiting', name, { kiting: +s.kiting || 0 }),
     });
   }
   return { key: 'ship' + name, kind: 'ship', id: name, name: (s ? s.name : '船#' + name), fid: fc.faction_id, children: kids };
 }
 
-// 逐舰风格叶：读面里每艘舰都有一行（值 = 有效值、mode = 叶片表态），正常路径就是取它。
-// 兜底那支（读面里没有 = 老服务端/新舰）补一片 `Inherit` 的叶：回传等于「这一层没有意见」。
+// 逐舰风格叶：读面里**每艘舰都有**一行（值 = 有效值、mode = 叶片表态），正常路径就是取它。
+// 万一没有那一行（老服务端 / 舰还没进读面）就补一片壳，值取**舰上记录值**——那是引擎在没有
+// 叶片时的兜底值，比凭空写个 0 诚实（读面里有这一行时 pairOrigins 已配好原值，壳不生效）。
 function styleLeaf(fc, key, ship, blank) {
   const list = (fc[key] = fc[key] || []);
   let e = list.find((x) => x.ship === ship);
-  if (!e) { e = blank; list.push(e); }
-  return e;
+  if (!e) {
+    e = Object.assign({ ship: ship, mode: 'Inherit' }, blank);
+    list.push(e);
+  }
+  return shellLeaf(e, LEAF_SPEC[key]);
 }
 
 function renderTree() {
@@ -517,6 +728,13 @@ function renderNode(node) {
 
   const mt = modeToggleFor(node);
   if (mt) head.appendChild(mt);
+  // 「恢复继承」：撤销这片叶的**表态**（mode → 继承），值不动。只在它自己有表态时出现——
+  // 那时"我想反悔"才有意义（把下拉调回「继承」等价，但这个按钮把撤销写在脸上）。
+  if (node.leaf && normMode(node.leaf.mode) !== 'Inherit') head.appendChild(restoreInheritButton(node.leaf));
+  if (spec.bulkOwnership) {
+    const bulk = bulkOwnershipSelect(node);
+    if (bulk) head.appendChild(bulk);
+  }
   wrap.appendChild(head);
 
   const hasKids = node.children && node.children.length;
@@ -562,16 +780,21 @@ function renderNode(node) {
   } else if (spec.editor === 'doctrine') {
     // 行为风格两轴（理智↔热血 / 护航↔独狼）：与「舰队默认指令」同一套开放规则——按有效归属
     // 判断能不能编辑（继承舰队默认风格也算你的），改值即把这片叶钉成玩家。
-    if (effectiveMode(node) === 'Player') wrap.appendChild(doctrineEditor(node.leaf));
+    if (effectiveMode(node) === 'Player') wrap.appendChild(doctrineEditor(node));
     else wrap.appendChild(hintLine('由系统自动决定（要自己定风格就把左边的归属改成「玩家」）'));
   } else if (spec.editor === 'kiting') {
     // 风筝↔贴脸姿态（单片叶）：同上。
-    if (effectiveMode(node) === 'Player') wrap.appendChild(kitingEditor(node.leaf));
+    if (effectiveMode(node) === 'Player') wrap.appendChild(kitingEditor(node));
     else wrap.appendChild(hintLine('由系统自动决定（要自己定风筝姿态就把左边的归属改成「玩家」）'));
   } else if (spec.editor === 'value') {
     wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel, node));
   } else if (spec.editor === 'building') {
     wrap.appendChild(buildingEditor(node));
+  }
+  // 风格两叶：把「这个数现在从哪来」说清楚（只在叶片自己没表态时，见 styleFollowHint）。
+  if (node.kind === 'shipdoctrine' || node.kind === 'shipkiting') {
+    const fh = styleFollowHint(node);
+    if (fh) wrap.appendChild(fh);
   }
   return wrap;
 }
@@ -580,6 +803,58 @@ function hintLine(text) {
   const d = el('div', { class: 'tnode-hint' });
   d.textContent = text;
   return d;
+}
+
+/// 「恢复继承」：撤销这片叶的**表态**（`mode → Inherit`），**值不动**（note §8 第 2 条的
+/// 主手段）。它与「把下拉调回继承」是同一件事，只是把"怎么撤销"写在脸上——「我碰过这一格，
+/// 但我不想再对它表态」是常见意图，而以前只能靠理解三态的含义才做得到。
+///
+/// ⚠ 它**不是**「删掉这片叶」：引擎的取值规则是"叶存在就用叶里的值"（哪怕叶说 Inherit），
+/// 而补丁接口只能新建/改写叶、删不掉（见 styleFollowHint 的说明）。所以撤销表态之后，
+/// 叶里那个数**仍然在用**——这正是「只回传差异」为什么重要：别让界面顺手造出这些叶。
+function restoreInheritButton(leaf) {
+  const b = el('button', {
+    class: 'restore', 'data-role': 'restore',
+    title: '撤销这片叶的表态（重新交给上层：舰队默认 / 势力 / 全局）。叶里那个数不动——它不是"删掉这片叶"',
+  }, '恢复继承');
+  b.addEventListener('click', () => {
+    leaf.mode = 'Inherit';
+    autoPinned.delete(leaf);
+    renderTree();
+  });
+  return b;
+}
+
+/// 舰行上的**便利**下拉：「这条舰的三片叶一起归谁」。
+///
+/// 它**只写 mode**（三片叶各写一次表态），**永不写值、永不接管**——所以它是"批量效率"，
+/// 不是"一个下拉代表一种归属"的假象（三片叶各有自己的归属链，见 note §8 第 1 条）。
+/// 三片叶表态不一致时多一个「各自不同」占位项，绝不假装它们一样。
+function bulkOwnershipSelect(node) {
+  const leaves = (node.children || []).map((ch) => ch.leaf).filter(Boolean);
+  if (leaves.length < 2) return null; // 只剩指令行（舰已不在世界里）时不值得有这个下拉
+  const modes = leaves.map((l) => normMode(l.mode));
+  const mixed = modes.some((m) => m !== modes[0]);
+  const sel = el('select', { class: 'mode bulk', 'data-role': 'bulk' });
+  if (mixed) {
+    const o = el('option', { value: '' });
+    o.textContent = '三片叶：各自不同';
+    o.selected = true;
+    sel.appendChild(o);
+  }
+  [['Inherit', '一起：继承'], ['Auto', '一起：自动'], ['Player', '一起：玩家']].forEach(([v, l]) => {
+    const o = el('option', { value: v });
+    o.textContent = l;
+    o.selected = !mixed && modes[0] === v;
+    sel.appendChild(o);
+  });
+  sel.title = '把这条舰的三片叶（指令 / 风格 / 风筝姿态）的归属一起改掉：只写归属、不写值';
+  sel.addEventListener('change', () => {
+    if (!sel.value) return;
+    leaves.forEach((l) => { l.mode = sel.value; autoPinned.delete(l); });
+    renderTree();
+  });
+  return sel;
 }
 
 /// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 全局。
@@ -614,16 +889,30 @@ function modeToggleFor(node) {
   if (!acc) return null;
   const mode = acc.get();
   const set = acc.set;
+  const styleAxis = STYLE_KINDS.indexOf(node.kind) >= 0;
 
-  const sel = el('select', { class: 'mode' });
+  const sel = el('select', { class: 'mode', 'data-role': 'mode' });
   [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']].forEach(([v, l]) => {
     const o = el('option', { value: v });
     o.textContent = l;
+    // 「自动」的措辞必须诚实（note §3.2）：风格轴上**没有**执行者，不能暗示"系统会来写"。
+    if (v === 'Auto') {
+      o.title = styleAxis
+        ? '风格轴目前没有 AI 执行者：选「自动」不会有人来重估这个值，它只会冻在现在这个数'
+        : '由 AI 每回合按局势重估（指令 / 预算轴真的有执行者）';
+    } else if (v === 'Inherit') {
+      o.title = '撤销这一层的表态：向上层要答案（舰队默认 / 势力 / 全局），风格轴还会落到出厂快照';
+    } else {
+      o.title = '归你管：系统不再改写它';
+    }
     o.selected = normMode(mode) === v;
     sel.appendChild(o);
   });
+  sel.title = styleAxis ? '谁负责这片风格叶（注意：风格轴暂无 AI 执行者）' : '谁负责这片叶';
   sel.addEventListener('change', () => {
     set(sel.value);
+    // 显式选过模式 = 一次明确的表态：撤回「写值即接管」的书签——值再变回原数也不该翻掉它。
+    if (node.leaf) autoPinned.delete(node.leaf);
     renderTree();
   });
   return sel;
@@ -638,17 +927,37 @@ function normMode(m) { return m || 'Inherit'; }
 // 「记录值」（出厂快照 + AI 流水），写它不产生任何控制效果。
 // 每条轴取 [-1,1]（0 = 基线），钳在两端；值一改就把这片叶钉成 Player（写值即接管，
 // 与 `--apply` 同一条规则：只写值不写 mode ⇒ 该叶变成玩家指令）。
-function setStyleAxis(leaf, key, raw) {
-  leaf[key] = Math.max(-1, Math.min(1, +raw || 0));
-  if (normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+/// 值一写就可能接管（`Inherit` → `Player`）：把这一行 head 里的归属下拉与「恢复继承」**就地**
+/// 跟上去。不重画整棵子树——那会换掉你正在编辑的那个输入框（与 styleField 的取舍一致），
+/// 于是会出现「我刚敲了数，归属却还写着继承」这种骗人的画面。
+function syncOwnership(node) {
+  if (!node || !node.leaf) return;
+  const wrap = document.querySelector('.tnode[data-key="' + node.key + '"]');
+  const head = wrap && wrap.querySelector(':scope > .tnode-head');
+  if (!head) return;
+  const mode = normMode(node.leaf.mode);
+  const sel = head.querySelector('select.mode[data-role="mode"]');
+  if (sel && sel.value !== mode) sel.value = mode;
+  const btn = head.querySelector('button[data-role="restore"]');
+  if (mode === 'Inherit') {
+    if (btn) btn.remove();
+  } else if (!btn) {
+    head.insertBefore(restoreInheritButton(node.leaf), sel ? sel.nextSibling : null);
+  }
 }
 
-function styleField(label, title, val, onSet) {
+function setStyleAxis(leaf, key, raw) {
+  leaf[key] = Math.max(-1, Math.min(1, +raw || 0));
+  // 值变了 ⇒ 写值即接管；值又改回**载入时那个数** ⇒ 不算表态（note §8 第 2 条）。
+  wroteValue(leaf);
+}
+
+function styleField(axis, label, title, val, onSet, node) {
   const w = el('span', { class: 'style-field' });
   w.appendChild(el('span', { class: 'lv-label' }, label + ' '));
-  const inp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+val || 0).toFixed(2) });
+  const inp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+val || 0).toFixed(2), 'data-axis': axis });
   if (title) inp.title = title;
-  inp.addEventListener('input', () => onSet(inp.value));
+  inp.addEventListener('input', () => { onSet(inp.value); syncOwnership(node); });
   // `change`（离开这一格 / 回车）后重画一次：行摘要显示的就是叶里现在那个数。
   // 输入过程中不重画——那会把正在编辑的输入框换掉（与数值叶编辑器同一条取舍）。
   inp.addEventListener('change', () => renderTree());
@@ -656,16 +965,18 @@ function styleField(label, title, val, onSet) {
   return w;
 }
 
-function doctrineEditor(leaf) {
+function doctrineEditor(node) {
+  const leaf = node.leaf;
   const box = el('div', { class: 'ship-editor' });
-  box.appendChild(styleField('理智↔热血', '负 = 欺软怕硬（挑威慑比自己低的）；正 = 飞蛾扑火（挑威慑比自己高的）；0 = 基线', leaf.temper, (v) => setStyleAxis(leaf, 'temper', v)));
-  box.appendChild(styleField('护航↔独狼', '负 = 空闲时贴本势力旗舰护航；正 = 独狼（空闲时自行就近接战）；0 = 基线', leaf.lone_wolf, (v) => setStyleAxis(leaf, 'lone_wolf', v)));
+  box.appendChild(styleField('temper', '理智↔热血', '负 = 欺软怕硬（挑威慑比自己低的）；正 = 飞蛾扑火（挑威慑比自己高的）；0 = 基线', leaf.temper, (v) => setStyleAxis(leaf, 'temper', v), node));
+  box.appendChild(styleField('lone_wolf', '护航↔独狼', '负 = 空闲时贴本势力旗舰护航；正 = 独狼（空闲时自行就近接战）；0 = 基线', leaf.lone_wolf, (v) => setStyleAxis(leaf, 'lone_wolf', v), node));
   return box;
 }
 
-function kitingEditor(leaf) {
+function kitingEditor(node) {
+  const leaf = node.leaf;
   const box = el('div', { class: 'ship-editor' });
-  box.appendChild(styleField('风筝↔贴脸', '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线', leaf.kiting, (v) => setStyleAxis(leaf, 'kiting', v)));
+  box.appendChild(styleField('kiting', '风筝↔贴脸', '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线', leaf.kiting, (v) => setStyleAxis(leaf, 'kiting', v), node));
   return box;
 }
 
@@ -677,7 +988,9 @@ function shipEditor(leaf, node) {
   // 覆盖掉，而界面上看起来「我明明改了」。
   const commit = (b) => {
     leaf.behavior = b;
-    if (node && normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+    // 写值即接管（否则这次编辑会被系统下一回合按自己的逻辑覆盖掉，而界面上看起来
+    // 「我明明改了」）；把行为改回**载入时那个**行为则不算表态，同风格轴的规则。
+    wroteValue(leaf);
     renderTree();
   };
 
@@ -745,8 +1058,9 @@ function leafValueEditor(leaf, label, node) {
   inp.addEventListener('input', () => {
     if (inp.disabled) return;
     leaf.value = +inp.value || 0;
-    // 写值即接管：改了值就把这一片钉成玩家的（与 `--apply` 同一条规则）。
-    if (normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+    // 写值即接管；值改回**载入时那个数**不算表态（note §8 第 2 条，与风格轴同一条规则）。
+    wroteValue(leaf);
+    syncOwnership(node); // 接管了就立刻把那一行的归属下拉跟上（输入框不重画）
   });
   wrap.appendChild(t);
   wrap.appendChild(inp);
@@ -939,11 +1253,28 @@ async function advance(n) {
   $('#status').textContent = '已推进 ' + n + ' 回合';
 }
 
+/// 回传 diff 里到底碰了几片叶（状态行诚实一点：空 diff 与"应用成功"必须看得出区别）。
+function countDiffLeaves(req) {
+  let n = 0;
+  (req.control || []).forEach((fac) => {
+    Object.keys(fac).forEach((k) => {
+      if (k === 'faction_id') return;
+      n += Array.isArray(fac[k]) ? fac[k].length : 1;
+    });
+  });
+  if (req.scope) n++;
+  return n;
+}
+
+// 「应用」只回传**差异**（见 buildCommandDiff）：没改过 ⇒ 空 diff ⇒ 幂等，而且不会把读面里
+// 的**有效值**写进叶里（那会让这些舰从此不再跟随舰队默认 / 出厂快照，且事后无从归因）。
 async function applyControl() {
-  bindWorld(await postJSON('/api/command', { control: edControl, scope: edScope }));
+  const req = buildCommandDiff();
+  const n = countDiffLeaves(req);
+  bindWorld(await postJSON('/api/command', req));
   buildEdits();
   renderAll();
-  $('#status').textContent = '已应用到服务器';
+  $('#status').textContent = n ? ('已应用 ' + n + ' 片叶的改动') : '没有改动要应用（只回传差异）';
 }
 
 async function newGame() {
