@@ -247,9 +247,28 @@ fn main() {
 
     // Overlay a control-state diff (agent steering) before anything runs.
     if let Some(path) = &cli.apply {
-        if let Err(e) = apply_diff(&mut state, &config, path) {
-            eprintln!("{}", json!({"ok": false, "code": "ERR_APPLY", "message": e}));
-            std::process::exit(10);
+        match apply_diff(&mut state, &config, path) {
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_APPLY", "message": e}));
+                std::process::exit(10);
+            }
+            // 有叶片没落地 → 在 stderr 上报。**这是 agent 唯一能发现「命令其实
+            // 没下达」的渠道**：stdout 必须保持零噪声的状态流，而丢弃的常见原因
+            // （舰已战沉/改名、城已易主、building 下标换城）恰恰是必须知道的那种。
+            // 静默即成功，所以只在真的丢了东西时才说话。
+            Ok(report) if !report.is_clean() => {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "code": "WARN_APPLY_SKIPPED",
+                        "applied": report.applied,
+                        "skipped": report.skipped,
+                        "hint": "some diff leaves did not land; the diff itself is valid, the entities it names are not (stale ship/city names, wrong faction, building index from another city).",
+                    })
+                );
+            }
+            Ok(_) => {}
         }
     }
 
@@ -328,7 +347,12 @@ fn main() {
 
 /// Read a control-state diff file (JSON, same shape as `POST /api/command`,
 /// i.e. `{control:[...], scope:{...}}`) and overlay it onto `state` by key.
-fn apply_diff(state: &mut State, config: &GameConfig, path: &Path) -> Result<(), String> {
+/// Returns what landed and what was dropped (see [`control::ApplyReport`]).
+fn apply_diff(
+    state: &mut State,
+    config: &GameConfig,
+    path: &Path,
+) -> Result<control::ApplyReport, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;

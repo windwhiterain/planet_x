@@ -410,7 +410,10 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
 async fn command(AxState(shared): AxState<Shared>, Json(req): Json<CommandReq>) -> Json<StateView> {
     let mut guard = shared.lock().unwrap();
     let world = &mut *guard;
-    apply_diff(&mut world.state, &world.config, &req);
+    // The web UI posts the *whole* editable surface back, so leaves that name
+    // entities which have since died / changed hands are expected — the report is
+    // deliberately dropped here (the CLI is where an authoring agent needs it).
+    let _report = apply_diff(&mut world.state, &world.config, &req);
     Json(state_view(world))
 }
 
