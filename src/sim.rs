@@ -4280,6 +4280,83 @@ mod tests {
         assert_eq!(m, dest, "a MOND master must compute the destination exactly");
     }
 
+    /// **运输能力的地基（机制不变量）**：非 master 舰船**能否抵达**某天体是**算出来的**，
+    /// 不是配置里写死的。`move_toward` 先把目标点交给 [`mond_drift`] 切向平移
+    /// `(r − radius) × drift_per_au`，而舰船只在距**平移后**目标 `arrival_eps` 内停泊——
+    /// 于是它离真实天体的距离就等于那个漂移量：
+    ///
+    /// ```text
+    /// 抵达 ⟺ drift(r) ≤ arrival_eps  ⟺  r ≤ radius + arrival_eps/drift_per_au = 30.000 AU
+    /// ```
+    ///
+    /// 这是「运输任务 = 舰船真实行为」的地基：装卸货同样要求停在 `arrival_eps` 内，
+    /// 所以**非 master 承运人物理上运不出 r > 30 AU 的货**——「柯伊伯带的货运只有崇拜教
+    /// 做得成」不是设定文案，是这条几何门槛的推论。
+    ///
+    /// 守卫它在，是因为它极易被无意破坏：调 `radius`/`drift_per_au`/`arrival_eps` 里任何一个
+    /// 都会平移这条门槛，而**崇拜教的圣所恰好只在门槛外 0.17 AU**——改一次参数就可能把它
+    /// 变成一个人人可停靠的普通城（或把冥王星/海王星变成运不出货的死城）。
+    #[test]
+    fn reachable_radius_separates_carriers_from_the_belt() {
+        let (config, state) = fresh_world(42);
+        let m = &config.mond;
+        let eps = config.combat.arrival_eps;
+        let reach = m.radius + eps / m.drift_per_au;
+
+        assert!(
+            (reach - 30.0).abs() < 1e-6,
+            "非 master 的停靠上限 = radius + arrival_eps/drift_per_au = 30 AU（现 {reach}）——\
+             这条线一动，带内哪些城运得出来就全变了"
+        );
+
+        let drift_at = |r: f64| (r - m.radius).max(0.0) * m.drift_per_au;
+        // 漂移量确实等于「离真实目标的距离」：把目标放在 [0, r]，量漂移后的点。
+        for r in [m.radius - 1.0, reach - 0.5, reach + 0.5, 38.16] {
+            let dest = [0.0, r];
+            let off = dist(mond_drift(&config, "中国", dest), dest);
+            let want = if r <= m.radius { 0.0 } else { drift_at(r) };
+            assert!(
+                (off - want).abs() < 1e-9,
+                "r={r} 时非 master 的偏移量应等于闭式 {want}，实为 {off}"
+            );
+            // master 在任何深度都不偏——这就是「唯一能可靠承运」的全部根据。
+            assert_eq!(mond_drift(&config, "行星X崇拜教", dest), dest);
+        }
+
+        // 判定必须与世界里的真实天体一致（round 0，确定性）。
+        let mut can_stop: Vec<String> = Vec::new();
+        let mut cannot: Vec<String> = Vec::new();
+        for b in &state.bodies {
+            let r = (b.position[0] * b.position[0] + b.position[1] * b.position[1]).sqrt();
+            if r <= m.radius {
+                continue;
+            }
+            if drift_at(r) <= eps {
+                can_stop.push(b.name.clone());
+            } else {
+                cannot.push(b.name.clone());
+            }
+        }
+        assert!(
+            cannot.contains(&"伊克西翁".to_string()),
+            "崇拜教的圣所必须在非 master 的停靠上限之外（这是「天然堡垒」的机制根据），\
+             实际可停靠 = {can_stop:?}"
+        );
+        for deep in ["妊神星", "创神星", "阋神星"] {
+            assert!(
+                cannot.contains(&deep.to_string()),
+                "{deep} 是星系矿业的柯伊伯矿——非 master 运不出这里的货，实际可停靠 = {can_stop:?}"
+            );
+        }
+        for shallow in ["海王星", "冥王星", "卡戎"] {
+            assert!(
+                can_stop.contains(&shallow.to_string()),
+                "{shallow} 在近日段应仍可停靠（带是「会自己关门」而不是一开始就锁死），\
+                 实际可停靠 = {can_stop:?}"
+            );
+        }
+    }
+
     /// **贸易路线的引力异常浸入深度**（M6）：两端都在带外 = 0（普通航线）；
     /// 一端在带内、一端在外 = 远端深度（要穿过去）；两端都在带内 = 较浅那端深度。
     /// 它是运费倍率与丢货率的唯一驱动量，所以必须有确定的语义。
