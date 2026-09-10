@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{BodyId, CityId, FactionId, ShipId};
+use crate::model::{BodyId, CityId, FactionId, ResourceMap, ShipId};
 use serde_json::json;
 
 /// 给「纯标签 enum」（只有单元变体）生成 **字符串化** 的 `From`/`TryFrom<String>`，配合
@@ -212,6 +212,23 @@ pub enum GameEvent {
     /// （`"destroyed"`=首都亡城自动切到人口最高活城；`"ai_review"`=周期性 AI 评估证明
     /// 候选更优）。首都是光速治理/本土防御的锚点，迁都会即时改变治理距离与防御半径。
     CapitalRelocated { faction: FactionId, from: BodyId, to: BodyId, reason: String },
+    /// **装货**：一艘运输舰在某天体的**产地货栈**里装走一批货（`cargo` = 这次装了什么、各多少）。
+    /// 这是「离岸产出 → 首都池」那条链的**上半段**，下半段是 [`GameEvent::CargoDelivered`]。
+    /// 有了这两条，「池子里的铁是哪来的」可以一路追到产地与那艘船。
+    CargoLoaded { ship: ShipId, faction: FactionId, body: BodyId, cargo: ResourceMap },
+    /// **卸货**：一艘运输舰把在舱货物卸进某天体。`into_pool = true` 表示**直接进了势力池**
+    /// （即该天体就是本势力首都，货从此可用）——那是集货腿的终点；`false` 表示卸进了该天体
+    /// 的货栈（中转，还得再运一程）。`cargo` 是这一批货。
+    ///
+    /// 注意：**货随舰沉没**——满载的运输舰被击沉时，舱里的货跟着没了（没有对应的
+    /// `CargoLost` 事件：货的消失就是那艘舰的 `ShipDestroyed` 的一部分）。
+    CargoDelivered {
+        ship: ShipId,
+        faction: FactionId,
+        body: BodyId,
+        cargo: ResourceMap,
+        into_pool: bool,
+    },
 }
 
 // --- 归一化投影 API（历史/事件查询的唯一契约） --------------------------------
@@ -469,6 +486,19 @@ impl GameEvent {
                 extra(&mut r, EventRole::Victim, EntityKind::Body, from);
                 r.data = json!({"faction": faction, "from": from, "to": to, "reason": reason});
             }
+            GameEvent::CargoLoaded { ship, faction, body, cargo } => {
+                set_actor(&mut r, EntityKind::Ship, ship);
+                set_target(&mut r, EntityKind::Body, body);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
+                r.data = json!({"ship": ship, "faction": faction, "body": body, "cargo": cargo});
+            }
+            GameEvent::CargoDelivered { ship, faction, body, cargo, into_pool } => {
+                set_actor(&mut r, EntityKind::Ship, ship);
+                set_target(&mut r, EntityKind::Body, body);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
+                r.data = json!({"ship": ship, "faction": faction, "body": body,
+                                "cargo": cargo, "into_pool": into_pool});
+            }
         }
         r
     }
@@ -493,6 +523,8 @@ impl GameEvent {
             GameEvent::CoalitionFormed { .. } => "coalition_formed",
             GameEvent::CoalitionEnded { .. } => "coalition_ended",
             GameEvent::CapitalRelocated { .. } => "capital_relocated",
+            GameEvent::CargoLoaded { .. } => "cargo_loaded",
+            GameEvent::CargoDelivered { .. } => "cargo_delivered",
         }
     }
 
@@ -617,6 +649,16 @@ impl GameEvent {
                 "{faction} 迁都 {from} → {to}（{}）",
                 capital_reason(reason)
             ),
+            // 标题必须点到名：`faction` 也是本事件的参与方（`extra` 里的第三角色），
+            // 所以它必须逐字出现在标题里（守卫 `headline_names_every_participant` 钉住这条）。
+            GameEvent::CargoLoaded { ship, faction, body, cargo } => {
+                format!("{faction} 的 {ship} 在 {body} 装 {}", cargo_summary(cargo))
+            }
+            GameEvent::CargoDelivered { ship, faction, body, cargo, into_pool } => format!(
+                "{faction} 的 {ship} 在 {body} 卸 {}（{}）",
+                cargo_summary(cargo),
+                if *into_pool { "入首都池" } else { "入中转货栈" }
+            ),
         }
     }
 
@@ -654,7 +696,10 @@ impl GameEvent {
             // 舰的存亡。
             GameEvent::ShipDestroyed { .. } | GameEvent::ShipSpawned { .. } => 5,
             // 值得注意但不改变归属。
-            GameEvent::Withdraw { .. } | GameEvent::StaleOrder { .. } => 2,
+            GameEvent::Withdraw { .. }
+            | GameEvent::StaleOrder { .. }
+            | GameEvent::CargoLoaded { .. }
+            | GameEvent::CargoDelivered { .. } => 2,
             // 逐发流水：按判据连读者都没有（只为 agent 分析而记录），也不该出现在故事板里。
             GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
         }
@@ -683,6 +728,19 @@ fn num(v: f64) -> String {
     } else {
         format!("{v:.1}")
     }
+}
+
+/// 一批货的可读摘要（`铁 6、碳 4`）。判据同 [`num`]：标题给人读，精确值在 `data` 里。
+/// [`ResourceMap`] 是 `BTreeMap` ⇒ 名字序，同批货的标题不会因为遍历顺序而抖。
+fn cargo_summary(cargo: &ResourceMap) -> String {
+    if cargo.is_empty() {
+        return "空舱".to_string();
+    }
+    cargo
+        .iter()
+        .map(|(rt, amt)| format!("{rt} {}", num(*amt)))
+        .collect::<Vec<_>>()
+        .join("、")
 }
 
 /// 迁都原因码 → 中文。机器码本身在投影 `data.reason` 里保持原样（查询用码、人读用这句）。

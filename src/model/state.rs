@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 fn default_schema_version() -> u32 {
     0
 }
@@ -155,7 +155,7 @@ impl State {
     }
 
     /// 把一笔货**卸进**某势力在某天体的货栈（数量 ≤0 时什么都不做）。
-    /// 装货（船提走）由 `sim` 的运输行为负责，删除空货栈条目也由它负责。
+    /// 装货（船提走）走 [`State::depot_take`]。
     pub fn depot_add(&mut self, fid: &str, body_id: &str, resource: &str, amount: f64) {
         if amount <= 0.0 {
             return;
@@ -164,6 +164,33 @@ impl State {
             .depot_mut(fid, body_id)
             .entry(resource.to_string())
             .or_insert(0.0) += amount;
+    }
+
+    /// 从某势力在某天体的货栈里**提走**一笔货（装船），返回**实际提走的量**
+    /// （0 = 那里没有这种货；请求量超过存量就提光）。
+    ///
+    /// 提空后**删掉空货栈条目**：`depots` 里只留「真有货」的条目，这样「哪些天体还有
+    /// 积压」可以直接从键集合读出来（AI 派单、观察面都靠它），不必到处判空。
+    /// 数量 ≤0 一律当作 0（不做事、也不建空条目）。
+    pub fn depot_take(&mut self, fid: &str, body_id: &str, resource: &str, amount: f64) -> f64 {
+        if amount <= 0.0 {
+            return 0.0;
+        }
+        let key = (fid.to_string(), body_id.to_string());
+        let Some(d) = self.depots.get_mut(&key) else {
+            return 0.0;
+        };
+        let taken = d.get(resource).copied().unwrap_or(0.0).min(amount);
+        if taken > 0.0 {
+            if let Some(x) = d.get_mut(resource) {
+                *x -= taken;
+            }
+            d.retain(|_, v| *v > 1e-9);
+        }
+        if d.is_empty() {
+            self.depots.remove(&key);
+        }
+        taken.max(0.0)
     }
 
     /// 某势力货栈里**所有天体**的存货总价值（按 `value_of` 计价）。
@@ -311,36 +338,69 @@ impl State {
         leaf.map(|l| l.value).unwrap_or(record)
     }
 
+    /// 这艘舰当前的**有效角色**：`true` = **运输舰**（自动控制给它排集货路线），
+    /// `false` = **战舰**（自动控制让它找仗打）。取值规则与前两条风格轴完全同形：
+    /// 叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
+    /// [`ShipSpec::default_freighter`](crate::model::ShipSpec::default_freighter)）。
+    ///
+    /// ⚠ **它只管「自动控制的活是哪一种」**：不影响自动开火（射程内的敌舰照打），
+    /// 也不影响 kiting（那条轴独立生效）。见 [`Ship::freighter`] 的说明。
+    pub fn ship_freighter(&self, ship_id: ShipId) -> bool {
+        let Some(s) = self.ship(&ship_id) else {
+            return false;
+        };
+        let record = s.freighter;
+        let Some(c) = self.control(s.faction_id.clone()) else {
+            return record;
+        };
+        let leaf = c.ship_freighter.get(&ship_id);
+        if leaf_mode(leaf) == ControlMode::Inherit {
+            if let Some(d) = &c.default_freighter {
+                if d.mode.is_player() {
+                    return d.value;
+                }
+            }
+        }
+        leaf.map(|l| l.value).unwrap_or(record)
+    }
+
     /// 决定这艘舰的**行为风格**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
     pub fn ship_doctrine_control(&self, ship_id: ShipId) -> ControlMode {
-        self.ship_style_chain(ship_id, true)
+        self.ship_style_chain(ship_id, StyleAxis::Doctrine)
     }
 
     /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
     pub fn ship_kiting_control(&self, ship_id: ShipId) -> ControlMode {
-        self.ship_style_chain(ship_id, false)
+        self.ship_style_chain(ship_id, StyleAxis::Kiting)
     }
 
-    /// 两条风格轴共用的归属链（`doctrine=true` 取 `ship_doctrine`/`default_doctrine`）。
-    fn ship_style_chain(&self, ship_id: ShipId, doctrine: bool) -> ControlMode {
+    /// 决定这艘舰的**角色**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    /// 自动控制据此判断「这片叶能不能写」（`Player` = 玩家说了算，AI 不碰）。
+    pub fn ship_freighter_control(&self, ship_id: ShipId) -> ControlMode {
+        self.ship_style_chain(ship_id, StyleAxis::Freighter)
+    }
+
+    /// 三条风格轴共用的归属链。
+    fn ship_style_chain(&self, ship_id: ShipId, axis: StyleAxis) -> ControlMode {
         let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Auto;
         };
         let fid = s.faction_id.clone();
         let (leaf, default) = match self.control(fid.clone()) {
-            Some(c) => {
-                if doctrine {
-                    (
-                        leaf_mode(c.ship_doctrine.get(&ship_id)),
-                        leaf_mode(c.default_doctrine.as_ref()),
-                    )
-                } else {
-                    (
-                        leaf_mode(c.ship_kiting.get(&ship_id)),
-                        leaf_mode(c.default_kiting.as_ref()),
-                    )
-                }
-            }
+            Some(c) => match axis {
+                StyleAxis::Doctrine => (
+                    leaf_mode(c.ship_doctrine.get(&ship_id)),
+                    leaf_mode(c.default_doctrine.as_ref()),
+                ),
+                StyleAxis::Kiting => (
+                    leaf_mode(c.ship_kiting.get(&ship_id)),
+                    leaf_mode(c.default_kiting.as_ref()),
+                ),
+                StyleAxis::Freighter => (
+                    leaf_mode(c.ship_freighter.get(&ship_id)),
+                    leaf_mode(c.default_freighter.as_ref()),
+                ),
+            },
             None => (ControlMode::Inherit, ControlMode::Inherit),
         };
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
@@ -413,6 +473,18 @@ impl State {
 fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
     leaf.map(|c| c.mode).unwrap_or_default()
 }
+
+/// 三条**风格轴**（都是「叶 → 舰队默认 → 舰上记录值」的同形链，共用归属判定）。
+/// 名字里的「风格」是仓库里的旧称：它们都是「比指令更持久、比舰级更具体」的 per-舰 控制属性。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StyleAxis {
+    /// 行为风格（`temper`/`lone_wolf`）。
+    Doctrine,
+    /// 风筝<->贴脸姿态。
+    Kiting,
+    /// 角色：运输舰 / 战舰。
+    Freighter,
+}
 /// 把 `State` 从 `schema_version` 逐档升级到 [`SCHEMA_VERSION`]。在加载 `.ron` /
 /// checkpoint 之后调用；无法迁移或版本比当前二进制还新则返回显式 `Err`（宁抛错，
 /// 不错载）。v0 → v1：`schema_version` 字段本身就是 v1 引入的——旧档案缺字段由 serde
@@ -484,9 +556,16 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
 /// 它是 `#[serde(default)]` 的新字段，v7 档没有它——而「旧档里那些正在路上的货」**不存在**：
 /// v7 里运输还不是舰船的真实行为，货只可能躺在某地（池子或货栈）里，不可能在半路。
 /// 所以旧档一律按**空舱**处理，**零信息损失**（没有货在途中，也没有货凭空出现/消失）。
+///
+/// v8 → v9（运输分支）：[`ShipBehavior::Haul`](crate::model::ShipBehavior) 是控制叶的**新取值**，
+/// 新增 `Ship::freighter` + 第三条风格轴（`ship_freighter`/`default_freighter` 叶片），
+/// 事件流里也多了 `CargoLoaded` / `CargoDelivered` 两种事件。旧档里不可能有它们
+/// （v8 的 `ShipBehavior` 没有 `Haul`，货也不会动、也没有「运输舰」这个角色），
+/// 所以这一档同样**零信息损失**：旧档加载后没有任何舰在跑路线、没有货在舱里、
+/// 每艘舰都按 `Ship.freighter = false`（= 战舰）继续过——那正是旧档的真实状态。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

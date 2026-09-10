@@ -9,6 +9,8 @@ use crate::prng::Prng;
 use crate::sim;
 use std::collections::BTreeMap;
 
+use super::freight;
+
 // 统一的基本权重：**距离 + 克制 + per-武器随机扰动**，所有自动逻辑共用。克制权重
 // > 距离权重（把火力用在打得动的目标上，比贴着打更划算）；扰动是小量，让每件武器
 // 各有一点点稳定的偏好（舰队火力不整齐划一）。
@@ -400,6 +402,13 @@ pub(crate) fn ai_ship_turn(
     let focus = focus_of.get(&owner).cloned().flatten();
     // 有效姿态（叶 → 舰队默认 → 记录值）：撤退阈值也跟着它走。
     let kiting = state.ship_kiting(ship_id.to_string());
+    // **有效角色**（第三条风格轴，叶 → 舰队默认 → 记录值）：`true` = 运输舰。
+    // 本回合的定编已经由 `freight::assign_roles` 在 `step_ships` 的循环之前写好了，
+    // 这里**只读**——所以同一回合里改角色不会改变这艘舰的活（也不会受处理顺序影响）。
+    //
+    // 用户裁决：这个角色**只管「自动控制给它派哪种活」**——找仗打（战舰）还是跑运输
+    // （运输舰）。它**不解除武装**：运输舰射程内照样自动开火、照样按 kiting 软移动。
+    let freighter = state.ship_freighter(ship_id.to_string());
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
@@ -422,6 +431,7 @@ pub(crate) fn ai_ship_turn(
 
     // 自保撤退（拟人的「别送死」，激进更晚撤）：舰已受重创、敌在本舰射程内、且离首都有
     // 一定距离时，后撤回首都/本土修整充能。让战争有「打残→撤→养好→再来」的损耗循环。
+    // **与角色无关**：运输舰被打残也回家（它没被解除武装，也就没被解除自保）。
     if let Some(target) = tgt {
         if base.hull_ratio < retreat_hull {
             let cap_body = state.capital_body(&owner);
@@ -442,20 +452,52 @@ pub(crate) fn ai_ship_turn(
                 return;
             }
         }
-        // 接战：每件武器逐发独立索敌（火力分配 / 克制 / 理智热血都作用于目标选择）。
-        let plan = build_fire_plan(state, config, ship_id);
-        if !plan.is_empty() {
-            if let Some(c) = state.control_mut(owner.clone()) {
-                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
+        // **运输舰不追敌**：路过之敌不作废它的航线（它这一回合的活是跑运输，不是接战）。
+        // 开火不受影响——等路线走完这一步，下面统一交给 `auto_combat`（它不改写指令）。
+        if !freighter {
+            // 接战：每件武器逐发独立索敌（火力分配 / 克制 / 理智热血都作用于目标选择）。
+            let plan = build_fire_plan(state, config, ship_id);
+            if !plan.is_empty() {
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
+                }
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Engage,
+                    target: Some(target.clone()),
+                    order: Some(ShipBehavior::Follow { ship: target.clone() }),
+                    ..base.clone()
+                });
+                sim::fire(state, config, ship_id, &plan);
             }
-            decisions.push(ShipDecision {
-                verdict: ShipVerdict::Engage,
-                target: Some(target.clone()),
-                order: Some(ShipBehavior::Follow { ship: target.clone() }),
-                ..base.clone()
-            });
-            sim::fire(state, config, ship_id, &plan);
+            return;
         }
+    }
+
+    // --- 角色 = 运输舰：这一回合的活就是跑集货路线（找仗打不是它的活）-----------------
+    //
+    // 路线从 `freight::route_for` 来：优先续用现有路线（货栈还有货/舱里载着货），否则按
+    // **积压占比抽签**挑一处新的。挑不到（没有积压、或定编还没收回去）就这一回合不派活。
+    if freighter {
+        match freight::route_for(state, &owner, ship_id) {
+            Some((from, to)) => {
+                let behavior = ShipBehavior::Haul { from: from.clone(), to: to.clone() };
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
+                }
+                let step = sim::haul_step(state, config, ship_id, &class, &from, &to);
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Haul,
+                    target: Some(step.body().to_string()),
+                    destination: Some(state.body_position(step.body())),
+                    order: Some(behavior),
+                    ..base.clone()
+                });
+            }
+            None => decisions.push(base.clone()),
+        }
+        // 路线走完（或没得跑）：**照常自动开火/轰炸**——射程内有敌舰就打、有敌城就炸，
+        // 且不改写指令（航线保留，下一回合接着跑）。
+        auto_combat(state, config, ship_id, &owner);
         return;
     }
 
@@ -566,10 +608,16 @@ mod tests {
     use crate::sim::{advance, dist};
     use crate::world::default_state;
 
-    /// Build the config + a fresh deterministic world (round 0).
+    /// Build the config + a fresh deterministic world (round 0)，并把**角色轴钉成「全员战舰」**。
+    ///
+    /// 这里 8 个用例测的都是**战术**（接战/撤退/护航/轰炸），不是集货。自动控制现在多了一条
+    /// 活：按积压定编、派船去跑运输路线——那会让被测的舰不在它该在的位置上（实测踩过：
+    /// 中国的驱逐舰成了运输舰，在金星原地装 0.75 件碳，于是「打残了该撤」的用例不再撤）。
+    /// 见 [`crate::world::pin_roles_to_war`]：它顺带也演示了「玩家意图能压住 AI 定编」。
     fn fresh_world(seed: u64) -> (GameConfig, State) {
         let config = load_config();
-        let state = default_state(&config, seed);
+        let mut state = default_state(&config, seed);
+        crate::world::pin_roles_to_war(&mut state);
         (config, state)
     }
 

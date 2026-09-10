@@ -69,6 +69,14 @@ pub struct ShipSpec {
     /// 继承这一份 `kiting`。全 0 = 基线。`--apply` 可再按单舰覆写。
     #[serde(default)]
     pub default_kiting: f64,
+    /// 本舰级出厂时的**默认角色**（`true` = 运输舰）。舰出厂时继承它，之后落在
+    /// [`Ship::freighter`] 那个记录值上；有效角色走 [`crate::model::State::ship_freighter`]
+    /// （叶 → 舰队默认 → 记录值），自动控制与玩家都可以改。
+    ///
+    /// 只有**航母**出厂就是运输舰：它是唯一的散货船（舱容 20 = 5 艘驱逐），让「舰级身份」
+    /// 和「它天生该干的活」对上。其余舰级出厂是战舰（= 旧行为不变）。
+    #[serde(default)]
+    pub default_freighter: bool,
 }
 
 fn default_mult() -> f64 {

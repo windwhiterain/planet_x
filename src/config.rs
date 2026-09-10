@@ -294,6 +294,15 @@ mod tests {
                 faction: "f".into(), from: "地球".into(), to: "火星".into(),
                 reason: "destroyed".into(),
             },
+            GameEvent::CargoLoaded {
+                ship: "长征".into(), faction: "中国".into(), body: "金星".into(),
+                cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
+            },
+            GameEvent::CargoDelivered {
+                ship: "长征".into(), faction: "中国".into(), body: "地球".into(),
+                cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
+                into_pool: true,
+            },
         ]
     }
 
@@ -315,7 +324,9 @@ mod tests {
             | GameEvent::CityDefected { .. }
             | GameEvent::CoalitionFormed { .. }
             | GameEvent::CoalitionEnded { .. }
-            | GameEvent::CapitalRelocated { .. } => {}
+            | GameEvent::CapitalRelocated { .. }
+            | GameEvent::CargoLoaded { .. }
+            | GameEvent::CargoDelivered { .. } => {}
         }
     }
 
