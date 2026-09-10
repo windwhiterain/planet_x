@@ -581,7 +581,8 @@ fn resolve_own_ship(
 }
 
 /// 校验一对 `(city, building)`：两个名字/下标都必须在**同一座城**里对得上。
-/// `building` 是 u32 下标（在它所属城内部唯一，见 §19 的裁决），所以换一座城
+/// `building` 是 u32 下标（在它所属城内部唯一，见 `.agents/notes/name-as-unique-key.md`
+/// 的裁决），所以换一座城
 /// 就得换下标——这是 agent 手写权重时最容易错的地方。
 fn check_city_building(
     state: &State,

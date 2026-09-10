@@ -3,7 +3,7 @@
 回合制太阳系沙盘：每回合 = 1 个月，全程数据驱动（`config/game.ron`）、确定性可复现。
 
 - [设计 spec](.agents/spec.md)
-- [点子库（活文档，记得回填）](.agents/ideas.md)
+- [笔记索引（活文档，记得回填）](.agents/notes.md) ← 每条主题的**具体描述**在 `.agents/notes/<主题>.md`
 - **[agent 游玩手册](.agents/agent-play.md)** ← 想「玩」先读这个
 
 - 不考虑向前兼容
@@ -22,12 +22,13 @@
   `PLANET_X_WEB_CLOSE_EXIT=0` 关掉后者，`PLANET_X_WEB_CLOSE_GRACE_MS` 调刷新窗口（默认 500ms）。
 - 端口仍**自动扫**（`3000` 被占就 `3001`…，多 worktree 同时跑互不干扰）；`GET /api/ping`
   给出 pid / 端口 / 二进制 + 构建时长——对不上就是连错了实例。
-- 细节与坑见 [点子库 §25](.agents/ideas.md)。
+- 细节与坑见 [笔记：服务生命周期](.agents/notes/web-lifecycle.md)。
 
 ## 给 agent 的工作约定
 
 - **边实现、边想点子**：在做当前目标时，冒出的新机制/新平衡/新剧情只要值得做就**先尝试**；
   做成验证编译通过、长局 harness 不崩、确有增益的改动。
-- **来不及实现的写进点子库**：任何想到但这一回合来不及做完/验证的点子，一律**追加到
-  [`.agents/ideas.md`](.agents/ideas.md)**（写得够细，让下一个 agent 能照做），别让它在对话
-  里蒸发。已实现的勾成 `[x]` 并注明模块，避免重复劳动。
+- **来不及实现的写进笔记**：任何想到但这一回合来不及做完/验证的点子，一律**新建
+  [`.agents/notes/<主题>.md`](.agents/notes/)**（写得够细，让下一个 agent 能照做）**并在
+  [`notes.md`](.agents/notes.md) 加一行索引**，别让它在对话里蒸发。已实现的勾成 `[x]` 并注明
+  模块，避免重复劳动。

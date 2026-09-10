@@ -224,7 +224,7 @@ load），但**没有任何 `schema_version` 或迁移钩子**：一旦某个字
 > - P1 已落地（`schemars` 生成 `schema_value()`，REPL `schema` 命令可查状态 schema）。
 > - P2 已落地（`apply_strict` + `--strict` / `q --strict`，未知字段报错）。
 > - P3 已落地（`State::schema_version` + `SCHEMA_VERSION` + `model::migrate`）。
-> - P4 未做（拆 `AgentState` 镜像 struct，工作量最大）。详见 `.agents/ideas.md` §11。
+> - P4 未做（拆 `AgentState` 镜像 struct，工作量最大）。详见 `schema-query-refactor.md` 的 P4。
 
 ### P0 — 让 `meta` 的规则字典不再漂移（先止血）
 - **问题**：`agent::meta_value` 手写字段清单，漏了 `combat.component_spill/…
@@ -408,7 +408,7 @@ schema。真正制造「双轨」的是**手写的平行投影 `AgentState`**。
 ## 10. 沉淀：「轨迹生成器 + 外部 jq」（Agent 讲故事的批次模型）— **已落地**
 
 > 用户拍板：**外部 jq 为必选依赖；丢 `--strict`；删掉自研 jq 引擎与查询 REPL；但 agent
-> 仍可通过 `--apply` diff 影响故事走向。** 本节是落地蓝图（已实现，见 `.agents/ideas.md` §13）。
+> 仍可通过 `--apply` diff 影响故事走向。** 本节是落地蓝图（已实现，见 `storytelling-mode.md`）。
 
 ### 10.1 形象转变：agent 从「玩家」变成「导演 / 说书人」
 
@@ -488,7 +488,7 @@ planet_x --round 240 | jq -s '[ .[] | .ships[] ] | group_by(.owner_name) | map({
 
 ### 10.8 权威 schema 贯彻（auth-schema worktree）：WYSIWYG key + 拆掉 `AgentState` 镜像
 
-遵循 §3.1 Layer 1 与 §9 的结论，真正「贯彻」了两点（见 `.agents/ideas.md` §14）：
+遵循 §3.1 Layer 1 与 §9 的结论，真正「贯彻」了两点（见 `wysiwyg-resource-keys.md`）：
 
 - **资源 key = 可读名（WYSIWYG）**：把 `config/game.ron`、`State`、控制面、world/测试里的
   资源 key 全部从 raw（`water_ice`）改成显示名（`水冰`）。于是「看到什么 key 就是什么 key」，

@@ -288,7 +288,7 @@ python play/_golden_compare.py play/baseline play/after
 - 自足是硬要求：里程碑里的事件是**归档历史**，实体可能早就没了或改了名，回查 state 只会得到
   「今天的答案」而不是「当时的答案」。
 - 同一句话出现在三处：CLI `--milestones` / `--digest` 的 `top_events`、投影 `idx/events.jsonl` 的
-  `headline` 列、Python `q.milestones()`。**完备 ≠ 可读**，这是 §15「窗口事件文案」的前置。
+  `headline` 列、Python `q.milestones()`。**完备 ≠ 可读**，这是 `coarse-trajectory-views.md` 里「窗口一句话事件文案」的前置。
 - 投影的事件行改为**由 `EventRow` 的序列化结果生成**（此前手写 `json!`，加了列就会悄悄漏掉——
   `headline` 就是这么差点漏的）。
 
@@ -536,7 +536,7 @@ churn 曾经是「窗口层下一个读者」的头号候选（「我是不是�
 - **`cause_id`（事件级因果链显式引用）**：仍**刻意没做**——实测会是 100% null 的死列，而链在
   Python 侧用 `razed.by_ship` / `destroyed.by` / `how+prev_owner` 的结构就能走通。
 - **投影体积**：归一化后 `idx/events.jsonl` 比原来的内联事件大约多 50%（列更多，现在还多一列
-  `headline`）。3000 回合量级可考虑 parquet（ideas.md §17 候选）。
+  `headline`）。3000 回合量级可考虑 parquet（`lazy-index-pandas.md` 候选）。
 - **`--digest` 的窗口粒度**：`top_events` 只列 [Milestone]，上限 24 条（`TOP_EVENTS`），
   `skipped` 如实给出。窗口太大时最重的会被「开战/停战」这类阈值抖动占满（见 §6 末尾），
   需要更细的窗口而不是更多条目。
