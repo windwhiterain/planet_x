@@ -404,9 +404,19 @@ fn same_seed_reproduces_identically() {
 
 /// **机制不变量：合纵连横是活的**——长局里反制联盟真的成立过（不是摆设），
 /// 霸权真的被针对过。这是**机制**是否生效，与「世界最后剩几家」无关。
+///
+/// ⚠ 「联盟成立过」取两种可读证据之**任一**（2026-10 修正，随风格/设计图两个 `Auto` 执行者
+/// 落地）：① `CoalitionFormed` **跃迁事件**；② 回合末的 `metrics.coalition_members` ≥
+/// `balance.min_members`（霸权 + 已达疏远阈值的成员）。
+/// 为什么事件不能单独当判据：它报的是**跃迁**，触发条件依赖两种次序的先后——若成员在霸权
+/// **出现之前**就已经疏远（初始关系 + 外交漂移很容易走到这一步），`coalition_before` 一上来
+/// 就是"已成立" ⇒ **永远不报事件**，而联盟事实上一直在那儿。也就是说"送不送这条事件"取决于与
+/// 机制无关的先后顺序，而这条守卫要问的是**机制是否活着**（联盟状态 + 制裁都真的出现过）。
+/// 事件本身的这个盲区记在 `control-live-layers.md` §15 的待办里（修正要给它加"按霸权存续"的记忆）。
 #[test]
 fn coalition_mechanism_is_alive() {
     let config = load_config();
+    let min_members = config.balance.min_members;
     for seed in [1u64, 42] {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
@@ -419,6 +429,9 @@ fn coalition_mechanism_is_alive() {
                 coalition_seen = true;
             }
             let m = sim::round_metrics(&state, &config, &RoundFlow::default());
+            if m.hegemon.is_some() && m.coalition_members.len() >= min_members {
+                coalition_seen = true;
+            }
             if m.sanctioned.is_some() {
                 sanction_seen = true;
             }
