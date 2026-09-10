@@ -51,6 +51,10 @@ pub struct RoundView {
 2. **两个槽同形**：过程量在 `pre` 里是 0 / 空——**不做** `skip_serializing_if`（那会让「pre 少几个键」
    变成第二条要记的规矩）。代价是 `pre` 里那几个 0 要靠文档说清楚，收益是 Python/前端不必写
    「键可能在不在」的分支。
+   > 📌 **这条规矩有一个正经的松动方向**（用户 2026-10 提出）：把「读面」与「存储」分开——
+   > 读面永远稠密（缺省由 schema **一处**声明、读者不自己编缺省），存储自动稀疏，靠无损的
+   > encode/decode 桥接。那时 `skip_serializing_if` 只出现在**存储编码**里，不再影响读面同形性。
+   > 见 [`dense-face-sparse-store.md`](dense-face-sparse-store.md)（提案，未裁决）。
 3. **每个数只有一个位置**：观测与过程**同处一行**（`FactionRow` / `CityRow`）。`flow.faction_production`
    与 `metrics.factions[].production` 合并成 `view.factions[].production` 一个位置 ⇒ §1 那个
    「两个读面各说各话」的坑**结构上不可能再发生**。

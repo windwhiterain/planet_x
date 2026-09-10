@@ -184,6 +184,10 @@ tidy 表：`idx/faction_process.jsonl` += 4 列（`governance_admin` / `governan
 * **Q3 · 体积**。`main.jsonl` 已经内联整份 `view`（含 `decisions`）。B4 若把逐发索敌计划也算进
   `view`，一局长局的 jsonl 会明显变大。备选：只在 `--derived` 里给、或单独成表 + `--every` 降采样
   （[`coarse-trajectory-views.md`](coarse-trajectory-views.md) 已有这套机制）。
+  ⚠ **B1 已经把这个体积问题量出来了**（§6.1）：`main.jsonl` 18127 B/行（+29%），其中 `capital`
+  一个对象就占 1350 B/行、`loyalty_target` 里约 40% 是同势力重复的全国项。用户由此提出了
+  **「稠密读面 / 自动稀疏存储」**那一层——见 [`dense-face-sparse-store.md`](dense-face-sparse-store.md)
+  （若那套落地，B1 这两处不必在「每行自足」与「不重复存」之间二选一）。
 
 ## 8. 次级候选（近失，别再重复盘一遍）
 
