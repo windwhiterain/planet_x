@@ -210,3 +210,17 @@ p_i      = clamp(flow × t_i ÷ Σ同侧票, 0, 1)
 * 骰子必须走 `derived_roll`（**绝不消费主 `Prng`**），否则「多造一艘船」会改掉世界后续的掷骰；
 * 任何「现状」项都要**排除被这个动作本身改变的量**（这里用的是「我之外」的头数，
   入伙/退伍两侧共用它）。
+
+## 9. 合并与基线
+
+* 合并进 `main` 后（`88b7c5b`）与另一个会话刚落地的 `feature/ai-agency`
+  （`autocontrol::style` 风格轴逐舰重估 + `autocontrol::blueprints` 建图）**互不打架**：
+  `style::regulate_styles` **不碰角色轴**（`ship_freighter`），角色的唯一写者仍是
+  `freight::assign_roles`。`autocontrol/mod.rs` 那一处导出冲突按「两边都留」解决。
+* **基线换代**：`--seed 42 --round 240 --digest 20`（`^{` 行、12 行、连跑两次相同）
+  = `9A1000019D2198ACA4011E04B76943CB434B935412B3D5775F287799CF816F28`。
+* ⚠ **这条改动没有「行为中性替身」**（不同于 `style_chance = 0` 那种开关）：它是用户裁决的
+  有意行为改变。想回到旧行为要改代码（`LEAN_*` 常量与 `threat_motive` 的调用点），
+  不是改配置——所以旧的 digest 基线一律作废。
+* 合并后验收：`cargo test --lib` **178 全绿**、`--test longhorizon` 6 全绿、
+  `--test projection_derived` 4 全绿（`trade_probe` 全是 `#[ignore]` 探针）。

@@ -54,6 +54,11 @@
 > `ai-agency` 在自己的旧基线上是 `D693E838…9273`。
 > 行为中性的替身（`config/game.ron`）：`autocontrol.style_chance = 0` +
 > `autocontrol.blueprint_themes = []` ⇒ 退回旧行为（`control-live-layers.md` §18.1）。
+> ⚠ **基线再一次换代**（`feature/ideology-role` 合并 = `88b7c5b`，**有意的行为改变**：
+> 思潮决定运输/战斗倾向 + 造舰动机解耦 + AI 估建造时间，见 `ideology-roles.md`）：
+> `--seed 42 --round 240 --digest 20`（同样的取行口径、连跑两次相同、12 行）=
+> `9A1000019D2198ACA4011E04B76943CB434B935412B3D5775F287799CF816F28`。
+> 上面那个 `B6078F7E…` 是**合并前**的 `main`（`52eb2bf`），已作废。
 > ⚠ §10.4 那个坑（「恢复继承」撤不掉叶里的值）**已解**：方案 A 落地（引擎 + kit + web 三端，
 > 见该篇 §11.1/§11.3）。取值规则本身没动——方案 B 仍留在桌上（§10.4 的表）。
 
