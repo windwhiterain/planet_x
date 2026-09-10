@@ -166,20 +166,23 @@ APPROX_COLUMNS = (
     "effective_authority_approx",
 )
 
-#: The control **read face** prints every numeric leaf value rounded to this many decimals, while the
-#: checkpoint keeps full precision (measured: writing 0.7131 stores 0.7131 in the `.ron` but
-#: `--control` reports 0.71). `verify` therefore treats a float request as *landed* when the read
-#: face is within half a unit of the last displayed digit. Emitted diffs keep full precision on
-#: purpose — the simulation uses the stored number, not the printed one.
-READ_FACE_DECIMALS = 2
+#: Float tolerance for `verify`. The control **read face is lossless**: it used to print every numeric
+#: leaf rounded to 2 decimals (so writing `0.7131` showed up as `0.71`, and a verbatim round-trip
+#: silently quantized it to `0.01`); that rounding is **gone** — the template is now the stored value
+#: bit for bit (guard: `src/control.rs::the_control_template_never_rounds_a_leaf_value`). So a float
+#: mismatch beyond float-repr slop here means the write really did **not** land.
+#:
+#: (If you point this kit at a binary older than that change you will see "did not land" for values
+#: whose only difference is the old rounding — that is the old engine, not your recipe.)
+_FLOAT_EPS = 1e-9
 
 
 def _values_match(requested: Any, after: Any) -> bool:
-    """Did the read face end up holding what we asked for? (tolerant of the read face's rounding.)"""
+    """Did the read face end up holding exactly what we asked for? (lossless read face ⇒ exact.)"""
     if isinstance(requested, bool) or isinstance(after, bool):
         return requested == after
     if isinstance(requested, (int, float)) and isinstance(after, (int, float)):
-        return abs(float(requested) - float(after)) <= 0.5 * 10 ** (-READ_FACE_DECIMALS) + 1e-12
+        return abs(float(requested) - float(after)) <= _FLOAT_EPS
     return requested == after
 
 

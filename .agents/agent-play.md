@@ -468,7 +468,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--story` | 剧情编年史（叙事弧） |
 | `--notables [<N>]` | **窗口层**：后续计算要回看的那一段历史（当前 = 开战/停战），带窗口宽度；`N` = 只出最近 N 条。**续玩前先读它** |
 | `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
-| `--control` | 可编辑控制面模板 |
+| `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
 | `--derived` | 这一回合存下来的派生态 `{round, source, pre, post}`（`post.flow` = 本回合产出/维护/治理的中间量；与 `--index` 的 `derived.flow` 同值） |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |

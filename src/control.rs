@@ -555,93 +555,23 @@ fn explicit<K: Clone + Ord>(m: &std::collections::BTreeMap<K, ControlMode>) -> V
         .collect()
 }
 
-/// Round to 2 decimals (token-noise reduction, matching the agent output).
-fn r2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}
-
-fn round_behavior(b: ShipBehavior) -> ShipBehavior {
-    match b {
-        ShipBehavior::Move { position } => ShipBehavior::Move {
-            position: [r2(position[0]), r2(position[1])],
-        },
-        other => other,
-    }
-}
-
-/// Round every numeric field of a control view so the agent template has no
-/// float noise. Only used by the agent `control` command; web `state_view`
-/// keeps raw values.
-fn round_view(v: FactionControlView) -> FactionControlView {
-    FactionControlView {
-        faction_id: v.faction_id,
-        capital: v.capital,
-        default_ship_order: v.default_ship_order.map(|d| DefaultShipOrder {
-            behavior: d.behavior.map(round_behavior),
-            mode: d.mode,
-        }),
-        default_doctrine: v.default_doctrine.map(|d| DefaultDoctrine {
-            temper: d.temper.map(r2),
-            lone_wolf: d.lone_wolf.map(r2),
-            mode: d.mode,
-        }),
-        default_kiting: v.default_kiting.map(|d| DefaultKiting { kiting: d.kiting.map(r2), mode: d.mode }),
-        ship_orders: v
-            .ship_orders
-            .into_iter()
-            .map(|o| ShipOrderEntry { ship: o.ship, behavior: round_behavior(o.behavior), mode: o.mode })
-            .collect(),
-        ship_doctrine: v
-            .ship_doctrine
-            .into_iter()
-            .map(|d| ShipDoctrineEntry {
-                ship: d.ship,
-                temper: r2(d.temper),
-                lone_wolf: r2(d.lone_wolf),
-                mode: d.mode,
-            })
-            .collect(),
-        ship_kiting: v
-            .ship_kiting
-            .into_iter()
-            .map(|k| ShipKitingEntry { ship: k.ship, kiting: r2(k.kiting), mode: k.mode })
-            .collect(),
-        investment_budget: v
-            .investment_budget
-            .into_iter()
-            .map(|b| BudgetEntry { resource: b.resource, value: r2(b.value), mode: b.mode })
-            .collect(),
-        construction_budget: v
-            .construction_budget
-            .into_iter()
-            .map(|b| BudgetEntry { resource: b.resource, value: r2(b.value), mode: b.mode })
-            .collect(),
-        invest_weights: v
-            .invest_weights
-            .into_iter()
-            .map(|i| InvestWeightEntry { value: r2(i.value), ..i })
-            .collect(),
-        build_weights: v
-            .build_weights
-            .into_iter()
-            .map(|i| BuildWeightEntry { value: r2(i.value), ..i })
-            .collect(),
-        loyalty_budget: v
-            .loyalty_budget
-            .into_iter()
-            .map(|l| LoyaltyBudgetEntry { value: r2(l.value), ..l })
-            .collect(),
-    }
-}
-
 /// Render the current editable control surface (control + scope) as JSON —
-/// the template an agent edits and posts back as a diff. Values are rounded to
-/// 2 decimals so the template is clean for an LLM.
+/// the template an agent edits and posts back as a diff.
+///
+/// **这里刻意不做任何数值舍入**（曾经把所有数字四舍五入到 2 位小数以求 token 干净）。
+/// 理由：这个函数是「**读面即写面、模板原样回传安全**」这句话的兑现处，
+/// 而往模板里塞一个**有损**变换，等于把那句承诺变成假的 —— `0.125` 会被显示成 `0.13`，
+/// 原样回传就真的把叶值改成了 `0.13`：一次静默的、没人要求的写操作。
+///
+/// 代价核算过（`engine-data-plane.md` §8.3）：实测一份跑到 120 回合的真实控制面里，
+/// **470 个数值没有一个是 2 位小数舍入会改变的** —— 也就是说这点 token 噪声在当前世界里
+/// 根本不存在，舍入**只带来风险、没带来收益**。想要好看的数字是客户端的事
+/// （Python kit / LLM 自己 `round()`），引擎的输出是数据。
 pub fn control_surface(state: &State) -> serde_json::Value {
     let control = state
         .control
         .iter()
-        .map(|(fid, c)| round_view(control_view(state, fid.clone(), c)))
+        .map(|(fid, c)| control_view(state, fid.clone(), c))
         .collect();
     let surface = ControlSurface { control, scope: scope_view(&state.scope) };
     serde_json::to_value(surface).expect("control surface is serializable")
@@ -1962,5 +1892,61 @@ mod tests {
             report.skipped
         );
         assert!(report.applied >= 40, "the whole template should touch many leaves, got {}", report.applied);
+    }
+
+    /// 「读面即写面、模板原样回传安全」是一条**可检查**的承诺：读面里出现的数字必须**逐位**
+    /// 等于状态里存着的那个数 —— 否则"原样回传"就成了一次没人要求的写操作。
+    ///
+    /// 历史：这里曾把所有数值四舍五入到 2 位小数（为了 token 干净），于是 `0.7131` 显示成
+    /// `0.71`、回传后**真的**变成 `0.71`。这条守卫就是那次教训的化身：三个"舍入会改变它"的值，
+    /// 落在三种不同的叶上（势力级默认风格 / 逐舰风格 / 资源预算）。
+    #[test]
+    fn the_control_template_never_rounds_a_leaf_value() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+        let noisy = 0.7131_f64;
+        let diff = serde_json::json!({
+            "control": [{
+                "faction_id": fid,
+                "default_doctrine": {"temper": noisy},
+                "ship_kiting": [{"ship": ship, "kiting": noisy}],
+                "investment_budget": [{"resource": "铁", "value": noisy}]
+            }]
+        });
+        apply_patch(&mut state, &config, &diff).expect("diff applies");
+
+        let surface = control_surface(&state);
+        let fac = surface["control"]
+            .as_array()
+            .expect("control 是数组")
+            .iter()
+            .find(|f| f["faction_id"] == serde_json::json!(fid))
+            .expect("控制面里必须有这个势力")
+            .clone();
+        let exact = serde_json::json!(noisy);
+        assert_eq!(fac["default_doctrine"]["temper"], exact, "势力级默认风格被舍入了");
+        let kite = fac["ship_kiting"]
+            .as_array()
+            .expect("ship_kiting 是数组")
+            .iter()
+            .find(|k| k["ship"] == serde_json::json!(ship))
+            .expect("刚写过的那艘舰必须在读面里");
+        assert_eq!(kite["kiting"], exact, "逐舰风筝距离被舍入了");
+        let budget = fac["investment_budget"]
+            .as_array()
+            .expect("investment_budget 是数组")
+            .iter()
+            .find(|b| b["resource"] == serde_json::json!("铁"))
+            .expect("刚写过的资源预算必须在读面里");
+        assert_eq!(budget["value"], exact, "投资预算被舍入了");
+        // 而且它必须就是状态里真的存着的那个数（读面 = 真值，不是"看起来像"）。
+        assert_eq!(state.ship_kiting(ship), noisy);
     }
 }

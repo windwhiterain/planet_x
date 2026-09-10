@@ -143,11 +143,10 @@ rep.describe()         # one readable paragraph
 > prove the game will behave as intended. For consequences, re-read the world after
 > `--round K` or ask the engine's own cost→benefit preview (`planet_x --control-plan`).
 >
-> ⚠ It also can only see what the **read face** shows, and the read face prints every numeric leaf
-> value rounded to **2 decimals** while the checkpoint keeps full precision (measured: writing
-> `0.7131` stores `0.7131` in the `.ron`, but `--control` reports `0.71`). `verify` therefore treats a
-> float request as landed within half of the last displayed digit. Emitted diffs keep full precision
-> on purpose — the simulation uses the stored number, not the printed one.
+> ⚠ It also can only see what the **read face** shows. That face is now **lossless** (the old 2-decimal
+> rounding of every numeric leaf is gone), so `--control` reproduces the stored value bit for bit and
+> `verify` compares floats exactly (bar float-repr epsilon). What you cannot see there is the
+> **effective** value behind an `Inherit` leaf — see the gaps list below.
 
 ## Hard constraint: **same-round transform**
 
@@ -286,9 +285,13 @@ guessing. They are listed because they are cheap to close and expensive to work 
 3. **No per-entity `effective` on the control read face.** `--control` shows the leaf's *recorded*
    value; when the leaf says `Inherit` the effective order may come from the fleet default or a scope
    node. Python must re-implement `resolve_chain`, which is a drift source (see §1.2 above).
-4. **The control read face rounds every numeric leaf value to 2 decimals** while the checkpoint keeps
-   full precision. Harmless for a human, but it means the documented "dump → edit → send back"
-   round-trip silently quantizes budgets and weights to `0.01`.
+4. **~~The control read face rounds every numeric leaf value to 2 decimals~~** — **fixed** (the
+   rounding is gone: `--control` is now bit-for-bit the stored value, so "dump → edit → send back" is
+   lossless; guard: `src/control.rs::the_control_template_never_rounds_a_leaf_value`). Historical note
+   kept because the diagnosis is the interesting part: a **lossy** transform inside a face that the
+   docs call "read face = write face" made `0.125` come back as `0.13` — a silent write nobody asked
+   for. Measured before removing it: **0 of 470** numeric leaves in a real round-120 control surface
+   would have changed under that rounding, i.e. it bought no token savings and only carried risk.
 5. **`ship_kiting` / `ship_doctrine` are not live layers yet** (`control-live-layers.md` §3/§4.1):
    they are bare per-ship fields with no tri-state and no faction-level default, and writing them
    produces no `NOTE_APPLY_TOOKOVER` either — so "all battleships go 贴脸" is O(N) leaves that new
