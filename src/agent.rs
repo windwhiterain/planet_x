@@ -100,12 +100,6 @@ pub fn state_json(state: &State, view: &RoundView) -> serde_json::Value {
     v
 }
 
-/// The story chronicle (`State::chronicle`) as a JSON array, for `story` /
-/// `.story` queries. This is the full, growing narrative arc of the run.
-pub fn story_value(state: &State) -> serde_json::Value {
-    serde_json::to_value(&state.chronicle).expect("chronicle is serializable")
-}
-
 /// A JSON Schema for the agent's per-round view (`Trajectory`), derived from the
 /// same authoritative model types the state is rendered from — so it stays in sync
 /// and self-describes the keys/types an agent may query (instead of memorising

@@ -62,7 +62,7 @@ History / event queries (the sparse milestones)::
     q.audit()                           # completeness self-check: unexplained city changes (want 0)
 
 Every event row also carries a **`headline`** column: one human-readable sentence rendered by the
-Rust side's single ``GameEvent::headline`` (the same sentence CLI ``--notables`` / ``--digest`` show).
+Rust side's single ``GameEvent::headline`` (the same sentence the ``--digest`` storyboard prints).
 It is *self-contained* (built only from the event's own fields, never by looking the entity up in
 today's state) so it stays true for archived history — an entity may be long dead or renamed since.
 Machine queries should still use ``actor_*``/``target_*``/``data``; the headline is for reading.

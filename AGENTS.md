@@ -52,9 +52,12 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
 - 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md)：
   **Rust 门 62 s 里 58 s 是 test 档编译、真跑只有 4.2 s**；投影每 1000 回合 169 MB 多花
   ~+3.5 s 墙钟（**是构造 JSON，不是磁盘**：这台 NVMe 写 169 MB 只要 0.1 s）。
-- **只想要最终 state**（不要逐回合轨迹）：`--round N --digest N --save ckpt.ron`
-  —— 实测 5.7 s / 0.09 MB，与纯模拟同价；单独 `--save` 不会变快，因为 `--round` 的合同
-  就是每回合吐一行（≈40 MB/1000 回合）。
+- **只想要最终 state**（不要逐回合轨迹）：`--round N --quiet --save ckpt.ron`
+  —— 1000 回合实测 5.2 s / **stdout 0 字节** / 档 0.09 MB（不加 `--quiet` 是 6.3 s / 40.3 MB；
+  单独 `--save` 不会变快，因为 `--round` 的合同就是每回合吐一行）。
+- **CLI 精简过一轮**（2026-10）：`--traj`/`--story`/`--notables`/`--milestones`/`--rounds`
+  已删（信息全在 `--index` 投影里）；**裸调用 `planet_x` 打 help**，`--seed 42` 这种
+  「有参数没动作」仍是机器可读的 `ERR_USAGE`。见 [笔记：CLI 读面](.agents/notes/cli-surface.md)。
 - 加一条断言：写进 `play/tests/g*.py` 的 `run()` 里（判据写 `run()`、数据取自摘要 ⇒ 改断言
   不重读投影）；**每条守卫都要带防空转判据**（「这一局里真的发生过 X」）。
 - 分档口径不变（[笔记：测试分档](.agents/notes/test-tiers.md)）：快组 ≈ T0/T1、中组 ≈ T2、长组 ≈ T3。
