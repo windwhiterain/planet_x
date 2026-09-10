@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{BodyId, CityId, FactionId, ShipId};
+use crate::model::{BodyId, CityId, FactionId, ResourceMap, ShipId};
 
 /// 一艘舰的「行为风格」——自动控制(`autocontrol`)读取它来决定怎么打。每条轴取 `[-1,1]`，
 /// **0 = 基线**(与旧行为一致)。这是 **per-舰** 的配置,不是全局值:舰出厂时继承所属舰级的
@@ -99,6 +99,19 @@ pub struct Ship {
     /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
     #[serde(default)]
     pub attack_hist: BTreeMap<ShipId, f64>,
+    /// **在舱货物**：这艘舰此刻实际装着什么、各多少（`资源 → 数量`）。这是**真实物理量**，
+    /// 不是账面数字——它只能由装卸两个动作改变：
+    ///
+    /// * **装货**：从某势力在某天体的**产地货栈**（[`crate::model::State::depots`]）里扣，
+    ///   总量不得超过有效舱容（见下）。
+    /// * **卸货**：进目标天体——若那是卸货势力的**首都**，就直接进 [`crate::model::Faction::resources`]
+    ///   （首都即集散地，见 `.agents/notes/freight-collection.md`）；否则进该天体的货栈。
+    ///
+    /// **有效舱容**不是常数：`舰级舱容 × hull / hull_max`——装甲被打掉的运输舰装得少
+    /// （受伤的船不敢满载）。舰级舱容见 [`crate::model::ShipSpec::cargo`]，
+    /// 折算见 [`crate::model::cargo_capacity`]。空 = 空舱（出厂/旧档）。
+    #[serde(default)]
+    pub cargo: ResourceMap,
 }
 
 fn default_hull_max() -> f64 {

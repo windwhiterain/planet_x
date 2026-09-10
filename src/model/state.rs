@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 fn default_schema_version() -> u32 {
     0
 }
@@ -479,9 +479,14 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
 /// 这一档的处理是**把旧档的既成事实当作「已经运到首都」**：旧档加载后 `depots` 为空，
 /// 于是它此刻的库存原样留在首都池里，只有**此后新产出的**离岸货才会开始积压在产地。
 /// 这不是信息损失（旧档的库存本来就在池子里），而是新旧语义之间唯一自洽的接法。
+///
+/// v7 → v8（运输分支）：新增 [`Ship::cargo`]（**在舱货物**：这艘舰此刻实际装着什么）。
+/// 它是 `#[serde(default)]` 的新字段，v7 档没有它——而「旧档里那些正在路上的货」**不存在**：
+/// v7 里运输还不是舰船的真实行为，货只可能躺在某地（池子或货栈）里，不可能在半路。
+/// 所以旧档一律按**空舱**处理，**零信息损失**（没有货在途中，也没有货凭空出现/消失）。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

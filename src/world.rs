@@ -720,6 +720,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             doctrine: spec.default_doctrine,
             kiting: spec.default_kiting,
             attack_hist: BTreeMap::new(),
+            cargo: BTreeMap::new(),
         });
     };
 

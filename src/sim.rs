@@ -358,6 +358,7 @@ pub(crate) fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn
         doctrine: cspec.default_doctrine,
         kiting: cspec.default_kiting,
         attack_hist: BTreeMap::new(),
+        cargo: BTreeMap::new(),
     };
     let panel = ship_panel(config, &ship);
     ship.hull = panel.hull_max;
@@ -4463,6 +4464,65 @@ mod tests {
         assert!(
             (cn_carbon(&state) - c0).abs() < 1e-9,
             "两回合过去，金星的碳一格都没进池——这就是「等船来运」"
+        );
+    }
+
+    /// **舱容（M2）**：有效舱容 = 舰级舱容 `ShipSpec::cargo` × **战损折算** `hull / hull_max`。
+    ///
+    /// 钉住三条机制不变量：
+    /// 1. **舰级舱容是「设计裁决」而不是平衡旋钮**——护卫 2 / 驱逐 4 / 巡洋 6 / 航母 20 /
+    ///    战列 6，且**航母是唯一的散货船**。这条要硬断言：改它等于改设计，不该是调参时手滑。
+    /// 2. **战损是连续的**：装甲掉一半 → 舱容减半（不是「受伤就装不了」的硬阈值）。
+    /// 3. **旧档（`hull_max ≤ 0`）按满舱**：绝不出现 `hull / 0 = ∞` 的无底货舱。
+    #[test]
+    fn cargo_capacity_is_class_capacity_times_hull_fraction() {
+        use crate::model::cargo_capacity;
+        let (config, state) = fresh_world(42);
+
+        // 1) 舰级舱容（设计裁决：见 config/game.ron 的 ships 注释第 (3) 类）。
+        let table = [
+            ("corvette", 2.0),
+            ("destroyer", 4.0),
+            ("cruiser", 6.0),
+            ("carrier", 20.0),
+            ("battleship", 6.0),
+        ];
+        for (class, cap) in table {
+            assert_eq!(
+                config.ship_spec(class).cargo,
+                cap,
+                "{class} 的舱容是设计裁决（{cap}），不是可随手调的平衡旋钮"
+            );
+        }
+        assert!(
+            table.iter().all(|(c, cap)| *c == "carrier" || *cap < 20.0),
+            "航母必须是唯一的散货船——否则「用哪条船运货」就不构成一个选择"
+        );
+
+        // 2) 战损连续折算。
+        let mut ship = state
+            .ships
+            .iter()
+            .find(|s| s.class == "cruiser")
+            .expect("开局有巡洋舰")
+            .clone();
+        assert!(ship.hull_max > 0.0, "出厂舰必须有 hull_max");
+        assert_eq!(cargo_capacity(&config, &ship), 6.0, "满血巡洋舰 = 满舱 6");
+        ship.hull = ship.hull_max * 0.5;
+        assert!(
+            (cargo_capacity(&config, &ship) - 3.0).abs() < 1e-9,
+            "装甲掉一半 → 舱容减半（连续，不是硬阈值）"
+        );
+        ship.hull = 0.0;
+        assert_eq!(cargo_capacity(&config, &ship), 0.0, "壳被打光 → 一格都装不了");
+
+        // 3) 旧档缺 `hull_max`：按满舱处理，而不是把舱容算成无穷。
+        ship.hull = 6.0;
+        ship.hull_max = 0.0;
+        assert_eq!(
+            cargo_capacity(&config, &ship),
+            6.0,
+            "hull_max ≤ 0（旧档）按未受损处理，绝不返回 ∞"
         );
     }
 

@@ -301,7 +301,7 @@
         "titan":     (label: "雾霾卫星", class: "titan",   color: "#e0a15e", accent: "#b87840", atmosphere: "#f0c080", radius: 0.60, banded: false, emissive: 0.03, roughness: 0.85, metalness: 0.0),
         "dwarf":     (label: "矮行星",   class: "dwarf",   color: "#d6cdb8", accent: "#8f8571", atmosphere: "#9a8f7a", radius: 0.35, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.0),
     },
-    // 舰船 5 级。舰级属性分两类：
+    // 舰船 5 级。舰级属性分三类：
     //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是
     //       本体的直接值）；另有槽位/造价/维护费。
     //   (2) 平台修正系数：armor_mult(护甲硬度) / shield_mult(护盾) /
@@ -309,6 +309,9 @@
     //       attack_mult(伤害) / range_mult(攻击距离) / pd_mult(点防御)，分别缩放所搭载的
     //       对应模块输出。舰级身份由此体现（护卫=快、驱逐=再生、巡洋=重甲、航母=超远程、
     //       战列=一锤定音）。
+    //   (3) 舱容 cargo：**与战斗无关的第三类能力**——一次能装多少单位货（运输）。
+    //       它**不从 hull 推**：船体大 ≠ 能装（航母 20 才是唯一的散货船）。有效舱容
+    //       还要乘战损折算 hull/hull_max（受伤的运输舰装得少，见 `model::cargo_capacity`）。
     // 速度 / 加速度 / 攻击距离**没有舰级基础值**：它们完全来自推进/武器模块，所以
     // 「推进」和「武器」一样是必须的（没有推进模块就没有速度/攻击距离=0）。
     // 分档（直接属性）：hull 低≈12-26 高≈72；hull_regen 低≈0.04 高≈0.30。
@@ -322,6 +325,7 @@
             build_cost: { "铁": 6.0, "碳": 3.0 },   // 资源：极低，常见
             upkeep: 1.5,
             slots: 2,            // 至少「武器+推进」两个槽（轻装哨戒）
+            cargo: 2.0,          // 舱容：极低（哨戒不是运输舰）
             armor_mult: 0.9,     // 低
             shield_mult: 0.9,    // 低
             shield_regen_mult: 0.9, // 低
@@ -339,6 +343,7 @@
             build_cost: { "铁": 12.0, "碳": 7.0 },  // 资源：中，常见
             upkeep: 2.5,
             slots: 2,
+            cargo: 4.0,          // 舱容：低（远洋部署：跑得远，但装得不多）
             armor_mult: 1.0,     // 中
             shield_mult: 0.9,    // 低
             shield_regen_mult: 1.0, // 中（远洋部署：不靠盾，靠船体再生）
@@ -356,6 +361,7 @@
             build_cost: { "铁": 18.0, "碳": 10.0, "硅": 6.0 },  // 资源：极高，常见
             upkeep: 6.0,
             slots: 3,            // 中型舰：火力+防护+推进
+            cargo: 6.0,          // 舱容：中（重甲舰体，顺带能拉货）
             armor_mult: 1.5,     // 高（重甲 → 护甲硬度放大）
             shield_mult: 1.3,    // 高
             shield_regen_mult: 1.3, // 高（招牌：扛伤害，盾再生快）
@@ -373,6 +379,7 @@
             build_cost: { "铁": 12.0, "碳": 8.0, "氦-3": 4.0, "铂": 3.0, "金": 2.0 },  // 资源：高，稀有
             upkeep: 7.5,
             slots: 3,
+            cargo: 20.0,         // 招牌：唯一的散货船——机库本来就是它的本体，装 20（=5 艘驱逐）
             armor_mult: 0.9,     // 低
             shield_mult: 0.9,    // 低
             shield_regen_mult: 0.9, // 低
@@ -390,6 +397,7 @@
             build_cost: { "铁": 10.0, "铀": 4.0 },  // 资源：中，稀有
             upkeep: 6.5,
             slots: 3,            // 主力舰三槽：火力+盾点防+推进
+            cargo: 6.0,          // 舱容：中（玻璃大炮：弹药库改不成货舱，但也拉得动）
             armor_mult: 0.9,     // 低
             shield_mult: 0.9,    // 低
             shield_regen_mult: 0.9, // 低

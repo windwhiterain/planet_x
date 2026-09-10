@@ -523,3 +523,74 @@ fn probe_landless() {
         }
     }
 }
+
+/// 8) **集货腿的量（M2）**：离岸产出积压了多少、值多少、折多少趟运输、有多少压在异常带里。
+///
+/// 这是 M3 派单 / M4 定价要面对的**需求侧**实测：没有运输时，货栈就是「等船来运」的存量。
+/// * **开局需求**（第 1 回合末的积压）＝ 每月要搬多少货（单位/回合）——它决定需要几条船；
+/// * **期末积压**＝ 一直没人运时攒下来的存量（单位 / 价值 / 折多少趟航母舱容）；
+/// * **带内**＝ 积压所在天体在 MOND 异常带内（非 master）的处数——它决定**谁能去取**。
+#[test]
+#[ignore]
+fn probe_collection_backlog() {
+    let config = load_config();
+    let n = rounds();
+    let carrier_cap = config.ship_spec("carrier").cargo;
+    let r_mond = config.mond.radius;
+    // (单位, 价值, 货栈处数, 其中在异常带内的处数)
+    let depot_of = |state: &State, fid: &str| -> (f64, f64, usize, usize) {
+        let (mut units, mut value, mut bodies, mut deep) = (0.0, 0.0, 0usize, 0usize);
+        for ((f, b), map) in &state.depots {
+            if f != fid {
+                continue;
+            }
+            bodies += 1;
+            let p = state.body_position(b);
+            if (p[0] * p[0] + p[1] * p[1]).sqrt() > r_mond {
+                deep += 1;
+            }
+            for (rt, amt) in map {
+                units += amt;
+                value += amt * value_of(&config, rt);
+            }
+        }
+        (units, value, bodies, deep)
+    };
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        sim::advance(&mut state, &config, &mut rng); // 第 1 回合末
+        let opening: BTreeMap<String, f64> = state
+            .factions
+            .iter()
+            .map(|f| (f.name.clone(), depot_of(&state, &f.name).0))
+            .collect();
+        for _ in 1..n {
+            sim::advance(&mut state, &config, &mut rng);
+        }
+        println!("== 集货积压 seed {seed}（{n} 回合，航母舱容 {carrier_cap}）==");
+        let (mut tot_units, mut tot_value, mut tot_pool) = (0.0, 0.0, 0.0);
+        for f in &state.factions {
+            let name = f.name.as_str();
+            let (units, value, bodies, deep) = depot_of(&state, &name);
+            let pool = stock_value(&state, &config, name);
+            let open = opening.get(name).copied().unwrap_or(0.0);
+            tot_units += units;
+            tot_value += value;
+            tot_pool += pool;
+            if units <= 0.0 && open <= 0.0 {
+                continue;
+            }
+            let trips = units / carrier_cap;
+            let ships = live_ships(&state, name);
+            println!(
+                "    {name:<14} 开局需求={open:>7.2}/回合  期末积压={units:>9.1} 单位 / 值 {value:>9.1}  \
+                 货栈 {bodies} 处（带内 {deep}）  折 {trips:>6.1} 趟航母  舰 {ships:>2}  池值 {pool:>9.1}"
+            );
+        }
+        let ratio = if tot_pool > 0.0 { 100.0 * tot_value / tot_pool } else { 0.0 };
+        println!(
+            "    —— 合计：积压 {tot_units:.1} 单位 / 值 {tot_value:.1}；池值合计 {tot_pool:.1}（积压占池值 {ratio:.1}%）"
+        );
+    }
+}
