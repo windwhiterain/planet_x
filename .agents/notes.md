@@ -38,10 +38,15 @@
 > 　④ 剩下的：风格轴与 `Auto` 设计图的**真执行者**（**进行中** `feature/ai-agency`）＋
 > `military-combat.md` 的 refit（把新图套到老舰上）＋
 > `eras-technology.md` 的时代门控（图库容器已就绪）。
-> `eras-technology.md` 的时代门控（图库容器已就绪）。
-> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变
-> （合并后的基线 = `293725C43A0E26DC516977C04A5BD9C99977252B8C08D683EC2EA2749ADEDBC4`，
-> `--seed 42 --round 240 --digest 20`；旧的 `70D5A34E…` 随 v9 运输落地作废）。
+> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` 比较。
+> ⚠ **基线已换代（2026-10）**：`293725C4…DBC4` 是 v10（设计图）时代的基线，已被**另一个会话**
+> 合进 main 的 `feature/freight-contract`（合并提交 `05fe04f`，雇佣运力市场，
+> `SCHEMA_VERSION` 10 → **13**）**作废**——那是**有意的行为改变**（运输仍在 WIP，用户明说
+> 数值以后再调）。`--seed 42 --round 240 --digest 20` 在 `3b6873a`（freight-contract +
+> 读面/写面对齐 + web 设计图库面板）上的新基线 =
+> `B6F234FB22703C8132C298CE4C0BB2429A3461EF98AE85DC838E23E5451DCB06`（12 行，连跑两次相同）。
+> 核对过：那两条分支**各自**在自己的树上都是 `293725C4…`（行为中性），换代完全来自 freight-contract
+> ——所以别再拿 `293725C4…` 去比新树，那会误报成"某分支改了行为"。
 > ⚠ §10.4 那个坑（「恢复继承」撤不掉叶里的值）**已解**：方案 A 落地（引擎 + kit + web 三端，
 > 见该篇 §11.1/§11.3）。取值规则本身没动——方案 B 仍留在桌上（§10.4 的表）。
 
