@@ -405,12 +405,15 @@ residualCount: 13          （实验前是 12）
 
 ### 10.4 验证
 
-* **引擎一行未动**：`git diff --stat src/` 空；同 seed `--seed 42 --round 240 --digest 20`（取 `^{` 行、`\n` 连接、UTF-8 无 BOM、12 行）在两棵树上**实测相同**：
-  `C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9`
-  （主工作树 `C:\resource\planet_x` = 本分支 = 同一个值）。
-  ⚠ **顺带查实一条文档漂移**：`notes.md` 末尾记的基线 `81A19749…1811` **不是 `a06354f` 的值**——那是更早的换代点；本轮实测的 `C928C3F1…06A9` 才是当前 `main`（`a06354f`）的值。本轮没改引擎，所以这条漂移与本轮无关，但**别再拿旧值当基线**。
+* **引擎一行未动**：`git diff --stat src/` 空；同 seed `--seed 42 --round 240 --digest 20`
+  （取 `^{` 行、`\n` 连接、UTF-8 无 BOM、12 行）= **`C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9`**。
+  * 分支点（`a06354f`）实测同值；**合并 `main`（`a310788`，B4 战斗中间量）之后**在那棵树上
+    再测一次，仍是这个值 ⇒ 本轮既没改引擎、也没改变 B4 之后的现状。
+  * 这条基线现在写在 `notes.md` 末尾（B4 那一轮顺手回填的；此前那里留的是更早的
+    `81A19749…1811`，与本轮无关，别再拿旧值当基线）。
 * `cargo nextest run -p planet_x_web`：**27 绿**（含 3 条新的 `views_tests`）。
-* **全档**：`cargo nextest run -P full` = **230 通过 / 0 失败 / 34 跳过**（27.3 s）。
+* **全档**：`cargo nextest run -P full` = **233 通过 / 0 失败 / 34 跳过**（合并后实测，28.6 s；
+  合并前是 230——多出来的 3 条是 B4 那边新加的）。
 * 覆盖率报告（`cargo test … --nocapture`）：
   `state.ships，seed 7 / 40 回合：字段 18 个 = 认领 5 + 残差 13；残差 = attack_hist、blueprint、component_hp、components、doctrine、faction_id、hull_max、kiting、position、shield、shield_max、spawned_round、velocity`
   ——**残差永远非空**（那条断言本身也是一条守门人：全被认领说明有人把字段写死在别处了）。
