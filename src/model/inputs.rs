@@ -58,8 +58,8 @@ pub struct RoundInputs {
 
 /// 一次 `derived_roll` 抽签的完整记录（掷出的值 + 当时的判据 + 结果）。
 ///
-/// 两种用法都能表达（见各字段）：**闸门**（`roll < 机会值` ⇒ 布尔）与**加权抽签**
-/// （`roll × 总权重` 落在哪一段 ⇒ 选中谁）。
+/// 两种用法都能表达（见各字段）：**闸门**（`value < threshold` ⇒ 走哪一支）与**加权抽签**
+/// （`value × pool_total` 落在哪一段 ⇒ 选中谁）。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Roll {
     /// 用途 = `derived_roll` 的 `salt`（`"role"` / `"route"` / `"gate"` / `"accept"` / `"pick"` / …）。
@@ -70,12 +70,13 @@ pub struct Roll {
     pub subject: String,
     /// **掷出的值** ∈ `[0, 1)`（`derived_roll` 的产物）。
     pub value: f64,
-    /// **闸门阈值**：与 `value` 比较的机会值（概率 `p`）。`None` = 这一枚不是闸门。
+    /// **闸门阈值**：判据是 `value < threshold`（概率 `p`）。`None` = 这一枚不是闸门。
     pub threshold: Option<f64>,
-    /// **抽签池的总权重**（加权抽签那一档）。`None` = 这一枚不是抽签。
+    /// **抽签池的总权重**（加权抽签那一档：`value × pool_total` 落在哪一段）。
+    /// `None` = 这一枚不是抽签。
     pub pool_total: Option<f64>,
-    /// **结果**：闸门 ⇒ `"true"` / `"false"`（过没过）；抽签 ⇒ 选中的那一段的名字
-    /// （货栈天体 / 合同号……）。`None` = 掷了但结果不由这枚骰子决定。
+    /// **结果**：闸门 ⇒ 走的那一支的可读标签（`"freight"` / `"war"` / `"accepted"` / `"refused"`…）；
+    /// 抽签 ⇒ 选中的那一段（货栈天体名 / 合同号 / 设计主题）。`None` = 掷了但结果不由这枚骰子决定。
     pub picked: Option<String>,
 }
 
@@ -88,5 +89,49 @@ impl RoundInputs {
     /// 记一条抽签记录（`derived_roll` 家族的统一入口）。
     pub fn push_roll(&mut self, roll: Roll) {
         self.rolls.push(roll);
+    }
+
+    /// 记一次**闸门**：判据是 `value < threshold`，`branch` 是走的那一支的可读标签。
+    ///
+    /// 只在**拍板处**调用（同一枚骰子可能被「估算」与「拍板」问两次——记的是决定，不是算过）。
+    pub fn record_gate(
+        &mut self,
+        purpose: &str,
+        faction: &str,
+        subject: &str,
+        value: f64,
+        threshold: f64,
+        branch: &str,
+    ) {
+        self.push_roll(Roll {
+            purpose: purpose.to_string(),
+            faction: faction.to_string(),
+            subject: subject.to_string(),
+            value,
+            threshold: Some(threshold),
+            pool_total: None,
+            picked: Some(branch.to_string()),
+        });
+    }
+
+    /// 记一次**加权抽签**：`value × pool_total` 落在哪一段（`picked` = 选中的那一段）。
+    pub fn record_draw(
+        &mut self,
+        purpose: &str,
+        faction: &str,
+        subject: &str,
+        value: f64,
+        pool_total: f64,
+        picked: &str,
+    ) {
+        self.push_roll(Roll {
+            purpose: purpose.to_string(),
+            faction: faction.to_string(),
+            subject: subject.to_string(),
+            value,
+            threshold: None,
+            pool_total: Some(pool_total),
+            picked: Some(picked.to_string()),
+        });
     }
 }

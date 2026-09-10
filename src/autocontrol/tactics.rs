@@ -492,6 +492,9 @@ pub(crate) fn ai_ship_turn(
     // 与 `decisions` 分开传是因为调用方（`sim::step_military`）两者都在 `RoundSink` 里
     // ——借两个不相交的字段，读卡不打架。
     haul_steps: &mut BTreeMap<ShipId, HaulStep>,
+    // B5 输入面：本回合 AI 判定**掷出的骰子**（派单抽签等）记在这里——与上面两个一样是
+    // 借 RoundSink 里不相交的字段。
+    inputs: &mut RoundInputs,
 ) {
     let Some(ship) = state.ship(ship_id) else {
         return;
@@ -600,7 +603,7 @@ pub(crate) fn ai_ship_turn(
     // 路线从 `freight::route_for` 来：优先续用现有路线（这条腿还有活/舱里载着货），否则按
     // **货量占比抽签**在两个方向里挑一条新的。挑不到（没有货要动、或定编还没收回去）就这一回合不派活。
     if role == ShipRole::Freight {
-        match freight::route_for(state, config, &owner, ship_id) {
+        match freight::route_for(state, config, &owner, ship_id, inputs) {
             Some((from, to)) => {
                 let behavior = ShipBehavior::Haul {
                     from: from.clone(),

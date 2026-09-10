@@ -91,7 +91,7 @@ fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> 
     let mut hist = Vec::new();
     for _ in 0..rounds {
         state.round += 1;
-        assign_roles(state, config);
+        assign_roles(state, config, &mut crate::model::RoundInputs::default());
         hist.push(roster(state, fid));
     }
     hist
@@ -155,7 +155,7 @@ fn route_lottery_is_proportional_to_the_backlog() {
     let mut hits = std::collections::BTreeMap::<String, usize>::new();
     for i in 0..4000 {
         let ship = format!("抽签舰{i}");
-        if let Some((from, _)) = route_for(&state, &config, "中国", &ship) {
+        if let Some((from, _)) = route_for(&state, &config, "中国", &ship, &mut crate::model::RoundInputs::default()) {
             *hits.entry(from).or_insert(0) += 1;
         }
     }
@@ -228,7 +228,7 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
         .ship_role
         .insert(hauler.clone(), Control::player(ShipRole::Freight));
     state.depots.clear();
-    assign_roles(&mut state, &config);
+    assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert!(
         state.ship_role(hauler.clone()) == ShipRole::Freight,
         "玩家钉的角色：AI 不得改写（哪怕没有积压）"
@@ -265,7 +265,7 @@ fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
         .unwrap()
         .ship_role
         .insert(ship.clone(), Control::player(ShipRole::Freight));
-    assign_roles(&mut state, &config);
+    assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight);
     assert!(
         state
@@ -536,7 +536,7 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
             s.cargo.clear();
         }
         state.round += 1;
-        assign_roles(&mut state, &config);
+        assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
         if state.ship_role(hauler.clone()) != ShipRole::Freight {
             recalled = true;
             break;
@@ -599,7 +599,7 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
     let mut waited = 0;
     for _ in 0..20 {
         st.round += 1;
-        assign_roles(&mut st, &config);
+        assign_roles(&mut st, &config, &mut crate::model::RoundInputs::default());
         waited += 1;
         if !roster(&st, "中国").is_empty() {
             break;
@@ -638,7 +638,7 @@ fn an_existing_route_is_kept_while_it_still_has_cargo() {
                 to: "地球".to_string(),
             }),
         );
-    let picked = route_for(&state, &config, "中国", &ship).unwrap();
+    let picked = route_for(&state, &config, "中国", &ship, &mut crate::model::RoundInputs::default()).unwrap();
     assert_eq!(
         picked.0, "冥王星",
         "那条腿还有货 ⇒ 续用现有路线，不按货量重掷"
@@ -647,7 +647,7 @@ fn an_existing_route_is_kept_while_it_still_has_cargo() {
     state
         .depots
         .remove(&("中国".to_string(), "冥王星".to_string()));
-    let picked = route_for(&state, &config, "中国", &ship).unwrap();
+    let picked = route_for(&state, &config, "中国", &ship, &mut crate::model::RoundInputs::default()).unwrap();
     assert_eq!(picked.0, "卡戎", "原路线没货了 ⇒ 重新抽签");
 }
 
@@ -1098,7 +1098,7 @@ fn probe_ideology_roles() {
         let mut waited = 0;
         for _ in 0..200 {
             st.round += 1;
-            assign_roles(&mut st, &config);
+            assign_roles(&mut st, &config, &mut crate::model::RoundInputs::default());
             waited += 1;
             if !roster(&st, "中国").is_empty() {
                 break;
@@ -1119,14 +1119,14 @@ fn probe_ideology_roles() {
         st.depot_add("中国", "金星", "碳", 100.0);
         for _ in 0..40 {
             st.round += 1;
-            assign_roles(&mut st, &config);
+            assign_roles(&mut st, &config, &mut crate::model::RoundInputs::default());
         }
         let before = roster(&st, "中国").len();
         st.depots.clear();
         let mut waited = 0;
         for _ in 0..200 {
             st.round += 1;
-            assign_roles(&mut st, &config);
+            assign_roles(&mut st, &config, &mut crate::model::RoundInputs::default());
             waited += 1;
             if roster(&st, "中国").is_empty() {
                 break;

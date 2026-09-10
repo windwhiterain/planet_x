@@ -545,20 +545,68 @@ fn hauler_headcount(state: &State, fid: &str, except: &str) -> f64 {
 /// 名单（**同侧总票数**的分母）只算**掷得动的船**：玩家钉住的、舱里有货的、正在执行承包单的
 /// 舰都不在名单上——票不该投给动不了的人，否则期望入伙数会凭空少掉。
 pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> ShipRole {
+    let roll = sim::derived_roll(fid, ship_id, state.round, "role");
+    role_with_roll(state, config, fid, ship_id, roll, None).0
+}
+
+/// [`should_be_role`] 的**拍板**入口（B5）：同一套判据，但**把这次抽签记进输入面**。
+///
+/// ⚠ 只有这里会记账，`should_be_role`（估算路，例如「挂单时估我还有几条腿」）不记——
+/// 同一枚骰子会被问两次，记的是**决定**（谁被定编成什么），不是「谁算过」。
+pub(crate) fn decide_role(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    inputs: &mut RoundInputs,
+) -> ShipRole {
+    let roll = sim::derived_roll(fid, ship_id, state.round, "role");
+    let (role, probe) = role_with_roll(state, config, fid, ship_id, roll, Some(inputs));
+    if let Some(p) = probe {
+        inputs.record_gate(
+            "role",
+            fid,
+            ship_id,
+            roll,
+            p,
+            match role {
+                ShipRole::Freight => "freight",
+                ShipRole::War => "war",
+                ShipRole::Observe => "observe",
+            },
+        );
+    }
+    role
+}
+
+/// 定编的**判据**（纯函数，吃骰子）：返回角色 + **这次抽签的机会值**。
+///
+/// 第二个值是 `Some(p)` 当且仅当**这枚骰子真的被用到了**（判据是 `roll < p`）；
+/// 早退的那几档（硬承诺 / 玩家表态 / 观测优先 / 运力为 0）返回 `None`——
+/// 于是记账那边不必复制一遍早退逻辑（**判据只有一处**）。
+fn role_with_roll(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    roll: f64,
+    // 拍板那条路把输入面传进来（记观测那一支的抽签）；估算那条路传 None。
+    mut recorder: Option<&mut RoundInputs>,
+) -> (ShipRole, Option<f64>) {
     // 1) 硬承诺（见上）。
     if state.contracts.assignment_of(ship_id).is_some() {
-        return ShipRole::Freight;
+        return (ShipRole::Freight, None);
     }
     let Some(ship) = state.ship(ship_id) else {
-        return ShipRole::War;
+        return (ShipRole::War, None);
     };
     if !ship.cargo.is_empty() {
-        return ShipRole::Freight;
+        return (ShipRole::Freight, None);
     }
     // 2) 玩家表态：AI 不掷骰，直接用玩家的值（`Player` 的逐舰叶或舰队默认）。
     let role = state.ship_role(ship_id.to_string());
     if state.ship_role_control(ship_id.to_string()).is_player() {
-        return role;
+        return (role, None);
     }
     // 3) **三个动机抢舰队**（水位配给，见 [`role_quotas`]）：先算出本回合观测与运输各自的
     //    配额。观测**先挑**（优先级，见下一条），但**挑几条**由配给说了算——所以一处积压
@@ -568,14 +616,36 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
     //    渠道空转就是零掌握度，而运输缺一条船还能雇人（承包市场就是干这个的）。选靶与抽签
     //    在 `autocontrol::knowledge`（与这里**同形**的缺口抽签）；它自己读 `state.ship_role`
     //    判断「我现在是不是观测舰」，所以入伙与退伍都在那一个函数里定。
-    if super::knowledge::should_observe(state, config, fid, ship_id, observe_quota) {
-        return ShipRole::Observe;
+    //
+    //    **B5**：观测那一支的骰子由 `recorder` 决定记不记——拍板那条路（`decide_role`）
+    //    传进来的是 `Some`，把这次抽签落进输入面；估算那条路传 `None`（同一枚骰子不记两遍）。
+    let observe_roll = sim::derived_roll(fid, ship_id, state.round, "observe_role");
+    let (observe, observe_p) = super::knowledge::observe_with_roll(
+        state,
+        config,
+        fid,
+        ship_id,
+        observe_quota,
+        observe_roll,
+    );
+    if let (Some(p), Some(rec)) = (observe_p, recorder.as_deref_mut()) {
+        rec.record_gate(
+            "observe_role",
+            fid,
+            ship_id,
+            observe_roll,
+            p,
+            if observe { "observe" } else { "war" },
+        );
+    }
+    if observe {
+        return (ShipRole::Observe, None);
     }
     // 5) 当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
     let cur = role == ShipRole::Freight;
     // 6) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
     if freight_tonnage(config, ship) <= 0.0 {
-        return ShipRole::War;
+        return (ShipRole::War, None);
     }
     // 7) 配额 → 抽签（用**水位配给之后**的那一支，不是主张）。
     let quota = freighter_quota_share;
@@ -647,13 +717,15 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
     let headcount = others + if cur { 1.0 } else { 0.0 };
     let flow = gap + ROLE_ROTATION * headcount;
     let p = (flow * mine / tickets).min(1.0);
-    let flip = sim::derived_roll(fid, ship_id, state.round, "role") < p;
+    // 骰子**由调用方掷进来**（B5）：拍板那条路要把它记进输入面，估算那条路不必。
+    let flip = roll < p;
     let stay = if cur { !flip } else { flip };
-    if stay {
+    let role = if stay {
         ShipRole::Freight
     } else {
         ShipRole::War
-    }
+    };
+    (role, Some(p))
 }
 
 /// **本回合的定编**：把「谁是运输舰」一次性写进第三条风格轴
@@ -667,7 +739,11 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
 /// 2. **归属链判定是 `Player` 就不写**：玩家在叶上或舰队默认上表过态 ⇒ 这条轴归玩家。
 ///
 /// 值没变就不重写：控制面的 diff 是给人读的，把同一个值每回合重写一遍只会制造噪声。
-pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
+pub(crate) fn assign_roles(
+    state: &mut State,
+    config: &GameConfig,
+    inputs: &mut RoundInputs,
+) {
     let mut fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort();
     for fid in fids {
@@ -684,7 +760,10 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
             if state.ship_role_control(s.name.clone()).is_player() {
                 continue;
             }
-            plan.push((s.name.clone(), should_be_role(state, config, &fid, &s.name)));
+            plan.push((
+                s.name.clone(),
+                decide_role(state, config, &fid, &s.name, inputs),
+            ));
         }
         for (name, role) in plan {
             let unchanged = state
@@ -712,11 +791,15 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
 /// **优先续用现有路线**——常驻路线不该每回合重掷：舱里有货 ⇒ 一定续（那票货得送到）；
 /// 空舱 ⇒ 看**这条腿还有没有活**（出口腿看起点还有没有净剩余、进口腿看终点还有没有缺口）。
 /// 抽签细节见本模块的文档。
+///
+/// **B5**：只有**真的抽了签**那一档（末尾）会往 `inputs` 记一条（早退的那几档没掷骰子——
+/// 「执行承包单的舰跑的是单据上的路线」，那不是抽出来的）。
 pub fn route_for(
     state: &State,
     config: &GameConfig,
     fid: &str,
     ship_id: &str,
+    inputs: &mut RoundInputs,
 ) -> Option<(BodyId, BodyId)> {
     // **执行承包单的舰**跑的是那张单的路线（接单时立的承诺，不是抽签抽出来的）：
     // 起运在**托运方**那里（可能是它的货栈、也可能是它的首都池）、目的在托运方那一端——
@@ -758,7 +841,8 @@ pub fn route_for(
     if total <= 0.0 {
         return None;
     }
-    let mut x = sim::derived_roll(fid, ship_id, state.round, "route") * total;
+    let roll = sim::derived_roll(fid, ship_id, state.round, "route");
+    let mut x = roll * total;
     let mut picked = cands.last().map(|l| (l.from.clone(), l.to.clone()))?; // 浮点兜底：落到末尾之外就取最后一条
     for l in &cands {
         if x < l.units {
@@ -767,6 +851,16 @@ pub fn route_for(
         }
         x -= l.units;
     }
+    // **输入面（B5）**：记的是「掷出的那一枚」+ 池子的总权重 + 抽中的腿——于是
+    // 「为什么它去了那个货栈」= 概率 ∝ 该腿的积压占比，而这里给出的是那一次的实况。
+    inputs.record_draw(
+        "route",
+        fid,
+        ship_id,
+        roll,
+        total,
+        &format!("{}→{}", picked.0, picked.1),
+    );
     Some(picked)
 }
 

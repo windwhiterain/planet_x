@@ -424,9 +424,29 @@ prev  : production={硅:20,碳:0.75,铁:40}, upkeep=20.6, governance_cost=6.0
   ——因为这些函数是**纯函数**（`should_be_role` / `route_for` / 闸门判定），而且**同一枚骰子
   可能被问两次**（`should_be_role` 既被「挂单估运力」问、又被「定编拍板」问）⇒ **只在拍板处
   记一条**（记的是「谁做了什么决定」，不是「谁算过」）。
+  * ✅ **B5b-1 已落地（9 处：定编 + 合同撮合）**。实践把形状钉死成三条：
+    1. 纯函数多返回一个 **`Option<机会值>`**（`role_with_roll` / `observe_with_roll`）：
+       `Some(p)` ⇔ 骰子**真被用到**（早退档返回 `None`）⇒ 记账那边**不必复制一遍早退逻辑**
+       ——**判据只有一处**，这是这一批最值钱的一条纪律；
+    2. 拍板路传 `recorder: Some(&mut inputs)`、估算路传 `None`：**一条判据、两种调用**；
+    3. **没掷就没记**（整期无产出的合同不续约 ⇒ 不掷骰 ⇒ 输入面里没有它）——这不是漏记。
+    用途清单：`role` / `observe_role` / `route` / `gate` / `accept` / `pick` / `assign` /
+    `quit` / `review` / `renew`；实测 seed 7 / 30 回合共 **1106 条**（`gate` 643 条最多）。
+    > 样例（直接回答玩家的问题）：
+    > `{"purpose":"gate","faction":"俄罗斯","subject":"契约0","value":0.4561,`
+    > `"threshold":0.5167,"picked":"heard"}` ／
+    > `{"purpose":"gate","faction":"无国界科学组织","value":0.8054,"picked":"unheard"}`
+    > ⇒「没人接我的单」原来是**根本没听说**，而不是「听说了不接」。
+    ⚠ 用例踩坑：`fresh_world` 把角色轴钉成「全员战舰」⇒ 定编两族骰子**根本不掷**，
+    「防空转」的断言必须换**没钉**的世界（`default_state`），否则是在断言一个假象。
+  * ⏳ **B5b-2 待接**：`blueprint_intent` / `blueprint_retune` / `blueprint_theme`（蓝图）、
+    `retool`（war / hauler 两处）、`observe_body`、风格 `chance` / `step`、
+    `nav_roll`（空盐那一档 = MOND 偏航）。形状同上（纯函数 + 调用方掷骰）。
 * **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
-  积压占比、合同的 `eligibility`/`pool_total`……它们是**回合中段的 state 快照** ⇒ 属 ③，
-  同样只在拍板处记。
+  积压占比、合同的 `eligibility`……它们是**回合中段的 state 快照** ⇒ 属 ③，同样只在拍板处记。
+  B5b-1 已经把**判据本身**记进去了（闸门的 `threshold`、抽签的 `pool_total` 就是它们）；
+  剩下的「候选池全表要不要逐项收」等 B5b-2 之后再定——那一项会让记录从 ~37 条/回合涨到
+  上百条/回合，值得单独量一次体积再决定。
 
 ## 7. 待裁决（剩下的设计点）
 

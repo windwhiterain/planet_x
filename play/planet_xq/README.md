@@ -101,6 +101,13 @@ settled face. Two things this buys you:
   same round and omit one launched later, so it may be longer than the round's closing roster.
 - **`relation_noise` answers "why did that relation wobble for no reason"**: `aff` and the drift
   rate are deterministic; the ±noise roll is the only unmotivated move.
+- **`rolls` answers "why did nobody take my contract / why was that ship made a freighter"**: each
+  entry is one `derived_roll` draw with **the value rolled and the bar it was compared against**.
+  Gates (`threshold` set, `picked` = which branch: `heard`/`unheard`, `willing`/`unwilling`,
+  `assigned`/`skipped`, `quit`/`kept`, `good`/`poor`, `renewed`/`replaced`,
+  `freight`/`war`/`observe`) vs weighted draws (`pool_total` set, `picked` = the lane/faction
+  chosen). Only decisions are recorded — the same die is often also consulted by an *estimate*
+  (e.g. sizing your own hauling capacity), and that is not a decision.
 
 ⚠ The input face is **not** in `main.jsonl` and **not** in `--derived`'s `post` — it is the
 `pre` side (what `--derived` prints as `pre`, and what `round_inputs` holds in an `--index`

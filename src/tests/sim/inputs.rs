@@ -157,3 +157,55 @@ fn the_input_face_reproduces_byte_for_byte() {
     };
     assert_eq!(run(7), run(7), "同 seed 的输入面不一致 ⇒ 记录改变了随机流");
 }
+
+/// **`rolls` 的形状与内容**（B5b）：每条要么是**闸门**（`threshold` + 走的那一支），要么是
+/// **加权抽签**（`pool_total` + 选中谁）；`value ∈ [0,1)`；势力与对象都不空。
+///
+/// 防空转：真世界里这几个用途**必须真的出现过**——某一族没接上时这里会红，
+/// 而不是安静地留一张空表（本仓库对「空表骗过守卫」有前科）。
+#[test]
+fn roll_records_are_well_formed_and_actually_happen() {
+    // ⚠ `fresh_world` 把角色轴**钉成「全员战舰」**（那条默认让定编那两族骰子根本不掷），
+    // 所以要测它们就得用**没钉**的世界——否则 `role` / `observe_role` 永不出现，
+    // 「防空转」这条就变成了在断言一个假象。
+    let config = load_config();
+    let mut state = default_state(&config, 7);
+    let mut rng = Prng::new(7);
+    let mut inputs = RoundInputs::default();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for _ in 0..30 {
+        advance_round(&mut state, &config, &mut rng, &mut inputs);
+        for r in &inputs.rolls {
+            assert!(
+                (0.0..1.0).contains(&r.value),
+                "掷出的值必须在 [0,1) 里：{:?}",
+                r
+            );
+            assert!(
+                !r.faction.is_empty() && !r.subject.is_empty(),
+                "抽签记录要能指回「谁、对什么」：{r:?}"
+            );
+            match (r.threshold, r.pool_total) {
+                (Some(p), None) => {
+                    assert!(
+                        (0.0..=1.0).contains(&p),
+                        "闸门的机会值必须是个概率（{p}）：{r:?}"
+                    );
+                    assert!(r.picked.is_some(), "闸门要记下走了哪一支：{r:?}");
+                }
+                (None, Some(total)) => {
+                    assert!(total > 0.0, "抽签池的总权重必须为正：{r:?}");
+                    assert!(r.picked.is_some(), "抽签要记下选中谁：{r:?}");
+                }
+                other => panic!("既不闸门也不抽签的形状：{other:?}（{r:?}）"),
+            }
+            *seen.entry(r.purpose.clone()).or_default() += 1;
+        }
+    }
+    for want in ["gate", "accept", "assign", "role", "review", "renew"] {
+        assert!(
+            seen.contains_key(want),
+            "30 回合里一次 `{want}` 抽签都没记到（已记到：{seen:?}）——那一族没接上？"
+        );
+    }
+}

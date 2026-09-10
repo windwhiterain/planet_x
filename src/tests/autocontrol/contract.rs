@@ -201,7 +201,7 @@ fn accepting_an_order_hires_a_faction_and_then_staffs_it_with_ships() {
             let s = state.ship(&ship).expect("派工指向的船必须存在");
             assert_eq!(s.faction_id, carrier, "只能派自己的船");
             let route =
-                freight::route_for(&state, &config, &carrier, &ship).expect("接活的舰要有路线");
+                freight::route_for(&state, &config, &carrier, &ship, &mut crate::model::RoundInputs::default()).expect("接活的舰要有路线");
             assert_eq!(route, (c.from.clone(), c.to.clone()), "跑的是雇主的路线");
             // 每条腿都有一端是雇主的首都（集散地）：集货腿的**终点**是首都，补给腿的**起点**
             // 是首都——「完全禁止瞬移」之后两个方向都是正式的单子。
@@ -241,7 +241,7 @@ fn a_contract_runs_any_number_of_ships_and_survives_one_going_down() {
     let rep0 = state.faction("美国").unwrap().reputation;
     // 一艘沉了：`settle_contracts` 抹掉那条派工，**不发事件、不掉信誉**。
     state.ships.retain(|s| s.name != ships[0]);
-    settle_contracts(&mut state, &config);
+    settle_contracts(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert_eq!(
         state.contracts.ships_of(id),
         vec![ships[1].clone()],
@@ -294,7 +294,7 @@ fn a_review_judges_the_measured_throughput_and_never_punishes_an_idle_depot() {
     // 0 个有货回合 ⇒ 不评：信誉一个字都不动，也不发事件。
     let rep0 = state.faction("美国").unwrap().reputation;
     state.contracts.get_mut(id).unwrap().review_round = 0;
-    settle_contracts(&mut state, &config);
+    settle_contracts(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert!(
         (state.faction("美国").unwrap().reputation - rep0).abs() < 1e-9,
         "货栈一直没货 ⇒ 不该考核（更不该判它不达标）"
@@ -317,7 +317,7 @@ fn a_review_judges_the_measured_throughput_and_never_punishes_an_idle_depot() {
         c.delivered = 12.0;
         c.review_round = 0;
     }
-    settle_contracts(&mut state, &config);
+    settle_contracts(&mut state, &config, &mut crate::model::RoundInputs::default());
     let rep1 = state.faction("美国").unwrap().reputation;
     assert!(
         (rep1 - rep0).abs() - config.freight.reputation_gain < 1e-9,
@@ -404,7 +404,7 @@ fn an_expired_term_is_renewed_or_switched_on_the_same_gate_that_hired_it() {
             c.delivered = 3.0;
         }
         st.faction_mut("美国").unwrap().reputation = rep;
-        settle_contracts(&mut st, &config);
+        settle_contracts(&mut st, &config, &mut crate::model::RoundInputs::default());
         (id, st)
     };
     // 信誉高于门槛（0.6 上下）⇒ 大概率续约：合同留在簿上、仍是同一受雇方、进度清零。
@@ -587,7 +587,7 @@ fn quitting_never_hands_the_cargo_in_transit_to_the_carrier() {
         us1 - us0
     );
     // 卸完变空 ⇒ 巡检放掉这条派工（它回去跑自己的线）。
-    settle_contracts(&mut state, &config);
+    settle_contracts(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert_eq!(
         state.contracts.assignment_of(&ship),
         None,

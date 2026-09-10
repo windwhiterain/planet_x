@@ -154,7 +154,11 @@ pub fn accept_chance(state: &State, config: &GameConfig, c: &Contract, fid: &str
 ///
 /// 中选者只是**受雇**（`carrier` 落定 + 雇佣期起算）：**不押船**。派工是下一步
 /// [`assign_hired_ships`] 的事——那张单要几条船、派哪几条，是受雇方自己的内部事务。
-pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
+pub(crate) fn match_carriers(
+    state: &mut State,
+    config: &GameConfig,
+    inputs: &mut RoundInputs,
+) {
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort(); // 确定性：候选顺序不依赖势力表的排列
     let open: Vec<u64> = state
@@ -194,12 +198,36 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
                 continue; // 一条船都派不出来 ⇒ 物理上接不了（不是「不太愿意」）
             }
             let rep = state.faction(fid).map(|f| f.reputation).unwrap_or(0.0);
-            if sim::derived_roll(fid, &key, round, "gate") >= eligibility(config, rep, &c) {
+            // **两道闸门都记账**（B5）：低信誉者「没听说这单」与「听说了但不想接」是两件
+            // 不同的事——只记事件的话，读面只看得见「最后谁接了」，看不见「谁根本没听说」。
+            let gate = eligibility(config, rep, &c);
+            let gate_roll = sim::derived_roll(fid, &key, round, "gate");
+            inputs.record_gate(
+                "gate",
+                fid,
+                &key,
+                gate_roll,
+                gate,
+                if gate_roll < gate { "heard" } else { "unheard" },
+            );
+            if gate_roll >= gate {
                 continue; // 这一回合没"听说"这单（低信誉者极少看见）
             }
-            if sim::derived_roll(fid, &key, round, "accept")
-                >= accept_chance(state, config, &c, fid)
-            {
+            let accept = accept_chance(state, config, &c, fid);
+            let accept_roll = sim::derived_roll(fid, &key, round, "accept");
+            inputs.record_gate(
+                "accept",
+                fid,
+                &key,
+                accept_roll,
+                accept,
+                if accept_roll < accept {
+                    "willing"
+                } else {
+                    "unwilling"
+                },
+            );
+            if accept_roll >= accept {
                 continue; // 看见了但不想接（越不划算越可能不接）
             }
             willing.push((fid.clone(), rep.max(1e-3)));
@@ -209,7 +237,8 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
         }
         // 3) 多家愿意接 ⇒ 按信誉加权抽签：信誉高者更可能拿到，但不是必然。
         let total: f64 = willing.iter().map(|(_, w)| *w).sum();
-        let mut x = sim::derived_roll("", &key, round, "pick") * total;
+        let pick_roll = sim::derived_roll("", &key, round, "pick");
+        let mut x = pick_roll * total;
         let mut chosen = willing.last().cloned().expect("willing 非空");
         for (fid, w) in &willing {
             if x < *w {
@@ -219,6 +248,7 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
             x -= w;
         }
         let (carrier, _) = chosen;
+        inputs.record_draw("pick", &carrier, &key, pick_roll, total, &key);
         let terms = hire_terms(state, config, &c.from, &c.to);
         if let Some(cc) = state.contracts.get_mut(id) {
             cc.carrier = Some(carrier.clone());
@@ -324,7 +354,11 @@ fn own_ship_balance(state: &State, config: &GameConfig, fid: &str) -> (f64, f64)
 ///
 /// 顺序上：**先补人再抽手**（这一回合刚接下的活也应该有机会立刻派人）。每个势力按名字序、
 /// 每张单按单号序处理 ⇒ 与势力表的排列无关，确定性。
-pub(crate) fn assign_hired_ships(state: &mut State, config: &GameConfig) {
+pub(crate) fn assign_hired_ships(
+    state: &mut State,
+    config: &GameConfig,
+    inputs: &mut RoundInputs,
+) {
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort();
     let unit = config.freight.recall_width.max(1e-9);
@@ -356,7 +390,16 @@ pub(crate) fn assign_hired_ships(state: &mut State, config: &GameConfig) {
                 }
                 let p = (shortfall / c.capacity).clamp(0.0, 1.0) * lend;
                 let key = format!("派工{id}");
-                if sim::derived_roll(&fid, &key, round, &ship) < p {
+                let roll = sim::derived_roll(&fid, &key, round, &ship);
+                inputs.record_gate(
+                    "assign",
+                    &fid,
+                    &format!("{key}:{ship}"),
+                    roll,
+                    p,
+                    if roll < p { "assigned" } else { "skipped" },
+                );
+                if roll < p {
                     state.contracts.assign(ship.clone(), id);
                     free.retain(|s| *s != ship);
                 }
@@ -381,10 +424,19 @@ pub(crate) fn assign_hired_ships(state: &mut State, config: &GameConfig) {
                 break;
             }
             let key = format!("退约{id}");
-            if sim::derived_roll(&fid, &key, round, "quit") >= quit {
+            let roll = sim::derived_roll(&fid, &key, round, "quit");
+            inputs.record_gate(
+                "quit",
+                &fid,
+                &key,
+                roll,
+                quit,
+                if roll < quit { "quit" } else { "kept" },
+            );
+            if roll >= quit {
                 continue;
             }
-            review_contract(state, config, id); // 离开前结清这一期
+            review_contract(state, config, id, inputs); // 离开前结清这一期
             end_contract(state, id, "recalled");
             quota -= 1;
         }
@@ -459,7 +511,12 @@ pub fn review_chance(config: &GameConfig, ratio: f64) -> f64 {
 /// * 事件带上 `ratio` / `good` / `delta`，所以「为什么它的信誉掉了」在流水账里查得到。
 ///
 /// 返回是否真的评了（供调用处决定要不要排下一次）。
-fn review_contract(state: &mut State, config: &GameConfig, id: u64) -> bool {
+fn review_contract(
+    state: &mut State,
+    config: &GameConfig,
+    id: u64,
+    inputs: &mut RoundInputs,
+) -> bool {
     let Some(c) = state.contracts.get(id).cloned() else {
         return false;
     };
@@ -469,8 +526,18 @@ fn review_contract(state: &mut State, config: &GameConfig, id: u64) -> bool {
     let Some(ratio) = c.throughput_ratio(config) else {
         return false;
     };
-    let good = sim::derived_roll(&c.shipper, &format!("考核{id}"), state.round, "review")
-        < review_chance(config, ratio);
+    let chance = review_chance(config, ratio);
+    let review_key = format!("考核{id}");
+    let roll = sim::derived_roll(&c.shipper, &review_key, state.round, "review");
+    inputs.record_gate(
+        "review",
+        &c.shipper,
+        &review_key,
+        roll,
+        chance,
+        if roll < chance { "good" } else { "poor" },
+    );
+    let good = roll < chance;
     let delta = if good {
         config.freight.reputation_gain
     } else {
@@ -556,7 +623,11 @@ fn end_contract(state: &mut State, id: u64, reason: &str) {
 /// 交付不在这里——它发生在 [`crate::sim::haul_unload`] 那一刻（船真的到了泊位）。
 /// 这里处理的是**时间的后果**，每回合开头跑一次（`sim::step_contracts`），顺序有意如此：
 /// **先记分母再考核**，所以「这一回合货栈有货」也算进这一期。
-pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
+pub(crate) fn settle_contracts(
+    state: &mut State,
+    config: &GameConfig,
+    inputs: &mut RoundInputs,
+) {
     // 0) **清理**：派工指向的舰没了（被击沉/报废/退役）⇒ 抹掉那条记录。
     //
     //    这里**没有事件、没有惩罚**（用户：「船沉没不管，只管统计运输量」）：船沉了这件事
@@ -630,7 +701,7 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
         .map(|c| c.id)
         .collect();
     for id in due {
-        review_contract(state, config, id);
+        review_contract(state, config, id, inputs);
         // 排下一次考核。到期那一回合的排期随后被「续约/结束」覆盖，所以这里不必特判。
         if let Some(c) = state.contracts.get(id).cloned() {
             let interval = hire_terms(state, config, &c.from, &c.to).interval;
@@ -661,9 +732,26 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
         };
         let rep = state.faction(&carrier).map(|f| f.reputation).unwrap_or(0.0);
         let no_output = c.delivered <= 1e-9;
-        let renew = !no_output
-            && sim::derived_roll(&c.shipper, &format!("续约{id}"), state.round, "renew")
-                < eligibility(config, rep, &c);
+        // 整期一件货都没搬 ⇒ **不掷骰**（不是信誉问题）——所以这一档不记账是**对的**：
+        // 输入面记的是「掷了什么」，没掷就是没有。
+        let renew_key = format!("续约{id}");
+        let renew_line = eligibility(config, rep, &c);
+        let renew_roll = sim::derived_roll(&c.shipper, &renew_key, state.round, "renew");
+        if !no_output {
+            inputs.record_gate(
+                "renew",
+                &c.shipper,
+                &renew_key,
+                renew_roll,
+                renew_line,
+                if renew_roll < renew_line {
+                    "renewed"
+                } else {
+                    "replaced"
+                },
+            );
+        }
+        let renew = !no_output && renew_roll < renew_line;
         if renew {
             // 续约**不发事件**：同一份关系继续，合同条款一个字都没变（只有计时器重置）。
             // 「这一刻发生了什么」已经由这一回合的 `contract_reviewed` 说了。

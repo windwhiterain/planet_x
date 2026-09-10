@@ -219,15 +219,34 @@ pub fn should_observe(
     ship_id: &str,
     quota: f64,
 ) -> bool {
+    let roll = sim::derived_roll(fid, ship_id, state.round, "observe_role");
+    observe_with_roll(state, config, fid, ship_id, quota, roll).0
+}
+
+/// 观测定编的**判据**（纯函数，吃骰子）：返回是否入伙 + **这次抽签的机会值**。
+///
+/// 第二个值是 `Some(p)` 当且仅当骰子真被用到（`roll < p`）——早退档（没配额 / 没这条舰 /
+/// 没观测能力）返回 `None`，于是记账那边不必复制早退逻辑。
+///
+/// **谁记账**：定编的拍板入口是 `freight::decide_role`（它同时管运输与观测两支的骰子，
+/// 因为「观测优先」就长在那条判据里）；估算路（`should_be_role`）拿同一个骰子但不记。
+pub(crate) fn observe_with_roll(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    quota: f64,
+    roll: f64,
+) -> (bool, Option<f64>) {
     // 1) 没分到船就不去（配额是三个动机抢完舰队的结果，见 `freight::role_quotas`）。
     if quota <= 0.0 {
-        return false;
+        return (false, None);
     }
     let Some(ship) = state.ship(ship_id) else {
-        return false;
+        return (false, None);
     };
     if observer_tonnage(config, ship) <= 0.0 {
-        return false;
+        return (false, None);
     }
     let cur = state.ship_role(ship_id.to_string()) == ShipRole::Observe;
     let others = observer_headcount(state, fid, ship_id);
@@ -285,8 +304,9 @@ pub fn should_observe(
     let headcount = others + if cur { 1.0 } else { 0.0 };
     let flow = gap + OBSERVER_ROTATION * headcount;
     let p = (flow * mine / tickets).min(1.0);
-    let flip = sim::derived_roll(fid, ship_id, state.round, "observe_role") < p;
-    if cur { !flip } else { flip }
+    let flip = roll < p;
+    let observe = if cur { !flip } else { flip };
+    (observe, Some(p))
 }
 
 #[cfg(test)]

@@ -1501,7 +1501,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "column_docs": {
                     "order": "**C7 · 本回合的逐舰解算顺序**（`sim::step_military` 开头由**主 `Prng`** 洗出）：它是「**为什么这艘舰一炮未发就被击沉**」的答案——互杀时它排在击沉它的那艘舰**之后**（`hull <= 0` 的舰在循环里跳过）。⚠ 含**所有**舰（已沉的也在洗牌池里，只是轮到时不行动）。",
                     "relation_noise": "**C13 · 本回合每对势力的关系噪声**（`rel += rng.range_f64(-noise, noise)` 里掷出的那个增量），`{势力: {势力: 噪声}}`，键是**有序**的一对（同一对只出现一次）。它回答「关系为什么**无端抖了一下**」——`aff` 与漂移率都是确定的，唯一无缘无故的动就是这个。",
-                    "rolls": "**`derived_roll` 家族的抽签记录**（定编 / 派单 / 合同闸门 / 风格 / 蓝图 / 知识……）：每条 = `{purpose, faction, subject, value, threshold, pool_total, picked}`——`value` 是掷出的值 ∈ [0,1)，`threshold` 是闸门比较的机会值，`pool_total` 是加权抽签池的总权重，`picked` 是结果。⚠ 这些骰子**不消费主 `Prng`**（`(势力, 对象, 回合, 用途)` 的哈希 ⇒ 可重算），但**判据不可重算**（候选池/权重/机会值都是那一刻的）——所以记录里两者都留。（B5a 先把面与两处主 `Prng` 接上；逐族接入见笔记。）",
+                    "rolls": "**`derived_roll` 家族的抽签记录**：每条 = `{purpose, faction, subject, value, threshold, pool_total, picked}`。两种形状：**闸门**（`threshold` 有值、`pool_total` 为空，判据是 `value < threshold`，`picked` 是走的那一支）与**加权抽签**（`pool_total` 有值、`threshold` 为空，`value × pool_total` 落在哪一段，`picked` 是选中的那一段）。已接的用途（B5b-1）：`role` / `observe_role`（定编：为什么这艘舰被改成运输舰 / 被派去观测）、`route`（派单：为什么去那个货栈）、`gate` / `accept`（**为什么没人接我的单**：`heard`/`unheard` 与 `willing`/`unwilling` 是两件事）、`pick`（多家愿意时加权抽中谁）、`assign`（派哪条船）、`quit` / `review` / `renew`（退约 / 考核好评差评 / 没续约）。⚠ 这些骰子**不消费主 `Prng`**（`(势力, 对象, 回合, 用途)` 的哈希 ⇒ 可重算），但**判据不可重算**（候选池/权重/机会值都是那一刻的）——所以两者都留。⚠ **只在「拍板处」记一条**：同一枚骰子会被「估算」与「拍板」问两次（例如挂单时估运力也问 role），记的是**决定**不是「谁算过」；没掷的档（整期无产出不续约、承包单指定路线）**不记**。",
                 },
             }),
             "decisions" => json!({

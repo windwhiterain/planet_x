@@ -37,7 +37,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
     // **集货定编**（本回合一次）：先把「谁是运输舰」定下来并写进第三条风格轴，再逐舰执行。
     // 放在这里而不是让每艘舰自己算，是为了**与舰的处理顺序无关**——下面的 `order` 是按 rng
     // 打乱的：若逐舰现算，前几艘舰这一回合装的货会改掉后面舰的名额，结论就依赖抽到的顺序了。
-    autocontrol::freight::assign_roles(state, config);
+    autocontrol::freight::assign_roles(state, config, &mut flow.inputs);
 
     for ship_id in order {
         let Some(ship) = state.ship(&ship_id) else {
@@ -136,6 +136,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
             &mut next_building_id,
             &mut flow.decisions.ships,
             &mut flow.haul_steps,
+            &mut flow.inputs,
         );
         continue;
     }

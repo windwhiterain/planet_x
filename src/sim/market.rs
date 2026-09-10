@@ -441,14 +441,14 @@ pub fn step_contracts(state: &mut State, config: &GameConfig, flow: &mut RoundSi
     autocontrol::freight::post_contracts(state, config, flow);
     // 2) 挂完就撮合：看得见、又愿意接的受雇方**按信誉加权抽签**接下（`carrier` 落定、
     //    雇佣期起算）。**不押船**——派几条船是受雇方自己的事。
-    autocontrol::contract::match_carriers(state, config);
+    autocontrol::contract::match_carriers(state, config, &mut flow.inputs);
     // 3) 受雇方派工：把自己的空闲船按**缺口**补到手上的单上；自己缺船时又收回它们
     //    （缺船也提前结束手上的雇佣）。路线与角色叶**不在这里写**——`step_ships` 的运输舰
     //    分支与 `assign_roles` 会照常处理（它们都认识派工记录），每个叶子只有一个写者。
-    autocontrol::contract::assign_hired_ships(state, config);
+    autocontrol::contract::assign_hired_ships(state, config, &mut flow.inputs);
     // 4) 巡检：记考核分母 → 到点**考核**（信誉的唯一来源）→ 固定期到期**续约或换人**。
     //    交付不在这里——它发生在 `haul_unload` 那一刻（船真的靠了泊位）。
-    autocontrol::contract::settle_contracts(state, config);
+    autocontrol::contract::settle_contracts(state, config, &mut flow.inputs);
     // 5) 单子没了 ⇒ 清掉指向它的派工，免得有舰永远钉在一张不存在的单上。
     state.contracts.drop_dangling_assignments();
 }

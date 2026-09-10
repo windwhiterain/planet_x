@@ -289,7 +289,7 @@ fn the_observer_headcount_lands_on_the_quota() {
     for _ in 0..rounds {
         state.round += 1;
         sum_quota += observer_quota(&state, &config, fid);
-        assign_roles(&mut state, &config);
+        assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
         sum += observers(&state, fid).len() as f64;
     }
     let mean = sum / rounds as f64;
@@ -307,7 +307,7 @@ fn the_observer_headcount_lands_on_the_quota() {
     let mut last: Vec<String> = Vec::new();
     for _ in 0..120 {
         state.round += 1;
-        assign_roles(&mut state, &config);
+        assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
         let now = observers(&state, fid);
         for n in &now {
             seen.insert(n.clone());
@@ -344,7 +344,7 @@ fn observers_and_haulers_both_get_their_share() {
         let (_, fq, oq) = role_quotas(&state, &config, fid);
         sum_frt_quota += fq;
         sum_obs_quota += oq;
-        assign_roles(&mut state, &config);
+        assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
         sum_obs += observers(&state, fid).len() as f64;
         sum_freight += state
             .ships
@@ -419,6 +419,7 @@ fn an_observer_is_ordered_to_dock_at_a_body_inside_the_anomaly() {
         &mut next_building_id,
         &mut decisions,
         &mut haul_steps,
+        &mut crate::model::RoundInputs::default(),
     );
     match state.ship_behavior(ship.clone()) {
         Some(ShipBehavior::Dock { body }) => {
