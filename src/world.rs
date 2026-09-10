@@ -822,6 +822,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         // 市场从空开始：挂单/价格在第一个回合由各势力的当期富余重新挂出（见
         // `sim::step_market`）——世界生成不预置市场，正如开局不预置成交历史。
         market: MarketState::default(),
+        // 产地货栈从空开始：开局各城库存都在首都池里（世界生成不预置离岸积压）。
+        depots: BTreeMap::new(),
     };
 
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------

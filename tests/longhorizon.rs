@@ -206,13 +206,18 @@ fn diagnose_long_horizon() {
 /// a long, war-torn run (here on the default diplomacy curve which opens
 /// peacefully and escalates on its own).
 ///
-/// **活体判据（机制层，不是平衡层）**：世界不能变成「没有任何活城」的僵局——那时既没有产出、
-/// 也没有造舰、也没有殖民，游戏真的结束了。
+/// **活体判据（机制层，不是平衡层）**：世界不能进入**吸收态**——既无活城**又**无舰。
+/// 那时既没有产出、也没有殖民的来源，游戏真的结束了。
 ///
-/// 这里**曾经**还断言「舰不能全没了」（`all ships gone`）。删掉 `step_resurgence`（D5）之后
-/// 这条不再是机制不变量：舰队被战争清空是**合法状态**，只要还有活城 + 造船区，舰队就能重造
-/// ——实测 seed 42 在 r816 前后确实出现过「全世界零舰」，随后由城里的造船区重新长出舰队。
-/// 把「零舰」当崩坏是把**平衡观测**误当**机制不变量**，所以改成记录（打印）而不断言。
+/// 「零活城」本身**不是**终局（曾经把它当终局，是错的）：殖民只要「一艘活舰 + 一处空白
+/// 定居点」，**不需要产出**。实测（seed 42、1000 回合、MOND 概率化之后）：r611 全世界只剩
+/// 最后一座城（欧罗巴冰下港）被夷平 → **r612 立刻殖民复生** → r650 又长回 16 座城。
+/// 所以这里把「零活城」降级为**诊断 + 恢复断言**（必须在 [`CITILESS_RECOVERY`] 回合内重新
+/// 立城），只把「既无城又无舰」当机制违规。
+///
+/// 同理，这里**曾经**断言「舰不能全没了」。删掉 `step_resurgence`（D5）之后那条不再是机制
+/// 不变量：舰队被战争清空是**合法状态**，只要还有活城 + 造船区，舰队就能重造——实测 seed 42
+/// 在 r816 前后确实出现过「全世界零舰」，随后由城里的造船区重新长出舰队。
 #[test]
 fn no_nonfinite_over_long_run() {
     let config = load_config();
@@ -222,6 +227,9 @@ fn no_nonfinite_over_long_run() {
     let mut nonfinite_round = None;
     let mut shipless_rounds = 0u32;
     let mut citiless_rounds = 0u32;
+    let mut dead_rounds = 0u32;
+    let mut citiless_since: Option<u32> = None;
+    let mut worst_recovery = 0u32;
     for _ in 0..horizon {
         sim::advance(&mut state, &config, &mut rng);
         let (bad, samples) = count_nonfinite(&state, &config);
@@ -229,21 +237,43 @@ fn no_nonfinite_over_long_run() {
             nonfinite_round = Some((state.round, samples));
             break;
         }
+        let cities = state.cities.iter().filter(|c| !c.razed).count();
         if state.ships.is_empty() {
             shipless_rounds += 1;
         }
-        if !state.cities.iter().any(|c| !c.razed) {
+        if cities == 0 {
             citiless_rounds += 1;
+            citiless_since.get_or_insert(state.round);
+            if state.ships.is_empty() {
+                dead_rounds += 1;
+            }
+        } else if let Some(from) = citiless_since.take() {
+            worst_recovery = worst_recovery.max(state.round - from);
         }
     }
-    println!("diagnostic: 零舰回合={shipless_rounds} 零活城回合={citiless_rounds}");
+    if let Some(from) = citiless_since {
+        worst_recovery = worst_recovery.max(state.round - from);
+    }
+    println!(
+        "diagnostic: 零舰回合={shipless_rounds} 零活城回合={citiless_rounds} \
+         最长零城复生耗时={worst_recovery} 回合"
+    );
     assert_eq!(
-        citiless_rounds, 0,
-        "世界出现了「没有任何活城」的僵局——那时既无产出也无殖民，游戏真的结束了"
+        dead_rounds, 0,
+        "世界进入了吸收态（既无活城又无舰）——那才是真的结束了"
+    );
+    assert!(
+        worst_recovery <= CITILESS_RECOVERY,
+        "零活城的状态拖了 {worst_recovery} 回合才复生（上限 {CITILESS_RECOVERY}）——\
+         殖民只需要「活舰 + 空白定居点」，不该拖这么久"
     );
     let Some((round, samples)) = nonfinite_round else { return };
     panic!("non-finite numbers at round {}: {:?}", round, samples);
 }
+
+/// 「全世界没有活城」之后，允许拖多少回合才重新立城。殖民不依赖产出（只要舰 + 空白
+/// 定居点），所以这个上限给得宽——它防的是「殖民机制坏了」，不是「经济不好」。
+const CITILESS_RECOVERY: u32 = 36;
 
 /// Economic sanity: the total world market value should not balloon without
 /// bound — a stockpile that compounds forever is a broken economy, not a game.

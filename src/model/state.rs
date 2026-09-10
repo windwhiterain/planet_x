@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 fn default_schema_version() -> u32 {
     0
 }
@@ -68,6 +68,15 @@ pub struct State {
     /// 可禁运、有配给），不是常数价无限供货的自动贩卖机。
     #[serde(default)]
     pub market: MarketState,
+    /// **产地货栈**：`(势力, 天体) → 库存`。非首都天体的产出落在这里，**必须靠船运回首都**
+    /// 才进入 [`Faction::resources`]（那个池子代表「首都集散地手上的现货」）。
+    ///
+    /// 依据：`.agents/notes/freight-collection.md` —— **首都即集散地**（对外路线只有
+    /// 首都↔首都），所以首都天体的产出免运输直接进池，其余地方的货得等人来运。
+    /// 货**不会消失**：没船就冻在产地（矿物不会烂），势力可以攒着等重建舰队、
+    /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
+    #[serde(default)]
+    pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
 }
 
 /// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
@@ -130,6 +139,43 @@ impl State {
     /// Mutably borrow a faction by its unique **name**.
     pub fn faction_mut(&mut self, name: &str) -> Option<&mut Faction> {
         self.factions.iter_mut().find(|f| f.name == name)
+    }
+
+    /// 某势力在某天体的**产地货栈**（非首都产出积压处；首都天体的产出直接进池，
+    /// 不会在这里）。见 [`State::depots`]。
+    pub fn depot(&self, fid: &str, body_id: &str) -> Option<&ResourceMap> {
+        self.depots.get(&(fid.to_string(), body_id.to_string()))
+    }
+
+    /// 可变的产地货栈；不存在则建空的（产出落地、承运人装货都走这里）。
+    pub fn depot_mut(&mut self, fid: &str, body_id: &str) -> &mut ResourceMap {
+        self.depots
+            .entry((fid.to_string(), body_id.to_string()))
+            .or_default()
+    }
+
+    /// 把一笔货**卸进**某势力在某天体的货栈（数量 ≤0 时什么都不做）。
+    /// 装货（船提走）由 `sim` 的运输行为负责，删除空货栈条目也由它负责。
+    pub fn depot_add(&mut self, fid: &str, body_id: &str, resource: &str, amount: f64) {
+        if amount <= 0.0 {
+            return;
+        }
+        *self
+            .depot_mut(fid, body_id)
+            .entry(resource.to_string())
+            .or_insert(0.0) += amount;
+    }
+
+    /// 某势力货栈里**所有天体**的存货总价值（按 `value_of` 计价）。
+    /// 这是「冻结在产地、还没运回首都」的那部分资产——观察面用它，
+    /// 也是「无船势力库存冻结」这一机制的可读信号。
+    pub fn depot_value(&self, fid: &str, value_of: &impl Fn(&str) -> f64) -> f64 {
+        self.depots
+            .iter()
+            .filter(|((f, _), _)| f == fid)
+            .flat_map(|(_, m)| m.iter())
+            .map(|(rt, amt)| amt * value_of(rt))
+            .sum()
     }
 
     /// Resolve the current world position of a body. Uses the stored
@@ -424,9 +470,18 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
 /// 而两件事互不相干——所以 v5 这个号在合并后**有两种历史**。这不妨碍加载：两档都是
 /// 「`#[serde(default)]` 补齐 + [`ControlMode`] 宽容 `Deserialize`」的零损失档，所以
 /// **`0..=5` 一律直接推到 6**（= 同时具备市场与风格活层），「旧档来自哪条分支」不影响结果。
+///
+/// v6 → v7（运输分支）：新增 [`State::depots`]（**产地货栈**：非首都天体的产出落在这里，
+/// 要靠船运回首都才进势力池）。它是 `#[serde(default)]` 的新字段，v6 档没有它——而
+/// 「旧档里那些远在天边的城，产出是不是已经运回来了」**无法反推**（旧语义下产出是
+/// 瞬间入库的，没有运输这件事）。
+///
+/// 这一档的处理是**把旧档的既成事实当作「已经运到首都」**：旧档加载后 `depots` 为空，
+/// 于是它此刻的库存原样留在首都池里，只有**此后新产出的**离岸货才会开始积压在产地。
+/// 这不是信息损失（旧档的库存本来就在池子里），而是新旧语义之间唯一自洽的接法。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
