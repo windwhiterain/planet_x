@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{BodyId, CityId, FactionId, ShipId};
+use crate::model::{BodyId, CityId, FactionId, ResourceMap, ShipId};
 
 /// 一艘舰的「行为风格」——自动控制(`autocontrol`)读取它来决定怎么打。每条轴取 `[-1,1]`，
 /// **0 = 基线**(与旧行为一致)。这是 **per-舰** 的配置,不是全局值:舰出厂时继承所属舰级的
@@ -38,6 +38,19 @@ pub enum ShipBehavior {
     Dock { body: BodyId },
     /// 殖民：前往定居点天体并（再）建立一座城市。
     Colonize { body: BodyId },
+    /// **运输**：在 `from` 装货、运到 `to` 卸货，卸完**自动返回 `from` 再装**——它是一条
+    /// **常驻路线**，不是一次性任务（带截止期的一次性运输留给将来的承包合同）。
+    ///
+    /// **当前跑在哪一腿不存状态，由货舱推出来**：舱里有货 ⇒ 驶向 `to`；空舱 ⇒ 驶向 `from`。
+    /// 于是「去 `from` 装 → 去 `to` 卸 → 再回 `from`」是一段不需要任何额外字段的循环：
+    /// 任何时刻的航向都只由 `(舰在哪儿, 舱里有货吗)` 决定。
+    ///
+    /// 装卸都要求舰**停在 `arrival_eps` 之内**（与殖民/停泊同一把尺子，且目标点同样会被
+    /// MOND 偏移——所以深处取货是「多试几个回合」，不是「取不到」）。装的是**本势力在该
+    /// 天体的产地货栈**（见 [`crate::model::State::depots`]）；卸货进 `to`——`to` 是本势力
+    /// **首都**就直接进 [`crate::model::Faction::resources`]（公理：首都即集散地），
+    /// 否则进该天体的货栈（中转）。
+    Haul { from: BodyId, to: BodyId },
     /// 待命（无指令，原地保持当前坐标——由 AI/玩家写入的默认值）。
     Idle,
 }
@@ -94,11 +107,36 @@ pub struct Ship {
     /// （叶 → 舰队默认 → 这个记录值）；agent 视图与投影给的都是有效值。
     #[serde(default)]
     pub kiting: f64,
+    /// 本舰的**角色**记录值：`true` = **运输舰**（自动控制给它排集货路线），
+    /// `false` = **战舰**（自动控制让它找仗打：接战/轰炸/殖民）。
+    ///
+    /// ⚠ 与 [`Self::doctrine`]/[`Self::kiting`] 一样**它不是有效值**：有效角色走
+    /// `State::ship_freighter`（叶 → 舰队默认 → **这个记录值**，出厂时继承
+    /// [`crate::model::ShipSpec::default_freighter`]）。
+    ///
+    /// **这个布尔只管一件事：自动控制把「找仗打」还是「跑运输」当成它的活。**
+    /// 它**不解除武装**——运输舰在射程内照样自动开火、照样按 kiting 姿态软移动。
+    /// 换句话说：它不是「军舰/民船」的军备差别，而是**同一个舰长的两种活**。
+    #[serde(default)]
+    pub freighter: bool,
     /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
     /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
     /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
     #[serde(default)]
     pub attack_hist: BTreeMap<ShipId, f64>,
+    /// **在舱货物**：这艘舰此刻实际装着什么、各多少（`资源 → 数量`）。这是**真实物理量**，
+    /// 不是账面数字——它只能由装卸两个动作改变：
+    ///
+    /// * **装货**：从某势力在某天体的**产地货栈**（[`crate::model::State::depots`]）里扣，
+    ///   总量不得超过有效舱容（见下）。
+    /// * **卸货**：进目标天体——若那是卸货势力的**首都**，就直接进 [`crate::model::Faction::resources`]
+    ///   （首都即集散地，见 `.agents/notes/freight-collection.md`）；否则进该天体的货栈。
+    ///
+    /// **有效舱容**不是常数：`舰级舱容 × hull / hull_max`——装甲被打掉的运输舰装得少
+    /// （受伤的船不敢满载）。舰级舱容见 [`crate::model::ShipSpec::cargo`]，
+    /// 折算见 [`crate::model::cargo_capacity`]。空 = 空舱（出厂/旧档）。
+    #[serde(default)]
+    pub cargo: ResourceMap,
 }
 
 fn default_hull_max() -> f64 {

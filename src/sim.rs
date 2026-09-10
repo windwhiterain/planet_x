@@ -357,7 +357,9 @@ pub(crate) fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn
         velocity: 0.0,
         doctrine: cspec.default_doctrine,
         kiting: cspec.default_kiting,
+        freighter: cspec.default_freighter,
         attack_hist: BTreeMap::new(),
+        cargo: BTreeMap::new(),
     };
     let panel = ship_panel(config, &ship);
     ship.hull = panel.hull_max;
@@ -1579,6 +1581,11 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &
         .map(|f| (f.name.clone(), coalition_war_focus(state, config, &f.name)))
         .collect();
 
+    // **集货定编**（本回合一次）：先把「谁是运输舰」定下来并写进第三条风格轴，再逐舰执行。
+    // 放在这里而不是让每艘舰自己算，是为了**与舰的处理顺序无关**——下面的 `order` 是按 rng
+    // 打乱的：若逐舰现算，前几艘舰这一回合装的货会改掉后面舰的名额，结论就依赖抽到的顺序了。
+    autocontrol::freight::assign_roles(state, config);
+
     for ship_id in order {
         let Some(ship) = state.ship(&ship_id) else { continue };
         if ship.hull <= 0.0 {
@@ -1602,6 +1609,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &
                     ShipBehavior::Follow { ship } => format!("followed ship {ship} gone"),
                     ShipBehavior::DockCity { city } => format!("target city {city} razed"),
                     ShipBehavior::Colonize { body } => format!("body {body} has no blank settlement"),
+                    ShipBehavior::Haul { from, to } => format!("haul route {from} → {to} invalid"),
                     _ => "invalid".to_string(),
                 };
                 if let Some(c) = state.control_mut(owner.clone()) {
@@ -1630,6 +1638,11 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &
                     // 待命：软目标——原地保持；但附近有敌舰时按 kiting 姿态自动软移动（风筝拉开/贴脸压近）。
                     let dest = autocontrol::kiting_dest(state, config, &ship_id).unwrap_or(pos);
                     move_toward(state, config, &ship_id, &class, dest);
+                }
+                // 运输：**整条路线本回合都在 `haul_step` 里执行**（择腿 + 移动 + 装卸），
+                // 所以这里不再自己移动——落到下面的自动接战，运输舰在航线上照样开火/轰炸。
+                ShipBehavior::Haul { from, to } => {
+                    haul_step(state, config, &ship_id, &class, from, to);
                 }
                 _ => {
                     // Move / Follow / DockCity / Dock：驶向行为目的地（软目标）；附近有敌舰时由 kiting 姿态调整。
@@ -2338,25 +2351,51 @@ fn mond_drift(config: &GameConfig, fid: &str, dest: [f64; 2], roll: f64) -> [f64
 
 /// 一次**导航尝试**的确定性伪随机数 ∈ `[0,1)`——[`mond_drift`] 的偏移幅度取自它。
 ///
-/// 为什么不用主 [`Prng`] 流：那会让「某艘舰多试了一次」改变**整个世界后续的掷骰**
-/// （同种子可复现就退化成「只要舰队数量一变，后面全变」，存档续玩的随机位置也解释不通）。
-/// 这里用 `(势力, 舰名, 回合)` 派生一个**独立**的小 `Prng`：同一回合、同一艘舰的结果恒定，
-/// **下一回合是一次全新的尝试**——「多试几个回合总有一次蒙对」就是靠这个实现的
-/// （船不会永远停错地方，它每个月重新算一次、重新试一次）。
+/// 就是 [`derived_roll`] 取**空盐**的那一档（`(势力, 舰名, 回合)`）。空盐让字节序列与
+/// `derived_roll` 出现之前**逐字相同**，所以已经实测过的 MOND 表（成功率 / 首次命中回合）
+/// 不作废。为什么不用主 [`Prng`] 流、为什么「下一回合是一次全新尝试」，见 [`derived_roll`]。
 fn nav_roll(fid: &str, ship: &str, round: u32) -> f64 {
-    // FNV-1a 64：只为把三个字段混成一个种子，不需要密码学强度。
+    derived_roll(fid, ship, round, "")
+}
+
+/// FNV-1a 64：只为把几个字段混成一个种子，不需要密码学强度。
+fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in fid
-        .bytes()
-        .chain(std::iter::once(b'|'))
-        .chain(ship.bytes())
-        .chain(std::iter::once(b'@'))
-        .chain(round.to_le_bytes())
-    {
+    for b in bytes {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    Prng::from_state(h).unit()
+    h
+}
+
+/// 派生一枚**确定性伪随机数** ∈ `[0,1)`：把 `(势力, 舰名, 回合, 用途)` 混成一个 64 位种子
+/// （FNV-1a）后再取 [`Prng::unit`]。
+///
+/// # 为什么不用主 [`Prng`] 流
+///
+/// 那会让「某艘舰多试了一次」改变**整个世界后续的掷骰**：同种子可复现就退化成
+/// 「只要舰队数量一变，后面全变」，存档续玩的随机位置也解释不通。派生骰子是**独立**的：
+/// 同一回合、同一艘舰、同一用途的结果恒定，下一回合才是一枚新骰子。
+///
+/// # `salt` = 用途
+///
+/// 同一艘舰在同一回合需要**多枚互不相关的骰子**（导航偏移、选线抽签……）。不区分用途，
+/// 「偏得远的舰」和「被派去远货栈的舰」就会被同一枚骰子绑在一起（可观测的相关性）。
+/// **空盐 = 导航那一档**（[`nav_roll`]），字节序列保持原样。
+///
+/// 这是本仓库的默认做法（见 `AGENTS.md`「默认用概率分布」）：**概率 ≠ 不可复现**。
+pub(crate) fn derived_roll(fid: &str, ship: &str, round: u32, salt: &str) -> f64 {
+    let mut bytes: Vec<u8> = Vec::with_capacity(fid.len() + ship.len() + salt.len() + 10);
+    bytes.extend_from_slice(fid.as_bytes());
+    bytes.push(b'|');
+    bytes.extend_from_slice(ship.as_bytes());
+    bytes.push(b'@');
+    bytes.extend_from_slice(&round.to_le_bytes());
+    if !salt.is_empty() {
+        bytes.push(b'#');
+        bytes.extend_from_slice(salt.as_bytes());
+    }
+    Prng::from_state(fnv1a(bytes.into_iter())).unit()
 }
 
 /// [`mond_drift`] 一次尝试的**成功率**：`偏移 = 上界 × roll^shape`，`roll` 均匀 ∈ `[0,1)`，
@@ -2379,6 +2418,228 @@ pub(crate) fn mond_arrival_chance(config: &GameConfig, depth: f64) -> f64 {
     }
     let shape = if m.drift_shape > 0.0 { m.drift_shape } else { 1.0 };
     ratio.powf(1.0 / shape)
+}
+
+// --- 集货腿（M2b）：装卸货 + 运输路线的执行 -----------------------------------
+
+/// 一批货的**尽量等量**分配（用户裁决 Q6）：把 `capacity` 个单位按「还有货的种类数」平摊；
+/// 某种货不够平摊，就把它的余量**交回去**、由其余种类再平摊（max-min 公平分配）。
+///
+/// ```text
+/// 三种货、舱容 6，都够      ⇒ 每种 2
+/// {铁 10, 铂 1, 碳 10}、舱容 6 ⇒ {铁 2.5, 铂 1, 碳 2.5}
+/// 舱容 ≥ 总存量             ⇒ 全装走
+/// ```
+///
+/// 为什么不是「按价值降序」或「按存量比例」：**尽量等量**不会让某种便宜货永远排在队尾
+/// （矿是混装的散货，不是按单价挑的快递），也不会在货栈里留下一地分数残渣。
+/// 纯函数、确定性（[`ResourceMap`] 是 `BTreeMap` ⇒ 名字序遍历，与插入顺序无关）。
+pub fn haul_split(available: &ResourceMap, capacity: f64) -> ResourceMap {
+    let mut out = ResourceMap::new();
+    let mut cap = capacity;
+    if cap <= 1e-9 {
+        return out;
+    }
+    let mut pool: Vec<(&String, f64)> = available
+        .iter()
+        .filter(|(_, a)| **a > 1e-9)
+        .map(|(k, a)| (k, *a))
+        .collect();
+    // 每一轮：把剩余舱容平摊给「还有货没分完」的种类；分光的种类退出、余量进下一轮。
+    // 终止性：每轮要么分完舱容（cap → 0），要么至少有一种货被分光（pool 变小）。
+    while !pool.is_empty() && cap > 1e-9 {
+        let share = cap / pool.len() as f64;
+        let mut next: Vec<(&String, f64)> = Vec::new();
+        for (rt, left) in pool {
+            let take = share.min(left);
+            *out.entry(rt.clone()).or_insert(0.0) += take;
+            cap -= take;
+            if left - take > 1e-9 {
+                next.push((rt, left - take));
+            }
+        }
+        pool = next;
+    }
+    out.retain(|_, v| *v > 1e-9);
+    out
+}
+
+/// 一条运输路线（[`ShipBehavior::Haul`]）本回合**做了什么**（观察与守卫用；不影响行为）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum HaulStep {
+    /// 在 `body` 装上了 `units` 件货（Q5 A：有多少装多少，绝不空舱等待）。
+    Loaded { body: BodyId, units: f64 },
+    /// 在 `body` 卸下 `units` 件货；`into_pool = true` 表示卸进了**首都池**（集货完成）。
+    Delivered { body: BodyId, units: f64, into_pool: bool },
+    /// 停在 `from` 但**货栈是空的**：原地等——「有货就走」的另一半正是「没货就不走」
+    /// （空载跑一趟是白烧时间，而货栈随时会因产出再涨）。
+    Waiting { body: BodyId },
+    /// 这一回合只是**在路上**，正驶向 `body`（装/卸都还没发生）。
+    EnRoute { body: BodyId },
+}
+
+impl HaulStep {
+    /// 这一步发生在哪个天体（`EnRoute` = 正驶向的那一端）——判定表与探针读它。
+    pub fn body(&self) -> &str {
+        match self {
+            HaulStep::Loaded { body, .. }
+            | HaulStep::Delivered { body, .. }
+            | HaulStep::Waiting { body }
+            | HaulStep::EnRoute { body } => body,
+        }
+    }
+}
+
+/// **装货**：把本势力在 `from` 的产地货栈装进 `ship` 的货舱。
+///
+/// 上限 = 有效舱容（[`cargo_capacity`]：舰级舱容 × 战损折算）− 已在舱；分配按 [`haul_split`]。
+/// 返回**实际装走的总件数**（0 = 那里没货，舰该原地等）。
+fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str) -> f64 {
+    let Some(ship) = state.ship(ship_id) else {
+        return 0.0;
+    };
+    let free = cargo_capacity(config, ship) - cargo_used(&ship.cargo);
+    if free <= 1e-9 {
+        return 0.0;
+    }
+    let avail = state.depot(fid, from).cloned().unwrap_or_default();
+    let plan = haul_split(&avail, free);
+    let mut moved: ResourceMap = ResourceMap::new();
+    for (rt, want) in &plan {
+        let got = state.depot_take(fid, from, rt, *want);
+        if got > 0.0 {
+            moved.insert(rt.clone(), got);
+        }
+    }
+    let units: f64 = moved.values().sum();
+    if units <= 0.0 {
+        return 0.0;
+    }
+    if let Some(s) = state.ship_mut(ship_id) {
+        for (rt, amt) in &moved {
+            *s.cargo.entry(rt.clone()).or_insert(0.0) += amt;
+        }
+    }
+    ev(
+        state,
+        GameEvent::CargoLoaded {
+            ship: ship_id.to_string(),
+            faction: fid.to_string(),
+            body: from.to_string(),
+            cargo: moved,
+        },
+    );
+    units
+}
+
+/// **卸货**：把 `ship` 的整个货舱卸进 `to`。`to` 是本势力首都 ⇒ 直接进**势力池**
+/// （[`Faction::resources`]：集货腿的终点，货从此可用）；否则进该天体的货栈（中转，还得再运一程）。
+/// 返回卸下的货（空 = 本来就空舱）。
+fn haul_unload(state: &mut State, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
+    let cargo = state
+        .ship_mut(ship_id)
+        .map(|s| std::mem::take(&mut s.cargo))
+        .unwrap_or_default();
+    if cargo.is_empty() {
+        return cargo;
+    }
+    let into_pool = state.capital_body(fid) == to;
+    if into_pool {
+        if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
+            for (rt, amt) in &cargo {
+                *f.resources.entry(rt.clone()).or_insert(0.0) += amt;
+            }
+        }
+    } else {
+        for (rt, amt) in &cargo {
+            state.depot_add(fid, to, rt, *amt);
+        }
+    }
+    ev(
+        state,
+        GameEvent::CargoDelivered {
+            ship: ship_id.to_string(),
+            faction: fid.to_string(),
+            body: to.to_string(),
+            cargo: cargo.clone(),
+            into_pool,
+        },
+    );
+    cargo
+}
+
+/// 一条运输路线本回合到达泊位后的**动作**（装或卸），返回这一步的记录。
+fn haul_act(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    leg: &str,
+    holding: bool,
+) -> HaulStep {
+    if holding {
+        let cargo = haul_unload(state, fid, ship_id, leg);
+        HaulStep::Delivered {
+            body: leg.to_string(),
+            units: cargo.values().sum(),
+            into_pool: state.capital_body(fid) == leg,
+        }
+    } else {
+        let units = haul_load(state, config, fid, ship_id, leg);
+        if units > 0.0 {
+            HaulStep::Loaded {
+                body: leg.to_string(),
+                units,
+            }
+        } else {
+            HaulStep::Waiting {
+                body: leg.to_string(),
+            }
+        }
+    }
+}
+
+/// 一条运输路线（[`ShipBehavior::Haul`]）本回合的**完整执行**：腿别判定 + 移动 + 装卸都在这里，
+/// 所以调用方**不要再自己移动这艘舰**。
+///
+/// **腿别不存状态**：舱里有货 ⇒ 去 `to`；空舱 ⇒ 去 `from`（见 [`ShipBehavior::Haul`] 的说明）。
+/// 到达判定用 `arrival_eps`（与殖民/停泊同一把尺子），且目标点照样会被 MOND 偏移——
+/// 所以深处取货/送货不是「做不到」，而是**要多试几个回合**（`move_toward` 每回合重新算一次）。
+pub(crate) fn haul_step(
+    state: &mut State,
+    config: &GameConfig,
+    ship_id: &str,
+    class: &str,
+    from: &str,
+    to: &str,
+) -> HaulStep {
+    let Some(ship) = state.ship(ship_id) else {
+        return HaulStep::EnRoute {
+            body: from.to_string(),
+        };
+    };
+    let fid = ship.faction_id.clone();
+    let pos = ship.position;
+    let holding = !ship.cargo.is_empty();
+    let leg = if holding { to } else { from };
+    let target = state.body_position(leg);
+    let eps = config.combat.arrival_eps;
+    // 已经停在泊位内：本回合直接办事（与 Colonize 一样是「到达即行动」）。
+    if dist(pos, target) <= eps {
+        return haul_act(state, config, &fid, ship_id, leg, holding);
+    }
+    // **kiting 姿态照常生效**（用户裁决：角色不影响 kiting）：附近有敌舰时，航路上的软目标
+    // 会被拉开/压近。它只改**移动**、不改「到没到」——到达判定看真实位置，且上面那一步
+    // 「已在泊位内就直接办事」先于移动，所以**靠了泊位的运输舰不会被敌人推得卸不了货**。
+    let dest = autocontrol::kiting_dest(state, config, ship_id).unwrap_or(target);
+    move_toward(state, config, ship_id, class, dest);
+    let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
+    if dist(np, target) <= eps {
+        return haul_act(state, config, &fid, ship_id, leg, holding);
+    }
+    HaulStep::EnRoute {
+        body: leg.to_string(),
+    }
 }
 
 /// 确定性命中率：武器追踪能力 `tracking`（AU/月）越高，越能咬住高速目标。目标速度
@@ -2597,7 +2858,7 @@ fn home_regen_bonus(state: &State, faction: &str, pos: [f64; 2]) -> f64 {
     }
 }
 
-pub(crate) fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: ShipBehavior, _owner: &str) -> bool {
+pub(crate) fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: ShipBehavior, owner: &str) -> bool {
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Dock { body } => state.body(&body).is_some(),
@@ -2606,6 +2867,14 @@ pub(crate) fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: S
         // 停泊城市：城还活着即可停靠/包围；是敌城则会在围城射程内自动轰炸。
         ShipBehavior::DockCity { city } => state.city(&city).map(|c| !c.razed).unwrap_or(false),
         ShipBehavior::Colonize { body } => has_blank_site(state, &body),
+        // 运输路线：两端天体都要在。**`from == to` 只在「卸进首都池」时合法**——
+        // 「自取自卸」没有意义（那是陈旧指令），但「首都天体上压着一处旧中转货栈、
+        // 把它扫进池子」是合法的路线（迁都把旧中转点留在了新首都，见 `autocontrol::freight`）。
+        ShipBehavior::Haul { from, to } => {
+            state.body(&from).is_some()
+                && state.body(&to).is_some()
+                && (from != to || state.capital_body(owner) == to)
+        }
     }
 }
 
@@ -2804,6 +3073,10 @@ pub(crate) fn behavior_dest(state: &State, behavior: &ShipBehavior) -> [f64; 2] 
         ShipBehavior::Follow { ship } => state.ship(ship).map(|s| s.position).unwrap_or([0.0, 0.0]),
         ShipBehavior::DockCity { city } => city_position(state, city),
         ShipBehavior::Dock { body } | ShipBehavior::Colonize { body } => state.body_position(body),
+        // `Haul` 的**腿别取决于货舱**（有货去 `to`、空舱去 `from`，见 [`haul_step`]），
+        // 而这个函数拿不到舰 ⇒ 只能给「待装那一端」。两条真正的执行路径（玩家 / AI）都在
+        // 到达 `Haul` 之前就分派给 [`haul_step`] 了，所以这个臂**只为穷尽匹配存在**。
+        ShipBehavior::Haul { from, .. } => state.body_position(from),
         ShipBehavior::Idle => [0.0, 0.0],
     }
 }
@@ -3601,10 +3874,16 @@ mod tests {
     use crate::model::GameEvent;
     use crate::world::default_state;
 
-    /// Build the config + a fresh deterministic world (round 0).
+    /// Build the config + a fresh deterministic world (round 0)，并把**角色轴钉成「全员战舰」**。
+    ///
+    /// 这个模块的用例大多在测**别的东西**（生产/贸易/MOND/战斗/事件），而自动控制现在多了一条
+    /// 活：按积压定编、把船派去跑集货路线。不钉住它，被测的舰就可能被抽去拉货、不在它该在的
+    /// 位置上（`crate::world::pin_roles_to_war` 的文档记着一次实测踩坑）。
+    /// **测集货本身的用例**（`haul_*`）自己撤掉/覆盖这条默认。
     fn fresh_world(seed: u64) -> (GameConfig, State) {
         let config = load_config();
-        let state = default_state(&config, seed);
+        let mut state = default_state(&config, seed);
+        crate::world::pin_roles_to_war(&mut state);
         (config, state)
     }
 
@@ -4463,6 +4742,274 @@ mod tests {
         assert!(
             (cn_carbon(&state) - c0).abs() < 1e-9,
             "两回合过去，金星的碳一格都没进池——这就是「等船来运」"
+        );
+    }
+
+    /// **舱容（M2）**：有效舱容 = 舰级舱容 `ShipSpec::cargo` × **战损折算** `hull / hull_max`。
+    ///
+    /// 钉住三条机制不变量：
+    /// 1. **舰级舱容是「设计裁决」而不是平衡旋钮**——护卫 2 / 驱逐 4 / 巡洋 6 / 航母 20 /
+    ///    战列 6，且**航母是唯一的散货船**。这条要硬断言：改它等于改设计，不该是调参时手滑。
+    /// 2. **战损是连续的**：装甲掉一半 → 舱容减半（不是「受伤就装不了」的硬阈值）。
+    /// 3. **旧档（`hull_max ≤ 0`）按满舱**：绝不出现 `hull / 0 = ∞` 的无底货舱。
+    #[test]
+    fn cargo_capacity_is_class_capacity_times_hull_fraction() {
+        use crate::model::cargo_capacity;
+        let (config, state) = fresh_world(42);
+
+        // 1) 舰级舱容（设计裁决：见 config/game.ron 的 ships 注释第 (3) 类）。
+        let table = [
+            ("corvette", 2.0),
+            ("destroyer", 4.0),
+            ("cruiser", 6.0),
+            ("carrier", 20.0),
+            ("battleship", 6.0),
+        ];
+        for (class, cap) in table {
+            assert_eq!(
+                config.ship_spec(class).cargo,
+                cap,
+                "{class} 的舱容是设计裁决（{cap}），不是可随手调的平衡旋钮"
+            );
+        }
+        assert!(
+            table.iter().all(|(c, cap)| *c == "carrier" || *cap < 20.0),
+            "航母必须是唯一的散货船——否则「用哪条船运货」就不构成一个选择"
+        );
+
+        // 2) 战损连续折算。
+        let mut ship = state
+            .ships
+            .iter()
+            .find(|s| s.class == "cruiser")
+            .expect("开局有巡洋舰")
+            .clone();
+        assert!(ship.hull_max > 0.0, "出厂舰必须有 hull_max");
+        assert_eq!(cargo_capacity(&config, &ship), 6.0, "满血巡洋舰 = 满舱 6");
+        ship.hull = ship.hull_max * 0.5;
+        assert!(
+            (cargo_capacity(&config, &ship) - 3.0).abs() < 1e-9,
+            "装甲掉一半 → 舱容减半（连续，不是硬阈值）"
+        );
+        ship.hull = 0.0;
+        assert_eq!(cargo_capacity(&config, &ship), 0.0, "壳被打光 → 一格都装不了");
+
+        // 3) 旧档缺 `hull_max`：按满舱处理，而不是把舱容算成无穷。
+        ship.hull = 6.0;
+        ship.hull_max = 0.0;
+        assert_eq!(
+            cargo_capacity(&config, &ship),
+            6.0,
+            "hull_max ≤ 0（旧档）按未受损处理，绝不返回 ∞"
+        );
+    }
+
+    /// **尽量等量分配（Q6）**：[`haul_split`] 是 max-min 公平分配——先按「还有货的种类数」平摊，
+    /// 分不满的种类把余量交回去、由其余种类再平摊。它是**纯函数**，这里逐档钉住。
+    #[test]
+    fn haul_split_is_max_min_fair() {
+        let m = |pairs: &[(&str, f64)]| -> ResourceMap {
+            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        };
+        // 三种货、舱容 6、都够 ⇒ 每种 2。
+        assert_eq!(
+            haul_split(&m(&[("铁", 10.0), ("碳", 10.0), ("硅", 10.0)]), 6.0),
+            m(&[("铁", 2.0), ("碳", 2.0), ("硅", 2.0)])
+        );
+        // 铂只有 1 ⇒ 它拿 1，多出来的 1 由另两种再平摊（这就是「尽量」等量）。
+        assert_eq!(
+            haul_split(&m(&[("铁", 10.0), ("铂", 1.0), ("碳", 10.0)]), 6.0),
+            m(&[("铁", 2.5), ("铂", 1.0), ("碳", 2.5)])
+        );
+        // 舱容 ≥ 总存量 ⇒ 全装走（一种货吃得下就全给它，不必等量）。
+        assert_eq!(
+            haul_split(&m(&[("铁", 1.0), ("碳", 2.0)]), 100.0),
+            m(&[("铁", 1.0), ("碳", 2.0)])
+        );
+        // 边界：空货栈 / 零舱容 ⇒ 什么都不装（不是 panic）。
+        assert!(haul_split(&ResourceMap::new(), 20.0).is_empty());
+        assert!(haul_split(&m(&[("铁", 5.0)]), 0.0).is_empty());
+    }
+
+    /// **货值守恒（M2b 的核心不变量）**：装货与卸货**只搬货**——产地里少多少，舱里就多多少；
+    /// 舱里清空多少，首都池就多多少。全程「货栈 + 在舱 + 池子」的总量一格不变。
+    ///
+    /// 这条守卫是这套机制的地基：集货腿的正当性全在「**货不会凭空出现或消失**」上
+    /// （一旦漏了，缺矿就会像 M1 之前那样被静默补贴掉）。
+    #[test]
+    fn hauling_moves_cargo_without_creating_or_destroying_any() {
+        let (config, mut state) = fresh_world(42);
+        state.depots.clear();
+        state.depot_add("中国", "金星", "碳", 7.0);
+        state.depot_add("中国", "金星", "铁", 5.0);
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .expect("中国开局有舰")
+            .name
+            .clone();
+        let class = state.ship(&ship).unwrap().class.clone();
+        // 停在金星泊位上（`arrival_eps` 之内）。
+        let vpos = state.body_position("金星");
+        state.ship_mut(&ship).unwrap().position = vpos;
+        let total = |s: &State| -> f64 {
+            let depot: f64 = s.depots.values().flat_map(|m| m.values()).sum();
+            let hold: f64 = s.ships.iter().flat_map(|x| x.cargo.values()).sum();
+            let pool: f64 = s.factions.iter().flat_map(|f| f.resources.values()).sum();
+            depot + hold + pool
+        };
+        let before = total(&state);
+
+        // —— 装货：上限 = 有效舱容，两种货尽量等量 ——
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        let units = match step {
+            HaulStep::Loaded { units, .. } => units,
+            other => panic!("停在货栈泊位上应当装货，实为 {other:?}"),
+        };
+        let cap = cargo_capacity(&config, state.ship(&ship).unwrap());
+        assert!(
+            (units - cap).abs() < 1e-9,
+            "货栈有 12 件、舱容 {cap} ⇒ 装满：实装 {units}"
+        );
+        let hold: f64 = state.ship(&ship).unwrap().cargo.values().sum();
+        assert!((hold - units).abs() < 1e-9, "装了多少就在舱里有多少");
+        let left: f64 = state.depot("中国", "金星").unwrap().values().sum();
+        assert!(
+            (left - (12.0 - units)).abs() < 1e-9,
+            "货栈恰好少了装走的那些：剩 {left}"
+        );
+        assert!((total(&state) - before).abs() < 1e-9, "装货不许造货");
+
+        // —— 卸货：挪到首都（地球）泊位上，货进**势力池** ——
+        let epos = state.body_position("地球");
+        state.ship_mut(&ship).unwrap().position = epos;
+        let carbon_before = state
+            .faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0);
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        match step {
+            HaulStep::Delivered {
+                units: u,
+                into_pool: true,
+                ..
+            } => assert!((u - hold).abs() < 1e-9, "整舱卸下"),
+            other => panic!("在首都泊位上应当卸进首都池，实为 {other:?}"),
+        }
+        assert!(state.ship(&ship).unwrap().cargo.is_empty(), "卸完舱就空了");
+        assert!(
+            state
+                .faction("中国")
+                .unwrap()
+                .resources
+                .get("碳")
+                .copied()
+                .unwrap_or(0.0)
+                > carbon_before,
+            "金星采的碳进了首都池——这就是集货腿的终点"
+        );
+        assert!((total(&state) - before).abs() < 1e-9, "卸货不许毁货");
+    }
+
+    /// **常驻路线 + 腿别由货舱决定（Q7 A / Q5 A）**：同一对 `from/to`、**不存任何额外状态**，
+    /// 空舱就去装、装到货就改跑 `to`、货栈空就原地等——三件事全部由「舱里有货吗」推出来。
+    #[test]
+    fn a_haul_route_alternates_legs_because_of_the_cargo() {
+        let (config, mut state) = fresh_world(42);
+        state.depots.clear();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .expect("中国开局有舰")
+            .name
+            .clone();
+        let class = state.ship(&ship).unwrap().class.clone();
+        let vpos = state.body_position("金星");
+        state.ship_mut(&ship).unwrap().position = vpos;
+
+        // 1) 货栈是空的 ⇒ **原地等**（「有货就走」的另一半是「没货就不走」），位置不动。
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        assert!(
+            matches!(step, HaulStep::Waiting { ref body } if body == "金星"),
+            "空货栈应当原地等，实为 {step:?}"
+        );
+        assert_eq!(state.ship(&ship).unwrap().position, vpos, "等的时候不许乱跑");
+        assert!(state.ship(&ship).unwrap().cargo.is_empty());
+
+        // 2) 来货了就装，且**这一回合不再跑**（与殖民一样是「到达即行动」）。
+        state.depot_add("中国", "金星", "碳", 3.0);
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        assert!(matches!(step, HaulStep::Loaded { .. }), "有货就装，实为 {step:?}");
+        assert!(!state.ship(&ship).unwrap().cargo.is_empty(), "舱里该有货");
+
+        // 3) 舱里有货 ⇒ 腿别翻到 `to`（哪怕 `from` 还有货）。同一对 from/to、零额外状态。
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        assert_eq!(step.body(), "地球", "舱里有货 ⇒ 这一腿去卸货端，实为 {step:?}");
+        assert!(
+            !matches!(step, HaulStep::Waiting { .. } | HaulStep::Loaded { .. }),
+            "有货时不该再在装货端打转，实为 {step:?}"
+        );
+    }
+
+    /// **端到端（玩家路径）**：给一艘舰写一条 `Haul` 指令，货真的从**产地货栈**走到**首都池**，
+    /// 而且走的是一条不需要重下的**常驻路线**（两个回合内装完并卸到池里）。
+    ///
+    /// 用「首都天体上的货栈」把航程压成 0 回合：它本来就是为了「迁都把旧中转点留在新首都」
+    /// 准备的合法路线（`Haul { from: cap, to: cap }`，见 `behavior_is_valid`），正好也是最短的
+    /// 端到端用例。
+    #[test]
+    fn a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool() {
+        let (config, mut state) = fresh_world(42);
+        state.depots.clear();
+        state.depot_add("中国", "地球", "碳", 9.0); // 首都是地球；这处货栈压着 9 件碳
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国" && s.class == "destroyer")
+            .expect("中国开局有一艘驱逐舰")
+            .name
+            .clone();
+        let epos = state.body_position("地球");
+        state.ship_mut(&ship).unwrap().position = epos;
+        // 玩家指令（`Player` = 自动控制不碰它）：路线 地球→地球，角色钉成运输舰。
+        {
+            let c = state.control_mut("中国".to_string()).unwrap();
+            c.ship_orders.insert(
+                ship.clone(),
+                Control::player(ShipBehavior::Haul {
+                    from: "地球".to_string(),
+                    to: "地球".to_string(),
+                }),
+            );
+            c.ship_freighter.insert(ship.clone(), Control::player(true));
+        }
+        let mut rng = Prng::new(42);
+        let mut delivered = 0.0;
+        // 驱逐舰舱容 4、货栈 9 件 ⇒ 要跑三趟（4+4+1）；每趟「装一回合 + 卸一回合」，
+        // 所以 8 个回合足够，也正是「常驻路线自己往复」的证据（不需要重下指令）。
+        for _ in 0..8 {
+            advance(&mut state, &config, &mut rng);
+            for e in &state.events {
+                if let GameEvent::CargoDelivered { cargo, into_pool: true, .. } = e {
+                    delivered += cargo.values().sum::<f64>();
+                }
+            }
+        }
+        assert!(
+            delivered >= 9.0 - 1e-9,
+            "压在货栈里的那 9 件必须整批运进首都池（实为 {delivered}，其中还含金星当期产出的那部分）"
+        );
+        // 注意：**不要**拿首都池的增量当判据——池子同时在花钱（建设/造舰/维护），
+        // 收进来的货是**毛额**、池子的净变化是另一回事。判据用事件（到货的毛额）
+        // 与「货栈条目消失」（没有货留在产地）这两条。
+        assert!(
+            state.depot("中国", "地球").is_none(),
+            "空货栈条目要被清掉（AI 派单靠键集合读积压）"
         );
     }
 

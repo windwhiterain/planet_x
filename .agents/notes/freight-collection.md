@@ -114,9 +114,86 @@ Haul { from: BodyId, to: BodyId },
 所以运输承包的关键量是**准时率**：`Haul` 的成败按「到货 vs 截止期」判，超期就掉信誉（§4）。
 一个非 master 承运人接深空单 = 明知会用掉几个月、且大概率先超期；这正是信誉阶梯要定价的东西。
 
-**货舱容量**：`Ship` 现在**完全没有货舱字段**（`src/model/ship.rs`）。建议在 `ships:` 表每级加
-`cargo`（护卫 2 / 驱逐 4 / 巡洋 6 / **航母 20** / 战列 6），载货量 = `cargo × (hull/hull_max)`
-（残舰运得少）。**航母从「只有战斗意义」变成专业货舰**；这也顺带解释了它 `build_cost` 里的稀有矿。
+**货舱容量**（**M2a 已落地**，schema v8）：舰级 `cargo`＝护卫 2 / 驱逐 4 / 巡洋 6 / **航母 20** / 战列 6；
+有效舱容 = `cargo × (hull/hull_max)`（残舰运得少，连续折算，见 `model::cargo_capacity`）。
+**航母从「只有战斗意义」变成唯一的散货船**；这也顺带解释了它 `build_cost` 里的稀有矿。
+在舱货物存在 `Ship.cargo: ResourceMap` 里——它是**真实物理量**，只能由装/卸两个动作改变。
+
+### 3.1 装载语义（**M2b 已落地**，用户裁决 Q5=A / Q6=尽量等量 / Q7=A）
+
+* **有货就走**（Q5 A）：到 `from` 就把 `min(舱容, 货栈存量)` 装上，**不空舱等待**；
+  货栈空 ⇒ `Waiting` 原地等（「有货就走」的另一半正是「没货就不走」）。
+* **尽量等量**（Q6）：多种货按 [max-min 公平分配](`sim::haul_split`)——先按「还有货的种类数」
+  平摊，某种不够就把余量交回去、由其余再平摊。`{铁 10, 铂 1, 碳 10}`、舱容 6
+  ⇒ `{铁 2.5, 铂 1, 碳 2.5}`。既不让便宜货永远排尾，也不留一地分数残渣。
+* **常驻路线**（Q7 A）：卸完**自动回 `from` 再装**，往复不停。它是一条**路线**，
+  不是一次性任务（带截止期的一次性运输留给承包合同）。
+* **腿别不存状态**：**舱里有货 ⇒ 去 `to`；空舱 ⇒ 去 `from`**。任何时刻的航向都由
+  `(舰在哪儿, 舱里有货吗)` 推出来，所以「去装 → 去卸 → 再回装」的循环**不需要任何额外字段**
+  （`sim::haul_step` 是唯一的执行入口，玩家路径与 AI 路径都走它）。
+* 装卸都要求**停在 `arrival_eps` 之内**，且目标点同样被 MOND 偏移 ⇒ 深处取送货是
+  「多试几个回合」，不是做不到。
+
+### 3.2 角色 = 第三条风格轴（**M2b 已落地**）
+
+用户裁决：**「自动控制选择战争还是运输」要作为 bool 加在船的控制属性上，像风格一样，
+但不影响自动开火/kiting。** 于是：
+
+```rust
+Ship.freighter: bool                     // 记录值（出厂继承 ShipSpec::default_freighter）
+ControllableState.ship_freighter: BTreeMap<ShipId, Control<bool>>
+ControllableState.default_freighter: Option<Control<bool>>
+State::ship_freighter(ship) -> bool      // 叶 → 舰队默认(Player) → 记录值，与前两条轴同形
+```
+
+* **只管「自动控制派哪种活」**：`true` = 运输舰（排集货路线）、`false` = 战舰（找仗打）。
+  **不解除武装**：运输舰射程内照样自动开火、照样按 `kiting` 软姿态移动（`auto_combat`
+  不改写指令，航线保留）。自保撤退也与角色无关（打残了都回家）。
+* **与前两条轴唯一的差别：这条轴 AI 会写**（每回合按积压**定编**，`freight::assign_roles`，
+  在 `step_ships` 的逐舰循环**之前**跑一次 ⇒ 与打乱的处理顺序无关）。
+  两道闸：只写自动控制自己开的舰；归属链判定是 `Player` 就一个字都不写。
+* **定编口径**：`needed_freighters = 有积压的货栈数`（一处积压配一条船，刻意粗糙、无阈值常数）；
+  选谁按**集货运力**排序：`有效舱容 × 巡航速度 ÷ 维护费`（见 §3.3）。
+* 出厂默认：**只有航母是运输舰**（`ShipSpec::default_freighter`）——舰级身份 = 它天生该干的活。
+  （对 AI 势力这几乎不可见：定编每回合都会重写那片叶。）
+
+### 3.3 运力要算速度（用户点破）
+
+「一趟能装多少」只是**每趟**的量；**单位时间的运力 = 舱容 × 速度**（航程一定时，
+来回时间 ≈ `2×航程 ÷ 巡航速度`，跑得快就是跑得勤）。而且本作的速度**完全来自推进模块**
+⇒ **没有推进模块的船速度是 0，派它去运货等于派一尊雕像**，必须剔出运力名单。
+
+又因为「按舱容排序」有实测硬伤——**把主力舰从战线上抽走**（seed 7 / r120：俄罗斯按舱容选出的
+8 条运输舰里 5 条是战列舰）——所以排序键最终是 **`有效舱容 × 巡航速度 ÷ 维护费`**
+（`freight::freight_tonnage`；两项都取有效值：舱容乘战损折算、速度取 `ship_panel` 的巡航速度
+——推进模块的完整度已折在里面）。排序天然对上舰级身份：
+
+| 舰级 | 舱容 | speed_mult | 维护费 | 运力÷维护费（同型推进下） |
+|---|---|---|---|---|
+| 航母 | 20 | 1.0 | 7.5 | **2.67** |
+| 驱逐 | 4 | **1.3** | 2.5 | 2.08（远洋部署 = 天生的集货/护航舰） |
+| 护卫 | 2 | 1.0 | 1.5 | 1.33 |
+| 巡洋 | 6 | 1.0 | 6.0 | 1.00 |
+| 战列 | 6 | 0.9 | 6.5 | 0.83（**最不该去拉货的一条**） |
+
+### 3.4 派单：按积压占比抽签（用户裁决）
+
+**每艘船去哪个积压点的伪随机概率分布 = 该处积压占比**（`freight::route_for`）：
+
+```text
+把 [0, 总积压) 按各处积压切成区间，抽一枚 ∈[0,1) 的骰子落在哪段就去哪儿
+骰子 = sim::derived_roll(势力, 舰名, 回合, "route")   // 派生，绝不消费主 Prng 流
+```
+
+* **期望上自动按积压成比例**分配运力，不必维护「已派了几条船」那本账
+  （那本账还得考虑船在路上、船被击沉、船改行……）；
+* **无中心、无顺序依赖**：每艘舰自己掷一次就走；
+* **仍然完全确定**：同种子同回合逐字复现（`derived_roll` 的 `salt` 区分用途，
+  与导航偏移那枚骰子互不相关）；
+* **续用优先**：货栈还有货/舱里载着货 ⇒ 不改道（常驻路线不抖动，否则一票货永远运不回家）。
+
+**AI**：链路由 `autocontrol/freight.rs` 出（纯函数），执行由 `sim::haul_step` 做。
+**玩家/agent**：`--apply` 直接写 `Haul` 叶子与角色叶（`ship_freighter`/`default_freighter`）。
 
 **AI**：新增 `autocontrol/freight.rs`——谁有货要运、派几条船、走哪条线、接不接别人的单。
 **玩家/agent**：`--apply` 直接写 `Haul` 叶子（与现有控制面一致）。
@@ -182,6 +259,52 @@ Haul { from: BodyId, to: BodyId },
 无国界科学组织（土星→木星 8 面积，100%）需要集货；中国 2/122（1%）；其余六家为 0
 （远端城尚未开采）。
 
+**集货需求（每月要搬多少货）** = 离岸面积 × `production_rate 0.5`，r1 实测：
+
+| 势力 | 离岸面积 | 开局需求 | 折航母（舱容 20） |
+|---|---|---|---|
+| 美国（地球 1 处，首都在火星） | 54.0 | **27.00 单位/回合** | 1.35 趟/回合——**一艘航母跟不上** |
+| 无国界科学组织（土星） | 7.6 | 3.80 | 0.19 趟/回合（一艘驱逐每回合刚好） |
+| 中国（金星） | 1.5 | 0.75 | 0.04 趟/回合（航母 27 回合一趟） |
+
+→ 集货腿的**运量**是真实约束：美国开局那**一处**地球矿场就比整个柯伊伯带的产出还大。
+
+**积压规模（`probe_collection_backlog`，没有运输时能攒多少）**——这是 M1 落地后新测的，
+它量化了「缺集货腿」的真实代价：
+
+| 种子 / 回合 | 世界积压（单位 / 价值） | 世界池值合计 | 积压 ÷ 池值 |
+|---|---|---|---|
+| seed 7 / r120 | 2520.3 / 3005.4 | 508.4 | **591%**（≈ 86% 的矿冻着） |
+| seed 42 / r120 | 3420.1 / 3856.2 | 535.9 | **720%**（≈ 88% 的矿冻着） |
+| seed 7 / r400 | 16102.5 / 18825.8 | 1657.9 | **1136%**（≈ 92% 的矿冻着） |
+
+**这条比 v1 的估计严重得多**：不是「美国/科学组织两家被掐住」，而是**所有势力的离岸
+产出都在无限堆积**（俄罗斯 r400 积压 14885 单位，是它全部流动库存的 20 倍）——
+整个世界的经济被冻住的时间越长，缺矿就越不像「稀缺」而像「瘫痪」。
+而且 r400 seed 7 的积压里**只有 1 处货栈在异常带内**（俄罗斯 9 处中的 1 处），
+说明集货腿的绝大多数活是**带内的普通航程**：MOND 只在边境起作用，不是集货的主要难点。
+
+**集货开/关的 A/B（`probe_freight_ab`，M2b 落地后的因果读数）**——同一颗种子、同一段回合，
+**只切「角色的舰队默认」一个开关**（关 = 钉成 `Player(false)` ⇒ 自动定编不许碰）：
+
+| 种子 / 240 回合 | 集货**关**：积压 / 首都池值 | 集货**开**：积压 / 首都池值 | 进池货 |
+|---|---|---|---|
+| seed 7 | 8591 / 993（**865%**） | 5122 / 3452（**148%**） | 1750 件 |
+| seed 42 | 8246 / 2367（**348%**） | 5586 / 11085（**50%**） | 782 件 |
+
+→ **集货腿把流动经济放大 3.5–4.7 倍**（池值 993→3452 / 2367→11085），把「冻着的比例」
+压到 1/6–1/7。这条是这套机制存在的全部理由，也是最该长期盯住的读数。
+
+**为什么不看「积压占池值」的横向对比**：世界走向对战争极其敏感，同一种子在不同提交上能差
+几倍（实测 M2b 开发期间同一个 seed 42 出现过 546% / 242% / 134% 三种结局），
+**只有 A/B（只切一个开关）才是因果读数**。
+
+**吞吐的真实瓶颈（M2b 实测，`probe_collection_backlog`）**：
+* 每趟**只装 3.4–4.9 件**——不是「装不满」，而是**舰队里根本没有货船**：
+  俄罗斯的 8 条运输舰是 战列×3+巡洋×2+驱逐×3（它的舱容上限就是 6，而航母才是 20）；
+  科学组织/崇拜教各 1 条运输舰也都是**战列舰**。**`cargo` 的分布已经把集货腿的天花板钉死了**。
+* 于是「让 AI 造航母」成了集货腿真正的放大器（**未做**，见 §8 Q9）。
+
 **潜在量（v1 的 ad valorem 估算，现在要改成物理航程）**：星系矿业若开采妊神星/创神星/阋神星，
 非 master 承运人平均要 **3–8 个回合**才靠得上泊位（§1）→ 这些矿**运得出来但会拖**，
 于是「谁来运、会不会超期」成了柯伊伯带经济的核心问题，而不是一道过不去的墙。
@@ -190,6 +313,7 @@ r400 seed 7 实测远端产出仅约 **1%** 世界产出（冥王星前哨 0.555
 **晚期结构已经把客户群准备好了**（r400 seed 7）：崇拜教 14 城 / 25 舰 / `power_share` 0.94、
 8 家全部禁运它、首都已是**地球**；幸存者 星系矿业@冥王星、美国@卡戎（**0 舰**）、
 联合国/深空运输联盟@海王星（razed 城仍是首都）→ **6 家 0 舰**，它们**必须承包**。
+（同一次探针里这 6 家的积压合计 1159 单位 / 1263 价值——**天然承包客户已经带着货在等了**。）
 
 ---
 
@@ -200,30 +324,57 @@ r400 seed 7 实测远端产出仅约 **1%** 世界产出（冥王星前哨 0.555
 `pay_with_surplus`(1126)、`listed_value`(1110)、`agent::governance_distance`(agent.rs:228)、
 `State::capital_body`、三态控制（`Control<T>`）与派生表。
 
-**新增**：`State.depots`；`ShipBehavior::Haul`；舰级 `cargo`；`model::freight`
-（`FreightOffer` / `FreightState.reputation`）；`Faction::reputation`（或舰级）；
-`autocontrol/freight.rs`；`RoundFlow`/`FactionMetrics` 的 `depot_value / haul_* / reputation /
-contract_*`；config 一个 `freight:` 段（`cargo_load_rounds`、`reputation_delta_*`、
+**已落地**（M0–M2b）：`State.depots`（M1）；`ShipBehavior::Haul`；舰级 `cargo`；
+`Ship.cargo`；`Ship.freighter` + 第三条风格轴（`ship_freighter`/`default_freighter` 叶）；
+`model::cargo_capacity` / `cargo_used` / `freight_tonnage`；`sim::haul_split` / `haul_step` /
+`HaulStep` / `derived_roll`（派生的确定性骰子，导航与抽签共用）；`State::depot_take`；
+事件 `CargoLoaded` / `CargoDelivered`；判定 `ShipVerdict::Haul`；
+`autocontrol/freight.rs`（`needed_freighters` / `should_be_freighter` / `route_for` /
+`assign_roles`）；观察面（`ships.freighter`/`freighter_mode` + `control` 表的
+`ship_freighter`/`default_freighter` 行 + `--control`/`--apply` 的对应叶）；探针
+`probe_collection_backlog` / `probe_freight_ab`。
+**Schema**：v6 → v7（货栈）→ v8（在舱货物）→ **v9**（`Haul` + 角色轴 + 两种货运事件），
+`migrate` 收 `0..=8`，新字段全 `#[serde(default)]`。
+
+**待做**：`model::freight`（`FreightOffer` / `FreightState.reputation`）；
+`Faction::reputation`（或舰级）；`RoundFlow`/`FactionMetrics` 的
+`haul_* / reputation / contract_*`；config 一个 `freight:` 段（`reputation_delta_*`、
 `reputation_gate_*`（各类难度的信誉门槛）、**`reputation_shadow_lambda0` /
 `reputation_shadow_decay`（信誉的影子价格 `λ(信誉)`，递减）**、
 **`difficulty_*`（航程/货值/截止期/战争如何合成难度）**、
 `carrier_margin`、`contract_deadline_slack`）。
-**Schema**：`SCHEMA_VERSION` 5 → 6，`migrate` 接受旧值，新字段全 `#[serde(default)]`。
 
 ---
 
 ## 7. 里程碑（一步一提交）
 
-- **M0 机制守卫**：把 §1 的可达性表固化成不变量测试（`drift > arrival_eps ⟺ r > 30.000`；
-  带内 7 天体的判定；围城 36.333）——这是后面一切的判据。
-- **M1 货栈**：`State.depots` + `step_production` 分流 + schema v6 + index 暴露。
-- **M2 货舱与运输行为**：舰级 `cargo`；`ShipBehavior::Haul`；装/卸货在 `arrival_eps` 内完成。
-- **M3 AI 运输**：`autocontrol/freight.rs`（自己运 vs 承包，按可达性派船）。
-- **M4 承包市场 + 信誉**：挂单/接单、信誉闸与自评闸、结算与截断。
-- **M5 禁运扩展 + 观察面**：承包也受 `trade_blocked`；metrics/probe/index。
-- **M6 并掉旧的 MOND 特权路径**：`carrier` 从 `config.mond.masters` 写死改为
-  「挂价承运人 + 物理可达性」，`carrier_share` 语义重定义为市场费率。
-- **M7 守卫分层 + 笔记回填**：机制不变量断言；平衡目标 `#[ignore]` + 实测值写注释。
+- [x] **M0 机制守卫**（`src/sim.rs` 单测）：把 §1 的可达性表固化成不变量测试。
+      M0b（用户裁决「MOND 是伪随机范围」）后改判：`drift_per_au` 变成**上界**、新增
+      `MondConfig.drift_shape`，守卫改成「**任何深度 p > 0**」+「p 随深度单调递减」+
+      「深处只是要多试几个回合（首次命中回合数实测）」。
+- [x] **M1 货栈**（`State.depots` / `sim::step_production` / `projection::cities.depot_value`，
+      schema **v7**）：首都天体产出免运进池，其余落产地货栈。
+- [x] **M2a 货舱**（`ShipSpec.cargo` / `Ship.cargo` / `model::cargo_capacity`，schema **v8**）：
+      舰级舱容 2/4/6/20/6，有效舱容 = `舰级舱容 × hull/hull_max`（战损连续折算）。
+- [x] **M2b 运输行为**（schema **v9**）：`ShipBehavior::Haul` + `sim::haul_step`（装卸 + 择腿
+      + 移动一体）+ `haul_split`（尽量等量）+ **角色轴**（`Ship.freighter` / 三条风格轴的第三条 /
+      `freight::assign_roles` 定编）+ **按积压占比抽签派单**（`route_for`）+ `derived_roll`。
+      守卫：`haul_split_is_max_min_fair`、`hauling_moves_cargo_without_creating_or_destroying_any`、
+      `a_haul_route_alternates_legs_because_of_the_cargo`、
+      `a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`、
+      `crew_size_is_one_ship_per_stocked_depot`、`route_lottery_is_proportional_to_the_backlog`、
+      `an_existing_route_is_kept_while_it_still_has_cargo`、
+      `the_ai_writes_the_role_leaf_but_never_over_a_player`、
+      `the_effective_role_follows_the_leaf_then_the_fleet_default_then_the_record`、
+      `freight_tonnage_counts_speed_and_never_picks_a_ship_that_cannot_move`、（速度/0 速守卫已做**变异验证**）
+      `the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after`。
+- [~] **M3 AI 运输（自主集货部分已提前完成）**：`autocontrol/freight.rs` 已能自己运
+      （定编 + 抽签派单 + 执行）。**未做**：与承包的取舍（自己运 vs 请人运）。
+- [ ] **M4 承包市场 + 信誉**：挂单/接单、信誉闸与自评闸、结算与截断。
+- [ ] **M5 禁运扩展 + 观察面**：承包也受 `trade_blocked`；metrics/probe/index。
+- [ ] **M6 并掉旧的 MOND 特权路径**：`carrier` 从 `config.mond.masters` 写死改为
+      「挂价承运人 + 物理可达性」，`carrier_share` 语义重定义为市场费率。
+- [ ] **M7 守卫分层 + 笔记回填**：机制不变量断言；平衡目标 `#[ignore]` + 实测值写注释。
 
 **守卫分层（遵用户指示：平衡往后放）**：
 - **机制不变量（断言）**：可达性阈值；装载量 ≤ `cargo`；同种子复现；货值守恒
@@ -244,8 +395,18 @@ contract_*`；config 一个 `freight:` 段（`cargo_load_rounds`、`reputation_d
 | **Q2** | 承包方向：**托运方挂单、承运方接单** ／ 承运方投标、托运方选 | 挂单（与商品挂价簿同构、可观测、确定性） |
 | **Q3** | 信誉载体：**势力级** ／ 舰船级（名船长） | 势力级先做（舰船级是漂亮的后续：一辆有名有姓的老货船） |
 | **Q4** | 禁运是否扩展到**承包**（不给你运货）？ | 是——比不卖矿更狠，且直接掐崇拜教的垄断 |
+| **Q5** | ~~`Haul` 的装载触发~~ | **已裁决 = (A) 有货就走**（见 §3.1） |
+| **Q6** | ~~多种货先装哪种~~ | **已裁决 = 尽量等量**（max-min 公平分配，见 §3.1；不是价值降序） |
+| **Q7** | ~~`Haul` 的寿命~~ | **已裁决 = (A) 常驻路线** + **自动控制要能按积压自动选线**（见 §3.4） |
+| **Q8** | 定编口径：现在是「**一处有积压的货栈配一条船**」（`needed_freighters`） | 先这样（无阈值常数、随积压清空自动收回）。要做细应按 **积压量 ÷ 航程 ÷ 单位时间运力** 估——那是平衡层 |
+| **Q9** | **AI 要不要为了集货去造航母**？实测瓶颈就是「舰队里没有货船」（每趟只装 3.4–4.9 件，因为最大的舱容是 6） | 建议要：让 `autocontrol::shipbuilding` 在「积压 / 运力」超过阈值时把某个船坞改装成航母。**未做**——它会改变造舰优先级与军备结构，属于设计裁决 |
 
-已定（不再问）：货栈按 `(势力,天体)`；首都产出免运；卸货进首都池；信誉公开；到货付款。
+已定（不再问）：货栈按 `(势力,天体)`；首都产出免运；卸货进首都池；信誉公开；到货付款；
+**在途货物跨势力时要在舰上标明货主**（M4 的 `cargo_owner`，M2 暂不需要——自己运自己的货）；
+**角色 = 第三条风格轴**（bool，`Ship.freighter` + 叶 + 舰队默认；AI 会写、玩家可压住；
+不影响自动开火/kiting）；**派单按积压占比抽签**；**运力 = 舱容 × 速度 ÷ 维护费**（0 速的舰剔出）；
+**运输舰不追敌**（路过之敌不作废航线，开火照旧）；**货随舰沉没**（没有 `CargoLost` 事件——
+货的消失就是那艘舰的 `ShipDestroyed` 的一部分）。
 
 ---
 

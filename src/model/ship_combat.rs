@@ -54,6 +54,13 @@ pub struct ShipSpec {
     /// 平台修正器」的一环——把所搭载的点防模块输出按舰型缩放，而非给舰叠加独立面板。
     #[serde(default = "default_mult")]
     pub pd_mult: f64,
+    /// **舱容**：本舰级一次能装多少单位货（运输装货的上限，见 [`Ship::cargo`]）。
+    ///
+    /// 它是与「武器/护甲」**并列的第三类能力**，所以**不从 hull 推**：船体大 ≠ 能装
+    /// （战列舰 30 船体只装 6，航母 20 船体装 20——航母的机库/货舱本来就是它的招牌）。
+    /// 有效舱容还要乘战损折算 `hull / hull_max`，见 [`cargo_capacity`]。
+    /// 0 = 不承运（可以装 0，即永远装不满；不是错误状态）。
+    pub cargo: f64,
     /// 本舰级出厂时的**默认行为风格**（per-舰 配置的类默认）：舰出厂时继承这一份
     /// `ShipDoctrine`。全 0 = 基线（与旧行为一致）。`--apply` 可再按单舰覆写。
     #[serde(default)]
@@ -62,6 +69,14 @@ pub struct ShipSpec {
     /// 继承这一份 `kiting`。全 0 = 基线。`--apply` 可再按单舰覆写。
     #[serde(default)]
     pub default_kiting: f64,
+    /// 本舰级出厂时的**默认角色**（`true` = 运输舰）。舰出厂时继承它，之后落在
+    /// [`Ship::freighter`] 那个记录值上；有效角色走 [`crate::model::State::ship_freighter`]
+    /// （叶 → 舰队默认 → 记录值），自动控制与玩家都可以改。
+    ///
+    /// 只有**航母**出厂就是运输舰：它是唯一的散货船（舱容 20 = 5 艘驱逐），让「舰级身份」
+    /// 和「它天生该干的活」对上。其余舰级出厂是战舰（= 旧行为不变）。
+    #[serde(default)]
+    pub default_freighter: bool,
 }
 
 fn default_mult() -> f64 {
@@ -238,6 +253,29 @@ pub fn component_effectiveness(config: &GameConfig, ship: &Ship, i: usize) -> f6
         return 1.0;
     }
     (hp / component_integrity(config, &ship.components[i])).clamp(0.0, 1.0)
+}
+
+/// 某舰的**有效舱容**（一次能装多少单位货）：舰级舱容 × **战损折算** `hull / hull_max`。
+///
+/// * 舰级舱容来自 [`ShipSpec::cargo`]——船体大小不决定它能装多少（见那里的说明）。
+/// * 战损折算：装甲被打掉的运输舰装得少（`hull/hull_max` 越低，货舱越「不敢装满」）。
+///   这是**连续**的：不用「受伤就罢工」这种硬阈值，而是让它运得少。
+/// * `hull_max ≤ 0`（旧档缺该字段）按**未受损**处理（满舱）——否则 `hull/0` 会把舱容
+///   算成无穷，让旧档的船变成无底洞。
+///
+/// 纯函数、无 RNG、不读 `state`：给定 `(config, ship)` 恒定。
+pub fn cargo_capacity(config: &GameConfig, ship: &Ship) -> f64 {
+    let cap = config.ship_spec(&ship.class).cargo;
+    if ship.hull_max <= 0.0 {
+        return cap;
+    }
+    cap * (ship.hull / ship.hull_max).clamp(0.0, 1.0)
+}
+
+/// 在舱货物的**总件数**（各资源求和）——与 [`cargo_capacity`] 同一把尺子（都是「单位」，
+/// 不折算价值）。装货判「还能装多少」用它；卸货不设上限（货栈/池子有多大收多大）。
+pub fn cargo_used(cargo: &ResourceMap) -> f64 {
+    cargo.values().sum()
 }
 
 pub fn ship_panel(config: &GameConfig, ship: &Ship) -> ShipPanel {

@@ -273,7 +273,7 @@ fn decisions_table_matches_the_derived_record() {
     assert_eq!(order_rows.len(), ships.len(), "逐舰判定的条数两个读面不一致");
     assert_eq!(retool_rows.len(), retools.len(), "改装判定的条数两个读面不一致");
 
-    const KNOWN: [&str; 6] = ["withdraw", "engage", "colonize", "bombard", "move", "hold"];
+    const KNOWN: [&str; 7] = ["withdraw", "engage", "colonize", "bombard", "move", "haul", "hold"];
     for d in ships {
         let actor = d["ship"].as_str().unwrap();
         // 一艘舰一回合**最多两行**（先机动、到位后再判一次），所以配对键是

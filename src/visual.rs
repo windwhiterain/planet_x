@@ -265,6 +265,7 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             Some(ShipBehavior::DockCity { city }) => format!("城#{}", city),
             Some(ShipBehavior::Dock { body }) => format!("停泊#{}", body),
             Some(ShipBehavior::Colonize { body }) => format!("殖民#{}", body),
+            Some(ShipBehavior::Haul { from, to }) => format!("运{from}→{to}"),
             Some(ShipBehavior::Move { .. }) => "移动".to_string(),
             Some(ShipBehavior::Idle) | None => "待命".to_string(),
         };
@@ -427,6 +428,7 @@ fn behavior_str(b: &ShipBehavior) -> String {
         ShipBehavior::DockCity { city } => format!("舰→城#{}(停泊/包围)", city),
         ShipBehavior::Dock { body } => format!("舰→天体#{}(停泊轨道)", body),
         ShipBehavior::Colonize { body } => format!("舰→天体#{}(殖民)", body),
+        ShipBehavior::Haul { from, to } => format!("舰→天体#{from}(装货)→天体#{to}(卸货，往复)"),
         ShipBehavior::Idle => "待命".to_string(),
     }
 }

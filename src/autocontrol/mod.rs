@@ -25,6 +25,7 @@
 
 pub mod budget;
 pub mod economy;
+pub mod freight;
 pub mod shipbuilding;
 pub mod tactics;
 

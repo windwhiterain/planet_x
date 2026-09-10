@@ -349,10 +349,14 @@ fn write_round(
                 "order_default_mode": default_mode_of(state, &s.faction_id),
                 "order_effective_mode": state.ship_control(s.name.clone()),
                 "order_effective": state.ship_behavior(s.name.clone()),
-                // 两条**风格轴**的有效值（叶 → 舰队默认 → 舰上记录值）。风格是活层，
-                // `Ship.doctrine`/`Ship.kiting` 只是记录值——这里给的是引擎解析后的答案。
+                // 三条**风格轴**的有效值（叶 → 舰队默认 → 舰上记录值）。风格是活层，
+                // `Ship.doctrine`/`Ship.kiting`/`Ship.freighter` 只是记录值——这里给的是
+                // 引擎解析后的答案。第三条轴（角色）与前两条的唯一差别：**AI 会写它**
+                // （按积压定编），所以 `freighter_mode` 还会告诉你那片叶归谁。
                 "doctrine": state.ship_doctrine(s.name.clone()),
                 "kiting": state.ship_kiting(s.name.clone()),
+                "freighter": state.ship_freighter(s.name.clone()),
+                "freighter_mode": state.ship_freighter_control(s.name.clone()),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -524,23 +528,30 @@ fn write_round(
         if let Some(d) = &c.default_ship_order {
             row("default_ship_order", json!(""), json!(null), json!(d.value), d.mode)?;
         }
-        // —— 风格两轴的四片叶（`control-live-layers.md` §3 那条候选）——
+        // —— 风格三轴的六片叶（`control-live-layers.md` §3 那条候选 + 运输分支的角色轴）——
         //
-        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`（**有效值**）
-        // 看结果，看不到这四片叶**自己的值与自己的表态**——于是「这艘舰的风格是它自己钉的，
-        // 还是跟着舰队默认走的」在表里查不出来（web 的 `effectiveMode()` 正是靠这个区分）。
-        // `value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，kiting 是数字。
+        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`/`freighter`
+        // （**有效值**）看结果，看不到这些叶**自己的值与自己的表态**——于是「这艘舰的风格/角色
+        // 是它自己钉的，还是跟着舰队默认走的」在表里查不出来（web 的 `effectiveMode()` 正是
+        // 靠这个区分）。`value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，
+        // kiting 是数字，freighter 是布尔。
         for (ship, leaf) in &c.ship_doctrine {
             row("ship_doctrine", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
         }
         for (ship, leaf) in &c.ship_kiting {
             row("ship_kiting", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
         }
+        for (ship, leaf) in &c.ship_freighter {
+            row("ship_freighter", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+        }
         if let Some(d) = &c.default_doctrine {
             row("default_doctrine", json!(""), json!(null), json!(d.value), d.mode)?;
         }
         if let Some(d) = &c.default_kiting {
             row("default_kiting", json!(""), json!(null), json!(d.value), d.mode)?;
+        }
+        if let Some(d) = &c.default_freighter {
+            row("default_freighter", json!(""), json!(null), json!(d.value), d.mode)?;
         }
         for (res, leaf) in &c.investment_budget {
             row("investment_budget", json!(res), json!(null), json!(leaf.value), leaf.mode)?;
@@ -661,7 +672,7 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","doctrine":"object","kiting":"number"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","doctrine":"object","kiting":"number","freighter":"boolean","freighter_mode":"string"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_default_mode": "势力级**舰队默认指令**的表态（没有这片叶 = Inherit）。",
@@ -669,6 +680,8 @@ pub fn projection_schema() -> serde_json::Value {
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案（null = 没有任何一层说话，调用方按 Idle 兜底）。注意「叶 Inherit + 舰队默认不是 Player」时会回落到叶上的记录值——这是引擎的既有取值规则，Python 侧不要自己重算。",
                     "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
                     "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
+                    "freighter": "**有效角色**（`State::ship_freighter`，同一条链）：`true` = 运输舰（自动控制给它排集货路线），`false` = 战舰（找仗打）。它**只管自动控制派哪种活**——不解除武装，运输舰照样自动开火、照样按 `kiting` 软移动。",
+                    "freighter_mode": "角色那片叶的**有效归属**（`State::ship_freighter_control`）：Auto = 这条结论是自动控制写的（它每回合按积压定编），Player = 玩家钉的、AI 不碰。",
                 },
             }),
             "cities" => json!({
@@ -744,10 +757,10 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / default_ship_order / default_doctrine / default_kiting / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting` 与 `capital` 为 `\"\"`。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_freighter / default_ship_order / default_doctrine / default_kiting / default_freighter / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
+                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting`/`default_freighter` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
-                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting` 列。",
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_freighter`/`default_freighter` 是布尔、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`freighter` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),
@@ -766,7 +779,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "column_docs": {
                     "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）。",
                     "actor": "作判定的一方：舰名（ship_order）/ 船坞所在城名（retool）。",
-                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ **hold（没派活）**；retool 固定为 retool。",
+                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool。",
                     "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）；纯位置机动为 null（看 `detail.destination`）。",
                     "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。",
                 },

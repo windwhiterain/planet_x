@@ -63,6 +63,19 @@ pub struct ShipKitingEntry {
     pub mode: ControlMode,
 }
 
+/// 一艘舰的**角色**（普通舰船控制属性，第三条风格轴）：`true` = 运输舰（自动控制给它排集货
+/// 路线），`false` = 战舰（找仗打）。值与 `mode` 的语义见 [`ShipDoctrineEntry`]。
+///
+/// ⚠ 与另两条轴唯一的差别：**自动控制会写这片叶**（每回合按积压定编，见
+/// `autocontrol::freight`）。所以「有效值不是玩家写的那份」是正常的——`mode = Player`
+/// 才是「玩家钉的、AI 不碰」。它**只管自动控制派哪种活**，不解除武装（照样自动开火/kiting）。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ShipFreighterEntry {
+    pub ship: ShipId,
+    pub freighter: bool,
+    pub mode: ControlMode,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BudgetEntry {
     pub resource: String,
@@ -108,9 +121,13 @@ pub struct FactionControlView {
     pub default_doctrine: Option<DefaultDoctrine>,
     /// 舰队默认**风筝<->贴脸姿态**（势力级）：与 `default_doctrine` 同形的另一片。
     pub default_kiting: Option<DefaultKiting>,
+    /// 舰队默认**角色**（势力级，第三条风格轴）。
+    pub default_freighter: Option<DefaultFreighter>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub ship_kiting: Vec<ShipKitingEntry>,
+    /// 本势力各舰的**角色**（有效值 + 那片叶自己的表态）。
+    pub ship_freighter: Vec<ShipFreighterEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
@@ -187,6 +204,20 @@ pub struct DefaultKiting {
     pub remove: bool,
 }
 
+/// 舰队默认**角色**（势力级，第三条风格轴），与 [`DefaultKiting`] 同形。
+///
+/// 写它 = 「全舰队按这个角色走」（`true` = 全转运输）。玩家把它设成 `Player` 后，
+/// 自动控制的**逐舰定编不再生效**（那片叶归玩家）——这正是「AI 定编 vs 玩家意图」的闸门。
+#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct DefaultFreighter {
+    /// 默认角色（缺省 = 保留现值；写值即接管）。
+    #[serde(default)]
+    pub freighter: Option<bool>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
+}
+
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipOrderPatch {
@@ -242,6 +273,21 @@ pub struct ShipKitingPatch {
     /// **删掉这片叶**（回落到舰队默认 / 出厂快照）。叶不存在时是幂等成功；与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove: bool,
+}
+
+/// 一艘舰的**角色**补丁（per-舰，第三条风格轴）：覆盖 `ship` 的角色叶。
+/// 缺省 = 保留现值。语义同 [`ShipKitingPatch`]（叶片 + 写值即接管）。
+///
+/// 玩家写它 = 手动给这艘舰定活（`true` 运货 / `false` 打仗），自动控制的定编从此不碰这艘舰。
+#[derive(Deserialize, Default, JsonSchema)]
+pub struct ShipFreighterPatch {
+    /// 目标舰（唯一名 identity）。
+    pub ship: ShipId,
+    #[serde(default)]
+    pub freighter: Option<bool>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -372,6 +418,9 @@ pub struct FactionControlPatch {
     /// 舰队默认风筝<->贴脸姿态（势力级，两片之二）。
     #[serde(default)]
     pub default_kiting: Option<DefaultKiting>,
+    /// 舰队默认**角色**（势力级，第三条风格轴）。
+    #[serde(default)]
+    pub default_freighter: Option<DefaultFreighter>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
@@ -381,6 +430,9 @@ pub struct FactionControlPatch {
     /// 本势力各舰的风筝<->贴脸姿态补丁（per-舰 普通控制属性）。
     #[serde(default)]
     pub ship_kiting: Vec<ShipKitingPatch>,
+    /// 本势力各舰的**角色**补丁（per-舰，第三条风格轴）。
+    #[serde(default)]
+    pub ship_freighter: Vec<ShipFreighterPatch>,
     /// 投资预算补丁（建设）。
     #[serde(default)]
     pub investment_budget: Vec<BudgetPatch>,
@@ -523,6 +575,17 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
             mode: c.ship_kiting.get(&s.name).map(|l| l.mode).unwrap_or_default(),
         })
         .collect();
+    // 角色：**有效值**（自动控制可能刚写过它）+ 那片叶自己的表态（`Player` = 玩家钉的）。
+    let ship_freighter = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid)
+        .map(|s| ShipFreighterEntry {
+            ship: s.name.clone(),
+            freighter: state.ship_freighter(s.name.clone()),
+            mode: c.ship_freighter.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+        })
+        .collect();
     let investment_budget = c
         .investment_budget
         .iter()
@@ -590,9 +653,14 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
             mode: Some(d.mode),
             remove: false,
         }),
+        default_freighter: c.default_freighter.as_ref().map(|d| DefaultFreighter {
+            freighter: Some(d.value),
+            mode: Some(d.mode),
+        }),
         ship_orders,
         ship_doctrine,
         ship_kiting,
+        ship_freighter,
         investment_budget,
         construction_budget,
         invest_weights,
@@ -1400,6 +1468,30 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         if let Some(d) = &fac.default_kiting {
             apply_default_kiting(state, &fid, d, &mut report);
         }
+        // 舰队默认**角色**（势力级，第三条风格轴）。写它 = 全舰队按这个角色走；
+        // 设成 `Player` 之后自动控制的逐舰定编不再生效（那片叶归玩家）。
+        if let Some(d) = &fac.default_freighter {
+            let path = format!("{fid}.default_freighter");
+            let wrote = d.freighter.is_some();
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .default_freighter
+                .get_or_insert_with(|| Control::inherit(false));
+            if let Some(v) = d.freighter {
+                ctrl.value = v;
+            }
+            match (d.mode, wrote) {
+                (Some(m), _) => ctrl.mode = m,
+                (None, true) => {
+                    ctrl.mode = ControlMode::Player;
+                    report.took_over(path.clone());
+                }
+                (None, false) => {}
+            }
+            report.applied += 1;
+        }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
             apply_ship_order(state, &fid, sp, i, &mut report);
         }
@@ -1408,6 +1500,27 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         }
         for (i, k) in fac.ship_kiting.iter().enumerate() {
             apply_ship_kiting(state, &fid, k, i, &mut report);
+        }
+        // **角色**补丁（per-舰，第三条风格轴）：同一条路（叶片 + 写值即接管）。
+        // 与另两条轴的差别：这片叶自动控制**也会写**，但**玩家写过（`Player`）之后 AI 不再碰**
+        // ——所以「手动给某艘舰定活」是一次性的、且能一直压住自动定编。
+        for (i, f) in fac.ship_freighter.iter().enumerate() {
+            let path = format!("{fid}.ship_freighter[{i}].ship");
+            if resolve_own_ship(state, &fid, &f.ship, &path, &mut report).is_none() {
+                continue;
+            }
+            let base = state.ship_freighter(f.ship.clone());
+            let value = f.freighter.unwrap_or(base);
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .ship_freighter
+                .entry(f.ship.clone())
+                .or_insert_with(|| Control::inherit(base));
+            ctrl.value = value;
+            write_mode_leaf(&mut ctrl.mode, f.mode, f.freighter.is_some(), format!("{fid}.ship_freighter[{i}]"), &mut report);
+            report.applied += 1;
         }
         for (i, bp) in fac.investment_budget.iter().enumerate() {
             apply_budget(state, config, &fid, BudgetKind::Investment, bp, i, &mut report);

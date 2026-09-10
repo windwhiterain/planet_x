@@ -482,7 +482,66 @@ fn probe_freight() {
     }
 }
 
-/// 7) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
+/// 8b) **集货的 A/B（因果读数）**：同一颗种子、同一段回合，**只切「集货开/关」一个开关**
+/// （关 = 把各势力的**舰队默认角色**钉成「战舰」且归玩家 ⇒ 自动定编不许碰角色叶，
+/// 见 `State::ship_freighter` 的取值链）。
+///
+/// 为什么非要 A/B：世界走向对战争极其敏感，隔一次改动比「积压占池值」那样的横向数字会被
+/// 完全不同的战争结局搅浑（实测同一颗种子在不同提交上能差出几倍）。只切一个开关，
+/// 「集货腿搬走了多少、首都池多了多少」才是**因果**读数。
+#[test]
+#[ignore]
+fn probe_freight_ab() {
+    let config = load_config();
+    let n = rounds();
+    let depot_units = |state: &State| -> f64 {
+        state.depots.values().flat_map(|m| m.values()).sum()
+    };
+    let pool_value = |state: &State| -> f64 {
+        state
+            .factions
+            .iter()
+            .flat_map(|f| f.resources.iter())
+            .map(|(rt, amt)| amt * value_of(&config, rt))
+            .sum()
+    };
+    for seed in seeds() {
+        let mut line = String::new();
+        for hauling in [false, true] {
+            let mut state = world::default_state(&config, seed);
+            if !hauling {
+                // 玩家的舰队默认角色 = 战舰（`Player` ⇒ 自动定编一个字都不写）。
+                let fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
+                for fid in fids {
+                    if let Some(c) = state.control_mut(fid) {
+                        c.default_freighter = Some(Control::player(false));
+                    }
+                }
+            }
+            let mut rng = Prng::new(seed);
+            let mut delivered = 0.0;
+            for _ in 0..n {
+                sim::advance(&mut state, &config, &mut rng);
+                for e in &state.events {
+                    if let GameEvent::CargoDelivered { cargo, into_pool: true, .. } = e {
+                        delivered += cargo.values().sum::<f64>();
+                    }
+                }
+            }
+            let tag = if hauling { "集货**开**" } else { "集货关" };
+            line.push_str(&format!(
+                "  {tag}：期末积压 {:.0} 单位 / 首都池值 {:.0}（积压/池值 {:.0}%）  进池货 {:.0} 件",
+                depot_units(&state),
+                pool_value(&state),
+                if pool_value(&state) > 0.0 { 100.0 * depot_units(&state) / pool_value(&state) } else { 0.0 },
+                delivered,
+            ));
+        }
+        println!("== 集货 A/B seed {seed}（{n} 回合）==\n{line}");
+    }
+}
+
+/// 9) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
 fn probe_landless() {
@@ -521,5 +580,130 @@ fn probe_landless() {
                 stock_value(&state, &config, &f.name)
             );
         }
+    }
+}
+
+/// 8) **集货腿的量（M2）**：离岸产出积压了多少、值多少、折多少趟运输、有多少压在异常带里。
+///
+/// 这是 M3 派单 / M4 定价要面对的**需求侧**实测：没有运输时，货栈就是「等船来运」的存量。
+/// * **开局需求**（第 1 回合末的积压）＝ 每月要搬多少货（单位/回合）——它决定需要几条船；
+/// * **期末积压**＝ 一直没人运时攒下来的存量（单位 / 价值 / 折多少趟航母舱容）；
+/// * **带内**＝ 积压所在天体在 MOND 异常带内（非 master）的处数——它决定**谁能去取**。
+#[test]
+#[ignore]
+fn probe_collection_backlog() {
+    let config = load_config();
+    let n = rounds();
+    let carrier_cap = config.ship_spec("carrier").cargo;
+    let r_mond = config.mond.radius;
+    // (单位, 价值, 货栈处数, 其中在异常带内的处数)
+    let depot_of = |state: &State, fid: &str| -> (f64, f64, usize, usize) {
+        let (mut units, mut value, mut bodies, mut deep) = (0.0, 0.0, 0usize, 0usize);
+        for ((f, b), map) in &state.depots {
+            if f != fid {
+                continue;
+            }
+            bodies += 1;
+            let p = state.body_position(b);
+            if (p[0] * p[0] + p[1] * p[1]).sqrt() > r_mond {
+                deep += 1;
+            }
+            for (rt, amt) in map {
+                units += amt;
+                value += amt * value_of(&config, rt);
+            }
+        }
+        (units, value, bodies, deep)
+    };
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        // 集货吞吐（扫每回合的事件流水；`advance` 开头会 clear，所以返回后就是本回合的）：
+        // (装货件数, 卸货件数, 其中**卸进首都池**的件数)——最后一项才是「集货真正完成」。
+        let (mut loaded, mut delivered, mut to_pool) = (0.0, 0.0, 0.0);
+        let (mut load_trips, mut delivery_trips) = (0u32, 0u32);
+        let mut tally = |state: &State,
+                         loaded: &mut f64,
+                         delivered: &mut f64,
+                         to_pool: &mut f64,
+                         load_trips: &mut u32,
+                         delivery_trips: &mut u32| {
+            for e in &state.events {
+                match e {
+                    GameEvent::CargoLoaded { cargo, .. } => {
+                        *loaded += cargo.values().sum::<f64>();
+                        *load_trips += 1;
+                    }
+                    GameEvent::CargoDelivered { cargo, into_pool, .. } => {
+                        let u: f64 = cargo.values().sum();
+                        *delivered += u;
+                        *delivery_trips += 1;
+                        if *into_pool {
+                            *to_pool += u;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        sim::advance(&mut state, &config, &mut rng); // 第 1 回合末
+        tally(&state, &mut loaded, &mut delivered, &mut to_pool, &mut load_trips, &mut delivery_trips);
+        let opening: BTreeMap<String, f64> = state
+            .factions
+            .iter()
+            .map(|f| (f.name.clone(), depot_of(&state, &f.name).0))
+            .collect();
+        for _ in 1..n {
+            sim::advance(&mut state, &config, &mut rng);
+            tally(&state, &mut loaded, &mut delivered, &mut to_pool, &mut load_trips, &mut delivery_trips);
+        }
+        println!("== 集货积压 seed {seed}（{n} 回合，航母舱容 {carrier_cap}）==");
+        let (mut tot_units, mut tot_value, mut tot_pool_v) = (0.0, 0.0, 0.0);
+        for f in &state.factions {
+            let name = f.name.as_str();
+            let (units, value, bodies, deep) = depot_of(&state, &name);
+            let pool = stock_value(&state, &config, name);
+            let open = opening.get(name).copied().unwrap_or(0.0);
+            tot_units += units;
+            tot_value += value;
+            tot_pool_v += pool;
+            let haulers = state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                .count();
+            // 运输舰的**舰级构成**：运力 = 舱容 × 舰数，所以「派了谁」和「派了几条」一样重要。
+            let mut classes: BTreeMap<String, usize> = BTreeMap::new();
+            for s in state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+            {
+                *classes.entry(s.class.clone()).or_insert(0) += 1;
+            }
+            let breakdown = classes
+                .iter()
+                .map(|(k, v)| format!("{k}×{v}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ships = live_ships(&state, name);
+            if units <= 0.0 && open <= 0.0 && haulers == 0 {
+                continue;
+            }
+            let trips = units / carrier_cap;
+            println!(
+                "    {name:<14} 开局需求={open:>7.2}/回合  期末积压={units:>9.1} 单位 / 值 {value:>9.1}  \
+                 货栈 {bodies} 处（带内 {deep}）  折 {trips:>6.1} 趟航母  舰 {ships:>2}（运输 {haulers}: {breakdown}）  池值 {pool:>9.1}"
+            );
+        }
+        let ratio = if tot_pool_v > 0.0 { 100.0 * tot_value / tot_pool_v } else { 0.0 };
+        println!(
+            "    —— 合计：积压 {tot_units:.1} 单位 / 值 {tot_value:.1}；池值合计 {tot_pool_v:.1}（积压占池值 {ratio:.1}%）"
+        );
+        let per_load = if load_trips > 0 { loaded / load_trips as f64 } else { 0.0 };
+        println!(
+            "    —— 集货吞吐：装 {loaded:.0} 件（{load_trips} 趟，**每趟 {per_load:.1} 件**）/ 卸 {delivered:.0} 件（{delivery_trips} 趟），\
+             其中**进首都池 {to_pool:.0} 件**（集货真正完成的那部分）"
+        );
     }
 }
