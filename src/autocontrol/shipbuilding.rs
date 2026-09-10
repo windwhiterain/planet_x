@@ -81,6 +81,76 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
     last
 }
 
+/// 选装评分的**偏好旋钮**（`choose_loadout` 里唯一允许被"设计主题"改写的那几个数）。
+///
+/// [`Default`] = **历史行为的逐字复刻**（所有分类权重 1.0、无造价惩罚、战时武器加分 2.0）
+/// ⇒ `choose_loadout` 与设计图落地之前逐字节一致，而 AI 的设计主题只是在它上面加了一层
+/// 「这一型舰是干什么的」（`autocontrol::blueprints` 用 [`Self::from_theme`]）。
+///
+/// ⚠ 它**不改**「买不起就不装」那条硬规则，也不改「至少一件武器 + 至少一件推进」那两条硬保证
+/// ——主题只调**偏好**，不能凭空造出势力供不起的舰。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LoadoutPrefs {
+    /// 战时武器加分（历史值 2.0）。
+    pub war_weapon_bonus: f64,
+    /// 四个模块分类对评分里"战斗增益"项的权重。
+    pub cat_weapon: f64,
+    pub cat_defense: f64,
+    pub cat_thrust: f64,
+    pub cat_utility: f64,
+    /// 造价（市场价值）惩罚：>0 时更看重便宜模块。
+    pub cost_penalty: f64,
+    /// **库存折价**（1.0 = 用真实库存；<1 = 只当自己有那么多）。
+    ///
+    /// 它只给**设计图生成器**用（`choose_loadout_themed` 按 `autocontrol.blueprint_stock_margin`
+    /// 折算）：图是在**回合步进里**画的，而船是在**下一回合出厂那一刻**才付钱的，两者之间库存
+    /// 会变。留一道余量 ⇒ 出厂时那笔钱通常还在（否则 `commit_spend` 的钳零会白送模块，
+    /// 而白送的模块**照样要付维护费**——实测那会把舰队推过"养不起→锈蚀→拆解"的悬崖）。
+    pub stock_scale: f64,
+}
+
+impl Default for LoadoutPrefs {
+    fn default() -> Self {
+        Self {
+            war_weapon_bonus: 2.0,
+            cat_weapon: 1.0,
+            cat_defense: 1.0,
+            cat_thrust: 1.0,
+            cat_utility: 1.0,
+            cost_penalty: 0.0,
+            stock_scale: 1.0,
+        }
+    }
+}
+
+impl LoadoutPrefs {
+    /// 设计主题 → 偏好旋钮（`config/game.ron` 的 `autocontrol.blueprint_themes`）。
+    ///
+    /// `stock_scale` 取 `1/(1 + blueprint_stock_margin)`：`margin = 1` ⇒ 只把一半库存当可用
+    /// （"画得出的图，钱要留一倍"）。`margin = 0` ⇒ 与出厂现算同一条线（历史行为）。
+    pub(crate) fn from_theme(theme: &crate::model::DesignTheme, margin: f64) -> Self {
+        Self {
+            cat_weapon: theme.cat_weapon,
+            cat_defense: theme.cat_defense,
+            cat_thrust: theme.cat_thrust,
+            cat_utility: theme.cat_utility,
+            cost_penalty: theme.cost_penalty,
+            stock_scale: 1.0 / (1.0 + margin.max(0.0)),
+            ..Self::default()
+        }
+    }
+
+    /// 某个分类的权重（未知分类归 `utility`：配置里只会有这四类，这是兜底而不是分支）。
+    fn cat_mult(&self, category: &str) -> f64 {
+        match category {
+            "weapon" => self.cat_weapon,
+            "defense" => self.cat_defense,
+            "thrust" => self.cat_thrust,
+            _ => self.cat_utility,
+        }
+    }
+}
+
 /// Deterministically pick a ship component loadout (舰船定制) for a faction building
 /// a ship of `class` — the **resource → military** link, now also **category-balanced
 /// and threat-aware**:
@@ -96,6 +166,36 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
 /// `pub(crate)` so `world` can fit the starting / re-seeded / story-granted ships the
 /// same way a shipyard does (a ship's firepower is entirely its fitted modules).
 pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
+    choose_loadout_prefs(state, config, fid, class, &LoadoutPrefs::default())
+}
+
+/// 同 [`choose_loadout`]，但按一份**设计主题**的偏好选装（AI 的设计图生成器走这条）。
+///
+/// 与出厂现算有**两处刻意的不一样**（都是"图是在回合步进里画的"这件事带来的）：
+/// 1. 主题只改评分（分类权重 + 造价惩罚）；
+/// 2. 库存按 `autocontrol.blueprint_stock_margin` 折价 —— 留一道余量，让出厂那一刻真的付得起
+///    （见 [`LoadoutPrefs::stock_scale`]）。
+///
+/// 可得性检查、硬保证、排序兜底全部照旧 ⇒ 主题不同的两张图**都**买得起，只是"钱花在哪一类
+/// 模块上"不同。
+pub(crate) fn choose_loadout_themed(
+    state: &State,
+    config: &GameConfig,
+    fid: FactionId,
+    class: &str,
+    theme: &crate::model::DesignTheme,
+) -> Vec<String> {
+    let margin = config.autocontrol.blueprint_stock_margin;
+    choose_loadout_prefs(state, config, fid, class, &LoadoutPrefs::from_theme(theme, margin))
+}
+
+fn choose_loadout_prefs(
+    state: &State,
+    config: &GameConfig,
+    fid: FactionId,
+    class: &str,
+    prefs: &LoadoutPrefs,
+) -> Vec<String> {
     let slots = config.ship_spec(class).slots as usize;
     if slots == 0 {
         return Vec::new();
@@ -122,6 +222,7 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     // Score every candidate component by (a) resource fit — how much of its rare
     // inputs the faction can comfortably supply — plus (b) a small (class-scaled)
     // raw combat-gain tiebreak, minus (c) an upkeep drag. 战时给武器加分（更舍得堆火力）。
+    // 「战斗增益」那一项乘**主题**的分类权重（`prefs`；默认全 1.0 = 历史行为逐字不变）。
     let mut cands: Vec<(String, f64)> = Vec::new();
     for (id, cs) in &config.components {
         let fit: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r) * abund(r)).sum();
@@ -132,12 +233,14 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
         let gain_accel = cs.accel * spec.accel_mult;
         let gain_range = cs.range * spec.range_mult;
         let gain_regen = cs.shield_regen * spec.shield_regen_mult;
-        let gain = gain_weapon * 4.0 + gain_shield * 0.8 + cs.hardness * spec.armor_mult * 3.0
+        let gain = (gain_weapon * 4.0 + gain_shield * 0.8 + cs.hardness * spec.armor_mult * 3.0
             + gain_regen * 60.0 + gain_speed * 3.0 + gain_accel * 3.0
-            + cs.intercept * spec.pd_mult * 2.0 + gain_range * 12.0;
-        let mut score = fit + gain * 0.03 - cs.upkeep * 2.0;
+            + cs.intercept * spec.pd_mult * 2.0 + gain_range * 12.0)
+            * prefs.cat_mult(&cs.category);
+        let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+        let mut score = fit + gain * 0.03 - cs.upkeep * 2.0 - cost_val * prefs.cost_penalty;
         if at_war && cs.category == "weapon" {
-            score += gain_weapon * 2.0; // 战时要火力。
+            score += gain_weapon * prefs.war_weapon_bonus; // 战时要火力。
         }
         if score > 0.0 {
             cands.push((id.clone(), score));
@@ -149,7 +252,13 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     // **至少一件推进（硬保证：没有推进就没有速度/加速度，船动不了）**，其余按分数填满
     // （护盾/护甲/点防/辅助是可选的防御与支持，不硬性要求）。
     let mut chosen: Vec<String> = Vec::new();
-    let mut remaining = f.resources.clone();
+    // 可用库存 = 真实库存 × `prefs.stock_scale`（1.0 = 历史行为）。折价只影响"装不装得起"，
+    // 不影响下面的评分（评分里那份 `abund` 用的是**真实**库存的归一化分布）。
+    let mut remaining: ResourceMap = f
+        .resources
+        .iter()
+        .map(|(k, v)| (k.clone(), v * prefs.stock_scale))
+        .collect();
     let afford = |id: &str, rem: &ResourceMap| -> bool {
         config
             .component_spec(id)
@@ -252,21 +361,25 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     chosen
 }
 
-/// **出厂选装的唯一入口**：有设计图就按图装配，没有（或图交给系统）就走生成器。
+/// **出厂选装的唯一入口**：有设计图就按图装配，没有（或图没写选装）就走生成器。
 ///
-/// 三条路（`.agents/notes/ship-blueprint-spec.md` §2.4）：
-/// * 图存在、图的**归属解析为 `Player`**、且 `components` 非空 ⇒ **用图上的选装**（原样，
-///   顺序 = 槽位顺序；合法性由 `--apply` 在写入时守卫）；
-/// * 图存在但归属是 `Auto`/`Inherit`（`blueprint_control` 的答案）⇒ **现场**调
-///   [`choose_loadout`]（与今天同一条代码路径、**同一时点**）；
-/// * 没有图（旧档 / 开局预置舰队 / 剧情赠舰）⇒ 同上，也是现场调 [`choose_loadout`]。
+/// 两条路（`.agents/notes/ship-blueprint-spec.md` §2.4 + 本轮 `autocontrol::blueprints`）：
+/// * 图存在且 `components` 非空 ⇒ **用图上的选装**（原样，顺序 = 槽位顺序；合法性由 `--apply`
+///   与建图路径在写入时守卫）；
+/// * 没有图（旧档 / 开局预置舰队 / 剧情赠舰）或图的选装为空 ⇒ 现场调 [`choose_loadout`]。
 ///
-/// ⚠ **`components` 为空 = 「交给生成器」**（与 `mode` 无关）：一张只钉意图/舰级的图
-/// 不必把选装也抄一遍。
+/// ⚠ **归属（`Player`/`Auto`）不在这里分支**——这是本轮改掉的旧语义。旧版只在图归 `Player`
+/// 时才用图上的选装，于是 `Auto` 图的 `components` 被**静默忽略**（"我画了图，出厂却按生成器
+/// 装"），而 `Auto` 图那一层本来就承诺"系统可重估它"。正确的分工是：
+/// **图 = 出厂规格（装什么），`mode` = 谁可以改这张图（写到哪一层归谁）**。
+/// 于是 AI 设计的图（`Control::inherit` + `components`）真的会让新舰按设计下水
+/// ——否则 `Auto` 图那一层还是半个空头支票。
 ///
-/// ⚠ **不许在回合步进里预生成 `Auto` 图的选装**：今天选装是在**出厂那一刻**按当时库存
-/// 算的，提前算会改变成本时点与结果（行为不中性）。本函数因此是**纯读**的：
-/// 它不改状态，也不消费 RNG。
+/// ⚠ **`components` 为空 = 「交给生成器」**：一张只钉舰级/意图的图不必把选装也抄一遍。
+///
+/// ⚠ 本函数是**纯读**的：它不改状态、不消费 RNG。选装算在哪一刻是设计的一部分——
+/// AI 的设计图在**回合步进里**（`autocontrol::blueprints`）按当时的库存算好并落进图里，
+/// 于是"这张图造一艘要什么模块"是可读的；没有图时则仍是**出厂那一刻**现算（旧行为）。
 pub(crate) fn resolve_loadout(
     state: &State,
     config: &GameConfig,
@@ -276,7 +389,7 @@ pub(crate) fn resolve_loadout(
 ) -> Vec<String> {
     if let Some(id) = blueprint {
         if let Some(leaf) = state.control(fid.clone()).and_then(|c| c.blueprints.get(id)) {
-            if !leaf.value.components.is_empty() && state.blueprint_control(&fid, id).is_player() {
+            if !leaf.value.components.is_empty() {
                 return leaf.value.components.clone();
             }
         }

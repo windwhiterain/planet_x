@@ -724,6 +724,51 @@ fn write_round(
         )
         .map_err(|e| e.to_string())?;
     }
+    // 风格轴的**执行者**（`autocontrol::style`）：`Auto` 风格叶不是"值冻结"，它每回合被
+    // 概率触发、朝战况目标走一步分布步长——所以"改了哪条轴、朝哪儿改、为什么"必须能回答。
+    for s in &derived.flow.decisions.styles {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": s.faction,
+                "kind": "style_retune",
+                "actor": s.ship,
+                "verdict": s.axis,
+                "target": serde_json::Value::Null,
+                "detail": {
+                    "from": s.from,
+                    "to": s.to,
+                    "goal": s.target,
+                    "drivers": s.drivers,
+                },
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // 设计图的**执行者**（`autocontrol::blueprints`）：建图/重估/复用/回收。
+    for d in &derived.flow.decisions.blueprints {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": d.faction,
+                "kind": "blueprint",
+                "actor": d.blueprint,
+                "verdict": d.action,
+                "target": d.class,
+                "detail": {
+                    "theme": d.theme,
+                    "components": d.components,
+                    "city": d.city,
+                    "building": d.building,
+                },
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
@@ -891,14 +936,14 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "blueprints" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。`Auto` 图的选装由 `choose_loadout` 在出厂时现算；`Player` 图的选装就是 `components`。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `Derived`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
+                "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `Derived`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
                 "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","order":"object","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
                 "column_docs": {
                     "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
                     "class": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
-                    "components": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器。",
-                    "order": "本图给**新舰**的默认意图（`ShipBehavior`，默认枚举形式；null = 本图对意图没有说话）。⚠ 链上只在该图的归属解析为 `Player` 时取值。",
-                    "mode": "图叶**自己的**表态：Inherit（没有说话）/ Auto（系统可重估——`retool_shipyards` 会把它改到战局需要的舰级）/ Player（系统不许动）。",
+                    "components": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器；非空 ⇒ **出厂就按它装配**（与图的归属无关：归属只管「谁能改这张图」）。",
+                    "order": "本图给**新舰**的默认意图（`ShipBehavior`，默认枚举形式；null = 本图对意图没有说话）。⚠ 链上只在该图的归属解析为 `Player` 时取值。AI 建的图**从不**写它（建图 ≠ 表态，Q1(c)）。",
+                    "mode": "图叶**自己的**表态：Inherit（没有说话——**AI 建的图就是这个**：流水，不是表态）/ Auto（系统可重估：`retool_shipyards` 改舰级、`autocontrol::blueprints` 重估选装）/ Player（系统不许动）。",
                     "effective_mode": "**有效归属**（`State::blueprint_control`：图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，别在 Python 里重算。",
                     "ship_count": "世界上 `Ship.blueprint == blueprint_id` 的舰数（引擎算）。",
                     "class_slots": "该舰级的槽位上限（配置表 `ShipSpec.slots` 的派生量，省得每个配方自己 join meta.json）。null = 舰级不在配置表里（正常状态不会出现）。",
@@ -908,14 +953,14 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "decisions" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合 AI 的判定**（`Derived.flow.decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
+                "description": "**本回合 AI 的判定**（`Derived.flow.decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
                 "column_docs": {
-                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）。",
-                    "actor": "作判定的一方：舰名（ship_order）/ 船坞所在城名（retool）。",
-                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool。",
-                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）；纯位置机动为 null（看 `detail.destination`）。",
-                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。",
+                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）。",
+                    "actor": "作判定的一方：舰名（ship_order / style_retune）/ 船坞所在城名（retool）/ **图名**（blueprint）。",
+                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped。",
+                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）／**舰级**（blueprint）；纯位置机动与 style_retune 为 null（看 `detail`）。",
+                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。style_retune：`from`/`to`（这条轴改动前后的值）、`goal`（这次重估朝它走的**战况目标**）、`drivers`（当时读到的战况输入：temper 是 war/win/damage/withdraw，lone_wolf 是 neighbors，kiting 是 power/hardness/hurt）。blueprint：`theme`（设计主题）/ `components`（落到图上的选装）/ `city`+`building`（这次决策发生在哪个建造区；reaped 为 null）。",
                 },
             }),
             _ => continue,

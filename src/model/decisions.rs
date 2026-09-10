@@ -105,6 +105,53 @@ pub struct RetoolDecision {
     pub to: String,
 }
 
+/// 一条**风格重估**（`kind = "style_retune"`）：自动控制把某艘舰的某条风格轴从 `from` 改成 `to`。
+///
+/// 这是「风格轴上的 `Auto`」这个承诺的**流水**（`autocontrol::style`）：风格是慢变量，
+/// 它每回合被**概率**触发、走**分布**步长（指数松弛）——所以"它什么时候改、朝哪儿改、
+/// 为什么"必须能回答，否则读面只看到一个数变了。
+///
+/// `from`/`to`/`target` 都已按 2 位小数落盘（与写进叶里的值同一个数）；`drivers` 是这次
+/// 重估**当时读到的战况输入**，键随轴不同：
+/// * `temper`：`war` / `win` / `damage` / `withdraw`；
+/// * `lone_wolf`：`neighbors`（护航半径内的友舰数）；
+/// * `kiting`：`power`（敌我火力比）/ `hardness`（硬度对比）/ `hurt`（挨打程度）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StyleDecision {
+    pub faction: FactionId,
+    pub ship: ShipId,
+    /// 哪条轴：`temper` / `lone_wolf` / `kiting`（前两条同处一片叶 `ship_doctrine`）。
+    pub axis: String,
+    pub from: f64,
+    pub to: f64,
+    /// 这次重估朝它走的目标值（`from` → `to` 是这段距离的一小步）。
+    pub target: f64,
+    /// 驱动这次重估的可读输入（见上）。
+    pub drivers: std::collections::BTreeMap<String, f64>,
+}
+
+/// 一条**设计图**决策（`kind = "blueprint"`）：AI 给自己的建造区建图 / 重估 / 复用 / 回收。
+///
+/// 设计图是「还不存在的舰的规则」的家（[`crate::model::Blueprint`]），而 `Auto` 图这一层的
+/// 执行者就是这里（`autocontrol::blueprints`）：按资源优势与战况生成设计，**按
+/// `(舰级, 选装签名)` 归并复用**（长局里图库不该爆炸），没人指向的自建图回收掉。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BlueprintDecision {
+    pub faction: FactionId,
+    pub blueprint: String,
+    /// `created`（新建一张）/ `retuned`（重估已有那张的选装）/ `reused`（复用了同签名的另一张）
+    /// / `reaped`（回收没人指向的自建图）。
+    pub action: String,
+    pub class: String,
+    /// 设计主题（`强袭`/`堡垒`/…）：这个势力此刻认为"这一型舰该干什么"。
+    pub theme: String,
+    /// 落到图上的选装（`reaped` 时是它被回收前的选装）。
+    pub components: Vec<String>,
+    /// 这次决策发生在哪个建造区（`reaped` 没有建造区 ⇒ `None`）。
+    pub city: Option<CityId>,
+    pub building: Option<BuildingId>,
+}
+
 /// 本回合 AI 的判定集合（挂在 [`RoundFlow`](super::RoundFlow) 上随回合一起带出）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RoundDecisions {
@@ -113,4 +160,10 @@ pub struct RoundDecisions {
     pub ships: Vec<ShipDecision>,
     /// 船坞改装决策。
     pub retools: Vec<RetoolDecision>,
+    /// **风格重估**（`autocontrol::style`：`Auto` 风格叶的执行者）——每改一条轴一行。
+    #[serde(default)]
+    pub styles: Vec<StyleDecision>,
+    /// **设计图**决策（`autocontrol::blueprints`：`Auto` 图的执行者）——建图/重估/复用/回收。
+    #[serde(default)]
+    pub blueprints: Vec<BlueprintDecision>,
 }

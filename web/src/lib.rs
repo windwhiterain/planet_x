@@ -918,6 +918,15 @@ mod tests {
                 .collect()
         };
         // 前提：这艘舰还没有风格叶、本势力也没有把舰队默认风格设成玩家（下面几条断言依赖它）。
+        //
+        // ⚠ 本用例要的是「**还没有叶**」这个起点（证明"新建一片叶"这条路径只写该写的字段），
+        // 而风格轴的执行者（`autocontrol::style`）现在**每回合都在写风格叶** ⇒ 先把这片势力
+        // 名下的风格叶清干净（清掉之后有效值回落到舰上记录值，正是本用例想要的起点）。
+        // 这不是"绕过新机制"：这个测试根本不跑模拟，它测的是 `/api/command` 那一层的 diff 形状。
+        if let Some(c) = w.state.control.get_mut(&fid) {
+            c.ship_doctrine.clear();
+            c.ship_kiting.clear();
+        }
         assert!(
             w.state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
             "开局不该有风格叶，否则证明不了「新建」这条路径"

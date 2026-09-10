@@ -221,6 +221,68 @@
         // 被孤立的大国要花更多资源养边地，远端殖民地更易离心叛乱→体量自然回落）。
         sanction_cost_mult: 1.45,
     ),
+    // 自动控制（Auto）的**执行者**：`Auto` 这一档承诺「系统每回合决定并改写」，这一节就是
+    // 「谁去写」的两个执行者的参数——
+    //   ① 风格三轴（temper / lone_wolf / kiting）的**逐舰重估**（`autocontrol::style`）；
+    //   ② 设计图的**建图 / 重估 / 回收**（`autocontrol::blueprints`）。
+    // 全部走派生骰子（势力×舰名/舰级×回合×用途），不消费主 Prng 流；重估是**概率**触发、
+    // 步长也是**分布**（指数松弛）——风格是慢变量，每回合大改只会把轨迹噪声化。
+    autocontrol: (
+        // --- ① 风格轴逐舰重估 ---------------------------------------------------
+        // 每回合、每舰、每轴被重估的概率（0 = 关掉风格执行者，退回旧的「值冻结」行为）。
+        style_chance: 0.35,
+        // 单次重估最多走完「当前值 → 战况目标」这段距离的比例（实际步长 = roll × 它）。
+        style_step_max: 0.55,
+        // 变化小于它就当没变（不写叶）：控制面 diff 是给人读的，抖 0.001 只是噪声。
+        style_epsilon: 0.01,
+        // 战况 → temper（理智↔热血）：在打(+)、打赢(+) 促成热血；被打残(−)、撤退多(−)
+        // 促成理智（欺软怕硬 = 先吃弱的）。四个数一起决定这条轴被什么驱动。
+        temper_war: 0.6,
+        temper_win: 0.8,
+        temper_damage: 1.4,
+        temper_withdraw: 0.7,
+        // 编队规模参考值：半径内友舰数达到它时 lone_wolf 目标 ≈ 0（<它 → 独狼，>它 → 护航）。
+        lone_wolf_ref: 2.0,
+        // 编队规模的观察半径（AU）；0 = 用 combat.escort_range（护航机制自己的半径）。
+        lone_wolf_radius: 0.0,
+        // kiting（风筝↔贴脸）的三个权重：敌我火力比、自身硬度对比、自己挨了多少打。
+        kiting_power: 0.8,
+        kiting_hardness: 0.5,
+        kiting_hurt: 1.0,
+        // --- ② 设计图（AI 建图 / 重估 / 回收）------------------------------------
+        // 每回合、每个「归 AI 管的建造区」被重新生成一次设计的概率（抽签）。
+        blueprint_chance: 0.25,
+        // 每回合、每个 (势力, 舰级) 重抽一次**设计意图**（主题）的概率。主题是图的名字，
+        // 所以必须比选装更黏：改主题 = 换一张图（旧图没人指向就被回收）。
+        blueprint_intent_chance: 0.08,
+        // 画图时的**库存余量**：图只挑「库存折成 1/(1+余量) 之后仍买得起」的模块。
+        // 图在回合步进里画、船在下一回合出厂时才付钱，不留余量就会白送模块（commit_spend
+        // 钳零），而白送的模块照样付维护费——实测会把舰队推过「养不起→锈蚀→拆队」的悬崖。
+        // 0 = 不留余量（与出厂现算同一条线）。
+        blueprint_stock_margin: 0.0,
+        // 回收「没有建造区指向、且不是玩家钉的」自建图（长局里图库不该只增不减）。
+        blueprint_reap: true,
+        // 设计主题表：意图 → 选装偏好（各分类评分权重 + 造价惩罚）。
+        // 「买不起就不装」那条硬规则照旧生效 ⇒ 任何主题都不会造出势力供不起的舰。
+        blueprint_themes: [
+            // 强袭：堆武器，战时更可能抽到（在打仗的势力自然造出火力型设计）。
+            (name: "强袭", weight: 1.0, war_weight: 1.6,
+             cat_weapon: 1.0, cat_defense: 1.0, cat_thrust: 1.0, cat_utility: 1.0,
+             cost_penalty: 0.0),
+            // 堡垒：堆防御（护盾/装甲/点防），挨得住消耗战。
+            (name: "堡垒", weight: 0.8, war_weight: 0.8,
+             cat_weapon: 1.0, cat_defense: 1.0, cat_thrust: 1.0, cat_utility: 1.0,
+             cost_penalty: 0.0),
+            // 远洋：堆推进（速度=规避与抢先战位），和平期的机动作战型。
+            (name: "远洋", weight: 0.7, war_weight: 0.3,
+             cat_weapon: 1.0, cat_defense: 1.0, cat_thrust: 1.0, cat_utility: 1.0,
+             cost_penalty: 0.0),
+            // 平价：不挑分类，狠狠惩罚贵模块 —— 资源紧张时的量产型。
+            (name: "平价", weight: 0.8, war_weight: 0.0,
+             cat_weapon: 1.0, cat_defense: 1.0, cat_thrust: 1.0, cat_utility: 1.0,
+             cost_penalty: 0.0),
+        ],
+    ),
     // 历史层的容量（判据见 Salience：分层按「后续计算需要访问哪一段历史」）。
     //   milestones = 需要**无限过去**的那一层，随 checkpoint 存活（当前为空——没有任何
     //                variant 有无限过去的读者，见 State::milestones 的文档）。

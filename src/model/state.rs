@@ -621,10 +621,23 @@ mod tests {
         let ships = state.ships.len();
         let cities = state.cities.len();
         let buildings: usize = state.cities.iter().map(|c| c.buildings.len()).sum();
-        // 先把 `spawned_round` 归零：v9 档里**没有这个键**，而紧凑 RON 里 `Some(12)` 没法用
+        // **先把这个新层清干净**：8 回合之后 AI（`autocontrol::blueprints`）已经建了自己的设计图、
+        // 并把建造区指了过去（那是 v10 之后才有的东西）。本测试的文本手术要造的是**一份 v9 档**
+        // ——v9 那一代里根本没有设计图这一层，所以得先把它按 v9 的样子清空（空库 / 无指针），
+        // 否则序列化里既没有 `blueprints:{}` 也没有 `blueprint:None` 可删。
+        for c in state.control.values_mut() {
+            c.blueprints.clear();
+        }
+        for c in state.cities.iter_mut() {
+            for b in c.buildings.iter_mut() {
+                b.blueprint = None;
+            }
+        }
+        // 同时把 `spawned_round` 归零：v9 档里**没有这个键**，而紧凑 RON 里 `Some(12)` 没法用
         // 一次字符串替换干净地删掉（`None` 可以）。这不妨碍本测试的目的——它测的是
         // 「文件里没有那个键时会发生什么」。
         for s in state.ships.iter_mut() {
+            s.blueprint = None;
             s.spawned_round = None;
         }
         let text = ron::to_string(&state).expect("serialize the state");

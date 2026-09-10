@@ -16,22 +16,29 @@
 //! 按**关注点**拆成若干子模块，每个只装一类「决定」：
 //! * [`budget`]       预算重算（Ai 每回合从库存重算，Player 只读命令）。
 //! * [`shipbuilding`] 舰种 / 组件选装 + 海军随威胁重构。
+//! * [`blueprints`]   **设计图**：AI 自己建图 / 重估 / 去重复用 / 回收（`Auto` 图的执行者）。
+//! * [`style`]        **风格三轴**（temper / lone_wolf / kiting）的逐舰重估（`Auto` 风格叶的执行者）。
 //! * [`tactics`]      战术选目标（克制/距离/行为风格）+ 单舰 AI 回合。
+//! * [`freight`]      集货派单（谁去运、跑哪条线）+ 角色轴定编。
 //! * [`economy`]      经济→成本预览（`--control-plan`）。
 //!
 //! 各子模块之间尽量不互相依赖；唯一的例外是 [`economy`] 阅读 [`budget`] 的预算并把
 //! 引擎原语向 [`crate::sim`] 借。对外的接口统一由本文件 `pub use` 重新导出，保持
 //! `autocontrol::<name>` 的调用方式不变。
 
+pub mod blueprints;
 pub mod budget;
 pub mod economy;
 pub mod freight;
 pub mod shipbuilding;
+pub mod style;
 pub mod tactics;
 
 pub(crate) use budget::{read_budget, write_budget, BudgetKind};
 pub use economy::{control_plan, control_plan_all};
+pub(crate) use blueprints::design_fleets;
 pub(crate) use shipbuilding::{choose_loadout, choose_next_class, resolve_loadout, retool_shipyards};
+pub(crate) use style::regulate_styles;
 pub(crate) use tactics::{ai_ship_turn, auto_combat, kiting_dest};
 
 /// Round a float to 2 decimals (token-noise reduction); `+ 0.0` normalizes IEEE `-0.0`.

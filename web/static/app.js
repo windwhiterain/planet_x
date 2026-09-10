@@ -119,31 +119,35 @@ function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
 // ——运输舰在射程内照样自动开火、照样按 kiting 姿态软移动。
 function freighterSummary(l) { return l.freighter ? '运输舰' : '战舰'; }
 
-// 风格轴上的「自动」大都是**空头承诺**：全仓没有一处生产代码写风格叶（`ship_doctrine`/
-// `ship_kiting` 的唯一写入者就是玩家/agent），所以系统**不会**来重估它。对照：指令轴的
-// `Auto` 是真的有执行者（AI 每回合往 `ship_orders` 写叶，所以那里照旧说「值由系统写」）。
-// 措辞必须分开——照抄「值由系统写」在风格轴上是假话（note：control-live-layers §3.2）。
-//
-// ⚠ 唯一的例外是**逐舰角色叶**：`ship_freighter` 是自动控制每回合真的会写的叶（按积压定编），
-// 所以它的「自动」名副其实——它拿的正是 `ship_orders` 那套措辞，**不在这里**。
-// 而**势力级默认角色**（`default_freighter`）依旧是空头承诺：AI 只写逐舰叶，不写这片默认叶。
-const AUTO_FROZEN = '自动（本轴暂无重估者：值冻结）';   // 逐舰风格叶：值在用，但没人会改它
-const AUTO_NO_VALUE = '自动（本轴暂无重估者：不给值）'; // 势力级默认叶：引擎只在它是玩家时供值
-const AUTO_WRITTEN = '自动（自动控制每回合按积压定编，会改写这片叶）'; // 角色轴逐舰叶：真有执行者
-/// 「自动」在这片叶上是不是**空头承诺**（没有执行者）。只有它没执行者时才敢说"值冻结"。
-const AUTO_FROZEN_KINDS = ['shipdoctrine', 'fleetdoctrine', 'shipkiting', 'fleetkiting', 'fleetfreighter'];
+// **「自动」这一档到底有没有执行者**——措辞必须与引擎一致（note：control-live-layers §3.2/§13）。
+// 三种情况，三句不同的话：
+//   ① 逐舰**风格两叶**（`ship_doctrine`/`ship_kiting`）：本轮**有执行者**了
+//      （`autocontrol::style` 每回合按战况概率重估、写回叶片）⇒ 照实说「会改写」。
+//   ② 逐舰**角色叶**（`ship_freighter`）：自动控制按积压定编 ⇒ 也照实说「会改写」。
+//   ③ **势力级默认叶**（`default_doctrine`/`default_kiting`/`default_freighter`）：AI **不写**
+//      这片叶，而且引擎的取值规则是"默认叶只在**它自己是玩家**时供值" ⇒ 它 `Auto` 时的存储值
+//      是**没人读的**。诚实的说法是「本层不供值」，绝不能写成"值由系统写"。
+//      （一句话解释这个组合：`Auto` 的默认叶 = AI 的答案是**"不设全舰队默认、逐舰自己说"**，
+//       所以它确实不必写任何值——但界面必须把"那个数没人用"说出来。）
+const AUTO_RETUNED = '自动（自动控制每回合按战况重估，会改写这片叶）';      // 逐舰风格两叶
+const AUTO_WRITTEN = '自动（自动控制每回合按积压定编，会改写这片叶）';      // 逐舰角色叶
+const AUTO_UNWRITTEN = '自动（本层不供值：引擎只在它是玩家时才取默认值）'; // 势力级默认叶
+/// 三组 kind：哪一片叶属于哪种措辞（`modeToggleFor` 与各行的 decorateLabel 都读它）。
+const AUTO_RETUNED_KINDS = ['shipdoctrine', 'shipkiting'];
+const AUTO_WRITTEN_KINDS = ['shipfreighter'];
+const AUTO_UNWRITTEN_KINDS = ['fleetdoctrine', 'fleetkiting', 'fleetfreighter'];
 
 // 势力级**默认风格**行的摘要：只有它自己是「玩家」时那个值才真的被采用（引擎的取值规则：
 // 默认叶为 `Inherit`/`Auto` 时不供值），所以这两种情况都不显示那几个数——显示了会骗人。
 function fleetStyleLabel(leaf, summary) {
   const m = normMode(leaf.mode);
   if (m === 'Player') return ' · ' + summary(leaf);
-  return m === 'Auto' ? ' · ' + AUTO_NO_VALUE : ' · 未表态';
+  return m === 'Auto' ? ' · ' + AUTO_UNWRITTEN : ' · 未表态';
 }
 
-/// 逐舰风格叶的 `Auto` 补注：值是**在用**的（叶片自己的值优先），但没人会来重估它。
-function autoFrozen(leaf) { return normMode(leaf.mode) === 'Auto' ? ' · ' + AUTO_FROZEN : ''; }
-/// 角色轴逐舰叶的 `Auto` 补注：这片叶**真的有执行者**（自动控制每回合定编），措辞相反。
+/// 逐舰**风格叶**的 `Auto` 补注：这片叶现在**真的有执行者**（自动控制按战况重估）。
+function autoRetuned(leaf) { return normMode(leaf.mode) === 'Auto' ? ' · ' + AUTO_RETUNED : ''; }
+/// 逐舰**角色叶**的 `Auto` 补注：这片叶也有执行者（自动控制按积压定编），措辞另说一句。
 function autoWritten(leaf) { return normMode(leaf.mode) === 'Auto' ? ' · ' + AUTO_WRITTEN : ''; }
 
 /// 「这个数现在是从哪来的」：引擎的取值链是
@@ -216,9 +220,9 @@ const KIND = {
   ship:      { childMode: 'tabs', bulkOwnership: true },
   shiporder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
   // 逐舰风格两叶：值 = **有效风格**（叶 → 舰队默认 → 舰上记录值），mode = 该叶自己的表态。
-  // `Auto` 时补一句实话（值在用，但风格轴没有重估者 ⇒ 它冻着；见 AUTO_FROZEN）。
-  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) + autoFrozen(n.leaf) },
-  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) + autoFrozen(n.leaf) },
+  // `Auto` 时补一句实话：这两片叶本轮**真的有执行者**（自动控制每回合按战况重估，见 AUTO_RETUNED）。
+  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) + autoRetuned(n.leaf) },
+  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) + autoRetuned(n.leaf) },
   // 势力级**三条默认**：指令 / 风格 / 风筝姿态。它们是「舰」这一组的前提（先定默认，例外才少写）。
   // 后两片与「舰队默认指令」同形，只是「风格」有两个轴：doctrine = 理智↔热血 + 护航↔独狼，
   // kiting = 风筝↔贴脸。摘要见 fleetStyleLabel（没表态就不显示数——那两个数还不算数）。
@@ -226,7 +230,7 @@ const KIND = {
   fleetdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => fleetStyleLabel(n.leaf, doctrineSummary) },
   fleetkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => fleetStyleLabel(n.leaf, kitingSummary) },
   // 第三条风格轴**角色**（运输舰↔战舰）。两行与上面同形，但有一条轴间差别：逐舰那片叶
-  // **自动控制每回合也会写**（按积压定编）⇒ 它的「自动」是真的（用 autoWritten，不是 autoFrozen）。
+  // **自动控制每回合也会写**（按积压定编）⇒ 它的「自动」是真的（用 autoWritten）。
   shipfreighter: { childMode: 'leaf', scope: 'leaf', editor: 'freighter', decorateLabel: (n) => ' · ' + freighterSummary(n.leaf) + autoWritten(n.leaf) },
   // 势力级默认角色：AI **不写**这片叶（它只写逐舰叶）⇒ 与另两条风格轴的默认叶同一条措辞。
   fleetfreighter: { childMode: 'leaf', scope: 'leaf', editor: 'freighter', decorateLabel: (n) => fleetStyleLabel(n.leaf, freighterSummary) },
@@ -1019,17 +1023,26 @@ function modeToggleFor(node) {
   if (!acc) return null;
   const mode = acc.get();
   const set = acc.set;
-  const styleAxis = AUTO_FROZEN_KINDS.indexOf(node.kind) >= 0;
+  // 这片叶上的「自动」有没有执行者（措辞必须与引擎一致，见上面三组 kind 的说明）。
+  const retuned = AUTO_RETUNED_KINDS.indexOf(node.kind) >= 0;
+  const written = AUTO_WRITTEN_KINDS.indexOf(node.kind) >= 0;
+  const unwritten = AUTO_UNWRITTEN_KINDS.indexOf(node.kind) >= 0;
 
   const sel = el('select', { class: 'mode', 'data-role': 'mode' });
   [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']].forEach(([v, l]) => {
     const o = el('option', { value: v });
     o.textContent = l;
-    // 「自动」的措辞必须诚实（note §3.2）：风格轴上**没有**执行者，不能暗示"系统会来写"。
+    // 「自动」的措辞必须诚实：有执行者的轴照实说"会来写"，势力级默认叶则**不供值**。
     if (v === 'Auto') {
-      o.title = styleAxis
-        ? '风格轴目前没有 AI 执行者：选「自动」不会有人来重估这个值，它只会冻在现在这个数'
-        : '由 AI 每回合按局势重估（指令 / 预算轴真的有执行者）';
+      if (retuned) {
+        o.title = '由自动控制每回合按战况重估（风格三轴的逐舰叶本轮真的有执行者）';
+      } else if (written) {
+        o.title = '由 AI 每回合按积压定编（指令 / 预算 / 角色轴真的有执行者）';
+      } else if (unwritten) {
+        o.title = '这一层不供值：引擎只在它是「玩家」时才取默认值——选「自动」等于说"不设全舰队默认，逐舰自己说"';
+      } else {
+        o.title = '由 AI 每回合按局势重估（指令 / 预算轴真的有执行者）';
+      }
     } else if (v === 'Inherit') {
       o.title = '撤销这一层的表态：向上层要答案（舰队默认 / 势力 / 全局），风格轴还会落到出厂快照';
     } else {

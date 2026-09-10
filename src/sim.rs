@@ -1273,6 +1273,10 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
     for fid in retool_ids {
         autocontrol::retool_shipyards(state, config, &fid, rng, &mut flow.decisions.retools);
     }
+    // **设计图的执行者**（`Auto` 图那一层的真写入者）：AI 自己建图 / 重估选装 / 去重复用 /
+    // 回收没人指向的自建图。放在 `retool_shipyards` **之后**：舰级重估刚刚落定，这一趟就能把
+    // 「图与建造区对得上」顺手收敛（retool 改了舰级 ⇒ 图的名字与舰级跟着换）。
+    autocontrol::design_fleets(state, config, &mut flow.decisions.blueprints);
 }
 
 
@@ -1806,6 +1810,13 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &
         continue;
     }
 
+    // **风格轴的执行者**（`Auto` 风格叶那一层的真写入者）：按**本回合的战况**重估
+    // temper / lone_wolf / kiting 三条轴，并把结论写回逐舰叶（`Control::inherit` = 流水）。
+    // 位置是刻意的：逐舰循环之后 ⇒ 本回合的接战/撤退/战沉都已发生（`events` 与 `decisions`
+    // 是本回合的），而护甲再生之前 ⇒ 「被打残」这个信号还是新鲜的；写下的值从**下一回合**
+    // 起生效 ⇒ 与舰的处理顺序无关（那个顺序是按 rng 打乱的），也不改变本回合任何判定。
+    autocontrol::regulate_styles(state, config, &flow.decisions.ships, &mut flow.decisions.styles);
+
     // 护甲再生（%/时间）：每回合幸存舰只按舰级 hull_regen 恢复其最大护甲的一
     // 个比例（不消耗资源、不复活已毁舰）。处于本方本土防御半径内的舰获得额外
     // home_regen_bonus 再生（cult 的 MOND 异常使其圣所旁舰只极难被消耗）。
@@ -1896,7 +1907,10 @@ fn total_live_pop(state: &State) -> u64 {
 
 /// 该势力**战争强度**（0..1）：与任何其他势力的最低关系相对交战阈值越深越贴近 1（平滑）。
 /// 关系远在交战阈值之上 → 0（没在打仗）；跌到阈值之下越深 → 趋近 1（在交战）。
-fn war_strength(state: &State, config: &GameConfig, fid: &str) -> f64 {
+///
+/// `pub(crate)`：`autocontrol::style` 用它当**风格重估的战况输入**（「在打」是热血/独狼/贴脸
+/// 这三条轴共同的驱动力之一）——那与思潮 debuff 的用法同源，所以共用一份实现，不另写一份。
+pub(crate) fn war_strength(state: &State, config: &GameConfig, fid: &str) -> f64 {
     let wt = config.combat.war_threshold;
     let mut worst: f64 = 0.0;
     for o in &state.factions {
@@ -5900,39 +5914,47 @@ mod tests {
     /// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。删除 `step_resurgence`
     /// （D5）之后，同回合复垦只剩「殖民舰恰好当回合抵达」这一条路径，**拆平本身也变少了**
     /// （120 回合只剩 13 次）——所以把视野拉到 400 回合，让样本重新够用。
+    ///
+    /// ⚠ 视野改成**多个种子合计**（而不是只跑 seed 7）：风格轴 + 设计图两个执行者落地之后，
+    /// seed 7 这条轨迹安静下来了（400 回合 10 次拆平 / 4 艘舰，同一个种子上基线是 57 次 /
+    /// 33 艘）——**非空这条要求因此不能只押在一个种子上**（那种世界是怎么变的，记在
+    /// `.agents/notes/control-live-layers.md` §15，是待上层裁决的平衡项，不是这里放宽判据）。
+    /// 不变式本身对**每一个**种子每一回合都照旧检查，只是样本从三个种子里凑。
     #[test]
     fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
         let config = load_config();
-        let mut state = default_state(&config, 7);
-        let mut rng = crate::prng::Prng::new(7);
         let mut razings = 0usize;
-        for _ in 0..400 {
-            advance(&mut state, &config, &mut rng);
-            // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 也由
-            // step_military 里的殖民路径发（拆平在前、复垦在后），正是要抓的顺序。
-            let mut razed: std::collections::BTreeMap<String, String> =
-                std::collections::BTreeMap::new();
-            for e in &state.events {
-                match e {
-                    GameEvent::CityRazed { city, owner, .. } => {
-                        razed.insert(city.clone(), owner.clone());
-                        razings += 1;
-                    }
-                    GameEvent::ColonyFounded { city, owner, .. } => {
-                        if let Some(loser) = razed.get(city) {
-                            assert_ne!(
-                                loser, owner,
-                                "第 {} 回合：{city} 被 {loser} 丢掉后又被**同一个势力**复垦——\
-                                 一对净效果为零的事件（拆平在同回合被自己抹掉）",
-                                state.round
-                            );
+        for seed in [1u64, 7, 42] {
+            let mut state = default_state(&config, seed);
+            let mut rng = crate::prng::Prng::new(seed);
+            for _ in 0..400 {
+                advance(&mut state, &config, &mut rng);
+                // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 也由
+                // step_military 里的殖民路径发（拆平在前、复垦在后），正是要抓的顺序。
+                let mut razed: std::collections::BTreeMap<String, String> =
+                    std::collections::BTreeMap::new();
+                for e in &state.events {
+                    match e {
+                        GameEvent::CityRazed { city, owner, .. } => {
+                            razed.insert(city.clone(), owner.clone());
+                            razings += 1;
                         }
+                        GameEvent::ColonyFounded { city, owner, .. } => {
+                            if let Some(loser) = razed.get(city) {
+                                assert_ne!(
+                                    loser, owner,
+                                    "seed {seed} 第 {} 回合：{city} 被 {loser} 丢掉后又被**同一个势力**复垦——\
+                                     一对净效果为零的事件（拆平在同回合被自己抹掉）",
+                                    state.round
+                                );
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
-        assert!(razings >= 20, "400 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
+        assert!(razings >= 20, "三个种子各 400 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
     }
 
     // ---- 舰船设计图（blueprint）：出厂快照 / 归属 / 意图链 -------------------------
@@ -6132,7 +6154,58 @@ mod tests {
         );
     }
 
+    /// **图的选装是出厂规格**（本轮改掉的旧语义）：`components` 非空 ⇒ 出厂就按它装配，
+    /// **与图的归属无关**（归属只管"谁能改这张图"）。旧版只在图归 `Player` 时用它 ⇒ `Auto`
+    /// 图的选装被静默忽略，而 AI 建图那一层（`autocontrol::blueprints`）就永远造不出东西。
+    #[test]
+    fn the_yard_launches_from_any_designs_components() {
+        let (config, mut state) = fresh_world(42);
+        let fid = "中国".to_string();
+        stock(&mut state, &config, &fid, 300.0);
+        let (_, _, class) = attach_blueprint(
+            &mut state,
+            &config,
+            &fid,
+            "auto:custom",
+            "corvette",
+            &["plasma", "ion_drive"],
+            None,
+            ControlMode::Auto,
+        );
+        assert_eq!(
+            crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:custom".to_string())),
+            vec!["plasma".to_string(), "ion_drive".to_string()],
+            "`Auto` 图的选装必须真的生效（否则 AI 建图只是空头支票）"
+        );
+        let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("auto:custom"));
+        assert_eq!(
+            state.ship(&name).unwrap().components,
+            vec!["plasma".to_string(), "ion_drive".to_string()],
+            "出厂用的是**图上的**选装（不再是现场生成的另一套）"
+        );
+        // 对照：空选装的图仍然走生成器（那是"交给生成器"的正式语义）。
+        attach_blueprint(
+            &mut state,
+            &config,
+            &fid,
+            "auto:empty",
+            "corvette",
+            &[],
+            None,
+            ControlMode::Auto,
+        );
+        assert_eq!(
+            crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:empty".to_string())),
+            crate::autocontrol::choose_loadout(&state, &config, fid.clone(), &class),
+            "空选装 = 交给生成器（与归属无关）"
+        );
+    }
+
     /// `Auto` 图（`components: []`）⇒ 出厂那一刻**现场**调 `choose_loadout`（§7.1-4）。
+    ///
+    /// ⚠ 本用例测的是**空选装**那条路（`components` 为空 = 交给生成器，与归属无关）。
+    /// 「`Auto` 图的选装被**静默忽略**」那条旧语义本轮已经改掉：图 = 出厂规格、`mode` = 谁能改图
+    /// ⇒ `components` 非空时**任何**归属都按图装配（见 `the_yard_launches_from_any_designs_components`）。
     #[test]
     fn auto_blueprint_uses_choose_loadout_at_launch() {
         let (config, mut state) = fresh_world(42);
