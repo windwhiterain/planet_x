@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 fn default_schema_version() -> u32 {
     0
 }
@@ -77,6 +77,13 @@ pub struct State {
     /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
     #[serde(default)]
     pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
+    /// **承包市场**（托运方挂单、承运方接单）的持久状态：挂单簿 + 单号分配器。
+    ///
+    /// 依据：`.agents/notes/freight-collection.md` §4——集货腿的**第二条路**：自己没有运力
+    /// （或运力不够）的势力，把「搬不动的那部分积压」挂出去请人来运。报酬是**抽成**
+    /// （承运人交付时从货里自留，见 [`Contract::share`]），砸单**只掉信誉、不赔货值**。
+    #[serde(default)]
+    pub contracts: ContractState,
 }
 
 /// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
@@ -563,9 +570,18 @@ enum StyleAxis {
 /// （v8 的 `ShipBehavior` 没有 `Haul`，货也不会动、也没有「运输舰」这个角色），
 /// 所以这一档同样**零信息损失**：旧档加载后没有任何舰在跑路线、没有货在舱里、
 /// 每艘舰都按 `Ship.freighter = false`（= 战舰）继续过——那正是旧档的真实状态。
+///
+/// v9 → v10（运输分支）：新增 [`State::contracts`]（**承包市场**：[`ContractState`] 的挂单簿）
+/// 与 [`Faction::reputation`]（**势力级信誉**）。两者都是 `#[serde(default)]` 的新字段，
+/// v9 档没有它们——而那个世界里**根本没有承包这件事**：没人挂过单，也就没人有履约履历。
+///
+/// 所以这一档的处理是**让所有势力从中性信誉起步**（[`REPUTATION_NEUTRAL`]），
+/// 与全新开局在同一条起跑线上。这不是信息损失，而是新旧语义之间唯一自洽的接法：
+/// 旧档里不存在任何可以折算成信誉的东西（旧语义下集货腿还只是「自己派船运」，
+/// 没有对手方，也就没有「谁说话算数」这个问题）。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

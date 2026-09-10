@@ -237,6 +237,10 @@ fn faction(
         home_attack_mult,
         home_regen_bonus,
         ideology,
+        // 信誉从中性值起步（开局人人平等：没有任何承包履历）。用常量而不是配置项，
+        // 是为了让「开局值」与「旧档 serde 缺省」共用一个真值来源——两者一旦分叉，
+        // 旧档就会莫名其妙地比新开局矮一截。
+        reputation: REPUTATION_NEUTRAL,
     }
 }
 
@@ -826,6 +830,8 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         market: MarketState::default(),
         // 产地货栈从空开始：开局各城库存都在首都池里（世界生成不预置离岸积压）。
         depots: BTreeMap::new(),
+        // 承包市场从空开始：没人挂过单，正如开局不预置成交历史。
+        contracts: ContractState::default(),
     };
 
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------

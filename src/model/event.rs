@@ -229,6 +229,23 @@ pub enum GameEvent {
         cargo: ResourceMap,
         into_pool: bool,
     },
+    /// **挂出一张运输承包单**：`shipper` 要人把 `amount` 单位的 `resource` 从 `from` 运到
+    /// `to`（= 它的首都），承运人凭**抽成** `share` 取酬。
+    ///
+    /// 这是集货腿的**第二条路**：自己没有运力（或运力不够）的势力，把搬不动的积压挂出去。
+    /// 依据与裁决见 `.agents/notes/freight-collection.md` §4（挂单制 Q2、抽成制 Q10）。
+    /// 后续的接单/交付/超期各自是独立事件——本事件只记「这张单出现了」。
+    ContractPosted {
+        /// 挂单号（`ContractState::next_id` 分配），与投影表 `contracts` 的 `contract_id` 同源。
+        contract: u64,
+        shipper: FactionId,
+        resource: String,
+        amount: f64,
+        from: BodyId,
+        to: BodyId,
+        /// 承运人抽成比例（`0.15` = 自留 15%）。
+        share: f64,
+    },
 }
 
 // --- 归一化投影 API（历史/事件查询的唯一契约） --------------------------------
@@ -499,6 +516,16 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "faction": faction, "body": body,
                                 "cargo": cargo, "into_pool": into_pool});
             }
+            GameEvent::ContractPosted { contract, shipper, resource, amount, from, to, share } => {
+                // 发起方 = **托运方**（挂单的人），直接对象 = **目的天体**（= 它的首都）；
+                // 起运天体是第三个参与方（`Third`）——它同时是「这单从哪儿来」的答案，
+                // 也是「哪个货栈积压了」的 join 键。
+                set_actor(&mut r, EntityKind::Faction, shipper);
+                set_target(&mut r, EntityKind::Body, to);
+                extra(&mut r, EventRole::Third, EntityKind::Body, from);
+                r.data = json!({"contract": contract, "shipper": shipper, "resource": resource,
+                                "amount": amount, "from": from, "to": to, "share": share});
+            }
         }
         r
     }
@@ -525,6 +552,7 @@ impl GameEvent {
             GameEvent::CapitalRelocated { .. } => "capital_relocated",
             GameEvent::CargoLoaded { .. } => "cargo_loaded",
             GameEvent::CargoDelivered { .. } => "cargo_delivered",
+            GameEvent::ContractPosted { .. } => "contract_posted",
         }
     }
 
@@ -659,6 +687,13 @@ impl GameEvent {
                 cargo_summary(cargo),
                 if *into_pool { "入首都池" } else { "入中转货栈" }
             ),
+            // 参与方三个：托运方（actor）、目的天体（target）、起运天体（third）——标题里
+            // 三者都要逐字出现（守卫 `headline_names_every_participant` 钉住这条）。
+            GameEvent::ContractPosted { shipper, resource, amount, from, to, share, .. } => format!(
+                "{shipper} 挂单：{from} → {to} 运 {resource} {} 件（承运人抽成 {:.0}%）",
+                num(*amount),
+                share * 100.0
+            ),
         }
     }
 
@@ -666,7 +701,8 @@ impl GameEvent {
     ///
     /// **量纲是一个 0–9 的序数阶梯，不是 0–100 的分数**（实测投影里出现的值只有
     /// `0 / 2 / 5 / 7 / 8 / 9`）：`9` = 世界格局（开战/停战/结盟/迁都）、`8` = 城市易主或毁灭、
-    /// `7` = 势力重建与剧情节拍、`5` = 舰的存亡、`2` = 撤退/指令降级、`0` = 逐发流水（开火/围城）。
+    /// `7` = 势力重建与剧情节拍、`5` = 舰的存亡、`2` = 撤退/指令降级、`1` = 市场记账（承包挂单）、
+    /// `0` = 逐发流水（开火/围城）。
     /// 所以「值得一读」的门槛是 **≥ 8**（格局 + 地图要重画的事），不是 60 之类的分数阈值
     /// ——踩过这个坑：`q.storyboard()` 一开始把门槛写成 60，于是**静默返回空表**。
     ///
@@ -700,6 +736,10 @@ impl GameEvent {
             | GameEvent::StaleOrder { .. }
             | GameEvent::CargoLoaded { .. }
             | GameEvent::CargoDelivered { .. } => 2,
+            // **市场记账**：挂一张承包单是日常经济动作（比装卸还低一档）——它本身不改变
+            // 任何归属，只是一条「有人想买运力」的公开信息。给人看的排序里不该压过
+            // 撤退/指令降级，更不该进故事板。
+            GameEvent::ContractPosted { .. } => 1,
             // 逐发流水：按判据连读者都没有（只为 agent 分析而记录），也不该出现在故事板里。
             GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
         }

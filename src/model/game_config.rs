@@ -542,6 +542,39 @@ impl Default for IdeologyConfig {
     }
 }
 
+/// **承包市场**（集货腿的第二条路：请人来运）tuning。
+///
+/// 机制见 `.agents/notes/freight-collection.md` §4，用户裁决：承运人**不赔货值、只掉信誉**
+/// （Q1(b)）、信誉是**势力级**（Q3）、报酬是**抽成制**（Q10）、超期**不作废**（Q11）。
+///
+/// 这里的量**不着急调平衡**（用户：「先确定机制的正确性」）：`share` 决定「请人运值不值」，
+/// `deadline_*` / `reference_speed` 只用来把**截止期**定在一个「正常跑得完」的宽裕值上
+/// ——它们是**算出难度**的输入（M4b 的门槛与自评闸读同一批量），不是硬阈值。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FreightConfig {
+    /// 承运人**抽成**比例（0.15 = 交付时从货里自留 15%，其余进托运方首都池）。
+    /// 它是 Q10 的机制落点：**没有货币转移**，报酬就是承运人没交出去的那部分货。
+    pub share: f64,
+    /// 截止期的**固定宽限**（回合）：装货、排队、绕路都算在里面。
+    pub deadline_base: f64,
+    /// 截止期对**估算航程**的倍率（1.5 = 给 50% 的余量）。
+    pub deadline_slack: f64,
+    /// 估算航程用的**参考巡航速度**（AU/回合）。用它把「往返距离」折成回合数：
+    /// `往返回合 ≈ 2 × 距离 ÷ reference_speed`。
+    ///
+    /// 为什么用一个**参考**速度而不是接单者的真实速度：挂单时还不知道谁会来接，
+    /// 而截止期必须**在挂单时就定死**（否则同一张单的时限会随接单者而变，
+    /// 确定性就没了）。取参考值意味着「慢船接远单」会真的超期——那是**设计要的**
+    /// 风险（超期掉信誉），不是漏洞。
+    pub reference_speed: f64,
+}
+
+impl Default for FreightConfig {
+    fn default() -> Self {
+        Self { share: 0.15, deadline_base: 2.0, deadline_slack: 1.5, reference_speed: 1.0 }
+    }
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -549,6 +582,10 @@ pub struct GameConfig {
     pub combat: CombatConfig,
     pub diplomacy: DiplomacyConfig,
     pub market: MarketConfig,
+    /// **承包市场**（托运方挂单、承运方接单）。`#[serde(default)]` 容忍旧配置无此节
+    /// （默认值 = 抽成 15%、宽裕的截止期）。
+    #[serde(default)]
+    pub freight: FreightConfig,
     pub governance: GovernanceConfig,
     pub mond: MondConfig,
     /// 合纵连横 / 均势外交（弱者联盟对抗霸权）。`#[serde(default)]` 容忍旧配置无此节。

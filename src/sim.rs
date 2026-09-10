@@ -73,6 +73,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
 
     let mut flow = RoundFlow::default();
     step_production(state, config, &mut flow);
+    // 承包市场（挂单侧）：把「自己一个回合搬不动的积压」挂出去。放在 `step_production` 之后
+    // （货栈是本回合刚更新过的），而在 `step_military` 的逐舰循环之前——挂单估运力用的是
+    // `should_be_freighter`（纯函数），它与本回合稍后真正写进角色叶、并据此派单的那批舰
+    // **同口径**，所以不存在「先挂单、再发现自己其实有闲船」的错位。
+    step_contracts(state, config);
     step_upkeep(state, config, &mut flow);
     step_market(state, config, &mut flow);
     step_construction(state, config, rng, &mut flow);
@@ -1118,6 +1123,27 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     for (fid, v) in carrier_income {
         flow.market_carrier_income.insert(fid, v);
     }
+}
+
+// --- 承包市场（集货腿的第二条路：请人来运）-------------------------------------
+//
+// 集货腿有两条路：**自己派船**（`step_ships` 里的定编 + 抽签派单）与**请人来运**（承包）。
+// 本步管后者里**托运方**的那一半（挂单 + 收回无人接的过期单）；承运方的接单/履约在 M4b–M4c。
+//
+// 为什么它不是「又一个市场步」而是独立的一步：**承包的标的是运力，不是货**。
+// 商品市场撮合的是「谁卖什么、多少钱」，成交即完成（货瞬移）；承包撮合的是
+// 「谁替谁跑一趟」，成交只是**开始**——后面要真的有船去装、去运、去卸
+// （复用 `Haul` 的常驻路线），所以它是运输行为的一部分，不是市场的一部分。
+//
+// 依据与裁决见 `.agents/notes/freight-collection.md` §4（Q1(b) 只扣信誉 / Q2 挂单制 /
+// Q4 禁运同样挡承包 / Q10 抽成制 / Q11 超期不作废）。
+fn step_contracts(state: &mut State, config: &GameConfig) {
+    // 先收回**没人接**的过期挂单（无人承诺 ⇒ 收回不掉任何人的信誉，见该函数的文档），
+    // 再挂新的：所以一处积压不会因为一张没人接的单而永久堵住。
+    autocontrol::freight::retire_stale_open(state);
+    autocontrol::freight::post_contracts(state, config);
+    // 已完成的单子移出挂单簿（挂单簿只留未完成的；「成交了」由事件与流水账记录）。
+    state.contracts.retire_fulfilled();
 }
 
 /// 某势力此刻挂单簿上的**总价值**（= 它的购买力：能拿出来交换的实物值多少）。

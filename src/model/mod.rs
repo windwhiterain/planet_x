@@ -24,6 +24,7 @@
 //!
 //! * [`identity`]   — id aliases + resource bundles/definitions.
 //! * [`market`]     — 星际市场的持久状态（挂单/价格/成交量/滑窗需求）。
+//! * [`contract`]   — **承包市场**（托运方挂单、承运方接单）的持久状态。
 //! * [`body`]       — orbits, celestial bodies and 定居点.
 //! * [`building`]   — a continuous-area building allocation + its spec.
 //! * [`ship`]       — the ship entity, its doctrine/behavior + naming.
@@ -44,6 +45,7 @@
 mod body;
 mod building;
 mod city;
+mod contract;
 mod control;
 mod decisions;
 mod event;
@@ -59,6 +61,7 @@ mod state;
 pub use body::*;
 pub use building::*;
 pub use city::*;
+pub use contract::*;
 pub use control::*;
 pub use decisions::*;
 pub use event::*;

@@ -707,3 +707,77 @@ fn probe_collection_backlog() {
         );
     }
 }
+
+/// 10) **承包市场的需求侧（M4a）**：挂单侧在真实局面里到底挂出了什么。
+///
+/// M4a 只有**托运方**那一半（承运方的接单/履约在 M4b–M4c），所以这里测的是**需求**：
+///
+/// * **谁在挂、挂多少**——一处积压一张单，单子的体量（件数）与承运人能拿到的抽成量；
+/// * **挂出的量 ÷ 期末积压**——这就是「一个回合搬不动的比例」。它是**连续量**：
+///   自己的船越少、积压越大，这个比例越接近 1，但**不存在断点**；
+/// * **滞留**：没人接的单会一直躺在挂单簿上，直到过了截止期被托运方收回 ⇒
+///   打印「挂单总数 / 期末仍在挂单簿 / 已收回」。**这是 M4b 的对照组**：
+///   承运方一上线，滞留数必须掉下来（否则说明市场没运转）。
+#[test]
+#[ignore]
+fn probe_contract_market() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut posted: Vec<(String, f64, u32)> = Vec::new(); // (托运方, 件数, 挂单回合)
+        for _ in 0..n {
+            sim::advance(&mut state, &config, &mut rng);
+            for e in &state.events {
+                if let GameEvent::ContractPosted { shipper, amount, .. } = e {
+                    posted.push((shipper.clone(), *amount, state.round));
+                }
+            }
+        }
+        let open_from = |fid: &str| -> (usize, f64) {
+            let mut c = 0usize;
+            let mut units = 0.0;
+            for k in &state.contracts.contracts {
+                if k.shipper == fid && k.carrier.is_none() {
+                    c += 1;
+                    units += k.amount;
+                }
+            }
+            (c, units)
+        };
+        println!("== 承包挂单 seed {seed}（{n} 回合，抽成 {:.0}%）==", config.freight.share * 100.0);
+        let (mut tot_posted, mut tot_units) = (0usize, 0.0);
+        for f in &state.factions {
+            let name = f.name.as_str();
+            let mine: Vec<&(String, f64, u32)> = posted.iter().filter(|(s, _, _)| s == name).collect();
+            let (open_n, open_units) = open_from(name);
+            let backlog: f64 = state
+                .depots
+                .iter()
+                .filter(|((fid, _), _)| fid == name)
+                .map(|(_, m)| m.values().sum::<f64>())
+                .sum();
+            if mine.is_empty() && backlog <= 0.0 {
+                continue;
+            }
+            tot_posted += mine.len();
+            tot_units += mine.iter().map(|(_, a, _)| *a).sum::<f64>();
+            let mean = if mine.is_empty() { 0.0 } else { mine.iter().map(|(_, a, _)| *a).sum::<f64>() / mine.len() as f64 };
+            let max = mine.iter().map(|(_, a, _)| *a).fold(0.0f64, f64::max);
+            let cover = if backlog > 0.0 { 100.0 * open_units / backlog } else { 0.0 };
+            let lapsed = mine.len() - open_n;
+            let n = mine.len();
+            println!(
+                "    {name:<14} 挂单 {n:<3} 张（均 {mean:>7.1} / 最大 {max:>7.1} 件）  \
+                 期末在簿 {open_n} 张 = {open_units:>8.1} 件 ÷ 积压 {backlog:>8.1} 件 = **{cover:>5.1}%**  已收回 {lapsed}"
+            );
+        }
+        let reward: f64 = state.contracts.contracts.iter().map(|c| c.carrier_cut(c.amount)).sum();
+        println!(
+            "    —— 合计：挂出 {tot_posted} 张 / {tot_units:.0} 件；期末在簿 {} 张 / 待运 {:.0} 件（承运人抽成后可拿 {reward:.0} 件）",
+            state.contracts.contracts.len(),
+            state.contracts.contracts.iter().map(|c| c.amount).sum::<f64>()
+        );
+    }
+}

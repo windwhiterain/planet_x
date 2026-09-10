@@ -189,7 +189,9 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
             "生产 production：采矿建筑按面积×labor×productivity×production_rate 出矿；人口限制劳动效率（min_efficiency 下限）。治理 governance：行政成本 = (admin_base + admin_per_au×距首都距离)×人口超载倍率 + 娱乐预算，用库存按价值加权支付，覆盖率<1 则忠诚下跌。",
             "迁都（capital，controllable）：`capital` 叶子带 mode（Player=你说的算，Auto=系统周期性重估，Inherit=沿作用域链上溯）。首都=治理/本土防御锚点；首都人口占全势力人口的比例越高，全国每城目标忠诚加成越大（capital_share_loyalty_buff）；迁都则按「旧首都人口占比」扣全国忠诚（capital_share_relocate_cost）——迁都是为了省治理距离成本，却是以全国忠诚为赌注的豪赌，不是免费优化。首都亡城（其上已无本势力活城）会被立即强迁到人口最高的活城。",
             "市场 market：**真实交换所**，不是常数价贩卖机。价格 = 基价 × (coverage_rounds/覆盖回合数)^price_alpha，其中覆盖回合数 = 世界总库存 ÷ 实测消费率（由库存差量出来）——稀缺顶到 price_ceiling（默认 8×）、过剩折到 price_floor。供给是**别人真的拿出来卖的富余**（挂单记名卖家），卖光就买不到；成交价再乘**关系倍率**（对敌最多 1+hostile_price_markup 倍，对友打 friendly_price_discount 折）。**关系冷到 embargo_relation、交战、或「已倒向联盟的弱者 ↔ 被锁定的霸权」即全面禁运**——那个卖家的所有资源对你都不存在（见 metrics.factions[<你>].trade_blocked_by）。付款=把自己可出口的实物交割给对方，另按 spread 烧掉一笔（真实价值 sink）。",
-            "运费与 MOND 承运 freight/mond：货物**不是瞬移**——成交价再乘运费率 = freight_per_au × 买卖双方首都距离，**要穿越 28 AU 引力异常带**再按浸入深度加 mond_freight_mult 倍；非 master 的货走那条线会**按深度丢货**（确定性比例，见 mond_loss_per_au），只有掌握了 MOND 的 master 能可靠承运、并对这条线上的运费**抽税**（carrier_share）。观察面：metrics.factions[].freight_paid / carrier_income——后者只有 master 会 >0，那是柯伊伯带贸易的垄断租金。",
+            "集货 collection（**非首都产出必须靠船运**）：首都天体的产出免运直接进池，其余落到**产地货栈**（`depots`：`(势力, 天体) → 库存`），必须有人开船把它运回首都才变成可用库存。谁跑运输是**第三条风格轴** `ships[].freighter`（叶 → 舰队默认 → 舰上记录值，与前两条风格轴同形：AI 每回合按积压定编并写叶、玩家把叶或舰队默认设成 Player 即可压住；它**只管派哪种活**——运输舰照样自动开火、照样按 kiting 软移动）。派单是**按积压占比抽签**（不是派去积压最大的那处），骰子由 (势力, 舰名, 回合) 派生、不消费主随机流。观察面：ships[].freighter/freighter_mode、cities[].depot_value、事件 cargo_loaded / cargo_delivered（货在舰上被击沉则随舰消失，没有单独事件）。",
+            "承包 contracting（集货的**第二条路**：请人来运）：自己运力不够的势力（或**一艘舰都没有**的亡国残部）把「一个回合搬不动的积压」挂到承包市场（`contracts` 表：托运方 / 承运方 / 资源 / 数量 / 从哪到哪 / 抽成 share / 截止期；`carrier=null` 表示还没人接）。**报酬是抽成**：承运人交付时从货里自留 share，其余进托运方首都池——**没有货币转移**，所以没有汇率、没有通胀，也不会递归收费。**砸单不赔货值**（只扣信誉）：于是 `factions[].reputation`（势力级、公开）是这条腿上**唯一的抵押品**——托运方靠它决定敢不敢把货交给一个陌生人，低信誉者结构上接不到贵单/难单。超期**不作废**（只扣一次信誉，货照运、抽成照拿）；没人接的过期单会被托运方收回（没有任何承诺，不扣信誉）。禁运同样挡承包（不给你运货）。",
+            "运费与 MOND 承运 freight/mond：**注意这与上面的集货/承包是两件事**。这里是**抽象市场运费**——成交价再乘运费率 = freight_per_au × 买卖双方首都距离，**要穿越 28 AU 引力异常带**再按浸入深度加 mond_freight_mult 倍；非 master 的货走那条线会**按深度丢货**（确定性比例，见 mond_loss_per_au），只有掌握了 MOND 的 master 能可靠承运、并对这条线上的运费**抽税**（carrier_share）。它发生在**成交瞬间**（货是瞬移的），而集货/承包是**真实的舰船航线**（货真的在路上，会被拦、会随舰沉没）。观察面：metrics.factions[].freight_paid / carrier_income——后者只有 master 会 >0，那是柯伊伯带贸易的垄断租金。",
             "实体身份=唯一名字（WYSIWYG 资源 key 即可读中文名），无 numeric shadow id；schema 由同一批结构体派生（--schema / --control-schema 自描述）。"
         ],
         "structures": config_json(&config.structures),
@@ -200,6 +202,7 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
         "combat": config_json(&config.combat),
         "diplomacy": config_json(&config.diplomacy),
         "market": market,
+        "freight": config_json(&config.freight),
         "governance": config_json(&config.governance),
         "mond": config_json(&config.mond),
         "balance": config_json(&config.balance),
@@ -338,6 +341,7 @@ mod tests {
         assert_covers(&m, "combat", &serde_json::to_value(&cfg.combat).unwrap());
         assert_covers(&m, "diplomacy", &serde_json::to_value(&cfg.diplomacy).unwrap());
         assert_covers(&m, "market", &serde_json::to_value(&cfg.market).unwrap());
+        assert_covers(&m, "freight", &serde_json::to_value(&cfg.freight).unwrap());
         assert_covers(&m, "governance", &serde_json::to_value(&cfg.governance).unwrap());
         assert_covers(&m, "mond", &serde_json::to_value(&cfg.mond).unwrap());
         assert_covers(&m, "balance", &serde_json::to_value(&cfg.balance).unwrap());

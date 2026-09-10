@@ -303,6 +303,10 @@ mod tests {
                 cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
                 into_pool: true,
             },
+            GameEvent::ContractPosted {
+                contract: 0, shipper: "中国".into(), resource: "碳".into(), amount: 12.0,
+                from: "金星".into(), to: "地球".into(), share: 0.15,
+            },
         ]
     }
 
@@ -326,7 +330,8 @@ mod tests {
             | GameEvent::CoalitionEnded { .. }
             | GameEvent::CapitalRelocated { .. }
             | GameEvent::CargoLoaded { .. }
-            | GameEvent::CargoDelivered { .. } => {}
+            | GameEvent::CargoDelivered { .. }
+            | GameEvent::ContractPosted { .. } => {}
         }
     }
 
