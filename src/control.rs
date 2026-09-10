@@ -1459,13 +1459,20 @@ mod tests {
     /// 读面回传必须仍然合法：web 的 `POST /api/command` 把**整面**
     /// `FactionControlView` 发回来，所以 `deny_unknown_fields` 不能把模板自己的
     /// 键判成非法。（读面键集 ⊆ 写面键集。）
+    ///
+    /// 这里刻意**逐字模仿前端**：`web/static/app.js` 拿到 `world.control` 后
+    /// `structuredClone` 一份并给每个势力补 `buildings = c.buildings || []`，
+    /// 发回来的就是「读面 + buildings」。少了这一步，守卫就测不到真实载荷。
     #[test]
     fn the_control_template_round_trips_back_through_apply() {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
-        let surface = control_surface(&state);
+        let mut surface = control_surface(&state);
+        for fac in surface["control"].as_array_mut().expect("control is an array") {
+            fac.as_object_mut().expect("faction is an object").insert("buildings".to_string(), serde_json::json!([]));
+        }
         // 整面回传：应当被接受，且没有任何叶片被丢。
-        let report = apply_patch(&mut state, &config, &surface).expect("the template must round-trip");
+        let report = apply_patch(&mut state, &config, &surface).expect("the web payload must round-trip");
         assert!(
             report.is_clean(),
             "the editable template must be a valid diff ({{}}): {:?}",
