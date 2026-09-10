@@ -83,7 +83,7 @@
 `sim.rs:358-359` 把 `cspec.default_doctrine` / `cspec.default_kiting` 拷进 `Ship.doctrine/kiting`；
 字段定义 `ship_combat.rs:57-64`。**但配置里根本没有这两个键**（`grep default_doctrine|default_kiting
 config/*.ron` 零命中）⇒ 今天所有舰出厂都是 `{0,0}` / `0.0`。
-有效值走活层 `State::ship_doctrine` / `ship_kiting`（`src/model/state.rs:229-266`：叶 → 舰队默认 →
+有效值走活层 `State::ship_doctrine` / `ship_kiting`（`src/model/state.rs:275-312`：叶 → 舰队默认 →
 **舰上记录值**），`Ship.doctrine/kiting` 只是记录值（`src/model/ship.rs:80-96`）。
 
 ### 1.4 「造什么舰级」= `Building.ship_type`——**唯一会被 AI 重估的非控制属性**
@@ -121,7 +121,7 @@ config/*.ron` 零命中）⇒ 今天所有舰出厂都是 `{0,0}` / `0.0`。
 漏斗内做五件事：选装 → 确定性取名（`ship.rs:137-151`）→ 算面板并把 `hull/shield` 拉满
 （`sim.rs:362-366`）→ 装 `component_hp`（`sim.rs:368`）→ 扣组件成本 + 发 `ShipSpawned` 事件
 → **给新舰插一条 `Control::inherit(Idle)` 的指令叶**（`sim.rs:385-390`，`Inherit` = 没有说话，
-于是归属上溯到舰队默认：`state.rs:191-197`）。这就是设计图的**唯一接入点**。
+于是归属上溯到舰队默认：`state.rs:237-244`）。这就是设计图的**唯一接入点**。
 
 ### 1.6 造舰进度是「城市 × 舰级」的池子（不是「城市 × 建造区」）
 
@@ -138,7 +138,7 @@ config/*.ron` 零命中）⇒ 今天所有舰出厂都是 `{0,0}` / `0.0`。
 | --- | --- | --- |
 | 叶片集合 | `ControllableState`，`src/model/control.rs:251-308` | 11 片：`ship_orders`/`ship_doctrine`/`ship_kiting`/`default_ship_order`/`default_doctrine`/`default_kiting`/两类预算/两类权重/`loyalty_budget`/`capital` |
 | 三态 | `ControlMode`，`control.rs:63-92`（线格式 `Some(Player)` / JSON `"Player"`，`control.rs:126-177`） | 已落定，新叶直接复用 |
-| 归属链（舰指令） | `state.rs:202-216`（叶 → 舰队默认 → 势力 → 全局）；值规则 `state.rs:184-199` | 新层要插进这里 |
+| 归属链（舰指令） | `state.rs:248-262`（叶 → 舰队默认 → 势力 → 全局）；值规则 `state.rs:230-245` / `:275-292` | 新层要插进这里 |
 | 读面即写面 | `FactionControlView`（`control.rs:90-108`）+ `control_view`（`control.rs:432-536`）+ `round_view`（`:575-635`，数值 `r2` 到 2 位小数） | 每加一片叶，读面/写面/round/web 四处都要动 |
 | 写面 | `FactionControlPatch`（`control.rs:308-351`，`deny_unknown_fields`）+ `apply_diff`（`:791-1109`）+ `write_value_leaf`/`write_mode_leaf`（`:702-738`） | 写值即接管；丢弃必须 `report.skip` |
 | 结构叶 | `BuildingPatch`（`control.rs:259-285`）+ `apply_building_patch`（`:1117-1323`） | `ship_type` 只能写在建造区上（`:1276-1288`） |
@@ -146,7 +146,7 @@ config/*.ron` 零命中）⇒ 今天所有舰出厂都是 `{0,0}` / `0.0`。
 | CLI | `--control`（`main.rs:360`）、`--apply` 回执（`main.rs:276-310`）、`--control-schema` | 自动跟随 |
 | web | `StateView{control,scope,info}`（`web/src/lib.rs:99-110/172-181`）+ `buildingEditor`（`web/static/app.js:653-712`）、`ship_type` 下拉（`app.js:667-669/710`） | 建造区编辑器要加一行 |
 | 投影 | `LAZY`（`projection.rs:64-74`）、`DERIVED`（`:92-97`）、ships 行（`:311-356`）、cities 内联 `buildings[]`（`:360-375`）、派生发射（`:494-527`）、schema（`:573-700`） | **加表要改三处**：`DERIVED` 声明 + 发射 + schema（注释 `:90-91`，守卫 `:1202-1235`） |
-| 迁移 | `SCHEMA_VERSION = 6`（`state.rs:12`）、`migrate()`（`state.rs:427-438`，注意 `0..=5` 那一臂） | 升档要改这一臂 |
+| 迁移 | `SCHEMA_VERSION = 7`（`state.rs:12`）、`migrate()`（`state.rs:482-492`，注意 `0..=6` 那一臂） | 升档要改这一臂 |
 
 ---
 
@@ -353,7 +353,7 @@ pub struct Blueprint {
 | `Auto` | 出厂时按 `choose_loadout` 现算选装（= 今天的路径）；AI 可以改 class（若 Q3 选口径 B）与写回流水 |
 | `Inherit` | 这一层没有说话 ⇒ 沿 `scope` 链上溯（`resolve_chain`，`control.rs:14-20`）；全链无话 ⇒ `Auto` |
 
-新增解析函数（与 `investment_budget_control` 同形，`state.rs:305-309`）：
+新增解析函数（与 `investment_budget_control` 同形，`state.rs:351-357`）：
 
 ```rust
     /// 谁负责这张设计图：图叶 → 势力 scope → 全局（**没有**「舰队默认」这一档——设计图是
@@ -382,7 +382,7 @@ pub struct Blueprint {
 叶 → 【本舰出厂图的 order（图叶是 Player 时才取值）】 → 舰队默认 → 势力 scope → 全局 scope
 ```
 
-实现（`state.rs:184-199` 的扩写，**新层插在舰队默认之前**）：
+实现（`state.rs:230-245` 的扩写，**新层插在舰队默认之前**）：
 
 ```rust
     pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
@@ -640,10 +640,10 @@ q.cities(12).explode("buildings").assign(
 
 ## 6. 迁移
 
-* `SCHEMA_VERSION` 6 → **7**（`state.rs:12`）。
-* `migrate()`（`state.rs:427-438`）：把 `0 | 1 | 2 | 3 | 4 | 5` 那一臂改成 `0..=6`，
-  并在文档注释里加一段 `v6 → v7`。
-* **零信息损失**（要写进注释，照 `state.rs:415-426` 的体例）：
+* `SCHEMA_VERSION` 7 → **8**（`state.rs:12`；⚠ v7 已被 `feature/freight-collection` 的产地货栈用掉）。
+* `migrate()`（`state.rs:482-492`）：把 `0 | 1 | 2 | 3 | 4 | 5 | 6` 那一臂改成 `0..=7`，
+  并在文档注释里加一段 `v7 → v8`。
+* **零信息损失**（要写进注释，照 `state.rs:455-481` 的体例）：
   新增四个字段全部 `#[serde(default)]`——
   `ControllableState.blueprints`（旧档 ⇒ 空库）、`Building.blueprint`（旧档 ⇒ `None`）、
   `Ship.blueprint`（旧档 ⇒ `None`）、`GameConfig.blueprints`（旧配置 ⇒ 空种子表）。
@@ -655,7 +655,7 @@ q.cities(12).explode("buildings").assign(
   ⇒ **「旧档 + 新二进制」与「旧档 + 旧二进制」在同一 seed 下 `--digest` 必须逐字相同**
   （§7 的验收命令）。
 * 不做向前兼容（AGENTS.md 的「不考虑向前兼容」）：新档旧二进制读不了是**预期**的
-  （`migrate` 会因版本过新而显式 `Err`，`state.rs:434-436`）。
+  （`migrate` 会因版本过新而显式 `Err`，`state.rs:488-491`）。
 * 要不要顺手加 `Ship.spawned_round`（`engine-data-plane.md` §8.5 的候选：解 kit 的编制表
   tie-break）？与本轮正交，但**共用一次升档**最省事——见 Q9，我不替你拍板。
 
@@ -772,7 +772,7 @@ q.cities(12).explode("buildings").assign(
    （`engine-data-plane.md` §8.1/§8.7），别犯第三次。
 
 **动手顺序（用户已确认）**：① web 三条（`control-live-layers.md` §8）→ ② 两轴叶（同篇 §3.1）
-→ ③ 本规格（连同 Q9 一次升 `SCHEMA_VERSION` 7）。
+→ ③ 本规格（连同 Q9 一次升 `SCHEMA_VERSION` 8）。
 
 ---
 
@@ -853,9 +853,9 @@ q.cities(12).explode("buildings").assign(
    图名换代是**玩家主动重命名**（= 删旧建新）。两者的共同后果：任何按名字写的 diff 下一回合
    可能指向不存在的东西 ⇒ **引用了不存在的图必须响亮报 `no_such_blueprint`**，
    绝不能静默回落到生成器。
-2. **旧档加载**：四个新字段全部 `#[serde(default)]`；`migrate()` 的 `0..=5` 臂要改
-   （`state.rs:429`）；别忘了 `RoundState` 也有自己的 `schema_version`（`state.rs:84-86`）。
-   另一条：`SCHEMA_VERSION` 注释里要写清 v6→v7 的**零信息损失论证**（照 `state.rs:415-426` 的体例）。
+2. **旧档加载**：四个新字段全部 `#[serde(default)]`；`migrate()` 的 `0..=6` 臂要改
+   （`state.rs:484`）；别忘了 `RoundState` 也有自己的 `schema_version`（`state.rs:93-95`）。
+   另一条：`SCHEMA_VERSION` 注释里要写清 v7→v8 的**零信息损失论证**（照 `state.rs:455-481` 的体例）。
 3. **AI 与玩家的所有权冲突有两条路**，只堵一条没用：
    ① 图的归属（本规格）；② **`retool_shipyards` 改 `ship_type`**（`shipbuilding.rs:259-310`，
    今天不看任何归属）。必须按 §4.7 给 retool 加 gate，否则玩家钉的图会被
@@ -909,7 +909,7 @@ q.cities(12).explode("buildings").assign(
 | `src/model/control.rs` | `ControllableState.blueprints`（`:251-308`）；`BlueprintEntry` 读面；`FactionControlView.blueprints`（`:90-108`）；`control_view`（`:511-535`）；`round_view`（`:575-635`）；`BlueprintPatch` + `FactionControlPatch.blueprints`（`:308-351`）；`apply_diff` 的新分支（写值即接管 + skip 码）；`BuildingPatch.blueprint`（`:259-285`）+ `apply_building_patch`（`:1276-1288` 附近） |
 | `src/model/building.rs` | `Building.blueprint`（`:22-36`） |
 | `src/model/ship.rs` | `Ship.blueprint`（`:49-102`） |
-| `src/model/state.rs` | `SCHEMA_VERSION 6→7`（`:12`）；`migrate()`（`:427-438`）+ 注释；`blueprint_control`；`ship_behavior` 插新层（`:184-199`） |
+| `src/model/state.rs` | `SCHEMA_VERSION 7→8`（`:12`）；`migrate()`（`:482-492`）+ 注释；`blueprint_control`；`ship_behavior` 插新层（`:230-245`） |
 | `src/model/game_config.rs` | `GameConfig.blueprints`（可选种子表，`:534-578`） |
 | `src/model/event.rs` | （可选）`ShipSpawned` 加 `blueprint: Option<String>`（`:171`）——**读面/事件归因**；加了要同步 `history_row`（`:395`）与 headline（`:573-578`） |
 | `src/world.rs` | 种子表 → `control[fid].blueprints`；开局舰队 `blueprint: None`（`:832-850` 不变） |

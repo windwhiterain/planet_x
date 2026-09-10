@@ -69,6 +69,10 @@ body {
 #side {
   background: var(--panel); border-right: 1px solid var(--line);
   padding: 12px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; backdrop-filter: blur(4px);
+  /* 压在底部读面之上：两条 bar 同时展开时，底部那条（DOM 在后面）会盖住这里的
+     「应用到服务器」——它是**全宽**的，点上去被它接走，表现为"应用按不动"。
+     读面是只读的，让它让位比让控制面按钮点不到要好。 */
+  z-index: 16;
 }
 
 /* 底部 bar body：一条「选中对象」标题行 + 该对象的完整记录（generic widget 渲染） */
@@ -115,6 +119,15 @@ body {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 4px; font-size: 12px; flex: none;
 }
+/* 舰行上的**便利**下拉：一次改三片叶的归属（只写 mode，永不写值）。做得比子叶的下拉弱，
+   免得看起来像"这条舰的归属"——归属永远在子叶那一行（三片叶各有各的链）。 */
+.tnode select.mode.bulk { background: #101733; color: var(--muted); font-size: 11px; padding: 1px 3px; }
+/* 「恢复继承」：撤销这片叶的表态（值不动）。比子叶的三态下拉更直白，所以给它一个按钮。 */
+.tnode .restore, .ship-editor .restore {
+  background: #14203c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 11px; flex: none;
+}
+.tnode .restore:hover, .ship-editor .restore:hover { border-color: var(--accent); }
 .ship-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; }
 .leaf-val { display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px; color: var(--muted); }
 .leaf-val .lv-label { font-size: 12px; }

@@ -852,4 +852,122 @@ mod tests {
         assert!(report.applied > 0, "回传总得碰到点什么");
         assert_eq!(snap(&w), before, "读面原样回传不许改变任何舰的有效风格 / 归属");
     }
+
+    /// 前端「只回传差异」靠的就是引擎这条契约（note §8 第 3 条）：补丁写成什么形状，就**只有**
+    /// 那几个字段被写——别的叶、别的舰一个都不许动。顺带钉住三件反直觉的事：
+    ///
+    /// * **空 diff 是彻底 no-op**（前端"什么都没改"时点「应用」发的就是它）；
+    /// * **只改一条轴时另一条轴保留当前有效值**——前端正是靠这个才敢逐轴提交；
+    /// * **「恢复继承」只撤表态、不动值**：`{mode: Inherit}` 之后叶里那个数还在，而引擎的取值
+    ///   规则是"叶存在就用叶里的值"（`leaf.map(..)` 优先于记录值）⇒ 撤销表态**不会**把这个数
+    ///   放回出厂快照。这条与直觉相反，所以让它由测试写着，而不是留在某人的印象里。
+    ///
+    /// 为什么值得一条测试：这条路上"多写一个字段"的后果是**静默**的——读面里的风格叶给的是
+    /// **有效值**，把整行原样写回去就把「没有叶 ⇒ 兜底到出厂记录值」变成「叶钉住这个数」，
+    /// 而现象只是"改舰队默认对这艘舰没用"，事后极难归因。
+    #[test]
+    fn minimal_leaf_diffs_touch_only_what_changed() {
+        let mut w = world();
+        for _ in 0..3 {
+            w.pre = sim::derived_from_state(&w.state, &w.config);
+            w.post = sim::advance(&mut w.state, &w.config, &mut w.rng);
+        }
+        // 挑一个**有舰队**的势力（`factions[0]` 可能一艘舰都没有，那样证明不了"别的舰没被动"）。
+        let fid = w
+            .state
+            .factions
+            .iter()
+            .map(|f| f.name.clone())
+            .find(|f| w.state.ships.iter().filter(|s| s.faction_id == *f).count() >= 2)
+            .expect("世界里得有个有两艘以上舰的势力");
+        let ours: Vec<String> = w.state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(ours.len() >= 2, "要两艘以上的舰才能证明「别的舰没被动」：{ours:?}");
+        let ship = ours[0].clone();
+
+        // 逐舰的「有效风格 + 有效归属」快照：任何一片叶被多写一下，这里就会变。
+        let snap = |w: &GameWorld| -> Vec<(String, f64, f64, f64, ControlMode, ControlMode)> {
+            w.state
+                .ships
+                .iter()
+                .map(|s| {
+                    let d = w.state.ship_doctrine(s.name.clone());
+                    (
+                        s.name.clone(),
+                        d.temper,
+                        d.lone_wolf,
+                        w.state.ship_kiting(s.name.clone()),
+                        w.state.ship_doctrine_control(s.name.clone()),
+                        w.state.ship_kiting_control(s.name.clone()),
+                    )
+                })
+                .collect()
+        };
+        // 前提：这艘舰还没有风格叶、本势力也没有把舰队默认风格设成玩家（下面几条断言依赖它）。
+        assert!(
+            w.state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
+            "开局不该有风格叶，否则证明不了「新建」这条路径"
+        );
+        assert_ne!(
+            w.state.control.get(&fid).and_then(|c| c.default_doctrine.as_ref()).map(|d| d.mode),
+            Some(ControlMode::Player),
+            "前提：舰队默认风格不是玩家表态（否则取值会走默认而不是叶）"
+        );
+        let before = snap(&w);
+        let lone_before = w.state.ship_doctrine(ship.clone()).lone_wolf;
+
+        // ① 空 diff：彻底 no-op（前端没改东西时点「应用」发的就是它）。
+        let empty: CommandReq = serde_json::from_value(serde_json::json!({ "control": [] })).unwrap();
+        let r = apply_diff(&mut w.state, &w.config, &empty);
+        assert_eq!((r.applied, r.skipped.len(), r.took_over.len()), (0, 0, 0));
+        assert_eq!(snap(&w), before, "空 diff 不该动任何东西");
+
+        // ② 逐轴提交：只写 temper。缺省的那条轴保留**当前有效值**，且这片叶因「写了值没写 mode」
+        //    被接管；别的舰、这条舰的另一条轴一律不动。
+        let one: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid, "ship_doctrine": [{ "ship": ship, "temper": 0.33 }] }]
+        }))
+        .unwrap();
+        let r = apply_diff(&mut w.state, &w.config, &one);
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(r.took_over.len(), 1, "写值即接管必须留一条回执：{:?}", r.took_over);
+        let leaf = w.state.control[&fid].ship_doctrine[&ship].clone();
+        assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.33, lone_before), "缺省的那条轴必须保留现值");
+        assert_eq!(leaf.mode, ControlMode::Player);
+
+        let after = snap(&w);
+        for (b, a) in before.iter().zip(after.iter()) {
+            assert_eq!(b.0, a.0);
+            if a.0 != ship {
+                assert_eq!(b, a, "只改一艘舰的叶，别的舰不该被动");
+            }
+        }
+        let edited = |v: &Vec<(String, f64, f64, f64, ControlMode, ControlMode)>| v.iter().find(|x| x.0 == ship).cloned().unwrap();
+        assert_eq!(edited(&after).2, lone_before, "没写的那条轴的有效值也不许变");
+        assert_eq!(edited(&after).3, edited(&before).3, "风筝轴一个字都不该动");
+        assert_eq!(edited(&after).4, ControlMode::Player, "接管之后归属是玩家");
+
+        // ③ 「恢复继承」（`{mode: Inherit}`）：只撤表态、值不动——而且引擎的取值规则让叶里那个数
+        //    **继续生效**。补丁接口只能新建/改写叶、删不掉叶，所以"收回出厂快照"今天做不到。
+        let back: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid, "ship_doctrine": [{ "ship": ship, "mode": "Inherit" }] }]
+        }))
+        .unwrap();
+        let r = apply_diff(&mut w.state, &w.config, &back);
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert!(r.took_over.is_empty(), "只写 mode 不是接管：{:?}", r.took_over);
+        let leaf = &w.state.control[&fid].ship_doctrine[&ship];
+        assert_eq!(leaf.mode, ControlMode::Inherit);
+        assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.33, lone_before), "「恢复继承」的契约是值不动");
+        assert_eq!(w.state.ship_doctrine(ship.clone()).temper, 0.33, "叶存在就用叶里的值，哪怕它说 Inherit");
+        assert_eq!(
+            w.state.ship_doctrine_control(ship.clone()),
+            edited(&before).4,
+            "收回表态后归属回到链上（与最初一致）"
+        );
+    }
 }
