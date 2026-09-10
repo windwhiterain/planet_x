@@ -142,6 +142,14 @@ def main() -> int:
             v["layout"] = "table"  # 表没有来源没意义
     run_case("null-source-on-table", d)
 
+    # ⑤c `new: true` 只对多键叶成立：挂到势力级单叶（keys 为空）上要红
+    d = clone()
+    for v in walk_views(d):
+        for c in v.get("columns") or []:
+            if isinstance(c.get("leaf"), str) and c["leaf"].endswith(".default_role"):
+                c["new"] = True
+    run_case("new-on-single-leaf", d)
+
     # ⑥ 认领完整性：把 `capital` 的全部 leaf 行删掉（它只在 sel-faction 里被认领）
     d = clone()
     for _, c in walk_columns(d):

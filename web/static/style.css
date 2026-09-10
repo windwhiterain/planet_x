@@ -112,7 +112,6 @@ body {
 }
 .tnode-tab:hover { border-color: var(--accent); color: var(--text); }
 .tnode-tab.sel { background: #1e3a6b; border-color: var(--accent); color: var(--text); font-weight: 600; }
-.tnode-kids { padding: 2px 6px 6px; }
 /* 一行说明（例如「这片叶子现在由系统自动决定」）：只解释，不可编辑。 */
 .tnode-hint { padding: 2px 8px 8px; color: var(--muted); font-size: 11px; }
 .tnode select.mode {
@@ -189,13 +188,6 @@ button.primary:hover { background: #2563eb; }
 
 /* ---- 设计图库（势力级图库：舰级 / 组件多选 / 意图 / 删图） ----------------- */
 .bp-editor { align-items: flex-start; }
-.bp-add { border: 1px dashed var(--line); border-radius: 6px; margin: 4px 6px; }
-/* 新建表单的标题：独占一行（`.tnode-label` 是 `flex: 1`，在 430px 的面板里会被挤成一列一个字）。 */
-.bp-add-title { flex: 0 0 100%; font-weight: 600; font-size: 12px; }
-.bp-add input.bp-name {
-  background: #0d1226; color: var(--text); border: 1px solid var(--line);
-  border-radius: 4px; padding: 2px 6px; width: 140px;
-}
 .bp-comps { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 2px 8px 4px; }
 .bp-comps-head { color: var(--muted); font-size: 12px; }
 .bp-comp-list { display: flex; flex-wrap: wrap; gap: 2px 8px; }
@@ -297,7 +289,6 @@ button.primary:hover { background: #2563eb; }
 /* 读面比控制树宽：整理过的表列多（舰队 10 列），430px 会把它挤成横向滚动。 */
 #side.read { width: 560px; }
 #side { gap: 8px; }
-#sideTabs { padding: 0 0 2px; }
 #readPanel { display: flex; flex-direction: column; gap: 6px; }
 #readTabs { margin-bottom: 4px; }
 .now-line { color: #9ecbff; font-size: 12px; }
@@ -421,5 +412,24 @@ select.mode.mini {
 .sv-card-tr > td { background: #10162e; border-top: 1px dashed var(--line); }
 .sv-card-box { padding: 6px 8px; }
 .sv-card-head { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
-/* 旧控制树那一页的说明（页 tab 与页体是分开的两个 DOM） */
-.tree-old-hint { margin: 0 0 6px; }
+
+/* ---- 控制行里「＋ 新建一片叶」（views.json 的 `new: true`：身份键由用户现填）--------- */
+/* 它是 `keys_from` 的对偶：那个从名单里挑键，这个现造一个键（设计图库的图名）。 */
+.ctl-new {
+  border: 1px dashed var(--line); border-radius: 6px; margin: 4px 0; padding: 4px 6px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ctl-new-title { font-weight: 600; font-size: 12px; }
+.ctl-new-line { display: flex; align-items: center; gap: 6px; }
+.ctl-new-line .lv-label { color: var(--muted); font-size: 12px; }
+.ctl-new-key {
+  background: #0d1226; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 6px; width: 150px;
+}
+.ctl-new-bar { display: flex; align-items: center; gap: 8px; }
+.ctl-new-bar button {
+  background: #14203c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 12px;
+}
+.ctl-new-bar button:hover { border-color: var(--accent); }
+.ctl-new-stat { color: #fca5a5; font-size: 12px; }
