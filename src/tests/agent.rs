@@ -197,6 +197,12 @@ fn agent_view_is_self_described_by_schema() {
         "upkeep",
         "governance_cost",
         "governance_coverage",
+        // B1：把钱花在哪（行政 vs 娱乐）+ 人口超载倍率 + 思潮忠诚惩罚 + 迁都判据。
+        "governance_admin",
+        "governance_entertainment",
+        "governance_scale",
+        "ideology_loyalty_penalty",
+        "capital",
     ] {
         assert!(
             sample_fac.get(k).is_some(),
@@ -207,4 +213,17 @@ fn agent_view_is_self_described_by_schema() {
         m.get("cities").is_some(),
         "view 缺每城一行 cities"
     );
+    // B1：每城那一行必须带**忠诚目标值分项**（「为什么这座城忠诚在掉」的解释面）。
+    let sample_city = m
+        .get("cities")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.values().next())
+        .cloned()
+        .unwrap_or_default();
+    for k in ["distance", "entertainment", "capital_share", "ideology_penalty", "effective"] {
+        assert!(
+            sample_city.get("loyalty_target").and_then(|t| t.get(k)).is_some(),
+            "view.cities[].loyalty_target 缺分项 {k}"
+        );
+    }
 }

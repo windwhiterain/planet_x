@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{CityId, FactionId, ResourceMap};
+use crate::model::{BodyId, CityId, FactionId, ResourceMap};
 
 /// 一回合的**视图**——`pre`（推进前）与 `post`（推进后）用的是**同一个类型**：
 ///
@@ -114,6 +114,22 @@ pub struct FactionRow {
     /// 本回合**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。这是「谁靠贸易活着」
     /// 的观察面：一个净进口常年为 0 的势力，其实没在参与市场。
     pub net_import: f64,
+    /// 本回合治理开销的**行政部分**（`Σ (admin_base + admin_per_au × 距离超程) × scale`）——
+    /// 「我把娱乐预算拉满，钱却被行政吃掉」里的那个行政。
+    pub governance_admin: f64,
+    /// 本回合治理开销的**娱乐/福利部分**（各城 [`city_loyalty_budget`](crate::sim::city_loyalty_budget) 之和）。
+    pub governance_entertainment: f64,
+    /// **人口超载放大倍率**：`1 + max(0, 人口 ÷ 管理容量 − 1)`。它同时乘在行政开销与每座城的
+    /// 忠诚距离项上——「为什么治理费比上回合暴涨」的答案。中性缺省 = **1.0**（`pre` 里是 1.0 而
+    /// 不是 0：0 会被读成「治理能力归零」，那是另一回事；与 [`FactionRow::governance_coverage`]
+    /// 的缺省约定同类）。
+    pub governance_scale: f64,
+    /// 本回合**思潮优势端自平衡**忠诚惩罚（全国同值，0..`max_loyalty_penalty`）：势力身处垄断的
+    /// 优势端思潮却「言行不符」时的扣分（军国却不打仗、科学却不探异常区……）。
+    pub ideology_loyalty_penalty: f64,
+    /// 本回合的**首都评估与迁都**（判据数字）。事件 `CapitalRelocated` 只带 `reason` 字符串、
+    /// **不带任何数字**——「为什么迁都 / 为什么没迁」只能在这里读。
+    pub capital: CapitalFlow,
 }
 
 /// 单座城的一行（[`RoundView::cities`] 的一项）。
@@ -127,6 +143,57 @@ pub struct CityRow {
     pub production: ResourceMap,
     /// **过程**：本回合开采产出的市场价值。
     pub production_value: f64,
+    /// **过程**：本回合忠诚的**目标值**及其分项（`step_governance` 的中间量）。忠诚每回合朝
+    /// `effective` 靠近（治理覆盖得住时），所以这四个分项就是「这座城的忠诚为什么在掉」的答案。
+    pub loyalty_target: LoyaltyTarget,
+}
+
+/// 一座城本回合的**忠诚目标值**及其分项（[`CityRow::loyalty_target`]）。
+///
+/// `step_governance` 每回合算出一个目标忠诚 `effective`，再把实际忠诚朝它恢复
+/// （`loyalty_recover`）；治理覆盖不住时改用欠费惩罚。此前这四项**算完就扔**，于是
+/// 「忠诚在掉」只能看见结果、看不见原因。
+///
+/// 缺省（`pre` 里 / 该城这一回合没跑治理）**全 0**——同其它过程量的约定：0 = 还没算。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct LoyaltyTarget {
+    /// 距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`（越远越低）。
+    pub distance: f64,
+    /// 娱乐/福利项：`本城娱乐预算 × 治理覆盖率 ÷ entertainment_cost`（预算真落地的那部分）。
+    pub entertainment: f64,
+    /// 首都向心项：首都人口占全势力比例 × `capital_share_loyalty_buff`（**全国同值**）。
+    pub capital_share: f64,
+    /// 思潮优势端惩罚（**全国同值**，见 [`FactionRow::ideology_loyalty_penalty`]）。
+    pub ideology_penalty: f64,
+    /// 四项相加并 clamp 到 0..1 的**结果**——忠诚每回合朝它恢复。
+    pub effective: f64,
+}
+
+/// 一个势力本回合的**首都评估与迁都**（[`FactionRow::capital`]）。
+///
+/// 周期性 AI 评估（`capital_control == Auto` 且到了 `capital_review_every`）时，引擎会算出
+/// 「现首都 vs 人口最高候选城」各自的**总治理距离成本**，只有候选便宜 `capital_relocate_threshold`
+/// AU 以上才真迁。这组数字以前**只活在栈上**，事件里只有一句 `reason`；亡城强迁那条路则
+/// 根本没有评估（`reviewed = false`，只有 `relocated_*` 有值）。
+///
+/// 缺省 = 「这一回合没评估、也没迁」——`Option` 用来表达**没算**，而不是拿 0 冒充成本 0。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct CapitalFlow {
+    /// 本回合是否做过周期性评估（非 Auto 控制 / 没到评估回合 = false）。
+    pub reviewed: bool,
+    /// 评估时的候选首都（人口最高的活城）；没评估 = `None`。
+    pub candidate: Option<BodyId>,
+    /// 现首都的「总治理距离成本」（AU，越小越好）；没评估 = `None`。
+    pub current_cost: Option<f64>,
+    /// 候选首都的同项成本；没评估 = `None`。
+    pub candidate_cost: Option<f64>,
+    /// 本回合**真的迁都**了：旧首都（没迁 = `None`）。
+    pub relocated_from: Option<BodyId>,
+    /// 本回合**真的迁都**了：新首都（没迁 = `None`）。
+    pub relocated_to: Option<BodyId>,
+    /// 迁都造成的**全国忠诚扣减**（旧首都人口占比 × `capital_share_relocate_cost`；没迁 = 0）。
+    /// 占比这个中间量本身不另给一列——它就是「扣减 ÷ 系数」，两个数同一个位置。
+    pub relocate_loyalty_cost: f64,
 }
 
 /// **引擎内部的写入口袋**（**不是读面的一部分**）：各 step 把「算过、用过、但不落持久状态」的
@@ -159,8 +226,12 @@ pub struct RoundSink {
     /// 抽成 `∝` 它的 `mond_control`（连续量，不再是「master 名单」里的布尔身份）。
     /// 这是「垄断承运人」的观察面：一个势力靠承运挣多少，说明它在深空贸易里的地位。
     pub market_carrier_income: BTreeMap<FactionId, f64>,
-    /// 每势力本回合治理流（总成本 / 覆盖率）。
+    /// 每势力本回合治理流（总成本 / 覆盖率 / 行政娱乐拆分 / 人口超载倍率 / 思潮惩罚）。
     pub governance: BTreeMap<FactionId, GovernanceFlow>,
+    /// 每城本回合的**忠诚目标值**分项（`step_governance` 的中间量）。
+    pub city_loyalty: BTreeMap<CityId, LoyaltyTarget>,
+    /// 每势力本回合的**首都评估与迁都**（`step_capital` 的中间量）。
+    pub capital: BTreeMap<FactionId, CapitalFlow>,
     /// 本回合 **AI 的判定**（“掷了什么”）：逐舰的行为判定 + 船坞改装。**纯追加、行为中性**
     /// ——见 [`crate::model::RoundDecisions`]（那里解释了为什么它必须单独捕获：指令叶只记结果，
     /// 不记过程）。
@@ -175,4 +246,12 @@ pub struct GovernanceFlow {
     pub total: f64,
     /// 治理覆盖率（0..1）。
     pub coverage: f64,
+    /// 行政部分（距离 × 人口超载）。
+    pub admin: f64,
+    /// 娱乐/福利部分（各城预算之和）。
+    pub entertainment: f64,
+    /// 人口超载放大倍率（1.0 = 未超载）。
+    pub scale: f64,
+    /// 思潮优势端自平衡忠诚惩罚（全国）。
+    pub ideology_penalty: f64,
 }

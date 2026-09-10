@@ -51,6 +51,10 @@ pub struct RoundView {
 2. **两个槽同形**：过程量在 `pre` 里是 0 / 空——**不做** `skip_serializing_if`（那会让「pre 少几个键」
    变成第二条要记的规矩）。代价是 `pre` 里那几个 0 要靠文档说清楚，收益是 Python/前端不必写
    「键可能在不在」的分支。
+   > 📌 **这条规矩有一个正经的松动方向**（用户 2026-10 提出）：把「读面」与「存储」分开——
+   > 读面永远稠密（缺省由 schema **一处**声明、读者不自己编缺省），存储自动稀疏，靠无损的
+   > encode/decode 桥接。那时 `skip_serializing_if` 只出现在**存储编码**里，不再影响读面同形性。
+   > 见 [`dense-face-sparse-store.md`](dense-face-sparse-store.md)（提案，未裁决）。
 3. **每个数只有一个位置**：观测与过程**同处一行**（`FactionRow` / `CityRow`）。`flow.faction_production`
    与 `metrics.factions[].production` 合并成 `view.factions[].production` 一个位置 ⇒ §1 那个
    「两个读面各说各话」的坑**结构上不可能再发生**。
@@ -97,9 +101,14 @@ pub struct RoundView {
 * **`pre` 面还是「回合开始时的观测」**：真正的「AI 这一回合**看到/掷出**了什么」（逐舰解算顺序的
   洗牌、各处 `derived_roll` 的骰子、`deterrence`、`war_strength`）**仍然没有记录**——那要改
   `advance` 的返回（让它同时产出 pre 面），见 [`engine-data-plane.md`](engine-data-plane.md) §7.4。
-* **一张 36 条候选的「step 中间量」清单已经盘出来了**（每条带 `文件:行号`、粒度、是否吃骰子），
+* **一张 36 条候选的「step 中间量」清单已经盘出来了** → 现在**整份落在
+  [`step-intermediates.md`](step-intermediates.md)**（每条带 `文件:行号`，已在 `main` = `7e11d32`
+  上复核过；粒度、是否吃骰子、能回答什么问题都在表里），
   按批次排好：B1 治理/忠诚（「为什么这座城忠诚在掉」+ 迁都判据）、B2 钱去哪了（预算实花 vs 批的、
   造舰进度 vs 产能、维护费欠费的**生锈比例**）、B3 市场与运输（价格分解/丢货量/禁运三档原因/
   在途状态）、B4 战斗（逐发索敌计划含**玩家舰**、命中折减、点防）、B5 上面那个 `pre` 面。
   新增量一律沿本篇的形状：**观测与过程同处一行**、纯追加（不改行为 ⇒ digest 逐字不变）。
   `unified-metrics.md` §候选第一条（把治理中间量并入读面，给「帝国为何要崩」的预警）就是 B1。
+  → **B1 已经落地**（`feature/step-intermediates-b1`：`view.cities[].loyalty_target` 四项分项 +
+  `view.factions[]` 的行政/娱乐拆分、人口超载倍率、思潮忠诚惩罚、`capital` 迁都判据），
+  digest 逐字不变、全档 192 绿——见该篇 **§6.1**。

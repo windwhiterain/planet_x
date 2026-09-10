@@ -352,6 +352,57 @@ class PlanetXQ:
             c = c[c["loyalty"] <= min_loyalty]
         return c.sort_values("loyalty")
 
+    def neutral(self, path: str):
+        """A read-face field's **neutral value** (its default), straight out of `schema.json`
+        (`neutral.fields`) — declared by the engine, **never invented here**.
+
+        Why this exists: a missing key used to mean different things to different readers
+        (`flow.jsonl` substituted `0` for governance coverage while `metrics` substituted `1.0`,
+        so the same round read as "0% covered" and "100% covered"). The engine now declares every
+        read-face field's neutral value in one place and *uses the same declarations itself*;
+        consumers substitute from here instead of hardcoding.
+
+        Use it when a key may be missing (a projection written by an older build, or a field the
+        sparse storage omitted)::
+
+            fm.get("governance_scale", q.neutral("factions[].governance_scale"))   # 1.0, not 0
+        """
+        section = (self.schema or {}).get("neutral") or {}
+        return (section.get("fields") or {}).get(path)
+
+    def view_loyalty(self, round: int, faction: str | None = None) -> pd.DataFrame:
+        """**「这座城的忠诚为什么在掉」**：每城一行，带上引擎算出的忠诚目标值分项。
+
+        `loyalty_target_*` 来自 `derived.city_process`（引擎在 `step_governance` 里**捕获**的中间量，
+        不在这里重算）：`effective` 是这一回合的目标忠诚（实际忠诚朝它恢复），四个分项就是它为什么低——
+        `distance`（离首都太远，再乘人口超载倍率）/ `entertainment`（娱乐预算 × 治理覆盖率）/
+        `capital_share`（首都人口占比带来的向心 buff）/ `ideology_penalty`（思潮优势端言行不符）。
+
+        ⚠ `coverage < 1` 时忠诚**改走欠费惩罚**（不朝目标恢复），此时 `effective` 只是「本该到的值」——
+        要和 `loyalty`（现状）与 `view_economy()["governance_coverage"]` 一起读。按 `effective` 升序
+        （最危险的在最上面）。
+        """
+        c = self.cities(round)
+        p = self.city_process(round)
+        if c is None or c.empty or p is None or p.empty:
+            return pd.DataFrame()
+        cols = [
+            "round", "city_id",
+            "loyalty_target_effective", "loyalty_target_distance",
+            "loyalty_target_entertainment", "loyalty_target_capital_share",
+            "loyalty_target_ideology_penalty",
+        ]
+        missing = [c for c in cols if c not in p.columns]
+        if missing:
+            raise KeyError(
+                f"derived.city_process 缺列 {missing}——这份投影是「B1 中间量」之前的构建产出的，"
+                f"请用当前 planet_x 重新 `--index`（各字段的中性值见 schema.json 的 neutral 段）"
+            )
+        out = c.merge(p[cols], on=["round", "city_id"], how="left")
+        if faction is not None:
+            out = out[out["faction_id"] == faction]
+        return out.sort_values("loyalty_target_effective")
+
     def view_market(self, round: int, faction: str) -> dict | None:
         """A faction's stockpile valued at market prices: per-resource amount & value + total.
         Reads ``resources`` (sim stockpile) and the ``meta.resource_value`` table."""
@@ -394,7 +445,24 @@ class PlanetXQ:
             "net_flow": net, "bleeding": net < -1e-9,
             "market_value": fm.get("market_value"),
             "net_import": fm.get("net_import"),
-            "governance_coverage": fm.get("governance_coverage"),
+            # 缺省值**从 schema.json 取**（`q.neutral`），不在这里写 0/1：那两个 1.0（覆盖率、
+            # 超载倍率）的中性含义是「没有账要付」，与「能力归零 = 0」是两件事——历史上正是
+            # 各读者自己编缺省，才让同一回合的两个读面说 0% 与 100%。
+            "governance_coverage": fm.get(
+                "governance_coverage", self.neutral("factions[].governance_coverage")
+            ),
+            # B1：治理开销的**两个来源**（行政 vs 娱乐，乘制裁倍率 = `governance_cost`）、
+            # 人口超载倍率、思潮优势端的全国忠诚惩罚，以及本回合的迁都判据（`capital` 是对象：
+            # `reviewed` / `candidate` / `current_cost` / `candidate_cost` / `relocated_*`）。
+            "governance_admin": fm.get("governance_admin", self.neutral("factions[].governance_admin")),
+            "governance_entertainment": fm.get(
+                "governance_entertainment", self.neutral("factions[].governance_entertainment")
+            ),
+            "governance_scale": fm.get("governance_scale", self.neutral("factions[].governance_scale")),
+            "ideology_loyalty_penalty": fm.get(
+                "ideology_loyalty_penalty", self.neutral("factions[].ideology_loyalty_penalty")
+            ),
+            "capital": fm.get("capital"),
             "fleet_value": fm.get("fleet_value"),
             "city_count": fm.get("city_count"), "ship_count": fm.get("ship_count"),
             "at_war": fm.get("at_war"),

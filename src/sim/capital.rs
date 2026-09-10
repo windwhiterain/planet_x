@@ -14,7 +14,7 @@ use super::*;
 ///   [`GovernanceConfig::capital_relocate_threshold`] AU 以上时才迁（避免反复横跳）。
 ///
 /// 放在 [`step_resurgence`] 之后：刚重建出立足点的势力也能当回合被认领一个新首都。
-pub fn step_capital(state: &mut State, config: &GameConfig) {
+pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let review_every = config.governance.capital_review_every.max(1);
 
@@ -43,13 +43,24 @@ pub fn step_capital(state: &mut State, config: &GameConfig) {
             reason = "destroyed";
         } else if state.capital_control(&fid) == ControlMode::Auto && state.round % review_every == 0 {
             let best = highest_pop_city_body(state, &fid);
-            if best != cur {
-                let cur_cost = capital_anchor_cost(state, config, &fid, &cur);
-                let best_cost = capital_anchor_cost(state, config, &fid, &best);
-                if best_cost + config.governance.capital_relocate_threshold < cur_cost {
-                    new_cap = Some(best);
-                    reason = "ai_review";
-                }
+            // 候选与两笔成本**无论最后迁不迁都算出来并记下**：判据本身就是读面要回答的问题
+            // （「为什么没迁」= 候选没便宜够 `capital_relocate_threshold`）。两个函数都只读
+            // 城市位置与人口 ⇒ 纯追加、不改行为。
+            let cur_cost = capital_anchor_cost(state, config, &fid, &cur);
+            let best_cost = capital_anchor_cost(state, config, &fid, &best);
+            flow.capital.insert(
+                fid.clone(),
+                CapitalFlow {
+                    reviewed: true,
+                    candidate: Some(best.clone()),
+                    current_cost: Some(cur_cost),
+                    candidate_cost: Some(best_cost),
+                    ..Default::default()
+                },
+            );
+            if best != cur && best_cost + config.governance.capital_relocate_threshold < cur_cost {
+                new_cap = Some(best);
+                reason = "ai_review";
             }
         }
 
@@ -59,6 +70,12 @@ pub fn step_capital(state: &mut State, config: &GameConfig) {
             // 迁离越动荡（国本动摇）；亡城强迁时旧首都已失（占比=0）→ 应急无忠诚代价。
             let old_share = faction_capital_share(state, &fid);
             let loyalty_cost = old_share * config.governance.capital_share_relocate_cost;
+            // 这次迁都本身与它的忠诚代价也进读面。亡城强迁那条路**没有评估**（`reviewed` 仍是
+            // false、没有候选与成本），但「从哪迁到哪、付了多少忠诚」同样要看得见。
+            let entry = flow.capital.entry(fid.clone()).or_default();
+            entry.relocated_from = Some(from.clone());
+            entry.relocated_to = Some(nc.clone());
+            entry.relocate_loyalty_cost = loyalty_cost;
             // 保留原 mode 标记（Player 仍归玩家、Inherit 让作用域链决定）——迁都是换「值」，
             // 不改变「由谁决定」的层次化粒度。
             let prev_mode = state

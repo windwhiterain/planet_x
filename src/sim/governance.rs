@@ -198,9 +198,6 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         } else {
             1.0
         };
-        // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率。
-        flow.governance.insert(fid.clone(), GovernanceFlow { total: governance_total, coverage });
-
         // 忠诚度向「距离目标 + 娱乐加成 + 首都人口占比 buff」恢复/下降，并标记叛乱。
         // 首都人口占全势力的比例越高，全国向心力越强（每城目标忠诚更高）。用占比：把
         // 首都放在人口中心有真实收益，而不是无脑堆绝对人口。
@@ -222,6 +219,20 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         //
         // 连续、无断崖：掌握度每涨一点，深处的离心压力就小一点（凡人 → 指哪打哪是渐变的）。
         let mond_distance_relief = 1.0 - mond_control(state, &fid);
+        // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率 + 行政/娱乐拆分 +
+        // 人口超载倍率 + 思潮惩罚。**写入点从上面挪到这里**，是因为后两项此刻才算出来——
+        // 捕获的仍是同一批局部变量，只是等它们齐了再写（纯追加：不参与任何计算）。
+        flow.governance.insert(
+            fid.clone(),
+            GovernanceFlow {
+                total: governance_total,
+                coverage,
+                admin: total_admin,
+                entertainment: ent_total,
+                scale,
+                ideology_penalty: ideo_penalty,
+            },
+        );
         let mut to_revolt = Vec::new();
         for (cid, d, ent) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
@@ -229,6 +240,17 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
                 (1.0 - g.loyalty_distance * a * scale * mond_distance_relief).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
+            // 捕获这一城的忠诚目标值分项（纯追加）——「这座城的忠诚为什么在掉」的分解。
+            flow.city_loyalty.insert(
+                cid.clone(),
+                LoyaltyTarget {
+                    distance: target_base,
+                    entertainment: ent_bonus,
+                    capital_share: cap_bonus,
+                    ideology_penalty: ideo_penalty,
+                    effective: target_eff,
+                },
+            );
             let cur = state.city(cid).map(|c| c.loyalty).unwrap_or(1.0);
             let new = if coverage >= 1.0 - 1e-6 {
                 (cur + (target_eff - cur) * g.loyalty_recover).clamp(0.0, 1.0)

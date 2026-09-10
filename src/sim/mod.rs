@@ -130,7 +130,7 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundV
     //
     // 迁都：亡城强迁（首都天体失守→人口最高活城）+ 周期性 AI 评估。放在这里，
     // 让本回合刚靠殖民舰立起立足点的势力也能当回合被认领新首都。
-    step_capital(state, config);
+    step_capital(state, config, &mut sink);
     step_diplomacy(state, config, rng);
     // 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力结成反制联盟——
     // 军事上联手制衡，经济上多国资源封锁。这给「一家独大」一个自然的众矢之的。

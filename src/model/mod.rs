@@ -56,6 +56,10 @@ mod game_config;
 mod identity;
 mod market;
 mod metrics;
+/// 读面字段的**中性值（缺省值）一处声明**——见模块文档，以及 `schema.json` 的 `neutral` 段。
+/// 它**不用 glob 导出**：调用方写 `neutral::value::GOVERNANCE_SCALE`，让「这个 1.0 是哪来的」在
+/// 读代码时就看得见。
+pub mod neutral;
 mod ship;
 mod ship_combat;
 mod state;
