@@ -137,9 +137,16 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     };
     for e in &state.events {
         match e {
+            // ⚠ **交火 = 真打出了伤害**（`damage > 0`）：这一条必须显式写出来。B4 之后
+            // `Attack` 事件**0 伤害也会发**（逐发分解要能回答「齐射被点防吃光」——那正是
+            // 伤害为 0 的情形），所以「有 Attack 事件」不再等价于「交过火」。
+            // 漏掉这道闸，战争疲劳会开始被「打了一发被拦光的空炮」取消 ⇒ 外交行为漂移。
             GameEvent::Attack {
-                attacker, target, ..
-            } => {
+                attacker,
+                target,
+                damage,
+                ..
+            } if *damage > 1e-9 => {
                 note_pair(
                     state.ship(attacker).map(|s| s.faction_id.clone()),
                     state.ship(target).map(|s| s.faction_id.clone()),

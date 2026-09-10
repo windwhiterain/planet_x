@@ -43,7 +43,11 @@ use crate::model::*;
 /// 贸易**（一笔一对一行：价格分解 + 丢货率）与**每艘在跑运输的舰走了哪一步**；另加各势力的
 /// 购买力/买方名次、每一处货栈的运力账，`FactionRow.trade_blocked_by` 从计数升级成「名单 + 三档
 /// 原因」。`State` 仍然一个字段没动。
-pub const SCHEMA_VERSION: u32 = 19;
+/// **v20 = 战斗中间量进事件层**（`feature/b4-combat`，用户裁决 Q1 走 (b)）：`GameEvent::Attack`
+/// 长出 `shots`（逐发明细：选择三项分 + 命中/点防/护盾/护甲/破甲），**并且 0 伤害的齐射也发**
+/// （「被点防吃光」此前什么事件都不留）。这一档**真的动了 `State`**（`State::events` 是持久字段）
+/// ⇒ 旧档里的 `Attack` 事件靠 `#[serde(default)]` 补成空 `shots`（那些档只看聚合量，不失真）。
+pub const SCHEMA_VERSION: u32 = 20;
 fn default_schema_version() -> u32 {
     0
 }
@@ -858,13 +862,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             Ok(())
         }
         // **v13–v18：六个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
-        // 这几档里 `State` 只在**一条**历史上真动过字段（`mond_control`），而它在**没有那条历史
-        // 的档**里 serde 缺省 0 = 凡人；其余动过的全是**派生读面**（本来就不持久，包括
-        // `feature/b2-money` 的「钱去哪了」与 `feature/b3-market` 的「市场与运输」）。
+        // 这几档里 `State` 只在**两条**历史上真动过字段：`mond_control`（tech 支线）与
+        // `Attack.shots`（`feature/b4-combat`）。前者在本支之外的档里 serde 缺省 0 = 凡人；
+        // 后者靠 `#[serde(default)]` 补成空 vec（旧档的 `Attack` 只看聚合量，空 `shots`
+        // 与「没记」同义——不是「打了一发没有任何分解」）。
         // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
         // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
         // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 | 14 | 15 | 16 | 17 | 18 => {
+        13 | 14 | 15 | 16 | 17 | 18 | 19 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

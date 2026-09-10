@@ -143,6 +143,20 @@ fn samples() -> Vec<GameEvent> {
             attacker: "a".into(),
             target: "b".into(),
             damage: 1.5,
+            shots: vec![crate::model::Shot {
+                weapon: 0,
+                target_hull_before: 20.0,
+                hit: 0.75,
+                pd: 1.0,
+                pd_absorbed: 1.0,
+                absorbed: 0.4,
+                soak: 0.5,
+                armor_soak: 0.1,
+                hull_pen: 1.0,
+                damage: 1.5,
+                killed: false,
+                ..Default::default()
+            }],
         },
         GameEvent::ShipDestroyed {
             ship: "s".into(),

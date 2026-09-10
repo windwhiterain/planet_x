@@ -15,6 +15,7 @@ mod haul;
 mod ideology;
 mod knowledge;
 mod mond;
+mod shots;
 mod site_supply;
 mod spending;
 mod story;

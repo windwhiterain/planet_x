@@ -88,7 +88,26 @@ fn doctrine_weight(
     hist: &BTreeMap<ShipId, f64>,
     d: f64,
 ) -> f64 {
-    let mut s = basic_weight(d, weapon, target, config);
+    let (basic, temper, spread) = doctrine_terms(state, config, attacker, weapon, target, hist, d);
+    (basic + temper) * spread
+}
+
+/// [`doctrine_weight`] 的**三项分解**：`(基本权重, 理智热血加项, 火力分配乘数)`。
+///
+/// 总分 = `(basic + temper) × spread`。⚠ 第三项是**乘数**不是加项（旧实现里就是
+/// `s *= 1 - fire_spread*recency`，形状原样保留——B4 只是把过程记下来，**不改判据**）。
+/// 逐项记下来的理由：这是「这门炮为什么打它」的唯一答案，事后无法重算（当时的距离/威慑/
+/// 新鲜度都已经变了）。三项随这一发落进事件层的 `Attack.data.shots`。
+fn doctrine_terms(
+    state: &State,
+    config: &GameConfig,
+    attacker: &Ship,
+    weapon: &Weapon,
+    target: &Ship,
+    hist: &BTreeMap<ShipId, f64>,
+    d: f64,
+) -> (f64, f64, f64) {
+    let basic = basic_weight(d, weapon, target, config);
     // 理智<->热血：`temper<0` 欺软怕硬(打威慑低于自己的)，`>0` 飞蛾扑火(打威慑高于自己的)。
     // 用「威慑比」的对数来量化敌我差距：即使本舰威慑远大于目标，弱目标之间仍能分清高下
     // （避免 `(my-tg)/(my+tg)` 在 my≫tg 时把所有弱目标压成 ~1、失去区分度）。
@@ -96,30 +115,34 @@ fn doctrine_weight(
     // 读的是**有效风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——AI 只读它，
     // 从不写它，所以玩家钉住的风格不会被 AI 覆盖。
     let temper = state.ship_doctrine(attacker.name.clone()).temper;
+    let mut temper_term = 0.0;
     if temper.abs() > 1e-9 {
         let my_det = sim::deterrence(state, config, &attacker.name);
         let tg_det = sim::deterrence(state, config, &target.name);
         let rel = ((my_det + 1.0) / (tg_det + 1.0)).ln().clamp(-4.0, 4.0);
-        s += W_TEMPER * -temper * rel;
+        temper_term = W_TEMPER * -temper * rel;
     }
     // 火力分配（在基本权重之上）：`fire_spread>0` 越近打过的权重越低(雨露均沾)，`<0` 越高
     // (死磕补刀)。
     let recency = hist.get(&target.name).copied().unwrap_or(0.0);
+    let mut spread = 1.0;
     if weapon.fire_spread.abs() > 1e-9 && recency > 1e-9 {
-        s *= 1.0 - weapon.fire_spread * recency;
+        spread = 1.0 - weapon.fire_spread * recency;
     }
-    s
+    (basic, temper_term, spread)
 }
 
 /// 一件武器在**射程内**挑得分最高的活敌舰（按基本权重 + 行为风格层）。
+///
+/// 返回**目标 + 它的三项分**（B4）：那三项就是「为什么是它」的答案，随这一发落进事件层。
 fn best_target_in_range(
     state: &State,
     config: &GameConfig,
     attacker: &Ship,
     weapon: &Weapon,
     hist: &BTreeMap<ShipId, f64>,
-) -> Option<ShipId> {
-    let mut best: Option<(f64, ShipId)> = None;
+) -> Option<(ShipId, f64, f64, f64)> {
+    let mut best: Option<(f64, ShipId, f64, f64, f64)> = None;
     for s in &state.ships {
         if s.hull <= 0.0 || !sim::hostile(state, config, &attacker.faction_id, &s.faction_id) {
             continue;
@@ -128,12 +151,13 @@ fn best_target_in_range(
         if d > weapon.range {
             continue;
         }
-        let score = doctrine_weight(state, config, attacker, weapon, s, hist, d);
-        if best.as_ref().map_or(true, |&(bs, _)| score > bs) {
-            best = Some((score, s.name.clone()));
+        let (basic, temper, spread) = doctrine_terms(state, config, attacker, weapon, s, hist, d);
+        let score = (basic + temper) * spread;
+        if best.as_ref().map_or(true, |&(bs, _, _, _, _)| score > bs) {
+            best = Some((score, s.name.clone(), basic, temper, spread));
         }
     }
-    best.map(|(_, n)| n)
+    best.map(|(_, n, b, t, sp)| (n, b, t, sp))
 }
 
 /// 一艘舰对目标 `s` 的**综合得分**（追击/选主目标用）：取各武器行为风格得分的最大，叠加
@@ -197,11 +221,14 @@ fn fleet_flag(state: &State, fid: &str) -> Option<ShipId> {
 /// 本舰本回合的开火计划：每件武器的每一发都**独立索敌**——按行为风格层挑一个射程内的活
 /// 敌舰。攻击历史用本地副本随时更新（打过的刷新到 1），使「雨露均沾」武器在**同回合内**
 /// 就能把多发摊到不同目标。确定性。
+///
+/// **B4**：每条计划带上「选它时算的三项分」（[`crate::sim::FireOrder`]）——判据一个字没改，
+/// 只是不再把过程扔掉（它随后进事件层的逐发记录）。
 pub(crate) fn build_fire_plan(
     state: &State,
     config: &GameConfig,
     ship_id: &str,
-) -> Vec<(usize, ShipId)> {
+) -> Vec<sim::FireOrder> {
     let Some(ship) = state.ship(ship_id) else {
         return Vec::new();
     };
@@ -214,8 +241,16 @@ pub(crate) fn build_fire_plan(
     for (i, w) in weapons.iter().enumerate() {
         let shots = (w.fire_rate.round()).max(1.0) as usize;
         for _ in 0..shots {
-            if let Some(t) = best_target_in_range(state, config, ship, w, &hist) {
-                plan.push((i, t.clone()));
+            if let Some((t, basic, temper, spread)) =
+                best_target_in_range(state, config, ship, w, &hist)
+            {
+                plan.push(sim::FireOrder {
+                    weapon: i,
+                    target: t.clone(),
+                    score_basic: basic,
+                    score_temper: temper,
+                    score_spread: spread,
+                });
                 hist.insert(t, 1.0); // 本回合内后续发能看到这次的「新鲜攻击」。
             }
         }
