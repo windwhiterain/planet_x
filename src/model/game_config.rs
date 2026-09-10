@@ -681,6 +681,227 @@ impl Default for FreightConfig {
     }
 }
 
+/// **自动控制（`Auto`）的执行者** tuning——回答「`Auto` 这一档到底**谁**来执行」。
+///
+/// 三态归属里 `Auto` 的承诺是「系统每回合决定并改写」。此前只有**指令轴**兑现了它
+/// （`autocontrol::tactics` 每回合写 `ship_orders`）：**风格两轴**没有写入者
+/// （`Auto` 的实际效果是值冻结，见 `.agents/notes/control-live-layers.md` §3.2），
+/// **设计图**只有「重估已有图」（`retool_shipyards`）这半张。这一节就是那两个执行者的参数。
+///
+/// 全部字段都有默认值 ⇒ 旧配置（没有 `autocontrol:` 节）照常工作。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AutoControlConfig {
+    // --- ① 风格轴的逐舰重估 ---------------------------------------------------
+    /// 每回合、每艘舰、每条轴被重估一次的**概率**（`derived_roll` 抽签）。
+    ///
+    /// 为什么是概率而不是"每回合都改"：每回合大改会把轨迹噪声化（风格是**慢变量**，
+    /// 它表达的是"这支部队在打什么仗"，不是"这一发打谁"）。抽签让**漂移是连续的**、
+    /// 且每艘舰都有自己的节奏（`derived_roll` 按舰名派生 ⇒ 不会全舰队同步抖动）。
+    #[serde(default = "default_style_chance")]
+    pub style_chance: f64,
+    /// 单次重估**最多**走完「当前值 → 战况目标」这段距离的比例。实际步长是随机的
+    /// （`步长 = roll × 本值`）：指数松弛 ⇒ 离目标远时改得多、近了改得少，
+    /// **天然收敛、不会来回抖**。1.0 = 一次到位（不推荐：那会变成阈值式的跳变）。
+    #[serde(default = "default_style_step_max")]
+    pub style_step_max: f64,
+    /// 变化小于它就**当没变**（不写叶）：控制面 diff 是给人读的，写着一堆 0.001 的抖动
+    /// 只会淹没真正的改动（且值与读面都按 2 位小数落盘，写下去也读不出来）。
+    #[serde(default = "default_style_epsilon")]
+    pub style_epsilon: f64,
+    /// 战况 → `temper`（理智↔热血）的四个权重：**在打**促成热血、**打赢**促成热血、
+    /// **被打残**与**本回合撤退多**促成理智（欺软怕硬 = 先打弱的）。
+    #[serde(default = "default_temper_war")]
+    pub temper_war: f64,
+    #[serde(default = "default_temper_win")]
+    pub temper_win: f64,
+    #[serde(default = "default_temper_damage")]
+    pub temper_damage: f64,
+    #[serde(default = "default_temper_withdraw")]
+    pub temper_withdraw: f64,
+    /// 「编队规模」的参考值：本舰 `lone_wolf_radius` 内的友舰数达到它时 `lone_wolf` 目标 = 0
+    /// （越来越少 → 趋向 +1 独狼；越来越多 → 趋向 −1 护航）。平滑映射，无阈值。
+    #[serde(default = "default_lone_wolf_ref")]
+    pub lone_wolf_ref: f64,
+    /// 编队规模的**观察半径**（AU）。0 = 用 `combat.escort_range`（护航机制自己的半径
+    /// ——驱动它的那条轴就该用同一把尺子）。
+    #[serde(default)]
+    pub lone_wolf_radius: f64,
+    /// `kiting`（风筝↔贴脸）的三个权重：**敌我火力比**（强则贴脸、弱则风筝）、
+    /// **自身硬度对比**（甲厚则贴脸）、**自己挨了多少打**（残则拉开）。
+    #[serde(default = "default_kiting_power")]
+    pub kiting_power: f64,
+    #[serde(default = "default_kiting_hardness")]
+    pub kiting_hardness: f64,
+    #[serde(default = "default_kiting_hurt")]
+    pub kiting_hurt: f64,
+
+    // --- ② 设计图（AI 建图 / 重估 / 回收）------------------------------------
+    /// 每回合、每个「归 AI 管的建造区」被重新生成一次设计的概率（抽签）。
+    #[serde(default = "default_blueprint_chance")]
+    pub blueprint_chance: f64,
+    /// 每回合、每个 `(势力, 舰级)` 重新抽一次**设计意图**（主题）的概率。主题是设计图的
+    /// **身份**（名字里有它），所以它必须比选装更黏——改主题 = 换一张图。
+    #[serde(default = "default_blueprint_intent_chance")]
+    pub blueprint_intent_chance: f64,
+    /// 画图时的**库存余量**（倍率）：设计图只挑「把库存折成 `1/(1+余量)` 之后仍买得起」的模块。
+    ///
+    /// 为什么会有这个旋钮：图是在**回合步进里**画的，而船是在**下一回合出厂那一刻**才付组件钱的。
+    /// 不留余量 ⇒ 出厂时钱可能已经花掉，`commit_spend` 的钳零就白送模块，而白送的模块**照样
+    /// 要付维护费**。留一道余量 = "画得出的图，钱要留一倍"，出厂时那笔钱通常还在。
+    ///
+    /// ⚠ **默认是 0（= 与出厂现算同一条线）**，不是"机制上更好"的那个值：实测余量 1.0 会让设计
+    /// 更便宜 ⇒ 船坞下更多水 ⇒ 总维护费越过收入，部分种子上整队锈蚀拆解（`min_ships` 打到 0）。
+    /// 机制是好的（"对造价负责"），但**默认必须是不把世界跑崩的那一档**；要开就是把它设成 1.0，
+    /// 并重新标定长局基线。证据与复现见 `.agents/notes/control-live-layers.md` §14.3。
+    #[serde(default = "default_blueprint_stock_margin")]
+    pub blueprint_stock_margin: f64,
+    /// 是否回收「本势力没有任何建造区指向、且不是玩家钉的」自建图。
+    /// 长局里图库不该只增不减（对照 `agent-control-long-game.md` §7 的幽灵权重教训）。
+    #[serde(default = "default_true")]
+    pub blueprint_reap: bool,
+    /// 设计**主题**表（意图 → 选装偏好）。空表 = 不建图（退回「所有建造区无图」）。
+    #[serde(default = "default_blueprint_themes")]
+    pub blueprint_themes: Vec<DesignTheme>,
+}
+
+/// 一份**设计主题**：AI 造图时的「这一型舰是干什么的」。
+///
+/// 主题只改**选装评分**（各分类的权重）与**造价惩罚**，不改「买不起就不装」这条硬规则
+/// ——所以任何主题都不会凭空造出势力供不起的舰（`autocontrol::shipbuilding::choose_loadout`
+/// 的可得性检查仍然生效）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DesignTheme {
+    /// 主题名（进图名：`自动{主题}·{舰级}`）。
+    pub name: String,
+    /// 平时被抽中的基础权重。
+    pub weight: f64,
+    /// **战况**加成：抽签权重 = `weight + war_strength × war_weight`（在打 → 更可能抽到它）。
+    pub war_weight: f64,
+    /// 四个模块分类的评分权重（`weapon` / `defense` / `thrust` / `utility`）。
+    pub cat_weapon: f64,
+    pub cat_defense: f64,
+    pub cat_thrust: f64,
+    pub cat_utility: f64,
+    /// 造价（市场价值）惩罚：越高越"只图便宜"。
+    pub cost_penalty: f64,
+}
+
+fn default_style_chance() -> f64 {
+    0.35
+}
+fn default_style_step_max() -> f64 {
+    0.55
+}
+fn default_style_epsilon() -> f64 {
+    0.01
+}
+fn default_temper_war() -> f64 {
+    0.6
+}
+fn default_temper_win() -> f64 {
+    0.8
+}
+fn default_temper_damage() -> f64 {
+    1.4
+}
+fn default_temper_withdraw() -> f64 {
+    0.7
+}
+fn default_lone_wolf_ref() -> f64 {
+    2.0
+}
+fn default_kiting_power() -> f64 {
+    0.8
+}
+fn default_kiting_hardness() -> f64 {
+    0.5
+}
+fn default_kiting_hurt() -> f64 {
+    1.0
+}
+fn default_blueprint_chance() -> f64 {
+    0.25
+}
+fn default_blueprint_intent_chance() -> f64 {
+    0.08
+}
+fn default_blueprint_stock_margin() -> f64 {
+    // 默认 **0**（与出厂现算同一条线）：配置里那个"留一倍余量"的 1.0 实测会在部分种子上把
+    // 舰队推过「养不起→锈蚀→整队拆解」的悬崖 ⇒ 默认值取"能跑起来"的那一档。见字段文档。
+    0.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_blueprint_themes() -> Vec<DesignTheme> {
+    vec![
+        DesignTheme {
+            name: "强袭".to_string(),
+            weight: 1.0,
+            war_weight: 1.6,
+            cat_weapon: 1.8,
+            cat_defense: 0.6,
+            cat_thrust: 0.8,
+            cat_utility: 0.6,
+            cost_penalty: 0.0,
+        },
+        DesignTheme {
+            name: "堡垒".to_string(),
+            weight: 0.8,
+            war_weight: 0.8,
+            cat_weapon: 0.7,
+            cat_defense: 2.0,
+            cat_thrust: 0.5,
+            cat_utility: 1.0,
+            cost_penalty: 0.0,
+        },
+        DesignTheme {
+            name: "远洋".to_string(),
+            weight: 0.7,
+            war_weight: 0.3,
+            cat_weapon: 0.9,
+            cat_defense: 0.6,
+            cat_thrust: 2.0,
+            cat_utility: 1.0,
+            cost_penalty: 0.0,
+        },
+        DesignTheme {
+            name: "平价".to_string(),
+            weight: 0.8,
+            war_weight: 0.0,
+            cat_weapon: 1.0,
+            cat_defense: 1.0,
+            cat_thrust: 1.0,
+            cat_utility: 1.0,
+            cost_penalty: 0.35,
+        },
+    ]
+}
+
+impl Default for AutoControlConfig {
+    fn default() -> Self {
+        Self {
+            style_chance: default_style_chance(),
+            style_step_max: default_style_step_max(),
+            style_epsilon: default_style_epsilon(),
+            temper_war: default_temper_war(),
+            temper_win: default_temper_win(),
+            temper_damage: default_temper_damage(),
+            temper_withdraw: default_temper_withdraw(),
+            lone_wolf_ref: default_lone_wolf_ref(),
+            lone_wolf_radius: 0.0,
+            kiting_power: default_kiting_power(),
+            kiting_hardness: default_kiting_hardness(),
+            kiting_hurt: default_kiting_hurt(),
+            blueprint_chance: default_blueprint_chance(),
+            blueprint_intent_chance: default_blueprint_intent_chance(),
+            blueprint_stock_margin: default_blueprint_stock_margin(),
+            blueprint_reap: true,
+            blueprint_themes: default_blueprint_themes(),
+        }
+    }
+}
+
 /// The whole game configuration, loaded from `config/game.ron`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameConfig {
@@ -742,6 +963,10 @@ pub struct GameConfig {
     /// * `#[serde(default)]` 容忍旧配置无此节。
     #[serde(default)]
     pub blueprints: BTreeMap<FactionId, Vec<BlueprintSeed>>,
+    /// **`Auto` 的执行者**（风格三轴的逐舰重估 + AI 建图/重估/回收）的参数。
+    /// `#[serde(default)]` 容忍旧配置无此节（默认值 = 两个执行者都开着，见各字段说明）。
+    #[serde(default)]
+    pub autocontrol: AutoControlConfig,
 }
 
 impl GameConfig {
