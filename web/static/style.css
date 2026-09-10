@@ -123,6 +123,9 @@ body {
   border-radius: 4px; padding: 2px 6px; width: 84px;
 }
 .ship-editor label, .leaf-val label { color: var(--muted); font-size: 12px; }
+/* 风格轴（理智↔热血 / 护航↔独狼 / 风筝↔贴脸）：一条轴 = 一个标签 + 一个 [-1,1] 的数。 */
+.ship-editor .style-field { display: flex; align-items: center; gap: 4px; }
+.ship-editor .style-field .lv-label { color: var(--muted); font-size: 12px; }
 .ship-editor input[type="checkbox"] { accent-color: var(--accent); }
 .add-bld { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 8px; }
 .add-bld button, .ship-editor .rm {

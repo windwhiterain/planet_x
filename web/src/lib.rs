@@ -747,4 +747,109 @@ mod tests {
             assert!(dumped.contains(path), "{path} 没挂上：{dumped}");
         }
     }
+
+    /// 势力级**默认风格**两片（`default_doctrine` / `default_kiting`）走 web 的写面：
+    /// 「只写 mode」（前端把归属改成玩家）合法且落地，再写值（前端编辑器里的数）立刻在读面
+    /// 回显——这就是「势力级两行」的前端往返。最后值**真的生效**：叶 Inherit 的舰改用默认。
+    #[test]
+    fn fleet_default_style_rows_round_trip_through_the_web_surface() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        let fc_of = |v: &StateView| v.control.iter().find(|c| c.faction_id == fid).cloned().unwrap();
+
+        // 开局没有任何人表态：读面**不给**这两行（前端于是补一片 `Inherit` 的叶让行出现）。
+        let fc = fc_of(&state_view(&w));
+        assert!(fc.default_doctrine.is_none() && fc.default_kiting.is_none(), "开局不该有默认风格叶");
+
+        // 第一步：前端把这两行的归属改成「玩家」——**只写 mode、不写值**是合法的（值不动），
+        // 也不算「写值即接管」。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "default_doctrine": { "mode": "Player" },
+                "default_kiting": { "mode": "Player" } }]
+        }))
+        .expect("前端写的就是这个形状");
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "两条新行必须落地：{:?}", report.skipped);
+        assert!(report.took_over.is_empty(), "只写 mode 不算接管：{:?}", report.took_over);
+
+        // 第二步：写值（编辑器里的两个数 / 一个数）。读面必须立刻回显——
+        // 「点了应用、刷新页面还在」靠的就是这条链。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "default_doctrine": { "temper": 0.4, "lone_wolf": -0.6 },
+                "default_kiting": { "kiting": -1.0 } }]
+        }))
+        .expect("前端写的就是这个形状");
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "{:?}", report.skipped);
+
+        let fc = fc_of(&state_view(&w));
+        let d = fc.default_doctrine.expect("势力级默认风格要在读面里");
+        assert_eq!((d.temper, d.lone_wolf, d.mode), (Some(0.4), Some(-0.6), Some(ControlMode::Player)));
+        let k = fc.default_kiting.expect("势力级默认风筝姿态要在读面里");
+        assert_eq!((k.kiting, k.mode), (Some(-1.0), Some(ControlMode::Player)));
+
+        // 值真的生效：叶还 Inherit 的舰（开局就是这样，AI 从不写这两片叶）改用舰队默认。
+        let sid = w.state.ships.iter().find(|s| s.faction_id == fid).unwrap().name.clone();
+        let eff = w.state.ship_doctrine(sid.clone());
+        assert_eq!((eff.temper, eff.lone_wolf), (0.4, -0.6), "叶 Inherit + 默认是玩家 ⇒ 取默认值");
+        assert_eq!(w.state.ship_kiting(sid.clone()), -1.0);
+        assert_eq!(w.state.ship_doctrine_control(sid), ControlMode::Player);
+    }
+
+    /// 前端「点应用」= 把 `/api/state` 的 `control`/`scope` 两段**原样** POST 回 `/api/command`。
+    /// 这条路径必须**风格中性**：读面给的是「有效值 + 叶片表态」，回传后每艘舰的有效风格与
+    /// 有效归属逐舰不变。
+    ///
+    /// 这条测试的靶子是读面里那些「状态中还没有叶片」的行（`ship_doctrine`/`ship_kiting`
+    /// 对**每艘舰**都有一行，哪怕叶不存在）：原样回传会把有效值写进一片 `Inherit` 的叶——
+    /// 引擎刻意允许（值不会被采用），但「真的没变」值得被钉住，否则一次误改就会把全舰队的
+    /// 风格静默改成读面那一刻的快照。
+    #[test]
+    fn posting_the_read_surface_back_keeps_effective_style() {
+        let mut w = world();
+        // 先推几回合，让世界不是开局那一张脸（叶子上有 AI 流水、舰队有增减）。
+        for _ in 0..3 {
+            w.pre = sim::derived_from_state(&w.state, &w.config);
+            w.post = sim::advance(&mut w.state, &w.config, &mut w.rng);
+        }
+        // 让舰队默认风格成为**玩家表态**：这样「叶 Inherit ⇒ 取默认值」这条路径也真的参与进来。
+        let fid = w.state.factions[0].name.clone();
+        let take: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "default_doctrine": { "temper": 0.5, "lone_wolf": -0.25, "mode": "Player" },
+                "default_kiting": { "kiting": -0.8, "mode": "Player" } }]
+        }))
+        .unwrap();
+        assert!(apply_diff(&mut w.state, &w.config, &take).is_clean());
+
+        let snap = |w: &GameWorld| -> Vec<(String, f64, f64, f64, ControlMode, ControlMode)> {
+            w.state
+                .ships
+                .iter()
+                .map(|s| {
+                    let d = w.state.ship_doctrine(s.name.clone());
+                    (
+                        s.name.clone(),
+                        d.temper,
+                        d.lone_wolf,
+                        w.state.ship_kiting(s.name.clone()),
+                        w.state.ship_doctrine_control(s.name.clone()),
+                        w.state.ship_kiting_control(s.name.clone()),
+                    )
+                })
+                .collect()
+        };
+        let before = snap(&w);
+
+        // 浏览器的那一次 POST：读面（写面模板）原样回传。
+        let view = state_view(&w);
+        let posted = serde_json::json!({ "control": view.control, "scope": view.scope });
+        let req: CommandReq = serde_json::from_value(posted)
+            .expect("读面必须能被写面接受——前端正是把这两段原样回传的");
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.applied > 0, "回传总得碰到点什么");
+        assert_eq!(snap(&w), before, "读面原样回传不许改变任何舰的有效风格 / 归属");
+    }
 }
