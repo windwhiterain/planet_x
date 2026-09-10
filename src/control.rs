@@ -29,19 +29,27 @@ pub struct ShipOrderEntry {
 
 /// 一艘舰的行为风格（per-舰 可配置）读面：两条轴各取 [-1,1]，0 = 基线。
 /// 〈风筝<->贴脸〉不在行为风格里，是普通舰船控制属性 [`ShipKitingEntry`]。
+///
+/// `temper`/`lone_wolf` 给的是**有效值**（叶 → 舰队默认 → 舰上记录值），`mode` 给的是
+/// **叶片自己的表态**（没有叶片 = `Inherit`）。所以「模板原样回传」安全：没被改过的行
+/// 写回去仍然没有意见。**改值请把 `mode` 改成 `Player`/`Auto`**——只改值而留着 `Inherit`
+/// 等于说"这一层没有意见"，除非舰队默认也是 `Player`，否则那个值不会被采用。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipDoctrineEntry {
     pub ship: ShipId,
     pub temper: f64,
     pub lone_wolf: f64,
+    pub mode: ControlMode,
 }
 
 /// 一艘舰的风筝<->贴脸姿态（普通舰船控制属性，per-舰）：[-1,1]，0 = 基线。它是软属性——
 /// Move/Follow/Dock/Idle 皆为软目标，附近有敌舰时自动按它软移动（玩家也不能硬控制）。
+/// 值与 `mode` 的语义见 [`ShipDoctrineEntry`]。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipKitingEntry {
     pub ship: ShipId,
     pub kiting: f64,
+    pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -85,6 +93,10 @@ pub struct FactionControlView {
     pub capital: Option<Control<BodyId>>,
     /// 舰队默认指令（势力级）：新舰出生就继承它，一次性指令执行完也回落到它。
     pub default_ship_order: Option<DefaultShipOrder>,
+    /// 舰队默认**行为风格**（势力级）：叶 Inherit 的舰取它的值。
+    pub default_doctrine: Option<DefaultDoctrine>,
+    /// 舰队默认**风筝<->贴脸姿态**（势力级）：与 `default_doctrine` 同形的另一片。
+    pub default_kiting: Option<DefaultKiting>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub ship_kiting: Vec<ShipKitingEntry>,
@@ -123,6 +135,34 @@ pub struct DefaultShipOrder {
     pub mode: Option<ControlMode>,
 }
 
+/// 舰队默认**行为风格**（势力级，两片之一）：**读面即写面**，与 `default_ship_order` 同形。
+///
+/// "全舰队风筝、战列舰贴脸"这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名；新下水的舰
+/// 也自动跟随（它没有自己的叶）。两条轴各取 [-1,1]，0 = 基线。
+#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct DefaultDoctrine {
+    /// 默认理智<->热血（缺省 = 保留现值；写值即接管，见 [`apply_diff`]）。
+    #[serde(default)]
+    pub temper: Option<f64>,
+    /// 默认护航<->独狼（缺省 = 保留现值）。
+    #[serde(default)]
+    pub lone_wolf: Option<f64>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
+}
+
+/// 舰队默认**风筝<->贴脸姿态**（势力级，两片之二），与 [`DefaultDoctrine`] 同形。
+#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct DefaultKiting {
+    /// 默认姿态（缺省 = 保留现值；写值即接管）。
+    #[serde(default)]
+    pub kiting: Option<f64>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
+}
+
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipOrderPatch {
@@ -140,6 +180,9 @@ pub struct ShipOrderPatch {
 
 /// 一艘舰的行为风格补丁（per-舰 可配置）：覆盖 `ship` 的某条轴；缺省轴保留现值。
 /// 每条轴会被钳制到 [-1,1]（技能就是在这个区间里取值的）。
+///
+/// 写的是**叶片**（`ControllableState::ship_doctrine`），不是舰上那个记录值：
+/// **写了值却没写 `mode` = 接管**（这片叶变成玩家风格），免得"我明明写了风格却没生效"。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipDoctrinePatch {
     /// 目标舰（唯一名 identity）。
@@ -148,16 +191,22 @@ pub struct ShipDoctrinePatch {
     pub temper: Option<f64>,
     #[serde(default)]
     pub lone_wolf: Option<f64>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管，没写值就保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
 }
 
-/// 一艘舰的风筝<->贴脸姿态补丁（普通舰船控制属性，per-舰）：覆盖 `ship` 的 `kiting`；
-/// 被钳制到 [-1,1]。缺省 = 保留现值。
+/// 一艘舰的风筝<->贴脸姿态补丁（普通舰船控制属性，per-舰）：覆盖 `ship` 的姿态叶；
+/// 被钳制到 [-1,1]。缺省 = 保留现值。语义同 [`ShipDoctrinePatch`]（叶片 + 写值即接管）。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipKitingPatch {
     /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
     #[serde(default)]
     pub kiting: Option<f64>,
+    /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -266,6 +315,12 @@ pub struct FactionControlPatch {
     /// 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
     #[serde(default)]
     pub default_ship_order: Option<DefaultShipOrder>,
+    /// 舰队默认行为风格（势力级，两片之一）：叶 Inherit 的舰取它的值。
+    #[serde(default)]
+    pub default_doctrine: Option<DefaultDoctrine>,
+    /// 舰队默认风筝<->贴脸姿态（势力级，两片之二）。
+    #[serde(default)]
+    pub default_kiting: Option<DefaultKiting>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
@@ -380,22 +435,32 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
         .iter()
         .map(|(sid, ctrl)| ShipOrderEntry { ship: sid.clone(), behavior: ctrl.value.clone(), mode: ctrl.mode })
         .collect();
-    // 读面：本势力每艘舰当前的行为风格（per-舰 可配置）。
+    // 读面：本势力每艘舰当前的行为风格。**值取有效值**（叶 → 舰队默认 → 舰上记录值），
+    // **mode 取叶片自己的表态**（没有叶片 = Inherit）——于是"模板原样回传"安全：没被改过的
+    // 行写回去仍然没有意见（有效值原样落进叶，而叶说 Inherit，取值回到原处）。
     let ship_doctrine = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid)
-        .map(|s| ShipDoctrineEntry {
-            ship: s.name.clone(),
-            temper: s.doctrine.temper,
-            lone_wolf: s.doctrine.lone_wolf,
+        .map(|s| {
+            let eff = state.ship_doctrine(s.name.clone());
+            ShipDoctrineEntry {
+                ship: s.name.clone(),
+                temper: eff.temper,
+                lone_wolf: eff.lone_wolf,
+                mode: c.ship_doctrine.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+            }
         })
         .collect();
     let ship_kiting = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid)
-        .map(|s| ShipKitingEntry { ship: s.name.clone(), kiting: s.kiting })
+        .map(|s| ShipKitingEntry {
+            ship: s.name.clone(),
+            kiting: state.ship_kiting(s.name.clone()),
+            mode: c.ship_kiting.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+        })
         .collect();
     let investment_budget = c
         .investment_budget
@@ -448,6 +513,15 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
         capital: c.capital.clone(),
         default_ship_order: c.default_ship_order.as_ref().map(|d| DefaultShipOrder {
             behavior: Some(d.value.clone()),
+            mode: Some(d.mode),
+        }),
+        default_doctrine: c.default_doctrine.as_ref().map(|d| DefaultDoctrine {
+            temper: Some(d.value.temper),
+            lone_wolf: Some(d.value.lone_wolf),
+            mode: Some(d.mode),
+        }),
+        default_kiting: c.default_kiting.as_ref().map(|d| DefaultKiting {
+            kiting: Some(d.value),
             mode: Some(d.mode),
         }),
         ship_orders,
@@ -506,6 +580,12 @@ fn round_view(v: FactionControlView) -> FactionControlView {
             behavior: d.behavior.map(round_behavior),
             mode: d.mode,
         }),
+        default_doctrine: v.default_doctrine.map(|d| DefaultDoctrine {
+            temper: d.temper.map(r2),
+            lone_wolf: d.lone_wolf.map(r2),
+            mode: d.mode,
+        }),
+        default_kiting: v.default_kiting.map(|d| DefaultKiting { kiting: d.kiting.map(r2), mode: d.mode }),
         ship_orders: v
             .ship_orders
             .into_iter()
@@ -518,12 +598,13 @@ fn round_view(v: FactionControlView) -> FactionControlView {
                 ship: d.ship,
                 temper: r2(d.temper),
                 lone_wolf: r2(d.lone_wolf),
+                mode: d.mode,
             })
             .collect(),
         ship_kiting: v
             .ship_kiting
             .into_iter()
-            .map(|k| ShipKitingEntry { ship: k.ship, kiting: r2(k.kiting) })
+            .map(|k| ShipKitingEntry { ship: k.ship, kiting: r2(k.kiting), mode: k.mode })
             .collect(),
         investment_budget: v
             .investment_budget
@@ -616,6 +697,25 @@ fn resolve_own_ship(
 /// 为什么：值写进去、而 mode 仍解析成 `Auto` 时，系统下一回合就会按自己的逻辑覆盖它。
 /// stdout 与退出码一切正常，agent 却会带着「命令已下达」的错觉玩下去——这正是本项目
 /// 反复吃过的「失败看起来像成功」。
+/// 「写值即接管」的三态落点（叶片共用）：显式 `mode` 优先；只写了值没写 `mode` ⇒ `Player`
+/// 并在回执里记一笔；什么都没写 ⇒ 保留现模式。
+fn write_mode_leaf(
+    ctrl: &mut ControlMode,
+    mode: Option<ControlMode>,
+    wrote_value: bool,
+    path: String,
+    report: &mut ApplyReport,
+) {
+    match mode {
+        Some(m) => *ctrl = m,
+        None if wrote_value => {
+            *ctrl = ControlMode::Player;
+            report.took_over(path);
+        }
+        None => {}
+    }
+}
+
 fn write_value_leaf<T>(
     ctrl: &mut Control<T>,
     value: Option<T>,
@@ -728,6 +828,55 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             }
             report.applied += 1;
         }
+        // 舰队默认**行为风格**（势力级，两片之一）：与上面同一条「写值即接管」规则。
+        if let Some(d) = &fac.default_doctrine {
+            let path = format!("{fid}.default_doctrine");
+            let wrote = d.temper.is_some() || d.lone_wolf.is_some();
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .default_doctrine
+                .get_or_insert_with(|| Control::inherit(ShipDoctrine::default()));
+            if let Some(v) = d.temper {
+                ctrl.value.temper = v.clamp(-1.0, 1.0);
+            }
+            if let Some(v) = d.lone_wolf {
+                ctrl.value.lone_wolf = v.clamp(-1.0, 1.0);
+            }
+            match (d.mode, wrote) {
+                (Some(m), _) => ctrl.mode = m,
+                (None, true) => {
+                    ctrl.mode = ControlMode::Player;
+                    report.took_over(path.clone());
+                }
+                (None, false) => {}
+            }
+            report.applied += 1;
+        }
+        // 舰队默认**风筝<->贴脸姿态**（势力级，两片之二）。
+        if let Some(d) = &fac.default_kiting {
+            let path = format!("{fid}.default_kiting");
+            let wrote = d.kiting.is_some();
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .default_kiting
+                .get_or_insert_with(|| Control::inherit(0.0));
+            if let Some(v) = d.kiting {
+                ctrl.value = v.clamp(-1.0, 1.0);
+            }
+            match (d.mode, wrote) {
+                (Some(m), _) => ctrl.mode = m,
+                (None, true) => {
+                    ctrl.mode = ControlMode::Player;
+                    report.took_over(path.clone());
+                }
+                (None, false) => {}
+            }
+            report.applied += 1;
+        }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
             // Resolve the ship by its **name** (the unique key): an order only
             // applies to a ship that exists and that this faction actually owns,
@@ -767,31 +916,47 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             }
             report.applied += 1;
         }
-        // 行为风格补丁：只作用于本势力确实拥有的舰；每条轴钳制到 [-1,1]。
+        // 行为风格补丁：写的是**叶片**（值 + 三态），不是舰上那个记录值——`Ship.doctrine`
+        // 只是出厂快照/AI 流水。每条轴钳制到 [-1,1]；缺省轴保留「当前有效值」，所以只写一条
+        // 轴不会把另一条清零。写值即接管（与其它叶同一条规则），回执里记一笔。
         for (i, d) in fac.ship_doctrine.iter().enumerate() {
             let path = format!("{fid}.ship_doctrine[{i}].ship");
             if resolve_own_ship(state, &fid, &d.ship, &path, &mut report).is_none() {
                 continue;
             }
-            let ship = state.ships.iter_mut().find(|s| s.name == d.ship).expect("just resolved");
-            if let Some(v) = d.temper {
-                ship.doctrine.temper = v.clamp(-1.0, 1.0);
-            }
-            if let Some(v) = d.lone_wolf {
-                ship.doctrine.lone_wolf = v.clamp(-1.0, 1.0);
-            }
+            let base = state.ship_doctrine(d.ship.clone());
+            let value = ShipDoctrine {
+                temper: d.temper.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.temper),
+                lone_wolf: d.lone_wolf.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.lone_wolf),
+            };
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .ship_doctrine
+                .entry(d.ship.clone())
+                .or_insert_with(|| Control::inherit(base));
+            ctrl.value = value;
+            write_mode_leaf(&mut ctrl.mode, d.mode, d.temper.is_some() || d.lone_wolf.is_some(), format!("{fid}.ship_doctrine[{i}]"), &mut report);
             report.applied += 1;
         }
-        // 风筝<->贴脸姿态补丁：普通舰船控制属性，只作用于本势力确实拥有的舰；钳制到 [-1,1]。
+        // 风筝<->贴脸姿态补丁：同一条路（叶片 + 写值即接管），钳制到 [-1,1]。
         for (i, k) in fac.ship_kiting.iter().enumerate() {
             let path = format!("{fid}.ship_kiting[{i}].ship");
             if resolve_own_ship(state, &fid, &k.ship, &path, &mut report).is_none() {
                 continue;
             }
-            let ship = state.ships.iter_mut().find(|s| s.name == k.ship).expect("just resolved");
-            if let Some(v) = k.kiting {
-                ship.kiting = v.clamp(-1.0, 1.0);
-            }
+            let base = state.ship_kiting(k.ship.clone());
+            let value = k.kiting.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base);
+            let ctrl = state
+                .control
+                .entry(fid.clone())
+                .or_default()
+                .ship_kiting
+                .entry(k.ship.clone())
+                .or_insert_with(|| Control::inherit(base));
+            ctrl.value = value;
+            write_mode_leaf(&mut ctrl.mode, k.mode, k.kiting.is_some(), format!("{fid}.ship_kiting[{i}]"), &mut report);
             report.applied += 1;
         }
         for (i, bp) in fac.investment_budget.iter().enumerate() {
@@ -1344,13 +1509,15 @@ mod tests {
         assert_eq!(b, ShipBehavior::Follow { ship: "华盛顿".to_string() });
     }
 
-    /// Applying a ship-doctrine patch sets only the given axes on the faction's
-    /// own ships, clamps each axis to [-1,1], and ignores other-faction / unknown
-    /// ships (per-舰 可配置覆写).
+    /// 应用一条舰风格补丁：只写给定轴、钳制到 [-1,1]、只作用于本势力自己的舰。
+    ///
+    /// 而且它写的是**叶片**：舰上的 `Ship.doctrine`/`Ship.kiting` 是**记录值**（出厂快照 +
+    /// AI 流水），补丁不该动它——有效值走 `State::ship_doctrine`/`State::ship_kiting`。
     #[test]
     fn apply_ship_doctrine_patch() {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
+        let record_before = state.ship("长城").expect("长城 exists").doctrine;
         let diff = serde_json::json!({
             "control": [{"faction_id": "中国",
                 "ship_doctrine": [
@@ -1364,14 +1531,68 @@ mod tests {
             }]
         });
         apply_patch(&mut state, &config, &diff).expect("doctrine patch applies");
-        let d = state.ship("长城").expect("长城 exists").doctrine;
+        let d = state.ship_doctrine("长城".to_string());
         assert_eq!(d.temper, -1.0);
         assert_eq!(d.lone_wolf, 1.0, "axis must be clamped to [-1,1]");
-        assert_eq!(state.ship("长城").unwrap().kiting, -0.5);
+        assert_eq!(state.ship_kiting("长城".to_string()), -0.5);
+        assert_eq!(
+            state.ship("长城").unwrap().doctrine,
+            record_before,
+            "补丁写的是叶片；舰上的 doctrine 是记录值，不该被改"
+        );
+        // 写值即接管：这片叶从此归玩家。
+        assert_eq!(state.ship_doctrine_control("长城".to_string()), ControlMode::Player);
+        assert_eq!(state.ship_kiting_control("长城".to_string()), ControlMode::Player);
         // 华盛顿 belongs to 美国, not 中国 → the 中国 patch must be a no-op.
-        let w = state.ship("华盛顿").expect("华盛顿 exists").doctrine;
-        assert_eq!(w.temper, 0.0, "other-faction ship must be untouched");
-        assert_eq!(state.ship("华盛顿").unwrap().kiting, 0.0, "other-faction ship must be untouched");
+        assert_eq!(
+            state.ship_doctrine("华盛顿".to_string()).temper,
+            0.0,
+            "other-faction ship must be untouched"
+        );
+        assert_eq!(state.ship_kiting("华盛顿".to_string()), 0.0, "other-faction ship must be untouched");
+    }
+
+    /// 舰队默认**风格**（`default_doctrine` / `default_kiting`）：一片叶改全舰队、
+    /// **新舰（还没有任何叶片）也自动跟随**、单舰特例仍然优先。
+    ///
+    /// 这就是「按舰级默认」在控制面上的正解形态：不需要引擎加一层 `BTreeMap<舰级, …>`，
+    /// 「全舰队风筝、战列舰贴脸」= 一片默认叶 + 几片特例叶。
+    #[test]
+    fn fleet_default_style_covers_ships_without_leaves() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .map(|s| s.name.clone())
+            .expect("中国 has a starting ship");
+
+        // 1) 只写势力级默认：没有叶片的舰全部取它（写值即接管 ⇒ mode = Player）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "default_kiting": {"kiting": -1.0}}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("default style applies");
+        assert_eq!(state.ship_kiting(ship.clone()), -1.0, "没有叶片的舰必须跟随舰队默认");
+        assert_eq!(
+            state.ship_kiting_control(ship.clone()),
+            ControlMode::Player,
+            "只写值不写 mode ⇒ 接管（与其它叶同一条规则）"
+        );
+
+        // 2) 单舰特例（更具体的层）优先。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "ship_kiting": [{"ship": ship, "kiting": 1.0, "mode": "Player"}]}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("per-ship override applies");
+        assert_eq!(state.ship_kiting(ship.clone()), 1.0, "单舰叶片比舰队默认更具体");
+
+        // 3) 把叶片交回上层（Inherit）⇒ 又回到舰队默认的值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "ship_kiting": [{"ship": ship, "mode": "Inherit"}]}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("release applies");
+        assert_eq!(state.ship_kiting(ship.clone()), -1.0, "叶 Inherit + 舰队默认 Player ⇒ 取默认值");
     }
 
     /// 舰队默认指令（`default_ship_order`）：**新舰出生就有意图**，而且**一个叶片改全舰队**。

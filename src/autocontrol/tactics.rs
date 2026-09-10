@@ -87,7 +87,10 @@ fn doctrine_weight(
     // 理智<->热血：`temper<0` 欺软怕硬(打威慑低于自己的)，`>0` 飞蛾扑火(打威慑高于自己的)。
     // 用「威慑比」的对数来量化敌我差距：即使本舰威慑远大于目标，弱目标之间仍能分清高下
     // （避免 `(my-tg)/(my+tg)` 在 my≫tg 时把所有弱目标压成 ~1、失去区分度）。
-    let temper = attacker.doctrine.temper;
+    //
+    // 读的是**有效风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——AI 只读它，
+    // 从不写它，所以玩家钉住的风格不会被 AI 覆盖。
+    let temper = state.ship_doctrine(attacker.name.clone()).temper;
     if temper.abs() > 1e-9 {
         let my_det = sim::deterrence(state, config, &attacker.name);
         let tg_det = sim::deterrence(state, config, &target.name);
@@ -243,7 +246,9 @@ pub(crate) fn auto_combat(state: &mut State, config: &GameConfig, ship_id: &str,
 /// 生效，对玩家与 AI 一视同仁。引擎结算不读它。
 pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> Option<[f64; 2]> {
     let Some(ship) = state.ship(ship_id) else { return None };
-    if ship.kiting.abs() < 1e-9 {
+    // 有效姿态（叶 → 舰队默认 → 舰上记录值）：AI 只读，玩家写的叶优先。
+    let kiting = state.ship_kiting(ship_id.to_string());
+    if kiting.abs() < 1e-9 {
         return None; // 基线：无软调整。
     }
     let owner = ship.faction_id.clone();
@@ -261,7 +266,7 @@ pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> 
     }
     // unit: 从敌舰指向本舰的单位向量——把目的地放在「本舰当前这一侧、距敌 desired_r」处。
     let unit = [(pos[0] - epos[0]) / d, (pos[1] - epos[1]) / d];
-    let desired_r = if ship.kiting < 0.0 {
+    let desired_r = if kiting < 0.0 {
         range // 风筝：保持在最远武器射程。
     } else {
         config.combat.min_engage_range.max(0.0) // 贴脸：压近到最小交战距离。
@@ -335,7 +340,7 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
         && config.combat.escort_range > 0.0
         && sim::faction_at_war(state, config, owner)
     {
-        let lone_wolf = state.ship(ship_id).map(|s| s.doctrine.lone_wolf).unwrap_or(0.0);
+        let lone_wolf = state.ship_doctrine(ship_id.to_string()).lone_wolf;
         if lone_wolf < -0.01 {
             if let Some(flag_id) = fleet_flag(state, &owner) {
                 if flag_id != ship_id {
@@ -386,7 +391,8 @@ pub(crate) fn ai_ship_turn(
     let my_hull = ship.hull;
     let my_hull_max = ship.hull_max;
     let focus = focus_of.get(&owner).cloned().flatten();
-    let kiting = ship.kiting;
+    // 有效姿态（叶 → 舰队默认 → 记录值）：撤退阈值也跟着它走。
+    let kiting = state.ship_kiting(ship_id.to_string());
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 

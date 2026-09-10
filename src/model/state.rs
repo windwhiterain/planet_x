@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 fn default_schema_version() -> u32 {
     0
 }
@@ -216,6 +216,86 @@ impl State {
     // 算它的；一路「继承」到全局也没人说话，就落到 `Auto`（系统自动决定）。所以
     // 「叶子/作用域不存在」与「显式写着 Inherit」完全等价——都是没有说话。
 
+    /// 这艘舰当前的**有效行为风格**：叶 → 舰队默认 → **舰上的记录值**（出厂快照）。
+    ///
+    /// 与 [`State::ship_behavior`] 同一条取值规则（叶 Inherit + 舰队默认是 `Player` ⇒ 取默认值；
+    /// 否则取叶上的值），只是最后兜底到 `Ship.doctrine`——因为 `doctrine` 出厂时就有一份
+    /// 快照，而指令没有。这条兜底让「老存档里只写过 `Ship.doctrine`」的行为完全不变。
+    pub fn ship_doctrine(&self, ship_id: ShipId) -> ShipDoctrine {
+        let Some(s) = self.ship(&ship_id) else {
+            return ShipDoctrine::default();
+        };
+        let record = s.doctrine;
+        let Some(c) = self.control(s.faction_id.clone()) else {
+            return record;
+        };
+        let leaf = c.ship_doctrine.get(&ship_id);
+        if leaf_mode(leaf) == ControlMode::Inherit {
+            if let Some(d) = &c.default_doctrine {
+                if d.mode.is_player() {
+                    return d.value;
+                }
+            }
+        }
+        leaf.map(|l| l.value).unwrap_or(record)
+    }
+
+    /// 这艘舰当前的**有效风筝<->贴脸姿态**：叶 → 舰队默认 → 舰上的记录值。
+    pub fn ship_kiting(&self, ship_id: ShipId) -> f64 {
+        let Some(s) = self.ship(&ship_id) else {
+            return 0.0;
+        };
+        let record = s.kiting;
+        let Some(c) = self.control(s.faction_id.clone()) else {
+            return record;
+        };
+        let leaf = c.ship_kiting.get(&ship_id);
+        if leaf_mode(leaf) == ControlMode::Inherit {
+            if let Some(d) = &c.default_kiting {
+                if d.mode.is_player() {
+                    return d.value;
+                }
+            }
+        }
+        leaf.map(|l| l.value).unwrap_or(record)
+    }
+
+    /// 决定这艘舰的**行为风格**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    pub fn ship_doctrine_control(&self, ship_id: ShipId) -> ControlMode {
+        self.ship_style_chain(ship_id, true)
+    }
+
+    /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    pub fn ship_kiting_control(&self, ship_id: ShipId) -> ControlMode {
+        self.ship_style_chain(ship_id, false)
+    }
+
+    /// 两条风格轴共用的归属链（`doctrine=true` 取 `ship_doctrine`/`default_doctrine`）。
+    fn ship_style_chain(&self, ship_id: ShipId, doctrine: bool) -> ControlMode {
+        let Some(s) = self.ship(&ship_id) else {
+            return ControlMode::Auto;
+        };
+        let fid = s.faction_id.clone();
+        let (leaf, default) = match self.control(fid.clone()) {
+            Some(c) => {
+                if doctrine {
+                    (
+                        leaf_mode(c.ship_doctrine.get(&ship_id)),
+                        leaf_mode(c.default_doctrine.as_ref()),
+                    )
+                } else {
+                    (
+                        leaf_mode(c.ship_kiting.get(&ship_id)),
+                        leaf_mode(c.default_kiting.as_ref()),
+                    )
+                }
+            }
+            None => (ControlMode::Inherit, ControlMode::Inherit),
+        };
+        let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
+        resolve_chain(&[leaf, default, faction, self.scope.global])
+    }
+
     /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
     pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
         let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.investment_budget.get(resource)));
@@ -320,9 +400,17 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
 ///
 /// 此后的约定：一旦某层真的积累了「计算回看」的历史，升版就**不该**再继续「只升版本号」，
 /// 届时应在此处写真正的迁移（而不是把历史一起丢掉）。
+///
+/// v5 → v6：**风格（doctrine / kiting）也变成活层**——`ControllableState` 多了四片：
+/// 每舰的 `ship_doctrine`/`ship_kiting` 叶片 + 势力级 `default_doctrine`/`default_kiting`；
+/// `Ship.doctrine`/`Ship.kiting` 降级为**记录值**（出厂快照 + AI 流水）。
+///
+/// **这一档同样是零信息损失**：旧档没有那四片（`#[serde(default)]` ⇒ 空），于是
+/// [`State::ship_doctrine`]/[`State::ship_kiting`] 的链一路继承、最后兜底到舰上的记录值——
+/// **旧档的有效风格逐舰不变**。旧二进制读不了新档（版本过新会被拒），这是既定的方向。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 => {
+        0 | 1 | 2 | 3 | 4 | 5 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

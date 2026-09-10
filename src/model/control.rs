@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::model::{BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipId};
+use crate::model::{BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipDoctrine, ShipId};
 
 /// 沿作用域链（从具体到宽泛）取第一个**有意见**的层，即第一个不是
 /// [`ControlMode::Inherit`] 的节点；全链都「继承」（没有说话）时，由系统自动决定
@@ -252,6 +252,17 @@ pub struct ControlScopePatch {
 pub struct ControllableState {
     /// 本方各飞船的当前指令（每艘舰一个 Control）。
     pub ship_orders: BTreeMap<ShipId, Control<ShipBehavior>>,
+    /// 本方各舰的**行为风格**叶片（值 + 三态归属）。
+    ///
+    /// 这是 `ship_doctrine` 这一轴的**活层**：`Ship.doctrine` 降级成"记录值"（出厂快照 +
+    /// AI 流水），有效值走 [`State::ship_doctrine`](crate::model::State::ship_doctrine) 的
+    /// 叶 → 舰队默认 → 记录值 链。AI **从不写**这片叶（它只读有效值），所以"AI 覆盖玩家风格"
+    /// 这种问题在这条轴上不存在。
+    #[serde(default)]
+    pub ship_doctrine: BTreeMap<ShipId, Control<ShipDoctrine>>,
+    /// 本方各舰的**风筝<->贴脸姿态**叶片（值 + 三态归属），与 `ship_doctrine` 同形的另一条轴。
+    #[serde(default)]
+    pub ship_kiting: BTreeMap<ShipId, Control<f64>>,
     /// **舰队默认指令**（势力级的「没有别的指令时怎么办」）。
     ///
     /// 它是「新舰出生就有意图」和「一次性指令执行完回落到哪」的唯一答案，也是本势力
@@ -264,6 +275,13 @@ pub struct ControllableState {
     /// （更具体的层优先）。
     #[serde(default)]
     pub default_ship_order: Option<Control<ShipBehavior>>,
+    /// **舰队默认行为风格**（势力级）：叶 Inherit 的舰取它的值。"全舰队风筝、战列舰贴脸"
+    /// 这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名。
+    #[serde(default)]
+    pub default_doctrine: Option<Control<ShipDoctrine>>,
+    /// **舰队默认风筝<->贴脸姿态**（势力级），与 `default_doctrine` 同形的另一片。
+    #[serde(default)]
+    pub default_kiting: Option<Control<f64>>,
     /// 投资预算（资源/时间）：决定拿出多少资源用于「建设（建筑）」，按各建筑
     /// 建设投资权重竞争（每资源一个 Control）。
     pub investment_budget: BTreeMap<String, Control<f64>>,
