@@ -1,6 +1,11 @@
 # 超长轨迹的「粗粒度 / 降采样视图」
 
 > 状态 `[~]` ｜ 索引：[notes.md](../notes.md) ｜ 前身：`ideas.md` §15
+>
+> ⚠ **2026-10 更新**：`--traj` **已从 CLI 删掉**（见 [`cli-surface.md`](cli-surface.md)），
+> 所以下面提到 `--traj N --every K` 的那条只适用于 `--round`；**`--every` 只管 stdout 轨迹、
+> 不动 `--index` 投影**（实测 `--every 10` 与全量一模一样）。要「连轨迹都不要」用新的
+> `--quiet`。
 
 > 问题：`--round 3000` 输出 3001 行全量 JSON，agent 上下文/管道撑不住。要让 agent 先看
 > 「粗粒度」再决定是否放大。落了一套，剩下的是候选。
