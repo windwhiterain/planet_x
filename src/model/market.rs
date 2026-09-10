@@ -54,6 +54,10 @@ pub struct MarketState {
     /// 「仓里够全球用几个回合」比「绝对数量」更能表达稀缺。
     #[serde(default)]
     pub avg_demand: ResourceMap,
+    /// **上一回合市场时刻**的世界总库存（按资源）。与「本回合市场时刻的库存 + 本回合产出」
+    /// 相减即得**实测消费率**——价格发现不猜需求，而是量出来的。
+    #[serde(default)]
+    pub last_stock: ResourceMap,
 }
 
 impl MarketState {
@@ -122,6 +126,7 @@ mod tests {
             price: [("铁".to_string(), 1.4)].into_iter().collect(),
             settled: [("铁".to_string(), 4.0)].into_iter().collect(),
             avg_demand: [("铁".to_string(), 3.0)].into_iter().collect(),
+            last_stock: [("铁".to_string(), 12.0)].into_iter().collect(),
         };
         let text = ron::ser::to_string(&m).expect("serializable");
         let back: MarketState = ron::from_str(&text).expect("deserializable");
@@ -129,5 +134,6 @@ mod tests {
         assert_eq!(back.price_of("铁", 1.0), 1.4);
         assert_eq!(back.settled.get("铁"), Some(&4.0));
         assert_eq!(back.avg_demand.get("铁"), Some(&3.0));
+        assert_eq!(back.last_stock.get("铁"), Some(&12.0));
     }
 }

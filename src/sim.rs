@@ -74,7 +74,7 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     let mut flow = RoundFlow::default();
     step_production(state, config, &mut flow);
     step_upkeep(state, config, &mut flow);
-    step_market(state, config);
+    step_market(state, config, &mut flow);
     step_construction(state, config, rng);
     step_military(state, config, rng);
     // 光速治理：以距离首都为代价的管理/忠诚度，给超大帝国一个自然上限。
@@ -790,127 +790,270 @@ fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     }
 }
 
-/// Automatic interstellar exchange. Every faction keeps each mineral its
-/// shipyards consume at least [`MarketConfig::working_buffer`] units in stock;
-/// when one falls short it buys the deficit by selling its surplus minerals
-/// (value-weighted), at a small [`MarketConfig::spread`] friction.
+/// 军工需要的资源集合：所有舰级的 `build_cost` ∪ 所有组件的 `cost`。
+/// 这是买方想常备的目标集合（一个势力有船坞，就想备齐这些料）。
+fn military_need(config: &GameConfig) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for cls in config.ships.keys() {
+        for rt in config.ship_spec(cls).build_cost.keys() {
+            out.insert(rt.clone());
+        }
+    }
+    for id in config.components.keys() {
+        for rt in config.component_spec(id).cost.keys() {
+            out.insert(rt.clone());
+        }
+    }
+    out
+}
+
+/// 星际市场（真实交换所）。每回合三步，全部确定性、无 RNG：
 ///
-/// This gives the economy a downstream **sink** for surplus stockpiles (so they
-/// do not balloon unboundedly) and a **supply** so a faction that cannot mine a
-/// keystone mineral (e.g. carbon) can still build and sustain a fleet. Trade is
-/// deterministic (no RNG) and value-conserving modulo the spread fee.
-fn step_market(state: &mut State, config: &GameConfig) {
+/// 1. **价格发现**：`mult = (coverage_rounds / 覆盖回合数)^price_alpha`，其中
+///    「覆盖回合数」= 世界总库存 ÷ 全球消费率（滑窗）。稀缺 → 高价（顶到
+///    [`MarketConfig::price_ceiling`]），过剩 → 折价（[`MarketConfig::price_floor`]）。
+///    消费率由「上回合市场时刻的库存 + 本回合产出 − 本回合市场时刻的库存」实测——
+///    不猜需求。
+/// 2. **挂单**：供给来自**各势力真实的富余**（库存扣掉自己要留的部分），挂单**记名卖家**
+///    （禁运判据在卖家身上，见 [`step_market`] 的可见性过滤）。
+/// 3. **结算（配给）**：买方按购买力（自己可出口富余的价值）从别人的挂单里买，
+///    **仓里有多少卖多少**；买不到就是买不到。付款=把自己可出口的实物交给卖家，
+///    另按 `spread` 烧掉一笔手续费（真实的价值 sink）。
+///
+/// 与旧实现的根本差别：旧版是**常数价的无限贩卖机**（没有卖家、没有仓、没有价格），
+/// 所以「缺某种矿」不可能更贵、也不可能「不卖给你」。见
+/// `.agents/notes/trade-and-sanctions.md` 的实测基线。
+fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let m = &config.market;
     if m.auto_trade_limit <= 0.0 {
         return;
     }
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+    let need = military_need(config);
 
-    // 经济制裁：若有一个已「坐大」的霸权（实力占比达标且至少一弱者倒向联盟），该霸权
-    // 被多国资源封锁，其自动市场交易额度按 `sanction_trade_mult` 缩水——难以靠市场兑换
-    // 短缺矿物，产业受抑。
-    let sanctioned = sanctioned_hegemon(state, config);
-    let trade_limit_of = |fid: FactionId| -> f64 {
-        if sanctioned == Some(fid) {
-            m.auto_trade_limit * config.balance.sanction_trade_mult
-        } else {
-            m.auto_trade_limit
-        }
-    };
-
-    for fid in faction_ids {
-        // 1) Minerals this faction's shipyards need (union of build_cost keys).
-        let mut need: BTreeSet<String> = BTreeSet::new();
-        for c in &state.cities {
-            if c.faction_id != fid {
-                continue;
-            }
-            for b in &c.buildings {
-                if b.is_shipyard() {
-                    if let Some(cls) = b.ship_type.clone() {
-                        for (rt, _) in &config.ship_spec(&cls).build_cost {
-                            need.insert(rt.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if need.is_empty() {
-            continue;
-        }
-
-        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
-
-        // 2) Deficits below the working buffer, and their cost.
-        let mut deficits: Vec<(String, f64)> = Vec::new();
-        let mut buy_value = 0.0;
-        for rt in &need {
-            let have = stock.get(rt).copied().unwrap_or(0.0);
-            if have < m.working_buffer {
-                let amt = m.working_buffer - have;
-                deficits.push((rt.clone(), amt));
-                buy_value += amt * value_of(rt);
-            }
-        }
-        if deficits.is_empty() {
-            continue;
-        }
-
-        // 3) Sellable surplus: minerals NOT in `need`, above the reserve floor.
-        let floor = m.working_buffer;
-        let mut surplus_value = 0.0;
-        for (rt2, amt) in &stock {
-            if need.contains(rt2) {
-                continue;
-            }
-            let over = amt - floor;
-            if over > 1e-6 {
-                surplus_value += over * value_of(rt2);
-            }
-        }
-        if surplus_value <= 1e-6 {
-            continue;
-        }
-
-        // 4) Effective buy: capped by the trade limit (or the sanctioned cap) and
-        // by what surplus sells.
-        let eff_buy = buy_value
-            .min(trade_limit_of(fid.clone()))
-            .min(surplus_value / (1.0 + m.spread));
-        if eff_buy <= 1e-6 {
-            continue;
-        }
-        let scale = eff_buy / buy_value;
-        let actual_sell = eff_buy * (1.0 + m.spread);
-
-        // 5) Apply: top up deficits (scaled), drain surpluses by value share.
-        if let Some(f) = state.faction_mut(&fid) {
-            let mut res = std::mem::take(&mut f.resources);
-            for (rt, amt) in &deficits {
-                *res.entry(rt.clone()).or_insert(0.0) += amt * scale;
-            }
-            for (rt2, amt) in &stock {
-                if need.contains(rt2) {
-                    continue;
-                }
-                let price = value_of(rt2);
-                if price <= 1e-9 {
-                    continue;
-                }
-                let over = amt - floor;
-                if over <= 1e-6 {
-                    continue;
-                }
-                let share = (over * price) / surplus_value;
-                let sell_amt = (actual_sell * share / price).min(res.get(rt2).copied().unwrap_or(0.0));
-                let cur = res.get(rt2).copied().unwrap_or(0.0);
-                res.insert(rt2.clone(), (cur - sell_amt).max(0.0));
-            }
-            f.resources = res;
+    // --- 1) 观测：世界总库存 + 本回合产出 → 消费率（滑窗）→ 价格 ----------------
+    let mut world_stock: ResourceMap = ResourceMap::new();
+    for f in &state.factions {
+        for (rt, v) in &f.resources {
+            *world_stock.entry(rt.clone()).or_insert(0.0) += *v;
         }
     }
+    let mut produced: ResourceMap = ResourceMap::new();
+    for prod in flow.faction_production.values() {
+        for (rt, v) in prod {
+            *produced.entry(rt.clone()).or_insert(0.0) += *v;
+        }
+    }
+    let last = state.market.last_stock.clone();
+    let first_round = last.is_empty();
+    let mut price: ResourceMap = ResourceMap::new();
+    let mut avg_demand: ResourceMap = ResourceMap::new();
+    for rt in config.resources.keys() {
+        let have = world_stock.get(rt).copied().unwrap_or(0.0);
+        let made = produced.get(rt).copied().unwrap_or(0.0);
+        // 消费 = 上回合市场时刻库存 + 本回合产出 − 本回合市场时刻库存。
+        // 中间发生的支出：上回合的建设/治理 + 本回合的维护 + 市场手续费。
+        let consumed = if first_round {
+            0.0
+        } else {
+            (last.get(rt).copied().unwrap_or(0.0) + made - have).max(0.0)
+        };
+        let prev = state.market.avg_demand.get(rt).copied().unwrap_or(0.0);
+        let demand = if first_round || prev <= 0.0 {
+            consumed
+        } else {
+            prev * (1.0 - m.demand_smoothing) + consumed * m.demand_smoothing
+        };
+        avg_demand.insert(rt.clone(), demand);
+        let mult = if demand <= m.demand_min {
+            // 几乎没人消费它 → 没有稀缺信号，按基价（否则没人用的矿会被永久顶成天价）。
+            1.0
+        } else {
+            let cover = (have / demand).max(m.cover_floor);
+            (m.coverage_rounds / cover)
+                .powf(m.price_alpha)
+                .clamp(m.price_floor, m.price_ceiling)
+        };
+        price.insert(rt.clone(), value_of(rt) * mult);
+    }
+
+    // --- 2) 挂单：真实供给（谁卖、卖什么、多少、什么价） ------------------------
+    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
+    let mut offers: Vec<Offer> = Vec::new();
+    // 挂单簿：卖方还能交出什么（结算期间唯一权威的「可给出去的实物」账本）。
+    let mut remaining: BTreeMap<(FactionId, String), f64> = BTreeMap::new();
+    for fid in &faction_ids {
+        let Some(f) = state.faction(fid) else { continue };
+        for (rt, amt) in &f.resources {
+            // 自己需要的资源至少留 `working_buffer`；其余按 `reserve_fraction` 留一半。
+            let keep = if need.contains(rt) {
+                m.working_buffer.max(amt * m.reserve_fraction)
+            } else {
+                amt * m.reserve_fraction
+            };
+            let over = amt - keep;
+            if over > 1e-6 {
+                offers.push(Offer {
+                    seller: fid.clone(),
+                    resource: rt.clone(),
+                    amount: over,
+                    ask: price.get(rt).copied().unwrap_or_else(|| value_of(rt)),
+                });
+                remaining.insert((fid.clone(), rt.clone()), over);
+            }
+        }
+    }
+
+    // --- 3) 结算：买方按购买力从别人的挂单里买（配给） --------------------------
+    // 买方顺序＝购买力降序（「钱多的人先买」，确定性：同额按名字排序）。
+    let mut buyers: Vec<(FactionId, f64)> = faction_ids
+        .iter()
+        .map(|fid| (fid.clone(), listed_value(&remaining, &price, &value_of, fid)))
+        .collect();
+    buyers.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut settled: ResourceMap = ResourceMap::new();
+    let mut net_import: BTreeMap<FactionId, f64> = BTreeMap::new();
+    let mut spent: BTreeMap<FactionId, f64> = BTreeMap::new();
+    for (buyer, _) in buyers {
+        // 想买的：军工需要、且低于目标库存的资源，**越贵越先买**（先抢最稀缺的）。
+        let stock = state.faction(&buyer).map(|f| f.resources.clone()).unwrap_or_default();
+        let mut want: Vec<(String, f64, f64)> = need
+            .iter()
+            .map(|rt| {
+                let have = stock.get(rt).copied().unwrap_or(0.0);
+                let p = price.get(rt).copied().unwrap_or_else(|| value_of(rt));
+                (rt.clone(), (m.working_buffer - have).max(0.0), p)
+            })
+            .filter(|(_, w, _)| *w > 1e-9)
+            .collect();
+        want.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+
+        for (rt, mut short, p) in want {
+            if short <= 1e-9 || p <= 1e-9 {
+                continue;
+            }
+            // 别的势力此刻还剩多少这种资源在卖（按卖家名排序 → 确定性）。
+            let sellers: Vec<(FactionId, f64)> = remaining
+                .iter()
+                .filter(|((s, r), amt)| r == &rt && s != &buyer && **amt > 1e-9)
+                .map(|((s, _), amt)| (s.clone(), *amt))
+                .collect();
+            for (seller, avail) in sellers {
+                if short <= 1e-9 {
+                    break;
+                }
+                // 购买力每次现算：自己的货可能已经被别人买走了。
+                let spendable = listed_value(&remaining, &price, &value_of, &buyer);
+                let limit_left = (m.auto_trade_limit - spent.get(&buyer).copied().unwrap_or(0.0)).max(0.0);
+                let max_purchase = (spendable / (1.0 + m.spread)).min(limit_left);
+                let take = short.min(avail).min(max_purchase / p);
+                if take <= 1e-9 {
+                    continue;
+                }
+                let cost = take * p;
+                // 实物交割：卖家的货 → 买家。
+                if let Some(f) = state.faction_mut(&seller) {
+                    let e = f.resources.entry(rt.clone()).or_insert(0.0);
+                    *e = (*e - take).max(0.0);
+                }
+                if let Some(f) = state.faction_mut(&buyer) {
+                    *f.resources.entry(rt.clone()).or_insert(0.0) += take;
+                }
+                if let Some(r) = remaining.get_mut(&(seller.clone(), rt.clone())) {
+                    *r -= take;
+                }
+                *settled.entry(rt.clone()).or_insert(0.0) += take;
+                // 付款：买家把自己可出口的实物交给卖家（等值 cost），
+                //      另按 spread 烧掉 cost×spread（市场手续费 = 真实的价值 sink）。
+                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), cost);
+                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, cost * m.spread);
+                *net_import.entry(buyer.clone()).or_insert(0.0) += cost;
+                *net_import.entry(seller.clone()).or_insert(0.0) -= cost;
+                *spent.entry(buyer.clone()).or_insert(0.0) += cost;
+                short -= take;
+            }
+        }
+    }
+
+    // --- 4) 写回：挂单（原始清单，供观测）/ 价格 / 成交 / 需求滑窗 ---------------
+    state.market = MarketState {
+        offers,
+        price,
+        settled,
+        avg_demand,
+        last_stock: world_stock,
+    };
+    for (fid, v) in net_import {
+        flow.market_net.insert(fid, v);
+    }
 }
+
+/// 某势力此刻挂单簿上的**总价值**（= 它的购买力：能拿出来交换的实物值多少）。
+fn listed_value(
+    remaining: &BTreeMap<(FactionId, String), f64>,
+    price: &ResourceMap,
+    value_of: &impl Fn(&str) -> f64,
+    fid: &FactionId,
+) -> f64 {
+    remaining
+        .iter()
+        .filter(|((s, _), _)| s == fid)
+        .map(|((_, rt), amt)| amt * price.get(rt).copied().unwrap_or_else(|| value_of(rt)))
+        .sum()
+}
+
+/// 从 `fid` 的挂单簿里取出价值 `value` 的实物：
+/// `to = Some(卖家)` 时交割给对方（付款），`to = None` 时实物消失（市场手续费 sink）。
+/// 按资源名确定性顺序取，因此整条结算链无 RNG、可复现。
+fn pay_with_surplus(
+    state: &mut State,
+    remaining: &mut BTreeMap<(FactionId, String), f64>,
+    price: &ResourceMap,
+    value_of: &impl Fn(&str) -> f64,
+    fid: &FactionId,
+    to: Option<&FactionId>,
+    value: f64,
+) {
+    if value <= 1e-9 {
+        return;
+    }
+    let keys: Vec<String> = remaining
+        .keys()
+        .filter(|(s, _)| s == fid)
+        .map(|(_, rt)| rt.clone())
+        .collect();
+    let mut left = value;
+    for rt in keys {
+        if left <= 1e-9 {
+            break;
+        }
+        let avail = remaining.get(&(fid.clone(), rt.clone())).copied().unwrap_or(0.0);
+        if avail <= 1e-9 {
+            continue;
+        }
+        let p = price.get(&rt).copied().unwrap_or_else(|| value_of(&rt));
+        if p <= 1e-9 {
+            continue;
+        }
+        let units = (left / p).min(avail);
+        if units <= 1e-9 {
+            continue;
+        }
+        *remaining.entry((fid.clone(), rt.clone())).or_insert(0.0) -= units;
+        if let Some(f) = state.faction_mut(fid) {
+            let e = f.resources.entry(rt.clone()).or_insert(0.0);
+            *e = (*e - units).max(0.0);
+        }
+        if let Some(to) = to {
+            if let Some(f) = state.faction_mut(to) {
+                *f.resources.entry(rt.clone()).or_insert(0.0) += units;
+            }
+        }
+        left -= units * p;
+    }
+}
+
 
 // --- construction (dual budgets) ---------------------------------------------
 
@@ -2960,7 +3103,21 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
         wars,
         factions,
         city_production,
+        // 市场观察面：价、成交、挂单、每势力净进口（由 step_market 当回合写入）。
+        market_price: state.market.price.clone(),
+        market_settled: state.market.settled.clone(),
+        market_offered: offered_by_resource(&state.market),
+        market_net_import: flow.market_net.clone(),
     }
+}
+
+/// 本回合按资源汇总的挂单量（供给侧观察）。
+fn offered_by_resource(market: &MarketState) -> ResourceMap {
+    let mut out: ResourceMap = ResourceMap::new();
+    for o in &market.offers {
+        *out.entry(o.resource.clone()).or_insert(0.0) += o.amount;
+    }
+    out
 }
 
 

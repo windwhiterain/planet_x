@@ -43,6 +43,16 @@ pub struct RoundMetrics {
     pub factions: BTreeMap<FactionId, FactionMetrics>,
     /// 每座活城的本回合产出（`cities` 的细分）：人口、忠诚与按资源开采量。
     pub city_production: BTreeMap<CityId, CityMetrics>,
+    /// 本回合**市场价**（资源 → 每单位价格 = 基价 × 稀缺系数）。这是「缺某种矿 →
+    /// 市场上超高价」的观察面：价格由「世界库存够用几回合」算出，上限 `price_ceiling`。
+    pub market_price: ResourceMap,
+    /// 本回合各资源的**成交量**（真实成交的实物量）。成交 0 = 没人卖给你（或没人买）。
+    pub market_settled: ResourceMap,
+    /// 本回合各资源的**挂单总量**（供给侧：世界上真的有人拿出来卖多少）。
+    pub market_offered: ResourceMap,
+    /// 每势力本回合的**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。这是「谁靠贸易活着」
+    /// 的观察面：一个净进口常年为 0 的势力，其实没在参与市场。
+    pub market_net_import: BTreeMap<FactionId, f64>,
 }
 
 impl Default for RoundMetrics {
@@ -60,6 +70,10 @@ impl Default for RoundMetrics {
             wars: Vec::new(),
             factions: BTreeMap::new(),
             city_production: BTreeMap::new(),
+            market_price: ResourceMap::new(),
+            market_settled: ResourceMap::new(),
+            market_offered: ResourceMap::new(),
+            market_net_import: BTreeMap::new(),
         }
     }
 }
@@ -111,6 +125,9 @@ pub struct RoundFlow {
     pub faction_production: BTreeMap<FactionId, ResourceMap>,
     /// 每势力本回合舰队维护费（市场价值）。
     pub upkeep: BTreeMap<FactionId, f64>,
+    /// 每势力本回合**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。
+    /// 由 `sim::step_market` 在结算时记录——这是「谁真的在市场上买卖」的权威账。
+    pub market_net: BTreeMap<FactionId, f64>,
     /// 每势力本回合治理流（总成本 / 覆盖率）。
     pub governance: BTreeMap<FactionId, GovernanceFlow>,
 }

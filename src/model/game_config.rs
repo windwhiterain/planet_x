@@ -201,22 +201,39 @@ pub struct DiplomacyConfig {
     /// Upper clamp on any relation (bounded friendliness).
     pub friendship_ceiling: f64,
 }
-/// Market tuning. An automatic interstellar exchange that lets each faction buy
-/// the minerals it is short of (so shipyards rarely stall on a single drought)
-/// by selling its scarce-value surpluses. This gives the economy a **sink** for
-/// surplus stockpiles and a **supply** that keeps a faction building even when
-/// it cannot mine a keystone mineral (e.g. carbon).
+/// Market tuning. 星际市场是**真实交换所**：供给来自各势力真实的富余（挂单记名卖家），
+/// 价格由「库存够全世界用几回合」逐回合算出（稀缺 → 高价），成交按挂单**配给**
+/// （买不到就是买不到），并且禁运可以让某个卖家**根本不卖给你**。
+/// 见 `.agents/notes/trade-and-sanctions.md`。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MarketConfig {
-    /// Per-round cap, in market value (credits), on how much a faction may
-    /// auto-trade. `0.0` disables the market entirely.
+    /// Per-round cap, in market value (credits), on how much a faction may buy
+    /// this round. `0.0` disables the market entirely (无市场：谁缺料谁自己扛).
     pub auto_trade_limit: f64,
-    /// Each yard-critical resource is kept at least this many units in stock;
-    /// the market tops it up when it falls short.
+    /// 买方每资源想维持的库存（单位）——低于它才会去买。这是**军工目标库存**。
     pub working_buffer: f64,
-    /// Market fee: a faction sells `(1+spread)`× worth to buy `1×` worth, a
-    /// small friction that stops trades from being perfect conversions.
+    /// 市场手续费：买方要交出 `cost × (1+spread)` 的实物才能换到价值 `cost` 的货，
+    /// 差额是**市场烧掉的价值**（sink）——贸易不是免费的价值搬运。
     pub spread: f64,
+    /// 卖方保留比例：挂单前先留下自己库存的这个比例（1.0 = 一毛不卖）。
+    /// 卖方供给 = 库存 − max(自己需要的 working_buffer, 库存 × reserve_fraction)。
+    pub reserve_fraction: f64,
+    /// 价格发现的目标「覆盖回合数」：世界的库存应当够全世界用这么多回合。
+    /// 库存只够用 1 回合 → 价格顶到 [`Self::price_ceiling`]；够用这么多回合 → 基价。
+    pub coverage_rounds: f64,
+    /// 稀缺指数：`mult = (coverage_rounds / 覆盖回合数)^price_alpha`。1.0 = 线性。
+    pub price_alpha: f64,
+    /// 价格下限（倍率）：严重过剩时最多折到这里（0.4 = 四折）。
+    pub price_floor: f64,
+    /// 价格上限（倍率）：断供时最高涨到这里（8.0 = 八倍）——「超高价」的上限。
+    pub price_ceiling: f64,
+    /// 「覆盖回合数」的下限：库存为 0 时用它代替，免得除零（0.5 = 半个月的用量）。
+    pub cover_floor: f64,
+    /// 需求滑窗的每回合更新比例（0.1 = 用 10% 的本回合消费修正滑窗）。
+    pub demand_smoothing: f64,
+    /// 需求地板（单位/回合）：低于它的资源视为「几乎没人消费」，价格不升不降（基价）。
+    /// 否则一个没人用的矿会因为「库存 0」被永久顶在天价上。
+    pub demand_min: f64,
 }
 /// 光速治理 (lightspeed governance) tuning。
 ///
