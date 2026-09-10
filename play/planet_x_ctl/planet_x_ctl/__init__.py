@@ -232,10 +232,21 @@ ENGINE_EFFECTIVE_COLUMNS = (
 #: 一眼就能看出手上这一帧是谁算的；这一列只是让 ``df.query(...)`` 也能问同一句话。
 EFFECTIVE_PROVENANCE_COLUMN = "effective_order_from_engine"
 
-#: Columns this kit computes **locally** instead of reading them from the engine — the **fallback**
-#: used only when the projection has no ``order_effective_mode`` (an index directory written by an
-#: older engine). They re-implement the resolution chain from the read face, so they are an
-#: *approximation* of the engine's answer and **do not model the design-blueprint layer** at all
+#: Fallback (only when the projection has no ``order_effective_mode``): the kit's **local
+#: approximation** of the engine's chain resolution, computed from the **real leaves**.
+#:
+#: ⚠ Two column groups in :func:`ships` answer two different questions, from two different sources —
+#: do not conflate them:
+#:
+#: * ``order_leaf`` / ``order_mode`` / ``order_value`` / ``order_behavior`` = **本舰那片叶**
+#:   (existence + the value it records), read from the projection's **``derived.control``** table
+#:   (``idx/control.jsonl``), the only read face that lists leaves which **really exist**
+#:   (`--control` lists every ship since ``control-live-layers.md`` §13 — it shows the *effective*
+#:   value there, so it cannot answer existence);
+#: * :data:`ENGINE_EFFECTIVE_COLUMNS` = the engine's **answer** (effective order + who supplied it).
+#:
+#: The fallback trio below re-implements the chain from the read face, so it is an *approximation* of
+#: the engine's answer and **does not model the design-blueprint layer** at all
 #: (``leaf → fleet default → faction scope → global``, missing ``leaf → **blueprint** → …``).
 #: Prefer ``ENGINE_EFFECTIVE_COLUMNS``; see the README.
 APPROX_COLUMNS = (
@@ -571,13 +582,22 @@ def _leaf_name(faction: str, kind: str, key: tuple) -> str:
 
 @dataclass(frozen=True)
 class Leaf:
-    """One controllable leaf as the engine's **read face** shows it: a value plus its mode."""
+    """One controllable leaf as the engine's **read face** shows it: a value plus its mode.
+
+    ⚠ For the **per-ship list kinds** the read face lists a row for every ship, so ``exists`` is
+    "this row was listed" and ``value`` is the row's value — the **effective** one, not the leaf's
+    record. Leaf **existence** lives in the projection's ``derived.control`` table; see
+    :meth:`Surface.leaf` and ``ships()["order_leaf"]``.
+    """
 
     faction: str
     kind: str
     key: tuple = ()
+    #: 读面列了这一行（**不是**"状态里真的有这片叶"——逐舰叶永远列，见上面的 ⚠）。
     exists: bool = False
+    #: 叶片自己的三态表态（没有叶片 = ``Inherit``）。
     mode: str = INHERIT
+    #: 读面这一行的值。逐舰**指令**叶上它是**有效值**（链上的答案），不是叶里的记录值。
     value: Any = None
     raw: dict | None = None
     scope_origin: str | None = None
@@ -680,6 +700,17 @@ class Surface:
 
         A leaf the read face did not list is **not an error**: it means "nobody has spoken here"
         (``mode == "Inherit"``), which is the same as an explicitly-written ``Inherit``.
+
+        ⚠ **``exists`` does not mean "the state holds this leaf"** for the **per-ship list kinds**
+        (``ship_orders`` / ``ship_doctrine`` / ``ship_kiting`` / ``ship_freighter``): those rows are
+        listed for **every** ship, so ``exists`` only ever means "the read face listed this row"
+        (``control-live-layers.md`` §13/§13.6). What that row holds is the **effective** value, not
+        the leaf's record. The authoritative **leaf-existence** face is the projection's
+        ``derived.control`` table (``q.control()``, ``idx/control.jsonl`` — one row per leaf that
+        really exists): that is where ``ships()["order_leaf"]`` comes from, and it is what to use
+        instead of ``leaf(...).exists`` when you need to know whether a per-ship leaf is there.
+        (The per-faction singletons *do* report honest existence: the read face gives ``null`` when
+        the leaf is missing.)
         """
         if kind not in LEAF_KINDS:
             raise ValueError(f"未知叶种类 {kind!r}（可用：{list(LEAF_KINDS)}）")
@@ -1589,19 +1620,55 @@ def _leaf_lookup(s: Surface) -> dict[tuple, Leaf]:
     return out
 
 
+def _real_order_leaves(q, r: int) -> dict[tuple[str, str], dict]:
+    """``(faction_id, ship) -> {"mode", "value"}`` for the ship-order leaves that **really exist**.
+
+    Source: the projection's **``derived.control``** table (``idx/control.jsonl``), whose
+    ``kind == "ship_order"`` rows the engine emits by walking ``ControllableState::ship_orders`` —
+    so a row is exactly "this faction has an order leaf for this ship", and ``value``/``mode`` are
+    what that leaf holds. That makes it the authoritative **leaf-existence** face for the order axis.
+
+    ⚠ **Not** the ``--control`` read face: since that face went "one row per ship"
+    (``control-live-layers.md`` §13) it lists every ship, with the **effective** value and the leaf's
+    own stance — reading existence off it would report ``order_leaf = True`` for a ship whose leaf was
+    deleted, and would turn ``order_behavior`` (the *record*) into the effective value (§13.6).
+
+    A projection old enough to have no ``derived`` section raises from ``q.derived`` — that is
+    deliberate (loud, with "请用新版 planet_x 重新 --index"), because guessing here is how the
+    column silently changes meaning.
+    """
+    rows = q.derived("control", r)
+    out: dict[tuple[str, str], dict] = {}
+    if not len(rows):
+        return out
+    for _, row in rows[rows["kind"] == "ship_order"].iterrows():
+        out[(row["faction_id"], row["key"])] = {"mode": row["mode"], "value": row["value"]}
+    return out
+
+
 def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
           index_dir=None) -> pd.DataFrame:
     """The projection's ``ships`` table **joined against the control leaves**.
 
     Per ship: ``ship_id``/``name``/``class``/``faction_id``/``hull`` + the ship's own order leaf
-    (``order_mode`` / ``order_value`` / ``order_leaf``) + the faction's ``default_ship_order_mode`` /
-    ``default_ship_order_value`` + the **effective** style axes (``doctrine_temper`` /
-    ``doctrine_lone_wolf`` / ``kiting``).
+    (``order_leaf`` / ``order_mode`` / ``order_value`` / ``order_behavior``) + the faction's
+    ``default_ship_order_mode`` / ``default_ship_order_value`` + the **effective** style axes
+    (``doctrine_temper`` / ``doctrine_lone_wolf`` / ``kiting``).
 
-    **The effective order is the ENGINE's answer** (:data:`ENGINE_EFFECTIVE_COLUMNS`): read straight
-    off the projection's own ``order_effective_mode`` / ``order_effective`` / ``order_source``
-    columns, i.e. ``State::ship_control`` / ``State::ship_behavior`` / ``State::ship_behavior_source``
-    — the code that knows the design-blueprint layer (``叶 → 出厂图 → 舰队默认 → 势力 → 全局``).
+    Two *different* questions, two *different* sources — do not mix them up:
+
+    * **「本舰那片叶」**（``order_leaf`` / ``order_mode`` / ``order_value`` / ``order_behavior``）:
+      read from the projection's **``derived.control``** table (``idx/control.jsonl``,
+      ``kind == "ship_order"``), which the engine builds by walking ``c.ship_orders`` — i.e. it lists
+      **only the leaves that really exist**, with the **recorded value** each one holds.
+      ⚠ ``--control`` **cannot** answer this any more: since that face went "one row per ship"
+      (``control-live-layers.md`` §13) every ship has a row, carrying the **effective** value plus
+      the leaf's own stance. Reading existence off it made ``order_leaf`` always ``True`` and turned
+      ``order_behavior`` into the effective value while keeping the old name (§13.6).
+    * **「有效值 / 归谁」**（:data:`ENGINE_EFFECTIVE_COLUMNS`) — the ENGINE's answer, read straight off
+      the projection's own ``order_effective_mode`` / ``order_effective`` / ``order_source`` columns,
+      i.e. ``State::ship_control`` / ``State::ship_behavior`` / ``State::ship_behavior_source`` — the
+      code that knows the design-blueprint layer (``叶 → 出厂图 → 舰队默认 → 势力 → 全局``).
 
     ⚠ This kit used to **re-implement** that chain in Python (:data:`APPROX_COLUMNS`), and that
     re-implementation predated the blueprint layer — so it handed back *wrong* answers for any ship
@@ -1611,6 +1678,11 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     per row which of the two you are holding. Never mix them up in a recipe: prefer
     ``effective_order_mode`` / ``effective_order_value`` / ``order_source``, and treat the ``_approx``
     trio as a degraded, blueprint-blind hint.
+
+    Having both on one frame is what makes 「叶里的记录值 ≠ 有效值」 readable for the first time:
+    a ship whose leaf says ``Inherit`` while the faction's fleet default is ``Player`` shows the old
+    record in ``order_behavior`` and the default's order in ``effective_order_value``, with
+    ``order_source == "fleet_default"``.
     """
     q = projection(ckpt, planet_x=planet_x, index_dir=index_dir)
     r = _last_round(q) if round is None else int(round)
@@ -1619,6 +1691,7 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         return df
     s = surface(ckpt, planet_x=planet_x, index_dir=index_dir)
     leaves = _leaf_lookup(s)
+    real = _real_order_leaves(q, r)
 
     def L(fac, kind, key):
         return leaves.get((fac, kind, key))
@@ -1633,11 +1706,11 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     eff_mode, eff_value, eff_auth = [], [], []
     for _, row in df.iterrows():
         fac, ship = row["faction_id"], row["ship_id"]
-        lf = L(fac, "ship_orders", (ship,))
-        exists = lf is not None and lf.exists
-        omode = lf.mode if lf is not None else INHERIT
-        oval = lf.value if lf is not None else None
-        order_leaf_.append(bool(exists))
+        # **本舰那片叶**（存在性 + 记录值）走投影的 `derived.control`，不走 `--control`（见 docstring）。
+        lf = real.get((fac, ship))
+        omode = lf["mode"] if lf is not None else INHERIT
+        oval = lf["value"] if lf is not None else None
+        order_leaf_.append(lf is not None)
         order_mode.append(omode)
         order_value.append(oval)
         order_behavior.append(behavior_str(oval))

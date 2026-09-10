@@ -270,8 +270,10 @@ Two things worth knowing about the kit's side of `remove`:
 * `remove` **不能**和值 / `mode` 同时写（引擎报 `remove_conflicts_with_value`）：一条同时说着
   "删掉它"和"把它设成 0.5"的补丁没有正确答案，所以两件事请分两条补丁发。
 * `Report.removed` / `removed_leafs` 给出真的被删掉的那些叶；`describe()` 会把它们列出来。
-  逐舰叶的**存在性**读面看不出来（风格两行对每艘舰都在，列的是有效值），所以逐舰删叶的
-  "落地了没有"以**引擎回执**为准，不以读面为准。
+  逐舰叶的**存在性**在 `--control` 上读不出来（那片现在对每艘舰都有一行，列的是有效值），
+  所以逐舰删叶的"落地了没有"以**引擎回执**为准，不以 `--control` 为准。要问「这片叶还在不在」
+  用投影的 **`q.control()`**（`idx/control.jsonl`，只列真实存在的叶）——`ships()` 的
+  `order_leaf` 就是从那里来的（见下）。
 * ⚠ **角色轴（`ship_freighter`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
   （按积压定编谁去跑集货路线），所以删掉它是**放手**——AI 下回合可能立刻又写下它的结论，
   而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
@@ -280,6 +282,28 @@ Two things worth knowing about the kit's side of `remove`:
 The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, while
 `effective_order_value` is what the chain actually resolves to (`order_source` says **who supplied
 it**). Which brings us to the next warning.
+
+> ### Where each of those two answers comes from (and what `--control` can no longer tell you)
+>
+> | question | columns | source |
+> |---|---|---|
+> | 「本舰**那片叶**还在吗？它自己记着什么？」 | `order_leaf` / `order_mode` / `order_value` / `order_behavior` | the projection's **`derived.control`** table (`idx/control.jsonl`, `kind == "ship_order"`) — the engine emits one row per **real** leaf by walking `ControllableState::ship_orders` |
+> | 「**有效**指令是什么？**归谁**？这条值**谁供的**？」 | `effective_order_mode` / `effective_order_value` / `order_source` | the projection's ships table: `order_effective_mode` / `order_effective` / `order_source` (`State::ship_control` / `ship_behavior` / `ship_behavior_source`) |
+>
+> ⚠ **`--control` is not a leaf-existence face.** Since that read face went "one row per ship"
+> (`control-live-layers.md` §13) it lists **every** ship, and the `behavior` it shows is the
+> **effective** value. Reading leaf existence off it (as this kit did for one commit) made
+> `order_leaf` permanently `True` and silently re-pointed `order_behavior` at the effective value
+> while keeping the old column name — the exact failure mode `.agents/notes/engine-data-plane.md`
+> calls out (「引擎给答案，Python 只负责筛」), except this time the answer was *the kit's own*.
+> The authoritative existence face is **`derived.control`**; a projection old enough to lack the
+> `derived` section raises there instead of guessing.
+>
+> Having both groups on one frame is what makes 「叶里的记录值 ≠ 有效值」 readable: a ship whose leaf
+> says `Inherit` while the faction's fleet default is `Player` shows the old record in
+> `order_behavior`, the default's order in `effective_order_value`, and `order_source ==
+> "fleet_default"`. `demo.py` §[4d] asserts exactly that, including a **deleted** leaf
+> (`order_leaf == False` while the effective value still comes from the fleet default).
 
 > ### `ships()`: the effective columns are the **engine's** answer (the `*_approx` hole is closed)
 >
@@ -391,9 +415,12 @@ guessing. They are listed because they are cheap to close and expensive to work 
 2. **~~The new read-face tables exist on disk but are not declared in `schema.json`.~~** — **closed**:
    the derived tables live in the schema's own `derived` section (not `lazy` — they join on columns
    `main.jsonl` already carries), and `planet_xq.load()` reads it, so `q.derived(name, round)` /
-   `q.flow()` / `q.control()` / `q.blueprints()` all work. (The `idx/control.jsonl` table still has no
-   `effective` column: it lists leaves, and "which layer wins" is a **per-ship** answer — it belongs on
-   the ships table, where the engine now puts it. See the next point.)
+   `q.flow()` / `q.control()` / `q.blueprints()` all work. `idx/control.jsonl` has no `effective`
+   column — it lists **leaves** (kind/key/sub/value/mode), and "which layer wins" is a **per-ship**
+   answer that belongs on the ships table, where the engine now puts it (next point). What that table
+   *is* good for: it is the one read face that answers **「这片叶真的存在吗」** for per-ship leaves
+   (`--control` lists every ship since §13) — `ships()` reads it for `order_leaf` for exactly that
+   reason, and `q.control()` is the public accessor.
 3. **~~No per-entity `effective` on the control read face.~~** — **closed** (blueprint round,
    `SCHEMA_VERSION` 9 → 10): the projection's ships table carries the engine's own
    `order_effective_mode` / `order_effective` / `order_source`, and `ships()` now **reads** them

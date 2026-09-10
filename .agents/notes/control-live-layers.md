@@ -672,7 +672,7 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
 | --- | --- |
 | 引擎 | `ShipOrderEntry.behavior: Option<ShipBehavior>`（读面 `null` = 没人说话）；`control_view` 改为遍历 `state.ships`；`apply_ship_order` 加「不建空叶」规则（`src/control.rs`） |
 | web | `web/src/lib.rs` 新增守卫 `the_order_read_face_lists_ships_without_a_leaf`（每舰一行 / 删叶后仍在 / 只写 mode 能把叶建回来）；`app.js` 把 `behavior === null` 显示成「**无人表态（按待命兜底）**」而不是「待命」（`behaviorType` 新增 `unset`，编辑器里那一项是 disabled 的只读显示——想真下达待命就选「待命」，那才是一次写值=接管）。「恢复出厂值」按钮仍按 **`st.control` 里的原始叶**判定（读面看不出来） |
-| kit | 无需改动即兼容：`Surface.leaf()` 对逐舰叶的 `exists` 一直是"**读面列了这一行**"（§8.1 那条老约定），删叶是否落地本来就以 `NOTE_APPLY_REMOVED` 回执为准。`demo.py` 的 census 数字不变（基线里每艘舰本来都有叶） |
+| kit | ⚠ **不是"无需改动即兼容"**——本分支第一版就是这么判的，于是踩了 **§13.6** 那个洞（`order_leaf` 恒 `True`、`order_behavior` 静默变成有效值）。现在 `ships()` 的「本舰那片叶」四列（`order_leaf`/`order_mode`/`order_value`/`order_behavior`）改从投影的 **`derived.control`** 表读（只列真实存在的叶），有效三列继续读引擎列 |
 | 文档 | `agent-play.md` §4.2 补一段「`ship_orders` 每舰一行 + `behavior: null` 的含义」 |
 
 ### 13.3 B：缺口与改法（kit 的 `_approx` 列换成引擎的答案）
@@ -723,8 +723,8 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
      `null`（叶没被重建）。
   2. 手工在 20 回合的真实档上跑同一条链：`430D2F8A7828B50B3FAED0AFE9E670A03B99F1C7EEB28AC7FC75ADC76E18B541`
      改前=改后（`T0 == T1`），checkpoint 里逐字节确认**长城那片叶没有被建回来**（其余 6 艘的叶原样）。
-* **B 的端到端（`play/planet_x_ctl`）**：`uv run python demo.py` **全部断言通过**，其中 4 条是
-  本轮新增/改写的：
+* **B 的端到端（`play/planet_x_ctl`）**：`uv run python demo.py` **全部断言通过**，其中 4 条 +
+  新增的 §[4d] 十条（10 条）是本轮新增/改写的：
   * 「有效指令列来自**引擎**（含设计图层），不是本地重算」——13 行与
     `order_effective_mode` / `behavior_str(order_effective)` 逐值相同、来源布尔列全 `True`；
   * 「引擎列在时**没有** `_approx` 列」；
@@ -736,6 +736,56 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
     **dict** ⇒ `TypeError: unhashable type: 'dict'`。现在拆成两条断言，并且**按配方自己的意图**
     断言那 4 处变动（「跟着舰队默认走的舰，有效指令真的换成了那一句」）——那是**真事**：旧的
     近似读面根本看不见"舰队默认一落地，这些舰的有效指令当场就换了"。
+  * ⚠ 另有一处**排版 bug**（不是本轮引入）：`demo.py` 第 5 节的 `print("\n[5] 确定性…")` 被并进了
+    上面那行注释里（那一节的标题从没打印过）。修了。
+* **§13.6 那个洞的证据（审查方探针 `scratch/probe_leaf.py`，修前/修后各跑一次）**：见 §13.6。
+
+### 13.6 ⚠ 一个被审查方钉住的真洞：读面改形状，**kit 里那三列的语义被静默换掉了**
+
+**这是「契约有两端」那条老教训的第 N 次复发**（`engine-data-plane.md` §8.1/§8.7），而且这次
+症状最阴：**列名没变，语义变了**。
+
+**怎么来的**：§13.1 把 `--control` 的 `ship_orders` 改成「每舰一行、`behavior` 给**有效值**」，
+而 kit 的 `Surface._index` 正是从 `--control` 的 `fac[kind]` 列表建的 ⇒ `ships()` 里那三列
+（`order_leaf` / `order_value` / `order_behavior`）跟着变了意思：
+
+| 列 | 它**应该**说 | 改形状之后它说成了 |
+| --- | --- | --- |
+| `order_leaf` | 这艘舰**有没有自己的叶** | **恒 `True`**（读面对每艘舰都有一行） |
+| `order_value` / `order_behavior` | 那片叶**自己记着的值** | **有效值**（叶 → 出厂图 → 舰队默认） |
+
+**审查方的探针证据**（`scratch/probe_leaf.py`：把中国的舰队默认钉成 `Player` + `Dock 月球`，
+于是"叶里的记录值"与"有效值"必然分道扬镳；中国 7 艘舰**本来都有** AI 写的 `Inherit` 叶）：
+
+```
+修前（假话）：order_leaf 恒 True；order_behavior = Dock:月球（= 有效值）
+              真叶里记着的却是 {"DockCity":{"city":"泰坦采矿城"}} / {"Haul":{...}}
+修后（实话）：
+舰    order_leaf order_mode order_behavior(kit)                 有效值(引擎)  order_source   真叶(control 表)
+长城   True      Inherit   DockCity:泰坦采矿城                  Dock:月球     fleet_default {"DockCity":{"city":"泰坦采矿城"}}
+北斗   True      Inherit   {"Haul": {"from": "金星", "to": "地球"}} Dock:月球  fleet_default {"Haul":{"from":"金星","to":"地球"}}
+中国：6 艘（删掉北斗的叶之后）order_leaf = False，order_behavior 空，有效值照旧 Dock:月球
+```
+
+**修法**：「本舰那片叶」这件事只能问**只列真实存在叶**的那个读面 —— 投影的
+**`derived.control`** 表（`idx/control.jsonl`；引擎遍历 `c.ship_orders` 生成，
+`kind == "ship_order"`）。于是 `ships()`：
+
+* `order_leaf` = 这张表里有没有该舰的 `ship_order` 行；
+* `order_mode` / `order_value` / `order_behavior` = 那行里的 `mode` / `value`（叶自己的记录值）；
+* `effective_order_*` / `order_source` **照旧**读引擎列（§13.3）；
+* 投影太老、没有 `derived` 段 ⇒ `q.derived()` 响亮报错（**不猜**：猜就是又一次"名字没变、
+  语义变了"）。
+
+**这件事顺带带来一个正收益**：「**叶里的记录值 ≠ 有效值**」第一次在 kit 侧可读（今天只有引擎列
+回答得了一半）。`demo.py` 新增 §[4d] 把它钉死（10 条断言）：叶在、叶说 `Inherit`、舰队默认是
+`Player` ⇒ `order_behavior` 是叶里那句旧的、`effective_order_value` 是默认那句、
+`order_source == "fleet_default"`；再删掉一艘舰的叶 ⇒ `order_leaf` 翻成 `False` 而有效值照旧。
+
+> **教训（写进措辞纪律）**：读面**改形状**时，凡是"从读面推出来"的消费者列都要重新问一遍
+> 「这条信息的**权威来源**是哪个读面？」——`--control` 是**写面模板**（值 = 有效值 + 表态），
+> 而「叶存在吗」是**状态**问题，它的家在 `derived.control`。两条读面各答各的，
+> **别让一个形状变化把另一个问题的答案换掉而不同时改列名或改名**。
 
 ### 13.5 未做 / 已知边界
 
@@ -753,6 +803,8 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
   「（无人表态 · 按待命兜底）」显示项。
 * `[ ]` **方案 B（逐舰取值规则与文档对齐）仍留在桌上**——本轮把「叶不存在」与「叶 Inherit」
   的差别**读面化**（`order_source` + A 的 `null`），取值规则本身一个字没动。
-* `[ ]` **风格/角色三轴的"叶到底存不存在"读面依然看不出来**（逐舰行永远在，`exists` 是"列了
-  这一行"），删叶落地以 `NOTE_APPLY_REMOVED` 为准。本轮没有碰它（A 只统一了"每舰一行"这半边，
-  另一半要动叶存在性的读面契约，得与方案 B 一起想）。
+* `[ ]` **风格/角色三轴没有跟上 §13.6 那条修法**：它们的 `exists`（kit 的 `Surface.leaf`）仍然是
+  "读面列了这一行"（逐舰行永远在），删叶落地只能看 `NOTE_APPLY_REMOVED` 回执。**指令轴现在有了
+  权威答案**（`derived.control`，`ships()["order_leaf"]`），同理可以给风格三轴各加一列
+  （`control` 表里已经有 `ship_doctrine`/`ship_kiting`/`ship_freighter` 的行，改的是 kit 侧）；
+  本轮没做，因为它牵扯"叶存在性"这条读面契约的**整体**说法，值得与方案 B 一起定。

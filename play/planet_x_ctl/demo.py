@@ -568,7 +568,64 @@ def main(argv=None) -> int:
                   any(s["code"] == "no_such_blueprint" for s in rep_bp6.skipped),
                   f"{[s['code'] for s in rep_bp6.skipped]}")
 
-    # ---------------------------------------------------------------- 5. determinism    print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
+    # ---------------------------------------------------------------- 4d. leaf record ≠ effective value
+    print("\n[4d] 「**叶里的记录值**」与「**有效值**」是两件事——kit 两组列首次把它们分开给")
+    # 场景（与审查方探针同一套）：把某势力的舰队默认钉成玩家 + `Dock:月球`。那几艘舰**本来就有**
+    # 一片 `Inherit` 的指令叶（AI 每回合写的），于是三种答案同时存在、而且必须**互不冒充**：
+    #   叶里的记录值 = 上一回合 AI 写的那句（`order_behavior`）
+    #   有效值       = 舰队默认那一句（`effective_order_value`）
+    #   谁供的值     = `order_source == "fleet_default"`
+    s_lo = ctl.surface(ckpt)
+    s_lo.set_default_ship_order(faction, behavior="Dock:月球", mode=ctl.PLAYER)
+    ckpt_lo = work / "ckpt_leaforder.ron"
+    app_lo = ctl.apply(ckpt, ctl.write(s_lo.emit(), work / "steer_leaforder.json"), save=ckpt_lo)
+    check("LO: --apply --save 成功（舰队默认 = 玩家 + Dock 月球）", app_lo.ok and not app_lo.skipped)
+
+    mine_lo = ctl.ships(ckpt_lo)
+    mine_lo = mine_lo[mine_lo["faction_id"] == faction]
+    inherits = mine_lo[mine_lo["order_mode"] == ctl.INHERIT]
+    check("LO: 有一批「叶在、叶说 Inherit」的舰（否则这条什么都没证明）",
+          len(inherits) >= 1, f"{len(inherits)}/{len(mine_lo)} 艘")
+    check("LO: `order_leaf` 说的是真相——这些舰**有**自己的叶（投影 derived.control 里有它们的行）",
+          bool(inherits["order_leaf"].all()), f"{int(inherits['order_leaf'].sum())}/{len(inherits)}")
+    check("LO: `order_behavior` = **叶里那句旧的**（不是舰队默认）",
+          all(v is not None for v in inherits["order_behavior"])
+          and set(inherits["order_behavior"]).isdisjoint({"Dock:月球"}),
+          f"叶里={sorted(set(inherits['order_behavior']))}")
+    check("LO: `effective_order_value` = 舰队默认那句，且 `order_source` 指得出是它供的",
+          set(inherits["effective_order_value"]) == {"Dock:月球"}
+          and set(inherits["order_source"]) == {"fleet_default"},
+          f"source={sorted(set(inherits['order_source']))}")
+    check("LO: 两组列**真的不一样**（「叶里说了什么」≠「链上的答案」）",
+          all(a != b for a, b in zip(inherits["order_behavior"], inherits["effective_order_value"])),
+          f"叶里={sorted(set(inherits['order_behavior']))} vs "
+          f"有效={sorted(set(inherits['effective_order_value']))}")
+
+    # 再把其中一艘舰的叶**删掉**：`order_leaf` 必须翻成 False —— 这件事 `--control` 量不出来
+    # （那面每舰一行，`behavior` 给的是有效值），只有投影的 `control` 表（引擎遍历 `c.ship_orders`）
+    # 才说得清「这片叶还在不在」。
+    gone = sorted(inherits["ship_id"])[0]
+    s_lo2 = ctl.surface(ckpt_lo)
+    s_lo2.remove(faction, "ship_orders", gone)
+    ckpt_lo2 = work / "ckpt_leaforder2.ron"
+    check("LO: 删叶真的落地",
+          ctl.apply(ckpt_lo, ctl.write(s_lo2.emit(), work / "steer_leaforder2.json"),
+                    save=ckpt_lo2).ok)
+    row_gone = ctl.ships(ckpt_lo2)
+    row_gone = row_gone[row_gone["ship_id"] == gone].iloc[0]
+    check("LO: 叶被删过 ⇒ `order_leaf` 是 **False**、`order_behavior` 空、`order_mode` 回 Inherit",
+          not bool(row_gone["order_leaf"]) and pd.isna(row_gone["order_behavior"])
+          and row_gone["order_mode"] == ctl.INHERIT,
+          f"{gone}: leaf={row_gone['order_leaf']} mode={row_gone['order_mode']} "
+          f"behavior={row_gone['order_behavior']!r}")
+    check("LO: 但**有效值**照旧由舰队默认供给（没有叶 ≠ 没有指令）",
+          row_gone["effective_order_value"] == "Dock:月球"
+          and row_gone["order_source"] == "fleet_default")
+    check("LO: 别的舰照旧有自己的叶（只删了一艘）",
+          int(ctl.ships(ckpt_lo2).query("faction_id == @faction")["order_leaf"].sum()) == len(mine_lo) - 1)
+
+    # ---------------------------------------------------------------- 5. determinism
+    print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
     d1, _ = recipe_policy(ckpt, proj)
     d2, _ = recipe_policy(ckpt, proj)
     p1 = ctl.write(d1, work / "det1.json")
