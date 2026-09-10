@@ -19,6 +19,7 @@
 //! `planet_x::control` module so the engine crate stays free of any web stack.
 
 use axum::extract::State as AxState;
+use axum::http::{header, HeaderValue};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use planet_x::config::parse_seed;
@@ -32,6 +33,7 @@ use planet_x::world;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 /// The in-memory world owned by the server.
 pub struct GameWorld {
@@ -205,6 +207,12 @@ async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> 
 /// Build the axum router serving the JSON API and the static frontend.
 ///
 /// The static directory is `PLANET_X_WEB_STATIC` if set, else `<crate>/static`.
+///
+/// 每个响应都带 `Cache-Control: no-cache`。这不是「不许缓存」，而是「用之前先问一句」：
+/// `ServeDir` 只发 `Last-Modified`，浏览器于是按**启发式**缓存（`10% × (Date − Last-Modified)`）
+/// 把改过的 `map3d.js`/`app.js` 缓存住——**改了前端、刷新却看不到旧代码**，排查时极费时间
+/// （本轮就吃了一次：以为改动没生效，其实是浏览器喂了旧脚本）。no-cache 仍带 `Last-Modified`，
+/// 命中就是 304，代价可忽略；前端改动从此「刷新即生效」。
 pub fn router(shared: Shared) -> Router {
     let static_dir = std::env::var("PLANET_X_WEB_STATIC")
         .unwrap_or_else(|_| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
@@ -215,6 +223,10 @@ pub fn router(shared: Shared) -> Router {
         .route("/api/new", post(new_game))
         .with_state(shared)
         .fallback_service(ServeDir::new(static_dir))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
 }
 
 #[cfg(test)]

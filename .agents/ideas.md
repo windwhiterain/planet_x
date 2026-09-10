@@ -966,12 +966,17 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - `[x]` 新增 URL 调试参数（开发用，只在首帧 setWorld 生效一次）：`?focus=<天体>&dist=<世界单位>`、
   `?view=px,py,pz@tx,ty,tz`、`?tune=k:v,...`（覆盖任意 TUNING）、`?hide=labels,markers`；
   配合 `PlanetXMap.tune({...})` / `PlanetXMap.tuning` 可以不改源码刷参数。
-- `[ ]` **dev 静态服务不发 Cache-Control**（`web/src/lib.rs` 的 `ServeDir` 只给 Last-Modified）：
-  浏览器按启发式缓存（10% × (Date−Last-Modified)）把旧的 `map3d.js` 缓存住，**改了前端刷新却看不到**
-  （本轮排查浪费了不少时间：`fetch('map3d.js')` 拿到的是旧内容、页面里 `PlanetXMap.tune` 不存在）。
-  建议给 fallback 那一层加 `tower_http::set_header::SetResponseHeaderLayer::overriding(
-  CACHE_CONTROL, HeaderValue::from_static("no-cache"))`（要重编译 + 重启 dev server，会丢内存里的
-  那一局世界，所以本轮没做）。临时绕过：硬刷新（Ctrl+Shift+R），或另起一个端口/工作区当新 origin。
+- `[x]` **dev 静态服务不发 Cache-Control → 已修**（`web/src/lib.rs::router` + `web/Cargo.toml`）：
+  `ServeDir` 只给 `Last-Modified`，浏览器按启发式缓存（10% × (Date−Last-Modified)）把旧的
+  `map3d.js`/`app.js` 缓存住，**改了前端刷新却看不到**（两轮排查都被这个坑骗过：一次是
+  `fetch('map3d.js')` 拿到旧内容、`PlanetXMap.tune` 不存在；一次是「验证通过」其实是浏览器喂了旧
+  `app.js`，害我基于错误的运行时状态写了个假兜底常量）。现在整个 router 压一层
+  `SetResponseHeaderLayer::overriding(CACHE_CONTROL, "no-cache")`（`tower-http` 加 `set-header`
+  feature）：仍是「可缓存」，但**用前必须回服务器问一句**，命中就是 304（静态文件照旧带
+  `Last-Modified`），代价可忽略。实测：`/`、`/app.js`、`/map3d.js`、`/jsonview.js`、`/style.css`、
+  `/api/state` 全部 `Cache-Control: no-cache`；在全新 origin 上加载页面 → 改一行 `app.js` → **普通刷新
+  （不带任何 cache-bust）即拿到新内容**。注意：**已经**被旧规则缓存住的条目仍会撑到自己过期，
+  那之后就一直对了（实在遇到就硬刷新一次）。
 - `[ ]` **同屏 9 艘舰停在同一城时标记会叠成一团**（seed 42 的灶神星）：可做屏幕空间去重/聚合成
   「×9」徽标，或按势力分扇区摆开。本轮没做。
 - `[ ]` **太阳表面还是有点「奶酪」感**：`SUN_FRAG` 的 `fbm` 粒面在球面大尺度上显得斑驳，可换成
