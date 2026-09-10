@@ -192,6 +192,320 @@ pub(crate) fn ev(state: &mut State, e: GameEvent) {
     state.events.push(e);
 }
 
+// --- 状态变更漏斗（single writer）--------------------------------------------
+//
+// 所有「改变归属 / 存亡」的写入都必须走下面这几个漏斗：漏斗负责 (1) 改状态 (2) 记事件。
+// 这样「历史」就不再是顺手记的副产品——**忘记记事件在结构上变得不可能**。这是 Stage B 的
+// 「治根」：Stage A 只是把已知的漏补齐，漏斗化让**未来新增的路径**也必须经过事件。
+//
+// 更精确的因果仍由调用方给出（`fire` 知道补刀者、`step_upkeep` 知道是欠费、`bombard_city`
+// 知道是哪艘舰拆的城）；漏斗只保证「无论如何都有一条事件」。
+
+/// 击毁 / 报废一艘舰（漏斗）：hull 归零 + 记一条 [`GameEvent::ShipDestroyed`]。
+///
+/// **同一艘舰只记一次**（本回合内多条路径命中时以第一条为准，避免重复计数）。返回是否
+/// 新记了一条；`false` = 之前那条路径已经记过。
+pub(crate) fn kill_ship(state: &mut State, ship: &ShipId, cause: DeathCause, by: Option<Killer>) -> bool {
+    if state.events.iter().any(|e| matches!(e, GameEvent::ShipDestroyed { ship: s, .. } if s == ship)) {
+        return false;
+    }
+    let Some((owner, class)) = state.ship(ship).map(|s| (s.faction_id.clone(), s.class.clone())) else {
+        return false;
+    };
+    if let Some(s) = state.ship_mut(ship) {
+        s.hull = 0.0;
+    }
+    ev(state, GameEvent::ShipDestroyed { ship: ship.clone(), owner, class, cause, by });
+    true
+}
+
+/// 清扫本回合 `hull ≤ 0` 的舰（漏斗**兜底**）：保证任何从 `state.ships` 消失的舰都有一条
+/// 死因事件，然后移除它并清掉它的指令。
+///
+/// `watched` = **进入本步进时还活着**的舰集合。返回值只统计它们当中「被兜底补记」的数量——
+/// 正常为 0（精确路径都已记过）。不为 0 意味着**某条路径漏了 [`kill_ship`]**，于是
+/// `debug_assert` 在测试里立刻喊出来；release 下仍保持历史完整（用最保守的
+/// [`DeathCause::Scrapped`] 补一条，不谎称是战损）。
+///
+/// 为什么需要 `watched`：回合**开始前**就已经 `hull ≤ 0` 的舰（只有外部/测试能在回合之间
+/// 造成这种状态；`advance` 开头会 `events.clear()`，所以它的死因事件本来就不属于本回合）
+/// 不该在这里喊——它不是本回合的漏记，只是被顺带清走。
+fn sweep_dead_ships(state: &mut State, watched: &BTreeSet<ShipId>) -> usize {
+    let dead: Vec<ShipId> = state
+        .ships
+        .iter()
+        .filter(|s| s.hull <= 0.0)
+        .map(|s| s.name.clone())
+        .collect();
+    let mut invented = 0;
+    for sid in dead {
+        if kill_ship(state, &sid, DeathCause::Scrapped, None) && watched.contains(&sid) {
+            invented += 1;
+        }
+    }
+    state.ships.retain(|s| s.hull > 0.0);
+    let alive: BTreeSet<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
+    for c in state.control.values_mut() {
+        c.ship_orders.retain(|sid, _| alive.contains(sid));
+    }
+    invented
+}
+
+/// 造一艘舰的参数（[`spawn_ship`] 的输入）。
+pub(crate) struct ShipSpawn<'a> {
+    pub owner: FactionId,
+    pub class: &'a str,
+    pub position: [f64; 2],
+    /// 出厂城（船坞建造时给出；剧情赠舰 / 重建种子舰在天体附近下水则为 `None`）。
+    pub city: Option<CityId>,
+    pub via: SpawnVia,
+    /// 是否从库存支付装配组件成本（船坞出厂要付；剧情赠舰与重建种子舰不付）。
+    pub pay_components: bool,
+}
+
+/// 造一艘舰（漏斗）：装配组件 + 确定性取名 + 算 effective 面板 + 记一条
+/// [`GameEvent::ShipSpawned`]。
+///
+/// 三条造舰路径（船坞出厂 / 剧情赠舰 / 反僵尸重建）统一走这里。此前 `step_resurgence`
+/// 的种子舰**完全不发事件**——投影实测 63 次出生里 **46 次无解释**，直到把对账守卫从
+/// 「城的归属」扩到「舰的出生」才被抓出来（见 `every_ship_state_change_is_explained_by_an_event`）。
+///
+/// 确定性：`choose_loadout` / `ship_display_name` 都无 RNG，`ship_name_seq` 单调递增，
+/// 故本漏斗不改变模拟的随机数流。
+pub(crate) fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -> ShipId {
+    let components = autocontrol::choose_loadout(state, config, spec.owner.clone(), spec.class);
+    let class = spec.class.to_string();
+    let cspec = config.ship_spec(&class);
+    // 舰名 = 从本势力名字库确定性取的一个唯一名（名字即唯一 key，击毁后不复用）。
+    let seq = *state.ship_name_seq.entry(spec.owner.clone()).or_insert(0);
+    state.ship_name_seq.insert(spec.owner.clone(), seq + 1);
+    let fname = state.faction(&spec.owner).map(|f| f.name.clone()).unwrap_or_default();
+    let name = ship_display_name(config.ship_pool(&fname), seq);
+    let mut ship = Ship {
+        name: name.clone(),
+        class: class.clone(),
+        faction_id: spec.owner.clone(),
+        position: spec.position,
+        hull: 0.0,
+        hull_max: 0.0,
+        shield: 0.0,
+        shield_max: 0.0,
+        components,
+        component_hp: Vec::new(),
+        velocity: 0.0,
+        doctrine: cspec.default_doctrine,
+        kiting: cspec.default_kiting,
+        attack_hist: BTreeMap::new(),
+    };
+    let panel = ship_panel(config, &ship);
+    ship.hull = panel.hull_max;
+    ship.hull_max = panel.hull_max;
+    ship.shield = panel.shield_max;
+    ship.shield_max = panel.shield_max;
+    // 每件组件初始满完整度（模块毁损用）。
+    ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
+    if spec.pay_components {
+        let comp_cost: Vec<(String, f64)> = ship
+            .components
+            .iter()
+            .flat_map(|c| config.component_spec(c).cost.clone())
+            .collect();
+        let mut spent: ResourceMap = ResourceMap::new();
+        commit_spend(state, &spec.owner, &mut spent, &comp_cost);
+    }
+    ev(state, GameEvent::ShipSpawned {
+        ship: name.clone(),
+        owner: spec.owner.clone(),
+        class: class.clone(),
+        city: spec.city,
+        via: spec.via,
+    });
+    state
+        .control
+        .entry(spec.owner)
+        .or_default()
+        .ship_orders
+        .insert(name.clone(), Control::inherit(ShipBehavior::Idle));
+    state.ships.push(ship);
+    name
+}
+
+/// 一座城被**夷平**的方式（决定记哪条事件）。
+enum RazeCause {
+    /// 被舰炮拆平 → `CityRazed`（带拆城的舰/势力、伤害、夷平前人口）。
+    Bombardment { by_ship: ShipId, by_faction: FactionId, damage: f64 },
+    /// 离心叛乱：市民自己散伙，无外部攻击者 → `Revolt`。
+    Revolt { faction: FactionId, loyalty: f64 },
+}
+
+/// 把一座城夷平为空白（漏斗）：清人口 / 建筑 / 造舰进度、`razed = true`，并记事件。
+///
+/// 两条路径（舰炮拆平 / 离心叛乱）统一走这里。**刻意保留两条路径各自对忠诚度的效果**
+/// （炮击不动 `loyalty`、叛乱清零）：治理步进跳过 razed 城，故该值对模拟是惰性的，但它是
+/// 投影 `cities.loyalty` 列的一部分——改它会改变已发布的轨迹。
+fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
+    let pop_before = state.city(cid).map(|c| c.population).unwrap_or(0);
+    if let Some(c) = state.city_mut(cid) {
+        c.razed = true;
+        c.population = 0;
+        c.buildings.clear();
+        c.ship_progress.clear();
+        if matches!(&cause, RazeCause::Revolt { .. }) {
+            c.loyalty = 0.0;
+        }
+    }
+    match cause {
+        RazeCause::Bombardment { by_ship, by_faction, damage } => ev(state, GameEvent::CityRazed {
+            city: cid.clone(),
+            fallen_to: by_faction,
+            by_ship,
+            damage,
+            pop_before,
+        }),
+        RazeCause::Revolt { faction, loyalty } => ev(state, GameEvent::Revolt {
+            city: cid.clone(),
+            faction,
+            loyalty,
+        }),
+    }
+}
+
+/// 给一座城的新建筑补上「投资 / 建造权重」控制叶子。
+///
+/// `Control::inherit` 的 `mode = None` → 控制解析沿作用域链上溯，与「叶子不存在」等价，
+/// 因此这一步**不改变任何决策**（只是让控制面里那座城的建筑是可枚举的）。
+fn wire_city_control(state: &mut State, config: &GameConfig, cid: &CityId, to: &FactionId) {
+    let buildings = state.city(cid).map(|c| c.buildings.clone()).unwrap_or_default();
+    let ctrl = state.control.entry(to.clone()).or_default();
+    for b in &buildings {
+        let ikey = (cid.clone(), b.id);
+        ctrl.invest_weights.entry(ikey).or_insert_with(|| {
+            Control::inherit(config.building_spec(&b.kind).default_invest_weight)
+        });
+        if b.is_shipyard() {
+            let bkey = (cid.clone(), b.id);
+            ctrl.build_weights.entry(bkey).or_insert_with(|| {
+                Control::inherit(config.building_spec(&b.kind).default_build_weight)
+            });
+        }
+    }
+}
+
+/// 复垦一座**空白城**（razed → 活城）并交给 `to`（漏斗）：重新播种建筑 / 人口 / 造舰进度、
+/// 忠诚重置为 1.0，并记 `ColonyFounded { how: Refounded, prev_owner }`。
+///
+/// `prev_owner` 由漏斗自己读（改归属**之前**的持有者 = 空白城保留的 diaspora claim），
+/// 所以「谁失去了这座城市」不可能被调用方漏掉。
+///
+/// 两条路径统一走这里：殖民舰复垦、反僵尸重建的 diaspora 复垦（含回到自己的废墟）。
+/// 返回 `false` = 该城没有可用的定居点（调用方自行处理）。
+fn reseed_city(
+    state: &mut State,
+    config: &GameConfig,
+    cid: &CityId,
+    to: &FactionId,
+    seeded_ship_class: &str,
+    next_building_id: &mut BuildingId,
+) -> bool {
+    let Some(settlement) = state.city_settlement(cid).cloned() else { return false };
+    let Some(body) = state.city(cid).map(|c| c.body_id.clone()) else { return false };
+    let prev_owner = state.city(cid).map(|c| c.faction_id.clone());
+    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+    let buildings = seed_colony_buildings(&settlement, pop, seeded_ship_class, config, next_building_id);
+    if let Some(c) = state.city_mut(cid) {
+        c.razed = false;
+        c.faction_id = to.clone();
+        c.population = pop;
+        c.buildings = buildings;
+        c.ship_progress.clear();
+        c.ship_progress.insert(seeded_ship_class.to_string(), 0.0);
+        c.loyalty = 1.0;
+    }
+    wire_city_control(state, config, cid, to);
+    ev(state, GameEvent::ColonyFounded {
+        city: cid.clone(),
+        owner: to.clone(),
+        body,
+        seeded_ship_class: seeded_ship_class.to_string(),
+        how: FoundingHow::Refounded,
+        prev_owner,
+    });
+    true
+}
+
+/// 在**从未被占据**的定居点上新建一座城（漏斗）并记 `ColonyFounded { how: NewSite }`。
+/// 城名由调用方给出（殖民城 / 收容所两种命名不同）。返回 `false` = 同名城已存在（防御）。
+fn found_city(
+    state: &mut State,
+    config: &GameConfig,
+    name: &CityId,
+    body: &BodyId,
+    settlement: &Settlement,
+    to: &FactionId,
+    seeded_ship_class: &str,
+    next_building_id: &mut BuildingId,
+) -> bool {
+    if state.city(name).is_some() {
+        return false;
+    }
+    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+    let buildings = seed_colony_buildings(settlement, pop, seeded_ship_class, config, next_building_id);
+    let mut progress: BTreeMap<String, f64> = BTreeMap::new();
+    progress.insert(seeded_ship_class.to_string(), 0.0);
+    state.cities.push(City {
+        name: name.clone(),
+        body_id: body.clone(),
+        settlement: settlement.name.clone(),
+        faction_id: to.clone(),
+        population: pop,
+        buildings,
+        ship_progress: progress,
+        razed: false,
+        space_station: false,
+        loyalty: 1.0,
+    });
+    wire_city_control(state, config, name, to);
+    ev(state, GameEvent::ColonyFounded {
+        city: name.clone(),
+        owner: to.clone(),
+        body: body.clone(),
+        seeded_ship_class: seeded_ship_class.to_string(),
+        how: FoundingHow::NewSite,
+        prev_owner: None,
+    });
+    true
+}
+
+/// 难民**夺取一座活城**（漏斗）：重新播种并换主，记 `CityOverrun { from, to }`。
+///
+/// `from` 由漏斗自己读（改归属**之前**的持有者），所以「这座城市是从谁手里被夺走的」
+/// 不可能被漏掉。这条路径此前**完全不发事件**——一座活城从 A 到 B 静默发生。
+fn overrun_city(
+    state: &mut State,
+    config: &GameConfig,
+    cid: &CityId,
+    to: &FactionId,
+    seeded_ship_class: &str,
+    next_building_id: &mut BuildingId,
+) -> bool {
+    let Some(settlement) = state.city_settlement(cid).cloned() else { return false };
+    let from = state.city(cid).map(|c| c.faction_id.clone()).unwrap_or_default();
+    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
+    let buildings = seed_colony_buildings(&settlement, pop, seeded_ship_class, config, next_building_id);
+    if let Some(c) = state.city_mut(cid) {
+        c.razed = false;
+        c.faction_id = to.clone();
+        c.population = pop;
+        c.buildings = buildings;
+        c.ship_progress.clear();
+        c.ship_progress.insert(seeded_ship_class.to_string(), 0.0);
+        c.loyalty = 1.0;
+    }
+    wire_city_control(state, config, cid, to);
+    ev(state, GameEvent::CityOverrun { city: cid.clone(), from, to: to.clone() });
+    true
+}
+
 /// A building's health ratio (armor / armor_max), clamped to [0, 1]. Intact
 /// buildings are 1.0; damaged buildings produce/operate at a reduced ratio.
 fn building_health(b: &Building, config: &GameConfig) -> f64 {
@@ -402,10 +716,9 @@ fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 }
             }
             for sid in scrap {
-                ev(state, GameEvent::ShipDestroyed { ship: sid.clone(), owner: fid.clone(), class: state.ship(&sid).map(|s| s.class.clone()).unwrap_or_default() });
-                if let Some(s) = state.ship_mut(&sid) {
-                    s.hull = 0.0;
-                }
+                // 经济性死亡：不是被打沉的，是养不起被拆解的（此前与战损共用同一个事件、
+                // 无法区分）。走漏斗 → 保证有事件。
+                kill_ship(state, &sid, DeathCause::UpkeepShortfall, None);
             }
         }
     }
@@ -835,50 +1148,17 @@ fn build_city(
         // On launch, the ship is fitted with a deterministic component loadout chosen
         // from the faction's resource advantage (see `choose_loadout`); the component
         // cost is paid out of the stockpile and the effective panel (hull_max, etc.)
-        // is computed from class + components.
+        // is computed from class + components. All of that (naming, fitting, paying,
+        // recording `ShipSpawned`) lives in the `spawn_ship` funnel.
         while to_write_progress.get(cls).copied().unwrap_or(0.0) >= bp - 1e-9 {
-            let components = autocontrol::choose_loadout(state, config, fid.clone(), cls);
-            // 舰名 = 从本势力名字库确定性取的一个唯一名（名字即唯一 key）。
-            let seq = *state.ship_name_seq.entry(fid.clone()).or_insert(0);
-            state.ship_name_seq.insert(fid.clone(), seq + 1);
-            let fname = state.faction(&fid).map(|f| f.name.clone()).unwrap_or_default();
-            let name = ship_display_name(config.ship_pool(&fname), seq);
-            let mut ship = Ship {
-                name,
-                class: cls.clone(),
-                faction_id: fid.clone(),
+            spawn_ship(state, config, ShipSpawn {
+                owner: fid.clone(),
+                class: cls.as_str(),
                 position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
-                hull: 0.0,
-                hull_max: 0.0,
-                shield: 0.0,
-                shield_max: 0.0,
-                components,
-                component_hp: Vec::new(),
-                velocity: 0.0,
-                doctrine: spec.default_doctrine,
-                kiting: spec.default_kiting,
-                attack_hist: BTreeMap::new(),
-            };
-            let panel = ship_panel(config, &ship);
-            ship.hull = panel.hull_max;
-            ship.hull_max = panel.hull_max;
-            ship.shield = panel.shield_max;
-            ship.shield_max = panel.shield_max;
-            // 每件组件初始满完整度（模块毁损用）。
-            ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
-            // Pay the (validated-affordable) component cost.
-            let comp_cost: Vec<(String, f64)> = ship
-                .components
-                .iter()
-                .flat_map(|c| config.component_spec(c).cost.clone())
-                .collect();
-            let mut spent0: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
-            commit_spend(state, &fid, &mut spent0, &comp_cost);
-            ev(state, GameEvent::ShipSpawned { ship: ship.name.clone(), owner: fid.clone(), class: cls.clone(), city: cid.clone() });
-            if let Some(c) = state.control_mut(fid.clone()) {
-                c.ship_orders.insert(ship.name.clone(), Control::inherit(ShipBehavior::Idle));
-            }
-            state.ships.push(ship);
+                city: Some(cid.clone()),
+                via: SpawnVia::Shipyard,
+                pay_components: true,
+            });
             *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
         }
     }
@@ -933,6 +1213,13 @@ fn ship_power(config: &GameConfig, ship: &Ship) -> f64 {
 }
 
 fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+    // 进入本步进时**还活着**的舰：漏斗兜底的断言只对它们成立（见 `sweep_dead_ships`）。
+    let alive_at_step_start: BTreeSet<ShipId> = state
+        .ships
+        .iter()
+        .filter(|s| s.hull > 0.0)
+        .map(|s| s.name.clone())
+        .collect();
     let mut order: Vec<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
     for i in (1..order.len()).rev() {
         let j = rng.range(i as u64 + 1) as usize;
@@ -1068,12 +1355,11 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
     }
 
-    // Drop destroyed ships and prune their behaviors from the controllable state.
-    state.ships.retain(|s| s.hull > 0.0);
-    let alive: std::collections::BTreeSet<ShipId> = state.ships.iter().map(|s| s.name.clone()).collect();
-    for c in state.control.values_mut() {
-        c.ship_orders.retain(|sid, _| alive.contains(sid));
-    }
+    // 清扫本回合战沉的舰（漏斗**兜底**）：保证「从 state.ships 消失的舰都有死因事件」，
+    // 并清掉它的指令。正常 0 艘需要兜底——不为 0 说明某条路径漏了 `kill_ship`，
+    // `debug_assert` 会在测试里立刻炸出来。
+    let invented = sweep_dead_ships(state, &alive_at_step_start);
+    debug_assert_eq!(invented, 0, "有 {invented} 艘舰死亡却没有事件：某条路径漏了 kill_ship");
 }
 
 // --- resurgence (anti-zombie / anti-monopoly) -------------------------------
@@ -1153,6 +1439,9 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         .max()
         .map_or(0, |m| m + 1);
 
+    // 这次重建「落脚」的方式——决定走哪个漏斗（`reseed_city` / `found_city` / `overrun_city`），
+    // 使一次重建在历史里可读成「复垦了自己的废墟 / 占了一块新地 / 夺取了别人的活城」。
+    // 三个漏斗各自负责「改状态 + 记事件」，调用方无处可漏。
     for fid in faction_ids {
         // Already a participant (has a ship or a living city)? Nothing to do.
         let has_ship = state.ships.iter().any(|s| s.faction_id == fid && s.hull > 0.0);
@@ -1165,7 +1454,6 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         }
 
         let seeded_ship_class = autocontrol::choose_next_class(state, &fid, config, rng);
-        let spec = config.ship_spec(&seeded_ship_class);
 
         // Anchor 1/2: this faction's own lowest-name footprint, else any razed refuge.
         let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.name.clone()).map(|c| c.name.clone());
@@ -1173,155 +1461,52 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.name.clone()).map(|c| c.name.clone())
         });
 
-        let (body, pos) = if let Some(anchor_id) = anchor_id {
-            // Re-seed the anchor's city (diaspora claim / refugee refuge).
-            let Some(settlement) = state.city_settlement(&anchor_id).cloned() else { continue };
-            let body = state.city(&anchor_id).map(|c| c.body_id.clone()).unwrap_or_default();
-            let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-            let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
-            if let Some(c) = state.city_mut(&anchor_id) {
-                c.razed = false;
-                c.faction_id = fid.clone();
-                c.population = pop;
-                c.buildings = buildings;
-                c.ship_progress.clear();
-                c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
-                c.loyalty = 1.0;
+        let (body, city) = if let Some(anchor_id) = anchor_id {
+            // 复垦一座空白城（自己的废墟 / 任何空白避风港）→ `reseed_city` 漏斗。
+            let Some(body) = state.city(&anchor_id).map(|c| c.body_id.clone()) else { continue };
+            if !reseed_city(state, config, &anchor_id, &fid, &seeded_ship_class, &mut next_building) {
+                continue;
             }
-            // Ensure the re-seeded buildings have invest/build-weight entries.
-            let city_buildings = state.city(&anchor_id).map(|c| c.buildings.clone()).unwrap_or_default();
-            if let Some(ctrl) = state.control_mut(fid.clone()) {
-                for b in &city_buildings {
-                    let ikey = (anchor_id.clone(), b.id);
-                    ctrl.invest_weights.entry(ikey).or_insert_with(|| {
-                        Control::inherit(config.building_spec(&b.kind).default_invest_weight)
-                    });
-                    if b.is_shipyard() {
-                        let bkey = (anchor_id.clone(), b.id);
-                        ctrl.build_weights.entry(bkey).or_insert_with(|| {
-                            Control::inherit(config.building_spec(&b.kind).default_build_weight)
-                        });
-                    }
-                }
-            }
-            let cpos = state.body_position(&body);
-            (body, [cpos[0] + 0.05, cpos[1] + 0.05])
-        } else {
-            // Anchor 3/4 (last resort): no razed footprint and no vacant settlement.
-            // First try to found a brand-new city on a never-occupied settlement; if
-            // the world is entirely full, a diaspora refugee overruns the strongest
-            // colonizer's lowest-id fringe city. Either way a wiped civ re-enters.
-            if let Some((body, sname)) = find_vacant_settlement(state) {
-                let Some(settlement) = state.body_settlement(&body, &sname).cloned() else { continue };
-                let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-                let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
-                let base = if settlement.name.is_empty() {
-                    state.body(&body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
-                } else {
-                    settlement.name.clone()
-                };
-                let city = City {
-                    name: format!("{}-收容所", base),
-                    body_id: body.clone(),
-                    settlement: settlement.name.clone(),
-                    faction_id: fid.clone(),
-                    population: pop,
-                    buildings,
-                    ship_progress: {
-                        let mut m = BTreeMap::new();
-                        m.insert(seeded_ship_class.clone(), 0.0);
-                        m
-                    },
-                    razed: false,
-                    space_station: false,
-                    loyalty: 1.0,
-                };
-                let ctrl = state.control.entry(fid.clone()).or_default();
-                for b in &city.buildings {
-                    let key = (city.name.clone(), b.id);
-                    ctrl.invest_weights
-                        .insert(key.clone(), Control::inherit(config.building_spec(&b.kind).default_invest_weight));
-                    if b.is_shipyard() {
-                        ctrl.build_weights
-                            .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
-                    }
-                }
-                state.cities.push(city);
-                let cpos = state.body_position(&body);
-                (body, [cpos[0] + 0.05, cpos[1] + 0.05])
+            (body, anchor_id)
+        } else if let Some((body, sname)) = find_vacant_settlement(state) {
+            // Anchor 3: 在从未被占据的定居点上新建一座收容所 → `found_city` 漏斗。
+            let Some(settlement) = state.body_settlement(&body, &sname).cloned() else { continue };
+            let base = if settlement.name.is_empty() {
+                state.body(&body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
             } else {
-                // 世界完全满员：难民夺取最强殖民者的最小 id 边缘城。
-                let Some(host_cid) = displace_city_for_refugee(state) else { continue };
-                let Some(settlement) = state.city_settlement(&host_cid).cloned() else { continue };
-                let body = state.city(&host_cid).map(|c| c.body_id.clone()).unwrap_or_default();
-                let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-                let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, &mut next_building);
-                if let Some(c) = state.city_mut(&host_cid) {
-                    c.razed = false;
-                    c.faction_id = fid.clone();
-                    c.population = pop;
-                    c.buildings = buildings;
-                    c.ship_progress.clear();
-                    c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
-                    c.loyalty = 1.0;
-                }
-                let city_buildings = state.city(&host_cid).map(|c| c.buildings.clone()).unwrap_or_default();
-                if let Some(ctrl) = state.control_mut(fid.clone()) {
-                    for b in &city_buildings {
-                        let ikey = (host_cid.clone(), b.id);
-                        ctrl.invest_weights.entry(ikey).or_insert_with(|| {
-                            Control::inherit(config.building_spec(&b.kind).default_invest_weight)
-                        });
-                        if b.is_shipyard() {
-                            let bkey = (host_cid.clone(), b.id);
-                            ctrl.build_weights.entry(bkey).or_insert_with(|| {
-                                Control::inherit(config.building_spec(&b.kind).default_build_weight)
-                            });
-                        }
-                    }
-                }
-                let cpos = state.body_position(&body);
-                (body, [cpos[0] + 0.05, cpos[1] + 0.05])
+                settlement.name.clone()
+            };
+            let new_cid = format!("{}-收容所", base);
+            if !found_city(state, config, &new_cid, &body, &settlement, &fid, &seeded_ship_class, &mut next_building) {
+                continue;
             }
+            (body, new_cid)
+        } else {
+            // Anchor 4: 世界完全满员 → 难民夺取最强殖民者的最小 id 边缘城 → `overrun_city` 漏斗。
+            let Some(host_cid) = displace_city_for_refugee(state) else { continue };
+            let Some(body) = state.city(&host_cid).map(|c| c.body_id.clone()) else { continue };
+            if !overrun_city(state, config, &host_cid, &fid, &seeded_ship_class, &mut next_building) {
+                continue;
+            }
+            (body, host_cid)
         };
+
+        let cpos = state.body_position(&body);
+        let pos = [cpos[0] + 0.05, cpos[1] + 0.05];
 
         // Launch one affordable colony ship from the rebuilt/founded city.
         // 舰级 = 平台修正器：重建种子舰也必须装配组件（至少一件武器），否则没有火力。
-        let seed_components = autocontrol::choose_loadout(state, config, fid.clone(), &seeded_ship_class);
-        let seq = *state.ship_name_seq.entry(fid.clone()).or_insert(0);
-        state.ship_name_seq.insert(fid.clone(), seq + 1);
-        let fname = state.faction(&fid).map(|f| f.name.clone()).unwrap_or_default();
-        let name = ship_display_name(config.ship_pool(&fname), seq);
-        let mut seed = Ship {
-            name,
-            class: seeded_ship_class.clone(),
-            faction_id: fid.clone(),
+        // 走 `spawn_ship` 漏斗 → 种子舰也有 `ShipSpawned` 事件。此前这条路径**完全不发**
+        // 造舰事件（只发 Resurgence），投影实测 63 次出生里 46 次无解释。
+        let seed_name = spawn_ship(state, config, ShipSpawn {
+            owner: fid.clone(),
+            class: seeded_ship_class.as_str(),
             position: pos,
-            hull: spec.hull,
-            hull_max: spec.hull,
-            shield: 0.0,
-            shield_max: 0.0,
-            components: seed_components,
-            component_hp: Vec::new(),
-            velocity: 0.0,
-            doctrine: spec.default_doctrine,
-            kiting: spec.default_kiting,
-            attack_hist: BTreeMap::new(),
-        };
-        seed.component_hp = seed.components.iter().map(|c| component_integrity(config, c)).collect();
-        let seed_panel = ship_panel(config, &seed);
-        seed.hull = seed_panel.hull_max;
-        seed.hull_max = seed_panel.hull_max;
-        seed.shield = seed_panel.shield_max;
-        seed.shield_max = seed_panel.shield_max;
-        state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .ship_orders
-            .insert(seed.name.clone(), Control::inherit(ShipBehavior::Idle));
-        ev(state, GameEvent::Resurgence { faction: fid, body, ship: seed.name.clone() });
-        state.ships.push(seed);
+            city: Some(city.clone()),
+            via: SpawnVia::Resurgence,
+            pay_components: false,
+        });
+        ev(state, GameEvent::Resurgence { faction: fid, body, ship: seed_name, city });
     }
 }
 
@@ -1580,20 +1765,16 @@ fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
         // 的大帝国体量回落，又让旁观/小势力能接盘城市、成长为多极棋子。找不到可倒戈目标
         // （世界只剩一家）时兜底夷为空白（可再殖民，旧行为）。
         for cid in to_revolt {
+            // 先读爆发时的忠诚度：下面两条分支都会把它改写（倒戈重置为 1.0、夷平清零）。
+            let loyalty = state.city(&cid).map(|c| c.loyalty).unwrap_or(0.0);
             let target = most_ideologically_distant_faction(state, &fid)
                 .filter(|to| to != &fid);
             if let Some(to) = target {
-                defect_city(state, config, &cid, &fid, &to);
-                ev(state, GameEvent::CityDefected { city: cid, from: fid.clone(), to });
+                // 漏斗：改归属 + 记 `CityDefected`（在同一处，漏不掉）。
+                defect_city(state, config, &cid, &fid, &to, loyalty);
             } else {
-                if let Some(c) = state.city_mut(&cid) {
-                    c.razed = true;
-                    c.population = 0;
-                    c.buildings.clear();
-                    c.ship_progress.clear();
-                    c.loyalty = 0.0;
-                }
-                ev(state, GameEvent::Revolt { city: cid, faction: fid.clone() });
+                // 漏斗：夷平为空白 + 记 `Revolt`。
+                raze_city(state, &cid, RazeCause::Revolt { faction: fid.clone(), loyalty });
             }
         }
     }
@@ -1632,11 +1813,12 @@ fn most_ideologically_distant_faction(state: &State, owner: &str) -> Option<Fact
     best.map(|(_, n)| n)
 }
 
-/// 把一座城从 `from` 倒戈给 `to`：城市换主、居民重燃对新主的认同（忠诚重置为 1.0，
+/// 把一座城从 `from` 倒戈给 `to`（漏斗）：城市换主、居民重燃对新主的认同（忠诚重置为 1.0，
 /// 不再立刻叛变）、人口/建筑/船坞/空间站全部保留（这是一次**改旗易帜**，不是夷平）。
 /// 同时把旧主对该城建筑/娱乐预算的控制叶子迁到新主名下，使新主的 AI 确实能治理这座
 /// 城；并对旧主↔新主施加「夺城」级的关系打击（倒戈在旧主眼中几近叛国）。
-fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &str, to: &str) {
+/// `loyalty` 是爆发时的忠诚度（换主后会被重置，故由调用方先读好传入）。
+fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &str, to: &str, loyalty: f64) {
     // 先收集该城建筑 id（避免在可变借权时再读 state.city）。
     let building_ids: Vec<BuildingId> = state
         .city(city)
@@ -1684,6 +1866,13 @@ fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &str, t
     // 外交：倒戈 = 夺城级的关系下压（旧主视新主为敌）。
     let cur = relation(state, from, to);
     set_relation_sym(state, from.to_string(), to.to_string(), cur + config.diplomacy.capture_delta, config);
+    // 漏斗负责记事件：改归属与记 `CityDefected` 在同一处，**忘记记在结构上不可能**。
+    ev(state, GameEvent::CityDefected {
+        city: city.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        loyalty,
+    });
 }
 
 // --- 迁都 (capital relocation) ----------------------------------------------
@@ -1896,7 +2085,9 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, pl
     let afac = state.ship(attacker_id).map(|a| a.faction_id.clone()).unwrap_or_default();
     let weapons = state.ship(attacker_id).map(|a| ship_weapons(config, a)).unwrap_or_default();
     let mut damage_acc: BTreeMap<ShipId, f64> = BTreeMap::new();
-    let mut destroyed: Vec<(ShipId, FactionId, String)> = Vec::new();
+    // 被击毁的舰 + **补刀的那一发**（哪艘舰/哪个势力/什么弹种）。此前只记「被毁」不记凶手，
+    // 只能靠同回合的 Attack 反推，集火时不可判。
+    let mut destroyed: Vec<(ShipId, Killer)> = Vec::new();
     // 攻击历史新鲜度：本舰打过谁。逐发结算后刷新，使同回合后续发能按「越近越降权重」改选。
     let mut hist: BTreeMap<ShipId, f64> = BTreeMap::new();
 
@@ -1907,10 +2098,14 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, pl
         }
         let dmg = resolve_shot(state, config, attacker_id, w, target_id);
         let dead = state.ship(target_id).map(|s| s.hull <= 0.0).unwrap_or(false);
-        if dead && !destroyed.iter().any(|(n, _, _)| n == target_id) {
-            if let Some(ts) = state.ship(target_id) {
-                destroyed.push((target_id.clone(), ts.faction_id.clone(), ts.class.clone()));
-            }
+        // 第一发把它打到 hull ≤ 0 的就是**补刀**（已在 0 的目标在循环开头被跳过，
+        // 所以这里判真一定是本发致命）。记下这一发的来源作为凶手。
+        if dead && !destroyed.iter().any(|(n, _)| n == target_id) {
+            destroyed.push((target_id.clone(), Killer {
+                ship: attacker_id.to_string(),
+                faction: afac.clone(),
+                weapon: weapon_kind_name(w.kind).to_string(),
+            }));
         }
         // 本发是「攻击」：把该目标新鲜度刷到 1（哪怕全被护盾/拦截吃掉）。
         hist.entry(target_id.clone()).or_insert(0.0);
@@ -1930,8 +2125,8 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, pl
             adjust_relation(state, &afac, &tfac, config.diplomacy.attack_delta);
         }
     }
-    for (t, owner, cls) in destroyed {
-        ev(state, GameEvent::ShipDestroyed { ship: t, owner, class: cls });
+    for (t, by) in destroyed {
+        kill_ship(state, &t, DeathCause::Combat, Some(by));
     }
 }
 
@@ -2147,20 +2342,20 @@ pub(crate) fn bombard_city(state: &mut State, config: &GameConfig, ship_id: &str
             b.armor -= dmg * share;
         }
         c.buildings.retain(|b| b.armor > 1e-6);
-        if c.buildings.is_empty() {
-            c.razed = true;
-            c.population = 0;
-            c.ship_progress.clear();
-            true
-        } else {
-            false
-        }
+        // 建筑清零 = 城失守；**状态改写交给 `raze_city` 漏斗**（它自己读夷平前人口并记事件）。
+        c.buildings.is_empty()
     };
     adjust_relation(state, &attacker, &old_owner, config.diplomacy.attack_delta);
     ev(state, GameEvent::Siege { attacker: ship_id.to_string(), city: cid.to_string(), damage: dmg });
     if razed {
         adjust_relation(state, &attacker, &old_owner, config.diplomacy.capture_delta);
-        ev(state, GameEvent::CityRazed { city: cid.to_string(), fallen_to: attacker });
+        // 漏斗记 `CityRazed`：`by_ship` = 拆掉这座城的那艘舰（此前只能去同回合的 Siege 里猜），
+        // `pop_before`/`damage` = 这次毁灭的量级。
+        raze_city(state, &cid.to_string(), RazeCause::Bombardment {
+            by_ship: ship_id.to_string(),
+            by_faction: attacker,
+            damage: dmg,
+        });
     }
 }
 
@@ -2183,24 +2378,15 @@ pub(crate) fn colonize(
     // 1) A razed (blank) city keeps occupying its settlement: re-seed it there.
     let razed_cid = state.cities.iter().find(|c| c.body_id == body && c.razed).map(|c| c.name.clone());
     if let Some(cid) = razed_cid {
-        let Some(settlement) = state.city_settlement(&cid).cloned() else {
+        // 漏斗：复垦空白城 + 记 `ColonyFounded { how: Refounded }`。旧主（空白城保留的
+        // diaspora claim）由漏斗自己读，调用方漏不掉。
+        if !reseed_city(state, config, &cid, &faction, &seeded_ship_class, next_building_id) {
+            // 该城没有可用的定居点 —— 殖民舰就地待命（旧行为）。
             if let Some(c) = state.control_mut(faction.clone()) {
                 c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
             }
             return;
-        };
-        let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-        let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
-        if let Some(c) = state.city_mut(&cid) {
-            c.razed = false;
-            c.faction_id = faction.clone();
-            c.population = pop;
-            c.buildings = buildings;
-            c.ship_progress.clear();
-            c.ship_progress.insert(seeded_ship_class.clone(), 0.0);
-            c.loyalty = 1.0;
         }
-        ev(state, GameEvent::ColonyFounded { city: cid, owner: faction.clone(), body: body.to_string(), seeded_ship_class: seeded_ship_class.clone() });
         if let Some(c) = state.control_mut(faction.clone()) {
             c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
         }
@@ -2219,42 +2405,14 @@ pub(crate) fn colonize(
         }
         return;
     };
-    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-    let buildings = seed_colony_buildings(&settlement, pop, &seeded_ship_class, config, next_building_id);
     let base = if settlement.name.is_empty() {
         state.body(body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
     } else {
         settlement.name.clone()
     };
-    let city = City {
-        name: format!("{}-殖民城", base),
-        body_id: body.to_string(),
-        settlement: settlement.name.clone(),
-        faction_id: faction.clone(),
-        population: pop,
-        buildings,
-        ship_progress: {
-            let mut m = BTreeMap::new();
-            m.insert(seeded_ship_class.clone(), 0.0);
-            m
-        },
-        razed: false,
-        space_station: false,
-        loyalty: 1.0,
-    };
-    let cctrl = state.control.entry(faction.clone()).or_default();
-    for b in &city.buildings {
-        let key = (city.name.clone(), b.id);
-        cctrl.invest_weights
-            .insert(key.clone(), Control::inherit(config.building_spec(&b.kind).default_invest_weight));
-        if b.is_shipyard() {
-            cctrl.build_weights
-                .insert(key, Control::inherit(config.building_spec(&b.kind).default_build_weight));
-        }
-    }
-    let cname = city.name.clone();
-    state.cities.push(city);
-    ev(state, GameEvent::ColonyFounded { city: cname, owner: faction.clone(), body: body.to_string(), seeded_ship_class: seeded_ship_class.clone() });
+    let cname = format!("{}-殖民城", base);
+    // 漏斗：新建城 + 记 `ColonyFounded { how: NewSite }`。
+    found_city(state, config, &cname, &body.to_string(), &settlement, &faction, &seeded_ship_class, next_building_id);
     if let Some(c) = state.control_mut(faction.clone()) {
         c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
     }
@@ -2771,7 +2929,13 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     let ic = &config.ideology;
     let r = config.mond.radius;
-    // 击毁归属：本回合某舰被谁击毁——由「攻击它的那一方」领功（近似取最后一个攻击者）。
+    // 击毁归属：本回合某舰被谁击毁——由「攻击它的那一方」领功。
+    //
+    // 注意：`ShipDestroyed` 已经带了权威的 `by`（补刀那一发的舰/势力），但**这里刻意仍走
+    // 近似口径**（同回合最后一条 `Attack` 的势力）。原因见 `.agents/sparse-history-design.md`
+    // §5：换用 `by` 在 60 回合窗口内逐字节一致，但在 1000 回合长局里会翻转
+    // `world_is_multipolar` 的「霸权轮换」判定（种子 1 被俄罗斯锁死）——那是**平衡层面的
+    // 改动**，需要单独一次平衡验证，不该混在「历史完备性」的改动里。
     let mut killer_of: BTreeMap<ShipId, FactionId> = BTreeMap::new();
     for e in &state.events {
         if let GameEvent::Attack { attacker, target, .. } = e {
@@ -2799,7 +2963,7 @@ fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
                         }
                     }
                 }
-                GameEvent::CityRazed { city, fallen_to } => {
+                GameEvent::CityRazed { city, fallen_to, .. } => {
                     if fallen_to == &name {
                         mil += 1.0;
                     } else if let Some(c) = state.city(city) {
@@ -2962,7 +3126,7 @@ fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
         }
         StoryTrigger::FirstRaze => {
             if let Some((city, fallen)) = state.events.iter().find_map(|e| match e {
-                GameEvent::CityRazed { city, fallen_to } => Some((city.clone(), fallen_to.clone())),
+                GameEvent::CityRazed { city, fallen_to, .. } => Some((city.clone(), fallen_to.clone())),
                 _ => None,
             }) {
                 add(&mut parts, state.city(&city).map(|c| c.name.clone()));
@@ -2997,42 +3161,17 @@ fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, 
     if state.body(&body).is_none() {
         return;
     }
-    let spec = config.ship_spec(class);
-    // 舰级 = 平台修正器：剧情赠舰也装配组件（至少一件武器），否则没有火力。
-    let story_components = autocontrol::choose_loadout(state, config, faction.clone(), class);
-    let seq = *state.ship_name_seq.entry(faction.clone()).or_insert(0);
-    state.ship_name_seq.insert(faction.clone(), seq + 1);
-    let fname = state.faction(&faction).map(|f| f.name.clone()).unwrap_or_default();
-    let name = ship_display_name(config.ship_pool(&fname), seq);
-    let mut ship = Ship {
-        name,
-        class: class.to_string(),
-        faction_id: faction.clone(),
+    // 剧情赠舰此前**完全不发事件**——一艘舰凭空出现。走 `spawn_ship` 漏斗补上，
+    // 让它进可查的历史（`via = story` 与船坞出厂区分开）；赠舰不付组件成本
+    // （是剧情送的），也没有出厂城（在天体附近下水）。
+    spawn_ship(state, config, ShipSpawn {
+        owner: faction,
+        class,
         position: [pos[0] + 0.05, pos[1] + 0.05],
-        hull: spec.hull,
-        hull_max: spec.hull,
-        shield: 0.0,
-        shield_max: 0.0,
-        components: story_components,
-        component_hp: Vec::new(),
-        velocity: 0.0,
-        doctrine: spec.default_doctrine,
-        kiting: spec.default_kiting,
-        attack_hist: BTreeMap::new(),
-    };
-    ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
-    let ship_panel = ship_panel(config, &ship);
-    ship.hull = ship_panel.hull_max;
-    ship.hull_max = ship_panel.hull_max;
-    ship.shield = ship_panel.shield_max;
-    ship.shield_max = ship_panel.shield_max;
-    state
-        .control
-        .entry(faction.clone())
-        .or_default()
-        .ship_orders
-        .insert(ship.name.clone(), Control::inherit(ShipBehavior::Idle));
-    state.ships.push(ship);
+        city: None,
+        via: SpawnVia::Story,
+        pay_components: false,
+    });
 }
 
 /// 判断一条剧情触发条件是否已满足。
@@ -3091,10 +3230,13 @@ mod tests {
         });
         crate::control::apply_patch(&mut state, &config, &diff).expect("apply order");
 
-        // Simulate the target being destroyed before the round advances.
-        if let Some(t) = state.ship_mut(&ship3) {
-            t.hull = 0.0;
-        }
+        // Simulate the target being destroyed before the round advances. 走 `kill_ship` 漏斗——
+        // 它现在是**唯一**合法的「让一艘舰死」的方式（绕过它会被 `sweep_dead_ships` 的兜底
+        // `debug_assert` 当场抓住，这正是这条测试以前直接 `t.hull = 0.0` 会炸的原因）。
+        assert!(
+            kill_ship(&mut state, &ship3, DeathCause::Combat, None),
+            "target must get a recorded death event"
+        );
         let pos_before = state.ship(&ship0).map(|s| s.position).unwrap();
 
         advance(&mut state, &config, &mut rng);
@@ -3575,7 +3717,7 @@ mod tests {
         assert!(
             state.events.iter().any(|e| matches!(
                 e,
-                GameEvent::CityDefected { city: cid, from, to }
+                GameEvent::CityDefected { city: cid, from, to, .. }
                     if *cid == city && *from == owner && *to == "无国界科学组织"
             )),
             "expected a CityDefected event, got {:?}",
@@ -3951,7 +4093,13 @@ mod tests {
 
         // 注入一回合「战争得利」：我方舰击毁一艘敌舰。击毁归属由 Attack→ShipDestroyed 反推。
         state.events.push(GameEvent::Attack { attacker: my_ship.clone(), target: enemy.0.clone(), damage: 10.0 });
-        state.events.push(GameEvent::ShipDestroyed { ship: enemy.0.clone(), owner: enemy.1.clone(), class: "corvette".to_string() });
+        state.events.push(GameEvent::ShipDestroyed {
+            ship: enemy.0.clone(),
+            owner: enemy.1.clone(),
+            class: "corvette".to_string(),
+            cause: DeathCause::Combat,
+            by: None,
+        });
         step_ideology(&mut state, &config, &RoundFlow::default());
 
         let after = state.faction(&fname).unwrap().ideology.peace_military;

@@ -974,3 +974,92 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   「×9」徽标，或按势力分扇区摆开。本轮没做。
 - `[ ]` **太阳表面还是有点「奶酪」感**：`SUN_FRAG` 的 `fbm` 粒面在球面大尺度上显得斑驳，可换成
   更细的高频粒面 + 边缘变暗（limb darkening）来提升真实感。
+---
+
+## 23. 稀疏历史 / 事件账本（sparse history ledger） — `[x]`（Stage A + B 已落地，已并入 main）
+
+> 起因：轨迹答不出「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」
+> 与「**一艘舰被击毁，是被哪艘舰击毁？**」。完整设计 + 实测见
+> **[`.agents/sparse-history-design.md`](sparse-history-design.md)**。
+
+**诊断（三个独立根因，按根本性排序）**：
+1. **事实根本没被记录**（与 pandas 无关）：`Resurgence` 不带 `city`；难民夺城 `displace_city_for_refugee`
+   **零事件**；`ShipDestroyed` 无凶手；欠缴锈蚀复用同一个「被击毁」；剧情赠舰零事件。
+   seed 7 r24 活体样本：`大红斑科学站` 被夷平 → 同回合在木星重建（事件不带 city）→ r31 倒戈，
+   整条链只能靠 `resurgence.body == city.body_id` 反查。
+2. **历史活不过 checkpoint**（与 pandas 无关）：`state.events` 每回合清空，只有 `chronicle` 累计。
+3. **enum 被直接序列化成表**：13 个 variant 摊成 23 列并集 → 平均 null **74.8%**、`faction` 角色
+   **7 种拼写**、`from`/`to` **一列两义**（`city_defected` 是势力、`capital_relocated` 是天体）。
+   → **反证**：把 ③ 修到完美也修不出 ①，没写下来的事实任何表形态都变不出来。
+
+**已落地（Stage A，`[x]`）**：
+- `[x]` **归一化投影 API**（`src/model/event.rs`）：`GameEvent::{history_row,kind,salience,participants}`。
+  `history_row` 是**穷尽 match** → 新增 variant 时编译器强迫你声明参与方/显著性/载荷，
+  **历史不可能被「忘记记录」**（这是本设计的牙齿）。Rust 侧 variant 字段名保持可读，
+  归一化只发生在投影层。
+- `[x]` **因果字段补齐**：`ShipDestroyed{cause: DeathCause, by: Option<Killer>}`（补刀那一发的
+  舰/势力/弹种；`fire()` 里第一发打到 hull≤0 的就是凶手）、`CityRazed{by_ship,damage,pop_before}`、
+  `ColonyFounded{how,prev_owner}`、`Resurgence{city}`、`CityDefected/Revolt{loyalty}`、
+  新增 `CityOverrun`（难民夺活城）、`ShipSpawned{via}`（剧情赠舰）。
+- `[x]` **`events` 变 lazy 表**（`idx/events.jsonl`，`event_id="<round>:<seq>"`）：固定列 +
+  统一参与方槽位（`actor_*`/`target_*`/`extra`）+ per-type 载荷收进单个 `data` 对象列
+  （**一列只承载一种类型**；不再有同名多义/同角色多名）。主流 `events` → `event_ids`。
+  实测平均 null **74.8% → 4.7%**；`variant 专属列 = 0`。
+- `[x]` **顺手修 `city_ids` 丢 razed 城**：投影 `city_ids` 过滤 `!razed` 而 `idx/cities.jsonl` 写全部，
+  导致 `q.join('cities')` 静默丢掉**被夷平的城**——偏偏那是历史最关心的实体。改为逐行一致。
+- `[x]` **Python kit**：`q.events()/actors()/history(kind,id)/cause(kind,id)/fates()/audit()`。
+  `actors()` 从三类槽位**通用展开**（无 variant 知识）→ 任意实体同一个查询形状。实测 60,775 事件下
+  单实体历史 0.84 ms。**先按类型取**（`q.events(type=…)` 字段稠密）；长表「缺失 = 没有那一行」，
+  所以稀疏字段统计是 `groupby().size()` 一行的事（宽表 64% NaN 的坑全部规避）。
+- `[x]` **完备性守卫** `every_city_state_change_is_explained_by_an_event`：投影 120 回合，逐回合对比
+  密集快照，任何 `(faction_id, razed)` 变化都必须有命名该城的事件解释（实测 **145 次全有解释**），
+  并断言 `checked >= 5`（**守卫必须非空**）。另 `event_ledger_is_deterministic`。
+  `q.audit()` 把同一不变量暴露给 agent。
+- `[x]` `SCHEMA_VERSION` 1→2（`GameEvent` 是 `State` 的一部分）；`main.rs::event_counts` 删掉
+  手抄的 variant→label `match`，改走单一权威 `kind()`。
+- 验证：`cargo test --lib` **55 passed**（+4 投影守卫）、`cargo test --test longhorizon` **6 passed/8 ignored**
+  （`same_seed_reproduces_identically`、`world_is_multipolar` 全绿 → 平衡未动）、seed 7 @ 60 端到端
+  `q.cause('ship','星环')` → `killer=天工/中国, weapon=kinetic, assists=[镇岳,长城]`；`q.audit()` = 0。
+
+**未做（Stage B，`[x]` —— 已落地，见下）**：
+
+**已落地（Stage B：漏斗化 + 对账，**可证明行为中性**）**：
+- `[x]` **状态变更漏斗（single writer）**：`sim.rs` 里**每一处**归属/存亡写入现在都在漏斗内，无例外——
+  `kill_ship`（hull 归零 + 记 `ShipDestroyed`，同舰只记一次）、`sweep_dead_ships`（清扫 + **兜底补事件** + 清指令）、
+  `spawn_ship`（装配/取名/面板/付组件费 + 记 `ShipSpawned`）、`raze_city`（清人口/建筑/进度 + `CityRazed`/`Revolt`）、
+  `reseed_city`（razed→活城 + `ColonyFounded{Refounded, prev_owner}`）、`found_city`（新建 + `ColonyFounded{NewSite}`）、
+  `overrun_city`（夺活城 + `CityOverrun`）、`defect_city`（换主 + 迁控制叶子 + `CityDefected`）、`wire_city_control`。
+  「忘记记事件」从此在**结构上**不可能：改状态与记事件在同一处。
+  - 兜底：`sweep_dead_ships` 带 `debug_assert_eq!(invented, 0)`——正常 0 艘需兜底，不为 0 = 某条路径漏了
+    `kill_ship`，测试当场炸；release 仍用最保守的 `Scrapped` 补一条（历史完整但不谎称战损）。
+- `[x]` **对账扩到「舰的存亡」——当场抓出第二类漏洞**：`every_ship_state_change_is_explained_by_an_event`
+  一上线就发现 `step_resurgence` 的种子舰**完全不发造舰事件**（实测 63 次出生里 **46 次无解释**），
+  与「城易主查不到原因」完全同源，只是藏在舰那一侧；修法即 `spawn_ship` 漏斗。
+  实测 120 回合：**242 次舰死亡 / 249 次舰出生 / 145 次城变化，全部有事件解释**；两条守卫都断言「检查数 ≥ 5」。
+- `[x]` `q.changes(kind, id)`：纯 dense-diff 视图（与事件账本互证；舰还会显式给出「消失的那一回合」）。
+- `[x]` **行为中性的证明方法（可复用）**：改 `sim.rs` 后不靠「跑一遍看着对」，而是 **golden-file 对比**——
+  `python play/_golden_compare.py <baseline> <after>`：`idx/{cities,ships,factions,bodies,settlements}.jsonl` +
+  `meta.json` 必须**逐字节一致**，`main.jsonl` 去掉 `event_ids` 后必须一致，`idx/events.jsonl` 允许不同。
+  **Stage B 全程通过**：漏斗化只多了 46 条 `ship_spawned` 记录，模拟逐字节未变。
+- `[ ]` **（负结果，勿重复尝试）`step_ideology` 改用权威 `by` 替换近似 `killer_of`**：60 回合窗口**逐字节一致**
+  （0/20 起凶手不一致），但 1000 回合长局**翻转 `world_is_multipolar` 的霸权轮换判定**——seed 1 后半程被
+  **俄罗斯锁死**（轮换数 1 < 需要 2；峰值占比 0.820，逼近 0.85 上限）。差别只在「凶手舰同回合被反杀」这种
+  罕见情形，但足以在混沌长局里改变结局 → **属平衡改动，已回退**，需**单独一次平衡验证**（配 `probe_multipolar`
+  横向对比）后再上。**教训：「60 回合逐字节一致」不足以证明长局中性。**
+
+**未做（Stage C，`[ ]`）**：
+- `[ ]` **`State.ledger` 长存里程碑层**（只收 `Salience::Milestone`，随 checkpoint 存活 → 解决根因 ②）。
+  天然有界 ≈ O(实体数 × 常数)；海量 `attack`/`siege` 流水永不进 State。
+- `[ ]` **一句话 headline**：`GameEvent::headline()` 单点渲染（`第47回合：中国夷平火星-殖民城，美国失一城`），
+  `--digest`/`chronicle`/Python 三处共用。**完备 ≠ 可读**——这是 §15「窗口事件文案」的前置。
+- `[ ]` salience 权重进 `config/game.ron` + `--digest` 的 `top_events`。
+- `[ ]` **`cause_id` 显式因果链刻意没做**：实测会是 100% null 的死列，而链在 Python 侧用
+  `razed.by_ship`/`destroyed.by`/`how`+`prev_owner` 的结构就能走通。
+
+**账本暴露出的新问题（`[ ]` 值得单独修）**：
+- `[ ]` **僵尸势力的「夺城—倒戈」振荡**：seed 7 @ 60 回合 `city_overrun` **41** 条、`resurgence` 46 条。
+  `冥王星前哨` 每 4 回合循环：`city_defected 星系矿业→欧盟` → 同回合 `city_overrun 欧盟→星系矿业`
+  → `resurgence`。机制自相抵消（`step_governance` 先跑把城倒戈走 → 该势力立刻「无舰无活城」→
+  `step_resurgence` 当回合用 `displace_city_for_refugee` 夺回**同一座城**）：净效果为零却把该城永久钉在
+  4 回合一轮的易主循环里，事件量翻倍。改法候选：① `resurgence` 加冷却；② 夺城目标排除「刚被本势力
+  丢掉的城市」；③ 优先选未被倒戈过的城。**注意**会影响 `zombie_factions_are_bounded`/`world_is_multipolar`，需长局验证。

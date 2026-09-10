@@ -207,6 +207,15 @@ fn weapon_kind(t: &str) -> u8 {
     }
 }
 
+/// 弹种 id → 可读名（[`weapon_kind`] 的逆）。用于事件里记「被什么打沉的」。
+pub fn weapon_kind_name(kind: u8) -> &'static str {
+    match kind {
+        WEAPON_PLASMA => "plasma",
+        WEAPON_MISSILE => "missile",
+        _ => "kinetic",
+    }
+}
+
 /// Compute a ship's effective combat panel from its class spec plus its fitted
 /// components. Pure & deterministic (no RNG); cheap enough for the hot loop.
 /// A component's 完整度 (integrity) when freshly installed: weapons/shields/armor each

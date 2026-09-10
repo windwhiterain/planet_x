@@ -12,6 +12,8 @@ Directory layout written by ``planet_x --round N --index DIR``:
                          market.resource_value, economy/combat/diplomacy/… tuning) — same source
                          as `--meta`
     DIR/main.jsonl       one lean fact row per round
+    DIR/idx/events.jsonl (round, seq, event_id, ...)  the **sparse event ledger**: one row per
+                                                      event, normalized participant slots
     DIR/idx/ships.jsonl  (round, ship_id, ...)        per-round ship detail (+ effective panel)
     DIR/idx/cities.jsonl (round, city_id, ...)        per-round city detail (+ buildings list)
     DIR/idx/factions.jsonl (round, faction_id, ...)   per-round faction detail (resources/relations/
@@ -35,6 +37,30 @@ Typical use::
     q.resource_value()      # config: resource key (可读名) -> value
     q.yearly_avg("metrics.cities")              # 年均 (round = 1 month, 12/年)
     q.decadal_avg("metrics.factions.中国.market_value")  # 十年均 (120 月)
+
+History / event queries (the sparse ledger)::
+
+    q.events(round=47)                  # every event of one round (long form: one row/event)
+    q.events(type="city_razed")         # ONE type -> its payload is flattened into dense columns
+    q.history("city", "火星-殖民城")     # ★ everything that ever happened to one entity
+    q.history("ship", "长征-7")          #   … any kind: city/ship/faction/body/settlement
+    q.cause("ship", "长征-7")            # ★ resolved fate: killer ship / faction / weapon / assists
+    q.cause("city", "冥王星前哨")         #   the last ownership/death event (why it changed hands)
+    q.fates(kind="ship")                # every ship death in the window, with cause + killer
+    q.actors()                          # long-form (round, seq, kind, id, role) participant index
+    q.changes("city", "冥王星前哨")       # pure dense-diff of the snapshot table (cross-check)
+    q.audit()                           # completeness self-check: unexplained city changes (want 0)
+
+Design notes for the ledger (each backed by measurement):
+
+* It is a **long table**: "missing" means *no such row*, not NaN. So sparse-field statistics
+  (counts / per-window rates / first-last / fates) are one-liners: ``groupby(...).size()``.
+* Participants always use the same slots (``actor_*`` / ``target_*`` / ``extra``) and there are
+  **no variant-specific columns** — otherwise you get the two diseases of a serialized tagged
+  union: one column with two meanings (``from``/``to`` is a faction in ``city_defected`` but a
+  body in ``capital_relocated``) and one role with many spellings (faction/owner/fallen_to/…).
+* **Filter by type first** (``q.events(type=...)``): the union frame is ~75% null, a single-type
+  frame is dense. Use the full frame only for counting/scanning.
 
 Entity identity: every id (ship/city/building/faction/body/settlement) is a **string name**,
 never an integer offset — ``q.ids("ships", r)`` returns a list of names, and ``--apply`` diff ids
@@ -281,6 +307,286 @@ class PlanetXQ:
             return exploded.merge(detail, on=["round", key], how="inner")
         return exploded.merge(detail, on=key, how="inner")
 
+    # --- 事件历史（稀疏账本）----------------------------------------------------
+    # 设计要点（每条都有实测依据）：
+    #   * 事件表是**长表**：一行一事件，「缺失」表现为「没有那一行」，不是 NaN。所以稀疏
+    #     字段的统计（计数 / 窗口率 / 首末次 / 结局）都是 groupby().size() 一行的事。
+    #   * 参与方一律走统一槽位 `actor_*` / `target_*` / `extra`，**没有 variant 专属列**
+    #     （否则会回到「同名多义」：`from`/`to` 在 city_defected 是势力、在
+    #     capital_relocated 是天体；以及「同角色多名」：faction/owner/fallen_to 五种拼写）。
+    #   * **先按类型取**：`events(type='city_razed')` 会把该类型的载荷摊成稠密列；全集帧
+    #     只用于计数/扫描（实测：混帧时 74.8% 单元格是 null，按类型取则相关字段 0% null）。
+
+    def _events_table(self) -> pd.DataFrame:
+        if "events" not in self._tables:
+            raise KeyError(
+                "该投影没有 events 表（可能是旧版 planet_x 写出的、事件仍内联在 main.jsonl "
+                "的 facts['events'] 里）。请用新版重新生成：planet_x --round N --index DIR"
+            )
+        return self._tables["events"]
+
+    @staticmethod
+    def _flatten_data(df: pd.DataFrame) -> pd.DataFrame:
+        """把 `data` 对象列摊成普通列。只在按**单一类型**取时才做——那时这些字段是稠密的。"""
+        if df.empty or "data" not in df.columns:
+            return df
+        payload = pd.json_normalize(df["data"].tolist())
+        if payload.empty:
+            return df.drop(columns=["data"])
+        payload.index = df.index
+        return pd.concat([df.drop(columns=["data"]), payload], axis=1)
+
+    def events(
+        self,
+        round: int | None = None,
+        type: str | None = None,
+        types: list[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
+        salience: str | None = None,
+        entity: tuple[str, str] | None = None,
+        flatten: bool = True,
+    ) -> pd.DataFrame:
+        """稀疏事件账本（一行一事件）。
+
+        `type` 取**单个**类型（且 `flatten=True`，默认）时，把该类型的专属载荷 `data` 摊成
+        普通列 → 一个**稠密**帧。这是推荐的读法。
+        `entity=('city', 城名)` 只保留与该实体相关的事件（等价于 :meth:`history`）。
+        """
+        df = self._events_table()
+        if df.empty:
+            return df
+        if round is not None:
+            df = df[df["round"] == round]
+        if since is not None:
+            df = df[df["round"] >= since]
+        if until is not None:
+            df = df[df["round"] <= until]
+        if type is not None:
+            df = df[df["type"] == type]
+        elif types is not None:
+            df = df[df["type"].isin(list(types))]
+        if salience is not None:
+            df = df[df["salience"] == salience]
+        if entity is not None:
+            kind, eid = entity
+            hit = self.actors()
+            hit = hit[(hit["entity_kind"] == kind) & (hit["entity_id"] == eid)][["round", "seq"]]
+            df = df.merge(hit.drop_duplicates(), on=["round", "seq"], how="inner")
+        df = df.sort_values(["round", "seq"]).reset_index(drop=True)
+        if flatten and type is not None:
+            df = self._flatten_data(df)
+        return df
+
+    def actors(self) -> pd.DataFrame:
+        """长表参与方索引 `(round, seq, event_id, entity_kind, entity_id, role)`。
+
+        从统一的 `actor_*` / `target_*` / `extra` 槽位**通用地**展开——**不需要任何 variant
+        的字段知识**（这正是归一化的目的）。任意实体的历史 = 在这张表上过滤一次。
+        结果缓存（`q._actors_cache`）。
+        """
+        cached = getattr(self, "_actors_cache", None)
+        if cached is not None:
+            return cached
+        df = self._events_table()
+        cols = ["round", "seq", "event_id", "entity_kind", "entity_id", "role"]
+        if df.empty:
+            out = pd.DataFrame(columns=cols)
+            self._actors_cache = out
+            return out
+        frames = []
+        for kc, ic, role in (("actor_kind", "actor_id", "actor"),
+                             ("target_kind", "target_id", "target")):
+            sub = pd.DataFrame({
+                "round": df["round"].to_numpy(),
+                "seq": df["seq"].to_numpy(),
+                "event_id": df["event_id"].to_numpy(),
+                "entity_kind": df[kc].to_numpy(),
+                "entity_id": df[ic].to_numpy(),
+                "role": role,
+            })
+            frames.append(sub)
+        extra = df[["round", "seq", "event_id", "extra"]].explode("extra")
+        # explode 空数组/None 会造出幽灵 NaN 行 —— 必须显式滤掉。
+        extra = extra[extra["extra"].notna()]
+        if len(extra):
+            ex = pd.json_normalize(extra["extra"].tolist())
+            ex = ex.rename(columns={"kind": "entity_kind", "id": "entity_id"})
+            ex["round"] = extra["round"].to_numpy()
+            ex["seq"] = extra["seq"].to_numpy()
+            ex["event_id"] = extra["event_id"].to_numpy()
+            frames.append(ex[cols])
+        out = pd.concat(frames, ignore_index=True)
+        out = out[out["entity_id"].notna()].reset_index(drop=True)
+        self._actors_cache = out
+        return out
+
+    def history(
+        self,
+        kind: str,
+        entity_id: str,
+        since: int | None = None,
+        until: int | None = None,
+        types: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """★ 一个实体的历史。
+
+        ``q.history('city', '火星-殖民城')`` / ``q.history('ship', '长征-7')`` /
+        ``q.history('faction', '中国')``。`kind` ∈ city/ship/faction/body/settlement。
+        返回该实体参与过的全部事件（含它作为 actor/target/victim/beneficiary/third 的），
+        按时间排序。
+        """
+        alias = {"cities": "city", "ships": "ship", "factions": "faction",
+                 "bodies": "body", "settlements": "settlement"}
+        kind = alias.get(kind, kind)
+        hit = self.actors()
+        hit = hit[(hit["entity_kind"] == kind) & (hit["entity_id"] == entity_id)][["round", "seq"]]
+        ev = self._events_table()
+        df = ev.merge(hit.drop_duplicates(), on=["round", "seq"], how="inner")
+        if since is not None:
+            df = df[df["round"] >= since]
+        if until is not None:
+            df = df[df["round"] <= until]
+        if types is not None:
+            df = df[df["type"].isin(list(types))]
+        return df.sort_values(["round", "seq"]).reset_index(drop=True)
+
+    def cause(self, kind: str, entity_id: str) -> dict:
+        """★ 一个实体的**结局**，已解析成可直读的形状。
+
+        * ``kind='ship'``：死因 `death_cause`、**凶手** `killer`/`killer_faction`/`weapon`、
+          以及同回合的助攻方 `assists` —— 答「一艘舰被击毁，是被哪艘舰击毁？」。
+          仍在役则返回 `alive=True` 与它的出厂记录。
+        * ``kind='city'``：最近一次归属/存亡事件（夷平 / 倒戈 / 夺城 / 复垦 / 叛乱）
+          —— 答「这座城为什么换主人？被夷平后复垦，还是改旗易帜？」。
+        """
+        ev = self.history(kind, entity_id)
+        if ev.empty:
+            return {"kind": kind, "id": entity_id, "found": False}
+        if kind in ("ship", "ships"):
+            dead = ev[ev["type"] == "ship_destroyed"]
+            if dead.empty:
+                born = ev[ev["type"] == "ship_spawned"]
+                return {"kind": "ship", "id": entity_id, "found": True, "alive": True,
+                        "spawned": (born.iloc[0]["data"] if len(born) else None)}
+            row = dead.iloc[-1]
+            data = row["data"] or {}
+            by = data.get("by") or {}
+            atk = ev[(ev["type"] == "attack") & (ev["round"] == row["round"])]
+            return {
+                "kind": "ship", "id": entity_id, "found": True, "alive": False,
+                "round": int(row["round"]), "death_cause": data.get("cause"),
+                "killer": by.get("ship"), "killer_faction": by.get("faction"),
+                "weapon": by.get("weapon"),
+                "assists": sorted({a for a in atk["actor_id"].tolist()
+                                   if isinstance(a, str) and a != by.get("ship")}),
+            }
+        rel = ev[ev["type"].isin(["city_razed", "city_defected", "city_overrun",
+                                  "colony_founded", "revolt", "resurgence"])]
+        if rel.empty:
+            return {"kind": kind, "id": entity_id, "found": True, "changes": 0}
+        row = rel.iloc[-1]
+        return {"kind": kind, "id": entity_id, "found": True, "round": int(row["round"]),
+                "type": row["type"], "data": row["data"]}
+
+    def fates(self, since: int | None = None, until: int | None = None,
+              kind: str = "ship") -> pd.DataFrame:
+        """窗口内的**结局清单**（一次读完，不用手工 join）。
+
+        ``kind='ship'`` → 每艘被击毁的舰一行：`ship/owner/death_cause/killer/killer_faction/weapon`
+        （战死 vs 维护费报废由 `death_cause` 区分）。
+        ``kind='city'`` → 城的变化事件（夷平/倒戈/夺城/复垦/叛乱）。
+        """
+        if kind != "ship":
+            return self.events(types=["city_razed", "city_defected", "city_overrun",
+                                      "colony_founded", "revolt"], since=since, until=until)
+        df = self.events(type="ship_destroyed", since=since, until=until, flatten=False)
+        if df.empty:
+            return pd.DataFrame(columns=["round", "ship", "owner", "death_cause",
+                                         "killer", "killer_faction", "weapon"])
+
+        def pick(d, *path):
+            cur = d or {}
+            for p in path:
+                cur = (cur or {}).get(p) if isinstance(cur, dict) else None
+            return cur
+
+        out = pd.DataFrame({
+            "round": df["round"].to_numpy(),
+            "ship": [pick(d, "ship") for d in df["data"]],
+            "owner": [pick(d, "owner") for d in df["data"]],
+            "death_cause": [pick(d, "cause") for d in df["data"]],
+            "killer": [pick(d, "by", "ship") for d in df["data"]],
+            "killer_faction": [pick(d, "by", "faction") for d in df["data"]],
+            "weapon": [pick(d, "by", "weapon") for d in df["data"]],
+        })
+        return out
+
+    def changes(self, kind: str, entity_id: str) -> pd.DataFrame:
+        """**纯 dense-diff 视图**：某个实体在密集表里的关键列**发生变化的那些回合**。
+
+        与事件账本互证——这是「不靠事件、只看快照差异」的独立口径（:meth:`audit` 就是两者的
+        差集）。城默认比较 `faction_id`/`razed`/`population`；舰比较 `faction_id`/`hull`/`class`。
+
+        **它单独用是不够的**：dense-diff **因果盲**（说不出被谁击毁 / 被谁夷平），而且
+        **同回合的 raze→recolonize 差异为空**（事件才是正本）。对舰它还会显式给出
+        「消失的那一回合」（密集表里被毁舰直接没有行）。
+        """
+        alias = {"cities": "city", "ships": "ship", "factions": "faction"}
+        kind = alias.get(kind, kind)
+        spec = {
+            "city": ("cities", "city_id", ["faction_id", "razed", "population"]),
+            "ship": ("ships", "ship_id", ["faction_id", "hull", "class"]),
+            "faction": ("factions", "faction_id", ["capital_body"]),
+        }
+        if kind not in spec:
+            raise ValueError(f"changes() 支持 city/ship/faction，收到 {kind!r}")
+        table, key, cols = spec[kind]
+        df = self.table(table)
+        if df is None or df.empty:
+            return df
+        df = df[df[key] == entity_id].sort_values("round")
+        if df.empty:
+            return df
+        cols = [c for c in cols if c in df.columns]
+        # 重索引到「首次出现 → 全局末回合」，让**消失**也表现为一次变化（NaN）。
+        first, last = int(df["round"].min()), int(self.facts["round"].max())
+        df = df.set_index("round").reindex(range(first, last + 1))
+        present = df[key].notna()
+        prev = df[cols].shift()
+        same = df[cols].eq(prev) | (df[cols].isna() & prev.isna())
+        changed = (~same.all(axis=1)) | (present != present.shift())
+        out = df[changed].reset_index()
+        return out[["round", key] + cols].reset_index(drop=True)
+
+    def audit(self) -> pd.DataFrame:
+        """**完备性自查**：密集快照里可见、却没有任何事件解释的城状态变化（**应为空**）。
+
+        与 Rust 侧守卫 ``every_city_state_change_is_explained_by_an_event`` 是同一个不变量，
+        这里把它暴露给 agent：若返回非空，说明当前投影回答不了「这座城市为什么变了」。
+        """
+        cities = self.cities()
+        cols = ["round", "city_id", "was", "now"]
+        if cities is None or cities.empty:
+            return pd.DataFrame(columns=cols)
+        named = self.actors()
+        named = named[named["entity_kind"] == "city"][["round", "entity_id"]].drop_duplicates()
+        out = []
+        prev: dict[str, tuple] = {}
+        prev_round = None
+        for _, r in cities.sort_values(["round", "city_id"]).iterrows():
+            if r["round"] != prev_round:
+                prev, prev_round = {}, r["round"]
+            now = (r["faction_id"], bool(r["razed"]))
+            was = prev.get(r["city_id"])
+            if was is not None and was != now:
+                hit = named[(named["round"] == r["round"]) & (named["entity_id"] == r["city_id"])]
+                if hit.empty:
+                    out.append({"round": int(r["round"]), "city_id": r["city_id"],
+                                "was": was, "now": now})
+            prev[r["city_id"]] = now
+        return pd.DataFrame(out, columns=cols)
+
     def spec(self, section: str) -> pd.DataFrame | None:
         """One config section of ``meta.json`` as a DataFrame (index = spec name/key).
 
@@ -394,6 +700,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"# join('ships', round={r}): {joined.shape}")
         cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "x", "y") if c in joined.columns]
         print(joined[cols].head(5).to_string(index=False))
+    # The sparse event ledger + its completeness self-check (empty = all history is explained).
+    try:
+        ev = q.events()
+        print(f"# events ledger: {ev.shape}; types={dict(ev['type'].value_counts())}")
+        print(f"# audit() 未解释的城状态变化: {len(q.audit())} 条（应为 0）")
+    except KeyError as exc:
+        print(f"# (no event ledger in this projection: {exc})")
     return 0
 
 

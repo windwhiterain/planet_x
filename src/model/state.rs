@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 fn default_schema_version() -> u32 {
     0
 }
@@ -34,6 +34,12 @@ pub struct State {
     /// 城市/天体/势力/全局 的控制作用域树：谁负责 AI 决策、谁收玩家指令。
     pub scope: ControlScope,
     /// 本回合事件日志（`#[serde(default)]` 以便旧状态/旧 .ron 加载时缺字段不报错）。
+    ///
+    /// 这是**回合内明细层**：每回合被清空、不累计，只描述「这一回合发生了什么」。事件本身
+    /// 自带因果（谁被谁击毁、哪艘舰夷平了哪座城、城从谁手里易主），所以 agent 不必反推状态差。
+    /// 「跨回合的历史」由投影层承担：`planet_x --index` 把每个回合的事件归一化成
+    /// `idx/events.jsonl`（一行一事件、固定列、统一参与方槽位），Python kit 用
+    /// `q.history('city', 城名)` / `q.cause('ship', 舰名)` 做 join 查询。
     #[serde(default)]
     pub events: Vec<GameEvent>,
     /// 剧情编年史：本局已发生的叙事事件（按发生先后追加）。这是「剧情丰富」的载体——
@@ -231,9 +237,17 @@ impl State {
 /// 不错载）。v0 → v1：`schema_version` 字段本身就是 v1 引入的——旧档案缺字段由 serde
 /// default 填 0，其既有字段无需任何数据变换（所有 v1 新字段都带 serde default）。
 /// 真正的语义迁移（改字段含义/重算派生值）在将来某版本于此处补档。
+///
+/// v1 → v2：**事件（[`GameEvent`]）的结构变了**——`ShipDestroyed` 增加 `cause`/`by`（死因与
+/// 凶手）、`CityRazed` 增加 `by_ship`/`damage`/`pop_before`、`CityDefected`/`Revolt` 增加
+/// `loyalty`、`Resurgence` 增加 `city`、新增 `CityOverrun`，`ShipSpawned`/`ColonyFounded`
+/// 各加一个来源字段。而 [`State::events`] 是**回合内流水**（每回合被清空、不累计），所以
+/// 「旧档里那一回合的事件」本身就只是当回合的残留——**没有值得迁移的历史**，也无法凭空
+/// 补齐缺失的因果。故 v1 → v2 只升版本号：旧 checkpoint 若含旧结构的事件会**在反序列化时
+/// 明确报错**（而不是静默错载）；从 seed 重新生成即可（本模拟确定性可复现）。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 => {
+        0 | 1 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

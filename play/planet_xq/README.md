@@ -12,11 +12,14 @@ faction/body/settlement = its unique name), never integer offsets.
 
 ```
 planet_x --seed 7 --round 12 --index out/
-# out/main.jsonl        lean per-round facts (round, time_month, events, chronicle, metrics,
-#                       ship_ids[], city_ids[], faction_ids[], body_ids[], settlement_ids[])
+# out/main.jsonl        lean per-round facts (round, time_month, chronicle, metrics,
+#                       event_ids[], ship_ids[], city_ids[], faction_ids[], body_ids[],
+#                       settlement_ids[])
 # out/schema.json       agent-readable projection contract (eager / lazy / columns / read_order)
 # out/meta.json         static rules dictionary (ships/buildings/components/structures/economy/…,
 #                       same source as `planet_x --meta`) — loadable as DataFrames
+# out/idx/events.jsonl     (round, seq, event_id, ...) the sparse event ledger: one row per event,
+#                          normalized participant slots (see "History" below)
 # out/idx/ships.jsonl      (round, ship_id, ...) per-round ship detail (+ effective panel)
 # out/idx/cities.jsonl     (round, city_id, ...) per-round city detail (+ buildings list)
 # out/idx/factions.jsonl   (round, faction_id, ...) per-round faction detail (resources/relations/
@@ -100,6 +103,69 @@ Key ideas:
 > read `faction_snapshot` → write a control diff → `planet_x --start ckpt.ron --apply diff.json
 > --round K --save ckpt.ron` → re-read → adjust. Checkpoints preserve the RNG, so the run is
 > deterministic and rewindable.
+
+## History: the sparse event ledger
+
+A trajectory answers *"what is the world now"*. The ledger answers **"why is it like this"** —
+which event made this city change hands, which ship killed that one. `idx/events.jsonl` is one row
+per event with **normalized participant slots**, so any entity joins its own history the same way:
+
+```python
+q = planet_xq.load("out")
+
+q.events(round=47)                  # every event of one round (long form: one row per event)
+q.events(type="city_razed")         # ONE type -> payload flattened into DENSE columns
+q.events(salience="milestone")      # only identity/ownership/existence changes
+
+q.history("city", "冥王星前哨")      # ★ everything that ever happened to one entity
+q.history("ship", "长征-7")          #   any kind: city / ship / faction / body / settlement
+q.history("faction", "中国", since=40, types=["war_started"])
+
+q.cause("ship", "星环")              # ★ {'death_cause':'combat', 'killer':'天工',
+                                    #    'killer_faction':'中国', 'weapon':'kinetic',
+                                    #    'assists':['镇岳','长城'], ...}
+q.cause("city", "冥王星前哨")         # the last ownership/death event ("被夷平后复垦，还是倒戈？")
+
+q.fates(kind="ship")                # every ship death in the window: cause + killer + weapon
+q.fates(kind="city", since=40)      # every city ownership/death event in the window
+
+q.actors()                          # long-form (round, seq, event_id, kind, id, role) index
+q.changes("city", "冥王星前哨")      # pure dense-diff of the snapshot table (independent cross-check)
+q.audit()                           # completeness self-check: unexplained city changes (want 0)
+```
+
+> The ledger is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
+> `raze_city` / `reseed_city` / `found_city` / `overrun_city` / `defect_city`): every ownership or
+> existence change goes through one place that *both* mutates the state and records the event, so a
+> new code path cannot silently skip the history. Two Rust guards — and `q.audit()` — verify it
+> against the dense tables on every test run (measured: 242 ship deaths / 249 ship births / 145 city
+> ownership changes over 120 rounds, **all** explained).
+
+Why the shape is what it is (each point measured on a real 715-event projection):
+
+| | serialized tagged union (old) | normalized ledger (now) |
+|---|---|---|
+| mean null ratio | **74.8%** | **4.7%** |
+| variant-specific columns | 23 | **0** |
+| one role, many spellings | `faction`/`owner`/`fallen_to`/`from`/`to`/`a`/`b` | 1 (`actor_id` + `target_id` + `extra`) |
+| one column, two meanings | `from`/`to` = faction in `city_defected`, **body** in `capital_relocated` | none |
+
+- **Long form, not wide**: "missing" means *no such row*, never NaN. So sparse-field statistics
+  (counts, per-window rates, first/last, fates) are one-liners — `groupby(...).size()`.
+- **Filter by type first.** Mixing all types in one frame is what makes it sparse
+  (`q.events(type='city_razed')` → its fields are 0% null); the full frame is for counting/scanning.
+- **No variant-specific columns.** The per-type payload lives in one `data` object column (one
+  column carries one type of value — no column that is sometimes a scalar and sometimes a list,
+  which makes `isna()`/`sum()`/`dropna()` unreliable).
+- `resolve_never re-derives game logic`: the ledger records what the simulation *did*
+  (`CityRazed.by_ship`, `ShipDestroyed.by` = the killing blow, `ColonyFounded.how`/`prev_owner`,
+  `DeathCause` = combat vs upkeep-shortfall), it does not infer it afterwards.
+- `q.audit()` mirrors the Rust guard `every_city_state_change_is_explained_by_an_event`: if a
+  snapshot-visible city change has no explaining event, it is listed. Empty = the history is
+  complete, so "why did this city change hands?" always has an answer.
+
+> Note: `events` is no longer inlined in `main.jsonl` (the round row now carries `event_ids`).
+> Read it via `q.events(...)`, not `q.facts["events"]`.
 
 ## Semantic views: the "common read" in Python, "game logic" in Rust
 
