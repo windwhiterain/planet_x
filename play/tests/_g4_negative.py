@@ -30,6 +30,7 @@ T = Path(tempfile.mkdtemp(prefix="g4-neg-"))
 BASE = json.loads(g4_spec.VIEWS_JSON.read_text(encoding="utf-8"))
 
 MISBEHAVED: list[str] = []
+CASES = 0  # 注入错的数量（基线那一跑不算）
 
 
 class FakeH:
@@ -49,6 +50,9 @@ class FakeH:
 
 def run_case(label, doc=None, mutate=None, expect="red"):
     """喂一份被改坏的声明给 `g4_spec.run`，返回红的判据名。"""
+    global CASES
+    if expect == "red":
+        CASES += 1
     if doc is not None:
         p = T / f"{label}.json"
         p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
@@ -90,6 +94,15 @@ def walk_columns(doc):
                 yield v, c
 
 
+def walk_views(doc):
+    """所有视图（pages + select + inline）。"""
+    for page in doc.get("pages", []) + [{"views": doc.get("select", [])}]:
+        for v in page.get("views", []):
+            yield v
+    for v in doc.get("inline") or []:
+        yield v
+
+
 def main() -> int:
     # 基线：原样应该是全绿（否则这一份反向验证自己就不可信）
     run_case("baseline-out", expect="green")
@@ -114,6 +127,20 @@ def main() -> int:
     d = clone()
     d["pages"][0]["views"][1]["omit"].append({"path": "hegemon", "why": "试试"})
     run_case("omit-overlap", d)
+
+    # ⑤b `source` 的三种形态（2026-10 新增）：键必须存在，值可以是字符串或**显式** null
+    #     （null = 「这张卡故意不依赖记录」，例如全局归属那条）；漏写键仍然要红。
+    d = clone()
+    for v in walk_views(d):
+        if v.get("id") == "global-scope":
+            del v["source"]
+    run_case("source-key-missing", d)
+
+    d = clone()
+    for v in walk_views(d):
+        if v.get("source") is None and v.get("layout") != "table":
+            v["layout"] = "table"  # 表没有来源没意义
+    run_case("null-source-on-table", d)
 
     # ⑥ 认领完整性：把 `capital` 的全部 leaf 行删掉（它只在 sel-faction 里被认领）
     d = clone()
@@ -205,7 +232,7 @@ def main() -> int:
         for m in MISBEHAVED:
             print("  -", m)
         return 1
-    print("\n反向验证通过：基线与每个注入错都按期望红/绿（16 个注入错全部咬住）。")
+    print(f"\n反向验证通过：基线与每个注入错都按期望红/绿（{CASES} 个注入错全部咬住）。")
     return 0
 
 

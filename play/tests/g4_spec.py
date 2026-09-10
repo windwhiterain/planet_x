@@ -368,10 +368,21 @@ def run(h, ck) -> None:
         layout = v.get("layout", "table")
         if layout not in LAYOUTS:
             shape_bad.append(f"{vid}：未知 layout `{layout}`（已知 {LAYOUTS}）")
-        # `source` 不是每条都必须有：inline 那条只是「路径 → 哪条视图」的映射表（`use_at`），
-        # 它自己不含列。
-        if mount != "inline" and not isinstance(v.get("source"), str):
-            shape_bad.append(f"{vid}：缺 source")
+        # `source` 的三种合法形态：
+        #   * 字符串 = 常规来源；
+        #   * **`null`（键必须在）** = 「这张卡故意不依赖任何记录」，只放不取记录的行
+        #     （例如 `{ "owner": "global" }` 那条全局归属）——显式写 null 才允许，
+        #     **漏写**仍然红（那多半是打错/漏了，而不是有意）；
+        #   * inline 那条本来就不含列（它只是「路径 → 哪条视图」的映射表）。
+        if mount != "inline":
+            src = v.get("source", "<缺>")
+            if src is None:
+                if layout == "table":
+                    shape_bad.append(f"{vid}：layout=table 不能 source: null（表没有来源没意义）")
+            elif not isinstance(src, str):
+                shape_bad.append(f"{vid}：source 既不是字符串也不是 null（{src!r}）")
+            elif src == "<缺>":
+                shape_bad.append(f"{vid}：缺 source（要「不依赖记录」就显式写 `\"source\": null`）")
         if mount == "select" and not isinstance(v.get("select_kind"), str):
             shape_bad.append(f"{vid}：select 挂载要声明 select_kind")
         if mount == "inline" and v.get("use_at") is None:

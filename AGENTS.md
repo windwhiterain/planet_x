@@ -33,7 +33,7 @@
 # ① 数据级（不需要重编 Rust；改断言 = 改 .py，立刻生效）
 uv run --project play/planet_xq python play/tests/run.py all      # 四组 67 条判据；缓存命中 ~4 s
 uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
-uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 16 个错，全咬住
+uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 18 个错，全咬住
 
 # ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
 cargo nextest run -P full                    # 合流门

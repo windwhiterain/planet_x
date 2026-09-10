@@ -466,10 +466,15 @@ guessing. They are listed because they are cheap to close and expensive to work 
 5. **~~`ship_kiting` / `ship_doctrine` are not live layers yet~~** — **fixed upstream**
    (`control-live-layers.md` §4.1): both are tri-state leaves with a faction-level default
    (`default_kiting` / `default_doctrine`), so "the whole fleet goes 贴脸" is **one leaf** that new
-   ships inherit too. This kit now lists those two kinds in `LEAF_KINDS` (leaving them out made them
-   vanish from `surface()` silently — the §8.1 lesson: the contract has two ends, emitter *and*
-   consumer) and `set_kiting` / `set_doctrine` demand an explicit ownership (`mode=` or
+   ships inherit too. `set_kiting` / `set_doctrine` demand an explicit ownership (`mode=` or
    `take_over=True`) like every other value write.
+   ⚠ **The lesson this cost is now structural (2026-10)**: leaving a kind out of this kit's table made
+   it vanish from `surface()` *silently* — the contract has two ends, emitter *and* consumer. So the
+   table is no longer ours: `LEAF_KINDS` is a **lazy `Mapping` read from the engine's
+   `--control-schema`** (`src/control/leaves.rs`), and the same declaration feeds the WebUI. Adding a
+   leaf means touching the engine once; this kit (and the UI) follow automatically.
+   `play/tests/g4_spec.py` guards it on the data: `leaves` ∪ `actions` ∪ `{faction_id}` must equal
+   `FactionControlPatch.properties` **both ways**.
    ⚠ One engine-side trap this exposed: creating a **two-axis** leaf (`default_doctrine` /
    `ship_doctrine`) from a single-axis patch used to initialize the *other* axis to `0.0`
    (`Control::inherit(ShipDoctrine::default())`, `src/control.rs`), not to the ship's record value
