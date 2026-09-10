@@ -285,7 +285,64 @@ fn probe_embargo() {
     }
 }
 
-/// 4) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
+/// 4) **稀缺是否真的咬到战斗力**（M7）：新出厂舰挂的是什么**武器/防御**。
+///
+/// 只看 weapon/defense 类别——推进器是**平台**（船坞无论如何都要装，否则下不了水），
+/// 把它算进来会把「稀有矿武装率」灌水。稀有矿武器 = 等离子炮(氦-3/金)、轨道炮(铀)；
+/// 廉价武器 = 动能炮(铁/碳)、集束导弹(氢/碳)。
+///
+/// A/B：市场开启（`auto_trade_limit = 80`）vs 关闭（`0`，谁缺料谁自己扛）。
+#[test]
+#[ignore]
+fn probe_armament_gate() {
+    let base = load_config();
+    let n = rounds();
+    let _ = &base;
+    for seed in seeds() {
+        for arm in [0.0f64, 80.0] {
+            let mut config = base.clone();
+            config.market.auto_trade_limit = arm;
+            let mut state = world::default_state(&config, seed);
+            let mut rng = Prng::new(seed);
+            let mut weapons: BTreeMap<String, u32> = BTreeMap::new();
+            let mut defenses: BTreeMap<String, u32> = BTreeMap::new();
+            let mut spawned: u32 = 0;
+            for _ in 0..n {
+                sim::advance(&mut state, &config, &mut rng);
+                for e in &state.events {
+                    if let GameEvent::ShipSpawned { ship, .. } = e {
+                        spawned += 1;
+                        if let Some(s) = state.ships.iter().find(|s| &s.name == ship) {
+                            for c in &s.components {
+                                match config.component_spec(c).category.as_str() {
+                                    "weapon" => *weapons.entry(c.clone()).or_insert(0) += 1,
+                                    "defense" => *defenses.entry(c.clone()).or_insert(0) += 1,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let d = sim::round_metrics(&state, &config, &RoundFlow::default());
+            let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by).sum();
+            println!("== 武器质量 seed {seed} 市场额度={arm}（{n} 回合）== 出厂舰={spawned}");
+            print!("   武器:");
+            for (c, k) in &weapons {
+                print!(" {c}={k}");
+            }
+            println!();
+            print!("   防御:");
+            for (c, k) in &defenses {
+                print!(" {c}={k}");
+            }
+            println!();
+            println!("   （末回合被禁运合计={blocked}）");
+        }
+    }
+}
+
+/// 5) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
 fn probe_landless() {

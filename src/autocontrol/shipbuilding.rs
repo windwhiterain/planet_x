@@ -161,8 +161,15 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
         chosen.iter().filter(|id| config.component_spec(id).category == cat).count()
     };
 
-    // 强制装配一件指定类别（买得起选最高分；买不起强制最便宜一件兜底）。
-    let force_cat = |cat: &str, chosen: &mut Vec<String>, remaining: &mut ResourceMap| {
+    // 强制装配一件指定类别（买得起选最高分；买不起时按 `free_fallback` 决定怎么办）。
+    //
+    // `free_fallback` 区分**平台**与**军备**：
+    // * **推进器是平台**（`true`）：没有推进器的舰根本下不了水（速度=0 的船坞废铁），
+    //   所以船坞无论如何都会给它装上——这是「能不能出厂」的问题，不是「买不买得起」的问题。
+    // * **武器是军备**（`false`）：**买不起就不装**（M7 硬门槛）。旧版在这里无视库存强塞最便宜
+    //   的一件并把库存钳到 0，于是「全世界最稀缺的氦-3/金/铀」对军备毫无约束——制裁也就
+    //   咬不到任何东西。现在缺稀有矿的势力**退回廉价配置**（动能炮 = 铁+碳），而不是白拿。
+    let force_cat = |cat: &str, chosen: &mut Vec<String>, remaining: &mut ResourceMap, free_fallback: bool| {
         if count_cat(chosen, cat) >= 1 {
             return;
         }
@@ -179,28 +186,53 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
             }
         }
         if count_cat(chosen, cat) == 0 {
-            let mut cheapest: Option<(String, f64)> = None;
+            // 买得起的里面挑最便宜的（省钱兜底）。
+            let mut cheapest_affordable: Option<(String, f64)> = None;
             for (id, cs) in &config.components {
-                if cs.category == cat {
+                if cs.category != cat || !afford(id, remaining) {
+                    continue;
+                }
+                let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+                if cheapest_affordable
+                    .as_ref()
+                    .map(|(_, c)| cost_val < *c)
+                    .unwrap_or(true)
+                {
+                    cheapest_affordable = Some((id.clone(), cost_val));
+                }
+            }
+            if let Some((id, _)) = cheapest_affordable {
+                let cs = config.component_spec(&id);
+                for (r, c) in &cs.cost {
+                    *remaining.entry(r.clone()).or_insert(0.0) -= c;
+                }
+                chosen.push(id);
+            } else if free_fallback {
+                // 平台部件：付不起也装（下不了水的船没有意义）。
+                let mut cheapest: Option<(String, f64)> = None;
+                for (id, cs) in &config.components {
+                    if cs.category != cat {
+                        continue;
+                    }
                     let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
                     if cheapest.as_ref().map(|(_, c)| cost_val < *c).unwrap_or(true) {
                         cheapest = Some((id.clone(), cost_val));
                     }
                 }
-            }
-            if let Some((id, _)) = cheapest {
-                let cs = config.component_spec(&id);
-                for (r, c) in &cs.cost {
-                    let e = remaining.entry(r.clone()).or_insert(0.0);
-                    *e = (*e - c).max(0.0); // 买不起也不至于负——最差兜底。
+                if let Some((id, _)) = cheapest {
+                    let cs = config.component_spec(&id);
+                    for (r, c) in &cs.cost {
+                        let e = remaining.entry(r.clone()).or_insert(0.0);
+                        *e = (*e - c).max(0.0); // 买不起也不至于负——平台兜底。
+                    }
+                    chosen.push(id);
                 }
-                chosen.push(id);
             }
         }
     };
-    // 硬保证：至少一件武器（攻击力来源）+ 至少一件推进（速度来源）。
-    force_cat("weapon", &mut chosen, &mut remaining);
-    force_cat("thrust", &mut chosen, &mut remaining);
+    // 硬保证：至少一件武器（攻击力来源，**稀缺在此咬人**）+ 至少一件推进（速度来源，平台）。
+    force_cat("weapon", &mut chosen, &mut remaining, false);
+    force_cat("thrust", &mut chosen, &mut remaining, true);
     // 填满剩余槽位（按分数；护盾/护甲/点防/辅助/额外部件可选）。
     for (id, _) in &cands {
         if chosen.len() >= slots {
