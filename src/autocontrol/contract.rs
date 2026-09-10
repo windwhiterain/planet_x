@@ -172,6 +172,12 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
             if *fid == c.shipper {
                 continue; // 自己给自己运不算雇佣（挂单的意义就是请人）
             }
+            // **禁运同样挡雇佣**（Q4，用户裁决）：全面禁运是「根本不卖给你」——那就不该
+            // 还能雇对方的船来搬货（比不卖矿更狠的一条，见 `.agents/notes/trade-and-sanctions.md`）。
+            // 判据与商品市场**同源**（`sim::trade_blocked`），所以「为什么断供」在两处一致。
+            if sim::trade_blocked(state, config, &c.shipper, fid) {
+                continue;
+            }
             if available_throughput(state, config, fid, &c.from, &c.to) <= 0.0 {
                 continue; // 一条船都派不出来 ⇒ 物理上接不了（不是「不太愿意」）
             }
@@ -902,6 +908,54 @@ mod tests {
             })
             .expect("该发一次考核事件");
         assert!((reviewed - 1.0).abs() < 1e-9, "事件的达标率该是 1.0，实为 {reviewed:.3}");
+    }
+
+    /// **禁运同样挡雇佣**（Q4）：被封锁的势力**既接不到**这条线上的活，也不该把自己的
+    /// 运力借给封锁它的人——商品市场的 `trade_blocked` 判的是「根本不卖给你」，而雇对方的
+    /// 船运货比卖矿更直接。
+    #[test]
+    fn a_blockade_keeps_a_faction_out_of_the_hiring_market() {
+        let (config, mut state) = fresh(42);
+        // 清场：只留中国有积压（雇主）当待雇方；中国没有船 ⇒ 只能请人。
+        state.depots.clear();
+        state.contracts.contracts.clear();
+        state.factions.iter_mut().for_each(|f| f.reputation = 1.0);
+        state.depot_add("中国", "金星", "碳", 400.0);
+        state.ships.retain(|s| s.faction_id != "中国");
+        let id = contract(&mut state, &config, "中国", 3.0, "金星", "地球", 0.0);
+        // 把所有势力之间的封锁全打开（关系拉到冰点）⇒ 没人能接。
+        for f in state.factions.iter_mut() {
+            for v in f.relations.values_mut() {
+                *v = config.market.embargo_relation - 10.0;
+            }
+        }
+        let mut rng = crate::prng::Prng::new(42);
+        sim::advance(&mut state, &config, &mut rng);
+        assert!(
+            state.contracts.get(id).expect("单子还在").is_open(),
+            "全星系互相封锁 ⇒ 不该有人接下这条线上的活：{:?}",
+            state.contracts.get(id)
+        );
+        // 关系修好之后（同一张单、同一个回合数）就有人接了——证明上面那条不是因为
+        // 别的原因（没船、门槛、自评）而没人接。
+        let mut state2 = fresh(42).1;
+        state2.depots.clear();
+        state2.contracts.contracts.clear();
+        state2.factions.iter_mut().for_each(|f| f.reputation = 1.0);
+        state2.depot_add("中国", "金星", "碳", 400.0);
+        state2.ships.retain(|s| s.faction_id != "中国");
+        let id2 = contract(&mut state2, &config, "中国", 3.0, "金星", "地球", 0.0);
+        for f in state2.factions.iter_mut() {
+            for v in f.relations.values_mut() {
+                *v = 50.0;
+            }
+        }
+        let mut rng2 = crate::prng::Prng::new(42);
+        sim::advance(&mut state2, &config, &mut rng2);
+        assert!(
+            state2.contracts.get(id2).expect("单子还在").is_hired(),
+            "关系正常时该有人接（否则上一条断言是空转的）"
+        );
     }
 
     /// **固定期到期 ⇒ 按信誉决定续约还是换人**，用的是当初那条准入闸。

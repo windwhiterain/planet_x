@@ -541,6 +541,78 @@ fn probe_freight_ab() {
     }
 }
 
+/// 8c) **雇佣市场的 A/B（因果读数）**：同一颗种子、同一段回合，**只切「雇佣市场开/关」一个开关**。
+///
+/// 关的做法：把**雇主的准入闸抬到没人够得着**（`freight.gate_base = 100`）——于是单子照旧
+/// 挂出去（需求信号仍在，世界走向的确定性与开的那一侧逐字相同），但**没有一家能受雇**，
+/// 整条雇佣腿的搬运量归零。这是**同一颗种子上只动一个数**的因果读数，不是跨提交对照
+/// （同种子在不同提交上本来就能差出几倍，见 §5.2 的读数纪律）。
+///
+/// 与 8b（集货 A/B）合起来回答的是同一个问题：**「请人运」这条路到底搬走了多少货**
+/// ——它是自有集货的补充，还是只是在内部倒手。
+#[test]
+#[ignore]
+fn probe_hire_ab() {
+    let config = load_config();
+    let n = rounds();
+    let depot_units =
+        |state: &State| -> f64 { state.depots.values().flat_map(|m| m.values()).sum() };
+    let pool_value = |state: &State| -> f64 {
+        state
+            .factions
+            .iter()
+            .flat_map(|f| f.resources.iter())
+            .map(|(rt, amt)| amt * value_of(&config, rt))
+            .sum()
+    };
+    for seed in seeds() {
+        let mut line = String::new();
+        for hiring in [false, true] {
+            let mut cfg = config.clone();
+            if !hiring {
+                // 准入闸抬到天上 ⇒ 谁都不够格受雇（单子照挂，需求信号不受影响）。
+                cfg.freight.gate_base = 100.0;
+            }
+            let mut state = world::default_state(&cfg, seed);
+            let mut rng = Prng::new(seed);
+            let (mut to_pool, mut by_hire) = (0.0, 0.0);
+            let mut hires = 0usize;
+            for _ in 0..n {
+                sim::advance(&mut state, &cfg, &mut rng);
+                for e in &state.events {
+                    match e {
+                        GameEvent::CargoDelivered { cargo, into_pool, owner, faction, .. } => {
+                            let u: f64 = cargo.values().sum();
+                            if *into_pool {
+                                to_pool += u;
+                            }
+                            // 受雇跑的船：**货主不是船东**（`cargo_owner` 认派工记录）。
+                            // 不看 `into_pool`：雇主可能在雇佣期内迁都，那时货卸进货栈而不是池子，
+                            // 但它照样是**受雇搬走的货**。
+                            if owner != faction {
+                                by_hire += u;
+                            }
+                        }
+                        GameEvent::ContractAccepted { .. } => hires += 1,
+                        _ => {}
+                    }
+                }
+            }
+            let tag = if hiring { "雇佣**开**" } else { "雇佣关" };
+            line.push_str(&format!(
+                "  {tag}：期末积压 {:.0} 单位 / 首都池值 {:.0}（积压/池值 {:.0}%）  集货进池 {:.0} 件（其中受雇搬运 {:.0} 件）  成交 {} 单\n",
+                depot_units(&state),
+                pool_value(&state),
+                if pool_value(&state) > 0.0 { 100.0 * depot_units(&state) / pool_value(&state) } else { 0.0 },
+                to_pool,
+                by_hire,
+                hires,
+            ));
+        }
+        println!("== 雇佣市场 A/B seed {seed}（{n} 回合）==\n{line}");
+    }
+}
+
 /// 9) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
@@ -622,7 +694,7 @@ fn probe_collection_backlog() {
         // (装货件数, 卸货件数, 其中**卸进首都池**的件数)——最后一项才是「集货真正完成」。
         let (mut loaded, mut delivered, mut to_pool) = (0.0, 0.0, 0.0);
         let (mut load_trips, mut delivery_trips) = (0u32, 0u32);
-        let mut tally = |state: &State,
+        let tally = |state: &State,
                          loaded: &mut f64,
                          delivered: &mut f64,
                          to_pool: &mut f64,
