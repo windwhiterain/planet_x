@@ -359,9 +359,11 @@ class PlanetXQ:
         """**「这座城的忠诚为什么在掉」**：每城一行，带上引擎算出的忠诚目标值分项。
 
         `loyalty_target_*` 来自 `derived.city_process`（引擎在 `step_governance` 里**捕获**的中间量，
-        不在这里重算）：`effective` 是这一回合的目标忠诚（实际忠诚朝它恢复），四个分项就是它为什么低——
-        `distance`（离首都太远，再乘人口超载倍率）/ `entertainment`（娱乐预算 × 治理覆盖率）/
-        `capital_share`（首都人口占比带来的向心 buff）/ `ideology_penalty`（思潮优势端言行不符）。
+        不在这里重算）：`effective` 是这一回合的目标忠诚（实际忠诚朝它恢复），分项就是它为什么低——
+        `distance`（离首都太远，再乘人口超载倍率）/ `entertainment`（娱乐预算 × 治理覆盖率）。
+        `capital_loyalty_bonus`（首都人口占比带来的向心 buff）与 `ideology_loyalty_penalty`
+        （思潮优势端言行不符的扣分）**按势力算一次**，所以它们是从 `faction_process` join 来的，
+        完整式子是 `effective = clamp(distance + entertainment + bonus − penalty)`。
 
         ⚠ `coverage < 1` 时忠诚**改走欠费惩罚**（不朝目标恢复），此时 `effective` 只是「本该到的值」——
         要和 `loyalty`（现状）与 `view_economy()["governance_coverage"]` 一起读。按 `effective` 升序
@@ -369,21 +371,26 @@ class PlanetXQ:
         """
         c = self.cities(round)
         p = self.city_process(round)
-        if c is None or c.empty or p is None or p.empty:
+        f = self.faction_process(round)
+        if c is None or c.empty or p is None or p.empty or f is None or f.empty:
             return pd.DataFrame()
         cols = [
             "round", "city_id",
             "loyalty_target_effective", "loyalty_target_distance",
-            "loyalty_target_entertainment", "loyalty_target_capital_share",
-            "loyalty_target_ideology_penalty",
+            "loyalty_target_entertainment",
         ]
-        missing = [c for c in cols if c not in p.columns]
-        if missing:
-            raise KeyError(
-                f"derived.city_process 缺列 {missing}——这份投影是「B1 中间量」之前的构建产出的，"
-                f"请用当前 planet_x 重新 `--index`（各字段的中性值见 schema.json 的 neutral 段）"
-            )
+        # 另两项**按势力算一次**（首都向心项、思潮优势端惩罚）⇒ join `faction_process` 拿，
+        # 不在城表里重复存（「同一个数只有一个位置」，见 schema 的 city_process 说明）。
+        fcols = ["round", "faction_id", "capital_loyalty_bonus", "ideology_loyalty_penalty"]
+        for table, need, cols_ in (("city_process", cols, p.columns), ("faction_process", fcols, f.columns)):
+            missing = [x for x in need if x not in cols_]
+            if missing:
+                raise KeyError(
+                    f"derived.{table} 缺列 {missing}——这份投影是「B1 中间量」之前的构建产出的，"
+                    f"请用当前 planet_x 重新 `--index`（各字段的中性值见 schema.json 的 neutral 段）"
+                )
         out = c.merge(p[cols], on=["round", "city_id"], how="left")
+        out = out.merge(f[fcols], on=["round", "faction_id"], how="left")
         if faction is not None:
             out = out[out["faction_id"] == faction]
         return out.sort_values("loyalty_target_effective")
@@ -406,6 +413,24 @@ class PlanetXQ:
             "resources": entries,
             "total_value": sum(e["value"] for e in entries),
         }
+
+    def _capital_decision(self, round: int, faction: str) -> dict | None:
+        """This faction's **capital review/relocation** decision for the round, or `None`.
+
+        `None` means it neither reviewed nor moved — that is what the sparse absence of a row in
+        `derived.decisions` (`kind="capital"`) means (not "a review with no numbers"). The numbers
+        the events never carry live in the returned dict: `current_cost` / `candidate_cost`
+        ("why it did **not** move" is the gap between them) and `relocate_loyalty_cost`.
+        """
+        d = self.decisions(round)
+        if d is None or d.empty or "kind" not in d.columns:
+            return None
+        sel = d[(d["kind"] == "capital") & (d["faction_id"] == faction)]
+        if sel.empty:
+            return None
+        row = sel.iloc[-1]
+        detail = row["detail"] if isinstance(row["detail"], dict) else {}
+        return {"verdict": row["verdict"], "target": row["target"], **detail}
 
     def view_economy(self, round: int, faction: str) -> dict:
         """A faction's economy read (sim-computed numbers + trivial arithmetic): production vs
@@ -447,7 +472,12 @@ class PlanetXQ:
             "ideology_loyalty_penalty": fm.get(
                 "ideology_loyalty_penalty", self.neutral("factions[].ideology_loyalty_penalty")
             ),
-            "capital": fm.get("capital"),
+            "capital_loyalty_bonus": fm.get(
+                "capital_loyalty_bonus", self.neutral("factions[].capital_loyalty_bonus")
+            ),
+            # 首都评估/迁都是**稀疏判定**（大多数回合 `None`）⇒ 从 derived.decisions 取，不在
+            # 每势力一行里。`None` = 这一回合既没评估也没迁。
+            "capital": self._capital_decision(round, faction),
             "fleet_value": fm.get("fleet_value"),
             "city_count": fm.get("city_count"), "ship_count": fm.get("ship_count"),
             "at_war": fm.get("at_war"),

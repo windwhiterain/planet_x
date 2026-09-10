@@ -216,6 +216,7 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
                 entertainment: ent_total,
                 scale,
                 ideology_penalty: ideo_penalty,
+                capital_bonus: cap_bonus,
             },
         );
         let mut to_revolt = Vec::new();
@@ -225,13 +226,13 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
             // 捕获这一城的忠诚目标值分项（纯追加）——「这座城的忠诚为什么在掉」的分解。
+            // **只放逐城不同的项**：首都向心项与思潮惩罚按势力算一次，已经进了 `GovernanceFlow`
+            // （→ `FactionRow`），在这里抄一遍就是「同一个数两个位置」。
             flow.city_loyalty.insert(
                 cid.clone(),
                 LoyaltyTarget {
                     distance: target_base,
                     entertainment: ent_bonus,
-                    capital_share: cap_bonus,
-                    ideology_penalty: ideo_penalty,
                     effective: target_eff,
                 },
             );

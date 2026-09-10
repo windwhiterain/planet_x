@@ -22,14 +22,14 @@
 //!
 //! # 读它
 //!
-//! * 单回合：`planet_x --start ckpt.ron --derived` → `post.flow.decisions`（原始嵌套结构）。
+//! * 单回合：`planet_x --start ckpt.ron --derived` → `post.decisions`（原始嵌套结构）。
 //! * 整段轨迹：`planet_x --index out/` → `out/idx/decisions.jsonl` 一行一条判定，
 //!   按 `round` / `faction_id` / `actor` join（Python: `planet_xq.load('out').decisions()`）。
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{BuildingId, CityId, FactionId, ShipBehavior, ShipId};
+use super::{BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipId};
 
 /// 一艘 AI 舰本回合的判定结果。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
@@ -153,6 +153,35 @@ pub struct BlueprintDecision {
     pub building: Option<BuildingId>,
 }
 
+/// 一条**首都评估/迁都**判定（`kind = "capital"`）：AI 周期性重估首都是否该搬，以及搬迁的判据与代价。
+///
+/// 为什么它在**稀疏数组**里、而不是「每势力一行」里的一个对象：它 11/12 个回合什么都不发生
+/// （每 `capital_review_every` 回合评估一次，强迁只在首都失守时发生）。放进稠密面就会变成
+/// 每行 9 个对象 × 每个 6 个 `null`——**实测 1350 B/行，占 B1 新增量的 25%**，而它承载的信息
+/// 只在那一个回合存在。**「大部分回合无事发生」的判定归本数组**（同 [`ShipDecision`] 的
+/// `hold`、[`RetoolDecision`] 的空白行）。
+///
+/// **缺席 = 这个势力这一回合既没评估也没迁**（不是「评估了但没有数」）。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct CapitalDecision {
+    pub faction: FactionId,
+    /// 本回合是否做过周期性评估（非 `Auto` 控制 / 没到评估回合 ⇒ 那两种情况下**不会有这条**；
+    /// 强迁那条路会以 `reviewed = false` 出现）。
+    pub reviewed: bool,
+    /// 评估时的候选首都（人口最高的活城）；没评估 ⇒ `null`。
+    pub candidate: Option<BodyId>,
+    /// 现首都的「总治理距离成本」（AU，越小越好）；没评估 ⇒ `null`。
+    pub current_cost: Option<f64>,
+    /// 候选首都的同项成本；没评估 ⇒ `null`。**「为什么没迁」就在这两笔数之差里。**
+    pub candidate_cost: Option<f64>,
+    /// 真的迁了：旧首都（没迁 ⇒ `null`）。
+    pub relocated_from: Option<BodyId>,
+    /// 真的迁了：新首都（没迁 ⇒ `null`）。
+    pub relocated_to: Option<BodyId>,
+    /// 迁都造成的**全国忠诚扣减**（旧首都人口占比 × `capital_share_relocate_cost`；没迁 = 0）。
+    pub relocate_loyalty_cost: f64,
+}
+
 /// 本回合 AI 的判定集合（挂在 [`RoundSink`](super::RoundSink) 上随回合一起带出）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct RoundDecisions {
@@ -167,4 +196,8 @@ pub struct RoundDecisions {
     /// **设计图**决策（`autocontrol::blueprints`：`Auto` 图的执行者）——建图/重估/复用/回收。
     #[serde(default)]
     pub blueprints: Vec<BlueprintDecision>,
+    /// **首都评估/迁都**（`sim::step_capital`）——见 [`CapitalDecision`]：只在评估回合或迁都回合
+    /// 才有条目，所以它是**稀疏**的（大多数回合是空数组）。
+    #[serde(default)]
+    pub capital: Vec<CapitalDecision>,
 }

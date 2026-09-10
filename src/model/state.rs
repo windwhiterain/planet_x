@@ -19,7 +19,7 @@ use crate::model::*;
 /// 变成 `idx/faction_process.jsonl`/`idx/city_process.jsonl`、每回合轨迹的 `metrics`
 /// 变成 `view`。**世界状态本身（`State`）没有变**，变的是派生读面，故不写迁移档
 /// （旧档照常读；旧派生态不复用，本来也不持久）。
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 fn default_schema_version() -> u32 {
     0
 }
@@ -794,6 +794,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // ideology_loyalty_penalty|capital`、`CityRow::loyalty_target`），`State` 的字段一个没动
         // ⇒ 推号即可（存档照旧可用）。
         14 => {
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        // v15：`feature/capital-decisions` 之前那一版。仍然**只动派生读面**——`FactionRow.capital`
+        // 搬进 `RoundDecisions.capital`（稀疏数组）、`LoyaltyTarget` 少了两个「按势力算一次」的项
+        // （它们上移到 `FactionRow::capital_loyalty_bonus` / `ideology_loyalty_penalty`），
+        // `State` 的字段一个没动 ⇒ 推号即可（存档照旧可用）。
+        15 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

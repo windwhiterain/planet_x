@@ -197,12 +197,12 @@ fn agent_view_is_self_described_by_schema() {
         "upkeep",
         "governance_cost",
         "governance_coverage",
-        // B1：把钱花在哪（行政 vs 娱乐）+ 人口超载倍率 + 思潮忠诚惩罚 + 迁都判据。
+        // B1：把钱花在哪（行政 vs 娱乐）+ 人口超载倍率 + 两个「按势力算一次」的全国项。
         "governance_admin",
         "governance_entertainment",
         "governance_scale",
         "ideology_loyalty_penalty",
-        "capital",
+        "capital_loyalty_bonus",
     ] {
         assert!(
             sample_fac.get(k).is_some(),
@@ -220,10 +220,16 @@ fn agent_view_is_self_described_by_schema() {
         .and_then(|o| o.values().next())
         .cloned()
         .unwrap_or_default();
-    for k in ["distance", "entertainment", "capital_share", "ideology_penalty", "effective"] {
+    // 城行只放**逐城不同**的三项；那两个按势力算一次的全国项在势力行上（上面刚查过）。
+    for k in ["distance", "entertainment", "effective"] {
         assert!(
             sample_city.get("loyalty_target").and_then(|t| t.get(k)).is_some(),
             "view.cities[].loyalty_target 缺分项 {k}"
         );
     }
+    // 首都评估/迁都在**判定数组**里（稀疏：大多数回合是空数组）。
+    assert!(
+        m.get("decisions").and_then(|d| d.get("capital")).is_some_and(|c| c.is_array()),
+        "view.decisions 缺稀疏的首都判定数组 capital"
+    );
 }

@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// 从判定数组里查某势力这一回合的「首都评估/迁都」行；没有 ⇒ `None`
+/// （= 既没评估也没迁，**这就是稀疏的含义**，不是「有行但没数」）。
+fn capital_decision<'a>(sink: &'a RoundSink, fid: &str) -> Option<&'a CapitalDecision> {
+    sink.decisions.capital.iter().find(|c| c.faction == fid)
+}
+
 /// 迁都-亡城强迁：首都天体上已无本势力活城 → 自动切到**人口最高的活城**。
 #[test]
 fn capital_destroyed_auto_relocates_to_highest_population_city() {
@@ -18,7 +24,7 @@ fn capital_destroyed_auto_relocates_to_highest_population_city() {
     step_capital(&mut state, &config, &mut sink);
 
     // 强迁那条路**没有评估**：读面里只有「从哪迁到哪」与它的忠诚代价。
-    let cap = sink.capital.get("中国").expect("迁都要在读面里留痕");
+    let cap = capital_decision(&sink, "中国").expect("迁都要在读面里留痕");
     assert!(!cap.reviewed, "亡城强迁不是周期性评估");
     assert!(cap.current_cost.is_none() && cap.candidate.is_none(), "没评估就不该编出判据数字");
     assert_eq!(cap.relocated_from.as_deref(), Some("地球"));
@@ -65,7 +71,7 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
     step_capital(&mut state, &config, &mut sink);
 
     // 判据数字必须留下来：现首都（水星）比候选（地球）贵，且这次评估**真的迁了**。
-    let cap = sink.capital.get("中国").expect("评估要在读面里留痕");
+    let cap = capital_decision(&sink, "中国").expect("评估要在读面里留痕");
     assert!(cap.reviewed, "Auto 首都在评估轮必须记下「评估过」");
     assert_eq!(cap.candidate.as_deref(), Some("地球"), "候选 = 人口最高的活城");
     let cur_cost = cap.current_cost.expect("评估过就该有现首都成本");
@@ -93,6 +99,52 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
     );
 }
 
+/// 首都判定是**稀疏**的：只有「评估过」或「迁过」的势力才在判定数组里占一行。
+///
+/// 这条是那个设计决定的可执行形式：`capital` 原本挂在「每势力一行」的稠密面上，实测 1350 B/行
+/// （占 B1 新增量的 25%），而它 11/12 个回合什么都不发生——所以它搬进了判定数组。
+#[test]
+fn capital_review_is_sparse_in_the_decision_log() {
+    let (mut config, mut state) = fresh_world(42);
+    config.governance.admin_range = 0.05;
+    config.governance.capital_relocate_threshold = 0.1;
+
+    // 非评估回合（12k+1）：就算首都是 Auto，也不该产生任何判定行。
+    state.round = 13;
+    let diff = serde_json::json!({
+        "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Auto"}}]
+    });
+    crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
+    let mut sink = RoundSink::default();
+    step_capital(&mut state, &config, &mut sink);
+    assert!(
+        sink.decisions.capital.is_empty(),
+        "非评估回合不该有首都判定行，实际 {:?}",
+        sink.decisions.capital
+    );
+
+    // 评估回合：每个进了数组的势力都必须是「评估过」或「迁过」——没有第三种。
+    state.round = 12;
+    let mut sink = RoundSink::default();
+    step_capital(&mut state, &config, &mut sink);
+    assert!(!sink.decisions.capital.is_empty(), "评估回合至少应有一条（中国是 Auto）");
+    for c in &sink.decisions.capital {
+        assert!(
+            c.reviewed || c.relocated_to.is_some(),
+            "{} 的判定行既没评估也没迁——不该占位",
+            c.faction
+        );
+        if c.reviewed && c.relocated_to.is_none() {
+            // 「评估了但没迁」同样要有判据数字，否则读的人只能看到结果。
+            assert!(c.current_cost.is_some() && c.candidate_cost.is_some(), "{} 缺判据数字", c.faction);
+        }
+    }
+    assert!(
+        capital_decision(&sink, "中国").is_some_and(|c| c.reviewed),
+        "中国是 Auto 首都，评估回合该有它"
+    );
+}
+
 /// 迁都-Player 标记：mode=Player 的首都在评估轮不被 AI 覆盖（除非亡城硬规则）。
 #[test]
 fn player_capital_not_overridden_by_ai_review() {
@@ -110,10 +162,10 @@ fn player_capital_not_overridden_by_ai_review() {
     let mut sink = RoundSink::default();
     step_capital(&mut state, &config, &mut sink);
 
-    // 「AI 没插嘴」这件事也要看得见：Player 钉的首都**不进评估**。
+    // 「AI 没插嘴」这件事也要看得见：Player 钉的首都**不进评估** ⇒ 判定数组里没有它。
     assert!(
-        sink.capital.get("中国").map(|c| !c.reviewed).unwrap_or(true),
-        "Player 控制的首都读面不该说它评估过"
+        capital_decision(&sink, "中国").is_none(),
+        "Player 控制的首都既没评估也没迁，判定数组里不该有它的行"
     );
 
     assert_eq!(

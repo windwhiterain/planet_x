@@ -131,17 +131,17 @@ fn derived_matches_the_projection_for_the_same_round() {
             row["governance_coverage"], expect["governance_coverage"],
             "{fid} 的治理覆盖率两个读面不一致"
         );
-        // B1：治理的拆分、人口超载倍率、思潮惩罚必须跨进程逐值相同；迁都判据只在视图里
-        // （它稀疏，不进 tidy 表）——但**必须在**，而且形状是对象。
+        // B1：治理的拆分、人口超载倍率、两个全国项必须跨进程逐值相同。
+        // ⚠ 首都评估/迁都**不在**这一行里：它是稀疏的判定，住在 `decisions` 数组（下面单独钉）。
         for col in [
             "governance_admin",
             "governance_entertainment",
             "governance_scale",
             "ideology_loyalty_penalty",
+            "capital_loyalty_bonus",
         ] {
             assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
         }
-        assert!(expect["capital"].is_object(), "{fid} 缺迁都判据 capital");
         if expect["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
             admin_seen += 1;
         }
@@ -156,6 +156,16 @@ fn derived_matches_the_projection_for_the_same_round() {
         "这一回合没有任何势力真的跑过治理——这条守卫会退化成空转"
     );
     assert!(admin_seen >= 1, "没有任何势力报出行政开销——B1 那几列等于空转");
+    // 首都判定是**稀疏数组**（不在每势力一行里）：形状必须是数组，且缺席表示「既没评估也没迁」。
+    let cap = &v["post"]["decisions"]["capital"];
+    assert!(cap.is_array(), "view.decisions.capital 必须是数组（稀疏判定）");
+    for c in cap.as_array().unwrap() {
+        assert!(c["faction"].is_string(), "首都判定行缺 faction：{c}");
+        assert!(
+            c["reviewed"] == serde_json::json!(true) || !c["relocated_to"].is_null(),
+            "首都判定行既没评估也没迁，不该占位：{c}"
+        );
+    }
 
     // 5) 城的过程量表同理，且必须真有带产出的行（否则等于没检查）。
     let city_proc = derived_rows(&out, "city_process", 6);

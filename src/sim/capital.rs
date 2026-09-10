@@ -36,6 +36,11 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
 
         let mut new_cap: Option<BodyId> = None;
         let mut reason = "";
+        // 本回合的评估读数：没评估就全是 `None` ⇒ 读面用 `null` 表达「**没算**」。
+        let mut reviewed = false;
+        let mut candidate: Option<BodyId> = None;
+        let mut current_cost: Option<f64> = None;
+        let mut candidate_cost: Option<f64> = None;
 
         if !cur_owned {
             // 亡城强迁 → 人口最高的活城（并列取名字序）。
@@ -48,16 +53,10 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
             // 城市位置与人口 ⇒ 纯追加、不改行为。
             let cur_cost = capital_anchor_cost(state, config, &fid, &cur);
             let best_cost = capital_anchor_cost(state, config, &fid, &best);
-            flow.capital.insert(
-                fid.clone(),
-                CapitalFlow {
-                    reviewed: true,
-                    candidate: Some(best.clone()),
-                    current_cost: Some(cur_cost),
-                    candidate_cost: Some(best_cost),
-                    ..Default::default()
-                },
-            );
+            reviewed = true;
+            candidate = Some(best.clone());
+            current_cost = Some(cur_cost);
+            candidate_cost = Some(best_cost);
             if best != cur && best_cost + config.governance.capital_relocate_threshold < cur_cost {
                 new_cap = Some(best);
                 reason = "ai_review";
@@ -70,12 +69,20 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
             // 迁离越动荡（国本动摇）；亡城强迁时旧首都已失（占比=0）→ 应急无忠诚代价。
             let old_share = faction_capital_share(state, &fid);
             let loyalty_cost = old_share * config.governance.capital_share_relocate_cost;
-            // 这次迁都本身与它的忠诚代价也进读面。亡城强迁那条路**没有评估**（`reviewed` 仍是
-            // false、没有候选与成本），但「从哪迁到哪、付了多少忠诚」同样要看得见。
-            let entry = flow.capital.entry(fid.clone()).or_default();
-            entry.relocated_from = Some(from.clone());
-            entry.relocated_to = Some(nc.clone());
-            entry.relocate_loyalty_cost = loyalty_cost;
+            // 这次迁都本身与它的忠诚代价进读面（判定数组里的一行）。亡城强迁那条路
+            // **没有评估**（`reviewed = false`、候选与成本是 `null`），但「从哪迁到哪、
+            // 付了多少忠诚」同样要看得见。⚠ 必须在这里 push：下面 `ev(..)` 会把 `from`/`nc`
+            // 移走。
+            flow.decisions.capital.push(CapitalDecision {
+                faction: fid.clone(),
+                reviewed,
+                candidate,
+                current_cost,
+                candidate_cost,
+                relocated_from: Some(from.clone()),
+                relocated_to: Some(nc.clone()),
+                relocate_loyalty_cost: loyalty_cost,
+            });
             // 保留原 mode 标记（Player 仍归玩家、Inherit 让作用域链决定）——迁都是换「值」，
             // 不改变「由谁决定」的层次化粒度。
             let prev_mode = state
@@ -100,6 +107,19 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
                 from,
                 to: nc,
                 reason: reason.to_string(),
+            });
+        } else if reviewed {
+            // 评估过、但判据不成立 ⇒ **没迁**。这条同样要记：「为什么没迁」正是那两笔成本之差
+            // （`candidate_cost + capital_relocate_threshold` 还不小于 `current_cost`）。
+            flow.decisions.capital.push(CapitalDecision {
+                faction: fid.clone(),
+                reviewed: true,
+                candidate,
+                current_cost,
+                candidate_cost,
+                relocated_from: None,
+                relocated_to: None,
+                relocate_loyalty_cost: 0.0,
             });
         }
     }

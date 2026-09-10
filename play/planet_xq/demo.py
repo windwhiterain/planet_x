@@ -101,18 +101,20 @@ print(
     f" (行政 {round(econ['governance_admin'], 2)} + 娱乐 {round(econ['governance_entertainment'], 2)})"
     f" × 制裁倍率 | 覆盖率 {econ['governance_coverage']} | 人口超载倍率 {round(econ['governance_scale'], 3)}"
     f" | 思潮忠诚惩罚 {round(econ['ideology_loyalty_penalty'], 4)}"
+    f" | 首都向心 {round(econ['capital_loyalty_bonus'], 4)}"
 )
 # 勾稽：「行政 + 娱乐」乘上制裁倍率才是总开销 ⇒ 两项之和 ≤ 总（倍率 ≥ 1）。这里把比值也打出来，
 # 它就是 1/倍率；不相等就说明读面把两个来源说岔了。
 assert parts > 0.0 and econ["governance_cost"] >= parts - 1e-9, (parts, econ["governance_cost"])
 print("  两项之和 ÷ 总开销 =", round(parts / econ["governance_cost"], 4), "（= 1 ÷ 制裁倍率）")
-print("  迁都判据（只在评估回合有数）：", econ["capital"])
+print("  迁都判定（稀疏：没评估也没迁就是 None）：", econ["capital"])
 
 lt = q.view_loyalty(last_round, "中国")
 cols = [
     "city_id", "loyalty", "loyalty_target_effective", "loyalty_target_distance",
-    "loyalty_target_entertainment", "loyalty_target_capital_share",
-    "loyalty_target_ideology_penalty",
+    "loyalty_target_entertainment",
+    # 这两列按势力算一次：`view_loyalty` 从 faction_process join 进来（同一个数只存一个位置）。
+    "capital_loyalty_bonus", "ideology_loyalty_penalty",
 ]
 print(lt[[c for c in cols if c in lt.columns]].to_string(index=False))
 # 勾稽：目标忠诚 = 四项相加并 clamp[0,1]（这是引擎自己的分解，Python 侧只做加法，不重算公式）。
@@ -120,10 +122,13 @@ row = lt.iloc[0]
 s = (
     row["loyalty_target_distance"]
     + row["loyalty_target_entertainment"]
-    + row["loyalty_target_capital_share"]
-    - row["loyalty_target_ideology_penalty"]
+    + row["capital_loyalty_bonus"]
+    - row["ideology_loyalty_penalty"]
 )
 assert abs(row["loyalty_target_effective"] - min(max(s, 0.0), 1.0)) < 1e-12, (
     s, row["loyalty_target_effective"],
 )
-print("勾稽通过：effective = clamp(distance + entertainment + capital_share − ideology_penalty)")
+print(
+    "勾稽通过：effective = clamp(distance + entertainment"
+    " + capital_loyalty_bonus − ideology_loyalty_penalty)"
+)

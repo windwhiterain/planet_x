@@ -681,6 +681,9 @@ fn write_round(
                 "governance_entertainment": row.map(|r| r.governance_entertainment).unwrap_or(0.0),
                 "governance_scale": row.map(|r| r.governance_scale).unwrap_or(1.0),
                 "ideology_loyalty_penalty": row.map(|r| r.ideology_loyalty_penalty).unwrap_or(0.0),
+                // B1 的另两个「按势力算一次」的量：首都向心项（它和上面的思潮惩罚一起，
+                // 构成每座城忠诚目标式里的全国项——城表不重复它们）。
+                "capital_loyalty_bonus": row.map(|r| r.capital_loyalty_bonus).unwrap_or(0.0),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -691,6 +694,8 @@ fn write_round(
         let prod = crow.map(|r| r.production.clone()).unwrap_or_default();
         // B1：忠诚目标值分项（`view.cities[].loyalty_target` 的**平铺版**）——「这座城的忠诚为什么
         // 在掉」的答案。缺省全 0（这一回合没跑治理），同其它过程量的约定。
+        // ⚠ 只平铺**逐城不同**的三项：另两项（首都向心项、思潮惩罚）按势力算一次，在
+        // `faction_process` 的 `capital_loyalty_bonus` / `ideology_loyalty_penalty` 里。
         let lt = crow.map(|r| r.loyalty_target.clone()).unwrap_or_default();
         writeln!(
             w.city_process,
@@ -705,8 +710,6 @@ fn write_round(
                 "loyalty_target_effective": lt.effective,
                 "loyalty_target_distance": lt.distance,
                 "loyalty_target_entertainment": lt.entertainment,
-                "loyalty_target_capital_share": lt.capital_share,
-                "loyalty_target_ideology_penalty": lt.ideology_penalty,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -1023,6 +1026,40 @@ fn write_round(
         )
         .map_err(|e| e.to_string())?;
     }
+    // **首都评估/迁都**（`sim::step_capital`）：稀疏——只在评估回合或迁都回合有行。
+    // 为什么它在判定表里而不是每势力一行：11/12 个回合什么都不发生（见 `CapitalDecision`）。
+    for c in &view.decisions.capital {
+        let verdict = if c.relocated_to.is_some() {
+            if c.reviewed {
+                "relocate"
+            } else {
+                "forced"
+            }
+        } else {
+            "review"
+        };
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": c.faction,
+                "kind": "capital",
+                "actor": c.faction,
+                "verdict": verdict,
+                "target": c.relocated_to,
+                "detail": {
+                    "reviewed": c.reviewed,
+                    "candidate": c.candidate,
+                    "current_cost": c.current_cost,
+                    "candidate_cost": c.candidate_cost,
+                    "relocated_from": c.relocated_from,
+                    "relocate_loyalty_cost": c.relocate_loyalty_cost,
+                },
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
     // 设计图的**执行者**（`autocontrol::blueprints`）：建图/重估/复用/回收。
     for d in &view.decisions.blueprints {
         writeln!(
@@ -1205,7 +1242,7 @@ pub fn projection_schema() -> serde_json::Value {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
-                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number"},
+                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number"},
                 "column_docs": {
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
@@ -1214,19 +1251,19 @@ pub fn projection_schema() -> serde_json::Value {
                     "governance_admin": "治理总开销的**行政部分**（距离 × 人口超载）。`governance_admin + governance_entertainment` 乘上制裁倍率 = `governance_total`；只给合计时「我把娱乐预算拉满、钱却被行政吃掉」看不出来。",
                     "governance_entertainment": "治理总开销的**娱乐/福利部分**（各城忠诚预算之和）。",
                     "governance_scale": "**人口超载放大倍率** = `1 + max(0, 人口 ÷ 管理容量 − 1)`，同时乘在行政开销与每座城的忠诚距离项上。**中性缺省 1.0**（不是 0：缺的是「没有账」，不是「治理能力归零」）——同 `governance_coverage` 的缺省约定，零城势力因此不会被读成崩溃。",
-                    "ideology_loyalty_penalty": "本回合**思潮优势端自平衡**的全国忠诚惩罚（0..`max_loyalty_penalty`）：身处垄断优势端思潮却言行不符时的扣分（军国却不打仗、科学却不探异常区）。它同时出现在每座城的 `loyalty_target_ideology_penalty` 上（全国同值）。",
+                    "ideology_loyalty_penalty": "本回合**思潮优势端自平衡**的忠诚惩罚（0..`max_loyalty_penalty`）：身处垄断优势端思潮却言行不符时的扣分（军国却不打仗、科学却不探异常区）。**按势力算一次**——它是每座城忠诚目标式里的扣项，但只在这里存一份（城表不重复它）。",
+                    "capital_loyalty_bonus": "本回合**首都向心项** = 首都人口占全势力比例 × `capital_share_loyalty_buff`。**按势力算一次**（城表不重复它）：城表那三列 + 本列 − `ideology_loyalty_penalty`，clamp 到 0..1 就是那座城的 `loyalty_target_effective`。把首都放在人口中心有真实收益，迁都则要付忠诚代价。",
                 },
             }),
             "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项**，按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
-                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","loyalty_target_capital_share":"number","loyalty_target_ideology_penalty":"number"},
+                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number"},
                 "column_docs": {
                     "loyalty_target_effective": "本回合这座城的**忠诚目标值**（0..1）：实际忠诚每回合朝它恢复（治理覆盖得住时），覆盖不住则改用欠费惩罚。所以「忠诚在掉」= 它低。「为什么低」看下面四列。",
                     "loyalty_target_distance": "距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`。越远的城越低——这是「帝国太大管不住」的第一来源。",
                     "loyalty_target_entertainment": "娱乐/福利项：`本城娱乐预算 × 治理覆盖率 ÷ entertainment_cost`。**乘了覆盖率**：批了预算但治理没到位，这部分不落地（`coverage < 1` 时同一笔钱打折进忠诚）。",
-                    "loyalty_target_capital_share": "首都向心项：首都人口占全势力比例 × `capital_share_loyalty_buff`（**全国同值**）——把首都放在人口中心有真实收益。",
-                    "loyalty_target_ideology_penalty": "思潮优势端惩罚（**全国同值**，见 `faction_process` 的 `ideology_loyalty_penalty`）。",
+                    "⚠ 全国项不在本表": "忠诚目标式里的另外两项——首都向心项与思潮优势端惩罚——**按势力算一次**，所以在 `faction_process` 的 `capital_loyalty_bonus` / `ideology_loyalty_penalty` 里（join 键 = `faction_id`）。同一个数只存一个位置：城表只放逐城不同的三项。",
                 },
             }),
             "control" => json!({
@@ -1268,14 +1305,14 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "decisions" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
+                "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）+ **首都评估/迁都**（稀疏：只在评估回合或迁都回合有行）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
                 "column_docs": {
-                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）。",
-                    "actor": "作判定的一方：舰名（ship_order / style_retune）/ 船坞所在城名（retool）/ **图名**（blueprint）。",
-                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped。",
-                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）／**舰级**（blueprint）；纯位置机动与 style_retune 为 null（看 `detail`）。",
-                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。style_retune：`from`/`to`（这条轴改动前后的值）、`goal`（这次重估朝它走的**战况目标**）、`drivers`（当时读到的战况输入：temper 是 war/win/damage/withdraw，lone_wolf 是 neighbors，kiting 是 power/hardness/hurt）。blueprint：`theme`（设计主题）/ `components`（落到图上的选装）/ `city`+`building`（这次决策发生在哪个建造区；reaped 为 null）。",
+                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）/ capital（首都评估与迁都，**稀疏**）。",
+                    "actor": "作判定的一方：舰名（ship_order / style_retune）/ 船坞所在城名（retool）/ **图名**（blueprint）/ 势力名（capital——判定者就是那个势力本身）。",
+                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped；capital：relocate（评估后真的迁了）/ review（评估过、判据不成立 ⇒ **没迁**）/ forced（亡城强迁，没有评估）。",
+                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）／**舰级**（blueprint）／**新首都天体名**（capital，没迁为 null——评估时的候选城在 `detail.candidate` 里）；纯位置机动与 style_retune 为 null（看 `detail`）。",
+                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。style_retune：`from`/`to`（这条轴改动前后的值）、`goal`（这次重估朝它走的**战况目标**）、`drivers`（当时读到的战况输入：temper 是 war/win/damage/withdraw，lone_wolf 是 neighbors，kiting 是 power/hardness/hurt）。blueprint：`theme`（设计主题）/ `components`（落到图上的选装）/ `city`+`building`（这次决策发生在哪个建造区；reaped 为 null）。capital：`reviewed`（本回合是否做过周期性评估）、`candidate`（人口最高的活城——评估时的候选）、`current_cost`/`candidate_cost`（现首都与候选各自到全势力各城的**总治理距离成本** AU；**「为什么没迁」就是候选 − 现首都还不够 `capital_relocate_threshold`**）、`relocated_from`（旧首都）、`relocate_loyalty_cost`（迁都当回合对**全国每座城**的忠诚扣减 = 旧首都人口占比 × `capital_share_relocate_cost`）。",
                 },
             }),
             _ => continue,

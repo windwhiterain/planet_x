@@ -166,6 +166,31 @@ tidy 表：`idx/faction_process.jsonl` += 4 列（`governance_admin` / `governan
 成本，B1 改成**评估回合一律算**——否则「为什么没迁」恰好是唯一读不到的那种情况。两个函数都只读
 城市位置与人口，无副作用、不消费骰子。
 
+### 6.2 形状修订（`feature/capital-decisions`）
+
+B1 落地后量了字节，发现两处不合本项目自己的规矩，于是把它俩收掉了（细节与裁决理由见
+[`dense-face-sparse-store.md`](dense-face-sparse-store.md) §8——那里也记了「**为什么不做**
+通用稀疏层」）：
+
+| 原形状 | 现形状 | 为什么 |
+| --- | --- | --- |
+| `view.factions[<>].capital{7 字段}`（平时 6 个 `null`，1350 B/行，而它 11/12 回合无事发生） | **`view.decisions.capital[]`**（稀疏数组，一行一条首都判定；缺席 = 既没评估也没迁） | 「大部分回合无事发生」的判定归判定数组（同 `ShipDecision` 的 `hold`） |
+| `view.cities[<>].loyalty_target` 里的 `capital_share` / `ideology_penalty`（按势力算一次，却在每座城抄一遍） | 城行只留 `distance`/`entertainment`/`effective`；那两项**只在势力行**（`capital_loyalty_bonus` / `ideology_loyalty_penalty`） | 「同一个数只有一个位置」 |
+
+读面的忠诚目标式因此变成：
+
+```text
+effective = clamp(distance + entertainment
+                  + factions[<势力>].capital_loyalty_bonus
+                  - factions[<势力>].ideology_loyalty_penalty, 0, 1)
+```
+
+实测（同口径 `--seed 7 --round 6`）：`main.jsonl` **18127 → 15652 B/行**（B1 的净新增
+5338 → 2485 B/行）；`capital` 那项在 30 回合整段里 40500 → **4185 B**；城侧 `loyalty_target`
+3653 → **1908 B/行**。`SCHEMA_VERSION` 15 → 16；`idx/decisions.jsonl` 多一类 `kind="capital"` 行；
+`faction_process` 多一列 `capital_loyalty_bonus`，`city_process` 少两列。
+验收：digest **仍逐字不变**、全档 **198 绿**、kit 端到端勾稽通过。
+
 ## 7. 待裁决（三个设计点，动 B4/B5 之前必须先定）
 
 * **Q1 · 「每次结算 / 舰对」粒度的量放哪？** 战斗五条（C1–C5）与索敌计划是**逐舰逐发**的，

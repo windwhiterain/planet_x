@@ -9,8 +9,11 @@ use super::*;
 /// B1 的核心不变量：**忠诚目标值就是那条忠诚方程的分解**。
 ///
 /// `step_governance` 每回合算出一个目标忠诚 `effective`，再把实际忠诚朝它恢复；这里钉住
-/// 分解式本身（四项之和 clamp 后 == `effective`），外加两条结构性事实：首都向心项与思潮惩罚
-/// 是**全国同值**，距离项随离首都的距离**单调不增**。
+/// 分解式本身——`distance + entertainment + 势力行的首都向心项 − 势力行的思潮惩罚`，clamp 后
+/// == `effective`——外加一条结构性事实：距离项随离首都的距离**单调不增**。
+///
+/// ⚠ 后两项按势力算一次，所以它们**只在势力行**（`capital_loyalty_bonus` /
+/// `ideology_loyalty_penalty`），城行不重复存：这正是「同一个数只有一个位置」。
 #[test]
 fn loyalty_target_decomposes_the_loyalty_equation() {
     let (config, mut state) = fresh_world(42);
@@ -28,31 +31,37 @@ fn loyalty_target_decomposes_the_loyalty_equation() {
     assert!(cities.len() >= 2, "这条守卫要至少两座城才谈得上「随距离单调」");
     cities.sort_by(|a, b| a.1.total_cmp(&b.1));
 
+    // 折进视图：全国项只从**势力行**取（城行没有它们——「同一个数只有一个位置」）。
+    let view = observe(&state, &config, &sink);
+    let frow = view.factions.get(fid).expect("势力行").clone();
+    assert!(
+        frow.capital_loyalty_bonus > 0.0,
+        "首都在自己的活城上 ⇒ 首都向心项应当为正（拿到 {}）",
+        frow.capital_loyalty_bonus
+    );
+
     let mut prev_distance_term = f64::INFINITY;
-    let mut national: Option<(f64, f64)> = None;
     for (cid, d) in &cities {
         let t = sink
             .city_loyalty
             .get(cid)
             .unwrap_or_else(|| panic!("{cid} 没有忠诚目标值——捕获漏了这座城"));
 
-        // 1) 勾稽：四项之和 clamp 后就是 `effective`（忠诚朝它恢复的那个值）。
-        let sum = t.distance + t.entertainment + t.capital_share - t.ideology_penalty;
+        // 1) 勾稽：三项（含势力行那两项）之和 clamp 后就是 `effective`（忠诚朝它恢复的那个值）。
+        let sum =
+            t.distance + t.entertainment + frow.capital_loyalty_bonus - frow.ideology_loyalty_penalty;
         assert!(
             (t.effective - sum.clamp(0.0, 1.0)).abs() < 1e-12,
-            "{cid}: effective={} 与四项之和 {sum} 对不上（clamp 后应为 {}）",
+            "{cid}: effective={} 与三项之和 {sum} 对不上（clamp 后应为 {}）",
             t.effective,
             sum.clamp(0.0, 1.0)
         );
         assert!((0.0..=1.0).contains(&t.effective), "{cid} 的目标忠诚越界");
 
-        // 2) 全国同值：首都向心项与思潮惩罚按**势力**算，每座城读到的必须是同一个数。
-        match national {
-            None => national = Some((t.capital_share, t.ideology_penalty)),
-            Some((cs, ip)) => {
-                assert_eq!(t.capital_share, cs, "{cid} 的首都向心项与同势力其它城不一致");
-                assert_eq!(t.ideology_penalty, ip, "{cid} 的思潮惩罚与同势力其它城不一致");
-            }
+        // 2) 城行**不该**重存那两个全国项：它们在势力行上，只有一个位置。
+        for (k, v) in [("capital_loyalty_bonus", frow.capital_loyalty_bonus),
+                       ("ideology_loyalty_penalty", frow.ideology_loyalty_penalty)] {
+            assert!(v.is_finite(), "{fid} 的 {k} 应当是有限数");
         }
 
         // 3) 距离项随距离单调不增——这是「帝国太大管不住」的第一来源。
@@ -64,14 +73,13 @@ fn loyalty_target_decomposes_the_loyalty_equation() {
         prev_distance_term = t.distance;
     }
 
-    // 4) 折进视图以后还是同一个数（「同一个量只有一个位置」）：`observe` 拿同一个 sink 折一遍。
-    let view = observe(&state, &config, &sink);
+    // 4) 折进视图以后还是同一个数（「同一个量只有一个位置」）。
     for (cid, _) in &cities {
         let s = sink.city_loyalty.get(cid).expect("上面刚查过");
         let row = &view.cities.get(cid).expect("视图必须有这座活城").loyalty_target;
         assert_eq!(row.effective, s.effective, "{cid} 的 effective 折进视图后变了");
         assert_eq!(row.distance, s.distance, "{cid} 的距离项折进视图后变了");
-        assert_eq!(row.ideology_penalty, s.ideology_penalty, "{cid} 的思潮项折进视图后变了");
+        assert_eq!(row.entertainment, s.entertainment, "{cid} 的娱乐项折进视图后变了");
     }
 }
 
@@ -101,6 +109,7 @@ fn governance_cost_splits_into_admin_and_entertainment() {
         );
         assert!(g.scale >= 1.0, "{fid} 的人口超载倍率不该小于 1");
         assert!(g.ideology_penalty >= 0.0, "{fid} 的思潮惩罚不该是负数");
+        assert!(g.capital_bonus >= 0.0, "{fid} 的首都向心项不该是负数");
         if state.cities.iter().any(|c| c.faction_id == fid && !c.razed) {
             assert!(g.admin > 0.0, "{fid} 有活城却没有行政开销");
             checked += 1;
@@ -129,12 +138,14 @@ fn pre_view_has_neutral_b1_defaults() {
     );
     assert_eq!(row.ideology_loyalty_penalty, 0.0);
 
-    assert!(!row.capital.reviewed, "没推进过就不该说「评估过」");
-    assert!(row.capital.candidate.is_none(), "没评估 ⇒ 候选是 None，不是编一个城名");
-    assert!(row.capital.current_cost.is_none(), "没评估 ⇒ 成本是 None，不是 0");
-    assert!(row.capital.candidate_cost.is_none());
-    assert!(row.capital.relocated_from.is_none() && row.capital.relocated_to.is_none());
-    assert_eq!(row.capital.relocate_loyalty_cost, 0.0);
+    assert_eq!(row.capital_loyalty_bonus, 0.0, "没跑治理 ⇒ 首都向心项是 0");
+    assert_eq!(row.ideology_loyalty_penalty, 0.0);
+    // 首都判定是**稀疏数组**：没推进过 ⇒ 空数组（不是「有行但全是 null」）。
+    assert!(
+        view.decisions.capital.is_empty(),
+        "没推进过就不该有首都判定行，实际 {:?}",
+        view.decisions.capital
+    );
 
     assert!(!view.cities.is_empty());
     for (cid, c) in &view.cities {
