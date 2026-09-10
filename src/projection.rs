@@ -481,8 +481,8 @@ fn write_round(
                 // （按积压定编），所以 `freighter_mode` 还会告诉你那片叶归谁。
                 "doctrine": state.ship_doctrine(s.name.clone()),
                 "kiting": state.ship_kiting(s.name.clone()),
-                "freighter": state.ship_freighter(s.name.clone()),
-                "freighter_mode": state.ship_freighter_control(s.name.clone()),
+                "role": state.ship_role(s.name.clone()),
+                "role_mode": state.ship_role_control(s.name.clone()),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -625,7 +625,7 @@ fn write_round(
                 "freighter_count": state
                     .ships
                     .iter()
-                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()))
+                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_role(s.name.clone()) == ShipRole::Freight)
                     .count(),
                 "city_ids": city_ids,
                 "ship_ids": ship_ids,
@@ -780,9 +780,9 @@ fn write_round(
                 leaf.mode,
             )?;
         }
-        for (ship, leaf) in &c.ship_freighter {
+        for (ship, leaf) in &c.ship_role {
             row(
-                "ship_freighter",
+                "ship_role",
                 json!(ship),
                 json!(null),
                 json!(leaf.value),
@@ -807,9 +807,9 @@ fn write_round(
                 d.mode,
             )?;
         }
-        if let Some(d) = &c.default_freighter {
+        if let Some(d) = &c.default_role {
             row(
-                "default_freighter",
+                "default_role",
                 json!(""),
                 json!(null),
                 json!(d.value),
@@ -1111,7 +1111,7 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","freighter":"boolean","freighter_mode":"string","blueprint":"string","blueprint_mode":"string","order_blueprint_mode":"string","spawned_round":"integer"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","order_blueprint_mode":"string","spawned_round":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_default_mode": "势力级**舰队默认指令**的表态（没有这片叶 = Inherit）。",
@@ -1120,8 +1120,8 @@ pub fn projection_schema() -> serde_json::Value {
                     "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）：`leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）/ `blueprint:<图名>`（值来自本舰出厂那张图上的 `order`）/ `fleet_default`（势力级舰队默认叶）/ `scope` / `record`。⚠ 后两个取值在**指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`freighter` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`（那时值真的来自那片叶，`leaf.map(|l| l.value)`），只有叶不存在才可能落到 `blueprint:*`/`fleet_default`。",
                     "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
                     "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
-                    "freighter": "**有效角色**（`State::ship_freighter`，同一条链）：`true` = 运输舰（自动控制给它排集货路线），`false` = 战舰（找仗打）。它**只管自动控制派哪种活**——不解除武装，运输舰照样自动开火、照样按 `kiting` 软移动。",
-                    "freighter_mode": "角色那片叶的**有效归属**（`State::ship_freighter_control`）：Auto = 这条结论是自动控制写的（它每回合按积压定编），Player = 玩家钉的、AI 不碰。",
+                    "freighter": "**有效角色**（`State::ship_role`，同一条链）：`true` = 运输舰（自动控制给它排集货路线），`false` = 战舰（找仗打）。它**只管自动控制派哪种活**——不解除武装，运输舰照样自动开火、照样按 `kiting` 软移动。",
+                    "freighter_mode": "角色那片叶的**有效归属**（`State::ship_role_control`）：Auto = 这条结论是自动控制写的（它每回合按积压定编），Player = 玩家钉的、AI 不碰。",
                     "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
                     "order_blueprint_mode": "图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）= Inherit（Q1(c)：图的意图轴默认沉默）。⚠ 这是**图叶自己**的表态，不是链解析结果——与 `order_effective_mode` 不一致是正常的（例如图叶 Inherit、舰队默认叶 Player）。",
@@ -1231,10 +1231,10 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_freighter / default_ship_order / default_doctrine / default_kiting / default_freighter / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting`/`default_freighter` 与 `capital` 为 `\"\"`。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_ship_order / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
+                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
-                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_freighter`/`default_freighter` 是布尔、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`freighter` 列。",
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是布尔、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`freighter` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),

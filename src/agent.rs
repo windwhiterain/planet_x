@@ -91,8 +91,8 @@ pub fn state_json(state: &State, view: &RoundView) -> serde_json::Value {
             row["kiting"] = json!(state.ship_kiting(s.name.clone()));
             // 第三条风格轴（角色）：`true` = 运输舰。同样给**有效值**——自动控制每回合会写
             // 这片叶（按积压定编），所以 `Ship.freighter` 那份记录值常常不是它此刻的活。
-            row["freighter"] = json!(state.ship_freighter(s.name.clone()));
-            row["freighter_mode"] = json!(state.ship_freighter_control(s.name.clone()).name());
+            row["role"] = json!(state.ship_role(s.name.clone()));
+            row["freighter_mode"] = json!(state.ship_role_control(s.name.clone()).name());
         }
     }
     round_value(&mut v);

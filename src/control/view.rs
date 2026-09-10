@@ -51,14 +51,14 @@ pub fn control_view(
         })
         .collect();
     // 角色：**有效值**（自动控制可能刚写过它）+ 那片叶自己的表态（`Player` = 玩家钉的）。
-    let ship_freighter = state
+    let ship_role = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid)
-        .map(|s| ShipFreighterEntry {
+        .map(|s| ShipRoleEntry {
             ship: s.name.clone(),
-            freighter: state.ship_freighter(s.name.clone()),
-            mode: c.ship_freighter.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+            role: state.ship_role(s.name.clone()),
+            mode: c.ship_role.get(&s.name).map(|l| l.mode).unwrap_or_default(),
         })
         .collect();
     let investment_budget = c
@@ -154,8 +154,8 @@ pub fn control_view(
             mode: Some(d.mode),
             remove: false,
         }),
-        default_freighter: c.default_freighter.as_ref().map(|d| DefaultFreighter {
-            freighter: Some(d.value),
+        default_role: c.default_role.as_ref().map(|d| DefaultShipRole {
+            role: Some(d.value),
             mode: Some(d.mode),
             remove: false,
         }),
@@ -163,7 +163,7 @@ pub fn control_view(
         ship_orders,
         ship_doctrine,
         ship_kiting,
-        ship_freighter,
+        ship_role,
         investment_budget,
         construction_budget,
         invest_weights,

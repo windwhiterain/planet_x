@@ -402,13 +402,13 @@ pub(crate) fn ai_ship_turn(
     let focus = focus_of.get(&owner).cloned().flatten();
     // 有效姿态（叶 → 舰队默认 → 记录值）：撤退阈值也跟着它走。
     let kiting = state.ship_kiting(ship_id.to_string());
-    // **有效角色**（第三条风格轴，叶 → 舰队默认 → 记录值）：`true` = 运输舰。
+    // **有效角色**（第三条风格轴，叶 → 舰队默认 → 记录值，三态）：War / Freight / Observe。
     // 本回合的定编已经由 `freight::assign_roles` 在 `step_ships` 的循环之前写好了，
     // 这里**只读**——所以同一回合里改角色不会改变这艘舰的活（也不会受处理顺序影响）。
     //
-    // 用户裁决：这个角色**只管「自动控制给它派哪种活」**——找仗打（战舰）还是跑运输
-    // （运输舰）。它**不解除武装**：运输舰射程内照样自动开火、照样按 kiting 软移动。
-    let freighter = state.ship_freighter(ship_id.to_string());
+    // 用户裁决：这个角色**只管「自动控制给它派哪种活」**——打仗、跑运输、还是蹲异常区观测。
+    // 它**不解除武装**：任何角色的舰，射程内照样自动开火、照样按 kiting 软移动。
+    let role = state.ship_role(ship_id.to_string());
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
@@ -452,9 +452,9 @@ pub(crate) fn ai_ship_turn(
                 return;
             }
         }
-        // **运输舰不追敌**：路过之敌不作废它的航线（它这一回合的活是跑运输，不是接战）。
+        // **非战舰不追敌**：路过之敌不作废它的航线（它这一回合的活是跑运输/观测，不是接战）。
         // 开火不受影响——等路线走完这一步，下面统一交给 `auto_combat`（它不改写指令）。
-        if !freighter {
+        if role == ShipRole::War {
             // 接战：每件武器逐发独立索敌（火力分配 / 克制 / 理智热血都作用于目标选择）。
             let plan = build_fire_plan(state, config, ship_id);
             if !plan.is_empty() {
@@ -477,7 +477,7 @@ pub(crate) fn ai_ship_turn(
     //
     // 路线从 `freight::route_for` 来：优先续用现有路线（货栈还有货/舱里载着货），否则按
     // **积压占比抽签**挑一处新的。挑不到（没有积压、或定编还没收回去）就这一回合不派活。
-    if freighter {
+    if role == ShipRole::Freight {
         match freight::route_for(state, &owner, ship_id) {
             Some((from, to)) => {
                 let behavior = ShipBehavior::Haul { from: from.clone(), to: to.clone() };

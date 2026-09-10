@@ -484,7 +484,7 @@ fn probe_freight() {
 
 /// 8b) **集货的 A/B（因果读数）**：同一颗种子、同一段回合，**只切「集货开/关」一个开关**
 /// （关 = 把各势力的**舰队默认角色**钉成「战舰」且归玩家 ⇒ 自动定编不许碰角色叶，
-/// 见 `State::ship_freighter` 的取值链）。
+/// 见 `State::ship_role` 的取值链）。
 ///
 /// 为什么非要 A/B：世界走向对战争极其敏感，隔一次改动比「积压占池值」那样的横向数字会被
 /// 完全不同的战争结局搅浑（实测同一颗种子在不同提交上能差出几倍）。只切一个开关，
@@ -514,7 +514,7 @@ fn probe_freight_ab() {
                 let fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
                 for fid in fids {
                     if let Some(c) = state.control_mut(fid) {
-                        c.default_freighter = Some(Control::player(false));
+                        c.default_role = Some(Control::player(ShipRole::War));
                     }
                 }
             }
@@ -742,14 +742,14 @@ fn probe_collection_backlog() {
             let haulers = state
                 .ships
                 .iter()
-                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_role(s.name.clone()) == ShipRole::Freight)
                 .count();
             // 运输舰的**舰级构成**：运力 = 舱容 × 舰数，所以「派了谁」和「派了几条」一样重要。
             let mut classes: BTreeMap<String, usize> = BTreeMap::new();
             for s in state
                 .ships
                 .iter()
-                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_role(s.name.clone()) == ShipRole::Freight)
             {
                 *classes.entry(s.class.clone()).or_insert(0) += 1;
             }
@@ -1009,7 +1009,7 @@ fn probe_ideology_freight() {
                 let hauling = state
                     .ships
                     .iter()
-                    .any(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()));
+                    .any(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_role(s.name.clone()) == ShipRole::Freight);
                 if hauling {
                     first_hauler.entry(f.name.clone()).or_insert(r);
                 }
@@ -1033,7 +1033,7 @@ fn probe_ideology_freight() {
                 let c = state
                     .ships
                     .iter()
-                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()))
+                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_role(s.name.clone()) == ShipRole::Freight)
                     .count() as f64;
                 *hauler_rounds.entry(f.name.clone()).or_insert(0.0) += c;
                 let d: f64 = state
@@ -1068,7 +1068,7 @@ fn probe_ideology_freight() {
                 .filter(|s| {
                     s.hull > 0.0
                         && s.faction_id == f.name
-                        && state.ship_freighter_control(s.name.clone()).is_player()
+                        && state.ship_role_control(s.name.clone()).is_player()
                 })
                 .count();
             println!(

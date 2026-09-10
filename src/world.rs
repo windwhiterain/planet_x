@@ -729,7 +729,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             velocity: 0.0,
             doctrine: spec.default_doctrine,
             kiting: spec.default_kiting,
-            freighter: spec.default_freighter,
+            role: spec.default_role,
             attack_hist: BTreeMap::new(),
             cargo: BTreeMap::new(),
             // 开局预置舰队**不挂设计图**（用户裁决 Q8：不预置标准图；即便将来种子表非空，
@@ -889,7 +889,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 }
 
 /// **测试专用**：把每个势力的**舰队默认角色**钉成「战舰」且归玩家
-/// （`default_freighter = Player(false)`）——于是自动定编（`autocontrol::freight`）再也
+/// （`default_role = Player(false)`）——于是自动定编（`autocontrol::freight`）再也
 /// 不写角色叶，全场的舰都按战舰行事（= 引入运输之前的行为）。
 ///
 /// 为什么需要它：自动控制现在多了一条活（按积压定编、派船跑集货路线），于是「测战术」的
@@ -905,6 +905,6 @@ pub fn pin_roles_to_war(state: &mut State) {
             .control
             .entry(fid)
             .or_default()
-            .default_freighter = Some(crate::model::Control::player(false));
+            .default_role = Some(crate::model::Control::player(crate::model::ShipRole::War));
     }
 }

@@ -5,7 +5,7 @@
 //! 1. [`needed_freighters`] / [`freighter_quota`]：本势力**该有多少艘运输舰**——一处有
 //!    积压的货栈配一条船（需求），再乘上**思潮倾向**（[`freight_lean`]：军国少投、
 //!    和平/殖民多投）；
-//! 2. [`should_be_freighter`]：**这艘舰**是不是该跑运输——按「目标头数 − 现状头数」
+//! 2. [`should_be_role`]：**这艘舰**是不是该跑运输——按「目标头数 − 现状头数」
 //!    这个**缺口抽签**（概率分布 = 想要的比例 ⇒ 期望入伙数 = 缺口），与遍历顺序无关；
 //! 3. [`route_for`]：这艘舰**该跑哪条线**——`from` 按**积压占比抽签**、`to` 永远是首都。
 //!
@@ -27,7 +27,7 @@
 //! # 与「角色」的分工
 //!
 //! 这一层**只给运输舰排线**。谁是运输舰是第三条风格轴
-//! （[`State::ship_freighter`](crate::model::State::ship_freighter)）说了算，
+//! （[`State::ship_role`](crate::model::State::ship_role)）说了算，
 //! 而「该有几艘」是这里的 [`needed_freighters`]——自动控制把结论写回那片叶
 //! （`Player` 的叶不碰），于是玩家能覆写、AI 也不必每回合重新发明结论。
 //!
@@ -62,7 +62,7 @@ pub fn stocked_depots(state: &State, fid: &str) -> Vec<(BodyId, f64)> {
 /// 本势力**该有多少艘运输舰**：一处有积压的货栈配一条船。
 ///
 /// 这是个**刻意粗糙**的定编（用户的指示是「先确定机制的正确性，不着急管平衡性」）：
-/// 它不含任何阈值常数，且「积压清空一处 ⇒ 那艘船自然改回战舰」（见 [`should_be_freighter`]）。
+/// 它不含任何阈值常数，且「积压清空一处 ⇒ 那艘船自然改回战舰」（见 [`should_be_role`]）。
 /// 真要做细，该考虑的是「按积压量 + 航程折算需要几艘」，那是平衡层的事。
 pub fn needed_freighters(state: &State, fid: &str) -> usize {
     stocked_depots(state, fid).len()
@@ -112,7 +112,7 @@ const LEAN_GAIN: f64 = 1.5;
 ///
 /// 没有它，配额处两侧概率都恰好是 0 ⇒ 谁去运货**一次定终身**（那是「固定」而不是「动态」）。
 const ROLE_ROTATION: f64 = 0.05;
-/// **效率票的温度**：一张票 = `e^(效率加成 ÷ 它)`（见 [`should_be_freighter`] 的抽签）。
+/// **效率票的温度**：一张票 = `e^(效率加成 ÷ 它)`（见 [`should_be_role`] 的抽签）。
 /// 越小越接近「只让最好的船去运」（断崖就在那个极限里），越大越是「谁去都行」。
 /// 取 0.5 时最好的船与最差的船票数之比 = `e^(ROLE_EFF_GAIN ÷ 0.5)` ≈ 20 倍。
 const ROLE_WIDTH: f64 = 0.5;
@@ -155,7 +155,7 @@ fn hauler_headcount(state: &State, fid: &str, except: &str) -> f64 {
         .ships
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0 && s.name != except)
-        .filter(|s| state.ship_freighter(s.name.clone()))
+        .filter(|s| state.ship_role(s.name.clone()) == ShipRole::Freight)
         .count() as f64
 }
 
@@ -184,23 +184,26 @@ fn hauler_headcount(state: &State, fid: &str, except: &str) -> f64 {
 ///
 /// 名单（**同侧总票数**的分母）只算**掷得动的船**：玩家钉住的、舱里有货的、正在执行承包单的
 /// 舰都不在名单上——票不该投给动不了的人，否则期望入伙数会凭空少掉。
-pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> bool {
+pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> ShipRole {
     // 1) 硬承诺（见上）。
     if state.contracts.assignment_of(ship_id).is_some() {
-        return true;
+        return ShipRole::Freight;
     }
-    let Some(ship) = state.ship(ship_id) else { return false };
+    let Some(ship) = state.ship(ship_id) else { return ShipRole::War };
     if !ship.cargo.is_empty() {
-        return true;
+        return ShipRole::Freight;
     }
     // 2) 玩家表态：AI 不掷骰，直接用玩家的值（`Player` 的逐舰叶或舰队默认）。
-    let cur = state.ship_freighter(ship_id.to_string());
-    if state.ship_freighter_control(ship_id.to_string()).is_player() {
-        return cur;
+    let role = state.ship_role(ship_id.to_string());
+    if state.ship_role_control(ship_id.to_string()).is_player() {
+        return role;
     }
-    // 3) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
+    // 3) [**观测**：本舰要不要改行去蹲异常区 —— 见下面的「观测优先」那一段]
+    //    当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
+    let cur = role == ShipRole::Freight;
+    // 4) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
     if freight_tonnage(config, ship) <= 0.0 {
-        return false;
+        return ShipRole::War;
     }
     // 4) 配额 → 抽签。
     let quota = freighter_quota(state, fid);
@@ -222,12 +225,12 @@ pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_i
     let mut mine = 0.0;
     let mut tickets = 0.0;
     for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
-        if tonnage(s) <= 0.0 || state.ship_freighter(s.name.clone()) != cur {
+        if tonnage(s) <= 0.0 || (state.ship_role(s.name.clone()) == ShipRole::Freight) != cur {
             continue;
         }
         if s.name != ship_id {
             // 钉住的舰不在这张名单上（玩家表态 / 舱里有货 / 正在执行承包单）。
-            if state.ship_freighter_control(s.name.clone()).is_player()
+            if state.ship_role_control(s.name.clone()).is_player()
                 || state.contracts.assignment_of(&s.name).is_some()
                 || !s.cargo.is_empty()
             {
@@ -251,15 +254,16 @@ pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_i
     let flow = gap + ROLE_ROTATION * headcount;
     let p = (flow * mine / tickets).min(1.0);
     let flip = sim::derived_roll(fid, ship_id, state.round, "role") < p;
-    if cur {
-        !flip
+    let stay = if cur { !flip } else { flip };
+    if stay {
+        ShipRole::Freight
     } else {
-        flip
+        ShipRole::War
     }
 }
 
 /// **本回合的定编**：把「谁是运输舰」一次性写进第三条风格轴
-/// （[`State::ship_freighter`](crate::model::State::ship_freighter) 那片叶）。
+/// （[`State::ship_role`](crate::model::State::ship_role) 那片叶）。
 ///
 /// 每回合跑一次，且**只看本回合开始时的状态**（在 `step_ships` 的逐舰循环**之前**调用）
 /// ——逐舰现算会让结论依赖舰的处理顺序，而那个顺序是按 `rng` 打乱的。
@@ -274,7 +278,7 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
     fids.sort();
     for fid in fids {
         // 先算完整个势力的名单再写：同一回合内几个势力的结论互不影响（也更好推理）。
-        let mut plan: Vec<(String, bool)> = Vec::new();
+        let mut plan: Vec<(String, ShipRole)> = Vec::new();
         for s in state
             .ships
             .iter()
@@ -283,22 +287,22 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
             if state.ship_control(s.name.clone()) != ControlMode::Auto {
                 continue;
             }
-            if state.ship_freighter_control(s.name.clone()).is_player() {
+            if state.ship_role_control(s.name.clone()).is_player() {
                 continue;
             }
-            plan.push((s.name.clone(), should_be_freighter(state, config, &fid, &s.name)));
+            plan.push((s.name.clone(), should_be_role(state, config, &fid, &s.name)));
         }
         for (name, role) in plan {
             let unchanged = state
                 .control(fid.clone())
-                .and_then(|c| c.ship_freighter.get(&name))
+                .and_then(|c| c.ship_role.get(&name))
                 .map(|l| l.value == role && l.mode == ControlMode::Inherit)
                 .unwrap_or(false);
             if unchanged {
                 continue;
             }
             if let Some(c) = state.control_mut(fid.clone()) {
-                c.ship_freighter.insert(name, Control::inherit(role));
+                c.ship_role.insert(name, Control::inherit(role));
             }
         }
     }
@@ -389,13 +393,13 @@ pub fn trip_throughput(state: &State, config: &GameConfig, ship: &Ship, from: &s
     cargo_capacity(config, ship) * trips
 }
 
-/// 本势力**此刻能去跑运输的舰**（[`should_be_freighter`] 的名单，**扣掉正在替别人跑的**）。
+/// 本势力**此刻能去跑运输的舰**（[`should_be_role`] 的名单，**扣掉正在替别人跑的**）。
 ///
 /// 挂单发生在 `assign_roles` **之前**（见 `sim::step_contracts` 的注解），所以这里不能读
-/// 角色叶——那片叶还是上一回合的结论。`should_be_freighter` 是**纯函数**，拿它算出来的
+/// 角色叶——那片叶还是上一回合的结论。`should_be_role` 是**纯函数**，拿它算出来的
 /// 正是本回合稍后会写进叶子、并据此派单的那批舰，因此估算与实际派单同口径。
 ///
-/// **受雇在外的舰不算我的集货运力**：`should_be_freighter` 的第 0 条说「替别人跑的舰也是
+/// **受雇在外的舰不算我的集货运力**：`should_be_role` 的第 0 条说「替别人跑的舰也是
 /// 运输舰」（它得跑完那条线），但那是**别人的**线——把它算进「我自己能搬多少」会让雇主
 /// 以为积压有着落了，从而少雇人（旧形态里这条估算还不会露馅，因为一张单只押一艘舰）。
 fn serving_freighters<'a>(
@@ -408,7 +412,7 @@ fn serving_freighters<'a>(
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0)
         .filter(|s| state.contracts.assignment_of(&s.name).is_none())
-        .filter(|s| should_be_freighter(state, config, fid, &s.name))
+        .filter(|s| should_be_role(state, config, fid, &s.name) == ShipRole::Freight)
         .collect()
 }
 

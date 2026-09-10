@@ -450,24 +450,25 @@ impl State {
         leaf.map(|l| l.value).unwrap_or(record)
     }
 
-    /// 这艘舰当前的**有效角色**：`true` = **运输舰**（自动控制给它排集货路线），
-    /// `false` = **战舰**（自动控制让它找仗打）。取值规则与前两条风格轴完全同形：
-    /// 叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
-    /// [`ShipSpec::default_freighter`](crate::model::ShipSpec::default_freighter)）。
+    /// 这艘舰当前的**有效角色**（[`ShipRole`]：打仗 / 跑运输 / 观测）。取值规则与前两条
+    /// 风格轴完全同形：叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
+    /// [`ShipSpec::default_role`](crate::model::ShipSpec::default_role)）。
     ///
     /// ⚠ **它只管「自动控制的活是哪一种」**：不影响自动开火（射程内的敌舰照打），
-    /// 也不影响 kiting（那条轴独立生效）。见 [`Ship::freighter`] 的说明。
-    pub fn ship_freighter(&self, ship_id: ShipId) -> bool {
+    /// 也不影响 kiting（那条轴独立生效）。见 [`Ship::role`] 的说明。
+    ///
+    /// 舰不存在 ⇒ [`ShipRole::War`]（旧档的 serde 缺省也是它）。
+    pub fn ship_role(&self, ship_id: ShipId) -> ShipRole {
         let Some(s) = self.ship(&ship_id) else {
-            return false;
+            return ShipRole::War;
         };
-        let record = s.freighter;
+        let record = s.role;
         let Some(c) = self.control(s.faction_id.clone()) else {
             return record;
         };
-        let leaf = c.ship_freighter.get(&ship_id);
+        let leaf = c.ship_role.get(&ship_id);
         if leaf_mode(leaf) == ControlMode::Inherit {
-            if let Some(d) = &c.default_freighter {
+            if let Some(d) = &c.default_role {
                 if d.mode.is_player() {
                     return d.value;
                 }
@@ -488,8 +489,8 @@ impl State {
 
     /// 决定这艘舰的**角色**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
     /// 自动控制据此判断「这片叶能不能写」（`Player` = 玩家说了算，AI 不碰）。
-    pub fn ship_freighter_control(&self, ship_id: ShipId) -> ControlMode {
-        self.ship_style_chain(ship_id, StyleAxis::Freighter)
+    pub fn ship_role_control(&self, ship_id: ShipId) -> ControlMode {
+        self.ship_style_chain(ship_id, StyleAxis::Role)
     }
 
     /// 三条风格轴共用的归属链。
@@ -508,9 +509,9 @@ impl State {
                     leaf_mode(c.ship_kiting.get(&ship_id)),
                     leaf_mode(c.default_kiting.as_ref()),
                 ),
-                StyleAxis::Freighter => (
-                    leaf_mode(c.ship_freighter.get(&ship_id)),
-                    leaf_mode(c.default_freighter.as_ref()),
+                StyleAxis::Role => (
+                    leaf_mode(c.ship_role.get(&ship_id)),
+                    leaf_mode(c.default_role.as_ref()),
                 ),
             },
             None => (ControlMode::Inherit, ControlMode::Inherit),
@@ -647,8 +648,8 @@ enum StyleAxis {
     Doctrine,
     /// 风筝<->贴脸姿态。
     Kiting,
-    /// 角色：运输舰 / 战舰。
-    Freighter,
+    /// 角色：打仗 / 运输 / 观测（三态）。
+    Role,
 }
 /// 把 `State` 从 `schema_version` 逐档升级到 [`SCHEMA_VERSION`]。在加载 `.ron` /
 /// checkpoint 之后调用；无法迁移或版本比当前二进制还新则返回显式 `Err`（宁抛错，
@@ -723,7 +724,7 @@ enum StyleAxis {
 /// 所以旧档一律按**空舱**处理，**零信息损失**（没有货在途中，也没有货凭空出现/消失）。
 ///
 /// v8 → v9（运输分支）：[`ShipBehavior::Haul`](crate::model::ShipBehavior) 是控制叶的**新取值**，
-/// 新增 `Ship::freighter` + 第三条风格轴（`ship_freighter`/`default_freighter` 叶片），
+/// 新增 `Ship::freighter` + 第三条风格轴（`ship_role`/`default_role` 叶片），
 /// 事件流里也多了 `CargoLoaded` / `CargoDelivered` 两种事件。旧档里不可能有它们
 /// （v8 的 `ShipBehavior` 没有 `Haul`，货也不会动、也没有「运输舰」这个角色），
 /// 所以这一档同样**零信息损失**：旧档加载后没有任何舰在跑路线、没有货在舱里、
