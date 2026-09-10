@@ -130,11 +130,15 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
    在**配方期**就拒绝；畸形 diff → `exit 10` 且不抛异常。
 2. `[x]` **确定性**：同一 ckpt + 同一配方 ⇒ 逐字节一致的 diff（demo 里断言）。
 3. `[ ]` **`agent-play.md` 加一节「用 Python 写施政」**（引擎侧的原生写法已经写进 §3/§4 了）。
-4. `[ ]` 换后端 + 去掉本地重算：kit 现在仍 shell out `--control`，并且自己算了一份
-   `effective_*_approx`（**明确标注是漂移源**）。引擎侧现在有了
-   `ships` 表的 `order_leaf_mode`/`order_default_mode`/`order_effective_mode`/`order_effective`/
-   `doctrine`/`kiting` 与 `idx/control.jsonl`，所以下一步是：`surface()` 改 join、
-   删掉 `_approx` 那几列。
+4. `[~]` 换后端 + 去掉本地重算：
+   * `[x]` ~~自己算了一份 `effective_*_approx`~~ → **已解**（`feature/read-face-parity`，
+     见 `control-live-layers.md` §13.3）：`ships()` 现在优先读引擎 ships 表的
+     `order_effective_mode`/`order_effective`/`order_source`（**含设计图层**——本地那份没有它，
+     对"按图造的舰"是错的），只有**旧 index 目录**才退回本地近似，且列名带 `_approx` +
+     布尔列 `effective_order_from_engine` 标明来源。
+   * `[ ]` `surface()` **仍然 shell out `--control`**，这是**有意保留**的：那面模板就是写面
+     （读面即写面），`idx/control.jsonl` 发的是叶自己的值/表态、发不出模板形状（`null`-vs-缺席
+     的 presence 语义、`remove` 的省略…）。要改的话先想清楚"模板从哪里来"。
 5. `[ ]` 一个示例配方进 `play/exp*/recipes/*.py`（demo 里的统计策略已经很接近，可直接搬）。
 6. `[x]` **跟上引擎的两片新叶**（本轮补，教训见 `engine-data-plane.md` §8.7）：
    `LEAF_KINDS` 补 `default_doctrine`/`default_kiting`（少了它们**不报错**，只是这两片叶

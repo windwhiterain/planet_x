@@ -15,9 +15,16 @@
 > 引擎 + `planet_x_ctl` + web 三端齐活，同 seed `--digest` **逐字不变**；实现记录、验收数据、
 > 未做项见 [`ship-blueprint.md`](notes/ship-blueprint.md) §6 与规格篇顶部状态行，
 > **审查方的独立验收**见同篇 **§7**）
-> 下一步（本轮之后）：`control-live-layers.md` §12.6 的排队项（方案 B「逐舰取值规则与文档对齐」、
-> 风格轴要不要真的 AI 执行者、`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的
-> `effective`/`order_source`）＋ `military-combat.md` 的 refit（把新图套到老舰上）＋
+> 下一步（本轮之后）：`control-live-layers.md` §12.6 的排队项
+> 　① ~~**`ship_orders` 读面列出每一艘舰**~~ → `[x]` **已完成**（`feature/read-face-parity`，提交
+> `09027a4`：读面**每舰一行**、`behavior` 改成**有效值**（`null` = 链上没人说话）、
+> 「`null` 行**不建叶**」的写面规则，web / kit 跟着对齐；见该篇 **§13.1/§13.2**）
+> 　② ~~**kit 的 `_approx` 列换成引擎的 `effective`/`order_source`**~~ → `[x]` **已完成**
+> （同一分支：`ships()` 优先读引擎的 `order_effective_mode`/`order_effective`/`order_source`
+> ——含**设计图层**；只有旧 index 目录才退回本地近似，且列名带 `_approx` + 布尔来源列
+> `effective_order_from_engine`；见该篇 **§13.3**）
+> 　③ 剩下的排队项：方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者 ＋
+> `military-combat.md` 的 refit（把新图套到老舰上）＋
 > `eras-technology.md` 的时代门控（图库容器已就绪）。
 > 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变
 > （合并后的基线 = `293725C43A0E26DC516977C04A5BD9C99977252B8C08D683EC2EA2749ADEDBC4`，
@@ -84,8 +91,8 @@
 | `[~]` | [agent 控制面](notes/agent-control-api.md) | 已把 coalition 格局与城市 loyalty/距离暴露给 agent；summary 级联与目标模板仍缺。 | summary/delta 级联；control 目标模板命令 |
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
-| `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）。 | `spawned_round`；玩家舰的自动战斗判定；逐武器火力分配 |
-| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**；§3.2：**风格轴今天没有 AI 写入者**（`Auto` 是空头承诺）。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**：`remove: true` 删叶（十条叶全支持）+ `NOTE_APPLY_REMOVED` + kit 的 `remove_*` + web 的「恢复出厂值」，顺带关掉了「单轴新建两轴叶 ⇒ 另一条静默变 0」那个坑。 | ③ 蓝图（连同 `spawned_round` 升 `SCHEMA_VERSION` 7→8）；方案 B（取值规则对齐文档）仍留着 |
+| `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）；**有效指令的链只由引擎算**（kit 的 `*_approx` 降级为旧 index 目录的兜底）。 | 玩家舰的自动战斗判定；逐武器火力分配 |
+| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**；§3.2：**风格轴今天没有 AI 写入者**（`Auto` 是空头承诺）。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**；**§12 = 角色轴补齐**；**§13 = 读面/写面两侧对齐已落地**（`feature/read-face-parity`：`ship_orders` 读面**每舰一行** + `behavior` 取有效值（`null` = 没人说话）+ kit 的 `_approx` 换成引擎的 `effective`/`order_source`）。 | 方案 B（取值规则对齐文档）仍留着；风格轴要不要 AI 执行者 |
 | `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.flow()/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
 | `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
 

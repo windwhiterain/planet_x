@@ -24,6 +24,7 @@ Exit code is non-zero if any assertion fails. ``--planet-x PATH`` overrides the 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import tempfile
@@ -63,6 +64,38 @@ def census(s: ctl.Surface) -> pd.DataFrame:
                      "spoken": sum(1 for lf in leaves if lf.mode != ctl.INHERIT),
                      "player": sum(1 for lf in leaves if lf.mode == ctl.PLAYER)})
     return pd.DataFrame(rows)
+
+
+#: The columns a projection written by an engine **before** the blueprint round does not have
+#: (`SCHEMA_VERSION` 10 加的 `order_effective*` / `order_source` / `blueprint*` / `spawned_round`)。
+#: 删掉它们 = 一份**旧引擎**的索引目录，用来演一遍 kit 的降级路径（本地 `*_approx`）。
+_OLD_ENGINE_DROPS = ("order_effective_mode", "order_effective", "order_source",
+                     "order_leaf_mode", "order_default_mode", "order_blueprint_mode",
+                     "doctrine", "kiting", "freighter", "freighter_mode",
+                     "blueprint", "blueprint_mode", "spawned_round")
+
+
+def _old_engine_index(src, dst) -> Path:
+    """A copy of ``src`` with the post-blueprint engine columns stripped out of ``idx/ships.jsonl``.
+
+    这就是「旧引擎写的索引目录」的本体：`ships()` 认不出 ``order_effective_mode``，于是退回
+    本地近似并**把列名标成 `_approx`**、把来源布尔列置 False。降级路径没人跑过就会悄悄烂掉，
+    所以这里**真的**造一份出来跑。
+    """
+    dst = Path(dst)
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    p = dst / "idx" / "ships.jsonl"
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        rows.append(json.dumps({k: v for k, v in row.items() if k not in _OLD_ENGINE_DROPS},
+                               ensure_ascii=False))
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return dst
 
 
 def economy_table(proj_dir) -> pd.DataFrame:
@@ -174,14 +207,46 @@ def main(argv=None) -> int:
     df_cities = ctl.cities(ckpt, index_dir=proj)
     print(f"    ctl.ships(): {df_ships.shape}    ctl.cities(): {df_cities.shape}")
     check("ships 表已 join 控制叶",
-          {"order_mode", "order_value", "default_ship_order_mode", "doctrine_temper", "kiting"}
-          <= set(df_ships.columns))
-    check("本地近似的 effective 列有 _approx 标名", all(c in df_ships.columns for c in ctl.APPROX_COLUMNS))
+          {"order_leaf", "order_mode", "order_value", "default_ship_order_mode",
+           "doctrine_temper", "doctrine_lone_wolf", "kiting"} <= set(df_ships.columns))
     # 设计图那一轮新增的引擎列（**引擎的答案**，不是本地近似）：出处列 + 出厂图 + 下水回合。
     check("ships 表带上了设计图/出处/下水回合列",
           {"blueprint", "blueprint_mode", "order_blueprint_mode", "order_source", "spawned_round"}
           <= set(df_ships.columns),
           f"order_source={df_ships['order_source'].dropna().unique()[:3].tolist()}…")
+
+    # **有效指令 = 引擎的答案**（本轮修的洞）。以前这三列是 kit 在 Python 里**重算**的
+    # （`*_approx`），而那条链**没有设计图层**（`叶 → 出厂图 → 舰队默认 → …`），所以对"按图造的舰"
+    # 给出的是**错的**答案。现在直接读引擎自己的 `order_effective_mode` / `order_effective` /
+    # `order_source`（`State::ship_control` / `ship_behavior` / `ship_behavior_source`）。
+    check("有效指令列来自**引擎**（含设计图层），不是本地重算",
+          bool(df_ships[ctl.EFFECTIVE_PROVENANCE_COLUMN].all())
+          and all(c in df_ships.columns for c in ctl.ENGINE_EFFECTIVE_COLUMNS)
+          and list(df_ships["effective_order_mode"]) == list(df_ships["order_effective_mode"])
+          and list(df_ships["effective_order_value"])
+          == [ctl.behavior_str(v) for v in df_ships["order_effective"]],
+          f"{ctl.EFFECTIVE_PROVENANCE_COLUMN}=True，{len(df_ships)} 行与引擎列逐值相同")
+    check("引擎列在时**没有** `_approx` 列（两种来源不穿同一件衣服）",
+          not any(c in df_ships.columns for c in ctl.APPROX_COLUMNS),
+          f"缺席：{list(ctl.APPROX_COLUMNS)}")
+
+    # 降级路径：旧引擎写的索引目录**没有**那几列 ⇒ 退回本地近似，**列名带 `_approx`** +
+    # 布尔列标明来源。这条路径仍然通（模拟法：把本轮那几列从 ships 表里删掉），而且在这一帧里
+    # 两套链给出的结论一致——**因为这一帧里没有任何"按图造的舰"**：本地近似缺的正是蓝图层那一格
+    # （`ship-blueprint.md` §6，`README` 第 8 条）。
+    df_old = ctl.ships(ckpt, index_dir=_old_engine_index(proj, work / "proj_oldengine"))
+    check("旧索引目录 ⇒ 退回本地近似，且读面说得出「这一帧是谁算的」",
+          not any(df_old[ctl.EFFECTIVE_PROVENANCE_COLUMN])
+          and all(c in df_old.columns for c in ctl.APPROX_COLUMNS)
+          and not any(c in df_old.columns for c in ctl.ENGINE_EFFECTIVE_COLUMNS),
+          f"{ctl.EFFECTIVE_PROVENANCE_COLUMN}={sorted(set(df_old[ctl.EFFECTIVE_PROVENANCE_COLUMN]))}")
+    check("降级路径与引擎在**这一帧**给出同样的结论（差别只在蓝图层，而这一帧没有按图造的舰）",
+          list(df_old["effective_order_mode_approx"])
+          == list(df_ships["effective_order_mode"])
+          and list(df_old["effective_order_value_approx"])
+          == list(df_ships["effective_order_value"]),
+          f"{len(df_old)} 行逐值相同")
+
     check("--control-schema 里有 blueprints（agent 才知道能往 --apply 写什么）",
           "BlueprintPatch" in schema.get("definitions", {}),
           f"{len(schema.get('definitions', {}))} 个定义")
@@ -313,11 +378,28 @@ def main(argv=None) -> int:
     check("C: took_over 恰好是刻意的那几片叶", rep_c.took_over == expected_took, f"{rep_c.took_over}")
     check("C: took_over_leafs 也一一对应", rep_c.took_over_leafs == expected_took,
           f"{rep_c.took_over_leafs}")
-    check("C: 顺带变动只有那几处隐含的 mode 翻转（+ 那片叶从无到有）",
-          {(c.leaf, c.field, c.after) for c in rep_c.incidental}
-          == ({(leaf, "mode", ctl.PLAYER) for leaf in rep_c.took_over_leafs}
-              | {(leaf, "exists", True) for leaf in rep_c.took_over_leafs}),
-          f"{[(c.leaf, c.field, c.before, c.after) for c in rep_c.incidental]}")
+    # 顺带变动 = 「那片叶从无到有」（`exists` 翻转）+ 隐含的 `mode` 翻转 + **一次真实的后果**：
+    # 势力级默认指令一落地，那些"叶在、叶说 `Inherit`"的舰的**有效指令**当场换成默认值。
+    #
+    # ⚠ 第三条只有在读面给**有效值**时才看得见（旧读面显示的是叶里那条旧记录，"有效值"这一列
+    # 根本不存在）。它是真事、不是噪声：那几艘舰下一回合的行为确实换了。所以这里按**配方自己的
+    # 意图**断言（"值等于我们写进去的那个默认指令"），而不是断言"没有变动"。
+    # ⚠ 断言里不要拿 `c.after` 当集合元素：`behavior` 是个 dict，塞进 set 会 TypeError。
+    _leaf_flips = {(c.leaf, c.field, json.dumps(c.after, ensure_ascii=False, sort_keys=True))
+                   for c in rep_c.incidental if c.leaf in rep_c.took_over_leafs}
+    check("C: 顺带变动里有那片叶的两处翻转（mode、exists）",
+          _leaf_flips == {(leaf, "mode", json.dumps(ctl.PLAYER)) for leaf in rep_c.took_over_leafs}
+          | {(leaf, "exists", json.dumps(True)) for leaf in rep_c.took_over_leafs},
+          f"{sorted(_leaf_flips)}")
+    _fac = expected_took[0].split(".")[0]
+    _written = next(e["default_ship_order"]["behavior"] for e in diff_c["control"]
+                    if e["faction_id"] == _fac)
+    _moved = [c for c in rep_c.incidental if c.leaf not in rep_c.took_over_leafs]
+    check("C: 其余顺带变动都是「跟着舰队默认走的舰，有效指令真的换成了那一句」",
+          bool(_moved)
+          and all(c.field == "behavior" and c.leaf.startswith(f"{_fac}.ship_orders[")
+                  and c.after == _written and c.before != c.after for c in _moved),
+          f"{len(_moved)} 艘：{[(c.leaf, c.before, c.after) for c in _moved]}")
 
     # ---------------------------------------------------------------- 4b. the third style axis
     print("\n[4b] 第三条风格轴**角色**（运输舰↔战舰）：写值即接管 · AI 定编的闸门 · 删叶 = 交回定编")

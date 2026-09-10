@@ -65,8 +65,9 @@ Typical use::
     rep = ctl.verify(ckpt, diff)             # read-only: before/after read face + receipts
     assert rep.ok
 
-See ``README.md`` for the division of labour, the two documented pitfalls, and the
-``_approx`` caveat on the local ``effective`` columns.
+See ``README.md`` for the division of labour, the two documented pitfalls, and what
+``ships()`` does about the effective columns (engine's answer first, local ``_approx`` only as a
+fallback for index directories written by an older engine).
 """
 from __future__ import annotations
 
@@ -88,6 +89,7 @@ import pandas as pd
 
 __all__ = [
     "INHERIT", "AUTO", "PLAYER", "MODES", "LEAF_KINDS", "APPROX_COLUMNS",
+    "ENGINE_EFFECTIVE_COLUMNS", "EFFECTIVE_PROVENANCE_COLUMN",
     "Leaf", "Surface", "Report", "Request", "LeafChange", "Applied",
     "surface", "ships", "cities", "ships_and_cities", "buildings", "projection",
     "roster", "write", "dumps", "verify", "apply", "load_json", "query",
@@ -205,11 +207,43 @@ def query(df: pd.DataFrame, expr: str, **names) -> pd.DataFrame:
 _WEIGHT_KINDS = ("invest_weights", "build_weights")
 _BUDGET_KINDS = ("investment_budget", "construction_budget")
 
-#: Columns this kit computes **locally** instead of reading them from the engine.
-#: They are an *approximation* of the engine's chain resolution — see the README.
+#: The **engine's own answer** to "what is this ship's effective order, and who supplied it".
+#: `ships()` reads these straight out of the projection's ships table whenever they are there
+#: (they have been since the blueprint round, `SCHEMA_VERSION` 10):
+#:
+#: * ``effective_order_mode`` ← ``order_effective_mode`` (`State::ship_control`: 叶 → 出厂图 →
+#:   舰队默认 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto)；
+#: * ``effective_order_value`` ← ``order_effective`` (`State::ship_behavior`；``None`` = 链上
+#:   没有任何一层说话，引擎按 ``Idle`` 兜底)；
+#: * ``order_source`` ← the engine's own column (`State::ship_behavior_source`：``leaf`` /
+#:   ``blueprint:<名>`` / ``fleet_default``；``None`` = 没有人供值)。
+#:
+#: ⚠ ``order_source`` 是引擎**原样**穿过来的列（本 kit 不重算它，也不改名）——它与
+#: ``effective_order_mode`` 不是一回事：前者答「这条**值**是谁供的」，后者答「这艘舰**归谁**」。
+ENGINE_EFFECTIVE_COLUMNS = (
+    "effective_order_mode",
+    "effective_order_value",
+    "order_source",
+)
+
+#: ``ships()`` 的**来源列**：这一行的有效指令是引擎算的，还是本 kit 本地近似的？
+#: ``True`` ⇒ 引擎的 ``ENGINE_EFFECTIVE_COLUMNS`` 在；``False`` ⇒ 只有 ``APPROX_COLUMNS``
+#: （旧引擎写的索引目录没有那几列）。**读面不许撒谎**：两种来源的列名**不一样**，所以
+#: 一眼就能看出手上这一帧是谁算的；这一列只是让 ``df.query(...)`` 也能问同一句话。
+EFFECTIVE_PROVENANCE_COLUMN = "effective_order_from_engine"
+
+#: Columns this kit computes **locally** instead of reading them from the engine — the **fallback**
+#: used only when the projection has no ``order_effective_mode`` (an index directory written by an
+#: older engine). They re-implement the resolution chain from the read face, so they are an
+#: *approximation* of the engine's answer and **do not model the design-blueprint layer** at all
+#: (``leaf → fleet default → faction scope → global``, missing ``leaf → **blueprint** → …``).
+#: Prefer ``ENGINE_EFFECTIVE_COLUMNS``; see the README.
 APPROX_COLUMNS = (
     "effective_order_mode_approx",
     "effective_order_value_approx",
+    # ⚠ 这一列是「**归属**链上最具体的有意见者」（`leaf` / `fleet_default` / `faction_scope` /
+    # `global_scope` / `auto_fallback`），**不是**引擎 `order_source` 的「**值**是谁供的」。
+    # 名字不同是故意的：本地近似没有资格冒用引擎的列名（那正是这次要修的谎）。
     "effective_authority_approx",
 )
 
@@ -499,8 +533,15 @@ def behavior_str(behavior: Any) -> str | None:
         return "Idle"
     if isinstance(behavior, Mapping) and len(behavior) == 1:
         verb, arg = next(iter(behavior.items()))
+        key = _BEHAVIOR_KEYS.get(verb)
+        if key is None:
+            # 本 kit **不认识**的行为（引擎那边新增的，例如运输的 `Haul{from,to}`）：宁可按原样
+            # JSON 输出，也不硬拼。以前这里拼出 `"Haul:"`——一个看着像被截断的串，既丢了
+            # `from`/`to`，又让人以为读面坏了。（`normalize_behavior` 只认这六种，所以这种行
+            # 是**只读**的：AI/引擎写的，kit 不会去写它。）
+            return json.dumps(behavior, ensure_ascii=False)
         if isinstance(arg, Mapping):
-            inner = arg.get(_BEHAVIOR_KEYS.get(verb, ""), "")
+            inner = arg.get(key, "")
             if isinstance(inner, (list, tuple)):
                 return f"{verb}:[{', '.join(str(v) for v in inner)}]"
             return f"{verb}:{inner}"
@@ -1552,12 +1593,24 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
           index_dir=None) -> pd.DataFrame:
     """The projection's ``ships`` table **joined against the control leaves**.
 
-    Per ship: ``ship_id``/``name``/``class``/``faction_id``/``hull`` + the ship's own leaf
+    Per ship: ``ship_id``/``name``/``class``/``faction_id``/``hull`` + the ship's own order leaf
     (``order_mode`` / ``order_value`` / ``order_leaf``) + the faction's ``default_ship_order_mode`` /
-    ``default_ship_order_value`` + its ``doctrine_*`` / ``kiting`` record.
+    ``default_ship_order_value`` + the **effective** style axes (``doctrine_temper`` /
+    ``doctrine_lone_wolf`` / ``kiting``).
 
-    The three ``*_approx`` columns are the kit's **local approximation** of the engine's chain
-    resolution — see ``APPROX_COLUMNS`` and the README. Do not treat them as authoritative.
+    **The effective order is the ENGINE's answer** (:data:`ENGINE_EFFECTIVE_COLUMNS`): read straight
+    off the projection's own ``order_effective_mode`` / ``order_effective`` / ``order_source``
+    columns, i.e. ``State::ship_control`` / ``State::ship_behavior`` / ``State::ship_behavior_source``
+    — the code that knows the design-blueprint layer (``叶 → 出厂图 → 舰队默认 → 势力 → 全局``).
+
+    ⚠ This kit used to **re-implement** that chain in Python (:data:`APPROX_COLUMNS`), and that
+    re-implementation predated the blueprint layer — so it handed back *wrong* answers for any ship
+    built from a blueprint. The local version now runs **only** when the projection has no
+    ``order_effective_mode`` (an index directory written by an older engine); it keeps the
+    ``_approx`` names, and :data:`EFFECTIVE_PROVENANCE_COLUMN` (``effective_order_from_engine``) says
+    per row which of the two you are holding. Never mix them up in a recipe: prefer
+    ``effective_order_mode`` / ``effective_order_value`` / ``order_source``, and treat the ``_approx``
+    trio as a degraded, blueprint-blind hint.
     """
     q = projection(ckpt, planet_x=planet_x, index_dir=index_dir)
     r = _last_round(q) if round is None else int(round)
@@ -1596,7 +1649,8 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         dlw.append((doc.raw or {}).get("lone_wolf") if doc is not None and doc.exists else None)
         kk = L(fac, "ship_kiting", (ship,))
         kit.append(kk.value if kk is not None and kk.exists else None)
-        # ---- local approximation of `leaf → fleet default → faction scope → global` ----
+        # ---- local approximation (fallback only: 旧索引目录没有引擎那几列) ----
+        # `leaf → fleet default → faction scope → global`，**不建模设计图层**。
         if omode != INHERIT:
             authority, mode = "leaf", omode
         elif d is not None and d.mode != INHERIT:
@@ -1625,10 +1679,27 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     df["default_ship_order_value"] = dso_value
     df["doctrine_temper"] = dt
     df["doctrine_lone_wolf"] = dlw
-    df["kiting"] = kit
-    df["effective_order_mode_approx"] = eff_mode
-    df["effective_order_value_approx"] = eff_value
-    df["effective_authority_approx"] = eff_auth
+    # 风格三轴的**有效值**在引擎的 ships 表里（`doctrine` / `kiting` / `freighter`，都是
+    # `State::ship_doctrine` / `ship_kiting` / `ship_freighter` 的答案）。旧引擎的索引目录没有
+    # 这几列 ⇒ 由读面补一份（读面那些逐舰风格行给的**也是有效值**，所以逐字相同）。
+    # ⚠ 只在引擎列**缺席**时才补：无条件写就是拿本地那一份去盖引擎的答案——那正是本轮在
+    # `effective_order_*` 上修掉的毛病（那边本地那份还会算错）。引擎给答案，Python 只负责筛。
+    if "kiting" not in df.columns:
+        df["kiting"] = kit
+    from_engine = {"order_effective_mode", "order_effective"} <= set(df.columns)
+    if from_engine:
+        # **引擎的答案**（含设计图层）。`order_source` 就是引擎自己那一列，原样留着、不改名。
+        df[EFFECTIVE_PROVENANCE_COLUMN] = True
+        df["effective_order_mode"] = df["order_effective_mode"]
+        df["effective_order_value"] = [behavior_str(v) for v in df["order_effective"]]
+    else:
+        # 降级：旧索引目录没有那几列 ⇒ 退回本地近似。**列名带 `_approx`** + 布尔列标明来源，
+        # 于是"这一帧是谁算的"在读面上不含糊。注意本地近似不建模设计图层 ⇒ 对"按图造的舰"
+        # 给出的答案是错的，只当提示用。
+        df[EFFECTIVE_PROVENANCE_COLUMN] = False
+        df["effective_order_mode_approx"] = eff_mode
+        df["effective_order_value_approx"] = eff_value
+        df["effective_authority_approx"] = eff_auth
     return df
 
 
