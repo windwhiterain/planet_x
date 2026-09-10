@@ -1,4 +1,8 @@
-//! sim 的单元测试：不推进回合或 ≤48 回合（短档）。长档见同目录 horizon_mid.rs。
+//! sim 的单元测试：不推进回合或 ≤48 回合（短档）。
+//!
+//! ⚠ 「中档（49–480 回合）」在本仓库的 Rust 侧**现在是空的**：那几条按模拟时长才算得出的
+//! 判据（同回合复垦、选装、编年史、战争最短回合）都搬到了 `play/tests/g2_mid.py`
+//! （数据级、不重编）。见 `.agents/notes/test-decoupled-suite.md`。
 
 use super::*;
 use crate::config::load_config;
@@ -21,8 +25,7 @@ mod site_supply;
 mod spending;
 mod story;
 mod trade;
-
-mod horizon_mid;
+mod war_scar;
 
 /// Build the config + a fresh deterministic world (round 0)，并把**角色轴钉成「全员战舰」**。
 ///

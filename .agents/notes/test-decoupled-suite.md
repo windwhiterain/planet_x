@@ -20,9 +20,9 @@
 | 东西 | 是什么 |
 | --- | --- |
 | `play/tests/_harness.py` | 脚手架：定位二进制、**按指纹缓存投影**（`target/test-fixtures/`）、跑世界、抽摘要、记断言 |
-| `play/tests/g1_contract.py` | 快组（≤48 回合，**1.8 s**，5 条）：同 seed 逐字节可复现、`--derived` 的 `post` ≡ `--index` 的 `view`、过程量表与视图同源、中性值表没有死路径 |
-| `play/tests/g2_mid.py` | 中组（400 回合，**7.6 s** 冷 / 缓存后 ~1 s，4 条）：拆平的城不被旧主同回合复垦（含「拆平数 ≥ 20」防空转）、整局里出现过装组件的活舰 |
-| `play/tests/g3_long.py` | 长组（1000 回合 × **7 seed**，**13 s**，10 条）：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
+| `play/tests/g1_contract.py` | 快组（≤60 回合，**1.9 s**，31 条）：确定性、两个读面逐值一致（过程量 / 判定 / 贸易 / 输入面）、档起点保留过程量、无档自报重算、`--control` 不动点、中性值表没有死路径 |
+| `play/tests/g2_mid.py` | 中组（400 回合，**0.9 s** 命中，12 条）：同回合复垦、选装、编年史（节拍/顺序/唯一/参与者）、战争最短回合 = 疤痕承诺 |
+| `play/tests/g3_long.py` | 长组（1000 回合 × **7 seed**，**0.9 s** 命中，10 条）：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
 | `play/tests/run.py` | 入口：`1`/`2`/`3`/`all`、`--bin debug|release|<路径>`、`--refresh`、`-j N`、`--list` |
 | `play/planet_xq`（改） | `load(dir, only=…)` 只装需要的表（1000 回合的投影全装 12 s，只装 3 张 1.5 s）；**`precise_float=True`**（见 §10.3） |
 
@@ -38,16 +38,29 @@
 | `tests/horizon_mid.rs::same_seed_reproduces_identically` | `g1_contract.py`（判据更强：整份投影每个文件的 sha256） |
 | `src/tests/sim/horizon_mid.rs::a_city_razed_…_this_round` | `g2_mid.py`（同种子 `[1,7,42]` / 400 回合 / 拆平 ≥ 20） |
 | `src/tests/sim/horizon_mid.rs::long_run_produces_customized_ships` | `g2_mid.py`（累计口径不变） |
+| `tests/projection_derived.rs`（**6 条全搬**） | `g1_contract.py`：`derived_matches_…`（faction/city 过程量表 + control/scope）、`projecting_a_checkpoint_keeps_…flow`、`derived_without_checkpoint_says_…`、`decisions_table_matches_…`、`b3_tables_match_…`、`b5_input_face_matches_…` |
+| `tests/control_read_face.rs::every_ship_gets_an_order_row_and_the_template_is_a_fixed_point` | `g1_contract.py::control_fixed_point`（`--control` → `--apply` 回传 → 逐字节相同） |
+| `src/tests/sim/horizon_mid.rs::story_chronicle_grows_deterministically` | `g2_mid.py`（节拍清单**改从 `meta.json` 的 `story` 读**，不再写死「prologue 在 1 回合」） |
+| `src/tests/sim/horizon_mid.rs::story_participants_are_concrete` | `g2_mid.py`（事件型节拍的参与者；RoundAt 那条改判「非空 + **跨种子逐字相同**」——`meta.json` 不发 beat 的静态 `participants`） |
+| `src/tests/sim/horizon_mid.rs::war_scar_floor_…`（**真实长局那一半**） | `g2_mid.py`（`war_started`/`war_ended` 配对算时长 vs 配置算出的最短回合；400 回合 × 3 seed ⇒ 349 场战争，最短 9 = 承诺值）。**形状那一半**留在 `src/tests/sim/war_scar.rs`（要内部函数 + 手工世界；顺带从 `horizon_mid` 改名为 `war_scar` ⇒ 回快档：它不推进回合了） |
+
+**顺手丢掉的过时探针**（用户：*「一些过时的测试就丢掉」*）：`probe_world_health`、`probe_sanction`
+（都被 `probe_multipolar` 这个升级版取代——同一批指标的更全口径，留两份同源仪器只会有一份开始说谎）、
+`probe_zombies`（一次性调试器：打印第一次 ≥3 僵尸势力就 `return`，为当时那次「僵尸夺城—倒戈振荡」
+调查写的；全球僵尸数已由 `probe_multipolar` 的 `zombies` 列覆盖）。理由写进了
+`tests/horizon_long.rs` 的模块文档。
 
 **留在 Rust 的**（`play/tests/README.md` 与各组 doc 里都写了理由）：纯函数/数学、**手工造世界的
-合成场景**（`duel(…)`、`fresh_world(…)` 夹具）、sink/中间量级契约、错误路径（`Result`/`migrate`）、
-`#[ignore]` 探针、以及**类型层**守卫（读面每个叶子都声明了中性值——那条要走 schemars 的
-类型 schema 遍历，Python 侧只做了**反向**的一半：`neutral.fields` 里的路径都得活着）。
+合成场景**（`duel(…)`、`fresh_world(…)`、手工塞 `HistoryEntry` 的疤痕形状）、sink/中间量级契约、
+错误路径（`Result`/`migrate`）、`#[ignore]` 探针、以及**类型层**守卫（读面每个叶子都声明了中性值
+——那条要走 schemars 的类型 schema 遍历，Python 侧只做了**反向**的一半：`neutral.fields` 里的路径
+都得活着）。
 
-**还没搬的**（下一轮照「读面表」逐张来）：`src/tests/sim/horizon_mid.rs` 剩下的三条
-（战痕地板 / 编年史 / 编年史参与者）、`tests/control_read_face.rs`、`tests/projection_derived.rs`
-里 `decisions`/`market_trades`/`haul_steps`/`round_inputs` 那几张表的逐列对账（g1 现在只对了
-`faction_process` 的 9 列）。
+**还没搬的**：`tests/` 下只剩探针（`trade_probe` 13 / `site_supply_probe` 6 / `tech_probe` 3 /
+`horizon_long` 7 条 ignore，全是「只打印不断言」）与空的 `horizon_mid.rs`（路标文件）。
+`src/tests/**` 的 224 条是快档单测：纯函数、合成场景、内部契约、错误路径——按 §6 的两栏对账，
+**它们没有「跑出来的数据」可测**，所以留在原处。再往后要搬的是**探针**（数据面完全够，而且
+缓存之后比在 Rust 里跑快得多）：等哪天真要调平衡时按需搬。
 
 
 # 1. 为什么：实测成本模型（这台机器，2025 一轮 B5 期间量）
