@@ -7,7 +7,11 @@ use super::*;
 /// `pub(crate)`：投影守卫要用它构造一个确定性的「先夷平、同回合再被别家复垦」样本。
 pub enum RazeCause {
     /// 被舰炮拆平 → `CityRazed`（带拆城的舰/势力、伤害、夷平前人口）。
-    Bombardment { by_ship: ShipId, by_faction: FactionId, damage: f64 },
+    Bombardment {
+        by_ship: ShipId,
+        by_faction: FactionId,
+        damage: f64,
+    },
     /// 离心叛乱：市民自己散伙，无外部攻击者 → `Revolt`。
     Revolt { faction: FactionId, loyalty: f64 },
 }
@@ -25,7 +29,10 @@ pub fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
     // 「谁失去了这座城市」**只有在此刻才知道**：夷平不改 `faction_id`（空白城保留最后主人的
     // diaspora claim），但同一回合后来的 `reseed_city`/`found_city` 会把它改写成新主。
     // 事后再读就只会读到新主（错的人），所以在这里就把它钉进事件。
-    let owner = state.city(cid).map(|c| c.faction_id.clone()).unwrap_or_default();
+    let owner = state
+        .city(cid)
+        .map(|c| c.faction_id.clone())
+        .unwrap_or_default();
     if let Some(c) = state.city_mut(cid) {
         c.razed = true;
         c.population = 0;
@@ -36,19 +43,29 @@ pub fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
         }
     }
     match cause {
-        RazeCause::Bombardment { by_ship, by_faction, damage } => ev(state, GameEvent::CityRazed {
-            city: cid.clone(),
-            owner,
-            fallen_to: by_faction,
+        RazeCause::Bombardment {
             by_ship,
+            by_faction,
             damage,
-            pop_before,
-        }),
-        RazeCause::Revolt { faction, loyalty } => ev(state, GameEvent::Revolt {
-            city: cid.clone(),
-            faction,
-            loyalty,
-        }),
+        } => ev(
+            state,
+            GameEvent::CityRazed {
+                city: cid.clone(),
+                owner,
+                fallen_to: by_faction,
+                by_ship,
+                damage,
+                pop_before,
+            },
+        ),
+        RazeCause::Revolt { faction, loyalty } => ev(
+            state,
+            GameEvent::Revolt {
+                city: cid.clone(),
+                faction,
+                loyalty,
+            },
+        ),
     }
 }
 
@@ -57,7 +74,10 @@ pub fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
 /// `Control::inherit` 的 `mode = Inherit` → 控制解析沿作用域链上溯，与「叶子不存在」等价，
 /// 因此这一步**不改变任何决策**（只是让控制面里那座城的建筑是可枚举的）。
 pub fn wire_city_control(state: &mut State, config: &GameConfig, cid: &CityId, to: &FactionId) {
-    let buildings = state.city(cid).map(|c| c.buildings.clone()).unwrap_or_default();
+    let buildings = state
+        .city(cid)
+        .map(|c| c.buildings.clone())
+        .unwrap_or_default();
     let ctrl = state.control.entry(to.clone()).or_default();
     for b in &buildings {
         let ikey = (cid.clone(), b.id);
@@ -90,11 +110,21 @@ pub fn reseed_city(
     seeded_ship_class: &str,
     next_building_id: &mut BuildingId,
 ) -> bool {
-    let Some(settlement) = state.city_settlement(cid).cloned() else { return false };
-    let Some(body) = state.city(cid).map(|c| c.body_id.clone()) else { return false };
+    let Some(settlement) = state.city_settlement(cid).cloned() else {
+        return false;
+    };
+    let Some(body) = state.city(cid).map(|c| c.body_id.clone()) else {
+        return false;
+    };
     let prev_owner = state.city(cid).map(|c| c.faction_id.clone());
     let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-    let buildings = seed_colony_buildings(&settlement, pop, seeded_ship_class, config, next_building_id);
+    let buildings = seed_colony_buildings(
+        &settlement,
+        pop,
+        seeded_ship_class,
+        config,
+        next_building_id,
+    );
     if let Some(c) = state.city_mut(cid) {
         c.razed = false;
         c.faction_id = to.clone();
@@ -105,14 +135,17 @@ pub fn reseed_city(
         c.loyalty = 1.0;
     }
     wire_city_control(state, config, cid, to);
-    ev(state, GameEvent::ColonyFounded {
-        city: cid.clone(),
-        owner: to.clone(),
-        body,
-        seeded_ship_class: seeded_ship_class.to_string(),
-        how: FoundingHow::Refounded,
-        prev_owner,
-    });
+    ev(
+        state,
+        GameEvent::ColonyFounded {
+            city: cid.clone(),
+            owner: to.clone(),
+            body,
+            seeded_ship_class: seeded_ship_class.to_string(),
+            how: FoundingHow::Refounded,
+            prev_owner,
+        },
+    );
     true
 }
 
@@ -132,7 +165,8 @@ pub fn found_city(
         return false;
     }
     let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-    let buildings = seed_colony_buildings(settlement, pop, seeded_ship_class, config, next_building_id);
+    let buildings =
+        seed_colony_buildings(settlement, pop, seeded_ship_class, config, next_building_id);
     let mut progress: BTreeMap<String, f64> = BTreeMap::new();
     progress.insert(seeded_ship_class.to_string(), 0.0);
     state.cities.push(City {
@@ -148,14 +182,17 @@ pub fn found_city(
         loyalty: 1.0,
     });
     wire_city_control(state, config, name, to);
-    ev(state, GameEvent::ColonyFounded {
-        city: name.clone(),
-        owner: to.clone(),
-        body: body.clone(),
-        seeded_ship_class: seeded_ship_class.to_string(),
-        how: FoundingHow::NewSite,
-        prev_owner: None,
-    });
+    ev(
+        state,
+        GameEvent::ColonyFounded {
+            city: name.clone(),
+            owner: to.clone(),
+            body: body.clone(),
+            seeded_ship_class: seeded_ship_class.to_string(),
+            how: FoundingHow::NewSite,
+            prev_owner: None,
+        },
+    );
     true
 }
 
@@ -175,7 +212,9 @@ pub fn building_health(b: &Building, config: &GameConfig) -> f64 {
 /// occupies yet. Settlement ↔ city is 1:1, so a site with a live city never
 /// counts as blank.
 pub fn has_blank_site(state: &State, body: &str) -> bool {
-    let Some(b) = state.body(body) else { return false };
+    let Some(b) = state.body(body) else {
+        return false;
+    };
     if b.settlements.is_empty() {
         return false;
     }
@@ -192,7 +231,6 @@ pub fn has_blank_site(state: &State, body: &str) -> bool {
     b.settlements.iter().any(|s| !occupied.contains(&s.name))
 }
 
-
 /// Seed buildings for a newly founded / razed-and-reseeded city.
 pub fn seed_colony_buildings(
     s: &Settlement,
@@ -202,7 +240,12 @@ pub fn seed_colony_buildings(
     next_id: &mut BuildingId,
 ) -> Vec<Building> {
     let mut buildings = Vec::new();
-    let mut alloc = |kind: &str, resource: Option<String>, ship_type: Option<String>, area: f64, deployed: f64| -> Building {
+    let mut alloc = |kind: &str,
+                     resource: Option<String>,
+                     ship_type: Option<String>,
+                     area: f64,
+                     deployed: f64|
+     -> Building {
         let id = *next_id;
         *next_id += 1;
         let armor = deployed * config.structure_spec("concrete").armor_per_area;
@@ -220,7 +263,9 @@ pub fn seed_colony_buildings(
     };
 
     let footprint = s.total_area * config.combat.colony_footprint;
-    let resid = (population as f64 / s.ecological_capacity.max(1e-6)).min(footprint * 0.5).max(4.0);
+    let resid = (population as f64 / s.ecological_capacity.max(1e-6))
+        .min(footprint * 0.5)
+        .max(4.0);
     buildings.push(alloc("residential", None, None, resid, resid));
     let mut budget = (footprint - resid).max(0.0);
     for d in &s.resources {
@@ -234,6 +279,12 @@ pub fn seed_colony_buildings(
         }
     }
     let construction = (footprint * 0.3).clamp(2.0, 8.0);
-    buildings.push(alloc("construction", None, Some(ship_class.to_string()), construction, construction));
+    buildings.push(alloc(
+        "construction",
+        None,
+        Some(ship_class.to_string()),
+        construction,
+        construction,
+    ));
     buildings
 }

@@ -162,21 +162,58 @@ class PlanetXQ:
         return self.derived("faction_process", round)
 
     def city_process(self, round: int | None = None) -> pd.DataFrame:
-        """每回合每城的**过程量**：开采产出（含已夷平的空白城，`razed` 列筛）。"""
+        """每回合每城的**过程量**：开采产出 + 忠诚目标值分项 + 产出/建造的中间量
+        （含已夷平的空白城，`razed` 列筛）。
+
+        B2 那四列：`labor`（用工系数，**中性值 1.0**，乘在采矿产出与造舰速率上）、
+        `housing_capacity`（人口天花板）、`is_hub`（本城天体是不是首都集散地 ⇒ 产出直进势力池
+        还是先落产地货栈）、`build`（`{舰级: {rate, increment}}`——缺钱还是缺产能，用
+        :meth:`view_spending` 直接读判据）。
+        """
         return self.derived("city_process", round)
 
     def control(self, round: int | None = None) -> pd.DataFrame:
         """**控制面的 tidy 行**：一行一个叶片（`kind`/`key`/`sub`/`value`/`mode`）。
 
         `mode` 是叶片自己的三态表态（`Player`/`Auto`/`Inherit`），**不是**有效归属；
-        舰的有效指令看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` 列
-        （引擎解析，别自己重算链）。`sub` 只对权重叶有意义（城内建筑下标）。
+        舰的有效指令/风格/角色看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` /
+        `role` 列（引擎解析，别自己重算链）。`role` 是**三值字符串**（`"War"` 战舰 /
+        `"Freight"` 运输舰 / `"Observe"` 观测舰）——旧列名 `freighter` 是布尔，已随
+        `ShipRole` 改名，同一行的 `role_mode` 是那片叶的有效归属。
+        `sub` 只对权重叶有意义（城内建筑下标）。
         """
         return self.derived("control", round)
 
     def scope(self, round: int | None = None) -> pd.DataFrame:
         """作用域树的**显式**表态：`level`（global/faction/body/city）+ `key` + `mode`。"""
         return self.derived("scope", round)
+
+    def market_trades(self, round: int | None = None) -> pd.DataFrame:
+        """**本回合真的成交的星际贸易**（B3）：一笔一对（买方 × 卖方）一行。
+
+        一行里同时有「价格是怎么算出来的」与「路上丢了多少」：
+
+        * `dist_au` / `depth` / `mond_extra` / `freight_rate` / `rel_mult` / `mastery` / `loss`
+          全部**只由这一对决定**（与该笔买的是哪种矿无关）——每种矿的成交价就是
+          `q.facts` 里那一行的 `view.market_price[资源] × (rel_mult + freight_rate)`；
+        * `moved` 是这一对之间**卖方交出的件数**（按资源）：买方收到的是
+          `moved[资源] × (1 − loss)`，`view.market_settled` 记的正是**收到**的那份；
+        * **稀疏**：没成交的回合零行（不是「成交了 0 件」）。
+
+        ⚠ 粒度是**一对一行**，不是「一对 × 一资源一行」：想按资源展开就自己拆 `moved`
+        （`q.view_trade()` 顺手做了这件事）。
+        """
+        return self.derived("market_trades", round)
+
+    def haul_steps(self, round: int | None = None) -> pd.DataFrame:
+        """**本回合每艘在跑运输的舰走了哪一步**（B3）：`step` ∈ loaded / delivered / waiting / en_route。
+
+        `waiting`（停在**空货栈**干等）与 `en_route`（在路上）**既不落 state 也不发事件**——
+        这张表是它们唯一的读法：「我派它去拉货，为什么一件没运回来」= 看 `step` 与
+        `q.ships()` 里那艘舰的 `cargo`（舱里空 + `waiting` ⇒ 那处货栈没货）。
+        AI 与**玩家指令**两条执行路径都写它，所以玩家舰也在表里。
+        """
+        return self.derived("haul_steps", round)
 
     def decisions(self, round: int | None = None) -> pd.DataFrame:
         """**本回合 AI 的判定**（“掷了什么”）：`kind`/`actor`/`verdict`/`target`/`detail`。
@@ -216,7 +253,19 @@ class PlanetXQ:
     def factions(self, round: int | None = None) -> pd.DataFrame:
         """Factions per round: identity + 库存(resources) + 外交(relations) + 自有城/舰清单。
         ``relations``/``resources``/``city_ids``/``ship_ids`` stay dict- / list-valued cells
-        (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read)."""
+        (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read).
+
+        引擎还在这张表上放了**编队配额**那几列（一行一势力、每回合重算），读它们就不用自己
+        复算自动控制的判据（列级说明见投影的 ``schema.json``）：
+
+        * ``observer_quota`` —— **观测配额**（目标头数，连续量）：本势力该有几艘舰去太阳系外缘的
+          引力异常区蹲着（``autocontrol::knowledge``）；**掌握度到顶 ⇒ 0**（没东西可学了）。
+        * ``observer_count`` —— 此刻**真的在观测**的舰数（有效角色 = ``Observe``）。与配额一起读
+          就能分开「不想学」（配额 0）与「没人可派」（配额 > 0 而这列跟不上）。
+        * ``observer_target`` —— 观测编队的**驻地天体**（``null`` = 异常区里没有候选天体）。
+        * ``mond_ships_in_band`` —— 此刻在异常区里的自己的活舰数（掌握度唯一的知识来源）。
+        * ``freighter_quota`` / ``freighter_count`` —— 集货那条同形的一对（目标条数 / 现状条数）。
+        """
         return self.table("factions", round)
 
     def bodies(self) -> pd.DataFrame:
@@ -395,6 +444,165 @@ class PlanetXQ:
             out = out[out["faction_id"] == faction]
         return out.sort_values("loyalty_target_effective")
 
+    def view_spending(self, round: int, faction: str) -> dict:
+        """**「钱去哪了」**（B2）：本回合该势力的预算去向 + 造舰是缺钱还是缺产能 + 舰队为什么掉血。
+
+        三个读面在这里合成一屏（都是引擎算的中间量，Python 只做减法与 join）：
+
+        * `budget`（DataFrame，逐资源）：**批了多少 − 花了多少 = 没花掉的**。
+          限额来自 `derived.control` 的 `investment_budget`/`construction_budget` 叶（引擎每回合把
+          当回合用的额度写回去），已花来自 `view.factions[].investment_spent`/`construction_spent`
+          ——**同一个数不在两个读面各存一份**，所以这里才要 join。
+        * `build`（DataFrame，逐城 × 舰级）：`rate` 是产能上限、`increment` 是实得进度，
+          `bottleneck` 直接给出判据——`money`（钱批光了）/ `capacity`（产能封顶）/ `idle`
+          （有产能却一分钱没批到）/ `-`（进度满仓在等下水）。
+        * `upkeep_unpaid` / `fleet_rust`：付不起的维护费与由此**每艘舰被锈掉的船体比例**
+          （锈到 0 才发事件，所以掉血只有这两个数看得见）。
+
+        示例：``q.view_spending(round=30, faction="中国")["budget"]``。
+        """
+        fm = self._faction_row(round, faction)
+        inv_spent = dict(fm.get("investment_spent", self.neutral("factions[].investment_spent")) or {})
+        con_spent = dict(fm.get("construction_spent", self.neutral("factions[].construction_spent")) or {})
+
+        ctl = self.control(round)
+        def batch(kind: str) -> dict:
+            if ctl is None or ctl.empty or "kind" not in ctl.columns:
+                return {}
+            sel = ctl[(ctl["kind"] == kind) & (ctl["faction_id"] == faction)]
+            return {r["key"]: float(r["value"]) for _, r in sel.iterrows()}
+
+        inv_lim, con_lim = batch("investment_budget"), batch("construction_budget")
+        rows = []
+        for rt in sorted(set(inv_lim) | set(inv_spent) | set(con_lim) | set(con_spent)):
+            row = {"resource": rt}
+            for kind, lim, spent in (("investment", inv_lim, inv_spent), ("construction", con_lim, con_spent)):
+                want = float(lim.get(rt, 0.0))
+                got = float(spent.get(rt, 0.0))
+                row[f"{kind}_batch"] = want
+                row[f"{kind}_spent"] = got
+                row[f"{kind}_unspent"] = want - got
+            rows.append(row)
+        budget = pd.DataFrame(rows)
+
+        # 造舰：每城每舰级的速率与实得进度。判据只用两列比较，不在这里重算引擎公式。
+        cs = self.city_process(round)
+        build = pd.DataFrame()
+        if cs is not None and not cs.empty and "build" in cs.columns:
+            missing = [c for c in ("labor", "housing_capacity", "is_hub", "build") if c not in cs.columns]
+            if missing:
+                raise KeyError(
+                    f"derived.city_process 缺列 {missing}——这份投影是「B2 中间量」之前的构建产出的，"
+                    f"请用当前 planet_x 重新 `--index`"
+                )
+            sel = cs[cs["faction_id"] == faction]
+            recs = []
+            for _, crow in sel.iterrows():
+                for cls, line in (crow["build"] or {}).items():
+                    rate = float(line.get("rate", 0.0))
+                    inc = float(line.get("increment", 0.0))
+                    if inc <= 0.0:
+                        why = "idle"          # 有产能、一分钱没批到
+                    elif inc >= rate - 1e-9:
+                        why = "capacity"      # 顶到产能上限（钱还剩着）
+                    else:
+                        why = "money"         # 钱批光了
+                    recs.append({
+                        "city_id": crow["city_id"], "class": cls,
+                        "rate": rate, "increment": inc, "bottleneck": why,
+                    })
+            build = pd.DataFrame(recs)
+
+        return {
+            "round": round, "faction": faction,
+            "budget": budget,
+            "build": build,
+            "upkeep_unpaid": fm.get("upkeep_unpaid", self.neutral("factions[].upkeep_unpaid")),
+            "fleet_rust": fm.get("fleet_rust", self.neutral("factions[].fleet_rust")),
+            # B3（市场与运输）：购买力与**买方名次**（0 = 第一个挑）、集货总缺口（`Σ缺口 ÷ Σ要求`）、
+            # 以及「谁不卖给我、为什么」（三档：war / cold / coalition）。
+            "purchasing_power": fm.get(
+                "purchasing_power", self.neutral("factions[].purchasing_power")
+            ),
+            "market_rank": fm.get("market_rank", self.neutral("factions[].market_rank")),
+            "haul_gap": fm.get("haul_gap"),
+            "trade_blocked_by": fm.get("trade_blocked_by", self.neutral("factions[].trade_blocked_by")),
+        }
+
+    def view_trade(self, round: int, faction: str | None = None) -> dict:
+        """**「为什么是这个价 / 我买到的货为什么少了」**（B3）：本回合的成交清单。
+
+        返回 `{"trades": DataFrame, "blocked": DataFrame}`：
+
+        * `trades` —— 一行 = 一笔成交（`buyer` × `seller`），带 `price_mult`（= `rel_mult +
+          freight_rate`，**这就是成交价相对市场价的倍数**）与拆开的 `dist_au` / `depth` /
+          `mond_extra` / `freight_rate` / `rel_mult` / `mastery` / `loss`；`moved` 是那一对之间
+          卖方交出的件数（按资源，**保留原样**——想按资源展开就自己拆，`delivered_units` 一列
+          给出「买方收到」的总量 = `Σ moved × (1 − loss)`）。
+        * `blocked` —— **谁不卖给我、为什么**（`blocker` / `cause` ∈ war / cold / coalition）。
+          三档的对策不同：战争要停战、冷关系要缓和、联盟封锁要拆联盟。
+          `cause` 来自势力行（`view.factions[].trade_blocked_by`），是**引擎的判据**，不是这里推的。
+
+        `faction` 给了就只看与它有关的行（买方或卖方 = 它；禁运只看「不卖给它」那些）。
+        """
+        fm = self._faction_row(round, faction) if faction else None
+        rows = []
+        blocked = []
+        if fm is not None:
+            for blocker, cause in (fm.get("trade_blocked_by") or {}).items():
+                blocked.append({"blocked_faction": faction, "blocker": blocker, "cause": cause})
+        blocked = pd.DataFrame(blocked)
+
+        t = self.market_trades(round)
+        if t is None or t.empty:
+            return {"round": round, "faction": faction, "trades": t if t is not None else pd.DataFrame(),
+                    "blocked": blocked}
+        missing = [c for c in ("buyer", "seller", "moved", "dist_au", "depth", "mond_extra",
+                               "freight_rate", "rel_mult", "mastery", "loss") if c not in t.columns]
+        if missing:
+            raise KeyError(
+                f"derived.market_trades 缺列 {missing}——这份投影是「B3 中间量」之前的构建产出的，"
+                f"请用当前 planet_x 重新 `--index`"
+            )
+        t = t.copy()
+        # 这一列的加法是**文档承诺的那条恒等式**（成交价 = 市场价 × 本列），不是平台重算游戏公式。
+        t["price_mult"] = t["rel_mult"] + t["freight_rate"]
+        t["delivered_units"] = t.apply(
+            lambda r: sum(v * (1.0 - float(r["loss"])) for v in (r["moved"] or {}).values()), axis=1
+        )
+        if faction is not None:
+            rows = t[(t["buyer"] == faction) | (t["seller"] == faction)]
+        else:
+            rows = t
+        return {"round": round, "faction": faction, "trades": rows, "blocked": blocked}
+
+    def view_freight(self, round: int, faction: str) -> dict:
+        """**「哪处货栈在积压、我的船这一回合在干什么」**（B3）：集货的两半合在一屏。
+
+        * `depots`（DataFrame，逐货栈）：`need`（要求运力）/ `own`（自有运力的期望份额）/
+          `hired`（已雇运力）/ `uncovered`（缺口 = need − own − hired，连续量）。
+          势力级的总账是 `haul_gap`（= `Σuncovered ÷ Σneed`，见 `view_economy`）——本表是它的
+          **逐货栈**展开：「我的货为什么一直躺在产地」= 哪一处的 `uncovered` 长期不为 0。
+        * `steps`（DataFrame，逐舰）：本势力**在跑运输的舰**这一回合走了哪一步
+          （loaded / delivered / waiting / en_route）+ 它的舰级/位置/货舱。`waiting` = 停在
+          **空货栈**干等（不是故障），`en_route` = 在路上——两者都不落 state、不发事件。
+        """
+        frow = self._faction_row(round, faction)
+        gap = frow.get("freight_gap", self.neutral("factions[].freight_gap")) or {}
+        depots = pd.DataFrame(
+            [{"body_id": b, **{k: float(v.get(k, 0.0)) for k in ("need", "own", "hired", "uncovered")}}
+             for b, v in gap.items()]
+        )
+        hs = self.haul_steps(round)
+        if hs is None or hs.empty or "ship_id" not in hs.columns:
+            return {"round": round, "faction": faction, "depots": depots, "steps": pd.DataFrame()}
+        ships = self.ships(round)
+        cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "cargo", "x", "y")
+                if c in ships.columns]
+        mine = hs.merge(ships[cols], on=["round", "ship_id"], how="left")
+        mine = mine[mine["faction_id"] == faction]
+        return {"round": round, "faction": faction, "depots": depots, "steps": mine}
+
     def view_market(self, round: int, faction: str) -> dict | None:
         """A faction's stockpile valued at market prices: per-resource amount & value + total.
         Reads ``resources`` (sim stockpile) and the ``meta.resource_value`` table."""
@@ -475,6 +683,16 @@ class PlanetXQ:
             "capital_loyalty_bonus": fm.get(
                 "capital_loyalty_bonus", self.neutral("factions[].capital_loyalty_bonus")
             ),
+            # B2（钱去哪了）：**已花**的预算（缺省从 `schema.json` 取）、付不起的维护费与由此
+            # 每艘舰被锈掉的比例。「批了多少」不在这里——它住在控制面，用 `view_spending()` 相减。
+            "investment_spent": fm.get(
+                "investment_spent", self.neutral("factions[].investment_spent")
+            ),
+            "construction_spent": fm.get(
+                "construction_spent", self.neutral("factions[].construction_spent")
+            ),
+            "upkeep_unpaid": fm.get("upkeep_unpaid", self.neutral("factions[].upkeep_unpaid")),
+            "fleet_rust": fm.get("fleet_rust", self.neutral("factions[].fleet_rust")),
             # 首都评估/迁都是**稀疏判定**（大多数回合 `None`）⇒ 从 derived.decisions 取，不在
             # 每势力一行里。`None` = 这一回合既没评估也没迁。
             "capital": self._capital_decision(round, faction),

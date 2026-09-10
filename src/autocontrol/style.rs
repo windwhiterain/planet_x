@@ -134,18 +134,37 @@ pub(crate) fn regulate_styles(
             if axis_writable(state, &fid, &ship_id, StyleAxis::Doctrine) {
                 let mut doc = doctrine;
                 // (分量名, 旧值, 新值, 目标, 驱动输入)
-                let mut hits: Vec<(&'static str, f64, f64, f64, BTreeMap<String, f64>)> = Vec::new();
+                let mut hits: Vec<(&'static str, f64, f64, f64, BTreeMap<String, f64>)> =
+                    Vec::new();
                 let temper_target = temper_target(ac, &sit);
                 if let Some(next) = step_value(
-                    config, &fid, &ship_id, round, StyleAxis::Doctrine, "temper", doc.temper,
+                    config,
+                    &fid,
+                    &ship_id,
+                    round,
+                    StyleAxis::Doctrine,
+                    "temper",
+                    doc.temper,
                     temper_target,
                 ) {
-                    hits.push(("temper", doc.temper, next, temper_target, drivers_doc.clone()));
+                    hits.push((
+                        "temper",
+                        doc.temper,
+                        next,
+                        temper_target,
+                        drivers_doc.clone(),
+                    ));
                     doc.temper = next;
                 }
                 let (lone_target, neighbors) = lone_wolf_target(state, config, &ship_id);
                 if let Some(next) = step_value(
-                    config, &fid, &ship_id, round, StyleAxis::Doctrine, "lone_wolf", doc.lone_wolf,
+                    config,
+                    &fid,
+                    &ship_id,
+                    round,
+                    StyleAxis::Doctrine,
+                    "lone_wolf",
+                    doc.lone_wolf,
                     lone_target,
                 ) {
                     hits.push((
@@ -162,7 +181,8 @@ pub(crate) fn regulate_styles(
                     if let Some(c) = state.control_mut(fid.clone()) {
                         // ⚠ 两条轴**一次写**：没被重估的那条带着它**当时在用的值**——这就是
                         // 「只改一条轴不会把另一条清零」那条规矩的落点（`control-live-layers.md` §3.1）。
-                        c.ship_doctrine.insert(ship_id.clone(), Control::inherit(doc));
+                        c.ship_doctrine
+                            .insert(ship_id.clone(), Control::inherit(doc));
                     }
                     for (component, from, to, target, drivers) in hits {
                         out.push(StyleDecision {
@@ -180,11 +200,19 @@ pub(crate) fn regulate_styles(
             // --- 风筝<->贴脸（另一片叶）---------------------------------------------
             if axis_writable(state, &fid, &ship_id, StyleAxis::Kiting) {
                 let (target, drivers) = kiting_target(state, config, &ship_id);
-                if let Some(next) =
-                    step_value(config, &fid, &ship_id, round, StyleAxis::Kiting, "kiting", kiting, target)
-                {
+                if let Some(next) = step_value(
+                    config,
+                    &fid,
+                    &ship_id,
+                    round,
+                    StyleAxis::Kiting,
+                    "kiting",
+                    kiting,
+                    target,
+                ) {
                     if let Some(c) = state.control_mut(fid.clone()) {
-                        c.ship_kiting.insert(ship_id.clone(), Control::inherit(next));
+                        c.ship_kiting
+                            .insert(ship_id.clone(), Control::inherit(next));
                     }
                     out.push(StyleDecision {
                         faction: fid.clone(),
@@ -208,12 +236,24 @@ fn axis_writable(state: &State, fid: &str, ship_id: &str, axis: StyleAxis) -> bo
     };
     let (leaf, default) = match axis {
         StyleAxis::Doctrine => (
-            c.ship_doctrine.get(ship_id).map(|l| l.mode).unwrap_or_default(),
-            c.default_doctrine.as_ref().map(|l| l.mode).unwrap_or_default(),
+            c.ship_doctrine
+                .get(ship_id)
+                .map(|l| l.mode)
+                .unwrap_or_default(),
+            c.default_doctrine
+                .as_ref()
+                .map(|l| l.mode)
+                .unwrap_or_default(),
         ),
         StyleAxis::Kiting => (
-            c.ship_kiting.get(ship_id).map(|l| l.mode).unwrap_or_default(),
-            c.default_kiting.as_ref().map(|l| l.mode).unwrap_or_default(),
+            c.ship_kiting
+                .get(ship_id)
+                .map(|l| l.mode)
+                .unwrap_or_default(),
+            c.default_kiting
+                .as_ref()
+                .map(|l| l.mode)
+                .unwrap_or_default(),
         ),
     };
     // ① 逐舰叶：玩家钉的这艘舰的特例，一个字都不许改。
@@ -255,7 +295,8 @@ fn step_value(
         return None; // 这一回合这艘舰的这条轴不重估（概率触发，不是每回合都动）。
     }
     let step_salt = format!("{}:{component}:step", axis.name());
-    let step = (sim::derived_roll(fid, ship_id, round, &step_salt) * ac.style_step_max).clamp(0.0, 1.0);
+    let step =
+        (sim::derived_roll(fid, ship_id, round, &step_salt) * ac.style_step_max).clamp(0.0, 1.0);
     let next = r2(cur + (target - cur) * step).clamp(-1.0, 1.0);
     if (next - cur).abs() < ac.style_epsilon {
         return None; // 变化小到读面都看不出来 ⇒ 不写（否则每回合的 diff 全是噪声）。
@@ -291,7 +332,9 @@ fn lone_wolf_target(state: &State, config: &GameConfig, ship_id: &str) -> (f64, 
     let mut n = 0.0;
     if r > 0.0 {
         for s in &state.ships {
-            if s.name != ship_id && s.faction_id == ship.faction_id && s.hull > 0.0
+            if s.name != ship_id
+                && s.faction_id == ship.faction_id
+                && s.hull > 0.0
                 && sim::dist(ship.position, s.position) <= r
             {
                 n += 1.0;
@@ -311,7 +354,11 @@ fn lone_wolf_target(state: &State, config: &GameConfig, ship_id: &str) -> (f64, 
 ///
 /// **附近没有敌舰 ⇒ 目标 0**：这条轴只在接战时才有意义（`kiting_dest` 也要先找到敌舰），
 /// 和平时期让它松弛回基线，而不是凭"周边无敌"就判成贴脸。
-fn kiting_target(state: &State, config: &GameConfig, ship_id: &str) -> (f64, BTreeMap<String, f64>) {
+fn kiting_target(
+    state: &State,
+    config: &GameConfig,
+    ship_id: &str,
+) -> (f64, BTreeMap<String, f64>) {
     let zero = BTreeMap::from([
         ("power".to_string(), 0.0),
         ("hardness".to_string(), 0.0),
@@ -341,7 +388,10 @@ fn kiting_target(state: &State, config: &GameConfig, ship_id: &str) -> (f64, BTr
     let my = sim::deterrence(state, config, ship_id);
     let theirs = sim::deterrence(state, config, &foe);
     let power = (((my + 1.0) / (theirs + 1.0)).ln() * 0.5).clamp(-1.0, 1.0);
-    let (my_tough, foe_tough) = (panel.hull_max + panel.shield_max, foe_panel.hull_max + foe_panel.shield_max);
+    let (my_tough, foe_tough) = (
+        panel.hull_max + panel.shield_max,
+        foe_panel.hull_max + foe_panel.shield_max,
+    );
     let hardness = ((my_tough - foe_tough) / (my_tough + foe_tough).max(1e-9)).clamp(-1.0, 1.0);
     let hurt = (1.0 - ship.hull / ship.hull_max.max(1e-9)).clamp(0.0, 1.0);
     let ac = &config.autocontrol;
@@ -366,7 +416,11 @@ fn situation(
 ) -> Situation {
     let war = sim::war_strength(state, config, fid);
     let (mut hull, mut hull_max, mut fleet) = (0.0f64, 0.0f64, 0.0f64);
-    for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
+    for s in state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+    {
         hull += s.hull;
         hull_max += s.hull_max.max(0.0);
         fleet += 1.0;
@@ -379,7 +433,13 @@ fn situation(
     // 净战果：**只算战沉**（`DeathCause::Combat`）——维护费欠缴导致的锈蚀报废不是战果。
     let (mut kills, mut losses) = (0.0, 0.0);
     for e in &state.events {
-        if let GameEvent::ShipDestroyed { owner, cause: DeathCause::Combat, by, .. } = e {
+        if let GameEvent::ShipDestroyed {
+            owner,
+            cause: DeathCause::Combat,
+            by,
+            ..
+        } = e
+        {
             if owner == fid {
                 losses += 1.0;
             } else if by.as_ref().map(|k| k.faction == fid).unwrap_or(false) {
@@ -393,10 +453,14 @@ fn situation(
         .filter(|d| d.faction == fid && d.verdict == ShipVerdict::Withdraw)
         .count() as f64;
     let withdraw = (withdrew / fleet.max(1.0)).clamp(0.0, 1.0);
-    Situation { war, damage, win, withdraw }
+    Situation {
+        war,
+        damage,
+        win,
+        withdraw,
+    }
 }
 
 #[cfg(test)]
 #[path = "../tests/autocontrol/style.rs"]
 mod tests;
-

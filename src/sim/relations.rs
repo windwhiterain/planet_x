@@ -10,7 +10,11 @@ pub fn war_pairs(state: &State, config: &GameConfig) -> BTreeSet<(FactionId, Fac
         for j in (i + 1)..ids.len() {
             let (a, b) = (ids[i].clone(), ids[j].clone());
             if hostile(state, config, &a, &b) {
-                if a <= b { pairs.insert((a, b)); } else { pairs.insert((b, a)); }
+                if a <= b {
+                    pairs.insert((a, b));
+                } else {
+                    pairs.insert((b, a));
+                }
             }
         }
     }
@@ -29,7 +33,10 @@ pub fn hostile(state: &State, config: &GameConfig, a: &str, b: &str) -> bool {
 /// 该势力当前是否处于交战状态：与任意其他势力的关系已达到交战阈值。
 /// 用于「造舰按威胁响应」——战时倾向多造战争机器，和平时倾向多造殖民/经济舰。
 pub fn faction_at_war(state: &State, config: &GameConfig, fid: &str) -> bool {
-    state.factions.iter().any(|o| o.name != fid && hostile(state, config, fid, &o.name))
+    state
+        .factions
+        .iter()
+        .any(|o| o.name != fid && hostile(state, config, fid, &o.name))
 }
 
 /// **「记恨」读者**——窗口层（[`State::notables`]）当前的唯一消费者。
@@ -58,9 +65,7 @@ pub fn war_scar_floor(state: &State, config: &GameConfig, a: &str, b: &str) -> O
         .iter()
         .filter(|e| e.round + span > state.round)
         .filter_map(|e| match &e.event {
-            GameEvent::WarStarted { a: x, b: y }
-                if (x == a && y == b) || (x == b && y == a) =>
-            {
+            GameEvent::WarStarted { a: x, b: y } if (x == a && y == b) || (x == b && y == a) => {
                 Some(e.round)
             }
             _ => None,
@@ -122,13 +127,19 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     let mut note_pair = |a: Option<FactionId>, b: Option<FactionId>| {
         if let (Some(a), Some(b)) = (a, b) {
             if a != b {
-                if a <= b { fought.insert((a, b)); } else { fought.insert((b, a)); }
+                if a <= b {
+                    fought.insert((a, b));
+                } else {
+                    fought.insert((b, a));
+                }
             }
         }
     };
     for e in &state.events {
         match e {
-            GameEvent::Attack { attacker, target, .. } => {
+            GameEvent::Attack {
+                attacker, target, ..
+            } => {
                 note_pair(
                     state.ship(attacker).map(|s| s.faction_id.clone()),
                     state.ship(target).map(|s| s.faction_id.clone()),
@@ -149,12 +160,27 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         for j in (i + 1)..ids.len() {
             let (a, b) = (ids[i].clone(), ids[j].clone());
             let (align_a, align_b, aggr, ideo_a, ideo_b) = {
-                let fa = state.factions.iter().find(|f| f.name == a).expect("faction a gone");
-                let fb = state.factions.iter().find(|f| f.name == b).expect("faction b gone");
-                (fa.alignment, fb.alignment, fa.aggression.max(fb.aggression), fa.ideology, fb.ideology)
+                let fa = state
+                    .factions
+                    .iter()
+                    .find(|f| f.name == a)
+                    .expect("faction a gone");
+                let fb = state
+                    .factions
+                    .iter()
+                    .find(|f| f.name == b)
+                    .expect("faction b gone");
+                (
+                    fa.alignment,
+                    fb.alignment,
+                    fa.aggression.max(fb.aggression),
+                    fa.ideology,
+                    fb.ideology,
+                )
             };
             let mut rel = relation(state, &a, &b);
-            let mut aff = d.affinity_floor + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
+            let mut aff = d.affinity_floor
+                + d.affinity_span * (1.0 - (align_a - align_b).abs().min(band) / band);
             // 思潮相似度（可变化当代思潮）：相似 → 亲和上移，对立 → 亲和下移（对称修正）。
             // 与 alignment（历史静态阵营亲缘）叠加，构成「历史静态 + 思潮可变」双因子。
             if d.ideology_affinity_span != 0.0 {
@@ -162,7 +188,11 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
                 aff += d.ideology_affinity_span * (2.0 * sim - 1.0);
             }
             let at_war = rel <= config.combat.war_threshold;
-            let pair = if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+            let pair = if a <= b {
+                (a.clone(), b.clone())
+            } else {
+                (b.clone(), a.clone())
+            };
             let clashing = fought.contains(&pair);
 
             if at_war && !clashing {
@@ -197,13 +227,26 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 /// `step_diplomacy` **之后**跑，把两个正彼此交战的弱者拉近，于是刚开战的一对可以在 **6 回合**
 /// 内言和，而地板承诺的是至少 9 回合。经过本漏斗后，「忘记套用地板」在结构上不可能——
 /// 与 [`ev`]/[`kill_ship`] 那套 single-writer 纪律同源。
-pub fn set_relation_sym(state: &mut State, a: FactionId, b: FactionId, v: f64, config: &GameConfig) {
+pub fn set_relation_sym(
+    state: &mut State,
+    a: FactionId,
+    b: FactionId,
+    v: f64,
+    config: &GameConfig,
+) {
     let floor = war_scar_floor(state, config, &a, &b);
-    let mut v = v.clamp(config.diplomacy.hostility_floor, config.diplomacy.friendship_ceiling);
+    let mut v = v.clamp(
+        config.diplomacy.hostility_floor,
+        config.diplomacy.friendship_ceiling,
+    );
     if let Some(floor) = floor {
         v = v.min(floor);
     }
-    for f in state.factions.iter_mut().filter(|f| f.name == a || f.name == b) {
+    for f in state
+        .factions
+        .iter_mut()
+        .filter(|f| f.name == a || f.name == b)
+    {
         let other = if f.name == a { b.clone() } else { a.clone() };
         f.relations.insert(other, v);
     }

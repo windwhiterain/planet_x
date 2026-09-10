@@ -105,10 +105,7 @@ fn info_roots_are_whole_model_dumps() {
 fn info_tree_carries_real_round_flow_after_advance() {
     let mut w = world();
     assert!(
-        w.post
-            .factions
-            .values()
-            .all(|r| r.production.is_empty()),
+        w.post.factions.values().all(|r| r.production.is_empty()),
         "round 0 has no process quantities yet"
     );
     for _ in 0..5 {
@@ -137,11 +134,15 @@ fn info_tree_carries_real_round_flow_after_advance() {
     // 所以「过程量真的算过」的判据 = 至少有一个势力的产出/维护/治理不是空的/零。
     let rows = view["factions"].as_object().unwrap();
     assert!(
-        rows.values().any(|r| !r["production"].as_object().unwrap().is_empty()),
+        rows.values()
+            .any(|r| !r["production"].as_object().unwrap().is_empty()),
         "the round's process quantities must be real, not empty"
     );
     assert!(rows.values().any(|r| r["upkeep"].as_f64().unwrap() > 0.0));
-    assert!(rows.values().any(|r| r["governance_cost"].as_f64().unwrap() > 0.0));
+    assert!(
+        rows.values()
+            .any(|r| r["governance_cost"].as_f64().unwrap() > 0.0)
+    );
     assert!(!view["power_share"].as_object().unwrap().is_empty());
 }
 
@@ -676,9 +677,12 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
     assert_eq!(row.mode, ControlMode::Inherit);
 }
 
-/// 第三条风格轴（**角色**：运输舰↔战舰）在 web 的读写两面上走通：读面每艘舰一行
-/// （`ship_freighter`，值 = 有效值）、写面能定角色（写值即接管 ⇒ 自动控制不再定编这艘舰）、
+/// 第三条风格轴（**角色**：战舰 / 运输舰 / 观测舰，三值枚举）在 web 的读写两面上走通：读面每艘舰
+/// 一行（`ship_role`，值 = **有效角色**）、写面能定角色（写值即接管 ⇒ 自动控制不再定编这艘舰）、
 /// `remove` 能删掉这片叶把它**交回自动定编**（这与另两条风格轴上"删叶"的含义不同）。
+///
+/// ⚠ 这里的值型态本轮变了：`freighter: bool` → `role: "War" | "Freight" | "Observe"`。
+/// 所以下面每一处载荷都写字符串，而不是 `true`/`false`——写布尔会被 serde 当场拒（类型不符）。
 #[test]
 fn the_role_axis_round_trips_through_the_web_surface() {
     let mut w = world();
@@ -698,29 +702,26 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         .find(|c| c.faction_id == fid)
         .unwrap();
     let row = fc
-        .ship_freighter
+        .ship_role
         .iter()
         .find(|e| e.ship == ship)
         .expect("每艘舰一行角色");
-    assert_eq!(row.freighter, w.state.ship(&ship).unwrap().freighter);
+    assert_eq!(row.role, w.state.ship(&ship).unwrap().role);
 
     // ② 写面：把一艘舰钉成运输舰（写值即接管 ⇒ 归属变 Player，AI 定编从此不碰它）。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_freighter": [{ "ship": ship, "freighter": true }] }]
+        "control": [{ "faction_id": fid, "ship_role": [{ "ship": ship, "role": "Freight" }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
-    assert!(w.state.ship_freighter(ship.clone()));
-    assert_eq!(
-        w.state.ship_freighter_control(ship.clone()),
-        ControlMode::Player
-    );
+    assert_eq!(w.state.ship_role(ship.clone()), ShipRole::Freight);
+    assert_eq!(w.state.ship_role_control(ship.clone()), ControlMode::Player);
 
     // ③ 前端那个「恢复出厂值」按钮发的补丁：只带身份键 + `remove`。
-    let record = w.state.ship(&ship).unwrap().freighter;
+    let record = w.state.ship(&ship).unwrap().role;
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_freighter": [{ "ship": ship, "remove": true }] }]
+        "control": [{ "faction_id": fid, "ship_role": [{ "ship": ship, "remove": true }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -732,7 +733,7 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         report.removed
     );
     assert_eq!(
-        w.state.ship_freighter(ship.clone()),
+        w.state.ship_role(ship.clone()),
         record,
         "删叶之后回到出厂记录值"
     );
@@ -740,19 +741,20 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         w.state
             .control
             .get(&fid)
-            .and_then(|c| c.ship_freighter.get(&ship))
+            .and_then(|c| c.ship_role.get(&ship))
             .is_none(),
         "这片叶必须真的没了"
     );
     assert_ne!(
-        w.state.ship_freighter_control(ship.clone()),
+        w.state.ship_role_control(ship.clone()),
         ControlMode::Player,
         "删叶 = 交回自动定编（而不是「锁成某个值」）"
     );
 
     // ④ 势力级默认角色叶（`Option`：有叶才有一行）也走读写两面。
+    //    这里用第三态 `Observe`：它是本轮新加的那一档，顺手钉住「字符串收发得回去」。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "default_freighter": { "freighter": true, "mode": "Player" } }]
+        "control": [{ "faction_id": fid, "default_role": { "role": "Observe", "mode": "Player" } }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
@@ -761,10 +763,15 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         .into_iter()
         .find(|c| c.faction_id == fid)
         .unwrap();
-    let d = fc.default_freighter.expect("势力级默认角色叶要在读面里");
+    let d = fc.default_role.expect("势力级默认角色叶要在读面里");
     assert_eq!(
-        (d.freighter, d.mode),
-        (Some(true), Some(ControlMode::Player))
+        (d.role, d.mode),
+        (Some(ShipRole::Observe), Some(ControlMode::Player))
+    );
+    assert_eq!(
+        w.state.ship_role(ship.clone()),
+        ShipRole::Observe,
+        "舰队默认归玩家 ⇒ 它的值说了算（继承它的舰现在是观测舰）"
     );
 }
 

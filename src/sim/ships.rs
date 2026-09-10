@@ -39,15 +39,27 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
         .as_ref()
         .and_then(|c| state.city(c).map(|c| c.body_id.clone()))
         .unwrap_or_else(|| state.capital_body(&spec.owner));
-    let stock: ResourceMap = state.stock_at(&spec.owner, &site).cloned().unwrap_or_default();
-    let components =
-        autocontrol::resolve_loadout(state, config, spec.owner.clone(), spec.class, spec.blueprint, &stock);
+    let stock: ResourceMap = state
+        .stock_at(&spec.owner, &site)
+        .cloned()
+        .unwrap_or_default();
+    let components = autocontrol::resolve_loadout(
+        state,
+        config,
+        spec.owner.clone(),
+        spec.class,
+        spec.blueprint,
+        &stock,
+    );
     let class = spec.class.to_string();
     let cspec = config.ship_spec(&class);
     // 舰名 = 从本势力名字库确定性取的一个唯一名（名字即唯一 key，击毁后不复用）。
     let seq = *state.ship_name_seq.entry(spec.owner.clone()).or_insert(0);
     state.ship_name_seq.insert(spec.owner.clone(), seq + 1);
-    let fname = state.faction(&spec.owner).map(|f| f.name.clone()).unwrap_or_default();
+    let fname = state
+        .faction(&spec.owner)
+        .map(|f| f.name.clone())
+        .unwrap_or_default();
     let name = ship_display_name(config.ship_pool(&fname), seq);
     let mut ship = Ship {
         name: name.clone(),
@@ -63,7 +75,7 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
         velocity: 0.0,
         doctrine: cspec.default_doctrine,
         kiting: cspec.default_kiting,
-        freighter: cspec.default_freighter,
+        role: cspec.default_role,
         attack_hist: BTreeMap::new(),
         cargo: BTreeMap::new(),
         // 出厂归因：这艘舰是哪张图印出来的（`None` = 无图）。快照的溯源，不是活层。
@@ -77,7 +89,11 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
     ship.shield = panel.shield_max;
     ship.shield_max = panel.shield_max;
     // 每件组件初始满完整度（模块毁损用）。
-    ship.component_hp = ship.components.iter().map(|c| component_integrity(config, c)).collect();
+    ship.component_hp = ship
+        .components
+        .iter()
+        .map(|c| component_integrity(config, c))
+        .collect();
     if spec.pay_components {
         let comp_cost: Vec<(String, f64)> = ship
             .components
@@ -87,14 +103,17 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
         let mut spent: ResourceMap = ResourceMap::new();
         commit_spend(state, &spec.owner, &site, &mut spent, &comp_cost);
     }
-    ev(state, GameEvent::ShipSpawned {
-        ship: name.clone(),
-        owner: spec.owner.clone(),
-        class: class.clone(),
-        city: spec.city,
-        via: spec.via,
-        blueprint: spec.blueprint.cloned(),
-    });
+    ev(
+        state,
+        GameEvent::ShipSpawned {
+            ship: name.clone(),
+            owner: spec.owner.clone(),
+            class: class.clone(),
+            city: spec.city,
+            via: spec.via,
+            blueprint: spec.blueprint.cloned(),
+        },
+    );
     state
         .control
         .entry(spec.owner)
@@ -109,13 +128,18 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
 /// 战力之和——「威慑 = 综合战力 + 附近同势力战力互相叠加」。这是「理智<->热血」选目标的
 /// 依据：欺软怕硬打威慑低于自己的、飞蛾扑火打威慑高于自己的。确定性（无 RNG）。
 pub fn deterrence(state: &State, config: &GameConfig, ship_id: &str) -> f64 {
-    let Some(me) = state.ship(ship_id) else { return 0.0 };
+    let Some(me) = state.ship(ship_id) else {
+        return 0.0;
+    };
     let r = config.combat.deterrence_radius;
     let mut d = ship_power(config, me);
     if r > 0.0 {
         for s in &state.ships {
-            if s.name != ship_id && s.faction_id == me.faction_id && s.hull > 0.0
-                && dist(me.position, s.position) <= r {
+            if s.name != ship_id
+                && s.faction_id == me.faction_id
+                && s.hull > 0.0
+                && dist(me.position, s.position) <= r
+            {
                 d += ship_power(config, s);
             }
         }
@@ -130,7 +154,12 @@ pub fn ship_power(config: &GameConfig, ship: &Ship) -> f64 {
     p.attack * 4.0 + p.hull_max * 1.0 + p.shield_max * 0.8 + p.hardness * 3.0 + p.intercept * 2.0
 }
 
-pub fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: ShipBehavior, owner: &str) -> bool {
+pub fn behavior_is_valid(
+    state: &State,
+    _config: &GameConfig,
+    behavior: ShipBehavior,
+    owner: &str,
+) -> bool {
     match behavior {
         ShipBehavior::Move { .. } | ShipBehavior::Idle => true,
         ShipBehavior::Dock { body } => state.body(&body).is_some(),
@@ -158,8 +187,18 @@ pub fn behavior_is_valid(state: &State, _config: &GameConfig, behavior: ShipBeha
 /// 的既有约定（见 `step_capital` 的迁都：保留原来的 mode 标记）。
 pub fn reset_order_keep_mode(state: &mut State, fid: &FactionId, ship_id: &str) {
     if let Some(c) = state.control_mut(fid.clone()) {
-        let mode = c.ship_orders.get(ship_id).map(|c| c.mode).unwrap_or_default();
-        c.ship_orders.insert(ship_id.to_string(), Control { value: ShipBehavior::Idle, mode });
+        let mode = c
+            .ship_orders
+            .get(ship_id)
+            .map(|c| c.mode)
+            .unwrap_or_default();
+        c.ship_orders.insert(
+            ship_id.to_string(),
+            Control {
+                value: ShipBehavior::Idle,
+                mode,
+            },
+        );
     }
 }
 

@@ -13,9 +13,12 @@ mod fleet;
 mod governance;
 mod haul;
 mod ideology;
+mod knowledge;
 mod mond;
 mod site_supply;
+mod spending;
 mod story;
+mod trade;
 
 mod horizon_mid;
 
@@ -39,7 +42,11 @@ fn fresh_world(seed: u64) -> (GameConfig, State) {
 fn settlements_and_cities_are_one_to_one() {
     let (_config, state) = fresh_world(42);
     for b in &state.bodies {
-        let cities: Vec<&City> = state.cities.iter().filter(|c| c.body_id == b.name).collect();
+        let cities: Vec<&City> = state
+            .cities
+            .iter()
+            .filter(|c| c.body_id == b.name)
+            .collect();
         assert!(
             cities.len() <= b.settlements.len(),
             "body {}: {} cities must not exceed {} settlements",
@@ -59,21 +66,47 @@ fn settlements_and_cities_are_one_to_one() {
     }
 
     let earth = &state.bodies[2];
-    assert_eq!(earth.settlements.len(), 5, "Earth has five spec metropolises");
-    let earth_cities = state.cities.iter().filter(|c| c.body_id == "地球").count();
-    assert_eq!(earth_cities, 5, "five cities on five Earth settlements (1:1)");
-    // 巴黎 (settlement named 巴黎) hosts only 铀/铂 — its own region's ores.
-    let paris = earth.settlements[3].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
-    assert_eq!(paris, vec!["铀", "铂"], "Paris settlement mines only its own ores");
     assert_eq!(
-        state.cities.iter().find(|c| c.name == "巴黎").map(|c| c.settlement.as_str()),
+        earth.settlements.len(),
+        5,
+        "Earth has five spec metropolises"
+    );
+    let earth_cities = state.cities.iter().filter(|c| c.body_id == "地球").count();
+    assert_eq!(
+        earth_cities, 5,
+        "five cities on five Earth settlements (1:1)"
+    );
+    // 巴黎 (settlement named 巴黎) hosts only 铀/铂 — its own region's ores.
+    let paris = earth.settlements[3]
+        .resources
+        .iter()
+        .map(|d| d.resource.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paris,
+        vec!["铀", "铂"],
+        "Paris settlement mines only its own ores"
+    );
+    assert_eq!(
+        state
+            .cities
+            .iter()
+            .find(|c| c.name == "巴黎")
+            .map(|c| c.settlement.as_str()),
         Some("巴黎"),
         "巴黎 occupies the settlement named 巴黎"
     );
     // 长三角/珠三角 are distinct settlements, so both may mine 铁 independently.
-    let cn = earth.settlements[0].resources.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>();
+    let cn = earth.settlements[0]
+        .resources
+        .iter()
+        .map(|d| d.resource.as_str())
+        .collect::<Vec<_>>();
     assert!(cn.contains(&"铁"), "长三角 settlement has 铁");
-    assert!(cn.contains(&"硅") && cn.contains(&"水冰"), "长三角 has 硅/水冰");
+    assert!(
+        cn.contains(&"硅") && cn.contains(&"水冰"),
+        "长三角 has 硅/水冰"
+    );
 }
 
 // ---- 舰船设计图（blueprint）：出厂快照 / 归属 / 意图链 -------------------------
@@ -149,15 +182,19 @@ fn spawn_at(
 ) -> ShipId {
     let pos = state.body_position(body);
     let bp = blueprint.map(|s| s.to_string());
-    spawn_ship(state, config, ShipSpawn {
-        owner: owner.to_string(),
-        class,
-        position: pos,
-        city: None,
-        via: SpawnVia::Shipyard,
-        pay_components: false,
-        blueprint: bp.as_ref(),
-    })
+    spawn_ship(
+        state,
+        config,
+        ShipSpawn {
+            owner: owner.to_string(),
+            class,
+            position: pos,
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: false,
+            blueprint: bp.as_ref(),
+        },
+    )
 }
 
 /// 把某势力喂饱**所有**资源（免得「买不起」把设计图的用例卡住）。
@@ -167,7 +204,9 @@ fn spawn_at(
 /// 卡在门外（这正是 Q4(b) 生效的样子）。
 fn stock(state: &mut State, config: &GameConfig, fid: &str, amount: f64) {
     let keys: Vec<String> = config.resources.keys().cloned().collect();
-    let Some(f) = state.faction_mut(fid) else { return };
+    let Some(f) = state.faction_mut(fid) else {
+        return;
+    };
     for k in keys {
         f.resources.insert(k, amount);
     }

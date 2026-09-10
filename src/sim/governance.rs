@@ -14,7 +14,11 @@ pub fn total_live_pop(state: &State) -> u64 {
 
 /// 该势力的**军事实力占比**（舰队引擎数值之和 / 全星系舰队引擎数值之和），0..1。
 pub fn faction_military_share(state: &State, config: &GameConfig, fid: &str) -> f64 {
-    let total: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
+    let total: f64 = state
+        .ships
+        .iter()
+        .map(|s| ship_panel(config, s).hull_max)
+        .sum();
     if total <= 1e-9 {
         return 0.0;
     }
@@ -39,7 +43,10 @@ pub fn faction_mond_ship_share(state: &State, config: &GameConfig, fid: &str) ->
     if ships.is_empty() {
         return 0.0;
     }
-    let in_mond = ships.iter().filter(|s| dist(s.position, [0.0, 0.0]) > r).count() as f64;
+    let in_mond = ships
+        .iter()
+        .filter(|s| dist(s.position, [0.0, 0.0]) > r)
+        .count() as f64;
     in_mond / ships.len() as f64
 }
 
@@ -91,17 +98,9 @@ pub fn faction_colonizing(state: &State, fid: &str) -> f64 {
 ///   * `violate_轴` = 该势力「优势端思潮 vs 行为不符」的连续度（见 [`IdeologyDebuffConfig`]）。
 ///
 /// 全 C¹ 平滑、无硬阈值；只对优势端思潮本身生效（自指向，不误伤中立/对立端）。
-pub fn ideology_loyalty_debuff(
-    state: &State,
-    config: &GameConfig,
-    fid: &str,
-    p_total: f64,
-) -> f64 {
+pub fn ideology_loyalty_debuff(state: &State, config: &GameConfig, fid: &str, p_total: f64) -> f64 {
     let d = &config.ideology.debuff;
-    let id = state
-        .faction(fid)
-        .map(|f| f.ideology)
-        .unwrap_or_default();
+    let id = state.faction(fid).map(|f| f.ideology).unwrap_or_default();
     // 打击强度 = 该势力自身体量（单极化越坐大越该被打）。
     let dom = smoothstep(d.gate_lo, d.gate_hi, faction_pop_share(state, fid, p_total));
 
@@ -120,7 +119,10 @@ pub fn ideology_loyalty_debuff(
     let col = faction_colonizing(state, fid);
     let viol_col = smoothstep(0.0, 1.0, id.nature_colony) * (1.0 - smoothstep(0.0, 1.0, col));
 
-    let raw = d.w_military * viol_mil + d.w_science * viol_sci + d.w_elite * viol_elite + d.w_colony * viol_col;
+    let raw = d.w_military * viol_mil
+        + d.w_science * viol_sci
+        + d.w_elite * viol_elite
+        + d.w_colony * viol_col;
     d.max_loyalty_penalty * (dom * raw).clamp(0.0, 1.0)
 }
 
@@ -131,7 +133,12 @@ pub fn faction_ideology_debuffs(state: &State, config: &GameConfig) -> BTreeMap<
     state
         .factions
         .iter()
-        .map(|f| (f.name.clone(), ideology_loyalty_debuff(state, config, &f.name, p_total)))
+        .map(|f| {
+            (
+                f.name.clone(),
+                ideology_loyalty_debuff(state, config, &f.name, p_total),
+            )
+        })
         .collect()
 }
 
@@ -181,7 +188,10 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
 
         // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
         // 治理是否到位以及娱乐投入是否真正落地。
-        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state
+            .faction(&fid)
+            .map(|f| f.resources.clone())
+            .unwrap_or_default();
         let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
         let pay = governance_total.min(total_value);
         if pay > 1e-9 {
@@ -204,6 +214,21 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         let cap_bonus = faction_capital_share(state, &fid) * g.capital_share_loyalty_buff;
         // 思潮优势端自平衡 debuff：该势力若身处「垄断」的优势端思潮又「言行不符」，扣全国忠诚。
         let ideo_penalty = ideology_loyalty_debuff(state, config, &fid, p_total);
+        // **B1 深空治理**（用户裁决：`tech-system.md` §10 七条 MOND 红利里**只做这一条**）：
+        // 距离那条忠诚衰减 **× (1 − MOND 掌握度)** —— 掌握度 1.0（指哪打哪）的势力，
+        // **深处不再因为「离首都太远」而离心**。
+        //
+        // 为什么挂在「距离」这一项上、而不是给个独立加成：光速治理这条机制的全部内容就是
+        // 「指令从首都传到边陲要时间」；MOND 掌握的正是**在异常区里把坐标算准**这件事，
+        // 所以它读起来是「同一个物理量的两个读数」，不是外挂的一层 buff。
+        //
+        // 为什么只动忠诚、不动开销：裁决的原话是「**不按距离付忠诚衰减**」。开销那一半
+        // （`admin_per_au`）留在原处，于是这条红利买到的是**守得住**，不是**管得起**——
+        // 付不出治理费时城市照样掉忠诚（覆盖率那条支路与距离无关）。想要「管得起」是
+        // 另一个提案（§10 的 B2…B7 里没有它，留作未来）。
+        //
+        // 连续、无断崖：掌握度每涨一点，深处的离心压力就小一点（凡人 → 指哪打哪是渐变的）。
+        let mond_distance_relief = 1.0 - mond_control(state, &fid);
         // 记录本回合治理流（step_governance 的「中间量」）：总开销 + 覆盖率 + 行政/娱乐拆分 +
         // 人口超载倍率 + 思潮惩罚。**写入点从上面挪到这里**，是因为后两项此刻才算出来——
         // 捕获的仍是同一批局部变量，只是等它们齐了再写（纯追加：不参与任何计算）。
@@ -222,7 +247,8 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         let mut to_revolt = Vec::new();
         for (cid, d, ent) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
-            let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
+            let target_base =
+                (1.0 - g.loyalty_distance * a * scale * mond_distance_relief).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
             // 捕获这一城的忠诚目标值分项（纯追加）——「这座城的忠诚为什么在掉」的分解。
@@ -257,14 +283,20 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         for cid in to_revolt {
             // 先读爆发时的忠诚度：下面两条分支都会把它改写（倒戈重置为 1.0、夷平清零）。
             let loyalty = state.city(&cid).map(|c| c.loyalty).unwrap_or(0.0);
-            let target = most_ideologically_distant_faction(state, &fid)
-                .filter(|to| to != &fid);
+            let target = most_ideologically_distant_faction(state, &fid).filter(|to| to != &fid);
             if let Some(to) = target {
                 // 漏斗：改归属 + 记 `CityDefected`（在同一处，漏不掉）。
                 defect_city(state, config, &cid, &fid, &to, loyalty);
             } else {
                 // 漏斗：夷平为空白 + 记 `Revolt`。
-                raze_city(state, &cid, RazeCause::Revolt { faction: fid.clone(), loyalty });
+                raze_city(
+                    state,
+                    &cid,
+                    RazeCause::Revolt {
+                        faction: fid.clone(),
+                        loyalty,
+                    },
+                );
             }
         }
     }
@@ -277,7 +309,14 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
 /// 同时把旧主对该城建筑/娱乐预算的控制叶子迁到新主名下，使新主的 AI 确实能治理这座
 /// 城；并对旧主↔新主施加「夺城」级的关系打击（倒戈在旧主眼中几近叛国）。
 /// `loyalty` 是爆发时的忠诚度（换主后会被重置，故由调用方先读好传入）。
-pub fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &str, to: &str, loyalty: f64) {
+pub fn defect_city(
+    state: &mut State,
+    config: &GameConfig,
+    city: &str,
+    from: &str,
+    to: &str,
+    loyalty: f64,
+) {
     // 先收集该城建筑 id（避免在可变借权时再读 state.city）。
     let building_ids: Vec<BuildingId> = state
         .city(city)
@@ -341,14 +380,23 @@ pub fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &st
 
     // 外交：倒戈 = 夺城级的关系下压（旧主视新主为敌）。
     let cur = relation(state, from, to);
-    set_relation_sym(state, from.to_string(), to.to_string(), cur + config.diplomacy.capture_delta, config);
+    set_relation_sym(
+        state,
+        from.to_string(),
+        to.to_string(),
+        cur + config.diplomacy.capture_delta,
+        config,
+    );
     // 漏斗负责记事件：改归属与记 `CityDefected` 在同一处，**忘记记在结构上不可能**。
-    ev(state, GameEvent::CityDefected {
-        city: city.to_string(),
-        from: from.to_string(),
-        to: to.to_string(),
-        loyalty,
-    });
+    ev(
+        state,
+        GameEvent::CityDefected {
+            city: city.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            loyalty,
+        },
+    );
 }
 
 // --- 迁都 (capital relocation) ----------------------------------------------

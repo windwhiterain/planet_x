@@ -72,7 +72,7 @@ def census(s: ctl.Surface) -> pd.DataFrame:
 #: 删掉它们 = 一份**旧引擎**的索引目录，用来演一遍 kit 的降级路径（本地 `*_approx`）。
 _OLD_ENGINE_DROPS = ("order_effective_mode", "order_effective", "order_source",
                      "order_leaf_mode", "order_default_mode", "order_blueprint_mode",
-                     "doctrine", "kiting", "freighter", "freighter_mode",
+                     "doctrine", "kiting", "role", "role_mode",
                      "blueprint", "blueprint_mode", "spawned_round")
 
 
@@ -404,28 +404,32 @@ def main(argv=None) -> int:
           f"{len(_moved)} 艘：{[(c.leaf, c.before, c.after) for c in _moved]}")
 
     # ---------------------------------------------------------------- 4b. the third style axis
-    print("\n[4b] 第三条风格轴**角色**（运输舰↔战舰）：写值即接管 · AI 定编的闸门 · 删叶 = 交回定编")
+    print("\n[4b] 第三条风格轴**角色**（战舰 War / 运输舰 Freight / 观测舰 Observe）："
+          "写值即接管 · AI 定编的闸门 · 删叶 = 交回定编")
     hero = names[0]
     s_r = ctl.surface(ckpt, index_dir=proj)
-    check("角色轴进得了 surface()（读面每艘舰一行 `ship_freighter`）",
-          all(s_r.leaf(faction, "ship_freighter", n).value is not None for n in names),
+    check("角色轴进得了 surface()（读面每艘舰一行 `ship_role`）",
+          all(s_r.leaf(faction, "ship_role", n).value is not None for n in names),
           f"{len(names)} 艘")
     # ① 写值即接管：这艘舰归玩家，自动控制的逐舰定编从此不碰它。
-    s_r.set_freighter(hero, True, take_over=True)
+    #    ⚠ 值是三值字符串（`War`/`Freight`/`Observe`），不是旧版的 True/False。
+    s_r.set_role(hero, "Freight", take_over=True)
     path_r = ctl.write(s_r.emit(), work / "steer_r.json")
     rep_r = ctl.verify(ckpt, path_r)
     print(rep_r.describe())
     check("R: 写角色值 = 一次接管（回执指的就是那片叶）",
-          rep_r.took_over_leafs == [f"{faction}.ship_freighter[{hero}]"], f"{rep_r.took_over_leafs}")
-    check("R: 值真的写成了运输舰", rep_r.after.leaf(faction, "ship_freighter", hero).value is True)
+          rep_r.took_over_leafs == [f"{faction}.ship_role[{hero}]"], f"{rep_r.took_over_leafs}")
+    check("R: 值真的写成了运输舰",
+          rep_r.after.leaf(faction, "ship_role", hero).value == "Freight",
+          f"{rep_r.after.leaf(faction, 'ship_role', hero).value!r}")
 
     # 真的落地：verify 只是演习，而删叶必须对着「那片叶真的在」的 checkpoint 来。
     ckpt_r = work / "ckpt_r.ron"
     app_r = ctl.apply(ckpt, path_r, save=ckpt_r)
     check("R: --apply --save 成功，checkpoint 里这艘舰的角色已归玩家",
           app_r.ok and not app_r.skipped
-          and ctl.surface(ckpt_r).leaf(faction, "ship_freighter", hero).mode == ctl.PLAYER,
-          f"{ctl.surface(ckpt_r).leaf(faction, 'ship_freighter', hero)}")
+          and ctl.surface(ckpt_r).leaf(faction, "ship_role", hero).mode == ctl.PLAYER,
+          f"{ctl.surface(ckpt_r).leaf(faction, 'ship_role', hero)}")
 
     # ② 删叶 = **交回自动定编**（不是"锁成某个值"）。逐舰叶的存在性读面看不出来，
     #    所以"落地了没有"以引擎的 NOTE_APPLY_REMOVED 回执为准。
@@ -433,32 +437,33 @@ def main(argv=None) -> int:
     #    apply 下来——否则第二次删的仍然是"那片叶还在"的 checkpoint（这个坑笔记里记过，
     #    这里当场演示一遍）。
     s_r2 = ctl.surface(ckpt_r)
-    s_r2.remove_freighter(hero)
+    s_r2.remove_role(hero)
     path_r2 = ctl.write(s_r2.emit(), work / "steer_r2.json")
     rep_r2 = ctl.verify(ckpt_r, path_r2)
     print(rep_r2.describe())
     check("R: 删叶在引擎回执里出现（读面看不出来，靠回执）",
-          rep_r2.removed_leafs == [f"{faction}.ship_freighter[{hero}]"], f"{rep_r2.removed_leafs}")
+          rep_r2.removed_leafs == [f"{faction}.ship_role[{hero}]"], f"{rep_r2.removed_leafs}")
     ckpt_r2 = work / "ckpt_r2.ron"
     check("R: 删叶真的落地（--apply --save：这一步之后那片叶才真的没了）",
           ctl.apply(ckpt_r, path_r2, save=ckpt_r2).ok)
-    rep_r3 = ctl.verify(ckpt_r2, ctl.surface(ckpt_r2).remove_freighter(hero).emit())
+    rep_r3 = ctl.verify(ckpt_r2, ctl.surface(ckpt_r2).remove_role(hero).emit())
     check("R: 再删同一片叶 = 幂等成功（不进回执、也不算丢弃）",
           rep_r3.ok and rep_r3.removed_leafs == [] and not rep_r3.skipped, str(rep_r3.removed_leafs))
 
     # ③ 势力级默认角色叶：一片叶管住全舰队；`Player` 就是「AI 定编别碰我的舰队」那道闸门。
+    #    这里用第三态 `Observe`——它是本轮新加的那一档（观测舰去异常区蹲着喂 MOND 掌握度）。
     s_r3 = ctl.surface(ckpt_r)
-    s_r3.set_default_freighter(faction, True, mode=ctl.PLAYER)
+    s_r3.set_default_role(faction, "Observe", mode=ctl.PLAYER)
     path_r3 = ctl.write(s_r3.emit(), work / "steer_r3.json")
     rep_r4 = ctl.verify(ckpt_r, path_r3)
-    d_leaf = rep_r4.after.leaf(faction, "default_freighter")
-    check("R: 势力级默认角色叶建成（读面里出现，值是玩家钉的运输舰）",
-          d_leaf.value is True and d_leaf.mode == ctl.PLAYER, f"{d_leaf}")
+    d_leaf = rep_r4.after.leaf(faction, "default_role")
+    check("R: 势力级默认角色叶建成（读面里出现，值是玩家钉的观测舰）",
+          d_leaf.value == "Observe" and d_leaf.mode == ctl.PLAYER, f"{d_leaf}")
     ckpt_r3 = work / "ckpt_r3.ron"
     check("R: 势力级默认叶真的落地", ctl.apply(ckpt_r, path_r3, save=ckpt_r3).ok)
-    rep_r5 = ctl.verify(ckpt_r3, ctl.surface(ckpt_r3).remove_default_freighter(faction).emit())
+    rep_r5 = ctl.verify(ckpt_r3, ctl.surface(ckpt_r3).remove_default_role(faction).emit())
     check("R: 删势力级默认角色叶也在回执里（`exists` 由 True 翻回 False）",
-          rep_r5.removed_leafs == [f"{faction}.default_freighter"], f"{rep_r5.removed_leafs}")
+          rep_r5.removed_leafs == [f"{faction}.default_role"], f"{rep_r5.removed_leafs}")
 
     # ---------------------------------------------------------------- 4c. 舰船设计图
     print("\n[4c] 设计图**blueprint**（「还不存在的舰」的出厂规格）：建图 · 建造区指针 · 删图")
@@ -526,8 +531,13 @@ def main(argv=None) -> int:
         ckpt_bp2 = work / "ckpt_bp2.ron"
         check("BP: 拆指针真的落地", ctl.apply(ckpt_bp, path_bp2, save=ckpt_bp2).ok)
         got2 = ctl.buildings(ckpt_bp2)
+        # ⚠ `pd.isna` 而不是 `is None`：引擎给的确实是 JSON `null`（Python 侧就是 `None`），但
+        # pandas 3 的 `str` dtype 会把「有字符串、也有缺值」的列统一成 `str` + `NaN` —— 于是这一格
+        # 读出来是 `nan`（float），`is None` 恒 False。同一个坑这份 demo 在 `mine["order"]` 那处
+        # 已经用 `pd.isna` 绕过（见上面「图的意图轴默认沉默」那条）。
         check("BP: 指针回到「无」（= 走 ship_type + choose_loadout）",
-              got2[(got2["city"] == ycity) & (got2["building"] == ybid)].iloc[0]["blueprint"] is None)
+              pd.isna(got2[(got2["city"] == ycity)
+                           & (got2["building"] == ybid)].iloc[0]["blueprint"]))
 
         # ④ 删图（改名/换代的正规路径）：回执点名到叶。⚠ 删图之后挂它的区是**悬空指针 ⇒ 停产**
         #    （进度不再增加），所以正确用法是**先拆指针再删图**——读面会把悬空指针原样输出。
@@ -683,9 +693,9 @@ def main(argv=None) -> int:
             lambda: ctl.surface(ckpt, index_dir=proj).set_budget(
                 faction, "construction_budget", {"不存在": 1.0}, mode=ctl.PLAYER),
             "不在已知表里")
-    refuses("角色轴喂一个数字 → 当场拒绝（它是开关，不是数值轴）",
-            lambda: ctl.surface(ckpt).set_freighter(names[:1], 1),
-            "只接受 True/False")
+    refuses("角色轴喂一个数字 → 当场拒绝（它是三值字符串枚举，不是数值轴）",
+            lambda: ctl.surface(ckpt).set_role(names[:1], 1),
+            "只接受")
 
     hand_written = {"control": [{"faction_id": faction, "ship_orders": [
         {"ship": names[0], "mode": "Auto"}, {"ship": "方舟3", "mode": "Player"}]}]}

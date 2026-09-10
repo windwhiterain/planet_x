@@ -94,7 +94,10 @@ pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
             }
         }
         for c in &state.cities {
-            if c.faction_id == name && !c.razed && dist(state.body_position(&c.body_id), [0.0, 0.0]) > r {
+            if c.faction_id == name
+                && !c.razed
+                && dist(state.body_position(&c.body_id), [0.0, 0.0]) > r
+            {
                 tech_cities += 1;
             }
         }
@@ -104,7 +107,7 @@ pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
             .get(&name)
             .map(|m| m.iter().map(|(k, v)| v * value_of(k)).sum())
             .unwrap_or(0.0);
-        let upkeep = flow.upkeep.get(&name).copied().unwrap_or(0.0);
+        let upkeep = flow.upkeep.get(&name).map(|u| u.total).unwrap_or(0.0);
         let gov = flow.governance.get(&name).map(|g| g.total).unwrap_or(0.0);
         let net = prod - upkeep - gov;
         // 人均面积（全部定居点面积 / 总人口）
@@ -124,7 +127,8 @@ pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
 
         let t = Ideology {
             peace_military: (mil * ic.military_scale).clamp(-1.0, 1.0),
-            science_tech: ((tech_cities as f64 - sci_ships as f64) * ic.mond_scale).clamp(-1.0, 1.0),
+            science_tech: ((tech_cities as f64 - sci_ships as f64) * ic.mond_scale)
+                .clamp(-1.0, 1.0),
             people_elite: (net / ic.economy_scale.max(1e-6)).clamp(-1.0, 1.0),
             nature_colony: ((ic.area_ref - pca) * ic.area_scale).clamp(-1.0, 1.0),
         };
@@ -133,7 +137,9 @@ pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
 
     // Pass 2（可变 state）：把各势力思潮向 target 靠拢（确定性；钳 [-1,1]）。
     for f in &mut state.factions {
-        let Some(target) = targets.get(&f.name) else { continue };
+        let Some(target) = targets.get(&f.name) else {
+            continue;
+        };
         let dr = ic.drift_rate;
         let converge = |cur: f64, tgt: f64| (cur + dr * (tgt - cur)).clamp(-1.0, 1.0);
         f.ideology.peace_military = converge(f.ideology.peace_military, target.peace_military);

@@ -34,15 +34,25 @@ fn apply_ship_doctrine_patch() {
         "补丁写的是叶片；舰上的 doctrine 是记录值，不该被改"
     );
     // 写值即接管：这片叶从此归玩家。
-    assert_eq!(state.ship_doctrine_control("长城".to_string()), ControlMode::Player);
-    assert_eq!(state.ship_kiting_control("长城".to_string()), ControlMode::Player);
+    assert_eq!(
+        state.ship_doctrine_control("长城".to_string()),
+        ControlMode::Player
+    );
+    assert_eq!(
+        state.ship_kiting_control("长城".to_string()),
+        ControlMode::Player
+    );
     // 华盛顿 belongs to 美国, not 中国 → the 中国 patch must be a no-op.
     assert_eq!(
         state.ship_doctrine("华盛顿".to_string()).temper,
         0.0,
         "other-faction ship must be untouched"
     );
-    assert_eq!(state.ship_kiting("华盛顿".to_string()), 0.0, "other-faction ship must be untouched");
+    assert_eq!(
+        state.ship_kiting("华盛顿".to_string()),
+        0.0,
+        "other-faction ship must be untouched"
+    );
 }
 
 /// 舰队默认**风格**（`default_doctrine` / `default_kiting`）：一片叶改全舰队、
@@ -66,7 +76,11 @@ fn fleet_default_style_covers_ships_without_leaves() {
         "control": [{"faction_id": "中国", "default_kiting": {"kiting": -1.0}}]
     });
     apply_patch(&mut state, &config, &diff).expect("default style applies");
-    assert_eq!(state.ship_kiting(ship.clone()), -1.0, "没有叶片的舰必须跟随舰队默认");
+    assert_eq!(
+        state.ship_kiting(ship.clone()),
+        -1.0,
+        "没有叶片的舰必须跟随舰队默认"
+    );
     assert_eq!(
         state.ship_kiting_control(ship.clone()),
         ControlMode::Player,
@@ -78,14 +92,22 @@ fn fleet_default_style_covers_ships_without_leaves() {
         "control": [{"faction_id": "中国", "ship_kiting": [{"ship": ship, "kiting": 1.0, "mode": "Player"}]}]
     });
     apply_patch(&mut state, &config, &diff).expect("per-ship override applies");
-    assert_eq!(state.ship_kiting(ship.clone()), 1.0, "单舰叶片比舰队默认更具体");
+    assert_eq!(
+        state.ship_kiting(ship.clone()),
+        1.0,
+        "单舰叶片比舰队默认更具体"
+    );
 
     // 3) 把叶片交回上层（Inherit）⇒ 又回到舰队默认的值。
     let diff = serde_json::json!({
         "control": [{"faction_id": "中国", "ship_kiting": [{"ship": ship, "mode": "Inherit"}]}]
     });
     apply_patch(&mut state, &config, &diff).expect("release applies");
-    assert_eq!(state.ship_kiting(ship.clone()), -1.0, "叶 Inherit + 舰队默认 Player ⇒ 取默认值");
+    assert_eq!(
+        state.ship_kiting(ship.clone()),
+        -1.0,
+        "叶 Inherit + 舰队默认 Player ⇒ 取默认值"
+    );
 }
 
 /// 舰队默认指令（`default_ship_order`）：**新舰出生就有意图**，而且**一个叶片改全舰队**。
@@ -107,9 +129,21 @@ fn fleet_default_order_covers_new_ships() {
         .find(|s| s.faction_id == fid)
         .map(|s| s.name.clone())
         .expect("a chinese ship");
-    state.control_mut(fid.clone()).expect("control").ship_orders.remove(&ship);
-    assert_eq!(state.ship_control(ship.clone()), ControlMode::Auto, "no leaf, no default → system");
-    assert_eq!(state.ship_behavior(ship.clone()), None, "no leaf, no default → no order at all");
+    state
+        .control_mut(fid.clone())
+        .expect("control")
+        .ship_orders
+        .remove(&ship);
+    assert_eq!(
+        state.ship_control(ship.clone()),
+        ControlMode::Auto,
+        "no leaf, no default → system"
+    );
+    assert_eq!(
+        state.ship_behavior(ship.clone()),
+        None,
+        "no leaf, no default → no order at all"
+    );
 
     // 写一个舰队默认（不带 mode → 写值即接管 = Player）。
     let diff = serde_json::json!({
@@ -126,7 +160,9 @@ fn fleet_default_order_covers_new_ships() {
     );
     assert_eq!(
         state.ship_behavior(ship.clone()),
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        }),
         "…and its intent (this is the whole point: the new ship has orders without being named)"
     );
 
@@ -138,7 +174,11 @@ fn fleet_default_order_covers_new_ships() {
         }]
     });
     apply_patch(&mut state, &config, &batch).expect("fleet default retarget applies");
-    assert_eq!(state.ship_behavior(ship.clone()), Some(ShipBehavior::Idle), "one leaf, whole fleet");
+    assert_eq!(
+        state.ship_behavior(ship.clone()),
+        Some(ShipBehavior::Idle),
+        "one leaf, whole fleet"
+    );
 
     let exception = serde_json::json!({
         "control": [{"faction_id": "中国",
@@ -148,13 +188,22 @@ fn fleet_default_order_covers_new_ships() {
     apply_patch(&mut state, &config, &exception).expect("per-ship exception applies");
     assert_eq!(
         state.ship_behavior(ship.clone()),
-        Some(ShipBehavior::Colonize { body: "火星".to_string() }),
+        Some(ShipBehavior::Colonize {
+            body: "火星".to_string()
+        }),
         "a named ship overrides the fleet default"
     );
 
     // 舰队默认读面即写面：`--control` 里看得见它，且值能原样回传。
-    let view = control_view(&state, &config, fid.clone(), state.control(fid.clone()).expect("control"));
-    let d = view.default_ship_order.expect("the fleet default is part of the read surface");
+    let view = control_view(
+        &state,
+        &config,
+        fid.clone(),
+        state.control(fid.clone()).expect("control"),
+    );
+    let d = view
+        .default_ship_order
+        .expect("the fleet default is part of the read surface");
     assert_eq!(d.mode, Some(ControlMode::Player));
     assert_eq!(d.behavior, Some(ShipBehavior::Idle));
 }
@@ -175,66 +224,90 @@ fn the_role_axis_obeys_the_same_delete_rules() {
         .expect("中国至少有一艘舰");
     // 出厂记录值给成 `true`：否则「删叶回到记录值」与「钉在 false」分不出来。
     for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.freighter = true;
+        s.role = ShipRole::Freight;
     }
 
     // ① 逐舰角色叶（玩家钉「打仗」）：有效值 = 叶里的值，归属 = Player（AI 从此不许碰）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "freighter": false}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "role": "War"}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
-    assert!(!state.ship_freighter(ship.clone()));
-    assert_eq!(state.ship_freighter_control(ship.clone()), ControlMode::Player);
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::War);
+    assert_eq!(state.ship_role_control(ship.clone()), ControlMode::Player);
 
     // ② 删叶 ⇒ 回到出厂记录值，叶真的没了，并且**交回自动定编**（归属不再是 Player）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
     assert_eq!(r.removed.len(), 1, "{:?}", r.removed);
-    assert!(r.removed[0].contains("ship_freighter"), "{:?}", r.removed);
-    assert!(state.ship_freighter(ship.clone()), "删叶之后回落到出厂记录值 true");
+    assert!(r.removed[0].contains("ship_role"), "{:?}", r.removed);
+    assert_eq!(
+        state.ship_role(ship.clone()),
+        ShipRole::Freight,
+        "删叶之后回落到出厂记录值 Freight"
+    );
     assert!(
-        state.control.get(&fid).and_then(|c| c.ship_freighter.get(&ship)).is_none(),
+        state
+            .control
+            .get(&fid)
+            .and_then(|c| c.ship_role.get(&ship))
+            .is_none(),
         "叶必须真的没了"
     );
     assert_ne!(
-        state.ship_freighter_control(ship.clone()),
+        state.ship_role_control(ship.clone()),
         ControlMode::Player,
         "删叶 = 交回自动定编：AI 下回合作出的结论可以再写进这片叶"
     );
 
     // ③ 幂等：再删一次仍然**成功**（目标状态已达成），但不进回执、不算丢弃。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean() && r.removed.is_empty() && r.applied == 1, "{:?}", r);
+    assert!(
+        r.is_clean() && r.removed.is_empty() && r.applied == 1,
+        "{:?}",
+        r
+    );
 
     // ④ `remove` 带值 / 带归属 ⇒ 拒绝（删与写是两件事）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true, "freighter": false}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true, "role": "War"}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert_eq!(r.skipped.len(), 1, "{:?}", r);
     assert_eq!(r.skipped[0].code, "remove_conflicts_with_value");
-    assert!(state.ship_freighter(ship.clone()), "被拒绝的补丁一个字节都不许动");
+    assert_eq!(
+        state.ship_role(ship.clone()),
+        ShipRole::Freight,
+        "被拒绝的补丁一个字节都不许动"
+    );
 
     // ⑤ 势力级默认角色叶：`Player` 时它的值压过叶片值（AI 定编的闸门）；删掉它 ⇒ 不再供值。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_freighter": {"freighter": false, "mode": "Player"}}]
+        "control": [{"faction_id": fid, "default_role": {"role": "War", "mode": "Player"}}]
     });
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
-    assert!(!state.ship_freighter(ship.clone()), "舰队默认是 Player ⇒ 它的值说了算");
+    assert_eq!(
+        state.ship_role(ship.clone()),
+        ShipRole::War,
+        "舰队默认是 Player ⇒ 它的值说了算"
+    );
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_freighter": {"remove": true}}]
+        "control": [{"faction_id": fid, "default_role": {"remove": true}}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
-    assert!(r.removed[0].contains("default_freighter"), "{:?}", r.removed);
-    assert!(state.ship_freighter(ship.clone()), "默认叶没了 ⇒ 回落到舰上记录值 true");
+    assert!(r.removed[0].contains("default_role"), "{:?}", r.removed);
+    assert_eq!(
+        state.ship_role(ship.clone()),
+        ShipRole::Freight,
+        "默认叶没了 ⇒ 回落到舰上记录值 Freight"
+    );
 
     // ⑥ 陈叶（舰已不在）照删不误：与另两条轴同一条规矩。
     state.ships.retain(|s| s.name != ship);
@@ -242,13 +315,17 @@ fn the_role_axis_obeys_the_same_delete_rules() {
         .control
         .entry(fid.clone())
         .or_default()
-        .ship_freighter
-        .insert(ship.clone(), Control::inherit(true));
+        .ship_role
+        .insert(ship.clone(), Control::inherit(ShipRole::Freight));
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
-    assert!(r.is_clean(), "删陈叶不该因为舰没了而被丢弃：{:?}", r.skipped);
+    assert!(
+        r.is_clean(),
+        "删陈叶不该因为舰没了而被丢弃：{:?}",
+        r.skipped
+    );
     assert_eq!(r.removed.len(), 1, "{:?}", r.removed);
 }
 
@@ -268,9 +345,17 @@ fn a_two_axis_fleet_default_must_be_created_with_both_axes() {
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert_eq!(r.skipped.len(), 1, "{:?}", r);
     assert_eq!(r.skipped[0].code, "partial_doctrine_leaf");
-    assert!(r.skipped[0].reason.contains("两条轴"), "拒绝理由要给改法：{}", r.skipped[0].reason);
     assert!(
-        state.control.get(&fid).and_then(|c| c.default_doctrine.as_ref()).is_none(),
+        r.skipped[0].reason.contains("两条轴"),
+        "拒绝理由要给改法：{}",
+        r.skipped[0].reason
+    );
+    assert!(
+        state
+            .control
+            .get(&fid)
+            .and_then(|c| c.default_doctrine.as_ref())
+            .is_none(),
         "被拒绝的补丁不许留下半片叶"
     );
 
@@ -279,8 +364,15 @@ fn a_two_axis_fleet_default_must_be_created_with_both_axes() {
         "control": [{"faction_id": fid, "default_doctrine": {"mode": "Player"}}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
-    assert!(r.is_clean() && r.took_over.is_empty(), "只写 mode 不是接管：{:?}", r.took_over);
-    let leaf = state.control[&fid].default_doctrine.clone().expect("叶建出来了");
+    assert!(
+        r.is_clean() && r.took_over.is_empty(),
+        "只写 mode 不是接管：{:?}",
+        r.took_over
+    );
+    let leaf = state.control[&fid]
+        .default_doctrine
+        .clone()
+        .expect("叶建出来了");
     assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.0, 0.0));
 
     // ③ 叶已存在 ⇒ 单轴写合法，缺省轴保留现值。
@@ -289,14 +381,23 @@ fn a_two_axis_fleet_default_must_be_created_with_both_axes() {
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean(), "{:?}", r.skipped);
-    let leaf = state.control[&fid].default_doctrine.clone().expect("叶还在");
+    let leaf = state.control[&fid]
+        .default_doctrine
+        .clone()
+        .expect("叶还在");
     assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.0, -0.5));
 
     // ④ 删掉之后"叶不存在"这条状态又回来了 ⇒ 再单轴写还是被拒（守卫看的是存在性，不是次数）。
     let diff = serde_json::json!({
         "control": [{"faction_id": fid, "default_doctrine": {"remove": true}}]
     });
-    assert!(apply_patch(&mut state, &config, &diff).unwrap().removed.len() == 1);
+    assert!(
+        apply_patch(&mut state, &config, &diff)
+            .unwrap()
+            .removed
+            .len()
+            == 1
+    );
     let diff = serde_json::json!({
         "control": [{"faction_id": fid, "default_doctrine": {"lone_wolf": -0.5}}]
     });
@@ -320,7 +421,10 @@ fn a_single_axis_ship_leaf_seeds_the_other_axis_from_what_is_in_use() {
         .map(|s| s.name.clone())
         .expect("中国至少有一艘舰");
     for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.doctrine = ShipDoctrine { temper: 0.71, lone_wolf: -0.2 };
+        s.doctrine = ShipDoctrine {
+            temper: 0.71,
+            lone_wolf: -0.2,
+        };
     }
 
     // 没有舰队默认 ⇒ 缺省轴 = 出厂记录值。
@@ -329,7 +433,11 @@ fn a_single_axis_ship_leaf_seeds_the_other_axis_from_what_is_in_use() {
     });
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     let leaf = state.control[&fid].ship_doctrine[&ship].clone();
-    assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.5, -0.2), "缺省轴要种出厂记录值，不是 0.0");
+    assert_eq!(
+        (leaf.value.temper, leaf.value.lone_wolf),
+        (0.5, -0.2),
+        "缺省轴要种出厂记录值，不是 0.0"
+    );
 
     // 舰队默认是玩家表态 ⇒ 缺省轴 = **当时在用的那个数**（界面上显示的就是它）。
     let diff = serde_json::json!({

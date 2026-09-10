@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::model::{
-    Blueprint, BlueprintId, BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipDoctrine, ShipId,
+    Blueprint, BlueprintId, BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipDoctrine,
+    ShipId, ShipRole,
 };
 
 /// 沿作用域链（从具体到宽泛）取第一个**有意见**的层，即第一个不是
@@ -192,17 +193,26 @@ pub struct Control<T> {
 impl<T> Control<T> {
     /// 一个由系统自动决策的可控值。
     pub fn auto(value: T) -> Self {
-        Self { value, mode: ControlMode::Auto }
+        Self {
+            value,
+            mode: ControlMode::Auto,
+        }
     }
 
     /// 一个由玩家指令决定的可控值。
     pub fn player(value: T) -> Self {
-        Self { value, mode: ControlMode::Player }
+        Self {
+            value,
+            mode: ControlMode::Player,
+        }
     }
 
     /// 一个继承上层（本层没有说话）的可控值。
     pub fn inherit(value: T) -> Self {
-        Self { value, mode: ControlMode::Inherit }
+        Self {
+            value,
+            mode: ControlMode::Inherit,
+        }
     }
 }
 
@@ -265,15 +275,16 @@ pub struct ControllableState {
     /// 本方各舰的**风筝<->贴脸姿态**叶片（值 + 三态归属），与 `ship_doctrine` 同形的另一条轴。
     #[serde(default)]
     pub ship_kiting: BTreeMap<ShipId, Control<f64>>,
-    /// 本方各舰的**角色**叶片（值 + 三态归属）：`true` = 运输舰、`false` = 战舰。
+    /// 本方各舰的**角色**叶片（值 + 三态归属）：[`ShipRole`] = 打仗 / 运输 / **观测**。
     /// 这是第三条风格轴，取值规则与 `ship_doctrine`/`ship_kiting` 完全同形
-    /// （叶 → 舰队默认 → 舰上记录值，见 [`State::ship_freighter`](crate::model::State::ship_freighter)）。
+    /// （叶 → 舰队默认 → 舰上记录值，见 [`State::ship_role`](crate::model::State::ship_role)）。
     ///
-    /// **与前两条轴的唯一差别：这条轴 AI 会写**（前两条 AI 只读）。因为「谁是运输舰」是
-    /// 自动控制**每回合要做的判断**（按积压定编，见 `autocontrol::freight`），它需要把结论
-    /// 落在某处才稳定。三态语义照旧：玩家把这片叶设成 `Player`，AI 就不再改写它。
+    /// **与前两条轴的唯一差别：这条轴 AI 会写**（前两条 AI 只读）。因为「这艘舰干哪种活」是
+    /// 自动控制**每回合要做的判断**（按积压定编 + 按观测缺口定编，见 `autocontrol::freight`
+    /// 与 `autocontrol::knowledge`），它需要把结论落在某处才稳定。三态语义照旧：玩家把这片叶
+    /// 设成 `Player`，AI 就不再改写它。
     #[serde(default)]
-    pub ship_freighter: BTreeMap<ShipId, Control<bool>>,
+    pub ship_role: BTreeMap<ShipId, Control<ShipRole>>,
     /// **舰队默认指令**（势力级的「没有别的指令时怎么办」）。
     ///
     /// 它是「新舰出生就有意图」和「一次性指令执行完回落到哪」的唯一答案，也是本势力
@@ -296,7 +307,7 @@ pub struct ControllableState {
     /// **舰队默认角色**（势力级，第三条风格轴）：叶 Inherit 的舰取它的值。
     /// 「全舰队转运输、只有两艘战列留作战舰」这类意图 = 一片默认叶 + 几片特例叶。
     #[serde(default)]
-    pub default_freighter: Option<Control<bool>>,
+    pub default_role: Option<Control<ShipRole>>,
     /// **设计图库**（势力级）：图名 → 图纸。
     ///
     /// 设计图是**「还不存在的舰」的出厂规格**：建造区指向一张图

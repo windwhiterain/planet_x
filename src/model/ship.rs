@@ -4,6 +4,46 @@ use std::collections::BTreeMap;
 
 use crate::model::{BodyId, CityId, FactionId, ResourceMap, ShipId};
 
+/// **一艘舰的角色**（第三条风格轴的**取值**）：自动控制按它决定「这艘舰本回合干哪种活」。
+///
+/// 用户裁决（`tech-system.md` §11 裁决 9b = (a)）：**角色轴加第三态**——原来是 `bool`
+/// （运输/战斗），现在是三态：
+///
+/// | 值 | 自动控制派它干什么 | 为什么存在 |
+/// |---|---|---|
+/// | [`ShipRole::War`] | 找仗打：接战 / 轰炸 / 殖民 | 基线（旧 `false`） |
+/// | [`ShipRole::Freight`] | 排集货路线（`autocontrol::freight`） | 旧 `true` |
+/// | [`ShipRole::Observe`] | **去异常区蹲着**（`autocontrol::knowledge`）——它是 MOND 掌握度**唯一**的知识来源 | 裁决 9b：没有它，知识渠道空转（实测没人去拿） |
+///
+/// ⚠ 三态是**互斥**的（一条轴一个值），不是三条并行的 bool：一艘舰同一时刻只有一种活。
+/// 优先级是**观测 > 运输 > 战斗**（`should_be_role` 的判据顺序）——观测排第一是因为
+/// 「没有观测，渠道就空转」，而运输可以由别的舰补上。
+///
+/// ⚠ 它**不是有效值**：有效角色走 `State::ship_role`（叶 → 舰队默认 → **记录值**）。
+/// 三态中的任何一个都**不解除武装**：观测舰、运输舰在射程内照样自动开火、照样按
+/// `kiting` 姿态软移动（沿用「角色只管派哪种活」的既有裁决）。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum ShipRole {
+    /// 战舰：找仗打（接战 / 轰炸 / 殖民）。
+    #[default]
+    War,
+    /// 运输舰：跑集货路线（把产地货栈的货搬回首都）。
+    Freight,
+    /// **观测舰**：驻在引力异常区里，把「飞船在异常区」这条知识渠道喂给本势力。
+    Observe,
+}
+
+impl ShipRole {
+    /// 稳定短名（观察面/日志用；serde 的 JSON 形态与它一致）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::War => "War",
+            Self::Freight => "Freight",
+            Self::Observe => "Observe",
+        }
+    }
+}
+
 /// 一艘舰的「行为风格」——自动控制(`autocontrol`)读取它来决定怎么打。每条轴取 `[-1,1]`，
 /// **0 = 基线**(与旧行为一致)。这是 **per-舰** 的配置,不是全局值:舰出厂时继承所属舰级的
 /// [`ShipSpec::default_doctrine`],也可由 `--apply` 按舰覆写。引擎本身不读它——它只影响
@@ -107,18 +147,18 @@ pub struct Ship {
     /// （叶 → 舰队默认 → 这个记录值）；agent 视图与投影给的都是有效值。
     #[serde(default)]
     pub kiting: f64,
-    /// 本舰的**角色**记录值：`true` = **运输舰**（自动控制给它排集货路线），
-    /// `false` = **战舰**（自动控制让它找仗打：接战/轰炸/殖民）。
+    /// 本舰的**角色**记录值（见 [`ShipRole`]）：自动控制派它干哪种活——打仗 / 跑运输 /
+    /// 蹲异常区观测。
     ///
     /// ⚠ 与 [`Self::doctrine`]/[`Self::kiting`] 一样**它不是有效值**：有效角色走
-    /// `State::ship_freighter`（叶 → 舰队默认 → **这个记录值**，出厂时继承
-    /// [`crate::model::ShipSpec::default_freighter`]）。
+    /// `State::ship_role`（叶 → 舰队默认 → **这个记录值**，出厂时继承
+    /// [`crate::model::ShipSpec::default_role`]）。
     ///
-    /// **这个布尔只管一件事：自动控制把「找仗打」还是「跑运输」当成它的活。**
-    /// 它**不解除武装**——运输舰在射程内照样自动开火、照样按 kiting 姿态软移动。
-    /// 换句话说：它不是「军舰/民船」的军备差别，而是**同一个舰长的两种活**。
+    /// **角色只管一件事：自动控制把哪种活当成它的。**
+    /// 它**不解除武装**——无论哪种角色的舰，在射程内照样自动开火、照样按 kiting 姿态软移动。
+    /// 换句话说：它不是「军舰/民船」的军备差别，而是**同一个舰长的三种活**。
     #[serde(default)]
-    pub freighter: bool,
+    pub role: ShipRole,
     /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
     /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
     /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
@@ -167,18 +207,11 @@ fn coprime_step(len: usize) -> usize {
     if len <= 1 {
         return 1;
     }
-    (3..len)
-        .rev()
-        .find(|&s| gcd(s, len) == 1)
-        .unwrap_or(1)
+    (3..len).rev().find(|&s| gcd(s, len) == 1).unwrap_or(1)
 }
 
 fn gcd(a: usize, b: usize) -> usize {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 /// Deterministic, unique-per-faction ship name drawn from a faction's name pool.

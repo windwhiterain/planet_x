@@ -9,7 +9,16 @@ use std::path::PathBuf;
 
 /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
 const MAJOR_EAGER: &[&str] = &[
-    "round", "time_month", "event_ids", "chronicle", "view", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
+    "round",
+    "time_month",
+    "event_ids",
+    "chronicle",
+    "view",
+    "ship_ids",
+    "city_ids",
+    "faction_ids",
+    "body_ids",
+    "settlement_ids",
 ];
 
 /// A scratch dir for one test, removed on drop.
@@ -30,7 +39,9 @@ impl Drop for Scratch {
 
 fn jsonl(path: &Path) -> Vec<serde_json::Value> {
     let text = fs::read_to_string(path).unwrap();
-    text.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
 }
 
 /// The main stream must be **lean**: no heavy object collections inline — only eager fields +
@@ -51,7 +62,11 @@ fn projection_writes_lean_main_and_indexed_tables() {
     for f in LAZY {
         assert!(lazy.contains_key(f.name), "schema.lazy 缺 {}", f.name);
         assert_eq!(lazy[f.name]["key"], f.key, "schema.lazy.{}.key 错", f.name);
-        assert_eq!(lazy[f.name]["table"], f.table, "schema.lazy.{}.table 错", f.name);
+        assert_eq!(
+            lazy[f.name]["table"], f.table,
+            "schema.lazy.{}.table 错",
+            f.name
+        );
     }
     let eager = schema["eager"].as_object().unwrap();
     for k in MAJOR_EAGER {
@@ -64,14 +79,26 @@ fn projection_writes_lean_main_and_indexed_tables() {
     assert_eq!(main[0]["round"], 0);
     for row in &main {
         for obj in ["ships", "cities", "factions", "bodies", "settlements"] {
-            assert!(!row.as_object().unwrap().contains_key(obj), "main 不应内联 {obj}");
+            assert!(
+                !row.as_object().unwrap().contains_key(obj),
+                "main 不应内联 {obj}"
+            );
         }
         // 事件已改为 lazy：主流只带 event_ids，不再内联 events。
-        assert!(!row.as_object().unwrap().contains_key("events"), "main 不应内联 events（已 lazy 化）");
-        assert!(row["contract_ids"].is_array(), "main 每行要有 contract_ids（join contracts 用）");
+        assert!(
+            !row.as_object().unwrap().contains_key("events"),
+            "main 不应内联 events（已 lazy 化）"
+        );
+        assert!(
+            row["contract_ids"].is_array(),
+            "main 每行要有 contract_ids（join contracts 用）"
+        );
         let ids = row["ship_ids"].as_array().unwrap();
         assert!(!ids.is_empty(), "main 每行要有 ship_ids（join 用）");
-        assert!(row["event_ids"].is_array(), "main 每行要有 event_ids（join events 用）");
+        assert!(
+            row["event_ids"].is_array(),
+            "main 每行要有 event_ids（join events 用）"
+        );
     }
 
     // lazy tables actually written.
@@ -82,14 +109,23 @@ fn projection_writes_lean_main_and_indexed_tables() {
     assert!(s.0.join("idx/bodies.jsonl").exists());
     assert!(s.0.join("idx/settlements.jsonl").exists());
     // 雇佣挂单簿：表必须存在，且列面与 schema 声明一致（挂单号/雇主/受雇方/要求运力/期限）。
-    assert!(s.0.join("idx/contracts.jsonl").exists(), "缺 idx/contracts.jsonl（雇佣挂单簿）");
+    assert!(
+        s.0.join("idx/contracts.jsonl").exists(),
+        "缺 idx/contracts.jsonl（雇佣挂单簿）"
+    );
     let contract_rows = jsonl(&s.0.join("idx/contracts.jsonl"));
     assert!(
         !contract_rows.is_empty(),
         "6 回合内该有挂单（离岸产出落进货栈、自己运不动就挂出去）——空表会让下面的列面守卫空转"
     );
     for row in contract_rows {
-        for col in ["contract_id", "shipper", "carrier", "capacity", "expires_round"] {
+        for col in [
+            "contract_id",
+            "shipper",
+            "carrier",
+            "capacity",
+            "expires_round",
+        ] {
             assert!(row.get(col).is_some(), "contracts 表缺列 {col}: {row}");
         }
         assert!(
@@ -104,47 +140,93 @@ fn projection_writes_lean_main_and_indexed_tables() {
     let ships = jsonl(&s.0.join("idx/ships.jsonl"));
     assert!(!ships.is_empty());
     assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");
-    assert!(ships[0].get("components").is_some(), "ships 表要有 components 列");
+    assert!(
+        ships[0].get("components").is_some(),
+        "ships 表要有 components 列"
+    );
     // factions table: has relations + resources, and its own city/ship id lists.
     let factions = jsonl(&s.0.join("idx/factions.jsonl"));
     assert!(!factions.is_empty());
-    assert!(factions[0].get("faction_id").is_some(), "factions 表要有 faction_id 列");
-    assert!(factions[0].get("relations").is_some(), "factions 表要有 relations");
-    assert!(factions[0].get("resources").is_some(), "factions 表要有 resources（库存）");
+    assert!(
+        factions[0].get("faction_id").is_some(),
+        "factions 表要有 faction_id 列"
+    );
+    assert!(
+        factions[0].get("relations").is_some(),
+        "factions 表要有 relations"
+    );
+    assert!(
+        factions[0].get("resources").is_some(),
+        "factions 表要有 resources（库存）"
+    );
     // 思潮 → 集货倾向：**「这个国家为什么少跑运输」必须可读**，而不是只能从行为反推。
     for col in ["freight_lean", "freighter_quota", "freighter_count"] {
-        assert!(factions[0].get(col).is_some(), "factions 表缺 {col}（思潮→集货倾向）");
+        assert!(
+            factions[0].get(col).is_some(),
+            "factions 表缺 {col}（思潮→集货倾向）"
+        );
     }
     // 造舰的两条动机（解耦）：也要能从读面上看出「为什么造重舰 / 为什么造货船」。
     for col in ["threat_motive", "haul_gap"] {
-        assert!(factions[0].get(col).is_some(), "factions 表缺 {col}（造舰动机）");
+        assert!(
+            factions[0].get(col).is_some(),
+            "factions 表缺 {col}（造舰动机）"
+        );
     }
     // cities table: governance distance + revolt-risk are game-derived but emitted for the agent.
     let cities = jsonl(&s.0.join("idx/cities.jsonl"));
     assert!(!cities.is_empty());
-    assert!(cities[0].get("gov_distance").is_some(), "cities 表要有 gov_distance（治理距离）");
+    assert!(
+        cities[0].get("gov_distance").is_some(),
+        "cities 表要有 gov_distance（治理距离）"
+    );
     assert!(
         cities[0].get("depot_value").is_some(),
         "cities 表要有 depot_value（产地货栈：压在产地、还没运回首都的存货价值）"
     );
-    assert!(cities[0].get("revolt_risk").is_some(), "cities 表要有 revolt_risk（离心风险）");
+    assert!(
+        cities[0].get("revolt_risk").is_some(),
+        "cities 表要有 revolt_risk（离心风险）"
+    );
 
     // events table: 归一化固定列（一行一事件），参与方走统一槽位。
     let events = jsonl(&s.0.join("idx/events.jsonl"));
     assert!(!events.is_empty(), "6 回合后应有事件");
-    for col in ["round", "seq", "event_id", "type", "salience", "actor_kind", "actor_id",
-                "target_kind", "target_id", "extra", "magnitude", "headline", "data"] {
+    for col in [
+        "round",
+        "seq",
+        "event_id",
+        "type",
+        "salience",
+        "actor_kind",
+        "actor_id",
+        "target_kind",
+        "target_id",
+        "extra",
+        "magnitude",
+        "headline",
+        "data",
+    ] {
         assert!(events[0].get(col).is_some(), "events 表要有 {col} 列");
     }
     // 归一化的意义：**没有任何一列是 variant 专属字段**，否则又会回到「同名多义」
     // （`from`/`to` 一列两义）与「同角色多名」（faction/owner/fallen_to/from/to）。
-    for forbidden in ["from", "to", "a", "b", "attacker", "target", "city", "ship", "body", "owner"] {
-        assert!(events[0].get(forbidden).is_none(), "events 表不应有 variant 专属列 {forbidden}（应进 data/统一槽位）");
+    for forbidden in [
+        "from", "to", "a", "b", "attacker", "target", "city", "ship", "body", "owner",
+    ] {
+        assert!(
+            events[0].get(forbidden).is_none(),
+            "events 表不应有 variant 专属列 {forbidden}（应进 data/统一槽位）"
+        );
     }
-    assert!(events.iter().all(|e| e["salience"].is_string()), "salience 必须是字符串分级");
+    assert!(
+        events.iter().all(|e| e["salience"].is_string()),
+        "salience 必须是字符串分级"
+    );
     // 每个事件至少有一个被命名的实体（否则它无法被任何实体 join 到）。
     assert!(
-        events.iter().all(|e| e["actor_id"].is_string() || e["target_id"].is_string()
+        events.iter().all(|e| e["actor_id"].is_string()
+            || e["target_id"].is_string()
             || !e["extra"].as_array().map(|a| a.is_empty()).unwrap_or(true)),
         "每个事件至少要有一个参与方实体"
     );
@@ -179,7 +261,10 @@ fn no_city_changes_owner_twice_in_one_round() {
         }
         let city = e["data"]["city"].as_str().unwrap_or_default().to_string();
         let round = e["round"].as_u64().unwrap_or_default() as u32;
-        flips.entry((round, city)).or_default().push(e["headline"].as_str().unwrap_or("").to_string());
+        flips
+            .entry((round, city))
+            .or_default()
+            .push(e["headline"].as_str().unwrap_or("").to_string());
     }
     let bad: Vec<_> = flips.iter().filter(|(_, v)| v.len() > 1).collect();
     assert!(
@@ -188,7 +273,11 @@ fn no_city_changes_owner_twice_in_one_round() {
         bad.len(),
         bad.iter().take(5).collect::<Vec<_>>()
     );
-    assert!(flips.len() >= 5, "只观察到 {} 次活城易主，样本太稀——守卫可能是空转", flips.len());
+    assert!(
+        flips.len() >= 5,
+        "只观察到 {} 次活城易主，样本太稀——守卫可能是空转",
+        flips.len()
+    );
 }
 
 /// **标题必须点到名**：`GameEvent::participants()` 列出的每一个实体 id，都要**逐字出现**
@@ -212,17 +301,30 @@ fn headline_names_every_participant() {
         assert!(!h.is_empty(), "{} 没有标题", e["type"]);
         assert!(!h.contains('\n'), "标题必须单行: {h:?}");
         let mut ids: Vec<String> = Vec::new();
-        if let Some(v) = e["actor_id"].as_str() { ids.push(v.to_string()); }
-        if let Some(v) = e["target_id"].as_str() { ids.push(v.to_string()); }
+        if let Some(v) = e["actor_id"].as_str() {
+            ids.push(v.to_string());
+        }
+        if let Some(v) = e["target_id"].as_str() {
+            ids.push(v.to_string());
+        }
         for p in e["extra"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
-            if let Some(v) = p["id"].as_str() { ids.push(v.to_string()); }
+            if let Some(v) = p["id"].as_str() {
+                ids.push(v.to_string());
+            }
         }
         for id in &ids {
-            assert!(h.contains(id.as_str()), "标题 {h:?} 没提到参与方 {id:?}（{}）", e["type"]);
+            assert!(
+                h.contains(id.as_str()),
+                "标题 {h:?} 没提到参与方 {id:?}（{}）",
+                e["type"]
+            );
             checked += 1;
         }
     }
-    assert!(checked >= 50, "只校验了 {checked} 个参与方名字，守卫可能是空转");
+    assert!(
+        checked >= 50,
+        "只校验了 {checked} 个参与方名字，守卫可能是空转"
+    );
 }
 
 /// **失城方必须在夷平那一刻记下**：`city_razed.owner` 是夷平时的持有者，**不是**同回合
@@ -282,7 +384,14 @@ fn city_razed_records_the_loser_not_the_refounder() {
         .map(|sh| sh.class.clone())
         .unwrap_or_else(|| "corvette".to_string());
     assert!(
-        crate::sim::reseed_city(&mut state, &cfg, &city, &founder, &class, &mut next_building),
+        crate::sim::reseed_city(
+            &mut state,
+            &cfg,
+            &city,
+            &founder,
+            &class,
+            &mut next_building
+        ),
         "复垦应当成功（同回合制造出「夷平 → 被别家复垦」这个巧合）"
     );
     let _ = body;
@@ -300,7 +409,10 @@ fn city_razed_records_the_loser_not_the_refounder() {
         let city = e["data"]["city"].as_str().unwrap();
         let owner = e["data"]["owner"].as_str().unwrap();
         let fallen_to = e["data"]["fallen_to"].as_str().unwrap();
-        assert_ne!(owner, fallen_to, "夷平一座城不该由它的持有者自己造成（{city}）");
+        assert_ne!(
+            owner, fallen_to,
+            "夷平一座城不该由它的持有者自己造成（{city}）"
+        );
         assert_eq!(owner, loser, "city_razed.owner 必须是失城方，而不是抢城者");
         // 同回合、同一座城的复垦者若存在，必然**不是** owner 被写成的那个名字。
         for f in &events {
@@ -312,7 +424,10 @@ fn city_razed_records_the_loser_not_the_refounder() {
             }
             let fdr = f["data"]["owner"].as_str().unwrap_or_default();
             let prev = f["data"]["prev_owner"].as_str().unwrap_or_default();
-            assert_eq!(prev, owner, "{city} 同回合被 {fdr} 复垦，prev_owner 应等于失城方 {owner}");
+            assert_eq!(
+                prev, owner,
+                "{city} 同回合被 {fdr} 复垦，prev_owner 应等于失城方 {owner}"
+            );
             if fdr != owner {
                 razed_with_revival += 1;
             }
@@ -335,7 +450,11 @@ fn projection_is_deterministic() {
         write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
         fs::read(s.0.join("main.jsonl")).unwrap()
     };
-    assert_eq!(run("a"), run("b"), "same seed must reproduce identical main.jsonl");
+    assert_eq!(
+        run("a"),
+        run("b"),
+        "same seed must reproduce identical main.jsonl"
+    );
 }
 
 /// The event milestones is deterministic too: same seed → byte-identical `idx/events.jsonl`.
@@ -352,7 +471,11 @@ fn event_milestones_is_deterministic() {
         write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
         fs::read(s.0.join("idx/events.jsonl")).unwrap()
     };
-    assert_eq!(run("milestones_a"), run("milestones_b"), "same seed must reproduce identical event milestones");
+    assert_eq!(
+        run("milestones_a"),
+        run("milestones_b"),
+        "same seed must reproduce identical event milestones"
+    );
 }
 
 /// **完备性守卫**：密集快照里可见的每一次「城的归属 / 存亡」变化，都必须有一条**命名
@@ -528,16 +651,26 @@ fn derived_tables_are_written_and_declared() {
         .cities
         .iter()
         .filter(|c| c.faction_id == "中国")
-        .find_map(|c| c.buildings.iter().find(|b| b.is_shipyard()).map(|b| (c.name.clone(), b.id)))
+        .find_map(|c| {
+            c.buildings
+                .iter()
+                .find(|b| b.is_shipyard())
+                .map(|b| (c.name.clone(), b.id))
+        })
         .expect("中国要有一个建造区");
-    state.control.entry("中国".to_string()).or_default().blueprints.insert(
-        "守卫样本图".to_string(),
-        crate::model::Control::player(crate::model::Blueprint {
-            class: "corvette".to_string(),
-            components: vec!["kinetic".to_string()],
-            order: None,
-        }),
-    );
+    state
+        .control
+        .entry("中国".to_string())
+        .or_default()
+        .blueprints
+        .insert(
+            "守卫样本图".to_string(),
+            crate::model::Control::player(crate::model::Blueprint {
+                class: "corvette".to_string(),
+                components: vec!["kinetic".to_string()],
+                order: None,
+            }),
+        );
     if let Some(city) = state.city_mut(&cid) {
         for b in city.buildings.iter_mut() {
             if b.id == bid {
@@ -553,13 +686,25 @@ fn derived_tables_are_written_and_declared() {
     let schema: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(s.0.join("schema.json")).unwrap()).unwrap();
     let derived = schema["derived"].as_object().unwrap();
-    assert_eq!(derived.len(), DERIVED.len(), "schema.derived 的条目数应等于 DERIVED");
+    assert_eq!(
+        derived.len(),
+        DERIVED.len(),
+        "schema.derived 的条目数应等于 DERIVED"
+    );
     let main = jsonl(&s.0.join("main.jsonl"));
     let row0 = main[0].as_object().unwrap();
     for t in DERIVED {
         assert!(derived.contains_key(t.name), "schema.derived 缺 {}", t.name);
-        assert_eq!(derived[t.name]["table"], t.table, "schema.derived.{}.table 错", t.name);
-        assert_eq!(derived[t.name]["join_on"], t.join_on, "schema.derived.{}.join_on 错", t.name);
+        assert_eq!(
+            derived[t.name]["table"], t.table,
+            "schema.derived.{}.table 错",
+            t.name
+        );
+        assert_eq!(
+            derived[t.name]["join_on"], t.join_on,
+            "schema.derived.{}.join_on 错",
+            t.name
+        );
         assert!(
             !jsonl(&s.0.join(t.table)).is_empty(),
             "派生表 {} 没有写出来（{}）",
@@ -567,22 +712,35 @@ fn derived_tables_are_written_and_declared() {
             t.table
         );
         if !t.join_on.is_empty() {
-            assert!(row0.contains_key(t.join_on), "main.jsonl 缺 join 列 {}", t.join_on);
+            assert!(
+                row0.contains_key(t.join_on),
+                "main.jsonl 缺 join 列 {}",
+                t.join_on
+            );
         }
     }
     // ships 表的指令归属列：引擎解析的结果必须在表里（Python 不该自己重实现链）。
     let ships = jsonl(&s.0.join("idx/ships.jsonl"));
     for col in [
-        "order_leaf_mode", "order_default_mode", "order_effective_mode", "order_effective",
+        "order_leaf_mode",
+        "order_default_mode",
+        "order_effective_mode",
+        "order_effective",
         // 设计图那一轮新增的五列（缺一列 = 读面少一个答案）。
-        "order_source", "blueprint", "blueprint_mode", "order_blueprint_mode", "spawned_round",
+        "order_source",
+        "blueprint",
+        "blueprint_mode",
+        "order_blueprint_mode",
+        "spawned_round",
     ] {
         assert!(ships[0].get(col).is_some(), "ships 表缺 {col}");
     }
     // `cities` 表的内联 `buildings[]` 要能看出「哪个下标在造哪张图」。
     let cities = jsonl(&s.0.join("idx/cities.jsonl"));
     let has_bp_key = cities.iter().any(|c| {
-        c["buildings"].as_array().is_some_and(|bs| bs.iter().any(|b| b.get("blueprint").is_some()))
+        c["buildings"]
+            .as_array()
+            .is_some_and(|bs| bs.iter().any(|b| b.get("blueprint").is_some()))
     });
     assert!(has_bp_key, "cities.buildings[] 缺 blueprint 键");
 }
@@ -598,7 +756,12 @@ fn blueprints_table_matches_the_control_face() {
         .cities
         .iter()
         .filter(|c| c.faction_id == "中国")
-        .find_map(|c| c.buildings.iter().find(|b| b.is_shipyard()).map(|b| (c.name.clone(), b.id)))
+        .find_map(|c| {
+            c.buildings
+                .iter()
+                .find(|b| b.is_shipyard())
+                .map(|b| (c.name.clone(), b.id))
+        })
         .expect("中国要有一个建造区");
     {
         let c = state.control.entry("中国".to_string()).or_default();
@@ -607,7 +770,9 @@ fn blueprints_table_matches_the_control_face() {
             crate::model::Control::player(crate::model::Blueprint {
                 class: "corvette".to_string(),
                 components: vec!["kinetic".to_string(), "ion_drive".to_string()],
-                order: Some(ShipBehavior::Dock { body: "地球".to_string() }),
+                order: Some(ShipBehavior::Dock {
+                    body: "地球".to_string(),
+                }),
             }),
         );
         c.blueprints.insert(
@@ -630,15 +795,19 @@ fn blueprints_table_matches_the_control_face() {
     // 造一艘出自「重甲护卫」的舰，让 `ship_count` 有非零值。
     let pos = state.body_position("地球");
     let bp = "重甲护卫".to_string();
-    crate::sim::spawn_ship(&mut state, &cfg, crate::sim::ShipSpawn {
-        owner: "中国".to_string(),
-        class: "corvette",
-        position: pos,
-        city: None,
-        via: SpawnVia::Shipyard,
-        pay_components: false,
-        blueprint: Some(&bp),
-    });
+    crate::sim::spawn_ship(
+        &mut state,
+        &cfg,
+        crate::sim::ShipSpawn {
+            owner: "中国".to_string(),
+            class: "corvette",
+            position: pos,
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: false,
+            blueprint: Some(&bp),
+        },
+    );
     let mut rng = Prng::new(5);
     let s = Scratch::new("bp_match");
     write_index(&mut state, &cfg, &mut rng, 0, &s.0).unwrap();
@@ -647,7 +816,10 @@ fn blueprints_table_matches_the_control_face() {
     let mut seen: BTreeMap<(String, String), serde_json::Value> = BTreeMap::new();
     for r in &rows {
         seen.insert(
-            (r["faction_id"].as_str().unwrap().to_string(), r["blueprint_id"].as_str().unwrap().to_string()),
+            (
+                r["faction_id"].as_str().unwrap().to_string(),
+                r["blueprint_id"].as_str().unwrap().to_string(),
+            ),
             r.clone(),
         );
     }
@@ -658,13 +830,21 @@ fn blueprints_table_matches_the_control_face() {
             let row = seen
                 .get(&(fid.clone(), id.clone()))
                 .unwrap_or_else(|| panic!("蓝图表缺 {fid}/{id}"));
-            assert_eq!(row["class"].as_str().unwrap(), leaf.value.class, "{fid}/{id} 的 class 不一致");
+            assert_eq!(
+                row["class"].as_str().unwrap(),
+                leaf.value.class,
+                "{fid}/{id} 的 class 不一致"
+            );
             assert_eq!(
                 row["components"],
                 json!(leaf.value.components),
                 "{fid}/{id} 的 components 不一致"
             );
-            assert_eq!(row["mode"].as_str().unwrap(), leaf.mode.name(), "{fid}/{id} 的 mode 不一致");
+            assert_eq!(
+                row["mode"].as_str().unwrap(),
+                leaf.mode.name(),
+                "{fid}/{id} 的 mode 不一致"
+            );
             assert_eq!(
                 row["effective_mode"].as_str().unwrap(),
                 state.blueprint_control(fid, id).name(),
@@ -673,7 +853,11 @@ fn blueprints_table_matches_the_control_face() {
             if id == "重甲护卫" {
                 assert_eq!(row["ship_count"], json!(1), "本图造了多少艘（引擎算）");
                 assert_eq!(row["class_slots"], json!(2), "corvette 的槽位上限");
-                assert_eq!(row["order"], json!({"Dock": {"body": "地球"}}), "默认枚举形式（与 control 表一致）");
+                assert_eq!(
+                    row["order"],
+                    json!({"Dock": {"body": "地球"}}),
+                    "默认枚举形式（与 control 表一致）"
+                );
                 assert_eq!(row["launch_waiting"], json!(false), "没有满进度 ⇒ 不在等钱");
             }
             if id == "auto:cruiser" {
@@ -701,14 +885,21 @@ fn flow_table_matches_the_derived_record() {
 
     let flow = jsonl(&s.0.join("idx/faction_process.jsonl"));
     let last_round = state.round;
-    let last: Vec<&serde_json::Value> =
-        flow.iter().filter(|r| r["round"] == json!(last_round)).collect();
+    let last: Vec<&serde_json::Value> = flow
+        .iter()
+        .filter(|r| r["round"] == json!(last_round))
+        .collect();
     assert!(!last.is_empty(), "最后一回合应有过程量行");
     let mut checked = 0usize;
     let mut admin_seen = 0usize;
     for row in last {
         let fid = row["faction_id"].as_str().unwrap();
-        let expect_upkeep = outcome.post.factions.get(fid).map(|r| r.upkeep).unwrap_or(0.0);
+        let expect_upkeep = outcome
+            .post
+            .factions
+            .get(fid)
+            .map(|r| r.upkeep)
+            .unwrap_or(0.0);
         assert_eq!(
             row["upkeep"].as_f64().unwrap(),
             expect_upkeep,
@@ -720,29 +911,122 @@ fn flow_table_matches_the_derived_record() {
             .get(fid)
             .map(|r| r.production.clone())
             .unwrap_or_default();
-        assert_eq!(row["production"], serde_json::to_value(&expect_prod).unwrap(), "{fid} 的 production 不一致");
+        assert_eq!(
+            row["production"],
+            serde_json::to_value(&expect_prod).unwrap(),
+            "{fid} 的 production 不一致"
+        );
         // B1：治理的拆分（行政 vs 娱乐）、人口超载倍率、思潮惩罚也必须与视图逐值一致。
         let expect_row = outcome.post.factions.get(fid);
         for (col, got, want) in [
-            ("governance_admin", row["governance_admin"].as_f64().unwrap(),
-             expect_row.map(|r| r.governance_admin).unwrap_or(0.0)),
-            ("governance_entertainment", row["governance_entertainment"].as_f64().unwrap(),
-             expect_row.map(|r| r.governance_entertainment).unwrap_or(0.0)),
-            ("governance_scale", row["governance_scale"].as_f64().unwrap(),
-             expect_row.map(|r| r.governance_scale).unwrap_or(1.0)),
-            ("ideology_loyalty_penalty", row["ideology_loyalty_penalty"].as_f64().unwrap(),
-             expect_row.map(|r| r.ideology_loyalty_penalty).unwrap_or(0.0)),
-            ("capital_loyalty_bonus", row["capital_loyalty_bonus"].as_f64().unwrap(),
-             expect_row.map(|r| r.capital_loyalty_bonus).unwrap_or(0.0)),
+            (
+                "governance_admin",
+                row["governance_admin"].as_f64().unwrap(),
+                expect_row.map(|r| r.governance_admin).unwrap_or(0.0),
+            ),
+            (
+                "governance_entertainment",
+                row["governance_entertainment"].as_f64().unwrap(),
+                expect_row
+                    .map(|r| r.governance_entertainment)
+                    .unwrap_or(0.0),
+            ),
+            (
+                "governance_scale",
+                row["governance_scale"].as_f64().unwrap(),
+                expect_row.map(|r| r.governance_scale).unwrap_or(1.0),
+            ),
+            (
+                "ideology_loyalty_penalty",
+                row["ideology_loyalty_penalty"].as_f64().unwrap(),
+                expect_row
+                    .map(|r| r.ideology_loyalty_penalty)
+                    .unwrap_or(0.0),
+            ),
+            (
+                "capital_loyalty_bonus",
+                row["capital_loyalty_bonus"].as_f64().unwrap(),
+                expect_row.map(|r| r.capital_loyalty_bonus).unwrap_or(0.0),
+            ),
         ] {
             assert_eq!(got, want, "{fid} 的 {col} 与视图不一致（读了两个不同的数）");
         }
         if row["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
             admin_seen += 1;
         }
+        // B2（钱去哪了）：花掉的投资/建造预算、欠费与生锈比例，逐值必须与视图相同。
+        // ⚠ 这一局只有 8 回合，**不能**在这里要求它们非零（开局那几回合往往真的没花钱）——
+        // 「真的非零」由 `src/tests/sim/spending.rs` 与 60 回合的集成用例钉住。
+        for (col, got, want) in [
+            (
+                "upkeep_unpaid",
+                row["upkeep_unpaid"].as_f64().unwrap(),
+                expect_row.map(|r| r.upkeep_unpaid).unwrap_or(0.0),
+            ),
+            (
+                "fleet_rust",
+                row["fleet_rust"].as_f64().unwrap(),
+                expect_row.map(|r| r.fleet_rust).unwrap_or(0.0),
+            ),
+        ] {
+            assert_eq!(got, want, "{fid} 的 {col} 与视图不一致（读了两个不同的数）");
+        }
+        let want_spend = (
+            expect_row
+                .map(|r| r.investment_spent.clone())
+                .unwrap_or_default(),
+            expect_row
+                .map(|r| r.construction_spent.clone())
+                .unwrap_or_default(),
+        );
+        for (col, got, want) in [
+            (
+                "investment_spent",
+                row["investment_spent"].clone(),
+                want_spend.0.clone(),
+            ),
+            (
+                "construction_spent",
+                row["construction_spent"].clone(),
+                want_spend.1.clone(),
+            ),
+        ] {
+            assert_eq!(
+                got,
+                serde_json::to_value(&want).unwrap(),
+                "{fid} 的 {col} 与视图不一致（读了两个不同的数）"
+            );
+        }
+        // B3（市场与运输）：购买力/买方名次/逐货栈运力账。名次是 `Option` ⇒ `null` 合法
+        // （那一回合没排队），所以这里比的是「两个读面给同一个值」，不是「一定有值」。
+        for (col, got, want) in [(
+            "purchasing_power",
+            row["purchasing_power"].as_f64().unwrap(),
+            expect_row.map(|r| r.purchasing_power).unwrap_or(0.0),
+        )] {
+            assert_eq!(got, want, "{fid} 的 {col} 与视图不一致");
+        }
+        assert_eq!(
+            row["market_rank"],
+            serde_json::to_value(expect_row.and_then(|r| r.market_rank)).unwrap(),
+            "{fid} 的买方名次与视图不一致"
+        );
+        assert_eq!(
+            row["freight_gap"],
+            serde_json::to_value(
+                expect_row
+                    .map(|r| r.freight_gap.clone())
+                    .unwrap_or_default()
+            )
+            .unwrap(),
+            "{fid} 的运力账与视图不一致"
+        );
         checked += 1;
     }
-    assert!(checked >= 2, "只检查了 {checked} 个势力的过程量行——守卫太空");
+    assert!(
+        checked >= 2,
+        "只检查了 {checked} 个势力的过程量行——守卫太空"
+    );
     assert!(admin_seen >= 1, "没有任何势力报出行政开销——新的列等于空转");
 
     // 城的过程量表同理（挑一个真有产出的城，别拿空表当通过）。
@@ -750,9 +1034,17 @@ fn flow_table_matches_the_derived_record() {
     let with_prod: Vec<&serde_json::Value> = city_flow
         .iter()
         .filter(|r| r["round"] == json!(last_round))
-        .filter(|r| r["production"].as_object().map(|o| !o.is_empty()).unwrap_or(false))
+        .filter(|r| {
+            r["production"]
+                .as_object()
+                .map(|o| !o.is_empty())
+                .unwrap_or(false)
+        })
         .collect();
-    assert!(!with_prod.is_empty(), "最后一回合应有带产出的城（否则这条守卫没在检查任何东西）");
+    assert!(
+        !with_prod.is_empty(),
+        "最后一回合应有带产出的城（否则这条守卫没在检查任何东西）"
+    );
     let mut targets_seen = 0usize;
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
@@ -762,9 +1054,18 @@ fn flow_table_matches_the_derived_record() {
             .get(cid)
             .map(|r| r.production.clone())
             .unwrap_or_default();
-        assert_eq!(row["production"], serde_json::to_value(&expect).unwrap(), "{cid} 的产出不一致");
+        assert_eq!(
+            row["production"],
+            serde_json::to_value(&expect).unwrap(),
+            "{cid} 的产出不一致"
+        );
         // B1：忠诚目标值分项（平铺列）与视图里的嵌套对象同源。
-        let want_eff = outcome.post.cities.get(cid).map(|r| r.loyalty_target.effective).unwrap_or(0.0);
+        let want_eff = outcome
+            .post
+            .cities
+            .get(cid)
+            .map(|r| r.loyalty_target.effective)
+            .unwrap_or(0.0);
         assert_eq!(
             row["loyalty_target_effective"].as_f64().unwrap(),
             want_eff,
@@ -773,8 +1074,37 @@ fn flow_table_matches_the_derived_record() {
         if want_eff > 0.0 {
             targets_seen += 1;
         }
+        // B2：产出与建造的中间量（平铺列 vs 视图里的嵌套对象）也必须同源。
+        let crow = outcome.post.cities.get(cid);
+        assert_eq!(
+            row["labor"].as_f64().unwrap(),
+            crow.map(|r| r.labor).unwrap_or(1.0),
+            "{cid} 的用工系数不一致"
+        );
+        assert!(
+            row["labor"].as_f64().unwrap() > 0.0,
+            "{cid}: 用工系数不该是 0（中性值是 1.0，见 schema 的 neutral 段）"
+        );
+        assert_eq!(
+            row["housing_capacity"].as_f64().unwrap(),
+            crow.map(|r| r.housing_capacity).unwrap_or(0.0),
+            "{cid} 的住房容量不一致"
+        );
+        assert_eq!(
+            row["is_hub"],
+            serde_json::to_value(crow.map(|r| r.is_hub).unwrap_or(false)).unwrap(),
+            "{cid} 的集散地标记不一致"
+        );
+        assert_eq!(
+            row["build"],
+            serde_json::to_value(crow.map(|r| r.build.clone()).unwrap_or_default()).unwrap(),
+            "{cid} 的造舰进度不一致"
+        );
     }
-    assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——新的列等于空转");
+    assert!(
+        targets_seen >= 1,
+        "没有任何城报出忠诚目标值——新的列等于空转"
+    );
 }
 
 /// 控制面表：每个叶片一行，`mode` 与状态里的一致；`capital` 这种可空叶也在。
@@ -784,57 +1114,109 @@ fn control_table_holds_every_leaf() {
     let mut state = default_state(&cfg, 7);
     // 造几片叶：一个玩家叶、一个势力级默认、一笔预算。
     let fid = state.factions[0].name.clone();
-    let ship = state.ships.iter().find(|s| s.faction_id == fid).map(|s| s.name.clone());
+    let ship = state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == fid)
+        .map(|s| s.name.clone());
     let mut c = crate::model::ControllableState::default();
     if let Some(ship) = &ship {
         c.ship_orders.insert(
             ship.clone(),
-            Control { value: ShipBehavior::Idle, mode: ControlMode::Player },
+            Control {
+                value: ShipBehavior::Idle,
+                mode: ControlMode::Player,
+            },
         );
     }
-    c.default_ship_order = Some(Control { value: ShipBehavior::Idle, mode: ControlMode::Player });
+    c.default_ship_order = Some(Control {
+        value: ShipBehavior::Idle,
+        mode: ControlMode::Player,
+    });
     // 风格四片叶（`control-live-layers.md` §3 那条候选）：四片都要出现在表里——
     // 少了它们，「这艘舰的风格是它自己钉的，还是跟着舰队默认走」在表里就查不出来。
     if let Some(ship) = &ship {
         c.ship_doctrine.insert(
             ship.clone(),
-            Control { value: crate::model::ShipDoctrine { temper: 0.71, lone_wolf: -0.25 }, mode: ControlMode::Player },
+            Control {
+                value: crate::model::ShipDoctrine {
+                    temper: 0.71,
+                    lone_wolf: -0.25,
+                },
+                mode: ControlMode::Player,
+            },
         );
-        c.ship_kiting.insert(ship.clone(), Control { value: -0.6, mode: ControlMode::Player });
+        c.ship_kiting.insert(
+            ship.clone(),
+            Control {
+                value: -0.6,
+                mode: ControlMode::Player,
+            },
+        );
     }
     c.default_doctrine = Some(Control {
-        value: crate::model::ShipDoctrine { temper: 0.25, lone_wolf: 0.5 },
+        value: crate::model::ShipDoctrine {
+            temper: 0.25,
+            lone_wolf: 0.5,
+        },
         mode: ControlMode::Auto,
     });
-    c.default_kiting = Some(Control { value: 0.2, mode: ControlMode::Player });
+    c.default_kiting = Some(Control {
+        value: 0.2,
+        mode: ControlMode::Player,
+    });
     c.construction_budget.insert(
         "铁".to_string(),
-        Control { value: 3.5, mode: ControlMode::Player },
+        Control {
+            value: 3.5,
+            mode: ControlMode::Player,
+        },
     );
     state.control.insert(fid.clone(), c);
-    state.scope.factions.insert(fid.clone(), ControlMode::Player);
+    state
+        .scope
+        .factions
+        .insert(fid.clone(), ControlMode::Player);
 
     let mut rng = Prng::new(7);
     let s = Scratch::new("control_table");
     write_index(&mut state, &cfg, &mut rng, 0, &s.0).unwrap();
 
     let rows = jsonl(&s.0.join("idx/control.jsonl"));
-    let has = |kind: &str| rows.iter().any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid));
+    let has = |kind: &str| {
+        rows.iter()
+            .any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid))
+    };
     assert!(has("default_ship_order"), "缺舰队默认指令行");
     assert!(has("construction_budget"), "缺预算行");
     // 风格四片叶：值与**自己的** mode 都要在（不是有效值、不是有效归属）。
     let doc = rows
         .iter()
-        .find(|r| r["kind"] == json!("ship_doctrine") && r["key"] == json!(ship.clone().unwrap_or_default()))
+        .find(|r| {
+            r["kind"] == json!("ship_doctrine")
+                && r["key"] == json!(ship.clone().unwrap_or_default())
+        })
         .expect("缺逐舰风格叶行");
-    assert_eq!(doc["value"], json!({"temper": 0.71, "lone_wolf": -0.25}), "风格叶的值应是叶自己的值");
+    assert_eq!(
+        doc["value"],
+        json!({"temper": 0.71, "lone_wolf": -0.25}),
+        "风格叶的值应是叶自己的值"
+    );
     assert_eq!(doc["mode"], json!("Player"));
     assert!(
-        rows.iter().any(|r| r["kind"] == json!("ship_kiting") && r["value"] == json!(-0.6)),
+        rows.iter()
+            .any(|r| r["kind"] == json!("ship_kiting") && r["value"] == json!(-0.6)),
         "缺逐舰风筝姿态叶行"
     );
-    let dd = rows.iter().find(|r| r["kind"] == json!("default_doctrine")).expect("缺舰队默认风格行");
-    assert_eq!(dd["mode"], json!("Auto"), "势力级默认风的 mode 也要如实带出来");
+    let dd = rows
+        .iter()
+        .find(|r| r["kind"] == json!("default_doctrine"))
+        .expect("缺舰队默认风格行");
+    assert_eq!(
+        dd["mode"],
+        json!("Auto"),
+        "势力级默认风的 mode 也要如实带出来"
+    );
     assert!(has("default_kiting"), "缺舰队默认风筝姿态行");
     if let Some(ship) = &ship {
         let row = rows
@@ -845,9 +1227,14 @@ fn control_table_holds_every_leaf() {
     }
     // scope 表：显式节点一行（global 恒定 + 我们刚钉的势力）。
     let scope = jsonl(&s.0.join("idx/scope.jsonl"));
-    assert!(scope.iter().any(|r| r["level"] == json!("global")), "scope 缺 global 行");
     assert!(
-        scope.iter().any(|r| r["level"] == json!("faction") && r["key"] == json!(fid) && r["mode"] == json!("Player")),
+        scope.iter().any(|r| r["level"] == json!("global")),
+        "scope 缺 global 行"
+    );
+    assert!(
+        scope.iter().any(|r| r["level"] == json!("faction")
+            && r["key"] == json!(fid)
+            && r["mode"] == json!("Player")),
         "scope 缺该势力的显式表态"
     );
 

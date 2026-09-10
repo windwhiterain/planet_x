@@ -62,7 +62,11 @@ pub fn build_rounds(state: &State, config: &GameConfig, fid: &str, class: &str) 
     }
     let productivity = config.building_spec("construction").productivity;
     let mut best_rate = 0.0f64;
-    for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+    for c in state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+    {
         let area: f64 = c
             .buildings
             .iter()
@@ -114,7 +118,9 @@ pub fn build_rounds(state: &State, config: &GameConfig, fid: &str, class: &str) 
 pub fn threat_motive(state: &State, config: &GameConfig, fid: &str) -> f64 {
     let shares = sim::faction_power_share(state, config);
     let mine = shares.get(fid).copied().unwrap_or(0.0).max(1e-6);
-    let Some(f) = state.faction(fid) else { return 0.0 };
+    let Some(f) = state.faction(fid) else {
+        return 0.0;
+    };
     let war = config.combat.war_threshold;
     let width = (-war).max(1.0) * 0.5;
     let mut deficit = 0.0;
@@ -132,7 +138,7 @@ pub fn threat_motive(state: &State, config: &GameConfig, fid: &str) -> f64 {
 ///
 /// 用的是与定编同一把尺子（舰级版 `舱容 × 速度 × 维护费`，见 [`freight::freight_tonnage`]）
 /// ⇒ 配置里改数值它就跟着变，不写死舰名。今天选出的是**航母**（20×1.0÷7.5 = 2.67，
-/// 次高的驱逐只有 2.08），恰好也是唯一一个 `default_freighter = true` 的舰级
+/// 次高的驱逐只有 2.08），恰好也是唯一一个 `default_role = true` 的舰级
 /// ——派生结论与作者意图对上了，这是那把尺子没错的旁证。
 pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<String> {
     config
@@ -145,7 +151,7 @@ pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<Str
             // 驱逐 2.08 高 28%，却贵一倍还多）。实测（seed 7 / 600 回合）：每个势力的船坞都被
             // 改成航母却**一艘也下不了水**，全世界 600 回合只拆平 4 次——战争没了、运输也没了。
             // 除过时间之后，穷势力会选**造得动**的那一级，富势力仍然选航母（它也是唯一一个
-            // `default_freighter = true` 的舰级，派生结论与作者意图对上了）。
+            // `default_role = true` 的舰级，派生结论与作者意图对上了）。
             let spec = config.ship_spec(cls);
             let tonnage = spec.cargo * spec.speed_mult / spec.upkeep.max(1e-6);
             let score = match build_rounds(state, config, fid, cls) {
@@ -166,8 +172,15 @@ pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<Str
 /// prefers classes it currently has few of. So the fleet grows into a **mixed navy**
 /// (screens + warships + carriers), not a one-class blob. Deterministic: the seeded
 /// RNG drives a weighted pick over class scores (variety), reproducible per seed.
-pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, rng: &mut Prng) -> String {
-    let Some(f) = state.faction(fid) else { return "corvette".to_string() };
+pub(crate) fn choose_next_class(
+    state: &State,
+    fid: &str,
+    config: &GameConfig,
+    rng: &mut Prng,
+) -> String {
+    let Some(f) = state.faction(fid) else {
+        return "corvette".to_string();
+    };
     let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
     let mut max_res = 0.0f64;
     for (r, v) in &f.resources {
@@ -175,7 +188,10 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
     }
     let ab = |r: &str| {
         if max_res > 1e-9 {
-            f.resources.get(r).map(|v| *v * value_of(r) / max_res).unwrap_or(0.0)
+            f.resources
+                .get(r)
+                .map(|v| *v * value_of(r) / max_res)
+                .unwrap_or(0.0)
         } else {
             0.0
         }
@@ -204,8 +220,16 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
     let mut scored: Vec<(String, f64)> = Vec::new();
     for (cls, spec) in &config.ships {
         let cost_val: f64 = spec.build_cost.iter().map(|(r, c)| c * value_of(r)).sum();
-        let covered: f64 = spec.build_cost.iter().map(|(r, c)| c * value_of(r) * ab(r)).sum();
-        let fit = if cost_val > 1e-9 { covered / cost_val } else { 0.0 };
+        let covered: f64 = spec
+            .build_cost
+            .iter()
+            .map(|(r, c)| c * value_of(r) * ab(r))
+            .sum();
+        let fit = if cost_val > 1e-9 {
+            covered / cost_val
+        } else {
+            0.0
+        };
         let share = counts.get(cls).copied().unwrap_or(0) as f64 / total as f64;
         // Classes the faction has < 25% of get a pull toward a balanced mix.
         let mix_bonus = (0.25 - share).max(0.0) * 1.5;
@@ -215,7 +239,11 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
         // 这一离散标志区分旗舰（战列/航母）与巡洋/护卫，给一个明确的战争加成，避免和
         // 巡洋（造价相近）混在一起。
         let flagship = spec.build_points >= 40.0 && spec.upkeep >= 6.5;
-        let war_bonus = if flagship { WAR_BUILD_BONUS * motive } else { 0.0 };
+        let war_bonus = if flagship {
+            WAR_BUILD_BONUS * motive
+        } else {
+            0.0
+        };
         // **时间成本**（用户裁决：「得让 AI 能估计建造时间」）：造得越久，这一级越不该现在排产。
         // 用 `σ((回合数 − TIME_REF) ÷ TIME_WIDTH)` 而不是硬性的「超过 N 回合不造」——
         // **结构上造不出来**（`None`）才顶格扣分，而「要造很久」只是扣分（穷势力仍然造得出重舰，
@@ -224,7 +252,10 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
             Some(rounds) => TIME_PENALTY * sigmoid((rounds - TIME_REF) / TIME_WIDTH),
             None => TIME_PENALTY,
         };
-        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty + war_bonus - time_penalty));
+        scored.push((
+            cls.clone(),
+            fit + mix_bonus - upkeep_penalty + war_bonus - time_penalty,
+        ));
     }
 
     // Weighted random pick → variety; deterministic via the seeded RNG.
@@ -332,8 +363,16 @@ impl LoadoutPrefs {
 /// **读的是势力池**（首都集散地）：这是「设计口径」——开局预置舰队、剧情赠舰、设计图生成器
 /// 都问「这个势力觉得什么装得起」。**出厂那一刻的现算走 [`resolve_loadout`]**，
 /// 它把**船坞所在天体**的库存传进来（非首都船坞只能装本地付得起的模块）。
-pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
-    let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
+pub(crate) fn choose_loadout(
+    state: &State,
+    config: &GameConfig,
+    fid: FactionId,
+    class: &str,
+) -> Vec<String> {
+    let stock = state
+        .faction(&fid)
+        .map(|f| f.resources.clone())
+        .unwrap_or_default();
     choose_loadout_prefs(state, config, fid, class, &stock, &LoadoutPrefs::default())
 }
 
@@ -354,8 +393,18 @@ pub(crate) fn choose_loadout_themed(
     theme: &crate::model::DesignTheme,
 ) -> Vec<String> {
     let margin = config.autocontrol.blueprint_stock_margin;
-    let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
-    choose_loadout_prefs(state, config, fid, class, &stock, &LoadoutPrefs::from_theme(theme, margin))
+    let stock = state
+        .faction(&fid)
+        .map(|f| f.resources.clone())
+        .unwrap_or_default();
+    choose_loadout_prefs(
+        state,
+        config,
+        fid,
+        class,
+        &stock,
+        &LoadoutPrefs::from_theme(theme, margin),
+    )
 }
 
 fn choose_loadout_prefs(
@@ -391,7 +440,10 @@ fn choose_loadout_prefs(
         if max_ab <= 1e-9 {
             return 0.0;
         }
-        stock.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0)
+        stock
+            .get(r)
+            .map(|v| *v * value_of(r) / max_ab)
+            .unwrap_or(0.0)
     };
 
     // 战局感知：交战中的势力更看重武器（武器加分），和平时更偏向防御/支持。
@@ -406,7 +458,11 @@ fn choose_loadout_prefs(
     // 「战斗增益」那一项乘**主题**的分类权重（`prefs`；默认全 1.0 = 历史行为逐字不变）。
     let mut cands: Vec<(String, f64)> = Vec::new();
     for (id, cs) in &config.components {
-        let fit: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r) * abund(r)).sum();
+        let fit: f64 = cs
+            .cost
+            .iter()
+            .map(|(r, c)| c * value_of(r) * abund(r))
+            .sum();
         // 用舰级修正系数缩放每件模块的「战斗增益」，让选装与舰型匹配。
         let gain_weapon = cs.damage * spec.attack_mult;
         let gain_shield = cs.shield * spec.shield_mult;
@@ -414,9 +470,14 @@ fn choose_loadout_prefs(
         let gain_accel = cs.accel * spec.accel_mult;
         let gain_range = cs.range * spec.range_mult;
         let gain_regen = cs.shield_regen * spec.shield_regen_mult;
-        let gain = (gain_weapon * 4.0 + gain_shield * 0.8 + cs.hardness * spec.armor_mult * 3.0
-            + gain_regen * 60.0 + gain_speed * 3.0 + gain_accel * 3.0
-            + cs.intercept * spec.pd_mult * 2.0 + gain_range * 12.0)
+        let gain = (gain_weapon * 4.0
+            + gain_shield * 0.8
+            + cs.hardness * spec.armor_mult * 3.0
+            + gain_regen * 60.0
+            + gain_speed * 3.0
+            + gain_accel * 3.0
+            + cs.intercept * spec.pd_mult * 2.0
+            + gain_range * 12.0)
             * prefs.cat_mult(&cs.category);
         let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
         let mut score = fit + gain * 0.03 - cs.upkeep * 2.0 - cost_val * prefs.cost_penalty;
@@ -447,7 +508,10 @@ fn choose_loadout_prefs(
             .all(|(r, c)| rem.get(r).copied().unwrap_or(0.0) >= *c)
     };
     let count_cat = |chosen: &Vec<String>, cat: &str| -> usize {
-        chosen.iter().filter(|id| config.component_spec(id).category == cat).count()
+        chosen
+            .iter()
+            .filter(|id| config.component_spec(id).category == cat)
+            .count()
     };
 
     // 强制装配一件指定类别（买得起选最高分；买不起时按 `free_fallback` 决定怎么办）。
@@ -458,67 +522,75 @@ fn choose_loadout_prefs(
     // * **武器是军备**（`false`）：**买不起就不装**（M7 硬门槛）。旧版在这里无视库存强塞最便宜
     //   的一件并把库存钳到 0，于是「全世界最稀缺的氦-3/金/铀」对军备毫无约束——制裁也就
     //   咬不到任何东西。现在缺稀有矿的势力**退回廉价配置**（动能炮 = 铁+碳），而不是白拿。
-    let force_cat = |cat: &str, chosen: &mut Vec<String>, remaining: &mut ResourceMap, free_fallback: bool| {
-        if count_cat(chosen, cat) >= 1 {
-            return;
-        }
-        for (id, _) in &cands {
+    let force_cat =
+        |cat: &str, chosen: &mut Vec<String>, remaining: &mut ResourceMap, free_fallback: bool| {
             if count_cat(chosen, cat) >= 1 {
-                break;
+                return;
             }
-            if config.component_spec(id).category == cat && !chosen.contains(id) && afford(id, remaining) {
-                let cs = config.component_spec(id);
-                for (r, c) in &cs.cost {
-                    *remaining.entry(r.clone()).or_insert(0.0) -= c;
+            for (id, _) in &cands {
+                if count_cat(chosen, cat) >= 1 {
+                    break;
                 }
-                chosen.push(id.clone());
-            }
-        }
-        if count_cat(chosen, cat) == 0 {
-            // 买得起的里面挑最便宜的（省钱兜底）。
-            let mut cheapest_affordable: Option<(String, f64)> = None;
-            for (id, cs) in &config.components {
-                if cs.category != cat || !afford(id, remaining) {
-                    continue;
-                }
-                let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
-                if cheapest_affordable
-                    .as_ref()
-                    .map(|(_, c)| cost_val < *c)
-                    .unwrap_or(true)
+                if config.component_spec(id).category == cat
+                    && !chosen.contains(id)
+                    && afford(id, remaining)
                 {
-                    cheapest_affordable = Some((id.clone(), cost_val));
+                    let cs = config.component_spec(id);
+                    for (r, c) in &cs.cost {
+                        *remaining.entry(r.clone()).or_insert(0.0) -= c;
+                    }
+                    chosen.push(id.clone());
                 }
             }
-            if let Some((id, _)) = cheapest_affordable {
-                let cs = config.component_spec(&id);
-                for (r, c) in &cs.cost {
-                    *remaining.entry(r.clone()).or_insert(0.0) -= c;
-                }
-                chosen.push(id);
-            } else if free_fallback {
-                // 平台部件：付不起也装（下不了水的船没有意义）。
-                let mut cheapest: Option<(String, f64)> = None;
+            if count_cat(chosen, cat) == 0 {
+                // 买得起的里面挑最便宜的（省钱兜底）。
+                let mut cheapest_affordable: Option<(String, f64)> = None;
                 for (id, cs) in &config.components {
-                    if cs.category != cat {
+                    if cs.category != cat || !afford(id, remaining) {
                         continue;
                     }
                     let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
-                    if cheapest.as_ref().map(|(_, c)| cost_val < *c).unwrap_or(true) {
-                        cheapest = Some((id.clone(), cost_val));
+                    if cheapest_affordable
+                        .as_ref()
+                        .map(|(_, c)| cost_val < *c)
+                        .unwrap_or(true)
+                    {
+                        cheapest_affordable = Some((id.clone(), cost_val));
                     }
                 }
-                if let Some((id, _)) = cheapest {
+                if let Some((id, _)) = cheapest_affordable {
                     let cs = config.component_spec(&id);
                     for (r, c) in &cs.cost {
-                        let e = remaining.entry(r.clone()).or_insert(0.0);
-                        *e = (*e - c).max(0.0); // 买不起也不至于负——平台兜底。
+                        *remaining.entry(r.clone()).or_insert(0.0) -= c;
                     }
                     chosen.push(id);
+                } else if free_fallback {
+                    // 平台部件：付不起也装（下不了水的船没有意义）。
+                    let mut cheapest: Option<(String, f64)> = None;
+                    for (id, cs) in &config.components {
+                        if cs.category != cat {
+                            continue;
+                        }
+                        let cost_val: f64 = cs.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+                        if cheapest
+                            .as_ref()
+                            .map(|(_, c)| cost_val < *c)
+                            .unwrap_or(true)
+                        {
+                            cheapest = Some((id.clone(), cost_val));
+                        }
+                    }
+                    if let Some((id, _)) = cheapest {
+                        let cs = config.component_spec(&id);
+                        for (r, c) in &cs.cost {
+                            let e = remaining.entry(r.clone()).or_insert(0.0);
+                            *e = (*e - c).max(0.0); // 买不起也不至于负——平台兜底。
+                        }
+                        chosen.push(id);
+                    }
                 }
             }
-        }
-    };
+        };
     // 硬保证：至少一件武器（攻击力来源，**稀缺在此咬人**）+ 至少一件推进（速度来源，平台）。
     force_cat("weapon", &mut chosen, &mut remaining, false);
     force_cat("thrust", &mut chosen, &mut remaining, true);
@@ -605,13 +677,23 @@ pub(crate) fn resolve_loadout(
     stock: &ResourceMap,
 ) -> Vec<String> {
     if let Some(id) = blueprint {
-        if let Some(leaf) = state.control(fid.clone()).and_then(|c| c.blueprints.get(id)) {
+        if let Some(leaf) = state
+            .control(fid.clone())
+            .and_then(|c| c.blueprints.get(id))
+        {
             if !leaf.value.components.is_empty() {
                 return leaf.value.components.clone();
             }
         }
     }
-    choose_loadout_prefs(state, config, fid.clone(), class, stock, &LoadoutPrefs::default())
+    choose_loadout_prefs(
+        state,
+        config,
+        fid.clone(),
+        class,
+        stock,
+        &LoadoutPrefs::default(),
+    )
 }
 
 /// 威胁响应（海军随威胁重构）：交战中，若某势力的舰队被单一舰型统治（占比 > `over_share`），
@@ -656,7 +738,11 @@ pub(crate) fn retool_shipyards(
     if total == 0 {
         return;
     }
-    let (over_class, over_count) = counts.iter().max_by_key(|(_, n)| **n).map(|(k, n)| (k.clone(), *n)).unwrap();
+    let (over_class, over_count) = counts
+        .iter()
+        .max_by_key(|(_, n)| **n)
+        .map(|(k, n)| (k.clone(), *n))
+        .unwrap();
     // 舰队不是被单一舰型**严重**统治就不重定向（保守：只在极度单一时触发，避免扰动
     // 权力平衡与「霸权→联盟」的合纵连横节奏）。
     if (over_count as f64) / (total as f64) < 0.60 {
@@ -703,7 +789,9 @@ fn retoolable_yards(
             if !b.is_shipyard() {
                 continue;
             }
-            let Some(cls) = b.ship_type.clone() else { continue };
+            let Some(cls) = b.ship_type.clone() else {
+                continue;
+            };
             if let Some(bp) = b.blueprint.as_ref() {
                 if !blueprint_known(state, &fid_owned, bp) {
                     continue;
@@ -774,11 +862,16 @@ pub(crate) fn retool_haulers(
     claimed: &BTreeSet<(CityId, BuildingId)>,
     retools: &mut Vec<RetoolDecision>,
 ) {
-    let Some(hauler) = hauler_class(state, config, fid) else { return };
+    let Some(hauler) = hauler_class(state, config, fid) else {
+        return;
+    };
     // **至多一个货船船坞**：配额是按「处积压数」算的几条腿，一个船坞的产出绰绰有余。
     // 没有这条闸，缺口大的势力会**每回合**腾一个船坞，把全势力的造船能力都改成货船
     //（实测：那样做会把整个世界的战争产能搬空）。
-    if retoolable_yards(state, fid).iter().any(|(_, _, cls, _)| *cls == hauler) {
+    if retoolable_yards(state, fid)
+        .iter()
+        .any(|(_, _, cls, _)| *cls == hauler)
+    {
         return;
     }
     let p = (sigmoid((freight::haul_gap(state, config, fid) - HAUL_MID) / HAUL_WIDTH)
@@ -789,7 +882,11 @@ pub(crate) fn retool_haulers(
     }
     // 每一级现在有几艘（挑**冗余最小**的那一级改产）。
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
+    for s in state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+    {
         *counts.entry(s.class.clone()).or_insert(0) += 1;
     }
     let mut cands: Vec<(CityId, BuildingId, String, Option<BlueprintId>)> =
@@ -806,7 +903,9 @@ pub(crate) fn retool_haulers(
             .unwrap_or(0)
             .cmp(&counts.get(&b.2).copied().unwrap_or(0))
     });
-    let Some((cid, bid, from, bp)) = cands.into_iter().next() else { return };
+    let Some((cid, bid, from, bp)) = cands.into_iter().next() else {
+        return;
+    };
     apply_yard_class(state, fid, &cid, bid, bp.as_ref(), &hauler);
     retools.push(RetoolDecision {
         faction: fid.to_string(),

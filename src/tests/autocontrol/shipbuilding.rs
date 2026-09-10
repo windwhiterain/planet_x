@@ -20,9 +20,15 @@ fn choose_loadout_is_deterministic_and_affordable() {
     // Give China (3) a fat rare-mineral stack so it can afford a real loadout.
     if let Some(f) = state.faction_mut("中国") {
         for (r, amt) in [
-            ("铀", 200.0), ("金", 200.0), ("氦-3", 200.0),
-            ("铂", 200.0), ("氢", 200.0), ("钍", 200.0),
-            ("铁", 200.0), ("碳", 200.0), ("硅", 200.0),
+            ("铀", 200.0),
+            ("金", 200.0),
+            ("氦-3", 200.0),
+            ("铂", 200.0),
+            ("氢", 200.0),
+            ("钍", 200.0),
+            ("铁", 200.0),
+            ("碳", 200.0),
+            ("硅", 200.0),
         ] {
             *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
         }
@@ -44,7 +50,10 @@ fn choose_loadout_is_deterministic_and_affordable() {
         }
     }
     // A resource-rich faction should fill more than a token slot.
-    assert!(a.len() >= 2, "rich faction should field a real loadout, got {a:?}");
+    assert!(
+        a.len() >= 2,
+        "rich faction should field a real loadout, got {a:?}"
+    );
 }
 
 /// 拟人指挥官：海军**混编**——一支富有的、近乎全护卫的势力，`choose_next_class` 会被
@@ -54,8 +63,14 @@ fn choose_next_class_diversifies_toward_a_mix() {
     let (config, mut state) = fresh_world(42);
     if let Some(f) = state.faction_mut("中国") {
         for (r, amt) in [
-            ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
-            ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+            ("铀", 300.0),
+            ("金", 300.0),
+            ("氦-3", 300.0),
+            ("铂", 300.0),
+            ("氢", 300.0),
+            ("钍", 300.0),
+            ("铁", 300.0),
+            ("碳", 300.0),
             ("硅", 300.0),
         ] {
             *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
@@ -85,8 +100,14 @@ fn choose_next_class_builds_heavier_navy_at_war() {
     let (config, mut state) = fresh_world(42);
     if let Some(f) = state.faction_mut("中国") {
         for (r, amt) in [
-            ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
-            ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+            ("铀", 300.0),
+            ("金", 300.0),
+            ("氦-3", 300.0),
+            ("铂", 300.0),
+            ("氢", 300.0),
+            ("钍", 300.0),
+            ("铁", 300.0),
+            ("碳", 300.0),
             ("硅", 300.0),
         ] {
             *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
@@ -110,8 +131,16 @@ fn choose_next_class_builds_heavier_navy_at_war() {
         heavy
     };
     let peace = sample_heavy(&state);
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let war = sample_heavy(&state);
     assert!(
         war > peace,
@@ -142,8 +171,16 @@ fn war_retools_over_abundant_shipyard_toward_a_war_class() {
             s.class = "corvette".to_string();
         }
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let before = shipyard_types(&state, "中国".to_string());
     let mut rng = Prng::new(7);
     let mut retools = Vec::new();
@@ -154,10 +191,16 @@ fn war_retools_over_abundant_shipyard_toward_a_war_class() {
         "a corvette-dominated wartime fleet should retool a shipyard into a war class; before={before:?} after={after:?}"
     );
     // 改装决策必须**被记下来**（它不发事件，只有这里能留下"什么时候改成什么的"）。
-    let rec = retools.iter().find(|r| r.faction == "中国").expect("改装要留一条判定");
+    let rec = retools
+        .iter()
+        .find(|r| r.faction == "中国")
+        .expect("改装要留一条判定");
     assert_eq!(rec.from, "corvette", "改装前后舰级要对得上：{rec:?}");
     assert_eq!(
-        after.iter().find(|(c, _)| *c == rec.city).map(|(_, t)| t.clone()),
+        after
+            .iter()
+            .find(|(c, _)| *c == rec.city)
+            .map(|(_, t)| t.clone()),
         Some(rec.to.clone()),
         "判定里记的新舰级必须就是状态里改成的那个：{rec:?}"
     );
@@ -165,11 +208,18 @@ fn war_retools_over_abundant_shipyard_toward_a_war_class() {
 
 /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。
 #[test]
-fn choose_loadout_is_balanced_and_threat_aware() {        let (config, mut state) = fresh_world(42);
+fn choose_loadout_is_balanced_and_threat_aware() {
+    let (config, mut state) = fresh_world(42);
     if let Some(f) = state.faction_mut("中国") {
         for (r, amt) in [
-            ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
-            ("氢", 300.0), ("钍", 300.0), ("铁", 300.0), ("碳", 300.0),
+            ("铀", 300.0),
+            ("金", 300.0),
+            ("氦-3", 300.0),
+            ("铂", 300.0),
+            ("氢", 300.0),
+            ("钍", 300.0),
+            ("铁", 300.0),
+            ("碳", 300.0),
             ("硅", 300.0),
         ] {
             *f.resources.entry(r.to_string()).or_insert(0.0) += amt;
@@ -178,19 +228,37 @@ fn choose_loadout_is_balanced_and_threat_aware() {        let (config, mut state
     // 和平：一艘巡洋舰（slot≥2）应至少各有一件武器与防御。
     let peace = choose_loadout(&state, &config, "中国".to_string(), "cruiser");
     assert!(
-        peace.iter().any(|c| config.component_spec(c).category == "weapon"),
+        peace
+            .iter()
+            .any(|c| config.component_spec(c).category == "weapon"),
         "a ship should field a weapon (got {peace:?})"
     );
     assert!(
-        peace.iter().any(|c| config.component_spec(c).category == "defense"),
+        peace
+            .iter()
+            .any(|c| config.component_spec(c).category == "defense"),
         "a ship should field a defense (got {peace:?})"
     );
     // 开战：武器数不应比和平少（战时要火力的偏置）。
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let war = choose_loadout(&state, &config, "中国".to_string(), "cruiser");
-    let peace_w = peace.iter().filter(|c| config.component_spec(c).category == "weapon").count();
-    let war_w = war.iter().filter(|c| config.component_spec(c).category == "weapon").count();
+    let peace_w = peace
+        .iter()
+        .filter(|c| config.component_spec(c).category == "weapon")
+        .count();
+    let war_w = war
+        .iter()
+        .filter(|c| config.component_spec(c).category == "weapon")
+        .count();
     assert!(
         war_w >= peace_w,
         "at war the AI should field at least as many weapons (war {war_w} >= peace {peace_w}); war={war:?} peace={peace:?}"
@@ -209,15 +277,27 @@ fn two_corvette_yards(state: &mut State) -> [(CityId, BuildingId); 2] {
             s.class = "corvette".to_string();
         }
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let mut yards: Vec<(CityId, BuildingId)> = Vec::new();
     for c in state.cities.iter().filter(|c| c.faction_id == "中国") {
         for b in c.buildings.iter().filter(|b| b.is_shipyard()) {
             yards.push((c.name.clone(), b.id));
         }
     }
-    assert!(yards.len() >= 2, "中国的建造区要 ≥2 座，实际 {}", yards.len());
+    assert!(
+        yards.len() >= 2,
+        "中国的建造区要 ≥2 座，实际 {}",
+        yards.len()
+    );
     let picked = [yards[0].clone(), yards[1].clone()];
     for (cid, bid) in &picked {
         if let Some(city) = state.city_mut(cid) {
@@ -237,14 +317,19 @@ fn two_corvette_yards(state: &mut State) -> [(CityId, BuildingId); 2] {
 fn player_pinned_blueprint_is_not_retooled() {
     let (config, mut state) = fresh_world(42);
     let [first, second] = two_corvette_yards(&mut state);
-    state.control.entry("中国".to_string()).or_default().blueprints.insert(
-        "玩家钉的护卫".to_string(),
-        Control::player(Blueprint {
-            class: "corvette".to_string(),
-            components: vec!["kinetic".to_string(), "ion_drive".to_string()],
-            order: None,
-        }),
-    );
+    state
+        .control
+        .entry("中国".to_string())
+        .or_default()
+        .blueprints
+        .insert(
+            "玩家钉的护卫".to_string(),
+            Control::player(Blueprint {
+                class: "corvette".to_string(),
+                components: vec!["kinetic".to_string(), "ion_drive".to_string()],
+                order: None,
+            }),
+        );
     if let Some(city) = state.city_mut(&first.0) {
         for b in city.buildings.iter_mut() {
             if b.id == first.1 {
@@ -256,7 +341,10 @@ fn player_pinned_blueprint_is_not_retooled() {
     let mut retools = Vec::new();
     retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
 
-    let rec = retools.iter().find(|r| r.faction == "中国").expect("战时过度单一 ⇒ 必须有一次改装");
+    let rec = retools
+        .iter()
+        .find(|r| r.faction == "中国")
+        .expect("战时过度单一 ⇒ 必须有一次改装");
     assert_eq!(
         (rec.city.clone(), rec.building),
         second.clone(),
@@ -265,7 +353,11 @@ fn player_pinned_blueprint_is_not_retooled() {
     // 被钉住的那座：舰级、图的舰级、图的选装**都没变**。
     let bp = state.control["中国"].blueprints["玩家钉的护卫"].clone();
     assert_eq!(bp.value.class, "corvette", "玩家钉的图的舰级不许被 AI 改");
-    assert_eq!(bp.value.components, vec!["kinetic".to_string(), "ion_drive".to_string()], "选装不许被改");
+    assert_eq!(
+        bp.value.components,
+        vec!["kinetic".to_string(), "ion_drive".to_string()],
+        "选装不许被改"
+    );
     let pinned = state
         .city(&first.0)
         .unwrap()
@@ -275,7 +367,11 @@ fn player_pinned_blueprint_is_not_retooled() {
         .unwrap()
         .ship_type
         .clone();
-    assert_eq!(pinned.as_deref(), Some("corvette"), "被钉住的建造区不许被改装");
+    assert_eq!(
+        pinned.as_deref(),
+        Some("corvette"),
+        "被钉住的建造区不许被改装"
+    );
     // 另一个区照旧被重定向到战局需要的舰级。
     let other = state
         .city(&second.0)
@@ -286,7 +382,11 @@ fn player_pinned_blueprint_is_not_retooled() {
         .unwrap()
         .ship_type
         .clone();
-    assert_ne!(other.as_deref(), Some("corvette"), "没挂图的那个区照旧被改装：{other:?}");
+    assert_ne!(
+        other.as_deref(),
+        Some("corvette"),
+        "没挂图的那个区照旧被改装：{other:?}"
+    );
     assert_eq!(other, Some(rec.to.clone()));
 }
 
@@ -295,14 +395,19 @@ fn player_pinned_blueprint_is_not_retooled() {
 fn an_auto_blueprint_is_retooled_as_a_blueprint() {
     let (config, mut state) = fresh_world(42);
     let [first, _second] = two_corvette_yards(&mut state);
-    state.control.entry("中国".to_string()).or_default().blueprints.insert(
-        "auto:corvette".to_string(),
-        Control::auto(Blueprint {
-            class: "corvette".to_string(),
-            components: Vec::new(),
-            order: None,
-        }),
-    );
+    state
+        .control
+        .entry("中国".to_string())
+        .or_default()
+        .blueprints
+        .insert(
+            "auto:corvette".to_string(),
+            Control::auto(Blueprint {
+                class: "corvette".to_string(),
+                components: Vec::new(),
+                order: None,
+            }),
+        );
     if let Some(city) = state.city_mut(&first.0) {
         for b in city.buildings.iter_mut() {
             if b.id == first.1 {
@@ -313,12 +418,22 @@ fn an_auto_blueprint_is_retooled_as_a_blueprint() {
     let mut rng = Prng::new(7);
     let mut retools = Vec::new();
     retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
-    let rec = retools.iter().find(|r| r.faction == "中国").expect("必须有一次改装");
-    assert_eq!((rec.city.clone(), rec.building), first, "Auto 图不挡改装（第一个候选就是它）");
+    let rec = retools
+        .iter()
+        .find(|r| r.faction == "中国")
+        .expect("必须有一次改装");
+    assert_eq!(
+        (rec.city.clone(), rec.building),
+        first,
+        "Auto 图不挡改装（第一个候选就是它）"
+    );
     let bp = state.control["中国"].blueprints["auto:corvette"].clone();
     assert_eq!(bp.value.class, rec.to, "改的是**图**的舰级");
     assert_eq!(bp.mode, ControlMode::Auto, "归属不许被改装动作改掉");
-    assert!(bp.value.components.is_empty(), "选装**不预生成**（出厂那一刻由生成器现算）");
+    assert!(
+        bp.value.components.is_empty(),
+        "选装**不预生成**（出厂那一刻由生成器现算）"
+    );
     let yard = state
         .city(&first.0)
         .unwrap()
@@ -328,5 +443,9 @@ fn an_auto_blueprint_is_retooled_as_a_blueprint() {
         .unwrap()
         .ship_type
         .clone();
-    assert_eq!(yard, Some(rec.to.clone()), "口径 A：区的 ship_type 必须与图的 class 相等");
+    assert_eq!(
+        yard,
+        Some(rec.to.clone()),
+        "口径 A：区的 ship_type 必须与图的 class 相等"
+    );
 }

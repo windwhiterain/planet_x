@@ -48,7 +48,11 @@ fn run(args: &[&str]) -> std::process::Output {
 /// `main.jsonl` 的最后一行（= 最后一回合）。
 fn last_main_row(dir: &std::path::Path) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.join("main.jsonl")).unwrap();
-    let last = text.lines().filter(|l| !l.trim().is_empty()).next_back().unwrap();
+    let last = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next_back()
+        .unwrap();
     serde_json::from_str(last).unwrap()
 }
 
@@ -84,16 +88,34 @@ fn derived_matches_the_projection_for_the_same_round() {
     let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
 
     // 1) 投影 6 回合，并顺手存一份 checkpoint（应当带上最后一回合的 pre/post，含流量）。
-    let st = run(&["--seed", "7", "--round", "6", "--index", out_s, "--save", ckpt_s]);
-    assert!(st.status.success(), "--index 失败: {}", String::from_utf8_lossy(&st.stderr));
+    let st = run(&[
+        "--seed", "7", "--round", "6", "--index", out_s, "--save", ckpt_s,
+    ]);
+    assert!(
+        st.status.success(),
+        "--index 失败: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
 
     // 2) 单点导出同一回合的派生态。
     let st = run(&["--start", ckpt_s, "--derived"]);
-    assert!(st.status.success(), "--derived 失败: {}", String::from_utf8_lossy(&st.stderr));
-    let v: serde_json::Value = serde_json::from_slice(&st.stdout).expect("--derived 必须输出一行 JSON");
-    assert_eq!(v["source"], serde_json::json!("checkpoint"), "有档时必须报 checkpoint 来源");
+    assert!(
+        st.status.success(),
+        "--derived 失败: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&st.stdout).expect("--derived 必须输出一行 JSON");
+    assert_eq!(
+        v["source"],
+        serde_json::json!("checkpoint"),
+        "有档时必须报 checkpoint 来源"
+    );
     assert_eq!(v["round"], serde_json::json!(6));
-    assert!(v.get("note").is_none(), "有档时不该有 note（那份派生态是真的）");
+    assert!(
+        v.get("note").is_none(),
+        "有档时不该有 note（那份派生态是真的）"
+    );
 
     // 3) 主流最后一行的 `view`：必须等于 ckpt 里整个 `post`（逐值相等，不是"差不多"）。
     let main = last_main_row(&out);
@@ -106,7 +128,10 @@ fn derived_matches_the_projection_for_the_same_round() {
     // 4) **过程量表**最后回合的每一行：必须等于 ckpt 里 `post.factions[<势力>]` 的对应列。
     //    两个读面读的是同一份视图 ⇒ 直接逐值相等，不再需要任何"存在性翻译"。
     let proc = derived_rows(&out, "faction_process", 6);
-    assert!(!proc.is_empty(), "idx/faction_process.jsonl 在最后一回合应有行");
+    assert!(
+        !proc.is_empty(),
+        "idx/faction_process.jsonl 在最后一回合应有行"
+    );
     let rows = &v["post"]["factions"];
     let mut checked = 0usize;
     let mut governance_ran = 0usize;
@@ -118,7 +143,10 @@ fn derived_matches_the_projection_for_the_same_round() {
             !expect.is_null(),
             "ckpt 的 post.factions 里没有 {fid} 的行——视图丢了过程量"
         );
-        assert_eq!(row["upkeep"], expect["upkeep"], "{fid} 的 upkeep 两个读面不一致");
+        assert_eq!(
+            row["upkeep"], expect["upkeep"],
+            "{fid} 的 upkeep 两个读面不一致"
+        );
         assert_eq!(
             row["production"], expect["production"],
             "{fid} 的 production 两个读面不一致"
@@ -142,6 +170,19 @@ fn derived_matches_the_projection_for_the_same_round() {
         ] {
             assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
         }
+        // B2（钱去哪了）：花掉的投资/建造预算、欠付维护费与生锈比例也必须跨进程逐值相同。
+        // ⚠ 「批了多少」**不在**这一行里——限额是控制面的持久叶（join `derived.control` 的
+        // `kind='investment_budget'`/`'construction_budget'`），两份相减才是「没花掉的」。
+        // 这条守卫管的是「已花」那一半；它是否**真的非零**由 `src/tests/sim/spending.rs` 钉
+        // （那里跑 8 回合，确保真有花钱的回合），这里只保证两个读面给同一个数。
+        for col in [
+            "investment_spent",
+            "construction_spent",
+            "upkeep_unpaid",
+            "fleet_rust",
+        ] {
+            assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
+        }
         if expect["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
             admin_seen += 1;
         }
@@ -150,15 +191,24 @@ fn derived_matches_the_projection_for_the_same_round() {
         }
         checked += 1;
     }
-    assert!(checked >= 2, "只比对到 {checked} 个势力——守卫太空（至少要有 >=2 个）");
+    assert!(
+        checked >= 2,
+        "只比对到 {checked} 个势力——守卫太空（至少要有 >=2 个）"
+    );
     assert!(
         governance_ran >= 1,
         "这一回合没有任何势力真的跑过治理——这条守卫会退化成空转"
     );
-    assert!(admin_seen >= 1, "没有任何势力报出行政开销——B1 那几列等于空转");
+    assert!(
+        admin_seen >= 1,
+        "没有任何势力报出行政开销——B1 那几列等于空转"
+    );
     // 首都判定是**稀疏数组**（不在每势力一行里）：形状必须是数组，且缺席表示「既没评估也没迁」。
     let cap = &v["post"]["decisions"]["capital"];
-    assert!(cap.is_array(), "view.decisions.capital 必须是数组（稀疏判定）");
+    assert!(
+        cap.is_array(),
+        "view.decisions.capital 必须是数组（稀疏判定）"
+    );
     for c in cap.as_array().unwrap() {
         assert!(c["faction"].is_string(), "首都判定行缺 faction：{c}");
         assert!(
@@ -171,10 +221,16 @@ fn derived_matches_the_projection_for_the_same_round() {
     let city_proc = derived_rows(&out, "city_process", 6);
     let with_prod: Vec<&serde_json::Value> = city_proc
         .iter()
-        .filter(|r| r["production"].as_object().map(|o| !o.is_empty()).unwrap_or(false))
+        .filter(|r| {
+            r["production"]
+                .as_object()
+                .map(|o| !o.is_empty())
+                .unwrap_or(false)
+        })
         .collect();
     assert!(!with_prod.is_empty(), "最后一回合没有任何带产出的城行");
     let mut targets_seen = 0usize;
+    let mut hubs_seen = false;
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
         assert_eq!(
@@ -194,14 +250,48 @@ fn derived_matches_the_projection_for_the_same_round() {
         if lt["effective"].as_f64().unwrap_or(0.0) > 0.0 {
             targets_seen += 1;
         }
+        // B2：产出与建造的中间量——用工系数 / 住房容量 / 是否集散地 / 每舰级造舰进度
+        // （`build` 是嵌套对象：平铺列里就是它本身，逐值相同）。
+        let b2 = &v["post"]["cities"][cid];
+        assert_eq!(row["labor"], b2["labor"], "{cid} 的用工系数两个读面不一致");
+        assert_eq!(
+            row["housing_capacity"], b2["housing_capacity"],
+            "{cid} 的住房容量两个读面不一致"
+        );
+        assert_eq!(
+            row["is_hub"], b2["is_hub"],
+            "{cid} 的集散地标记两个读面不一致"
+        );
+        assert_eq!(row["build"], b2["build"], "{cid} 的造舰进度两个读面不一致");
+        // 中性值约定：用工系数**永远不该是 0**（0 会被读成「全城没人上工」，中性值是 1.0）。
+        assert!(
+            row["labor"].as_f64().unwrap_or(0.0) > 0.0,
+            "{cid}: 用工系数落到了 0——中性值约定被破坏了（应为 1.0 起步）"
+        );
+        let hubs_seen_here = row["is_hub"] == serde_json::json!(true);
+        hubs_seen |= hubs_seen_here;
     }
-    assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——B1 那几列等于空转");
+    assert!(
+        targets_seen >= 1,
+        "没有任何城报出忠诚目标值——B1 那几列等于空转"
+    );
+    // 集散地至少要有真的一处（否则「产出直进势力池」这条路永远是 false，列等于空转）。
+    assert!(
+        hubs_seen,
+        "没有任何城被标成集散地（首都）——`is_hub` 那列等于空转"
+    );
 
     // 6) 控制面表也要在（读面即写面的 tidy 版），并且 join 列真的存在于主流。
     for table in ["control", "scope"] {
-        assert!(!derived_rows(&out, table, 6).is_empty(), "idx/{table}.jsonl 在最后一回合应有行");
+        assert!(
+            !derived_rows(&out, table, 6).is_empty(),
+            "idx/{table}.jsonl 在最后一回合应有行"
+        );
     }
-    assert!(main["faction_ids"].is_array(), "main 行要有 faction_ids（派生表的 join 列）");
+    assert!(
+        main["faction_ids"].is_array(),
+        "main 行要有 faction_ids（派生表的 join 列）"
+    );
 }
 
 /// **投影一份 checkpoint 时，起点那一行的流量必须是那一回合的真数**，不是 0。
@@ -214,8 +304,21 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
     let s = Scratch::new("seedflow");
     let first = s.0.join("run");
     let ckpt = s.0.join("ckpt.ron");
-    let st = run(&["--seed", "7", "--round", "4", "--index", first.to_str().unwrap(), "--save", ckpt.to_str().unwrap()]);
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = run(&[
+        "--seed",
+        "7",
+        "--round",
+        "4",
+        "--index",
+        first.to_str().unwrap(),
+        "--save",
+        ckpt.to_str().unwrap(),
+    ]);
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let ckpt_s = ckpt.to_str().unwrap();
 
     // 参考：档里存下来的派生态。
@@ -226,8 +329,19 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
 
     // 只用这个 checkpoint 投影（不推进任何回合）。
     let proj = s.0.join("proj");
-    let st = run(&["--start", ckpt_s, "--round", "0", "--index", proj.to_str().unwrap()]);
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = run(&[
+        "--start",
+        ckpt_s,
+        "--round",
+        "0",
+        "--index",
+        proj.to_str().unwrap(),
+    ]);
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
 
     let main = last_main_row(&proj);
     assert_eq!(main["round"], serde_json::json!(round));
@@ -240,7 +354,10 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
     let mut nonzero = 0usize;
     for row in &proc {
         let fid = row["faction_id"].as_str().unwrap();
-        assert_eq!(row["upkeep"], v["post"]["factions"][fid]["upkeep"], "{fid} 的 upkeep 应为档里的真数");
+        assert_eq!(
+            row["upkeep"], v["post"]["factions"][fid]["upkeep"],
+            "{fid} 的 upkeep 应为档里的真数"
+        );
         assert_eq!(
             row["production"], v["post"]["factions"][fid]["production"],
             "{fid} 的 production 应为档里的真数"
@@ -249,11 +366,21 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
             nonzero += 1;
         }
     }
-    assert!(nonzero > 0, "这条守卫要求至少有一个势力的维护费非零，否则等于没检查（零值也能骗过相等断言）");
+    assert!(
+        nonzero > 0,
+        "这条守卫要求至少有一个势力的维护费非零，否则等于没检查（零值也能骗过相等断言）"
+    );
 
     // 对照：全新开局的回合 0 确实没有流量（那是初始世界，没有"上一回合"）。
     let fresh = s.0.join("fresh");
-    let st = run(&["--seed", "7", "--round", "0", "--index", fresh.to_str().unwrap()]);
+    let st = run(&[
+        "--seed",
+        "7",
+        "--round",
+        "0",
+        "--index",
+        fresh.to_str().unwrap(),
+    ]);
     assert!(st.status.success());
     assert!(
         derived_rows(&fresh, "faction_process", 0)
@@ -266,7 +393,11 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
 #[test]
 fn derived_without_checkpoint_says_it_was_recomputed() {
     let st = run(&["--seed", "7", "--derived"]);
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     assert_eq!(v["source"], serde_json::json!("state"));
     assert!(
@@ -277,8 +408,12 @@ fn derived_without_checkpoint_says_it_was_recomputed() {
     let rows = v["post"]["factions"].as_object().unwrap();
     assert!(!rows.is_empty());
     assert!(
-        rows.values().all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0
-            && r["production"].as_object().map(|o| o.is_empty()).unwrap_or(true)),
+        rows.values()
+            .all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0
+                && r["production"]
+                    .as_object()
+                    .map(|o| o.is_empty())
+                    .unwrap_or(true)),
         "按状态重算时不该凭空出现过程量"
     );
     // 但观测部分仍然是真的（从当前状态汇总），不该是空壳。
@@ -300,11 +435,21 @@ fn decisions_table_matches_the_derived_record() {
     // 跑到**确实有仗打**的回合——否则战斗分支永远走不到。跑 60 回合：「seed 7 在 r3 开战」
     // 是旧轨迹上的事实，几次有意为之的行为改动（造舰动机、风格/设计图的执行者）都把它推后了。
     // 守卫要防的是「表退化成空的」，不是「某个特定回合有仗打」⇒ 给足回合数。
-    let st = run(&["--seed", "7", "--round", "60", "--index", out_s, "--save", ckpt_s]);
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let st = run(&[
+        "--seed", "7", "--round", "60", "--index", out_s, "--save", ckpt_s,
+    ]);
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
 
     let st = run(&["--start", ckpt_s, "--derived"]);
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     let round = v["round"].as_u64().unwrap();
     let dec = &v["post"]["decisions"];
@@ -312,14 +457,28 @@ fn decisions_table_matches_the_derived_record() {
     let retools = dec["retools"].as_array().expect("decisions.retools 是数组");
 
     let rows = derived_rows(&out, "decisions", round);
-    let order_rows: Vec<&serde_json::Value> =
-        rows.iter().filter(|r| r["kind"] == serde_json::json!("ship_order")).collect();
-    let retool_rows: Vec<&serde_json::Value> =
-        rows.iter().filter(|r| r["kind"] == serde_json::json!("retool")).collect();
-    assert_eq!(order_rows.len(), ships.len(), "逐舰判定的条数两个读面不一致");
-    assert_eq!(retool_rows.len(), retools.len(), "改装判定的条数两个读面不一致");
+    let order_rows: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r["kind"] == serde_json::json!("ship_order"))
+        .collect();
+    let retool_rows: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r["kind"] == serde_json::json!("retool"))
+        .collect();
+    assert_eq!(
+        order_rows.len(),
+        ships.len(),
+        "逐舰判定的条数两个读面不一致"
+    );
+    assert_eq!(
+        retool_rows.len(),
+        retools.len(),
+        "改装判定的条数两个读面不一致"
+    );
 
-    const KNOWN: [&str; 7] = ["withdraw", "engage", "colonize", "bombard", "move", "haul", "hold"];
+    const KNOWN: [&str; 7] = [
+        "withdraw", "engage", "colonize", "bombard", "move", "haul", "hold",
+    ];
     for d in ships {
         let actor = d["ship"].as_str().unwrap();
         // 一艘舰一回合**最多两行**（先机动、到位后再判一次），所以配对键是
@@ -335,12 +494,30 @@ fn decisions_table_matches_the_derived_record() {
         assert_eq!(row["faction_id"], d["faction"], "{actor} 的势力不一致");
         assert_eq!(row["target"], d["target"], "{actor} 的目标不一致");
         // 输入那一半也要对得上——读表的人正是靠它解释"为什么"。
-        assert_eq!(row["detail"]["hull_ratio"], d["hull_ratio"], "{actor} 的血量比不一致");
-        assert_eq!(row["detail"]["retreat_hull"], d["retreat_hull"], "{actor} 的撤退阈值不一致");
-        assert_eq!(row["detail"]["kiting"], d["kiting"], "{actor} 的风筝距离不一致");
-        assert_eq!(row["detail"]["enemy_in_range"], d["enemy_in_range"], "{actor} 的敌情不一致");
-        assert_eq!(row["detail"]["destination"], d["destination"], "{actor} 的目的地不一致");
-        assert_eq!(row["detail"]["order"], d["order"], "{actor} 写回的行为不一致");
+        assert_eq!(
+            row["detail"]["hull_ratio"], d["hull_ratio"],
+            "{actor} 的血量比不一致"
+        );
+        assert_eq!(
+            row["detail"]["retreat_hull"], d["retreat_hull"],
+            "{actor} 的撤退阈值不一致"
+        );
+        assert_eq!(
+            row["detail"]["kiting"], d["kiting"],
+            "{actor} 的风筝距离不一致"
+        );
+        assert_eq!(
+            row["detail"]["enemy_in_range"], d["enemy_in_range"],
+            "{actor} 的敌情不一致"
+        );
+        assert_eq!(
+            row["detail"]["destination"], d["destination"],
+            "{actor} 的目的地不一致"
+        );
+        assert_eq!(
+            row["detail"]["order"], d["order"],
+            "{actor} 写回的行为不一致"
+        );
         assert!(
             KNOWN.contains(&row["verdict"].as_str().unwrap()),
             "出现了没在 schema 里声明过的判定：{row}"
@@ -354,8 +531,14 @@ fn decisions_table_matches_the_derived_record() {
             .unwrap_or_else(|| panic!("decisions 表缺 {city} 的改装行"));
         assert_eq!(row["faction_id"], r["faction"], "{city} 的势力不一致");
         assert_eq!(row["target"], r["to"], "{city} 改装后的舰级不一致");
-        assert_eq!(row["detail"]["from"], r["from"], "{city} 改装前的舰级不一致");
-        assert_eq!(row["detail"]["building"], r["building"], "{city} 的建筑下标不一致");
+        assert_eq!(
+            row["detail"]["from"], r["from"],
+            "{city} 改装前的舰级不一致"
+        );
+        assert_eq!(
+            row["detail"]["building"], r["building"],
+            "{city} 的建筑下标不一致"
+        );
     }
 
     // 防空转：这 20 回合里必须真的发生过接战（否则上面对得再齐也只是空表对空表）。
@@ -380,5 +563,199 @@ fn decisions_table_matches_the_derived_record() {
         order_rows.len() >= 4,
         "最后一回合的逐舰判定只有 {} 条——守卫太空",
         order_rows.len()
+    );
+
+    // B2 的防空转：**整局**（60 回合）里必须真的花过钱、也真的有过造舰进度行——
+    // 否则上面那几列只是「空表比空表」，跨进程相等毫无意义。范围取整局的理由同上：
+    // 某一回合有没有在建的东西取决于当回合的态势，钉死单帧会随轨迹漂移而翻车。
+    let faction_all = derived_rows_all(&out, "faction_process");
+    let spend_seen = faction_all.iter().any(|r| {
+        ["investment_spent", "construction_spent"].iter().any(|k| {
+            r[*k]
+                .as_object()
+                .map(|o| o.values().any(|v| v.as_f64().unwrap_or(0.0) > 0.0))
+                .unwrap_or(false)
+        })
+    });
+    assert!(
+        spend_seen,
+        "seed 7 的前 60 回合里应当真的花过钱（投资或造舰）——B2 那几列等于空转"
+    );
+    let city_all = derived_rows_all(&out, "city_process");
+    let lines_seen = city_all.iter().any(|r| {
+        r["build"]
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false)
+    });
+    assert!(lines_seen, "没有任何城报出造舰进度行——`build` 那列等于空转");
+    let rust_seen = faction_all
+        .iter()
+        .any(|r| r["fleet_rust"].as_f64().unwrap_or(0.0) > 0.0);
+    let unpaid_seen = faction_all
+        .iter()
+        .any(|r| r["upkeep_unpaid"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(
+        rust_seen && unpaid_seen,
+        "这 60 回合里应当至少有一家付不起维护费（欠费与生锈两列一起才说明它真的在发生）"
+    );
+
+    // B3 的防空转：整局里必须真的成交过、也真的有过在跑的运输舰（同上，范围取整局）。
+    let trades_all = derived_rows_all(&out, "market_trades");
+    assert!(
+        trades_all
+            .iter()
+            .any(|r| r["dist_au"].as_f64().unwrap_or(0.0) > 0.0),
+        "60 回合里一笔跨天体的贸易都没有——价格分解那几列等于空转"
+    );
+    let hauls_all = derived_rows_all(&out, "haul_steps");
+    let steps: std::collections::BTreeSet<&str> = hauls_all
+        .iter()
+        .map(|r| r["step"].as_str().unwrap())
+        .collect();
+    assert!(
+        steps.contains("loaded") || steps.contains("delivered"),
+        "60 回合里没有一次装卸（只见到 {steps:?}）——`haul_steps` 没在记真的动作"
+    );
+    assert!(
+        steps.contains("waiting") || steps.contains("en_route"),
+        "只见到装卸（{steps:?}）——`waiting`/`en_route` 这两档**没有别的读法**，它们不出现就说明 \
+         这条路径没跑过，用例没在检查东西"
+    );
+    let _ = &faction_all; // 上面已经用过它（B2 那几条），这里再次借它只为下面的货栈账
+    assert!(
+        faction_all.iter().any(|r| r["freight_gap"]
+            .as_object()
+            .map(|o| o
+                .values()
+                .any(|g| g["uncovered"].as_f64().unwrap_or(0.0) > 0.0))
+            .unwrap_or(false)),
+        "60 回合里一处积压缺口都没有——`freight_gap` 那列等于空转"
+    );
+}
+
+/// **B3 的两张新派生表**（`market_trades` / `haul_steps`）必须是 `--derived` 里同一份数的
+/// 平铺版：跨进程、跨两条代码路径给出**逐值相同**的结果。
+///
+/// 它们与 `decisions` 表是同一类东西（本回合的结算事实，状态里没有），所以「两个读面各说各话」
+/// 的风险也一样大——尤其是价格分解：读者会照着它调贸易策略。
+#[test]
+fn b3_tables_match_the_derived_record() {
+    let s = Scratch::new("b3tables");
+    let out = s.0.join("out");
+    let ckpt = s.0.join("ckpt.ron");
+    let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
+
+    // 30 回合：够到「跨天体贸易」与「在途/等待」都出现过（防空转见下）。
+    let st = run(&[
+        "--seed", "7", "--round", "30", "--index", out_s, "--save", ckpt_s,
+    ]);
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+
+    // 表里最后出现的回合必须就是最后一回合——否则下面的「最后一回合逐值比对」会退化成空转。
+    let trades = derived_rows_all(&out, "market_trades");
+    let hauls = derived_rows_all(&out, "haul_steps");
+    assert!(
+        trades.iter().any(|r| r["round"] == serde_json::json!(30)),
+        "第 30 回合没有成交行——把 `--round` 调大一点，别让这条守卫空转"
+    );
+    assert!(
+        hauls.iter().any(|r| r["round"] == serde_json::json!(30)),
+        "第 30 回合没有运输动作行——同上"
+    );
+
+    let st = run(&["--start", ckpt_s, "--derived"]);
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
+    assert_eq!(v["round"], serde_json::json!(30));
+
+    // ① 成交清单：逐字段与视图相等（`moved` 也是一个值，直接比）。
+    let want = v["post"]["market_trades"]
+        .as_array()
+        .expect("view.market_trades 是数组");
+    let rows = derived_rows(&out, "market_trades", 30);
+    assert_eq!(rows.len(), want.len(), "成交笔数两个读面不一致");
+    for (row, w) in rows.iter().zip(want.iter()) {
+        for col in [
+            "buyer",
+            "seller",
+            "moved",
+            "dist_au",
+            "depth",
+            "mond_extra",
+            "freight_rate",
+            "rel_mult",
+            "mastery",
+            "loss",
+        ] {
+            assert_eq!(row[col], w[col], "成交行的 {col} 两个读面不一致：{row}");
+        }
+    }
+
+    // ② 运输动作：视图是 `{舰名: 动作}` 的 map，表是平铺行——把三个共同字段逐条对上。
+    let steps = v["post"]["haul_steps"]
+        .as_object()
+        .expect("view.haul_steps 是对象");
+    let hrows = derived_rows(&out, "haul_steps", 30);
+    assert_eq!(hrows.len(), steps.len(), "运输动作条数两个读面不一致");
+    for row in &hrows {
+        let ship = row["ship_id"].as_str().unwrap();
+        let w = &steps[ship];
+        assert_eq!(row["step"], w["step"], "{ship} 的动作名两个读面不一致");
+        assert_eq!(row["body"], w["body"], "{ship} 的动作天体两个读面不一致");
+        // ⚠ 视图是**tag 枚举**（变体专属载荷只在它自己那一档出现），表是**平铺列**（每行都有）。
+        // 所以 `units`/`into_pool` 只在该档真有这个字段时逐值比，其余档要求表里是那个「没有」
+        // 的中性值（0 / false）——这正是这两种表示之间的接缝，写下来免得下次有人「顺手统一」。
+        match w["step"].as_str().unwrap() {
+            "loaded" | "delivered" => {
+                assert_eq!(row["units"], w["units"], "{ship} 的搬动件数两个读面不一致");
+            }
+            _ => {
+                assert_eq!(
+                    row["units"],
+                    serde_json::json!(0.0),
+                    "{ship}: 等待/在途不该有件数"
+                );
+                assert_eq!(
+                    w.get("units"),
+                    None,
+                    "{ship}: 视图里等待/在途不该出现 `units` 字段"
+                );
+            }
+        }
+        if w["step"] == serde_json::json!("delivered") {
+            assert_eq!(
+                row["into_pool"], w["into_pool"],
+                "{ship} 的「进了首都池」两个读面不一致"
+            );
+        } else {
+            assert_eq!(
+                row["into_pool"],
+                serde_json::json!(false),
+                "{ship}: 非卸货档的 into_pool 应为 false"
+            );
+        }
+    }
+
+    // ③ 防空转：这一局里必须既有跨天体成交，也有「没有别的读法」的那两档动作。
+    assert!(
+        trades
+            .iter()
+            .any(|r| r["dist_au"].as_f64().unwrap_or(0.0) > 0.0),
+        "30 回合里一笔跨天体贸易都没有——价格分解那几列没被检查到"
+    );
+    let kinds: std::collections::BTreeSet<&str> =
+        hauls.iter().map(|r| r["step"].as_str().unwrap()).collect();
+    assert!(
+        kinds.contains("waiting") || kinds.contains("en_route"),
+        "没见到 waiting/en_route（{kinds:?}）——这两档不落 state、不发事件，不出现就等于没检查"
     );
 }

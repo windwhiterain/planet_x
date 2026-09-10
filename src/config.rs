@@ -2,7 +2,7 @@
 //! initial-state RON file, and seed parsing. Used by both the CLI and the web
 //! server so the two entry points behave identically.
 
-use crate::model::{migrate, GameConfig, RoundState, State};
+use crate::model::{GameConfig, RoundState, State, migrate};
 use crate::prng::{self, Prng};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,8 @@ pub fn config_path() -> PathBuf {
 /// the binaries use; tests (e.g. in the `planet_x_web` crate, whose cwd is `web/`)
 /// use this one with `CARGO_MANIFEST_DIR`-anchored paths.
 pub fn load_config_from(path: &Path) -> Result<GameConfig, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("无法读取配置文件 {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("无法读取配置文件 {}: {e}", path.display()))?;
     ron::from_str(&text).map_err(|e| format!("配置文件 {} 解析失败: {e}", path.display()))
 }
 
@@ -37,16 +38,28 @@ pub fn load_config() -> GameConfig {
 /// Load a `State` initial snapshot from a RON file. Exits on error.
 pub fn load_state(path: &Path) -> State {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("{} 无法读取初始状态 {}: {e}", "[错误]".red().bold(), path.display());
+        eprintln!(
+            "{} 无法读取初始状态 {}: {e}",
+            "[错误]".red().bold(),
+            path.display()
+        );
         std::process::exit(1);
     });
     let mut state: State = ron::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("{} 初始状态 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
+        eprintln!(
+            "{} 初始状态 {} 解析失败: {e}",
+            "[错误]".red().bold(),
+            path.display()
+        );
         std::process::exit(1);
     });
     // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错退出，而不是静默错载。
     if let Err(e) = migrate(&mut state) {
-        eprintln!("{} 初始状态 {} 迁移失败: {e}", "[错误]".red().bold(), path.display());
+        eprintln!(
+            "{} 初始状态 {} 迁移失败: {e}",
+            "[错误]".red().bold(),
+            path.display()
+        );
         std::process::exit(1);
     }
     state
@@ -70,15 +83,20 @@ pub fn save_state(path: &Path, state: &State) -> Result<(), String> {
 
 /// Serialize a session checkpoint (round_state + RNG position) to a RON file.
 pub fn save_checkpoint(path: &Path, round_state: &RoundState, rng: &Prng) -> Result<(), String> {
-    let cp = Checkpoint { prng_state: rng.state(), round_state: round_state.clone() };
+    let cp = Checkpoint {
+        prng_state: rng.state(),
+        round_state: round_state.clone(),
+    };
     let text = ron::to_string(&cp).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Load a checkpoint, returning the [`RoundState`] and the resumable [`Prng`].
 pub fn load_checkpoint(path: &Path) -> Result<(RoundState, Prng), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut cp: Checkpoint =
+        ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错。
     migrate(&mut cp.round_state.state)?;
     // 包装层（`RoundState`）自己那个版本号也跟着推到当前值：它以前只是**写出去**、从没被校准，
@@ -106,7 +124,10 @@ pub fn parse_seed(v: &str) -> u64 {
         return prng::random_seed();
     }
     v.trim().parse::<u64>().unwrap_or_else(|_| {
-        eprintln!("{} 无效的 --seed 值: {v} （用数字或 'random'）", "[错误]".red().bold());
+        eprintln!(
+            "{} 无效的 --seed 值: {v} （用数字或 'random'）",
+            "[错误]".red().bold()
+        );
         std::process::exit(2);
     })
 }
@@ -114,4 +135,3 @@ pub fn parse_seed(v: &str) -> u64 {
 #[cfg(test)]
 #[path = "tests/config.rs"]
 mod tests;
-

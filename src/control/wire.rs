@@ -88,9 +88,9 @@ pub struct ShipKitingEntry {
 /// `autocontrol::freight`）。所以「有效值不是玩家写的那份」是正常的——`mode = Player`
 /// 才是「玩家钉的、AI 不碰」。它**只管自动控制派哪种活**，不解除武装（照样自动开火/kiting）。
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ShipFreighterEntry {
+pub struct ShipRoleEntry {
     pub ship: ShipId,
-    pub freighter: bool,
+    pub role: ShipRole,
     pub mode: ControlMode,
 }
 
@@ -169,7 +169,7 @@ pub struct FactionControlView {
     /// 舰队默认**风筝<->贴脸姿态**（势力级）：与 `default_doctrine` 同形的另一片。
     pub default_kiting: Option<DefaultKiting>,
     /// 舰队默认**角色**（势力级，第三条风格轴）。
-    pub default_freighter: Option<DefaultFreighter>,
+    pub default_role: Option<DefaultShipRole>,
     /// **势力级设计图库**：一行 = 一张图（厂房里「还不存在的舰」的出厂规格）。
     /// 建造区指向其中一张（`buildings[].blueprint` → 结构叶 [`BuildingPatch::blueprint`]）。
     pub blueprints: Vec<BlueprintEntry>,
@@ -177,7 +177,7 @@ pub struct FactionControlView {
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub ship_kiting: Vec<ShipKitingEntry>,
     /// 本势力各舰的**角色**（有效值 + 那片叶自己的表态）。
-    pub ship_freighter: Vec<ShipFreighterEntry>,
+    pub ship_role: Vec<ShipRoleEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
@@ -259,14 +259,14 @@ pub struct DefaultKiting {
 /// 写它 = 「全舰队按这个角色走」（`true` = 全转运输）。玩家把它设成 `Player` 后，
 /// 自动控制的**逐舰定编不再生效**（那片叶归玩家）——这正是「AI 定编 vs 玩家意图」的闸门。
 #[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
-pub struct DefaultFreighter {
+pub struct DefaultShipRole {
     /// 默认角色（缺省 = 保留现值；写值即接管）。
     #[serde(default)]
-    pub freighter: Option<bool>,
+    pub role: Option<ShipRole>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（势力级这一层回到"没有说话"）。与 `freighter`/`mode` 同时出现 ⇒ 拒绝；
+    /// **删掉这片叶**（势力级这一层回到"没有说话"）。与 `role`/`mode` 同时出现 ⇒ 拒绝；
     /// 叶不存在时是幂等成功。
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove: bool,
@@ -334,17 +334,17 @@ pub struct ShipKitingPatch {
 ///
 /// 玩家写它 = 手动给这艘舰定活（`true` 运货 / `false` 打仗），自动控制的定编从此不碰这艘舰。
 #[derive(Deserialize, Default, JsonSchema)]
-pub struct ShipFreighterPatch {
+pub struct ShipRolePatch {
     /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
     #[serde(default)]
-    pub freighter: Option<bool>,
+    pub role: Option<ShipRole>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
     #[serde(default)]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**：这艘舰回到"没有自己的角色" ⇒ **交回自动定编**（`Inherit` 之下 AI 下回合
     /// 可能立刻又写下它的结论——想让结论稳定就得写 `Player` 而不是删叶）。叶不存在时是幂等成功；
-    /// 与 `freighter`/`mode` 同时出现 ⇒ 拒绝。舰已战沉也能删（删的是控制面里的叶）。
+    /// 与 `role`/`mode` 同时出现 ⇒ 拒绝。舰已战沉也能删（删的是控制面里的叶）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove: bool,
 }
@@ -538,7 +538,7 @@ pub struct FactionControlPatch {
     pub default_kiting: Option<DefaultKiting>,
     /// 舰队默认**角色**（势力级，第三条风格轴）。
     #[serde(default)]
-    pub default_freighter: Option<DefaultFreighter>,
+    pub default_role: Option<DefaultShipRole>,
     /// **设计图库补丁**（势力级）：新建/改值/改归属/删图。写值即接管（⇒ `Player`）。
     ///
     /// ⚠ 它们在 `apply_diff` 里**先于** `buildings` 应用：同一份 diff 里「建图 + 把某个
@@ -557,7 +557,7 @@ pub struct FactionControlPatch {
     pub ship_kiting: Vec<ShipKitingPatch>,
     /// 本势力各舰的**角色**补丁（per-舰，第三条风格轴）。
     #[serde(default)]
-    pub ship_freighter: Vec<ShipFreighterPatch>,
+    pub ship_role: Vec<ShipRolePatch>,
     /// 投资预算补丁（建设）。
     #[serde(default)]
     pub investment_budget: Vec<BudgetPatch>,

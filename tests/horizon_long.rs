@@ -44,8 +44,14 @@ fn count_nonfinite(state: &State, _config: &GameConfig) -> (usize, Vec<String>) 
     for b in &state.bodies {
         check(format!("body[{}].position.0", b.name), b.position[0]);
         check(format!("body[{}].position.1", b.name), b.position[1]);
-        check(format!("body[{}].orbit.peri", b.name), b.orbit.perihelion_distance as f64);
-        check(format!("body[{}].orbit.aphe", b.name), b.orbit.aphelion_distance as f64);
+        check(
+            format!("body[{}].orbit.peri", b.name),
+            b.orbit.perihelion_distance as f64,
+        );
+        check(
+            format!("body[{}].orbit.aphe", b.name),
+            b.orbit.aphelion_distance as f64,
+        );
         for s in &b.settlements {
             check(format!("settlement.{}area", s.name), s.total_area);
             for d in &s.resources {
@@ -68,7 +74,10 @@ fn count_nonfinite(state: &State, _config: &GameConfig) -> (usize, Vec<String>) 
     for c in &state.cities {
         for b in &c.buildings {
             check(format!("city[{}].bld[{}].area", c.name, b.id), b.area);
-            check(format!("city[{}].bld[{}].deployed", c.name, b.id), b.deployed);
+            check(
+                format!("city[{}].bld[{}].deployed", c.name, b.id),
+                b.deployed,
+            );
             check(format!("city[{}].bld[{}].armor", c.name, b.id), b.armor);
         }
         for (cls, p) in &c.ship_progress {
@@ -118,8 +127,16 @@ fn health_report(state: &State, config: &GameConfig) -> String {
 
     // Per-faction summary where it is interesting.
     for f in &state.factions {
-        let ships = state.ships.iter().filter(|s| s.faction_id == f.name).count();
-        let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count();
+        let ships = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == f.name)
+            .count();
+        let cities = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == f.name && !c.razed)
+            .count();
         let val = faction_value(f, config);
         let at_war = state
             .factions
@@ -150,7 +167,11 @@ fn is_zombie(state: &State, fid: FactionId) -> bool {
 }
 
 fn zombie_count(state: &State) -> usize {
-    state.factions.iter().filter(|f| is_zombie(state, f.name.clone())).count()
+    state
+        .factions
+        .iter()
+        .filter(|f| is_zombie(state, f.name.clone()))
+        .count()
 }
 
 fn count_wars(state: &State, config: &GameConfig) -> usize {
@@ -166,12 +187,20 @@ fn count_wars(state: &State, config: &GameConfig) -> usize {
 }
 
 fn world_value(state: &State, config: &GameConfig) -> f64 {
-    state.factions.iter().map(|f| faction_value(f, config)).sum()
+    state
+        .factions
+        .iter()
+        .map(|f| faction_value(f, config))
+        .sum()
 }
 
 fn check_state(state: &State, config: &GameConfig) {
     let (bad, samples) = count_nonfinite(state, config);
-    assert_eq!(bad, 0, "non-finite numbers found after round {}: {:?}", state.round, samples);
+    assert_eq!(
+        bad, 0,
+        "non-finite numbers found after round {}: {:?}",
+        state.round, samples
+    );
 }
 
 /// Diagnostic (opt-in, `cargo test -- --ignored --nocapture`): run several seeds
@@ -267,7 +296,9 @@ fn no_nonfinite_over_long_run() {
         "零活城的状态拖了 {worst_recovery} 回合才复生（上限 {CITILESS_RECOVERY}）——\
          殖民只需要「活舰 + 空白定居点」，不该拖这么久"
     );
-    let Some((round, samples)) = nonfinite_round else { return };
+    let Some((round, samples)) = nonfinite_round else {
+        return;
+    };
     panic!("non-finite numbers at round {}: {:?}", round, samples);
 }
 
@@ -332,7 +363,10 @@ fn city_founding_requires_a_ship_there() {
                         .filter(|s| &s.faction_id == owner && s.hull > 0.0)
                         .count();
                     if ships == 0 && violations.len() < 5 {
-                        violations.push(format!("seed {seed} r{}: {owner} 造了 {city} 却一艘舰都没有", state.round));
+                        violations.push(format!(
+                            "seed {seed} r{}: {owner} 造了 {city} 却一艘舰都没有",
+                            state.round
+                        ));
                     }
                 }
             }
@@ -368,7 +402,12 @@ fn probe_world_health() {
         let alive = state
             .factions
             .iter()
-            .filter(|f| state.cities.iter().any(|c| c.faction_id == f.name && !c.razed))
+            .filter(|f| {
+                state
+                    .cities
+                    .iter()
+                    .any(|c| c.faction_id == f.name && !c.razed)
+            })
             .count();
         println!(
             "seed {seed}: 末态有城势力={alive}/{} 亡国峰值={max_dead} 城占峰值={max_top_share:.3}",
@@ -400,7 +439,11 @@ fn coalition_mechanism_is_alive() {
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
             check_state(&state, &config);
-            if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
+            if state
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CoalitionFormed { .. }))
+            {
                 coalition_seen = true;
             }
             let m = sim::observe(&state, &config, &RoundSink::default());
@@ -411,8 +454,14 @@ fn coalition_mechanism_is_alive() {
                 sanction_seen = true;
             }
         }
-        assert!(coalition_seen, "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）");
-        assert!(sanction_seen, "seed {seed}: 长局从未出现被封锁的霸权（经济制裁未生效）");
+        assert!(
+            coalition_seen,
+            "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）"
+        );
+        assert!(
+            sanction_seen,
+            "seed {seed}: 长局从未出现被封锁的霸权（经济制裁未生效）"
+        );
     }
 }
 
@@ -497,7 +546,9 @@ fn probe_sanction() {
             let _ = flow;
         }
         let avg = top_sum / top_count as f64;
-        println!("seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}");
+        println!(
+            "seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}"
+        );
     }
 }
 
@@ -536,13 +587,26 @@ fn probe_multipolar() {
             }
         }
         let (_, terminal_top) = top_power(&state, &config);
-        let alive = state.factions.iter().filter(|f| state.cities.iter().any(|c| c.faction_id == f.name && !c.razed)).count();
+        let alive = state
+            .factions
+            .iter()
+            .filter(|f| {
+                state
+                    .cities
+                    .iter()
+                    .any(|c| c.faction_id == f.name && !c.razed)
+            })
+            .count();
         // 吉尼：排序末回合各势力城占比，算基尼系数。
         let mut shares: Vec<f64> = state
             .factions
             .iter()
             .map(|f| {
-                let n = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
+                let n = state
+                    .cities
+                    .iter()
+                    .filter(|c| c.faction_id == f.name && !c.razed)
+                    .count() as f64;
                 n / state.cities.iter().filter(|c| !c.razed).count().max(1) as f64
             })
             .collect();
@@ -562,7 +626,8 @@ fn probe_multipolar() {
         };
         println!(
             "seed {seed}: avg_top={:.3} terminal_top={:.3} rotations={rotations} alive={alive} zombies={max_zombies} gini={gini:.3}",
-            top_sum / top_count as f64, terminal_top
+            top_sum / top_count as f64,
+            terminal_top
         );
     }
 }
@@ -651,12 +716,31 @@ fn probe_zombies() {
     for _ in 0..1000u32 {
         sim::advance(&mut state, &config, &mut rng);
         if zombie_count(&state) >= 3 {
-            println!("--- round {} dead {} ---", state.round, zombie_count(&state));
+            println!(
+                "--- round {} dead {} ---",
+                state.round,
+                zombie_count(&state)
+            );
             for f in &state.factions {
-                let ships = state.ships.iter().filter(|s| s.faction_id == f.name).count();
-                let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count();
-                let razed = state.cities.iter().filter(|c| c.faction_id == f.name && c.razed).count();
-                println!("  {} ships={ships} cities={cities} own_razed={razed}", f.name);
+                let ships = state
+                    .ships
+                    .iter()
+                    .filter(|s| s.faction_id == f.name)
+                    .count();
+                let cities = state
+                    .cities
+                    .iter()
+                    .filter(|c| c.faction_id == f.name && !c.razed)
+                    .count();
+                let razed = state
+                    .cities
+                    .iter()
+                    .filter(|c| c.faction_id == f.name && c.razed)
+                    .count();
+                println!(
+                    "  {} ships={ships} cities={cities} own_razed={razed}",
+                    f.name
+                );
             }
             let total_settlements: usize = state.bodies.iter().map(|b| b.settlements.len()).sum();
             let total_cities = state.cities.len();
@@ -693,12 +777,12 @@ fn probe_debuff_behavior() {
             }
             if state.round % 150 == 0 {
                 let p = total_ideology_penalty(&state, &config);
-                let mut s: Vec<String> = p
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v:.2}"))
-                    .collect();
+                let mut s: Vec<String> = p.iter().map(|(k, v)| format!("{k}={v:.2}")).collect();
                 s.sort();
-                println!("  seed {seed} r{}  top={top}({share:.2})  debts: {s:?}", state.round);
+                println!(
+                    "  seed {seed} r{}  top={top}({share:.2})  debts: {s:?}",
+                    state.round
+                );
             }
         }
         println!("== seed {seed} final leader={leader} streak={streak} ==");
@@ -706,7 +790,10 @@ fn probe_debuff_behavior() {
 }
 
 // 临时：各势力思潮 debuff 惩罚（用 sim 公开的可观测接口）。
-fn total_ideology_penalty(state: &State, config: &GameConfig) -> std::collections::BTreeMap<String, f64> {
+fn total_ideology_penalty(
+    state: &State,
+    config: &GameConfig,
+) -> std::collections::BTreeMap<String, f64> {
     sim::faction_ideology_debuffs(state, config)
 }
 
@@ -749,23 +836,49 @@ fn probe_tech_vs_science() {
             }
         }
         // 谁是最强位，落在哪端。
-        let top = m.power_share.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(k, _)| k.clone()).unwrap();
-        let st = state.faction(&top).map(|f| f.ideology.science_tech).unwrap_or(0.0);
+        let top = m
+            .power_share
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(k, _)| k.clone())
+            .unwrap();
+        let st = state
+            .faction(&top)
+            .map(|f| f.ideology.science_tech)
+            .unwrap_or(0.0);
         let top_share = m.power_share.get(&top).copied().unwrap_or(0.0);
-        if st > 0.0 { tech_top += 1; } else { sci_top += 1; }
-        println!(
-            "seed {seed}: top={top} share={top_share:.2} science_tech_of_top={st:+.2}"
-        );
+        if st > 0.0 {
+            tech_top += 1;
+        } else {
+            sci_top += 1;
+        }
+        println!("seed {seed}: top={top} share={top_share:.2} science_tech_of_top={st:+.2}");
     }
 
     // 皮尔逊相关：science_tech 与 power_share。
-    let (n, sx, sy, sxx, syy, sxy) = all.iter().fold((0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |(n, sx, sy, sxx, syy, sxy), (x, y)| {
-        (n + 1.0, sx + x, sy + y, sxx + x * x, syy + y * y, sxy + x * y)
-    });
+    let (n, sx, sy, sxx, syy, sxy) = all.iter().fold(
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        |(n, sx, sy, sxx, syy, sxy), (x, y)| {
+            (
+                n + 1.0,
+                sx + x,
+                sy + y,
+                sxx + x * x,
+                syy + y * y,
+                sxy + x * y,
+            )
+        },
+    );
     let corr = if n > 1.0 {
         let denom = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
-        if denom > 1e-9 { (n * sxy - sx * sy) / denom } else { 0.0 }
-    } else { 0.0 };
+        if denom > 1e-9 {
+            (n * sxy - sx * sy) / denom
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     println!(
         "--- 汇总: tech端 n={tech_n}(均实力{:.3})  science端 n={sci_n}(均实力{:.3})  corr(science_tech,power)={corr:.3}  最强=n_tech:{tech_top} n_science:{sci_top}",
         tech_power_sum / tech_n.max(1) as f64,
@@ -818,7 +931,13 @@ fn probe_polar_ideology() {
                 max_streak = max_streak.max(streak);
                 // 缓冲当前 #1 的思潮（仅当它已是本段 #1 且有望成为末段霸权的候选）。
                 if let Some(f) = state.faction(&leader) {
-                    buf.push((leader.clone(), f.ideology.peace_military, f.ideology.science_tech, f.ideology.people_elite, f.ideology.nature_colony));
+                    buf.push((
+                        leader.clone(),
+                        f.ideology.peace_military,
+                        f.ideology.science_tech,
+                        f.ideology.people_elite,
+                        f.ideology.nature_colony,
+                    ));
                 }
                 if buf.len() > AVG_WINDOW {
                     buf.remove(0);
@@ -831,8 +950,16 @@ fn probe_polar_ideology() {
             if locked {
                 let n = buf.len() as f64;
                 let (pm, st, pe, nc) = {
-                    let mut a = 0.0; let mut b = 0.0; let mut c = 0.0; let mut d = 0.0;
-                    for r in &buf { a += r.1; b += r.2; c += r.3; d += r.4; }
+                    let mut a = 0.0;
+                    let mut b = 0.0;
+                    let mut c = 0.0;
+                    let mut d = 0.0;
+                    for r in &buf {
+                        a += r.1;
+                        b += r.2;
+                        c += r.3;
+                        d += r.4;
+                    }
                     (a / n, b / n, c / n, d / n)
                 };
                 println!(
@@ -846,4 +973,3 @@ fn probe_polar_ideology() {
         }
     }
 }
-

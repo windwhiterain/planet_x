@@ -21,27 +21,45 @@ fn fleet_default_governs_newly_built_ships() {
 
     // 与船坞出厂同一条漏斗造一艘新舰（不带指令叶片）。
     let pos = state.body_position("水星");
-    let name = spawn_ship(&mut state, &config, ShipSpawn {
-        owner: fid.clone(),
-        class: "corvette",
-        position: pos,
-        city: None,
-        via: SpawnVia::Shipyard,
-        pay_components: false,
-        blueprint: None,
-    });
+    let name = spawn_ship(
+        &mut state,
+        &config,
+        ShipSpawn {
+            owner: fid.clone(),
+            class: "corvette",
+            position: pos,
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: false,
+            blueprint: None,
+        },
+    );
     // 出厂时 `spawn_ship` 给它一条**没有说话**（`Inherit`）的叶片——它不在玩家的任何
     // diff 里，所以「谁负责、干什么」只能由更宽的那一层回答。
     let leaf = state
         .control(fid.clone())
         .and_then(|c| c.ship_orders.get(&name).cloned())
         .expect("spawn_ship seeds an order leaf");
-    assert_eq!(leaf.mode, ControlMode::Inherit, "a freshly built ship has no opinion of its own");
-    assert_eq!(leaf.value, ShipBehavior::Idle, "…and its recorded value is a mere placeholder");
-    assert_eq!(state.ship_control(name.clone()), ControlMode::Player, "…so the fleet default owns it");
+    assert_eq!(
+        leaf.mode,
+        ControlMode::Inherit,
+        "a freshly built ship has no opinion of its own"
+    );
+    assert_eq!(
+        leaf.value,
+        ShipBehavior::Idle,
+        "…and its recorded value is a mere placeholder"
+    );
+    assert_eq!(
+        state.ship_control(name.clone()),
+        ControlMode::Player,
+        "…so the fleet default owns it"
+    );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        }),
         "…and it inherits the faction's intent instead of standing idle"
     );
 
@@ -49,10 +67,18 @@ fn fleet_default_governs_newly_built_ships() {
     let mut rng = Prng::new(42);
     let before = state.ship(&name).expect("ship").position;
     advance(&mut state, &config, &mut rng);
-    assert_eq!(state.ship_control(name.clone()), ControlMode::Player, "the system must not take it over");
+    assert_eq!(
+        state.ship_control(name.clone()),
+        ControlMode::Player,
+        "the system must not take it over"
+    );
     let after = state.ship(&name).map(|s| s.position).unwrap_or(before);
-    let to_earth = dist(after, state.body_position("地球")) < dist(before, state.body_position("地球"));
-    assert!(to_earth, "the new ship must sail for 地球 per the fleet default, not be sent off by the AI");
+    let to_earth =
+        dist(after, state.body_position("地球")) < dist(before, state.body_position("地球"));
+    assert!(
+        to_earth,
+        "the new ship must sail for 地球 per the fleet default, not be sent off by the AI"
+    );
 }
 
 /// 玩家点名的殖民舰建完城之后必须**仍然是玩家的**。
@@ -74,7 +100,14 @@ fn colonize_keeps_player_ownership() {
         .map(|c| (c.name.clone(), c.body_id.clone(), c.faction_id.clone()))
         .expect("a foreign city to raze");
     let (cid, body, owner) = victim;
-    raze_city(&mut state, &cid, RazeCause::Revolt { faction: owner, loyalty: 0.0 });
+    raze_city(
+        &mut state,
+        &cid,
+        RazeCause::Revolt {
+            faction: owner,
+            loyalty: 0.0,
+        },
+    );
 
     let ship = state
         .ships
@@ -98,10 +131,21 @@ fn colonize_keeps_player_ownership() {
         .control(fid.clone())
         .and_then(|c| c.ship_orders.get(&ship).cloned())
         .expect("the order leaf must still exist");
-    assert_eq!(leaf.value, ShipBehavior::Idle, "one-shot order must be spent");
-    assert_eq!(leaf.mode, ControlMode::Player, "…but ownership must survive the order");
+    assert_eq!(
+        leaf.value,
+        ShipBehavior::Idle,
+        "one-shot order must be spent"
+    );
+    assert_eq!(
+        leaf.mode,
+        ControlMode::Player,
+        "…but ownership must survive the order"
+    );
     assert!(
-        state.events.iter().any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
+        state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
         "the city must actually have been refounded, got {:?}",
         state.events
     );
@@ -113,7 +157,9 @@ fn colonize_keeps_player_ownership() {
         .filter(|c| !c.razed)
         .map(|c| c.body_id.clone())
         .find(|b| {
-            let Some(body) = state.body(b) else { return false };
+            let Some(body) = state.body(b) else {
+                return false;
+            };
             let live: std::collections::BTreeSet<String> = state
                 .cities
                 .iter()
@@ -123,13 +169,29 @@ fn colonize_keeps_player_ownership() {
             body.settlements.iter().all(|s| live.contains(&s.name))
         })
         .expect("a body whose settlements are all occupied");
-    order(&mut state, ShipBehavior::Colonize { body: full_body.clone() });
-    colonize(&mut state, &config, &mut rng, &ship, &full_body, &mut next_id);
+    order(
+        &mut state,
+        ShipBehavior::Colonize {
+            body: full_body.clone(),
+        },
+    );
+    colonize(
+        &mut state,
+        &config,
+        &mut rng,
+        &ship,
+        &full_body,
+        &mut next_id,
+    );
     let leaf = state
         .control(fid.clone())
         .and_then(|c| c.ship_orders.get(&ship).cloned())
         .expect("the order leaf must still exist");
-    assert_eq!(leaf.mode, ControlMode::Player, "an early return must not hand the ship back either");
+    assert_eq!(
+        leaf.mode,
+        ControlMode::Player,
+        "an early return must not hand the ship back either"
+    );
 }
 
 /// A player-facing regression guard for the "stale follow" bug: a player
@@ -164,13 +226,23 @@ fn player_stale_follow_degrades_to_idle_and_does_not_drift() {
 
     // The order must have degraded to Idle ...
     let order = state.ship_behavior(ship0.clone());
-    assert_eq!(order, Some(ShipBehavior::Idle), "stale order must degrade to Idle");
+    assert_eq!(
+        order,
+        Some(ShipBehavior::Idle),
+        "stale order must degrade to Idle"
+    );
     // ... without moving the ship toward the origin.
     let pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
-    assert_eq!(pos_after, pos_before, "ship must not drift (target is dead)");
+    assert_eq!(
+        pos_after, pos_before,
+        "ship must not drift (target is dead)"
+    );
     // ... and a StaleOrder event must be recorded.
     assert!(
-        state.events.iter().any(|e| matches!(e, GameEvent::StaleOrder { ship: s, .. } if *s == ship0)),
+        state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::StaleOrder { ship: s, .. } if *s == ship0)),
         "expected a StaleOrder event for ship 0, got {:?}",
         state.events
     );
@@ -242,14 +314,19 @@ fn follow_ship_auto_attacks_hostile_but_not_the_followed_friend() {
     );
     // The followed friend must be unharmed (no attack targeting ship 1).
     assert!(
-        !state.events.iter().any(|e| matches!(e, GameEvent::Attack { target, .. } if target == &ship1)),
+        !state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Attack { target, .. } if target == &ship1)),
         "ship must not fire at its own followed friend, got {:?}",
         state.events
     );
     // The order is still a valid Follow (not degraded to Idle).
     assert_eq!(
         state.ship_behavior(ship0.clone()),
-        Some(ShipBehavior::Follow { ship: ship1.clone() })
+        Some(ShipBehavior::Follow {
+            ship: ship1.clone()
+        })
     );
 }
 
@@ -264,7 +341,10 @@ fn advance_populates_round_events() {
         advance(&mut state, &config, &mut rng);
     }
     // After a few rounds of a war-torn seed, an event log should exist.
-    assert!(!state.events.is_empty(), "after 6 rounds there should be events");
+    assert!(
+        !state.events.is_empty(),
+        "after 6 rounds there should be events"
+    );
 }
 
 /// 停泊轨道 (Dock) follows a body's current position; 待命 (Idle) holds
@@ -302,10 +382,15 @@ fn dock_follows_body_and_idle_holds_position() {
 
     // Dock: the ship moved toward the body (not froze, not degraded).
     let dock_pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
-    assert_ne!(dock_pos_after, dock_pos_before, "docked ship should move toward the body");
+    assert_ne!(
+        dock_pos_after, dock_pos_before,
+        "docked ship should move toward the body"
+    );
     assert_eq!(
         state.ship_behavior(ship0.clone()),
-        Some(ShipBehavior::Dock { body: "火星".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "火星".to_string()
+        }),
         "dock order must persist (not degrade to Idle)"
     );
     // Idle: the ship did not move.

@@ -91,7 +91,13 @@ pub fn eligibility(config: &GameConfig, reputation: f64, c: &Contract) -> f64 {
 ///
 /// 它是「受雇方根据当前运力决定是否接受雇佣」那把尺子——**加总**而不是挑一条船，
 /// 因为一份单要的是**运力**，几条小船凑起来也算数（用户：「对方派几艘船都无所谓」）。
-pub fn available_throughput(state: &State, config: &GameConfig, fid: &str, from: &str, to: &str) -> f64 {
+pub fn available_throughput(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    from: &str,
+    to: &str,
+) -> f64 {
     state
         .ships
         .iter()
@@ -116,7 +122,11 @@ pub fn available_throughput(state: &State, config: &GameConfig, fid: &str, from:
 /// * **λ** 见 [`shadow_price`]。
 pub fn decision_value(state: &State, config: &GameConfig, c: &Contract, fid: &str) -> f64 {
     let terms = hire_terms(state, config, &c.from, &c.to);
-    let unit = config.resources.get(&c.resource).map(|r| r.value).unwrap_or(1.0);
+    let unit = config
+        .resources
+        .get(&c.resource)
+        .map(|r| r.value)
+        .unwrap_or(1.0);
     // 一期的报酬：这条线一个考核期该搬回的货（= capacity × interval = nominal_hold）× 抽成 × 单价。
     let reward = c.share * c.capacity * terms.interval as f64 * unit;
     let mine = available_throughput(state, config, fid, &c.from, &c.to);
@@ -160,7 +170,9 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
         .collect();
     for id in open {
         // 每单重新取一遍状态：前面成交的单会占掉运力（`available_throughput` 看得见）。
-        let Some(c) = state.contracts.get(id).cloned() else { continue };
+        let Some(c) = state.contracts.get(id).cloned() else {
+            continue;
+        };
         if !c.is_open() {
             continue;
         }
@@ -185,7 +197,8 @@ pub(crate) fn match_carriers(state: &mut State, config: &GameConfig) {
             if sim::derived_roll(fid, &key, round, "gate") >= eligibility(config, rep, &c) {
                 continue; // 这一回合没"听说"这单（低信誉者极少看见）
             }
-            if sim::derived_roll(fid, &key, round, "accept") >= accept_chance(state, config, &c, fid)
+            if sim::derived_roll(fid, &key, round, "accept")
+                >= accept_chance(state, config, &c, fid)
             {
                 continue; // 看见了但不想接（越不划算越可能不接）
             }
@@ -322,10 +335,17 @@ pub(crate) fn assign_hired_ships(state: &mut State, config: &GameConfig) {
         let (spare, deficit) = own_ship_balance(state, config, &fid);
         let lend = sigmoid((spare - bar) / unit);
         // --- 第一段：补人 ---------------------------------------------------
-        let held: Vec<u64> = state.contracts.carried_by(&fid).iter().map(|c| c.id).collect();
+        let held: Vec<u64> = state
+            .contracts
+            .carried_by(&fid)
+            .iter()
+            .map(|c| c.id)
+            .collect();
         let mut free: Vec<ShipId> = idle;
         for id in held {
-            let Some(c) = state.contracts.get(id).cloned() else { continue };
+            let Some(c) = state.contracts.get(id).cloned() else {
+                continue;
+            };
             if c.capacity <= 1e-9 {
                 continue;
             }
@@ -383,9 +403,15 @@ pub(crate) fn assign_hired_ships(state: &mut State, config: &GameConfig) {
 /// 挂在每一次交付上，于是「搬得多」直接等于「名声好」——那让雇主失去了「我雇的这条线到底
 /// 有没有达标」这个判断，而这正是新形态要问的问题。
 pub(crate) fn on_delivery(state: &mut State, ship_id: &str, loaded: f64, cut: f64) {
-    let Some(id) = state.contracts.assignment_of(ship_id) else { return };
-    let Some(c) = state.contracts.get(id).cloned() else { return };
-    let Some(carrier) = c.carrier.clone() else { return };
+    let Some(id) = state.contracts.assignment_of(ship_id) else {
+        return;
+    };
+    let Some(c) = state.contracts.get(id).cloned() else {
+        return;
+    };
+    let Some(carrier) = c.carrier.clone() else {
+        return;
+    };
     if let Some(cc) = state.contracts.get_mut(id) {
         cc.delivered += loaded;
     }
@@ -434,13 +460,22 @@ pub fn review_chance(config: &GameConfig, ratio: f64) -> f64 {
 ///
 /// 返回是否真的评了（供调用处决定要不要排下一次）。
 fn review_contract(state: &mut State, config: &GameConfig, id: u64) -> bool {
-    let Some(c) = state.contracts.get(id).cloned() else { return false };
-    let Some(carrier) = c.carrier.clone() else { return false };
-    let Some(ratio) = c.throughput_ratio(config) else { return false };
-    let good =
-        sim::derived_roll(&c.shipper, &format!("考核{id}"), state.round, "review")
-            < review_chance(config, ratio);
-    let delta = if good { config.freight.reputation_gain } else { -config.freight.reputation_gain };
+    let Some(c) = state.contracts.get(id).cloned() else {
+        return false;
+    };
+    let Some(carrier) = c.carrier.clone() else {
+        return false;
+    };
+    let Some(ratio) = c.throughput_ratio(config) else {
+        return false;
+    };
+    let good = sim::derived_roll(&c.shipper, &format!("考核{id}"), state.round, "review")
+        < review_chance(config, ratio);
+    let delta = if good {
+        config.freight.reputation_gain
+    } else {
+        -config.freight.reputation_gain
+    };
     add_reputation(state, config, &carrier, delta);
     sim::ev(
         state,
@@ -474,8 +509,12 @@ fn review_contract(state: &mut State, config: &GameConfig, id: u64) -> bool {
 ///   （见 [`settle_contracts`] 第 0 步），那期间那张单**不再对外招募**
 ///   （[`match_carriers`] 跳过还挂着船的未接单），所以不会出现「两个受雇方跑同一张单」。
 fn end_contract(state: &mut State, id: u64, reason: &str) {
-    let Some(c) = state.contracts.get(id).cloned() else { return };
-    let Some(carrier) = c.carrier.clone() else { return };
+    let Some(c) = state.contracts.get(id).cloned() else {
+        return;
+    };
+    let Some(carrier) = c.carrier.clone() else {
+        return;
+    };
     let homebound: Vec<ShipId> = state
         .contracts
         .ships_of(id)
@@ -503,7 +542,12 @@ fn end_contract(state: &mut State, id: u64, reason: &str) {
     }
     sim::ev(
         state,
-        GameEvent::ContractEnded { contract: id, shipper: c.shipper, carrier, reason: reason.into() },
+        GameEvent::ContractEnded {
+            contract: id,
+            shipper: c.shipper,
+            carrier,
+            reason: reason.into(),
+        },
     );
 }
 
@@ -523,7 +567,10 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
         .assignments
         .iter()
         .filter(|(s, _)| {
-            !state.ship(s.as_str()).map(|sh| sh.hull > 0.0).unwrap_or(false)
+            !state
+                .ship(s.as_str())
+                .map(|sh| sh.hull > 0.0)
+                .unwrap_or(false)
         })
         .map(|(s, _)| s.clone())
         .collect();
@@ -537,8 +584,15 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
         .assignments
         .iter()
         .filter(|(s, id)| {
-            state.contracts.get(**id).map(|c| c.is_open()).unwrap_or(false)
-                && state.ship(s.as_str()).map(|sh| sh.cargo.is_empty()).unwrap_or(true)
+            state
+                .contracts
+                .get(**id)
+                .map(|c| c.is_open())
+                .unwrap_or(false)
+                && state
+                    .ship(s.as_str())
+                    .map(|sh| sh.cargo.is_empty())
+                    .unwrap_or(true)
         })
         .map(|(s, _)| s.clone())
         .collect();
@@ -599,8 +653,12 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
         .map(|c| c.id)
         .collect();
     for id in expired {
-        let Some(c) = state.contracts.get(id).cloned() else { continue };
-        let Some(carrier) = c.carrier.clone() else { continue };
+        let Some(c) = state.contracts.get(id).cloned() else {
+            continue;
+        };
+        let Some(carrier) = c.carrier.clone() else {
+            continue;
+        };
         let rep = state.faction(&carrier).map(|f| f.reputation).unwrap_or(0.0);
         let no_output = c.delivered <= 1e-9;
         let renew = !no_output

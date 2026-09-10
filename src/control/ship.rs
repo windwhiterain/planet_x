@@ -21,7 +21,13 @@ pub fn apply_default_ship_order(
         return;
     }
     if d.remove {
-        let existed = state.control.entry(fid.clone()).or_default().default_ship_order.take().is_some();
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .default_ship_order
+            .take()
+            .is_some();
         leaf_removed(report, path, existed);
         return;
     }
@@ -67,7 +73,13 @@ pub fn apply_default_doctrine(
         return;
     }
     if d.remove {
-        let existed = state.control.entry(fid.clone()).or_default().default_doctrine.take().is_some();
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .default_doctrine
+            .take()
+            .is_some();
         leaf_removed(report, path, existed);
         return;
     }
@@ -131,7 +143,13 @@ pub fn apply_default_kiting(
         return;
     }
     if d.remove {
-        let existed = state.control.entry(fid.clone()).or_default().default_kiting.take().is_some();
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .default_kiting
+            .take()
+            .is_some();
         leaf_removed(report, path, existed);
         return;
     }
@@ -158,16 +176,16 @@ pub fn apply_default_kiting(
 
 /// 舰队默认**角色**（势力级，第三条风格轴）：与 [`apply_default_kiting`] 同形，
 /// 外加这片叶特有的用途——设成 `Player` 是「AI 定编别碰我的舰队」的闸门。
-pub fn apply_default_freighter(
+pub fn apply_default_role(
     state: &mut State,
     fid: &FactionId,
-    d: &DefaultFreighter,
+    d: &DefaultShipRole,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.default_freighter");
+    let path = format!("{fid}.default_role");
     let mut present = Vec::new();
-    if d.freighter.is_some() {
-        present.push("freighter");
+    if d.role.is_some() {
+        present.push("role");
     }
     if d.mode.is_some() {
         present.push("mode");
@@ -180,20 +198,20 @@ pub fn apply_default_freighter(
             .control
             .entry(fid.clone())
             .or_default()
-            .default_freighter
+            .default_role
             .take()
             .is_some();
         leaf_removed(report, path, existed);
         return;
     }
-    let wrote = d.freighter.is_some();
+    let wrote = d.role.is_some();
     let ctrl = state
         .control
         .entry(fid.clone())
         .or_default()
-        .default_freighter
-        .get_or_insert_with(|| Control::inherit(false));
-    if let Some(v) = d.freighter {
+        .default_role
+        .get_or_insert_with(|| Control::inherit(ShipRole::default()));
+    if let Some(v) = d.role {
         ctrl.value = v;
     }
     match (d.mode, wrote) {
@@ -335,7 +353,10 @@ pub fn apply_ship_doctrine(
     let base = state.ship_doctrine(d.ship.clone());
     let value = ShipDoctrine {
         temper: d.temper.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.temper),
-        lone_wolf: d.lone_wolf.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.lone_wolf),
+        lone_wolf: d
+            .lone_wolf
+            .map(|v| v.clamp(-1.0, 1.0))
+            .unwrap_or(base.lone_wolf),
     };
     let ctrl = state
         .control
@@ -412,17 +433,17 @@ pub fn apply_ship_kiting(
 /// 删叶）。唯一与另两条轴的差别：这片叶**自动控制也会写**（按积压定编），所以
 /// 「删叶」在这条轴上的意思是**交回自动定编**（AI 可能下回合立刻又写下结论），
 /// 而不是「从此保持某个值」——要后者就写 `Player`。
-pub fn apply_ship_freighter(
+pub fn apply_ship_role(
     state: &mut State,
     fid: &FactionId,
-    f: &ShipFreighterPatch,
+    f: &ShipRolePatch,
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.ship_freighter[{i}].ship");
+    let path = format!("{fid}.ship_role[{i}].ship");
     let mut present = Vec::new();
-    if f.freighter.is_some() {
-        present.push("freighter");
+    if f.role.is_some() {
+        present.push("role");
     }
     if f.mode.is_some() {
         present.push("mode");
@@ -436,7 +457,7 @@ pub fn apply_ship_freighter(
             .control
             .entry(fid.clone())
             .or_default()
-            .ship_freighter
+            .ship_role
             .remove(&f.ship)
             .is_some();
         leaf_removed(report, path, existed);
@@ -445,21 +466,21 @@ pub fn apply_ship_freighter(
     if resolve_own_ship(state, fid, &f.ship, &path, report).is_none() {
         return;
     }
-    let base = state.ship_freighter(f.ship.clone());
-    let value = f.freighter.unwrap_or(base);
+    let base = state.ship_role(f.ship.clone());
+    let value = f.role.unwrap_or(base);
     let ctrl = state
         .control
         .entry(fid.clone())
         .or_default()
-        .ship_freighter
+        .ship_role
         .entry(f.ship.clone())
         .or_insert_with(|| Control::inherit(base));
     ctrl.value = value;
     write_mode_leaf(
         &mut ctrl.mode,
         f.mode,
-        f.freighter.is_some(),
-        format!("{fid}.ship_freighter[{i}]"),
+        f.role.is_some(),
+        format!("{fid}.ship_role[{i}]"),
         report,
     );
     report.applied += 1;

@@ -78,6 +78,9 @@ q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict
                                #   kind: ship_order / retool / style_retune / blueprint / capital
                                #   (capital rows are sparse: only review rounds and relocations)
 q.blueprints(round=12)         # one row per design blueprint: class / components / order / mode / effective_mode / …
+q.market_trades(round=12)      # ONE ROW PER REALIZED TRADE (buyer × seller): moved{} / dist_au / depth /
+                               #   mond_extra / freight_rate / rel_mult / mastery / loss  — sparse (no trade ⇒ no row)
+q.haul_steps(round=12)         # ONE ROW PER SHIP THAT RAN A HAUL ROUTE: step / body / units / into_pool
 ```
 
 `decisions` is the one table that answers "**why** did my ship do that": `verdict` is one of
@@ -101,8 +104,10 @@ Two things worth knowing:
   `view.factions[<faction>]` object (`production`, `production_value`, `upkeep`,
   `governance_cost`, `governance_coverage`, the **B1 governance split** `governance_admin` /
   `governance_entertainment` / `governance_scale` / `ideology_loyalty_penalty` /
-  `capital_loyalty_bonus`, plus the trade terms `freight_paid` / `carrier_income` / `net_import`);
-  the per-city ore output and the **`loyalty_target` object** likewise sit in `view.cities[<city>]`
+  `capital_loyalty_bonus`, the trade terms `freight_paid` / `carrier_income` / `net_import`, and the
+  **B2 money** terms `investment_spent` / `construction_spent` / `upkeep_unpaid` / `fleet_rust`);
+  the per-city ore output, the **`loyalty_target` object** and the **B2 build terms** `labor` /
+  `housing_capacity` / `is_hub` / `build` likewise sit in `view.cities[<city>]`
   (that map skips razed cities, while `city_process` keeps their rows with `production = {}`).
   These tables are the **joinable reshape** of the same numbers (stable dtypes, one row per
   `(round, name)`), which is what you want for pandas work.
@@ -114,6 +119,24 @@ Two things worth knowing:
   relocation (`kind="capital"`) only exists on rounds where something happened
   (`11/12` rounds have no row at all — read `q.view_economy(round, f)["capital"]`, which is `None`
   then, instead of expecting a per-faction object full of `null`s).
+  **③「what was spent」 is in the view, 「what was granted」 is in `control`** (B2): the batch limits
+  are persistent control leaves (`investment_budget` / `construction_budget`, one row per resource in
+  `derived.control`), and the view carries only `investment_spent` / `construction_spent`. Subtract
+  them to get "granted but not spent" — `q.view_spending(round, f)["budget"]` does the join for you.
+  Storing the limit in the view too would be a second copy of the same number.
+  **④ B3 — a trade row is a (buyer, seller) pair, not a (pair × resource) row**: everything in
+  `market_trades` except `moved` depends only on the pair (distance / anomaly depth / relation), so
+  the effective price of *any* resource on that deal is
+  `view.market_price[resource] × (rel_mult + freight_rate)` (`q.view_trade()` hands you that sum as
+  `price_mult`). `moved` is what the **seller gave up** — the buyer receives
+  `moved[rt] × (1 − loss)`, which is exactly what `view.market_settled` totals world-wide.
+  **⑤ B3 — `haul_steps` is per ship, and `waiting` / `en_route` have no other read path**: a hauler
+  parked at an **empty depot** and a hauler that is simply *in transit* leave no trace in state and
+  emit no event, so without this table "I sent it for cargo and nothing came back" is unanswerable.
+  Both execution paths write it (the AI brain *and* player orders), so player ships are in there too.
+  ⚠ the ledger's `own` can read **`-0.0`**: that is Rust's empty-sum sign bit and means "no own
+  freighters available this round" (e.g. they are all hired out to someone else) — compare with
+  `== 0.0`, not with a sign test.
 - **过程量 — the round's production / upkeep / governance / trade / AI judgments — only exists for
   rounds the engine actually advanced; in `pre` it is 0/empty.** A projection started from a
   checkpoint (`--start ckpt.ron --round 0 --index out/`) therefore puts that checkpoint's **stored
@@ -126,8 +149,13 @@ Two things worth knowing:
   (`flow.jsonl` used to say "0% covered" while `metrics` said "100% covered" for the same round).
 - For **per-ship effective intent** read the `ships` table columns
   `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
-  `doctrine` / `kiting` — the engine resolves the ownership chain, so **do not re-implement it**
-  (a Python re-implementation is a drift source).
+  `doctrine` / `kiting` / `role` / `role_mode` — the engine resolves the ownership chain, so
+  **do not re-implement it** (a Python re-implementation is a drift source).
+  ⚠ `role` is a **three-valued string** (`"War"` 战舰 / `"Freight"` 运输舰 / `"Observe"` 观测舰);
+  it replaced the old **boolean** `freighter` column (and `freighter_mode` → `role_mode`), so a
+  recipe that filtered `df["freighter"] == True` must now filter `df["role"] == "Freight"`.
+  `role_mode` is that leaf's effective ownership (`Auto` = the automatic controller wrote this
+  conclusion, `Player` = a player pinned it).
 
 
 ## Usage (uv)
@@ -165,6 +193,9 @@ snap["relations"]              # {faction: rel} 两两外交关系
 snap["view"]                   # this faction's row of the round view:
                                # city_count / ship_count / production_value / upkeep / …
 snap["city_ids"], snap["ship_ids"]  # it owns these cities / ships (names)
+snap["observer_quota"]             # 观测配额（目标头数）：该派几艘舰去 MOND 异常区蹲着喂掌握度
+snap["observer_count"], snap["observer_target"]   # 现在真在观测的舰数 / 编队驻地天体
+snap["freighter_quota"], snap["freighter_count"]  # 集货那条同形的一对（目标条数 / 现状条数）
 
 # buildable insight: which of my shipyards make what
 cities = q.city_buildings(12, "中国")
@@ -182,9 +213,18 @@ Key ideas:
 - **factions** is the diplomacy + economy table: per-faction `resources` (stockpile), `relations`
   (toward every other faction), and the faction's own `city_ids`/`ship_ids`. `faction_snapshot(r, name)`
   merges it with that faction's row of the round `view` (`view.factions[<faction>]`) into one read.
+  It also carries the engine's own **编队配额** columns (per faction, per round — read them instead of
+  re-deriving the automatic controller's judgements; the full column docs are in `schema.json`):
+  `observer_quota` (观测配额 = **target head count** of ships that should sit in the MOND anomaly
+  band; `0` once 掌握度 is maxed out), `observer_count` (ships actually observing right now, i.e.
+  effective `role == "Observe"` — read it next to the quota to tell 「不想学」 from 「没人可派」),
+  `observer_target` (the band body the observer flotilla garrisons; `null` = no candidate),
+  `mond_ships_in_band`, and the freight twin `freighter_quota` / `freighter_count`.
 - **ships** carries the effective panel: `attack`, `attack_range`, `speed`, `accel`, `hardness`,
   `intercept`, `shield_regen`, `hull_regen`, `upkeep`, plus `components`/`component_hp` — so an agent
-  can plan/engage without recomputing.
+  can plan/engage without recomputing. It also carries the three style axes the engine resolved:
+  `doctrine` / `kiting` / `role` (＋ that leaf's ownership in `role_mode`), where `role` is the
+  string `"War" | "Freight" | "Observe"` (战舰 / 运输舰 / 观测舰).
 - **rules** (the static tuning dictionary) live in `meta.json` and load as DataFrames: `q.meta`
   (raw dict), `q.ships_spec()` / `q.buildings_spec()` / `q.components_spec()` /
   `q.structures_spec()` (index = spec name/key; nested `build_cost`/`cost` stay as dict-valued
@@ -355,14 +395,19 @@ q.view_frontier(12, min_loyalty=0.5)   # any city about to revolt
 q.view_loyalty(12, "中国")        # WHY each city's loyalty is dropping (engine's loyalty-target split)
                                #   = 3 per-city columns + the 2 faction-wide ones joined in
 q.view_market(12, "中国")         # my stockpile valued at market prices (per-resource + total)
-q.view_economy(12, "中国")        # production vs upkeep vs governance (+ admin/entertainment split), net flow, coverage
+q.view_economy(12, "中国")        # production vs upkeep vs governance (+ admin/entertainment split), net flow,
+                               #   coverage, purchasing power & buying rank, haul_gap, "who won't sell to me"
+q.view_spending(12, "中国")       # WHERE THE MONEY WENT: batch − spent per resource, build bottleneck, fleet rust
+q.view_trade(12, "中国")          # WHY THIS PRICE / WHY MY CARGO SHRANK: per-pair price split + loss, blocked list
+q.view_freight(12, "中国")        # WHICH DEPOT IS BACKED UP (need/own/hired/uncovered) + what each hauler did
 q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, indexed by round) — e.g. is it being drained?
 ```
 
 - `view_sitrep` / `view_frontier` / `view_loyalty` / `view_market` / `view_economy` /
-  `resource_series` are all **pure retrieval** — they re-read the round `view` (mostly
-  `view.factions[<faction>]`) / the lazy + derived tables and do trivial arithmetic
-  (`net = production − upkeep − governance`).
+  `view_spending` / `view_trade` / `view_freight` / `resource_series` are all **pure retrieval** —
+  they re-read the round `view` (mostly `view.factions[<faction>]`) / the lazy + derived tables and do
+  trivial arithmetic (`net = production − upkeep − governance`, `unspent = batch − spent`,
+  `price_mult = rel_mult + freight_rate`).
 - `view_loyalty` is the **B1 payoff**: one row per city with the engine's own loyalty-target split —
   `loyalty_target_distance` (too far from the capital, amplified by population overload) and
   `loyalty_target_entertainment` (that city's entertainment budget × governance coverage) per city,
@@ -378,6 +423,41 @@ q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, in
   (`production_value − upkeep − governance_cost`), while `net_import` is the engine's own **trade**
   net for the round (bought − sold by market value, `> 0` = net importer) lifted straight out of
   this faction's `view` row.
+- `view_spending` is the **B2 payoff** ("批了钱为什么没花掉 / 造舰慢是缺钱还是缺产能 / 我的船为什么在掉血"):
+  * `budget` — one row per resource, `investment_batch − investment_spent = investment_unspent`
+    (same for `construction_`). The **batch** is a control leaf, the **spent** is a captured
+    mid-step local; the join happens here because the read face deliberately stores only one of them.
+  * `build` — one row per (city, class): `rate` is the capacity ceiling, `increment` the progress
+    actually paid for, and `bottleneck` is the verdict — `money` (the budget ran out: `increment < rate`),
+    `capacity` (money was left over but the shipyard/crew capped it), `idle` (capacity exists and
+    **not one unit of budget reached it**). A class with no row means this city has no shipyard for it.
+  * `upkeep_unpaid` / `fleet_rust` — the maintenance the faction could not pay, and the **hull fraction
+    every ship lost** because of it (`hull_max × fleet_rust`). Rusting to zero is the only case that
+    emits an event, so these two columns are the only place the bleeding is visible.
+    ⚠ `fleet_rust` is **not** `upkeep_unpaid ÷ upkeep`: the engine has a visibility floor (a tiny
+    shortfall still rusts 0.2), so read the column instead of recomputing it.
+    ⚠ `upkeep_unpaid` is *"unpaid **and therefore rusting**"*, not the complement of "what was paid":
+    a landless (exiled) faction is exempt from the stockpile drain, so its `upkeep_unpaid` is `0`
+    even though it pays nothing — don't read `upkeep − upkeep_unpaid` as "what was actually paid".
+- `view_trade` / `view_freight` are the **B3 payoff** ("为什么是这个价 / 我买到的货为什么少了 /
+  有货在卖我却没买到 / 这趟货为什么没运回来 / 哪处货栈在积压"):
+  * `trades` — one row per **realized** deal (`buyer` × `seller`), with the whole price split
+    (`price_mult = rel_mult + freight_rate`, plus `dist_au` / `depth` / `mond_extra` / `mastery` /
+    `loss`) and `delivered_units`. `loss > 0` means the shipment crossed an anomaly band and part of
+    it **went missing** — that is a deterministic fraction, not a dice roll.
+  * `blocked` — **who refuses to sell to me and why**: `cause` ∈ `war` / `cold` / `coalition`.
+    The three tiers need different answers (make peace / warm relations / break the coalition), so a
+    bare count would not have been enough.
+  * `depots` — the per-depot capacity ledger: `need` (throughput required to clear that depot's
+    backlog in one round-trip), `own` (this faction's own freighters' *expected* share of it — the
+    dispatch is a lottery weighted by backlog share, so the expectation is the same yardstick),
+    `hired` (contracted capacity: accepting a contract *is* a commitment) and
+    `uncovered = max(0, need − own − hired)`. The faction-wide ratio is `haul_gap`
+    (`Σuncovered ÷ Σneed`) — this table is that ratio broken down per depot, i.e. "which depot is
+    rotting and why".
+  * `steps` — what each of this faction's haulers did this round: `loaded` / `delivered` / `waiting`
+    (parked at an **empty depot** — not a malfunction, it is "no cargo, no trip") / `en_route`.
+    Both of the latter are invisible in state and emit no event, so this is their only read path.
 - The one thing they deliberately **don't** judge is *"is my commanded build budget sustainable?"*
   — that's `planet_x --control-plan <faction>` (game logic: the upkeep-reserve cap + a dry-run
   `advance`). Python `view_economy` gives the raw process quantities; the verdict comes from Rust.

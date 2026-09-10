@@ -18,9 +18,24 @@ fn empty_market_falls_back_to_base_price() {
 fn offers_are_attributed_to_their_seller() {
     let m = MarketState {
         offers: vec![
-            Offer { seller: "欧盟".into(), resource: "铀".into(), amount: 2.0, ask: 6.0 },
-            Offer { seller: "欧盟".into(), resource: "铂".into(), amount: 1.0, ask: 6.0 },
-            Offer { seller: "俄罗斯".into(), resource: "铀".into(), amount: 3.0, ask: 6.0 },
+            Offer {
+                seller: "欧盟".into(),
+                resource: "铀".into(),
+                amount: 2.0,
+                ask: 6.0,
+            },
+            Offer {
+                seller: "欧盟".into(),
+                resource: "铂".into(),
+                amount: 1.0,
+                ask: 6.0,
+            },
+            Offer {
+                seller: "俄罗斯".into(),
+                resource: "铀".into(),
+                amount: 3.0,
+                ask: 6.0,
+            },
         ],
         ..Default::default()
     };
@@ -34,7 +49,12 @@ fn offers_are_attributed_to_their_seller() {
 #[test]
 fn market_state_survives_a_round_trip() {
     let m = MarketState {
-        offers: vec![Offer { seller: "美国".into(), resource: "铁".into(), amount: 4.0, ask: 1.4 }],
+        offers: vec![Offer {
+            seller: "美国".into(),
+            resource: "铁".into(),
+            amount: 4.0,
+            ask: 1.4,
+        }],
         price: [("铁".to_string(), 1.4)].into_iter().collect(),
         settled: [("铁".to_string(), 4.0)].into_iter().collect(),
         avg_demand: [("铁".to_string(), 3.0)].into_iter().collect(),

@@ -143,11 +143,25 @@ stringly_unit_enum!(FoundingHow { "new_site" => NewSite, "refounded" => Refounde
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEvent {
     /// 开火：攻击者对目标舰造成 damage 伤害。
-    Attack { attacker: ShipId, target: ShipId, damage: f64 },
+    Attack {
+        attacker: ShipId,
+        target: ShipId,
+        damage: f64,
+    },
     /// 舰被击毁（hull ≤ 0）。`cause` 区分战死/锈蚀报废，`by` 是补刀的凶手（战死时必有）。
-    ShipDestroyed { ship: ShipId, owner: FactionId, class: String, cause: DeathCause, by: Option<Killer> },
+    ShipDestroyed {
+        ship: ShipId,
+        owner: FactionId,
+        class: String,
+        cause: DeathCause,
+        by: Option<Killer>,
+    },
     /// 围城：攻击者对本回合城市建筑造成 damage 伤害。
-    Siege { attacker: ShipId, city: CityId, damage: f64 },
+    Siege {
+        attacker: ShipId,
+        city: CityId,
+        damage: f64,
+    },
     /// 城市被夷平（razed），可再殖民。
     ///
     /// `by_ship` 是**拆掉它的那艘舰**（把「哪艘舰拆了这座城」直接钉进事件，而不是让查询方
@@ -203,27 +217,51 @@ pub enum GameEvent {
     WarEnded { a: FactionId, b: FactionId },
     /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
     /// `participants` 是参与方可读名（事件型触发时为具体对象）。
-    Story { id: String, title: String, participants: Vec<String> },
+    Story {
+        id: String,
+        title: String,
+        participants: Vec<String>,
+    },
     /// 离心叛乱（光速治理的代价）：城市忠诚度跌破叛变阈值，居民脱离其统治势力，
     /// 城市被夷平为空白（可再殖民）。这是超大帝国管理廉价的远方殖民地失败的结果。
     /// `loyalty` 是爆发时的忠诚度（可读的量级）。
-    Revolt { city: CityId, faction: FactionId, loyalty: f64 },
+    Revolt {
+        city: CityId,
+        faction: FactionId,
+        loyalty: f64,
+    },
     /// 离心「改旗易帜」：城市忠诚度跌破叛变阈值后，居民不把城市夷为荒地，而是**倒戈到
     /// 思潮与旧主最对立**的势力（`to`）——城市连同其人口/建筑/舰队坞一起易主，旧主
     /// 失去一座城、新主获得一座城。这既给「过度扩张的大帝国」一个体量回落的口子，又让
     /// 被夷平/旁观的小势力能**接盘**城市、成长为真正的多极棋子，而不是退化成永久旁观者。
     /// 与 [`GameEvent::Revolt`] 并存：`Revolt` 是无可倒戈目标时的兜底（夷为空白）。
-    CityDefected { city: CityId, from: FactionId, to: FactionId, loyalty: f64 },
+    CityDefected {
+        city: CityId,
+        from: FactionId,
+        to: FactionId,
+        loyalty: f64,
+    },
     /// 合纵连横：一方势力被判定为「霸权」后，其余较弱势力结成反制联盟（`members`
     /// 为联盟成员，不含霸权 `hegemon`）。这是「一家独大 → 众人围剿」的政治跃迁，
     /// 让上千回合的博弈维持多方参与。
-    CoalitionFormed { hegemon: FactionId, members: Vec<FactionId> },
+    CoalitionFormed {
+        hegemon: FactionId,
+        members: Vec<FactionId>,
+    },
     /// 合纵连横：既有的反制联盟解体（`members` 为解体时的成员）。
-    CoalitionEnded { hegemon: FactionId, members: Vec<FactionId> },
+    CoalitionEnded {
+        hegemon: FactionId,
+        members: Vec<FactionId>,
+    },
     /// 迁都：势力把首都从 `from` 天体迁到 `to` 天体。`reason` 是触发原因
     /// （`"destroyed"`=首都亡城自动切到人口最高活城；`"ai_review"`=周期性 AI 评估证明
     /// 候选更优）。首都是光速治理/本土防御的锚点，迁都会即时改变治理距离与防御半径。
-    CapitalRelocated { faction: FactionId, from: BodyId, to: BodyId, reason: String },
+    CapitalRelocated {
+        faction: FactionId,
+        from: BodyId,
+        to: BodyId,
+        reason: String,
+    },
     /// **装货**：一艘运输舰在某天体的**产地货栈**里装走一批货（`cargo` = 这次装了什么、各多少）。
     /// 这是「离岸产出 → 首都池」那条链的**上半段**，下半段是 [`GameEvent::CargoDelivered`]。
     /// 有了这两条，「池子里的铁是哪来的」可以一路追到产地与那艘船。
@@ -395,7 +433,11 @@ pub struct Participant {
 
 impl Participant {
     fn new(role: EventRole, kind: EntityKind, id: impl Into<String>) -> Self {
-        Self { role, kind, id: id.into() }
+        Self {
+            role,
+            kind,
+            id: id.into(),
+        }
     }
 }
 
@@ -487,12 +529,22 @@ impl GameEvent {
             data: json!({}),
         };
         match self {
-            GameEvent::Attack { attacker, target, damage } => {
+            GameEvent::Attack {
+                attacker,
+                target,
+                damage,
+            } => {
                 set_actor(&mut r, EntityKind::Ship, attacker);
                 set_target(&mut r, EntityKind::Ship, target);
                 r.magnitude = *damage;
             }
-            GameEvent::ShipDestroyed { ship, owner, class, cause, by } => {
+            GameEvent::ShipDestroyed {
+                ship,
+                owner,
+                class,
+                cause,
+                by,
+            } => {
                 set_target(&mut r, EntityKind::Ship, ship);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, owner);
                 if let Some(k) = by {
@@ -503,12 +555,23 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "owner": owner, "class": class,
                                 "cause": cause, "by": by});
             }
-            GameEvent::Siege { attacker, city, damage } => {
+            GameEvent::Siege {
+                attacker,
+                city,
+                damage,
+            } => {
                 set_actor(&mut r, EntityKind::Ship, attacker);
                 set_target(&mut r, EntityKind::City, city);
                 r.magnitude = *damage;
             }
-            GameEvent::CityRazed { city, owner, fallen_to, by_ship, damage, pop_before } => {
+            GameEvent::CityRazed {
+                city,
+                owner,
+                fallen_to,
+                by_ship,
+                damage,
+                pop_before,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, fallen_to);
                 set_target(&mut r, EntityKind::City, city);
                 // 拆城的那艘舰是**次要发起方**：城际易主的「谁做的」在 actor（势力），
@@ -521,7 +584,14 @@ impl GameEvent {
                 r.data = json!({"city": city, "owner": owner, "fallen_to": fallen_to,
                                 "by_ship": by_ship, "damage": damage, "pop_before": pop_before});
             }
-            GameEvent::ShipSpawned { ship, owner, class, city, via, blueprint } => {
+            GameEvent::ShipSpawned {
+                ship,
+                owner,
+                class,
+                city,
+                via,
+                blueprint,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, owner);
                 set_target(&mut r, EntityKind::Ship, ship);
                 if let Some(c) = city {
@@ -530,7 +600,14 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "owner": owner, "class": class, "city": city,
                                 "via": via, "blueprint": blueprint});
             }
-            GameEvent::ColonyFounded { city, owner, body, seeded_ship_class, how, prev_owner } => {
+            GameEvent::ColonyFounded {
+                city,
+                owner,
+                body,
+                seeded_ship_class,
+                how,
+                prev_owner,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, owner);
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Third, EntityKind::Body, body);
@@ -560,19 +637,32 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::Faction, b);
                 r.data = json!({"a": a, "b": b});
             }
-            GameEvent::Story { id, title, participants } => {
+            GameEvent::Story {
+                id,
+                title,
+                participants,
+            } => {
                 // 剧情参与方是可读名，未必是实体 id；仍按名字入索引（查得到就查得到）。
                 for p in participants {
                     extra(&mut r, EventRole::Third, EntityKind::Faction, p);
                 }
                 r.data = json!({"id": id, "title": title, "participants": participants});
             }
-            GameEvent::Revolt { city, faction, loyalty } => {
+            GameEvent::Revolt {
+                city,
+                faction,
+                loyalty,
+            } => {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, faction);
                 r.data = json!({"city": city, "faction": faction, "loyalty": loyalty});
             }
-            GameEvent::CityDefected { city, from, to, loyalty } => {
+            GameEvent::CityDefected {
+                city,
+                from,
+                to,
+                loyalty,
+            } => {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, from);
                 extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, to);
@@ -593,13 +683,24 @@ impl GameEvent {
                 }
                 r.data = json!({"hegemon": hegemon, "members": members});
             }
-            GameEvent::CapitalRelocated { faction, from, to, reason } => {
+            GameEvent::CapitalRelocated {
+                faction,
+                from,
+                to,
+                reason,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, faction);
                 set_target(&mut r, EntityKind::Body, to);
                 extra(&mut r, EventRole::Victim, EntityKind::Body, from);
                 r.data = json!({"faction": faction, "from": from, "to": to, "reason": reason});
             }
-            GameEvent::CargoLoaded { ship, faction, owner, body, cargo } => {
+            GameEvent::CargoLoaded {
+                ship,
+                faction,
+                owner,
+                body,
+                cargo,
+            } => {
                 set_actor(&mut r, EntityKind::Ship, ship);
                 set_target(&mut r, EntityKind::Body, body);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
@@ -609,7 +710,14 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "faction": faction, "owner": owner,
                                 "body": body, "cargo": cargo});
             }
-            GameEvent::CargoDelivered { ship, faction, owner, body, cargo, into_pool } => {
+            GameEvent::CargoDelivered {
+                ship,
+                faction,
+                owner,
+                body,
+                cargo,
+                into_pool,
+            } => {
                 set_actor(&mut r, EntityKind::Ship, ship);
                 set_target(&mut r, EntityKind::Body, body);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
@@ -619,7 +727,15 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "faction": faction, "owner": owner, "body": body,
                                 "cargo": cargo, "into_pool": into_pool});
             }
-            GameEvent::ContractPosted { contract, shipper, resource, capacity, from, to, share } => {
+            GameEvent::ContractPosted {
+                contract,
+                shipper,
+                resource,
+                capacity,
+                from,
+                to,
+                share,
+            } => {
                 // 发起方 = **雇主**（挂单的人），直接对象 = **目的天体**（= 它的首都）；
                 // 起运天体是第三个参与方（`Third`）——它同时是「这单从哪儿来」的答案，
                 // 也是「哪个货栈积压了」的 join 键。
@@ -629,7 +745,15 @@ impl GameEvent {
                 r.data = json!({"contract": contract, "shipper": shipper, "resource": resource,
                                 "capacity": capacity, "from": from, "to": to, "share": share});
             }
-            GameEvent::ContractAccepted { contract, shipper, carrier, resource, capacity, from, to } => {
+            GameEvent::ContractAccepted {
+                contract,
+                shipper,
+                carrier,
+                resource,
+                capacity,
+                from,
+                to,
+            } => {
                 // 发起方 = **受雇方**（接单的人），直接对象 = **雇主**。
                 // 这里**没有舰**：接下的是运力，不是一条船（用户：「对方派几艘船都无所谓」）。
                 set_actor(&mut r, EntityKind::Faction, carrier);
@@ -640,21 +764,41 @@ impl GameEvent {
                                 "resource": resource, "capacity": capacity,
                                 "from": from, "to": to});
             }
-            GameEvent::ContractDelivered { contract, shipper, carrier, ship, resource, amount, cut } => {
+            GameEvent::ContractDelivered {
+                contract,
+                shipper,
+                carrier,
+                ship,
+                resource,
+                amount,
+                cut,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, carrier);
                 set_target(&mut r, EntityKind::Ship, ship);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
                                 "ship": ship, "resource": resource, "amount": amount, "cut": cut});
             }
-            GameEvent::ContractReviewed { contract, shipper, carrier, ratio, good, delta } => {
+            GameEvent::ContractReviewed {
+                contract,
+                shipper,
+                carrier,
+                ratio,
+                good,
+                delta,
+            } => {
                 // 发起方 = **雇主**（验货的人），直接对象 = **受雇方**（被评的人）。
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Faction, carrier);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
                                 "ratio": ratio, "good": good, "delta": delta});
             }
-            GameEvent::ContractEnded { contract, shipper, carrier, reason } => {
+            GameEvent::ContractEnded {
+                contract,
+                shipper,
+                carrier,
+                reason,
+            } => {
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Faction, carrier);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
@@ -741,10 +885,20 @@ impl GameEvent {
     /// [`GameEvent::history_row`]/[`GameEvent::salience`] 同样的「漏不掉」纪律。
     pub fn headline(&self) -> String {
         match self {
-            GameEvent::Attack { attacker, target, damage } => {
+            GameEvent::Attack {
+                attacker,
+                target,
+                damage,
+            } => {
                 format!("{attacker} 对 {target} 开火（{} 伤害）", num(*damage))
             }
-            GameEvent::ShipDestroyed { ship, owner, class, cause, by } => match (cause, by) {
+            GameEvent::ShipDestroyed {
+                ship,
+                owner,
+                class,
+                cause,
+                by,
+            } => match (cause, by) {
                 (DeathCause::Combat, Some(k)) => format!(
                     "{} 的 {}「{ship}」被 {} 的 {killer} 击毁（{weapon}）",
                     owner,
@@ -761,14 +915,32 @@ impl GameEvent {
                 }
                 (DeathCause::Scrapped, _) => format!("{owner} 的 {class}「{ship}」被拆解"),
             },
-            GameEvent::Siege { attacker, city, damage } => {
+            GameEvent::Siege {
+                attacker,
+                city,
+                damage,
+            } => {
                 format!("{attacker} 轰击城 {city}（{} 伤害）", num(*damage))
             }
-            GameEvent::CityRazed { city, owner, fallen_to, by_ship, damage, pop_before } => format!(
+            GameEvent::CityRazed {
+                city,
+                owner,
+                fallen_to,
+                by_ship,
+                damage,
+                pop_before,
+            } => format!(
                 "{fallen_to} 的 {by_ship} 夷平 {owner} 的 {city}（人口 {pop_before} → 0，{} 伤害）",
                 num(*damage)
             ),
-            GameEvent::ShipSpawned { ship, owner, class, city, via, blueprint } => {
+            GameEvent::ShipSpawned {
+                ship,
+                owner,
+                class,
+                city,
+                via,
+                blueprint,
+            } => {
                 let base = match (via, city) {
                     (SpawnVia::Shipyard, Some(c)) => {
                         format!("{owner} 的 {c} 出厂一艘 {class}「{ship}」")
@@ -785,7 +957,14 @@ impl GameEvent {
                     None => base,
                 }
             }
-            GameEvent::ColonyFounded { city, owner, body, how, prev_owner, .. } => match (how, prev_owner) {
+            GameEvent::ColonyFounded {
+                city,
+                owner,
+                body,
+                how,
+                prev_owner,
+                ..
+            } => match (how, prev_owner) {
                 (FoundingHow::NewSite, _) => format!("{owner} 在 {body} 新建城市 {city}"),
                 (FoundingHow::Refounded, Some(p)) => {
                     format!("{owner} 在 {body} 复垦 {p} 留下的废墟 {city}")
@@ -796,37 +975,53 @@ impl GameEvent {
             GameEvent::Withdraw { ship, to_body } => format!("{ship} 撤往 {to_body} 修整"),
             GameEvent::WarStarted { a, b } => format!("{a} 与 {b} 开战"),
             GameEvent::WarEnded { a, b } => format!("{a} 与 {b} 停战"),
-            GameEvent::Story { title, participants, .. } => {
+            GameEvent::Story {
+                title,
+                participants,
+                ..
+            } => {
                 if participants.is_empty() {
                     title.clone()
                 } else {
                     format!("{title}（{}）", participants.join("、"))
                 }
             }
-            GameEvent::Revolt { city, faction, loyalty } => format!(
+            GameEvent::Revolt {
+                city,
+                faction,
+                loyalty,
+            } => format!(
                 "{faction} 的 {city} 叛乱，城市化为废墟（忠诚 {}）",
                 num(*loyalty)
             ),
-            GameEvent::CityDefected { city, from, to, loyalty } => format!(
-                "{from} 的 {city} 倒戈至 {to}（忠诚 {}）",
-                num(*loyalty)
-            ),
-            GameEvent::CoalitionFormed { hegemon, members } => format!(
-                "{} 结成联盟对抗霸权 {hegemon}",
-                members.join("、")
-            ),
-            GameEvent::CoalitionEnded { hegemon, members } => format!(
-                "反 {hegemon} 联盟解体（原成员 {}）",
-                members.join("、")
-            ),
-            GameEvent::CapitalRelocated { faction, from, to, reason } => format!(
-                "{faction} 迁都 {from} → {to}（{}）",
-                capital_reason(reason)
-            ),
+            GameEvent::CityDefected {
+                city,
+                from,
+                to,
+                loyalty,
+            } => format!("{from} 的 {city} 倒戈至 {to}（忠诚 {}）", num(*loyalty)),
+            GameEvent::CoalitionFormed { hegemon, members } => {
+                format!("{} 结成联盟对抗霸权 {hegemon}", members.join("、"))
+            }
+            GameEvent::CoalitionEnded { hegemon, members } => {
+                format!("反 {hegemon} 联盟解体（原成员 {}）", members.join("、"))
+            }
+            GameEvent::CapitalRelocated {
+                faction,
+                from,
+                to,
+                reason,
+            } => format!("{faction} 迁都 {from} → {to}（{}）", capital_reason(reason)),
             // 标题必须点到名：`faction` 与 `owner`（货主）都是本事件的参与方，所以它们必须
             // 逐字出现在标题里（守卫 `headline_names_every_participant` 钉住这条）。
             // 自己运自己的货时两者相同 ⇒ 只写一次（同一个 id 出现一次就够守卫用了）。
-            GameEvent::CargoLoaded { ship, faction, owner, body, cargo } => {
+            GameEvent::CargoLoaded {
+                ship,
+                faction,
+                owner,
+                body,
+                cargo,
+            } => {
                 if owner == faction {
                     format!("{faction} 的 {ship} 在 {body} 装 {}", cargo_summary(cargo))
                 } else {
@@ -836,10 +1031,24 @@ impl GameEvent {
                     )
                 }
             }
-            GameEvent::CargoDelivered { ship, faction, owner, body, cargo, into_pool } => {
-                let what = if *into_pool { "入首都池" } else { "入中转货栈" };
+            GameEvent::CargoDelivered {
+                ship,
+                faction,
+                owner,
+                body,
+                cargo,
+                into_pool,
+            } => {
+                let what = if *into_pool {
+                    "入首都池"
+                } else {
+                    "入中转货栈"
+                };
                 if owner == faction {
-                    format!("{faction} 的 {ship} 在 {body} 卸 {}（{what}）", cargo_summary(cargo))
+                    format!(
+                        "{faction} 的 {ship} 在 {body} 卸 {}（{what}）",
+                        cargo_summary(cargo)
+                    )
                 } else {
                     format!(
                         "{faction} 的 {ship} 在 {body} 卸 {owner} 的 {}（{what}）",
@@ -849,31 +1058,67 @@ impl GameEvent {
             }
             // 参与方两个：雇主（actor）、受雇方（target）——标题里两者都要逐字出现
             // （守卫 `headline_names_every_participant` 钉住这条）。
-            GameEvent::ContractPosted { shipper, resource, capacity, from, to, share, .. } => format!(
+            GameEvent::ContractPosted {
+                shipper,
+                resource,
+                capacity,
+                from,
+                to,
+                share,
+                ..
+            } => format!(
                 "{shipper} 雇佣运力：{from} → {to} 运 {resource}，要求 {} 件/回合（抽成 {:.0}%）",
                 num(*capacity),
                 share * 100.0
             ),
-            GameEvent::ContractAccepted { carrier, shipper, resource, capacity, from, to, .. } => {
+            GameEvent::ContractAccepted {
+                carrier,
+                shipper,
+                resource,
+                capacity,
+                from,
+                to,
+                ..
+            } => {
                 format!(
                     "{carrier} 接下 {shipper} 的雇佣单：{from} → {to} 运 {resource}，承诺 {} 件/回合",
                     num(*capacity)
                 )
             }
-            GameEvent::ContractDelivered { carrier, ship, shipper, resource, amount, cut, .. } => {
+            GameEvent::ContractDelivered {
+                carrier,
+                ship,
+                shipper,
+                resource,
+                amount,
+                cut,
+                ..
+            } => {
                 format!(
                     "{carrier} 的 {ship} 向 {shipper} 交付雇佣货 {resource} {} 件（自留抽成 {}）",
                     num(*amount),
                     num(*cut)
                 )
             }
-            GameEvent::ContractReviewed { shipper, carrier, ratio, good, delta, .. } => format!(
+            GameEvent::ContractReviewed {
+                shipper,
+                carrier,
+                ratio,
+                good,
+                delta,
+                ..
+            } => format!(
                 "{shipper} 考核 {carrier} 的雇佣运力：达标率 {:.0}%（{}，信誉 {:+.3}）",
                 ratio * 100.0,
                 if *good { "好评" } else { "差评" },
                 delta
             ),
-            GameEvent::ContractEnded { shipper, carrier, reason, .. } => {
+            GameEvent::ContractEnded {
+                shipper,
+                carrier,
+                reason,
+                ..
+            } => {
                 let why = match reason.as_str() {
                     "term" => "固定期到期，雇主不续约",
                     "no_output" => "整个雇佣期没有产出",
@@ -948,10 +1193,18 @@ impl GameEvent {
         let r = self.history_row();
         let mut out = Vec::new();
         if let (Some(k), Some(id)) = (r.actor_kind, r.actor_id) {
-            out.push(Participant { role: EventRole::Actor, kind: entity_kind_from_str(k), id });
+            out.push(Participant {
+                role: EventRole::Actor,
+                kind: entity_kind_from_str(k),
+                id,
+            });
         }
         if let (Some(k), Some(id)) = (r.target_kind, r.target_id) {
-            out.push(Participant { role: EventRole::Target, kind: entity_kind_from_str(k), id });
+            out.push(Participant {
+                role: EventRole::Target,
+                kind: entity_kind_from_str(k),
+                id,
+            });
         }
         out.extend(r.extra);
         out
@@ -1070,7 +1323,12 @@ impl Milestones {
     pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&HistoryEntry> {
         self.entries
             .iter()
-            .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))
+            .filter(|e| {
+                e.event
+                    .participants()
+                    .iter()
+                    .any(|p| p.kind == kind && p.id == id)
+            })
             .collect()
     }
 }
@@ -1118,7 +1376,12 @@ impl Notables {
     pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&HistoryEntry> {
         self.entries
             .iter()
-            .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))
+            .filter(|e| {
+                e.event
+                    .participants()
+                    .iter()
+                    .any(|p| p.kind == kind && p.id == id)
+            })
             .collect()
     }
 }
@@ -1156,18 +1419,34 @@ pub enum StoryTrigger {
     /// 指定势力第一次与任何势力交战时触发。
     FactionAtWar { faction: FactionId },
     /// a 对 b 的关系跌破 `value` 时触发（如某势力失和、阵营反目）。
-    RelationBelow { a: FactionId, b: FactionId, value: f64 },
+    RelationBelow {
+        a: FactionId,
+        b: FactionId,
+        value: f64,
+    },
 }
 /// 剧情事件的机械后果（可选；刻意保持小幅、确定性，避免扰动经济/军事平衡太久）。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StoryEffect {
     /// 调整 a↔b 的关系（双向）。
-    Relations { a: FactionId, b: FactionId, delta: f64 },
+    Relations {
+        a: FactionId,
+        b: FactionId,
+        delta: f64,
+    },
     /// 给某势力注入一定量资源（key 为 config 原始资源 key）。
-    GrantResources { faction: FactionId, resource: String, amount: f64 },
+    GrantResources {
+        faction: FactionId,
+        resource: String,
+        amount: f64,
+    },
     /// 给某势力在指定天体附近「出厂」一艘舰（给剧情以真实的机械分量——如
     /// 一艘新锐旗舰从天体附近下水）。舰 id 由模拟按当前最大 id 连续分配，确定性。
-    GrantShip { faction: FactionId, class: String, body: BodyId },
+    GrantShip {
+        faction: FactionId,
+        class: String,
+        body: BodyId,
+    },
 }
 /// 一条剧情事件模板，来自 config/game.ron 的 `story` 表。
 ///

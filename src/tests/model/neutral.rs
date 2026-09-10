@@ -52,8 +52,7 @@ fn collect<'a>(v: &'a Value, path: &str, out: &mut Vec<&'a Value>) {
 /// `dig_path` 是在这份 JSON 里下钻的路径，`full_path` 是它在 [`READ_FACE_NEUTRALS`] 里的键：
 /// 两者只在「拿嵌套结构的 Default 单独检查」时不同（那时下钻用剥了前缀的相对路径）。
 fn assert_path_is_neutral(json: &Value, dig_path: &str, full_path: &str, where_: &str) {
-    let neutral =
-        neutral_for(full_path).unwrap_or_else(|| panic!("{full_path} 没在表里声明"));
+    let neutral = neutral_for(full_path).unwrap_or_else(|| panic!("{full_path} 没在表里声明"));
     let mut found = Vec::new();
     collect(json, dig_path, &mut found);
     assert!(
@@ -174,8 +173,7 @@ fn every_read_face_field_declares_a_neutral() {
 
     let declared: std::collections::BTreeSet<&str> =
         READ_FACE_NEUTRALS.iter().map(|(p, _)| *p).collect();
-    let walked: std::collections::BTreeSet<&str> =
-        leaves.iter().map(|(p, _)| p.as_str()).collect();
+    let walked: std::collections::BTreeSet<&str> = leaves.iter().map(|(p, _)| p.as_str()).collect();
 
     let undeclared: Vec<&&str> = walked.difference(&declared).collect();
     assert!(
@@ -183,7 +181,10 @@ fn every_read_face_field_declares_a_neutral() {
         "读面字段没有声明中性值（加字段就要在 `model::neutral::READ_FACE_NEUTRALS` 加一行）：{undeclared:?}"
     );
     let stale: Vec<&&str> = declared.difference(&walked).collect();
-    assert!(stale.is_empty(), "表里这些路径在读面结构里不存在了（字段改名/删了？）：{stale:?}");
+    assert!(
+        stale.is_empty(),
+        "表里这些路径在读面结构里不存在了（字段改名/删了？）：{stale:?}"
+    );
 
     // 类型相容：中性值的种类**必须**是这个字段声明的类型之一——整数档对 `integer`、
     // 浮点档对 `number`、`null`/`object`/`array`/`boolean` 各自对号（这一条防的是
@@ -197,9 +198,22 @@ fn every_read_face_field_declares_a_neutral() {
         );
     }
     // 两个非零中性值必须真的是 One/Null，别被顺手改成 Zero（这是历史坑的正中央）。
-    assert_eq!(neutral_for("factions[].governance_scale"), Some(Neutral::One));
-    assert_eq!(neutral_for("factions[].governance_coverage"), Some(Neutral::One));
-    assert_eq!(neutral_for("factions[].capital_loyalty_bonus"), Some(Neutral::Zero));
+    assert_eq!(
+        neutral_for("factions[].governance_scale"),
+        Some(Neutral::One)
+    );
+    assert_eq!(
+        neutral_for("factions[].governance_coverage"),
+        Some(Neutral::One)
+    );
+    assert_eq!(
+        neutral_for("factions[].capital_loyalty_bonus"),
+        Some(Neutral::Zero)
+    );
+    // B2：用工系数的中性值同样是 **1.0**（不缺人手），不是 0——「全城没人上工」是另一回事。
+    assert_eq!(neutral_for("cities[].labor"), Some(Neutral::One));
+    // 集散地的中性值是 false（这个月的入库路径还没定），不是「它不是首都」。
+    assert_eq!(neutral_for("cities[].is_hub"), Some(Neutral::False));
     // 稀疏数组：整条存在或整条缺席，中性值是空数组（条目内部不逐字段声明）。
     assert_eq!(neutral_for("decisions.capital"), Some(Neutral::EmptyArray));
 }
@@ -223,6 +237,15 @@ fn struct_defaults_equal_the_declared_neutrals() {
     for (path, _) in READ_FACE_NEUTRALS {
         if let Some(rest) = path.strip_prefix("cities[].loyalty_target.") {
             assert_path_is_neutral(&light, rest, path, "LoyaltyTarget::default()");
+        }
+    }
+
+    // B2 的每舰级造舰行（map 的**值**结构）：缺一个键时读到的是「本城没这个舰级的建造区」，
+    // 而一旦有键，两个叶子各自按声明填（`Default` = 两项都是 0）。
+    let line = serde_json::to_value(crate::model::BuildLine::default()).unwrap();
+    for (path, _) in READ_FACE_NEUTRALS {
+        if let Some(rest) = path.strip_prefix("cities[].build[].") {
+            assert_path_is_neutral(&line, rest, path, "BuildLine::default()");
         }
     }
 }
@@ -258,6 +281,25 @@ const PROCESS_PATHS: &[&str] = &[
     "cities[].loyalty_target.distance",
     "cities[].loyalty_target.entertainment",
     "cities[].loyalty_target.effective",
+    // B2（钱去哪了）：这八个都是「这一步还没跑」⇒ 中性值。⚠ 用工系数与集散地**特别容易写错**：
+    // 前者的中性值是 1.0（不缺人手，不是「没人上工」），后者的中性值是 `false`（这个月的入库
+    // 路径还没定，不是「它不是首都」——要后者请拿 `control` 的 `capital` 叶比 `body_id`）。
+    "factions[].investment_spent",
+    "factions[].construction_spent",
+    "factions[].upkeep_unpaid",
+    "factions[].fleet_rust",
+    "cities[].labor",
+    "cities[].housing_capacity",
+    "cities[].is_hub",
+    "cities[].build",
+    // B3（市场与运输）：本回合的结算事实 + 市场里的位置 + 集货运力账。
+    // ⚠ `market_rank` 的中性值是 **`null`**（还没排队），不是 0（那是「第一个挑」）；
+    // `freight_gap` 只把**容器**列进来（`pre` 里是 `{}`，条目内部一个值都取不到——列叶子会红）。
+    "market_trades",
+    "haul_steps",
+    "factions[].purchasing_power",
+    "factions[].market_rank",
+    "factions[].freight_gap",
 ];
 
 #[test]
@@ -268,7 +310,10 @@ fn pre_face_process_fields_equal_their_declared_neutral() {
     let view = serde_json::to_value(crate::sim::view_from_state(&state, &config)).unwrap();
 
     // 下限只是防空转（原本 ~32 条；`capital` 判定搬进稀疏数组、两个全国项上移势力行后少了几条）。
-    assert!(PROCESS_PATHS.len() >= 20, "过程量清单短了——守卫会退化成空转");
+    assert!(
+        PROCESS_PATHS.len() >= 20,
+        "过程量清单短了——守卫会退化成空转"
+    );
     for path in PROCESS_PATHS {
         assert!(
             neutral_for(path).is_some(),
@@ -295,6 +340,12 @@ fn value_consts_match_the_table() {
     assert_eq!(value::GOVERNANCE_COVERAGE, 1.0);
     assert_eq!(value::GOVERNANCE_SCALE, 1.0);
     assert_eq!(
+        neutral_for("cities[].labor"),
+        Some(Neutral::One),
+        "用工系数常量与表不一致"
+    );
+    assert_eq!(value::CITY_LABOR, 1.0);
+    assert_eq!(
         Neutral::One.to_json(),
         serde_json::json!(value::GOVERNANCE_SCALE),
         "表里的「1」与引擎常量必须是同一个值"
@@ -306,14 +357,18 @@ fn value_consts_match_the_table() {
 #[test]
 fn schema_publishes_the_neutral_table() {
     let schema = crate::projection::projection_schema();
-    let section = schema.get("neutral").expect("schema.json 必须有 neutral 段");
+    let section = schema
+        .get("neutral")
+        .expect("schema.json 必须有 neutral 段");
     assert_eq!(section["root"], serde_json::json!("view"));
     let desc = section["description"].as_str().expect("neutral 段要有说明");
     assert!(
         desc.contains("不要自己编缺省"),
         "说明里必须点明「缺键按这里补、别自己编」——那正是历史坑的成因"
     );
-    let published = section["fields"].as_object().expect("neutral.fields 是对象");
+    let published = section["fields"]
+        .as_object()
+        .expect("neutral.fields 是对象");
     assert_eq!(
         published.len(),
         READ_FACE_NEUTRALS.len(),

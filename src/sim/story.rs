@@ -26,12 +26,20 @@ pub fn step_story(state: &mut State, config: &GameConfig) {
                 StoryEffect::Relations { a, b, delta } => {
                     adjust_relation(state, config, a, b, *delta);
                 }
-                StoryEffect::GrantResources { faction, resource, amount } => {
+                StoryEffect::GrantResources {
+                    faction,
+                    resource,
+                    amount,
+                } => {
                     if let Some(f) = state.faction_mut(faction) {
                         *f.resources.entry(resource.clone()).or_insert(0.0) += *amount;
                     }
                 }
-                StoryEffect::GrantShip { faction, class, body } => {
+                StoryEffect::GrantShip {
+                    faction,
+                    class,
+                    body,
+                } => {
                     grant_story_ship(state, config, faction.clone(), class, body.clone());
                 }
             }
@@ -46,7 +54,14 @@ pub fn step_story(state: &mut State, config: &GameConfig) {
             body: spec.body.clone(),
             participants: participants.clone(),
         };
-        ev(state, GameEvent::Story { id: spec.id.clone(), title: spec.title.clone(), participants });
+        ev(
+            state,
+            GameEvent::Story {
+                id: spec.id.clone(),
+                title: spec.title.clone(),
+                participants,
+            },
+        );
         state.chronicle.push(entry);
     }
 }
@@ -89,7 +104,9 @@ pub fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
         }
         StoryTrigger::FirstRaze => {
             if let Some((city, fallen)) = state.events.iter().find_map(|e| match e {
-                GameEvent::CityRazed { city, fallen_to, .. } => Some((city.clone(), fallen_to.clone())),
+                GameEvent::CityRazed {
+                    city, fallen_to, ..
+                } => Some((city.clone(), fallen_to.clone())),
                 _ => None,
             }) {
                 add(&mut parts, state.city(&city).map(|c| c.name.clone()));
@@ -116,7 +133,13 @@ pub fn story_participants(state: &State, spec: &StoryEvent) -> Vec<String> {
 
 /// 剧情：把一个舰级「出厂」给某势力，位置在天体当前位置附近（小幅确定性偏移）。
 /// 舰 id 按当前最大 id 连续分配，/并配一条 `Idle` 指令；无 RNG，确定性复现。
-pub fn grant_story_ship(state: &mut State, config: &GameConfig, faction: FactionId, class: &str, body: BodyId) {
+pub fn grant_story_ship(
+    state: &mut State,
+    config: &GameConfig,
+    faction: FactionId,
+    class: &str,
+    body: BodyId,
+) {
     if !config.ships.contains_key(class) {
         return;
     }
@@ -127,25 +150,38 @@ pub fn grant_story_ship(state: &mut State, config: &GameConfig, faction: Faction
     // 剧情赠舰此前**完全不发事件**——一艘舰凭空出现。走 `spawn_ship` 漏斗补上，
     // 让它进可查的历史（`via = story` 与船坞出厂区分开）；赠舰不付组件成本
     // （是剧情送的），也没有出厂城（在天体附近下水）。
-    spawn_ship(state, config, ShipSpawn {
-        owner: faction,
-        class,
-        position: [pos[0] + 0.05, pos[1] + 0.05],
-        city: None,
-        via: SpawnVia::Story,
-        pay_components: false,
-        // 剧情赠舰**没有图**（它不是任何建造区印出来的）。
-        blueprint: None,
-    });
+    spawn_ship(
+        state,
+        config,
+        ShipSpawn {
+            owner: faction,
+            class,
+            position: [pos[0] + 0.05, pos[1] + 0.05],
+            city: None,
+            via: SpawnVia::Story,
+            pay_components: false,
+            // 剧情赠舰**没有图**（它不是任何建造区印出来的）。
+            blueprint: None,
+        },
+    );
 }
 
 /// 判断一条剧情触发条件是否已满足。
 pub fn story_trigger_fired(state: &State, trigger: &StoryTrigger) -> bool {
     match trigger {
         StoryTrigger::RoundAt { round } => state.round >= *round,
-        StoryTrigger::FirstWar => state.events.iter().any(|e| matches!(e, GameEvent::WarStarted { .. })),
-        StoryTrigger::FirstRaze => state.events.iter().any(|e| matches!(e, GameEvent::CityRazed { .. })),
-        StoryTrigger::FirstColony => state.events.iter().any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
+        StoryTrigger::FirstWar => state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::WarStarted { .. })),
+        StoryTrigger::FirstRaze => state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CityRazed { .. })),
+        StoryTrigger::FirstColony => state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
         StoryTrigger::WarBetween { a, b } => state.events.iter().any(|e| match e {
             GameEvent::WarStarted { a: x, b: y } => {
                 let (lo, hi) = (x.min(y), x.max(y));

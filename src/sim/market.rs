@@ -55,7 +55,12 @@ pub fn trade_blocked(state: &State, config: &GameConfig, a: &str, b: &str) -> bo
 
 /// [`trade_blocked`] 的**原因**（`None` = 没封锁）。把「为什么断供」区分开，才能对账
 /// ——否则「禁运太多」无法判断是战争、联盟还是阈值太严。
-pub fn trade_block_cause(state: &State, config: &GameConfig, a: &str, b: &str) -> Option<&'static str> {
+pub fn trade_block_cause(
+    state: &State,
+    config: &GameConfig,
+    a: &str,
+    b: &str,
+) -> Option<&'static str> {
     if a == b {
         return None;
     }
@@ -69,7 +74,8 @@ pub fn trade_block_cause(state: &State, config: &GameConfig, a: &str, b: &str) -
     // 反制联盟对霸权的封锁：谁「倒向联盟」谁就不跟霸权做生意。
     if config.balance.hegemon_power <= 1.0 {
         if let Some(h) = sanctioned_hegemon(state, config) {
-            let estranged = |x: &str| x != h && relation(state, x, &h) <= config.balance.coalition_estrange;
+            let estranged =
+                |x: &str| x != h && relation(state, x, &h) <= config.balance.coalition_estrange;
             if (a == h && estranged(b)) || (b == h && estranged(a)) {
                 return Some("coalition");
             }
@@ -154,7 +160,9 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     // 挂单簿：卖方还能交出什么（结算期间唯一权威的「可给出去的实物」账本）。
     let mut remaining: BTreeMap<(FactionId, String), f64> = BTreeMap::new();
     for fid in &faction_ids {
-        let Some(f) = state.faction(fid) else { continue };
+        let Some(f) = state.faction(fid) else {
+            continue;
+        };
         for (rt, amt) in &f.resources {
             // 自己需要的资源至少留 `working_buffer`；其余按 `reserve_fraction` 留一半。
             let keep = if need.contains(rt) {
@@ -179,7 +187,12 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     // 买方顺序＝购买力降序（「钱多的人先买」，确定性：同额按名字排序）。
     let mut buyers: Vec<(FactionId, f64)> = faction_ids
         .iter()
-        .map(|fid| (fid.clone(), listed_value(&remaining, &price, &value_of, fid)))
+        .map(|fid| {
+            (
+                fid.clone(),
+                listed_value(&remaining, &price, &value_of, fid),
+            )
+        })
         .collect();
     buyers.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
@@ -188,9 +201,23 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     let mut spent: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut freight_paid: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut carrier_income: BTreeMap<FactionId, f64> = BTreeMap::new();
+    // **买方队列本身就是读面数据**（B3）：「为什么有货在卖我却没买到」的答案有一半在这里
+    // ——购买力决定谁先挑。名次按**引擎自己排好的顺序**记（别让读者拿购买力重排一遍：
+    // 同额时的名字序是这里的 tie-break）。
+    for (rank, (fid, power)) in buyers.iter().enumerate() {
+        flow.market_power.insert(fid.clone(), *power);
+        flow.market_rank.insert(fid.clone(), rank);
+    }
+    // 本回合**真的成交**的每一对买卖方（B3 的中间量）：键是 (买方, 卖方)，值是那一对的价格
+    // 分解与丢货率。**粒度选「一对一行」而不是「一对 × 一资源一行」**：下面这些数只由这一对
+    // 决定（距离/深度/关系），与买的是哪种矿无关；「各买了多少件」收在 `moved` 里。
+    let mut trades: BTreeMap<(FactionId, FactionId), MarketTrade> = BTreeMap::new();
     for (buyer, _) in buyers {
         // 想买的：军工需要、且低于目标库存的资源，**越贵越先买**（先抢最稀缺的）。
-        let stock = state.faction(&buyer).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state
+            .faction(&buyer)
+            .map(|f| f.resources.clone())
+            .unwrap_or_default();
         let mut want: Vec<(String, f64, f64)> = need
             .iter()
             .map(|rt| {
@@ -211,7 +238,10 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             let sellers: Vec<(FactionId, f64)> = remaining
                 .iter()
                 .filter(|((s, r), amt)| {
-                    r == &rt && s != &buyer && **amt > 1e-9 && !trade_blocked(state, config, s, &buyer)
+                    r == &rt
+                        && s != &buyer
+                        && **amt > 1e-9
+                        && !trade_blocked(state, config, s, &buyer)
                 })
                 .map(|((s, _), amt)| (s.clone(), *amt))
                 .collect();
@@ -221,7 +251,8 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
                 }
                 // 购买力每次现算：自己的货可能已经被别人买走了。
                 let spendable = listed_value(&remaining, &price, &value_of, &buyer);
-                let limit_left = (m.auto_trade_limit - spent.get(&buyer).copied().unwrap_or(0.0)).max(0.0);
+                let limit_left =
+                    (m.auto_trade_limit - spent.get(&buyer).copied().unwrap_or(0.0)).max(0.0);
                 let max_purchase = (spendable / (1.0 + m.spread).max(1e-9)).min(limit_left);
 
                 // --- 路线：距离 + 引力异常带浸入深度（M6）---------------------------
@@ -244,16 +275,17 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
                 if take <= 1e-9 {
                     continue;
                 }
-                let give_market = take * p;               // 货值（按市场价）
-                let pay_seller = give_market * rel_mult;  // 卖方实收（含关系溢价/折扣）
+                let give_market = take * p; // 货值（按市场价）
+                let pay_seller = give_market * rel_mult; // 卖方实收（含关系溢价/折扣）
                 let freight = give_market * freight_rate; // 运费
-                let cost = pay_seller + freight;          // 贸易额（不含手续费）
-                let fee = cost * m.spread;                // 市场手续费（烧掉）
-                // 丢货：非 master 的货走异常带会**部分失联**（确定性比例，不是掷骰——
-                // 掷骰会污染 `Prng` 流、破坏同种子复现）。
-                let reliable = is_mond_master(config, &buyer) || is_mond_master(config, &seller);
-                let loss = if depth > 0.0 && !reliable {
-                    (m.mond_loss_per_au * depth).clamp(0.0, m.mond_loss_cap)
+                let cost = pay_seller + freight; // 贸易额（不含手续费）
+                let fee = cost * m.spread; // 市场手续费（烧掉）
+                // 丢货：货走异常带会**部分失联**，比例随「这条线上最好的掌握度」连续下降
+                // （`1 − max(买卖双方掌握度)`：任一方到顶就是 0 损失，与旧版「有一个 master
+                // 就不丢」同口径）。确定性比例，不是掷骰——掷骰会污染 `Prng` 流。
+                let route_mastery = mond_control(state, &buyer).max(mond_control(state, &seller));
+                let loss = if depth > 0.0 {
+                    (m.mond_loss_per_au * depth * (1.0 - route_mastery)).clamp(0.0, m.mond_loss_cap)
                 } else {
                     0.0
                 };
@@ -273,29 +305,89 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
                 }
                 *settled.entry(rt.clone()).or_insert(0.0) += take - lost_units;
 
+                // 记这一对（买方 × 卖方）的本回合结算：价格分解 + 丢货（B3 的中间量）。
+                // 同一对可能买好几种矿 —— 那些数**只由这一对决定**，所以只写一次
+                // （`or_insert_with`：拿第一个成交的那个资源时刻的值，其余资源同值）。
+                let entry = trades
+                    .entry((buyer.clone(), seller.clone()))
+                    .or_insert_with(|| MarketTrade {
+                        buyer: buyer.clone(),
+                        seller: seller.clone(),
+                        moved: ResourceMap::new(),
+                        dist_au,
+                        depth,
+                        mond_extra,
+                        freight_rate,
+                        rel_mult,
+                        mastery: route_mastery,
+                        loss,
+                    });
+                *entry.moved.entry(rt.clone()).or_insert(0.0) += take;
+
                 // 付款：卖方（货款）+ 承运人（异常带那一段运费）+ 市场（手续费，烧掉）。
-                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), pay_seller);
+                pay_with_surplus(
+                    state,
+                    &mut remaining,
+                    &price,
+                    &value_of,
+                    &buyer,
+                    Some(&seller),
+                    pay_seller,
+                );
                 let carrier = if depth > 0.0 && m.carrier_share > 0.0 {
-                    config
-                        .mond
-                        .masters
-                        .iter()
-                        .find(|x| *x != &buyer && *x != &seller && state.faction(x).is_some())
-                        .cloned()
+                    // 承运人 = **掌握度最高**、且不是买卖双方的势力（并列取 `state.factions`
+                    // 里靠前的那个，保证确定性）。掌握度连续化之后「谁在承运」不再读配置名单，
+                    // 而是读世界里的实际掌握度；它的**抽成按掌握度折算**（见下）——所以
+                    // 「名单」那一步特权路径到此为止，留下的是一条连续的斜坡。
+                    let mut best: Option<&crate::model::Faction> = None;
+                    for f in &state.factions {
+                        if f.name == buyer || f.name == seller || f.mond_control <= 0.0 {
+                            continue;
+                        }
+                        if best.map_or(true, |b| f.mond_control > b.mond_control) {
+                            best = Some(f);
+                        }
+                    }
+                    best.map(|f| (f.name.clone(), f.mond_control))
                 } else {
                     None
                 };
                 match &carrier {
-                    Some(c) => {
-                        // 只有 master 能可靠穿越异常带 → 它对这条线上的贸易**抽税**。
-                        let carrier_fee = freight * m.carrier_share;
-                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(c), carrier_fee);
-                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, freight - carrier_fee);
+                    Some((c, mastery)) => {
+                        // 只有掌握 MOND 的人能可靠穿越异常带 → 它对这条线上的贸易**抽税**；
+                        // 抽得多狠 = 它的掌握度（`control = 1` 时与旧版逐位相同）。
+                        let carrier_fee = freight * m.carrier_share * mastery;
+                        pay_with_surplus(
+                            state,
+                            &mut remaining,
+                            &price,
+                            &value_of,
+                            &buyer,
+                            Some(c),
+                            carrier_fee,
+                        );
+                        pay_with_surplus(
+                            state,
+                            &mut remaining,
+                            &price,
+                            &value_of,
+                            &buyer,
+                            None,
+                            freight - carrier_fee,
+                        );
                         *carrier_income.entry(c.clone()).or_insert(0.0) += carrier_fee;
                     }
                     None => {
                         // 没有承运人（或承运人就是买卖双方之一）：那一段运费直接烧掉。
-                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, freight);
+                        pay_with_surplus(
+                            state,
+                            &mut remaining,
+                            &price,
+                            &value_of,
+                            &buyer,
+                            None,
+                            freight,
+                        );
                     }
                 }
                 pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, fee);
@@ -327,6 +419,8 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     for (fid, v) in carrier_income {
         flow.market_carrier_income.insert(fid, v);
     }
+    // 成交清单（按买卖双方名排序 ⇒ 确定性的行序）。
+    flow.market_trades = trades.into_values().collect();
 }
 
 // --- 雇佣运力市场（集货腿的第二条路：雇人来运）---------------------------------
@@ -342,9 +436,9 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
 // 依据与裁决见 `.agents/notes/freight-collection.md` §4（Q1(b) 只扣信誉 / Q2 挂单制 /
 // Q4 禁运同样挡雇佣 / Q10 抽成制 / 雇佣形态：单子要求运力、派几条船都无所谓、
 // 周期考核出信誉、船沉没不管）。
-pub fn step_contracts(state: &mut State, config: &GameConfig) {
+pub fn step_contracts(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     // 1) 雇主挂单（内含**加价**：一个考核周期没人接就抬一档，见 `freight::escalate_open_contracts`）。
-    autocontrol::freight::post_contracts(state, config);
+    autocontrol::freight::post_contracts(state, config, flow);
     // 2) 挂完就撮合：看得见、又愿意接的受雇方**按信誉加权抽签**接下（`carrier` 落定、
     //    雇佣期起算）。**不押船**——派几条船是受雇方自己的事。
     autocontrol::contract::match_carriers(state, config);
@@ -398,7 +492,10 @@ pub fn pay_with_surplus(
         if left <= 1e-9 {
             break;
         }
-        let avail = remaining.get(&(fid.clone(), rt.clone())).copied().unwrap_or(0.0);
+        let avail = remaining
+            .get(&(fid.clone(), rt.clone()))
+            .copied()
+            .unwrap_or(0.0);
         if avail <= 1e-9 {
             continue;
         }
@@ -424,7 +521,6 @@ pub fn pay_with_surplus(
     }
 }
 
-
 // --- construction (dual budgets) ---------------------------------------------
 
 /// 本回合按资源汇总的挂单量（供给侧观察）。
@@ -435,4 +531,3 @@ pub fn offered_by_resource(market: &MarketState) -> ResourceMap {
     }
     out
 }
-

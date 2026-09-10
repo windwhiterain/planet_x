@@ -19,7 +19,9 @@
 //! 手工挑字段地投影（手工投影才会漂移）。
 
 use serde::Serialize;
-use serde::ser::{self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple, Serializer};
+use serde::ser::{
+    self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple, Serializer,
+};
 use serde_json::{Map, Value};
 
 /// 把任意 `Serialize` 值转成 `serde_json::Value`，非字符串 map key 自动转字符串
@@ -85,7 +87,9 @@ impl Serializer for JsonSafe {
         Ok(Value::String(v.to_string()))
     }
     fn serialize_bytes(self, v: &[u8]) -> Res<Value> {
-        Ok(Value::Array(v.iter().map(|b| Value::Number((*b).into())).collect()))
+        Ok(Value::Array(
+            v.iter().map(|b| Value::Number((*b).into())).collect(),
+        ))
     }
     fn serialize_none(self) -> Res<Value> {
         Ok(Value::Null)
@@ -99,10 +103,19 @@ impl Serializer for JsonSafe {
     fn serialize_unit_struct(self, _name: &'static str) -> Res<Value> {
         Ok(Value::Null)
     }
-    fn serialize_unit_variant(self, _name: &'static str, _idx: u32, variant: &'static str) -> Res<Value> {
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _idx: u32,
+        variant: &'static str,
+    ) -> Res<Value> {
         Ok(Value::String(variant.to_string()))
     }
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, value: &T) -> Res<Value> {
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Res<Value> {
         value.serialize(self)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -117,13 +130,23 @@ impl Serializer for JsonSafe {
         Ok(Value::Object(map))
     }
     fn serialize_seq(self, len: Option<usize>) -> Res<Self::SerializeSeq> {
-        Ok(Seq { items: Vec::with_capacity(len.unwrap_or(0)) })
+        Ok(Seq {
+            items: Vec::with_capacity(len.unwrap_or(0)),
+        })
     }
     fn serialize_tuple(self, len: usize) -> Res<Self::SerializeTuple> {
-        Ok(Seq { items: Vec::with_capacity(len) })
+        Ok(Seq {
+            items: Vec::with_capacity(len),
+        })
     }
-    fn serialize_tuple_struct(self, _name: &'static str, len: usize) -> Res<Self::SerializeTupleStruct> {
-        Ok(Seq { items: Vec::with_capacity(len) })
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Res<Self::SerializeTupleStruct> {
+        Ok(Seq {
+            items: Vec::with_capacity(len),
+        })
     }
     fn serialize_tuple_variant(
         self,
@@ -132,10 +155,16 @@ impl Serializer for JsonSafe {
         variant: &'static str,
         len: usize,
     ) -> Res<Self::SerializeTupleVariant> {
-        Ok(TupleVariant { variant: variant.to_string(), items: Vec::with_capacity(len) })
+        Ok(TupleVariant {
+            variant: variant.to_string(),
+            items: Vec::with_capacity(len),
+        })
     }
     fn serialize_map(self, _len: Option<usize>) -> Res<Self::SerializeMap> {
-        Ok(MapSer { map: Map::new(), key: None })
+        Ok(MapSer {
+            map: Map::new(),
+            key: None,
+        })
     }
     fn serialize_struct(self, _name: &'static str, _len: usize) -> Res<Self::SerializeStruct> {
         Ok(StructSer { map: Map::new() })
@@ -147,7 +176,10 @@ impl Serializer for JsonSafe {
         variant: &'static str,
         _len: usize,
     ) -> Res<Self::SerializeStructVariant> {
-        Ok(StructVariant { variant: variant.to_string(), map: Map::new() })
+        Ok(StructVariant {
+            variant: variant.to_string(),
+            map: Map::new(),
+        })
     }
 }
 
@@ -337,10 +369,19 @@ impl Serializer for KeyAsString {
     fn serialize_unit_struct(self, _name: &'static str) -> Res<String> {
         Ok(String::new())
     }
-    fn serialize_unit_variant(self, _name: &'static str, _idx: u32, variant: &'static str) -> Res<String> {
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _idx: u32,
+        variant: &'static str,
+    ) -> Res<String> {
         Ok(variant.to_string())
     }
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, value: &T) -> Res<String> {
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Res<String> {
         value.serialize(self)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -353,13 +394,26 @@ impl Serializer for KeyAsString {
         Ok(format!("{variant}:{}", value.serialize(KeyAsString)?))
     }
     fn serialize_seq(self, len: Option<usize>) -> Res<Self::SerializeSeq> {
-        Ok(KeySeq { parts: Vec::with_capacity(len.unwrap_or(0)), first: None })
+        Ok(KeySeq {
+            parts: Vec::with_capacity(len.unwrap_or(0)),
+            first: None,
+        })
     }
     fn serialize_tuple(self, len: usize) -> Res<Self::SerializeTuple> {
-        Ok(KeySeq { parts: Vec::with_capacity(len), first: None })
+        Ok(KeySeq {
+            parts: Vec::with_capacity(len),
+            first: None,
+        })
     }
-    fn serialize_tuple_struct(self, _name: &'static str, len: usize) -> Res<Self::SerializeTupleStruct> {
-        Ok(KeySeq { parts: Vec::with_capacity(len), first: None })
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Res<Self::SerializeTupleStruct> {
+        Ok(KeySeq {
+            parts: Vec::with_capacity(len),
+            first: None,
+        })
     }
     fn serialize_tuple_variant(
         self,
@@ -368,7 +422,10 @@ impl Serializer for KeyAsString {
         variant: &'static str,
         len: usize,
     ) -> Res<Self::SerializeTupleVariant> {
-        Ok(KeySeq { parts: Vec::with_capacity(len + 1), first: Some(variant.to_string()) })
+        Ok(KeySeq {
+            parts: Vec::with_capacity(len + 1),
+            first: Some(variant.to_string()),
+        })
     }
     fn serialize_map(self, _len: Option<usize>) -> Res<Self::SerializeMap> {
         Err(ser::Error::custom("map key must not itself be a map"))

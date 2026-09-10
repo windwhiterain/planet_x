@@ -7,7 +7,10 @@ use super::*;
 #[test]
 fn normalize_behavior_accepts_tagged_form() {
     let cases = [
-        (serde_json::json!({"type":"idle"}), serde_json::json!("Idle")),
+        (
+            serde_json::json!({"type":"idle"}),
+            serde_json::json!("Idle"),
+        ),
         (
             serde_json::json!({"type":"follow","ship":"华盛顿"}),
             serde_json::json!({"Follow":{"ship":"华盛顿"}}),
@@ -28,7 +31,10 @@ fn normalize_behavior_accepts_tagged_form() {
     for (tagged, expected) in cases {
         let mut v = tagged.clone();
         normalize_behavior(&mut v, "test").expect("legal tag normalizes");
-        assert_eq!(v, expected, "tagged input {tagged:?} must normalize to {expected:?}");
+        assert_eq!(
+            v, expected,
+            "tagged input {tagged:?} must normalize to {expected:?}"
+        );
     }
 }
 
@@ -40,9 +46,13 @@ fn normalize_behavior_accepts_tagged_form() {
 #[test]
 fn unknown_behavior_tag_is_rejected_with_the_legal_tags_and_a_hint() {
     let mut v = serde_json::json!({"type":"target_ship","ship":"华盛顿","attack":true});
-    let err = normalize_behavior(&mut v, "中国.ship_orders[0]").expect_err("removed behavior must be rejected");
+    let err = normalize_behavior(&mut v, "中国.ship_orders[0]")
+        .expect_err("removed behavior must be rejected");
     for needle in ["target_ship", "合法", "follow", "自动开火"] {
-        assert!(err.contains(needle), "error must mention {needle:?}, got: {err}");
+        assert!(
+            err.contains(needle),
+            "error must mention {needle:?}, got: {err}"
+        );
     }
     // 未知但也不像旧行为的标签同样被拒（不再静默流过）。
     let mut v = serde_json::json!({"type":"teleport"});
@@ -71,6 +81,13 @@ fn apply_patch_accepts_tagged_ship_order() {
         }]
     });
     apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");
-    let b = state.ship_behavior("长城".to_string()).expect("长城 has an order");
-    assert_eq!(b, ShipBehavior::Follow { ship: "华盛顿".to_string() });
+    let b = state
+        .ship_behavior("长城".to_string())
+        .expect("长城 has an order");
+    assert_eq!(
+        b,
+        ShipBehavior::Follow {
+            ship: "华盛顿".to_string()
+        }
+    );
 }

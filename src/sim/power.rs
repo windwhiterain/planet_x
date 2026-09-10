@@ -28,22 +28,45 @@ pub fn war_strength(state: &State, config: &GameConfig, fid: &str) -> f64 {
 pub fn faction_power(state: &State, config: &GameConfig) -> BTreeMap<FactionId, f64> {
     let b = &config.balance;
     let total_cities = state.cities.iter().filter(|c| !c.razed).count() as f64;
-    let total_fleet: f64 = state.ships.iter().map(|s| ship_panel(config, s).hull_max).sum();
+    let total_fleet: f64 = state
+        .ships
+        .iter()
+        .map(|s| ship_panel(config, s).hull_max)
+        .sum();
     let mut powers = BTreeMap::new();
     if total_cities <= 0.0 && total_fleet <= 0.0 {
-        return state.factions.iter().map(|f| (f.name.clone(), 0.0)).collect();
+        return state
+            .factions
+            .iter()
+            .map(|f| (f.name.clone(), 0.0))
+            .collect();
     }
     for f in &state.factions {
-        let cities = state.cities.iter().filter(|c| c.faction_id == f.name && !c.razed).count() as f64;
+        let cities = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == f.name && !c.razed)
+            .count() as f64;
         let fleet: f64 = state
             .ships
             .iter()
             .filter(|s| s.faction_id == f.name)
             .map(|s| ship_panel(config, s).hull_max)
             .sum();
-        let city_share = if total_cities > 0.0 { cities / total_cities } else { 0.0 };
-        let fleet_share = if total_fleet > 0.0 { fleet / total_fleet } else { 0.0 };
-        powers.insert(f.name.clone(), b.power_city_weight * city_share + b.power_fleet_weight * fleet_share);
+        let city_share = if total_cities > 0.0 {
+            cities / total_cities
+        } else {
+            0.0
+        };
+        let fleet_share = if total_fleet > 0.0 {
+            fleet / total_fleet
+        } else {
+            0.0
+        };
+        powers.insert(
+            f.name.clone(),
+            b.power_city_weight * city_share + b.power_fleet_weight * fleet_share,
+        );
     }
     powers
 }
@@ -54,7 +77,11 @@ pub fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMap<Facti
     let b = &config.balance;
     let wp = b.power_city_weight + b.power_fleet_weight;
     if wp <= 0.0 {
-        return state.factions.iter().map(|f| (f.name.clone(), 0.0)).collect();
+        return state
+            .factions
+            .iter()
+            .map(|f| (f.name.clone(), 0.0))
+            .collect();
     }
     faction_power(state, config)
         .into_iter()
@@ -66,7 +93,12 @@ pub fn faction_power_share(state: &State, config: &GameConfig) -> BTreeMap<Facti
 /// （关系 ≤ 该值，即被遏制/疏远了霸权）、且彼此相互和平（互不交战）的一方。若 ≥
 /// [`BalanceOfPowerConfig::min_members`] 即视为联盟成立。遏制是冷战式的——成员未必与
 /// 霸权开战，但已脱离其影响、转而与弱国抱团。
-pub fn coalition_of(state: &State, config: &GameConfig, hegemon: &str, members: &[FactionId]) -> Vec<FactionId> {
+pub fn coalition_of(
+    state: &State,
+    config: &GameConfig,
+    hegemon: &str,
+    members: &[FactionId],
+) -> Vec<FactionId> {
     let estrange = config.balance.coalition_estrange;
     let estranged: Vec<FactionId> = members
         .iter()
@@ -76,7 +108,11 @@ pub fn coalition_of(state: &State, config: &GameConfig, hegemon: &str, members: 
     estranged
         .iter()
         .cloned()
-        .filter(|m| estranged.iter().all(|o| o == m || !hostile(state, config, m, o)))
+        .filter(|m| {
+            estranged
+                .iter()
+                .all(|o| o == m || !hostile(state, config, m, o))
+        })
         .collect()
 }
 
@@ -143,7 +179,9 @@ pub fn coalition_war_focus(state: &State, config: &GameConfig, owner: &str) -> O
     if b.hegemon_power > 1.0 {
         return None;
     }
-    let Some(hegemon) = active_coalition_hegemon(state, config) else { return None };
+    let Some(hegemon) = active_coalition_hegemon(state, config) else {
+        return None;
+    };
     if owner == hegemon.as_str() {
         return None;
     }
@@ -156,11 +194,7 @@ pub fn coalition_war_focus(state: &State, config: &GameConfig, owner: &str) -> O
         .factions
         .iter()
         .any(|f| f.name != hegemon && hostile(state, config, &f.name, &hegemon));
-    if war_on {
-        Some(hegemon)
-    } else {
-        None
-    }
+    if war_on { Some(hegemon) } else { None }
 }
 
 /// 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力被共同威胁推向彼此——
@@ -199,8 +233,11 @@ pub fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 
     // 步骤前后联盟成员、及与霸权交战成员（用于跃迁/集体安全判定）。
     let coalition_before = coalition_of(state, config, &hegemon, &members);
-    let was_at_war: BTreeSet<FactionId> =
-        members.iter().cloned().filter(|m| hostile(state, config, m, &hegemon)).collect();
+    let was_at_war: BTreeSet<FactionId> = members
+        .iter()
+        .cloned()
+        .filter(|m| hostile(state, config, m, &hegemon))
+        .collect();
 
     // 合纵：弱者-弱者相互靠拢（共同威胁把他们推向彼此）。
     for i in 0..members.len() {
@@ -226,13 +263,22 @@ pub fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 
     // 集体安全：任一弱者与霸权进入交战（本回合新跨入），其余尚未交战的弱者对霸权关系
     // 骤降——「攻其一方 = 与全体为敌」的防御协定：霸权一旦开打，弱者联盟群起而攻之。
-    let now_at_war: BTreeSet<FactionId> =
-        members.iter().cloned().filter(|m| hostile(state, config, m, &hegemon)).collect();
+    let now_at_war: BTreeSet<FactionId> = members
+        .iter()
+        .cloned()
+        .filter(|m| hostile(state, config, m, &hegemon))
+        .collect();
     if now_at_war.difference(&was_at_war).next().is_some() {
         for m in &members {
             if !now_at_war.contains(m) {
                 let rel = relation(state, m, &hegemon);
-                set_relation_sym(state, m.clone(), hegemon.clone(), rel + b.collective_defense_delta, config);
+                set_relation_sym(
+                    state,
+                    m.clone(),
+                    hegemon.clone(),
+                    rel + b.collective_defense_delta,
+                    config,
+                );
             }
         }
     }
@@ -242,9 +288,21 @@ pub fn step_balance_of_power(state: &mut State, config: &GameConfig) {
     let before_active = coalition_before.len() >= b.min_members;
     let after_active = coalition_after.len() >= b.min_members;
     if before_active && !after_active {
-        ev(state, GameEvent::CoalitionEnded { hegemon, members: coalition_before });
+        ev(
+            state,
+            GameEvent::CoalitionEnded {
+                hegemon,
+                members: coalition_before,
+            },
+        );
     } else if !before_active && after_active {
-        ev(state, GameEvent::CoalitionFormed { hegemon, members: coalition_after });
+        ev(
+            state,
+            GameEvent::CoalitionFormed {
+                hegemon,
+                members: coalition_after,
+            },
+        );
     }
 }
 

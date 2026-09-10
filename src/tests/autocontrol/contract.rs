@@ -41,11 +41,20 @@ fn the_shadow_price_of_reputation_decreases_with_reputation() {
     for i in 0..=40 {
         let rep = i as f64 * 0.1;
         let l = shadow_price(&config, rep);
-        assert!(l <= prev + 1e-12, "λ 必须随信誉单调不增：rep={rep:.1} 时 {l:.3} > {prev:.3}");
+        assert!(
+            l <= prev + 1e-12,
+            "λ 必须随信誉单调不增：rep={rep:.1} 时 {l:.3} > {prev:.3}"
+        );
         prev = l;
     }
-    assert!(shadow_price(&config, 0.0) > shadow_price(&config, 4.0) * 5.0, "两端要拉开差距");
-    assert!(shadow_price(&config, 0.0) <= config.freight.shadow_lambda0 + 1e-9, "上界是 lambda0");
+    assert!(
+        shadow_price(&config, 0.0) > shadow_price(&config, 4.0) * 5.0,
+        "两端要拉开差距"
+    );
+    assert!(
+        shadow_price(&config, 0.0) <= config.freight.shadow_lambda0 + 1e-9,
+        "上界是 lambda0"
+    );
 }
 
 /// **低信誉接不到难单**：同一条深空线，低信誉者的合格度必须显著更低。
@@ -58,7 +67,10 @@ fn a_low_reputation_carrier_is_rarely_shown_a_hard_contract() {
     let high = eligibility(&config, 3.0, &c);
     assert!(high > low, "高信誉的合格度必须更高：{high:.3} vs {low:.3}");
     assert!(low < 0.05, "信誉远低于门槛 ⇒ 极少看见（实为 {low:.4}）");
-    assert!(high > 0.9, "信誉远高于门槛 ⇒ 基本总看得见（实为 {high:.4}）");
+    assert!(
+        high > 0.9,
+        "信誉远高于门槛 ⇒ 基本总看得见（实为 {high:.4}）"
+    );
 }
 
 /// **λ 的两端就是 §C1 那张表**：够不着的活（注定吃差评）低信誉者不赌、高信誉者敢赌；
@@ -127,7 +139,13 @@ fn a_carrier_short_of_capacity_is_reluctant_to_accept() {
     let c = state.contracts.get(id).unwrap().clone();
     let rich = accept_chance(&state, &config, &c, "中国");
     // 只剩一条护卫舰（舱容 2）⇒ 能凑的运力小得多。
-    let keep = state.ships.iter().find(|s| s.class == "corvette").unwrap().name.clone();
+    let keep = state
+        .ships
+        .iter()
+        .find(|s| s.class == "corvette")
+        .unwrap()
+        .name
+        .clone();
     state.ships.retain(|s| s.name == keep);
     let poor = accept_chance(&state, &config, &c, "中国");
     assert!(
@@ -136,7 +154,10 @@ fn a_carrier_short_of_capacity_is_reluctant_to_accept() {
     );
     // 一条船都没有 ⇒ 物理上接不了（`match_carriers` 会直接跳过，连骰子都不掷）。
     state.ships.clear();
-    assert_eq!(available_throughput(&state, &config, "中国", "金星", "地球"), 0.0);
+    assert_eq!(
+        available_throughput(&state, &config, "中国", "金星", "地球"),
+        0.0
+    );
 }
 
 /// **撮合只定「谁受雇」，不押船**（用户：「对方派几艘船都无所谓」）。
@@ -160,23 +181,33 @@ fn accepting_an_order_hires_a_faction_and_then_staffs_it_with_ships() {
         .filter(|c| c.is_hired())
         .cloned()
         .collect();
-    assert!(!taken.is_empty(), "400 件积压挂出去，该有人接：{:?}", state.contracts.contracts);
+    assert!(
+        !taken.is_empty(),
+        "400 件积压挂出去，该有人接：{:?}",
+        state.contracts.contracts
+    );
     for c in &taken {
         let carrier = c.carrier.clone().unwrap();
         assert_ne!(carrier, c.shipper, "不能自己接自己的单");
-        assert_eq!(c.accepted_round, Some(state.round), "雇佣期从接单那一刻起算");
+        assert_eq!(
+            c.accepted_round,
+            Some(state.round),
+            "雇佣期从接单那一刻起算"
+        );
         assert!(c.expires_round > state.round, "固定期必须在将来");
         assert!(c.review_round > state.round, "第一次考核在一个周期之后");
         // 派上去的船都必须是**受雇方自己**的，而且跑的是**雇主**的路线。
         for ship in state.contracts.ships_of(c.id) {
             let s = state.ship(&ship).expect("派工指向的船必须存在");
             assert_eq!(s.faction_id, carrier, "只能派自己的船");
-            let route = freight::route_for(&state, &config, &carrier, &ship).expect("接活的舰要有路线");
+            let route =
+                freight::route_for(&state, &config, &carrier, &ship).expect("接活的舰要有路线");
             assert_eq!(route, (c.from.clone(), c.to.clone()), "跑的是雇主的路线");
             // 每条腿都有一端是雇主的首都（集散地）：集货腿的**终点**是首都，补给腿的**起点**
             // 是首都——「完全禁止瞬移」之后两个方向都是正式的单子。
             assert!(
-                route.0 == state.capital_body(&c.shipper) || route.1 == state.capital_body(&c.shipper),
+                route.0 == state.capital_body(&c.shipper)
+                    || route.1 == state.capital_body(&c.shipper),
                 "每条腿都该有一端是雇主首都，实为 {route:?}"
             );
         }
@@ -221,7 +252,10 @@ fn a_contract_runs_any_number_of_ships_and_survives_one_going_down() {
         "船沉本身不该动信誉（考核会说话，别罚两次）"
     );
     assert!(
-        !state.events.iter().any(|e| matches!(e, GameEvent::ContractEnded { .. })),
+        !state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ContractEnded { .. })),
         "合同不该因为沉了一条船就结束（还有别的船在跑）"
     );
 }
@@ -247,10 +281,16 @@ fn a_review_judges_the_measured_throughput_and_never_punishes_an_idle_depot() {
     for i in 0..=20 {
         let r = i as f64 * 0.1;
         let p = review_chance(&config, r);
-        assert!(p > prev, "好评概率必须随达标率单调增：{r:.1} 时 {p:.3} <= {prev:.3}");
+        assert!(
+            p > prev,
+            "好评概率必须随达标率单调增：{r:.1} 时 {p:.3} <= {prev:.3}"
+        );
         prev = p;
     }
-    assert!((review_chance(&config, 1.0) - 0.5).abs() < 1e-9, "恰好达标 = 五五开");
+    assert!(
+        (review_chance(&config, 1.0) - 0.5).abs() < 1e-9,
+        "恰好达标 = 五五开"
+    );
     // 0 个有货回合 ⇒ 不评：信誉一个字都不动，也不发事件。
     let rep0 = state.faction("美国").unwrap().reputation;
     state.contracts.get_mut(id).unwrap().review_round = 0;
@@ -260,7 +300,10 @@ fn a_review_judges_the_measured_throughput_and_never_punishes_an_idle_depot() {
         "货栈一直没货 ⇒ 不该考核（更不该判它不达标）"
     );
     assert!(
-        !state.events.iter().any(|e| matches!(e, GameEvent::ContractReviewed { .. })),
+        !state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ContractReviewed { .. })),
         "无从考核就不该发 `contract_reviewed`"
     );
     // 有货可运 + 交得足 ⇒ 必评，且信誉的变动量恰好是考核幅度（好评或差评二选一）。
@@ -288,7 +331,10 @@ fn a_review_judges_the_measured_throughput_and_never_punishes_an_idle_depot() {
             _ => None,
         })
         .expect("该发一次考核事件");
-    assert!((reviewed - 1.0).abs() < 1e-9, "事件的达标率该是 1.0，实为 {reviewed:.3}");
+    assert!(
+        (reviewed - 1.0).abs() < 1e-9,
+        "事件的达标率该是 1.0，实为 {reviewed:.3}"
+    );
 }
 
 /// **禁运同样挡雇佣**（Q4）：被封锁的势力**既接不到**这条线上的活，也不该把自己的
@@ -453,7 +499,14 @@ fn quitting_never_hands_the_cargo_in_transit_to_the_carrier() {
         .clone();
     let class = state.ship(&ship).unwrap().class.clone();
     let id = state.contracts.post(
-        "中国".into(), "碳".into(), 3.0, "金星".into(), "地球".into(), share, 0, 0.0,
+        "中国".into(),
+        "碳".into(),
+        3.0,
+        "金星".into(),
+        "地球".into(),
+        share,
+        0,
+        0.0,
     );
     {
         let c = state.contracts.get_mut(id).unwrap();
@@ -479,20 +532,47 @@ fn quitting_never_hands_the_cargo_in_transit_to_the_carrier() {
     );
     // 卸到中国首都：抽成归美国，余数必须进**中国**的池子。
     let (cn0, us0) = (
-        state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
-        state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        state
+            .faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
+        state
+            .faction("美国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
     );
     state.ship_mut(&ship).unwrap().position = state.body_position("地球");
     assert!(
         matches!(
             sim::haul_step(&mut state, &config, &ship, &class, "金星", "地球"),
-            sim::HaulStep::Delivered { into_pool: true, .. }
+            sim::HaulStep::Delivered {
+                into_pool: true,
+                ..
+            }
         ),
         "目的 = 雇主首都 ⇒ 该进池子"
     );
     let (cn1, us1) = (
-        state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
-        state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        state
+            .faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
+        state
+            .faction("美国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
     );
     assert!(
         (cn1 - cn0 - (loaded - loaded * share)).abs() < 1e-9,
@@ -583,7 +663,13 @@ fn a_hired_ship_delivers_to_the_employer_and_pays_itself_in_cargo() {
     for _ in 0..8 {
         sim::advance(&mut state, &config, &mut rng);
         for e in &state.events {
-            if let GameEvent::ContractDelivered { contract, amount, cut: c, .. } = e {
+            if let GameEvent::ContractDelivered {
+                contract,
+                amount,
+                cut: c,
+                ..
+            } = e
+            {
                 if *contract == id {
                     delivered_events += 1;
                     paid += amount;
@@ -598,7 +684,10 @@ fn a_hired_ship_delivers_to_the_employer_and_pays_itself_in_cargo() {
     // 口径与「一票货」形态不同：那时合同上写着「运 12 件」，交付总量有**上界**；
     // 现在单子要的是**运力**（单位/回合），只要金星还有货、船还在跑，它就会一直搬
     // ——所以这里能核的是**分成比例**（抽成制 Q10，这一条才是机制不变量），不是某个绝对数。
-    assert!(paid > 0.0 && cut > 0.0, "该有交付：雇主实收 {paid:.3} / 受雇方自留 {cut:.3}");
+    assert!(
+        paid > 0.0 && cut > 0.0,
+        "该有交付：雇主实收 {paid:.3} / 受雇方自留 {cut:.3}"
+    );
     assert!(
         (paid / (paid + cut) - (1.0 - share)).abs() < 1e-9,
         "抽成比例必须恰好是 85%（实收 {paid:.3} / 自留 {cut:.3}）"

@@ -62,7 +62,11 @@ struct Yard {
 /// 调用点：`sim::step_construction` 的末尾（`retool_shipyards` **之后**）——那时本回合的舰级
 /// 重估已经落定，设计图这一趟就能把"图与建造区对得上"顺手收敛（`retool` 改了舰级 ⇒ 图的名字
 /// 与舰级要跟着换）。下一回合的出厂（`build_city` → `spawn_ship`）用的就是这些图。
-pub(crate) fn design_fleets(state: &mut State, config: &GameConfig, out: &mut Vec<BlueprintDecision>) {
+pub(crate) fn design_fleets(
+    state: &mut State,
+    config: &GameConfig,
+    out: &mut Vec<BlueprintDecision>,
+) {
     if config.autocontrol.blueprint_themes.is_empty() {
         return; // 空表 = 不建图（退回「所有建造区无图、出厂现算」）。
     }
@@ -90,7 +94,9 @@ fn design_one_faction(
             if !b.is_shipyard() {
                 continue;
             }
-            let Some(class) = b.ship_type.clone() else { continue };
+            let Some(class) = b.ship_type.clone() else {
+                continue;
+            };
             match b.blueprint.as_ref() {
                 // 悬空指针：那个区已停产（Q10(a)）；删图是玩家/agent 的动作 ⇒ AI 不替他收拾。
                 Some(ptr) if !blueprint_known(state, fid, ptr) => continue,
@@ -128,7 +134,11 @@ fn design_one_faction(
         // 想用的名字被玩家的图占了 ⇒ 这一轮对这个舰级什么都不做（宁可不动，也不改名/抢名字）。
         if lib
             .get(&intended)
-            .map(|_| state.blueprint_control(&fid.to_string(), &intended).is_player())
+            .map(|_| {
+                state
+                    .blueprint_control(&fid.to_string(), &intended)
+                    .is_player()
+            })
             .unwrap_or(false)
         {
             continue;
@@ -245,7 +255,10 @@ fn design_one_faction(
                 faction: fid.to_string(),
                 blueprint: name,
                 action: "reaped".to_string(),
-                class: leaf.as_ref().map(|l| l.value.class.clone()).unwrap_or_default(),
+                class: leaf
+                    .as_ref()
+                    .map(|l| l.value.class.clone())
+                    .unwrap_or_default(),
                 theme: String::new(),
                 components: leaf.map(|l| l.value.components).unwrap_or_default(),
                 city: None,
@@ -275,12 +288,16 @@ fn current_theme<'a>(
     yards: &[Yard],
 ) -> Option<&'a DesignTheme> {
     for y in yards {
-        let Some(name) = y.blueprint.as_ref() else { continue };
+        let Some(name) = y.blueprint.as_ref() else {
+            continue;
+        };
         let Some(leaf) = lib.get(name) else { continue };
         if leaf.mode.is_player() || leaf.value.class != class {
             continue;
         }
-        let Some(theme) = theme_of_name(name) else { continue };
+        let Some(theme) = theme_of_name(name) else {
+            continue;
+        };
         if let Some(t) = config
             .autocontrol
             .blueprint_themes
@@ -325,7 +342,10 @@ fn draw_theme<'a>(
     war: f64,
 ) -> &'a DesignTheme {
     let themes = &config.autocontrol.blueprint_themes;
-    let total: f64 = themes.iter().map(|t| (t.weight + war * t.war_weight).max(0.0)).sum();
+    let total: f64 = themes
+        .iter()
+        .map(|t| (t.weight + war * t.war_weight).max(0.0))
+        .sum();
     if total <= 1e-9 {
         return &themes[0];
     }
@@ -355,7 +375,9 @@ fn signature_match(
     }
     lib.iter()
         .find(|(_, leaf)| {
-            !leaf.mode.is_player() && leaf.value.class == class && leaf.value.components == components
+            !leaf.mode.is_player()
+                && leaf.value.class == class
+                && leaf.value.components == components
         })
         .map(|(name, _)| name.clone())
 }

@@ -73,7 +73,9 @@ pub fn normalize_behavior(v: &mut serde_json::Value, where_: &str) -> Result<(),
 /// view is untouched. Errors carry the **diff path** of the offending order so
 /// the agent knows which line to fix.
 pub fn normalize_control_diffs(value: &mut serde_json::Value) -> Result<(), String> {
-    let Some(control) = value.get_mut("control").and_then(|c| c.as_array_mut()) else { return Ok(()) };
+    let Some(control) = value.get_mut("control").and_then(|c| c.as_array_mut()) else {
+        return Ok(());
+    };
     for (fi, fac) in control.iter_mut().enumerate() {
         // 舰队默认指令也是「行为」字段，tagged 写法同样要认（手册 §4.3 的承诺对每个
         // behavior 字段都成立，否则这个字段只能用默认枚举形式写，成为暗坑）。
@@ -87,20 +89,36 @@ pub fn normalize_control_diffs(value: &mut serde_json::Value) -> Result<(), Stri
         // 漏掉这一处，那个字段就只能用默认枚举形式写，成为暗坑。
         if let Some(bps) = fac.get_mut("blueprints").and_then(|b| b.as_array_mut()) {
             for (bi, bp) in bps.iter_mut().enumerate() {
-                let name = bp.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+                let name = bp
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("?")
+                    .to_string();
                 if let Some(order) = bp.get_mut("order") {
                     // `null` = 本图对意图没有说话（不是行为，跳过）。
                     if !order.is_null() {
-                        normalize_behavior(order, &format!("control[{fi}].blueprints[{bi}] (图「{name}」)"))?;
+                        normalize_behavior(
+                            order,
+                            &format!("control[{fi}].blueprints[{bi}] (图「{name}」)"),
+                        )?;
                     }
                 }
             }
         }
-        let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else { continue };
+        let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else {
+            continue;
+        };
         for (oi, order) in orders.iter_mut().enumerate() {
-            let ship = order.get("ship").and_then(|s| s.as_str()).unwrap_or("?").to_string();
+            let ship = order
+                .get("ship")
+                .and_then(|s| s.as_str())
+                .unwrap_or("?")
+                .to_string();
             if let Some(behavior) = order.get_mut("behavior") {
-                normalize_behavior(behavior, &format!("control[{fi}].ship_orders[{oi}] (ship 「{ship}」)"))?;
+                normalize_behavior(
+                    behavior,
+                    &format!("control[{fi}].ship_orders[{oi}] (ship 「{ship}」)"),
+                )?;
             }
         }
     }

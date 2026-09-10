@@ -14,7 +14,11 @@ use super::*;
 #[test]
 fn off_capital_production_lands_in_the_depot_not_the_pool() {
     let (config, mut state) = fresh_world(42);
-    assert_eq!(state.capital_body("中国"), "地球", "用例前提：中国首都在地球");
+    assert_eq!(
+        state.capital_body("中国"),
+        "地球",
+        "用例前提：中国首都在地球"
+    );
     assert_eq!(
         state.capital_body("无国界科学组织"),
         "木星",
@@ -23,10 +27,20 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
 
     let mut flow = RoundSink::default();
     let cn_silicon = |s: &State| {
-        s.faction("中国").unwrap().resources.get("硅").copied().unwrap_or(0.0)
+        s.faction("中国")
+            .unwrap()
+            .resources
+            .get("硅")
+            .copied()
+            .unwrap_or(0.0)
     };
     let cn_carbon = |s: &State| {
-        s.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0)
+        s.faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0)
     };
     let sci_value = |s: &State| {
         let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
@@ -42,10 +56,7 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
     step_production(&mut state, &config, &mut flow);
 
     // —— 中国：首都产出进池，离岸产出进货栈 ——
-    assert!(
-        cn_silicon(&state) > si0,
-        "地球（首都）上的硅应直接进池"
-    );
+    assert!(cn_silicon(&state) > si0, "地球（首都）上的硅应直接进池");
     assert!(
         state.depot("中国", "地球").is_none(),
         "首都天体的产出不进货栈（免运输、直接进池）"
@@ -141,7 +152,11 @@ fn cargo_capacity_is_class_capacity_times_hull_fraction() {
         "装甲掉一半 → 舱容减半（连续，不是硬阈值）"
     );
     ship.hull = 0.0;
-    assert_eq!(cargo_capacity(&config, &ship), 0.0, "壳被打光 → 一格都装不了");
+    assert_eq!(
+        cargo_capacity(&config, &ship),
+        0.0,
+        "壳被打光 → 一格都装不了"
+    );
 
     // 3) 旧档缺 `hull_max`：按满舱处理，而不是把舱容算成无穷。
     ship.hull = 6.0;
@@ -296,8 +311,13 @@ fn a_hired_delivery_splits_the_cargo_between_carrier_and_shipper() {
         0.0,
     );
     state.contracts.assign(ship.clone(), id);
-    state.contracts.contracts.iter_mut().find(|c| c.id == id).unwrap().carrier =
-        Some("美国".into());
+    state
+        .contracts
+        .contracts
+        .iter_mut()
+        .find(|c| c.id == id)
+        .unwrap()
+        .carrier = Some("美国".into());
     // 停在**托运方货栈**的泊位上 → 装货该装的是**中国的**货。
     let vpos = state.body_position("金星");
     state.ship_mut(&ship).unwrap().position = vpos;
@@ -316,18 +336,48 @@ fn a_hired_delivery_splits_the_cargo_between_carrier_and_shipper() {
     );
     // 卸到中国的首都（地球）：抽成归美国、余数归中国。
     let (cn0, us0) = (
-        state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
-        state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        state
+            .faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
+        state
+            .faction("美国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
     );
     state.ship_mut(&ship).unwrap().position = state.body_position("地球");
     let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
     assert!(
-        matches!(step, HaulStep::Delivered { into_pool: true, .. }),
+        matches!(
+            step,
+            HaulStep::Delivered {
+                into_pool: true,
+                ..
+            }
+        ),
         "目的 = 托运方首都 ⇒ 该进池子，实为 {step:?}"
     );
     let (cn1, us1) = (
-        state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
-        state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        state
+            .faction("中国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
+        state
+            .faction("美国")
+            .unwrap()
+            .resources
+            .get("碳")
+            .copied()
+            .unwrap_or(0.0),
     );
     let cut = loaded * share;
     assert!(
@@ -374,18 +424,29 @@ fn a_haul_route_alternates_legs_because_of_the_cargo() {
         matches!(step, HaulStep::Waiting { ref body } if body == "金星"),
         "空货栈应当原地等，实为 {step:?}"
     );
-    assert_eq!(state.ship(&ship).unwrap().position, vpos, "等的时候不许乱跑");
+    assert_eq!(
+        state.ship(&ship).unwrap().position,
+        vpos,
+        "等的时候不许乱跑"
+    );
     assert!(state.ship(&ship).unwrap().cargo.is_empty());
 
     // 2) 来货了就装，且**这一回合不再跑**（与殖民一样是「到达即行动」）。
     state.depot_add("中国", "金星", "碳", 3.0);
     let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
-    assert!(matches!(step, HaulStep::Loaded { .. }), "有货就装，实为 {step:?}");
+    assert!(
+        matches!(step, HaulStep::Loaded { .. }),
+        "有货就装，实为 {step:?}"
+    );
     assert!(!state.ship(&ship).unwrap().cargo.is_empty(), "舱里该有货");
 
     // 3) 舱里有货 ⇒ 腿别翻到 `to`（哪怕 `from` 还有货）。同一对 from/to、零额外状态。
     let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
-    assert_eq!(step.body(), "地球", "舱里有货 ⇒ 这一腿去卸货端，实为 {step:?}");
+    assert_eq!(
+        step.body(),
+        "地球",
+        "舱里有货 ⇒ 这一腿去卸货端，实为 {step:?}"
+    );
     assert!(
         !matches!(step, HaulStep::Waiting { .. } | HaulStep::Loaded { .. }),
         "有货时不该再在装货端打转，实为 {step:?}"
@@ -422,7 +483,8 @@ fn a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool() {
                 to: "地球".to_string(),
             }),
         );
-        c.ship_freighter.insert(ship.clone(), Control::player(true));
+        c.ship_role
+            .insert(ship.clone(), Control::player(ShipRole::Freight));
     }
     let mut rng = Prng::new(42);
     let mut delivered = 0.0;
@@ -431,7 +493,12 @@ fn a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool() {
     for _ in 0..8 {
         advance(&mut state, &config, &mut rng);
         for e in &state.events {
-            if let GameEvent::CargoDelivered { cargo, into_pool: true, .. } = e {
+            if let GameEvent::CargoDelivered {
+                cargo,
+                into_pool: true,
+                ..
+            } = e
+            {
                 delivered += cargo.values().sum::<f64>();
             }
         }

@@ -88,12 +88,22 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
         let ideology_loyalty_penalty = gov.map(|g| g.ideology_penalty).unwrap_or(0.0);
         // 首都向心项：**按势力算一次**，城行不重复它（见 `LoyaltyTarget` 的文档）。
         let capital_loyalty_bonus = gov.map(|g| g.capital_bonus).unwrap_or(0.0);
-        // 「谁不卖给你」：有多少势力对本势力**全面禁运**（本回合市场结算的实际判据）。
-        let trade_blocked_by = state
+        // 「谁不卖给你、为什么」：对本势力**全面禁运**的那些势力各是什么原因（B3 把它从
+        // 「计数」升级成「名单 + 三档原因」——战争/冷关系/联盟封锁的对策完全不同）。
+        // 判据就是市场结算用的那一个函数（`trade_block_cause`），不在读面另编一套。
+        let trade_blocked_by: BTreeMap<FactionId, String> = state
             .factions
             .iter()
-            .filter(|o| trade_blocked(state, config, &o.name, &fid))
-            .count();
+            .filter(|o| o.name != fid)
+            .filter_map(|o| {
+                trade_block_cause(state, config, &o.name, &fid)
+                    .map(|c| (o.name.clone(), c.to_string()))
+            })
+            .collect();
+        // 钱去哪了（B2）：维护欠费与生锈，以及**实际花掉**的投资/建造预算。限额是控制面的
+        // 持久叶（`control` 的 investment_budget/construction_budget），这里不重复它。
+        let up = sink.upkeep.get(&fid);
+        let spend = sink.spend.get(&fid);
         factions.insert(
             fid.clone(),
             FactionRow {
@@ -108,7 +118,7 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 // —— 本回合过程（`pre` 里是 0 / 空）——
                 production,
                 production_value,
-                upkeep: sink.upkeep.get(&fid).copied().unwrap_or(0.0),
+                upkeep: up.map(|u| u.total).unwrap_or(0.0),
                 governance_cost,
                 governance_coverage,
                 governance_admin,
@@ -119,6 +129,17 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 freight_paid: sink.market_freight.get(&fid).copied().unwrap_or(0.0),
                 carrier_income: sink.market_carrier_income.get(&fid).copied().unwrap_or(0.0),
                 net_import: sink.market_net.get(&fid).copied().unwrap_or(0.0),
+                // B2：钱去哪了。0 = 付清/没锈（`pre` 里也是这两个 0——那一步还没跑）。
+                upkeep_unpaid: up.map(|u| u.unpaid).unwrap_or(0.0),
+                fleet_rust: up.map(|u| u.rust).unwrap_or(0.0),
+                // 只列真花过的资源（稀疏 map）；限额在 `control` 的预算叶上，相减 = 没花掉的。
+                investment_spent: spend.map(|s| s.investment.clone()).unwrap_or_default(),
+                construction_spent: spend.map(|s| s.construction.clone()).unwrap_or_default(),
+                // B3：市场里的位置（结算那一刻的购买力与名次；`pre` 里是 0 / null = 还没排队）
+                // 与每一处货栈的运力账（挂单那一步算的那本）。
+                purchasing_power: sink.market_power.get(&fid).copied().unwrap_or(0.0),
+                market_rank: sink.market_rank.get(&fid).copied(),
+                freight_gap: sink.freight_gap.get(&fid).cloned().unwrap_or_default(),
             },
         );
     }
@@ -135,6 +156,9 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
             .cloned()
             .unwrap_or_default();
         let production_value = production.iter().map(|(k, v)| v * value_of(k)).sum::<f64>();
+        // 产出与建造的中间量（B2）：用工系数 / 住房容量 / 是否集散地 / 每舰级造舰进度。
+        // ⚠ 用工系数缺省走**具名常量 1.0**（不缺人手），不是 0——写 0 会被读成「全城没人上工」。
+        let cf = sink.city_flow.get(&c.name);
         cities.insert(
             c.name.clone(),
             CityRow {
@@ -144,6 +168,12 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 production,
                 // 本回合的忠诚目标值分项；`pre` 里是全 0 的 `LoyaltyTarget::default()`。
                 loyalty_target: sink.city_loyalty.get(&c.name).cloned().unwrap_or_default(),
+                labor: cf
+                    .map(|f| f.labor)
+                    .unwrap_or(crate::model::neutral::value::CITY_LABOR),
+                housing_capacity: cf.map(|f| f.housing_capacity).unwrap_or(0.0),
+                is_hub: cf.map(|f| f.is_hub).unwrap_or(false),
+                build: cf.map(|f| f.build.clone()).unwrap_or_default(),
             },
         );
     }
@@ -165,6 +195,10 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
         market_offered: offered_by_resource(&state.market),
         factions,
         cities,
+        // B3：本回合的结算事实——真的成交的每一笔贸易（价格分解 + 丢货）与每艘在跑运输的舰
+        // 走了哪一步。`pre` 里两者都为空（这一回合还没结算/还没跑）。
+        market_trades: sink.market_trades.clone(),
+        haul_steps: sink.haul_steps.clone(),
         // 本回合 AI 的判定流水（`pre` 里为空 = 这一回合还没掷）。
         decisions: sink.decisions.clone(),
     }

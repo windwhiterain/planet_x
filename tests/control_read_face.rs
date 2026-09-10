@@ -22,7 +22,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let d = std::env::temp_dir().join(format!("planet_x_readface_{}_{tag}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("planet_x_readface_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Self(d)
@@ -48,14 +49,21 @@ fn run(args: &[&str]) -> std::process::Output {
 /// `--control` 的输出（stdout 一行 JSON）。
 fn control(args: &[&str]) -> String {
     let out = run(args);
-    assert!(out.status.success(), "--control 失败: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "--control 失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("stdout 必须是 UTF-8")
 }
 
 /// 一个 checkpoint 的状态读数（`--round 0` 不推进时间，只打印当前状态）。
 fn state_of(ckpt: &str) -> serde_json::Value {
     let out = control(&["--start", ckpt, "--round", "0"]);
-    let line = out.lines().find(|l| !l.trim().is_empty()).expect("状态流至少一行");
+    let line = out
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("状态流至少一行");
     serde_json::from_str(line).expect("状态流是 JSON")
 }
 
@@ -91,9 +99,18 @@ fn every_ship_gets_an_order_row_and_the_template_is_a_fixed_point() {
 
     // 1) 一个小而真实的世界。
     let out = run(&[
-        "--seed", "42", "--round", "12", "--save", ckpt0.to_str().unwrap(),
+        "--seed",
+        "42",
+        "--round",
+        "12",
+        "--save",
+        ckpt0.to_str().unwrap(),
     ]);
-    assert!(out.status.success(), "跑局失败: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "跑局失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let ckpt0s = ckpt0.to_str().unwrap();
 
     // 挑一艘有叶的舰，把它那片叶**删掉**——这就是「从没被点名过」的状态
@@ -117,9 +134,20 @@ fn every_ship_gets_an_order_row_and_the_template_is_a_fixed_point() {
     )
     .unwrap();
     let out = run(&[
-        "--start", ckpt0s, "--apply", rm.to_str().unwrap(), "--round", "0", "--save", ckpt1.to_str().unwrap(),
+        "--start",
+        ckpt0s,
+        "--apply",
+        rm.to_str().unwrap(),
+        "--round",
+        "0",
+        "--save",
+        ckpt1.to_str().unwrap(),
     ]);
-    assert!(out.status.success(), "删叶失败: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "删叶失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("NOTE_APPLY_REMOVED"),
         "删叶必须留下回执（删的是叶，不是值）"
@@ -159,11 +187,25 @@ fn every_ship_gets_an_order_row_and_the_template_is_a_fixed_point() {
     // 3) **原样回传**这一面模板，再读一次：必须逐字节相同。
     std::fs::write(&t0, &before).unwrap();
     let out = run(&[
-        "--start", ckpt1s, "--apply", t0.to_str().unwrap(), "--round", "0", "--save", ckpt2.to_str().unwrap(),
+        "--start",
+        ckpt1s,
+        "--apply",
+        t0.to_str().unwrap(),
+        "--round",
+        "0",
+        "--save",
+        ckpt2.to_str().unwrap(),
     ]);
-    assert!(out.status.success(), "回传模板失败: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "回传模板失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("WARN_APPLY_SKIPPED"), "模板回传不许丢叶子: {stderr}");
+    assert!(
+        !stderr.contains("WARN_APPLY_SKIPPED"),
+        "模板回传不许丢叶子: {stderr}"
+    );
     let after = control(&["--start", ckpt2.to_str().unwrap(), "--control"]);
     std::fs::write(&t1, &after).unwrap();
     assert_eq!(before, after, "读面不是不动点：原样回传改变了它自己的形状");

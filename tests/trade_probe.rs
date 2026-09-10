@@ -19,7 +19,10 @@ use planet_x::world;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn rounds() -> u32 {
-    std::env::var("PROBE_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(400)
+    std::env::var("PROBE_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(400)
 }
 
 fn seeds() -> Vec<u64> {
@@ -36,14 +39,23 @@ fn value_of(config: &GameConfig, rt: &str) -> f64 {
 fn stock_value(state: &State, config: &GameConfig, fid: &str) -> f64 {
     state
         .faction(fid)
-        .map(|f| f.resources.iter().map(|(k, v)| v * value_of(config, k)).sum())
+        .map(|f| {
+            f.resources
+                .iter()
+                .map(|(k, v)| v * value_of(config, k))
+                .sum()
+        })
         .unwrap_or(0.0)
 }
 
 /// 该势力**能挖到**的资源集合（其所有活城定居点的矿藏并集）。
 fn minable(state: &State, fid: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+    for c in state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+    {
         if let Some(s) = state.city_settlement(&c.name) {
             for d in &s.resources {
                 out.insert(d.resource.clone());
@@ -57,7 +69,11 @@ fn minable(state: &State, fid: &str) -> BTreeSet<String> {
 fn yard_need(state: &State, config: &GameConfig, fid: &str) -> (BTreeSet<String>, usize) {
     let mut out = BTreeSet::new();
     let mut classless = 0usize;
-    for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+    for c in state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+    {
         for b in &c.buildings {
             if !b.is_shipyard() {
                 continue;
@@ -86,11 +102,19 @@ fn need_of_all_classes(config: &GameConfig) -> BTreeSet<String> {
 }
 
 fn live_cities(state: &State, fid: &str) -> usize {
-    state.cities.iter().filter(|c| c.faction_id == fid && !c.razed).count()
+    state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && !c.razed)
+        .count()
 }
 
 fn live_ships(state: &State, fid: &str) -> usize {
-    state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count()
+    state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .count()
 }
 
 /// 1) 结构依赖：每个势力**挖得到**什么、全部舰级要什么、因此结构上必须进口什么。
@@ -158,7 +182,13 @@ fn probe_market_prices() {
             let offered = &d.market_offered;
             let sv: f64 = settled
                 .iter()
-                .map(|(rt, amt)| amt * d.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt)))
+                .map(|(rt, amt)| {
+                    amt * d
+                        .market_price
+                        .get(rt)
+                        .copied()
+                        .unwrap_or_else(|| value_of(&config, rt))
+                })
                 .sum();
             cum_settled_value += sv;
             for (fid, row) in &d.factions {
@@ -167,7 +197,11 @@ fn probe_market_prices() {
             if checkpoints.contains(&r) {
                 print!("  r{r:<5} 价格倍数:");
                 for rt in &order {
-                    let p = d.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt));
+                    let p = d
+                        .market_price
+                        .get(rt)
+                        .copied()
+                        .unwrap_or_else(|| value_of(&config, rt));
                     let base = value_of(&config, rt);
                     print!(" {rt}={:.2}", if base > 0.0 { p / base } else { 1.0 });
                 }
@@ -181,7 +215,14 @@ fn probe_market_prices() {
                 for rt in &order {
                     print!(" {rt}={:.1}", settled.get(rt).copied().unwrap_or(0.0));
                 }
-                println!("   成交额={sv:.1} 世界库存价值={:.0}", state.factions.iter().map(|f| stock_value(&state, &config, &f.name)).sum::<f64>());
+                println!(
+                    "   成交额={sv:.1} 世界库存价值={:.0}",
+                    state
+                        .factions
+                        .iter()
+                        .map(|f| stock_value(&state, &config, &f.name))
+                        .sum::<f64>()
+                );
             }
         }
         println!("  累计成交额={cum_settled_value:.0}");
@@ -206,7 +247,10 @@ fn probe_market_prices() {
 fn probe_embargo() {
     let config = load_config();
     let n = rounds();
-    let checkpoints: Vec<u32> = [1, 20, 60, 120, 240, 400, 600, 800, 1000].into_iter().filter(|c| *c <= n).collect();
+    let checkpoints: Vec<u32> = [1, 20, 60, 120, 240, 400, 600, 800, 1000]
+        .into_iter()
+        .filter(|c| *c <= n)
+        .collect();
     for seed in seeds() {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
@@ -226,12 +270,15 @@ fn probe_embargo() {
             let mut any = false;
             let mut pairs = 0usize;
             for (fid, fm) in &d.factions {
-                if fm.trade_blocked_by > 0 {
+                // B3：这列从「计数」变成「名单 + 原因」（`{对方: war|cold|coalition}`），
+                // 探针关心的是规模，所以取它的条目数。
+                let blocked_n = fm.trade_blocked_by.len();
+                if blocked_n > 0 {
                     any = true;
                     *blocked_rounds.entry(fid.clone()).or_insert(0) += 1;
                     let e = max_blocked.entry(fid.clone()).or_insert(0);
-                    *e = (*e).max(fm.trade_blocked_by);
-                    pairs += fm.trade_blocked_by;
+                    *e = (*e).max(blocked_n);
+                    pairs += blocked_n;
                 }
             }
             if any {
@@ -325,7 +372,7 @@ fn probe_armament_gate() {
                 }
             }
             let d = sim::observe(&state, &config, &RoundSink::default());
-            let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by).sum();
+            let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by.len()).sum();
             println!("== 武器质量 seed {seed} 市场额度={arm}（{n} 回合）== 出厂舰={spawned}");
             print!("   武器:");
             for (c, k) in &weapons {
@@ -400,7 +447,10 @@ fn probe_no_resurgence() {
             alive_trace.push((state.round, alive_now, dead_now));
         }
         println!("== 删掉 resurgence 之后 seed {seed}（{n} 回合）==");
-        println!("  亡国（无城无舰）峰值={dead_peak} 末态={dead_last}   末态仍有活城的势力数={}", alive_trace.last().map(|t| t.1).unwrap_or(0));
+        println!(
+            "  亡国（无城无舰）峰值={dead_peak} 末态={dead_last}   末态仍有活城的势力数={}",
+            alive_trace.last().map(|t| t.1).unwrap_or(0)
+        );
         // 每 1/4 段打印一次「仍有活城 / 亡国」的走向。
         let step = (n / 4).max(1);
         print!("  走向(回合:活城势力/亡国):");
@@ -468,8 +518,8 @@ fn probe_freight() {
         }
         println!("== 运费/MOND 承运 seed {seed}（{n} 回合）==");
         println!(
-            "  异常带半径={} AU  masters={:?}  有承运收入的回合={rounds_with_carrier}/{n}  有势力首都位于带内的回合={deep_routes}/{n}",
-            config.mond.radius, config.mond.masters
+            "  异常带半径={} AU  initial={:?}  有承运收入的回合={rounds_with_carrier}/{n}  有势力首都位于带内的回合={deep_routes}/{n}",
+            config.mond.radius, config.mond.initial
         );
         for f in &state.factions {
             println!(
@@ -484,7 +534,7 @@ fn probe_freight() {
 
 /// 8b) **集货的 A/B（因果读数）**：同一颗种子、同一段回合，**只切「集货开/关」一个开关**
 /// （关 = 把各势力的**舰队默认角色**钉成「战舰」且归玩家 ⇒ 自动定编不许碰角色叶，
-/// 见 `State::ship_freighter` 的取值链）。
+/// 见 `State::ship_role` 的取值链）。
 ///
 /// 为什么非要 A/B：世界走向对战争极其敏感，隔一次改动比「积压占池值」那样的横向数字会被
 /// 完全不同的战争结局搅浑（实测同一颗种子在不同提交上能差出几倍）。只切一个开关，
@@ -494,9 +544,8 @@ fn probe_freight() {
 fn probe_freight_ab() {
     let config = load_config();
     let n = rounds();
-    let depot_units = |state: &State| -> f64 {
-        state.depots.values().flat_map(|m| m.values()).sum()
-    };
+    let depot_units =
+        |state: &State| -> f64 { state.depots.values().flat_map(|m| m.values()).sum() };
     let pool_value = |state: &State| -> f64 {
         state
             .factions
@@ -514,7 +563,7 @@ fn probe_freight_ab() {
                 let fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
                 for fid in fids {
                     if let Some(c) = state.control_mut(fid) {
-                        c.default_freighter = Some(Control::player(false));
+                        c.default_role = Some(Control::player(ShipRole::War));
                     }
                 }
             }
@@ -523,12 +572,21 @@ fn probe_freight_ab() {
             for _ in 0..n {
                 sim::advance(&mut state, &config, &mut rng);
                 for e in &state.events {
-                    if let GameEvent::CargoDelivered { cargo, into_pool: true, .. } = e {
+                    if let GameEvent::CargoDelivered {
+                        cargo,
+                        into_pool: true,
+                        ..
+                    } = e
+                    {
                         delivered += cargo.values().sum::<f64>();
                     }
                 }
             }
-            let tag = if hauling { "集货**开**" } else { "集货关" };
+            let tag = if hauling {
+                "集货**开**"
+            } else {
+                "集货关"
+            };
             line.push_str(&format!(
                 "  {tag}：期末积压 {:.0} 单位 / 首都池值 {:.0}（积压/池值 {:.0}%）  进池货 {:.0} 件",
                 depot_units(&state),
@@ -581,7 +639,13 @@ fn probe_hire_ab() {
                 sim::advance(&mut state, &cfg, &mut rng);
                 for e in &state.events {
                     match e {
-                        GameEvent::CargoDelivered { cargo, into_pool, owner, faction, .. } => {
+                        GameEvent::CargoDelivered {
+                            cargo,
+                            into_pool,
+                            owner,
+                            faction,
+                            ..
+                        } => {
                             let u: f64 = cargo.values().sum();
                             if *into_pool {
                                 to_pool += u;
@@ -695,18 +759,20 @@ fn probe_collection_backlog() {
         let (mut loaded, mut delivered, mut to_pool) = (0.0, 0.0, 0.0);
         let (mut load_trips, mut delivery_trips) = (0u32, 0u32);
         let tally = |state: &State,
-                         loaded: &mut f64,
-                         delivered: &mut f64,
-                         to_pool: &mut f64,
-                         load_trips: &mut u32,
-                         delivery_trips: &mut u32| {
+                     loaded: &mut f64,
+                     delivered: &mut f64,
+                     to_pool: &mut f64,
+                     load_trips: &mut u32,
+                     delivery_trips: &mut u32| {
             for e in &state.events {
                 match e {
                     GameEvent::CargoLoaded { cargo, .. } => {
                         *loaded += cargo.values().sum::<f64>();
                         *load_trips += 1;
                     }
-                    GameEvent::CargoDelivered { cargo, into_pool, .. } => {
+                    GameEvent::CargoDelivered {
+                        cargo, into_pool, ..
+                    } => {
                         let u: f64 = cargo.values().sum();
                         *delivered += u;
                         *delivery_trips += 1;
@@ -719,7 +785,14 @@ fn probe_collection_backlog() {
             }
         };
         sim::advance(&mut state, &config, &mut rng); // 第 1 回合末
-        tally(&state, &mut loaded, &mut delivered, &mut to_pool, &mut load_trips, &mut delivery_trips);
+        tally(
+            &state,
+            &mut loaded,
+            &mut delivered,
+            &mut to_pool,
+            &mut load_trips,
+            &mut delivery_trips,
+        );
         let opening: BTreeMap<String, f64> = state
             .factions
             .iter()
@@ -727,7 +800,14 @@ fn probe_collection_backlog() {
             .collect();
         for _ in 1..n {
             sim::advance(&mut state, &config, &mut rng);
-            tally(&state, &mut loaded, &mut delivered, &mut to_pool, &mut load_trips, &mut delivery_trips);
+            tally(
+                &state,
+                &mut loaded,
+                &mut delivered,
+                &mut to_pool,
+                &mut load_trips,
+                &mut delivery_trips,
+            );
         }
         println!("== 集货积压 seed {seed}（{n} 回合，航母舱容 {carrier_cap}）==");
         let (mut tot_units, mut tot_value, mut tot_pool_v) = (0.0, 0.0, 0.0);
@@ -742,15 +822,19 @@ fn probe_collection_backlog() {
             let haulers = state
                 .ships
                 .iter()
-                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                .filter(|s| {
+                    s.faction_id == name
+                        && s.hull > 0.0
+                        && state.ship_role(s.name.clone()) == ShipRole::Freight
+                })
                 .count();
             // 运输舰的**舰级构成**：运力 = 舱容 × 舰数，所以「派了谁」和「派了几条」一样重要。
             let mut classes: BTreeMap<String, usize> = BTreeMap::new();
-            for s in state
-                .ships
-                .iter()
-                .filter(|s| s.faction_id == name && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
-            {
+            for s in state.ships.iter().filter(|s| {
+                s.faction_id == name
+                    && s.hull > 0.0
+                    && state.ship_role(s.name.clone()) == ShipRole::Freight
+            }) {
                 *classes.entry(s.class.clone()).or_insert(0) += 1;
             }
             let breakdown = classes
@@ -768,11 +852,19 @@ fn probe_collection_backlog() {
                  货栈 {bodies} 处（带内 {deep}）  折 {trips:>6.1} 趟航母  舰 {ships:>2}（运输 {haulers}: {breakdown}）  池值 {pool:>9.1}"
             );
         }
-        let ratio = if tot_pool_v > 0.0 { 100.0 * tot_value / tot_pool_v } else { 0.0 };
+        let ratio = if tot_pool_v > 0.0 {
+            100.0 * tot_value / tot_pool_v
+        } else {
+            0.0
+        };
         println!(
             "    —— 合计：积压 {tot_units:.1} 单位 / 值 {tot_value:.1}；池值合计 {tot_pool_v:.1}（积压占池值 {ratio:.1}%）"
         );
-        let per_load = if load_trips > 0 { loaded / load_trips as f64 } else { 0.0 };
+        let per_load = if load_trips > 0 {
+            loaded / load_trips as f64
+        } else {
+            0.0
+        };
         println!(
             "    —— 集货吞吐：装 {loaded:.0} 件（{load_trips} 趟，**每趟 {per_load:.1} 件**）/ 卸 {delivered:.0} 件（{delivery_trips} 趟），\
              其中**进首都池 {to_pool:.0} 件**（集货真正完成的那部分）"
@@ -818,14 +910,24 @@ fn probe_contract_market() {
                         posted_cap += capacity;
                     }
                     GameEvent::ContractAccepted { .. } => accepted += 1,
-                    GameEvent::ContractDelivered { amount, cut: c, carrier, .. } => {
+                    GameEvent::ContractDelivered {
+                        amount,
+                        cut: c,
+                        carrier,
+                        ..
+                    } => {
                         paid += amount;
                         cut += c;
                         trips += 1;
                         *income.entry(carrier.clone()).or_insert(0.0) += c;
                         *runs.entry(carrier.clone()).or_insert(0) += 1;
                     }
-                    GameEvent::ContractReviewed { ratio, good: g, contract, .. } => {
+                    GameEvent::ContractReviewed {
+                        ratio,
+                        good: g,
+                        contract,
+                        ..
+                    } => {
                         if *g {
                             good += 1;
                         } else {
@@ -837,7 +939,9 @@ fn probe_contract_market() {
                                 k.capacity,
                                 k.served_rounds,
                                 k.delivered,
-                                state.round.saturating_sub(k.accepted_round.unwrap_or(state.round)),
+                                state
+                                    .round
+                                    .saturating_sub(k.accepted_round.unwrap_or(state.round)),
                                 *ratio,
                             ));
                         }
@@ -870,13 +974,20 @@ fn probe_contract_market() {
                 .collect();
             let open = mine.iter().filter(|c| c.is_open()).count();
             let hired = mine.iter().filter(|c| c.is_hired()).count();
-            let my_ships = state.ships.iter().filter(|s| s.faction_id == name && s.hull > 0.0).count();
+            let my_ships = state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == name && s.hull > 0.0)
+                .count();
             let serving: usize = state
                 .contracts
                 .assignments
                 .iter()
                 .filter(|(s, _)| {
-                    state.ship(s.as_str()).map(|sh| sh.faction_id == name).unwrap_or(false)
+                    state
+                        .ship(s.as_str())
+                        .map(|sh| sh.faction_id == name)
+                        .unwrap_or(false)
                 })
                 .count();
             let inc = income.get(name).copied().unwrap_or(0.0);
@@ -896,7 +1007,11 @@ fn probe_contract_market() {
             ratios.iter().sum::<f64>() / ratios.len() as f64
         };
         let under = ratios.iter().filter(|r| **r < 1.0).count();
-        let paid_share = if paid + cut > 0.0 { cut / (paid + cut) } else { 0.0 };
+        let paid_share = if paid + cut > 0.0 {
+            cut / (paid + cut)
+        } else {
+            0.0
+        };
         println!(
             "    —— 挂出 {posted} 张（要求运力合计 {posted_cap:.1} 件/回合）；成交 {accepted} 单；搬到位 {paid:.0} 件（{trips} 趟，受雇方自留 {cut:.0} 件 = 它的全部报酬，实付抽成 {:.1}%，开叫价 {:.0}%）",
             paid_share * 100.0,
@@ -942,8 +1057,17 @@ fn probe_contract_market() {
         println!(
             "    —— 期末在簿 {} 张（等人接 {} 张，抽成已抬到 {:.1}%–{:.1}%，均 {:.1}%；上限 {:.0}%）；在期单子的编制 {:?}（每张几条船）",
             state.contracts.contracts.len(),
-            state.contracts.contracts.iter().filter(|c| c.is_open()).count(),
-            if open_shares.is_empty() { 0.0 } else { lo * 100.0 },
+            state
+                .contracts
+                .contracts
+                .iter()
+                .filter(|c| c.is_open())
+                .count(),
+            if open_shares.is_empty() {
+                0.0
+            } else {
+                lo * 100.0
+            },
             hi * 100.0,
             mean_share * 100.0,
             config.freight.share_max * 100.0,
@@ -1001,28 +1125,44 @@ fn probe_ideology_freight() {
                 for f in state.factions.clone() {
                     ships_at_200.insert(
                         f.name.clone(),
-                        state.ships.iter().filter(|s| s.hull > 0.0 && s.faction_id == f.name).count(),
+                        state
+                            .ships
+                            .iter()
+                            .filter(|s| s.hull > 0.0 && s.faction_id == f.name)
+                            .count(),
                     );
                 }
             }
             for f in state.factions.clone() {
-                let hauling = state
-                    .ships
-                    .iter()
-                    .any(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()));
+                let hauling = state.ships.iter().any(|s| {
+                    s.hull > 0.0
+                        && s.faction_id == f.name
+                        && state.ship_role(s.name.clone()) == ShipRole::Freight
+                });
                 if hauling {
                     first_hauler.entry(f.name.clone()).or_insert(r);
                 }
             }
             for e in &state.events {
                 match e {
-                    GameEvent::CargoDelivered { owner, into_pool, cargo, .. } => {
+                    GameEvent::CargoDelivered {
+                        owner,
+                        into_pool,
+                        cargo,
+                        ..
+                    } => {
                         // 只算**进池**的那一卸（中转卸货不算到家）。
                         if *into_pool {
                             *own.entry(owner.clone()).or_insert(0.0) += cargo.values().sum::<f64>();
                         }
                     }
-                    GameEvent::ContractDelivered { shipper, carrier, amount, cut, .. } => {
+                    GameEvent::ContractDelivered {
+                        shipper,
+                        carrier,
+                        amount,
+                        cut,
+                        ..
+                    } => {
                         *hired_in.entry(shipper.clone()).or_insert(0.0) += amount - cut;
                         *earned.entry(carrier.clone()).or_insert(0.0) += cut;
                     }
@@ -1033,7 +1173,11 @@ fn probe_ideology_freight() {
                 let c = state
                     .ships
                     .iter()
-                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()))
+                    .filter(|s| {
+                        s.hull > 0.0
+                            && s.faction_id == f.name
+                            && state.ship_role(s.name.clone()) == ShipRole::Freight
+                    })
                     .count() as f64;
                 *hauler_rounds.entry(f.name.clone()).or_insert(0.0) += c;
                 let d: f64 = state
@@ -1050,7 +1194,11 @@ fn probe_ideology_freight() {
             let martial = f.ideology.peace_military - f.ideology.nature_colony;
             let lean = planet_x::autocontrol::freight::freight_lean(&state, &f.name);
             let quota = planet_x::autocontrol::freight::freighter_quota(&state, &config, &f.name);
-            let ships = state.ships.iter().filter(|s| s.hull > 0.0 && s.faction_id == f.name).count();
+            let ships = state
+                .ships
+                .iter()
+                .filter(|s| s.hull > 0.0 && s.faction_id == f.name)
+                .count();
             // 诊断：**动得了**的舰（有推进模块 ⇒ 运力 > 0）与「角色轴归玩家」的舰数。
             // 若某个势力有舰却一条运输舰都派不出来，答案通常在这两列里。
             let movable = state
@@ -1068,7 +1216,7 @@ fn probe_ideology_freight() {
                 .filter(|s| {
                     s.hull > 0.0
                         && s.faction_id == f.name
-                        && state.ship_freighter_control(s.name.clone()).is_player()
+                        && state.ship_role_control(s.name.clone()).is_player()
                 })
                 .count();
             println!(
@@ -1121,10 +1269,18 @@ fn probe_threat_motive() {
                 let mut motives: Vec<(String, f64)> = state
                     .factions
                     .iter()
-                    .map(|f| (f.name.clone(), planet_x::autocontrol::shipbuilding::threat_motive(&state, &config, &f.name)))
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            planet_x::autocontrol::shipbuilding::threat_motive(
+                                &state, &config, &f.name,
+                            ),
+                        )
+                    })
                     .collect();
                 motives.sort_by(|a, b| b.1.total_cmp(&a.1));
-                let mean = motives.iter().map(|(_, m)| m).sum::<f64>() / motives.len().max(1) as f64;
+                let mean =
+                    motives.iter().map(|(_, m)| m).sum::<f64>() / motives.len().max(1) as f64;
                 let flagship = state
                     .ships
                     .iter()

@@ -29,7 +29,10 @@ fn half_built(state: &mut State, cid: &str) {
 }
 
 fn built_area(state: &State, cid: &str) -> f64 {
-    state.city(cid).map(|c| c.buildings.iter().map(|b| b.deployed).sum()).unwrap_or(0.0)
+    state
+        .city(cid)
+        .map(|c| c.buildings.iter().map(|b| b.deployed).sum())
+        .unwrap_or(0.0)
 }
 
 /// **池子里的货到不了别人家门口**（「完全禁止瞬移」的核心）：同一座非首都城市，
@@ -39,7 +42,11 @@ fn only_the_local_depot_can_fund_an_offsite_city() {
     let (config, mut state) = fresh_world(42);
     // 水星熔炉基地 = 中国的非首都城市（首都 = 地球）。
     let cid = "水星熔炉基地".to_string();
-    assert_ne!(state.capital_body("中国"), "水星", "用例前提：水星不是中国的首都");
+    assert_ne!(
+        state.capital_body("中国"),
+        "水星",
+        "用例前提：水星不是中国的首都"
+    );
     gut_all_stock(&mut state);
     half_built(&mut state, &cid);
     let before = built_area(&state, &cid);
@@ -76,7 +83,11 @@ fn only_the_local_depot_can_fund_an_offsite_city() {
 fn the_capital_body_spends_the_faction_pool() {
     let (config, mut state) = fresh_world(42);
     let cid = "长三角".to_string();
-    assert_eq!(state.city(&cid).unwrap().body_id, state.capital_body("中国"), "用例前提");
+    assert_eq!(
+        state.city(&cid).unwrap().body_id,
+        state.capital_body("中国"),
+        "用例前提"
+    );
     gut_all_stock(&mut state);
     half_built(&mut state, &cid);
     if let Some(f) = state.faction_mut("中国") {
@@ -148,7 +159,10 @@ fn the_reserve_grows_with_the_round_trip_time() {
     let far = freight::site_reserve(&state, &config, fid, "金星");
     let r_near = crate::model::lane_rounds(&state, &config, "水星", &cap);
     let r_far = crate::model::lane_rounds(&state, &config, "金星", &cap);
-    assert!(r_far > r_near, "用例前提：金星这条线的一个往返更久（{r_far} vs {r_near}）");
+    assert!(
+        r_far > r_near,
+        "用例前提：金星这条线的一个往返更久（{r_far} vs {r_near}）"
+    );
     let u_near: f64 = near.values().sum();
     let u_far: f64 = far.values().sum();
     assert!(

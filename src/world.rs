@@ -52,7 +52,14 @@ fn satellite_body(
     parent: &str,
     settlements: Vec<Settlement>,
 ) -> Body {
-    build_body(name, semi_major, e, dir_angle_deg, Some(parent), settlements)
+    build_body(
+        name,
+        semi_major,
+        e,
+        dir_angle_deg,
+        Some(parent),
+        settlements,
+    )
 }
 
 fn build_body(
@@ -100,7 +107,9 @@ fn body_kind_for(name: &str) -> &'static str {
         "欧罗巴" => "ice_world",
         "泰坦" => "titan",
         "天王星" | "海王星" => "ice_giant",
-        "冥王星" | "卡戎" | "伊克西翁" | "妊神星" | "创神星" | "阋神星" => "dwarf",
+        "冥王星" | "卡戎" | "伊克西翁" | "妊神星" | "创神星" | "阋神星" => {
+            "dwarf"
+        }
         _ => "rocky",
     }
 }
@@ -117,7 +126,13 @@ fn deposit(rt: &str, area: f64) -> ResourceDeposit {
     }
 }
 
-fn settlement(name: &str, total_area: f64, ecocap: f64, speed: f64, resources: Vec<ResourceDeposit>) -> Settlement {
+fn settlement(
+    name: &str,
+    total_area: f64,
+    ecocap: f64,
+    speed: f64,
+    resources: Vec<ResourceDeposit>,
+) -> Settlement {
     Settlement {
         name: name.to_string(),
         total_area,
@@ -158,10 +173,23 @@ fn new_building(
 
 /// Seed a city's initial building footprint from its settlement's deposits,
 /// sized so population is housed and a bit of mining/industry is up and running.
-fn seed_buildings(s: &Settlement, population: u32, ship_class: &str, config: &GameConfig, next_id: &mut BuildingId) -> Vec<Building> {
+fn seed_buildings(
+    s: &Settlement,
+    population: u32,
+    ship_class: &str,
+    config: &GameConfig,
+    next_id: &mut BuildingId,
+) -> Vec<Building> {
     let mut buildings = Vec::new();
-    let mut alloc = |kind: &str, resource: Option<String>, ship_type: Option<String>, area: f64, deployed: f64| -> Building {
-        let b = new_building(*next_id, kind, resource, ship_type, "concrete", area, deployed, config);
+    let mut alloc = |kind: &str,
+                     resource: Option<String>,
+                     ship_type: Option<String>,
+                     area: f64,
+                     deployed: f64|
+     -> Building {
+        let b = new_building(
+            *next_id, kind, resource, ship_type, "concrete", area, deployed, config,
+        );
         *next_id += 1;
         b
     };
@@ -181,7 +209,13 @@ fn seed_buildings(s: &Settlement, population: u32, ship_class: &str, config: &Ga
             budget -= area;
         }
     }
-    buildings.push(alloc("construction", None, Some(ship_class.to_string()), construction, construction));
+    buildings.push(alloc(
+        "construction",
+        None,
+        Some(ship_class.to_string()),
+        construction,
+        construction,
+    ));
     buildings
 }
 
@@ -244,6 +278,9 @@ fn faction(
         // 是为了让「开局值」与「旧档 serde 缺省」共用一个真值来源——两者一旦分叉，
         // 旧档就会莫名其妙地比新开局矮一截。
         reputation: REPUTATION_NEUTRAL,
+        // 掌握度的真值只有一份：`config.mond.initial`（在 `default_state` 里按名字打点，
+        // 见那里的注释）。这里给 0 = 凡人，与「旧档 serde 缺省」同一个值。
+        mond_control: 0.0,
     }
 }
 
@@ -252,15 +289,60 @@ fn faction(
 /// 矿业=军+技术+精英+殖民（采掘）；大国相应偏向。见 `Ideology` 的轴定义。
 fn ideology(name: &str) -> Ideology {
     match name {
-        F_UN => Ideology { peace_military: -0.4, science_tech: -0.5, people_elite: 0.5, nature_colony: -0.2 },
-        F_US => Ideology { peace_military: 0.5, science_tech: 0.5, people_elite: 0.3, nature_colony: 0.6 },
-        F_EU => Ideology { peace_military: -0.2, science_tech: 0.1, people_elite: 0.6, nature_colony: -0.3 },
-        F_CN => Ideology { peace_military: 0.4, science_tech: 0.7, people_elite: -0.3, nature_colony: 0.5 },
-        F_RU => Ideology { peace_military: 0.6, science_tech: 0.4, people_elite: 0.2, nature_colony: 0.4 },
-        F_MINING => Ideology { peace_military: 0.3, science_tech: 0.8, people_elite: 0.5, nature_colony: 0.8 },
-        F_SCIENCE => Ideology { peace_military: -0.6, science_tech: -0.8, people_elite: 0.2, nature_colony: -0.4 },
-        F_TRANSPORT => Ideology { peace_military: -0.2, science_tech: 0.5, people_elite: 0.4, nature_colony: 0.3 },
-        F_CULT => Ideology { peace_military: 0.7, science_tech: -0.1, people_elite: -0.4, nature_colony: -0.6 },
+        F_UN => Ideology {
+            peace_military: -0.4,
+            science_tech: -0.5,
+            people_elite: 0.5,
+            nature_colony: -0.2,
+        },
+        F_US => Ideology {
+            peace_military: 0.5,
+            science_tech: 0.5,
+            people_elite: 0.3,
+            nature_colony: 0.6,
+        },
+        F_EU => Ideology {
+            peace_military: -0.2,
+            science_tech: 0.1,
+            people_elite: 0.6,
+            nature_colony: -0.3,
+        },
+        F_CN => Ideology {
+            peace_military: 0.4,
+            science_tech: 0.7,
+            people_elite: -0.3,
+            nature_colony: 0.5,
+        },
+        F_RU => Ideology {
+            peace_military: 0.6,
+            science_tech: 0.4,
+            people_elite: 0.2,
+            nature_colony: 0.4,
+        },
+        F_MINING => Ideology {
+            peace_military: 0.3,
+            science_tech: 0.8,
+            people_elite: 0.5,
+            nature_colony: 0.8,
+        },
+        F_SCIENCE => Ideology {
+            peace_military: -0.6,
+            science_tech: -0.8,
+            people_elite: 0.2,
+            nature_colony: -0.4,
+        },
+        F_TRANSPORT => Ideology {
+            peace_military: -0.2,
+            science_tech: 0.5,
+            people_elite: 0.4,
+            nature_colony: 0.3,
+        },
+        F_CULT => Ideology {
+            peace_military: 0.7,
+            science_tech: -0.1,
+            people_elite: -0.4,
+            nature_colony: -0.6,
+        },
         _ => Ideology::default(),
     }
 }
@@ -313,7 +395,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.39,
             0.206,
             20.0,
-            vec![settlement("水星熔炉基地", 34.0, 6.0, 1.2, vec![deposit("铁", 32.0), deposit("铂", 8.0)])],
+            vec![settlement(
+                "水星熔炉基地",
+                34.0,
+                6.0,
+                1.2,
+                vec![deposit("铁", 32.0), deposit("铂", 8.0)],
+            )],
         ),
         // 金星（中国）资源丰富：碳
         body(
@@ -321,7 +409,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.72,
             0.007,
             95.0,
-            vec![settlement("金星浮空之城", 40.0, 8.0, 1.2, vec![deposit("碳", 40.0)])],
+            vec![settlement(
+                "金星浮空之城",
+                40.0,
+                8.0,
+                1.2,
+                vec![deposit("碳", 40.0)],
+            )],
         ),
         // 地球/城市 — 五大城市群各自占一个定居点（1:1），矿藏按 spec 各自列出。
         body(
@@ -336,7 +430,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     120.0,
                     25.0,
                     2.4,
-                    vec![deposit("铁", 40.0), deposit("硅", 32.0), deposit("水冰", 36.0)],
+                    vec![
+                        deposit("铁", 40.0),
+                        deposit("硅", 32.0),
+                        deposit("水冰", 36.0),
+                    ],
                 ),
                 // 珠三角（中国）资源丰富：铁，硅，水冰
                 settlement(
@@ -344,7 +442,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     120.0,
                     25.0,
                     2.4,
-                    vec![deposit("铁", 40.0), deposit("硅", 32.0), deposit("水冰", 36.0)],
+                    vec![
+                        deposit("铁", 40.0),
+                        deposit("硅", 32.0),
+                        deposit("水冰", 36.0),
+                    ],
                 ),
                 // 亚特兰大（美国）资源丰富：水冰，碳，金
                 settlement(
@@ -352,7 +454,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                     100.0,
                     25.0,
                     2.4,
-                    vec![deposit("水冰", 40.0), deposit("碳", 30.0), deposit("金", 10.0)],
+                    vec![
+                        deposit("水冰", 40.0),
+                        deposit("碳", 30.0),
+                        deposit("金", 10.0),
+                    ],
                 ),
                 // 巴黎（欧盟）资源丰富：铀，铂
                 settlement(
@@ -379,7 +485,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.05,
             240.0,
             "地球",
-            vec![settlement("宁静海基地", 44.0, 10.0, 1.4, vec![deposit("铁", 28.0), deposit("氦-3", 22.0)])],
+            vec![settlement(
+                "宁静海基地",
+                44.0,
+                10.0,
+                1.4,
+                vec![deposit("铁", 28.0), deposit("氦-3", 22.0)],
+            )],
         ),
         // 火星（美国）资源丰富：硅，铁，水冰
         body(
@@ -392,7 +504,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 70.0,
                 16.0,
                 1.8,
-                vec![deposit("硅", 30.0), deposit("铁", 30.0), deposit("水冰", 20.0)],
+                vec![
+                    deposit("硅", 30.0),
+                    deposit("铁", 30.0),
+                    deposit("水冰", 20.0),
+                ],
             )],
         ),
         // 灶神星（深空运输联盟）资源丰富：硅，钍
@@ -401,7 +517,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             2.36,
             0.089,
             220.0,
-            vec![settlement("灶神星转运港", 30.0, 9.0, 1.3, vec![deposit("硅", 30.0), deposit("钍", 12.0)])],
+            vec![settlement(
+                "灶神星转运港",
+                30.0,
+                9.0,
+                1.3,
+                vec![deposit("硅", 30.0), deposit("钍", 12.0)],
+            )],
         ),
         // 木星（无国界科学组织）资源丰富：氢 —— 轨道空间站
         body(
@@ -409,7 +531,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             5.20,
             0.049,
             30.0,
-            vec![settlement("木星轨道空间站", 48.0, 12.0, 1.6, vec![deposit("氢", 46.0)])],
+            vec![settlement(
+                "木星轨道空间站",
+                48.0,
+                12.0,
+                1.6,
+                vec![deposit("氢", 46.0)],
+            )],
         ),
         // 欧罗巴（美国）资源丰富：水冰 —— 木星的卫星，绕木星 0.60 AU。
         satellite_body(
@@ -418,7 +546,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.03,
             140.0,
             "木星",
-            vec![settlement("欧罗巴冰下港", 34.0, 9.0, 1.2, vec![deposit("水冰", 40.0)])],
+            vec![settlement(
+                "欧罗巴冰下港",
+                34.0,
+                9.0,
+                1.2,
+                vec![deposit("水冰", 40.0)],
+            )],
         ),
         // 土星（无国界科学组织）资源丰富：氢，铂，金，水冰（包括星环）—— 轨道空间站
         body(
@@ -451,7 +585,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 46.0,
                 11.0,
                 1.4,
-                vec![deposit("硅", 28.0), deposit("铁", 24.0), deposit("铀", 14.0)],
+                vec![
+                    deposit("硅", 28.0),
+                    deposit("铁", 24.0),
+                    deposit("铀", 14.0),
+                ],
             )],
         ),
         // 天王星（欧盟）资源丰富：甲烷，氢 —— 轨道空间站
@@ -460,7 +598,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             19.2,
             0.046,
             120.0,
-            vec![settlement("天王星轨道站", 40.0, 10.0, 1.5, vec![deposit("甲烷", 32.0), deposit("氢", 20.0)])],
+            vec![settlement(
+                "天王星轨道站",
+                40.0,
+                10.0,
+                1.5,
+                vec![deposit("甲烷", 32.0), deposit("氢", 20.0)],
+            )],
         ),
         // 海王星（欧盟）资源丰富：水冰，甲烷 —— 轨道空间站
         body(
@@ -468,7 +612,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             30.05,
             0.009,
             200.0,
-            vec![settlement("海王星轨道站", 36.0, 9.0, 1.5, vec![deposit("水冰", 30.0), deposit("甲烷", 22.0)])],
+            vec![settlement(
+                "海王星轨道站",
+                36.0,
+                9.0,
+                1.5,
+                vec![deposit("水冰", 30.0), deposit("甲烷", 22.0)],
+            )],
         ),
         // 冥王星（俄罗斯）资源丰富：水冰，硅，碳
         body(
@@ -481,7 +631,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 26.0,
                 7.0,
                 1.0,
-                vec![deposit("水冰", 26.0), deposit("硅", 18.0), deposit("碳", 14.0)],
+                vec![
+                    deposit("水冰", 26.0),
+                    deposit("硅", 18.0),
+                    deposit("碳", 14.0),
+                ],
             )],
         ),
         // 卡戎（俄罗斯）资源丰富：铁，金 —— 冥王星的卫星，绕冥王星 1.20 AU。
@@ -491,7 +645,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.06,
             300.0,
             "冥王星",
-            vec![settlement("卡戎深空港", 24.0, 7.0, 1.0, vec![deposit("铁", 24.0), deposit("金", 10.0)])],
+            vec![settlement(
+                "卡戎深空港",
+                24.0,
+                7.0,
+                1.0,
+                vec![deposit("铁", 24.0), deposit("金", 10.0)],
+            )],
         ),
         // 伊克西翁（行星X崇拜教）资源丰富：碳
         body(
@@ -499,7 +659,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             39.70,
             0.24,
             330.0,
-            vec![settlement("伊克西翁圣所", 20.0, 5.0, 0.9, vec![deposit("碳", 24.0)])],
+            vec![settlement(
+                "伊克西翁圣所",
+                20.0,
+                5.0,
+                0.9,
+                vec![deposit("碳", 24.0)],
+            )],
         ),
         // 妊神星（星系矿业）资源丰富：水冰，硅，铂
         body(
@@ -512,7 +678,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
                 22.0,
                 6.0,
                 1.0,
-                vec![deposit("水冰", 22.0), deposit("硅", 12.0), deposit("铂", 8.0)],
+                vec![
+                    deposit("水冰", 22.0),
+                    deposit("硅", 12.0),
+                    deposit("铂", 8.0),
+                ],
             )],
         ),
         // 创神星（星系矿业）资源丰富：铁，铂
@@ -521,7 +691,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             45.43,
             0.16,
             300.0,
-            vec![settlement("创神星采矿站", 22.0, 6.0, 1.0, vec![deposit("铁", 20.0), deposit("铂", 9.0)])],
+            vec![settlement(
+                "创神星采矿站",
+                22.0,
+                6.0,
+                1.0,
+                vec![deposit("铁", 20.0), deposit("铂", 9.0)],
+            )],
         ),
         // 阋神星（星系矿业）资源丰富：硅，铀
         body(
@@ -529,7 +705,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             67.78,
             0.44,
             160.0,
-            vec![settlement("阋神星前哨", 24.0, 5.0, 0.8, vec![deposit("硅", 16.0), deposit("铀", 12.0)])],
+            vec![settlement(
+                "阋神星前哨",
+                24.0,
+                5.0,
+                0.8,
+                vec![deposit("硅", 16.0), deposit("铀", 12.0)],
+            )],
         ),
     ];
 
@@ -550,7 +732,15 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     // factions. The cult sits far outside the political band so it rests hostile
     // to everyone (a pariah that every conventional power eventually turns on).
     let mut factions = vec![
-        faction(F_UN, 'U', "#3b82f6", stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]), 0.4, 0.10, ideology(F_UN)),
+        faction(
+            F_UN,
+            'U',
+            "#3b82f6",
+            stockpile(&[("铁", 4.0), ("碳", 4.0), ("氦-3", 2.0)]),
+            0.4,
+            0.10,
+            ideology(F_UN),
+        ),
         faction(
             F_US,
             'A',
@@ -560,7 +750,15 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             0.60,
             ideology(F_US),
         ),
-        faction(F_EU, 'E', "#8b5cf6", stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]), 0.9, 0.30, ideology(F_EU)),
+        faction(
+            F_EU,
+            'E',
+            "#8b5cf6",
+            stockpile(&[("铁", 5.0), ("碳", 5.0), ("铀", 1.0)]),
+            0.9,
+            0.30,
+            ideology(F_EU),
+        ),
         faction(
             F_CN,
             'C',
@@ -653,29 +851,227 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
     let mut next_building_id: BuildingId = 0;
     let mut cities = vec![
         // 地球/城市（spec 命名；长三角/珠三角=中国、亚特兰大=美国、巴黎=欧盟、莫斯科=俄罗斯）
-        city("长三角", "地球", F_CN, 1400, &earth.settlements[0], "corvette", config, &mut next_building_id),
-        city("珠三角", "地球", F_CN, 1100, &earth.settlements[1], "destroyer", config, &mut next_building_id),
-        city("亚特兰大", "地球", F_US, 900, &earth.settlements[2], "destroyer", config, &mut next_building_id),
-        city("巴黎", "地球", F_EU, 700, &earth.settlements[3], "cruiser", config, &mut next_building_id),
-        city("莫斯科", "地球", F_RU, 800, &earth.settlements[4], "battleship", config, &mut next_building_id),
+        city(
+            "长三角",
+            "地球",
+            F_CN,
+            1400,
+            &earth.settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "珠三角",
+            "地球",
+            F_CN,
+            1100,
+            &earth.settlements[1],
+            "destroyer",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "亚特兰大",
+            "地球",
+            F_US,
+            900,
+            &earth.settlements[2],
+            "destroyer",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "巴黎",
+            "地球",
+            F_EU,
+            700,
+            &earth.settlements[3],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "莫斯科",
+            "地球",
+            F_RU,
+            800,
+            &earth.settlements[4],
+            "battleship",
+            config,
+            &mut next_building_id,
+        ),
         // 各族主星（spec 天体归属，定居点 ↔ 城 1:1）
-        city("水星熔炉基地", "水星", F_CN, 220, &bodies[0].settlements[0], "corvette", config, &mut next_building_id),
-        city("金星浮空之城", "金星", F_CN, 260, &bodies[1].settlements[0], "corvette", config, &mut next_building_id),
-        city("宁静海基地", "月球", F_UN, 420, &bodies[3].settlements[0], "corvette", config, &mut next_building_id),
-        city("奥林匹斯港", "火星", F_US, 1000, &bodies[4].settlements[0], "cruiser", config, &mut next_building_id),
-        city("灶神星转运港", "灶神星", F_TRANSPORT, 280, &bodies[5].settlements[0], "corvette", config, &mut next_building_id),
-        city("大红斑科学站", "木星", F_SCIENCE, 520, &bodies[6].settlements[0], "carrier", config, &mut next_building_id),
-        city("欧罗巴冰下港", "欧罗巴", F_US, 300, &bodies[7].settlements[0], "corvette", config, &mut next_building_id),
-        city("土星环科学站", "土星", F_SCIENCE, 480, &bodies[8].settlements[0], "corvette", config, &mut next_building_id),
-        city("泰坦采矿城", "泰坦", F_MINING, 460, &bodies[9].settlements[0], "cruiser", config, &mut next_building_id),
-        city("天王星轨道站", "天王星", F_EU, 380, &bodies[10].settlements[0], "cruiser", config, &mut next_building_id),
-        city("海王星轨道站", "海王星", F_EU, 340, &bodies[11].settlements[0], "corvette", config, &mut next_building_id),
-        city("冥王星前哨", "冥王星", F_RU, 360, &bodies[12].settlements[0], "cruiser", config, &mut next_building_id),
-        city("卡戎深空港", "卡戎", F_RU, 260, &bodies[13].settlements[0], "corvette", config, &mut next_building_id),
-        city("伊克西翁圣所", "伊克西翁", F_CULT, 200, &bodies[14].settlements[0], "cruiser", config, &mut next_building_id),
-        city("妊神星转运站", "妊神星", F_MINING, 260, &bodies[15].settlements[0], "corvette", config, &mut next_building_id),
-        city("创神星采矿站", "创神星", F_MINING, 240, &bodies[16].settlements[0], "corvette", config, &mut next_building_id),
-        city("阋神星前哨", "阋神星", F_MINING, 220, &bodies[17].settlements[0], "corvette", config, &mut next_building_id),
+        city(
+            "水星熔炉基地",
+            "水星",
+            F_CN,
+            220,
+            &bodies[0].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "金星浮空之城",
+            "金星",
+            F_CN,
+            260,
+            &bodies[1].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "宁静海基地",
+            "月球",
+            F_UN,
+            420,
+            &bodies[3].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "奥林匹斯港",
+            "火星",
+            F_US,
+            1000,
+            &bodies[4].settlements[0],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "灶神星转运港",
+            "灶神星",
+            F_TRANSPORT,
+            280,
+            &bodies[5].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "大红斑科学站",
+            "木星",
+            F_SCIENCE,
+            520,
+            &bodies[6].settlements[0],
+            "carrier",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "欧罗巴冰下港",
+            "欧罗巴",
+            F_US,
+            300,
+            &bodies[7].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "土星环科学站",
+            "土星",
+            F_SCIENCE,
+            480,
+            &bodies[8].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "泰坦采矿城",
+            "泰坦",
+            F_MINING,
+            460,
+            &bodies[9].settlements[0],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "天王星轨道站",
+            "天王星",
+            F_EU,
+            380,
+            &bodies[10].settlements[0],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "海王星轨道站",
+            "海王星",
+            F_EU,
+            340,
+            &bodies[11].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "冥王星前哨",
+            "冥王星",
+            F_RU,
+            360,
+            &bodies[12].settlements[0],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "卡戎深空港",
+            "卡戎",
+            F_RU,
+            260,
+            &bodies[13].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "伊克西翁圣所",
+            "伊克西翁",
+            F_CULT,
+            200,
+            &bodies[14].settlements[0],
+            "cruiser",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "妊神星转运站",
+            "妊神星",
+            F_MINING,
+            260,
+            &bodies[15].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "创神星采矿站",
+            "创神星",
+            F_MINING,
+            240,
+            &bodies[16].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
+        city(
+            "阋神星前哨",
+            "阋神星",
+            F_MINING,
+            220,
+            &bodies[17].settlements[0],
+            "corvette",
+            config,
+            &mut next_building_id,
+        ),
     ];
 
     // 城市形态 = 空间站 还是 地面：建在气态/冰巨行星（体积上没有固体表面）上的定居点
@@ -716,7 +1112,10 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             name,
             class: class.to_string(),
             faction_id: faction.to_string(),
-            position: [pos[0] + rng.range_f64(-0.05, 0.05), pos[1] + rng.range_f64(-0.05, 0.05)],
+            position: [
+                pos[0] + rng.range_f64(-0.05, 0.05),
+                pos[1] + rng.range_f64(-0.05, 0.05),
+            ],
             hull: spec.hull,
             hull_max: spec.hull,
             shield: 0.0,
@@ -726,7 +1125,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             velocity: 0.0,
             doctrine: spec.default_doctrine,
             kiting: spec.default_kiting,
-            freighter: spec.default_freighter,
+            role: spec.default_role,
             attack_hist: BTreeMap::new(),
             cargo: BTreeMap::new(),
             // 开局预置舰队**不挂设计图**（用户裁决 Q8：不预置标准图；即便将来种子表非空，
@@ -781,7 +1180,12 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         c.investment_budget = f
             .resources
             .iter()
-            .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    Control::inherit(*v * config.economy.invest_fraction),
+                )
+            })
             .collect();
         // 首都（唯一事实来源 = 命令控制 `ControllableState::capital`）：开局按势力
         // 播种其初始首都天体，mode=Inherit（没有说话，沿作用域链上溯，全链无人表态则
@@ -792,7 +1196,12 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         c.construction_budget = f
             .resources
             .iter()
-            .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    Control::inherit(*v * config.economy.invest_fraction),
+                )
+            })
             .collect();
         // **设计图种子表**（`config/game.ron` 的 `blueprints:`，当前为空——用户裁决 Q8
         // 「不预置标准图」）。种子一律以 `Inherit`（这一层没有说话）写入：归属由 `scope`
@@ -808,18 +1217,23 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         let c = control.entry(city.faction_id.clone()).or_default();
         for b in &city.buildings {
             let ikey = (city.name.clone(), b.id);
-            c.invest_weights
-                .insert(ikey, Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+            c.invest_weights.insert(
+                ikey,
+                Control::inherit(config.building_spec(&b.kind).default_invest_weight),
+            );
             if b.is_shipyard() {
                 let bkey = (city.name.clone(), b.id);
-                c.build_weights
-                    .insert(bkey, Control::inherit(config.building_spec(&b.kind).default_build_weight));
+                c.build_weights.insert(
+                    bkey,
+                    Control::inherit(config.building_spec(&b.kind).default_build_weight),
+                );
             }
         }
     }
     for s in &ships {
         if let Some(c) = control.get_mut(&s.faction_id) {
-            c.ship_orders.insert(s.name.clone(), Control::inherit(ShipBehavior::Idle));
+            c.ship_orders
+                .insert(s.name.clone(), Control::inherit(ShipBehavior::Idle));
         }
     }
 
@@ -850,6 +1264,19 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         contracts: ContractState::default(),
     };
 
+    // --- 开局 MOND 掌握度（科技体系的干线）------------------------------------
+    // 真值只有一份：`config.mond.initial`（取代旧的 `masters` 名单）。没列出的势力从 0 起，
+    // 靠**飞船在异常区**的在场观测慢慢爬（`sim::step_knowledge`）。
+    for f in &mut state.factions {
+        f.mond_control = config
+            .mond
+            .initial
+            .get(&f.name)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+    }
+
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------
     // 舰级现在是「平台修正器」，攻击力完全来自所装配的武器模块。因此开局预置舰
     // （初始造舰时是建在 State 组装前的裸舰）必须在世界生成后按资源优势补装配组件，
@@ -865,7 +1292,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         let comps = crate::autocontrol::choose_loadout(&state, &config, fid, &class);
         if let Some(s) = state.ships.iter_mut().find(|s| s.name == sname) {
             s.components = comps;
-            s.component_hp = s.components.iter().map(|c| component_integrity(&config, c)).collect();
+            s.component_hp = s
+                .components
+                .iter()
+                .map(|c| component_integrity(&config, c))
+                .collect();
             // 组件可能会加护盾池/硬度/速度，重算并钳制当前值到新上限。
             let panel = ship_panel(&config, s);
             s.hull_max = panel.hull_max;
@@ -879,7 +1310,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 }
 
 /// **测试专用**：把每个势力的**舰队默认角色**钉成「战舰」且归玩家
-/// （`default_freighter = Player(false)`）——于是自动定编（`autocontrol::freight`）再也
+/// （`default_role = Player(false)`）——于是自动定编（`autocontrol::freight`）再也
 /// 不写角色叶，全场的舰都按战舰行事（= 引入运输之前的行为）。
 ///
 /// 为什么需要它：自动控制现在多了一条活（按积压定编、派船跑集货路线），于是「测战术」的
@@ -891,10 +1322,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 pub fn pin_roles_to_war(state: &mut State) {
     let fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
     for fid in fids {
-        state
-            .control
-            .entry(fid)
-            .or_default()
-            .default_freighter = Some(crate::model::Control::player(false));
+        state.control.entry(fid).or_default().default_role =
+            Some(crate::model::Control::player(crate::model::ShipRole::War));
     }
 }

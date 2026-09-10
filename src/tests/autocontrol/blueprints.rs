@@ -27,7 +27,10 @@ fn yards(state: &State, fid: &str) -> Vec<(CityId, BuildingId, Option<BlueprintI
 }
 
 fn lib(state: &State, fid: &str) -> BTreeMap<BlueprintId, Control<Blueprint>> {
-    state.control(fid.to_string()).map(|c| c.blueprints.clone()).unwrap_or_default()
+    state
+        .control(fid.to_string())
+        .map(|c| c.blueprints.clone())
+        .unwrap_or_default()
 }
 
 /// **AI 会自己建图**（`Auto` 图那一层的执行者）：跑一趟之后，归它管的每个建造区都指着一张
@@ -44,7 +47,9 @@ fn the_ai_creates_a_design_for_every_yard_it_owns() {
     assert!(!l.is_empty(), "{fid} 的图库该有图");
     for (city, bid, ptr) in yards(&state, &fid) {
         let name = ptr.unwrap_or_else(|| panic!("{city}#{bid} 没有被指到任何设计图"));
-        let leaf = l.get(&name).unwrap_or_else(|| panic!("{city}#{bid} 指着一张不存在的图 {name}"));
+        let leaf = l
+            .get(&name)
+            .unwrap_or_else(|| panic!("{city}#{bid} 指着一张不存在的图 {name}"));
         let class = state
             .city(&city)
             .unwrap()
@@ -54,7 +59,11 @@ fn the_ai_creates_a_design_for_every_yard_it_owns() {
             .and_then(|b| b.ship_type.clone())
             .unwrap();
         assert_eq!(leaf.value.class, class, "口径 A：图的舰级必须与建造区相等");
-        assert_eq!(leaf.mode, ControlMode::Inherit, "AI 写的是流水（这一层没有说话）");
+        assert_eq!(
+            leaf.mode,
+            ControlMode::Inherit,
+            "AI 写的是流水（这一层没有说话）"
+        );
         assert!(leaf.value.order.is_none(), "建图 ≠ 表态：AI 不写意图轴");
         assert!(
             name.starts_with(DESIGN_PREFIX),
@@ -96,12 +105,19 @@ fn designs_are_deduped_by_class_and_signature() {
     let mut by_class: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (_, _, ptr) in yards(&state, &fid) {
         if let Some(ptr) = ptr {
-            let class = second.get(&ptr).map(|l| l.value.class.clone()).unwrap_or_default();
+            let class = second
+                .get(&ptr)
+                .map(|l| l.value.class.clone())
+                .unwrap_or_default();
             by_class.entry(class).or_default().insert(ptr);
         }
     }
     for (class, names) in by_class {
-        assert_eq!(names.len(), 1, "同舰级的建造区该共用一张图（{class} 有 {names:?}）");
+        assert_eq!(
+            names.len(),
+            1,
+            "同舰级的建造区该共用一张图（{class} 有 {names:?}）"
+        );
     }
 }
 
@@ -111,7 +127,10 @@ fn designs_are_deduped_by_class_and_signature() {
 fn a_player_pinned_design_and_its_yard_are_left_alone() {
     let (config, mut state) = fresh(42);
     let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid).into_iter().next().expect("中国有建造区");
+    let (city, bid, _) = yards(&state, &fid)
+        .into_iter()
+        .next()
+        .expect("中国有建造区");
     let class = state
         .city(&city)
         .unwrap()
@@ -131,14 +150,25 @@ fn a_player_pinned_design_and_its_yard_are_left_alone() {
     apply_patch(&mut state, &config, &diff).expect("pin + pointer applies");
     let mut out = Vec::new();
     design_fleets(&mut state, &config, &mut out);
-    let leaf = lib(&state, &fid).get("玩家的守卫图").cloned().expect("玩家的图还在");
+    let leaf = lib(&state, &fid)
+        .get("玩家的守卫图")
+        .cloned()
+        .expect("玩家的图还在");
     assert_eq!(leaf.mode, ControlMode::Player, "玩家的图归玩家");
-    assert_eq!(leaf.value.components, vec!["kinetic", "ion_drive"], "玩家的选装一个字都不许动");
+    assert_eq!(
+        leaf.value.components,
+        vec!["kinetic", "ion_drive"],
+        "玩家的选装一个字都不许动"
+    );
     let ptr = yards(&state, &fid)
         .into_iter()
         .find(|(c, b, _)| *c == city && *b == bid)
         .and_then(|(_, _, p)| p);
-    assert_eq!(ptr.as_deref(), Some("玩家的守卫图"), "玩家指过去的建造区不许被改派");
+    assert_eq!(
+        ptr.as_deref(),
+        Some("玩家的守卫图"),
+        "玩家指过去的建造区不许被改派"
+    );
     assert!(
         !out.iter().any(|d| d.blueprint == "玩家的守卫图"),
         "回收/重估都不许碰玩家的图"
@@ -151,7 +181,10 @@ fn a_player_pinned_design_and_its_yard_are_left_alone() {
 fn a_dangling_pointer_is_left_dangling() {
     let (config, mut state) = fresh(42);
     let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid).into_iter().next().expect("中国有建造区");
+    let (city, bid, _) = yards(&state, &fid)
+        .into_iter()
+        .next()
+        .expect("中国有建造区");
     if let Some(c) = state.city_mut(&city) {
         for b in &mut c.buildings {
             if b.id == bid {
@@ -189,7 +222,11 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
     apply_patch(&mut state, &config, &diff).expect("designs apply");
     state.control_mut(fid.clone()).unwrap().blueprints.insert(
         "自动堡垒·玩家钉的".to_string(),
-        Control::player(Blueprint { class: "corvette".to_string(), components: vec![], order: None }),
+        Control::player(Blueprint {
+            class: "corvette".to_string(),
+            components: vec![],
+            order: None,
+        }),
     );
     let mut out = Vec::new();
     design_fleets(&mut state, &config, &mut out);
@@ -197,7 +234,10 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
     assert!(!l.contains_key("自动强袭·陈图"), "没人指向的自建图该被回收");
     assert!(l.contains_key("玩家自己的图"), "不是 AI 命名的图不许碰");
     assert!(l.contains_key("自动堡垒·玩家钉的"), "玩家钉住的图不许回收");
-    assert!(out.iter().any(|d| d.action == "reaped" && d.blueprint == "自动强袭·陈图"));
+    assert!(
+        out.iter()
+            .any(|d| d.action == "reaped" && d.blueprint == "自动强袭·陈图")
+    );
 }
 
 /// **改图不影响已有的舰**（快照语义）：设计图重估了选装，已经下水的舰一个字节都不变，
@@ -206,7 +246,10 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
 fn retuning_a_design_never_touches_ships_already_in_space() {
     let (config, mut state) = fresh(42);
     let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid).into_iter().next().expect("中国有建造区");
+    let (city, bid, _) = yards(&state, &fid)
+        .into_iter()
+        .next()
+        .expect("中国有建造区");
     let class = state
         .city(&city)
         .unwrap()
@@ -269,7 +312,10 @@ fn retuning_a_design_never_touches_ships_already_in_space() {
 fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
     let (config, mut state) = fresh(42);
     let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid).into_iter().next().expect("中国有建造区");
+    let (city, bid, _) = yards(&state, &fid)
+        .into_iter()
+        .next()
+        .expect("中国有建造区");
     let mut out = Vec::new();
     design_fleets(&mut state, &config, &mut out);
     let old = yards(&state, &fid)
@@ -278,7 +324,11 @@ fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
         .and_then(|(_, _, p)| p)
         .unwrap();
     // 把建造区改造成另一级（就像 `retool_shipyards` 做的那样）。
-    let new_class = if lib(&state, &fid)[&old].value.class == "cruiser" { "corvette" } else { "cruiser" };
+    let new_class = if lib(&state, &fid)[&old].value.class == "cruiser" {
+        "corvette"
+    } else {
+        "cruiser"
+    };
     if let Some(c) = state.city_mut(&city) {
         for b in &mut c.buildings {
             if b.id == bid {
@@ -295,9 +345,11 @@ fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
         .unwrap();
     let l = lib(&state, &fid);
     assert_eq!(
-        l[&ptr].value.class,
-        new_class,
+        l[&ptr].value.class, new_class,
         "图与建造区必须重新对齐（口径 A）"
     );
-    assert_ne!(ptr, old, "舰级变了 ⇒ 换一张对应舰级的图（名字里就写着舰级）");
+    assert_ne!(
+        ptr, old,
+        "舰级变了 ⇒ 换一张对应舰级的图（名字里就写着舰级）"
+    );
 }

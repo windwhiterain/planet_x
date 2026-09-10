@@ -3,7 +3,11 @@
 use super::*;
 
 /// 挂了这张图的建造区（城名、建筑下标、该区当前的 `ship_type`）。
-pub fn referencing_yards(state: &State, fid: &str, bp: &BlueprintId) -> Vec<(CityId, BuildingId, String)> {
+pub fn referencing_yards(
+    state: &State,
+    fid: &str,
+    bp: &BlueprintId,
+) -> Vec<(CityId, BuildingId, String)> {
     state
         .cities
         .iter()
@@ -12,7 +16,13 @@ pub fn referencing_yards(state: &State, fid: &str, bp: &BlueprintId) -> Vec<(Cit
             c.buildings
                 .iter()
                 .filter(|b| b.blueprint.as_deref() == Some(bp.as_str()))
-                .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+                .map(|b| {
+                    (
+                        c.name.clone(),
+                        b.id,
+                        b.ship_type.clone().unwrap_or_default(),
+                    )
+                })
         })
         .collect()
 }
@@ -132,7 +142,10 @@ pub fn apply_blueprint(
                 format!("{path}.components"),
                 c,
                 "no_such_component",
-                format!("没有组件「{c}」（可选：{}；也可用 --meta 看全表）。", all.join(" / ")),
+                format!(
+                    "没有组件「{c}」（可选：{}；也可用 --meta 看全表）。",
+                    all.join(" / ")
+                ),
             );
             return;
         }

@@ -7,7 +7,10 @@ use super::*;
 fn story_effects_apply() {
     let (config, mut state) = fresh_world(42);
     let mut rng = Prng::new(42);
-    let rel_before = state.faction("无国界科学组织").and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied()).unwrap_or(0.0);
+    let rel_before = state
+        .faction("无国界科学组织")
+        .and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied())
+        .unwrap_or(0.0);
 
     advance(&mut state, &config, &mut rng);
 
@@ -18,8 +21,14 @@ fn story_effects_apply() {
         state.chronicle.iter().any(|c| c.id == "prologue"),
         "prologue must fire and record its effects at round 1"
     );
-    let rel_after = state.faction("无国界科学组织").and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied()).unwrap_or(0.0);
-    assert!(rel_after < rel_before, "prologue must lower science↔cult relation (effect)");
+    let rel_after = state
+        .faction("无国界科学组织")
+        .and_then(|f| f.relations.get(&"行星X崇拜教".to_string()).copied())
+        .unwrap_or(0.0);
+    assert!(
+        rel_after < rel_before,
+        "prologue must lower science↔cult relation (effect)"
+    );
 }
 
 /// 剧情 GrantShip 后果：kuiper_boom（RoundAt 24）给星系矿业(5)出厂一艘巡洋舰；
@@ -36,9 +45,16 @@ fn story_grant_ship_spawns_a_fleet_member() {
 
     // The story fired this round.
     assert!(
-        state.chronicle.iter().any(|c| c.id == "kuiper_boom" && c.round == 24),
+        state
+            .chronicle
+            .iter()
+            .any(|c| c.id == "kuiper_boom" && c.round == 24),
         "kuiper_boom must fire at round 24, got {:?}",
-        state.chronicle.iter().map(|c| (c.id.clone(), c.round)).collect::<Vec<_>>()
+        state
+            .chronicle
+            .iter()
+            .map(|c| (c.id.clone(), c.round))
+            .collect::<Vec<_>>()
     );
 
     // The granted cruiser is at exactly body 9 (泰坦) position + the deterministic offset.
@@ -53,7 +69,11 @@ fn story_grant_ship_spawns_a_fleet_member() {
                 && (s.position[1] - (bpos[1] + 0.05)).abs() < 1e-9
         })
         .expect("kuiper_boom must grant 星系矿业 a cruiser parked at 泰坦");
-    assert_eq!(state.ship_behavior(granted.name.clone()), Some(ShipBehavior::Idle), "granted ship starts Idle");
+    assert_eq!(
+        state.ship_behavior(granted.name.clone()),
+        Some(ShipBehavior::Idle),
+        "granted ship starts Idle"
+    );
 
     // Determinism: re-running reproduces the identical granted fleet.
     let (_, mut state2) = fresh_world(42);
@@ -73,5 +93,8 @@ fn story_grant_ship_spawns_a_fleet_member() {
         .filter(|s| s.faction_id == "星系矿业")
         .map(|s| (s.name.clone(), s.class.clone()))
         .collect();
-    assert_eq!(fleet_a, fleet_b, "same seed must reproduce the same granted fleet");
+    assert_eq!(
+        fleet_a, fleet_b,
+        "same seed must reproduce the same granted fleet"
+    );
 }

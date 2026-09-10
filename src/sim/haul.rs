@@ -44,31 +44,10 @@ pub fn haul_split(available: &ResourceMap, capacity: f64) -> ResourceMap {
     out
 }
 
-/// 一条运输路线（[`ShipBehavior::Haul`]）本回合**做了什么**（观察与守卫用；不影响行为）。
-#[derive(Clone, Debug, PartialEq)]
-pub enum HaulStep {
-    /// 在 `body` 装上了 `units` 件货（Q5 A：有多少装多少，绝不空舱等待）。
-    Loaded { body: BodyId, units: f64 },
-    /// 在 `body` 卸下 `units` 件货；`into_pool = true` 表示卸进了**首都池**（集货完成）。
-    Delivered { body: BodyId, units: f64, into_pool: bool },
-    /// 停在 `from` 但**货栈是空的**：原地等——「有货就走」的另一半正是「没货就不走」
-    /// （空载跑一趟是白烧时间，而货栈随时会因产出再涨）。
-    Waiting { body: BodyId },
-    /// 这一回合只是**在路上**，正驶向 `body`（装/卸都还没发生）。
-    EnRoute { body: BodyId },
-}
-
-impl HaulStep {
-    /// 这一步发生在哪个天体（`EnRoute` = 正驶向的那一端）——判定表与探针读它。
-    pub fn body(&self) -> &str {
-        match self {
-            HaulStep::Loaded { body, .. }
-            | HaulStep::Delivered { body, .. }
-            | HaulStep::Waiting { body }
-            | HaulStep::EnRoute { body } => body,
-        }
-    }
-}
+/// 运输动作（变体与判据）**住在 `model`**：它同时是引擎内部类型与读面类型
+/// （`view.haul_steps`），而 `model` 不许依赖 `sim`。这里只做转出，让
+/// `sim::HaulStep` / `sim::haul::HaulStep` 照旧可用（全仓库的既有引用不动）。
+pub use crate::model::HaulStep;
 
 /// 这批货的**货主**（收货方）：执行承包单时是**托运方**，否则是船主自己。
 ///
@@ -103,7 +82,14 @@ pub fn cargo_owner(state: &State, fid: &str, ship_id: &str) -> FactionId {
 /// 所以受雇的船到了地方能装多少装多少——与雇主自己的运输舰完全一样（旧形态里这里还有一道
 /// 「这张单还差多少」的闸，那是「一票货」形态的遗留）。返回**实际装走的总件数**
 /// （0 = 那里没货，舰该原地等）。
-pub fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str, to: &str) -> f64 {
+pub fn haul_load(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    from: &str,
+    to: &str,
+) -> f64 {
     let Some(ship) = state.ship(ship_id) else {
         return 0.0;
     };
@@ -159,7 +145,13 @@ pub fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &st
 /// 真正的「回程把自己那份拉回家」需要把 `Haul` 的无状态腿规则撑开（舱里不是空的就是满的
 /// 那条判据不够用了），留作后续钩子。
 /// 返回卸下的货（空 = 本来就空舱）。
-pub fn haul_unload(state: &mut State, _config: &GameConfig, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
+pub fn haul_unload(
+    state: &mut State,
+    _config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    to: &str,
+) -> ResourceMap {
     let cargo = state
         .ship_mut(ship_id)
         .map(|s| std::mem::take(&mut s.cargo))

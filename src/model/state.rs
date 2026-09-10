@@ -13,13 +13,37 @@ use crate::model::*;
 /// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
 /// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
 /// 所以不能按号细判，只能整段按最保守的方式接）。
-/// **v14 = 派生读面换代**（`feature/pre-post-unify`）：派生数据不再分 `flow` + `metrics`
-/// 两段，只有**一回合一份视图** [`RoundView`]（`pre`/`post` 同形）——`--derived` 的
-/// `{flow, metrics}` 变成 `{view}`、`--index` 的 `idx/flow.jsonl`/`idx/city_flow.jsonl`
-/// 变成 `idx/faction_process.jsonl`/`idx/city_process.jsonl`、每回合轨迹的 `metrics`
-/// 变成 `view`。**世界状态本身（`State`）没有变**，变的是派生读面，故不写迁移档
-/// （旧档照常读；旧派生态不复用，本来也不持久）。
-pub const SCHEMA_VERSION: u32 = 16;
+/// **v14–v16 是被两条历史各自用过的号**（合并时逐次发现，故合并后取 **17**）：
+///
+/// | 号 | `main` 那条线 | `feature/tech-system-mond` 这条线 |
+/// |---|---|---|
+/// | v14 | `feature/step-intermediates-b1`：读面追加治理/忠诚中间量（`State` 没动）；再往前 v14 还被 `feature/pre-post-unify`（派生读面换代）用过 | **MOND 掌握度连续化**：`Faction::mond_control` 取代 `config.mond.masters` 名单（**只有这一条真动了 `State`**） |
+/// | v15 | `feature/capital-decisions`：`FactionRow.capital` 搬进 `RoundDecisions`（读面，`State` 没动） | 与 main 的读面换代合并之后的号 |
+/// | v16 | 中性值一处声明（读面缺省值，`State` 没动） | 与 step-intermediates 合并之后的号 |
+///
+/// 同一个号在多处含义不同，**号本身已经不能再判语义** ⇒ 合并后取 **17**，
+/// `13 | 14 | 15 | 16` **整段只推号**：
+///
+/// * 这几档里只有**本支那条线的 v14/v15 档**真的存过 `mond_control`——那是本支自己的档，
+///   键在结构里，读进来照旧生效（**不丢**）；**v13 及更早、以及 main 那条线的档**里压根没有
+///   这个键 ⇒ serde 缺省 **0（凡人）**，**不保真**（用户裁决：不考虑向前兼容；那些档只存在于
+///   本次开发的 worktree 里，没有真实损失）；
+/// * 两条历史动过的**派生读面**量本来就不持久（每回合重算），推号即可。
+///
+/// **v17 又被撞了一次**（第三次）：`feature/b2-money`（「钱去哪了」的中间量）与上面那个 17
+/// 是同号不同义——它**只动派生读面**（各势力实际花掉的投资/建造预算、欠付维护费与生锈比例；
+/// 各城用工系数、住房容量、是否集散地、每舰级造舰速率与实得进度），`State` 一个字段没动。
+/// 于是合并后取 **18**，`13 | 14 | 15 | 16 | 17` **整段只推号**（17 那一档：main 线的档没有
+/// `mond_control` 键 ⇒ 缺省 0，与本支 v14/v15 档的处理同一条约定）。
+///
+/// **v18 = 「钱去哪了」的中间量**（`feature/b2-money`）：派生读面增列（各势力实际花掉的投资/建造
+/// 预算、欠付维护费与生锈比例；各城用工系数、住房容量、是否集散地、每舰级造舰速率与实得进度），
+/// `State` 一个字段没动。
+/// **v19 = 「市场与运输」的中间量**（`feature/b3-market`）：派生读面再添两片——本回合**真的成交的
+/// 贸易**（一笔一对一行：价格分解 + 丢货率）与**每艘在跑运输的舰走了哪一步**；另加各势力的
+/// 购买力/买方名次、每一处货栈的运力账，`FactionRow.trade_blocked_by` 从计数升级成「名单 + 三档
+/// 原因」。`State` 仍然一个字段没动。
+pub const SCHEMA_VERSION: u32 = 19;
 fn default_schema_version() -> u32 {
     0
 }
@@ -228,7 +252,9 @@ impl State {
 
     /// [`State::stock_at`] 的**总件数**（那里什么都没有 ⇒ 0）。
     pub fn stock_units_at(&self, fid: &str, body: &str) -> f64 {
-        self.stock_at(fid, body).map(|m| m.values().sum()).unwrap_or(0.0)
+        self.stock_at(fid, body)
+            .map(|m| m.values().sum())
+            .unwrap_or(0.0)
     }
 
     /// 从 [`State::stock_at`] 提走一笔（装船 / 建造消耗），返回**实际提走的量**
@@ -241,7 +267,12 @@ impl State {
             let Some(f) = self.factions.iter_mut().find(|f| f.name == fid) else {
                 return 0.0;
             };
-            let got = f.resources.get(resource).copied().unwrap_or(0.0).min(amount);
+            let got = f
+                .resources
+                .get(resource)
+                .copied()
+                .unwrap_or(0.0)
+                .min(amount);
             if got > 0.0 {
                 if let Some(x) = f.resources.get_mut(resource) {
                     *x -= got;
@@ -484,24 +515,25 @@ impl State {
         leaf.map(|l| l.value).unwrap_or(record)
     }
 
-    /// 这艘舰当前的**有效角色**：`true` = **运输舰**（自动控制给它排集货路线），
-    /// `false` = **战舰**（自动控制让它找仗打）。取值规则与前两条风格轴完全同形：
-    /// 叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
-    /// [`ShipSpec::default_freighter`](crate::model::ShipSpec::default_freighter)）。
+    /// 这艘舰当前的**有效角色**（[`ShipRole`]：打仗 / 跑运输 / 观测）。取值规则与前两条
+    /// 风格轴完全同形：叶 → 舰队默认（`Player` 时） → 舰上的记录值（出厂继承舰级
+    /// [`ShipSpec::default_role`](crate::model::ShipSpec::default_role)）。
     ///
     /// ⚠ **它只管「自动控制的活是哪一种」**：不影响自动开火（射程内的敌舰照打），
-    /// 也不影响 kiting（那条轴独立生效）。见 [`Ship::freighter`] 的说明。
-    pub fn ship_freighter(&self, ship_id: ShipId) -> bool {
+    /// 也不影响 kiting（那条轴独立生效）。见 [`Ship::role`] 的说明。
+    ///
+    /// 舰不存在 ⇒ [`ShipRole::War`]（旧档的 serde 缺省也是它）。
+    pub fn ship_role(&self, ship_id: ShipId) -> ShipRole {
         let Some(s) = self.ship(&ship_id) else {
-            return false;
+            return ShipRole::War;
         };
-        let record = s.freighter;
+        let record = s.role;
         let Some(c) = self.control(s.faction_id.clone()) else {
             return record;
         };
-        let leaf = c.ship_freighter.get(&ship_id);
+        let leaf = c.ship_role.get(&ship_id);
         if leaf_mode(leaf) == ControlMode::Inherit {
-            if let Some(d) = &c.default_freighter {
+            if let Some(d) = &c.default_role {
                 if d.mode.is_player() {
                     return d.value;
                 }
@@ -522,8 +554,8 @@ impl State {
 
     /// 决定这艘舰的**角色**由谁控制：叶子 → 舰队默认 → 势力 → 全局。
     /// 自动控制据此判断「这片叶能不能写」（`Player` = 玩家说了算，AI 不碰）。
-    pub fn ship_freighter_control(&self, ship_id: ShipId) -> ControlMode {
-        self.ship_style_chain(ship_id, StyleAxis::Freighter)
+    pub fn ship_role_control(&self, ship_id: ShipId) -> ControlMode {
+        self.ship_style_chain(ship_id, StyleAxis::Role)
     }
 
     /// 三条风格轴共用的归属链。
@@ -542,9 +574,9 @@ impl State {
                     leaf_mode(c.ship_kiting.get(&ship_id)),
                     leaf_mode(c.default_kiting.as_ref()),
                 ),
-                StyleAxis::Freighter => (
-                    leaf_mode(c.ship_freighter.get(&ship_id)),
-                    leaf_mode(c.default_freighter.as_ref()),
+                StyleAxis::Role => (
+                    leaf_mode(c.ship_role.get(&ship_id)),
+                    leaf_mode(c.default_role.as_ref()),
                 ),
             },
             None => (ControlMode::Inherit, ControlMode::Inherit),
@@ -681,8 +713,8 @@ enum StyleAxis {
     Doctrine,
     /// 风筝<->贴脸姿态。
     Kiting,
-    /// 角色：运输舰 / 战舰。
-    Freighter,
+    /// 角色：打仗 / 运输 / 观测（三态）。
+    Role,
 }
 /// 把 `State` 从 `schema_version` 逐档升级到 [`SCHEMA_VERSION`]。在加载 `.ron` /
 /// checkpoint 之后调用；无法迁移或版本比当前二进制还新则返回显式 `Err`（宁抛错，
@@ -757,7 +789,7 @@ enum StyleAxis {
 /// 所以旧档一律按**空舱**处理，**零信息损失**（没有货在途中，也没有货凭空出现/消失）。
 ///
 /// v8 → v9（运输分支）：[`ShipBehavior::Haul`](crate::model::ShipBehavior) 是控制叶的**新取值**，
-/// 新增 `Ship::freighter` + 第三条风格轴（`ship_freighter`/`default_freighter` 叶片），
+/// 新增 `Ship::freighter` + 第三条风格轴（`ship_role`/`default_role` 叶片），
 /// 事件流里也多了 `CargoLoaded` / `CargoDelivered` 两种事件。旧档里不可能有它们
 /// （v8 的 `ShipBehavior` 没有 `Haul`，货也不会动、也没有「运输舰」这个角色），
 /// 所以这一档同样**零信息损失**：旧档加载后没有任何舰在跑路线、没有货在舱里、
@@ -825,25 +857,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
-        // v13：`feature/pre-post-unify` 之前那一版。它变的是**派生读面**（`flow` + `metrics`
-        // 两段 → 一回合一份 `RoundView`），`State` 的字段一个没动 ⇒ 推号即可（存档照旧可用）。
-        13 => {
-            state.schema_version = SCHEMA_VERSION;
-            Ok(())
-        }
-        // v14：`feature/step-intermediates-b1` 之前那一版。同样**只动派生读面**——`RoundView`
-        // 追加了治理/忠诚的中间量（`FactionRow::governance_admin|entertainment|scale|
-        // ideology_loyalty_penalty|capital`、`CityRow::loyalty_target`），`State` 的字段一个没动
-        // ⇒ 推号即可（存档照旧可用）。
-        14 => {
-            state.schema_version = SCHEMA_VERSION;
-            Ok(())
-        }
-        // v15：`feature/capital-decisions` 之前那一版。仍然**只动派生读面**——`FactionRow.capital`
-        // 搬进 `RoundDecisions.capital`（稀疏数组）、`LoyaltyTarget` 少了两个「按势力算一次」的项
-        // （它们上移到 `FactionRow::capital_loyalty_bonus` / `ideology_loyalty_penalty`），
-        // `State` 的字段一个没动 ⇒ 推号即可（存档照旧可用）。
-        15 => {
+        // **v13–v18：六个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
+        // 这几档里 `State` 只在**一条**历史上真动过字段（`mond_control`），而它在**没有那条历史
+        // 的档**里 serde 缺省 0 = 凡人；其余动过的全是**派生读面**（本来就不持久，包括
+        // `feature/b2-money` 的「钱去哪了」与 `feature/b3-market` 的「市场与运输」）。
+        // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
+        // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
+        // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
+        13 | 14 | 15 | 16 | 17 | 18 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

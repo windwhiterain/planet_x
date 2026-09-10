@@ -23,7 +23,10 @@ fn damaged_ship_regenerates_hull_each_round() {
 
     advance(&mut state, &config, &mut rng);
 
-    let hull = state.ship(&ship0).map(|s| s.hull).expect("ship 0 still alive");
+    let hull = state
+        .ship(&ship0)
+        .map(|s| s.hull)
+        .expect("ship 0 still alive");
     let expected = (6.0 + 12.0 * regen).min(12.0);
     assert!(
         (hull - expected).abs() < 1e-9,
@@ -36,9 +39,14 @@ fn damaged_ship_regenerates_hull_each_round() {
         s.position = [80.0, 80.0];
     }
     advance(&mut state, &config, &mut rng);
-    let max1 = config.ship_spec(&state.ship(&ship1).map(|s| s.class.clone()).unwrap()).hull;
+    let max1 = config
+        .ship_spec(&state.ship(&ship1).map(|s| s.class.clone()).unwrap())
+        .hull;
     let hull1 = state.ship(&ship1).map(|s| s.hull).unwrap();
-    assert!((hull1 - max1).abs() < 1e-9, "full hull must not over-heal, got {hull1}");
+    assert!(
+        (hull1 - max1).abs() < 1e-9,
+        "full hull must not over-heal, got {hull1}"
+    );
 }
 
 /// 本土防御（首都即强弩）：靠近首都的目标被削弱，远离首都的没有。
@@ -47,9 +55,15 @@ fn home_field_weakens_attackers_near_the_capital() {
     let (_config, state) = fresh_world(42);
     let cap = state.body_position("地球"); // 地球（中国首都）。
     let mult_near = home_defense_mult(&state, "中国", cap);
-    assert!(mult_near < 1.0, "near the capital should be defended (mult {mult_near})");
+    assert!(
+        mult_near < 1.0,
+        "near the capital should be defended (mult {mult_near})"
+    );
     let mult_far = home_defense_mult(&state, "中国", [80.0, 80.0]);
-    assert_eq!(mult_far, 1.0, "far from the capital should have no home-field defense");
+    assert_eq!(
+        mult_far, 1.0,
+        "far from the capital should have no home-field defense"
+    );
 }
 
 /// 舰船定制面板：装了护盾+轨道炮+推进的舰，其 effective 面板反映组件的护盾池/火力/射程/
@@ -61,12 +75,19 @@ fn ship_panel_reflects_fitted_components() {
     let base = config.ship_spec("corvette");
     let ship0 = state.ships[0].name.clone();
     if let Some(s) = state.ship_mut(&ship0) {
-        s.components = vec!["shield".to_string(), "railgun".to_string(), "ion_drive".to_string()];
+        s.components = vec![
+            "shield".to_string(),
+            "railgun".to_string(),
+            "ion_drive".to_string(),
+        ];
     }
     let s = state.ship(&ship0).unwrap();
     let panel = ship_panel(&config, s);
     // 船体 = 舰级直接属性，模块不改它（护盾/装甲只吸收/减伤，不加血）。
-    assert!((panel.hull_max - base.hull).abs() < 1e-9, "hull is a direct class attribute");
+    assert!(
+        (panel.hull_max - base.hull).abs() < 1e-9,
+        "hull is a direct class attribute"
+    );
     // 护盾池 = 模块 × 舰级 shield_mult。
     let shield_spec = config.component_spec("shield");
     assert!((panel.shield_max - shield_spec.shield * base.shield_mult).abs() < 1e-9);
@@ -79,7 +100,10 @@ fn ship_panel_reflects_fitted_components() {
     let drive_spec = config.component_spec("ion_drive");
     assert!((panel.speed - drive_spec.speed * base.speed_mult).abs() < 1e-9);
     assert!((panel.accel - drive_spec.accel * base.accel_mult).abs() < 1e-9);
-    assert!(panel.upkeep > base.upkeep, "components should raise maintenance");
+    assert!(
+        panel.upkeep > base.upkeep,
+        "components should raise maintenance"
+    );
     // 护甲=硬度：这艘船没装装甲，硬度应为 0。
     assert!((panel.hardness).abs() < 1e-9);
 }
@@ -129,7 +153,11 @@ fn fire_degrades_components_under_damage() {
     if let Some(t) = state.ship_mut(&ship3) {
         t.position = [40.0, 40.0];
         t.components = vec!["missile".to_string()];
-        t.component_hp = t.components.iter().map(|c| component_integrity(&config, c)).collect();
+        t.component_hp = t
+            .components
+            .iter()
+            .map(|c| component_integrity(&config, c))
+            .collect();
         t.hull = 500.0;
         t.hull_max = 500.0;
         t.shield = 0.0;
@@ -139,10 +167,22 @@ fn fire_degrades_components_under_damage() {
     if let Some(a) = state.ship_mut(&ship0) {
         a.position = [40.1, 40.0];
         a.components = vec!["railgun".to_string()];
-        a.component_hp = a.components.iter().map(|c| component_integrity(&config, c)).collect();
+        a.component_hp = a
+            .components
+            .iter()
+            .map(|c| component_integrity(&config, c))
+            .collect();
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let before = state.ship(&ship3).unwrap().component_hp.clone();
     let panel_before = ship_panel(&config, state.ship(&ship3).unwrap());
     fire_concentrate(&mut state, &config, &ship0, &ship3);
@@ -169,9 +209,16 @@ fn damaged_components_repair_in_friendly_territory() {
         s.component_hp = vec![5.0];
         s.hull = s.hull.max(5.0);
     }
-    let before = state.ship(&ship0).map(|s| s.component_hp.first().copied().unwrap_or(0.0)).unwrap_or(0.0);
+    let before = state
+        .ship(&ship0)
+        .map(|s| s.component_hp.first().copied().unwrap_or(0.0))
+        .unwrap_or(0.0);
     advance(&mut state, &config, &mut Prng::new(42));
-    let after = state.ship(&ship0).map(|s| s.component_hp.first().copied()).flatten().unwrap_or(before);
+    let after = state
+        .ship(&ship0)
+        .map(|s| s.component_hp.first().copied())
+        .flatten()
+        .unwrap_or(before);
     assert!(
         after > before,
         "a damaged component should repair over rounds; before={before} after={after}"
@@ -195,10 +242,17 @@ fn fleet_air_defense_covers_nearby_missile_targets() {
     if let Some(g) = state.ship_mut(&ship3) {
         g.position = [41.0, 40.0];
         g.components = vec!["point_defense".to_string()];
-        g.component_hp = g.components.iter().map(|c| component_integrity(&config, c)).collect();
+        g.component_hp = g
+            .components
+            .iter()
+            .map(|c| component_integrity(&config, c))
+            .collect();
     }
     let cover_with = cluster_pd_cover(&state, &config, &ship5, "美国", [40.0, 40.0]);
-    assert!(cover_with > 0.0, "a nearby PD ship should give air-defense cover; got {cover_with}");
+    assert!(
+        cover_with > 0.0,
+        "a nearby PD ship should give air-defense cover; got {cover_with}"
+    );
     // 把 PD 舰移远 → 覆盖应下降。
     state.ship_mut(&ship3).unwrap().position = [100.0, 100.0];
     let cover_far = cluster_pd_cover(&state, &config, &ship5, "美国", [40.0, 40.0]);
@@ -229,8 +283,16 @@ fn combat_respects_shields_and_speed_evasion() {
         s.shield = 12.0;
         s.shield_max = 12.0;
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
 
     let shield_before = state.ship(&ship3).map(|s| s.shield).unwrap();
     let hull_before = state.ship(&ship3).map(|s| s.hull).unwrap();
@@ -238,9 +300,18 @@ fn combat_respects_shields_and_speed_evasion() {
 
     let shield_after = state.ship(&ship3).map(|s| s.shield).unwrap();
     let hull_after = state.ship(&ship3).map(|s| s.hull).unwrap();
-    assert!(shield_after < shield_before, "shield pool must absorb damage");
-    assert!(hull_after < hull_before, "hull should take spill damage too");
-    assert!(hull_after > 0.0, "a single volley on a destroyer should not one-shot it");
+    assert!(
+        shield_after < shield_before,
+        "shield pool must absorb damage"
+    );
+    assert!(
+        hull_after < hull_before,
+        "hull should take spill damage too"
+    );
+    assert!(
+        hull_after > 0.0,
+        "a single volley on a destroyer should not one-shot it"
+    );
 
     // Evasion: a fast target is hit less by a low-tracking weapon than a slow one.
     let fast_hit = hit_factor(2.0, 2.6); // corvette speed

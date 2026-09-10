@@ -22,14 +22,29 @@ pub fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
 }
 
 /// Move a ship one round's step toward `dest`, capped by its class speed.
-pub fn move_toward(state: &mut State, config: &GameConfig, ship_id: &str, _class: &str, dest: [f64; 2]) {
-    let Some(ship) = state.ship(ship_id).cloned() else { return };
+pub fn move_toward(
+    state: &mut State,
+    config: &GameConfig,
+    ship_id: &str,
+    _class: &str,
+    dest: [f64; 2],
+) {
+    let Some(ship) = state.ship(ship_id).cloned() else {
+        return;
+    };
     let pos = ship.position;
     let fid = ship.faction_id.clone();
-    // MOND 异常区：没有掌握修正引力的势力把指令坐标「算错」，实际航向产生偏移。
-    // 偏移幅度是**伪随机**的（`nav_roll` 按 势力×舰名×回合 派生）：这一回合偏多少是确定的，
-    // 但**下回合是全新的一次尝试**——所以深处目标不是「进不去」，而是「要多试几个回合」。
-    let dest = mond_drift(config, &fid, dest, nav_roll(&fid, &ship.name, state.round));
+    // MOND 异常区：势力把指令坐标「算错」多少，由它的**掌握度**连续决定（`control = 1`
+    // 就是今天的崇拜教，指哪打哪）；偏移幅度还是**伪随机**的（`nav_roll` 按 势力×舰名×回合
+    // 派生）：这一回合偏多少是确定的，但**下回合是全新的一次尝试**——所以深处目标不是
+    // 「进不去」，而是「要多试几个回合」。
+    let control = mond_control(state, &fid);
+    let dest = mond_drift(
+        config,
+        control,
+        dest,
+        nav_roll(&fid, &ship.name, state.round),
+    );
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;
@@ -42,12 +57,20 @@ pub fn move_toward(state: &mut State, config: &GameConfig, ship_id: &str, _class
     // 当前速度向巡航逼近（accel 若为 0 则直接到巡航，避免推进全被打伤时卡死）。
     let vel = if cruise > 0.0 {
         let accel = panel.accel;
-        let next = if accel > 1e-9 { ship.velocity + accel } else { cruise };
+        let next = if accel > 1e-9 {
+            ship.velocity + accel
+        } else {
+            cruise
+        };
         next.min(cruise)
     } else {
         0.0
     };
-    let step = if distance <= config.combat.arrival_eps { 0.0 } else { vel.min(distance) };
+    let step = if distance <= config.combat.arrival_eps {
+        0.0
+    } else {
+        vel.min(distance)
+    };
     if let Some(s) = state.ship_mut(ship_id) {
         s.velocity = vel;
         if step > 0.0 {
@@ -65,7 +88,11 @@ pub fn trade_anchor(state: &State, fid: &str) -> [f64; 2] {
     if !cap.is_empty() && state.body(&cap).is_some() {
         return state.body_position(&cap);
     }
-    if let Some(s) = state.ships.iter().find(|s| s.faction_id == fid && s.hull > 0.0) {
+    if let Some(s) = state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == fid && s.hull > 0.0)
+    {
         return s.position;
     }
     [0.0, 0.0]

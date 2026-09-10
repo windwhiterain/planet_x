@@ -3,10 +3,10 @@
 use super::*;
 
 mod apply;
+mod blueprint;
 mod normalize;
 mod ship;
 mod view;
-mod blueprint;
 
 // --- the apply report: "did my diff actually land?" ---------------------
 //
@@ -24,7 +24,14 @@ fn some_building(state: &State, fid: &str, shipyard: bool) -> (CityId, BuildingI
             }
         }
     }
-    panic!("{fid} 没有 {} 的建筑", if shipyard { "建造区" } else { "非建造区" });
+    panic!(
+        "{fid} 没有 {} 的建筑",
+        if shipyard {
+            "建造区"
+        } else {
+            "非建造区"
+        }
+    );
 }
 
 /// 建一张图 + 把它挂到某个建造区上（两个写面动作合并成一份 diff：这是正解用法）。

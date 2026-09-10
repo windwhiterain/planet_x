@@ -27,23 +27,39 @@ fn spawn_uses_the_yard_blueprint() {
         .find(|s| s.blueprint.as_deref() == Some("重甲护卫"))
         .expect("挂了图的那个建造区必须产出一艘舰")
         .clone();
-    assert_eq!(ship.components, vec!["kinetic".to_string(), "ion_drive".to_string()], "选装 = 图上的选装（顺序也照图）");
+    assert_eq!(
+        ship.components,
+        vec!["kinetic".to_string(), "ion_drive".to_string()],
+        "选装 = 图上的选装（顺序也照图）"
+    );
     assert_eq!(ship.class, class);
-    assert_eq!(ship.hull_max, ship_panel(&config, &ship).hull_max, "面板是快照，且与 config 现算的面板一致");
-    assert_eq!(ship.spawned_round, Some(state.round), "下水回合要记下来（Q9）");
+    assert_eq!(
+        ship.hull_max,
+        ship_panel(&config, &ship).hull_max,
+        "面板是快照，且与 config 现算的面板一致"
+    );
+    assert_eq!(
+        ship.spawned_round,
+        Some(state.round),
+        "下水回合要记下来（Q9）"
+    );
     // 组件成本**真的**从库存里扣了：在同一份状态上再走一次「出厂 + 付款」，逐资源比对
     // （比「跟 400 比」可靠——那一回合里还有开采/市场/别处的建造在同一条库存上进账）。
     let mut probe = state.clone();
     let before = state.faction(&fid).unwrap().resources.clone();
-    spawn_ship(&mut probe, &config, ShipSpawn {
-        owner: fid.clone(),
-        class: "corvette",
-        position: state.body_position("地球"),
-        city: None,
-        via: SpawnVia::Shipyard,
-        pay_components: true,
-        blueprint: Some(&"重甲护卫".to_string()),
-    });
+    spawn_ship(
+        &mut probe,
+        &config,
+        ShipSpawn {
+            owner: fid.clone(),
+            class: "corvette",
+            position: state.body_position("地球"),
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: true,
+            blueprint: Some(&"重甲护卫".to_string()),
+        },
+    );
     let after = probe.faction(&fid).unwrap().resources.clone();
     let mut need: ResourceMap = ResourceMap::new();
     for comp in ["kinetic", "ion_drive"] {
@@ -87,8 +103,14 @@ fn editing_a_blueprint_does_not_touch_existing_ships() {
     let report = apply_patch(&mut state, &config, &diff).expect("editing a blueprint applies");
     assert!(report.is_clean(), "改图本身必须干净：{:?}", report.skipped);
 
-    let after = state.ship(&name).cloned().expect("the old ship is still there");
-    assert_eq!(after.components, before.components, "**已下水的舰的选装是快照**，改图不许动它");
+    let after = state
+        .ship(&name)
+        .cloned()
+        .expect("the old ship is still there");
+    assert_eq!(
+        after.components, before.components,
+        "**已下水的舰的选装是快照**，改图不许动它"
+    );
     assert_eq!(after.hull_max, before.hull_max);
     assert_eq!(after.shield_max, before.shield_max);
     assert_eq!(after.component_hp, before.component_hp);
@@ -122,11 +144,25 @@ fn the_yard_launches_from_any_designs_components() {
     );
     let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
     assert_eq!(
-        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:custom".to_string()), &site),
+        crate::autocontrol::resolve_loadout(
+            &state,
+            &config,
+            fid.clone(),
+            &class,
+            Some(&"auto:custom".to_string()),
+            &site
+        ),
         vec!["plasma".to_string(), "ion_drive".to_string()],
         "`Auto` 图的选装必须真的生效（否则 AI 建图只是空头支票）"
     );
-    let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("auto:custom"));
+    let name = spawn_at(
+        &mut state,
+        &config,
+        &fid,
+        &class,
+        "地球",
+        Some("auto:custom"),
+    );
     assert_eq!(
         state.ship(&name).unwrap().components,
         vec!["plasma".to_string(), "ion_drive".to_string()],
@@ -145,7 +181,14 @@ fn the_yard_launches_from_any_designs_components() {
     );
     let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
     assert_eq!(
-        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:empty".to_string()), &site),
+        crate::autocontrol::resolve_loadout(
+            &state,
+            &config,
+            fid.clone(),
+            &class,
+            Some(&"auto:empty".to_string()),
+            &site
+        ),
         crate::autocontrol::choose_loadout(&state, &config, fid.clone(), &class),
         "空选装 = 交给生成器（与归属无关）"
     );
@@ -186,8 +229,19 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
         crate::autocontrol::choose_loadout(&state, &config, fid.clone(), &class),
         "`Auto` 图的选装必须**就是** `choose_loadout` 的答案（不是第二份生成逻辑）"
     );
-    let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("auto:corvette"));
-    assert_eq!(state.ship(&name).unwrap().components, expected, "出厂用的是当场算出来的选装");
+    let name = spawn_at(
+        &mut state,
+        &config,
+        &fid,
+        &class,
+        "地球",
+        Some("auto:corvette"),
+    );
+    assert_eq!(
+        state.ship(&name).unwrap().components,
+        expected,
+        "出厂用的是当场算出来的选装"
+    );
 
     // **没有提前缓存**：把库存掏空之后再算，生成器给不出完整选装——只剩**平台兜底**的那件
     // 推进器（「至少一件推进」是硬保证：没有推进器的舰速度 0、永远不能当运输舰，那是
@@ -212,7 +266,9 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
         "库存掏空 ⇒ 只剩平台兜底（证明它是**出厂那一刻**算的）：{empty_stock:?} vs {expected:?}"
     );
     assert!(
-        empty_stock.iter().all(|c| config.component_spec(c).category == "thrust"),
+        empty_stock
+            .iter()
+            .all(|c| config.component_spec(c).category == "thrust"),
         "兜底只给**平台**（推进器）：买不起的军备绝不白送，实为 {empty_stock:?}"
     );
 }
@@ -229,7 +285,9 @@ fn blueprint_default_order_governs_new_ships() {
         "护卫-守家",
         "corvette",
         &["kinetic", "ion_drive"],
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string(),
+        }),
         ControlMode::Player,
     );
     // 舰队默认**同时**是 Player 且冲突 ⇒ **更具体的图赢**（链：叶 → 图 → 舰队默认 → …）。
@@ -239,10 +297,16 @@ fn blueprint_default_order_governs_new_ships() {
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
     let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("护卫-守家"));
-    assert_eq!(state.ship_control(name.clone()), ControlMode::Player, "图上的意图归玩家 ⇒ AI 不许接管这艘舰");
+    assert_eq!(
+        state.ship_control(name.clone()),
+        ControlMode::Player,
+        "图上的意图归玩家 ⇒ AI 不许接管这艘舰"
+    );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        }),
         "图比舰队默认更具体 ⇒ 图赢（Q1(c)）"
     );
 
@@ -282,7 +346,9 @@ fn fleet_default_still_covers_blueprintless_ships() {
     for (ship, what) in [(&with_bp, "挂了图但图没写 order"), (&without_bp, "没有图")] {
         assert_eq!(
             state.ship_behavior(ship.clone()),
-            Some(ShipBehavior::Dock { body: "火星".to_string() }),
+            Some(ShipBehavior::Dock {
+                body: "火星".to_string()
+            }),
             "{what} 的舰仍由舰队默认作答"
         );
         assert_eq!(
@@ -305,15 +371,22 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
         "护卫-守家",
         "corvette",
         &["kinetic", "ion_drive"],
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string(),
+        }),
         ControlMode::Player,
     );
     let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("护卫-守家"));
     // ① 刚下水的舰：叶**存在**且写着 `Inherit`，但更具体的图层供值 ⇒ 出处是它。
-    assert_eq!(state.ship_behavior_source(name.clone()), Some(OrderSource::Blueprint("护卫-守家".to_string())));
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        Some(OrderSource::Blueprint("护卫-守家".to_string()))
+    );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock { body: "地球".to_string() }),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        }),
         "叶没表态 ⇒ 图上的意图生效"
     );
 
@@ -322,9 +395,24 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
         "ship_orders": [{"ship": name, "remove": true}]
     }]});
     apply_patch(&mut state, &config, &diff).expect("remove applies");
-    assert!(!state.control(fid.clone()).unwrap().ship_orders.contains_key(&name), "叶真的被删了");
-    assert_eq!(state.ship_behavior_source(name.clone()), Some(OrderSource::Blueprint("护卫-守家".to_string())));
-    assert_eq!(state.ship_behavior(name.clone()), Some(ShipBehavior::Dock { body: "地球".to_string() }));
+    assert!(
+        !state
+            .control(fid.clone())
+            .unwrap()
+            .ship_orders
+            .contains_key(&name),
+        "叶真的被删了"
+    );
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        Some(OrderSource::Blueprint("护卫-守家".to_string()))
+    );
+    assert_eq!(
+        state.ship_behavior(name.clone()),
+        Some(ShipBehavior::Dock {
+            body: "地球".to_string()
+        })
+    );
 
     // ③ 把图的意图轴清空（`order: null`）：叶**不存在** + 没人供值 ⇒ **没有出处**
     //    （调用方按 Idle 兜底）。这就是「叶不存在」那一侧。
@@ -332,36 +420,57 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
         {"name": "护卫-守家", "order": null}
     ]}]});
     apply_patch(&mut state, &config, &diff).expect("clearing the order axis applies");
-    assert_eq!(state.ship_behavior_source(name.clone()), None, "没有任何一层说话");
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        None,
+        "没有任何一层说话"
+    );
     assert_eq!(state.ship_behavior(name.clone()), None);
 
     // ④ **叶存在但写着 `Inherit`**（不是删掉它）：出处必须诚实报 `leaf`——值真的来自
     //    那片叶（`leaf.map(|l| l.value).unwrap_or(..)`），与「没有叶」**不等价**。
-    state
-        .control_mut(fid.clone())
-        .unwrap()
-        .ship_orders
-        .insert(name.clone(), Control::inherit(ShipBehavior::Move { position: [1.0, 2.0] }));
-    assert_eq!(state.ship_behavior_source(name.clone()), Some(OrderSource::Leaf));
+    state.control_mut(fid.clone()).unwrap().ship_orders.insert(
+        name.clone(),
+        Control::inherit(ShipBehavior::Move {
+            position: [1.0, 2.0],
+        }),
+    );
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        Some(OrderSource::Leaf)
+    );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Move { position: [1.0, 2.0] }),
+        Some(ShipBehavior::Move {
+            position: [1.0, 2.0]
+        }),
         "叶存在就用叶里的值（与它的 mode 无关）——这正是「叶 Inherit ≠ 没有叶」"
     );
 
     // ⑤ 舰队默认供值时出处是它；叶有意见时叶赢。
-    state.control_mut(fid.clone()).unwrap().ship_orders.remove(&name);
+    state
+        .control_mut(fid.clone())
+        .unwrap()
+        .ship_orders
+        .remove(&name);
     let diff = serde_json::json!({"control": [{"faction_id": "中国",
         "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
     }]});
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
-    assert_eq!(state.ship_behavior_source(name.clone()), Some(OrderSource::FleetDefault));
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        Some(OrderSource::FleetDefault)
+    );
     state
         .control_mut(fid.clone())
         .unwrap()
         .ship_orders
         .insert(name.clone(), Control::player(ShipBehavior::Idle));
-    assert_eq!(state.ship_behavior_source(name.clone()), Some(OrderSource::Leaf), "叶有意见 ⇒ 叶赢");
+    assert_eq!(
+        state.ship_behavior_source(name.clone()),
+        Some(OrderSource::Leaf),
+        "叶有意见 ⇒ 叶赢"
+    );
 }
 
 /// **悬空图指针 ⇒ 该建造区停产**（Q10(a)）：进度不再增加，也没有舰凭空冒出来。
@@ -392,12 +501,33 @@ fn a_dangling_blueprint_pointer_stops_the_yard() {
     let ships_before = state.ships.len();
     let mut rng = Prng::new(42);
     advance(&mut state, &config, &mut rng);
-    assert_eq!(state.ships.len(), ships_before, "悬空指针不许凭空产出（也不许静默回落生成器）");
-    let progress = state.city(&cid).unwrap().ship_progress.get(&class).copied().unwrap_or(0.0);
-    assert!(progress <= 1e-9, "那个建造区停产 ⇒ 进度必须一点不涨，got {progress}");
+    assert_eq!(
+        state.ships.len(),
+        ships_before,
+        "悬空指针不许凭空产出（也不许静默回落生成器）"
+    );
+    let progress = state
+        .city(&cid)
+        .unwrap()
+        .ship_progress
+        .get(&class)
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        progress <= 1e-9,
+        "那个建造区停产 ⇒ 进度必须一点不涨，got {progress}"
+    );
     // 建区还在、指针**原样**保留（读面据此能一眼看出「这个区指着一张不存在的图」）。
     assert_eq!(
-        state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint.as_deref(),
+        state
+            .city(&cid)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == bid)
+            .unwrap()
+            .blueprint
+            .as_deref(),
         Some("已经不存在的图"),
         "指针原样输出，不被静默清掉"
     );
@@ -428,7 +558,13 @@ fn a_player_blueprint_that_cannot_be_afforded_waits_for_money() {
     let mut rng = Prng::new(42);
     advance(&mut state, &config, &mut rng);
     assert_eq!(state.ships.len(), ships_before, "买不起就不下水");
-    let progress = state.city(&cid).unwrap().ship_progress.get(&class).copied().unwrap_or(0.0);
+    let progress = state
+        .city(&cid)
+        .unwrap()
+        .ship_progress
+        .get(&class)
+        .copied()
+        .unwrap_or(0.0);
     assert!(
         progress >= config.ship_spec(&class).build_points - 1e-9,
         "进度**继续攒**（下回合再试），got {progress}"
@@ -442,7 +578,10 @@ fn a_player_blueprint_that_cannot_be_afforded_waits_for_money() {
     stock(&mut state, &config, &fid, 400.0);
     advance(&mut state, &config, &mut rng);
     assert!(
-        state.ships.iter().any(|s| s.blueprint.as_deref() == Some("豪华护卫")),
+        state
+            .ships
+            .iter()
+            .any(|s| s.blueprint.as_deref() == Some("豪华护卫")),
         "攒够钱之后必须下水（进度没丢）"
     );
 }
@@ -469,17 +608,23 @@ fn ship_spawned_event_carries_the_blueprint_only_when_there_is_one() {
             .events
             .iter()
             .find_map(|e| match e {
-                GameEvent::ShipSpawned { ship: s, blueprint, .. } if s == ship => {
-                    Some((e.headline(), blueprint.clone()))
-                }
+                GameEvent::ShipSpawned {
+                    ship: s, blueprint, ..
+                } if s == ship => Some((e.headline(), blueprint.clone())),
                 _ => None,
             })
             .expect("spawn_ship must emit an event")
     };
     let (h_bp, bp) = headline(&with_bp);
     assert_eq!(bp.as_deref(), Some("有图"));
-    assert!(h_bp.contains("设计图：有图"), "挂了图的事件句子带归因：{h_bp}");
+    assert!(
+        h_bp.contains("设计图：有图"),
+        "挂了图的事件句子带归因：{h_bp}"
+    );
     let (h_plain, bp2) = headline(&plain);
     assert_eq!(bp2, None);
-    assert!(!h_plain.contains("设计图"), "无图那一路的句子不许变（digest 的故事板拿它比对）：{h_plain}");
+    assert!(
+        !h_plain.contains("设计图"),
+        "无图那一路的句子不许变（digest 的故事板拿它比对）：{h_plain}"
+    );
 }

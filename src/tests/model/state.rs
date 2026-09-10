@@ -49,6 +49,17 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
     // **状态结构**的迁移，不是事件日志的形状——而「这一回合出过哪些事件」本来就随世界走向变
     //（改一条经济机制就可能让它出现），留着它会让这条守卫变成一条**行为**断言。
     state.events.clear();
+    // 同理，把**指令叶**也还原成出厂形态（`Inherit` 的 `Idle`）：本测试测的是
+    // 「schema 迁移」与「没有图 ⇒ 指令链上那一层恒为空」，**不是**「这 8 回合里 AI 选了什么」。
+    // 在役的角色轴第三态（观测舰）会让 AI **从第 1 回合起**就写指令——它把观测舰派去
+    // `Dock` 异常区的目标天体（seed 7 抽到海王星），于是「第一艘舰的叶还是出厂那条 Idle」
+    // 这个前提不再成立。归位之后，断言仍然落在**链的形状**（`OrderSource::Leaf`）上。
+    for c in state.control.values_mut() {
+        for o in c.ship_orders.values_mut() {
+            o.value = ShipBehavior::Idle;
+            o.mode = ControlMode::Inherit;
+        }
+    }
     let text = ron::to_string(&state).expect("serialize the state");
     for needle in ["blueprint:None", "blueprints:{}"] {
         assert!(
@@ -63,7 +74,10 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
         // 用 `SCHEMA_VERSION` 拼针脚，而不是写死当时那个号：这条手术的目的是**造一份真的
         // v9 档**，而版本号每升一档都会变（合并设计图/承包市场两条分支时就已经撞过一次：
         // 写死 `10` 的针脚在 v13 上什么都不替换，于是「v9 档」里写着 13）。
-        .replace(&format!("schema_version:{SCHEMA_VERSION}"), "schema_version:9");
+        .replace(
+            &format!("schema_version:{SCHEMA_VERSION}"),
+            "schema_version:9",
+        );
     assert!(
         !old_text.contains("blueprint") && !old_text.contains("spawned_round"),
         "手术没做干净：v9 档里不该出现设计图那四个字段 —— 残留处：{:?}",
@@ -71,37 +85,66 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
             .find("blueprint")
             .or_else(|| old_text.find("spawned_round"))
             .map(|i| {
-                let head: String = old_text[..i].chars().rev().take(80).collect::<Vec<_>>()
-                    .into_iter().rev().collect();
+                let head: String = old_text[..i]
+                    .chars()
+                    .rev()
+                    .take(80)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 let tail: String = old_text[i..].chars().take(120).collect();
                 format!("{head}{tail}")
             })
     );
 
-    let mut restored: State = ron::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");
+    let mut restored: State =
+        ron::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");
     assert_eq!(restored.schema_version, 9, "档里写的就是 9");
     migrate(&mut restored).expect("v9 必须能迁到当前版本");
     assert_eq!(restored.schema_version, SCHEMA_VERSION);
     assert_eq!(restored.ships.len(), ships, "实体不许在迁移里丢");
     assert_eq!(restored.cities.len(), cities);
-    assert_eq!(restored.cities.iter().map(|c| c.buildings.len()).sum::<usize>(), buildings);
+    assert_eq!(
+        restored
+            .cities
+            .iter()
+            .map(|c| c.buildings.len())
+            .sum::<usize>(),
+        buildings
+    );
     for (fid, c) in &restored.control {
-        assert!(c.blueprints.is_empty(), "{fid} 的设计图库在旧档里必须是空的");
+        assert!(
+            c.blueprints.is_empty(),
+            "{fid} 的设计图库在旧档里必须是空的"
+        );
     }
     for s in &restored.ships {
         assert_eq!(s.blueprint, None, "旧档的舰没有出厂图");
-        assert_eq!(s.spawned_round, None, "旧档缺 spawned_round ⇒ 未知（不是第 0 回合）");
+        assert_eq!(
+            s.spawned_round, None,
+            "旧档缺 spawned_round ⇒ 未知（不是第 0 回合）"
+        );
     }
     for c in &restored.cities {
         for b in &c.buildings {
-            assert_eq!(b.blueprint, None, "旧档的建造区没有图指针 ⇒ 走 choose_loadout");
+            assert_eq!(
+                b.blueprint, None,
+                "旧档的建造区没有图指针 ⇒ 走 choose_loadout"
+            );
         }
     }
     // 没有图 ⇒ 指令链上新增的那一层恒为空 ⇒ 取值与旧档一致：舰上的叶（出厂时那条
     // `Inherit` 的 `Idle`）就是它的答案，归属仍是「系统自动」（除非 scope 另有表态）。
     if let Some(ship) = restored.ships.first().map(|s| s.name.clone()) {
-        assert_eq!(restored.ship_behavior_source(ship.clone()), Some(OrderSource::Leaf));
-        assert_eq!(restored.ship_behavior(ship.clone()), Some(ShipBehavior::Idle));
+        assert_eq!(
+            restored.ship_behavior_source(ship.clone()),
+            Some(OrderSource::Leaf)
+        );
+        assert_eq!(
+            restored.ship_behavior(ship.clone()),
+            Some(ShipBehavior::Idle)
+        );
         assert_eq!(restored.ship_control(ship), ControlMode::Auto);
     }
 }

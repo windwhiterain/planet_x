@@ -30,9 +30,9 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
             continue; // 无活城：resurgence 会在后续回合重建，届时再定首都。
         }
 
-        let cur_owned = living.iter().any(|cid| {
-            state.city(cid).map(|c| c.body_id == cur).unwrap_or(false)
-        });
+        let cur_owned = living
+            .iter()
+            .any(|cid| state.city(cid).map(|c| c.body_id == cur).unwrap_or(false));
 
         let mut new_cap: Option<BodyId> = None;
         let mut reason = "";
@@ -46,7 +46,9 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
             // 亡城强迁 → 人口最高的活城（并列取名字序）。
             new_cap = Some(highest_pop_city_body(state, &fid));
             reason = "destroyed";
-        } else if state.capital_control(&fid) == ControlMode::Auto && state.round % review_every == 0 {
+        } else if state.capital_control(&fid) == ControlMode::Auto
+            && state.round % review_every == 0
+        {
             let best = highest_pop_city_body(state, &fid);
             // 候选与两笔成本**无论最后迁不迁都算出来并记下**：判据本身就是读面要回答的问题
             // （「为什么没迁」= 候选没便宜够 `capital_relocate_threshold`）。两个函数都只读
@@ -93,7 +95,10 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
                 .unwrap_or_default();
             {
                 let ctrl = state.control.entry(fid.clone()).or_default();
-                ctrl.capital = Some(Control { value: nc.clone(), mode: prev_mode });
+                ctrl.capital = Some(Control {
+                    value: nc.clone(),
+                    mode: prev_mode,
+                });
             }
             if loyalty_cost > 0.0 {
                 for cid in &living {
@@ -102,12 +107,15 @@ pub fn step_capital(state: &mut State, config: &GameConfig, flow: &mut RoundSink
                     }
                 }
             }
-            ev(state, GameEvent::CapitalRelocated {
-                faction: fid.clone(),
-                from,
-                to: nc,
-                reason: reason.to_string(),
-            });
+            ev(
+                state,
+                GameEvent::CapitalRelocated {
+                    faction: fid.clone(),
+                    from,
+                    to: nc,
+                    reason: reason.to_string(),
+                },
+            );
         } else if reviewed {
             // 评估过、但判据不成立 ⇒ **没迁**。这条同样要记：「为什么没迁」正是那两笔成本之差
             // （`candidate_cost + capital_relocate_threshold` 还不小于 `current_cost`）。

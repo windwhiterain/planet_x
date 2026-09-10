@@ -15,7 +15,11 @@ fn roster(state: &State, fid: &str) -> Vec<String> {
     let mut v: Vec<String> = state
         .ships
         .iter()
-        .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+        .filter(|s| {
+            s.faction_id == fid
+                && s.hull > 0.0
+                && state.ship_role(s.name.clone()) == ShipRole::Freight
+        })
         .map(|s| s.name.clone())
         .collect();
     v.sort();
@@ -72,7 +76,18 @@ fn grow_fleet(state: &mut State, fid: &str, times: usize) {
 /// 连跑 `rounds` 个回合的**角色定编**（每回合先推进 `round` 再定编，与 `sim` 同步：
 /// 骰子是 `(势力, 舰名, 回合, "role")` 派生的，**换回合才换骰子**）。
 /// 返回每回合的运输舰名单。
+///
+/// ⚠ **这份用例集测的是集货定编**，而角色轴上现在还有**优先级更高**的第三态（观测舰，
+/// 用户裁决「观测 > 运输 > 战斗」）——不把它从棋盘上拿开的话，运输舰的名额会被观测抢走
+/// （实测：本文件里四条用例当场翻红，平均头数从 1.46 掉到 1.00），测出来的就不是集货的定编了。
+/// 拿开的方式用的是**真实存在的一种状态**：把本势力标成**已经学满 MOND**
+/// （`mond_control = 1.0` ⇒ 棘轮之下没有东西可学 ⇒ `observer_quota = 0` ⇒ 没人去观测），
+/// 而不是把观测那条机制关掉或改常数。
+/// 观测自己的定编/选靶/优先级由 `src/tests/autocontrol/knowledge.rs` 专门覆盖。
 fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> Vec<Vec<String>> {
+    if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
+        f.mond_control = 1.0;
+    }
     let mut hist = Vec::new();
     for _ in 0..rounds {
         state.round += 1;
@@ -91,16 +106,27 @@ fn crew_size_is_one_ship_per_stocked_depot() {
     let (config, mut state) = fresh(42);
     state.depots.clear();
     let baseline = needed_haulers(&state, &config, "中国");
-    assert!(baseline > 0.0, "每个建造区常备一套选装 ⇒ 开局就有进口腿（实为 {baseline:.2}）");
+    assert!(
+        baseline > 0.0,
+        "每个建造区常备一套选装 ⇒ 开局就有进口腿（实为 {baseline:.2}）"
+    );
     // **首都没有货 ⇒ 进口腿一条都不成立**（「有货才派」，与出口侧「有净剩余才派」同一条纪律）。
     let mut dry = state.clone();
     for f in dry.factions.iter_mut() {
         f.resources.clear();
     }
-    assert_eq!(needed_haulers(&dry, &config, "中国"), 0.0, "首都拿不出货 ⇒ 不派船");
+    assert_eq!(
+        needed_haulers(&dry, &config, "中国"),
+        0.0,
+        "首都拿不出货 ⇒ 不派船"
+    );
     // 出口腿：往**没有城的天体**放货（那里没有建设需求 ⇒ 全是净剩余）。
     export_only(&mut state, "中国", &["冥王星", "卡戎"], 100.0);
-    assert_eq!(needed_haulers(&state, &config, "中国"), 2.0, "两处净剩余 = 两条腿 = 两艘船");
+    assert_eq!(
+        needed_haulers(&state, &config, "中国"),
+        2.0,
+        "两处净剩余 = 两条腿 = 两艘船"
+    );
     // 一处搬空 ⇒ 那条腿自然消失（「积压清空那艘船就改回战舰」的机制落点）。
     state.depots.clear();
     state.depot_add("中国", "冥王星", "碳", 100.0);
@@ -155,7 +181,10 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
     state.depot_add("中国", "金星", "碳", 100.0);
     let hist = run_roles(&mut state, &config, "中国", 60);
     let with_hauler = hist.iter().filter(|r| !r.is_empty()).count();
-    assert!(with_hauler > 35, "有积压就该有人跑运输（60 回合里只有 {with_hauler} 回合有）");
+    assert!(
+        with_hauler > 35,
+        "有积压就该有人跑运输（60 回合里只有 {with_hauler} 回合有）"
+    );
     // 运力最好的船优先：开局是「护卫 ×2 + 驱逐 ×1」，驱逐的运力最高
     //（4×1.3÷2.5 = 2.08 vs 2×1.0÷1.5 = 1.33），它被选中的回合数该多于任何一艘护卫。
     let destroyer = state
@@ -171,14 +200,17 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
         .map(|r| r.iter().filter(|n| **n != destroyer).count())
         .max()
         .unwrap_or(0);
-    assert!(d > c_max, "运力高的船该被优先选中：驱逐 {d} 回合 vs 单艘护卫最多 {c_max} 回合");
+    assert!(
+        d > c_max,
+        "运力高的船该被优先选中：驱逐 {d} 回合 vs 单艘护卫最多 {c_max} 回合"
+    );
     // 结论落在叶子上，且模式是 `Inherit`（玩家把**舰队默认**设成 Player 时能压过 AI）。
     let (hauler, leaf) = state
         .control("中国".to_string())
         .and_then(|c| {
-            c.ship_freighter
+            c.ship_role
                 .iter()
-                .find(|(_, l)| l.value)
+                .find(|(_, l)| l.value == ShipRole::Freight)
                 .map(|(n, l)| (n.clone(), l.clone()))
         })
         .expect("AI 该在某个回合写过一片 true 的叶");
@@ -193,19 +225,19 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(hauler.clone(), Control::player(true));
+        .ship_role
+        .insert(hauler.clone(), Control::player(ShipRole::Freight));
     state.depots.clear();
     assign_roles(&mut state, &config);
     assert!(
-        state.ship_freighter(hauler.clone()),
+        state.ship_role(hauler.clone()) == ShipRole::Freight,
         "玩家钉的角色：AI 不得改写（哪怕没有积压）"
     );
     assert_eq!(
         state
             .control("中国".to_string())
             .unwrap()
-            .ship_freighter
+            .ship_role
             .get(&hauler)
             .unwrap()
             .mode,
@@ -231,23 +263,31 @@ fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(ship.clone(), Control::player(true));
+        .ship_role
+        .insert(ship.clone(), Control::player(ShipRole::Freight));
     assign_roles(&mut state, &config);
-    assert!(state.ship_freighter(ship.clone()));
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight);
     assert!(
-        state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+        state
+            .control("中国".to_string())
+            .unwrap()
+            .ship_role
+            .contains_key(&ship),
         "玩家的叶 AI 不碰，所以它还在"
     );
 
     // 删叶：玩家放手 ⇒ 归属不再拦着 AI。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": "中国", "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = crate::control::apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
     assert!(
-        !state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+        !state
+            .control("中国".to_string())
+            .unwrap()
+            .ship_role
+            .contains_key(&ship),
         "叶必须真的没了"
     );
 
@@ -318,7 +358,10 @@ fn freight_tonnage_counts_speed_and_never_picks_a_ship_that_cannot_move() {
     );
     // 三处积压 ⇒ 目标头数 3（中庸），而只有 2 艘动得了 ⇒ 那两艘该基本都常在名单上。
     let mean = hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64;
-    assert!(mean > 1.85, "缺口大过候选数 ⇒ 两艘动得了的基本常驻名单（平均 {mean:.2}）");
+    assert!(
+        mean > 1.85,
+        "缺口大过候选数 ⇒ 两艘动得了的基本常驻名单（平均 {mean:.2}）"
+    );
     // **软排序**：两艘里运力高的那艘被选中的回合数不少于低的那艘。
     let movable: Vec<(String, f64)> = state
         .ships
@@ -354,24 +397,26 @@ fn the_effective_role_follows_the_leaf_then_the_fleet_default_then_the_record() 
         .name
         .clone();
     // 记录值（出厂快照）：护卫舰 = 战舰。
-    assert!(!state.ship_freighter(ship.clone()), "护卫舰出厂不是运输舰");
+    assert_eq!(
+        state.ship_role(ship.clone()),
+        ShipRole::War,
+        "护卫舰出厂不是运输舰"
+    );
     // 舰队默认（Player）⇒ 全舰队改口。
-    state
-        .control_mut("中国".to_string())
-        .unwrap()
-        .default_freighter = Some(Control::player(true));
+    state.control_mut("中国".to_string()).unwrap().default_role =
+        Some(Control::player(ShipRole::Freight));
     assert!(
-        state.ship_freighter(ship.clone()),
+        state.ship_role(ship.clone()) == ShipRole::Freight,
         "叶没有说话（压根没有）时，Player 的舰队默认说了算"
     );
     // 逐舰的叶（Player）更具体 ⇒ 压过舰队默认。
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(ship.clone(), Control::player(false));
+        .ship_role
+        .insert(ship.clone(), Control::player(ShipRole::War));
     assert!(
-        !state.ship_freighter(ship.clone()),
+        state.ship_role(ship.clone()) != ShipRole::Freight,
         "更具体的叶（逐舰 Player）压过舰队默认"
     );
 }
@@ -420,8 +465,14 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
             "平均头数该贴着配额（思潮 {mil}×军事 + {col}×殖民 ⇒ 配额 {quota}）：实为 {got:.2}"
         );
     }
-    assert!(militarist < neutral, "军国端该少跑运输：{militarist:.2} vs {neutral:.2}");
-    assert!(pacifist > neutral, "和平端该多跑运输：{pacifist:.2} vs {neutral:.2}");
+    assert!(
+        militarist < neutral,
+        "军国端该少跑运输：{militarist:.2} vs {neutral:.2}"
+    );
+    assert!(
+        pacifist > neutral,
+        "和平端该多跑运输：{pacifist:.2} vs {neutral:.2}"
+    );
     assert!(
         colonist > neutral,
         "殖民端要给远方殖民地送补给 ⇒ 该多跑运输（所以它在「尚武度」上是负权重）：{colonist:.2} vs {neutral:.2}"
@@ -439,6 +490,12 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
 #[test]
 fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let (config, mut state) = fresh(42);
+    // ⚠ 先把观测那一支**从棋盘上拿开**（把本势力标成已学满 MOND ⇒ 观测主张 0）：角色轴上
+    // 现在还有第三态，而它**优先级更高**（用户裁决 观测 > 运输 > 战斗）——不清场的话，
+    // 「名额收回」之后那艘船会变成**观测舰**而不是战舰，测出来的就不是集货的收回；
+    // 而且观测抽走的运力会让本势力把船**雇出去**（下面的承包承诺），又多一层干扰。
+    // 拿开用的是真实存在的一种状态，不是把机制关掉（与 `run_roles` 同一处置）。
+    state.faction_mut("中国").unwrap().mond_control = 1.0;
     // 出口腿（无城天体）——进口腿与保留量各有自己的守卫。
     export_only(&mut state, "中国", &["冥王星"], 100.0);
     // 角色是**掷骰**定的（有积压只是「有人去运」的概率高），所以这里跑几个回合而不是一个：
@@ -447,14 +504,22 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let mut found = None;
     for _ in 0..20 {
         sim::advance(&mut state, &config, &mut rng);
-        if let Some(n) = roster(&state, "中国").into_iter().next() {
+        // 只挑**没有承包承诺**的运输舰：在役的承包舰被硬承诺（`should_be_role` 第 1 条）钉在
+        // 运输位上，配额清空也收不回去——那是正确行为，不是本用例要测的事。
+        if let Some(n) = roster(&state, "中国")
+            .into_iter()
+            .find(|n| state.contracts.assignment_of(n).is_none())
+        {
             found = Some(n);
             break;
         }
     }
     let hauler = found.expect("有积压 ⇒ 若干回合内该定出运输舰");
     assert!(
-        matches!(state.ship_behavior(hauler.clone()), Some(ShipBehavior::Haul { .. })),
+        matches!(
+            state.ship_behavior(hauler.clone()),
+            Some(ShipBehavior::Haul { .. })
+        ),
         "运输舰该有一条路线，实为 {:?}",
         state.ship_behavior(hauler.clone())
     );
@@ -472,12 +537,15 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
         }
         state.round += 1;
         assign_roles(&mut state, &config);
-        if !state.ship_freighter(hauler.clone()) {
+        if state.ship_role(hauler.clone()) != ShipRole::Freight {
             recalled = true;
             break;
         }
     }
-    assert!(recalled, "没有积压了 ⇒ 该把运输舰的名额收回去（船改回战舰）");
+    assert!(
+        recalled,
+        "没有积压了 ⇒ 该把运输舰的名额收回去（船改回战舰）"
+    );
     // 配额为 0 时**超额是确定的**（带上我就是超一条），所以收回是必然的、且很快。
 }
 
@@ -523,7 +591,10 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
     // 3) 没有积压 ⇒ 全员战舰；新积压一出现 ⇒ 几回合内补得上（不是「一旦改成战舰就回不去」）。
     let mut st = setup(0.0, 0.0, &[]);
     run_roles(&mut st, &config, "中国", 10);
-    assert!(roster(&st, "中国").is_empty(), "没有货要动 ⇒ 谁都不该占着运输舰的名额");
+    assert!(
+        roster(&st, "中国").is_empty(),
+        "没有货要动 ⇒ 谁都不该占着运输舰的名额"
+    );
     st.depot_add("中国", "冥王星", "碳", 100.0);
     let mut waited = 0;
     for _ in 0..20 {
@@ -534,7 +605,10 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
             break;
         }
     }
-    assert!(waited <= 10, "新积压该在几回合内被顶上（实为 {waited} 回合）");
+    assert!(
+        waited <= 10,
+        "新积压该在几回合内被顶上（实为 {waited} 回合）"
+    );
 }
 
 /// **续用现有路线**：这条腿还有活时不改道（常驻路线不抖动）；没活了才重掷。
@@ -565,9 +639,14 @@ fn an_existing_route_is_kept_while_it_still_has_cargo() {
             }),
         );
     let picked = route_for(&state, &config, "中国", &ship).unwrap();
-    assert_eq!(picked.0, "冥王星", "那条腿还有货 ⇒ 续用现有路线，不按货量重掷");
+    assert_eq!(
+        picked.0, "冥王星",
+        "那条腿还有货 ⇒ 续用现有路线，不按货量重掷"
+    );
     // 冥王星清空 ⇒ 才重掷（这次必然去卡戎，因为只剩它一处）。
-    state.depots.remove(&("中国".to_string(), "冥王星".to_string()));
+    state
+        .depots
+        .remove(&("中国".to_string(), "冥王星".to_string()));
     let picked = route_for(&state, &config, "中国", &ship).unwrap();
     assert_eq!(picked.0, "卡戎", "原路线没货了 ⇒ 重新抽签");
 }
@@ -591,14 +670,21 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
         if hired > 0.0 {
             // 一张**已接单**的合同，承诺了 `hired` 的运力（它就该顶掉缺口）。
             let id = state.contracts.post(
-                "中国".into(), "碳".into(), hired, "冥王星".into(), "地球".into(), 0.1, 0, 0.0,
+                "中国".into(),
+                "碳".into(),
+                hired,
+                "冥王星".into(),
+                "地球".into(),
+                0.1,
+                0,
+                0.0,
             );
             let c = state.contracts.get_mut(id).unwrap();
             c.carrier = Some("美国".into());
             c.accepted_round = Some(0);
             c.expires_round = 99;
         }
-        post_contracts(state, &config);
+        post_contracts(state, &config, &mut RoundSink::default());
         state
             .contracts
             .contracts
@@ -608,7 +694,10 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             .sum()
     };
     let need = gap_at(&mut state, 0.0);
-    assert!(need > 0.0, "一条船都没有 ⇒ 该把整条线的要求运力挂出去（实为 {need:.3}）");
+    assert!(
+        need > 0.0,
+        "一条船都没有 ⇒ 该把整条线的要求运力挂出去（实为 {need:.3}）"
+    );
     // 已经雇到四成 ⇒ 只该挂剩下的六成。
     let partial = gap_at(&mut state, need * 0.4);
     assert!(
@@ -629,17 +718,18 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             .expect("中国开局有护卫舰")
             .name
             .clone();
-        st.ships.retain(|s| s.faction_id != "中国" || s.name == keep);
+        st.ships
+            .retain(|s| s.faction_id != "中国" || s.name == keep);
         // 这艘船必须**确实在跑运输**：角色现在是掷骰定的（思潮驱动），所以这里用一片
-        // `Player` 的叶把它钉住——`should_be_freighter` 对归玩家的轴不掷骰。
+        // `Player` 的叶把它钉住——`should_be_role` 对归玩家的轴不掷骰。
         st.control_mut("中国".to_string())
             .unwrap()
-            .ship_freighter
-            .insert(keep.clone(), Control::player(true));
+            .ship_role
+            .insert(keep.clone(), Control::player(ShipRole::Freight));
         st.depots.clear();
         st.contracts.contracts.clear();
         st.depot_add("中国", "冥王星", "碳", 100.0);
-        post_contracts(&mut st, &config);
+        post_contracts(&mut st, &config, &mut RoundSink::default());
         st.contracts
             .contracts
             .iter()
@@ -670,19 +760,29 @@ fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
         if stock > 0.0 {
             state.depot_add("中国", "冥王星", "碳", stock);
         }
-        post_contracts(state, &config);
+        post_contracts(state, &config, &mut RoundSink::default());
     };
     post(&mut state, 1000.0);
     assert_eq!(state.contracts.contracts.len(), 1, "一条腿一张单");
     let id = state.contracts.contracts[0].id;
     let capacity = state.contracts.contracts[0].capacity;
     assert!(capacity > 0.0, "该挂出这条线的要求运力");
-    assert_eq!(state.contracts.contracts[0].resource, "碳", "主货种 = 积压最多的那种");
+    assert_eq!(
+        state.contracts.contracts[0].resource, "碳",
+        "主货种 = 积压最多的那种"
+    );
 
     // 积压变小/变大 ⇒ **同一张单**（运力要求与积压量无关，所以这里该一个字都不变）。
     post(&mut state, 400.0);
-    assert_eq!(state.contracts.contracts.len(), 1, "仍是同一张单，不是第二张");
-    assert_eq!(state.contracts.contracts[0].id, id, "单号不变（改数不是新单）");
+    assert_eq!(
+        state.contracts.contracts.len(),
+        1,
+        "仍是同一张单，不是第二张"
+    );
+    assert_eq!(
+        state.contracts.contracts[0].id, id,
+        "单号不变（改数不是新单）"
+    );
 
     // 有人接了 ⇒ 冻结：此后货栈怎么变都不再改这张单（它已经是**承诺**）。
     state.contracts.contracts[0].carrier = Some("美国".into());
@@ -700,7 +800,10 @@ fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
     state.contracts.contracts[0].carrier = None;
     state.contracts.contracts[0].accepted_round = None;
     post(&mut state, 0.0);
-    assert!(state.contracts.contracts.is_empty(), "货栈空了 ⇒ 未接单的该撤回");
+    assert!(
+        state.contracts.contracts.is_empty(),
+        "货栈空了 ⇒ 未接单的该撤回"
+    );
 }
 
 /// **没人接 ⇒ 每过一个考核周期抬一档抽成**（用户裁决：价格做成**动态平衡**）。
@@ -711,10 +814,24 @@ fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
 fn an_unaccepted_order_escalates_once_per_review_period() {
     let (config, mut state) = fresh(42);
     let open = state.contracts.post(
-        "中国".into(), "碳".into(), 3.0, "金星".into(), "地球".into(), config.freight.share, 0, 0.6,
+        "中国".into(),
+        "碳".into(),
+        3.0,
+        "金星".into(),
+        "地球".into(),
+        config.freight.share,
+        0,
+        0.6,
     );
     let taken = state.contracts.post(
-        "中国".into(), "铁".into(), 3.0, "水星".into(), "地球".into(), config.freight.share, 0, 0.6,
+        "中国".into(),
+        "铁".into(),
+        3.0,
+        "水星".into(),
+        "地球".into(),
+        config.freight.share,
+        0,
+        0.6,
     );
     {
         let c = state.contracts.get_mut(taken).unwrap();
@@ -738,13 +855,19 @@ fn an_unaccepted_order_escalates_once_per_review_period() {
     // 满一个周期 ⇒ 抬一档，并把叫价起点挪到本回合。
     state.round = interval;
     escalate_open_contracts(&mut state, &config);
-    let c = state.contracts.get(open).expect("没人接的单**留在簿上**继续叫价");
+    let c = state
+        .contracts
+        .get(open)
+        .expect("没人接的单**留在簿上**继续叫价");
     assert!(
         (c.share - share0 * config.freight.share_escalation).abs() < 1e-9,
         "满一个周期该抬一档：{share0:.3} → {:.3}",
         c.share
     );
-    assert_eq!(c.posted_round, state.round, "抬价后重新起叫（下一档要再等一个完整周期）");
+    assert_eq!(
+        c.posted_round, state.round,
+        "抬价后重新起叫（下一档要再等一个完整周期）"
+    );
     assert_eq!(
         state.contracts.get(taken).unwrap().share,
         share0,
@@ -762,7 +885,10 @@ fn an_unaccepted_order_escalates_once_per_review_period() {
         config.freight.share_max,
         c.share
     );
-    assert!(state.contracts.get(taken).is_some(), "已接单的合同不会因为加价被动过");
+    assert!(
+        state.contracts.get(taken).is_some(),
+        "已接单的合同不会因为加价被动过"
+    );
 }
 
 /// **AI 端到端**：一条船都没有 ⇒ 把整条线的**要求运力**挂到雇佣市场上，并发一条事件。
@@ -784,7 +910,12 @@ fn the_ai_posts_an_order_for_the_capacity_it_cannot_cover() {
         .iter()
         .filter(|c| c.shipper == "中国" && c.from == "冥王星")
         .collect();
-    assert_eq!(mine.len(), 1, "一条腿一张单，实为 {:?}", state.contracts.contracts);
+    assert_eq!(
+        mine.len(),
+        1,
+        "一条腿一张单，实为 {:?}",
+        state.contracts.contracts
+    );
     let need =
         crate::model::required_throughput(&state, &config, "冥王星", &state.capital_body("中国"));
     assert!(
@@ -793,8 +924,15 @@ fn the_ai_posts_an_order_for_the_capacity_it_cannot_cover() {
         mine[0].capacity
     );
     assert_eq!(mine[0].from, "冥王星", "起运 = 产地货栈");
-    assert_eq!(mine[0].to, state.capital_body("中国"), "目的照公理 = 雇主首都");
-    assert!((mine[0].share - config.freight.share).abs() < 1e-12, "抽成 = 配置里的费率");
+    assert_eq!(
+        mine[0].to,
+        state.capital_body("中国"),
+        "目的照公理 = 雇主首都"
+    );
+    assert!(
+        (mine[0].share - config.freight.share).abs() < 1e-12,
+        "抽成 = 配置里的费率"
+    );
     assert!(mine[0].min_reputation > 0.0, "门槛要在挂单时算好并冻结");
     assert!(
         state
@@ -839,7 +977,10 @@ fn a_shipless_faction_hires_carriers_for_both_directions() {
     let outbound: Vec<&crate::model::Contract> = mine.iter().filter(|c| c.to == cap).collect();
     let inbound: Vec<&crate::model::Contract> = mine.iter().filter(|c| c.from == cap).collect();
     assert!(!outbound.is_empty(), "集货腿该挂单，实为 {mine:?}");
-    assert!(!inbound.is_empty(), "补给腿也该挂单（首都 → 缺料的站点），实为 {mine:?}");
+    assert!(
+        !inbound.is_empty(),
+        "补给腿也该挂单（首都 → 缺料的站点），实为 {mine:?}"
+    );
     assert!(
         mine.iter().any(|c| c.is_hired()),
         "没船的势力请的人该有人接（承包商就是这条通路），实为 {mine:?}"
@@ -883,13 +1024,25 @@ fn posting_the_same_world_twice_yields_the_same_orders() {
             .contracts
             .contracts
             .iter()
-            .map(|c| (c.id, c.shipper.clone(), c.from.clone(), c.capacity, c.share, c.min_reputation))
+            .map(|c| {
+                (
+                    c.id,
+                    c.shipper.clone(),
+                    c.from.clone(),
+                    c.capacity,
+                    c.share,
+                    c.min_reputation,
+                )
+            })
             .collect::<Vec<_>>()
     };
     let a = run();
     let b = run();
     assert_eq!(a, b, "同种子同回合的挂单必须逐字相同");
-    assert!(!a.is_empty(), "造了缺口就该有单子可测（否则这条守卫是空转的）");
+    assert!(
+        !a.is_empty(),
+        "造了缺口就该有单子可测（否则这条守卫是空转的）"
+    );
 }
 /// 【探针·思潮→角色】逐思潮打印：倾向倍数、目标头数、平均头数、换岗率、头数分布。
 /// 跑法：`cargo test --lib probe_ideology_roles -- --ignored --nocapture`。
@@ -932,7 +1085,11 @@ fn probe_ideology_roles() {
         );
     }
     println!("--- 单处货栈（需求 1）：第一艘运输舰要等几回合 ---");
-    for (tag, mil, col) in [("军国 +1", 1.0, 0.0), ("中庸 0", 0.0, 0.0), ("和平 -1", -1.0, 0.0)] {
+    for (tag, mil, col) in [
+        ("军国 +1", 1.0, 0.0),
+        ("中庸 0", 0.0, 0.0),
+        ("和平 -1", -1.0, 0.0),
+    ] {
         let mut st = base.clone();
         set_ideology(&mut st, "中国", mil, col);
         grow_fleet(&mut st, "中国", 3);
@@ -950,7 +1107,11 @@ fn probe_ideology_roles() {
         println!("{tag:>14}: 第 {waited} 回合出现第一条运输舰");
     }
     println!("--- 单处货栈清空之后：名额收回要几回合 ---");
-    for (tag, mil, col) in [("军国 +1", 1.0, 0.0), ("中庸 0", 0.0, 0.0), ("和平 -1", -1.0, 0.0)] {
+    for (tag, mil, col) in [
+        ("军国 +1", 1.0, 0.0),
+        ("中庸 0", 0.0, 0.0),
+        ("和平 -1", -1.0, 0.0),
+    ] {
         let mut st = base.clone();
         set_ideology(&mut st, "中国", mil, col);
         grow_fleet(&mut st, "中国", 3);

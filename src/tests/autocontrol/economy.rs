@@ -25,7 +25,10 @@ fn control_plan_balances_and_flags_over_committed_construction() {
     let u = plan["upkeep"].as_f64().unwrap();
     let g = plan["governance_cost"].as_f64().unwrap();
     let net = plan["net_flow"].as_f64().unwrap();
-    assert!((net - (p - u - g)).abs() < 0.05, "net must ≈ production − upkeep − governance");
+    assert!(
+        (net - (p - u - g)).abs() < 0.05,
+        "net must ≈ production − upkeep − governance"
+    );
     assert_eq!(plan["verdict"].as_str().unwrap(), "healthy");
     assert!(!plan["over_committed_construction"].as_bool().unwrap());
     assert!(plan["rounds_before_insolvent"].is_null());
@@ -37,7 +40,8 @@ fn control_plan_balances_and_flags_over_committed_construction() {
             {"resource": "碳", "value": 10000.0, "mode": "Player"}
         ]}]
     });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("apply construction over-commit");
+    crate::control::apply_patch(&mut state, &config, &diff)
+        .expect("apply construction over-commit");
 
     let plan2 = control_plan(&state, &config, "中国").expect("faction exists");
     assert!(

@@ -111,8 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared: Shared = Arc::new(Mutex::new(world));
 
     // 生命周期：身份 + 页面登记 + 退出闸门。`exit_rx` 就是给 axum 的优雅停机信号。
-    let owner_pid =
-        owner::parse_owner_pid(std::env::var("PLANET_X_WEB_OWNER_PID").ok().as_deref());
+    let owner_pid = owner::parse_owner_pid(std::env::var("PLANET_X_WEB_OWNER_PID").ok().as_deref());
     let (web, exit_rx) = WebCtx::new(port, owner_pid);
     let app = router(shared, web.clone());
 

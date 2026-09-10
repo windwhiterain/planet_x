@@ -10,6 +10,7 @@ use crate::sim;
 use std::collections::BTreeMap;
 
 use super::freight;
+use super::knowledge;
 
 // 统一的基本权重：**距离 + 克制 + per-武器随机扰动**，所有自动逻辑共用。克制权重
 // > 距离权重（把火力用在打得动的目标上，比贴着打更划算）；扰动是小量，让每件武器
@@ -70,7 +71,9 @@ fn weapon_noise(seed: u64, target: &str) -> f64 {
 
 /// 基本权重（所有自动逻辑通用）：距离 + 克制 + per-武器随机扰动。
 fn basic_weight(d: f64, weapon: &Weapon, target: &Ship, config: &GameConfig) -> f64 {
-    W_DIST * dist_score(d, weapon.range) + W_CTR * weapon_counter(weapon, config, target) + weapon_noise(weapon.seed, &target.name)
+    W_DIST * dist_score(d, weapon.range)
+        + W_CTR * weapon_counter(weapon, config, target)
+        + weapon_noise(weapon.seed, &target.name)
 }
 
 /// 行为风格层（在基本权重之上）：理智<->热血按「威慑对比」偏置、火力分配按「攻击历史
@@ -109,7 +112,13 @@ fn doctrine_weight(
 }
 
 /// 一件武器在**射程内**挑得分最高的活敌舰（按基本权重 + 行为风格层）。
-fn best_target_in_range(state: &State, config: &GameConfig, attacker: &Ship, weapon: &Weapon, hist: &BTreeMap<ShipId, f64>) -> Option<ShipId> {
+fn best_target_in_range(
+    state: &State,
+    config: &GameConfig,
+    attacker: &Ship,
+    weapon: &Weapon,
+    hist: &BTreeMap<ShipId, f64>,
+) -> Option<ShipId> {
     let mut best: Option<(f64, ShipId)> = None;
     for s in &state.ships {
         if s.hull <= 0.0 || !sim::hostile(state, config, &attacker.faction_id, &s.faction_id) {
@@ -142,8 +151,18 @@ fn target_ship_score(state: &State, config: &GameConfig, attacker: &Ship, s: &Sh
     score
 }
 
-pub(crate) fn nearest_enemy_ship(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], range: f64, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipId> {
-    let Some(attacker) = state.ship(attacker_id) else { return None };
+pub(crate) fn nearest_enemy_ship(
+    state: &State,
+    config: &GameConfig,
+    owner: &str,
+    pos: [f64; 2],
+    range: f64,
+    focus: Option<FactionId>,
+    attacker_id: &str,
+) -> Option<ShipId> {
+    let Some(attacker) = state.ship(attacker_id) else {
+        return None;
+    };
     let mut best: Option<(f64, ShipId)> = None; // (score, name)
     for s in &state.ships {
         if s.hull <= 0.0 || !sim::hostile(state, config, owner, &s.faction_id) {
@@ -178,8 +197,14 @@ fn fleet_flag(state: &State, fid: &str) -> Option<ShipId> {
 /// 本舰本回合的开火计划：每件武器的每一发都**独立索敌**——按行为风格层挑一个射程内的活
 /// 敌舰。攻击历史用本地副本随时更新（打过的刷新到 1），使「雨露均沾」武器在**同回合内**
 /// 就能把多发摊到不同目标。确定性。
-pub(crate) fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str) -> Vec<(usize, ShipId)> {
-    let Some(ship) = state.ship(ship_id) else { return Vec::new() };
+pub(crate) fn build_fire_plan(
+    state: &State,
+    config: &GameConfig,
+    ship_id: &str,
+) -> Vec<(usize, ShipId)> {
+    let Some(ship) = state.ship(ship_id) else {
+        return Vec::new();
+    };
     let weapons = ship_weapons(config, ship);
     if weapons.is_empty() {
         return Vec::new();
@@ -199,7 +224,12 @@ pub(crate) fn build_fire_plan(state: &State, config: &GameConfig, ship_id: &str)
 }
 
 /// 就近的敌对城（在围城射程内）：进攻自动化（轰炸不需要行为）的目标候选。
-fn nearest_hostile_city_in_siege_range(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2]) -> Option<CityId> {
+fn nearest_hostile_city_in_siege_range(
+    state: &State,
+    config: &GameConfig,
+    owner: &str,
+    pos: [f64; 2],
+) -> Option<CityId> {
     let mut best: Option<(f64, CityId)> = None;
     for c in &state.cities {
         if c.razed || !sim::hostile(state, config, owner, &c.faction_id) {
@@ -221,7 +251,13 @@ fn nearest_hostile_city_in_siege_range(state: &State, config: &GameConfig, owner
 /// 自动轰炸：若 `owner` 的敌对城进入 `pos` 的围城射程，就轰炸最近的那座；返回**炸了哪座城**
 /// （`None` = 没炸）。返回城名而不只是 `bool`，是为了让调用方能把它记进
 /// [`crate::model::RoundDecisions`]——「轰炸」是判定，城名是判定的对象。
-fn auto_bombard(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2]) -> Option<CityId> {
+fn auto_bombard(
+    state: &mut State,
+    config: &GameConfig,
+    ship_id: &str,
+    owner: &str,
+    pos: [f64; 2],
+) -> Option<CityId> {
     if let Some(city) = nearest_hostile_city_in_siege_range(state, config, owner, pos) {
         sim::bombard_city(state, config, ship_id, &city);
         Some(city)
@@ -233,7 +269,10 @@ fn auto_bombard(state: &mut State, config: &GameConfig, ship_id: &str, owner: &s
 /// 自动战斗（攻击/轰炸都不需要行为）：射程内有敌对舰就按统一基本权重逐发索敌开火；
 /// 否则若有敌对城进入围城射程则就地轰炸。对玩家与 AI 共用。不修改该舰的指令（行为保留）。
 pub(crate) fn auto_combat(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str) {
-    let pos = state.ship(ship_id).map(|s| s.position).unwrap_or([0.0, 0.0]);
+    let pos = state
+        .ship(ship_id)
+        .map(|s| s.position)
+        .unwrap_or([0.0, 0.0]);
     let plan = build_fire_plan(state, config, ship_id);
     if !plan.is_empty() {
         sim::fire(state, config, ship_id, &plan);
@@ -250,7 +289,9 @@ pub(crate) fn auto_combat(state: &mut State, config: &GameConfig, ship_id: &str,
 /// Move/Follow/Dock/Idle 都是**软目标**——即使玩家也不能硬控制它：附近有敌舰时此姿态自动
 /// 生效，对玩家与 AI 一视同仁。引擎结算不读它。
 pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> Option<[f64; 2]> {
-    let Some(ship) = state.ship(ship_id) else { return None };
+    let Some(ship) = state.ship(ship_id) else {
+        return None;
+    };
     // 有效姿态（叶 → 舰队默认 → 舰上记录值）：AI 只读，玩家写的叶优先。
     let kiting = state.ship_kiting(ship_id.to_string());
     if kiting.abs() < 1e-9 {
@@ -261,7 +302,8 @@ pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> 
     let range = ship_panel(config, ship).attack_range;
     // 感知半径：只对**附近**敌舰生效（武器射程 + 一点缓冲），不越全图。
     let awareness = range + 0.5;
-    let Some(enemy) = nearest_enemy_ship(state, config, &owner, pos, awareness, None, ship_id) else {
+    let Some(enemy) = nearest_enemy_ship(state, config, &owner, pos, awareness, None, ship_id)
+    else {
         return None;
     };
     let epos = state.ship(&enemy).map(|s| s.position).unwrap_or(pos);
@@ -279,8 +321,18 @@ pub(crate) fn kiting_dest(state: &State, config: &GameConfig, ship_id: &str) -> 
     Some([epos[0] + unit[0] * desired_r, epos[1] + unit[1] * desired_r])
 }
 
-fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _rng: &mut Prng, focus: Option<FactionId>, attacker_id: &str) -> Option<ShipBehavior> {
-    let Some(attacker) = state.ship(attacker_id) else { return None };
+fn pick_target(
+    state: &State,
+    config: &GameConfig,
+    owner: &str,
+    pos: [f64; 2],
+    _rng: &mut Prng,
+    focus: Option<FactionId>,
+    attacker_id: &str,
+) -> Option<ShipBehavior> {
+    let Some(attacker) = state.ship(attacker_id) else {
+        return None;
+    };
     // 对舰：在追击半径内选综合得分最高的敌舰（基本权重 + 行为风格层 + 集火加成）。
     let mut best_ship: Option<(f64, ShipId)> = None;
     for s in &state.ships {
@@ -321,18 +373,30 @@ fn pick_target(state: &State, config: &GameConfig, owner: &str, pos: [f64; 2], _
     // 无仗可打：就近（重建）殖民一处被夷平的定居点。
     for c in &state.cities {
         if c.razed {
-            return Some(ShipBehavior::Colonize { body: c.body_id.clone() });
+            return Some(ShipBehavior::Colonize {
+                body: c.body_id.clone(),
+            });
         }
     }
     None
 }
 
-fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2], rng: &mut Prng, focus: Option<FactionId>) -> Option<ShipBehavior> {
+fn resolve_target(
+    state: &mut State,
+    config: &GameConfig,
+    ship_id: &str,
+    owner: &str,
+    pos: [f64; 2],
+    rng: &mut Prng,
+    focus: Option<FactionId>,
+) -> Option<ShipBehavior> {
     let cur = state.ship_behavior(ship_id.to_string());
     // 保持一个仍有效的跟随/围城行为，避免指挥官每回合在目标间抖动。
     if let Some(b) = cur {
-        if matches!(b, ShipBehavior::Follow { .. } | ShipBehavior::DockCity { .. })
-            && sim::behavior_is_valid(state, config, b.clone(), owner)
+        if matches!(
+            b,
+            ShipBehavior::Follow { .. } | ShipBehavior::DockCity { .. }
+        ) && sim::behavior_is_valid(state, config, b.clone(), owner)
         {
             return Some(b);
         }
@@ -358,7 +422,8 @@ fn resolve_target(state: &mut State, config: &GameConfig, ship_id: &str, owner: 
         }
     }
     if let Some(c) = state.control_mut(owner.to_string()) {
-        c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
+        c.ship_orders
+            .insert(ship_id.to_string(), Control::inherit(behavior.clone()));
     }
     if matches!(behavior, ShipBehavior::Idle) {
         None
@@ -388,8 +453,14 @@ pub(crate) fn ai_ship_turn(
     focus_of: &BTreeMap<FactionId, Option<FactionId>>,
     next_building_id: &mut BuildingId,
     decisions: &mut Vec<ShipDecision>,
+    // 本回合的**运输动作**账（`view.haul_steps`）：运输舰这一回合走了哪一步。
+    // 与 `decisions` 分开传是因为调用方（`sim::step_military`）两者都在 `RoundSink` 里
+    // ——借两个不相交的字段，读卡不打架。
+    haul_steps: &mut BTreeMap<ShipId, HaulStep>,
 ) {
-    let Some(ship) = state.ship(ship_id) else { return };
+    let Some(ship) = state.ship(ship_id) else {
+        return;
+    };
     if ship.hull <= 0.0 {
         return;
     }
@@ -402,13 +473,13 @@ pub(crate) fn ai_ship_turn(
     let focus = focus_of.get(&owner).cloned().flatten();
     // 有效姿态（叶 → 舰队默认 → 记录值）：撤退阈值也跟着它走。
     let kiting = state.ship_kiting(ship_id.to_string());
-    // **有效角色**（第三条风格轴，叶 → 舰队默认 → 记录值）：`true` = 运输舰。
+    // **有效角色**（第三条风格轴，叶 → 舰队默认 → 记录值，三态）：War / Freight / Observe。
     // 本回合的定编已经由 `freight::assign_roles` 在 `step_ships` 的循环之前写好了，
     // 这里**只读**——所以同一回合里改角色不会改变这艘舰的活（也不会受处理顺序影响）。
     //
-    // 用户裁决：这个角色**只管「自动控制给它派哪种活」**——找仗打（战舰）还是跑运输
-    // （运输舰）。它**不解除武装**：运输舰射程内照样自动开火、照样按 kiting 软移动。
-    let freighter = state.ship_freighter(ship_id.to_string());
+    // 用户裁决：这个角色**只管「自动控制给它派哪种活」**——打仗、跑运输、还是蹲异常区观测。
+    // 它**不解除武装**：任何角色的舰，射程内照样自动开火、照样按 kiting 软移动。
+    let role = state.ship_role(ship_id.to_string());
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
@@ -438,7 +509,10 @@ pub(crate) fn ai_ship_turn(
             let cap_pos = state.body_position(&cap_body);
             if sim::dist(pos, cap_pos) > config.combat.retreat_min_dist {
                 if let Some(c) = state.control_mut(owner.clone()) {
-                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Move { position: cap_pos }));
+                    c.ship_orders.insert(
+                        ship_id.to_string(),
+                        Control::inherit(ShipBehavior::Move { position: cap_pos }),
+                    );
                 }
                 decisions.push(ShipDecision {
                     verdict: ShipVerdict::Withdraw,
@@ -447,24 +521,37 @@ pub(crate) fn ai_ship_turn(
                     order: Some(ShipBehavior::Move { position: cap_pos }),
                     ..base.clone()
                 });
-                sim::ev(state, GameEvent::Withdraw { ship: ship_id.to_string(), to_body: cap_body });
+                sim::ev(
+                    state,
+                    GameEvent::Withdraw {
+                        ship: ship_id.to_string(),
+                        to_body: cap_body,
+                    },
+                );
                 sim::move_toward(state, config, ship_id, &class, cap_pos);
                 return;
             }
         }
-        // **运输舰不追敌**：路过之敌不作废它的航线（它这一回合的活是跑运输，不是接战）。
+        // **非战舰不追敌**：路过之敌不作废它的航线（它这一回合的活是跑运输/观测，不是接战）。
         // 开火不受影响——等路线走完这一步，下面统一交给 `auto_combat`（它不改写指令）。
-        if !freighter {
+        if role == ShipRole::War {
             // 接战：每件武器逐发独立索敌（火力分配 / 克制 / 理智热血都作用于目标选择）。
             let plan = build_fire_plan(state, config, ship_id);
             if !plan.is_empty() {
                 if let Some(c) = state.control_mut(owner.clone()) {
-                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
+                    c.ship_orders.insert(
+                        ship_id.to_string(),
+                        Control::inherit(ShipBehavior::Follow {
+                            ship: target.clone(),
+                        }),
+                    );
                 }
                 decisions.push(ShipDecision {
                     verdict: ShipVerdict::Engage,
                     target: Some(target.clone()),
-                    order: Some(ShipBehavior::Follow { ship: target.clone() }),
+                    order: Some(ShipBehavior::Follow {
+                        ship: target.clone(),
+                    }),
                     ..base.clone()
                 });
                 sim::fire(state, config, ship_id, &plan);
@@ -477,14 +564,21 @@ pub(crate) fn ai_ship_turn(
     //
     // 路线从 `freight::route_for` 来：优先续用现有路线（这条腿还有活/舱里载着货），否则按
     // **货量占比抽签**在两个方向里挑一条新的。挑不到（没有货要动、或定编还没收回去）就这一回合不派活。
-    if freighter {
+    if role == ShipRole::Freight {
         match freight::route_for(state, config, &owner, ship_id) {
             Some((from, to)) => {
-                let behavior = ShipBehavior::Haul { from: from.clone(), to: to.clone() };
+                let behavior = ShipBehavior::Haul {
+                    from: from.clone(),
+                    to: to.clone(),
+                };
                 if let Some(c) = state.control_mut(owner.clone()) {
-                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
+                    c.ship_orders
+                        .insert(ship_id.to_string(), Control::inherit(behavior.clone()));
                 }
                 let step = sim::haul_step(state, config, ship_id, &class, &from, &to);
+                // 记这一步（B3 的「这趟货为什么没运回来」）：读面里 `haul_steps` 一舰一行
+                // （`waiting`/`en_route` 既不落 State 也不发事件，不记就永远读不到）。
+                haul_steps.insert(ship_id.to_string(), step.clone());
                 decisions.push(ShipDecision {
                     verdict: ShipVerdict::Haul,
                     target: Some(step.body().to_string()),
@@ -501,7 +595,38 @@ pub(crate) fn ai_ship_turn(
         return;
     }
 
-    let Some(behavior) = resolve_target(state, config, ship_id, &owner, pos, rng, focus.clone()) else {
+    // --- 角色 = 观测舰：这一回合的活是**去异常区蹲着**（找仗打不是它的活）----------------
+    //
+    // 目标天体由 `knowledge::target_body` 按**期望在场收益**抽签（每 12 回合重抽一次 ⇒
+    // 掌握度涨上去之后编队会自然往外挪）。指令用 `Dock { body }`——**跟着天体走**，
+    // 于是它会一直待在带里（`sim::mond_presence` 只认「此刻在带内的活舰」）。
+    // 迷航照旧发生（深处要试几次才到位，见 `sim::mond_drift`），这正是这条干线的意义。
+    if role == ShipRole::Observe {
+        match knowledge::target_body(state, config, &owner) {
+            Some((body, _)) => {
+                let behavior = ShipBehavior::Dock { body: body.clone() };
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders
+                        .insert(ship_id.to_string(), Control::inherit(behavior.clone()));
+                }
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Move,
+                    target: Some(body.clone()),
+                    destination: Some(state.body_position(&body)),
+                    order: Some(behavior),
+                    ..base.clone()
+                });
+            }
+            None => decisions.push(base.clone()),
+        }
+        // 观测舰**照常自动开火**（不解除武装）：射程内有敌舰就打、有敌城就炸，
+        // 且不改写指令（驻地保留，下一回合接着待）。
+        auto_combat(state, config, ship_id, &owner);
+        return;
+    }
+
+    let Some(behavior) = resolve_target(state, config, ship_id, &owner, pos, rng, focus.clone())
+    else {
         // 没派活：叶上那条值可能是很久以前的——这一回合 AI 对它没有新选择。
         decisions.push(base.clone());
         return;
@@ -545,16 +670,25 @@ pub(crate) fn ai_ship_turn(
     // 移动后：自动接战（攻击不要行为）→ 自动轰炸 → 殖民落地。
     if let Some(ship) = state.ship(ship_id) {
         let np = ship.position;
-        if let Some(target) = nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), ship_id) {
+        if let Some(target) =
+            nearest_enemy_ship(state, config, &owner, np, range, focus.clone(), ship_id)
+        {
             let plan = build_fire_plan(state, config, ship_id);
             if !plan.is_empty() {
                 if let Some(c) = state.control_mut(owner.clone()) {
-                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
+                    c.ship_orders.insert(
+                        ship_id.to_string(),
+                        Control::inherit(ShipBehavior::Follow {
+                            ship: target.clone(),
+                        }),
+                    );
                 }
                 decisions.push(ShipDecision {
                     verdict: ShipVerdict::Engage,
                     target: Some(target.clone()),
-                    order: Some(ShipBehavior::Follow { ship: target.clone() }),
+                    order: Some(ShipBehavior::Follow {
+                        ship: target.clone(),
+                    }),
                     enemy_in_range: true,
                     after_move: true,
                     ..base.clone()

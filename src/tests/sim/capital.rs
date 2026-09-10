@@ -26,10 +26,16 @@ fn capital_destroyed_auto_relocates_to_highest_population_city() {
     // 强迁那条路**没有评估**：读面里只有「从哪迁到哪」与它的忠诚代价。
     let cap = capital_decision(&sink, "中国").expect("迁都要在读面里留痕");
     assert!(!cap.reviewed, "亡城强迁不是周期性评估");
-    assert!(cap.current_cost.is_none() && cap.candidate.is_none(), "没评估就不该编出判据数字");
+    assert!(
+        cap.current_cost.is_none() && cap.candidate.is_none(),
+        "没评估就不该编出判据数字"
+    );
     assert_eq!(cap.relocated_from.as_deref(), Some("地球"));
     assert_eq!(cap.relocated_to.as_deref(), Some("金星"));
-    assert_eq!(cap.relocate_loyalty_cost, 0.0, "旧首都已失（占比 0）⇒ 应急迁都无忠诚代价");
+    assert_eq!(
+        cap.relocate_loyalty_cost, 0.0,
+        "旧首都已失（占比 0）⇒ 应急迁都无忠诚代价"
+    );
 
     // 剩余中国活城：水星熔炉基地(220,水星)、金星浮空之城(260,金星)。人口最高=金星浮空之城。
     assert_eq!(
@@ -73,7 +79,11 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
     // 判据数字必须留下来：现首都（水星）比候选（地球）贵，且这次评估**真的迁了**。
     let cap = capital_decision(&sink, "中国").expect("评估要在读面里留痕");
     assert!(cap.reviewed, "Auto 首都在评估轮必须记下「评估过」");
-    assert_eq!(cap.candidate.as_deref(), Some("地球"), "候选 = 人口最高的活城");
+    assert_eq!(
+        cap.candidate.as_deref(),
+        Some("地球"),
+        "候选 = 人口最高的活城"
+    );
     let cur_cost = cap.current_cost.expect("评估过就该有现首都成本");
     let cand_cost = cap.candidate_cost.expect("评估过就该有候选成本");
     assert!(
@@ -81,7 +91,10 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
         "判据应当成立：候选 {cand_cost} + 门槛 < 现首都 {cur_cost}"
     );
     assert_eq!(cap.relocated_to.as_deref(), Some("地球"));
-    assert!(cap.relocate_loyalty_cost > 0.0, "迁离有人口的旧首都 ⇒ 全国忠诚要付代价");
+    assert!(
+        cap.relocate_loyalty_cost > 0.0,
+        "迁离有人口的旧首都 ⇒ 全国忠诚要付代价"
+    );
 
     // 中国人口最繁华城=长三角(1400,地球)；迁到地球显著降低总治理距离成本。
     assert_eq!(
@@ -127,7 +140,10 @@ fn capital_review_is_sparse_in_the_decision_log() {
     state.round = 12;
     let mut sink = RoundSink::default();
     step_capital(&mut state, &config, &mut sink);
-    assert!(!sink.decisions.capital.is_empty(), "评估回合至少应有一条（中国是 Auto）");
+    assert!(
+        !sink.decisions.capital.is_empty(),
+        "评估回合至少应有一条（中国是 Auto）"
+    );
     for c in &sink.decisions.capital {
         assert!(
             c.reviewed || c.relocated_to.is_some(),
@@ -136,7 +152,11 @@ fn capital_review_is_sparse_in_the_decision_log() {
         );
         if c.reviewed && c.relocated_to.is_none() {
             // 「评估了但没迁」同样要有判据数字，否则读的人只能看到结果。
-            assert!(c.current_cost.is_some() && c.candidate_cost.is_some(), "{} 缺判据数字", c.faction);
+            assert!(
+                c.current_cost.is_some() && c.candidate_cost.is_some(),
+                "{} 缺判据数字",
+                c.faction
+            );
         }
     }
     assert!(

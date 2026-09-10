@@ -132,3 +132,80 @@ print(
     "勾稽通过：effective = clamp(distance + entertainment"
     " + capital_loyalty_bonus − ideology_loyalty_penalty)"
 )
+
+print()
+print("--- B2: 钱去哪了（批了多少 − 花了多少 = 没花掉的；以及掉血与造舰瓶颈）---")
+sp = q.view_spending(last_round, "中国")
+b = sp["budget"]
+if b.empty:
+    print(f"中国 @ round {last_round}: 这一回合两边都没有预算行（没有库存键？）")
+else:
+    print(b.to_string(index=False))
+    # 勾稽：没花掉的 = 批的 − 花的（**同一个数不在两个读面各存一份**，所以这一列只在 Python 侧算）。
+    for kind in ("investment", "construction"):
+        lhs = b[f"{kind}_batch"] - b[f"{kind}_spent"]
+        assert (lhs - b[f"{kind}_unspent"]).abs().max() < 1e-9, (kind, b)
+    # 引擎不会超批：花掉的永远不超过批的。
+    for kind in ("investment", "construction"):
+        assert (b[f"{kind}_spent"] <= b[f"{kind}_batch"] + 1e-9).all(), (kind, b)
+    assert (b["investment_unspent"] >= -1e-9).all() and (b["construction_unspent"] >= -1e-9).all()
+    print(
+        "勾稽通过：花了 ≤ 批了，且 没花掉的 = 批的 − 花的",
+        "| 本回合未花总额 =",
+        round(float((b["investment_unspent"] + b["construction_unspent"]).sum()), 2),
+    )
+print(
+    f"  维护欠费 {round(sp['upkeep_unpaid'], 3)} ⇒ 每艘舰被锈掉船体的"
+    f" {round(sp['fleet_rust'], 4)} 倍 hull_max"
+    f"（锈到 0 才发事件，所以掉血只有这一处看得见）"
+)
+build = sp["build"]
+if build.empty:
+    print("  这一回合这座势力没有建造区的进度行")
+else:
+    print(build.to_string(index=False))
+    print(
+        "  瓶颈票数：",
+        {k: int(v) for k, v in build["bottleneck"].value_counts().items()},
+        "（money=钱批光了 / capacity=产能封顶 / idle=有产能却一分钱没批到）",
+    )
+
+print()
+print("--- B3: 市场与运输（为什么是这个价 / 我买到的货为什么少了 / 这趟货为什么没运回来）---")
+tr = q.view_trade(last_round, "中国")
+trades, blocked = tr["trades"], tr["blocked"]
+if trades is None or trades.empty:
+    print(f"中国 @ round {last_round}: 这一回合它没有成交（稀疏：没成交就没有行）")
+else:
+    cols = ["buyer", "seller", "price_mult", "dist_au", "depth", "mond_extra",
+            "freight_rate", "rel_mult", "mastery", "loss", "delivered_units"]
+    print(trades[[c for c in cols if c in trades.columns]].to_string(index=False))
+    # 勾稽：`price_mult` 就是**引擎给的两个分解项之和**（Python 只做一次加法，不重算公式）。
+    row_t = trades.iloc[0]
+    assert abs(row_t["price_mult"] - (row_t["rel_mult"] + row_t["freight_rate"])) < 1e-9
+    rt = next(iter(row_t["moved"]))
+    world = q.facts[q.facts["round"] == last_round].iloc[0]["view"]
+    price = (world or {}).get("market_price", {})
+    print(
+        f"  举例：买 {rt} 的成交价 = 市场价 {round(float(price.get(rt, float('nan'))), 3)}"
+        f" × {round(float(row_t['price_mult']), 4)}（关系 {round(float(row_t['rel_mult']), 3)}"
+        f" + 运费 {round(float(row_t['freight_rate']), 4)}）"
+    )
+    if float(row_t["loss"]) > 0.0:
+        print(
+            f"  ⚠ 这条线穿了异常带（深度 {round(float(row_t['depth']), 3)}）："
+            f"丢了 {round(float(row_t['loss']) * 100, 1)}% 的货"
+        )
+print("  谁不卖给我、为什么：")
+print(blocked.to_string(index=False) if not blocked.empty else "  （这一回合谁都跟我做生意）")
+
+fr = q.view_freight(last_round, "中国")
+print("  每一处货栈的运力账（need = 要求运力；uncovered = 缺口）：")
+print(fr["depots"].to_string(index=False) if not fr["depots"].empty else "  （没有积压）")
+print("  在跑运输的舰这一回合走了哪一步：")
+cols = [c for c in ("ship_id", "step", "body", "units", "cargo") if c in fr["steps"].columns]
+print(
+    fr["steps"][cols].to_string(index=False)
+    if not fr["steps"].empty
+    else "  （这一回合没有在跑的运输舰）"
+)

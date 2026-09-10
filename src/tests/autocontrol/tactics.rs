@@ -43,9 +43,25 @@ fn ships_do_not_chase_enemies_beyond_pursuit_range() {
     if let Some(s) = state.ship_mut(&ship5) {
         s.position = [140.0, 40.0];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
-    let picked = pick_target(&state, &config, "中国", [40.0, 40.0], &mut Prng::new(1), None, &ship0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
+    let picked = pick_target(
+        &state,
+        &config,
+        "中国",
+        [40.0, 40.0],
+        &mut Prng::new(1),
+        None,
+        &ship0,
+    );
     // 远处那艘敌舰不应被选中（超出追击半径）；可能选中更近的目标或城市/空。
     let chased = matches!(picked, Some(ShipBehavior::Follow { ship: ref s }) if *s == ship5);
     assert!(
@@ -77,8 +93,16 @@ fn kiting_repositions_relative_to_nearby_enemy() {
     if let Some(s) = state.ship_mut(&ship5) {
         s.position = [50.0, 50.0];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let range = crate::model::ship_panel(&config, state.ship(&ship0).unwrap()).attack_range;
     let en = state.ship(&ship3).unwrap().position;
     // 风筝：目的地的敌我距离应拉到「最远武器射程」处（敌更近则被推开）。
@@ -102,7 +126,10 @@ fn kiting_repositions_relative_to_nearby_enemy() {
     if let Some(s) = state.ship_mut(&ship0) {
         s.kiting = 0.0;
     }
-    assert!(kiting_dest(&state, &config, &ship0).is_none(), "baseline kiting must be None");
+    assert!(
+        kiting_dest(&state, &config, &ship0).is_none(),
+        "baseline kiting must be None"
+    );
 }
 
 /// 火力分配（雨露均沾）：一件 `fire_spread>0`、`fire_rate>1` 的武器，会把本回合的多发
@@ -128,10 +155,22 @@ fn spread_weapon_distributes_fire_across_targets() {
     if let Some(s) = state.ship_mut(&ship5) {
         s.position = [40.2, 40.0];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let plan = build_fire_plan(&state, &config, &ship0);
-    assert_eq!(plan.len(), 2, "a fire_rate=2 weapon should fire 2 shots, got {plan:?}");
+    assert_eq!(
+        plan.len(),
+        2,
+        "a fire_rate=2 weapon should fire 2 shots, got {plan:?}"
+    );
     let first = plan[0].1.clone();
     let second = plan[1].1.clone();
     assert!(
@@ -176,20 +215,36 @@ fn temper_biases_toward_weaker_or_stronger_deterrence() {
         s.position = [60.0, 40.0];
         s.components = vec!["railgun".to_string()];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     // 理智(tempter<0)：欺软怕硬 → 挑威慑低的 ship3。
     if let Some(s) = state.ship_mut(&ship0) {
         s.doctrine.temper = -1.0;
     }
     let rational = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 200.0, None, &ship0);
-    assert_eq!(rational, Some(ship3), "理智 should pick the weaker 威慑 target, got {rational:?}");
+    assert_eq!(
+        rational,
+        Some(ship3),
+        "理智 should pick the weaker 威慑 target, got {rational:?}"
+    );
     // 热血(temper>0)：飞蛾扑火 → 挑威慑高的 ship5。
     if let Some(s) = state.ship_mut(&ship0) {
         s.doctrine.temper = 1.0;
     }
     let hot = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 200.0, None, &ship0);
-    assert_eq!(hot, Some(ship5), "热血 should pick the stronger 威慑 target, got {hot:?}");
+    assert_eq!(
+        hot,
+        Some(ship5),
+        "热血 should pick the stronger 威慑 target, got {hot:?}"
+    );
 }
 
 /// 武器克制选目标（拟人「别浪费导弹打点防重镇」）：一舰有导弹时，应优先攻击**没有**
@@ -214,8 +269,16 @@ fn target_selection_respects_weapon_advantage() {
     if let Some(s) = state.ship_mut(&ship5) {
         s.position = [40.3, 40.0];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
     let target = nearest_enemy_ship(&state, &config, "中国", [40.0, 40.0], 0.4, None, &ship0);
     assert_eq!(
         target,
@@ -242,15 +305,26 @@ fn damaged_far_ai_ship_withdraws_to_heal() {
     if let Some(s) = state.ship_mut(&ship3) {
         s.position = [40.3, 40.0];
     }
-    state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
-    state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+    state
+        .faction_mut("中国")
+        .unwrap()
+        .relations
+        .insert("美国".to_string(), -35.0);
+    state
+        .faction_mut("美国")
+        .unwrap()
+        .relations
+        .insert("中国".to_string(), -35.0);
 
     let d_before = dist([40.0, 40.0], home);
     let mut rng = Prng::new(42);
     let derived = advance(&mut state, &config, &mut rng);
 
     assert!(
-        state.events.iter().any(|e| matches!(e, GameEvent::Withdraw { ship: s, .. } if *s == ship2)),
+        state
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Withdraw { ship: s, .. } if *s == ship2)),
         "a damaged far-from-home ship must withdraw, events={:?}",
         state.events
     );
@@ -268,7 +342,12 @@ fn damaged_far_ai_ship_withdraws_to_heal() {
         .ships
         .iter()
         .find(|d| d.ship == ship2 && d.verdict == ShipVerdict::Withdraw)
-        .unwrap_or_else(|| panic!("撤退判定必须被记下来，decisions={:?}", derived.decisions.ships));
+        .unwrap_or_else(|| {
+            panic!(
+                "撤退判定必须被记下来，decisions={:?}",
+                derived.decisions.ships
+            )
+        });
     assert_eq!(rec.target.as_deref(), Some("地球"), "撤退目标是首都天体");
     assert!(
         (rec.retreat_hull - effective_retreat_hull(&config, rec.kiting)).abs() < 1e-12,
@@ -301,17 +380,24 @@ fn decisions_are_consistent_and_at_most_two_per_ship() {
     let ds = &derived.decisions.ships;
     assert!(!ds.is_empty(), "一回合至少要留下一批判定");
 
-    let mut per_ship: std::collections::BTreeMap<String, Vec<&ShipDecision>> = std::collections::BTreeMap::new();
+    let mut per_ship: std::collections::BTreeMap<String, Vec<&ShipDecision>> =
+        std::collections::BTreeMap::new();
     for d in ds {
         assert!(d.ship != "", "判定必须指明是哪艘舰");
         if let Some(s) = state.ship(&d.ship) {
-            assert_eq!(s.faction_id, d.faction, "判定的势力必须与舰的归属一致：{d:?}");
+            assert_eq!(
+                s.faction_id, d.faction,
+                "判定的势力必须与舰的归属一致：{d:?}"
+            );
         }
         assert!(
             (d.retreat_hull - effective_retreat_hull(&config, d.kiting)).abs() < 1e-12,
             "retreat_hull 与 kiting 不自洽：{d:?}"
         );
-        assert!((0.0..=1.0).contains(&d.hull_ratio), "血量比超出 0..1：{d:?}");
+        assert!(
+            (0.0..=1.0).contains(&d.hull_ratio),
+            "血量比超出 0..1：{d:?}"
+        );
         // `Hold` 的语义是「这回合 AI 没派活」——那它也就不该写叶。
         if d.verdict == ShipVerdict::Hold {
             assert!(d.order.is_none(), "没派活的判定不该带写回的行为：{d:?}");
@@ -319,13 +405,30 @@ fn decisions_are_consistent_and_at_most_two_per_ship() {
         per_ship.entry(d.ship.clone()).or_default().push(d);
     }
     for (ship, rows) in &per_ship {
-        assert!(rows.len() <= 2, "{ship} 一回合出现了 {} 条判定（上限是 2）：{rows:?}", rows.len());
+        assert!(
+            rows.len() <= 2,
+            "{ship} 一回合出现了 {} 条判定（上限是 2）：{rows:?}",
+            rows.len()
+        );
         if rows.len() == 2 {
-            assert_eq!(rows[0].verdict, ShipVerdict::Move, "{ship} 的第一条判定应当是机动：{rows:?}");
-            assert!(!rows[0].after_move, "{ship} 的第一条判定不该标成「移动之后」：{rows:?}");
-            assert!(rows[1].after_move, "{ship} 的第二条判定必须标成「移动之后」：{rows:?}");
+            assert_eq!(
+                rows[0].verdict,
+                ShipVerdict::Move,
+                "{ship} 的第一条判定应当是机动：{rows:?}"
+            );
+            assert!(
+                !rows[0].after_move,
+                "{ship} 的第一条判定不该标成「移动之后」：{rows:?}"
+            );
+            assert!(
+                rows[1].after_move,
+                "{ship} 的第二条判定必须标成「移动之后」：{rows:?}"
+            );
         } else {
-            assert!(!rows[0].after_move, "{ship} 只有一条判定时不该标成「移动之后」：{rows:?}");
+            assert!(
+                !rows[0].after_move,
+                "{ship} 只有一条判定时不该标成「移动之后」：{rows:?}"
+            );
         }
     }
 }

@@ -94,6 +94,9 @@ pub mod value {
     pub const GOVERNANCE_COVERAGE: f64 = 1.0;
     /// 人口超载倍率的中性值：未超载。
     pub const GOVERNANCE_SCALE: f64 = 1.0;
+    /// 用工系数的中性值：**不缺人手**（没有用工缺口 ⇒ 不打折）。同上面两个 1.0 的道理——
+    /// 写 0 会被读成「全城没人上工」，那是另一回事。
+    pub const CITY_LABOR: f64 = 1.0;
 }
 
 /// 读面（`RoundView`）每个**叶子字段**的中性值。
@@ -123,6 +126,10 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     // ── 每势力一行 / 每城一行 ──
     ("factions", Neutral::EmptyMap),
     ("cities", Neutral::EmptyMap),
+    // ── 本回合的结算事实（过程；`pre` 里为空）──
+    // 一笔成交一行 / 一艘在跑运输的舰一行——两者都是**稀疏**的：没成交、没跑运输就是空的。
+    ("market_trades", Neutral::EmptyArray),
+    ("haul_steps", Neutral::EmptyMap),
     // ── AI 的判定（过程；`pre` 里为空）──
     ("decisions.ships", Neutral::EmptyArray),
     ("decisions.retools", Neutral::EmptyArray),
@@ -138,7 +145,9 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     ("factions[].population", Neutral::ZeroInt),
     ("factions[].market_value", Neutral::Zero),
     ("factions[].at_war", Neutral::False),
-    ("factions[].trade_blocked_by", Neutral::ZeroInt),
+    // B3：这列从「计数」升级成「名单 + 原因」（`{对方势力: war|cold|coalition}`）；
+    // 空 map = 谁都跟我做生意（不是「没算过」——它本来就是从 state 现算的观测）。
+    ("factions[].trade_blocked_by", Neutral::EmptyMap),
     // ── FactionRow：过程 ──
     ("factions[].production", Neutral::EmptyMap),
     ("factions[].production_value", Neutral::Zero),
@@ -156,6 +165,25 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     ("factions[].freight_paid", Neutral::Zero),
     ("factions[].carrier_income", Neutral::Zero),
     ("factions[].net_import", Neutral::Zero),
+    // ── FactionRow：钱去哪了（B2）──
+    // 「批了多少」是控制面的持久叶（`control` 的 investment_budget/construction_budget），
+    // 不在读面里；这里只有「真花掉的」，所以它的中性值是空 map（不是「没批」）。
+    ("factions[].investment_spent", Neutral::EmptyMap),
+    ("factions[].construction_spent", Neutral::EmptyMap),
+    ("factions[].upkeep_unpaid", Neutral::Zero),
+    ("factions[].fleet_rust", Neutral::Zero),
+    // ── FactionRow：市场里的位置 + 集货运力账（B3）──
+    ("factions[].purchasing_power", Neutral::Zero),
+    // **名次的中性值是 `null`**：`None` = 这一回合没排过队（`pre` 面）。写 0 会被读成
+    // 「第一个挑」——那是实打实的一个名次，不是「还没排队」（同 `hegemon: Option` 的约定）。
+    ("factions[].market_rank", Neutral::Null),
+    // 运力账是稀疏的（没积压的货栈不占键）；条目内部**逐字段**声明，因为一旦有键，
+    // 四个数就是完整的（不存在「条目里某个字段缺了」的读法）。
+    ("factions[].freight_gap", Neutral::EmptyMap),
+    ("factions[].freight_gap[].need", Neutral::Zero),
+    ("factions[].freight_gap[].own", Neutral::Zero),
+    ("factions[].freight_gap[].hired", Neutral::Zero),
+    ("factions[].freight_gap[].uncovered", Neutral::Zero),
     // ── CityRow ──
     ("cities[].population", Neutral::ZeroInt),
     ("cities[].loyalty", Neutral::Zero),
@@ -163,8 +191,15 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     ("cities[].production_value", Neutral::Zero),
     ("cities[].loyalty_target.distance", Neutral::Zero),
     ("cities[].loyalty_target.entertainment", Neutral::Zero),
-
     ("cities[].loyalty_target.effective", Neutral::Zero),
+    // ── CityRow：产出与建造的中间量（B2）──
+    // 用工系数的中性值是 **1.0**（不缺人手），不是 0——写 0 会被读成「全城没人上工」。
+    ("cities[].labor", Neutral::One),
+    ("cities[].housing_capacity", Neutral::Zero),
+    ("cities[].is_hub", Neutral::False),
+    ("cities[].build", Neutral::EmptyMap),
+    ("cities[].build[].rate", Neutral::Zero),
+    ("cities[].build[].increment", Neutral::Zero),
 ];
 
 /// 查一个路径的中性值（路径口径见 [`READ_FACE_NEUTRALS`]）。

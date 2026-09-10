@@ -36,7 +36,7 @@ pub fn parse_owner_pid(raw: Option<&str>) -> Option<u32> {
 pub fn wait_for_exit(pid: u32) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+        INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
     // SAFETY: `OpenProcess` 只取一个同步句柄；失败返回空指针，下面据此提前返回。
     // `WaitForSingleObject(.., INFINITE)` 在这个句柄上一直等，句柄一 signal（进程结束）
@@ -81,7 +81,11 @@ mod tests {
         assert_eq!(parse_owner_pid(None), None);
         assert_eq!(parse_owner_pid(Some("")), None);
         assert_eq!(parse_owner_pid(Some("   ")), None);
-        assert_eq!(parse_owner_pid(Some("0")), None, "0 = 没设，不是「盯住 Idle 进程」");
+        assert_eq!(
+            parse_owner_pid(Some("0")),
+            None,
+            "0 = 没设，不是「盯住 Idle 进程」"
+        );
         assert_eq!(parse_owner_pid(Some("abc")), None);
         assert_eq!(parse_owner_pid(Some("-1")), None);
         assert_eq!(parse_owner_pid(Some(" 4242 ")), Some(4242));
@@ -94,6 +98,9 @@ mod tests {
         let start = std::time::Instant::now();
         // 一个几乎肯定不存在的 pid（Windows 上打不开句柄、unix 上 ESRCH）。
         wait_for_exit(0x7FFF_FFF0);
-        assert!(start.elapsed() < Duration::from_secs(2), "死 pid 不该让看护挂住");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "死 pid 不该让看护挂住"
+        );
     }
 }

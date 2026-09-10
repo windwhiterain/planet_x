@@ -179,8 +179,7 @@ fn agent_view_is_self_described_by_schema() {
     }
     // 视图 `view` 必须真的出现在发射的 JSON 里（不是空壳），且是实体视图的一部分。
     assert!(
-        v.get("view")
-            .is_some_and(|m| m.get("factions").is_some()),
+        v.get("view").is_some_and(|m| m.get("factions").is_some()),
         "agent 视图必须携带 view（含各势力一行）"
     );
     // 每势力那一行必须同时带**观测**与**本回合过程量**（产出/维护/治理）。
@@ -209,10 +208,7 @@ fn agent_view_is_self_described_by_schema() {
             "view.factions 缺过程量字段 {k}"
         );
     }
-    assert!(
-        m.get("cities").is_some(),
-        "view 缺每城一行 cities"
-    );
+    assert!(m.get("cities").is_some(), "view 缺每城一行 cities");
     // B1：每城那一行必须带**忠诚目标值分项**（「为什么这座城忠诚在掉」的解释面）。
     let sample_city = m
         .get("cities")
@@ -223,13 +219,18 @@ fn agent_view_is_self_described_by_schema() {
     // 城行只放**逐城不同**的三项；那两个按势力算一次的全国项在势力行上（上面刚查过）。
     for k in ["distance", "entertainment", "effective"] {
         assert!(
-            sample_city.get("loyalty_target").and_then(|t| t.get(k)).is_some(),
+            sample_city
+                .get("loyalty_target")
+                .and_then(|t| t.get(k))
+                .is_some(),
             "view.cities[].loyalty_target 缺分项 {k}"
         );
     }
     // 首都评估/迁都在**判定数组**里（稀疏：大多数回合是空数组）。
     assert!(
-        m.get("decisions").and_then(|d| d.get("capital")).is_some_and(|c| c.is_array()),
+        m.get("decisions")
+            .and_then(|d| d.get("capital"))
+            .is_some_and(|c| c.is_array()),
         "view.decisions 缺稀疏的首都判定数组 capital"
     );
 }

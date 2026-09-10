@@ -3,7 +3,12 @@
 use super::*;
 
 /// `remove: true` 同时带了别的字段 ⇒ 记一条拒绝。返回 `true` = 这条补丁到此为止。
-pub fn remove_conflicts(remove: bool, present: &[&str], path: &str, report: &mut ApplyReport) -> bool {
+pub fn remove_conflicts(
+    remove: bool,
+    present: &[&str],
+    path: &str,
+    report: &mut ApplyReport,
+) -> bool {
     if !remove || present.is_empty() {
         return false;
     }
@@ -52,7 +57,10 @@ pub fn resolve_own_ship(
                 path,
                 ship,
                 "not_your_ship",
-                format!("「{ship}」属于 {}，不是 {fid} 的舰——指令只对本势力的舰生效。", s.faction_id),
+                format!(
+                    "「{ship}」属于 {}，不是 {fid} 的舰——指令只对本势力的舰生效。",
+                    s.faction_id
+                ),
             );
             None
         }
@@ -149,8 +157,8 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         }
         // 舰队默认**角色**（势力级，第三条风格轴）。写它 = 全舰队按这个角色走；
         // 设成 `Player` 之后自动控制的逐舰定编不再生效（那片叶归玩家）。
-        if let Some(d) = &fac.default_freighter {
-            apply_default_freighter(state, &fid, d, &mut report);
+        if let Some(d) = &fac.default_role {
+            apply_default_role(state, &fid, d, &mut report);
         }
         // **设计图库**（势力级）：**先于** `buildings` 应用——同一份 diff 里「建图 + 把某个
         // 建造区指过去」必须一次成功（否则 agent 得写两条命令，中间那条会报
@@ -172,14 +180,30 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // **角色**补丁（per-舰，第三条风格轴）：同一条路（叶片 + 写值即接管）。
         // 与另两条轴的差别：这片叶自动控制**也会写**，但**玩家写过（`Player`）之后 AI 不再碰**
         // ——所以「手动给某艘舰定活」是一次性的、且能一直压住自动定编。
-        for (i, f) in fac.ship_freighter.iter().enumerate() {
-            apply_ship_freighter(state, &fid, f, i, &mut report);
+        for (i, f) in fac.ship_role.iter().enumerate() {
+            apply_ship_role(state, &fid, f, i, &mut report);
         }
         for (i, bp) in fac.investment_budget.iter().enumerate() {
-            apply_budget(state, config, &fid, BudgetKind::Investment, bp, i, &mut report);
+            apply_budget(
+                state,
+                config,
+                &fid,
+                BudgetKind::Investment,
+                bp,
+                i,
+                &mut report,
+            );
         }
         for (i, bp) in fac.construction_budget.iter().enumerate() {
-            apply_budget(state, config, &fid, BudgetKind::Construction, bp, i, &mut report);
+            apply_budget(
+                state,
+                config,
+                &fid,
+                BudgetKind::Construction,
+                bp,
+                i,
+                &mut report,
+            );
         }
         for (i, ip) in fac.invest_weights.iter().enumerate() {
             apply_weight(
@@ -304,7 +328,11 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
 /// Returns the [`ApplyReport`] (what landed / what was dropped and why) so the
 /// caller can tell the agent. Callers that don't care (the web command route)
 /// may ignore it.
-pub fn apply_patch(state: &mut State, config: &GameConfig, value: &serde_json::Value) -> Result<ApplyReport, String> {
+pub fn apply_patch(
+    state: &mut State,
+    config: &GameConfig,
+    value: &serde_json::Value,
+) -> Result<ApplyReport, String> {
     let mut v = value.clone();
     normalize_control_diffs(&mut v)?;
     let req: CommandReq =

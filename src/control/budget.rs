@@ -53,7 +53,13 @@ pub fn apply_budget(
         value: bp.value.unwrap_or(0.0),
         mode: bp.mode.unwrap_or_default(),
     });
-    write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.{name}[{i}].value"), report);
+    write_value_leaf(
+        ctrl,
+        bp.value,
+        bp.mode,
+        format!("{fid}.{name}[{i}].value"),
+        report,
+    );
     report.applied += 1;
 }
 
@@ -122,7 +128,13 @@ pub fn apply_weight(
         value: value.unwrap_or(0.0),
         mode: mode.unwrap_or_default(),
     });
-    write_value_leaf(ctrl, value, mode, format!("{fid}.{name}[{i}].value"), report);
+    write_value_leaf(
+        ctrl,
+        value,
+        mode,
+        format!("{fid}.{name}[{i}].value"),
+        report,
+    );
     report.applied += 1;
 }
 
@@ -178,7 +190,10 @@ pub fn apply_loyalty_budget(
                 format!("{path}.city"),
                 &lp.city,
                 "no_such_city",
-                format!("没有名为「{}」的城（城被夷平后名字会从活城列表里消失）。", lp.city),
+                format!(
+                    "没有名为「{}」的城（城被夷平后名字会从活城列表里消失）。",
+                    lp.city
+                ),
             );
             return;
         }
@@ -203,6 +218,12 @@ pub fn apply_loyalty_budget(
             value: lp.value.unwrap_or(0.0),
             mode: lp.mode.unwrap_or_default(),
         });
-    write_value_leaf(ctrl, lp.value, lp.mode, format!("{fid}.loyalty_budget[{i}].value"), report);
+    write_value_leaf(
+        ctrl,
+        lp.value,
+        lp.mode,
+        format!("{fid}.loyalty_budget[{i}].value"),
+        report,
+    );
     report.applied += 1;
 }

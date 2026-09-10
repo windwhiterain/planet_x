@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::model::{
-    BlueprintSeed, BodyKindSpec, BuildingSpec, ComponentSpec, FactionId, ResourceDef, ShipSpec, StoryEvent,
+    BlueprintSeed, BodyKindSpec, BuildingSpec, ComponentSpec, FactionId, ResourceDef, ShipSpec,
+    StoryEvent,
 };
 
 /// Economy tuning (production and population).
@@ -344,17 +345,18 @@ fn default_capital_share_relocate_cost() -> f64 {
 /// MOND / 柯伊伯引力异常 tuning。
 ///
 /// 在「异常区」（距太阳超过 [`Self::radius`] 的深空）内，真实引力按 MOND（Modified
-/// Newtonian Dynamics）修正，偏离标准牛顿假定。没有掌握 MOND 修正引力的势力（即除
-/// [`Self::masters`] 之外的所有势力）在异常区内轨道计算错误，其指令坐标与实际到达
-/// 坐标产生偏移——舰船无法精确机动到目标点，因而难以精确轰炸/殖民/停靠深处目标。
-/// 这让 cult（掌握了 MOND 的势力）偏僻的柯伊伯带圣所成为天然堡垒：围攻者的舰队在
+/// Newtonian Dynamics）修正，偏离标准牛顿假定。**掌握度**（`Faction::mond_control`，0..1）
+/// 越低，势力在此区内的轨道计算错得越狠，其指令坐标与实际到达坐标产生偏移——舰船无法
+/// 精确机动到目标点，因而难以精确轰炸/殖民/停靠深处目标。
+/// 这让 cult（掌握度 = 1 的势力）偏僻的柯伊伯带圣所成为天然堡垒：围攻者的舰队在
 /// 那里「迷航」，而 cult 自己的舰指哪打哪。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MondConfig {
     /// 异常区起始半径（距太阳，AU）：超出此距离进入「柯伊伯异常区」。
     pub radius: f64,
-    /// 非 master 势力在异常区内，每超出 [`Self::radius`] 1 AU 的**最大**导航偏移量（AU）。
-    /// 实际偏移是伪随机的（见 [`Self::drift_shape`]），所以它是上界而不是定值。
+    /// 势力在异常区内，每超出 [`Self::radius`] 1 AU 的**最大**导航偏移量（AU），
+    /// **再乘以 `(1 − 掌握度)`**。实际偏移还是伪随机的（见 [`Self::drift_shape`]），
+    /// 所以它是上界而不是定值。
     pub drift_per_au: f64,
     /// 伪随机偏移的分布形状：`偏移 = 上界 × roll^drift_shape`（`roll ∈ [0,1)` 均匀）。
     ///
@@ -366,8 +368,66 @@ pub struct MondConfig {
     ///
     /// 这是「带内到底有多难」的总旋钮：往小调 = 圣所与柯伊伯矿更难被外人碰到。
     pub drift_shape: f64,
-    /// 掌握了 MOND 修正引力的势力 id（在异常区内无导航偏移）。
-    pub masters: Vec<FactionId>,
+    /// 开局**掌握度**（0..1）——**机制**，现在是**空表**：用户裁决「特权删掉」，
+    /// 没有任何势力白拿 MOND（旧版那份 `masters` 名单连开局起点都不再给）。
+    /// 想给某个剧本一个起点就写在这里，机制不用改。
+    #[serde(default)]
+    pub initial: BTreeMap<FactionId, f64>,
+    /// **知识（道）怎么涨**——见 [`KnowledgeConfig`]。用户裁决：先**只做一条渠道**
+    /// （飞船在异常区），所以这里没有「开采/条约/扩散」的旋钮。
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+}
+
+/// MOND **知识**的输入：掌握度（`Faction::mond_control`）如何随「在场」涨落。
+///
+/// 用户裁决（`.agents/notes/tech-system.md` §8）：**先只做一条渠道——飞船在异常区**。
+/// 不开采、不建研究建筑、不做扩散，于是「不去就学不会」是一条硬事实：
+/// 势力只要没有舰在异常区里，它的目标值就是 0，掌握度会**慢慢锈回去**（道会锈）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KnowledgeConfig {
+    /// **在场强度**的参考值：`目标 = 1 − e^(−在场强度 / 它)`。
+    /// 即「在场强度恰好等于它」时爬到目标的 63%——指数饱和，投入翻倍不等于进度翻倍，
+    /// 越接近满越难。它同时是**唯一的规模旋钮**：调小 = 学得快。
+    pub presence_ref: f64,
+    /// 每回合向目标靠拢的比例（与 `ideology.drift_rate` 同形的松弛；越小越慢）。
+    /// 掌握度因此**不是**一次性的解锁，而是一个会被打回原形的活量。
+    pub drift_rate: f64,
+    /// 深度权重：一艘舰的在场强度 = `1 + 深度(AU) × 它`。
+    /// 深处的观测更值钱 ⇒ 外缘（柯伊伯带）永远有理由派人去。
+    pub depth_weight: f64,
+    /// **学满所需的在场强度**：在场强度达到它 ⇒ 目标 = **1.0**（掌握度到顶）。
+    ///
+    /// 为什么需要这个数：指数饱和 `1 − e^(−p/ref)` **永远到不了 1**，而用户裁决
+    /// 「一旦达到 1.0 就不会下降」——那条棘轮（[`crate::sim::step_knowledge`]）必须有一个
+    /// **够得着**的顶。参考算法（`presence = Σ 1 + 深度 × depth_weight`）：
+    /// `12.0` ≈ 5 艘舰蹲在创神星（深 10.2 ⇒ 每艘 3.5）、或 8 艘蹲在深 4 的地方、
+    /// 或 1 艘蹲在深 44 的远日段 ⇒ 「一支真的常驻深空的编队」。
+    ///
+    /// 这一个数**不是断崖**：跨过它只是把目标从 0.99x 抬到 1.0，而 0.99 与 1.0 的行为差别
+    /// 只有「前沿 228 AU vs 无穷」这一档（深处本来就已经「当月到位」）。
+    pub mastery_presence: f64,
+    /// **学满需要多少个「够格的回合」**：在场强度 ≥ [`Self::mastery_presence`] 的那些回合，
+    /// 掌握度按 `1/它` 的**固定步长**往上爬（在场强度掉下去的那些回合不算）。爬满 ⇒ 正好 1.0
+    /// ⇒ 棘轮锁住。
+    ///
+    /// 为什么不能「够格就直接到顶」（第一版就是这么写的）：实测 seed 7 里**俄罗斯**与
+    /// **深空运输联盟**各自只在 6–7% 的回合里有舰在带内，却都靠**某一回合恰好**凑够在场强度
+    /// 而当上了 master（r240 双双到 1.0、此后永久独占）。一回合的巧合不该换来永久垄断——
+    /// 所以「学满」= **持续**够格，而不是踩中一次。
+    pub mastery_rounds: u32,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            presence_ref: 2.0,
+            drift_rate: 0.03,
+            depth_weight: 0.25,
+            mastery_presence: 12.0,
+            mastery_rounds: 48,
+        }
+    }
 }
 /// 合纵连横 / 均势外交 (balance-of-power) tuning——「弱者联盟对抗霸权」。
 ///
@@ -973,7 +1033,10 @@ impl GameConfig {
     /// 某势力的名字库（按势力名查）。库里为空/未配置时返回空切片——
     /// 由 [`ship_display_name`] 退回到「舰-{序列}」这种唯一但无含义的名字。
     pub fn ship_pool(&self, faction_name: &str) -> &[String] {
-        self.name_pool.get(faction_name).map(Vec::as_slice).unwrap_or(&[])
+        self.name_pool
+            .get(faction_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 

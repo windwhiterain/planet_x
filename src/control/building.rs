@@ -59,13 +59,21 @@ pub fn apply_building_patch(
     report: &mut ApplyReport,
 ) -> bool {
     let Some(cid) = patch.city.clone() else {
-        report.skip(format!("{path}.city"), "", "missing_city", "建筑补丁必须指明 city（城名）。");
+        report.skip(
+            format!("{path}.city"),
+            "",
+            "missing_city",
+            "建筑补丁必须指明 city（城名）。",
+        );
         return false;
     };
 
     if patch.building.is_none() {
         // Add a new building.
-        let kind = patch.kind.clone().unwrap_or_else(|| "residential".to_string());
+        let kind = patch
+            .kind
+            .clone()
+            .unwrap_or_else(|| "residential".to_string());
         let Some(spec) = config.buildings.get(&kind) else {
             let kinds: Vec<&str> = config.buildings.keys().map(String::as_str).collect();
             report.skip(
@@ -93,13 +101,19 @@ pub fn apply_building_patch(
                     format!("{path}.city"),
                     &cid,
                     "not_your_city",
-                    format!("「{cid}」属于 {}，不是 {fid} 的城——新建建筑只能落在自己的城里。", c.faction_id),
+                    format!(
+                        "「{cid}」属于 {}，不是 {fid} 的城——新建建筑只能落在自己的城里。",
+                        c.faction_id
+                    ),
                 );
                 return false;
             }
             Some(_) => {}
         }
-        let structure = patch.structure.clone().unwrap_or_else(|| "concrete".to_string());
+        let structure = patch
+            .structure
+            .clone()
+            .unwrap_or_else(|| "concrete".to_string());
         if !config.structures.contains_key(&structure) {
             let all: Vec<&str> = config.structures.keys().map(String::as_str).collect();
             report.skip(
@@ -117,8 +131,19 @@ pub fn apply_building_patch(
             .flat_map(|c| c.buildings.iter().map(|b| b.id))
             .max()
             .map_or(0, |m| m + 1);
-        let resource = if kind == "mining" { patch.resource.clone() } else { None };
-        let ship_type = if kind == "construction" { patch.ship_type.clone().or_else(|| Some("corvette".to_string())) } else { None };
+        let resource = if kind == "mining" {
+            patch.resource.clone()
+        } else {
+            None
+        };
+        let ship_type = if kind == "construction" {
+            patch
+                .ship_type
+                .clone()
+                .or_else(|| Some("corvette".to_string()))
+        } else {
+            None
+        };
         // **设计图指针**（新建建造区可以一步挂上图）：非建造区 ⇒ `not_a_shipyard`；
         // 库里没有 ⇒ `no_such_blueprint`；舰级对不上 ⇒ `blueprint_class_mismatch`。
         let mut blueprint: Option<BlueprintId> = None;
@@ -178,9 +203,15 @@ pub fn apply_building_patch(
             city.buildings.push(b);
         }
         let ctrl = state.control.entry(fid.clone()).or_default();
-        ctrl.invest_weights.insert((cid.clone(), id), Control::player(spec.default_invest_weight));
+        ctrl.invest_weights.insert(
+            (cid.clone(), id),
+            Control::player(spec.default_invest_weight),
+        );
         if kind == "construction" {
-            ctrl.build_weights.insert((cid.clone(), id), Control::player(spec.default_build_weight));
+            ctrl.build_weights.insert(
+                (cid.clone(), id),
+                Control::player(spec.default_build_weight),
+            );
         }
         return true;
     }
@@ -197,7 +228,10 @@ pub fn apply_building_patch(
             );
             return false;
         }
-        if state.city(&cid).is_some_and(|c| !c.buildings.iter().any(|b| b.id == bid)) {
+        if state
+            .city(&cid)
+            .is_some_and(|c| !c.buildings.iter().any(|b| b.id == bid))
+        {
             report.skip(
                 format!("{path}.building"),
                 bid.to_string(),
@@ -226,7 +260,10 @@ pub fn apply_building_patch(
         );
         return false;
     }
-    let Some(target) = state.city(&cid).and_then(|c| c.buildings.iter().find(|b| b.id == bid)) else {
+    let Some(target) = state
+        .city(&cid)
+        .and_then(|c| c.buildings.iter().find(|b| b.id == bid))
+    else {
         report.skip(
             format!("{path}.building"),
             bid.to_string(),

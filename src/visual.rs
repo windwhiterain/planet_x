@@ -1,11 +1,11 @@
 //! CLI rendering: a colored ASCII star map plus structured tables
 //! (rendered with `comfy-table`) and a compact report.
 
+use crate::model::*;
 use colored::{Color, Colorize};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
 use std::collections::BTreeMap;
-use crate::model::*;
 
 const COLS: usize = 66;
 const ROWS: usize = 22;
@@ -37,11 +37,19 @@ fn tx(v: f64) -> f64 {
 /// unique key, so the letter is derived from the name (deterministic; no RNG)
 /// rather than any numeric id.
 fn body_letter(name: &str) -> char {
-    let h = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let h = name
+        .bytes()
+        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     (b'A' + (h % 26) as u8) as char
 }
 
-fn map_to_grid(p: [f64; 2], minx: f64, spanx: f64, maxy: f64, spany: f64) -> Option<(usize, usize)> {
+fn map_to_grid(
+    p: [f64; 2],
+    minx: f64,
+    spanx: f64,
+    maxy: f64,
+    spany: f64,
+) -> Option<(usize, usize)> {
     if spanx <= 0.0 || spany <= 0.0 || !p[0].is_finite() || !p[1].is_finite() {
         return None;
     }
@@ -57,7 +65,9 @@ fn map_to_grid(p: [f64; 2], minx: f64, spanx: f64, maxy: f64, spany: f64) -> Opt
 /// A stable palette index for a faction, derived from its **name** (the unique
 /// key). Deterministic, so a faction keeps its colour across snapshots.
 fn faction_color(name: &str) -> Color {
-    let h = name.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+    let h = name
+        .bytes()
+        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
     PALETTE[h % PALETTE.len()]
 }
 
@@ -115,12 +125,26 @@ pub fn render_map(state: &State) -> String {
     for b in &state.bodies {
         let p = b.position;
         if let Some((c, r)) = map_to_grid([tx(p[0]), tx(p[1])], minx, spanx, maxy, spany) {
-            put(&mut grid, c, r, body_letter(&b.name).to_string().cyan().to_string());
+            put(
+                &mut grid,
+                c,
+                r,
+                body_letter(&b.name).to_string().cyan().to_string(),
+            );
         }
     }
     for s in &state.ships {
-        if let Some((c, r)) = map_to_grid([tx(s.position[0]), tx(s.position[1])], minx, spanx, maxy, spany) {
-            let ch = state.faction(&s.faction_id).map(|f| f.symbol).unwrap_or('?');
+        if let Some((c, r)) = map_to_grid(
+            [tx(s.position[0]), tx(s.position[1])],
+            minx,
+            spanx,
+            maxy,
+            spany,
+        ) {
+            let ch = state
+                .faction(&s.faction_id)
+                .map(|f| f.symbol)
+                .unwrap_or('?');
             let color = faction_color(&s.faction_id);
             put(&mut grid, c, r, ch.to_string().color(color).to_string());
         }
@@ -224,8 +248,16 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             cell(body_letter(&b.name).to_string().cyan().to_string()),
             cell(b.name.clone()),
             cell(fmt_pos(p)),
-            cell(if b.settlements.is_empty() { "无人".to_string() } else { format!("{}个定居点", b.settlements.len()) }),
-            cell(if cities.is_empty() { "—".to_string() } else { cities.join("、") }),
+            cell(if b.settlements.is_empty() {
+                "无人".to_string()
+            } else {
+                format!("{}个定居点", b.settlements.len())
+            }),
+            cell(if cities.is_empty() {
+                "—".to_string()
+            } else {
+                cities.join("、")
+            }),
         ]);
     }
     s.push_str(&t.to_string());
@@ -242,13 +274,21 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             .collect::<Vec<_>>()
             .join("  ");
         let armor: f64 = c.buildings.iter().map(|b| b.armor).sum();
-        let owner = if c.razed { "—".to_string() } else { faction_name(state, &c.faction_id) };
+        let owner = if c.razed {
+            "—".to_string()
+        } else {
+            faction_name(state, &c.faction_id)
+        };
         t.add_row(vec![
             cell(c.name.clone()),
             cell(owner),
             cell(c.population.to_string()),
             cell(format!("{:.0}", armor)),
-            cell(if c.razed { "空白".to_string() } else { "—".to_string() }),
+            cell(if c.razed {
+                "空白".to_string()
+            } else {
+                "—".to_string()
+            }),
             cell(buildings),
         ]);
     }
@@ -257,7 +297,15 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
     // --- Ships ---
     s.push_str(&heading("飞船"));
     let mut t = new_table();
-    t.set_header(vec!["ID", "名称", "势力", "位置 (AU)", "目标", "航速", "耐久%"]);
+    t.set_header(vec![
+        "ID",
+        "名称",
+        "势力",
+        "位置 (AU)",
+        "目标",
+        "航速",
+        "耐久%",
+    ]);
     for sh in &state.ships {
         let spec = config.ship_spec(&sh.class);
         let target = match state.ship_behavior(sh.name.clone()) {
@@ -278,7 +326,10 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
             cell(fmt_pos(sh.position)),
             cell(target),
             cell(format!("{:.2}", crate::model::ship_panel(config, sh).speed)),
-            cell(format!("{:.0}", (sh.hull / sh.hull_max.clamp(1e-9, f64::MAX) * 100.0).clamp(0.0, 100.0))),
+            cell(format!(
+                "{:.0}",
+                (sh.hull / sh.hull_max.clamp(1e-9, f64::MAX) * 100.0).clamp(0.0, 100.0)
+            )),
         ]);
     }
     if !state.ships.is_empty() {
@@ -305,7 +356,11 @@ pub fn render_summary(state: &State, config: &GameConfig) -> String {
                 f.name
             )),
             cell(fmt_resource_map(config, &f.resources)),
-            cell(if enemies.is_empty() { "—".to_string() } else { enemies.join(" ") }),
+            cell(if enemies.is_empty() {
+                "—".to_string()
+            } else {
+                enemies.join(" ")
+            }),
         ]);
     }
     s.push_str(&t.to_string());
@@ -330,7 +385,9 @@ pub fn render_control_diff(
     let mut header_printed = false;
 
     for fid in after.keys() {
-        let Some(prev) = before.get(fid) else { continue };
+        let Some(prev) = before.get(fid) else {
+            continue;
+        };
         let curr = &after[fid];
 
         let mut lines: Vec<String> = Vec::new();
@@ -371,7 +428,10 @@ pub fn render_control_diff(
                 header_printed = true;
             }
             let color = faction_color(fid);
-            out.push_str(&format!("  {}\n", faction_name(state, fid).color(color).bold()));
+            out.push_str(&format!(
+                "  {}\n",
+                faction_name(state, fid).color(color).bold()
+            ));
             for l in lines {
                 out.push_str(&l);
                 out.push('\n');
@@ -394,7 +454,11 @@ where
     K: Ord + Clone,
     V: Clone + PartialEq,
 {
-    let mut keys: Vec<K> = before.keys().cloned().chain(after.keys().cloned()).collect();
+    let mut keys: Vec<K> = before
+        .keys()
+        .cloned()
+        .chain(after.keys().cloned())
+        .collect();
     keys.sort();
     keys.dedup();
 
@@ -438,7 +502,9 @@ fn building_ref_str(config: &GameConfig, state: &State, cid: &CityId, bid: &Buil
         .city(cid)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format!("城#{}", cid));
-    let b = state.city(cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let b = state
+        .city(cid)
+        .and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
     let label = b
         .map(|bb| config.building_spec(&bb.kind).label.clone())
         .unwrap_or_else(|| format!("#{}", bid));
@@ -457,7 +523,9 @@ fn build_key_str(config: &GameConfig, state: &State, key: &BuildKey) -> String {
         .city(cid)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format!("城#{}", cid));
-    let b = state.city(cid).and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
+    let b = state
+        .city(cid)
+        .and_then(|c| c.buildings.iter().find(|b| b.id == *bid));
     let cls = b
         .and_then(|bb| bb.ship_type.clone())
         .unwrap_or_else(|| format!("#{}", bid));

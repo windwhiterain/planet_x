@@ -24,7 +24,10 @@ use planet_x::world;
 use std::collections::BTreeMap;
 
 fn rounds() -> u32 {
-    std::env::var("PROBE_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(240)
+    std::env::var("PROBE_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(240)
 }
 
 fn seeds() -> Vec<u64> {
@@ -41,7 +44,9 @@ fn value_of(config: &GameConfig, rt: &str) -> f64 {
 /// 一座城**还没建成的那部分**要花多少资源（按 `per_area_cost` 与引擎同一把尺子）。
 fn city_invest_need(state: &State, config: &GameConfig, cid: &str) -> ResourceMap {
     let mut out: ResourceMap = ResourceMap::new();
-    let Some(city) = state.city(cid) else { return out };
+    let Some(city) = state.city(cid) else {
+        return out;
+    };
     let res_mod = state
         .city_settlement(cid)
         .map(|s| s.construction_resource_mod)
@@ -64,10 +69,17 @@ fn city_invest_need(state: &State, config: &GameConfig, cid: &str) -> ResourceMa
 /// 与 `sim::production::step_production` 同一把尺子）。`None` = 没有定居点。
 fn city_mine_rate(state: &State, config: &GameConfig, cid: &str) -> ResourceMap {
     let mut out: ResourceMap = ResourceMap::new();
-    let Some(city) = state.city(cid) else { return out };
+    let Some(city) = state.city(cid) else {
+        return out;
+    };
     let deposits: Vec<(String, f64)> = state
         .city_settlement(cid)
-        .map(|s| s.resources.iter().map(|d| (d.resource.clone(), d.area)).collect())
+        .map(|s| {
+            s.resources
+                .iter()
+                .map(|d| (d.resource.clone(), d.area))
+                .collect()
+        })
         .unwrap_or_default();
     let labor = sim::labor_ratio(state, config, cid);
     for b in &city.buildings {
@@ -75,7 +87,9 @@ fn city_mine_rate(state: &State, config: &GameConfig, cid: &str) -> ResourceMap 
         if spec.role != "mining" {
             continue;
         }
-        let Some(rt) = b.resource.clone() else { continue };
+        let Some(rt) = b.resource.clone() else {
+            continue;
+        };
         let area = b.deployed * sim::building_health(b, config);
         let effective = area.min(sim::deposit_area(&deposits, &rt));
         if effective <= 0.0 {
@@ -102,12 +116,20 @@ fn value(config: &GameConfig, m: &ResourceMap) -> f64 {
 }
 
 fn fmt(m: &ResourceMap) -> String {
-    let mut v: Vec<(String, f64)> = m.iter().filter(|(_, a)| **a > 1e-6).map(|(k, a)| (k.clone(), *a)).collect();
+    let mut v: Vec<(String, f64)> = m
+        .iter()
+        .filter(|(_, a)| **a > 1e-6)
+        .map(|(k, a)| (k.clone(), *a))
+        .collect();
     v.sort_by(|a, b| b.1.total_cmp(&a.1));
     if v.is_empty() {
         return "—".to_string();
     }
-    v.iter().take(4).map(|(k, a)| format!("{k} {a:.1}")).collect::<Vec<_>>().join(" / ")
+    v.iter()
+        .take(4)
+        .map(|(k, a)| format!("{k} {a:.1}"))
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// 一座城**已经建成的那部分**折算成资源当量（= 迄今投进去的投资量，逐件资源）。
@@ -116,7 +138,9 @@ fn fmt(m: &ResourceMap) -> String {
 /// 于是「这一回合投了多少」= 两个回合的差。
 fn city_built(state: &State, config: &GameConfig, cid: &str) -> ResourceMap {
     let mut out: ResourceMap = ResourceMap::new();
-    let Some(city) = state.city(cid) else { return out };
+    let Some(city) = state.city(cid) else {
+        return out;
+    };
     let res_mod = state
         .city_settlement(cid)
         .map(|s| s.construction_resource_mod)
@@ -132,15 +156,26 @@ fn city_built(state: &State, config: &GameConfig, cid: &str) -> ResourceMap {
 }
 
 /// 全势力在「首都天体 / 非首都天体」上**已经建成**的资源当量（用来取差分量流速）。
-fn built_split(state: &State, config: &GameConfig) -> (BTreeMap<String, ResourceMap>, BTreeMap<String, ResourceMap>) {
+fn built_split(
+    state: &State,
+    config: &GameConfig,
+) -> (BTreeMap<String, ResourceMap>, BTreeMap<String, ResourceMap>) {
     let mut cap: BTreeMap<String, ResourceMap> = BTreeMap::new();
     let mut off: BTreeMap<String, ResourceMap> = BTreeMap::new();
     for f in &state.factions {
         let fid = f.name.as_str();
         let capital = state.capital_body(fid);
-        for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+        for c in state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid && !c.razed)
+        {
             let b = city_built(state, config, &c.name);
-            let slot = if c.body_id == capital { cap.entry(fid.to_string()).or_default() } else { off.entry(fid.to_string()).or_default() };
+            let slot = if c.body_id == capital {
+                cap.entry(fid.to_string()).or_default()
+            } else {
+                off.entry(fid.to_string()).or_default()
+            };
             add(slot, &b);
         }
     }
@@ -181,14 +216,22 @@ fn probe_site_supply_health() {
             sim::advance(&mut state, &config, &mut rng);
             for e in &state.events {
                 match e {
-                    GameEvent::CargoLoaded { owner, body, cargo, .. } => {
+                    GameEvent::CargoLoaded {
+                        owner, body, cargo, ..
+                    } => {
                         // 装货点是不是**货主的首都** ⇒ 这是进口腿（补给）的起点。
                         if *body == state.capital_body(owner) {
                             imp += cargo.values().sum::<f64>();
                             imp_trips += 1;
                         }
                     }
-                    GameEvent::CargoDelivered { owner, body, cargo, into_pool, .. } => {
+                    GameEvent::CargoDelivered {
+                        owner,
+                        body,
+                        cargo,
+                        into_pool,
+                        ..
+                    } => {
                         if !*into_pool && *body != state.capital_body(owner) {
                             exp += cargo.values().sum::<f64>();
                             exp_trips += 1;
@@ -207,7 +250,12 @@ fn probe_site_supply_health() {
                 let pool: f64 = state
                     .factions
                     .iter()
-                    .map(|f| f.resources.iter().map(|(k, v)| v * value_of(&config, k)).sum::<f64>())
+                    .map(|f| {
+                        f.resources
+                            .iter()
+                            .map(|(k, v)| v * value_of(&config, k))
+                            .sum::<f64>()
+                    })
                     .sum();
                 let depot: f64 = state
                     .depots
@@ -219,7 +267,9 @@ fn probe_site_supply_health() {
                 let haulers = state
                     .ships
                     .iter()
-                    .filter(|s| s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                    .filter(|s| {
+                        s.hull > 0.0 && state.ship_role(s.name.clone()) == ShipRole::Freight
+                    })
                     .count();
                 rounds_log.push(format!(
                     "    r{r:<4} 城 {cities:<3} 舰 {alive:<3}（运输 {haulers:<2}、**裸舰 {bare:<2}**） 池值 {pool:>8.1} 货栈值 {depot:>9.1} ｜ 累计进口 {imp:>8.1}（{imp_trips} 趟）/ 出口 {exp:>8.1}（{exp_trips} 趟）"
@@ -250,12 +300,19 @@ fn probe_site_stock_and_deficit() {
             let fid = f.name.as_str();
             let cap = state.capital_body(fid);
             let mut lines: Vec<String> = Vec::new();
-            for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+            for c in state
+                .cities
+                .iter()
+                .filter(|c| c.faction_id == fid && !c.razed)
+            {
                 if c.body_id == cap {
                     continue;
                 }
-                let need = planet_x::autocontrol::freight::site_build_need(&state, &config, fid, &c.body_id);
-                let deficit = planet_x::autocontrol::freight::site_deficit(&state, &config, fid, &c.body_id);
+                let need = planet_x::autocontrol::freight::site_build_need(
+                    &state, &config, fid, &c.body_id,
+                );
+                let deficit =
+                    planet_x::autocontrol::freight::site_deficit(&state, &config, fid, &c.body_id);
                 let stock = state.depot(fid, &c.body_id).cloned().unwrap_or_default();
                 let built: f64 = c.buildings.iter().map(|b| b.deployed).sum();
                 let plan: f64 = c.buildings.iter().map(|b| b.area).sum();
@@ -270,7 +327,13 @@ fn probe_site_stock_and_deficit() {
             if lines.is_empty() {
                 continue;
             }
-            println!("  {fid:<12} 首都 {cap} 池值 {:.1}", f.resources.iter().map(|(k, v)| v * value_of(&config, k)).sum::<f64>());
+            println!(
+                "  {fid:<12} 首都 {cap} 池值 {:.1}",
+                f.resources
+                    .iter()
+                    .map(|(k, v)| v * value_of(&config, k))
+                    .sum::<f64>()
+            );
             for l in lines {
                 println!("{l}");
             }
@@ -298,12 +361,24 @@ fn probe_site_deadlock() {
         for f in &state.factions {
             let fid = f.name.as_str();
             let cap = state.capital_body(fid);
-            let ships = state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count();
-            let cities: Vec<&City> = state.cities.iter().filter(|c| c.faction_id == fid && !c.razed).collect();
+            let ships = state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == fid && s.hull > 0.0)
+                .count();
+            let cities: Vec<&City> = state
+                .cities
+                .iter()
+                .filter(|c| c.faction_id == fid && !c.razed)
+                .collect();
             if cities.is_empty() && ships == 0 {
                 continue;
             }
-            let pool: f64 = f.resources.iter().map(|(k, v)| v * value_of(&config, k)).sum();
+            let pool: f64 = f
+                .resources
+                .iter()
+                .map(|(k, v)| v * value_of(&config, k))
+                .sum();
             let depots: f64 = state
                 .depots
                 .iter()
@@ -314,7 +389,11 @@ fn probe_site_deadlock() {
             let haulers = state
                 .ships
                 .iter()
-                .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+                .filter(|s| {
+                    s.faction_id == fid
+                        && s.hull > 0.0
+                        && state.ship_role(s.name.clone()) == ShipRole::Freight
+                })
                 .count();
             let lns = planet_x::autocontrol::freight::lanes(&state, &config, fid);
             println!(
@@ -325,12 +404,14 @@ fn probe_site_deadlock() {
             );
             // 每一处有建造区的地方：它想造什么、差什么。
             for c in &cities {
-                let yards: Vec<&Building> = c.buildings.iter().filter(|b| b.is_shipyard()).collect();
+                let yards: Vec<&Building> =
+                    c.buildings.iter().filter(|b| b.is_shipyard()).collect();
                 if yards.is_empty() {
                     continue;
                 }
                 let stock = state.stock_at(fid, &c.body_id).cloned().unwrap_or_default();
-                let deficit = planet_x::autocontrol::freight::site_deficit(&state, &config, fid, &c.body_id);
+                let deficit =
+                    planet_x::autocontrol::freight::site_deficit(&state, &config, fid, &c.body_id);
                 for y in yards {
                     let cls = y.ship_type.clone().unwrap_or_default();
                     let hull: ResourceMap = config
@@ -401,8 +482,14 @@ fn probe_site_invest_flow() {
             let mut round_off: ResourceMap = ResourceMap::new();
             for f in &state.factions {
                 let fid = f.name.as_str();
-                let c = diff(prev_cap.get(fid).unwrap_or(&ResourceMap::new()), cap.get(fid).unwrap_or(&ResourceMap::new()));
-                let o = diff(prev_off.get(fid).unwrap_or(&ResourceMap::new()), off.get(fid).unwrap_or(&ResourceMap::new()));
+                let c = diff(
+                    prev_cap.get(fid).unwrap_or(&ResourceMap::new()),
+                    cap.get(fid).unwrap_or(&ResourceMap::new()),
+                );
+                let o = diff(
+                    prev_off.get(fid).unwrap_or(&ResourceMap::new()),
+                    off.get(fid).unwrap_or(&ResourceMap::new()),
+                );
                 round_cap += units(&c);
                 add(&mut round_off, &o);
             }
@@ -435,10 +522,18 @@ fn probe_site_invest_flow() {
                 );
             }
         }
-        let avg_rate = if rounds_counted > 0 { off_rate_sum / rounds_counted as f64 } else { 0.0 };
+        let avg_rate = if rounds_counted > 0 {
+            off_rate_sum / rounds_counted as f64
+        } else {
+            0.0
+        };
         println!(
             "== 投资流速 seed {seed}（{n} 回合）== 累计投资：首都 {tot_cap:.1} 单位 / **非首都 {tot_off:.1} 单位**（{:.0}% 在非首都）｜ 非首都本地产出均 {avg_rate:.1}/回合（合计 {:.1}）",
-            if tot_cap + tot_off > 0.0 { 100.0 * tot_off / (tot_cap + tot_off) } else { 0.0 },
+            if tot_cap + tot_off > 0.0 {
+                100.0 * tot_off / (tot_cap + tot_off)
+            } else {
+                0.0
+            },
             avg_rate * rounds_counted as f64,
         );
     }
@@ -461,7 +556,10 @@ fn probe_site_deposit_gaps() {
         }
     }
     wanted.sort();
-    println!("== 建楼要的资源：{wanted:?}（{n} 个天体）==", n = world::default_state(&config, 7).bodies.len());
+    println!(
+        "== 建楼要的资源：{wanted:?}（{n} 个天体）==",
+        n = world::default_state(&config, 7).bodies.len()
+    );
     let state = world::default_state(&config, 7);
     // 按天体列出定居点矿藏——这是「本地产出」的天花板。
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
@@ -471,7 +569,11 @@ fn probe_site_deposit_gaps() {
                 continue;
             }
             let have: Vec<String> = s.resources.iter().map(|d| d.resource.clone()).collect();
-            let lack: Vec<String> = wanted.iter().filter(|w| !have.contains(w)).cloned().collect();
+            let lack: Vec<String> = wanted
+                .iter()
+                .filter(|w| !have.contains(w))
+                .cloned()
+                .collect();
             for l in &lack {
                 *missing.entry(l.clone()).or_insert(0) += 1;
             }
@@ -497,7 +599,8 @@ fn probe_site_supply() {
             sim::advance(&mut state, &config, &mut rng);
         }
         println!("== 站点自给 seed {seed}（{n} 回合）==");
-        let (mut w_cap_need, mut w_off_need, mut w_off_stock, mut w_off_rate) = (0.0, 0.0, 0.0, 0.0);
+        let (mut w_cap_need, mut w_off_need, mut w_off_stock, mut w_off_rate) =
+            (0.0, 0.0, 0.0, 0.0);
         let mut w_off_unbuildable = 0.0;
         for f in &state.factions {
             let fid = f.name.as_str();
@@ -510,7 +613,11 @@ fn probe_site_supply() {
             let mut unbuildable: ResourceMap = ResourceMap::new();
             let mut off_cities = 0usize;
             let mut cap_cities = 0usize;
-            for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+            for c in state
+                .cities
+                .iter()
+                .filter(|c| c.faction_id == fid && !c.razed)
+            {
                 let need = city_invest_need(&state, &config, &c.name);
                 if c.body_id == cap {
                     cap_cities += 1;
@@ -540,8 +647,8 @@ fn probe_site_supply() {
             w_off_rate += orr;
             w_off_unbuildable += units(&unbuildable);
             println!(
-                "  {fid:<12} 首都={cap:<6} 城 {cap_cities}(首都)/{off_cities}(外地)  投资需求 首都 {cn:>8.1} / 外地 {on:>8.1} 单位"
-                , cap = cap
+                "  {fid:<12} 首都={cap:<6} 城 {cap_cities}(首都)/{off_cities}(外地)  投资需求 首都 {cn:>8.1} / 外地 {on:>8.1} 单位",
+                cap = cap
             );
             println!(
                 "      外地需求 {}  ｜ 本地月产 {}  ｜ 本地货栈 {}  ｜ **只能靠运的** {:.1} 单位 {}",

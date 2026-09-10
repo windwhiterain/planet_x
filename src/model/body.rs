@@ -71,7 +71,8 @@ impl Orbit {
         }
         // True anomaly from perihelion.
         let half = ecc_anomaly / 2.0;
-        let true_anomaly = 2.0 * ((1.0 + e).sqrt() * half.sin()).atan2((1.0 - e).sqrt() * half.cos());
+        let true_anomaly =
+            2.0 * ((1.0 + e).sqrt() * half.sin()).atan2((1.0 - e).sqrt() * half.cos());
         let r = m * (1.0 - e * ecc_anomaly.cos());
 
         // Perihelion direction is the opposite of the aphelion direction.

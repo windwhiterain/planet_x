@@ -5,7 +5,13 @@ use super::*;
 /// The command-controlled 建设投资权重 of a building (its build priority).
 /// Follows the control scope: an AI-controlled building uses the config default,
 /// while a player-controlled building uses the commanded value.
-pub fn invest_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b: &Building) -> f64 {
+pub fn invest_weight(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    cid: &str,
+    b: &Building,
+) -> f64 {
     let key = (cid.to_string(), b.id);
     if state.invest_control(fid.to_string(), &key).is_player() {
         state
@@ -36,7 +42,10 @@ pub fn build_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b:
 /// in market value). Follows the control scope: the system uses the config default,
 /// a Player-commanded city uses the commanded value.
 pub fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, cid: CityId) -> f64 {
-    if state.loyalty_budget_control(fid.clone(), cid.clone()).is_player() {
+    if state
+        .loyalty_budget_control(fid.clone(), cid.clone())
+        .is_player()
+    {
         state
             .control(fid.clone())
             .and_then(|c| c.loyalty_budget.get(&cid))
@@ -87,7 +96,9 @@ fn merge_capital_depots(state: &mut State) {
     let fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for fid in fids {
         let cap = state.capital_body(&fid);
-        let Some(map) = state.depots.remove(&(fid.clone(), cap)) else { continue };
+        let Some(map) = state.depots.remove(&(fid.clone(), cap)) else {
+            continue;
+        };
         if let Some(f) = state.faction_mut(&fid) {
             for (rt, amt) in map {
                 *f.resources.entry(rt).or_insert(0.0) += amt;
@@ -102,7 +113,12 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
     for cid in city_ids {
         let (body_id, faction_id, population, razed) = {
             let c = state.city(&cid).expect("city disappeared");
-            (c.body_id.clone(), c.faction_id.clone(), c.population, c.razed)
+            (
+                c.body_id.clone(),
+                c.faction_id.clone(),
+                c.population,
+                c.razed,
+            )
         };
         if razed {
             continue;
@@ -116,7 +132,10 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
             match s {
                 Some(s) => (
                     s.ecological_capacity,
-                    s.resources.iter().map(|d| (d.resource.clone(), d.area)).collect::<Vec<_>>(),
+                    s.resources
+                        .iter()
+                        .map(|d| (d.resource.clone(), d.area))
+                        .collect::<Vec<_>>(),
                 ),
                 None => continue,
             }
@@ -144,10 +163,13 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
 
         // Population grows toward housing capacity.
         if housing_capacity > population as f64 {
-            let delta = ((housing_capacity - population as f64) * config.economy.pop_growth).round() as i64;
+            let delta =
+                ((housing_capacity - population as f64) * config.economy.pop_growth).round() as i64;
             if delta > 0 {
                 if let Some(c) = state.city_mut(&cid) {
-                    c.population = ((c.population as i64 + delta).min(housing_capacity as i64).max(0)) as u32;
+                    c.population = ((c.population as i64 + delta)
+                        .min(housing_capacity as i64)
+                        .max(0)) as u32;
                 }
             }
         }
@@ -157,6 +179,18 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
         } else {
             (population as f64 / staff_req).clamp(config.economy.min_efficiency, 1.0)
         };
+
+        // 记录本回合的**用工系数 / 住房容量 / 是否集散地**（B2 的中间量）：这三个数此前算完就扔，
+        // 而它们正是「这座城产量为什么低 / 人口为什么不涨 / 挖出来的矿为什么用不了」的答案。
+        // ⚠ 记的是**这一步用的**值：`labor` 取的是人口增长**之前**的人口（上面那段才涨），
+        // 事后拿回合末的 state 重算会得到另一个数——建造那一步另算的那把，已经折进
+        // `step_construction` 写的 `build.rate` 里，不在这里存第二份。
+        {
+            let cf = flow.city_flow.entry(cid.clone()).or_default();
+            cf.labor = labor;
+            cf.housing_capacity = housing_capacity;
+            cf.is_hub = is_hub;
+        }
 
         // Mining output.
         for (rt, area) in mines {
@@ -169,8 +203,18 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
             // 记录本回合产出（step_production 的「中间量」），供 observe 做 agent 总结：
             // 每城 + 每势力各记一份；**记的是开采量**（不管它落在首都还是产地货栈）；
             // 随后按 `is_hub` 决定入库路径。
-            *flow.city_production.entry(cid.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
-            *flow.faction_production.entry(faction_id.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
+            *flow
+                .city_production
+                .entry(cid.clone())
+                .or_default()
+                .entry(rt.clone())
+                .or_insert(0.0) += output;
+            *flow
+                .faction_production
+                .entry(faction_id.clone())
+                .or_default()
+                .entry(rt.clone())
+                .or_insert(0.0) += output;
             if is_hub {
                 if let Some(f) = state.faction_mut(&faction_id) {
                     *f.resources.entry(rt).or_insert(0.0) += output;
@@ -210,8 +254,9 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
             .map(|s| ship_panel(config, s).upkeep)
             .sum();
-        // 记录本回合舰队维护费（step_upkeep 的「中间量」）。
-        flow.upkeep.insert(fid.clone(), upkeep_total);
+        // 记录本回合舰队维护费（step_upkeep 的「中间量」）。欠费与生锈在下面补进同一格
+        // （「付不起会怎样」和「该付多少」是同一件事的两面，所以只占一个位置）。
+        flow.upkeep.entry(fid.clone()).or_default().total = upkeep_total;
         if upkeep_total <= 1e-9 {
             continue;
         }
@@ -220,7 +265,10 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
         if landless {
             continue;
         }
-        let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
+        let stock = state
+            .faction(&fid)
+            .map(|f| f.resources.clone())
+            .unwrap_or_default();
         let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
         let pay = upkeep_total.min(total_value);
         if pay > 1e-9 {
@@ -234,9 +282,14 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
         }
         // Unpaid upkeep rusts the fleet; hull reaching 0 scrapped.
         let short = (upkeep_total - total_value).max(0.0);
+        // 记「欠了多少」：付不起的那部分（0 = 付清）。它就是生锈的分子。
+        flow.upkeep.entry(fid.clone()).or_default().unpaid = short;
         if short > 1e-9 {
             let frac = (short / upkeep_total).min(1.0);
             let frac = frac.max(0.2); // at least a visible rust when short
+            // 记**实际用的**那个比例（含 0.2 下限）：每艘舰掉的船体 = `hull_max × 这个数`。
+            // 只有锈到 0 才留事件，所以掉血本身只有这一个读法。
+            flow.upkeep.entry(fid.clone()).or_default().rust = frac;
             let mut scrap: Vec<ShipId> = Vec::new();
             for s in state.ships.iter_mut() {
                 if s.faction_id != fid || s.hull <= 0.0 {
@@ -257,7 +310,12 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     }
 }
 
-pub fn per_area_cost(config: &GameConfig, spec: &BuildingSpec, res_mod: f64, b: &Building) -> Vec<(String, f64)> {
+pub fn per_area_cost(
+    config: &GameConfig,
+    spec: &BuildingSpec,
+    res_mod: f64,
+    b: &Building,
+) -> Vec<(String, f64)> {
     let mult = config.structure_spec(&b.structure).cost_mult * res_mod;
     spec.build_cost
         .iter()
@@ -277,7 +335,12 @@ pub fn budget_remaining(limit: &ResourceMap, spent: &ResourceMap, rt: &str) -> f
 /// **同一个函数也用来卡「这个站点手上到底有没有这些货」**（把 `limit` 传成
 /// [`State::stock_at`] 的副本、`spent` 传空表）：建造的可负担量 = `min(预算速率, 站点库存)`，
 /// 两个上限共用一条算术，不再各写一份。
-pub fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, spent: &ResourceMap, cap: f64) -> f64 {
+pub fn max_affordable_inc(
+    cost_per_area: &[(String, f64)],
+    limit: &ResourceMap,
+    spent: &ResourceMap,
+    cap: f64,
+) -> f64 {
     let mut inc = cap;
     for (rt, c) in cost_per_area {
         if *c <= 1e-9 {
@@ -294,7 +357,13 @@ pub fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, 
 ///
 /// 与 [`commit_spend`] 配对使用：先卡到「站点付得起」，再从站点扣。两处分开写必然漂移，
 /// 而漂移的后果正是 `.agents/notes/freight-collection.md` 要堵的那个洞——**凭空造出**。
-pub fn site_affordable(state: &State, fid: &str, body: &str, cost: &[(String, f64)], cap: f64) -> f64 {
+pub fn site_affordable(
+    state: &State,
+    fid: &str,
+    body: &str,
+    cost: &[(String, f64)],
+    cap: f64,
+) -> f64 {
     let stock = state.stock_at(fid, body).cloned().unwrap_or_default();
     max_affordable_inc(cost, &stock, &ResourceMap::new(), cap)
 }
@@ -307,7 +376,13 @@ pub fn site_affordable(state: &State, fid: &str, body: &str, cost: &[(String, f6
 ///
 /// `spent` 是**本回合这个势力在这类预算上花掉的量**（记账用，与 `build_city` 的
 /// `inv_spent`/`con_spent` 同形）：它记的是**账单**，与从哪处库存扣无关。
-pub fn commit_spend(state: &mut State, fid: &str, body: &str, spent: &mut ResourceMap, cost: &[(String, f64)]) {
+pub fn commit_spend(
+    state: &mut State,
+    fid: &str,
+    body: &str,
+    spent: &mut ResourceMap,
+    cost: &[(String, f64)],
+) {
     for (rt, c) in cost {
         state.stock_take(fid, body, rt, *c);
         *spent.entry(rt.clone()).or_insert(0.0) += c;

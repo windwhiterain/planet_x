@@ -74,6 +74,20 @@ pub struct Faction {
     /// [`REPUTATION_NEUTRAL`]，「谁都没做过承包生意」正是那个世界的真实状态。
     #[serde(default = "default_reputation")]
     pub reputation: f64,
+    /// **MOND 掌握度**（0..1）——科技体系的**干线**（见 `.agents/notes/tech-system.md`）。
+    ///
+    /// `0` = 牛顿近似的凡人（异常区内指令坐标被算错），`1` = 指哪打哪。
+    /// 它**连续地**决定「一次导航尝试的胜算」（`sim::mond_arrival_chance`），
+    /// 而不是在某个档位上开关——所以「深处」永远只是**要多试几个回合**。
+    ///
+    /// 开局值来自 `config.mond.initial`——**现在只有行星X崇拜教 = 1.0**（用户裁决：
+    /// 「崇拜教初始就是1.0」；它是唯一天生就懂 MOND 的势力，见 `config/game.ron` 的
+    /// `mond.initial` 与 `tech-system.md` §9.2）；其余势力由 `sim::step_knowledge` 按
+    /// **飞船在异常区**的在场强度自己熬出来（用户裁决：先只做这一条渠道）。
+    /// **学到顶（1.0）就永久持有**（棘轮）；1.0 之下会随「不在场」慢慢锈回凡人。
+    /// `serde(default)` = 0 让旧档退化成凡人。
+    #[serde(default)]
+    pub mond_control: f64,
 }
 
 /// **中性信誉**：没有任何承包履历的势力从这里起步。

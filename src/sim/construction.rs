@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundSink) {
+pub fn step_construction(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    flow: &mut RoundSink,
+) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let mut next_building_id = state
         .cities
@@ -12,15 +17,42 @@ pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng,
         .map_or(0, |m| m + 1);
 
     for fid in faction_ids {
-        let (investment, inv_modes) = autocontrol::read_budget(state, config, fid.clone(), autocontrol::BudgetKind::Investment);
-        let (construction, con_modes) = autocontrol::read_budget(state, config, fid.clone(), autocontrol::BudgetKind::Construction);
-        autocontrol::write_budget(state, fid.clone(), autocontrol::BudgetKind::Investment, &investment, &inv_modes);
-        autocontrol::write_budget(state, fid.clone(), autocontrol::BudgetKind::Construction, &construction, &con_modes);
+        let (investment, inv_modes) = autocontrol::read_budget(
+            state,
+            config,
+            fid.clone(),
+            autocontrol::BudgetKind::Investment,
+        );
+        let (construction, con_modes) = autocontrol::read_budget(
+            state,
+            config,
+            fid.clone(),
+            autocontrol::BudgetKind::Construction,
+        );
+        autocontrol::write_budget(
+            state,
+            fid.clone(),
+            autocontrol::BudgetKind::Investment,
+            &investment,
+            &inv_modes,
+        );
+        autocontrol::write_budget(
+            state,
+            fid.clone(),
+            autocontrol::BudgetKind::Construction,
+            &construction,
+            &con_modes,
+        );
 
         let mut inv_spent: ResourceMap = ResourceMap::new();
         let mut con_spent: ResourceMap = ResourceMap::new();
 
-        let city_ids: Vec<CityId> = state.cities.iter().filter(|c| c.faction_id == fid).map(|c| c.name.clone()).collect();
+        let city_ids: Vec<CityId> = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid)
+            .map(|c| c.name.clone())
+            .collect();
         for cid in city_ids {
             build_city(
                 state,
@@ -33,8 +65,19 @@ pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng,
                 &mut con_spent,
                 &mut next_building_id,
                 rng,
+                flow,
             );
         }
+        // 记录本回合**实际花掉的**投资/建造预算（B2 的中间量，写完即弃的局部变量）。
+        // 批了多少不在这里——限额是控制面的持久叶（`investment_budget`/`construction_budget`，
+        // 上面 `write_budget` 刚写回当回合用的额度），两者相减 = 「批了却没花掉的那部分」。
+        flow.spend.insert(
+            fid.clone(),
+            crate::model::SpendFlow {
+                investment: inv_spent,
+                construction: con_spent,
+            },
+        );
     }
     // 威胁响应（整支舰队随威胁重构）：战时把过度生产的「轻舰」船坞按战况重定向到更重/更
     // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
@@ -58,7 +101,6 @@ pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng,
     autocontrol::design_fleets(state, config, &mut flow.decisions.blueprints);
 }
 
-
 #[allow(clippy::too_many_arguments)]
 pub fn build_city(
     state: &mut State,
@@ -71,6 +113,7 @@ pub fn build_city(
     con_spent: &mut ResourceMap,
     next_building_id: &mut BuildingId,
     _rng: &mut Prng,
+    flow: &mut RoundSink,
 ) {
     if state.city(&cid).map(|c| c.razed).unwrap_or(true) {
         return;
@@ -84,7 +127,10 @@ pub fn build_city(
                 s.total_area,
                 s.construction_speed_mod,
                 s.construction_resource_mod,
-                s.resources.iter().map(|d| (d.resource.clone(), d.area)).collect::<Vec<_>>(),
+                s.resources
+                    .iter()
+                    .map(|d| (d.resource.clone(), d.area))
+                    .collect::<Vec<_>>(),
             ),
             None => return,
         }
@@ -95,9 +141,21 @@ pub fn build_city(
     let labor = labor_ratio(state, config, &cid);
     // 这座城市**所在的天体**：本回合一切实物消耗（建楼 / 造舰 / 装模块）都只从
     // [`State::stock_at`] 提货——首都天体是池子，其余天体是本地货栈。
-    let body_id = state.city(&cid).map(|c| c.body_id.clone()).unwrap_or_default();
+    let body_id = state
+        .city(&cid)
+        .map(|c| c.body_id.clone())
+        .unwrap_or_default();
 
-    pub fn new_b(id: BuildingId, kind: &str, resource: Option<String>, ship_type: Option<String>, structure: &str, area: f64, deployed: f64, config: &GameConfig) -> Building {
+    pub fn new_b(
+        id: BuildingId,
+        kind: &str,
+        resource: Option<String>,
+        ship_type: Option<String>,
+        structure: &str,
+        area: f64,
+        deployed: f64,
+        config: &GameConfig,
+    ) -> Building {
         let armor = deployed * config.structure_spec(structure).armor_per_area;
         Building {
             id,
@@ -148,7 +206,16 @@ pub fn build_city(
         match idx {
             Some(i) => buildings[i].area += add,
             None => {
-                buildings.push(new_b(*next_id, kind, resource.map(str::to_string), None, "concrete", add, 0.0, config));
+                buildings.push(new_b(
+                    *next_id,
+                    kind,
+                    resource.map(str::to_string),
+                    None,
+                    "concrete",
+                    add,
+                    0.0,
+                    config,
+                ));
                 *next_id += 1;
             }
         }
@@ -161,7 +228,14 @@ pub fn build_city(
     let res_area = find_area(&buildings, "residential", None);
     if res_area < desired_res - 1e-9 && planning_remaining > 0.0 {
         let add = (desired_res - res_area).min(planning_remaining);
-        raise_area(&mut buildings, config, next_building_id, "residential", None, add);
+        raise_area(
+            &mut buildings,
+            config,
+            next_building_id,
+            "residential",
+            None,
+            add,
+        );
         planning_remaining -= add;
     }
 
@@ -180,7 +254,16 @@ pub fn build_city(
         let idx = shipyard_index;
         match idx {
             Some(i) => buildings[i].area += add,
-            None => buildings.push(new_b(*next_building_id, "construction", None, None, "concrete", add, 0.0, config)),
+            None => buildings.push(new_b(
+                *next_building_id,
+                "construction",
+                None,
+                None,
+                "concrete",
+                add,
+                0.0,
+                config,
+            )),
         }
         if idx.is_none() {
             *next_building_id += 1;
@@ -195,7 +278,14 @@ pub fn build_city(
         let cur = find_area(&buildings, "mining", Some(rt));
         if cur < *darea - 1e-9 {
             let add = (*darea - cur).min(planning_remaining);
-            raise_area(&mut buildings, config, next_building_id, "mining", Some(rt), add);
+            raise_area(
+                &mut buildings,
+                config,
+                next_building_id,
+                "mining",
+                Some(rt),
+                add,
+            );
             planning_remaining -= add;
         }
     }
@@ -203,7 +293,8 @@ pub fn build_city(
     // 2) Build: grow deployed toward the planned area, spending the investment
     // budget. Higher invest weight builds first.
     buildings.sort_by(|a, b| {
-        invest_weight(state, config, &fid, &cid, b).total_cmp(&invest_weight(state, config, &fid, &cid, a))
+        invest_weight(state, config, &fid, &cid, b)
+            .total_cmp(&invest_weight(state, config, &fid, &cid, a))
     });
     for b in buildings.iter_mut() {
         if !b.under_construction() {
@@ -221,7 +312,10 @@ pub fn build_city(
         if inc <= 1e-6 {
             continue;
         }
-        let cost: Vec<(String, f64)> = per_area.iter().map(|(rt, c)| (rt.clone(), *c * inc)).collect();
+        let cost: Vec<(String, f64)> = per_area
+            .iter()
+            .map(|(rt, c)| (rt.clone(), *c * inc))
+            .collect();
         commit_spend(state, &fid, &body_id, inv_spent, &cost);
         b.deployed += inc;
     }
@@ -233,7 +327,9 @@ pub fn build_city(
         if b.under_construction() {
             b.armor = amax;
         } else {
-            b.armor = (b.armor + (amax - b.armor) * config.combat.armor_regen).min(amax).max(0.0);
+            b.armor = (b.armor + (amax - b.armor) * config.combat.armor_regen)
+                .min(amax)
+                .max(0.0);
         }
     }
 
@@ -267,14 +363,18 @@ pub fn build_city(
     }
     shipyards.sort_by(|a, b| b.2.total_cmp(&a.2));
 
-    let city_progress: BTreeMap<String, f64> = state.city(&cid).map(|c| c.ship_progress.clone()).unwrap_or_default();
+    let city_progress: BTreeMap<String, f64> = state
+        .city(&cid)
+        .map(|c| c.ship_progress.clone())
+        .unwrap_or_default();
 
     // Aggregate per-class production rate (all 建造区 of a class add up toward the
     // city pool) and per-class build priority (max of its shipyards' weights).
     let mut class_rate: BTreeMap<String, f64> = BTreeMap::new();
     let mut class_weight: BTreeMap<String, f64> = BTreeMap::new();
     for (_, cls, w, area) in &shipyards {
-        *class_rate.entry(cls.clone()).or_insert(0.0) += area * config.building_spec("construction").productivity * labor;
+        *class_rate.entry(cls.clone()).or_insert(0.0) +=
+            area * config.building_spec("construction").productivity * labor;
         let e = class_weight.entry(cls.clone()).or_insert(0.0);
         *e = e.max(*w);
     }
@@ -305,14 +405,35 @@ pub fn build_city(
         let spec = config.ship_spec(cls);
         let bp = spec.build_points;
         let launch_blueprint = class_blueprint.get(cls).cloned().flatten();
-        let per_progress: Vec<(String, f64)> = spec.build_cost.iter().map(|(rt, c)| (rt.clone(), c / bp)).collect();
+        let per_progress: Vec<(String, f64)> = spec
+            .build_cost
+            .iter()
+            .map(|(rt, c)| (rt.clone(), c / bp))
+            .collect();
         // 造舰与建楼同一条纪律：预算速率 × **本站点库存**（船坞在哪颗星，钢材就得在哪颗星）。
         let increment = max_affordable_inc(&per_progress, con_limit, con_spent, *rate).max(0.0);
         let increment = site_affordable(state, &fid, &body_id, &per_progress, increment);
+        // 记本回合这一舰级的**产能速率上限**与**实得进度**（B2 的中间量）——「造舰慢是缺钱还是缺
+        // 产能」的唯一入口。⚠ **`increment = 0` 也要占位**（本城有建造区、速率摆在那儿、却一分钱
+        // 没批到 = 预算被别人吃光了）；只有「本城根本没这个舰级的建造区」才没有行。
+        //
+        // ⚠ **记的是「最终实得」**：`site_affordable` 又按**本站点库存**卡了一道（「完全禁止瞬移」
+        // 之后船坞缺钢材是常见的第三种「造不动」），所以这一笔必须放在它**之后**——否则读面上
+        // 写着「进度涨了」而实体没有（`flow` 的纪律：中间量是**观测**，得与实体对得上）。
+        flow.city_flow.entry(cid.clone()).or_default().build.insert(
+            cls.clone(),
+            crate::model::BuildLine {
+                rate: *rate,
+                increment,
+            },
+        );
         if increment <= 1e-9 {
             continue;
         }
-        let cost: Vec<(String, f64)> = per_progress.iter().map(|(rt, c)| (rt.clone(), *c * increment)).collect();
+        let cost: Vec<(String, f64)> = per_progress
+            .iter()
+            .map(|(rt, c)| (rt.clone(), *c * increment))
+            .collect();
         commit_spend(state, &fid, &body_id, con_spent, &cost);
         *to_write_progress.entry(cls.clone()).or_insert(0.0) += increment;
         // Spawn ships as their build points fill (the cost was paid as progress).
@@ -335,15 +456,19 @@ pub fn build_city(
                     break;
                 }
             }
-            spawn_ship(state, config, ShipSpawn {
-                owner: fid.clone(),
-                class: cls.as_str(),
-                position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
-                city: Some(cid.clone()),
-                via: SpawnVia::Shipyard,
-                pay_components: true,
-                blueprint: launch_blueprint.as_ref(),
-            });
+            spawn_ship(
+                state,
+                config,
+                ShipSpawn {
+                    owner: fid.clone(),
+                    class: cls.as_str(),
+                    position: [body_pos[0] + 0.05, body_pos[1] + 0.05],
+                    city: Some(cid.clone()),
+                    via: SpawnVia::Shipyard,
+                    pay_components: true,
+                    blueprint: launch_blueprint.as_ref(),
+                },
+            );
             *to_write_progress.entry(cls.clone()).or_insert(0.0) -= bp;
         }
     }
@@ -355,13 +480,13 @@ pub fn build_city(
     if let Some(c) = state.control_mut(fid.clone()) {
         for b in &buildings {
             let key = (cid.clone(), b.id);
-            c.invest_weights
-                .entry(key.clone())
-                .or_insert_with(|| Control::inherit(config.building_spec(&b.kind).default_invest_weight));
+            c.invest_weights.entry(key.clone()).or_insert_with(|| {
+                Control::inherit(config.building_spec(&b.kind).default_invest_weight)
+            });
             if b.is_shipyard() {
-                c.build_weights
-                    .entry(key)
-                    .or_insert_with(|| Control::inherit(config.building_spec(&b.kind).default_build_weight));
+                c.build_weights.entry(key).or_insert_with(|| {
+                    Control::inherit(config.building_spec(&b.kind).default_build_weight)
+                });
             }
         }
     }
@@ -450,7 +575,8 @@ pub fn blueprint_launch_waiting(
                 .buildings
                 .iter()
                 .any(|b| b.is_shipyard() && b.blueprint.as_deref() == Some(id.as_str()));
-            carries && city.ship_progress.get(class).copied().unwrap_or(0.0) >= spec.build_points - 1e-9
+            carries
+                && city.ship_progress.get(class).copied().unwrap_or(0.0) >= spec.build_points - 1e-9
         })
 }
 

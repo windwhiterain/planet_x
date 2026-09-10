@@ -59,10 +59,25 @@ fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
             }
         }
     }
-    assert!(razings >= 20, "三个种子各 400 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
+    assert!(
+        razings >= 20,
+        "三个种子各 400 回合只发生 {razings} 次拆平，样本太小，守卫会空转"
+    );
 }
 
 /// 功能性验证：长局里确实会出现「定制化」舰（资源→组件选择真的被 AI 执行）。
+///
+/// ⚠ **口径 = 「整局里出现过」，而不是「400 回合末还剩着」**（M2 之后改的）。
+/// 原来数的是**末回合快照**，于是这条非空守卫押在一个轨迹事实上：世界是混沌的
+/// （任何一处机制改动都会重掷整条轨迹），而舰队在长局里会被打光。实测（400 回合 × seed
+/// 7/42，同一个探针在两条树上各跑一次）：
+///   * `main`（`23bdb25`）：出厂 206 / 230 条，末回合活舰 **0 / 27**；
+///   * 本分支（MOND 掌握度连续化 + 飞船在场渠道）：出厂 105 / 92 条，末回合活舰 **0 / 0**。
+/// 两条树上**机制都在正常工作**（出厂的舰基本全都带组件：100/105、87/92），
+/// 差别只是「末回合那片场地上还剩几条舰」。所以判据改成**累计**：
+/// 只要整局里有任何一个回合存在过「装了组件的活舰」，AI 的选装就被验证过了——
+/// 这个口径比原来**更不容易空转**（末回合快照会随轨迹归零，累计不会），
+/// 而它检验的仍然是同一件事。
 #[test]
 fn long_run_produces_customized_ships() {
     let config = load_config();
@@ -72,8 +87,12 @@ fn long_run_produces_customized_ships() {
         let mut rng = Prng::new(seed);
         for _ in 0..400u32 {
             advance(&mut state, &config, &mut rng);
+            customized += state
+                .ships
+                .iter()
+                .filter(|s| s.hull > 0.0 && !s.components.is_empty())
+                .count();
         }
-        customized += state.ships.iter().filter(|s| !s.components.is_empty()).count();
     }
     assert!(
         customized > 0,
@@ -93,7 +112,10 @@ fn story_chronicle_grows_deterministically() {
     }
     let ids: Vec<&str> = state.chronicle.iter().map(|c| c.id.as_str()).collect();
     assert!(ids.contains(&"prologue"), "prologue (RoundAt 1) must fire");
-    assert!(ids.contains(&"planet_x_arrives"), "planet_x_arrives (RoundAt 60) must fire");
+    assert!(
+        ids.contains(&"planet_x_arrives"),
+        "planet_x_arrives (RoundAt 60) must fire"
+    );
 
     // The chronicle records the round it fired, in non-decreasing order.
     let rounds: Vec<u32> = state.chronicle.iter().map(|c| c.round).collect();
@@ -115,8 +137,16 @@ fn story_chronicle_grows_deterministically() {
         advance(&mut state2, &config, &mut rng2);
     }
     assert_eq!(
-        state.chronicle.iter().map(|c| (c.round, c.id.clone(), c.title.clone())).collect::<Vec<_>>(),
-        state2.chronicle.iter().map(|c| (c.round, c.id.clone(), c.title.clone())).collect::<Vec<_>>(),
+        state
+            .chronicle
+            .iter()
+            .map(|c| (c.round, c.id.clone(), c.title.clone()))
+            .collect::<Vec<_>>(),
+        state2
+            .chronicle
+            .iter()
+            .map(|c| (c.round, c.id.clone(), c.title.clone()))
+            .collect::<Vec<_>>(),
         "same seed must produce the same story arc"
     );
 }
@@ -132,22 +162,46 @@ fn story_participants_are_concrete() {
     }
     let find = |id: &str| state.chronicle.iter().find(|c| c.id == id);
     if let Some(war) = find("first_war") {
-        assert_eq!(war.participants.len(), 2, "first_war names the two belligerents, got {:?}", war.participants);
+        assert_eq!(
+            war.participants.len(),
+            2,
+            "first_war names the two belligerents, got {:?}",
+            war.participants
+        );
         assert!(war.participants.iter().all(|p| !p.is_empty()));
     }
     if let Some(razed) = find("first_raze") {
-        assert!(razed.participants.len() >= 2, "first_raze names the city and the razer, got {:?}", razed.participants);
+        assert!(
+            razed.participants.len() >= 2,
+            "first_raze names the city and the razer, got {:?}",
+            razed.participants
+        );
     }
     if let Some(colon) = find("first_colony") {
-        assert!(colon.participants.len() >= 2, "first_colony names the colonizer and the body, got {:?}", colon.participants);
+        assert!(
+            colon.participants.len() >= 2,
+            "first_colony names the colonizer and the body, got {:?}",
+            colon.participants
+        );
     }
     if let Some(cn) = find("cn_us_rivalry") {
-        assert!(cn.participants.contains(&"中国".to_string()), "cn_us_rivalry names 中国, got {:?}", cn.participants);
-        assert!(cn.participants.contains(&"美国".to_string()), "cn_us_rivalry names 美国, got {:?}", cn.participants);
+        assert!(
+            cn.participants.contains(&"中国".to_string()),
+            "cn_us_rivalry names 中国, got {:?}",
+            cn.participants
+        );
+        assert!(
+            cn.participants.contains(&"美国".to_string()),
+            "cn_us_rivalry names 美国, got {:?}",
+            cn.participants
+        );
     }
     // RoundAt beats keep exactly their static participants (no event to enrich).
     if let Some(pro) = find("prologue") {
-        assert_eq!(pro.participants, vec!["无国界科学组织".to_string(), "行星X崇拜教".to_string()]);
+        assert_eq!(
+            pro.participants,
+            vec!["无国界科学组织".to_string(), "行星X崇拜教".to_string()]
+        );
     }
 }
 
@@ -168,14 +222,20 @@ fn war_scar_floor_makes_a_real_floor_on_war_duration() {
     let base = config.diplomacy.war_scar_relation;
     let thr = config.combat.war_threshold;
     assert!(span > 0, "war_scar_rounds 应当开启");
-    assert!(base < thr, "疤痕初值必须低于交战阈值（{base} vs {thr}），否则压不住言和");
+    assert!(
+        base < thr,
+        "疤痕初值必须低于交战阈值（{base} vs {thr}），否则压不住言和"
+    );
 
     // 1. 地板形状：只属于开战的那一对，随年龄抬高，到 span 之后消失。
     let mut s = default_state(&config, 1);
     s.round = 10;
     s.notables.entries.push(crate::model::HistoryEntry {
         round: 10,
-        event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        event: GameEvent::WarStarted {
+            a: "甲".into(),
+            b: "乙".into(),
+        },
     });
     let at = |age: u32| {
         let mut t = s.clone();
@@ -214,7 +274,11 @@ fn war_scar_floor_makes_a_real_floor_on_war_duration() {
         let round = state.round;
         for e in &state.events {
             let pair = |a: &String, b: &String| {
-                if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) }
+                if a <= b {
+                    (a.clone(), b.clone())
+                } else {
+                    (b.clone(), a.clone())
+                }
             };
             match e {
                 GameEvent::WarStarted { a, b } => {

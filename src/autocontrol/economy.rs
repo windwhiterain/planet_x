@@ -4,8 +4,8 @@
 //! 预算、向 [`crate::sim`] 借一次干跑引擎结算、再汇总成一组粗粒度指标。纯分析，不改状态、
 //! 不耗调用方 RNG。
 
-use super::budget::{read_budget, BudgetKind};
-use super::{r2, PLAN_SEED};
+use super::budget::{BudgetKind, read_budget};
+use super::{PLAN_SEED, r2};
 use crate::model::*;
 use crate::prng::Prng;
 use crate::sim;
@@ -56,7 +56,12 @@ fn dry_view(state: &State, config: &GameConfig) -> RoundView {
 
 /// Build one faction's profile from the real `state` (commands / stockpile) and the
 /// dry-run `view` (production / upkeep / governance for the coming round).
-fn plan_core(state: &State, config: &GameConfig, view: &RoundView, fid: &str) -> Option<serde_json::Value> {
+fn plan_core(
+    state: &State,
+    config: &GameConfig,
+    view: &RoundView,
+    fid: &str,
+) -> Option<serde_json::Value> {
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     // 库存市场价值（当前、未推进）。
@@ -81,7 +86,9 @@ fn plan_core(state: &State, config: &GameConfig, view: &RoundView, fid: &str) ->
     let ai_cap = (stock_value * config.economy.invest_fraction)
         .min((stock_value - upkeep_now * config.economy.upkeep_reserve_mult).max(0.0));
 
-    let Some(fm) = view.factions.get(fid) else { return None };
+    let Some(fm) = view.factions.get(fid) else {
+        return None;
+    };
 
     let production = fm.production_value;
     let upkeep = fm.upkeep;

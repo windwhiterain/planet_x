@@ -20,7 +20,11 @@ pub fn control_view(
         .map(|s| ShipOrderEntry {
             ship: s.name.clone(),
             behavior: state.ship_behavior(s.name.clone()),
-            mode: c.ship_orders.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+            mode: c
+                .ship_orders
+                .get(&s.name)
+                .map(|l| l.mode)
+                .unwrap_or_default(),
         })
         .collect();
     // 读面：本势力每艘舰当前的行为风格。**值取有效值**（叶 → 舰队默认 → 舰上记录值），
@@ -36,7 +40,11 @@ pub fn control_view(
                 ship: s.name.clone(),
                 temper: eff.temper,
                 lone_wolf: eff.lone_wolf,
-                mode: c.ship_doctrine.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+                mode: c
+                    .ship_doctrine
+                    .get(&s.name)
+                    .map(|l| l.mode)
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -47,35 +55,49 @@ pub fn control_view(
         .map(|s| ShipKitingEntry {
             ship: s.name.clone(),
             kiting: state.ship_kiting(s.name.clone()),
-            mode: c.ship_kiting.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+            mode: c
+                .ship_kiting
+                .get(&s.name)
+                .map(|l| l.mode)
+                .unwrap_or_default(),
         })
         .collect();
     // 角色：**有效值**（自动控制可能刚写过它）+ 那片叶自己的表态（`Player` = 玩家钉的）。
-    let ship_freighter = state
+    let ship_role = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid)
-        .map(|s| ShipFreighterEntry {
+        .map(|s| ShipRoleEntry {
             ship: s.name.clone(),
-            freighter: state.ship_freighter(s.name.clone()),
-            mode: c.ship_freighter.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+            role: state.ship_role(s.name.clone()),
+            mode: c.ship_role.get(&s.name).map(|l| l.mode).unwrap_or_default(),
         })
         .collect();
     let investment_budget = c
         .investment_budget
         .iter()
-        .map(|(rt, ctrl)| BudgetEntry { resource: rt.clone(), value: ctrl.value, mode: ctrl.mode })
+        .map(|(rt, ctrl)| BudgetEntry {
+            resource: rt.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
         .collect();
     let construction_budget = c
         .construction_budget
         .iter()
-        .map(|(rt, ctrl)| BudgetEntry { resource: rt.clone(), value: ctrl.value, mode: ctrl.mode })
+        .map(|(rt, ctrl)| BudgetEntry {
+            resource: rt.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
         .collect();
     let invest_weights = c
         .invest_weights
         .iter()
         .map(|((cid, bid), ctrl)| {
-            let b = state.city(cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            let b = state
+                .city(cid)
+                .and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
             InvestWeightEntry {
                 city: cid.clone(),
                 building: *bid,
@@ -92,7 +114,9 @@ pub fn control_view(
         .build_weights
         .iter()
         .map(|((cid, bid), ctrl)| {
-            let b = state.city(cid).and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
+            let b = state
+                .city(cid)
+                .and_then(|cty| cty.buildings.iter().find(|b| b.id == *bid));
             BuildWeightEntry {
                 city: cid.clone(),
                 building: *bid,
@@ -105,7 +129,11 @@ pub fn control_view(
     let loyalty_budget = c
         .loyalty_budget
         .iter()
-        .map(|(cid, ctrl)| LoyaltyBudgetEntry { city: cid.clone(), value: ctrl.value, mode: ctrl.mode })
+        .map(|(cid, ctrl)| LoyaltyBudgetEntry {
+            city: cid.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
         .collect();
     // 设计图库：**每张图一行**。`ship_count` 是**现算的派生量**（不落状态），`mode` 是图叶
     // 自己的表态；有效归属（图叶 → 势力 scope → 全局）走 `State::blueprint_control`，
@@ -154,8 +182,8 @@ pub fn control_view(
             mode: Some(d.mode),
             remove: false,
         }),
-        default_freighter: c.default_freighter.as_ref().map(|d| DefaultFreighter {
-            freighter: Some(d.value),
+        default_role: c.default_role.as_ref().map(|d| DefaultShipRole {
+            role: Some(d.value),
             mode: Some(d.mode),
             remove: false,
         }),
@@ -163,7 +191,7 @@ pub fn control_view(
         ship_orders,
         ship_doctrine,
         ship_kiting,
-        ship_freighter,
+        ship_role,
         investment_budget,
         construction_budget,
         invest_weights,
@@ -185,7 +213,9 @@ pub fn scope_view(s: &ControlScope) -> ControlScopePatch {
 }
 
 /// 过滤掉「没有说话」（`Inherit`）的键。
-pub fn explicit<K: Clone + Ord>(m: &std::collections::BTreeMap<K, ControlMode>) -> Vec<(K, ControlMode)> {
+pub fn explicit<K: Clone + Ord>(
+    m: &std::collections::BTreeMap<K, ControlMode>,
+) -> Vec<(K, ControlMode)> {
     m.iter()
         .filter(|(_, v)| **v != ControlMode::Inherit)
         .map(|(k, v)| (k.clone(), *v))
@@ -210,7 +240,10 @@ pub fn control_surface(state: &State, config: &GameConfig) -> serde_json::Value 
         .iter()
         .map(|(fid, c)| control_view(state, config, fid.clone(), c))
         .collect();
-    let surface = ControlSurface { control, scope: scope_view(&state.scope) };
+    let surface = ControlSurface {
+        control,
+        scope: scope_view(&state.scope),
+    };
     serde_json::to_value(surface).expect("control surface is serializable")
 }
 
@@ -225,7 +258,7 @@ pub fn control_schema_value() -> serde_json::Value {
 
 // --- write side (diff application) ------------------------------------------
 
-    // --- 删叶（`remove: true`） --------------------------------------------------
+// --- 删叶（`remove: true`） --------------------------------------------------
 //
 // 控制叶的**存在性本身就是一种状态**：「没有叶」= 这一层没有说话。而在取值规则里
 // 「叶不存在」与「叶写着 `Inherit`」并**不**等价——`State::ship_doctrine` 是

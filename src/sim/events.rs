@@ -32,16 +32,32 @@ pub fn ev(state: &mut State, e: GameEvent) {
 /// **同一艘舰只记一次**（本回合内多条路径命中时以第一条为准，避免重复计数）。返回是否
 /// 新记了一条；`false` = 之前那条路径已经记过。
 pub fn kill_ship(state: &mut State, ship: &ShipId, cause: DeathCause, by: Option<Killer>) -> bool {
-    if state.events.iter().any(|e| matches!(e, GameEvent::ShipDestroyed { ship: s, .. } if s == ship)) {
+    if state
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::ShipDestroyed { ship: s, .. } if s == ship))
+    {
         return false;
     }
-    let Some((owner, class)) = state.ship(ship).map(|s| (s.faction_id.clone(), s.class.clone())) else {
+    let Some((owner, class)) = state
+        .ship(ship)
+        .map(|s| (s.faction_id.clone(), s.class.clone()))
+    else {
         return false;
     };
     if let Some(s) = state.ship_mut(ship) {
         s.hull = 0.0;
     }
-    ev(state, GameEvent::ShipDestroyed { ship: ship.clone(), owner, class, cause, by });
+    ev(
+        state,
+        GameEvent::ShipDestroyed {
+            ship: ship.clone(),
+            owner,
+            class,
+            cause,
+            by,
+        },
+    );
     true
 }
 
@@ -105,7 +121,9 @@ pub fn military_deltas(events: &[GameEvent]) -> BTreeMap<FactionId, f64> {
     };
     for e in events {
         match e {
-            GameEvent::ShipDestroyed { owner, cause, by, .. } => {
+            GameEvent::ShipDestroyed {
+                owner, cause, by, ..
+            } => {
                 bump(owner, -1.0);
                 if *cause == DeathCause::Combat {
                     if let Some(k) = by {
@@ -113,7 +131,9 @@ pub fn military_deltas(events: &[GameEvent]) -> BTreeMap<FactionId, f64> {
                     }
                 }
             }
-            GameEvent::CityRazed { owner, fallen_to, .. } => {
+            GameEvent::CityRazed {
+                owner, fallen_to, ..
+            } => {
                 bump(owner, -1.0);
                 bump(fallen_to, 1.0);
             }

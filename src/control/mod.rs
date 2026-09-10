@@ -18,7 +18,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-
 pub mod apply;
 pub mod blueprint;
 pub mod budget;
