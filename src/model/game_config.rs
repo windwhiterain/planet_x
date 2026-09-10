@@ -244,6 +244,21 @@ pub struct MarketConfig {
     /// **全面禁运**阈值：某势力对另一势力的关系 ≤ 此值即「根本不卖给你」（所有资源）。
     /// 比交战阈值更早生效：还没开打，供货就已经断了。
     pub embargo_relation: f64,
+    /// **运费率**：每 1 AU 距离、按货值计的运费（0.02 = 30 AU 加价 60%）。
+    /// 货物不是瞬移的——深空的货真的更贵（与 `economy-depth.md` 的「距离运费」同一条）。
+    pub freight_per_au: f64,
+    /// **穿越引力异常带的运费倍率**：运费按「浸入异常带的深度」再加这么多倍（见
+    /// [`crate::sim::route_depth`]）。没有掌握 MOND 的势力只能花大价钱（或冒险）走这条线。
+    pub mond_freight_mult: f64,
+    /// **异常区丢货率**：非 master 的货物每「浸入异常带 1 AU」损失的货值比例
+    /// （确定性比例，不是掷骰——掷骰会污染 `Prng` 流、破坏同种子复现）。
+    pub mond_loss_per_au: f64,
+    /// 丢货率上限（整批货最多损失到这个比例）。
+    pub mond_loss_cap: f64,
+    /// 异常带运费中**付给承运人**（掌握了 MOND 的 master）的比例：
+    /// 只有 master 能可靠穿越异常带，于是它天然成为柯伊伯带的垄断承运人、对这条线上的
+    /// 贸易抽税。其余部分（以及没有 master 存世时的全部）与手续费一样被**烧掉**（sink）。
+    pub carrier_share: f64,
 }
 /// 光速治理 (lightspeed governance) tuning。
 ///

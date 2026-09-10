@@ -963,6 +963,8 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let mut settled: ResourceMap = ResourceMap::new();
     let mut net_import: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut spent: BTreeMap<FactionId, f64> = BTreeMap::new();
+    let mut freight_paid: BTreeMap<FactionId, f64> = BTreeMap::new();
+    let mut carrier_income: BTreeMap<FactionId, f64> = BTreeMap::new();
     for (buyer, _) in buyers {
         // 想买的：军工需要、且低于目标库存的资源，**越贵越先买**（先抢最稀缺的）。
         let stock = state.faction(&buyer).map(|f| f.resources.clone()).unwrap_or_default();
@@ -997,36 +999,88 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 // 购买力每次现算：自己的货可能已经被别人买走了。
                 let spendable = listed_value(&remaining, &price, &value_of, &buyer);
                 let limit_left = (m.auto_trade_limit - spent.get(&buyer).copied().unwrap_or(0.0)).max(0.0);
-                let max_purchase = (spendable / (1.0 + m.spread)).min(limit_left);
-                // 成交价 = 市场价 × 关系倍率（向敌人买贵得多）。
-                let p_eff = p * relation_price_mult(state, config, &seller, &buyer);
-                let take = short.min(avail).min(max_purchase / p_eff);
+                let max_purchase = (spendable / (1.0 + m.spread).max(1e-9)).min(limit_left);
+
+                // --- 路线：距离 + 引力异常带浸入深度（M6）---------------------------
+                // 货物不是瞬移的：运得越远越贵；要穿越异常带就更贵——而只有掌握了 MOND 的
+                // 势力能可靠走那条线（其余人要么付溢价，要么**丢货**）。
+                let anchor_b = trade_anchor(state, &buyer);
+                let anchor_s = trade_anchor(state, &seller);
+                let depth = route_depth(config, anchor_b, anchor_s);
+                let dist_au = dist(anchor_b, anchor_s);
+                let mond_extra = if depth > 0.0 {
+                    m.mond_freight_mult * (depth / (depth + 1.0))
+                } else {
+                    0.0
+                };
+                let freight_rate = m.freight_per_au * dist_au * (1.0 + mond_extra);
+                // 成交价 = 市场价 ×（关系倍率 + 运费率）：向敌人买、运得远、要过异常带都更贵。
+                let rel_mult = relation_price_mult(state, config, &seller, &buyer);
+                let p_eff = p * (rel_mult + freight_rate);
+                let take = short.min(avail).min(max_purchase / p_eff.max(1e-9));
                 if take <= 1e-9 {
                     continue;
                 }
-                // 买方实付（按市场价计的实物价值）与卖方交出的货值（市场价）不是一回事：
-                // 差价就是关系溢价/折扣，落在卖方身上。
-                let give_market = take * p;
-                let cost = take * p_eff;
-                // 实物交割：卖家的货 → 买家。
+                let give_market = take * p;               // 货值（按市场价）
+                let pay_seller = give_market * rel_mult;  // 卖方实收（含关系溢价/折扣）
+                let freight = give_market * freight_rate; // 运费
+                let cost = pay_seller + freight;          // 贸易额（不含手续费）
+                let fee = cost * m.spread;                // 市场手续费（烧掉）
+                // 丢货：非 master 的货走异常带会**部分失联**（确定性比例，不是掷骰——
+                // 掷骰会污染 `Prng` 流、破坏同种子复现）。
+                let reliable = is_mond_master(config, &buyer) || is_mond_master(config, &seller);
+                let loss = if depth > 0.0 && !reliable {
+                    (m.mond_loss_per_au * depth).clamp(0.0, m.mond_loss_cap)
+                } else {
+                    0.0
+                };
+                let lost_units = take * loss;
+                let received = give_market * (1.0 - loss);
+
+                // 实物交割：卖家的货 → 买家；途中损失的那部分直接消失。
                 if let Some(f) = state.faction_mut(&seller) {
                     let e = f.resources.entry(rt.clone()).or_insert(0.0);
                     *e = (*e - take).max(0.0);
                 }
                 if let Some(f) = state.faction_mut(&buyer) {
-                    *f.resources.entry(rt.clone()).or_insert(0.0) += take;
+                    *f.resources.entry(rt.clone()).or_insert(0.0) += take - lost_units;
                 }
                 if let Some(r) = remaining.get_mut(&(seller.clone(), rt.clone())) {
                     *r -= take;
                 }
-                *settled.entry(rt.clone()).or_insert(0.0) += take;
-                // 付款：买家把自己可出口的实物交给卖家（等值 cost），
-                //      另按 spread 烧掉 cost×spread（市场手续费 = 真实的价值 sink）。
-                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), cost);
-                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, cost * m.spread);
-                // 净进口 = 收到的货值 − 交出的货值（关系溢价因此体现为卖方的贸易收益）。
-                *net_import.entry(buyer.clone()).or_insert(0.0) += give_market - cost * (1.0 + m.spread);
-                *net_import.entry(seller.clone()).or_insert(0.0) += cost - give_market;
+                *settled.entry(rt.clone()).or_insert(0.0) += take - lost_units;
+
+                // 付款：卖方（货款）+ 承运人（异常带那一段运费）+ 市场（手续费，烧掉）。
+                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), pay_seller);
+                let carrier = if depth > 0.0 && m.carrier_share > 0.0 {
+                    config
+                        .mond
+                        .masters
+                        .iter()
+                        .find(|x| *x != &buyer && *x != &seller && state.faction(x).is_some())
+                        .cloned()
+                } else {
+                    None
+                };
+                match &carrier {
+                    Some(c) => {
+                        // 只有 master 能可靠穿越异常带 → 它对这条线上的贸易**抽税**。
+                        let carrier_fee = freight * m.carrier_share;
+                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(c), carrier_fee);
+                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, freight - carrier_fee);
+                        *carrier_income.entry(c.clone()).or_insert(0.0) += carrier_fee;
+                    }
+                    None => {
+                        // 没有承运人（或承运人就是买卖双方之一）：那一段运费直接烧掉。
+                        pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, freight);
+                    }
+                }
+                pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, fee);
+                *freight_paid.entry(buyer.clone()).or_insert(0.0) += freight;
+
+                // 净进口 = 实收货值 − 全部流出（关系溢价是老账，运费与丢货是新账）。
+                *net_import.entry(buyer.clone()).or_insert(0.0) += received - cost - fee;
+                *net_import.entry(seller.clone()).or_insert(0.0) += pay_seller - give_market;
                 *spent.entry(buyer.clone()).or_insert(0.0) += cost;
                 short -= take;
             }
@@ -1043,6 +1097,12 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     };
     for (fid, v) in net_import {
         flow.market_net.insert(fid, v);
+    }
+    for (fid, v) in freight_paid {
+        flow.market_freight.insert(fid, v);
+    }
+    for (fid, v) in carrier_income {
+        flow.market_carrier_income.insert(fid, v);
     }
 }
 
@@ -2177,6 +2237,39 @@ pub(crate) fn move_toward(state: &mut State, config: &GameConfig, ship_id: &str,
     }
 }
 
+/// 某势力的**交割锚点**（货物从哪儿发出 / 运到哪儿）：优先其首都天体，其次（无活城的
+/// 流亡势力）其第一艘活舰的位置，都没有则原点。用于估算贸易路线的距离与是否穿越异常带。
+fn trade_anchor(state: &State, fid: &str) -> [f64; 2] {
+    let cap = state.capital_body(fid);
+    if !cap.is_empty() && state.body(&cap).is_some() {
+        return state.body_position(&cap);
+    }
+    if let Some(s) = state.ships.iter().find(|s| s.faction_id == fid && s.hull > 0.0) {
+        return s.position;
+    }
+    [0.0, 0.0]
+}
+
+/// 一条贸易路线**浸入引力异常带的最大深度**（AU，0 = 完全没进异常带）。
+///
+/// * 两端都在异常带外 → 0（普通航线，无 MOND 代价）。
+/// * 一端在内一端在外 → `远端半径 − radius`（越深，穿越成本越高）。
+/// * 两端都在带内 → `较浅那端半径 − radius`（整条线都在异常带里，走浅处算）。
+///
+/// 就是 `decider_radius - mond.radius` 的闭式表达，确定性、无 RNG。
+pub(crate) fn route_depth(config: &GameConfig, a: [f64; 2], b: [f64; 2]) -> f64 {
+    let r = |p: [f64; 2]| (p[0] * p[0] + p[1] * p[1]).sqrt();
+    let (ra, rb) = (r(a), r(b));
+    let (inner, outer) = if ra <= rb { (ra, rb) } else { (rb, ra) };
+    let deep_ref = if inner > config.mond.radius { inner } else { outer };
+    (deep_ref - config.mond.radius).max(0.0)
+}
+
+/// 是否掌握 MOND 修正引力（异常区内无导航偏移，因而能可靠承运）。
+pub(crate) fn is_mond_master(config: &GameConfig, fid: &str) -> bool {
+    config.mond.masters.iter().any(|x| x == fid)
+}
+
 /// MOND 主力导航偏移：舰船所在势力未掌握 MOND 修正引力（见 [`MondConfig::masters`]）
 /// 且目标点进入异常区（距太阳超过 `mond.radius`）时，返回一个沿切向偏移的伪目标。
 /// 非 master 舰因此无法精确机动到深处目标（难以轰炸/殖民/停靠），体现「指令坐标与
@@ -2957,6 +3050,8 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
                 governance_cost,
                 governance_coverage,
                 trade_blocked_by,
+                freight_paid: flow.market_freight.get(&fid).copied().unwrap_or(0.0),
+                carrier_income: flow.market_carrier_income.get(&fid).copied().unwrap_or(0.0),
             },
         );
     }
@@ -4040,6 +4135,33 @@ mod tests {
         // MOND 势力（行星X崇拜教=8）：掌握修正引力，无偏移、指哪打哪。
         let m = mond_drift(&config, "行星X崇拜教", dest);
         assert_eq!(m, dest, "a MOND master must compute the destination exactly");
+    }
+
+    /// **贸易路线的引力异常浸入深度**（M6）：两端都在带外 = 0（普通航线）；
+    /// 一端在带内、一端在外 = 远端深度（要穿过去）；两端都在带内 = 较浅那端深度。
+    /// 它是运费倍率与丢货率的唯一驱动量，所以必须有确定的语义。
+    #[test]
+    fn route_depth_measures_mond_immersion() {
+        let (config, _state) = fresh_world(42);
+        let r = config.mond.radius;
+        let inside = [r - 5.0, 0.0];
+        let shallow = [r + 2.0, 0.0];
+        let deep = [r + 10.0, 0.0];
+        assert_eq!(
+            route_depth(&config, inside, [1.0, 0.0]),
+            0.0,
+            "两端都在异常带外的航线没有 MOND 代价"
+        );
+        assert!(
+            (route_depth(&config, inside, deep) - 10.0).abs() < 1e-9,
+            "一端在带内、一端在 10 AU 深 → 要穿到 10 AU 深"
+        );
+        assert!(
+            (route_depth(&config, shallow, deep) - 2.0).abs() < 1e-9,
+            "两端都在带内 → 按较浅那端算（2 AU）"
+        );
+        // 确定性：交换两端不改变结果（路线是双向的）。
+        assert_eq!(route_depth(&config, inside, deep), route_depth(&config, deep, inside));
     }
 
     /// 本土防御（首都即强弩）：靠近首都的目标被削弱，远离首都的没有。

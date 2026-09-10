@@ -425,7 +425,64 @@ fn probe_no_resurgence() {
     }
 }
 
-/// 6) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
+/// 6) **M6：运费与 MOND 承运**——谁在付运费、谁靠穿越异常带抽税、丢了多少货。
+#[test]
+#[ignore]
+fn probe_freight() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut freight: BTreeMap<FactionId, f64> = BTreeMap::new();
+        let mut carrier: BTreeMap<FactionId, f64> = BTreeMap::new();
+        let mut rounds_with_carrier = 0u32;
+        let mut deep_routes = 0u32;
+        for _ in 0..n {
+            let d = sim::advance(&mut state, &config, &mut rng);
+            for (fid, v) in &d.flow.market_freight {
+                *freight.entry(fid.clone()).or_insert(0.0) += *v;
+            }
+            let mut any = false;
+            for (fid, v) in &d.flow.market_carrier_income {
+                *carrier.entry(fid.clone()).or_insert(0.0) += *v;
+                if *v > 0.0 {
+                    any = true;
+                }
+            }
+            if any {
+                rounds_with_carrier += 1;
+            }
+            // 有多少条「进出异常带」的航线存在（用首都半径粗看）。
+            for f in &state.factions {
+                let cap = state.capital_body(&f.name);
+                if cap.is_empty() {
+                    continue;
+                }
+                let p = state.body_position(&cap);
+                if (p[0] * p[0] + p[1] * p[1]).sqrt() > config.mond.radius {
+                    deep_routes += 1;
+                    break;
+                }
+            }
+        }
+        println!("== 运费/MOND 承运 seed {seed}（{n} 回合）==");
+        println!(
+            "  异常带半径={} AU  masters={:?}  有承运收入的回合={rounds_with_carrier}/{n}  有势力首都位于带内的回合={deep_routes}/{n}",
+            config.mond.radius, config.mond.masters
+        );
+        for f in &state.factions {
+            println!(
+                "    {:<14} 付运费={:>9.1}  承运收入={:>9.1}",
+                f.name,
+                freight.get(&f.name).copied().unwrap_or(0.0),
+                carrier.get(&f.name).copied().unwrap_or(0.0)
+            );
+        }
+    }
+}
+
+/// 7) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
 fn probe_landless() {

@@ -106,6 +106,11 @@ pub struct FactionMetrics {
     /// 交战 / 已倒向联盟的弱者 ↔ 被锁定的霸权 / 关系冷到 `embargo_relation`。
     /// >0 意味着这个势力的船坞只能靠自己挖的料——这是制裁真正咬到的地方。
     pub trade_blocked_by: usize,
+    /// 本回合付出的**运费**（市场价值）：距离 × 运费率，穿越引力异常带再加倍。
+    pub freight_paid: f64,
+    /// 本回合收到的**承运费**（市场价值）：只有掌握了 MOND 的势力能可靠穿越异常带，
+    /// 所以它是柯伊伯带贸易的垄断承运人，对这条线上的货运抽税。
+    pub carrier_income: f64,
 }
 /// 单座城的本回合产出（`RoundMetrics::city_production` 的一项）。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -132,6 +137,11 @@ pub struct RoundFlow {
     /// 每势力本回合**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。
     /// 由 `sim::step_market` 在结算时记录——这是「谁真的在市场上买卖」的权威账。
     pub market_net: BTreeMap<FactionId, f64>,
+    /// 每势力本回合**付出的运费**（市场价值）——距离与引力异常带的代价。
+    pub market_freight: BTreeMap<FactionId, f64>,
+    /// 每势力本回合**收到的承运费**（市场价值）——掌握 MOND 的 master 靠穿越异常带抽的税。
+    /// 这是「垄断承运人」的观察面：一个势力靠承运挣多少，说明它在深空贸易里的地位。
+    pub market_carrier_income: BTreeMap<FactionId, f64>,
     /// 每势力本回合治理流（总成本 / 覆盖率）。
     pub governance: BTreeMap<FactionId, GovernanceFlow>,
 }
