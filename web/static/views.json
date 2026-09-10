@@ -1,0 +1,403 @@
+{
+  "version": 1,
+  "note": "组织点（view spec）声明。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。",
+  "tagged_behavior": {
+    "map": {
+      "Idle": "待命",
+      "Move": "移动 ({position})",
+      "Follow": "跟随 {ship}",
+      "DockCity": "停泊 {city}",
+      "Dock": "泊入轨道 {body}",
+      "Colonize": "殖民 {body}",
+      "Haul": "跑运输 {from}→{to}"
+    },
+    "empty": "待命"
+  },
+  "inline": [
+    {
+      "id": "inline-raw",
+      "mount": "inline",
+      "use_at": {
+        "state.ships": "ship-table",
+        "state.cities": "city-table",
+        "state.factions": "faction-table",
+        "state.events": "events",
+        "post.market_trades": "trades",
+        "post.haul_steps": "haul",
+        "post.decisions.ships": "ai-ships",
+        "post.decisions.blueprints": "ai-blueprints"
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "now",
+      "title": "本回合",
+      "hint": "推进之后先看这里：故事、战局、AI 在干什么、本回合事件明细",
+      "views": [
+        {
+          "id": "story",
+          "title": "故事（编年史）",
+          "mount": "panel",
+          "layout": "timeline",
+          "source": "@state.chronicle[*]",
+          "title_path": "title",
+          "meta": ["round", "participants"],
+          "body": "body",
+          "limit": { "n": 5, "from": "end" },
+          "empty": "还没有故事节拍——继续推进。"
+        },
+        {
+          "id": "situation",
+          "title": "战局",
+          "mount": "panel",
+          "layout": "sheet",
+          "source": "@post",
+          "columns": [
+            { "path": "hegemon", "label": "霸权", "missing": "无" },
+            { "path": "wars", "label": "交战", "fmt": "pairs", "sep": "↔" },
+            { "path": "sanctioned", "label": "被制裁", "missing": "无" },
+            { "path": "power_share", "label": "实力占比", "fmt": "top", "n": 4, "digits": 0 },
+            { "path": "population", "label": "总人口", "fmt": "int" },
+            { "path": "city_count", "label": "城", "fmt": "int" },
+            { "path": "ship_count", "label": "舰", "fmt": "int" },
+            { "path": "fleet_value", "label": "舰队价值", "fmt": "num", "digits": 0 },
+            { "path": "market_settled", "label": "本回合成交", "fmt": "map", "digits": 1 }
+          ],
+          "omit": [
+            { "path": "coalition_members", "why": "联盟成员在势力页可看" },
+            { "path": "faction_power", "why": "原始实力值；人读那个用「实力占比」" }
+          ]
+        },
+        {
+          "id": "ai-blueprints",
+          "title": "AI 在改设计图",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@post.decisions.blueprints[*]",
+          "key": "blueprint",
+          "columns": [
+            { "path": "faction", "label": "势力", "dot": "@state.factions[?name=${faction}].color" },
+            { "path": "action", "label": "动作", "fmt": "enum", "map": { "created": "新建", "retuned": "重估", "reaped": "回收", "skipped": "跳过" } },
+            { "path": "blueprint", "label": "设计图" },
+            { "path": "class", "label": "舰级", "fmt": "enum", "label_from": "config.ships" },
+            { "path": "city", "label": "在哪造", "missing": "—" },
+            { "path": "theme", "label": "主题", "missing": "—" }
+          ],
+          "empty": "本回合 AI 没动设计图库。"
+        },
+        {
+          "id": "ai-ships",
+          "title": "AI 给舰下的判定",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@post.decisions.ships[*]",
+          "key": "ship",
+          "columns": [
+            { "path": "ship", "label": "舰", "dot": "@state.factions[?name=${faction}].color" },
+            { "path": "verdict", "label": "判定", "fmt": "enum", "map": { "haul": "跑运输", "move": "机动", "engage": "接战", "bombard": "轰炸", "colonize": "殖民", "withdraw": "自保撤退", "hold": "没派活" } },
+            { "path": "order", "label": "指令", "fmt": "tagged", "map_ref": "tagged_behavior" },
+            { "path": "target", "label": "目标", "missing": "—" },
+            { "path": "hull_ratio", "label": "船体", "fmt": "pct" },
+            { "path": "enemy_in_range", "label": "敌在射程", "fmt": "bool", "map": { "true": "是", "false": "" } }
+          ],
+          "empty": "本回合没有逐舰判定。"
+        },
+        {
+          "id": "events",
+          "title": "本回合事件明细",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@state.events[*]",
+          "columns": [
+            { "path": "type", "label": "类型", "fmt": "enum", "unmapped": "?", "map": {
+              "attack": "开火", "ship_destroyed": "舰被毁", "siege": "围城", "city_razed": "城被夷平",
+              "ship_spawned": "新舰下水", "colony_founded": "殖民", "stale_order": "指令过期",
+              "withdraw": "撤退", "war_started": "开战", "war_ended": "停战", "story": "剧情",
+              "revolt": "叛乱", "city_defected": "城倒戈", "coalition_formed": "结盟", "coalition_ended": "联盟解散",
+              "capital_relocated": "迁都", "cargo_loaded": "装货", "cargo_delivered": "到货",
+              "contract_posted": "挂单（运力）", "contract_accepted": "接单", "contract_delivered": "单已交付",
+              "contract_reviewed": "考核承运方", "contract_ended": "单结束"
+            } }
+          ],
+          "empty": "本回合没有事件。"
+        }
+      ]
+    },
+    {
+      "id": "factions",
+      "title": "势力",
+      "hint": "一行一势力：位置、军事、钱、以及「为什么穷 / 为什么离心」的分项",
+      "views": [
+        {
+          "id": "faction-table",
+          "title": "势力概况",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@state.factions[*]",
+          "key": "name",
+          "select_kind": "faction",
+          "order": [{ "by": "@post.power_share.${name}", "dir": "desc" }],
+          "columns": [
+            { "path": "name", "label": "势力", "dot": "color", "click": "faction" },
+            { "path": "@post.power_share.${name}", "label": "实力占比", "fmt": "pct", "digits": 0 },
+            { "path": "@post.factions.${name}.at_war", "label": "状态", "fmt": "bool", "map": { "true": "交战", "false": "和平" } },
+            { "path": "@state.control.${name}.capital.value", "label": "首都", "missing": "—" },
+            { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
+            { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
+            { "path": "@post.factions.${name}.fleet_value", "label": "舰队", "fmt": "num", "digits": 0 },
+            { "path": "@post.factions.${name}.production_value", "label": "产出/月", "fmt": "num", "digits": 1 },
+            { "path": "@post.factions.${name}.upkeep", "label": "维护/月", "fmt": "num", "digits": 1 },
+            { "path": "@post.factions.${name}.upkeep_unpaid", "label": "没付上的维护", "fmt": "num", "digits": 1 },
+            { "path": "@post.factions.${name}.governance_cost", "label": "治理/月", "fmt": "num", "digits": 1 },
+            { "path": "@post.factions.${name}.governance_coverage", "label": "治理覆盖", "fmt": "pct", "digits": 0 },
+            { "path": "@post.factions.${name}.purchasing_power", "label": "购买力", "fmt": "num", "digits": 0 },
+            { "path": "@post.factions.${name}.market_rank", "label": "市场中排名", "fmt": "int", "missing": "—" },
+            { "path": "@post.factions.${name}.freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
+            { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 }
+          ],
+          "omit": [
+            { "path": "symbol", "why": "图形符号（地图上用），文字界面不显示" },
+            { "path": "color", "why": "已作为名字前的色点显示" },
+            { "path": "alignment", "why": "阵营倾向的原始分项" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fleet",
+      "title": "舰队",
+      "hint": "一舰一行：在哪、归谁、角色、船体、有效指令 + 这话是谁说的",
+      "views": [
+        {
+          "id": "ship-table",
+          "title": "全部舰",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@state.ships[*]",
+          "key": "name",
+          "select_kind": "ship",
+          "group": { "by": "faction_id", "dot": "@state.factions[?name=${faction_id}].color" },
+          "order": [{ "by": "role", "dir": "asc" }, { "by": "name", "dir": "asc" }],
+          "columns": [
+            { "path": "name", "label": "舰", "click": "ship" },
+            { "path": "class", "label": "舰级", "fmt": "enum", "label_from": "config.ships" },
+            { "path": "role", "label": "角色", "fmt": "enum", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
+            { "path": "hull", "label": "船体", "with": "hull_max", "fmt": "ratio", "digits": 0 },
+            { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].behavior", "label": "指令（有效）", "fmt": "tagged", "map_ref": "tagged_behavior" },
+            { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].mode", "label": "这话谁说的", "fmt": "owner", "missing": "没人说话" },
+            { "path": "@post.haul_steps.${name}.step", "label": "运输此刻", "fmt": "enum", "missing": "—", "map": { "loaded": "在装", "en_route": "在途", "waiting": "等货", "delivered": "已交货" } },
+            { "path": "@post.decisions.ships[?ship=${name}].verdict", "label": "意志", "fmt": "enum", "missing": "—", "map": { "haul": "跑运输", "move": "机动", "engage": "接战", "bombard": "轰炸", "colonize": "殖民", "withdraw": "自保撤退", "hold": "没派活" } },
+            { "path": "@post.decisions.ships[?ship=${name}].target", "label": "目标", "missing": "—" },
+            { "path": "cargo", "label": "载货", "fmt": "map", "digits": 1, "missing": "空" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cities",
+      "title": "城市",
+      "hint": "一城一行：人口、忠诚，以及忠诚目标拆出的两个原因项（距离 / 娱乐）",
+      "views": [
+        {
+          "id": "city-table",
+          "title": "全部城",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@state.cities[*]",
+          "key": "name",
+          "select_kind": "city",
+          "group": { "by": "faction_id", "dot": "@state.factions[?name=${faction_id}].color" },
+          "order": [{ "by": "loyalty", "dir": "asc" }],
+          "columns": [
+            { "path": "name", "label": "城", "click": "city" },
+            { "path": "loyalty", "label": "忠诚", "fmt": "pct", "digits": 0, "bar": true },
+            { "path": "@post.cities.${name}.loyalty_target.effective", "label": "忠诚目标", "fmt": "pct", "digits": 0 },
+            { "path": "@post.cities.${name}.loyalty_target.distance", "label": "↳ 距离项", "fmt": "pct", "digits": 0 },
+            { "path": "@post.cities.${name}.loyalty_target.entertainment", "label": "↳ 娱乐项", "fmt": "pct", "digits": 0 },
+            { "path": "@post.cities.${name}.build", "label": "在造（进度/速率）", "fmt": "progress", "missing": "没在造" },
+            { "path": "@post.cities.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
+            { "path": "population", "label": "人口", "fmt": "int" },
+            { "path": "body_id", "label": "天体" },
+            { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "market",
+      "title": "市场·运输",
+      "hint": "逐笔成交（含运费与丢货）、价格、以及每艘货船此刻在哪一步",
+      "views": [
+        {
+          "id": "trades",
+          "title": "本回合成交",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@post.market_trades[*]",
+          "key": "buyer",
+          "columns": [
+            { "path": "buyer", "label": "买方", "dot": "@state.factions[?name=${buyer}].color" },
+            { "path": "seller", "label": "卖方", "dot": "@state.factions[?name=${seller}].color" },
+            { "path": "moved", "label": "货", "fmt": "map", "digits": 1 },
+            { "path": "dist_au", "label": "距离 AU", "fmt": "num", "digits": 1 },
+            { "path": "freight_rate", "label": "运费率", "fmt": "pct", "digits": 1 },
+            { "path": "loss", "label": "丢货率", "fmt": "pct", "digits": 1 },
+            { "path": "rel_mult", "label": "关系倍率", "fmt": "num", "digits": 2 },
+            { "path": "mond_extra", "label": "MOND 附加", "fmt": "num", "digits": 2 }
+          ],
+          "empty": "本回合没有成交。"
+        },
+        {
+          "id": "haul",
+          "title": "每艘货船此刻",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@post.haul_steps",
+          "key": "@key",
+          "columns": [
+            { "path": "@key", "label": "舰" },
+            { "path": "@state.ships[?name=${@key}].faction_id", "label": "势力", "missing": "—" },
+            { "path": "body", "label": "地点", "missing": "—" },
+            { "path": "step", "label": "这一步", "fmt": "enum", "map": { "loaded": "在装", "en_route": "在途", "waiting": "等货", "delivered": "已交货" } },
+            { "path": "units", "label": "件数", "fmt": "num", "digits": 1, "missing": "—" },
+            { "path": "into_pool", "label": "货进哪里", "fmt": "bool", "map": { "true": "首都池", "false": "产地货栈" } }
+          ],
+          "empty": "这回合没有货船在跑。"
+        },
+        {
+          "id": "prices",
+          "title": "价格",
+          "mount": "panel",
+          "layout": "pairs",
+          "source": "@post.market_price",
+          "fmt": "num",
+          "digits": 2,
+          "sort": "desc",
+          "limit": { "n": 12 }
+        },
+        {
+          "id": "offers",
+          "title": "挂单簿",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@state.market.offers[*]",
+          "key": "seller",
+          "order": [{ "by": "amount", "dir": "desc" }],
+          "columns": [
+            { "path": "seller", "label": "卖家", "dot": "@state.factions[?name=${seller}].color" },
+            { "path": "resource", "label": "货" },
+            { "path": "amount", "label": "量", "fmt": "num", "digits": 1 },
+            { "path": "ask", "label": "要价", "fmt": "num", "digits": 2 }
+          ],
+          "empty": "挂单簿是空的。"
+        }
+      ]
+    }
+  ],
+  "select": [
+    {
+      "id": "sel-ship",
+      "title": "舰",
+      "mount": "select",
+      "select_kind": "ship",
+      "layout": "sheet",
+      "source": "@state.ships[*]",
+      "key": "name",
+      "columns": [
+        { "path": "name", "label": "舰" },
+        { "path": "faction_id", "label": "势力", "dot": "@state.factions[?name=${faction_id}].color" },
+        { "path": "class", "label": "舰级", "fmt": "enum", "label_from": "config.ships" },
+        { "path": "blueprint", "label": "出厂图", "missing": "（无图，按舰级默认）" },
+        { "path": "role", "label": "角色", "fmt": "enum", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
+        { "path": "hull", "label": "船体", "with": "hull_max", "fmt": "ratio", "digits": 0 },
+        { "path": "shield", "label": "护盾", "with": "shield_max", "fmt": "ratio", "digits": 0 },
+        { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].behavior", "label": "指令（有效）", "fmt": "tagged", "map_ref": "tagged_behavior" },
+        { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].mode", "label": "这话谁说的", "fmt": "owner", "missing": "没人说话" },
+        { "path": "doctrine", "label": "风格", "fmt": "fields", "fields": [["temper", "理智↔热血"], ["lone_wolf", "护航↔独狼"]], "digits": 2 },
+        { "path": "kiting", "label": "姿态（风筝↔贴脸）", "fmt": "num", "digits": 2 },
+        { "path": "@post.haul_steps.${name}.step", "label": "运输此刻", "fmt": "enum", "missing": "—", "map": { "loaded": "在装", "en_route": "在途", "waiting": "等货", "delivered": "已交货" } },
+        { "path": "cargo", "label": "载货", "fmt": "map", "digits": 1, "missing": "空" },
+        { "path": "position", "label": "坐标", "fmt": "vec", "digits": 1 },
+        { "path": "velocity", "label": "速度", "fmt": "num", "digits": 2 },
+        { "path": "spawned_round", "label": "下水回合", "fmt": "int" },
+        { "path": "components", "label": "组件", "fmt": "list" }
+      ]
+    },
+    {
+      "id": "sel-city",
+      "title": "城",
+      "mount": "select",
+      "select_kind": "city",
+      "layout": "sheet",
+      "source": "@state.cities[*]",
+      "key": "name",
+      "columns": [
+        { "path": "name", "label": "城" },
+        { "path": "faction_id", "label": "势力", "dot": "@state.factions[?name=${faction_id}].color" },
+        { "path": "body_id", "label": "天体" },
+        { "path": "population", "label": "人口", "fmt": "int" },
+        { "path": "loyalty", "label": "忠诚", "fmt": "pct", "digits": 0, "bar": true },
+        { "path": "@post.cities.${name}.loyalty_target.effective", "label": "忠诚目标", "fmt": "pct", "digits": 0 },
+        { "path": "@post.cities.${name}.loyalty_target.distance", "label": "↳ 距离项", "fmt": "pct", "digits": 0 },
+        { "path": "@post.cities.${name}.loyalty_target.entertainment", "label": "↳ 娱乐项", "fmt": "pct", "digits": 0 },
+        { "path": "@post.cities.${name}.labor", "label": "劳动力", "fmt": "pct", "digits": 0 },
+        { "path": "@post.cities.${name}.housing_capacity", "label": "住房容量", "fmt": "num", "digits": 0 },
+        { "path": "@post.cities.${name}.is_hub", "label": "集散枢纽", "fmt": "bool", "map": { "true": "是", "false": "否" } },
+        { "path": "@post.cities.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
+        { "path": "@post.cities.${name}.production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
+        { "path": "@post.cities.${name}.build", "label": "在造（进度/速率）", "fmt": "progress", "missing": "没在造" },
+        { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "否" } }
+      ]
+    },
+    {
+      "id": "sel-body",
+      "title": "天体",
+      "mount": "select",
+      "select_kind": "body",
+      "layout": "sheet",
+      "source": "@state.bodies[*]",
+      "key": "name",
+      "columns": [
+        { "path": "name", "label": "天体" },
+        { "path": "kind", "label": "类型", "fmt": "enum", "label_from": "config.body_kinds" },
+        { "path": "orbit.parent", "label": "母星", "missing": "（绕日）" },
+        { "path": "position", "label": "坐标", "fmt": "vec", "digits": 2 },
+        { "path": "orbit.aphelion_distance", "label": "远日点 AU", "fmt": "num", "digits": 2 },
+        { "path": "orbit.perihelion_distance", "label": "近日点 AU", "fmt": "num", "digits": 2 },
+        { "path": "orbit.period", "label": "公转（月）", "fmt": "num", "digits": 1 },
+        { "path": "settlements[*].name", "label": "定居点", "fmt": "list" },
+        { "path": "settlements", "label": "定居点明细", "fmt": "rows", "fields": ["total_area", "ecological_capacity", "construction_speed_mod"] }
+      ]
+    },
+    {
+      "id": "sel-faction",
+      "title": "势力",
+      "mount": "select",
+      "select_kind": "faction",
+      "layout": "sheet",
+      "source": "@state.factions[*]",
+      "key": "name",
+      "columns": [
+        { "path": "name", "label": "势力", "dot": "color" },
+        { "path": "@post.power_share.${name}", "label": "实力占比", "fmt": "pct", "digits": 0 },
+        { "path": "@post.factions.${name}.at_war", "label": "状态", "fmt": "bool", "map": { "true": "交战", "false": "和平" } },
+        { "path": "@state.control.${name}.capital.value", "label": "首都", "missing": "—" },
+        { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
+        { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
+        { "path": "resources", "label": "首都库存", "fmt": "map", "digits": 0, "missing": "空" },
+        { "path": "@post.factions.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
+        { "path": "@post.factions.${name}.upkeep", "label": "舰队维护/月", "fmt": "num", "digits": 1 },
+        { "path": "@post.factions.${name}.upkeep_unpaid", "label": "没付上的维护", "fmt": "num", "digits": 1 },
+        { "path": "@post.factions.${name}.governance_cost", "label": "治理/月", "fmt": "num", "digits": 1 },
+        { "path": "@post.factions.${name}.governance_coverage", "label": "治理覆盖", "fmt": "pct", "digits": 0 },
+        { "path": "@post.factions.${name}.purchasing_power", "label": "购买力", "fmt": "num", "digits": 0 },
+        { "path": "@post.factions.${name}.trade_blocked_by", "label": "被谁挡住贸易", "fmt": "map", "missing": "没人挡" },
+        { "path": "@post.factions.${name}.freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
+        { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
+        { "path": "reputation", "label": "名声", "fmt": "map", "digits": 0, "missing": "—" },
+        { "path": "relations", "label": "关系", "fmt": "map", "digits": 0, "missing": "—" }
+      ]
+    }
+  ]
+}

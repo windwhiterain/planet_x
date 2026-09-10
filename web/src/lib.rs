@@ -609,3 +609,10 @@ pub fn router(shared: Shared, web: WebCtx) -> Router {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+/// `web/static/views.json`（组织点声明）的守门人：静态合法性 + 对真实世界的路径存在性。
+/// 声明是**数据**，写错不会编译报错，只会让某个视图静静少一列——纪律放在这里。
+/// 见 `.agents/notes/web-human-views.md` 与该文件头。
+#[cfg(test)]
+#[path = "views_tests.rs"]
+mod views_tests;

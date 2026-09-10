@@ -286,6 +286,241 @@ function scopeAccess(node) {
   };
 }
 
+// --- 读面（组织点）---------------------------------------------------------
+// 左侧面板有两个模式：**控制**（写面，手写的控制树）与**读面**（组织点声明出来的视图）。
+// 读面的一切由 `web/static/views.json`（数据）驱动，渲染交给 `specview.js`（通用求值器）——
+// 本文件只做三件事：把根喂给它、把「未组织」审计算出来、把点击接到选中读面上。
+// 依据与铁律见 `.agents/notes/web-human-views.md`。
+let viewsDoc = { pages: [], select: [] };   // views.json 的内容
+let sideMode = 'read';                       // 左栏当前模式：'read' | 'control'
+let readPage = 0;                            // 读面当前页（views.json 的 pages 下标）
+let readLoaded = false;                      // 视图数据是否加载成功（失败要说话，不是空白）
+let readError = '';
+const readExpanded = new Set();              // 读面里的展开状态（残差 / 上限）
+
+// 组织点求值器要的「根」：六个 info 根 + 写面的读模板（control / scope）。
+// control 是**读面**（有效值 + 叶的表态），跨根 join「这艘舰的指令是谁说的」就靠它。
+function specRoot(name) {
+  if (name === 'control') return world ? world.control : undefined;
+  if (name === 'scope') return world ? world.scope : undefined;
+  return infoValueOf(world, name);
+}
+
+function bindSpecView() {
+  if (!window.SpecView) return;
+  window.SpecView.bind({
+    getRoot: specRoot,
+    maps: {},
+    onPathClick: copyPath,
+    selection: sel,
+    expanded: readExpanded,
+    onSelect: (kind, name) => selectEntity(kind, name),
+  });
+}
+
+async function loadViews() {
+  try {
+    viewsDoc = await fetchJSON('views.json');
+    if (window.SpecView) window.SpecView.setSpecs(viewsDoc);
+    readLoaded = true;
+  } catch (e) {
+    readLoaded = false;
+    readError = String(e && e.message ? e.message : e);
+  }
+}
+
+// 左栏模式切换 + 读面渲染。
+function renderSide() {
+  const treePanel = $('#treePanel');
+  const readPanel = $('#readPanel');
+  const foot = $('.side-foot');
+  if (!treePanel || !readPanel) return;
+  const read = sideMode === 'read';
+  $('#side').classList.toggle('read', read);
+  treePanel.style.display = read ? 'none' : '';
+  readPanel.style.display = read ? '' : 'none';
+  // 「应用到服务器」只在控制模式下有意义（读面是只读的）。
+  if (foot) foot.style.display = read ? 'none' : '';
+  document.querySelectorAll('#sideTabs .tnode-tab').forEach((t) => {
+    t.classList.toggle('sel', t.dataset.mode === sideMode);
+  });
+  if (read) renderReadPanel();
+}
+
+function renderReadPanel() {
+  const tabsBox = $('#readTabs');
+  const body = $('#readBody');
+  if (!tabsBox || !body) return;
+  tabsBox.textContent = '';
+  body.textContent = '';
+  if (!readLoaded) {
+    body.appendChild(el('div', { class: 'sv-empty' }, '视图声明（views.json）没加载上：' + readError));
+    return;
+  }
+  const pages = (viewsDoc.pages || []).concat([{ id: 'leftover', title: '未组织', hint: '没有被任何组织点认领的数据 —— 它们照旧由通用 widget 渲染' }]);
+  if (readPage >= pages.length) readPage = 0;
+  pages.forEach((p, i) => {
+    const t = el('span', { class: 'tnode-tab' + (i === readPage ? ' sel' : '') });
+    t.textContent = p.title;
+    t.addEventListener('click', () => { readPage = i; renderReadPanel(); });
+    tabsBox.appendChild(t);
+  });
+  const page = pages[readPage];
+  if (page.id === 'leftover') {
+    renderSpecCheck(body);
+    renderLeftover(body);
+    return;
+  }
+  if (page.hint) body.appendChild(el('div', { class: 'sv-pagehint' }, page.hint));
+  (page.views || []).forEach((spec) => window.SpecView.renderView(body, spec));
+}
+
+// --- 「未组织」索引（铁律 R 的兜底一侧）--------------------------------------
+// 引擎加了新根 / 新顶层集合 / 新字段 ⇒ 它们**自动**出现在这里（通用 widget 渲染），
+// 不需要谁来更新前端。反过来，这里也把「某条被整理过的集合里，还有哪些字段没被认领」列出来。
+function renderLeftover(body) {
+  // 把每条组织点引用的路径归一成**段**（去掉 [*] / [?..] / ${..} 与 @根），供"谁整理了什么"用。
+  const claimSegs = () => {
+    const out = [];
+    window.SpecView.claimedPaths(viewsDoc).forEach((c) => {
+      const segs = String(c.expr)
+        .split('.')
+        .map((s) => s.replace(/\[.*$/, '').replace(/\$\{[^}]*\}/g, '·'))
+        .filter((s) => s && s !== '·');
+      if (!segs.length) return;
+      const root = segs[0].replace(/^@/, '');
+      out.push({ view: c.view, root, rest: segs.slice(1) });
+    });
+    return out;
+  };
+  const claimed = claimSegs();
+  const views = (viewsDoc.pages || []).flatMap((p) => p.views || []).concat(viewsDoc.select || []);
+  const specById = (id) => views.find((v) => v.id === id);
+
+  ['state', 'pre', 'post', 'config', 'session', 'control', 'scope'].forEach((rootName) => {
+    const root = specRoot(rootName);
+    if (root === undefined || root === null) return;
+    const wrap = el('div', { class: 'sv-view' });
+    wrap.appendChild(el('h3', { class: 'sv-title' }, '@' + rootName));
+    if (Array.isArray(root)) {
+      wrap.appendChild(el('div', { class: 'sv-hint' }, '数组：' + root.length + ' 项（未组织：整份由通用 widget 渲染）'));
+      wrap.appendChild(jsonToggle('展开原始数据', () => root, rootName));
+      body.appendChild(wrap);
+      return;
+    }
+    const list = el('div', { class: 'sv-list' });
+    Object.keys(root).forEach((k) => {
+      const v = root[k];
+      const hits = claimed.filter((c) => c.root === rootName && c.rest[0] === k);
+      const direct = hits.filter((c) => c.rest.length === 1);
+      const nested = hits.filter((c) => c.rest.length > 1);
+      const row = el('div', { class: 'sv-lrow' });
+      row.appendChild(el('span', (direct.length || nested.length) ? 'sv-badge ok' : 'sv-badge',
+        (direct.length || nested.length) ? '已整理' : '未组织'));
+      row.appendChild(el('span', { class: 'sv-lkey' }, k));
+      row.appendChild(el('span', { class: 'sv-lshape' }, shapeOf(v)));
+      if (direct.length) row.appendChild(el('span', { class: 'sv-lby' }, '← ' + [...new Set(direct.map((c) => c.view))].join('、')));
+      // 嵌套集合（如 post.decisions 下的 ships/blueprints）：整理了哪些、还剩哪些没人认领。
+      const nestedKeys = [...new Set(nested.map((c) => c.rest[1]))];
+      if (nestedKeys.length && v && typeof v === 'object' && !Array.isArray(v)) {
+        const all = Object.keys(v);
+        const left = all.filter((x) => !nestedKeys.includes(x));
+        row.appendChild(el('span', { class: 'sv-lby' }, '← ' + [...new Set(nested.map((c) => c.view))].join('、') + ' 整理了 ' + nestedKeys.join('、')));
+        if (left.length) row.appendChild(el('span', { class: 'sv-lshape' }, '· 仍未组织：' + left.join('、')));
+      }
+      // 被整理过的集合：把「这条集合里还有哪些字段没人认领」摆出来（残差的集合级视图）。
+      const spec = direct.length ? specById(direct[0].view) : null;
+      if (spec && Array.isArray(v) && v.length) {
+        const res = window.SpecView.residualOf(v[0], spec);
+        if (res) row.appendChild(el('span', { class: 'sv-lshape' }, '· 按「' + spec.id + '」每条记录里未被认领：' + Object.keys(res).join('、')));
+      }
+      row.appendChild(jsonToggle('看原始数据', () => v, rootName + '.' + k));
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    body.appendChild(wrap);
+  });
+}
+
+function shapeOf(v) {
+  if (Array.isArray(v)) return '数组 ' + v.length + (v.length && typeof v[0] === 'object' ? ' × 对象' : '');
+  if (v && typeof v === 'object') return '对象 ' + Object.keys(v).length + ' 键';
+  return typeof v + ' ' + JSON.stringify(v);
+}
+
+// --- 运行时自检（用**真的求值器**跑一遍每条视图）------------------------------
+// 静态校验（Rust 测试 `views_tests.rs`）只能证明路径合文法、引用的视图存在；
+// 「这一帧里这条列到底取不取得到值」只有拿求值器在真数据上跑一遍才知道。所以放在这儿，
+// **跟着当前这一帧**，永远不漂移：某列全帧取不到值 ⇒ 明说，而不是安静地显示一串「·」。
+function renderSpecCheck(body) {
+  const wrap = el('div', { class: 'sv-view' });
+  wrap.appendChild(el('h3', { class: 'sv-title' }, '视图自检（这一帧）'));
+  wrap.appendChild(el('div', { class: 'sv-hint' },
+    '用真的求值器把每条视图跑一遍：哪些列这帧取不到值、哪条来源整段落空。引擎改了字段名 ⇒ 这里立刻明说，而不是在表格里留一排「·」。'));
+  const list = el('div', { class: 'sv-list' });
+  const specs = (viewsDoc.pages || []).flatMap((p) => p.views || []).concat(viewsDoc.select || []);
+  specs.forEach((spec) => {
+    if (spec.mount === 'inline') return;
+    let rows = [];
+    try {
+      rows = window.SpecView.expand(spec.source);
+    } catch (e) {
+      list.appendChild(checkRow(spec.id, 'warn', 'source 求值抛错：' + e));
+      return;
+    }
+    if (!rows.length) {
+      list.appendChild(checkRow(spec.id, 'warn', '这一帧没有记录（' + spec.source + '）'));
+      return;
+    }
+    const dead = [];
+    (spec.columns || []).forEach((c) => {
+      const any = rows.some((r) => !isNilLike(window.SpecView.evalPath(c.path, r.value, r.key)));
+      if (!any) dead.push(c.path);
+    });
+    if (dead.length) {
+      list.appendChild(checkRow(spec.id, 'warn',
+        rows.length + ' 条记录 / ' + (spec.columns || []).length + ' 列，其中 ' + dead.length + ' 列全帧取不到值：' + dead.join('、')));
+    } else {
+      list.appendChild(checkRow(spec.id, 'ok',
+        rows.length + ' 条记录 / ' + (spec.columns || []).length + ' 列全部取到了值'));
+    }
+  });
+  wrap.appendChild(list);
+  body.appendChild(wrap);
+}
+
+function isNilLike(v) {
+  return v === null || v === undefined;
+}
+
+function checkRow(id, kind, text) {
+  const row = el('div', { class: 'sv-lrow' });
+  row.appendChild(el('span', { class: kind === 'ok' ? 'sv-badge ok' : 'sv-badge warn' }, kind === 'ok' ? '✓' : '⚠'));
+  row.appendChild(el('span', { class: 'sv-lkey' }, id));
+  row.appendChild(el('span', { class: 'sv-lshape' }, text));
+  return row;
+}
+
+// 一个「点开就地看原始 JSON」的小开关（未组织索引里每个键都有）。
+function jsonToggle(label, get, rootPath) {
+  const btn = el('span', { class: 'sv-more clickable' }, '▸ ' + label);
+  const box = el('div', { class: 'sv-residual-box' });
+  box.style.display = 'none';
+  let built = false;
+  btn.addEventListener('click', () => {
+    const open = box.style.display === 'none';
+    box.style.display = open ? '' : 'none';
+    btn.textContent = (open ? '▾ ' : '▸ ') + label;
+    if (open && !built) {
+      built = true;
+      if (window.JsonView) {
+        window.JsonView.render(box, get(), { rootPath, expandDepth: 1, onPathClick: copyPath, rerender: renderReadPanel });
+      } else box.textContent = JSON.stringify(get());
+    }
+  });
+  return btn;
+}
+
 // --- 状态加载 / 选择 --------------------------------------------------------
 // 服务器只给两样东西：写面（control/scope 的可编辑模板）与读面（info：模型的整份 dump）。
 // 这里把 info 的根绑成 `st`（规范世界）与 `cfg`（配置表）——**读面的一切都从这两个根取**，
@@ -299,10 +534,12 @@ function bindWorld(w) {
   world = w;
   st = stateOf(w);
   cfg = infoValueOf(w, 'config');
+  bindSpecView();
 }
 
 async function init() {
   registerTab(); // 先报到：刷新时新页面的登记要尽早落地（服务端有个极短的刷新窗口）
+  await loadViews(); // 视图声明先于第一帧（读面要用它）
   bindWorld(await fetchJSON('/api/state'));
   prevState = world;
   selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
@@ -576,7 +813,9 @@ function buildingLabel(b) {
 
 // --- 主渲染 ----------------------------------------------------------------
 function renderAll() {
+  bindSpecView();
   renderMap();
+  renderSide();      // 左栏：控制（写面）或读面（组织点）
   renderTree();
   renderSelection();
   renderDiff();
@@ -585,6 +824,31 @@ function renderAll() {
 
 function updateTop() {
   $('#metaRound').textContent = '回合 ' + st.round + ' · ' + st.time_month + ' 个月';
+  const line = $('#nowLine');
+  if (line) line.textContent = nowSummary();
+}
+
+// 「本回合」一句话：**只报事实，不做判断**（没有阈值、没有高亮——那属于注意力路由，本轮不做）。
+// 事件类型的英文 key → 中文标签取自 views.json 里那条声明（一处来源，不在这里再抄一份）。
+function nowSummary() {
+  const events = st.events || [];
+  const labels = (() => {
+    const v = (viewsDoc.pages || []).flatMap((p) => p.views || []).find((x) => x.id === 'events');
+    const col = v && (v.columns || []).find((c) => c.path === 'type');
+    return (col && col.map) || {};
+  })();
+  const counts = new Map();
+  events.forEach((e) => {
+    const k = labels[e.type] || (e.type + '（无中文标签）');
+    counts.set(k, (counts.get(k) || 0) + 1);
+  });
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
+    .map(([k, n]) => k + (n > 1 ? ' ×' + n : '')).join(' · ');
+  const chron = st.chronicle || [];
+  const last = chron.length ? chron[chron.length - 1] : null;
+  const fresh = last && last.round === st.round ? '｜新故事：' + last.title : '';
+  if (!events.length && !fresh) return '本回合没有事件';
+  return '本回合 ' + events.length + ' 件事' + (top ? '（' + top + '）' : '') + fresh;
 }
 
 // 地图：把**从 state 根适配出来**的世界交给 three.js 场景（map3d.js），并把 config 的天体
@@ -642,7 +906,7 @@ function findEntity(kind, name) {
 function selectEntity(kind, name) {
   sel = { kind, name };
   openBottomBar(); // 用户点了东西 → 把读面亮出来，否则「点了没反应」
-  if (kind === 'faction') { setFaction(name); return; }
+  if (kind === 'faction') setFaction(name); // 顺带把控制树切到这个势力（写面）
   renderSelection();
 }
 
@@ -655,32 +919,57 @@ function openBottomBar() {
   if (btn) btn.textContent = btn.dataset.openArrow;
 }
 
+// 选中读面：**先问组织点**（`select` 挂载）——命中就用整理过的卡片 + 「其余字段」；
+// 没命中就退回通用 widget 渲染整份记录（老行为，一条也不少）。
 function renderSelection() {
   const head = $('#selHead');
   const box = $('#readout');
   if (!head || !box) return;
   head.textContent = '';
+  box.textContent = '';
   if (!sel) {
-    box.textContent = '（在地图上点天体/城/舰，或点左侧控制树里的势力，这里会显示它的完整记录）';
+    box.textContent = '（在地图上点天体/城/舰，或点左侧控制树/读面里的名字，这里会显示它的记录）';
     return;
   }
   const found = findEntity(sel.kind, sel.name);
   if (!found) {
     head.textContent = (KIND_LABEL[sel.kind] || sel.kind) + ' ' + sel.name + '（当前世界里已不存在）';
-    box.textContent = '';
     return;
   }
-  const label = el('span', 'sel-kind', KIND_LABEL[sel.kind] || sel.kind);
-  const nameEl = el('span', 'sel-name clickable', sel.name);
+  const label = el('span', { class: 'sel-kind' }, KIND_LABEL[sel.kind] || sel.kind);
+  const nameEl = el('span', { class: 'sel-name clickable' }, sel.name);
   nameEl.title = '点击复制 JSON 路径';
   nameEl.addEventListener('click', () => copyPath(found.path));
-  head.append(label, nameEl, el('span', 'sel-path', found.path));
+  head.append(label, nameEl, el('span', { class: 'sel-path' }, found.path));
+
+  const spec = window.SpecView && window.SpecView.selectSpecFor(sel.kind);
+  if (spec) {
+    head.appendChild(el('span', { class: 'sel-path' }, '组织点：' + spec.id));
+    window.SpecView.renderSelect(box, spec, sel.name);
+    return;
+  }
+  head.appendChild(el('span', { class: 'sel-path' }, '（这个类型没有组织点，按通用 widget 显示）'));
   window.JsonView.render(box, found.value, {
     rootPath: found.path,
     expandDepth: 1,
     state: { expanded: selExpanded },
     onPathClick: copyPath,
+    inline: inlineSpec,
+    rerender: renderSelection,
   });
+}
+
+// 通用树里的**原位重组点**：给 jsonview 的钩子。命中就返回节点，没命中返回 null（走通用渲染）。
+function inlineSpec(path, value) {
+  if (!window.SpecView || !value || typeof value !== 'object') return null;
+  const spec = window.SpecView.inlineFor(path);
+  if (!spec) return null;
+  const box = el('div', { class: 'sv-inline' });
+  const bar = el('div', { class: 'sv-inline-bar' });
+  bar.textContent = '此处由组织点「' + spec.id + '」整理（原始字段在每行的「其余字段」里）';
+  box.appendChild(bar);
+  window.SpecView.renderView(box, spec);
+  return box;
 }
 
 // --- 层级树（控制 + 作用域）-----------------------------------------------
@@ -1913,6 +2202,8 @@ function renderInfo() {
     state: { expanded: infoExpanded },
     filter: infoFilter,
     onPathClick: copyPath,
+    inline: inlineSpec,        // 原位组织点（本文件决定；widget 只认这个钩子）
+    rerender: () => renderInfo(),
   });
 }
 
@@ -2086,6 +2377,10 @@ window.addEventListener('DOMContentLoaded', () => {
   $('#advanceBtn').addEventListener('click', () => advance(+$('#advanceN').value));
   $('#newBtn').addEventListener('click', newGame);
   $('#applyBtn').addEventListener('click', applyControl);
+  // 左栏两个模式：控制（写面，手写控制树）/ 读面（组织点声明出来的视图）。
+  document.querySelectorAll('#sideTabs .tnode-tab').forEach((t) => {
+    t.addEventListener('click', () => { sideMode = t.dataset.mode; renderSide(); });
+  });
   // 边缘 bar 手动展开/收起（默认收起，地图全屏）。
   toggleBar('#toggleTop', '#topbar');
   toggleBar('#toggleSide', '#side');
