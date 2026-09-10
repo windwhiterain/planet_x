@@ -288,16 +288,28 @@ impl Participant {
     }
 }
 
-/// 事件的**显著性**分级。「长存账本」（随 checkpoint 存活、天然有界）只收
-/// [`Salience::Milestone`]；海量逐发流水（开火/围城）只落磁盘投影。
+/// 事件的**分级**。判据是**后续计算需要访问哪一段历史**——不是「重要性」。
+///
+/// 这三条是**设计约束，不是描述**：它决定一条事件必须被存进哪一层，所以新增 variant 时
+/// 要问的是「后面的逻辑要回看它吗、要回看多久」，而不是「它听起来重不重要」。反过来，
+/// 每一条定级都应当能指到**具体的读者**——见 [`GameEvent::salience`] 里的读者盘点。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Salience {
-    /// 改变身份/归属/存亡的里程碑：城易主或夷平、舰出生或死亡、开战停战、联盟、迁都、剧情。
+    /// 后续计算需要访问**无限的过去历史**。→ 必须长存进 [`State::milestones`]，随 checkpoint
+    /// 存活，不设时间窗口。
     Milestone,
-    /// 值得注意但不改变归属：重建、撤退、指令降级。
+    /// 后续计算需要访问**一定的事件窗口**（最近 W 个回合 / 最近 W 条）。→ 只需一个有界窗口
+    /// 在 state 里，不需要无限长存。
+    ///
+    /// **范例：[`GameEvent::WarStarted`]。** 两国开战之后，相当一段时间里它们会**互相记恨**
+    /// ——关系被一个会衰减的旧仇压着，所以后面的外交/思潮计算要回头看「最近 W 个回合里我们
+    /// 打过仗吗」。W 之外的那场战争不再影响任何计算，因此**不需要**无限长存；反之，今天的关系
+    /// 模型（`relations` 标量 + `war_fatigue` 回拉）**没有任何记忆**，于是关系在阈值上来回穿
+    /// 越——这正是战争事件反复 `war_started`/`war_ended` 闪烁的原因。
     Notable,
-    /// 逐发/逐次的高频流水：开火、围城。
+    /// 后续计算**只需要前一帧**（本回合流水），或者根本不需要访问——只是记录下来供 agent
+    /// 事后分析。→ 存档里只活一个回合；要跨段查询走磁盘投影 `idx/events.jsonl`。
     Detail,
 }
 
@@ -325,7 +337,7 @@ pub struct EventRow {
     /// 统一的数值强度（伤害；无伤害的事件为 0），便于 `groupby().sum()` 之类统计。
     pub magnitude: f64,
     /// 一句话标题（见 [`GameEvent::headline`]）。**同一渲染器的唯一产物**：CLI 的
-    /// `--ledger`/`--digest` 与投影表里的这一列说的是同一句话，不会各写一份文案。
+    /// `--milestones`/`--digest` 与投影表里的这一列说的是同一句话，不会各写一份文案。
     /// 它是**人读**的便利列，机器查询仍应走 `actor_*`/`target_*`/`data` 这些结构化列。
     pub headline: String,
     /// variant 专属载荷（可读名/舰级/原因/忠诚度…），固定只用这一个对象列承载。
@@ -518,7 +530,27 @@ impl GameEvent {
         }
     }
 
-    /// 显著性分级：决定它是否进「长存账本」。
+    /// 分级：按**后续计算的访问需求**定级（判据见 [`Salience`]），决定它被存进哪一层。
+    ///
+    /// **定级的依据 = 生产代码的读者盘点**（非测试的 `state.events` / `state.milestones` 读者）：
+    ///
+    /// | 读者 | 访问的历史 |
+    /// |---|---|
+    /// | `step_ideology` → `military_deltas(&state.events)` | 本回合的军事得失 |
+    /// | `kill_ship` 的同回合去重 | 本回合 |
+    /// | `step_diplomacy` 的「本回合谁和谁交火」（由 `Attack`/`Siege` 反推） | 本回合 |
+    /// | `step_story` 的载荷提取 + `StoryTrigger::*` | 本回合 / [`State::chronicle`] |
+    /// | `autocontrol::tactics` 的 `Withdraw` 判定 | 本回合 |
+    /// | `agent::state_json`、`projection` 的渲染 | 本回合 |
+    ///
+    /// 也就是说：**今天没有任何生产逻辑读无限过去或读窗口**——「永远发生过没有」这类需求
+    /// （`first_war`/`first_raze`/`first_colony`）当前由 [`State::chronicle`] 的去重承担，
+    /// 而不是由历史层承担。因此下面的定级是**按本判据有待收紧的**，不是已经收敛的：
+    /// 现有分级是按「重要性」拍的，与读者需求无关，两者冲突时**以读者需求为准**。
+    ///
+    /// 已经明确的缺口（见 [`Salience::Notable`] 的战争范例）：关系模型没有记忆，缺一个
+    /// 「最近 W 回合里我们打过仗吗」的窗口读者；一旦补上，[`GameEvent::WarStarted`] /
+    /// [`GameEvent::WarEnded`] 就该从下面的 `Milestone` 组移到 `Notable` 组。
     pub fn salience(&self) -> Salience {
         match self {
             // 改变身份/归属/存亡的里程碑。
@@ -547,7 +579,7 @@ impl GameEvent {
     ///
     /// 三条设计约束：
     /// 1. **自足**——只读事件自身的字段，不接受 `&State`。于是它对**已经归档的历史**
-    ///    （长存账本里跨 checkpoint 的老事件、投影表里的行）同样成立：那些实体可能早已
+    ///    （长存里程碑里跨 checkpoint 的老事件、投影表里的行）同样成立：那些实体可能早已
     ///    不存在/已改名，回查 state 只会得到**今天的**答案而不是当时的答案。
     /// 2. **单行**——不含换行，可直接进 JSONL / 表格 / 终端一行。
     /// 3. **点到名**——[`GameEvent::participants`] 列出的每一个 id 都**逐字出现**在标题里
@@ -675,7 +707,7 @@ impl GameEvent {
             GameEvent::ShipDestroyed { .. } | GameEvent::ShipSpawned { .. } => 5,
             // 值得注意但不改变归属。
             GameEvent::Withdraw { .. } | GameEvent::StaleOrder { .. } => 2,
-            // 逐发流水（永不进长存账本，也不会出现在 digest 的头条里）。
+            // 逐发流水（永不进长存里程碑，也不会出现在 digest 的头条里）。
             GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
         }
     }
@@ -724,34 +756,34 @@ fn entity_kind_from_str(s: &str) -> EntityKind {
     }
 }
 
-/// 长存账本里的一条记录：**第几回合**发生了什么。`GameEvent` 本身不带回合号（它只活在
-/// 「本回合」的流水里），跨回合的账本必须自己带上时间戳。
+/// 长存里程碑里的一条记录：**第几回合**发生了什么。`GameEvent` 本身不带回合号（它只活在
+/// 「本回合」的流水里），跨回合的里程碑必须自己带上时间戳。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct LedgerEntry {
+pub struct MilestoneEntry {
     pub round: u32,
     pub event: GameEvent,
 }
 
-/// **长存里程碑账本**（`State::ledger`）：本局发生过的全部里程碑事件，按发生顺序追加。
+/// **长存里程碑**（`State::milestones`）：本局发生过的全部里程碑事件，按发生顺序追加。
 ///
 /// 解决的是「历史活不过 checkpoint」这个根因：[`State::events`] 是**回合内流水**——每回合
 /// 开头被 [`crate::sim::advance`] 清空，于是 `--save` 出来的存档里只剩最后一回合的事件，
 /// 而「这个城市是怎么变成今天这样的」全部丢失（只有磁盘投影 `idx/events.jsonl` 记得，
-/// 前提是你一直在 `--index`）。账本把**里程碑**层收进 `State` 本身：存一份 checkpoint 就
+/// 前提是你一直在 `--index`）。里程碑把**里程碑**层收进 `State` 本身：存一份 checkpoint 就
 /// 带走了这段历史，`--start` 续玩时它仍然在。
 ///
 /// 分层由 [`GameEvent::salience`] 单点声明：只收 [`Salience::Milestone`]（易主/存亡/开战/
 /// 结盟/剧情），逐发流水（`attack`/`siege`）永不进来——它们数量是里程碑的一两个数量级。
-/// 写入点是 [`crate::sim::ev`]（发事件的唯一漏斗），因此**记不进账本在结构上不可能**。
+/// 写入点是 [`crate::sim::ev`]（发事件的唯一漏斗），因此**记不进里程碑在结构上不可能**。
 ///
 /// **容量**：完整的历史必然随回合线性增长（记录状态变化本就是 Ω(变化数)）。默认**不设上限**
 /// （无损优先），可用 `config/game.ron` 的 `history.max_milestones` 设上限；一旦截断，丢弃
-/// 的数量与丢到哪一回合都记在 [`Ledger::dropped`]/[`Ledger::dropped_through_round`] 里——
+/// 的数量与丢到哪一回合都记在 [`Milestones::dropped`]/[`Milestones::dropped_through_round`] 里——
 /// **截断是可见的，不静默**。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Ledger {
+pub struct Milestones {
     /// 里程碑记录，最旧 → 最新。
-    pub entries: Vec<LedgerEntry>,
+    pub entries: Vec<MilestoneEntry>,
     /// 因超出上限而被丢弃的记录数（`0` = 无损）。
     #[serde(default)]
     pub dropped: u64,
@@ -761,17 +793,17 @@ pub struct Ledger {
     pub dropped_through_round: u32,
 }
 
-impl Ledger {
+impl Milestones {
     /// 追加一条里程碑。**非里程碑直接忽略**——分层只在 [`GameEvent::salience`] 一处声明。
     pub fn push(&mut self, round: u32, event: GameEvent) {
         if event.salience() != Salience::Milestone {
             return;
         }
-        self.entries.push(LedgerEntry { round, event });
+        self.entries.push(MilestoneEntry { round, event });
     }
 
     /// 按上限裁剪（`cap == 0` = 不设上限，无损）。丢弃**最旧**的记录，并把丢弃量与丢弃
-    /// 到的回合数记进账本自身——下游据此知道「这不是全部历史」。
+    /// 到的回合数记进里程碑自身——下游据此知道「这不是全部历史」。
     pub fn trim(&mut self, cap: usize) {
         if cap == 0 || self.entries.len() <= cap {
             return;
@@ -782,14 +814,14 @@ impl Ledger {
         self.entries.drain(..excess);
     }
 
-    /// 账本是否完整（没有因上限而丢过记录）。
+    /// 里程碑是否完整（没有因上限而丢过记录）。
     pub fn is_complete(&self) -> bool {
         self.dropped == 0
     }
 
     /// 某一实体参与过的全部里程碑（`kind`/`id` 与投影的索引口径一致：**名字即 id**）。
     /// Rust 侧的等价物，供 CLI/测试使用；Python 侧走 `q.history()` 查投影。
-    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&LedgerEntry> {
+    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&MilestoneEntry> {
         self.entries
             .iter()
             .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))

@@ -106,8 +106,8 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 放在回合末：此时事件（战争得失/城夷平/叛乱）与流量（产出/维护/治理）均已就位。
     step_ideology(state, config, &flow);
 
-    // 长存账本收尾：按配置裁剪容量（唯一一处有 config 的地方）。默认 0 = 无损。
-    state.ledger.trim(config.history.max_milestones);
+    // 长存里程碑收尾：按配置裁剪容量（唯一一处有 config 的地方）。默认 0 = 无损。
+    state.milestones.trim(config.history.max_milestones);
 
     // 结回合：把所有派生数据装进一个 `Derived`（flow 中间量 + post 观测/总结）。`post`
     // 由 `round_metrics` 汇总（复用 `balance_picture`/`sanctioned_hegemon`/`faction_power`
@@ -190,16 +190,16 @@ pub(crate) fn ideology_similarity(a: &Ideology, b: &Ideology) -> f64 {
     (1.0 - dist).clamp(0.0, 1.0)
 }
 
-/// Append a [`GameEvent`] to this round's log — **and** to the long-lived milestone ledger.
+/// Append a [`GameEvent`] to this round's log — **and** to the long-lived milestone milestones.
 ///
-/// 这是**发事件的唯一漏斗**，也是 [`State::ledger`] 的唯一写入点：里程碑层由
-/// [`GameEvent::salience`] 单点声明（`Ledger::push` 自己过滤），所以「事件发了、账本没记」
+/// 这是**发事件的唯一漏斗**，也是 [`State::milestones`] 的唯一写入点：里程碑层由
+/// [`GameEvent::salience`] 单点声明（`Milestones::push` 自己过滤），所以「事件发了、里程碑没记」
 /// 在结构上不可能——和 [`kill_ship`]/[`spawn_ship`] 这些状态漏斗是同一套纪律。
 ///
-/// `State::ledger` 不随回合清空（[`advance`] 只清 `State::events`），容量裁剪在 `advance`
+/// `State::milestones` 不随回合清空（[`advance`] 只清 `State::events`），容量裁剪在 `advance`
 /// 收尾时按 `config.history.max_milestones` 统一做（那里才有 config）。
 pub(crate) fn ev(state: &mut State, e: GameEvent) {
-    state.ledger.push(state.round, e.clone());
+    state.milestones.push(state.round, e.clone());
     state.events.push(e);
 }
 
@@ -2970,7 +2970,7 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     let ic = &config.ideology;
     let r = config.mond.radius;
-    // --- 军事信号：完全由**本回合的事件账本**推出，不再回读回合末的 state ---------------
+    // --- 军事信号：完全由**本回合的事件历史**推出，不再回读回合末的 state ---------------
     //
     // 这里以前有**两处「事后回读」**，都是错的——它们都在回合末去读一个回合内已经变过的世界，
     // 于是把「当时发生了什么」记到了「现在还剩什么」的头上：
@@ -3057,7 +3057,7 @@ fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     }
 }
 
-/// 一个回合的事件账本 → 各势力的**军事净信号**（思潮「和平↔军国」的驱动量）。
+/// 一个回合的事件历史 → 各势力的**军事净信号**（思潮「和平↔军国」的驱动量）。
 ///
 /// 纯函数、只吃事件，**完全不看 state**：这是这条规则能被单元测试精确钉住的原因，也是它
 /// 正确的原因——「谁丢了城 / 谁打沉了谁」都是当时记下的事实，事后再去 state 里回读一个已经
@@ -3280,7 +3280,7 @@ mod tests {
         (config, state)
     }
 
-    /// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件账本推出，且**同一现象同分**。
+    /// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件历史推出，且**同一现象同分**。
     ///
     /// 这里逐条钉住旧实现的两个真实缺陷：
     /// 1. **互杀吞掉战功**：旧口径是「同回合最后一条 `Attack` 的势力」，那要 `state.ship(attacker)`
@@ -3292,7 +3292,7 @@ mod tests {
     /// 另外钉住「`CityDefected`（主路）与 `Revolt`（兜底）必须同分」——它们是同一个触发的两条
     /// 分支，旧代码却只给兜底分支扣分。
     #[test]
-    fn military_signal_uses_the_ledger_and_is_branch_agnostic() {
+    fn military_signal_uses_the_milestones_and_is_branch_agnostic() {
         let d = |events: &[GameEvent], fid: &str| military_deltas(events).get(fid).copied().unwrap_or(0.0);
 
         // 1) 互杀：A 的舰打沉 B 的舰，B 的舰同回合也打沉 A 的舰 → **双方各得一分战功**。

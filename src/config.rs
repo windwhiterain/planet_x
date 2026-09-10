@@ -156,9 +156,9 @@ mod tests {
         let (loaded, mut rng_b) = load_checkpoint(&path).expect("checkpoint 必须能读回来");
         assert_eq!(loaded.state.round, a.round);
         assert_eq!(
-            loaded.state.ledger.entries.len(),
-            a.ledger.entries.len(),
-            "长存账本必须随 checkpoint 一起活下来"
+            loaded.state.milestones.entries.len(),
+            a.milestones.entries.len(),
+            "长存里程碑必须随 checkpoint 一起活下来"
         );
         assert_eq!(rng_b.state(), rng_a.state(), "RNG 位置必须原样恢复");
 
@@ -307,9 +307,9 @@ mod tests {
         assert!(serde_json::from_str::<DeathCause>("\"nonsense\"").is_err());
     }
 
-    /// 长存账本：只收里程碑、跨回合不丢、可按实体查史；截断时**如实记账**。
+    /// 长存里程碑：只收里程碑、跨回合不丢、可按实体查史；截断时**如实记账**。
     #[test]
-    fn ledger_collects_milestones_and_reports_truncation() {
+    fn milestones_collects_milestones_and_reports_truncation() {
         let config = load_config();
         let seed = 7u64;
         let mut state = world::default_state(&config, seed);
@@ -317,10 +317,10 @@ mod tests {
         for _ in 0..20 {
             sim::advance(&mut state, &config, &mut rng);
         }
-        let n = state.ledger.entries.len();
-        assert!(n >= 5, "20 回合只攒了 {n} 条里程碑，账本可能没在记");
+        let n = state.milestones.entries.len();
+        assert!(n >= 5, "20 回合只攒了 {n} 条里程碑，里程碑可能没在记");
 
-        // 账本 = 全部里程碑事件（逐回合 events 里的 milestone 之和），一条不多一条不少，
+        // 里程碑 = 全部里程碑事件（逐回合 events 里的 milestone 之和），一条不多一条不少，
         // 且**逐发流水永不入账**。
         let mut expected = 0usize;
         let mut replay = world::default_state(&config, seed);
@@ -333,21 +333,21 @@ mod tests {
                 .filter(|e| e.salience() == crate::model::Salience::Milestone)
                 .count();
         }
-        assert_eq!(n, expected, "账本条数必须等于里程碑事件总数");
+        assert_eq!(n, expected, "里程碑条数必须等于里程碑事件总数");
         assert!(
-            !state.ledger.entries.iter().any(|e| matches!(
+            !state.milestones.entries.iter().any(|e| matches!(
                 e.event,
                 GameEvent::Attack { .. } | GameEvent::Siege { .. }
             )),
-            "逐发流水不该进长存账本"
+            "逐发流水不该进长存里程碑"
         );
         // 回合号必须是真的（跨回合累计，不是「全是最后一回合」）。
         let rounds: std::collections::BTreeSet<u32> =
-            state.ledger.entries.iter().map(|e| e.round).collect();
-        assert!(rounds.len() >= 5, "账本应跨多个回合，实际只覆盖 {rounds:?}");
+            state.milestones.entries.iter().map(|e| e.round).collect();
+        assert!(rounds.len() >= 5, "里程碑应跨多个回合，实际只覆盖 {rounds:?}");
 
         // 按实体查史：随便挑一个出现过的城，它的历史必须非空且都点到它的名。
-        if let Some(entry) = state.ledger.entries.iter().find(|e| {
+        if let Some(entry) = state.milestones.entries.iter().find(|e| {
             e.event.participants().iter().any(|p| p.kind == crate::model::EntityKind::City)
         }) {
             let cid = entry
@@ -357,7 +357,7 @@ mod tests {
                 .find(|p| p.kind == crate::model::EntityKind::City)
                 .unwrap()
                 .id;
-            let hist = state.ledger.history_of(crate::model::EntityKind::City, &cid);
+            let hist = state.milestones.history_of(crate::model::EntityKind::City, &cid);
             assert!(!hist.is_empty());
             assert!(hist.iter().all(|e| e.event.headline().contains(&cid)));
         } else {
@@ -365,7 +365,7 @@ mod tests {
         }
 
         // 截断：**可见**。丢弃量与丢弃到的回合都要记下来。
-        let mut trimmed = state.ledger.clone();
+        let mut trimmed = state.milestones.clone();
         let cap = 10;
         trimmed.trim(cap);
         assert_eq!(trimmed.entries.len(), cap);
@@ -373,7 +373,7 @@ mod tests {
         assert!(!trimmed.is_complete());
         assert!(trimmed.dropped_through_round > 0);
         // 无损配置（0）不动任何东西。
-        let mut intact = state.ledger.clone();
+        let mut intact = state.milestones.clone();
         intact.trim(0);
         assert_eq!(intact.entries.len(), n);
         assert!(intact.is_complete());
@@ -396,7 +396,7 @@ mod tests {
         };
         assert_eq!(back.round, state.round);
         assert_eq!(back.events.len(), state.events.len());
-        assert_eq!(back.ledger.entries.len(), state.ledger.entries.len());
+        assert_eq!(back.milestones.entries.len(), state.milestones.entries.len());
     }
 }
 

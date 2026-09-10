@@ -18,7 +18,7 @@ planet_x --seed 7 --round 12 --index out/
 # out/schema.json       agent-readable projection contract (eager / lazy / columns / read_order)
 # out/meta.json         static rules dictionary (ships/buildings/components/structures/economy/…,
 #                       same source as `planet_x --meta`) — loadable as DataFrames
-# out/idx/events.jsonl     (round, seq, event_id, ...) the sparse event ledger: one row per event,
+# out/idx/events.jsonl     (round, seq, event_id, ...) the sparse event milestones: one row per event,
 #                          normalized participant slots + a human-readable `headline`
 #                          (see "History" below)
 # out/idx/ships.jsonl      (round, ship_id, ...) per-round ship detail (+ effective panel)
@@ -105,9 +105,9 @@ Key ideas:
 > --round K --save ckpt.ron` → re-read → adjust. Checkpoints preserve the RNG, so the run is
 > deterministic and rewindable.
 
-## History: the sparse event ledger
+## History: the sparse event milestones
 
-A trajectory answers *"what is the world now"*. The ledger answers **"why is it like this"** —
+A trajectory answers *"what is the world now"*. The milestones answers **"why is it like this"** —
 which event made this city change hands, which ship killed that one. `idx/events.jsonl` is one row
 per event with **normalized participant slots**, so any entity joins its own history the same way:
 
@@ -134,23 +134,23 @@ q.actors()                          # long-form (round, seq, event_id, kind, id,
 q.changes("city", "冥王星前哨")      # pure dense-diff of the snapshot table (independent cross-check)
 q.audit()                           # completeness self-check: unexplained city changes (want 0)
 
-q.ledger()                          # ★ the milestone ledger: every milestone, one readable line each
-q.ledger(limit=30)                  #   only the last 30 (== CLI `planet_x --ledger 30`)
-q.ledger(entity=("city", "大红斑科学站"))   # ★ that city's life story, in order
-q.storyboard(window=100)            # ★ the ledger compressed to one row per 100 rounds
+q.milestones()                          # ★ the milestone milestones: every milestone, one readable line each
+q.milestones(limit=30)                  #   only the last 30 (== CLI `planet_x --milestones 30`)
+q.milestones(entity=("city", "大红斑科学站"))   # ★ that city's life story, in order
+q.storyboard(window=100)            # ★ the milestones compressed to one row per 100 rounds
 ```
 
-### The milestone ledger — reading a run as a story
+### The milestone milestones — reading a run as a story
 
 Every row carries a **`headline`**: one human-readable sentence, rendered by the Rust side's single
-`GameEvent::headline()` — the *same* sentence CLI `--ledger` and `--digest` print, so the three
+`GameEvent::headline()` — the *same* sentence CLI `--milestones` and `--digest` print, so the three
 surfaces can never disagree. It is deliberately **self-contained**: built only from the event's own
 fields, never by looking the entity up in today's state — an entity in old history may be long dead
 or renamed since, so re-reading the world would produce *today's* answer, not the true one. It is
 also guaranteed to name **every** participant that the query index points at (a Rust guard pins
 this: `headline_names_every_participant`).
 
-`q.ledger()` keeps only `salience == "milestone"` rows (ownership/existence changes, wars,
+`q.milestones()` keeps only `salience == "milestone"` rows (ownership/existence changes, wars,
 coalitions, capital moves, story beats) — per-shot `attack`/`siege` noise never appears, which is
 exactly what makes it readable. Example, one city's whole life:
 
@@ -165,35 +165,35 @@ exactly what makes it readable. Example, one city's whole life:
 
 (headline 只给人读；机器查询仍走 `actor_*` / `target_*` / `data` 这些结构化列。)
 
-The same ledger lives **inside `State`** (`State::ledger`) and therefore **survives checkpoints**:
-`planet_x --start ckpt.ron --ledger 40` answers "what has happened in this save so far" without
+The same milestones lives **inside `State`** (`State::milestones`) and therefore **survives checkpoints**:
+`planet_x --start ckpt.ron --milestones 40` answers "what has happened in this save so far" without
 needing the original `--index` directory. It is written by the single event funnel (`sim::ev`), so a
-milestone event cannot be emitted without entering the ledger. Default is lossless (unlimited); the
-`history.max_milestones` config caps it, and any truncation is reported via `ledger.dropped` /
+milestone event cannot be emitted without entering the milestones. Default is lossless (unlimited); the
+`history.max_milestones` config caps it, and any truncation is reported via `milestones.dropped` /
 `dropped_through_round` instead of happening silently.
 
-> **`q.ledger()` reads the projection, not `State::ledger`** — the two agree only for a *single-segment*
+> **`q.milestones()` reads the projection, not `State::milestones`** — the two agree only for a *single-segment*
 > run. `--index` truncates its directory (`File::create`), so after a segmented run
 > (`--round 30 --save ckpt` then `--start ckpt --round 30`) the second dir covers only its own rounds:
-> measured, `load("seg2").ledger()` = **199** rows (rounds 30→60) while the checkpoint's
-> `State::ledger` = **460** rows (rounds 1→60). To reconstruct the whole save in Python, union and
+> measured, `load("seg2").milestones()` = **199** rows (rounds 30→60) while the checkpoint's
+> `State::milestones` = **460** rows (rounds 1→60). To reconstruct the whole save in Python, union and
 > dedupe on `event_id`:
 >
 > ```python
 > pd.concat([load("seg1").events(), load("seg2").events()]).drop_duplicates(subset=["event_id"])
-> # 671 events / 460 milestones — identical to the checkpoint's State::ledger
+> # 671 events / 460 milestones — identical to the checkpoint's State::milestones
 > ```
 >
 > Forgetting `drop_duplicates` **silently double-counts the seam round** (the two dirs overlap on
 > round 30 with identical `event_id`s — 9 rows here). Per-shot detail (`attack`/`siege`) only exists
 > in the segment that produced it.
 >
-> **Cost of the in-state ledger**: it is the largest part of a checkpoint and grows linearly —
+> **Cost of the in-state milestones**: it is the largest part of a checkpoint and grows linearly —
 > measured 41% of a round-60 checkpoint (43.5 of 106 KB) and **66% at round 200** (202 of 306 KB),
 > ~9 entries/round. An agent that re-`--save`s every round therefore rewrites that history each time.
 
 
-> The ledger is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
+> The milestones is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
 > `raze_city` / `reseed_city` / `found_city` / `overrun_city` / `defect_city`): every ownership or
 > existence change goes through one place that *both* mutates the state and records the event, so a
 > new code path cannot silently skip the history. Two Rust guards — and `q.audit()` — verify it
@@ -202,7 +202,7 @@ milestone event cannot be emitted without entering the ledger. Default is lossle
 
 Why the shape is what it is (each point measured on a real 715-event projection):
 
-| | serialized tagged union (old) | normalized ledger (now) |
+| | serialized tagged union (old) | normalized milestones (now) |
 |---|---|---|
 | mean null ratio | **74.8%** | **4.7%** |
 | variant-specific columns | 23 | **0** |
@@ -216,7 +216,7 @@ Why the shape is what it is (each point measured on a real 715-event projection)
 - **No variant-specific columns.** The per-type payload lives in one `data` object column (one
   column carries one type of value — no column that is sometimes a scalar and sometimes a list,
   which makes `isna()`/`sum()`/`dropna()` unreliable).
-- **Never re-derives game logic**: the ledger records what the simulation *did*
+- **Never re-derives game logic**: the milestones records what the simulation *did*
   (`CityRazed.by_ship` + `CityRazed.owner` = who razed it and who lost it, `ShipDestroyed.by` = the
   killing blow, `ColonyFounded.how`/`prev_owner`, `DeathCause` = combat vs upkeep-shortfall). Facts
   that only exist *at that moment* must be recorded then — e.g. "who lost this city" cannot be

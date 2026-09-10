@@ -355,7 +355,7 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "events" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "事件历史（稀疏账本）：一行一事件，**归一化固定列**——参与方一律走 (actor_kind, actor_id, target_kind, target_id) 主槽位 + `extra` 长表（role/kind/id），因此任意实体（城/舰/势力/天体）都能用同一个查询形状 join 它自己的历史，不需要知道任何事件类型的字段布局。variant 专属载荷统一收进 `data` 一个对象列（一列只承载一种类型：没有\"同时是标量和列表\"的列，也没有 `from`/`to` 这种一列两义的同名列）。\n统计建议：**先按类型取**（`q.events(type='city_razed')` → 该类型的字段是稠密的），全集帧只用于计数/扫描。",
+                "description": "事件历史（稀疏里程碑）：一行一事件，**归一化固定列**——参与方一律走 (actor_kind, actor_id, target_kind, target_id) 主槽位 + `extra` 长表（role/kind/id），因此任意实体（城/舰/势力/天体）都能用同一个查询形状 join 它自己的历史，不需要知道任何事件类型的字段布局。variant 专属载荷统一收进 `data` 一个对象列（一列只承载一种类型：没有\"同时是标量和列表\"的列，也没有 `from`/`to` 这种一列两义的同名列）。\n统计建议：**先按类型取**（`q.events(type='city_razed')` → 该类型的字段是稠密的），全集帧只用于计数/扫描。",
                 "columns": {
                     "round":"integer","seq":"integer","event_id":"string","type":"string","salience":"string",
                     "actor_kind":"string","actor_id":"string","target_kind":"string","target_id":"string",
@@ -369,7 +369,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "target_kind/target_id": "动作直接对象（如被围的**城**、被击毁的**舰**）。",
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",
                     "magnitude": "统一数值强度（伤害；无伤害事件为 0），便于 groupby().sum()。",
-                    "headline": "**人读的一句话**（`GameEvent::headline` 的唯一产物，与 CLI `--ledger`/`--digest` 同源）。它自足（只读事件自身字段，不回查 state），所以对已归档的历史同样成立；`participants()` 列出的每个 id 都逐字出现在这句话里。机器查询仍走 actor_*/target_*/data。",
+                    "headline": "**人读的一句话**（`GameEvent::headline` 的唯一产物，与 CLI `--milestones`/`--digest` 同源）。它自足（只读事件自身字段，不回查 state），所以对已归档的历史同样成立；`participants()` 列出的每个 id 都逐字出现在这句话里。机器查询仍走 actor_*/target_*/data。",
                     "data": "该事件类型的专属载荷（可读名/舰级/死因/忠诚度/复垦方式…），固定只用这一个对象列。",
                 },
             }),
@@ -675,12 +675,12 @@ mod tests {
         assert_eq!(run("a"), run("b"), "same seed must reproduce identical main.jsonl");
     }
 
-    /// The event ledger is deterministic too: same seed → byte-identical `idx/events.jsonl`.
+    /// The event milestones is deterministic too: same seed → byte-identical `idx/events.jsonl`.
     ///
     /// NOTE: `Scratch` 的目录名是「进程 id + tag」，而 cargo 的测试是**同进程多线程并行**的，
     /// 所以 tag 必须在全文件内唯一——与 `projection_is_deterministic` 共用 "a"/"b" 会撞目录。
     #[test]
-    fn event_ledger_is_deterministic() {
+    fn event_milestones_is_deterministic() {
         let cfg = load_config();
         let run = |tag: &str| -> Vec<u8> {
             let mut state = default_state(&cfg, 42);
@@ -689,7 +689,7 @@ mod tests {
             write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
             fs::read(s.0.join("idx/events.jsonl")).unwrap()
         };
-        assert_eq!(run("ledger_a"), run("ledger_b"), "same seed must reproduce identical event ledger");
+        assert_eq!(run("milestones_a"), run("milestones_b"), "same seed must reproduce identical event milestones");
     }
 
     /// **完备性守卫**：密集快照里可见的每一次「城的归属 / 存亡」变化，都必须有一条**命名

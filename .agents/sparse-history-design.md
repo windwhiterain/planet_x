@@ -1,10 +1,10 @@
-# 稀疏历史 / 事件账本（sparse history ledger）
+# 稀疏历史 / 事件历史（sparse history milestones）
 
 > 目标：让「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」和
 > 「**一艘舰被击毁，是被哪艘舰击毁？**」都能在 Python 里一行 join 查出来。
 >
 > 状态：**Stage A / B / C 均已落地**，已并入 `main`（`cb813f2` 为 A+B；C 见 §4c）。
-> 后续/未做见 §5，由账本暴露出的新问题见 §6。
+> 后续/未做见 §5，由里程碑暴露出的新问题见 §6。
 
 ---
 
@@ -176,7 +176,7 @@ q.audit()             # 完备性自查（应为空）
 **关键守卫** `every_city_state_change_is_explained_by_an_event`：投影 120 回合 → 逐回合对比密集
 快照，任何 `(faction_id, razed)` 变化都必须有**命名该城**的事件解释。实测 **145 次变化全部有解释**，
 并断言 `checked >= 5`（**守卫必须非空**：一个什么都没检查的绿灯等于没有守卫）。
-另有 `event_ledger_is_deterministic`（同 seed → 逐字节一致）。
+另有 `event_milestones_is_deterministic`（同 seed → 逐字节一致）。
 
 > 顺手修掉一个测试基建 bug：`Scratch` 目录名 = 「进程 id + tag」，而 cargo 测试**同进程多线程并行**，
 > 两个测试共用 tag `a`/`b` 会撞目录。
@@ -259,19 +259,19 @@ python play/_golden_compare.py play/baseline play/after
 
 ---
 
-## 4c. Stage C 已落地（长存账本 + 可读性 + 三处「事后回读」的根治）
+## 4c. Stage C 已落地（长存里程碑 + 可读性 + 三处「事后回读」的根治）
 
-### 4c.1 长存里程碑账本（解决根因 ②）
+### 4c.1 长存里程碑（解决根因 ②）
 
-`State.ledger: Ledger { entries: Vec<LedgerEntry{round, event}> , dropped, dropped_through_round }`，
+`State.milestones: Milestones { entries: Vec<MilestoneEntry{round, event}> , dropped, dropped_through_round }`，
 只收 `Salience::Milestone`（由 `GameEvent::salience()` 单点声明），**不随回合清空**。
 
-- **写入点是唯一的发事件漏斗 `sim::ev`**（`state.ledger.push(round, e)` 后 `state.events.push(e)`），
-  于是「事件发了、账本没记」在结构上不可能——与 `kill_ship`/`spawn_ship` 是同一套纪律。
+- **写入点是唯一的发事件漏斗 `sim::ev`**（`state.milestones.push(round, e)` 后 `state.events.push(e)`），
+  于是「事件发了、里程碑没记」在结构上不可能——与 `kill_ship`/`spawn_ship` 是同一套纪律。
 - 容量裁剪在 `advance` 收尾按 `config.history.max_milestones` 做（0 = 默认**无损**）；
-  截断时最旧的先丢，并把 `dropped` / `dropped_through_round` 记进账本自身——**截断可见**。
-- `Ledger::history_of(kind, id)` 是 Rust 侧的「某实体全部里程碑」（投影侧对应 `q.ledger(entity=…)`）。
-- `--ledger [N]` 输出 `{round, count, returned, complete, dropped, dropped_through_round, events:[{round, headline, event}]}`。
+  截断时最旧的先丢，并把 `dropped` / `dropped_through_round` 记进里程碑自身——**截断可见**。
+- `Milestones::history_of(kind, id)` 是 Rust 侧的「某实体全部里程碑」（投影侧对应 `q.milestones(entity=…)`）。
+- `--milestones [N]` 输出 `{round, count, returned, complete, dropped, dropped_through_round, events:[{round, headline, event}]}`。
 - `SCHEMA_VERSION` 2 → 3。
 
 ### 4c.2 一句话 headline（单点渲染，三处共用）
@@ -280,10 +280,10 @@ python play/_golden_compare.py play/baseline play/after
 **自足**（只读事件自身字段，不接受 `&State`）、**单行**、且 **`participants()` 列出的每个 id 都
 逐字出现在句子里**（守卫 `headline_names_every_participant` 钉住）。
 
-- 自足是硬要求：账本里的事件是**归档历史**，实体可能早就没了或改了名，回查 state 只会得到
+- 自足是硬要求：里程碑里的事件是**归档历史**，实体可能早就没了或改了名，回查 state 只会得到
   「今天的答案」而不是「当时的答案」。
-- 同一句话出现在三处：CLI `--ledger` / `--digest` 的 `top_events`、投影 `idx/events.jsonl` 的
-  `headline` 列、Python `q.ledger()`。**完备 ≠ 可读**，这是 §15「窗口事件文案」的前置。
+- 同一句话出现在三处：CLI `--milestones` / `--digest` 的 `top_events`、投影 `idx/events.jsonl` 的
+  `headline` 列、Python `q.milestones()`。**完备 ≠ 可读**，这是 §15「窗口事件文案」的前置。
 - 投影的事件行改为**由 `EventRow` 的序列化结果生成**（此前手写 `json!`，加了列就会悄悄漏掉——
   `headline` 就是这么差点漏的）。
 
@@ -301,7 +301,7 @@ python play/_golden_compare.py play/baseline play/after
 势力」这个与本次得失无关的偶然。现在两种活城易主（倒戈 / 难民夺城）与夷平一律同等计分。
 
 信号计算被抽成**纯函数** `military_deltas(&[GameEvent]) -> BTreeMap<FactionId, f64>`——只吃事件、
-完全不看 state，于是这条规则可以被单元测试逐条钉死（`military_signal_uses_the_ledger_and_is_branch_agnostic`）。
+完全不看 state，于是这条规则可以被单元测试逐条钉死（`military_signal_uses_the_milestones_and_is_branch_agnostic`）。
 **`colony_founded` 刻意不计**：新建/复垦是殖民行为，归 `nature_colony` 轴，记进军事轴会让殖民者
 集体漂向军国。
 
@@ -364,7 +364,7 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
 对比 §4b.4 那个「只改凶手一侧」的半修正（seed 1 轮换数 **1**、峰值 0.820、被判锁死）：
 **两处一起修之后反而更健康**。
 
-**账本体积（实测，用于决定默认是否设上限）**：round 60 的 checkpoint 106 KB，其中账本
+**里程碑体积（实测，用于决定默认是否设上限）**：round 60 的 checkpoint 106 KB，其中里程碑
 43.5 KB（**41%**），约 94 字符/条、7.7 条/回合 → 1000 回合约 **0.7 MB**（而实体部分几乎不随
 回合增长）。因此默认**无损**（`max_milestones: 0`），超长归档局可设上限换取有界文件。
 
@@ -378,7 +378,7 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
   剩下的多回合「拆平—复垦」循环见 §6。
 
 ### Stage C 里剩下的（都是**刻意没做**，各带理由）
-- ~~`State.ledger` / `headline()` / `--ledger` / `top_events`~~ → **已做**（§4c.1/4c.2）。
+- ~~`State.milestones` / `headline()` / `--milestones` / `top_events`~~ → **已做**（§4c.1/4c.2）。
 - **salience 权重配置化**：`--digest` 的 `top_events` 目前用**Rust 里声明的** `GameEvent::weight()`
   （穷尽 match）。它是一个**展示排序键**、不是模拟数值，外置成 config 反而会让「新增 variant
   必须声明权重」这条编译期纪律失效。将来真要按剧本调叙事重点，再改成「穷尽 match 读 config」的形式。
@@ -392,7 +392,7 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
 
 ---
 
-## 6. 由账本暴露出来的新问题（值得单独修）
+## 6. 由里程碑暴露出来的新问题（值得单独修）
 
 ### 6.1 僵尸势力的「夺城—倒戈」振荡——**同回合抵消部分已修**
 
@@ -410,7 +410,7 @@ r33 resurgence    星系矿业
 
 **剩下的是多回合循环（未修）**：`reseed_city` 每次都挑该势力**自己最低名的空白城**，于是
 「欧盟拆平 → 联合国复垦 → 欧盟再拆平」可以在同一处反复很多轮。实测 seed 7 的
-`大红斑科学站`（`q.ledger(entity=('city','大红斑科学站'))` 可直接读）：
+`大红斑科学站`（`q.milestones(entity=('city','大红斑科学站'))` 可直接读）：
 
 ```
  r4 city_defected  无国界科学组织→星系矿业   r11 city_razed 中国拆平(联合国) + 中国复垦
@@ -442,11 +442,11 @@ config 里已有 `ceasefire_relation` 字段可以复用）。属机制/平衡�
 ```bash
 cargo run --bin planet_x -- --seed 7 --round 60 --index play/after
 cargo run --bin planet_x -- --seed 7 --round 60 --save play/c60.ron
-cargo run --bin planet_x -- --start play/c60.ron --round 0 --ledger 20   # 账本活过 checkpoint
+cargo run --bin planet_x -- --start play/c60.ron --round 0 --milestones 20   # 里程碑活过 checkpoint
 
 python play/_probe_invariant.py play/after/idx/events.jsonl   # 同回合翻转不变量 + headline 完整性
 cd play/planet_xq && uv sync
-uv run python -c "from planet_xq import load; q=load('../after'); print(q.ledger(limit=10)); print(q.storyboard(50))"
+uv run python -c "from planet_xq import load; q=load('../after'); print(q.milestones(limit=10)); print(q.storyboard(50))"
 
 cargo test --lib                          # 68 passed（含 5 个 config 往返 + 8 个投影守卫）
 cargo test --test longhorizon             # 6 passed / 8 ignored
@@ -456,5 +456,5 @@ cargo test --test longhorizon probe_multipolar -- --ignored --nocapture   # 多�
 未跟踪的临时探针（可删）：`play/_probe_sparse{,2,3}.py`（pandas 稀疏字段实测）、
 `play/_smoke_history.py`、`play/_probe_stageb.py`（舰存亡对账 + 凶手近似的差异率）、
 `play/_golden_compare.py`、`play/_mp_leaders.py`（单极锁死量化）、`play/_probe_invariant.py`
-（同回合翻转不变量）、`play/_ledger.py`（`--ledger` 渲染）、`play/_ron_locate.py`（RON 定位）、
+（同回合翻转不变量）、`play/_ledger.py`（`--milestones` 渲染）、`play/_ron_locate.py`（RON 定位）、
 `play/hist_probe/`、`play/{baseline,after*,mp_*}`。

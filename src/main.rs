@@ -39,7 +39,7 @@
 //!              introspect field names rather than memorising them.
 //! * `--story`  dump the story chronicle (`State::chronicle`) as a JSON array — the
 //!              full narrative arc (round, id, title, body, participants).
-//! * `--ledger [N]` dump the **long-lived milestone ledger** (`State::ledger`) — every
+//! * `--milestones [N]` dump the **long-lived milestone milestones** (`State::milestones`) — every
 //!              milestone event of this run (city flips/razing, ship birth/death, wars,
 //!              coalitions, capital moves, story beats) in order, each with a one-line
 //!              `headline`. Unlike `--story` (narrative prose from the config's story
@@ -109,13 +109,13 @@ Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继�
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
 - `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
 - `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
-- `planet_x --start s240.ron --ledger 40`          # 续玩前先读「这局已经发生过什么」（里程碑账本）\n\
+- `planet_x --start s240.ron --milestones 40`          # 续玩前先读「这局已经发生过什么」（里程碑）\n\
 - `planet_x --traj 240`                            # 一键拿故事封包（含 `.story` 编年史）\n\
 - 先 `--schema` 查视图字段、`--control-schema` 查 --apply 能写啥、`--meta` 查规则；分析用\n\
   `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
 --round N 输出 N+1 行 JSON（回合 0 + N 回合）；--traj N 输出一个自包含 story pack；\n\
---meta/--schema/--control-schema/--story/--ledger [N]/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
+--meta/--schema/--control-schema/--story/--milestones [N]/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -157,12 +157,12 @@ struct Cli {
     #[arg(long)]
     story: bool,
 
-    /// 输出**长存里程碑账本**（`State::ledger`）：本局发生过的里程碑事件（城易主/夷平/舰
+    /// 输出**长存里程碑**（`State::milestones`）：本局发生过的里程碑事件（城易主/夷平/舰
     /// 存亡/开战停战/结盟/迁都/剧情），按发生顺序，带一句话标题。与 `--story` 的区别：
-    /// 账本是**机械历史**（覆盖全部实体，随 checkpoint 存活），编年史是**叙事文案**
+    /// 里程碑是**机械历史**（覆盖全部实体，随 checkpoint 存活），编年史是**叙事文案**
     /// （只有 config 里写的那些剧情节拍）。可选参数 N = 只出最近 N 条（缺省 = 全部）。
     #[arg(long, num_args = 0..=1, value_name = "N")]
-    ledger: Option<Option<u32>>,
+    milestones: Option<Option<u32>>,
 
     /// 输出可编辑控制面（control + scope）JSON——agent 写 --apply diff 的模板。
     #[arg(long)]
@@ -245,8 +245,8 @@ fn main() {
         emit(&agent::story_value(&state).to_string());
         return;
     }
-    if let Some(tail) = cli.ledger {
-        emit(&ledger_value(&state, tail).to_string());
+    if let Some(tail) = cli.milestones {
+        emit(&milestone_value(&state, tail).to_string());
         return;
     }
     if cli.control {
@@ -402,12 +402,12 @@ fn run_trajectory(
     );
 }
 
-/// 长存账本（[`State::ledger`]）的可读视图：每条里程碑 = `{round, headline, event}`。
+/// 长存里程碑（[`State::milestones`]）的可读视图：每条里程碑 = `{round, headline, event}`。
 ///
-/// `tail = Some(n)` 只出最近 `n` 条。`complete/dropped/dropped_through_round` 直接来自账本
+/// `tail = Some(n)` 只出最近 `n` 条。`complete/dropped/dropped_through_round` 直接来自里程碑
 /// 自身——**截断过的历史会明说自己不完整**，读的人不会把它误当成全部。
-fn ledger_value(state: &State, tail: Option<u32>) -> serde_json::Value {
-    let all = &state.ledger.entries;
+fn milestone_value(state: &State, tail: Option<u32>) -> serde_json::Value {
+    let all = &state.milestones.entries;
     let start = match tail {
         Some(n) => all.len().saturating_sub(n as usize),
         None => 0,
@@ -420,9 +420,9 @@ fn ledger_value(state: &State, tail: Option<u32>) -> serde_json::Value {
         "round": state.round,
         "count": all.len(),
         "returned": events.len(),
-        "complete": state.ledger.is_complete(),
-        "dropped": state.ledger.dropped,
-        "dropped_through_round": state.ledger.dropped_through_round,
+        "complete": state.milestones.is_complete(),
+        "dropped": state.milestones.dropped,
+        "dropped_through_round": state.milestones.dropped_through_round,
         "events": events,
     })
 }

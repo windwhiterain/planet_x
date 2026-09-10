@@ -983,7 +983,7 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   更细的高频粒面 + 边缘变暗（limb darkening）来提升真实感。
 ---
 
-## 23. 稀疏历史 / 事件账本（sparse history ledger） — `[x]`（Stage A + B + C 全部落地）
+## 23. 稀疏历史 / 事件历史（sparse history milestones） — `[x]`（Stage A + B + C 全部落地）
 
 > 起因：轨迹答不出「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」
 > 与「**一艘舰被击毁，是被哪艘舰击毁？**」。完整设计 + 实测见
@@ -1020,7 +1020,7 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   所以稀疏字段统计是 `groupby().size()` 一行的事（宽表 64% NaN 的坑全部规避）。
 - `[x]` **完备性守卫** `every_city_state_change_is_explained_by_an_event`：投影 120 回合，逐回合对比
   密集快照，任何 `(faction_id, razed)` 变化都必须有命名该城的事件解释（实测 **145 次全有解释**），
-  并断言 `checked >= 5`（**守卫必须非空**）。另 `event_ledger_is_deterministic`。
+  并断言 `checked >= 5`（**守卫必须非空**）。另 `event_milestones_is_deterministic`。
   `q.audit()` 把同一不变量暴露给 agent。
 - `[x]` `SCHEMA_VERSION` 1→2（`GameEvent` 是 `State` 的一部分）；`main.rs::event_counts` 删掉
   手抄的 variant→label `match`，改走单一权威 `kind()`。
@@ -1043,7 +1043,7 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   一上线就发现 `step_resurgence` 的种子舰**完全不发造舰事件**（实测 63 次出生里 **46 次无解释**），
   与「城易主查不到原因」完全同源，只是藏在舰那一侧；修法即 `spawn_ship` 漏斗。
   实测 120 回合：**242 次舰死亡 / 249 次舰出生 / 145 次城变化，全部有事件解释**；两条守卫都断言「检查数 ≥ 5」。
-- `[x]` `q.changes(kind, id)`：纯 dense-diff 视图（与事件账本互证；舰还会显式给出「消失的那一回合」）。
+- `[x]` `q.changes(kind, id)`：纯 dense-diff 视图（与事件历史互证；舰还会显式给出「消失的那一回合」）。
 - `[x]` **行为中性的证明方法（可复用）**：改 `sim.rs` 后不靠「跑一遍看着对」，而是 **golden-file 对比**——
   `python play/_golden_compare.py <baseline> <after>`：`idx/{cities,ships,factions,bodies,settlements}.jsonl` +
   `meta.json` 必须**逐字节一致**，`main.jsonl` 去掉 `event_ids` 后必须一致，`idx/events.jsonl` 允许不同。
@@ -1055,22 +1055,22 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   平衡调整」**——先问「同一段逻辑里是不是还有别的缺陷没修」。半个修正的症状和平衡回归一模一样。
 
 **已落地（Stage C，`[x]`，见 `.agents/sparse-history-design.md` §4c）**：
-- `[x]` **`State.ledger` 长存里程碑层**（`src/model/event.rs` 的 `Ledger`/`LedgerEntry`，
+- `[x]` **`State.milestones` 长存里程碑层**（`src/model/event.rs` 的 `Milestones`/`MilestoneEntry`，
   `SCHEMA_VERSION` 2→3）：只收 `Salience::Milestone`（由 `salience()` 单点声明），**不随回合清空**
-  → 解决根因 ②。写入点是唯一的发事件漏斗 `sim::ev` → 「事件发了、账本没记」结构上不可能。
-  `--ledger [N]` 输出（带 `complete/dropped/dropped_through_round`，截断可见）；
+  → 解决根因 ②。写入点是唯一的发事件漏斗 `sim::ev` → 「事件发了、里程碑没记」结构上不可能。
+  `--milestones [N]` 输出（带 `complete/dropped/dropped_through_round`，截断可见）；
   容量由 `config/game.ron` 的 `history.max_milestones` 控制（**默认 0 = 无损**）。
-  **实测体积**：round 60 的 checkpoint 106 KB，账本占 41%（94 字符/条 × 7.7 条/回合）
+  **实测体积**：round 60 的 checkpoint 106 KB，里程碑占 41%（94 字符/条 × 7.7 条/回合）
   → 1000 回合约 0.7 MB；超长归档局可设上限。
 - `[x]` **一句话 headline**：`GameEvent::headline()`（穷尽 match）**自足**（只读事件自身字段，
   不回查 state——归档历史里的实体可能早就没了）、**单行**，且 `participants()` 的每个 id
   都**逐字出现**在句子里（守卫 `headline_names_every_participant`）。同一句话出现在
-  CLI `--ledger`/`--digest top_events`、投影 `idx/events.jsonl` 的 `headline` 列、Python `q.ledger()`。
+  CLI `--milestones`/`--digest top_events`、投影 `idx/events.jsonl` 的 `headline` 列、Python `q.milestones()`。
 - `[x]` **投影事件行改由 `EventRow` 序列化生成**（此前手写 `json!`，加列会悄悄漏——`headline` 就这么差点漏掉）。
 - `[x]` **`--digest` 加窗口 `top_events`**：窗口内里程碑按 `GameEvent::weight()`（穷尽 match 的
   **展示排序键**，刻意不外置 config——外置会让「新增 variant 必须声明权重」这条编译期纪律失效）
   取最重 24 条，**展示按时间序**，并如实给出 `total/shown/skipped`。
-- `[x]` Python kit：`q.ledger(since/until/limit/entity)`、`q.storyboard(window)`；
+- `[x]` Python kit：`q.milestones(since/until/limit/entity)`、`q.storyboard(window)`；
   `q.events()` 多一列 `headline`。
 - `[x]` **三处「事后回读」的根治**（`step_ideology`）：① 凶手用权威 `by`（互杀不再吞掉战功）；
   ② **新增 `CityRazed.owner`**（失城方只有夷平那一刻才知道——同回合复垦会把 `faction_id` 改成新主）；
@@ -1100,11 +1100,11 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 - `[ ]` 投影体积：`idx/events.jsonl` 比原内联事件大约多 50%（列更多，现在还多 `headline`）。
   3000 回合量级可考虑 parquet。
 
-**账本暴露出的新问题（`[ ]` 值得单独修）**：
+**里程碑暴露出的新问题（`[ ]` 值得单独修）**：
 - `[~]` **僵尸势力的「夺城—倒戈」振荡**：**同回合自相抵消那部分已修**（41 → 20 条 `city_overrun`，
   见上）。**剩下的是多回合循环**：`reseed_city` 每次都挑该势力**自己最低名的空白城**，于是
   「欧盟拆平 → 联合国复垦 → 欧盟再拆平」在同一处反复（seed 7 的 `大红斑科学站`：
-  `q.ledger(entity=('city','大红斑科学站'))` 可直接读整条链）。这不是净零动作（每次复垦都真的重建
+  `q.milestones(entity=('city','大红斑科学站'))` 可直接读整条链）。这不是净零动作（每次复垦都真的重建
   人口/建筑），而是**反僵尸机制**与**舰炮拆城**互相咬住。改法候选：① 复垦锚点排除「最近 N 回合内
   被拆平过」的城；② `resurgence` 加冷却；③ 重建优先选**别人**的废墟（现在只挑自己的 diaspora claim）。
   **注意**会影响 `zombie_factions_are_bounded`/`world_is_multipolar`，需长局验证。

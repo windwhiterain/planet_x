@@ -12,7 +12,7 @@ Directory layout written by ``planet_x --round N --index DIR``:
                          market.resource_value, economy/combat/diplomacy/… tuning) — same source
                          as `--meta`
     DIR/main.jsonl       one lean fact row per round
-    DIR/idx/events.jsonl (round, seq, event_id, ...)  the **sparse event ledger**: one row per
+    DIR/idx/events.jsonl (round, seq, event_id, ...)  the **sparse event milestones**: one row per
                                                       event, normalized participant slots
     DIR/idx/ships.jsonl  (round, ship_id, ...)        per-round ship detail (+ effective panel)
     DIR/idx/cities.jsonl (round, city_id, ...)        per-round city detail (+ buildings list)
@@ -38,7 +38,7 @@ Typical use::
     q.yearly_avg("metrics.cities")              # 年均 (round = 1 month, 12/年)
     q.decadal_avg("metrics.factions.中国.market_value")  # 十年均 (120 月)
 
-History / event queries (the sparse ledger)::
+History / event queries (the sparse milestones)::
 
     q.events(round=47)                  # every event of one round (long form: one row/event)
     q.events(type="city_razed")         # ONE type -> its payload is flattened into dense columns
@@ -49,18 +49,18 @@ History / event queries (the sparse ledger)::
     q.fates(kind="ship")                # every ship death in the window, with cause + killer
     q.actors()                          # long-form (round, seq, kind, id, role) participant index
     q.changes("city", "冥王星前哨")       # pure dense-diff of the snapshot table (cross-check)
-    q.ledger()                          # ★ 里程碑账本: every milestone, one readable line each
-    q.ledger(limit=30)                  #   the last 30 (same as CLI `--ledger 30`)
-    q.storyboard(window=100)            # ★ 故事板: ledger compressed to one row per 100 rounds
+    q.milestones()                          # ★ 里程碑: every milestone, one readable line each
+    q.milestones(limit=30)                  #   the last 30 (same as CLI `--milestones 30`)
+    q.storyboard(window=100)            # ★ 故事板: milestones compressed to one row per 100 rounds
     q.audit()                           # completeness self-check: unexplained city changes (want 0)
 
 Every event row also carries a **`headline`** column: one human-readable sentence rendered by the
-Rust side's single ``GameEvent::headline`` (the same sentence CLI ``--ledger`` / ``--digest`` show).
+Rust side's single ``GameEvent::headline`` (the same sentence CLI ``--milestones`` / ``--digest`` show).
 It is *self-contained* (built only from the event's own fields, never by looking the entity up in
 today's state) so it stays true for archived history — an entity may be long dead or renamed since.
 Machine queries should still use ``actor_*``/``target_*``/``data``; the headline is for reading.
 
-Design notes for the ledger (each backed by measurement):
+Design notes for the milestones (each backed by measurement):
 
 * It is a **long table**: "missing" means *no such row*, not NaN. So sparse-field statistics
   (counts / per-window rates / first-last / fates) are one-liners: ``groupby(...).size()``.
@@ -316,7 +316,7 @@ class PlanetXQ:
             return exploded.merge(detail, on=["round", key], how="inner")
         return exploded.merge(detail, on=key, how="inner")
 
-    # --- 事件历史（稀疏账本）----------------------------------------------------
+    # --- 事件历史（稀疏里程碑）----------------------------------------------------
     # 设计要点（每条都有实测依据）：
     #   * 事件表是**长表**：一行一事件，「缺失」表现为「没有那一行」，不是 NaN。所以稀疏
     #     字段的统计（计数 / 窗口率 / 首末次 / 结局）都是 groupby().size() 一行的事。
@@ -356,7 +356,7 @@ class PlanetXQ:
         entity: tuple[str, str] | None = None,
         flatten: bool = True,
     ) -> pd.DataFrame:
-        """稀疏事件账本（一行一事件）。
+        """稀疏事件历史（一行一事件）。
 
         `type` 取**单个**类型（且 `flatten=True`，默认）时，把该类型的专属载荷 `data` 摊成
         普通列 → 一个**稠密**帧。这是推荐的读法。
@@ -387,25 +387,25 @@ class PlanetXQ:
             df = self._flatten_data(df)
         return df
 
-    def ledger(
+    def milestones(
         self,
         since: int | None = None,
         until: int | None = None,
         limit: int | None = None,
         entity: tuple[str, str] | None = None,
     ) -> pd.DataFrame:
-        """**里程碑账本视图**：本**投影目录**里的全部里程碑事件，按发生顺序。
+        """**里程碑视图**：本**投影目录**里的全部里程碑事件，按发生顺序。
 
         只保留 `salience == "milestone"` 的行（城易主/夷平/舰存亡/开战停战/结盟/迁都/剧情），
         逐发流水（`attack`/`siege`）永不出现——这正是它可读的原因。
 
         列：`round`、`headline`（人读的一句话，由 Rust 侧唯一的 `GameEvent::headline` 渲染，
-        与 CLI `--ledger`/`--digest` 说的一模一样）、`type`，以及 `actor_*`/`target_*`/`extra`
+        与 CLI `--milestones`/`--digest` 说的一模一样）、`type`，以及 `actor_*`/`target_*`/`extra`
         这些**机器可查**的结构化槽位（标题只是给人看的，查询请用这些列）。
 
-        `limit=N` 只保留**最后 N 条**（与 CLI `--ledger N` 同一个语义）。
+        `limit=N` 只保留**最后 N 条**（与 CLI `--milestones N` 同一个语义）。
 
-        ⚠ **它读的是投影，不是 `State::ledger`**，两者只在**单段运行**（一次 `--index` 跑完）
+        ⚠ **它读的是投影，不是 `State::milestones`**，两者只在**单段运行**（一次 `--index` 跑完）
         下内容一致。`--index` 每跑一次都会**截断**目录（`File::create`），所以**分段续玩**时：
 
         ```
@@ -413,11 +413,11 @@ class PlanetXQ:
         planet_x --start ckpt --round 30 --index seg2/ --save ckpt # seg2 = 回合 30..60（含重复的 r30）
         ```
 
-        * `load("seg2").ledger()` 只有 **199** 条（回合 30→60）——而 ckpt 里 `State::ledger` 有
+        * `load("seg2").milestones()` 只有 **199** 条（回合 30→60）——而 ckpt 里 `State::milestones` 有
           **460** 条（回合 1→60）。**跨段连续的历史此刻只能在 CLI 侧拿**
-          （`planet_x --start ckpt --ledger`），Python 侧要自己拼：
+          （`planet_x --start ckpt --milestones`），Python 侧要自己拼：
           `pd.concat([a.events(), b.events()]).drop_duplicates(subset=['event_id'])`
-          ——拼完是 671 条 / 460 里程碑，与 ckpt 的 `State::ledger` **逐条相等**；
+          ——拼完是 671 条 / 460 里程碑，与 ckpt 的 `State::milestones` **逐条相等**；
           **忘了去重会静默多算 9 条**（两个目录在衔接回合上重叠，`event_id` 完全相同）。
         * 逐发细节（`attack`/`siege`）只存在于那一段自己的投影里；拼接后早期回合只有里程碑。
         """
@@ -433,12 +433,12 @@ class PlanetXQ:
         return out.reset_index(drop=True)
 
     def storyboard(self, window: int = 50) -> pd.DataFrame:
-        """**故事板**：把里程碑账本压成「每 `window` 回合一段」的可读摘要。
+        """**故事板**：把里程碑压成「每 `window` 回合一段」的可读摘要。
 
         返回 `round_from`/`round_to`/`events`（该段的全部标题，换行连接）/`count`。超长轨迹
         （几千回合）里，这是比逐回合快照省几百倍上下文的读法——与 CLI 的 `--digest K` 同构。
         """
-        led = self.ledger()
+        led = self.milestones()
         if led.empty:
             return led
         w = max(1, int(window))
@@ -600,7 +600,7 @@ class PlanetXQ:
     def changes(self, kind: str, entity_id: str) -> pd.DataFrame:
         """**纯 dense-diff 视图**：某个实体在密集表里的关键列**发生变化的那些回合**。
 
-        与事件账本互证——这是「不靠事件、只看快照差异」的独立口径（:meth:`audit` 就是两者的
+        与事件历史互证——这是「不靠事件、只看快照差异」的独立口径（:meth:`audit` 就是两者的
         差集）。城默认比较 `faction_id`/`razed`/`population`；舰比较 `faction_id`/`hull`/`class`。
 
         **它单独用是不够的**：dense-diff **因果盲**（说不出被谁击毁 / 被谁夷平），而且
@@ -775,19 +775,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"# join('ships', round={r}): {joined.shape}")
         cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "x", "y") if c in joined.columns]
         print(joined[cols].head(5).to_string(index=False))
-    # The sparse event ledger + its completeness self-check (empty = all history is explained).
+    # The sparse event milestones + its completeness self-check (empty = all history is explained).
     try:
         ev = q.events()
-        print(f"# events ledger: {ev.shape}; types={dict(ev['type'].value_counts())}")
+        print(f"# events milestones: {ev.shape}; types={dict(ev['type'].value_counts())}")
         print(f"# audit() 未解释的城状态变化: {len(q.audit())} 条（应为 0）")
-        led = q.ledger()
-        print(f"# 里程碑账本: {led.shape}")
+        led = q.milestones()
+        print(f"# 里程碑: {led.shape}")
         for line in led.tail(8).itertuples():
             print(f"#   r{line.round}  {line.headline}")
     except KeyError as exc:
-        print(f"# (no event ledger in this projection: {exc})")
+        print(f"# (no event milestones in this projection: {exc})")
     except AttributeError as exc:
-        print(f"# (ledger helpers unavailable: {exc})")
+        print(f"# (milestones helpers unavailable: {exc})")
     return 0
 
 
