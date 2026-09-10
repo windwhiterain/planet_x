@@ -276,7 +276,9 @@ effective = clamp(distance + entertainment
    `HaulStep` 的定义因此**搬进了 `model`**（`model/haul.rs`）：`model` 不许依赖 `sim`，
    而它同时是引擎内部类型与读面类型 ⇒ 定义只留一份（`sim::haul` 只做转出）。
 
-**体积账**（同口径 `--seed 7 --round 30`，31 行，逐子树实测；键名与分隔符都算）：
+**体积账**（同口径 `--seed 7 --round 30`，31 行，逐子树实测；键名与分隔符都算。
+复算脚本 `C:\resource\px_b3_bytes.py` **不跨版本比总额**，只量 B3 自己那几个子树——合并后的
+轨迹与 B2 那棵树不同，跨版本比总额会把轨迹差异混进来）：
 
 | 项 | B/行 | 条目/行 |
 | --- | --- | --- |
