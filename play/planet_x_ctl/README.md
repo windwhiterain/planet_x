@@ -292,10 +292,19 @@ guessing. They are listed because they are cheap to close and expensive to work 
    docs call "read face = write face" made `0.125` come back as `0.13` — a silent write nobody asked
    for. Measured before removing it: **0 of 470** numeric leaves in a real round-120 control surface
    would have changed under that rounding, i.e. it bought no token savings and only carried risk.
-5. **`ship_kiting` / `ship_doctrine` are not live layers yet** (`control-live-layers.md` §3/§4.1):
-   they are bare per-ship fields with no tri-state and no faction-level default, and writing them
-   produces no `NOTE_APPLY_TOOKOVER` either — so "all battleships go 贴脸" is O(N) leaves that new
-   ships do not inherit, and the kit has no `mode` to require.
+5. **~~`ship_kiting` / `ship_doctrine` are not live layers yet~~** — **fixed upstream**
+   (`control-live-layers.md` §4.1): both are tri-state leaves with a faction-level default
+   (`default_kiting` / `default_doctrine`), so "the whole fleet goes 贴脸" is **one leaf** that new
+   ships inherit too. This kit now lists those two kinds in `LEAF_KINDS` (leaving them out made them
+   vanish from `surface()` silently — the §8.1 lesson: the contract has two ends, emitter *and*
+   consumer) and `set_kiting` / `set_doctrine` demand an explicit ownership (`mode=` or
+   `take_over=True`) like every other value write.
+   ⚠ One engine-side trap this exposed: creating a **two-axis** leaf (`default_doctrine` /
+   `ship_doctrine`) from a single-axis patch initializes the *other* axis to `0.0`
+   (`Control::inherit(ShipDoctrine::default())`, `src/control.rs:770`), not to the ship's record value
+   — a fleet-wide change that looks perfectly normal afterwards. The kit refuses that patch
+   (`_require_both_axes`); whether the *engine* should instead seed the missing axis is an open
+   question recorded in `control-live-layers.md`.
 6. **`(city, building)` is a per-city `u32` index.** Correct and documented, but it forces every
    recipe to be a same-round transform and makes any cross-round diff silently wrong. A stable
    building identity (or an `--index` column naming it) would remove a whole class of footguns.

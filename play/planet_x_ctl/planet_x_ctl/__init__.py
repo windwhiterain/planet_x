@@ -17,7 +17,11 @@ Tri-state ownership (``.agents/notes/control-live-layers.md``)
 Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing) / ``Auto`` (the
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
 ``leaf → faction default_ship_order → faction scope → global scope``; the most specific layer that
-is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``.
+is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The two **style** axes have the
+same shape with their own faction-level default: ``ship_doctrine → default_doctrine`` and
+``ship_kiting → default_kiting``; ``default_doctrine`` speaks **two axes in one leaf** (``temper`` +
+``lone_wolf``), which is why this kit refuses to create it from a single-axis patch (see
+``Surface._require_both_axes``).
 
 **写值即接管 (writing a value takes over).** In a diff, writing a leaf's ``value``/``behavior``
 while omitting ``mode`` silently turns that leaf into ``Player`` (the engine reports it on stderr as
@@ -95,6 +99,12 @@ MODES = (INHERIT, AUTO, PLAYER)
 LEAF_KINDS: dict[str, tuple[str, ...]] = {
     "capital": (),
     "default_ship_order": (),
+    # 势力级默认风格两片（`control-live-layers.md` §4.1）：与 `default_ship_order` 同形，
+    # 只是各有自己的轴——`default_doctrine` 是 temper/lone_wolf，`default_kiting` 是 kiting。
+    # ⚠ 少了这两项时**不会报错**，只会静静地从 surface() 里消失（读面有、这里看不见）——
+    # 那正是 `engine-data-plane.md` §8.1 的教训：契约是发射端 + 消费者两处。
+    "default_doctrine": (),
+    "default_kiting": (),
     "ship_orders": ("ship",),
     "ship_doctrine": ("ship",),
     "ship_kiting": ("ship",),
@@ -108,14 +118,17 @@ LEAF_KINDS: dict[str, tuple[str, ...]] = {
 _KIND_ORDER = tuple(LEAF_KINDS)
 _KEY_FIELDS = frozenset({"ship", "city", "building", "resource"})
 #: Which read-face field carries a leaf's **value**. Three kinds spell it something other than
-#: ``value``: `ShipOrderPatch`/`DefaultShipOrder` write ``behavior``, and `ShipKitingPatch` writes
-#: ``kiting``. `ShipDoctrinePatch` has two axes at once (``temper`` / ``lone_wolf``).
+#: ``value``: `ShipOrderPatch`/`DefaultShipOrder` write ``behavior``, `ShipKitingPatch`/`DefaultKiting`
+#: write ``kiting``. `ShipDoctrinePatch`/`DefaultDoctrine` have two axes at once
+#: (``temper`` / ``lone_wolf``).
 _VALUE_FIELD = {"ship_orders": "behavior", "default_ship_order": "behavior",
-                "ship_kiting": "kiting", "capital": "value"}
+                "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value"}
+
+_TWO_AXIS_KINDS = ("ship_doctrine", "default_doctrine")
 
 
 def _leaf_value(kind: str, entry: Mapping) -> Any:
-    if kind == "ship_doctrine":
+    if kind in _TWO_AXIS_KINDS:
         return {k: entry.get(k) for k in ("temper", "lone_wolf")}
     return entry.get(_VALUE_FIELD.get(kind, "value"))
 
@@ -802,6 +815,27 @@ class Surface:
             )
         return None
 
+    def _require_both_axes(self, faction: str, kind: str, key: Any,
+                           temper: float | None, lone_wolf: float | None, what: str) -> None:
+        """Refuse to create a **two-axis** leaf from a single-axis patch.
+
+        The engine speaks two axes in one leaf (``temper`` + ``lone_wolf``) and, when the leaf does
+        **not exist yet**, creates it from ``ShipDoctrine::default()`` — i.e. the axis you did *not*
+        mention becomes ``0.0``. That is a silent fleet-wide change (and 0.0 is a meaningful,
+        "textbook" temperament, so nothing looks wrong afterwards). The kit therefore demands both
+        axes on a *new* leaf, and stays permissive once the leaf exists (there "缺省轴保留现值").
+        """
+        if temper is not None and lone_wolf is not None:
+            return
+        if self.leaf(faction, kind, key).exists:
+            return
+        raise ValueError(
+            f"{what}：`{faction}.{kind}` 这片叶**还不存在**，而引擎新建叶片用的是 "
+            f"`ShipDoctrine::default()` —— 你只写了**一条轴**，另一条会被初始化成 0.0"
+            f"（不是「保留出厂值」）。0.0 是个正常取值，事后看不出问题，所以这里直接拒绝："
+            f"两条轴一起给（temper=…, lone_wolf=…）。"
+        )
+
     # -- mutations: ship ownership & behavior ------------------------------------------
 
     def set_mode(self, selection: Any, mode: str) -> "Surface":
@@ -855,23 +889,83 @@ class Surface:
         self._add(faction, "default_ship_order", (), patch)
         return self
 
-    def set_kiting(self, selection: Any, kiting: float) -> "Surface":
-        """风筝↔贴脸姿态, clamped to ``[-1, 1]``.
+    def set_default_kiting(self, faction: str, kiting: float | None = None, *,
+                           mode: str | None = None, take_over: bool = False) -> "Surface":
+        """势力级默认风筝姿态——**一片叶**管住全舰队里「没有自己表态」的舰（含新下水的）。
 
-        ⚠ **Engine gap**: ``ship_kiting`` is still a bare per-ship field — no tri-state, no faction
-        default, and the apply path writes it directly (no ``NOTE_APPLY_TOOKOVER`` either). So this
-        helper has no ``mode`` to require; see ``control-live-layers.md`` §3/§4.1.
+        与 :meth:`set_default_ship_order` 同形（同一层、同样的三态）。只写值必须明说归属：
+        要么 ``mode=``，要么 ``take_over=True``（引擎会回 ``NOTE_APPLY_TOOKOVER``）；
+        只写 ``mode`` 是合法的（值不动）——那正是"整支舰队交还/收回"的用法，一片叶顶 N 片。
+        """
+        if kiting is None and mode is None:
+            raise ValueError("set_default_kiting 至少要给 kiting= 或 mode= 之一")
+        patch: dict = {}
+        if kiting is not None:
+            patch["kiting"] = _clamp(kiting)
+        if mode is not None:
+            patch["mode"] = _check_mode(mode)
+        else:
+            m = self._mode_or_takeover(None, take_over, f"set_default_kiting({faction!r})")
+            if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
+                patch["mode"] = m
+        self._add(faction, "default_kiting", (), patch)
+        return self
+
+    def set_default_doctrine(self, faction: str, temper: float | None = None,
+                             lone_wolf: float | None = None, *,
+                             mode: str | None = None, take_over: bool = False) -> "Surface":
+        """势力级默认**行为风格**（``temper`` / ``lone_wolf``，各自 clamp 到 ``[-1, 1]``）。
+
+        与 :meth:`set_default_kiting` 同形。想「让全势力的舰都更保守」——改这一片叶就够了，
+        不必逐舰点名（叶沉默的舰，包括还没造出来的，都跟着变）。
+        """
+        if temper is None and lone_wolf is None and mode is None:
+            raise ValueError("set_default_doctrine 至少要给 temper= / lone_wolf= / mode= 之一")
+        patch: dict = {}
+        if temper is not None:
+            patch["temper"] = _clamp(temper)
+        if lone_wolf is not None:
+            patch["lone_wolf"] = _clamp(lone_wolf)
+        if patch:
+            self._require_both_axes(faction, "default_doctrine", None, temper, lone_wolf,
+                                    f"set_default_doctrine({faction!r})")
+        if mode is not None:
+            patch["mode"] = _check_mode(mode)
+        elif patch:
+            m = self._mode_or_takeover(None, take_over, f"set_default_doctrine({faction!r})")
+            if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
+                patch["mode"] = m
+        self._add(faction, "default_doctrine", (), patch)
+        return self
+
+    def set_kiting(self, selection: Any, kiting: float, *,
+                   mode: str | None = None, take_over: bool = False) -> "Surface":
+        """**逐舰**风筝↔贴脸姿态（clamp 到 ``[-1, 1]``）。
+
+        引擎侧它现在是**活层**（三态叶 + 势力级默认，见 ``default_kiting``）：写值必须明说归属
+        （``mode=`` 或 ``take_over=True``），否则你是在**静默接管**这艘舰的姿态——那正是
+        这个套件存在的意义所在。只想让"叶沉默的舰"跟着变，就用
+        :meth:`set_default_kiting`（一片叶，新舰自动继承）。
         """
         k = _clamp(kiting)
         for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "ship_kiting", (ship,), {"ship": ship, "kiting": k})
+            patch = {"ship": ship, "kiting": k}
+            if mode is not None:
+                patch["mode"] = _check_mode(mode)
+            else:
+                m = self._mode_or_takeover(None, take_over, f"set_kiting({ship!r})")
+                if m is not None:  # pragma: no cover
+                    patch["mode"] = m
+            self._add(faction, "ship_kiting", (ship,), patch)
         return self
 
     def set_doctrine(self, selection: Any, temper: float | None = None,
-                     lone_wolf: float | None = None) -> "Surface":
-        """行为风格 (``temper`` / ``lone_wolf``), each clamped to ``[-1, 1]``.
+                     lone_wolf: float | None = None, *,
+                     mode: str | None = None, take_over: bool = False) -> "Surface":
+        """**逐舰**行为风格（``temper`` / ``lone_wolf``，各自 clamp 到 ``[-1, 1]``）。
 
-        ⚠ Same engine gap as :meth:`set_kiting` — doctrine is not a live layer yet.
+        与 :meth:`set_kiting` 同一套归属纪律（引擎侧已是活层）；想改全舰队就用
+        :meth:`set_default_doctrine`。
         """
         if temper is None and lone_wolf is None:
             raise ValueError("set_doctrine 至少要给 temper= 或 lone_wolf= 之一")
@@ -881,6 +975,14 @@ class Surface:
                 patch["temper"] = _clamp(temper)
             if lone_wolf is not None:
                 patch["lone_wolf"] = _clamp(lone_wolf)
+            self._require_both_axes(faction, "ship_doctrine", (ship,), temper, lone_wolf,
+                                    f"set_doctrine({ship!r})")
+            if mode is not None:
+                patch["mode"] = _check_mode(mode)
+            else:
+                m = self._mode_or_takeover(None, take_over, f"set_doctrine({ship!r})")
+                if m is not None:  # pragma: no cover
+                    patch["mode"] = m
             self._add(faction, "ship_doctrine", (ship,), patch)
         return self
 
