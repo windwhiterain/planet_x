@@ -14,18 +14,67 @@
 // 视觉是**数据驱动**的：每个 state 天体带一个 `kind` key（config body_kinds 的键），
 // 本模块据 bodyKinds[body.kind] 解析出颜色/尺寸/类别/星环/着色器分支，不再内联猜测。
 // 若 CDN 加载失败，本模块整体失败，但 app.js 的控制面板不受影响。
+//
+// 几条贯穿全模块的视觉原则（改之前先读）：
+// * **光是太阳给的**：天体 shader 用**世界空间法线**点乘指向原点的太阳方向，暖光只有
+//   受光面有；环境光只留一点点，否则整颗球会被「相机头灯」均匀照亮（那是 bug，不是风格）。
+// * **阵营色只出现在 UI 层**：城市/舰的 3D 模型一律中性舰船灰，阵营身份由
+//   「恒定屏幕尺寸的准星环 + 标签 chip 的色点」这类 UI 元素表达，绝不刷在模型上。
+// * **标记的遮挡要看得见**：标记精灵不做深度测试（避免被球面切边），改为每帧用解析式
+//   射线-球相交判断**中心点**是否被天体挡住，挡住了就淡出——空间感靠这个，不靠 z-buffer。
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 let scene, camera, renderer, controls, raycaster, pointer;
 let bodiesG, citiesG, shipsG, spinners = [];
-let lodItems = [];    // 需按相机距离做「小模型 <-> 恒定尺寸 billboard」切换的对象
+let lodItems = [];    // 随相机距离/遮挡更新的标记：{mesh, sprites[], pos, switchDist}
+let labelItems = [];  // 天体名标签：恒定屏幕尺寸 + 同样参与遮挡淡出
+let occluders = [];   // 遮挡体（天体显示球）：{center:Vector3, radius}
 let fitted = false;   // 相机是否已按首帧适配（advance 不再重置视角）
 let scale = 110;      // 世界单位：最远天体径向压缩后 ≈ `scale` 单位
 let currentWorld = null;
 let currentVisuals = null;
+let layout = null;    // 当前帧的显示布局（computeLayout 的结果）
 let sun = null;
+
+// --- 视觉调参（改这里就能整体改观感，配合截图迭代） --------------------------
+const TUNING = {
+  // 显示半径 = radiusScale × config 的 `radius`（相对类地行星）。
+  // 保持 config 的**相对比例**（气巨>冰巨>类地>卫星>矮行星，与真实太阳系次序一致），
+  // 只把整体尺度从「木星比太阳还大」压到「太阳明显最大」。
+  radiusScale: 2.2,
+  radiusMin: 0.26,
+  radiusMax: 5.7,
+  sunRadius: 6.4,
+
+  // 径向压缩指数 r^orbitExp：越小内太阳系越舒展（外圈/柯伊伯带越挤）。
+  orbitExp: 0.42,
+
+  // 星环：内/外缘 = 相对天体显示半径的倍数（土星主环真实跨度约 1.2–2.3 Rs）。
+  ringInner: 1.2,
+  ringOuter: 2.0,
+
+  // 卫星与母星之间的最小净空（母星带星环时按环外缘算），不足则沿方位角把卫星推出去。
+  moonGap: 1.2,
+
+  // 行星 shader：受光面之外的底光。真实太空里背光面几乎全黑，但全黑会让星球在战略图上
+  // 「消失」（连城市都找不到），所以留一点点让暗面仍读得出轮廓。
+  shaderAmbient: 0.075,
+  // 首帧取景：fitR>0 = 固定取景半径；否则按「当前天体最远距离 × fitMargin」自适应。
+  fitR: 0,
+  fitMargin: 1.22,
+  // 遮挡淡出：depth∈[-0.10, 0.06] 内把标记淡出（depth=0 表示中心点正好落在天体轮廓上）。
+  occlFadeLo: -0.10,
+  occlFadeHi: 0.06,
+
+  // UI 标记尺寸（屏幕像素）。
+  reticlePx: 16,        // 阵营准星环（近景会跟着模型大小放大，见 fitWorld）
+  farDotPx: 8,          // 远景 billboard（近景换成 3D 模型）
+  farDotStationPx: 10,
+  labelPx: 13,          // 天体标签 chip 高度
+  labelGapPx: 7,        // 标签与天体轮廓之间的间距
+};
 
 // 相机远离到超过此距离（世界单位）时，城市/舰的小模型换成恒定尺寸 billboard。
 const LOD_SWITCH_DIST = 30;
@@ -38,20 +87,31 @@ const DEFAULT_KIND = {
 };
 
 // --- 颜色助手 ------------------------------------------------
+// config 里的颜色是 CSS hex（sRGB），而 `gl_FragColor` 写出的值被 three.js 当作**线性**
+// 颜色再做 sRGB 编码（renderer.outputColorSpace = SRGB）。所以必须在这里先把 sRGB 转成
+// 线性，否则每颗行星都会被「免费提亮」一次（0.85 的驼色会变成 0.93 的近白），
+// 看起来发灰发糊。MeshStandardMaterial 走 three 自己的 ColorManagement 不受影响。
+function srgbToLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
 function hex2rgb(hex) {
   if (!hex) return [0.6, 0.6, 0.7];
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
   const n = parseInt(full, 16);
   if (Number.isNaN(n)) return [0.6, 0.6, 0.7];
-  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+  return [
+    srgbToLinear(((n >> 16) & 255) / 255),
+    srgbToLinear(((n >> 8) & 255) / 255),
+    srgbToLinear((n & 255) / 255),
+  ];
 }
 
 // --- 坐标：径向压缩 + 世界缩放 ---------------------------------------------
 // 天体在 AU 里跨度很大（内行星 ~0.3，外行星 ~40），直接按线性会挤成一团。
-// 用 r' = r^0.5 做径向压缩（保方向、只改半径），再整体缩放到 `scale`。
+// 用 r' = r^orbitExp 做径向压缩（保方向、只改半径），再整体缩放到 `scale`。
 function compressRadius(r) {
-  return Math.sqrt(r);
+  return Math.pow(r, TUNING.orbitExp);
 }
 function compress(pos) {
   const x = pos[0], y = pos[1];
@@ -134,13 +194,18 @@ const NOISE_GLSL = `
   }
 `;
 
-// 行星顶点着色器：把对象空间位置、世界法线、世界坐标传给片元。
+// 行星顶点着色器：把对象空间位置、**世界空间**法线、世界坐标传给片元。
+//
+// 注意 `normalMatrix` 是「对象 → **相机/视图**空间」的法线矩阵；而片元里的光照方向是
+// 世界空间的（太阳在原点）。两者混用会让 `dot(n, lightDir)` 失去意义——整个球面的漫反射
+// 几乎恒为 0，剩下的只有环境光 + 跟着视线走的边缘辉光，看起来就像相机挂了头灯。
+// 所以这里必须用 `mat3(modelMatrix)` 把法线变到世界空间（球体是等比缩放，直接乘即可）。
 const PLANET_VERT = `
   varying vec3 vNormal;
   varying vec3 vWorldPos;
   varying vec3 vObjPos;
   void main(){
-    vNormal = normalize(normalMatrix * normal);
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vObjPos = position;
     vec4 wp = modelMatrix * vec4(position, 1.0);
     vWorldPos = wp.xyz;
@@ -158,6 +223,7 @@ const PLANET_FRAG = `
   uniform float uBanded;
   uniform float uEmissive;
   uniform float uRough;
+  uniform float uAmbient;
   uniform int uClass;
   ${NOISE_GLSL}
   varying vec3 vNormal;
@@ -237,16 +303,20 @@ const PLANET_FRAG = `
     vec3 lightDir = normalize(vec3(0.0, 0.0, 0.0) - vWorldPos); // 太阳在原点
     vec3 viewDir = normalize(cameraPosition - vWorldPos);
     float diff = max(dot(n, lightDir), 0.0);
+    // 加一点半影过渡，让晨昏线是一条柔和的带而不是硬切（真实大气散射的廉价近似）。
+    float lit = smoothstep(0.0, 0.12, diff);
 
     vec3 surface = surfaceColor(sph);
 
-    // 颜色 = 表面×(环境+漫反射) + 自发光 + 大气辉光 + 高光。
-    vec3 col = surface * (0.28 + 0.72 * diff);
-    col += surface * uEmissive * 0.6;
+    // 颜色 = 表面 ×(环境 + 太阳漫反射) + 微弱自发光 + 大气辉光 + 高光。
+    // 环境项故意压得很低：行星的立体感全靠这盏太阳，背光面就该是暗的。
+    vec3 col = surface * (uAmbient + (1.0 - uAmbient) * lit);
+    col += surface * uEmissive * 0.35;
+    // 大气辉光也**跟着太阳**：只有受光侧的边缘才有大气被照亮，夜晚一侧不发光。
     float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.5);
-    col += uAtmo * rim * (0.35 + 0.65 * diff);
+    col += uAtmo * rim * (0.06 + 0.94 * lit);
     vec3 hv = normalize(lightDir + viewDir);
-    col += vec3(1.0) * pow(max(dot(n, hv), 0.0), 24.0) * (1.0 - uRough) * 0.25 * diff;
+    col += vec3(1.0) * pow(max(dot(n, hv), 0.0), 24.0) * (1.0 - uRough) * 0.22 * lit;
 
     gl_FragColor = vec4(col, 1.0);
   }
@@ -295,6 +365,7 @@ function planetMaterial(spec) {
       uBanded: { value: spec.banded ? 1.0 : 0.0 },
       uEmissive: { value: spec.emissive || 0.0 },
       uRough: { value: spec.roughness || 0.0 },
+      uAmbient: { value: TUNING.shaderAmbient },
       uClass: { value: classIndex(spec.class) },
     },
   });
@@ -356,39 +427,68 @@ function lighten(hex, amt) {
 }
 
 // --- 标签 ----------------------------------------------------------------
-function makeLabel(text, color = '#cdd6f4', fontPx = 42) {
-  const pad = 12;
+// 标签画成一张 UI「chip」：半透明深色圆角底 + 白字，名字前面可以带阵营色小色块
+// （天体是某势力首都时用）。返回 { sprite, px, aspect } —— `px` 是**期望的屏幕高度**，
+// 真正的 scale 由 updateMarkers 每帧按相机距离换算，所以标签在任意缩放下都是同一个
+// 像素尺寸（旧版是世界尺寸 sprite，镜头一贴近就占满整个屏幕）。
+const LABEL_SS = 2;        // canvas 超采样倍率（HiDPI 下文字才不糊）
+function makeLabel(text, color = '#dbe6ff', fontPx = 13, dots = []) {
+  const padX = 7, padY = 4, dotR = 3.2, dotGap = 6;
+  const font = `600 ${fontPx * LABEL_SS}px system-ui, "Segoe UI", "Microsoft YaHei", sans-serif`;
   const c = document.createElement('canvas');
-  const font = `${fontPx}px system-ui, "Segoe UI", sans-serif`;
-  const ctx = c.getContext('2d');
+  let ctx = c.getContext('2d');
   ctx.font = font;
-  const w = Math.max(Math.ceil(ctx.measureText(text).width) + pad * 2, 32);
-  const h = fontPx + pad * 2;
-  c.width = w;
-  c.height = h;
-  const ctx2 = c.getContext('2d');
-  ctx2.font = font;
-  ctx2.fillStyle = color;
-  ctx2.textBaseline = 'middle';
-  ctx2.textAlign = 'left';
-  ctx2.fillText(text, pad, h / 2);
+  const textW = ctx.measureText(text).width;
+  const dotW = dots.length ? dots.length * (dotR * 2 * LABEL_SS + dotGap * LABEL_SS) : 0;
+  const w = Math.ceil(textW + dotW) + padX * 2 * LABEL_SS;
+  const h = Math.ceil(fontPx * 1.34 * LABEL_SS) + padY * 2 * LABEL_SS;
+  c.width = w; c.height = h;
+  ctx = c.getContext('2d');            // 改尺寸会重置 context 状态，必须重设
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  // 底：圆角深色 chip，保证压在任何行星上都能读。
+  const r = h / 2;
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(w - r, 0); ctx.arc(w - r, r, r, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(r, h); ctx.arc(r, r, r, Math.PI / 2, -Math.PI / 2);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(6,10,22,0.62)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 1 * LABEL_SS;
+  ctx.stroke();
+  let x = padX * LABEL_SS;
+  dots.forEach((d) => {
+    ctx.beginPath();
+    ctx.arc(x + dotR * LABEL_SS, h / 2, dotR * LABEL_SS, 0, Math.PI * 2);
+    ctx.fillStyle = d;
+    ctx.fill();
+    x += dotR * 2 * LABEL_SS + dotGap * LABEL_SS;
+  });
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, h / 2 + LABEL_SS);
   const tex = new THREE.CanvasTexture(c);
   tex.minFilter = THREE.LinearFilter;
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  tex.userData.shared = false;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
   const sp = new THREE.Sprite(mat);
-  sp.scale.set(w / 16, h / 16, 1);   // 标签更小，减少天体间文字互相挤叠
-  return sp;
+  return { sprite: sp, px: h / LABEL_SS, aspect: w / h };
 }
 
 // --- 动态对象重建 ------------------------------------------------------------
+// 共享资源（标记贴图、城市/舰的几何与材质）标记了 userData.shared → 不随单次 setWorld 释放。
 function disposeGroup(g) {
   if (!g) return;
   g.traverse((o) => {
-    if (o.geometry) o.geometry.dispose();
+    if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
     if (o.material) {
-      // 共享纹理（billboard 缓存）标记了 userData.shared → 不随单次释放销毁。
-      if (Array.isArray(o.material)) o.material.forEach((m) => { m.dispose(); if (m.map && !m.map.userData.shared) m.map.dispose(); });
-      else { o.material.dispose(); if (o.material.map && !o.material.map.userData.shared) o.material.map.dispose(); }
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => {
+        if (m.userData.shared) return;
+        m.dispose();
+        if (m.map && !m.map.userData.shared) m.map.dispose();
+      });
     }
   });
   while (g.children.length) g.remove(g.children[0]);
@@ -397,47 +497,129 @@ function clearSpinners() {
   spinners = [];
 }
 
-// 天体显示半径：由类型表 radius（相对类地行星）乘一个基准，短边钳到可读。
-// 带定居点（宜居/有城）的天体略大，好容纳城市标记。
+// 天体显示半径：直接用 config 的 `radius`（相对类地行星）乘一个全局尺度。
+// 刻意**不做** `2.4*radius + 0.9` 那种放大：那会让木星(7.1)比太阳(3.2)还大、卫星整个
+// 陷进母星里。这里只做整体缩放，保住 config 里「气巨 > 冰巨 > 类地 > 卫星 > 矮行星」
+// 的真实次序与大致比例。
 function bodyRadius(body, spec) {
-  const base = 2.4 * (spec.radius || 0.6);
-  const hab = body.settlements && body.settlements.length ? 0.9 : 0.0;
-  return Math.max(base + hab, 0.9);
+  const r = TUNING.radiusScale * (spec.radius || 0.6);
+  return Math.min(Math.max(r, TUNING.radiusMin), TUNING.radiusMax);
+}
+
+// --- 显示布局：算出每个天体的**显示**位置（纯渲染用，不动 state） ---------------
+// 真实比例下卫星轨道半径远小于被夸张过的母星显示半径，直接画会重叠。做法：
+//   1) 卫星离母星不足「母星半径(带环则按环外缘) + 自身半径 + moonGap」时，
+//      沿母星→卫星的方位角把它推到刚好够远，并记下缩放系数 k；
+//   2) 画轨道线时对**整条轨道**用同一个 k（相对母星缩放偏移量），卫星仍然精确落在线
+//      自己画出的轨道上，不会「飘在轨道外」。
+function computeLayout(world, visuals) {
+  const nodes = new Map();     // name -> { pos:Vector3, radius:number }
+  world.bodies.forEach((b) => {
+    nodes.set(b.name, { pos: wp(b.position), radius: bodyRadius(b, specFor(visuals, b)) });
+  });
+  const orbitScale = new Map(); // 卫星 name -> k（画轨道线用）
+  world.bodies.forEach((b) => {
+    if (!b.orbit || !b.orbit.parent) return;
+    const me = nodes.get(b.name);
+    const par = nodes.get(b.orbit.parent);
+    if (!me || !par) return;
+    const parBody = world.bodies.find((x) => x.name === b.orbit.parent);
+    const parReach = par.radius * (parBody && parBody.ring ? TUNING.ringOuter : 1.0);
+    const minSep = parReach + me.radius + TUNING.moonGap;
+    const off = me.pos.clone().sub(par.pos);
+    const d = off.length();
+    if (d < 1e-6 || d >= minSep) return;
+    const k = minSep / d;
+    orbitScale.set(b.name, k);
+    me.pos.copy(par.pos).addScaledVector(off, k);
+  });
+  return { nodes, orbitScale };
 }
 
 function specFor(visuals, body) {
   return (visuals && visuals[body.kind]) || DEFAULT_KIND;
 }
 
-// --- 恒定尺寸 billboard（镜头拉远、城市/舰的小模型退化为固定像素大小的点） -----
+// --- UI 标记层：恒定屏幕尺寸的精灵（billboard / 阵营准星环 / 标签） ------------
+// 所有标记精灵都是「恒定像素尺寸」：每帧按相机距离换算成世界尺寸（见 updateMarkers），
+// 因此镜头拉远拉近时标记不会忽大忽小。标记一律 `depthTest:false`（避免被球面切边、
+// 或被自己的行星地面吃掉），遮挡改由 occlAlpha() 显式计算——这才是「空间感」的来源。
 const shapeTex = {};
 function makeShapeTexture(shape) {
+  const S = 128;                      // 画大一点，缩到十几像素时边缘才干净
   const c = document.createElement('canvas');
-  c.width = c.height = 64;
+  c.width = c.height = S;
   const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, 64, 64);
+  ctx.clearRect(0, 0, S, S);
   ctx.fillStyle = '#ffffff';
   ctx.strokeStyle = '#ffffff';
+  const m = S / 2;
   if (shape === 'dot') {
-    ctx.beginPath(); ctx.arc(32, 32, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(m, m, S * 0.20, 0, Math.PI * 2); ctx.fill();
   } else if (shape === 'diamond') {
-    ctx.beginPath(); ctx.moveTo(32, 4); ctx.lineTo(60, 32); ctx.lineTo(32, 60); ctx.lineTo(4, 32); ctx.closePath(); ctx.fill();
-  } else if (shape === 'ring') {
-    ctx.beginPath(); ctx.arc(32, 32, 22, 0, Math.PI * 2); ctx.lineWidth = 8; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(m, S * 0.20); ctx.lineTo(S * 0.80, m); ctx.lineTo(m, S * 0.80); ctx.lineTo(S * 0.20, m);
+    ctx.closePath(); ctx.fill();
+  } else if (shape === 'reticle') {
+    // 阵营准星环：细圆环 + 四个短刻度，中间留空给模型自己。
+    ctx.lineWidth = S * 0.045;
+    ctx.beginPath(); ctx.arc(m, m, S * 0.36, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = S * 0.055;
+    for (let i = 0; i < 4; i++) {
+      const a = i * Math.PI / 2 + Math.PI / 4;
+      ctx.beginPath();
+      ctx.moveTo(m + Math.cos(a) * S * 0.40, m + Math.sin(a) * S * 0.40);
+      ctx.lineTo(m + Math.cos(a) * S * 0.46, m + Math.sin(a) * S * 0.46);
+      ctx.stroke();
+    }
   }
   const tex = new THREE.CanvasTexture(c);
-  tex.userData.shared = true;   // 多个 billboard 共享，不随单个释放销毁
+  tex.userData.shared = true;   // 多个标记共享，不随单个释放销毁
   tex.anisotropy = 4;
   return tex;
 }
-function makeBillboard(shape, colorHex, px, onTop) {
+// 建一个恒定像素尺寸的标记精灵。`px` 期望屏幕像素；`aspect` 用于非正方形贴图（标签）。
+function makeMarkerSprite(shape, colorHex, px, opacity = 1, aspect = 1) {
   const tex = shapeTex[shape] || (shapeTex[shape] = makeShapeTexture(shape));
-  // depthTest:false → 标记永远画在最上层（像标签一样），不会被所在天体/其他天体挡住。
-  const mat = new THREE.SpriteMaterial({ map: tex, color: new THREE.Color(colorHex || '#8f9bb3'), transparent: true, depthTest: !onTop, depthWrite: false });
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    color: new THREE.Color(colorHex || '#ffffff'),
+    transparent: true,
+    opacity,
+    depthTest: false,
+    depthWrite: false,
+  });
   const sp = new THREE.Sprite(mat);
-  sp.userData.px = px;
-  return sp;
+  return { sp, px, aspect, baseOpacity: opacity, always: true };
 }
+
+// 解析式遮挡：把「相机 → 标记中心」这条线段与每个天体显示球求交。
+// depth ∈ (-∞, 1]：≤0 = 中心点在轮廓外（看得见，越负越远）；0 = 正好压在轮廓边缘；
+// 越大 = 中心点越深入球体背面。(r - 垂距)/r 对球体是精确的「背面深度」，而且**连续**——
+// 所以沿 [-0.10, 0.06] 淡出不会有跳变。返回 1 = 完全可见，0 = 完全被挡住。
+function occlAlpha(pos) {
+  if (!occluders.length) return 1;
+  _occlD.copy(pos).sub(camera.position);
+  const tMax = _occlD.length();
+  if (tMax < 1e-6) return 1;
+  _occlD.divideScalar(tMax);
+  let depth = -Infinity;
+  for (let i = 0; i < occluders.length; i++) {
+    const o = occluders[i];
+    _occlV.copy(o.center).sub(camera.position);
+    const tc = _occlV.dot(_occlD);
+    if (tc <= 0 || tc >= tMax) continue;              // 球体在标记之后 → 挡不住
+    const d2 = _occlV.lengthSq() - tc * tc;
+    const r2 = o.radius * o.radius;
+    if (d2 >= r2) continue;                            // 光线从天体旁边擦过去
+    const d = (o.radius - Math.sqrt(Math.max(d2, 0))) / o.radius;
+    if (d > depth) depth = d;
+  }
+  if (depth === -Infinity) return 1;
+  return 1 - THREE.MathUtils.smoothstep(depth, TUNING.occlFadeLo, TUNING.occlFadeHi);
+}
+const _occlD = new THREE.Vector3();
+const _occlV = new THREE.Vector3();
 
 // 城市在行星上的确定性方位：`elev` 为距 +Y 极轴的极角（0=顶，π/2=赤道），返回单位方向。
 function cityDir(idx, count, elev) {
@@ -447,40 +629,64 @@ function cityDir(idx, count, elev) {
   return [Math.cos(az) * horiz, y, Math.sin(az) * horiz];
 }
 
-// 每帧按相机距离切换：远 → 恒定尺寸 billboard；近 → 小模型。#
-function updateLod() {
+// 每帧更新所有标记：按相机距离切换「近景模型 / 远景 UI 精灵」、按固定像素换算世界尺寸、
+// 以及按遮挡淡出。世界尺寸 = px × (2·dist·tan(fov/2) / 视口高)，投影后正好约 px 像素。
+function updateMarkers() {
   if (!camera || !renderer) return;
   const fov = camera.fov * Math.PI / 180;
   const vh = renderer.domElement.clientHeight || 600;
+  const k = 2 * Math.tan(fov / 2) / vh;               // 世界长度 = k · 距离 · 像素
   for (const it of lodItems) {
     const dist = camera.position.distanceTo(it.pos);
-    if (dist > LOD_SWITCH_DIST) {
-      const px = it.billboard.userData.px || 10;
-      const s = px * 2 * dist * Math.tan(fov / 2) / vh;   // 让投影后的屏幕像素 ≈ px
-      it.billboard.scale.set(s, s, 1);
-      it.billboard.visible = true;
-      it.mesh.visible = false;
-    } else {
-      it.billboard.visible = false;
-      it.mesh.visible = true;
+    const wpp = k * dist;                             // 一个屏幕像素对应的世界长度
+    const near = dist <= (it.switchDist || LOD_SWITCH_DIST);
+    const a = it.fade === false ? 1 : occlAlpha(it.pos);
+    if (it.mesh) it.mesh.visible = near;
+    for (const s of it.sprites) {
+      const vis = (s.always || !near) && a > 0.012;
+      s.sp.visible = vis;
+      if (!vis) continue;
+      // 准星环带 fitWorld 时贴住模型大小（否则拉近后模型会捅出环外）。
+      const px = s.fitWorld ? Math.min(Math.max(s.fitWorld / wpp + 9, s.px), 56) : s.px;
+      s.sp.scale.set(px * wpp * s.aspect, px * wpp, 1);
+      s.sp.material.opacity = s.baseOpacity * a;
     }
+  }
+  // 标签：恒定像素尺寸 + 始终浮在天体上方（间距也按像素算，缩放时不会越离越远）
+  // + 与标记同一套遮挡淡出（用标签自身位置判定，否则会被自己的行星永远挡住）。
+  for (const lb of labelItems) {
+    const wpp = k * camera.position.distanceTo(lb.center);
+    lb.sp.position.set(
+      lb.center.x,
+      lb.center.y + lb.radius + TUNING.labelGapPx * wpp,
+      lb.center.z,
+    );
+    const a = occlAlpha(lb.sp.position);
+    lb.sp.visible = a > 0.012;
+    if (!lb.sp.visible) continue;
+    lb.sp.scale.set(lb.px * wpp * lb.aspect, lb.px * wpp, 1);
+    lb.sp.material.opacity = a;
   }
 }
 
 // 轨道路径：`orbit` 的局部（焦点中心）轨道，在 AU 里叠加 `anchor`（母天体的世界坐标，
 // 日心行星传入 [0,0] 即绕太阳）后做**径向压缩**，得到该天体在压缩平面上的真实路径——卫星
 // 的椭圆就包在它的母天体周围，而不是绕太阳。
-function orbitLine(orbit, anchor) {
+// `k`：相对母星的偏移缩放系数（computeLayout 算出的「卫星让位」系数）。整条轨道一起缩放，
+// 卫星才仍然精确落在自己画出的轨道线上。
+function orbitLine(orbit, anchor, k) {
   const pts = [];
   const period = Math.max(orbit.period, 1e-6);
   const n = 160;
   const ax = anchor ? (anchor[0] || 0) : 0;
   const ay = anchor ? (anchor[1] || 0) : 0;
+  const [acx, acz] = compress([ax, ay]);
+  const kk = k || 1;
   for (let i = 0; i <= n; i++) {
     const t = (i / n) * period;
     const local = orbitPositionAt(orbit, t);
     const [cx, cz] = compress([ax + local[0], ay + local[1]]);
-    pts.push(new THREE.Vector3(cx * scale, 0, cz * scale));
+    pts.push(new THREE.Vector3((acx + (cx - acx) * kk) * scale, 0, (acz + (cz - acz) * kk) * scale));
   }
   const g = new THREE.BufferGeometry().setFromPoints(pts);
   // 轨道画得细而淡，避免与行星/标记抢视觉（减少重叠感）。
@@ -494,8 +700,8 @@ function facColorFor(world, fid) {
 }
 
 function addRing(parent, position, r, colorHex) {
-  const inner = r * 1.35;
-  const outer = r * 2.5;
+  const inner = r * TUNING.ringInner;
+  const outer = r * TUNING.ringOuter;
   const geo = new THREE.RingGeometry(inner, outer, 128, 1);
   const [cr, cg, cb] = lighten(colorHex || '#c9b08a', 0.18);
   const mesh = new THREE.Mesh(geo, ringMaterial(inner, outer, [cr, cg, cb]));
@@ -504,11 +710,136 @@ function addRing(parent, position, r, colorHex) {
   parent.add(mesh);
 }
 
-function renderBodies(group, world, visuals) {
+// --- 城市/舰模型：中性舰船灰 + 一点结构感 ------------------------------------
+// 阵营色**不**刷在模型上（否则就是一堆花花绿绿的塑料块）。身份交给 UI 层：准星环 + 标签
+// chip。材质统一「灰白喷涂的航天器」——高 roughness、近零 metalness，只有窗户/舱灯用自发光。
+// 几何/材质模块级共享并标记 userData.shared，disposeGroup 会跳过它们。
+function shared(o) { o.userData.shared = true; return o; }
+const HULL = {
+  get hull() { return this._h || (this._h = shared(new THREE.MeshStandardMaterial({ color: 0xd9dde5, roughness: 0.62, metalness: 0.06 }))); },
+  get dark() { return this._d || (this._d = shared(new THREE.MeshStandardMaterial({ color: 0x9ba3b1, roughness: 0.8, metalness: 0.04 }))); },
+  get lamp() { return this._l || (this._l = shared(new THREE.MeshStandardMaterial({ color: 0x2a3242, emissive: 0xffc978, emissiveIntensity: 1.4, roughness: 0.6 }))); },
+  get solar() { return this._s || (this._s = shared(new THREE.MeshStandardMaterial({ color: 0x2f4a6e, roughness: 0.35, metalness: 0.2 }))); },
+};
+const GEO = {
+  get dome() { return this._dome || (this._dome = shared(new THREE.SphereGeometry(0.5, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2))); },
+  get tower() { return this._tower || (this._tower = shared(new THREE.BoxGeometry(0.17, 1, 0.17))); },
+  get block() { return this._block || (this._block = shared(new THREE.BoxGeometry(0.42, 0.3, 0.42))); },
+  get torus() { return this._torus || (this._torus = shared(new THREE.TorusGeometry(0.36, 0.05, 8, 22))); },
+  get core() { return this._core || (this._core = shared(new THREE.SphereGeometry(0.15, 12, 8))); },
+  get panel() { return this._panel || (this._panel = shared(new THREE.BoxGeometry(0.42, 0.02, 0.2))); },
+  get hullBox() { return this._hullBox || (this._hullBox = shared(new THREE.BoxGeometry(0.16, 0.14, 0.62))); },
+  get fin() { return this._fin || (this._fin = shared(new THREE.BoxGeometry(0.03, 0.22, 0.2))); },
+};
+
+// 地面城市：一个穹顶 + 两三栋塔楼，全部组装在以天体中心为原点的小 Group 里。
+function groundCityModel(s) {
+  const g = new THREE.Group();
+  const dome = new THREE.Mesh(GEO.dome, HULL.dark);
+  dome.scale.setScalar(s * 0.9);
+  dome.position.y = s * 0.02;
+  g.add(dome);
+  const n = 3;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + 0.4;
+    const h = s * (1.5 - i * 0.28);
+    const t = new THREE.Mesh(GEO.tower, i === 0 ? HULL.hull : HULL.dark);
+    t.scale.set(s * 0.55, h, s * 0.55);
+    t.position.set(Math.cos(a) * s * 0.42, h * 0.5 + s * 0.1, Math.sin(a) * s * 0.42);
+    g.add(t);
+  }
+  // 舱灯：一点点暖光，让「城市」读起来是活的而不是一块灰。
+  const lamp = new THREE.Mesh(GEO.block, HULL.lamp);
+  lamp.scale.set(s * 0.5, s * 0.22, s * 0.5);
+  lamp.position.y = s * 0.12;
+  g.add(lamp);
+  return g;
+}
+// 轨道空间站：一个环 + 核心 + 两片太阳能板。
+function stationModel(s) {
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(GEO.torus, HULL.hull);
+  ring.scale.setScalar(s * 2.1);
+  g.add(ring);
+  const core = new THREE.Mesh(GEO.core, HULL.dark);
+  core.scale.setScalar(s * 1.6);
+  g.add(core);
+  for (const sign of [-1, 1]) {
+    const p = new THREE.Mesh(GEO.panel, HULL.solar);
+    p.scale.set(s * 2.6, s * 1.6, s * 2.0);
+    p.position.z = sign * s * 1.1;
+    g.add(p);
+  }
+  return g;
+}
+// 舰：细长船体 + 背鳍 + 尾部喷口。按舰级给不同长度（护卫短、战列长）。
+// 尺度刻意做得很小：一枚护卫舰不该有行星半径的三分之一。
+const SHIP_LEN = { corvette: 0.14, destroyer: 0.19, cruiser: 0.25, carrier: 0.30, battleship: 0.36 };
+function shipModel(cls) {
+  const s = SHIP_LEN[cls] || 0.4;
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(GEO.hullBox, HULL.hull);
+  body.scale.set(s / 0.62, s / 0.62, s / 0.62);
+  g.add(body);
+  const fin = new THREE.Mesh(GEO.fin, HULL.dark);
+  fin.scale.setScalar(s / 0.62);
+  fin.position.set(0, s * 0.28, -s * 0.1);
+  g.add(fin);
+  const noz = new THREE.Mesh(GEO.core, HULL.lamp);
+  noz.scale.set(s * 1.1, s * 1.1, s * 0.8);
+  noz.position.z = -s * 0.78;
+  g.add(noz);
+  return g;
+}
+
+// 每个城市/舰标记 = 中性 3D 模型（近景）+ 阵营色准星环（常显）+ 中性远景点（远景观）。
+// 三者都挂在以天体中心为原点的 Group 里，随天体一起移动（「关于星球的坐标」）。
+function addMarker(group, world, opts) {
+  const g = new THREE.Group();
+  g.userData = { kind: opts.kind, name: opts.name };
+  if (opts.model) {
+    opts.model.position.copy(opts.local);
+    g.add(opts.model);
+  }
+  if (opts.orient) {
+    opts.model.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...opts.orient));
+  }
+  const sprites = [];
+  // 阵营色准星环：近景时贴着模型大小（模型大小/像素尺度 + 余量），远景时收到固定尺寸。
+  const ret = makeMarkerSprite('reticle', opts.color, TUNING.reticlePx, 0.85);
+  ret.fitWorld = opts.modelSize || 0;
+  ret.sp.position.copy(opts.local);
+  g.add(ret.sp);
+  sprites.push(ret);
+  // 中性远景点：镜头拉远、模型被 LOD 换掉之后代表这个标记。阵营色只在准星环上。
+  const dot = makeMarkerSprite(opts.shape, '#eef2f8', opts.px, 1);
+  dot.always = false;
+  dot.sp.position.copy(opts.local);
+  g.add(dot.sp);
+  sprites.push(dot);
+  g.position.copy(opts.center);
+  group.add(g);
+  lodItems.push({
+    mesh: opts.model || null,
+    sprites,
+    pos: opts.world.clone(),
+    switchDist: opts.switchDist,
+    fade: opts.fade !== false,
+  });
+}
+
+function renderBodies(group, world, visuals, layout) {
+  // 天体是某势力首都时，标签 chip 前面带该势力的色点（阵营身份的 UI 表达）。
+  const capsByBody = {};
+  (world.factions || []).forEach((f) => {
+    if (!f.capital_body) return;
+    (capsByBody[f.capital_body] = capsByBody[f.capital_body] || []).push(f.color);
+  });
   world.bodies.forEach((b) => {
     const spec = specFor(visuals, b);
-    const p = wp(b.position);
-    const r = bodyRadius(b, spec);
+    const node = layout.nodes.get(b.name);
+    const p = node.pos;
+    const r = node.radius;
     const geo = new THREE.SphereGeometry(r, 48, 32);
     const mat = planetMaterial(spec);
     const mesh = new THREE.Mesh(geo, mat);
@@ -528,82 +859,79 @@ function renderBodies(group, world, visuals) {
     const anchor = b.orbit.parent
       ? ((world.bodies.find((x) => x.name === b.orbit.parent) || {}).position || [0, 0])
       : [0, 0];
-    group.add(orbitLine(b.orbit, anchor));
+    group.add(orbitLine(b.orbit, anchor, layout.orbitScale.get(b.name) || 1));
 
-    const lbl = makeLabel(b.name, b.settlements && b.settlements.length ? '#e2f3ff' : '#9fb4d8', 26);
-    lbl.position.set(p.x, p.y + r + 3, p.z);
-    group.add(lbl);
+    const lbl = makeLabel(b.name, '#dbe6ff', TUNING.labelPx, capsByBody[b.name] || []);
+    group.add(lbl.sprite);
+    labelItems.push({ sp: lbl.sprite, px: lbl.px, aspect: lbl.aspect, center: p.clone(), radius: r });
   });
 }
 
 // 城市模型很小；相对其所属天体定位——
 //   地面城市：贴在天体表面的确定性点（按城市在整群里的序号给方位）。
 //   空间站：悬在这颗天体更高的轨道上。
-// 每个城市 = 一个小模型 + 一个恒定尺寸 billboard（LOD 切换），都挂在以天体中心为原点的
-// 小组里，因此随天体一起移动（"关于星球的坐标"）。
-function renderCities(group, world, visuals) {
+function renderCities(group, world, visuals, layout) {
   const byBody = {};
   world.cities.forEach((c) => { (byBody[c.body_id] = byBody[c.body_id] || []).push(c); });
   Object.entries(byBody).forEach(([bodyName, cities]) => {
     const body = world.bodies.find((b) => b.name === bodyName);
-    if (!body) return;
-    const P = wp(body.position);
-    const spec = specFor(visuals, body);
-    const r = bodyRadius(body, spec);
+    const node = layout.nodes.get(bodyName);
+    if (!body || !node) return;
+    const P = node.pos;
+    const r = node.radius;
+    // 模型尺寸跟着天体显示半径走，小行星上的城市不会跟母星一样大。
+    // 刻意压得**很小**（城市高度 ≈ 行星半径的 10% 量级）——它们是地表上的聚落，
+    // 不是贴在行星上的巨型水晶。
+    const s = Math.min(Math.max(r * 0.085, 0.030), 0.18);
     cities.forEach((c, idx) => {
       const color = facColorFor(world, c.faction_id);
-      const g = new THREE.Group();
-      g.userData = { kind: 'city', name: c.name };
-      let mesh, bbShape, bx = 0, by = 0, bz = 0, bbx = 0, bby = 0, bbz = 0;
+      let model, local, orient = null, px, modelSize;
       if (c.space_station) {
         // 空间站：轨道半径略大于行星，绕行星一圈分布。
         const az = (idx / Math.max(cities.length, 1)) * Math.PI * 2 + 1.7;
-        const orbR = r * 1.9;
-        bx = Math.cos(az) * orbR; bz = Math.sin(az) * orbR; by = r * 0.55;
-        mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.5, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.55, metalness: 0.15 }));
-        bbShape = 'ring';
-        bbx = bx; bby = by; bbz = bz;
+        const orbR = r * 1.45;
+        local = new THREE.Vector3(Math.cos(az) * orbR, r * 0.45, Math.sin(az) * orbR);
+        model = stationModel(s * 0.75);
+        px = TUNING.farDotStationPx;
+        modelSize = s * 1.1;
       } else {
-        // 地面城市：贴在天体表面，朝表面法线方向直立。
+        // 地面城市：贴在天体表面，朝表面法线方向直立。billboard/准星抬到半径之外，
+        // 让它贴在天体轮廓外缘——这样它才不会被自己的球体前面。
         const dir = cityDir(idx, cities.length, 0.95);
-        const rs = r * 0.98;
-        bx = dir[0] * rs; by = dir[1] * rs; bz = dir[2] * rs;
-        mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.7, metalness: 0.05 }));
-        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dir[0], dir[1], dir[2]));
-        bbShape = 'dot';
-        // billboard 抬到半径之外并置顶绘制，让它贴在天体表面外缘而不被球体自遮挡。
-        const rbb = r * 1.06;
-        bbx = dir[0] * rbb; bby = dir[1] * rbb; bbz = dir[2] * rbb;
+        const rb = r * 1.05;
+        local = new THREE.Vector3(dir[0] * rb, dir[1] * rb, dir[2] * rb);
+        model = groundCityModel(s);
+        orient = dir;
+        px = TUNING.farDotPx;
+        modelSize = s * 1.2;
       }
-      mesh.position.set(bx, by, bz);
-      g.add(mesh);
-      // 地面城市 billboard: 抬出表面 + 最上层；空间站/舰 billboard: 保持深度测试。
-      const bb = makeBillboard(bbShape, color, c.space_station ? 13 : 11, !c.space_station);
-      bb.position.set(bbx, bby, bbz);
-      g.add(bb);
-      g.position.set(P.x, P.y, P.z);
-      group.add(g);
-      lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(P.x + bbx, P.y + bby, P.z + bbz) });
+      addMarker(group, world, {
+        kind: 'city', name: c.name, color, model, local, orient,
+        center: P, world: new THREE.Vector3(P.x + local.x, P.y + local.y, P.z + local.z),
+        shape: c.space_station ? 'reticle' : 'dot',
+        px, modelSize,
+        switchDist: Math.max(14, r * 22),
+      });
     });
   });
 }
 
-function renderShips(group, world) {
+function renderShips(group, world, layout) {
   world.ships.forEach((s) => {
+    // 舰在星际空间里飞，不挂在任何天体下 → 直接用它的显示坐标（未被布局调整过）。
     const p = wp(s.position);
     const color = facColorFor(world, s.faction_id);
-    const g = new THREE.Group();
-    g.userData = { kind: 'ship', name: s.name };
     const y = 0.6;
-    const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 0), new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.7, metalness: 0.1 }));
-    mesh.position.set(0, y, 0);
-    g.add(mesh);
-    const bb = makeBillboard('diamond', color, 9);
-    bb.position.set(0, y, 0);
-    g.add(bb);
-    g.position.set(p.x, 0, p.z);
-    group.add(g);
-    lodItems.push({ mesh, billboard: bb, pos: new THREE.Vector3(p.x, y, p.z) });
+    const model = shipModel(s.class);
+    const modelSize = (SHIP_LEN[s.class] || 0.4) * 0.9;
+    addMarker(group, world, {
+      kind: 'ship', name: s.name, color, model,
+      local: new THREE.Vector3(0, y, 0),
+      center: new THREE.Vector3(p.x, 0, p.z),
+      world: new THREE.Vector3(p.x, y, p.z),
+      shape: 'diamond', px: TUNING.farDotPx, modelSize,
+      switchDist: LOD_SWITCH_DIST,
+    });
   });
 }
 
@@ -627,7 +955,7 @@ function makeStars() {
 // 太阳：自发光白热核心 + 径向光晕 sprite（additive），替代纯色球。
 function makeSun() {
   const core = new THREE.Mesh(
-    new THREE.SphereGeometry(3.2, 48, 32),
+    new THREE.SphereGeometry(TUNING.sunRadius, 48, 32),
     new THREE.ShaderMaterial({ vertexShader: SUN_VERT, fragmentShader: SUN_FRAG })
   );
 
@@ -657,9 +985,16 @@ function makeSun() {
 // --- 相机适配 ---------------------------------------------------------------
 function fitCamera(world) {
   scale = systemScale(world);
-  // 让最外轨道（半径 = 110 世界单位，见 systemScale）撑满约 78% 的视口宽度，
-  // 使全屏视图里太阳系不挤在中央一小块。（略留边距，避免最外轨道被裁切。）
-  const R = 110;
+  // 取景半径：按**当前**天体位置的最大半径（而不是最远远日点）来定，否则镜头会为了几条
+  // 此刻空无一物的远日点轨道白白缩掉三分之一，行星在屏幕上小得看不清。
+  // TUNING.fitR > 0 时用固定值（调试/特殊取景用）。
+  let maxR = 0;
+  world.bodies.forEach((b) => {
+    const v = wp(b.position);
+    maxR = Math.max(maxR, Math.hypot(v.x, v.z));
+  });
+  const R = TUNING.fitR > 0 ? TUNING.fitR : Math.max(48, maxR * TUNING.fitMargin);
+  // 让 R 撑满约 78% 的视口宽度，全屏视图里太阳系不挤在中央一小块。
   const fov = camera.fov * Math.PI / 180;
   const aspect = camera.aspect || 1.6;
   const halfW = Math.tan(fov / 2) * aspect;
@@ -698,7 +1033,7 @@ function tick() {
   controls.update();
   const t = performance.now() * 0.001;
   for (const s of spinners) s.mesh.rotation.y = (t * s.speed) % (Math.PI * 2);
-  updateLod();
+  updateMarkers();
   renderer.render(scene, camera);
 }
 
@@ -723,11 +1058,12 @@ function init(container) {
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
 
-  scene.add(new THREE.AmbientLight(0x8890b0, 0.5));
+  // 只有一点点环境光：城市/舰模型的光**也**应该来自太阳，否则整幅地图又会变成
+  // 「相机头灯」式的平光（那是行星 shader 修掉的那个毛病，别在这里重新引入）。
+  scene.add(new THREE.AmbientLight(0x8890b0, 0.16));
   // 太阳点光源：decay=0 无距离衰减，整幅系统均匀受光（星际尺度下不做物理衰减）。
-  // 行星的 shader 自算太阳方向漫反射；此灯主要照亮城市/舰标记。降强度、去暖色，
-  // 避免标记过曝/发黄（金属感）。
-  const sunLight = new THREE.PointLight(0xfff6e8, 0.9, 0, 0);
+  // 行星的 shader 自算太阳方向漫反射；此灯负责照亮城市/舰模型（MeshStandardMaterial）。
+  const sunLight = new THREE.PointLight(0xfff4e2, 1.5, 0, 0);
   sunLight.position.set(0, 0, 0);
   scene.add(sunLight);
 
@@ -767,10 +1103,17 @@ function setWorld(world, visuals) {
   disposeGroup(shipsG);
   clearSpinners();
   lodItems = [];
-  renderBodies(bodiesG, world, visuals);
-  renderCities(citiesG, world, visuals);
-  renderShips(shipsG, world);
-  updateLod();
+  labelItems = [];
+  // 先算显示布局（含卫星让位），三个渲染层共用同一套显示位置；
+  // 顺便把天体显示球登记成遮挡体，供标记的遮挡淡出使用。
+  layout = computeLayout(world, visuals);
+  occluders = [];
+  layout.nodes.forEach((n) => occluders.push({ center: n.pos, radius: n.radius }));
+  renderBodies(bodiesG, world, visuals, layout);
+  renderCities(citiesG, world, visuals, layout);
+  renderShips(shipsG, world, layout);
+  updateMarkers();
+  applyDebugQuery();
 }
 
 function resetView(world) {
@@ -790,29 +1133,27 @@ function getView() {
   if (!camera || !controls) return null;
   return { pos: camera.position.toArray(), target: controls.target.toArray() };
 }
-// 天体在渲染世界坐标里的位置（供 setView 取景/调试）。
+// 天体在渲染世界坐标里的位置（供 setView 取景/调试）——用**显示布局**里的位置，
+// 这样调试取景和画面上看到的球体永远一致（含卫星让位后的位置）。
 function bodyPoint(name) {
-  if (!currentWorld) return null;
-  const b = currentWorld.bodies.find((x) => x.name === name);
-  if (!b) return null;
-  const v = wp(b.position);
-  return { pos: [v.x, v.y, v.z], radius: bodyRadius(b, specFor(currentVisuals, b)) };
+  if (!currentWorld || !layout) return null;
+  const node = layout.nodes.get(name);
+  if (!node) return null;
+  const v = node.pos;
+  return { pos: [v.x, v.y, v.z], radius: node.radius };
 }
 
 // 调试取景：把相机放到「太阳朝天体的一侧」看它的受光面；dist 按天体半径逼近。
 // hideLabels 为真时隐藏标签 sprite（近距离截图不挡画面），重建时自动恢复。
 function focusBody(name, opts) {
   opts = opts || {};
-  if (!currentWorld) return null;
-  const b = currentWorld.bodies.find((x) => x.name === name);
-  if (!b) return null;
-  const v = wp(b.position);
-  const p = [v.x, v.y, v.z];
+  const bp = bodyPoint(name);
+  if (!bp) return null;
+  const p = bp.pos;
   const len = Math.hypot(p[0], p[1], p[2]) || 1;
   // 从天体指向太阳的方向（太阳在原点）。
   const dir = [-p[0] / len, -p[1] / len, -p[2] / len];
-  const spec = specFor(currentVisuals, b);
-  const radius = bodyRadius(b, spec);
+  const radius = bp.radius;
   const dist = opts.dist || (radius * 3.2);
   const cam = [p[0] + dir[0] * dist, p[1] + dir[1] * dist + dist * 0.28, p[2] + dir[2] * dist];
   setView(cam, p);
@@ -825,4 +1166,63 @@ function focusBody(name, opts) {
   return { name, pos: p, radius, cam };
 }
 
-window.PlanetXMap = { init, setWorld, resetView, setView, getView, bodyPoint, focusBody };
+// 视觉调参的运行时入口（截图调优/事后微调都用它，不用改源码刷新）。
+//   PlanetXMap.tune({ radiusScale: 1.2, orbitExp: 0.45 })
+// 改完会自动重建世界；`PlanetXMap.tuning` 是当前生效值。
+function tune(patch) {
+  Object.assign(TUNING, patch || {});
+  if (currentWorld) {
+    scale = systemScale(currentWorld);     // 轨道指数变了 → 世界尺度也要重算
+    setWorld(currentWorld, currentVisuals);
+  }
+  return { ...TUNING };
+}
+
+// --- 截图/调参用的 URL 参数（开发用，不影响正常操作） ------------------------
+//   ?focus=地球&dist=18        取景某个天体（dist 为世界单位，缺省按半径自动）
+//   ?view=160,190,120@0,0,0    直接给相机位置与目标点
+//   ?tune=radiusScale:1.2,orbitExp:0.45   覆盖视觉调参（见 TUNING）
+//   ?hide=labels,markers       隐藏标签/城市舰标记（看星球本体时用）
+// 只在页面加载后的**第一次** setWorld 生效一次，之后不再干预相机。
+function readDebugQuery() {
+  const q = new URLSearchParams(location.search);
+  const out = { applied: false, focus: q.get('focus'), view: q.get('view') };
+  out.dist = q.has('dist') ? Number(q.get('dist')) : null;
+  if (q.has('tune')) {
+    q.get('tune').split(',').forEach((kv) => {
+      const [k, v] = kv.split(':');
+      if (k && v !== undefined && Object.prototype.hasOwnProperty.call(TUNING, k)) TUNING[k] = Number(v);
+    });
+  }
+  const hide = (q.get('hide') || '').split(',').filter(Boolean);
+  out.hideLabels = hide.indexOf('labels') >= 0;
+  out.hideMarkers = hide.indexOf('markers') >= 0;
+  return out;
+}
+const DEBUG_Q = (typeof location !== 'undefined') ? readDebugQuery() : { applied: true };
+function applyDebugQuery() {
+  if (DEBUG_Q.applied) return;
+  DEBUG_Q.applied = true;
+  if (DEBUG_Q.view) {
+    const [p, t] = DEBUG_Q.view.split('@');
+    setView(p.split(',').map(Number), t ? t.split(',').map(Number) : null);
+  } else if (DEBUG_Q.focus) {
+    focusBody(DEBUG_Q.focus, {
+      dist: DEBUG_Q.dist, hideLabels: DEBUG_Q.hideLabels, hideMarkers: DEBUG_Q.hideMarkers,
+    });
+    return;
+  }
+  if (DEBUG_Q.hideLabels && bodiesG) bodiesG.traverse((o) => { if (o.isSprite) o.visible = false; });
+  if (DEBUG_Q.hideMarkers) {
+    if (citiesG) citiesG.visible = false;
+    if (shipsG) shipsG.visible = false;
+  }
+}
+
+window.PlanetXMap = {
+  init, setWorld, resetView, setView, getView, bodyPoint, focusBody, tune,
+  tuning: TUNING,
+  debug: () => ({
+    lod: lodItems.length, labels: labelItems.length, occluders: occluders.length,
+  }),
+};

@@ -237,12 +237,22 @@ function updateTop() {
 // 地图：把**从 state 根适配出来**的世界交给 three.js 场景（map3d.js），并把 config 的天体
 // 类型表（body_kinds）一并给它，供它按 body.kind 解析视觉（颜色/尺寸/着色器分支）。
 //
-// map3d 的接口是既定的 `{bodies, cities, ships, factions}`，其中势力按 `id` 查颜色；原始
-// `Faction` 的唯一键是 `name`（`id` 已废弃）。所以这里只补一个 `id` **别名**，其余字段原样
-// 透传（`Object.assign` 保留 relations/resources/ideology…，地图将来要用就有）。
+// map3d 的接口是既定的 `{bodies, cities, ships, factions}`，其中势力按 `id` 查阵营色、按
+// `capital_body` 给天体标签加「首都色点」。这两个都不是原始 `Faction` 上的字段（唯一键是
+// `name`；「有效首都」是算出来的）——所以适配层只补这两个**接口别名**，其余字段 `Object.assign`
+// 原样透传（relations/resources/ideology… 地图将来要用就有）。
+const DEFAULT_CAPITAL_BODY = '地球'; // 与引擎 `default_capital_body()` 的兜底一致
 function mapWorld() {
+  const ctrl = st.control || {};
   return Object.assign({}, st, {
-    factions: (st.factions || []).map((f) => Object.assign({}, f, { id: f.name })),
+    factions: (st.factions || []).map((f) => {
+      const cap = ctrl[f.name] && ctrl[f.name].capital;
+      return Object.assign({}, f, {
+        id: f.name,
+        // 有效首都 = 控制叶子 `capital` 的值（迁都的唯一事实来源）；没有该叶子时按引擎兜底。
+        capital_body: (cap && cap.value) || DEFAULT_CAPITAL_BODY,
+      });
+    }),
   });
 }
 function renderMap() {
