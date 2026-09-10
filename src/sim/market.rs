@@ -251,7 +251,8 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
                 let fee = cost * m.spread;                // 市场手续费（烧掉）
                 // 丢货：非 master 的货走异常带会**部分失联**（确定性比例，不是掷骰——
                 // 掷骰会污染 `Prng` 流、破坏同种子复现）。
-                let reliable = is_mond_master(config, &buyer) || is_mond_master(config, &seller);
+                let reliable = is_mond_master(mond_control(state, &buyer))
+                    || is_mond_master(mond_control(state, &seller));
                 let loss = if depth > 0.0 && !reliable {
                     (m.mond_loss_per_au * depth).clamp(0.0, m.mond_loss_cap)
                 } else {
@@ -276,12 +277,19 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
                 // 付款：卖方（货款）+ 承运人（异常带那一段运费）+ 市场（手续费，烧掉）。
                 pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), pay_seller);
                 let carrier = if depth > 0.0 && m.carrier_share > 0.0 {
-                    config
-                        .mond
-                        .masters
-                        .iter()
-                        .find(|x| *x != &buyer && *x != &seller && state.faction(x).is_some())
-                        .cloned()
+                    // 承运人 = **掌握度到顶**、且不是买卖双方的势力（掌握度连续化之后，
+                    // 「谁在承运」不再读配置名单，而是读世界里的实际掌握度；并列时取
+                    // `state.factions` 里靠前的那个，保证确定性）。
+                    let mut best: Option<&crate::model::Faction> = None;
+                    for f in &state.factions {
+                        if f.name == buyer || f.name == seller || !is_mond_master(f.mond_control) {
+                            continue;
+                        }
+                        if best.map_or(true, |b| f.mond_control > b.mond_control) {
+                            best = Some(f);
+                        }
+                    }
+                    best.map(|f| f.name.clone())
                 } else {
                     None
                 };

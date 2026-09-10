@@ -344,17 +344,18 @@ fn default_capital_share_relocate_cost() -> f64 {
 /// MOND / 柯伊伯引力异常 tuning。
 ///
 /// 在「异常区」（距太阳超过 [`Self::radius`] 的深空）内，真实引力按 MOND（Modified
-/// Newtonian Dynamics）修正，偏离标准牛顿假定。没有掌握 MOND 修正引力的势力（即除
-/// [`Self::masters`] 之外的所有势力）在异常区内轨道计算错误，其指令坐标与实际到达
-/// 坐标产生偏移——舰船无法精确机动到目标点，因而难以精确轰炸/殖民/停靠深处目标。
-/// 这让 cult（掌握了 MOND 的势力）偏僻的柯伊伯带圣所成为天然堡垒：围攻者的舰队在
+/// Newtonian Dynamics）修正，偏离标准牛顿假定。**掌握度**（`Faction::mond_control`，0..1）
+/// 越低，势力在此区内的轨道计算错得越狠，其指令坐标与实际到达坐标产生偏移——舰船无法
+/// 精确机动到目标点，因而难以精确轰炸/殖民/停靠深处目标。
+/// 这让 cult（掌握度 = 1 的势力）偏僻的柯伊伯带圣所成为天然堡垒：围攻者的舰队在
 /// 那里「迷航」，而 cult 自己的舰指哪打哪。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MondConfig {
     /// 异常区起始半径（距太阳，AU）：超出此距离进入「柯伊伯异常区」。
     pub radius: f64,
-    /// 非 master 势力在异常区内，每超出 [`Self::radius`] 1 AU 的**最大**导航偏移量（AU）。
-    /// 实际偏移是伪随机的（见 [`Self::drift_shape`]），所以它是上界而不是定值。
+    /// 势力在异常区内，每超出 [`Self::radius`] 1 AU 的**最大**导航偏移量（AU），
+    /// **再乘以 `(1 − 掌握度)`**。实际偏移还是伪随机的（见 [`Self::drift_shape`]），
+    /// 所以它是上界而不是定值。
     pub drift_per_au: f64,
     /// 伪随机偏移的分布形状：`偏移 = 上界 × roll^drift_shape`（`roll ∈ [0,1)` 均匀）。
     ///
@@ -366,8 +367,11 @@ pub struct MondConfig {
     ///
     /// 这是「带内到底有多难」的总旋钮：往小调 = 圣所与柯伊伯矿更难被外人碰到。
     pub drift_shape: f64,
-    /// 掌握了 MOND 修正引力的势力 id（在异常区内无导航偏移）。
-    pub masters: Vec<FactionId>,
+    /// 开局**掌握度**（0..1，缺省 0 = 凡人）——**取代**旧的 `masters: Vec<FactionId>`：
+    /// 名单语义从「布尔特权」升级为「初始值」。`{ "行星X崇拜教": 1.0 }` 就是旧的
+    /// 「指哪打哪」，其余势力从 0 起爬（见 `sim::step_knowledge`）。
+    #[serde(default)]
+    pub initial: BTreeMap<FactionId, f64>,
 }
 /// 合纵连横 / 均势外交 (balance-of-power) tuning——「弱者联盟对抗霸权」。
 ///

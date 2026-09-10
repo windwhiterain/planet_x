@@ -468,8 +468,8 @@ fn probe_freight() {
         }
         println!("== 运费/MOND 承运 seed {seed}（{n} 回合）==");
         println!(
-            "  异常带半径={} AU  masters={:?}  有承运收入的回合={rounds_with_carrier}/{n}  有势力首都位于带内的回合={deep_routes}/{n}",
-            config.mond.radius, config.mond.masters
+            "  异常带半径={} AU  initial={:?}  有承运收入的回合={rounds_with_carrier}/{n}  有势力首都位于带内的回合={deep_routes}/{n}",
+            config.mond.radius, config.mond.initial
         );
         for f in &state.factions {
             println!(

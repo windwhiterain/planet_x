@@ -26,10 +26,12 @@ pub fn move_toward(state: &mut State, config: &GameConfig, ship_id: &str, _class
     let Some(ship) = state.ship(ship_id).cloned() else { return };
     let pos = ship.position;
     let fid = ship.faction_id.clone();
-    // MOND 异常区：没有掌握修正引力的势力把指令坐标「算错」，实际航向产生偏移。
-    // 偏移幅度是**伪随机**的（`nav_roll` 按 势力×舰名×回合 派生）：这一回合偏多少是确定的，
-    // 但**下回合是全新的一次尝试**——所以深处目标不是「进不去」，而是「要多试几个回合」。
-    let dest = mond_drift(config, &fid, dest, nav_roll(&fid, &ship.name, state.round));
+    // MOND 异常区：势力把指令坐标「算错」多少，由它的**掌握度**连续决定（`control = 1`
+    // 就是今天的崇拜教，指哪打哪）；偏移幅度还是**伪随机**的（`nav_roll` 按 势力×舰名×回合
+    // 派生）：这一回合偏多少是确定的，但**下回合是全新的一次尝试**——所以深处目标不是
+    // 「进不去」，而是「要多试几个回合」。
+    let control = mond_control(state, &fid);
+    let dest = mond_drift(config, control, dest, nav_roll(&fid, &ship.name, state.round));
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;

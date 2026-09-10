@@ -13,7 +13,10 @@ use super::faction::default_capital_body;
 /// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
 /// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
 /// 所以不能按号细判，只能整段按最保守的方式接）。
-pub const SCHEMA_VERSION: u32 = 13;
+/// **v14 = MOND 掌握度连续化**（`.agents/notes/tech-system.md`）：`Faction::mond_control`
+/// 取代 `config.mond.masters` 名单。v13 存档里没有这个量 ⇒ 按 serde 缺省 0（凡人）读入，
+/// 旧档在这条改动上**不保真**（用户裁决：不考虑向前兼容）。
+pub const SCHEMA_VERSION: u32 = 14;
 fn default_schema_version() -> u32 {
     0
 }
@@ -758,6 +761,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // v10–v12：**两条独立历史共用过这一段号**（见上面的说明）⇒ 整段保守处理。
         10 | 11 | 12 => {
             state.contracts = Default::default();
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        // v13：MOND 掌握度还不存在（`Faction::mond_control` 是 serde 新增字段，
+        // 缺省 0 = 凡人）。**这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份
+        // （`config.mond.initial`），而 `migrate` 拿不到 config；硬编码势力名会造出第二份
+        // 真相。旧 `.ron` 因此在这一点上不保真（用户裁决：不考虑向前兼容）。
+        13 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

@@ -74,6 +74,17 @@ pub struct Faction {
     /// [`REPUTATION_NEUTRAL`]，「谁都没做过承包生意」正是那个世界的真实状态。
     #[serde(default = "default_reputation")]
     pub reputation: f64,
+    /// **MOND 掌握度**（0..1）——科技体系的**干线**（见 `.agents/notes/tech-system.md`）。
+    ///
+    /// `0` = 牛顿近似的凡人（异常区内指令坐标被算错），`1` = 指哪打哪（今天的崇拜教）。
+    /// 它**连续地**决定「一次导航尝试的胜算」（`sim::mond_arrival_chance`），
+    /// 而不是在某个档位上开关——所以「深处」永远只是**要多试几个回合**。
+    ///
+    /// 开局值来自 `config.mond.initial`（取代旧的 `masters` 名单）；
+    /// 之后由 `sim::step_knowledge` 按**飞船在异常区**的在场强度驱动（用户裁决：
+    /// 先只做这一条渠道）。`serde(default)` = 0 让旧档退化成凡人。
+    #[serde(default)]
+    pub mond_control: f64,
 }
 
 /// **中性信誉**：没有任何承包履历的势力从这里起步。

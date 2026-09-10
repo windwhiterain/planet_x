@@ -244,6 +244,9 @@ fn faction(
         // 是为了让「开局值」与「旧档 serde 缺省」共用一个真值来源——两者一旦分叉，
         // 旧档就会莫名其妙地比新开局矮一截。
         reputation: REPUTATION_NEUTRAL,
+        // 掌握度的真值只有一份：`config.mond.initial`（在 `default_state` 里按名字打点，
+        // 见那里的注释）。这里给 0 = 凡人，与「旧档 serde 缺省」同一个值。
+        mond_control: 0.0,
     }
 }
 
@@ -849,6 +852,13 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         // 承包市场从空开始：没人挂过单，正如开局不预置成交历史。
         contracts: ContractState::default(),
     };
+
+    // --- 开局 MOND 掌握度（科技体系的干线）------------------------------------
+    // 真值只有一份：`config.mond.initial`（取代旧的 `masters` 名单）。没列出的势力从 0 起，
+    // 靠**飞船在异常区**的在场观测慢慢爬（`sim::step_knowledge`）。
+    for f in &mut state.factions {
+        f.mond_control = config.mond.initial.get(&f.name).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    }
 
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------
     // 舰级现在是「平台修正器」，攻击力完全来自所装配的武器模块。因此开局预置舰
