@@ -173,9 +173,12 @@
             { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
             { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
             { "path": "@post.factions.${name}.fleet_value", "label": "舰队", "fmt": "num", "digits": 0 },
+            { "leaf": "@control[?faction_id=${name}].default_role", "compact": true },
             { "path": "resources", "label": "首都库存", "fmt": "map", "digits": 0, "missing": "空" },
             { "path": "@post.factions.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
             { "path": "@post.factions.${name}.production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
+            { "leaf": "@control[?faction_id=${name}].investment_budget", "compact": true },
+            { "leaf": "@control[?faction_id=${name}].construction_budget", "compact": true },
             { "path": "@post.factions.${name}.upkeep", "label": "维护/月", "fmt": "num", "digits": 1 },
             { "path": "@post.factions.${name}.upkeep_unpaid", "label": "没付上的维护", "fmt": "num", "digits": 1 },
             { "path": "@post.factions.${name}.governance_cost", "label": "治理/月", "fmt": "num", "digits": 1 },
@@ -184,9 +187,6 @@
             { "path": "@post.factions.${name}.market_rank", "label": "市场中排名", "fmt": "int", "missing": "—" },
             { "path": "@post.factions.${name}.freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
             { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
-            { "leaf": "@control[?faction_id=${name}].investment_budget", "compact": true },
-            { "leaf": "@control[?faction_id=${name}].construction_budget", "compact": true },
-            { "leaf": "@control[?faction_id=${name}].default_role", "compact": true },
             { "owner": "factions", "label": "归谁" }
           ],
           "omit": [

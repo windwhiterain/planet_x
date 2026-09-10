@@ -8,6 +8,10 @@
 //   格式化器     num / pct / ratio / enum / map / sum / top / tagged / …（一张通用表）
 //   布局         table / sheet / cards / timeline / pairs
 //   组织         group（分组）、order（行序）、limit（上限，**必须明说藏了多少**）
+//   控制行       `leaf` / `owner` / `action` —— **本文件不解释它们**，只把节点要过来
+//                （见 isControlRow / ctx.controlNode）：写面住在 `web/static/controls.js`，
+//                与「本文件不认识 bodies/cities」是同一条纪律。四种行住在同一个 `columns`
+//                数组里 ⇒ 行序就是「读与控制穿插」的顺序。
 //
 // 于是「新增一个组织点 = 写一段 JSON」，前端一行代码都不用改。
 //
@@ -52,6 +56,7 @@
     onSelect: null,      // 点一行选中实体（底栏读面）
     selection: null,     // {kind, name}
     expanded: new Set(), // 上限展开 / 残差展开的状态（viewId#row 之类）
+    controlNode: null,   // 控制行（`leaf`/`owner`/`action`）交给宿主渲染——见 isControlRow
   };
 
   function bind(opts) {
@@ -64,6 +69,8 @@
     if (o.onSelect !== undefined) ctx.onSelect = o.onSelect;
     if (o.selection !== undefined) ctx.selection = o.selection;
     if (o.expanded) ctx.expanded = o.expanded;
+    // 写面钩子（`web/static/controls.js`）：`(col, rec, recKey, {where}) → 一个 DOM 节点`。
+    if (o.controlNode !== undefined) ctx.controlNode = o.controlNode;
   }
 
   // --- 路径表达式 ------------------------------------------------------------
@@ -230,6 +237,10 @@
   function claimedKeys(spec) {
     const out = new Set();
     (spec.columns || []).forEach((c) => {
+      // 控制行里 `action` 认领的**就是**记录上的那个字段（`buildings` 是城记录的一个字段，
+      // 它由「建筑与建造区」那一行渲染 ⇒ 不该再落进「其余字段」里当没被认领）。
+      // `leaf`/`owner` 是绝对路径（@control/@scope），不认领本条记录的字段。
+      if (c.action) out.add(String(c.action).replace(/\[.*$/, ''));
       const p = String(c.path || '');
       if (!p || p.charAt(0) === '@') return;
       const first = splitSegments(p)[0] || '';
@@ -455,8 +466,38 @@
     return el('span', 'sv-val', String(text));
   }
 
+  // --- 控制行：本文件**不解释**它们 ------------------------------------------
+  // 一行除了 `path`（读）之外，还可以是 `leaf`（一片控制叶）/ `owner`（作用域归属）/
+  // `action`（命令列表）——那是**写面**的三种行。它们怎么渲染、写回什么、归属怎么写，
+  // 全在宿主的钩子里（`web/static/controls.js`）：本文件只认「这一行带没带这三个键」，
+  // 然后把节点要过来 append 进去。**这与它不认识 bodies/cities 是同一条纪律**。
+  const CONTROL_KEYS = ['leaf', 'owner', 'action'];
+
+  function isControlRow(col) {
+    return !!col && CONTROL_KEYS.some((k) => col[k] != null);
+  }
+
+  /// 控制行的宿主节点。**钩子给不出节点就明说**（不静默留一个空格子——那是"失败看起来像成功"）。
+  function controlNodeFor(col, rec, recKey, where) {
+    if (!ctx.controlNode) return el('span', 'sv-missing', '（没人接写面钩子）');
+    let node = null;
+    try {
+      node = ctx.controlNode(col, rec, recKey, { where });
+    } catch (e) {
+      return el('span', 'sv-missing', '写面渲染抛错：' + (e && e.message ? e.message : e));
+    }
+    return node || el('span', 'sv-missing', '·');
+  }
+
   function cellNode(rec, recKey, col, identity) {
     const td = el('td', 'sv-td');
+    // 控制格：一个 `<td>` 里放宿主给的节点（`compact` 的格子窄一些，完整编辑器在卡片里）。
+    if (isControlRow(col)) {
+      td.classList.add('sv-td-ctl');
+      if (col.compact) td.classList.add('sv-compact');
+      td.appendChild(controlNodeFor(col, rec, recKey, 'table'));
+      return td;
+    }
     const v = evalPath(col.path, rec, recKey);
     ratioSlot = null;
     const text = format(v, col, rec);
@@ -600,6 +641,13 @@
     const table = el('table', 'sv-table');
     const thead = el('thead');
     const htr = el('tr');
+    // `card` = 这一行展开时内联渲染哪张 `select` 卡片（读行 + 控制行都在那张卡里）。
+    const wantCard = !!spec.card;
+    if (wantCard) {
+      const th = el('th', 'sv-th sv-th-card', '');
+      th.title = '展开这一行的卡片（组织点「' + spec.card + '」）——读行与控制行住在同一条行序里';
+      htr.appendChild(th);
+    }
     htr.appendChild(el('th', 'sv-th sv-th-key', keyCol ? keyCol.label || spec.key : spec.key_label || ''));
     cols.forEach((c) => htr.appendChild(el('th', 'sv-th', c.label || c.path)));
     htr.appendChild(el('th', 'sv-th sv-th-res', '其余'));
@@ -608,10 +656,44 @@
     const tbody = el('tbody');
     table.appendChild(tbody);
 
+    // 一条记录的**行内卡片**：把**手里这一条记录**喂给那张 `select` 卡片。
+    // ⚠ 不是"按名字回 source 里再找一次"：表是分组的、记录本来就在手上，重新找既慢又可能
+    // 找到另一条同名记录（舰与城同名、天体与势力同名都会踩）。
+    const cardRowFor = (tr, r) => {
+      const trCard = el('tr', 'sv-card-tr');
+      const td = el('td', 'sv-card-td');
+      td.colSpan = tr.childElementCount || 1;
+      const box = el('div', 'sv-card-box');
+      renderCard(box, spec.card, r.value, r.key);
+      td.appendChild(box);
+      trCard.appendChild(td);
+      tr.parentNode.insertBefore(trCard, tr.nextSibling);
+      return trCard;
+    };
+
     const paint = (list) => {
       tbody.textContent = '';
       list.forEach((r) => {
         const tr = el('tr', 'sv-tr');
+        const rowId = spec.id + '#' + (groupKey || '') + (r.key == null ? '' : r.key);
+        const cardKey = rowId + ':card';
+        let cardRow = null;
+        if (wantCard) {
+          const tdE = el('td', 'sv-td sv-td-expand');
+          const open = ctx.expanded.has(cardKey);
+          const btn = el('span', 'sv-more clickable', open ? '▾' : '▸');
+          btn.title = '展开这一行的卡片（组织点「' + spec.card + '」）——读行与控制行在同一条行序里';
+          btn.addEventListener('click', () => {
+            const now = !ctx.expanded.has(cardKey);
+            if (now) ctx.expanded.add(cardKey);
+            else ctx.expanded.delete(cardKey);
+            btn.textContent = now ? '▾' : '▸';
+            if (now && !cardRow) cardRow = cardRowFor(tr, r);
+            if (cardRow) cardRow.style.display = now ? '' : 'none';
+          });
+          tdE.appendChild(btn);
+          tr.appendChild(tdE);
+        }
         const td0 = el('td', 'sv-td sv-td-key');
         const label = keyCol ? evalPath(keyCol.path, r.value, r.key) : spec.key ? evalPath(spec.key, r.value, r.key) : r.key;
         const who = label == null ? r.key : label;
@@ -631,9 +713,10 @@
         td0.appendChild(lab);
         tr.appendChild(td0);
         cols.forEach((c) => tr.appendChild(cellNode(r.value, r.key, c, who)));
-        const rowId = spec.id + '#' + (groupKey || '') + (r.key == null ? '' : r.key);
         tr.appendChild(residualCell(r.value, spec, rowId));
         tbody.appendChild(tr);
+        // 展开状态住在 ctx.expanded 里 ⇒ 重画（推进回合 / 应用之后）时把开着的卡片一起重建。
+        if (wantCard && ctx.expanded.has(cardKey)) cardRow = cardRowFor(tr, r);
       });
     };
     let shown = limited.length;
@@ -676,6 +759,17 @@
   function sheetOfRecord(container, spec, r) {
     const grid = el('div', 'sv-sheet');
     (spec.columns || []).forEach((c) => {
+      // 控制行：中文标签 + 宿主给的节点。读行与控制行住在**同一个 columns 数组**里，
+      // 所以「首都库存（读）紧挨投资预算（控制）」是数组顺序的直接结果。
+      if (isControlRow(c)) {
+        const crow = el('div', 'sv-sheet-row sv-sheet-row-ctl');
+        const ck = el('div', 'sv-sheet-k', c.label || c.leaf || c.owner || c.action);
+        const cv = el('div', 'sv-sheet-v');
+        cv.appendChild(controlNodeFor(c, r.value, r.key, 'sheet'));
+        crow.append(ck, cv);
+        grid.appendChild(crow);
+        return;
+      }
       const v = evalPath(c.path, r.value, r.key);
       ratioSlot = null;
       const text = format(v, c, r.value);
@@ -847,6 +941,22 @@
     container.appendChild(wrap);
   }
 
+  /// 把**一条记录**喂给一张 `select` 卡片（表格的行内展开用它，见 `tableFor` 的 `card`）。
+  /// 卡片就是 `mount: select` 的普通视图：同一份列声明，读行与控制行按同一条行序。
+  function renderCard(container, cardId, record, recKey) {
+    const spec = findById(cardId);
+    if (!spec) {
+      container.appendChild(el('div', 'sv-empty', '（没有这张卡片：' + cardId + '）'));
+      return null;
+    }
+    container.appendChild(el('div', 'sv-card-head',
+      '卡片「' + (spec.title || spec.id) + '」（组织点 ' + spec.id + '）——读行与控制行按同一条行序'));
+    sheetOfRecord(container, spec, { key: recKey, value: record, path: '' });
+    const om = omitLine(spec);
+    if (om) container.appendChild(om);
+    return spec;
+  }
+
   // --- 挂载点查找（给 app.js / jsonview.js 用） ------------------------------
   let DOC = { pages: [], select: [] };
 
@@ -907,11 +1017,22 @@
 
   function pages() { return DOC.pages || []; }
 
+  /// 整份声明（宿主要读 `leaf_ui`/`action_ui`/`write_omit` 这类顶层段——它们不是视图，
+  /// 但也住在同一份声明里；`setSpecs` 已把它们塞进 `ctx.maps`，这里给宿主一个直读口）。
+  function doc() { return DOC; }
+
   // 一个视图「认领了哪些字段」——给「未组织」审计用（铁律 R 的另一半：没被认领的要看得见）。
+  // 控制行也算认领：`leaf` 行认领的是 `@control` 上的那条路径（它由写面的控制行渲染，
+  // 不能同时又报成「未组织」），`owner` 行认领 `@scope` 的层，`action` 行认领记录上的那个字段。
   function claimedPaths(doc) {
     const out = [];
     const walk = (spec) => {
-      (spec.columns || []).forEach((c) => out.push({ view: spec.id, expr: c.path }));
+      (spec.columns || []).forEach((c) => {
+        if (c.leaf != null) out.push({ view: spec.id, expr: c.leaf, control: true });
+        else if (c.owner != null) out.push({ view: spec.id, expr: '@scope.' + c.owner, control: true });
+        else if (c.action != null) out.push({ view: spec.id, expr: c.action, control: true });
+        else out.push({ view: spec.id, expr: c.path });
+      });
       if (spec.source) out.push({ view: spec.id, expr: spec.source });
     };
     (doc.pages || []).forEach((p) => (p.views || []).forEach(walk));
@@ -923,11 +1044,14 @@
     bind,
     setSpecs,
     pages,
+    doc,
     renderView,
     renderSheet,
     renderSelect,
+    renderCard,
     inlineFor,
     selectSpecFor,
+    isControlRow,
     evalPath,
     expand,
     claimedKeys,
