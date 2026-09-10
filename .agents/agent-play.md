@@ -155,6 +155,11 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 
 > 先 `--digest K --round N` 看整段走势的故事板，再对感兴趣窗口 `--index` 精读，别一把梭全量。
 
+> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --ledger 60` 读「这局已经发生过什么」
+> ——全部里程碑事件（谁夺了谁的城、哪艘舰被谁打沉、谁和谁开战）都在里面，每条一句话。
+> 它随 checkpoint 存活，不需要当初的 `--index` 目录。Python 侧对应 `q.ledger(...)` /
+> `q.ledger(entity=("city", 城名))`（某座城的一生）/ `q.storyboard(window)`（压成故事板）。
+
 ---
 
 ## 3. 决策面：你能控制什么（指令 / control）
@@ -258,7 +263,8 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 观察  planet_x --seed 7 --index out/ ;  planet_xq 读
 决策  写 diff.json（见 §4）
 应用  planet_x --seed 7 --apply diff.json --round 30 --save ckpt30.ron
-再看  planet_x --start ckpt30.ron --round 30 --index out2/   （续玩 + 精读）
+再看  planet_x --start ckpt30.ron --ledger 40    （这局到目前为止的里程碑，一句话一条）
+续玩  planet_x --start ckpt30.ron --round 30 --index out2/   （续玩 + 精读）
 ```
 
 - **确定性**：同 seed（或同 checkpoint + 已保存 RNG 位置）→ 后续逐字节一致。
@@ -300,6 +306,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--meta` | 游戏规则字典（resources/buildings/ships/economy/combat…） |
 | `--schema` | 状态视图的 JSON Schema |
 | `--story` | 剧情编年史（叙事弧） |
+| `--ledger [<N>]` | **长存里程碑账本**：本局全部里程碑事件（城易主/夷平/舰存亡/开战停战/结盟/迁都/剧情），每条一句话标题；`N` = 只出最近 N 条。**续玩前先读它** |
 | `--control` | 可编辑控制面模板 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |

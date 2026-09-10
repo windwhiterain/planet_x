@@ -39,6 +39,12 @@
 //!              introspect field names rather than memorising them.
 //! * `--story`  dump the story chronicle (`State::chronicle`) as a JSON array — the
 //!              full narrative arc (round, id, title, body, participants).
+//! * `--ledger [N]` dump the **long-lived milestone ledger** (`State::ledger`) — every
+//!              milestone event of this run (city flips/razing, ship birth/death, wars,
+//!              coalitions, capital moves, story beats) in order, each with a one-line
+//!              `headline`. Unlike `--story` (narrative prose from the config's story
+//!              table) this is the **mechanical** history, and it survives `--save`/
+//!              `--start`. Optional `N` = only the most recent N entries.
 //! * `--control` dump the editable control surface (control + scope) — the template
 //!              an agent edits into an `--apply` diff.
 //! * `--control-schema` dump a machine-readable JSON Schema for the control / `--apply`
@@ -62,7 +68,7 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, State, SCHEMA_VERSION};
+use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, Salience, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, control, projection, sim, world};
 use serde_json::json;
@@ -103,12 +109,13 @@ Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继�
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
 - `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
 - `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
+- `planet_x --start s240.ron --ledger 40`          # 续玩前先读「这局已经发生过什么」（里程碑账本）\n\
 - `planet_x --traj 240`                            # 一键拿故事封包（含 `.story` 编年史）\n\
 - 先 `--schema` 查视图字段、`--control-schema` 查 --apply 能写啥、`--meta` 查规则；分析用\n\
   `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
 --round N 输出 N+1 行 JSON（回合 0 + N 回合）；--traj N 输出一个自包含 story pack；\n\
---meta/--schema/--control-schema/--story/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
+--meta/--schema/--control-schema/--story/--ledger [N]/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -149,6 +156,13 @@ struct Cli {
     /// 输出剧情编年史（叙事弧：round/id/title/body/participants）为 JSON 数组。
     #[arg(long)]
     story: bool,
+
+    /// 输出**长存里程碑账本**（`State::ledger`）：本局发生过的里程碑事件（城易主/夷平/舰
+    /// 存亡/开战停战/结盟/迁都/剧情），按发生顺序，带一句话标题。与 `--story` 的区别：
+    /// 账本是**机械历史**（覆盖全部实体，随 checkpoint 存活），编年史是**叙事文案**
+    /// （只有 config 里写的那些剧情节拍）。可选参数 N = 只出最近 N 条（缺省 = 全部）。
+    #[arg(long, num_args = 0..=1, value_name = "N")]
+    ledger: Option<Option<u32>>,
 
     /// 输出可编辑控制面（control + scope）JSON——agent 写 --apply diff 的模板。
     #[arg(long)]
@@ -229,6 +243,10 @@ fn main() {
     // State-reflecting dumps.
     if cli.story {
         emit(&agent::story_value(&state).to_string());
+        return;
+    }
+    if let Some(tail) = cli.ledger {
+        emit(&ledger_value(&state, tail).to_string());
         return;
     }
     if cli.control {
@@ -384,6 +402,31 @@ fn run_trajectory(
     );
 }
 
+/// 长存账本（[`State::ledger`]）的可读视图：每条里程碑 = `{round, headline, event}`。
+///
+/// `tail = Some(n)` 只出最近 `n` 条。`complete/dropped/dropped_through_round` 直接来自账本
+/// 自身——**截断过的历史会明说自己不完整**，读的人不会把它误当成全部。
+fn ledger_value(state: &State, tail: Option<u32>) -> serde_json::Value {
+    let all = &state.ledger.entries;
+    let start = match tail {
+        Some(n) => all.len().saturating_sub(n as usize),
+        None => 0,
+    };
+    let events: Vec<serde_json::Value> = all[start..]
+        .iter()
+        .map(|e| json!({"round": e.round, "headline": e.event.headline(), "event": e.event}))
+        .collect();
+    json!({
+        "round": state.round,
+        "count": all.len(),
+        "returned": events.len(),
+        "complete": state.ledger.is_complete(),
+        "dropped": state.ledger.dropped,
+        "dropped_through_round": state.ledger.dropped_through_round,
+        "events": events,
+    })
+}
+
 fn save_if_requested(save: Option<&Path>, round_state: &RoundState, rng: &Prng) {
     if let Some(path) = save {
         if let Err(e) = save_checkpoint(path, round_state, rng) {
@@ -497,9 +540,38 @@ fn digest_value(
         "sanctioned": metrics.sanctioned,
         "wars": metrics.wars,
         "events": event_counts(events_acc),
+        "top_events": top_events(events_acc),
         "story": story,
     })
 }
+
+/// 一个窗口内**最重要**的若干条里程碑，渲染成 `{round, headline}`——digest 的「故事板」。
+///
+/// 只取 [`Salience::Milestone`]（逐发流水 `attack`/`siege` 不出现在这里，正是 digest 存在的
+/// 意义）。窗口内里程碑多于 [`TOP_EVENTS`] 时按 [`GameEvent::weight`] 取最重的若干条，
+/// **展示顺序仍按时间**（读起来才是故事）；被略过的条数如实给出，不假装这就是全部。
+///
+/// 这里只做「挑选 + 渲染」，句子本身来自唯一的 [`GameEvent::headline`]——CLI、投影表的
+/// `headline` 列、以及 agent 读到的都是同一句话。
+fn top_events(events: &[GameEvent]) -> serde_json::Value {
+    let mut picked: Vec<usize> = (0..events.len())
+        .filter(|&i| events[i].salience() == Salience::Milestone)
+        .collect();
+    let total = picked.len();
+    // 稳定排序：权重降序，同权重保持原有的时间先后。
+    picked.sort_by_key(|&i| std::cmp::Reverse(events[i].weight()));
+    picked.truncate(TOP_EVENTS);
+    // 展示按时间序（挑选用权重，读起来用时间）。
+    picked.sort_unstable();
+    let shown: Vec<serde_json::Value> = picked
+        .iter()
+        .map(|&i| json!({"headline": events[i].headline()}))
+        .collect();
+    json!({"total": total, "shown": shown.len(), "skipped": total - shown.len(), "events": shown})
+}
+
+/// `--digest` 每个窗口最多列几条里程碑（见 [`top_events`]）。
+const TOP_EVENTS: usize = 24;
 
 /// Count the GameEvent variants in a window, keyed by their `type` label.
 fn event_counts(events: &[GameEvent]) -> BTreeMap<String, u32> {

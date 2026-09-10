@@ -49,7 +49,16 @@ History / event queries (the sparse ledger)::
     q.fates(kind="ship")                # every ship death in the window, with cause + killer
     q.actors()                          # long-form (round, seq, kind, id, role) participant index
     q.changes("city", "冥王星前哨")       # pure dense-diff of the snapshot table (cross-check)
+    q.ledger()                          # ★ 里程碑账本: every milestone, one readable line each
+    q.ledger(limit=30)                  #   the last 30 (same as CLI `--ledger 30`)
+    q.storyboard(window=100)            # ★ 故事板: ledger compressed to one row per 100 rounds
     q.audit()                           # completeness self-check: unexplained city changes (want 0)
+
+Every event row also carries a **`headline`** column: one human-readable sentence rendered by the
+Rust side's single ``GameEvent::headline`` (the same sentence CLI ``--ledger`` / ``--digest`` show).
+It is *self-contained* (built only from the event's own fields, never by looking the entity up in
+today's state) so it stays true for archived history — an entity may be long dead or renamed since.
+Machine queries should still use ``actor_*``/``target_*``/``data``; the headline is for reading.
 
 Design notes for the ledger (each backed by measurement):
 
@@ -378,6 +387,59 @@ class PlanetXQ:
             df = self._flatten_data(df)
         return df
 
+    def ledger(
+        self,
+        since: int | None = None,
+        until: int | None = None,
+        limit: int | None = None,
+        entity: tuple[str, str] | None = None,
+    ) -> pd.DataFrame:
+        """**里程碑账本**（= `--ledger` 的投影版）：本局全部里程碑事件，按发生顺序。
+
+        只保留 `salience == "milestone"` 的行（城易主/夷平/舰存亡/开战停战/结盟/迁都/剧情），
+        逐发流水（`attack`/`siege`）永不出现——这正是它可读的原因。
+
+        列：`round`、`headline`（人读的一句话，由 Rust 侧唯一的 `GameEvent::headline` 渲染，
+        与 CLI `--ledger`/`--digest` 说的一模一样）、`type`，以及 `actor_*`/`target_*`/`extra`
+        这些**机器可查**的结构化槽位（标题只是给人看的，查询请用这些列）。
+
+        `limit=N` 只保留**最后 N 条**（与 CLI `--ledger N` 同一个语义）。
+
+        注意：`State::ledger` 本身随 checkpoint 存活（`planet_x --start ckpt --ledger`）；这里
+        读的是**投影**累积的全量历史，两者在默认配置（无损）下内容一致。
+        """
+        df = self.events(salience="milestone", since=since, until=until, entity=entity)
+        if df.empty:
+            return df
+        cols = ["round", "seq", "event_id", "type", "headline",
+                "actor_kind", "actor_id", "target_kind", "target_id"]
+        cols = [c for c in cols if c in df.columns]
+        out = df[cols].copy()
+        if limit is not None and limit >= 0:
+            out = out.tail(limit)
+        return out.reset_index(drop=True)
+
+    def storyboard(self, window: int = 50) -> pd.DataFrame:
+        """**故事板**：把里程碑账本压成「每 `window` 回合一段」的可读摘要。
+
+        返回 `round_from`/`round_to`/`events`（该段的全部标题，换行连接）/`count`。超长轨迹
+        （几千回合）里，这是比逐回合快照省几百倍上下文的读法——与 CLI 的 `--digest K` 同构。
+        """
+        led = self.ledger()
+        if led.empty:
+            return led
+        w = max(1, int(window))
+        led = led.copy()
+        led["round_from"] = (led["round"] // w) * w
+        led["round_to"] = led["round_from"] + w
+        grouped = led.groupby("round_from", sort=True)
+        out = grouped.agg(
+            round_to=("round_to", "first"),
+            count=("headline", "size"),
+            events=("headline", lambda s: "\n".join(s.to_list())),
+        ).reset_index()
+        return out
+
     def actors(self) -> pd.DataFrame:
         """长表参与方索引 `(round, seq, event_id, entity_kind, entity_id, role)`。
 
@@ -705,8 +767,14 @@ def main(argv: list[str] | None = None) -> int:
         ev = q.events()
         print(f"# events ledger: {ev.shape}; types={dict(ev['type'].value_counts())}")
         print(f"# audit() 未解释的城状态变化: {len(q.audit())} 条（应为 0）")
+        led = q.ledger()
+        print(f"# 里程碑账本: {led.shape}")
+        for line in led.tail(8).itertuples():
+            print(f"#   r{line.round}  {line.headline}")
     except KeyError as exc:
         print(f"# (no event ledger in this projection: {exc})")
+    except AttributeError as exc:
+        print(f"# (ledger helpers unavailable: {exc})")
     return 0
 
 

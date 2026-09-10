@@ -19,7 +19,8 @@ planet_x --seed 7 --round 12 --index out/
 # out/meta.json         static rules dictionary (ships/buildings/components/structures/economy/…,
 #                       same source as `planet_x --meta`) — loadable as DataFrames
 # out/idx/events.jsonl     (round, seq, event_id, ...) the sparse event ledger: one row per event,
-#                          normalized participant slots (see "History" below)
+#                          normalized participant slots + a human-readable `headline`
+#                          (see "History" below)
 # out/idx/ships.jsonl      (round, ship_id, ...) per-round ship detail (+ effective panel)
 # out/idx/cities.jsonl     (round, city_id, ...) per-round city detail (+ buildings list)
 # out/idx/factions.jsonl   (round, faction_id, ...) per-round faction detail (resources/relations/
@@ -132,7 +133,45 @@ q.fates(kind="city", since=40)      # every city ownership/death event in the wi
 q.actors()                          # long-form (round, seq, event_id, kind, id, role) index
 q.changes("city", "冥王星前哨")      # pure dense-diff of the snapshot table (independent cross-check)
 q.audit()                           # completeness self-check: unexplained city changes (want 0)
+
+q.ledger()                          # ★ the milestone ledger: every milestone, one readable line each
+q.ledger(limit=30)                  #   only the last 30 (== CLI `planet_x --ledger 30`)
+q.ledger(entity=("city", "大红斑科学站"))   # ★ that city's life story, in order
+q.storyboard(window=100)            # ★ the ledger compressed to one row per 100 rounds
 ```
+
+### The milestone ledger — reading a run as a story
+
+Every row carries a **`headline`**: one human-readable sentence, rendered by the Rust side's single
+`GameEvent::headline()` — the *same* sentence CLI `--ledger` and `--digest` print, so the three
+surfaces can never disagree. It is deliberately **self-contained**: built only from the event's own
+fields, never by looking the entity up in today's state — an entity in old history may be long dead
+or renamed since, so re-reading the world would produce *today's* answer, not the true one. It is
+also guaranteed to name **every** participant that the query index points at (a Rust guard pins
+this: `headline_names_every_participant`).
+
+`q.ledger()` keeps only `salience == "milestone"` rows (ownership/existence changes, wars,
+coalitions, capital moves, story beats) — per-shot `attack`/`siege` noise never appears, which is
+exactly what makes it readable. Example, one city's whole life:
+
+```
+ round         type                                      headline
+     4  city_defected        无国界科学组织 的 大红斑科学站 倒戈至 星系矿业（忠诚 0.2）
+    11     city_razed   中国 的 北斗 夷平 联合国 的 大红斑科学站（人口 240 → 0，3.1 伤害）
+    11 colony_founded                  中国 在 木星 复垦 联合国 留下的废墟 大红斑科学站
+    33     city_razed  欧盟 的 联盟 夷平 联合国 的 大红斑科学站（人口 240 → 0，19.1 伤害）
+    33 colony_founded                 联合国 在 木星 复垦 联合国 留下的废墟 大红斑科学站
+```
+
+(headline 只给人读；机器查询仍走 `actor_*` / `target_*` / `data` 这些结构化列。)
+
+The same ledger lives **inside `State`** (`State::ledger`) and therefore **survives checkpoints**:
+`planet_x --start ckpt.ron --ledger 40` answers "what has happened in this save so far" without
+needing the original `--index` directory. It is written by the single event funnel (`sim::ev`), so a
+milestone event cannot be emitted without entering the ledger. Default is lossless (unlimited); the
+`history.max_milestones` config caps it, and any truncation is reported via `ledger.dropped` /
+`dropped_through_round` instead of happening silently.
+
 
 > The ledger is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
 > `raze_city` / `reseed_city` / `found_city` / `overrun_city` / `defect_city`): every ownership or
@@ -157,9 +196,12 @@ Why the shape is what it is (each point measured on a real 715-event projection)
 - **No variant-specific columns.** The per-type payload lives in one `data` object column (one
   column carries one type of value — no column that is sometimes a scalar and sometimes a list,
   which makes `isna()`/`sum()`/`dropna()` unreliable).
-- `resolve_never re-derives game logic`: the ledger records what the simulation *did*
-  (`CityRazed.by_ship`, `ShipDestroyed.by` = the killing blow, `ColonyFounded.how`/`prev_owner`,
-  `DeathCause` = combat vs upkeep-shortfall), it does not infer it afterwards.
+- **Never re-derives game logic**: the ledger records what the simulation *did*
+  (`CityRazed.by_ship` + `CityRazed.owner` = who razed it and who lost it, `ShipDestroyed.by` = the
+  killing blow, `ColonyFounded.how`/`prev_owner`, `DeathCause` = combat vs upkeep-shortfall). Facts
+  that only exist *at that moment* must be recorded then — e.g. "who lost this city" cannot be
+  recovered later, because a razed city keeps its last owner as a diaspora claim only until someone
+  re-founds it the same round.
 - `q.audit()` mirrors the Rust guard `every_city_state_change_is_explained_by_an_event`: if a
   snapshot-visible city change has no explaining event, it is listed. Empty = the history is
   complete, so "why did this city change hands?" always has an answer.
