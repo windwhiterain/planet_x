@@ -267,7 +267,7 @@ Python 侧再用一个不精确的解析器 = 把那个坑从后门放回来。�
 
 | 环节 | 实测 | 说明 |
 | --- | --- | --- |
-| `cargo nextest run -P full`（Rust 门） | **62.1 s**（其中**真跑只有 4.2 s**：223 条绿 / 31 skipped） | 58 s 是 **test 档编译** ⇒ **编译:运行 ≈ 14:1** |
+| `cargo nextest run -P full`（Rust 门） | 增量 **~13–16 s**（改一个库文件后：编译 ~10 s + 真跑 4–5 s）；**冷/切档首次 62–89 s** | ⚠ 我先前写的「62 s 里 58 s 是 test 档编译」是**冷建**，不是增量——更正与完整对照见 [`test-wall-clock.md`](test-wall-clock.md) §0.2 |
 | `cargo build --release`（增量 / 冷） | 39.5 s / 1 m 48 s | 数据级长组的前置 |
 | `cargo build`（debug 增量） | **3.3 s** | 内循环用 |
 | 投影 1000 回合（`--index`，169 MB） | **8.5–9.4 s** | 纯模拟 5.9 s ⇒ **投影多花 ~+3.5 s 墙钟 / +1.2 s CPU** |
