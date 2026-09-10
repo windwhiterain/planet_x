@@ -12,6 +12,7 @@ mod combat;
 mod fleet;
 mod haul;
 mod ideology;
+mod knowledge;
 mod mond;
 mod story;
 

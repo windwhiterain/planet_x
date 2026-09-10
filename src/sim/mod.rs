@@ -45,6 +45,7 @@ pub mod geometry;
 pub mod governance;
 pub mod haul;
 pub mod ideology;
+pub mod knowledge;
 pub mod market;
 pub mod metrics;
 pub mod military;
@@ -63,6 +64,7 @@ pub use geometry::*;
 pub use governance::*;
 pub use haul::*;
 pub use ideology::*;
+pub use knowledge::*;
 pub use market::*;
 pub use metrics::*;
 pub use military::*;
@@ -148,6 +150,11 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 思潮（可变化意识形态）：按「变化因素」（战争得失/MOND 接触/经济好坏/人均面积）驱动。
     // 放在回合末：此时事件（战争得失/城夷平/叛乱）与流量（产出/维护/治理）均已就位。
     step_ideology(state, config, &flow);
+
+    // MOND 知识（科技体系的干线）：**飞船在异常区的在场强度**驱动掌握度涨落
+    // （用户裁决：第一版只做这一条渠道）。放在这里是因为它读「回合末的舰位」——
+    // 与本回合的 `step_ideology`（同一个 MOND 接触口径）读的是同一份世界。
+    step_knowledge(state, config);
 
     // 历史层收尾：两层各自按配置裁剪（这是唯一拿得到 config 的地方）。
     // `max_milestones` 默认 0 = 无损；`notable_window` 默认 24 回合，滑窗过期是**预期行为**。

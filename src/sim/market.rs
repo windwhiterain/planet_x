@@ -249,12 +249,14 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
                 let freight = give_market * freight_rate; // 运费
                 let cost = pay_seller + freight;          // 贸易额（不含手续费）
                 let fee = cost * m.spread;                // 市场手续费（烧掉）
-                // 丢货：非 master 的货走异常带会**部分失联**（确定性比例，不是掷骰——
-                // 掷骰会污染 `Prng` 流、破坏同种子复现）。
-                let reliable = is_mond_master(mond_control(state, &buyer))
-                    || is_mond_master(mond_control(state, &seller));
-                let loss = if depth > 0.0 && !reliable {
-                    (m.mond_loss_per_au * depth).clamp(0.0, m.mond_loss_cap)
+                // 丢货：货走异常带会**部分失联**，比例随「这条线上最好的掌握度」连续下降
+                // （`1 − max(买卖双方掌握度)`：任一方到顶就是 0 损失，与旧版「有一个 master
+                // 就不丢」同口径）。确定性比例，不是掷骰——掷骰会污染 `Prng` 流。
+                let route_mastery =
+                    mond_control(state, &buyer).max(mond_control(state, &seller));
+                let loss = if depth > 0.0 {
+                    (m.mond_loss_per_au * depth * (1.0 - route_mastery))
+                        .clamp(0.0, m.mond_loss_cap)
                 } else {
                     0.0
                 };
@@ -277,26 +279,28 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
                 // 付款：卖方（货款）+ 承运人（异常带那一段运费）+ 市场（手续费，烧掉）。
                 pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), pay_seller);
                 let carrier = if depth > 0.0 && m.carrier_share > 0.0 {
-                    // 承运人 = **掌握度到顶**、且不是买卖双方的势力（掌握度连续化之后，
-                    // 「谁在承运」不再读配置名单，而是读世界里的实际掌握度；并列时取
-                    // `state.factions` 里靠前的那个，保证确定性）。
+                    // 承运人 = **掌握度最高**、且不是买卖双方的势力（并列取 `state.factions`
+                    // 里靠前的那个，保证确定性）。掌握度连续化之后「谁在承运」不再读配置名单，
+                    // 而是读世界里的实际掌握度；它的**抽成按掌握度折算**（见下）——所以
+                    // 「名单」那一步特权路径到此为止，留下的是一条连续的斜坡。
                     let mut best: Option<&crate::model::Faction> = None;
                     for f in &state.factions {
-                        if f.name == buyer || f.name == seller || !is_mond_master(f.mond_control) {
+                        if f.name == buyer || f.name == seller || f.mond_control <= 0.0 {
                             continue;
                         }
                         if best.map_or(true, |b| f.mond_control > b.mond_control) {
                             best = Some(f);
                         }
                     }
-                    best.map(|f| f.name.clone())
+                    best.map(|f| (f.name.clone(), f.mond_control))
                 } else {
                     None
                 };
                 match &carrier {
-                    Some(c) => {
-                        // 只有 master 能可靠穿越异常带 → 它对这条线上的贸易**抽税**。
-                        let carrier_fee = freight * m.carrier_share;
+                    Some((c, mastery)) => {
+                        // 只有掌握 MOND 的人能可靠穿越异常带 → 它对这条线上的贸易**抽税**；
+                        // 抽得多狠 = 它的掌握度（`control = 1` 时与旧版逐位相同）。
+                        let carrier_fee = freight * m.carrier_share * mastery;
                         pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(c), carrier_fee);
                         pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, freight - carrier_fee);
                         *carrier_income.entry(c.clone()).or_insert(0.0) += carrier_fee;

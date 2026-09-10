@@ -372,6 +372,35 @@ pub struct MondConfig {
     /// 「指哪打哪」，其余势力从 0 起爬（见 `sim::step_knowledge`）。
     #[serde(default)]
     pub initial: BTreeMap<FactionId, f64>,
+    /// **知识（道）怎么涨**——见 [`KnowledgeConfig`]。用户裁决：先**只做一条渠道**
+    /// （飞船在异常区），所以这里没有「开采/条约/扩散」的旋钮。
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+}
+
+/// MOND **知识**的输入：掌握度（`Faction::mond_control`）如何随「在场」涨落。
+///
+/// 用户裁决（`.agents/notes/tech-system.md` §8）：**先只做一条渠道——飞船在异常区**。
+/// 不开采、不建研究建筑、不做扩散，于是「不去就学不会」是一条硬事实：
+/// 势力只要没有舰在异常区里，它的目标值就是 0，掌握度会**慢慢锈回去**（道会锈）。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KnowledgeConfig {
+    /// **在场强度**的参考值：`目标 = 1 − e^(−在场强度 / 它)`。
+    /// 即「在场强度恰好等于它」时爬到目标的 63%——指数饱和，投入翻倍不等于进度翻倍，
+    /// 越接近满越难。它同时是**唯一的规模旋钮**：调小 = 学得快。
+    pub presence_ref: f64,
+    /// 每回合向目标靠拢的比例（与 `ideology.drift_rate` 同形的松弛；越小越慢）。
+    /// 掌握度因此**不是**一次性的解锁，而是一个会被打回原形的活量。
+    pub drift_rate: f64,
+    /// 深度权重：一艘舰的在场强度 = `1 + 深度(AU) × 它`。
+    /// 深处的观测更值钱 ⇒ 外缘（柯伊伯带）永远有理由派人去。
+    pub depth_weight: f64,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self { presence_ref: 2.0, drift_rate: 0.03, depth_weight: 0.25 }
+    }
 }
 /// 合纵连横 / 均势外交 (balance-of-power) tuning——「弱者联盟对抗霸权」。
 ///

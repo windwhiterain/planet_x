@@ -473,6 +473,19 @@ fn write_round(
             .filter(|s| s.hull > 0.0 && s.faction_id == f.name)
             .map(|s| s.name.clone())
             .collect();
+        // 前沿（p = 1 的日心距）：掌握度到顶时是无穷 ⇒ 用 `null` 表示（JSON 没有 Infinity）。
+        let frontier = crate::sim::mond_frontier(config, f.mond_control);
+        let frontier_json =
+            if frontier.is_finite() { json!(r2(frontier)) } else { serde_json::Value::Null };
+        let ships_in_band = state
+            .ships
+            .iter()
+            .filter(|s| {
+                s.hull > 0.0
+                    && s.faction_id == f.name
+                    && crate::sim::dist(s.position, [0.0, 0.0]) > config.mond.radius
+            })
+            .count();
         writeln!(
             w.factions,
             "{}",
@@ -512,8 +525,12 @@ fn write_round(
                 "haul_gap": r2(crate::autocontrol::freight::haul_gap(state, config, &f.name)),
                 // **MOND 掌握度**（0..1）——科技体系的干线：它连续地决定异常区里
                 // 「一次导航尝试的胜算」（`0` = 凡人、`1` = 指哪打哪），因此这一列是
-                // 「谁能去多深」的唯一读数（前沿 = radius + arrival_eps/(drift×(1−它))）。
+                // 「谁能去多深」的唯一读数。另两列给出它的**来路**与**结论**：
+                // `mond_ships_in_band` = 此刻在异常区里的自己的活舰数（唯一的知识渠道），
+                // `mond_frontier_au` = 一次到位的最远日心距。
                 "mond_control": r2(f.mond_control),
+                "mond_ships_in_band": ships_in_band,
+                "mond_frontier_au": frontier_json,
                 // 此刻实际在跑运输的舰数（有效角色为 true；含玩家钉住与舱里有货的）。
                 "freighter_count": state
                     .ships
@@ -925,10 +942,12 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
                     "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
-                    "mond_control": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪（今天的崇拜教）。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。",
+                    "mond_control": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪（今天的崇拜教）。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）——**它是活知识**：把舰队撤回来，它会慢慢锈回凡人。",
+                    "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
+                    "mond_frontier_au": "**前沿海拔**（AU）：一次导航尝试就能精确到位（p = 1）的最远日心距 = `radius + arrival_eps/(drift_per_au×(1−mond_control))`。前沿**之外**不是「进不去」，而是「期望要试 `1/p` 次」；掌握度到顶时为 `null`（无穷远，指哪打哪）。",
                     "freight_lean": "**思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）= `2σ(−1.5 × 尚武度)`，**尚武度 = +和平↔军国 − 自然↔殖民**（两轴同权反号，写死在 `autocontrol::freight`）。中庸 = 1.0 = 旧的硬定编；**军国 < 1**（宁可缺货、宁可雇人也要把船留在战线上）、**和平/殖民 > 1**（殖民要给远方殖民地送补给 ⇒ 多跑运输）。",
                     "freighter_quota": "**目标运输舰条数**（连续量）= `需求 × freight_lean`，需求 = 有积压的货栈数。自动控制按「目标 − 现状」这个**缺口抽签**派人（概率 = 缺口 × 本舰的票 ÷ 同侧总票数，票按运力效率 ⇒ 期望入伙数正好是缺口）。**没有积压 ⇒ 配额 0 ⇒ 全员战舰**。",
                     "threat_motive": "**造战斗舰的动机**（0..1）= 敌对国比自己强多少：`σ((Σ_j 敌对度_j × (实力_j − 自己实力) ÷ 自己实力 − 1) ÷ 0.5)`。实力用均势外交那把尺子（城 + 舰体占比）；**只有比自己强的才算威胁** ⇒ 压得住场子的势力不会因为「在打仗」就继续堆旗舰（众弱结盟的备战动机 > 霸权的）。它取代了旧的「是否处于战争」这个布尔。",

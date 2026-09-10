@@ -23,10 +23,18 @@ pub fn mond_control(state: &State, fid: &str) -> f64 {
     state.faction(fid).map(|f| f.mond_control).unwrap_or(0.0).clamp(0.0, 1.0)
 }
 
-/// 「指哪打哪」的布尔口径（承运可靠性、市场征税人那几处的**唯一**入口）：
-/// 掌握度到顶。掌握度连续之后**只有这一处**还需要布尔——别在别处再写一遍。
-pub fn is_mond_master(control: f64) -> bool {
-    control >= 1.0 - 1e-9
+/// **前沿海拔**：掌握度 `control` 的势力在异常区内能**一次到位**（`p = 1`）的最远日心距。
+///
+/// `r* = radius + arrival_eps / (drift_per_au × (1 − control))`，`control = 1` ⇒ 无穷。
+/// 它是干线上最直观的读数（`0 → 30.0`、`0.35 → 31.1`、`0.70 → 34.7`、`0.90 → 48.0` AU）：
+/// 前沿之外不是「进不去」，而是「期望要试 `1/p` 次」。
+pub fn mond_frontier(config: &GameConfig, control: f64) -> f64 {
+    let m = &config.mond;
+    let mastery = 1.0 - control.clamp(0.0, 1.0);
+    if m.drift_per_au <= 0.0 || mastery <= 0.0 {
+        return f64::INFINITY;
+    }
+    m.radius + config.combat.arrival_eps / (m.drift_per_au * mastery)
 }
 
 /// MOND 主力导航偏移：`control` 是舰船所在势力的掌握度（见 [`mond_control`]）；
