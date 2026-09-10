@@ -252,13 +252,14 @@ fn main() {
 
     // Build the world: from a checkpoint (state + RNG) or generated procedurally.
     //
-    // `--derived` 要的是**档里存下来的**那一对 `pre`/`post`（尤其 `post.flow` 的流量中间量，
-    // 那是状态里没有的东西），所以这条路径保留整份 `RoundState`；其余路径继续用 `load_initial`
-    // （它接受 session checkpoint 与裸 state 两种档）。
+    // `--derived`（以及 `--index`）要的是**档里存下来的**那一对 `pre`/`post`：`--derived`
+    // 直接报它，`--index` 用它当**起点回合**的派生态（否则投影一份 checkpoint 会显示
+    // 「全世界零产出/零维护」——那些量只有在它是回合结果时才存在）。其余路径继续用
+    // `load_initial`（它同时接受 session checkpoint 与裸 state 两种档）。
     let seed = parse_seed(&cli.seed);
     let mut stored: Option<RoundState> = None;
     let (mut state, mut rng) = match &cli.start {
-        Some(path) if cli.derived => match load_checkpoint(path) {
+        Some(path) if cli.derived || cli.index.is_some() => match load_checkpoint(path) {
             Ok((rs, prng)) => {
                 let s = rs.state.clone();
                 stored = Some(rs);
@@ -388,7 +389,11 @@ fn main() {
             );
             std::process::exit(10);
         };
-        let outcome = match projection::write_index(&mut state, &config, &mut rng, n, dir) {
+        // 从 checkpoint 起跑时，把档里那一对派生态交给投影当**起点回合**的行（见
+        // `projection::write_index_seeded`）：那一行的 state 就是那一回合的结果，所以
+        // 「产出/维护/治理」应当是那一回合的数，而不是被抹成 0。
+        let start_derived = stored.as_ref().map(|rs| rs.post.clone());
+        let outcome = match projection::write_index_seeded(&mut state, &config, &mut rng, n, dir, start_derived) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));

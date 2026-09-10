@@ -32,7 +32,41 @@ planet_x --seed 7 --round 12 --index out/
 `schema.json` is the single contract both Rust and this kit share: it declares which fields are
 **eager** (inline in `main.jsonl`) vs **lazy** (in a table keyed by id), plus each lazy field's
 table / key / id-column / whether it is per-round, and the column types — so an agent can navigate
-without reverse-engineering the JSON.
+without reverse-engineering the JSON. Since the **derived** tables landed it also carries a
+`derived` section (see below): quantities the **engine computed** rather than state that it stored.
+
+## Derived tables: what the engine computed (not state it stored)
+
+`idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl` are **not** lazy
+fields: they are not reached by exploding an id-array from `main.jsonl`, because their data
+**is not in the state at all** — it is what the round's step functions computed and applied
+(production, fleet upkeep, governance cost/coverage) plus the control surface (who owns which
+leaf). Their schema entry therefore carries `join_on` (a column that *already exists* in
+`main.jsonl`, usually `faction_ids`/`city_ids`) instead of `id_col`.
+
+```python
+q = planet_xq.load("out")
+q.derived("flow")              # generic accessor: q.derived(name, round=None)
+q.flow(round=12)               # per-round × faction: production{} / upkeep / governance_total / governance_coverage
+q.city_flow(round=12)          # per-round × city: production{} (razed cities included, `razed` column)
+q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
+q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
+```
+
+Two things worth knowing:
+
+- **`flow` numbers are also inside `main.jsonl`** as the nested `metrics.factions[<faction>]`
+  object (`production`, `upkeep`, `governance_cost`, `governance_coverage`). These tables are the
+  **joinable reshape** of the same numbers (stable dtypes, one row per `(round, name)`), which is
+  what you want for pandas work.
+- **A projection started from a checkpoint** (`--start ckpt.ron --round 0 --index out/`) puts that
+  checkpoint's own round flow into the start row, because that row's state *is* the result of that
+  round. A fresh `--seed` run has no flow at round 0 (`{}`) — the initial world has no previous round.
+- For **per-ship effective intent** read the `ships` table columns
+  `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
+  `doctrine` / `kiting` — the engine resolves the ownership chain, so **do not re-implement it**
+  (a Python re-implementation is a drift source).
+
 
 ## Usage (uv)
 

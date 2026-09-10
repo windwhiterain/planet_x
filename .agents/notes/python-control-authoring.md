@@ -119,22 +119,32 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
   记得加 gitignore 例外（`/play/*` 默认忽略，`!/play/planet_xq` 是现成的先例，新目录要照抄一行）。
 * ❌ **引擎侧通配/清叶动词 → 已否决**（理由与替代见 `engine-data-plane.md` §1.1）。
 
-## 3. 落地步骤
+## 3. 落地记录（`[~]` 套件本体已建，在 `play/planet_x_ctl`）
 
-1. `play/planet_x_ctl/`：`pyproject.toml`（uv，依赖只需 pandas）+ `planet_x_ctl/__init__.py`
-   （§1 的 API）+ `README.md`（含 §1.2/§1.3 的坑）+ `demo.py`（对真实 ckpt 跑一遍：筛 → 改 →
-   `verify` → 断言无 `warn`）。
-2. 一个示例配方 `play/exp*/recipes/*.py`（用某一局的 ckpt 复现一两条统计施政），跑
-   `--apply` + `--round` 确认没有 `warn/note`。
-3. `agent-play.md` 加一节「用 Python 写施政」，并补上引擎侧的原生写法（`default_ship_order` +
-   逐舰 `mode`），免得"批量改归属"看起来像 Python 独有能力。
-4. 等 `engine-data-plane.md` 的 tidy 表落地后，把 `surface()` 的后端从 shell out 切到 join
-   （只改一个访问器）。
+1. `[x]` `play/planet_x_ctl/`：`pyproject.toml`（uv，唯一依赖 pandas）+ `planet_x_ctl/__init__.py`
+   + `README.md`（双语：分工 / API / 同回合约束 / §1.2 的取值坑 / 引擎缺口）+ 自断言 `demo.py`
+   （自己生成 fixture，无网络）。`.gitignore` 加了一行 `!/play/planet_x_ctl`。
+   **实测**（`uv run python demo.py`，退出码 0）：批量 Auto/Player 各 5 叶、0 跳过 0 接管，
+   值的字节级不变；统计封顶配方 29 叶全落地、`took_over` 恰好是刻意的那一片；
+   两次跑配方逐字节一致；"写值不写 mode / 死舰名 / 换城 building 下标 / 未知资源"四个护栏
+   在**配方期**就拒绝；畸形 diff → `exit 10` 且不抛异常。
+2. `[x]` **确定性**：同一 ckpt + 同一配方 ⇒ 逐字节一致的 diff（demo 里断言）。
+3. `[ ]` **`agent-play.md` 加一节「用 Python 写施政」**（引擎侧的原生写法已经写进 §3/§4 了）。
+4. `[ ]` 换后端 + 去掉本地重算：kit 现在仍 shell out `--control`，并且自己算了一份
+   `effective_*_approx`（**明确标注是漂移源**）。引擎侧现在有了
+   `ships` 表的 `order_leaf_mode`/`order_default_mode`/`order_effective_mode`/`order_effective`/
+   `doctrine`/`kiting` 与 `idx/control.jsonl`，所以下一步是：`surface()` 改 join、
+   删掉 `_approx` 那几列。
+5. `[ ]` 一个示例配方进 `play/exp*/recipes/*.py`（demo 里的统计策略已经很接近，可直接搬）。
 
 ## 4. 复现 / 验证
 
 ```bash
-cd play/planet_x_ctl && uv sync && uv run python demo.py
+cd play/planet_x_ctl && uv sync && uv run python demo.py     # 自断言，退出码 0 = 全过
 # 引擎侧对照（同一份 diff 手写版长什么样）：
 planet_x --start play/exp2/ckpt_r12.ron --apply steer.json --control 2>receipt.jsonl
+# 读派生表（引擎算出来的量）：
+planet_x --seed 7 --round 6 --index out/ && python -c "
+import planet_xq; q = planet_xq.load('out')
+print(q.flow(6)[['faction_id','upkeep']]); print(q.control(6)['kind'].value_counts())"
 ```

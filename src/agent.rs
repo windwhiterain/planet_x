@@ -43,6 +43,8 @@ pub struct Trajectory {
     /// 势力：资源库存/外交关系/投资与建造预算（每个 faction 一对象）。
     pub factions: Vec<Faction>,
     /// 飞船：坐标/舰级/耐久/阵营/当前命中与目标（每艘 ship 一对象）。
+    /// `doctrine`/`kiting` 是**有效值**（叶 → 舰队默认 → 舰上记录值，引擎解析），
+    /// 不是舰上那份出厂快照——见 `state_json` 的注释。
     pub ships: Vec<Ship>,
     /// 本回合事件（谁开火/被毁/城被夷平/殖民/战争/剧情…）。
     pub events: Vec<GameEvent>,
@@ -76,6 +78,18 @@ pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
         metrics: derived.metrics.clone(),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
+    // 舰的**风格**在这里给**有效值**（叶 → 舰队默认 → 舰上记录值），不是 `Ship` 上那份记录：
+    // 风格现在是活层，`--apply` 写的是叶片，所以直接序列化 `Ship` 只能读到出厂快照——agent
+    // 会看到 `kiting: 0.0` 而以为是基线，实际上舰队默认早把它推成 -1.0 了。这类
+    // 「读数不反映真实行为」正是本项目最忌讳的那种坑，所以在唯一的 agent 视图上就地改掉
+    // （与 `round_value` 同一手法：序列化后统一修字段）。记录值仍完整地存在 checkpoint 里。
+    // 放在 `round_value` **之前**，让这些值也一起按两位小数规整（避免 token 噪声）。
+    if let Some(ships) = v.get_mut("ships").and_then(|s| s.as_array_mut()) {
+        for (row, s) in ships.iter_mut().zip(state.ships.iter()) {
+            row["doctrine"] = serde_json::to_value(state.ship_doctrine(s.name.clone())).expect("doctrine is serializable");
+            row["kiting"] = json!(state.ship_kiting(s.name.clone()));
+        }
+    }
     round_value(&mut v);
     v
 }
@@ -234,6 +248,43 @@ pub fn governance_distance(state: &State, owner: &str, body_id: &str) -> f64 {
 mod tests {
     use super::*;
     use crate::config;
+
+    /// 风格是**活层**：agent 视图（`state_json`）必须给**有效值**，而不是 `Ship` 上那份
+    /// 出厂快照——否则 agent 读到 `kiting: 0.0`、以为还是基线，实际舰队默认早已把它推成
+    /// `-1.0`（又一次「读数不反映真实行为」）。
+    #[test]
+    fn state_view_reports_effective_doctrine_and_kiting() {
+        let cfg = config::load_config();
+        let mut state = crate::world::default_state(&cfg, 7);
+        let (fid, name) = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .map(|s| (s.faction_id.clone(), s.name.clone()))
+            .expect("中国 has a starting ship");
+        let record_kiting = state.ship(&name).unwrap().kiting;
+        let record_doctrine = state.ship(&name).unwrap().doctrine;
+
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "default_kiting": {"kiting": -1.0, "mode": "Player"},
+                "default_doctrine": {"temper": 0.5, "mode": "Player"}}]
+        });
+        crate::control::apply_patch(&mut state, &cfg, &diff).expect("默认风格 applies");
+
+        let v = state_json(&state, &crate::sim::derived_from_state(&state, &cfg));
+        let row = v["ships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == serde_json::json!(name))
+            .expect("该舰在视图里");
+        assert_eq!(row["kiting"], serde_json::json!(-1.0), "视图必须给有效姿态（舰队默认）");
+        assert_eq!(row["doctrine"]["temper"], serde_json::json!(0.5), "视图必须给有效风格");
+        // 记录值不动（它仍是出厂快照）——这正是"视图不能直接序列化 Ship"的原因。
+        assert_eq!(state.ship(&name).unwrap().kiting, record_kiting);
+        assert_eq!(state.ship(&name).unwrap().doctrine, record_doctrine);
+    }
 
     /// `meta_value` 是让 agent 读的「规则字典」。它必须从 config 结构体**派生**，
     /// 而不是手写字段清单——此守卫确保新增的 config 字段（尤其是 `combat` 那些）

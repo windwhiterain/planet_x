@@ -144,9 +144,66 @@ fn derived_matches_the_projection_for_the_same_round() {
     assert!(main["faction_ids"].is_array(), "main 行要有 faction_ids（派生表的 join 列）");
 }
 
+/// **投影一份 checkpoint 时，起点那一行的流量必须是那一回合的真数**，不是 0。
+///
+/// 档里的 `post` 就是「产生这个状态的那一回合」的派生态，而 `--start ckpt --round 0 --index`
+/// 写出的回合 0 行的 state 正是那个状态。若这里退回 `derived_from_state`，agent 会看到
+/// 「全世界零产出、零维护、零治理」——一个数字上自洽、语义上骗人的读面。
 #[test]
-fn derived_without_checkpoint_says_it_was_recomputed() {
-    let st = run(&["--seed", "7", "--derived"]);
+fn projecting_a_checkpoint_keeps_that_rounds_flow() {
+    let s = Scratch::new("seedflow");
+    let first = s.0.join("run");
+    let ckpt = s.0.join("ckpt.ron");
+    let st = run(&["--seed", "7", "--round", "4", "--index", first.to_str().unwrap(), "--save", ckpt.to_str().unwrap()]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let ckpt_s = ckpt.to_str().unwrap();
+
+    // 参考：档里存下来的派生态。
+    let st = run(&["--start", ckpt_s, "--derived"]);
+    let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
+    let round = v["round"].as_u64().unwrap();
+    assert_eq!(round, 4);
+
+    // 只用这个 checkpoint 投影（不推进任何回合）。
+    let proj = s.0.join("proj");
+    let st = run(&["--start", ckpt_s, "--round", "0", "--index", proj.to_str().unwrap()]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+
+    let main = last_main_row(&proj);
+    assert_eq!(main["round"], serde_json::json!(round));
+    assert_eq!(
+        main["metrics"], v["post"]["metrics"],
+        "起点回合的 metrics 必须是档里那一回合的观测，不是重算（重算会把产出/维护/治理抹成 0）"
+    );
+    let flow = derived_rows(&proj, "flow", round);
+    assert!(!flow.is_empty(), "起点回合应有 flow 行");
+    let mut nonzero = 0usize;
+    for row in &flow {
+        let fid = row["faction_id"].as_str().unwrap();
+        assert_eq!(&row["upkeep"], &v["post"]["flow"]["upkeep"][fid], "{fid} 的 upkeep 应为档里的真数");
+        assert_eq!(
+            res_map(&row["production"]),
+            res_map(&v["post"]["flow"]["faction_production"][fid]),
+            "{fid} 的 production 应为档里的真数"
+        );
+        if row["upkeep"].as_f64().unwrap_or(0.0) > 0.0 {
+            nonzero += 1;
+        }
+    }
+    assert!(nonzero > 0, "这条守卫要求至少有一个势力的维护费非零，否则等于没检查（零值也能骗过相等断言）");
+
+    // 对照：全新开局的回合 0 确实没有流量（那是初始世界，没有"上一回合"）。
+    let fresh = s.0.join("fresh");
+    let st = run(&["--seed", "7", "--round", "0", "--index", fresh.to_str().unwrap()]);
+    assert!(st.status.success());
+    assert!(
+        derived_rows(&fresh, "flow", 0).iter().all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0),
+        "全新开局的回合 0 不该有流量"
+    );
+}
+
+#[test]
+fn derived_without_checkpoint_says_it_was_recomputed() {    let st = run(&["--seed", "7", "--derived"]);
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     assert_eq!(v["source"], serde_json::json!("state"));

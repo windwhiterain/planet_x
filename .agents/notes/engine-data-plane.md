@@ -144,3 +144,36 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
 舰队怎么重组、谁接战了，只散在事件与状态差里）。想要"AI 在想什么"的读面，得在
 `sim`/`autocontrol` 的决策点补一次捕获（新的 `Decisions`），并且必须**行为中性**——
 判据：同 seed/同回合的 `--digest` 输出与捕获前**逐字相同**，长局 harness 全绿。
+
+## 8. 落地**之后**发现的缺口（同轮处理 / 记成候选）
+
+写侧套件 `play/planet_x_ctl`（并行做的那一半）在真实使用中撞出六条，逐条记录处理方式——
+**"加了表就完事"是这一节最想纠正的错觉**：
+
+1. `[x]` **只写了表、没让消费者看见**（本轮修复）：四张派生表在 `schema.json` 的**新 `derived` 段**
+   （不是 `lazy` 段——它们不是靠 main 的 id 数组索引，而是靠 `join_on` 指向 main 已有的列），
+   而 `planet_xq.load()` 只读 `schema["lazy"]` ⇒ Python 侧**看不见**它们。
+   修复：`planet_xq` 现在也读 `schema["derived"]`，并给 `q.derived(name, round)` +
+   `q.flow()/q.city_flow()/q.control()/q.scope()` 四个便利读法（缺表时报出"旧版投影没有这一段"）。
+   **教训**：契约是"发射端 + 消费者"两处，光在 Rust 侧加 schema 段不算完。
+2. `[x]` **投影一份 checkpoint 时起点回合的流量是 0**（本轮修复）：`--start ckpt --round 0 --index`
+   走的是 `derived_from_state`（flow 恒空），于是 agent 看到"全世界零产出/零维护/零治理"——
+   数字自洽、语义骗人。修复：`projection::write_index_seeded(..., start: Option<Derived>)`，
+   `--start` 时把档里存的 `post` 交给投影当**起点回合**的行（那一行的 state 就是那一回合的结果）；
+   守卫：`tests/projection_derived.rs::projecting_a_checkpoint_keeps_that_rounds_flow`
+   （含"至少一个势力维护费非零"的防空转断言）。全新开局仍然没有流量（初始世界没有"上一回合"）。
+3. `[ ]` **`--control` 的叶值被舍入到 2 位小数**（已知不对称，只记录）：`round_view` 为了
+   token 噪声把预算/权重四舍五入，而 checkpoint 存的是全精度——于是"dump → 改 → 回传"会
+   **静默量化到 0.01**。对玩法无实质影响（模拟用的是存下来的数），但它与"读面即写面、模板
+   原样回传"的承诺有张力。候选修法：读面不舍入，或加 `--control-raw`。kit 侧已按半个显示单位
+   容差处理。
+4. `[x]` **风格轴曾经没有 `mode`** —— 已由 `70e15e5` 解掉（`ship_doctrine`/`ship_kiting` 现在
+   都是三态叶片 + 写值即接管 + 势力级默认）。写侧套件是在那次提交**之前**做的，所以它的
+   报告里把这条列为"做不到"；现在 kit 可以（也应该）要求显式 `mode`。
+5. `[ ]` **ships 表没有 `spawned_round`**（候选）：编制表的确定性 tie-break（"旗舰 = hull_max
+   最大的巡洋舰，同分取**最老的**"）因此表达不出来，kit 只能用名字序当代理（舰名带世代后缀，
+   近似但对不齐）。要做得给 `Ship` 加一个出厂回合字段 + `SCHEMA_VERSION` 升档（旧档缺 ⇒ 未知）。
+6. `[x]` **`--control` 需要 CWD 里有 `config/game.ron`，且二进制与 config 是 worktree 局部配对**
+   （kit 侧的坑，已按其办法解决）：从 checkpoint 往上找 config 会找到**另一个 worktree 的**配置，
+   于是报 `missing field 'sanction_trade_mult'`。kit 现在优先按**二进制自己**的位置推 CWD，
+   checkpoint 次之。

@@ -162,6 +162,24 @@ pub fn write_index(
     rounds: u32,
     dir: &Path,
 ) -> Result<IndexOutcome, String> {
+    write_index_seeded(state, config, rng, rounds, dir, None)
+}
+
+/// [`write_index`]，但允许把**起点回合的派生态**交进来。
+///
+/// `--start <ckpt> --index` 时档里存着**产生当前状态的那一回合**的派生态：那一行的 state 就是
+/// 那一回合的结果，所以用档里的 `post` 比用 `derived_from_state`（`flow` 恒空、`metrics` 里
+/// 的产出/维护/治理全被抹成 0）**更真**——否则「投影一份 checkpoint」会让 agent 看到「全世界
+/// 零产出、零维护」，而真相是这些量只在它是回合结果时才有。全新开局（`--seed`）没有这一对，
+/// 传 `None`（回合 0 就是初始世界，没有流量）。
+pub fn write_index_seeded(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    rounds: u32,
+    dir: &Path,
+    start: Option<Derived>,
+) -> Result<IndexOutcome, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir.join(IDX_DIR)).map_err(|e| e.to_string())?;
     fs::write(dir.join(SCHEMA), projection_schema().to_string()).map_err(|e| e.to_string())?;
@@ -217,9 +235,16 @@ pub fn write_index(
     }
 
     // Round 0 (start state) then each advancing round.
-    let mut pre = sim::derived_from_state(state, config);
-    write_round(&mut w, state, config, &pre)?;
-    let mut post = pre.clone();
+    //
+    // 起点那一行的派生态：有档就用档里那一对（见 [`write_index_seeded`]），没有就按当前状态重算。
+    let (mut pre, mut post) = match start {
+        Some(s) => (s.clone(), s),
+        None => {
+            let d = sim::derived_from_state(state, config);
+            (d.clone(), d)
+        }
+    };
+    write_round(&mut w, state, config, &post)?;
     for _ in 0..rounds {
         // `pre` = 本回合开头的观测（随机决策尚未落地）；`post` = 结尾的观测 + 本回合流量。
         pre = sim::derived_from_state(state, config);
