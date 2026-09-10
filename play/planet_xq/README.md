@@ -172,6 +172,26 @@ milestone event cannot be emitted without entering the ledger. Default is lossle
 `history.max_milestones` config caps it, and any truncation is reported via `ledger.dropped` /
 `dropped_through_round` instead of happening silently.
 
+> **`q.ledger()` reads the projection, not `State::ledger`** — the two agree only for a *single-segment*
+> run. `--index` truncates its directory (`File::create`), so after a segmented run
+> (`--round 30 --save ckpt` then `--start ckpt --round 30`) the second dir covers only its own rounds:
+> measured, `load("seg2").ledger()` = **199** rows (rounds 30→60) while the checkpoint's
+> `State::ledger` = **460** rows (rounds 1→60). To reconstruct the whole save in Python, union and
+> dedupe on `event_id`:
+>
+> ```python
+> pd.concat([load("seg1").events(), load("seg2").events()]).drop_duplicates(subset=["event_id"])
+> # 671 events / 460 milestones — identical to the checkpoint's State::ledger
+> ```
+>
+> Forgetting `drop_duplicates` **silently double-counts the seam round** (the two dirs overlap on
+> round 30 with identical `event_id`s — 9 rows here). Per-shot detail (`attack`/`siege`) only exists
+> in the segment that produced it.
+>
+> **Cost of the in-state ledger**: it is the largest part of a checkpoint and grows linearly —
+> measured 41% of a round-60 checkpoint (43.5 of 106 KB) and **66% at round 200** (202 of 306 KB),
+> ~9 entries/round. An agent that re-`--save`s every round therefore rewrites that history each time.
+
 
 > The ledger is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
 > `raze_city` / `reseed_city` / `found_city` / `overrun_city` / `defect_city`): every ownership or

@@ -394,7 +394,7 @@ class PlanetXQ:
         limit: int | None = None,
         entity: tuple[str, str] | None = None,
     ) -> pd.DataFrame:
-        """**里程碑账本**（= `--ledger` 的投影版）：本局全部里程碑事件，按发生顺序。
+        """**里程碑账本视图**：本**投影目录**里的全部里程碑事件，按发生顺序。
 
         只保留 `salience == "milestone"` 的行（城易主/夷平/舰存亡/开战停战/结盟/迁都/剧情），
         逐发流水（`attack`/`siege`）永不出现——这正是它可读的原因。
@@ -405,8 +405,21 @@ class PlanetXQ:
 
         `limit=N` 只保留**最后 N 条**（与 CLI `--ledger N` 同一个语义）。
 
-        注意：`State::ledger` 本身随 checkpoint 存活（`planet_x --start ckpt --ledger`）；这里
-        读的是**投影**累积的全量历史，两者在默认配置（无损）下内容一致。
+        ⚠ **它读的是投影，不是 `State::ledger`**，两者只在**单段运行**（一次 `--index` 跑完）
+        下内容一致。`--index` 每跑一次都会**截断**目录（`File::create`），所以**分段续玩**时：
+
+        ```
+        planet_x --seed 7 --round 30 --index seg1/ --save ckpt     # seg1 = 回合 1..30
+        planet_x --start ckpt --round 30 --index seg2/ --save ckpt # seg2 = 回合 30..60（含重复的 r30）
+        ```
+
+        * `load("seg2").ledger()` 只有 **199** 条（回合 30→60）——而 ckpt 里 `State::ledger` 有
+          **460** 条（回合 1→60）。**跨段连续的历史此刻只能在 CLI 侧拿**
+          （`planet_x --start ckpt --ledger`），Python 侧要自己拼：
+          `pd.concat([a.events(), b.events()]).drop_duplicates(subset=['event_id'])`
+          ——拼完是 671 条 / 460 里程碑，与 ckpt 的 `State::ledger` **逐条相等**；
+          **忘了去重会静默多算 9 条**（两个目录在衔接回合上重叠，`event_id` 完全相同）。
+        * 逐发细节（`attack`/`siege`）只存在于那一段自己的投影里；拼接后早期回合只有里程碑。
         """
         df = self.events(salience="milestone", since=since, until=until, entity=entity)
         if df.empty:
