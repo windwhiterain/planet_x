@@ -78,6 +78,25 @@ pub struct Roll {
     /// **结果**：闸门 ⇒ 走的那一支的可读标签（`"freight"` / `"war"` / `"accepted"` / `"refused"`…）；
     /// 抽签 ⇒ 选中的那一段（货栈天体名 / 合同号 / 设计主题）。`None` = 掷了但结果不由这枚骰子决定。
     pub picked: Option<String>,
+    /// **候选池**（B5c）：加权抽签时，**参与抽签的每个候选**各自占多少权重。
+    ///
+    /// 为什么要有它：`pool_total` 只说了「池子多大」，说不了「**为什么是它而不是别人**」——
+    /// 例如「为什么这艘运输舰去了木星而不是火星」要的正是「那两条腿各有多少货」。
+    /// 闸门与幅度骰那一档为空（它们的判据是**一个数**，没有池子）。
+    ///
+    /// ⚠ **只记池子，不记「落选者被算了多少次」**：像集货那样「一次派单问一枚骰子」的抽签，
+    /// 池子就是全部信息；而「逐候选各掷一枚」的形态在本仓库里不存在（那会造出顺序依赖）。
+    #[serde(default)]
+    pub pool: Vec<PoolEntry>,
+}
+
+/// 加权抽签池里的一个候选（[`Roll::pool`] 的一项）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PoolEntry {
+    /// 候选的名字（天体名 / 势力名 / 主题名 / 舰名……）。
+    pub name: String,
+    /// 它的权重（= 它被抽中的概率 × `pool_total`）。
+    pub weight: f64,
 }
 
 impl RoundInputs {
@@ -102,7 +121,7 @@ impl RoundInputs {
         value: f64,
         threshold: f64,
         branch: &str,
-    ) {
+    ) -> &mut Roll {
         self.push_roll(Roll {
             purpose: purpose.to_string(),
             faction: faction.to_string(),
@@ -111,10 +130,16 @@ impl RoundInputs {
             threshold: Some(threshold),
             pool_total: None,
             picked: Some(branch.to_string()),
+            // 闸门的判据是**一个数**（机会值）——没有池子时留空；定编那两处由调用方补。
+            pool: Vec::new(),
         });
+        self.rolls.last_mut().expect("刚 push 过")
     }
 
     /// 记一次**加权抽签**：`value × pool_total` 落在哪一段（`picked` = 选中的那一段）。
+    ///
+    /// 返回刚记下的那一条：**池子**（B5c，见 [`Roll::pool`]）由调用方在下一行挂上——
+    /// `inputs.record_draw(…).pool = 每条腿各有多少货;`
     pub fn record_draw(
         &mut self,
         purpose: &str,
@@ -123,7 +148,7 @@ impl RoundInputs {
         value: f64,
         pool_total: f64,
         picked: &str,
-    ) {
+    ) -> &mut Roll {
         self.push_roll(Roll {
             purpose: purpose.to_string(),
             faction: faction.to_string(),
@@ -132,6 +157,8 @@ impl RoundInputs {
             threshold: None,
             pool_total: Some(pool_total),
             picked: Some(picked.to_string()),
+            pool: Vec::new(),
         });
+        self.rolls.last_mut().expect("刚 push 过")
     }
 }

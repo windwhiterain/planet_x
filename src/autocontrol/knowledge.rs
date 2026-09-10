@@ -70,7 +70,7 @@ const OBSERVER_EFF_GAIN: f64 = 1.5;
 /// 深处从「期望 0.2 次到位」变成「当月到位」），所以目标必须能**跟着掌握度迁移**。
 /// 12 回合（= 一年）是「够飞一趟、又不至于一辈子钉在近处」的量级。
 /// 抽签的键是**回合 ÷ 它**（整数商），所以同一个周期内全势力的选择恒定。
-const RETARGET_EPOCH: u32 = 12;
+pub(crate) const RETARGET_EPOCH: u32 = 12;
 
 /// 一艘舰在深度 `depth` 处的**在场价值**——与 [`sim::mond_presence`] **同一把尺子**
 /// （那一条是唯一的知识来源，这里再算一份就必须逐字一致，所以共用这个函数）。
@@ -118,10 +118,29 @@ pub fn body_weight(config: &GameConfig, control: f64, depth: f64) -> f64 {
 /// 无中心、无顺序依赖，而**期望上自动等于按收益成比例**。骰子的键是
 /// `(势力, 周期)`——同一周期内全势力一个答案，跨周期才会迁移（见 [`RETARGET_EPOCH`]）。
 pub fn target_body(state: &State, config: &GameConfig, fid: &str) -> Option<(BodyId, f64)> {
+    let epoch = state.round / RETARGET_EPOCH.max(1);
+    let (dest, _) = target_body_with_roll(state, config, fid, epoch);
+    dest
+}
+
+/// [`target_body`] 的**判据**（纯函数，吃骰子）：返回选中的天体 + **这次抽签的账**
+/// （掷出的值、池子总权重、每个候选的权重）。
+///
+/// `roll` 是 `(势力, "", 周期, "observe_body")` 那一枚 ∈ `[0,1)`；`None` = 没得挑
+/// （带里没有候选、或权重全为 0）⇒ **不掷、也不记**。
+///
+/// 拍板那条路（`tactics::ai_ship_turn` 真的把观测舰派出去时）拿它去记账；
+/// 读面（投影显示「这艘观测舰去哪儿」）走 [`target_body`]，**不记**——读面不该产生流水。
+pub fn target_body_with_roll(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    epoch: u32,
+) -> (Option<(BodyId, f64)>, Option<(f64, f64, Vec<(String, f64)>)>) {
     let control = sim::mond_control(state, fid);
     let cands = band_bodies(state, config);
     if cands.is_empty() {
-        return None;
+        return (None, None);
     }
     let weights: Vec<f64> = cands
         .iter()
@@ -129,17 +148,25 @@ pub fn target_body(state: &State, config: &GameConfig, fid: &str) -> Option<(Bod
         .collect();
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
-        return None;
+        return (None, None);
     }
-    let epoch = state.round / RETARGET_EPOCH.max(1);
-    let mut roll = sim::derived_roll(fid, "", epoch, "observe_body") * total;
+    let roll = sim::derived_roll(fid, "", epoch, "observe_body");
+    let mut x = roll * total;
+    let pool: Vec<(String, f64)> = cands
+        .iter()
+        .zip(&weights)
+        .map(|((b, _), w)| (b.clone(), *w))
+        .collect();
     for (i, w) in weights.iter().enumerate() {
-        if roll < *w {
-            return Some(cands[i].clone());
+        if x < *w {
+            return (Some(cands[i].clone()), Some((roll, total, pool)));
         }
-        roll -= w;
+        x -= w;
     }
-    cands.last().cloned()
+    (
+        cands.last().cloned(),
+        Some((roll, total, pool)),
+    )
 }
 
 /// 本势力**科学↔技术**思潮给出的**观测倾向**（头数倍数，中庸 = 1.0）。
@@ -237,7 +264,7 @@ pub(crate) fn observe_with_roll(
     ship_id: &str,
     quota: f64,
     roll: f64,
-) -> (bool, Option<f64>) {
+) -> (bool, Option<(f64, Vec<(String, f64)>)>) {
     // 1) 没分到船就不去（配额是三个动机抢完舰队的结果，见 `freight::role_quotas`）。
     if quota <= 0.0 {
         return (false, None);
@@ -272,6 +299,7 @@ pub(crate) fn observe_with_roll(
     };
     let mut mine = 0.0;
     let mut tickets = 0.0;
+    let mut pool: Vec<(String, f64)> = Vec::new();
     for s in state
         .ships
         .iter()
@@ -291,6 +319,7 @@ pub(crate) fn observe_with_roll(
         }
         let t = ticket(s);
         tickets += t;
+        pool.push((s.name.clone(), t));
         if s.name == ship_id {
             mine = t;
         }
@@ -306,7 +335,7 @@ pub(crate) fn observe_with_roll(
     let p = (flow * mine / tickets).min(1.0);
     let flip = roll < p;
     let observe = if cur { !flip } else { flip };
-    (observe, Some(p))
+    (observe, Some((p, pool)))
 }
 
 #[cfg(test)]

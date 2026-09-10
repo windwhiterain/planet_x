@@ -374,20 +374,28 @@ fn draw_theme<'a>(
         return &themes[0];
     }
     // **输入面（B5）**：主题是**加权抽签**抽出来的（权重 = 主题基础权重 + 战况加成）——
-    // 记下掷出的值、池子的总权重与抽中的主题，于是「船坞为什么画了这张图」可查。
+    // 记下掷出的值、池子的总权重、**每个主题各占多少**（B5c）与抽中的主题，
+    // 于是「船坞为什么画了这张图」可查。
     let roll = sim::derived_roll(fid, class, round, "blueprint_theme");
+    let pool: Vec<crate::model::PoolEntry> = themes
+        .iter()
+        .map(|t| crate::model::PoolEntry {
+            name: t.name.clone(),
+            weight: (t.weight + war * t.war_weight).max(0.0),
+        })
+        .collect();
     let mut x = roll * total;
     let mut last = &themes[0];
     for t in themes {
         last = t;
         x -= (t.weight + war * t.war_weight).max(0.0);
         if x <= 0.0 {
-            inputs.record_draw("blueprint_theme", fid, class, roll, total, &t.name);
+            inputs.record_draw("blueprint_theme", fid, class, roll, total, &t.name).pool = pool.clone();
             return t;
         }
     }
     // 浮点兜底：落在池子末尾之外 ⇒ 取最后一条（与旧行为逐字相同）。
-    inputs.record_draw("blueprint_theme", fid, class, roll, total, &last.name);
+    inputs.record_draw("blueprint_theme", fid, class, roll, total, &last.name).pool = pool;
     last
 }
 

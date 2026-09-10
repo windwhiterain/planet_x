@@ -640,7 +640,29 @@ pub(crate) fn ai_ship_turn(
     // 于是它会一直待在带里（`sim::mond_presence` 只认「此刻在带内的活舰」）。
     // 迷航照旧发生（深处要试几次才到位，见 `sim::mond_drift`），这正是这条干线的意义。
     if role == ShipRole::Observe {
-        match knowledge::target_body(state, config, &owner) {
+        // **输入面（B5）**：选靶是**加权抽签**（权重 = 该天体此刻的期望在场收益）。
+        // 骰子按 `(势力, 周期)` 派生 ⇒ 同一周期内全势力一个答案、跨周期才迁移；这里只在
+        // **真的派船**时记一条（读面显示「这艘观测舰去哪儿」走的是不记账的 `target_body`）。
+        let epoch = state.round / crate::autocontrol::knowledge::RETARGET_EPOCH.max(1);
+        let (target, probe) = knowledge::target_body_with_roll(state, config, &owner, epoch);
+        if let Some((roll, total, pool)) = probe {
+            if let Some((body, _)) = &target {
+                inputs
+                    .record_draw(
+                        "observe_body",
+                        &owner,
+                        &epoch.to_string(),
+                        roll,
+                        total,
+                        body,
+                    )
+                    .pool = pool
+                    .into_iter()
+                    .map(|(name, weight)| crate::model::PoolEntry { name, weight })
+                    .collect();
+            }
+        }
+        match target {
             Some((body, _)) => {
                 let behavior = ShipBehavior::Dock { body: body.clone() };
                 if let Some(c) = state.control_mut(owner.clone()) {

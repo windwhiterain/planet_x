@@ -828,12 +828,15 @@ class PlanetXQ:
           （判据不可重算，骰子可重算）。**三种形状**：**闸门**（`threshold` 有值，判据
           `value < threshold`，`picked` = 走的那一支）、**加权抽签**（`pool_total` 有值，
           `picked` = 选中的那一段）、**幅度骰**（两者都空，只有 `nav`：掷出的数直接当偏移量，
-          `picked` = 落点坐标）。已接的用途：定编 `role`/`observe_role`、派单 `route`、合同
+          `picked` = 落点坐标）。**`pool` = 候选池**（B5c）：加权抽签里每个候选各占多少权重
+          （`[{name, weight}]`，权重之和 = `pool_total`）——它答的是「**为什么是它而不是别人**」
+          （「为什么这艘运输舰去了冥王星而不是卡戎」＝那两条腿各有多少货）。已接的用途：
+          定编 `role`/`observe_role`、派单 `route`、观测选靶 `observe_body`、合同
           `gate`/`accept`/`pick`/`assign`/`quit`/`review`/`renew`、船坞
           `retool`/`blueprint_intent`/`blueprint_retune`/`blueprint_theme`、风格轴
           `style_chance`、导航 `nav`。⚠ 「**没人接我的单**」看 `gate`：`unheard`（没听说过）
           与 `unwilling`（听说了不接）是两件事，只读事件是分不出来的。
-          ⚠ **量**：实测 ~127 条/回合（约 21.6 KB/回合，与整份 `view` 同量级）——
+          ⚠ **量**：实测 ~130 条/回合（约 22 KB/回合，与整份 `view` 同量级）——
           只想看一件事时先按 `purpose` 过滤（`pd.DataFrame(rolls)` 之后 `groupby('purpose')`）。
 
         ⚠ 这一面**不在 `main.jsonl` 里**（按回合 join 这张表更省），也**不在 `--derived` 的

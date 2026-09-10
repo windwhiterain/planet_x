@@ -450,9 +450,16 @@ prev  : production={硅:20,碳:0.75,铁:40}, upkeep=20.6, governance_cost=6.0
     > 若哪天真要压：`style_chance` 的 `skip`（1371 条里绝大多数是「这回合没动」）可以折成
     > 「每舰每轴一行、只记动没动」，或把 `subject` 里的冗余前缀（`长城:doctrine:temper`）
     > 拆成两列。**现在不做**——记全的收益（能回答「为什么它没动」）大于这几 KB。
-  * ⏳ **还剩 B5b-3（小）**：`observe_body`（观测舰选靶，`(势力, 回合/EPOCH, "observe_body")`
-    的加权抽签）与风格 `step`（步长那第二枚骰子，**有意不单独记**：同一个决定的第二个数，
-    读面已从轴的新值看出结果——记两次会破「一条抽签 = 一个决定」的口径）。* **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
+  * ✅ **B5b-3 / B5c 也已落地**：`observe_body`（观测选靶，加权抽签；读面显示「这艘观测舰去
+    哪儿」走的是**不记账**的 `target_body`，只有真的派船时记）；以及 **B5c = 候选池**：
+    `Roll` 长出 `pool: [{name, weight}]`，在六个真抽签处填上（`route` 各条腿的货、`pick`
+    各家的信誉权重、`observe_body` 各天体的期望在场收益、`blueprint_theme` 各主题权重、
+    定编 `role`/`observe_role` 同侧每艘候选舰的票）——它答的是「**为什么是它而不是别人**」，
+    而不只是「池子多大」。守卫钉住三条恒等式：池非空、`Σ weight == pool_total`、
+    `picked ∈ pool`。API 形状：`record_gate/record_draw` 返回 `&mut Roll`，池子在下一行
+    `… .pool = …` 挂上（省掉 7 个参数的签名）。
+  * ⏳ **还剩（小）**：风格 `step`（步长那第二枚骰子）**有意不记**——同一个决定的第二个数，
+    读面已从轴的新值看出结果，记两次会破「一条抽签 = 一个决定」的口径。* **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
   积压占比、合同的 `eligibility`……它们是**回合中段的 state 快照** ⇒ 属 ③，同样只在拍板处记。
   B5b-1 已经把**判据本身**记进去了（闸门的 `threshold`、抽签的 `pool_total` 就是它们）；
   剩下的「候选池全表要不要逐项收」等 B5b-2 之后再定——那一项会让记录从 ~37 条/回合涨到

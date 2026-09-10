@@ -248,7 +248,15 @@ pub(crate) fn match_carriers(
             x -= w;
         }
         let (carrier, _) = chosen;
-        inputs.record_draw("pick", &carrier, &key, pick_roll, total, &key);
+        // **候选池（B5c）**：愿意接的每家各占多少权重——「为什么是它拿到了」= 信誉加权。
+        let pool: Vec<crate::model::PoolEntry> = willing
+            .iter()
+            .map(|(f, w)| crate::model::PoolEntry {
+                name: f.clone(),
+                weight: *w,
+            })
+            .collect();
+        inputs.record_draw("pick", &carrier, &key, pick_roll, total, &carrier).pool = pool;
         let terms = hire_terms(state, config, &c.from, &c.to);
         if let Some(cc) = state.contracts.get_mut(id) {
             cc.carrier = Some(carrier.clone());

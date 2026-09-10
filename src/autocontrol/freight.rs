@@ -562,26 +562,29 @@ pub(crate) fn decide_role(
 ) -> ShipRole {
     let roll = sim::derived_roll(fid, ship_id, state.round, "role");
     let (role, probe) = role_with_roll(state, config, fid, ship_id, roll, Some(inputs));
-    if let Some(p) = probe {
-        inputs.record_gate(
-            "role",
-            fid,
-            ship_id,
-            roll,
-            p,
-            match role {
-                ShipRole::Freight => "freight",
-                ShipRole::War => "war",
-                ShipRole::Observe => "observe",
-            },
-        );
+    if let Some((p, pool)) = probe {
+        inputs
+            .record_gate(
+                "role",
+                fid,
+                ship_id,
+                roll,
+                p,
+                match role {
+                    ShipRole::Freight => "freight",
+                    ShipRole::War => "war",
+                    ShipRole::Observe => "observe",
+                },
+            )
+            // **候选池（B5c）**：同侧每艘候选舰各持多少票——「为什么是它被定编」就在这张表里。
+            .pool = pool;
     }
     role
 }
 
-/// 定编的**判据**（纯函数，吃骰子）：返回角色 + **这次抽签的机会值**。
+/// 定编的**判据**（纯函数，吃骰子）：返回角色 + **这次抽签的机会值与候选池**。
 ///
-/// 第二个值是 `Some(p)` 当且仅当**这枚骰子真的被用到了**（判据是 `roll < p`）；
+/// 第二个值是 `Some((p, pool))` 当且仅当**这枚骰子真的被用到了**（判据是 `roll < p`）；
 /// 早退的那几档（硬承诺 / 玩家表态 / 观测优先 / 运力为 0）返回 `None`——
 /// 于是记账那边不必复制一遍早退逻辑（**判据只有一处**）。
 fn role_with_roll(
@@ -592,7 +595,7 @@ fn role_with_roll(
     roll: f64,
     // 拍板那条路把输入面传进来（记观测那一支的抽签）；估算那条路传 None。
     mut recorder: Option<&mut RoundInputs>,
-) -> (ShipRole, Option<f64>) {
+) -> (ShipRole, Option<(f64, Vec<crate::model::PoolEntry>)>) {
     // 1) 硬承诺（见上）。
     if state.contracts.assignment_of(ship_id).is_some() {
         return (ShipRole::Freight, None);
@@ -628,7 +631,8 @@ fn role_with_roll(
         observe_quota,
         observe_roll,
     );
-    if let (Some(p), Some(rec)) = (observe_p, recorder.as_deref_mut()) {
+    if let (Some((p, pool)), Some(rec)) = (observe_p, recorder.as_deref_mut()) {
+        // **候选池（B5c）**：观测那一支的候选舰各持多少票。
         rec.record_gate(
             "observe_role",
             fid,
@@ -636,7 +640,8 @@ fn role_with_roll(
             observe_roll,
             p,
             if observe { "observe" } else { "war" },
-        );
+        )
+        .pool = pool.into_iter().map(|(n, w)| crate::model::PoolEntry { name: n, weight: w }).collect();
     }
     if observe {
         return (ShipRole::Observe, None);
@@ -674,6 +679,8 @@ fn role_with_roll(
     };
     let mut mine = 0.0;
     let mut tickets = 0.0;
+    // **候选池（B5c）**：同侧每个候选舰各持多少票——「为什么是这艘被定编」= 票重 × 缺口。
+    let mut pool: Vec<crate::model::PoolEntry> = Vec::new();
     for s in state
         .ships
         .iter()
@@ -699,6 +706,10 @@ fn role_with_roll(
         }
         let t = ticket(s);
         tickets += t;
+        pool.push(crate::model::PoolEntry {
+            name: s.name.clone(),
+            weight: t,
+        });
         if s.name == ship_id {
             mine = t;
         }
@@ -725,7 +736,7 @@ fn role_with_roll(
     } else {
         ShipRole::War
     };
-    (role, Some(p))
+    (role, Some((p, pool)))
 }
 
 /// **本回合的定编**：把「谁是运输舰」一次性写进第三条风格轴
@@ -851,16 +862,26 @@ pub fn route_for(
         }
         x -= l.units;
     }
-    // **输入面（B5）**：记的是「掷出的那一枚」+ 池子的总权重 + 抽中的腿——于是
-    // 「为什么它去了那个货栈」= 概率 ∝ 该腿的积压占比，而这里给出的是那一次的实况。
-    inputs.record_draw(
-        "route",
-        fid,
-        ship_id,
-        roll,
-        total,
-        &format!("{}→{}", picked.0, picked.1),
-    );
+    // **输入面（B5）**：记的是「掷出的那一枚」+ 池子的总权重 + **每条腿各有多少货**（B5c）
+    // + 抽中的腿——于是「为什么它去了那个货栈」= 概率 ∝ 该腿的积压占比，而这里给出的是
+    // 那一次的实况与全部对手。
+    let pool: Vec<crate::model::PoolEntry> = cands
+        .iter()
+        .map(|l| crate::model::PoolEntry {
+            name: format!("{}→{}", l.from, l.to),
+            weight: l.units,
+        })
+        .collect();
+    inputs
+        .record_draw(
+            "route",
+            fid,
+            ship_id,
+            roll,
+            total,
+            &format!("{}→{}", picked.0, picked.1),
+        )
+        .pool = pool;
     Some(picked)
 }
 

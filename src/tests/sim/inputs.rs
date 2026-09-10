@@ -208,6 +208,24 @@ fn roll_records_are_well_formed_and_actually_happen() {
                 }
                 (Some(_), Some(_)) => panic!("不能既是闸门又是抽签：{r:?}"),
             }
+            // **候选池（B5c）**：加权抽签必须给出「谁参与了、各占多少」。
+            if r.pool_total.is_some() {
+                assert!(
+                    !r.pool.is_empty(),
+                    "加权抽签必须带候选池（否则答不了「为什么是它」）：{r:?}"
+                );
+                let sum: f64 = r.pool.iter().map(|e| e.weight).sum();
+                assert!(
+                    (sum - r.pool_total.unwrap()).abs() < 1e-9,
+                    "池中各候选权重之和 {sum} ≠ 总权重 {:?}（同一个数两处不一致）",
+                    r.pool_total
+                );
+                let picked = r.picked.clone().unwrap_or_default();
+                assert!(
+                    r.pool.iter().any(|e| e.name == picked),
+                    "抽中的 `{picked}` 不在候选池里：{r:?}"
+                );
+            }
             *seen.entry(r.purpose.clone()).or_default() += 1;
         }
     }

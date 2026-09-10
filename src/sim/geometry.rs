@@ -58,6 +58,8 @@ pub fn move_toward(
             threshold: None,
             pool_total: None,
             picked: Some(format!("{:.3},{:.3}", dest[0], dest[1])),
+            // 幅度骰没有候选池（掷出的数直接被当成量用）。
+            pool: Vec::new(),
         });
     }
     let distance = dist(pos, dest);
