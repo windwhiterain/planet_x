@@ -150,6 +150,7 @@
 | `[ ]` | [语义视图 API](notes/semantic-view-api.md) | 把裸 jq 降为逃生舱；语义 view 工具只在 jq 侧做了 PoC（压缩约 34×）。 | Rust 侧 `view` 命令；工具层参数校验 |
 | `[x]` | [定居点名字 key](notes/settlements-lazy-table.md) | `Settlement` 改按名字引用，投影新增懒表 `settlements`，测试全绿。 | — |
 | `[x]` | [统一总结指标](notes/unified-metrics.md) | 总结指标由步进中间量聚合，agent 视图与 `--digest` 同源、不再重算。 | 治理中间量并入 `RoundView`；Web 是否复用待定 |
+| `[ ]` | [Step 中间量清单：36 条算完就扔的量](notes/step-intermediates.md) | 数据面下一批：把 `step_*` 里只活在栈上的中间量（忠诚为何在掉 / 批了钱为何没花 / 我为何打不中 / 这单为何没人接）捕获进 `RoundView`。36 条逐条带 `文件:行号`（已在 `main` = `7e11d32` 上复核）+ 粒度 + 是否吃骰子 + 能回答什么问题，分 A 经济治理 / B 市场运输 / C 军事外交三组。 | 全部未实现；已排成 B1 治理 → B2 钱 → B3 市场运输 → B4 战斗 → B5 `pre` 面；**§7 三个设计点要先裁决**（逐发索敌计划放哪 / `pre` 面怎么产 / 体积） |
 | `[x]` | [权威 schema 贯彻](notes/wysiwyg-resource-keys.md) | 资源 key 统一成中文可读名、删掉镜像结构，视图直用权威类型。 | 派生字段要 agent 现场 jq 计算（或加语义视图） |
 
 ---
