@@ -238,20 +238,20 @@ function updateTop() {
 // 类型表（body_kinds）一并给它，供它按 body.kind 解析视觉（颜色/尺寸/着色器分支）。
 //
 // map3d 的接口是既定的 `{bodies, cities, ships, factions}`，其中势力按 `id` 查阵营色、按
-// `capital_body` 给天体标签加「首都色点」。这两个都不是原始 `Faction` 上的字段（唯一键是
-// `name`；「有效首都」是算出来的）——所以适配层只补这两个**接口别名**，其余字段 `Object.assign`
-// 原样透传（relations/resources/ideology… 地图将来要用就有）。
-const DEFAULT_CAPITAL_BODY = '地球'; // 与引擎 `default_capital_body()` 的兜底一致
+// `capital_body` 给天体标签加「首都色点」。这两个名字都不是原始 `Faction` 的字段，但**值都在
+// state 里**：
+//   * `id`           —— 就是 `Faction.name`（势力唯一键）。
+//   * `capital_body` —— 有效首都在**命令控制**里：`state.control[势力].capital.value`
+//                       （`State::capital_body` 的唯一事实来源，建世界时就按 `initial_capital`
+//                       播种、之后由 sim 的迁都步骤维护；`Faction` 刻意不存首都，无 shadow 双状态）。
+// 所以适配层只把这两处**接通**给地图，不新增任何事实：控制叶子缺了就不给别名（map3d 会跳过该
+// 色点），绝不瞎兜一个天体。其余字段 `Object.assign` 原样透传（relations/resources/ideology…）。
 function mapWorld() {
   const ctrl = st.control || {};
   return Object.assign({}, st, {
     factions: (st.factions || []).map((f) => {
       const cap = ctrl[f.name] && ctrl[f.name].capital;
-      return Object.assign({}, f, {
-        id: f.name,
-        // 有效首都 = 控制叶子 `capital` 的值（迁都的唯一事实来源）；没有该叶子时按引擎兜底。
-        capital_body: (cap && cap.value) || DEFAULT_CAPITAL_BODY,
-      });
+      return Object.assign({}, f, { id: f.name, capital_body: cap ? cap.value : undefined });
     }),
   });
 }
