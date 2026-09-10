@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use planet_x::config::parse_seed;
 use planet_x::control::{
-    apply_diff, control_view, scope_view, CommandReq, FactionControlView,
+    apply_diff, control_view, scope_view, ApplyReport, CommandReq, FactionControlView,
 };
 use planet_x::model::*;
 use planet_x::prng::Prng;
@@ -106,7 +106,7 @@ pub struct InfoRoot {
 ///   ——要什么自己从模型里拿，模型加字段前端自动看到。
 #[derive(Serialize, Clone)]
 pub struct StateView {
-    /// 可控 state（写面的读模板）：各势力的舰指令/预算/权重/迁都。
+    /// 可控 state（写面的读模板）：各势力的舰指令/预算/权重/迁都/**设计图库**。
     pub control: Vec<FactionControlView>,
     /// 控制作用域树（写面的读模板）：谁自动、谁玩家、谁继承。
     pub scope: ControlScopePatch,
@@ -115,6 +115,18 @@ pub struct StateView {
     /// 建筑/势力/舰/事件/编年史…）、派生量与全部配置表都在，且**加字段即自动出现**。
     #[serde(default)]
     pub info: Vec<InfoRoot>,
+    /// **只有 `POST /api/command` 才有的一段**：这次命令面 diff 实际做了什么
+    /// （[`ApplyReport`]：落地几条、**丢了哪些、为什么**、隐含接管了哪些、删了什么）。
+    ///
+    /// 为什么它必须回给页面：界面能**新建/改/删设计图**之后，「你写的东西被守卫拒了」是
+    /// 一条正常情况下会发生的事（`blueprint_class_mismatch` / `duplicate_component` /
+    /// `too_many_components` / `no_such_component`），而 `--apply` 的语义是"只触碰 diff 里
+    /// 出现的叶片"⇒ **静默丢掉与成功落地在响应上完全一样**。那正是这个仓库反复拉黑的
+    /// 「失败看起来像成功」（`agent-play.md`）。所以丢弃清单原样回传，页面把它显示在
+    /// 「应用到服务器」旁边。其它三个端点（`/api/state`、`/api/advance`、`/api/new`）
+    /// 没跑过 diff ⇒ 这个键**不出现**（`skip_serializing_if`，所以老形状逐字节不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ApplyReport>,
 }
 
 #[derive(Deserialize)]
@@ -177,8 +189,12 @@ fn info_roots(world: &GameWorld) -> Vec<InfoRoot> {
 /// `info` 的 `state`/`config` 根里取。
 pub fn state_view(world: &GameWorld) -> StateView {
     let s = &world.state;
-    let control = s.control.iter().map(|(fid, c)| control_view(s, fid.clone(), c)).collect();
-    StateView { control, scope: scope_view(&s.scope), info: info_roots(world) }
+    let control = s
+        .control
+        .iter()
+        .map(|(fid, c)| control_view(s, &world.config, fid.clone(), c))
+        .collect();
+    StateView { control, scope: scope_view(&s.scope), info: info_roots(world), report: None }
 }
 
 // --- 服务生命周期：身份 / 页面登记 / 退出闸门 --------------------------------
@@ -409,12 +425,21 @@ async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) 
 
 async fn command(AxState(shared): AxState<Shared>, Json(req): Json<CommandReq>) -> Json<StateView> {
     let mut guard = shared.lock().unwrap();
-    let world = &mut *guard;
-    // The web UI posts the *whole* editable surface back, so leaves that name
-    // entities which have since died / changed hands are expected — the report is
-    // deliberately dropped here (the CLI is where an authoring agent needs it).
-    let _report = apply_diff(&mut world.state, &world.config, &req);
-    Json(state_view(world))
+    // 整面回传时，指向"已经死了 / 易主了"的实体的叶片是预期内的（丢弃不是错误）——但
+    // **丢弃必须被看见**：`--apply` 的语义是"只触碰 diff 里出现的叶片"，所以静默丢掉与
+    // 成功落地在响应上完全一样，而界面现在能新建/改/删设计图，`blueprint_class_mismatch`
+    // 这类拒绝是玩家最需要看到的一句话。回执原样回给页面（见 [`StateView::report`]）。
+    Json(apply_command(&mut guard, &req))
+}
+
+/// 跑一次命令面 diff 并组装响应：**唯一一条会带上回执的路径**（见 [`StateView::report`]）。
+///
+/// 抽成函数是为了可测——handler 只做「把 `CommandReq` 递进来、把 `StateView` 递出去」。
+pub(crate) fn apply_command(world: &mut GameWorld, req: &CommandReq) -> StateView {
+    let report = apply_diff(&mut world.state, &world.config, req);
+    let mut view = state_view(world);
+    view.report = Some(report);
+    view
 }
 
 async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> Json<StateView> {
@@ -1138,6 +1163,7 @@ mod tests {
         assert_eq!(row.components, vec!["kinetic".to_string(), "ion_drive".to_string()]);
         assert_eq!(row.mode, ControlMode::Player);
         assert_eq!(row.ship_count, 0, "还没造过 ⇒ 0（派生量，现算）");
+        assert!(!row.launch_waiting, "派生的「买不起 ⇒ 未下水」标记：刚建的图没人在等钱");
         assert_eq!(
             w.state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint.as_deref(),
             Some("重甲护卫")
@@ -1166,5 +1192,146 @@ mod tests {
         assert_eq!(report.removed.len(), 1, "{:?}", report.removed);
         let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
         assert!(fc.blueprints.is_empty(), "图被删掉了");
+    }
+
+    /// **图库读面必须带上 `launch_waiting`（Q4(b) 的可见标记）**，而且它不该改变写面：
+    /// 建造区那一行要能显示「买不起 ⇒ 未下水」，而这条标记的**唯一真值**在引擎里
+    /// （与投影 `blueprints.launch_waiting` 列同一个函数）——前端不重算它，只显示。
+    ///
+    /// 这里把判据造全：玩家归属的图 + 带选装 + 建造区挂着它 + 该舰级进度**已经攒够**
+    /// + 组件**买不起** ⇒ `launch_waiting == true`；钱够了 ⇒ 立刻回 false（它是"此刻"的
+    /// 派生量，不是新状态）。同时钉住：整面模板回传（含这些只读列）**不许炸写面**。
+    #[test]
+    fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        let (cid, bid, ship_type) = first_shipyard(&w, &fid);
+
+        // 建图（玩家归属 + 两件选装）+ 把建造区指过去。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "blueprints": [{"name": "等钱的图", "class": ship_type,
+                                "components": ["kinetic", "ion_drive"], "mode": "Player"}],
+                "buildings": [{"city": cid, "building": bid, "blueprint": "等钱的图"}] }]
+        }))
+        .unwrap();
+        let view = apply_command(&mut w, &req);
+        assert!(view.report.as_ref().unwrap().is_clean(), "{:?}", view.report.as_ref().unwrap().skipped);
+        let waiting = |w: &GameWorld| -> bool {
+            state_view(w)
+                .control
+                .into_iter()
+                .find(|c| c.faction_id == fid)
+                .unwrap()
+                .blueprints
+                .into_iter()
+                .find(|b| b.name == "等钱的图")
+                .expect("读面要给出这张图")
+                .launch_waiting
+        };
+        assert!(!waiting(&w), "进度还是 0 ⇒ 没有人在等钱");
+
+        // 造出「进度攒够却没下水」：该城该舰级的进度写满 `build_points`，库存清零（买不起）。
+        let bp = w.config.ship_spec(&ship_type).build_points;
+        w.state.city_mut(&cid).unwrap().ship_progress.insert(ship_type.clone(), bp);
+        zero_resources(&mut w, &fid);
+        assert!(
+            waiting(&w),
+            "进度满 + 买不起 ⇒ launch_waiting 必须为真（界面就靠它显示「买不起 ⇒ 未下水」）"
+        );
+
+        // 整面模板回传（带着 `ship_count` / `launch_waiting` 两个只读派生列）：
+        // **不许**被 `deny_unknown_fields` 判非法（读面即写面）。
+        let face = state_view(&w);
+        let posted = serde_json::json!({ "control": face.control, "scope": face.scope });
+        let req: CommandReq = serde_json::from_value(posted).expect("读面必须能被写面收下");
+        assert!(apply_command(&mut w, &req).report.unwrap().is_clean(), "模板回传不该丢叶");
+
+        // 钱够了 ⇒ 下一回合真的下水，进度被扣掉 ⇒ 标记随之消失。
+        // ⚠ 这条派生列的判据是「进度满 **且** 没下水」（不是"直接检查库存"）：买得起之后
+        // 出厂循环会把这艘舰放出来、进度减一次 `build_points`，于是标记自然回 false。
+        // 所以这里模拟那次扣减，而不是只改库存——否则测的就是一个不存在的语义。
+        for (_, v) in w.state.faction_mut(&fid).unwrap().resources.iter_mut() {
+            *v = 1e9;
+        }
+        assert!(waiting(&w), "只补钱、没下水 ⇒ 进度仍然满着（标记照实说：还没下水）");
+        w.state.city_mut(&cid).unwrap().ship_progress.remove(&ship_type);
+        assert!(!waiting(&w), "下水之后进度归零 ⇒ 不再等钱");
+    }
+
+    /// **`POST /api/command` 必须把引擎的回执回给页面**：界面能新建/改/删设计图之后，
+    /// 「你写的补丁被守卫拒了」是正常会发生的事（`blueprint_class_mismatch` 等），而
+    /// `--apply` 的语义是"只触碰 diff 里出现的叶片"⇒ 静默丢掉与成功落地在响应上一样，
+    /// 那正是「失败看起来像成功」。这条测试钉住三件事：
+    /// 1. 被拒的原因码**从响应里拿得到**（不是只写进日志）；
+    /// 2. `/api/state` 那种"没跑过 diff"的响应**不带**这个键（老形状逐字节不变）；
+    /// 3. 被拒之后状态**一个字节不动**。
+    #[test]
+    fn a_rejected_blueprint_patch_comes_back_in_the_command_report() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        let (cid, bid, ship_type) = first_shipyard(&w, &fid);
+
+        // `/api/state` 那条路（`state_view`）：没有回执键（`skip_serializing_if`）。
+        let plain = serde_json::to_value(state_view(&w)).unwrap();
+        assert!(plain.get("report").is_none(), "只有跑过 diff 的响应才带 report");
+
+        // 先建一张**舰级对得上**的图并挂上指针（合法）。
+        let ok: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "blueprints": [{"name": "被拒的图", "class": ship_type, "components": ["kinetic"], "mode": "Player"}],
+                "buildings": [{"city": cid, "building": bid, "blueprint": "被拒的图"}] }]
+        }))
+        .unwrap();
+        assert!(apply_command(&mut w, &ok).report.unwrap().is_clean());
+
+        // 再把图的舰级改成**另一个**级：建造区还挂着它 ⇒ 口径 A 的守卫必须拒。
+        let other = w
+            .config
+            .ships
+            .keys()
+            .find(|k| **k != ship_type)
+            .cloned()
+            .expect("至少有两个舰级");
+        let bad: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "blueprints": [{"name": "被拒的图", "class": other}] }]
+        }))
+        .unwrap();
+        let view = apply_command(&mut w, &bad);
+        let json = serde_json::to_value(&view).unwrap();
+        let skipped = json["report"]["skipped"].as_array().expect("回执必须带着丢弃清单");
+        assert_eq!(skipped.len(), 1, "{json}");
+        assert_eq!(skipped[0]["code"], "blueprint_class_mismatch");
+        // reason 是人读的一句话，且指出**接下来怎么办**（"要么…要么…"）。
+        let reason = skipped[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("要么"), "reason 要给出出路（界面照实显示它）：{reason}");
+        assert_eq!(
+            w.state.control[&fid].blueprints["被拒的图"].value.class,
+            ship_type,
+            "被拒 ⇒ 状态一个字节不动"
+        );
+    }
+
+    /// 本势力的第一个建造区（城名、建筑下标、该区舰级）——两条设计图测试都要它。
+    fn first_shipyard(w: &GameWorld, fid: &str) -> (String, u32, String) {
+        w.state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid)
+            .find_map(|c| {
+                c.buildings
+                    .iter()
+                    .find(|b| b.is_shipyard())
+                    .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+            })
+            .expect("这个势力得有建造区")
+    }
+
+    /// 把某个势力的库存全部清零（用来制造「进度满却买不起」）。
+    fn zero_resources(w: &mut GameWorld, fid: &str) {
+        for (_, v) in w.state.faction_mut(fid).unwrap().resources.iter_mut() {
+            *v = 0.0;
+        }
     }
 }

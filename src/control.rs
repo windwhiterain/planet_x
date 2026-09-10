@@ -137,8 +137,9 @@ pub struct LoyaltyBudgetEntry {
 ///   就等于回传时清空选装。
 /// * `order` = 本图给**新舰**的默认意图（`null` = 本图对意图没有说话——Q1(c) 的
 ///   「意图轴默认 `Inherit`/沉默」）。
-/// * `ship_count` = **读面附加的派生量**（引擎算：世界上有多少艘舰出自这张图）。它只读：
-///   写面收下这个键但**不写它**（[`BlueprintPatch::ship_count`]）。
+/// * `ship_count` / `launch_waiting` = **读面附加的派生量**（引擎算，不落状态）。它们只读：
+///   写面收下这两个键但**不写它们**（[`BlueprintPatch::ship_count`] /
+///   [`BlueprintPatch::launch_waiting`]）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BlueprintEntry {
     pub name: BlueprintId,
@@ -148,6 +149,11 @@ pub struct BlueprintEntry {
     pub mode: ControlMode,
     /// 本图造了多少艘（`state.ships` 里 `blueprint == name` 的条数，现算、不落状态）。
     pub ship_count: usize,
+    /// **本图此刻是不是「买不起 ⇒ 没下水」**（用户裁决 Q4(b) 的可见标记，现算、不落状态）：
+    /// 某个挂着这张图的城里，该舰级的进度已经攒够 `build_points` 却**没有下水**——这张图
+    /// （`Player` 归属、带选装）的组件此刻买不起。判据与投影 `blueprints.launch_waiting` 列
+    /// **同一个函数**（[`crate::sim::blueprint_launch_waiting`]），免得两个读面各说各话。
+    pub launch_waiting: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -442,6 +448,10 @@ pub struct BlueprintPatch {
     /// `deny_unknown_fields` 判成非法）。
     #[serde(default)]
     pub ship_count: Option<usize>,
+    /// **只读回显**：本图此刻是不是在等钱（Q4(b) 的可见标记，读面给的派生量）。同
+    /// [`Self::ship_count`]：收下但不写。
+    #[serde(default)]
+    pub launch_waiting: Option<bool>,
 }
 
 /// 挂了这张图的建造区（城名、建筑下标、该区当前的 `ship_type`）。
@@ -810,7 +820,11 @@ pub struct SkippedLeaf {
 /// 一次 `--apply` / `POST /api/command` **实际做了什么**：落地了几个叶片、
 /// 丢了哪些（[`SkippedLeaf`]）、**隐含接管**了哪些、**删掉**了哪些。CLI 在 stderr 上以
 /// `WARN_APPLY_SKIPPED` / `NOTE_APPLY_TOOKOVER` / `NOTE_APPLY_REMOVED` 报出（stdout 必须
-/// 保持零噪声的状态流）；web 的 `POST /api/command` 整面回传，丢弃是预期内的，故刻意忽略。
+/// 保持零噪声的状态流）；web 的 `POST /api/command` 把它**原样回给页面**
+/// （`planet_x_web::StateView::report`）——界面必须能把 `blueprint_class_mismatch` /
+/// `duplicate_component` 这类拒绝**显示出来**，静默吞掉就是「失败看起来像成功」。
+/// （在此之前 web 刻意忽略它，理由是"整面回传时丢弃是预期内的"；界面有了**建图/改图**
+/// 之后这条不再成立：玩家手写的东西会被守卫拒掉，而那正是他最需要看到的一句话。）
 #[derive(Debug, Default, Clone, Serialize, JsonSchema)]
 pub struct ApplyReport {
     /// 成功落到状态上的叶片数（一个 `ship_orders[]` 条目 / 一条预算 / 一次迁都… 算一个）。
@@ -862,7 +876,14 @@ impl ApplyReport {
 
 // --- read builders ----------------------------------------------------------
 
-pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> FactionControlView {
+/// `config` 只用于**派生读面**（`launch_waiting` 要按舰级的 `build_points` 判进度是否攒够），
+/// 它不参与任何取值决策——写了什么就是什么，所以这条参数不改变控制面的语义。
+pub fn control_view(
+    state: &State,
+    config: &GameConfig,
+    fid: FactionId,
+    c: &ControllableState,
+) -> FactionControlView {
     let ship_orders = c
         .ship_orders
         .iter()
@@ -956,6 +977,11 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
     // 自己的表态；有效归属（图叶 → 势力 scope → 全局）走 `State::blueprint_control`，
     // 读面在投影的 `blueprints.effective_mode` 列里给（`--control` 是**写面模板**，
     // 多给派生列只会让模板与写面漂移）。
+    //
+    // ⚠ `ship_count` / `launch_waiting` 是这条规则的两个**例外**：它们确实是派生量，但
+    // **必须**在写面模板里（读面即写面 ⇒ 写面得先收下它们；而且「这张图在等钱」是
+    // 玩家做决定要看的东西，投影列在 CLI 侧够用、在 web 里够不着）。它们**只读**：
+    // `BlueprintPatch` 收下但不写回状态。
     let blueprints = c
         .blueprints
         .iter()
@@ -970,6 +996,7 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
                 .iter()
                 .filter(|s| s.faction_id == fid && s.blueprint.as_deref() == Some(name.as_str()))
                 .count(),
+            launch_waiting: crate::sim::blueprint_launch_waiting(state, config, &fid, name),
         })
         .collect();
     FactionControlView {
@@ -1043,11 +1070,11 @@ fn explicit<K: Clone + Ord>(m: &std::collections::BTreeMap<K, ControlMode>) -> V
 /// **470 个数值没有一个是 2 位小数舍入会改变的** —— 也就是说这点 token 噪声在当前世界里
 /// 根本不存在，舍入**只带来风险、没带来收益**。想要好看的数字是客户端的事
 /// （Python kit / LLM 自己 `round()`），引擎的输出是数据。
-pub fn control_surface(state: &State) -> serde_json::Value {
+pub fn control_surface(state: &State, config: &GameConfig) -> serde_json::Value {
     let control = state
         .control
         .iter()
-        .map(|(fid, c)| control_view(state, fid.clone(), c))
+        .map(|(fid, c)| control_view(state, config, fid.clone(), c))
         .collect();
     let surface = ControlSurface { control, scope: scope_view(&state.scope) };
     serde_json::to_value(surface).expect("control surface is serializable")
@@ -2764,7 +2791,7 @@ mod tests {
         );
 
         // 舰队默认读面即写面：`--control` 里看得见它，且值能原样回传。
-        let view = control_view(&state, fid.clone(), state.control(fid.clone()).expect("control"));
+        let view = control_view(&state, &config, fid.clone(), state.control(fid.clone()).expect("control"));
         let d = view.default_ship_order.expect("the fleet default is part of the read surface");
         assert_eq!(d.mode, Some(ControlMode::Player));
         assert_eq!(d.behavior, Some(ShipBehavior::Idle));
@@ -2999,7 +3026,7 @@ mod tests {
         assert_eq!(state.control.len(), before, "a typo must not create a control entry");
         assert!(state.control.get("中国洋").is_none(), "no phantom faction");
         // 而且它绝不能出现在读面（模板）里——那正是它从前最有害的地方。
-        let surface = control_surface(&state);
+        let surface = control_surface(&state, &config);
         let ids: Vec<&str> = surface["control"]
             .as_array()
             .unwrap()
@@ -3054,7 +3081,7 @@ mod tests {
     fn the_control_template_round_trips_back_through_apply() {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
-        let mut surface = control_surface(&state);
+        let mut surface = control_surface(&state, &config);
         for fac in surface["control"].as_array_mut().expect("control is an array") {
             fac.as_object_mut().expect("faction is an object").insert("buildings".to_string(), serde_json::json!([]));
         }
@@ -3097,7 +3124,7 @@ mod tests {
         });
         apply_patch(&mut state, &config, &diff).expect("diff applies");
 
-        let surface = control_surface(&state);
+        let surface = control_surface(&state, &config);
         let fac = surface["control"]
             .as_array()
             .expect("control 是数组")
@@ -3633,7 +3660,7 @@ mod tests {
             blueprint: Some(&bp),
         });
 
-        let mut surface = control_surface(&state);
+        let mut surface = control_surface(&state, &config);
         let row = surface["control"]
             .as_array()
             .unwrap()
@@ -3645,6 +3672,7 @@ mod tests {
             .expect("读面必须给出蓝图片");
         assert_eq!(row["components"], serde_json::json!(["kinetic", "ion_drive"]), "选装要**全量**输出（少输出 = 回传时清空）");
         assert_eq!(row["ship_count"], serde_json::json!(1), "读面附加：本图造了多少艘");
+        assert_eq!(row["launch_waiting"], serde_json::json!(false), "读面附加：这张图此刻没人在等钱");
         assert!(row["order"].is_null(), "本图对意图没有说话 ⇒ null（不是缺字段）");
 
         for fac in surface["control"].as_array_mut().unwrap() {
