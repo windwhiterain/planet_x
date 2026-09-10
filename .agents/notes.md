@@ -15,6 +15,11 @@
 > 引擎 + `planet_x_ctl` + web 三端齐活，同 seed `--digest` **逐字不变**；实现记录、验收数据、
 > 未做项见 [`ship-blueprint.md`](notes/ship-blueprint.md) §6 与规格篇顶部状态行，
 > **审查方的独立验收**见同篇 **§7**）
+> → ③b ~~**web 的设计图库面板**~~ → `[x]` **已完成**（`feature/web-blueprint-editor`：势力级**设计图库**
+> （新建 / 改 / 删 / 三态归属 / `ship_count`）+ 建造区那一行的联动 + **`launch_waiting`（买不起 ⇒ 未下水）
+> 第一次看得见** + 引擎守卫的报错回执；引擎只加了**读面**两处（控制读面的 `launch_waiting` 列、
+> `/api/command` 回传 `ApplyReport`），`--digest` 与 `--control` 均**逐字不变**。实现记录、载荷原文、
+> 实机十二步、两把量具见 [`ship-blueprint.md`](notes/ship-blueprint.md) **§8**）
 > 下一步（本轮之后）：`control-live-layers.md` §12.6 的排队项（方案 B「逐舰取值规则与文档对齐」、
 > 风格轴要不要真的 AI 执行者、`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的
 > `effective`/`order_source`）＋ `military-combat.md` 的 refit（把新图套到老舰上）＋
@@ -61,7 +66,7 @@
 | `[x]` | [战斗行为风格](notes/combat-behavior-doctrine.md) | per-舰 `doctrine`、逐武器索敌与统一权重已落地，思潮实验也接上。 | doctrine 扩到经济/造舰；政治系统 M1–M3 |
 | `[ ]` | [时代与科技演进](notes/eras-technology.md) | 用解锁式舰级、材料升级与舰种分支，给上千回合铺时代节奏；三条都还只在纸面。 | 舰级解锁、结构演进、设计图分支全未开工 |
 | `[~]` | [军事与战斗](notes/military-combat.md) | 拟真战斗与舰船定制（组件/护盾/点防/命中折减）已落地，AI 拟人化那批也做完。 | 舰船退役换装、换模块/再装配；长局可玩性 |
-| `[x]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部（`feature/ship-blueprint`）；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮）；实现记录见该篇 §6 |
+| `[x]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部（`feature/ship-blueprint`）；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮）；实现记录见该篇 §6；**web 的设计图库面板（新建/改/删 + `launch_waiting` 可见）见该篇 §8**（`feature/web-blueprint-editor`） |
 | `[x]` | [舰船设计图：实现规格](notes/ship-blueprint-spec.md)（**十条已裁决**） | 现状核实（带 `文件:行号`）、数据结构、config/叶片/投影形状、迁移、测试计划、改动地图；更正旧 note 两处事实（出厂风格 config 从未填过、造舰只剩两条路）。**§8.0 = 十条裁决**（Q1 图压舰队默认但意图轴默认沉默 / Q2 活层 + `order_source` / Q3 `ship_type` 仍是唯一真相 / Q4 买不起就不下水 / Q10 悬空指针停产报错…）。 | 已按「附 A 改动地图」实现完毕（`SCHEMA_VERSION` **9 → 10**，`spawned_round` 一并落地）；顶部状态行写着实际提交、验证数据与**偏离项** |
 | `[~]` | [MOND 引力异常](notes/mond-anomaly.md) | 异常区导航偏移已实现（崇拜教免疫）；战斗光环、矿产红利与科技扩散未做。 | 异常区战斗光环；矿藏加成；MOND 扩散 |
 | `[ ]` | [行星X 回归](notes/planet-x-return.md) | 把行星X 做成第 19 号长周期天体 + 全球回归效应；现在只是第 60 回合的纯散文节拍。 | 天体、回归效应、配置、harness 断言全未开工 |
