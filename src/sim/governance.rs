@@ -207,10 +207,26 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         let cap_bonus = faction_capital_share(state, &fid) * g.capital_share_loyalty_buff;
         // 思潮优势端自平衡 debuff：该势力若身处「垄断」的优势端思潮又「言行不符」，扣全国忠诚。
         let ideo_penalty = ideology_loyalty_debuff(state, config, &fid, p_total);
+        // **B1 深空治理**（用户裁决：`tech-system.md` §10 七条 MOND 红利里**只做这一条**）：
+        // 距离那条忠诚衰减 **× (1 − MOND 掌握度)** —— 掌握度 1.0（指哪打哪）的势力，
+        // **深处不再因为「离首都太远」而离心**。
+        //
+        // 为什么挂在「距离」这一项上、而不是给个独立加成：光速治理这条机制的全部内容就是
+        // 「指令从首都传到边陲要时间」；MOND 掌握的正是**在异常区里把坐标算准**这件事，
+        // 所以它读起来是「同一个物理量的两个读数」，不是外挂的一层 buff。
+        //
+        // 为什么只动忠诚、不动开销：裁决的原话是「**不按距离付忠诚衰减**」。开销那一半
+        // （`admin_per_au`）留在原处，于是这条红利买到的是**守得住**，不是**管得起**——
+        // 付不出治理费时城市照样掉忠诚（覆盖率那条支路与距离无关）。想要「管得起」是
+        // 另一个提案（§10 的 B2…B7 里没有它，留作未来）。
+        //
+        // 连续、无断崖：掌握度每涨一点，深处的离心压力就小一点（凡人 → 指哪打哪是渐变的）。
+        let mond_distance_relief = 1.0 - mond_control(state, &fid);
         let mut to_revolt = Vec::new();
         for (cid, d, ent) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
-            let target_base = (1.0 - g.loyalty_distance * a * scale).clamp(0.0, 1.0);
+            let target_base =
+                (1.0 - g.loyalty_distance * a * scale * mond_distance_relief).clamp(0.0, 1.0);
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
             let cur = state.city(cid).map(|c| c.loyalty).unwrap_or(1.0);
