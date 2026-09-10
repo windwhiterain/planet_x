@@ -801,6 +801,14 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
 * `[ ]` **`--control` 的 `behavior: null` 行在 web 上仍是"可编辑的"**：把类型下拉改成真行为
   就等于写值即接管（`Player`），这是既有语义；只是那一格现在多了一个 disabled 的
   「（无人表态 · 按待命兜底）」显示项。
+* `[ ]` **web 那半只跑了 crate 测试，没实机点过**（措辞纪律：别把"代码写了"说成"验证过了"）。
+  `planet_x_web` 的守卫（每舰一行 / 删叶后仍在 / 只写 mode 能把叶建回来）是**引擎侧**证据；
+  `app.js` 的「无人表态（按待命兜底）」是**代码级**改动（`behaviorType` 新增 `unset` +
+  编辑器里一个 disabled 的只读显示项），本轮没在浏览器里点过：第一次尝试走 `scripts/web.ps1`
+  时撞上的其实是**别的 worktree** 的实例（`/api/ping` 的 `exe` 是 `C:\resource\planet_x\target\…
+  且 `owner_pid: null` 的孤儿），而自己那个实例随启动 job 被收走（租约生效）⇒ 没拿到实机证据。
+  要补就三步：起服务（`scripts/web.ps1`，用 `/api/ping` 核对 exe 是本 worktree 的）→ 点掉一艘舰
+  指令行的「恢复出厂值」→ 应用后看那一行是否改口成「无人表态（按待命兜底）」。
 * `[ ]` **方案 B（逐舰取值规则与文档对齐）仍留在桌上**——本轮把「叶不存在」与「叶 Inherit」
   的差别**读面化**（`order_source` + A 的 `null`），取值规则本身一个字没动。
 * `[ ]` **风格/角色三轴没有跟上 §13.6 那条修法**：它们的 `exists`（kit 的 `Surface.leaf`）仍然是
