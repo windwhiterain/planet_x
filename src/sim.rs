@@ -438,7 +438,7 @@ fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
 
 /// 给一座城的新建筑补上「投资 / 建造权重」控制叶子。
 ///
-/// `Control::inherit` 的 `mode = None` → 控制解析沿作用域链上溯，与「叶子不存在」等价，
+/// `Control::inherit` 的 `mode = Inherit` → 控制解析沿作用域链上溯，与「叶子不存在」等价，
 /// 因此这一步**不改变任何决策**（只是让控制面里那座城的建筑是可枚举的）。
 fn wire_city_control(state: &mut State, config: &GameConfig, cid: &CityId, to: &FactionId) {
     let buildings = state.city(cid).map(|c| c.buildings.clone()).unwrap_or_default();
@@ -588,40 +588,43 @@ fn building_health(b: &Building, config: &GameConfig) -> f64 {
 /// while a player-controlled building uses the commanded value.
 fn invest_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b: &Building) -> f64 {
     let key = (cid.to_string(), b.id);
-    match state.invest_control(fid.to_string(), &key) {
-        ControlMode::Ai => config.building_spec(&b.kind).default_invest_weight,
-        ControlMode::Player => state
+    if state.invest_control(fid.to_string(), &key).is_player() {
+        state
             .control(fid.to_string())
             .and_then(|c| c.invest_weights.get(&key))
             .map(|c| c.value)
-            .unwrap_or_else(|| config.building_spec(&b.kind).default_invest_weight),
+            .unwrap_or_else(|| config.building_spec(&b.kind).default_invest_weight)
+    } else {
+        config.building_spec(&b.kind).default_invest_weight
     }
 }
 
 /// The command-controlled 建造投资权重 of a 建造区 (shipyard) building.
 fn build_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b: &Building) -> f64 {
     let key = (cid.to_string(), b.id);
-    match state.build_control(fid.to_string(), &key) {
-        ControlMode::Ai => config.building_spec(&b.kind).default_build_weight,
-        ControlMode::Player => state
+    if state.build_control(fid.to_string(), &key).is_player() {
+        state
             .control(fid.to_string())
             .and_then(|c| c.build_weights.get(&key))
             .map(|c| c.value)
-            .unwrap_or_else(|| config.building_spec(&b.kind).default_build_weight),
+            .unwrap_or_else(|| config.building_spec(&b.kind).default_build_weight)
+    } else {
+        config.building_spec(&b.kind).default_build_weight
     }
 }
 
 /// The command-controlled 娱乐/福利预算 of a city (its loyalty spending per round,
-/// in market value). Follows the control scope: AI uses the config default, a
-/// Player-commanded city uses the commanded value.
+/// in market value). Follows the control scope: the system uses the config default,
+/// a Player-commanded city uses the commanded value.
 fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, cid: CityId) -> f64 {
-    match state.loyalty_budget_control(fid.clone(), cid.clone()) {
-        ControlMode::Ai => config.governance.default_entertainment,
-        ControlMode::Player => state
+    if state.loyalty_budget_control(fid.clone(), cid.clone()).is_player() {
+        state
             .control(fid.clone())
             .and_then(|c| c.loyalty_budget.get(&cid))
             .map(|c| c.value)
-            .unwrap_or(config.governance.default_entertainment),
+            .unwrap_or(config.governance.default_entertainment)
+    } else {
+        config.governance.default_entertainment
     }
 }
 
@@ -1316,7 +1319,7 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         let class = ship.class.clone();
         let pos = ship.position;
 
-        let is_ai = state.ship_control(ship_id.clone()) == ControlMode::Ai;
+        let is_ai = state.ship_control(ship_id.clone()) == ControlMode::Auto;
 
         if !is_ai {
             // --- player-controlled: execute the commanded behavior literally ---
@@ -2039,7 +2042,7 @@ fn step_capital(state: &mut State, config: &GameConfig) {
             // 亡城强迁 → 人口最高的活城（并列取名字序）。
             new_cap = Some(highest_pop_city_body(state, &fid));
             reason = "destroyed";
-        } else if state.capital_control(&fid) == ControlMode::Ai && state.round % review_every == 0 {
+        } else if state.capital_control(&fid) == ControlMode::Auto && state.round % review_every == 0 {
             let best = highest_pop_city_body(state, &fid);
             if best != cur {
                 let cur_cost = capital_anchor_cost(state, config, &fid, &cur);
@@ -2057,9 +2060,14 @@ fn step_capital(state: &mut State, config: &GameConfig) {
             // 迁离越动荡（国本动摇）；亡城强迁时旧首都已失（占比=0）→ 应急无忠诚代价。
             let old_share = faction_capital_share(state, &fid);
             let loyalty_cost = old_share * config.governance.capital_share_relocate_cost;
-            // 保留原 mode 标记（Player 仍归玩家、None 让作用域链决定）——迁都是换「值」，
+            // 保留原 mode 标记（Player 仍归玩家、Inherit 让作用域链决定）——迁都是换「值」，
             // 不改变「由谁决定」的层次化粒度。
-            let prev_mode = state.control.get(&fid).and_then(|c| c.capital.as_ref()).and_then(|c| c.mode);
+            let prev_mode = state
+                .control
+                .get(&fid)
+                .and_then(|c| c.capital.as_ref())
+                .map(|c| c.mode)
+                .unwrap_or_default();
             {
                 let ctrl = state.control.entry(fid.clone()).or_default();
                 ctrl.capital = Some(Control { value: nc.clone(), mode: prev_mode });
@@ -2505,14 +2513,10 @@ pub(crate) fn colonize(
         // diaspora claim）由漏斗自己读，调用方漏不掉。
         if !reseed_city(state, config, &cid, &faction, &seeded_ship_class, next_building_id) {
             // 该城没有可用的定居点 —— 殖民舰就地待命（旧行为）。
-            if let Some(c) = state.control_mut(faction.clone()) {
-                c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
-            }
+            reset_order_keep_mode(state, &faction, ship_id);
             return;
         }
-        if let Some(c) = state.control_mut(faction.clone()) {
-            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
-        }
+        reset_order_keep_mode(state, &faction, ship_id);
         return;
     }
 
@@ -2523,9 +2527,7 @@ pub(crate) fn colonize(
         .and_then(|b| b.settlements.iter().find(|s| !occupied.contains(&s.name)).cloned())
     else {
         // Every settlement is occupied by a live city — nothing to colonize.
-        if let Some(c) = state.control_mut(faction.clone()) {
-            c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
-        }
+        reset_order_keep_mode(state, &faction, ship_id);
         return;
     };
     let base = if settlement.name.is_empty() {
@@ -2536,8 +2538,19 @@ pub(crate) fn colonize(
     let cname = format!("{}-殖民城", base);
     // 漏斗：新建城 + 记 `ColonyFounded { how: NewSite }`。
     found_city(state, config, &cname, &body.to_string(), &settlement, &faction, &seeded_ship_class, next_building_id);
-    if let Some(c) = state.control_mut(faction.clone()) {
-        c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Idle));
+    reset_order_keep_mode(state, &faction, ship_id);
+}
+
+/// 一次性指令（殖民）执行完之后的收尾：指令复位成 `Idle`，但**保留「由谁决定」**。
+///
+/// 为什么必须保留：殖民是「命令 → 执行 → 指令失效」的一次性动作，而这里以前无条件写
+/// `Control::inherit(..)`，于是**玩家点名的殖民舰一旦建完城就被交还给系统**（AI 下一回合
+/// 就把它征去别处）——玩家会看到自己刚下达的处置静默蒸发。换「值」不换「归属」是 sim 里
+/// 的既有约定（见 `step_capital` 的迁都：保留原来的 mode 标记）。
+fn reset_order_keep_mode(state: &mut State, fid: &FactionId, ship_id: &str) {
+    if let Some(c) = state.control_mut(fid.clone()) {
+        let mode = c.ship_orders.get(ship_id).map(|c| c.mode).unwrap_or_default();
+        c.ship_orders.insert(ship_id.to_string(), Control { value: ShipBehavior::Idle, mode });
     }
 }
 
@@ -3453,6 +3466,83 @@ mod tests {
             seeded_ship_class: "corvette".into(), how: FoundingHow::NewSite, prev_owner: None,
         }];
         assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
+    }
+
+    /// 玩家点名的殖民舰建完城之后必须**仍然是玩家的**。
+    ///
+    /// 殖民是「命令 → 执行 → 指令失效」的一次性动作：收尾只该把**值**复位成 `Idle`，
+    /// 不许把**归属**一起清掉——以前无条件写 `Control::inherit(..)`，于是玩家刚下达的处置
+    /// 在城建好的那一刻被静默交还给系统（AI 下一回合就把它征去别处）。
+    #[test]
+    fn colonize_keeps_player_ownership() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(42);
+        let fid = "中国".to_string();
+
+        // 空出一座城（复垦路径：空白城仍占着它的定居点），再让中国的一艘舰去殖民。
+        let victim = state
+            .cities
+            .iter()
+            .find(|c| !c.razed && c.faction_id != fid)
+            .map(|c| (c.name.clone(), c.body_id.clone(), c.faction_id.clone()))
+            .expect("a foreign city to raze");
+        let (cid, body, owner) = victim;
+        raze_city(&mut state, &cid, RazeCause::Revolt { faction: owner, loyalty: 0.0 });
+
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("a chinese ship");
+        let order = |state: &mut State, v: ShipBehavior| {
+            state
+                .control_mut(fid.clone())
+                .expect("control")
+                .ship_orders
+                .insert(ship.clone(), Control::player(v));
+        };
+        order(&mut state, ShipBehavior::Colonize { body: body.clone() });
+
+        let mut next_id = 100_000;
+        colonize(&mut state, &config, &mut rng, &ship, &body, &mut next_id);
+
+        let leaf = state
+            .control(fid.clone())
+            .and_then(|c| c.ship_orders.get(&ship).cloned())
+            .expect("the order leaf must still exist");
+        assert_eq!(leaf.value, ShipBehavior::Idle, "one-shot order must be spent");
+        assert_eq!(leaf.mode, ControlMode::Player, "…but ownership must survive the order");
+        assert!(
+            state.events.iter().any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
+            "the city must actually have been refounded, got {:?}",
+            state.events
+        );
+
+        // 早退路径（无处可殖民）同样不许动归属：找一个所有定居点都被活的城占满的天体。
+        let full_body = state
+            .cities
+            .iter()
+            .filter(|c| !c.razed)
+            .map(|c| c.body_id.clone())
+            .find(|b| {
+                let Some(body) = state.body(b) else { return false };
+                let live: std::collections::BTreeSet<String> = state
+                    .cities
+                    .iter()
+                    .filter(|c| &c.body_id == b && !c.razed)
+                    .map(|c| c.settlement.clone())
+                    .collect();
+                body.settlements.iter().all(|s| live.contains(&s.name))
+            })
+            .expect("a body whose settlements are all occupied");
+        order(&mut state, ShipBehavior::Colonize { body: full_body.clone() });
+        colonize(&mut state, &config, &mut rng, &ship, &full_body, &mut next_id);
+        let leaf = state
+            .control(fid.clone())
+            .and_then(|c| c.ship_orders.get(&ship).cloned())
+            .expect("the order leaf must still exist");
+        assert_eq!(leaf.mode, ControlMode::Player, "an early return must not hand the ship back either");
     }
 
     /// A player-facing regression guard for the "stale follow" bug: a player

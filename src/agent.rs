@@ -166,10 +166,10 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
 
     json!({
         "notes": [
-            "budget：造舰预算 construction_budget = 库存×invest_fraction，但**先留维护底线**：从库存里预留 upkeep×upkeep_reserve_mult 的市场价值，只把超出部分用于造舰（'把海军养在经济能承受的规模'）。投资预算 investment_budget = 库存×invest_fraction，不受该保留约束。只有叶子的 mode=Player 时命令的 value 才被采用；mode=Ai 时系统每回合按上式重算。",
+            "budget：造舰预算 construction_budget = 库存×invest_fraction，但**先留维护底线**：从库存里预留 upkeep×upkeep_reserve_mult 的市场价值，只把超出部分用于造舰（'把海军养在经济能承受的规模'）。投资预算 investment_budget = 库存×invest_fraction，不受该保留约束。只有叶子的 mode=Player 时命令的 value 才被采用；mode=Auto 时系统每回合按上式重算；mode=Inherit 时沿作用域链上溯（全链没人表态则落到 Auto）。",
             "每回合净流 ≈ 产出 production_value − 舰队维护 upkeep − 治理开销 governance_cost。为负则库存持续下降（清算），最终舰队生锈（护甲扣到 0 报废）、城市治理不到位而降忠诚→叛乱夷平。用 --control-plan [faction] 看该势力的剖面（净流/可养舰队上限/清算前剩余回合）。",
             "生产 production：采矿建筑按面积×labor×productivity×production_rate 出矿；人口限制劳动效率（min_efficiency 下限）。治理 governance：行政成本 = (admin_base + admin_per_au×距首都距离)×人口超载倍率 + 娱乐预算，用库存按价值加权支付，覆盖率<1 则忠诚下跌。",
-            "迁都（capital，controllable）：`capital` 叶子带 mode（Player=你说的算，Ai=系统周期性重估）。首都=治理/本土防御锚点；首都人口占全势力人口的比例越高，全国每城目标忠诚加成越大（capital_share_loyalty_buff）；迁都则按「旧首都人口占比」扣全国忠诚（capital_share_relocate_cost）——迁都是为了省治理距离成本，却是以全国忠诚为赌注的豪赌，不是免费优化。首都亡城（其上已无本势力活城）会被立即强迁到人口最高的活城。",
+            "迁都（capital，controllable）：`capital` 叶子带 mode（Player=你说的算，Auto=系统周期性重估，Inherit=沿作用域链上溯）。首都=治理/本土防御锚点；首都人口占全势力人口的比例越高，全国每城目标忠诚加成越大（capital_share_loyalty_buff）；迁都则按「旧首都人口占比」扣全国忠诚（capital_share_relocate_cost）——迁都是为了省治理距离成本，却是以全国忠诚为赌注的豪赌，不是免费优化。首都亡城（其上已无本势力活城）会被立即强迁到人口最高的活城。",
             "实体身份=唯一名字（WYSIWYG 资源 key 即可读中文名），无 numeric shadow id；schema 由同一批结构体派生（--schema / --control-schema 自描述）。"
         ],
         "structures": config_json(&config.structures),

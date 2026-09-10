@@ -770,8 +770,9 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
         // 首都（唯一事实来源 = 命令控制 `ControllableState::capital`）：开局按势力
-        // 播种其初始首都天体，mode=inherit（None，沿作用域链上溯，默认 Ai）。之后由
-        // sim 的迁都步骤维护，`Faction` 不再存首都可以下（单源无 shadow 双状态）。
+        // 播种其初始首都天体，mode=Inherit（没有说话，沿作用域链上溯，全链无人表态则
+        // 落到 Auto）。之后由 sim 的迁都步骤维护，`Faction` 不再存首都可以下
+        //（单源无 shadow 双状态）。
         c.capital = Some(Control::inherit(initial_capital(&f.name).to_string()));
         // 建造预算默认与投资预算相等，作为造舰的资金池。
         c.construction_budget = f

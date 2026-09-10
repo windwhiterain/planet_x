@@ -105,9 +105,10 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 \n\
 【控制模型 = 指令】每势力有可控状态 State::control：ship_orders（Idle/Move/Follow/DockCity/\n\
 Dock/Colonize；攻击与轰炸不需要行为，射程内自动发生）、doctrine/kiting（行为风格与风筝<->贴脸）、\n\
-budget（投资预算）、invest_weights。每个叶子带 mode：\n\
-Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继承上层）。State::scope 是一棵\n\
-作用域树（全局→势力→天体→城市），决定某叶子由谁控制。agent 用 --apply 写 diff 定向故事。\n\
+budget（投资预算）、invest_weights。每个叶子带 mode（三态）：\n\
+Inherit（继承上层，缺省）| Auto（系统自动决策）| Player（玩家指令，系统只读）。State::scope 是一棵\n\
+作用域树（全局→势力→天体→城市），决定某叶子由谁控制；沿链取第一个不是 Inherit 的层，全链\n\
+继承则落到 Auto。agent 用 --apply 写 diff 定向故事。\n\
 \n\
 【讲故事流程】\n\
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\

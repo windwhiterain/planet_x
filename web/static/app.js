@@ -104,9 +104,10 @@ function behaviorFromInput(type, d) {
 //  childMode  'tabs'  容器：tab 带，仅展开激活子节点
 //             'list'  分类组：全部子项堆叠
 //             'leaf'  终端节点（无子）
-//  scope      选 AI/玩家 toggle 的来源：
+//  scope      选「谁负责」三态 toggle 的来源：
 //             null 无 toggle（纯分组容器）；'global' edScope.global；
 //             'factions'/'bodies'/'cities' scopeVal(edScope[k], id)；'leaf' node.leaf.mode
+//             （三态：Inherit=继承上层 / Auto=系统自动 / Player=玩家；读面永远给全三态之一）
 //  editor     'ship'  舰行为编辑器（仅 Player）| 'value' 数值叶子编辑器 | 'building' 建筑
 const KIND = {
   global:    { childMode: 'tabs', scope: 'global' },
@@ -215,7 +216,7 @@ function getControl(fid) {
 
 function scopeVal(list, id) {
   const e = list.find((x) => x[0] === id);
-  return e ? e[1] : null;
+  return e ? e[1] : 'Inherit';
 }
 function setScopeVal(list, id, val) {
   const i = list.findIndex((x) => x[0] === id);
@@ -487,18 +488,21 @@ function modeToggleFor(node) {
   const set = acc.set;
 
   const sel = el('select', { class: 'mode' });
-  [['', '默认'], ['Ai', 'AI'], ['Player', '玩家']].forEach(([v, l]) => {
+  [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']].forEach(([v, l]) => {
     const o = el('option', { value: v });
     o.textContent = l;
-    o.selected = mode === (v === '' ? null : v);
+    o.selected = normMode(mode) === v;
     sel.appendChild(o);
   });
   sel.addEventListener('change', () => {
-    set(sel.value === '' ? null : sel.value);
+    set(sel.value);
     renderTree();
   });
   return sel;
 }
+
+// 读面的三态是权威拼写；缺省（null/undefined，例如 scope 里没列出的层）算「继承」。
+function normMode(m) { return m || 'Inherit'; }
 
 function shipEditor(leaf) {
   const edit = el('div', { class: 'ship-editor' });

@@ -19,12 +19,12 @@ use serde::{Deserialize, Serialize};
 
 // --- read-side wire types (the editable control surface) --------------------
 
-/// 一艘舰的读面条目：行为 + 由谁决定。
+/// 一艘舰的读面条目：行为 + 由谁决定（三态，读面永远给全三态之一）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipOrderEntry {
     pub ship: ShipId,
     pub behavior: ShipBehavior,
-    pub mode: Option<ControlMode>,
+    pub mode: ControlMode,
 }
 
 /// 一艘舰的行为风格（per-舰 可配置）读面：两条轴各取 [-1,1]，0 = 基线。
@@ -48,7 +48,7 @@ pub struct ShipKitingEntry {
 pub struct BudgetEntry {
     pub resource: String,
     pub value: f64,
-    pub mode: Option<ControlMode>,
+    pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -60,7 +60,7 @@ pub struct InvestWeightEntry {
     pub ship_type: Option<String>,
     pub structure: String,
     pub value: f64,
-    pub mode: Option<ControlMode>,
+    pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,14 +69,14 @@ pub struct BuildWeightEntry {
     pub building: BuildingId,
     pub ship_type: Option<String>,
     pub value: f64,
-    pub mode: Option<ControlMode>,
+    pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LoyaltyBudgetEntry {
     pub city: CityId,
     pub value: f64,
-    pub mode: Option<ControlMode>,
+    pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -93,25 +93,13 @@ pub struct FactionControlView {
     pub loyalty_budget: Vec<LoyaltyBudgetEntry>,
 }
 
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
-pub struct ScopeView {
-    #[serde(default)]
-    pub global: Option<ControlMode>,
-    #[serde(default)]
-    pub factions: Vec<(FactionId, Option<ControlMode>)>,
-    #[serde(default)]
-    pub bodies: Vec<(BodyId, Option<ControlMode>)>,
-    #[serde(default)]
-    pub cities: Vec<(CityId, Option<ControlMode>)>,
-}
-
 /// The editable control surface, exactly what the frontend edits and posts back
 /// to `/api/command`. Emitted by the agent CLI `control` command as the
 /// "template" the agent edits, and accepted by `apply` / `--apply` as a diff.
 #[derive(Serialize, Clone)]
 pub struct ControlSurface {
     pub control: Vec<FactionControlView>,
-    pub scope: ScopeView,
+    pub scope: ControlScopePatch,
 }
 
 // --- presence-aware control patches (the "diff" the agent writes) ----------
@@ -124,9 +112,10 @@ pub struct ShipOrderPatch {
     /// 新行为（Idle/Move/Follow/DockCity/Dock/Colonize）。缺省 = 保留现值。
     #[serde(default)]
     pub behavior: Option<ShipBehavior>,
-    /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
+    /// 由谁决定：Inherit（继承，撤销本层的表态）/ Auto（系统自动）/ Player（玩家）。
+    /// 缺省 = 保留现值。
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// 一艘舰的行为风格补丁（per-舰 可配置）：覆盖 `ship` 的某条轴；缺省轴保留现值。
@@ -159,9 +148,9 @@ pub struct BudgetPatch {
     /// 新的预算额（资源投放量）。缺省 = 保留现值。
     #[serde(default)]
     pub value: Option<f64>,
-    /// 由谁决定：Ai（系统）/Player（玩家）/ 显式 None（继承上层）。缺省 = 保留现值。
+    /// 由谁决定：Inherit（继承）/ Auto（系统自动）/ Player（玩家）。缺省 = 保留现值。
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// 某城某「建设投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -172,7 +161,7 @@ pub struct InvestWeightPatch {
     #[serde(default)]
     pub value: Option<f64>,
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// 某城某建造区「建造投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -183,7 +172,7 @@ pub struct BuildWeightPatch {
     #[serde(default)]
     pub value: Option<f64>,
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// 某城「娱乐/福利预算」补丁：`value` 替换预算额，`mode` 指定由谁决定。
@@ -193,7 +182,7 @@ pub struct LoyaltyBudgetPatch {
     #[serde(default)]
     pub value: Option<f64>,
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// A structural building patch: add a new building, remove an existing one, or
@@ -227,17 +216,17 @@ pub struct BuildingPatch {
 }
 
 /// 迁都（首都天体）补丁：`value` 指定新的首都天体（BodyId = 天体唯一名）；
-/// `mode` 指定由谁决定（Ai/Player/显式 None）。缺省 `value` 保留现值、缺省 `mode`
+/// `mode` 指定由谁决定（Inherit/Auto/Player）。缺省 `value` 保留现值、缺省 `mode`
 /// 保留现模式。迁都的唯一事实来源是 [`ControllableState::capital`]（无 shadow 双状态）。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct CapitalPatch {
     /// 新的首都天体（天体唯一名）。缺省 = 保留现值。
     #[serde(default)]
     pub value: Option<BodyId>,
-    /// 由谁决定：Ai（系统周期性迁移）/Player（玩家，系统不改写，除非首都亡城强迁）/
-    /// 显式 None（沿作用域链上溯）。缺省 = 保留现模式。
+    /// 由谁决定：Auto（系统周期性迁移）/Player（玩家，系统不改写，除非首都亡城强迁）/
+    /// Inherit（撤销本层的表态，沿作用域链上溯）。缺省 = 保留现模式。
     #[serde(default)]
-    pub mode: Option<Option<ControlMode>>,
+    pub mode: Option<ControlMode>,
 }
 
 /// 单个势力的可控状态补丁（`--apply` / `POST /api/command` 的 `control[]` 元素）。
@@ -292,7 +281,7 @@ pub struct CommandReq {
     pub control: Vec<FactionControlPatch>,
     /// Optional scope (AI/玩家 boundary tree) overlay.
     #[serde(default)]
-    pub scope: Option<ScopeView>,
+    pub scope: Option<ControlScopePatch>,
 }
 
 // --- write-side result (what a diff actually did) ---------------------------
@@ -437,22 +426,24 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
     }
 }
 
-pub fn scope_view(s: &ControlScope) -> ScopeView {
-    ScopeView {
-        global: s.global,
-        factions: s.factions.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        bodies: s.bodies.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        cities: s.cities.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+/// 作用域树的**读面**：只列出**有意见**的节点/键（`Inherit` ≡ 没有说话，不必列出，
+/// 与「这个键不存在」等价）。读面即写面，所以这份模板原样回传安全：没列出的层不会被
+/// 意外清掉。
+pub fn scope_view(s: &ControlScope) -> ControlScopePatch {
+    ControlScopePatch {
+        global: (s.global != ControlMode::Inherit).then_some(s.global),
+        factions: explicit(&s.factions),
+        bodies: explicit(&s.bodies),
+        cities: explicit(&s.cities),
     }
 }
 
-fn scope_from_view(v: &ScopeView) -> ControlScope {
-    ControlScope {
-        global: v.global,
-        factions: v.factions.iter().cloned().collect(),
-        bodies: v.bodies.iter().cloned().collect(),
-        cities: v.cities.iter().cloned().collect(),
-    }
+/// 过滤掉「没有说话」（`Inherit`）的键。
+fn explicit<K: Clone + Ord>(m: &std::collections::BTreeMap<K, ControlMode>) -> Vec<(K, ControlMode)> {
+    m.iter()
+        .filter(|(_, v)| **v != ControlMode::Inherit)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect()
 }
 
 /// Round to 2 decimals (token-noise reduction, matching the agent output).
@@ -667,7 +658,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 .entry(ship_name)
                 .or_insert_with(|| Control {
                     value: sp.behavior.clone().unwrap_or(ShipBehavior::Idle),
-                    mode: sp.mode.flatten(),
+                    mode: sp.mode.unwrap_or_default(),
                 });
             if let Some(v) = &sp.behavior {
                 ctrl.value = v.clone();
@@ -716,7 +707,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             }
             let ctrl = state.control.entry(fid.clone()).or_default().investment_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
                 value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.flatten(),
+                mode: bp.mode.unwrap_or_default(),
             });
             if let Some(v) = bp.value {
                 ctrl.value = v;
@@ -738,7 +729,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             }
             let ctrl = state.control.entry(fid.clone()).or_default().construction_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
                 value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.flatten(),
+                mode: bp.mode.unwrap_or_default(),
             });
             if let Some(v) = bp.value {
                 ctrl.value = v;
@@ -755,7 +746,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             let key = (ip.city.clone(), ip.building);
             let ctrl = state.control.entry(fid.clone()).or_default().invest_weights.entry(key).or_insert_with(|| Control {
                 value: ip.value.unwrap_or(0.0),
-                mode: ip.mode.flatten(),
+                mode: ip.mode.unwrap_or_default(),
             });
             if let Some(v) = ip.value {
                 ctrl.value = v;
@@ -772,7 +763,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             let key = (bp.city.clone(), bp.building);
             let ctrl = state.control.entry(fid.clone()).or_default().build_weights.entry(key).or_insert_with(|| Control {
                 value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.flatten(),
+                mode: bp.mode.unwrap_or_default(),
             });
             if let Some(v) = bp.value {
                 ctrl.value = v;
@@ -806,7 +797,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             }
             let ctrl = state.control.entry(fid.clone()).or_default().loyalty_budget.entry(lp.city.clone()).or_insert_with(|| Control {
                 value: lp.value.unwrap_or(0.0),
-                mode: lp.mode.flatten(),
+                mode: lp.mode.unwrap_or_default(),
             });
             if let Some(v) = lp.value {
                 ctrl.value = v;
@@ -859,8 +850,14 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         }
     }
     if let Some(sv) = &req.scope {
-        state.scope.overlay(&scope_from_view(sv));
-        report.applied += 1;
+        // 作用域补丁：**每个被触碰的节点算一个叶片**（`applied` 是「落地了几个叶片」
+        // 的口径，作用域节点与叶子同权）。
+        let touched = usize::from(sv.global.is_some())
+            + sv.factions.len()
+            + sv.bodies.len()
+            + sv.cities.len();
+        state.scope.overlay(sv);
+        report.applied += touched;
     }
     report
 }
@@ -1293,8 +1290,8 @@ mod tests {
     fn scope_player_takes_over_independent_faction() {
         let config = crate::config::load_config();
         let mut state = crate::world::default_state(&config, 42);
-        // Default scope (all None) → everything resolves to Ai.
-        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Ai, "default scope is Ai");
+        // Default scope (all Inherit) → everything resolves to Auto.
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Auto, "default scope is Auto");
 
         // Take over faction 中国 via a scope-only diff.
         let scope_diff = serde_json::json!({"scope": {"factions": [["中国", "Player"]]}});
@@ -1302,16 +1299,78 @@ mod tests {
         assert_eq!(state.ship_control("长城".to_string()), ControlMode::Player, "ship of a Player faction is player-owned");
         assert_eq!(state.investment_budget_control("中国".to_string(), "铁"), ControlMode::Player, "budget leaf follows scope");
         assert_eq!(state.construction_budget_control("中国".to_string(), "铁"), ControlMode::Player);
-        // Other factions are untouched (still Ai): 华盛顿 is a US ship (美国).
-        assert_eq!(state.ship_control("华盛顿".to_string()), ControlMode::Ai, "untouched faction stays Ai");
+        // Other factions are untouched (still Auto): 华盛顿 is a US ship (美国).
+        assert_eq!(state.ship_control("华盛顿".to_string()), ControlMode::Auto, "untouched faction stays Auto");
 
         // An explicit leaf mode still overrides scope in the opposite direction:
-        // force 长城 back to Ai inside a Player faction.
+        // hand 长城 back to the system inside a Player faction.
         let leaf_diff = serde_json::json!({
-            "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Ai"}]}]
+            "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Auto"}]}]
         });
         apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
-        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Ai, "explicit Ai leaf beats Player scope");
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Auto, "explicit Auto leaf beats Player scope");
+
+        // …and an explicit `Inherit` leaf un-does that override, falling back to scope.
+        let back = serde_json::json!({
+            "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Inherit"}]}]
+        });
+        apply_patch(&mut state, &config, &back).expect("inherit leaf applies");
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Player, "Inherit leaf falls back to the faction scope");
+    }
+
+    /// 三态的**旧档拼写**必须继续能读进来（`.ron` 存档里存的是旧的
+    /// `Option<ControlMode>`：`None` = 没有说话、`Some(Ai)` / `Some(Player)` = 显式指定）。
+    /// 这是「改名不丢档」的守卫：映射是双射，所以加载时就能完成迁移。
+    #[test]
+    fn legacy_mode_spellings_still_load() {
+        use crate::model::ControlMode;
+
+        // JSON 读面：null / 旧名 "Ai" / 三个新名。
+        let from_json = |s: &str| -> ControlMode { serde_json::from_str(s).expect("mode must load") };
+        assert_eq!(from_json("null"), ControlMode::Inherit, "null = 没有说话");
+        assert_eq!(from_json("\"Ai\""), ControlMode::Auto, "Ai is the pre-rename spelling of Auto");
+        assert_eq!(from_json("\"Auto\""), ControlMode::Auto);
+        assert_eq!(from_json("\"Inherit\""), ControlMode::Inherit);
+        assert_eq!(from_json("\"Player\""), ControlMode::Player);
+        assert!(serde_json::from_str::<ControlMode>("\"玩家\"").is_err(), "unknown spellings must fail loudly");
+
+        // RON 存档里叶子写的是 `mode: None` / `Some(Ai)` / `Some(Player)`。
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Leaf {
+            #[serde(default)]
+            mode: ControlMode,
+        }
+        let load = |s: &str| -> ControlMode { ron::from_str::<Leaf>(s).expect("legacy leaf must load").mode };
+        assert_eq!(load("(mode: None)"), ControlMode::Inherit, "legacy `None` = Inherit");
+        assert_eq!(load("(mode: Some(Ai))"), ControlMode::Auto, "legacy `Some(Ai)` = Auto");
+        assert_eq!(load("(mode: Some(Player))"), ControlMode::Player, "legacy `Some(Player)` = Player");
+        assert_eq!(load("(mode: Some(Inherit))"), ControlMode::Inherit, "new spelling, same `Some(..)` shell");
+        assert_eq!(load("()"), ControlMode::Inherit, "missing field defaults to Inherit");
+        // 手写 `.ron` 也必须带 `Some(..)` 外壳（RON 里 `deserialize_option` 不认裸标识符）；
+        // 这是**有意的**：JSON 是写面，`.ron` 只由 `--save` 写。写错了会当场报 ExpectedOption，
+        // 而不是静默当成 Inherit。
+        assert!(ron::from_str::<Leaf>("(mode: Player)").is_err(), "a bare RON identifier must fail loudly");
+
+        // 作用域树同理：整棵树（含旧的 `global: None` 与 `Some(x)` 键值）必须能读。
+        let scope: crate::model::ControlScope = ron::from_str(
+            r#"(global: None, factions: {"中国": Some(Player), "美国": None}, bodies: {}, cities: {})"#,
+        )
+        .expect("legacy scope tree must load");
+        assert_eq!(scope.global, ControlMode::Inherit);
+        assert_eq!(scope.factions.get("中国").copied(), Some(ControlMode::Player));
+        assert_eq!(scope.factions.get("美国").copied(), Some(ControlMode::Inherit));
+
+        // 写面（线格式）：JSON 是干净的字符串三态，RON 是与旧档同形的 `Some(标识符)`
+        // —— 而且**自己写的必须读得回来**（RON 的裸标识符 vs 引号字符串在这里是坑）。
+        for m in [ControlMode::Inherit, ControlMode::Auto, ControlMode::Player] {
+            let json = serde_json::to_string(&Leaf { mode: m }).expect("json");
+            assert_eq!(json, format!("{{\"mode\":\"{}\"}}", m.name()), "JSON read面 must be a bare three-state string");
+            assert_eq!(serde_json::from_str::<Leaf>(&json).expect("json back").mode, m);
+
+            let text = ron::to_string(&Leaf { mode: m }).expect("ron");
+            assert_eq!(text, format!("(mode:Some({}))", m.name()), "RON must stay `Some(<ident>)`, same shape as legacy");
+            assert_eq!(ron::from_str::<Leaf>(&text).expect("ron back").mode, m, "own checkpoint must load back: {text}");
+        }
     }
 
     /// 娱乐/福利预算：一座城的忠诚度投入是一个可控叶子。按 Player 覆盖后，治理模型
