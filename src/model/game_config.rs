@@ -234,6 +234,16 @@ pub struct MarketConfig {
     /// 需求地板（单位/回合）：低于它的资源视为「几乎没人消费」，价格不升不降（基价）。
     /// 否则一个没人用的矿会因为「库存 0」被永久顶在天价上。
     pub demand_min: f64,
+    /// 友好门槛：某势力对另一势力的关系达到此值即算友好，享价格折扣。
+    pub friendly_relation: f64,
+    /// 友好折扣上限（0.15 = 最多打 85 折买对方的货）。
+    pub friendly_price_discount: f64,
+    /// 敌对加价上限（1.5 = 关系冷到交战边缘时，买对方的货要付 2.5 倍价）。
+    /// 这让「关系」直接变成**成本**——同一个矿，向敌人买贵得多。
+    pub hostile_price_markup: f64,
+    /// **全面禁运**阈值：某势力对另一势力的关系 ≤ 此值即「根本不卖给你」（所有资源）。
+    /// 比交战阈值更早生效：还没开打，供货就已经断了。
+    pub embargo_relation: f64,
 }
 /// 光速治理 (lightspeed governance) tuning。
 ///
@@ -369,11 +379,11 @@ pub struct BalanceOfPowerConfig {
     /// 弱国「倒向联盟」的疏远阈值：某弱者对霸权的关系 ≤ 此值即视为已加入反制联盟
     /// （被遏制/疏远了霸权、转而与弱国抱团）。与交战阈值（war_threshold）无关——
     /// 遏制是冷战式的「疏远 + 经济封锁」，不必然导致开战。
+    ///
+    /// **这是经济封锁的判据**：已倒向联盟的弱者 ↔ 被锁定的霸权之间**全面禁运**
+    /// （见 `sim::trade_blocked`）——取代了旧的 `sanction_trade_mult`（那只是「少卖一点」，
+    /// 现在是真的「不卖给你」）。
     pub coalition_estrange: f64,
-    /// 经济制裁：当一个反制联盟（≥ [`Self::min_members`]）成立并对霸权实施封锁时，
-    /// 霸权保留的自动市场交易额度比例（0..1；1 = 不制裁）。这会给一家独大的经济体
-    /// 造成资源封锁与失衡——它难以再靠市场兑换到短缺矿物（如铀/氦-3），产业受抑。
-    pub sanction_trade_mult: f64,
     /// 经济制裁的「治理代价」：被封锁的霸权维持帝国（行政 + 娱乐/福利）的成本倍率。
     /// >1 表示被孤立/封锁的霸权要把更多稀缺资源中转去维持领地与治安，导致**远端/边缘
     /// 殖民地更难养、更易离心叛乱**——把「多国资源封锁」转化为「霸权扩张受限」，让
@@ -396,7 +406,6 @@ impl Default for BalanceOfPowerConfig {
             collective_defense_delta: -15.0,
             min_members: 2,
             coalition_estrange: -10.0,
-            sanction_trade_mult: 1.0,
             sanction_cost_mult: 1.6,
         }
     }

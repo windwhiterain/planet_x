@@ -807,6 +807,65 @@ fn military_need(config: &GameConfig) -> BTreeSet<String> {
     out
 }
 
+/// **关系即价格**：卖方 `seller` 卖给买方 `buyer` 时的实际成交价倍率。
+///
+/// * 关系为负 → 加价（越冷越贵），到交战边缘封顶 `hostile_price_markup`（默认 2.5×）。
+/// * 关系为正 → 折扣（越暖越便宜），到 `friendly_relation` 封顶 `friendly_price_discount`
+///   （默认 85 折）。
+///
+/// 同一个矿，向朋友买和向敌人买不是一个价——这是「不同关系不同价格」（D4）。
+fn relation_price_mult(state: &State, config: &GameConfig, seller: &str, buyer: &str) -> f64 {
+    let m = &config.market;
+    let rel = relation(state, seller, buyer);
+    if rel < 0.0 {
+        // 跨度 = 交战阈值的绝对值再多一点（越过它就已经开战/禁运了）。
+        let span = (-config.combat.war_threshold).max(1.0) + 1.0;
+        1.0 + m.hostile_price_markup * ((-rel) / span).clamp(0.0, 1.0)
+    } else {
+        let f = m.friendly_relation.max(1.0);
+        1.0 - m.friendly_price_discount * (rel / f).clamp(0.0, 1.0)
+    }
+}
+
+/// **全面禁运**：某一方「根本不卖给你」——**所有资源**都断供（D4：全面）。
+///
+/// 三档判据（任一档成立即封锁）：
+/// 1. **交战**：关系 ≤ `war_threshold`（任一方这样看对方即可）。
+/// 2. **反制联盟封锁**：已倒向联盟的弱者 ↔ 被锁定的霸权（取代旧的 `sanction_trade_mult`
+///    ——那个只是「少卖一点」，这个是真的「不卖」）。
+/// 3. **冷到断供**：关系 ≤ `embargo_relation`（比交战阈值更早，还没开打就断货）。
+///
+/// 判据是**对称**的：一方不卖，买卖就做不成。公开给测试/观测（`--schema` 之外的控制面
+/// 也可用它回答「他到底卖不卖我」）。
+pub fn trade_blocked(state: &State, config: &GameConfig, a: &str, b: &str) -> bool {
+    trade_block_cause(state, config, a, b).is_some()
+}
+
+/// [`trade_blocked`] 的**原因**（`None` = 没封锁）。把「为什么断供」区分开，才能对账
+/// ——否则「禁运太多」无法判断是战争、联盟还是阈值太严。
+pub fn trade_block_cause(state: &State, config: &GameConfig, a: &str, b: &str) -> Option<&'static str> {
+    if a == b {
+        return None;
+    }
+    if hostile(state, config, a, b) || hostile(state, config, b, a) {
+        return Some("war");
+    }
+    let cold = config.market.embargo_relation;
+    if relation(state, a, b) <= cold || relation(state, b, a) <= cold {
+        return Some("cold");
+    }
+    // 反制联盟对霸权的封锁：谁「倒向联盟」谁就不跟霸权做生意。
+    if config.balance.hegemon_power <= 1.0 {
+        if let Some(h) = sanctioned_hegemon(state, config) {
+            let estranged = |x: &str| x != h && relation(state, x, &h) <= config.balance.coalition_estrange;
+            if (a == h && estranged(b)) || (b == h && estranged(a)) {
+                return Some("coalition");
+            }
+        }
+    }
+    None
+}
+
 /// 星际市场（真实交换所）。每回合三步，全部确定性、无 RNG：
 ///
 /// 1. **价格发现**：`mult = (coverage_rounds / 覆盖回合数)^price_alpha`，其中
@@ -934,9 +993,12 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 continue;
             }
             // 别的势力此刻还剩多少这种资源在卖（按卖家名排序 → 确定性）。
+            // **禁运过滤**：不卖给你的卖家，其挂单对你根本不存在。
             let sellers: Vec<(FactionId, f64)> = remaining
                 .iter()
-                .filter(|((s, r), amt)| r == &rt && s != &buyer && **amt > 1e-9)
+                .filter(|((s, r), amt)| {
+                    r == &rt && s != &buyer && **amt > 1e-9 && !trade_blocked(state, config, s, &buyer)
+                })
                 .map(|((s, _), amt)| (s.clone(), *amt))
                 .collect();
             for (seller, avail) in sellers {
@@ -947,11 +1009,16 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 let spendable = listed_value(&remaining, &price, &value_of, &buyer);
                 let limit_left = (m.auto_trade_limit - spent.get(&buyer).copied().unwrap_or(0.0)).max(0.0);
                 let max_purchase = (spendable / (1.0 + m.spread)).min(limit_left);
-                let take = short.min(avail).min(max_purchase / p);
+                // 成交价 = 市场价 × 关系倍率（向敌人买贵得多）。
+                let p_eff = p * relation_price_mult(state, config, &seller, &buyer);
+                let take = short.min(avail).min(max_purchase / p_eff);
                 if take <= 1e-9 {
                     continue;
                 }
-                let cost = take * p;
+                // 买方实付（按市场价计的实物价值）与卖方交出的货值（市场价）不是一回事：
+                // 差价就是关系溢价/折扣，落在卖方身上。
+                let give_market = take * p;
+                let cost = take * p_eff;
                 // 实物交割：卖家的货 → 买家。
                 if let Some(f) = state.faction_mut(&seller) {
                     let e = f.resources.entry(rt.clone()).or_insert(0.0);
@@ -968,8 +1035,9 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
                 //      另按 spread 烧掉 cost×spread（市场手续费 = 真实的价值 sink）。
                 pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, Some(&seller), cost);
                 pay_with_surplus(state, &mut remaining, &price, &value_of, &buyer, None, cost * m.spread);
-                *net_import.entry(buyer.clone()).or_insert(0.0) += cost;
-                *net_import.entry(seller.clone()).or_insert(0.0) -= cost;
+                // 净进口 = 收到的货值 − 交出的货值（关系溢价因此体现为卖方的贸易收益）。
+                *net_import.entry(buyer.clone()).or_insert(0.0) += give_market - cost * (1.0 + m.spread);
+                *net_import.entry(seller.clone()).or_insert(0.0) += cost - give_market;
                 *spent.entry(buyer.clone()).or_insert(0.0) += cost;
                 short -= take;
             }
@@ -3053,6 +3121,12 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
         let production_value: f64 = production.iter().map(|(k, v)| v * value_of(k)).sum();
         let governance_cost = flow.governance.get(&fid).map(|g| g.total).unwrap_or(0.0);
         let governance_coverage = flow.governance.get(&fid).map(|g| g.coverage).unwrap_or(1.0);
+        // 「谁不卖给你」：有多少势力对本势力**全面禁运**（本回合市场结算的实际判据）。
+        let trade_blocked_by = state
+            .factions
+            .iter()
+            .filter(|o| trade_blocked(state, config, &o.name, &fid))
+            .count();
         factions.insert(
             fid.clone(),
             FactionMetrics {
@@ -3067,6 +3141,7 @@ pub fn round_metrics(state: &State, config: &GameConfig, flow: &RoundFlow) -> Ro
                 upkeep: flow.upkeep.get(&fid).copied().unwrap_or(0.0),
                 governance_cost,
                 governance_coverage,
+                trade_blocked_by,
             },
         );
     }

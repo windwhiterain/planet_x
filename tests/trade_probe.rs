@@ -200,7 +200,92 @@ fn probe_market_prices() {
     }
 }
 
-/// 3) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
+/// 3) 禁运是否真的发生、以及**为什么**（战争 / 冷到断供 / 反制联盟）。
+#[test]
+#[ignore]
+fn probe_embargo() {
+    let config = load_config();
+    let n = rounds();
+    let checkpoints: Vec<u32> = [1, 20, 60, 120, 240, 400, 600, 800, 1000].into_iter().filter(|c| *c <= n).collect();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut max_blocked: BTreeMap<FactionId, usize> = BTreeMap::new();
+        let mut blocked_rounds: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut spawns: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut rounds_with_any = 0u32;
+        let mut max_pairs = 0usize;
+        println!("== 禁运 seed {seed}（{n} 回合）==");
+        for r in 1..=n {
+            let d = sim::advance(&mut state, &config, &mut rng);
+            for e in &state.events {
+                if let GameEvent::ShipSpawned { owner, .. } = e {
+                    *spawns.entry(owner.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut any = false;
+            let mut pairs = 0usize;
+            for (fid, fm) in &d.metrics.factions {
+                if fm.trade_blocked_by > 0 {
+                    any = true;
+                    *blocked_rounds.entry(fid.clone()).or_insert(0) += 1;
+                    let e = max_blocked.entry(fid.clone()).or_insert(0);
+                    *e = (*e).max(fm.trade_blocked_by);
+                    pairs += fm.trade_blocked_by;
+                }
+            }
+            if any {
+                rounds_with_any += 1;
+            }
+            max_pairs = max_pairs.max(pairs / 2);
+
+            if checkpoints.contains(&r) {
+                let ids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
+                let mut by_cause: BTreeMap<&str, usize> = BTreeMap::new();
+                let mut rels: Vec<f64> = Vec::new();
+                for i in 0..ids.len() {
+                    for j in (i + 1)..ids.len() {
+                        let a = &ids[i];
+                        let b = &ids[j];
+                        let rel = state
+                            .faction(a)
+                            .and_then(|f| f.relations.get(b).copied())
+                            .unwrap_or(0.0);
+                        rels.push(rel);
+                        if let Some(c) = sim::trade_block_cause(&state, &config, a, b) {
+                            *by_cause.entry(c).or_insert(0) += 1;
+                        }
+                    }
+                }
+                rels.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                let med = rels.get(rels.len() / 2).copied().unwrap_or(0.0);
+                let pairs_total = rels.len();
+                let blocked = by_cause.values().sum::<usize>();
+                println!(
+                    "  r{r:<5} 封锁对={blocked}/{pairs_total} 原因={by_cause:?} 关系(最小/中位/最大)={:.1}/{:.1}/{:.1}",
+                    rels.first().copied().unwrap_or(0.0),
+                    med,
+                    rels.last().copied().unwrap_or(0.0)
+                );
+            }
+        }
+        println!(
+            "  有势力被禁运的回合={rounds_with_any}/{n}（{:.0}%）  同时被封锁的势力对峰值={max_pairs}",
+            rounds_with_any as f64 / n as f64 * 100.0
+        );
+        for f in &state.factions {
+            println!(
+                "    {:<14} 被禁运回合={:<4} 最多被几国封锁={:<2} 出厂舰={}",
+                f.name,
+                blocked_rounds.get(&f.name).copied().unwrap_or(0),
+                max_blocked.get(&f.name).copied().unwrap_or(0),
+                spawns.get(&f.name).copied().unwrap_or(0)
+            );
+        }
+    }
+}
+
+/// 4) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
 fn probe_landless() {

@@ -102,6 +102,10 @@ pub struct FactionMetrics {
     pub governance_cost: f64,
     /// 治理覆盖率（0..1：库存能覆盖治理开销的比例；<1 = 治理不到位/忠诚在跌）。
     pub governance_coverage: f64,
+    /// **有多少势力对本势力全面禁运**（「不卖给你」的观察面）。判据同市场结算：
+    /// 交战 / 已倒向联盟的弱者 ↔ 被锁定的霸权 / 关系冷到 `embargo_relation`。
+    /// >0 意味着这个势力的船坞只能靠自己挖的料——这是制裁真正咬到的地方。
+    pub trade_blocked_by: usize,
 }
 /// 单座城的本回合产出（`RoundMetrics::city_production` 的一项）。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
