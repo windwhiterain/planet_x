@@ -37,8 +37,8 @@
   `src/json.rs` + `web/src/lib.rs` 的 `InfoRoot`/`info_roots` + `web/static/jsonview.js` + `web/static/app.js::renderInfo`）：
   WebUI 以前只有左侧「可控 state」（控制面树，硬编码字段知识），普通 state（实体全量字段/事件/编年史/派生/配置）
   到不了前端。现在 `GET /api/state` 多带一个 `info: [{name, value}]`——**每个根都是模型的整份 JSON dump、零手工投影**：
-  `state`（规范世界，含 control/scope）、`pre`/`post`（上一回合的派生态；`post.flow` 是步进函数**实际用过**的
-  流量：每城/每势力产出、舰队维护费、治理成本/覆盖率，与 CLI `--save` 的 `RoundState` 同源）、`config`
+  `state`（规范世界，含 control/scope）、`pre`/`post`（上一回合的**视图**，两份同形；`post` 比 `pre`
+  多的就是本回合的过程量：每城/每势力产出、舰队维护费、治理成本/覆盖率——与 CLI `--save` 的 `RoundState` 同源）、`config`
   （game.ron 的全部调参表）、`session`（RNG 位置）。前端由 `jsonview.js` 渲染，它是 **schema-agnostic widget**：
   **不认识任何字段名**，只认 JSON 形状——object 全标量→键值行；object 全对象且 ≥3 项→映射表（首列=key）；
   array 全对象→自动表格（列=各元素键的并集，按首次出现顺序）；array 全标量→chips；其余→递归可折叠节点。
@@ -50,7 +50,7 @@
   UI：右侧边缘 panel（与左侧对称，只读），带 root tab、子串过滤（命中列名则只留该列；命中节点名则整棵子树
   照常展开）、全展开/全收起（展开状态按路径跨渲染保留）、点叶子复制 JSON 路径（`state.cities[3].loyalty`）。
   验证：`cargo test --workspace` 全绿（56 lib + 6 长局 + 2 web）；:3011 实机验证（自动表格/过滤/chips/
-  复制路径/推进 3 回合后 flow 非空/左右面板+地图共存无回归）。
+  复制路径/推进 3 回合后 `post` 的过程量非零/左右面板+地图共存无回归）。
 - `[x]` **把通用 widget 推广到其它读面（读面全面 generic 化）**（branch `feature/web-readside`）：左侧控制面树仍是手写 `KIND` 注册表（舰/预算/权重/建筑各有专用
   编辑器）——那是「写面」需要语义，暂不动；但**读面**（底部 readout、势力一览、舰面板）都可改成同一个
   widget 渲染 `world.info` 的子树，省掉一批手工投影。另：`StateView` 里给地图用的拍平字段

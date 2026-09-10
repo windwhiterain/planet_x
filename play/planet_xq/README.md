@@ -3,16 +3,32 @@
 Read a `planet_x --index` projection into pandas.
 
 The Rust generator projects a run into a **lean main stream** + **id-indexed lazy tables** so the
-agent's default view stays small (only `metrics` + id-arrays are inline). Use this kit to fetch a
-heavy field (a ship's full object, a city's details, a faction's stockpile + relations) by id, and
-to join it back to the main facts. **Entity ids are always string names** (ship/city/building/
-faction/body/settlement = its unique name), never integer offsets.
+agent's default view stays small (only the round's `view` + id-arrays are inline). Use this kit to
+fetch a heavy field (a ship's full object, a city's details, a faction's stockpile + relations) by
+id, and to join it back to the main facts. **Entity ids are always string names** (ship/city/
+building/faction/body/settlement = its unique name), never integer offsets.
+
+## The round view: one shape, twice
+
+A round's world is **one object, `RoundView`**, and the projection hands you it twice with the
+**same shape**:
+
+- `pre` — the world at the round's **start** (the process quantities are 0/empty there);
+- `post` — the world at the round's **end** *plus* that round's **process quantities**
+  (production / upkeep / governance / trade / the AI's judgments).
+
+`main.jsonl` carries `post` as the row's **`view`** key, flat and eager: `view.city_count` /
+`view.ship_count` / `view.fleet_value` / `view.population`, the politics block
+(`view.power_share` / `view.hegemon` / `view.coalition_members` / `view.sanctioned` / `view.wars`),
+the market tables (`view.market_price` / `view.market_settled` / `view.market_offered`), one row
+per faction (`view.factions[<势力>]`) and per city (`view.cities[<城>]`), and the AI's own
+judgments (`view.decisions`). Any dotted path below starts at `view` for exactly this reason.
 
 ## Layout
 
 ```
 planet_x --seed 7 --round 12 --index out/
-# out/main.jsonl        lean per-round facts (round, time_month, chronicle, metrics,
+# out/main.jsonl        lean per-round facts (round, time_month, chronicle, view,
 #                       event_ids[], ship_ids[], city_ids[], faction_ids[], body_ids[],
 #                       settlement_ids[])
 # out/schema.json       agent-readable projection contract (eager / lazy / columns / read_order)
@@ -37,7 +53,7 @@ without reverse-engineering the JSON. Since the **derived** tables landed it als
 
 ## Derived tables: what the engine computed (not state it stored)
 
-`idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl`,
+`idx/faction_process.jsonl`, `idx/city_process.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl`,
 `idx/decisions.jsonl`, `idx/blueprints.jsonl` are **not** lazy
 fields: they are not reached by exploding an id-array from `main.jsonl`, because their data
 **is not in the state at all** — it is what the round's step functions computed and applied
@@ -50,9 +66,9 @@ schema entry therefore carries `join_on` (a column that
 
 ```python
 q = planet_xq.load("out")
-q.derived("flow")              # generic accessor: q.derived(name, round=None)
-q.flow(round=12)               # per-round × faction: production{} / upkeep / governance_total / governance_coverage
-q.city_flow(round=12)          # per-round × city: production{} (razed cities included, `razed` column)
+q.derived("faction_process")   # generic accessor: q.derived(name, round=None)
+q.faction_process(round=12)    # per-round × faction: production{} / upkeep / governance_total / governance_coverage
+q.city_process(round=12)       # per-round × city: production{} (razed cities included, `razed` column)
 q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
 q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
 q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict / target / detail
@@ -76,13 +92,18 @@ and `launch_waiting` flags the "progress is full but the components cannot be pa
 
 Two things worth knowing:
 
-- **`flow` numbers are also inside `main.jsonl`** as the nested `metrics.factions[<faction>]`
-  object (`production`, `upkeep`, `governance_cost`, `governance_coverage`). These tables are the
-  **joinable reshape** of the same numbers (stable dtypes, one row per `(round, name)`), which is
-  what you want for pandas work.
-- **A projection started from a checkpoint** (`--start ckpt.ron --round 0 --index out/`) puts that
-  checkpoint's own round flow into the start row, because that row's state *is* the result of that
-  round. A fresh `--seed` run has no flow at round 0 (`{}`) — the initial world has no previous round.
+- **The same process numbers are also inside `main.jsonl`** as the nested
+  `view.factions[<faction>]` object (`production`, `production_value`, `upkeep`,
+  `governance_cost`, `governance_coverage`, plus the trade terms `freight_paid` /
+  `carrier_income` / `net_import`); the per-city ore output likewise sits in `view.cities[<city>]`
+  (that map skips razed cities, while `city_process` keeps their rows with `production = {}`).
+  These tables are the **joinable reshape** of the same numbers (stable dtypes, one row per
+  `(round, name)`), which is what you want for pandas work.
+- **过程量 — the round's production / upkeep / governance / trade / AI judgments — only exists for
+  rounds the engine actually advanced; in `pre` it is 0/empty.** A projection started from a
+  checkpoint (`--start ckpt.ron --round 0 --index out/`) therefore puts that checkpoint's **stored
+  view** into the start row, because that row's state *is* the result of that round; a fresh `--seed`
+  run has no process quantities at round 0 (`0` / `{}`) — the initial world has no previous round.
 - For **per-ship effective intent** read the `ships` table columns
   `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
   `doctrine` / `kiting` — the engine resolves the ownership chain, so **do not re-implement it**
@@ -100,7 +121,7 @@ import planet_xq
 q = planet_xq.load('out')
 print(q.facts)                 # lean main stream
 print(q.factions(round=10))    # per-faction resources + relations + own city/ship ids
-print(q.faction_snapshot(10, '中国'))   # one-call decision view (metrics+stockpile+relations)
+print(q.faction_snapshot(10, '中国'))   # one-call decision view (view row + stockpile + relations)
 print(q.ships(round=10))       # ships at round 10 (from the index), with effective panel
 print(q.city_buildings(10, '中国'))     # that faction's cities, each with a buildings list
 merged = q.join('ships', round=10)   # explode main ship_ids and merge with ship detail
@@ -109,8 +130,8 @@ print(q.bodies())              # global master table
 print(q.settlements())         # global 定居点 master (area/capacity/resources)
 print(q.ships_spec())          # static rules: ship class -> spec (hull/upkeep/build_points/…)
 print(q.resource_value())      # resource key (可读名) -> value
-print(q.yearly_avg('metrics.cities'))      # 年均 (1 回合 = 1 月, 12 月/年)
-print(q.decadal_avg('metrics.factions.中国.market_value'))  # 十年均 (120 月)
+print(q.yearly_avg('view.city_count'))     # 年均 (1 回合 = 1 月, 12 月/年)
+print(q.decadal_avg('view.factions.中国.market_value'))  # 十年均 (120 月)
 "
 ```
 
@@ -121,7 +142,8 @@ q = planet_xq.load("out")
 snap = q.faction_snapshot(12, "中国")
 snap["resources"]              # {resource: amount} 库存
 snap["relations"]              # {faction: rel} 两两外交关系
-snap["metrics"]                # city_count / ship_count / production_value / upkeep / …
+snap["view"]                   # this faction's row of the round view:
+                               # city_count / ship_count / production_value / upkeep / …
 snap["city_ids"], snap["ship_ids"]  # it owns these cities / ships (names)
 
 # buildable insight: which of my shipyards make what
@@ -139,7 +161,7 @@ Key ideas:
   merge on `key` only.
 - **factions** is the diplomacy + economy table: per-faction `resources` (stockpile), `relations`
   (toward every other faction), and the faction's own `city_ids`/`ship_ids`. `faction_snapshot(r, name)`
-  merges it with the lean `metrics.factions` numbers into one read.
+  merges it with that faction's row of the round `view` (`view.factions[<faction>]`) into one read.
 - **ships** carries the effective panel: `attack`, `attack_range`, `speed`, `accel`, `hardness`,
   `intercept`, `shield_regen`, `hull_regen`, `upkeep`, plus `components`/`component_hp` — so an agent
   can plan/engage without recomputing.
@@ -152,8 +174,8 @@ Key ideas:
   `q.window_avg(path, size, agg='mean')` averages it into windows of `size` rounds (1 round = 1
   month, so `size=12` is 年均 and `size=120` is 十年均), indexed by each window's start round.
   `q.yearly_avg(path)` / `q.decadal_avg(path)` are the 12 / 120 shortcuts. `path` is dotted and
-  may be a world metric (`metrics.population`, `metrics.cities`) or per-faction
-  (`metrics.factions.中国.production_value`).
+  may be a world metric (`view.population`, `view.city_count`) or per-faction
+  (`view.factions.中国.production_value`).
 
 > **Playing loop** (the whole reason this kit exists): `planet_x --seed S --index out/` →
 > read `faction_snapshot` → write a control diff → `planet_x --start ckpt.ron --apply diff.json
@@ -301,9 +323,10 @@ Why the shape is what it is (each point measured on a real 715-event projection)
 ## Semantic views: the "common read" in Python, "game logic" in Rust
 
 The split is a hard boundary. **Python views only pack what the simulation already computed and
-wrote into `metrics` / the lazy tables** (pure retrieval, can never drift from the rules). **Any
-judgement that needs a game formula stays in Rust** (`--control-plan` for the economy-sustainability
-verdict; governance-distance / power-share / coalition are computed & emitted by the sim itself).
+wrote into the round's `view` / the lazy tables** (pure retrieval, can never drift from the rules).
+**Any judgement that needs a game formula stays in Rust** (`--control-plan` for the
+economy-sustainability verdict; governance-distance / power-share / coalition are computed & emitted
+by the sim itself).
 
 ```python
 q.view_sitrep(12)                # world politics: totals + hegemon/coalition/sanction/wars/power_share + per-faction
@@ -315,11 +338,15 @@ q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, in
 ```
 
 - `view_sitrep` / `view_frontier` / `view_market` / `view_economy` / `resource_series` are all
-  **pure retrieval** — they re-read `metrics`/lazy tables and do trivial arithmetic
-  (`net = production − upkeep − governance`).
+  **pure retrieval** — they re-read the round `view` (mostly `view.factions[<faction>]`) / the lazy
+  tables and do trivial arithmetic (`net = production − upkeep − governance`).
+- ⚠ `view_economy` returns **two nets**, and they are different things: `net_flow` is computed here
+  (`production_value − upkeep − governance_cost`), while `net_import` is the engine's own **trade**
+  net for the round (bought − sold by market value, `> 0` = net importer) lifted straight out of
+  this faction's `view` row.
 - The one thing they deliberately **don't** judge is *"is my commanded build budget sustainable?"*
   — that's `planet_x --control-plan <faction>` (game logic: the upkeep-reserve cap + a dry-run
-  `advance`). Python `view_economy` gives the raw flow; the verdict comes from Rust.
+  `advance`). Python `view_economy` gives the raw process quantities; the verdict comes from Rust.
 - `revolt_risk` / `gov_distance` on each city are game-derived and **emitted by the simulation**
   (`agent::governance_distance`), so the Python frontier view stays correct without re-deriving the
   governance distance formula.

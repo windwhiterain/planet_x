@@ -847,7 +847,7 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
 | `lone_wolf` | **编队规模**：本舰护航半径（`lone_wolf_radius`，0 = 用 `combat.escort_range`）内的友舰数 `n` ⇒ `1 − 2·n/(n+lone_wolf_ref)`（孤舰 +1、成群 → −1）。平滑、无阈值 |
 | `kiting` | 敌我火力比（`sim::deterrence` 对数比，强则贴脸）+ 硬度对比（船体+护盾的和差比）+ 挨打程度（`1−hull/hull_max`，残则拉开）。**附近没有敌舰 ⇒ 目标 0**（这条轴只在接战时才有意义，与 `kiting_dest` 同一把尺子：`tactics::nearest_enemy_ship`，感知半径 = 武器射程 + 0.5） |
 
-每次真的改了就往 `derived.flow.decisions.styles` 追加一行（`StyleDecision`：轴 / 旧值 / 新值 /
+每次真的改了就往 `view.decisions.styles` 追加一行（`StyleDecision`：轴 / 旧值 / 新值 /
 目标 / 当时读到的驱动输入）——投影 `idx/decisions.jsonl` 的 `kind = "style_retune"`。
 
 ### 16.3 闸门（宁严勿宽）与"两轴一片叶"
@@ -936,7 +936,7 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
 ### 18.3 两处测试判据的改动（如实记下，不是"改测试让它过"）
 
 1. `longhorizon::coalition_mechanism_is_alive`：判据从"**必须**送出 `CoalitionFormed` 事件"
-   放宽成"事件**或**回合末 `metrics.coalition_members ≥ min_members`"。理由是那条事件报的是
+   放宽成"事件**或**回合末 `view.coalition_members ≥ min_members`"。理由是那条事件报的是
    **跃迁**，触发取决于"关系先冷"还是"霸权先出现"这个与机制无关的先后顺序（成员在霸权出现前
    就已疏远 ⇒ `before_active` 一上来就是 true ⇒ 永不报事件），而卫兵要问的是**机制是否活着**。
    **事件本身的这个盲区是候选修复项**（要给它加"按霸权存续"的记忆），不在本轮范围。

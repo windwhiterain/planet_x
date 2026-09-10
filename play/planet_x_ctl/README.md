@@ -403,24 +403,27 @@ instead of a `matched=False` row.
 All of these were *measured*, and each one is a place where the data-plane-only ruling leaves the kit
 guessing. They are listed because they are cheap to close and expensive to work around:
 
-1. **Flow metrics only exist for rounds the engine actually advanced.** `--start ckpt --round 0
-   --index DIR` (the natural way to project a checkpoint) emits a correct **snapshot** but reports
-   `production_value = 0`, `upkeep = 0`, `governance_cost = 0` for every faction — those come from
-   `RoundFlow`, which is not persisted. Any statistical policy therefore needs a projection produced
-   by a real run: `planet_x --seed S --round N --index DIR --save ckpt.ron` — one pass, so the
+1. **过程量 — the round's production / upkeep / governance / trade / AI judgments — only exists for
+   rounds the engine actually advanced; in a round's `pre` view it is 0/empty.** `--start ckpt
+   --round 0 --index DIR` (the natural way to project a checkpoint) emits a correct **snapshot**, but
+   the numbers a statistical policy needs are not in the persisted state — `production_value = 0`,
+   `upkeep = 0`, `governance_cost = 0` for every faction. They are computed *during* the round and
+   folded into that round's `post` view, so any statistical policy needs a projection produced by a
+   real run: `planet_x --seed S --round N --index DIR --save ckpt.ron` — one pass, so the
    projection's last round and the checkpoint describe the same state. `ctl.new_checkpoint(...,
    index_dir=…)` does the one-pass thing for you.
-   *(As of this writing `idx/flow.jsonl` and `idx/city_flow.jsonl` are already being written, which
-   is half of the `engine-data-plane.md` §2 fix — see the next point for what is still missing.)*
+   *(The process tables `idx/faction_process.jsonl` / `idx/city_process.jsonl` are written every
+   round and declared in the schema's `derived` section — see the next point. That does not soften
+   the rule above: a round the engine never advanced has no process quantities to write.)*
 2. **~~The new read-face tables exist on disk but are not declared in `schema.json`.~~** — **closed**:
    the derived tables live in the schema's own `derived` section (not `lazy` — they join on columns
    `main.jsonl` already carries), and `planet_xq.load()` reads it, so `q.derived(name, round)` /
-   `q.flow()` / `q.control()` / `q.blueprints()` all work. `idx/control.jsonl` has no `effective`
-   column — it lists **leaves** (kind/key/sub/value/mode), and "which layer wins" is a **per-ship**
-   answer that belongs on the ships table, where the engine now puts it (next point). What that table
-   *is* good for: it is the one read face that answers **「这片叶真的存在吗」** for per-ship leaves
-   (`--control` lists every ship since §13) — `ships()` reads it for `order_leaf` for exactly that
-   reason, and `q.control()` is the public accessor.
+   `q.faction_process()` / `q.control()` / `q.blueprints()` all work. `idx/control.jsonl` has no
+   `effective` column — it lists **leaves** (kind/key/sub/value/mode), and "which layer wins" is a
+   **per-ship** answer that belongs on the ships table, where the engine now puts it (next point).
+   What that table *is* good for: it is the one read face that answers **「这片叶真的存在吗」** for
+   per-ship leaves (`--control` lists every ship since §13) — `ships()` reads it for `order_leaf`
+   for exactly that reason, and `q.control()` is the public accessor.
 3. **~~No per-entity `effective` on the control read face.~~** — **closed** (blueprint round,
    `SCHEMA_VERSION` 9 → 10): the projection's ships table carries the engine's own
    `order_effective_mode` / `order_effective` / `order_source`, and `ships()` now **reads** them

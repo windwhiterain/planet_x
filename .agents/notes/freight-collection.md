@@ -586,7 +586,7 @@ r400 seed 7 实测远端产出仅约 **1%** 世界产出（冥王星前哨 0.555
 `migrate` 收 `0..=8`，新字段全 `#[serde(default)]`。
 
 **待做**：`model::contract`（`Contract` + `ContractState`，挂单/在运/成交账）；
-`Faction::reputation`（**势力级**，Q3）；`RoundFlow`/`FactionMetrics` 的
+`Faction::reputation`（**势力级**，Q3）；`RoundSink` / 每势力一行 `FactionRow` 的
 `haul_* / reputation / contract_*`；config 一个 `freight:` 段：
 - `freight_share`（承运人抽成比例，Q10）、`reputation_init`、
   `reputation_delta_deliver` / `reputation_delta_late` / `reputation_delta_lost`（Q1(b)：**只掉信誉**，
@@ -667,7 +667,7 @@ r400 seed 7 实测远端产出仅约 **1%** 世界产出（冥王星前哨 0.555
   连带的教训写在这里：**测试里造旧档的针脚不要写死版本号**（`state.rs` 那条 v9 守卫原本
   `.replace("schema_version:10", …)`，升到 v13 之后它什么都不替换，于是「v9 档」里写着 13），
   现在改成用 `SCHEMA_VERSION` 拼针脚。
-- [ ] **M5 禁运扩展 + 观察面**：承包也受 `trade_blocked`；metrics/probe/index。
+- [ ] **M5 禁运扩展 + 观察面**：承包也受 `trade_blocked`；view/probe/index。
 - [ ] **M6 并掉旧的 MOND 特权路径**：`carrier` 从 `config.mond.masters` 写死改为
       「挂价承运人 + 物理可达性」，`carrier_share` 语义重定义为市场费率。
 - [ ] **M7 守卫分层 + 笔记回填**：机制不变量断言；平衡目标 `#[ignore]` + 实测值写注释。

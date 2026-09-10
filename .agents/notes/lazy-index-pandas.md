@@ -7,8 +7,9 @@
 
 **已落地一个最小闭环（`src/projection.rs` + `play/planet_xq`）**：
 - `[x]` **`planet_x --seed S --round N --index DIR`**（`src/projection.rs`）：把 N+1 回合投影成——
-  - `DIR/main.jsonl`：**lean 主流**，每回合一行 `{round,time_month,events,chronicle,metrics,
-    ship_ids[],city_ids[],body_ids[]}`（重型实体不内联，只带 id）。
+  - `DIR/main.jsonl`：**lean 主流**，每回合一行 `{round,time_month,events,chronicle,view,
+    ship_ids[],city_ids[],body_ids[]}`（重型实体不内联，只带 id；`view` = 本回合的**一份视图**，
+    见 [`pre-post-unify.md`](pre-post-unify.md)）。
   - `DIR/idx/{ships,cities}.jsonl`：**per-round 表** `(round, key_id, ...)` 完整对象。
   - `DIR/idx/bodies.jsonl`：**全局主表**（天体 name/轨道/定居点，几乎不变），一次性。
   - `DIR/schema.json`：**agent 可读的投影契约**——声明 `eager`（内联字段）vs `lazy`（索引字段），
@@ -44,7 +45,7 @@
 - `[x]` **统计函数库**（Python 侧，`planet_xq` 内）——先落了**取数 + 窗口平均**：`metric_series(path)`
   （逐月序列，index=round）、`window_avg(path,size,agg)`（按 size 回合/窗口聚合，默认 mean）、
   `yearly_avg(path)`（12 月=1 年）、`decadal_avg(path)`（120 月=10 年）。`path` 为点分路径，
-  可指世界量（`metrics.population`）或势力量（`metrics.factions.中国.production_value`）。
+  可指世界量（`view.population`）或势力量（`view.factions.中国.production_value`）。
   仍开：`rolling_mean/max`、`histogram`、`hegemon_timeline`、`leader_rotation`、`war_durations`、
   `gini(stockpile)`——把「方便做统计」做成库而非让 agent 每次手写 pandas。
 - `[ ]` **eager 单对象模式**（保留短跑 `--round`/`--traj` 全量快照）与索引模式并存，同一份

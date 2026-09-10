@@ -32,25 +32,30 @@
 **没有跑任何测试**，是**读代码**找出来的：判据是「这个量是不是每回合被重复算了多次」，
 以及「内层循环里有没有 O(实体) 的现算」。两条都指向同一类错误：**纯函数被反复调用**。
 
-## 2. 热点（带 `文件:行号`，按推断的收益排序）
+## 2. 热点（按推断的收益排序）
+
+> ⚠ 这一节是**当时读代码**留下的诊断快照：`文件:行号` 那批数字此后动过两次（`sim` 大拆分见
+> [`code-layout.md`](code-layout.md)；派生读面换代把 `round_metrics` 改名 `observe`，见
+> [`pre-post-unify.md`](pre-post-unify.md)）。**行号已删掉**（照不准了，也不编新的）——
+> 要动手就按函数名 grep 定位。
 
 | # | 热点 | 证据 | 每回合重复次数（推断） |
 | --- | --- | --- | --- |
-| 1 | `sanctioned_hegemon` → `dominant_hegemon` → `faction_power_share`：每次都会给**每艘舰**现算 `ship_panel` | `src/sim/power.rs:31,42`（`ship_panel` 在势力×舰的双层循环里）；调用点：`src/sim/market.rs:214` 的**逐挂单**过滤（`trade_blocked` → `trade_block_cause` 的 `market.rs:71`）、`src/sim/metrics.rs:63-67` 的逐势力×逐势力计数 | 数百次 |
-| 2 | `coalition_war_focus` 逐势力各算一次「谁是霸权」 | `src/sim/military.rs:28-32` → `src/sim/power.rs:146`（内部又 `faction_power_share`） | 势力数次 |
-| 3 | `round_metrics` 内部 `faction_power_share` 被算 **3 遍** | `src/sim/metrics.rs:11`（`balance_picture`）+ `:12`（`active_coalition_hegemon`）+ `:38`（`sanctioned_hegemon`，各自再走 `dominant_hegemon`） | 3 次 |
-| 4 | `threat_motive` 逐势力各算一次全量实力占比 | `src/autocontrol/shipbuilding.rs:115`（AI 每回合建图/改装都调它） | 势力数次 |
-| 5 | 索敌内层循环：每发武器扫**全舰队**，且先查 `hostile`（势力线性扫 + BTreeMap）再算距离 | `src/autocontrol/tactics.rs:112-128`、`:145-165`、`:282-301` | 舰 × 武器发数 |
-| 6 | 每个候选目标都重算 `ship_weapons()` + `attack_hist.clone()`（堆分配） | `src/autocontrol/tactics.rs:133-134`（在候选循环**内**） | 候选数 |
-| 7 | `doctrine_weight` 每个候选都 `ship_doctrine(String 克隆)` + 两次 `deterrence()`（后者自己 O(舰队) × `ship_power`） | `src/autocontrol/tactics.rs:95-99` → `src/sim/ships.rs:100-113` | 候选数 |
-| 8 | `State::ship/city/faction` 全是**名字线性扫**，在循环里被反复调用 | `src/model/state.rs:117,127,137,146` | 到处都是 |
-| 9 | 长局用例每回合**再调一次** `round_metrics`（把最贵那块翻倍） | `tests/horizon_long.rs:406`、`:465`（`top_power`） | 2 次/回合 |
+| 1 | `sanctioned_hegemon` → `dominant_hegemon` → `faction_power_share`：每次都会给**每艘舰**现算 `ship_panel` | `src/sim/power.rs`（`ship_panel` 在势力×舰的双层循环里）；调用点：`src/sim/market.rs` 的**逐挂单**过滤（`trade_blocked` → `trade_block_cause`）、`src/sim/metrics.rs` 的逐势力×逐势力计数 | 数百次 |
+| 2 | `coalition_war_focus` 逐势力各算一次「谁是霸权」 | `src/sim/military.rs` → `src/sim/power.rs`（内部又 `faction_power_share`） | 势力数次 |
+| 3 | `observe`（当时的 `round_metrics`）内部 `faction_power_share` 被算 **3 遍** | `src/sim/metrics.rs` 的 `balance_picture` + `active_coalition_hegemon` + `sanctioned_hegemon`（各自再走 `dominant_hegemon`） | 3 次 |
+| 4 | `threat_motive` 逐势力各算一次全量实力占比 | `src/autocontrol/shipbuilding.rs`（AI 每回合建图/改装都调它） | 势力数次 |
+| 5 | 索敌内层循环：每发武器扫**全舰队**，且先查 `hostile`（势力线性扫 + BTreeMap）再算距离 | `src/autocontrol/tactics.rs` | 舰 × 武器发数 |
+| 6 | 每个候选目标都重算 `ship_weapons()` + `attack_hist.clone()`（堆分配） | `src/autocontrol/tactics.rs`（在候选循环**内**） | 候选数 |
+| 7 | `doctrine_weight` 每个候选都 `ship_doctrine(String 克隆)` + 两次 `deterrence()`（后者自己 O(舰队) × `ship_power`） | `src/autocontrol/tactics.rs` → `src/sim/ships.rs` | 候选数 |
+| 8 | `State::ship/city/faction` 全是**名字线性扫**，在循环里被反复调用 | `src/model/state.rs` | 到处都是 |
+| 9 | 长局用例每回合**再调一次** `observe`（当时的 `round_metrics`，把最贵那块翻倍） | `tests/horizon_long.rs`（`top_power`） | 2 次/回合 |
 
 ## 3. 待办（P1 → P3，都还没做）
 
 **P1 = 纯去重（值相同 ⇒ digest 逐字不变，属「纯搬运」级改动）**：
 
-1. `round_metrics`：`faction_power_share` / `sanctioned_hegemon` / `war_pairs` 各只算一次，
+1. `observe`（当时的 `round_metrics`）：`faction_power_share` / `sanctioned_hegemon` / `war_pairs` 各只算一次，
    下传给内部使用者（`balance_picture`、`dominant_hegemon` 需要「收一份份额进来」的变体）。
 2. `step_market`：把 `sanctioned_hegemon` 提到买家循环**之前**——该步进期间 state 不变，
    值恒等，所以安全。
@@ -67,9 +72,9 @@
 * `deterrence` 的邻域缓存。
 
 **P3 = 测试侧**：`coalition_mechanism_is_alive` / `world_is_multipolar` /
-`test_power_statistic_matches_game_logic` 改读 `advance` 返回的 `derived.metrics`，省掉第二次
-`round_metrics`。断言不变——它们读的 `hegemon` / `coalition_members` / `sanctioned` 与 `flow`
-无关（`flow` 只影响产出/维护/治理那些字段）。
+`test_power_statistic_matches_game_logic` 改读 `advance` 返回的 `RoundView`（不再经
+`derived.metrics`），省掉第二次 `observe`。断言不变——它们读的 `hegemon` / `coalition_members` /
+`sanctioned` 与**过程量**无关（过程量只影响产出/维护/治理那些字段）。
 
 ## 4. 还欠的验证
 

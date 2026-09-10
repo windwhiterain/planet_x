@@ -443,8 +443,8 @@ def projection(source: str | os.PathLike, *, planet_x=None, index_dir=None):
     """A :class:`planet_xq.PlanetXQ` projection.
 
     ``source`` is either a **checkpoint** (projected on the fly with ``--start``/``--round 0``) or an
-    already-written ``--index`` **directory** (pass that whenever you need the flow metrics — see the
-    README note on ``production_value`` / ``upkeep``).
+    already-written ``--index`` **directory** (pass that whenever you need the round's **过程量** —
+    see the README note on ``production_value`` / ``upkeep``).
     """
     if index_dir is not None:
         d = str(index_dir)
@@ -1564,7 +1564,7 @@ def surface(ckpt: str | os.PathLike | None = None, *, planet_x=None,
     instead of ``ckpt`` when you already have one; ``ckpt`` is then only used to resolve
     ``(city, building)`` indices, so pass both if you intend to write building-keyed weights.
     ``index_dir=`` points the auxiliary lookups at an existing ``--index`` projection of the same
-    checkpoint (useful for the economy tables — see the README note on flow metrics).
+    checkpoint (useful for the economy tables — see the README note on 过程量).
     """
     if control is not None:
         return Surface(control, ckpt, planet_x=planet_x, index_dir=index_dir, source="(in-memory)")
@@ -1597,8 +1597,8 @@ def new_checkpoint(path: str | os.PathLike, *, seed: int | None = None, rounds: 
 
     With ``index_dir=`` the same run also writes a projection (``--index DIR``) — one pass, so the
     projection's last round and the checkpoint describe **the same state**. Do this when you need
-    the flow metrics (``production_value`` / ``upkeep`` / ``governance_cost``); see the README note
-    "投影的 flow 数字只在真跑过的回合里才有".
+    the round's **过程量** (``production_value`` / ``upkeep`` / ``governance_cost``); see the README
+    note "过程量只在引擎真跑过的回合里才有（``pre`` 里它是 0/空）".
     """
     args = []
     if seed is not None:

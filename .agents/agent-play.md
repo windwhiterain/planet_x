@@ -63,7 +63,7 @@ cd play/planet_xq && uv sync            # 首次：建 .venv（pandas）
 uv run python -c "
 import planet_xq
 q = planet_xq.load('out')
-print(q.facts[['round','metrics']].head())   # 每回合的轻盈决策视图
+print(q.facts[['round','view']].head())      # 每回合的轻盈决策视图
 print(q.join('ships', round=10))             # 第 10 月所有舰（按 id join）
 "
 
@@ -103,16 +103,24 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 ```jsonc
 { "round": 12, "time_month": 12.0,
   "events": [...], "chronicle": [...],
-  "metrics": { "cities": 17, "ships": 26, "fleet_value": 578.0, "population": 8800,
-               "power_share": {"中国": 0.13, ...}, "hegemon": "中国", "sanctioned": "中国",
-               "coalition_members": ["美国", ...], "wars": [["美国","中国"], ...],
-               "factions": {"中国": {"city_count":4,"ship_count":6,"fleet_value":120,
-                                     "production_value":64.8,"upkeep":30.0,
-                                     "governance_cost":4.8,"at_war":true}, ...},
-               "city_production": {"长三角": {"production_value":28.4, ...}} },
+  "view": { "city_count": 17, "ship_count": 26, "fleet_value": 578.0, "population": 8800,
+            "power_share": {"中国": 0.13, ...}, "hegemon": "中国", "sanctioned": "中国",
+            "coalition_members": ["美国", ...], "wars": [["美国","中国"], ...],
+            "factions": {"中国": {"city_count":4,"ship_count":6,"fleet_value":120,
+                                  "production_value":64.8,"upkeep":30.0,
+                                  "governance_cost":4.8,"governance_coverage":1.0,
+                                  "net_import":-12.5,"at_war":true}, ...},
+            "cities": {"长三角": {"population":410,"loyalty":0.86,
+                                  "production_value":28.4, ...}},
+            "decisions": { ... } },
   "ship_ids": ["长城", ...], "city_ids": ["长三角", ...], "faction_ids": ["中国", ...],
   "body_ids": ["地球", ...], "settlement_ids": ["长三角", ...] }
 ```
+
+> `view` = 这一回合的**一份视图**（与 `--derived` 的 `post`、`--traj` 的 `Trajectory.view` 同构）：
+> 世界总量/政治/市场（观测）+ **每势力一行、每城一行**——一行里**同时**装着一个势力的观测
+> （城数/舰数/人口/库存价值/是否交战）与**本回合的过程量**（产出/维护费/治理/贸易）。过程量在
+> 回合开始的那份视图（`pre`）里是 0/空：那不是「没有」，是「还没算」。
 
 重型实体**不内联**，只在 `idx/*.jsonl` 表里、按 id（=名字）索引：
 
@@ -129,8 +137,8 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 
 | 派生表 | 粒度 | 关键列 | 回答什么 |
 |---|---|---|---|
-| `flow` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`main` 的 `metrics` 里也有嵌套的一份，这是可 join 的平铺版） |
-| `city_flow` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
+| `faction_process` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`view.factions[<势力>]` 是**同一个来源**的另一份读法，这是可 join 的平铺版） |
+| `city_process` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
 | `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/default_ship_order/default_doctrine/default_kiting/各类预算与权重/capital）。⚠ **设计图不在本表**（它是结构叶，见下一行） |
 | `scope` | 每回合 × 显式节点 | `level(global/faction/body/city) key mode` | 作用域树里谁有意见 |
 | `blueprints` | 每回合 × 设计图 | `faction_id blueprint_id class components[] order mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + 新舰默认意图）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
@@ -143,8 +151,9 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 ⚠ `order_source` 把「**叶不存在**」与「叶写着 `Inherit`」**分开报**：后者报 `leaf`——那时值
 真的来自那片叶（`leaf.map(|l| l.value).unwrap_or(..)`），只有叶不存在才可能落到图/舰队默认。
 单点查（不想跑整个 `--index`）：`planet_x --start ckpt.ron --derived` 给出这一回合存下来的
-`{round, source, pre, post}`（`post.flow` 就是上面那张 flow 表的来源；没档时会按当前状态重算
-并附 `note`，那种情况下 flow 是空的）。
+**视图对** `{round, source, pre, post}`——两个槽都是 `RoundView` 且**同形**：`pre` = 回合开始时
+看到的世界（过程量全 0/空），`post` = 回合结束时的世界 **+ 本回合过程量**（就是上面那几张派生表
+的来源）。没档时会按当前状态重算：此时 `pre` 与 `post` 相同、过程量全 0，并附 `note` 说明。
 
 **「我的舰为什么跑到那儿去送死？」** —— 那条指令是 AI 写的，判定过程**不发事件也不落状态**，
 只有 `decisions` 表有：一行一条判定（`verdict` = `withdraw`/`engage`/`colonize`/`bombard`/
@@ -158,9 +167,9 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 import planet_xq
 q = planet_xq.load("out")
 q.facts                                  # 轻盈主流 DataFrame（每回合一行）
-q.facts.metrics                          # 逐回合的总结指标（object 列）
+q.facts.view                             # 逐回合的视图（object 列：观测 + 每势力/每城一行 + AI 判定）
 q.factions(round=12)                     # 每势力：库存/relations/自有城与舰
-q.faction_snapshot(12, "中国")           # 一键决策视图（metrics+库存+relations+自有城/舰）
+q.faction_snapshot(12, "中国")           # 一键决策视图（view+库存+relations+自有城/舰）
 q.ships(round=12)                        # 第 12 月全部舰（含 effective 面板）
 q.cities(round=12)                       # 第 12 月全部城（含 buildings 清单）
 q.bodies() ; q.settlements()             # 天体 / 定居点主表
@@ -174,11 +183,11 @@ q.join("ships", round=12)                # explode 主流 ship_ids 并按 (round
 常用判断：
 ```python
 # 谁是霸权、谁被制裁
-m = q.facts.iloc[-1].metrics
+m = q.facts.iloc[-1].view
 m["hegemon"], m["sanctioned"], m["coalition_members"], m["wars"]
 
 # 我（中国）的走势
-f = q.facts.metrics.apply(lambda m: m["factions"].get("中国", {}))
+f = q.facts.view.apply(lambda m: m["factions"].get("中国", {}))
 f.apply(lambda d: (d["city_count"], d["ship_count"], round(d["production_value"],1)))
 
 # 我的外交 + 库存（重点：这能直接看会不会被制裁/缺什么矿）
@@ -189,7 +198,7 @@ snap["relations"]; snap["resources"]
 q.join("cities", round=12).query("faction_id=='中国' and loyalty < 0.5")
 
 # 舰队维护费 vs 生产（翻车前看这个：upkeep > production → 先扩产）
-snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
+snap["view"]["upkeep"], snap["view"]["production_value"]
 ```
 
 > **语义视图（纯读取，把模拟算好的打包给你）**：`q.view_sitrep(12)`（世界政治：霸权/联盟/制裁/战争/
@@ -522,11 +531,11 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
 | `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
-| `--derived` | 这一回合存下来的派生态 `{round, source, pre, post}`（`post.flow` = 本回合产出/维护/治理的中间量；`post.flow.decisions` = **本回合 AI 的判定**；与 `--index` 的同名派生表同值） |
+| `--derived` | 这一回合的**视图对** `{round, source, pre, post}`（两个槽都是 `RoundView` 且同形：`pre` = 回合开始时的世界、`post` = 回合结束时的世界 + 本回合过程量；`post.decisions` = **本回合 AI 的判定**）；与 `--index` 的过程量表同值 |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |
 | `--every <K>` | 每 K 回合一个全量快照（降采样） |
 | `--digest <K>` | 每 K 回合一行语义故事板（世界/各势力/战争/事件计数/剧情节拍） |
-| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（flow/city_flow/control/scope/decisions）+ schema.json（planet_xq 读） |
+| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（faction_process/city_process/control/scope/decisions/blueprints）+ schema.json（planet_xq 读） |
 
 > 注意：**没有交互式 REPL**、没有 `--query`。这正是设计：stdout 零噪声、确定性、可复现；
 > 分析在外部（planet_xq / pandas）做，控制走 `--apply` diff。
@@ -542,14 +551,14 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 - **别把 `--apply` 的 stderr 丢掉**：`WARN_APPLY_SKIPPED` 是唯一能告诉你「这条命令没有落地」
   的信号（见 §4.5）。stdout 永远只是状态流，成功时不打印任何回执。
 - **有名字的实体用名字**（舰/城/势力/天体/定居点 = 唯一名）；`--index` 的 lazy 表、`--apply`
-  diff、`metrics.factions` 的 key 全用名字，不是整数。**例外：`building` 是城内的 u32 下标。**
+  diff、`view.factions` 的 key 全用名字，不是整数。**例外：`building` 是城内的 u32 下标。**
   同一实体在扩张/重建后名字可能变（如 "长城2"），拿它当 key 用，别假设数字下标或长期稳定。
 - **舰/城会死，名字会换代**：`--apply` 点名的舰如果已战沉，那条指令会被丢弃（报
   `no_such_ship`）。玩长局时**每回合重新查一次名字**，别把上一回合的 diff 直接重放。
 - **外交/库存看 `factions` 表**：`--index` 的 `idx/factions.jsonl` 直接给每势力的
   `relations`（两两关系）与 `resources`（库存），`q.faction_snapshot(r, 名字)` 一行拿全——
   不用再为了看外交/库存去 `--round 0` 全量 dump。
-- **`metrics.factions` 是 dict（key= faction id 的字符串名）**，不是数组；`production` 是每资源
+- **`view.factions` 是 dict（key= faction id 的字符串名）**，不是数组；`production` 是每资源
   dict，总产出用 `production_value`。
 - **`chronicle` 是累计的**（每行都带整段叙事弧到当回合），逐行读会重复；按 `(round, id)` 去重。
 - **`q.view_*` 的返回类型不统一**：`view_sitrep`/`view_market`/`view_economy` 是 dict
@@ -557,4 +566,4 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
   按需 `.to_dict()`/`to_string()`，别假设能一把 `json.dumps`。
 - **`events` 的类型列叫 `type`**（不是 `kind`）；`q.events(type="siege")` 直接按类型取（字段稠密），
   实体历史用 `q.history(kind, id)`（这里的第一个参数才叫 `kind`，取 `"ship"`/`"city"`）。
-- **回合 0 未步进**，`metrics` 流量为 0；看真实流量从回合 1 起。
+- **回合 0 未步进**，`view` 里的**过程量全为 0/空**（`pre` 面永远如此：那时还没算）；看真实流量从回合 1 起。

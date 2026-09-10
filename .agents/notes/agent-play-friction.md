@@ -41,7 +41,8 @@ agent 为下一次 `--apply` 决策，要手写 `control/scope` 且背一堆整�
   「每回合产入 vs 维护 vs 治理开销 vs 可造舰上限」，并给出 `fleet_value`/`upkeep`/`city_count`
   的近似平衡点，让 agent 在写 diff 前看到代价，而不是提交后观崩盘。落地：`sim::control_plan`
   ——**干跑一轮真实 `advance`**（克隆 state + 固定 RNG 种子，产出/维护/治理都不吃 RNG），
-  取模拟自身上一步的 `RoundFlow` 经 `round_metrics`，零漂移；另读 `read_budget`（含造舰
+  取模拟自身上一步的过程量（当时的 `RoundFlow`，现已改名 `RoundSink`）经 `observe`
+  （当时叫 `round_metrics`），零漂移；另读 `read_budget`（含造舰
   维护保留上限）+ 报告 AI 保守上限以对比是否过度投入。字段：`production_value/upkeep/
   governance_cost/net_flow/stock_market_value/construction_budget_value/investment_budget_value/
   ai_construction_cap/over_committed_construction/fleet_upkeep_cap/fleet_overextended/
@@ -58,7 +59,7 @@ agent 为下一次 `--apply` 决策，要手写 `control/scope` 且背一堆整�
   WYSIWYG 身份约定）。
 
 ### 18.3 从「aggregate」到「该干嘛」缺一座桥
-`metrics` 告诉 agent 城数/产出/份额，但要"哪座城是我的短板（低忠诚/高治理距离）""哪个邻居是
+`view` 告诉 agent 城数/产出/份额，但要"哪座城是我的短板（低忠诚/高治理距离）""哪个邻居是
 我该抱团扁的霸权""我缺哪种关键矿物"，agent 得自己 join/手算。
 
 - `[ ]` **语义视图命令（`semantic-view-api.md` Layer 2 落地）**：`--view sitrep` / `--view economy <faction>` /
@@ -75,7 +76,7 @@ agent 为下一次 `--apply` 决策，要手写 `control/scope` 且背一堆整�
 且没有「当前计划」的持久化位置。
 
 - `[ ]` **`--play <session>`（脚本化回合循环）**：一个会话目录/主键（`--start`+`--save`+一段
-  `--round`），agent 每回合循环「读 metrics → 写 diff → apply → 存」；命令 `--play` 批量跑一段
+  `--round`），agent 每回合循环「读 view → 写 diff → apply → 存」；命令 `--play` 批量跑一段
   + 记录每步 diff（做成 `--traj` 同源的 steer 日志），让「讲一段被干预的故事」如 `--traj` 一样
   可复现、可检查。优先做一个**轻量脚本**：`planet_x --seed S --plan plan.jsonl`（plan 是
   「到某回合应用某 diff」的序列），一次性重放更省事。

@@ -1,9 +1,16 @@
 """planet_xq — read a `planet_x --index` projection into pandas.
 
 The Rust tool projects the world into a **lean main stream** (``main.jsonl``: eager fields +
-``metrics`` + id-arrays) and **id-indexed lazy tables** (``idx/*.jsonl``: the heavy entity
-objects). This kit loads both and exposes join helpers so an agent fetches heavy detail by id
-without hand-rolling the merge.
+the round's **``view``** — one :class:`RoundView` per round — plus id-arrays) and **id-indexed
+lazy tables** (``idx/*.jsonl``: the heavy entity objects). This kit loads both and exposes join
+helpers so an agent fetches heavy detail by id without hand-rolling the merge.
+
+The round's world has exactly **one shape, twice**: ``pre`` = the world at the round's start
+(the process quantities are 0/empty there) and ``post`` = the world at the round's end **+ that
+round's process quantities** (production / upkeep / governance / trade / the AI's judgments).
+``main.jsonl`` carries the ``post`` one as the row's ``view`` key; everything under it is flat —
+``view.city_count`` / ``view.ship_count`` / ``view.factions[<势力>]`` / ``view.cities[<城>]`` /
+``view.market_price`` / ``view.decisions``.
 
 Directory layout written by ``planet_x --round N --index DIR``:
 
@@ -35,8 +42,8 @@ Typical use::
     q.join("ships", round=10)  # explode main.ship_ids and merge with the ship detail table
     q.ships_spec()          # config: ship class -> spec as a DataFrame (joinable with q.facts)
     q.resource_value()      # config: resource key (可读名) -> value
-    q.yearly_avg("metrics.cities")              # 年均 (round = 1 month, 12/年)
-    q.decadal_avg("metrics.factions.中国.market_value")  # 十年均 (120 月)
+    q.yearly_avg("view.city_count")             # 年均 (round = 1 month, 12/年)
+    q.decadal_avg("view.factions.中国.market_value")     # 十年均 (120 月)
 
 History / event queries (the sparse milestones)::
 
@@ -123,19 +130,20 @@ class PlanetXQ:
     # --- 派生表：引擎算出来的量（不在状态里，只能由引擎产出）-----------------------------
     #
     # 四张表（见 `schema.json` 的 `derived` 段与笔记 `engine-data-plane.md`）：
-    #   flow       每回合 × 势力：production{} / upkeep / governance_total / governance_coverage
-    #   city_flow  每回合 × 城  ：production{}（含 razed 空城）
-    #   control    每回合 × 叶片：kind / key / sub / value / mode（谁在控制什么）
-    #   scope      每回合 × 显式作用域节点：level / key / mode
+    #   faction_process  每回合 × 势力：production{} / upkeep / governance_total / governance_coverage
+    #   city_process     每回合 × 城  ：production{}（含 razed 空城）
+    #   control          每回合 × 叶片：kind / key / sub / value / mode（谁在控制什么）
+    #   scope            每回合 × 显式作用域节点：level / key / mode
     #
-    # ⚠ `flow` 的**数值**在 mainstream 的 `metrics.factions[<势力>]` 里也有一份（嵌套对象）；
+    # ⚠ `faction_process` 的**数值**在 mainstream 的 `view.factions[<势力>]` 里也有一份（嵌套对象）；
     #   这些表的价值是**形状**——可直接 join、列类型稳定、按 (round, 名字) 对齐。
-    # ⚠ 从 checkpoint 起跑的投影（`--start ckpt --round 0 --index`）那一行的 flow 是
-    #   「产生这个状态的那一回合」的流量（引擎现在还额外把档里存的派生态写进回合 0 行）；
-    #   全新开局（`--seed`）的回合 0 没有流量，是 `{}`。
+    # ⚠ **过程量只在引擎真跑过的回合里才有**（`pre` 里它是 0/空）。从 checkpoint 起跑的投影
+    #   （`--start ckpt --round 0 --index`）那一行的过程量是「产生这个状态的那一回合」的量
+    #   （引擎把档里存的那份视图写进回合 0 行）；全新开局（`--seed`）的回合 0 只有初始世界，
+    #   过程量是 0/空。
 
     def derived(self, name: str, round: int | None = None) -> pd.DataFrame:
-        """One derived table (``flow`` / ``city_flow`` / ``control`` / ``scope``), by round."""
+        """One derived table (``faction_process`` / ``city_process`` / ``control`` / ``scope``), by round."""
         if name not in self.schema.get("derived", {}):
             raise KeyError(
                 f"'{name}' is not a derived table。该投影的 derived 段是 "
@@ -144,17 +152,18 @@ class PlanetXQ:
             )
         return self.table(name, round)
 
-    def flow(self, round: int | None = None) -> pd.DataFrame:
-        """每回合每势力的流量中间量：产出（按资源）/ 舰队维护费 / 治理成本与覆盖率。
+    def faction_process(self, round: int | None = None) -> pd.DataFrame:
+        """每回合每势力的**过程量**：产出（按资源）/ 舰队维护费 / 治理成本与覆盖率。
 
         这是「预算压顶」判据的分子分母：`upkeep / production_value` —— 后者可由
-        `production` 按 `q.resource_value()` 加权得到，或直接读 `q.factions()` 的同名列。
+        `production` 按 `q.resource_value()` 加权得到，或直接读 `view.factions[<势力>]`
+        里的 `production_value`（`q.faction_snapshot()` / :meth:`view_economy` 给的就是那一行）。
         """
-        return self.derived("flow", round)
+        return self.derived("faction_process", round)
 
-    def city_flow(self, round: int | None = None) -> pd.DataFrame:
-        """每回合每城的开采产出（含已夷平的空白城，`razed` 列筛）。"""
-        return self.derived("city_flow", round)
+    def city_process(self, round: int | None = None) -> pd.DataFrame:
+        """每回合每城的**过程量**：开采产出（含已夷平的空白城，`razed` 列筛）。"""
+        return self.derived("city_process", round)
 
     def control(self, round: int | None = None) -> pd.DataFrame:
         """**控制面的 tidy 行**：一行一个叶片（`kind`/`key`/`sub`/`value`/`mode`）。
@@ -226,19 +235,24 @@ class PlanetXQ:
         return row.iloc[0].to_dict() if len(row) else None
 
     def faction_snapshot(self, round: int, name: str) -> dict:
-        """A single faction's decision view at a round: the lean ``metrics.factions`` numbers
-        merged with the ``factions`` detail (stockpile + relations + its city/ship ids). This is
-        the one-call "what's on my mind" — resources, diplomacy, economy, fleet and cities."""
+        """A single faction's decision view at a round: that faction's row of the round ``view``
+        (``view.factions[<faction>]``) merged with the ``factions`` detail (stockpile + relations +
+        its city/ship ids). This is the one-call "what's on my mind" — resources, diplomacy,
+        economy, fleet and cities.
+
+        ``snap["view"]`` is **that one faction's row** (city_count / ship_count / production_value /
+        upkeep / governance_cost / market_value / net_import / …), not the whole round view.
+        """
         frow = self.faction(round, name)
         if frow is None:
             return {"faction": name, "exists": False}
         out = dict(frow)
         out["exists"] = True
-        # lean metrics per faction (if the main row carries them)
+        # that faction's row of the round view (if the main row carries one)
         fact = self.facts[self.facts["round"] == round]
         if len(fact):
-            m = fact.iloc[0].get("metrics") or {}
-            out["metrics"] = (m.get("factions") or {}).get(name, {})
+            v = fact.iloc[0].get("view") or {}
+            out["view"] = (v.get("factions") or {}).get(name, {})
         return out
 
     def fleet(self, round: int | None, faction: str) -> pd.DataFrame:
@@ -266,29 +280,29 @@ class PlanetXQ:
                 rows.append({"round": r["round"], "faction_id": r["faction_id"], "other": other, "relation": v})
         return pd.DataFrame(rows, columns=["round", "faction_id", "other", "relation"])
 
-    def _faction_metrics(self, round: int, name: str) -> dict:
-        """The lean ``metrics.factions[name]`` numbers for one round (sim-computed)."""
+    def _faction_row(self, round: int, name: str) -> dict:
+        """That faction's row of the round ``view`` (``view.factions[name]``, sim-computed)."""
         fact = self.facts[self.facts["round"] == round]
         if len(fact) == 0:
             return {}
-        return (fact.iloc[0].get("metrics") or {}).get("factions", {}).get(name, {})
+        return (fact.iloc[0].get("view") or {}).get("factions", {}).get(name, {})
 
     # --- semantic views (pure retrieval: pack the sim's own computed output) -----------------
-    # These only re-read what the simulation already computed and wrote into `metrics` / the lazy
-    # tables. They never re-derive a game rule (power_share/coalition/governance budget verdicts
-    # stay in Rust — see `--control-plan`); they are the "common read" layer.
+    # These only re-read what the simulation already computed and wrote into the round's `view`
+    # / the lazy tables. They never re-derive a game rule (power_share/coalition/governance budget
+    # verdicts stay in Rust — see `--control-plan`); they are the "common read" layer.
 
     def view_sitrep(self, round: int) -> dict | None:
-        """The world political picture at a round (sim's own aggregate): totals + hegemon /
-        coalition / sanction / wars / power_share + one row per faction."""
+        """The world political picture at a round (sim's own aggregate, i.e. the round ``view``):
+        totals + hegemon / coalition / sanction / wars / power_share + one row per faction."""
         fact = self.facts[self.facts["round"] == round]
         if len(fact) == 0:
             return None
-        m = fact.iloc[0].get("metrics") or {}
+        v = fact.iloc[0].get("view") or {}
         fid_f = fact.iloc[0].get("faction_ids") or []
         factions = []
         for fid in fid_f:
-            fm = (m.get("factions") or {}).get(fid, {})
+            fm = (v.get("factions") or {}).get(fid, {})
             factions.append({
                 "faction": fid,
                 "city_count": fm.get("city_count"),
@@ -302,11 +316,11 @@ class PlanetXQ:
             })
         return {
             "round": round,
-            "cities": m.get("cities"), "ships": m.get("ships"),
-            "fleet_value": m.get("fleet_value"), "population": m.get("population"),
-            "power_share": m.get("power_share"),
-            "hegemon": m.get("hegemon"), "sanctioned": m.get("sanctioned"),
-            "coalition_members": m.get("coalition_members"), "wars": m.get("wars"),
+            "city_count": v.get("city_count"), "ship_count": v.get("ship_count"),
+            "fleet_value": v.get("fleet_value"), "population": v.get("population"),
+            "power_share": v.get("power_share"),
+            "hegemon": v.get("hegemon"), "sanctioned": v.get("sanctioned"),
+            "coalition_members": v.get("coalition_members"), "wars": v.get("wars"),
             "factions": factions,
         }
 
@@ -347,8 +361,14 @@ class PlanetXQ:
         upkeep vs governance, net flow, market value, governance coverage. `net < 0` means the
         current fleet/governance is outrunning production (a bleed). NOTE: the *judgement* of
         whether a commanded build budget is sustainable (verdict / sustainable-upkeep /
-        rounds-to-insolvency) is game logic — read it from the Rust `--control-plan`, not here."""
-        fm = self._faction_metrics(round, faction)
+        rounds-to-insolvency) is game logic — read it from the Rust `--control-plan`, not here.
+
+        ⚠ Two different nets, deliberately named after their source fields: `net_flow` is **computed
+        here** (production_value − upkeep − governance_cost, a stock-flow reading), while
+        `net_import` is the **engine's own** trade net for the round (bought − sold, by market
+        value; >0 = net importer) straight out of this faction's ``view`` row.
+        """
+        fm = self._faction_row(round, faction)
         prod = fm.get("production_value", 0.0) or 0.0
         upkeep = fm.get("upkeep", 0.0) or 0.0
         gov = fm.get("governance_cost", 0.0) or 0.0
@@ -358,6 +378,7 @@ class PlanetXQ:
             "production_value": prod, "upkeep": upkeep, "governance_cost": gov,
             "net_flow": net, "bleeding": net < -1e-9,
             "market_value": fm.get("market_value"),
+            "net_import": fm.get("net_import"),
             "governance_coverage": fm.get("governance_coverage"),
             "fleet_value": fm.get("fleet_value"),
             "city_count": fm.get("city_count"), "ship_count": fm.get("ship_count"),
@@ -827,8 +848,8 @@ class PlanetXQ:
         """A monthly Series of a metric from the lean main stream, indexed by ``round``.
 
         ``path`` is dot-separated into each fact row: e.g. ``"population"`` (a facts column),
-        ``"metrics.population"``, ``"metrics.cities"``, ``"metrics.fleet_value"``, or a per-faction
-        metric like ``"metrics.factions.中国.production_value"``. Missing steps yield NaN.
+        ``"view.population"``, ``"view.city_count"``, ``"view.fleet_value"``, or a per-faction
+        metric like ``"view.factions.中国.production_value"``. Missing steps yield NaN.
 
         Every round = 1 month, so ``round`` is already a fine month index to resample.
         """
