@@ -146,6 +146,9 @@ fn new_building(
         kind: kind.to_string(),
         resource,
         ship_type,
+        // 世界生成**不挂设计图**（用户裁决 Q8：不预置标准图）——开局每个建造区都走
+        // `ship_type` + `choose_loadout`，于是「新旧行为一致」是**结构性**的。
+        blueprint: None,
         structure: structure.to_string(),
         area,
         deployed,
@@ -722,6 +725,11 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             freighter: spec.default_freighter,
             attack_hist: BTreeMap::new(),
             cargo: BTreeMap::new(),
+            // 开局预置舰队**不挂设计图**（用户裁决 Q8：不预置标准图；即便将来种子表非空，
+            // 开局舰队也保持 `blueprint: None`——它不是一个建造区印出来的）。
+            blueprint: None,
+            // 开局舰队在第 0 回合就已经存在（这不是"未知"，是真的知道）。
+            spawned_round: Some(0),
         });
     };
 
@@ -782,6 +790,14 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
             .iter()
             .map(|(k, v)| (k.clone(), Control::inherit(*v * config.economy.invest_fraction)))
             .collect();
+        // **设计图种子表**（`config/game.ron` 的 `blueprints:`，当前为空——用户裁决 Q8
+        // 「不预置标准图」）。种子一律以 `Inherit`（这一层没有说话）写入：归属由 `scope`
+        // 链解析（默认落到 `Auto`），想让某张图开局就归玩家用 `--apply` 钉。
+        // 表为空 ⇒ 一个字节都不改（新开局零张图 = 行为中性是结构性的）。
+        for seed in config.blueprints.get(&f.name).into_iter().flatten() {
+            c.blueprints
+                .insert(seed.name.clone(), Control::inherit(seed.blueprint()));
+        }
         control.insert(f.name.clone(), c);
     }
     for city in &cities {

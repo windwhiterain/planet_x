@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{BodyKindSpec, BuildingSpec, ComponentSpec, FactionId, ResourceDef, ShipSpec, StoryEvent};
+use crate::model::{
+    BlueprintSeed, BodyKindSpec, BuildingSpec, ComponentSpec, FactionId, ResourceDef, ShipSpec, StoryEvent,
+};
 
 /// Economy tuning (production and population).
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -586,6 +588,19 @@ pub struct GameConfig {
     /// 容忍旧配置无此节（缺库的势力退回通用名，见 [`GameConfig::ship_pool`] / [`ship_display_name`]）。
     #[serde(default)]
     pub name_pool: BTreeMap<String, Vec<String>>,
+    /// **设计图种子表**：势力名 → 该势力**开局**的设计图（[`BlueprintSeed`]）。
+    ///
+    /// 开局把这几张图放进对应势力的设计图库（[`ControllableState::blueprints`]），并且
+    /// **一律以 `Inherit`（这一层没有说话）写入**——归属由 `scope` 链解析（默认落到
+    /// `Auto`）；想让某张图开局就归玩家，用 `--apply` 钉。
+    ///
+    /// * 缺这一节 / 写空 = 一张图都没有 ⇒ 所有建造区走 `choose_loadout`
+    ///   （**与设计图落地之前逐字节一致**）；
+    /// * **用户裁决 Q8：不预置标准图**（本表在 `game.ron` 里是空的）——预置会让「新旧行为
+    ///   一致」从**结构性**退化成「要额外证明的」。表留着是为了把容器做好。
+    /// * `#[serde(default)]` 容忍旧配置无此节。
+    #[serde(default)]
+    pub blueprints: BTreeMap<FactionId, Vec<BlueprintSeed>>,
 }
 
 impl GameConfig {

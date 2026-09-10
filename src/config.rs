@@ -81,6 +81,10 @@ pub fn load_checkpoint(path: &Path) -> Result<(RoundState, Prng), String> {
     let mut cp: Checkpoint = ron::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     // 显式迁移到当前 schema 版本；无法迁移/版本过新则报错。
     migrate(&mut cp.round_state.state)?;
+    // 包装层（`RoundState`）自己那个版本号也跟着推到当前值：它以前只是**写出去**、从没被校准，
+    // 于是「旧档 + 新二进制」读完会出现 `state.schema_version = 10` 而包装层还写着 9 ——
+    // 一个只在 `--save` 之后才被发现的自相矛盾。迁移的语义仍以 `State` 为准（它才是被迁移的那个）。
+    cp.round_state.schema_version = crate::model::SCHEMA_VERSION;
     Ok((cp.round_state, Prng::from_state(cp.prng_state)))
 }
 
@@ -265,10 +269,12 @@ mod tests {
             GameEvent::ShipSpawned {
                 ship: "s".into(), owner: "f".into(), class: "corvette".into(),
                 city: Some("c".into()), via: SpawnVia::Shipyard,
+                blueprint: None,
             },
             GameEvent::ShipSpawned {
                 ship: "s".into(), owner: "f".into(), class: "corvette".into(),
                 city: None, via: SpawnVia::Story,
+                blueprint: None,
             },
             GameEvent::ColonyFounded {
                 city: "c".into(), owner: "f".into(), body: "地球".into(),

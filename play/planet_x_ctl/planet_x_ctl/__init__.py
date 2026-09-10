@@ -123,25 +123,48 @@ LEAF_KINDS: dict[str, tuple[str, ...]] = {
     "invest_weights": ("city", "building"),
     "build_weights": ("city", "building"),
     "loyalty_budget": ("city",),
+    # **设计图库**（势力级）：图名 → 图纸。设计图是「还不存在的舰」的出厂规格——建造区**指向**
+    # 一张图（结构叶，见 `Surface.set_blueprint_pointer`），下水那一刻把图**印成**一艘舰。
+    #
+    # 它是**复合值**叶（class + components[] + order{}），所以 `_leaf_value` 有一个专用分支；
+    # 三态语义照旧：`Player` = 系统不许重估这张图（出厂按图装配）／`Auto` = 系统可重估
+    # （`retool_shipyards` 会改它的舰级）／`Inherit` = 这一层没有说话（沿 scope 链上溯）。
+    # ⚠ 图的**意图轴**默认沉默：只有图上真写了 `order`（且归属是 Player）才遮住舰队默认。
+    "blueprints": ("name",),
 }
 
 _KIND_ORDER = tuple(LEAF_KINDS)
-_KEY_FIELDS = frozenset({"ship", "city", "building", "resource"})
+_KEY_FIELDS = frozenset({"ship", "city", "building", "resource", "name"})
 #: Which read-face field carries a leaf's **value**. Three kinds spell it something other than
 #: ``value``: `ShipOrderPatch`/`DefaultShipOrder` write ``behavior``, `ShipKitingPatch`/`DefaultKiting`
 #: write ``kiting``. `ShipDoctrinePatch`/`DefaultDoctrine` have two axes at once
-#: (``temper`` / ``lone_wolf``).
+#: (``temper`` / ``lone_wolf``), and ``blueprints`` is a **composite** (class + components + order).
 _VALUE_FIELD = {"ship_orders": "behavior", "default_ship_order": "behavior",
                 "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value",
                 "ship_freighter": "freighter", "default_freighter": "freighter"}
 
 _TWO_AXIS_KINDS = ("ship_doctrine", "default_doctrine")
+#: 复合值叶（一张设计图 = 舰级 + 选装 + 意图）。与两轴风格叶同理：值不止一个字段，所以
+#: `_leaf_value` 不能靠一个字段名取。
+_COMPOSITE_KINDS = ("blueprints",)
+_BLUEPRINT_FIELDS = ("class", "components", "order")
 
 
 def _leaf_value(kind: str, entry: Mapping) -> Any:
     if kind in _TWO_AXIS_KINDS:
         return {k: entry.get(k) for k in ("temper", "lone_wolf")}
+    if kind in _COMPOSITE_KINDS:
+        return {k: entry.get(k) for k in _BLUEPRINT_FIELDS}
     return entry.get(_VALUE_FIELD.get(kind, "value"))
+
+
+def _component_id(c: Any) -> str:
+    """组件 id 的一个便宜校验：配方期挡住 ``1`` / ``None`` 这类噪声（引擎那边只看表里有不有）。"""
+    if not isinstance(c, str) or not c:
+        raise ValueError(
+            f"组件 id 必须是非空字符串（收到 {c!r}）——可选值见 `q.components_spec()`（`--meta` 的 components 表）。"
+        )
+    return c
 
 
 def _fix_query(expr: str) -> str:
@@ -575,6 +598,9 @@ class Surface:
                     self._rank[(fid, kind, _entry_key(kind, entry))] = i
         # pending edits: faction -> kind -> key -> partial patch entry
         self._pending: dict[str, dict[str, dict[tuple, dict]]] = {}
+        # pending **structural** edits: faction -> [buildings[] 补丁]（设计图指针走这条路：
+        # 它不是控制叶，而是建造区上的结构字段，写面形状见 `set_blueprint_pointer`）。
+        self._pending_buildings: dict[str, list[dict]] = {}
         self._scope_pending: dict = {}
         self._projection_cache = None
         self._building_index_cache: pd.DataFrame | None = None
@@ -1232,6 +1258,99 @@ class Surface:
         self._add(faction, "default_ship_order", (), {"remove": True})
         return self
 
+    # -- 设计图（还不存在的舰的出厂规格）----------------------------------------------
+
+    def set_blueprint(self, faction: str, name: str, *, class_: str | None = None,
+                      components: Sequence[str] | None = None, order: Any = None,
+                      mode: str | None = None, take_over: bool = False) -> "Surface":
+        """建/改一张**设计图**：舰级 + 选装 + 该图给新舰的默认意图。
+
+        * ``class_``：舰级（``ShipSpec`` 的 key）。**新建时必须给**，而且必须与该建造区的
+          ``ship_type`` 相等——口径 A：``Building.ship_type`` 仍是「这个区造哪一级」的
+          唯一真相，图的舰级对不上会被引擎拒（``blueprint_class_mismatch``）。两处要一起改
+          （同一份 diff 里给 ``buildings[].ship_type``），见 :meth:`set_blueprint_pointer`。
+        * ``components``：选装（组件 id 顺序 = 槽位）。**空列表 = 交给生成器**
+          （``choose_loadout`` 在出厂那一刻按当时库存现算）。不许重复（``duplicate_component``），
+          不许超过该舰级的槽位（``too_many_components``），组件必须存在（``no_such_component``）。
+        * ``order``：本图给**新舰**的默认意图（``{"type":"dock","body":"地球"}`` 这种 tagged
+          写法与 ``"Idle"`` 都收）。⚠ 图的**意图轴默认沉默**——只有真写了它（且图的归属是
+          ``Player``）才遮住舰队默认。要**清空**这一层（回到沉默）用 :meth:`silence_blueprint_order`。
+        * 写值必须明说归属（``mode=…`` 或 ``take_over=True``）——「写值即接管」的守卫。
+
+        新建图必须把 ``class_`` 一起给（引擎只写 `mode` 时不会凭空造图，会报
+        ``no_such_blueprint``）。
+        """
+        _BLUEPRINT_CLASS = class_
+        patch: dict = {"name": name}
+        wrote = False
+        if _BLUEPRINT_CLASS is not None:
+            patch["class"] = _BLUEPRINT_CLASS
+            wrote = True
+        if components is not None:
+            patch["components"] = [_component_id(c) for c in components]
+            wrote = True
+        if order is not None:
+            patch["order"] = normalize_behavior(order)
+            wrote = True
+        m = self._mode_or_takeover(mode, take_over, f"set_blueprint({name!r})") if wrote else (
+            _check_mode(mode) if mode is not None else None)
+        if m is not None:
+            patch["mode"] = m
+        self._add(faction, "blueprints", (name,), patch)
+        return self
+
+    def silence_blueprint_order(self, faction: str, name: str) -> "Surface":
+        """让这张图的**意图轴沉默**（写 ``"order": null``）——建图时没写、现在收回这一层。
+
+        ⚠ 这与 :meth:`remove_blueprint` 是**两件事**：清空 ``order`` 只是这一层不再说话
+        （链继续往下降到舰队默认），图与建造区指针都还在；删图会让挂它的建造区变成
+        **悬空指针 ⇒ 停产**。
+        """
+        self._add(faction, "blueprints", (name,), {"name": name, "order": None})
+        return self
+
+    def remove_blueprint(self, faction: str, name: str) -> "Surface":
+        """删掉**整张图**（= 改名/换代的正规路径）。
+
+        ⚠ 挂它的建造区**不会**被自动改指针：它们随后是**悬空指针 ⇒ 停产**（进度不再增加），
+        读面照旧把那个指针原样输出。想让它们回去自动选装，逐个
+        :meth:`set_blueprint_pointer(..., blueprint=None)`。
+        """
+        return self.remove(faction, "blueprints", name)
+
+    def set_blueprint_pointer(self, faction: str, city: str, building: Any,
+                              blueprint: str | None) -> "Surface":
+        """把一个**建造区**指向一张图（``blueprint=名字``）或拆掉指针（``blueprint=None``）。
+
+        这是**结构叶**补丁（``buildings[]``），不是控制叶——所以它与 ``Surface.remove`` 那套
+        叶键无关。两道校验在引擎侧：库里没有那个名字 ⇒ ``no_such_blueprint``（**绝不静默回落
+        生成器**）；图与该区的 ``ship_type`` 对不上 ⇒ ``blueprint_class_mismatch``。
+        ``None`` 写的是 ``null``（**拆掉**），不是"缺席"（缺席 = 不动这一格）。
+        """
+        idx = self.resolve_building(city, building)
+        entry = {"city": city, "building": idx, "blueprint": blueprint}
+        self._require_faction(faction)
+        self._pending_buildings.setdefault(faction, []).append(entry)
+        return self
+
+    def set_blueprint_and_retool(self, faction: str, name: str, *, class_: str, city: str,
+                                 building: Any, components: Sequence[str] | None = None,
+                                 order: Any = None, mode: str | None = None,
+                                 take_over: bool = False) -> "Surface":
+        """**一条命令把图与建造区的舰级一起改**（口径 A 的正解：两处一起写）。
+
+        引擎的守卫是双向的：只改图的 ``class`` 或只改区的 ``ship_type`` 都会报
+        ``blueprint_class_mismatch``——因为那会让图与它自己的建造区对不上（= 把玩家的图作废）。
+        这两笔必须在**同一份 diff** 里，所以这里合成一个调用。
+        """
+        self.set_blueprint(faction, name, class_=class_, components=components, order=order,
+                           mode=mode, take_over=take_over)
+        idx = self.resolve_building(city, building)
+        self._require_faction(faction)
+        self._pending_buildings.setdefault(faction, []).append(
+            {"city": city, "building": idx, "ship_type": class_, "blueprint": name})
+        return self
+
     def set_scope(self, *, global_mode: str | None = None,
                   factions: Mapping[str, str] | None = None,
                   bodies: Mapping[str, str] | None = None,
@@ -1292,14 +1411,18 @@ class Surface:
         """
         order = list(self.factions)
         extra = sorted(f for f in self._pending if f not in order)
+        for f in self._pending_buildings:
+            if f not in order and f not in extra:
+                extra.append(f)
         control = []
         for faction in order + extra:
             kinds = self._pending.get(faction)
-            if not kinds:
+            buildings = self._pending_buildings.get(faction) or []
+            if not kinds and not buildings:
                 continue
             entry: dict[str, Any] = {"faction_id": faction}
             for kind in _KIND_ORDER:
-                if kind not in kinds:
+                if not kinds or kind not in kinds:
                     continue
                 bucket = kinds[kind]
                 if not LEAF_KINDS[kind]:
@@ -1308,6 +1431,10 @@ class Surface:
                 keys = sorted(bucket, key=lambda k: (self._rank.get((faction, kind, k), 10 ** 9),
                                                      _key_label(k)))
                 entry[kind] = [copy.deepcopy(bucket[k]) for k in keys]
+            # 结构叶（设计图指针）：**追加顺序**即调用顺序（同一格被写两次时，后一条覆盖前一条
+            # ——引擎按顺序应用，所以 emit 的顺序就是语义）。
+            if buildings:
+                entry["buildings"] = copy.deepcopy(buildings)
             if len(entry) > 1:
                 control.append(entry)
         return {"control": control, "scope": self._scope_patch()}
@@ -1561,10 +1688,14 @@ def buildings(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=Non
             rows.append({"city": c["city_id"], "building": int(b["id"]),
                          "faction_id": c["faction_id"], "kind": b.get("kind"),
                          "resource": b.get("resource"), "ship_type": b.get("ship_type"),
+                         # **设计图指针**（原样输出：指向一张不存在/被改名的图时也照样在这里，
+                         # 那个建造区**停产**——见 Q10(a)）。
+                         "blueprint": b.get("blueprint"),
                          "structure": b.get("structure"), "area": b.get("area"),
                          "deployed": b.get("deployed"), "armor": b.get("armor")})
     return pd.DataFrame(rows, columns=["city", "building", "faction_id", "kind", "resource",
-                                       "ship_type", "structure", "area", "deployed", "armor"])
+                                       "ship_type", "blueprint", "structure", "area", "deployed",
+                                       "armor"])
 
 
 def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
@@ -1586,8 +1717,14 @@ def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, plane
 # --------------------------------------------------------------------------------------
 
 #: The default **refresh rule** for a roster slot: highest current ``hull``, then ``hull_max``,
-#: then name ascending (names carry the generation suffix: 方舟 / 方舟2 / 方舟3).
-DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-hull", "-hull_max", "ship_id")
+#: then **oldest first** (``spawned_round`` ascending — the engine's ``Ship.spawned_round``, exposed
+#: as the ships table's ``spawned_round`` column), then name ascending (names carry the generation
+#: suffix: 方舟 / 方舟2 / 方舟3).
+#:
+#: ⚠ ``spawned_round`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
+#: NaN **last** in ascending order, so "unknown" never wins the tie-break; those ties fall through to
+#: the name order, which is what the rule did before this column existed.
+DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-hull", "-hull_max", "spawned_round", "ship_id")
 
 
 def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=None,
@@ -1604,9 +1741,15 @@ def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=
         r = ctl.roster(ckpt, spec)
 
     **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``hull`` → highest ``hull_max``
-    → name ascending. "Oldest" is *not* available: the projection's ships table carries no birth
-    round (engine gap), so name order stands in for seniority. Pass ``rule=`` to override, using
+    → **oldest first** (``spawned_round`` ascending, unknown/``null`` last) → name ascending.
+    ``spawned_round`` is the engine's own birth round (``Ship.spawned_round``, shipped as the ships
+    table's ``spawned_round`` column); ties that involve ships from an old checkpoint (``null``) fall
+    back to name order, exactly as before that column existed. Pass ``rule=`` to override, using
     ``"-col"`` for descending.
+
+    A rule column the frame does not carry (e.g. an index directory written by an **older** engine,
+    which has no ``spawned_round``) is **skipped** rather than raising — the roster then degrades to
+    the remaining columns (name order), never to an exception.
 
     Returns one row per slot: ``slot``/``query``/``refresh_rule``/``matched``/``candidates`` plus the
     matched ship's columns; ``matched=False`` means nothing currently fills the slot (``strict=True``
@@ -1624,10 +1767,19 @@ def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=
             raise ValueError(f"spec 条目必须是 (slot, query) 或 (slot, query, rule)：{item!r}")
         slot_rule = tuple(slot_rule or rule or DEFAULT_REFRESH_RULE)
         cand = query(ships_df, query_expr)
-        cand = cand.sort_values(by=[c.lstrip("-") for c in slot_rule],
-                                ascending=[not c.startswith("-") for c in slot_rule],
-                                kind="mergesort")
+        # 规则里可能有这一帧没有的列（老引擎写的索引目录没有 `spawned_round`）：**跳过它**、
+        # 用剩下的列排序（回落名字序），而不是抛 KeyError —— 编制表在旧索引目录上还得能用。
+        usable = tuple(c for c in slot_rule if c.lstrip("-") in cand.columns)
+        skipped_cols = tuple(c for c in slot_rule if c not in usable)
+        if usable:
+            cand = cand.sort_values(by=[c.lstrip("-") for c in usable],
+                                    ascending=[not c.startswith("-") for c in usable],
+                                    kind="mergesort",
+                                    # 未知的下水回合（旧档 = null）排在**最后**：不许用 NaN 赢得
+                                    # tie-break（那会让"未知"变成"最老"）。
+                                    na_position="last")
         base = {"slot": slot, "query": query_expr, "refresh_rule": ",".join(slot_rule),
+                "rule_columns_missing": ",".join(skipped_cols),
                 "candidates": int(len(cand))}
         if len(cand) == 0:
             if strict:

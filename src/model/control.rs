@@ -4,7 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::model::{BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipDoctrine, ShipId};
+use crate::model::{
+    Blueprint, BlueprintId, BodyId, BuildingId, CityId, FactionId, ShipBehavior, ShipDoctrine, ShipId,
+};
 
 /// 沿作用域链（从具体到宽泛）取第一个**有意见**的层，即第一个不是
 /// [`ControlMode::Inherit`] 的节点；全链都「继承」（没有说话）时，由系统自动决定
@@ -295,6 +297,26 @@ pub struct ControllableState {
     /// 「全舰队转运输、只有两艘战列留作战舰」这类意图 = 一片默认叶 + 几片特例叶。
     #[serde(default)]
     pub default_freighter: Option<Control<bool>>,
+    /// **设计图库**（势力级）：图名 → 图纸。
+    ///
+    /// 设计图是**「还不存在的舰」的出厂规格**：建造区指向一张图
+    /// （[`Building::blueprint`](crate::model::Building::blueprint)），下水那一刻把图**印成**
+    /// 一艘舰（`Ship.components` 是**快照**，之后改图不影响已有的舰）。
+    ///
+    /// 三态语义（照 [`Control`] 的通用规则，但这一片有自己的链——图是**势力的库**，
+    /// **没有**「舰队默认」那一档）：
+    /// * `Player` = 系统**不许重估**这张图：出厂按图装配（`components` 非空时就是它），
+    ///   图上写了 `order` 时这艘舰的意图也归玩家（AI 不再改写它的指令叶）；
+    /// * `Auto` = 系统可重估这张图（`retool_shipyards` 会把它改到战局需要的舰级）；
+    ///   出厂选装仍走 [`crate::autocontrol::choose_loadout`] 现算（= 今天的行为）；
+    /// * `Inherit` = 这一层没有说话 ⇒ 沿 `scope` 链上溯（通常落到 `Auto`）。
+    ///
+    /// 有效归属走 [`State::blueprint_control`](crate::model::State::blueprint_control)。
+    ///
+    /// ⚠ **图的「意图轴」默认 `Inherit`（沉默）**：建图 ≠ 表态。只有图上真写了
+    /// [`Blueprint::order`]，这一层才可能在指令链上遮住舰队默认（用户裁决 Q1(c)）。
+    #[serde(default)]
+    pub blueprints: BTreeMap<BlueprintId, Control<Blueprint>>,
     /// 投资预算（资源/时间）：决定拿出多少资源用于「建设（建筑）」，按各建筑
     /// 建设投资权重竞争（每资源一个 Control）。
     pub investment_budget: BTreeMap<String, Control<f64>>,

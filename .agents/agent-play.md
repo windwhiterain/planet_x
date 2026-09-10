@@ -119,8 +119,8 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 | 表 | 粒度 | 关键列 |
 |---|---|---|
 | `factions` | 每回合 | `faction_id resources(库存) relations(外交) capital_body alignment aggression home_* city_ids ship_ids` |
-| `ships` | 每回合 | `ship_id faction_id class x y hull hull_max shield shield_max velocity components component_hp attack attack_range speed accel hardness intercept shield_regen hull_regen upkeep` |
-| `cities` | 每回合 | `city_id faction_id body_id name population loyalty razed deployed_area building_count buildings[]`（`buildings[].id` = `--apply` 要的 u32 下标） |
+| `ships` | 每回合 | `ship_id faction_id class x y hull hull_max shield shield_max velocity components component_hp attack attack_range speed accel hardness intercept shield_regen hull_regen upkeep blueprint blueprint_mode order_blueprint_mode order_source spawned_round` |
+| `cities` | 每回合 | `city_id faction_id body_id name population loyalty razed deployed_area building_count buildings[]`（`buildings[]` 里每栋有 `id`（= `--apply` 要的 u32 下标）`kind resource ship_type blueprint structure area deployed armor`） |
 | `bodies` | 全局一次 | `body_id name x y perihelion_distance aphelion_distance period settlement_count` |
 | `settlements` | 全局一次 | `settlement_id body_id name total_area ecological_capacity construction_speed_mod resources` |
 | `events` | 每回合 | `event_id("回合:序号") type headline weight salience actor_*/target_*/extra + data`（类型列叫 **`type`**） |
@@ -131,11 +131,17 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 |---|---|---|---|
 | `flow` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`main` 的 `metrics` 里也有嵌套的一份，这是可 join 的平铺版） |
 | `city_flow` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
-| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/default_ship_order/default_doctrine/default_kiting/各类预算与权重/capital） |
+| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/default_ship_order/default_doctrine/default_kiting/各类预算与权重/capital）。⚠ **设计图不在本表**（它是结构叶，见下一行） |
 | `scope` | 每回合 × 显式节点 | `level(global/faction/body/city) key mode` | 作用域树里谁有意见 |
+| `blueprints` | 每回合 × 设计图 | `faction_id blueprint_id class components[] order mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + 新舰默认意图）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
 
 `ships` 表另有几列是**引擎解析后的答案**，别自己重算链：`order_leaf_mode`、
-`order_default_mode`、`order_effective_mode`、`order_effective`、`doctrine`、`kiting`。
+`order_default_mode`、`order_effective_mode`、`order_effective`、**`order_source`**
+（= **这条意图是谁供的值**：`leaf` / `blueprint:<图名>` / `fleet_default`；`scope`/`record`
+在指令链上不会出现）、`doctrine`、`kiting`、`blueprint`（本舰是哪张图印出来的）、
+`spawned_round`（下水回合；`null` = 旧档 ⇒ 未知）。
+⚠ `order_source` 把「**叶不存在**」与「叶写着 `Inherit`」**分开报**：后者报 `leaf`——那时值
+真的来自那片叶（`leaf.map(|l| l.value).unwrap_or(..)`），只有叶不存在才可能落到图/舰队默认。
 单点查（不想跑整个 `--index`）：`planet_x --start ckpt.ron --derived` 给出这一回合存下来的
 `{round, source, pre, post}`（`post.flow` 就是上面那张 flow 表的来源；没档时会按当前状态重算
 并附 `note`，那种情况下 flow 是空的）。
@@ -159,6 +165,7 @@ q.ships(round=12)                        # 第 12 月全部舰（含 effective �
 q.cities(round=12)                       # 第 12 月全部城（含 buildings 清单）
 q.bodies() ; q.settlements()             # 天体 / 定居点主表
 q.decisions(round=12)                    # 本回合 AI 的判定（逐舰 verdict + 判定的输入 + 船坞改装）
+q.blueprints(round=12)                   # 设计图库（一行一图：舰级/选装/默认意图/归属/造过多少艘）
 q.fleet(12, "中国") ; q.city_buildings(12, "中国")   # 某势力的舰 / 城
 q.ids("ships", 12)                       # 第 12 月的 ship_id（=舰名）数组
 q.join("ships", round=12)                # explode 主流 ship_ids 并按 (round,id) merge 完整对象
@@ -214,9 +221,12 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 `scope` 是一棵「谁负责」的作用域树（全局→势力→天体→城市）。旧档里的 `"Ai"` 与 `null`
 分别按 `Auto` / `Inherit` 读入（`SCHEMA_VERSION` v4→v5 的零损失映射）。
 
-**归属链（舰的指令与风格都是这条）**：`叶 → 舰队默认 → 势力 scope → 全局 scope`，
+**归属链（舰的指令与风格都是这条）**：`叶 → 出厂图（设计图）→ 舰队默认 → 势力 scope → 全局 scope`，
 最具体的那层**有意见**（`Player`/`Auto`）就它说了算；一路 `Inherit` 就到 `Auto`。
-所以「新舰出厂归谁、干什么」的答案是**舰队默认**，不必逐舰点名。
+所以「新舰出厂归谁、干什么」的答案是**舰队默认**（要按舰级分开编排，就写一张图的 `order`——
+见 §3 的 `blueprints`），不必逐舰点名。
+⚠ 图的**意图轴默认沉默**：建图（哪怕归玩家）**不等于**表态，只有图上真写了 `order`，那层才参与；
+而且它只在该图的归属解析为 `Player` 时才供值。
 
 | 指令面 | 含义 | 关键点 |
 |---|---|---|
@@ -232,7 +242,22 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 | `build_weights` | 各建造区优先级 | 哪个船坞先造。key 同上 |
 | `loyalty_budget` | 每城娱乐/福利（月） | 提「忠诚」压低叛乱 |
 | `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
-| `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效） |
+| `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效）、**挂/拆设计图指针**（`{"city":…,"building":…,"blueprint":"<图名>"}`；`"blueprint": null` = 拆掉指针回到自动选装） |
+| `blueprints` | **设计图库**（势力级，一张图一片叶） | `{"name":"<图名>","class":"<舰级>","components":[…],"order":{…},"mode":…}`——见 §3 末尾 |
+
+> **设计图（blueprint）= 「还不存在的舰」的出厂规格**：建造区**指向**一张图
+> （`buildings[].blueprint`），下水那一刻把图**印成**一艘舰（`components` 是**快照**，
+> 之后改图**不动**已有的舰）。`mode`：`Player` = 系统不许重估这张图（出厂按图装配，
+> 图上写了 `order` 时那艘舰的意图也归你）/ `Auto` = 系统可重估（`retool_shipyards` 会改它的
+> 舰级）/ `Inherit` = 这一层没说话（沿 scope 链解析）。
+> **四条硬规则**（违反了会被点名丢弃）：
+> * 口径 A：图的 `class` 必须 == 该建造区的 `ship_type` ⇒ **图与区要一起写**（`blueprint_class_mismatch`）；
+> * 选装不许重复（`duplicate_component`）、不许超过该舰级槽位（`too_many_components`）、组件必须存在（`no_such_component`）；
+> * 图名不存在时**不许凭空造图**（只写 `mode` ⇒ `no_such_blueprint`）；
+> * **悬空指针 ⇒ 那个建造区停产**（指针指向一张被改名/删掉的图时，进度不再增加；读面把指针
+>   原样输出，你可以据此看出「这个区为什么不出舰」）。指针写 `null` 才是拆掉它。
+> ⚠ **玩家归属的图买不起就不下水**：进度继续攒、下回合再试（蓝图表 `launch_waiting` 列会
+> 标出来）。`Auto` 图与无图**保持旧行为**（生成器自己保证买得起）。
 
 > **风格与指令是同一个形状**（`--apply` 里的两片名字不同，语义同构）：写值即接管、
 > 缺省轴保留现值、`mode` 显式给出时以它为准。
@@ -341,6 +366,19 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
   }]}
   ```
   这两片一写：**所有"没有说话"的舰（含以后下水的）都按它走**，单舰特例仍写在 `ship_orders`。
+- **按舰级编排**（"新造的护卫舰守家、巡洋舰远征"）用**设计图**，而不是给每艘舰点名：
+  ```jsonc
+  {"control":[{"faction_id":"中国",
+    "blueprints":[{"name":"护卫-守家","class":"corvette",
+                   "components":["kinetic","ion_drive"],      // 空数组 = 出厂时交给生成器现算
+                   "order":{"type":"dock","body":"地球"},       // 图上写了它，这一层才参与
+                   "mode":"Player"}],
+    "buildings":[{"city":"珠三角","building":7,"ship_type":"corvette","blueprint":"护卫-守家"}]
+  }]}
+  ```
+  这一份 diff 说：`珠三角` 的 7 号建造区以后按「护卫-守家」出厂（选装钉死 + 新舰默认守地球），
+  而且这张图**归玩家**——AI 不许重估它。**图与建造区的舰级必须一起写**（口径 A）。
+  想让这张图只钉选装、意图仍跟随舰队默认 ⇒ **别写 `order`**（或写 `"order": null` 收回这一层）。
 - 若想**整体接管**一个势力（所有叶子都归你），写
   `{"scope":{"factions":[["中国","Player"]]}}`。注意**叶比 scope 更具体**：已经自己有叶片的舰
   不会被 scope 翻转，要逐舰写 `{"ship":"长城","mode":"Player"}`（只写 mode，不动值）或

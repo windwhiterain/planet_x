@@ -177,6 +177,14 @@ def main(argv=None) -> int:
           {"order_mode", "order_value", "default_ship_order_mode", "doctrine_temper", "kiting"}
           <= set(df_ships.columns))
     check("本地近似的 effective 列有 _approx 标名", all(c in df_ships.columns for c in ctl.APPROX_COLUMNS))
+    # 设计图那一轮新增的引擎列（**引擎的答案**，不是本地近似）：出处列 + 出厂图 + 下水回合。
+    check("ships 表带上了设计图/出处/下水回合列",
+          {"blueprint", "blueprint_mode", "order_blueprint_mode", "order_source", "spawned_round"}
+          <= set(df_ships.columns),
+          f"order_source={df_ships['order_source'].dropna().unique()[:3].tolist()}…")
+    check("--control-schema 里有 blueprints（agent 才知道能往 --apply 写什么）",
+          "BlueprintPatch" in schema.get("definitions", {}),
+          f"{len(schema.get('definitions', {}))} 个定义")
 
     counts = df_ships.groupby("faction_id").size().sort_values(ascending=False)
     faction = sorted(counts[counts == int(counts.max())].index)[0]   # 并列时按名字定序
@@ -196,11 +204,49 @@ def main(argv=None) -> int:
                "refresh_rule"]].to_string(index=False))
     check("编制表把每个 slot 映射到现役舰（刷新规则写在配方里）",
           bool(ros["matched"].all()) and ros["slot"].tolist() == [s for s, _ in spec])
-    check("编制表槽位是确定的（同分按名字）",
+    check("编制表槽位是确定的（同分：**最老的先**，再名字序）",
           ros.iloc[0]["ship_id"]
-          == fleet.sort_values(["hull", "hull_max", "ship_id"],
-                               ascending=[False, False, True]).iloc[0]["ship_id"],
+          == fleet.sort_values(["hull", "hull_max", "spawned_round", "ship_id"],
+                               ascending=[False, False, True, True],
+                               na_position="last").iloc[0]["ship_id"],
           f"旗舰={ros.iloc[0]['ship_id']}，最高 hull={flagship_hull:g}")
+
+    # **「同分取最老的」真的成立了吗**（Q9 的目的：`Ship.spawned_round` 进投影 ships 表）。
+    # 光有「编制表选中的 == 最老的」还不够——如果那一组里"最老的"恰好也是名字序第一，
+    # 这条断言什么都没证明。所以要**构造一对「同分（hull/hull_max 相同）、年龄不同、
+    # 且名字序会挑另一艘」**的舰：只有这时"取最老的"与"取名字序"给出不同答案。
+    def _tie_pairs(fixture, idx_dir=None):
+        d = ctl.ships(fixture, index_dir=idx_dir)
+        out = []
+        key = d["hull"].astype(str) + "/" + d["hull_max"].astype(str)
+        for _, g in d.groupby(key):
+            known = g[g["spawned_round"].notna()]
+            if len(known) >= 2 and known["spawned_round"].nunique() >= 2:
+                srt = known.sort_values(["spawned_round", "ship_id"])
+                old, new = srt.iloc[0], srt.iloc[-1]
+                if str(old["ship_id"]) > str(new["ship_id"]):   # 名字序会挑 new ⇒ 这一对能证明规则
+                    out.append((str(old["ship_id"]), str(new["ship_id"]),
+                                int(old["spawned_round"]), int(new["spawned_round"])))
+        return out
+
+    tie_ckpt, tie_dir, pairs = ckpt, proj, _tie_pairs(ckpt, proj)
+    if not pairs:
+        # 12 回合的 fixture 里可能只有开局舰队（全是第 0 回合下水）⇒ 跑长一点再找。
+        tie_ckpt = Path(ctl.new_checkpoint(work / "ckpt_tie.ron", seed=args.seed,
+                                          rounds=max(args.round, 60), planet_x=engine))
+        tie_dir, pairs = None, _tie_pairs(tie_ckpt)
+    print(f"    同分且年龄不同的对：{pairs[:3]}{'…' if len(pairs) > 3 else ''}"
+          f"（fixture={Path(tie_ckpt).name}）")
+    check("构造出「同分 / 年龄不同 / 名字序会挑错」的一对（守卫不许空转）", bool(pairs),
+          f"{len(pairs)} 对")
+    if pairs:
+        old_id, new_id, old_r, new_r = pairs[0]
+        r_tie = ctl.roster(tie_ckpt, [("配对", f"ship_id in ['{old_id}', '{new_id}']")],
+                           index_dir=tie_dir)
+        check("同分取**最老的**（spawned_round 升序），而不是名字序",
+              r_tie.iloc[0]["ship_id"] == old_id,
+              f"选中={r_tie.iloc[0]['ship_id']}（最老={old_id}@r{old_r}；"
+              f"名字序会给={new_id}@r{new_r}；规则={r_tie.iloc[0]['refresh_rule']}）")
 
     # ---------------------------------------------------------------- 2. bulk ownership → Auto
     print("\n[2] 批量归属：整队 → Auto（引擎没有通配，这里展开成 N 条只写 mode 的叶）")
@@ -330,8 +376,117 @@ def main(argv=None) -> int:
     check("R: 删势力级默认角色叶也在回执里（`exists` 由 True 翻回 False）",
           rep_r5.removed_leafs == [f"{faction}.default_freighter"], f"{rep_r5.removed_leafs}")
 
-    # ---------------------------------------------------------------- 5. determinism
-    print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
+    # ---------------------------------------------------------------- 4c. 舰船设计图
+    print("\n[4c] 设计图**blueprint**（「还不存在的舰」的出厂规格）：建图 · 建造区指针 · 删图")
+    bld = ctl.buildings(ckpt_r3, index_dir=proj)
+    check("建造区表带上了设计图指针列", "blueprint" in bld.columns)
+    yards = bld[(bld["faction_id"] == faction) & (bld["kind"] == "construction")]
+    check("施政对象有建造区可挂图", len(yards) > 0, f"{len(yards)} 个建造区")
+    if len(yards):
+        y = yards.iloc[0]
+        ycity, ybid, ycls = y["city"], int(y["building"]), y["ship_type"]
+        # ① 建图 + **把图与建造区的舰级一起写**（口径 A 的正解：只改一处会被引擎拒）。
+        s_bp = ctl.surface(ckpt_r3, index_dir=proj)
+        s_bp.set_blueprint_and_retool(faction, "重甲护卫", class_=ycls, city=ycity, building=ybid,
+                                      components=["kinetic", "ion_drive"], mode=ctl.PLAYER)
+        path_bp = ctl.write(s_bp.emit(), work / "steer_bp.json")
+        print(f"    载荷：建图「重甲护卫」({ycls}) + 把 {ycity}/{ybid} 指过去")
+        rep_bp = ctl.verify(ckpt_r3, path_bp)
+        print(rep_bp.describe())
+        check("BP: 建图 + 挂指针一次成功、无丢弃", rep_bp.ok and not rep_bp.skipped,
+              f"{rep_bp.skipped}")
+        lf_bp = rep_bp.after.leaf(faction, "blueprints", "重甲护卫")
+        check("BP: 图叶的值是**复合**的（class + components + order）",
+              (lf_bp.value or {}).get("class") == ycls
+              and (lf_bp.value or {}).get("components") == ["kinetic", "ion_drive"],
+              f"{lf_bp.value}")
+        check("BP: 显式 mode=Player ⇒ 这张图归玩家、且**没有**意外接管",
+              lf_bp.mode == ctl.PLAYER and rep_bp.took_over_leafs == [],
+              f"mode={lf_bp.mode} took_over={rep_bp.took_over_leafs}")
+
+        # 真的落地（verify 只是只读演习）：读面/投影里必须看得见指针。
+        ckpt_bp = work / "ckpt_bp.ron"
+        check("BP: --apply --save 成功", ctl.apply(ckpt_r3, path_bp, save=ckpt_bp).ok)
+        # ⚠ 换了一个 checkpoint 就要**重新投影**：`index_dir=` 是「直接用这个目录」，
+        # 传上一份 ckpt 的投影目录会让读面全是旧值（本 demo 也踩过：指针显示 None）。
+        got = ctl.buildings(ckpt_bp)
+        row = got[(got["city"] == ycity) & (got["building"] == ybid)].iloc[0]
+        check("BP: 建造区的**指针**落到了这张图上（重新投影后看得见）", row["blueprint"] == "重甲护卫",
+              f"{row['blueprint']}")
+
+        # ② 蓝图表的读面（`q.blueprints(round)`）：一行一图 + **引擎算的**列。
+        q = ctl.projection(ckpt_bp)
+        bp_df = q.blueprints(round=ctl._last_round(q))
+        check("BP: 投影蓝图表可读（q.blueprints 泛化自 schema.derived）",
+              len(bp_df) >= 1 and {"effective_mode", "class_slots", "component_cost",
+                                   "launch_waiting", "ship_count"} <= set(bp_df.columns),
+              f"{bp_df.shape}")
+        mine = bp_df[bp_df["blueprint_id"] == "重甲护卫"].iloc[0]
+        slots = int(q.ships_spec().loc[ycls, "slots"])
+        check("BP: 有效归属由**引擎**解析（不是本地近似）",
+              mine["effective_mode"] == ctl.PLAYER and mine["mode"] == ctl.PLAYER
+              and int(mine["class_slots"]) == slots,
+              f"effective_mode={mine['effective_mode']} slots={mine['class_slots']}（配置表 {slots}）")
+        check("BP: 图的意图轴默认沉默（没写 order ⇒ null，链继续下降到舰队默认）",
+              pd.isna(mine["order"]), f"{mine['order']!r}（JSON null 在 pandas 里读成 NaN）")
+        check("BP: 组件成本 / 造过多少艘是引擎算的派生列",
+              float(mine["component_cost"].get("铁", 0.0)) > 0 and int(mine["ship_count"]) >= 0,
+              f"component_cost={dict(mine['component_cost'])} ship_count={mine['ship_count']}")
+
+        # ③ 拆指针 = 回到自动选装（写的是 `null`，不是"缺席"：缺席 = 不动这一格）。
+        s_bp2 = ctl.surface(ckpt_bp)
+        s_bp2.set_blueprint_pointer(faction, ycity, ybid, None)
+        path_bp2 = ctl.write(s_bp2.emit(), work / "steer_bp2.json")
+        rep_bp2 = ctl.verify(ckpt_bp, path_bp2)
+        check("BP: 拆指针（null）落地", rep_bp2.ok and not rep_bp2.skipped)
+        ckpt_bp2 = work / "ckpt_bp2.ron"
+        check("BP: 拆指针真的落地", ctl.apply(ckpt_bp, path_bp2, save=ckpt_bp2).ok)
+        got2 = ctl.buildings(ckpt_bp2)
+        check("BP: 指针回到「无」（= 走 ship_type + choose_loadout）",
+              got2[(got2["city"] == ycity) & (got2["building"] == ybid)].iloc[0]["blueprint"] is None)
+
+        # ④ 删图（改名/换代的正规路径）：回执点名到叶。⚠ 删图之后挂它的区是**悬空指针 ⇒ 停产**
+        #    （进度不再增加），所以正确用法是**先拆指针再删图**——读面会把悬空指针原样输出。
+        s_bp3 = ctl.surface(ckpt_bp2)
+        s_bp3.remove_blueprint(faction, "重甲护卫")
+        path_bp3 = ctl.write(s_bp3.emit(), work / "steer_bp3.json")
+        rep_bp3 = ctl.verify(ckpt_bp2, path_bp3)
+        check("BP: 删图在引擎回执里（读面看不出来，靠回执）",
+              rep_bp3.removed_leafs == [f"{faction}.blueprints[重甲护卫]"], f"{rep_bp3.removed_leafs}")
+
+        # ⑤ 质量栏：图的舰级与建造区对不上 ⇒ 引擎**响亮**拒绝（口径 A），绝不静默。
+        other = next((c for c in sorted(set(df_ships["class"])) if c != ycls), None)
+        if other:
+            s_bp5 = ctl.surface(ckpt_bp2)
+            s_bp5.set_blueprint(faction, "错级图", class_=other, components=[], mode=ctl.PLAYER)
+            s_bp5.set_blueprint_pointer(faction, ycity, ybid, "错级图")
+            rep_bp5 = ctl.verify(ckpt_bp2, ctl.write(s_bp5.emit(), work / "steer_bp5.json"))
+            codes = [s["code"] for s in rep_bp5.skipped]
+            check("BP: 图的舰级与建造区对不上 ⇒ 引擎报 blueprint_class_mismatch（建造区侧）",
+                  "blueprint_class_mismatch" in codes, f"{codes}（图={other}，区={ycls}）")
+            # **另一侧**的同一道守卫：在还挂着图的 checkpoint 上只改**图的** `class` ⇒ 报在图上，
+            # 而且路径要从列表下标映射回**叶名**（`中国.blueprints[重甲护卫]`）——新 kind 走的是
+            # 同一条正则 + 新 diff 里的 `name`（`_engine_path_to_leaf`）。漏了它，报告里就只有
+            # 一行看不懂的下标（`中国.blueprints[0].class`）。
+            s_bp7 = ctl.surface(ckpt_bp)
+            s_bp7.set_blueprint(faction, "重甲护卫", class_=other, components=["kinetic"],
+                                mode=ctl.PLAYER)
+            rep_bp7 = ctl.verify(ckpt_bp, ctl.write(s_bp7.emit(), work / "steer_bp7.json"))
+            check("BP: 只改图的舰级同样被拒（图侧，双向守卫的第二条路）",
+                  any(s["code"] == "blueprint_class_mismatch" for s in rep_bp7.skipped),
+                  f"{[(s['code'], s.get('path')) for s in rep_bp7.skipped]}")
+            check("BP: 丢弃路径映射回**叶名**（新 kind 走同一条正则）",
+                  any(s.get("leaf") == f"{faction}.blueprints[重甲护卫]" for s in rep_bp7.skipped),
+                  f"{[(s['code'], s.get('path'), s.get('leaf')) for s in rep_bp7.skipped]}")
+            # 指向一张**不存在**的图：同样响亮（而且那个区会停产）——绝不静默回落生成器。
+            s_bp6 = ctl.surface(ckpt_bp2)
+            s_bp6.set_blueprint_pointer(faction, ycity, ybid, "这张图不存在")
+            rep_bp6 = ctl.verify(ckpt_bp2, ctl.write(s_bp6.emit(), work / "steer_bp6.json"))
+            check("BP: 悬空指针 ⇒ no_such_blueprint（不是静默回落生成器）",
+                  any(s["code"] == "no_such_blueprint" for s in rep_bp6.skipped),
+                  f"{[s['code'] for s in rep_bp6.skipped]}")
+
+    # ---------------------------------------------------------------- 5. determinism    print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
     d1, _ = recipe_policy(ckpt, proj)
     d2, _ = recipe_policy(ckpt, proj)
     p1 = ctl.write(d1, work / "det1.json")

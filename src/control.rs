@@ -16,6 +16,7 @@
 use crate::model::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// `remove` 的序列化开关：**只在真的要删叶时才出现在线格式里**。
 ///
@@ -26,6 +27,21 @@ use serde::{Deserialize, Serialize};
 /// 每次都出现的"假变动"。
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// `null` 与「字段缺席」必须分得开（presence-aware 写面的经典需求）。
+///
+/// `Option<Option<T>>` 的 serde 默认实现会把 `null` 与「缺席」**都**落成外层的 `None`，
+/// 于是「不改这个字段」与「把它清空」在写面上就没法区分了（`BuildingPatch.blueprint`
+/// 与 `BlueprintPatch.order` 都需要这个区分）。这个 `deserialize_with` 把**出现过的**值
+/// 一律包成 `Some(..)`：`"x"` ⇒ `Some(Some(x))`、`null` ⇒ `Some(None)`；缺席时才走
+/// `#[serde(default)]` ⇒ 外层 `None`。
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 // --- read-side wire types (the editable control surface) --------------------
@@ -111,6 +127,29 @@ pub struct LoyaltyBudgetEntry {
     pub mode: ControlMode,
 }
 
+/// 一张设计图的**读面条目**（读面即写面）。
+///
+/// * `mode` = **图叶自己的表态**（三态：`Inherit` 这一层没有说话 / `Auto` 系统可重估 /
+///   `Player` 系统不许动）。有效归属看 `--control` 之外的地方（[`State::blueprint_control`]，
+///   投影 `blueprints.effective_mode`）。
+/// * `components` **必须全量输出**（不是 `null`）：读面即写面要能「dump → 改 → 回传」，
+///   按 presence-aware 规则，`components` 缺席 = 不动、`[]` = 清空（交给生成器）。少输出
+///   就等于回传时清空选装。
+/// * `order` = 本图给**新舰**的默认意图（`null` = 本图对意图没有说话——Q1(c) 的
+///   「意图轴默认 `Inherit`/沉默」）。
+/// * `ship_count` = **读面附加的派生量**（引擎算：世界上有多少艘舰出自这张图）。它只读：
+///   写面收下这个键但**不写它**（[`BlueprintPatch::ship_count`]）。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BlueprintEntry {
+    pub name: BlueprintId,
+    pub class: String,
+    pub components: Vec<String>,
+    pub order: Option<ShipBehavior>,
+    pub mode: ControlMode,
+    /// 本图造了多少艘（`state.ships` 里 `blueprint == name` 的条数，现算、不落状态）。
+    pub ship_count: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FactionControlView {
     pub faction_id: FactionId,
@@ -123,6 +162,9 @@ pub struct FactionControlView {
     pub default_kiting: Option<DefaultKiting>,
     /// 舰队默认**角色**（势力级，第三条风格轴）。
     pub default_freighter: Option<DefaultFreighter>,
+    /// **势力级设计图库**：一行 = 一张图（厂房里「还不存在的舰」的出厂规格）。
+    /// 建造区指向其中一张（`buildings[].blueprint` → 结构叶 [`BuildingPatch::blueprint`]）。
+    pub blueprints: Vec<BlueprintEntry>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub ship_kiting: Vec<ShipKitingEntry>,
@@ -356,6 +398,259 @@ pub struct LoyaltyBudgetPatch {
     pub remove: bool,
 }
 
+/// 一张**设计图**的补丁（势力级设计图库的一项）：**读面即写面**。
+///
+/// * **写值即接管**：只写 `class` / `components` / `order` 而没写 `mode` ⇒ 这片图叶变
+///   `Player`（并记 `NOTE_APPLY_TOOKOVER`）——「我明明写了图却没生效」是不可能的；
+/// * 只写 `mode` 合法（值不动）：`{"name":"重甲巡洋","mode":"Auto"}` = 交回系统重估；
+/// * **图名不存在时不许凭空造图**（只写 `mode` ⇒ 报 `no_such_blueprint`，同
+///   `no_such_faction` 防幽灵势力的理由）；
+/// * `remove: true` ⇒ **删掉整张图**（与「让意图轴沉默」是两件事，见下）。
+///
+/// `order` 是**三层含义**的双 Option（见 [`double_option`]）：
+/// * **缺席** = 不动这一层；
+/// * `null` = **本图对意图没有说话**（意图轴回到沉默 ⇒ 链继续往下降到舰队默认）。
+///   这与「删掉这张图」（`remove: true`）后果完全不同：删图会让挂它的建造区变成
+///   **悬空指针 ⇒ 停产**（Q10(a)），而清空 `order` 只是收回这一层的表态；
+/// * 给值 = 表态（`{"type":"dock","body":"地球"}` 这种 tagged 写法 `--apply` 同样接受）。
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BlueprintPatch {
+    /// 图名（势力内的唯一 key）。改名 = 删旧建新（指向旧名的建造区会变成悬空指针）。
+    pub name: BlueprintId,
+    /// 舰级（`config.ships` 的 key）。新建图**必须**给；口径 A 下它必须与该建造区的
+    /// `ship_type` 相等（不等报 `blueprint_class_mismatch`）。
+    #[serde(default)]
+    pub class: Option<String>,
+    /// 选装表（组件 id，顺序 = 槽位顺序）。`[]` = 交给生成器（`choose_loadout`）。
+    /// 校验：组件必须存在（`no_such_component`）、不许重复（`duplicate_component`）、
+    /// 数量不许超过该舰级的槽位（`too_many_components`）。
+    #[serde(default)]
+    pub components: Option<Vec<String>>,
+    /// 本图给**新舰**的默认意图。`null` = 本图对意图没有说话（三层含义见上）。
+    #[serde(default, deserialize_with = "double_option")]
+    pub order: Option<Option<ShipBehavior>>,
+    /// 三态归属：Inherit / Auto / Player。缺省 = 写了值就接管、没写值就保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
+    /// **删掉整张图**（挂它的建造区随后是悬空指针 ⇒ 停产，见 Q10(a)）。
+    /// 图不存在时是**幂等成功**；与值/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
+    /// **只读回显**：本图造了多少艘（读面给的派生量）。写面**收下但不写**它——它不落状态，
+    /// 由引擎现算。收下是为了「读面即写面、模板原样回传安全」（否则整面回传会被
+    /// `deny_unknown_fields` 判成非法）。
+    #[serde(default)]
+    pub ship_count: Option<usize>,
+}
+
+/// 挂了这张图的建造区（城名、建筑下标、该区当前的 `ship_type`）。
+fn referencing_yards(state: &State, fid: &str, bp: &BlueprintId) -> Vec<(CityId, BuildingId, String)> {
+    state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid)
+        .flat_map(|c| {
+            c.buildings
+                .iter()
+                .filter(|b| b.blueprint.as_deref() == Some(bp.as_str()))
+                .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+        })
+        .collect()
+}
+
+/// 本份 diff 打算把**哪些建造区**改成**哪个舰级**（键 = `(城, 建筑下标)`）。
+///
+/// 为什么需要它：口径 A 要求「图的 `class` == 建造区的 `ship_type`」，而这个约束的校验
+/// 发生在两处（改图 / 改区）。若两处各自只看**当前**状态，「两处一起写」（这是 spec §4.5
+/// 教的正解）就会被先落地的那一半拒掉——正确的判据是**这份 diff 之后的意图**。
+fn yard_ship_type_intent(fac: &FactionControlPatch) -> BTreeMap<(CityId, BuildingId), String> {
+    let mut m = BTreeMap::new();
+    for b in &fac.buildings {
+        if let (Some(city), Some(bid), Some(st)) =
+            (b.city.as_ref(), b.building, b.ship_type.as_ref())
+        {
+            m.insert((city.clone(), bid), st.clone());
+        }
+    }
+    m
+}
+
+/// **设计图**补丁：新建 / 改值（舰级、选装、意图）/ 改归属 / 删图。
+///
+/// 校验与丢弃码见 [`BlueprintPatch`] 与 `.agents/notes/ship-blueprint-spec.md` §4.6。
+/// 顺序与其它叶一致：**删叶（含冲突检查）→ 校验 → 写**。
+fn apply_blueprint(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &FactionId,
+    patch: &BlueprintPatch,
+    i: usize,
+    yard_intent: &BTreeMap<(CityId, BuildingId), String>,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.blueprints[{i}]");
+    let mut present = Vec::new();
+    if patch.class.is_some() {
+        present.push("class");
+    }
+    if patch.components.is_some() {
+        present.push("components");
+    }
+    if patch.order.is_some() {
+        present.push("order");
+    }
+    if patch.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(patch.remove, &present, &path, report) {
+        return;
+    }
+    // 删**整张图**：挂它的建造区随后是悬空指针 ⇒ 停产（Q10(a)）。图不存在时是幂等成功。
+    if patch.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .blueprints
+            .remove(&patch.name)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    let current = state
+        .control(fid.clone())
+        .and_then(|c| c.blueprints.get(&patch.name))
+        .cloned();
+    let wrote_value = patch.class.is_some() || patch.components.is_some() || patch.order.is_some();
+    // 图名不存在 + 没有写任何值 ⇒ **绝不凭空造图**（同 `no_such_faction` 防幽灵势力的理由：
+    // 一个错别字会造出一张谁都不认识的图，它随后出现在读面里，看起来像真的）。
+    if current.is_none() && !wrote_value {
+        report.skip(
+            format!("{path}.name"),
+            &patch.name,
+            "no_such_blueprint",
+            format!(
+                "「{}」这张设计图不在 {fid} 的设计图库里（图名是唯一 key，会被改名/删除）。想建一张新图请把 `class` 一起写上（写值即接管）；只写 `mode` 不会凭空造图。",
+                patch.name
+            ),
+        );
+        return;
+    }
+    // 目标值：写了的用写的，没写的保留现值（新建时 `class` 必给）。
+    let class = match (patch.class.as_ref(), current.as_ref()) {
+        (Some(c), _) => c.clone(),
+        (None, Some(v)) => v.value.class.clone(),
+        (None, None) => {
+            report.skip(
+                format!("{path}.class"),
+                "",
+                "missing_class",
+                "新建一张设计图必须给 `class`（舰级 = config.ships 的 key）：图是「还不存在的舰」的出厂规格，没有舰级的图印不出舰。",
+            );
+            return;
+        }
+    };
+    if !config.ships.contains_key(&class) {
+        let all: Vec<&str> = config.ships.keys().map(String::as_str).collect();
+        report.skip(
+            format!("{path}.class"),
+            &class,
+            "no_such_class",
+            format!("没有舰级「{class}」（可选：{}）。", all.join(" / ")),
+        );
+        return;
+    }
+    let components = patch.components.clone().unwrap_or_else(|| {
+        current
+            .as_ref()
+            .map(|v| v.value.components.clone())
+            .unwrap_or_default()
+    });
+    for c in &components {
+        if !config.components.contains_key(c) {
+            let all: Vec<&str> = config.components.keys().map(String::as_str).collect();
+            report.skip(
+                format!("{path}.components"),
+                c,
+                "no_such_component",
+                format!("没有组件「{c}」（可选：{}；也可用 --meta 看全表）。", all.join(" / ")),
+            );
+            return;
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for c in &components {
+        if !seen.insert(c.clone()) {
+            report.skip(
+                format!("{path}.components"),
+                c,
+                "duplicate_component",
+                format!(
+                    "组件「{c}」在同一张图里出现了两次。一件组件一个槽位——与 `choose_loadout` 的 `!chosen.contains(id)` 同一条规则；「双主炮」是新机制，要先重审槽位与平衡。"
+                ),
+            );
+            return;
+        }
+    }
+    let slots = config.ship_spec(&class).slots as usize;
+    if components.len() > slots {
+        report.skip(
+            format!("{path}.components"),
+            components.len().to_string(),
+            "too_many_components",
+            format!(
+                "这张图装了 {} 件，而 {class} 只有 {slots} 个槽位（槽位上限必须仍然生效，否则设计图就是新的失衡入口）。",
+                components.len()
+            ),
+        );
+        return;
+    }
+    // 口径 A（Q3）：图的 `class` 必须与**挂它的每个建造区**的 `ship_type` 相等。
+    // 「两处一起写」是正解（spec §4.5）⇒ 本份 diff 里那个区的目标舰级也算数。
+    for (cid, bid, st) in referencing_yards(state, fid, &patch.name) {
+        if st == class {
+            continue;
+        }
+        if yard_intent.get(&(cid.clone(), bid)) == Some(&class) {
+            continue;
+        }
+        report.skip(
+            format!("{path}.class"),
+            &class,
+            "blueprint_class_mismatch",
+            format!(
+                "「{}」的建造区（{cid} / building={bid}）产的是「{st}」，而这张图的 class 要写成「{class}」：口径 A 下二者必须相等。要么同一份 diff 里把这个建造区的 `ship_type` 也改成同一级，要么别动图的舰级。",
+                patch.name
+            ),
+        );
+        return;
+    }
+    // 写：值 + 归属（写值即接管，与其它叶同一条规则）。
+    let leaf = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .blueprints
+        .entry(patch.name.clone())
+        .or_insert_with(|| {
+            Control::inherit(Blueprint {
+                class: class.clone(),
+                components: Vec::new(),
+                order: None,
+            })
+        });
+    leaf.value.class = class;
+    leaf.value.components = components;
+    if let Some(order) = &patch.order {
+        // `Some(None)` = 本图对**意图**没有说话（清空这一层，链继续往下降到舰队默认）；
+        // `Some(Some(v))` = 表态。缺席 = 不动。
+        leaf.value.order = order.clone();
+    }
+    write_mode_leaf(&mut leaf.mode, patch.mode, wrote_value, path, report);
+    report.applied += 1;
+}
+
 /// A structural building patch: add a new building, remove an existing one, or
 /// change an existing building's attributes (structure / ship_type / kind).
 #[derive(Deserialize, Default, JsonSchema)]
@@ -375,6 +670,15 @@ pub struct BuildingPatch {
     /// For a new (建造区) building: the ship class it produces.
     #[serde(default)]
     pub ship_type: Option<String>,
+    /// 这个建造区的**设计图**（名字，在所属势力的设计图库里查）。**三层含义**（见
+    /// [`double_option`]）：**缺席** = 不动；`null` = **拆掉指针**（回到
+    /// `ship_type` + `choose_loadout` 的旧路径）；给名字 = 指向那张图。
+    ///
+    /// 校验（都点名到叶）：不是建造区 ⇒ `not_a_shipyard`；库里没有这个名字 ⇒
+    /// `no_such_blueprint`（**响亮**，绝不静默回落生成器）；图的 `class` 与该区的
+    /// `ship_type` 不等 ⇒ `blueprint_class_mismatch`（口径 A；两处**一起写**就都合法）。
+    #[serde(default, deserialize_with = "double_option")]
+    pub blueprint: Option<Option<BlueprintId>>,
     /// For a new or modified building: structure key (concrete | steel).
     #[serde(default)]
     pub structure: Option<String>,
@@ -430,6 +734,13 @@ pub struct FactionControlPatch {
     /// 舰队默认**角色**（势力级，第三条风格轴）。
     #[serde(default)]
     pub default_freighter: Option<DefaultFreighter>,
+    /// **设计图库补丁**（势力级）：新建/改值/改归属/删图。写值即接管（⇒ `Player`）。
+    ///
+    /// ⚠ 它们在 `apply_diff` 里**先于** `buildings` 应用：同一份 diff 里「建图 + 把某个
+    /// 建造区指过去」必须一次成功（否则 agent 得写两条命令，中间那一条会报
+    /// `no_such_blueprint`）。
+    #[serde(default)]
+    pub blueprints: Vec<BlueprintPatch>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
@@ -641,6 +952,26 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
         .iter()
         .map(|(cid, ctrl)| LoyaltyBudgetEntry { city: cid.clone(), value: ctrl.value, mode: ctrl.mode })
         .collect();
+    // 设计图库：**每张图一行**。`ship_count` 是**现算的派生量**（不落状态），`mode` 是图叶
+    // 自己的表态；有效归属（图叶 → 势力 scope → 全局）走 `State::blueprint_control`，
+    // 读面在投影的 `blueprints.effective_mode` 列里给（`--control` 是**写面模板**，
+    // 多给派生列只会让模板与写面漂移）。
+    let blueprints = c
+        .blueprints
+        .iter()
+        .map(|(name, ctrl)| BlueprintEntry {
+            name: name.clone(),
+            class: ctrl.value.class.clone(),
+            components: ctrl.value.components.clone(),
+            order: ctrl.value.order.clone(),
+            mode: ctrl.mode,
+            ship_count: state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == fid && s.blueprint.as_deref() == Some(name.as_str()))
+                .count(),
+        })
+        .collect();
     FactionControlView {
         faction_id: fid,
         capital: c.capital.clone(),
@@ -667,6 +998,7 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
             mode: Some(d.mode),
             remove: false,
         }),
+        blueprints,
         ship_orders,
         ship_doctrine,
         ship_kiting,
@@ -1591,6 +1923,14 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         if let Some(d) = &fac.default_freighter {
             apply_default_freighter(state, &fid, d, &mut report);
         }
+        // **设计图库**（势力级）：**先于** `buildings` 应用——同一份 diff 里「建图 + 把某个
+        // 建造区指过去」必须一次成功（否则 agent 得写两条命令，中间那条会报
+        // `no_such_blueprint`）。校验用的是**本份 diff 之后**的意图（`yard_intent`），
+        // 所以「图与区的舰级两处一起写」也一次成功。
+        let yard_intent = yard_ship_type_intent(fac);
+        for (i, bp) in fac.blueprints.iter().enumerate() {
+            apply_blueprint(state, config, &fid, bp, i, &yard_intent, &mut report);
+        }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
             apply_ship_order(state, &fid, sp, i, &mut report);
         }
@@ -1802,11 +2142,56 @@ fn apply_building_patch(
             .map_or(0, |m| m + 1);
         let resource = if kind == "mining" { patch.resource.clone() } else { None };
         let ship_type = if kind == "construction" { patch.ship_type.clone().or_else(|| Some("corvette".to_string())) } else { None };
+        // **设计图指针**（新建建造区可以一步挂上图）：非建造区 ⇒ `not_a_shipyard`；
+        // 库里没有 ⇒ `no_such_blueprint`；舰级对不上 ⇒ `blueprint_class_mismatch`。
+        let mut blueprint: Option<BlueprintId> = None;
+        if let Some(want) = &patch.blueprint {
+            if let Some(name) = want {
+                if kind != "construction" {
+                    report.skip(
+                        format!("{path}.blueprint"),
+                        name,
+                        "not_a_shipyard",
+                        format!("新建的是「{kind}」而不是建造区（kind=construction），只有建造区能挂设计图。"),
+                    );
+                    return false;
+                }
+                let bp_class = state
+                    .control(fid.clone())
+                    .and_then(|c| c.blueprints.get(name))
+                    .map(|l| l.value.class.clone());
+                match bp_class {
+                    None => {
+                        report.skip(
+                            format!("{path}.blueprint"),
+                            name,
+                            "no_such_blueprint",
+                            format!("{fid} 的设计图库里没有「{name}」——新建造区要么不挂图（走 `ship_type` + 生成器），要么挂一张已经存在的图。"),
+                        );
+                        return false;
+                    }
+                    Some(bp_class) if ship_type.as_deref() != Some(bp_class.as_str()) => {
+                        report.skip(
+                            format!("{path}.blueprint"),
+                            name,
+                            "blueprint_class_mismatch",
+                            format!(
+                                "「{name}」是 {bp_class} 级的图，而这个新建造区产的是 {}：口径 A 下二者必须相等（同一份补丁里写上 `ship_type`）。",
+                                ship_type.clone().unwrap_or_else(|| "（没有舰级）".to_string())
+                            ),
+                        );
+                        return false;
+                    }
+                    Some(_) => blueprint = Some(name.clone()),
+                }
+            }
+        }
         let b = Building {
             id,
             kind: kind.clone(),
             resource,
             ship_type,
+            blueprint,
             structure: structure.clone(),
             area,
             deployed: 0.0,
@@ -1875,6 +2260,86 @@ fn apply_building_patch(
     };
     let is_shipyard = target.is_shipyard();
     let target_kind = target.kind.clone();
+    let cur_ship_type = target.ship_type.clone();
+    let cur_blueprint = target.blueprint.clone();
+    // 口径 A 的反向守卫可能会拒掉 `ship_type` 这一笔（见下）——那时**不许**写进去。
+    let mut ship_type_blocked = false;
+    // **设计图指针**的校验（写面三层：缺席 = 不动 / `null` = 拆掉指针 / 名字 = 指过去）。
+    // 校验先于写入：借不到第二遍状态（下面的可变块已经把城借走了）。
+    let mut next_blueprint: Option<Option<BlueprintId>> = None;
+    if let Some(want) = &patch.blueprint {
+        if !is_shipyard {
+            report.skip(
+                format!("{path}.blueprint"),
+                want.clone().unwrap_or_default(),
+                "not_a_shipyard",
+                format!("「{cid}」的 building={bid} 不是建造区（kind={target_kind}），只有建造区能挂设计图（图决定这个区把「还不存在的舰」造成什么样）。"),
+            );
+        } else {
+            match want {
+                // `null` = 拆掉指针 ⇒ 回到 `ship_type` + `choose_loadout`（旧路径）。
+                None => next_blueprint = Some(None),
+                Some(name) => {
+                    let bp_class = state
+                        .control(fid.clone())
+                        .and_then(|c| c.blueprints.get(name))
+                        .map(|l| l.value.class.clone());
+                    match bp_class {
+                        None => report.skip(
+                            format!("{path}.blueprint"),
+                            name,
+                            "no_such_blueprint",
+                            format!("{fid} 的设计图库里没有「{name}」。**绝不静默回落生成器**：引用不存在的图会让这个建造区**停产**（进度不再增加）——想回到自动选装就写 `\"blueprint\": null`。"),
+                        ),
+                        // 口径 A：图的 class 必须与该区的 ship_type 相等（同补丁里写了
+                        // `ship_type` 就按那个新值比，否则按现值）。
+                        Some(bp_class) => {
+                            let target_st = patch.ship_type.clone().or_else(|| cur_ship_type.clone());
+                            if target_st.as_deref() != Some(bp_class.as_str()) {
+                                report.skip(
+                                    format!("{path}.blueprint"),
+                                    name,
+                                    "blueprint_class_mismatch",
+                                    format!(
+                                        "「{name}」是 {bp_class} 级的图，而这个建造区产的是 {}：口径 A 下二者必须相等（把 `ship_type` 也一起写，或换一张对得上舰级的图）。",
+                                        target_st.unwrap_or_else(|| "（没有舰级）".to_string())
+                                    ),
+                                );
+                            } else {
+                                next_blueprint = Some(Some(name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // **反方向**的守卫（spec §9.3）：改 `ship_type` 时，若这个区挂着一张 class 对不上的图
+    // 而图不在同一份 diff 里跟着改，那就是把玩家的图**间接作废**（图与区对不上 ⇒ 以后
+    // 只会报 mismatch）。响亮报出来，并给两条出路。
+    if let Some(st) = &patch.ship_type {
+        if is_shipyard {
+            if let Some(bp) = &cur_blueprint {
+                if let Some(bp_class) = state
+                    .control(fid.clone())
+                    .and_then(|c| c.blueprints.get(bp))
+                    .map(|l| l.value.class.clone())
+                {
+                    // 蓝图表在本份 diff 里已经先落地了：若那边也改了 `class`，这里读到的
+                    // 就是**新** class，于是不会误报。
+                    if bp_class != *st {
+                        ship_type_blocked = true;
+                        report.skip(
+                            format!("{path}.ship_type"),
+                            st,
+                            "blueprint_class_mismatch",
+                            format!("这个建造区挂着设计图「{bp}」（{bp_class} 级），而你要把它改成 {st} 级。要么同一份 diff 里把图的 `class` 也改成 {st}（`blueprints[].class`），要么先拆掉指针（`\"blueprint\": null`）——留着对不上的图等于把它作废。"),
+                        );
+                    }
+                }
+            }
+        }
+    }
     let mut touched = false;
     if let Some(city) = state.city_mut(&cid) {
         if let Some(b) = city.buildings.iter_mut().find(|b| b.id == bid) {
@@ -1893,17 +2358,19 @@ fn apply_building_patch(
                 }
             }
             if let Some(s) = &patch.ship_type {
-                if is_shipyard {
-                    b.ship_type = Some(s.clone());
-                    touched = true;
-                } else {
+                if !is_shipyard {
                     report.skip(
                         format!("{path}.ship_type"),
                         s,
                         "not_a_shipyard",
                         format!("「{cid}」的 building={bid} 不是建造区（kind={target_kind}），只有建造区能定 ship_type（决定该区造哪一级舰）。"),
                     );
+                } else if !ship_type_blocked {
+                    b.ship_type = Some(s.clone());
+                    touched = true;
                 }
+                // `ship_type_blocked` ⇒ 上面那条 `blueprint_class_mismatch` 已经报了，
+                // **这一笔不许落地**（否则「响亮报错 + 悄悄改掉」= 最难查的一种）。
             }
             if let Some(k) = &patch.kind {
                 if config.buildings.contains_key(k) {
@@ -1934,6 +2401,11 @@ fn apply_building_patch(
             }
             if let Some(a) = patch.area {
                 b.area = a.max(0.0);
+                touched = true;
+            }
+            // 设计图指针（上面已经校验过：建造区 / 图存在 / 舰级对得上）。
+            if let Some(next) = &next_blueprint {
+                b.blueprint = next.clone();
                 touched = true;
             }
         }
@@ -2023,6 +2495,19 @@ fn normalize_control_diffs(value: &mut serde_json::Value) -> Result<(), String> 
             .and_then(|d| d.get_mut("behavior"))
         {
             normalize_behavior(behavior, &format!("control[{fi}].default_ship_order"))?;
+        }
+        // 设计图的**意图轴**也是「行为」字段（手册 §4 的例子写的是 tagged 形式）：
+        // 漏掉这一处，那个字段就只能用默认枚举形式写，成为暗坑。
+        if let Some(bps) = fac.get_mut("blueprints").and_then(|b| b.as_array_mut()) {
+            for (bi, bp) in bps.iter_mut().enumerate() {
+                let name = bp.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+                if let Some(order) = bp.get_mut("order") {
+                    // `null` = 本图对意图没有说话（不是行为，跳过）。
+                    if !order.is_null() {
+                        normalize_behavior(order, &format!("control[{fi}].blueprints[{bi}] (图「{name}」)"))?;
+                    }
+                }
+            }
         }
         let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else { continue };
         for (oi, order) in orders.iter_mut().enumerate() {
@@ -2969,6 +3454,351 @@ mod tests {
             (leaf.value.temper, leaf.value.lone_wolf),
             (0.5, 0.9),
             "船正在跟随舰队默认 ⇒ 另一条轴种的是默认值（UI 上显示的数）"
+        );
+    }
+
+    // ---- 舰船设计图（blueprint）的写面/读面契约 -------------------------------
+
+    /// 某势力第一座城的某个建造区：`(城名, 建筑下标, 舰级, 是不是建造区)`。
+    fn some_building(state: &State, fid: &str, shipyard: bool) -> (CityId, BuildingId, String) {
+        for c in state.cities.iter().filter(|c| c.faction_id == fid) {
+            for b in &c.buildings {
+                if b.is_shipyard() == shipyard {
+                    return (c.name.clone(), b.id, b.kind.clone());
+                }
+            }
+        }
+        panic!("{fid} 没有 {} 的建筑", if shipyard { "建造区" } else { "非建造区" });
+    }
+
+    /// 建一张图 + 把它挂到某个建造区上（两个写面动作合并成一份 diff：这是正解用法）。
+    fn pin_blueprint(
+        state: &mut State,
+        config: &GameConfig,
+        name: &str,
+        class: &str,
+        components: &serde_json::Value,
+        mode: &str,
+    ) -> (CityId, BuildingId) {
+        let (cid, bid, _) = some_building(state, "中国", true);
+        let diff = serde_json::json!({"control": [{"faction_id": "中国",
+            "blueprints": [{"name": name, "class": class, "components": components, "mode": mode}],
+            "buildings": [{"city": cid, "building": bid, "ship_type": class, "blueprint": name}],
+        }]});
+        let rep = apply_patch(state, config, &diff).expect("建图 + 挂图必须一次成功");
+        assert!(rep.is_clean(), "正解用法不该被丢弃：{:?}", rep.skipped);
+        (cid, bid)
+    }
+
+    /// 设计图写面的**每一个丢弃码**都点名到叶（§7.3-9 / §4.6）。
+    #[test]
+    fn blueprint_patch_reports_every_skip_code() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let (cid, bid, _) = some_building(&state, "中国", true);
+        let (rcid, rbid, _) = some_building(&state, "中国", false);
+        let skip = |rep: &ApplyReport, code: &str| {
+            let hit = rep
+                .skipped
+                .iter()
+                .find(|s| s.code == code)
+                .unwrap_or_else(|| panic!("要报 {code}，实际 {:?}", rep.skipped));
+            assert!(hit.path.contains("blueprint"), "{code} 要点名到叶，got {}", hit.path);
+            assert!(!hit.reason.is_empty(), "{code} 要有一句人读的理由");
+        };
+
+        // ① 建造区指向一张**不存在**的图（悬空指针）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
+            {"city": cid, "building": bid, "blueprint": "没有这张图"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "no_such_blueprint");
+        assert_eq!(
+            state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint,
+            None,
+            "被丢弃的指针不许落地"
+        );
+
+        // ② 图名不存在 + 只写 mode ⇒ 同样 `no_such_blueprint`（不许凭空造图）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "没有这张图", "mode": "Auto"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "no_such_blueprint");
+        assert!(
+            !state.control["中国"].blueprints.contains_key("没有这张图"),
+            "错别字不许造出一张谁都不认识的图（防幽灵图）"
+        );
+
+        // ③ 舰级对不上：图是 cruiser，建造区是 corvette。
+        let (cid2, bid2, st2) = some_building(&state, "中国", true);
+        let diff = serde_json::json!({"control": [{"faction_id": "中国",
+            "blueprints": [{"name": "巡洋图", "class": "cruiser", "components": [], "mode": "Player"}],
+            "buildings": [{"city": cid2, "building": bid2, "blueprint": "巡洋图"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        // 建图本身落地了（`applied`），只有指针被丢。
+        skip(&rep, "blueprint_class_mismatch");
+        assert!(st2.is_empty() || state.control["中国"].blueprints.contains_key("巡洋图"));
+        assert_eq!(
+            state.city(&cid2).unwrap().buildings.iter().find(|b| b.id == bid2).unwrap().blueprint,
+            None,
+            "对不上的指针不许落地（口径 A）"
+        );
+
+        // ④ 不存在的组件。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "坏图", "class": "corvette", "components": ["没有这个组件"], "mode": "Player"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "no_such_component");
+        assert!(!state.control["中国"].blueprints.contains_key("坏图"), "被拒的图不许污染库");
+
+        // ⑤ 组件重复。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "双炮图", "class": "corvette", "components": ["kinetic", "kinetic"], "mode": "Player"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "duplicate_component");
+        assert!(!state.control["中国"].blueprints.contains_key("双炮图"));
+
+        // ⑥ 超过槽位（corvette 只有 2 个槽）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "超载图", "class": "corvette",
+             "components": ["kinetic", "ion_drive", "shield"], "mode": "Player"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "too_many_components");
+        assert!(!state.control["中国"].blueprints.contains_key("超载图"));
+
+        // ⑦ 建图没给舰级 / 舰级不存在。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "无级图", "components": ["kinetic"], "mode": "Player"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "missing_class");
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "怪级图", "class": "无畏舰", "components": [], "mode": "Player"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "no_such_class");
+
+        // ⑧ 把图挂到**非建造区**上。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国",
+            "blueprints": [{"name": "民用图", "class": "corvette", "components": [], "mode": "Player"}],
+            "buildings": [{"city": rcid, "building": rbid, "blueprint": "民用图"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        skip(&rep, "not_a_shipyard");
+    }
+
+    /// **写值即接管**：只写 `components` ⇒ 图叶变 `Player` 并记一笔（§7.3-11）。
+    #[test]
+    fn writing_a_blueprint_value_without_mode_takes_over() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "我的图", "class": "corvette", "components": ["kinetic", "ion_drive"]}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(rep.is_clean(), "{:?}", rep.skipped);
+        let leaf = state.control["中国"].blueprints["我的图"].clone();
+        assert_eq!(leaf.mode, ControlMode::Player, "只写值 ⇒ 这一层接管（免得「我写了图却没生效」）");
+        assert!(rep.took_over.iter().any(|p| p.contains("blueprints[0]")), "{:?}", rep.took_over);
+        assert_eq!(state.blueprint_control(&"中国".to_string(), &"我的图".to_string()), ControlMode::Player);
+
+        // 只写 `mode` 合法（值不动）——交回系统重估。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "我的图", "mode": "Auto"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(rep.is_clean(), "{:?}", rep.skipped);
+        let leaf = state.control["中国"].blueprints["我的图"].clone();
+        assert_eq!(leaf.mode, ControlMode::Auto);
+        assert_eq!(leaf.value.components, vec!["kinetic".to_string(), "ion_drive".to_string()], "值不动");
+    }
+
+    /// **读面即写面**：图库非空时，整面模板回传仍然合法，`ship_count` 这种只读列不许炸写面。
+    #[test]
+    fn the_blueprint_template_round_trips_back_through_apply() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        pin_blueprint(
+            &mut state,
+            &config,
+            "护卫-守家",
+            "corvette",
+            &serde_json::json!(["kinetic", "ion_drive"]),
+            "Player",
+        );
+        // 给它造一艘舰，让 `ship_count` 有个非零值（读面附加列）。
+        let pos = state.body_position("地球");
+        let bp = "护卫-守家".to_string();
+        crate::sim::spawn_ship(&mut state, &config, crate::sim::ShipSpawn {
+            owner: "中国".to_string(),
+            class: "corvette",
+            position: pos,
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: false,
+            blueprint: Some(&bp),
+        });
+
+        let mut surface = control_surface(&state);
+        let row = surface["control"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["faction_id"] == "中国")
+            .and_then(|f| f["blueprints"].as_array())
+            .and_then(|b| b.first())
+            .cloned()
+            .expect("读面必须给出蓝图片");
+        assert_eq!(row["components"], serde_json::json!(["kinetic", "ion_drive"]), "选装要**全量**输出（少输出 = 回传时清空）");
+        assert_eq!(row["ship_count"], serde_json::json!(1), "读面附加：本图造了多少艘");
+        assert!(row["order"].is_null(), "本图对意图没有说话 ⇒ null（不是缺字段）");
+
+        for fac in surface["control"].as_array_mut().unwrap() {
+            fac.as_object_mut().unwrap().insert("buildings".to_string(), serde_json::json!([]));
+        }
+        let rep = apply_patch(&mut state, &config, &surface).expect("模板回传必须合法");
+        assert!(rep.is_clean(), "模板回传不许丢叶：{:?}", rep.skipped);
+        assert!(rep.applied >= 40, "整面模板要触碰很多叶，got {}", rep.applied);
+        let leaf = state.control["中国"].blueprints["护卫-守家"].clone();
+        assert_eq!(leaf.mode, ControlMode::Player);
+        assert_eq!(leaf.value.components.len(), 2, "回传不改变选装");
+    }
+
+    /// **悬空指针**（图被删掉之后）：apply 报 `no_such_blueprint`，读面**原样输出**指针（Q10(a)）。
+    #[test]
+    fn a_dangling_blueprint_pointer_is_reported_not_silently_ignored() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let (cid, bid) = pin_blueprint(
+            &mut state,
+            &config,
+            "会被删的图",
+            "corvette",
+            &serde_json::json!(["kinetic", "ion_drive"]),
+            "Player",
+        );
+        // 删掉整张图（挂它的建造区**不会**被自动改指针：那是玩家的话，引擎不替他猜）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国",
+            "blueprints": [{"name": "会被删的图", "remove": true}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(rep.is_clean(), "{:?}", rep.skipped);
+        assert!(rep.removed.iter().any(|p| p.contains("blueprints")), "{:?}", rep.removed);
+        assert!(!state.control["中国"].blueprints.contains_key("会被删的图"));
+
+        // 读面（web/--control 的 `buildings` 是结构补丁面，指针在 state 里读）**原样**输出。
+        let b = state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap();
+        assert_eq!(b.blueprint.as_deref(), Some("会被删的图"), "指针原样保留（读面据此看出「这个区指着不存在的图」）");
+
+        // 再有人写这个指针 ⇒ 响亮报出来。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
+            {"city": cid, "building": bid, "blueprint": "会被删的图"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert_eq!(rep.skipped[0].code, "no_such_blueprint", "{:?}", rep.skipped);
+
+        // 拆指针是**另一件事**（回到 `ship_type` + 生成器）：`null` 与缺席必须分得开。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
+            {"city": cid, "building": bid, "blueprint": null}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(rep.is_clean(), "{:?}", rep.skipped);
+        assert_eq!(
+            state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint,
+            None,
+            "`\"blueprint\": null` = 拆掉指针（缺席才是「不动」）"
+        );
+        assert_ne!(rep.applied, 0, "拆指针是一次落地");
+    }
+
+    /// 口径 A 的**双向守卫**：图与建造区的舰级要一起写；只写一处必须**响亮**被拒（§9.3）。
+    #[test]
+    fn blueprint_and_yard_class_must_be_changed_together() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let (cid, bid) = pin_blueprint(
+            &mut state,
+            &config,
+            "护卫图",
+            "corvette",
+            &serde_json::json!(["kinetic", "ion_drive"]),
+            "Player",
+        );
+
+        // ① 只改图 ⇒ 拒绝（否则这张图对不上它自己的建造区）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "护卫图", "class": "cruiser"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert_eq!(rep.skipped[0].code, "blueprint_class_mismatch", "{:?}", rep.skipped);
+        assert_eq!(state.control["中国"].blueprints["护卫图"].value.class, "corvette", "被拒 ⇒ 状态不动");
+
+        // ② 只改建造区 ⇒ 同样拒绝（另一条路，堵一条没用）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
+            {"city": cid, "building": bid, "ship_type": "cruiser"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert_eq!(rep.skipped[0].code, "blueprint_class_mismatch", "{:?}", rep.skipped);
+        assert_eq!(
+            state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().ship_type.as_deref(),
+            Some("corvette"),
+            "被拒 ⇒ 建造区不动"
+        );
+
+        // ③ **两处一起写** ⇒ 一次成功（正解）。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国",
+            "blueprints": [{"name": "护卫图", "class": "cruiser", "components": []}],
+            "buildings": [{"city": cid, "building": bid, "ship_type": "cruiser"}]}]});
+        let rep = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(rep.is_clean(), "两处一起写必须一次成功：{:?}", rep.skipped);
+        assert_eq!(state.control["中国"].blueprints["护卫图"].value.class, "cruiser");
+        assert_eq!(
+            state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().ship_type.as_deref(),
+            Some("cruiser")
+        );
+    }
+
+    /// 「让图的**意图轴**沉默」（`order: null`）与「删掉这张图」（`remove: true`）是两件事。
+    #[test]
+    fn silencing_the_order_axis_is_not_deleting_the_blueprint() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let (cid, bid) = pin_blueprint(
+            &mut state,
+            &config,
+            "护卫-守家",
+            "corvette",
+            &serde_json::json!(["kinetic", "ion_drive"]),
+            "Player",
+        );
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "护卫-守家", "order": {"type": "dock", "body": "地球"}}]}]});
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        assert_eq!(
+            state.control["中国"].blueprints["护卫-守家"].value.order,
+            Some(ShipBehavior::Dock { body: "地球".to_string() }),
+            "tagged 写法的意图要被认下来（与 default_ship_order.behavior 同一套）"
+        );
+
+        // 清空意图轴：图还在、指针还在，只是这一层不再说话。
+        let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
+            {"name": "护卫-守家", "order": null}]}]});
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        assert_eq!(state.control["中国"].blueprints["护卫-守家"].value.order, None, "意图轴沉默");
+        assert!(state.control["中国"].blueprints.contains_key("护卫-守家"), "图还在");
+        assert_eq!(
+            state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint.as_deref(),
+            Some("护卫-守家"),
+            "指针还在（= 选装仍按图装配，只有意图那一层交还给下层）"
+        );
+    }
+
+    /// 图的**有效归属**沿 scope 链上溯（图叶 → 势力 → 全局）：势力设成 `Player` 也能接管。
+    #[test]
+    fn blueprint_ownership_follows_the_scope_chain() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        state.control.entry("中国".to_string()).or_default().blueprints.insert(
+            "种子图".to_string(),
+            Control::inherit(Blueprint { class: "corvette".to_string(), components: vec![], order: None }),
+        );
+        let fid = "中国".to_string();
+        assert_eq!(state.blueprint_control(&fid, &"种子图".to_string()), ControlMode::Auto, "全链继承 ⇒ Auto");
+        let diff = serde_json::json!({"scope": {"factions": [["中国", "Player"]]}});
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        assert_eq!(
+            state.blueprint_control(&fid, &"种子图".to_string()),
+            ControlMode::Player,
+            "势力的 scope 表态也要能接管设计图（与其它叶同一条链的语义）"
         );
     }
 }

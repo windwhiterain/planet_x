@@ -95,6 +95,12 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable { name: "control", table: "idx/control.jsonl", key: "key", join_on: "faction_ids", round: true },
     DerivedTable { name: "scope", table: "idx/scope.jsonl", key: "key", join_on: "", round: true },
     DerivedTable { name: "decisions", table: "idx/decisions.jsonl", key: "actor", join_on: "faction_ids", round: true },
+    // **舰船设计图库**（势力级）：一行 = 一张图。设计图是**结构叶**（`{class, components[],
+    // order{}}`），塞进 `control` 表的通用 `value: any` 列会让列类型不稳、Python 侧还要
+    // 二次解析 —— 所以给它一张有类型列的专用表（`engine-data-plane.md` §1 的「引擎给答案、
+    // Python 只筛」）。⚠ `control` 派生表**不发** `kind="blueprint"` 的行（两份表示 = 漂移
+    // 风险）：设计图只住这张表，`control` 表的描述里也写明了这一点。
+    DerivedTable { name: "blueprints", table: "idx/blueprints.jsonl", key: "blueprint_id", join_on: "faction_ids", round: true },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -109,6 +115,7 @@ struct Writers {
     control: BufWriter<File>,
     scope: BufWriter<File>,
     decisions: BufWriter<File>,
+    blueprints: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
 }
@@ -129,6 +136,7 @@ impl Writers {
             control: open("control")?,
             scope: open("scope")?,
             decisions: open("decisions")?,
+            blueprints: open("blueprints")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
         })
@@ -138,7 +146,7 @@ impl Writers {
         for w in [
             &mut self.main, &mut self.events, &mut self.ships, &mut self.cities, &mut self.factions,
             &mut self.flow, &mut self.city_flow, &mut self.control, &mut self.scope,
-            &mut self.bodies, &mut self.settlements,
+            &mut self.blueprints, &mut self.bodies, &mut self.settlements,
         ] {
             w.flush().map_err(|e| e.to_string())?;
         }
@@ -349,6 +357,25 @@ fn write_round(
                 "order_default_mode": default_mode_of(state, &s.faction_id),
                 "order_effective_mode": state.ship_control(s.name.clone()),
                 "order_effective": state.ship_behavior(s.name.clone()),
+                // —— 设计图（出厂规格）在**这艘舰**上的三个读数 ——
+                // `blueprint`：本舰出厂所用图名（快照的溯源；null = 无图）。
+                // `blueprint_mode`：那张图**在势力库里的叶表态**（缺图 = Inherit）。
+                // `order_blueprint_mode`：图给新舰的默认意图（`order`）那一层的表态：
+                //   缺图 / 图上没写 order = Inherit（= 这一层没有说话）。⚠ 它是**图叶自己**
+                //   的表态，不是链解析结果——所以你可能在这里看到 Inherit，而
+                //   `order_effective_mode` 却是 Player（那来自舰队默认叶或作用域）。
+                "blueprint": s.blueprint,
+                "blueprint_mode": blueprint_mode_of(state, &s.faction_id, s.blueprint.as_deref()),
+                "order_blueprint_mode": order_blueprint_mode_of(state, &s.faction_id, s.blueprint.as_deref()),
+                // **这条有效意图是谁供的值**（Q2=(b) 的出处列）：leaf / blueprint:<图名> /
+                // fleet_default / scope / record。`scope`/`record` 在**指令链上不会出现**
+                // （作用域不携带值、指令没有出厂记录值），见 `column_docs`。
+                // ⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`
+                // （那时值真的来自那片叶），前者才可能落到 `blueprint:*`/`fleet_default`。
+                "order_source": state.ship_behavior_source(s.name.clone()).map(|src| src.label()),
+                // 下水回合（编制表的确定性 tie-break：「同分取最老的」）。旧档缺字段 ⇒ null
+                // = **未知**（读者要回落名字序，不能当成第 0 回合）。
+                "spawned_round": s.spawned_round,
                 // 三条**风格轴**的有效值（叶 → 舰队默认 → 舰上记录值）。风格是活层，
                 // `Ship.doctrine`/`Ship.kiting`/`Ship.freighter` 只是记录值——这里给的是
                 // 引擎解析后的答案。第三条轴（角色）与前两条的唯一差别：**AI 会写它**
@@ -376,6 +403,9 @@ fn write_round(
                     "kind": b.kind,
                     "resource": b.resource,
                     "ship_type": b.ship_type,
+                    // **设计图指针**（原样输出：指向一张已被删除/改名的图时，它照样出现在这里
+                    // ——配合「进度停攒」你就能一眼看出「这个区停产了，因为图没了」，见 Q10(a)）。
+                    "blueprint": b.blueprint,
                     "structure": b.structure,
                     "area": r2(b.area),
                     "deployed": r2(b.deployed),
@@ -572,6 +602,60 @@ fn write_round(
             row("capital", json!(""), json!(null), json!(cap.value), cap.mode)?;
         }
     }
+    // —— 设计图库：每回合 × 每势力 × 每张图一行 ——
+    //
+    // 这是**结构叶**的专用表（`control` 表那边刻意不发 `kind="blueprint"` 的行，免得出现
+    // 两份表示互相漂移）。列的口径：
+    // * `mode` = 图叶**自己的**表态；`effective_mode` = `State::blueprint_control` 的答案
+    //   （图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，Python 别重算。
+    // * `ship_count` = 世界上有多少艘舰出自这张图（引擎算）。
+    // * `class_slots` / `component_cost` 是**配置表的派生量**：不落状态，省得每个配方自己
+    //   去 join `meta.json`。
+    // * `launch_waiting` = Q4(b) 的**可见标记**：这张（玩家归属的）图此刻「进度已经攒够
+    //   `build_points` 却没下水」——因为买不起它的选装，进度在继续攒。
+    for (fid, c) in &state.control {
+        for (id, leaf) in &c.blueprints {
+            let ship_count = state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == *fid && s.blueprint.as_deref() == Some(id.as_str()))
+                .count();
+            let mut component_cost: ResourceMap = ResourceMap::new();
+            for comp in &leaf.value.components {
+                if let Some(cs) = config.components.get(comp) {
+                    for (rt, amt) in &cs.cost {
+                        *component_cost.entry(rt.clone()).or_insert(0.0) += *amt;
+                    }
+                }
+            }
+            writeln!(
+                w.blueprints,
+                "{}",
+                json!({
+                    "round": state.round,
+                    "faction_id": fid,
+                    "blueprint_id": id,
+                    "class": leaf.value.class,
+                    // 选装：**全量**输出（空数组 = 交给生成器现算），与 `--control` 一致。
+                    "components": leaf.value.components,
+                    // `order` = 本图给新舰的默认意图（**默认枚举形式**，与 `control` 表一致；
+                    // null = 本图对意图没有说话）。
+                    "order": leaf.value.order,
+                    "mode": leaf.mode,
+                    "effective_mode": state.blueprint_control(fid, id),
+                    "ship_count": ship_count,
+                    // 该舰级的槽位上限（配置表派生量）。
+                    "class_slots": config.ships.get(&leaf.value.class).map(|s| s.slots),
+                    // 选装的一次性成本（造一艘要额外花的组件钱；配置表派生量）。
+                    "component_cost": component_cost,
+                    // 本回合这张图是否在「等钱」（进度满了却不下水，Q4(b) 的可见标记）。
+                    "launch_waiting": crate::sim::blueprint_launch_waiting(state, config, fid, id),
+                })
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
     // `scope`：只发**显式表态**的节点（`Inherit` = 这一层没有说话，不必占行）。
     writeln!(
         w.scope,
@@ -662,6 +746,34 @@ fn default_mode_of(state: &State, fid: &FactionId) -> ControlMode {
         .unwrap_or_default()
 }
 
+/// 本舰出厂那张图**在势力库里的叶表态**（没有图 / 图不存在 = `Inherit` = 这一层没有说话）。
+fn blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> ControlMode {
+    bp.and_then(|id| {
+        state
+            .control(fid.clone())
+            .and_then(|c| c.blueprints.get(id))
+            .map(|l| l.mode)
+    })
+    .unwrap_or_default()
+}
+
+/// 本舰出厂图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）
+/// 就是 `Inherit`（Q1(c)：图的意图轴默认沉默）。
+///
+/// ⚠ 这是**图叶自己的**表态，不是链解析结果：`order_effective_mode`（`State::ship_control`）
+/// 才是「谁说了算」。两者可能不一致，而且那正是有信息的地方（例如图叶是 `Inherit`、
+/// 但舰队默认叶是 `Player` ⇒ 图上这层说话与否都不影响结果）。
+fn order_blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> ControlMode {
+    bp.and_then(|id| {
+        state
+            .control(fid.clone())
+            .and_then(|c| c.blueprints.get(id))
+            .filter(|l| l.value.order.is_some())
+            .map(|l| l.mode)
+    })
+    .unwrap_or_default()
+}
+
 /// The **agent-readable** projection schema. It is the single contract both the Rust emitter and
 /// the Python kit share: fields with a `lazy` entry are NOT inline in `main.jsonl` (the main row
 /// carries their id-array), while `eager` fields are inline. Column types are listed so the agent
@@ -672,16 +784,21 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","doctrine":"object","kiting":"number","freighter":"boolean","freighter_mode":"string"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_default_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","freighter":"boolean","freighter_mode":"string","blueprint":"string","blueprint_mode":"string","order_blueprint_mode":"string","spawned_round":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_default_mode": "势力级**舰队默认指令**的表态（没有这片叶 = Inherit）。",
-                    "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 舰队默认 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。",
+                    "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → **出厂图**（图上真写了 `order` 时）→ 舰队默认 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。",
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案（null = 没有任何一层说话，调用方按 Idle 兜底）。注意「叶 Inherit + 舰队默认不是 Player」时会回落到叶上的记录值——这是引擎的既有取值规则，Python 侧不要自己重算。",
+                    "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）：`leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）/ `blueprint:<图名>`（值来自本舰出厂那张图上的 `order`）/ `fleet_default`（势力级舰队默认叶）/ `scope` / `record`。⚠ 后两个取值在**指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`freighter` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`（那时值真的来自那片叶，`leaf.map(|l| l.value)`），只有叶不存在才可能落到 `blueprint:*`/`fleet_default`。",
                     "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
                     "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
                     "freighter": "**有效角色**（`State::ship_freighter`，同一条链）：`true` = 运输舰（自动控制给它排集货路线），`false` = 战舰（找仗打）。它**只管自动控制派哪种活**——不解除武装，运输舰照样自动开火、照样按 `kiting` 软移动。",
                     "freighter_mode": "角色那片叶的**有效归属**（`State::ship_freighter_control`）：Auto = 这条结论是自动控制写的（它每回合按积压定编），Player = 玩家钉的、AI 不碰。",
+                    "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
+                    "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
+                    "order_blueprint_mode": "图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）= Inherit（Q1(c)：图的意图轴默认沉默）。⚠ 这是**图叶自己**的表态，不是链解析结果——与 `order_effective_mode` 不一致是正常的（例如图叶 Inherit、舰队默认叶 Player）。",
+                    "spawned_round": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
                 },
             }),
             "cities" => json!({
@@ -754,7 +871,7 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "control" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。",
+                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
                     "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_freighter / default_ship_order / default_doctrine / default_kiting / default_freighter / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
@@ -766,10 +883,27 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "scope" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**作用域树的显式表态**：谁负责 AI 决策（全局 / 势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。舰的归属链是 叶 → 舰队默认 → 势力 → 全局。",
+                "description": "**作用域树的显式表态**：谁负责 AI 决策（全局 / 势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。舰的归属链是 叶 → 出厂图 → 舰队默认 → 势力 → 全局。",
                 "columns": {"round":"integer","level":"string","key":"string","mode":"string"},
                 "column_docs": {
                     "level": "节点层级：global / faction / body / city（`global` 的 key 为 `\"\"`）。",
+                },
+            }),
+            "blueprints" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。`Auto` 图的选装由 `choose_loadout` 在出厂时现算；`Player` 图的选装就是 `components`。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `Derived`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
+                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","order":"object","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
+                "column_docs": {
+                    "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
+                    "class": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
+                    "components": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器。",
+                    "order": "本图给**新舰**的默认意图（`ShipBehavior`，默认枚举形式；null = 本图对意图没有说话）。⚠ 链上只在该图的归属解析为 `Player` 时取值。",
+                    "mode": "图叶**自己的**表态：Inherit（没有说话）/ Auto（系统可重估——`retool_shipyards` 会把它改到战局需要的舰级）/ Player（系统不许动）。",
+                    "effective_mode": "**有效归属**（`State::blueprint_control`：图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，别在 Python 里重算。",
+                    "ship_count": "世界上 `Ship.blueprint == blueprint_id` 的舰数（引擎算）。",
+                    "class_slots": "该舰级的槽位上限（配置表 `ShipSpec.slots` 的派生量，省得每个配方自己 join meta.json）。null = 舰级不在配置表里（正常状态不会出现）。",
+                    "component_cost": "这张图的选装**一次性成本**（Σ组件 `cost`，配置表派生量）。造一艘的总花费还要加上舰级的 `build_cost`（那是进度池的账）。",
+                    "launch_waiting": "**进度满了却不下水的可见标记**（用户裁决 Q4(b)）：本回合这张图在某个挂了它的城里，该舰级的进度已经 ≥ `build_points` 却没下水——因为**买不起**它的选装（只对 **Player 归属**的图可能为 true；Auto 图与无图保持旧行为）。进度**不会丢**，下回合攒够钱就下水。",
                 },
             }),
             "decisions" => json!({
@@ -1319,6 +1453,30 @@ mod tests {
     fn derived_tables_are_written_and_declared() {
         let cfg = load_config();
         let mut state = default_state(&cfg, 7);
+        // ⚠ 蓝图表是**叶驱动**的：新开局零张图 ⇒ 表里零行。守卫要的是「声明了就必须写出来」，
+        // 所以这里先给一个势力建一张图（否则这条断言会以「表没写出来」的假象失败）。
+        let (cid, bid) = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == "中国")
+            .find_map(|c| c.buildings.iter().find(|b| b.is_shipyard()).map(|b| (c.name.clone(), b.id)))
+            .expect("中国要有一个建造区");
+        state.control.entry("中国".to_string()).or_default().blueprints.insert(
+            "守卫样本图".to_string(),
+            crate::model::Control::player(crate::model::Blueprint {
+                class: "corvette".to_string(),
+                components: vec!["kinetic".to_string()],
+                order: None,
+            }),
+        );
+        if let Some(city) = state.city_mut(&cid) {
+            for b in city.buildings.iter_mut() {
+                if b.id == bid {
+                    b.ship_type = Some("corvette".to_string());
+                    b.blueprint = Some("守卫样本图".to_string());
+                }
+            }
+        }
         let mut rng = Prng::new(7);
         let s = Scratch::new("derived_contract");
         write_index(&mut state, &cfg, &mut rng, 3, &s.0).unwrap();
@@ -1345,9 +1503,121 @@ mod tests {
         }
         // ships 表的指令归属列：引擎解析的结果必须在表里（Python 不该自己重实现链）。
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
-        for col in ["order_leaf_mode", "order_default_mode", "order_effective_mode", "order_effective"] {
+        for col in [
+            "order_leaf_mode", "order_default_mode", "order_effective_mode", "order_effective",
+            // 设计图那一轮新增的五列（缺一列 = 读面少一个答案）。
+            "order_source", "blueprint", "blueprint_mode", "order_blueprint_mode", "spawned_round",
+        ] {
             assert!(ships[0].get(col).is_some(), "ships 表缺 {col}");
         }
+        // `cities` 表的内联 `buildings[]` 要能看出「哪个下标在造哪张图」。
+        let cities = jsonl(&s.0.join("idx/cities.jsonl"));
+        let has_bp_key = cities.iter().any(|c| {
+            c["buildings"].as_array().is_some_and(|bs| bs.iter().any(|b| b.get("blueprint").is_some()))
+        });
+        assert!(has_bp_key, "cities.buildings[] 缺 blueprint 键");
+    }
+
+    /// **蓝图表与读面一致**（§7.4-15）：同一回合，`idx/blueprints.jsonl` 的行集必须与
+    /// `state.control[*].blueprints` 的键集逐条对应，`mode`/`components`/`class` 逐值相等
+    /// ——防「两张表各说各话」。
+    #[test]
+    fn blueprints_table_matches_the_control_face() {
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 5);
+        let (cid, bid) = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == "中国")
+            .find_map(|c| c.buildings.iter().find(|b| b.is_shipyard()).map(|b| (c.name.clone(), b.id)))
+            .expect("中国要有一个建造区");
+        {
+            let c = state.control.entry("中国".to_string()).or_default();
+            c.blueprints.insert(
+                "重甲护卫".to_string(),
+                crate::model::Control::player(crate::model::Blueprint {
+                    class: "corvette".to_string(),
+                    components: vec!["kinetic".to_string(), "ion_drive".to_string()],
+                    order: Some(ShipBehavior::Dock { body: "地球".to_string() }),
+                }),
+            );
+            c.blueprints.insert(
+                "auto:cruiser".to_string(),
+                crate::model::Control::auto(crate::model::Blueprint {
+                    class: "cruiser".to_string(),
+                    components: Vec::new(),
+                    order: None,
+                }),
+            );
+        }
+        if let Some(city) = state.city_mut(&cid) {
+            for b in city.buildings.iter_mut() {
+                if b.id == bid {
+                    b.ship_type = Some("corvette".to_string());
+                    b.blueprint = Some("重甲护卫".to_string());
+                }
+            }
+        }
+        // 造一艘出自「重甲护卫」的舰，让 `ship_count` 有非零值。
+        let pos = state.body_position("地球");
+        let bp = "重甲护卫".to_string();
+        crate::sim::spawn_ship(&mut state, &cfg, crate::sim::ShipSpawn {
+            owner: "中国".to_string(),
+            class: "corvette",
+            position: pos,
+            city: None,
+            via: SpawnVia::Shipyard,
+            pay_components: false,
+            blueprint: Some(&bp),
+        });
+        let mut rng = Prng::new(5);
+        let s = Scratch::new("bp_match");
+        write_index(&mut state, &cfg, &mut rng, 0, &s.0).unwrap();
+
+        let rows = jsonl(&s.0.join("idx/blueprints.jsonl"));
+        let mut seen: BTreeMap<(String, String), serde_json::Value> = BTreeMap::new();
+        for r in &rows {
+            seen.insert(
+                (r["faction_id"].as_str().unwrap().to_string(), r["blueprint_id"].as_str().unwrap().to_string()),
+                r.clone(),
+            );
+        }
+        let mut expected: BTreeSet<(String, String)> = BTreeSet::new();
+        for (fid, c) in &state.control {
+            for (id, leaf) in &c.blueprints {
+                expected.insert((fid.clone(), id.clone()));
+                let row = seen
+                    .get(&(fid.clone(), id.clone()))
+                    .unwrap_or_else(|| panic!("蓝图表缺 {fid}/{id}"));
+                assert_eq!(row["class"].as_str().unwrap(), leaf.value.class, "{fid}/{id} 的 class 不一致");
+                assert_eq!(
+                    row["components"],
+                    json!(leaf.value.components),
+                    "{fid}/{id} 的 components 不一致"
+                );
+                assert_eq!(row["mode"].as_str().unwrap(), leaf.mode.name(), "{fid}/{id} 的 mode 不一致");
+                assert_eq!(
+                    row["effective_mode"].as_str().unwrap(),
+                    state.blueprint_control(fid, id).name(),
+                    "{fid}/{id} 的 effective_mode 必须是引擎解析的答案"
+                );
+                if id == "重甲护卫" {
+                    assert_eq!(row["ship_count"], json!(1), "本图造了多少艘（引擎算）");
+                    assert_eq!(row["class_slots"], json!(2), "corvette 的槽位上限");
+                    assert_eq!(row["order"], json!({"Dock": {"body": "地球"}}), "默认枚举形式（与 control 表一致）");
+                    assert_eq!(row["launch_waiting"], json!(false), "没有满进度 ⇒ 不在等钱");
+                }
+                if id == "auto:cruiser" {
+                    assert!(row["order"].is_null(), "本图对意图没有说话 ⇒ null");
+                    assert_eq!(row["components"], json!([]));
+                }
+            }
+        }
+        assert_eq!(
+            seen.keys().cloned().collect::<BTreeSet<_>>(),
+            expected,
+            "蓝图表与读面的键集必须逐条对应（两张表不许各说各话）"
+        );
     }
 
     /// 派生表里的数就是 `Derived` 里的数（**不做舍入**）：`--index` 的 `derived.flow` 与

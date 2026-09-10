@@ -1253,6 +1253,7 @@ function buildingEditor(node) {
   const b = node.b;
   const fid = node.fid;
   const cityId = node.cityId;
+  const fc = getControl(fid);
 
   wrap.appendChild(labelWrap('结构', optSelect(cfg.structures, Object.keys(cfg.structures || {}), b.structure, (v) => {
     b.structure = v;
@@ -1267,6 +1268,40 @@ function buildingEditor(node) {
       pushModify(fid, cityId, b.id, { ship_type: v });
       renderTree();
     })));
+    // **设计图**：这个建造区把「还不存在的舰」造成什么样。
+    //
+    // 读面（`world.control[势力].blueprints`）给的是图库；这一行只写**指针**
+    // （`buildings[].blueprint`）——「（无：自动选装）」= 拆掉指针（写 `null`，不是
+    // 缺席：缺席 = 不动这一格，两者后果不同）。图的内容（选装/意图/归属）在图上改，
+    // 引擎会在 `--apply` 时报 `blueprint_class_mismatch`（图的舰级必须与舰型相等）。
+    const bps = fc.blueprints || [];
+    const bpSel = el('select', { 'data-key': 'blueprint-' + cityId + '-' + b.id });
+    const none = el('option', { value: '' });
+    none.textContent = '（无：自动选装）';
+    none.selected = !b.blueprint;
+    bpSel.appendChild(none);
+    bps.forEach((bp) => {
+      const o = el('option', { value: bp.name });
+      // 归属是本势力的 scope 链解析出来的（这里只有叶自己的表态，够用：Player = 系统不许动）。
+      o.textContent = bp.name + '（' + shipClassName(bp.class) + '·' + normMode(bp.mode) + '）';
+      o.selected = bp.name === b.blueprint;
+      bpSel.appendChild(o);
+    });
+    if (b.blueprint && !bps.some((bp) => bp.name === b.blueprint)) {
+      // **悬空指针**（图被改名/删掉了）：读面原样输出它，这里也必须显示出来——它意味着
+      // **这个建造区停产**，静默吞掉就等于「失败看起来像成功」。
+      const o = el('option', { value: b.blueprint });
+      o.textContent = b.blueprint + '（库里没有这张图 ⇒ 本区停产）';
+      o.selected = true;
+      bpSel.appendChild(o);
+    }
+    bpSel.disabled = !bps.length && !b.blueprint;
+    bpSel.addEventListener('change', () => {
+      // `''` ⇒ `null`（**拆掉指针**，回到自动选装），给名字 ⇒ 指过去。
+      pushModify(fid, cityId, b.id, { blueprint: bpSel.value || null });
+      renderDiff();
+    });
+    wrap.appendChild(labelWrap('设计图', bpSel));
     if (node.buildLeaf) wrap.appendChild(leafValueEditor(node.buildLeaf, '建造权重'));
   }
 

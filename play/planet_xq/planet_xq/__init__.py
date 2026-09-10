@@ -184,6 +184,20 @@ class PlanetXQ:
         """
         return self.derived("decisions", round)
 
+    def blueprints(self, round: int | None = None) -> pd.DataFrame:
+        """**舰船设计图库**：一行一张图（`blueprint_id`/`class`/`components`/`order`/`mode`/…）。
+
+        * `mode` = 图叶**自己的**三态表态；`effective_mode` = **引擎解析**的归属
+          （图叶 → 势力 scope → 全局；全继承 ⇒ Auto）——别自己重算链。
+        * `components` 是**全量**列表（空 = 出厂那一刻交给 `choose_loadout` 现算）；
+          `order` 是本图给**新舰**的默认意图（`null` = 本图对意图没有说话）。
+        * `ship_count` = 世界上有多少艘舰出自这张图（引擎算）。
+        * `launch_waiting` = 这张（玩家归属的）图此刻「进度满了却因买不起选装没下水」。
+        * 舰那一侧看 `q.ships()` 的 `blueprint` 列（出厂图名，`null` = 无图）；
+          建造区那一侧看 `q.cities()` 的内联 `buildings[].blueprint`（悬空指针 ⇒ 那个区停产）。
+        """
+        return self.derived("blueprints", round)
+
     def ships(self, round: int | None = None) -> pd.DataFrame:
         return self.table("ships", round)
 

@@ -27,6 +27,17 @@ pub struct Building {
     pub resource: Option<String>,
     /// Ship class produced, for a shipyard (建造区) building.
     pub ship_type: Option<String>,
+    /// 本建造区的**设计图**（舰船出厂规格，在所属势力的
+    /// [`ControllableState::blueprints`](crate::model::ControllableState::blueprints) 里按名字查）。
+    ///
+    /// * `None` = 没有图 ⇒ 走 `ship_type` + [`crate::autocontrol::choose_loadout`]
+    ///   （**与设计图落地之前逐字节一致**）；
+    /// * `Some(名)` 且图存在 ⇒ 下水时把图印成舰（口径 A：图的 `class` 必须 == `ship_type`）；
+    /// * `Some(名)` 但图**不存在**（悬空指针：玩家改名了/删了）⇒ **这个建造区停产**
+    ///   （进度不再增加）+ `--apply` 提到它时报 `no_such_blueprint` + 读面**原样输出**这个指针
+    ///   （用户裁决 Q10(a)：静默回落到生成器 = 「失败看起来像成功」）。
+    #[serde(default)]
+    pub blueprint: Option<crate::model::BlueprintId>,
     /// Building's own structure attribute: "concrete" 混凝土 | "steel" 钢结构.
     pub structure: String,
     pub area: f64,

@@ -38,12 +38,14 @@ without reverse-engineering the JSON. Since the **derived** tables landed it als
 ## Derived tables: what the engine computed (not state it stored)
 
 `idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl`,
-`idx/decisions.jsonl` are **not** lazy
+`idx/decisions.jsonl`, `idx/blueprints.jsonl` are **not** lazy
 fields: they are not reached by exploding an id-array from `main.jsonl`, because their data
 **is not in the state at all** — it is what the round's step functions computed and applied
 (production, fleet upkeep, governance cost/coverage), the control surface (who owns which
-leaf), and **the AI's own judgments** (`decisions`: why a ship withdrew / engaged / did nothing,
-and which shipyard was retooled). Their schema entry therefore carries `join_on` (a column that
+leaf), **the AI's own judgments** (`decisions`: why a ship withdrew / engaged / did nothing,
+and which shipyard was retooled), and the **ship-blueprint library** (`blueprints`: one row per
+design — class / components / default order / ownership / how many ships came off it). Their
+schema entry therefore carries `join_on` (a column that
 *already exists* in `main.jsonl`, usually `faction_ids`/`city_ids`) instead of `id_col`.
 
 ```python
@@ -54,6 +56,7 @@ q.city_flow(round=12)          # per-round × city: production{} (razed cities i
 q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
 q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
 q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict / target / detail
+q.blueprints(round=12)         # one row per design blueprint: class / components / order / mode / effective_mode / …
 ```
 
 `decisions` is the one table that answers "**why** did my ship do that": `verdict` is one of
@@ -61,6 +64,15 @@ q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict
 this ship an order** this round — not "it is idling"), and `detail` carries the inputs that decided
 it (`hull_ratio` vs `retreat_hull`, `kiting`, `enemy_in_range`). A ship can appear **twice** in one
 round (it moved, then re-judged on arrival) — check `detail.after_move` before aggregating.
+
+`blueprints` is the yard's catalog of designs for ships that **do not exist yet**: a design is
+`class` + `components` (empty = the generator picks at launch) + the default `order` a new ship
+inherits. `mode` is that design leaf's own three-state opinion and `effective_mode` is the engine's
+resolved ownership (leaf → faction scope → global); `ship_count` says how many hulls came off it,
+and `launch_waiting` flags the "progress is full but the components cannot be paid for" case (a
+`Player`-owned design never silently overdraws the stockpile). Join the ships side on `q.ships()`'s
+`blueprint` column (which design printed this hull; `null` = none) and the yard side on the inline
+`buildings[].blueprint` in `q.cities()`.
 
 Two things worth knowing:
 

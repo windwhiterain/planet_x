@@ -602,6 +602,16 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 
 ### 12.6 下一步
 
-③ **蓝图**，按 `ship-blueprint-spec.md`（版本号已校正为 **9 → 10**），`Ship.spawned_round`
-一并落地；再往后是排队项（方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者、
-`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的 `effective`）。
+③ ~~**蓝图**~~ → `[x]` **已完成**（`feature/ship-blueprint`，`SCHEMA_VERSION` **9 → 10**；
+`Ship.spawned_round` 一并落地并**进了投影 ships 表**——编制表的 tie-break 终于能说「取最老的」）。
+实现记录见 [`ship-blueprint.md`](ship-blueprint.md) §6。这一步把本篇的活层模型往「还不存在的舰」
+那一侧推了一格：设计图是**图（舰级层）**，链变成 `叶 → 图 → 舰队默认 → 势力 → 全局`，
+但**图的意图轴默认沉默**（建图 ≠ 表态）——正是 §3.2 那条「Auto 必须是真执行者」的延伸。
+
+再往后是排队项（方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者、
+`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的 `effective`/`order_source`）。
+
+> ⚠ 蓝图的 intent-source 一节（`ship_behavior_source`）把本篇 §10.4 那条查实的**取值规则**
+> 落成了读面：`order_source` 会把「**叶不存在**」与「叶写着 `Inherit`」分开报（前者才可能落到
+> 图/舰队默认，后者诚实地报 `leaf`）。这正是「没表态 ≠ 没值」第一次进入正式读面契约——
+> 方案 B 若哪天要做，改的就是这里。
