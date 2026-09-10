@@ -17,6 +17,17 @@ use crate::model::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// `remove` 的序列化开关：**只在真的要删叶时才出现在线格式里**。
+///
+/// 为什么需要它：读面（`--control` / web 的 `control` 段）复用 `DefaultShipOrder` /
+/// `DefaultDoctrine` / `DefaultKiting` 这几个结构体来**回显**叶片，而 `remove` 是**写面**
+/// 的东西（读面表达"没有这片叶"的方式是 `null`）。不跳过的话读面里会多出一堆
+/// `"remove": false`，而 kit 的 `verify` 是按字段比对读面的——那一列会立刻变成
+/// 每次都出现的"假变动"。
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 // --- read-side wire types (the editable control surface) --------------------
 
 /// 一艘舰的读面条目：行为 + 由谁决定（三态，读面永远给全三态之一）。
@@ -133,12 +144,19 @@ pub struct DefaultShipOrder {
     /// 缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（这一层回到"没有说话"）。与 `behavior`/`mode` 同时出现 ⇒ 拒绝（见 [`apply_diff`] 的「删叶」）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 舰队默认**行为风格**（势力级，两片之一）：**读面即写面**，与 `default_ship_order` 同形。
 ///
 /// "全舰队风筝、战列舰贴脸"这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名；新下水的舰
 /// 也自动跟随（它没有自己的叶）。两条轴各取 [-1,1]，0 = 基线。
+///
+/// ⚠ **两轴一片叶**：这片叶**还不存在**时，必须**两条轴一起给**——只给一条的话另一条会
+/// 静默变成 `0.0`（= 基线），而 `0.0` 是个正常取值，事后从读面完全看不出来（见
+/// [`apply_diff`] 的 `partial_doctrine_leaf`：那种补丁会被**拒绝**）。
 #[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
 pub struct DefaultDoctrine {
     /// 默认理智<->热血（缺省 = 保留现值；写值即接管，见 [`apply_diff`]）。
@@ -150,6 +168,9 @@ pub struct DefaultDoctrine {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（这一层回到"没有说话"。注意：与它自己的两条轴同时出现 ⇒ 拒绝）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 舰队默认**风筝<->贴脸姿态**（势力级，两片之二），与 [`DefaultDoctrine`] 同形。
@@ -161,6 +182,9 @@ pub struct DefaultKiting {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（这一层回到"没有说话"）。与 `kiting`/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
@@ -176,6 +200,10 @@ pub struct ShipOrderPatch {
     /// 缺省 = 保留现值。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（这艘舰回到"没有自己的指令" ⇒ 取舰队默认）。与 `behavior`/`mode` 同时出现 ⇒ 拒绝。
+    /// 舰已战沉也能删（删的是**控制面**里的叶，不要求实体还在 ⇒ 顺带是清理陈叶的路）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 一艘舰的行为风格补丁（per-舰 可配置）：覆盖 `ship` 的某条轴；缺省轴保留现值。
@@ -194,6 +222,10 @@ pub struct ShipDoctrinePatch {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管，没写值就保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（这艘舰回到"没有自己的风格" ⇒ 有效风格回落到舰队默认 / **出厂快照**）。
+    /// 叶不存在时是**幂等成功**（目标状态就是"没有这片叶"）。与值/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 一艘舰的风筝<->贴脸姿态补丁（普通舰船控制属性，per-舰）：覆盖 `ship` 的姿态叶；
@@ -207,6 +239,9 @@ pub struct ShipKitingPatch {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（回落到舰队默认 / 出厂快照）。叶不存在时是幂等成功；与值/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -220,6 +255,9 @@ pub struct BudgetPatch {
     /// 由谁决定：Inherit（继承）/ Auto（系统自动）/ Player（玩家）。缺省 = 保留现值。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（该资源回到"这一层没有说话"）。与值/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 某城某「建设投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -231,6 +269,9 @@ pub struct InvestWeightPatch {
     pub value: Option<f64>,
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 某城某建造区「建造投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -242,6 +283,9 @@ pub struct BuildWeightPatch {
     pub value: Option<f64>,
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 某城「娱乐/福利预算」补丁：`value` 替换预算额，`mode` 指定由谁决定。
@@ -252,6 +296,9 @@ pub struct LoyaltyBudgetPatch {
     pub value: Option<f64>,
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；城已易主/被夷平也能删（清理陈叶）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// A structural building patch: add a new building, remove an existing one, or
@@ -280,7 +327,7 @@ pub struct BuildingPatch {
     #[serde(default)]
     pub area: Option<f64>,
     /// Remove the referenced building.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub remove: bool,
 }
 
@@ -296,6 +343,10 @@ pub struct CapitalPatch {
     /// Inherit（撤销本层的表态，沿作用域链上溯）。缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（回落到 [`default_capital_body`](crate::model::default_capital_body) 的兜底）。
+    /// 与 `value`/`mode` 同时出现 ⇒ 拒绝。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 单个势力的可控状态补丁（`--apply` / `POST /api/command` 的 `control[]` 元素）。
@@ -385,18 +436,23 @@ pub struct SkippedLeaf {
 }
 
 /// 一次 `--apply` / `POST /api/command` **实际做了什么**：落地了几个叶片、
-/// 丢了哪些（[`SkippedLeaf`]）、**隐含接管**了哪些。CLI 在 stderr 上以
-/// `WARN_APPLY_SKIPPED` / `NOTE_APPLY_TOOKOVER` 报出（stdout 必须保持零噪声的状态流）；
-/// web 的 `POST /api/command` 整面回传，丢弃是预期内的，故刻意忽略。
+/// 丢了哪些（[`SkippedLeaf`]）、**隐含接管**了哪些、**删掉**了哪些。CLI 在 stderr 上以
+/// `WARN_APPLY_SKIPPED` / `NOTE_APPLY_TOOKOVER` / `NOTE_APPLY_REMOVED` 报出（stdout 必须
+/// 保持零噪声的状态流）；web 的 `POST /api/command` 整面回传，丢弃是预期内的，故刻意忽略。
 #[derive(Debug, Default, Clone, Serialize, JsonSchema)]
 pub struct ApplyReport {
     /// 成功落到状态上的叶片数（一个 `ship_orders[]` 条目 / 一条预算 / 一次迁都… 算一个）。
+    /// **删叶也算**（包括"本来就没有那片叶"的幂等删除：目标状态达成了）。
     pub applied: usize,
     /// 没落地的叶片，附带为什么。
     pub skipped: Vec<SkippedLeaf>,
     /// **只写了值、没写 mode** 而被隐含接管成玩家指令的叶片路径（见 [`apply_diff`] 的
     /// 「写值即接管」）。它不是错误，但 agent 需要知道「这一条从这一刻起不再由系统改写」。
     pub took_over: Vec<String>,
+    /// 真的被**删掉**的叶片路径（`remove: true` 且那片叶确实存在）。它值得一条回执，因为
+    /// 「删叶」的后果是**有效值换来源**（逐舰风格回出厂快照、舰队默认回"没有说话"），
+    /// 而"删了一片本来就不存在的叶"不进这个列表（那是幂等的 no-op，见 [`apply_diff`]）。
+    pub removed: Vec<String>,
 }
 
 impl ApplyReport {
@@ -419,6 +475,11 @@ impl ApplyReport {
     /// 记一条隐含接管（只写值、没写 mode）。
     fn took_over(&mut self, path: impl Into<String>) {
         self.took_over.push(path.into());
+    }
+
+    /// 记一条删叶（只记**真的**删掉了的；幂等删除不记）。
+    fn removed(&mut self, path: impl Into<String>) {
+        self.removed.push(path.into());
     }
 
     /// 是否一切都落地了。
@@ -511,18 +572,23 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
     FactionControlView {
         faction_id: fid,
         capital: c.capital.clone(),
+        // 读面这几片是**值 + 表态**（"这一层说了什么"），`remove` 只存在于**写面**：
+        // 读面表达"没有这片叶"的方式就是 `None`/不给这一行（见 `scope_view` 同理）。
         default_ship_order: c.default_ship_order.as_ref().map(|d| DefaultShipOrder {
             behavior: Some(d.value.clone()),
             mode: Some(d.mode),
+            remove: false,
         }),
         default_doctrine: c.default_doctrine.as_ref().map(|d| DefaultDoctrine {
             temper: Some(d.value.temper),
             lone_wolf: Some(d.value.lone_wolf),
             mode: Some(d.mode),
+            remove: false,
         }),
         default_kiting: c.default_kiting.as_ref().map(|d| DefaultKiting {
             kiting: Some(d.value),
             mode: Some(d.mode),
+            remove: false,
         }),
         ship_orders,
         ship_doctrine,
@@ -587,6 +653,590 @@ pub fn control_schema_value() -> serde_json::Value {
 }
 
 // --- write side (diff application) ------------------------------------------
+
+    // --- 删叶（`remove: true`） --------------------------------------------------
+//
+// 控制叶的**存在性本身就是一种状态**：「没有叶」= 这一层没有说话。而在取值规则里
+// 「叶不存在」与「叶写着 `Inherit`」并**不**等价——`State::ship_doctrine` 是
+// `leaf.map(|l| l.value).unwrap_or(record)`：**叶存在就用叶里的值**（与 `mode` 无关），
+// 只有叶真的不存在才回落到出厂记录值。于是"碰过一次的风格叶"以前永远钉着那个数
+// （`mode: Inherit` 撤不掉它），而补丁接口只能新建/改写叶、删不掉——`remove` 就是那个出口。
+//
+// 三条规则（2026-10 裁决）：
+// 1. 删的是**控制面里那片叶**，不要求实体还在（舰战沉 / 城易主 / 建筑没了 / 资源 key 已删
+//    都能删）⇒ 顺带是清理陈叶的路；
+// 2. 叶本来就不存在 ⇒ **幂等成功**（目标状态就是"没有这片叶"）：不进 `removed`，也不算丢弃；
+// 3. `remove` 与任何值 / `mode` 字段同时出现 ⇒ **拒绝**：一条同时说着"删掉它"和"设成 0.5"
+//    的补丁没有正确答案，而任何一种静默优先级都会让写补丁的人以为另一件事发生了。
+
+/// `remove: true` 同时带了别的字段 ⇒ 记一条拒绝。返回 `true` = 这条补丁到此为止。
+fn remove_conflicts(remove: bool, present: &[&str], path: &str, report: &mut ApplyReport) -> bool {
+    if !remove || present.is_empty() {
+        return false;
+    }
+    report.skip(
+        path,
+        "",
+        "remove_conflicts_with_value",
+        format!(
+            "`remove: true` 不能再带 {}：删掉这片叶与给它写值/写归属是两件事（要什么值请删完再单独发一条）。",
+            present.join(" / ")
+        ),
+    );
+    true
+}
+
+/// 记一次删叶的结果：**真的**删掉了才进 `removed`；本来就没有这片叶是幂等成功。
+fn leaf_removed(report: &mut ApplyReport, path: String, existed: bool) {
+    if existed {
+        report.removed(path);
+    }
+    report.applied += 1;
+}
+
+/// 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
+fn apply_default_ship_order(
+    state: &mut State,
+    fid: &FactionId,
+    d: &DefaultShipOrder,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.default_ship_order");
+    let mut present = Vec::new();
+    if d.behavior.is_some() {
+        present.push("behavior");
+    }
+    if d.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(d.remove, &present, &path, report) {
+        return;
+    }
+    if d.remove {
+        let existed = state.control.entry(fid.clone()).or_default().default_ship_order.take().is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    let c = state.control.entry(fid.clone()).or_default();
+    let ctrl = c
+        .default_ship_order
+        .get_or_insert_with(|| Control::inherit(ShipBehavior::Idle));
+    if let Some(v) = &d.behavior {
+        ctrl.value = v.clone();
+    }
+    // 写值即接管（与叶子同一条规则）：只写默认行为、没写 mode，就是「这是我的默认」。
+    match (d.mode, d.behavior.is_some()) {
+        (Some(m), _) => ctrl.mode = m,
+        (None, true) => {
+            ctrl.mode = ControlMode::Player;
+            report.took_over(path);
+        }
+        (None, false) => {}
+    }
+    report.applied += 1;
+}
+
+/// 舰队默认**行为风格**（势力级，两片之一）：与「写值即接管」同一条规则，外加一条
+/// **两轴叶**的额外守卫（见 `partial_doctrine_leaf`）。
+fn apply_default_doctrine(
+    state: &mut State,
+    fid: &FactionId,
+    d: &DefaultDoctrine,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.default_doctrine");
+    let mut present = Vec::new();
+    if d.temper.is_some() {
+        present.push("temper");
+    }
+    if d.lone_wolf.is_some() {
+        present.push("lone_wolf");
+    }
+    if d.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(d.remove, &present, &path, report) {
+        return;
+    }
+    if d.remove {
+        let existed = state.control.entry(fid.clone()).or_default().default_doctrine.take().is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    let wrote = d.temper.is_some() || d.lone_wolf.is_some();
+    // **两轴叶的"新建"必须两条轴一起给**（`0.0` 是个正常取值：静默把它填进另一条轴，
+    // 事后从读面完全看不出来——这正是这条守卫存在的理由）。叶已存在时单轴写仍然合法
+    // （缺省轴保留现值）。
+    let exists = state
+        .control
+        .get(fid)
+        .and_then(|c| c.default_doctrine.as_ref())
+        .is_some();
+    if !exists && wrote && !(d.temper.is_some() && d.lone_wolf.is_some()) {
+        report.skip(
+            path,
+            "",
+            "partial_doctrine_leaf",
+            "`default_doctrine` 是**两轴一片叶**（temper + lone_wolf），而这片叶还不存在：只给一条轴会把另一条静默设成 0.0（= 基线），而 0.0 是个正常取值，事后从读面看不出来。三条路任选：① 两条轴一起给；② 先只写 `mode`（先表态归属，值下次再给）；③ `remove: true` 删掉这片叶（回到「没有说话」）。",
+        );
+        return;
+    }
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .default_doctrine
+        .get_or_insert_with(|| Control::inherit(ShipDoctrine::default()));
+    if let Some(v) = d.temper {
+        ctrl.value.temper = v.clamp(-1.0, 1.0);
+    }
+    if let Some(v) = d.lone_wolf {
+        ctrl.value.lone_wolf = v.clamp(-1.0, 1.0);
+    }
+    match (d.mode, wrote) {
+        (Some(m), _) => ctrl.mode = m,
+        (None, true) => {
+            ctrl.mode = ControlMode::Player;
+            report.took_over(path);
+        }
+        (None, false) => {}
+    }
+    report.applied += 1;
+}
+
+/// 舰队默认**风筝<->贴脸姿态**（势力级，两片之二）。
+fn apply_default_kiting(
+    state: &mut State,
+    fid: &FactionId,
+    d: &DefaultKiting,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.default_kiting");
+    let mut present = Vec::new();
+    if d.kiting.is_some() {
+        present.push("kiting");
+    }
+    if d.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(d.remove, &present, &path, report) {
+        return;
+    }
+    if d.remove {
+        let existed = state.control.entry(fid.clone()).or_default().default_kiting.take().is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    let wrote = d.kiting.is_some();
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .default_kiting
+        .get_or_insert_with(|| Control::inherit(0.0));
+    if let Some(v) = d.kiting {
+        ctrl.value = v.clamp(-1.0, 1.0);
+    }
+    match (d.mode, wrote) {
+        (Some(m), _) => ctrl.mode = m,
+        (None, true) => {
+            ctrl.mode = ControlMode::Player;
+            report.took_over(path);
+        }
+        (None, false) => {}
+    }
+    report.applied += 1;
+}
+
+/// 逐舰指令补丁：`behavior` 替换该舰行为、`mode` 指定由谁决定、`remove` 删掉这片叶。
+fn apply_ship_order(
+    state: &mut State,
+    fid: &FactionId,
+    sp: &ShipOrderPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.ship_orders[{i}].ship");
+    let mut present = Vec::new();
+    if sp.behavior.is_some() {
+        present.push("behavior");
+    }
+    if sp.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(sp.remove, &present, &path, report) {
+        return;
+    }
+    // 删叶**不要求舰还在**：删的是我们控制面里的那片叶（陈叶清理也是它的用途之一）。
+    if sp.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_orders
+            .remove(&sp.ship)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    // Resolve the ship by its **name** (the unique key): an order only applies to a
+    // ship that exists and that this faction actually owns, so ordering another
+    // faction's ship (or a vanished one) is a no-op.
+    let Some(ship_name) = resolve_own_ship(state, fid, &sp.ship, &path, report) else {
+        return;
+    };
+    // 「写值即接管」：只写了 behavior 而没写 mode，就意味着这是**玩家的指令**
+    // （否则值会被系统下一回合按自己的逻辑覆盖，而 agent 以为命令已下达——
+    // 这正是 `agent-play-friction` 里那类「失败看起来像成功」）。
+    let implied = match (sp.mode, sp.behavior.is_some()) {
+        (Some(m), _) => m,
+        (None, true) => {
+            report.took_over(format!("{fid}.ship_orders[{i}].behavior"));
+            ControlMode::Player
+        }
+        (None, false) => ControlMode::Inherit,
+    };
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .ship_orders
+        .entry(ship_name)
+        .or_insert_with(|| Control {
+            value: sp.behavior.clone().unwrap_or(ShipBehavior::Idle),
+            mode: implied,
+        });
+    if let Some(v) = &sp.behavior {
+        ctrl.value = v.clone();
+    }
+    if let Some(m) = sp.mode {
+        ctrl.mode = m;
+    } else if sp.behavior.is_some() {
+        ctrl.mode = ControlMode::Player;
+    }
+    report.applied += 1;
+}
+
+/// 逐舰**行为风格**补丁：写的是**叶片**（值 + 三态），不是舰上那个记录值——`Ship.doctrine`
+/// 只是出厂快照 / AI 流水。每条轴钳制到 [-1,1]；缺省轴保留「当前有效」的那条（所以只写一条轴
+/// 不会把另一条清零，也**不会**把另一条变成 0）。写值即接管（与其它叶同一条规则）。
+fn apply_ship_doctrine(
+    state: &mut State,
+    fid: &FactionId,
+    d: &ShipDoctrinePatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.ship_doctrine[{i}].ship");
+    let mut present = Vec::new();
+    if d.temper.is_some() {
+        present.push("temper");
+    }
+    if d.lone_wolf.is_some() {
+        present.push("lone_wolf");
+    }
+    if d.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(d.remove, &present, &path, report) {
+        return;
+    }
+    // 删叶 ⇒ 有效风格回落到舰队默认 / **出厂快照**（叶不存在 = 这一层没有说话，且叶里的值
+    // 不再参与取值）。舰已战沉也能删。
+    if d.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_doctrine
+            .remove(&d.ship)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    if resolve_own_ship(state, fid, &d.ship, &path, report).is_none() {
+        return;
+    }
+    let base = state.ship_doctrine(d.ship.clone());
+    let value = ShipDoctrine {
+        temper: d.temper.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.temper),
+        lone_wolf: d.lone_wolf.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.lone_wolf),
+    };
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .ship_doctrine
+        .entry(d.ship.clone())
+        .or_insert_with(|| Control::inherit(base));
+    ctrl.value = value;
+    write_mode_leaf(
+        &mut ctrl.mode,
+        d.mode,
+        d.temper.is_some() || d.lone_wolf.is_some(),
+        format!("{fid}.ship_doctrine[{i}]"),
+        report,
+    );
+    report.applied += 1;
+}
+
+/// 逐舰**风筝<->贴脸姿态**补丁：与 [`apply_ship_doctrine`] 同一条路（叶片 + 写值即接管 + 删叶）。
+fn apply_ship_kiting(
+    state: &mut State,
+    fid: &FactionId,
+    k: &ShipKitingPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.ship_kiting[{i}].ship");
+    let mut present = Vec::new();
+    if k.kiting.is_some() {
+        present.push("kiting");
+    }
+    if k.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(k.remove, &present, &path, report) {
+        return;
+    }
+    if k.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_kiting
+            .remove(&k.ship)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    if resolve_own_ship(state, fid, &k.ship, &path, report).is_none() {
+        return;
+    }
+    let base = state.ship_kiting(k.ship.clone());
+    let value = k.kiting.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base);
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .ship_kiting
+        .entry(k.ship.clone())
+        .or_insert_with(|| Control::inherit(base));
+    ctrl.value = value;
+    write_mode_leaf(
+        &mut ctrl.mode,
+        k.mode,
+        k.kiting.is_some(),
+        format!("{fid}.ship_kiting[{i}]"),
+        report,
+    );
+    report.applied += 1;
+}
+
+/// 资源预算补丁（投资 / 建造共用）：`value` 替换预算额、`mode` 指定由谁决定、`remove` 删叶。
+fn apply_budget(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &FactionId,
+    which: BudgetKind,
+    bp: &BudgetPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let name = which.name();
+    let path = format!("{fid}.{name}[{i}].resource");
+    let mut present = Vec::new();
+    if bp.value.is_some() {
+        present.push("value");
+    }
+    if bp.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(bp.remove, &present, &path, report) {
+        return;
+    }
+    // 删叶先于「资源是否存在」的检查：config 里已经没有的 key 也能删（清理陈叶）。
+    if bp.remove {
+        let c = state.control.entry(fid.clone()).or_default();
+        let map = match which {
+            BudgetKind::Investment => &mut c.investment_budget,
+            BudgetKind::Construction => &mut c.construction_budget,
+        };
+        let existed = map.remove(&bp.resource).is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    if !config.resources.contains_key(&bp.resource) {
+        report.skip(
+            path,
+            &bp.resource,
+            "no_such_resource",
+            format!("没有资源 key「{}」（WYSIWYG：状态里的 key 就是 diff 里的 key，用 --meta 的 resources 看全表）。", bp.resource),
+        );
+        return;
+    }
+    let c = state.control.entry(fid.clone()).or_default();
+    let map = match which {
+        BudgetKind::Investment => &mut c.investment_budget,
+        BudgetKind::Construction => &mut c.construction_budget,
+    };
+    let ctrl = map.entry(bp.resource.clone()).or_insert_with(|| Control {
+        value: bp.value.unwrap_or(0.0),
+        mode: bp.mode.unwrap_or_default(),
+    });
+    write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.{name}[{i}].value"), report);
+    report.applied += 1;
+}
+
+/// `apply_budget` 的两条路（投资 / 建造）——同一套代码，只有 map 与名字不同。
+#[derive(Clone, Copy)]
+enum BudgetKind {
+    Investment,
+    Construction,
+}
+
+impl BudgetKind {
+    fn name(self) -> &'static str {
+        match self {
+            BudgetKind::Investment => "investment_budget",
+            BudgetKind::Construction => "construction_budget",
+        }
+    }
+}
+
+/// 某城某建筑的两类权重补丁（建设投资权重 / 建造投资权重）：`value` 替换权重、`remove` 删叶。
+fn apply_weight(
+    state: &mut State,
+    fid: &FactionId,
+    which: WeightKind,
+    city: &CityId,
+    building: &BuildingId,
+    value: Option<f64>,
+    mode: Option<ControlMode>,
+    remove: bool,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let name = which.name();
+    let path = format!("{fid}.{name}[{i}]");
+    let mut present = Vec::new();
+    if value.is_some() {
+        present.push("value");
+    }
+    if mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(remove, &present, &path, report) {
+        return;
+    }
+    let key = (city.clone(), *building);
+    // 删叶先于「城/建筑是否存在」的检查：建筑没了、城易主了也能删（清理陈叶）。
+    if remove {
+        let c = state.control.entry(fid.clone()).or_default();
+        let map = match which {
+            WeightKind::Invest => &mut c.invest_weights,
+            WeightKind::Build => &mut c.build_weights,
+        };
+        let existed = map.remove(&key).is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    if !check_city_building(state, fid, city, *building, &path, report) {
+        return;
+    }
+    let c = state.control.entry(fid.clone()).or_default();
+    let map = match which {
+        WeightKind::Invest => &mut c.invest_weights,
+        WeightKind::Build => &mut c.build_weights,
+    };
+    let ctrl = map.entry(key).or_insert_with(|| Control {
+        value: value.unwrap_or(0.0),
+        mode: mode.unwrap_or_default(),
+    });
+    write_value_leaf(ctrl, value, mode, format!("{fid}.{name}[{i}].value"), report);
+    report.applied += 1;
+}
+
+/// `apply_weight` 的两条路（建设投资权重 / 建造投资权重）。
+#[derive(Clone, Copy)]
+enum WeightKind {
+    Invest,
+    Build,
+}
+
+impl WeightKind {
+    fn name(self) -> &'static str {
+        match self {
+            WeightKind::Invest => "invest_weights",
+            WeightKind::Build => "build_weights",
+        }
+    }
+}
+
+/// 某城娱乐/福利预算补丁：`value` 替换预算额、`remove` 删叶。
+fn apply_loyalty_budget(
+    state: &mut State,
+    fid: &FactionId,
+    lp: &LoyaltyBudgetPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.loyalty_budget[{i}]");
+    let mut present = Vec::new();
+    if lp.value.is_some() {
+        present.push("value");
+    }
+    if lp.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(lp.remove, &present, &path, report) {
+        return;
+    }
+    if lp.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .loyalty_budget
+            .remove(&lp.city)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    match state.city(&lp.city) {
+        None => {
+            report.skip(
+                format!("{path}.city"),
+                &lp.city,
+                "no_such_city",
+                format!("没有名为「{}」的城（城被夷平后名字会从活城列表里消失）。", lp.city),
+            );
+            return;
+        }
+        Some(city) if city.faction_id != *fid => {
+            report.skip(
+                format!("{path}.city"),
+                &lp.city,
+                "not_your_city",
+                format!("「{}」属于 {}，不是 {fid} 的城。", lp.city, city.faction_id),
+            );
+            return;
+        }
+        Some(_) => {}
+    }
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .loyalty_budget
+        .entry(lp.city.clone())
+        .or_insert_with(|| Control {
+            value: lp.value.unwrap_or(0.0),
+            mode: lp.mode.unwrap_or_default(),
+        });
+    write_value_leaf(ctrl, lp.value, lp.mode, format!("{fid}.loyalty_budget[{i}].value"), report);
+    report.applied += 1;
+}
 
 /// 把一条 `ship` 引用解析成「本势力确实拥有的那艘舰」，或一条**丢弃记录**。
 /// 舰名是唯一 key，但**会变**（战沉后重建的护卫舰叫 `长城2`），所以「查无此舰」
@@ -737,244 +1387,64 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 注意：这里**不能**提前 `let c = state.control.entry(..)`——那会把
         // `state.control` 借出去，后面所有需要 `state.city(..)` 的校验都借不动。
         // 每个写点各自取一次 entry（同名 `fid` 的 `Control` 是同一个）。
-        // 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
+        //
+        // 每片叶一个 `apply_*` 助手：它们各自处理「删叶 / 写值 / 写归属」三件事，
+        // 顺序统一是 **删叶（含冲突检查）→ 实体校验 → 写**。抽出来的原因不是行数：
+        // `remove` 的冲突检查与幂等语义要在**每一片**叶上完全一致。
         if let Some(d) = &fac.default_ship_order {
-            let path = format!("{fid}.default_ship_order");
-            let c = state.control.entry(fid.clone()).or_default();
-            let ctrl = c
-                .default_ship_order
-                .get_or_insert_with(|| Control::inherit(ShipBehavior::Idle));
-            if let Some(v) = &d.behavior {
-                ctrl.value = v.clone();
-            }
-            // 写值即接管（与叶子同一条规则）：只写默认行为、没写 mode，就是「这是我的默认」。
-            match (d.mode, d.behavior.is_some()) {
-                (Some(m), _) => ctrl.mode = m,
-                (None, true) => {
-                    ctrl.mode = ControlMode::Player;
-                    report.took_over(path.clone());
-                }
-                (None, false) => {}
-            }
-            report.applied += 1;
+            apply_default_ship_order(state, &fid, d, &mut report);
         }
-        // 舰队默认**行为风格**（势力级，两片之一）：与上面同一条「写值即接管」规则。
         if let Some(d) = &fac.default_doctrine {
-            let path = format!("{fid}.default_doctrine");
-            let wrote = d.temper.is_some() || d.lone_wolf.is_some();
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .default_doctrine
-                .get_or_insert_with(|| Control::inherit(ShipDoctrine::default()));
-            if let Some(v) = d.temper {
-                ctrl.value.temper = v.clamp(-1.0, 1.0);
-            }
-            if let Some(v) = d.lone_wolf {
-                ctrl.value.lone_wolf = v.clamp(-1.0, 1.0);
-            }
-            match (d.mode, wrote) {
-                (Some(m), _) => ctrl.mode = m,
-                (None, true) => {
-                    ctrl.mode = ControlMode::Player;
-                    report.took_over(path.clone());
-                }
-                (None, false) => {}
-            }
-            report.applied += 1;
+            apply_default_doctrine(state, &fid, d, &mut report);
         }
-        // 舰队默认**风筝<->贴脸姿态**（势力级，两片之二）。
         if let Some(d) = &fac.default_kiting {
-            let path = format!("{fid}.default_kiting");
-            let wrote = d.kiting.is_some();
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .default_kiting
-                .get_or_insert_with(|| Control::inherit(0.0));
-            if let Some(v) = d.kiting {
-                ctrl.value = v.clamp(-1.0, 1.0);
-            }
-            match (d.mode, wrote) {
-                (Some(m), _) => ctrl.mode = m,
-                (None, true) => {
-                    ctrl.mode = ControlMode::Player;
-                    report.took_over(path.clone());
-                }
-                (None, false) => {}
-            }
-            report.applied += 1;
+            apply_default_kiting(state, &fid, d, &mut report);
         }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
-            // Resolve the ship by its **name** (the unique key): an order only
-            // applies to a ship that exists and that this faction actually owns,
-            // so ordering another faction's ship (or a vanished one) is a no-op.
-            let path = format!("{fid}.ship_orders[{i}].ship");
-            let Some(ship_name) = resolve_own_ship(state, &fid, &sp.ship, &path, &mut report) else {
-                continue;
-            };
-            // 「写值即接管」：只写了 behavior 而没写 mode，就意味着这是**玩家的指令**
-            // （否则值会被系统下一回合按自己的逻辑覆盖，而 agent 以为命令已下达——
-            // 这正是 `agent-play-friction` 里那类「失败看起来像成功」）。
-            let implied = match (sp.mode, sp.behavior.is_some()) {
-                (Some(m), _) => m,
-                (None, true) => {
-                    report.took_over(format!("{fid}.ship_orders[{i}].behavior"));
-                    ControlMode::Player
-                }
-                (None, false) => ControlMode::Inherit,
-            };
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .ship_orders
-                .entry(ship_name)
-                .or_insert_with(|| Control {
-                    value: sp.behavior.clone().unwrap_or(ShipBehavior::Idle),
-                    mode: implied,
-                });
-            if let Some(v) = &sp.behavior {
-                ctrl.value = v.clone();
-            }
-            if let Some(m) = sp.mode {
-                ctrl.mode = m;
-            } else if sp.behavior.is_some() {
-                ctrl.mode = ControlMode::Player;
-            }
-            report.applied += 1;
+            apply_ship_order(state, &fid, sp, i, &mut report);
         }
-        // 行为风格补丁：写的是**叶片**（值 + 三态），不是舰上那个记录值——`Ship.doctrine`
-        // 只是出厂快照/AI 流水。每条轴钳制到 [-1,1]；缺省轴保留「当前有效值」，所以只写一条
-        // 轴不会把另一条清零。写值即接管（与其它叶同一条规则），回执里记一笔。
         for (i, d) in fac.ship_doctrine.iter().enumerate() {
-            let path = format!("{fid}.ship_doctrine[{i}].ship");
-            if resolve_own_ship(state, &fid, &d.ship, &path, &mut report).is_none() {
-                continue;
-            }
-            let base = state.ship_doctrine(d.ship.clone());
-            let value = ShipDoctrine {
-                temper: d.temper.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.temper),
-                lone_wolf: d.lone_wolf.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base.lone_wolf),
-            };
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .ship_doctrine
-                .entry(d.ship.clone())
-                .or_insert_with(|| Control::inherit(base));
-            ctrl.value = value;
-            write_mode_leaf(&mut ctrl.mode, d.mode, d.temper.is_some() || d.lone_wolf.is_some(), format!("{fid}.ship_doctrine[{i}]"), &mut report);
-            report.applied += 1;
+            apply_ship_doctrine(state, &fid, d, i, &mut report);
         }
-        // 风筝<->贴脸姿态补丁：同一条路（叶片 + 写值即接管），钳制到 [-1,1]。
         for (i, k) in fac.ship_kiting.iter().enumerate() {
-            let path = format!("{fid}.ship_kiting[{i}].ship");
-            if resolve_own_ship(state, &fid, &k.ship, &path, &mut report).is_none() {
-                continue;
-            }
-            let base = state.ship_kiting(k.ship.clone());
-            let value = k.kiting.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(base);
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .ship_kiting
-                .entry(k.ship.clone())
-                .or_insert_with(|| Control::inherit(base));
-            ctrl.value = value;
-            write_mode_leaf(&mut ctrl.mode, k.mode, k.kiting.is_some(), format!("{fid}.ship_kiting[{i}]"), &mut report);
-            report.applied += 1;
+            apply_ship_kiting(state, &fid, k, i, &mut report);
         }
         for (i, bp) in fac.investment_budget.iter().enumerate() {
-            if !config.resources.contains_key(&bp.resource) {
-                report.skip(
-                    format!("{fid}.investment_budget[{i}].resource"),
-                    &bp.resource,
-                    "no_such_resource",
-                    format!("没有资源 key「{}」（WYSIWYG：状态里的 key 就是 diff 里的 key，用 --meta 的 resources 看全表）。", bp.resource),
-                );
-                continue;
-            }
-            let ctrl = state.control.entry(fid.clone()).or_default().investment_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
-                value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.unwrap_or_default(),
-            });
-            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.investment_budget[{i}].value"), &mut report);
-            report.applied += 1;
+            apply_budget(state, config, &fid, BudgetKind::Investment, bp, i, &mut report);
         }
         for (i, bp) in fac.construction_budget.iter().enumerate() {
-            if !config.resources.contains_key(&bp.resource) {
-                report.skip(
-                    format!("{fid}.construction_budget[{i}].resource"),
-                    &bp.resource,
-                    "no_such_resource",
-                    format!("没有资源 key「{}」（WYSIWYG：状态里的 key 就是 diff 里的 key，用 --meta 的 resources 看全表）。", bp.resource),
-                );
-                continue;
-            }
-            let ctrl = state.control.entry(fid.clone()).or_default().construction_budget.entry(bp.resource.clone()).or_insert_with(|| Control {
-                value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.unwrap_or_default(),
-            });
-            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.construction_budget[{i}].value"), &mut report);
-            report.applied += 1;
+            apply_budget(state, config, &fid, BudgetKind::Construction, bp, i, &mut report);
         }
         for (i, ip) in fac.invest_weights.iter().enumerate() {
-            if !check_city_building(state, &fid, &ip.city, ip.building, &format!("{fid}.invest_weights[{i}]"), &mut report) {
-                continue;
-            }
-            let key = (ip.city.clone(), ip.building);
-            let ctrl = state.control.entry(fid.clone()).or_default().invest_weights.entry(key).or_insert_with(|| Control {
-                value: ip.value.unwrap_or(0.0),
-                mode: ip.mode.unwrap_or_default(),
-            });
-            write_value_leaf(ctrl, ip.value, ip.mode, format!("{fid}.invest_weights[{i}].value"), &mut report);
-            report.applied += 1;
+            apply_weight(
+                state,
+                &fid,
+                WeightKind::Invest,
+                &ip.city,
+                &ip.building,
+                ip.value,
+                ip.mode,
+                ip.remove,
+                i,
+                &mut report,
+            );
         }
         for (i, bp) in fac.build_weights.iter().enumerate() {
-            if !check_city_building(state, &fid, &bp.city, bp.building, &format!("{fid}.build_weights[{i}]"), &mut report) {
-                continue;
-            }
-            let key = (bp.city.clone(), bp.building);
-            let ctrl = state.control.entry(fid.clone()).or_default().build_weights.entry(key).or_insert_with(|| Control {
-                value: bp.value.unwrap_or(0.0),
-                mode: bp.mode.unwrap_or_default(),
-            });
-            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.build_weights[{i}].value"), &mut report);
-            report.applied += 1;
+            apply_weight(
+                state,
+                &fid,
+                WeightKind::Build,
+                &bp.city,
+                &bp.building,
+                bp.value,
+                bp.mode,
+                bp.remove,
+                i,
+                &mut report,
+            );
         }
         for (i, lp) in fac.loyalty_budget.iter().enumerate() {
-            match state.city(&lp.city) {
-                None => {
-                    report.skip(
-                        format!("{fid}.loyalty_budget[{i}].city"),
-                        &lp.city,
-                        "no_such_city",
-                        format!("没有名为「{}」的城（城被夷平后名字会从活城列表里消失）。", lp.city),
-                    );
-                    continue;
-                }
-                Some(city) if city.faction_id != fid => {
-                    report.skip(
-                        format!("{fid}.loyalty_budget[{i}].city"),
-                        &lp.city,
-                        "not_your_city",
-                        format!("「{}」属于 {}，不是 {fid} 的城。", lp.city, city.faction_id),
-                    );
-                    continue;
-                }
-                Some(_) => {}
-            }
-            let ctrl = state.control.entry(fid.clone()).or_default().loyalty_budget.entry(lp.city.clone()).or_insert_with(|| Control {
-                value: lp.value.unwrap_or(0.0),
-                mode: lp.mode.unwrap_or_default(),
-            });
-            write_value_leaf(ctrl, lp.value, lp.mode, format!("{fid}.loyalty_budget[{i}].value"), &mut report);
-            report.applied += 1;
+            apply_loyalty_budget(state, &fid, lp, i, &mut report);
         }
         for (i, bpatch) in fac.buildings.iter().enumerate() {
             let path = format!("{fid}.buildings[{i}]");
@@ -992,11 +1462,33 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             if state.faction(&fac.faction_id).is_none() {
                 continue; // 已在上面的循环里记过 no_such_faction。
             }
+            let path = format!("control[{fi}].capital");
+            let mut present = Vec::new();
+            if cap.value.is_some() {
+                present.push("value");
+            }
+            if cap.mode.is_some() {
+                present.push("mode");
+            }
+            if remove_conflicts(cap.remove, &present, &path, &mut report) {
+                continue;
+            }
+            if cap.remove {
+                let existed = state
+                    .control
+                    .entry(fac.faction_id.clone())
+                    .or_default()
+                    .capital
+                    .take()
+                    .is_some();
+                leaf_removed(&mut report, path, existed);
+                continue;
+            }
             let cur = state.capital_body(&fac.faction_id);
             let new_value = match cap.value.as_ref() {
                 Some(v) if state.body(v).is_none() => {
                     report.skip(
-                        format!("control[{fi}].capital.value"),
+                        format!("{path}.value"),
                         v,
                         "no_such_body",
                         format!("没有名为「{v}」的天体（天体名是唯一 key）。"),
@@ -1017,7 +1509,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                     (Some(m), _) => ctrl.mode = m,
                     (None, true) => {
                         ctrl.mode = ControlMode::Player;
-                        report.took_over(format!("control[{fi}].capital.value"));
+                        report.took_over(format!("{path}.value"));
                     }
                     (None, false) => {}
                 }
@@ -1915,7 +2407,8 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{
                 "faction_id": fid,
-                "default_doctrine": {"temper": noisy},
+                // 两轴一片叶：这片叶还不存在，必须两条轴一起给（否则 `partial_doctrine_leaf` 拒绝）。
+                "default_doctrine": {"temper": noisy, "lone_wolf": 0.0},
                 "ship_kiting": [{"ship": ship, "kiting": noisy}],
                 "investment_budget": [{"resource": "铁", "value": noisy}]
             }]
@@ -1948,5 +2441,244 @@ mod tests {
         assert_eq!(budget["value"], exact, "投资预算被舍入了");
         // 而且它必须就是状态里真的存着的那个数（读面 = 真值，不是"看起来像"）。
         assert_eq!(state.ship_kiting(ship), noisy);
+    }
+
+    /// **删叶**（`remove: true`）：控制叶的"存在性"本身就是一种状态——「没有叶」= 这一层
+    /// 没有说话。而取值规则里「叶不存在」与「叶写着 `Inherit`」**不**等价
+    /// （`leaf.map(|l| l.value).unwrap_or(record)`：叶存在就用叶里的值，与 `mode` 无关），
+    /// 所以"碰过一次的风格叶"以前永远钉着那个数。这条测试把三段都钉住：
+    /// ① 写叶 ⇒ 钉住；② 「恢复继承」撤**不掉**它；③ **删叶**才真的回到出厂快照。
+    #[test]
+    fn removing_a_leaf_returns_the_value_to_its_source() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+        // 出厂记录值给成非零：`config/*.ron` 从来没填过 `default_doctrine`，开局记录值是 {0,0}，
+        // 那样子"回到出厂快照"与"钉在 0"分不出来。
+        for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
+            s.doctrine = ShipDoctrine { temper: 0.71, lone_wolf: -0.2 };
+        }
+        let record = state.ship(&ship).unwrap().doctrine;
+
+        // ① 写一片逐舰风格叶：有效值 = 叶里的值，这片叶**钉住**了它。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "temper": -1.0, "lone_wolf": 0.5}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(state.ship_doctrine(ship.clone()).temper, -1.0);
+
+        // ② 「恢复继承」（只写 mode）撤不掉那个数：叶还在，取值优先用叶里的值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "mode": "Inherit"}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(
+            state.ship_doctrine(ship.clone()).temper,
+            -1.0,
+            "叶存在就用叶里的值（哪怕它写着 Inherit）——这正是「恢复继承」不够用的原因"
+        );
+
+        // ③ 删叶 ⇒ 有效值回到**出厂快照**，而且这片叶真的从控制面里消失。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(r.removed.len(), 1, "真的删掉了要留一条 NOTE_APPLY_REMOVED 回执：{:?}", r.removed);
+        assert!(r.removed[0].contains("ship_doctrine"), "{:?}", r.removed);
+        assert_eq!(state.ship_doctrine(ship.clone()), record, "删叶之后有效风格必须回到出厂快照");
+        assert!(
+            state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
+            "叶必须真的没了"
+        );
+
+        // ④ 幂等：再删一次不报错、不算丢弃、也不进 `removed`（目标状态已经达成）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert!(r.removed.is_empty(), "删一片本来就不存在的叶不进回执：{:?}", r.removed);
+        assert_eq!(r.applied, 1, "但它是**成功的**（目标状态达成），不是被丢弃");
+
+        // ⑤ `remove` 与值同时出现 ⇒ **拒绝**（任何一种静默优先级都会让人误判另一件事发生了）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true, "temper": 0.5}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert_eq!(r.skipped.len(), 1, "{:?}", r);
+        assert_eq!(r.skipped[0].code, "remove_conflicts_with_value");
+        assert_eq!(state.ship_doctrine(ship.clone()), record, "被拒绝的补丁一个字节都不许动");
+    }
+
+    /// 删叶的三个边角：**势力级默认叶**（删了 ⇒ 这一层不再供值）、**舰已不在**（陈叶清理）、
+    /// 以及**预算/迁都**这几片同形的叶（同一套规则，不是只给风格轴开的后门）。
+    #[test]
+    fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+
+        // 势力级默认风格：建成"玩家表态"的叶 ⇒ 叶 Inherit 的舰取它的值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"temper": 0.4, "lone_wolf": -0.6, "mode": "Player"}}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        assert_eq!((state.ship_doctrine(ship.clone()).temper, state.ship_doctrine(ship.clone()).lone_wolf), (0.4, -0.6));
+
+        // 删掉这片默认叶 ⇒ 这一层不再供值（回落到舰上记录值 / 作用域链）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"remove": true}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
+        assert!(state.control.get(&fid).and_then(|c| c.default_doctrine.as_ref()).is_none());
+        let rec = state.ship(&ship).unwrap().doctrine;
+        assert_eq!(state.ship_doctrine(ship.clone()), rec, "默认叶没了 ⇒ 回落到舰上记录值");
+
+        // 舰已不在（战沉/换代）：它的陈叶仍然能被删掉——删的是**控制面**里的叶，不要求实体还在。
+        state.ships.retain(|s| s.name != ship);
+        state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_doctrine
+            .insert(ship.clone(), Control::inherit(ShipDoctrine { temper: 0.9, lone_wolf: 0.9 }));
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean(), "删陈叶不该因为舰没了而被丢弃：{:?}", r.skipped);
+        assert_eq!(r.removed.len(), 1, "陈叶也是真的被删掉了：{:?}", r.removed);
+
+        // 预算叶与迁都叶：同一套 `remove` 语义（这里只钉"删得掉"，值语义由各自的取值规则决定）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "investment_budget": [{"resource": "铁", "value": 3.0}],
+                "capital": {"value": "地球", "mode": "Player"}}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "investment_budget": [{"resource": "铁", "remove": true}],
+                "capital": {"remove": true}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(r.removed.len(), 2, "{:?}", r.removed);
+        let c = state.control.get(&fid).expect("control");
+        assert!(c.investment_budget.get("铁").is_none() && c.capital.is_none());
+    }
+
+    /// **两轴叶的"新建"必须两条轴一起给**：`default_doctrine` 只给一条轴的话，另一条会静默
+    /// 变成 `0.0`（= 基线），而 `0.0` 是个正常取值——事后从读面完全看不出来全舰队的风格被改了。
+    /// 叶**已存在**时单轴写仍然合法（那时"缺省 = 保留现值"是真的）。
+    #[test]
+    fn a_two_axis_fleet_default_must_be_created_with_both_axes() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+
+        // ① 叶还不存在 + 只给一条轴 ⇒ 拒绝，并**不许留下半片叶**。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"temper": 0.4}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert_eq!(r.skipped.len(), 1, "{:?}", r);
+        assert_eq!(r.skipped[0].code, "partial_doctrine_leaf");
+        assert!(r.skipped[0].reason.contains("两条轴"), "拒绝理由要给改法：{}", r.skipped[0].reason);
+        assert!(
+            state.control.get(&fid).and_then(|c| c.default_doctrine.as_ref()).is_none(),
+            "被拒绝的补丁不许留下半片叶"
+        );
+
+        // ② 只写 `mode`（先表态归属）合法 —— 值那两条轴暂时都是 0.0（引擎的 `ShipDoctrine::default()`）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"mode": "Player"}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean() && r.took_over.is_empty(), "只写 mode 不是接管：{:?}", r.took_over);
+        let leaf = state.control[&fid].default_doctrine.clone().expect("叶建出来了");
+        assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.0, 0.0));
+
+        // ③ 叶已存在 ⇒ 单轴写合法，缺省轴保留现值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"lone_wolf": -0.5}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        let leaf = state.control[&fid].default_doctrine.clone().expect("叶还在");
+        assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.0, -0.5));
+
+        // ④ 删掉之后"叶不存在"这条状态又回来了 ⇒ 再单轴写还是被拒（守卫看的是存在性，不是次数）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"remove": true}}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().removed.len() == 1);
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_doctrine": {"lone_wolf": -0.5}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert_eq!(r.skipped.len(), 1, "{:?}", r);
+        assert_eq!(r.skipped[0].code, "partial_doctrine_leaf");
+    }
+
+    /// 逐舰**两轴叶**的单轴写：缺的那条轴种的是**这艘舰当时在用的那一条**——没有舰队默认时
+    /// 正是出厂记录值（`0.71`），有玩家默认时是默认值（界面上显示的就是它）。**绝不是一个
+    /// 凭空来的 `0.0`**（那正是 §3.1 那个坑的形态）。
+    #[test]
+    fn a_single_axis_ship_leaf_seeds_the_other_axis_from_what_is_in_use() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+        for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
+            s.doctrine = ShipDoctrine { temper: 0.71, lone_wolf: -0.2 };
+        }
+
+        // 没有舰队默认 ⇒ 缺省轴 = 出厂记录值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "temper": 0.5}]}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        let leaf = state.control[&fid].ship_doctrine[&ship].clone();
+        assert_eq!((leaf.value.temper, leaf.value.lone_wolf), (0.5, -0.2), "缺省轴要种出厂记录值，不是 0.0");
+
+        // 舰队默认是玩家表态 ⇒ 缺省轴 = **当时在用的那个数**（界面上显示的就是它）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "ship_doctrine": [{"ship": ship, "remove": true}],
+                "default_doctrine": {"temper": 0.1, "lone_wolf": 0.9, "mode": "Player"}}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "temper": 0.5}]}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        let leaf = state.control[&fid].ship_doctrine[&ship].clone();
+        assert_eq!(
+            (leaf.value.temper, leaf.value.lone_wolf),
+            (0.5, 0.9),
+            "船正在跟随舰队默认 ⇒ 另一条轴种的是默认值（UI 上显示的数）"
+        );
     }
 }

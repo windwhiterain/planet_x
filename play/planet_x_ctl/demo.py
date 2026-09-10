@@ -267,9 +267,10 @@ def main(argv=None) -> int:
     check("C: took_over 恰好是刻意的那几片叶", rep_c.took_over == expected_took, f"{rep_c.took_over}")
     check("C: took_over_leafs 也一一对应", rep_c.took_over_leafs == expected_took,
           f"{rep_c.took_over_leafs}")
-    check("C: 顺带变动只有那几处隐含的 mode 翻转",
+    check("C: 顺带变动只有那几处隐含的 mode 翻转（+ 那片叶从无到有）",
           {(c.leaf, c.field, c.after) for c in rep_c.incidental}
-          == {(leaf, "mode", ctl.PLAYER) for leaf in rep_c.took_over_leafs},
+          == ({(leaf, "mode", ctl.PLAYER) for leaf in rep_c.took_over_leafs}
+              | {(leaf, "exists", True) for leaf in rep_c.took_over_leafs}),
           f"{[(c.leaf, c.field, c.before, c.after) for c in rep_c.incidental]}")
 
     # ---------------------------------------------------------------- 5. determinism

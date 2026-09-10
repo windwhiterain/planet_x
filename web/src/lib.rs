@@ -619,15 +619,25 @@ mod tests {
 
     /// 起始端口空着时，自动模式**必须**原样用它——「`3000` 空着就和从前一样」是这条
     /// 特性的全部兼容性承诺，破了它等于偷偷改掉所有人的 URL。
+    ///
+    /// 「空着」的前提是「问内核要一个空闲端口 → 放手 → 交给 `bind_auto`」，而这两步之间那个
+    /// 端口可能被**别人**抢走（同一进程里并行的测试、一次出向连接都算）。所以这里**重试**：
+    /// 被抢走时的症状是 `bind_auto` 返回了**别的**端口，而重试能把它与"实现真的用了起始
+    /// 端口"区分开。实测在 `cargo test --workspace` 的并行跑里偶发（单独跑 5/5 通过）。
     #[tokio::test]
     async fn bind_auto_keeps_the_base_port_when_it_is_free() {
-        // 先问内核要一个肯定空闲的端口，再放手把它交给 `bind_auto`。
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        for attempt in 1..=8 {
+            // 先问内核要一个肯定空闲的端口，再放手把它交给 `bind_auto`。
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
 
-        let listener = bind_auto("127.0.0.1", port, 16).await.expect("一个刚放手的端口能重绑");
-        assert_eq!(listener.local_addr().unwrap().port(), port);
+            let listener = bind_auto("127.0.0.1", port, 16).await.expect("一个刚放手的端口能重绑");
+            if listener.local_addr().unwrap().port() == port {
+                return;
+            }
+            assert!(attempt < 8, "连续 8 个「刚放手的端口」都被抢走了 —— 这不像是巧合");
+        }
     }
 
     /// 占用时**让位**：向上扫到下一个空闲端口，而不是把「地址已占用」原样抛出去——
@@ -969,5 +979,56 @@ mod tests {
             edited(&before).4,
             "收回表态后归属回到链上（与最初一致）"
         );
+    }
+
+    /// 「恢复出厂值」（**删叶**）走 web 的写面：前端那个按钮发的就是
+    /// `{"ship": …, "remove": true}`。它与「恢复继承」（只写 mode）**不是**一回事——
+    /// 叶只要还在，引擎就优先用叶里的值，所以只有删掉它才能回到出厂快照。
+    #[test]
+    fn removing_a_ship_style_leaf_returns_the_factory_record() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        let ship = w
+            .state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("这个势力得有舰");
+        // 出厂记录值给成非零（`config/*.ron` 从没填过风格，开局是 {0,0}，那样分不出
+        // "回到出厂值"和"钉在 0"）。
+        for s in w.state.ships.iter_mut().filter(|s| s.faction_id == fid) {
+            s.doctrine = planet_x::model::ShipDoctrine { temper: 0.71, lone_wolf: -0.2 };
+        }
+        let record = w.state.ship(&ship).unwrap().doctrine;
+
+        // ① 先写一片叶（两轴一起给，避免 `partial_doctrine_leaf`）。
+        let take: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "ship_doctrine": [{ "ship": ship, "temper": -1.0, "lone_wolf": 0.5 }] }]
+        }))
+        .unwrap();
+        assert!(apply_diff(&mut w.state, &w.config, &take).is_clean());
+        assert_eq!(w.state.ship_doctrine(ship.clone()).temper, -1.0);
+
+        // ② 前端那个按钮的补丁：只带身份键 + `remove`。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "ship_doctrine": [{ "ship": ship, "remove": true }] }]
+        }))
+        .unwrap();
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "{:?}", report.skipped);
+        assert_eq!(report.removed.len(), 1, "删叶要有回执：{:?}", report.removed);
+        assert_eq!(w.state.ship_doctrine(ship.clone()), record, "删叶之后必须回到出厂记录值");
+        assert!(
+            w.state.control.get(&fid).and_then(|c| c.ship_doctrine.get(&ship)).is_none(),
+            "这片叶必须真的没了（前端「当前跟随」那行会立刻改口）"
+        );
+        // 读面仍然给这艘舰一行（值 = 有效值 = 出厂值）——前端不必为"叶不存在"特判。
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        let row = fc.ship_doctrine.into_iter().find(|e| e.ship == ship).expect("每艘舰一行");
+        assert_eq!((row.temper, row.lone_wolf), (record.temper, record.lone_wolf));
+        assert_eq!(row.mode, ControlMode::Inherit);
     }
 }

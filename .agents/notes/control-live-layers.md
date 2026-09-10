@@ -142,20 +142,22 @@ s.set_default_doctrine("中国", lone_wolf=-0.4, take_over=True)   # 只写一�
 （叶已存在时仍然允许只改一条轴，那时"缺省 = 保留现值"是真的）。这条与
 `agent-play-friction.md` 的「宁可在配方期报错」同源。
 
-* ✅ **已裁决（2026-10，用户确认）**：**(ii) + (iv)，不动叶值形状**。
+* ✅ **已裁决（2026-10，用户确认）**：**(ii) + (iv)，不动叶值形状**。**已实现**，见 §11。
   * **逐舰**（`ship_doctrine`）：叶不存在时，缺的那条轴**从这艘舰的记录值 `Ship.doctrine` 种上**
     —— 引擎手里就有这个数，而"只改一条轴"的直觉含义正是"另一条保持它现在的样子"。
+    ⚠ **本轮实测修正**：代码里那条路种的是**这艘舰当时在用的那条轴**
+    （`let base = state.ship_doctrine(ship)`）——没有舰队默认时**正是记录值**（这条逐字成立），
+    舰队默认是玩家时是**默认值**（而界面显示的也正是它，所以这才是对的：只动一条轴不该让
+    界面上另一个数凭空跳回出厂值）。真正会变 `0.0` 的只有**势力级**那条建叶分支
+    （`Control::inherit(ShipDoctrine::default())`）——即下面那一条。两条路都补了测试。
   * **势力级**（`default_doctrine`）：没有"单一的现有值"可种（舰队里各舰记录值可能不同），
-    所以**要求两条轴一起给**；只给一条 ⇒ **响亮拒绝**（把 kit 的 `_require_both_axes` 搬进引擎，
-    错误信息里给出改法）。
+    所以**要求两条轴一起给**；只给一条 ⇒ **响亮拒绝**（`partial_doctrine_leaf`，错误信息里
+    给出三条改法：两条轴一起给 / 先只写 `mode` / `remove` 删掉这片叶）。实现见 §11.2。
   * **不选 (iii)**（两轴各自 `Option` = 逐轴继承）：表达力最强，但要动叶值形状、读面、
     `--control` 模板、kit 的 `LEAF_KINDS`/`_VALUE_FIELD`、web 编辑器与 `SCHEMA_VERSION` 迁移，
     而且链要从"按**叶**解析 mode"变成"逐**轴**解析"——而它唯一多出来的能力（舰队级只钉一条轴）
     几乎只有逐舰叶才需要 ⇒ 收益/代价不成比例。真出现需求再回来拆。
-  * **实现要点**（下一步做）：`apply_patch` 的两处建叶分支（`src/control.rs:762` 起与逐舰那条）+
-    一个新的拒绝码（建议 `partial_doctrine_leaf`，走既有的 `WARN_APPLY_SKIPPED` 通道）+
-    守卫测试（"势力级单轴新建 ⇒ 拒绝；叶已存在 ⇒ 允许；逐舰单轴 ⇒ 种记录值而不是 0"）。
-    **不升 `SCHEMA_VERSION`。**
+  * **不升 `SCHEMA_VERSION`** ✅（叶值形状没动；`remove` 只是**写面**多了一个字段）。
 
 ### 3.2 已查实：**风格轴今天没有执行者**（`Auto` 在风格轴上是空头承诺）
 
@@ -306,15 +308,16 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 | # | 做什么 | 验收判据 |
 | --- | --- | --- |
 | 1 | ~~**web 三条**（§8 的 1/2/3/5；纯前端）~~ → `[x]` **已完成**（`feature/web-control-panel-ux`，提交 `f673bac`，见 §10） | ✅ 全测绿 + 实机点通：改一格→应用→刷新仍在；**把值改回原数不钉 `Player`**；只回传差异 ⇒ 别的势力的叶一个都没多 |
-| 2 | **两轴叶**（§3.1 的裁决；引擎十来行 + 守卫） | 新守卫：势力级单轴新建 ⇒ 拒绝、叶已存在 ⇒ 允许、逐舰单轴 ⇒ 种**记录值**而不是 0；行为中性（同 seed `--digest` 逐字不变） |
+| 2 | ~~**两轴叶**（§3.1 的裁决；引擎十来行 + 守卫）~~ → `[x]` **已完成**（`feature/leaf-existence`，与下面的删叶一起做，见 §11.2） | ✅ 守卫齐了：势力级单轴新建 ⇒ `partial_doctrine_leaf`、叶已存在 ⇒ 允许、逐舰单轴 ⇒ 种"当时在用的那条"（无默认时正是记录值）；行为中性（同 seed `--digest` 逐字不变） |
+| 2b | **删叶（方案 A，§10.4）** → `[x]` **已完成**（同一分支，见 §11.1） | ✅ `remove: true` 十条叶全支持 + `NOTE_APPLY_REMOVED` 回执 + kit 的 `remove_*` + web 的「恢复出厂值」；实机删叶后逐舰风格真的回到出厂快照 |
 | 3 | **蓝图**（`ship-blueprint-spec.md` §8.0 的全部裁决 + 附 A 改动地图），**连同 `spawned_round` 一次升 `SCHEMA_VERSION`**（⚠ 现在是 **7 → 8**：`feature/freight-collection` 已把 v7 用掉了，见 §10.5） | spec §7 的测试计划全绿 + 旧档迁移**零信息损失**说明 + 老开局逐字节中性（`--digest` 对照）+ 长局 harness |
 
 > 顺序的理由：1 是纯前端且当天可验（还顺手把 §3.2 的假话改掉）；2 是十来行但**现在就能从 web 踩到**
 > （静默改数）；3 要升档 + 迁移，值得等 1/2 落地、读面稳定之后再动。
 >
-> ⚠ ① 落地后**没有**关掉 §3.1 那个坑：势力级两轴叶「单轴新建 ⇒ 另一条轴变 0」仍然在引擎里
-> （① 只是让界面不去踩它：壳被碰过就整片发）。所以 ② 照原计划做，且 ① 的补丁形状
-> （完整的两轴新建）已经是 ② 落地后仍然合法的形状（见 §10.2）。
+> ⚠ ① 落地后**没有**关掉 §3.1 那个坑：势力级两轴叶「单轴新建 ⇒ 另一条轴变 0」当时仍然在引擎里
+> （① 只是让界面不去踩它：壳被碰过就整片发）。**② 已把它关掉**（引擎响亮拒绝），
+> 且 ① 的补丁形状（完整的两轴新建）仍然合法。
 
 ## 10. 本轮：控制面板三条落地（`feature/web-control-panel-ux`，提交 `f673bac`）
 
@@ -402,16 +405,17 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
   采用」——与上面那段**代码相反**（那条描述对势力级默认叶成立，对逐舰叶不成立）。文档与代码
   必须先对齐一个，否则下一个读这段的人还会踩。
 
-**候选（未裁决，等用户挑）**：
+**候选（✅ 用户已选 A，本轮已实现 —— 见 §11）**：
 
 | | 做什么 | 代价 |
 | --- | --- | --- |
-| **A** | 补丁加**删叶**（如 `{"ship":"X","remove":true}`）：`恢复出厂值` 才真正做得到；kit 的 `Surface` 与 web 各加一个动作 | 引擎 + kit + web 三处；要给 `remove` 定语义（舰队级/逐舰、与 `mode` 并存时谁优先） |
+| **A** ✅ | 补丁加**删叶**（`{"ship":"X","remove":true}`）：`恢复出厂值` 才真正做得到；kit 的 `Surface` 与 web 各加一个动作 | 引擎 + kit + web 三处；要给 `remove` 定语义（舰队级/逐舰、与 `mode` 并存时谁优先）→ 三条规则见 §11.1 |
 | **B** | 把逐舰叶的取值对齐文档（叶 `Inherit` ⇒ 一律走默认/记录值，只有叶有表态时才用叶值） | 会推翻 §7 的"逐舰叶读面给有效值 + 只改一条轴保留现值"那套；`--digest` 从"行为中性"变成"要重标"；但"没表态就没用"与「写值即接管」更自洽 |
-| **C** | 什么都不做：把两行 hint 说清楚（**本轮已做**）+ 把"删叶"留在话题里 | 「我碰过这格、现在想还给它」只能靠舰队默认或重新开局 |
+| **C** | 什么都不做：把两行 hint 说清楚（§10 已做）+ 把"删叶"留在话题里 | 「我碰过这格、现在想还给它」只能靠舰队默认或重新开局 |
 
-> 我的倾向：**A**。C 已经落地了，B 会动到刚验过的那套读面语义；而 A 是纯增量、与 ② 同源
-> （都在"叶的存在性"这件事上给用户一个明确动作）。但这属于要用户拍板的那类，先不动。
+> 用户选了 **A**。B 仍留在桌上：`remove` 让"没表态就没用"这件事有了出口，但**取值规则**本身
+> （叶存在就用叶值）没变——`src/control.rs` 那段读面文档（§10.4 附带发现）本轮改成了实话，
+> 代码没动。
 
 ### 10.5 顺带修的小东西 / 记下的边角
 
@@ -434,3 +438,89 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 * **一个与本题无关的编译警告**（`main` 上就有，来自 MOND 概率化那次合并）：
   `src/sim.rs:2371 pub(crate) fn mond_arrival_chance` 从未被使用 ⇒ `cargo build` 一直有一条
   `dead_code`。没在本分支动它（不想在纯前端分支里改引擎），但它该被清掉。
+
+## 11. 本轮：两轴叶（②）+ 删叶（方案 A）（`feature/leaf-existence`）
+
+引擎（`src/control.rs`、`src/main.rs`、`src/agent.rs` 一处夹具）+ kit（`play/planet_x_ctl`）
++ web 前端（`web/static/app.js` / `style.css`、`web/src/lib.rs` 的测试）。
+**不升 `SCHEMA_VERSION`**（叶值形状没动，`remove` 只是写面多一个字段）；同 seed `--digest`
+逐字节不变（见 §11.4）。
+
+### 11.1 删叶的三条规则（A 的实现）
+
+`remove: bool` 加在**十个控制叶补丁**上：`DefaultShipOrder` / `DefaultDoctrine` / `DefaultKiting`、
+`ShipOrderPatch` / `ShipDoctrinePatch` / `ShipKitingPatch`、`BudgetPatch`、`InvestWeightPatch` /
+`BuildWeightPatch`、`LoyaltyBudgetPatch`、`CapitalPatch`（`BuildingPatch` 早就有同名的 `remove`，
+但那是**结构性**的——删一座建筑；语义不同、名字刻意相同）。
+
+1. 删的是**控制面里那片叶**，**不要求实体还在**（舰战沉 / 城易主 / 建筑没了 / 资源 key 已删
+   都能删）⇒ 顺带是清理陈叶的路；
+2. 叶本来就不存在 ⇒ **幂等成功**（`applied += 1`、**不进** `removed`、不报 `skip`）——
+   "目标状态达成了"与"改一个值"是两种成功；
+3. `remove` 与任何值 / `mode` 字段同时出现 ⇒ **拒绝**（新码 `remove_conflicts_with_value`）：
+   一条同时说着"删掉它"和"把它设成 0.5"的补丁没有正确答案，静默优先级 = 又一次
+   "失败看起来像成功"。
+
+回执：`ApplyReport.removed`（只记**真的**删掉的）+ CLI stderr `NOTE_APPLY_REMOVED`（与
+`NOTE_APPLY_TOOKOVER` 对称）；web 的 `POST /api/command` 照旧忽略。
+
+实现上把每片叶的"删 / 写"抽成了十个 `apply_*` 助手，`apply_diff` 只剩调用。理由不是行数：
+`remove` 的冲突检查与幂等语义必须在**每一片**叶上完全一致，而原先那十个内联块已经开始互相漂移。
+
+> ⚠ **一个被 kit 的 demo 当场抓出来的线格式坑**：读面复用 `DefaultShipOrder` / `DefaultDoctrine` /
+> `DefaultKiting` 来**回显**叶片，于是 `remove` 会以 `"remove": false` 出现在 `--control` 里；
+> 而 kit 的 `verify` 是按字段比对读面的 ⇒ 每一步都会多出一列"假变动"。
+> 修法：`#[serde(default, skip_serializing_if = "is_false")]`——只在真的要删叶时才出现在线格式里。
+> 又一次"契约有两端"：**emitter 一改，consumer 立刻报出来**（这次是好事）。
+
+### 11.2 两轴叶（② 的实现）
+
+* **势力级** `default_doctrine`：叶**不存在** + 只给一条轴 ⇒ `partial_doctrine_leaf` 拒绝，
+  理由里给三条改法（两条轴一起给 / 先只写 `mode` / `remove` 删掉这片叶）；叶已存在时单轴写
+  照旧合法（缺省轴保留现值）。
+* **逐舰**：代码本来就是对的（缺省轴取"当时在用的那条"，见 §3.1 的实测修正），本轮**补测试**把
+  两种情形钉住：没有舰队默认 ⇒ 种**出厂记录值**；舰队默认是玩家 ⇒ 种**默认值**（界面上显示的
+  那个数）。**绝不是一个凭空来的 `0.0`。**
+* kit 的 `_require_both_axes` 保留（配方期报错比 apply 期报错早），文档改成"引擎也会拒绝"。
+
+### 11.3 三端接口（A 落地后）
+
+| 端 | 动作 |
+| --- | --- |
+| 引擎 | 写面 `remove: true`；拒绝码 `partial_doctrine_leaf` / `remove_conflicts_with_value`；回执 `removed` → `NOTE_APPLY_REMOVED` |
+| kit | `Surface.remove(faction, kind, key)` + `remove_doctrine` / `remove_kiting` / `remove_default_doctrine` / `remove_default_kiting` / `remove_default_ship_order`；`Report.removed` / `removed_leafs`；`_leaf_fields` 给**势力级**单片叶多一个 `exists` 字段（读面 `null` 就是"没有这片叶"）；`verify` 把删叶请求按**回执**判落地（读面永远没有 `remove` 字段） |
+| web | 行上第二个动作「**恢复出厂值**」（与「恢复继承」并存，各自写在按钮上）：标记 → 发 `{"…","remove":true}`；只在 `state.control` 里**真的**有这片叶时出现；标记后隐藏编辑器 + 一行说明；再点一次取消。§10.4 那个"叶在、mode 是 Inherit"的状态下它照样在——那正是它存在的理由 |
+
+### 11.4 验证
+
+* `cargo test --workspace` 全绿：`planet_x` lib **104**+1ignored（新增 4 条：删叶回源、
+  删叶的三个边角（势力级 / 舰已不在的陈叶 / 预算与迁都）、两轴叶新建守卫、逐舰单轴种子）、
+  `longhorizon` 6+10ignored、`projection_derived` 4、`planet_x_web` **17**（新增删叶往返）。
+* **行为中性**：`--seed 42 --round 240 --digest 20` = `70D5A34E…D901`，与 `main`（`d452481`）
+  上同一条命令**逐字节相同**。应然：`remove` 不请求就不发生，② 那两条路只接管以前会**静默改数**
+  的补丁。
+* **kit**：`demo.py` 全部断言通过（并顺手修了它对 C 的断言：现在多一条 `exists` 翻转，
+  那是**真的**"这片叶从无到有"）；另跑了一次端到端脚本（`scratch/kit_remove_check.py`，未入库）：
+  写叶 → 删叶（回执里出现它）→ 读面回到出厂 `{0,0}` → **幂等**再删 → 单轴新建被 kit 与引擎
+  **各拒一次** → 删势力级默认叶，全部通过。
+* **实机 web**（`scripts/web.ps1`，3001，pid 47888）：舰队默认风格设玩家 + 长城风格 `0.7` → 应用；
+  点「恢复出厂值」发出的正是 `{"ship_doctrine":[{"ship":"长城","remove":true}]}` → 应用后
+  `state.control.中国.ship_doctrine == {}`、那一行改口成「当前跟随：舰队默认（… -0.40）」；
+  再把舰队默认也删掉 → `default_doctrine: null`、那一行改口成「当前跟随：出厂快照（+0.00）」；
+  全程另外 8 个势力**一个字节没动**（`world.control` 别的势力段逐字节相同）。
+
+### 11.5 顺带
+
+* 修了一个**偶发失败**的测试（`web/src/lib.rs::bind_auto_keeps_the_base_port_when_it_is_free`）：
+  它"问内核要一个空闲端口 → 放手 → 重绑"，而两步之间那个端口会被并行测试或一次出向连接抢走
+  （实测 `cargo test --workspace` 里偶发，单独跑 5/5 通过）。改成重试 8 次，失败信息里说清
+  「返回了**别的**端口」与「实现没用起始端口」的区别。
+* `src/control.rs` 那段读面文档（§10.4 的附带发现）改成实话：**逐舰**叶"存在就用叶里的值"，
+  与 `mode` 无关；只有**势力级**默认叶才是"自身 `Player` 才供值"。
+  （方案 B 没做：取值规则本身没变。）
+
+### 11.6 下一步
+
+③ **蓝图**（`ship-blueprint-spec.md` §8.0 十条裁决 + 附 A 改动地图），连同 `spawned_round`
+一次升 `SCHEMA_VERSION` **7 → 8**。⚠ 蓝图那一步要注意：`order_source` 必须把
+「叶不存在」与「叶写着 `Inherit`」分开报——本轮已经证明这两者在**取值**上不等价。

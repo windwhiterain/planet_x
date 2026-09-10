@@ -270,7 +270,9 @@ mod tests {
         let diff = serde_json::json!({
             "control": [{"faction_id": fid,
                 "default_kiting": {"kiting": -1.0, "mode": "Player"},
-                "default_doctrine": {"temper": 0.5, "mode": "Player"}}]
+                // `default_doctrine` 是**两轴一片叶**：这片叶还不存在时必须两条轴一起给
+                // （只给一条 ⇒ `partial_doctrine_leaf` 拒绝，见 control.rs）。
+                "default_doctrine": {"temper": 0.5, "lone_wolf": 0.0, "mode": "Player"}}]
         });
         crate::control::apply_patch(&mut state, &cfg, &diff).expect("默认风格 applies");
 

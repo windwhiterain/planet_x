@@ -770,6 +770,12 @@ q.cities(12).explode("buildings").assign(
 2. **读面契约两端一起动**：新列（`order_source` 等）要同时进 `projection_schema()`、`planet_xq`、
    `planet_x_ctl` 的 `LEAF_KINDS`、`agent-play.md` 的链描述——这轮已经因为漏掉消费者而两次踩坑
    （`engine-data-plane.md` §8.1/§8.7），别犯第三次。
+3. **⚠ `order_source` 必须把「叶不存在」与「叶写着 `Inherit`」分开报**（本轮新查实，
+   `control-live-layers.md` §10.4/§11）：这两者在**归属**上等价、在**取值**上不等价——
+   `State::ship_doctrine` 是 `leaf.map(|l| l.value).unwrap_or(record)`，所以"叶存在但没表态"
+   照样用它叶里的值，只有叶**不存在**才回落到出厂记录值。蓝图那一步要给"回出厂快照"一个动作，
+   而引擎刚从补丁层拿到了它（`remove: true` 删叶 + `NOTE_APPLY_REMOVED`，`control-live-layers.md` §11.1）：
+   图层的意图轴若要表达"我不管"，得想清楚是写 `Inherit` 还是**删掉这片叶**——两者后果不同。
 
 **动手顺序（用户已确认）**：① web 三条（`control-live-layers.md` §8）→ ② 两轴叶（同篇 §3.1）
 → ③ 本规格（连同 Q9 一次升 `SCHEMA_VERSION` 8）。

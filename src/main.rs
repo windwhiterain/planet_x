@@ -309,6 +309,20 @@ fn main() {
                         })
                     );
                 }
+                // 「删叶」的回执：这些叶片被真的删掉了 ⇒ 有效值**换了来源**（逐舰风格回出厂快照 /
+                // 舰队默认回「没有说话」）。删一片本来就不存在的叶是幂等的，不进这个列表。
+                if !report.removed.is_empty() {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "code": "NOTE_APPLY_REMOVED",
+                            "applied": report.applied,
+                            "removed": report.removed,
+                            "hint": "those control leaves are gone: what they used to supply now comes from the next layer (per-ship style falls back to the factory record, a fleet default falls back to the scope chain).",
+                        })
+                    );
+                }
             }
         }
     }

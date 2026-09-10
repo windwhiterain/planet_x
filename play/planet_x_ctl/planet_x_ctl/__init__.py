@@ -820,20 +820,22 @@ class Surface:
         """Refuse to create a **two-axis** leaf from a single-axis patch.
 
         The engine speaks two axes in one leaf (``temper`` + ``lone_wolf``) and, when the leaf does
-        **not exist yet**, creates it from ``ShipDoctrine::default()`` — i.e. the axis you did *not*
-        mention becomes ``0.0``. That is a silent fleet-wide change (and 0.0 is a meaningful,
-        "textbook" temperament, so nothing looks wrong afterwards). The kit therefore demands both
-        axes on a *new* leaf, and stays permissive once the leaf exists (there "缺省轴保留现值").
+        **not exist yet**, creating it from a single axis used to fill the axis you did *not* mention
+        with ``0.0`` — a silent fleet-wide change (and 0.0 is a meaningful, "textbook" temperament, so
+        nothing looks wrong afterwards). The engine now **rejects** that patch itself
+        (``partial_doctrine_leaf``, see ``notes/control-live-layers.md`` §3.1); this check stays
+        because a recipe should fail while you are still writing it, not at apply time.
         """
         if temper is not None and lone_wolf is not None:
             return
         if self.leaf(faction, kind, key).exists:
             return
         raise ValueError(
-            f"{what}：`{faction}.{kind}` 这片叶**还不存在**，而引擎新建叶片用的是 "
-            f"`ShipDoctrine::default()` —— 你只写了**一条轴**，另一条会被初始化成 0.0"
-            f"（不是「保留出厂值」）。0.0 是个正常取值，事后看不出问题，所以这里直接拒绝："
-            f"两条轴一起给（temper=…, lone_wolf=…）。"
+            f"{what}：`{faction}.{kind}` 这片叶**还不存在**，而这片叶装的是**两条轴**——"
+            f"只写一条会把另一条静默定成 0.0（不是「保留出厂值」），0.0 又是个正常取值，"
+            f"事后看不出问题，所以这里直接拒绝（引擎也会拒绝，码 `partial_doctrine_leaf`）。"
+            f"三条路：① 两条轴一起给（temper=…, lone_wolf=…）；② 先只写 mode=…（先表态归属）；"
+            f"③ {kind}=… 这片叶本来就不该存在 ⇒ 用 clear_* / remove 删掉它。"
         )
 
     # -- mutations: ship ownership & behavior ------------------------------------------
@@ -1095,6 +1097,55 @@ class Surface:
             if m is not None:  # pragma: no cover
                 patch["mode"] = m
         self._add(faction, "capital", (), patch)
+        return self
+
+    # -- mutations: deleting leaves ("remove") ----------------------------------------
+
+    def remove(self, faction: str, kind: str, key: Any = None) -> "Surface":
+        """**删掉一片控制叶**（引擎的 `remove: true`）：这一层回到「没有说话」。
+
+        与「把 `mode` 改回 `Inherit`」**不是**一回事：只要那片叶还在，取值就优先用**叶里的值**
+        （``State::ship_doctrine`` 是 ``leaf.map(|l| l.value).unwrap_or(record)``，与 `mode` 无关）。
+        所以想让一艘舰**真的回到出厂快照**（或让势力级默认不再供值），只能删叶。
+        删一片本来就不存在的叶是幂等的（引擎既不报丢弃、也不进 `NOTE_APPLY_REMOVED`）。
+
+        ``key`` 与读面同形：逐舰叶给舰名、预算叶给资源名、权重叶给 ``(城, 建筑下标)``、
+        势力级单片叶不给（``None``）。名字用 :meth:`remove` 而不是 ``clear`` 是为了和引擎
+        补丁里的字段同名——同一件事在两处叫两个名字正是这个仓库反复吃亏的地方。
+        """
+        self._require_faction(faction)
+        key = _normalize_key(kind, key)
+        patch: dict = {"remove": True}
+        for f, v in zip(LEAF_KINDS[kind], key):
+            patch[f] = v
+        self._add(faction, kind, key, patch)
+        return self
+
+    def remove_doctrine(self, selection: Any) -> "Surface":
+        """逐舰：删掉**风格叶** ⇒ 这些舰的风格回到「舰队默认 / 出厂快照」。"""
+        for faction, ship in self._ship_pairs(selection):
+            self._add(faction, "ship_doctrine", (ship,), {"ship": ship, "remove": True})
+        return self
+
+    def remove_kiting(self, selection: Any) -> "Surface":
+        """逐舰：删掉**风筝姿态叶** ⇒ 回到「舰队默认 / 出厂快照」。"""
+        for faction, ship in self._ship_pairs(selection):
+            self._add(faction, "ship_kiting", (ship,), {"ship": ship, "remove": True})
+        return self
+
+    def remove_default_doctrine(self, faction: str) -> "Surface":
+        """势力级：删掉**默认风格叶** ⇒ 这一层不再供值（回落到作用域链 / 舰上记录值）。"""
+        self._add(faction, "default_doctrine", (), {"remove": True})
+        return self
+
+    def remove_default_kiting(self, faction: str) -> "Surface":
+        """势力级：删掉**默认风筝姿态叶** ⇒ 这一层不再供值。"""
+        self._add(faction, "default_kiting", (), {"remove": True})
+        return self
+
+    def remove_default_ship_order(self, faction: str) -> "Surface":
+        """势力级：删掉**舰队默认指令叶** ⇒ 没有自己叶片的舰回落到 `Idle` / 作用域链。"""
+        self._add(faction, "default_ship_order", (), {"remove": True})
         return self
 
     def set_scope(self, *, global_mode: str | None = None,
@@ -1604,6 +1655,8 @@ class Report:
     skipped: list[dict] = _dc_field(default_factory=list)
     took_over: list[str] = _dc_field(default_factory=list)
     took_over_leafs: list[str] = _dc_field(default_factory=list)
+    removed: list[str] = _dc_field(default_factory=list)
+    removed_leafs: list[str] = _dc_field(default_factory=list)
     applied: int = 0
     applied_from: str = "engine"
     honesty: str = _HONESTY
@@ -1664,7 +1717,8 @@ class Report:
         return {
             "ckpt": self.ckpt, "ok": self.ok, "exit_code": self.exit_code, "error": self.error,
             "applied": self.applied, "skipped": self.skipped, "took_over": self.took_over,
-            "took_over_leafs": self.took_over_leafs,
+            "took_over_leafs": self.took_over_leafs, "removed": self.removed,
+            "removed_leafs": self.removed_leafs,
             "requests": [r.as_dict() for r in self.requests],
             "changes": [c.as_dict() for c in self.changes],
             "receipt": self.receipt, "honesty": self.honesty,
@@ -1676,9 +1730,12 @@ class Report:
                  f"applied={self.applied} ({self.applied_from}) requested={len(self.requests)} "
                  f"changed={len(self.changed)} noop={len(self.noop_requests)} "
                  f"skipped={len(self.skipped)} took_over={len(self.took_over)} "
+                 f"removed={len(self.removed)} "
                  f"incidental={len(self.incidental)} ok={self.ok}"]
         if self.error:
             lines.append(f"  ERROR: {self.error}")
+        for leaf in self.removed_leafs or self.removed:
+            lines.append(f"  removed: {leaf}（这片叶被真的删掉了 ⇒ 取值换来源）")
         for r in self.failed_requests:
             lines.append(f"  REQUESTED-BUT-NOT-LANDED: {r.leaf}.{r.field} "
                          f"(asked {r.value!r}, read face now {r.after!r})")
@@ -1701,9 +1758,22 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
     """``leaf name → {field: value}`` for a whole surface (the structural-diff basis).
 
     A leaf the read face does not list is normalized to ``Inherit`` — 「叶不存在」≡「显式写
-    Inherit」, so an absent leaf and an explicitly-silent leaf compare equal and neither shows up as a
-    spurious change. Field **names are kept exactly as the engine spells them** (``behavior`` for the
-    orders, ``value`` for capital/budgets/weights, ``kiting`` for the kiting leaf).
+    Inherit」as far as *ownership* goes, so an absent leaf and an explicitly-silent leaf compare equal
+    and neither shows up as a spurious change. Field **names are kept exactly as the engine spells
+    them** (``behavior`` for the orders, ``value`` for capital/budgets/weights, ``kiting`` for the
+    kiting leaf).
+
+    ⚠ That equivalence does **not** hold for the *value*: an existing style leaf supplies its value
+    even when its mode is ``Inherit`` (``State::ship_doctrine`` is
+    ``leaf.map(|l| l.value).unwrap_or(record)``), while a missing leaf falls back to the ship's factory
+    record. Deleting a leaf therefore really changes behaviour, and this function has to be able to
+    see it:
+
+    * **势力级单片叶**（`default_*` / `capital`）: 读面给 `null` 就是"没有这片叶" ⇒ 多报一个
+      ``exists`` 字段（`False ⇄ True` 是一次真实的"叶被删掉/被建出来"）。
+    * **逐舰叶**：读面**看不出来**（`ship_doctrine`/`ship_kiting` 对每艘舰都有一行，列的是**有效
+      值**，哪怕叶并不存在）。所以这里不猜：逐舰删叶是否落地看引擎的
+      `NOTE_APPLY_REMOVED` 回执（[`Report.removed`]），不看读面。
     """
     out: dict[str, dict[str, Any]] = {}
     for fac in s.raw.get("control") or []:
@@ -1713,9 +1783,10 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
                 raw = fac.get(kind)
                 name = f"{fid}.{kind}"
                 if raw is None:
-                    out[name] = {"mode": INHERIT, _VALUE_FIELD.get(kind, "value"): None}
+                    out[name] = {"exists": False, "mode": INHERIT,
+                                 _VALUE_FIELD.get(kind, "value"): None}
                 else:
-                    out[name] = dict(raw)
+                    out[name] = {"exists": True, **raw}
                 continue
             for entry in fac.get(kind) or []:
                 key = _entry_key(kind, entry)
@@ -1737,8 +1808,11 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 raw = fac.get(kind)
                 if raw is None:
                     continue
+                # `remove` 也算一个被请求的字段：删叶请求没有值可写（`_leaf_fields` 那边靠
+                # `exists` 翻转看结果），漏掉它会让"删一片势力级叶"在 `requests` 里**消失**，
+                # 于是 `verify` 看上去"什么都没请求"——静默的成功比失败更难查。
                 out.setdefault(f"{fid}.{kind}", {}).update(
-                    {k: v for k, v in raw.items() if k in ("mode", "value", "behavior")})
+                    {k: v for k, v in raw.items() if k in ("mode", "value", "behavior", "remove")})
                 continue
             for entry in fac.get(kind) or []:
                 key = _entry_key(kind, entry)
@@ -1845,6 +1919,8 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
                 rep.skipped.append(s)
         elif code == "NOTE_APPLY_TOOKOVER":
             rep.took_over.extend(r.get("took_over") or [])
+        elif code == "NOTE_APPLY_REMOVED":
+            rep.removed.extend(r.get("removed") or [])
         if isinstance(r.get("applied"), int):
             rep.applied = r["applied"]
 
@@ -1862,15 +1938,23 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
     # The engine reports takeover paths by *diff index*; translate them back to leaf identities.
     rep.took_over_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.took_over})
     took_leafs = set(rep.took_over_leafs)
+    # 删叶同理：回执里给的是 `中国.ship_doctrine[0].ship` 这种**下标路径**，翻成叶名再比。
+    rep.removed_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.removed})
+    removed_leafs = set(rep.removed_leafs)
     for leaf, fields in requested.items():
         skip_hit = next((s for s in rep.skipped if s.get("leaf") == leaf), None)
         for fld, val in fields.items():
             b = before_f.get(leaf, {}).get(fld, "<absent>")
             a = after_f.get(leaf, {}).get(fld, "<absent>")
+            # 「删叶」是**另一种**请求：它的成功不是"字段变成了这个值"，而是"这片叶没了"
+            # （`remove` 只存在于写面，读面永远没有这个字段）。权威信号是引擎的回执：
+            # 没被丢弃 = 落地（幂等删除也算落地，只是不进 `NOTE_APPLY_REMOVED` 的名单）。
+            is_remove = fld == "remove" and bool(val)
+            removed_here = leaf in removed_leafs
             rep.requests.append(Request(
                 leaf=leaf, field=fld, value=val, before=b, after=a,
-                changed=(b != a),
-                satisfied=_values_match(val, a),
+                changed=(b != a) or removed_here,
+                satisfied=(skip_hit is None) if is_remove else _values_match(val, a),
                 skipped=skip_hit is not None,
                 skip_reason=(skip_hit or {}).get("reason", ""),
                 took_over=leaf in took_leafs,
@@ -1913,6 +1997,19 @@ class Applied:
         for r in self.receipt:
             if r.get("code") == "NOTE_APPLY_TOOKOVER":
                 out.extend(r.get("took_over") or [])
+        return out
+
+    @property
+    def removed(self) -> list[str]:
+        """Paths of the control leaves that were **actually deleted** by this apply.
+
+        The engine only lists leaves that really existed; a delete of a leaf that was already gone is
+        an idempotent success and is deliberately *not* listed (see `apply_diff`'s 「删叶」).
+        """
+        out: list[str] = []
+        for r in self.receipt:
+            if r.get("code") == "NOTE_APPLY_REMOVED":
+                out.extend(r.get("removed") or [])
         return out
 
 

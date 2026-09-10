@@ -154,7 +154,7 @@ function styleFollowHint(node) {
   // ——今天没有任何接口能删掉一片叶（补丁只能新建/改写），说法必须写到这一步。
   const raw = ((st.control || {})[node.fid] || {})[doctrine ? 'ship_doctrine' : 'ship_kiting'] || {};
   const s = st.ships.find((x) => x.name === node.id);
-  if (raw[node.id]) return hintLine('当前跟随：本舰叶片里的数（没表态 ≠ 没值：引擎优先用叶里的值）');
+  if (raw[node.id]) return hintLine('当前跟随：本舰叶片里的数（没表态 ≠ 没值：引擎优先用叶里的值）——要真正还回出厂快照，用「恢复出厂值」删掉这片叶');
   const rec = s ? (doctrine ? s.doctrine : s.kiting) : null;
   return hintLine('当前跟随：出厂快照' + (rec != null ? '（' + summary(rec) + '）' : ''));
 }
@@ -370,6 +370,14 @@ function wroteValue(leaf) {
 function diffLeaf(leaf, spec) {
   const o = leafOrigin.get(leaf);
   if (!o) return null; // 连原值都没有 ⇒ 不敢猜，宁可不回传
+  if (removedLeaves.has(leaf)) {
+    // 删叶：只发身份键 + `remove`（引擎拒绝「删叶 + 写值」混在一条补丁里）。
+    if (o.shell) return null; // 读面里本来就没有这片叶 ⇒ 没什么可删的
+    const out = {};
+    spec.keys.forEach((k) => { out[k] = leaf[k]; });
+    out.remove = true;
+    return out;
+  }
   const out = {};
   spec.keys.forEach((k) => { out[k] = leaf[k]; });
   let changed = false;
@@ -731,6 +739,8 @@ function renderNode(node) {
   // 「恢复继承」：撤销这片叶的**表态**（mode → 继承），值不动。只在它自己有表态时出现——
   // 那时"我想反悔"才有意义（把下拉调回「继承」等价，但这个按钮把撤销写在脸上）。
   if (node.leaf && normMode(node.leaf.mode) !== 'Inherit') head.appendChild(restoreInheritButton(node.leaf));
+  // 「恢复出厂值」：**删掉这片叶**（取值真的回到上层/出厂快照）。只在状态里真的有这片叶时出现。
+  if (node.leaf && rawLeafOf(node)) head.appendChild(removeLeafButton(node));
   if (spec.bulkOwnership) {
     const bulk = bulkOwnershipSelect(node);
     if (bulk) head.appendChild(bulk);
@@ -768,6 +778,12 @@ function renderNode(node) {
       const activeChild = node.children.find((ch) => ch.key === active);
       if (activeChild) wrap.appendChild(renderNode(activeChild));
     }
+    return wrap;
+  }
+
+  // 被标记删除的叶：不再给编辑器（点「应用」它就没了），只说明会发生什么。
+  if (node.leaf && removedLeaves.has(node.leaf)) {
+    wrap.appendChild(hintLine('已标记删除：点「应用到服务器」之后这片叶消失，取值回到上层 / 出厂快照（再点一次按钮可撤销）'));
     return wrap;
   }
 
@@ -855,6 +871,52 @@ function bulkOwnershipSelect(node) {
     renderTree();
   });
   return sel;
+}
+
+// --- 删叶（「恢复出厂值」） --------------------------------------------------
+// 引擎的取值规则是「叶存在就用叶里的值」（`leaf.map(|l| l.value).unwrap_or(record)`，与叶的
+// `mode` 无关），所以「恢复继承」只交还**归属**、交还不了**数值**：碰过一次的风格叶会一直
+// 钉着那个数。真正把它放回出厂快照 / 舰队默认的动作是**删掉这片叶**（补丁的 `remove: true`）。
+// 这里就是那个动作（note §10.4 选定的方案 A）。
+const removedLeaves = new WeakSet(); // 被标记「删掉这片叶」的叶（点「应用」时才真的发出去）
+
+/// 这片叶在**原始 state** 里存在吗？——删叶按钮只在真的有这片叶时出现。
+/// （读面里逐舰风格两行**总是**在，哪怕叶不存在；要知道真相得看 `state.control`。）
+const RAW_LEAF = {
+  shiporder:     { list: 'ship_orders', key: (n) => n.id },
+  shipdoctrine:  { list: 'ship_doctrine', key: (n) => n.id },
+  shipkiting:    { list: 'ship_kiting', key: (n) => n.id },
+  fleetorder:    { list: 'default_ship_order' },
+  fleetdoctrine: { list: 'default_doctrine' },
+  fleetkiting:   { list: 'default_kiting' },
+  resource:      { list: 'investment_budget', key: (n) => n.leaf.resource },
+  conbudget:     { list: 'construction_budget', key: (n) => n.leaf.resource },
+};
+
+function rawLeafOf(node) {
+  const spec = RAW_LEAF[node.kind];
+  if (!spec) return null;
+  const raw = (st.control || {})[node.fid];
+  if (!raw) return null;
+  const bucket = raw[spec.list];
+  if (bucket == null) return null;
+  return spec.key ? (bucket[spec.key(node)] || null) : bucket;
+}
+
+/// 「恢复出厂值」= **删掉这片叶**。它与「恢复继承」不是一回事（见上面的说明），所以两个
+/// 动作并存、各自写在按钮上：「恢复继承」= 交还归属；「恢复出厂值」= 把这个数也还回去。
+function removeLeafButton(node) {
+  const marked = removedLeaves.has(node.leaf);
+  const b = el('button', {
+    class: 'restore rm-leaf' + (marked ? ' on' : ''), 'data-role': 'remove-leaf',
+    title: '删掉这片叶（不是清空）：这一层不再说话，取值回到上层 / 出厂快照。点「应用到服务器」才生效。',
+  }, marked ? '取消删除' : '恢复出厂值');
+  b.addEventListener('click', () => {
+    if (marked) removedLeaves.delete(node.leaf);
+    else removedLeaves.add(node.leaf);
+    renderTree();
+  });
+  return b;
 }
 
 /// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 全局。

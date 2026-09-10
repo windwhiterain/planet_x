@@ -3,14 +3,16 @@
 > **🡒 当前已裁决、下一步做什么**（2026-10，用户已确认；实现顺序见
 > [`control-live-layers.md`](notes/control-live-layers.md) §9）：
 > ① ~~**web 三条**~~ → `[x]` **已完成**（`feature/web-control-panel-ux`，提交 `f673bac`；实现记录、
-> 实机数据、以及一个**新查实的语义坑**见该篇 §10）→ ② **两轴叶**（同篇 §3.1：势力级单轴新建 ⇒
-> 响亮拒绝；逐舰单轴 ⇒ 从 `Ship.doctrine` 记录值种上；不动叶值形状）→ ③ **舰船设计图**
-> （[`ship-blueprint-spec.md`](notes/ship-blueprint-spec.md) §8.0 十条已裁决 + 附 A 改动地图，
-> 连同 `spawned_round` 一次升 `SCHEMA_VERSION`，⚠ 现在是 **7 → 8**：产地货栈已用掉 v7）。
+> 实机数据见该篇 §10）→ ② ~~**两轴叶**~~ ＋ ②b ~~**删叶（方案 A）**~~ → `[x]` **都已完成**
+> （`feature/leaf-existence`：单轴新建两轴叶被引擎拒（`partial_doctrine_leaf`）、`remove: true`
+> 删叶 + `NOTE_APPLY_REMOVED` 回执、kit 的 `remove_*`、web 行上的「恢复出厂值」；见该篇 §11）
+> → ③ **舰船设计图**（[`ship-blueprint-spec.md`](notes/ship-blueprint-spec.md) §8.0 十条已裁决 +
+> 附 A 改动地图，连同 `spawned_round` 一次升 `SCHEMA_VERSION`，⚠ 现在是 **7 → 8**：
+> 产地货栈已用掉 v7）。⚠ 蓝图那一步的 `order_source` 要把「叶不存在」与「叶写着 `Inherit`」
+> 分开报——本轮已证明这两者在**取值**上不等价。
 > 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变。
-> ⚠ ① 顺手查实一件**要用户拍板**的事（该篇 §10.4）：**「恢复继承」撤不掉叶里的值**——
-> 引擎的取值规则是"叶存在就用叶里的值"（与叶的 `mode` 无关），而补丁接口**删不掉叶**，
-> 所以碰过一次的风格叶就永远不再跟随出厂快照。三个候选（A 加删叶 / B 对齐文档 / C 不管）在该篇。
+> ⚠ §10.4 那个坑（「恢复继承」撤不掉叶里的值）**已解**：方案 A 落地（引擎 + kit + web 三端，
+> 见该篇 §11.1/§11.3）。取值规则本身没动——方案 B 仍留在桌上（§10.4 的表）。
 
 > **这里只是索引。** 每条主题的**具体描述**（怎么设计的、落地到哪一步、实测数据、未做项与理由）
 > 都在 `.agents/notes/<slug>.md`：一条主题一个文件，文件名就是它的稳定 ID。
@@ -72,7 +74,7 @@
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
 | `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）。 | `spawned_round`；玩家舰的自动战斗判定；逐武器火力分配 |
-| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**；§3.2 记了一个新事实：**风格轴今天没有 AI 写入者**（`Auto` 是空头承诺）。**§10 = web 三条已落地**（提交 `f673bac`：只回传差异（含"壳"整片新建的规则）、「恢复继承」+ 等值不接管、舰行批量归属、诚实措辞、实机逐条核对的 POST JSON）**+ 一个新查实的坑**：引擎"叶存在就用叶里的值"⇒ **「恢复继承」撤不掉值**，而补丁接口删不掉叶（三个候选待拍板）。 | 做 §3.1 的两轴叶裁决（②）、再动蓝图（③）；① 遗留的三个候选见 §10.4（删叶 / 对齐文档 / 不管） |
+| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**；§3.2：**风格轴今天没有 AI 写入者**（`Auto` 是空头承诺）。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**：`remove: true` 删叶（十条叶全支持）+ `NOTE_APPLY_REMOVED` + kit 的 `remove_*` + web 的「恢复出厂值」，顺带关掉了「单轴新建两轴叶 ⇒ 另一条静默变 0」那个坑。 | ③ 蓝图（连同 `spawned_round` 升 `SCHEMA_VERSION` 7→8）；方案 B（取值规则对齐文档）仍留着 |
 | `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.flow()/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
 | `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
 

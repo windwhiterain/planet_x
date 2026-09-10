@@ -87,6 +87,14 @@ s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, m
 s.set_capital("中国", "月球", mode="Player")
 s.set_scope(factions={"中国": "Player"})                        # scope nodes carry ownership, not values
 
+# 删叶（`remove: true`）：这一层**不再说话**，而且叶里的值也不再参与取值 ——
+# 这是「恢复出厂值」的唯一做法（`mode: "Inherit"` 做不到，见 §1.2 与下面的 "删叶" 一节）
+s.remove("中国", "ship_doctrine", "长城")
+s.remove_doctrine(mine)                                         # 通配：这些舰的风格回出厂快照/舰队默认
+s.remove_kiting(mine)
+s.remove_default_doctrine("中国")                                # 势力级默认叶：删了就不再供值
+s.remove_default_ship_order("中国")
+
 diff = s.emit()                       # {"control": […], "scope": {…}} → ready for `--apply`
 ctl.write(diff, "steer.json")         # canonical, deterministic JSON (byte-identical on replay)
 rep = ctl.verify(ckpt, "steer.json")  # read-only rehearsal; Report
@@ -192,6 +200,44 @@ screen for a long time — looking like an order nobody gave.
 s.set_default_ship_order(fac, mode="Player")                 # the layer that will now speak…
 s.set_mode(fleet, "Inherit")                                 # …and the leaves that stop speaking
 ```
+
+And when you want the *value* back from the factory record, releasing is **not enough** — see the
+next subsection.
+
+### 删叶 (`remove`): `mode: "Inherit"` 撤不掉叶里的值
+
+This is the trap §1.2 of `python-control-authoring.md` hides one level deeper, and it is worth
+spelling out because the symptom is「我改了舰队默认，这艘舰却不跟」:
+
+```rust
+// State::ship_doctrine — the *value* rule, and it does not look at `mode`
+if leaf.mode == Inherit {
+    if let Some(d) = &c.default_doctrine { if d.mode.is_player() { return d.value } }
+}
+leaf.map(|l| l.value).unwrap_or(record)   // ← 叶**存在**就用叶里的值
+```
+
+So an existing leaf supplies its value **whatever its mode says**, while a *missing* leaf falls back
+to `Ship.doctrine` (the factory record). 「叶不存在」and「叶写着 `Inherit`」are therefore equal for
+*ownership* and different for *value*.
+
+```python
+s = ctl.surface(ckpt)
+s.set_doctrine("长城", temper=0.7, lone_wolf=-0.4, mode="Player")   # pins the leaf…
+s.set_doctrine("长城", mode="Inherit")                              # …this only releases ownership
+# 有效风格**仍然是** 0.7 / -0.4（叶里的值优先于出厂快照）
+s.remove_doctrine("长城")                                           # ← 这才是「恢复出厂值」
+```
+
+Two things worth knowing about the kit's side of `remove`:
+
+* 删一片**本来就不存在**的叶是**幂等成功**（引擎既不报丢弃，也不进 `NOTE_APPLY_REMOVED`）；
+  `Report.requests` 里那条请求仍然是 `satisfied`，所以 `rep.ok` 不会因为它变红。
+* `remove` **不能**和值 / `mode` 同时写（引擎报 `remove_conflicts_with_value`）：一条同时说着
+  "删掉它"和"把它设成 0.5"的补丁没有正确答案，所以两件事请分两条补丁发。
+* `Report.removed` / `removed_leafs` 给出真的被删掉的那些叶；`describe()` 会把它们列出来。
+  逐舰叶的**存在性**读面看不出来（风格两行对每艘舰都在，列的是有效值），所以逐舰删叶的
+  "落地了没有"以**引擎回执**为准，不以读面为准。
 
 The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, and
 `effective_order_value_approx` shows what the chain would resolve to. Which brings us to the next
@@ -300,11 +346,15 @@ guessing. They are listed because they are cheap to close and expensive to work 
    consumer) and `set_kiting` / `set_doctrine` demand an explicit ownership (`mode=` or
    `take_over=True`) like every other value write.
    ⚠ One engine-side trap this exposed: creating a **two-axis** leaf (`default_doctrine` /
-   `ship_doctrine`) from a single-axis patch initializes the *other* axis to `0.0`
-   (`Control::inherit(ShipDoctrine::default())`, `src/control.rs:770`), not to the ship's record value
-   — a fleet-wide change that looks perfectly normal afterwards. The kit refuses that patch
-   (`_require_both_axes`); whether the *engine* should instead seed the missing axis is an open
-   question recorded in `control-live-layers.md`.
+   `ship_doctrine`) from a single-axis patch used to initialize the *other* axis to `0.0`
+   (`Control::inherit(ShipDoctrine::default())`, `src/control.rs`), not to the ship's record value
+   — a fleet-wide change that looks perfectly normal afterwards. **Now settled on both ends**: the
+   *engine* rejects such a patch (code `partial_doctrine_leaf`, `control-live-layers.md` §3.1 —
+   the fleet-level leaf needs both axes; a per-ship leaf seeds the missing axis from the value the
+   ship is actually using, i.e. the record value when no default is `Player`), and the kit still
+   refuses it at recipe time so the author sees it while writing, not at apply time.
+   The same ruling added `remove: true` (删叶) — the only way to get a style leaf **back** to the
+   factory record (see the 「删叶」 section above).
 6. **`(city, building)` is a per-city `u32` index.** Correct and documented, but it forces every
    recipe to be a same-round transform and makes any cross-round diff silently wrong. A stable
    building identity (or an `--index` column naming it) would remove a whole class of footguns.
