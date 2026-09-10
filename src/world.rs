@@ -818,6 +818,9 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         notables: Notables::default(),
         chronicle: Vec::new(),
         ship_name_seq,
+        // 市场从空开始：挂单/价格在第一个回合由各势力的当期富余重新挂出（见
+        // `sim::step_market`）——世界生成不预置市场，正如开局不预置成交历史。
+        market: MarketState::default(),
     };
 
     // --- 开局舰队装配（消灭裸舰）---------------------------------------------
