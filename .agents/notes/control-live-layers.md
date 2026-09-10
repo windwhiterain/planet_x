@@ -87,6 +87,7 @@ AI 最后写的行为上——那是「活层」最危险的坑。
   （叶 → 舰队默认 → 势力 → 全局，`app.js::effectiveMode`）开放；改行为/改值即把该叶钉成
   `Player`；不可编辑时给一行说明（`.tnode-hint`）。三态下拉是「继承/自动/玩家」。
   ⚠ **只跑了 crate 测试与 round-trip 守卫，没实机点过**（未按 `scripts/web.ps1` 起服务）。
+  → 这一条的实机部分已在**本轮**补上（含两行默认风格 + 逐舰风格叶，见 §7）。
 * `[x]` **风格（doctrine / kiting）也是活层**（提交 `70e15e5`，见 §6）：每舰叶片 +
   势力级 `default_doctrine`/`default_kiting` + `Ship` 字段降级为记录值 + AI 5 个读点改走有效值。
   **实测行为中性**（同 seed 的 60 回合完整状态流 sha256 改前=改后；240 回合 `--digest` 逐行相同）。
@@ -106,9 +107,45 @@ AI 最后写的行为上——那是「活层」最危险的坑。
 * `[ ]` **`agent-play.md` 要跟着改**：§3/§4.2 那句「注意这会让新造出来的舰默认 Idle」现在
   有了正解（舰队默认），要改写成「设舰队默认 = 新舰自动继承意图」；「省略 mode 保留当前
   模式」要补一句「但写值即接管」；另外要补 `--derived` 与四张派生表。
-* `[ ]` **web 侧还差两行**：`default_doctrine`/`default_kiting` 没进 `web/static/app.js`
-  （「舰队默认指令」那一行是现成的模板，照抄即可）。⚠ 本轮 web 改动**仍只跑了 crate 测试**，
-  没按 `scripts/web.ps1` 实机点过。
+* `[x]` **web 侧还差两行** —— **已补上**（分支 `feature/web-fleet-defaults-style`，实现与实机证据见 §7）。
+  顺带把「逐舰风格编辑」也补了（此前 web 里根本没有绑 `Ship.doctrine`/`Ship.kiting` 的 UI）。
+* `[x]` **投影的 `control` tidy 表补上四条风格叶**（本轮补，引擎侧）：`src/projection.rs` 的
+  `control` 表原先只发 `ship_order` / `default_ship_order` / 预算 / 权重 / 首都，现在也发
+  `ship_doctrine` / `ship_kiting` / `default_doctrine` / `default_kiting`（`value` 列是 `any`：
+  doctrine 是 `{temper, lone_wolf}` 对象、kiting 是数字），`kind` 的 schema 描述同步列全。
+  **为什么值得单独记一笔**：漏掉它们的后果不是报错，而是 Python 侧**只能**从 `ships` 表的
+  `doctrine`/`kiting`（有效值）看结果 —— 于是「这艘舰的风格是它自己钉的，还是跟着舰队默认走的」
+  在表里查不出来（web 的 `effectiveMode()` 正是靠这个区分）。
+  守卫：`projection::tests::control_table_holds_every_leaf`（四片叶的值与**各自的** mode 逐条断言）。
+  端到端：写一片 `default_doctrine`/`default_kiting` + 逐舰两片 → 投影后 `idx/control.jsonl` 出现四行，
+  值就是叶自己的值（`{"lone_wolf":0.1,"temper":-0.9}` / `0.5` / `{"lone_wolf":-0.4,"temper":0.3}` / `-0.6`）。
+  ⚠ 顺带记一个反直觉的观察：**跑了 20 回合的基线局里这四片叶一片都不存在**（AI 不写风格叶），
+  所以"表里没有"是正确的**缺席**、不是漏发 —— 也正因为如此，没有守卫时这个洞极难被发现。
+
+### 3.1 一个被 kit 撞出来的语义坑：**单轴写「还不存在的两轴叶」**
+
+**事实**（`src/control.rs:762-770`）：`default_doctrine` / `ship_doctrine` 是**一片叶装两条轴**
+（`temper` + `lone_wolf`）。当这片叶**还不存在**时，引擎用
+`Control::inherit(ShipDoctrine::default())` 把它建出来 —— 也就是**你没写的那条轴变成 `0.0`**，
+而不是「保留舰上的记录值」。
+
+**为什么它是坑**：`0.0` 是个**正常取值**（"理智/不独"），事后从读面完全看不出问题，而它已经
+把全舰队的 `temper` 从出厂值（中国舰队实测 `0.71`）静默改成了 `0`。复现（kit 侧）：
+
+```python
+s = ctl.surface(ckpt)
+s.set_default_doctrine("中国", lone_wolf=-0.4, take_over=True)   # 只写一条轴
+# → 落地后 default_doctrine.value == {"temper": 0.0, "lone_wolf": -0.4}
+```
+
+**已做**：`planet_x_ctl` 的 `Surface._require_both_axes` 在**配方期**拒绝「单轴新建叶」
+（叶已存在时仍然允许只改一条轴，那时"缺省 = 保留现值"是真的）。这条与
+`agent-play-friction.md` 的「宁可在配方期报错」同源。
+
+* `[ ]` **待裁决（引擎侧）**：要不要让引擎自己把缺的轴**初始化成"出厂记录值"**，或者把叶值
+  改成两轴各自 `Option`？两条路的代价：前者要求引擎在建叶时能拿到该势力/该舰的现有风格
+  （势力级默认更麻烦——舰队里各舰记录值可能不同），后者动到叶值的形状、读面与迁移。
+  在裁决之前，**kit 的拒绝就是当前的正确答案**（响亮失败 > 静默改数值）。
 
 ## 4. 裁决（✅ 用户已确认，且 §4.1/4.2/4.4 已实现）
 
@@ -152,5 +189,61 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
   等于说"这一层没有意见"，除非舰队默认也是 `Player`，那个值不会被采用。
 * **投影**：`ships` 表加 `doctrine` / `kiting` 两列（引擎解析后的有效风格），
   与 `order_*` 四列同一思路——**Python 不该自己重实现链**。
-* **web**：`default_doctrine` / `default_kiting` 两行**还没加**（见 §3 剩余）。
+* **web**：`default_doctrine` / `default_kiting` 两行**还没加**（见 §3 剩余）→ 本轮补上，见 §7。
 ```
+
+## 7. web 控制面板接上风格活层（本轮 `feature/web-fleet-defaults-style`）
+
+只动前端（`web/static/app.js`、`web/static/style.css`）与 web crate 的测试；**引擎一行没动**。
+
+* **势力级三行默认**：`舰` 分组的第一组子项从「舰队默认指令」一行变成三行——`舰队默认指令`
+  （`default_ship_order`）/ `舰队默认风格`（`default_doctrine`：理智↔热血 + 护航↔独狼）/
+  `舰队默认风筝姿态`（`default_kiting`：风筝↔贴脸）。三行同一套惯例：节点 kind 各一种
+  （`fleetorder`/`fleetdoctrine`/`fleetkiting`）、同样的 `scope: 'leaf'` 三态下拉
+  （继承/自动/玩家）、同样的「有效归属是玩家才给编辑器、否则一行 `.tnode-hint`」。
+  读面里没有这两片叶（开局就是）时前端补一片 `Inherit` 的叶让行出现，与作用域「没列出的层 ≡
+  继承」同义；回传等价于「这一层没有意见」（引擎声明的「模板原样回传安全」）。
+* **摘要诚实**：势力级默认行的摘要只在**它自己是 `Player`** 时显示那几个数（`Auto` 显示
+  「自动（值由系统写）」、`Inherit` 显示「未表态」）——引擎的取值规则就是「默认叶只在自身是
+  Player 时供值」，把没表态的存储值显示成"当前风格"会骗人。
+* **`effectiveMode()` 按轴选默认叶**：新增 `DEFAULT_LEAF` 映射
+  `shiporder → default_ship_order`、`shipdoctrine → default_doctrine`、`shipkiting →
+  default_kiting`（对应引擎 `ship_control` / `ship_doctrine_control` / `ship_kiting_control`）。
+  以前只认 `default_ship_order`。
+* **逐舰风格叶**：一条舰从「一片叶」变成**三叶容器**（tabs：指令 / 风格 / 风筝姿态）。三片叶的
+  归属链各自独立，所以三态下拉跟着子叶走。风格两叶写的是**叶片**
+  （`ship_doctrine`/`ship_kiting`），**不碰** `Ship.doctrine`/`Ship.kiting`——那是记录值，
+  写它没有任何控制效果（本轮实机确认：改了叶之后 `ship.doctrine` 记录值原地不动，而读面的
+  有效风格变了）。逐舰 leaf 的读面值 = **有效风格**（叶 → 舰队默认 → 记录值），所以
+  「继承舰队默认」的舰也看得见它现在实际用的数。
+* **值一改即接管**：三片风格轴（temper / lone_wolf / kiting）都钳到 [-1,1]，且 `Inherit` 时改值
+  就把该叶钉成 `Player`（与 `--apply` 的「写值即接管」同一条规则）。
+* **可自动化**：`.tnode` 上加了 `data-key`（如 `fleetdoc中国` / `doc长城`），行可直接选中。
+* **验证**（`cargo test --workspace` 全绿：planet_x 96 / longhorizon 6+10ignored /
+  projection_derived 3 / planet_x_web 15+2；新增的两条 web 测试见下）+ **实机**：
+  `scripts/web.ps1` 起服务（3001，pid 8344，`GET /api/ping` 对得上）、浏览器里给中国设
+  `舰队默认风格 = (理智 +0.50 / 独狼 -0.25, 玩家)`、`舰队默认风筝姿态 = -0.60 玩家`、
+  长城 `风格 = 理智 -0.90 玩家`（逐舰例外）、北斗 `指令 = 移动(30,20) 玩家`，点「应用到服务器」
+  后**刷新页面仍在**，且 `/api/state` 里落的是**叶片**：
+  `control["中国"].default_doctrine = {value:{temper:0.5,lone_wolf:-0.25}, mode:"Player"}`、
+  `ship_doctrine["长城"] = {value:{temper:-0.9}, mode:"Player"}`，而 `ships[长城].doctrine`
+  记录值仍是 `{0,0}`；`ship_doctrine` 读面里 北斗/赤霄/镇岳 的 `mode` 是 `Inherit`、值 = 舰队默认
+  （= 归属链按新轴生效）。
+* **新增 web 测试**（`web/src/lib.rs`）：① `fleet_default_style_rows_round_trip_through_the_web_surface`
+  ——「只写 mode」（前端第一步改归属）合法、再写值读面立刻回显、且叶 Inherit 的舰改用默认；
+  ② `posting_the_read_surface_back_keeps_effective_style` —— 把 `/api/state` 的
+  `control`/`scope` 两段**原样** POST 回去（前端「点应用」就是这么干的）之后，逐舰有效风格与
+  有效归属**一字不变**（守门「读面原样回传安全」，含读面里每舰都有一行的风格叶）。
+* **已知副作用（引擎已裁定为安全）**：因为前端回传整份读面，`ship_doctrine`/`ship_kiting`
+  里那些「没有叶片」的行会被写成一片 `Inherit` 的叶（值 = 当时的有效值）。语义不变（`Inherit`
+  = 这一层没有说话），但 `--control` 模板与 `state.control` 会比从前多出这些叶。
+* **剩余 / 需要上层裁决**：
+  * `projection.rs` 的 `control` tidy 表没有这四片风格叶（见 §3 剩余最后一条）——Python 侧
+    看不到风格叶自己的值与表态。
+  * 「改了值就自动钉成 `Player`」是前端跟着引擎的「写值即接管」做的；但**读面给的是有效值**，
+    所以「把继承来的值原地再写一遍」也会把这片叶从 `Inherit` 钉成 `Player`（原本跟随舰队默认，
+    改完后变成这艘舰自己的特例）。UI 上这是"我碰过这一格"的后果，目前没有提示也没有「恢复继承」
+    按钮（把三态下拉调回「继承」也能达到同样效果，但理解成本高）。
+  * 舰节点从一片叶变成三叶容器是**界面结构改动**（指令编辑器从舰这一行移到「指令」tab）：
+    §1 那条「一条舰 = 一片叶」的直觉需要跟着更新；如果更希望逐舰风格不占界面，改成挂在
+    另一个分组也只是 `app.js` 的事。

@@ -169,6 +169,21 @@ class PlanetXQ:
         """作用域树的**显式**表态：`level`（global/faction/body/city）+ `key` + `mode`。"""
         return self.derived("scope", round)
 
+    def decisions(self, round: int | None = None) -> pd.DataFrame:
+        """**本回合 AI 的判定**（“掷了什么”）：`kind`/`actor`/`verdict`/`target`/`detail`。
+
+        * `kind="ship_order"`：逐舰判定。`verdict` ∈ withdraw / engage / colonize / bombard /
+          move / **hold**（`hold` = 这回合 AI 没给这艘舰派活——不是"它在待命"）。
+        * `kind="retool"`：船坞改装（`actor` = 城名，`target` = 新舰级）。
+        * `detail` 是各 kind 的专属事实：逐舰判定带 `hull_ratio` / `retreat_hull` / `kiting` /
+          `enemy_in_range` / `after_move` / `destination` / `order`；改装带 `from` / `building`。
+
+        **一艘舰一回合最多两行**（先机动、到位后再判一次）——按 `actor` 聚合前先看 `after_move`。
+        这些判定**既不发事件也不落状态**（指令叶只留结果），所以这是唯一能回答
+        「我的舰为什么跑到那儿去送死」的地方；`detail` 里的两个数（血量比 vs 撤退阈值）就是判据。
+        """
+        return self.derived("decisions", round)
+
     def ships(self, round: int | None = None) -> pd.DataFrame:
         return self.table("ships", round)
 

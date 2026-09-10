@@ -1,6 +1,8 @@
 # 舰船设计图（非控制属性 = 建造单位上的模板）
 
-> 状态 `[ ]`（设计长文，未开工） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
+> 状态 `[~]`（设计已定 + **实现规格已就绪**，见 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；
+> §8 的 10 条开放问题**待裁决**，裁决前不动 `src/`） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
+> `ship-blueprint-spec.md`（**实现篇**：改动地图 / 叶片形状 / 测试计划）、
 > `control-live-layers.md`（它的对偶：控制属性=活层）、`eras-technology.md`（「设计图分支」
 > 剩余项就是它）、`military-combat.md`（换模块/再装配剩余项）、`agent-control-long-game.md`
 > §6（结构性叶片的所有权不明）、`combat-behavior-doctrine.md`、`spawn_ship`（唯一的造舰漏斗）
@@ -30,11 +32,19 @@
 | --- | --- | --- |
 | 面板/造价/维护/槽位 | `ShipSpec`（`config/game.ron` 的 `ships:`，**按舰级**，全局） | 配置表 |
 | 选装（模块表） | `Ship.components`，由 `autocontrol::choose_loadout(state, config, owner, class)` **确定性**地按势力资源优势选 | 出厂快照 |
-| 出厂风格 | `ShipSpec.default_doctrine` / `default_kiting` → 拷进 `Ship.doctrine`/`Ship.kiting` | 出厂快照（`control-live-layers.md` 要把它们**升成活层**，见那篇 §3） |
-| 造什么舰级 | `Building{kind:"construction", ship_type}`（建造区一个字段） | ⚠ 会被 AI 的舰队构成逻辑重估 |
+| 出厂风格 | `ShipSpec.default_doctrine` / `default_kiting` → 拷进 `Ship.doctrine`/`Ship.kiting` | 出厂快照 |
+| 造什么舰级 | `Building{kind:"construction", ship_type}`（建造区一个字段） | ⚠ **唯一**会被 AI 重估的非控制属性 |
 
-`spawn_ship`（`sim.rs`）是**唯一的造舰漏斗**（船坞出厂 / 剧情赠舰 / 反僵尸重建三条路都走
-它），所以设计图的接入点只有一个。
+两处**回填更正**（子 agent 逐行核实，见 `ship-blueprint-spec.md` §1.3/§1.5）：
+
+* **出厂风格那两行在原 note 里写重了**：`ShipSpec.default_doctrine`/`default_kiting` 在
+  `config/*.ron` 里**从来没有被填过**（grep 零命中），所以今天所有舰的出厂记录风格都是
+  `{0,0}`/`0.0`；而且 `control-live-layers.md` 已把它们升成**活层** ⇒ 「有效风格」现在走
+  `叶 → 势力默认 → 记录值` 的链，`Ship.doctrine/kiting` 只是**记录值**（出厂快照 + AI 流水）。
+  设计图若还要带 `order`，必须说清它落在链的哪一层（spec §4.3，也是 Q1/Q2 的由来）。
+* **造舰漏斗只有两条路，不是三条**：`spawn_ship`（`sim.rs`）仍是唯一漏斗，但 `SpawnVia`
+  现在只剩 `Shipyard` / `Story`（`src/model/event.rs:94`）——第三条「反僵尸重建」随
+  `step_resurgence` 在提交 `4283dc2` 删除。接入点仍然只有一个。
 
 ## 2. 设计图的形状（草案）
 
@@ -94,10 +104,24 @@ pub struct Blueprint {
 
 ## 5. 风险 / 开放问题
 
+**实现规格已写好**：所有形状（数据结构 / config / 叶片 / 投影 / 迁移 / 测试 / 改动地图 / 验证命令）
+在 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；**10 条开放问题在它的 §8**，
+按影响排序的前三条是：
+
+* **Q1 舰级层 vs 势力舰队默认谁更有权威**（链 = `叶 → 图 → 舰队默认 → 势力 → 全局`？）——
+  (a) 图压过舰队默认：最具体者胜，但"我设了舰队默认却不生效"违反直觉；
+  (b) 舰队默认压过图：一旦写了舰队默认，按舰级编排就失效。
+* **Q2 按舰级默认意图是快照还是活层**——活层要对（"改图全级跟"），代价是读面必须给
+  `order_blueprint_mode`，否则又是一次「读数不反映行为」。
+* **Q3 `class` 的真相在哪**——`Building.ship_type` 仍是唯一真相（最小改动、旧档逐字节中性），
+  还是搬进图（彻底，但迁移造不出图）。
+
+下面是设计阶段就记下的风险（与 spec §9 互补，不重复）：
+
 * **设计图爆炸**：AI 势力长期造舰会攒出几百份自动设计图 → 需要在 `Auto` 侧做**去重/复用**
   （例如按 (class, 选装签名) 归并），否则控制面读面会被淹没（对照 note §7 幽灵权重
   的教训：条目只会单调增长）。
 * **平衡**：玩家拿到设计图编辑权 = 能造出「非法」组合吗？`ship_panel` 的槽位约束
-  （`slots`）必须仍然生效；否则这是新的失衡入口。
+  （`slots`）必须仍然生效；否则这是新的失衡入口（spec 的 Q4/Q7 也在这条线上）。
 * **与 `eras-technology` 的解锁**：解锁式设计图需要一个「什么时代能造什么图」的门控表，
   那属于 `eras-technology.md` 的范畴，本 note 只把**容器**做好。

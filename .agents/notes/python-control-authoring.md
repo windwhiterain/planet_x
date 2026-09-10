@@ -136,6 +136,17 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
    `doctrine`/`kiting` 与 `idx/control.jsonl`，所以下一步是：`surface()` 改 join、
    删掉 `_approx` 那几列。
 5. `[ ]` 一个示例配方进 `play/exp*/recipes/*.py`（demo 里的统计策略已经很接近，可直接搬）。
+6. `[x]` **跟上引擎的两片新叶**（本轮补，教训见 `engine-data-plane.md` §8.7）：
+   `LEAF_KINDS` 补 `default_doctrine`/`default_kiting`（少了它们**不报错**，只是这两片叶
+   从 `surface()` 里静静消失；demo 的叶计数 237 → 255 就是它们），加两个 setter，
+   并让 `set_kiting`/`set_doctrine` 也要求显式归属（`mode=` 或 `take_over=True`）——
+   引擎侧它们早就是三态叶了，kit 文档还停在 "engine gap"。
+7. `[x]` **两轴叶的护栏**（`Surface._require_both_axes`）：`default_doctrine`/`ship_doctrine`
+   一片叶装 `temper`+`lone_wolf`，而在叶**还不存在**时只写一条轴，引擎会把另一条初始化成
+   `0.0`（不是保留出厂值）——`0.0` 是个正常取值，事后看不出来。kit 现在在配方期直接拒绝。
+   ⚠ 引擎侧要不要自己种上缺的那条轴，见 `control-live-layers.md` §3.1（**待裁决**）。
+   实测：读面读得到、写得到（`took_over` 恰好两片）、落地后有效值随势力默认走
+   （中国 5 艘舰 `kiting` 全 = −0.6）；已存在的叶仍允许只改一条轴。
 
 ## 4. 复现 / 验证
 

@@ -256,7 +256,16 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
 /// 就把它产出该舰型的最小 id 船坞重定向到 `choose_next_class` 选出的**战局感知新舰型**
 /// （战争加分——多造重舰；去重加分——避免单调）。和平时不重定向（船坞保持生产既有舰型）。
 /// 每次至多重定向一个船坞、且只在明显过度生产时触发，避免抖振。确定性（seeded RNG）。
-pub(crate) fn retool_shipyards(state: &mut State, config: &GameConfig, fid: &str, rng: &mut Prng) {
+///
+/// 真的改了就往 `retools` **追加一行**（纯记录）：这是少数几个**不留事件的 AI 决策**之一，
+/// 事后只能从 `ship_type` 的变化反推、且看不出是什么时候改的。
+pub(crate) fn retool_shipyards(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &str,
+    rng: &mut Prng,
+    retools: &mut Vec<RetoolDecision>,
+) {
     if !sim::faction_at_war(state, config, fid) {
         return;
     }
@@ -306,6 +315,13 @@ pub(crate) fn retool_shipyards(state: &mut State, config: &GameConfig, fid: &str
                 }
             }
         }
+        retools.push(RetoolDecision {
+            faction: fid.to_string(),
+            city: cid,
+            building: bid,
+            from: over_class,
+            to: new_class,
+        });
     }
 }
 
@@ -457,11 +473,20 @@ mod tests {
         state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
         let before = shipyard_types(&state, "中国".to_string());
         let mut rng = Prng::new(7);
-        retool_shipyards(&mut state, &config, "中国", &mut rng);
+        let mut retools = Vec::new();
+        retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
         let after = shipyard_types(&state, "中国".to_string());
         assert!(
             after.iter().any(|(_, t)| t != "corvette"),
             "a corvette-dominated wartime fleet should retool a shipyard into a war class; before={before:?} after={after:?}"
+        );
+        // 改装决策必须**被记下来**（它不发事件，只有这里能留下"什么时候改成什么的"）。
+        let rec = retools.iter().find(|r| r.faction == "中国").expect("改装要留一条判定");
+        assert_eq!(rec.from, "corvette", "改装前后舰级要对得上：{rec:?}");
+        assert_eq!(
+            after.iter().find(|(c, _)| *c == rec.city).map(|(_, t)| t.clone()),
+            Some(rec.to.clone()),
+            "判定里记的新舰级必须就是状态里改成的那个：{rec:?}"
         );
     }
 

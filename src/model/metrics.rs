@@ -123,9 +123,14 @@ pub struct CityMetrics {
     /// 本回合开采产出，按资源。
     pub production: ResourceMap,
 }
-/// 一回合的**流动性中间量捕获**：各 step 计算并应用、但不落到持久状态、原本不对外暴露的
-/// 量。`advance` 把 `RoundFlow` 带回 `round_metrics`，使 agent 的「流量总结」（产出/维护/
+/// 一回合的**中间量捕获**：各 step 计算并应用、但不落到持久状态、原本不对外暴露的量。
+/// `advance` 把 `RoundFlow` 带回 `round_metrics`，使 agent 的「流量总结」（产出/维护/
 /// 治理）与模拟**逐回合完全一致**——不是事后从状态反推的近似值。纯数据、无 RNG。
+///
+/// 这类量有两族，都住在这里（同一条管道：算过 → 带出 → 投影成表）：
+/// * **流量**（下面那些 map）：产出/维护/治理/贸易净额；
+/// * **判定**（[`RoundFlow::decisions`]）：AI 这一回合**选了什么、为什么**（见
+///   [`super::decisions`]）——它同样"不落持久状态、也不发事件"。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RoundFlow {
     /// 每城每资源的本回合开采产出。
@@ -144,6 +149,10 @@ pub struct RoundFlow {
     pub market_carrier_income: BTreeMap<FactionId, f64>,
     /// 每势力本回合治理流（总成本 / 覆盖率）。
     pub governance: BTreeMap<FactionId, GovernanceFlow>,
+    /// 本回合 **AI 的判定**（“掷了什么”）：逐舰的行为判定 + 船坞改装。**纯追加、行为中性**
+    /// ——见 [`super::decisions`]（那里解释了为什么它必须单独捕获：指令叶只记结果，不记过程）。
+    #[serde(default)]
+    pub decisions: crate::model::RoundDecisions,
 }
 /// 一个势力的本回合治理流（`RoundFlow::governance` 的一项）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

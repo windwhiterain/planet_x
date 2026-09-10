@@ -216,14 +216,15 @@ fn nearest_hostile_city_in_siege_range(state: &State, config: &GameConfig, owner
     best.map(|(_, c)| c)
 }
 
-/// 自动轰炸：若 `owner` 的敌对城进入 `pos` 的围城射程，就轰炸最近的那座；返回是否轰炸。
-/// 无行为需求——凡在围城射程内的敌对城即触发。
-fn auto_bombard(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2]) -> bool {
+/// 自动轰炸：若 `owner` 的敌对城进入 `pos` 的围城射程，就轰炸最近的那座；返回**炸了哪座城**
+/// （`None` = 没炸）。返回城名而不只是 `bool`，是为了让调用方能把它记进
+/// [`crate::model::RoundDecisions`]——「轰炸」是判定，城名是判定的对象。
+fn auto_bombard(state: &mut State, config: &GameConfig, ship_id: &str, owner: &str, pos: [f64; 2]) -> Option<CityId> {
     if let Some(city) = nearest_hostile_city_in_siege_range(state, config, owner, pos) {
         sim::bombard_city(state, config, ship_id, &city);
-        true
+        Some(city)
     } else {
-        false
+        None
     }
 }
 
@@ -236,7 +237,9 @@ pub(crate) fn auto_combat(state: &mut State, config: &GameConfig, ship_id: &str,
         sim::fire(state, config, ship_id, &plan);
         return;
     }
-    auto_bombard(state, config, ship_id, owner, pos);
+    // 玩家舰的这一层自动战斗**目前不记录**判定（记的是 AI 舰的，见 `ai_ship_turn`）——
+    // 这是有意留下的一格空白，写进 notes 而不是假装它不存在。
+    let _ = auto_bombard(state, config, ship_id, owner, pos);
 }
 
 /// 本舰的**软移动目的地**（风筝<->贴脸姿态）：在附近有敌舰时按 `kiting` 重新定距离——
@@ -372,6 +375,9 @@ fn effective_retreat_hull(config: &GameConfig, kiting: f64) -> f64 {
 /// 护航/独狼、殖民、轰炸——并把它实际执行的指令写回可控状态（`Control::inherit`），使
 /// 逐回合 diff 能反映系统真正做了什么。执行所需的引擎原语（移动/开火/轰炸/殖民）借自
 /// [`crate::sim`]。
+///
+/// 每次判定都往 `decisions` **追加一行**（纯记录，不改行为）：指令叶只留下结果，
+/// 只有这里能回答「AI 为什么这么选」（见 [`crate::model::RoundDecisions`]）。
 pub(crate) fn ai_ship_turn(
     state: &mut State,
     config: &GameConfig,
@@ -379,6 +385,7 @@ pub(crate) fn ai_ship_turn(
     ship_id: &str,
     focus_of: &BTreeMap<FactionId, Option<FactionId>>,
     next_building_id: &mut BuildingId,
+    decisions: &mut Vec<ShipDecision>,
 ) {
     let Some(ship) = state.ship(ship_id) else { return };
     if ship.hull <= 0.0 {
@@ -396,17 +403,40 @@ pub(crate) fn ai_ship_turn(
 
     let tgt = nearest_enemy_ship(state, config, &owner, pos, range, focus.clone(), ship_id);
 
+    // 判定的**共同底稿**：谁、在哪、当时的输入是什么。每个分支只覆盖"选了什么"
+    // （`verdict`/`target`/`destination`/`order`），输入不必重复抄一遍。
+    let retreat_hull = effective_retreat_hull(config, kiting);
+    let base = ShipDecision {
+        ship: ship_id.to_string(),
+        faction: owner.clone(),
+        verdict: ShipVerdict::Hold,
+        target: None,
+        destination: None,
+        hull_ratio: my_hull / my_hull_max.max(1e-9),
+        retreat_hull,
+        kiting,
+        enemy_in_range: tgt.is_some(),
+        order: None,
+        after_move: false,
+    };
+
     // 自保撤退（拟人的「别送死」，激进更晚撤）：舰已受重创、敌在本舰射程内、且离首都有
     // 一定距离时，后撤回首都/本土修整充能。让战争有「打残→撤→养好→再来」的损耗循环。
     if let Some(target) = tgt {
-        let retreat_hull = effective_retreat_hull(config, kiting);
-        if my_hull / my_hull_max.max(1e-9) < retreat_hull {
+        if base.hull_ratio < retreat_hull {
             let cap_body = state.capital_body(&owner);
             let cap_pos = state.body_position(&cap_body);
             if sim::dist(pos, cap_pos) > config.combat.retreat_min_dist {
                 if let Some(c) = state.control_mut(owner.clone()) {
                     c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Move { position: cap_pos }));
                 }
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Withdraw,
+                    target: Some(cap_body.clone()),
+                    destination: Some(cap_pos),
+                    order: Some(ShipBehavior::Move { position: cap_pos }),
+                    ..base.clone()
+                });
                 sim::ev(state, GameEvent::Withdraw { ship: ship_id.to_string(), to_body: cap_body });
                 sim::move_toward(state, config, ship_id, &class, cap_pos);
                 return;
@@ -418,12 +448,20 @@ pub(crate) fn ai_ship_turn(
             if let Some(c) = state.control_mut(owner.clone()) {
                 c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
             }
+            decisions.push(ShipDecision {
+                verdict: ShipVerdict::Engage,
+                target: Some(target.clone()),
+                order: Some(ShipBehavior::Follow { ship: target.clone() }),
+                ..base.clone()
+            });
             sim::fire(state, config, ship_id, &plan);
         }
         return;
     }
 
     let Some(behavior) = resolve_target(state, config, ship_id, &owner, pos, rng, focus.clone()) else {
+        // 没派活：叶上那条值可能是很久以前的——这一回合 AI 对它没有新选择。
+        decisions.push(base.clone());
         return;
     };
 
@@ -431,17 +469,36 @@ pub(crate) fn ai_ship_turn(
     if let ShipBehavior::Colonize { body } = &behavior {
         let bpos = state.body_position(body);
         if sim::dist(pos, bpos) <= config.combat.arrival_eps {
+            decisions.push(ShipDecision {
+                verdict: ShipVerdict::Colonize,
+                target: Some(body.to_string()),
+                order: Some(behavior.clone()),
+                ..base.clone()
+            });
             sim::colonize(state, config, rng, ship_id, body, next_building_id);
             return;
         }
     }
     // 自动轰炸：原地附近若有敌对城在围城射程内，先轰炸（轰炸不需要行为）。
-    if auto_bombard(state, config, ship_id, &owner, pos) {
+    if let Some(city) = auto_bombard(state, config, ship_id, &owner, pos) {
+        decisions.push(ShipDecision {
+            verdict: ShipVerdict::Bombard,
+            target: Some(city),
+            ..base.clone()
+        });
         return;
     }
 
-    let base = sim::behavior_dest(state, &behavior);
-    sim::move_toward(state, config, ship_id, &class, kiting_dest(state, config, ship_id).unwrap_or(base));
+    let base_dest = sim::behavior_dest(state, &behavior);
+    let dest = kiting_dest(state, config, ship_id).unwrap_or(base_dest);
+    decisions.push(ShipDecision {
+        verdict: ShipVerdict::Move,
+        target: behavior_object(&behavior),
+        destination: Some(dest),
+        order: Some(behavior.clone()),
+        ..base.clone()
+    });
+    sim::move_toward(state, config, ship_id, &class, dest);
 
     // 移动后：自动接战（攻击不要行为）→ 自动轰炸 → 殖民落地。
     if let Some(ship) = state.ship(ship_id) {
@@ -452,19 +509,51 @@ pub(crate) fn ai_ship_turn(
                 if let Some(c) = state.control_mut(owner.clone()) {
                     c.ship_orders.insert(ship_id.to_string(), Control::inherit(ShipBehavior::Follow { ship: target.clone() }));
                 }
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Engage,
+                    target: Some(target.clone()),
+                    order: Some(ShipBehavior::Follow { ship: target.clone() }),
+                    enemy_in_range: true,
+                    after_move: true,
+                    ..base.clone()
+                });
                 sim::fire(state, config, ship_id, &plan);
                 return;
             }
         }
-        if auto_bombard(state, config, ship_id, &owner, np) {
+        if let Some(city) = auto_bombard(state, config, ship_id, &owner, np) {
+            decisions.push(ShipDecision {
+                verdict: ShipVerdict::Bombard,
+                target: Some(city),
+                after_move: true,
+                ..base.clone()
+            });
             return;
         }
         if let ShipBehavior::Colonize { body } = &behavior {
             let bpos = state.body_position(body);
             if sim::dist(np, bpos) <= config.combat.arrival_eps {
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Colonize,
+                    target: Some(body.to_string()),
+                    order: Some(behavior.clone()),
+                    after_move: true,
+                    ..base.clone()
+                });
                 sim::colonize(state, config, rng, ship_id, body, next_building_id);
             }
         }
+    }
+}
+
+/// 行为的**对象**（判定表里的 `target` 列）：跟谁、停哪座城、殖民哪个天体。
+/// 纯位置的 `Move`/`Idle` 没有对象（目的地另记在 `destination`）。
+fn behavior_object(b: &ShipBehavior) -> Option<String> {
+    match b {
+        ShipBehavior::Follow { ship } => Some(ship.clone()),
+        ShipBehavior::DockCity { city } => Some(city.clone()),
+        ShipBehavior::Colonize { body } => Some(body.clone()),
+        _ => None,
     }
 }
 
@@ -711,7 +800,7 @@ mod tests {
 
         let d_before = dist([40.0, 40.0], home);
         let mut rng = Prng::new(42);
-        advance(&mut state, &config, &mut rng);
+        let derived = advance(&mut state, &config, &mut rng);
 
         assert!(
             state.events.iter().any(|e| matches!(e, GameEvent::Withdraw { ship: s, .. } if *s == ship2)),
@@ -724,5 +813,74 @@ mod tests {
             d_after < d_before,
             "withdrawing ship should head for home ({d_before:.2} -> {d_after:.2})"
         );
+
+        // …而且**判定本身**要被记下来（不发事件的那一半）：从「它撤了」到「为什么撤」，
+        // 只有 `decisions` 能回答——当时的血量比与撤退阈值就是判据。
+        let rec = derived
+            .flow
+            .decisions
+            .ships
+            .iter()
+            .find(|d| d.ship == ship2 && d.verdict == ShipVerdict::Withdraw)
+            .unwrap_or_else(|| panic!("撤退判定必须被记下来，decisions={:?}", derived.flow.decisions.ships));
+        assert_eq!(rec.target.as_deref(), Some("地球"), "撤退目标是首都天体");
+        assert!(
+            (rec.retreat_hull - effective_retreat_hull(&config, rec.kiting)).abs() < 1e-12,
+            "记下的撤退阈值必须等于当时的有效阈值（风格变了它也变）：{rec:?}"
+        );
+        assert!(
+            rec.hull_ratio < rec.retreat_hull && rec.hull_ratio > 0.0,
+            "血量比必须真的低于阈值，否则这条判定不成立：{rec:?}"
+        );
+        assert!(rec.enemy_in_range, "撤退的前提是敌在射程内：{rec:?}");
+        assert!(
+            matches!(rec.order, Some(ShipBehavior::Move { .. })),
+            "判定里要带上实际写回指令叶的行为：{rec:?}"
+        );
+    }
+
+    /// 捕获的**基本不变量**（不是"有数据就行"）：
+    ///
+    /// * 一艘 AI 舰一回合**最多两条**判定，且是「先机动 → 移动后再判一次」这个固定序列
+    ///   （`move` 在前、`after_move` 只有第二条才为真）——没有这条，读表的人会把同一艘舰的
+    ///   两行当成"它同时做了两件事"；
+    /// * 每条判定的舰属于它自报的势力；
+    /// * `retreat_hull` 与 `kiting` 自洽（读表的人正是靠这一列解释"它为什么撤/为什么打"，
+    ///   错了就会得出反向的结论）。
+    #[test]
+    fn decisions_are_consistent_and_at_most_two_per_ship() {
+        let (config, mut state) = fresh_world(42);
+        let mut rng = Prng::new(7);
+        let derived = advance(&mut state, &config, &mut rng);
+        let ds = &derived.flow.decisions.ships;
+        assert!(!ds.is_empty(), "一回合至少要留下一批判定");
+
+        let mut per_ship: std::collections::BTreeMap<String, Vec<&ShipDecision>> = std::collections::BTreeMap::new();
+        for d in ds {
+            assert!(d.ship != "", "判定必须指明是哪艘舰");
+            if let Some(s) = state.ship(&d.ship) {
+                assert_eq!(s.faction_id, d.faction, "判定的势力必须与舰的归属一致：{d:?}");
+            }
+            assert!(
+                (d.retreat_hull - effective_retreat_hull(&config, d.kiting)).abs() < 1e-12,
+                "retreat_hull 与 kiting 不自洽：{d:?}"
+            );
+            assert!((0.0..=1.0).contains(&d.hull_ratio), "血量比超出 0..1：{d:?}");
+            // `Hold` 的语义是「这回合 AI 没派活」——那它也就不该写叶。
+            if d.verdict == ShipVerdict::Hold {
+                assert!(d.order.is_none(), "没派活的判定不该带写回的行为：{d:?}");
+            }
+            per_ship.entry(d.ship.clone()).or_default().push(d);
+        }
+        for (ship, rows) in &per_ship {
+            assert!(rows.len() <= 2, "{ship} 一回合出现了 {} 条判定（上限是 2）：{rows:?}", rows.len());
+            if rows.len() == 2 {
+                assert_eq!(rows[0].verdict, ShipVerdict::Move, "{ship} 的第一条判定应当是机动：{rows:?}");
+                assert!(!rows[0].after_move, "{ship} 的第一条判定不该标成「移动之后」：{rows:?}");
+                assert!(rows[1].after_move, "{ship} 的第二条判定必须标成「移动之后」：{rows:?}");
+            } else {
+                assert!(!rows[0].after_move, "{ship} 只有一条判定时不该标成「移动之后」：{rows:?}");
+            }
+        }
     }
 }

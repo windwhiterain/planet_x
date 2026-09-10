@@ -94,6 +94,7 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable { name: "city_flow", table: "idx/city_flow.jsonl", key: "city_id", join_on: "city_ids", round: true },
     DerivedTable { name: "control", table: "idx/control.jsonl", key: "key", join_on: "faction_ids", round: true },
     DerivedTable { name: "scope", table: "idx/scope.jsonl", key: "key", join_on: "", round: true },
+    DerivedTable { name: "decisions", table: "idx/decisions.jsonl", key: "actor", join_on: "faction_ids", round: true },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -107,6 +108,7 @@ struct Writers {
     city_flow: BufWriter<File>,
     control: BufWriter<File>,
     scope: BufWriter<File>,
+    decisions: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
 }
@@ -126,6 +128,7 @@ impl Writers {
             city_flow: open("city_flow")?,
             control: open("control")?,
             scope: open("scope")?,
+            decisions: open("decisions")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
         })
@@ -521,6 +524,24 @@ fn write_round(
         if let Some(d) = &c.default_ship_order {
             row("default_ship_order", json!(""), json!(null), json!(d.value), d.mode)?;
         }
+        // —— 风格两轴的四片叶（`control-live-layers.md` §3 那条候选）——
+        //
+        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`（**有效值**）
+        // 看结果，看不到这四片叶**自己的值与自己的表态**——于是「这艘舰的风格是它自己钉的，
+        // 还是跟着舰队默认走的」在表里查不出来（web 的 `effectiveMode()` 正是靠这个区分）。
+        // `value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，kiting 是数字。
+        for (ship, leaf) in &c.ship_doctrine {
+            row("ship_doctrine", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+        }
+        for (ship, leaf) in &c.ship_kiting {
+            row("ship_kiting", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+        }
+        if let Some(d) = &c.default_doctrine {
+            row("default_doctrine", json!(""), json!(null), json!(d.value), d.mode)?;
+        }
+        if let Some(d) = &c.default_kiting {
+            row("default_kiting", json!(""), json!(null), json!(d.value), d.mode)?;
+        }
         for (res, leaf) in &c.investment_budget {
             row("investment_budget", json!(res), json!(null), json!(leaf.value), leaf.mode)?;
         }
@@ -558,6 +579,55 @@ fn write_round(
     for (cid, m) in &state.scope.cities {
         writeln!(w.scope, "{}", json!({"round": state.round, "level": "city", "key": cid, "mode": m}))
             .map_err(|e| e.to_string())?;
+    }
+
+    // —— 判定：本回合 **AI 选了什么、为什么**（`Derived.flow.decisions`）——
+    //
+    // 两种 `kind` 共用一组固定列；`actor` = 谁（舰名 / 船坞所在城）是 join 键。共用列之外
+    // 的差异（逐舰判定的输入 vs 改装的前后舰级）都进 `detail` 对象——这样 Python 侧列类型
+    // 稳定，而各 kind 的专属信息不丢。
+    //
+    // ⚠ 空白是**有信息**的：`verdict: "hold"` 行 = 这回合 AI 没给这艘舰派活（叶上那条值
+    // 可能是很久以前的），不是"它在待命"。
+    for d in &derived.flow.decisions.ships {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": d.faction,
+                "kind": "ship_order",
+                "actor": d.ship,
+                "verdict": d.verdict,
+                "target": d.target,
+                "detail": {
+                    "hull_ratio": d.hull_ratio,
+                    "retreat_hull": d.retreat_hull,
+                    "kiting": d.kiting,
+                    "enemy_in_range": d.enemy_in_range,
+                    "after_move": d.after_move,
+                    "destination": d.destination,
+                    "order": d.order,
+                },
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for r in &derived.flow.decisions.retools {
+        writeln!(
+            w.decisions,
+            "{}",
+            json!({
+                "round": state.round,
+                "faction_id": r.faction,
+                "kind": "retool",
+                "actor": r.city,
+                "verdict": "retool",
+                "target": r.to,
+                "detail": {"building": r.building, "from": r.from},
+            })
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -674,9 +744,10 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / default_ship_order / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order` 与 `capital` 为 `\"\"`。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / default_ship_order / default_doctrine / default_kiting / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
+                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),
@@ -686,6 +757,18 @@ pub fn projection_schema() -> serde_json::Value {
                 "columns": {"round":"integer","level":"string","key":"string","mode":"string"},
                 "column_docs": {
                     "level": "节点层级：global / faction / body / city（`global` 的 key 为 `\"\"`）。",
+                },
+            }),
+            "decisions" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**本回合 AI 的判定**（`Derived.flow.decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
+                "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
+                "column_docs": {
+                    "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）。",
+                    "actor": "作判定的一方：舰名（ship_order）/ 船坞所在城名（retool）。",
+                    "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ **hold（没派活）**；retool 固定为 retool。",
+                    "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）；纯位置机动为 null（看 `detail.destination`）。",
+                    "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。",
                 },
             }),
             _ => continue,
@@ -720,6 +803,7 @@ pub fn projection_schema() -> serde_json::Value {
             "看外交/经济/军力全貌：q.factions(round=r)（势力主表：relations/resources/自有城与舰）；",
             "要「这回合产出/维护/治理到底是多少」：读 derived.flow / derived.city_flow（引擎内部中间量，状态里没有）；",
             "要「谁在控制什么」：读 derived.control（每个叶片一行）+ derived.scope（显式作用域节点），舰的有效指令看 ships 表的 order_effective* 列；",
+            "要「AI 为什么这么决定」：读 derived.decisions（逐舰判定 withdraw/engage/colonize/bombard/move/hold + 当时的关键输入，以及船坞改装）——它既不发事件也不落状态，只有这里能读到；",
             "查「某城/某舰/某势力发生过什么」：用事件历史表——q.history('city', 城名) / q.history('ship', 舰名)（归一化参与方槽位，任意实体都能 join），或按类型直取稠密帧 q.events(type='city_razed')；",
             "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)；",
             "要规则（舰级/建筑/组件/资源价值）时读 meta.json：Python kit 里 q.meta / q.ships_spec() / q.buildings_spec() / q.components_spec() / q.resource_value() —— 规则表可当 DataFrame 与 facts join。"
@@ -1326,6 +1410,20 @@ mod tests {
             );
         }
         c.default_ship_order = Some(Control { value: ShipBehavior::Idle, mode: ControlMode::Player });
+        // 风格四片叶（`control-live-layers.md` §3 那条候选）：四片都要出现在表里——
+        // 少了它们，「这艘舰的风格是它自己钉的，还是跟着舰队默认走」在表里就查不出来。
+        if let Some(ship) = &ship {
+            c.ship_doctrine.insert(
+                ship.clone(),
+                Control { value: crate::model::ShipDoctrine { temper: 0.71, lone_wolf: -0.25 }, mode: ControlMode::Player },
+            );
+            c.ship_kiting.insert(ship.clone(), Control { value: -0.6, mode: ControlMode::Player });
+        }
+        c.default_doctrine = Some(Control {
+            value: crate::model::ShipDoctrine { temper: 0.25, lone_wolf: 0.5 },
+            mode: ControlMode::Auto,
+        });
+        c.default_kiting = Some(Control { value: 0.2, mode: ControlMode::Player });
         c.construction_budget.insert(
             "铁".to_string(),
             Control { value: 3.5, mode: ControlMode::Player },
@@ -1341,6 +1439,20 @@ mod tests {
         let has = |kind: &str| rows.iter().any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid));
         assert!(has("default_ship_order"), "缺舰队默认指令行");
         assert!(has("construction_budget"), "缺预算行");
+        // 风格四片叶：值与**自己的** mode 都要在（不是有效值、不是有效归属）。
+        let doc = rows
+            .iter()
+            .find(|r| r["kind"] == json!("ship_doctrine") && r["key"] == json!(ship.clone().unwrap_or_default()))
+            .expect("缺逐舰风格叶行");
+        assert_eq!(doc["value"], json!({"temper": 0.71, "lone_wolf": -0.25}), "风格叶的值应是叶自己的值");
+        assert_eq!(doc["mode"], json!("Player"));
+        assert!(
+            rows.iter().any(|r| r["kind"] == json!("ship_kiting") && r["value"] == json!(-0.6)),
+            "缺逐舰风筝姿态叶行"
+        );
+        let dd = rows.iter().find(|r| r["kind"] == json!("default_doctrine")).expect("缺舰队默认风格行");
+        assert_eq!(dd["mode"], json!("Auto"), "势力级默认风的 mode 也要如实带出来");
+        assert!(has("default_kiting"), "缺舰队默认风筝姿态行");
         if let Some(ship) = &ship {
             let row = rows
                 .iter()

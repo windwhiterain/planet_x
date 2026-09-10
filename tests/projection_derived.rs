@@ -229,7 +229,8 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
 }
 
 #[test]
-fn derived_without_checkpoint_says_it_was_recomputed() {    let st = run(&["--seed", "7", "--derived"]);
+fn derived_without_checkpoint_says_it_was_recomputed() {
+    let st = run(&["--seed", "7", "--derived"]);
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     assert_eq!(v["source"], serde_json::json!("state"));
@@ -238,4 +239,89 @@ fn derived_without_checkpoint_says_it_was_recomputed() {    let st = run(&["--se
     assert_eq!(v["post"]["flow"]["upkeep"], serde_json::json!({}));
     // 但 metrics 仍然是真的（从当前状态汇总），不该是空壳。
     assert!(v["post"]["metrics"]["factions"].as_object().unwrap().len() >= 2);
+}
+
+/// **判定表（`idx/decisions.jsonl`）的契约**：它必须与 `--derived` 里**同一回合存下来的**
+/// 判定逐条对得上（跨进程、跨两条代码路径），而且**必须真有东西**。
+///
+/// 为什么单独钉：这是一张"空白也有意义"的表（`hold` = 这回合 AI 没派活），所以最容易
+/// 悄悄退化成一张永远为空的表——那比没有表更坏，它看起来像"AI 这一回合什么也没决定"。
+#[test]
+fn decisions_table_matches_the_derived_record() {
+    let s = Scratch::new("decisions");
+    let out = s.0.join("out");
+    let ckpt = s.0.join("ckpt.ron");
+    let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
+
+    // 跑到有仗打的回合（seed 7：r3 开战）——否则 engage 之类的分支永远走不到。
+    let st = run(&["--seed", "7", "--round", "20", "--index", out_s, "--save", ckpt_s]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+
+    let st = run(&["--start", ckpt_s, "--derived"]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
+    let round = v["round"].as_u64().unwrap();
+    let dec = &v["post"]["flow"]["decisions"];
+    let ships = dec["ships"].as_array().expect("decisions.ships 是数组");
+    let retools = dec["retools"].as_array().expect("decisions.retools 是数组");
+
+    let rows = derived_rows(&out, "decisions", round);
+    let order_rows: Vec<&serde_json::Value> =
+        rows.iter().filter(|r| r["kind"] == serde_json::json!("ship_order")).collect();
+    let retool_rows: Vec<&serde_json::Value> =
+        rows.iter().filter(|r| r["kind"] == serde_json::json!("retool")).collect();
+    assert_eq!(order_rows.len(), ships.len(), "逐舰判定的条数两个读面不一致");
+    assert_eq!(retool_rows.len(), retools.len(), "改装判定的条数两个读面不一致");
+
+    const KNOWN: [&str; 6] = ["withdraw", "engage", "colonize", "bombard", "move", "hold"];
+    for d in ships {
+        let actor = d["ship"].as_str().unwrap();
+        // 一艘舰一回合**最多两行**（先机动、到位后再判一次），所以配对键是
+        // (actor, verdict, after_move) 而不是 actor。
+        let row = order_rows
+            .iter()
+            .find(|r| {
+                r["actor"] == serde_json::json!(actor)
+                    && r["verdict"] == d["verdict"]
+                    && r["detail"]["after_move"] == d["after_move"]
+            })
+            .unwrap_or_else(|| panic!("decisions 表缺 {actor} 的判定行（{d}）"));
+        assert_eq!(row["faction_id"], d["faction"], "{actor} 的势力不一致");
+        assert_eq!(row["target"], d["target"], "{actor} 的目标不一致");
+        // 输入那一半也要对得上——读表的人正是靠它解释"为什么"。
+        assert_eq!(row["detail"]["hull_ratio"], d["hull_ratio"], "{actor} 的血量比不一致");
+        assert_eq!(row["detail"]["retreat_hull"], d["retreat_hull"], "{actor} 的撤退阈值不一致");
+        assert_eq!(row["detail"]["kiting"], d["kiting"], "{actor} 的风筝距离不一致");
+        assert_eq!(row["detail"]["enemy_in_range"], d["enemy_in_range"], "{actor} 的敌情不一致");
+        assert_eq!(row["detail"]["destination"], d["destination"], "{actor} 的目的地不一致");
+        assert_eq!(row["detail"]["order"], d["order"], "{actor} 写回的行为不一致");
+        assert!(
+            KNOWN.contains(&row["verdict"].as_str().unwrap()),
+            "出现了没在 schema 里声明过的判定：{row}"
+        );
+    }
+    for r in retools {
+        let city = r["city"].as_str().unwrap();
+        let row = retool_rows
+            .iter()
+            .find(|x| x["actor"] == serde_json::json!(city))
+            .unwrap_or_else(|| panic!("decisions 表缺 {city} 的改装行"));
+        assert_eq!(row["faction_id"], r["faction"], "{city} 的势力不一致");
+        assert_eq!(row["target"], r["to"], "{city} 改装后的舰级不一致");
+        assert_eq!(row["detail"]["from"], r["from"], "{city} 改装前的舰级不一致");
+        assert_eq!(row["detail"]["building"], r["building"], "{city} 的建筑下标不一致");
+    }
+
+    // 防空转：这 20 回合里必须真的发生过接战（否则上面对得再齐也只是空表对空表）。
+    let verdicts: std::collections::BTreeSet<&str> =
+        order_rows.iter().map(|r| r["verdict"].as_str().unwrap()).collect();
+    assert!(
+        verdicts.contains("engage"),
+        "seed 7 的 20 回合里应当真的出现过接战判定，实际只见到 {verdicts:?}"
+    );
+    assert!(
+        order_rows.len() >= 4,
+        "最后一回合的逐舰判定只有 {} 条——守卫太空",
+        order_rows.len()
+    );
 }

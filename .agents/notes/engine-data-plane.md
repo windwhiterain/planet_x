@@ -85,11 +85,13 @@ leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
 
 ## 5. 落地状态（用户授权自行决定顺序）
 
-1. `[x]` **读面补表**（本轮做完，见 §7）：`flow` / `city_flow` / `control` / `scope` 四张派生表 +
+1. `[x]` **读面补表**（本轮做完，见 §7）：`flow` / `city_flow` / `control` / `scope` / `decisions`
+   五张派生表 +
    ships 表的 `order_*` 列（引擎解析的归属/有效指令）+ `--derived` 单点导出 + schema 同步 +
    跨进程一致性测试（`tests/projection_derived.rs`）。
-2. `[ ]` **"AI 到底掷了什么"要单独捕获**（见 §7.4）：`pre` **不是**这个（它只是回合前的观测），
-   要真数据得在 `sim`/`autocontrol` 的决策点补一次**结构化捕获**，并证明行为中性。
+2. `[x]` **"AI 到底掷了什么"要单独捕获**（见 §7.4/§7.5）：`pre` **不是**这个（它只是回合前的观测），
+   真数据在 `sim`/`autocontrol` 的决策点做了一次**结构化捕获**（`RoundDecisions` → `idx/decisions.jsonl`），
+   并证明了行为中性（`--digest` 与 `main.jsonl` 逐字节不变）。
 3. `[x]` **风格活层**（`control-live-layers.md` §4.1+4.2+4.4）：`default_doctrine`/`default_kiting`
    + `Ship.doctrine/kiting` 降级为记录值 + ships 表的 `doctrine`/`kiting` 有效值列。
    提交 `70e15e5`，含**行为中性**验证（60 回合状态流 sha256 改前=改后）。
@@ -100,9 +102,11 @@ leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
 
 ```bash
 cargo test --workspace
-cargo run --bin planet_x -- --seed 7 --round 6 --index out/          # 看 idx/{flow,city_flow,control,scope}.jsonl
+cargo run --bin planet_x -- --seed 7 --round 6 --index out/          # 看 idx/{flow,city_flow,control,scope,decisions}.jsonl
 cargo run --bin planet_x -- --seed 7 --round 6 --index out/ --save ckpt.ron
 cargo run --bin planet_x -- --start ckpt.ron --derived               # 与上面同一回合，值必须完全相同
+# 行为中性（改捕获前后各跑一次，逐字节比对）：
+cargo run --bin planet_x -- --seed 42 --round 240 --digest 20 | shasum -a 256
 ```
 
 ## 7. 落地记录（2026-10，`feature/control-tri-state`）
@@ -145,6 +149,40 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
 `sim`/`autocontrol` 的决策点补一次捕获（新的 `Decisions`），并且必须**行为中性**——
 判据：同 seed/同回合的 `--digest` 输出与捕获前**逐字相同**，长局 harness 全绿。
 
+→ **§7.5 就是这件事的落地记录。**
+
+### 7.5 `decisions`：把「AI 的判定过程」也做成中间量（本轮做的）
+
+**为什么必须是新捕获**：指令叶（`ship_orders`）只留下**结果**——「它现在在 `Follow` 某艘舰」；
+事件（`ShipDestroyed`/`Withdraw`/`ShipSpawned`）只记**发生了什么**。中间那层「AI 为什么这么选」
+（是接战索敌还是自保撤退？当时的血量比与撤退阈值差多少？这回合它是不是**根本没被派活**？）
+全部发生在 `autocontrol` 内部，用完就丢。
+
+**形状**（`src/model/decisions.rs` → 挂在 `RoundFlow.decisions` → `Derived.flow.decisions` →
+`idx/decisions.jsonl`）：
+
+* `kind="ship_order"`：逐舰判定，`verdict` ∈ `withdraw` / `engage` / `colonize` / `bombard` /
+  `move` / **`hold`**；`detail` 带判定**输入**——`hull_ratio` / `retreat_hull` / `kiting` /
+  `enemy_in_range` / `after_move` / `destination` / `order`。
+  * **`hold` 是空白里的信息**：这一回合 AI 没给这艘舰派活（叶上那条值可能是很久以前的）。
+  * **一艘舰一回合最多两行**：先机动（`move`），移动到位后再判一次（`after_move: true`）——
+    所以聚合前要看 `after_move`，否则会把「先去了哪、到了之后改了什么主意」算成两件事。
+* `kind="retool"`：船坞改装（`actor`=城名、`target`=新舰级、`detail.from/building`）——这是
+  **少数几个不留事件的 AI 决策之一**，此前只能从 `ship_type` 的变化反推、且不知何时改的。
+
+**行为中性已实测**（同一次改动前后）：`--seed 42 --round 240 --digest 20` 的输出 sha256
+**完全相同**；`--seed 7 --round 60 --index` 的 `main.jsonl` sha256 **完全相同**；
+只有 checkpoint 字节变了——因为它多存了 `decisions` 这一栏（预期，且是有用的那一栏）。
+实测规模：seed 7 跑 60 回合 → 1083 行（engage 444 / hold 464 / move 144 / bombard 14 /
+retool 13 / colonize 3 / withdraw 1）。
+
+**没做的两件事（记成候选，别当成做完了）**：
+
+* `[ ]` **玩家名下的舰**：它们的指令是你下的（没有 AI 判定），但**自动接战/轰炸**（`auto_combat`）
+  对所有舰一视同仁——那一层今天不记录，所以「AI 拿你的舰去开火」仍然只能从事件反推。
+* `[ ]` **火力分配（`build_fire_plan` 的逐武器索敌）**：那是"每一发打谁"的判定，比行为判定更细。
+  没做是因为它一行一武器会爆行数（一场大战几百发），值得先想清楚它的表形状。
+
 ## 8. 落地**之后**发现的缺口（同轮处理 / 记成候选）
 
 写侧套件 `play/planet_x_ctl`（并行做的那一半）在真实使用中撞出六条，逐条记录处理方式——
@@ -162,11 +200,16 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
    `--start` 时把档里存的 `post` 交给投影当**起点回合**的行（那一行的 state 就是那一回合的结果）；
    守卫：`tests/projection_derived.rs::projecting_a_checkpoint_keeps_that_rounds_flow`
    （含"至少一个势力维护费非零"的防空转断言）。全新开局仍然没有流量（初始世界没有"上一回合"）。
-3. `[ ]` **`--control` 的叶值被舍入到 2 位小数**（已知不对称，只记录）：`round_view` 为了
-   token 噪声把预算/权重四舍五入，而 checkpoint 存的是全精度——于是"dump → 改 → 回传"会
-   **静默量化到 0.01**。对玩法无实质影响（模拟用的是存下来的数），但它与"读面即写面、模板
-   原样回传"的承诺有张力。候选修法：读面不舍入，或加 `--control-raw`。kit 侧已按半个显示单位
-   容差处理。
+3. `[x]` **`--control` 的叶值被舍入到 2 位小数**（本轮修复）：`round_view` 为了 token 噪声把
+   预算/权重四舍五入，而 checkpoint 存的是全精度——于是"dump → 改 → 回传"会**静默量化到 0.01**。
+   **修法：直接删掉读面的舍入**（选它而不是"加 `--control-raw`"，理由是分界线本身：**引擎是数据
+   平面，输出即真值；好不好看是策略平面的事**）。而且先量过代价：一份跑到 120 回合的真实控制面里
+   **470 个数值没有一个会被 2 位舍入改变**——这点噪声在当前世界里根本不存在，舍入只带来风险、
+   没带来收益。守卫：`src/control.rs::the_control_template_never_rounds_a_leaf_value`
+   （三个"舍入会改变它"的值落在三种叶上：势力级默认风格 / 逐舰风格 / 资源预算）；
+   端到端证据：写 `0.7131` → `--control` 读回 `0.7131`（旧行为是 `0.71`）。
+   kit 侧同步收紧：`_values_match` 从"半格容差"改成**精确比较**（只留 1e-9 的浮点表示余量），
+   因为读面已经无损——"落在容差里"不再能当"落地了"的证据。
 4. `[x]` **风格轴曾经没有 `mode`** —— 已由 `70e15e5` 解掉（`ship_doctrine`/`ship_kiting` 现在
    都是三态叶片 + 写值即接管 + 势力级默认）。写侧套件是在那次提交**之前**做的，所以它的
    报告里把这条列为"做不到"；现在 kit 可以（也应该）要求显式 `mode`。
@@ -177,3 +220,14 @@ razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧�
    （kit 侧的坑，已按其办法解决）：从 checkpoint 往上找 config 会找到**另一个 worktree 的**配置，
    于是报 `missing field 'sanction_trade_mult'`。kit 现在优先按**二进制自己**的位置推 CWD，
    checkpoint 次之。
+7. `[x]` **「契约有两端」这条教训又犯了一次**（本轮修复）：引擎这轮给控制面加了两片**势力级
+   默认风格**（`default_doctrine`/`default_kiting`）并让风格轴有了 `mode`，而 kit 的
+   `LEAF_KINDS` 里没有这两个 kind —— **它不报错，只是静静地把这两片叶从 `surface()` 里藏起来**
+   （读面有、Python 看不见；demo 的叶计数 237 → 修复后 255，差的 18 就是它们）。
+   修复：`LEAF_KINDS`、`_VALUE_FIELD`、`_leaf_value`（两轴叶）、两个新 setter
+   （`set_default_doctrine`/`set_default_kiting`），并让逐舰的 `set_kiting`/`set_doctrine`
+   也**要求显式归属**（`mode=` 或 `take_over=True`）——引擎那边它们早就是三态叶了，
+   kit 的文档还停在"engine gap"。
+   教训（与 §8.1 同源，值得单独再记一次）：**引擎改了读面，必须顺手 grep 一遍消费者里
+   写死的字段清单**；"没报错"在这里恰恰是最坏的症状。
+   顺带撞出 `control-live-layers.md` §3.1 那个两轴叶的坑，kit 已按"配方期拒绝"处理。
