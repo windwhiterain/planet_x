@@ -705,6 +705,7 @@ fn flow_table_matches_the_derived_record() {
         flow.iter().filter(|r| r["round"] == json!(last_round)).collect();
     assert!(!last.is_empty(), "最后一回合应有过程量行");
     let mut checked = 0usize;
+    let mut admin_seen = 0usize;
     for row in last {
         let fid = row["faction_id"].as_str().unwrap();
         let expect_upkeep = outcome.post.factions.get(fid).map(|r| r.upkeep).unwrap_or(0.0);
@@ -720,9 +721,27 @@ fn flow_table_matches_the_derived_record() {
             .map(|r| r.production.clone())
             .unwrap_or_default();
         assert_eq!(row["production"], serde_json::to_value(&expect_prod).unwrap(), "{fid} 的 production 不一致");
+        // B1：治理的拆分（行政 vs 娱乐）、人口超载倍率、思潮惩罚也必须与视图逐值一致。
+        let expect_row = outcome.post.factions.get(fid);
+        for (col, got, want) in [
+            ("governance_admin", row["governance_admin"].as_f64().unwrap(),
+             expect_row.map(|r| r.governance_admin).unwrap_or(0.0)),
+            ("governance_entertainment", row["governance_entertainment"].as_f64().unwrap(),
+             expect_row.map(|r| r.governance_entertainment).unwrap_or(0.0)),
+            ("governance_scale", row["governance_scale"].as_f64().unwrap(),
+             expect_row.map(|r| r.governance_scale).unwrap_or(1.0)),
+            ("ideology_loyalty_penalty", row["ideology_loyalty_penalty"].as_f64().unwrap(),
+             expect_row.map(|r| r.ideology_loyalty_penalty).unwrap_or(0.0)),
+        ] {
+            assert_eq!(got, want, "{fid} 的 {col} 与视图不一致（读了两个不同的数）");
+        }
+        if row["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
+            admin_seen += 1;
+        }
         checked += 1;
     }
     assert!(checked >= 2, "只检查了 {checked} 个势力的过程量行——守卫太空");
+    assert!(admin_seen >= 1, "没有任何势力报出行政开销——新的列等于空转");
 
     // 城的过程量表同理（挑一个真有产出的城，别拿空表当通过）。
     let city_flow = jsonl(&s.0.join("idx/city_process.jsonl"));
@@ -732,6 +751,7 @@ fn flow_table_matches_the_derived_record() {
         .filter(|r| r["production"].as_object().map(|o| !o.is_empty()).unwrap_or(false))
         .collect();
     assert!(!with_prod.is_empty(), "最后一回合应有带产出的城（否则这条守卫没在检查任何东西）");
+    let mut targets_seen = 0usize;
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
         let expect = outcome
@@ -741,7 +761,18 @@ fn flow_table_matches_the_derived_record() {
             .map(|r| r.production.clone())
             .unwrap_or_default();
         assert_eq!(row["production"], serde_json::to_value(&expect).unwrap(), "{cid} 的产出不一致");
+        // B1：忠诚目标值分项（平铺列）与视图里的嵌套对象同源。
+        let want_eff = outcome.post.cities.get(cid).map(|r| r.loyalty_target.effective).unwrap_or(0.0);
+        assert_eq!(
+            row["loyalty_target_effective"].as_f64().unwrap(),
+            want_eff,
+            "{cid} 的忠诚目标值不一致"
+        );
+        if want_eff > 0.0 {
+            targets_seen += 1;
+        }
     }
+    assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——新的列等于空转");
 }
 
 /// 控制面表：每个叶片一行，`mode` 与状态里的一致；`capital` 这种可空叶也在。

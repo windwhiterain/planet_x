@@ -71,8 +71,16 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
             .cloned()
             .unwrap_or_default();
         let production_value: f64 = production.iter().map(|(k, v)| v * value_of(k)).sum();
-        let governance_cost = sink.governance.get(&fid).map(|g| g.total).unwrap_or(0.0);
-        let governance_coverage = sink.governance.get(&fid).map(|g| g.coverage).unwrap_or(1.0);
+        // 治理流：总开销 / 覆盖率 / 行政娱乐拆分 / 人口超载倍率 / 思潮惩罚。缺省值由**这里
+        // 一处**给出（`pre` 与零城势力都走这条），所以两个读面永远一致。`scale` 的中性缺省是
+        // 1.0 而不是 0——同 `coverage` 的约定：缺的是「没有账」，不是「治理能力归零」。
+        let gov = sink.governance.get(&fid);
+        let governance_cost = gov.map(|g| g.total).unwrap_or(0.0);
+        let governance_coverage = gov.map(|g| g.coverage).unwrap_or(1.0);
+        let governance_admin = gov.map(|g| g.admin).unwrap_or(0.0);
+        let governance_entertainment = gov.map(|g| g.entertainment).unwrap_or(0.0);
+        let governance_scale = gov.map(|g| g.scale).unwrap_or(1.0);
+        let ideology_loyalty_penalty = gov.map(|g| g.ideology_penalty).unwrap_or(0.0);
         // 「谁不卖给你」：有多少势力对本势力**全面禁运**（本回合市场结算的实际判据）。
         let trade_blocked_by = state
             .factions
@@ -96,6 +104,12 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 upkeep: sink.upkeep.get(&fid).copied().unwrap_or(0.0),
                 governance_cost,
                 governance_coverage,
+                governance_admin,
+                governance_entertainment,
+                governance_scale,
+                ideology_loyalty_penalty,
+                // 首都评估/迁都（`step_capital` 的中间量）：没评估也没迁 = `CapitalFlow::default()`。
+                capital: sink.capital.get(&fid).cloned().unwrap_or_default(),
                 freight_paid: sink.market_freight.get(&fid).copied().unwrap_or(0.0),
                 carrier_income: sink.market_carrier_income.get(&fid).copied().unwrap_or(0.0),
                 net_import: sink.market_net.get(&fid).copied().unwrap_or(0.0),
@@ -122,6 +136,8 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 loyalty: c.loyalty,
                 production_value,
                 production,
+                // 本回合的忠诚目标值分项；`pre` 里是全 0 的 `LoyaltyTarget::default()`。
+                loyalty_target: sink.city_loyalty.get(&c.name).cloned().unwrap_or_default(),
             },
         );
     }

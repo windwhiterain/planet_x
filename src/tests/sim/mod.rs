@@ -10,6 +10,7 @@ mod blueprints;
 mod capital;
 mod combat;
 mod fleet;
+mod governance;
 mod haul;
 mod ideology;
 mod mond;

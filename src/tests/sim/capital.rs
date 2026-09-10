@@ -14,7 +14,16 @@ fn capital_destroyed_auto_relocates_to_highest_population_city() {
         }
     }
 
-    step_capital(&mut state, &config);
+    let mut sink = RoundSink::default();
+    step_capital(&mut state, &config, &mut sink);
+
+    // 强迁那条路**没有评估**：读面里只有「从哪迁到哪」与它的忠诚代价。
+    let cap = sink.capital.get("中国").expect("迁都要在读面里留痕");
+    assert!(!cap.reviewed, "亡城强迁不是周期性评估");
+    assert!(cap.current_cost.is_none() && cap.candidate.is_none(), "没评估就不该编出判据数字");
+    assert_eq!(cap.relocated_from.as_deref(), Some("地球"));
+    assert_eq!(cap.relocated_to.as_deref(), Some("金星"));
+    assert_eq!(cap.relocate_loyalty_cost, 0.0, "旧首都已失（占比 0）⇒ 应急迁都无忠诚代价");
 
     // 剩余中国活城：水星熔炉基地(220,水星)、金星浮空之城(260,金星)。人口最高=金星浮空之城。
     assert_eq!(
@@ -52,7 +61,21 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
     crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
     assert_eq!(state.capital_body("中国"), "水星");
 
-    step_capital(&mut state, &config);
+    let mut sink = RoundSink::default();
+    step_capital(&mut state, &config, &mut sink);
+
+    // 判据数字必须留下来：现首都（水星）比候选（地球）贵，且这次评估**真的迁了**。
+    let cap = sink.capital.get("中国").expect("评估要在读面里留痕");
+    assert!(cap.reviewed, "Auto 首都在评估轮必须记下「评估过」");
+    assert_eq!(cap.candidate.as_deref(), Some("地球"), "候选 = 人口最高的活城");
+    let cur_cost = cap.current_cost.expect("评估过就该有现首都成本");
+    let cand_cost = cap.candidate_cost.expect("评估过就该有候选成本");
+    assert!(
+        cand_cost + config.governance.capital_relocate_threshold < cur_cost,
+        "判据应当成立：候选 {cand_cost} + 门槛 < 现首都 {cur_cost}"
+    );
+    assert_eq!(cap.relocated_to.as_deref(), Some("地球"));
+    assert!(cap.relocate_loyalty_cost > 0.0, "迁离有人口的旧首都 ⇒ 全国忠诚要付代价");
 
     // 中国人口最繁华城=长三角(1400,地球)；迁到地球显著降低总治理距离成本。
     assert_eq!(
@@ -84,7 +107,14 @@ fn player_capital_not_overridden_by_ai_review() {
 
     // 评估轮：Player 控制的首都不被周期迁移覆盖。
     state.round = 12;
-    step_capital(&mut state, &config);
+    let mut sink = RoundSink::default();
+    step_capital(&mut state, &config, &mut sink);
+
+    // 「AI 没插嘴」这件事也要看得见：Player 钉的首都**不进评估**。
+    assert!(
+        sink.capital.get("中国").map(|c| !c.reviewed).unwrap_or(true),
+        "Player 控制的首都读面不该说它评估过"
+    );
 
     assert_eq!(
         state.capital_body("中国"),

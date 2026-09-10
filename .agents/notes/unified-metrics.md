@@ -52,10 +52,14 @@
   `--digest 12` 的 `factions[].production` 是窗口累计值（如 美国=347.45）。
 
 **候选（留待后续）**：
-- `[ ]` 把治理中间量（`governance_total`/`coverage`/距首都距离）也并入 `RoundView`——给
+- `[x]` 把治理中间量（`governance_total`/`coverage`/距首都距离）也并入 `RoundView`——给
   agent 一个「帝国为何要崩」的预警阅读，代价是每回合多一遍治理公式。
   **这一条已展开成 [`step-intermediates.md`](step-intermediates.md) 的 B1 批**（带 `文件:行号`：
   `sim/governance.rs:215` 的忠诚目标值及各分项、`:209` 的思潮惩罚、`:173-178` 的行政/娱乐拆分、
   `sim/capital.rs:47-61` 的迁都判据与迁都忠诚扣减），与另外 32 条一起排好了 B1–B5 批次。
+  **B1 已落地**（`feature/step-intermediates-b1`）：没有另加一遍治理公式，而是把
+  `step_governance` **本来就在算的**那几个中间量捕获下来（`view.cities[].loyalty_target` /
+  `view.factions[]` 的 `governance_admin|entertainment|scale|ideology_loyalty_penalty` + `capital`）——
+  「与模拟逐字一致」而不是「事后重算一遍」。见该篇 §6.1。
 - `[ ]` Web（玩家界面）要不要共享 `observe` 折出来的那份视图（现在刻意不动它）——若玩家也想要
   「世界一目了然的概览面板」可复用，但形状是面向玩家，另行设计。

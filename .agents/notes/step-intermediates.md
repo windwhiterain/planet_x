@@ -1,6 +1,7 @@
 # Step 中间量清单：36 条「算完就扔」的量
 
-> 状态 `[ ]` **未实现**（本篇只是盘点，一行代码都还没写）
+> 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）；B2–B5 仍是候选，
+> 一行代码都还没写。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md) §5（本篇是那一条的展开）、
 > [`unified-metrics.md`](unified-metrics.md)（上一次「总结 = 步进中间量」的合并；它的「候选」第一条
 > 就是本篇的 **B1**）、[`engine-data-plane.md`](engine-data-plane.md) §7.4（`pre` 面的真相 = 本篇 **B5**
@@ -37,20 +38,22 @@
 
 ## 2. A 组 · 经济与治理（12 条）
 
+> **`✅B1` = 已在 B1 批落地**（字段形状与实测见 §6.1）；其余仍是候选。
+
 | `文件:行号` | 量 | 粒度 | 骰子 | 它能回答什么问题 |
 | --- | --- | --- | --- | --- |
-| `sim/governance.rs:215` | `target_eff`（分项 `:213 target_base`、`:214 ent_bonus`、`:207 cap_bonus`） | 每城 | 无 | 这座城本回合的忠诚**目标值**及各分项——距离扣了多少、娱乐预算实换算成多少加成、首都人口占比 buff 多少。`view.factions[].governance_cost/coverage` 只给势力 total，「为什么这座城忠诚在掉」目前**没有解释面** |
-| `sim/governance.rs:209` | `ideo_penalty`（`ideology_loyalty_debuff`：`viol_mil/sci/elite/col`） | 每势力 | 无 | 「优势端思潮 vs 行为不符」扣的**全国**忠诚惩罚——为何全国忠诚一起掉（军国却不打仗、科学却不探 MOND）。现成 `pub fn faction_ideology_debuffs`（`:129`）**全仓库零调用者** |
-| `sim/governance.rs:173-178` | `total_admin` vs `ent_total`（行政 vs 娱乐拆分） | 每势力 | 无 | 「钱没花在我想的地方」：娱乐预算拉满却被行政（距离 × 人口超载）吃掉。现在只捕获了合计 |
-| `sim/governance.rs:171-172` | `overload` / `scale = 1.0 + overload` | 每势力 | 无 | 人口超管理容量后**放大所有远距离城**的治理费与忠诚惩罚——「为什么治理费比上回合暴涨」 |
+| ✅B1 `sim/governance.rs:215` | `target_eff`（分项 `:213 target_base`、`:214 ent_bonus`、`:207 cap_bonus`） | 每城 | 无 | 这座城本回合的忠诚**目标值**及各分项——距离扣了多少、娱乐预算实换算成多少加成、首都人口占比 buff 多少。`view.factions[].governance_cost/coverage` 只给势力 total，所以 B1 之前「为什么这座城忠诚在掉」**没有解释面**（现在 `view.cities[].loyalty_target` 就是它） |
+| ✅B1 `sim/governance.rs:209` | `ideo_penalty`（`ideology_loyalty_debuff`：`viol_mil/sci/elite/col`） | 每势力 | 无 | 「优势端思潮 vs 行为不符」扣的**全国**忠诚惩罚——为何全国忠诚一起掉（军国却不打仗、科学却不探 MOND）。⚠ 盘点时写的「`faction_ideology_debuffs`（`:129`）全仓库零调用者」**是错的**：`tests/horizon_long.rs:710` 的探针在用（每个 150 回合打印一次），漏判因为当时只 grep 了 `src/`。它不是读面的一部分，所以 B1 之前只有那条探针看得见这个数 |
+| ✅B1 `sim/governance.rs:173-178` | `total_admin` vs `ent_total`（行政 vs 娱乐拆分） | 每势力 | 无 | 「钱没花在我想的地方」：娱乐预算拉满却被行政（距离 × 人口超载）吃掉。B1 之前只捕获了合计 |
+| ✅B1 `sim/governance.rs:171-172` | `overload` / `scale = 1.0 + overload` | 每势力 | 无 | 人口超管理容量后**放大所有远距离城**的治理费与忠诚惩罚——「为什么治理费比上回合暴涨」 |
 | `sim/production.rs:133` | `labor`（= `labor_ratio`；`sim/construction.rs:95` 用的是**同一把尺**） | 每城 | 无 | 人口 / 建筑用工之比，直接乘在采矿产出上——「为什么这座城产量低」= 人手不足（人口→劳力的传导点） |
 | `sim/production.rs:91` | `is_hub` | 每城 | 无 | 产出**直进势力池**还是**先落产地货栈等船运**——「我挖出来的矿为什么用不了」。`view.cities[].production` 明确只记开采量、不分入库路径 |
 | `sim/production.rs:121` | `housing_capacity`（+ `:103 housing_area`） | 每城 | 无 | 人口增长的**住房天花板**——「为什么人口不涨了、产出提不上去」= 住宅面积 × 生态容量封顶 |
 | `sim/production.rs:214,216` | `short` / `frac`（`:217` 的 `.max(0.2)`；每舰 `hull_max*frac` @`:223`） | 每势力（落到每舰 hull） | 无 | 付不起维护费时舰队**按比例生锈**——「为什么我的船在掉血」。只有锈到 0 才留 `DeathCause::UpkeepShortfall` 事件，**掉血本身零记录** |
 | `sim/construction.rs:20-21` | `inv_spent` / `con_spent`（对比 `investment`/`construction` 限额；写入点 `:218`、`:308`） | 每势力（按资源） | 无（该 step 的 rng 只被 `retool_shipyards`/`design_fleets` 消费） | 本回合**实际花掉的**投资/建造预算——「批了 100 铁为何只花 30」。限额是持久 control 叶（可见），已花量是纯局部变量（写完即弃） |
 | `sim/construction.rs:303` | `increment`（+ `:267-272 class_rate`/`class_weight`） | 每城（按舰级） | 无 | 该舰级本回合**实得建造进度** vs 产能速率上限——造舰慢是缺钱还是缺产能；哪个舰级在抢同一笔建造预算 |
-| `sim/capital.rs:47-48` | `cur_cost` / `best_cost`（+ `:45 best`） | 每势力 | 无 | **迁都判据数字**：新旧首都的「总治理距离成本」各是多少、候选城是谁。事件 `CapitalRelocated` 只带 `reason` 字符串，**不带数字** |
-| `sim/capital.rs:60-61` | `old_share` / `loyalty_cost` | 每势力 | 无 | 迁都当回合对**全国每座城**的忠诚扣减及其来源（旧首都人口占比）——「为什么迁都以后忠诚集体掉了一截」 |
+| ✅B1 `sim/capital.rs:47-48` | `cur_cost` / `best_cost`（+ `:45 best`） | 每势力 | 无 | **迁都判据数字**：新旧首都的「总治理距离成本」各是多少、候选城是谁。事件 `CapitalRelocated` 只带 `reason` 字符串，**不带数字** |
+| ✅B1 `sim/capital.rs:60-61` | `old_share` / `loyalty_cost` | 每势力 | 无 | 迁都当回合对**全国每座城**的忠诚扣减及其来源（旧首都人口占比）——「为什么迁都以后忠诚集体掉了一截」 |
 
 ## 3. B 组 · 市场与运输（12 条）
 
@@ -114,7 +117,7 @@
 
 | 批 | 内容 | 为什么这个顺序 | 是否要动 `advance` 返回值 |
 | --- | --- | --- | --- |
-| **B1** 治理/忠诚 | A 组 `target_eff` 分项、`ideo_penalty`、行政 vs 娱乐拆分、`overload`、迁都判据（`cur_cost`/`best_cost` + `old_share`/`loyalty_cost`） | `unified-metrics.md` 候选第一条；「帝国为何要崩」的预警面；全是确定性、粒度天然对齐「每城一行 / 每势力一行」 | 否 |
+| ✅ **B1** 治理/忠诚（**已落地**，见 §6.1） | A 组 `target_eff` 分项、`ideo_penalty`、行政 vs 娱乐拆分、`overload`、迁都判据（`cur_cost`/`best_cost` + `old_share`/`loyalty_cost`） | `unified-metrics.md` 候选第一条；「帝国为何要崩」的预警面；全是确定性、粒度天然对齐「每城一行 / 每势力一行」 | 否 |
 | **B2** 钱去哪了 | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
 | **B3** 市场与运输 | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
 | **B4** 战斗 | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
@@ -127,6 +130,41 @@
    ——`[profile.test] opt-level=2` 之后，见 [`test-wall-clock.md`](test-wall-clock.md) §0）；
 3. 读面契约测试（`tests/projection_derived.rs`）加一条：新列在 `pre`/`post` 两档都存在且类型一致；
 4. Python kit（`play/planet_xq`）与 web 信息树能**泛化**读出（这两处本来就是 generic 渲染，通常零改动）。
+
+### 6.1 B1 落地记录（`feature/step-intermediates-b1`，全部实测）
+
+读面（`RoundView`，`pre`/`post` 同形）：
+
+| 位置 | 新字段 | 缺省（`pre` 里 / 那一步没跑） |
+| --- | --- | --- |
+| `view.cities[<城>].loyalty_target` | `distance` / `entertainment` / `capital_share` / `ideology_penalty` / `effective`（= 四项之和 clamp 到 0..1） | 全 0 |
+| `view.factions[<势力>]` | `governance_admin` / `governance_entertainment` / `governance_scale` / `ideology_loyalty_penalty` | 0 / 0 / **1.0** / 0（倍率的中性缺省是 1.0，同 `governance_coverage` 那条约定：缺的是「没有账」，不是「治理能力归零」） |
+| `view.factions[<势力>].capital` | `reviewed` / `candidate` / `current_cost` / `candidate_cost` / `relocated_from` / `relocated_to` / `relocate_loyalty_cost` | `reviewed=false` + `Option` 全 `None`（用 `Option` 表达「**没算**」，不拿 0 冒充成本 0） |
+
+引擎内部：`RoundSink` 新增 `city_loyalty`（每城）与 `capital`（每势力）两张 map；`GovernanceFlow` 扩成
+`total / coverage / admin / entertainment / scale / ideology_penalty`（一个势力**一条**记录，不另开平行
+map）；`step_capital` 因此多了 `flow: &mut RoundSink` 形参。
+
+tidy 表：`idx/faction_process.jsonl` += 4 列（`governance_admin` / `governance_entertainment` /
+`governance_scale` / `ideology_loyalty_penalty`）；`idx/city_process.jsonl` += 5 列
+（`loyalty_target_effective` / `_distance` / `_entertainment` / `_capital_share` / `_ideology_penalty`）。
+**迁都判据不进表**（它稀疏——只有评估回合才有数），只在 view 里；kit 用
+`q.view_economy(r, f)["capital"]` 读。两张表的 `columns` 与 `column_docs` 都补了。
+
+`SCHEMA_VERSION` **14 → 15**：又是「只动派生读面、`State` 字段一个没动」⇒ `migrate` 加一档 `14 =>` 推号。
+
+| 判据 | 结果 |
+| --- | --- |
+| 行为中性：`--seed 42 --round 240 --digest 20` 的 SHA-256 | **`657F2DC9…66665`，逐字不变**（就是 B1 之前那条基线） |
+| `cargo nextest run -P full`（工作区） | **192 passed / 0 failed / 25 skipped，29.3 s** |
+| 点名 13 条（3 条新用例 + 两条读面契约 + 迁都三条） | 13/13 通过 |
+| 新用例 | `loyalty_target_decomposes_the_loyalty_equation`（勾稽 / 全国同值 / 距离项单调 / 折进视图后逐值不变）、`governance_cost_splits_into_admin_and_entertainment`（`total = (admin + ent) × 制裁倍率`、有活城必有行政开销）、`pre_view_has_neutral_b1_defaults`（缺省值说话算话） |
+| kit 端到端（`--seed 7 --round 30` 的真投影跑 `play/planet_xq/demo.py`） | 中国 r30：治理总开销 **6.0 = (行政 1.0 + 娱乐 5.0) × 1.0**、覆盖率 1.0、超载倍率 1.0、思潮惩罚 **0.0765**；`q.view_loyalty(30, "中国")` 五行城的四项分项齐全，demo 里的勾稽断言（`effective = clamp(四项和)`）通过 |
+| web | 信息树本来就是 generic 渲染整份 `RoundView` ⇒ **零改动**（新增字段自动可见） |
+
+一个**顺手做的判断**（行为中性，值得记下来）：AI 迁都评估原本只在「候选 ≠ 现首都」时才算那两笔
+成本，B1 改成**评估回合一律算**——否则「为什么没迁」恰好是唯一读不到的那种情况。两个函数都只读
+城市位置与人口，无副作用、不消费骰子。
 
 ## 7. 待裁决（三个设计点，动 B4/B5 之前必须先定）
 
@@ -171,8 +209,9 @@ grep -n 'target_eff\|ideo_penalty\|total_admin\|ent_total\|overload' src/sim/gov
 grep -n 'is_hub\|housing_capacity\|labor\|short\|frac' src/sim/production.rs
 grep -n 'inv_spent\|con_spent\|increment\|class_rate' src/sim/construction.rs
 grep -n 'cur_cost\|best_cost\|old_share\|loyalty_cost' src/sim/capital.rs
-# 「现成观测函数零调用者」这条是这么查的（只应命中定义那一行）
-grep -rn 'faction_ideology_debuffs' src/
+# ⚠ 这条当时**只 grep 了 src/**，于是误判成「零调用者」——真正的调用者在 tests/ 里
+# （`tests/horizon_long.rs:710` 的探针）。教训：判「死代码」要 grep 仓库根，别只 grep src/。
+grep -rn 'faction_ideology_debuffs' --include='*.rs' .
 ```
 
 行为中性（B1–B4 的验收门，纯追加类改动）：

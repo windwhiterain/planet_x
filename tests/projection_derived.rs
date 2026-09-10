@@ -110,6 +110,7 @@ fn derived_matches_the_projection_for_the_same_round() {
     let rows = &v["post"]["factions"];
     let mut checked = 0usize;
     let mut governance_ran = 0usize;
+    let mut admin_seen = 0usize;
     for row in &proc {
         let fid = row["faction_id"].as_str().unwrap();
         let expect = &rows[fid];
@@ -130,6 +131,20 @@ fn derived_matches_the_projection_for_the_same_round() {
             row["governance_coverage"], expect["governance_coverage"],
             "{fid} 的治理覆盖率两个读面不一致"
         );
+        // B1：治理的拆分、人口超载倍率、思潮惩罚必须跨进程逐值相同；迁都判据只在视图里
+        // （它稀疏，不进 tidy 表）——但**必须在**，而且形状是对象。
+        for col in [
+            "governance_admin",
+            "governance_entertainment",
+            "governance_scale",
+            "ideology_loyalty_penalty",
+        ] {
+            assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
+        }
+        assert!(expect["capital"].is_object(), "{fid} 缺迁都判据 capital");
+        if expect["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
+            admin_seen += 1;
+        }
         if expect["governance_cost"].as_f64().unwrap_or(0.0) > 0.0 {
             governance_ran += 1;
         }
@@ -140,6 +155,7 @@ fn derived_matches_the_projection_for_the_same_round() {
         governance_ran >= 1,
         "这一回合没有任何势力真的跑过治理——这条守卫会退化成空转"
     );
+    assert!(admin_seen >= 1, "没有任何势力报出行政开销——B1 那几列等于空转");
 
     // 5) 城的过程量表同理，且必须真有带产出的行（否则等于没检查）。
     let city_proc = derived_rows(&out, "city_process", 6);
@@ -148,13 +164,28 @@ fn derived_matches_the_projection_for_the_same_round() {
         .filter(|r| r["production"].as_object().map(|o| !o.is_empty()).unwrap_or(false))
         .collect();
     assert!(!with_prod.is_empty(), "最后一回合没有任何带产出的城行");
+    let mut targets_seen = 0usize;
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
         assert_eq!(
             row["production"], v["post"]["cities"][cid]["production"],
             "{cid} 的产出两个读面不一致"
         );
+        // B1：忠诚目标值分项——平铺列 vs 视图里的嵌套对象，逐个同源。
+        let lt = &v["post"]["cities"][cid]["loyalty_target"];
+        assert_eq!(
+            row["loyalty_target_effective"], lt["effective"],
+            "{cid} 的忠诚目标值两个读面不一致"
+        );
+        assert_eq!(
+            row["loyalty_target_distance"], lt["distance"],
+            "{cid} 的忠诚距离项两个读面不一致"
+        );
+        if lt["effective"].as_f64().unwrap_or(0.0) > 0.0 {
+            targets_seen += 1;
+        }
     }
+    assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——B1 那几列等于空转");
 
     // 6) 控制面表也要在（读面即写面的 tidy 版），并且 join 列真的存在于主流。
     for table in ["control", "scope"] {

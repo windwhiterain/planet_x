@@ -105,3 +105,6 @@ pub struct RoundView {
   在途状态）、B4 战斗（逐发索敌计划含**玩家舰**、命中折减、点防）、B5 上面那个 `pre` 面。
   新增量一律沿本篇的形状：**观测与过程同处一行**、纯追加（不改行为 ⇒ digest 逐字不变）。
   `unified-metrics.md` §候选第一条（把治理中间量并入读面，给「帝国为何要崩」的预警）就是 B1。
+  → **B1 已经落地**（`feature/step-intermediates-b1`：`view.cities[].loyalty_target` 四项分项 +
+  `view.factions[]` 的行政/娱乐拆分、人口超载倍率、思潮忠诚惩罚、`capital` 迁都判据），
+  digest 逐字不变、全档 192 绿——见该篇 **§6.1**。

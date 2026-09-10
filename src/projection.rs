@@ -674,13 +674,22 @@ fn write_round(
                 "upkeep": row.map(|r| r.upkeep).unwrap_or(0.0),
                 "governance_total": row.map(|r| r.governance_cost).unwrap_or(0.0),
                 "governance_coverage": row.map(|r| r.governance_coverage).unwrap_or(1.0),
+                // B1：把钱花在哪拆开（行政 vs 娱乐）+ 人口超载倍率 + 思潮忠诚惩罚。
+                "governance_admin": row.map(|r| r.governance_admin).unwrap_or(0.0),
+                "governance_entertainment": row.map(|r| r.governance_entertainment).unwrap_or(0.0),
+                "governance_scale": row.map(|r| r.governance_scale).unwrap_or(1.0),
+                "ideology_loyalty_penalty": row.map(|r| r.ideology_loyalty_penalty).unwrap_or(0.0),
             })
         )
         .map_err(|e| e.to_string())?;
     }
     for c in &state.cities {
         // 含已夷平的空白城（产出为 `{}`）——与 `cities` 表逐行一致。
-        let prod = view.cities.get(&c.name).map(|r| r.production.clone()).unwrap_or_default();
+        let crow = view.cities.get(&c.name);
+        let prod = crow.map(|r| r.production.clone()).unwrap_or_default();
+        // B1：忠诚目标值分项（`view.cities[].loyalty_target` 的**平铺版**）——「这座城的忠诚为什么
+        // 在掉」的答案。缺省全 0（这一回合没跑治理），同其它过程量的约定。
+        let lt = crow.map(|r| r.loyalty_target.clone()).unwrap_or_default();
         writeln!(
             w.city_process,
             "{}",
@@ -691,6 +700,11 @@ fn write_round(
                 "faction_id": c.faction_id,
                 "razed": c.razed,
                 "production": prod,
+                "loyalty_target_effective": lt.effective,
+                "loyalty_target_distance": lt.distance,
+                "loyalty_target_entertainment": lt.entertainment,
+                "loyalty_target_capital_share": lt.capital_share,
+                "loyalty_target_ideology_penalty": lt.ideology_penalty,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -1188,19 +1202,30 @@ pub fn projection_schema() -> serde_json::Value {
         let entry = match t.name {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费、治理总成本/覆盖率。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
-                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number"},
+                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
+                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number"},
                 "column_docs": {
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
                     "governance_total": "本回合治理总开销（行政 + 娱乐，含制裁倍率）。",
                     "governance_coverage": "治理覆盖率 0..1（覆盖不住就是离心风险的来源）。",
+                    "governance_admin": "治理总开销的**行政部分**（距离 × 人口超载）。`governance_admin + governance_entertainment` 乘上制裁倍率 = `governance_total`；只给合计时「我把娱乐预算拉满、钱却被行政吃掉」看不出来。",
+                    "governance_entertainment": "治理总开销的**娱乐/福利部分**（各城忠诚预算之和）。",
+                    "governance_scale": "**人口超载放大倍率** = `1 + max(0, 人口 ÷ 管理容量 − 1)`，同时乘在行政开销与每座城的忠诚距离项上。**中性缺省 1.0**（不是 0：缺的是「没有账」，不是「治理能力归零」）——同 `governance_coverage` 的缺省约定，零城势力因此不会被读成崩溃。",
+                    "ideology_loyalty_penalty": "本回合**思潮优势端自平衡**的全国忠诚惩罚（0..`max_loyalty_penalty`）：身处垄断优势端思潮却言行不符时的扣分（军国却不打仗、科学却不探异常区）。它同时出现在每座城的 `loyalty_target_ideology_penalty` 上（全国同值）。",
                 },
             }),
             "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出，按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
-                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object"},
+                "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项**，按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
+                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","loyalty_target_capital_share":"number","loyalty_target_ideology_penalty":"number"},
+                "column_docs": {
+                    "loyalty_target_effective": "本回合这座城的**忠诚目标值**（0..1）：实际忠诚每回合朝它恢复（治理覆盖得住时），覆盖不住则改用欠费惩罚。所以「忠诚在掉」= 它低。「为什么低」看下面四列。",
+                    "loyalty_target_distance": "距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`。越远的城越低——这是「帝国太大管不住」的第一来源。",
+                    "loyalty_target_entertainment": "娱乐/福利项：`本城娱乐预算 × 治理覆盖率 ÷ entertainment_cost`。**乘了覆盖率**：批了预算但治理没到位，这部分不落地（`coverage < 1` 时同一笔钱打折进忠诚）。",
+                    "loyalty_target_capital_share": "首都向心项：首都人口占全势力比例 × `capital_share_loyalty_buff`（**全国同值**）——把首都放在人口中心有真实收益。",
+                    "loyalty_target_ideology_penalty": "思潮优势端惩罚（**全国同值**，见 `faction_process` 的 `ideology_loyalty_penalty`）。",
+                },
             }),
             "control" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,

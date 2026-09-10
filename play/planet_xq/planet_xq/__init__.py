@@ -337,6 +337,33 @@ class PlanetXQ:
             c = c[c["loyalty"] <= min_loyalty]
         return c.sort_values("loyalty")
 
+    def view_loyalty(self, round: int, faction: str | None = None) -> pd.DataFrame:
+        """**「这座城的忠诚为什么在掉」**：每城一行，带上引擎算出的忠诚目标值分项。
+
+        `loyalty_target_*` 来自 `derived.city_process`（引擎在 `step_governance` 里**捕获**的中间量，
+        不在这里重算）：`effective` 是这一回合的目标忠诚（实际忠诚朝它恢复），四个分项就是它为什么低——
+        `distance`（离首都太远，再乘人口超载倍率）/ `entertainment`（娱乐预算 × 治理覆盖率）/
+        `capital_share`（首都人口占比带来的向心 buff）/ `ideology_penalty`（思潮优势端言行不符）。
+
+        ⚠ `coverage < 1` 时忠诚**改走欠费惩罚**（不朝目标恢复），此时 `effective` 只是「本该到的值」——
+        要和 `loyalty`（现状）与 `view_economy()["governance_coverage"]` 一起读。按 `effective` 升序
+        （最危险的在最上面）。
+        """
+        c = self.cities(round)
+        p = self.city_process(round)
+        if c is None or c.empty or p is None or p.empty:
+            return pd.DataFrame()
+        cols = [
+            "round", "city_id",
+            "loyalty_target_effective", "loyalty_target_distance",
+            "loyalty_target_entertainment", "loyalty_target_capital_share",
+            "loyalty_target_ideology_penalty",
+        ]
+        out = c.merge(p[cols], on=["round", "city_id"], how="left")
+        if faction is not None:
+            out = out[out["faction_id"] == faction]
+        return out.sort_values("loyalty_target_effective")
+
     def view_market(self, round: int, faction: str) -> dict | None:
         """A faction's stockpile valued at market prices: per-resource amount & value + total.
         Reads ``resources`` (sim stockpile) and the ``meta.resource_value`` table."""
@@ -380,6 +407,14 @@ class PlanetXQ:
             "market_value": fm.get("market_value"),
             "net_import": fm.get("net_import"),
             "governance_coverage": fm.get("governance_coverage"),
+            # B1：治理开销的**两个来源**（行政 vs 娱乐，乘制裁倍率 = `governance_cost`）、
+            # 人口超载倍率、思潮优势端的全国忠诚惩罚，以及本回合的迁都判据（`capital` 是对象：
+            # `reviewed` / `candidate` / `current_cost` / `candidate_cost` / `relocated_*`）。
+            "governance_admin": fm.get("governance_admin"),
+            "governance_entertainment": fm.get("governance_entertainment"),
+            "governance_scale": fm.get("governance_scale"),
+            "ideology_loyalty_penalty": fm.get("ideology_loyalty_penalty"),
+            "capital": fm.get("capital"),
             "fleet_value": fm.get("fleet_value"),
             "city_count": fm.get("city_count"), "ship_count": fm.get("ship_count"),
             "at_war": fm.get("at_war"),

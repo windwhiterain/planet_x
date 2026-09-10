@@ -68,7 +68,10 @@ schema entry therefore carries `join_on` (a column that
 q = planet_xq.load("out")
 q.derived("faction_process")   # generic accessor: q.derived(name, round=None)
 q.faction_process(round=12)    # per-round × faction: production{} / upkeep / governance_total / governance_coverage
+                               #   + the B1 split: governance_admin / governance_entertainment /
+                               #     governance_scale / ideology_loyalty_penalty
 q.city_process(round=12)       # per-round × city: production{} (razed cities included, `razed` column)
+                               #   + loyalty_target_* : WHY this city's loyalty is dropping
 q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
 q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
 q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict / target / detail
@@ -94,11 +97,15 @@ Two things worth knowing:
 
 - **The same process numbers are also inside `main.jsonl`** as the nested
   `view.factions[<faction>]` object (`production`, `production_value`, `upkeep`,
-  `governance_cost`, `governance_coverage`, plus the trade terms `freight_paid` /
-  `carrier_income` / `net_import`); the per-city ore output likewise sits in `view.cities[<city>]`
+  `governance_cost`, `governance_coverage`, the **B1 governance split** `governance_admin` /
+  `governance_entertainment` / `governance_scale` / `ideology_loyalty_penalty`, the capital-review
+  object `capital`, plus the trade terms `freight_paid` / `carrier_income` / `net_import`); the
+  per-city ore output and the **`loyalty_target` object** likewise sit in `view.cities[<city>]`
   (that map skips razed cities, while `city_process` keeps their rows with `production = {}`).
   These tables are the **joinable reshape** of the same numbers (stable dtypes, one row per
-  `(round, name)`), which is what you want for pandas work.
+  `(round, name)`), which is what you want for pandas work. The capital-review numbers are the one
+  B1 item that stays **view-only** (they are sparse — they only exist on a review round), so read
+  them from `q.view_economy(round, f)["capital"]` rather than from a table column.
 - **过程量 — the round's production / upkeep / governance / trade / AI judgments — only exists for
   rounds the engine actually advanced; in `pre` it is 0/empty.** A projection started from a
   checkpoint (`--start ckpt.ron --round 0 --index out/`) therefore puts that checkpoint's **stored
@@ -332,14 +339,25 @@ by the sim itself).
 q.view_sitrep(12)                # world politics: totals + hegemon/coalition/sanction/wars/power_share + per-faction
 q.view_frontier(12, "中国")       # my risky cities (loyalty / gov_distance / revolt_risk), sorted by loyalty
 q.view_frontier(12, min_loyalty=0.5)   # any city about to revolt
+q.view_loyalty(12, "中国")        # WHY each city's loyalty is dropping (engine's loyalty-target split)
 q.view_market(12, "中国")         # my stockpile valued at market prices (per-resource + total)
-q.view_economy(12, "中国")        # production vs upkeep vs governance, net flow, coverage, bleeding flag
+q.view_economy(12, "中国")        # production vs upkeep vs governance (+ admin/entertainment split), net flow, coverage
 q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, indexed by round) — e.g. is it being drained?
 ```
 
-- `view_sitrep` / `view_frontier` / `view_market` / `view_economy` / `resource_series` are all
-  **pure retrieval** — they re-read the round `view` (mostly `view.factions[<faction>]`) / the lazy
-  tables and do trivial arithmetic (`net = production − upkeep − governance`).
+- `view_sitrep` / `view_frontier` / `view_loyalty` / `view_market` / `view_economy` /
+  `resource_series` are all **pure retrieval** — they re-read the round `view` (mostly
+  `view.factions[<faction>]`) / the lazy + derived tables and do trivial arithmetic
+  (`net = production − upkeep − governance`).
+- `view_loyalty` is the **B1 payoff**: one row per city with the engine's own loyalty-target split —
+  `loyalty_target_distance` (too far from the capital, amplified by population overload),
+  `loyalty_target_entertainment` (that city's entertainment budget × governance coverage),
+  `loyalty_target_capital_share` (the capital's population share, a faction-wide buff) and
+  `loyalty_target_ideology_penalty` (the faction-wide "monopolist ideology vs behaviour" penalty).
+  Loyalty moves *toward* `loyalty_target_effective` **only while governance is covered**; when
+  `coverage < 1` the city bleeds by a shortfall penalty instead, so read it together with `loyalty`
+  and `view_economy(round, f)["governance_coverage"]`. Both `view_loyalty` and `view_economy` read
+  numbers the **engine captured mid-step** — Python never re-derives the loyalty or cost formula.
 - ⚠ `view_economy` returns **two nets**, and they are different things: `net_flow` is computed here
   (`production_value − upkeep − governance_cost`), while `net_import` is the engine's own **trade**
   net for the round (bought − sold by market value, `> 0` = net importer) lifted straight out of

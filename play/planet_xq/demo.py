@@ -90,3 +90,40 @@ if fak:
     fid = next(iter(fak))
     p = q.yearly_avg(f"view.factions.{fid}.production_value")
     print(f"年均 {fid} production_value:", {int(y): round(float(v), 1) for y, v in p.items()})
+
+print()
+print("--- B1: 治理/忠诚的中间量（「钱花在哪」「这座城的忠诚为什么在掉」）---")
+last_round = int(q.facts["round"].max())
+econ = q.view_economy(last_round, "中国")
+parts = econ["governance_admin"] + econ["governance_entertainment"]
+print(
+    f"中国 @ round {last_round}: 治理总开销 {round(econ['governance_cost'], 2)} ="
+    f" (行政 {round(econ['governance_admin'], 2)} + 娱乐 {round(econ['governance_entertainment'], 2)})"
+    f" × 制裁倍率 | 覆盖率 {econ['governance_coverage']} | 人口超载倍率 {round(econ['governance_scale'], 3)}"
+    f" | 思潮忠诚惩罚 {round(econ['ideology_loyalty_penalty'], 4)}"
+)
+# 勾稽：「行政 + 娱乐」乘上制裁倍率才是总开销 ⇒ 两项之和 ≤ 总（倍率 ≥ 1）。这里把比值也打出来，
+# 它就是 1/倍率；不相等就说明读面把两个来源说岔了。
+assert parts > 0.0 and econ["governance_cost"] >= parts - 1e-9, (parts, econ["governance_cost"])
+print("  两项之和 ÷ 总开销 =", round(parts / econ["governance_cost"], 4), "（= 1 ÷ 制裁倍率）")
+print("  迁都判据（只在评估回合有数）：", econ["capital"])
+
+lt = q.view_loyalty(last_round, "中国")
+cols = [
+    "city_id", "loyalty", "loyalty_target_effective", "loyalty_target_distance",
+    "loyalty_target_entertainment", "loyalty_target_capital_share",
+    "loyalty_target_ideology_penalty",
+]
+print(lt[[c for c in cols if c in lt.columns]].to_string(index=False))
+# 勾稽：目标忠诚 = 四项相加并 clamp[0,1]（这是引擎自己的分解，Python 侧只做加法，不重算公式）。
+row = lt.iloc[0]
+s = (
+    row["loyalty_target_distance"]
+    + row["loyalty_target_entertainment"]
+    + row["loyalty_target_capital_share"]
+    - row["loyalty_target_ideology_penalty"]
+)
+assert abs(row["loyalty_target_effective"] - min(max(s, 0.0), 1.0)) < 1e-12, (
+    s, row["loyalty_target_effective"],
+)
+print("勾稽通过：effective = clamp(distance + entertainment + capital_share − ideology_penalty)")
