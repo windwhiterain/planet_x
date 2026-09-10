@@ -148,6 +148,7 @@ function bindWorld(w) {
 }
 
 async function init() {
+  registerTab(); // 先报到：刷新时新页面的登记要尽早落地（服务端有个极短的刷新窗口）
   bindWorld(await fetchJSON('/api/state'));
   prevState = world;
   selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
@@ -157,6 +158,28 @@ async function init() {
   renderAll();
   updateTop();
 }
+
+// --- 页面 vs 服务：最后一个页面关掉，服务就退 ---------------------------------
+// 服务端**没有空闲计时器**（不会因为「你没在操作」而退）：它只在最后一个页面离开后
+// 自退。所以每个页面载入时报到、离开时注销，且每次载入用一个**新的** tab id
+// （刷新 = 旧 id 注销先到 + 新 id 登记后到，服务端留一个 500ms 的刷新窗口吸收它）。
+const TAB_ID = (window.crypto && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : String(Date.now()) + Math.random().toString(36).slice(2);
+
+function registerTab() {
+  postJSON('/api/tab', { tab: TAB_ID }).catch(() => {});
+}
+
+function leaveTab() {
+  const body = JSON.stringify({ tab: TAB_ID });
+  // sendBeacon 是唯一在 pagehide 里还算可靠的投递方式（fetch 会被页面卸载掐掉）。
+  if (navigator.sendBeacon) navigator.sendBeacon('/api/bye', new Blob([body], { type: 'application/json' }));
+  else fetch('/api/bye', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+}
+// bfcache 里页面还可能回来（persisted=true）→ 那时不许注销，回来时再报到一次。
+window.addEventListener('pagehide', (e) => { if (!e.persisted) leaveTab(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) registerTab(); });
 
 function initMap() {
   const c = $('#map');

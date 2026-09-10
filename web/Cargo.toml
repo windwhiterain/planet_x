@@ -12,3 +12,13 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 # `fs` = ServeDir（静态前端）；`set-header` = 给每个响应压上 Cache-Control（见 `router`）。
 tower-http = { version = "0.5", features = ["fs", "set-header"] }
+
+# 启动者租约（见 `src/owner.rs`）：Windows 上「等一个不属于自己的进程结束」只有句柄这
+# 一条路（`OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject`）。windows-sys 本来就在
+# 依赖树里（axum/tokio 那条），这里只是把已有的 0.59 直接挂上来，不引入新版本。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+# unix 上没有「等非子进程」的现成接口，退到轮询 `kill(pid, 0)`。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

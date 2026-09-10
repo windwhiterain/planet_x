@@ -1,0 +1,4 @@
+# shell 脚本必须是 LF：CRLF 会让 git_bash 的 shebang 报
+# `/usr/bin/env: 'bash\r': No such file or directory`（本仓的启动器 scripts/web.sh 就靠它）。
+# 只钉 *.sh；PowerShell / Rust 源码用 CRLF 无所谓，别一刀切。
+*.sh text eol=lf

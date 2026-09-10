@@ -561,11 +561,13 @@ name = "planet_x_web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "libc",
  "planet_x",
  "serde",
  "serde_json",
  "tokio",
  "tower-http",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -5,19 +5,26 @@
 //! deterministic RNG, and exposes a hotseat-style JSON API over the engine
 //! (`planet_x` crate) as a library:
 //!
-//! * `GET  /api/meta`      resource/building/structure/ship metadata.
 //! * `GET  /api/state`     the current world (bodies, cities, factions, ships,
 //!                         per-faction controllable state, control scope) **plus**
 //!                         the generic read-only info tree ([`InfoRoot`]).
 //! * `POST /api/advance`   run `n` rounds, return the new world.
 //! * `POST /api/command`   write a faction's controllable state + the scope.
 //! * `POST /api/new`       rebuild the world from a seed.
+//! * `GET  /api/ping`      server identity: pid / port / binary + build age / open pages.
+//! * `POST /api/tab`       register one open page (tab).
+//! * `POST /api/bye`       release one page; the **last** one leaving retires the server.
+//!
+//! 后三条是**生命周期**面（见 [`WebCtx`]）：服务不该比「看它的人」活得久。它没有
+//! 空闲计时器，只有两个「触发即退」的条件——启动它的进程退出（[`owner`]）、或者最后
+//! 一个页面关掉。端口仍由 `main` 自动扫，多 worktree 并存互不干扰。
 //!
 //! Static files (the frontend) are served from `web/static/`. Everything that
 //! is *not* HTTP — the control-diff domain (`apply_patch` / `control_surface` /
 //! `control_schema_value` / patch & view types) — lives in the engine's
 //! `planet_x::control` module so the engine crate stays free of any web stack.
 
+use axum::extract::Extension as AxExtension;
 use axum::extract::State as AxState;
 use axum::http::{header, HeaderValue};
 use axum::routing::{get, post};
@@ -31,10 +38,16 @@ use planet_x::prng::Prng;
 use planet_x::sim;
 use planet_x::world;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
+
+pub mod owner;
 
 /// The in-memory world owned by the server.
 pub struct GameWorld {
@@ -168,6 +181,213 @@ pub fn state_view(world: &GameWorld) -> StateView {
     StateView { control, scope: scope_view(&s.scope), info: info_roots(world) }
 }
 
+// --- 服务生命周期：身份 / 页面登记 / 退出闸门 --------------------------------
+
+/// 一台 WebUI 服务的身份证：谁在跑（`pid`）、在哪（`port`）、跑的是哪个构建（`exe` +
+/// 构建了多久）、几个页面在看。
+///
+/// 值得有：端口是**自动扫**的（`3000` 被占就 `3001`…），所以「浏览器里这个到底是哪个
+/// 进程、哪个构建」从前只能靠猜。`exe_age_secs` 一眼看出「页面里是十分钟前编译的旧
+/// 二进制」——旧实例锁住 `target\debug\planet_x_web.exe` 时正是这个症状。
+#[derive(Serialize, Clone)]
+pub struct Identity {
+    pub app: &'static str,
+    pub pid: u32,
+    pub port: u16,
+    pub uptime_secs: u64,
+    /// 当前进程的可执行文件（谁在跑）。
+    pub exe: String,
+    /// 那个文件被写下的时刻距今多久（`None` = 取不到）。**这是判断「跑的是不是刚编的
+    /// 那个」的依据**，比看目录时间戳靠谱。
+    pub exe_age_secs: Option<u64>,
+    /// 看护目标（`PLANET_X_WEB_OWNER_PID`）：它一退出，本服务就自退。`None` = 没人看护。
+    pub owner_pid: Option<u32>,
+    /// 当前登记在看这个服务的页面数。
+    pub tabs: usize,
+}
+
+/// 退出闸门：任何一条「该退了」的理由都往这里投一次，**只有第一次算数**。
+///
+/// 用 `oneshot` 是因为它同时干两件事：给 `axum::serve` 一个 graceful-shutdown 信号，
+/// 并把「为什么退」这段人话带到最后那行日志里——排查「服务怎么自己没了」时，
+/// 「谁让它退的」比「它退了」重要得多。
+#[derive(Clone)]
+pub struct ExitGate {
+    tx: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+}
+
+impl ExitGate {
+    fn channel() -> (ExitGate, oneshot::Receiver<String>) {
+        let (tx, rx) = oneshot::channel();
+        (ExitGate { tx: Arc::new(Mutex::new(Some(tx))) }, rx)
+    }
+
+    /// 请求退出；返回这次调用是否是**触发者**（重复请求返回 `false`，不再改理由）。
+    pub fn request(&self, why: impl Into<String>) -> bool {
+        let why = why.into();
+        let taken = self.tx.lock().unwrap().take();
+        match taken {
+            Some(tx) => tx.send(why).is_ok(),
+            None => false,
+        }
+    }
+}
+
+/// 服务的运行时上下文：身份 + 打开的页面 + 退出闸门。
+///
+/// 生命周期规则（两把，都「触发即退」，**没有空闲计时器**）：
+///
+/// 1. **启动者租约**（[`owner`]）：`PLANET_X_WEB_OWNER_PID` 指的进程一结束就退。
+///    这条治的是「会话/job 没了，exe 变孤儿继续监听」——Windows 不会替你收孙进程。
+/// 2. **最后一个页面关掉**：前端在 `pagehide` 时注销自己，登记数掉到 0 就退。
+///    这条治的是「人早走了，服务还在」。`PLANET_X_WEB_CLOSE_EXIT=0` 可以关掉它。
+#[derive(Clone)]
+pub struct WebCtx {
+    inner: Arc<WebInner>,
+}
+
+struct WebInner {
+    started: Instant,
+    port: u16,
+    owner_pid: Option<u32>,
+    exe: PathBuf,
+    exe_mtime: Option<SystemTime>,
+    /// 登记在看这个服务的页面（tab id）。空 = 没人看。
+    tabs: Mutex<HashSet<String>>,
+    /// 关掉最后一个页面是否自退。
+    close_exit: bool,
+    /// 「最后一个页面关了」之后等多久再真退：**只为吸收刷新**（旧页面 `pagehide` 的
+    /// 注销会先到，新页面的登记晚几十毫秒）。这不是空闲超时——没人操作不会退。
+    close_grace: Duration,
+    exit: ExitGate,
+}
+
+impl WebCtx {
+    /// 按环境变量建上下文，并把退出闸门的接收端交给 `axum::serve` 的优雅停机。
+    ///
+    /// * `PLANET_X_WEB_OWNER_PID`     看护目标（见 [`owner`]）；没设 = 不设租约。
+    /// * `PLANET_X_WEB_CLOSE_EXIT`    `0`/`false`/`off` = 关掉「最后一个页面关了自退」。
+    /// * `PLANET_X_WEB_CLOSE_GRACE_MS` 刷新窗口，默认 `500`（`0` = 关页面立刻退，
+    ///   代价是**刷新会把服务带走**）。
+    pub fn new(port: u16, owner_pid: Option<u32>) -> (Self, oneshot::Receiver<String>) {
+        let close_exit = parse_flag(std::env::var("PLANET_X_WEB_CLOSE_EXIT").ok().as_deref(), true);
+        let close_grace =
+            Duration::from_millis(parse_u64(std::env::var("PLANET_X_WEB_CLOSE_GRACE_MS").ok().as_deref(), 500));
+        WebCtx::with_close_policy(port, owner_pid, close_exit, close_grace)
+    }
+
+    /// 显式给策略的构造器（测试用；生产走 [`WebCtx::new`] 读环境变量）。
+    pub fn with_close_policy(
+        port: u16,
+        owner_pid: Option<u32>,
+        close_exit: bool,
+        close_grace: Duration,
+    ) -> (Self, oneshot::Receiver<String>) {
+        let (exit, rx) = ExitGate::channel();
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe_mtime = std::fs::metadata(&exe).and_then(|m| m.modified()).ok();
+        let ctx = WebCtx {
+            inner: Arc::new(WebInner {
+                started: Instant::now(),
+                port,
+                owner_pid,
+                exe,
+                exe_mtime,
+                tabs: Mutex::new(HashSet::new()),
+                close_exit,
+                close_grace,
+                exit,
+            }),
+        };
+        (ctx, rx)
+    }
+
+    /// 退出闸门（给 main 里的看护线程用：主人一没就往这里投）。
+    pub fn exit_gate(&self) -> ExitGate {
+        self.inner.exit.clone()
+    }
+
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.inner.owner_pid
+    }
+
+    pub fn identity(&self) -> Identity {
+        Identity {
+            app: "planet_x_web",
+            pid: std::process::id(),
+            port: self.inner.port,
+            uptime_secs: self.inner.started.elapsed().as_secs(),
+            exe: self.inner.exe.display().to_string(),
+            exe_age_secs: self.inner.exe_mtime.and_then(|t| {
+                SystemTime::now().duration_since(t).ok().map(|d| d.as_secs())
+            }),
+            owner_pid: self.inner.owner_pid,
+            tabs: self.tab_count(),
+        }
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.inner.tabs.lock().unwrap().len()
+    }
+
+    /// 登记一个页面；返回当前页面数。
+    pub fn open_tab(&self, tab: &str) -> usize {
+        let mut tabs = self.inner.tabs.lock().unwrap();
+        tabs.insert(tab.to_string());
+        tabs.len()
+    }
+
+    /// 注销一个页面。
+    ///
+    /// 只有**确实登记过**的 id 才算数（陌生 id 什么都不动、返回 `None`）——否则一个
+    /// 迟到的、来自上一个服务的注销就能把当前服务带走。`Some(0)` = 最后一个页面走了。
+    pub fn close_tab(&self, tab: &str) -> Option<usize> {
+        let mut tabs = self.inner.tabs.lock().unwrap();
+        if !tabs.remove(tab) {
+            return None;
+        }
+        Some(tabs.len())
+    }
+
+    /// 刚有一个页面注销：若它是最后一个，等一个刷新窗口，期间没人回来就退。
+    pub fn tab_closed(&self) {
+        if !self.inner.close_exit {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            if !me.inner.close_grace.is_zero() {
+                tokio::time::sleep(me.inner.close_grace).await;
+            }
+            if me.tab_count() == 0 {
+                me.inner.exit.request("最后一个页面已关闭");
+            }
+        });
+    }
+}
+
+/// 开关型环境变量：`0` / `false` / `no` / `off`（大小写无关、忽略空白）= 关，别的 = 开，
+/// 没设 / 空 = `default`。
+fn parse_flag(raw: Option<&str>, default: bool) -> bool {
+    let Some(s) = raw else { return default };
+    let s = s.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "" => default,
+        "0" | "false" | "no" | "off" => false,
+        _ => true,
+    }
+}
+
+/// 非负整数型环境变量：没设 / 空 / 不是数字 = `default`。
+fn parse_u64(raw: Option<&str>, default: u64) -> u64 {
+    let Some(s) = raw else { return default };
+    let s = s.trim();
+    if s.is_empty() {
+        return default;
+    }
+    s.parse().unwrap_or(default)
+}
+
 // --- handlers ---------------------------------------------------------------
 
 async fn get_state(AxState(shared): AxState<Shared>) -> Json<StateView> {
@@ -203,6 +423,47 @@ async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> 
     world.pre = d.clone();
     world.post = d;
     Json(state_view(&world))
+}
+
+// --- 生命周期 handlers ------------------------------------------------------
+
+/// 一个页面的登记体（`/api/tab` 与 `/api/bye` 同形）。
+#[derive(Deserialize)]
+pub struct TabReq {
+    #[serde(default)]
+    pub tab: String,
+}
+
+/// 页面数回执。
+#[derive(Serialize)]
+pub struct TabCount {
+    pub tabs: usize,
+}
+
+/// `GET /api/ping` —— 我是谁、在哪、跑的是哪个构建、几个页面在看。
+///
+/// 轻量（不碰世界、不加锁），所以前端可以随手打，agent 也可以用它确认「3001 上那个
+/// 到底是不是我刚起的」。
+async fn ping(AxExtension(web): AxExtension<WebCtx>) -> Json<Identity> {
+    Json(web.identity())
+}
+
+/// `POST /api/tab` —— 一个页面报到了（载入时、以及从 bfcache 回来时）。
+async fn tab_open(AxExtension(web): AxExtension<WebCtx>, Json(req): Json<TabReq>) -> Json<TabCount> {
+    Json(TabCount { tabs: web.open_tab(&req.tab) })
+}
+
+/// `POST /api/bye` —— 一个页面走了；**最后一个**走的会触发服务自退（留一个刷新窗口）。
+async fn tab_bye(AxExtension(web): AxExtension<WebCtx>, Json(req): Json<TabReq>) -> Json<TabCount> {
+    match web.close_tab(&req.tab) {
+        Some(0) => {
+            web.tab_closed();
+            Json(TabCount { tabs: 0 })
+        }
+        Some(left) => Json(TabCount { tabs: left }),
+        // 陌生 id：什么都不动（迟到/伪造的注销不该带走当前服务）。
+        None => Json(TabCount { tabs: web.tab_count() }),
+    }
 }
 
 // --- 监听端口 ---------------------------------------------------------------
@@ -241,12 +502,15 @@ pub async fn bind_auto(host: &str, base: u16, attempts: u16) -> std::io::Result<
 ///
 /// The static directory is `PLANET_X_WEB_STATIC` if set, else `<crate>/static`.
 ///
+/// `web` 带上生命周期面（身份 / 页面登记 / 退出闸门）——路由本身不决定什么时候退，
+/// 它只把「谁在看」记下来、把「我是谁」答出去；决定权在 [`WebCtx`] 与 [`owner`]。
+///
 /// 每个响应都带 `Cache-Control: no-cache`。这不是「不许缓存」，而是「用之前先问一句」：
 /// `ServeDir` 只发 `Last-Modified`，浏览器于是按**启发式**缓存（`10% × (Date − Last-Modified)`）
 /// 把改过的 `map3d.js`/`app.js` 缓存住——**改了前端、刷新却看不到旧代码**，排查时极费时间
 /// （本轮就吃了一次：以为改动没生效，其实是浏览器喂了旧脚本）。no-cache 仍带 `Last-Modified`，
 /// 命中就是 304，代价可忽略；前端改动从此「刷新即生效」。
-pub fn router(shared: Shared) -> Router {
+pub fn router(shared: Shared, web: WebCtx) -> Router {
     let static_dir = std::env::var("PLANET_X_WEB_STATIC")
         .unwrap_or_else(|_| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
     Router::new()
@@ -254,7 +518,11 @@ pub fn router(shared: Shared) -> Router {
         .route("/api/advance", post(advance))
         .route("/api/command", post(command))
         .route("/api/new", post(new_game))
+        .route("/api/ping", get(ping))
+        .route("/api/tab", post(tab_open))
+        .route("/api/bye", post(tab_bye))
         .with_state(shared)
+        .layer(AxExtension(web))
         .fallback_service(ServeDir::new(static_dir))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
@@ -370,5 +638,110 @@ mod tests {
         let picked = listener.local_addr().unwrap().port();
         assert_ne!(picked, busy, "自动模式不能把已经被占的端口当成自己的");
         assert!(picked >= busy, "自动模式只向上扫：{picked} < {busy}");
+    }
+
+    /// 环境变量的读法：`0`/`false`/`no`/`off` 是关，别的（含乱写）是开，没设/空回落默认。
+    #[test]
+    fn env_flag_and_u64_parsing() {
+        assert!(parse_flag(None, true), "没设 = 默认");
+        assert!(!parse_flag(None, false));
+        assert!(parse_flag(Some(""), true), "空 = 默认");
+        assert!(!parse_flag(Some(" 0 "), true));
+        assert!(!parse_flag(Some("FALSE"), true));
+        assert!(!parse_flag(Some("no"), true));
+        assert!(!parse_flag(Some("off"), true));
+        assert!(parse_flag(Some("1"), false));
+        assert!(parse_flag(Some("yes"), false));
+
+        assert_eq!(parse_u64(None, 500), 500);
+        assert_eq!(parse_u64(Some(""), 500), 500);
+        assert_eq!(parse_u64(Some(" 0 "), 500), 0, "0 = 关页面立刻退，是合法值");
+        assert_eq!(parse_u64(Some("1200"), 500), 1200);
+        assert_eq!(parse_u64(Some("banana"), 500), 500);
+    }
+
+    /// 页面登记：陌生 id 不许动任何东西。这是「迟到的注销把当前服务带走」的守门人——
+    /// 一个来自**上一个**服务的 `bye` 不该让新服务退出。
+    #[tokio::test]
+    async fn unknown_tab_id_changes_nothing() {
+        let (web, _rx) = WebCtx::with_close_policy(0, None, true, Duration::ZERO);
+        assert_eq!(web.close_tab("never-seen"), None);
+        assert_eq!(web.tab_count(), 0);
+        web.open_tab("a");
+        assert_eq!(web.close_tab("bogus"), None);
+        assert_eq!(web.tab_count(), 1, "陌生 id 不该让别人的登记消失");
+    }
+
+    /// 最后一个页面关掉才退；还留着一个页面时不许退。
+    #[tokio::test]
+    async fn last_tab_leaving_retires_the_server() {
+        let (web, mut rx) = WebCtx::with_close_policy(0, None, true, Duration::ZERO);
+        web.open_tab("a");
+        web.open_tab("b");
+
+        // a 走了，b 还在 → 不许退。
+        assert_eq!(web.close_tab("a"), Some(1));
+        web.tab_closed();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "还有一个页面在看，不该退");
+
+        // b 也走了 → 退，并且带上人话理由。
+        assert_eq!(web.close_tab("b"), Some(0));
+        web.tab_closed();
+        let why = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("最后一个页面关掉必须触发退出")
+            .expect("理由要送到");
+        assert!(why.contains("页面"), "退出理由要说清是谁让退的：{why}");
+    }
+
+    /// `PLANET_X_WEB_CLOSE_EXIT=0` 时，关页面**不**退（只留启动者租约这条命）。
+    #[tokio::test]
+    async fn close_exit_can_be_disabled() {
+        let (web, mut rx) = WebCtx::with_close_policy(0, None, false, Duration::ZERO);
+        web.open_tab("only");
+        assert_eq!(web.close_tab("only"), Some(0));
+        web.tab_closed();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "关掉 close-exit 后关页面不该退");
+    }
+
+    /// 退出闸门只认第一次：后来的理由不许覆盖第一个（也不许再触发一次）。
+    #[tokio::test]
+    async fn exit_gate_fires_once() {
+        let (web, rx) = WebCtx::with_close_policy(0, None, true, Duration::ZERO);
+        let gate = web.exit_gate();
+        assert!(gate.request("第一个理由"));
+        assert!(!gate.request("第二个理由"), "第二次不许再触发");
+        assert_eq!(rx.await.unwrap(), "第一个理由");
+    }
+
+    /// `/api/ping` 必须如实报出身份：pid / 端口 / 二进制路径 / 页面数。agent 靠它区分
+    /// 「3001 上那个是不是我刚起的」。
+    #[tokio::test]
+    async fn ping_reports_identity() {
+        let (web, _rx) = WebCtx::with_close_policy(3013, Some(4242), true, Duration::ZERO);
+        web.open_tab("t");
+        let Json(id) = ping(AxExtension(web.clone())).await;
+        assert_eq!(id.app, "planet_x_web");
+        assert_eq!(id.pid, std::process::id());
+        assert_eq!(id.port, 3013);
+        assert_eq!(id.owner_pid, Some(4242));
+        assert_eq!(id.tabs, 1);
+        assert!(id.exe.ends_with(".exe") || !id.exe.is_empty(), "要报出在跑哪个文件");
+    }
+
+    /// 3 条生命周期路由都要注册上（`/api/ping` GET，`/api/tab`、`/api/bye` POST）——
+    /// 前端 `pagehide` 的注销打不中就等于没有自退。
+    #[test]
+    fn lifecycle_routes_are_mounted() {
+        let (web, _rx) = WebCtx::with_close_policy(0, None, true, Duration::ZERO);
+        let shared: Shared = Arc::new(Mutex::new(world()));
+        let app = router(shared, web);
+        // `Router` 没有公开的路由表读取接口；用 `Debug` 打印确认这三条真的挂上了。
+        let dumped = format!("{app:?}");
+        for path in ["/api/ping", "/api/tab", "/api/bye"] {
+            assert!(dumped.contains(path), "{path} 没挂上：{dumped}");
+        }
     }
 }
