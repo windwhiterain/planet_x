@@ -199,3 +199,8 @@
   → `7494A2C8…F446`（**B1 深空治理**）。
   再往前：`657F2DC97901BD612E6F784B97FA10A73EC677C7C4AEBD4B1F17179723576665`（`main` = `98c4b70`，
   重构合并点）与更早的重构前（`8b96aef`）逐字节相同，那是「纯搬运」的验收证据。
+- ⚠ **别裸跑 `git stash pop`**：这个仓库里躺着**别的分支留下的旧 stash**（当前
+  `stash@{0}` = `On feature/military-ships: pre-refactor worktree state`）。它一旦被弹出，会
+  把**拆分之前那个 195 KB 的 `src/sim.rs` 单体**复活到工作树（`DU src/sim.rs` 冲突；
+  实测踩过一次，用 `git rm -f src/sim.rs` 清掉即可，别去 drop 别人的 stash）。
+  要临时关掉一处改动做 A/B，**先 `cp` 备份再用 `sed` 拨那一行**，别用 stash。
