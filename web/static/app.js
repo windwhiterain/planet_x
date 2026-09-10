@@ -60,7 +60,12 @@ function facColor(fid) {
 // --- 行为辅助（当前 ShipBehavior 的 serde 形状） --------------------------
 // Idle / {Move:{position}} / {Follow:{ship}} / {DockCity:{city}} /
 // {Dock:{body}} / {Colonize:{body}} —— 实体一律用「唯一名」作为 key。
+//
+// ⚠ `null` 是**第四种**情况，不是「待命」：指令读面给的是**有效值**，而 `null` 的意思是
+// **链上没有任何一层说话**（叶不存在 + 出厂图没写意图 + 舰队默认不是玩家的）。这时引擎
+// 才按 `Idle` 兜底——把它显示成「待命」是拿兜底值冒充"有人说了待命"，所以单独一个 `unset`。
 function behaviorType(b) {
+  if (b === null || b === undefined) return 'unset';
   if (typeof b === 'string') return 'idle';
   if (b && b.Move) return 'move';
   if (b && b.Follow) return 'follow';
@@ -74,6 +79,7 @@ function behaviorSummary(b, w) {
   const cityName = (id) => { const c = w.cities.find((x) => x.name === id); return c ? c.name : '城#' + id; };
   const bodyName = (id) => { const bd = w.bodies.find((x) => x.name === id); return bd ? bd.name : '天体#' + id; };
   switch (behaviorType(b)) {
+    case 'unset': return '无人表态（按待命兜底）';
     case 'move': return '移动(' + (b.Move.position[0] | 0) + ',' + (b.Move.position[1] | 0) + ')';
     case 'follow': return '→' + shipName(b.Follow.ship) + '·跟随';
     case 'dock_city': return '→' + cityName(b.DockCity.city) + '·停泊城';
@@ -716,16 +722,21 @@ function buildTree() {
 // **风筝姿态**（风筝↔贴脸）+ **角色**（运输舰↔战舰）。四片叶的归属链各自独立，所以
 // 「归谁」的下拉跟着子叶走。
 //
-// 风格两叶与角色叶的读面**总是**给（哪怕状态里根本没有那片叶）：值 = **有效值**（叶 →
-// 舰队默认 → 舰上记录值）、mode = 这片叶自己的表态。所以这里显示的就是「这艘舰现在实际
-// 用的风格/角色」。
+// **四片叶的读面都「每舰一行」**（哪怕状态里根本没有那片叶），口径也一致：
+// 值 = **有效值**（指令：叶 → 出厂图 → 舰队默认；风格/角色：叶 → 舰队默认 → 舰上记录值）、
+// mode = 这片叶自己的表态（没有叶 = `Inherit`）。所以这里显示的就是「这艘舰现在实际用的」。
+// ⚠ 这条对**指令**（`ship_orders`）以前不成立：那片叶只列**有叶的舰**，于是「恢复出厂值」
+// 一按，这艘舰**整行**（连风格 / 角色）就从控制树里消失——现在也不会了。
+// ⚠ 指令的 `behavior === null` 是「链上没人说话」（引擎按 `Idle` 兜底），**不是**「待命」；
+// 风格三轴没有这个问题（它们兜底到出厂记录值，永远有一个数）。
 // ⚠ `Ship.doctrine` / `Ship.kiting` / `Ship.freighter` 只是出厂快照（**记录值**），改它们没有
 // 任何控制效果——那正是「我明明改了风格却没反应」的坑；要改就走这几片叶。
 function shipNode(fc, ord) {
   const name = ord.ship;
   const s = st.ships.find((x) => x.name === name);
   const kids = [{ key: 'ord' + name, kind: 'shiporder', id: name, name: '指令', leaf: ord, fid: fc.faction_id }];
-  // 世界里已经没有这艘舰（战沉 / 改名换代）时只留指令行：它的风格叶写进去也只会被丢弃。
+  // 指令行是**每舰一行**来的，所以正常路径下这艘舰一定在 `st.ships` 里；`s` 缺席只剩
+  // 「`/api/state` 的 info 树与 control 段来自不同时刻」这种边缘情况（那时风格叶写进去也只会被丢弃）。
   if (s) {
     kids.push({
       key: 'doc' + name, kind: 'shipdoctrine', id: name, name: '风格', fid: fc.faction_id,
@@ -1149,6 +1160,16 @@ function shipEditor(leaf, node) {
   };
 
   const typeSel = el('select');
+  // `unset`（`behavior === null`）= **链上没有任何一层说话**，引擎按 `Idle` 兜底。它是个
+  // **只读的显示状态**（disabled），不冒充「有人说了待命」：想真的下达待命就选「待命」，
+  // 那才是一次写值（= 接管）。
+  if (t === 'unset') {
+    const o = el('option', { value: 'unset' });
+    o.textContent = '（无人表态 · 按待命兜底）';
+    o.selected = true;
+    o.disabled = true;
+    typeSel.appendChild(o);
+  }
   [['idle', '待命'], ['move', '移动'], ['follow', '跟随舰'], ['dock_city', '停泊城'], ['dock', '停泊轨道'], ['colonize', '殖民']].forEach(([v, lbl]) => {
     const o = el('option', { value: v }); o.textContent = lbl; o.selected = t === v; typeSel.appendChild(o);
   });

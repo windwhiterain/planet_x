@@ -46,11 +46,29 @@ where
 
 // --- read-side wire types (the editable control surface) --------------------
 
-/// 一艘舰的读面条目：行为 + 由谁决定（三态，读面永远给全三态之一）。
+/// 一艘舰的**指令**读面条目。与三条风格轴同形——**本势力每一艘舰都有一行**。
+///
+/// * `behavior` = **有效值**（[`State::ship_behavior`]：叶 → 出厂图 → 舰队默认）。
+///   `null` = **链上没有任何一层说话**（调用方按 `Idle` 兜底）——这正是「叶不存在」
+///   那一侧；它与「叶写着 `Inherit`」在**归属**上等价、在**取值**上**不等价**
+///   （叶存在就用叶里的值，与 `mode` 无关）。
+/// * `mode` = **这片叶自己的表态**（没有叶 = `Inherit`）。
+///
+/// 于是「模板原样回传」安全，而且**读面是不动点**：
+/// * 值 = 有效值 + `mode: Inherit` ⇒ 写回去以后有效值不变（叶值 = 有效值，或高层照旧供值）；
+/// * `behavior: null` + `mode: Inherit` ⇒ 补丁**不会**建出一片叶（见 [`apply_ship_order`]），
+///   否则「链上没人说话」会被静默变成「叶里记着 `Idle`」。
+///
+/// ⚠ **它以前只列「有叶的舰」**（`control_view` 遍历的是 `c.ship_orders`），于是
+/// `remove: true` 删掉一片指令叶之后，这艘舰就**整行从控制树里消失**（web 上连它的风格 /
+/// 角色两行也一起没了），玩家/agent 再也没法在界面上单独给它设归属。现在与风格三轴一样
+/// **每舰一行**（`control-live-layers.md` §10.5 记的那个读面缺口）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipOrderEntry {
     pub ship: ShipId,
-    pub behavior: ShipBehavior,
+    /// **有效指令**；`null` = 链上没有任何一层说话（引擎按 `Idle` 兜底）。
+    pub behavior: Option<ShipBehavior>,
+    /// 本舰指令叶**自己的**表态（没有叶片 = `Inherit`）。
     pub mode: ControlMode,
 }
 
@@ -863,10 +881,18 @@ impl ApplyReport {
 // --- read builders ----------------------------------------------------------
 
 pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> FactionControlView {
-    let ship_orders = c
-        .ship_orders
+    // 指令：与下面三条风格轴**同形**——遍历 `state.ships`，**每舰一行**。
+    // 值取**有效值**（叶 → 出厂图 → 舰队默认），`mode` 取叶片自己的表态（没有叶 = Inherit）。
+    // 以前这里遍历的是 `c.ship_orders`（只有存在叶的舰），后果见 [`ShipOrderEntry`] 的说明。
+    let ship_orders = state
+        .ships
         .iter()
-        .map(|(sid, ctrl)| ShipOrderEntry { ship: sid.clone(), behavior: ctrl.value.clone(), mode: ctrl.mode })
+        .filter(|s| s.faction_id == fid)
+        .map(|s| ShipOrderEntry {
+            ship: s.name.clone(),
+            behavior: state.ship_behavior(s.name.clone()),
+            mode: c.ship_orders.get(&s.name).map(|l| l.mode).unwrap_or_default(),
+        })
         .collect();
     // 读面：本势力每艘舰当前的行为风格。**值取有效值**（叶 → 舰队默认 → 舰上记录值），
     // **mode 取叶片自己的表态**（没有叶片 = Inherit）——于是"模板原样回传"安全：没被改过的
@@ -1357,6 +1383,22 @@ fn apply_ship_order(
         }
         (None, false) => ControlMode::Inherit,
     };
+    // **不建"空叶"**：读面每舰一行之后，模板里会出现
+    // `{"ship": X, "behavior": null, "mode": "Inherit"}` —— 它说的正是「这一层没有说话」。
+    // 若无条件 `or_insert_with`，回传模板会给每一艘**叶被删过**的舰重新建出一片
+    // `value = Idle` 的叶，于是「链上没人说话」（有效值 `null`）静默变成「叶里记着 Idle」
+    // （有效值 `Some(Idle)`）——模板回传就不再是不动点，而且这是一次**没人要求**的写操作。
+    // 规则：既没写值、表态又是 `Inherit` ⇒ 幂等成功（目标状态"这一层没有说话"已经成立），
+    // 与「删一片本来就不存在的叶」同一条语义（`control-live-layers.md` §11.1 规则 2）。
+    let leaf_exists = state
+        .control
+        .get(fid)
+        .map(|c| c.ship_orders.contains_key(&ship_name))
+        .unwrap_or(false);
+    if !leaf_exists && sp.behavior.is_none() && implied == ControlMode::Inherit {
+        report.applied += 1;
+        return;
+    }
     let ctrl = state
         .control
         .entry(fid.clone())
@@ -3066,6 +3108,183 @@ mod tests {
             report.skipped
         );
         assert!(report.applied >= 40, "the whole template should touch many leaves, got {}", report.applied);
+    }
+
+    /// **指令读面：每舰一行 + 是一处不动点。**
+    ///
+    /// 三条契约（`control-live-layers.md` §10.5 的读面缺口 + 本轮新增的一节）：
+    /// 1. 本势力**每一艘舰**都有一行——包括**从没被点名过**（连叶都没有）的舰；
+    /// 2. `behavior` 是**有效值**（链上没人说话时是 `null`），`mode` 是**叶自己的表态**
+    ///    （没有叶 = `Inherit`）；
+    /// 3. 把整面模板**原样回传**再读一次，JSON **逐字节相同**（同一份状态、同一份模板）。
+    #[test]
+    fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+
+        // 三种情形，正好覆盖取值链的三个分支：
+        //  ① 从没被点名过的舰（连叶都没有）——`remove: true` 之后就是这样；
+        //  ② 有叶、叶说 `Inherit`（AI 每回合写的流水）——有效值来自叶里那个记录值；
+        //  ③ 有叶、叶是 `Player`（玩家钉的）。
+        let ours: Vec<ShipId> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(ours.len() >= 3, "中国开局至少 3 艘舰（实际 {}）", ours.len());
+        let (unnamed, inherit_leaf, player_leaf) =
+            (ours[0].clone(), ours[1].clone(), ours[2].clone());
+        let c = state.control_mut(fid.clone()).expect("control");
+        c.ship_orders.remove(&unnamed);
+        c.ship_orders.insert(
+            inherit_leaf.clone(),
+            Control {
+                value: ShipBehavior::Move { position: [1.5, -2.0] },
+                mode: ControlMode::Inherit,
+            },
+        );
+        c.ship_orders.insert(
+            player_leaf.clone(),
+            Control { value: ShipBehavior::Dock { body: "地球".to_string() }, mode: ControlMode::Player },
+        );
+
+        let row = |s: &serde_json::Value, ship: &str| -> serde_json::Value {
+            s["control"]
+                .as_array()
+                .expect("control 是数组")
+                .iter()
+                .find(|f| f["faction_id"] == serde_json::json!(fid))
+                .expect("控制面里必须有这个势力")["ship_orders"]
+                .as_array()
+                .expect("ship_orders 是数组")
+                .iter()
+                .find(|r| r["ship"] == serde_json::json!(ship))
+                .unwrap_or_else(|| panic!("读面里必须有「{ship}」这一行"))
+                .clone()
+        };
+
+        let surface = control_surface(&state);
+        let rows = surface["control"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["faction_id"] == serde_json::json!(fid))
+            .unwrap()["ship_orders"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(rows, ours.len(), "指令读面必须**每舰一行**（含没有叶的舰）");
+
+        // ① 没有叶、链上没人说话 ⇒ `behavior: null` + `mode: Inherit`。
+        assert_eq!(row(&surface, &unnamed), serde_json::json!({
+            "ship": unnamed, "behavior": serde_json::Value::Null, "mode": "Inherit",
+        }));
+        // ② 叶在、叶说 Inherit ⇒ 值取叶里的记录值，表态照实报 Inherit。
+        assert_eq!(row(&surface, &inherit_leaf), serde_json::json!({
+            "ship": inherit_leaf, "behavior": {"Move": {"position": [1.5, -2.0]}}, "mode": "Inherit",
+        }));
+        // ③ 叶在、叶是 Player ⇒ 值取叶值、表态是 Player。
+        assert_eq!(row(&surface, &player_leaf), serde_json::json!({
+            "ship": player_leaf, "behavior": {"Dock": {"body": "地球"}}, "mode": "Player",
+        }));
+
+        // **不动点**：整面模板原样回传，再读一次必须逐字节相同。
+        let before = surface.to_string();
+        let report = apply_patch(&mut state, &config, &surface).expect("模板必须能原样回传");
+        assert!(report.is_clean(), "模板回传不许丢叶子: {:?}", report.skipped);
+        assert_eq!(
+            control_surface(&state).to_string(),
+            before,
+            "读面不是不动点：回传模板改变了它自己的形状"
+        );
+        // ① 那一行**没有**变出一片叶来（否则「链上没人说话」会被静默变成「叶里记着 Idle」，
+        //    `behavior` 也就不再是 `null` 了——上面那条逐字节断言正是靠这条规则才成立）。
+        assert!(
+            !state.control(fid.clone()).unwrap().ship_orders.contains_key(&unnamed),
+            "`behavior: null` 的行不许建叶"
+        );
+
+        // 舰队默认（势力级 Player）压过「叶说 Inherit」：② 的有效值换成默认值，
+        // ①（没有叶）也一样；③ 仍然是自己钉的那个值。回传之后仍然是不动点。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "default_ship_order": {"behavior": {"type": "colonize", "body": "火星"}, "mode": "Player"}
+            }]
+        });
+        apply_patch(&mut state, &config, &diff).expect("舰队默认落地");
+        let surface = control_surface(&state);
+        assert_eq!(row(&surface, &unnamed)["behavior"], serde_json::json!({"Colonize": {"body": "火星"}}));
+        assert_eq!(row(&surface, &inherit_leaf)["behavior"], serde_json::json!({"Colonize": {"body": "火星"}}));
+        assert_eq!(row(&surface, &player_leaf)["behavior"], serde_json::json!({"Dock": {"body": "地球"}}));
+        let before = surface.to_string();
+        apply_patch(&mut state, &config, &surface).expect("模板必须能原样回传");
+        assert_eq!(control_surface(&state).to_string(), before, "有了舰队默认之后读面仍须是不动点");
+    }
+
+    /// 读面的 `behavior: null` 与「叶不存在」是**同一件事**的两面，所以回传它**不许建叶**；
+    /// 而 `mode` 表态（`Auto`/`Player`）与写值照旧建叶——那才是「给这艘舰设归属」的动作。
+    ///
+    /// 为什么值得单独立一条：建叶规则错一格的后果不是报错，而是**有效值静默改变**
+    /// （`null` → `Some(Idle)`），而两次 `--control` 的差异只有那一格。
+    #[test]
+    fn a_null_behavior_row_never_invents_a_leaf() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let has_leaf = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国有一艘舰");
+        let no_leaf = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .nth(1)
+            .expect("中国有第二艘舰");
+        state.control_mut(fid.clone()).unwrap().ship_orders.remove(&no_leaf);
+
+        // ① 读面那一行原样回传 ⇒ 幂等成功，但**不建叶**。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "ship_orders": [{"ship": no_leaf, "behavior": null, "mode": "Inherit"}]
+            }]
+        });
+        let report = apply_patch(&mut state, &config, &diff).expect("null 行回传必须被接受");
+        assert!(report.is_clean(), "{:?}", report.skipped);
+        assert_eq!(report.applied, 1, "「这一层没有说话」也是达成了目标状态（幂等成功）");
+        assert!(
+            !state.control(fid.clone()).unwrap().ship_orders.contains_key(&no_leaf),
+            "读面那一行说的就是「没有叶」，回传它当然不许建叶"
+        );
+        assert_eq!(state.ship_behavior(no_leaf.clone()), None, "有效值仍然是「没人说话」");
+
+        // ② 只写 `mode`（哪怕写的是 `Inherit`）而**叶已经存在** ⇒ 值不动。
+        let before = state.ship_behavior(has_leaf.clone());
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_orders": [{"ship": has_leaf, "mode": "Inherit"}]}]
+        });
+        apply_patch(&mut state, &config, &diff).expect("只写 mode 落地");
+        assert_eq!(state.ship_behavior(has_leaf.clone()), before, "只写表态不许动值");
+
+        // ③ `mode: Auto`（表态）与写值仍然建叶 —— 那正是「给这艘没有叶的舰设归属」。
+        for (i, patch) in [serde_json::json!({"ship": no_leaf, "mode": "Auto"}),
+                           serde_json::json!({"ship": no_leaf, "behavior": "Idle", "mode": "Inherit"})]
+            .into_iter()
+            .enumerate()
+        {
+            let mut s = state.clone();
+            let diff = serde_json::json!({"control": [{"faction_id": fid, "ship_orders": [patch]}]});
+            apply_patch(&mut s, &config, &diff).expect("建叶");
+            assert!(
+                s.control(fid.clone()).unwrap().ship_orders.contains_key(&no_leaf),
+                "第 {i} 条补丁（表态/写值）必须建出那片叶 —— 否则「设归属」这条唯一的入口就断了"
+            );
+        }
     }
 
     /// 「读面即写面、模板原样回传安全」是一条**可检查**的承诺：读面里出现的数字必须**逐位**
