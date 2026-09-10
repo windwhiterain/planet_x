@@ -81,10 +81,11 @@
 
   // 折叠态的一行预览（generic：只取前几个标量子项）
   function preview(v) {
-    if (isArr(v)) return v.filter(isScalar).slice(0, 5).map(fmtScalar).join(', ').slice(0, PREVIEW);
+    const cut = (s) => (s.length > PREVIEW ? s.slice(0, PREVIEW) + '…' : s);
+    if (isArr(v)) return cut(v.filter(isScalar).slice(0, 5).map(fmtScalar).join(', '));
     const ks = Object.keys(v);
     const s = ks.filter((k) => isScalar(v[k])).slice(0, 4).map((k) => k + '=' + fmtScalar(v[k])).join('  ');
-    return (s || ks.slice(0, 4).join(', ')).slice(0, PREVIEW);
+    return cut(s || ks.slice(0, 4).join(', '));
   }
 
   // --- 过滤（generic：键名 + 标量值 的子串匹配） ----------------------------
@@ -176,12 +177,16 @@
 
   // --- 自动表格（generic：列 = 键的并集，按首次出现顺序） -------------------
   // entries = [{ label, value, path }]；value 是对象时才有列。
-  function tableEl(entries, ctx, depth) {
+  function tableEl(entries, ctx, depth, path) {
     const allCols = colsOf(entries);
     // 列级过滤：查询命中某些**列名**时只留这些列（在宽表里找某个字段立刻聚焦）；
     // 没命中任何列名就保留全部列，只按行过滤。规则纯结构，不认字段名。
     const named = ctx.q ? allCols.filter((c) => String(c).toLowerCase().includes(ctx.q)) : allCols;
-    const cols = ctx.q && named.length ? named : allCols;
+    const wanted = ctx.q && named.length ? named : allCols;
+    // ⚠ 列上限**必须说出来**：超出的列不是"没有"，是"被这个上限挡住了"（见文件头铁律）。
+    const cap = capFor(path, wanted.length);
+    const cols = wanted.slice(0, cap);
+    const hiddenCols = wanted.slice(cap);
     // 行级过滤：行标签命中，或**所留列**的深层值命中（留下的列正是用户要找的）。
     const kept = entries.filter(
       (e) => !ctx.q || hit(e.label, e.label, ctx.q) || cols.some((c) => hit(cellOf(e.value, c), c, ctx.q))
@@ -194,11 +199,27 @@
     const htr = el('tr');
     htr.appendChild(el('th', 'jv-th jv-th-key', ''));
     cols.forEach((c) => htr.appendChild(el('th', 'jv-th', c)));
+    if (hiddenCols.length) {
+      const th = el('th', 'jv-th jv-th-hidden', '… 还有 ' + hiddenCols.length + ' 列');
+      th.title = '被列上限挡住的列：' + hiddenCols.join('、');
+      htr.appendChild(th);
+    }
     thead.appendChild(htr);
     table.appendChild(thead);
     const tbody = el('tbody');
     table.appendChild(tbody);
     box.appendChild(table);
+
+    // 被挡住的列：一行按钮说明它挡了多少、都是什么，点一下就地放宽（不丢数据、不撒谎）。
+    if (hiddenCols.length) {
+      const note = el('button', 'jv-more');
+      note.textContent = '还有 ' + hiddenCols.length + ' 列未显示（' + hiddenCols.join('、') + '）— 点这里显示';
+      note.addEventListener('click', () => {
+        capExtra.set(path, (capExtra.get(path) || 0) + hiddenCols.length);
+        if (ctx.rerender) ctx.rerender();
+      });
+      box.appendChild(note);
+    }
 
     const more = el('button', 'jv-more');
     let shown = 0;
@@ -224,17 +245,28 @@
     return isObj(row) ? row[col] : undefined;
   }
 
-  // 列 = 各行键的并集，按首次出现顺序（上限 MAX_COLS）。
+  // 列 = 各行键的并集，按首次出现顺序（**全部算出来，不在这里截断**）。
+  //
+  // ⚠ 以前这里凑够 `MAX_COLS` 就 `break outer`：多出来的列**直接消失**、毫无提示。实机症状
+  // （本轮勘察）：`state.ships` 的 18 个键只渲染出 16 列，`spawned_round` / `velocity` 被
+  // 默默扔掉——一次纯粹的引擎扩展就把兜底撑破了，而现象是「数据不见了」。现在上限只在
+  // [`tableEl`] 施加，并且**必须说出来藏了多少**。见 `.agents/notes/web-human-views.md` 铁律 R。
   function colsOf(entries) {
     const cols = [];
-    outer: for (const e of entries) {
+    for (const e of entries) {
       if (!isObj(e.value)) continue;
       for (const k of Object.keys(e.value)) {
         if (!cols.includes(k)) cols.push(k);
-        if (cols.length >= MAX_COLS) break outer;
       }
     }
     return cols;
+  }
+
+  // 「列上限」的用户选择：按**节点路径**记住（跨重渲染保留），默认 MAX_COLS。
+  const capExtra = new Map();
+  function capFor(path, total) {
+    const extra = capExtra.get(path) || 0;
+    return Math.min(total, MAX_COLS + extra);
   }
 
   // 一行：标量单元格直写；组合单元格显示摘要，点击在该行下就地递归展开。
@@ -272,6 +304,22 @@
   // --- fill：把一个组合值铺进容器（按 layoutOf 分派） ----------------------
   function fill(body, v, path, depth, ctx) {
     const q = ctx.q;
+    // **原位重组点**（铁律 R 的另一半）：这条路径若被某个组织点认领，就交给它渲染
+    // （整理后的表/卡片 + 每行的「其余字段」）。认领是数据里声明的，本文件依然不认识任何
+    // 领域字段名——它只知道「调用方给了一个 path→节点 的钩子」。
+    if (ctx.inline) {
+      const node = ctx.inline(path, v);
+      if (node) {
+        body.appendChild(node);
+        return;
+      }
+    }
+    if (depth > MAX_DEPTH) {
+      // 深度上限也不能静默：说到哪一层为止、为什么。
+      return void body.appendChild(
+        el('div', 'jv-empty', '已达显示深度上限（' + MAX_DEPTH + ' 层）——点上层节点分层展开即可继续下钻')
+      );
+    }
     const layout = layoutOf(v);
     if (layout === 'empty') return void body.appendChild(el('div', 'jv-empty', isArr(v) ? '[] 空' : '{} 空'));
 
@@ -297,7 +345,7 @@
       const entries = isArr(v)
         ? v.map((e, i) => ({ label: '[' + i + ']', value: e, path: joinPath(path, i, true) }))
         : Object.keys(v).map((k) => ({ label: k, value: v[k], path: joinPath(path, k, false) }));
-      return void body.appendChild(tableEl(entries, ctx, depth));
+      return void body.appendChild(tableEl(entries, ctx, depth, path));
     }
 
     if (layout === 'kv') {
@@ -344,6 +392,11 @@
       expanded: (o.state && o.state.expanded) || new Set(),
       expandDepth: o.expandDepth == null ? 1 : o.expandDepth,
       onPathClick: o.onPathClick || null,
+      // 调用方提供的**原位重组点**钩子：path → 节点（没有就返回 null，走通用渲染）。
+      // widget 依然不认识任何领域字段名——它只知道有这么个钩子。
+      inline: o.inline || null,
+      // 列上限被用户放宽之后，谁来重画（不传就只是本次不生效，不会静默丢列）。
+      rerender: o.rerender || null,
     };
     container.textContent = '';
     const root = el('div', 'jv-root');
