@@ -532,46 +532,33 @@ impl GameEvent {
 
     /// 分级：按**后续计算的访问需求**定级（判据见 [`Salience`]），决定它被存进哪一层。
     ///
-    /// **定级的依据 = 生产代码的读者盘点**（非测试的 `state.events` / `state.milestones` 读者）：
+    /// **定级的依据 = 生产代码的读者盘点**（非测试的 `state.events` / `state.notables` /
+    /// `state.milestones` 读者）：
     ///
     /// | 读者 | 访问的历史 |
     /// |---|---|
+    /// | `step_diplomacy` → `war_scar_floor`（记恨地板） | **最近 `war_scar_rounds` 回合**的战争 |
+    /// | `step_diplomacy` 的「本回合谁和谁交火」（由 `Attack`/`Siege` 反推） | 本回合 |
     /// | `step_ideology` → `military_deltas(&state.events)` | 本回合的军事得失 |
     /// | `kill_ship` 的同回合去重 | 本回合 |
-    /// | `step_diplomacy` 的「本回合谁和谁交火」（由 `Attack`/`Siege` 反推） | 本回合 |
     /// | `step_story` 的载荷提取 + `StoryTrigger::*` | 本回合 / [`State::chronicle`] |
     /// | `autocontrol::tactics` 的 `Withdraw` 判定 | 本回合 |
     /// | `agent::state_json`、`projection` 的渲染 | 本回合 |
     ///
-    /// 也就是说：**今天没有任何生产逻辑读无限过去或读窗口**——「永远发生过没有」这类需求
-    /// （`first_war`/`first_raze`/`first_colony`）当前由 [`State::chronicle`] 的去重承担，
-    /// 而不是由历史层承担。因此下面的定级是**按本判据有待收紧的**，不是已经收敛的：
-    /// 现有分级是按「重要性」拍的，与读者需求无关，两者冲突时**以读者需求为准**。
+    /// **结论：没有 variant 有「无限过去」读者，所以 `Milestone` 组当前为空。** 这是判据的
+    /// 正确结果，不是遗漏——仅有的无限过去需求（`first_war`/`first_raze`/`first_colony` 的
+    /// 「史上第一次」）由 [`State::chronicle`] 的 `id` 去重承担，历史层不必为它们长存。
+    /// 将来哪个机制真的需要无限回看，再把对应 variant **提升**进 `Milestone` 组。
     ///
-    /// 已经明确的缺口（见 [`Salience::Notable`] 的战争范例）：关系模型没有记忆，缺一个
-    /// 「最近 W 回合里我们打过仗吗」的窗口读者；一旦补上，[`GameEvent::WarStarted`] /
-    /// [`GameEvent::WarEnded`] 就该从下面的 `Milestone` 组移到 `Notable` 组。
+    /// 兜底分支是有意的：按本判据 **`Detail` 是缺省**（「不被任何计算读取」是安全假设），
+    /// 而「提升」是一个需要指明读者的**主动**动作。新增 variant 时编译器不再强迫你定级
+    /// ——这正是判据从「重要性」换成「读者需求」的代价，由本段文档承担提醒。
     pub fn salience(&self) -> Salience {
         match self {
-            // 改变身份/归属/存亡的里程碑。
-            GameEvent::CityRazed { .. }
-            | GameEvent::CityDefected { .. }
-            | GameEvent::CityOverrun { .. }
-            | GameEvent::ColonyFounded { .. }
-            | GameEvent::Revolt { .. }
-            | GameEvent::Resurgence { .. }
-            | GameEvent::ShipDestroyed { .. }
-            | GameEvent::ShipSpawned { .. }
-            | GameEvent::WarStarted { .. }
-            | GameEvent::WarEnded { .. }
-            | GameEvent::CoalitionFormed { .. }
-            | GameEvent::CoalitionEnded { .. }
-            | GameEvent::CapitalRelocated { .. }
-            | GameEvent::Story { .. } => Salience::Milestone,
-            // 值得注意但不改变归属。
-            GameEvent::Withdraw { .. } | GameEvent::StaleOrder { .. } => Salience::Notable,
-            // 逐次高频流水。
-            GameEvent::Attack { .. } | GameEvent::Siege { .. } => Salience::Detail,
+            // 唯一的窗口读者：记恨地板（`sim::war_scar_floor`）要回看「最近打过仗吗」。
+            GameEvent::WarStarted { .. } | GameEvent::WarEnded { .. } => Salience::Notable,
+            // 其余全部只需要前一帧，或根本不被计算读取（只供 agent 事后分析）。
+            _ => Salience::Detail,
         }
     }
 
@@ -756,34 +743,36 @@ fn entity_kind_from_str(s: &str) -> EntityKind {
     }
 }
 
-/// 长存里程碑里的一条记录：**第几回合**发生了什么。`GameEvent` 本身不带回合号（它只活在
-/// 「本回合」的流水里），跨回合的里程碑必须自己带上时间戳。
+/// 历史层里的一条记录：**第几回合**发生了什么。`GameEvent` 本身不带回合号（它只活在
+/// 「本回合」的流水里），跨回合的存档必须自己带上时间戳——这是本类型存在的唯一理由。
+///
+/// [`Milestones`] 与 [`Notables`] 共用它：两层的差别只在**保留多久**，不在记录形状。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct MilestoneEntry {
+pub struct HistoryEntry {
     pub round: u32,
     pub event: GameEvent,
 }
 
-/// **长存里程碑**（`State::milestones`）：本局发生过的全部里程碑事件，按发生顺序追加。
+/// **长存里程碑层**（`State::milestones`）：后续计算需要访问**无限过去**的事件，按发生顺序追加。
 ///
-/// 解决的是「历史活不过 checkpoint」这个根因：[`State::events`] 是**回合内流水**——每回合
-/// 开头被 [`crate::sim::advance`] 清空，于是 `--save` 出来的存档里只剩最后一回合的事件，
-/// 而「这个城市是怎么变成今天这样的」全部丢失（只有磁盘投影 `idx/events.jsonl` 记得，
-/// 前提是你一直在 `--index`）。里程碑把**里程碑**层收进 `State` 本身：存一份 checkpoint 就
-/// 带走了这段历史，`--start` 续玩时它仍然在。
+/// **当前为空，而且这是判据的正确结果，不是遗漏。** 定级判据是「后续计算需要访问哪一段历史」
+/// （见 [`Salience`]），而读者盘点（见 [`GameEvent::salience`]）表明：**没有任何生产逻辑读无限
+/// 过去**。仅有的无限过去需求——`first_war`/`first_raze`/`first_colony` 的「史上第一次」——由
+/// [`State::chronicle`] 的 `id` 去重承担，历史层不必为它们长存。
 ///
-/// 分层由 [`GameEvent::salience`] 单点声明：只收 [`Salience::Milestone`]（易主/存亡/开战/
-/// 结盟/剧情），逐发流水（`attack`/`siege`）永不进来——它们数量是里程碑的一两个数量级。
-/// 写入点是 [`crate::sim::ev`]（发事件的唯一漏斗），因此**记不进里程碑在结构上不可能**。
+/// 所以本层**刻意不预填**：将来哪个机制真的需要无限回看，再把对应 variant 提升进来。它保留
+/// 字段是为了给那条判据一个现成的家，而不是为了装「听起来重要」的事件。（曾经这里按「重要性」
+/// 预填了 14 个 variant，结果吃掉存档 67%——见 `.agents/ideas.md`。）
 ///
-/// **容量**：完整的历史必然随回合线性增长（记录状态变化本就是 Ω(变化数)）。默认**不设上限**
-/// （无损优先），可用 `config/game.ron` 的 `history.max_milestones` 设上限；一旦截断，丢弃
-/// 的数量与丢到哪一回合都记在 [`Milestones::dropped`]/[`Milestones::dropped_through_round`] 里——
-/// **截断是可见的，不静默**。
+/// 与 [`Notables`] 的分工是**保留期**，不是重要性：本层无限，[`Notables`] 只有窗口。
+/// 写入点是 [`crate::sim::ev`]（发事件的唯一漏斗），因此「该记而没记」在结构上不可能。
+///
+/// **容量**：默认不设上限（`history.max_milestones: 0` = 无损）；一旦截断，丢弃量与丢到哪一
+/// 回合都记在 [`Milestones::dropped`]/[`Milestones::dropped_through_round`] 里——截断可见。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Milestones {
     /// 里程碑记录，最旧 → 最新。
-    pub entries: Vec<MilestoneEntry>,
+    pub entries: Vec<HistoryEntry>,
     /// 因超出上限而被丢弃的记录数（`0` = 无损）。
     #[serde(default)]
     pub dropped: u64,
@@ -794,16 +783,17 @@ pub struct Milestones {
 }
 
 impl Milestones {
-    /// 追加一条里程碑。**非里程碑直接忽略**——分层只在 [`GameEvent::salience`] 一处声明。
+    /// 追加一条。**非 [`Salience::Milestone`] 直接忽略**——分层只在 [`GameEvent::salience`]
+    /// 一处声明。当前没有任何 variant 定级为 `Milestone`，所以这是个空操作。
     pub fn push(&mut self, round: u32, event: GameEvent) {
         if event.salience() != Salience::Milestone {
             return;
         }
-        self.entries.push(MilestoneEntry { round, event });
+        self.entries.push(HistoryEntry { round, event });
     }
 
     /// 按上限裁剪（`cap == 0` = 不设上限，无损）。丢弃**最旧**的记录，并把丢弃量与丢弃
-    /// 到的回合数记进里程碑自身——下游据此知道「这不是全部历史」。
+    /// 到的回合数记进本层自身——下游据此知道「这不是全部历史」。
     pub fn trim(&mut self, cap: usize) {
         if cap == 0 || self.entries.len() <= cap {
             return;
@@ -814,14 +804,62 @@ impl Milestones {
         self.entries.drain(..excess);
     }
 
-    /// 里程碑是否完整（没有因上限而丢过记录）。
+    /// 里程碑层是否完整（没有因上限而丢过记录）。
     pub fn is_complete(&self) -> bool {
         self.dropped == 0
     }
 
     /// 某一实体参与过的全部里程碑（`kind`/`id` 与投影的索引口径一致：**名字即 id**）。
     /// Rust 侧的等价物，供 CLI/测试使用；Python 侧走 `q.history()` 查投影。
-    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&MilestoneEntry> {
+    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&HistoryEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))
+            .collect()
+    }
+}
+
+/// **窗口层**（`State::notables`）：后续计算需要访问**一定事件窗口**的事件，只保留最近
+/// `history.notable_window` 个回合。
+///
+/// 与 [`Milestones`] 的差别只有**保留期**：本层会被裁剪，且裁剪是**预期行为而非损失**——
+/// 出了窗口的历史按判据就不该再影响任何计算。因此这里**不记 `dropped`**：过期不是丢弃。
+///
+/// 本层当前的**唯一生产者与消费者**是战争：[`GameEvent::WarStarted`] /
+/// [`GameEvent::WarEnded`]（判据范例见 [`Salience::Notable`]），读者是
+/// [`crate::sim::war_scar_floor`]（记恨地板）——它回头看「最近打过仗吗」。
+///
+/// `window == 0` = **不裁剪**（与 `max_milestones: 0` 同义：无损）。注意此时本层退化成无限
+/// 长存，那说明这条判据被绕过了——真要无限长存，该提升进 [`Milestones`]。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Notables {
+    /// 窗口内的记录，最旧 → 最新。
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl Notables {
+    /// 追加一条。**非 [`Salience::Notable`] 直接忽略**——分层只在 [`GameEvent::salience`]
+    /// 一处声明。
+    pub fn push(&mut self, round: u32, event: GameEvent) {
+        if event.salience() != Salience::Notable {
+            return;
+        }
+        self.entries.push(HistoryEntry { round, event });
+    }
+
+    /// 丢弃已滑出窗口的记录（`window == 0` = 不裁剪）。窗口是 `[round - window + 1, round]`：
+    /// **本回合仍在窗口内**，所以 `window = 1` 等价于「只看本回合」。
+    pub fn trim(&mut self, round: u32, window: usize) {
+        if window == 0 {
+            return;
+        }
+        let window = window as u32;
+        let oldest = round.saturating_sub(window - 1);
+        self.entries.retain(|e| e.round >= oldest);
+    }
+
+    /// 窗口内是否有这条事件（`kind`/`id` 口径与投影一致：**名字即 id**）。
+    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&HistoryEntry> {
         self.entries
             .iter()
             .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))

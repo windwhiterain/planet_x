@@ -197,13 +197,17 @@ fn write_round(
         let h = e.history_row();
         // 行内容以 `EventRow` 的**序列化结果**为准（唯一来源）：将来给 `EventRow` 加字段，
         // 表里会自动多一列——不会像手写 `json!` 那样悄悄漏掉（本列 `headline` 就是这么
-        // 差点漏掉的）。投影自己只需补三个键，并把 `magnitude` 规整到两位小数。
+        // 差点漏掉的）。投影自己只需补几个键，并把 `magnitude` 规整到两位小数。
         let mut row = serde_json::to_value(&h).map_err(|e| e.to_string())?;
         let obj = row.as_object_mut().ok_or("EventRow 必须是 JSON 对象")?;
         obj.insert("round".to_string(), json!(state.round));
         obj.insert("seq".to_string(), json!(i));
         obj.insert("event_id".to_string(), json!(event_id(state.round, i)));
         obj.insert("magnitude".to_string(), json!(r2(h.magnitude)));
+        // `weight` 是**纯显示用**的排序键（`GameEvent::weight`，穷尽 match 声明、不进 config）。
+        // 它必须投影出来：`salience` 是**分层判据**（后续计算要访问哪段历史），**不是重要性**——
+        // 按它挑「值得读的事件」会挑错（里程碑层清空后会挑到空集）。给人看的排序走这一列。
+        obj.insert("weight".to_string(), json!(e.weight()));
         writeln!(events, "{row}").map_err(|e| e.to_string())?;
     }
 
@@ -358,13 +362,15 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "事件历史（稀疏里程碑）：一行一事件，**归一化固定列**——参与方一律走 (actor_kind, actor_id, target_kind, target_id) 主槽位 + `extra` 长表（role/kind/id），因此任意实体（城/舰/势力/天体）都能用同一个查询形状 join 它自己的历史，不需要知道任何事件类型的字段布局。variant 专属载荷统一收进 `data` 一个对象列（一列只承载一种类型：没有\"同时是标量和列表\"的列，也没有 `from`/`to` 这种一列两义的同名列）。\n统计建议：**先按类型取**（`q.events(type='city_razed')` → 该类型的字段是稠密的），全集帧只用于计数/扫描。",
                 "columns": {
                     "round":"integer","seq":"integer","event_id":"string","type":"string","salience":"string",
+                    "weight":"integer",
                     "actor_kind":"string","actor_id":"string","target_kind":"string","target_id":"string",
                     "extra":"array","magnitude":"number","headline":"string","data":"object"
                 },
                 "column_docs": {
                     "event_id": "稳定 id `<round>:<seq>`，join/因果引用用。",
                     "type": "事件类型（与 Rust `GameEvent::kind()` / serde 判别式逐字一致）。",
-                    "salience": "显著性：milestone（改变归属/存亡）/ notable / detail（逐次高频流水）。",
+                    "salience": "**分层**，判据 = 后续计算需要访问哪一段历史（见 `Salience`）：`milestone`（无限过去）/ `notable`（一定窗口）/ `detail`（只需前一帧、或没有读者，仅为 agent 分析而记录）。**这一列不是「重要性」**——按重要性挑事件请用 `weight`。",
+                    "weight": "**纯显示用**的排序键（`GameEvent::weight`，0–100）。`salience` 回答「谁要回看它」，`weight` 回答「人读起来重不重要」——两者刻意分开：给 agent/人挑「值得读的事件」用这一列（如 `q.storyboard()`）。",
                     "actor_kind/actor_id": "动作发起方（如 city_razed 的 actor 是拆城的**势力**）——没有发起方时为 null。",
                     "target_kind/target_id": "动作直接对象（如被围的**城**、被击毁的**舰**）。",
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",

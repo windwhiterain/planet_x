@@ -47,6 +47,12 @@
         war_fatigue: 0.12,
         // 停战目标关系（高于 war_threshold，故能跨回和平），停火冷却期间关系向它靠拢。
         ceasefire_relation: -6.0,
+        // 记恨（战争疤痕）：一场战争的影响持续多少回合 / 疤痕初值（负=敌意，线性衰减到 0）。
+        // 新鲜时 -30 < war_threshold(-20)，所以刚开战的对手**不可能当回合就言和**——这治的是
+        // 「开战/停战反复闪烁」；随后地板抬过阈值，和平重新可能（记恨，但会淡）。
+        // 这是窗口层（State::notables）唯一的读者。
+        war_scar_rounds: 24,
+        war_scar_relation: -30.0,
         // 静息亲和 = affinity_floor + affinity_span * (1 - |Δalignment|/2)。
         // 同阵营 ~ -42+70 = +28（友）；异阵营(Δ=2) ~ -42（敌，最终走向战争）。
         affinity_floor: -42.0,
@@ -159,12 +165,17 @@
         // 被孤立的大国要花更多资源养边地，远端殖民地更易离心叛乱→体量自然回落）。
         sanction_cost_mult: 1.45,
     ),
-    // 长存里程碑历史（State::milestones）的容量。里程碑事件（城易主/舰存亡/开战/结盟/剧情）
-    // 逐回合累计、跨 checkpoint 存活，因此文件会随回合线性增长。
-    // 0 = 不设上限（默认，无损优先）；设了上限则最旧的里程碑先丢，丢弃量记在
+    // 历史层的容量（判据见 Salience：分层按「后续计算需要访问哪一段历史」）。
+    //   milestones = 需要**无限过去**的那一层，随 checkpoint 存活（当前为空——没有任何
+    //                variant 有无限过去的读者，见 State::milestones 的文档）。
+    //   notables   = 需要**一定窗口**的那一层，只保留最近 notable_window 个回合。
+    //               当前唯一成员是战争（WarStarted/WarEnded），读者是「记恨地板」。
+    // 0 = 不设上限 / 不裁剪（无损优先）；里程碑层设了上限则最旧的先丢，丢弃量记在
     // State::milestones.dropped / dropped_through_round 里——截断可见，不静默。
+    // 窗口层被裁掉是**预期行为**，不是损失，所以不记 dropped。
     history: (
         max_milestones: 0,
+        notable_window: 24,
     ),
     // 思潮（可变化意识形态）：4 条轴逐回合按「变化因素」向信号 target 靠拢。
     // 变化因素：和平↔军国=战争得失；科学↔技术=飞船在 MOND 区 vs 开采 MOND 区资源；

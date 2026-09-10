@@ -815,6 +815,7 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         scope,
         events: Vec::new(),
         milestones: Milestones::default(),
+        notables: Notables::default(),
         chronicle: Vec::new(),
         ship_name_seq,
     };
