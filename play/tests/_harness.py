@@ -1,0 +1,294 @@
+"""数据级测试的共享脚手架（**不用测试框架**，几个脚本分组跑）。
+
+三句话（方案见 `.agents/notes/test-decoupled-suite.md`）：
+
+1. **一次编译**：断言跑在 `planet_x` **跑出来的数据**上（`--index` 投影），测试代码
+   （本目录的 `.py`）改动**不需要重编任何 Rust**。今天的问题是 8 个测试二进制**每个都
+   静态链一遍整个 crate**：改一个文件要 46.7 s 重建，而真跑只有 26.5 s。
+2. **轨迹复用**：一次运行按 `(二进制指纹, seed, 回合数, 分辨率)` 缓存进
+   `target/test-fixtures/`，被**所有组、所有断言**复用（今天那四条长局跑的是**完全相同**的
+   一批世界，2.8 万回合被重算了四遍）。二进制或 `config/game.ron` 一变，指纹就变 ⇒
+   **缓存自动失效**，绝不手写「已知过期」的 golden。
+3. **分组**：每个 `g*.py` 是一个组，`run.py` 按组合跑。组内**一份数据、多条断言**，
+   失败信息里带 `(seed, round)` 以便定位。
+
+用法（用 kit 那个 venv 的 python，它带 pandas）：
+
+    play/planet_xq/.venv/Scripts/python.exe play/tests/run.py            # 默认：快组
+    play/planet_xq/.venv/Scripts/python.exe play/tests/run.py all -j 7   # 全组、7 路并行
+    play/planet_xq/.venv/Scripts/python.exe play/tests/g3_long.py        # 单跑一个组
+
+环境变量：`PLANET_X_BIN` 指向别处的二进制（默认 `target/<bin>/planet_x[.exe]`）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pandas as pd
+
+REPO = Path(__file__).resolve().parents[2]
+CONFIG = REPO / "config" / "game.ron"
+CACHE_ROOT = REPO / "target" / "test-fixtures"
+
+
+# ── 投影缓存 ────────────────────────────────────────────────────────────────
+
+
+def _exe(kind: str) -> Path:
+    env = os.environ.get("PLANET_X_BIN")
+    if env:
+        return Path(env)
+    return REPO / "target" / kind / ("planet_x.exe" if os.name == "nt" else "planet_x")
+
+
+class Harness:
+    """一个二进制 + 一个缓存根：把「跑一次世界」变成可复用的目录。"""
+
+    def __init__(self, kind: str = "release", refresh: bool = False, jobs: int = 0):
+        self.kind = kind
+        self.refresh = refresh
+        self.jobs = jobs or min(8, (os.cpu_count() or 4))
+        self.path = _exe(kind)
+        if not self.path.exists():
+            sys.exit(
+                f"找不到二进制 {self.path}\n"
+                f"先编一个：cargo build{' --release' if kind == 'release' else ''}\n"
+                f"（或用 PLANET_X_BIN 指向已编好的 planet_x）"
+            )
+        self.hits: list[str] = []
+        self.misses: list[tuple[str, float]] = []
+        self._kit = KIT
+
+    # 指纹 = 二进制（mtime+size）+ 配置哈希。**代码一改，缓存自动失效**——这是整套方案的
+    # 安全底线（方案 §5）：二进制换了，「轨迹」就不该复用。
+    def fingerprint(self) -> str:
+        st = self.path.stat()
+        h = hashlib.sha256()
+        h.update(f"{self.path}:{st.st_mtime_ns}:{st.st_size}".encode())
+        if CONFIG.exists():
+            h.update(hashlib.sha256(CONFIG.read_bytes()).digest())
+        return h.hexdigest()[:16]
+
+    def dir_for(self, seed: int, rounds: int, every: int = 1) -> Path:
+        return CACHE_ROOT / f"{self.fingerprint()}-s{seed}-r{rounds}-e{every}"
+
+    def projection(self, seed: int, rounds: int, every: int = 1) -> Path:
+        """按 `(seed, 回合数, 分辨率)` 取一份投影目录：命中就直接返回，否则跑一次。"""
+        dest = self.dir_for(seed, rounds, every)
+        if not self.refresh and (dest / "_cache.json").exists():
+            self.hits.append(dest.name)
+            return dest
+        tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        self.run_into(tmp, seed, rounds, every)
+        elapsed = time.time() - t0
+        info = {
+            "seed": seed,
+            "rounds": rounds,
+            "every": every,
+            "binary": str(self.path),
+            "fingerprint": self.fingerprint(),
+            "elapsed_s": round(elapsed, 1),
+            "size_mb": round(_dir_size(tmp) / 1e6, 1),
+        }
+        (tmp / "_cache.json").write_text(
+            json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        self.misses.append((dest.name, elapsed))
+        return dest
+
+    def run_into(self, dest: Path, seed: int, rounds: int, every: int = 1, extra=()) -> None:
+        """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。"""
+        args = [
+            str(self.path),
+            "--seed", str(seed),
+            "--round", str(rounds),
+            "--every", str(every),
+            "--index", str(dest),
+            *extra,
+        ]
+        log = dest / "_run.log"
+        dest.mkdir(parents=True, exist_ok=True)
+        with open(log, "wb") as fh:
+            p = subprocess.run(args, stdout=fh, stderr=subprocess.STDOUT, cwd=str(REPO))
+        if p.returncode != 0:
+            tail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{tail}")
+
+    def capture(self, args: list[str]) -> str:
+        """跑一次二进制、拿它的 stdout（`--derived` 这类单点导出）。不缓存。"""
+        p = subprocess.run([str(self.path), *args], cwd=str(REPO), capture_output=True,
+                           text=True, encoding="utf-8")
+        if p.returncode != 0:
+            raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-2000:]}")
+        return p.stdout
+
+    def prewarm(self, keys: list[tuple[int, int]], every: int = 1) -> list[Path]:
+        """并行把一批 (seed, 回合数) 备好（多个进程跑多个世界，互不干扰）。"""
+        if len(keys) <= 1 or self.jobs <= 1:
+            return [self.projection(s, r, every) for s, r in keys]
+        with ThreadPoolExecutor(max_workers=min(self.jobs, len(keys))) as ex:
+            return list(ex.map(lambda k: self.projection(k[0], k[1], every), keys))
+
+    def q(self, dirpath: Path, only=None):
+        """读一份投影（kit 的 PlanetXQ）。`only` = 只装这几张表（长投影全装要 ~12 s）。"""
+        return self._kit.load(str(dirpath), only=only)
+
+    def digest(self, seed: int, rounds: int, build, every: int = 1):
+        """把 `build(投影目录)` 的结果按投影缓存成一个 pickle。
+
+        投影是**真相**，摘要是**它的**缓存：摘要文件就躺在投影目录里 ⇒ 跟着它同生共死
+        （二进制一变，投影目录换名，摘要自然也换）。这样「一条断言加进长组」不必再读
+        170 MB（1000 回合全装 ≈ 12 s、读一遍 ≈ 8 s），只要 0.05 s 读摘要。
+
+        摘要名字里带**抽取逻辑的代码指纹**（见 [`_code_stamp`]）：改了抽取逻辑就重算，
+        只改 `run()` 里的判据就照旧命中。
+        """
+        d = self.projection(seed, rounds, every)
+        path = d / f"_digest_{build.__name__}-{_code_stamp(build)}.pkl"
+        if path.exists() and not self.refresh:
+            return pd.read_pickle(path)
+        out = build(d)
+        pd.to_pickle(out, path)
+        return out
+
+    def digests(self, keys, build, every: int = 1) -> list:
+        """并行把一批 `(seed, 回合数)` 的摘要备好（摘要已在就只读 pickle）。"""
+        if len(keys) <= 1 or self.jobs <= 1:
+            return [self.digest(s, r, build, every) for s, r in keys]
+        with ThreadPoolExecutor(max_workers=min(self.jobs, len(keys))) as ex:
+            return list(ex.map(lambda k: self.digest(k[0], k[1], build, every), keys))
+
+    def report(self) -> None:
+        if self.misses:
+            total = sum(e for _, e in self.misses)
+            print(f"  缓存：新跑 {len(self.misses)} 份（{total:.1f} s），命中 {len(self.hits)} 份")
+        else:
+            print(f"  缓存：全部命中（{len(self.hits)} 份，0 s 重跑）")
+
+
+def _dir_size(p: Path) -> int:
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+
+def projection_hashes(d: Path) -> dict[str, str]:
+    """投影目录里**该是确定的那部分**的 sha256（`_` 开头的是我们自己的缓存/日志，跳过）。"""
+    return {
+        str(f.relative_to(d)): hashlib.sha256(f.read_bytes()).hexdigest()
+        for f in sorted(d.rglob("*"))
+        if f.is_file() and not f.name.startswith("_")
+    }
+
+
+def _code_stamp(build) -> str:
+    """摘要的失效键 = 抽取逻辑的**内容**哈希（不是 mtime）。
+
+    取的是「这个模块里除 `run` 以外的全部顶层函数/类」的源码：断言住在 `run()` 里，而
+    判据的**数据**来自抽取函数——所以只改判据 ⇒ 摘要照旧命中；改了 `extract` / `_scan`
+    这类抽取逻辑 ⇒ 摘要自动重算。比「按文件 mtime 判过期」可靠（内容没变就不该重算），
+    也比手写版本号可靠（不会忘）。
+    """
+    import inspect
+
+    mod = sys.modules.get(getattr(build, "__module__", ""))
+    h = hashlib.sha256()
+    if mod is not None:
+        for name, obj in sorted(vars(mod).items()):
+            if name == "run" or not (inspect.isfunction(obj) or inspect.isclass(obj)):
+                continue
+            if getattr(obj, "__module__", None) != build.__module__:
+                continue
+            try:
+                h.update(inspect.getsource(obj).encode("utf-8"))
+            except (OSError, TypeError):
+                h.update(name.encode("utf-8"))
+    try:
+        h.update(inspect.getsource(build).encode("utf-8"))
+    except (OSError, TypeError):
+        pass
+    return h.hexdigest()[:8]
+
+
+def _load_kit():
+    """读**本 worktree** 的 kit 源码。
+
+    ⚠ 那个 venv 是 editable 装的，指向的是**它自己那个 worktree** 的 `planet_xq`（`.pth`
+    里的 meta-path finder 优先级高于 `sys.path`）——直接 `import planet_xq` 会读到别人家的
+    副本。所以这里按文件路径显式加载，保证「测的是本目录的这一份」。
+    """
+    local = REPO / "play" / "planet_xq" / "planet_xq" / "__init__.py"
+    if local.exists():
+        spec = importlib.util.spec_from_file_location(
+            "planet_xq", local, submodule_search_locations=[str(local.parent)]
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["planet_xq"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    import planet_xq  # 退路：装在哪就用哪
+
+    return planet_xq
+
+
+# 进程内只加载一次（组脚本 `from _harness import KIT` 就能拿到同一份）。
+KIT = _load_kit()
+
+
+# ── 断言记录（够用就行：一个组一份清单 + 非零退出码）────────────────────────
+
+
+class Checks:
+    def __init__(self, group: str):
+        self.group = group
+        self.rows: list[tuple[bool, str, str]] = []
+
+    def check(self, name: str, cond, detail: str = "") -> bool:
+        self.rows.append((bool(cond), name, detail))
+        return bool(cond)
+
+    def finish(self) -> int:
+        bad = [r for r in self.rows if not r[0]]
+        width = max((len(r[1]) for r in self.rows), default=0)
+        for ok, name, detail in self.rows:
+            print(f"  {'ok  ' if ok else 'FAIL'} {name.ljust(width)}  {detail}")
+        tail = f"，**{len(bad)} 条红**" if bad else ""
+        print(f"[{self.group}] {len(self.rows) - len(bad)}/{len(self.rows)} 通过{tail}")
+        return 1 if bad else 0
+
+
+def group_main(name: str, run, argv: list[str] | None = None) -> int:
+    """每个组统一的入口：`--bin/--refresh/--jobs` → `run(harness, checks)`。"""
+    ap = argparse.ArgumentParser(prog=f"play/tests/{name}.py", description=__doc__)
+    ap.add_argument("--bin", default=os.environ.get("PLANET_X_KIND", "release"),
+                    help="release（长局默认，跑得快）| debug（重编快）| 二进制路径")
+    ap.add_argument("--refresh", action="store_true", help="无视缓存，重跑投影")
+    ap.add_argument("-j", "--jobs", type=int, default=0, help="并行跑几个世界（默认 ~8）")
+    args = ap.parse_args(argv)
+    kind = args.bin if args.bin in ("release", "debug") else "release"
+    if args.bin not in ("release", "debug"):
+        os.environ["PLANET_X_BIN"] = args.bin
+    h = Harness(kind=kind, refresh=args.refresh, jobs=args.jobs)
+    ck = Checks(name)
+    print(f"[{name}] 二进制 {h.path}（{kind}）指纹 {h.fingerprint()}")
+    t0 = time.time()
+    try:
+        run(h, ck)
+    finally:
+        h.report()
+        print(f"[{name}] 用时 {time.time() - t0:.1f} s")
+    return ck.finish()

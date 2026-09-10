@@ -6,12 +6,37 @@
 //! diagnostic + regression guard. Run the diagnostic with:
 //!
 //! ```text
-//! cargo test --test longhorizon -- --nocapture
+//! cargo nextest run -P full --run-ignored all -E 'test(/diagnose_long_horizon/)' --no-capture
 //! ```
 //!
 //! The individual `#[test]`s are shrink-wrapped invariants; the
 //! `diagnose_long_horizon` test prints a human-readable health report so a
 //! maintainer can eyeball the trajectory.
+//!
+//! ## 那几条**长局不变量**已经搬到 Python 侧（`play/tests/g3_long.py`）
+//!
+//! 2026-10（用户裁决：*「测试应该和游戏二进制解耦，直接测跑出来的数据」*）：下面这五条
+//! 原来住在这里，现在住 `play/tests/g3_long.py` —— 它们断言的全是**读面上的数**，不需要
+//! crate 内部 API，而在这里每条的**世界**都要自己跑一遍（七条用例跑的是**完全相同**的
+//! `seed × 1000 回合`，同一批 2.8 万回合被重算了四遍，每次改一个字还要重编 8 个测试二进制）。
+//!
+//! | 原来住这里 | 现在住 |
+//! | --- | --- |
+//! | `no_nonfinite_over_long_run`（读面不许有非有限的数 + 不进吸收态 + 零活城复生） | `g3_long.py` 的前四条 |
+//! | `world_value_is_bounded` | `g3_long.py`「世界总价值 < 2e6」 |
+//! | `city_founding_requires_a_ship_there` | `g3_long.py`「建城必须有一艘在场的活舰」 |
+//! | `coalition_mechanism_is_alive` | `g3_long.py`「合纵连横/制裁真的成立过」 |
+//! | `test_power_statistic_matches_game_logic` | `g3_long.py`「霸权 = 占比最高者，且联盟/封锁自洽」 |
+//!
+//! 判据与阈值**一个没动**（`36` 回合复生上限、`2e6` 价值上限、`min_members`/`hegemon_power`
+//! 从 `meta.json` 读），种子还更宽（Python 侧 7 个种子跑全部不变量）。跑法：
+//!
+//! ```text
+//! uv run --project play/planet_xq python play/tests/run.py 3
+//! ```
+//!
+//! 留在这里的是**探针**（`#[ignore]`，只打印不断言）与 `world_is_multipolar`——它是待调的
+//! **平衡目标**，不是机制不变量。它们要用 crate 内部量（`sim::observe` 等），所以不搬。
 
 use planet_x::config::load_config;
 use planet_x::model::*;
@@ -231,151 +256,6 @@ fn diagnose_long_horizon() {
     }
 }
 
-/// The world must never panic and must never produce a non-finite number across
-/// a long, war-torn run (here on the default diplomacy curve which opens
-/// peacefully and escalates on its own).
-///
-/// **活体判据（机制层，不是平衡层）**：世界不能进入**吸收态**——既无活城**又**无舰。
-/// 那时既没有产出、也没有殖民的来源，游戏真的结束了。
-///
-/// 「零活城」本身**不是**终局（曾经把它当终局，是错的）：殖民只要「一艘活舰 + 一处空白
-/// 定居点」，**不需要产出**。实测（seed 42、1000 回合、MOND 概率化之后）：r611 全世界只剩
-/// 最后一座城（欧罗巴冰下港）被夷平 → **r612 立刻殖民复生** → r650 又长回 16 座城。
-/// 所以这里把「零活城」降级为**诊断 + 恢复断言**（必须在 [`CITILESS_RECOVERY`] 回合内重新
-/// 立城），只把「既无城又无舰」当机制违规。
-///
-/// 同理，这里**曾经**断言「舰不能全没了」。删掉 `step_resurgence`（D5）之后那条不再是机制
-/// 不变量：舰队被战争清空是**合法状态**，只要还有活城 + 造船区，舰队就能重造——实测 seed 42
-/// 在 r816 前后确实出现过「全世界零舰」，随后由城里的造船区重新长出舰队。
-#[test]
-fn no_nonfinite_over_long_run() {
-    let config = load_config();
-    let mut state = world::default_state(&config, 42);
-    let mut rng = Prng::new(42);
-    let horizon = 1000u32;
-    let mut nonfinite_round = None;
-    let mut shipless_rounds = 0u32;
-    let mut citiless_rounds = 0u32;
-    let mut dead_rounds = 0u32;
-    let mut citiless_since: Option<u32> = None;
-    let mut worst_recovery = 0u32;
-    for _ in 0..horizon {
-        sim::advance(&mut state, &config, &mut rng);
-        let (bad, samples) = count_nonfinite(&state, &config);
-        if bad > 0 {
-            nonfinite_round = Some((state.round, samples));
-            break;
-        }
-        let cities = state.cities.iter().filter(|c| !c.razed).count();
-        if state.ships.is_empty() {
-            shipless_rounds += 1;
-        }
-        if cities == 0 {
-            citiless_rounds += 1;
-            citiless_since.get_or_insert(state.round);
-            if state.ships.is_empty() {
-                dead_rounds += 1;
-            }
-        } else if let Some(from) = citiless_since.take() {
-            worst_recovery = worst_recovery.max(state.round - from);
-        }
-    }
-    if let Some(from) = citiless_since {
-        worst_recovery = worst_recovery.max(state.round - from);
-    }
-    println!(
-        "diagnostic: 零舰回合={shipless_rounds} 零活城回合={citiless_rounds} \
-         最长零城复生耗时={worst_recovery} 回合"
-    );
-    assert_eq!(
-        dead_rounds, 0,
-        "世界进入了吸收态（既无活城又无舰）——那才是真的结束了"
-    );
-    assert!(
-        worst_recovery <= CITILESS_RECOVERY,
-        "零活城的状态拖了 {worst_recovery} 回合才复生（上限 {CITILESS_RECOVERY}）——\
-         殖民只需要「活舰 + 空白定居点」，不该拖这么久"
-    );
-    let Some((round, samples)) = nonfinite_round else {
-        return;
-    };
-    panic!("non-finite numbers at round {}: {:?}", round, samples);
-}
-
-/// 「全世界没有活城」之后，允许拖多少回合才重新立城。殖民不依赖产出（只要舰 + 空白
-/// 定居点），所以这个上限给得宽——它防的是「殖民机制坏了」，不是「经济不好」。
-const CITILESS_RECOVERY: u32 = 36;
-
-/// Economic sanity: the total world market value should not balloon without
-/// bound — a stockpile that compounds forever is a broken economy, not a game.
-/// We assert the total value at a late horizon is within a sane multiple of its
-/// value at an early horizon (money is conserved-looking, not exponential).
-#[test]
-fn world_value_is_bounded() {
-    let config = load_config();
-    for seed in [1u64, 42] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        for _ in 0..1000 {
-            sim::advance(&mut state, &config, &mut rng);
-        }
-        let late = world_value(&state, &config);
-        // The value should be well-bounded — production is area/cap-limited so
-        // the milestones must settle, not soar. (The initial board has a few hundred
-        // value; runaways are the thing this guards.)
-        assert!(
-            late < 2_000_000.0,
-            "world value at seed {} round {} is {:.0} — unbounded economic runaway",
-            seed,
-            state.round,
-            late
-        );
-    }
-}
-
-/// **机制不变量：建城必须由一艘此刻在场的活舰解释**（没有凭空变城）。
-///
-/// `step_resurgence` 删除（D5）之后，**造一座新城**的路径只剩一条：殖民舰开到
-/// `arrival_eps` 之内 → `sim::colonize`（里面还有两条 debug 断言钉住同一条不变量）。
-/// 本守卫在**长局事件层**复核它：凡某回合出现 `ColonyFounded`，其 owner 在该回合结束时必须
-/// 仍有活舰——殖民舰**不被消耗**（只把行为重置为 `Idle`）。
-///
-/// **注意「建城」与「城易主」是两回事**：离心倒戈（`CityDefected`）把一座**已存在**的城交给
-/// 意识形态最对立者，**不需要舰**。所以一个「城舰两空」的势力仍可能靠**倒戈**复生——实测
-/// seed 1 里联合国/无国界科学组织就是这样反复回来的。那是合法机制（认同你的城民还在），
-/// **不是**凭空变城；这条守卫只钉「新城的诞生」。
-#[test]
-fn city_founding_requires_a_ship_there() {
-    let config = load_config();
-    let mut foundings = 0usize;
-    let mut violations: Vec<String> = Vec::new();
-    for seed in [1u64, 42] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        for _ in 0..1000 {
-            sim::advance(&mut state, &config, &mut rng);
-            for e in &state.events {
-                if let GameEvent::ColonyFounded { owner, city, .. } = e {
-                    foundings += 1;
-                    let ships = state
-                        .ships
-                        .iter()
-                        .filter(|s| &s.faction_id == owner && s.hull > 0.0)
-                        .count();
-                    if ships == 0 && violations.len() < 5 {
-                        violations.push(format!(
-                            "seed {seed} r{}: {owner} 造了 {city} 却一艘舰都没有",
-                            state.round
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    assert!(violations.is_empty(), "凭空变城：{violations:?}");
-    assert!(foundings > 0, "1000 回合里一次建城都没发生——这条守卫会空转");
-}
-
 /// 平衡观测（`--ignored`）：删掉 resurgence 之后，世界的**整合程度**——还剩几家有城、
 /// 几家亡国、最强的城占多少。这是**待调的平衡目标**（不是机制不变量），所以只记录不断言。
 ///
@@ -412,55 +292,6 @@ fn probe_world_health() {
         println!(
             "seed {seed}: 末态有城势力={alive}/{} 亡国峰值={max_dead} 城占峰值={max_top_share:.3}",
             state.factions.len()
-        );
-    }
-}
-
-/// **机制不变量：合纵连横是活的**——长局里反制联盟真的成立过（不是摆设），
-/// 霸权真的被针对过。这是**机制**是否生效，与「世界最后剩几家」无关。
-///
-/// ⚠ 「联盟成立过」取两种可读证据之**任一**（2026-10 修正，随风格/设计图两个 `Auto` 执行者
-/// 落地）：① `CoalitionFormed` **跃迁事件**；② 回合末的 `metrics.coalition_members` ≥
-/// `balance.min_members`（霸权 + 已达疏远阈值的成员）。
-/// 为什么事件不能单独当判据：它报的是**跃迁**，触发条件依赖两种次序的先后——若成员在霸权
-/// **出现之前**就已经疏远（初始关系 + 外交漂移很容易走到这一步），`coalition_before` 一上来
-/// 就是"已成立" ⇒ **永远不报事件**，而联盟事实上一直在那儿。也就是说"送不送这条事件"取决于与
-/// 机制无关的先后顺序，而这条守卫要问的是**机制是否活着**（联盟状态 + 制裁都真的出现过）。
-/// 事件本身的这个盲区记在 `control-live-layers.md` §15 的待办里（修正要给它加"按霸权存续"的记忆）。
-#[test]
-fn coalition_mechanism_is_alive() {
-    let config = load_config();
-    let min_members = config.balance.min_members;
-    for seed in [1u64, 42] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        let mut coalition_seen = false;
-        let mut sanction_seen = false;
-        for _ in 0..1000u32 {
-            sim::advance(&mut state, &config, &mut rng);
-            check_state(&state, &config);
-            if state
-                .events
-                .iter()
-                .any(|e| matches!(e, GameEvent::CoalitionFormed { .. }))
-            {
-                coalition_seen = true;
-            }
-            let m = sim::observe(&state, &config, &RoundSink::default());
-            if m.hegemon.is_some() && m.coalition_members.len() >= min_members {
-                coalition_seen = true;
-            }
-            if m.sanctioned.is_some() {
-                sanction_seen = true;
-            }
-        }
-        assert!(
-            coalition_seen,
-            "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）"
-        );
-        assert!(
-            sanction_seen,
-            "seed {seed}: 长局从未出现被封锁的霸权（经济制裁未生效）"
         );
     }
 }
@@ -629,38 +460,6 @@ fn probe_multipolar() {
             top_sum / top_count as f64,
             terminal_top
         );
-    }
-}
-
-/// 一致性守卫：测试的「谁最强」统计与游戏国际关系逻辑的「谁是霸权」统计必须**同源**。
-///
-/// `world_is_multipolar` 等测试用 [`top_power`]（读 `observe.power_share`，即
-/// `sim::faction_power` 归一化）判定最强势力——这与 `step_balance_of_power`/`sanction_cost_mult`
-/// 判定并针对的霸权**同一公式**。若两者再次分裂（例如测试又改回纯数城市、而游戏用城+舰队
-/// 加权），测试就会验收一个系统实际不针对的「霸权」。本守卫逐回合断言二者一致。
-#[test]
-fn test_power_statistic_matches_game_logic() {
-    let config = load_config();
-    for seed in [1u64, 42] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        for _ in 0..1000u32 {
-            sim::advance(&mut state, &config, &mut rng);
-            // 测试用的权威统计（observe → power_share）。
-            let (test_top, _) = top_power(&state, &config);
-            // 游戏国际关系逻辑真正读的权威统计：balance_picture → power_share（同一函数）。
-            let (_, _, powers) = sim::balance_picture(&state, &config);
-            let (game_top, _) = powers
-                .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(k, v)| (k.clone(), *v))
-                .unwrap_or((String::new(), 0.0));
-            assert_eq!(
-                test_top, game_top,
-                "seed {seed} r{}: 测试认为最强是 {test_top}，游戏逻辑却针对 {game_top} —— 统计分裂",
-                state.round
-            );
-        }
     }
 }
 

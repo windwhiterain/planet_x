@@ -95,22 +95,37 @@ __all__ = ["load", "PlanetXQ"]
 class PlanetXQ:
     """A loaded ``planet_x --index`` projection: the lean main stream + lazy tables."""
 
-    def __init__(self, dirpath: str):
+    def __init__(self, dirpath: str, only=None):
         self.dir = os.path.abspath(dirpath)
         with open(os.path.join(self.dir, "schema.json"), encoding="utf-8") as fh:
             self.schema = json.load(fh)
-        self.facts = pd.read_json(os.path.join(self.dir, self.schema["main_stream"]), lines=True)
+        # ⚠ **`precise_float=True` 是必须的，不是优化项**：pandas 默认走 `ujson` 的快速浮点
+        # 解析，对某些需要 16 位有效数字的值会落到**相邻的那个 double** 上（实测：
+        # `1.989510667009421` 会被读成 `1.9895106670094211`）。引擎那边为此专门开了
+        # serde_json 的 `float_roundtrip`（见 `Cargo.toml`），Python 侧再用一个不精确的
+        # 解析器，等于把那个坑从后门放回来——「读出来的数 ≠ 写出去的数」。
+        self.facts = pd.read_json(os.path.join(self.dir, self.schema["main_stream"]), lines=True,
+                                  precise_float=True)
+        # `only`：只装这几张表（`None` = 全装）。**为批量读设计**：一份 1000 回合的投影
+        # 有 ~170 MB，全装 ≈ 12 s（`round_inputs` / `control` / `blueprints` 就占一半多），
+        # 而多数问题只碰两三张表。没装的表照旧按名字报错，但错误信息会说清「是没装，不是没有」。
+        self._only = None if only is None else set(only)
         self._tables: dict[str, pd.DataFrame] = {}
         for name, cfg in self.schema.get("lazy", {}).items():
-            self._tables[name] = pd.read_json(os.path.join(self.dir, cfg["table"]), lines=True)
+            if self._only is not None and name not in self._only:
+                continue
+            self._tables[name] = pd.read_json(os.path.join(self.dir, cfg["table"]), lines=True,
+                                              precise_float=True)
         # **派生表**（`schema.derived`）：数据不在状态里、是引擎算出来的量（本回合流量中间量、
         # 控制面）。它们不像 lazy 表那样由 main 的某个 id 数组索引，而是用 `join_on` 指向
         # main 已有的列（`faction_ids`/`city_ids`）——所以它们单独一段，但读法与 lazy 表一样。
         # 旧版投影没有这一段（`.get(..., {})` ⇒ 空，方法会报出「该投影没有这张表」）。
         for name, cfg in self.schema.get("derived", {}).items():
+            if self._only is not None and name not in self._only:
+                continue
             path = os.path.join(self.dir, cfg["table"])
             if os.path.exists(path):
-                self._tables[name] = pd.read_json(path, lines=True)
+                self._tables[name] = pd.read_json(path, lines=True, precise_float=True)
         # Static rules dictionary (written by --index alongside schema.json); `None` if absent.
         self.meta: dict | None = None
         meta_path = os.path.join(self.dir, "meta.json")
@@ -121,6 +136,13 @@ class PlanetXQ:
     def table(self, name: str, round: int | None = None) -> pd.DataFrame:
         """A lazy table, optionally filtered to one round (for per-round tables)."""
         if name not in self._tables:
+            if self._only is not None and name in self._only:
+                raise KeyError(f"'{name}' 不在这个投影里（schema 里有、文件不在）")
+            if self._only is not None:
+                raise KeyError(
+                    f"'{name}' 这次没装（load(..., only={sorted(self._only)}）——"
+                    f"要它就在 only 里加上，别以为投影里没有"
+                )
             raise KeyError(f"'{name}' is not a lazy table (have: {list(self._tables)})")
         df = self._tables[name]
         if round is not None and "round" in df.columns:
@@ -1305,8 +1327,10 @@ class PlanetXQ:
         return self.window_avg(path, 120, agg)
 
 
-def load(dirpath: str) -> PlanetXQ:
-    return PlanetXQ(dirpath)
+def load(dirpath: str, only=None) -> PlanetXQ:
+    """装一份投影。`only`（可选）= 只装这几张表的名字（批处理长投影时省时间；
+    没装的表访问会明确报「这次没装」）。"""
+    return PlanetXQ(dirpath, only=only)
 
 
 def main(argv: list[str] | None = None) -> int:
