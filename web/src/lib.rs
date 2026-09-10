@@ -30,7 +30,6 @@ use planet_x::prng::Prng;
 use planet_x::sim;
 use planet_x::world;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeDir;
 
@@ -61,39 +60,6 @@ pub type Shared = Arc<Mutex<GameWorld>>;
 
 // --- wire types -------------------------------------------------------------
 
-#[derive(Serialize)]
-pub struct MetaView {
-    pub resources: BTreeMap<String, ResourceDef>,
-    pub structures: BTreeMap<String, StructureSpec>,
-    pub buildings: BTreeMap<String, BuildingMeta>,
-    pub ships: BTreeMap<String, ShipSpec>,
-    /// 天体/行星**类型**表（`BodyKindSpec`）：`state` 天体只带 `kind` key，前端据本表
-    /// 解析出颜色/尺寸/类别/星环/着色器分支等视觉属性。
-    pub body_kinds: BTreeMap<String, BodyKindSpec>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct BuildingMeta {
-    pub label: String,
-    pub role: String,
-    pub default_invest_weight: f64,
-    pub default_build_weight: f64,
-}
-
-/// One faction as the frontend needs it.
-#[derive(Serialize, Clone)]
-pub struct FactionView {
-    pub id: FactionId,
-    pub name: String,
-    pub color: String,
-    pub resources: Vec<(String, f64)>,
-    pub relations: Vec<(FactionId, f64)>,
-    pub investment_budget: Vec<(String, f64)>,
-    pub construction_budget: Vec<(String, f64)>,
-    /// 有效首都天体（迁都唯一事实来源 [`State::capital_body`] 解析）。
-    pub capital_body: BodyId,
-}
-
 /// 通用只读信息树的**一个根**：一个名字 + 一份任意 JSON。
 ///
 /// 前端用**同一个** schema-agnostic widget 渲染任意根——widget 不认识 `State` /
@@ -101,8 +67,7 @@ pub struct FactionView {
 /// 因此模型加字段/改结构，前端**一个字符都不用改**：树自动变。
 ///
 /// 每个根的值都是 `serde_json::to_value` 出来的**模型本体**，没有任何手工投影
-/// （手工投影才会漂移）——`StateView` 里那些「拍平给地图用」的字段是另一回事，
-/// 这里不做那件事。
+/// （手工投影才会漂移）。
 #[derive(Serialize, Clone)]
 pub struct InfoRoot {
     /// 根名（前端据此显示 tab）。
@@ -111,25 +76,27 @@ pub struct InfoRoot {
     pub value: serde_json::Value,
 }
 
+/// 一次 `/api/state` 的响应：**读面 + 写面**。
+///
+/// 这里刻意**只有**两样东西，没有第三种：
+///
+/// * **写面**（[`Self::control`] / [`Self::scope`]）——命令面的读面模板。它必须是
+///   **语义化**的（`Control<T>` 展开成 `{value, mode}`、`(城, 建筑)` 元组键展开成
+///   `{city, building, kind, …}` 字段），因为 agent/玩家要在这上面写 presence-aware
+///   的 diff（见 `planet_x::control`）。这不是「投影」，是**另一种数据结构**，保留。
+/// * **读面**（[`Self::info`]）——模型的整份 dump。**没有**任何「给前端的拍平视图」：
+///   以前那些 `bodies`/`cities`/`ships`/`FactionView`/`MetaView` 字段全是手工挑选的
+///   投影（会漂移、会漏字段、加字段要改两处），现在前端直接从 `state` / `config` 根取
+///   ——要什么自己从模型里拿，模型加字段前端自动看到。
 #[derive(Serialize, Clone)]
 pub struct StateView {
-    pub round: u32,
-    pub time_month: f64,
-    pub bodies: Vec<Body>,
-    pub cities: Vec<City>,
-    pub factions: Vec<FactionView>,
-    pub ships: Vec<Ship>,
+    /// 可控 state（写面的读模板）：各势力的舰指令/预算/权重/迁都。
     pub control: Vec<FactionControlView>,
+    /// 控制作用域树（写面的读模板）：谁 AI、谁玩家。
     pub scope: ScopeView,
-    /// 本回合事件流水（who attacked / ships lost / razed cities / wars / story beats …）。
-    #[serde(default)]
-    pub events: Vec<GameEvent>,
-    /// 剧情编年史：整段已展开的叙事弧。
-    #[serde(default)]
-    pub chronicle: Vec<ChronicleEntry>,
     /// 全量只读信息树：每个根都是模型的**整份** JSON dump（见 [`InfoRoot`]）。
-    /// 前端的「状态」面板用通用 widget 渲染它，因此普通 state（天体/城/势力/舰/
-    /// 事件/编年史…）以及派生量与全部配置表都在这里，且**加字段即自动出现**。
+    /// 读面（地图/状态面板/选中详情）全部从这里取，因此普通 state（天体/定居点/城/
+    /// 建筑/势力/舰/事件/编年史…）、派生量与全部配置表都在，且**加字段即自动出现**。
     #[serde(default)]
     pub info: Vec<InfoRoot>,
 }
@@ -186,74 +153,19 @@ fn info_roots(world: &GameWorld) -> Vec<InfoRoot> {
     ]
 }
 
-fn faction_view(state: &State, f: &Faction) -> FactionView {
-    FactionView {
-        // Faction identity is its unique name; `id` carries that name now.
-        id: f.name.clone(),
-        name: f.name.clone(),
-        color: f.color.clone(),
-        resources: f.resources.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        relations: f.relations.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        investment_budget: Vec::new(),
-        construction_budget: Vec::new(),
-        capital_body: state.capital_body(&f.name),
-    }
-}
-
+/// 组装一次响应：写面（control/scope 的读模板）+ 读面（整份模型 dump）。
+///
+/// `state_view` 现在**只剩**这两件事——以前那些 `bodies`/`cities`/`ships`/`factions`
+/// 拍平字段（以及 `/api/meta` 那份 BuildingMeta 改名表）都是「前端要什么就在后端拼一份」
+/// 的手工投影：会漏字段、会与模型漂移、模型加字段要改两处。现在前端要什么就从
+/// `info` 的 `state`/`config` 根里取。
 pub fn state_view(world: &GameWorld) -> StateView {
     let s = &world.state;
-    let mut factions: Vec<FactionView> = s.factions.iter().map(|f| faction_view(s, f)).collect();
-    // Attach the (effective) budgets to each faction view for display.
-    for f in factions.iter_mut() {
-        if let Some(c) = s.control.get(&f.id) {
-            f.investment_budget = c.investment_budget.iter().map(|(rt, ctrl)| (rt.clone(), ctrl.value)).collect();
-            f.construction_budget = c.construction_budget.iter().map(|(rt, ctrl)| (rt.clone(), ctrl.value)).collect();
-        }
-    }
     let control = s.control.iter().map(|(fid, c)| control_view(s, fid.clone(), c)).collect();
-    StateView {
-        round: s.round,
-        time_month: s.time_month,
-        bodies: s.bodies.clone(),
-        cities: s.cities.clone(),
-        factions,
-        ships: s.ships.clone(),
-        control,
-        scope: scope_view(&s.scope),
-        events: s.events.clone(),
-        chronicle: s.chronicle.clone(),
-        info: info_roots(world),
-    }
+    StateView { control, scope: scope_view(&s.scope), info: info_roots(world) }
 }
 
 // --- handlers ---------------------------------------------------------------
-
-async fn get_meta(AxState(shared): AxState<Shared>) -> Json<MetaView> {
-    let world = shared.lock().unwrap();
-    let buildings = world
-        .config
-        .buildings
-        .iter()
-        .map(|(k, spec)| {
-            (
-                k.clone(),
-                BuildingMeta {
-                    label: spec.label.clone(),
-                    role: spec.role.clone(),
-                    default_invest_weight: spec.default_invest_weight,
-                    default_build_weight: spec.default_build_weight,
-                },
-            )
-        })
-        .collect();
-    Json(MetaView {
-        resources: world.config.resources.clone(),
-        structures: world.config.structures.clone(),
-        buildings,
-        ships: world.config.ships.clone(),
-        body_kinds: world.config.body_kinds.clone(),
-    })
-}
 
 async fn get_state(AxState(shared): AxState<Shared>) -> Json<StateView> {
     let world = shared.lock().unwrap();
@@ -297,7 +209,6 @@ pub fn router(shared: Shared) -> Router {
     let static_dir = std::env::var("PLANET_X_WEB_STATIC")
         .unwrap_or_else(|_| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
     Router::new()
-        .route("/api/meta", get(get_meta))
         .route("/api/state", get(get_state))
         .route("/api/advance", post(advance))
         .route("/api/command", post(command))
@@ -379,6 +290,10 @@ mod tests {
         let json = serde_json::to_value(&view).expect("StateView serializes");
         assert_eq!(json["info"][0]["value"]["round"].as_u64().unwrap(), 5);
         assert!(json["info"][0]["value"]["events"].is_array());
+        // 读面**不许**再有手工投影字段：响应的顶层只有写面（control/scope）与整份树。
+        // 这条测试是「想再塞一个给前端用的拍平字段」时的守门人——要读什么，从树里取。
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["control", "info", "scope"], "StateView must stay control+scope+info");
         let post = &json["info"][2]["value"];
         assert!(!post["flow"]["faction_production"].as_object().unwrap().is_empty(), "the round flow must be real, not empty");
         assert!(!post["flow"]["upkeep"].as_object().unwrap().is_empty());

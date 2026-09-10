@@ -48,11 +48,16 @@
     <button id="applyBtn" class="primary">✓ 应用到服务器</button>
   </aside>
 
-  <!-- 底部边缘 bar：选中读面 + 回合 diff（默认收起） -->
-  <button id="toggleDiff" class="edge-toggle bottom" title="展开/收起状态" data-closed-arrow="▲" data-open-arrow="▼">▲</button>
+  <!-- 底部边缘 bar：**选中对象读面**（generic widget）+ 回合 diff（默认收起）。
+       在地图上点天体/城/舰、或在左侧控制树里点势力，这里显示**该对象的整份记录**，
+       同样由 jsonview.js 渲染——所以「舰面板/势力一览」不再需要一行读字段的代码。 -->
+  <button id="toggleDiff" class="edge-toggle bottom" title="展开/收起选中读面" data-closed-arrow="▲" data-open-arrow="▼">▲</button>
   <footer id="diffBar" class="edge-panel bottom">
-    <div id="readout"></div>
-    <div id="diffText"></div>
+    <div class="sel-bar">
+      <span id="selHead"></span>
+      <span id="diffText"></span>
+    </div>
+    <div id="readout" class="jv-scroll"></div>
   </footer>
 
   <!-- 右侧边缘 bar：**普通 state 全量信息**（只读，默认收起）。

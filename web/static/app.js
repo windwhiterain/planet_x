@@ -12,17 +12,19 @@
 //     schema-agnostic widget 渲染：本文件不写任何字段名，只决定「渲染哪个根」，
 //     所以 State/GameConfig/Derived 怎么改都不用动前端。
 
-let world = null;      // 当前 StateView（/api/state）
-let meta = null;       // MetaView（/api/meta）
-let selFaction = 0;    // 选中势力 id（读面/聚焦）
-let selShip = null;    // 选中舰名（读面）
+let world = null;      // 当前 StateView（/api/state）= { control, scope, info }
+let st = null;         // info 的 `state` 根：规范世界的**原始** State（天体/定居点/城/势力/舰/…）
+let cfg = null;        // info 的 `config` 根：game.ron 的全部调参表（资源/结构/建筑/舰/天体类型/剧情…）
+let selFaction = '';   // 选中势力（读面/聚焦）
+let sel = null;        // 选中对象 { kind, name }——底部读面用通用 widget 渲染它的完整记录
 let edControl = [];    // 所有势力的可编辑控制（FactionControlView[]）
 let edScope = null;    // 可编辑作用域
 let prevState = null;  // 上一帧，用于 diff 页脚
 let selTab = new Map(); // parentKey -> 激活子 key（每层只开一个 tab）
-let infoRoot = 0;      // 右侧面板当前显示的根（world.info 的下标）
+let infoTab = 0;       // 右侧面板当前显示的根（world.info 的下标）
 let infoFilter = '';   // 右侧面板的过滤串
 const infoExpanded = new Set(); // 右侧面板的展开状态（路径集合，跨渲染保留）
+const selExpanded = new Set();  // 底部读面的展开状态
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const el = (tag, attrs, html) => {
@@ -45,9 +47,9 @@ async function postJSON(url, body) {
   return r.json();
 }
 
-// 势力显示色来自后端（/api/state -> faction.color，CSS hex）。未知回落灰。
+// 势力显示色来自 state 根的原始 Faction（唯一键 = name）。未知回落灰。
 function facColor(fid) {
-  const f = world.factions.find((x) => x.id === fid);
+  const f = (st.factions || []).find((x) => x.name === fid);
   return (f && f.color) || '#8f9bb3';
 }
 
@@ -131,11 +133,25 @@ function scopeAccess(node) {
 }
 
 // --- 状态加载 / 选择 --------------------------------------------------------
+// 服务器只给两样东西：写面（control/scope 的可编辑模板）与读面（info：模型的整份 dump）。
+// 这里把 info 的根绑成 `st`（规范世界）与 `cfg`（配置表）——**读面的一切都从这两个根取**，
+// 后端不再有「给前端拍平一份」的字段，所以模型加字段前端自动就能读到。
+function infoValueOf(w, name) {
+  const r = ((w && w.info) || []).find((x) => x.name === name);
+  return (r && r.value) || {};
+}
+function stateOf(w) { return infoValueOf(w, 'state'); }
+function bindWorld(w) {
+  world = w;
+  st = stateOf(w);
+  cfg = infoValueOf(w, 'config');
+}
+
 async function init() {
-  meta = await fetchJSON('/api/meta');
-  prevState = await fetchJSON('/api/state');
-  world = await fetchJSON('/api/state');
-  selFaction = world.factions.length ? world.factions[0].id : 0;
+  bindWorld(await fetchJSON('/api/state'));
+  prevState = world;
+  selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
+  sel = selFaction ? { kind: 'faction', name: selFaction } : null;
   initMap();
   buildEdits();
   renderAll();
@@ -156,11 +172,13 @@ function buildEdits() {
 }
 
 function setFaction(fid) {
-  if (fid === selFaction) return;
+  sel = { kind: 'faction', name: fid };
+  openBottomBar();
+  if (fid === selFaction) { renderSelection(); return; }
   selFaction = fid;
   selTab.set('g', 'f' + fid);
   renderTree();
-  renderReadout();
+  renderSelection();
 }
 
 function getControl(fid) {
@@ -182,10 +200,11 @@ function setScopeVal(list, id, val) {
   else list.push([id, val]);
 }
 
-function resName(r) { return meta.resources[r] ? meta.resources[r].name : r; }
-function structName(s) { return meta.structures[s] ? meta.structures[s].name : s; }
-function kindName(k) { return meta.buildings[k] ? meta.buildings[k].label : k; }
-function shipClassName(c) { return meta.ships[c] ? meta.ships[c].label : c; }
+// 显示名一律从 **config 根**取（以前是 /api/meta——那份 View 与 config 完全同构，纯冗余）。
+function resName(r) { return cfg.resources && cfg.resources[r] ? cfg.resources[r].name : r; }
+function structName(s) { return cfg.structures && cfg.structures[s] ? cfg.structures[s].name : s; }
+function kindName(k) { return cfg.buildings && cfg.buildings[k] ? cfg.buildings[k].label : k; }
+function shipClassName(c) { return cfg.ships && cfg.ships[c] ? cfg.ships[c].label : c; }
 
 function investLeaf(fc, city, bid) {
   return (fc.invest_weights || []).find((e) => e.city === city && e.building === bid);
@@ -206,50 +225,113 @@ function buildingLabel(b) {
 function renderAll() {
   renderMap();
   renderTree();
-  renderReadout();
+  renderSelection();
   renderDiff();
   renderInfo();
 }
 
 function updateTop() {
-  $('#metaRound').textContent = '回合 ' + world.round + ' · ' + world.time_month + ' 个月';
+  $('#metaRound').textContent = '回合 ' + st.round + ' · ' + st.time_month + ' 个月';
 }
 
-// 地图：把当前 world 交给 three.js 场景（map3d.js）。同时把 config 的天体类型表
-// (/api/meta -> body_kinds) 一并交给地图，供它按 body.kind 解析视觉（颜色/尺寸/shader）。
+// 地图：把**从 state 根适配出来**的世界交给 three.js 场景（map3d.js），并把 config 的天体
+// 类型表（body_kinds）一并给它，供它按 body.kind 解析视觉（颜色/尺寸/着色器分支）。
+//
+// map3d 的接口是既定的 `{bodies, cities, ships, factions}`，其中势力按 `id` 查颜色；原始
+// `Faction` 的唯一键是 `name`（`id` 已废弃）。所以这里只补一个 `id` **别名**，其余字段原样
+// 透传（`Object.assign` 保留 relations/resources/ideology…，地图将来要用就有）。
+function mapWorld() {
+  return Object.assign({}, st, {
+    factions: (st.factions || []).map((f) => Object.assign({}, f, { id: f.name })),
+  });
+}
 function renderMap() {
-  if (window.PlanetXMap && window.PlanetXMap.setWorld) window.PlanetXMap.setWorld(world, meta && meta.body_kinds);
+  if (window.PlanetXMap && window.PlanetXMap.setWorld) window.PlanetXMap.setWorld(mapWorld(), cfg.body_kinds);
 }
 
-// 地图点击回调，更新读面 + 选中舰。
-function mapSelect(sel) {
-  const readout = $('#readout');
-  if (sel.kind === 'body') {
-    selShip = null;
-    readout.textContent = '天体 ' + sel.name;
-  } else if (sel.kind === 'city') {
-    selShip = null;
-    readout.textContent = '城市 ' + sel.name;
-  } else if (sel.kind === 'ship') {
-    selShip = sel.name;
-    const s = world.ships.find((x) => x.name === sel.name);
-    const fc = (world.control || []).find((x) => x.faction_id === (s && s.faction_id));
-    const order = fc ? (fc.ship_orders || []).find((o) => o.ship === sel.name) : null;
-    const fname = (world.factions.find((x) => x.id === (s && s.faction_id)) || {}).name;
-    readout.textContent = s.name + ' [' + (fname || '') + '] ' + behaviorSummary(order ? order.behavior : null, world);
+// 地图点击 → 选中该对象（底部读面用通用 widget 渲染它的完整记录）。
+function mapSelect(s) {
+  selectEntity(s.kind, s.name);
+}
+
+// --- 选中读面（generic widget）---------------------------------------------
+// 「选中某个对象」= 在 state 根里按名字定位它，然后把**它的整份记录**交给同一个
+// schema-agnostic widget 渲染。所以读面里没有一行「读某个字段」的代码：舰的 hull/
+// shield/components/doctrine/attack_hist、势力的 resources/relations/ideology…
+// 全部自动出现，模型加字段这里不用改。
+//
+// 定位规则是通用的：在 state 根的顶层**数组**里找 `name` 相等的元素。`KIND_ARRAY` 只是
+// 一个「这类对象通常住在哪个数组」的最小提示（地图点击给的是 kind），找不到就扫全部数组。
+const KIND_ARRAY = { faction: 'factions', ship: 'ships', body: 'bodies', city: 'cities' };
+const KIND_LABEL = { faction: '势力', ship: '舰', body: '天体', city: '城' };
+
+function findEntity(kind, name) {
+  const keys = Object.keys(st).filter((k) => Array.isArray(st[k]));
+  const prefer = KIND_ARRAY[kind];
+  const order = prefer && keys.includes(prefer) ? [prefer].concat(keys.filter((k) => k !== prefer)) : keys;
+  for (const k of order) {
+    const i = st[k].findIndex((e) => e && typeof e === 'object' && e.name === name);
+    if (i >= 0) return { path: 'state.' + k + '[' + i + ']', value: st[k][i] };
   }
+  return null;
+}
+
+function selectEntity(kind, name) {
+  sel = { kind, name };
+  openBottomBar(); // 用户点了东西 → 把读面亮出来，否则「点了没反应」
+  if (kind === 'faction') { setFaction(name); return; }
+  renderSelection();
+}
+
+// 展开底部读面（与边缘 bar 的收起/展开共用同一套类名与箭头）。
+function openBottomBar() {
+  const panel = $('#diffBar');
+  const btn = $('#toggleDiff');
+  if (!panel || panel.classList.contains('open')) return;
+  panel.classList.add('open');
+  if (btn) btn.textContent = btn.dataset.openArrow;
+}
+
+function renderSelection() {
+  const head = $('#selHead');
+  const box = $('#readout');
+  if (!head || !box) return;
+  head.textContent = '';
+  if (!sel) {
+    box.textContent = '（在地图上点天体/城/舰，或点左侧控制树里的势力，这里会显示它的完整记录）';
+    return;
+  }
+  const found = findEntity(sel.kind, sel.name);
+  if (!found) {
+    head.textContent = (KIND_LABEL[sel.kind] || sel.kind) + ' ' + sel.name + '（当前世界里已不存在）';
+    box.textContent = '';
+    return;
+  }
+  const label = el('span', 'sel-kind', KIND_LABEL[sel.kind] || sel.kind);
+  const nameEl = el('span', 'sel-name clickable', sel.name);
+  nameEl.title = '点击复制 JSON 路径';
+  nameEl.addEventListener('click', () => copyPath(found.path));
+  head.append(label, nameEl, el('span', 'sel-path', found.path));
+  window.JsonView.render(box, found.value, {
+    rootPath: found.path,
+    expandDepth: 1,
+    state: { expanded: selExpanded },
+    onPathClick: copyPath,
+  });
 }
 
 // --- 层级树（控制 + 作用域）-----------------------------------------------
+// 树本身是**写面**（控制作用域链上的可编辑叶子），所以它按语义搭结构；但「世界里有什么
+// 实体」一律从 `st`（原始 State）读，不再依赖后端的拍平视图。
 function buildTree() {
   const root = { key: 'g', kind: 'global', name: '全局', children: [] };
-  world.factions.forEach((f) => {
-    const fid = f.id;
+  st.factions.forEach((f) => {
+    const fid = f.name;
     const fc = getControl(fid);
     const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: f.color, fid, children: [] };
 
     const shipLeaves = (fc.ship_orders || []).map((ord) => {
-      const s = world.ships.find((x) => x.name === ord.ship);
+      const s = st.ships.find((x) => x.name === ord.ship);
       return { key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid };
     });
 
@@ -264,11 +346,11 @@ function buildTree() {
     if (conLeaves.length) budgetKids.push({ key: 'gc' + fid, kind: 'group', name: '建造预算', fid, children: conLeaves });
 
     const bodyNodes = [];
-    world.cities.filter((c) => c.faction_id === fid).forEach((ci) => {
+    st.cities.filter((c) => c.faction_id === fid).forEach((ci) => {
       const bid = ci.body_id;
       let bn = bodyNodes.find((n) => n.id === bid);
       if (!bn) {
-        const b = world.bodies.find((x) => x.name === bid);
+        const b = st.bodies.find((x) => x.name === bid);
         bn = { key: 'b' + fid + '-' + bid, kind: 'body', id: bid, name: (b ? b.name : '天体#' + bid), children: [], fid };
         bodyNodes.push(bn);
       }
@@ -308,7 +390,7 @@ function renderNode(node) {
 
   const lbl = el('span', { class: 'tnode-label' });
   let labelText = node.name;
-  if (spec.decorateLabel) labelText += spec.decorateLabel(node, world);
+  if (spec.decorateLabel) labelText += spec.decorateLabel(node, st);
   lbl.textContent = labelText;
   if (node.color) lbl.style.color = node.color;
   if (spec.selectFaction) {
@@ -340,9 +422,10 @@ function renderNode(node) {
         tab.textContent = ch.name;
         tab.addEventListener('click', () => {
           selTab.set(node.key, ch.key);
-          if ((KIND[ch.kind] || {}).selectFaction) selFaction = ch.id;
+          // 势力 tab 是「选中这个势力」——走统一的选中入口（会亮出底部读面）。
+          if ((KIND[ch.kind] || {}).selectFaction) { selectEntity('faction', ch.id); return; }
           renderTree();
-          renderReadout();
+          renderSelection();
         });
         tabs.appendChild(tab);
       });
@@ -398,7 +481,7 @@ function shipEditor(leaf) {
 
   const bodySel = () => {
     const s = el('select');
-    world.bodies.filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
+    st.bodies.filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
       const o = el('option', { value: bd.name }); o.textContent = bd.name; o.selected = d.body === bd.name; s.appendChild(o);
     });
     s.addEventListener('change', () => { d.body = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
@@ -406,7 +489,7 @@ function shipEditor(leaf) {
   };
   const citySel = () => {
     const s = el('select');
-    world.cities.forEach((c) => {
+    st.cities.forEach((c) => {
       const o = el('option', { value: c.name }); o.textContent = c.name; o.selected = d.city === c.name; s.appendChild(o);
     });
     s.addEventListener('change', () => { d.city = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
@@ -414,7 +497,7 @@ function shipEditor(leaf) {
   };
   const shipSel = () => {
     const s = el('select');
-    world.ships.forEach((sh) => {
+    st.ships.forEach((sh) => {
       const o = el('option', { value: sh.name }); o.textContent = sh.name; o.selected = d.ship === sh.name; s.appendChild(o);
     });
     s.addEventListener('change', () => { d.ship = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
@@ -461,7 +544,7 @@ function optSelect(metaMap, keys, value, onChange) {
   keys.forEach((k) => {
     const o = el('option', { value: k });
     const m = metaMap[k];
-    o.textContent = m ? (m.name || m.label || k) : k;
+    o.textContent = m ? (m.name || m.label || k) : k; // 显示名优先 name，其次 label（与配置表同构）
     o.selected = k === value;
     s.appendChild(o);
   });
@@ -488,15 +571,15 @@ function buildingEditor(node) {
   const fid = node.fid;
   const cityId = node.cityId;
 
-  wrap.appendChild(labelWrap('结构', optSelect(meta.structures, Object.keys(meta.structures || {}), b.structure, (v) => {
+  wrap.appendChild(labelWrap('结构', optSelect(cfg.structures, Object.keys(cfg.structures || {}), b.structure, (v) => {
     b.structure = v;
     pushModify(fid, cityId, b.id, { structure: v });
     renderTree();
   })));
 
-  const spec = meta.buildings[b.kind];
+  const spec = cfg.buildings[b.kind];
   if (spec && spec.role === 'shipyard') {
-    wrap.appendChild(labelWrap('舰型', optSelect(meta.ships, Object.keys(meta.ships || {}), b.ship_type, (v) => {
+    wrap.appendChild(labelWrap('舰型', optSelect(cfg.ships, Object.keys(cfg.ships || {}), b.ship_type, (v) => {
       b.ship_type = v;
       pushModify(fid, cityId, b.id, { ship_type: v });
       renderTree();
@@ -520,11 +603,11 @@ function addBuildingButton(node) {
   const wrap = el('div', { class: 'add-bld' });
   wrap.appendChild(el('span', { class: 'tnode-label', style: 'font-weight:600' }, '+ 新建'));
 
-  const buildKeys = Object.keys(meta.buildings || {});
-  const kindSel = optSelect(meta.buildings, buildKeys, 'mining', () => {});
-  const structSel = optSelect(meta.structures, Object.keys(meta.structures || {}), 'concrete', () => {});
-  const shipSel = optSelect(meta.ships, Object.keys(meta.ships || {}), (Object.keys(meta.ships || {})[0] || 'corvette'), () => {});
-  const resSel = optSelect(meta.resources, Object.keys(meta.resources || {}), (Object.keys(meta.resources || {})[0] || 'iron'), () => {});
+  const buildKeys = Object.keys(cfg.buildings || {});
+  const kindSel = optSelect(cfg.buildings, buildKeys, 'mining', () => {});
+  const structSel = optSelect(cfg.structures, Object.keys(cfg.structures || {}), 'concrete', () => {});
+  const shipSel = optSelect(cfg.ships, Object.keys(cfg.ships || {}), (Object.keys(cfg.ships || {})[0] || 'corvette'), () => {});
+  const resSel = optSelect(cfg.resources, Object.keys(cfg.resources || {}), (Object.keys(cfg.resources || {})[0] || 'iron'), () => {});
   const areaInp = el('input', { type: 'number', class: 'num', value: '4', step: '1' });
 
   wrap.appendChild(kindSel);
@@ -561,14 +644,14 @@ function renderInfo() {
     body.textContent = '（服务器没有返回信息树）';
     return;
   }
-  if (infoRoot >= roots.length) infoRoot = 0;
+  if (infoTab >= roots.length) infoTab = 0;
   roots.forEach((r, i) => {
-    const t = el('span', { class: 'tnode-tab' + (i === infoRoot ? ' sel' : '') });
+    const t = el('span', { class: 'tnode-tab' + (i === infoTab ? ' sel' : '') });
     t.textContent = r.name;
-    t.addEventListener('click', () => { infoRoot = i; renderInfo(); });
+    t.addEventListener('click', () => { infoTab = i; renderInfo(); });
     tabs.appendChild(t);
   });
-  const root = roots[infoRoot];
+  const root = roots[infoTab];
   window.JsonView.render(body, root.value, {
     rootPath: root.name,
     expandDepth: 1,
@@ -587,7 +670,7 @@ function copyPath(path) {
 
 // 展开/收起**当前根**的全部可折叠节点（路径由 widget 自己枚举，结构无关）。
 function setAllOpen(open) {
-  const root = ((world && world.info) || [])[infoRoot];
+  const root = ((world && world.info) || [])[infoTab];
   if (!root) return;
   window.JsonView.expandablePaths(root.value, root.name)
     .forEach((p) => window.JsonView.setOpen(infoExpanded, p, open));
@@ -601,23 +684,22 @@ function onInfoFilter(v) {
   infoFilterTimer = setTimeout(renderInfo, 120); // 大树上防抖
 }
 
-// --- 读面 / diff ------------------------------------------------------------
-function renderReadout() {
-  const f = world.factions.find((x) => x.id === selFaction);
-  if (f) {
-    const res = f.resources.filter(([, v]) => v >= 0.05).map(([k, v]) => (meta.resources[k]?.name || k) + ' ' + (+v).toFixed(1)).join('  ');
-    $('#readout').textContent = '[ ' + f.name + ' ] ' + (res || '无资源') + '  交战: ' +
-      f.relations.filter(([, v]) => v <= -20).map(([id]) => world.factions.find((x) => x.id === id)?.name).filter(Boolean).join('、') || '无';
-  }
-}
-
+// --- 回合 diff --------------------------------------------------------------
+// 以前这里也负责「读面」（手写一行「势力：资源… 交战…」）。现在读面是选中对象的通用
+// widget 渲染（见 renderSelection），这里只留回合间的**计数对比**——它比的是两帧的
+// state 根，仍然是结构无关的（数数组长度）。
 function renderDiff() {
   const box = $('#diffText');
   if (!box) return;
   if (!prevState) { box.textContent = ''; return; }
-  box.textContent = '上回合: ' + prevState.round + ' → ' + world.round +
-    '  舰 ' + prevState.ships.length + '→' + world.ships.length +
-    '  城 ' + prevState.cities.length + '→' + world.cities.length;
+  const a = stateOf(prevState);
+  const counts = (s) => Object.keys(s).filter((k) => Array.isArray(s[k])).map((k) => k + ' ' + s[k].length);
+  const prev = Object.fromEntries(counts(a).map((x) => x.split(' ')));
+  const now = Object.fromEntries(counts(st).map((x) => x.split(' ')));
+  const parts = Object.keys(now)
+    .filter((k) => prev[k] !== undefined && prev[k] !== now[k])
+    .map((k) => k + ' ' + prev[k] + '→' + now[k]);
+  box.textContent = '上回合: ' + a.round + ' → ' + st.round + (parts.length ? '  ' + parts.join('  ') : '  （数组计数无变化）');
 }
 
 // --- 边缘 bar 展开/收起 ----------------------------------------------------
@@ -635,7 +717,7 @@ function toggleBar(btnId, panelId) {
 // --- 动作 ------------------------------------------------------------------
 async function advance(n) {
   prevState = world;
-  world = await postJSON('/api/advance', { n });
+  bindWorld(await postJSON('/api/advance', { n }));
   buildEdits();
   renderAll();
   updateTop();
@@ -643,7 +725,7 @@ async function advance(n) {
 }
 
 async function applyControl() {
-  world = await postJSON('/api/command', { control: edControl, scope: edScope });
+  bindWorld(await postJSON('/api/command', { control: edControl, scope: edScope }));
   buildEdits();
   renderAll();
   $('#status').textContent = '已应用到服务器';
@@ -652,12 +734,14 @@ async function applyControl() {
 async function newGame() {
   const seed = $('#seedInput').value || 'random';
   prevState = null;
-  world = await postJSON('/api/new', { seed });
-  selFaction = world.factions.length ? world.factions[0].id : 0;
+  bindWorld(await postJSON('/api/new', { seed }));
+  selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
+  sel = selFaction ? { kind: 'faction', name: selFaction } : null;
   selTab = new Map();
-  infoRoot = 0;
+  infoTab = 0;
   infoExpanded.clear(); // 新世界 → 展开状态重来
-  if (window.PlanetXMap && window.PlanetXMap.resetView) window.PlanetXMap.resetView(world);
+  selExpanded.clear();
+  if (window.PlanetXMap && window.PlanetXMap.resetView) window.PlanetXMap.resetView(mapWorld());
   buildEdits();
   renderAll();
   updateTop();

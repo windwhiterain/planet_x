@@ -891,12 +891,30 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   照常展开）、全展开/全收起（展开状态按路径跨渲染保留）、点叶子复制 JSON 路径（`state.cities[3].loyalty`）。
   验证：`cargo test --workspace` 全绿（56 lib + 6 长局 + 2 web）；:3011 实机验证（自动表格/过滤/chips/
   复制路径/推进 3 回合后 flow 非空/左右面板+地图共存无回归）。
-- `[ ]` **把通用 widget 推广到其它读面**：左侧控制面树仍是手写 `KIND` 注册表（舰/预算/权重/建筑各有专用
+- `[x]` **把通用 widget 推广到其它读面（读面全面 generic 化）**（branch `feature/web-readside`）：左侧控制面树仍是手写 `KIND` 注册表（舰/预算/权重/建筑各有专用
   编辑器）——那是「写面」需要语义，暂不动；但**读面**（底部 readout、势力一览、舰面板）都可改成同一个
   widget 渲染 `world.info` 的子树，省掉一批手工投影。另：`StateView` 里给地图用的拍平字段
   （bodies/cities/ships/factions）与 `MetaView` 在 `config` 根出现后已属冗余，可让前端直接从 `info` 取，
   进一步删掉后端的手工字段。
 
+  **已实现**（branch `feature/web-readside`）：①`StateView` 只剩 `{control, scope, info}`——删掉
+  `bodies`/`cities`/`ships`/`FactionView` 与整个 `/api/meta`（`MetaView`/`BuildingMeta`）：那些都是
+  手工挑字段的投影（会漂移、会漏字段）。前端改从 `info` 的 `state`/`config` 根取，显示名走
+  `cfg.resources/structures/buildings/ships`（与 config 表同构）。有测试守住「StateView 不许再加
+  给前端用的拍平字段」。②底部读面（原手写一行「势力资源/交战」）换成**选中对象读面**：地图点
+  天体/城/舰、左侧点势力 → 在 `state` 根里按名字定位该对象（通用：扫顶层数组找 `name` 相等的元素，
+  `KIND_ARRAY` 只是「这类对象住哪个数组」的最小提示），再用**同一个 widget** 渲染它的**整份记录**
+  ——舰的 hull/shield/components/component_hp/doctrine/attack_hist/kiting…、城的 buildings 表、
+  势力的 ideology/relations/resources… 全部自动出现，读面里不再有一行读字段的代码。选中即展开底部
+  边缘 bar。③`renderDiff` 也改成结构无关（比较两帧 state 根里各数组的长度：`chronicle 0→3  events
+  0→9  ships 21→13`）。④地图输入在 app.js 里从 state 根适配（只补一个 `id = name` 别名；
+  **map3d.js 一字未动**，因为那份文件当时正被用户大改，避免撞车）。验证：`cargo test --workspace`
+  全绿（56+6+2）；:3012 实机点城/舰/天体/势力→读面自动展开且内容正确、无 JS 报错、左树（含建筑编辑器
+  与「+ 新建」）/右面板/推进/重建/应用均无回归。
+- `[ ]`（下一步）**左侧控制面树的读侧也可以吃 `info`**：树节点现在按 `st.bodies/cities/ships/factions`
+  自己查实体名（`KIND_ARRAY` 那套），可以进一步走「按路径取子树」的统一入口；另外 `behaviorSummary`
+  仍是手写的行为→中文摘要（写面需要语义，暂可接受），若要彻底 generic，可让后端在 `info` 的
+  `state.control.<势力>.ship_orders` 里就带上人可读摘要（那是模型字段，不是前端投影）。
 ---
 
 ## 22. WebUI 3D 地图渲染质量：光照/尺度/材质/遮挡（用户验收 4 项） — `[x]`（`web/static/map3d.js`）
