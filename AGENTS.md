@@ -30,9 +30,11 @@
 [笔记：测试与二进制解耦](.agents/notes/test-decoupled-suite.md)）：
 
 ```bash
-# ① 数据级（不需要重编 Rust；改断言 = 改 .py，立刻生效）
-uv run --project play/planet_xq python play/tests/run.py all      # 四组 67 条判据；缓存命中 ~4 s
+# ① 数据级 —— **流程就是「build release + python 测试」**：run.py 会先按需
+#    `cargo build --release`（二进制比 src/config 旧或不存在时），再跑各组。
+uv run --project play/planet_xq python play/tests/run.py all      # 四组 75 条判据；缓存命中 ~4 s
 uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
+uv run --project play/planet_xq python play/tests/run.py --no-build  # 跳过前置编译
 uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 16 个错，全咬住
 
 # ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
@@ -42,14 +44,8 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
 
 - 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
   世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
-- **内循环走 debug、合流门走 release**（实测，改一个引擎文件之后）：
-
-  | 路线 | 编 + 跑 |
-  | --- | --- |
-  | release：`cargo build --release` + `run.py 1` | 39.5 + 3.7 ≈ **44 s** |
-  | **debug：`cargo build` + `run.py 1 --bin debug`** | 3.3 + 8.9 ≈ **12 s** |
-
-  长组反过来：debug 下模拟慢 ~4×（投影 1000 回合 8.6 s → ~35 s）⇒ `run.py all` 用 release。
+- **数据级一律走 release 二进制**（用户裁决：*「python 测试的方式改为 build release 加 python 测试」*）
+  ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
 - 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与
   [test-wall-clock §0.2](.agents/notes/test-wall-clock.md)：
   - **Rust 门**：增量（改一个库文件）**~13–16 s** = 编译 ~10 s + 真跑 4–5 s；

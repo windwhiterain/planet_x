@@ -5,14 +5,19 @@
 
 ## 跑
 
+**流程 = 「build release + python 测试」**（用户裁决）：`run.py` 会先看 release 二进制是不是
+比源码旧（或不存在），是就先 `cargo build --release` 再跑各组——改完 Rust 直接跑这一条即可，
+不用记得先编译。已经最新就跳过（`--no-build` 强制跳过）。
+
 ```bash
 uv run --project play/planet_xq python play/tests/run.py           # 快组（内循环：1 + 4）
-uv run --project play/planet_xq python play/tests/run.py all -j 7  # 四组全跑
+uv run --project play/planet_xq python play/tests/run.py all -j 7  # 四组全跑（75 条判据）
 uv run --project play/planet_xq python play/tests/run.py --list    # 看有哪些组
 uv run --project play/planet_xq python play/tests/g3_long.py       # 单跑一个组
 ```
 
-* `--bin debug` 用 `target/debug/planet_x`（重编快、跑得慢——短局用它划算）；
+* 默认 `--bin release`：**长组的墙钟由模拟的机器码质量决定**（debug 下慢 ~4×），
+  所以数据级一律走 release；`--bin debug` 只在「只跑快组、想省编译」时用，
   `--bin <路径>` / `PLANET_X_BIN=<路径>` 指向别处的二进制。
 * `--refresh` 无视缓存重跑投影（引擎行为变了但二进制指纹没变时用得上）。
 * `-j N` 并行跑几个世界（默认 ~8）。
@@ -21,10 +26,10 @@ uv run --project play/planet_xq python play/tests/g3_long.py       # 单跑一�
 
 | 组 | 档 | 现在装的是什么 |
 | --- | --- | --- |
-| `g1_contract.py` | T0/T1（≤60 回合） | **读面契约**：同 seed 逐字节可复现；`--derived` 的 `post` ≡ `--index` 的 `view`；过程量表（`faction_process`/`city_process`）、判定表（`decisions`）、贸易两张表（`market_trades`/`haul_steps`）、输入面（`round_inputs` ≡ `pre`）逐值对账；从档投影时起点行保留真过程量；无档的 `--derived` 自报重算；`--control` 是不动点（dump→回传→逐字节相同）；中性值表里没有死路径 |
-| `g2_mid.py` | T2（400 回合） | **机制不变量**：拆平的城不被旧主同回合复垦；整局里出现过装组件的活舰；编年史（RoundAt 节拍都触发/顺序单调/id 唯一/参与者具体）；没有一场战争短于疤痕承诺的回合数 |
-| `g3_long.py` | T3（1000 回合 × 7 seed） | **世界健康与政治机制**：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
-| `g4_spec.py` | T0/T1（40 回合 + 两个单点 dump） | **声明纪律**（从 `web/src/views_tests.rs` 搬来，原处留指针）：① 静态——id 唯一 / 引用完整（`use`/`use_at`/`card`/`map_ref`/`label_from`）/ `omit` 不与列重叠 / 路径表达式合文法 / `@根` 已知；② 写面对账——`--control-schema` 的 `leaves[].field` ∪ `actions[].field` ∪ `{faction_id}` **双向等于** `FactionControlPatch.properties`；③ 读面对账——**跑一局**、每片叶写一次（哨兵值）、再 `--control` 读回来，对条目字段集与「`keys` 空 ⇔ 对象」的形状；④ 认领完整性——每个叶都被 `leaf`/`action` 行认领，或在 `write_omit` 里写明理由（否则它在界面上凭空消失） |
+| `g1_contract.py` | T0/T1（≤60 回合） | **读面契约**（31 条）：同 seed 逐字节可复现；`--derived` 的 `post` ≡ `--index` 的 `view`；过程量表（`faction_process`/`city_process`）、判定表（`decisions`）、贸易两张表（`market_trades`/`haul_steps`）、输入面（`round_inputs` ≡ `pre`）逐值对账；从档投影时起点行保留真过程量；无档的 `--derived` 自报重算；`--control` 是不动点（dump→回传→逐字节相同）；中性值表里没有死路径 |
+| `g2_mid.py` | T2（400 回合 × 3 seed） | **机制不变量 + 投影完备性审计**（20 条）：拆平的城不被旧主同回合复垦；整局里出现过装组件的活舰；**城的每次归属/存亡变化都有事件命名它**（实测 1933 次）/ **舰的出现有造舰事件、消失有死因事件**（337 出生 / 392 死亡）/ **一回合内同一座城不会易主两次** / **headline 逐字点到每个参与者**（32093 个实体）；编年史（节拍/顺序/唯一/参与者具体）；没有一场战争短于疤痕承诺的回合数 |
+| `g3_long.py` | T3（1000 回合 × 7 seed） | **世界健康与政治机制**（10 条）：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
+| `g4_spec.py` | T0/T1（40 回合 + 两个单点 dump） | **声明纪律**（14 条，从 `web/src/views_tests.rs` 搬来，原处留指针）：① 静态——id 唯一 / 引用完整（`use`/`use_at`/`card`/`map_ref`/`label_from`）/ `omit` 不与列重叠 / 路径表达式合文法 / `@根` 已知；② 写面对账——`--control-schema` 的 `leaves[].field` ∪ `actions[].field` ∪ `{faction_id}` **双向等于** `FactionControlPatch.properties`；③ 读面对账——**跑一局**、每片叶写一次（哨兵值）、再 `--control` 读回来，对条目字段集与「`keys` 空 ⇔ 对象」的形状；④ 认领完整性——每个叶都被 `leaf`/`action` 行认领，或在 `write_omit` 里写明理由（否则它在界面上凭空消失） |
 
 每一条都带**防空转**判据（「这一局里真的发生过 X」），红的时候打印前几条样例 + 总处数，
 样例里带 `(seed, 回合)`。

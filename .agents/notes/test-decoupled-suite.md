@@ -43,6 +43,16 @@
 | `src/tests/sim/horizon_mid.rs::story_chronicle_grows_deterministically` | `g2_mid.py`（节拍清单**改从 `meta.json` 的 `story` 读**，不再写死「prologue 在 1 回合」） |
 | `src/tests/sim/horizon_mid.rs::story_participants_are_concrete` | `g2_mid.py`（事件型节拍的参与者；RoundAt 那条改判「非空 + **跨种子逐字相同**」——`meta.json` 不发 beat 的静态 `participants`） |
 | `src/tests/sim/horizon_mid.rs::war_scar_floor_…`（**真实长局那一半**） | `g2_mid.py`（`war_started`/`war_ended` 配对算时长 vs 配置算出的最短回合；400 回合 × 3 seed ⇒ 349 场战争，最短 9 = 承诺值）。**形状那一半**留在 `src/tests/sim/war_scar.rs`（要内部函数 + 手工世界；顺带从 `horizon_mid` 改名为 `war_scar` ⇒ 回快档：它不推进回合了） |
+| `src/tests/projection/mod.rs::every_city_state_change_is_explained_by_an_event` | `g2_mid.py`（**城的完备性审计**：密集快照里每次归属/存亡变化都要有事件命名这座城）。样本 120 回合 × 1 seed → **400 回合 × 3 seed**，实测 **1933 次变化**全有解释（Rust 版下限只要 5） |
+| `src/tests/projection/mod.rs::every_ship_state_change_is_explained_by_an_event` | `g2_mid.py`（舰的出现 = 造舰事件、消失 = 死因事件；实测 **337 出生 / 392 死亡**全有解释） |
+| `src/tests/projection/mod.rs::no_city_changes_owner_twice_in_one_round` | `g2_mid.py`（实测 1848 次活城易主，0 次同回合翻转两遍） |
+| `src/tests/projection/mod.rs::headline_names_every_participant` | `g2_mid.py`（实测 **32093 个实体**全部逐字出现在 `headline` 里） |
+| `src/tests/projection/mod.rs::projection_is_deterministic` / `::event_milestones_is_deterministic` | `g1_contract.py`「同 seed 重跑逐字节一致」（比的是**整份投影每个文件**的 sha256 ⇒ 更强，两条并一条） |
+
+**流程也改了**（用户裁决：*「python 测试的方式改为 build release 加 python 测试」*）：
+`run.py` 现在**先按需 `cargo build --release`**（二进制比 `src`/`config` 旧或不存在时才编），
+再跑各组 —— 改完 Rust 直接 `uv run --project play/planet_xq python play/tests/run.py all` 即可，
+`--no-build` 可跳过。数据级一律走 release 二进制（长组的墙钟由机器码质量决定）。
 
 **顺手丢掉的过时探针**（用户：*「一些过时的测试就丢掉」*）：`probe_world_health`、`probe_sanction`
 （都被 `probe_multipolar` 这个升级版取代——同一批指标的更全口径，留两份同源仪器只会有一份开始说谎）、

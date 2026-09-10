@@ -1,4 +1,24 @@
 //! projection 的单元测试（≤48 回合的读面守卫）。
+//!
+//! ## 2026-10：六条**天生数据级**的守卫搬到 `play/tests/g2_mid.py`（用户裁决「把更多 rust 测试搬 python」）
+//!
+//! 它们本来就在读投影文件，却为此在 Rust 里**再跑一遍世界**：
+//!
+//! | 原用例 | 现在住 |
+//! | --- | --- |
+//! | `every_city_state_change_is_explained_by_an_event` | `g2_mid.py`「城的每次归属/存亡变化都有事件命名它」 |
+//! | `every_ship_state_change_is_explained_by_an_event` | `g2_mid.py`「舰的出现有造舰事件、消失有死因事件」 |
+//! | `no_city_changes_owner_twice_in_one_round` | `g2_mid.py`「一回合内同一座城不会易主两次」 |
+//! | `headline_names_every_participant` | `g2_mid.py`「headline 逐字点到每个参与者」 |
+//! | `projection_is_deterministic` / `event_milestones_is_deterministic` | `g1_contract.py`「同 seed 重跑逐字节一致」（比的是**整份投影的每个文件**，更强） |
+//!
+//! ⚠ **样本放宽了一个量级**（判据与阈值一条没动）：Rust 版是 seed 42 / 120 回合、下限 `≥5`；
+//! Python 版是 **3 个种子 × 400 回合**，实测 1933 次城变化 / 337 次舰出生 / 392 次舰死亡 /
+//! 32093 个标题实体，全部有解释。
+//!
+//! 留在本文件的 6 条要么要**内部漏斗**（`city_razed_records_the_loser_not_the_refounder` 要
+//! 用 `raze_city`/`reseed_city` 造出「同回合被 A 夷平、被 B 复垦」的确定性巧合）、要么是
+//! **声明契约**（schema 里 eager/lazy/derived 三处声明与写出来的表对齐）。
 
 use super::*;
 use crate::config::load_config;
@@ -232,101 +252,6 @@ fn projection_writes_lean_main_and_indexed_tables() {
     );
 }
 
-/// **同回合归属翻转不变量**：一个回合内，同一座城不能易主两次。
-///
-/// 这条不变量是「僵尸势力夺城—倒戈振荡」的**结构性**约束：`step_governance`（离心倒戈）
-/// 先跑，`step_resurgence`（难民夺城）后跑，后者若把前者刚放手的那座城夺回来，两个步进
-/// 就在同一回合里**正好互相抵消**——净效果为零，却照样记两条里程碑、白造一艘种子舰。
-/// 实测 seed 7 的 `冥王星前哨` 就是这样被钉进 4 回合一轮的死循环（60 回合 41 次夺城）。
-///
-/// 「活城易主」= `city_defected` / `city_overrun` / `colony_founded`（城活着，换了主人或
-/// 从空白重新立起来）。三者之和每 `(回合, 城)` 最多 1 条。
-///
-/// 注意：`city_razed` → `colony_founded`（被夷平后同回合复垦）**不算**违规——城经过了
-/// 「死亡」这个中间态，是两件不同的事（先被拆平、再被重建），两条事件都是真的。
-#[test]
-fn no_city_changes_owner_twice_in_one_round() {
-    let cfg = load_config();
-    let mut state = default_state(&cfg, 7);
-    let mut rng = Prng::new(7);
-    let s = Scratch::new("no_double_flip");
-    write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
-
-    let events = jsonl(&s.0.join("idx/events.jsonl"));
-    let mut flips: BTreeMap<(u32, String), Vec<String>> = BTreeMap::new();
-    for e in &events {
-        let ty = e["type"].as_str().unwrap_or_default();
-        if !matches!(ty, "city_defected" | "city_overrun" | "colony_founded") {
-            continue;
-        }
-        let city = e["data"]["city"].as_str().unwrap_or_default().to_string();
-        let round = e["round"].as_u64().unwrap_or_default() as u32;
-        flips
-            .entry((round, city))
-            .or_default()
-            .push(e["headline"].as_str().unwrap_or("").to_string());
-    }
-    let bad: Vec<_> = flips.iter().filter(|(_, v)| v.len() > 1).collect();
-    assert!(
-        bad.is_empty(),
-        "有 {} 座城在同一回合里易主了两次（净效果为零的自相抵消）：{:#?}",
-        bad.len(),
-        bad.iter().take(5).collect::<Vec<_>>()
-    );
-    assert!(
-        flips.len() >= 5,
-        "只观察到 {} 次活城易主，样本太稀——守卫可能是空转",
-        flips.len()
-    );
-}
-
-/// **标题必须点到名**：`GameEvent::participants()` 列出的每一个实体 id，都要**逐字出现**
-/// 在 `headline()` 里（单行、非空）。
-///
-/// 这把「索引指向谁」和「人读到的句子说的是谁」钉在一起：查询 join 到的实体，一定能在
-/// 那句话里看见；反之标题里出现的实体也不会是索引之外的幽灵。同时钉住「标题自足」——
-/// 它只读事件自身的字段，所以对归档的老历史同样成立。
-#[test]
-fn headline_names_every_participant() {
-    let cfg = load_config();
-    let mut state = default_state(&cfg, 7);
-    let mut rng = Prng::new(7);
-    let s = Scratch::new("headline_names");
-    write_index(&mut state, &cfg, &mut rng, 80, &s.0).unwrap();
-
-    let events = jsonl(&s.0.join("idx/events.jsonl"));
-    let mut checked = 0usize;
-    for e in &events {
-        let h = e["headline"].as_str().unwrap_or_default();
-        assert!(!h.is_empty(), "{} 没有标题", e["type"]);
-        assert!(!h.contains('\n'), "标题必须单行: {h:?}");
-        let mut ids: Vec<String> = Vec::new();
-        if let Some(v) = e["actor_id"].as_str() {
-            ids.push(v.to_string());
-        }
-        if let Some(v) = e["target_id"].as_str() {
-            ids.push(v.to_string());
-        }
-        for p in e["extra"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
-            if let Some(v) = p["id"].as_str() {
-                ids.push(v.to_string());
-            }
-        }
-        for id in &ids {
-            assert!(
-                h.contains(id.as_str()),
-                "标题 {h:?} 没提到参与方 {id:?}（{}）",
-                e["type"]
-            );
-            checked += 1;
-        }
-    }
-    assert!(
-        checked >= 50,
-        "只校验了 {checked} 个参与方名字，守卫可能是空转"
-    );
-}
-
 /// **失城方必须在夷平那一刻记下**：`city_razed.owner` 是夷平时的持有者，**不是**同回合
 /// 后来复垦者的名字。
 ///
@@ -437,205 +362,6 @@ fn city_razed_records_the_loser_not_the_refounder() {
         razed_with_revival >= 1,
         "确定性样本里没有「被 A 夷平、同回合被 B 复垦」的城——这条守卫没能真的验到那个坑"
     );
-}
-
-/// The projection is deterministic: the same seed → byte-identical `main.jsonl`.
-#[test]
-fn projection_is_deterministic() {
-    let cfg = load_config();
-    let run = |tag: &str| -> Vec<u8> {
-        let mut state = default_state(&cfg, 42);
-        let mut rng = Prng::new(42);
-        let s = Scratch::new(tag);
-        write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
-        fs::read(s.0.join("main.jsonl")).unwrap()
-    };
-    assert_eq!(
-        run("a"),
-        run("b"),
-        "same seed must reproduce identical main.jsonl"
-    );
-}
-
-/// The event milestones is deterministic too: same seed → byte-identical `idx/events.jsonl`.
-///
-/// NOTE: `Scratch` 的目录名是「进程 id + tag」，而 cargo 的测试是**同进程多线程并行**的，
-/// 所以 tag 必须在全文件内唯一——与 `projection_is_deterministic` 共用 "a"/"b" 会撞目录。
-#[test]
-fn event_milestones_is_deterministic() {
-    let cfg = load_config();
-    let run = |tag: &str| -> Vec<u8> {
-        let mut state = default_state(&cfg, 42);
-        let mut rng = Prng::new(42);
-        let s = Scratch::new(tag);
-        write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
-        fs::read(s.0.join("idx/events.jsonl")).unwrap()
-    };
-    assert_eq!(
-        run("milestones_a"),
-        run("milestones_b"),
-        "same seed must reproduce identical event milestones"
-    );
-}
-
-/// **完备性守卫**：密集快照里可见的每一次「城的归属 / 存亡」变化，都必须有一条**命名
-/// 了这座城**的事件来解释。
-///
-/// 这正是此前最痛的那个洞——「城市易主了，就近是什么事件导致？」答不上来，因为若干路径
-/// 根本不发事件：难民夺城（`displace_city_for_refugee`）零事件（`SpawnVia::Resurgence`
-/// 与 `CityOverrun` 已在贸易分支删除——它们不再有任何生产者，留着只会骗下一个读者）。
-/// 稀疏历史安全的前提就是「能证明自己什么都没丢」；这条测试就是那个证明。它同时是
-/// 「事件系统不许退化成顺手记的副产品」的回归防线。
-#[test]
-fn every_city_state_change_is_explained_by_an_event() {
-    let cfg = load_config();
-    let mut state = default_state(&cfg, 42);
-    let mut rng = Prng::new(42);
-    let s = Scratch::new("reconcile");
-    write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
-
-    // 每回合「被事件命名过的实体」集合：(kind, id)。
-    let mut named: BTreeMap<u32, BTreeSet<(String, String)>> = BTreeMap::new();
-    for e in jsonl(&s.0.join("idx/events.jsonl")) {
-        let round = e["round"].as_u64().unwrap() as u32;
-        let set = named.entry(round).or_default();
-        for (kc, ic) in [("actor_kind", "actor_id"), ("target_kind", "target_id")] {
-            if let (Some(k), Some(i)) = (e[kc].as_str(), e[ic].as_str()) {
-                set.insert((k.to_string(), i.to_string()));
-            }
-        }
-        for p in e["extra"].as_array().cloned().unwrap_or_default() {
-            if let (Some(k), Some(i)) = (p["kind"].as_str(), p["id"].as_str()) {
-                set.insert((k.to_string(), i.to_string()));
-            }
-        }
-    }
-
-    // 逐回合对比密集快照：任何 (faction_id, razed) 变化都必须被解释。
-    // `prev`/`cur` 分开两张表：文件按回合成块，遇到新回合才把 cur 提升为 prev。
-    let mut prev: BTreeMap<String, (String, bool)> = BTreeMap::new();
-    let mut cur: BTreeMap<String, (String, bool)> = BTreeMap::new();
-    let mut cur_round = u32::MAX;
-    let mut unexplained: Vec<String> = Vec::new();
-    // 真正被检查到的变化次数——**守卫必须非空**：一个什么都没检查的绿灯等于没有守卫。
-    let mut checked = 0usize;
-    for c in jsonl(&s.0.join("idx/cities.jsonl")) {
-        let round = c["round"].as_u64().unwrap() as u32;
-        if round != cur_round {
-            prev = std::mem::take(&mut cur);
-            cur_round = round;
-        }
-        let cid = c["city_id"].as_str().unwrap().to_string();
-        let now = (
-            c["faction_id"].as_str().unwrap_or_default().to_string(),
-            c["razed"].as_bool().unwrap_or(false),
-        );
-        if let Some(p) = prev.get(&cid) {
-            if p != &now {
-                checked += 1;
-                let explained = named
-                    .get(&round)
-                    .map(|set| set.contains(&("city".to_string(), cid.clone())))
-                    .unwrap_or(false);
-                if !explained {
-                    unexplained.push(format!("r{round} 城 {cid}: {p:?} → {now:?}"));
-                }
-            }
-        }
-        cur.insert(cid, now);
-    }
-    assert!(
-        checked >= 5,
-        "该窗口内只看到 {checked} 次城状态变化——守卫几乎没在检查东西，请换更长窗口/种子"
-    );
-    assert!(
-        unexplained.is_empty(),
-        "存在**未被任何事件解释**的城状态变化（历史不完备，agent 会答不出「为什么易主」）：\n· {}",
-        unexplained.join("\n· ")
-    );
-    println!("完备性守卫：{checked} 次城状态变化全部有事件解释");
-}
-
-/// 把 `idx/ships.jsonl` 读成 `round -> 该回合存在的舰 id 集合`。
-///
-/// 注意：`idx/ships.jsonl` 只在舰**活着**时写行（模拟里 `retain(hull > 0)` 不留尸行），
-/// 所以「一艘舰不见了」这件事**只能由事件表解释**——这正是这条守卫要钉住的不变量。
-fn ships_by_round(dir: &Path) -> BTreeMap<u32, BTreeSet<String>> {
-    let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    for r in jsonl(&dir.join("idx/ships.jsonl")) {
-        let round = r["round"].as_u64().unwrap() as u32;
-        if let Some(s) = r["ship_id"].as_str() {
-            out.entry(round).or_default().insert(s.to_string());
-        }
-    }
-    out
-}
-
-/// 某类事件的**目标舰**按回合集合（`ship_destroyed` / `ship_spawned` 的 `target_id` 即舰名）。
-fn event_ships(dir: &Path, ty: &str) -> BTreeMap<u32, BTreeSet<String>> {
-    let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    for e in jsonl(&dir.join("idx/events.jsonl")) {
-        if e["type"] != ty {
-            continue;
-        }
-        let round = e["round"].as_u64().unwrap() as u32;
-        if let Some(s) = e["target_id"].as_str() {
-            out.entry(round).or_default().insert(s.to_string());
-        }
-    }
-    out
-}
-
-/// **舰的存亡对账**：密集表里「出现 / 消失」的每一艘舰都必须被事件解释——
-/// 消失 = 死因事件（`ship_destroyed`，带 `cause`/`by`），出现 = 造舰事件
-/// （`ship_spawned`，带 `via`）。任何一头缺失都意味着**某条路径漏了 `kill_ship` /
-/// `spawn_ship` 漏斗**。
-///
-/// 这条守卫是 Stage B 的直接收获：它一上线就抓出 `step_resurgence` 的种子舰
-/// **完全不发造舰事件**（实测 63 次出生里 46 次无解释）——那是一条与「城市易主查不到
-/// 原因」完全同源的漏洞，只是藏在舰这一侧。
-#[test]
-fn every_ship_state_change_is_explained_by_an_event() {
-    let cfg = load_config();
-    let mut state = default_state(&cfg, 42);
-    let mut rng = Prng::new(42);
-    let s = Scratch::new("reconcile_ships");
-    write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
-
-    let alive = ships_by_round(&s.0);
-    let dead = event_ships(&s.0, "ship_destroyed");
-    let born = event_ships(&s.0, "ship_spawned");
-    let max_round = alive.keys().copied().max().unwrap_or(0);
-
-    let (mut checked_death, mut checked_birth) = (0usize, 0usize);
-    let mut unexplained: Vec<String> = Vec::new();
-    for r in 1..=max_round {
-        let empty = BTreeSet::new();
-        let prev = alive.get(&(r - 1)).unwrap_or(&empty);
-        let cur = alive.get(&r).unwrap_or(&empty);
-        for sid in prev.difference(cur) {
-            checked_death += 1;
-            if !dead.get(&r).map(|d| d.contains(sid)).unwrap_or(false) {
-                unexplained.push(format!("r{r} 舰 {sid} 消失但没有死因事件"));
-            }
-        }
-        for sid in cur.difference(prev) {
-            checked_birth += 1;
-            if !born.get(&r).map(|d| d.contains(sid)).unwrap_or(false) {
-                unexplained.push(format!("r{r} 舰 {sid} 出现但没有造舰事件"));
-            }
-        }
-    }
-    assert!(
-        checked_death >= 5 && checked_birth >= 5,
-        "窗口内只看到 {checked_death} 次死亡 / {checked_birth} 次出生——守卫几乎没在检查东西"
-    );
-    assert!(
-        unexplained.is_empty(),
-        "存在**未被任何事件解释**的舰存亡变化（漏斗有漏；agent 会答不出「这艘舰哪去了/哪来的」）：\n· {}",
-        unexplained.join("\n· ")
-    );
-    println!("完备性守卫：{checked_death} 次舰死亡 / {checked_birth} 次舰出生全部有事件解释");
 }
 
 /// **派生表契约**：`DERIVED` 声明的每张表都要真的写出来、要在 `schema.derived` 里有条目、
