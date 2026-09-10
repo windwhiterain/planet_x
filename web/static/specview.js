@@ -450,7 +450,7 @@
     return el('span', 'sv-val', String(text));
   }
 
-  function cellNode(rec, recKey, col) {
+  function cellNode(rec, recKey, col, identity) {
     const td = el('td', 'sv-td');
     const v = evalPath(col.path, rec, recKey);
     ratioSlot = null;
@@ -465,8 +465,10 @@
     }
     const holder = valueNode(col, v, text);
     if (col.click && ctx.onSelect) {
+      // 身份用**这一行是谁**（key 字段/首列），不是数组下标——否则会去选中"0 号"。
+      const who = identity != null ? identity : v;
       holder.classList.add('clickable');
-      holder.addEventListener('click', () => ctx.onSelect(col.click, recKey != null ? recKey : v));
+      holder.addEventListener('click', () => ctx.onSelect(col.click, who));
     }
     if (ctx.onPathClick && holder.title == null) holder.title = col.path;
     td.appendChild(holder);
@@ -607,6 +609,7 @@
         const tr = el('tr', 'sv-tr');
         const td0 = el('td', 'sv-td sv-td-key');
         const label = keyCol ? evalPath(keyCol.path, r.value, r.key) : spec.key ? evalPath(spec.key, r.value, r.key) : r.key;
+        const who = label == null ? r.key : label;
         const lab = el('span', keyCol || spec.key ? 'sv-val' : '', label == null ? String(r.key) : String(label));
         if (keyCol && keyCol.dot) {
           const c = evalPath(keyCol.dot, r.value, r.key);
@@ -618,11 +621,11 @@
         }
         if (keyCol && keyCol.click && ctx.onSelect) {
           lab.classList.add('clickable');
-          lab.addEventListener('click', () => ctx.onSelect(keyCol.click, r.key != null ? r.key : label));
+          lab.addEventListener('click', () => ctx.onSelect(keyCol.click, who));
         }
         td0.appendChild(lab);
         tr.appendChild(td0);
-        cols.forEach((c) => tr.appendChild(cellNode(r.value, r.key, c)));
+        cols.forEach((c) => tr.appendChild(cellNode(r.value, r.key, c, who)));
         const rowId = spec.id + '#' + (groupKey || '') + (r.key == null ? '' : r.key);
         tr.appendChild(residualCell(r.value, spec, rowId));
         tbody.appendChild(tr);
