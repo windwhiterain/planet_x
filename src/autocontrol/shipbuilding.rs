@@ -132,7 +132,7 @@ pub fn threat_motive(state: &State, config: &GameConfig, fid: &str) -> f64 {
 ///
 /// 用的是与定编同一把尺子（舰级版 `舱容 × 速度 × 维护费`，见 [`freight::freight_tonnage`]）
 /// ⇒ 配置里改数值它就跟着变，不写死舰名。今天选出的是**航母**（20×1.0÷7.5 = 2.67，
-/// 次高的驱逐只有 2.08），恰好也是唯一一个 `default_freighter = true` 的舰级
+/// 次高的驱逐只有 2.08），恰好也是唯一一个 `default_role = true` 的舰级
 /// ——派生结论与作者意图对上了，这是那把尺子没错的旁证。
 pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<String> {
     config
@@ -145,7 +145,7 @@ pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<Str
             // 驱逐 2.08 高 28%，却贵一倍还多）。实测（seed 7 / 600 回合）：每个势力的船坞都被
             // 改成航母却**一艘也下不了水**，全世界 600 回合只拆平 4 次——战争没了、运输也没了。
             // 除过时间之后，穷势力会选**造得动**的那一级，富势力仍然选航母（它也是唯一一个
-            // `default_freighter = true` 的舰级，派生结论与作者意图对上了）。
+            // `default_role = true` 的舰级，派生结论与作者意图对上了）。
             let spec = config.ship_spec(cls);
             let tonnage = spec.cargo * spec.speed_mult / spec.upkeep.max(1e-6);
             let score = match build_rounds(state, config, fid, cls) {

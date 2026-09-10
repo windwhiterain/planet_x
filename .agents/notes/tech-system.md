@@ -421,3 +421,68 @@ seed 7/42）——
 | **观察面** | `mond_ships_in_band`（已有）+ 新列 `observer_quota`（目标头数）与逐舰 `observer` / `observer_mode`（有效值与归属） | `projection.rs` |
 | **验收** | ① 单测：缺口抽签的期望入伙数 = 缺口（照抄 `ideology-roles.md` 的做法）；② 探针：seed 7/42 × 600 回合里**至少一家**把掌握度推到 1.0（现在全是 0），且它成为唯一的承运人；③ 长局守卫不翻红；④ digest 换代 | 同 §7 的口径 |
 
+### 11.1 落地记录（本轮已实现，`[x]`）
+
+**轴的形状：选了 ⓐ（三值枚举）**——裁决说的是「第三**态**」，而并列 bool 会造出「既是运输舰
+又是观测舰」这种第四种组合：角色**本来就互斥**，枚举把这条互斥写进类型。改名清单（一次到位）：
+
+| 旧 | 新 |
+|---|---|
+| `Ship::freighter: bool` / `ShipSpec::default_freighter: bool` | `Ship::role: ShipRole` / `default_role: ShipRole` |
+| `ControllableState::ship_freighter` / `default_freighter`（`Control<bool>`） | `ship_role` / `default_role`（`Control<ShipRole>`） |
+| `State::ship_freighter` / `ship_freighter_control` | `ship_role` / `ship_role_control` |
+| `should_be_freighter` → `bool` | `should_be_role` → `ShipRole`（硬承诺/玩家表态照旧，配额那一段翻译成 `Freight`/`War`） |
+| `ShipFreighterEntry` / `ShipFreighterPatch` / `DefaultFreighter` | `ShipRoleEntry` / `ShipRolePatch` / `DefaultShipRole` |
+| 控制面字段 `{ship, freighter: bool}` / `{freighter: bool}` | `{ship, role: "War"｜"Freight"｜"Observe"}` / `{role: ...}` |
+| 读面 `ships[].freighter`(bool) / `freighter_mode` | `ships[].role`(string) / `role_mode` |
+
+**这一步单独一次提交、且验证是「行为中性」**：同一棵树开/关这次重构各跑一遍
+`--seed 42 --round 240 --digest 20`，两侧逐字节都是 `A5183C6A…`。
+
+**新模块 `autocontrol/knowledge.rs`**（与 `freight.rs` 同形，`use` 关系是单向的：
+`freight` 读 `knowledge`，`knowledge` 不读 `freight`）：
+
+| 件 | 落地 |
+|---|---|
+| 尺子 | `presence_value = 1 + 深度 × depth_weight`——**与 `sim::mond_presence` 共用同一个函数**，不新造第二把尺子 |
+| 选靶 | 按 `body_weight = p(深度, control) × presence_value(深度)` **抽签**（不是取最大者），骰子 `derived_roll(fid, "", round ÷ 12, "observe_body")` ⇒ **每 12 回合重抽一次**（长期驻地，但会跟着掌握度往外迁） |
+| 配额 | `observer_quota = min(mastery_presence ÷ 每艘在目标深度的价值, 舰队的一半)`；**掌握度到顶 ⇒ 0**（棘轮之下没有东西可学） |
+| 派谁 | `should_observe`：`p = (缺口 + 轮换 0.05) × 我的票 ÷ 同侧总票数`，票按 `速度 ÷ 维护费`（观测舰要**先到位**，不看舱容不等同运力），骰子 `derived_roll(fid, ship, round, "observe_role")` |
+| 行为 | `tactics::ai_ship_turn` 的 `Observe` 分支：指令 = `Dock { 目标天体 }`（跟着天体走 ⇒ 一直待在带里），随后照旧 `auto_combat`（**不解除武装**） |
+| 观察面 | `factions[].observer_quota`（配额）、`observer_count`（此刻真的在观测的舰数）、`observer_target`（驻地天体）；逐舰就是 `ships[].role`/`role_mode` |
+
+**三处与 §11 初稿的偏离（都记在这里，因为都改了行为）**：
+
+1. **选靶的尺子从「深度 × p」改成「p × 在场价值」**。实测两者在**凡人**这一端给出相反的
+   答案：掌握度 0 时 `创神星`（深 10.2、p = 0.20）的 `深度 × p = 2.0` 与 `海王星`（深 2、
+   p = 1.0）的 `2.0` **打平**，抽签会把人派去大概率迷航的深空目标。按在场收益算：
+   海王星 `1.5` vs 创神星 `0.71` ⇒ 凡人先蹲前沿边上；掌握度到顶时 p 全是 1 ⇒ 最深的最重。
+   真正的理由：它衡量的正是知识渠道**消费的那个量**，不是它的替身。
+2. **配额多了一条上界「舰队的一半」**（`OBSERVER_FLEET_SHARE`）。没有它，一支三艘舰的小
+   势力会把三艘全派去蹲点——既没有商船也没有战舰，而三艘舰的在场强度（≈4.5）**根本够不到
+   学满（12）**，于是永远蹲着、永远拿不到棘轮、还被人灭国。比例而不是硬上限，是为了不造出
+   「第 N+1 艘舰永远进不去」的断崖。
+3. **目标天体的重抽周期是 12 回合**（不是每回合）——每回合重掷等于让舰队在天体之间来回漂。
+
+### 11.2 实测（`tests/tech_probe.rs`，600 回合 × seed 7/42）
+
+| 种子 | 谁学到了 | 读数 |
+|---|---|---|
+| 42 | **中国 1.0（棘轮锁住）** | r120 还是 0.00 → **r240 已经 1.00**；在场率 59%、平均在场 4.73；崇拜教 1.00（天生） |
+| 7 | **只有崇拜教（天生 1.0）** | 全场最高是俄罗斯峰值 0.29（在场率 4%）；其余全 0 |
+
+**为什么 seed 7 学不到——不是机制坏了，是那个世界已经没有势力了**：同一探针时读 `--index`
+的 `factions` 表，**r240 时 9 家里只剩 1 家活着**（seed 42：中国 16 城 31 舰，其余八家
+0 城 0 舰；seed 7：美国 17 城 0 舰，其余八家 0 城 0 舰）。这正是 §9.1 记的那个停摆项
+（「世界在 r240–400 之间舰队全灭」）的**更强版本**：不是没舰，是**没了势力**。观测编队要
+有舰队才谈得上——所以「谁学得会 MOND」这个问题在当前世界里的真实答案是
+**「挺到最后的那个」**。这是平衡轮的活，不是本轮的（本轮口径：机制正确性）。
+
+**承运垄断（`probe_mond_carrier`，400 回合）**：崇拜教 17.48（seed 42）/ 0.70（seed 7），
+其余八家合计 0.14 以下。⚠ 一个值得平衡轮看一眼的细节：并列（中国也到 1.0）时**先到者赢**
+（`first-wins` 的 tie-break）⇒ 后来的掌握者拿不到承运收入，「迟到的赢家」在这条腿上是空的。
+
+**验收对照**：① 单测 5 条（`src/tests/autocontrol/knowledge.rs`：尺子、配额两条上界、
+期望入伙数 = 缺口、优先级、行为）全绿；② 探针 seed 42 **达标**（一家到 1.0）、seed 7
+未达标但**原因已查明**（世界只剩一家且没有舰队）；③ 全档 `200/200` 全绿；④ digest 已换代。
+

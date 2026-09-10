@@ -476,9 +476,9 @@ fn write_round(
                 // = **未知**（读者要回落名字序，不能当成第 0 回合）。
                 "spawned_round": s.spawned_round,
                 // 三条**风格轴**的有效值（叶 → 舰队默认 → 舰上记录值）。风格是活层，
-                // `Ship.doctrine`/`Ship.kiting`/`Ship.freighter` 只是记录值——这里给的是
+                // `Ship.doctrine`/`Ship.kiting`/`Ship.role` 只是记录值——这里给的是
                 // 引擎解析后的答案。第三条轴（角色）与前两条的唯一差别：**AI 会写它**
-                // （按积压定编），所以 `freighter_mode` 还会告诉你那片叶归谁。
+                // （按积压 + 观测需求定编），所以 `role_mode` 还会告诉你那片叶归谁。
                 "doctrine": state.ship_doctrine(s.name.clone()),
                 "kiting": state.ship_kiting(s.name.clone()),
                 "role": state.ship_role(s.name.clone()),
@@ -576,6 +576,23 @@ fn write_round(
                     && crate::sim::dist(s.position, [0.0, 0.0]) > config.mond.radius
             })
             .count();
+        // **观测定编**（`autocontrol::knowledge`）：本势力本回合想要的观测舰头数、抽签抽中的
+        // 目标天体、以及此刻真的在观测的舰数。三列一起读就能回答「它为什么没在学 MOND」——
+        // 是配额 0（不想学 / 已经学满），还是没人可派（配额 > 0 但 `observer_count` 跟不上）。
+        let observer_quota =
+            r2(crate::autocontrol::knowledge::observer_quota(state, config, &f.name));
+        let observer_target = crate::autocontrol::knowledge::target_body(state, config, &f.name)
+            .map(|(b, _)| json!(b))
+            .unwrap_or(serde_json::Value::Null);
+        let observer_count = state
+            .ships
+            .iter()
+            .filter(|s| {
+                s.hull > 0.0
+                    && s.faction_id == f.name
+                    && state.ship_role(s.name.clone()) == ShipRole::Observe
+            })
+            .count();
         writeln!(
             w.factions,
             "{}",
@@ -621,6 +638,12 @@ fn write_round(
                 "mond_control": r2(f.mond_control),
                 "mond_ships_in_band": ships_in_band,
                 "mond_frontier_au": frontier_json,
+                // **观测定编**（第三条角色轴的第三态）：`observer_quota` = 本回合想要的观测舰
+                // 头数（连续量）、`observer_count` = 此刻真的在观测的舰数、`observer_target` =
+                // 抽签抽中的驻地天体。配额与新不学得到顶是同一句话（掌握度到顶 ⇒ 配额 0）。
+                "observer_quota": observer_quota,
+                "observer_count": observer_count,
+                "observer_target": observer_target,
                 // 此刻实际在跑运输的舰数（有效角色为 true；含玩家钉住与舱里有货的）。
                 "freighter_count": state
                     .ships
@@ -757,11 +780,11 @@ fn write_round(
         }
         // —— 风格三轴的六片叶（`control-live-layers.md` §3 那条候选 + 运输分支的角色轴）——
         //
-        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`/`freighter`
+        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`/`role`
         // （**有效值**）看结果，看不到这些叶**自己的值与自己的表态**——于是「这艘舰的风格/角色
         // 是它自己钉的，还是跟着舰队默认走的」在表里查不出来（web 的 `effectiveMode()` 正是
         // 靠这个区分）。`value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，
-        // kiting 是数字，freighter 是布尔。
+        // kiting 是数字，role 是三值字符串（War/Freight/Observe）。
         for (ship, leaf) in &c.ship_doctrine {
             row(
                 "ship_doctrine",
@@ -1117,11 +1140,11 @@ pub fn projection_schema() -> serde_json::Value {
                     "order_default_mode": "势力级**舰队默认指令**的表态（没有这片叶 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → **出厂图**（图上真写了 `order` 时）→ 舰队默认 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。",
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案（null = 没有任何一层说话，调用方按 Idle 兜底）。注意「叶 Inherit + 舰队默认不是 Player」时会回落到叶上的记录值——这是引擎的既有取值规则，Python 侧不要自己重算。",
-                    "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）：`leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）/ `blueprint:<图名>`（值来自本舰出厂那张图上的 `order`）/ `fleet_default`（势力级舰队默认叶）/ `scope` / `record`。⚠ 后两个取值在**指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`freighter` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`（那时值真的来自那片叶，`leaf.map(|l| l.value)`），只有叶不存在才可能落到 `blueprint:*`/`fleet_default`。",
+                    "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）：`leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）/ `blueprint:<图名>`（值来自本舰出厂那张图上的 `order`）/ `fleet_default`（势力级舰队默认叶）/ `scope` / `record`。⚠ 后两个取值在**指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`role` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。⚠ 它把「叶**不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf`（那时值真的来自那片叶，`leaf.map(|l| l.value)`），只有叶不存在才可能落到 `blueprint:*`/`fleet_default`。",
                     "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
                     "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
-                    "freighter": "**有效角色**（`State::ship_role`，同一条链）：`true` = 运输舰（自动控制给它排集货路线），`false` = 战舰（找仗打）。它**只管自动控制派哪种活**——不解除武装，运输舰照样自动开火、照样按 `kiting` 软移动。",
-                    "freighter_mode": "角色那片叶的**有效归属**（`State::ship_role_control`）：Auto = 这条结论是自动控制写的（它每回合按积压定编），Player = 玩家钉的、AI 不碰。",
+                    "role": "**有效角色**（`State::ship_role`，同一条链，**三态字符串**）：`War` = 战舰（找仗打）、`Freight` = 运输舰（自动控制给它排集货路线）、`Observe` = **观测舰**（自动控制把它派去引力异常区蹲着，喂 MOND 掌握度那条知识渠道）。**它只管自动控制派哪种活**——不解除武装，任何角色的舰在射程内照样自动开火、照样按 `kiting` 软移动。⚠ 三态**互斥**（一艘舰同一时刻只有一种活），优先级是**观测 > 运输 > 战斗**。",
+                    "role_mode": "角色那片叶的**有效归属**（`State::ship_role_control`）：Auto = 这条结论是自动控制写的（它每回合按积压 + 观测需求定编），Player = 玩家钉的、AI 不碰。",
                     "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
                     "order_blueprint_mode": "图上**意图那一层**的表态：图上写了 `order` 就是叶自己的表态，没写（或缺图）= Inherit（Q1(c)：图的意图轴默认沉默）。⚠ 这是**图叶自己**的表态，不是链解析结果——与 `order_effective_mode` 不一致是正常的（例如图叶 Inherit、舰队默认叶 Player）。",
@@ -1136,11 +1159,14 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","observer_quota":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
                     "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
                     "mond_control": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
                     "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
+                    "observer_quota": "**观测配额**（目标头数，连续量）：本势力**该有几艘舰去异常区蹲着** = `学满所需的在场强度 ÷ 一艘舰在目标天体处值多少`（`autocontrol::knowledge`），再被「舰队的一半」压住（观测是副业：一支三艘舰的小势力把船全派去蹲点，既打不了仗也运不了货，而三艘舰根本够不到学满）。掌握度**到顶 ⇒ 配额 0**（棘轮之下没有东西可学了，这不是断崖，是同一条棘轮的另一面）。",
+                    "observer_count": "**此刻真的在观测的舰数**（有效角色 = `Observe`）。与 `observer_quota` 一起读就能分清「不想学」（配额 0）与「没人可派」（配额 > 0 但这一列跟不上）。",
+                    "observer_target": "**观测编队的驻地天体**：候选 = 异常区内的天体，按**期望在场收益**（`p(深度, 掌握度) × (1 + 深度 × depth_weight)`）**抽签**（不是取最大者），每 12 回合重抽一次 ⇒ 掌握度涨上去之后编队会自然往外挪（凡人先蹲前沿边上的海王星/冥王星，掌握度高了才轮到创神星/阋神星）。`null` = 没有带内天体。",
                     "mond_frontier_au": "**前沿海拔**（AU）：一次导航尝试就能精确到位（p = 1）的最远日心距 = `radius + arrival_eps/(drift_per_au×(1−mond_control))`。前沿**之外**不是「进不去」，而是「期望要试 `1/p` 次」；掌握度到顶时为 `null`（无穷远，指哪打哪）。",
                     "freight_lean": "**思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）= `2σ(−1.5 × 尚武度)`，**尚武度 = +和平↔军国 − 自然↔殖民**（两轴同权反号，写死在 `autocontrol::freight`）。中庸 = 1.0 = 旧的硬定编；**军国 < 1**（宁可缺货、宁可雇人也要把船留在战线上）、**和平/殖民 > 1**（殖民要给远方殖民地送补给 ⇒ 多跑运输）。",
                     "freighter_quota": "**目标运输舰条数**（连续量）= `需求 × freight_lean`，需求 = 有积压的货栈数。自动控制按「目标 − 现状」这个**缺口抽签**派人（概率 = 缺口 × 本舰的票 ÷ 同侧总票数，票按运力效率 ⇒ 期望入伙数正好是缺口）。**没有积压 ⇒ 配额 0 ⇒ 全员战舰**。",
@@ -1234,7 +1260,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_ship_order / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
                     "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
-                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是布尔、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`freighter` 列。",
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是三值字符串（War/Freight/Observe）、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`role` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),

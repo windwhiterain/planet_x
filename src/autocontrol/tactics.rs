@@ -10,6 +10,7 @@ use crate::sim;
 use std::collections::BTreeMap;
 
 use super::freight;
+use super::knowledge;
 
 // 统一的基本权重：**距离 + 克制 + per-武器随机扰动**，所有自动逻辑共用。克制权重
 // > 距离权重（把火力用在打得动的目标上，比贴着打更划算）；扰动是小量，让每件武器
@@ -497,6 +498,35 @@ pub(crate) fn ai_ship_turn(
         }
         // 路线走完（或没得跑）：**照常自动开火/轰炸**——射程内有敌舰就打、有敌城就炸，
         // 且不改写指令（航线保留，下一回合接着跑）。
+        auto_combat(state, config, ship_id, &owner);
+        return;
+    }
+
+    // --- 角色 = 观测舰：这一回合的活是**去异常区蹲着**（找仗打不是它的活）----------------
+    //
+    // 目标天体由 `knowledge::target_body` 按**期望在场收益**抽签（每 12 回合重抽一次 ⇒
+    // 掌握度涨上去之后编队会自然往外挪）。指令用 `Dock { body }`——**跟着天体走**，
+    // 于是它会一直待在带里（`sim::mond_presence` 只认「此刻在带内的活舰」）。
+    // 迷航照旧发生（深处要试几次才到位，见 `sim::mond_drift`），这正是这条干线的意义。
+    if role == ShipRole::Observe {
+        match knowledge::target_body(state, config, &owner) {
+            Some((body, _)) => {
+                let behavior = ShipBehavior::Dock { body: body.clone() };
+                if let Some(c) = state.control_mut(owner.clone()) {
+                    c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
+                }
+                decisions.push(ShipDecision {
+                    verdict: ShipVerdict::Move,
+                    target: Some(body.clone()),
+                    destination: Some(state.body_position(&body)),
+                    order: Some(behavior),
+                    ..base.clone()
+                });
+            }
+            None => decisions.push(base.clone()),
+        }
+        // 观测舰**照常自动开火**（不解除武装）：射程内有敌舰就打、有敌城就炸，
+        // 且不改写指令（驻地保留，下一回合接着待）。
         auto_combat(state, config, ship_id, &owner);
         return;
     }

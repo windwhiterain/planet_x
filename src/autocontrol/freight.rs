@@ -198,14 +198,20 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
     if state.ship_role_control(ship_id.to_string()).is_player() {
         return role;
     }
-    // 3) [**观测**：本舰要不要改行去蹲异常区 —— 见下面的「观测优先」那一段]
-    //    当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
+    // 3) **观测优先**（用户裁决：观测 > 运输 > 战斗）：观测是**唯一没有替代品**的角色——
+    //    渠道空转就是零掌握度，而运输缺一条船还能雇人（承包市场就是干这个的）。配额、选靶与
+    //    抽签在 `autocontrol::knowledge`（与这里**同形**的缺口抽签）；它自己读
+    //    `state.ship_role` 判断「我现在是不是观测舰」，所以入伙与退伍都在那一个函数里定。
+    if super::knowledge::should_observe(state, config, fid, ship_id) {
+        return ShipRole::Observe;
+    }
+    // 4) 当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
     let cur = role == ShipRole::Freight;
-    // 4) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
+    // 5) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
     if freight_tonnage(config, ship) <= 0.0 {
         return ShipRole::War;
     }
-    // 4) 配额 → 抽签。
+    // 6) 配额 → 抽签。
     let quota = freighter_quota(state, fid);
     let others = hauler_headcount(state, fid, ship_id);
     let temp = ROLE_WIDTH.max(1e-9);

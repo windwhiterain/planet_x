@@ -54,7 +54,18 @@ fn grow_fleet(state: &mut State, fid: &str, times: usize) {
 /// 连跑 `rounds` 个回合的**角色定编**（每回合先推进 `round` 再定编，与 `sim` 同步：
 /// 骰子是 `(势力, 舰名, 回合, "role")` 派生的，**换回合才换骰子**）。
 /// 返回每回合的运输舰名单。
+///
+/// ⚠ **这份用例集测的是集货定编**，而角色轴上现在还有**优先级更高**的第三态（观测舰，
+/// 用户裁决「观测 > 运输 > 战斗」）——不把它从棋盘上拿开的话，运输舰的名额会被观测抢走
+/// （实测：本文件里四条用例当场翻红，平均头数从 1.46 掉到 1.00），测出来的就不是集货的定编了。
+/// 拿开的方式用的是**真实存在的一种状态**：把本势力标成**已经学满 MOND**
+/// （`mond_control = 1.0` ⇒ 棘轮之下没有东西可学 ⇒ `observer_quota = 0` ⇒ 没人去观测），
+/// 而不是把观测那条机制关掉或改常数。
+/// 观测自己的定编/选靶/优先级由 `src/tests/autocontrol/knowledge.rs` 专门覆盖。
 fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> Vec<Vec<String>> {
+    if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
+        f.mond_control = 1.0;
+    }
     let mut hist = Vec::new();
     for _ in 0..rounds {
         state.round += 1;

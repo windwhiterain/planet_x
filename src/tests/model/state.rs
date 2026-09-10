@@ -44,6 +44,17 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
         s.blueprint = None;
         s.spawned_round = None;
     }
+    // 同理，把**指令叶**也还原成出厂形态（`Inherit` 的 `Idle`）：本测试测的是
+    // 「schema 迁移」与「没有图 ⇒ 指令链上那一层恒为空」，**不是**「这 8 回合里 AI 选了什么」。
+    // 在役的角色轴第三态（观测舰）会让 AI **从第 1 回合起**就写指令——它把观测舰派去
+    // `Dock` 异常区的目标天体（seed 7 抽到海王星），于是「第一艘舰的叶还是出厂那条 Idle」
+    // 这个前提不再成立。归位之后，断言仍然落在**链的形状**（`OrderSource::Leaf`）上。
+    for c in state.control.values_mut() {
+        for o in c.ship_orders.values_mut() {
+            o.value = ShipBehavior::Idle;
+            o.mode = ControlMode::Inherit;
+        }
+    }
     let text = ron::to_string(&state).expect("serialize the state");
     for needle in ["blueprint:None", "blueprints:{}"] {
         assert!(
