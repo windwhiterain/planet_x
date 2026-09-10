@@ -1,6 +1,10 @@
 # MOND / 柯伊伯引力异常
 
 > 状态 `[~]` ｜ 索引：[notes.md](../notes.md) ｜ 前身：`ideas.md` §4
+>
+> **下面三条 `[ ]` 的落点已定**：见 [科技体系：以 MOND 为干线](tech-system.md) §2–§4
+> ——`masters` 这份写死的名单升级为**连续掌握度** `mond_control`（`=1` 就是今天的 cult），
+> 三条待办分别变成干线上的「经济／军事／扩散」挂点。
 
 已实现：非 master 势力在异常区内导航偏移（`mond` 配置 + `sim::mond_drift`），cult（`masters`）
 指哪打哪。这是「cult 被围攻如何自保」的答案。可再加深：
