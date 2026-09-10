@@ -10,10 +10,11 @@
 > `feature/freight-collection` 合进 `main` 时加进来的 `ship_freighter` / `default_freighter` 当时
 > 没走 ②/A 的规矩——没有 `remove`、web 与 kit 都不认识它；现在三端齐了，并查实这条轴是**唯一
 > AI 会写的风格叶**（删叶 = 交回自动定编，不是冻结）；见该篇 **§12**）
-> → ③ ~~**舰船设计图**~~ → `[x]` **已完成**（`feature/ship-blueprint`，实现提交 `fe534ff`：
-> `SCHEMA_VERSION` **9 → 10**，
+> → ③ ~~**舰船设计图**~~ → `[x]` **已完成并合并**（`feature/ship-blueprint`，实现提交 `fe534ff`，
+> 合并提交 **`89741b8`**：`SCHEMA_VERSION` **9 → 10**，
 > 引擎 + `planet_x_ctl` + web 三端齐活，同 seed `--digest` **逐字不变**；实现记录、验收数据、
-> 未做项见 [`ship-blueprint.md`](notes/ship-blueprint.md) §6 与规格篇顶部状态行。
+> 未做项见 [`ship-blueprint.md`](notes/ship-blueprint.md) §6 与规格篇顶部状态行，
+> **审查方的独立验收**见同篇 **§7**）
 > 下一步（本轮之后）：`control-live-layers.md` §12.6 的排队项（方案 B「逐舰取值规则与文档对齐」、
 > 风格轴要不要真的 AI 执行者、`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的
 > `effective`/`order_source`）＋ `military-combat.md` 的 refit（把新图套到老舰上）＋
