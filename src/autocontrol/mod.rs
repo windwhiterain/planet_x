@@ -41,7 +41,9 @@ pub mod tactics;
 pub(crate) use budget::{read_budget, write_budget, BudgetKind};
 pub use economy::{control_plan, control_plan_all};
 pub(crate) use blueprints::design_fleets;
-pub(crate) use shipbuilding::{choose_loadout, choose_next_class, resolve_loadout, retool_shipyards};
+pub(crate) use shipbuilding::{
+    choose_loadout, choose_next_class, resolve_loadout, retool_haulers, retool_shipyards,
+};
 pub(crate) use style::regulate_styles;
 pub(crate) use tactics::{ai_ship_turn, auto_combat, kiting_dest};
 

@@ -3,7 +3,161 @@
 use crate::model::*;
 use crate::prng::Prng;
 use crate::sim;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::contract::sigmoid;
+use super::freight;
+
+// --- 造舰动机（用户裁决：**让造货运船的动机和造战争船的动机解耦**）---------------
+//
+// 两条动机、**两条通道**，刻意不折进同一个分数：
+//
+// * **战斗舰**看**敌对国与自己的实力差距**（[`threat_motive`]）——取代旧的「是否处于战争」
+//   这个布尔 + 常数加分。差距为负（敌人都比我弱）时动机压到 0 附近。
+// * **货船**看**集货运力缺口**（[`freight::haul_gap`] → [`retool_haulers`]）——与威胁无关，
+//   也不用舰队编成（编成是战时那条通道的事）。
+//
+// 两者**各占一个船坞**：战时重构先跑（行为逐字节不变），集货侧重构只认**它剩下的**船坞。
+// 旧写法里两者共用 `choose_next_class` 的一个 score，于是「有威胁」永远压过「缺运力」
+// ——那正是耦合。修 bug 时不要把两条动机再合成一个分数。
+
+/// 造战斗舰的动机上限：旧写法里「处于战争 ⇒ 旗舰 +0.6」的那个 0.6，现在成了**上限**
+/// （动机为 1 时才给满），于是这条改动只会让「战时堆旗舰」变得**更有分辨力**、不会更极端。
+const WAR_BUILD_BONUS: f64 = 0.6;
+/// 威胁动机的**中点**与**软化宽度**（相对差距的尺度，见 [`threat_motive`]）：
+/// 相对差距 1.0（敌对国的净超出 = 我全部实力）⇒ 动机 0.5。
+const THREAT_MID: f64 = 1.0;
+const THREAT_WIDTH: f64 = 0.5;
+/// **造舰的时间成本**：`TIME_PENALTY` 是顶格扣分，`TIME_REF` 是「不算慢」的回合数，
+/// `TIME_WIDTH` 是软化宽度。三条是**同一件事**的三个位置（造多久算慢、慢多少扣多少）。
+const TIME_PENALTY: f64 = 0.4;
+const TIME_REF: f64 = 12.0;
+const TIME_WIDTH: f64 = 6.0;
+/// 集货动机的**中点**：搬不动的比例过半才是「真的运不过来」⇒ 动机 0.5。
+const HAUL_MID: f64 = 0.5;
+const HAUL_WIDTH: f64 = 0.25;
+
+/// **造一艘某舰级的舰大概要几个回合**（纯函数，给 AI 决策用；`None` = 结构上造不出来）。
+///
+/// ```text
+/// 回合数 = build_points ÷ 每回合能推的进度
+/// 每回合进度 = max_affordable_inc( 成本÷build_points , 本势力的**造舰预算** , 0 , 船坞速率 )
+/// 船坞速率 = 该势力**最能造的那座城**的建造区面积 × 生产率 × 劳动比
+/// ```
+///
+/// * **与真实建造同源**：分母用的就是 `sim` 里那一段（[`sim::max_affordable_inc`]），
+///   预算读的就是自动控制自己写的那份造舰预算（[`super::budget::read_budget`]），
+///   劳动比也是 [`sim::labor_ratio`]——**三处都不另编**，否则「AI 以为 5 回合、实际 50 回合」
+///   这种错会悄悄发生（实测踩过：只看运力选舰级 ⇒ 全世界船坞都改成最贵的航母、一艘也下不了水）。
+/// * **预算与「买不买得起」是同一件事**：造舰预算本来就是从库存里按维护费保留之后算出来的
+///   （见 `budget::read_budget`），所以穷势力的每一级回合数都长，而**长的程度不一样**
+///   ——那正是「单位时间的运力」要区分的东西。
+/// * 取**最能造的那座城**（舰级进度是**按城**聚合的）：估的是「我这势力要多久能拿到这条船」，
+///   而不是某座具体船坞的排期。
+pub fn build_rounds(state: &State, config: &GameConfig, fid: &str, class: &str) -> Option<f64> {
+    let spec = config.ship_spec(class);
+    let bp = spec.build_points;
+    if bp <= 1e-9 {
+        return None;
+    }
+    let productivity = config.building_spec("construction").productivity;
+    let mut best_rate = 0.0f64;
+    for c in state.cities.iter().filter(|c| c.faction_id == fid && !c.razed) {
+        let area: f64 = c
+            .buildings
+            .iter()
+            .filter(|b| b.is_shipyard())
+            .map(|b| b.deployed)
+            .sum();
+        if area <= 1e-9 {
+            continue;
+        }
+        let labor = sim::labor_ratio(state, config, &c.name);
+        best_rate = best_rate.max(area * productivity * labor);
+    }
+    if best_rate <= 1e-9 {
+        return None; // 没有建造区 ⇒ 结构上造不出来。
+    }
+    let (budget, _mode) = super::budget::read_budget(
+        state,
+        config,
+        fid.to_string(),
+        super::budget::BudgetKind::Construction,
+    );
+    let per_progress: Vec<(String, f64)> = spec
+        .build_cost
+        .iter()
+        .map(|(r, c)| (r.clone(), c / bp))
+        .collect();
+    let inc = sim::max_affordable_inc(&per_progress, &budget, &ResourceMap::new(), best_rate);
+    if inc <= 1e-9 {
+        return None; // 预算推不动任何进度 ⇒ 等同造不出来（不是「很久」）。
+    }
+    Some(bp / inc)
+}
+
+/// **威胁动机**（0..1 的连续量）：**敌对国比自己强多少**。
+///
+/// ```text
+/// 敌对度_j = σ((开战阈值 − 对 j 的关系) ÷ 半个开战阈值)     // 关系正好在阈值上 = 0.5
+/// 相对差距 = Σ_j 敌对度_j × (实力_j − 自己实力) ÷ 自己实力   // 只有比自己强的才算数
+/// 动机     = σ((相对差距 − THREAT_MID) ÷ THREAT_WIDTH)
+/// ```
+///
+/// * **实力**用均势外交那把尺子（[`sim::faction_power_share`]：城 + 舰体占全星系的比例），
+///   不另编一个「军事实力」——否则「谁是霸权」与「谁该备战」会给出两个不同的答案。
+/// * **相对差距**（除以自己的实力）而不是绝对差：`AGENTS.md`「永远用相对数值比例而非绝对数值」，
+///   而且尺度无关（星系总实力随局内发展涨落，绝对差会漂）。
+/// * **只有比自己强才算威胁**：差距为负时动机趋近 0——压得住场子的势力不会因为「在打仗」
+///   就继续堆旗舰。于是**众弱结盟的备战动机 > 霸权的**，与 `step_balance_of_power` 的
+///   合纵连横自然咬合（霸权反而会松懈，这是这段机制的剧情价值）。
+pub fn threat_motive(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let shares = sim::faction_power_share(state, config);
+    let mine = shares.get(fid).copied().unwrap_or(0.0).max(1e-6);
+    let Some(f) = state.faction(fid) else { return 0.0 };
+    let war = config.combat.war_threshold;
+    let width = (-war).max(1.0) * 0.5;
+    let mut deficit = 0.0;
+    for (other, s) in &shares {
+        if other == fid {
+            continue;
+        }
+        let rel = f.relations.get(other).copied().unwrap_or(0.0);
+        deficit += sigmoid((war - rel) / width) * (s - mine);
+    }
+    sigmoid((deficit / mine - THREAT_MID) / THREAT_WIDTH)
+}
+
+/// **货船舰级**：本作里「一趟装多少 ÷ 单位时间 ÷ 养它多少钱」最好的那一级——**数据驱动，无特判**。
+///
+/// 用的是与定编同一把尺子（舰级版 `舱容 × 速度 × 维护费`，见 [`freight::freight_tonnage`]）
+/// ⇒ 配置里改数值它就跟着变，不写死舰名。今天选出的是**航母**（20×1.0÷7.5 = 2.67，
+/// 次高的驱逐只有 2.08），恰好也是唯一一个 `default_freighter = true` 的舰级
+/// ——派生结论与作者意图对上了，这是那把尺子没错的旁证。
+pub fn hauler_class(state: &State, config: &GameConfig, fid: &str) -> Option<String> {
+    config
+        .ships
+        .keys()
+        .map(|cls| {
+            // **单位时间能造出来的运力** = 舰级运力 ÷ 建造回合数（造不出来的记 0）。
+            //
+            // 为什么必须除建造时间：只看运力时永远选**航母**（20×1.0÷7.5 = 2.67，比次高的
+            // 驱逐 2.08 高 28%，却贵一倍还多）。实测（seed 7 / 600 回合）：每个势力的船坞都被
+            // 改成航母却**一艘也下不了水**，全世界 600 回合只拆平 4 次——战争没了、运输也没了。
+            // 除过时间之后，穷势力会选**造得动**的那一级，富势力仍然选航母（它也是唯一一个
+            // `default_freighter = true` 的舰级，派生结论与作者意图对上了）。
+            let spec = config.ship_spec(cls);
+            let tonnage = spec.cargo * spec.speed_mult / spec.upkeep.max(1e-6);
+            let score = match build_rounds(state, config, fid, cls) {
+                Some(rounds) if rounds > 0.0 => tonnage / rounds,
+                _ => 0.0,
+            };
+            (cls.clone(), score)
+        })
+        .filter(|(_, s)| *s > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(c, _)| c)
+}
 
 /// Pick a ship class for a new colony / new shipyard (with no class yet). Instead of
 /// "random among fully-affordable" (which a cash-limited faction collapses to corvette),
@@ -37,7 +191,8 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
         }
     }
     let total = total.max(1);
-    let at_war = sim::faction_at_war(state, config, fid);
+    // **造战斗舰的动机** = 敌对国与自己的实力差距（连续量），不再是「是否处于战争」这个布尔。
+    let motive = threat_motive(state, config, fid);
 
     // Score: a **normalized** resource fit — how well the faction's profile covers the
     // class's cost (0..1, so cheap and expensive hulls are on the same scale: scarce
@@ -60,8 +215,16 @@ pub(crate) fn choose_next_class(state: &State, fid: &str, config: &GameConfig, r
         // 这一离散标志区分旗舰（战列/航母）与巡洋/护卫，给一个明确的战争加成，避免和
         // 巡洋（造价相近）混在一起。
         let flagship = spec.build_points >= 40.0 && spec.upkeep >= 6.5;
-        let war_bonus = if at_war && flagship { 0.6 } else { 0.0 };
-        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty + war_bonus));
+        let war_bonus = if flagship { WAR_BUILD_BONUS * motive } else { 0.0 };
+        // **时间成本**（用户裁决：「得让 AI 能估计建造时间」）：造得越久，这一级越不该现在排产。
+        // 用 `σ((回合数 − TIME_REF) ÷ TIME_WIDTH)` 而不是硬性的「超过 N 回合不造」——
+        // **结构上造不出来**（`None`）才顶格扣分，而「要造很久」只是扣分（穷势力仍然造得出重舰，
+        // 只是不划算），遵 `AGENTS.md`：不设进不去的目标。
+        let time_penalty = match build_rounds(state, config, fid, cls) {
+            Some(rounds) => TIME_PENALTY * sigmoid((rounds - TIME_REF) / TIME_WIDTH),
+            None => TIME_PENALTY,
+        };
+        scored.push((cls.clone(), fit + mix_bonus - upkeep_penalty + war_bonus - time_penalty));
     }
 
     // Weighted random pick → variety; deterministic via the seeded RNG.
@@ -421,7 +584,11 @@ pub(crate) fn retool_shipyards(
     rng: &mut Prng,
     retools: &mut Vec<RetoolDecision>,
 ) {
-    if !sim::faction_at_war(state, config, fid) {
+    // **威胁动机取代「是否处于战争」这个布尔**（连续、且只有**比自己强的**敌人才算威胁）。
+    // 用概率闸而不是 `motive > 常数`：动机 0.9 ⇒ 九成回合照旧重构；动机 0.1 ⇒ 偶尔提前备战
+    // （冷战期也会造舰——那正是「动机连续」的意义）。骰子走 `derived_roll`，不消费主 `Prng`。
+    let motive = threat_motive(state, config, fid);
+    if sim::derived_roll(fid, "war-retool", state.round, "retool") >= motive {
         return;
     }
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -445,62 +612,155 @@ pub(crate) fn retool_shipyards(
     if new_class == over_class {
         return;
     }
-    // 找到产出 over_class 的**可改装**船坞（按城市 id、再按建筑 id）：
-    // 挂 `Player` 图的跳过（玩家钉住的图 AI 不许重估），挂悬空指针的跳过（那个区已停产）。
+    // 找到产出 over_class 的**可改装**船坞（按城名、再按建筑 id 的第一个）。
+    let target = retoolable_yards(state, fid)
+        .into_iter()
+        .find(|(_, _, cls, _)| cls == &over_class);
+    if let Some((cid, bid, from, bp)) = target {
+        apply_yard_class(state, fid, &cid, bid, bp.as_ref(), &new_class);
+        retools.push(RetoolDecision {
+            faction: fid.to_string(),
+            city: cid,
+            building: bid,
+            from,
+            to: new_class,
+        });
+    }
+}
+
+/// 本势力**可改装的船坞**：`(城, 建筑, 现在造的舰级, 挂的设计图)`，按 (城名, 建筑 id) 序。
+///
+/// 两道归属闸（与设计图那套口径一致，见 spec §4.7）：
+/// * **悬空图指针** ⇒ 那个区本来就停产（Q10(a)），改装它没有意义 ⇒ 跳过；
+/// * **归属解析为 `Player` 的图** ⇒ 跳过（玩家钉住的图 AI 不许重估）。
+///
+/// 只有 `ship_type` 已定的区算数（没定舰级的区本来就不出舰）。
+fn retoolable_yards(
+    state: &State,
+    fid: &str,
+) -> Vec<(CityId, BuildingId, String, Option<BlueprintId>)> {
+    let mut out = Vec::new();
     let fid_owned = fid.to_string();
-    let mut target: Option<(CityId, BuildingId, Option<BlueprintId>)> = None;
     for c in &state.cities {
         if c.faction_id != fid {
             continue;
         }
         for b in &c.buildings {
-            if b.is_shipyard() && b.ship_type.as_deref() == Some(over_class.as_str()) {
-                match b.blueprint.as_ref() {
-                    // 悬空指针 ⇒ 该区停产，改装它没有意义。
-                    Some(bp) if !blueprint_known(state, &fid_owned, bp) => continue,
-                    // 玩家钉住的图 ⇒ 跳过，另选一个。
-                    Some(bp) if state.blueprint_control(&fid_owned, bp).is_player() => continue,
-                    other => {
-                        target = Some((c.name.clone(), b.id, other.cloned()));
-                        break;
-                    }
+            if !b.is_shipyard() {
+                continue;
+            }
+            let Some(cls) = b.ship_type.clone() else { continue };
+            if let Some(bp) = b.blueprint.as_ref() {
+                if !blueprint_known(state, &fid_owned, bp) {
+                    continue;
+                }
+                if state.blueprint_control(&fid_owned, bp).is_player() {
+                    continue;
                 }
             }
-        }
-        if target.is_some() {
-            break;
+            out.push((c.name.clone(), b.id, cls, b.blueprint.clone()));
         }
     }
-    if let Some((cid, bid, bp)) = target {
-        if let Some(c) = state.city_mut(&cid) {
-            for b in &mut c.buildings {
-                if b.id == bid {
-                    b.ship_type = Some(new_class.clone());
-                    break;
-                }
+    out
+}
+
+/// 把一个船坞的舰级改成 `new_class`（调用方已保证它可改装：没挂玩家图、指针不悬空）。
+///
+/// 挂了 `Auto` 图 ⇒ **连图的 `class` 一起改**：口径 A 要求两者相等，只改一边会让这张图对不上
+/// 它自己的建造区（`blueprint_class_mismatch` 的形态）。
+/// 选装**不预生成**（`components` 保持原样 = 空 ⇒ 出厂时由生成器现算，见 `resolve_loadout`）：
+/// 在这里算一次会把「出厂那一刻按当时库存算」变成「改装那一刻算」，那是行为改变
+/// （spec §2.4 的硬约束）。
+fn apply_yard_class(
+    state: &mut State,
+    fid: &str,
+    cid: &CityId,
+    bid: BuildingId,
+    bp: Option<&BlueprintId>,
+    new_class: &str,
+) {
+    if let Some(c) = state.city_mut(cid) {
+        for b in &mut c.buildings {
+            if b.id == bid {
+                b.ship_type = Some(new_class.to_string());
+                break;
             }
         }
-        // 挂了 `Auto` 图 ⇒ **改图**（舰级），而不是只改 `ship_type`：口径 A 要求两者相等，
-        // 只改一边会让这张图对不上它自己的建造区（`blueprint_class_mismatch` 的形态）。
-        // 选装**不预生成**（`components` 保持原样 = 空 ⇒ 出厂时由生成器现算，见
-        // `resolve_loadout`）：在这里算一次会把「出厂那一刻按当时库存算」变成
-        // 「改装那一刻算」，那是行为改变（spec §2.4 的硬约束）。
-        if let Some(bp) = bp {
-            if let Some(leaf) = state
-                .control_mut(fid.to_string())
-                .and_then(|c| c.blueprints.get_mut(&bp))
-            {
-                leaf.value.class = new_class.clone();
-            }
-        }
-        retools.push(RetoolDecision {
-            faction: fid.to_string(),
-            city: cid,
-            building: bid,
-            from: over_class,
-            to: new_class,
-        });
     }
+    if let Some(bp) = bp {
+        if let Some(leaf) = state
+            .control_mut(fid.to_string())
+            .and_then(|c| c.blueprints.get_mut(bp))
+        {
+            leaf.value.class = new_class.to_string();
+        }
+    }
+}
+
+/// **集货侧的独立通道**：搬不动的比例一大，就腾**一个**船坞改产货船。
+///
+/// ```text
+/// 动机 = σ((搬不动的比例 − HAUL_MID) ÷ HAUL_WIDTH) × 思潮倾向
+/// ```
+///
+/// * **搬不动的比例**（[`freight::haul_gap`]）已经把「雇到的人」扣掉了：雇得到人就不必自己
+///   造船——雇佣市场本来就该顶掉缺口（分工，而不是重复建设）。
+/// * **乘思潮倾向**（[`freight::freight_lean`]）：军国宁可缺货、宁可雇人，也不把船坞从战争
+///   生产上挪开——与角色轴用的是**同一个** `lean`（同一条裁决，两处落地）。
+/// * 掷一次 `(势力, "hauler-retool", 回合)` 的派生骰子：**不消费主 `Prng`**。
+/// * 命中就改**一个**船坞（至多一个/回合，免得一口气把造船能力全搬走）：挑**本势力舰数最少
+///   的那一级**的船坞（改产冗余最小的一级），同分按 (城名, 建筑 id) 序（`sort_by` 是稳定的）。
+/// * **至多腾一个**（本势力已经有造货船的船坞就什么都不做）
+/// * **不碰本回合已被战时重构拿走的船坞**（`claimed`）：两条动机各占一个，谁也不淹没谁
+///   ——这就是「造货船的动机与造战争船的动机**解耦**」的落点。
+pub(crate) fn retool_haulers(
+    state: &mut State,
+    config: &GameConfig,
+    fid: &str,
+    claimed: &BTreeSet<(CityId, BuildingId)>,
+    retools: &mut Vec<RetoolDecision>,
+) {
+    let Some(hauler) = hauler_class(state, config, fid) else { return };
+    // **至多一个货船船坞**：配额是按「处积压数」算的几条腿，一个船坞的产出绰绰有余。
+    // 没有这条闸，缺口大的势力会**每回合**腾一个船坞，把全势力的造船能力都改成货船
+    //（实测：那样做会把整个世界的战争产能搬空）。
+    if retoolable_yards(state, fid).iter().any(|(_, _, cls, _)| *cls == hauler) {
+        return;
+    }
+    let p = (sigmoid((freight::haul_gap(state, config, fid) - HAUL_MID) / HAUL_WIDTH)
+        * freight::freight_lean(state, fid))
+    .clamp(0.0, 1.0);
+    if p <= 0.0 || sim::derived_roll(fid, "hauler-retool", state.round, "retool") >= p {
+        return;
+    }
+    // 每一级现在有几艘（挑**冗余最小**的那一级改产）。
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
+        *counts.entry(s.class.clone()).or_insert(0) += 1;
+    }
+    let mut cands: Vec<(CityId, BuildingId, String, Option<BlueprintId>)> =
+        retoolable_yards(state, fid)
+            .into_iter()
+            .filter(|(cid, bid, cls, _)| {
+                cls != &hauler && !claimed.contains(&(cid.clone(), bid.clone()))
+            })
+            .collect();
+    cands.sort_by(|a, b| {
+        counts
+            .get(&a.2)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&counts.get(&b.2).copied().unwrap_or(0))
+    });
+    let Some((cid, bid, from, bp)) = cands.into_iter().next() else { return };
+    apply_yard_class(state, fid, &cid, bid, bp.as_ref(), &hauler);
+    retools.push(RetoolDecision {
+        faction: fid.to_string(),
+        city: cid,
+        building: bid,
+        from,
+        to: hauler,
+    });
 }
 
 /// 这个势力库里**有没有**这张图（`Building.blueprint` 是悬空指针吗）。

@@ -498,6 +498,24 @@ fn write_round(
                 // 信誉（承包市场的准入资产，势力级）。它是**唯一的抵押品**：承运人不赔货值
                 // （Q1(b)），托运方靠这一列决定敢不敢把货交给它。
                 "reputation": r2(f.reputation),
+                // **思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）：
+                // `freight_lean` 是「愿意投在集货上的头数倍数」（中庸 = 1.0，军国 < 1、
+                // 和平/殖民 > 1），`freighter_quota` 是「目标运输舰条数」= 需求 × 倾向。
+                // 有这两列，「这个国家为什么少跑运输」是可读的，而不是只能从行为反推。
+                "freight_lean": r2(crate::autocontrol::freight::freight_lean(state, &f.name)),
+                "freighter_quota": r2(crate::autocontrol::freight::freighter_quota(state, &f.name)),
+                // **造舰的两条动机**（用户裁决：解耦）——
+                // `threat_motive`：敌对国比自己强多少（造战斗舰）；
+                // `haul_gap`：集货运力**搬不动的比例**（造货船；已雇到的部分不算缺口）。
+                // 有这两列，「这个国家为什么在造重舰 / 为什么在造船坞运货」是可读的。
+                "threat_motive": r2(crate::autocontrol::shipbuilding::threat_motive(state, config, &f.name)),
+                "haul_gap": r2(crate::autocontrol::freight::haul_gap(state, config, &f.name)),
+                // 此刻实际在跑运输的舰数（有效角色为 true；含玩家钉住与舱里有货的）。
+                "freighter_count": state
+                    .ships
+                    .iter()
+                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()))
+                    .count(),
                 "city_ids": city_ids,
                 "ship_ids": ship_ids,
             })
@@ -903,9 +921,14 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
                     "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
+                    "freight_lean": "**思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）= `2σ(−1.5 × 尚武度)`，**尚武度 = +和平↔军国 − 自然↔殖民**（两轴同权反号，写死在 `autocontrol::freight`）。中庸 = 1.0 = 旧的硬定编；**军国 < 1**（宁可缺货、宁可雇人也要把船留在战线上）、**和平/殖民 > 1**（殖民要给远方殖民地送补给 ⇒ 多跑运输）。",
+                    "freighter_quota": "**目标运输舰条数**（连续量）= `需求 × freight_lean`，需求 = 有积压的货栈数。自动控制按「目标 − 现状」这个**缺口抽签**派人（概率 = 缺口 × 本舰的票 ÷ 同侧总票数，票按运力效率 ⇒ 期望入伙数正好是缺口）。**没有积压 ⇒ 配额 0 ⇒ 全员战舰**。",
+                    "threat_motive": "**造战斗舰的动机**（0..1）= 敌对国比自己强多少：`σ((Σ_j 敌对度_j × (实力_j − 自己实力) ÷ 自己实力 − 1) ÷ 0.5)`。实力用均势外交那把尺子（城 + 舰体占比）；**只有比自己强的才算威胁** ⇒ 压得住场子的势力不会因为「在打仗」就继续堆旗舰（众弱结盟的备战动机 > 霸权的）。它取代了旧的「是否处于战争」这个布尔。",
+                    "haul_gap": "**造货船的需求**（0..1）= 集货运力**搬不动的比例**：`Σ(要求运力 − 自有 − 已雇) ÷ Σ要求运力`，逐货栈夹到 ≥0 再求和。**已雇到的不算缺口**（雇得到人就不必自己造船）。它推动 `retool_haulers` 腾一个船坞改产货船——**与 `threat_motive` 各占一个船坞，互不淹没**（这就是两条造舰动机的「解耦」）。",
+                    "freighter_count": "**此刻实际在跑运输的舰数**（有效角色为 true：含玩家钉住的、舱里载着货的、正在执行承包单的）。把这一列与 `freighter_quota` 对比，就能分辨「思潮不让跑」（配额低）与「没人可派」（配额高但舰不够）。",
                 },
             }),
             "contracts" => json!({
@@ -1188,6 +1211,14 @@ mod tests {
         assert!(factions[0].get("faction_id").is_some(), "factions 表要有 faction_id 列");
         assert!(factions[0].get("relations").is_some(), "factions 表要有 relations");
         assert!(factions[0].get("resources").is_some(), "factions 表要有 resources（库存）");
+        // 思潮 → 集货倾向：**「这个国家为什么少跑运输」必须可读**，而不是只能从行为反推。
+        for col in ["freight_lean", "freighter_quota", "freighter_count"] {
+            assert!(factions[0].get(col).is_some(), "factions 表缺 {col}（思潮→集货倾向）");
+        }
+        // 造舰的两条动机（解耦）：也要能从读面上看出「为什么造重舰 / 为什么造货船」。
+        for col in ["threat_motive", "haul_gap"] {
+            assert!(factions[0].get(col).is_some(), "factions 表缺 {col}（造舰动机）");
+        }
         // cities table: governance distance + revolt-risk are game-derived but emitted for the agent.
         let cities = jsonl(&s.0.join("idx/cities.jsonl"));
         assert!(!cities.is_empty());
