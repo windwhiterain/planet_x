@@ -412,8 +412,13 @@ residualCount: 13          （实验前是 12）
   * 这条基线现在写在 `notes.md` 末尾（B4 那一轮顺手回填的；此前那里留的是更早的
     `81A19749…1811`，与本轮无关，别再拿旧值当基线）。
 * `cargo nextest run -p planet_x_web`：**27 绿**（含 3 条新的 `views_tests`）。
-* **全档**：`cargo nextest run -P full` = **233 通过 / 0 失败 / 34 跳过**（合并后实测，28.6 s；
-  合并前是 230——多出来的 3 条是 B4 那边新加的）。
+* **全档**（都在**合并后的树上**实测，`main` 合并点 `1f4478b`）：
+  * 合并 `a310788`（B4 战斗中间量）之后：**233 通过 / 0 失败 / 34 跳过**（28.6 s）。
+  * 再并入 `c08e467`（B5a 输入面 `pre`，合并期间另一会话落的）之后：**238 通过 / 0 失败 /
+    34 跳过**（30.5 s）——多出来的 5 条是 B5a 那边新加的。
+* **合并的引擎中性是"构造性"的**：`git diff --stat c08e467 1f4478b -- src/ config/` **为空**
+  ⇒ 合并后的引擎与 config 与 B5a **逐字相同**，digest 不可能被本轮改动；
+  在合并后的 `main` 上再测一次 digest 仍是 `C928C3F1…06A9`。
 * 覆盖率报告（`cargo test … --nocapture`）：
   `state.ships，seed 7 / 40 回合：字段 18 个 = 认领 5 + 残差 13；残差 = attack_hist、blueprint、component_hp、components、doctrine、faction_id、hull_max、kiting、position、shield、shield_max、spawned_round、velocity`
   ——**残差永远非空**（那条断言本身也是一条守门人：全被认领说明有人把字段写死在别处了）。
