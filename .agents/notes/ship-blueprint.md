@@ -178,3 +178,39 @@ kit demo「全部断言通过」，其中**同分取最老**由一对真实同�
 **未做 / 偏离**（详见规格篇顶部状态行的同一张表）：refit（老舰套新图）、时代门控、
 web 里**编辑/新建图**的面板（只做了建造区那一行的指针 + 悬空指针显示）、AI 主动建图
 （`Auto` 图的执行者只有「重估已有图」这一半）、图形化的「买不起」提示（只有投影列）。
+
+## 7. 独立验收（**审查方**用另一套量具重跑，2026-10）
+
+实现方自述只当线索：下面是**另一个进程**用自己的量具、不看实现代码、只对契约跑出来的结果
+（两把量具都在 `scratch/`，gitignored）。
+
+1. **总量具** `scratch/accept_blueprint.ps1`：
+   * `cargo test --workspace` 全绿：lib **138 passed / 1 ignored**、longhorizon 6+10ignored、
+     projection_derived 4、web **19 + 2**、doc-tests 0（共 9 份 `test result`）。
+   * **行为中性**：`--seed 42 --round 240 --digest 20` 的 digest 行 sha256 = `293725C4…DBC4`
+     —— 与合并前 main（v9）**逐字节相同**（取法：只取 `^\{` 行、`\n` 连接、UTF-8 无 BOM）。
+   * **旧档零损失**：审查方自己那份 v9 档（`scratch/blueprint_fixture/ckpt_v9.ron`）在新二进制下
+     跑 `--round 240 --digest 20`，与 **v9 二进制**逐字节相同（`38E08F94…`）。
+   * **旧档读面 / 投影**：`--control` 只多出 `blueprints`（空库），其余**全部 9 个势力逐字段相同**；
+     投影里 13 艘舰与 22 个建造区的 `blueprint` 全 `null`，`spawned_round` 全 `null`（= 未知）。
+2. **契约探针** `scratch/accept_blueprint_contract.py`（A–E 五段**全部通过**）：
+   * A 读面=写面：建图 → 读回**全量** `components` → **原样回传是不动点**；`remove` 删图也支持；
+   * B 六个丢弃码一字不差地报出来（`no_such_component` / `duplicate_component` /
+     `too_many_components` / `blueprint_class_mismatch` / `no_such_blueprint` / `not_a_shipyard`）；
+   * C 链与出处四态齐全（`None` / `leaf` / `fleet_default` / `blueprint:守家`），且
+     **图层压过舰队默认**由**一艘真下水的舰**（`玉衡`）验证：`order_source = blueprint:守家`、
+     有效意图 = 图里的 `Dock 月球`；
+   * D 投影与 `schema.json` 声明齐、`cities.buildings[].blueprint` 在、ships 五列齐
+     （`spawned_round` 有真值）；
+   * E `--control-schema` 有 `blueprints`、`--schema` 有 `blueprint`。
+3. **kit 端到端**：`demo.py` **全部断言通过**（含 `[4b]`/`[4c]` 与「同分取最老」的真实同分对证明）。
+4. **web 实机**（审查方自己点的一遍，3001；证据 `scratch/blueprint-web-verified.png`）：
+   建图 → 建造区那一行显示 `设计图 [侦察护卫（护卫舰·Player）]` → **删图后**同一行变成
+   `侦察护卫（库里没有这张图 ⇒ 本区停产）`（Q10(a) 在界面上可见）。
+   ⚠ 第一次挂指针被**正确地拒了**：AI 的 `retool_shipyards` 早已把 `长三角#3` 从 `battleship`
+   改成 `corvette`，而图还是按旧舰级建的 ⇒ `blueprint_class_mismatch`。这条顺带证明**守卫真的在工作**。
+
+**审查方另外钉住的一条语义**（探针两个方向都测了）：指令轴上「叶写着 `Inherit` + 舰队默认是
+**Player**」⇒ **舰队默认的值压过叶里的值**（出处诚实地报 `fleet_default`）；「叶存在就用叶里的值」
+出现在**舰队默认不是玩家**时（出处报 `leaf`）。风格三轴与指令轴在这里**不一样**——
+`order_source` 存在的意义就是把这件事说出来。
