@@ -127,7 +127,7 @@ pub struct Blueprint {
 * **与 `eras-technology` 的解锁**：解锁式设计图需要一个「什么时代能造什么图」的门控表，
   那属于 `eras-technology.md` 的范畴，本 note 只把**容器**做好。
 
-## 6. 实现记录（`feature/ship-blueprint`，`SCHEMA_VERSION` 9 → 10）
+## 6. 实现记录（`feature/ship-blueprint`，实现提交 `fe534ff`，`SCHEMA_VERSION` 9 → 10）
 
 **一句话**：设计图 = 势力级库（`ControllableState.blueprints: BTreeMap<图名, Control<Blueprint>>`）
 + 建造区指针（`Building.blueprint`）+ 出厂快照（`Ship.components` / `Ship.blueprint`）。

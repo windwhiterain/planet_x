@@ -2,6 +2,7 @@
 
 > 状态 `[x]`（**十条裁决逐条落地，三端齐活**）｜ 实现记录 / 验收数据 / 未做项：
 > [`ship-blueprint.md`](ship-blueprint.md) §6 ｜ 分支 `feature/ship-blueprint`，
+> **实现提交 `fe534ff`**（本行随文档修订提交补记；`git log --oneline main..feature/ship-blueprint` 看全），
 > `SCHEMA_VERSION` **9 → 10**（v7→v8 产地货栈、v8→v9 货舱 + 运输 Haul 已被
 > `feature/freight-collection` 用掉）｜
 > 索引：[notes.md](../notes.md) ｜ 关联：[`ship-blueprint.md`](ship-blueprint.md)（**设计/裁决篇**：
