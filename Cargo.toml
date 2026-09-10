@@ -26,3 +26,19 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 opt-level = 3
+
+# **测试档**（`cargo test` / `cargo nextest run` 用的就是它——它默认继承 `dev` 的
+# `opt-level = 0`）：引擎是「字符串键 BTreeMap + 大量小函数」的形态，未优化的机器码在这种
+# 代码上比优化过的慢一个数量级；全档 ~110 s 里绝大部分是这一项，**不是断言**。
+#
+# 只提 `opt-level`，别的都**故意不动**：
+# * `debug-assertions` / `overflow-checks` 保持开启——它们要抓的 bug 比这点时间值钱；
+# * 不碰 `lto` / `codegen-units`：换来的运行时间抵不过编译时间的增加。
+#
+# **行为中性**：Rust 没有 fast-math，f64 运算仍是严格 IEEE ⇒ 同 seed 的 `--digest`
+# 必须**逐字不变**。这是验收判据：变了就是改错了，不是「浮点正常抖动」。
+#
+# ⚠ 代价：这个档位一变，**所有依赖要按新档位重编一次**（首次 `cargo nextest run` 会慢
+# 一两分钟），换完之后每一轮都省。
+[profile.test]
+opt-level = 2

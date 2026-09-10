@@ -2,6 +2,11 @@
 
 > 状态：`feature/refactor-modules` 已落地。相关：[`code-layout.md`](code-layout.md)（同一次
 > 重构里的文件拆分与单测搬家）。
+>
+> ⚠ **下表里的墙钟秒数（4.0 / 29.7 / 95.8 s）是 `feature/test-perf` 之前的口径**：那时
+> 测试跑在 dev 档（`opt-level = 0`）。该分支已加 `[profile.test] opt-level = 2`（见
+> [`test-wall-clock.md`](test-wall-clock.md)），**分档判据（模拟回合数）完全不变，只有墙钟
+> 会变**——重测后回填本表，别让旧数字冒充新口径。
 
 ## 1. 问题：时间全花在 7 条用例上
 
