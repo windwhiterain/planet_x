@@ -370,6 +370,15 @@ impl Default for BalanceOfPowerConfig {
         }
     }
 }
+/// 长存历史账本（[`crate::model::Ledger`]）的容量配置。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct HistoryConfig {
+    /// 账本最多保留多少条里程碑（`0` = 不设上限，默认）。超出时丢弃**最旧**的记录，并把
+    /// 丢弃量与丢弃到的回合记进账本自身（[`crate::model::Ledger::dropped`]）——截断可见。
+    #[serde(default)]
+    pub max_milestones: usize,
+}
+
 /// 思潮（Ideology）驱动 tuning——4 条轴逐回合按「变化因素」向信号 target 靠拢。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IdeologyConfig {
@@ -471,6 +480,9 @@ pub struct GameConfig {
     /// 思潮（可变化意识形态）驱动 tuning。`#[serde(default)]` 容忍旧配置无此节。
     #[serde(default)]
     pub ideology: IdeologyConfig,
+    /// 长存历史账本的容量。`#[serde(default)]` 容忍旧配置无此节（默认 0 = 无损）。
+    #[serde(default)]
+    pub history: HistoryConfig,
     /// Resource definitions (key -> display metadata). This is the source of
     /// truth for which resource keys exist.
     pub resources: BTreeMap<String, ResourceDef>,

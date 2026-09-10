@@ -4,13 +4,54 @@ use serde::{Deserialize, Serialize};
 use crate::model::{BodyId, CityId, FactionId, ShipId};
 use serde_json::json;
 
+/// 给「纯标签 enum」（只有单元变体）生成 **字符串化** 的 `From`/`TryFrom<String>`，配合
+/// `#[serde(into = "String", try_from = "String")]` 使用。
+///
+/// # 为什么不能按 serde 默认表示
+///
+/// serde 默认把单元变体序列化成**裸标识符**（RON 里是 `cause:combat`）。这样的 enum 一旦
+/// 嵌在**内部标签 enum**（`#[serde(tag = "...")]`，本文件里就是 [`GameEvent`]）内部，
+/// **RON 就再也读不回来**：deserialize 侧要把整个结构先缓冲成自描述内容，而 RON 的
+/// `deserialize_any` 无法把裸标识符还原成内容，于是报
+/// `Expected string or map but found a unit value instead`。
+///
+/// 后果不是「少一个字段」，而是**整份 `State` 反序列化失败**——`--save` 写出的 checkpoint
+/// 用 `--start` 读不回来（`load_initial` 还会把这个错误咽掉、退回当裸 `State` 解析，最终
+/// 报成一句莫名其妙的「missing field `round` in `State`」，指向文件末尾）。实测：
+/// `(type:"a",ship:"x",cause:combat)` 读不回来，而 `(type:"a",ship:"x",cause:"combat")` 可以。
+///
+/// 写成字符串是一石二鸟：RON 与 JSON 都能原样读回（`source:""` 之类），而 **JSON 侧的形状
+/// 完全不变**——`serde_json` 本来就把单元变体写成 `"combat"` 这样的字符串，所以 agent 视图、
+/// 投影、WebUI 一个字节都不动。
+macro_rules! stringly_unit_enum {
+    ($ty:ident { $($name:literal => $variant:ident),+ $(,)? }) => {
+        impl From<$ty> for String {
+            fn from(v: $ty) -> String { v.as_str().to_string() }
+        }
+        impl TryFrom<String> for $ty {
+            type Error = String;
+            /// 认不出的字符串**明确报错**（而不是退回某个默认变体）——checkpoint 里出现
+            /// 未知标签说明档与新二进制对不上，必须响亮地失败。
+            fn try_from(s: String) -> Result<Self, String> {
+                match s.as_str() {
+                    $($name => Ok($ty::$variant),)+
+                    other => Err(format!("unknown {}: {other:?}", stringify!($ty))),
+                }
+            }
+        }
+    };
+}
+
 /// 舰被击毁的**原因**。
 ///
 /// 此前「战死」与「维护费欠缴锈蚀报废」复用同一个 [`GameEvent::ShipDestroyed`]，agent 无法
 /// 判断一艘舰到底是打没的还是锈没的。把原因显式化，「谁被谁打沉」与「哪支舰队被经济拖垮」
 /// 才能分开统计。
+///
+/// **序列化成字符串**（见 [`stringly_unit_enum`] 的说明）：单元变体若按 serde 默认写成
+/// **裸标识符**，嵌在内部标签 enum（[`GameEvent`]）里时 RON 读不回来。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "String", try_from = "String")]
 pub enum DeathCause {
     /// 被敌方火力打沉（凶手见 [`Killer`]）。
     Combat,
@@ -19,6 +60,18 @@ pub enum DeathCause {
     /// 其它拆解（Scrapped）。
     Scrapped,
 }
+
+impl DeathCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeathCause::Combat => "combat",
+            DeathCause::UpkeepShortfall => "upkeep_shortfall",
+            DeathCause::Scrapped => "scrapped",
+        }
+    }
+}
+
+stringly_unit_enum!(DeathCause { "combat" => Combat, "upkeep_shortfall" => UpkeepShortfall, "scrapped" => Scrapped });
 
 /// 击毁一艘舰的**凶手**：补刀的那一发来自哪艘舰、哪个势力、什么弹种。
 ///
@@ -34,8 +87,10 @@ pub struct Killer {
 }
 
 /// 一艘舰**从哪来**。三条造舰路径都要能被区分，否则「这艘舰哪来的」在历史里答不出。
+///
+/// 与 [`DeathCause`] 一样**序列化成字符串**（见 [`stringly_unit_enum`]）。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "String", try_from = "String")]
 pub enum SpawnVia {
     /// 本势力某城的建造区出厂（[`GameEvent::ShipSpawned`] 的 `city` 是出厂城）。
     Shipyard,
@@ -46,18 +101,41 @@ pub enum SpawnVia {
     Resurgence,
 }
 
+impl SpawnVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpawnVia::Shipyard => "shipyard",
+            SpawnVia::Story => "story",
+            SpawnVia::Resurgence => "resurgence",
+        }
+    }
+}
+
+stringly_unit_enum!(SpawnVia { "shipyard" => Shipyard, "story" => Story, "resurgence" => Resurgence });
+
 /// 新殖民 / 复垦的**方式**。
 ///
 /// 空白城（razed）保留最后主人的 `faction_id`（diaspora claim），所以复垦时**旧主是可读的
 /// 历史**——`prev_owner` 记下它，「谁失去了这座城市」不再丢失。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "String", try_from = "String")]
 pub enum FoundingHow {
     /// 在**从未被占据**的定居点上新建一座城。
     NewSite,
     /// 复垦一座**被夷平的空白城**（`prev_owner` = 它倒下时的主人）。
     Refounded,
 }
+
+impl FoundingHow {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FoundingHow::NewSite => "new_site",
+            FoundingHow::Refounded => "refounded",
+        }
+    }
+}
+
+stringly_unit_enum!(FoundingHow { "new_site" => NewSite, "refounded" => Refounded });
 
 /// 一回合内发生的、值得 agent 知道的事件。每回合开始时被清空、回合演化中被
 /// 追加；agent 无需反推状态差即可得知「谁开火/谁被毁/哪城被夷平/谁殖民」。
@@ -79,7 +157,19 @@ pub enum GameEvent {
     /// `by_ship` 是**拆掉它的那艘舰**（把「哪艘舰拆了这座城」直接钉进事件，而不是让查询方
     /// 去同回合的 [`GameEvent::Siege`] 里猜）；`pop_before`/`damage` 是这次毁灭的量级，
     /// 供叙事与统计直读。
-    CityRazed { city: CityId, fallen_to: FactionId, by_ship: ShipId, damage: f64, pop_before: u32 },
+    ///
+    /// `owner` 是**失去这座城市的那一方**——这是**只有在此刻才知道**的事实：夷平只把城变成
+    /// 空白（`razed = true`），空白城**保留**最后主人的 `faction_id` 作为 diaspora claim，而
+    /// 同一回合后来的复垦/重建会把 `faction_id` 改写成新主。因此「谁丢了这座城」若不在
+    /// 这一刻记下来，回看时读到的就是**新主**（错的人）。
+    CityRazed {
+        city: CityId,
+        owner: FactionId,
+        fallen_to: FactionId,
+        by_ship: ShipId,
+        damage: f64,
+        pop_before: u32,
+    },
     /// 新舰从某城出厂（`via` 区分船坞建造 / 剧情赠舰）。`city` 只在船坞出厂时给出
     /// （剧情赠舰在天体附近下水，没有出厂城）。
     ShipSpawned { ship: ShipId, owner: FactionId, class: String, city: Option<CityId>, via: SpawnVia },
@@ -234,6 +324,10 @@ pub struct EventRow {
     pub extra: Vec<Participant>,
     /// 统一的数值强度（伤害；无伤害的事件为 0），便于 `groupby().sum()` 之类统计。
     pub magnitude: f64,
+    /// 一句话标题（见 [`GameEvent::headline`]）。**同一渲染器的唯一产物**：CLI 的
+    /// `--ledger`/`--digest` 与投影表里的这一列说的是同一句话，不会各写一份文案。
+    /// 它是**人读**的便利列，机器查询仍应走 `actor_*`/`target_*`/`data` 这些结构化列。
+    pub headline: String,
     /// variant 专属载荷（可读名/舰级/原因/忠诚度…），固定只用这一个对象列承载。
     pub data: serde_json::Value,
 }
@@ -266,6 +360,7 @@ impl GameEvent {
             target_id: None,
             extra: Vec::new(),
             magnitude: 0.0,
+            headline: self.headline(),
             data: json!({}),
         };
         match self {
@@ -290,15 +385,18 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::City, city);
                 r.magnitude = *damage;
             }
-            GameEvent::CityRazed { city, fallen_to, by_ship, damage, pop_before } => {
+            GameEvent::CityRazed { city, owner, fallen_to, by_ship, damage, pop_before } => {
                 set_actor(&mut r, EntityKind::Faction, fallen_to);
                 set_target(&mut r, EntityKind::City, city);
                 // 拆城的那艘舰是**次要发起方**：城际易主的「谁做的」在 actor（势力），
                 // 「具体哪艘舰」在同一行的 extra 里，一次查询都拿得到。
                 extra(&mut r, EventRole::Actor, EntityKind::Ship, by_ship);
+                // 失去这座城的一方是**受损方**——与 `city_defected`/`city_overrun` 的
+                // `from` 同槽位，于是「一座城的历史」用同一个查询形状就能读全。
+                extra(&mut r, EventRole::Victim, EntityKind::Faction, owner);
                 r.magnitude = *damage;
-                r.data = json!({"city": city, "fallen_to": fallen_to, "by_ship": by_ship,
-                                "damage": damage, "pop_before": pop_before});
+                r.data = json!({"city": city, "owner": owner, "fallen_to": fallen_to,
+                                "by_ship": by_ship, "damage": damage, "pop_before": pop_before});
             }
             GameEvent::ShipSpawned { ship, owner, class, city, via } => {
                 set_actor(&mut r, EntityKind::Faction, owner);
@@ -445,6 +543,143 @@ impl GameEvent {
         }
     }
 
+    /// 一句话标题：**人读**的那一行（`第 47 回合：中国夷平火星-殖民城…`）。
+    ///
+    /// 三条设计约束：
+    /// 1. **自足**——只读事件自身的字段，不接受 `&State`。于是它对**已经归档的历史**
+    ///    （长存账本里跨 checkpoint 的老事件、投影表里的行）同样成立：那些实体可能早已
+    ///    不存在/已改名，回查 state 只会得到**今天的**答案而不是当时的答案。
+    /// 2. **单行**——不含换行，可直接进 JSONL / 表格 / 终端一行。
+    /// 3. **点到名**——[`GameEvent::participants`] 列出的每一个 id 都**逐字出现**在标题里
+    ///    （守卫测试 `headline_names_every_participant` 钉住）。这让「索引指向谁」与
+    ///    「人读到的句子说的是谁」不可能分叉。
+    ///
+    /// 这里是**穷尽 match**：新增 variant 时编译器强迫你写它的那一句话，与
+    /// [`GameEvent::history_row`]/[`GameEvent::salience`] 同样的「漏不掉」纪律。
+    pub fn headline(&self) -> String {
+        match self {
+            GameEvent::Attack { attacker, target, damage } => {
+                format!("{attacker} 对 {target} 开火（{} 伤害）", num(*damage))
+            }
+            GameEvent::ShipDestroyed { ship, owner, class, cause, by } => match (cause, by) {
+                (DeathCause::Combat, Some(k)) => format!(
+                    "{} 的 {}「{ship}」被 {} 的 {killer} 击毁（{weapon}）",
+                    owner,
+                    class,
+                    k.faction,
+                    killer = k.ship,
+                    weapon = k.weapon,
+                ),
+                (DeathCause::Combat, None) => {
+                    format!("{owner} 的 {class}「{ship}」战沉")
+                }
+                (DeathCause::UpkeepShortfall, _) => {
+                    format!("{owner} 的 {class}「{ship}」因维护费欠缴锈蚀报废")
+                }
+                (DeathCause::Scrapped, _) => format!("{owner} 的 {class}「{ship}」被拆解"),
+            },
+            GameEvent::Siege { attacker, city, damage } => {
+                format!("{attacker} 轰击城 {city}（{} 伤害）", num(*damage))
+            }
+            GameEvent::CityRazed { city, owner, fallen_to, by_ship, damage, pop_before } => format!(
+                "{fallen_to} 的 {by_ship} 夷平 {owner} 的 {city}（人口 {pop_before} → 0，{} 伤害）",
+                num(*damage)
+            ),
+            GameEvent::ShipSpawned { ship, owner, class, city, via } => match (via, city) {
+                (SpawnVia::Shipyard, Some(c)) => {
+                    format!("{owner} 的 {c} 出厂一艘 {class}「{ship}」")
+                }
+                (SpawnVia::Shipyard, None) => format!("{owner} 出厂一艘 {class}「{ship}」"),
+                (SpawnVia::Story, _) => {
+                    format!("{owner} 因剧情得到一艘 {class}「{ship}」")
+                }
+                // 重建种子舰：`Resurgence` 事件会紧跟着说「在哪里重新立足」，所以这一句专注
+                // 说「下水了哪艘舰」，两条消息不互相复读。
+                (SpawnVia::Resurgence, Some(c)) => {
+                    format!("{owner} 的 {class}「{ship}」在 {c} 下水（重建种子舰）")
+                }
+                (SpawnVia::Resurgence, None) => {
+                    format!("{owner} 的 {class}「{ship}」下水（重建种子舰）")
+                }
+            },
+            GameEvent::ColonyFounded { city, owner, body, how, prev_owner, .. } => match (how, prev_owner) {
+                (FoundingHow::NewSite, _) => format!("{owner} 在 {body} 新建城市 {city}"),
+                (FoundingHow::Refounded, Some(p)) => {
+                    format!("{owner} 在 {body} 复垦 {p} 留下的废墟 {city}")
+                }
+                (FoundingHow::Refounded, None) => format!("{owner} 在 {body} 复垦 {city}"),
+            },
+            GameEvent::StaleOrder { ship, reason } => format!("{ship} 的指令失效（{reason}）"),
+            GameEvent::Withdraw { ship, to_body } => format!("{ship} 撤往 {to_body} 修整"),
+            GameEvent::WarStarted { a, b } => format!("{a} 与 {b} 开战"),
+            GameEvent::WarEnded { a, b } => format!("{a} 与 {b} 停战"),
+            GameEvent::Story { title, participants, .. } => {
+                if participants.is_empty() {
+                    title.clone()
+                } else {
+                    format!("{title}（{}）", participants.join("、"))
+                }
+            }
+            GameEvent::Resurgence { faction, body, ship, city } => {
+                format!("{faction} 在 {body} 的 {city} 重新立足（种子舰 {ship}）")
+            }
+            GameEvent::Revolt { city, faction, loyalty } => format!(
+                "{faction} 的 {city} 叛乱，城市化为废墟（忠诚 {}）",
+                num(*loyalty)
+            ),
+            GameEvent::CityDefected { city, from, to, loyalty } => format!(
+                "{from} 的 {city} 倒戈至 {to}（忠诚 {}）",
+                num(*loyalty)
+            ),
+            GameEvent::CityOverrun { city, from, to } => {
+                format!("{to} 的难民夺取 {from} 的 {city}")
+            }
+            GameEvent::CoalitionFormed { hegemon, members } => format!(
+                "{} 结成联盟对抗霸权 {hegemon}",
+                members.join("、")
+            ),
+            GameEvent::CoalitionEnded { hegemon, members } => format!(
+                "反 {hegemon} 联盟解体（原成员 {}）",
+                members.join("、")
+            ),
+            GameEvent::CapitalRelocated { faction, from, to, reason } => format!(
+                "{faction} 迁都 {from} → {to}（{}）",
+                capital_reason(reason)
+            ),
+        }
+    }
+
+    /// **digest 排序权重**：一个窗口内里程碑多于展示上限时，按此权重取最重要的若干条。
+    ///
+    /// 这是**展示**用的排序键，不是模拟数值——它决定「故事板里先看到哪句话」，不影响任何
+    /// 游戏机制，因此按本仓库「数值进 config」的惯例在此**不必**外置成配置表（外置反而会让
+    /// 「新增 variant 必须声明权重」这条编译期纪律失效）。若将来真要按剧本调节叙事重点，
+    /// 再把它改成读 `config` 的穷尽 match 即可。
+    pub fn weight(&self) -> u8 {
+        match self {
+            // 世界格局级：开战/停战、结盟/解体、迁都。
+            GameEvent::WarStarted { .. }
+            | GameEvent::WarEnded { .. }
+            | GameEvent::CoalitionFormed { .. }
+            | GameEvent::CoalitionEnded { .. }
+            | GameEvent::CapitalRelocated { .. } => 9,
+            // 城市易主/毁灭：地图要重画的事件。
+            GameEvent::CityRazed { .. }
+            | GameEvent::CityDefected { .. }
+            | GameEvent::CityOverrun { .. }
+            | GameEvent::ColonyFounded { .. }
+            | GameEvent::Revolt { .. } => 8,
+            // 势力重建（世界格局的复活）与剧情节拍。
+            GameEvent::Resurgence { .. } | GameEvent::Story { .. } => 7,
+            // 舰的存亡。
+            GameEvent::ShipDestroyed { .. } | GameEvent::ShipSpawned { .. } => 5,
+            // 值得注意但不改变归属。
+            GameEvent::Withdraw { .. } | GameEvent::StaleOrder { .. } => 2,
+            // 逐发流水（永不进长存账本，也不会出现在 digest 的头条里）。
+            GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
+        }
+    }
+
     /// 全部参与方（平铺，含 actor/target 两个主槽位），供投影层建长表索引。
     /// 与 [`GameEvent::history_row`] 同源，避免两处各写一份映射。
     pub fn participants(&self) -> Vec<Participant> {
@@ -461,6 +696,24 @@ impl GameEvent {
     }
 }
 
+/// 标题里的人数：整数不带小数点，否则保留一位（标题给人读，精确值在 `data` 里）。
+fn num(v: f64) -> String {
+    if (v - v.round()).abs() < 0.05 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// 迁都原因码 → 中文。机器码本身在投影 `data.reason` 里保持原样（查询用码、人读用这句）。
+fn capital_reason(reason: &str) -> &str {
+    match reason {
+        "destroyed" => "首都沦陷，自动改立",
+        "ai_review" => "周期性重估后更优",
+        other => other,
+    }
+}
+
 fn entity_kind_from_str(s: &str) -> EntityKind {
     match s {
         "city" => EntityKind::City,
@@ -471,8 +724,80 @@ fn entity_kind_from_str(s: &str) -> EntityKind {
     }
 }
 
-/// 一条剧情编年史记录：回合里发生的一次「叙事事件」，带标题、正文与参与方。
+/// 长存账本里的一条记录：**第几回合**发生了什么。`GameEvent` 本身不带回合号（它只活在
+/// 「本回合」的流水里），跨回合的账本必须自己带上时间戳。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LedgerEntry {
+    pub round: u32,
+    pub event: GameEvent,
+}
+
+/// **长存里程碑账本**（`State::ledger`）：本局发生过的全部里程碑事件，按发生顺序追加。
 ///
+/// 解决的是「历史活不过 checkpoint」这个根因：[`State::events`] 是**回合内流水**——每回合
+/// 开头被 [`crate::sim::advance`] 清空，于是 `--save` 出来的存档里只剩最后一回合的事件，
+/// 而「这个城市是怎么变成今天这样的」全部丢失（只有磁盘投影 `idx/events.jsonl` 记得，
+/// 前提是你一直在 `--index`）。账本把**里程碑**层收进 `State` 本身：存一份 checkpoint 就
+/// 带走了这段历史，`--start` 续玩时它仍然在。
+///
+/// 分层由 [`GameEvent::salience`] 单点声明：只收 [`Salience::Milestone`]（易主/存亡/开战/
+/// 结盟/剧情），逐发流水（`attack`/`siege`）永不进来——它们数量是里程碑的一两个数量级。
+/// 写入点是 [`crate::sim::ev`]（发事件的唯一漏斗），因此**记不进账本在结构上不可能**。
+///
+/// **容量**：完整的历史必然随回合线性增长（记录状态变化本就是 Ω(变化数)）。默认**不设上限**
+/// （无损优先），可用 `config/game.ron` 的 `history.max_milestones` 设上限；一旦截断，丢弃
+/// 的数量与丢到哪一回合都记在 [`Ledger::dropped`]/[`Ledger::dropped_through_round`] 里——
+/// **截断是可见的，不静默**。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Ledger {
+    /// 里程碑记录，最旧 → 最新。
+    pub entries: Vec<LedgerEntry>,
+    /// 因超出上限而被丢弃的记录数（`0` = 无损）。
+    #[serde(default)]
+    pub dropped: u64,
+    /// 已被丢弃的记录所覆盖到的最后一个回合（`dropped > 0` 时，
+    /// `entries` 从这之后开始，之前的历史只剩「丢了 `dropped` 条」这一条事实）。
+    #[serde(default)]
+    pub dropped_through_round: u32,
+}
+
+impl Ledger {
+    /// 追加一条里程碑。**非里程碑直接忽略**——分层只在 [`GameEvent::salience`] 一处声明。
+    pub fn push(&mut self, round: u32, event: GameEvent) {
+        if event.salience() != Salience::Milestone {
+            return;
+        }
+        self.entries.push(LedgerEntry { round, event });
+    }
+
+    /// 按上限裁剪（`cap == 0` = 不设上限，无损）。丢弃**最旧**的记录，并把丢弃量与丢弃
+    /// 到的回合数记进账本自身——下游据此知道「这不是全部历史」。
+    pub fn trim(&mut self, cap: usize) {
+        if cap == 0 || self.entries.len() <= cap {
+            return;
+        }
+        let excess = self.entries.len() - cap;
+        self.dropped_through_round = self.entries[excess - 1].round;
+        self.dropped += excess as u64;
+        self.entries.drain(..excess);
+    }
+
+    /// 账本是否完整（没有因上限而丢过记录）。
+    pub fn is_complete(&self) -> bool {
+        self.dropped == 0
+    }
+
+    /// 某一实体参与过的全部里程碑（`kind`/`id` 与投影的索引口径一致：**名字即 id**）。
+    /// Rust 侧的等价物，供 CLI/测试使用；Python 侧走 `q.history()` 查投影。
+    pub fn history_of(&self, kind: EntityKind, id: &str) -> Vec<&LedgerEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.event.participants().iter().any(|p| p.kind == kind && p.id == id))
+            .collect()
+    }
+}
+
+/// 一条剧情编年史记录：回合里发生的一次「叙事事件」，带标题、正文与参与方。
 /// 这是「剧情丰富」的可读载体——一条 `Story` 剧情事件在本回合触发时，除了记入
 /// [`State::events`]（本回合流水），还把这个完整条目追加进 [`State::chronicle`]，
 /// 供 agent 随时查询整段已展开的故事弧。

@@ -195,25 +195,16 @@ fn write_round(
     // 「这座城 / 这艘舰 / 这个势力的历史」，而不需要知道任何 variant 的字段布局。
     for (i, e) in state.events.iter().enumerate() {
         let h = e.history_row();
-        writeln!(
-            events,
-            "{}",
-            json!({
-                "round": state.round,
-                "seq": i,
-                "event_id": event_id(state.round, i),
-                "type": h.kind,
-                "salience": h.salience,
-                "actor_kind": h.actor_kind,
-                "actor_id": h.actor_id,
-                "target_kind": h.target_kind,
-                "target_id": h.target_id,
-                "extra": h.extra,
-                "magnitude": r2(h.magnitude),
-                "data": h.data,
-            })
-        )
-        .map_err(|e| e.to_string())?;
+        // 行内容以 `EventRow` 的**序列化结果**为准（唯一来源）：将来给 `EventRow` 加字段，
+        // 表里会自动多一列——不会像手写 `json!` 那样悄悄漏掉（本列 `headline` 就是这么
+        // 差点漏掉的）。投影自己只需补三个键，并把 `magnitude` 规整到两位小数。
+        let mut row = serde_json::to_value(&h).map_err(|e| e.to_string())?;
+        let obj = row.as_object_mut().ok_or("EventRow 必须是 JSON 对象")?;
+        obj.insert("round".to_string(), json!(state.round));
+        obj.insert("seq".to_string(), json!(i));
+        obj.insert("event_id".to_string(), json!(event_id(state.round, i)));
+        obj.insert("magnitude".to_string(), json!(r2(h.magnitude)));
+        writeln!(events, "{row}").map_err(|e| e.to_string())?;
     }
 
     for s in &state.ships {
@@ -368,7 +359,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "columns": {
                     "round":"integer","seq":"integer","event_id":"string","type":"string","salience":"string",
                     "actor_kind":"string","actor_id":"string","target_kind":"string","target_id":"string",
-                    "extra":"array","magnitude":"number","data":"object"
+                    "extra":"array","magnitude":"number","headline":"string","data":"object"
                 },
                 "column_docs": {
                     "event_id": "稳定 id `<round>:<seq>`，join/因果引用用。",
@@ -378,6 +369,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "target_kind/target_id": "动作直接对象（如被围的**城**、被击毁的**舰**）。",
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",
                     "magnitude": "统一数值强度（伤害；无伤害事件为 0），便于 groupby().sum()。",
+                    "headline": "**人读的一句话**（`GameEvent::headline` 的唯一产物，与 CLI `--ledger`/`--digest` 同源）。它自足（只读事件自身字段，不回查 state），所以对已归档的历史同样成立；`participants()` 列出的每个 id 都逐字出现在这句话里。机器查询仍走 actor_*/target_*/data。",
                     "data": "该事件类型的专属载荷（可读名/舰级/死因/忠诚度/复垦方式…），固定只用这一个对象列。",
                 },
             }),
@@ -529,7 +521,7 @@ mod tests {
         let events = jsonl(&s.0.join("idx/events.jsonl"));
         assert!(!events.is_empty(), "6 回合后应有事件");
         for col in ["round", "seq", "event_id", "type", "salience", "actor_kind", "actor_id",
-                    "target_kind", "target_id", "extra", "magnitude", "data"] {
+                    "target_kind", "target_id", "extra", "magnitude", "headline", "data"] {
             assert!(events[0].get(col).is_some(), "events 表要有 {col} 列");
         }
         // 归一化的意义：**没有任何一列是 variant 专属字段**，否则又会回到「同名多义」
@@ -543,6 +535,129 @@ mod tests {
             events.iter().all(|e| e["actor_id"].is_string() || e["target_id"].is_string()
                 || !e["extra"].as_array().map(|a| a.is_empty()).unwrap_or(true)),
             "每个事件至少要有一个参与方实体"
+        );
+    }
+
+    /// **同回合归属翻转不变量**：一个回合内，同一座城不能易主两次。
+    ///
+    /// 这条不变量是「僵尸势力夺城—倒戈振荡」的**结构性**约束：`step_governance`（离心倒戈）
+    /// 先跑，`step_resurgence`（难民夺城）后跑，后者若把前者刚放手的那座城夺回来，两个步进
+    /// 就在同一回合里**正好互相抵消**——净效果为零，却照样记两条里程碑、白造一艘种子舰。
+    /// 实测 seed 7 的 `冥王星前哨` 就是这样被钉进 4 回合一轮的死循环（60 回合 41 次夺城）。
+    ///
+    /// 「活城易主」= `city_defected` / `city_overrun` / `colony_founded`（城活着，换了主人或
+    /// 从空白重新立起来）。三者之和每 `(回合, 城)` 最多 1 条。
+    ///
+    /// 注意：`city_razed` → `colony_founded`（被夷平后同回合复垦）**不算**违规——城经过了
+    /// 「死亡」这个中间态，是两件不同的事（先被拆平、再被重建），两条事件都是真的。
+    #[test]
+    fn no_city_changes_owner_twice_in_one_round() {
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 7);
+        let mut rng = Prng::new(7);
+        let s = Scratch::new("no_double_flip");
+        write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
+
+        let events = jsonl(&s.0.join("idx/events.jsonl"));
+        let mut flips: BTreeMap<(u32, String), Vec<String>> = BTreeMap::new();
+        for e in &events {
+            let ty = e["type"].as_str().unwrap_or_default();
+            if !matches!(ty, "city_defected" | "city_overrun" | "colony_founded") {
+                continue;
+            }
+            let city = e["data"]["city"].as_str().unwrap_or_default().to_string();
+            let round = e["round"].as_u64().unwrap_or_default() as u32;
+            flips.entry((round, city)).or_default().push(e["headline"].as_str().unwrap_or("").to_string());
+        }
+        let bad: Vec<_> = flips.iter().filter(|(_, v)| v.len() > 1).collect();
+        assert!(
+            bad.is_empty(),
+            "有 {} 座城在同一回合里易主了两次（净效果为零的自相抵消）：{:#?}",
+            bad.len(),
+            bad.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(flips.len() >= 5, "只观察到 {} 次活城易主，样本太稀——守卫可能是空转", flips.len());
+    }
+
+    /// **标题必须点到名**：`GameEvent::participants()` 列出的每一个实体 id，都要**逐字出现**
+    /// 在 `headline()` 里（单行、非空）。
+    ///
+    /// 这把「索引指向谁」和「人读到的句子说的是谁」钉在一起：查询 join 到的实体，一定能在
+    /// 那句话里看见；反之标题里出现的实体也不会是索引之外的幽灵。同时钉住「标题自足」——
+    /// 它只读事件自身的字段，所以对归档的老历史同样成立。
+    #[test]
+    fn headline_names_every_participant() {
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 7);
+        let mut rng = Prng::new(7);
+        let s = Scratch::new("headline_names");
+        write_index(&mut state, &cfg, &mut rng, 80, &s.0).unwrap();
+
+        let events = jsonl(&s.0.join("idx/events.jsonl"));
+        let mut checked = 0usize;
+        for e in &events {
+            let h = e["headline"].as_str().unwrap_or_default();
+            assert!(!h.is_empty(), "{} 没有标题", e["type"]);
+            assert!(!h.contains('\n'), "标题必须单行: {h:?}");
+            let mut ids: Vec<String> = Vec::new();
+            if let Some(v) = e["actor_id"].as_str() { ids.push(v.to_string()); }
+            if let Some(v) = e["target_id"].as_str() { ids.push(v.to_string()); }
+            for p in e["extra"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+                if let Some(v) = p["id"].as_str() { ids.push(v.to_string()); }
+            }
+            for id in &ids {
+                assert!(h.contains(id.as_str()), "标题 {h:?} 没提到参与方 {id:?}（{}）", e["type"]);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 50, "只校验了 {checked} 个参与方名字，守卫可能是空转");
+    }
+
+    /// **失城方必须在夷平那一刻记下**：`city_razed.owner` 是夷平时的持有者，**不是**同回合
+    /// 后来复垦者的名字。
+    ///
+    /// 这正是 `step_ideology` 那段「事后回读」栽的坑：夷平不改 `faction_id`（空白城保留最后
+    /// 主人的 diaspora claim），而同回合稍后的 `reseed_city` 会把它改成新主，于是事后再读
+    /// 只会读到**抢城的人**。活体样本 seed 7 r24：大红斑科学站被欧盟夷平、同回合被无国界
+    /// 科学组织复垦，战功被记到了抢城者头上。
+    #[test]
+    fn city_razed_records_the_loser_not_the_refounder() {
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 7);
+        let mut rng = Prng::new(7);
+        let s = Scratch::new("razed_loser");
+        write_index(&mut state, &cfg, &mut rng, 60, &s.0).unwrap();
+
+        let events = jsonl(&s.0.join("idx/events.jsonl"));
+        let mut razed_with_revival = 0usize;
+        for e in &events {
+            if e["type"] != "city_razed" {
+                continue;
+            }
+            let round = e["round"].as_u64().unwrap();
+            let city = e["data"]["city"].as_str().unwrap();
+            let owner = e["data"]["owner"].as_str().unwrap();
+            let fallen_to = e["data"]["fallen_to"].as_str().unwrap();
+            assert_ne!(owner, fallen_to, "夷平一座城不该由它的持有者自己造成（{city}）");
+            // 同回合、同一座城的复垦者若存在，必然**不是** owner 被写成的那个名字。
+            for f in &events {
+                if f["type"] != "colony_founded" || f["round"].as_u64() != Some(round) {
+                    continue;
+                }
+                if f["data"]["city"].as_str() != Some(city) {
+                    continue;
+                }
+                let founder = f["data"]["owner"].as_str().unwrap_or_default();
+                let prev = f["data"]["prev_owner"].as_str().unwrap_or_default();
+                assert_eq!(prev, owner, "{city} 同回合被 {founder} 复垦，prev_owner 应等于失城方 {owner}");
+                if founder != owner {
+                    razed_with_revival += 1;
+                }
+            }
+        }
+        assert!(
+            razed_with_revival >= 1,
+            "样本里没有「被 A 夷平、同回合被 B 复垦」的城——这条守卫没能真的验到那个坑"
         );
     }
 

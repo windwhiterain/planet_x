@@ -983,7 +983,7 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   更细的高频粒面 + 边缘变暗（limb darkening）来提升真实感。
 ---
 
-## 23. 稀疏历史 / 事件账本（sparse history ledger） — `[x]`（Stage A + B 已落地，已并入 main）
+## 23. 稀疏历史 / 事件账本（sparse history ledger） — `[x]`（Stage A + B + C 全部落地）
 
 > 起因：轨迹答不出「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」
 > 与「**一艘舰被击毁，是被哪艘舰击毁？**」。完整设计 + 实测见
@@ -1048,28 +1048,71 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   `python play/_golden_compare.py <baseline> <after>`：`idx/{cities,ships,factions,bodies,settlements}.jsonl` +
   `meta.json` 必须**逐字节一致**，`main.jsonl` 去掉 `event_ids` 后必须一致，`idx/events.jsonl` 允许不同。
   **Stage B 全程通过**：漏斗化只多了 46 条 `ship_spawned` 记录，模拟逐字节未变。
-- `[ ]` **（负结果，勿重复尝试）`step_ideology` 改用权威 `by` 替换近似 `killer_of`**：60 回合窗口**逐字节一致**
-  （0/20 起凶手不一致），但 1000 回合长局**翻转 `world_is_multipolar` 的霸权轮换判定**——seed 1 后半程被
-  **俄罗斯锁死**（轮换数 1 < 需要 2；峰值占比 0.820，逼近 0.85 上限）。差别只在「凶手舰同回合被反杀」这种
-  罕见情形，但足以在混沌长局里改变结局 → **属平衡改动，已回退**，需**单独一次平衡验证**（配 `probe_multipolar`
-  横向对比）后再上。**教训：「60 回合逐字节一致」不足以证明长局中性。**
+- `[x]` **~~（负结果，勿重复尝试）~~ `step_ideology` 改用权威 `by`** —— **已做，并且当初的「负结果」结论是错的**。
+  当初只改「凶手」一侧就回退；Stage C 复查发现同一段代码里还有**第二处同类缺陷**（失城方回读，见下），
+  两处一起修之后长局不但没锁死、反而更健康（seed 1 轮换数 **1 → 25**）。教训：**「60 回合逐字节一致」
+  不足以证明长局中性**（窗口内中性 + 长局守卫失败 = 行为改动），**但「长局守卫失败」也不等于「这是纯
+  平衡调整」**——先问「同一段逻辑里是不是还有别的缺陷没修」。半个修正的症状和平衡回归一模一样。
 
-**未做（Stage C，`[ ]`）**：
-- `[ ]` **`State.ledger` 长存里程碑层**（只收 `Salience::Milestone`，随 checkpoint 存活 → 解决根因 ②）。
-  天然有界 ≈ O(实体数 × 常数)；海量 `attack`/`siege` 流水永不进 State。
-- `[ ]` **一句话 headline**：`GameEvent::headline()` 单点渲染（`第47回合：中国夷平火星-殖民城，美国失一城`），
-  `--digest`/`chronicle`/Python 三处共用。**完备 ≠ 可读**——这是 §15「窗口事件文案」的前置。
-- `[ ]` salience 权重进 `config/game.ron` + `--digest` 的 `top_events`。
+**已落地（Stage C，`[x]`，见 `.agents/sparse-history-design.md` §4c）**：
+- `[x]` **`State.ledger` 长存里程碑层**（`src/model/event.rs` 的 `Ledger`/`LedgerEntry`，
+  `SCHEMA_VERSION` 2→3）：只收 `Salience::Milestone`（由 `salience()` 单点声明），**不随回合清空**
+  → 解决根因 ②。写入点是唯一的发事件漏斗 `sim::ev` → 「事件发了、账本没记」结构上不可能。
+  `--ledger [N]` 输出（带 `complete/dropped/dropped_through_round`，截断可见）；
+  容量由 `config/game.ron` 的 `history.max_milestones` 控制（**默认 0 = 无损**）。
+  **实测体积**：round 60 的 checkpoint 106 KB，账本占 41%（94 字符/条 × 7.7 条/回合）
+  → 1000 回合约 0.7 MB；超长归档局可设上限。
+- `[x]` **一句话 headline**：`GameEvent::headline()`（穷尽 match）**自足**（只读事件自身字段，
+  不回查 state——归档历史里的实体可能早就没了）、**单行**，且 `participants()` 的每个 id
+  都**逐字出现**在句子里（守卫 `headline_names_every_participant`）。同一句话出现在
+  CLI `--ledger`/`--digest top_events`、投影 `idx/events.jsonl` 的 `headline` 列、Python `q.ledger()`。
+- `[x]` **投影事件行改由 `EventRow` 序列化生成**（此前手写 `json!`，加列会悄悄漏——`headline` 就这么差点漏掉）。
+- `[x]` **`--digest` 加窗口 `top_events`**：窗口内里程碑按 `GameEvent::weight()`（穷尽 match 的
+  **展示排序键**，刻意不外置 config——外置会让「新增 variant 必须声明权重」这条编译期纪律失效）
+  取最重 24 条，**展示按时间序**，并如实给出 `total/shown/skipped`。
+- `[x]` Python kit：`q.ledger(since/until/limit/entity)`、`q.storyboard(window)`；
+  `q.events()` 多一列 `headline`。
+- `[x]` **三处「事后回读」的根治**（`step_ideology`）：① 凶手用权威 `by`（互杀不再吞掉战功）；
+  ② **新增 `CityRazed.owner`**（失城方只有夷平那一刻才知道——同回合复垦会把 `faction_id` 改成新主）；
+  ③ `CityDefected`（主路）与 `Revolt`（兜底）同分（旧代码给兜底 −1、主路 0 分，分数取决于
+  「有没有可倒戈的势力」这个无关偶然）。信号抽成**纯函数** `military_deltas(&[GameEvent])`
+  （只吃事件、不看 state）→ 可被单测逐条钉死。`colony_founded` **刻意不计**（殖民归 `nature_colony` 轴）。
+- `[x]` **同回合归属翻转不变量**：`displace_city_for_refugee(state, exclude)` 排除本回合已易主过的城
+  → `city_overrun`（seed 7 @ 60 回合）**41 → 20**；守卫 `no_city_changes_owner_twice_in_one_round`。
+  （`city_razed`→`colony_founded` 同回合不算违规：中间经过了「死亡」态，是两件真实的事。）
+- `[x]` **顺带修掉一个预存重大缺陷：RON 读不回 checkpoint**（`--save`/`--start` 全断）。
+  根因：**单元 enum 嵌在内部标签 enum（`#[serde(tag)]`）里**时，serde 默认把单元变体写成**裸标识符**，
+  RON 的 `deserialize_any` 无法还原 → 整份 `State` 反序列化失败。`DeathCause`/`SpawnVia`/`FoundingHow`
+  是 Stage A 新增的，所以**是 Stage A 引入的**；而 `--save`/`--start` 是文档里的核心流程却**零测试**，
+  `load_initial` 还把解析错误静默咽掉、报成一句指向文件末尾的「missing field `round` in `State`」。
+  修法：`stringly_unit_enum!` 宏 + `#[serde(into="String", try_from="String")]`（**JSON 形状一字节不变**）。
+  守卫：`every_game_event_variant_round_trips_through_ron`（**逐个变体**，配穷尽 match 的
+  `variant_checklist` 提醒补样本）、`checkpoint_survives_save_and_resume_identically`（存→读→续跑逐字节一致）。
+- 验证：`cargo test --lib` **68 passed**、`cargo test --test longhorizon` **6 passed/8 ignored**、无警告。
+  `probe_multipolar`（1000 回合）：seed 1/42/12345 → rotations **25 / 80 / 83**、alive 9、zombies 0。
+
+**未做（仍是 `[ ]`，各带理由）**：
+- `[ ]` **salience 权重配置化**：`top_events` 的排序键 `GameEvent::weight()` 刻意留在 Rust
+  （它是**展示**排序、不是模拟数值；外置 config 会让「新增 variant 必须声明权重」失效）。
+  真要按剧本调叙事重点，再改成「穷尽 match 读 config」。
 - `[ ]` **`cause_id` 显式因果链刻意没做**：实测会是 100% null 的死列，而链在 Python 侧用
   `razed.by_ship`/`destroyed.by`/`how`+`prev_owner` 的结构就能走通。
+- `[ ]` 投影体积：`idx/events.jsonl` 比原内联事件大约多 50%（列更多，现在还多 `headline`）。
+  3000 回合量级可考虑 parquet。
 
 **账本暴露出的新问题（`[ ]` 值得单独修）**：
-- `[ ]` **僵尸势力的「夺城—倒戈」振荡**：seed 7 @ 60 回合 `city_overrun` **41** 条、`resurgence` 46 条。
-  `冥王星前哨` 每 4 回合循环：`city_defected 星系矿业→欧盟` → 同回合 `city_overrun 欧盟→星系矿业`
-  → `resurgence`。机制自相抵消（`step_governance` 先跑把城倒戈走 → 该势力立刻「无舰无活城」→
-  `step_resurgence` 当回合用 `displace_city_for_refugee` 夺回**同一座城**）：净效果为零却把该城永久钉在
-  4 回合一轮的易主循环里，事件量翻倍。改法候选：① `resurgence` 加冷却；② 夺城目标排除「刚被本势力
-  丢掉的城市」；③ 优先选未被倒戈过的城。**注意**会影响 `zombie_factions_are_bounded`/`world_is_multipolar`，需长局验证。
+- `[~]` **僵尸势力的「夺城—倒戈」振荡**：**同回合自相抵消那部分已修**（41 → 20 条 `city_overrun`，
+  见上）。**剩下的是多回合循环**：`reseed_city` 每次都挑该势力**自己最低名的空白城**，于是
+  「欧盟拆平 → 联合国复垦 → 欧盟再拆平」在同一处反复（seed 7 的 `大红斑科学站`：
+  `q.ledger(entity=('city','大红斑科学站'))` 可直接读整条链）。这不是净零动作（每次复垦都真的重建
+  人口/建筑），而是**反僵尸机制**与**舰炮拆城**互相咬住。改法候选：① 复垦锚点排除「最近 N 回合内
+  被拆平过」的城；② `resurgence` 加冷却；③ 重建优先选**别人**的废墟（现在只挑自己的 diaspora claim）。
+  **注意**会影响 `zombie_factions_are_bounded`/`world_is_multipolar`，需长局验证。
+- `[ ]` **战争的阈值抖动（新观察）**：`--digest 20` 里能看到同一对势力在一个 20 回合窗口内
+  开战→停战→开战好几个来回（seed 7 @ r40–60：`欧盟↔行星X崇拜教` 三个来回）。`hostile` 是
+  `relation <= war_threshold` 的**硬阈值**，关系每回合带随机漂移 → 阈值附近来回穿越。
+  不是同回合抵消（一对势力一回合最多跃迁一次），而是**缺回滞（hysteresis）**：
+  标准修法是开战/停战用不同阈值（config 里已有 `ceasefire_relation` 可复用）。
 
 ---
 

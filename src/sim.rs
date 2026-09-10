@@ -106,6 +106,9 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 放在回合末：此时事件（战争得失/城夷平/叛乱）与流量（产出/维护/治理）均已就位。
     step_ideology(state, config, &flow);
 
+    // 长存账本收尾：按配置裁剪容量（唯一一处有 config 的地方）。默认 0 = 无损。
+    state.ledger.trim(config.history.max_milestones);
+
     // 结回合：把所有派生数据装进一个 `Derived`（flow 中间量 + post 观测/总结）。`post`
     // 由 `round_metrics` 汇总（复用 `balance_picture`/`sanctioned_hegemon`/`faction_power`
     // 等 step 同源计算），因此观测与游戏逻辑**严格一致**；`faction_power` 是单一权威。
@@ -187,8 +190,16 @@ pub(crate) fn ideology_similarity(a: &Ideology, b: &Ideology) -> f64 {
     (1.0 - dist).clamp(0.0, 1.0)
 }
 
-/// Append a [`GameEvent`] to this round's log.
+/// Append a [`GameEvent`] to this round's log — **and** to the long-lived milestone ledger.
+///
+/// 这是**发事件的唯一漏斗**，也是 [`State::ledger`] 的唯一写入点：里程碑层由
+/// [`GameEvent::salience`] 单点声明（`Ledger::push` 自己过滤），所以「事件发了、账本没记」
+/// 在结构上不可能——和 [`kill_ship`]/[`spawn_ship`] 这些状态漏斗是同一套纪律。
+///
+/// `State::ledger` 不随回合清空（[`advance`] 只清 `State::events`），容量裁剪在 `advance`
+/// 收尾时按 `config.history.max_milestones` 统一做（那里才有 config）。
 pub(crate) fn ev(state: &mut State, e: GameEvent) {
+    state.ledger.push(state.round, e.clone());
     state.events.push(e);
 }
 
@@ -345,6 +356,10 @@ enum RazeCause {
 /// 投影 `cities.loyalty` 列的一部分——改它会改变已发布的轨迹。
 fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
     let pop_before = state.city(cid).map(|c| c.population).unwrap_or(0);
+    // 「谁失去了这座城市」**只有在此刻才知道**：夷平不改 `faction_id`（空白城保留最后主人的
+    // diaspora claim），但同一回合后来的 `reseed_city`/`found_city` 会把它改写成新主。
+    // 事后再读就只会读到新主（错的人），所以在这里就把它钉进事件。
+    let owner = state.city(cid).map(|c| c.faction_id.clone()).unwrap_or_default();
     if let Some(c) = state.city_mut(cid) {
         c.razed = true;
         c.population = 0;
@@ -357,6 +372,7 @@ fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
     match cause {
         RazeCause::Bombardment { by_ship, by_faction, damage } => ev(state, GameEvent::CityRazed {
             city: cid.clone(),
+            owner,
             fallen_to: by_faction,
             by_ship,
             damage,
@@ -1405,7 +1421,7 @@ fn find_vacant_settlement(state: &State) -> Option<(BodyId, String)> {
 /// id 活城**（一个边缘殖民地被难民潮占据），作为重新立足点。这保证「被完全吞并」的旧
 /// 势力也总能重返——既维持「上千回合不崩坏、无永久旁观者」，又给大帝国一个「难民危机」
 /// 式的代价。确定性（无 RNG）。返回被夺取的城市 id。
-fn displace_city_for_refugee(state: &State) -> Option<CityId> {
+fn displace_city_for_refugee(state: &State, exclude: &BTreeSet<CityId>) -> Option<CityId> {
     let mut counts: BTreeMap<FactionId, usize> = BTreeMap::new();
     for c in &state.cities {
         if !c.razed {
@@ -1417,6 +1433,13 @@ fn displace_city_for_refugee(state: &State) -> Option<CityId> {
         .cities
         .iter()
         .filter(|c| c.faction_id == holder && !c.razed)
+        // **不夺本回合已经易主过的城**：`step_governance` 先跑，可能刚刚把一座城从「本回合
+        // 变成僵尸的那个势力」手里倒戈走；若这里又把它夺回来，两个步进在同一回合里**正好
+        // 互相抵消**（净效果为零，却照样记两条里程碑事件、还白造一艘种子舰）。实测 seed 7
+        // 的 `冥王星前哨` 就是这样被钉进 4 回合一轮的「倒戈—夺回」循环（60 回合 41 次）。
+        // 排除之后，一个回合内同一座城不会易主两次——这是可断言的**同回合不变量**
+        // （见 `no_city_changes_owner_twice_in_one_round`）。
+        .filter(|c| !exclude.contains(&c.name))
         .min_by_key(|c| c.name.clone())
         .map(|c| c.name.clone())
 }
@@ -1442,6 +1465,22 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     // 这次重建「落脚」的方式——决定走哪个漏斗（`reseed_city` / `found_city` / `overrun_city`），
     // 使一次重建在历史里可读成「复垦了自己的废墟 / 占了一块新地 / 夺取了别人的活城」。
     // 三个漏斗各自负责「改状态 + 记事件」，调用方无处可漏。
+    //
+    // 「本回合已经易主过的城」——anchor 4（难民夺城）必须避开它们，否则会和本回合别的步进
+    // （离心倒戈 / 舰炮拆平后的复垦）在同一回合里互相抵消，或让一座城一回合内易主三次。
+    // 初始快照来自 `step_military`/`step_governance`；循环内每落实一个立足点就**追加**进去，
+    // 因此**同一个回合里没有哪座城会被重建/夺取两次**（守卫
+    // `no_city_changes_owner_twice_in_one_round` 钉住这条不变量）。
+    let mut flipped_this_round: BTreeSet<CityId> = state
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CityDefected { city, .. }
+            | GameEvent::CityOverrun { city, .. }
+            | GameEvent::CityRazed { city, .. } => Some(city.clone()),
+            _ => None,
+        })
+        .collect();
     for fid in faction_ids {
         // Already a participant (has a ship or a living city)? Nothing to do.
         let has_ship = state.ships.iter().any(|s| s.faction_id == fid && s.hull > 0.0);
@@ -1483,7 +1522,7 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             (body, new_cid)
         } else {
             // Anchor 4: 世界完全满员 → 难民夺取最强殖民者的最小 id 边缘城 → `overrun_city` 漏斗。
-            let Some(host_cid) = displace_city_for_refugee(state) else { continue };
+            let Some(host_cid) = displace_city_for_refugee(state, &flipped_this_round) else { continue };
             let Some(body) = state.city(&host_cid).map(|c| c.body_id.clone()) else { continue };
             if !overrun_city(state, config, &host_cid, &fid, &seeded_ship_class, &mut next_building) {
                 continue;
@@ -1493,6 +1532,8 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
         let cpos = state.body_position(&body);
         let pos = [cpos[0] + 0.05, cpos[1] + 0.05];
+        // 这个立足点本回合已经定下：后面的势力不许再在同一回合动它。
+        flipped_this_round.insert(city.clone());
 
         // Launch one affordable colony ship from the rebuilt/founded city.
         // 舰级 = 平台修正器：重建种子舰也必须装配组件（至少一件武器），否则没有火力。
@@ -2929,57 +2970,35 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     let ic = &config.ideology;
     let r = config.mond.radius;
-    // 击毁归属：本回合某舰被谁击毁——由「攻击它的那一方」领功。
+    // --- 军事信号：完全由**本回合的事件账本**推出，不再回读回合末的 state ---------------
     //
-    // 注意：`ShipDestroyed` 已经带了权威的 `by`（补刀那一发的舰/势力），但**这里刻意仍走
-    // 近似口径**（同回合最后一条 `Attack` 的势力）。原因见 `.agents/sparse-history-design.md`
-    // §5：换用 `by` 在 60 回合窗口内逐字节一致，但在 1000 回合长局里会翻转
-    // `world_is_multipolar` 的「霸权轮换」判定（种子 1 被俄罗斯锁死）——那是**平衡层面的
-    // 改动**，需要单独一次平衡验证，不该混在「历史完备性」的改动里。
-    let mut killer_of: BTreeMap<ShipId, FactionId> = BTreeMap::new();
-    for e in &state.events {
-        if let GameEvent::Attack { attacker, target, .. } = e {
-            if let Some(a) = state.ship(attacker) {
-                killer_of.insert(target.clone(), a.faction_id.clone());
-            }
-        }
-    }
+    // 这里以前有**两处「事后回读」**，都是错的——它们都在回合末去读一个回合内已经变过的世界，
+    // 于是把「当时发生了什么」记到了「现在还剩什么」的头上：
+    //
+    // * **凶手**：曾用「同回合最后一条 `Attack` 的势力」近似。那要 `state.ship(attacker)`
+    //   才知道攻击者属于谁，而**互杀**（凶手本回合也被打沉）时那艘舰已经不在 `state.ships`
+    //   里 → 这次击杀**领不到功**。`ShipDestroyed.by` 是补刀那一刻记下的权威事实，不受影响。
+    // * **失城方**：曾用 `state.city(city).faction_id` 判断「谁丢了这座城」。但夷平**不改归属**
+    //   （空白城保留最后主人的 diaspora claim），而同一回合稍后的复垦/重建会把它改成新主——
+    //   于是读到的是**新主**。活体样本 seed 7 r24：大红斑科学站被欧盟夷平、同回合被无国界
+    //   科学组织复垦，这次战功被记到了**抢城的人**头上。`CityRazed.owner` 在夷平那一刻记下
+    //   真正的失主。
+    //
+    // 口径（与模块文档声明一致）：「我丢了一城 / 沉了一舰 → −1；我夺了一城 / 击沉敌舰 → +1」。
+    // 「一座活城易主」是一个**现象**、有两条实现分支（`city_defected` 主路 / `revolt` 兜底），
+    // 因此二者必须同分——旧代码让兜底分支 −1 而主路 0 分，等于「分数取决于有没有可倒戈目标」
+    // 这个无关的偶然。同理 `city_overrun` 也是「活城易主」，一并同分。
+    // **`colony_founded` 刻意不计**：新建/复垦是**殖民**行为，归 `nature_colony` 轴管；把它记成
+    // 军事得分会让殖民者集体漂向军国，两轴打架。
+    let mil_delta = military_deltas(&state.events);
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
 
     // Pass 1（只读 state/flow）：算出每势力的信号 target。
     let mut targets: BTreeMap<FactionId, Ideology> = BTreeMap::new();
     for f in &state.factions {
         let name = f.name.clone();
-        // 战争得失
-        let mut mil = 0.0;
-        for e in &state.events {
-            match e {
-                GameEvent::ShipDestroyed { ship, owner, .. } => {
-                    if owner == &name {
-                        mil -= 1.0;
-                    } else if let Some(k) = killer_of.get(ship) {
-                        if k == &name {
-                            mil += 1.0;
-                        }
-                    }
-                }
-                GameEvent::CityRazed { city, fallen_to, .. } => {
-                    if fallen_to == &name {
-                        mil += 1.0;
-                    } else if let Some(c) = state.city(city) {
-                        if c.faction_id == name {
-                            mil -= 1.0;
-                        }
-                    }
-                }
-                GameEvent::Revolt { faction, .. } => {
-                    if faction == &name {
-                        mil -= 1.0;
-                    }
-                }
-                _ => {}
-            }
-        }
+        // 战争得失（见上：全部来自本回合事件，无 state 回读）。
+        let mil = mil_delta.get(&name).copied().unwrap_or(0.0);
         // MOND 接触：到访异常区舰数（→科学） vs 开采异常区资源（→技术，按异常区城数计）。
         let mut sci_ships = 0u32;
         let mut tech_cities = 0u32;
@@ -3038,8 +3057,58 @@ fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     }
 }
 
-// --- story / chronicle -------------------------------------------------------
+/// 一个回合的事件账本 → 各势力的**军事净信号**（思潮「和平↔军国」的驱动量）。
+///
+/// 纯函数、只吃事件，**完全不看 state**：这是这条规则能被单元测试精确钉住的原因，也是它
+/// 正确的原因——「谁丢了城 / 谁打沉了谁」都是当时记下的事实，事后再去 state 里回读一个已经
+/// 变过的世界必然读错（详见 [`step_ideology`] 的说明：凶手互杀、失城方被同回合复垦）。
+///
+/// 规则（每一条都只读事件自带字段）：
+/// * **失去一艘舰**（战沉 *或* 欠费报废）→ 旧主 −1。
+/// * **击沉敌舰** → `by.faction` +1；只有 `cause == Combat` 才算，且功劳归**补刀**那一发。
+/// * **城被夷平**（`CityRazed`）→ 失主（`owner`，夷平那一刻的持有者）−1、拆城方 +1。
+/// * **活城易主**（`CityDefected` / `CityOverrun`）→ 失主 −1、新主 +1。
+/// * **离心叛乱夷为空白**（`Revolt`，是 `CityDefected` 的兜底分支）→ 失主 −1。
+/// * **`ColonyFounded` 刻意不计**：新建/复垦是殖民行为，归 `nature_colony` 轴，
+///   记进军事轴会让殖民者集体漂向军国。
+///
+/// 「同一现象必须同分」是这条规则的核心：`CityDefected` 与 `Revolt` 是**同一个触发**
+/// （忠诚跌破阈值）的两条分支（有/无可倒戈目标），旧代码却给兜底分支 −1、主路 0 分——
+/// 等于分数取决于「世界上有没有可倒戈的势力」这个与本次得失无关的偶然。
+fn military_deltas(events: &[GameEvent]) -> BTreeMap<FactionId, f64> {
+    let mut delta: BTreeMap<FactionId, f64> = BTreeMap::new();
+    let mut bump = |fid: &FactionId, d: f64| {
+        if !fid.is_empty() {
+            *delta.entry(fid.clone()).or_insert(0.0) += d;
+        }
+    };
+    for e in events {
+        match e {
+            GameEvent::ShipDestroyed { owner, cause, by, .. } => {
+                bump(owner, -1.0);
+                if *cause == DeathCause::Combat {
+                    if let Some(k) = by {
+                        bump(&k.faction, 1.0);
+                    }
+                }
+            }
+            GameEvent::CityRazed { owner, fallen_to, .. } => {
+                bump(owner, -1.0);
+                bump(fallen_to, 1.0);
+            }
+            GameEvent::CityDefected { from, to, .. }
+            | GameEvent::CityOverrun { from, to, .. } => {
+                bump(from, -1.0);
+                bump(to, 1.0);
+            }
+            GameEvent::Revolt { faction, .. } => bump(faction, -1.0),
+            _ => {}
+        }
+    }
+    delta
+}
 
+// --- story / chronicle -------------------------------------------------------
 /// 剧情步进：评估 config 的 `story` 表，把满足触发条件的剧情事件火出，写入
 /// [`State::chronicle`] 编年史并记一条 [`GameEvent::Story`]，同时应用可选的小幅
 /// 机械后果（关系/资源）。确定性：无 RNG，同一种子触发完全一致。
@@ -3209,6 +3278,89 @@ mod tests {
         let config = load_config();
         let state = default_state(&config, seed);
         (config, state)
+    }
+
+    /// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件账本推出，且**同一现象同分**。
+    ///
+    /// 这里逐条钉住旧实现的两个真实缺陷：
+    /// 1. **互杀吞掉战功**：旧口径是「同回合最后一条 `Attack` 的势力」，那要 `state.ship(attacker)`
+    ///    才知道攻击者属于谁——凶手若在本回合也被打沉，它已经不在 `state.ships` 里，于是这次
+    ///    击杀**领不到功**。权威的 `by` 不受影响。
+    /// 2. **失城方读成了抢城者**：旧口径用 `state.city(city).faction_id` 判「谁丢了城」，而夷平
+    ///    不改归属、同回合稍后的复垦会把它改成新主，于是 −1 记到了**复垦者**头上。
+    ///
+    /// 另外钉住「`CityDefected`（主路）与 `Revolt`（兜底）必须同分」——它们是同一个触发的两条
+    /// 分支，旧代码却只给兜底分支扣分。
+    #[test]
+    fn military_signal_uses_the_ledger_and_is_branch_agnostic() {
+        let d = |events: &[GameEvent], fid: &str| military_deltas(events).get(fid).copied().unwrap_or(0.0);
+
+        // 1) 互杀：A 的舰打沉 B 的舰，B 的舰同回合也打沉 A 的舰 → **双方各得一分战功**。
+        let killer = |ship: &str, faction: &str| Killer {
+            ship: ship.to_string(), faction: faction.to_string(), weapon: "kinetic".to_string(),
+        };
+        let mutual = vec![
+            GameEvent::ShipDestroyed {
+                ship: "乙舰".into(), owner: "乙".into(), class: "corvette".into(),
+                cause: DeathCause::Combat, by: Some(killer("甲舰", "甲")),
+            },
+            GameEvent::ShipDestroyed {
+                ship: "甲舰".into(), owner: "甲".into(), class: "corvette".into(),
+                cause: DeathCause::Combat, by: Some(killer("乙舰", "乙")),
+            },
+        ];
+        assert_eq!(d(&mutual, "甲"), 0.0, "甲沉一舰失一分、击沉一舰得一分，净 0");
+        assert_eq!(d(&mutual, "乙"), 0.0, "乙同理——旧口径下会有一方拿不到战功");
+        // 单方面被击沉：凶手得分，事主扣分。
+        let one_sided = vec![GameEvent::ShipDestroyed {
+            ship: "乙舰".into(), owner: "乙".into(), class: "corvette".into(),
+            cause: DeathCause::Combat, by: Some(killer("甲舰", "甲")),
+        }];
+        assert_eq!(d(&one_sided, "甲"), 1.0);
+        assert_eq!(d(&one_sided, "乙"), -1.0);
+
+        // 2) 欠费报废：失主扣分，**没有人**领功（不是战功）。
+        let rusted = vec![GameEvent::ShipDestroyed {
+            ship: "锈舰".into(), owner: "丙".into(), class: "corvette".into(),
+            cause: DeathCause::UpkeepShortfall, by: None,
+        }];
+        assert_eq!(d(&rusted, "丙"), -1.0);
+        assert_eq!(d(&rusted, "甲"), 0.0, "欠费报废不该被记成任何人的战功");
+
+        // 3) 城被 A 拆平、同回合被 C 复垦：扣分属于**失城方 B**，复垦者 C 不因此得军事分。
+        let razed_then_refounded = vec![
+            GameEvent::CityRazed {
+                city: "城".into(), owner: "乙".into(), fallen_to: "甲".into(),
+                by_ship: "甲舰".into(), damage: 9.0, pop_before: 200,
+            },
+            GameEvent::ColonyFounded {
+                city: "城".into(), owner: "丙".into(), body: "木星".into(),
+                seeded_ship_class: "corvette".into(), how: FoundingHow::Refounded,
+                prev_owner: Some("乙".into()),
+            },
+        ];
+        assert_eq!(d(&razed_then_refounded, "乙"), -1.0, "失城方是乙，不是复垦者");
+        assert_eq!(d(&razed_then_refounded, "甲"), 1.0, "拆城方得一分");
+        assert_eq!(d(&razed_then_refounded, "丙"), 0.0, "复垦是殖民行为，不进军事轴");
+
+        // 4) 活城易主的两条分支必须同分：倒戈 / 难民夺城 / 叛乱兜底。
+        for ev in [
+            GameEvent::CityDefected { city: "城".into(), from: "乙".into(), to: "甲".into(), loyalty: 0.2 },
+            GameEvent::CityOverrun { city: "城".into(), from: "乙".into(), to: "甲".into() },
+        ] {
+            let one = vec![ev.clone()];
+            assert_eq!(d(&one, "乙"), -1.0, "{:?} 失主必须扣分（与 Revolt 兜底同分）", ev.kind());
+            assert_eq!(d(&one, "甲"), 1.0);
+        }
+        let revolt = vec![GameEvent::Revolt { city: "城".into(), faction: "乙".into(), loyalty: 0.0 }];
+        assert_eq!(d(&revolt, "乙"), -1.0);
+
+        // 5) 新建城（真·殖民）不进军事轴。
+        let founded = vec![GameEvent::ColonyFounded {
+            city: "新城".into(), owner: "丙".into(), body: "地球".into(),
+            seeded_ship_class: "corvette".into(), how: FoundingHow::NewSite, prev_owner: None,
+        }];
+        assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
     }
 
     /// A player-facing regression guard for the "stale follow" bug: a player
