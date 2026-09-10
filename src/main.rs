@@ -71,7 +71,7 @@
 
 use clap::Parser;
 use planet_x::agent;
-use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
+use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, control, projection, sim, world};
@@ -105,9 +105,10 @@ State 快照推进，全部数值由 config/game.ron 数据驱动、不硬编码
 \n\
 【控制模型 = 指令】每势力有可控状态 State::control：ship_orders（Idle/Move/Follow/DockCity/\n\
 Dock/Colonize；攻击与轰炸不需要行为，射程内自动发生）、doctrine/kiting（行为风格与风筝<->贴脸）、\n\
-budget（投资预算）、invest_weights。每个叶子带 mode：\n\
-Ai（系统自动决策）| Player（玩家指令，系统只读）| None（继承上层）。State::scope 是一棵\n\
-作用域树（全局→势力→天体→城市），决定某叶子由谁控制。agent 用 --apply 写 diff 定向故事。\n\
+budget（投资预算）、invest_weights。每个叶子带 mode（三态）：\n\
+Inherit（继承上层，缺省）| Auto（系统自动决策）| Player（玩家指令，系统只读）。State::scope 是一棵\n\
+作用域树（全局→势力→天体→城市），决定某叶子由谁控制；沿链取第一个不是 Inherit 的层，全链\n\
+继承则落到 Auto。agent 用 --apply 写 diff 定向故事。\n\
 \n\
 【讲故事流程】\n\
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
@@ -208,11 +209,22 @@ struct Cli {
 
     /// 索引投影模式：与 --round N 连用，把 N+1 回合投影成一份**lean 主流**（main.jsonl，
     /// 每回合一行：eager 字段 + metrics + id 数组）+ 按 id 索引的 **lazy 表**（idx/*.jsonl，
-    /// ships/cities/bodies 的完整对象）+ **agent 可读的投影 schema**（schema.json，声明哪些
-    /// 字段 eager / 哪些 lazy 及其表/key/列类型）。重型字段不再内联；agent 用 Python kit
-    /// （play/planet_xq，uv 管理）按 id join。确定性：同 seed 复现字节一致。
+    /// ships/cities/bodies 的完整对象）+ **派生表**（idx/flow.jsonl、idx/city_flow.jsonl、
+    /// idx/control.jsonl、idx/scope.jsonl：引擎内部中间量与控制面，状态里没有）+ **agent 可读
+    /// 的投影 schema**（schema.json，声明哪些字段 eager / 哪些 lazy / 哪些 derived 及其
+    /// 表/key/join 列/列类型）。重型字段不再内联；agent 用 Python kit（play/planet_xq，
+    /// uv 管理）按 id join。确定性：同 seed 复现字节一致。
     #[arg(long, value_name = "DIR")]
     index: Option<PathBuf>,
+
+    /// 输出这一回合存下来的**派生态**：`{round, source, pre, post, [note]}`。
+    /// `pre` = 推进前的观测，`post` = 推进后的观测 + **本回合流量中间量**（`Derived.flow`：
+    /// 各势力/各城的产出、舰队维护费、治理成本与覆盖率——这些量不落持久状态，只有这里和
+    /// `--index` 的 derived.flow 表能读到）。
+    /// 从 `--start <ckpt>` 读的是**档里存的**那一对（与 `--index` 同一回合的值完全相同，
+    /// 不做舍入）；没有档时按当前状态重算，这时 `post.flow` 是空的，`note` 会说明。
+    #[arg(long)]
+    derived: bool,
 }
 
 fn main() {
@@ -239,8 +251,22 @@ fn main() {
     }
 
     // Build the world: from a checkpoint (state + RNG) or generated procedurally.
+    //
+    // `--derived`（以及 `--index`）要的是**档里存下来的**那一对 `pre`/`post`：`--derived`
+    // 直接报它，`--index` 用它当**起点回合**的派生态（否则投影一份 checkpoint 会显示
+    // 「全世界零产出/零维护」——那些量只有在它是回合结果时才存在）。其余路径继续用
+    // `load_initial`（它同时接受 session checkpoint 与裸 state 两种档）。
     let seed = parse_seed(&cli.seed);
+    let mut stored: Option<RoundState> = None;
     let (mut state, mut rng) = match &cli.start {
+        Some(path) if cli.derived || cli.index.is_some() => match load_checkpoint(path) {
+            Ok((rs, prng)) => {
+                let s = rs.state.clone();
+                stored = Some(rs);
+                (s, prng)
+            }
+            Err(_) => load_initial(path, seed),
+        },
         Some(path) => load_initial(path, seed),
         None => (world::default_state(&config, seed), Prng::new(seed)),
     };
@@ -256,23 +282,68 @@ fn main() {
             // 没下达」的渠道**：stdout 必须保持零噪声的状态流，而丢弃的常见原因
             // （舰已战沉/改名、城已易主、building 下标换城）恰恰是必须知道的那种。
             // 静默即成功，所以只在真的丢了东西时才说话。
-            Ok(report) if !report.is_clean() => {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "ok": true,
-                        "code": "WARN_APPLY_SKIPPED",
-                        "applied": report.applied,
-                        "skipped": report.skipped,
-                        "hint": "some diff leaves did not land; the diff itself is valid, the entities it names are not (stale ship/city names, wrong faction, building index from another city).",
-                    })
-                );
+            Ok(report) => {
+                if !report.is_clean() {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "code": "WARN_APPLY_SKIPPED",
+                            "applied": report.applied,
+                            "skipped": report.skipped,
+                            "hint": "some diff leaves did not land; the diff itself is valid, the entities it names are not (stale ship/city names, wrong faction, building index from another city).",
+                        })
+                    );
+                }
+                // 「写值即接管」的回执：你只写了值、没写 mode，那些叶片从此归你（系统不再改写）。
+                // 这不是错误，但 agent 必须知道——它决定了下一回合谁在动它们。
+                if !report.took_over.is_empty() {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "code": "NOTE_APPLY_TOOKOVER",
+                            "applied": report.applied,
+                            "took_over": report.took_over,
+                            "hint": "writing a value without `mode` means `mode: Player` (the system stops overwriting that leaf). Pass an explicit mode (`Auto` / `Inherit`) if you only meant to nudge the recorded value.",
+                        })
+                    );
+                }
             }
-            Ok(_) => {}
         }
     }
 
     // State-reflecting dumps.
+    //
+    // `--derived`：这一回合引擎到底算出了什么（`pre` = 推进前的观测；`post` = 推进后 + 流量）。
+    // 有档就报**档里存的**那一对——于是它与 `--index` 的 `derived.flow` 表对同一回合给同一个值
+    // （有 `tests/projection_derived.rs` 把这条钉住）；没档（或叠加了 `--apply`，此时状态已变）
+    // 只能按当前状态重算，那种情况下没有流量，`note` 明说，别让人误以为流水为零。
+    if cli.derived {
+        let from_checkpoint = stored.is_some() && cli.apply.is_none();
+        let (pre, post) = match (&stored, cli.apply.is_some()) {
+            (Some(rs), false) => (rs.pre.clone(), rs.post.clone()),
+            (Some(rs), true) => (rs.pre.clone(), sim::derived_from_state(&state, &config)),
+            (None, _) => {
+                let d = sim::derived_from_state(&state, &config);
+                (d.clone(), d)
+            }
+        };
+        let mut v = json!({
+            "round": state.round,
+            "source": if from_checkpoint { "checkpoint" } else { "state" },
+            "pre": pre,
+            "post": post,
+        });
+        if !from_checkpoint {
+            v["note"] = json!(
+                "这份派生态是**按当前状态重算**的，没有档存的本回合流量中间量，所以 post.flow 是空的。\
+                 要真正的流量请用 `--index` 投影的 derived.flow 表，或用 `--save` 出来的 checkpoint（它带 pre/post）。"
+            );
+        }
+        emit(&v.to_string());
+        return;
+    }
     if cli.story {
         emit(&agent::story_value(&state).to_string());
         return;
@@ -318,12 +389,26 @@ fn main() {
             );
             std::process::exit(10);
         };
-        if let Err(e) = projection::write_index(&mut state, &config, &mut rng, n, dir) {
-            eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
-            std::process::exit(10);
-        }
-        let last = sim::derived_from_state(&state, &config);
-        let round_state = RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last.clone(), post: last };
+        // 从 checkpoint 起跑时，把档里那一对派生态交给投影当**起点回合**的行（见
+        // `projection::write_index_seeded`）：那一行的 state 就是那一回合的结果，所以
+        // 「产出/维护/治理」应当是那一回合的数，而不是被抹成 0。
+        let start_derived = stored.as_ref().map(|rs| rs.post.clone());
+        let outcome = match projection::write_index_seeded(&mut state, &config, &mut rng, n, dir, start_derived) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
+                std::process::exit(10);
+            }
+        };
+        // 存一份**没丢流量**的档：`pre`/`post` 直接取投影收尾回合的那一对。此前这里重新
+        // `derived_from_state`，把本回合的 `flow` 存成了空表——于是同一回合的两个读面
+        // （`--index` 的 derived.flow 表 vs 档里的 post）会各说各话。
+        let round_state = RoundState {
+            schema_version: SCHEMA_VERSION,
+            state: state.clone(),
+            pre: outcome.pre,
+            post: outcome.post,
+        };
         save_if_requested(cli.save.as_deref(), &round_state, &rng);
         return;
     }

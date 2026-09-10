@@ -18,7 +18,11 @@ ron = "0.8"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 colored = "2"
-serde_json = "1"
+# `float_roundtrip`：**解析**浮点必须精确。默认的快速解析器对某些十进制串会落到相邻的
+# double 上（实测：文件里写着 `1.4000000000000001`，默认解析读回来是 `1.4`）——于是
+# 「读出来的数 ≠ 写出去的数」。这个项目全靠数值说话（投影 → Python → diff → 回读），
+# 这种静默漂移必须掐掉。
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 opt-level = 3

@@ -104,9 +104,10 @@ function behaviorFromInput(type, d) {
 //  childMode  'tabs'  容器：tab 带，仅展开激活子节点
 //             'list'  分类组：全部子项堆叠
 //             'leaf'  终端节点（无子）
-//  scope      选 AI/玩家 toggle 的来源：
+//  scope      选「谁负责」三态 toggle 的来源：
 //             null 无 toggle（纯分组容器）；'global' edScope.global；
 //             'factions'/'bodies'/'cities' scopeVal(edScope[k], id)；'leaf' node.leaf.mode
+//             （三态：Inherit=继承上层 / Auto=系统自动 / Player=玩家；读面永远给全三态之一）
 //  editor     'ship'  舰行为编辑器（仅 Player）| 'value' 数值叶子编辑器 | 'building' 建筑
 const KIND = {
   global:    { childMode: 'tabs', scope: 'global' },
@@ -115,6 +116,8 @@ const KIND = {
   body:      { childMode: 'tabs', scope: 'bodies' },
   city:      { childMode: 'list', scope: 'cities' },
   ship:      { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
+  // 势力级「舰队默认指令」：新舰出生与一次性指令收尾都回落到它，所以它也带行为编辑器。
+  fleetorder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
   resource:  { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '投资预算/回合' },
   conbudget: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '建造预算/回合' },
   building:  { childMode: 'leaf', scope: 'leaf', editor: 'building' },
@@ -215,7 +218,7 @@ function getControl(fid) {
 
 function scopeVal(list, id) {
   const e = list.find((x) => x[0] === id);
-  return e ? e[1] : null;
+  return e ? e[1] : 'Inherit';
 }
 function setScopeVal(list, id, val) {
   const i = list.findIndex((x) => x[0] === id);
@@ -367,6 +370,9 @@ function buildTree() {
       const s = st.ships.find((x) => x.name === ord.ship);
       return { key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid };
     });
+    // 势力级的「舰队默认指令」也是一片可编辑叶子：新舰出生就继承它，一次性指令收尾回落
+    // 到它。它排在「舰」分组**之前**——因为它是这一组的前提（先定默认，例外才少写）。
+    const fleetLeaf = (fc.default_ship_order = fc.default_ship_order || { behavior: 'Idle', mode: 'Inherit' });
 
     const invLeaves = (fc.investment_budget || []).map((e) => ({
       key: 'inv' + fid + ':' + e.resource, kind: 'resource', name: resName(e.resource), leaf: e, fid,
@@ -400,7 +406,11 @@ function buildTree() {
     });
 
     const cats = [];
-    if (shipLeaves.length) cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: shipLeaves });
+    if (shipLeaves.length || fleetLeaf) {
+      const kids = [{ key: 'fleet' + fid, kind: 'fleetorder', id: fid, name: '舰队默认指令', leaf: fleetLeaf, fid }]
+        .concat(shipLeaves);
+      cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: kids });
+    }
     if (budgetKids.length) cats.push({ key: 'gbd' + fid, kind: 'group', name: '预算', fid, children: budgetKids });
     if (bodyNodes.length) cats.push({ key: 'gb' + fid, kind: 'group', name: '天体', fid, children: bodyNodes });
     fn.children = cats;
@@ -471,13 +481,39 @@ function renderNode(node) {
   }
 
   if (spec.editor === 'ship') {
-    if (node.leaf.mode === 'Player') wrap.appendChild(shipEditor(node.leaf));
+    // 编辑器对「**有效归属**是玩家」的叶子开放，而不是只看叶子自己的 mode：舰队默认指令
+    // 设成玩家之后，继承它（`Inherit`）的舰也归你管——以前那些舰在 UI 上连编辑器都没有。
+    // 改行为时会把叶子显式钉成 Player（写值即接管，与 `--apply` 同一条规则）。
+    if (effectiveMode(node) === 'Player') wrap.appendChild(shipEditor(node.leaf, node));
+    else wrap.appendChild(hintLine('由系统自动决定（要自己指挥就把左边的归属改成「玩家」）'));
   } else if (spec.editor === 'value') {
-    wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel));
+    wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel, node));
   } else if (spec.editor === 'building') {
     wrap.appendChild(buildingEditor(node));
   }
   return wrap;
+}
+
+function hintLine(text) {
+  const d = el('div', { class: 'tnode-hint' });
+  d.textContent = text;
+  return d;
+}
+
+/// 一片叶子的**有效归属**：叶子自己 → （舰：势力的舰队默认指令）→ 势力 → 全局。
+/// 这是 `State::ship_control` / `State::*_control` 在前端的对应读法，UI 用它决定
+/// 「这片叶子现在归谁、能不能编辑」。
+function effectiveMode(node) {
+  const own = normMode(node.leaf && node.leaf.mode);
+  if (own !== 'Inherit') return own;
+  if (node.kind === 'ship') {
+    const fc = getControl(node.fid);
+    const d = normMode(fc.default_ship_order && fc.default_ship_order.mode);
+    if (d !== 'Inherit') return d;
+  }
+  const fac = normMode(scopeVal(edScope.factions, node.fid));
+  if (fac !== 'Inherit') return fac;
+  return normMode(edScope.global);
 }
 
 function modeToggleFor(node) {
@@ -487,29 +523,39 @@ function modeToggleFor(node) {
   const set = acc.set;
 
   const sel = el('select', { class: 'mode' });
-  [['', '默认'], ['Ai', 'AI'], ['Player', '玩家']].forEach(([v, l]) => {
+  [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']].forEach(([v, l]) => {
     const o = el('option', { value: v });
     o.textContent = l;
-    o.selected = mode === (v === '' ? null : v);
+    o.selected = normMode(mode) === v;
     sel.appendChild(o);
   });
   sel.addEventListener('change', () => {
-    set(sel.value === '' ? null : sel.value);
+    set(sel.value);
     renderTree();
   });
   return sel;
 }
 
-function shipEditor(leaf) {
+// 读面的三态是权威拼写；缺省（null/undefined，例如 scope 里没列出的层）算「继承」。
+function normMode(m) { return m || 'Inherit'; }
+
+function shipEditor(leaf, node) {
   const edit = el('div', { class: 'ship-editor' });
   const t = behaviorType(leaf.behavior);
   const d = behaviorToInput(leaf.behavior);
+  // 改行为 = 变成你自己的指令（写值即接管）：否则这次编辑会被系统下一回合按自己的逻辑
+  // 覆盖掉，而界面上看起来「我明明改了」。
+  const commit = (b) => {
+    leaf.behavior = b;
+    if (node && normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+    renderTree();
+  };
 
   const typeSel = el('select');
   [['idle', '待命'], ['move', '移动'], ['follow', '跟随舰'], ['dock_city', '停泊城'], ['dock', '停泊轨道'], ['colonize', '殖民']].forEach(([v, lbl]) => {
     const o = el('option', { value: v }); o.textContent = lbl; o.selected = t === v; typeSel.appendChild(o);
   });
-  typeSel.addEventListener('change', () => { leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
+  typeSel.addEventListener('change', () => commit(behaviorFromInput(typeSel.value, d)));
   edit.appendChild(typeSel);
 
   const bodySel = () => {
@@ -517,7 +563,7 @@ function shipEditor(leaf) {
     st.bodies.filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
       const o = el('option', { value: bd.name }); o.textContent = bd.name; o.selected = d.body === bd.name; s.appendChild(o);
     });
-    s.addEventListener('change', () => { d.body = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
+    s.addEventListener('change', () => { d.body = s.value; commit(behaviorFromInput(typeSel.value, d)); });
     return s;
   };
   const citySel = () => {
@@ -525,7 +571,7 @@ function shipEditor(leaf) {
     st.cities.forEach((c) => {
       const o = el('option', { value: c.name }); o.textContent = c.name; o.selected = d.city === c.name; s.appendChild(o);
     });
-    s.addEventListener('change', () => { d.city = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
+    s.addEventListener('change', () => { d.city = s.value; commit(behaviorFromInput(typeSel.value, d)); });
     return s;
   };
   const shipSel = () => {
@@ -533,13 +579,13 @@ function shipEditor(leaf) {
     st.ships.forEach((sh) => {
       const o = el('option', { value: sh.name }); o.textContent = sh.name; o.selected = d.ship === sh.name; s.appendChild(o);
     });
-    s.addEventListener('change', () => { d.ship = s.value; leaf.behavior = behaviorFromInput(typeSel.value, d); renderTree(); });
+    s.addEventListener('change', () => { d.ship = s.value; commit(behaviorFromInput(typeSel.value, d)); });
     return s;
   };
 
   if (t === 'move') {
-    edit.appendChild(inputNum('x', d.x, (v) => { d.x = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
-    edit.appendChild(inputNum('y', d.y, (v) => { d.y = +v; leaf.behavior = behaviorFromInput(t, d); renderTree(); }));
+    edit.appendChild(inputNum('x', d.x, (v) => { d.x = +v; commit(behaviorFromInput(t, d)); }));
+    edit.appendChild(inputNum('y', d.y, (v) => { d.y = +v; commit(behaviorFromInput(t, d)); }));
   } else if (t === 'colonize' || t === 'dock') {
     edit.appendChild(bodySel());
   } else if (t === 'follow') {
@@ -559,13 +605,19 @@ function inputNum(label, val, onSet) {
   return w;
 }
 
-function leafValueEditor(leaf, label) {
+function leafValueEditor(leaf, label, node) {
   const wrap = el('div', { class: 'leaf-val' });
   const t = el('span', { class: 'lv-label' });
   t.textContent = label + ' ';
   const inp = el('input', { type: 'number', class: 'num', value: leaf.value, step: '0.1' });
-  inp.disabled = leaf.mode !== 'Player';
-  inp.addEventListener('input', () => { if (!inp.disabled) leaf.value = +inp.value || 0; });
+  // 只有「有效归属是玩家」的叶子才可编辑（可能继承自势力/天体/城市层的作用域）。
+  inp.disabled = !node || effectiveMode(node) !== 'Player';
+  inp.addEventListener('input', () => {
+    if (inp.disabled) return;
+    leaf.value = +inp.value || 0;
+    // 写值即接管：改了值就把这一片钉成玩家的（与 `--apply` 同一条规则）。
+    if (normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+  });
   wrap.appendChild(t);
   wrap.appendChild(inp);
   return wrap;

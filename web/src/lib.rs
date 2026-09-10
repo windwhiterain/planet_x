@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use planet_x::config::parse_seed;
 use planet_x::control::{
-    apply_diff, control_view, scope_view, CommandReq, FactionControlView, ScopeView,
+    apply_diff, control_view, scope_view, CommandReq, FactionControlView,
 };
 use planet_x::model::*;
 use planet_x::prng::Prng;
@@ -108,8 +108,8 @@ pub struct InfoRoot {
 pub struct StateView {
     /// 可控 state（写面的读模板）：各势力的舰指令/预算/权重/迁都。
     pub control: Vec<FactionControlView>,
-    /// 控制作用域树（写面的读模板）：谁 AI、谁玩家。
-    pub scope: ScopeView,
+    /// 控制作用域树（写面的读模板）：谁自动、谁玩家、谁继承。
+    pub scope: ControlScopePatch,
     /// 全量只读信息树：每个根都是模型的**整份** JSON dump（见 [`InfoRoot`]）。
     /// 读面（地图/状态面板/选中详情）全部从这里取，因此普通 state（天体/定居点/城/
     /// 建筑/势力/舰/事件/编年史…）、派生量与全部配置表都在，且**加字段即自动出现**。

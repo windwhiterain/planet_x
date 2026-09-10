@@ -459,7 +459,7 @@ mod tests {
         let city = state.cities.iter().find(|c| c.faction_id == fid).expect("a city").name.clone();
         let ctrl = state.control.entry(fid.clone()).or_default();
         ctrl.invest_weights.insert((city.clone(), 7), Control::player(1.5));
-        ctrl.build_weights.insert((city.clone(), 7), Control::ai(2.5));
+        ctrl.build_weights.insert((city.clone(), 7), Control::auto(2.5));
 
         let v = to_value(&state).expect("a tuple-keyed state must dump to JSON");
         let inv = &v["control"][fid.as_str()]["invest_weights"];

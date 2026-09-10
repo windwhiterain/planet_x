@@ -96,6 +96,14 @@ class PlanetXQ:
         self._tables: dict[str, pd.DataFrame] = {}
         for name, cfg in self.schema.get("lazy", {}).items():
             self._tables[name] = pd.read_json(os.path.join(self.dir, cfg["table"]), lines=True)
+        # **派生表**（`schema.derived`）：数据不在状态里、是引擎算出来的量（本回合流量中间量、
+        # 控制面）。它们不像 lazy 表那样由 main 的某个 id 数组索引，而是用 `join_on` 指向
+        # main 已有的列（`faction_ids`/`city_ids`）——所以它们单独一段，但读法与 lazy 表一样。
+        # 旧版投影没有这一段（`.get(..., {})` ⇒ 空，方法会报出「该投影没有这张表」）。
+        for name, cfg in self.schema.get("derived", {}).items():
+            path = os.path.join(self.dir, cfg["table"])
+            if os.path.exists(path):
+                self._tables[name] = pd.read_json(path, lines=True)
         # Static rules dictionary (written by --index alongside schema.json); `None` if absent.
         self.meta: dict | None = None
         meta_path = os.path.join(self.dir, "meta.json")
@@ -111,6 +119,55 @@ class PlanetXQ:
         if round is not None and "round" in df.columns:
             df = df[df["round"] == round]
         return df
+
+    # --- 派生表：引擎算出来的量（不在状态里，只能由引擎产出）-----------------------------
+    #
+    # 四张表（见 `schema.json` 的 `derived` 段与笔记 `engine-data-plane.md`）：
+    #   flow       每回合 × 势力：production{} / upkeep / governance_total / governance_coverage
+    #   city_flow  每回合 × 城  ：production{}（含 razed 空城）
+    #   control    每回合 × 叶片：kind / key / sub / value / mode（谁在控制什么）
+    #   scope      每回合 × 显式作用域节点：level / key / mode
+    #
+    # ⚠ `flow` 的**数值**在 mainstream 的 `metrics.factions[<势力>]` 里也有一份（嵌套对象）；
+    #   这些表的价值是**形状**——可直接 join、列类型稳定、按 (round, 名字) 对齐。
+    # ⚠ 从 checkpoint 起跑的投影（`--start ckpt --round 0 --index`）那一行的 flow 是
+    #   「产生这个状态的那一回合」的流量（引擎现在还额外把档里存的派生态写进回合 0 行）；
+    #   全新开局（`--seed`）的回合 0 没有流量，是 `{}`。
+
+    def derived(self, name: str, round: int | None = None) -> pd.DataFrame:
+        """One derived table (``flow`` / ``city_flow`` / ``control`` / ``scope``), by round."""
+        if name not in self.schema.get("derived", {}):
+            raise KeyError(
+                f"'{name}' is not a derived table。该投影的 derived 段是 "
+                f"{list(self.schema.get('derived', {}))}；旧版投影没有这一段，"
+                f"请用新版 planet_x 重新 `--index`。"
+            )
+        return self.table(name, round)
+
+    def flow(self, round: int | None = None) -> pd.DataFrame:
+        """每回合每势力的流量中间量：产出（按资源）/ 舰队维护费 / 治理成本与覆盖率。
+
+        这是「预算压顶」判据的分子分母：`upkeep / production_value` —— 后者可由
+        `production` 按 `q.resource_value()` 加权得到，或直接读 `q.factions()` 的同名列。
+        """
+        return self.derived("flow", round)
+
+    def city_flow(self, round: int | None = None) -> pd.DataFrame:
+        """每回合每城的开采产出（含已夷平的空白城，`razed` 列筛）。"""
+        return self.derived("city_flow", round)
+
+    def control(self, round: int | None = None) -> pd.DataFrame:
+        """**控制面的 tidy 行**：一行一个叶片（`kind`/`key`/`sub`/`value`/`mode`）。
+
+        `mode` 是叶片自己的三态表态（`Player`/`Auto`/`Inherit`），**不是**有效归属；
+        舰的有效指令看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` 列
+        （引擎解析，别自己重算链）。`sub` 只对权重叶有意义（城内建筑下标）。
+        """
+        return self.derived("control", round)
+
+    def scope(self, round: int | None = None) -> pd.DataFrame:
+        """作用域树的**显式**表态：`level`（global/faction/body/city）+ `key` + `mode`。"""
+        return self.derived("scope", round)
 
     def ships(self, round: int | None = None) -> pd.DataFrame:
         return self.table("ships", round)

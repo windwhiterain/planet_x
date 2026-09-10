@@ -43,6 +43,8 @@ pub struct Trajectory {
     /// 势力：资源库存/外交关系/投资与建造预算（每个 faction 一对象）。
     pub factions: Vec<Faction>,
     /// 飞船：坐标/舰级/耐久/阵营/当前命中与目标（每艘 ship 一对象）。
+    /// `doctrine`/`kiting` 是**有效值**（叶 → 舰队默认 → 舰上记录值，引擎解析），
+    /// 不是舰上那份出厂快照——见 `state_json` 的注释。
     pub ships: Vec<Ship>,
     /// 本回合事件（谁开火/被毁/城被夷平/殖民/战争/剧情…）。
     pub events: Vec<GameEvent>,
@@ -76,6 +78,18 @@ pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
         metrics: derived.metrics.clone(),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
+    // 舰的**风格**在这里给**有效值**（叶 → 舰队默认 → 舰上记录值），不是 `Ship` 上那份记录：
+    // 风格现在是活层，`--apply` 写的是叶片，所以直接序列化 `Ship` 只能读到出厂快照——agent
+    // 会看到 `kiting: 0.0` 而以为是基线，实际上舰队默认早把它推成 -1.0 了。这类
+    // 「读数不反映真实行为」正是本项目最忌讳的那种坑，所以在唯一的 agent 视图上就地改掉
+    // （与 `round_value` 同一手法：序列化后统一修字段）。记录值仍完整地存在 checkpoint 里。
+    // 放在 `round_value` **之前**，让这些值也一起按两位小数规整（避免 token 噪声）。
+    if let Some(ships) = v.get_mut("ships").and_then(|s| s.as_array_mut()) {
+        for (row, s) in ships.iter_mut().zip(state.ships.iter()) {
+            row["doctrine"] = serde_json::to_value(state.ship_doctrine(s.name.clone())).expect("doctrine is serializable");
+            row["kiting"] = json!(state.ship_kiting(s.name.clone()));
+        }
+    }
     round_value(&mut v);
     v
 }
@@ -166,10 +180,10 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
 
     json!({
         "notes": [
-            "budget：造舰预算 construction_budget = 库存×invest_fraction，但**先留维护底线**：从库存里预留 upkeep×upkeep_reserve_mult 的市场价值，只把超出部分用于造舰（'把海军养在经济能承受的规模'）。投资预算 investment_budget = 库存×invest_fraction，不受该保留约束。只有叶子的 mode=Player 时命令的 value 才被采用；mode=Ai 时系统每回合按上式重算。",
+            "budget：造舰预算 construction_budget = 库存×invest_fraction，但**先留维护底线**：从库存里预留 upkeep×upkeep_reserve_mult 的市场价值，只把超出部分用于造舰（'把海军养在经济能承受的规模'）。投资预算 investment_budget = 库存×invest_fraction，不受该保留约束。只有叶子的 mode=Player 时命令的 value 才被采用；mode=Auto 时系统每回合按上式重算；mode=Inherit 时沿作用域链上溯（全链没人表态则落到 Auto）。",
             "每回合净流 ≈ 产出 production_value − 舰队维护 upkeep − 治理开销 governance_cost。为负则库存持续下降（清算），最终舰队生锈（护甲扣到 0 报废）、城市治理不到位而降忠诚→叛乱夷平。用 --control-plan [faction] 看该势力的剖面（净流/可养舰队上限/清算前剩余回合）。",
             "生产 production：采矿建筑按面积×labor×productivity×production_rate 出矿；人口限制劳动效率（min_efficiency 下限）。治理 governance：行政成本 = (admin_base + admin_per_au×距首都距离)×人口超载倍率 + 娱乐预算，用库存按价值加权支付，覆盖率<1 则忠诚下跌。",
-            "迁都（capital，controllable）：`capital` 叶子带 mode（Player=你说的算，Ai=系统周期性重估）。首都=治理/本土防御锚点；首都人口占全势力人口的比例越高，全国每城目标忠诚加成越大（capital_share_loyalty_buff）；迁都则按「旧首都人口占比」扣全国忠诚（capital_share_relocate_cost）——迁都是为了省治理距离成本，却是以全国忠诚为赌注的豪赌，不是免费优化。首都亡城（其上已无本势力活城）会被立即强迁到人口最高的活城。",
+            "迁都（capital，controllable）：`capital` 叶子带 mode（Player=你说的算，Auto=系统周期性重估，Inherit=沿作用域链上溯）。首都=治理/本土防御锚点；首都人口占全势力人口的比例越高，全国每城目标忠诚加成越大（capital_share_loyalty_buff）；迁都则按「旧首都人口占比」扣全国忠诚（capital_share_relocate_cost）——迁都是为了省治理距离成本，却是以全国忠诚为赌注的豪赌，不是免费优化。首都亡城（其上已无本势力活城）会被立即强迁到人口最高的活城。",
             "市场 market：**真实交换所**，不是常数价贩卖机。价格 = 基价 × (coverage_rounds/覆盖回合数)^price_alpha，其中覆盖回合数 = 世界总库存 ÷ 实测消费率（由库存差量出来）——稀缺顶到 price_ceiling（默认 8×）、过剩折到 price_floor。供给是**别人真的拿出来卖的富余**（挂单记名卖家），卖光就买不到；成交价再乘**关系倍率**（对敌最多 1+hostile_price_markup 倍，对友打 friendly_price_discount 折）。**关系冷到 embargo_relation、交战、或「已倒向联盟的弱者 ↔ 被锁定的霸权」即全面禁运**——那个卖家的所有资源对你都不存在（见 metrics.factions[<你>].trade_blocked_by）。付款=把自己可出口的实物交割给对方，另按 spread 烧掉一笔（真实价值 sink）。",
             "运费与 MOND 承运 freight/mond：货物**不是瞬移**——成交价再乘运费率 = freight_per_au × 买卖双方首都距离，**要穿越 28 AU 引力异常带**再按浸入深度加 mond_freight_mult 倍；非 master 的货走那条线会**按深度丢货**（确定性比例，见 mond_loss_per_au），只有掌握了 MOND 的 master 能可靠承运、并对这条线上的运费**抽税**（carrier_share）。观察面：metrics.factions[].freight_paid / carrier_income——后者只有 master 会 >0，那是柯伊伯带贸易的垄断租金。",
             "实体身份=唯一名字（WYSIWYG 资源 key 即可读中文名），无 numeric shadow id；schema 由同一批结构体派生（--schema / --control-schema 自描述）。"
@@ -236,6 +250,43 @@ pub fn governance_distance(state: &State, owner: &str, body_id: &str) -> f64 {
 mod tests {
     use super::*;
     use crate::config;
+
+    /// 风格是**活层**：agent 视图（`state_json`）必须给**有效值**，而不是 `Ship` 上那份
+    /// 出厂快照——否则 agent 读到 `kiting: 0.0`、以为还是基线，实际舰队默认早已把它推成
+    /// `-1.0`（又一次「读数不反映真实行为」）。
+    #[test]
+    fn state_view_reports_effective_doctrine_and_kiting() {
+        let cfg = config::load_config();
+        let mut state = crate::world::default_state(&cfg, 7);
+        let (fid, name) = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .map(|s| (s.faction_id.clone(), s.name.clone()))
+            .expect("中国 has a starting ship");
+        let record_kiting = state.ship(&name).unwrap().kiting;
+        let record_doctrine = state.ship(&name).unwrap().doctrine;
+
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid,
+                "default_kiting": {"kiting": -1.0, "mode": "Player"},
+                "default_doctrine": {"temper": 0.5, "mode": "Player"}}]
+        });
+        crate::control::apply_patch(&mut state, &cfg, &diff).expect("默认风格 applies");
+
+        let v = state_json(&state, &crate::sim::derived_from_state(&state, &cfg));
+        let row = v["ships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == serde_json::json!(name))
+            .expect("该舰在视图里");
+        assert_eq!(row["kiting"], serde_json::json!(-1.0), "视图必须给有效姿态（舰队默认）");
+        assert_eq!(row["doctrine"]["temper"], serde_json::json!(0.5), "视图必须给有效风格");
+        // 记录值不动（它仍是出厂快照）——这正是"视图不能直接序列化 Ship"的原因。
+        assert_eq!(state.ship(&name).unwrap().kiting, record_kiting);
+        assert_eq!(state.ship(&name).unwrap().doctrine, record_doctrine);
+    }
 
     /// `meta_value` 是让 agent 读的「规则字典」。它必须从 config 结构体**派生**，
     /// 而不是手写字段清单——此守卫确保新增的 config 字段（尤其是 `combat` 那些）
