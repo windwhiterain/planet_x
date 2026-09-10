@@ -1,10 +1,10 @@
-# 稀疏历史 / 事件账本（sparse history ledger）
+# 稀疏历史 / 事件历史（sparse history / 三层历史）
 
 > 目标：让「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」和
 > 「**一艘舰被击毁，是被哪艘舰击毁？**」都能在 Python 里一行 join 查出来。
 >
 > 状态：**Stage A / B / C 均已落地**，已并入 `main`（`cb813f2` 为 A+B；C 见 §4c）。
-> 后续/未做见 §5，由账本暴露出的新问题见 §6。
+> 后续/未做见 §5，由里程碑暴露出的新问题见 §6。
 
 ---
 
@@ -176,7 +176,7 @@ q.audit()             # 完备性自查（应为空）
 **关键守卫** `every_city_state_change_is_explained_by_an_event`：投影 120 回合 → 逐回合对比密集
 快照，任何 `(faction_id, razed)` 变化都必须有**命名该城**的事件解释。实测 **145 次变化全部有解释**，
 并断言 `checked >= 5`（**守卫必须非空**：一个什么都没检查的绿灯等于没有守卫）。
-另有 `event_ledger_is_deterministic`（同 seed → 逐字节一致）。
+另有 `event_milestones_is_deterministic`（同 seed → 逐字节一致）。
 
 > 顺手修掉一个测试基建 bug：`Scratch` 目录名 = 「进程 id + tag」，而 cargo 测试**同进程多线程并行**，
 > 两个测试共用 tag `a`/`b` 会撞目录。
@@ -259,19 +259,24 @@ python play/_golden_compare.py play/baseline play/after
 
 ---
 
-## 4c. Stage C 已落地（长存账本 + 可读性 + 三处「事后回读」的根治）
+## 4c. Stage C 已落地（长存里程碑 + 可读性 + 三处「事后回读」的根治）
 
-### 4c.1 长存里程碑账本（解决根因 ②）
+### 4c.1 长存里程碑（解决根因 ②）
 
-`State.ledger: Ledger { entries: Vec<LedgerEntry{round, event}> , dropped, dropped_through_round }`，
+> ⚠ **本节的前提已被 [§4d](#4d-stage-d-已落地分层判据从重要性换成后续计算的访问需求--取代-4c-的前提) 取代。**
+> 长存层按「听起来重要」预填 14 个 variant 是**错的**：按 Stage D 的判据（读者需求）它应当是
+> **空的**，而预填的代价实测是吃掉存档 **67%**。下面这段保留下来作为「当时的判断」的记录，
+> 但**不要照它行事**——判据与现状见 §4d。
+
+`State.milestones: Milestones { entries: Vec<MilestoneEntry{round, event}> , dropped, dropped_through_round }`，
 只收 `Salience::Milestone`（由 `GameEvent::salience()` 单点声明），**不随回合清空**。
 
-- **写入点是唯一的发事件漏斗 `sim::ev`**（`state.ledger.push(round, e)` 后 `state.events.push(e)`），
-  于是「事件发了、账本没记」在结构上不可能——与 `kill_ship`/`spawn_ship` 是同一套纪律。
+- **写入点是唯一的发事件漏斗 `sim::ev`**（`state.milestones.push(round, e)` 后 `state.events.push(e)`），
+  于是「事件发了、里程碑没记」在结构上不可能——与 `kill_ship`/`spawn_ship` 是同一套纪律。
 - 容量裁剪在 `advance` 收尾按 `config.history.max_milestones` 做（0 = 默认**无损**）；
-  截断时最旧的先丢，并把 `dropped` / `dropped_through_round` 记进账本自身——**截断可见**。
-- `Ledger::history_of(kind, id)` 是 Rust 侧的「某实体全部里程碑」（投影侧对应 `q.ledger(entity=…)`）。
-- `--ledger [N]` 输出 `{round, count, returned, complete, dropped, dropped_through_round, events:[{round, headline, event}]}`。
+  截断时最旧的先丢，并把 `dropped` / `dropped_through_round` 记进里程碑自身——**截断可见**。
+- `Milestones::history_of(kind, id)` 是 Rust 侧的「某实体全部里程碑」（投影侧对应 `q.milestones(entity=…)`）。
+- `--milestones [N]` 输出 `{round, count, returned, complete, dropped, dropped_through_round, events:[{round, headline, event}]}`。
 - `SCHEMA_VERSION` 2 → 3。
 
 ### 4c.2 一句话 headline（单点渲染，三处共用）
@@ -280,10 +285,10 @@ python play/_golden_compare.py play/baseline play/after
 **自足**（只读事件自身字段，不接受 `&State`）、**单行**、且 **`participants()` 列出的每个 id 都
 逐字出现在句子里**（守卫 `headline_names_every_participant` 钉住）。
 
-- 自足是硬要求：账本里的事件是**归档历史**，实体可能早就没了或改了名，回查 state 只会得到
+- 自足是硬要求：里程碑里的事件是**归档历史**，实体可能早就没了或改了名，回查 state 只会得到
   「今天的答案」而不是「当时的答案」。
-- 同一句话出现在三处：CLI `--ledger` / `--digest` 的 `top_events`、投影 `idx/events.jsonl` 的
-  `headline` 列、Python `q.ledger()`。**完备 ≠ 可读**，这是 §15「窗口事件文案」的前置。
+- 同一句话出现在三处：CLI `--milestones` / `--digest` 的 `top_events`、投影 `idx/events.jsonl` 的
+  `headline` 列、Python `q.milestones()`。**完备 ≠ 可读**，这是 §15「窗口事件文案」的前置。
 - 投影的事件行改为**由 `EventRow` 的序列化结果生成**（此前手写 `json!`，加了列就会悄悄漏掉——
   `headline` 就是这么差点漏的）。
 
@@ -301,7 +306,7 @@ python play/_golden_compare.py play/baseline play/after
 势力」这个与本次得失无关的偶然。现在两种活城易主（倒戈 / 难民夺城）与夷平一律同等计分。
 
 信号计算被抽成**纯函数** `military_deltas(&[GameEvent]) -> BTreeMap<FactionId, f64>`——只吃事件、
-完全不看 state，于是这条规则可以被单元测试逐条钉死（`military_signal_uses_the_ledger_and_is_branch_agnostic`）。
+完全不看 state，于是这条规则可以被单元测试逐条钉死（`military_signal_uses_the_milestones_and_is_branch_agnostic`）。
 **`colony_founded` 刻意不计**：新建/复垦是殖民行为，归 `nature_colony` 轴，记进军事轴会让殖民者
 集体漂向军国。
 
@@ -364,12 +369,101 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
 对比 §4b.4 那个「只改凶手一侧」的半修正（seed 1 轮换数 **1**、峰值 0.820、被判锁死）：
 **两处一起修之后反而更健康**。
 
-**账本体积（实测，用于决定默认是否设上限）**：round 60 的 checkpoint 106 KB，其中账本
+**里程碑体积（实测，用于决定默认是否设上限）**：round 60 的 checkpoint 106 KB，其中里程碑
 43.5 KB（**41%**），约 94 字符/条、7.7 条/回合 → 1000 回合约 **0.7 MB**（而实体部分几乎不随
 回合增长）。因此默认**无损**（`max_milestones: 0`），超长归档局可设上限换取有界文件。
 
 ---
 
+## 4d. Stage D 已落地（分层判据从「重要性」换成「后续计算的访问需求」）—— **取代 §4c 的前提**
+
+§4c 把「听起来重要」的 14 个 variant 预填进长存层。实测那个决定**吃掉存档 67%**（r200：
+249,557 / 372,248 字节，1860 条 ≈ 9.3 条/回合），而它与「后续计算要不要回看它」毫无关系。
+
+### 4d.1 判据（写进 `Salience`，**文档即规格**）
+
+| 层 | 判据（**唯一的判据**） | 载体 |
+|---|---|---|
+| `Milestone` | 后续计算需要访问**无限的过去历史** | `State::milestones`，随 checkpoint 存活，无窗口 |
+| `Notable` | 后续计算需要访问**一定的事件窗口** | `State::notables` + `history.notable_window`（默认 24 回合） |
+| `Detail` | 后续计算**只需前一帧**，或**根本没有读者**——只为 agent 分析而记录 | `State::events`（一回合）+ 磁盘投影（永久，供 agent） |
+
+判据的**方向**很重要：它问的不是「这条事件重不重要」，而是「**谁**在**多久之后**要回看它」。
+所以每一条定级都必须能指到**具体读者**；指不到读者的，就是 `Detail`。`Milestones` 与 `Notables`
+共用 `HistoryEntry{round, event}`——两层的差别只在**保留期**，不在记录形状。
+
+### 4d.2 读者盘点 → 里程碑层清空
+
+盘点非测试的 `state.events` / `state.notables` 读者，**全部只读当前回合**：`step_ideology` 的
+`military_deltas`、`kill_ship` 的同回合去重、`step_diplomacy` 的「本回合谁和谁交火」、
+`step_story` 的载荷提取 + `StoryTrigger::*`、`tactics` 的 `Withdraw` 判定、`agent.rs` /
+`projection.rs` 的渲染。
+
+**没有任何逻辑读无限过去**，所以里程碑层**清空**（14 → 0），字段保留但不预填。仅有的无限过去
+需求（`first_war` / `first_raze` / `first_colony` 的「史上第一次」）已经有载体：`state.chronicle`
+的 `id` 去重——历史层不必为它们长存。
+
+> **一般化的教训**：真正的无限过去需求**通常该被折成一个 state 标量（累加器）**，而不是回放原始
+> 历史。`step_ideology` 就是这么做的——每回合只读当前帧的 `military_deltas`，累加进 `ideology`
+> 标量。历史层的价值只在「折不成标量」的场合。这也解释了为什么里程碑层按判据应当近乎空，以及
+> 为什么「先按重要性预填」必然会填错。
+
+### 4d.3 窗口层与它的第一个读者：记恨（战争疤痕）
+
+`WarStarted` / `WarEnded` → `Notable`，依据是明确的范例：**开战之后相当一段时间两国会互相记恨**
+——所以外交计算要回看「最近 W 回合我们打过仗吗」，而 W 之外的那场战争不再影响任何计算，因此
+**不必**长存。这就是「窗口」这一层的存在理由，而不是「战争比较重要」。
+
+实现：`sim::war_scar_floor()` 在窗口内找**最近一次** `WarStarted{a,b}`（无序匹配），返回一道从
+`war_scar_relation`（-30）**线性衰减到 0** 的关系地板。新鲜时 -30 < `war_threshold`(-20) →
+刚开战的对手**不可能当回合言和**；地板在第 `war_scar_rounds*(1-20/30)` = **9** 回合抬过阈值 →
+和平重新可能（「记恨，但会淡」）。
+
+实测（seed 7）：开战/停战 r60 **65/63 → 32/29**，r200 **93/91 → 59/57**；最短战争从「闪烁」
+变成**恰好 9 回合**（55 场里 30 场 = 9，中位数 9）。
+
+> **它同时治好了 §6.2 的阈值抖动**——但不是靠迟滞，而是靠「一场战争至少持续 9 回合」。
+
+### 4d.4 修 bug：一条地板如果有多个写入者，它就不是地板
+
+地板最初只套在 `step_diplomacy` 的漂移里。但关系有**多个**写入者，其中
+`step_balance_of_power` 的「合纵」（弱者相互靠拢）跑在 `step_diplomacy` **之后**，把两个正彼此
+交战的弱者拉近——于是实测最短战争只有 **6** 回合（3 场），直接推翻了地板的承诺。
+
+- **错误的修法**：放宽断言（把期望的最小值改成 6）——那是把 bug 写成规格。
+- **正确的修法**：把地板放进**关系写入的唯一漏斗**（`set_relation_sym` + `adjust_relation`），
+  与 `ev()` / `kill_ship()` 那套 single-writer 纪律同源。修正后 55 场战争 `min = 9`，零违例。
+- 守卫 `war_scar_floor_makes_a_real_floor_on_war_duration` **用 60 回合真实长局**验证最短战争
+  时长，而不是只测那个函数——只测函数的话，这个 bug 完全测不出来。
+
+### 4d.5 `salience` 是分层，`weight` 是重要性——投影必须两列都有
+
+清空后暴露一个新坑：`--digest` 的 `top_events` 与 `q.storyboard()` 原本按 `salience == Milestone`
+挑「值得读的事件」。里程碑层清空后，它们会**静默返回空**。这说明**「分层」和「重要性」是两件事**，
+不能互相替代：
+
+- `salience` 回答「**谁要回看它**」→ 分层 / 存储。
+- `weight`（`GameEvent::weight`，穷尽 match、**纯显示用**）回答「**人读起来重不重要**」→ 排序。
+
+于是投影新增 `weight` 列，`top_events` 与 `q.storyboard()`（新增 `min_weight=8`）改按它挑；
+`--schema` 的 `column_docs` 里显式写明这条区别，避免下一个 agent 再混用。
+
+> **又一个同类坑**：`weight` 的**量纲是 0–9 的序数阶梯**（9=开战/结盟/迁都、8=城市易主或毁灭、
+> 7=重建/剧情、5=舰存亡、2=撤退/降级、0=逐发流水），不是 0–100 的分数。门槛一度被写成 60
+> ——`q.storyboard()` 于是**静默返回空表**，而所有测试都是绿的。守卫
+> `weight_ladder_stays_a_documented_zero_to_nine_scale` 现在把量纲与阶梯顺序钉住。
+> 教训与 §4d.5 同源：**「静默变空」是过滤器类 bug 的默认失败模式**，所以门槛必须有守卫。
+
+### 4d.6 验证
+
+`cargo check --workspace --all-targets` 无警告；`cargo test --lib` **72 passed**（新增 5 条，其中
+`history_layers_are_assigned_by_reader_need_not_importance` 是**守卫里程碑层为空**——谁凭
+「听起来重要」把它填回去就会红）；`longhorizon` 6 passed / 8 ignored；`probe_multipolar` 三 seed
+均 9 势力存活 / 0 僵尸 / 无霸权失控（rotations 47 / 71 / 90）。
+**r200 存档 372,248 → 108,889 字节（-71%）**。`SCHEMA_VERSION` 3 → 4（只升版本号：v3 档里的
+里程碑是按旧判据预填的残留，不是任何计算回看的历史）。
+
+---
 ## 5. 未做 / 后续
 
 ### 单独立项（有测量依据）
@@ -378,7 +472,7 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
   剩下的多回合「拆平—复垦」循环见 §6。
 
 ### Stage C 里剩下的（都是**刻意没做**，各带理由）
-- ~~`State.ledger` / `headline()` / `--ledger` / `top_events`~~ → **已做**（§4c.1/4c.2）。
+- ~~`State.milestones` / `headline()` / `--milestones` / `top_events`~~ → **已做**（§4c.1/4c.2）。
 - **salience 权重配置化**：`--digest` 的 `top_events` 目前用**Rust 里声明的** `GameEvent::weight()`
   （穷尽 match）。它是一个**展示排序键**、不是模拟数值，外置成 config 反而会让「新增 variant
   必须声明权重」这条编译期纪律失效。将来真要按剧本调叙事重点，再改成「穷尽 match 读 config」的形式。
@@ -392,7 +486,7 @@ enum E { A { ship: String, cause: DeathCause } }   // DeathCause 是纯单元 en
 
 ---
 
-## 6. 由账本暴露出来的新问题（值得单独修）
+## 6. 由里程碑暴露出来的新问题（值得单独修）
 
 ### 6.1 僵尸势力的「夺城—倒戈」振荡——**同回合抵消部分已修**
 
@@ -410,7 +504,7 @@ r33 resurgence    星系矿业
 
 **剩下的是多回合循环（未修）**：`reseed_city` 每次都挑该势力**自己最低名的空白城**，于是
 「欧盟拆平 → 联合国复垦 → 欧盟再拆平」可以在同一处反复很多轮。实测 seed 7 的
-`大红斑科学站`（`q.ledger(entity=('city','大红斑科学站'))` 可直接读）：
+`大红斑科学站`（`q.milestones(entity=('city','大红斑科学站'))` 可直接读）：
 
 ```
  r4 city_defected  无国界科学组织→星系矿业   r11 city_razed 中国拆平(联合国) + 中国复垦
@@ -424,7 +518,7 @@ r33 resurgence    星系矿业
 选**别人**的废墟（它现在只挑自己的 diaspora claim）。**注意**：都会影响
 `zombie_factions_are_bounded` / `world_is_multipolar`，需长局验证。
 
-### 6.2 战争的阈值抖动（新观察，未修）
+### 6.2 战争的阈值抖动（**已由 §4d.3 的「记恨地板」修掉**）
 
 `--digest 20` 的 `top_events` 里（权重最高的就是开战/停战）能看到**同一对势力在一个 20 回合窗口
 里开战→停战→开战**好几次（实测 seed 7 @ r40–60：`欧盟↔行星X崇拜教` 三个来回）。`hostile` 是
@@ -435,6 +529,11 @@ r33 resurgence    星系矿业
 （hysteresis）**：标准修法是开战阈值与停战阈值不同（`ceasefire_relation > war_threshold`，
 config 里已有 `ceasefire_relation` 字段可以复用）。属机制/平衡设计。
 
+> **后续（§4d.3）**：最后没有走迟滞，而是走「记恨地板」——一场战争至少持续 9 回合，
+> 于是阈值附近的来回穿越不再每次产出一对事件。实测 r60 开战/停战从 65/63 降到 32/29，
+> r200 从 93/91 降到 59/57。若将来还要更硬的迟滞（进入战争需要更长的敌对积累），
+> 那会是 `Notable` 窗口的又一个读者（读最近 W 回合的 `attack`/`siege` 密度）。
+
 ---
 
 ## 7. 复现
@@ -442,13 +541,14 @@ config 里已有 `ceasefire_relation` 字段可以复用）。属机制/平衡�
 ```bash
 cargo run --bin planet_x -- --seed 7 --round 60 --index play/after
 cargo run --bin planet_x -- --seed 7 --round 60 --save play/c60.ron
-cargo run --bin planet_x -- --start play/c60.ron --round 0 --ledger 20   # 账本活过 checkpoint
+cargo run --bin planet_x -- --start play/c60.ron --round 0 --notables 40   # 窗口层活过 checkpoint
+cargo run --bin planet_x -- --start play/c60.ron --round 0 --milestones   # count: 0 —— 按判据为空（§4d.2）
 
 python play/_probe_invariant.py play/after/idx/events.jsonl   # 同回合翻转不变量 + headline 完整性
 cd play/planet_xq && uv sync
-uv run python -c "from planet_xq import load; q=load('../after'); print(q.ledger(limit=10)); print(q.storyboard(50))"
+uv run python -c "from planet_xq import load; q=load('../after'); print(q.history('city','大红斑科学站')); print(q.notables()); print(q.storyboard(50))"
 
-cargo test --lib                          # 68 passed（含 5 个 config 往返 + 8 个投影守卫）
+cargo test --lib                          # 72 passed（含 6 个 config 往返/分层守卫 + 8 个投影守卫）
 cargo test --test longhorizon             # 6 passed / 8 ignored
 cargo test --test longhorizon probe_multipolar -- --ignored --nocapture   # 多极健康报告
 ```
@@ -456,5 +556,5 @@ cargo test --test longhorizon probe_multipolar -- --ignored --nocapture   # 多�
 未跟踪的临时探针（可删）：`play/_probe_sparse{,2,3}.py`（pandas 稀疏字段实测）、
 `play/_smoke_history.py`、`play/_probe_stageb.py`（舰存亡对账 + 凶手近似的差异率）、
 `play/_golden_compare.py`、`play/_mp_leaders.py`（单极锁死量化）、`play/_probe_invariant.py`
-（同回合翻转不变量）、`play/_ledger.py`（`--ledger` 渲染）、`play/_ron_locate.py`（RON 定位）、
+（同回合翻转不变量）、`play/_ledger.py`（`--notables` 渲染）、`play/_ron_locate.py`（RON 定位）、
 `play/hist_probe/`、`play/{baseline,after*,mp_*}`。

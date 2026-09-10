@@ -106,8 +106,10 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     // 放在回合末：此时事件（战争得失/城夷平/叛乱）与流量（产出/维护/治理）均已就位。
     step_ideology(state, config, &flow);
 
-    // 长存账本收尾：按配置裁剪容量（唯一一处有 config 的地方）。默认 0 = 无损。
-    state.ledger.trim(config.history.max_milestones);
+    // 历史层收尾：两层各自按配置裁剪（这是唯一拿得到 config 的地方）。
+    // `max_milestones` 默认 0 = 无损；`notable_window` 默认 24 回合，滑窗过期是**预期行为**。
+    state.milestones.trim(config.history.max_milestones);
+    state.notables.trim(state.round, config.history.notable_window);
 
     // 结回合：把所有派生数据装进一个 `Derived`（flow 中间量 + post 观测/总结）。`post`
     // 由 `round_metrics` 汇总（复用 `balance_picture`/`sanctioned_hegemon`/`faction_power`
@@ -159,6 +161,44 @@ pub(crate) fn faction_at_war(state: &State, config: &GameConfig, fid: &str) -> b
     state.factions.iter().any(|o| o.name != fid && hostile(state, config, fid, &o.name))
 }
 
+/// **「记恨」读者**——窗口层（[`State::notables`]）当前的唯一消费者。
+///
+/// 回头看 `war_scar_rounds` 回合内**最近一次** `WarStarted{a,b}`，返回它此刻还压着的关系
+/// **地板**（`None` = 窗口里没有这道疤）。这就是 [`Salience::Notable`] 判据的范例落地：开战
+/// 之后「相当一段时间两国互相记恨」，所以后面的外交计算需要回看**一定窗口**——窗口之外的那场
+/// 战争不再影响任何计算，因此**不必**长存。
+///
+/// 地板从 `war_scar_relation`（负值）线性衰减到 0。新鲜时它低于 `war_threshold`，于是
+/// **刚开战的对手不可能当回合就言和**（战争不会一闪即灭，正是此前 `war_started`/`war_ended`
+/// 反复闪烁的成因之一）；随着疤变淡，地板抬过阈值，和平重新变得可能——「记恨，但会淡」。
+///
+/// `war_scar_rounds == 0` 或 `war_scar_relation >= 0` 时本机制关闭（返回 `None`）。
+fn war_scar_floor(state: &State, config: &GameConfig, a: &str, b: &str) -> Option<f64> {
+    let span = config.diplomacy.war_scar_rounds;
+    let base = config.diplomacy.war_scar_relation;
+    if span == 0 || base >= 0.0 {
+        return None;
+    }
+    // 窗口本身由 `Notables::trim` 保证；这里再按 `span` 判一次，使 `war_scar_rounds` 可以短于
+    // `history.notable_window`（否则读者会看见自己不该看的老疤）。
+    let started = state
+        .notables
+        .entries
+        .iter()
+        .filter(|e| e.round + span > state.round)
+        .filter_map(|e| match &e.event {
+            GameEvent::WarStarted { a: x, b: y }
+                if (x == a && y == b) || (x == b && y == a) =>
+            {
+                Some(e.round)
+            }
+            _ => None,
+        })
+        .max()?;
+    let age = state.round.saturating_sub(started);
+    Some(base * (1.0 - (age as f64) / (span as f64)))
+}
+
 fn relation(state: &State, a: &str, b: &str) -> f64 {
     state
         .faction(a)
@@ -166,14 +206,21 @@ fn relation(state: &State, a: &str, b: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn adjust_relation(state: &mut State, a: &str, b: &str, delta: f64) {
+/// 关系增减（开火/夺城的 delta、剧情的关系效果）。**写入前必须过战争疤痕地板**——
+/// 见 [`set_relation_sym`] 的说明：关系有多个写入者，任何一个绕过地板，地板就不成立。
+fn adjust_relation(state: &mut State, config: &GameConfig, a: &str, b: &str, delta: f64) {
     if a == b {
         return;
     }
     for (x, y) in [(a, b), (b, a)] {
+        // 地板要在拿到 `&mut` 之前算好（借用的先后顺序）。
+        let floor = war_scar_floor(state, config, x, y);
         if let Some(f) = state.faction_mut(x) {
-            let v = f.relations.get(y).copied().unwrap_or(0.0);
-            f.relations.insert(y.to_string(), v + delta);
+            let mut v = f.relations.get(y).copied().unwrap_or(0.0) + delta;
+            if let Some(floor) = floor {
+                v = v.min(floor);
+            }
+            f.relations.insert(y.to_string(), v);
         }
     }
 }
@@ -190,16 +237,19 @@ pub(crate) fn ideology_similarity(a: &Ideology, b: &Ideology) -> f64 {
     (1.0 - dist).clamp(0.0, 1.0)
 }
 
-/// Append a [`GameEvent`] to this round's log — **and** to the long-lived milestone ledger.
+/// Append a [`GameEvent`] to this round's log — **and** to every history layer it belongs to.
 ///
-/// 这是**发事件的唯一漏斗**，也是 [`State::ledger`] 的唯一写入点：里程碑层由
-/// [`GameEvent::salience`] 单点声明（`Ledger::push` 自己过滤），所以「事件发了、账本没记」
-/// 在结构上不可能——和 [`kill_ship`]/[`spawn_ship`] 这些状态漏斗是同一套纪律。
+/// 这是**发事件的唯一漏斗**，也是 [`State::events`]/[`State::milestones`]/[`State::notables`]
+/// 三层的唯一写入点：分层由 [`GameEvent::salience`] 单点声明（每层的 `push` 自己过滤），所以
+/// 「事件发了、历史没记」在结构上不可能——和 [`kill_ship`]/[`spawn_ship`] 这些状态漏斗是同一
+/// 套纪律。
 ///
-/// `State::ledger` 不随回合清空（[`advance`] 只清 `State::events`），容量裁剪在 `advance`
-/// 收尾时按 `config.history.max_milestones` 统一做（那里才有 config）。
+/// `events` 每回合被 [`advance`] 清空；两层历史不清空，容量裁剪在 `advance` 收尾时统一做
+/// （那里才拿得到 config）：`milestones` 按 `history.max_milestones` 截断，`notables` 按
+/// `history.notable_window` 滑窗。
 pub(crate) fn ev(state: &mut State, e: GameEvent) {
-    state.ledger.push(state.round, e.clone());
+    state.milestones.push(state.round, e.clone());
+    state.notables.push(state.round, e.clone());
     state.events.push(e);
 }
 
@@ -2163,7 +2213,7 @@ pub(crate) fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, pl
         if *dmg > 1e-9 {
             let tfac = state.ship(t).map(|s| s.faction_id.clone()).unwrap_or_default();
             ev(state, GameEvent::Attack { attacker: attacker_id.to_string(), target: t.clone(), damage: *dmg });
-            adjust_relation(state, &afac, &tfac, config.diplomacy.attack_delta);
+            adjust_relation(state, config, &afac, &tfac, config.diplomacy.attack_delta);
         }
     }
     for (t, by) in destroyed {
@@ -2386,10 +2436,10 @@ pub(crate) fn bombard_city(state: &mut State, config: &GameConfig, ship_id: &str
         // 建筑清零 = 城失守；**状态改写交给 `raze_city` 漏斗**（它自己读夷平前人口并记事件）。
         c.buildings.is_empty()
     };
-    adjust_relation(state, &attacker, &old_owner, config.diplomacy.attack_delta);
+    adjust_relation(state, config, &attacker, &old_owner, config.diplomacy.attack_delta);
     ev(state, GameEvent::Siege { attacker: ship_id.to_string(), city: cid.to_string(), damage: dmg });
     if razed {
-        adjust_relation(state, &attacker, &old_owner, config.diplomacy.capture_delta);
+        adjust_relation(state, config, &attacker, &old_owner, config.diplomacy.capture_delta);
         // 漏斗记 `CityRazed`：`by_ship` = 拆掉这座城的那艘舰（此前只能去同回合的 Siege 里猜），
         // `pop_before`/`damage` = 这次毁灭的量级。
         raze_city(state, &cid.to_string(), RazeCause::Bombardment {
@@ -2597,21 +2647,31 @@ fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
 
             // Little random fluctuation so relations wobble and cross thresholds.
             rel += rng.range_f64(-d.noise, d.noise);
-            rel = rel.clamp(d.hostility_floor, d.friendship_ceiling);
 
-            for f in state.factions.iter_mut().filter(|f| f.name == a || f.name == b) {
-                let other = if f.name == a { b.clone() } else { a.clone() };
-                f.relations.insert(other, rel);
-            }
+            // 写入走**唯一漏斗**：钳位 + 战争疤痕地板（记恨）都在里面，所以随机扰动压不过地板。
+            // 关系有多个写入者（这里的外交漂移、攻击/夺城 delta、合纵的相互靠拢、剧情效果），
+            // 地板必须对**每一个**成立——否则「刚开战的对手不可能当回合言和」会被别人推翻。
+            set_relation_sym(state, a.clone(), b.clone(), rel, config);
         }
     }
 }
 
 // --- balance of power (合纵连横 / 弱者联盟对抗霸权) ------------------------------
 
-/// 设置两个势力间的对称关系（带钳位），写入双方。
+/// **关系写入的唯一漏斗**：钳位 + 战争疤痕地板（记恨）。写入双方，保持对称。
+///
+/// 为什么必须漏斗化：疤痕是一条**地板**（`rel.min(floor)`），而关系有多个写入者——外交漂移、
+/// 倒戈/夺城的 `capture_delta`、**合纵的弱者相互靠拢**、剧情的 relations 效果……只要有一个
+/// 写入者绕过地板，它就**不再是地板**。实测证据：`step_balance_of_power` 的「合纵」在
+/// `step_diplomacy` **之后**跑，把两个正彼此交战的弱者拉近，于是刚开战的一对可以在 **6 回合**
+/// 内言和，而地板承诺的是至少 9 回合。经过本漏斗后，「忘记套用地板」在结构上不可能——
+/// 与 [`ev`]/[`kill_ship`] 那套 single-writer 纪律同源。
 fn set_relation_sym(state: &mut State, a: FactionId, b: FactionId, v: f64, config: &GameConfig) {
-    let v = v.clamp(config.diplomacy.hostility_floor, config.diplomacy.friendship_ceiling);
+    let floor = war_scar_floor(state, config, &a, &b);
+    let mut v = v.clamp(config.diplomacy.hostility_floor, config.diplomacy.friendship_ceiling);
+    if let Some(floor) = floor {
+        v = v.min(floor);
+    }
     for f in state.factions.iter_mut().filter(|f| f.name == a || f.name == b) {
         let other = if f.name == a { b.clone() } else { a.clone() };
         f.relations.insert(other, v);
@@ -2970,7 +3030,7 @@ fn step_balance_of_power(state: &mut State, config: &GameConfig) {
 fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     let ic = &config.ideology;
     let r = config.mond.radius;
-    // --- 军事信号：完全由**本回合的事件账本**推出，不再回读回合末的 state ---------------
+    // --- 军事信号：完全由**本回合的事件历史**推出，不再回读回合末的 state ---------------
     //
     // 这里以前有**两处「事后回读」**，都是错的——它们都在回合末去读一个回合内已经变过的世界，
     // 于是把「当时发生了什么」记到了「现在还剩什么」的头上：
@@ -3057,7 +3117,7 @@ fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundFlow) {
     }
 }
 
-/// 一个回合的事件账本 → 各势力的**军事净信号**（思潮「和平↔军国」的驱动量）。
+/// 一个回合的事件历史 → 各势力的**军事净信号**（思潮「和平↔军国」的驱动量）。
 ///
 /// 纯函数、只吃事件，**完全不看 state**：这是这条规则能被单元测试精确钉住的原因，也是它
 /// 正确的原因——「谁丢了城 / 谁打沉了谁」都是当时记下的事实，事后再去 state 里回读一个已经
@@ -3130,7 +3190,7 @@ fn step_story(state: &mut State, config: &GameConfig) {
         for effect in &spec.effects {
             match effect {
                 StoryEffect::Relations { a, b, delta } => {
-                    adjust_relation(state, a, b, *delta);
+                    adjust_relation(state, config, a, b, *delta);
                 }
                 StoryEffect::GrantResources { faction, resource, amount } => {
                     if let Some(f) = state.faction_mut(faction) {
@@ -3280,7 +3340,7 @@ mod tests {
         (config, state)
     }
 
-    /// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件账本推出，且**同一现象同分**。
+    /// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件历史推出，且**同一现象同分**。
     ///
     /// 这里逐条钉住旧实现的两个真实缺陷：
     /// 1. **互杀吞掉战功**：旧口径是「同回合最后一条 `Attack` 的势力」，那要 `state.ship(attacker)`
@@ -3292,7 +3352,7 @@ mod tests {
     /// 另外钉住「`CityDefected`（主路）与 `Revolt`（兜底）必须同分」——它们是同一个触发的两条
     /// 分支，旧代码却只给兜底分支扣分。
     #[test]
-    fn military_signal_uses_the_ledger_and_is_branch_agnostic() {
+    fn military_signal_uses_the_milestones_and_is_branch_agnostic() {
         let d = |events: &[GameEvent], fid: &str| military_deltas(events).get(fid).copied().unwrap_or(0.0);
 
         // 1) 互杀：A 的舰打沉 B 的舰，B 的舰同回合也打沉 A 的舰 → **双方各得一分战功**。
@@ -4338,6 +4398,92 @@ mod tests {
         assert!(
             r_same > r_opp,
             "similar ideologies must rest friendlier than opposite ones: same={r_same} opp={r_opp}"
+        );
+    }
+    /// **记恨地板（战争疤痕）**：开战之后 `war_scar_rounds` 回合内，这一对势力的关系被压在一道
+    /// 线性衰减的地板下——于是「刚开战就当回合言和」不可能。
+    ///
+    /// 这条测试钉住两件事：
+    /// 1. **地板自身的形状**：随年龄抬高、窗口内始终是敌意、出了 `war_scar_rounds` 彻底消失
+    ///    （窗口过期 = 不再影响任何计算，这正是它属于窗口层而不是里程碑层的原因）。
+    /// 2. **地板真的是一道地板**：用真实长局验证「没有任何一场战争短于地板承诺的回合数」。
+    ///    这一条曾经**失败过**（最短 6 回合）：`step_balance_of_power` 的「合纵」走另一个关系
+    ///    写入者，绕过了只在外交漂移里套用的地板。修法是让地板进入**关系写入的唯一漏斗**
+    ///    （`set_relation_sym` / `adjust_relation`），而不是在这个测试里放宽断言。
+    #[test]
+    fn war_scar_floor_makes_a_real_floor_on_war_duration() {
+        let config = load_config();
+        let span = config.diplomacy.war_scar_rounds;
+        let base = config.diplomacy.war_scar_relation;
+        let thr = config.combat.war_threshold;
+        assert!(span > 0, "war_scar_rounds 应当开启");
+        assert!(base < thr, "疤痕初值必须低于交战阈值（{base} vs {thr}），否则压不住言和");
+
+        // 1. 地板形状：只属于开战的那一对，随年龄抬高，到 span 之后消失。
+        let mut s = default_state(&config, 1);
+        s.round = 10;
+        s.notables.entries.push(crate::model::HistoryEntry {
+            round: 10,
+            event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        });
+        let at = |age: u32| {
+            let mut t = s.clone();
+            t.round = 10 + age;
+            war_scar_floor(&t, &config, "甲", "乙")
+        };
+        assert_eq!(at(0), Some(base), "刚开战必须是满额敌意");
+        assert!(at(1).unwrap() > at(0).unwrap(), "地板必须随年龄单调抬高");
+        assert!(at(span - 1).unwrap() < 0.0, "窗口内应当仍然带着敌意");
+        assert_eq!(at(span), None, "出了 war_scar_rounds 之后疤痕必须彻底消失");
+        assert_eq!(
+            war_scar_floor(&s, &config, "甲", "丙"),
+            None,
+            "疤痕只属于开战的那一对，不牵连第三方"
+        );
+        assert_eq!(
+            war_scar_floor(&s, &config, "乙", "甲"),
+            at(0),
+            "疤痕与势力顺序无关（必须无序匹配）"
+        );
+
+        // 地板抬过交战阈值所需的最小年龄 = 战争最短回合数。
+        let min_age = (0..=span)
+            .find(|a| base * (1.0 - (*a as f64) / (span as f64)) > thr)
+            .expect("疤痕必须最终抬过交战阈值，否则战争永远结束不了");
+
+        // 2. 真实长局：没有一场战争短于 min_age。
+        let mut state = default_state(&config, 7);
+        let mut rng = crate::prng::Prng::new(7);
+        let mut open: std::collections::BTreeMap<(String, String), u32> =
+            std::collections::BTreeMap::new();
+        let mut shortest = u32::MAX;
+        let mut episodes = 0usize;
+        for _ in 0..60 {
+            advance(&mut state, &config, &mut rng);
+            let round = state.round;
+            for e in &state.events {
+                let pair = |a: &String, b: &String| {
+                    if a <= b { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) }
+                };
+                match e {
+                    GameEvent::WarStarted { a, b } => {
+                        open.entry(pair(a, b)).or_insert(round);
+                    }
+                    GameEvent::WarEnded { a, b } => {
+                        if let Some(start) = open.remove(&pair(a, b)) {
+                            episodes += 1;
+                            shortest = shortest.min(round - start);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(episodes >= 5, "60 回合里只打完 {episodes} 场战争，样本太小");
+        assert!(
+            shortest >= min_age,
+            "最短战争 {shortest} 回合 < 地板承诺的 {min_age} 回合——\
+             说明有某个关系写入者绕过了地板（见 set_relation_sym 的说明）"
         );
     }
 }

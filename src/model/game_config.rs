@@ -167,6 +167,20 @@ pub struct DiplomacyConfig {
     /// Relation level a war cools toward when fighting stops (above the war
     /// threshold, so the pair crosses back into peace).
     pub ceasefire_relation: f64,
+    /// **记恨（战争疤痕）**：一场战争的影响持续多少回合。窗口内，开过战的那一对势力关系被压在
+    /// 一道地板下，地板从 `war_scar_relation` **线性衰减到 0**。
+    ///
+    /// 这是**窗口层**（[`crate::model::Notables`]）的唯一读者——`WarStarted` 定级为
+    /// [`crate::model::Salience::Notable`] 的依据就是它：开战之后「相当一段时间两国互相记恨」，
+    /// 所以外交计算要回看**一定窗口**，而窗口之外的那场战争不再影响任何计算。
+    ///
+    /// 副作用（也是此前 `war_started`/`war_ended` 反复闪烁的一个成因的解药）：新鲜疤痕低于
+    /// `combat.war_threshold`，所以**刚开战的对手不可能当回合就言和**，战争不会一闪即灭。
+    /// `0` = 关闭本机制。
+    pub war_scar_rounds: u32,
+    /// 战争疤痕的初值（负值 = 敌意）。新鲜时应当低于 `combat.war_threshold`，否则压不住
+    /// 「当回合言和」。`>= 0` = 关闭本机制。
+    pub war_scar_relation: f64,
     /// Resting affinity at maximum ideological distance (opposite blocs).
     pub affinity_floor: f64,
     /// Extra affinity at full ideological closeness (same bloc allies).
@@ -370,13 +384,24 @@ impl Default for BalanceOfPowerConfig {
         }
     }
 }
-/// 长存历史账本（[`crate::model::Ledger`]）的容量配置。
+/// 历史层（[`crate::model::Milestones`] 里程碑层 / [`crate::model::Notables`] 窗口层）的容量配置。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct HistoryConfig {
-    /// 账本最多保留多少条里程碑（`0` = 不设上限，默认）。超出时丢弃**最旧**的记录，并把
-    /// 丢弃量与丢弃到的回合记进账本自身（[`crate::model::Ledger::dropped`]）——截断可见。
+    /// 里程碑层最多保留多少条（`0` = 不设上限，默认）。超出时丢弃**最旧**的记录，并把丢弃量与
+    /// 丢弃到的回合记进本层自身（[`crate::model::Milestones::dropped`]）——截断可见。
     #[serde(default)]
     pub max_milestones: usize,
+    /// 窗口层保留多少个回合（默认 24 = 2 年；`0` = 不裁剪）。
+    ///
+    /// 与 `max_milestones` 的 `0` 同义（无损），但**语义相反的那一头值得注意**：这里被裁掉是
+    /// **预期行为**，不是损失——出了窗口的历史按判据就不该再影响任何计算。
+    /// 设成 `0` 等于让窗口层退化成无限长存，那说明判据被绕过了（真要无限长存应提升进里程碑层）。
+    #[serde(default = "default_notable_window")]
+    pub notable_window: usize,
+}
+
+fn default_notable_window() -> usize {
+    24
 }
 
 /// 思潮（Ideology）驱动 tuning——4 条轴逐回合按「变化因素」向信号 target 靠拢。
@@ -480,7 +505,7 @@ pub struct GameConfig {
     /// 思潮（可变化意识形态）驱动 tuning。`#[serde(default)]` 容忍旧配置无此节。
     #[serde(default)]
     pub ideology: IdeologyConfig,
-    /// 长存历史账本的容量。`#[serde(default)]` 容忍旧配置无此节（默认 0 = 无损）。
+    /// 长存里程碑历史的容量。`#[serde(default)]` 容忍旧配置无此节（默认 0 = 无损）。
     #[serde(default)]
     pub history: HistoryConfig,
     /// Resource definitions (key -> display metadata). This is the source of

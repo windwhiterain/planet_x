@@ -156,9 +156,9 @@ mod tests {
         let (loaded, mut rng_b) = load_checkpoint(&path).expect("checkpoint 必须能读回来");
         assert_eq!(loaded.state.round, a.round);
         assert_eq!(
-            loaded.state.ledger.entries.len(),
-            a.ledger.entries.len(),
-            "长存账本必须随 checkpoint 一起活下来"
+            loaded.state.milestones.entries.len(),
+            a.milestones.entries.len(),
+            "长存里程碑必须随 checkpoint 一起活下来"
         );
         assert_eq!(rng_b.state(), rng_a.state(), "RNG 位置必须原样恢复");
 
@@ -201,6 +201,42 @@ mod tests {
         assert!(samples.len() >= 18, "样本数 {} 应覆盖全部变体", samples.len());
     }
 
+
+    /// `GameEvent::weight` 的**量纲**必须保持文档承诺的 **0–9 序数阶梯**，不是 0–100 分数。
+    ///
+    /// 这条守卫存在的理由是一个真实踩过的坑：`q.storyboard()` 曾把「值得读」的门槛写成 **60**
+    /// （照「0–100 分数」的错觉），于是**静默返回空表**——测试全绿，故事板是空的。任何把量纲
+    /// 拉大的改动都会让下游那个 `>= 8` 的门槛失去意义，所以它必须在这里红，而不是在 Python 里静默。
+    #[test]
+    fn weight_ladder_stays_a_documented_zero_to_nine_scale() {
+        let by_kind = |k: &str| {
+            samples()
+                .into_iter()
+                .find(|e| e.kind() == k)
+                .unwrap_or_else(|| panic!("样本里没有 {k}"))
+                .weight()
+        };
+        for ev in samples() {
+            assert!(
+                ev.weight() <= 9,
+                "{} 的 weight={} 超出文档承诺的 0–9 量纲（q.storyboard 的门槛是 >= 8）",
+                ev.kind(),
+                ev.weight()
+            );
+        }
+        // 阶梯本身：逐发流水 < 撤退 < 舰存亡 < 重建/剧情 <= 城市易主 <= 世界格局。
+        assert!(by_kind("attack") < by_kind("withdraw"), "逐发流水必须在阶梯底部");
+        assert!(by_kind("withdraw") < by_kind("ship_destroyed"));
+        assert!(by_kind("ship_destroyed") < by_kind("resurgence"));
+        assert!(by_kind("resurgence") <= by_kind("city_razed"));
+        assert!(by_kind("city_razed") <= by_kind("war_started"));
+        assert_eq!(by_kind("attack"), 0, "逐发流水 = 0");
+        assert_eq!(by_kind("war_started"), 9, "世界格局级必须是阶梯顶端");
+        // 门槛 8 必须真的切出一部分、又不能等于全量（否则故事板要么空、要么等于没筛）。
+        let w: Vec<u8> = samples().iter().map(|e| e.weight()).collect();
+        assert!(w.iter().any(|&x| x >= 8), "门槛 8 切不出任何东西");
+        assert!(w.iter().any(|&x| x < 8), "门槛 8 等于全量，等于没筛");
+    }
     /// 全部 18 个 `GameEvent` 变体各一个样本。
     fn samples() -> Vec<GameEvent> {
         vec![
@@ -307,76 +343,164 @@ mod tests {
         assert!(serde_json::from_str::<DeathCause>("\"nonsense\"").is_err());
     }
 
-    /// 长存账本：只收里程碑、跨回合不丢、可按实体查史；截断时**如实记账**。
+    /// **分层判据的守卫**：分层按「后续计算需要访问哪一段历史」定，不按「重要性」。
+    ///
+    /// 这条测试钉住当前判据的两个结论，防止它们被无声地改回去：
+    /// 1. **里程碑层为空**——没有任何 variant 有「无限过去」读者（见 `GameEvent::salience`）。
+    ///    谁要是凭「这个事件听起来重要」把 variant 提升进来，这里会红。
+    /// 2. **窗口层只装战争**，且**真的只保留窗口内的回合**——窗口裁剪是设计，不是丢失。
     #[test]
-    fn ledger_collects_milestones_and_reports_truncation() {
+    fn history_layers_are_assigned_by_reader_need_not_importance() {
         let config = load_config();
         let seed = 7u64;
+        let window = config.history.notable_window;
+        assert!(window > 0, "窗口默认值应当是有限的（0 = 不裁剪，会让判据失去意义）");
         let mut state = world::default_state(&config, seed);
         let mut rng = crate::prng::Prng::new(seed);
         for _ in 0..20 {
             sim::advance(&mut state, &config, &mut rng);
         }
-        let n = state.ledger.entries.len();
-        assert!(n >= 5, "20 回合只攒了 {n} 条里程碑，账本可能没在记");
 
-        // 账本 = 全部里程碑事件（逐回合 events 里的 milestone 之和），一条不多一条不少，
-        // 且**逐发流水永不入账**。
-        let mut expected = 0usize;
+        // 1. 里程碑层按当前判据是空的。
+        assert!(
+            state.milestones.entries.is_empty(),
+            "里程碑层应当为空（没有无限过去的读者），实际有 {} 条——\
+             若有新读者出现，请同时更新 GameEvent::salience 的读者盘点表",
+            state.milestones.entries.len()
+        );
+        assert!(state.milestones.is_complete(), "空的里程碑层不应声称丢过东西");
+
+        // 2. 窗口层：非空、只装战争、且全部落在窗口内。
+        let nb = &state.notables.entries;
+        assert!(!nb.is_empty(), "20 回合里没记下任何窗口事件，窗口层可能没在记");
+        assert!(
+            nb.iter().all(|e| matches!(
+                e.event,
+                GameEvent::WarStarted { .. } | GameEvent::WarEnded { .. }
+            )),
+            "窗口层当前只该装战争（唯一的窗口读者是记恨地板）"
+        );
+        let oldest = state.round.saturating_sub(window as u32 - 1);
+        assert!(
+            nb.iter().all(|e| e.round >= oldest),
+            "窗口层里出现了窗口外的记录：最早 {}，窗口下界 {oldest}",
+            nb.iter().map(|e| e.round).min().unwrap_or(0)
+        );
+
+        // 与「逐回合重放 + 滑窗」的朴素算法对齐：条数必须相等。
         let mut replay = world::default_state(&config, seed);
         let mut rng2 = crate::prng::Prng::new(seed);
+        let mut expected: Vec<u32> = Vec::new();
         for _ in 0..20 {
             sim::advance(&mut replay, &config, &mut rng2);
-            expected += replay
-                .events
-                .iter()
-                .filter(|e| e.salience() == crate::model::Salience::Milestone)
-                .count();
+            let r = replay.round;
+            for e in &replay.events {
+                if e.salience() == crate::model::Salience::Notable {
+                    expected.push(r);
+                }
+            }
         }
-        assert_eq!(n, expected, "账本条数必须等于里程碑事件总数");
-        assert!(
-            !state.ledger.entries.iter().any(|e| matches!(
-                e.event,
-                GameEvent::Attack { .. } | GameEvent::Siege { .. }
-            )),
-            "逐发流水不该进长存账本"
+        expected.retain(|r| *r >= oldest);
+        assert_eq!(
+            nb.len(),
+            expected.len(),
+            "窗口层的条数必须等于「窗口内的 Notable 事件总数」"
         );
-        // 回合号必须是真的（跨回合累计，不是「全是最后一回合」）。
-        let rounds: std::collections::BTreeSet<u32> =
-            state.ledger.entries.iter().map(|e| e.round).collect();
-        assert!(rounds.len() >= 5, "账本应跨多个回合，实际只覆盖 {rounds:?}");
+    }
 
-        // 按实体查史：随便挑一个出现过的城，它的历史必须非空且都点到它的名。
-        if let Some(entry) = state.ledger.entries.iter().find(|e| {
-            e.event.participants().iter().any(|p| p.kind == crate::model::EntityKind::City)
-        }) {
-            let cid = entry
-                .event
-                .participants()
-                .into_iter()
-                .find(|p| p.kind == crate::model::EntityKind::City)
-                .unwrap()
-                .id;
-            let hist = state.ledger.history_of(crate::model::EntityKind::City, &cid);
-            assert!(!hist.is_empty());
-            assert!(hist.iter().all(|e| e.event.headline().contains(&cid)));
-        } else {
-            panic!("20 回合里没有任何涉及城市的事件，样本无效");
+    /// 里程碑层的机械行为：**截断可见**（丢弃量与丢弃到的回合都记下来），`0` = 无损。
+    ///
+    /// 这一层按当前判据没有生产者，所以这里直接构造条目来测机制——测的是 `trim` 本身，
+    /// 与「谁该进来」那个判据问题无关。
+    #[test]
+    fn milestones_trim_reports_truncation_visibly() {
+        let mk = |round: u32| crate::model::HistoryEntry {
+            round,
+            event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        };
+        let mut ms = crate::model::Milestones::default();
+        for r in 1..=25u32 {
+            ms.entries.push(mk(r));
         }
 
-        // 截断：**可见**。丢弃量与丢弃到的回合都要记下来。
-        let mut trimmed = state.ledger.clone();
-        let cap = 10;
-        trimmed.trim(cap);
-        assert_eq!(trimmed.entries.len(), cap);
-        assert_eq!(trimmed.dropped, (n - cap) as u64);
-        assert!(!trimmed.is_complete());
-        assert!(trimmed.dropped_through_round > 0);
         // 无损配置（0）不动任何东西。
-        let mut intact = state.ledger.clone();
+        let mut intact = ms.clone();
         intact.trim(0);
-        assert_eq!(intact.entries.len(), n);
+        assert_eq!(intact.entries.len(), 25);
         assert!(intact.is_complete());
+
+        // 截断：留下最新 cap 条，丢掉的最旧那批的回合号要被记下来。
+        let mut trimmed = ms.clone();
+        trimmed.trim(10);
+        assert_eq!(trimmed.entries.len(), 10);
+        assert_eq!(trimmed.dropped, 15);
+        assert!(!trimmed.is_complete());
+        assert_eq!(trimmed.dropped_through_round, 15, "丢到第 15 回合");
+        assert_eq!(trimmed.entries.first().unwrap().round, 16);
+    }
+
+    /// 窗口层的机械行为：只收窗口内、`window = 1` 等价于「只看本回合」、`0` = 不裁剪。
+    #[test]
+    fn notables_keep_exactly_the_window() {
+        let mk = |round: u32| crate::model::HistoryEntry {
+            round,
+            event: GameEvent::WarStarted { a: "甲".into(), b: "乙".into() },
+        };
+        let mut nb = crate::model::Notables::default();
+        for r in 1..=25u32 {
+            nb.entries.push(mk(r));
+        }
+
+        // window = 5，当前回合 25 → 保留 [21, 25]。
+        nb.trim(25, 5);
+        assert_eq!(nb.entries.len(), 5);
+        assert_eq!(nb.entries.first().unwrap().round, 21);
+        assert_eq!(nb.entries.last().unwrap().round, 25);
+
+        // 本回合仍在窗口内：window = 1 → 只剩当前回合（不是「空」）。
+        let mut one = crate::model::Notables::default();
+        for r in 1..=25u32 {
+            one.entries.push(mk(r));
+        }
+        one.trim(25, 1);
+        assert_eq!(one.entries.len(), 1);
+        assert_eq!(one.entries[0].round, 25);
+
+        // 0 = 不裁剪。
+        let mut all = crate::model::Notables::default();
+        for r in 1..=25u32 {
+            all.entries.push(mk(r));
+        }
+        all.trim(25, 0);
+        assert_eq!(all.entries.len(), 25);
+    }
+
+    /// `push` 的分层过滤：每一层只吃自己那一档，其余直接忽略。
+    #[test]
+    fn each_layer_only_takes_its_own_salience() {
+        use crate::model::{Notables, Salience};
+        let war = GameEvent::WarStarted { a: "甲".into(), b: "乙".into() };
+        let raze = GameEvent::CityRazed {
+            city: "城".into(),
+            owner: "甲".into(),
+            fallen_to: "乙".into(),
+            by_ship: "舰".into(),
+            damage: 1.0,
+            pop_before: 1,
+        };
+        assert_eq!(war.salience(), Salience::Notable);
+        assert_eq!(raze.salience(), Salience::Detail, "城市事件当前没有窗口/无限读者");
+
+        let mut nb = Notables::default();
+        nb.push(3, war.clone());
+        nb.push(3, raze.clone());
+        assert_eq!(nb.entries.len(), 1, "窗口层只收 Notable");
+        assert!(matches!(nb.entries[0].event, GameEvent::WarStarted { .. }));
+
+        let mut ms = crate::model::Milestones::default();
+        ms.push(3, war);
+        ms.push(3, raze);
+        assert!(ms.entries.is_empty(), "里程碑层当前没有任何 variant 属于它");
     }
 
     /// 载入一个**裸 `State`** 的 RON 也要能过（`--start` 的另一条路径）。
@@ -396,7 +520,13 @@ mod tests {
         };
         assert_eq!(back.round, state.round);
         assert_eq!(back.events.len(), state.events.len());
-        assert_eq!(back.ledger.entries.len(), state.ledger.entries.len());
+        assert_eq!(back.milestones.entries.len(), state.milestones.entries.len());
+        assert_eq!(back.notables.entries.len(), state.notables.entries.len());
+        assert_eq!(
+            back.notables.entries.iter().map(|e| e.round).collect::<Vec<_>>(),
+            state.notables.entries.iter().map(|e| e.round).collect::<Vec<_>>(),
+            "窗口层的回合号必须逐条读回来（记恨地板靠它算年龄）"
+        );
     }
 }
 

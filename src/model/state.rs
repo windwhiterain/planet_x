@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 fn default_schema_version() -> u32 {
     0
 }
@@ -42,14 +42,18 @@ pub struct State {
     /// `q.history('city', 城名)` / `q.cause('ship', 舰名)` 做 join 查询。
     #[serde(default)]
     pub events: Vec<GameEvent>,
-    /// **长存里程碑账本**：本局发生过的全部里程碑事件（易主/存亡/开战/结盟/剧情），按发生
-    /// 顺序累计、**不随回合清空**——这是「历史活过 checkpoint」的载体。
-    ///
-    /// 与 [`State::events`] 的分工：`events` 是**本回合明细**（会被清空，含逐发 `attack`/
-    /// `siege` 流水），`ledger` 是**跨回合里程碑**（只收 [`Salience::Milestone`]，永不自动
-    /// 清空）。两者都由 [`crate::sim::ev`] 这一个漏斗写入，所以不会各记一套。
+    /// **长存里程碑层**：后续计算需要访问**无限过去**的事件，按发生顺序累计、**不随回合清空**。
+    /// 只收 [`Salience::Milestone`]，而按当前判据**没有任何 variant 属于这一层**——所以它现在
+    /// 是空的（见 [`Milestones`] 的文档：这是判据的正确结果，不是遗漏）。
     #[serde(default)]
-    pub ledger: Ledger,
+    pub milestones: Milestones,
+    /// **窗口层**：后续计算需要访问**一定事件窗口**的事件，只保留最近
+    /// `history.notable_window` 个回合。当前唯一的成员是战争（[`GameEvent::WarStarted`] /
+    /// [`GameEvent::WarEnded`]），读者是「记恨地板」（[`crate::sim::war_scar_floor`]）。
+    ///
+    /// 与 [`State::milestones`] 的差别只有保留期：本层被裁剪是**预期行为**，因此不记 `dropped`。
+    #[serde(default)]
+    pub notables: Notables,
     /// 剧情编年史：本局已发生的叙事事件（按发生先后追加）。这是「剧情丰富」的载体——
     /// agent 用 `story` 命令/查询即可读到整段已展开的故事弧；`#[serde(default)]` 让旧的
     /// `.ron` 状态缺字段也能正常加载。
@@ -254,14 +258,23 @@ impl State {
 /// 补齐缺失的因果。故 v1 → v2 只升版本号：旧 checkpoint 若含旧结构的事件会**在反序列化时
 /// 明确报错**（而不是静默错载）；从 seed 重新生成即可（本模拟确定性可复现）。
 ///
-/// v2 → v3：新增 [`State::ledger`]（长存里程碑账本）+ `CityRazed` 增加 `owner`（失去这座城的
-/// 一方）。账本是 `#[serde(default)]` 的新字段：v2 档根本没有它，而 v2 档里的 `events` 只是
+/// v2 → v3：新增 [`State::milestones`]（长存里程碑）+ `CityRazed` 增加 `owner`（失去这座城的
+/// 一方）。里程碑是 `#[serde(default)]` 的新字段：v2 档根本没有它，而 v2 档里的 `events` 只是
 /// 当回合残留，**变不出跨回合的历史**——所以同样只升版本号。旧档若含旧结构的 `CityRazed`
-/// 会在反序列化时报错（明确失败，不静默错载）。一旦从 v3 起账本开始积累，此后升版就**不该**
-/// 再轻易丢弃它：那才是真的历史，届时应在此处写真正的迁移（而不是继续「只升版本号」）。
+/// 会在反序列化时报错（明确失败，不静默错载）。
+///
+/// v3 → v4：**分层判据换了**（从「重要性」换成「后续计算的访问需求」）+ 新增
+/// [`State::notables`]（窗口层）+ 战争从 [`Salience::Milestone`] 改判为 [`Salience::Notable`]。
+/// 同样只升版本号：v3 档的 `milestones` 里装的是**按旧判据预填**的事件（易主/存亡/开战/结盟/
+/// 剧情），它们与新判据不符，但**都不是任何计算会回看的东西**——按新判据的正确处理不是把它们
+/// 迁移进 `notables`（那只会把窗口塞满过期条目），而是丢弃：agent 要查那些历史，本来就走磁盘
+/// 投影 `idx/events.jsonl`。**这一档丢掉的不是真历史，是错分级的残留。**
+///
+/// 此后的约定：一旦某层真的积累了「计算回看」的历史，升版就**不该**再继续「只升版本号」，
+/// 届时应在此处写真正的迁移（而不是把历史一起丢掉）。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 => {
+        0 | 1 | 2 | 3 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

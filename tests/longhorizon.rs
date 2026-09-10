@@ -244,7 +244,7 @@ fn world_value_is_bounded() {
         }
         let late = world_value(&state, &config);
         // The value should be well-bounded — production is area/cap-limited so
-        // the ledger must settle, not soar. (The initial board has a few hundred
+        // the milestones must settle, not soar. (The initial board has a few hundred
         // value; runaways are the thing this guards.)
         assert!(
             late < 2_000_000.0,
