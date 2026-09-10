@@ -509,6 +509,24 @@ fn write_round(
         if let Some(d) = &c.default_ship_order {
             row("default_ship_order", json!(""), json!(null), json!(d.value), d.mode)?;
         }
+        // —— 风格两轴的四片叶（`control-live-layers.md` §3 那条候选）——
+        //
+        // 漏掉它们的后果很具体：Python 侧只能从 `ships` 表的 `doctrine`/`kiting`（**有效值**）
+        // 看结果，看不到这四片叶**自己的值与自己的表态**——于是「这艘舰的风格是它自己钉的，
+        // 还是跟着舰队默认走的」在表里查不出来（web 的 `effectiveMode()` 正是靠这个区分）。
+        // `value` 列是 `any`：doctrine 是 `{temper, lone_wolf}` 对象，kiting 是数字。
+        for (ship, leaf) in &c.ship_doctrine {
+            row("ship_doctrine", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+        }
+        for (ship, leaf) in &c.ship_kiting {
+            row("ship_kiting", json!(ship), json!(null), json!(leaf.value), leaf.mode)?;
+        }
+        if let Some(d) = &c.default_doctrine {
+            row("default_doctrine", json!(""), json!(null), json!(d.value), d.mode)?;
+        }
+        if let Some(d) = &c.default_kiting {
+            row("default_kiting", json!(""), json!(null), json!(d.value), d.mode)?;
+        }
         for (res, leaf) in &c.investment_budget {
             row("investment_budget", json!(res), json!(null), json!(leaf.value), leaf.mode)?;
         }
@@ -711,9 +729,10 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认指令 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / default_ship_order / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order` 与 `capital` 为 `\"\"`。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / default_ship_order / default_doctrine / default_kiting / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。",
+                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_ship_order`/`default_doctrine`/`default_kiting` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),
@@ -1372,6 +1391,20 @@ mod tests {
             );
         }
         c.default_ship_order = Some(Control { value: ShipBehavior::Idle, mode: ControlMode::Player });
+        // 风格四片叶（`control-live-layers.md` §3 那条候选）：四片都要出现在表里——
+        // 少了它们，「这艘舰的风格是它自己钉的，还是跟着舰队默认走」在表里就查不出来。
+        if let Some(ship) = &ship {
+            c.ship_doctrine.insert(
+                ship.clone(),
+                Control { value: crate::model::ShipDoctrine { temper: 0.71, lone_wolf: -0.25 }, mode: ControlMode::Player },
+            );
+            c.ship_kiting.insert(ship.clone(), Control { value: -0.6, mode: ControlMode::Player });
+        }
+        c.default_doctrine = Some(Control {
+            value: crate::model::ShipDoctrine { temper: 0.25, lone_wolf: 0.5 },
+            mode: ControlMode::Auto,
+        });
+        c.default_kiting = Some(Control { value: 0.2, mode: ControlMode::Player });
         c.construction_budget.insert(
             "铁".to_string(),
             Control { value: 3.5, mode: ControlMode::Player },
@@ -1387,6 +1420,20 @@ mod tests {
         let has = |kind: &str| rows.iter().any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid));
         assert!(has("default_ship_order"), "缺舰队默认指令行");
         assert!(has("construction_budget"), "缺预算行");
+        // 风格四片叶：值与**自己的** mode 都要在（不是有效值、不是有效归属）。
+        let doc = rows
+            .iter()
+            .find(|r| r["kind"] == json!("ship_doctrine") && r["key"] == json!(ship.clone().unwrap_or_default()))
+            .expect("缺逐舰风格叶行");
+        assert_eq!(doc["value"], json!({"temper": 0.71, "lone_wolf": -0.25}), "风格叶的值应是叶自己的值");
+        assert_eq!(doc["mode"], json!("Player"));
+        assert!(
+            rows.iter().any(|r| r["kind"] == json!("ship_kiting") && r["value"] == json!(-0.6)),
+            "缺逐舰风筝姿态叶行"
+        );
+        let dd = rows.iter().find(|r| r["kind"] == json!("default_doctrine")).expect("缺舰队默认风格行");
+        assert_eq!(dd["mode"], json!("Auto"), "势力级默认风的 mode 也要如实带出来");
+        assert!(has("default_kiting"), "缺舰队默认风筝姿态行");
         if let Some(ship) = &ship {
             let row = rows
                 .iter()

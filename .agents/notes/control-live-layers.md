@@ -109,12 +109,18 @@ AI 最后写的行为上——那是「活层」最危险的坑。
   模式」要补一句「但写值即接管」；另外要补 `--derived` 与四张派生表。
 * `[x]` **web 侧还差两行** —— **已补上**（分支 `feature/web-fleet-defaults-style`，实现与实机证据见 §7）。
   顺带把「逐舰风格编辑」也补了（此前 web 里根本没有绑 `Ship.doctrine`/`Ship.kiting` 的 UI）。
-* `[ ]` **投影的 `control` tidy 表还缺四条风格叶**（引擎侧，与 web 无关）：
-  `src/projection.rs` 的 `control` 表只发 `ship_order` / `default_ship_order` / 预算 / 权重 / 首都，
-  缺 `ship_doctrine` / `ship_kiting` / `default_doctrine` / `default_kiting` —— Python 侧现在只能从
-  `ships` 表的 `doctrine`/`kiting`（**有效值**）看结果，看不到这四片叶**自己的值与自己表的态度**；
-  `kind` 的 schema 描述也还只列着老的七种。（→ 上面那个子 agent 只做了 web，按分工没自己糊引擎读面；
-  这一条我来补。）
+* `[x]` **投影的 `control` tidy 表补上四条风格叶**（本轮补，引擎侧）：`src/projection.rs` 的
+  `control` 表原先只发 `ship_order` / `default_ship_order` / 预算 / 权重 / 首都，现在也发
+  `ship_doctrine` / `ship_kiting` / `default_doctrine` / `default_kiting`（`value` 列是 `any`：
+  doctrine 是 `{temper, lone_wolf}` 对象、kiting 是数字），`kind` 的 schema 描述同步列全。
+  **为什么值得单独记一笔**：漏掉它们的后果不是报错，而是 Python 侧**只能**从 `ships` 表的
+  `doctrine`/`kiting`（有效值）看结果 —— 于是「这艘舰的风格是它自己钉的，还是跟着舰队默认走的」
+  在表里查不出来（web 的 `effectiveMode()` 正是靠这个区分）。
+  守卫：`projection::tests::control_table_holds_every_leaf`（四片叶的值与**各自的** mode 逐条断言）。
+  端到端：写一片 `default_doctrine`/`default_kiting` + 逐舰两片 → 投影后 `idx/control.jsonl` 出现四行，
+  值就是叶自己的值（`{"lone_wolf":0.1,"temper":-0.9}` / `0.5` / `{"lone_wolf":-0.4,"temper":0.3}` / `-0.6`）。
+  ⚠ 顺带记一个反直觉的观察：**跑了 20 回合的基线局里这四片叶一片都不存在**（AI 不写风格叶），
+  所以"表里没有"是正确的**缺席**、不是漏发 —— 也正因为如此，没有守卫时这个洞极难被发现。
 
 ### 3.1 一个被 kit 撞出来的语义坑：**单轴写「还不存在的两轴叶」**
 
