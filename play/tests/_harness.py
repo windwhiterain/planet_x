@@ -80,12 +80,18 @@ class Harness:
             h.update(hashlib.sha256(CONFIG.read_bytes()).digest())
         return h.hexdigest()[:16]
 
-    def dir_for(self, seed: int, rounds: int, every: int = 1) -> Path:
-        return CACHE_ROOT / f"{self.fingerprint()}-s{seed}-r{rounds}-e{every}"
+    def dir_for(self, seed: int, rounds: int) -> Path:
+        return CACHE_ROOT / f"{self.fingerprint()}-s{seed}-r{rounds}"
 
-    def projection(self, seed: int, rounds: int, every: int = 1) -> Path:
-        """按 `(seed, 回合数, 分辨率)` 取一份投影目录：命中就直接返回，否则跑一次。"""
-        dest = self.dir_for(seed, rounds, every)
+    def projection(self, seed: int, rounds: int) -> Path:
+        """按 `(seed, 回合数)` 取一份投影目录：命中就直接返回，否则跑一次。
+
+        ⚠ **没有「分辨率」这一维**：`--every K` 只管 stdout 的轨迹快照，**不动 `--index`
+        写出来的投影**（实测 `--every 10` 与全量一模一样的 169.3 MB / 8.7 s）。要真减投影
+        只有两条路：少几个 seed / 少几回合（或者给 `--index` 加表过滤——用户裁决不做：
+        *「省的后面新测试又要改」*）。
+        """
+        dest = self.dir_for(seed, rounds)
         if not self.refresh and (dest / "_cache.json").exists():
             self.hits.append(dest.name)
             return dest
@@ -93,12 +99,11 @@ class Harness:
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        self.run_into(tmp, seed, rounds, every)
+        self.run_into(tmp, seed, rounds)
         elapsed = time.time() - t0
         info = {
             "seed": seed,
             "rounds": rounds,
-            "every": every,
             "binary": str(self.path),
             "fingerprint": self.fingerprint(),
             "elapsed_s": round(elapsed, 1),
@@ -112,13 +117,12 @@ class Harness:
         self.misses.append((dest.name, elapsed))
         return dest
 
-    def run_into(self, dest: Path, seed: int, rounds: int, every: int = 1, extra=()) -> None:
+    def run_into(self, dest: Path, seed: int, rounds: int, extra=()) -> None:
         """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。"""
         args = [
             str(self.path),
             "--seed", str(seed),
             "--round", str(rounds),
-            "--every", str(every),
             "--index", str(dest),
             *extra,
         ]
@@ -142,18 +146,18 @@ class Harness:
             raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-2000:]}")
         return (p.stdout, p.stderr) if stderr else p.stdout
 
-    def prewarm(self, keys: list[tuple[int, int]], every: int = 1) -> list[Path]:
+    def prewarm(self, keys: list[tuple[int, int]]) -> list[Path]:
         """并行把一批 (seed, 回合数) 备好（多个进程跑多个世界，互不干扰）。"""
         if len(keys) <= 1 or self.jobs <= 1:
-            return [self.projection(s, r, every) for s, r in keys]
+            return [self.projection(s, r) for s, r in keys]
         with ThreadPoolExecutor(max_workers=min(self.jobs, len(keys))) as ex:
-            return list(ex.map(lambda k: self.projection(k[0], k[1], every), keys))
+            return list(ex.map(lambda k: self.projection(k[0], k[1]), keys))
 
     def q(self, dirpath: Path, only=None):
         """读一份投影（kit 的 PlanetXQ）。`only` = 只装这几张表（长投影全装要 ~12 s）。"""
         return self._kit.load(str(dirpath), only=only)
 
-    def digest(self, seed: int, rounds: int, build, every: int = 1):
+    def digest(self, seed: int, rounds: int, build):
         """把 `build(投影目录)` 的结果按投影缓存成一个 pickle。
 
         投影是**真相**，摘要是**它的**缓存：摘要文件就躺在投影目录里 ⇒ 跟着它同生共死
@@ -163,7 +167,7 @@ class Harness:
         摘要名字里带**抽取逻辑的代码指纹**（见 [`_code_stamp`]）：改了抽取逻辑就重算，
         只改 `run()` 里的判据就照旧命中。
         """
-        d = self.projection(seed, rounds, every)
+        d = self.projection(seed, rounds)
         path = d / f"_digest_{build.__name__}-{_code_stamp(build)}.pkl"
         if path.exists() and not self.refresh:
             return pd.read_pickle(path)
@@ -171,12 +175,12 @@ class Harness:
         pd.to_pickle(out, path)
         return out
 
-    def digests(self, keys, build, every: int = 1) -> list:
+    def digests(self, keys, build) -> list:
         """并行把一批 `(seed, 回合数)` 的摘要备好（摘要已在就只读 pickle）。"""
         if len(keys) <= 1 or self.jobs <= 1:
-            return [self.digest(s, r, build, every) for s, r in keys]
+            return [self.digest(s, r, build) for s, r in keys]
         with ThreadPoolExecutor(max_workers=min(self.jobs, len(keys))) as ex:
-            return list(ex.map(lambda k: self.digest(k[0], k[1], build, every), keys))
+            return list(ex.map(lambda k: self.digest(k[0], k[1], build), keys))
 
     def report(self) -> None:
         if self.misses:

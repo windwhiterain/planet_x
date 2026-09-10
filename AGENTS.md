@@ -41,7 +41,17 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
 
 - 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
   世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
-- 引擎改动只需重编**一个**二进制：长局用 `--bin release`（默认），短局 `--bin debug` 更划算。
+- **内循环走 debug、合流门走 release**（实测，改一个引擎文件之后）：
+
+  | 路线 | 编 + 跑 |
+  | --- | --- |
+  | release：`cargo build --release` + `run.py 1` | 39.5 + 3.7 ≈ **44 s** |
+  | **debug：`cargo build` + `run.py 1 --bin debug`** | 3.3 + 8.9 ≈ **12 s** |
+
+  长组反过来：debug 下模拟慢 ~4×（投影 1000 回合 8.6 s → ~35 s）⇒ `run.py all` 用 release。
+- 现在的耗时结构（谁是大头）与两个未决的口子见
+  [笔记 §11](.agents/notes/test-decoupled-suite.md)：**Rust 门 62 s 里 58 s 是 test 档编译、
+  真跑只有 4.2 s**；投影每 1000 回合 169 MB（纯模拟 5.7 s vs 带投影 8.6 s ⇒ 写盘占 34%）。
 - 加一条断言：写进 `play/tests/g*.py` 的 `run()` 里（判据写 `run()`、数据取自摘要 ⇒ 改断言
   不重读投影）；**每条守卫都要带防空转判据**（「这一局里真的发生过 X」）。
 - 分档口径不变（[笔记：测试分档](.agents/notes/test-tiers.md)）：快组 ≈ T0/T1、中组 ≈ T2、长组 ≈ T3。
