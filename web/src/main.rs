@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("PLANET_X_WEB_PORT").unwrap_or_else(|_| "3000".to_string());
     let addr = format!("127.0.0.1:{port}");
 
-    let world = GameWorld { state, config, rng: Prng::new(seed) };
+    let world = GameWorld::new(state, config, Prng::new(seed));
     let shared: Shared = Arc::new(Mutex::new(world));
 
     let app = router(shared);

@@ -4,6 +4,13 @@
 //   全局 -> 势力 -> 分类(舰/预算/天体) -> 天体 -> 城市 -> 建筑
 // 每个容器节点显示一条 tab 带、只展开选中的子节点；分类组列出全部子项。
 // 地图由 map3d.js 渲染 WebGL 场景，通过 window.PlanetXMap.setWorld/onSelect 与这里耦合。
+//
+// 两个读面，分工明确：
+//   * 左侧「控制层级」= **可控 state**（可编辑的控制面：舰指令/预算/权重/迁都，写回服务器）。
+//   * 右侧「状态」    = **普通 state + 派生 + 配置**（只读全量）。
+//     它把后端给的 `world.info`（每个根 = 模型的整份 JSON dump）交给 jsonview.js 那个
+//     schema-agnostic widget 渲染：本文件不写任何字段名，只决定「渲染哪个根」，
+//     所以 State/GameConfig/Derived 怎么改都不用动前端。
 
 let world = null;      // 当前 StateView（/api/state）
 let meta = null;       // MetaView（/api/meta）
@@ -13,6 +20,9 @@ let edControl = [];    // 所有势力的可编辑控制（FactionControlView[]�
 let edScope = null;    // 可编辑作用域
 let prevState = null;  // 上一帧，用于 diff 页脚
 let selTab = new Map(); // parentKey -> 激活子 key（每层只开一个 tab）
+let infoRoot = 0;      // 右侧面板当前显示的根（world.info 的下标）
+let infoFilter = '';   // 右侧面板的过滤串
+const infoExpanded = new Set(); // 右侧面板的展开状态（路径集合，跨渲染保留）
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const el = (tag, attrs, html) => {
@@ -198,6 +208,7 @@ function renderAll() {
   renderTree();
   renderReadout();
   renderDiff();
+  renderInfo();
 }
 
 function updateTop() {
@@ -536,6 +547,60 @@ function addBuildingButton(node) {
   return wrap;
 }
 
+// --- 右侧「状态」面板（普通 state 全量读数） -------------------------------
+// 后端把模型的**整份 dump** 放在 world.info（[{name, value}]）。这里只做三件事：
+// 列 root tab、把选中的 root 交给 JsonView 渲染、接上过滤/展开状态。
+// 全程**没有任何字段名**——state 加字段/改结构，这里一行都不用动。
+function renderInfo() {
+  const roots = (world && world.info) || [];
+  const tabs = $('#jvTabs');
+  const body = $('#jvBody');
+  if (!tabs || !body) return;
+  tabs.textContent = '';
+  if (!roots.length) {
+    body.textContent = '（服务器没有返回信息树）';
+    return;
+  }
+  if (infoRoot >= roots.length) infoRoot = 0;
+  roots.forEach((r, i) => {
+    const t = el('span', { class: 'tnode-tab' + (i === infoRoot ? ' sel' : '') });
+    t.textContent = r.name;
+    t.addEventListener('click', () => { infoRoot = i; renderInfo(); });
+    tabs.appendChild(t);
+  });
+  const root = roots[infoRoot];
+  window.JsonView.render(body, root.value, {
+    rootPath: root.name,
+    expandDepth: 1,
+    state: { expanded: infoExpanded },
+    filter: infoFilter,
+    onPathClick: copyPath,
+  });
+}
+
+// 点叶子复制它的 JSON 路径（如 `state.cities[3].loyalty`）：agent/CLI 与 UI 用同一套定位。
+function copyPath(path) {
+  if (navigator.clipboard) navigator.clipboard.writeText(path).catch(() => {});
+  const s = $('#status');
+  if (s) s.textContent = '路径已复制: ' + path;
+}
+
+// 展开/收起**当前根**的全部可折叠节点（路径由 widget 自己枚举，结构无关）。
+function setAllOpen(open) {
+  const root = ((world && world.info) || [])[infoRoot];
+  if (!root) return;
+  window.JsonView.expandablePaths(root.value, root.name)
+    .forEach((p) => window.JsonView.setOpen(infoExpanded, p, open));
+  renderInfo();
+}
+
+let infoFilterTimer = null;
+function onInfoFilter(v) {
+  infoFilter = v;
+  clearTimeout(infoFilterTimer);
+  infoFilterTimer = setTimeout(renderInfo, 120); // 大树上防抖
+}
+
 // --- 读面 / diff ------------------------------------------------------------
 function renderReadout() {
   const f = world.factions.find((x) => x.id === selFaction);
@@ -590,6 +655,8 @@ async function newGame() {
   world = await postJSON('/api/new', { seed });
   selFaction = world.factions.length ? world.factions[0].id : 0;
   selTab = new Map();
+  infoRoot = 0;
+  infoExpanded.clear(); // 新世界 → 展开状态重来
   if (window.PlanetXMap && window.PlanetXMap.resetView) window.PlanetXMap.resetView(world);
   buildEdits();
   renderAll();
@@ -606,5 +673,10 @@ window.addEventListener('DOMContentLoaded', () => {
   toggleBar('#toggleTop', '#topbar');
   toggleBar('#toggleSide', '#side');
   toggleBar('#toggleDiff', '#diffBar');
+  toggleBar('#toggleInfo', '#info');
+  // 右侧状态面板：过滤 + 全展开/全收起（结构无关，全部走 widget 的通用 API）。
+  $('#jvFilter').addEventListener('input', (e) => onInfoFilter(e.target.value));
+  $('#jvExpand').addEventListener('click', () => setAllOpen(true));
+  $('#jvCollapse').addEventListener('click', () => setAllOpen(false));
   init();
 });

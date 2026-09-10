@@ -34,6 +34,7 @@ body {
 .edge-toggle:hover { border-color: var(--accent); color: var(--text); }
 .edge-toggle.top    { top: 10px; left: 50%; transform: translateX(-50%); width: 58px; height: 22px; border-radius: 6px 6px 0 0; }
 .edge-toggle.left   { left: 10px; top: 50%; transform: translateY(-50%); width: 22px; height: 58px; border-radius: 6px 0 0 6px; }
+.edge-toggle.right  { right: 10px; top: 50%; transform: translateY(-50%); width: 22px; height: 58px; border-radius: 0 6px 6px 0; }
 .edge-toggle.bottom { bottom: 10px; left: 50%; transform: translateX(-50%); width: 58px; height: 22px; border-radius: 0 0 6px 6px; }
 
 .edge-panel {
@@ -43,10 +44,12 @@ body {
 }
 .edge-panel.top    { top: 0; left: 0; right: 0; transform: translateY(-100%); }
 .edge-panel.left   { top: 0; bottom: 0; left: 0; width: 430px; transform: translateX(-100%); }
+.edge-panel.right  { top: 0; bottom: 0; right: 0; width: 580px; transform: translateX(100%); }
 .edge-panel.bottom { bottom: 0; left: 0; right: 0; transform: translateY(100%); }
 
 .edge-panel.open.top    { transform: translateY(0); }
 .edge-panel.open.left   { transform: translateX(0); }
+.edge-panel.open.right  { transform: translateX(0); }
 .edge-panel.open.bottom { transform: translateY(0); }
 
 /* 顶部 bar body */
@@ -121,6 +124,79 @@ button.primary:hover { background: #2563eb; }
 
 #status { color: var(--muted); }
 
+/* ---- 右侧「状态」面板：普通 state 全量读数（generic widget） ------------- */
+#info {
+  background: var(--panel); border-left: 1px solid var(--line);
+  padding: 12px; display: flex; flex-direction: column; overflow: hidden; backdrop-filter: blur(4px);
+}
+#infoPanel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.jv-toolbar { display: flex; gap: 6px; margin: 6px 0; }
+.jv-toolbar input {
+  flex: 1; min-width: 0; background: #0d1226; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12px;
+}
+.jv-toolbar button {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; flex: none;
+}
+.jv-toolbar button:hover { border-color: var(--accent); }
+.jv-scroll { flex: 1; min-height: 0; overflow: auto; }
+
+/* widget 本体：折叠节点 / 自动表格 / chips / 键值行 */
+.jv-root { font-size: 12px; line-height: 1.5; }
+.jv-node { border-left: 1px solid var(--line); margin-left: 3px; }
+.jv-head { display: flex; align-items: baseline; gap: 6px; padding: 1px 4px; border-radius: 4px; cursor: pointer; }
+.jv-head:hover { background: #18224a; }
+.jv-caret { color: var(--muted); flex: none; width: 10px; font-size: 10px; }
+.jv-key { color: #9ecbff; }
+.jv-key.clickable { cursor: copy; }
+.jv-kind { color: var(--muted); font-size: 11px; flex: none; }
+.jv-preview {
+  color: #5f6b90; font-size: 11px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 60%;
+}
+.jv-body { padding-left: 12px; }
+.jv-leaf { display: flex; gap: 8px; padding: 0 4px; }
+.jv-val { word-break: break-all; }
+.jv-val.jv-number { color: #ffd479; }
+.jv-val.jv-boolean { color: #7ee787; }
+.jv-val.jv-string { color: var(--text); }
+.jv-val.jv-null { color: #6b7280; }
+.jv-val.clickable { cursor: copy; }
+.jv-val.clickable:hover { background: #24305a; border-radius: 3px; }
+.jv-kv { display: grid; grid-template-columns: max-content 1fr; gap: 0 10px; }
+.jv-kv .jv-leaf { display: contents; }
+.jv-table-box { overflow-x: auto; }
+.jv-table { border-collapse: collapse; font-size: 11.5px; }
+.jv-th {
+  text-align: left; color: var(--muted); font-weight: 600; padding: 2px 6px;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #131a33; white-space: nowrap;
+}
+.jv-td {
+  padding: 1px 6px; border-bottom: 1px solid rgba(42, 51, 84, .45);
+  vertical-align: top; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jv-td-key { color: #9ecbff; }
+.jv-tr:hover .jv-td { background: rgba(35, 46, 88, .45); }
+.jv-sum { color: var(--muted); cursor: pointer; }
+.jv-sum:hover { color: var(--text); }
+.jv-absent { color: #3d4665; }
+.jv-holder { white-space: normal; }
+.jv-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 4px; }
+.jv-chip {
+  background: #16203c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 0 8px; font-size: 11.5px; word-break: break-all;
+}
+.jv-chip.clickable { cursor: copy; }
+.jv-chip.clickable:hover { border-color: var(--accent); }
+.jv-empty { color: var(--muted); font-size: 11px; padding: 0 4px; }
+.jv-more {
+  background: var(--panel2); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 8px; margin: 4px; font-size: 11px; cursor: pointer;
+}
+.jv-more:hover { border-color: var(--accent); color: var(--text); }
+
 @media (max-width: 720px) {
   .edge-panel.left { width: 100%; }
+  .edge-panel.right { width: 100%; }
 }

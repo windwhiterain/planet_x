@@ -15,16 +15,21 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("config/game.ron"))
 }
 
+/// Load and parse the `GameConfig` from an explicit path (no `std::process::exit`,
+/// no dependency on the process cwd). [`load_config`] is the exit-on-error wrapper
+/// the binaries use; tests (e.g. in the `planet_x_web` crate, whose cwd is `web/`)
+/// use this one with `CARGO_MANIFEST_DIR`-anchored paths.
+pub fn load_config_from(path: &Path) -> Result<GameConfig, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("无法读取配置文件 {}: {e}", path.display()))?;
+    ron::from_str(&text).map_err(|e| format!("配置文件 {} 解析失败: {e}", path.display()))
+}
+
 /// Load and parse the `GameConfig` from the config path. Exits on error.
 pub fn load_config() -> GameConfig {
     let path = config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("{} 无法读取配置文件 {}: {e}", "[错误]".red().bold(), path.display());
+    load_config_from(&path).unwrap_or_else(|e| {
+        eprintln!("{} {e}", "[错误]".red().bold());
         eprintln!("请提供 config/game.ron，或设置 PLANET_X_CONFIG 环境变量。");
-        std::process::exit(1);
-    });
-    ron::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("{} 配置文件 {} 解析失败: {e}", "[错误]".red().bold(), path.display());
         std::process::exit(1);
     })
 }

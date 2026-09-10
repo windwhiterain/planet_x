@@ -10,6 +10,7 @@ pub mod agent;
 pub mod autocontrol;
 pub mod config;
 pub mod control;
+pub mod json;
 pub mod model;
 pub mod projection;
 pub mod prng;

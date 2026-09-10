@@ -55,7 +55,27 @@
     <div id="diffText"></div>
   </footer>
 
+  <!-- 右侧边缘 bar：**普通 state 全量信息**（只读，默认收起）。
+       左侧是可控 state（可编辑的控制面）；右侧是同一份世界的完整读数：
+       天体/定居点/城/建筑/势力/舰/事件/编年史 + 本回合派生态 + 全部配置表。
+       由 jsonview.js 这个 schema-agnostic widget 渲染——它不认识任何字段名，只认
+       JSON 形状，所以 state 结构怎么改都不用动前端。 -->
+  <button id="toggleInfo" class="edge-toggle right" title="展开/收起状态" data-closed-arrow="◀" data-open-arrow="▶">◀</button>
+  <aside id="info" class="edge-panel right">
+    <div class="panel" id="infoPanel">
+      <h2>状态 <span class="hint">普通 state · 派生 · 配置（只读）</span></h2>
+      <div class="jv-toolbar">
+        <input id="jvFilter" placeholder="过滤（键名 / 值）" />
+        <button id="jvExpand" title="展开当前根的全部可折叠节点">全展开</button>
+        <button id="jvCollapse" title="收起当前根的全部可折叠节点">全收起</button>
+      </div>
+      <div id="jvTabs" class="tnode-tabs"></div>
+      <div id="jvBody" class="jv-scroll"></div>
+    </div>
+  </aside>
+
   <script type="module" src="map3d.js"></script>
+  <script src="jsonview.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
