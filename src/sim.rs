@@ -1125,31 +1125,33 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     }
 }
 
-// --- 承包市场（集货腿的第二条路：请人来运）-------------------------------------
+// --- 雇佣运力市场（集货腿的第二条路：雇人来运）---------------------------------
 //
-// 集货腿有两条路：**自己派船**（`step_ships` 里的定编 + 抽签派单）与**请人来运**（承包）。
-// 本步管后者里**托运方**的那一半（挂单 + 收回无人接的过期单）；承运方的接单/履约在 M4b–M4c。
+// 集货腿有两条路：**自己派船**（`step_ships` 里的定编 + 抽签派单）与**雇人来运**。
+// 本步管后者：雇主挂单 + 受雇方接单/派工 + 雇主的考核与续约/换人。
 //
-// 为什么它不是「又一个市场步」而是独立的一步：**承包的标的是运力，不是货**。
-// 商品市场撮合的是「谁卖什么、多少钱」，成交即完成（货瞬移）；承包撮合的是
-// 「谁替谁跑一趟」，成交只是**开始**——后面要真的有船去装、去运、去卸
-// （复用 `Haul` 的常驻路线），所以它是运输行为的一部分，不是市场的一部分。
+// 为什么它不是「又一个市场步」而是独立的一步：**雇佣的标的是运力，不是货**。
+// 商品市场撮合的是「谁卖什么、多少钱」，成交即完成（货瞬移）；雇佣撮合的是
+// 「谁替谁跑哪条线、跑得够不够」，成交只是**开始**——后面要真的有船去装、去运、去卸
+// （复用 `Haul` 的常驻路线），而且**每个考核期还要验一次货**，所以它是运输行为的一部分。
 //
 // 依据与裁决见 `.agents/notes/freight-collection.md` §4（Q1(b) 只扣信誉 / Q2 挂单制 /
-// Q4 禁运同样挡承包 / Q10 抽成制 / Q11 超期不作废）。
+// Q4 禁运同样挡雇佣 / Q10 抽成制 / 雇佣形态：单子要求运力、派几条船都无所谓、
+// 周期考核出信誉、船沉没不管）。
 fn step_contracts(state: &mut State, config: &GameConfig) {
-    // 挂单（内含**加价 + 延期**：没人接的单子自己涨价，见 `freight::escalate_open_contracts`）
+    // 1) 雇主挂单（内含**加价**：一个考核周期没人接就抬一档，见 `freight::escalate_open_contracts`）。
     autocontrol::freight::post_contracts(state, config);
-    // 挂完就撮合：看得见、又愿意接的承运人**按信誉加权抽签**接下单子，并当场押上一条船
-    // （`carrier` + `assignments`）。路线与角色叶**不在这里写**——`step_ships` 的运输舰分支
-    // 与 `assign_roles` 会照常处理（它们都认识 `assignments`），每个叶子只有一个写者。
+    // 2) 挂完就撮合：看得见、又愿意接的受雇方**按信誉加权抽签**接下（`carrier` 落定、
+    //    雇佣期起算）。**不押船**——派几条船是受雇方自己的事。
     autocontrol::contract::match_carriers(state, config);
-    // 履约巡检：**超期**（只扣一次信誉，Q11）+ **丢单**（押上的舰没了 ⇒ 合同回挂单簿）。
-    // 交付不在这里——它发生在 `haul_unload` 那一刻（船真的靠了泊位）。
+    // 3) 受雇方派工：把自己的空闲船按**缺口**补到手上的单上；自己缺船时又收回它们
+    //    （缺船也提前结束手上的雇佣）。路线与角色叶**不在这里写**——`step_ships` 的运输舰
+    //    分支与 `assign_roles` 会照常处理（它们都认识派工记录），每个叶子只有一个写者。
+    autocontrol::contract::assign_hired_ships(state, config);
+    // 4) 巡检：记考核分母 → 到点**考核**（信誉的唯一来源）→ 固定期到期**续约或换人**。
+    //    交付不在这里——它发生在 `haul_unload` 那一刻（船真的靠了泊位）。
     autocontrol::contract::settle_contracts(state, config);
-    // 已完成的单子移出挂单簿（挂单簿只留未完成的；「成交了」由事件与流水账记录）。
-    state.contracts.retire_fulfilled();
-    // 单子没了（完成/收回）⇒ 清掉指向它的执行关系，免得有舰永远钉在一张不存在的单上。
+    // 5) 单子没了 ⇒ 清掉指向它的派工，免得有舰永远钉在一张不存在的单上。
     state.contracts.drop_dangling_assignments();
 }
 
@@ -2541,29 +2543,20 @@ fn cargo_owner(state: &State, fid: &str, ship_id: &str) -> FactionId {
 /// **装货**：把 `from` 处**货主**的产地货栈装进 `ship` 的货舱。
 ///
 /// 上限 = 有效舱容（[`cargo_capacity`]：舰级舱容 × 战损折算）− 已在舱；分配按 [`haul_split`]。
-/// 执行承包单时还多一道上限：**这张单还差多少**——承运人只替托运方搬它挂出来（且还没送到）
-/// 的量，多装了等于运了没谈过价的货。
-/// 返回**实际装走的总件数**（0 = 那里没货，舰该原地等）。
+///
+/// **受雇跑的线没有任何额外上限**：雇主挂的是**运力**（单位/回合），不是「要搬多少件」，
+/// 所以受雇的船到了货栈能装多少装多少——与雇主自己的运输舰完全一样（旧形态里这里还有一道
+/// 「这张单还差多少」的闸，那是「一票货」形态的遗留）。返回**实际装走的总件数**
+/// （0 = 那里没货，舰该原地等）。
 fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str) -> f64 {
     let Some(ship) = state.ship(ship_id) else {
         return 0.0;
     };
-    let free = cargo_capacity(config, ship) - cargo_used(&ship.cargo);
-    if free <= 1e-9 {
+    let room = cargo_capacity(config, ship) - cargo_used(&ship.cargo);
+    if room <= 1e-9 {
         return 0.0;
     }
     let owner = cargo_owner(state, fid, ship_id);
-    let room = match state
-        .contracts
-        .assignment_of(ship_id)
-        .and_then(|id| state.contracts.get(id))
-    {
-        Some(c) => free.min(c.outstanding()),
-        None => free,
-    };
-    if room <= 1e-9 {
-        return 0.0; // 这张单已经送够了（等挂单簿收尾），别再装
-    }
     let avail = state.depot(&owner, from).cloned().unwrap_or_default();
     let plan = haul_split(&avail, room);
     let mut moved: ResourceMap = ResourceMap::new();
@@ -2603,7 +2596,7 @@ fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, f
 /// 真正的「回程把自己那份拉回家」需要把 `Haul` 的无状态腿规则撑开（舱里不是空的就是满的
 /// 那条判据不够用了），留作后续钩子。
 /// 返回卸下的货（空 = 本来就空舱）。
-fn haul_unload(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
+fn haul_unload(state: &mut State, _config: &GameConfig, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
     let cargo = state
         .ship_mut(ship_id)
         .map(|s| std::mem::take(&mut s.cargo))
@@ -2657,9 +2650,10 @@ fn haul_unload(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str,
             into_pool,
         },
     );
-    // 承包的账在货物落地之后结：进度 + 信誉 + `contract_delivered` 事件。
+    // 雇佣的账在货物落地之后结：进度 + `contract_delivered` 事件（**信誉不在这里动**——
+    // 雇佣形态下信誉只由雇主的周期考核产生）。
     if contract.is_some() && loaded > 1e-9 {
-        autocontrol::contract::on_delivery(state, config, ship_id, loaded, cut_units);
+        autocontrol::contract::on_delivery(state, ship_id, loaded, cut_units);
     }
     cargo
 }
@@ -5012,19 +5006,19 @@ mod tests {
         assert!((total(&state) - before).abs() < 1e-9, "卸货不许毁货");
     }
 
-    /// **承包交付的记账（M4c，Q10 抽成制）**：卸下来的货**分两份**——抽成归承运人自己的
-    /// 首都池，余数进**托运方**的池子（不是船东的！）。
+    /// **雇佣交付的记账（Q10 抽成制）**：卸下来的货**分两份**——抽成归受雇方自己的
+    /// 首都池，余数进**雇主**的池子（不是船东的！）。
     ///
     /// 这一条把「货主与船东分离」这件事钉在最细的粒度上（不跑 `advance`，所以池子不会被
     /// 维护费/建造搅浑）：**同一个天体、同一批货，进的是两个不同势力的池子**。
     #[test]
-    fn a_contract_delivery_splits_the_cargo_between_carrier_and_shipper() {
+    fn a_hired_delivery_splits_the_cargo_between_carrier_and_shipper() {
         let (config, mut state) = fresh_world(42);
         let share = config.freight.share;
         state.depots.clear();
-        // 托运方：中国在金星积压 10 件碳，**它自己没有船**。
+        // 雇主：中国在金星积压 10 件碳，**它自己没有船**。
         state.depot_add("中国", "金星", "碳", 10.0);
-        // 承运人：美国的一艘驱逐舰（舱容 4）。
+        // 受雇方：美国的一艘驱逐舰（舱容 4）。
         let ship = state
             .ships
             .iter()
@@ -5036,12 +5030,11 @@ mod tests {
         let id = state.contracts.post(
             "中国".into(),
             "碳".into(),
-            10.0,
+            3.0,
             "金星".into(),
             "地球".into(),
             share,
             0,
-            99,
             0.0,
         );
         state.contracts.assign(ship.clone(), id);
@@ -5091,8 +5084,8 @@ mod tests {
             "承运人的报酬就是它自留的那份货：{cut:.3}，实收 {:.3}",
             us1 - us0
         );
-        // 合同进度按**卸出舱的总量**记（抽成是搬运费，不能从合同的量里扣）。
-        let c = state.contracts.get(id).expect("10 件还没送完，合同该还在");
+        // 合同进度按**卸出舱的总量**记（抽成是搬运费，不能从运力里扣）。
+        let c = state.contracts.get(id).expect("合同还在雇佣期内");
         assert!(
             (c.delivered - loaded).abs() < 1e-9,
             "进度 = 卸出舱的总量 {loaded}，实为 {}",
@@ -5943,13 +5936,18 @@ mod tests {
     /// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。删除 `step_resurgence`
     /// （D5）之后，同回合复垦只剩「殖民舰恰好当回合抵达」这一条路径，**拆平本身也变少了**
     /// （120 回合只剩 13 次）——所以把视野拉到 400 回合，让样本重新够用。
+    ///
+    /// 雇佣运力市场（M4 改写）落地后这个数从 20 上下掉到 **17**：市场改的是「谁的货被谁搬走」，
+    /// 于是各家的资源池与战争节奏都换了条轨迹，拆平次数随之摆动（这一条是**样本量下限**，
+    /// 不是机制不变量——真正要钉的那条「同回合自我复垦」仍然是 0）。这里把视野再拉到 600 回合，
+    /// **保住 `>= 20` 这条下限**，而不是把下限调低去迁就新轨迹。
     #[test]
     fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
         let config = load_config();
         let mut state = default_state(&config, 7);
         let mut rng = crate::prng::Prng::new(7);
         let mut razings = 0usize;
-        for _ in 0..400 {
+        for _ in 0..600 {
             advance(&mut state, &config, &mut rng);
             // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 也由
             // step_military 里的殖民路径发（拆平在前、复垦在后），正是要抓的顺序。

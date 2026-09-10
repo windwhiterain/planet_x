@@ -241,80 +241,93 @@ pub enum GameEvent {
         cargo: ResourceMap,
         into_pool: bool,
     },
-    /// **挂出一张运输承包单**：`shipper` 要人把 `amount` 单位的 `resource` 从 `from` 运到
-    /// `to`（= 它的首都），承运人凭**抽成** `share` 取酬。
+    /// **挂出一张运力雇佣单**：`shipper` 请人在 `from` → `to`（= 它的首都）这条线上提供
+    /// `capacity` 单位/回合的运力，受雇方凭**抽成** `share` 取酬。
     ///
-    /// 这是集货腿的**第二条路**：自己没有运力（或运力不够）的势力，把搬不动的积压挂出去。
-    /// 依据与裁决见 `.agents/notes/freight-collection.md` §4（挂单制 Q2、抽成制 Q10）。
-    /// 后续的接单/交付/超期各自是独立事件——本事件只记「这张单出现了」。
+    /// 这是集货腿的**第二条路**：自己派不出足够的船（或干脆没船）的势力，把缺的那份运力
+    /// 挂出去。`capacity` 的口径是「一条参考船在这条线上的吞吐」（`model::required_throughput`）
+    /// ——雇主不知道自己会请到多大的船，但它知道自己**少一条船**（用户：「单主派发单的逻辑和
+    /// 派发自己运输船的逻辑一样，自己船不够了就派雇佣单子」）。
+    ///
+    /// 后续各自是独立事件：接单 / 交付 / 考核 / 结束。依据与裁决见
+    /// `.agents/notes/freight-collection.md` §4（挂单制 Q2、抽成制 Q10、雇佣形态）。
     ContractPosted {
         /// 挂单号（`ContractState::next_id` 分配），与投影表 `contracts` 的 `contract_id` 同源。
         contract: u64,
         shipper: FactionId,
+        /// **主货种**（挂单时该货栈积压最多的那种）——只用来折算货值，不是受雇方的约束。
         resource: String,
-        amount: f64,
+        /// **要求的运力**（单位/回合）。
+        capacity: f64,
         from: BodyId,
         to: BodyId,
-        /// 承运人抽成比例（`0.15` = 自留 15%）。
+        /// 受雇方的抽成比例（`0.15` = 自留 15%）。
         share: f64,
     },
-    /// **有人接下了承包单**：`carrier` 派 `ship` 去把 `shipper` 的 `resource` 从 `from` 运到 `to`。
+    /// **有人接下了雇佣单**：`carrier` 接下 `shipper` 这条线上的运力要求，雇佣期从这一回合开始。
     ///
-    /// 接单是**承诺**：从这一刻起这艘舰被钉在那张单上（`ContractState::assignments`），
-    /// 角色轴再也不能把它收回去当战舰（见 `autocontrol::freight::should_be_freighter`）；
-    /// 而超期也**不作废**（Q11：只扣一次信誉，货照运、抽成照拿）。
+    /// **没有「被押上的舰」**：接下的是**一份运力**，不是一条船。派几条船、派哪条船，
+    /// 是受雇方的内部事务（用户：「对方派几艘船都无所谓」）——船与单的关系是
+    /// `ContractState::assignments` 里**此刻的派工记录**，随时可变，不是承诺。
     ContractAccepted {
         /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
         contract: u64,
         shipper: FactionId,
         carrier: FactionId,
-        ship: ShipId,
         resource: String,
-        /// 接单时还差多少没送到（不是挂单总量：中途可能已经送过一部分）。
-        amount: f64,
+        /// 接下的运力（单位/回合）——从这一刻起**冻结**成承诺。
+        capacity: f64,
         from: BodyId,
         to: BodyId,
     },
-    /// **承包单交付**：`carrier` 的 `ship` 把货交到了托运方手里，`cut` 是它按抽成自留的部分。
+    /// **雇佣单交付**：`carrier` 的一条船把货交到了雇主手里，`cut` 是它按抽成自留的部分。
     ///
-    /// 这是集货腿第二条路的**终点**（对应自有集货的 `cargo_delivered`）：货进了托运方的池子，
-    /// 承运人拿到报酬（Q10：**就是它没交出去的那部分货**，没有货币转移），并且**信誉上涨**
-    /// （`gain`：涨多少按货值与 `risk_value_ref` 折算——搬了不值钱的货就涨不了多少）。
+    /// 这是集货腿第二条路的**终点**（对应自有集货的 `cargo_delivered`）：货进了雇主的池子，
+    /// 受雇方拿到报酬（Q10：**就是它没交出去的那部分货**，没有货币转移），
+    /// 而**交付本身不再动信誉**——雇佣形态下信誉只由**周期考核**产生（见 `contract_reviewed`）。
     ContractDelivered {
         contract: u64,
         shipper: FactionId,
         carrier: FactionId,
         ship: ShipId,
         resource: String,
-        /// 这一趟交付给托运方的量（单位，**不含**承运人自留的抽成）。
+        /// 这一趟交给雇主的量（单位，**不含**受雇方自留的抽成）。
         amount: f64,
-        /// 承运人这一趟自留的抽成（单位）——它的全部报酬。
+        /// 受雇方这一趟自留的抽成（单位）——它的全部报酬。
         cut: f64,
-        /// 这一趟给承运人加的信誉。
-        gain: f64,
     },
-    /// **承包单超期**（已接单的合同过了截止期）。**只扣一次信誉，合同不作废**（Q11）：
-    /// 承运人照旧把货送到、照旧拿抽成——掉的信誉是「你的承诺不值你自己说的价」。
-    ContractLate {
+    /// **雇主的周期考核**：`shipper` 验了 `carrier` 这一期的**实测吞吐**，给出好评或差评。
+    ///
+    /// 用户裁决的落点：「每个雇主会周期性对评估受雇方的运力是否达标来反馈对受雇方的信誉」。
+    ///
+    /// * `ratio` = 实测吞吐达标率 = `实交 ÷ (要求运力 × 有货回合数)`，1.0 = 恰好是一条参考船的水准；
+    /// * `good` = 这一票评价是好评还是差评（**掷骰子**决定，达标率越高越可能好评——遵
+    ///   `AGENTS.md`：用概率分布而不是「过线才算」）；`delta` 是因此加/减的信誉。
+    ///
+    /// 一条好船偶尔也会吃差评、一条烂船偶尔也会蒙到好评——这正是**信誉是市场信号**而不是
+    /// 判决书的意思。**期望**严格随达标率递增（见 `autocontrol::contract::review_contract`）。
+    ContractReviewed {
         contract: u64,
         shipper: FactionId,
         carrier: FactionId,
-        ship: ShipId,
-        /// 超了几个回合。
-        rounds_late: u32,
-        /// 扣掉的信誉。
-        penalty: f64,
+        /// 达标率（1.0 = 一条参考船的水准）。
+        ratio: f64,
+        good: bool,
+        /// 本次给受雇方加（正）或减（负）的信誉。
+        delta: f64,
     },
-    /// **承运人把单子丢了**（押上的舰被击沉/报废）：合同**回到挂单簿**让别人接，
-    /// 承运人掉一次信誉。Q1(b) 之后**没有货值赔偿**——掉信誉就是全部的代价。
-    ContractLost {
+    /// **雇佣结束**：合同离开挂单簿。三种由来（`reason`），都不是「违约」——
+    /// 雇佣形态下没有超期也没有丢单（船沉了不关雇主的事，用户：「船沉没不管，只管统计运输量」）。
+    ///
+    /// * `"term"`——固定期到期，雇主**按信誉决定换人**（续约用的是当初那条准入闸）；
+    /// * `"no_output"`——整个雇佣期一件货都没搬：不是谁的错，收单（若货栈**有货而它就是没搬**，
+    ///   这一期早就在考核里吃过差评了）；
+    /// * `"recalled"`——受雇方自己缺船了，**提前结束雇佣**（用户：「受雇方……是否提前结束雇佣」）。
+    ContractEnded {
         contract: u64,
         shipper: FactionId,
         carrier: FactionId,
-        ship: ShipId,
-        /// 丢的是哪艘舰（`ShipDestroyed` 里能查到怎么没的）。
         reason: String,
-        penalty: f64,
     },
 }
 
@@ -593,58 +606,46 @@ impl GameEvent {
                 r.data = json!({"ship": ship, "faction": faction, "owner": owner, "body": body,
                                 "cargo": cargo, "into_pool": into_pool});
             }
-            GameEvent::ContractPosted { contract, shipper, resource, amount, from, to, share } => {
-                // 发起方 = **托运方**（挂单的人），直接对象 = **目的天体**（= 它的首都）；
+            GameEvent::ContractPosted { contract, shipper, resource, capacity, from, to, share } => {
+                // 发起方 = **雇主**（挂单的人），直接对象 = **目的天体**（= 它的首都）；
                 // 起运天体是第三个参与方（`Third`）——它同时是「这单从哪儿来」的答案，
                 // 也是「哪个货栈积压了」的 join 键。
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Body, to);
                 extra(&mut r, EventRole::Third, EntityKind::Body, from);
                 r.data = json!({"contract": contract, "shipper": shipper, "resource": resource,
-                                "amount": amount, "from": from, "to": to, "share": share});
+                                "capacity": capacity, "from": from, "to": to, "share": share});
             }
-            GameEvent::ContractAccepted {
-                contract,
-                shipper,
-                carrier,
-                ship,
-                resource,
-                amount,
-                from,
-                to,
-            } => {
-                // 发起方 = **承运方**（接单的人），直接对象 = **那艘被押上的舰**，
-                // 托运方是第三个参与方。三者都要在标题里逐字出现（有个守卫钉这条）。
+            GameEvent::ContractAccepted { contract, shipper, carrier, resource, capacity, from, to } => {
+                // 发起方 = **受雇方**（接单的人），直接对象 = **雇主**。
+                // 这里**没有舰**：接下的是运力，不是一条船（用户：「对方派几艘船都无所谓」）。
                 set_actor(&mut r, EntityKind::Faction, carrier);
-                set_target(&mut r, EntityKind::Ship, ship);
-                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+                set_target(&mut r, EntityKind::Faction, shipper);
                 // 起讫天体**不进参与方槽位**（它们已经在 `contract_posted` 里当过参与方了，
-                // 这里再挂一遍只会让「这艘舰的历史」多出一堆天体行）；它们留在 `data` 里。
+                // 这里再挂一遍只会让「雇主的历史」多出一堆天体行）；它们留在 `data` 里。
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ship": ship, "resource": resource, "amount": amount,
+                                "resource": resource, "capacity": capacity,
                                 "from": from, "to": to});
             }
-            GameEvent::ContractDelivered { contract, shipper, carrier, ship, resource, amount, cut, gain } => {
+            GameEvent::ContractDelivered { contract, shipper, carrier, ship, resource, amount, cut } => {
                 set_actor(&mut r, EntityKind::Faction, carrier);
                 set_target(&mut r, EntityKind::Ship, ship);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ship": ship, "resource": resource, "amount": amount,
-                                "cut": cut, "gain": gain});
+                                "ship": ship, "resource": resource, "amount": amount, "cut": cut});
             }
-            GameEvent::ContractLate { contract, shipper, carrier, ship, rounds_late, penalty } => {
-                set_actor(&mut r, EntityKind::Faction, carrier);
-                set_target(&mut r, EntityKind::Ship, ship);
-                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+            GameEvent::ContractReviewed { contract, shipper, carrier, ratio, good, delta } => {
+                // 发起方 = **雇主**（验货的人），直接对象 = **受雇方**（被评的人）。
+                set_actor(&mut r, EntityKind::Faction, shipper);
+                set_target(&mut r, EntityKind::Faction, carrier);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ship": ship, "rounds_late": rounds_late, "penalty": penalty});
+                                "ratio": ratio, "good": good, "delta": delta});
             }
-            GameEvent::ContractLost { contract, shipper, carrier, ship, reason, penalty } => {
-                set_actor(&mut r, EntityKind::Faction, carrier);
-                set_target(&mut r, EntityKind::Ship, ship);
-                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+            GameEvent::ContractEnded { contract, shipper, carrier, reason } => {
+                set_actor(&mut r, EntityKind::Faction, shipper);
+                set_target(&mut r, EntityKind::Faction, carrier);
                 r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ship": ship, "reason": reason, "penalty": penalty});
+                                "reason": reason});
             }
         }
         r
@@ -675,8 +676,8 @@ impl GameEvent {
             GameEvent::ContractPosted { .. } => "contract_posted",
             GameEvent::ContractAccepted { .. } => "contract_accepted",
             GameEvent::ContractDelivered { .. } => "contract_delivered",
-            GameEvent::ContractLate { .. } => "contract_late",
-            GameEvent::ContractLost { .. } => "contract_lost",
+            GameEvent::ContractReviewed { .. } => "contract_reviewed",
+            GameEvent::ContractEnded { .. } => "contract_ended",
         }
     }
 
@@ -825,33 +826,40 @@ impl GameEvent {
                     )
                 }
             }
-            // 参与方三个：托运方（actor）、目的天体（target）、起运天体（third）——标题里
-            // 三者都要逐字出现（守卫 `headline_names_every_participant` 钉住这条）。
-            GameEvent::ContractPosted { shipper, resource, amount, from, to, share, .. } => format!(
-                "{shipper} 挂单：{from} → {to} 运 {resource} {} 件（承运人抽成 {:.0}%）",
-                num(*amount),
+            // 参与方两个：雇主（actor）、受雇方（target）——标题里两者都要逐字出现
+            // （守卫 `headline_names_every_participant` 钉住这条）。
+            GameEvent::ContractPosted { shipper, resource, capacity, from, to, share, .. } => format!(
+                "{shipper} 雇佣运力：{from} → {to} 运 {resource}，要求 {} 件/回合（抽成 {:.0}%）",
+                num(*capacity),
                 share * 100.0
             ),
-            // 参与方三个：承运方（actor）、被押上的舰（target）、托运方（third）——标题里
-            // 三者都要逐字出现（守卫 `headline_names_every_participant` 钉住这条）。
-            GameEvent::ContractAccepted { carrier, ship, shipper, resource, amount, from, to, .. } => {
+            GameEvent::ContractAccepted { carrier, shipper, resource, capacity, from, to, .. } => {
                 format!(
-                    "{carrier} 的 {ship} 接下 {shipper} 的承包单：{from} → {to} 运 {resource} {} 件",
-                    num(*amount)
+                    "{carrier} 接下 {shipper} 的雇佣单：{from} → {to} 运 {resource}，承诺 {} 件/回合",
+                    num(*capacity)
                 )
             }
             GameEvent::ContractDelivered { carrier, ship, shipper, resource, amount, cut, .. } => {
                 format!(
-                    "{carrier} 的 {ship} 向 {shipper} 交付承包货 {resource} {} 件（自留抽成 {}）",
+                    "{carrier} 的 {ship} 向 {shipper} 交付雇佣货 {resource} {} 件（自留抽成 {}）",
                     num(*amount),
                     num(*cut)
                 )
             }
-            GameEvent::ContractLate { carrier, ship, shipper, rounds_late, .. } => format!(
-                "{carrier} 的 {ship} 为 {shipper} 运的承包单超期 {rounds_late} 个回合"
+            GameEvent::ContractReviewed { shipper, carrier, ratio, good, delta, .. } => format!(
+                "{shipper} 考核 {carrier} 的雇佣运力：达标率 {:.0}%（{}，信誉 {:+.3}）",
+                ratio * 100.0,
+                if *good { "好评" } else { "差评" },
+                delta
             ),
-            GameEvent::ContractLost { carrier, ship, shipper, reason, .. } => {
-                format!("{carrier} 的 {ship} 丢了 {shipper} 的承包单（{reason}）")
+            GameEvent::ContractEnded { shipper, carrier, reason, .. } => {
+                let why = match reason.as_str() {
+                    "term" => "固定期到期，雇主不续约",
+                    "no_output" => "整个雇佣期没有产出",
+                    "recalled" => "受雇方自己缺船，提前结束",
+                    other => other,
+                };
+                format!("{shipper} 与 {carrier} 的雇佣结束（{why}）")
             }
         }
     }
@@ -895,19 +903,19 @@ impl GameEvent {
             | GameEvent::StaleOrder { .. }
             | GameEvent::CargoLoaded { .. }
             | GameEvent::CargoDelivered { .. } => 2,
-            // **市场记账**：挂一张承包单是日常经济动作（比装卸还低一档）——它本身不改变
+            // **市场记账**：挂一张雇佣单是日常经济动作（比装卸还低一档）——它本身不改变
             // 任何归属，只是一条「有人想买运力」的公开信息。给人看的排序里不该压过
             // 撤退/指令降级，更不该进故事板。
             GameEvent::ContractPosted { .. } => 1,
-            // 接单也是市场记账一档：它本身不改变任何归属（不像城市易主），只是「这张单
-            // 有人认领了」。真正的重头戏是交付/超期（M4c 的事件）。
+            // 接单也是市场记账一档：它本身不改变任何归属（不像城市易主），只是「这份运力
+            // 有人认领了」。
             GameEvent::ContractAccepted { .. } => 1,
-            // 超期是市场记账（承诺没兑现，但货还在路上）。
-            GameEvent::ContractLate { .. } => 1,
+            // 考核是市场记账：一条公开的行情（这个承运人这一期干得怎么样）。
+            GameEvent::ContractReviewed { .. } => 1,
             // 交付是**集货腿真正完成**的那一刻（与 `cargo_delivered` 同一档）。
             GameEvent::ContractDelivered { .. } => 2,
-            // 丢单：一艘舰沉了 + 一份承诺黄了——比交付更值得读。
-            GameEvent::ContractLost { .. } => 2,
+            // 雇佣结束：一份运力关系散了（会改变后续的市场格局），与交付同档。
+            GameEvent::ContractEnded { .. } => 2,
             // 逐发流水：按判据连读者都没有（只为 agent 分析而记录），也不该出现在故事板里。
             GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
         }

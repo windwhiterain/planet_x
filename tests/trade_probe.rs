@@ -708,13 +708,16 @@ fn probe_collection_backlog() {
     }
 }
 
-/// 10) **承包市场（M4）**：挂单、接单、交付、超期、丢单——整条腿的真实流量。
+/// 10) **雇佣运力市场**：挂单、受雇、派工、考核、续约/抽手——整条腿的真实流量。
 ///
-/// * **需求侧**：谁在挂、挂多少、单子多大；
-/// * **成交**：多少单被接走、**多少货真的被搬到了托运方首都**（`contract_delivered` 的
-///   `amount` 之和 = 承运人抽成之后的实收量）、承运人拿到了多少抽成；
-/// * **信誉**：期末各家的信誉（起点都是 1.0）——它是不是**动起来了**（涨的、跌的都有）；
-/// * **滞留**：期末在簿的单量与积压之比、还没人接的有多少。
+/// 雇佣形态下要看的量与「一票货」形态**完全不同**：
+///
+/// * **需求侧**：谁在挂、要求多少运力（单位/回合）、抬价抬到哪儿；
+/// * **成交与履约**：多少单被接下、**多少货真的被搬到了雇主首都**、受雇方拿到多少抽成；
+/// * **考核**（信誉的唯一来源）：好评/差评各多少、**达标率**的分布；
+/// * **关系的存续**：固定期到期换人（`term`）、无货可运收单（`no_cargo`）、受雇方缺船抽手
+///   （`recalled`）各多少——**市场是否在换手**是这一版的健康指标；
+/// * **派几条船**：用户说「对方派几艘船都无所谓」，所以要看到每张在期单子上实际有几条船。
 #[test]
 #[ignore]
 fn probe_contract_market() {
@@ -723,85 +726,136 @@ fn probe_contract_market() {
     for seed in seeds() {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
-        let mut posted: Vec<(String, f64, u32)> = Vec::new(); // (托运方, 件数, 挂单回合)
+        let (mut posted, mut posted_cap) = (0usize, 0.0);
         let mut accepted = 0usize;
-        let mut paid = 0.0; // 交给托运方的量（抽成后）
-        let mut cut = 0.0; // 承运人自留的量
-        let mut late = 0usize;
-        let mut lost = 0usize;
-        let mut trust: BTreeMap<String, f64> = BTreeMap::new(); // 承运人信誉变化
+        let (mut paid, mut cut, mut trips) = (0.0, 0.0, 0usize);
+        let (mut good, mut bad) = (0usize, 0usize);
+        let mut ratios: Vec<f64> = Vec::new();
+        // 达标率要连着**要求运力**一起看：一个「要求 0.01 件/回合」的单，随便搬点货就是
+        // 几百倍达标率——那不是干得好，是尺子坏了。
+        let mut pairs: Vec<(f64, u32, f64, u32, f64)> = Vec::new();
+        let mut ended: BTreeMap<String, usize> = BTreeMap::new();
+        let mut income: BTreeMap<String, f64> = BTreeMap::new(); // 受雇方的抽成收入（件）
+        let mut runs: BTreeMap<String, usize> = BTreeMap::new(); // 受雇方跑了几趟
         for _ in 0..n {
             sim::advance(&mut state, &config, &mut rng);
             for e in &state.events {
                 match e {
-                    GameEvent::ContractPosted { shipper, amount, .. } => {
-                        posted.push((shipper.clone(), *amount, state.round))
+                    GameEvent::ContractPosted { capacity, .. } => {
+                        posted += 1;
+                        posted_cap += capacity;
                     }
                     GameEvent::ContractAccepted { .. } => accepted += 1,
                     GameEvent::ContractDelivered { amount, cut: c, carrier, .. } => {
                         paid += amount;
                         cut += c;
-                        *trust.entry(carrier.clone()).or_insert(0.0) += 1.0;
+                        trips += 1;
+                        *income.entry(carrier.clone()).or_insert(0.0) += c;
+                        *runs.entry(carrier.clone()).or_insert(0) += 1;
                     }
-                    GameEvent::ContractLate { .. } => late += 1,
-                    GameEvent::ContractLost { .. } => lost += 1,
+                    GameEvent::ContractReviewed { ratio, good: g, contract, .. } => {
+                        if *g {
+                            good += 1;
+                        } else {
+                            bad += 1;
+                        }
+                        ratios.push(*ratio);
+                        if let Some(k) = state.contracts.get(*contract) {
+                            pairs.push((
+                                k.capacity,
+                                k.served_rounds,
+                                k.delivered,
+                                state.round.saturating_sub(k.accepted_round.unwrap_or(state.round)),
+                                *ratio,
+                            ));
+                        }
+                    }
+                    GameEvent::ContractEnded { reason, .. } => {
+                        *ended.entry(reason.clone()).or_insert(0) += 1;
+                    }
                     _ => {}
                 }
             }
         }
-        let open_from = |fid: &str| -> (usize, f64) {
-            let mut c = 0usize;
-            let mut units = 0.0;
-            for k in &state.contracts.contracts {
-                if k.shipper == fid && k.carrier.is_none() {
-                    c += 1;
-                    units += k.amount;
-                }
-            }
-            (c, units)
-        };
-        println!("== 承包市场 seed {seed}（{n} 回合，抽成 {:.0}%）==", config.freight.share * 100.0);
-        let (mut tot_posted, mut tot_units) = (0usize, 0.0);
+        let _ = trips;
+        println!(
+            "== 雇佣运力市场 seed {seed}（{n} 回合，开叫抽成 {:.0}%）==",
+            config.freight.share * 100.0
+        );
         for f in &state.factions {
             let name = f.name.as_str();
-            let mine: Vec<&(String, f64, u32)> = posted.iter().filter(|(s, _, _)| s == name).collect();
-            let (open_n, open_units) = open_from(name);
             let backlog: f64 = state
                 .depots
                 .iter()
                 .filter(|((fid, _), _)| fid == name)
                 .map(|(_, m)| m.values().sum::<f64>())
                 .sum();
-            if mine.is_empty() && backlog <= 0.0 && open_n == 0 {
+            let mine: Vec<&Contract> = state
+                .contracts
+                .contracts
+                .iter()
+                .filter(|c| c.shipper == name)
+                .collect();
+            let open = mine.iter().filter(|c| c.is_open()).count();
+            let hired = mine.iter().filter(|c| c.is_hired()).count();
+            let my_ships = state.ships.iter().filter(|s| s.faction_id == name && s.hull > 0.0).count();
+            let serving: usize = state
+                .contracts
+                .assignments
+                .iter()
+                .filter(|(s, _)| {
+                    state.ship(s.as_str()).map(|sh| sh.faction_id == name).unwrap_or(false)
+                })
+                .count();
+            let inc = income.get(name).copied().unwrap_or(0.0);
+            if backlog <= 0.0 && mine.is_empty() && inc <= 0.0 && my_ships == 0 {
                 continue;
             }
-            tot_posted += mine.len();
-            tot_units += mine.iter().map(|(_, a, _)| *a).sum::<f64>();
-            let mean = if mine.is_empty() {
-                0.0
-            } else {
-                mine.iter().map(|(_, a, _)| *a).sum::<f64>() / mine.len() as f64
-            };
-            let max = mine.iter().map(|(_, a, _)| *a).fold(0.0f64, f64::max);
-            let cover = if backlog > 0.0 { 100.0 * open_units / backlog } else { 0.0 };
-            let lapsed = mine.len() - open_n;
-            let delivered = trust.get(name).copied().unwrap_or(0.0);
             println!(
-                "    {name:<14} 挂单 {:<3} 张（均 {mean:>7.1} / 最大 {max:>7.1} 件）  \
-                 期末在簿 {open_n} 张 = {open_units:>8.1} 件 ÷ 积压 {backlog:>8.1} 件 = {cover:>5.1}%  \
-                 已收回 {lapsed}  承运交付 {delivered:>3.0} 趟  信誉 {:.2}",
-                mine.len(),
+                "    {name:<14} 积压 {backlog:>8.1} 件  舰 {my_ships:>2}（替人跑 {serving}）  \
+                 自己挂的单 {open} 张等人接 / {hired} 张在雇佣期  受雇收入 {inc:>7.1} 件（{} 趟）  信誉 {:.2}",
+                runs.get(name).copied().unwrap_or(0),
                 state.faction(name).unwrap().reputation
             );
         }
-        let reward: f64 = state.contracts.contracts.iter().map(|c| c.carrier_cut(c.amount)).sum();
-        // **价格发现**（用户裁决「价格做成动态平衡」）：没人接的单子会一路抬价，
-        // 所以这里要看到两件事——在簿单的抽成**已经抬上去了**，而成交单的实付抽成是多少。
+        let mean_ratio = if ratios.is_empty() {
+            0.0
+        } else {
+            ratios.iter().sum::<f64>() / ratios.len() as f64
+        };
+        let under = ratios.iter().filter(|r| **r < 1.0).count();
+        let paid_share = if paid + cut > 0.0 { cut / (paid + cut) } else { 0.0 };
+        println!(
+            "    —— 挂出 {posted} 张（要求运力合计 {posted_cap:.1} 件/回合）；成交 {accepted} 单；搬到位 {paid:.0} 件（{trips} 趟，受雇方自留 {cut:.0} 件 = 它的全部报酬，实付抽成 {:.1}%，开叫价 {:.0}%）",
+            paid_share * 100.0,
+            config.freight.share * 100.0
+        );
+        println!(
+            "    —— 考核 {} 次：好评 {good} / 差评 {bad}；平均达标率 {mean_ratio:.2}（未达标 {under}/{} 次 ⇒ 雇主的耐心在往哪边走）",
+            good + bad,
+            ratios.len()
+        );
+        let reason = |k: &str| ended.get(k).copied().unwrap_or(0);
+        println!(
+            "    —— 结束 {} 份关系：到期换人 {} / 无货收单 {} / 受雇方抽手 {}",
+            ended.values().sum::<usize>(),
+            reason("term"),
+            reason("no_cargo"),
+            reason("recalled")
+        );
+        // **派几条船**：一张单可以跑多条船，所以要看到在期单子的实际编制。
+        let staff: Vec<usize> = state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.is_hired())
+            .map(|c| state.contracts.ships_of(c.id).len())
+            .collect();
         let open_shares: Vec<f64> = state
             .contracts
             .contracts
             .iter()
-            .filter(|c| c.carrier.is_none())
+            .filter(|c| c.is_open())
             .map(|c| c.share)
             .collect();
         let (lo, hi) = (
@@ -813,23 +867,38 @@ fn probe_contract_market() {
         } else {
             open_shares.iter().sum::<f64>() / open_shares.len() as f64
         };
-        let paid_share = if paid + cut > 0.0 { cut / (paid + cut) } else { 0.0 };
         println!(
-            "    —— 挂出 {tot_posted} 张 / {tot_units:.0} 件；成交 {accepted} 单；\
-             **搬到位 {paid:.0} 件**（承运人自留 {cut:.0} 件 = 它的全部报酬，**实付抽成 {:.1}%**，\
-             开叫价 {:.0}%）；超期 {late} / 丢单 {lost}",
-            paid_share * 100.0,
-            config.freight.share * 100.0
-        );
-        println!(
-            "    —— 期末在簿 {} 张 / 待运 {:.0} 件（抽成已抬到 {:.1}%–{:.1}%，均 {:.1}%；\
-             上限 {:.0}%）；承运人若接完能拿 {reward:.0} 件",
+            "    —— 期末在簿 {} 张（等人接 {} 张，抽成已抬到 {:.1}%–{:.1}%，均 {:.1}%；上限 {:.0}%）；在期单子的编制 {:?}（每张几条船）",
             state.contracts.contracts.len(),
-            state.contracts.contracts.iter().map(|c| c.amount).sum::<f64>(),
+            state.contracts.contracts.iter().filter(|c| c.is_open()).count(),
             if open_shares.is_empty() { 0.0 } else { lo * 100.0 },
             hi * 100.0,
             mean_share * 100.0,
-            config.freight.share_max * 100.0
+            config.freight.share_max * 100.0,
+            staff
         );
+        // 达标率 × 要求运力：低要求运力的单会把平均达标率**假性**拉高（尺子坏了，
+        // 不是干得好），所以这一段必须逐条看。
+        let mut caps: Vec<f64> = pairs.iter().map(|(c, _, _, _, _)| *c).collect();
+        caps.sort_by(f64::total_cmp);
+        let med_cap = caps.get(caps.len() / 2).copied().unwrap_or(0.0);
+        let tiny = pairs.iter().filter(|(c, _, _, _, _)| *c < 0.2).count();
+        println!(
+            "    —— 考核时的要求运力：中位 {med_cap:.3} 件/回合、最小 {:.4}、最大 {:.2}；\
+             其中 {tiny}/{} 次的要求运力 < 0.2（这些单子的达标率没有意义）",
+            caps.first().copied().unwrap_or(0.0),
+            caps.last().copied().unwrap_or(0.0),
+            pairs.len()
+        );
+        // 尺子坏了要看清是哪一段坏的：把**要求运力 / 有货回合 / 雇佣期长度 / 交付量 / 达标率**
+        // 摆在一起。达标率 = 交付 ÷ (要求运力 × 有货回合)；若「有货回合 ≪ 雇佣期长度」，
+        // 这条公式就在奖励「搬积压」而不是奖励「提供运力」。
+        for (cap, served, delivered, elapsed, ratio) in pairs.iter().take(8) {
+            println!(
+                "        · 要求 {cap:>7.3}/回合 × 有货 {served:>3} 回合 ÷ 雇佣 {elapsed:>3} 回合 \
+                 ⇒ 应搬 {:>7.3}，实交 {delivered:>7.3} ⇒ 达标率 {ratio:>7.2}",
+                cap * *served as f64
+            );
+        }
     }
 }

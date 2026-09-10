@@ -306,24 +306,24 @@ mod tests {
                 into_pool: true,
             },
             GameEvent::ContractPosted {
-                contract: 0, shipper: "中国".into(), resource: "碳".into(), amount: 12.0,
+                contract: 0, shipper: "中国".into(), resource: "碳".into(), capacity: 3.0,
                 from: "金星".into(), to: "地球".into(), share: 0.15,
             },
             GameEvent::ContractAccepted {
-                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
-                resource: "碳".into(), amount: 12.0, from: "金星".into(), to: "地球".into(),
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(),
+                resource: "碳".into(), capacity: 3.0, from: "金星".into(), to: "地球".into(),
             },
             GameEvent::ContractDelivered {
                 contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
-                resource: "碳".into(), amount: 10.2, cut: 1.8, gain: 0.13,
+                resource: "碳".into(), amount: 10.2, cut: 1.8,
             },
-            GameEvent::ContractLate {
-                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
-                rounds_late: 2, penalty: 0.15,
+            GameEvent::ContractReviewed {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(),
+                ratio: 1.2, good: true, delta: 0.08,
             },
-            GameEvent::ContractLost {
-                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
-                reason: "ship_gone".into(), penalty: 0.35,
+            GameEvent::ContractEnded {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(),
+                reason: "term".into(),
             },
         ]
     }
@@ -352,8 +352,8 @@ mod tests {
             | GameEvent::ContractPosted { .. }
             | GameEvent::ContractAccepted { .. }
             | GameEvent::ContractDelivered { .. }
-            | GameEvent::ContractLate { .. }
-            | GameEvent::ContractLost { .. } => {}
+            | GameEvent::ContractReviewed { .. }
+            | GameEvent::ContractEnded { .. } => {}
         }
     }
 

@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 fn default_schema_version() -> u32 {
     0
 }
@@ -585,9 +585,26 @@ enum StyleAxis {
 /// （哪艘舰在执行哪张单）。两者都是 `#[serde(default)]` 的新语义，而 v10 档里的单子
 /// **一个承运人都没有**（那时还只有挂单侧），所以「门槛按 0 起步、没有任何执行关系」
 /// 正是它的真实状态：**零信息损失**。
+///
+/// v11 → v12（运输分支）：**单子从「一票货」改写成「一份运力雇佣」**（用户裁决）。
+/// [`Contract`] 的字段换了一茬：`amount`/`delivered`/`outstanding`/`deadline`/`late_penalized`
+/// 被 `capacity`（单位/回合）/`accepted_round`/`expires_round`/`review_round`/`served_rounds`
+/// 取代，事件也从 `contract_late`/`contract_lost` 换成 `contract_reviewed`/`contract_ended`。
+///
+/// 这一档**只清空挂单簿**（`.ron` 的显式 `null`/缺字段会让旧单子反序列化失败，而旧形态
+/// 的单子在新语义下没有任何意义：它写的是「搬 47 件铁」，新语义问的是「每月几件运力」，
+/// 两者之间没有等价的折算——硬凑一个只会让第一期的考核凭空判人不达标）。
+/// **零信息损失**：挂单簿是**瞬时状态**（谁此刻想雇人），worldgen 每回合都会重新挂
+/// ——旧档里那些没被接走的单子本来就没人接，清了它们不影响任何势力的实际处境；
+/// 而**已经发生过的**成交都留在事件流里，不会因为清簿而消失。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => {
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        11 => {
+            state.contracts = Default::default();
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

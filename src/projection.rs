@@ -475,8 +475,9 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
 
-    // 承包挂单簿（**只留未完成的单子**：等人接的 + 正在履行的）。`carrier` 为 null
-    // 表示还在挂单簿上等人接。完成的单子不在这张表里——「成交了」只留在 `events`。
+    // 雇佣挂单簿（**只留没结束的合同**：等人接的 + 还在雇佣期内的）。`carrier` 为 null
+    // 表示还在挂单簿上等人接；`ships` 是**此刻在替这张单跑的舰**（可以是零条、也可以多条
+    // ——用户：「对方派几艘船都无所谓」）。结束的合同不在这张表里，去 `events` 里查。
     for c in &state.contracts.contracts {
         writeln!(
             w.contracts,
@@ -487,23 +488,26 @@ fn write_round(
                 "shipper": c.shipper,
                 "carrier": c.carrier,
                 "resource": c.resource,
-                "amount": r2(c.amount),
+                // 要求的运力（单位/回合）——不是「要搬多少件」（雇佣形态）。
+                "capacity": r2(c.capacity),
                 "delivered": r2(c.delivered),
-                "outstanding": r2(c.outstanding()),
+                // 考核的分母：本期「起运货栈有货」的回合数。
+                "served_rounds": c.served_rounds,
+                // 扣除在途宽免之后的**产出期**（考核真正用的分母）。
+                "output_rounds": r2(c.output_rounds(config)),
+                // 实测吞吐达标率（1.0 = 一个考核周期搬回一舱货 = 一条参考船的水准）；
+                // null = **还不到看账的时候**（账上的产出还不满一个货舱）。
+                "ratio": c.throughput_ratio(config).map(r2),
                 "from": c.from,
                 "to": c.to,
                 "share": r2(c.share),
                 "min_reputation": r2(c.min_reputation),
-                // 执行这张单的那艘舰（`assignments` 的反查；null = 还没人接）。
-                "ship": state
-                    .contracts
-                    .assignments
-                    .iter()
-                    .find(|(_, id)| **id == c.id)
-                    .map(|(s, _)| s.clone()),
+                // 此刻在跑这张单的舰（`assignments` 的反查；空数组 = 还没派人）。
+                "ships": state.contracts.ships_of(c.id),
                 "posted_round": c.posted_round,
-                "deadline": c.deadline,
-                "late": state.round > c.deadline,
+                "accepted_round": c.accepted_round,
+                "expires_round": c.expires_round,
+                "review_round": c.review_round,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -739,25 +743,26 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
                 "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
-                    "reputation": "**信誉**（势力级，承包市场的准入资产）：承运人**不赔货值**，砸单只掉它，而托运方按它决定敢不敢把货交给你——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵单/难单。中性值 1.0（没有任何承包履历）。公开值，不随回合自然衰减（涨跌都来自明确行为：按时交付/超期/丢货）。",
+                    "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
                 },
             }),
             "contracts" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "**承包挂单簿**：一行一单，只含**未完成**的单子（等人接的 + 正在履行的）。完成的单子不在这里——“成交了/怎么结束的”去 `events` 里按类型查（`contract_posted` 及后续类型）。按 (round, contract_id) 索引。",
-                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","amount":"number","delivered":"number","outstanding":"number","from":"string","to":"string","share":"number","min_reputation":"number","ship":"string","posted_round":"integer","deadline":"integer","late":"boolean"},
+                "description": "**雇佣运力挂单簿**：一行一单，只含**没结束**的合同（等人接的 + 还在雇佣期内的）。结束的合同不在这里——“怎么结束的”去 `events` 里按 `contract_ended` 查。按 (round, contract_id) 索引。单子要求的是**运力**（单位/回合），不是一票货：受雇方自己决定派几条船来跑（`ships` 可以为空、也可以多条）。",
+                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","capacity":"number","delivered":"number","served_rounds":"integer","ratio":"number","from":"string","to":"string","share":"number","min_reputation":"number","ships":"array","posted_round":"integer","accepted_round":"integer","expires_round":"integer","review_round":"integer"},
                 "column_docs": {
-                    "shipper": "托运方（挂单的人）。",
-                    "carrier": "承运方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
-                    "ship": "**执行这张单的舰名**（null = 还没人接）。接单时押上的那艘舰，它跑的是**托运方**的路线——起运在托运方货栈、目的在托运方首都，与承运人自己的集货路线**方向不同**。",
-                    "min_reputation": "托运方定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((承运人信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是托运方唯一的自我保护（承运人不赔货值，押在陌生人手里的是它全部货值）。",
-                    "amount": "挂单总量（单位）。",
-                    "delivered": "**已交付给托运方**的量——不含承运人自留的抽成（见 `share`）。",
-                    "outstanding": "还差多少没送到 = `amount - delivered`。",
-                    "from/to": "起运天体（托运方的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是托运方首都）。",
-                    "share": "承运人**抽成**比例：交付时从货里自留，其余进托运方首都池。没有货币转移——报酬就是它没交出去的那部分货。",
-                    "posted_round/deadline": "挂单回合与截止回合。挂单时按**参考巡航速度**估出的宽裕时限定死（同一张单的时限不随接单者而变）。",
-                    "late": "此刻是否已过截止期。**超期不作废**（只扣一次信誉，货照运、抽成照拿）——所以 `late=true` 的单子仍在履行中。",
+                    "shipper": "雇主（挂单的人）。",
+                    "carrier": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
+                    "ships": "**此刻在替这张单跑的舰名数组**（空数组 = 还没派人，或多条船组队）。派几条船、派哪条，是**受雇方的内部事务**（用户：「对方派几艘船都无所谓」）——它跑的是**雇主**的路线：起运在雇主货栈、目的在雇主首都，与受雇方自己的集货路线**方向不同**。",
+                    "min_reputation": "雇主定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((受雇方信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是雇主唯一的自我保护（受雇方不赔货值）。**到期续约用的是同一个闸**。",
+                    "capacity": "**要求的运力**（单位/回合）= 一条参考船在这条线上的吞吐（`nominal_hold ÷ 参考往返回合数`）。未接单时每回合被改成此刻的缺口（雇主自己搬不动的部分），接单后**冻结**成承诺。",
+                    "delivered": "本雇佣期内**已从雇主货栈搬走**的量（含受雇方自留的抽成——抽成是搬运费，不该从运力里扣）。",
+                    "served_rounds": "考核的**分母**：本期「起运货栈有货」的回合数。没货可运的回合不算在受雇方头上。",
+                    "ratio": "**实测吞吐达标率** = `delivered ÷ (capacity × served_rounds)`：1.0 = 恰好是一条参考船的水准（一个考核期搬回一舱货）。null = 本期还没有有货可运的回合 ⇒ 无从考核（不是考零分）。雇主按它掷骰子给好评/差评。",
+                    "from/to": "起运天体（雇主的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是雇主首都）。",
+                    "share": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
+                    "posted_round": "**本轮叫价的起点**：一个考核周期没人接就抬一档抽成并把这一列挪到当时回合（免得一挂出来就连续加价）。",
+                    "accepted_round/expires_round/review_round": "雇佣起算回合 / 固定期到期回合 / 下次考核回合。期限与考核周期都从**航程**算（一个考核周期 = 这条线的一个往返），所以不同航线的刻度差一个数量级。",
                 },
             }),
             "events" => json!({
@@ -974,18 +979,25 @@ mod tests {
         assert!(s.0.join("idx/events.jsonl").exists());
         assert!(s.0.join("idx/bodies.jsonl").exists());
         assert!(s.0.join("idx/settlements.jsonl").exists());
-        // 承包挂单簿：表必须存在，且列面与 schema 声明一致（挂单号/托运方/承运方/截止期）。
-        assert!(s.0.join("idx/contracts.jsonl").exists(), "缺 idx/contracts.jsonl（承包挂单簿）");
+        // 雇佣挂单簿：表必须存在，且列面与 schema 声明一致（挂单号/雇主/受雇方/要求运力/期限）。
+        assert!(s.0.join("idx/contracts.jsonl").exists(), "缺 idx/contracts.jsonl（雇佣挂单簿）");
         let contract_rows = jsonl(&s.0.join("idx/contracts.jsonl"));
         assert!(
             !contract_rows.is_empty(),
             "6 回合内该有挂单（离岸产出落进货栈、自己运不动就挂出去）——空表会让下面的列面守卫空转"
         );
         for row in contract_rows {
-            for col in ["contract_id", "shipper", "carrier", "amount", "deadline"] {
+            for col in ["contract_id", "shipper", "carrier", "capacity", "expires_round"] {
                 assert!(row.get(col).is_some(), "contracts 表缺列 {col}: {row}");
             }
-            assert!(row.get("outstanding").is_some(), "contracts 表要有 outstanding（还差多少没送到）");
+            assert!(
+                row.get("ships").map(|v| v.is_array()).unwrap_or(false),
+                "contracts 表的 ships 必须是**数组**（一张单可以跑几条船）: {row}"
+            );
+            assert!(
+                row.get("served_rounds").is_some() && row.get("ratio").is_some(),
+                "contracts 表要有考核的分母与达标率（served_rounds / ratio）: {row}"
+            );
         }
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
         assert!(!ships.is_empty());
