@@ -3,7 +3,7 @@
 > 给 **LLM agent** 的实操手册：如何读这个世界、如何下指令、如何观察到后果并调整。
 >
 > **分析层 = `planet_x --index` 投影 + `play/planet_xq`（uv / pandas）。jq 已移除，本指南一律
-> 用 `planet_xq` 读数。** 逐回合全量 JSON（`--round`/`--traj`）仍在，但那用于外部任意的
+> 用 `planet_xq` 读数。** 逐回合全量 JSON（`--round`）仍在，但那用于外部任意的
 > 时间轴查询 / 存档封包；agent 日常读世界用 `--index` 的 lean 投影。
 
 ---
@@ -117,7 +117,7 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
   "body_ids": ["地球", ...], "settlement_ids": ["长三角", ...] }
 ```
 
-> `view` = 这一回合的**一份视图**（与 `--derived` 的 `post`、`--traj` 的 `Trajectory.view` 同构）：
+> `view` = 这一回合的**一份视图**（与 `--derived` 的 `post`、`--schema` 里 `Trajectory.view` 同构）：
 > 世界总量/政治/市场（观测）+ **每势力一行、每城一行**——一行里**同时**装着一个势力的观测
 > （城数/舰数/人口/库存价值/是否交战）与**本回合的过程量**（产出/维护费/治理/贸易）。过程量在
 > 回合开始的那份视图（`pre`）里是 0/空：那不是「没有」，是「还没算」。
@@ -213,15 +213,20 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 
 > 先 `--digest K --round N` 看整段走势的故事板，再对感兴趣窗口 `--index` 精读，别一把梭全量。
 
-> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --round 0 --notables 40` 读「这局最近在打什么」
+> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --round 0 --index out/` 读「这局最近在打什么」
 > ——窗口层（`State::notables`）里是**后续计算要回看的那一段历史**（当前 = 开战/停战，供「记恨
-> 地板」判定）。它随 checkpoint 存活，不需要当初的 `--index` 目录。
+> 地板」判定），在投影里是 `q.notables()`（按 `salience` 列筛出来的 `war_started`/`war_ended`）。
+> 它随 checkpoint 存活，不需要当初的 `--index` 目录。
 >
-> ⚠ **不要**用 `--milestones` 当「这局发生过什么」——**按当前判据那一层是空的**（`count: 0`）。
+> ⚠ **不要**把「里程碑层」当「这局发生过什么」——**按当前判据那一层是空的**（`q.milestones()` 返回空表）。
 > 判据是「后续计算需要访问哪一段历史」，不是「重要性」：没有任何模拟逻辑读无限过去，所以没有
 > 事件属于它。要读「一座城的一生 / 谁打沉的谁」，用 **`--index` 投影**：
 > `q.history("city", 城名)` / `q.cause("ship", 舰名)` / `q.storyboard(window)`（按 `weight`
 > 压成故事板）。**「重要 ≠ 分层」**——想挑值得读的事件看 `weight` 列，别看 `salience`。
+>
+> ⚠ 2026-10 CLI 精简：`--traj` / `--story` / `--notables` / `--milestones` 四个 dump 开关**已删**
+> ——它们的信息全在 `--index` 投影里（编年史在每行的 `chronicle`、两层历史按 `salience` 筛）。
+> 新增 `--quiet`（只要最终 state 时用）。见 [笔记：CLI 读面](notes/cli-surface.md)。
 
 ---
 
@@ -463,7 +468,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 决策  写 diff.json（见 §4）
 应用  planet_x --seed 7 --apply diff.json --round 30 --save ckpt30.ron 2>apply.jsonl
 回执  看 apply.jsonl：WARN_APPLY_SKIPPED = 有叶片没落地（见 §4.5）。别跳过这一步
-再看  planet_x --start ckpt30.ron --round 0 --notables 40  （这局最近在打什么，一句话一条）
+再看  planet_x --start ckpt30.ron --round 0 --index out3/  （q.notables()：这局最近在打什么）
 续玩  planet_x --start ckpt30.ron --round 30 --index out2/   （续玩 + 精读）
 ```
 
@@ -531,21 +536,22 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--seed <S>` | 确定性种子（数字），默认 `random` |
 | `--start <ckpt.ron>` | 从 checkpoint（State+RNG）续玩 |
 | `--round <N>` | 输出 N+1 行全量状态 JSON（回合 0 先） |
-| `--traj <N>` | 一个自包含 `{schema_version,meta,story,trajectory:[...]}` |
+| `--quiet` | 与 `--round` 连用：**只推进、不吐轨迹**（1000 回合省掉 40 MB stdout）。要留东西配 `--save`/`--index`/`--digest` |
 | `--apply <diff.json>` | 叠加控制 diff 后继续 |
 | `--save <ckpt.ron>` | 结束后写 checkpoint |
 | `--meta` | 游戏规则字典（resources/buildings/ships/economy/combat…） |
 | `--schema` | 状态视图的 JSON Schema |
-| `--story` | 剧情编年史（叙事弧） |
-| `--notables [<N>]` | **窗口层**：后续计算要回看的那一段历史（当前 = 开战/停战），带窗口宽度；`N` = 只出最近 N 条。**续玩前先读它** |
-| `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
 | `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema，**外加控制叶的结构事实**（`leaves` / `actions` / `owner_field` / `remove_field`）：每片叶的键名、**身份键**（`keys` 空 = 势力级单叶）、**值字段**、随行属性 `carries`、只读派生列 `read_only`。这一份是 web 与 kit 共用的唯一声明（`src/control/leaves.rs`，纪律见 `play/tests/g4_spec.py`） |
 | `--derived` | 这一回合的**视图对** `{round, source, pre, post}`（两个槽都是 `RoundView` 且同形：`pre` = 回合开始时的世界、`post` = 回合结束时的世界 + 本回合过程量；`post.decisions` = **本回合 AI 的判定**）；与 `--index` 的过程量表同值 |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |
-| `--every <K>` | 每 K 回合一个全量快照（降采样） |
+| `--every <K>` | 每 K 回合一个全量快照（降采样）。**只管 stdout 轨迹，不动 `--index` 投影** |
 | `--digest <K>` | 每 K 回合一行语义故事板（世界/各势力/战争/事件计数/剧情节拍） |
-| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（faction_process/city_process/control/scope/decisions/blueprints）+ schema.json（planet_xq 读） |
+| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（faction_process/city_process/control/scope/decisions/blueprints/market_trades/haul_steps/round_inputs）+ schema.json（planet_xq 读）。**编年史与两层历史都在这里**（`chronicle` 列 / `events` 的 `salience` 列） |
+
+> 2026-10 起 CLI 精简过一轮：`--traj` / `--story` / `--notables` / `--milestones`（以及
+> `--rounds` 这个别名）**已删**——它们给的东西投影里都有；**裸调用 `planet_x` 现在打 help**
+> 而不是回一条 `ERR_USAGE`。见 [笔记：CLI 读面](notes/cli-surface.md)。
 
 > 注意：**没有交互式 REPL**、没有 `--query`。这正是设计：stdout 零噪声、确定性、可复现；
 > 分析在外部（planet_xq / pandas）做，控制走 `--apply` diff。
@@ -557,7 +563,8 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 ## 8. 坑与边界
 
 - **jq 已移除**：分析用 `--index` + `planet_xq`；不要假定 `jq` 在 PATH。
-- **`--round`/`--traj` 是全量快照**（几千回合会撑爆上下文）；省 token 用 `--index` + `--digest`。
+- **`--round` 是全量快照**（几千回合会撑爆上下文）；省 token 用 `--index` + `--digest`，
+  连轨迹都不要就用 `--quiet`。
 - **别把 `--apply` 的 stderr 丢掉**：`WARN_APPLY_SKIPPED` 是唯一能告诉你「这条命令没有落地」
   的信号（见 §4.5）。stdout 永远只是状态流，成功时不打印任何回执。
 - **有名字的实体用名字**（舰/城/势力/天体/定居点 = 唯一名）；`--index` 的 lazy 表、`--apply`

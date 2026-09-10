@@ -69,7 +69,7 @@
 //! The tool is purely a generator; the `planet_x_web` binary is the separate,
 //! player-facing interactive UI (and is unaffected by these query changes).
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use planet_x::agent;
 use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{
@@ -116,13 +116,15 @@ Inherit（继承上层，缺省）| Auto（系统自动决策）| Player（玩�
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
 - `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
 - `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
-- `planet_x --start s240.ron --notables 40`         # 续玩前先读「这局最近在打什么」（窗口层）\n\
-- `planet_x --traj 240`                            # 一键拿故事封包（含 `.story` 编年史）\n\
+- `planet_x --start s240.ron --round 0 --index out/` # 续玩前先读「这局最近在打什么」\n\
+  （`q.notables()` / `q.history()`；窗口层与里程碑层都在投影里，按 `salience` 列筛）\n\
+- `planet_x --seed 42 --round 1000 --quiet --save end.ron`        # 只要最终 state，不要逐回合轨迹\n\
 - 先 `--schema` 查视图字段、`--control-schema` 查 --apply 能写啥、`--meta` 查规则；分析用\n\
   `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
---round N 输出 N+1 行 JSON（回合 0 + N 回合）；--traj N 输出一个自包含 story pack；\n\
---meta/--schema/--control-schema/--story/--notables [N]/--milestones [N]/--control/--control-plan [<faction>] 各自输出一个 JSON 值。分析用 --index + play/planet_xq。"
+--round N 输出 N+1 行 JSON（回合 0 + N 回合；`--every K` 采样、`--quiet` 一行都不出）；\n\
+--meta/--schema/--control-schema/--control/--control-plan [<faction>]/--derived 各自输出一个 JSON 值。\n\
+分析用 --index + play/planet_xq（历史/编年史也在投影里，不必额外 dump 开关）。"
 )]
 struct Cli {
     /// 确定性随机种子（数字，或 random / 随机）
@@ -134,19 +136,21 @@ struct Cli {
     start: Option<PathBuf>,
 
     /// 运行 n 个回合并把每个回合输出为一行 JSON（回合 0 先），供外部分析（--index/--digest）
-    #[arg(long = "round", visible_alias = "rounds", value_name = "N")]
+    #[arg(long = "round", value_name = "N")]
     round: Option<u32>,
 
-    /// 运行 n 个回合，输出一个自包含 JSON 文档 {schema_version, meta, story, trajectory:[...]}
-    #[arg(long, value_name = "N")]
-    traj: Option<u32>,
+    /// **静默推进**：与 --round 连用时不输出逐回合的完整状态（1000 回合 ≈ 40 MB 的那一份），
+    /// 只推进世界。要留东西就配 `--save`（最终 state，0.09 MB）/`--digest K`（故事板）/
+    /// `--index DIR`（投影，不受本开关影响）。
+    #[arg(long)]
+    quiet: bool,
 
     /// 把一份可控状态 diff（JSON，形同 web 的 POST /api/command：{control,scope}）
-    /// 按键 overlay 到状态上，再执行 --round/--traj。用于 agent 定向故事。
+    /// 按键 overlay 到状态上，再执行 --round。用于 agent 定向故事。
     #[arg(long, value_name = "FILE")]
     apply: Option<PathBuf>,
 
-    /// （--round/--traj 结束后）把当前状态连同 PRNG 位置写入一个 RON checkpoint，
+    /// （--round 结束后）把当前状态连同 PRNG 位置写入一个 RON checkpoint，
     /// 以便下次用 --start 确定性续玩（分段讲故事）。
     #[arg(long, value_name = "FILE")]
     save: Option<PathBuf>,
@@ -159,26 +163,6 @@ struct Cli {
     /// 输出 agent 视图的机器可读 JSON Schema（由渲染同一批结构体派生），供 agent 查字段。
     #[arg(long)]
     schema: bool,
-
-    /// 输出剧情编年史（叙事弧：round/id/title/body/participants）为 JSON 数组。
-    #[arg(long)]
-    story: bool,
-
-    /// 输出**窗口层**（`State::notables`）：后续计算需要回看的最近
-    /// `history.notable_window` 回合的事件（当前 = 开战/停战），带一句话标题。
-    /// 与 `--milestones` 的区别只有保留期：本层会过期，过期是设计而不是丢失。
-    /// 可选参数 N = 只出最近 N 条（缺省 = 全部）。
-    #[arg(long, num_args = 0..=1, value_name = "N")]
-    notables: Option<Option<u32>>,
-
-    /// 输出**长存里程碑层**（`State::milestones`）：后续计算需要访问**无限过去**的事件。
-    ///
-    /// **按当前判据这一层是空的**——没有任何生产逻辑读无限过去（见 `GameEvent::salience` 的
-    /// 读者盘点），所以这里通常返回 `count: 0`。它不是坏了，是判据的正确结果；agent 要查
-    /// 「这座城市怎么变成今天这样」应当走 `--index` 投影 + `play/planet_xq`（`q.history()`）。
-    /// 可选参数 N = 只出最近 N 条（缺省 = 全部）。
-    #[arg(long, num_args = 0..=1, value_name = "N")]
-    milestones: Option<Option<u32>>,
 
     /// 输出可编辑控制面（control + scope）JSON——agent 写 --apply diff 的模板。
     #[arg(long)]
@@ -198,8 +182,10 @@ struct Cli {
     #[arg(long, num_args = 0..=1, value_name = "FACTION")]
     control_plan: Option<Option<String>>,
 
-    /// 降采样步长：与 --round/--traj 连用，每 K 回合取一个快照（1 = 每回合）。用于把
-    /// 超长轨迹变成可读的粗粒度采样，避免几千行全量 JSON 撑爆上下文。
+    /// 降采样步长：与 --round 连用，每 K 回合取一个快照（1 = 每回合）。用于把超长轨迹
+    /// 变成可读的粗粒度采样，避免几千行全量 JSON 撑爆上下文。
+    /// ⚠ 它只管 **stdout 的轨迹**：`--index` 投影**不受它影响**（实测 `--every 10` 与全量
+    /// 都是 169 MB / 8.6 s）——投影要的是逐回合数据，没有可降的采样。
     #[arg(long, value_name = "K", default_value_t = 1)]
     every: u32,
 
@@ -232,6 +218,14 @@ struct Cli {
 }
 
 fn main() {
+    // **裸调用**（一个参数都没有）= 想知道这东西能干什么 ⇒ 打 help 并正常退出。
+    // 给了参数但没说要干什么（例如只有 `--seed 42`）仍然走下面那条机器可读的 ERR_USAGE
+    // ——那条是 agent 的合同，不要用 help 把它盖掉。
+    if std::env::args_os().len() == 1 {
+        let _ = Cli::command().print_help();
+        println!();
+        return;
+    }
     let cli = Cli::parse();
 
     // Agent-first output: always zero-noise. Redirected output keeps the single
@@ -367,18 +361,6 @@ fn main() {
         emit(&v.to_string());
         return;
     }
-    if cli.story {
-        emit(&agent::story_value(&state).to_string());
-        return;
-    }
-    if let Some(tail) = cli.notables {
-        emit(&notables_value(&state, config.history.notable_window, tail).to_string());
-        return;
-    }
-    if let Some(tail) = cli.milestones {
-        emit(&milestone_value(&state, tail).to_string());
-        return;
-    }
     if cli.control {
         emit(&control::control_surface(&state, &config).to_string());
         return;
@@ -447,17 +429,6 @@ fn main() {
     }
 
     // Trajectory runs.
-    if let Some(n) = cli.traj {
-        run_trajectory(
-            &mut state,
-            &config,
-            &mut rng,
-            n,
-            cli.every,
-            cli.save.as_deref(),
-        );
-        return;
-    }
     if let Some(n) = cli.round {
         run_rounds(
             &mut state,
@@ -466,6 +437,7 @@ fn main() {
             n,
             cli.every,
             cli.digest,
+            cli.quiet,
             cli.save.as_deref(),
         );
         return;
@@ -473,7 +445,7 @@ fn main() {
 
     eprintln!(
         "{}",
-        json!({"ok": false, "code": "ERR_USAGE", "message": "nothing to do: specify --round N, --traj N, or a dump flag (--meta/--schema/--control-schema/--story/--control/--control-plan [<faction>])"})
+        json!({"ok": false, "code": "ERR_USAGE", "message": "nothing to do: specify --round N, or a dump flag (--meta/--schema/--control-schema/--control/--control-plan [<faction>]/--derived). 裸调用（不带任何参数）会打 help。"})
     );
     std::process::exit(10);
 }
@@ -503,9 +475,10 @@ fn emit(s: &str) {
 
 /// Run `n` rounds. Depending on `digest`, either emit one semantic digest line per
 /// `digest`-round window (a coarse "storyboard"), or emit one agent-view JSON object
-/// per round sampled at `every` (downsampling: rounds 0, K, 2K, …). Each line is
-/// JSON Lines queryable by external `jq`. Optionally persist a deterministic
-/// checkpoint (state + RNG position).
+/// per round sampled at `every` (downsampling: rounds 0, K, 2K, …) — unless `quiet`,
+/// in which case the world advances and **nothing** is printed (the point: 1000 回合
+/// 的全量轨迹 ≈ 40 MB，而我只要最终 state / 一层摘要)。Each line is JSON Lines
+/// queryable by external `jq`. Optionally persist a deterministic checkpoint (state + RNG).
 fn run_rounds(
     state: &mut State,
     config: &GameConfig,
@@ -513,6 +486,7 @@ fn run_rounds(
     n: u32,
     every: u32,
     digest: Option<u32>,
+    quiet: bool,
     save: Option<&Path>,
 ) {
     if let Some(window) = digest {
@@ -520,16 +494,18 @@ fn run_rounds(
         return;
     }
     let every = every.max(1);
-    emit(&agent::render_state(
-        state,
-        &sim::view_from_state(state, config),
-    )); // round 0 / start
+    if !quiet {
+        emit(&agent::render_state(
+            state,
+            &sim::view_from_state(state, config),
+        )); // round 0 / start
+    }
     let mut last_pre = RoundInputs::default();
     let mut last_post = sim::view_from_state(state, config);
     for _ in 0..n {
         // `pre` = 本回合**消费掉**的输入（掷出的随机数）；`post` = 本回合**结算出来**的观测。
         last_post = sim::advance_round(state, config, rng, &mut last_pre);
-        if state.round % every == 0 {
+        if !quiet && state.round % every == 0 {
             emit(&agent::render_state(state, &last_post));
         }
     }
@@ -543,103 +519,6 @@ fn run_rounds(
         },
         rng,
     );
-}
-
-/// Run `n` rounds and emit ONE self-contained JSON document:
-/// `{schema_version, meta, story, trajectory:[...round snapshots...]}` — a packaged
-/// "story pack" with the timeline, the narrative arc and the rules in a single value.
-/// `every > 1` downsamples the `trajectory` array (round 0 then every K-th).
-fn run_trajectory(
-    state: &mut State,
-    config: &GameConfig,
-    rng: &mut Prng,
-    n: u32,
-    every: u32,
-    save: Option<&Path>,
-) {
-    let every = every.max(1);
-    let mut snaps = vec![agent::state_json(
-        state,
-        &sim::view_from_state(state, config),
-    )];
-    let mut last_pre = RoundInputs::default();
-    let mut last_post = sim::view_from_state(state, config);
-    for _ in 0..n {
-        last_post = sim::advance_round(state, config, rng, &mut last_pre);
-        if state.round % every == 0 {
-            snaps.push(agent::state_json(state, &last_post));
-        }
-    }
-    let pack = json!({
-        "schema_version": SCHEMA_VERSION,
-        "meta": agent::meta_value(config),
-        "story": agent::story_value(state),
-        "trajectory": snaps,
-    });
-    emit(&pack.to_string());
-    save_if_requested(
-        save,
-        &RoundState {
-            schema_version: SCHEMA_VERSION,
-            state: state.clone(),
-            pre: last_pre,
-            post: last_post,
-        },
-        rng,
-    );
-}
-
-/// 窗口层（[`State::notables`]）的可读视图：每条 = `{round, headline, event}`。
-///
-/// `tail = Some(n)` 只出最近 `n` 条。与 [`milestone_value`] 的关键区别：**这里没有
-/// `dropped`** ——窗口过期是预期行为而不是损失，所以本层不报「丢了多少」，只报**窗口有多宽**
-/// （`window`）以及当前装着几条。读的人据此知道「这不是全部历史，而是该被计算看到的那一段」。
-fn notables_value(state: &State, window: usize, tail: Option<u32>) -> serde_json::Value {
-    let all = &state.notables.entries;
-    let start = match tail {
-        Some(n) => all.len().saturating_sub(n as usize),
-        None => 0,
-    };
-    let events: Vec<serde_json::Value> = all[start..]
-        .iter()
-        .map(|e| json!({"round": e.round, "headline": e.event.headline(), "event": e.event}))
-        .collect();
-    json!({
-        "round": state.round,
-        "count": all.len(),
-        "returned": events.len(),
-        "window": window,
-        "window_rounds": [state.round.saturating_sub(window.saturating_sub(1) as u32), state.round],
-        "events": events,
-    })
-}
-
-/// 长存里程碑层（[`State::milestones`]）的可读视图：每条 = `{round, headline, event}`。
-///
-/// `tail = Some(n)` 只出最近 `n` 条。`complete/dropped/dropped_through_round` 直接来自本层
-/// 自身——**截断过的历史会明说自己不完整**，读的人不会把它误当成全部。
-///
-/// 注意本层按当前判据**通常为空**（见 [`State::milestones`] 的文档）：先看 `count` 再决定
-/// 要不要用，别把「空」误读成「这一局什么都没发生」。
-fn milestone_value(state: &State, tail: Option<u32>) -> serde_json::Value {
-    let all = &state.milestones.entries;
-    let start = match tail {
-        Some(n) => all.len().saturating_sub(n as usize),
-        None => 0,
-    };
-    let events: Vec<serde_json::Value> = all[start..]
-        .iter()
-        .map(|e| json!({"round": e.round, "headline": e.event.headline(), "event": e.event}))
-        .collect();
-    json!({
-        "round": state.round,
-        "count": all.len(),
-        "returned": events.len(),
-        "complete": state.milestones.is_complete(),
-        "dropped": state.milestones.dropped,
-        "dropped_through_round": state.milestones.dropped_through_round,
-        "events": events,
-    })
 }
 
 fn save_if_requested(save: Option<&Path>, round_state: &RoundState, rng: &Prng) {
