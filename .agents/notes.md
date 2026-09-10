@@ -40,7 +40,8 @@
 > 去重/回收）——**§3.2 那条"风格轴没有执行者"的空头承诺还清**；见 `control-live-layers.md` §16–§18。
 > 剩下的：`military-combat.md` 的 refit（把新图套到老舰上）＋
 > `eras-technology.md` 的时代门控（图库容器已就绪）——**都还等用户裁决**。
-> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` 比较。
+> 每步都要过：`cargo nextest run -P full` 全绿（= 全档，含长局）+ 同 seed `--digest` 比较。
+> （内循环用 `cargo nextest run`，快档 ~4 s；见 [`notes/test-tiers.md`](notes/test-tiers.md)）
 > ⚠ **基线已换代（2026-10）**：`293725C4…DBC4` 是 v10（设计图）时代的基线，已作废——
 > 三个合并一起把它换掉了：另一个会话的 `feature/freight-contract`（`05fe04f`，雇佣运力市场，
 > `SCHEMA_VERSION` 10 → **13**）＋ 本会话的「读面/写面两侧对齐」`feature/read-face-parity`
@@ -153,11 +154,27 @@
 
 ---
 
+## 工程 · 布局 · 测试
+
+| 状态 | 条目 | 一句话 | 剩余 |
+| --- | --- | --- | --- |
+| `[x]` | [代码布局：大文件拆小 + 单测搬出源码](notes/code-layout.md) | `sim.rs` 6341 → 170 行 `mod.rs` + 17 个子模块、`control.rs` 3863 → 85 + 8 个；18 个源文件的内联单测全搬到 `src/tests/`（`#[path]` 引入 ⇒ **零可见性放宽**）；纯搬运，digest 逐字节不变。 | 下一轮候选：`model/event.rs` 1141、`projection.rs` 1063、`model/game_config.rs` 992、`world.rs` 865、`autocontrol/shipbuilding.rs` 746 |
+| `[x]` | [测试按模拟时间分档](notes/test-tiers.md) | 用 `cargo nextest` 的 group/profile 按**推进回合数**分档：快档 178 条 / 4 s（原 110 s）、中档 184 / 30 s、全档 189 / 96 s；档位写在模块名 `horizon_mid`/`horizon_long` 里，加用例不用改配置。 | 读面契约用例（80–120 回合）仍留在快档的取舍与升级路径见该篇 §6 |
+
+---
+
 ## 快速参考：验证手段
 
-- 单元测试：`cargo test --lib`
-- 长局快守卫：`cargo test --test longhorizon`
-- 长局诊断（慢，可打印）：`cargo test --test longhorizon diagnose_long_horizon -- --ignored --nocapture`
+测试按**模拟时间**分档（判据 = 用例真正推进的回合数），细节见
+[`notes/test-tiers.md`](notes/test-tiers.md)：
+
+- **内循环（快档，~4 s）**：`cargo nextest run` —— T0 + T1（不推进回合 / ≤48 回合）
+- **中档（~30 s）**：`cargo nextest run -P mid` —— 加上 T2（49–480 回合）
+- **全档（~96 s，合流门）**：`cargo nextest run -P full` —— 全部非 ignore 用例
+- 探针/诊断（只打印不断言，`#[ignore]`）：`cargo nextest run -P full --run-ignored all`
+- 没装 nextest 的退路：`cargo test --workspace`（**仍然是全档，慢**）
 - 一次简短观察：`cargo run --bin planet_x -- --seed 7 --round 30 --digest 10`（每 10 月一行故事板）
 - 一键拿故事素材：`planet_x --seed 7 --round 60 --index out/`，再用 `play/planet_xq`
   (`planet_xq.load('out').facts`) 读主流与 `chronicle`（累计编年史按 `(round,id)` 去重）。
+- 纯搬运/拆文件类改动的行为验证：`--seed 42 --round 240 --digest 20` 的 SHA-256 必须逐字节
+  不变（当前基线 `657F2DC9…6665`，取行口径见 [`notes/code-layout.md`](notes/code-layout.md) §3）。

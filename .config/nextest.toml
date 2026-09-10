@@ -1,0 +1,44 @@
+# 测试按**模拟时间**分档（`cargo nextest` 分组）——为什么：全档一次要 ~110 s，
+# 其中 92% 的时间花在 7 条 ≥10 s 的长局用例上（每条 1000–3000 回合），而 196 条
+# 微用例加起来只有 ~2 s。分档让内循环跑得快，又**不藏用例**（没被选中的会在
+# 「N tests run / M skipped」里明说，不会伪装成 passed）。
+#
+# 档位（判据 = 该用例真正推进的回合数）：
+#   T0 不推进回合 / T1 ≤48 回合（4 年内）   → 默认档 `cargo nextest run`
+#   T2 49–480 回合（4–40 年）               → `cargo nextest run -P mid`
+#   T3 >480 回合（40 年+）                  → `cargo nextest run -P full`（合流门）
+#
+# 约定：高档用例住在名叫 `horizon_mid` / `horizon_long` 的**模块**里
+# （`src/tests/<区>/horizon_mid.rs`），或者整个**集成测试二进制**就叫这个名字
+# （`tests/horizon_mid.rs` / `tests/horizon_long.rs`）。于是档位在用例名里看得见，
+# 也能被 filterset 选中。加一条新的长局用例时**不用改这个文件**——放对文件即可。
+#
+# 探针/诊断（`#[ignore]`，只打印不断言）：
+#   cargo nextest run -P full --run-ignored all
+#   cargo nextest run -P full --run-ignored all -E 'test(/probe/)'
+
+[test-groups]
+# 长局每条只吃 1 核，限到 5 是为了在 `-P full` 时给其余 178 条留着核。
+t3-long = { max-threads = 5 }
+# 中档最大的一条是 400 回合，比长局轻，但仍想留余量。
+t2-mid = { max-threads = 6 }
+
+[[profile.default.overrides]]
+filter = 'test(/horizon_mid/) | binary(horizon_mid)'
+test-group = 't2-mid'
+
+[[profile.default.overrides]]
+filter = 'test(/horizon_long/) | binary(horizon_long)'
+test-group = 't3-long'
+
+# 默认档 = 快档：内循环用这条（T0 + T1）。
+[profile.default]
+default-filter = 'not (test(/horizon_mid/) | test(/horizon_long/) | binary(horizon_mid) | binary(horizon_long))'
+
+# 中档：加上 T2（4–40 年的行为用例）。
+[profile.mid]
+default-filter = 'not (test(/horizon_long/) | binary(horizon_long))'
+
+# 全档：合流门前跑这条。等价于「所有非 ignore 的用例」。
+[profile.full]
+default-filter = 'all()'
