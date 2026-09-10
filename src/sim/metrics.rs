@@ -86,6 +86,8 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
             .map(|g| g.scale)
             .unwrap_or(crate::model::neutral::value::GOVERNANCE_SCALE);
         let ideology_loyalty_penalty = gov.map(|g| g.ideology_penalty).unwrap_or(0.0);
+        // 首都向心项：**按势力算一次**，城行不重复它（见 `LoyaltyTarget` 的文档）。
+        let capital_loyalty_bonus = gov.map(|g| g.capital_bonus).unwrap_or(0.0);
         // 「谁不卖给你」：有多少势力对本势力**全面禁运**（本回合市场结算的实际判据）。
         let trade_blocked_by = state
             .factions
@@ -113,8 +115,7 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                 governance_entertainment,
                 governance_scale,
                 ideology_loyalty_penalty,
-                // 首都评估/迁都（`step_capital` 的中间量）：没评估也没迁 = `CapitalFlow::default()`。
-                capital: sink.capital.get(&fid).cloned().unwrap_or_default(),
+                capital_loyalty_bonus,
                 freight_paid: sink.market_freight.get(&fid).copied().unwrap_or(0.0),
                 carrier_income: sink.market_carrier_income.get(&fid).copied().unwrap_or(0.0),
                 net_import: sink.market_net.get(&fid).copied().unwrap_or(0.0),

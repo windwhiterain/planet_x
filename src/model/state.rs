@@ -13,22 +13,23 @@ use crate::model::*;
 /// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
 /// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
 /// 所以不能按号细判，只能整段按最保守的方式接）。
-/// **v14 与 v15 都是被两条历史各自用过的号**（合并时发现，故合并后取 **16**）：
+/// **v14–v16 是被两条历史各自用过的号**（合并时逐次发现，故合并后取 **17**）：
 ///
 /// | 号 | `main` 那条线 | `feature/tech-system-mond` 这条线 |
 /// |---|---|---|
-/// | v14 | `feature/step-intermediates-b1`：读面追加治理/忠诚中间量（`State` 没动） | **MOND 掌握度连续化**：`Faction::mond_control` 取代 `config.mond.masters` 名单 |
-/// | v15 | 中性值一处声明（读面缺省值，`State` 没动） | 与 main 的读面换代合并之后的号 |
+/// | v14 | `feature/step-intermediates-b1`：读面追加治理/忠诚中间量（`State` 没动）；再往前 v14 还被 `feature/pre-post-unify`（派生读面换代）用过 | **MOND 掌握度连续化**：`Faction::mond_control` 取代 `config.mond.masters` 名单（**只有这一条真动了 `State`**） |
+/// | v15 | `feature/capital-decisions`：`FactionRow.capital` 搬进 `RoundDecisions`（读面，`State` 没动） | 与 main 的读面换代合并之后的号 |
+/// | v16 | 中性值一处声明（读面缺省值，`State` 没动） | 与 step-intermediates 合并之后的号 |
 ///
-/// 两条历史还各自用过 **v14 = 派生读面换代**（`feature/pre-post-unify`：`{flow, metrics}`
-/// 两段变成一回合一份 [`RoundView`]）——同一个号在三处含义不同，**号本身已经不能再判语义**。
-/// ⇒ 合并后取 **16**，`13 | 14 | 15` **整段只推号**：
+/// 同一个号在多处含义不同，**号本身已经不能再判语义** ⇒ 合并后取 **17**，
+/// `13 | 14 | 15 | 16` **整段只推号**：
 ///
-/// * `mond_control` 走 serde 缺省 **0（凡人）**——「本分支自己那版 v14/v15 存出来的档」读到
-///   新二进制会**丢掉掌握度**，**不保真**（用户裁决：不考虑向前兼容；那些档只存在于本次
-///   开发的 worktree 里，没有真实损失）；
-/// * 两边动过的**派生读面**量本来就不持久（每回合重算），推号即可。
-pub const SCHEMA_VERSION: u32 = 16;
+/// * 这几档里只有**本支那条线的 v14/v15 档**真的存过 `mond_control`——那是本支自己的档，
+///   键在结构里，读进来照旧生效（**不丢**）；**v13 及更早、以及 main 那条线的档**里压根没有
+///   这个键 ⇒ serde 缺省 **0（凡人）**，**不保真**（用户裁决：不考虑向前兼容；那些档只存在于
+///   本次开发的 worktree 里，没有真实损失）；
+/// * 两条历史动过的**派生读面**量本来就不持久（每回合重算），推号即可。
+pub const SCHEMA_VERSION: u32 = 17;
 fn default_schema_version() -> u32 {
     0
 }
@@ -793,13 +794,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
-        // **v13 / v14 / v15：三个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）
-        // ⇒ 整段只推号。这几档里 `State` 只在**一条**历史上真动过字段（`mond_control`），
-        // 而它 serde 缺省 0 = 凡人；其余动过的都是**派生读面**（本来就不持久）。
+        // **v13 / v14 / v15 / v16：四个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的
+        // 对照表）⇒ 整段只推号。这几档里 `State` 只在**一条**历史上真动过字段
+        // （`mond_control`），而它在**没有那条历史的档**里 serde 缺省 0 = 凡人；其余动过的
+        // 全是**派生读面**（本来就不持久）。
         // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
         // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
         // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 | 14 | 15 => {
+        13 | 14 | 15 | 16 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

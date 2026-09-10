@@ -732,6 +732,8 @@ fn flow_table_matches_the_derived_record() {
              expect_row.map(|r| r.governance_scale).unwrap_or(1.0)),
             ("ideology_loyalty_penalty", row["ideology_loyalty_penalty"].as_f64().unwrap(),
              expect_row.map(|r| r.ideology_loyalty_penalty).unwrap_or(0.0)),
+            ("capital_loyalty_bonus", row["capital_loyalty_bonus"].as_f64().unwrap(),
+             expect_row.map(|r| r.capital_loyalty_bonus).unwrap_or(0.0)),
         ] {
             assert_eq!(got, want, "{fid} 的 {col} 与视图不一致（读了两个不同的数）");
         }

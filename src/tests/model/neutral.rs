@@ -12,13 +12,13 @@
 
 use super::*;
 use crate::config::load_config;
-use crate::model::{CapitalFlow, LoyaltyTarget, RoundView};
+use crate::model::{LoyaltyTarget, RoundView};
 use crate::world::default_state;
 use serde_json::Value;
 
 // ── 工具 ──────────────────────────────────────────────────────────────────
 
-/// 按 `factions[].capital.reviewed` 这种路径把**所有**匹配到的值收进来
+/// 按 `cities[].loyalty_target.distance` 这种路径把**所有**匹配到的值收进来
 /// （map 段 `[]` 会扇出到每一个值——断言要对每一个值都成立）。
 fn collect<'a>(v: &'a Value, path: &str, out: &mut Vec<&'a Value>) {
     let (head, rest) = match path.split_once('.') {
@@ -199,7 +199,9 @@ fn every_read_face_field_declares_a_neutral() {
     // 两个非零中性值必须真的是 One/Null，别被顺手改成 Zero（这是历史坑的正中央）。
     assert_eq!(neutral_for("factions[].governance_scale"), Some(Neutral::One));
     assert_eq!(neutral_for("factions[].governance_coverage"), Some(Neutral::One));
-    assert_eq!(neutral_for("factions[].capital.current_cost"), Some(Neutral::Null));
+    assert_eq!(neutral_for("factions[].capital_loyalty_bonus"), Some(Neutral::Zero));
+    // 稀疏数组：整条存在或整条缺席，中性值是空数组（条目内部不逐字段声明）。
+    assert_eq!(neutral_for("decisions.capital"), Some(Neutral::EmptyArray));
 }
 
 // ── 2. Rust 的 Default 就是声明的中性值（serde 缺字段走它）──────────────
@@ -216,15 +218,11 @@ fn struct_defaults_equal_the_declared_neutrals() {
         assert_path_is_neutral(&view, path, path, "RoundView::default()");
     }
 
-    // 嵌套结构（B1 那两个）：它们的 Default 就是「没跑这一步」的样子。
+    // 嵌套结构（B1 的忠诚目标值）：它的 Default 就是「没跑这一步」的样子。
     let light = serde_json::to_value(LoyaltyTarget::default()).unwrap();
-    let cap = serde_json::to_value(CapitalFlow::default()).unwrap();
     for (path, _) in READ_FACE_NEUTRALS {
         if let Some(rest) = path.strip_prefix("cities[].loyalty_target.") {
             assert_path_is_neutral(&light, rest, path, "LoyaltyTarget::default()");
-        }
-        if let Some(rest) = path.strip_prefix("factions[].capital.") {
-            assert_path_is_neutral(&cap, rest, path, "CapitalFlow::default()");
         }
     }
 }
@@ -250,13 +248,8 @@ const PROCESS_PATHS: &[&str] = &[
     "factions[].governance_entertainment",
     "factions[].governance_scale",
     "factions[].ideology_loyalty_penalty",
-    "factions[].capital.reviewed",
-    "factions[].capital.candidate",
-    "factions[].capital.current_cost",
-    "factions[].capital.candidate_cost",
-    "factions[].capital.relocated_from",
-    "factions[].capital.relocated_to",
-    "factions[].capital.relocate_loyalty_cost",
+    "factions[].capital_loyalty_bonus",
+    "decisions.capital",
     "factions[].freight_paid",
     "factions[].carrier_income",
     "factions[].net_import",
@@ -264,8 +257,6 @@ const PROCESS_PATHS: &[&str] = &[
     "cities[].production_value",
     "cities[].loyalty_target.distance",
     "cities[].loyalty_target.entertainment",
-    "cities[].loyalty_target.capital_share",
-    "cities[].loyalty_target.ideology_penalty",
     "cities[].loyalty_target.effective",
 ];
 
@@ -276,7 +267,8 @@ fn pre_face_process_fields_equal_their_declared_neutral() {
     // `view_from_state` = 喂一个空 sink 的观测 ⇒ 正是「`pre` 面」的形状（`--start` 载入 / 回合 0）。
     let view = serde_json::to_value(crate::sim::view_from_state(&state, &config)).unwrap();
 
-    assert!(PROCESS_PATHS.len() >= 30, "过程量清单短了——守卫会退化成空转");
+    // 下限只是防空转（原本 ~32 条；`capital` 判定搬进稀疏数组、两个全国项上移势力行后少了几条）。
+    assert!(PROCESS_PATHS.len() >= 20, "过程量清单短了——守卫会退化成空转");
     for path in PROCESS_PATHS {
         assert!(
             neutral_for(path).is_some(),
