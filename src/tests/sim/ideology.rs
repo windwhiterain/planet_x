@@ -292,6 +292,7 @@ fn ideology_military_win_drives_toward_militarism() {
         attacker: my_ship.clone(),
         target: enemy.0.clone(),
         damage: 10.0,
+        shots: Vec::new(),
     });
     state.events.push(GameEvent::ShipDestroyed {
         ship: enemy.0.clone(),

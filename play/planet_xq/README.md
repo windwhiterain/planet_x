@@ -81,6 +81,10 @@ q.blueprints(round=12)         # one row per design blueprint: class / component
 q.market_trades(round=12)      # ONE ROW PER REALIZED TRADE (buyer × seller): moved{} / dist_au / depth /
                                #   mond_extra / freight_rate / rel_mult / mastery / loss  — sparse (no trade ⇒ no row)
 q.haul_steps(round=12)         # ONE ROW PER SHIP THAT RAN A HAUL ROUTE: step / body / units / into_pool
+q.salvos(round=12)             # ★ PER-SHOT combat breakdown (B4): one row per weapon per shot —
+                               #   WHY it aimed there (score_basic / score_temper / score_spread → score)
+                               #   + WHAT it did (hit / def_mult / pd / pd_absorbed / absorbed / soak /
+                               #     armor_soak / hull_pen / damage / killed / skipped)
 ```
 
 `decisions` is the one table that answers "**why** did my ship do that": `verdict` is one of
@@ -98,8 +102,26 @@ and `launch_waiting` flags the "progress is full but the components cannot be pa
 `blueprint` column (which design printed this hull; `null` = none) and the yard side on the inline
 `buildings[].blueprint` in `q.cities()`.
 
+`salvos` is the **B4 payoff** ("why did that shot do almost nothing / why was my missile volley eaten
+alive"): `attack` events carry a per-shot record, and this flattens it. `hit` is the engine's
+**deterministic** tracking reduction (`hit_factor(weapon tracking, target speed)` — not a dice roll),
+`pd`/`pd_absorbed` is point defence (own `intercept` + nearby friendly ships' screen), `absorbed`/`soak`
+is the shield layer, `armor_soak` the hardness reduction, `hull_pen` what actually reached the hull.
+`skipped=True` means that shot **never fired** (its target was already dead when its turn came).
+⚠ two traps: (1) an `attack` event with **`magnitude == 0` is real** — a salvo fully intercepted by
+point defence leaves no damage, and before B4 it left **no event at all**, so "no attack rows" never
+meant "no shooting"; (2) `Σ shots[].damage` equals the event's `magnitude` only up to the table's
+2-decimal rounding of `magnitude` (it is exact in the engine's own state).
+
 Two things worth knowing:
 
+- **B4 put the combat internals in the *event* layer, not in the per-faction view** (a deliberate
+  ruling, see `step-intermediates.md` §7 Q1): the per-shot detail rides in
+  `events[type='attack'].data.shots`, so `main.jsonl` pays only the event *id* (~7 B) instead of
+  every row carrying the numbers. Consequences to know: **`--derived` does not include events**, so
+  a checkpoint's `post` view has no shot data — read it with `q.salvos()` / `q.events(type='attack')`
+  / `q.history('ship', …)` instead. The world itself is unchanged: only **damage > 0** adjusts
+  relations or counts as "engaged" for war-fatigue purposes.
 - **The same process numbers are also inside `main.jsonl`** as the nested
   `view.factions[<faction>]` object (`production`, `production_value`, `upkeep`,
   `governance_cost`, `governance_coverage`, the **B1 governance split** `governance_admin` /

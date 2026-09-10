@@ -133,6 +133,86 @@ impl FoundingHow {
 
 stringly_unit_enum!(FoundingHow { "new_site" => NewSite, "refounded" => Refounded });
 
+/// **一发**的完整记录：为什么瞄它 + 打出了什么（[`GameEvent::Attack`] 的 `shots` 的一项）。
+///
+/// 这是 C 组中间量（`hit` / `armor_soak` / `pd` / 索敌权重）的**唯一出口**。它们此前全部活在
+/// `sim::resolve_shot` 的栈上：算完就扔 ⇒「为什么这一发几乎没伤害」「我的导弹齐射为什么被吃光」
+/// 「这门炮为什么打它」在**任何**读面都查不到（`Attack` 只有折减后的总伤害）。
+///
+/// **一条 = 一件武器的一发**，`fire_rate > 1` 时同一件武器会出现多条。**选择输入**（`score*`）
+/// 与**结算分解**（`hit` 之后那一段）同处一条——「选它的理由」和「打出来的结果」中间隔着一个
+/// 回合都查不到别的来源，分开存只会让两边漂。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Shot {
+    /// 武器下标（= `ship_weapons(config, attacker)` 里的位置；配合舰级可查回型号）。
+    pub weapon: usize,
+    /// 那一发开始时目标还剩多少船体（0 = 目标已被本回合前面的发干掉，这一发**没打出去**）。
+    pub target_hull_before: f64,
+    /// 这一发**根本没打出去**（目标在它轮到之前就沉了）。为 true 时下面所有数都是 0/中性值
+    /// ——它回答的是「这门炮为什么白瞄了一场空」（谁先手由 `sim::step_military` 的逐舰顺序
+    /// 决定，那一条是 B5 的 `pre` 面）。
+    #[serde(default)]
+    pub skipped: bool,
+    // ── 选择输入（`autocontrol::build_fire_plan` 当时算的，见 `doctrine_weight`）──
+    /// 基本权重（射程内的距离/克制基础分）。
+    pub score_basic: f64,
+    /// 理智↔热血那一项**加了多少**（`W_TEMPER · -temper · ln(威慑比)`；无风格 = 0）。
+    pub score_temper: f64,
+    /// 火力分配那一项是**乘数**（不是加项）：`×(1 − fire_spread · 新鲜度)`，`fire_spread = 0`
+    /// 时为 1.0。⇒ 选它的总分 = `(score_basic + score_temper) × score_spread`。
+    pub score_spread: f64,
+    // ── 结算分解（`sim::resolve_shot`；`skipped` 或够不着时全为中性值）──
+    /// 距离 / 射程：`true` = 这一发在射程内（`damage` 为 0 且这个为 false ⇒ 够不着）。
+    pub in_range: bool,
+    /// 本土防御倍率（`home_defense_mult`；1.0 = 不在自家门口）。
+    pub def_mult: f64,
+    /// **命中折减** = `hit_factor(武器追踪, 目标速度)`（0.2..1）：目标越快、武器追踪越差，
+    /// 这一发越像「没打中」。**确定性折减，不是掷骰**。
+    pub hit: f64,
+    /// **点防拦截量**（只对导弹；`0` = 这一发不是导弹，或没人拦）：目标自身 `intercept` +
+    /// 邻近友舰的防空屏护 [`crate::sim::cluster_pd_cover`]。
+    pub pd: f64,
+    /// 被点防吃掉的伤害（`min(dmg_before_pd, pd)`）——**「齐射被吃光」就是它 = 打击力**。
+    pub pd_absorbed: f64,
+    /// 护盾吸收掉的伤害（`min(护盾值, dmg × shield_mult)`）。
+    pub absorbed: f64,
+    /// **护盾吸收比例**（`absorbed ÷ 该进护盾的那一份`；没有护盾伤害时为 1.0）。
+    pub soak: f64,
+    /// **护甲硬度减伤比例**（0..0.85，反比例函数：打得越重、吃得越多）。
+    pub armor_soak: f64,
+    /// 真正打进船体的伤害（= `hull_dmg × (1 − soak·0.5) × (1 − armor_soak)`）。
+    pub hull_pen: f64,
+    /// 这一发实际造成的伤害（护盾 + 船体）。
+    pub damage: f64,
+    /// 这一发是否是**补刀**（把目标打到 hull ≤ 0）。
+    pub killed: bool,
+}
+
+impl Default for Shot {
+    /// 中性的一发（全 0 / 中性倍率）——只有「没打出去」那种记录会用到它当底稿。
+    fn default() -> Self {
+        Shot {
+            weapon: 0,
+            target_hull_before: 0.0,
+            skipped: false,
+            score_basic: 0.0,
+            score_temper: 0.0,
+            score_spread: 1.0,
+            in_range: false,
+            def_mult: 1.0,
+            hit: 1.0,
+            pd: 0.0,
+            pd_absorbed: 0.0,
+            absorbed: 0.0,
+            soak: 1.0,
+            armor_soak: 0.0,
+            hull_pen: 0.0,
+            damage: 0.0,
+            killed: false,
+        }
+    }
+}
+
 /// 一回合内发生的、值得 agent 知道的事件。每回合开始时被清空、回合演化中被
 /// 追加；agent 无需反推状态差即可得知「谁开火/谁被毁/哪城被夷平/谁殖民」。
 ///
@@ -143,10 +223,21 @@ stringly_unit_enum!(FoundingHow { "new_site" => NewSite, "refounded" => Refounde
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEvent {
     /// 开火：攻击者对目标舰造成 damage 伤害。
+    ///
+    /// `shots` 是**这一对（攻击舰 × 目标）本回合的逐发分解**（用户裁决：战斗中间量进**事件层**，
+    /// 不占 `RoundView` 的字节——见 `.agents/notes/step-intermediates.md` §7 Q1）。
+    /// 聚合量（`damage`、标题、关系调整）不动：它仍是「这个目标这一回合总共挨了多少」。
+    ///
+    /// ⚠ **0 伤害也发**（`shots` 非空但 `damage == 0`）：那正是「齐射被点防吃光」那一格——
+    /// 旧规则下它**什么事件都不留**，于是 C5 想回答的问题在唯一能看见的地方是空白。
+    /// 关系调整仍只在 `damage > 0` 时发生（见 `sim::fire`），所以世界行为不变。
     Attack {
         attacker: ShipId,
         target: ShipId,
         damage: f64,
+        /// 逐发明细（每件武器的每一发一条）。空 = 旧档/非本引擎产出的事件。
+        #[serde(default)]
+        shots: Vec<Shot>,
     },
     /// 舰被击毁（hull ≤ 0）。`cause` 区分战死/锈蚀报废，`by` 是补刀的凶手（战死时必有）。
     ShipDestroyed {
@@ -533,10 +624,15 @@ impl GameEvent {
                 attacker,
                 target,
                 damage,
+                shots,
             } => {
                 set_actor(&mut r, EntityKind::Ship, attacker);
                 set_target(&mut r, EntityKind::Ship, target);
                 r.magnitude = *damage;
+                // 逐发分解进 `data.shots`（变体专属载荷只走这一个对象列，见 [`EventRow::data`]）。
+                // 聚合量 `magnitude` 保持「这个目标这一回合总共挨了多少」——逐发是**下钻**，
+                // 不是替代。
+                r.data = json!({ "shots": shots });
             }
             GameEvent::ShipDestroyed {
                 ship,
@@ -889,6 +985,7 @@ impl GameEvent {
                 attacker,
                 target,
                 damage,
+                ..
             } => {
                 format!("{attacker} 对 {target} 开火（{} 伤害）", num(*damage))
             }

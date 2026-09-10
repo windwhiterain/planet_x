@@ -171,8 +171,8 @@ fn spread_weapon_distributes_fire_across_targets() {
         2,
         "a fire_rate=2 weapon should fire 2 shots, got {plan:?}"
     );
-    let first = plan[0].1.clone();
-    let second = plan[1].1.clone();
+    let first = plan[0].target.clone();
+    let second = plan[1].target.clone();
     assert!(
         first != second,
         "a 雨露均沾 (fire_spread>0) weapon should spread its 2 shots across 2 targets, got {plan:?}"

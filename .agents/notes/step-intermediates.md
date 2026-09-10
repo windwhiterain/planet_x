@@ -2,7 +2,8 @@
 
 > 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）、
 > **B2（钱去哪了）已落地**（`feature/b2-money`，见 §6.3）、
-> **B3（市场与运输）已落地**（`feature/b3-market`，见 §6.4）；B4/B5 仍是候选，一行代码都还没写。
+> **B3（市场与运输）已落地**（`feature/b3-market`，见 §6.4）、
+> **B4（战斗：中间量进事件层）已落地**（`feature/b4-combat`，见 §6.5，用户裁决 Q1 = (b)）；B5 仍是候选。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md) §5（本篇是那一条的展开）、
 > [`unified-metrics.md`](unified-metrics.md)（上一次「总结 = 步进中间量」的合并；它的「候选」第一条
 > 就是本篇的 **B1**）、[`engine-data-plane.md`](engine-data-plane.md) §7.4（`pre` 面的真相 = 本篇 **B5**
@@ -124,7 +125,7 @@
 | ✅ **B1** 治理/忠诚（**已落地**，见 §6.1） | A 组 `target_eff` 分项、`ideo_penalty`、行政 vs 娱乐拆分、`overload`、迁都判据（`cur_cost`/`best_cost` + `old_share`/`loyalty_cost`） | `unified-metrics.md` 候选第一条；「帝国为何要崩」的预警面；全是确定性、粒度天然对齐「每城一行 / 每势力一行」 | 否 |
 | ✅ **B2** 钱去哪了（**已落地**，见 §6.3） | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
 | ✅ **B3** 市场与运输（**已落地**，见 §6.4） | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
-| **B4** 战斗 | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
+| ✅ **B4** 战斗（**已落地**，见 §6.5） | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
 | **B5** `pre` 面 | C7 洗牌顺序、C13 关系噪声、B 组 6 条 `derived_roll` 判定（含合同三闸门、派单、定编） | 唯一一批**必须**改 `advance`：让它同时产出「AI 看到/掷出了什么」 | **是** |
 
 每批的验收门（缺一不可）：
@@ -309,16 +310,64 @@ kit 新增 `market_trades()` / `haul_steps()` / `view_trade()` / `view_freight()
 `view_economy` 补购买力/名次/`haul_gap`/禁运名单，demo 端到端勾稽通过（勾稽式：
 `price_mult == rel_mult + freight_rate`）。
 
-## 7. 待裁决（三个设计点，动 B4/B5 之前必须先定）
+### 6.5 B4 落地记录（`feature/b4-combat`，Q1 裁决 = **(b) 进事件层**）
 
-* **Q1 · 「每次结算 / 舰对」粒度的量放哪？** 战斗五条（C1–C5）与索敌计划是**逐舰逐发**的，
-  塞不进「每势力一行 / 每城一行」的形状。三条路：
+**用户裁决**：Q1 选 **(b)**——战斗的逐发中间量放**事件层**，不占每行内联的 `RoundView`。
+加一句澄清（用户原话：*「kit 的速度不重要，我是说游戏中查询 event」*）：这条裁决看的是**引擎内**
+的读取与体积，不是 Python 侧的分析速度。
+
+**落点形状**：**不新增 variant**，而是给已有的 `GameEvent::Attack` 加 `shots: Vec<Shot>`。
+
+| 为什么 | 说明 |
+| --- | --- |
+| `Attack` 已经是「一条 =（攻击舰 × 目标）聚合伤害」 | 逐发是它的**下钻**，不是另一种事件；标题、`magnitude`、参与方槽位全都不用动 |
+| 事件行有 **`data` 对象列** | 变体专属载荷只有一个出口（`EventRow.data`），投影表自动多出 `data.shots`，零新表 |
+| 不新增 variant ⇒ 不动 `salience`/`headline`/`participants` 三处穷尽 match | 少三处「编译器逼你写」的地方，也就少三处漂移点 |
+| 事件在 `main.jsonl` 里**只有 id**（`event_ids`，约 5.5–7 B/条） | 所以这一批**一个字节都没进轨迹行**——这正是 (b) 相对 (a) 的全部价值 |
+
+**`Shot` 一条 = 一件武器的一发**，两类数同处一条：**选择输入**（`score_basic` / `score_temper`
+/ `score_spread`，总分 = `(basic + temper) × spread`——第三项是**乘数**，文档里写清了）与
+**结算分解**（`hit` / `def_mult` / `pd` + `pd_absorbed` / `absorbed` + `soak` / `armor_soak` /
+`hull_pen` / `damage` / `killed` / `skipped`）。分开放只会让「选它的理由」和「打出来的结果」
+两边漂。
+
+**一处必须一起改的判据（B4 唯一的非纯追加点）**：**放宽了发事件的闸**——从「总伤害 > 0 才发」
+改成「真朝一个**活**目标打过一发就发」。理由：`pd` 是**线性**拦截，被吃光时 `damage = 0`，
+而「我的导弹齐射为什么全被拦下了」（C5 的门面问题）在旧规则下**一条事件都不留**。
+⚠ 这会让 `step_diplomacy` 的「本回合谁和谁交火」（它由 `Attack`/`Siege` **反推**）把「打了一发
+被拦光的空炮」也算成交火 ⇒ **战争疲劳会被空炮取消**。所以同批给那条判据加了显式的
+`damage > 1e-9` 闸（`relations.rs`），关系调整也照旧只认真伤害 ⇒ **世界行为逐字不变**：
+
+```text
+digest --seed 42 --round 240 --digest 20：main 与 B4 两棵树 SHA-256 都是
+C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9（逐字相同）
+逐行逐字段比（脚本口径）：除 events/top_events 外**处处相等**，且这一局里
+事件计数**一条都没变**（42 号种子的 240 回合没出现过「整发被点防吃光」）
+```
+
+**验收**：`cargo nextest run -P full` **233 绿 / 0 红 / 34 skipped**（main 时 230，新增 3 条 B4 单测）；
+`SCHEMA_VERSION` 19 → 20（这一档**真的动了 `State`**：`State::events` 是持久字段；旧档的
+`Attack` 靠 `#[serde(default)]` 补空 `shots`，语义 = 「没记」而不是「打了一发没有任何分解」）；
+`migrate` 的合并档扩到 `13..=19`；事件表 `data` 列的中文说明补了 `attack.shots` 的全套字段与
+两个坑（`magnitude = 0` 的行是真的；`Σshots.damage` 与本表 `magnitude` 只差两位小数舍入）；
+kit 新增 **`q.salvos()`**（把 `data.shots` 摊平，含算好的 `score` 列）。
+
+**顺手回填的一条欠账**：`feature/site-supply`（`ad93ad2`/`af97de6`，已并入 main）**改了行为却没
+记新基线**——`notes.md` 的「快速参考」里当下仍是 `81A197…1811`，实测**当前 main 已是
+`C928C3F1…06A9`**。B4 这一条正好落在它之后，所以两边一起写进去了（见 `notes.md` 的基线链）。
+
+## 7. 待裁决（剩下的设计点，动 B5 之前必须先定）
+
+* **Q1 · 「每次结算 / 舰对」粒度的量放哪？** ✅ **已裁决：(b) 进事件层**（实现见 §6.5）。
+  当时的背景：战斗五条（C1–C5）与索敌计划是**逐舰逐发**的，塞不进「每势力一行 / 每城一行」的
+  形状。三条路：
   （a）扩 `RoundDecisions`——它已经是「这一回合选了什么、为什么」的家，且 `decisions` 已在
   `main.jsonl` 里**整份内联**（代价：体积）；
-  （b）**新的事件层**（`ShipFired` / `TargetChosen` 之类进 `state.events`）——可检索、可进稀疏历史，
-  但事件表已经不小；
+  （b）**事件层**（进 `state.events` / `Attack.data`）——可检索、可进稀疏历史，且轨迹里只付
+  一个事件 id（约 5.5–7 B），正文落在 `idx/events.jsonl`；
   （c）**不捕获明细**，只把聚合折进 `FactionRow`（如「本回合被规避掉多少伤害」）。
-  倾向：(a) 给 AI 决策、(b) 给「本回合内不可复原」的结算事实（C1–C5）。**要用户裁决。**
+  **裁决 = (b)**；理由与代价（`--derived` 看不到 events、`State` 变胖、`relations` 的交火判据
+  必须一起加闸）都记在 §6.5。
 * **Q2 · `pre` 面怎么产？** B5 要让 `advance` 同时吐 pre。两种形状：
   （a）`advance` 返回 `(pre_view, post_view)`；
   （b）保持单返回值，但把 `RoundSink` 扩成也收「判定流水」，回合末由 `observe` 一次折出两档。

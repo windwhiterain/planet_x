@@ -1360,7 +1360,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",
                     "magnitude": "统一数值强度（伤害；无伤害事件为 0），便于 groupby().sum()。",
                     "headline": "**人读的一句话**（`GameEvent::headline` 的唯一产物，与 CLI `--milestones`/`--digest` 同源）。它自足（只读事件自身字段，不回查 state），所以对已归档的历史同样成立；`participants()` 列出的每个 id 都逐字出现在这句话里。机器查询仍走 actor_*/target_*/data。",
-                    "data": "该事件类型的专属载荷（可读名/舰级/死因/忠诚度/复垦方式…），固定只用这一个对象列。",
+                    "data": "该事件类型的专属载荷（可读名/舰级/死因/忠诚度/复垦方式…），固定只用这一个对象列。⚠ `type=\"attack\"` 的载荷是 **`shots`：这一对（攻击舰 × 目标）本回合的逐发明细**（B4，用户裁决「战斗中间量进事件层」）——每条 = 一件武器的一发，带**选择输入**（`score_basic` / `score_temper` / `score_spread`，总分 = `(basic + temper) × spread`）与**结算分解**（`hit` 命中折减 / `def_mult` 本土防御 / `pd` + `pd_absorbed` 点防拦截 / `absorbed` + `soak` 护盾 / `armor_soak` 护甲 / `hull_pen` 进船体 / `damage` / `killed` / `skipped`）。聚合量 `magnitude` 仍是「这个目标这一回合总共挨了多少」，逐发是它的下钻（`Σ shots[].damage == magnitude`，**本表里差在 `magnitude` 被规整到两位小数上**，最大 0.005；state 里是精确相等）。⚠ **`magnitude = 0` 的 attack 行真的存在**（齐射被点防吃光：`pd_absorbed > 0` 而 `damage = 0`），那种交火在 B4 之前**一条事件都不留**——别把「没有 attack 行」当成「没打过」。",
                 },
             }),
             "bodies" => json!({

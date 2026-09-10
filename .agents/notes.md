@@ -164,7 +164,7 @@
 | `[ ]` | [语义视图 API](notes/semantic-view-api.md) | 把裸 jq 降为逃生舱；语义 view 工具只在 jq 侧做了 PoC（压缩约 34×）。 | Rust 侧 `view` 命令；工具层参数校验 |
 | `[x]` | [定居点名字 key](notes/settlements-lazy-table.md) | `Settlement` 改按名字引用，投影新增懒表 `settlements`，测试全绿。 | — |
 | `[x]` | [统一总结指标](notes/unified-metrics.md) | 总结指标由步进中间量聚合，agent 视图与 `--digest` 同源、不再重算。 | 治理中间量并入 `RoundView`；Web 是否复用待定 |
-| `[~]` | [Step 中间量清单：36 条算完就扔的量](notes/step-intermediates.md) | 数据面下一批：把 `step_*` 里只活在栈上的中间量（忠诚为何在掉 / 批了钱为何没花 / 我为何打不中 / 这单为何没人接）捕获进 `RoundView`。36 条逐条带 `文件:行号`（已在 `main` = `7e11d32` 上复核）+ 粒度 + 是否吃骰子 + 能回答什么问题，分 A 经济治理 / B 市场运输 / C 军事外交三组。**B1（治理/忠诚）已落地**：城行 `loyalty_target` 三项分项、势力行行政/娱乐拆分 + 人口超载倍率 + 两个全国项、`decisions.capital` 稀疏迁都判定（**形状修订见 §6.2**；`SCHEMA_VERSION` 16）。**B2（钱去哪了）已落地**（§6.3）：势力行 `investment_spent`/`construction_spent`/`upkeep_unpaid`/`fleet_rust`、城行 `labor`/`housing_capacity`/`is_hub`/`build`（造舰是缺钱还是缺产能）；「批了多少」**留在控制面**、读面只记已花（相减 = 没花掉的）。**B3（市场与运输）已落地**（§6.4）：`view.market_trades`（一笔成交一行：价格分解 + 丢货率）、`view.haul_steps`（一舰一行：`loaded`/`delivered`/`waiting`/`en_route`——后两档**既不落 state 也不发事件**）、势力行的购买力/买方名次、逐货栈运力账、禁运从计数升级成「名单 + 三档原因」。三批都是 digest 逐字不变 + 全档绿（B3 后 225 绿 / `SCHEMA_VERSION` 19）。 | B4 战斗 → B5 `pre` 面；**§7 三个设计点要先裁决**（逐发索敌计划放哪 / `pre` 面怎么产 / 体积——后者已由 `dense-face-sparse-store.md` §8/§9 结掉大半） |
+| `[~]` | [Step 中间量清单：36 条算完就扔的量](notes/step-intermediates.md) | 数据面下一批：把 `step_*` 里只活在栈上的中间量（忠诚为何在掉 / 批了钱为何没花 / 我为何打不中 / 这单为何没人接）捕获进 `RoundView`。36 条逐条带 `文件:行号`（已在 `main` = `7e11d32` 上复核）+ 粒度 + 是否吃骰子 + 能回答什么问题，分 A 经济治理 / B 市场运输 / C 军事外交三组。**B1（治理/忠诚）已落地**：城行 `loyalty_target` 三项分项、势力行行政/娱乐拆分 + 人口超载倍率 + 两个全国项、`decisions.capital` 稀疏迁都判定（**形状修订见 §6.2**；`SCHEMA_VERSION` 16）。**B2（钱去哪了）已落地**（§6.3）：势力行 `investment_spent`/`construction_spent`/`upkeep_unpaid`/`fleet_rust`、城行 `labor`/`housing_capacity`/`is_hub`/`build`（造舰是缺钱还是缺产能）；「批了多少」**留在控制面**、读面只记已花（相减 = 没花掉的）。**B3（市场与运输）已落地**（§6.4）：`view.market_trades`（一笔成交一行：价格分解 + 丢货率）、`view.haul_steps`（一舰一行：`loaded`/`delivered`/`waiting`/`en_route`——后两档**既不落 state 也不发事件**）、势力行的购买力/买方名次、逐货栈运力账、禁运从计数升级成「名单 + 三档原因」。**B4（战斗）已落地**（§6.5，**用户裁决 Q1 = 进事件层**）：`GameEvent::Attack` 长出 `shots`（逐发：选择三项分 + `hit`/`def_mult`/`pd`/`absorbed`/`soak`/`armor_soak`/`hull_pen`/`damage`/`killed`/`skipped`），**0 伤害的齐射也发**（被点防吃光此前一条事件都不留；同批给 `relations` 的交火判据加显式闸 ⇒ 世界逐字不变）；轨迹行**一个字节没加**（事件只内联 id）；kit 新增 `q.salvos()`。四批都是 digest 逐字段验中性 + 全档绿（B4 后 233 绿 / `SCHEMA_VERSION` 20）。 | B5 `pre` 面（Q2 未裁决）；**§7 的设计点先裁决**（Q2 `pre` 怎么产 / Q3 体积——后者已由 `dense-face-sparse-store.md` §8/§9 结掉大半） |
 | `[x]` | [稠密读面 / 稀疏存储](notes/dense-face-sparse-store.md) | 用户提的想法（对外稠密、底层自动稀疏）+ 由此量出来的两处浪费。**中性值所有权（§7）已落地**：`src/model/neutral.rs` 一处声明读面每个叶子字段的缺省值，引擎运行时缺省用同一批具名常量，`schema.json` 发 `neutral` 段，五条守卫（含 schemars 双向集合相等 ⇒ 加字段不加声明就红）；kit 的 `q.neutral()` 读同一份声明。**通用稀疏层 §8 裁决为「不做」**，⚠ **§9 在 B2 之后把量化依据重测了**：早先写的「能省的只剩 0.3% / 中性值约占 2%」**是错的**——实测中性值占字段出现次数的 43–47%、过程量按字节占 view 的 25%（3826 B/行）；结论不变，但依据换成了「能省的只有过程量那 25%，而代价是五个读取边界都要 decode」+ 判据本身是坏的（把「没发生」与「恰好是 0」算成一类）。 | 两处浪费已改用约定收掉（见 `step-intermediates.md` §6.2）：`capital` 进稀疏判定数组、两个全国项只存势力行（`main.jsonl` 18127 → 15652 B/行）；encode/decode 与 `--dense`/`--raw` 明确不做 |
 | `[x]` | [权威 schema 贯彻](notes/wysiwyg-resource-keys.md) | 资源 key 统一成中文可读名、删掉镜像结构，视图直用权威类型。 | 派生字段要 agent 现场 jq 计算（或加语义视图） |
 
@@ -209,11 +209,18 @@
   （**崇拜教初始 1.0**）→ `6E376B8F…573F`（**观测编队**：角色轴第三态）→ `7494A2C8…F446`
   （**B1 深空治理**）→ **`81A197493D2EAFF69F02FB03645CF64380CDED87924FA8AEAF482ED911F91811`**
   （**动机自然竞争**：删掉观测上限，改成水位配给）。
-  **两条线汇合之后（当前）**：基线就是上面最后一格 **`81A197…1811`**——在 `36c4882`
+  **两条线汇合之后**：基线就是上面最后一格 **`81A197…1811`**——在 `36c4882`
   （tech 支线并入 `main`）与「并入 B2」之后的树上都实测复现；**B2 那一批在合并后的树上同样
   验过它逐字节不变**。⚠ `SCHEMA_VERSION` 两条线都取过 **17**（本支 = `mond_control` 字段、
   读面那一路 = B2 的读面增列）⇒ 汇合后取 **18**，`13..=17` 整段只推号
   （对照表见 `src/model/state.rs`）。
+  **`81A197…1811` 之后又变了两次**（都不是本支）：
+  **`feature/site-supply`**（`ad93ad2`/`af97de6`，站点自给：非首都投资只吃本地库存；见
+  [`notes/site-supply.md`](notes/site-supply.md)）**改了行为却没记基线**——B4 落地时实测
+  `main` 已是 **`C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9`**
+  （顺手回填在这里）；`feature/b4-combat`（战斗中间量进事件层）在这棵树上**逐字节相同**
+  （digest 只多允许 `events` 计数变，实测连计数都没变——见 `step-intermediates.md` §6.5）。
+  `SCHEMA_VERSION` 之后又走到 **20**（B3 读面 19 / B4 `Attack.shots` 20）。
   再往前：`657F2DC9…6665`（`main` = `98c4b70`，重构合并点）与更早的重构前（`8b96aef`）逐字节相同，
   那是「纯搬运」的验收证据。
 - ⚠ **别裸跑 `git stash pop`**：这个仓库里躺着**别的分支留下的旧 stash**（当前

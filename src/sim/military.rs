@@ -240,12 +240,34 @@ pub fn hit_factor(tracking: f64, target_speed: f64) -> f64 {
     (1.0 - evade).clamp(0.2, 1.0)
 }
 
+/// 一发开火的**计划条目**：哪件武器、瞄谁，以及**选它时算的那三项分**。
+///
+/// `autocontrol::build_fire_plan` 产出、[`fire`] 消费；三项分随这一发落进
+/// [`crate::model::Shot`]（「选它的理由」与「打出来的结果」同处一条）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FireOrder {
+    /// 武器下标（`ship_weapons(config, attacker)` 里的位置）。
+    pub weapon: usize,
+    /// 这一发打谁。
+    pub target: ShipId,
+    /// 选择分的三项（见 [`crate::autocontrol::tactics`] 的 `doctrine_weight`）。
+    pub score_basic: f64,
+    pub score_temper: f64,
+    pub score_spread: f64,
+}
+
 /// 开火：本舰的每件武器**独立索敌**、逐发射击（`fire_rate` 发/时间）。`plan` 给出一发
-/// 打向哪个目标（每发条目 = 武器下标）。每发独立结算（命中 × 防御 × 护盾/护甲），一回合
-/// 内多发可打在**不同**目标上（火力分配）。伤害按目标**聚合**——每个目标累计伤害 > 0 才发
-/// 一次 `Attack` 事件、调一次关系（避免逐发打、关系掉得过快）。本舰攻击某目标后把它在该舰
+/// 打向哪个目标（每发条目 = 武器下标 + 当时算的选择分）。每发独立结算（命中 × 防御 ×
+/// 护盾/护甲），一回合内多发可打在**不同**目标上（火力分配）。伤害按目标**聚合**——每个目标
+/// 累计伤害 > 0 才调一次关系（避免逐发打、关系掉得过快）。本舰攻击某目标后把它在该舰
 /// `attack_hist` 里的新鲜度刷到 1（供火力分配层读，跨回合记忆）。确定性（无 RNG）。
-pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(usize, ShipId)]) {
+///
+/// **B4（用户裁决：战斗中间量进事件层）**：每一发的完整分解（选择分 + 命中/点防/护盾/护甲）
+/// 随 `Attack` 事件的 `shots` 出去。事件**只要真朝活目标打了一发就发**——包括总伤害为 0 的
+/// 那一档（被点防吃光的齐射）：「我的导弹为什么全被拦下了」在别处没有任何读法。
+/// ⚠ 关系仍然只在 `damage > 0` 时调整（`step_diplomacy` 的「交火」判据同步加了这道闸，
+/// 见 `relations.rs`），所以**世界行为不变**。
+pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[FireOrder]) {
     let afac = state
         .ship(attacker_id)
         .map(|a| a.faction_id.clone())
@@ -254,19 +276,39 @@ pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(
         .ship(attacker_id)
         .map(|a| ship_weapons(config, a))
         .unwrap_or_default();
+    // 每个目标：累计伤害 + 逐发分解（顺序 = plan 顺序 = 确定性的）。
     let mut damage_acc: BTreeMap<ShipId, f64> = BTreeMap::new();
+    let mut shots_acc: BTreeMap<ShipId, Vec<Shot>> = BTreeMap::new();
     // 被击毁的舰 + **补刀的那一发**（哪艘舰/哪个势力/什么弹种）。此前只记「被毁」不记凶手，
     // 只能靠同回合的 Attack 反推，集火时不可判。
     let mut destroyed: Vec<(ShipId, Killer)> = Vec::new();
     // 攻击历史新鲜度：本舰打过谁。逐发结算后刷新，使同回合后续发能按「越近越降权重」改选。
     let mut hist: BTreeMap<ShipId, f64> = BTreeMap::new();
 
-    for (wi, target_id) in plan {
+    for order in plan {
+        let wi = &order.weapon;
+        let target_id = &order.target;
         let Some(w) = weapons.get(*wi) else { continue };
         if !state.ship(target_id).map(|s| s.hull > 0.0).unwrap_or(false) {
-            continue; // 目标已被本回合其它发击毁——跳过这发（火力补刀不浪费）。
+            // 目标已被本回合其它发击毁——跳过这发（火力补刀不浪费）。**记下来**：
+            // 「这门炮白瞄了一场空」也是「为什么没打出去」的一半答案。
+            shots_acc.entry(target_id.clone()).or_default().push(Shot {
+                weapon: *wi,
+                target_hull_before: 0.0,
+                score_basic: order.score_basic,
+                score_temper: order.score_temper,
+                score_spread: order.score_spread,
+                skipped: true,
+                ..Shot::default()
+            });
+            continue;
         }
-        let dmg = resolve_shot(state, config, attacker_id, w, target_id);
+        let mut shot = resolve_shot(state, config, attacker_id, w, target_id);
+        shot.weapon = *wi;
+        shot.score_basic = order.score_basic;
+        shot.score_temper = order.score_temper;
+        shot.score_spread = order.score_spread;
+        let dmg = shot.damage;
         let dead = state
             .ship(target_id)
             .map(|s| s.hull <= 0.0)
@@ -274,6 +316,7 @@ pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(
         // 第一发把它打到 hull ≤ 0 的就是**补刀**（已在 0 的目标在循环开头被跳过，
         // 所以这里判真一定是本发致命）。记下这一发的来源作为凶手。
         if dead && !destroyed.iter().any(|(n, _)| n == target_id) {
+            shot.killed = true;
             destroyed.push((
                 target_id.clone(),
                 Killer {
@@ -287,6 +330,7 @@ pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(
         hist.entry(target_id.clone()).or_insert(0.0);
         *hist.get_mut(target_id).unwrap() = 1.0;
         *damage_acc.entry(target_id.clone()).or_insert(0.0) += dmg;
+        shots_acc.entry(target_id.clone()).or_default().push(shot);
     }
     // 攻击历史写回（火力分配跨回合记忆）。
     if let Some(a) = state.ship_mut(attacker_id) {
@@ -295,19 +339,27 @@ pub fn fire(state: &mut State, config: &GameConfig, attacker_id: &str, plan: &[(
         }
     }
     for (t, dmg) in &damage_acc {
+        let shots = shots_acc.remove(t).unwrap_or_default();
+        // **只要真的朝一个当时还活着的目标打过一发就发事件**（`damage` 可能是 0：被点防吃光）。
+        // `target_hull_before > 0` 过滤掉「瞄的是本回合早先已被打沉的舰」——那不是一次交火。
+        if !shots.iter().any(|s| !s.skipped) {
+            continue;
+        }
+        let tfac = state
+            .ship(t)
+            .map(|s| s.faction_id.clone())
+            .unwrap_or_default();
+        ev(
+            state,
+            GameEvent::Attack {
+                attacker: attacker_id.to_string(),
+                target: t.clone(),
+                damage: *dmg,
+                shots,
+            },
+        );
+        // 关系照旧只认真打出来的伤害（与 `step_diplomacy` 的交火判据同一道闸）。
         if *dmg > 1e-9 {
-            let tfac = state
-                .ship(t)
-                .map(|s| s.faction_id.clone())
-                .unwrap_or_default();
-            ev(
-                state,
-                GameEvent::Attack {
-                    attacker: attacker_id.to_string(),
-                    target: t.clone(),
-                    damage: *dmg,
-                },
-            );
             adjust_relation(state, config, &afac, &tfac, config.diplomacy.attack_delta);
         }
     }
@@ -329,12 +381,19 @@ pub fn fire_concentrate(
         .ship(attacker_id)
         .map(|a| ship_weapons(config, a))
         .unwrap_or_default();
-    let plan: Vec<(usize, ShipId)> = weapons
+    let plan: Vec<FireOrder> = weapons
         .iter()
         .enumerate()
         .flat_map(|(i, w)| {
             let shots = (w.fire_rate.round()).max(1.0) as usize;
-            (0..shots).map(move |_| (i, target_id.to_string()))
+            (0..shots).map(move |_| FireOrder {
+                weapon: i,
+                target: target_id.to_string(),
+                // 集中火力这条入口**不做索敌**（调用方指定目标）⇒ 三项分没有意义，记中性值。
+                score_basic: 0.0,
+                score_temper: 0.0,
+                score_spread: 1.0,
+            })
         })
         .collect();
     fire(state, config, attacker_id, &plan);
@@ -349,28 +408,54 @@ pub fn resolve_shot(
     attacker_id: &str,
     w: &Weapon,
     target_id: &str,
-) -> f64 {
+) -> Shot {
     let apos = state
         .ship(attacker_id)
         .map(|a| a.position)
         .unwrap_or([0.0, 0.0]);
-    let (tfac, tpos, tspeed, tpanel) = {
+    let (tfac, tpos, tspeed, tpanel, target_hull_before) = {
         let t = state.ship(target_id).expect("target gone");
         let panel = ship_panel(config, t);
-        (t.faction_id.clone(), t.position, panel.speed, panel)
+        (t.faction_id.clone(), t.position, panel.speed, panel, t.hull)
+    };
+    // 每一发的分解都从这里出去（[`Shot`]）：算完就扔的中间量，此后只在事件层可见。
+    let mut shot = Shot {
+        weapon: 0,
+        target_hull_before,
+        skipped: false,
+        score_basic: 0.0,
+        score_temper: 0.0,
+        score_spread: 1.0,
+        in_range: true,
+        def_mult: 1.0,
+        hit: 1.0,
+        pd: 0.0,
+        pd_absorbed: 0.0,
+        absorbed: 0.0,
+        soak: 1.0,
+        armor_soak: 0.0,
+        hull_pen: 0.0,
+        damage: 0.0,
+        killed: false,
     };
     let d = dist(apos, tpos);
     if d > w.range {
-        return 0.0; // weapon out of range — positional, not a stat
+        shot.in_range = false;
+        return shot; // weapon out of range — positional, not a stat
     }
     let def_mult = home_defense_mult(state, &tfac, tpos);
     let hit = hit_factor(w.tracking, tspeed);
     let mut dmg = w.damage * hit * def_mult;
+    shot.def_mult = def_mult;
+    shot.hit = hit;
     // 导弹是制导的（对高速目标规避弱），但会被目标点防御**线性**拦截（自身 + 附近友舰。
     if w.kind == WEAPON_MISSILE {
         let pd = tpanel.intercept + cluster_pd_cover(state, config, target_id, &tfac, tpos);
         if pd > 0.0 {
+            let before = dmg;
             dmg = (dmg - pd).max(0.0);
+            shot.pd = pd;
+            shot.pd_absorbed = before - dmg;
         }
     }
     let (mut hull, mut shield) = {
@@ -400,6 +485,11 @@ pub fn resolve_shot(
     hull -= hull_pen;
     let destroyed = hull <= 0.0;
     let hull_damage_done = (hull_before - hull.max(0.0)).max(0.0);
+    shot.absorbed = absorbed;
+    shot.soak = soak;
+    shot.armor_soak = armor_soak;
+    shot.hull_pen = hull_pen;
+    shot.killed = destroyed;
     if let Some(t) = state.ship_mut(target_id) {
         t.hull = if destroyed { 0.0 } else { hull.max(0.0) };
         t.shield = shield.max(0.0);
@@ -435,7 +525,8 @@ pub fn resolve_shot(
             }
         }
     }
-    dmg // 本次造成的总伤害（护盾 + 船体）；用于事件/关系/攻击历史。
+    shot.damage = dmg;
+    shot // 本次的**逐发分解**（护盾 + 船体总伤害在 `damage` 里）；用于事件/关系/攻击历史。
 }
 
 /// 舰队防空（防空屏护）：目标（`target_faction` 阵营、`tpos` 处）附近 `pd_radius` 内的友舰，
