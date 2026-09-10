@@ -160,7 +160,7 @@
 | --- | --- | --- | --- |
 | `[x]` | [代码布局：大文件拆小 + 单测搬出源码](notes/code-layout.md) | `sim.rs` 6341 → 170 行 `mod.rs` + 17 个子模块、`control.rs` 3863 → 85 + 8 个；18 个源文件的内联单测全搬到 `src/tests/`（`#[path]` 引入 ⇒ **零可见性放宽**）；纯搬运，digest 逐字节不变。 | 下一轮候选：`model/event.rs` 1141、`projection.rs` 1063、`model/game_config.rs` 992、`world.rs` 865、`autocontrol/shipbuilding.rs` 746 |
 | `[x]` | [测试按模拟时间分档](notes/test-tiers.md) | 用 `cargo nextest` 的 group/profile 按**推进回合数**分档：快档 178 条 / 4 s（原 110 s）、中档 184 / 30 s、全档 189 / 96 s；档位写在模块名 `horizon_mid`/`horizon_long` 里，加用例不用改配置。 | 读面契约用例（80–120 回合）仍留在快档的取舍与升级路径见该篇 §6 |
-| `[~]` | [测试墙钟：热点清单与待办](notes/test-wall-clock.md) | 测试走的是 dev 档（`opt-level = 0`）⇒ P0 已加 `[profile.test] opt-level = 2`（行为中性，**实测与 digest 对账还欠着**）；另附一份「每回合被重复算多次」的热点清单（带 `文件:行号`）。 | P1 纯去重（`faction_power_share` 一回合约 10+ 次、索敌内层逐候选重算）／P2 深缓存／P3 测试侧改读 `derived.metrics`；§4 的两次验证 |
+| `[~]` | [测试墙钟：热点清单与待办](notes/test-wall-clock.md) | 测试走的是 dev 档（`opt-level = 0`）⇒ **P0 已加 `[profile.test] opt-level = 2` 并实测**：最重的长局 77.2 → **18.1 s（4.27×）**、快档 4.4 → 2.0 s、中档 29.7 → 8.0 s（全档只推算没实测）；行为中性的两条依据见该篇 §0.1。另附一份「每回合被重复算多次」的热点清单（带 `文件:行号`）。 | P1 纯去重（`faction_power_share` 一回合约 10+ 次、索敌内层逐候选重算）／P2 深缓存／P3 测试侧改读 `derived.metrics`；全档重测 + P1 的 digest 对账 |
 
 ---
 
