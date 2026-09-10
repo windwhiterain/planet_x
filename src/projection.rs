@@ -41,6 +41,12 @@ fn idx_file(name: &str) -> String {
     format!("{IDX_DIR}/{name}.jsonl")
 }
 
+/// 事件的稳定 id：`"<round>:<seq>"`（`seq` = 本回合内的事件序号）。可排序、确定性、
+/// 不需要额外存储；Python 侧用它做 join 键与因果链引用。
+fn event_id(round: u32, seq: usize) -> String {
+    format!("{round}:{seq}")
+}
+
 /// Declaration of one lazy field: which table holds it, how it is keyed, whether it is a
 /// per-round snapshot (vs a global master table), and the main-stream id-array column.
 struct LazyField {
@@ -59,6 +65,10 @@ const LAZY: &[LazyField] = &[
     LazyField { name: "ships", table: "idx/ships.jsonl", key: "ship_id", id_col: "ship_ids", round: true },
     LazyField { name: "cities", table: "idx/cities.jsonl", key: "city_id", id_col: "city_ids", round: true },
     LazyField { name: "factions", table: "idx/factions.jsonl", key: "faction_id", id_col: "faction_ids", round: true },
+    // 事件历史：**归一化**的一行一事件（固定列 + 统一参与方槽位），取代此前内联在
+    // main.jsonl 里的「serde 直接摊开的 tagged enum」——那种表 74.8% 的单元格是 null、
+    // 且 `from`/`to` 一列两义（city_defected 是势力、capital_relocated 是天体）。
+    LazyField { name: "events", table: "idx/events.jsonl", key: "event_id", id_col: "event_ids", round: true },
     LazyField { name: "bodies", table: "idx/bodies.jsonl", key: "body_id", id_col: "body_ids", round: false },
     LazyField { name: "settlements", table: "idx/settlements.jsonl", key: "settlement_id", id_col: "settlement_ids", round: false },
 ];
@@ -81,6 +91,7 @@ pub fn write_index(
     fs::write(dir.join(META), crate::agent::meta_value(config).to_string()).map_err(|e| e.to_string())?;
 
     let mut main = BufWriter::new(File::create(dir.join(MAIN)).map_err(|e| e.to_string())?);
+    let mut events = BufWriter::new(File::create(dir.join(idx_file("events"))).map_err(|e| e.to_string())?);
     let mut ships = BufWriter::new(File::create(dir.join(idx_file("ships"))).map_err(|e| e.to_string())?);
     let mut cities = BufWriter::new(File::create(dir.join(idx_file("cities"))).map_err(|e| e.to_string())?);
     let mut factions = BufWriter::new(File::create(dir.join(idx_file("factions"))).map_err(|e| e.to_string())?);
@@ -133,21 +144,22 @@ pub fn write_index(
     }
 
     // Round 0 (start state) then each advancing round.
-    write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &sim::derived_from_state(state, config))?;
+    write_round(&mut main, &mut events, &mut ships, &mut cities, &mut factions, state, config, &sim::derived_from_state(state, config))?;
     for _ in 0..rounds {
         let derived = sim::advance(state, config, rng);
-        write_round(&mut main, &mut ships, &mut cities, &mut factions, state, config, &derived)?;
+        write_round(&mut main, &mut events, &mut ships, &mut cities, &mut factions, state, config, &derived)?;
     }
 
-    for w in [&mut main, &mut ships, &mut cities, &mut factions, &mut bodies, &mut settlements] {
+    for w in [&mut main, &mut events, &mut ships, &mut cities, &mut factions, &mut bodies, &mut settlements] {
         w.flush().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-/// Write one round's main line, ship rows, city rows, and faction rows.
+/// Write one round's main line, event rows, ship rows, city rows, and faction rows.
 fn write_round(
     main: &mut BufWriter<File>,
+    events: &mut BufWriter<File>,
     ships: &mut BufWriter<File>,
     cities: &mut BufWriter<File>,
     factions: &mut BufWriter<File>,
@@ -159,11 +171,16 @@ fn write_round(
     let row = json!({
         "round": state.round,
         "time_month": r2(state.time_month),
-        "events": state.events,
         "chronicle": state.chronicle,
         "metrics": metrics,
+        "event_ids": (0..state.events.len())
+            .map(|i| event_id(state.round, i))
+            .collect::<Vec<_>>(),
         "ship_ids": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-        "city_ids": state.cities.iter().filter(|c| !c.razed).map(|c| c.name.clone()).collect::<Vec<_>>(),
+        // **全部**城（含已夷平的空白城）：投影表 `cities` 里本来就有 razed 行，这里若把
+        // razed 城筛掉，`q.join('cities')` 就会与 `q.cities()` 不一致——而「被夷平的城」
+        // 恰恰是历史查询最关心的实体。是否算「活城」交给查询方看 `razed` 列。
+        "city_ids": state.cities.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
         "faction_ids": state.factions.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
         "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
         "settlement_ids": state.bodies
@@ -172,6 +189,32 @@ fn write_round(
             .collect::<Vec<_>>(),
     });
     writeln!(main, "{row}").map_err(|e| e.to_string())?;
+
+    // 本回合事件的**归一化行**（见 `GameEvent::history_row`）：固定列、无同名多义，
+    // 参与方在统一的 (actor/target/extra) 槽位里。Python 侧因此可以按任意实体 join
+    // 「这座城 / 这艘舰 / 这个势力的历史」，而不需要知道任何 variant 的字段布局。
+    for (i, e) in state.events.iter().enumerate() {
+        let h = e.history_row();
+        writeln!(
+            events,
+            "{}",
+            json!({
+                "round": state.round,
+                "seq": i,
+                "event_id": event_id(state.round, i),
+                "type": h.kind,
+                "salience": h.salience,
+                "actor_kind": h.actor_kind,
+                "actor_id": h.actor_id,
+                "target_kind": h.target_kind,
+                "target_id": h.target_id,
+                "extra": h.extra,
+                "magnitude": r2(h.magnitude),
+                "data": h.data,
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     for s in &state.ships {
         let p = ship_panel(config, s);
@@ -319,6 +362,25 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
                 "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","city_ids":"array","ship_ids":"array"},
             }),
+            "events" => json!({
+                "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
+                "description": "事件历史（稀疏账本）：一行一事件，**归一化固定列**——参与方一律走 (actor_kind, actor_id, target_kind, target_id) 主槽位 + `extra` 长表（role/kind/id），因此任意实体（城/舰/势力/天体）都能用同一个查询形状 join 它自己的历史，不需要知道任何事件类型的字段布局。variant 专属载荷统一收进 `data` 一个对象列（一列只承载一种类型：没有\"同时是标量和列表\"的列，也没有 `from`/`to` 这种一列两义的同名列）。\n统计建议：**先按类型取**（`q.events(type='city_razed')` → 该类型的字段是稠密的），全集帧只用于计数/扫描。",
+                "columns": {
+                    "round":"integer","seq":"integer","event_id":"string","type":"string","salience":"string",
+                    "actor_kind":"string","actor_id":"string","target_kind":"string","target_id":"string",
+                    "extra":"array","magnitude":"number","data":"object"
+                },
+                "column_docs": {
+                    "event_id": "稳定 id `<round>:<seq>`，join/因果引用用。",
+                    "type": "事件类型（与 Rust `GameEvent::kind()` / serde 判别式逐字一致）。",
+                    "salience": "显著性：milestone（改变归属/存亡）/ notable / detail（逐次高频流水）。",
+                    "actor_kind/actor_id": "动作发起方（如 city_razed 的 actor 是拆城的**势力**）——没有发起方时为 null。",
+                    "target_kind/target_id": "动作直接对象（如被围的**城**、被击毁的**舰**）。",
+                    "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",
+                    "magnitude": "统一数值强度（伤害；无伤害事件为 0），便于 groupby().sum()。",
+                    "data": "该事件类型的专属载荷（可读名/舰级/死因/忠诚度/复垦方式…），固定只用这一个对象列。",
+                },
+            }),
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "天体主表（name/轨道/定居点数），几乎不变，全局一次。按 body_id 索引。",
@@ -344,11 +406,11 @@ pub fn projection_schema() -> serde_json::Value {
         "eager": {
             "round":      {"type": "integer", "description": "回合号（月）。"},
             "time_month": {"type": "number", "description": "累计时间（月）。"},
-            "events":     {"type": "array", "description": "本回合事件（type + 引用 ship/city id：开火/被毁/城夷平/殖民/开战/停战/剧情）。"},
+            "event_ids":  {"type": "array", "items": {"type": "string"}, "description": "本回合事件 id（`<round>:<seq>`，join events 表用）。事件本体不再内联——见 lazy.events。"},
             "chronicle":  {"type": "array", "description": "剧情编年史（round id title body participants，累计叙事）。"},
             "metrics":    {"type": "object", "description": "总结指标（与 --schema 的 Trajectory.metrics 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 各势力·各城产出/维护/治理。这是 agent 的轻量决策视图。"},
             "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
-            "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合活城 id（=城名，join cities 表用）。"},
+            "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合**全部**城 id（=城名，join cities 表用）。含已夷平的空白城（razed 列筛）；与 cities 表逐行一致。"},
             "faction_ids": {"type": "array", "items": {"type": "string"}, "description": "本回合势力 id（=势力名，join factions 表用）。"},
             "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"},
             "settlement_ids": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点 id（=定居点名，join settlements 表用）。"}
@@ -358,6 +420,7 @@ pub fn projection_schema() -> serde_json::Value {
             "先读 schema.json，分清 eager（内联）vs lazy（索引）字段；",
             "读 main.jsonl 的 eager + metrics（轻量决策视图），按需拿 id；",
             "看外交/经济/军力全貌：q.factions(round=r)（势力主表：relations/resources/自有城与舰）；",
+            "查「某城/某舰/某势力发生过什么」：用事件历史表——q.history('city', 城名) / q.history('ship', 舰名)（归一化参与方槽位，任意实体都能 join），或按类型直取稠密帧 q.events(type='city_razed')；",
             "要某舰/某城/某天体的完整对象时，用 Python kit 按 id join：q.ships(round=r) / q.join('ships', round=r)；",
             "要规则（舰级/建筑/组件/资源价值）时读 meta.json：Python kit 里 q.meta / q.ships_spec() / q.buildings_spec() / q.components_spec() / q.resource_value() —— 规则表可当 DataFrame 与 facts join。"
         ]
@@ -374,7 +437,7 @@ mod tests {
 
     /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
     const MAJOR_EAGER: &[&str] = &[
-        "round", "time_month", "events", "chronicle", "metrics", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
+        "round", "time_month", "event_ids", "chronicle", "metrics", "ship_ids", "city_ids", "faction_ids", "body_ids", "settlement_ids",
     ];
 
     /// A scratch dir for one test, removed on drop.
@@ -431,14 +494,18 @@ mod tests {
             for obj in ["ships", "cities", "factions", "bodies", "settlements"] {
                 assert!(!row.as_object().unwrap().contains_key(obj), "main 不应内联 {obj}");
             }
+            // 事件已改为 lazy：主流只带 event_ids，不再内联 events。
+            assert!(!row.as_object().unwrap().contains_key("events"), "main 不应内联 events（已 lazy 化）");
             let ids = row["ship_ids"].as_array().unwrap();
             assert!(!ids.is_empty(), "main 每行要有 ship_ids（join 用）");
+            assert!(row["event_ids"].is_array(), "main 每行要有 event_ids（join events 用）");
         }
 
         // lazy tables actually written.
         assert!(s.0.join("idx/ships.jsonl").exists());
         assert!(s.0.join("idx/cities.jsonl").exists());
         assert!(s.0.join("idx/factions.jsonl").exists());
+        assert!(s.0.join("idx/events.jsonl").exists());
         assert!(s.0.join("idx/bodies.jsonl").exists());
         assert!(s.0.join("idx/settlements.jsonl").exists());
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
@@ -456,6 +523,26 @@ mod tests {
         assert!(!cities.is_empty());
         assert!(cities[0].get("gov_distance").is_some(), "cities 表要有 gov_distance（治理距离）");
         assert!(cities[0].get("revolt_risk").is_some(), "cities 表要有 revolt_risk（离心风险）");
+
+        // events table: 归一化固定列（一行一事件），参与方走统一槽位。
+        let events = jsonl(&s.0.join("idx/events.jsonl"));
+        assert!(!events.is_empty(), "6 回合后应有事件");
+        for col in ["round", "seq", "event_id", "type", "salience", "actor_kind", "actor_id",
+                    "target_kind", "target_id", "extra", "magnitude", "data"] {
+            assert!(events[0].get(col).is_some(), "events 表要有 {col} 列");
+        }
+        // 归一化的意义：**没有任何一列是 variant 专属字段**，否则又会回到「同名多义」
+        // （`from`/`to` 一列两义）与「同角色多名」（faction/owner/fallen_to/from/to）。
+        for forbidden in ["from", "to", "a", "b", "attacker", "target", "city", "ship", "body", "owner"] {
+            assert!(events[0].get(forbidden).is_none(), "events 表不应有 variant 专属列 {forbidden}（应进 data/统一槽位）");
+        }
+        assert!(events.iter().all(|e| e["salience"].is_string()), "salience 必须是字符串分级");
+        // 每个事件至少有一个被命名的实体（否则它无法被任何实体 join 到）。
+        assert!(
+            events.iter().all(|e| e["actor_id"].is_string() || e["target_id"].is_string()
+                || !e["extra"].as_array().map(|a| a.is_empty()).unwrap_or(true)),
+            "每个事件至少要有一个参与方实体"
+        );
     }
 
     /// The projection is deterministic: the same seed → byte-identical `main.jsonl`.
@@ -470,5 +557,101 @@ mod tests {
             fs::read(s.0.join("main.jsonl")).unwrap()
         };
         assert_eq!(run("a"), run("b"), "same seed must reproduce identical main.jsonl");
+    }
+
+    /// The event ledger is deterministic too: same seed → byte-identical `idx/events.jsonl`.
+    ///
+    /// NOTE: `Scratch` 的目录名是「进程 id + tag」，而 cargo 的测试是**同进程多线程并行**的，
+    /// 所以 tag 必须在全文件内唯一——与 `projection_is_deterministic` 共用 "a"/"b" 会撞目录。
+    #[test]
+    fn event_ledger_is_deterministic() {
+        let cfg = load_config();
+        let run = |tag: &str| -> Vec<u8> {
+            let mut state = default_state(&cfg, 42);
+            let mut rng = Prng::new(42);
+            let s = Scratch::new(tag);
+            write_index(&mut state, &cfg, &mut rng, 20, &s.0).unwrap();
+            fs::read(s.0.join("idx/events.jsonl")).unwrap()
+        };
+        assert_eq!(run("ledger_a"), run("ledger_b"), "same seed must reproduce identical event ledger");
+    }
+
+    /// **完备性守卫**：密集快照里可见的每一次「城的归属 / 存亡」变化，都必须有一条**命名
+    /// 了这座城**的事件来解释。
+    ///
+    /// 这正是此前最痛的那个洞——「城市易主了，就近是什么事件导致？」答不上来，因为若干路径
+    /// 根本不发事件：难民夺城（`displace_city_for_refugee`）零事件、`Resurgence` 不带 city。
+    /// 稀疏历史安全的前提就是「能证明自己什么都没丢」；这条测试就是那个证明。它同时是
+    /// 「事件系统不许退化成顺手记的副产品」的回归防线。
+    #[test]
+    fn every_city_state_change_is_explained_by_an_event() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 42);
+        let mut rng = Prng::new(42);
+        let s = Scratch::new("reconcile");
+        write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
+
+        // 每回合「被事件命名过的实体」集合：(kind, id)。
+        let mut named: BTreeMap<u32, BTreeSet<(String, String)>> = BTreeMap::new();
+        for e in jsonl(&s.0.join("idx/events.jsonl")) {
+            let round = e["round"].as_u64().unwrap() as u32;
+            let set = named.entry(round).or_default();
+            for (kc, ic) in [("actor_kind", "actor_id"), ("target_kind", "target_id")] {
+                if let (Some(k), Some(i)) = (e[kc].as_str(), e[ic].as_str()) {
+                    set.insert((k.to_string(), i.to_string()));
+                }
+            }
+            for p in e["extra"].as_array().cloned().unwrap_or_default() {
+                if let (Some(k), Some(i)) = (p["kind"].as_str(), p["id"].as_str()) {
+                    set.insert((k.to_string(), i.to_string()));
+                }
+            }
+        }
+
+        // 逐回合对比密集快照：任何 (faction_id, razed) 变化都必须被解释。
+        // `prev`/`cur` 分开两张表：文件按回合成块，遇到新回合才把 cur 提升为 prev。
+        let mut prev: BTreeMap<String, (String, bool)> = BTreeMap::new();
+        let mut cur: BTreeMap<String, (String, bool)> = BTreeMap::new();
+        let mut cur_round = u32::MAX;
+        let mut unexplained: Vec<String> = Vec::new();
+        // 真正被检查到的变化次数——**守卫必须非空**：一个什么都没检查的绿灯等于没有守卫。
+        let mut checked = 0usize;
+        for c in jsonl(&s.0.join("idx/cities.jsonl")) {
+            let round = c["round"].as_u64().unwrap() as u32;
+            if round != cur_round {
+                prev = std::mem::take(&mut cur);
+                cur_round = round;
+            }
+            let cid = c["city_id"].as_str().unwrap().to_string();
+            let now = (
+                c["faction_id"].as_str().unwrap_or_default().to_string(),
+                c["razed"].as_bool().unwrap_or(false),
+            );
+            if let Some(p) = prev.get(&cid) {
+                if p != &now {
+                    checked += 1;
+                    let explained = named
+                        .get(&round)
+                        .map(|set| set.contains(&("city".to_string(), cid.clone())))
+                        .unwrap_or(false);
+                    if !explained {
+                        unexplained.push(format!("r{round} 城 {cid}: {p:?} → {now:?}"));
+                    }
+                }
+            }
+            cur.insert(cid, now);
+        }
+        assert!(
+            checked >= 5,
+            "该窗口内只看到 {checked} 次城状态变化——守卫几乎没在检查东西，请换更长窗口/种子"
+        );
+        assert!(
+            unexplained.is_empty(),
+            "存在**未被任何事件解释**的城状态变化（历史不完备，agent 会答不出「为什么易主」）：\n· {}",
+            unexplained.join("\n· ")
+        );
+        println!("完备性守卫：{checked} 次城状态变化全部有事件解释");
     }
 }

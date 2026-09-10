@@ -503,29 +503,11 @@ fn digest_value(
 
 /// Count the GameEvent variants in a window, keyed by their `type` label.
 fn event_counts(events: &[GameEvent]) -> BTreeMap<String, u32> {
-    use GameEvent::*;
     let mut m = BTreeMap::new();
     for e in events {
-        let label = match e {
-            Attack { .. } => "attack",
-            ShipDestroyed { .. } => "ship_destroyed",
-            Siege { .. } => "siege",
-            CityRazed { .. } => "city_razed",
-            ShipSpawned { .. } => "ship_spawned",
-            ColonyFounded { .. } => "colony_founded",
-            StaleOrder { .. } => "stale_order",
-            Withdraw { .. } => "withdraw",
-            WarStarted { .. } => "war_started",
-            WarEnded { .. } => "war_ended",
-            Story { .. } => "story",
-            Resurgence { .. } => "resurgence",
-            Revolt { .. } => "revolt",
-            CityDefected { .. } => "city_defected",
-            CoalitionFormed { .. } => "coalition_formed",
-            CoalitionEnded { .. } => "coalition_ended",
-            CapitalRelocated { .. } => "capital_relocated",
-        };
-        *m.entry(label.to_string()).or_insert(0) += 1;
+        // 类型名走单一权威 `GameEvent::kind()`（此前这里手抄了一份 variant → label 的
+        // match，既与 serde 判别式有漂移风险，也会在新增 variant 时漏掉）。
+        *m.entry(e.kind().to_string()).or_insert(0) += 1;
     }
     m
 }
