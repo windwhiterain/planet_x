@@ -250,8 +250,10 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 | `ship_orders` | 每艘舰的**移动/停泊**行为 | `Idle / Move / Follow / DockCity / Dock / Colonize`（见下） |
 | `default_doctrine` | **舰队默认行为风格**（势力级一片，长期倾向） | `{"temper":…,"lone_wolf":…,"mode":…}`。全舰队一个风格 = 一片叶 |
 | `default_kiting` | **舰队默认风筝↔贴脸**（势力级一片） | `{"kiting":…,"mode":…}` |
+| `default_role` | **舰队默认角色**（势力级一片，第三条风格轴） | `{"role":"War"\|"Freight"\|"Observe","mode":…}`。角色决定自动控制**派哪种活**（战舰找仗打／运输舰跑集货／观测舰蹲异常区喂 MOND 掌握度），不解除武装 |
 | `ship_doctrine` | 每舰**行为风格**（per-舰叶片） | `temper`（理智↔热血，欺软怕硬↔飞蛾扑火）、`lone_wolf`（护航↔独狼），各 `[-1,1]`、`0`=基线 |
 | `ship_kiting` | 每舰**风筝↔贴脸**姿态（per-舰叶片） | `[-1,1]`、`0`=基线。**软属性**：Move/Follow/Dock/Idle 都是软目标，附近有敌舰时自动微调位置，**玩家也不能硬控制** |
+| `ship_role` | 每舰**角色**（per-舰叶片） | `War`/`Freight`/`Observe`。⚠ 这片叶**自动控制每回合也会写**（按积压定编集货 + 派舰去异常区），玩家钉 `mode=Player` 之后它不再碰 |
 | `investment_budget` | **建设**投资预算（每资源 / 月） | 用于建建筑、扩生产 |
 | `construction_budget` | **造舰**建造预算（每资源 / 月） | 用于造舰；会先给维护费留**预留**（见下） |
 | `invest_weights` | 各建设任务优先级 | 谁先吃投资预算。key = `city` + `building`（`building` 是**城内的 u32 下标**） |
@@ -260,6 +262,13 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 | `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
 | `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效）、**挂/拆设计图指针**（`{"city":…,"building":…,"blueprint":"<图名>"}`；`"blueprint": null` = 拆掉指针回到自动选装） |
 | `blueprints` | **设计图库**（势力级，一张图一片叶） | `{"name":"<图名>","class":"<舰级>","components":[…],"role":"War","kiting":-0.5,"doctrine":{"temper":0,"lone_wolf":0},"mode":…}`——见 §3 末尾。⚠ 图上**不能**写指令（`"order"` 是未知字段） |
+
+> ⚠ **这张表是文档，不是权威**：权威是引擎发的 `--control-schema` 的
+> `leaves` / `actions` 段（`src/control/leaves.rs`：每片叶的键名 / **身份键** / **值字段** /
+> 只读派生列）。**先跑那个，别看这张表**——2026-10 实测它就漏了两片叶
+> （`default_role` / `ship_role`，角色轴那次），补上就是因为这件事。
+> 三端（引擎 / web 的 `views.json` / Python kit）现在读同一份声明，
+> 纪律见 [`notes/web-control-spec.md`](notes/web-control-spec.md) 与 `play/tests/g4_spec.py`。
 
 > **设计图（blueprint）= 「还不存在的舰」的出厂规格**：建造区**指向**一张图
 > （`buildings[].blueprint`），下水那一刻把图**印成**一艘舰（`components` 是**快照**，
