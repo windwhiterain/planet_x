@@ -32,6 +32,7 @@ use planet_x::sim;
 use planet_x::world;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -204,6 +205,38 @@ async fn new_game(AxState(shared): AxState<Shared>, Json(req): Json<NewReq>) -> 
     Json(state_view(&world))
 }
 
+// --- 监听端口 ---------------------------------------------------------------
+
+/// 自动挑一个空闲端口：从 `base` 起向上扫 `attempts` 个端口，绑上**第一个**空闲的。
+///
+/// 全都占着就退到 OS 临时端口（`bind :0`，内核给哪个算哪个）——于是「自动模式」
+/// **不会**因为端口被占而启动失败。想钉死某个端口就别走这条路：直接绑那个端口，
+/// 占用即报错（见 `main`）——显式点名的端口被默默换掉，比启动失败更难查。
+///
+/// 为什么是「向上扫」而不是「直接 `:0`」：本机常同时开着好几个 WebUI（玩家一个、
+/// agent 再开一个做实机验证），URL 钉在 `3000` / `3001` / `3002` 附近比一个随机高位
+/// 端口好记、好写进脚本，而且 `3000` 空着时行为与从前**逐字一致**。
+///
+/// `base = 0` 时第一次尝试就是「让内核挑」，即 OS 临时端口。
+pub async fn bind_auto(host: &str, base: u16, attempts: u16) -> std::io::Result<TcpListener> {
+    let mut busy: Option<std::io::Error> = None;
+    for offset in 0..attempts {
+        let Some(port) = base.checked_add(offset) else { break };
+        match TcpListener::bind((host, port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => busy = Some(e),
+            // 别的错误（端口越权、地址不合法…）不是「这个端口被占」——换端口也没用，
+            // 直接上报，别把它藏成「扫了一百个都不行」。
+            Err(e) => return Err(e),
+        }
+    }
+    match TcpListener::bind((host, 0)).await {
+        Ok(listener) => Ok(listener),
+        // 连临时端口都拿不到：报「端口被占」这个更可能的原因（`busy`）。
+        Err(e) => Err(busy.unwrap_or(e)),
+    }
+}
+
 /// Build the axum router serving the JSON API and the static frontend.
 ///
 /// The static directory is `PLANET_X_WEB_STATIC` if set, else `<crate>/static`.
@@ -311,5 +344,31 @@ mod tests {
         assert!(!post["flow"]["upkeep"].as_object().unwrap().is_empty());
         assert!(!post["flow"]["governance"].as_object().unwrap().is_empty());
         assert!(!post["metrics"]["power_share"].as_object().unwrap().is_empty());
+    }
+
+    /// 起始端口空着时，自动模式**必须**原样用它——「`3000` 空着就和从前一样」是这条
+    /// 特性的全部兼容性承诺，破了它等于偷偷改掉所有人的 URL。
+    #[tokio::test]
+    async fn bind_auto_keeps_the_base_port_when_it_is_free() {
+        // 先问内核要一个肯定空闲的端口，再放手把它交给 `bind_auto`。
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let listener = bind_auto("127.0.0.1", port, 16).await.expect("一个刚放手的端口能重绑");
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
+
+    /// 占用时**让位**：向上扫到下一个空闲端口，而不是把「地址已占用」原样抛出去——
+    /// 这正是「本机已经有 `3000` 在跑」时想要的。也顺带钉住「绝不返回已占端口」。
+    #[tokio::test]
+    async fn bind_auto_skips_a_busy_port() {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = held.local_addr().unwrap().port();
+
+        let listener = bind_auto("127.0.0.1", busy, 16).await.expect("邻居端口总有空的");
+        let picked = listener.local_addr().unwrap().port();
+        assert_ne!(picked, busy, "自动模式不能把已经被占的端口当成自己的");
+        assert!(picked >= busy, "自动模式只向上扫：{picked} < {busy}");
     }
 }
