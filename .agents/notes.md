@@ -1,5 +1,15 @@
 # 《行星X》笔记索引
 
+> **🡒 当前已裁决、下一步做什么**（2026-10，用户已确认；实现顺序见
+> [`control-live-layers.md`](notes/control-live-layers.md) §9）：
+> ① **web 三条**（该篇 §8：逐舰三叶 tabs **保留** + 舰行加"三叶一起归谁"的批量下拉、
+> 「恢复继承」按钮 + 「等值不接管」、**应用只回传差异**、`Auto` 标签改成诚实说法——风格轴今天
+> **没有 AI 写入者**，见该篇 §3.2）→ ② **两轴叶**（同篇 §3.1：势力级单轴新建 ⇒ 响亮拒绝；
+> 逐舰单轴 ⇒ 从 `Ship.doctrine` 记录值种上；不动叶值形状）→ ③ **舰船设计图**
+> （[`ship-blueprint-spec.md`](notes/ship-blueprint-spec.md) §8.0 十条已裁决 + 附 A 改动地图，
+> 连同 `spawned_round` 一次升 `SCHEMA_VERSION` 7）。
+> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变。
+
 > **这里只是索引。** 每条主题的**具体描述**（怎么设计的、落地到哪一步、实测数据、未做项与理由）
 > 都在 `.agents/notes/<slug>.md`：一条主题一个文件，文件名就是它的稳定 ID。
 >
@@ -36,7 +46,7 @@
 | `[ ]` | [时代与科技演进](notes/eras-technology.md) | 用解锁式舰级、材料升级与舰种分支，给上千回合铺时代节奏；三条都还只在纸面。 | 舰级解锁、结构演进、设计图分支全未开工 |
 | `[~]` | [军事与战斗](notes/military-combat.md) | 拟真战斗与舰船定制（组件/护盾/点防/命中折减）已落地，AI 拟人化那批也做完。 | 舰船退役换装、换模块/再装配；长局可玩性 |
 | `[~]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮） |
-| `[~]` | [舰船设计图：实现规格](notes/ship-blueprint-spec.md)（**待裁决**） | 现状核实（带 `文件:行号`）、数据结构、config/叶片/投影形状、迁移、测试计划、改动地图；更正旧 note 两处事实（出厂风格 config 从未填过、造舰只剩两条路）。 | **§8 十条开放问题待裁决**（Q1 舰级层 vs 舰队默认 / Q2 意图快照 vs 活层 / Q3 class 真相在哪）；裁决后照「附 A 改动地图」实现 |
+| `[~]` | [舰船设计图：实现规格](notes/ship-blueprint-spec.md)（**十条已裁决**） | 现状核实（带 `文件:行号`）、数据结构、config/叶片/投影形状、迁移、测试计划、改动地图；更正旧 note 两处事实（出厂风格 config 从未填过、造舰只剩两条路）。**§8.0 = 十条裁决**（Q1 图压舰队默认但意图轴默认沉默 / Q2 活层 + `order_source` / Q3 `ship_type` 仍是唯一真相 / Q4 买不起就不下水 / Q10 悬空指针停产报错…）。 | 实现（排在 web 三条 → 两轴叶之后），照「附 A 改动地图」走，连同 `spawned_round` 升 `SCHEMA_VERSION` 7 |
 | `[~]` | [MOND 引力异常](notes/mond-anomaly.md) | 异常区导航偏移已实现（崇拜教免疫）；战斗光环、矿产红利与科技扩散未做。 | 异常区战斗光环；矿藏加成；MOND 扩散 |
 | `[ ]` | [行星X 回归](notes/planet-x-return.md) | 把行星X 做成第 19 号长周期天体 + 全球回归效应；现在只是第 60 回合的纯散文节拍。 | 天体、回归效应、配置、harness 断言全未开工 |
 | `[x]` | [舰级点防修正](notes/ship-class-pd-mult.md) | 五级舰按 spec 重新定性并新增 `pd_mult`，联动模型/配置/选装/meta，测试与长局全过。 | — |
@@ -59,7 +69,7 @@
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
 | `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）。 | `spawned_round`；玩家舰的自动战斗判定；逐武器火力分配 |
-| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；§3.1 两轴叶的坑（kit 侧已栏住，引擎侧待裁决）；**web 侧风格两行 + 逐舰风格叶已实机点过**（§7）。 | 两轴叶初始化语义待裁决；web 的「碰过就钉 Player」待裁决 |
+| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**（tabs 保留 + 舰行加批量归属、显式「恢复继承」+ 等值不接管、应用只回传差异、`Auto` 标签要诚实）；**§9 = 已确认的动手顺序**；§3.2 记了一个新事实：**风格轴今天没有 AI 写入者**（`Auto` 是空头承诺）。 | 实现 §8 的 web 三条，再做 §3.1 的两轴叶裁决 |
 | `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.flow()/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
 | `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
 

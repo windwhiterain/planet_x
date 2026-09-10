@@ -1,7 +1,8 @@
 # 舰船设计图（非控制属性 = 建造单位上的模板）
 
-> 状态 `[~]`（设计已定 + **实现规格已就绪**，见 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；
-> §8 的 10 条开放问题**待裁决**，裁决前不动 `src/`） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
+> 状态 `[~]`（设计已定 + 实现规格已就绪；**规格 §8 的十条已裁决**，见
+> [`ship-blueprint-spec.md`](ship-blueprint-spec.md) §8.0。实现排在 **web 三条 → 两轴叶**之后，
+> 并与 `spawned_round` 同一次升 `SCHEMA_VERSION`） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
 > `ship-blueprint-spec.md`（**实现篇**：改动地图 / 叶片形状 / 测试计划）、
 > `control-live-layers.md`（它的对偶：控制属性=活层）、`eras-technology.md`（「设计图分支」
 > 剩余项就是它）、`military-combat.md`（换模块/再装配剩余项）、`agent-control-long-game.md`
@@ -105,16 +106,15 @@ pub struct Blueprint {
 ## 5. 风险 / 开放问题
 
 **实现规格已写好**：所有形状（数据结构 / config / 叶片 / 投影 / 迁移 / 测试 / 改动地图 / 验证命令）
-在 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；**10 条开放问题在它的 §8**，
-按影响排序的前三条是：
+在 [`ship-blueprint-spec.md`](ship-blueprint-spec.md)；**十条开放问题已逐条裁决**（同篇 §8.0）。
+三条关键结论：
 
-* **Q1 舰级层 vs 势力舰队默认谁更有权威**（链 = `叶 → 图 → 舰队默认 → 势力 → 全局`？）——
-  (a) 图压过舰队默认：最具体者胜，但"我设了舰队默认却不生效"违反直觉；
-  (b) 舰队默认压过图：一旦写了舰队默认，按舰级编排就失效。
-* **Q2 按舰级默认意图是快照还是活层**——活层要对（"改图全级跟"），代价是读面必须给
-  `order_blueprint_mode`，否则又是一次「读数不反映行为」。
-* **Q3 `class` 的真相在哪**——`Building.ship_type` 仍是唯一真相（最小改动、旧档逐字节中性），
-  还是搬进图（彻底，但迁移造不出图）。
+* **Q1 = (c)**：链插一层 `叶 → 图 → 舰队默认 → 势力 → 全局`，但**图的意图轴默认 `Inherit`**
+  ——建图不等于表态；`Auto` 也算"有意见"，所以更要小心（加上 §3.2 那条：意图类叶片今天没有
+  AI 写入者，"再加一个 Auto"必须先有执行者）。
+* **Q2 = (b) 活层** + 读面加**出处列**（`order_source`）：一处改图、全级跟随，代价是必须能回答
+  "这条意图是谁下的"。
+* **Q3 = A**：`Building.ship_type` 仍是唯一真相，图的 `class` 必须相等。
 
 下面是设计阶段就记下的风险（与 spec §9 互补，不重复）：
 
