@@ -155,10 +155,15 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 
 > 先 `--digest K --round N` 看整段走势的故事板，再对感兴趣窗口 `--index` 精读，别一把梭全量。
 
-> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --milestones 60` 读「这局已经发生过什么」
-> ——全部里程碑事件（谁夺了谁的城、哪艘舰被谁打沉、谁和谁开战）都在里面，每条一句话。
-> 它随 checkpoint 存活，不需要当初的 `--index` 目录。Python 侧对应 `q.milestones(...)` /
-> `q.milestones(entity=("city", 城名))`（某座城的一生）/ `q.storyboard(window)`（压成故事板）。
+> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --round 0 --notables 40` 读「这局最近在打什么」
+> ——窗口层（`State::notables`）里是**后续计算要回看的那一段历史**（当前 = 开战/停战，供「记恨
+> 地板」判定）。它随 checkpoint 存活，不需要当初的 `--index` 目录。
+>
+> ⚠ **不要**用 `--milestones` 当「这局发生过什么」——**按当前判据那一层是空的**（`count: 0`）。
+> 判据是「后续计算需要访问哪一段历史」，不是「重要性」：没有任何模拟逻辑读无限过去，所以没有
+> 事件属于它。要读「一座城的一生 / 谁打沉的谁」，用 **`--index` 投影**：
+> `q.history("city", 城名)` / `q.cause("ship", 舰名)` / `q.storyboard(window)`（按 `weight`
+> 压成故事板）。**「重要 ≠ 分层」**——想挑值得读的事件看 `weight` 列，别看 `salience`。
 
 ---
 
@@ -263,7 +268,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 观察  planet_x --seed 7 --index out/ ;  planet_xq 读
 决策  写 diff.json（见 §4）
 应用  planet_x --seed 7 --apply diff.json --round 30 --save ckpt30.ron
-再看  planet_x --start ckpt30.ron --milestones 40    （这局到目前为止的里程碑，一句话一条）
+再看  planet_x --start ckpt30.ron --round 0 --notables 40  （这局最近在打什么，一句话一条）
 续玩  planet_x --start ckpt30.ron --round 30 --index out2/   （续玩 + 精读）
 ```
 
@@ -306,7 +311,8 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--meta` | 游戏规则字典（resources/buildings/ships/economy/combat…） |
 | `--schema` | 状态视图的 JSON Schema |
 | `--story` | 剧情编年史（叙事弧） |
-| `--milestones [<N>]` | **长存里程碑**：本局全部里程碑事件（城易主/夷平/舰存亡/开战停战/结盟/迁都/剧情），每条一句话标题；`N` = 只出最近 N 条。**续玩前先读它** |
+| `--notables [<N>]` | **窗口层**：后续计算要回看的那一段历史（当前 = 开战/停战），带窗口宽度；`N` = 只出最近 N 条。**续玩前先读它** |
+| `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
 | `--control` | 可编辑控制面模板 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |

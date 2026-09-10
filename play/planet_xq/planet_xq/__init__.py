@@ -453,13 +453,18 @@ class PlanetXQ:
             out = out.tail(limit)
         return out.reset_index(drop=True)
 
-    def storyboard(self, window: int = 50, min_weight: int = 60) -> pd.DataFrame:
+    def storyboard(self, window: int = 50, min_weight: int = 8) -> pd.DataFrame:
         """**故事板**：把最值得读的事件压成「每 `window` 回合一段」的可读摘要。
 
-        `min_weight` 是**显示门槛**，按投影的 `weight` 列过滤（0–100，`GameEvent::weight` 的
-        产物）。**这里刻意不按 `salience` 过滤**：分层判据是「后续计算要回看哪段历史」，与「读
-        起来重不重要」无关——按它过滤会让故事板在里程碑层清空后**静默变空**（曾经就是这样）。
-        想调松紧就改 `min_weight`（降到 0 = 每一条都列）。
+        `min_weight` 是**显示门槛**，按投影的 `weight` 列过滤——**那是 0–9 的序数阶梯，不是
+        0–100 的分数**：`9`=开战/停战/结盟/迁都、`8`=城市易主或毁灭、`7`=势力重建/剧情、
+        `5`=舰的存亡、`2`=撤退/降级、`0`=逐发流水。默认 **8** = 「格局 + 地图要重画的事」
+        （实测 seed 7 走 200 回合：2273 条事件里 ≈709 条 ≥8）；调到 7 会把势力重建 churn 也纳入，
+        调到 0 = 每一条都列。**踩过的坑**：这个门槛一度写成 60（照着「0–100 分数」的错觉），
+        于是故事板**静默返回空表**。
+
+        **这里刻意不按 `salience` 过滤**：分层判据是「后续计算要回看哪段历史」，与「读起来重不
+        重要」无关——按它过滤会让故事板在里程碑层清空后再次静默变空。
 
         返回 `round_from`/`round_to`/`events`（该段的全部标题，换行连接）/`count`。超长轨迹
         （几千回合）里，这是比逐回合快照省几百倍上下文的读法——与 CLI 的 `--digest K` 同构。

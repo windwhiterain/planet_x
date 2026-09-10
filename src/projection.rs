@@ -370,7 +370,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "event_id": "稳定 id `<round>:<seq>`，join/因果引用用。",
                     "type": "事件类型（与 Rust `GameEvent::kind()` / serde 判别式逐字一致）。",
                     "salience": "**分层**，判据 = 后续计算需要访问哪一段历史（见 `Salience`）：`milestone`（无限过去）/ `notable`（一定窗口）/ `detail`（只需前一帧、或没有读者，仅为 agent 分析而记录）。**这一列不是「重要性」**——按重要性挑事件请用 `weight`。",
-                    "weight": "**纯显示用**的排序键（`GameEvent::weight`，0–100）。`salience` 回答「谁要回看它」，`weight` 回答「人读起来重不重要」——两者刻意分开：给 agent/人挑「值得读的事件」用这一列（如 `q.storyboard()`）。",
+                    "weight": "**纯显示用**的排序键（`GameEvent::weight`）：**0–9 的序数阶梯**（9=开战/停战/结盟/迁都，8=城市易主或毁灭，7=势力重建/剧情，5=舰存亡，2=撤退/指令降级，0=逐发流水）。`salience` 回答「谁要回看它」，`weight` 回答「人读起来重不重要」——两者刻意分开：给 agent/人挑「值得读的事件」用这一列（`q.storyboard()` 默认取 `>= 8`），**别看 `salience`**。",
                     "actor_kind/actor_id": "动作发起方（如 city_razed 的 actor 是拆城的**势力**）——没有发起方时为 null。",
                     "target_kind/target_id": "动作直接对象（如被围的**城**、被击毁的**舰**）。",
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 by_ship（补刀的舰）、ship_destroyed 里的凶手与旧主。",

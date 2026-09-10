@@ -201,6 +201,42 @@ mod tests {
         assert!(samples.len() >= 18, "样本数 {} 应覆盖全部变体", samples.len());
     }
 
+
+    /// `GameEvent::weight` 的**量纲**必须保持文档承诺的 **0–9 序数阶梯**，不是 0–100 分数。
+    ///
+    /// 这条守卫存在的理由是一个真实踩过的坑：`q.storyboard()` 曾把「值得读」的门槛写成 **60**
+    /// （照「0–100 分数」的错觉），于是**静默返回空表**——测试全绿，故事板是空的。任何把量纲
+    /// 拉大的改动都会让下游那个 `>= 8` 的门槛失去意义，所以它必须在这里红，而不是在 Python 里静默。
+    #[test]
+    fn weight_ladder_stays_a_documented_zero_to_nine_scale() {
+        let by_kind = |k: &str| {
+            samples()
+                .into_iter()
+                .find(|e| e.kind() == k)
+                .unwrap_or_else(|| panic!("样本里没有 {k}"))
+                .weight()
+        };
+        for ev in samples() {
+            assert!(
+                ev.weight() <= 9,
+                "{} 的 weight={} 超出文档承诺的 0–9 量纲（q.storyboard 的门槛是 >= 8）",
+                ev.kind(),
+                ev.weight()
+            );
+        }
+        // 阶梯本身：逐发流水 < 撤退 < 舰存亡 < 重建/剧情 <= 城市易主 <= 世界格局。
+        assert!(by_kind("attack") < by_kind("withdraw"), "逐发流水必须在阶梯底部");
+        assert!(by_kind("withdraw") < by_kind("ship_destroyed"));
+        assert!(by_kind("ship_destroyed") < by_kind("resurgence"));
+        assert!(by_kind("resurgence") <= by_kind("city_razed"));
+        assert!(by_kind("city_razed") <= by_kind("war_started"));
+        assert_eq!(by_kind("attack"), 0, "逐发流水 = 0");
+        assert_eq!(by_kind("war_started"), 9, "世界格局级必须是阶梯顶端");
+        // 门槛 8 必须真的切出一部分、又不能等于全量（否则故事板要么空、要么等于没筛）。
+        let w: Vec<u8> = samples().iter().map(|e| e.weight()).collect();
+        assert!(w.iter().any(|&x| x >= 8), "门槛 8 切不出任何东西");
+        assert!(w.iter().any(|&x| x < 8), "门槛 8 等于全量，等于没筛");
+    }
     /// 全部 18 个 `GameEvent` 变体各一个样本。
     fn samples() -> Vec<GameEvent> {
         vec![

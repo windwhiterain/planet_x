@@ -983,7 +983,7 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   更细的高频粒面 + 边缘变暗（limb darkening）来提升真实感。
 ---
 
-## 23. 稀疏历史 / 事件历史（sparse history milestones） — `[x]`（Stage A + B + C 全部落地）
+## 23. 稀疏历史 / 事件历史（sparse history / 三层历史） — `[x]`（Stage A + B + C + D 全部落地）
 
 > 起因：轨迹答不出「**一个城市易主了，就近是什么事件导致的？被夷平然后被殖民，还是叛乱？**」
 > 与「**一艘舰被击毁，是被哪艘舰击毁？**」。完整设计 + 实测见
@@ -1116,6 +1116,77 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
 
 ---
 
+**已落地（Stage D，`[x]`）—— 分层判据从「重要性」换成「后续计算的访问需求」**：
+
+> 这一版**推翻了 Stage C 的前提**。Stage C 为了让 checkpoint 自述历史，把「听起来重要」的
+> 14 个 variant 预填进 `State::milestones`；实测那**吃掉存档 67%**（r200：249,557 / 372,248
+> 字节，1860 条 ≈ 9.3 条/回合），而且与「后续计算要不要回看它」毫无关系。
+
+判据（写进 `Salience` 三个 variant 的文档，文档即规格）：
+- **`Milestone`**：后续计算需要访问**无限的过去历史** → 长存进 `State::milestones`，随 checkpoint 存活。
+- **`Notable`**：后续计算需要访问**一定的事件窗口** → 只需一个有界窗口在 state 里（`State::notables`）。
+- **`Detail`**：后续计算**只需要前一帧**，或**根本没有读者**——只为 agent 事后分析而记录。
+
+- `[x]` **读者盘点**（写进 `GameEvent::salience` 的文档，作为定级依据的唯一来源）：非测试的
+  `state.events` / `state.notables` 读者**全部只读当前回合**——`step_ideology` 的
+  `military_deltas`、`kill_ship` 的同回合去重、`step_diplomacy` 的「本回合谁和谁交火」、
+  `step_story` 的载荷提取 + `StoryTrigger::*`、`tactics` 的 `Withdraw` 判定、`agent.rs` /
+  `projection.rs` 的渲染。**没有任何逻辑读无限过去。**
+- `[x]` **里程碑层清空**（14 → **0** 个 variant）。仅有的无限过去需求（`first_war` / `first_raze` /
+  `first_colony` 的「史上第一次」）**已经有载体**：`state.chronicle` 的 `id` 去重——历史层不必为
+  它们长存。字段保留（`Milestones`）作为将来真出现无限过去读者时的家，**刻意不预填**。
+  更一般的教训：**真正的无限过去需求通常该被折成一个 state 标量（累加器），而不是回放原始历史**
+  ——`step_ideology` 就是这么做的（每回合只读当前帧，累加进 `ideology` 标量）。
+- `[x]` **新增窗口层** `State::notables: Notables`（与 `Milestones` 共用 `HistoryEntry{round,event}`）
+  + `config.history.notable_window`（默认 **24** 回合 = 2 年）。裁剪区间 `[round-window+1, round]`
+  ——**本回合仍在窗口内**（`window = 1` = 只看本回合，不是空表）。**过期不记 `dropped`**：过期是
+  设计而非丢失（与里程碑层「截断可见」刻意相反，两者都在文档里写明了为什么）。
+- `[x]` **`WarStarted` / `WarEnded` → `Notable`**，依据是「记恨」这个窗口读者（见下）。各层 `push()`
+  自己过滤，`ev()` 仍是**唯一漏斗**（现在一次写三层）。
+- `[x]` **记恨（战争疤痕）**：`sim::war_scar_floor()` 回头看窗口内**最近一次** `WarStarted{a,b}`
+  （无序匹配），返回一道从 `war_scar_relation`（-30）**线性衰减到 0** 的关系地板。新鲜时
+  -30 < `war_threshold`(-20) → **刚开战的对手不可能当回合言和**；地板在第
+  `war_scar_rounds*(1-20/30)` = **9** 回合抬过阈值 → 和平重新可能。「记恨，但会淡」。
+  实测（seed 7）：开战/停战 r60 **65/63 → 32/29**、r200 **93/91 → 59/57**；最短战争从「闪烁」
+  变成**恰好 9 回合**（55 场里 30 场 = 9）。
+- `[x]` **修一个真 bug：地板被别的写入者绕过。** 最初地板只套在 `step_diplomacy` 的漂移里，而关系
+  有**多个**写入者——`step_balance_of_power` 的「合纵」（弱者相互靠拢，跑在 `step_diplomacy`
+  **之后**）把两个正彼此交战的弱者拉近，于是实测最短战争只有 **6** 回合（3 场），直接推翻了地板
+  的承诺。修法不是放宽断言，而是把地板放进**关系写入的唯一漏斗**（`set_relation_sym` +
+  `adjust_relation`）——与 `ev()` / `kill_ship()` 那套 single-writer 纪律同源。修正后 55 场战争
+  `min = 9`，零违例。**教训：一条「地板 / 不变量」如果有多个写入者，它就不是不变量。**
+- `[x]` **投影新增 `weight` 列**（`GameEvent::weight`，纯显示排序键）。`salience` 回答「谁要回看它」，
+  `weight` 回答「人读起来重不重要」——**两者刻意分开**，因为混用会让「挑值得读的事件」在里程碑层
+  清空后**静默变空**。`--digest top_events` 与 `q.storyboard()` 因此改按 `weight` 挑（`storyboard`
+  新增 `min_weight=8` 门槛），不再按 `salience` 过滤；`--schema` 的 `column_docs` 显式写明这条区别。
+  **`weight` 是 0–9 的序数阶梯，不是 0–100 分数**——门槛一度被写成 60（照「分数」的错觉），
+  于是 `q.storyboard()` **静默返回空表**（测试全绿）。已加守卫
+  `weight_ladder_stays_a_documented_zero_to_nine_scale` 把量纲钉住。
+- `[x]` CLI `--notables [N]` 新增；`--milestones [N]` 保留但文档写明「通常 `count: 0`，这就是判据的
+  正确结果」。`SCHEMA_VERSION` 3→4（**只升版本号**：v3 档里的里程碑是按旧判据预填的残留，不是任何
+  计算回看的历史；agent 要那些历史本来就走投影）。
+- 验证：`cargo check --workspace --all-targets` 无警告；`cargo test --lib` **72 passed**（新增
+  `history_layers_are_assigned_by_reader_need_not_importance`（**守卫里程碑层为空**——谁凭「听起来
+  重要」把它填回去就会红）、`milestones_trim_reports_truncation_visibly`、
+  `notables_keep_exactly_the_window`、`each_layer_only_takes_its_own_salience`、
+  `war_scar_floor_makes_a_real_floor_on_war_duration`（**用 60 回合真实长局验证最短战争时长**，
+  而不是只测函数）；`longhorizon` 6 passed / 8 ignored；`probe_multipolar` 三 seed 均 9 势力存活 /
+  0 僵尸 / 无霸权失控（rotations 47 / 71 / 90）。**r200 存档 372,248 → 108,889 字节（-71%）**。
+
+- `[ ]` **（留给以后）** 窗口层的下一个候选读者：`city_razed` / `city_defected` / `city_overrun`
+  ——「刚丢掉的城，旧主想夺回 / 民心不稳」是一个很自然的窗口机制。**先有读者，再提升定级**，
+  别反过来（那正是 Stage C 犯的错）。
+- `[ ]` **（留给以后）** `resurgence` 的 churn 循环（实测占 r200 事件的 **51%**）：`ship_spawned` 357
+  + `ship_destroyed` 357 + `resurgence` 238 = 952 / 1860。`reseed_city` 总挑势力**自己刚丢掉的**
+  空白城，于是「被拆平 → 自己的前主人同回合复垦 → 白送一艘种子舰 → 两回合后再来一遍」，
+  r196 / 198 / 200 在 `海王星轨道站` / `卡戎深空港` / `冥王星前哨` 一字不改地重复。
+  候选读者：**「我是不是刚在这座城栽过」**（窗口），一次性治住这个循环。
+  另注：其中大量 `ship_destroyed` 的 `cause` 是 `upkeep_shortfall`（欠维护报废，**不是战死**）。
+- `[ ]` **（留给以后）** 战争**进入**仍无迟滞：地板只保证「最短 9 回合」，`hostile` 还是硬阈值。
+  若要做「宣战需要更长的敌对积累」，那是 `Notable` 窗口的又一个读者（读最近 W 回合的
+  `attack`/`siege` 密度）。config 里已有 `ceasefire_relation` 可复用。
+- `[ ]` **（留给以后）** `history.max_milestones` 现在没有意义（层是空的）。等真有无限过去读者
+  进来时再定默认值；**不要提前设上限**——那是把问题藏起来而不是解决。
 ## 24. WebUI dev server 自动选空闲端口（`planet_x_web` 启动不再撞端口） — `[x]`（branch `feature/web-auto-port`）
 
 - **动机**：本机同时开两个 WebUI（玩家一个、agent 一个做实机验证）时，第二个从前只会抛
