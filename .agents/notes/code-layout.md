@@ -82,19 +82,25 @@ mod tests;
 `use super::*;`、私有夹具、私有函数访问**原样可用，零可见性放宽**；`src/tests/` 又
 真的做到「一眼看过去全是测试」。
 
-布局：
+布局（**测试文件本身也按主题拆开**，最大的现在是 829 行，没有 2000 行以上的文件）：
 
 ```
 src/tests/
-  sim/mod.rs            夹具（fresh_world 等）+ 短档用例
-  sim/horizon_mid.rs    中档（T2）用例      ← 见 test-tiers.md
-  control.rs
+  sim/mod.rs            夹具（fresh_world / attach_blueprint / spawn_at / stock）+ 零散用例
+  sim/{fleet,combat,haul,mond,ideology,capital,story,blueprints}.rs   按主题
+  sim/horizon_mid.rs    中档（T2）用例                    ← 见 test-tiers.md
+  control/mod.rs        夹具（some_building / pin_blueprint）
+  control/{apply,normalize,view,ship,blueprint}.rs
   projection/mod.rs
   autocontrol/{freight,contract,shipbuilding,tactics,blueprints,style,economy}.rs
   model/{state,contract,market}.rs
   config.rs agent.rs json.rs prng.rs
 web/src/tests.rs        （web 是另一个 crate，同理 #[path] 引入）
 ```
+
+规矩：**主题文件放短档用例，档位文件（`horizon_mid`/`horizon_long`）放高档用例**——
+一个用例只属于一个文件，两者不混。子模块写 `use super::*;` 就能拿到 `mod.rs` 里的夹具
+（父模块的私有项对子模块可见），所以夹具只写一份。
 
 ## 5. 还没拆的（下一轮候选）
 

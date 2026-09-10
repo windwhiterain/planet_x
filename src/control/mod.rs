@@ -38,5 +38,5 @@ pub use view::*;
 pub use wire::*;
 
 #[cfg(test)]
-#[path = "../tests/control.rs"]
+#[path = "../tests/control/mod.rs"]
 mod tests;
