@@ -33,17 +33,17 @@ pub struct Killer {
     pub weapon: String,
 }
 
-/// 一艘舰**从哪来**：船坞造出来 vs 剧情赠舰。
-///
-/// 剧情赠舰（[`StoryEffect::GrantShip`]）此前**完全不发事件**，一艘舰凭空出现；
-/// 这个字段把它纳入可查的历史。
+/// 一艘舰**从哪来**。三条造舰路径都要能被区分，否则「这艘舰哪来的」在历史里答不出。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SpawnVia {
     /// 本势力某城的建造区出厂（[`GameEvent::ShipSpawned`] 的 `city` 是出厂城）。
     Shipyard,
-    /// 剧情效果白送（[`StoryEffect::GrantShip`]）。
+    /// 剧情效果白送（[`StoryEffect::GrantShip`]）——此前**完全不发事件**，舰凭空出现。
     Story,
+    /// 反僵尸重建的种子舰（[`GameEvent::Resurgence`] 同时发出）——这条路径此前也**不发**
+    /// 造舰事件，投影对账实测 63 次出生里 46 次无解释。
+    Resurgence,
 }
 
 /// 新殖民 / 复垦的**方式**。

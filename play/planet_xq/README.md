@@ -130,8 +130,16 @@ q.fates(kind="ship")                # every ship death in the window: cause + ki
 q.fates(kind="city", since=40)      # every city ownership/death event in the window
 
 q.actors()                          # long-form (round, seq, event_id, kind, id, role) index
+q.changes("city", "冥王星前哨")      # pure dense-diff of the snapshot table (independent cross-check)
 q.audit()                           # completeness self-check: unexplained city changes (want 0)
 ```
+
+> The ledger is backed by **structural funnels** in the simulation (`kill_ship` / `spawn_ship` /
+> `raze_city` / `reseed_city` / `found_city` / `overrun_city` / `defect_city`): every ownership or
+> existence change goes through one place that *both* mutates the state and records the event, so a
+> new code path cannot silently skip the history. Two Rust guards — and `q.audit()` — verify it
+> against the dense tables on every test run (measured: 242 ship deaths / 249 ship births / 145 city
+> ownership changes over 120 rounds, **all** explained).
 
 Why the shape is what it is (each point measured on a real 715-event projection):
 

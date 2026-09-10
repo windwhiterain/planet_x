@@ -48,6 +48,7 @@ History / event queries (the sparse ledger)::
     q.cause("city", "冥王星前哨")         #   the last ownership/death event (why it changed hands)
     q.fates(kind="ship")                # every ship death in the window, with cause + killer
     q.actors()                          # long-form (round, seq, kind, id, role) participant index
+    q.changes("city", "冥王星前哨")       # pure dense-diff of the snapshot table (cross-check)
     q.audit()                           # completeness self-check: unexplained city changes (want 0)
 
 Design notes for the ledger (each backed by measurement):
@@ -520,6 +521,43 @@ class PlanetXQ:
             "weapon": [pick(d, "by", "weapon") for d in df["data"]],
         })
         return out
+
+    def changes(self, kind: str, entity_id: str) -> pd.DataFrame:
+        """**纯 dense-diff 视图**：某个实体在密集表里的关键列**发生变化的那些回合**。
+
+        与事件账本互证——这是「不靠事件、只看快照差异」的独立口径（:meth:`audit` 就是两者的
+        差集）。城默认比较 `faction_id`/`razed`/`population`；舰比较 `faction_id`/`hull`/`class`。
+
+        **它单独用是不够的**：dense-diff **因果盲**（说不出被谁击毁 / 被谁夷平），而且
+        **同回合的 raze→recolonize 差异为空**（事件才是正本）。对舰它还会显式给出
+        「消失的那一回合」（密集表里被毁舰直接没有行）。
+        """
+        alias = {"cities": "city", "ships": "ship", "factions": "faction"}
+        kind = alias.get(kind, kind)
+        spec = {
+            "city": ("cities", "city_id", ["faction_id", "razed", "population"]),
+            "ship": ("ships", "ship_id", ["faction_id", "hull", "class"]),
+            "faction": ("factions", "faction_id", ["capital_body"]),
+        }
+        if kind not in spec:
+            raise ValueError(f"changes() 支持 city/ship/faction，收到 {kind!r}")
+        table, key, cols = spec[kind]
+        df = self.table(table)
+        if df is None or df.empty:
+            return df
+        df = df[df[key] == entity_id].sort_values("round")
+        if df.empty:
+            return df
+        cols = [c for c in cols if c in df.columns]
+        # 重索引到「首次出现 → 全局末回合」，让**消失**也表现为一次变化（NaN）。
+        first, last = int(df["round"].min()), int(self.facts["round"].max())
+        df = df.set_index("round").reindex(range(first, last + 1))
+        present = df[key].notna()
+        prev = df[cols].shift()
+        same = df[cols].eq(prev) | (df[cols].isna() & prev.isna())
+        changed = (~same.all(axis=1)) | (present != present.shift())
+        out = df[changed].reset_index()
+        return out[["round", key] + cols].reset_index(drop=True)
 
     def audit(self) -> pd.DataFrame:
         """**完备性自查**：密集快照里可见、却没有任何事件解释的城状态变化（**应为空**）。

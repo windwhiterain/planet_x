@@ -182,16 +182,85 @@ q.audit()             # 完备性自查（应为空）
 
 ---
 
-## 5. 未做（Stage B / C）
+## 4b. Stage B 已落地（漏斗化 + 对账；**可证明行为中性**）
 
-### Stage B：漏斗化 + 对账
-- **单一写入漏斗**：`transfer_city/raze_city/kill_ship/found_city/spawn_ship` 取代 5+ 处直接赋值
-  （`c.faction_id = …`），让「发射事件」不可能被忘掉。**这是治根**；Stage A 只是把已知的漏补齐。
-- 同时把对账从「城的归属」扩到**舰的存亡**（现在缺：`idx/ships.jsonl` 里被毁舰直接消失，
-  `retain(hull>0)` 不留尸行）与**势力的城/舰清单**。
-- `q.changes(kind, id)`：纯 dense-diff 视图（与事件互证）。
-- 用 `ShipDestroyed.by` 替换 `step_ideology` 里近似的 `killer_of`（现在取「最后一个攻击者」，
-  集火时错）。**注意这是行为改动，需要长局平衡验证**，故未在 Stage A 做。
+> 目标：让「忘记记事件」在**结构上不可能**，并用密集表把这条不变量钉死。
+
+### 4b.1 状态变更漏斗（single writer）
+
+`sim.rs` 里现在**每一处**归属/存亡写入都在漏斗内（已核查，无例外）：
+
+| 漏斗 | 负责 | 取代的散落写入 |
+|---|---|---|
+| `kill_ship(ship, cause, by)` | hull 归零 + 记 `ShipDestroyed`（同舰只记一次） | `fire` 的 emit 循环、`step_upkeep` 的 scrap 循环 |
+| `sweep_dead_ships(watched)` | 清扫 `hull ≤ 0` + **兜底补事件** + 清指令 | `step_military` 末尾的裸 `retain(hull > 0)` |
+| `spawn_ship(ShipSpawn)` | 装配/取名/面板/付组件费 + 记 `ShipSpawned` | 船坞出厂、剧情赠舰、重建种子舰（**三处** push） |
+| `raze_city(cid, RazeCause)` | 清人口/建筑/进度 + 记 `CityRazed`/`Revolt` | `bombard_city`、`step_governance` 的叛乱分支 |
+| `reseed_city(cid, to, class)` | razed→活城 + 换主 + 记 `ColonyFounded{Refounded, prev_owner}` | `colonize` 复垦、`step_resurgence` 的复垦档 |
+| `found_city(name, body, settlement, to, class)` | 新建城 + 记 `ColonyFounded{NewSite}` | `colonize` 新site、`step_resurgence` 的收容所档 |
+| `overrun_city(cid, to, class)` | 夺活城 + 记 `CityOverrun{from, to}` | `step_resurgence` 的难民夺城档 |
+| `defect_city(..., loyalty)` | 换主 + 迁控制叶子 + 关系打击 + 记 `CityDefected` | 原来事件由调用方另发（会漏） |
+| `wire_city_control(cid, to)` | 给新建筑补继承型控制叶子 | 复垦/新建/夺城三处重复代码 |
+
+**兜底设计**：`sweep_dead_ships` 用 `debug_assert_eq!(invented, 0)` —— 正常 0 艘需要兜底；
+不为 0 就说明某条路径漏了 `kill_ship`，测试当场炸；release 下仍用最保守的 `Scrapped` 补一条
+（历史完整，但不谎称是战损）。`watched` 参数使断言只管**本回合内**的死亡（回合开始前就死的舰
+被顺带清走，不是本回合的漏记）。
+
+### 4b.2 守卫扩到「舰的存亡」——当场抓出第二类漏洞
+
+`every_ship_state_change_is_explained_by_an_event`：密集表里「出现/消失」的每艘舰都必须有事件。
+**一上线就抓出 `step_resurgence` 的种子舰完全不发造舰事件**（实测 63 次出生里 **46 次无解释**）
+——与「城易主查不到原因」完全同源，只是藏在舰那一侧。修法即上面的 `spawn_ship` 漏斗。
+
+实测（120 回合，seed 42）：**242 次舰死亡 / 249 次舰出生 / 145 次城变化，全部有事件解释**；
+两条守卫都断言「检查数 ≥ 5」（**守卫必须非空**）。
+
+### 4b.3 行为中性的证明方法（可复用）
+
+改完 `sim.rs` 后**不做**「跑一遍看着对」，而是 **golden-file 对比**：
+
+```bash
+git stash          # 或先在干净提交上生成基线
+planet_x --seed 7 --round 60 --index play/baseline
+# …改代码…
+planet_x --seed 7 --round 60 --index play/after
+python play/_golden_compare.py play/baseline play/after
+```
+
+判定：`idx/{cities,ships,factions,bodies,settlements}.jsonl` + `meta.json` 必须**逐字节一致**；
+`main.jsonl` 去掉 `event_ids` 后必须逐字节一致；`idx/events.jsonl` **允许**不同（它记录的是
+「本来就发生但没被记下来」的事，或同回合内事件次序变化）。
+
+**结果：Stage B 全程通过**——漏斗化只增加了 46 条 `ship_spawned` 记录，模拟本身逐字节未变。
+
+### 4b.4 一次**被否决**的改动（重要的负结果）
+
+`step_ideology` 里原本用「同回合最后一条 `Attack` 的势力」近似凶手（因为已死目标会被开火循环
+跳过，那条 `Attack` 其实必然就是补刀）。既然 `ShipDestroyed` 已有权威 `by`，替换掉近似看起来
+是纯改进：
+
+- 60 回合窗口：**逐字节一致**（含 events.jsonl），0/20 起不一致 → 看起来零风险。
+- 1000 回合长局：**翻转 `world_is_multipolar` 的「霸权轮换」判定** —— seed 1 后半程被
+  **俄罗斯锁死**（轮换数 1 < 需要的 2；峰值占比 0.820，逼近 0.85 上限）。
+
+差别只在「凶手舰自己在同回合被反杀」这种罕见情形（旧逻辑 `state.ship(attacker)` 拿不到就漏记功劳）。
+一次罕见的分歧足以在 1000 回合的混沌里改变结局 → **这是平衡层面的改动，不是历史完备性的改动**，
+故**回退**，并记入 §5 待单独做平衡验证。
+
+> 教训：**「60 回合逐字节一致」不足以证明长局中性**。窗口内中性 + 长局守卫失败 = 行为改动，
+> 必须按行为改动对待。
+
+---
+
+## 5. 未做（Stage C / 后续）
+
+### 单独立项（有测量依据）
+- **用 `ShipDestroyed.by` 替换 `step_ideology` 的近似 `killer_of`**：见 §4b.4 —— 窗口内中性，
+  但 1000 回合会翻转 `world_is_multipolar`。需要**单独一次平衡验证**（连同 `probe_multipolar`
+  的横向对比），不该混在历史改动里。
+- **僵尸势力的「夺城—倒戈」振荡**（见 §6）：`city_overrun` 41 条 / 60 回合，同一座城 4 回合一轮
+  易主。改法候选三条，均需长局验证。
 
 ### Stage C：长存账本 + 叙事性价比
 - `State.ledger`：只收 `Salience::Milestone` 的**稀疏里程碑层**，随 checkpoint 存活（解决根因 ②）。
@@ -201,6 +270,8 @@ q.audit()             # 完备性自查（应为空）
 - salience 权重配置化（`config/game.ron`），`--digest` 加 `top_events`。
 - `cause_id`（事件级因果链显式引用）——**目前刻意没做**：实测里 `cause_id` 会是 100% null 的死列，
   而链在 Python 侧用一张小规则表 + 类型结构就能走通（`razed.by_ship`、`destroyed.by`、`how/prev_owner`）。
+- 投影体积：归一化后 `idx/events.jsonl` 比原来的内联事件大约多 50%（列更多）。
+  3000 回合量级可考虑 parquet（ideas.md §17 候选）。
 
 ---
 
@@ -230,9 +301,14 @@ r33 resurgence    星系矿业
 ```bash
 cargo run --bin planet_x -- --seed 7 --round 60 --index play/hist_probe
 python play/_smoke_history.py            # 端到端：历史链 / 凶手 / 死因 / audit
-cargo test --lib                         # 55 passed（含 4 个投影守卫）
+cargo test --lib                         # 56 passed（含 5 个投影守卫）
 cargo test --test longhorizon            # 6 passed / 8 ignored
+
+# Stage B 的行为中性证明（golden-file 对比）
+python play/_golden_compare.py play/baseline play/after
 ```
 
 未跟踪的临时探针（可删）：`play/_probe_sparse{,2,3}.py`（pandas 稀疏字段实测）、
-`play/_smoke_history.py`、`play/hist_probe/`。
+`play/_smoke_history.py`、`play/_probe_stageb.py`（舰存亡对账 + 凶手近似的差异率）、
+`play/_golden_compare.py`、`play/_mp_leaders.py`（单极锁死量化）、`play/hist_probe/`、
+`play/{baseline,after*,mp_*}`。

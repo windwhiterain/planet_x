@@ -433,6 +433,7 @@ mod tests {
     use crate::config::load_config;
     use crate::prng::Prng;
     use crate::world::default_state;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     /// The eager (inline) top-level field names, asserted to be described by [`projection_schema`].
@@ -585,8 +586,6 @@ mod tests {
     /// 「事件系统不许退化成顺手记的副产品」的回归防线。
     #[test]
     fn every_city_state_change_is_explained_by_an_event() {
-        use std::collections::{BTreeMap, BTreeSet};
-
         let cfg = load_config();
         let mut state = default_state(&cfg, 42);
         let mut rng = Prng::new(42);
@@ -653,5 +652,87 @@ mod tests {
             unexplained.join("\n· ")
         );
         println!("完备性守卫：{checked} 次城状态变化全部有事件解释");
+    }
+
+    /// 把 `idx/ships.jsonl` 读成 `round -> 该回合存在的舰 id 集合`。
+    ///
+    /// 注意：`idx/ships.jsonl` 只在舰**活着**时写行（模拟里 `retain(hull > 0)` 不留尸行），
+    /// 所以「一艘舰不见了」这件事**只能由事件表解释**——这正是这条守卫要钉住的不变量。
+    fn ships_by_round(dir: &Path) -> BTreeMap<u32, BTreeSet<String>> {
+        let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for r in jsonl(&dir.join("idx/ships.jsonl")) {
+            let round = r["round"].as_u64().unwrap() as u32;
+            if let Some(s) = r["ship_id"].as_str() {
+                out.entry(round).or_default().insert(s.to_string());
+            }
+        }
+        out
+    }
+
+    /// 某类事件的**目标舰**按回合集合（`ship_destroyed` / `ship_spawned` 的 `target_id` 即舰名）。
+    fn event_ships(dir: &Path, ty: &str) -> BTreeMap<u32, BTreeSet<String>> {
+        let mut out: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for e in jsonl(&dir.join("idx/events.jsonl")) {
+            if e["type"] != ty {
+                continue;
+            }
+            let round = e["round"].as_u64().unwrap() as u32;
+            if let Some(s) = e["target_id"].as_str() {
+                out.entry(round).or_default().insert(s.to_string());
+            }
+        }
+        out
+    }
+
+    /// **舰的存亡对账**：密集表里「出现 / 消失」的每一艘舰都必须被事件解释——
+    /// 消失 = 死因事件（`ship_destroyed`，带 `cause`/`by`），出现 = 造舰事件
+    /// （`ship_spawned`，带 `via`）。任何一头缺失都意味着**某条路径漏了 `kill_ship` /
+    /// `spawn_ship` 漏斗**。
+    ///
+    /// 这条守卫是 Stage B 的直接收获：它一上线就抓出 `step_resurgence` 的种子舰
+    /// **完全不发造舰事件**（实测 63 次出生里 46 次无解释）——那是一条与「城市易主查不到
+    /// 原因」完全同源的漏洞，只是藏在舰这一侧。
+    #[test]
+    fn every_ship_state_change_is_explained_by_an_event() {
+        let cfg = load_config();
+        let mut state = default_state(&cfg, 42);
+        let mut rng = Prng::new(42);
+        let s = Scratch::new("reconcile_ships");
+        write_index(&mut state, &cfg, &mut rng, 120, &s.0).unwrap();
+
+        let alive = ships_by_round(&s.0);
+        let dead = event_ships(&s.0, "ship_destroyed");
+        let born = event_ships(&s.0, "ship_spawned");
+        let max_round = alive.keys().copied().max().unwrap_or(0);
+
+        let (mut checked_death, mut checked_birth) = (0usize, 0usize);
+        let mut unexplained: Vec<String> = Vec::new();
+        for r in 1..=max_round {
+            let empty = BTreeSet::new();
+            let prev = alive.get(&(r - 1)).unwrap_or(&empty);
+            let cur = alive.get(&r).unwrap_or(&empty);
+            for sid in prev.difference(cur) {
+                checked_death += 1;
+                if !dead.get(&r).map(|d| d.contains(sid)).unwrap_or(false) {
+                    unexplained.push(format!("r{r} 舰 {sid} 消失但没有死因事件"));
+                }
+            }
+            for sid in cur.difference(prev) {
+                checked_birth += 1;
+                if !born.get(&r).map(|d| d.contains(sid)).unwrap_or(false) {
+                    unexplained.push(format!("r{r} 舰 {sid} 出现但没有造舰事件"));
+                }
+            }
+        }
+        assert!(
+            checked_death >= 5 && checked_birth >= 5,
+            "窗口内只看到 {checked_death} 次死亡 / {checked_birth} 次出生——守卫几乎没在检查东西"
+        );
+        assert!(
+            unexplained.is_empty(),
+            "存在**未被任何事件解释**的舰存亡变化（漏斗有漏；agent 会答不出「这艘舰哪去了/哪来的」）：\n· {}",
+            unexplained.join("\n· ")
+        );
+        println!("完备性守卫：{checked_death} 次舰死亡 / {checked_birth} 次舰出生全部有事件解释");
     }
 }

@@ -920,14 +920,31 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   （`same_seed_reproduces_identically`、`world_is_multipolar` 全绿 → 平衡未动）、seed 7 @ 60 端到端
   `q.cause('ship','星环')` → `killer=天工/中国, weapon=kinetic, assists=[镇岳,长城]`；`q.audit()` = 0。
 
-**未做（Stage B，`[ ]`）**：
-- `[ ]` **单一写入漏斗**：`transfer_city/raze_city/kill_ship/found_city/spawn_ship` 取代 5+ 处
-  `c.faction_id = …` 直接赋值，让「发射事件」从结构上不可能被忘掉。**这是治根**，Stage A 只是补齐已知的漏。
-- `[ ]` **对账扩到舰的存亡**：`idx/ships.jsonl` 里被毁舰直接消失（`retain(hull>0)` 不留尸行），
-  现在只能靠事件表回答死因；把守卫扩成「实体消失也必须有事件解释」。
-- `[ ]` **用 `ShipDestroyed.by` 替换 `step_ideology` 里近似的 `killer_of`**（现取「最后一个攻击者」，
-  集火时错）。**是行为改动，需长局平衡验证**，故未在 Stage A 做。
-- `[ ]` `q.changes(kind, id)`：纯 dense-diff 视图（与事件互证）。
+**未做（Stage B，`[x]` —— 已落地，见下）**：
+
+**已落地（Stage B：漏斗化 + 对账，**可证明行为中性**）**：
+- `[x]` **状态变更漏斗（single writer）**：`sim.rs` 里**每一处**归属/存亡写入现在都在漏斗内，无例外——
+  `kill_ship`（hull 归零 + 记 `ShipDestroyed`，同舰只记一次）、`sweep_dead_ships`（清扫 + **兜底补事件** + 清指令）、
+  `spawn_ship`（装配/取名/面板/付组件费 + 记 `ShipSpawned`）、`raze_city`（清人口/建筑/进度 + `CityRazed`/`Revolt`）、
+  `reseed_city`（razed→活城 + `ColonyFounded{Refounded, prev_owner}`）、`found_city`（新建 + `ColonyFounded{NewSite}`）、
+  `overrun_city`（夺活城 + `CityOverrun`）、`defect_city`（换主 + 迁控制叶子 + `CityDefected`）、`wire_city_control`。
+  「忘记记事件」从此在**结构上**不可能：改状态与记事件在同一处。
+  - 兜底：`sweep_dead_ships` 带 `debug_assert_eq!(invented, 0)`——正常 0 艘需兜底，不为 0 = 某条路径漏了
+    `kill_ship`，测试当场炸；release 仍用最保守的 `Scrapped` 补一条（历史完整但不谎称战损）。
+- `[x]` **对账扩到「舰的存亡」——当场抓出第二类漏洞**：`every_ship_state_change_is_explained_by_an_event`
+  一上线就发现 `step_resurgence` 的种子舰**完全不发造舰事件**（实测 63 次出生里 **46 次无解释**），
+  与「城易主查不到原因」完全同源，只是藏在舰那一侧；修法即 `spawn_ship` 漏斗。
+  实测 120 回合：**242 次舰死亡 / 249 次舰出生 / 145 次城变化，全部有事件解释**；两条守卫都断言「检查数 ≥ 5」。
+- `[x]` `q.changes(kind, id)`：纯 dense-diff 视图（与事件账本互证；舰还会显式给出「消失的那一回合」）。
+- `[x]` **行为中性的证明方法（可复用）**：改 `sim.rs` 后不靠「跑一遍看着对」，而是 **golden-file 对比**——
+  `python play/_golden_compare.py <baseline> <after>`：`idx/{cities,ships,factions,bodies,settlements}.jsonl` +
+  `meta.json` 必须**逐字节一致**，`main.jsonl` 去掉 `event_ids` 后必须一致，`idx/events.jsonl` 允许不同。
+  **Stage B 全程通过**：漏斗化只多了 46 条 `ship_spawned` 记录，模拟逐字节未变。
+- `[ ]` **（负结果，勿重复尝试）`step_ideology` 改用权威 `by` 替换近似 `killer_of`**：60 回合窗口**逐字节一致**
+  （0/20 起凶手不一致），但 1000 回合长局**翻转 `world_is_multipolar` 的霸权轮换判定**——seed 1 后半程被
+  **俄罗斯锁死**（轮换数 1 < 需要 2；峰值占比 0.820，逼近 0.85 上限）。差别只在「凶手舰同回合被反杀」这种
+  罕见情形，但足以在混沌长局里改变结局 → **属平衡改动，已回退**，需**单独一次平衡验证**（配 `probe_multipolar`
+  横向对比）后再上。**教训：「60 回合逐字节一致」不足以证明长局中性。**
 
 **未做（Stage C，`[ ]`）**：
 - `[ ]` **`State.ledger` 长存里程碑层**（只收 `Salience::Milestone`，随 checkpoint 存活 → 解决根因 ②）。
