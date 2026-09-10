@@ -285,20 +285,12 @@ pub struct ControllableState {
     /// 设成 `Player`，AI 就不再改写它。
     #[serde(default)]
     pub ship_role: BTreeMap<ShipId, Control<ShipRole>>,
-    /// **舰队默认指令**（势力级的「没有别的指令时怎么办」）。
-    ///
-    /// 它是「新舰出生就有意图」和「一次性指令执行完回落到哪」的唯一答案，也是本势力
-    /// 舰队指令的**高层值**：叶子 `mode = Inherit`（没有说话）的舰（包括**刚下水、还没有
-    /// 任何叶片**的新舰）取它的值。
-    ///
-    /// 三态照旧：`Player` = 玩家给全舰队定的默认（新舰自动继承意图）；`Auto` = 明说交给
-    /// 系统（叶子 Inherit 的舰也归 AI）；`Inherit` = 这一层没有说话，由作用域链决定。
-    /// 它**只表态「谁负责 + 默认干什么」**，单舰的特例仍写在 `ship_orders` 的叶子上
-    /// （更具体的层优先）。
-    #[serde(default)]
-    pub default_ship_order: Option<Control<ShipBehavior>>,
     /// **舰队默认行为风格**（势力级）：叶 Inherit 的舰取它的值。"全舰队风筝、战列舰贴脸"
     /// 这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名。
+    ///
+    /// ⚠ 舰队级**只有长期倾向**这三片（风格两轴 + 角色）；**没有**"舰队默认指令"那一片了
+    /// （2026-10 删除）：指令是即时操作，写一片全舰队默认实测是**全舰队接管开关**，
+    /// 名字与作用不符——见 [`State::ship_behavior`](crate::model::State::ship_behavior)。
     #[serde(default)]
     pub default_doctrine: Option<Control<ShipDoctrine>>,
     /// **舰队默认风筝<->贴脸姿态**（势力级），与 `default_doctrine` 同形的另一片。
@@ -317,15 +309,16 @@ pub struct ControllableState {
     /// 三态语义（照 [`Control`] 的通用规则，但这一片有自己的链——图是**势力的库**，
     /// **没有**「舰队默认」那一档）：
     /// * `Player` = 系统**不许重估**这张图：出厂按图装配（`components` 非空时就是它），
-    ///   图上写了 `order` 时这艘舰的意图也归玩家（AI 不再改写它的指令叶）；
+    ///   图上写了倾向（风格/姿态/角色）时那几条轴也归玩家（AI 不再改写它的叶片）；
     /// * `Auto` = 系统可重估这张图（`retool_shipyards` 会把它改到战局需要的舰级）；
     ///   出厂选装仍走 [`crate::autocontrol::choose_loadout`] 现算（= 今天的行为）；
     /// * `Inherit` = 这一层没有说话 ⇒ 沿 `scope` 链上溯（通常落到 `Auto`）。
     ///
     /// 有效归属走 [`State::blueprint_control`](crate::model::State::blueprint_control)。
     ///
-    /// ⚠ **图的「意图轴」默认 `Inherit`（沉默）**：建图 ≠ 表态。只有图上真写了
-    /// [`Blueprint::order`]，这一层才可能在指令链上遮住舰队默认（用户裁决 Q1(c)）。
+    /// ⚠ **图能表态的是倾向（风格/姿态/角色），不是指令**；每条轴 `None` = 本图对该轴沉默
+    /// （建图 ≠ 表态）。只有图上真写了某条轴，这一层才可能在那条轴的链上遮住舰队默认
+    /// （用户裁决 Q1(c) + 2026-10 的倾向裁决）。
     #[serde(default)]
     pub blueprints: BTreeMap<BlueprintId, Control<Blueprint>>,
     /// 投资预算（资源/时间）：决定拿出多少资源用于「建设（建筑）」，按各建筑

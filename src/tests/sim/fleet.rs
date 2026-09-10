@@ -1,25 +1,22 @@
-//! 舰队行为与默认：舰队默认管新舰、殖民归属、陈旧 follow 退化成 idle、跟随友舰时自动开火只打敌对者、回合事件日志、dock/idle 的位姿。
+//! 舰队行为与默认：逐舰指令的归属、殖民归属、陈旧 follow 退化成 idle、跟随友舰时自动开火只打敌对者、回合事件日志、dock/idle 的位姿。
 
 use super::*;
 
-/// 舰队默认指令要真的管住**新造出来的舰**：它出厂时没有任何指令叶片（不点名 = 不在
-/// 任何 diff 里），但不能因此默认归系统、被 AI 拿去远征或停在 Idle —— 它应当直接执行
-/// 势力的默认意图。
+/// **新舰出厂时没有任何人给它指令**（2026-10 裁决：指令是即时操作，只写逐舰叶）。
 ///
-/// 这条是 note `agent-control-long-game.md` §5 的端到端守卫（控制面单测在
-/// `control::tests::fleet_default_order_covers_new_ships`）。
+/// 这条是 `default_ship_order` 删除之后的端到端守卫：船坞下水时写的那片叶是
+/// **沉默的 `Idle`**（归属 `Inherit` ⇒ 沿作用域链解析成 `Auto`），也就是说
+/// **新舰归系统**、下一回合由自动控制按战况/积压给它派活；玩家想让它干别的，
+/// 就给它（或给这型舰的**图**）写一条。
+///
+/// 旧行为（"新舰直接继承势力默认的一条站桩指令"）已被裁决删掉：那条默认叶实测是
+/// **全舰队接管开关**，名字与作用不符。
 #[test]
-fn fleet_default_governs_newly_built_ships() {
+fn newly_built_ships_have_no_order_of_their_own() {
     let (config, mut state) = fresh_world(42);
     let fid = "中国".to_string();
-    let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "default_ship_order": {"behavior": {"type": "dock", "body": "地球"}}
-        }]
-    });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
-    // 与船坞出厂同一条漏斗造一艘新舰（不带指令叶片）。
+    // 与船坞出厂同一条漏斗造一艘新舰。
     let pos = state.body_position("水星");
     let name = spawn_ship(
         &mut state,
@@ -35,7 +32,7 @@ fn fleet_default_governs_newly_built_ships() {
         },
     );
     // 出厂时 `spawn_ship` 给它一条**没有说话**（`Inherit`）的叶片——它不在玩家的任何
-    // diff 里，所以「谁负责、干什么」只能由更宽的那一层回答。
+    // diff 里，所以「谁负责」只能由作用域链回答。
     let leaf = state
         .control(fid.clone())
         .and_then(|c| c.ship_orders.get(&name).cloned())
@@ -52,32 +49,26 @@ fn fleet_default_governs_newly_built_ships() {
     );
     assert_eq!(
         state.ship_control(name.clone()),
-        ControlMode::Player,
-        "…so the fleet default owns it"
+        ControlMode::Auto,
+        "…so it belongs to the system (no fleet default leaf exists to claim it)"
     );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string()
-        }),
-        "…and it inherits the faction's intent instead of standing idle"
+        Some(ShipBehavior::Idle),
+        "叶里的值就是有效值（没有更高的一层能覆盖它）"
     );
 
-    // 推进一回合：AI 不许碰它（归属解析在它身上给出 Player），而且它照着默认意图动。
+    // 推进一回合：系统接手它（归属 Auto），并给它写下自己的判定。
     let mut rng = Prng::new(42);
-    let before = state.ship(&name).expect("ship").position;
     advance(&mut state, &config, &mut rng);
     assert_eq!(
         state.ship_control(name.clone()),
-        ControlMode::Player,
-        "the system must not take it over"
+        ControlMode::Auto,
+        "新舰归系统（旧的「舰队默认叶把它收走」已不存在）"
     );
-    let after = state.ship(&name).map(|s| s.position).unwrap_or(before);
-    let to_earth =
-        dist(after, state.body_position("地球")) < dist(before, state.body_position("地球"));
     assert!(
-        to_earth,
-        "the new ship must sail for 地球 per the fleet default, not be sent off by the AI"
+        state.ship(&name).is_some(),
+        "舰还在（这条用例只关心指令归属，不是存亡）"
     );
 }
 

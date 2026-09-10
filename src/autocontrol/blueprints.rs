@@ -212,12 +212,15 @@ fn design_one_faction(
                     if let Some(c) = state.control_mut(fid.to_string()) {
                         c.blueprints.insert(
                             target.clone(),
-                            // ⚠ **建图 ≠ 表态**（Q1(c)）：图上不写意图轴，叶子的归属是
-                            // 「这一层没有说话」（链继续上升到势力作用域/全局）。
+                            // ⚠ **建图 ≠ 表态**（Q1(c)）：AI 建的图**三条倾向轴全留空**，
+                            // 叶子的归属是「这一层没有说话」（链继续上升到势力作用域/全局）。
+                            // 角色/风格该不该由图来定，是**玩家**的决定——AI 继续逐舰写叶。
                             Control::inherit(Blueprint {
                                 class: class.clone(),
                                 components: fresh.clone(),
-                                order: None,
+                                doctrine: None,
+                                kiting: None,
+                                role: None,
                             }),
                         );
                     }

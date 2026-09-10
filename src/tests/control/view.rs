@@ -160,26 +160,61 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
         "`behavior: null` 的行不许建叶"
     );
 
-    // 舰队默认（势力级 Player）压过「叶说 Inherit」：② 的有效值换成默认值，
-    // ①（没有叶）也一样；③ 仍然是自己钉的那个值。回传之后仍然是不动点。
+    // 舰队默认**倾向**（势力级 Player）压过「叶说 Inherit」：没有自己角色叶的舰（①②）
+    // 都吃默认值；③ 也没有角色叶，所以同样吃默认。回传之后仍然是不动点。
+    // ⚠ 用**角色**这条轴（指令没有舰队默认叶了：2026-10 起指令只有逐舰叶）。
     let diff = serde_json::json!({
         "control": [{"faction_id": fid,
-            "default_ship_order": {"behavior": {"type": "colonize", "body": "火星"}, "mode": "Player"}
+            "default_role": {"role": "Freight", "mode": "Player"}
         }]
     });
-    apply_patch(&mut state, &config, &diff).expect("舰队默认落地");
+    apply_patch(&mut state, &config, &diff).expect("舰队默认倾向落地");
     let surface = control_surface(&state, &config);
-    assert_eq!(
-        row(&surface, &unnamed)["behavior"],
-        serde_json::json!({"Colonize": {"body": "火星"}})
-    );
-    assert_eq!(
-        row(&surface, &inherit_leaf)["behavior"],
-        serde_json::json!({"Colonize": {"body": "火星"}})
-    );
+    let role_of = |ship: &str| -> serde_json::Value {
+        surface["control"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["faction_id"] == serde_json::json!(fid))
+            .unwrap()["ship_role"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["ship"] == serde_json::json!(ship))
+            .unwrap_or_else(|| panic!("角色读面里必须有「{ship}」这一行"))
+            .clone()
+    };
+    for ship in [&unnamed, &inherit_leaf, &player_leaf] {
+        assert_eq!(
+            role_of(ship)["role"],
+            serde_json::json!("Freight"),
+            "舰队默认角色对所有舰生效（这三艘都没有自己的角色叶）"
+        );
+        assert_eq!(
+            role_of(ship)["mode"],
+            serde_json::json!("Inherit"),
+            "这一行报的是**那片叶自己的表态**（没有叶 ⇒ Inherit）；舰队默认叶的 Player 在 default_role 那一行上"
+        );
+    }
+    // 舰队默认叶自己在读面里（读面即写面）。
+    let dflt = surface["control"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["faction_id"] == serde_json::json!(fid))
+        .unwrap()["default_role"]
+        .clone();
+    assert_eq!(dflt["role"], serde_json::json!("Freight"));
+    assert_eq!(dflt["mode"], serde_json::json!("Player"));
+    // 指令**不受**舰队默认影响（那条轴已经没有舰队级那一片了）。
     assert_eq!(
         row(&surface, &player_leaf)["behavior"],
         serde_json::json!({"Dock": {"body": "地球"}})
+    );
+    assert_eq!(
+        row(&surface, &unnamed)["behavior"],
+        serde_json::Value::Null,
+        "没有叶 ⇒ 仍然没有人供指令（不再有舰队默认兜底）"
     );
     let before = surface.to_string();
     apply_patch(&mut state, &config, &surface).expect("模板必须能原样回传");

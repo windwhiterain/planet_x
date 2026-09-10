@@ -138,7 +138,8 @@
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
 | `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`faction_process`/`city_process`/`control`/`scope`/**`decisions`** 五表 + `--derived` 已落地，消费者（`planet_xq`/`planet_x_ctl`）也接上了；**`--control` 读面不再舍入**；**「AI 掷了什么」已捕获**（逐舰判定 + 船坞改装，行为中性已实测）；**有效指令的链只由引擎算**（kit 的 `*_approx` 降级为旧 index 目录的兜底）。 | 玩家舰的自动战斗判定；逐武器火力分配 |
-| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**；**§12 = 角色轴补齐**；**§13 = 读面/写面两侧对齐已落地**（`feature/read-face-parity`：`ship_orders` 读面**每舰一行**、`behavior` 取有效值（`null` = 没人说话）+ 写面「`null` 行不建叶」+ kit 的 `_approx` 换成引擎的 `effective`/`order_source`，`order_*` 回到**真实的叶**）；**§16 = 风格三轴的真执行者**（`autocontrol::style`：按战况概率重估、分布步长、`derived_roll`、三道玩家闸门）、**§17 = `Auto` 设计图的执行者**（`autocontrol::blueprints`：AI 建图/重估/去重/回收，图库 `O(主题×舰级)`）——**§3.2 那条"风格轴没有执行者"的空头承诺已经还清**。 | 两个执行者都还不够平衡（§17.3 的"买不起不下水"扩到 AI 图、玩家图的选装复用、主题权重再标定）；方案 B **已否决**（见 [`control-value-rule.md`](notes/control-value-rule.md)）；文档收尾（把取值规则写全） |
+| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 写值即接管 + **风格活层（doctrine/kiting/role）**全部落地；§4 四条已裁决；⚠ **舰队级「默认指令」2026-10 已删**（见 [`blueprint-stance.md`](notes/blueprint-stance.md)）；**§8 = 控制面板七条裁决**、**§9 = 已确认的动手顺序**。**§10 = web 三条已落地**（`f673bac`）；**§11 = 两轴叶 + 删叶（方案 A）已落地**；**§12 = 角色轴补齐**；**§13 = 读面/写面两侧对齐已落地**（`feature/read-face-parity`：`ship_orders` 读面**每舰一行**、`behavior` 取有效值（`null` = 没人说话）+ 写面「`null` 行不建叶」+ kit 的 `_approx` 换成引擎的 `effective`/`order_source`，`order_*` 回到**真实的叶**）；**§16 = 风格三轴的真执行者**（`autocontrol::style`：按战况概率重估、分布步长、`derived_roll`、三道玩家闸门）、**§17 = `Auto` 设计图的执行者**（`autocontrol::blueprints`：AI 建图/重估/去重/回收，图库 `O(主题×舰级)`）——**§3.2 那条"风格轴没有执行者"的空头承诺已经还清**。 | 两个执行者都还不够平衡（§17.3 的"买不起不下水"扩到 AI 图、玩家图的选装复用、主题权重再标定）；方案 B **已否决**（见 [`control-value-rule.md`](notes/control-value-rule.md)）；文档收尾（把取值规则写全） |
+| `[x]` | [设计图带倾向、指令只剩逐舰叶](notes/blueprint-stance.md) | 用户裁决「**指令是即时操作，风格/角色才是长期控制项**」：`Blueprint.order` 与舰队级 `default_ship_order` **两片叶删除**，图改带 `doctrine`/`kiting`/`role`（逐轴独立、活层、插在舰队默认之前）；`SCHEMA_VERSION` 21 → 22；实测证据（那片"默认叶"其实是全舰队接管开关）见笔记 §2。 | 倾向三轴的"是谁供的值"读面（`ship_*_source`）；批量下令动作；AI 是否需要写图上的倾向 |
 | `[x]` | [控制属性的取值规则](notes/control-value-rule.md) | **裁决：模型没有歧义，不改。** 归属与取值是同一条链上的同一件事（`Inherit` = 没意见、让位给上面的 `Player`；`Auto` 那一档的**值存在逐舰叶里**⇒「叶存在就供值」）。§1 六行实测表逐行由此推出；§3 结清三条"看起来像歧义"的旧账（恢复继承不还值 = 交互落差，出口是删叶；文档只写了归属那一半；势力默认叶 `Auto` 档没有存储）。 | 把 §1 写进 `src/control.rs` 顶部 + `agent-play.md`（文档收尾）；方案 B/B3 已否决 |
 | `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.derived(...)/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
 | `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
@@ -225,6 +226,16 @@
   `SCHEMA_VERSION` 之后又走到 **20**（B3 读面 19 / B4 `Attack.shots` 20）。
   再往前：`657F2DC9…6665`（`main` = `98c4b70`，重构合并点）与更早的重构前（`8b96aef`）逐字节相同，
   那是「纯搬运」的验收证据。
+  **`C928C3F1…06A9` 之后又变了**（B5 各批的输入面落地时改过行为、当时没回填）⇒ 在
+  `76753c0` 的 `main` 上实测基线已是
+  **`975DC8A988F9846330DDCD3845B9C2D37C28D8E6E9893F26AB11DCC912C2E41B`**
+  （2026-10 由 `feature/blueprint-stance` 顺手回填；同一份 12 行 JSON 逐字节复现）。
+  ⭐ **`feature/blueprint-stance`（删掉舰队默认指令 + 图改带倾向三轴）在这棵树上与 `main`
+  逐字节相同**——它的验收证据就是"**默认局面零影响**"：默认局里没人写过那两片叶
+  （没有 `--apply`、没有舰队默认、AI 建的图三轴全沉默），所以取值链的化简是**结构性等价**；
+  世界行为的变化只发生在"有人真的写了那些叶"的局面上（见
+  [`notes/blueprint-stance.md`](notes/blueprint-stance.md) §5）。
+  `SCHEMA_VERSION` 之后又走到 **22**（B5 输入面 21 / 本轮 22）。
 - ⚠ **别裸跑 `git stash pop`**：这个仓库里躺着**别的分支留下的旧 stash**（当前
   `stash@{0}` = `On feature/military-ships: pre-refactor worktree state`）。它一旦被弹出，会
   把**拆分之前那个 195 KB 的 `src/sim.rs` 单体**复活到工作树（`DU src/sim.rs` 冲突；

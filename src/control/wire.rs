@@ -147,7 +147,12 @@ pub struct BlueprintEntry {
     pub name: BlueprintId,
     pub class: String,
     pub components: Vec<String>,
-    pub order: Option<ShipBehavior>,
+    /// 本图给这型舰的**行为风格**（`None` = 本图对该轴沉默）。
+    pub doctrine: Option<ShipDoctrine>,
+    /// 本图给这型舰的**风筝↔贴脸姿态**（`None` = 本图对该轴沉默）。
+    pub kiting: Option<f64>,
+    /// 本图给这型舰的**角色**（`None` = 本图对该轴沉默）。
+    pub role: Option<ShipRole>,
     pub mode: ControlMode,
     /// 本图造了多少艘（`state.ships` 里 `blueprint == name` 的条数，现算、不落状态）。
     pub ship_count: usize,
@@ -162,8 +167,6 @@ pub struct BlueprintEntry {
 pub struct FactionControlView {
     pub faction_id: FactionId,
     pub capital: Option<Control<BodyId>>,
-    /// 舰队默认指令（势力级）：新舰出生就继承它，一次性指令执行完也回落到它。
-    pub default_ship_order: Option<DefaultShipOrder>,
     /// 舰队默认**行为风格**（势力级）：叶 Inherit 的舰取它的值。
     pub default_doctrine: Option<DefaultDoctrine>,
     /// 舰队默认**风筝<->贴脸姿态**（势力级）：与 `default_doctrine` 同形的另一片。
@@ -196,27 +199,14 @@ pub struct ControlSurface {
 
 // --- presence-aware control patches (the "diff" the agent writes) ----------
 
-/// 舰队默认指令（势力级）：**读面即写面**，与其它叶片同形——`behavior` = 默认干什么，
-/// `mode` = 谁负责。
+/// 舰队的默认**倾向**三片（`DefaultDoctrine` / `DefaultKiting` / `DefaultShipRole`）与逐舰叶片
+/// 共用同一套「读面即写面」形状。
 ///
-/// 它是「新舰默认归谁、干什么」的正解，也是「一次性指令执行完回落到哪」的答案：
-/// 叶子上没有说话（`Inherit`）或压根没有叶子（**刚下水的新舰**）的舰，都取这里的值。
-/// 单舰特例仍写在 `ship_orders[]`（更具体的层优先）。
-#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
-pub struct DefaultShipOrder {
-    /// 默认行为（缺省 = 保留现值；写值即接管，见 [`apply_diff`]）。
-    #[serde(default)]
-    pub behavior: Option<ShipBehavior>,
-    /// 由谁决定：Inherit（这一层没有说话）/ Auto（系统自动）/ Player（玩家）。
-    /// 缺省 = 保留现模式。
-    #[serde(default)]
-    pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（这一层回到"没有说话"）。与 `behavior`/`mode` 同时出现 ⇒ 拒绝（见 [`apply_diff`] 的「删叶」）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub remove: bool,
-}
+/// ⚠ **没有"舰队默认指令"那一片了**（2026-10 删除，用户裁决）：指令是**即时操作**，
+/// 只写逐舰叶（[`ShipOrderPatch`]）。原 `DefaultShipOrder` 已删——理由见
+/// [`State::ship_behavior`](crate::model::State::ship_behavior)。
 
-/// 舰队默认**行为风格**（势力级，两片之一）：**读面即写面**，与 `default_ship_order` 同形。
+/// 舰队默认**行为风格**（势力级，两片之一）：**读面即写面**。
 ///
 /// "全舰队风筝、战列舰贴脸"这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名；新下水的舰
 /// 也自动跟随（它没有自己的叶）。两条轴各取 [-1,1]，0 = 基线。
@@ -435,9 +425,17 @@ pub struct BlueprintPatch {
     /// 数量不许超过该舰级的槽位（`too_many_components`）。
     #[serde(default)]
     pub components: Option<Vec<String>>,
-    /// 本图给**新舰**的默认意图。`null` = 本图对意图没有说话（三层含义见上）。
+    /// 本图给这型舰的**行为风格**（长期倾向之一）。`null` = 本图对该轴没有说话
+    /// （三层含义见 [`double_option`]：缺席 = 不动 / `null` = 清空这一层 / 给值 = 表态）。
     #[serde(default, deserialize_with = "double_option")]
-    pub order: Option<Option<ShipBehavior>>,
+    pub doctrine: Option<Option<ShipDoctrine>>,
+    /// 本图给这型舰的**风筝↔贴脸姿态**（长期倾向之二）。`null` = 本图对该轴没有说话。
+    #[serde(default, deserialize_with = "double_option")]
+    pub kiting: Option<Option<f64>>,
+    /// 本图给这型舰的**角色**（长期倾向之三，也是"新舰一造出来就干什么"的落点）。
+    /// `null` = 本图对该轴没有说话。
+    #[serde(default, deserialize_with = "double_option")]
+    pub role: Option<Option<ShipRole>>,
     /// 三态归属：Inherit / Auto / Player。缺省 = 写了值就接管、没写值就保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
@@ -527,9 +525,6 @@ pub struct FactionControlPatch {
     /// 迁都（首都天体）补丁。
     #[serde(default)]
     pub capital: Option<CapitalPatch>,
-    /// 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
-    #[serde(default)]
-    pub default_ship_order: Option<DefaultShipOrder>,
     /// 舰队默认行为风格（势力级，两片之一）：叶 Inherit 的舰取它的值。
     #[serde(default)]
     pub default_doctrine: Option<DefaultDoctrine>,

@@ -151,7 +151,9 @@ pub fn control_view(
             name: name.clone(),
             class: ctrl.value.class.clone(),
             components: ctrl.value.components.clone(),
-            order: ctrl.value.order.clone(),
+            doctrine: ctrl.value.doctrine,
+            kiting: ctrl.value.kiting,
+            role: ctrl.value.role,
             mode: ctrl.mode,
             ship_count: state
                 .ships
@@ -166,11 +168,6 @@ pub fn control_view(
         capital: c.capital.clone(),
         // 读面这几片是**值 + 表态**（"这一层说了什么"），`remove` 只存在于**写面**：
         // 读面表达"没有这片叶"的方式就是 `None`/不给这一行（见 `scope_view` 同理）。
-        default_ship_order: c.default_ship_order.as_ref().map(|d| DefaultShipOrder {
-            behavior: Some(d.value.clone()),
-            mode: Some(d.mode),
-            remove: false,
-        }),
         default_doctrine: c.default_doctrine.as_ref().map(|d| DefaultDoctrine {
             temper: Some(d.value.temper),
             lone_wolf: Some(d.value.lone_wolf),

@@ -1,4 +1,4 @@
-//! 设计图（`--apply` 的 blueprint 叶）与船坞下水：图压舰队默认、`order_source`、悬空指针停产、买不起就不下水。夹具 `attach_blueprint`/`spawn_at`/`stock` 在 `super`。
+//! 设计图（`--apply` 的 blueprint 叶）与船坞下水：出厂快照、图上的**倾向**、`order_source`、悬空指针停产、买不起就不下水。夹具 `attach_blueprint`/`spawn_at`/`stock` 在 `super`。
 
 use super::*;
 
@@ -15,7 +15,7 @@ fn spawn_uses_the_yard_blueprint() {
         "重甲护卫",
         "corvette",
         &["kinetic", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     let mut rng = Prng::new(42);
@@ -90,7 +90,7 @@ fn editing_a_blueprint_does_not_touch_existing_ships() {
         "护卫甲",
         "corvette",
         &["kinetic", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("护卫甲"));
@@ -139,7 +139,7 @@ fn the_yard_launches_from_any_designs_components() {
         "auto:custom",
         "corvette",
         &["plasma", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Auto,
     );
     let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
@@ -176,7 +176,7 @@ fn the_yard_launches_from_any_designs_components() {
         "auto:empty",
         "corvette",
         &[],
-        None,
+        (None, None, None),
         ControlMode::Auto,
     );
     let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
@@ -211,7 +211,7 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
         "auto:corvette",
         "corvette",
         &[],
-        None,
+        (None, None, None),
         ControlMode::Auto,
     );
     // 同一时点的生成器答案（`spawn_ship` 内部就是走它——不许另写一份）。
@@ -273,59 +273,54 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
     );
 }
 
-/// **图的意图轴默认沉默**（Q1(c)）＋ 图上真写了 `order` 时它压过舰队默认（Q1(c) 的链）。
+/// **图能表态的是倾向**（2026-10 裁决）：图上写了 `role` ⇒ 新舰一造出来就是那个角色，
+/// 而**图比舰队默认更具体**（链：叶 → 图 → 舰队默认 → 记录值）。
 #[test]
-fn blueprint_default_order_governs_new_ships() {
+fn blueprint_role_governs_new_ships() {
     let (config, mut state) = fresh_world(42);
     let fid = "中国".to_string();
     let (_, _, class) = attach_blueprint(
         &mut state,
         &config,
         &fid,
-        "护卫-守家",
+        "运输-地球线",
         "corvette",
         &["kinetic", "ion_drive"],
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string(),
-        }),
+        (None, None, Some(ShipRole::Freight)),
         ControlMode::Player,
     );
-    // 舰队默认**同时**是 Player 且冲突 ⇒ **更具体的图赢**（链：叶 → 图 → 舰队默认 → …）。
+    // 舰队默认**同时**是 Player 且冲突 ⇒ **更具体的图赢**（叶 → 图 → 舰队默认 → …）。
     let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
+        "default_role": {"role": "War"}
     }]});
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
-    let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("护卫-守家"));
+    let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("运输-地球线"));
     assert_eq!(
-        state.ship_control(name.clone()),
+        state.ship_role(name.clone()),
+        ShipRole::Freight,
+        "图比舰队默认更具体 ⇒ 图赢"
+    );
+    assert_eq!(
+        state.ship_role_control(name.clone()),
         ControlMode::Player,
-        "图上的意图归玩家 ⇒ AI 不许接管这艘舰"
+        "图上写了这条轴、且图归玩家 ⇒ 这条轴归玩家，自动控制不许改写它"
     );
+    // 反例：**换一条轴**——图上没写风格，风格就仍由舰队默认作答（逐轴独立）。
     assert_eq!(
-        state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string()
-        }),
-        "图比舰队默认更具体 ⇒ 图赢（Q1(c)）"
-    );
-
-    let mut rng = Prng::new(7);
-    let before = state.ship(&name).unwrap().position;
-    advance(&mut state, &config, &mut rng);
-    let after = state.ship(&name).map(|s| s.position).unwrap_or(before);
-    assert!(
-        dist(after, state.body_position("地球")) < dist(before, state.body_position("地球")),
-        "新舰按图的默认意图驶向地球（而不是被 AI 派去别处）"
+        state.ship_doctrine(name.clone()),
+        ShipDoctrine::default(),
+        "图上没写风格 ⇒ 这一轴跟着链往下走（这里没有舰队默认风格，落到记录值）"
     );
 }
 
-/// 回归守卫：**没有图 / 图没有写 `order`** 的舰仍由舰队默认作答（新层不许把旧行为吃掉）。
+/// 回归守卫：**图对某条轴沉默**（`None`）时，那条轴仍由舰队默认作答
+/// （新层不许把旧行为吃掉——"建图 ≠ 表态"）。
 #[test]
 fn fleet_default_still_covers_blueprintless_ships() {
     let (config, mut state) = fresh_world(42);
     let fid = "中国".to_string();
-    // 一张**只钉选装**（没写 order）的图。
+    // 一张**只钉选装**（三条倾向轴全沉默）的图。
     let (_, _, class) = attach_blueprint(
         &mut state,
         &config,
@@ -333,102 +328,87 @@ fn fleet_default_still_covers_blueprintless_ships() {
         "只钉选装",
         "corvette",
         &["kinetic", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
+        "default_role": {"role": "Freight"}
     }]});
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
     let with_bp = spawn_at(&mut state, &config, &fid, &class, "水星", Some("只钉选装"));
     let without_bp = spawn_at(&mut state, &config, &fid, &class, "水星", None);
-    for (ship, what) in [(&with_bp, "挂了图但图没写 order"), (&without_bp, "没有图")] {
+    for (ship, what) in [(&with_bp, "挂了图但图没表态"), (&without_bp, "没有图")] {
         assert_eq!(
-            state.ship_behavior(ship.clone()),
-            Some(ShipBehavior::Dock {
-                body: "火星".to_string()
-            }),
+            state.ship_role(ship.clone()),
+            ShipRole::Freight,
             "{what} 的舰仍由舰队默认作答"
         );
         assert_eq!(
-            state.ship_control(ship.clone()),
+            state.ship_role_control(ship.clone()),
             ControlMode::Player,
-            "{what} 的舰归属仍由舰队默认叶决定（图的意图轴沉默 ⇒ 建图 ≠ 表态）"
+            "{what} 的归属仍由舰队默认叶决定（图沉默 ⇒ 建图 ≠ 表态）"
         );
     }
 }
 
-/// **贯穿性要求 3**：`order_source` 必须把「叶不存在」与「叶写着 `Inherit`」分开报。
+/// **指令只剩逐舰叶**（2026-10 裁决）：图与舰队默认**都不再**指挥指令；
+/// `order_source` 仍要把「叶不存在」与「叶写着 `Inherit`」分开报。
 #[test]
 fn order_source_separates_a_missing_leaf_from_a_silent_one() {
     let (config, mut state) = fresh_world(42);
     let fid = "中国".to_string();
+    // 一张**写得满满的**图：三轴全表态、归属 Player——它**依然**不能供指令。
     let (_, _, class) = attach_blueprint(
         &mut state,
         &config,
         &fid,
-        "护卫-守家",
+        "全能图",
         "corvette",
         &["kinetic", "ion_drive"],
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string(),
-        }),
+        (
+            Some(ShipDoctrine {
+                temper: 0.5,
+                lone_wolf: -0.5,
+            }),
+            Some(0.7),
+            Some(ShipRole::War),
+        ),
         ControlMode::Player,
     );
-    let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("护卫-守家"));
-    // ① 刚下水的舰：叶**存在**且写着 `Inherit`，但更具体的图层供值 ⇒ 出处是它。
+    let name = spawn_at(&mut state, &config, &fid, &class, "水星", Some("全能图"));
+
+    // ① 刚下水的舰：船坞给它写一片**沉默的**（`Inherit`）Idle 叶 ⇒ 出处是那片叶、值就是叶里的值。
+    //    **图写得再满也不能指挥指令**（图只带倾向）。
     assert_eq!(
         state.ship_behavior_source(name.clone()),
-        Some(OrderSource::Blueprint("护卫-守家".to_string()))
+        Some(OrderSource::Leaf),
+        "逐舰叶是唯一的供值者（下水时船坞写的那片 Idle 叶）"
     );
     assert_eq!(
         state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string()
-        }),
-        "叶没表态 ⇒ 图上的意图生效"
+        Some(ShipBehavior::Idle),
+        "图不再供指令 ⇒ 值只来自那片叶"
+    );
+    // 而**倾向**确实是图给的（图这条链是活的）。
+    assert_eq!(
+        state.ship_doctrine(name.clone()),
+        ShipDoctrine {
+            temper: 0.5,
+            lone_wolf: -0.5
+        }
     );
 
-    // ② 删掉那片叶（"叶不存在"）：出处**不变**（值仍然来自图）。
+    // ② 舰队默认指令这片叶**已经不存在**：写它会被 apply 当成未知字段拒掉（响亮）。
     let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "ship_orders": [{"ship": name, "remove": true}]
+        "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
     }]});
-    apply_patch(&mut state, &config, &diff).expect("remove applies");
     assert!(
-        !state
-            .control(fid.clone())
-            .unwrap()
-            .ship_orders
-            .contains_key(&name),
-        "叶真的被删了"
-    );
-    assert_eq!(
-        state.ship_behavior_source(name.clone()),
-        Some(OrderSource::Blueprint("护卫-守家".to_string()))
-    );
-    assert_eq!(
-        state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Dock {
-            body: "地球".to_string()
-        })
+        apply_patch(&mut state, &config, &diff).is_err(),
+        "`default_ship_order` 已删 ⇒ 写入必须报错，不能静默吞掉"
     );
 
-    // ③ 把图的意图轴清空（`order: null`）：叶**不存在** + 没人供值 ⇒ **没有出处**
-    //    （调用方按 Idle 兜底）。这就是「叶不存在」那一侧。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫-守家", "order": null}
-    ]}]});
-    apply_patch(&mut state, &config, &diff).expect("clearing the order axis applies");
-    assert_eq!(
-        state.ship_behavior_source(name.clone()),
-        None,
-        "没有任何一层说话"
-    );
-    assert_eq!(state.ship_behavior(name.clone()), None);
-
-    // ④ **叶存在但写着 `Inherit`**（不是删掉它）：出处必须诚实报 `leaf`——值真的来自
-    //    那片叶（`leaf.map(|l| l.value).unwrap_or(..)`），与「没有叶」**不等价**。
+    // ③ 换一片叶里的值（mode 仍是 `Inherit`）：出处照旧是 `leaf`——值真的来自那片叶。
     state.control_mut(fid.clone()).unwrap().ship_orders.insert(
         name.clone(),
         Control::inherit(ShipBehavior::Move {
@@ -447,29 +427,42 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
         "叶存在就用叶里的值（与它的 mode 无关）——这正是「叶 Inherit ≠ 没有叶」"
     );
 
-    // ⑤ 舰队默认供值时出处是它；叶有意见时叶赢。
+    // ④ 删掉那片叶 ⇒ 出处回到 None（"没有人说话"），**不回落到图**。
     state
         .control_mut(fid.clone())
         .unwrap()
         .ship_orders
         .remove(&name);
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
-    }]});
-    apply_patch(&mut state, &config, &diff).expect("fleet default applies");
     assert_eq!(
         state.ship_behavior_source(name.clone()),
-        Some(OrderSource::FleetDefault)
+        None,
+        "没有叶、图也不供指令 ⇒ 没有任何一层说话"
     );
-    state
-        .control_mut(fid.clone())
-        .unwrap()
-        .ship_orders
-        .insert(name.clone(), Control::player(ShipBehavior::Idle));
+    assert_eq!(state.ship_behavior(name.clone()), None);
+    // 而倾向**不受影响**（图那条链还在）。
+    assert_eq!(state.ship_kiting(name.clone()), 0.7);
+    assert_eq!(state.ship_role(name.clone()), ShipRole::War);
+
+    // ⑤ 把图上的 `role` 清空（`role: null`）⇒ 这条轴回到链的**下一层**：舰队默认。
+    let diff = serde_json::json!({"control": [{"faction_id": "中国",
+        "default_role": {"role": "Freight", "mode": "Player"},
+        "blueprints": [{"name": "全能图", "role": null}]
+    }]});
+    apply_patch(&mut state, &config, &diff).expect("clearing the role axis applies");
     assert_eq!(
-        state.ship_behavior_source(name.clone()),
-        Some(OrderSource::Leaf),
-        "叶有意见 ⇒ 叶赢"
+        state.ship_role(name.clone()),
+        ShipRole::Freight,
+        "图对这条轴沉默了 ⇒ 舰队默认接手（这就是链的意义：图在前、舰队默认在后）"
+    );
+    assert_eq!(
+        state.ship_role_control(name.clone()),
+        ControlMode::Player,
+        "现在由舰队默认叶（Player）表态"
+    );
+    assert_eq!(
+        state.ship_kiting(name.clone()),
+        0.7,
+        "另外两条轴不受影响（逐轴独立）"
     );
 }
 
@@ -486,7 +479,7 @@ fn a_dangling_blueprint_pointer_stops_the_yard() {
         "会被删掉的图",
         "corvette",
         &["kinetic", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     // 把进度清零，再把指针改成一张**不存在**的图（模拟玩家改名/删图之后的现场）。
@@ -546,7 +539,7 @@ fn a_player_blueprint_that_cannot_be_afforded_waits_for_money() {
         "豪华护卫",
         "corvette",
         &["plasma", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     if let Some(f) = state.faction_mut(&fid) {
@@ -598,7 +591,7 @@ fn ship_spawned_event_carries_the_blueprint_only_when_there_is_one() {
         "有图",
         "corvette",
         &["kinetic", "ion_drive"],
-        None,
+        (None, None, None),
         ControlMode::Player,
     );
     let with_bp = spawn_at(&mut state, &config, &fid, "corvette", "地球", Some("有图"));

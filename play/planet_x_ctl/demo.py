@@ -37,6 +37,8 @@ import planet_x_ctl as ctl
 
 # ---- policy knobs (the recipe's own choices, written down so it can be replayed) -------------
 OVEREXTENDED_RATIO = 0.5   # upkeep / production_value above this = 养不起的舰队
+#: 紧缩时给**全舰队**下的一条即时指令（逐舰点名）——2026-10 起指令**没有**"舰队默认叶"了
+#: （指令是即时操作），所以这条配方把同一句话写给每一艘舰（`order()` 的舰队选择器展开成 N 片叶）。
 DEFAULT_ORDER_BEHAVIOR = "Dock:地球"
 #: 紧缩时一起收缩的两类预算（造舰 + 建设）。引擎把两类预算做成了同一个形状，所以同一条配方
 #: 能一次管住两边；`construction_budget` 常在 AI 手里是 0，只有建设预算在动，所以两类都要看。
@@ -70,8 +72,10 @@ def census(s: ctl.Surface) -> pd.DataFrame:
 #: The columns a projection written by an engine **before** the blueprint round does not have
 #: (`SCHEMA_VERSION` 10 加的 `order_effective*` / `order_source` / `blueprint*` / `spawned_round`)。
 #: 删掉它们 = 一份**旧引擎**的索引目录，用来演一遍 kit 的降级路径（本地 `*_approx`）。
+#: ⚠ `order_default_mode` / `order_blueprint_mode` 两列**已经不在引擎里**（2026-10：指令只剩逐舰叶），
+#: 所以它们不在这张单子上——那不是"旧引擎缺的列"，是"没有这个列了"。
 _OLD_ENGINE_DROPS = ("order_effective_mode", "order_effective", "order_source",
-                     "order_leaf_mode", "order_default_mode", "order_blueprint_mode",
+                     "order_leaf_mode",
                      "doctrine", "kiting", "role", "role_mode",
                      "blueprint", "blueprint_mode", "spawned_round")
 
@@ -132,8 +136,10 @@ def recipe_ownership(ckpt, names: list[str], mode: str, *, index_dir=None) -> di
 def recipe_policy(ckpt, proj_dir, *, surface: ctl.Surface | None = None) -> tuple[dict, pd.DataFrame]:
     """统计施政：upkeep 占比过高的势力，其造舰 / 建设预算按 ``(1 - 占比)`` 等比封顶。
 
-    再补**一片**刻意的舰队默认叶（``take_over=True``），让「新舰自动跟随意图」有一个去处 ——
-    这份 diff 的回执因此应当**恰好**只有那一处接管。
+    再补一份**刻意的全舰队指令**（逐舰写 ``behavior`` + ``take_over=True``），让「一次说清全舰队
+    干什么」有一个去处 —— 这份 diff 的回执因此应当**恰好**只有那 N 处接管（一艘一处）。
+    ⚠ 2026-10 起指令**没有**势力级默认叶了，所以"全舰队"必须**逐舰点名**（`set_behavior` 收
+    一个舰名选择器，展开成 N 片叶）。
     """
     s = surface if surface is not None else ctl.surface(ckpt, index_dir=proj_dir)
     eco = economy_table(proj_dir)
@@ -157,8 +163,11 @@ def recipe_policy(ckpt, proj_dir, *, surface: ctl.Surface | None = None) -> tupl
         if takeover_faction is None and int(f["ship_count"] or 0) > 0:
             takeover_faction = fac
     if takeover_faction is not None:
-        # 唯一一处刻意接管：舰队默认是一片叶，不写 mode 就等于接管 —— 这里明说 take_over=True。
-        s.set_default_ship_order(takeover_faction, behavior=DEFAULT_ORDER_BEHAVIOR, take_over=True)
+        # 唯一一处刻意接管：**逐舰**把同一句话写给全舰队（指令没有舰队默认叶了，所以这是 N 片叶），
+        # 不写 mode 就等于接管 —— 这里明说 take_over=True，好让回执里的接管名单是**已知**的。
+        fleet = sorted(lf.key[0] for lf in s.leaves("ship_orders")
+                       if lf.faction == takeover_faction)
+        s.set_behavior(fleet, DEFAULT_ORDER_BEHAVIOR, take_over=True)
     cols = ["faction_id", "kind", "resource", "upkeep_ratio", "scale", "old", "new"]
     return s.emit(), pd.DataFrame(rows, columns=cols)
 
@@ -209,11 +218,11 @@ def main(argv=None) -> int:
     df_cities = ctl.cities(ckpt, index_dir=proj)
     print(f"    ctl.ships(): {df_ships.shape}    ctl.cities(): {df_cities.shape}")
     check("ships 表已 join 控制叶",
-          {"order_leaf", "order_mode", "order_value", "default_ship_order_mode",
+          {"order_leaf", "order_mode", "order_value", "default_role_mode",
            "doctrine_temper", "doctrine_lone_wolf", "kiting"} <= set(df_ships.columns))
     # 设计图那一轮新增的引擎列（**引擎的答案**，不是本地近似）：出处列 + 出厂图 + 下水回合。
     check("ships 表带上了设计图/出处/下水回合列",
-          {"blueprint", "blueprint_mode", "order_blueprint_mode", "order_source", "spawned_round"}
+          {"blueprint", "blueprint_mode", "order_source", "spawned_round"}
           <= set(df_ships.columns),
           f"order_source={df_ships['order_source'].dropna().unique()[:3].tolist()}…")
 
@@ -364,9 +373,14 @@ def main(argv=None) -> int:
     path_c = ctl.write(diff_c, work / "steer_c.json")
     print()
     print(table.to_string(index=False) if len(table) else "    （没有势力超标）")
-    expected_took = [f"{e['faction_id']}.default_ship_order"
-                     for e in diff_c["control"] if "default_ship_order" in e]
-    print(f"    刻意接管 {len(expected_took)} 处：{expected_took}")
+    # 刻意接管：**逐舰**写 behavior ⇒ 每艘舰的那片叶各算一处接管（N 片叶）。
+    # ⚠ 2026-10 起指令**没有**舰队默认叶了（`set_default_ship_order` 已删）："全舰队听我的"
+    # 现在展开成 N 片逐舰叶，而不是"一片叶 + 一条链上的默认"。
+    _fac_c = next((e["faction_id"] for e in diff_c["control"]
+                   if any("behavior" in o for o in e.get("ship_orders", []))), None)
+    _n_written = sum(1 for o in next(e["ship_orders"] for e in diff_c["control"]
+                                     if e["faction_id"] == _fac_c) if "behavior" in o)
+    print(f"    刻意接管：{_fac_c} 全舰队 {_n_written} 艘（逐舰写 behavior ⇒ {_n_written} 处接管）")
     rep_c = ctl.verify(ckpt, path_c)
     print(rep_c.describe())
     check("C: 没有 WARN_APPLY_SKIPPED",
@@ -377,31 +391,35 @@ def main(argv=None) -> int:
     check("C: 预算值真的变了",
           bool(table is not None) and all(r.changed for r in rep_c.requests
                                           if r.field == "value" and "budget" in r.leaf))
-    check("C: took_over 恰好是刻意的那几片叶", rep_c.took_over == expected_took, f"{rep_c.took_over}")
-    check("C: took_over_leafs 也一一对应", rep_c.took_over_leafs == expected_took,
-          f"{rep_c.took_over_leafs}")
-    # 顺带变动 = 「那片叶从无到有」（`exists` 翻转）+ 隐含的 `mode` 翻转 + **一次真实的后果**：
-    # 势力级默认指令一落地，那些"叶在、叶说 `Inherit`"的舰的**有效指令**当场换成默认值。
-    #
-    # ⚠ 第三条只有在读面给**有效值**时才看得见（旧读面显示的是叶里那条旧记录，"有效值"这一列
-    # 根本不存在）。它是真事、不是噪声：那几艘舰下一回合的行为确实换了。所以这里按**配方自己的
-    # 意图**断言（"值等于我们写进去的那个默认指令"），而不是断言"没有变动"。
+    check("C: took_over 恰好是那 N 片逐舰指令叶",
+          len(rep_c.took_over) == _n_written
+          and all(p.startswith(f"{_fac_c}.ship_orders[") for p in rep_c.took_over),
+          f"{len(rep_c.took_over)} 处：{rep_c.took_over[:3]}…")
+    check("C: took_over_leafs 也一一对应（叶名 = 势力.ship_orders[舰名]）",
+          len(rep_c.took_over_leafs) == _n_written
+          and all(p.startswith(f"{_fac_c}.ship_orders[") and not p.endswith("].behavior")
+                  for p in rep_c.took_over_leafs),
+          f"{rep_c.took_over_leafs[:3]}…")
+    # 顺带变动 = 「那片叶从无到有」（`exists` 翻转）**或**隐含的 `mode` 翻转 —— 船坞下水时就给
+    # 每艘舰写过一片 `Inherit` 的叶，所以这里通常只看到 `mode` 翻转。
     # ⚠ 断言里不要拿 `c.after` 当集合元素：`behavior` 是个 dict，塞进 set 会 TypeError。
     _leaf_flips = {(c.leaf, c.field, json.dumps(c.after, ensure_ascii=False, sort_keys=True))
                    for c in rep_c.incidental if c.leaf in rep_c.took_over_leafs}
-    check("C: 顺带变动里有那片叶的两处翻转（mode、exists）",
-          _leaf_flips == {(leaf, "mode", json.dumps(ctl.PLAYER)) for leaf in rep_c.took_over_leafs}
-          | {(leaf, "exists", json.dumps(True)) for leaf in rep_c.took_over_leafs},
-          f"{sorted(_leaf_flips)}")
-    _fac = expected_took[0].split(".")[0]
-    _written = next(e["default_ship_order"]["behavior"] for e in diff_c["control"]
-                    if e["faction_id"] == _fac)
-    _moved = [c for c in rep_c.incidental if c.leaf not in rep_c.took_over_leafs]
-    check("C: 其余顺带变动都是「跟着舰队默认走的舰，有效指令真的换成了那一句」",
-          bool(_moved)
-          and all(c.field == "behavior" and c.leaf.startswith(f"{_fac}.ship_orders[")
-                  and c.after == _written and c.before != c.after for c in _moved),
-          f"{len(_moved)} 艘：{[(c.leaf, c.before, c.after) for c in _moved]}")
+    check("C: 顺带变动只有「那片叶的 mode 翻转成 Player」（值翻转不是顺带变动，是我们请求的）",
+          all(f == "mode" and v == json.dumps(ctl.PLAYER) for (_, f, v) in _leaf_flips),
+          f"{sorted(_leaf_flips)[:4]}…")
+    # 每片叶里躺着的就是那句话本身——而且从 2026-10 起**叶就是唯一供值者**（指令链上没有
+    # 舰队默认叶、也没有图上意图，见 `State::ship_behavior`）⇒ 叶里的值**就是**有效值。
+    # 所以这条配方不需要再"等一回合看默认生效"。
+    _written = next(o["behavior"] for e in diff_c["control"] if e["faction_id"] == _fac_c
+                    for o in e["ship_orders"] if "behavior" in o)
+    _ships_written = [o["ship"] for e in diff_c["control"] if e["faction_id"] == _fac_c
+                      for o in e["ship_orders"] if "behavior" in o]
+    check("C: 每艘舰叶里的值就是那句话（叶是唯一供值者 ⇒ 也就是有效值）",
+          bool(_ships_written) and all(
+              rep_c.after.leaf(_fac_c, "ship_orders", n).value == _written
+              for n in _ships_written),
+          f"{len(_ships_written)} 艘 = {ctl.behavior_str(_written)}")
 
     # ---------------------------------------------------------------- 4b. the third style axis
     print("\n[4b] 第三条风格轴**角色**（战舰 War / 运输舰 Freight / 观测舰 Observe）："
@@ -475,9 +493,12 @@ def main(argv=None) -> int:
         y = yards.iloc[0]
         ycity, ybid, ycls = y["city"], int(y["building"]), y["ship_type"]
         # ① 建图 + **把图与建造区的舰级一起写**（口径 A 的正解：只改一处会被引擎拒）。
+        # ⚠ 图带的是**长期倾向**（角色 / 风格 / 风筝姿态），不是指令（2026-10 用户裁决）：
+        # 这张"重甲护卫"图表态 **角色 = 战舰**（它的活就是找仗打）。
         s_bp = ctl.surface(ckpt_r3, index_dir=proj)
         s_bp.set_blueprint_and_retool(faction, "重甲护卫", class_=ycls, city=ycity, building=ybid,
-                                      components=["kinetic", "ion_drive"], mode=ctl.PLAYER)
+                                      components=["kinetic", "ion_drive"], role="War",
+                                      mode=ctl.PLAYER)
         path_bp = ctl.write(s_bp.emit(), work / "steer_bp.json")
         print(f"    载荷：建图「重甲护卫」({ycls}) + 把 {ycity}/{ybid} 指过去")
         rep_bp = ctl.verify(ckpt_r3, path_bp)
@@ -485,9 +506,11 @@ def main(argv=None) -> int:
         check("BP: 建图 + 挂指针一次成功、无丢弃", rep_bp.ok and not rep_bp.skipped,
               f"{rep_bp.skipped}")
         lf_bp = rep_bp.after.leaf(faction, "blueprints", "重甲护卫")
-        check("BP: 图叶的值是**复合**的（class + components + order）",
+        check("BP: 图叶的值是**复合**的（class + components + 倾向三轴）",
               (lf_bp.value or {}).get("class") == ycls
-              and (lf_bp.value or {}).get("components") == ["kinetic", "ion_drive"],
+              and (lf_bp.value or {}).get("components") == ["kinetic", "ion_drive"]
+              and (lf_bp.value or {}).get("role") == "War"
+              and (lf_bp.value or {}).get("doctrine") is None,
               f"{lf_bp.value}")
         check("BP: 显式 mode=Player ⇒ 这张图归玩家、且**没有**意外接管",
               lf_bp.mode == ctl.PLAYER and rep_bp.took_over_leafs == [],
@@ -516,8 +539,9 @@ def main(argv=None) -> int:
               mine["effective_mode"] == ctl.PLAYER and mine["mode"] == ctl.PLAYER
               and int(mine["class_slots"]) == slots,
               f"effective_mode={mine['effective_mode']} slots={mine['class_slots']}（配置表 {slots}）")
-        check("BP: 图的意图轴默认沉默（没写 order ⇒ null，链继续下降到舰队默认）",
-              pd.isna(mine["order"]), f"{mine['order']!r}（JSON null 在 pandas 里读成 NaN）")
+        check("BP: 图上写了角色 ⇒ 蓝图表看得见它；没写的两条轴仍是 null（链继续下降到舰队默认）",
+              mine["role"] == "War" and pd.isna(mine["doctrine"]) and pd.isna(mine["kiting"]),
+              f"role={mine['role']!r} doctrine={mine['doctrine']!r} kiting={mine['kiting']!r}")
         check("BP: 组件成本 / 造过多少艘是引擎算的派生列",
               float(mine["component_cost"].get("铁", 0.0)) > 0 and int(mine["ship_count"]) >= 0,
               f"component_cost={dict(mine['component_cost'])} ship_count={mine['ship_count']}")
@@ -533,7 +557,7 @@ def main(argv=None) -> int:
         got2 = ctl.buildings(ckpt_bp2)
         # ⚠ `pd.isna` 而不是 `is None`：引擎给的确实是 JSON `null`（Python 侧就是 `None`），但
         # pandas 3 的 `str` dtype 会把「有字符串、也有缺值」的列统一成 `str` + `NaN` —— 于是这一格
-        # 读出来是 `nan`（float），`is None` 恒 False。同一个坑这份 demo 在 `mine["order"]` 那处
+        # 读出来是 `nan`（float），`is None` 恒 False。同一个坑这份 demo 在 `mine["doctrine"]` 那处
         # 已经用 `pd.isna` 绕过（见上面「图的意图轴默认沉默」那条）。
         check("BP: 指针回到「无」（= 走 ship_type + choose_loadout）",
               pd.isna(got2[(got2["city"] == ycity)
@@ -580,43 +604,39 @@ def main(argv=None) -> int:
                   any(s["code"] == "no_such_blueprint" for s in rep_bp6.skipped),
                   f"{[s['code'] for s in rep_bp6.skipped]}")
 
-    # ---------------------------------------------------------------- 4d. leaf record ≠ effective value
-    print("\n[4d] 「**叶里的记录值**」与「**有效值**」是两件事——kit 两组列首次把它们分开给")
-    # 场景（与审查方探针同一套）：把某势力的舰队默认钉成玩家 + `Dock:月球`。那几艘舰**本来就有**
-    # 一片 `Inherit` 的指令叶（AI 每回合写的），于是三种答案同时存在、而且必须**互不冒充**：
-    #   叶里的记录值 = 上一回合 AI 写的那句（`order_behavior`）
-    #   有效值       = 舰队默认那一句（`effective_order_value`）
-    #   谁供的值     = `order_source == "fleet_default"`
+    # ---------------------------------------------------------------- 4d. leaf record = effective value
+    print("\n[4d] 指令的「**叶里的值**」与「**有效值**」现在是**同一个东西**（叶是唯一供值者）")
+    # 场景：给全舰队**逐舰**写一条 `Dock:月球`。三种读数必须互相印证：
+    #   叶里的记录值（`order_behavior`）= 我们写进去的那句
+    #   有效值（`effective_order_value`）= 同一句（2026-10 起指令链上没有更高的一层）
+    #   谁供的值（`order_source`）    = `leaf`
+    #
+    # ⚠ 这条以前是**两件事**（叶里躺着一句旧记录、有效值由"舰队默认叶"供给，`order_source`
+    # 报 `fleet_default`）——舰队默认那片叶与图上的 `order` 一起被裁决删除之后，这个二分不再存在。
+    # 留着这一节是为了把**新**的不变式钉住：谁再往指令链上加一层"更高默认"，这里就红。
     s_lo = ctl.surface(ckpt)
-    s_lo.set_default_ship_order(faction, behavior="Dock:月球", mode=ctl.PLAYER)
+    _fleet_lo = sorted(lf.key[0] for lf in s_lo.leaves("ship_orders") if lf.faction == faction)
+    check("LO: 这一势力有舰可写（否则这一节什么都没证明）", bool(_fleet_lo), f"{len(_fleet_lo)} 艘")
+    s_lo.set_behavior(_fleet_lo, "Dock:月球", mode=ctl.PLAYER)
     ckpt_lo = work / "ckpt_leaforder.ron"
     app_lo = ctl.apply(ckpt, ctl.write(s_lo.emit(), work / "steer_leaforder.json"), save=ckpt_lo)
-    check("LO: --apply --save 成功（舰队默认 = 玩家 + Dock 月球）", app_lo.ok and not app_lo.skipped)
+    check("LO: --apply --save 成功（全舰队逐舰 = 玩家 + Dock 月球）", app_lo.ok and not app_lo.skipped)
 
     mine_lo = ctl.ships(ckpt_lo)
     mine_lo = mine_lo[mine_lo["faction_id"] == faction]
-    inherits = mine_lo[mine_lo["order_mode"] == ctl.INHERIT]
-    check("LO: 有一批「叶在、叶说 Inherit」的舰（否则这条什么都没证明）",
-          len(inherits) >= 1, f"{len(inherits)}/{len(mine_lo)} 艘")
-    check("LO: `order_leaf` 说的是真相——这些舰**有**自己的叶（投影 derived.control 里有它们的行）",
-          bool(inherits["order_leaf"].all()), f"{int(inherits['order_leaf'].sum())}/{len(inherits)}")
-    check("LO: `order_behavior` = **叶里那句旧的**（不是舰队默认）",
-          all(v is not None for v in inherits["order_behavior"])
-          and set(inherits["order_behavior"]).isdisjoint({"Dock:月球"}),
-          f"叶里={sorted(set(inherits['order_behavior']))}")
-    check("LO: `effective_order_value` = 舰队默认那句，且 `order_source` 指得出是它供的",
-          set(inherits["effective_order_value"]) == {"Dock:月球"}
-          and set(inherits["order_source"]) == {"fleet_default"},
-          f"source={sorted(set(inherits['order_source']))}")
-    check("LO: 两组列**真的不一样**（「叶里说了什么」≠「链上的答案」）",
-          all(a != b for a, b in zip(inherits["order_behavior"], inherits["effective_order_value"])),
-          f"叶里={sorted(set(inherits['order_behavior']))} vs "
-          f"有效={sorted(set(inherits['effective_order_value']))}")
+    check("LO: 每艘舰都有自己那片叶（投影 derived.control 里有它们的行）",
+          bool(mine_lo["order_leaf"].all()), f"{int(mine_lo['order_leaf'].sum())}/{len(mine_lo)}")
+    check("LO: `order_behavior` = 我们写进去的那句",
+          set(mine_lo["order_behavior"]) == {"Dock:月球"},
+          f"叶里={sorted(set(mine_lo['order_behavior']))}")
+    check("LO: `effective_order_value` 与它**逐行相同**，`order_source` 一律 `leaf`",
+          list(mine_lo["effective_order_value"]) == list(mine_lo["order_behavior"])
+          and set(mine_lo["order_source"]) == {"leaf"},
+          f"source={sorted(set(mine_lo['order_source']))}")
 
-    # 再把其中一艘舰的叶**删掉**：`order_leaf` 必须翻成 False —— 这件事 `--control` 量不出来
-    # （那面每舰一行，`behavior` 给的是有效值），只有投影的 `control` 表（引擎遍历 `c.ship_orders`）
-    # 才说得清「这片叶还在不在」。
-    gone = sorted(inherits["ship_id"])[0]
+    # 再把其中一艘舰的叶**删掉**：`order_leaf` 必须翻成 False，而且**没有人接手**
+    # （没有舰队默认叶、也没有图上意图）⇒ 有效值是空的，调用方按 `Idle` 兜底。
+    gone = sorted(mine_lo["ship_id"])[0]
     s_lo2 = ctl.surface(ckpt_lo)
     s_lo2.remove(faction, "ship_orders", gone)
     ckpt_lo2 = work / "ckpt_leaforder2.ron"
@@ -630,9 +650,9 @@ def main(argv=None) -> int:
           and row_gone["order_mode"] == ctl.INHERIT,
           f"{gone}: leaf={row_gone['order_leaf']} mode={row_gone['order_mode']} "
           f"behavior={row_gone['order_behavior']!r}")
-    check("LO: 但**有效值**照旧由舰队默认供给（没有叶 ≠ 没有指令）",
-          row_gone["effective_order_value"] == "Dock:月球"
-          and row_gone["order_source"] == "fleet_default")
+    check("LO: 没有叶 ⇒ **没有任何一层说话**（有效值空、出处空；旧行为的「舰队默认接手」已不存在）",
+          pd.isna(row_gone["effective_order_value"]) and pd.isna(row_gone["order_source"]),
+          f"effective={row_gone['effective_order_value']!r} source={row_gone['order_source']!r}")
     check("LO: 别的舰照旧有自己的叶（只删了一艘）",
           int(ctl.ships(ckpt_lo2).query("faction_id == @faction")["order_leaf"].sum()) == len(mine_lo) - 1)
 
@@ -726,11 +746,11 @@ def main(argv=None) -> int:
           f"removed={len(rep_r2.removed_leafs)}+{len(rep_r5.removed_leafs)} "
           f"ok={rep_r.ok and rep_r2.ok and rep_r5.ok}")
     print(f"    封顶 {len(table)} 条预算，涉 {table['faction_id'].nunique() if len(table) else 0} 个势力；"
-          f"新增舰队默认 {len(expected_took)} 处")
+          f"逐舰下发指令 {_n_written} 处（全舰队听同一句话）")
     if len(table):
         print(f"    合计削减 {float((table['old'] - table['new']).sum()):.2f}"
               "（按各资源自身单位求和，仅作量级参考）")
-    print(f"    新增的舰队默认：{ {e['faction_id']: e['default_ship_order'] for e in diff_c['control'] if 'default_ship_order' in e} }")
+    print(f"    逐舰下发的指令：{_n_written} 艘 ⇒ {ctl.behavior_str(_written)}")
     print("=" * 78)
 
     if FAILURES:
