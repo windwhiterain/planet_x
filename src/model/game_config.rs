@@ -351,8 +351,19 @@ fn default_capital_share_relocate_cost() -> f64 {
 pub struct MondConfig {
     /// 异常区起始半径（距太阳，AU）：超出此距离进入「柯伊伯异常区」。
     pub radius: f64,
-    /// 非 master 势力在异常区内，每超出 [`Self::radius`] 1 AU 的导航偏移量（AU）。
+    /// 非 master 势力在异常区内，每超出 [`Self::radius`] 1 AU 的**最大**导航偏移量（AU）。
+    /// 实际偏移是伪随机的（见 [`Self::drift_shape`]），所以它是上界而不是定值。
     pub drift_per_au: f64,
+    /// 伪随机偏移的分布形状：`偏移 = 上界 × roll^drift_shape`（`roll ∈ [0,1)` 均匀）。
+    ///
+    /// 单次尝试的成功率 = `P(偏移 ≤ arrival_eps)`：
+    /// * `1.0`（默认）→ 均匀分布，`p = eps/(depth×drift)`：伊克西翁 0.92、妊神星 0.29、创神星 0.20；
+    /// * `< 1` → 偏移**偏向大值**（更常在远处迷航）：`p = (eps/(depth×drift))^(1/shape)`，
+    ///   `0.5` 时创神星降到 0.04（≈26 回合才蒙对一次）——深处更难，但**永远不是 0**；
+    /// * `> 1` → 偏向小值（更好到）。
+    ///
+    /// 这是「带内到底有多难」的总旋钮：往小调 = 圣所与柯伊伯矿更难被外人碰到。
+    pub drift_shape: f64,
     /// 掌握了 MOND 修正引力的势力 id（在异常区内无导航偏移）。
     pub masters: Vec<FactionId>,
 }
