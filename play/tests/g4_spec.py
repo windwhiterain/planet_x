@@ -368,10 +368,21 @@ def run(h, ck) -> None:
         layout = v.get("layout", "table")
         if layout not in LAYOUTS:
             shape_bad.append(f"{vid}：未知 layout `{layout}`（已知 {LAYOUTS}）")
-        # `source` 不是每条都必须有：inline 那条只是「路径 → 哪条视图」的映射表（`use_at`），
-        # 它自己不含列。
-        if mount != "inline" and not isinstance(v.get("source"), str):
-            shape_bad.append(f"{vid}：缺 source")
+        # `source` 的三种合法形态：
+        #   * 字符串 = 常规来源；
+        #   * **`null`（键必须在）** = 「这张卡故意不依赖任何记录」，只放不取记录的行
+        #     （例如 `{ "owner": "global" }` 那条全局归属）——显式写 null 才允许，
+        #     **漏写**仍然红（那多半是打错/漏了，而不是有意）；
+        #   * inline 那条本来就不含列（它只是「路径 → 哪条视图」的映射表）。
+        if mount != "inline":
+            src = v.get("source", "<缺>")
+            if src is None:
+                if layout == "table":
+                    shape_bad.append(f"{vid}：layout=table 不能 source: null（表没有来源没意义）")
+            elif not isinstance(src, str):
+                shape_bad.append(f"{vid}：source 既不是字符串也不是 null（{src!r}）")
+            elif src == "<缺>":
+                shape_bad.append(f"{vid}：缺 source（要「不依赖记录」就显式写 `\"source\": null`）")
         if mount == "select" and not isinstance(v.get("select_kind"), str):
             shape_bad.append(f"{vid}：select 挂载要声明 select_kind")
         if mount == "inline" and v.get("use_at") is None:
@@ -604,13 +615,23 @@ def run(h, ck) -> None:
     leaf_rows: list[tuple[str, str, str]] = []
     action_rows: list[tuple[str, str]] = []
     owner_rows: list[tuple[str, str]] = []
+    new_rows: list[str] = []
     row_bad: list[str] = []
     for v in views:
         vid = v.get("id", "?")
         for c in v.get("columns") or []:
             if isinstance(c.get("leaf"), str):
                 try:
-                    leaf_rows.append((vid, c["leaf"], leaf_field_of(c["leaf"])))
+                    f = leaf_field_of(c["leaf"])
+                    leaf_rows.append((vid, c["leaf"], f))
+                    # `new: true` = 「这一行的身份键由人现填」（对偶于 `keys_from` 的「从名单里挑」）。
+                    # 只对**多键叶**有意义：势力级单叶（`keys` 为空）本来就每势力一片，
+                    # 「现造一个键」对它不成立 ⇒ 写了就是声明写错（静默忽略 = 又一个哑巴失败）。
+                    if c.get("new"):
+                        keys = {s["field"]: s.get("keys") or [] for s in leaves}.get(f)
+                        if not keys:
+                            new_rows.append(
+                                f"{vid}：`{f}` 是势力级单叶（keys 为空），`new` 对它没有意义")
                 except ValueError as e:
                     row_bad.append(f"{vid}：leaf 行 `{c['leaf']}` —— {e}")
             if isinstance(c.get("action"), str):
@@ -659,6 +680,13 @@ def run(h, ck) -> None:
              (f"leaf_ui 覆盖 {len(leaf_ui)}/{len(declared_fields)} 片叶、action_ui "
               f"{len(action_ui)}/{len(declared_actions)} 条命令；owner 行的作用域键都在 "
               f"ControlScopePatch 里（{sorted(scope_props)}）"))
+
+    # `new: true`（身份键由人现填）只对**多键叶**成立；写在势力级单叶上是声明写错。
+    new_rows_total = sum(1 for v in views for c in (v.get("columns") or []) if c.get("new"))
+    ck.check(f"认领完整性：{new_rows_total} 条 `new: true` 行都挂在多键叶上"
+             f"（单叶每势力一片，「现造一个身份键」对它不成立）",
+             not new_rows,
+             "；".join(new_rows[:3]) or f"本帧 {new_rows_total} 条，全部合法（防空转）")
 
 
 if __name__ == "__main__":

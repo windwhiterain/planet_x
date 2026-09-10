@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "组织点（view spec）声明 —— **读与控制的同一份声明**。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。控制那一侧的对应纪律：`--control-schema` 的 leaves 里每个叶要么被某条 leaf 行认领、要么在 write_omit 里写明理由。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。**四种行**：`path`（读）/ `leaf`（一片控制叶，值就是那条路径在 @control 上取到的东西）/ `owner`（作用域归属）/ `action`（命令列表）。四种住在同一个数组里 ⇒ 顺序就是「读与控制穿插」的顺序。",
+  "note": "组织点（view spec）声明 —— **读与控制的同一份声明**。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。控制那一侧的对应纪律：`--control-schema` 的 leaves 里每个叶要么被某条 leaf 行认领、要么在 write_omit 里写明理由。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。**四种行**：`path`（读）/ `leaf`（一片控制叶，值就是那条路径在 @control 上取到的东西）/ `owner`（作用域归属）/ `action`（命令列表）。四种住在同一个数组里 ⇒ 顺序就是「读与控制穿插」的顺序。两条例外语法：`leaf` 行上的 `new: true` = 这片叶的身份键**没有名单可枚举**（设计图库：图名是开放集合），由人现填（`keys_from` 的对偶）；视图写 `source: null` = **不取任何记录**，只放不依赖记录的行（如 `owner: global`）；`layout: table` 不许 `null`（表没有来源没有意义）。",
   "tagged_behavior": {
     "map": {
       "Idle": "待命",
@@ -28,15 +28,16 @@
     "loyalty_budget": { "label": "娱乐/福利预算", "editor": "number", "key_label": "city", "keys_from": { "path": "@state.cities[*]", "where": "faction_id=${name}", "key": "name" }, "hint": "按城建：给这座城拨多少娱乐/福利资源（忠诚目标里的娱乐项）" },
     "invest_weights": { "label": "建设权重", "editor": "number", "key_label": "building" },
     "build_weights": { "label": "建造权重", "editor": "number", "key_label": "building" },
-    "blueprints": { "label": "设计图", "editor": "blueprint", "key_label": "name" }
+    "blueprints": { "label": "设计图", "editor": "blueprint", "key_label": "name",
+      "read_only": { "ship_count": "本图造过", "launch_waiting": "买不起⇒未下水" },
+      "hint": "一张图 = 势力库里的一片叶（键 = 图名）。建造区只拿一个**指针**指向它，指针在「城市」页的建造区那一行改；图名是开放集合 ⇒ 这一行可以「＋ 新建」" }
   },
   "action_ui": {
     "buildings": { "label": "建筑", "editor": "building" }
   },
   "write_omit": [
     { "field": "invest_weights", "why": "随「建筑与建造区」行显示：每一片权重叶属于某个建造区，住在地点卡片的 building 行里（action: buildings）" },
-    { "field": "build_weights", "why": "同上（建造区的建造权重）" },
-    { "field": "blueprints", "why": "设计图库仍住在旧「控制树」页的设计图库分组里；第二步搬进卡片" }
+    { "field": "build_weights", "why": "同上（建造区的建造权重）" }
   ],
 
   "inline": [
@@ -330,7 +331,48 @@
           "empty": "挂单簿是空的。"
         }
       ]
+    },
+    {
+      "id": "blueprints",
+      "title": "设计图",
+      "hint": "一行一势力：库里每张图 = 一片叶（舰级 / 选装 / 倾向三轴 / 归属），末尾可以**新建**一张",
+      "views": [
+        {
+          "id": "bp-table",
+          "title": "各势力的设计图库",
+          "mount": "panel",
+          "layout": "table",
+          "source": "@control[*]",
+          "key": "faction_id",
+          "select_kind": "faction",
+          "columns": [
+            { "path": "faction_id", "label": "势力", "click": "faction", "dot": "@state.factions[?name=${faction_id}].color" },
+            { "leaf": "@control[?faction_id=${faction_id}].blueprints", "new": true }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "global",
+      "title": "全局",
+      "hint": "链上谁都没说话时按哪一档（全局作用域）。各层自己的表态在「未组织」页的 @scope 下也看得到",
+      "views": [
+        {
+          "id": "global-scope",
+          "title": "全局作用域",
+          "mount": "panel",
+          "layout": "sheet",
+          "source": null,
+          "columns": [
+            { "owner": "global", "label": "全局默认归谁" },
+            { "path": "@scope.factions", "label": "有表态的势力", "fmt": "pairs", "sep": "=" },
+            { "path": "@scope.bodies", "label": "有表态的天体", "fmt": "pairs", "sep": "=" },
+            { "path": "@scope.cities", "label": "有表态的城", "fmt": "pairs", "sep": "=" }
+          ]
+        }
+      ]
     }
+
   ],
   "select": [
     {

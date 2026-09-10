@@ -549,6 +549,9 @@
       else ctx.expanded.add(rowId);
       renderResidualInto(box, btn, res, keys, !now);
     });
+    td.addEventListener('click', (ev) => {
+      if (ev.target !== btn && !box.contains(ev.target)) btn.click();  // 整格可点（同上）
+    });
     td.append(btn, box);
     return td;
   }
@@ -588,6 +591,14 @@
 
   // --- 布局 -----------------------------------------------------------------
   function renderTable(container, spec) {
+    // `source: null` 对**表**没有意义（表是"多条记录"的布局）⇒ 明说这是声明写错了，
+    // 而不是安静地显示「这一帧没有数据」（那是另一件事：来源在，只是这帧空）。
+    // 静态纪律在 `play/tests/g4_spec.py` 里也会拦（`layout: table` 不许 `source: null`）。
+    if (spec.source === null) {
+      container.appendChild(el('div', 'sv-empty',
+        '（这条表的 `source` 是 `null`：表布局是"多条记录"的布局，`source: null` 只对 sheet / cards 有意义）'));
+      return;
+    }
     let rows = expand(spec.source);
     if (!rows.length) {
       container.appendChild(el('div', 'sv-empty', spec.empty || '（这一帧没有数据）'));
@@ -683,6 +694,8 @@
           const open = ctx.expanded.has(cardKey);
           const btn = el('span', 'sv-more clickable', open ? '▾' : '▸');
           btn.title = '展开这一行的卡片（组织点「' + spec.card + '」）——读行与控制行在同一条行序里';
+          // ⚠ 监听挂在**整个格**上（不是只挂那个 20px 的 span）：点在内边距上没反应是真实摩擦
+          // ——2026-10 修；同一个毛病「其余 ▸N」那格也有，见 [`residualCell`]。
           btn.addEventListener('click', () => {
             const now = !ctx.expanded.has(cardKey);
             if (now) ctx.expanded.add(cardKey);
@@ -692,6 +705,9 @@
             if (cardRow) cardRow.style.display = now ? '' : 'none';
           });
           tdE.appendChild(btn);
+          tdE.addEventListener('click', (ev) => {
+            if (ev.target !== btn) btn.click();   // 点在格子里（无论哪一处）都等于点那个箭头
+          });
           tr.appendChild(tdE);
         }
         const td0 = el('td', 'sv-td sv-td-key');
@@ -747,6 +763,14 @@
   }
 
   function renderSheet(container, spec) {
+    // `source: null` = **不取任何记录**：那是「不挂在任何一条 state 记录上的东西」的家
+    // （例如全局作用域的归属行——它属于控制面，不属于某一条势力/城/舰的记录）。
+    // 与「这一帧没有数据」**不是一回事**：后者要明说（`sv-empty`），前者本来就该渲染。
+    // ⚠ 键**必须在**（写 `null`，别省掉）：声明要自己说清「这张卡故意不依赖记录」。
+    if (spec.source === null) {
+      sheetOfRecord(container, spec, { value: {}, key: null });
+      return;
+    }
     const rows = expand(spec.source);
     if (!rows.length) {
       container.appendChild(el('div', 'sv-empty', spec.empty || '（这一帧没有数据）'));

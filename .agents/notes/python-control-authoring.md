@@ -153,6 +153,23 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
    实测：读面读得到、写得到（`took_over` 恰好两片）、落地后有效值随势力默认走
    （中国 5 艘舰 `kiting` 全 = −0.6）；已存在的叶仍允许只改一条轴。
 
+8. `[x]` **叶种类表不再手抄**（2026-10，`feature/control-tree-retire`）：`LEAF_KINDS` 从写死的
+   dict 换成**懒加载的 `Mapping`**（`_LeafFacts`），事实来自引擎的 `--control-schema`
+   （`src/control/leaves.rs` 的 `leaves`/`actions` 段）——顺手删掉
+   `_VALUE_FIELD`/`_TWO_AXIS_KINDS`/`_COMPOSITE_KINDS`/`_BLUEPRINT_FIELDS` 四张表，
+   以及没有任何调用方的 `_KEY_FIELDS`：
+   * `_leaf_value` 按 manifest 的 `values` 取（一个字段直取、多个给 dict）⇒ **加一条轴不用改 kit**；
+   * `_diff_fields` 的「被请求字段」= `{mode, remove} ∪ values(kind)` ⇒ 两轴不再需要特例分支；
+   * `_leaf_fields`/`_diff_fields` 过滤身份键改成**按这片叶自己的 `keys`**（旧并集语义会把
+     `invest_weights` 顺带带过来的 `resource` 属性一起抹掉）；
+   * 「叶不存在」那一行把**全部值字段**给 `null`（旧代码只写一个 `value: null` ⇒
+     两轴风格叶的另一条轴会在 `verify` 的 before/after 里凭空消失）。
+   验证：`demo.py` **全部断言通过**（这一局 297 片叶）、数据级四组 67 条全绿；纪律
+   （`leaves` ∪ `actions` ∪ `{faction_id}` ≡ `FactionControlPatch.properties`，双向）
+   由 `play/tests/g4_spec.py` 守，不再靠"记得改这边"。
+   这一条与 web 那半是**同一件事**：三端（引擎 / kit / WebUI）现在读同一份声明，
+   见 [`web-control-spec.md`](web-control-spec.md)。
+
 ## 4. 复现 / 验证
 
 ```bash

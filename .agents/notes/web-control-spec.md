@@ -250,7 +250,7 @@
   g4 的哪一族」的指针表；`cargo check -p planet_x_web --all-targets` 绿。
 * **反向验证 `play/tests/_g4_negative.py`**（不是组，不进 `run.py`）：把 `views.json` 与
   `--control-schema` 的**副本**逐个改坏喂给 `g4_spec.run`，要求「该红的红、基线绿」。
-  实测 **16 个注入错全部咬住**。**一条不会红的守卫等于没有守卫**，这份就是那条判据的量具。
+  实测 **16 个注入错全部咬住**（第二步又加了两条 `source` 形态的，现为 18）。**一条不会红的守卫等于没有守卫**，这份就是那条判据的量具。
 * ⚠ 与设计稿不符、以引擎实测为准的一条：**读面从不发 `remove`**（315 个条目里 0 次）。
   `DefaultDoctrine`/`DefaultKiting`/`DefaultShipRole` 构造时写死 `remove: false` 而该字段
   `skip_serializing_if = "is_false"`；`capital` 是 `Control<BodyId>`，根本没这个字段。

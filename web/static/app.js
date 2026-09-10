@@ -1,16 +1,20 @@
 // 行星X WebUI 前端 — 经典脚本（控制面板/DOM）+ three.js 3D 地图（map3d.js，ES module）。
 //
-// 控制面板是一个沿控制作用域链下钻的 tab 树：
-//   全局 -> 势力 -> 分类(舰/预算/天体) -> 天体 -> 城市 -> 建筑
-// 每个容器节点显示一条 tab 带、只展开选中的子节点；分类组列出全部子项。
-// 地图由 map3d.js 渲染 WebGL 场景，通过 window.PlanetXMap.setWorld/onSelect 与这里耦合。
+// 左栏**只有一栏**：`web/static/views.json` 声明出来的页（读与控制的四种行住在同一份声明、
+// 同一个数组里 ⇒ 顺序就是穿插的顺序）。求值器在 `specview.js`（通用，不认识领域词），
+// 写面那一半在 `controls.js`（叶的结构事实来自引擎的 `GET /api/control-schema`）。
 //
-// 两个读面，分工明确：
-//   * 左侧「控制层级」= **可控 state**（可编辑的控制面：舰指令/预算/权重/迁都，写回服务器）。
-//   * 右侧「状态」    = **普通 state + 派生 + 配置**（只读全量）。
-//     它把后端给的 `world.info`（每个根 = 模型的整份 JSON dump）交给 jsonview.js 那个
-//     schema-agnostic widget 渲染：本文件不写任何字段名，只决定「渲染哪个根」，
-//     所以 State/GameConfig/RoundView 怎么改都不用动前端。
+// ⚠ 2026-10：**手写的控制层级树已整条删除**（`buildTree`/`shipNode`/`renderNode`/`KIND`/
+// 「＋ 新建设计图」表单那一套）。它以前是第二栏「控制」，与新面并存了一段过渡期；
+// 它提供的每一件事现在都由声明的行提供（设计图 → 「设计图」页的 leaf 行 + `new: true`、
+// 建筑与建造区 → 城市卡片的 `action: buildings` 行、全局作用域 → 「全局」页的 `owner: global` 行、
+// 迁都 → 势力卡片的 `capital` 行）。**编辑器函数本身留着**——它们是 widget 注册表
+// （`leaf_ui.<field>.editor` 选一个），新行在用。见 `.agents/notes/web-control-spec.md`。
+//
+// 右侧「状态」 = **普通 state + 派生 + 配置**（原始读数；被组织点认领的集合会**就地**换成
+// 整理后的表，那张表里也有控制行）。它把后端给的 `world.info`（每个根 = 模型的整份 JSON dump）
+// 交给 jsonview.js 那个 schema-agnostic widget 渲染：本文件不写任何字段名，只决定「渲染哪个根」，
+// 所以 State/GameConfig/RoundView 怎么改都不用动前端。
 
 let world = null;      // 当前 StateView（/api/state）= { control, scope, info }
 let st = null;         // info 的 `state` 根：规范世界的**原始** State（天体/定居点/城/势力/舰/…）
@@ -22,7 +26,6 @@ let edScope = null;    // 可编辑作用域
 let baseControl = [];  // 载入时的读面快照（回传 diff 的基准，见 buildCommandDiff）
 let baseScope = null;  // 同上，作用域那一段
 let prevState = null;  // 上一帧，用于 diff 页脚
-let selTab = new Map(); // parentKey -> 激活子 key（每层只开一个 tab）
 let infoTab = 0;       // 右侧面板当前显示的根（world.info 的下标）
 let infoFilter = '';   // 右侧面板的过滤串
 const infoExpanded = new Set(); // 右侧面板的展开状态（路径集合，跨渲染保留）
@@ -51,12 +54,6 @@ async function postJSON(url, body) {
   return r.json();
 }
 
-// 势力显示色来自 state 根的原始 Faction（唯一键 = name）。未知回落灰。
-function facColor(fid) {
-  const f = (st.factions || []).find((x) => x.name === fid);
-  return (f && f.color) || '#8f9bb3';
-}
-
 // --- 行为辅助（当前 ShipBehavior 的 serde 形状） --------------------------
 // Idle / {Move:{position}} / {Follow:{ship}} / {DockCity:{city}} /
 // {Dock:{body}} / {Colonize:{body}} —— 实体一律用「唯一名」作为 key。
@@ -74,20 +71,6 @@ function behaviorType(b) {
   if (b && b.Dock) return 'dock';
   if (b && b.Colonize) return 'colonize';
   return 'idle';
-}
-function behaviorSummary(b, w) {
-  const shipName = (id) => { const s = w.ships.find((x) => x.name === id); return s ? s.name : '船#' + id; };
-  const cityName = (id) => { const c = w.cities.find((x) => x.name === id); return c ? c.name : '城#' + id; };
-  const bodyName = (id) => { const bd = w.bodies.find((x) => x.name === id); return bd ? bd.name : '天体#' + id; };
-  switch (behaviorType(b)) {
-    case 'unset': return '无人表态（按待命兜底）';
-    case 'move': return '移动(' + (b.Move.position[0] | 0) + ',' + (b.Move.position[1] | 0) + ')';
-    case 'follow': return '→' + shipName(b.Follow.ship) + '·跟随';
-    case 'dock_city': return '→' + cityName(b.DockCity.city) + '·停泊城';
-    case 'dock': return '→' + bodyName(b.Dock.body) + '·停泊轨道';
-    case 'colonize': return '→' + bodyName(b.Colonize.body) + '·殖民';
-    default: return '待命';
-  }
 }
 function behaviorToInput(b) {
   switch (behaviorType(b)) {
@@ -146,81 +129,15 @@ function roleSummary(l) {
 //      是**没人读的**。诚实的说法是「本层不供值」，绝不能写成"值由系统写"。
 //      （一句话解释这个组合：`Auto` 的默认叶 = AI 的答案是**"不设全舰队默认、逐舰自己说"**，
 //       所以它确实不必写任何值——但界面必须把"那个数没人用"说出来。）
-const AUTO_RETUNED = '自动（自动控制每回合按战况重估，会改写这片叶）';      // 逐舰风格两叶
-const AUTO_WRITTEN = '自动（自动控制每回合按积压/观测需求定编，会改写这片叶）'; // 逐舰角色叶
-const AUTO_UNWRITTEN = '自动（本层不供值：引擎只在它是玩家时才取默认值）'; // 势力级默认叶
-/// 三组**字段名**：哪一片叶属于哪种措辞（`modeToggleFor` 与各行的 decorateLabel 都读它）。
+/// 三组**字段名**：哪一片叶属于哪种措辞（归属下拉里「自动」那一档的说明文字读它）。
 /// 用字段名而不是 kind：`kind` 只是控制树内部的行键，字段名才是与引擎对齐的那一个
 /// （manifest / 读面 / 补丁都用它）。
 const AUTO_RETUNED_FIELDS = ['ship_doctrine', 'ship_kiting'];
 const AUTO_WRITTEN_FIELDS = ['ship_role'];
 const AUTO_UNWRITTEN_FIELDS = ['default_doctrine', 'default_kiting', 'default_role'];
 
-/// 节点的字段名：新控制行（`controls.js`）直接给 `field`，旧控制树的节点在 `buildTree` 里补。
+/// 节点的字段名：控制行由 `controls.js` 直接给 `field`（引擎 manifest 里的那个拼写）。
 function leafFieldOf(node) { return (node && (node.field || node.kind)) || ''; }
-
-// 势力级**默认风格**行的摘要：只有它自己是「玩家」时那个值才真的被采用（引擎的取值规则：
-// 默认叶为 `Inherit`/`Auto` 时不供值），所以这两种情况都不显示那几个数——显示了会骗人。
-function fleetStyleLabel(leaf, summary) {
-  const m = normMode(leaf[modeField()]);
-  if (m === 'Player') return ' · ' + summary(leaf);
-  return m === 'Auto' ? ' · ' + AUTO_UNWRITTEN : ' · 未表态';
-}
-
-/// 逐舰**风格叶**的 `Auto` 补注：这片叶现在**真的有执行者**（自动控制按战况重估）。
-function autoRetuned(leaf) { return normMode(leaf[modeField()]) === 'Auto' ? ' · ' + AUTO_RETUNED : ''; }
-/// 逐舰**角色叶**的 `Auto` 补注：这片叶也有执行者（自动控制按积压定编），措辞另说一句。
-function autoWritten(leaf) { return normMode(leaf[modeField()]) === 'Auto' ? ' · ' + AUTO_WRITTEN : ''; }
-
-/// 「这个数现在是从哪来的」：引擎的取值链是
-///   叶 `Inherit` + 舰队默认是 `Player` ⇒ 舰队默认的值；否则叶自己的值；没有叶 ⇒ 舰上记录值
-/// （`State::ship_doctrine` / `ship_kiting`）。只在叶片**自己没表态**时显示——那时"你以为的
-/// 归属"与"实际的来源"最容易错位，而这正是「改舰队默认对某艘舰没用」的成因。
-function styleFollowHint(node) {
-  const leaf = node.leaf;
-  if (normMode(leaf[modeField()]) !== 'Inherit') return null;
-  const doctrine = node.kind === 'shipdoctrine';
-  const summary = doctrine ? doctrineSummary : kitingSummary;
-  const fc = getControl(node.fid);
-  const d = fc[DEFAULT_LEAF[node.kind]];
-  if (d && normMode(d[modeField()]) === 'Player') {
-    return hintLine('当前跟随：舰队默认（' + summary(d) + '）');
-  }
-  // 叶片**存在**但没有表态：引擎取的是叶里的值（`leaf.map(...)` 优先于记录值）——也就是说
-  // 「没表态」不等于「没值」：这个数已经被钉在叶里，改出厂/舰队默认都不会再影响它。
-  // ⚠ 「恢复继承」只撤**表态**、不动值（note §8 第 2 条），所以它**不会**把这个数放回出厂值
-  // ——今天没有任何接口能删掉一片叶（补丁只能新建/改写），说法必须写到这一步。
-  const raw = ((st.control || {})[node.fid] || {})[doctrine ? 'ship_doctrine' : 'ship_kiting'] || {};
-  const s = st.ships.find((x) => x.name === node.id);
-  if (raw[node.id]) return hintLine('当前跟随：本舰叶片里的数（没表态 ≠ 没值：引擎优先用叶里的值）——要真正还回出厂快照，用「恢复出厂值」删掉这片叶');
-  const rec = s ? (doctrine ? s.doctrine : s.kiting) : null;
-  return hintLine('当前跟随：出厂快照' + (rec != null ? '（' + summary(rec) + '）' : ''));
-}
-
-/// 「这艘舰的**角色**现在是从哪来的」：与 [`styleFollowHint`] 同一条取值链
-/// （叶 → 舰队默认 → 舰上记录值），但有一句只属于这条轴的话——**这片叶是自动控制写的**，
-/// 所以在这里「没表态」的含义是「AI 每回合可以重新决定这艘舰干什么活」，而不是「永远冻着」。
-/// ⚠ 角色是**三值枚举**，所以提示里的值一律过 [`roleSummary`]，并在「观测舰」那一档说明
-/// 它到底去干什么（去异常区蹲着喂 MOND 掌握度）——只说"观测舰"三个字等于没说。
-function roleFollowHint(node) {
-  const leaf = node.leaf;
-  if (normMode(leaf[modeField()]) !== 'Inherit') return null;
-  const fc = getControl(node.fid);
-  const d = fc.default_role;
-  if (d && normMode(d[modeField()]) === 'Player') {
-    return hintLine('当前跟随：舰队默认（' + roleSummary(d) + '·' + roleHint(d.role)
-      + '）——它是玩家钉的 ⇒ 自动控制的逐舰定编不碰这艘舰');
-  }
-  const raw = ((st.control || {})[node.fid] || {}).ship_role || {};
-  const s = st.ships.find((x) => x.name === node.id);
-  if (raw[node.id]) {
-    return hintLine('当前跟随：本舰叶片里的角色（' + roleSummary(leaf) + '·' + roleHint(leaf.role)
-      + '；没表态 ⇒ 这是**自动控制写下的定编结论**，它每回合会重估；要钉死就把归属改成「玩家」）');
-  }
-  const rec = s ? roleSummary(s) : null;
-  return hintLine('当前跟随：出厂快照' + (rec ? '（' + rec + '·' + roleHint(s.role) + '）' : '')
-    + '——这一层还没有叶，自动控制随时可以给这艘舰定编');
-}
 
 /// 一个角色取值**到底在干什么**（`roleFollowHint` 与编辑器共用一句话，避免两处各说一套）。
 function roleHint(r) {
@@ -229,71 +146,6 @@ function roleHint(r) {
     case 'Observe': return '驻在引力异常区（MOND），喂「掌握度」那条知识渠道';
     default: return '找仗打（接战 / 轰炸 / 殖民）';
   }
-}
-
-// --- 节点类型注册表 ---------------------------------------------------------
-// 每种的 per-kind 行为统一放在这里：renderNode/modeToggleFor 不再 switch 裸字符串。
-//  childMode  'tabs'  容器：tab 带，仅展开激活子节点
-//             'list'  分类组：全部子项堆叠
-//             'leaf'  终端节点（无子）
-//  scope      选「谁负责」三态 toggle 的来源：
-//             null 无 toggle（纯分组容器）；'global' edScope.global；
-//             'factions'/'bodies'/'cities' scopeVal(edScope[k], id)；'leaf' node.leaf.mode
-//             （三态：Inherit=继承上层 / Auto=系统自动 / Player=玩家；读面永远给全三态之一）
-//  editor     'ship'  舰行为编辑器 | 'doctrine' 行为风格两轴（理智↔热血/护航↔独狼）|
-//             'kiting' 风筝↔贴脸姿态 | 'role' 角色三选一（战舰/运输舰/观测舰）|
-//             'value' 数值叶子编辑器 | 'building' 建筑
-//             （前四种都只在**有效归属是玩家**时给编辑器，否则给一行 .tnode-hint）
-const KIND = {
-  global:    { childMode: 'tabs', scope: 'global' },
-  faction:   { childMode: 'tabs', scope: 'factions', selectFaction: true },
-  group:     { childMode: 'list', scope: null },
-  body:      { childMode: 'tabs', scope: 'bodies' },
-  city:      { childMode: 'list', scope: 'cities' },
-  // 一条舰 = 一个**四叶容器**（指令 / 风格 / 风筝姿态 / 角色）。四片叶的归属链各自独立
-  // （叶 → 舰队默认 → 势力 → 全局），所以「归谁」的下拉在子叶那一行，不在这容器上；
-  // 容器这一行只留一个**便利**下拉（`bulkOwnership`）＝「这四片叶一起归谁」。
-  ship:      { childMode: 'tabs', bulkOwnership: true },
-  shiporder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
-  // 逐舰风格两叶：值 = **有效风格**（叶 → 舰队默认 → 舰上记录值），mode = 该叶自己的表态。
-  // `Auto` 时补一句实话：这两片叶本轮**真的有执行者**（自动控制每回合按战况重估，见 AUTO_RETUNED）。
-  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) + autoRetuned(n.leaf) },
-  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) + autoRetuned(n.leaf) },
-  // 势力级**三条默认**：指令 / 风格 / 风筝姿态。它们是「舰」这一组的前提（先定默认，例外才少写）。
-  // 后两片与「舰队默认指令」同形，只是「风格」有两个轴：doctrine = 理智↔热血 + 护航↔独狼，
-  // kiting = 风筝↔贴脸。摘要见 fleetStyleLabel（没表态就不显示数——那两个数还不算数）。
-  fleetdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => fleetStyleLabel(n.leaf, doctrineSummary) },
-  fleetkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => fleetStyleLabel(n.leaf, kitingSummary) },
-  // 第三条风格轴**角色**（战舰 / 运输舰 / 观测舰）。两行与上面同形，但有一条轴间差别：逐舰那片叶
-  // **自动控制每回合也会写**（按积压定编集货 + 派观测舰去异常区）⇒ 它的「自动」是真的（用 autoWritten）。
-  shiprole: { childMode: 'leaf', scope: 'leaf', editor: 'role', decorateLabel: (n) => ' · ' + roleSummary(n.leaf) + autoWritten(n.leaf) },
-  // 势力级默认角色：AI **不写**这片叶（它只写逐舰叶）⇒ 与另两条风格轴的默认叶同一条措辞。
-  fleetrole: { childMode: 'leaf', scope: 'leaf', editor: 'role', decorateLabel: (n) => fleetStyleLabel(n.leaf, roleSummary) },
-  resource:  { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '投资预算/回合' },
-  conbudget: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '建造预算/回合' },
-  building:  { childMode: 'leaf', scope: 'leaf', editor: 'building' },
-  // **设计图库**（势力级）：本势力「还不存在的舰」的出厂规格。一组 = 一张图一行 +
-  // 末尾一条「＋ 新建设计图」。建造区那一行只写**指针**（指到库里的一张图），
-  // 图的内容（舰级/选装/**倾向三轴**/归属）都在这里改。
-  bpgroup:   { childMode: 'list' },
-  blueprint: { childMode: 'leaf', scope: 'leaf', editor: 'blueprint' },
-};
-
-function scopeAccess(node) {
-  const spec = KIND[node.kind] || {};
-  // 旧控制树的 kind 在注册表里明说了 scope（容器是 null）；新控制行不注册 kind，但**它带的
-  // 就是一片叶** ⇒ 默认 'leaf'（归属写在叶片自己的 `mode` 上）。
-  const s = spec.scope === undefined ? (node.leaf ? 'leaf' : null) : spec.scope;
-  if (s === null || s === undefined) return null;
-  if (s === 'leaf') {
-    const mf = modeField();
-    return node.leaf ? { get: () => node.leaf[mf], set: (v) => { node.leaf[mf] = v; } } : null;
-  }
-  if (s === 'global') return { get: () => edScope.global, set: (v) => { edScope.global = v; } };
-  return {
-    get: () => scopeVal(edScope[s], node.id),
-    set: (v) => setScopeVal(edScope[s], node.id, v),
-  };
 }
 
 // --- 读面（组织点）---------------------------------------------------------
@@ -349,7 +201,7 @@ async function loadViews() {
 // 左栏：**只有一栏**（页 tab + 页体）。以前是「读面 / 控制」两个模式，而写面住在另一个模式里
 // ⇒ 「这个势力有多少库存」（读）与「我给它多少预算」（控制）要切一次 tab 才看得全。
 // 现在四种行——`path`（读）/ `leaf`（叶）/ `owner`（归属）/ `action`（命令）——住在**同一份
-// 声明、同一个数组**里，顺序就是穿插的顺序；旧控制树降级成一张普通页（第二步才删）。
+// 声明、同一个数组**里，顺序就是穿插的顺序。
 function renderSide() {
   const side = $('#side');
   if (side) side.classList.add('read');
@@ -362,13 +214,10 @@ function renderSide() {
 function renderReadPanel() {
   const tabsBox = $('#readTabs');
   const body = $('#readBody');
-  const treePanel = $('#treePanel');
   if (!tabsBox || !body) return;
   tabsBox.textContent = '';
   body.textContent = '';
   if (!readLoaded) {
-    if (treePanel) treePanel.style.display = 'none';
-    body.style.display = '';
     body.appendChild(el('div', { class: 'sv-empty' }, '视图声明（views.json）没加载上：' + readError));
     return;
   }
@@ -381,17 +230,6 @@ function renderReadPanel() {
     tabsBox.appendChild(t);
   });
   const page = pages[readPage];
-  const isTree = page.id === 'tree-old';
-  // 旧控制树那一页用**原来的 DOM**（`#treePanel` / `#tree`）：里面的设计图库、建筑面板都还在
-  // 用它，第二步才搬进卡片（见 `views.json` 的 `write_omit` 与 note §5）。
-  if (treePanel) treePanel.style.display = isTree ? '' : 'none';
-  body.style.display = isTree ? 'none' : '';
-  if (isTree) {
-    const h = treePanel && treePanel.querySelector('.tree-old-hint');
-    if (h && page.hint) h.textContent = page.hint;
-    renderTree();
-    return;
-  }
   if (page.id === 'leftover') {
     renderSpecCheck(body);
     renderWriteCheck(body);
@@ -515,15 +353,21 @@ function renderSpecCheck(body) {
   specs.forEach((spec) => {
     if (spec.mount === 'inline') return;
     let rows = [];
-    try {
-      rows = window.SpecView.expand(spec.source);
-    } catch (e) {
-      list.appendChild(checkRow(spec.id, 'warn', 'source 求值抛错：' + e));
-      return;
-    }
-    if (!rows.length) {
-      list.appendChild(checkRow(spec.id, 'warn', '这一帧没有记录（' + spec.source + '）'));
-      return;
+    if (spec.source === null) {
+      // `source: null` = **不取任何记录**（只有控制行，如「全局」页那条 `owner: global`）。
+      // 报成"这一帧没有记录"是反方向的谎话——它不是没数据，是**故意不依赖记录**。
+      rows = [{ value: {}, key: null }];
+    } else {
+      try {
+        rows = window.SpecView.expand(spec.source);
+      } catch (e) {
+        list.appendChild(checkRow(spec.id, 'warn', 'source 求值抛错：' + e));
+        return;
+      }
+      if (!rows.length) {
+        list.appendChild(checkRow(spec.id, 'warn', '这一帧没有记录（' + spec.source + '）'));
+        return;
+      }
     }
     // 读行与控制行**分开说**：
     //   * 读行的值是"这一帧取不到" ⇒ 那是真问题（引擎改了字段名 / 这局没有），要报；
@@ -801,7 +645,9 @@ function diffLeaf(leaf, spec) {
     if (o.shell) return null; // 读面里本来就没有这片叶 ⇒ 没什么可删的
     const out = {};
     spec.keys.forEach((k) => { out[k] = leaf[k]; });
-    out.remove = true;
+    // ⚠ 字段名走**引擎的 manifest**（`remove_field`）：以前这里写死 `'remove'`，而隔壁
+    // `removeFieldName()` 已经准备好了那份事实却没人用——引擎一旦改名，这条会**静默**发错键。
+    out[removeFieldName()] = true;
     return out;
   }
   const out = {};
@@ -869,7 +715,6 @@ function setFaction(fid) {
   openBottomBar();
   if (fid === selFaction) { renderSelection(); return; }
   selFaction = fid;
-  selTab.set('g', 'f' + fid);
   controlRerender();
   renderSelection();
 }
@@ -921,7 +766,7 @@ function buildingLabel(b) {
 function renderAll() {
   bindSpecView();
   renderMap();
-  renderSide();      // 左栏：读面（组织点声明出来的页；旧控制树是其中一页）
+  renderSide();      // 左栏：组织点声明出来的页（读与控制四种行同一条行序）
   renderSelection();
   renderDiff();
   renderInfo();
@@ -1034,7 +879,7 @@ function renderSelection() {
   head.textContent = '';
   box.textContent = '';
   if (!sel) {
-    box.textContent = '（在地图上点天体/城/舰，或点左侧控制树/读面里的名字，这里会显示它的记录）';
+    box.textContent = '（在地图上点天体/城/舰，或点左栏任何一页里的名字，这里会显示它的记录——控制行也能在这一格里直接改）';
     return;
   }
   const found = findEntity(sel.kind, sel.name);
@@ -1078,175 +923,23 @@ function inlineSpec(path, value) {
   return box;
 }
 
-// --- 层级树（控制 + 作用域）-----------------------------------------------
-// 树本身是**写面**（控制作用域链上的可编辑叶子），所以它按语义搭结构；但「世界里有什么
-// 实体」一律从 `st`（原始 State）读，不再依赖后端的拍平视图。
-function buildTree() {
-  const root = { key: 'g', kind: 'global', name: '全局', children: [] };
-  st.factions.forEach((f) => {
-    const fid = f.name;
-    const fc = getControl(fid);
-    const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: f.color, fid, children: [] };
-
-    const shipNodes = (fc.ship_orders || []).map((ord) => shipNode(fc, ord));
-    // 势力级**三条长期倾向**（风格 / 风筝姿态 / 角色）是可编辑叶片：新舰出生就继承它们。
-    // 它们排在「舰」分组**之前**——因为它们是这一组的前提（先定倾向，例外才少写）。
-    // 读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的**壳**让它出现在树上（与作用域里
-    // 「没列出的层 ≡ 继承」同义）。壳只用于显示：没被动过就不会进回传 diff，动过就按
-    // 「新建这片叶」整片发出去（见 shellLeaf）。
-    //
-    // ⚠ **指令**没有势力级那一片了（2026-10 用户裁决）：指令是**即时操作**，
-    // 只写逐舰叶；舰队级只留长期倾向这三片。
-    const fleetDoctrine = shellLeaf(fc.default_doctrine = fc.default_doctrine
-      || { temper: 0, lone_wolf: 0, mode: 'Inherit' }, LEAF_SPEC.default_doctrine);
-    const fleetKiting = shellLeaf(fc.default_kiting = fc.default_kiting
-      || { kiting: 0, mode: 'Inherit' }, LEAF_SPEC.default_kiting);
-    const fleetRole = shellLeaf(fc.default_role = fc.default_role
-      || { role: 'War', mode: 'Inherit' }, LEAF_SPEC.default_role);
-
-    const invLeaves = (fc.investment_budget || []).map((e) => ({
-      key: 'inv' + fid + ':' + e.resource, kind: 'resource', field: 'investment_budget',
-      name: resName(e.resource), leaf: e, fid,
-    }));
-    const conLeaves = (fc.construction_budget || []).map((e) => ({
-      key: 'con' + fid + ':' + e.resource, kind: 'conbudget', field: 'construction_budget',
-      name: resName(e.resource), leaf: e, fid,
-    }));
-    const budgetKids = [];
-    if (invLeaves.length) budgetKids.push({ key: 'gi' + fid, kind: 'group', name: '投资预算', fid, children: invLeaves });
-    if (conLeaves.length) budgetKids.push({ key: 'gc' + fid, kind: 'group', name: '建造预算', fid, children: conLeaves });
-
-    const bodyNodes = [];
-    st.cities.filter((c) => c.faction_id === fid).forEach((ci) => {
-      const bid = ci.body_id;
-      let bn = bodyNodes.find((n) => n.id === bid);
-      if (!bn) {
-        const b = st.bodies.find((x) => x.name === bid);
-        bn = { key: 'b' + fid + '-' + bid, kind: 'body', id: bid, name: (b ? b.name : '天体#' + bid), children: [], fid };
-        bodyNodes.push(bn);
-      }
-      const cn = { key: 'c' + ci.name, kind: 'city', id: ci.name, name: ci.name, children: [], fid, cityId: ci.name };
-      (ci.buildings || []).forEach((b) => {
-        cn.children.push({
-          key: 'bld' + fid + ':' + ci.name + ':' + b.id,
-          kind: 'building', id: b.id, name: buildingLabel(b),
-          leaf: investLeaf(fc, ci.name, b.id), buildLeaf: buildLeaf(fc, ci.name, b.id),
-          b, fid, cityId: ci.name, city: ci,
-        });
-      });
-      bn.children.push(cn);
-    });
-
-    const cats = [];
-    // **设计图库**（本势力「还不存在的舰」的出厂规格）：排在最前——建造区那一行的下拉
-    // 只能指向**库里已有的图**，先有库、才有指针。空库也显示（不然你没法建第一张图）。
-    const bpNodes = (fc.blueprints || []).map((bp) => blueprintNode(fc, bp));
-    cats.push({
-      key: 'gbp' + fid, kind: 'bpgroup', id: fid, fid,
-      name: '设计图库（' + bpNodes.length + ' 张）', children: bpNodes,
-    });
-    if (shipNodes.length || fleetDoctrine) {
-      const kids = [
-        { key: 'fleetdoc' + fid, kind: 'fleetdoctrine', field: 'default_doctrine', id: fid, name: '舰队默认风格', leaf: fleetDoctrine, fid },
-        { key: 'fleetkit' + fid, kind: 'fleetkiting', field: 'default_kiting', id: fid, name: '舰队默认风筝姿态', leaf: fleetKiting, fid },
-        { key: 'fleetfrt' + fid, kind: 'fleetrole', field: 'default_role', id: fid, name: '舰队默认角色', leaf: fleetRole, fid },
-      ].concat(shipNodes);
-      cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: kids });
-    }
-    if (budgetKids.length) cats.push({ key: 'gbd' + fid, kind: 'group', name: '预算', fid, children: budgetKids });
-    if (bodyNodes.length) cats.push({ key: 'gb' + fid, kind: 'group', name: '天体', fid, children: bodyNodes });
-    fn.children = cats;
-
-    root.children.push(fn);
-  });
-  return root;
-}
-
-// 一条舰 = 一个四叶容器：**指令**（干什么）+ **风格**（理智↔热血 / 护航↔独狼）+
-// **风筝姿态**（风筝↔贴脸）+ **角色**（战舰 / 运输舰 / 观测舰）。四片叶的归属链各自独立，所以
-// 「归谁」的下拉跟着子叶走。
-//
-// **四片叶的读面都「每舰一行」**（哪怕状态里根本没有那片叶），口径也一致：
-// 值 = **有效值**（指令：只有叶；风格/角色：叶 → 出厂图 → 舰队默认 → 舰上记录值）、
-// mode = 这片叶自己的表态（没有叶 = `Inherit`）。所以这里显示的就是「这艘舰现在实际用的」。
-// ⚠ 这条对**指令**（`ship_orders`）以前不成立：那片叶只列**有叶的舰**，于是「恢复出厂值」
-// 一按，这艘舰**整行**（连风格 / 角色）就从控制树里消失——现在也不会了。
-// ⚠ 指令的 `behavior === null` 是「链上没人说话」（引擎按 `Idle` 兜底），**不是**「待命」；
-// 风格三轴没有这个问题（它们兜底到出厂记录值，永远有一个数）。
-// ⚠ `Ship.doctrine` / `Ship.kiting` / `Ship.role` 只是出厂快照（**记录值**），改它们没有
-// 任何控制效果——那正是「我明明改了风格却没反应」的坑；要改就走这几片叶。
-function shipNode(fc, ord) {
-  const name = ord.ship;
-  const s = st.ships.find((x) => x.name === name);
-  const kids = [{ key: 'ord' + name, kind: 'shiporder', field: 'ship_orders', id: name, name: '指令', leaf: ord, fid: fc.faction_id }];
-  // 指令行是**每舰一行**来的，所以正常路径下这艘舰一定在 `st.ships` 里；`s` 缺席只剩
-  // 「`/api/state` 的 info 树与 control 段来自不同时刻」这种边缘情况（那时风格叶写进去也只会被丢弃）。
-  if (s) {
-    kids.push({
-      key: 'doc' + name, kind: 'shipdoctrine', field: 'ship_doctrine', id: name, name: '风格', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_doctrine', name, {
-        temper: +((s.doctrine || {}).temper) || 0,
-        lone_wolf: +((s.doctrine || {}).lone_wolf) || 0,
-      }),
-    });
-    kids.push({
-      key: 'kit' + name, kind: 'shipkiting', field: 'ship_kiting', id: name, name: '风筝姿态', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_kiting', name, { kiting: +s.kiting || 0 }),
-    });
-    // 角色：这片叶**自动控制每回合会写**（按积压定编集货 + 按观测需求派舰去异常区），所以它
-    // 常常带着一个玩家没写过的值 + `Inherit` 表态——`autoWritten` 会在那一行把这件事说清楚。
-    // 读面这一行的值 = **有效角色**（`ships[].role`，链上算完的结论），不是舰上的出厂快照。
-    kids.push({
-      key: 'frt' + name, kind: 'shiprole', field: 'ship_role', id: name, name: '角色', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_role', name, { role: s.role || 'War' }),
-    });
-  }
-  return { key: 'ship' + name, kind: 'ship', id: name, name: (s ? s.name : '船#' + name), fid: fc.faction_id, children: kids };
-}
-
-// 逐舰风格叶：读面里**每艘舰都有**一行（值 = 有效值、mode = 叶片表态），正常路径就是取它。
-// 万一没有那一行（老服务端 / 舰还没进读面）就补一片壳，值取**舰上记录值**——那是引擎在没有
-// 叶片时的兜底值，比凭空写个 0 诚实（读面里有这一行时 pairOrigins 已配好原值，壳不生效）。
-function styleLeaf(fc, key, ship, blank) {
-  const list = (fc[key] = fc[key] || []);
-  let e = list.find((x) => x.ship === ship);
-  if (!e) {
-    e = Object.assign({ ship: ship, mode: 'Inherit' }, blank);
-    list.push(e);
-  }
-  return shellLeaf(e, LEAF_SPEC[key]);
-}
-
-function renderTree() {
-  const tree = $('#tree');
-  if (!tree) return;
-  tree.innerHTML = '';
-  tree.appendChild(renderNode(buildTree()));
-}
-
-/// 左栏的页：**声明里的页** + 「未组织」+ 「控制树（旧）」。
-/// 旧的写面（手写控制树）降级成一张普通页——第二步才删它（设计图库 / 建筑那些手写面板还在
-/// 里面）；新的控制行住在「势力 / 舰队 / 城市」那几页里，**与读行挨着**，那才是这一步的重点。
+/// 左栏的页：**声明里的页** + 「未组织」。
+/// ⚠ 2026-10：这里以前还有一张「控制树（旧）」页（手写的控制层级）。它已经**整条删除**——
+/// 旧树能做的每一件事都改由 `views.json` 声明的行提供：设计图库 → 「设计图」页的 `leaf` 行
+/// （带 `new: true` 的「＋ 新建」）、建筑与建造区 → 城市卡片的 `action: buildings` 行、
+/// 全局作用域 → 「全局」页的 `owner: global` 行、迁都 → 「势力」卡片的 `capital` 行、
+/// 恢复继承 / 恢复出厂值 → 每条控制行自带。见 `.agents/notes/web-control-spec.md`。
 function sidePages() {
   return (viewsDoc.pages || []).concat([
     { id: 'leftover', title: '未组织', hint: '没有被任何组织点认领的数据 —— 它们照旧由通用 widget 渲染' },
-    {
-      id: 'tree-old',
-      title: '控制树（旧）',
-      hint: '手写的控制层级（全局 · 势力 · 天体 · 城 · 设计图 · 叶片）。这一页是**过渡**：'
-        + '新的控制行住在「势力 / 舰队 / 城市」几页里，与读行同一条行序；第二步把它删掉。',
-    },
   ]);
 }
 
-function treePageIndex() { return sidePages().length - 1; }
-
-/// 控制面重画：控制行既可能在读面那些页里，也可能在旧控制树那一页——**两者共用
-/// `renderLeafNode`**，所以改完值只要重画「看得见的那一面」。以前这里无脑 `renderTree()`：
-/// 在新控制行上改一个数，重画的是那棵没在看的树（值看起来"没有反应"）。
+/// 控制面重画：控制行住在声明出来的那些页里，也可能同时出现在底部的选中卡上
+/// （同一片叶两边都能改）⇒ 两边都要重画，否则会出现「改了左边、右下角还写着旧值」。
 function controlRerender() {
-  if (readPage === treePageIndex()) renderTree();
-  else renderReadPanel();
+  renderReadPanel();
+  renderSelection();
 }
 
 /// 「应用到服务器」的可用性：引擎的控制面清单没拉回来 ⇒ 回传的 diff 会**空着发出去**
@@ -1262,91 +955,12 @@ function renderApplyGate() {
     : '把改动作为**差异**回传（只发变过的字段；没改过就是空 diff）';
 }
 
-/// 层级树的一个节点。**容器**（全局 / 势力 / 天体 / 城 / 舰 / 设计图库 / 分组）在这里搭结构；
-/// **叶片那一行**交给 [`renderLeafNode`]——新的声明式控制行（`controls.js`）用的是同一个函数。
-function renderNode(node) {
-  const spec = KIND[node.kind] || {};
-  const hasKids = node.children && node.children.length;
-
-  if (spec.childMode === 'list' || spec.childMode === 'tabs') {
-    // `data-key` = 这棵树里的稳定节点键（「哪个势力的哪片叶」）。纯属可读性/可自动化：
-    // 人和脚本都能 `[data-key="fleetdoc中国"]` 一步点到那一行，不必靠中文文本猜。
-    const wrap = el('div', { class: 'tnode', 'data-key': node.key });
-    const head = el('div', { class: 'tnode-head' });
-
-    const lbl = el('span', { class: 'tnode-label' });
-    let labelText = node.name;
-    if (spec.decorateLabel) labelText += spec.decorateLabel(node, st);
-    lbl.textContent = labelText;
-    if (node.color) lbl.style.color = node.color;
-    if (spec.selectFaction) {
-      lbl.classList.add('clickable');
-      lbl.addEventListener('click', () => setFaction(node.id));
-    }
-    head.appendChild(lbl);
-
-    // 一条舰 = 一个四叶容器：容器这一行只留一个**便利**下拉（「这四片叶一起归谁」）。
-    if (spec.bulkOwnership) {
-      const bulk = bulkOwnershipSelect(node);
-      if (bulk) head.appendChild(bulk);
-    }
-    wrap.appendChild(head);
-
-    if (spec.childMode === 'list') {
-      const kids = el('div', { class: 'tnode-kids' });
-      if (hasKids) node.children.forEach((ch) => kids.appendChild(renderNode(ch)));
-      if (node.kind === 'city') kids.appendChild(addBuildingButton(node));
-      if (node.kind === 'bpgroup') {
-        if (!hasKids) {
-          kids.appendChild(hintLine('库里还没有图：在下面建一张（图名 / 舰级 / 选装 / 角色 / 风格 / 风筝姿态），再到底下「天体 → 城 → 建造区」那一行的「设计图」下拉把它指过去——先有库，才有指针。'));
-        }
-        kids.appendChild(addBlueprintButton(node));
-      }
-      wrap.appendChild(kids);
-      return wrap;
-    }
-
-    if (hasKids) {
-      const active = selTab.get(node.key) || node.children[0].key;
-      const tabs = el('div', { class: 'tnode-tabs' });
-      node.children.forEach((ch) => {
-        const tab = el('span', { class: 'tnode-tab' + (ch.key === active ? ' sel' : '') });
-        tab.textContent = ch.name;
-        tab.addEventListener('click', () => {
-          selTab.set(node.key, ch.key);
-          // 势力 tab 是「选中这个势力」——走统一的选中入口（会亮出底部读面）。
-          if ((KIND[ch.kind] || {}).selectFaction) { selectEntity('faction', ch.id); return; }
-          controlRerender();
-          renderSelection();
-        });
-        tabs.appendChild(tab);
-      });
-      wrap.appendChild(tabs);
-
-      const activeChild = node.children.find((ch) => ch.key === active);
-      if (activeChild) wrap.appendChild(renderNode(activeChild));
-    }
-    return wrap;
-  }
-
-  return renderLeafNode(node, {});
-}
-
-/// 一片叶的**一整行**：`<div class="tnode" data-key>` + head（标签 / 归属 / 恢复继承 /
-/// 恢复出厂值）+ 编辑器 + 「这个数现在从哪来」的跟进提示。
-///
-/// **旧控制树与新的声明式控制行共用这一段**（`renderNode` 与 `controls.js` 的 `controlNode`
-/// 都调它）⇒ 归属三态、写值即接管、删叶、编辑器种类这些规则**只有一处**，不会两边各说一套。
-///
-/// `opts`（只有新控制行会给）：
-///   * `noLabel`  不画标签（那一行的标签由卡片/表格的列头给）
-///   * `alwaysEditable` 不看「有效归属是玩家」那道闸门：新控制行的值旁边就是归属 chip，
-///     闸门由 chip 表达；而「还没有叶」的行更必须能写值——那是新建这片叶的唯一入口
-///   * `hint`     行首的一句实话（例如「没有叶（这一层没表态）」）
-///   * `carry`    身份是数字 id 的叶用它说清「这是哪座楼」（`invest_weights`）
+/// **一片叶那一行**。（2026-10 之前它叫「层级树的一个节点」：容器由已删除的 `renderNode` 搭，
+/// 叶片走这里。现在只有这一半留下——`controls.js` 把声明里的控制行做成同形的节点喂进来。）
+/// 节点形状：`{key, field, name, leaf, fid, editor, ctl?}`；`opts` 是呈现上的开关
+/// （`noLabel` / `alwaysEditable` / `hint` / `carry`）。
 function renderLeafNode(node, opts) {
   const o = opts || {};
-  const spec = KIND[node.kind] || {};
   const mf = modeField();
   const wrap = el('div', { class: 'tnode' + (node.ctl ? ' ctl-leaf' : ''), 'data-key': node.key });
   const head = el('div', { class: 'tnode-head' });
@@ -1354,7 +968,6 @@ function renderLeafNode(node, opts) {
   if (!o.noLabel) {
     const lbl = el('span', { class: 'tnode-label' });
     let labelText = String(node.name == null ? '' : node.name);
-    if (spec.decorateLabel) labelText += spec.decorateLabel(node, st);
     if (o.carry) labelText += '（' + o.carry + '）';
     lbl.textContent = labelText;
     if (node.color) lbl.style.color = node.color;
@@ -1387,15 +1000,17 @@ function renderLeafNode(node, opts) {
     return wrap;
   }
 
-  const editor = node.editor || spec.editor;
+  // 编辑器种类是**声明**（`views.json` 的 `leaf_ui.<field>.editor`）：`controls.js` 写在节点上。
+  // 下面那条 if 链就是**封闭的编辑器注册表**——与读面的 `fmt` 一个道理。
+  const editor = node.editor;
   // 编辑器对「**有效归属**是玩家」的叶子开放，而不是只看叶子自己的 mode：舰队默认设成玩家
   // 之后，继承它的舰也归你管——以前那些舰在 UI 上连编辑器都没有。
   // 改值时会把叶子显式钉成 Player（写值即接管，与 `--apply` 同一条规则）。
   // 新控制行（`alwaysEditable`）不看这道闸门：它的归属 chip 就在值旁边，而「还没有叶」的行
   // 必须能写值——否则「给一个还没有叶的资源设预算」在界面上无路可走。
   const open = !!o.alwaysEditable || effectiveMode(node) === 'Player';
-  // 数值叶的标签：旧控制树把它画在编辑器里（`editorLabel`）；新控制行的标签由行/列给。
-  const numLabel = node.ctl ? '' : spec.editorLabel;
+  // 数值叶的标签由**行/列**给（那一行自己的名字），编辑器里不再重复一次。
+  const numLabel = '';
   // 编辑器种类是**声明**（`views.json` 的 `leaf_ui.<field>.editor`），一张封闭的注册表
   // ——与读面的 `fmt` 一个道理。`behavior` 与旧控制树的 `ship` 是同一件事（`shipEditor`）。
   if (editor === 'ship' || editor === 'behavior') {
@@ -1488,36 +1103,6 @@ function restoreInheritButton(leaf) {
 
 /// 舰行上的**便利**下拉：「这条舰的各片叶（指令 / 风格 / 风筝姿态 / 角色）一起归谁」。
 ///
-/// 它**只写 mode**（每片叶各写一次表态），**永不写值、永不接管**——所以它是"批量效率"，
-/// 不是"一个下拉代表一种归属"的假象（各片叶各有自己的归属链，见 note §8 第 1 条）。
-/// 各叶表态不一致时多一个「各自不同」占位项，绝不假装它们一样。
-function bulkOwnershipSelect(node) {
-  const leaves = (node.children || []).map((ch) => ch.leaf).filter(Boolean);
-  if (leaves.length < 2) return null; // 只剩指令行（舰已不在世界里）时不值得有这个下拉
-  const modes = leaves.map((l) => normMode(l[modeField()]));
-  const mixed = modes.some((m) => m !== modes[0]);
-  const sel = el('select', { class: 'mode bulk', 'data-role': 'bulk' });
-  if (mixed) {
-    const o = el('option', { value: '' });
-    o.textContent = leaves.length + ' 片叶：各自不同';
-    o.selected = true;
-    sel.appendChild(o);
-  }
-  [['Inherit', '一起：继承'], ['Auto', '一起：自动'], ['Player', '一起：玩家']].forEach(([v, l]) => {
-    const o = el('option', { value: v });
-    o.textContent = l;
-    o.selected = !mixed && modes[0] === v;
-    sel.appendChild(o);
-  });
-  sel.title = '把这条舰的 ' + leaves.length + ' 片叶（指令 / 风格 / 风筝姿态 / 角色）的归属一起改掉：只写归属、不写值';
-  sel.addEventListener('change', () => {
-    if (!sel.value) return;
-    leaves.forEach((l) => { l[modeField()] = sel.value; autoPinned.delete(l); });
-    controlRerender();
-  });
-  return sel;
-}
-
 // --- 删叶（「恢复出厂值」） --------------------------------------------------
 // 引擎的取值规则是「叶存在就用叶里的值」（`leaf.map(|l| l.value).unwrap_or(record)`，与叶的
 // `mode` 无关），所以「恢复继承」只交还**归属**、交还不了**数值**：碰过一次的风格叶会一直
@@ -1598,10 +1183,12 @@ function effectiveMode(node) {
 }
 
 function modeToggleFor(node) {
-  const acc = scopeAccess(node);
-  if (!acc) return null;
-  const mode = acc.get();
-  const set = acc.set;
+  // 归属三态写在**叶片自己**身上（引擎的 `owner_field`）。以前这里还兼管全局/势力/天体/城的
+  // 作用域节点——那些节点随旧树一起删了；作用域现在是声明里的 `owner` 行（`controls.js`）。
+  if (!node.leaf) return null;
+  const mf0 = modeField();
+  const mode = node.leaf[mf0];
+  const set = (v) => { node.leaf[mf0] = v; };
   const isBp = leafFieldOf(node) === 'blueprints';
   // 这片叶上的「自动」有没有执行者（措辞必须与引擎一致，见上面三组 kind 的说明）。
   // ⚠ 风格三轴的逐舰叶**本轮起真的有执行者**（`autocontrol::style`），所以它不再算「冻住」；
@@ -1696,7 +1283,7 @@ function styleField(axis, label, title, val, onSet, node) {
   inp.addEventListener('input', () => { onSet(inp.value); syncOwnership(node); });
   // `change`（离开这一格 / 回车）后重画一次：行摘要显示的就是叶里现在那个数。
   // 输入过程中不重画——那会把正在编辑的输入框换掉（与数值叶编辑器同一条取舍）。
-  inp.addEventListener('change', () => renderTree());
+  inp.addEventListener('change', () => controlRerender());
   w.appendChild(inp);
   return w;
 }
@@ -1847,6 +1434,21 @@ function leafValueEditor(leaf, label, node, opts) {
   return wrap;
 }
 
+/// 建造区那两片**权重叶**（`invest_weights` / `build_weights`）的一行：值 + **它自己的归属**。
+/// ⚠ 2026-10 修掉一个真 bug：以前这里把 `leafValueEditor` 当纯显示调（第三个参数 `node` 不传），
+/// 而那个函数在 `!force && !node` 时把输入框 `disabled` ⇒ **界面上这两格根本改不动**
+/// （`views.json` 的 `write_omit` 却写着"住在建筑行里"——说谎的是界面）。现在它可编辑，
+/// 且与别的控制行同一条规矩：写值即接管（叶被钉成 `Player`）。
+function weightRow(leaf, field, label, owner) {
+  const box = el('div', { class: 'leaf-val' });
+  box.appendChild(el('span', { class: 'lv-label' }, label + ' '));
+  const node = { key: ((owner && owner.key) || '') + ':' + field, field, fid: owner && owner.fid, leaf, name: label };
+  const mt = modeToggleFor(node);
+  if (mt) box.appendChild(mt);
+  box.appendChild(leafValueEditor(leaf, '', node, { force: true }));
+  return box;
+}
+
 /// **迁都**（`capital` 这片叶，值 = 一个天体名）。旧控制树从来没给它入口（它只在读面里显示），
 /// 新控制行把它补上：一个天体下拉 + 「写值即接管」。
 /// ⚠ 这片叶**没有 `remove`**（引擎的 manifest 里 `read_only` 与值字段都不含它）⇒ 这里不提供
@@ -1923,15 +1525,6 @@ function pushModify(fid, cityId, bid, attrs) {
 // 的 `ship_type` 相等。它是**正确的守卫**，所以这里不是"避免触发"而是**把它显示出来**
 // （见 blueprintYardMismatch / 建造区那一行的告警 / 引擎报错回执三类呈现）。
 //
-// ⚠ 模板必须走**工厂**（每次给新对象、新数组）：模块级常量一旦被 `push` 过就再也洗不干净——
-// 「新建表单里上次勾的组件还在」和「壳的原值被同一只数组改掉 ⇒ 补丁发不出去」都是它造成的。
-function bpDraft(name) {
-  return {
-    name: name || '', class: '', components: [],
-    doctrine: null, kiting: null, role: null, mode: 'Inherit',
-  };
-}
-
 function compName(id) { return (cfg.components && cfg.components[id] && cfg.components[id].label) || id; }
 function compSlots(cls) {
   const s = cfg.ships && cfg.ships[cls];
@@ -1960,32 +1553,6 @@ function yardCountText(fid, name) {
 function blueprintYardMismatch(fid, name, cls) {
   return blueprintYards(fid, name).filter((y) => y.ship_type !== cls);
 }
-/// 倾向摘要：图上这条轴**没有说话**（`null`）时明说，而不是显示成"默认值"。
-/// 它就是引擎里 `role: null` / `doctrine: null` 的意思：这一层沉默，链往下降到舰队默认。
-function stanceSummary(bp) {
-  const bits = [];
-  if (bp.role != null) bits.push('角色 ' + roleSummary(bp));
-  if (bp.doctrine != null) bits.push('风格 ' + doctrineSummary(bp.doctrine));
-  if (bp.kiting != null) bits.push('姿态 ' + kitingSummary(bp.kiting));
-  return bits.length ? bits.join(' · ') : '倾向不表态（交给舰队默认）';
-}
-function blueprintSummary(fid, bp) {
-  const comps = (bp.components && bp.components.length)
-    ? bp.components.map(compName).join('＋')
-    : '空装（交给生成器）';
-  const yards = blueprintYards(fid, bp.name).length;
-  return ' · ' + shipClassName(bp.class) + ' · ' + comps + ' · ' + stanceSummary(bp)
-    + ' · ' + (bp.ship_count || 0) + ' 艘（本图造过）'
-    + (yards ? ' · 挂在 ' + yards + ' 个建造区' : ' · 还没挂到任何建造区');
-}
-function blueprintNode(fc, bp) {
-  return {
-    key: 'bp' + fc.faction_id + ':' + bp.name,
-    kind: 'blueprint', field: 'blueprints', id: bp.name, name: bp.name + blueprintSummary(fc.faction_id, bp),
-    leaf: bp, fid: fc.faction_id, bp,
-  };
-}
-
 /// **买不起 ⇒ 未下水**（用户裁决 Q4(b)）落在**这一行**上的判据。
 ///
 /// 读面的 `launch_waiting` 是**整张图**的派生列（引擎算："挂着它的某个城里，这个舰级的进度
@@ -2061,7 +1628,7 @@ function blueprintEditor(node) {
   //    或者用**角色**影响这型舰将来干什么。
   box.appendChild(stanceEditor(leaf));
 
-  if (node.bp && node.bp.launch_waiting) {
+  if (leaf.launch_waiting) {
     box.appendChild(hintLine('⚠ 买不起 ⇒ 未下水：挂着这张图的那座城进度已经攒够，却因为这张图的选装买不起而没有放舰下水（进度不会丢，攒够钱就下水）。'));
   }
   return box;
@@ -2210,146 +1777,6 @@ function stanceEditor(leaf) {
     + '⚠ 前提是这张图归**玩家**：图是「自动」时，上面的值只是当前值，引擎不把它当玩家的表态。'));
   return box;
 }
-function firstBodyWithSettlement() {
-  const b = (st.bodies || []).find((x) => x.settlements && x.settlements.length);
-  return b ? b.name : '';
-}
-function firstCityName() { return ((st.cities || [])[0] || {}).name || ''; }
-function firstShipName() { return ((st.ships || [])[0] || {}).name || ''; }
-
-/// 「＋ 新建设计图」：一行表单（图名 + 舰级 + 组件 + 角色 + 风格 + 风筝姿态 + 归属）→ 点「新建」把它加进
-/// **编辑面**（还不是服务器上的图：点「应用到服务器」才真的落地）。
-///
-/// 它进 diff 的方式与其它叶一样是 presence-aware 的：新建的图在编辑面里是一片**壳**
-/// （读面里没有它），壳一旦被碰过就**整片**发出去（名字 + 舰级 + 选装 + 倾向三轴 + 归属），
-/// 于是「建图 + 挂指针」可以放同一份 diff 一次成功（引擎按这个顺序应用，spec §4.4 例 1）。
-function addBlueprintButton(node) {
-  const fid = node.fid;
-  const wrap = el('div', { class: 'add-bld bp-add' });
-  // 标题独占一行：`.tnode-label` 是 `flex: 1`，窄面板里会被挤成一列一个字。
-  wrap.appendChild(el('span', { class: 'bp-add-title' }, '＋ 新建设计图'));
-
-  const draft = bpDraft(''); // 草稿：点「新建」之前它不属于任何一片叶
-  const nameInp = el('input', { type: 'text', class: 'bp-name', placeholder: '图名（本势力内唯一）', 'data-role': 'bp-new-name' });
-  const classKeys = Object.keys(cfg.ships || {});
-  const classSel = optSelect(cfg.ships, classKeys, classKeys[0], (v) => { draft.class = v; });
-  classSel.dataset.role = 'bp-new-class'; // 与 data-key 同一条思路：人和脚本都能一步点到那一格
-  classSel.title = '这张图的舰级（`config.ships` 的 key）。建之后必须与挂了它的建造区的「舰型」相等，否则引擎会拒（blueprint_class_mismatch）。';
-  draft.class = classKeys[0] || '';
-
-  const modeSel = el('select', { class: 'mode', 'data-role': 'bp-new-mode' });
-  [['Player', '玩家'], ['Auto', '自动'], ['Inherit', '继承']].forEach(([v, l]) => {
-    const o = el('option', { value: v });
-    o.textContent = l;
-    o.selected = v === 'Player';
-    o.title = v === 'Player'
-      ? '归你管：系统不再改写这张图的舰级与选装'
-      : (v === 'Auto'
-        ? '归系统：自动控制会把这张图的舰级改成它算出来的级（`retool_shipyards`）——只有建造区真的挂着它时才会发生；选装它不写（空选装 = 出厂时按库存现算）'
-        : '图叶自己没有表态：往上看势力 / 全局作用域，链上都没表态就是「自动」（= 系统会重估舰级）。新图慎用：它和你刚写下的配方不是一回事。');
-    modeSel.appendChild(o);
-  });
-  const modeHint = el('div', { class: 'tnode-hint bp-mode-hint' });
-  const syncModeHint = () => {
-    modeHint.textContent = modeSel.value === 'Player'
-      ? '归属：玩家 ⇒ 这张图钉死成你写的配方，自动控制不碰它。'
-      : (modeSel.value === 'Auto'
-        ? '归属：自动 ⇒ 你写的配方只是当前值：自动控制会把这张图的舰级改成它算的级（选装它不写）。要钉死就用「玩家」。'
-        : '归属：继承 ⇒ 图叶不说话，交给势力 / 全局作用域（默认是「自动」）。你写的值仍然在叶里，但归属不在你手上。');
-  };
-  syncModeHint();
-  modeSel.addEventListener('change', syncModeHint);
-
-  // 新建表单也要能写**倾向**（用户 2026-10 的诉求：图能指定的是风格/角色，不是指令）。
-  // 三格：角色（枚举，含「不表态」）/ 风格（两轴一片）/ 风筝姿态。
-  const roleSel = el('select', { 'data-role': 'bp-new-role' });
-  [['', '不表态'], ['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']].forEach(([v, l]) => {
-    const o = el('option', { value: v });
-    o.textContent = '角色：' + l;
-    o.selected = v === '';
-    roleSel.appendChild(o);
-  });
-  roleSel.title = '这型舰的**角色**：战舰找仗打、运输舰按积压跑集货路线、观测舰驻到引力异常区。'
-    + '不表态 = 引擎里的 `role: null`：这一层没有说话，链往下降到舰队默认角色。';
-
-  const docOn = el('input', { type: 'checkbox', 'data-role': 'bp-new-doctrine-on' });
-  const docTemper = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'temper' });
-  const docWolf = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'lone_wolf' });
-  docTemper.title = '理智↔热血：负 = 欺软怕硬；正 = 飞蛾扑火；0 = 基线';
-  docWolf.title = '护航↔独狼：负 = 空闲时贴旗舰护航；正 = 独狼；0 = 基线';
-  const docWrap = el('span', { class: 'bp-stance-row' });
-  docWrap.append(docOn, el('span', { class: 'lv-label' }, '理智↔热血 '), docTemper,
-    el('span', { class: 'lv-label' }, ' 护航↔独狼 '), docWolf);
-  docWrap.title = '勾上才表态（两轴必须一起给：只给一条时另一条会被引擎静默当成 0.0）。';
-
-  const kitOn = el('input', { type: 'checkbox', 'data-role': 'bp-new-kiting-on' });
-  const kitInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: '0.00', 'data-axis': 'kiting' });
-  kitInp.title = '风筝↔贴脸：负 = 风筝（保持最远射程、更早撤）；正 = 贴脸；0 = 基线';
-  const kitWrap = el('span', { class: 'bp-stance-row' });
-  kitWrap.append(kitOn, kitInp);
-
-  wrap.appendChild(labelWrap('名字', nameInp));
-  wrap.appendChild(labelWrap('舰级', classSel));
-  wrap.appendChild(labelWrap('归属', modeSel));
-  wrap.appendChild(labelWrap('角色', roleSel));
-  wrap.appendChild(labelWrap('风格', docWrap));
-  wrap.appendChild(labelWrap('风筝姿态', kitWrap));
-
-  // 组件多选用一片**独立草稿**（草稿不在编辑面里 ⇒ 不能进 diff，所以它不共用 componentPicker
-  // 的「写值即接管」路径；点「新建」时把那几件一次性写进新叶）。`inPlace` = 勾选不重画整棵树。
-  const draftLeaf = Object.assign({}, draft);
-  let compBox = componentPicker(draftLeaf, { inPlace: true });
-  wrap.appendChild(compBox);
-  // 舰级一改，槽位上限跟着变 ⇒ 只换这一格（草稿保留已勾的组件），别动表单别的东西。
-  classSel.addEventListener('change', () => {
-    draft.class = classSel.value;
-    draftLeaf.class = classSel.value;
-    const fresh = componentPicker(draftLeaf, { inPlace: true });
-    wrap.replaceChild(fresh, compBox);
-    compBox = fresh;
-  });
-
-  const add = el('button', { 'data-role': 'bp-new' }, '新建');
-  add.title = '把这张图加进编辑面（还没发给服务器）：点「应用到服务器」才真的落地。';
-  add.addEventListener('click', () => {
-    const name = (nameInp.value || '').trim();
-    if (!name) { $('#status').textContent = '图名不能为空（图名是库里的唯一 key）'; return; }
-    const fc = getControl(fid);
-    fc.blueprints = fc.blueprints || [];
-    if (fc.blueprints.some((b) => b.name === name)) {
-      $('#status').textContent = '库里已经有「' + name + '」这张图 ⇒ 改名（图名是唯一 key，改名 = 删旧建新）';
-      return;
-    }
-    // ① 先按**壳的模板**登记原值（否则它看起来"没改过"、压根不会进 diff）；
-    // ② 再把用户选的东西写上去——于是它与模板的差就是「新建这张图」这份补丁。
-    const entry = shellLeaf(bpDraft(name), LEAF_SPEC.blueprints);
-    fc.blueprints.push(entry);
-    entry.class = classSel.value;
-    entry.components = (draftLeaf.components || []).slice();
-    // 倾向三轴：空 = **明确写 `null`**（这一层没有说话；缺席才是"不动这一格"）。
-    entry.role = roleSel.value || null;
-    entry.doctrine = docOn.checked ? {
-      temper: Math.max(-1, Math.min(1, +docTemper.value || 0)),
-      lone_wolf: Math.max(-1, Math.min(1, +docWolf.value || 0)),
-    } : null;
-    entry.kiting = kitOn.checked ? Math.max(-1, Math.min(1, +kitInp.value || 0)) : null;
-    // 归属**显式**写出来（默认「玩家」）。不靠引擎的「写值即接管」兜底：那条规则会让界面
-    // 显示「继承」而叶其实归了玩家——正是这个仓库反复反对的那种"界面骗人"。
-    entry.mode = modeSel.value;
-    controlRerender();
-    $('#status').textContent = '已在编辑面里新建「' + name + '」：点「应用到服务器」才真的落地';
-  });
-  wrap.appendChild(add);
-  wrap.appendChild(modeHint);
-  return wrap;
-}
-
-/// 建造区那一行的**指针状态**：悬空 ⇒ 停产 / 舰级对不上 ⇒ 引擎会拒 / 买不起 ⇒ 没下水。
-///
-/// 单独一块（而不是直接往行上塞几行 hint）是因为它要**就地重算**：刚在「设计图」下拉里换了图
-/// 时，下拉里的选择**领先于读面**（`b.blueprint` 还是载入时的值），而这三条判断都得按"现在
-/// 选中的那张图"算——不然会出现"我选了图，行上还是旧状态"（引擎那边的守卫可不会跟着偷懒）。
-/// `chosen` = 界面上当前选中的图名（`null` = 没挂图，`undefined` = 按读面 `b.blueprint`）。
 function yardStatusBox(fc, node, chosen) {
   const box = el('div', { class: 'bp-yard-status' });
   const b = node.b;
@@ -2439,10 +1866,10 @@ function buildingEditor(node) {
     });
     wrap.appendChild(labelWrap('设计图', bpSel));
     wrap.appendChild(status);
-    if (node.buildLeaf) wrap.appendChild(leafValueEditor(node.buildLeaf, '建造权重'));
+    if (node.buildLeaf) wrap.appendChild(weightRow(node.buildLeaf, 'build_weights', '建造权重', node));
   }
 
-  if (node.leaf) wrap.appendChild(leafValueEditor(node.leaf, '建设权重'));
+  if (node.leaf) wrap.appendChild(weightRow(node.leaf, 'invest_weights', '建设权重', node));
 
   const rm = el('button', { class: 'rm' }, '移除');
   rm.addEventListener('click', () => {
@@ -2671,7 +2098,6 @@ async function newGame() {
   bindWorld(await postJSON('/api/new', { seed }));
   selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
   sel = selFaction ? { kind: 'faction', name: selFaction } : null;
-  selTab = new Map();
   infoTab = 0;
   infoExpanded.clear(); // 新世界 → 展开状态重来
   selExpanded.clear();
