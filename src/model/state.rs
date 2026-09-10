@@ -47,7 +47,11 @@ use crate::model::*;
 /// 长出 `shots`（逐发明细：选择三项分 + 命中/点防/护盾/护甲/破甲），**并且 0 伤害的齐射也发**
 /// （「被点防吃光」此前什么事件都不留）。这一档**真的动了 `State`**（`State::events` 是持久字段）
 /// ⇒ 旧档里的 `Attack` 事件靠 `#[serde(default)]` 补成空 `shots`（那些档只看聚合量，不失真）。
-pub const SCHEMA_VERSION: u32 = 20;
+/// **v21 = 输入面（B5）**：`pre` 从「回合开始的观测」（一份 `RoundView` 副本，零信息量）换成
+/// **输入面** [`RoundInputs`]（掷出的随机数 + 判定输入；C7 解算顺序 / C13 关系噪声已接）。
+/// `State` 一个字段没动，但**档的形状变了**：旧档的 `pre` 里是观测，新档里是输入——按本仓库
+/// 的惯例（读面/档的形状变化也推号，见 v18/v19 那两档）推号，让「旧档在这一面上不保真」明摆着。
+pub const SCHEMA_VERSION: u32 = 21;
 fn default_schema_version() -> u32 {
     0
 }
@@ -870,15 +874,18 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
-        // **v13–v18：六个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
+        // **v13–v20：这些号被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
         // 这几档里 `State` 只在**两条**历史上真动过字段：`mond_control`（tech 支线）与
         // `Attack.shots`（`feature/b4-combat`）。前者在本支之外的档里 serde 缺省 0 = 凡人；
         // 后者靠 `#[serde(default)]` 补成空 vec（旧档的 `Attack` 只看聚合量，空 `shots`
         // 与「没记」同义——不是「打了一发没有任何分解」）。
+        // v21（B5）就更轻：`State` 没动，动的是**档里 `pre` 那一格的含义**（观测 → 输入面）。
+        // 旧档的 `pre` 会被 serde 当成「全是未知字段」而忽略 ⇒ 输入面读出来是空的。
+        // 这与它的真相同义（那些档本来就没记过掷骰），所以**不补任何东西**。
         // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
         // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
         // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 | 14 | 15 | 16 | 17 | 18 | 19 => {
+        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
