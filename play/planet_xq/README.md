@@ -111,6 +111,11 @@ Two things worth knowing:
   checkpoint (`--start ckpt.ron --round 0 --index out/`) therefore puts that checkpoint's **stored
   view** into the start row, because that row's state *is* the result of that round; a fresh `--seed`
   run has no process quantities at round 0 (`0` / `{}`) — the initial world has no previous round.
+  **What "0/empty" means for each field is declared once**, in `schema.json`'s `neutral` section —
+  `q.neutral("factions[].governance_scale")` is `1.0` (not 0: "no bill to pay" is not "governance
+  capacity is zero"). Read a default from there rather than hardcoding one: the engine substitutes
+  from the *same* declarations, and that is exactly what keeps two read faces from disagreeing
+  (`flow.jsonl` used to say "0% covered" while `metrics` said "100% covered" for the same round).
 - For **per-ship effective intent** read the `ships` table columns
   `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
   `doctrine` / `kiting` — the engine resolves the ownership chain, so **do not re-implement it**

@@ -71,15 +71,20 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
             .cloned()
             .unwrap_or_default();
         let production_value: f64 = production.iter().map(|(k, v)| v * value_of(k)).sum();
-        // 治理流：总开销 / 覆盖率 / 行政娱乐拆分 / 人口超载倍率 / 思潮惩罚。缺省值由**这里
-        // 一处**给出（`pre` 与零城势力都走这条），所以两个读面永远一致。`scale` 的中性缺省是
-        // 1.0 而不是 0——同 `coverage` 的约定：缺的是「没有账」，不是「治理能力归零」。
+        // 治理流：总开销 / 覆盖率 / 行政娱乐拆分 / 人口超载倍率 / 思潮惩罚。**缺省值不是这里
+        // 定的**——它们来自 `model::neutral`（读面中性值的唯一声明处），这里只是把声明取来用；
+        // 那两个 1.0（覆盖率、超载倍率）必须走常量，因为「1.0 = 没有账」与「0 = 能力归零」是
+        // 两件事，写字面量迟早会有人改成 0。
         let gov = sink.governance.get(&fid);
         let governance_cost = gov.map(|g| g.total).unwrap_or(0.0);
-        let governance_coverage = gov.map(|g| g.coverage).unwrap_or(1.0);
+        let governance_coverage = gov
+            .map(|g| g.coverage)
+            .unwrap_or(crate::model::neutral::value::GOVERNANCE_COVERAGE);
         let governance_admin = gov.map(|g| g.admin).unwrap_or(0.0);
         let governance_entertainment = gov.map(|g| g.entertainment).unwrap_or(0.0);
-        let governance_scale = gov.map(|g| g.scale).unwrap_or(1.0);
+        let governance_scale = gov
+            .map(|g| g.scale)
+            .unwrap_or(crate::model::neutral::value::GOVERNANCE_SCALE);
         let ideology_loyalty_penalty = gov.map(|g| g.ideology_penalty).unwrap_or(0.0);
         // 「谁不卖给你」：有多少势力对本势力**全面禁运**（本回合市场结算的实际判据）。
         let trade_blocked_by = state

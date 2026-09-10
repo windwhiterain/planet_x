@@ -673,7 +673,9 @@ fn write_round(
                 "production": row.map(|r| r.production.clone()).unwrap_or_default(),
                 "upkeep": row.map(|r| r.upkeep).unwrap_or(0.0),
                 "governance_total": row.map(|r| r.governance_cost).unwrap_or(0.0),
-                "governance_coverage": row.map(|r| r.governance_coverage).unwrap_or(1.0),
+                "governance_coverage": row.map(|r| r.governance_coverage).unwrap_or(
+                    crate::model::neutral::value::GOVERNANCE_COVERAGE,
+                ),
                 // B1：把钱花在哪拆开（行政 vs 娱乐）+ 人口超载倍率 + 思潮忠诚惩罚。
                 "governance_admin": row.map(|r| r.governance_admin).unwrap_or(0.0),
                 "governance_entertainment": row.map(|r| r.governance_entertainment).unwrap_or(0.0),
@@ -1283,9 +1285,9 @@ pub fn projection_schema() -> serde_json::Value {
 
     json!({
         "title": "planet_x 投影：lean 主流 + lazy id 索引表 + 派生表",
-        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查，需要引擎算出来的量（本回合流量、控制面）时读派生表。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/faction_ids/body_ids/contract_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。\n· 派生表（derived）：数据**不在状态里**（引擎内部中间量/控制面），按 join_on 指的 main 列 join。",
+        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查，需要引擎算出来的量（本回合流量、控制面）时读派生表。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/faction_ids/body_ids/contract_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。\n· 派生表（derived）：数据**不在状态里**（引擎内部中间量/控制面），按 join_on 指的 main 列 join。\n· neutral：读面每个叶子字段的**中性值（缺省值）一处声明**——缺键时按它补装，别自己编缺省（v3 起）。",
         "generator": "planet_x",
-        "schema_version": 2,
+        "schema_version": 3,
         "main_stream": MAIN,
         "meta": META,
         "eager": {
@@ -1303,6 +1305,10 @@ pub fn projection_schema() -> serde_json::Value {
         },
         "lazy": lazy,
         "derived": derived_tables,
+        // 读面字段的**中性值**（缺省值）——由 `model::neutral` 一处声明、这里原样发出。
+        // 外部读者（kit / web / 别的语言）遇到缺键时按它补装，**别自己编缺省**：历史上
+        // `flow.jsonl` 补 0、`metrics` 补 1.0，同一回合两个读面各说各话就是这么来的。
+        "neutral": crate::model::neutral::schema_section(),
         "read_order": [
             "先读 schema.json，分清 eager（内联）/ lazy（索引）/ derived（引擎算出来的量）三类字段；",
             "读 main.jsonl 的 eager + view（决策视图），按需拿 id；",

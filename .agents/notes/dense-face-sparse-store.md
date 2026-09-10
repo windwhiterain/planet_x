@@ -1,7 +1,10 @@
 # 稠密读面 / 稀疏存储：把「读得舒服」和「存得省」解耦
 
-> 状态 `[ ]` **设计提案（未实现、未裁决）**——由用户 2026-10 的一句话触发：
-> 「在轨迹的结构上包装一层，让他表面上读写起来是 dense 的，但底层会自动 sparse 化」。
+> 状态 `[~]` **中性值所有权（§7）已落地**（`feature/neutral-values`）；**存储稀疏化那一半仍未做、未裁决**。
+> 由用户 2026-10 的一句话触发：
+> 「在轨迹的结构上包装一层，让他表面上读写起来是 dense 的，但底层会自动 sparse 化」；
+> 用户随后指定**先解决中性值**（那是这套东西里唯一必须立刻做对的部分：省字节可以等，
+> 缺省值错了会继续咬人）。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md)（§3 规矩 2 那条「**不做** `skip_serializing_if`」
 > 正是本篇要**有条件地**松动的那一条）、[`step-intermediates.md`](step-intermediates.md) §6.1/§7 Q3
 > （B1 实测的体积数字与 `capital` 的取舍）、[`engine-data-plane.md`](engine-data-plane.md) §7.3
@@ -57,6 +60,7 @@ B1（治理/忠诚中间量）落地后我称了一下字节（`--seed 7 --round
    （那三样本来就是现状，等于不做）。
 2. **中性值一处声明**：`schema.json` 增 per-field `neutral`（Rust 侧同源生成 + 一条一致性测试），
    三个消费者注入同一个值。**绝不允许读者自己写缺省**——那正是老坑的成因。
+   ✅ **已落地**（见 §7）。
 3. **无损性要能测**：一条 property 测试（长局 `decode(encode(v)) == v`，逐回合）+ 一条
    「稠密面字节 = 本提案之前」的对照。它是这套东西能不能信的**唯一**依据。
 4. **别碰写面**：控制面 diff 的 `{}` vs `null` 有它自己的三态语义（`engine-data-plane.md` §7.3），
@@ -94,3 +98,57 @@ B1（治理/忠诚中间量）落地后我称了一下字节（`--seed 7 --round
 * **Q3 规则 2（与父级同值可省）要不要**：它需要把「grain 与父级关系」写进 schema；
   只做规则 1 + 3 也能省掉 `capital` 那 1350 B。
 * **Q4 中性值归 schema 所有**（Rust 同源生成 + 一致性测试）——同意吗？
+  → ✅ **已按此落地**（§7）。
+
+## 7. 已落地：中性值所有权（`feature/neutral-values`）
+
+用户裁决「先把中性值这个问题解决了」⇒ 先把这套设计里**唯一必须立刻做对**的那一半做了：
+**缺省值的所有权收归一处**。存储稀疏化（省字节那一半）**没动**。
+
+### 7.1 形状
+
+* `src/model/neutral.rs`（新）——唯一声明处：
+  * `READ_FACE_NEUTRALS: &[(&str, Neutral)]`：读面（`RoundView`）**每一个叶子字段**的中性值，
+    路径口径相对读面根、map/数组的值用 `[]`（如 `factions[].governance_scale`）；
+  * `Neutral` 六档：`ZeroInt`（整数 0）/ `Zero`（浮点 0.0）/ `One`（**1.0**——「没有账」不是
+    「能力归零」）/ `False` / `Null`（「**没算**」，区别于「算了得 0」）/ `EmptyMap` / `EmptyArray`。
+    整数与浮点分开是因为 `serde_json` 区分 `0` 与 `0.0`：给整数列补 `0.0` 会把那一列带成 float
+    （lazy 表给 `production` 补 `{}` 是同一条理由）。
+  * `value::GOVERNANCE_COVERAGE` / `value::GOVERNANCE_SCALE`：引擎运行时缺省用的**具名常量**
+    （值来自这里，`sim::observe` 与 `projection` 不再写字面量 `1.0`）；
+  * `schema_section()`：直接生成 `schema.json` 的 `neutral` 段（含一段「缺键按这里补、
+    **别自己编缺省**」的说明）。
+* `schema.json` 新增 **`neutral`** 段：`{root: "view", description, fields: {路径 → 中性值}}`。
+
+### 7.2 五条守卫（各钉一边）
+
+| 测试 | 钉什么 |
+| --- | --- |
+| `every_read_face_field_declares_a_neutral` | 用 schemars 遍历读面结构，与声明表**双向集合相等**，且类型严格相容（整数档对 `integer`、浮点档对 `number`）⇒ **加字段不加声明就红** |
+| `struct_defaults_equal_the_declared_neutrals` | `RoundView` / `LoyaltyTarget` / `CapitalFlow` 的 `Default` 就是声明的中性值（serde 缺字段走的就是它） |
+| `pre_face_process_fields_equal_their_declared_neutral` | **引擎实证**：真实世界里「这一步还没跑」的字段（32 条过程量路径）吐出来的值必须逐字段等于声明 |
+| `value_consts_match_the_table` | 具名常量与表同值（常量给人读、表给 schema 读，两者不许漂） |
+| `schema_publishes_the_neutral_table` | 发出去的 `schema.json` 段等于本表（发布路径不许漂） |
+
+顺带把两处**真实踩到**的坑记下来（都在写测试时暴露）：
+1. **schemars 0.8 会把「`$ref` + 文档注释」包成 `allOf`** —— 不认这层，`decisions` / `capital` /
+   `loyalty_target` 三个嵌套结构会被当成叶子（摊出来只有 39 个叶子，表里有 50 个）。
+2. **map 容器自己也是叶子**：`factions: {}` / `cities: {}`（空世界）是合法状态，中性值 `{}`；
+   只摊 `factions[].x` 会漏掉容器本身。
+
+### 7.3 语义区分（写进模块文档，别搞混）
+
+* **过程量**：中性值既是「读者缺键时的替补」，**也是引擎真会吐出来的值**（这一步没跑/没发生）。
+* **观测量**（人口/忠诚/世界总量/价格…）：稠密面里它们**永远在**，中性值只是「万一缺键该怎么读」
+  的**定义**（读 0 / 读空），**不是**「一个空世界的观测值」——别拿它当语义断言。守卫 3 的
+  `PROCESS_PATHS` 清单就是这条区分在测试里的样子。
+
+### 7.4 kit 也跟着不再自己编缺省
+
+`q.neutral("factions[].governance_scale")` → `1.0`（读 `schema.json` 的 `neutral` 段）；
+`view_economy()` 里那些 `1.0` 档全部改成从声明取。`view_loyalty()` 对旧投影（没有 B1 那几列）
+给**明确报错**而不是静默补零。
+
+**没做的**：§2 的 encode/decode 那一层、规则 2（与父级同值可省）、规则 3（空集合可省）的存储侧、
+`--dense`/`--raw` 开关、以及 B1 那两处重复本身的清理（`capital` 7 字段 6 个 null、
+`loyalty_target` 全国项重复）——**它们要么等通用层落地，要么按 §5 的笨办法收**，两条路都还在桌上。
