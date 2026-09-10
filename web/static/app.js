@@ -120,28 +120,38 @@ function num2(v) {
 }
 function doctrineSummary(l) { return '理智↔热血 ' + num2(l.temper) + ' · 护航↔独狼 ' + num2(l.lone_wolf); }
 function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
-// 第三条风格轴**角色**（运输舰↔战舰）不是 [-1,1] 的连续轴，而是**一个开关**：它只决定
-// 自动控制派哪种活（`autocontrol::freight` 按积压定编谁去跑集货路线），不解除武装
-// ——运输舰在射程内照样自动开火、照样按 kiting 姿态软移动。
-function freighterSummary(l) { return l.freighter ? '运输舰' : '战舰'; }
+// 第三条风格轴**角色**不是 [-1,1] 的连续轴，也不是一个开关，而是**三选一的枚举**
+// （引擎的 `ShipRole`，serde 的 JSON 形态就是这三个字符串）。它只决定自动控制派哪种活：
+//   战舰   `War`     —— 找仗打（接战 / 轰炸 / 殖民）
+//   运输舰 `Freight` —— 按积压定编去跑集货路线（`autocontrol::freight`）
+//   观测舰 `Observe` —— 驻到太阳系外缘的引力异常区（MOND）蹲着，喂「掌握度」那条知识渠道
+//                       （`autocontrol::knowledge`）——它是 MOND 掌握度**唯一**的知识来源
+// 三态都不解除武装：运输舰 / 观测舰在射程内照样自动开火、照样按 kiting 姿态软移动。
+// ⚠ 取值是**字符串**（`'War' | 'Freight' | 'Observe'`），不再是 `true`/`false`。
+const ROLE_LABEL = { War: '战舰', Freight: '运输舰', Observe: '观测舰' };
+/// 角色 → 中文标签。未知取值**原样显示**（引擎加了第四态时不会静默显示成"战舰"骗人）。
+function roleSummary(l) {
+  const r = l && l.role;
+  return ROLE_LABEL[r] || r || '战舰';
+}
 
 // **「自动」这一档到底有没有执行者**——措辞必须与引擎一致（note：control-live-layers §3.2/§13）。
 // 三种情况，三句不同的话：
 //   ① 逐舰**风格两叶**（`ship_doctrine`/`ship_kiting`）：本轮**有执行者**了
 //      （`autocontrol::style` 每回合按战况概率重估、写回叶片）⇒ 照实说「会改写」。
-//   ② 逐舰**角色叶**（`ship_freighter`）：自动控制按积压定编 ⇒ 也照实说「会改写」。
-//   ③ **势力级默认叶**（`default_doctrine`/`default_kiting`/`default_freighter`）：AI **不写**
+//   ② 逐舰**角色叶**（`ship_role`）：自动控制按积压定编 ⇒ 也照实说「会改写」。
+//   ③ **势力级默认叶**（`default_doctrine`/`default_kiting`/`default_role`）：AI **不写**
 //      这片叶，而且引擎的取值规则是"默认叶只在**它自己是玩家**时供值" ⇒ 它 `Auto` 时的存储值
 //      是**没人读的**。诚实的说法是「本层不供值」，绝不能写成"值由系统写"。
 //      （一句话解释这个组合：`Auto` 的默认叶 = AI 的答案是**"不设全舰队默认、逐舰自己说"**，
 //       所以它确实不必写任何值——但界面必须把"那个数没人用"说出来。）
 const AUTO_RETUNED = '自动（自动控制每回合按战况重估，会改写这片叶）';      // 逐舰风格两叶
-const AUTO_WRITTEN = '自动（自动控制每回合按积压定编，会改写这片叶）';      // 逐舰角色叶
+const AUTO_WRITTEN = '自动（自动控制每回合按积压/观测需求定编，会改写这片叶）'; // 逐舰角色叶
 const AUTO_UNWRITTEN = '自动（本层不供值：引擎只在它是玩家时才取默认值）'; // 势力级默认叶
 /// 三组 kind：哪一片叶属于哪种措辞（`modeToggleFor` 与各行的 decorateLabel 都读它）。
 const AUTO_RETUNED_KINDS = ['shipdoctrine', 'shipkiting'];
-const AUTO_WRITTEN_KINDS = ['shipfreighter'];
-const AUTO_UNWRITTEN_KINDS = ['fleetdoctrine', 'fleetkiting', 'fleetfreighter'];
+const AUTO_WRITTEN_KINDS = ['shiprole'];
+const AUTO_UNWRITTEN_KINDS = ['fleetdoctrine', 'fleetkiting', 'fleetrole'];
 
 // 势力级**默认风格**行的摘要：只有它自己是「玩家」时那个值才真的被采用（引擎的取值规则：
 // 默认叶为 `Inherit`/`Auto` 时不供值），所以这两种情况都不显示那几个数——显示了会骗人。
@@ -184,21 +194,35 @@ function styleFollowHint(node) {
 /// 「这艘舰的**角色**现在是从哪来的」：与 [`styleFollowHint`] 同一条取值链
 /// （叶 → 舰队默认 → 舰上记录值），但有一句只属于这条轴的话——**这片叶是自动控制写的**，
 /// 所以在这里「没表态」的含义是「AI 每回合可以重新决定这艘舰干什么活」，而不是「永远冻着」。
-function freighterFollowHint(node) {
+/// ⚠ 角色是**三值枚举**，所以提示里的值一律过 [`roleSummary`]，并在「观测舰」那一档说明
+/// 它到底去干什么（去异常区蹲着喂 MOND 掌握度）——只说"观测舰"三个字等于没说。
+function roleFollowHint(node) {
   const leaf = node.leaf;
   if (normMode(leaf.mode) !== 'Inherit') return null;
   const fc = getControl(node.fid);
-  const d = fc.default_freighter;
+  const d = fc.default_role;
   if (d && normMode(d.mode) === 'Player') {
-    return hintLine('当前跟随：舰队默认（' + freighterSummary(d) + '）——它是玩家钉的 ⇒ 自动控制的逐舰定编不碰这艘舰');
+    return hintLine('当前跟随：舰队默认（' + roleSummary(d) + '·' + roleHint(d.role)
+      + '）——它是玩家钉的 ⇒ 自动控制的逐舰定编不碰这艘舰');
   }
-  const raw = ((st.control || {})[node.fid] || {}).ship_freighter || {};
+  const raw = ((st.control || {})[node.fid] || {}).ship_role || {};
   const s = st.ships.find((x) => x.name === node.id);
   if (raw[node.id]) {
-    return hintLine('当前跟随：本舰叶片里的角色（没表态 ⇒ 这是**自动控制写下的定编结论**，它每回合会重估；要钉死就把归属改成「玩家」）');
+    return hintLine('当前跟随：本舰叶片里的角色（' + roleSummary(leaf) + '·' + roleHint(leaf.role)
+      + '；没表态 ⇒ 这是**自动控制写下的定编结论**，它每回合会重估；要钉死就把归属改成「玩家」）');
   }
-  const rec = s ? freighterSummary({ freighter: !!s.freighter }) : null;
-  return hintLine('当前跟随：出厂快照' + (rec ? '（' + rec + '）' : '') + '——这一层还没有叶，自动控制随时可以给这艘舰定编');
+  const rec = s ? roleSummary(s) : null;
+  return hintLine('当前跟随：出厂快照' + (rec ? '（' + rec + '·' + roleHint(s.role) + '）' : '')
+    + '——这一层还没有叶，自动控制随时可以给这艘舰定编');
+}
+
+/// 一个角色取值**到底在干什么**（`roleFollowHint` 与编辑器共用一句话，避免两处各说一套）。
+function roleHint(r) {
+  switch (r) {
+    case 'Freight': return '按积压去跑集货路线';
+    case 'Observe': return '驻在引力异常区（MOND），喂「掌握度」那条知识渠道';
+    default: return '找仗打（接战 / 轰炸 / 殖民）';
+  }
 }
 
 // --- 节点类型注册表 ---------------------------------------------------------
@@ -211,7 +235,7 @@ function freighterFollowHint(node) {
 //             'factions'/'bodies'/'cities' scopeVal(edScope[k], id)；'leaf' node.leaf.mode
 //             （三态：Inherit=继承上层 / Auto=系统自动 / Player=玩家；读面永远给全三态之一）
 //  editor     'ship'  舰行为编辑器 | 'doctrine' 行为风格两轴（理智↔热血/护航↔独狼）|
-//             'kiting' 风筝↔贴脸姿态 | 'freighter' 角色开关（运输舰↔战舰）|
+//             'kiting' 风筝↔贴脸姿态 | 'role' 角色三选一（战舰/运输舰/观测舰）|
 //             'value' 数值叶子编辑器 | 'building' 建筑
 //             （前四种都只在**有效归属是玩家**时给编辑器，否则给一行 .tnode-hint）
 const KIND = {
@@ -235,11 +259,11 @@ const KIND = {
   fleetorder:    { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
   fleetdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => fleetStyleLabel(n.leaf, doctrineSummary) },
   fleetkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => fleetStyleLabel(n.leaf, kitingSummary) },
-  // 第三条风格轴**角色**（运输舰↔战舰）。两行与上面同形，但有一条轴间差别：逐舰那片叶
-  // **自动控制每回合也会写**（按积压定编）⇒ 它的「自动」是真的（用 autoWritten）。
-  shipfreighter: { childMode: 'leaf', scope: 'leaf', editor: 'freighter', decorateLabel: (n) => ' · ' + freighterSummary(n.leaf) + autoWritten(n.leaf) },
+  // 第三条风格轴**角色**（战舰 / 运输舰 / 观测舰）。两行与上面同形，但有一条轴间差别：逐舰那片叶
+  // **自动控制每回合也会写**（按积压定编集货 + 派观测舰去异常区）⇒ 它的「自动」是真的（用 autoWritten）。
+  shiprole: { childMode: 'leaf', scope: 'leaf', editor: 'role', decorateLabel: (n) => ' · ' + roleSummary(n.leaf) + autoWritten(n.leaf) },
   // 势力级默认角色：AI **不写**这片叶（它只写逐舰叶）⇒ 与另两条风格轴的默认叶同一条措辞。
-  fleetfreighter: { childMode: 'leaf', scope: 'leaf', editor: 'freighter', decorateLabel: (n) => fleetStyleLabel(n.leaf, freighterSummary) },
+  fleetrole: { childMode: 'leaf', scope: 'leaf', editor: 'role', decorateLabel: (n) => fleetStyleLabel(n.leaf, roleSummary) },
   resource:  { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '投资预算/回合' },
   conbudget: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '建造预算/回合' },
   building:  { childMode: 'leaf', scope: 'leaf', editor: 'building' },
@@ -344,11 +368,11 @@ const LEAF_SPEC = {
   default_ship_order:  { keys: [],                values: ['behavior'] },
   default_doctrine:    { keys: [],                values: ['temper', 'lone_wolf'] },
   default_kiting:      { keys: [],                values: ['kiting'] },
-  default_freighter:   { keys: [],                values: ['freighter'] },
+  default_role:   { keys: [],                values: ['role'] },
   ship_orders:         { keys: ['ship'],          values: ['behavior'] },
   ship_doctrine:       { keys: ['ship'],          values: ['temper', 'lone_wolf'] },
   ship_kiting:         { keys: ['ship'],          values: ['kiting'] },
-  ship_freighter:      { keys: ['ship'],          values: ['freighter'] },
+  ship_role:      { keys: ['ship'],          values: ['role'] },
   investment_budget:   { keys: ['resource'],      values: ['value'] },
   construction_budget: { keys: ['resource'],      values: ['value'] },
   invest_weights:      { keys: ['city', 'building'], values: ['value'] },
@@ -360,7 +384,7 @@ const LEAF_SPEC = {
   blueprints:          { keys: ['name'],          values: ['class', 'components', 'order'] },
 };
 /// 势力级那几片叶子（`Option<...>` 字段，不是数组）。
-const LEAF_OPTIONS = ['capital', 'default_ship_order', 'default_doctrine', 'default_kiting', 'default_freighter'];
+const LEAF_OPTIONS = ['capital', 'default_ship_order', 'default_doctrine', 'default_kiting', 'default_role'];
 
 /// 记下一片叶的原值。**不覆盖**已经记过的：读面里的叶在 [`pairOrigins`] 里配过对。
 function rememberOrigin(leaf, fields, spec, shell) {
@@ -681,8 +705,8 @@ function buildTree() {
       || { temper: 0, lone_wolf: 0, mode: 'Inherit' }, LEAF_SPEC.default_doctrine);
     const fleetKiting = shellLeaf(fc.default_kiting = fc.default_kiting
       || { kiting: 0, mode: 'Inherit' }, LEAF_SPEC.default_kiting);
-    const fleetFreighter = shellLeaf(fc.default_freighter = fc.default_freighter
-      || { freighter: false, mode: 'Inherit' }, LEAF_SPEC.default_freighter);
+    const fleetRole = shellLeaf(fc.default_role = fc.default_role
+      || { role: 'War', mode: 'Inherit' }, LEAF_SPEC.default_role);
 
     const invLeaves = (fc.investment_budget || []).map((e) => ({
       key: 'inv' + fid + ':' + e.resource, kind: 'resource', name: resName(e.resource), leaf: e, fid,
@@ -728,7 +752,7 @@ function buildTree() {
         { key: 'fleet' + fid, kind: 'fleetorder', id: fid, name: '舰队默认指令', leaf: fleetOrder, fid },
         { key: 'fleetdoc' + fid, kind: 'fleetdoctrine', id: fid, name: '舰队默认风格', leaf: fleetDoctrine, fid },
         { key: 'fleetkit' + fid, kind: 'fleetkiting', id: fid, name: '舰队默认风筝姿态', leaf: fleetKiting, fid },
-        { key: 'fleetfrt' + fid, kind: 'fleetfreighter', id: fid, name: '舰队默认角色', leaf: fleetFreighter, fid },
+        { key: 'fleetfrt' + fid, kind: 'fleetrole', id: fid, name: '舰队默认角色', leaf: fleetRole, fid },
       ].concat(shipNodes);
       cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: kids });
     }
@@ -742,7 +766,7 @@ function buildTree() {
 }
 
 // 一条舰 = 一个四叶容器：**指令**（干什么）+ **风格**（理智↔热血 / 护航↔独狼）+
-// **风筝姿态**（风筝↔贴脸）+ **角色**（运输舰↔战舰）。四片叶的归属链各自独立，所以
+// **风筝姿态**（风筝↔贴脸）+ **角色**（战舰 / 运输舰 / 观测舰）。四片叶的归属链各自独立，所以
 // 「归谁」的下拉跟着子叶走。
 //
 // **四片叶的读面都「每舰一行」**（哪怕状态里根本没有那片叶），口径也一致：
@@ -752,7 +776,7 @@ function buildTree() {
 // 一按，这艘舰**整行**（连风格 / 角色）就从控制树里消失——现在也不会了。
 // ⚠ 指令的 `behavior === null` 是「链上没人说话」（引擎按 `Idle` 兜底），**不是**「待命」；
 // 风格三轴没有这个问题（它们兜底到出厂记录值，永远有一个数）。
-// ⚠ `Ship.doctrine` / `Ship.kiting` / `Ship.freighter` 只是出厂快照（**记录值**），改它们没有
+// ⚠ `Ship.doctrine` / `Ship.kiting` / `Ship.role` 只是出厂快照（**记录值**），改它们没有
 // 任何控制效果——那正是「我明明改了风格却没反应」的坑；要改就走这几片叶。
 function shipNode(fc, ord) {
   const name = ord.ship;
@@ -772,11 +796,12 @@ function shipNode(fc, ord) {
       key: 'kit' + name, kind: 'shipkiting', id: name, name: '风筝姿态', fid: fc.faction_id,
       leaf: styleLeaf(fc, 'ship_kiting', name, { kiting: +s.kiting || 0 }),
     });
-    // 角色：这片叶**自动控制每回合会写**（按积压定编谁去跑集货路线），所以它常常带着一个
-    // 玩家没写过的值 + `Inherit` 表态——`autoWritten` 会在那一行把这件事说清楚。
+    // 角色：这片叶**自动控制每回合会写**（按积压定编集货 + 按观测需求派舰去异常区），所以它
+    // 常常带着一个玩家没写过的值 + `Inherit` 表态——`autoWritten` 会在那一行把这件事说清楚。
+    // 读面这一行的值 = **有效角色**（`ships[].role`，链上算完的结论），不是舰上的出厂快照。
     kids.push({
-      key: 'frt' + name, kind: 'shipfreighter', id: name, name: '角色', fid: fc.faction_id,
-      leaf: styleLeaf(fc, 'ship_freighter', name, { freighter: !!s.freighter }),
+      key: 'frt' + name, kind: 'shiprole', id: name, name: '角色', fid: fc.faction_id,
+      leaf: styleLeaf(fc, 'ship_role', name, { role: s.role || 'War' }),
     });
   }
   return { key: 'ship' + name, kind: 'ship', id: name, name: (s ? s.name : '船#' + name), fid: fc.faction_id, children: kids };
@@ -902,16 +927,16 @@ function renderNode(node) {
     // 风筝↔贴脸姿态（单片叶）：同上。
     if (effectiveMode(node) === 'Player') wrap.appendChild(kitingEditor(node));
     else wrap.appendChild(hintLine('由系统自动决定（要自己定风筝姿态就把左边的归属改成「玩家」）'));
-  } else if (spec.editor === 'freighter') {
-    // 角色（运输舰↔战舰，单片叶）：同一条开放规则。但这里「由系统自动决定」**不是空话**
-    // ——自动控制每回合按积压定编，所以提示要说清它真的会替你决定。
-    if (effectiveMode(node) === 'Player') wrap.appendChild(freighterEditor(node));
-    else if (node.kind === 'fleetfreighter') {
+  } else if (spec.editor === 'role') {
+    // 角色（战舰 / 运输舰 / 观测舰，单片叶）：同一条开放规则。但这里「由系统自动决定」**不是空话**
+    // ——自动控制每回合按积压与观测需求定编，所以提示要说清它真的会替你决定。
+    if (effectiveMode(node) === 'Player') wrap.appendChild(roleEditor(node));
+    else if (node.kind === 'fleetrole') {
       // ⚠ 势力级这片默认叶**没有执行者**：自动控制只写逐舰角色叶，从不写它。
       // 所以这里不能照抄逐舰那句「由自动控制定编」——那是假话（note §3.2 的措辞纪律）。
       wrap.appendChild(hintLine('未表态：这片默认叶只在它自己是「玩家」时才供值（自动控制的定编只写逐舰角色叶，不写它）——要「全舰队听我的」就把它改成「玩家」'));
     } else {
-      wrap.appendChild(hintLine('由自动控制定编（它每回合按积压决定谁去跑集货路线）；要自己钉死这艘舰，就把左边的归属改成「玩家」'));
+      wrap.appendChild(hintLine('由自动控制定编（它每回合按积压派集货、按观测需求派舰去异常区蹲着喂 MOND 掌握度）；要自己钉死这艘舰，就把左边的归属改成「玩家」'));
     }
   } else if (spec.editor === 'value') {
     wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel, node));
@@ -927,8 +952,8 @@ function renderNode(node) {
   if (node.kind === 'shipdoctrine' || node.kind === 'shipkiting') {
     const fh = styleFollowHint(node);
     if (fh) wrap.appendChild(fh);
-  } else if (node.kind === 'shipfreighter') {
-    const fh = freighterFollowHint(node);
+  } else if (node.kind === 'shiprole') {
+    const fh = roleFollowHint(node);
     if (fh) wrap.appendChild(fh);
   }
   return wrap;
@@ -1005,11 +1030,11 @@ const RAW_LEAF = {
   shiporder:     { list: 'ship_orders', key: (n) => n.id },
   shipdoctrine:  { list: 'ship_doctrine', key: (n) => n.id },
   shipkiting:    { list: 'ship_kiting', key: (n) => n.id },
-  shipfreighter: { list: 'ship_freighter', key: (n) => n.id },
+  shiprole:      { list: 'ship_role', key: (n) => n.id },
   fleetorder:    { list: 'default_ship_order' },
   fleetdoctrine: { list: 'default_doctrine' },
   fleetkiting:   { list: 'default_kiting' },
-  fleetfreighter:{ list: 'default_freighter' },
+  fleetrole:     { list: 'default_role' },
   resource:      { list: 'investment_budget', key: (n) => n.leaf.resource },
   conbudget:     { list: 'construction_budget', key: (n) => n.leaf.resource },
   blueprint:     { list: 'blueprints', key: (n) => n.id },
@@ -1047,12 +1072,12 @@ function removeLeafButton(node, label, title) {
 ///
 /// 「该轴对应的默认叶」不是写死的 `default_ship_order`：引擎里三条轴各有一片势力级默认
 /// （指令 → `default_ship_order`、风格 → `default_doctrine`、风筝姿态 → `default_kiting`、
-/// 角色 → `default_freighter`），见 [`DEFAULT_LEAF`]。
+/// 角色 → `default_role`），见 [`DEFAULT_LEAF`]。
 const DEFAULT_LEAF = {
   shiporder: 'default_ship_order',
   shipdoctrine: 'default_doctrine',
   shipkiting: 'default_kiting',
-  shipfreighter: 'default_freighter',
+  shiprole: 'default_role',
 };
 
 function effectiveMode(node) {
@@ -1187,22 +1212,29 @@ function kitingEditor(node) {
   return box;
 }
 
-/// **角色**编辑器（运输舰↔战舰）：一条开关，不是 [-1,1] 的轴。
+/// **角色**编辑器（战舰 / 运输舰 / 观测舰）：**三选一**，不是 [-1,1] 的轴，也不是开关。
 /// 写它 = 手动给这艘舰定活，自动控制的逐舰定编从此不碰它（`Player` 是那道闸门）；
-/// 它只决定**派哪种活**，不解除武装——运输舰照样自动开火、照样按 kiting 姿态软移动。
-function freighterEditor(node) {
+/// 它只决定**派哪种活**，不解除武装——运输舰 / 观测舰照样自动开火、照样按 kiting 姿态软移动。
+///
+/// ⚠ 值的取值就是 serde 的 `ShipRole`：`'War' | 'Freight' | 'Observe'`（**字符串**，
+/// 旧版这里是 `true`/`false`）。三态互斥：一艘舰同一时刻只有一种活。
+/// 归属（三态 mode）不在这里选——它在行首那个归属下拉里（与其他几条轴一致，见 `modeToggleFor`）。
+function roleEditor(node) {
   const leaf = node.leaf;
   const box = el('div', { class: 'ship-editor' });
-  const sel = el('select', { class: 'role', 'data-axis': 'freighter' });
-  [['true', '运输舰（按积压派集货路线）'], ['false', '战舰（找仗打）']].forEach(([v, lbl]) => {
+  const sel = el('select', { class: 'role', 'data-axis': 'role' });
+  [['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']].forEach(([v, lbl]) => {
     const o = el('option', { value: v });
-    o.textContent = lbl;
-    o.selected = String(!!leaf.freighter) === v;
+    o.textContent = lbl + '（' + roleHint(v) + '）';
+    o.selected = (leaf.role || 'War') === v;
     sel.appendChild(o);
   });
-  sel.title = '角色只决定自动控制派哪种活：运输舰去跑集货路线（按积压抽签），战舰去找仗打。它**不解除武装**，也不是「军舰/民船」的军备差别。';
+  sel.title = '角色只决定自动控制派哪种活：战舰找仗打、运输舰按积压跑集货路线、'
+    + '观测舰驻到太阳系外缘的引力异常区（MOND）蹲着喂「掌握度」那条知识渠道。'
+    + '它不是 [-1,1] 的连续轴，也不解除武装——运输舰 / 观测舰在射程内照样自动开火、'
+    + '照样按 kiting 姿态软移动。';
   sel.addEventListener('change', () => {
-    leaf.freighter = sel.value === 'true';
+    leaf.role = sel.value;
     // 与另两条风格轴同一条规则：值变了 ⇒ 写值即接管（把这片叶钉成玩家，AI 定编从此不碰它）。
     wroteValue(leaf);
     renderTree();

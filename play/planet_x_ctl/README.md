@@ -84,8 +84,10 @@ s.set_behavior(mine, "Dock:地球", mode="Player")                # "Idle" / "Fo
 s.set_default_ship_order("中国", behavior="Dock:地球", mode="Player")   # ONE leaf, new ships follow
 s.set_kiting(mine, -1.0)                                        # 贴脸（clamped to [-1, 1]）
 s.set_doctrine(mine, temper=0.4)
-s.set_freighter(mine, True, mode="Player")                      # 角色：True = 运输舰，False = 战舰
-s.set_default_freighter("中国", True, mode="Player")            # 一片叶：全舰队转运输，且 AI 定编不碰
+s.set_role(mine, "Freight", mode="Player")                      # 角色：三值字符串 ——
+                                                                #   "War" 战舰 / "Freight" 运输舰 /
+                                                                #   "Observe" 观测舰（去异常区蹲着喂 MOND 掌握度）
+s.set_default_role("中国", "Freight", mode="Player")            # 一片叶：全舰队转运输，且 AI 定编不碰
 s.set_budget("中国", "construction_budget", {"硅": 4.0, "铁": 12.0}, mode="Player")
 s.set_loyalty_budget("中国", {"珠三角": 2.5}, mode="Player")
 s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, mode="Player")
@@ -111,9 +113,9 @@ s.remove_blueprint("中国", "重甲护卫")                            # 删整
 s.remove("中国", "ship_doctrine", "长城")
 s.remove_doctrine(mine)                                         # 通配：这些舰的风格回出厂快照/舰队默认
 s.remove_kiting(mine)
-s.remove_freighter(mine)                                        # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
+s.remove_role(mine)                                             # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
 s.remove_default_doctrine("中国")                                # 势力级默认叶：删了就不再供值
-s.remove_default_freighter("中国")
+s.remove_default_role("中国")
 s.remove_default_ship_order("中国")
 
 diff = s.emit()                       # {"control": […], "scope": {…}} → ready for `--apply`
@@ -129,6 +131,22 @@ r = ctl.roster(ckpt, [("旗舰", "faction_id == '中国'"),
 
 `ctl.projection(x)` accepts **either** a checkpoint (projected on the fly) **or** an existing
 `--index` directory; `ships()` / `cities()` / `buildings()` / `roster()` all take `index_dir=` too.
+
+### 角色轴（`ship_role` / `default_role`）是**三值字符串枚举**
+
+第三条风格轴不再是 `true`/`false` 的开关，而是 serde 的 `ShipRole`，JSON 形态就是三个字符串
+（`ctl.ROLES`）：
+
+| 值 | 自动控制派它干什么 |
+|---|---|
+| `"War"` | 战舰：找仗打（接战 / 轰炸 / 殖民）——旧 `false` |
+| `"Freight"` | 运输舰：按积压跑集货路线（`autocontrol::freight`）——旧 `true` |
+| `"Observe"` | **观测舰**：驻在太阳系外缘的引力异常区（MOND）蹲着，喂「掌握度」那条知识渠道（`autocontrol::knowledge`）——MOND 掌握度的**唯一**知识来源 |
+
+三态互斥（一艘舰同一时刻只有一种活），且**都不解除武装**：运输舰 / 观测舰在射程内照样自动开火、
+照样按 `kiting` 姿态软移动。所以 `s.set_role(mine, "Freight")` 是"派它去跑集货"，不是"把它变成民船"。
+喂别的东西（`True` / `1` / `"freighter"`）会被 `_check_role` 在配方期当场拒绝——旧写法在这里
+不会"悄悄还能用"，因为引擎那边已经被 serde 拒了。
 
 ### Recipes: replayable, previewable, byte-stable
 
@@ -274,8 +292,9 @@ Two things worth knowing about the kit's side of `remove`:
   所以逐舰删叶的"落地了没有"以**引擎回执**为准，不以 `--control` 为准。要问「这片叶还在不在」
   用投影的 **`q.control()`**（`idx/control.jsonl`，只列真实存在的叶）——`ships()` 的
   `order_leaf` 就是从那里来的（见下）。
-* ⚠ **角色轴（`ship_freighter`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
-  （按积压定编谁去跑集货路线），所以删掉它是**放手**——AI 下回合可能立刻又写下它的结论，
+* ⚠ **角色轴（`ship_role`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
+  （按积压定编谁去跑集货路线 + 派观测舰去异常区蹲着喂 MOND 掌握度），所以删掉它是**放手**
+  ——AI 下回合可能立刻又写下它的结论，
   而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
   没有这个执行者，删掉就等于回到出厂快照。
 

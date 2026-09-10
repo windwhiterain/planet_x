@@ -169,8 +169,11 @@ class PlanetXQ:
         """**控制面的 tidy 行**：一行一个叶片（`kind`/`key`/`sub`/`value`/`mode`）。
 
         `mode` 是叶片自己的三态表态（`Player`/`Auto`/`Inherit`），**不是**有效归属；
-        舰的有效指令看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` 列
-        （引擎解析，别自己重算链）。`sub` 只对权重叶有意义（城内建筑下标）。
+        舰的有效指令/风格/角色看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` /
+        `role` 列（引擎解析，别自己重算链）。`role` 是**三值字符串**（`"War"` 战舰 /
+        `"Freight"` 运输舰 / `"Observe"` 观测舰）——旧列名 `freighter` 是布尔，已随
+        `ShipRole` 改名，同一行的 `role_mode` 是那片叶的有效归属。
+        `sub` 只对权重叶有意义（城内建筑下标）。
         """
         return self.derived("control", round)
 
@@ -216,7 +219,19 @@ class PlanetXQ:
     def factions(self, round: int | None = None) -> pd.DataFrame:
         """Factions per round: identity + 库存(resources) + 外交(relations) + 自有城/舰清单。
         ``relations``/``resources``/``city_ids``/``ship_ids`` stay dict- / list-valued cells
-        (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read)."""
+        (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read).
+
+        引擎还在这张表上放了**编队配额**那几列（一行一势力、每回合重算），读它们就不用自己
+        复算自动控制的判据（列级说明见投影的 ``schema.json``）：
+
+        * ``observer_quota`` —— **观测配额**（目标头数，连续量）：本势力该有几艘舰去太阳系外缘的
+          引力异常区蹲着（``autocontrol::knowledge``）；**掌握度到顶 ⇒ 0**（没东西可学了）。
+        * ``observer_count`` —— 此刻**真的在观测**的舰数（有效角色 = ``Observe``）。与配额一起读
+          就能分开「不想学」（配额 0）与「没人可派」（配额 > 0 而这列跟不上）。
+        * ``observer_target`` —— 观测编队的**驻地天体**（``null`` = 异常区里没有候选天体）。
+        * ``mond_ships_in_band`` —— 此刻在异常区里的自己的活舰数（掌握度唯一的知识来源）。
+        * ``freighter_quota`` / ``freighter_count`` —— 集货那条同形的一对（目标条数 / 现状条数）。
+        """
         return self.table("factions", round)
 
     def bodies(self) -> pd.DataFrame:
