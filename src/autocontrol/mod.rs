@@ -44,6 +44,7 @@ pub(crate) use blueprints::design_fleets;
 pub(crate) use shipbuilding::{
     choose_loadout, choose_next_class, resolve_loadout, retool_haulers, retool_shipyards,
 };
+pub use shipbuilding::minimum_loadout;
 pub(crate) use style::regulate_styles;
 pub(crate) use tactics::{ai_ship_turn, auto_combat, kiting_dest};
 

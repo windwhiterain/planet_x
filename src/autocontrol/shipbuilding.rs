@@ -328,8 +328,13 @@ impl LoadoutPrefs {
 /// component id. Returns ≤ `ShipSpec::slots` component ids, cumulatively affordable.
 /// `pub(crate)` so `world` can fit the starting / re-seeded / story-granted ships the
 /// same way a shipyard does (a ship's firepower is entirely its fitted modules).
+///
+/// **读的是势力池**（首都集散地）：这是「设计口径」——开局预置舰队、剧情赠舰、设计图生成器
+/// 都问「这个势力觉得什么装得起」。**出厂那一刻的现算走 [`resolve_loadout`]**，
+/// 它把**船坞所在天体**的库存传进来（非首都船坞只能装本地付得起的模块）。
 pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId, class: &str) -> Vec<String> {
-    choose_loadout_prefs(state, config, fid, class, &LoadoutPrefs::default())
+    let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
+    choose_loadout_prefs(state, config, fid, class, &stock, &LoadoutPrefs::default())
 }
 
 /// 同 [`choose_loadout`]，但按一份**设计主题**的偏好选装（AI 的设计图生成器走这条）。
@@ -349,7 +354,8 @@ pub(crate) fn choose_loadout_themed(
     theme: &crate::model::DesignTheme,
 ) -> Vec<String> {
     let margin = config.autocontrol.blueprint_stock_margin;
-    choose_loadout_prefs(state, config, fid, class, &LoadoutPrefs::from_theme(theme, margin))
+    let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
+    choose_loadout_prefs(state, config, fid, class, &stock, &LoadoutPrefs::from_theme(theme, margin))
 }
 
 fn choose_loadout_prefs(
@@ -357,24 +363,36 @@ fn choose_loadout_prefs(
     config: &GameConfig,
     fid: FactionId,
     class: &str,
+    stock: &ResourceMap,
     prefs: &LoadoutPrefs,
 ) -> Vec<String> {
     let slots = config.ship_spec(class).slots as usize;
     if slots == 0 {
         return Vec::new();
     }
-    let Some(f) = state.faction(&fid) else { return Vec::new() };
+    if state.faction(&fid).is_none() {
+        return Vec::new();
+    }
     let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
 
     // Normalized resource abundance by market value in the stockpile.
+    //
+    // **库存一件都没有时不早退**：下面那两条硬保证（至少一件武器、至少一件推进）里的
+    // **推进是平台部件**——「下不了水的船没有意义」。从前这里 `max_ab <= 0` 直接返回空选装，
+    // 于是「船坞所在天体一件库存都没有」会造出一艘**没有推进器的裸舰**：速度 0 ⇒ 永远不能
+    // 当运输舰（`freight_tonnage` = 0）⇒ 运不来模块 ⇒ 更多裸舰。那正是「完全禁止瞬移」把
+    // 消耗按到站点库存上之后最容易踩的**死亡螺旋**（实测 seed 7 / 200 回合全世界 0 舰）。
+    // 现在：靠富集度评分的那一项退化成 0，但**平台兜底照旧生效**（`free_fallback`）。
     let mut max_ab = 0.0f64;
-    for (r, v) in &f.resources {
+    for (r, v) in stock {
         max_ab = max_ab.max(*v * value_of(r));
     }
-    if max_ab <= 1e-9 {
-        return Vec::new();
-    }
-    let abund = |r: &str| f.resources.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0);
+    let abund = |r: &str| {
+        if max_ab <= 1e-9 {
+            return 0.0;
+        }
+        stock.get(r).map(|v| *v * value_of(r) / max_ab).unwrap_or(0.0)
+    };
 
     // 战局感知：交战中的势力更看重武器（武器加分），和平时更偏向防御/支持。
     let at_war = sim::faction_at_war(state, config, &fid);
@@ -415,10 +433,9 @@ fn choose_loadout_prefs(
     // **至少一件推进（硬保证：没有推进就没有速度/加速度，船动不了）**，其余按分数填满
     // （护盾/护甲/点防/辅助是可选的防御与支持，不硬性要求）。
     let mut chosen: Vec<String> = Vec::new();
-    // 可用库存 = 真实库存 × `prefs.stock_scale`（1.0 = 历史行为）。折价只影响"装不装得起"，
-    // 不影响下面的评分（评分里那份 `abund` 用的是**真实**库存的归一化分布）。
-    let mut remaining: ResourceMap = f
-        .resources
+    // 可用库存 = **这一处**的真实库存 × `prefs.stock_scale`（1.0 = 历史行为）。折价只影响
+    // "装不装得起"，不影响下面的评分（评分里那份 `abund` 用的是**真实**库存的归一化分布）。
+    let mut remaining: ResourceMap = stock
         .iter()
         .map(|(k, v)| (k.clone(), v * prefs.stock_scale))
         .collect();
@@ -524,6 +541,38 @@ fn choose_loadout_prefs(
     chosen
 }
 
+/// **一套「最低可用」选装的料** = 最便宜的一件武器 + 最便宜的一件推进（按市场价值，
+/// 与 [`choose_loadout_prefs`] 的兜底同一条判据）。
+///
+/// 它是 [`choose_loadout_prefs`] 那两条硬保证的**料单**：一艘舰至少要有一件武器（攻击力来源）
+/// 和一件推进（速度来源，平台）。所以「一个建造区想下水一艘舰」**至少**要备这么多料——
+/// 这正是 `freight::site_build_need` 里那笔「让它下得了水」的需求，它让补给腿知道
+/// **船坞所在天体**也缺东西（只有在建建筑的料单会漏掉这一整类需求：实测 seed 7 / 200 回合
+/// 全世界的船坞因为本地没有船体料而集体停产，最终 **0 舰**）。
+pub fn minimum_loadout(config: &GameConfig) -> ResourceMap {
+    let value_of = |r: &str| config.resources.get(r).map(|rr| rr.value).unwrap_or(1.0);
+    let cheapest = |cat: &str| -> Option<&crate::model::ComponentSpec> {
+        config
+            .components
+            .values()
+            .filter(|cs| cs.category == cat)
+            .min_by(|a, b| {
+                let va: f64 = a.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+                let vb: f64 = b.cost.iter().map(|(r, c)| c * value_of(r)).sum();
+                va.total_cmp(&vb)
+            })
+    };
+    let mut out = ResourceMap::new();
+    for cat in ["weapon", "thrust"] {
+        if let Some(cs) = cheapest(cat) {
+            for (r, c) in &cs.cost {
+                *out.entry(r.clone()).or_insert(0.0) += *c;
+            }
+        }
+    }
+    out
+}
+
 /// **出厂选装的唯一入口**：有设计图就按图装配，没有（或图没写选装）就走生成器。
 ///
 /// 两条路（`.agents/notes/ship-blueprint-spec.md` §2.4 + 本轮 `autocontrol::blueprints`）：
@@ -543,12 +592,17 @@ fn choose_loadout_prefs(
 /// ⚠ 本函数是**纯读**的：它不改状态、不消费 RNG。选装算在哪一刻是设计的一部分——
 /// AI 的设计图在**回合步进里**（`autocontrol::blueprints`）按当时的库存算好并落进图里，
 /// 于是"这张图造一艘要什么模块"是可读的；没有图时则仍是**出厂那一刻**现算（旧行为）。
+///
+/// ⚠ **`stock` = 出厂城所在天体的库存**（由 `spawn_ship` 按 [`State::stock_at`] 取：
+/// 首都 ⇒ 池子、其余 ⇒ 本地货栈）。只有"没有图"那条路用它——图上的选装是**设计者写死的
+/// 规格**，不由库存决定（买不起就不下水，见 `blueprint_launch_blocked`）。
 pub(crate) fn resolve_loadout(
     state: &State,
     config: &GameConfig,
     fid: FactionId,
     class: &str,
     blueprint: Option<&BlueprintId>,
+    stock: &ResourceMap,
 ) -> Vec<String> {
     if let Some(id) = blueprint {
         if let Some(leaf) = state.control(fid.clone()).and_then(|c| c.blueprints.get(id)) {
@@ -557,7 +611,7 @@ pub(crate) fn resolve_loadout(
             }
         }
     }
-    choose_loadout(state, config, fid, class)
+    choose_loadout_prefs(state, config, fid.clone(), class, stock, &LoadoutPrefs::default())
 }
 
 /// 威胁响应（海军随威胁重构）：交战中，若某势力的舰队被单一舰型统治（占比 > `over_share`），

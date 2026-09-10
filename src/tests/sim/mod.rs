@@ -14,6 +14,7 @@ mod governance;
 mod haul;
 mod ideology;
 mod mond;
+mod site_supply;
 mod story;
 
 mod horizon_mid;

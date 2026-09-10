@@ -17,10 +17,21 @@ pub(crate) fn read_budget(
     fid: FactionId,
     kind: BudgetKind,
 ) -> (ResourceMap, Vec<(String, ControlMode)>) {
-    let stockpile: ResourceMap = state
+    // **预算的基数 = 势力的全部实物**（首都池 + 各处产地货栈），不是只有池子那一份。
+    //
+    // 消耗侧改成「首都 ⇒ 池子、其余 ⇒ 本地货栈」之后（完全禁止瞬移），**只有池子**当基数
+    // 会让「矿全在殖民地货栈里、池子空着」的势力把预算算成 0——它不是没钱，是钱在别的星球上。
+    // 反过来，预算大也不等于能凭空花：每座城还各自被**本地库存**卡一道
+    //（`sim::site_affordable`），所以这一条只决定「这个月愿意投多少」，决定不了「买不买得起」。
+    let mut stockpile: ResourceMap = state
         .faction(&fid)
         .map(|f| f.resources.clone())
         .unwrap_or_default();
+    for (_, m) in state.depots.iter().filter(|((f, _), _)| f == &fid) {
+        for (rt, amt) in m {
+            *stockpile.entry(rt.clone()).or_insert(0.0) += amt;
+        }
+    }
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
     let stock_value: f64 = stockpile.iter().map(|(k, v)| v * value_of(k)).sum();
     // 造舰的「维护费保留」：自动指挥势力在投入造舰预算前，先从库存里预留 `upkeep ×

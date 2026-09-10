@@ -327,14 +327,17 @@ impl ContractState {
         before - self.assignments.len()
     }
 
-    /// 某人挂出、**还没人接**、且起运地是 `from` 的那张单（可改成此刻的缺口）。
+    /// 某人挂出、**还没人接**、且跑的是**同一条腿**（`from` → `to`）的那张单（可改成此刻的缺口）。
     ///
-    /// 一处货栈**只有一张未接单**：它是**需求信号**（我这条线缺多少运力），不是报价单；
+    /// 一条腿**只有一张未接单**：它是**需求信号**（我这条腿缺多少运力），不是报价单；
     /// 挂成一片只会让同一份缺口被反复请人。已接单的不在这里（那是承诺，改不得）。
-    pub fn open_mut(&mut self, shipper: &str, from: &str) -> Option<&mut Contract> {
+    ///
+    /// ⚠ 键是**整条腿** `(from, to)` 而不只是起运地：两条**进口腿**都以首都为起点
+    /// （`首都 → 甲站`、`首都 → 乙站`），只按 `from` 找会让它们互相认错。
+    pub fn open_mut(&mut self, shipper: &str, from: &str, to: &str) -> Option<&mut Contract> {
         self.contracts
             .iter_mut()
-            .find(|c| c.shipper == shipper && c.from == from && c.is_open())
+            .find(|c| c.shipper == shipper && c.from == from && c.to == to && c.is_open())
     }
 
     /// 某人**挂出且还开着**的单子（等人接的）。

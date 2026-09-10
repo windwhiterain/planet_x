@@ -93,6 +93,9 @@ pub fn build_city(
     let mut buildings: Vec<Building> = state.city(&cid).expect("city gone").buildings.clone();
     let population = state.city(&cid).map(|c| c.population as f64).unwrap_or(0.0);
     let labor = labor_ratio(state, config, &cid);
+    // 这座城市**所在的天体**：本回合一切实物消耗（建楼 / 造舰 / 装模块）都只从
+    // [`State::stock_at`] 提货——首都天体是池子，其余天体是本地货栈。
+    let body_id = state.city(&cid).map(|c| c.body_id.clone()).unwrap_or_default();
 
     pub fn new_b(id: BuildingId, kind: &str, resource: Option<String>, ship_type: Option<String>, structure: &str, area: f64, deployed: f64, config: &GameConfig) -> Building {
         let armor = deployed * config.structure_spec(structure).armor_per_area;
@@ -210,12 +213,16 @@ pub fn build_city(
         let per_area = per_area_cost(config, spec, res_mod, b);
         let speed = spec.construction_speed * speed_mod * spec.productivity * labor;
         let desired = (b.area - b.deployed).min(speed);
+        // **两个上限缺一不可**：预算是「这个月愿意花多少」（势力级速率），
+        // 站点库存是「这座城市手上有没有这些货」（**首都 ⇒ 池子、其余 ⇒ 产地货栈**）。
+        // 后者就是「完全禁止瞬移」的落点：非首都天体上没有的货，只能靠船运过去。
         let inc = max_affordable_inc(&per_area, invest_limit, inv_spent, desired);
+        let inc = site_affordable(state, &fid, &body_id, &per_area, inc);
         if inc <= 1e-6 {
             continue;
         }
         let cost: Vec<(String, f64)> = per_area.iter().map(|(rt, c)| (rt.clone(), *c * inc)).collect();
-        commit_spend(state, &fid, inv_spent, &cost);
+        commit_spend(state, &fid, &body_id, inv_spent, &cost);
         b.deployed += inc;
     }
 
@@ -292,7 +299,6 @@ pub fn build_city(
     // The construction budget is a per-round rate: it funds ship progress
     // incrementally (cost-per-progress × increment). A class completes a ship
     // once it has accrued `build_points`, at the city level.
-    let body_id = state.city(&cid).map(|c| c.body_id.clone()).unwrap_or_default();
     let body_pos = state.body_position(&body_id);
     let mut to_write_progress = city_progress;
     for (cls, rate, _) in &classes {
@@ -300,12 +306,14 @@ pub fn build_city(
         let bp = spec.build_points;
         let launch_blueprint = class_blueprint.get(cls).cloned().flatten();
         let per_progress: Vec<(String, f64)> = spec.build_cost.iter().map(|(rt, c)| (rt.clone(), c / bp)).collect();
+        // 造舰与建楼同一条纪律：预算速率 × **本站点库存**（船坞在哪颗星，钢材就得在哪颗星）。
         let increment = max_affordable_inc(&per_progress, con_limit, con_spent, *rate).max(0.0);
+        let increment = site_affordable(state, &fid, &body_id, &per_progress, increment);
         if increment <= 1e-9 {
             continue;
         }
         let cost: Vec<(String, f64)> = per_progress.iter().map(|(rt, c)| (rt.clone(), *c * increment)).collect();
-        commit_spend(state, &fid, con_spent, &cost);
+        commit_spend(state, &fid, &body_id, con_spent, &cost);
         *to_write_progress.entry(cls.clone()).or_insert(0.0) += increment;
         // Spawn ships as their build points fill (the cost was paid as progress).
         // On launch, the ship is fitted with a deterministic component loadout chosen
@@ -323,7 +331,7 @@ pub fn build_city(
             // （投影蓝图表 `launch_waiting` 列：这座城市这个舰级的进度已经满了却没下水）。
             // `Auto` 图与无图**保持旧行为**（生成器自己保证买得起），所以长局基线不必重标。
             if let Some(id) = launch_blueprint.as_ref() {
-                if blueprint_launch_blocked(state, config, &fid, id, cls) {
+                if blueprint_launch_blocked(state, config, &fid, id, cls, &body_id) {
                     break;
                 }
             }
@@ -365,16 +373,19 @@ pub fn build_city(
 /// 这个建造区的图**此刻**是否让下水停摆（用户裁决 Q4(b)：玩家写的图买不起就不下水、
 /// 进度继续攒）。
 ///
-/// **只对 `Player` 归属的图生效**：`Auto` 图与无图保持旧行为（生成器自己保证买得起、
-/// `commit_spend` 照旧钳零），所以长局基线不必重标。
+/// **只对 `Player` 归属的图生效**：`Auto` 图保持旧行为（生成器的选装本来就是按**站点**
+/// 库存算的，见 `choose_loadout`），所以长局基线不必重标。
 ///
-/// `components` 为空 = 「交给生成器」⇒ 同样按旧行为（生成器的选装本来就是按库存算的）。
+/// `components` 为空 = 「交给生成器」⇒ 同样按旧行为。
+/// **判据读的是 `body` 那处的库存**（[`State::stock_at`]）：首都天体是池子、其余是本地货栈
+/// ——船坞在哪儿，模块的钱就在哪儿付。
 pub fn blueprint_launch_blocked(
     state: &State,
     config: &GameConfig,
     fid: &str,
     id: &BlueprintId,
     class: &str,
+    body: &str,
 ) -> bool {
     if !state.blueprint_control(&fid.to_string(), id).is_player() {
         return false;
@@ -402,11 +413,9 @@ pub fn blueprint_launch_blocked(
             *need.entry(r.clone()).or_insert(0.0) += *amt;
         }
     }
-    let Some(f) = state.faction(fid) else {
-        return true;
-    };
+    let stock = state.stock_at(fid, body);
     need.iter()
-        .any(|(r, amt)| f.resources.get(r).copied().unwrap_or(0.0) < *amt - 1e-9)
+        .any(|(r, amt)| stock.and_then(|m| m.get(r)).copied().unwrap_or(0.0) < *amt - 1e-9)
 }
 
 /// 这张图此刻是否**在等钱**：挂了它的建造区所在城里，这个舰级的进度已经攒够

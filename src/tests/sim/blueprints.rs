@@ -120,8 +120,9 @@ fn the_yard_launches_from_any_designs_components() {
         None,
         ControlMode::Auto,
     );
+    let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
     assert_eq!(
-        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:custom".to_string())),
+        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:custom".to_string()), &site),
         vec!["plasma".to_string(), "ion_drive".to_string()],
         "`Auto` 图的选装必须真的生效（否则 AI 建图只是空头支票）"
     );
@@ -142,8 +143,9 @@ fn the_yard_launches_from_any_designs_components() {
         None,
         ControlMode::Auto,
     );
+    let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
     assert_eq!(
-        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:empty".to_string())),
+        crate::autocontrol::resolve_loadout(&state, &config, fid.clone(), &class, Some(&"auto:empty".to_string()), &site),
         crate::autocontrol::choose_loadout(&state, &config, fid.clone(), &class),
         "空选装 = 交给生成器（与归属无关）"
     );
@@ -170,12 +172,14 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
         ControlMode::Auto,
     );
     // 同一时点的生成器答案（`spawn_ship` 内部就是走它——不许另写一份）。
+    let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
     let expected = crate::autocontrol::resolve_loadout(
         &state,
         &config,
         fid.clone(),
         &class,
         Some(&"auto:corvette".to_string()),
+        &site,
     );
     assert_eq!(
         expected,
@@ -185,23 +189,31 @@ fn auto_blueprint_uses_choose_loadout_at_launch() {
     let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("auto:corvette"));
     assert_eq!(state.ship(&name).unwrap().components, expected, "出厂用的是当场算出来的选装");
 
-    // **没有提前缓存**：把库存掏空之后再下水，生成器给出空选装（裸舰）——若选装是在
-    // 回合步进里预生成的，这里就会拿到上一回合那份。
+    // **没有提前缓存**：把库存掏空之后再算，生成器给不出完整选装——只剩**平台兜底**的那件
+    // 推进器（「至少一件推进」是硬保证：没有推进器的舰速度 0、永远不能当运输舰，那是
+    // 「完全禁止瞬移」下最容易踩的死亡螺旋，见 `choose_loadout_prefs` 的注释）。
+    // 若选装是在回合步进里预生成的，这里就会拿到上一回合那份完整的选装。
     if let Some(f) = state.faction_mut(&fid) {
         for v in f.resources.values_mut() {
             *v = 0.0;
         }
     }
-    assert_eq!(
-        crate::autocontrol::resolve_loadout(
-            &state,
-            &config,
-            fid.clone(),
-            &class,
-            Some(&"auto:corvette".to_string())
-        ),
-        Vec::<String>::new(),
-        "库存掏空 ⇒ 生成器给空选装（证明它是**出厂那一刻**算的）"
+    let site = state.stock_at(&fid, "地球").cloned().unwrap_or_default();
+    let empty_stock = crate::autocontrol::resolve_loadout(
+        &state,
+        &config,
+        fid.clone(),
+        &class,
+        Some(&"auto:corvette".to_string()),
+        &site,
+    );
+    assert!(
+        empty_stock.len() < expected.len() && empty_stock.len() <= 1,
+        "库存掏空 ⇒ 只剩平台兜底（证明它是**出厂那一刻**算的）：{empty_stock:?} vs {expected:?}"
+    );
+    assert!(
+        empty_stock.iter().all(|c| config.component_spec(c).category == "thrust"),
+        "兜底只给**平台**（推进器）：买不起的军备绝不白送，实为 {empty_stock:?}"
     );
 }
 

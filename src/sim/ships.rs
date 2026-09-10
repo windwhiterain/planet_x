@@ -29,8 +29,19 @@ pub struct ShipSpawn<'a> {
 /// 确定性：`choose_loadout` / `ship_display_name` 都无 RNG，`ship_name_seq` 单调递增，
 /// 故本漏斗不改变模拟的随机数流。**设计图只改「装什么」**：无图（旧档、预置舰队、剧情赠舰）
 /// 与 `Auto` 图都走**同一个** `choose_loadout`、**同一时点**（出厂那一刻按当时库存算）。
+///
+/// **「当时库存」= 出厂城所在天体的库存**（[`State::stock_at`]：首都 ⇒ 池子、其余 ⇒ 货栈）：
+/// 选装与付款读的是**同一处**，所以「选了装不起的模块、`commit_spend` 钳零白送」这条
+/// 凭空造物的路被堵死（没有城的天体级下水——剧情赠舰 / 重建种子舰——算在首都）。
 pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -> ShipId {
-    let components = autocontrol::resolve_loadout(state, config, spec.owner.clone(), spec.class, spec.blueprint);
+    let site: BodyId = spec
+        .city
+        .as_ref()
+        .and_then(|c| state.city(c).map(|c| c.body_id.clone()))
+        .unwrap_or_else(|| state.capital_body(&spec.owner));
+    let stock: ResourceMap = state.stock_at(&spec.owner, &site).cloned().unwrap_or_default();
+    let components =
+        autocontrol::resolve_loadout(state, config, spec.owner.clone(), spec.class, spec.blueprint, &stock);
     let class = spec.class.to_string();
     let cspec = config.ship_spec(&class);
     // 舰名 = 从本势力名字库确定性取的一个唯一名（名字即唯一 key，击毁后不复用）。
@@ -74,7 +85,7 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
             .flat_map(|c| config.component_spec(c).cost.clone())
             .collect();
         let mut spent: ResourceMap = ResourceMap::new();
-        commit_spend(state, &spec.owner, &mut spent, &comp_cost);
+        commit_spend(state, &spec.owner, &site, &mut spent, &comp_cost);
     }
     ev(state, GameEvent::ShipSpawned {
         ship: name.clone(),

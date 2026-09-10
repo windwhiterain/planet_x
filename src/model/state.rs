@@ -210,6 +210,48 @@ impl State {
         taken.max(0.0)
     }
 
+    /// **某势力在某天体手上能直接动用的实物**——本作「即时可用库存」的**唯一读法**。
+    ///
+    /// * **首都天体** ⇒ [`Faction::resources`]（**势力池** = 首都集散地手上的现货）；
+    /// * **其余天体** ⇒ 该处的**产地货栈**（本地产出 + 运进来的补给）。
+    ///
+    /// 这一个是把 `.agents/notes/freight-collection.md` §2 的公理（首都即集散地）兑现成
+    /// **唯一路径**的落点：非首都天体手上没有的东西，**只能靠船运过去**——消耗
+    /// （建楼 / 造舰 / 装模块）与运输（装船）都只读它、只写它，不存在第二条
+    /// 「从池子里直接扣到别人家门口」的路（用户裁决：**完全禁止瞬移**）。
+    pub fn stock_at(&self, fid: &str, body: &str) -> Option<&ResourceMap> {
+        if self.capital_body(fid) == body {
+            return self.faction(fid).map(|f| &f.resources);
+        }
+        self.depot(fid, body)
+    }
+
+    /// [`State::stock_at`] 的**总件数**（那里什么都没有 ⇒ 0）。
+    pub fn stock_units_at(&self, fid: &str, body: &str) -> f64 {
+        self.stock_at(fid, body).map(|m| m.values().sum()).unwrap_or(0.0)
+    }
+
+    /// 从 [`State::stock_at`] 提走一笔（装船 / 建造消耗），返回**实际提走的量**
+    /// （0 = 那里没有这种货；请求量超过存量就提光）。
+    pub fn stock_take(&mut self, fid: &str, body: &str, resource: &str, amount: f64) -> f64 {
+        if amount <= 0.0 {
+            return 0.0;
+        }
+        if self.capital_body(fid) == body {
+            let Some(f) = self.factions.iter_mut().find(|f| f.name == fid) else {
+                return 0.0;
+            };
+            let got = f.resources.get(resource).copied().unwrap_or(0.0).min(amount);
+            if got > 0.0 {
+                if let Some(x) = f.resources.get_mut(resource) {
+                    *x -= got;
+                }
+            }
+            return got.max(0.0);
+        }
+        self.depot_take(fid, body, resource, amount)
+    }
+
     /// 某势力货栈里**所有天体**的存货总价值（按 `value_of` 计价）。
     /// 这是「冻结在产地、还没运回首都」的那部分资产——观察面用它，
     /// 也是「无船势力库存冻结」这一机制的可读信号。

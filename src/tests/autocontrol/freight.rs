@@ -33,6 +33,24 @@ fn set_ideology(state: &mut State, fid: &str, military: f64, colony: f64) {
     f.ideology.nature_colony = colony;
 }
 
+/// **把用例钉在「只有出口腿」的世界里**（新语义下做机制用例的前置）。
+///
+/// 改成两条腿之后，一个世界**同时**有两类腿，做单元用例时必须把另一类隔开：
+/// * **清空首都池** ⇒ `lanes` 里进口腿一条都不成立（首都拿不出货 ⇒ 「有货才派」）；
+/// * 货放在**本势力没有城的天体**上 ⇒ 那里没有建设需求、保留量为 0 ⇒ 全部是可运走的净剩余。
+///
+/// 于是「一处货栈 = 一条出口腿」，用例可以照旧数腿；进口腿与保留量的守卫各写各的
+/// （`the_hub_supplies_the_yard_and_the_site_never_ships_back_what_it_needs`）。
+fn export_only(state: &mut State, fid: &str, depots: &[&str], amount: f64) {
+    for f in state.factions.iter_mut() {
+        f.resources.clear();
+    }
+    state.depots.clear();
+    for b in depots {
+        state.depot_add(fid, b, "碳", amount);
+    }
+}
+
 /// 把某势力的舰队克隆 `times` 倍（名字加后缀）——用例需要一支**够大的**舰队，
 /// 否则「按比例投几条腿」会被舰队规模顶住，看不出思潮的差别。
 fn grow_fleet(state: &mut State, fid: &str, times: usize) {
@@ -64,41 +82,61 @@ fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> 
     hist
 }
 
-/// **定编 = 有积压的货栈数**，且它随积压清空自动归零（船自然改回战舰）。
+/// **定编 = 有货要动的腿按活量折算成的头数**（出口 + 进口），且它随货搬完自动归零。
+///
+/// 世界开局的基准不是 0：每个**建造区**都要常备一套最低可用选装（`site_standing`），
+/// 所以「进口腿」从第一回合起就有——这是**故意**的（船坞手里该有装得出一艘能动的船的料）。
 #[test]
 fn crew_size_is_one_ship_per_stocked_depot() {
-    let (_config, mut state) = fresh(42);
+    let (config, mut state) = fresh(42);
     state.depots.clear();
-    assert_eq!(needed_freighters(&state, "中国"), 0, "没有积压就没有运输舰");
-    state.depot_add("中国", "金星", "碳", 1.0);
-    assert_eq!(needed_freighters(&state, "中国"), 1, "一处积压配一条船");
-    state.depot_add("中国", "水星", "铁", 1.0);
-    assert_eq!(needed_freighters(&state, "中国"), 2, "两处积压配两条船");
-    // 清空积压 ⇒ 定编回 0（「积压清空那艘船就改回战舰」的机制落点）。
+    let baseline = needed_haulers(&state, &config, "中国");
+    assert!(baseline > 0.0, "每个建造区常备一套选装 ⇒ 开局就有进口腿（实为 {baseline:.2}）");
+    // **首都没有货 ⇒ 进口腿一条都不成立**（「有货才派」，与出口侧「有净剩余才派」同一条纪律）。
+    let mut dry = state.clone();
+    for f in dry.factions.iter_mut() {
+        f.resources.clear();
+    }
+    assert_eq!(needed_haulers(&dry, &config, "中国"), 0.0, "首都拿不出货 ⇒ 不派船");
+    // 出口腿：往**没有城的天体**放货（那里没有建设需求 ⇒ 全是净剩余）。
+    export_only(&mut state, "中国", &["冥王星", "卡戎"], 100.0);
+    assert_eq!(needed_haulers(&state, &config, "中国"), 2.0, "两处净剩余 = 两条腿 = 两艘船");
+    // 一处搬空 ⇒ 那条腿自然消失（「积压清空那艘船就改回战舰」的机制落点）。
     state.depots.clear();
-    assert_eq!(needed_freighters(&state, "中国"), 0);
+    state.depot_add("中国", "冥王星", "碳", 100.0);
+    assert_eq!(needed_haulers(&state, &config, "中国"), 1.0);
+    // **涓流腿只分到几分之一艘船**：1 件货 ≠ 一整艘（见 `needed_haulers` 的注释）。
+    state.depots.clear();
+    state.depot_add("中国", "冥王星", "碳", 1.0);
+    let trickle = needed_haulers(&state, &config, "中国");
+    assert!(
+        trickle > 0.0 && trickle < 1.0,
+        "1 件货只该分到几分之一艘（实为 {trickle:.3}）"
+    );
 }
 
-/// **抽签分布 = 积压占比**（用户裁决）：两处货栈积压 3:1 时，多条舰抽出来的比例要贴近 3:1。
+/// **抽签分布 = 每条腿的货量占比**（用户裁决）：两处货栈积压 3:1 时，多条舰抽出来的比例要贴近 3:1。
 ///
 /// 这里直接验证机制而不跑模拟：同一回合里换舰名掷骰子，看落点分布。
+/// 两处都放**没有城的天体**上，并把首都池清空 ⇒ 表里只剩这两条**出口腿**
+/// （保留量的抵扣、进口腿各有自己的守卫，本用例测的只有抽签本身）。
 #[test]
 fn route_lottery_is_proportional_to_the_backlog() {
-    let (_config, mut state) = fresh(42);
-    state.depots.clear();
-    state.depot_add("中国", "金星", "碳", 30.0);
-    state.depot_add("中国", "水星", "铁", 10.0);
+    let (config, mut state) = fresh(42);
+    export_only(&mut state, "中国", &["冥王星", "卡戎"], 0.0);
+    state.depot_add("中国", "冥王星", "碳", 30.0);
+    state.depot_add("中国", "卡戎", "铁", 10.0);
     let mut hits = std::collections::BTreeMap::<String, usize>::new();
     for i in 0..4000 {
         let ship = format!("抽签舰{i}");
-        if let Some((from, _)) = route_for(&state, "中国", &ship) {
+        if let Some((from, _)) = route_for(&state, &config, "中国", &ship) {
             *hits.entry(from).or_insert(0) += 1;
         }
     }
-    let venus = hits.get("金星").copied().unwrap_or(0) as f64;
-    let mercury = hits.get("水星").copied().unwrap_or(0) as f64;
-    assert!(venus + mercury > 3900.0, "每艘舰都该抽到一处：{hits:?}");
-    let ratio = venus / mercury;
+    let pluto = hits.get("冥王星").copied().unwrap_or(0) as f64;
+    let charon = hits.get("卡戎").copied().unwrap_or(0) as f64;
+    assert!(pluto + charon > 3900.0, "每艘舰都该抽到一处：{hits:?}");
+    let ratio = pluto / charon;
     assert!(
         (2.6..3.4).contains(&ratio),
         "积压 3:1 ⇒ 抽中比例应贴近 3:1，实为 {ratio:.2}（{hits:?}）"
@@ -346,10 +384,8 @@ fn the_effective_role_follows_the_leaf_then_the_fleet_default_then_the_record() 
 fn ideology_decides_how_much_of_the_fleet_hauls() {
     let (config, base) = fresh(42);
     let stock_four = |st: &mut State| {
-        st.depots.clear();
-        for b in ["金星", "水星", "火星", "木星"] {
-            st.depot_add("中国", b, "碳", 100.0);
-        }
+        // 四个**没有城**的天体 + 清空首都池 ⇒ 正好四条**出口腿**（进口腿与保留量都不掺进来）。
+        export_only(st, "中国", &["冥王星", "卡戎", "土星", "泰坦"], 100.0);
     };
     let mean_headcount = |mil: f64, col: f64| -> f64 {
         let mut st = base.clone();
@@ -359,8 +395,7 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
         let hist = run_roles(&mut st, &config, "中国", 120);
         hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64
     };
-
-    // 中庸（尚武度 0）⇒ 倍数**恰好** 1.0：`2σ(0) = 1` ⇒ 目标头数 = 需求 = 4 处货栈。
+    // 中庸（尚武度 0）⇒ 倍数**恰好** 1.0：`2σ(0) = 1` ⇒ 目标头数 = 需求 = 4 条出口腿。
     let mut neutral_state = base.clone();
     set_ideology(&mut neutral_state, "中国", 0.0, 0.0);
     stock_four(&mut neutral_state);
@@ -369,7 +404,7 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
         "中庸必须回到旧硬定编（倍数 1.0），实为 {}",
         freight_lean(&neutral_state, "中国")
     );
-    assert!((freighter_quota(&neutral_state, "中国") - 4.0).abs() < 1e-12);
+    assert!((freighter_quota(&neutral_state, &config, "中国") - 4.0).abs() < 1e-12);
 
     let militarist = mean_headcount(1.0, 0.0);
     let neutral = mean_headcount(0.0, 0.0);
@@ -404,8 +439,8 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
 #[test]
 fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let (config, mut state) = fresh(42);
-    state.depots.clear();
-    state.depot_add("中国", "金星", "碳", 100.0);
+    // 出口腿（无城天体）——进口腿与保留量各有自己的守卫。
+    export_only(&mut state, "中国", &["冥王星"], 100.0);
     // 角色是**掷骰**定的（有积压只是「有人去运」的概率高），所以这里跑几个回合而不是一个：
     // 这正是与旧版硬定编的行为差别，用例必须照新语义写，而不是照旧结论写。
     let mut rng = crate::prng::Prng::new(42);
@@ -423,11 +458,15 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
         "运输舰该有一条路线，实为 {:?}",
         state.ship_behavior(hauler.clone())
     );
-    // 积压清空 + 舱里也没货 ⇒ 名额收回。这里**每回合都清货栈**（模拟里金星会当期产出新的碳、
-    // 货栈立刻又有货——那是正确行为，不是这个用例要测的事）。
+    // 积压清空 + 舱里也没货 ⇒ 名额收回。这里**每回合都清货栈与首都池**（模拟里城会当期
+    // 产出新的货、货栈立刻又有货，而池子里有货就会开出进口腿——那都是正确行为，
+    // 不是这个用例要测的事）。
     let mut recalled = false;
     for _ in 0..20 {
         state.depots.clear();
+        for f in state.factions.iter_mut() {
+            f.resources.clear();
+        }
         for s in state.ships.iter_mut() {
             s.cargo.clear();
         }
@@ -455,14 +494,12 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
         let mut st = base.clone();
         set_ideology(&mut st, "中国", mil, col);
         grow_fleet(&mut st, "中国", 3);
-        st.depots.clear();
-        for b in depots {
-            st.depot_add("中国", b, "碳", 100.0);
-        }
+        // 只留**出口腿**（无城天体 + 空首都池）⇒ 配额正好是「腿数 × 思潮倍数」。
+        export_only(&mut st, "中国", depots, 100.0);
         st
     };
     // 1) 头数围着目标（4）站住，不会在两极之间摆。
-    let mut st = setup(0.0, 0.0, &["金星", "水星", "火星", "木星"]);
+    let mut st = setup(0.0, 0.0, &["冥王星", "卡戎", "土星", "泰坦"]);
     let hist = run_roles(&mut st, &config, "中国", 200);
     // 整数配额（需求 4 × 中庸 1.0）⇒ 头数该贴着 4（±1 的呼吸，而不是两极震荡）。
     let in_band = hist.iter().filter(|r| (3..=5).contains(&r.len())).count();
@@ -486,8 +523,8 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
     // 3) 没有积压 ⇒ 全员战舰；新积压一出现 ⇒ 几回合内补得上（不是「一旦改成战舰就回不去」）。
     let mut st = setup(0.0, 0.0, &[]);
     run_roles(&mut st, &config, "中国", 10);
-    assert!(roster(&st, "中国").is_empty(), "没有积压 ⇒ 谁都不该占着运输舰的名额");
-    st.depot_add("中国", "金星", "碳", 100.0);
+    assert!(roster(&st, "中国").is_empty(), "没有货要动 ⇒ 谁都不该占着运输舰的名额");
+    st.depot_add("中国", "冥王星", "碳", 100.0);
     let mut waited = 0;
     for _ in 0..20 {
         st.round += 1;
@@ -500,13 +537,14 @@ fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
     assert!(waited <= 10, "新积压该在几回合内被顶上（实为 {waited} 回合）");
 }
 
-/// **续用现有路线**：货栈还有货时不改道（常驻路线不抖动）；货栈空了才重掷。
+/// **续用现有路线**：这条腿还有活时不改道（常驻路线不抖动）；没活了才重掷。
 #[test]
 fn an_existing_route_is_kept_while_it_still_has_cargo() {
-    let (_config, mut state) = fresh(42);
-    state.depots.clear();
-    state.depot_add("中国", "金星", "碳", 5.0);
-    state.depot_add("中国", "水星", "铁", 500.0); // 积压大变（若重掷，几乎必去水星）
+    let (config, mut state) = fresh(42);
+    // 两条出口腿（无城天体 ⇒ 保留量为 0，存货全是净剩余）；只有出口腿，抽签结论才唯一。
+    export_only(&mut state, "中国", &[], 0.0);
+    state.depot_add("中国", "冥王星", "碳", 5.0);
+    state.depot_add("中国", "卡戎", "铁", 500.0); // 积压大变（若重掷，几乎必去卡戎）
     let ship = state
         .ships
         .iter()
@@ -514,7 +552,7 @@ fn an_existing_route_is_kept_while_it_still_has_cargo() {
         .unwrap()
         .name
         .clone();
-    // 先给这艘舰写一条去金星的路线。
+    // 先给这艘舰写一条去冥王星的路线。
     state
         .control_mut("中国".to_string())
         .unwrap()
@@ -522,16 +560,16 @@ fn an_existing_route_is_kept_while_it_still_has_cargo() {
         .insert(
             ship.clone(),
             Control::auto(ShipBehavior::Haul {
-                from: "金星".to_string(),
+                from: "冥王星".to_string(),
                 to: "地球".to_string(),
             }),
         );
-    let picked = route_for(&state, "中国", &ship).unwrap();
-    assert_eq!(picked.0, "金星", "金星还有货 ⇒ 续用现有路线，不按积压重掷");
-    // 金星清空 ⇒ 才重掷（这次必然去水星，因为只剩它一处）。
-    state.depots.remove(&("中国".to_string(), "金星".to_string()));
-    let picked = route_for(&state, "中国", &ship).unwrap();
-    assert_eq!(picked.0, "水星", "原路线没货了 ⇒ 重新抽签");
+    let picked = route_for(&state, &config, "中国", &ship).unwrap();
+    assert_eq!(picked.0, "冥王星", "那条腿还有货 ⇒ 续用现有路线，不按货量重掷");
+    // 冥王星清空 ⇒ 才重掷（这次必然去卡戎，因为只剩它一处）。
+    state.depots.remove(&("中国".to_string(), "冥王星".to_string()));
+    let picked = route_for(&state, &config, "中国", &ship).unwrap();
+    assert_eq!(picked.0, "卡戎", "原路线没货了 ⇒ 重新抽签");
 }
 
 // --- 雇佣挂单（雇主的缺口口径）---------------------------------------------
@@ -546,13 +584,14 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
     let (config, mut state) = fresh(42);
     state.ships.retain(|s| s.faction_id != "中国"); // 中国的船全没了 ⇒ 自有运力 0
     let gap_at = |state: &mut State, hired: f64| -> f64 {
-        state.depots.clear();
+        // 只留**出口腿**（清空首都池 ⇒ 不开进口腿），并只看**那一条腿**上的未接单——
+        // 两条腿之后，簿子上会同时有出口与进口的单子，求和会把两个方向混在一起。
+        export_only(state, "中国", &["冥王星"], 100.0);
         state.contracts.contracts.clear();
-        state.depot_add("中国", "金星", "碳", 100.0);
         if hired > 0.0 {
             // 一张**已接单**的合同，承诺了 `hired` 的运力（它就该顶掉缺口）。
             let id = state.contracts.post(
-                "中国".into(), "碳".into(), hired, "金星".into(), "地球".into(), 0.1, 0, 0.0,
+                "中国".into(), "碳".into(), hired, "冥王星".into(), "地球".into(), 0.1, 0, 0.0,
             );
             let c = state.contracts.get_mut(id).unwrap();
             c.carrier = Some("美国".into());
@@ -560,7 +599,13 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             c.expires_round = 99;
         }
         post_contracts(state, &config);
-        state.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum()
+        state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.is_open() && c.from == "冥王星")
+            .map(|c| c.capacity)
+            .sum()
     };
     let need = gap_at(&mut state, 0.0);
     assert!(need > 0.0, "一条船都没有 ⇒ 该把整条线的要求运力挂出去（实为 {need:.3}）");
@@ -593,9 +638,14 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             .insert(keep.clone(), Control::player(true));
         st.depots.clear();
         st.contracts.contracts.clear();
-        st.depot_add("中国", "金星", "碳", 100.0);
+        st.depot_add("中国", "冥王星", "碳", 100.0);
         post_contracts(&mut st, &config);
-        st.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum::<f64>()
+        st.contracts
+            .contracts
+            .iter()
+            .filter(|c| c.is_open() && c.from == "冥王星")
+            .map(|c| c.capacity)
+            .sum::<f64>()
     };
     assert!(
         with_ships > 0.0 && with_ships < need,
@@ -615,14 +665,15 @@ fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
     state.depots.clear();
     state.contracts.contracts.clear();
     let post = |state: &mut State, stock: f64| {
-        state.depots.clear();
+        // 清空首都池 ⇒ 只会有**出口腿**（否则簿子上同时有进口单，`len` 就不是 1 了）。
+        export_only(state, "中国", &[], 0.0);
         if stock > 0.0 {
-            state.depot_add("中国", "金星", "碳", stock);
+            state.depot_add("中国", "冥王星", "碳", stock);
         }
         post_contracts(state, &config);
     };
     post(&mut state, 1000.0);
-    assert_eq!(state.contracts.contracts.len(), 1, "一处货栈一张单");
+    assert_eq!(state.contracts.contracts.len(), 1, "一条腿一张单");
     let id = state.contracts.contracts[0].id;
     let capacity = state.contracts.contracts[0].capacity;
     assert!(capacity > 0.0, "该挂出这条线的要求运力");
@@ -718,24 +769,30 @@ fn an_unaccepted_order_escalates_once_per_review_period() {
 #[test]
 fn the_ai_posts_an_order_for_the_capacity_it_cannot_cover() {
     let (config, mut state) = fresh(42);
-    state.depots.clear();
-    state.depot_add("中国", "金星", "碳", 100.0);
+    // 只留出口腿（清空首都池 ⇒ 不开进口腿），这样「中国的单」只有一张。
+    export_only(&mut state, "中国", &["冥王星"], 100.0);
     state.ships.retain(|s| s.faction_id != "中国"); // 中国没有舰 ⇒ 自有运力 0
     let mut rng = crate::prng::Prng::new(42);
     sim::advance(&mut state, &config, &mut rng);
     // 挂出来的那张单**可能已经在本回合被接走**（撮合与派工都在 `step_contracts` 里）——
-    // 所以要看的是「簿上那张属于中国的单」，而不是「还没人接的单」。
-    let mine: Vec<&crate::model::Contract> =
-        state.contracts.contracts.iter().filter(|c| c.shipper == "中国").collect();
-    assert_eq!(mine.len(), 1, "一处积压一张单，实为 {:?}", state.contracts.contracts);
+    // 所以要看的是「簿上那张属于中国、跑冥王星那条出口腿的单」，而不是「还没人接的单」。
+    // 这一回合世界还在产货，所以池子里也会开出**进口腿**的单子（那是新语义下正确的事，
+    // 见 `a_shipless_faction_hires_carriers_for_both_directions`），这里只认出口那条。
+    let mine: Vec<&crate::model::Contract> = state
+        .contracts
+        .contracts
+        .iter()
+        .filter(|c| c.shipper == "中国" && c.from == "冥王星")
+        .collect();
+    assert_eq!(mine.len(), 1, "一条腿一张单，实为 {:?}", state.contracts.contracts);
     let need =
-        crate::model::required_throughput(&state, &config, "金星", &state.capital_body("中国"));
+        crate::model::required_throughput(&state, &config, "冥王星", &state.capital_body("中国"));
     assert!(
         (mine[0].capacity - need).abs() < 1e-9,
         "没有运力 ⇒ 该挂整条线的要求运力（应挂 {need:.3}，实为 {:.3}）",
         mine[0].capacity
     );
-    assert_eq!(mine[0].from, "金星", "起运 = 产地货栈");
+    assert_eq!(mine[0].from, "冥王星", "起运 = 产地货栈");
     assert_eq!(mine[0].to, state.capital_body("中国"), "目的照公理 = 雇主首都");
     assert!((mine[0].share - config.freight.share).abs() < 1e-12, "抽成 = 配置里的费率");
     assert!(mine[0].min_reputation > 0.0, "门槛要在挂单时算好并冻结");
@@ -745,6 +802,65 @@ fn the_ai_posts_an_order_for_the_capacity_it_cannot_cover() {
             .iter()
             .any(|e| matches!(e, GameEvent::ContractPosted { .. })),
         "挂单要发事件（否则投影/故事板里这件事不存在）"
+    );
+}
+
+/// **没船的势力靠承包商运货**（用户裁决：「不是有运输承包商吗」）——这是「完全禁止瞬移」
+/// 之下**唯一**的应急通路，所以它必须是**两个方向**都通的：
+///
+/// * **集货**：产地货栈的净剩余 → 自己的首都（`from` = 产地）；
+/// * **补给**：自己首都的货 → 自己缺料的站点（`from` = 首都）。
+///
+/// 前者本来就有，后者是本轮新增的（`freight::lanes` 的两个方向 + `open_mut` 按整条腿索引）。
+/// 一个**一条船都没有**的势力自己顶不上任何运力 ⇒ 两条腿的缺口都是「整条线的要求运力」，
+/// 于是别的势力（有船的那些）接单、派自己的船去跑。**没有第二条通路**：它自己的船是 0，
+/// 库存又只能在本天体上花。
+#[test]
+fn a_shipless_faction_hires_carriers_for_both_directions() {
+    let (config, mut state) = fresh(42);
+    state.ships.retain(|s| s.faction_id != "中国"); // 中国一条船都没有
+    // 造一处**没人搬得走**的净剩余（本势力没有城的天体 ⇒ 没有建设需求、保留量为 0）：
+    // 自己没船 ⇒ 集货腿的缺口也是「整条线的要求运力」，只能请人。
+    state.depot_add("中国", "冥王星", "碳", 100.0);
+    let mut rng = crate::prng::Prng::new(42);
+    // 跑十几回合：站点缺的模块料一直等不来（补给腿成立），而请来的人真的把货运过去了。
+    for _ in 0..12 {
+        sim::advance(&mut state, &config, &mut rng);
+    }
+    let cap = state.capital_body("中国");
+    let mine: Vec<crate::model::Contract> = state
+        .contracts
+        .contracts
+        .iter()
+        .filter(|c| c.shipper == "中国")
+        .cloned()
+        .collect();
+    // 两个方向都挂上了单，而且**都被人接了**（簿子上留着已接单的合同）。
+    let outbound: Vec<&crate::model::Contract> = mine.iter().filter(|c| c.to == cap).collect();
+    let inbound: Vec<&crate::model::Contract> = mine.iter().filter(|c| c.from == cap).collect();
+    assert!(!outbound.is_empty(), "集货腿该挂单，实为 {mine:?}");
+    assert!(!inbound.is_empty(), "补给腿也该挂单（首都 → 缺料的站点），实为 {mine:?}");
+    assert!(
+        mine.iter().any(|c| c.is_hired()),
+        "没船的势力请的人该有人接（承包商就是这条通路），实为 {mine:?}"
+    );
+    // 接单的确实是**别人**（自己没船），派来的是受雇方自己的船，而且**真的把货运到了**。
+    // ⚠ 「每张已接单都派着船」**不是**不变量：受雇方可能这一回合刚接、或船被抽回去打仗
+    //（`assign_hired_ships` 每回合按缺口重派）——所以看的是「这条通路通不通」。
+    let mut delivered = 0.0;
+    let mut staffed = 0usize;
+    for c in mine.iter().filter(|c| c.is_hired()) {
+        let carrier = c.carrier.clone().expect("已接单必有承运方");
+        assert_ne!(carrier, "中国", "自己没船，不可能是自己接的");
+        if !state.contracts.ships_of(c.id).is_empty() {
+            staffed += 1;
+        }
+        delivered += c.delivered;
+    }
+    assert!(staffed > 0, "受雇方该真的派自己的船来跑（实为 0 条）");
+    assert!(
+        delivered > 0.0,
+        "承包商的船该真的把货运到（「没船就雇人」这条通路得是**通**的），实为 {delivered:.2}"
     );
 }
 
@@ -799,7 +915,7 @@ fn probe_ideology_roles() {
             st.depot_add("中国", b, "碳", 100.0);
         }
         let lean = freight_lean(&st, "中国");
-        let quota = freighter_quota(&st, "中国");
+        let quota = freighter_quota(&st, &config, "中国");
         let hist = run_roles(&mut st, &config, "中国", 200);
         let mean = hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64;
         let churn: usize = hist

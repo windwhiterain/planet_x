@@ -44,6 +44,11 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
         s.blueprint = None;
         s.spawned_round = None;
     }
+    // **事件日志也清掉**：`ShipSpawned` 那类事件同样带 `blueprint` 字段（v9 之后才有的），
+    // 而它的值是个**名字**（`Some("自动平价·护卫舰")`），字符串手术删不干净。本用例测的是
+    // **状态结构**的迁移，不是事件日志的形状——而「这一回合出过哪些事件」本来就随世界走向变
+    //（改一条经济机制就可能让它出现），留着它会让这条守卫变成一条**行为**断言。
+    state.events.clear();
     let text = ron::to_string(&state).expect("serialize the state");
     for needle in ["blueprint:None", "blueprints:{}"] {
         assert!(
@@ -61,7 +66,16 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
         .replace(&format!("schema_version:{SCHEMA_VERSION}"), "schema_version:9");
     assert!(
         !old_text.contains("blueprint") && !old_text.contains("spawned_round"),
-        "手术没做干净：v9 档里不该出现设计图那四个字段"
+        "手术没做干净：v9 档里不该出现设计图那四个字段 —— 残留处：{:?}",
+        old_text
+            .find("blueprint")
+            .or_else(|| old_text.find("spawned_round"))
+            .map(|i| {
+                let head: String = old_text[..i].chars().rev().take(80).collect::<Vec<_>>()
+                    .into_iter().rev().collect();
+                let tail: String = old_text[i..].chars().take(120).collect();
+                format!("{head}{tail}")
+            })
     );
 
     let mut restored: State = ron::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");

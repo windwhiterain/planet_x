@@ -81,14 +81,14 @@ fn the_throughput_ratio_waits_until_a_full_hold_is_due_and_skips_the_transit_leg
 fn there_is_at_most_one_open_order_per_lane() {
     let mut cs = ContractState::default();
     cs.post("中国".into(), "碳".into(), 3.0, "金星".into(), "地球".into(), 0.1, 0, 0.6);
-    assert!(cs.open_mut("中国", "金星").is_some());
-    assert!(cs.open_mut("美国", "金星").is_none(), "别人的单不算我的");
-    assert!(cs.open_mut("中国", "水星").is_none(), "别的货栈各自成单");
+    assert!(cs.open_mut("中国", "金星", "地球").is_some());
+    assert!(cs.open_mut("美国", "金星", "地球").is_none(), "别人的单不算我的");
+    assert!(cs.open_mut("中国", "水星", "地球").is_none(), "别的货栈各自成单");
     // 有人接了 ⇒ 不再可改（承诺冻结）。
     let id = cs.contracts[0].id;
     cs.get_mut(id).unwrap().carrier = Some("美国".into());
     cs.get_mut(id).unwrap().accepted_round = Some(0);
-    assert!(cs.open_mut("中国", "金星").is_none(), "已接单的合同不再是需求信号");
+    assert!(cs.open_mut("中国", "金星", "地球").is_none(), "已接单的合同不再是需求信号");
 }
 
 /// **一张单可以同时有多艘舰，也可以随时换**（用户：「对方派几艘船都无所谓」）。

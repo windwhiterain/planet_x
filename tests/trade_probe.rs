@@ -1049,7 +1049,7 @@ fn probe_ideology_freight() {
         for f in &state.factions {
             let martial = f.ideology.peace_military - f.ideology.nature_colony;
             let lean = planet_x::autocontrol::freight::freight_lean(&state, &f.name);
-            let quota = planet_x::autocontrol::freight::freighter_quota(&state, &f.name);
+            let quota = planet_x::autocontrol::freight::freighter_quota(&state, &config, &f.name);
             let ships = state.ships.iter().filter(|s| s.hull > 0.0 && s.faction_id == f.name).count();
             // 诊断：**动得了**的舰（有推进模块 ⇒ 运力 > 0）与「角色轴归玩家」的舰数。
             // 若某个势力有舰却一条运输舰都派不出来，答案通常在这两列里。

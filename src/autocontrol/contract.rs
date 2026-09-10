@@ -274,7 +274,7 @@ fn hired_throughput(state: &State, config: &GameConfig, c: &Contract) -> f64 {
 /// 余缺**，而「自己缺不缺船」本来就与「借没借出去」无关：`需求运力 − 自有运力` 才是雇主
 /// 那边同一把尺子的另一面（`freight::post_contracts`）。
 fn own_ship_balance(state: &State, config: &GameConfig, fid: &str) -> (f64, f64) {
-    let needed = freight::needed_freighters(state, fid) as f64;
+    let needed = freight::needed_haulers(state, config, fid);
     let fleet = state
         .ships
         .iter()
@@ -545,20 +545,21 @@ pub(crate) fn settle_contracts(state: &mut State, config: &GameConfig) {
     for s in leftover {
         state.contracts.unassign(&s);
     }
-    // 1) **记分母**：已受雇、且起运货栈**有货**的合同 ⇒ 这一回合算一个「有货可运的回合」。
+    // 1) **记分母**：已受雇、且**这条腿有活**的合同 ⇒ 这一回合算一个「有货可运的回合」。
     //    放在 `step_production` 之后（`step_contracts` 的位置）+ 装卸之前，所以这一回合
-    //    刚产出的货也算数。没有货的回合不进分母：那不是受雇方的错。
+    //    刚产出的货也算数。没有活的回合不进分母：那不是受雇方的错。
+    //
+    //    **两个方向共用同一把尺子**（[`freight::lane_has_work`]）：
+    //    * 出口腿（产地 → 首都）：那处货栈还有**净剩余**（扣掉本地建设要用的）；
+    //    * 进口腿（首都 → 站点）：那处**还缺**、且首都真的拿得出那些货。
+    //    从前这里只看「起运货栈有没有货」——进口腿的起运端是**首都池**（不是货栈），
+    //    按老口径它一回合都不会被算进分母，达标率会天生虚高。
     let stocked: Vec<u64> = state
         .contracts
         .contracts
         .iter()
         .filter(|c| c.is_hired())
-        .filter(|c| {
-            state
-                .depot(&c.shipper, &c.from)
-                .map(|m| m.values().any(|v| *v > 1e-9))
-                .unwrap_or(false)
-        })
+        .filter(|c| freight::lane_has_work(state, config, &c.shipper, &c.from, &c.to))
         .map(|c| c.id)
         .collect();
     for id in stocked {

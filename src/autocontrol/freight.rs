@@ -45,27 +45,304 @@ fn units_of(map: &ResourceMap) -> f64 {
     map.values().sum()
 }
 
-/// 本势力**有积压的货栈**（天体名 + 积压件数），按天体名序（`BTreeMap` 遍历顺序 ⇒ 确定性）。
+/// `a − b` 的**逐资源正部**：每种货各自 `max(0, ·)`（不是整表相减）。
+fn positive_part(a: &ResourceMap, b: &ResourceMap) -> ResourceMap {
+    let mut out = ResourceMap::new();
+    for (rt, av) in a {
+        let d = *av - b.get(rt).copied().unwrap_or(0.0);
+        if d > 1e-9 {
+            out.insert(rt.clone(), d);
+        }
+    }
+    out
+}
+
+// --- 站点手上的货：建楼要花什么、还缺什么、剩下多少能运走（单向运输 → 双向）-------------
+//
+// 用户裁决「**完全禁止瞬移**」：非首都天体上的建造（建楼 / 造舰 / 装模块）只能花**那处
+// 货栈里的货**（首都天体照旧花池子）。于是每一处站点同时是两条腿的两端：
+//
+// * **出口**：本地现货**扣掉自己建设要用的**，剩下的才等船运回首都（净额，见下）；
+// * **进口**：自己建设要用的**减去本地现货**，缺口从首都运过来。
+//
+// 两条腿的货量都从**同一把尺子**（[`site_build_need`]）与**同一处库存**
+//（[`State::stock_at`]）算出来 —— 与 `sim::build_city` 实际花钱的方式同源，不另编估算。
+
+/// 一处站点（某势力在**某天体**上的城）**计划要干的活**还差哪些料（逐资源）。
 ///
-/// 含**首都天体上的货栈**（若存在）：那通常意味着迁都把一处旧中转点留在了首都——
-/// 把它扫进池子也是一条合法路线（`Haul { from: cap, to: cap }`）。
-pub fn stocked_depots(state: &State, fid: &str) -> Vec<(BodyId, f64)> {
-    state
-        .depots
+/// 三项相加，全部是「**计划**」而不是「速率」——需求必须是**存量**才有终点（速率永远开着）：
+///
+/// 1. **在建的建筑**：`(计划面积 − 已建成面积) × 单位面积成本`，单位成本走
+///    [`sim::per_area_cost`]（与 `build_city` 同一条算术，含 `construction_resource_mod`
+///    与结构 `cost_mult`）；
+/// 2. **建造区要下的下一艘舰的船体料**：`build_cost × (1 − 进度 ÷ build_points)`
+///    ——进度已经攒了一部分，剩下的料还得运过来；
+/// 3. **那艘舰的最低可用选装**（[`crate::autocontrol::minimum_loadout`]：最便宜的武器 +
+///    最便宜的推进）——少了它，船坞下水不了一艘能动的船。
+///
+/// ⚠ 第 2、3 项是**实测补上的**：只算第 1 项时，一个「楼全建完了、只剩船坞在干活」的天体
+/// 需求恒为 0 ⇒ 一条补给腿都不会开 ⇒ 船坞干等本地那点矿 ⇒ **全世界 0 舰**（seed 7 / 200 回合
+/// 实测）。建筑、船体、模块是同一件事的三段：**这座城市要花的实物都在这个天体上**。
+///
+/// 它是**需求的存量**（一个计划还差多少），与「积压」同量纲——于是进出口两条腿的抽签
+/// （概率 = 量占比）在两边的尺度一致，不需要另一套「需求怎么估」的模型。
+pub fn site_build_need(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let mut out = ResourceMap::new();
+    let loadout = super::minimum_loadout(config);
+    for c in state
+        .cities
         .iter()
-        .filter(|((f, _), _)| f == fid)
-        .map(|((_, b), m)| (b.clone(), units_of(m)))
-        .filter(|(_, u)| *u > 1e-9)
+        .filter(|c| c.faction_id == fid && c.body_id == body && !c.razed)
+    {
+        let res_mod = state
+            .city_settlement(&c.name)
+            .map(|s| s.construction_resource_mod)
+            .unwrap_or(1.0);
+        for b in &c.buildings {
+            let spec = config.building_spec(&b.kind);
+            if b.under_construction() {
+                let per_area = sim::per_area_cost(config, spec, res_mod, b);
+                let left = b.area - b.deployed;
+                for (rt, cost) in per_area {
+                    *out.entry(rt).or_insert(0.0) += cost * left;
+                }
+            }
+            // 建造区：这一艘还没下水的舰要的料（船体余量 + 一套最低可用选装）。
+            if !b.is_shipyard() {
+                continue;
+            }
+            let Some(cls) = b.ship_type.as_deref() else { continue };
+            let Some(ship) = config.ships.get(cls) else { continue };
+            let bp = ship.build_points.max(1e-9);
+            let progress = c.ship_progress.get(cls).copied().unwrap_or(0.0);
+            let left = (1.0 - progress / bp).clamp(0.0, 1.0);
+            for (rt, cost) in &ship.build_cost {
+                *out.entry(rt.clone()).or_insert(0.0) += cost * left;
+            }
+            for (rt, cost) in &loadout {
+                *out.entry(rt.clone()).or_insert(0.0) += cost;
+            }
+        }
+    }
+    out
+}
+
+/// 一处站点**每回合要吃多少料**（逐资源）——**产能速率 × 单位成本**，与 `build_city`
+/// 那两处 `max_affordable_inc(...)` 的**速率上限**同一把尺子：
+///
+/// * **在建建筑**：`min(剩余面积, construction_speed × speed_mod × productivity × labor)
+///   × 单位面积成本`；
+/// * **建造区**：`min(船体余量, rate ÷ build_points) × 船体成本`，其中
+///   `rate = deployed × productivity × labor` 就是 `build_city` 里那个 `class_rate`。
+///
+/// 为什么需要它：站点要留多少料**不是「它还欠多少活」**（那是计划的总量，永远很大 ⇒ 什么
+/// 都不往外运），而是「**下一班船来之前它会烧掉多少**」。实测：按计划总量当保留量时，
+/// 站点把料全留下、首都永远收不到货，而首都自己也要料（seed 7 / r150：星系矿业@地球的船坞
+/// 只差 **铁 3.8** 就卡了 50 回合，全世界的船坞相继停产、最终 **0 舰**）。
+pub fn site_burn(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let mut out = ResourceMap::new();
+    let yard_spec = config.building_spec("construction");
+    for c in state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && c.body_id == body && !c.razed)
+    {
+        let speed_mod = state
+            .city_settlement(&c.name)
+            .map(|s| s.construction_speed_mod)
+            .unwrap_or(1.0);
+        let res_mod = state
+            .city_settlement(&c.name)
+            .map(|s| s.construction_resource_mod)
+            .unwrap_or(1.0);
+        let labor = sim::labor_ratio(state, config, &c.name);
+        for b in &c.buildings {
+            let spec = config.building_spec(&b.kind);
+            if b.under_construction() {
+                let speed = spec.construction_speed * speed_mod * spec.productivity * labor;
+                let inc = (b.area - b.deployed).min(speed);
+                for (rt, cost) in sim::per_area_cost(config, spec, res_mod, b) {
+                    *out.entry(rt).or_insert(0.0) += cost * inc;
+                }
+            }
+            if !b.is_shipyard() {
+                continue;
+            }
+            let Some(cls) = b.ship_type.as_deref() else { continue };
+            let Some(ship) = config.ships.get(cls) else { continue };
+            let bp = ship.build_points.max(1e-9);
+            let progress = c.ship_progress.get(cls).copied().unwrap_or(0.0);
+            let left = (1.0 - progress / bp).clamp(0.0, 1.0);
+            let rate = b.deployed * yard_spec.productivity * labor; // = `class_rate`
+            let frac = (rate / bp).min(left);
+            for (rt, cost) in &ship.build_cost {
+                *out.entry(rt.clone()).or_insert(0.0) += cost * frac;
+            }
+        }
+    }
+    out
+}
+
+/// 一处站点**要常备的一次性料**：每个建造区一套**最低可用选装**
+/// （[`crate::autocontrol::minimum_loadout`]）。
+///
+/// 它是「下水那一回合要一次性付掉」的钱，不属于「每回合烧掉多少」，所以不进
+/// [`site_burn`] 而单独常备——一个船坞手里**始终**该有装得出一艘能动的船的模块料。
+pub fn site_standing(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let mut out = ResourceMap::new();
+    let loadout = super::minimum_loadout(config);
+    let yards = state
+        .cities
+        .iter()
+        .filter(|c| c.faction_id == fid && c.body_id == body && !c.razed)
+        .flat_map(|c| c.buildings.iter())
+        .filter(|b| b.is_shipyard() && b.ship_type.is_some())
+        .count();
+    for (rt, cost) in &loadout {
+        out.insert(rt.clone(), cost * yards as f64);
+    }
+    out
+}
+
+/// 一处站点**本回合该留多少料**（lead-time 库存）——进出口两侧**共用这一个量**。
+///
+/// ```text
+/// 保留量 = min(计划总量, 每回合消耗速率 × 这条线一个往返的回合数) + 常备（最低选装）
+/// ```
+///
+/// * **速率 × 往返回合数** = 「下一班船到达之前我会烧掉多少」，这是库存论里最朴素的那条
+///   口径，而这里的「一个往返」不是新编的数——它就是全作**唯一**的那把尺子
+///   [`lane_rounds`](crate::model::lane_rounds)（合同市场的考核周期、要求运力都用它）。
+///   深处的站点往返几十回合 ⇒ 自然要多囤一点；近地两个回合 ⇒ 几乎不囤。
+/// * **上限是计划总量**：楼快建完时不必囤满一整套。
+/// * **常备量加在外面**：下水是一锤子买卖，不该被「这回合烧多少」抹掉。
+///
+/// 于是**同一件货不可能同时出现在两条腿上**：存量超过保留量的那部分才是出口，低于保留量的
+/// 那部分是缺口——两条腿互为镜像，中间没有缝（否则刚送到的货下一回合就被原路运回去）。
+pub fn site_reserve(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let cap = state.capital_body(fid);
+    let rounds = crate::model::lane_rounds(state, config, body, &cap).max(1.0);
+    let plan = site_build_need(state, config, fid, body);
+    let burn = site_burn(state, config, fid, body);
+    let standing = site_standing(state, config, fid, body);
+    let mut out = ResourceMap::new();
+    for (rt, want) in &plan {
+        let lead = burn.get(rt).copied().unwrap_or(0.0) * rounds;
+        out.insert(rt.clone(), want.min(lead));
+    }
+    for (rt, extra) in &standing {
+        *out.entry(rt.clone()).or_insert(0.0) += extra;
+    }
+    out
+}
+
+/// 一处站点**还缺**的资源 = `本回合该留的量 − 本地现货`（逐资源正部）。
+///
+/// 这就是**补给腿**的需求信号：首都派船去那儿，就是去补这个缺口。
+pub fn site_deficit(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let need = site_reserve(state, config, fid, body);
+    let stock = state.stock_at(fid, body).cloned().unwrap_or_default();
+    positive_part(&need, &stock)
+}
+
+/// 一处站点**能运走的净剩余** = `本地现货 − 本回合该留的量`（逐资源正部）。
+///
+/// **为什么是净额而不是全部现货**（实测逼出来的口径）：货栈现在**一份库存两用**（自己建设
+/// 花 + 等船运走）。若出口按「全部现货」算，刚给殖民地送上门的建材下一回合就会被集货签抽中
+/// **原路运回首都**——两条腿自己和自己打架。扣掉本地该留的量之后，同一件货**不可能同时**
+/// 出现在出口和进口两侧：站点还缺的留在原地，站点用不完的才往外运。
+pub fn exportable_at(state: &State, config: &GameConfig, fid: &str, body: &str) -> ResourceMap {
+    let need = site_reserve(state, config, fid, body);
+    let stock = state.stock_at(fid, body).cloned().unwrap_or_default();
+    positive_part(&stock, &need)
+}
+
+/// 一条**运输腿**：从 `from` 搬到 `to`，`units` = 此刻这条腿上**有多少货要动**
+/// （出口腿 = 净剩余，进口腿 = 缺口与首都现货的交集）。抽签按 `units` 占比 ⇒ 期望运力
+/// 自动按「哪儿的货多」成比例。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lane {
+    pub from: BodyId,
+    pub to: BodyId,
+    pub units: f64,
+}
+
+/// 本势力此刻**要动的货**（两个方向合成一张表，按 `(from, to)` 天体名序 ⇒ 确定性）。
+///
+/// * **出口腿** `站点 → 首都`：该处的**净剩余**（[`exportable_at`]）> 0；
+/// * **进口腿** `首都 → 站点`：该处的**缺口**（[`site_deficit`]）与**首都池现货**的交集 > 0
+///   ——池子里没有的货，派船去也是空跑（「有货才派」与出口侧「有积压才派」是同一条纪律）。
+///
+/// 两端的量都是**存量**（件），所以两边的抽签权重同量纲、可以直接混在一张表里按占比抽。
+pub fn lanes(state: &State, config: &GameConfig, fid: &str) -> Vec<Lane> {
+    let cap = state.capital_body(fid);
+    if cap.is_empty() || state.body(&cap).is_none() {
+        return Vec::new();
+    }
+    let hub: ResourceMap = state.stock_at(fid, &cap).cloned().unwrap_or_default();
+    let mut out: BTreeMap<(BodyId, BodyId), f64> = BTreeMap::new();
+    // 出口：有货栈的地方（货栈按 `(势力, 天体)` 存，所以键集合就是「哪里攒着货」）。
+    let bodies: Vec<BodyId> = state
+        .depots
+        .keys()
+        .filter(|(f, b)| f == fid && *b != cap)
+        .map(|(_, b)| b.clone())
+        .collect();
+    // 进口：有活城的地方（缺口不需要货栈已经存在——缺口正是「这里什么都没有」）。
+    let mut sites: BTreeSet<BodyId> = bodies.iter().cloned().collect();
+    sites.extend(
+        state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid && !c.razed && c.body_id != cap)
+            .map(|c| c.body_id.clone()),
+    );
+    for b in &bodies {
+        let out_units = units_of(&exportable_at(state, config, fid, b));
+        if out_units > 1e-9 {
+            *out.entry((b.clone(), cap.clone())).or_insert(0.0) += out_units;
+        }
+    }
+    for b in &sites {
+        let deficit = site_deficit(state, config, fid, b);
+        // 只能运**首都真的有的**那部分：逐资源取交集（缺口 30 硅、池子 5 硅 ⇒ 这条腿此刻 5 件）。
+        let movable: f64 = deficit
+            .iter()
+            .map(|(rt, want)| want.min(hub.get(rt).copied().unwrap_or(0.0)))
+            .sum();
+        if movable > 1e-9 {
+            *out.entry((cap.clone(), b.clone())).or_insert(0.0) += movable;
+        }
+    }
+    out.into_iter()
+        .map(|((from, to), units)| Lane { from, to, units })
         .collect()
 }
 
-/// 本势力**该有多少艘运输舰**：一处有积压的货栈配一条船。
+/// 本势力**该有多少艘运输舰**（**连续量**）：每条腿按**它有多少活**分到船的头数，
+/// **一条腿最多算一艘**（一条线同时只跑一趟）。
 ///
-/// 这是个**刻意粗糙**的定编（用户的指示是「先确定机制的正确性，不着急管平衡性」）：
-/// 它不含任何阈值常数，且「积压清空一处 ⇒ 那艘船自然改回战舰」（见 [`should_be_freighter`]）。
-/// 真要做细，该考虑的是「按积压量 + 航程折算需要几艘」，那是平衡层的事。
-pub fn needed_freighters(state: &State, fid: &str) -> usize {
-    stocked_depots(state, fid).len()
+/// ```text
+/// 头数 = Σ_腿 min(1, 这条腿的货量 ÷ 一个货舱)
+/// ```
+///
+/// **为什么不能「一条腿 = 一艘船」**（量出来的修正）：改成两条腿之后，**每个建造区**都会
+/// 常备一套最低选装（[`site_standing`]），于是一个 12 城的势力平白多出十几条**涓流腿**
+/// （每条一两件货），而按「一条腿配一条船」它们会**把整支舰队吃光**——实测 r1 就有 11/21
+/// 艘舰被定成运输舰，战争舰队被抽空 ⇒ 更容易被打光 ⇒ 更造不出船。
+/// 按活量折算之后，涓流腿各分到几分之一艘，**期望上仍然自动等于「谁活多谁多拿」**
+/// （与抽签那条纪律同源：概率分布 = 想要的比例），只是不再让一条 1 件的腿独占一艘船。
+pub fn needed_haulers(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let hold = config.freight.nominal_hold.max(1e-9);
+    lanes(state, config, fid)
+        .iter()
+        .map(|l| (l.units / hold).min(1.0))
+        .sum()
+}
+
+/// [`needed_haulers`] 取整（读面与守卫要一个「几条船」的整数）。
+pub fn needed_freighters(state: &State, config: &GameConfig, fid: &str) -> usize {
+    needed_haulers(state, config, fid).ceil() as usize
 }
 
 /// 一艘舰的**集货运力**（定编的排序键）：`有效舱容 × 巡航速度 ÷ 维护费`。
@@ -89,7 +366,7 @@ pub fn freight_tonnage(config: &GameConfig, ship: &Ship) -> f64 {
 // --- 思潮 → 角色（用户裁决：「**由国家思潮决定自动控制下舰船倾向于运输还是战斗**」）----
 //
 // 「谁是运输舰」从**硬定编**（按运力排名取前 N、一刀切）改成**思潮驱动的概率**：
-// 需求（[`needed_freighters`]：一处有积压的货栈 = 一条腿）仍然说**要多少条腿**，
+// 需求（[`needed_freighters`]：一条腿 = 一条船）仍然说**要多少条腿**，
 // 思潮说**本势力愿意投多少条腿**。
 //
 // 系数**写死在这里、不进 config**（用户裁决：「不要配置了，直接耦合思潮写死」）：
@@ -139,10 +416,10 @@ pub fn freight_lean(state: &State, fid: &str) -> f64 {
 
 /// 本回合的**目标头数**（连续量，不取整）：`需求 × 思潮倾向`。
 ///
-/// 需求是 [`needed_freighters`]（一处有积压的货栈 = 一条腿）——**倾向乘在需求上**，
-/// 所以「**没有积压 ⇒ 目标 0 ⇒ 谁都不去跑运输**」这条不变量不会被思潮冲掉。
-pub fn freighter_quota(state: &State, fid: &str) -> f64 {
-    needed_freighters(state, fid) as f64 * freight_lean(state, fid)
+/// 需求是 [`needed_freighters`]（一条腿 = 一条船）——**倾向乘在需求上**，
+/// 所以「**没有货要动 ⇒ 目标 0 ⇒ 谁都不去跑运输**」这条不变量不会被思潮冲掉。
+pub fn freighter_quota(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    needed_haulers(state, config, fid) * freight_lean(state, fid)
 }
 
 /// 本势力此刻**已经是运输舰**的舰数（不含 `except`）——抽签的**现状项**。
@@ -203,7 +480,7 @@ pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_i
         return false;
     }
     // 4) 配额 → 抽签。
-    let quota = freighter_quota(state, fid);
+    let quota = freighter_quota(state, config, fid);
     let others = hauler_headcount(state, fid, ship_id);
     let temp = ROLE_WIDTH.max(1e-9);
     // 运力效率加成（以**队内最大运力**为基准，尺度无关）：最好的船 = 0、最差的 = −gain。
@@ -304,60 +581,97 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
     }
 }
 
-/// 给某舰挑一条集货路线：`from` 按**积压占比**抽签，`to` 永远是本势力首都
-/// （公理：首都即集散地）。`None` = 没有货要运（或势力连首都都没有）。
+/// 给某舰挑一条路线（**两个方向共用一张抽签表**，见 [`lanes`]）。
 ///
-/// **优先续用现有路线**（舱里有货、或那处货栈还有货）——常驻路线不该每回合重掷。
+/// * **出口腿** `站点 → 首都`：把产地用不完的货运回集散地（公理：首都即集散地）；
+/// * **进口腿** `首都 → 站点`：把站点建设缺的货从首都送过去。
+///
+/// `None` = 没有货要动（或势力连首都都没有）。
+///
+/// **优先续用现有路线**——常驻路线不该每回合重掷：舱里有货 ⇒ 一定续（那票货得送到）；
+/// 空舱 ⇒ 看**这条腿还有没有活**（出口腿看起点还有没有净剩余、进口腿看终点还有没有缺口）。
 /// 抽签细节见本模块的文档。
-pub fn route_for(state: &State, fid: &str, ship_id: &str) -> Option<(BodyId, BodyId)> {
+pub fn route_for(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> Option<(BodyId, BodyId)> {
     // **执行承包单的舰**跑的是那张单的路线（接单时立的承诺，不是抽签抽出来的）：
-    // 起运在**托运方**的货栈、目的在**托运方**的首都——与自有集货的目标（自己的首都）
-    // 完全不同，所以这条要压在最前面，不能让它去抽自己的签。
+    // 起运在**托运方**那里（可能是它的货栈、也可能是它的首都池）、目的在托运方那一端——
+    // 与自有运输的目标完全不同，所以这条要压在最前面，不能让它去抽自己的签。
     if let Some(id) = state.contracts.assignment_of(ship_id) {
         if let Some(c) = state.contracts.get(id) {
             return Some((c.from.clone(), c.to.clone()));
         }
     }
-    let to = state.capital_body(fid);
-    if to.is_empty() || state.body(&to).is_none() {
+    let cap = state.capital_body(fid);
+    if cap.is_empty() || state.body(&cap).is_none() {
         return None;
     }
     let holding = state
         .ship(ship_id)
         .map(|s| !s.cargo.is_empty())
         .unwrap_or(false);
-    let cands = stocked_depots(state, fid);
-    // 续用现有路线：只要那处还有货（或舱里载着货要送），就不改道。
-    if let Some(ShipBehavior::Haul { from, .. }) = state.ship_behavior(ship_id.to_string()) {
-        if state.body(&from).is_some() {
-            if holding || cands.iter().any(|(b, _)| *b == from) {
+    let cands = lanes(state, config, fid);
+    // 续用现有路线：舱里有货就送完它；空舱则看这条腿还有没有活。
+    if let Some(ShipBehavior::Haul { from, to }) = state.ship_behavior(ship_id.to_string()) {
+        if state.body(&from).is_some() && state.body(&to).is_some() {
+            let live = cands
+                .iter()
+                .any(|l| l.from == from && l.to == to);
+            if holding || live {
                 return Some((from, to));
             }
         }
     }
-    // 舱里有货但**没有**路线（例如玩家把指令清掉了）：先把货送回家再说。
+    // 舱里有货但**没有**路线（例如玩家把指令清掉了）：先把货送回首都再说。
     // `from = to = 首都` 是合法的「只卸不装」路线——`haul_step` 只看 `to`（舱里有货时腿别就是 `to`）。
     if holding {
-        return Some((to.clone(), to));
+        return Some((cap.clone(), cap.clone()));
     }
     if cands.is_empty() {
         return None;
     }
-    // 抽签：把 [0, 总积压) 按各处积压切成区间，落在哪段就去哪儿 ⇒ 概率 = 积压占比。
-    let total: f64 = cands.iter().map(|(_, u)| *u).sum();
+    // 抽签：把 [0, 总量) 按每条腿的量切成区间，落在哪段就跑哪条 ⇒ 概率 = 量占比
+    // （期望运力自动按「哪儿的货多」成比例，与派单纪律同源）。
+    let total: f64 = cands.iter().map(|l| l.units).sum();
     if total <= 0.0 {
         return None;
     }
     let mut x = sim::derived_roll(fid, ship_id, state.round, "route") * total;
-    let mut from = cands.last().map(|(b, _)| b.clone())?; // 浮点兜底：落到末尾之外就取最后一处
-    for (b, u) in &cands {
-        if x < *u {
-            from = b.clone();
+    let mut picked = cands.last().map(|l| (l.from.clone(), l.to.clone()))?; // 浮点兜底：落到末尾之外就取最后一条
+    for l in &cands {
+        if x < l.units {
+            picked = (l.from.clone(), l.to.clone());
             break;
         }
-        x -= u;
+        x -= l.units;
     }
-    Some((from, to))
+    Some(picked)
+}
+
+/// **一条腿上此刻的货**（挂单的主货种、考核的「还有没有活」都用它）。
+///
+/// 起点是首都 ⇒ **进口腿**：终点还缺的（[`site_deficit`]）；
+/// 否则 ⇒ **出口腿**：起点用不完的净剩余（[`exportable_at`]）。
+pub fn lane_cargo(state: &State, config: &GameConfig, fid: &str, from: &str, to: &str) -> ResourceMap {
+    if from == state.capital_body(fid) {
+        site_deficit(state, config, fid, to)
+    } else {
+        exportable_at(state, config, fid, from)
+    }
+}
+
+/// **一条腿还有没有活**（考核分母与「续用路线」共用这一把尺子）。
+///
+/// * **出口腿**：起点还有净剩余就是有活；
+/// * **进口腿**：终点还缺**且首都真的拿得出**那几种货——首都池空着的回合不该算在受雇方头上
+///   （与出口腿「产地当期还没产出」是同一条宽免的理由）。
+pub fn lane_has_work(state: &State, config: &GameConfig, fid: &str, from: &str, to: &str) -> bool {
+    let cargo = lane_cargo(state, config, fid, from, to);
+    if from != state.capital_body(fid) {
+        return units_of(&cargo) > 1e-9;
+    }
+    let hub = state.stock_at(fid, from).cloned().unwrap_or_default();
+    cargo
+        .iter()
+        .any(|(rt, want)| *want > 1e-9 && hub.get(rt).copied().unwrap_or(0.0) > 1e-9)
 }
 
 // --- 雇佣运力市场：雇主侧（挂单）-----------------------------------------------
@@ -471,13 +785,16 @@ enum Plan {
     Post { shipper: FactionId, resource: String, capacity: f64, from: BodyId, to: BodyId },
 }
 
-/// 本势力**每一处货栈的运力账**：`(天体, 要求运力, 自有运力, 已雇运力, 缺口)`。
+/// 本势力**每一条腿的运力账**：`(起点, 终点, 要求运力, 自有运力, 已雇运力, 缺口)`。
 ///
-/// * **自有运力**落到每一处的那一份是**期望值**：派单是**按积压占比抽签**的（[`route_for`]），
-///   所以「期望落到这处的那一份」= `Σ(各运输舰在这条线上的吞吐) × (这处积压 ÷ 总积压)`
+/// * **自有运力**落到每条腿的那一份是**期望值**：派单是**按货量占比抽签**的（[`route_for`]），
+///   所以「期望落到这条腿的那一份」= `Σ(各运输舰在这条线上的吞吐) × (这条腿的货量 ÷ 总货量)`
 ///   ——与真实派单**同口径**，不是另编一个模型；
 /// * **已雇运力**按**已接单合同的 `capacity`** 算（接单就是承诺），不看此刻有几条船在跑；
 /// * **缺口** = `max(0, 要求 − 自有 − 已雇)`：**连续量、无阈值**，雇够了自己归零。
+///
+/// 出口腿与进口腿**同一本账**：两条腿的缺口都是「我搬不动的那部分」，所以「该雇人还是该自己
+/// 造船」在两边是同一条判据（用户裁决：**进承包商**）。
 ///
 /// 一本账供两处用：雇主挂单（[`post_contracts`]）与「该不该腾个船坞去造货船」
 /// （[`crate::autocontrol::shipbuilding::retool_haulers`]）。
@@ -485,40 +802,30 @@ pub(crate) fn capacity_ledger(
     state: &State,
     config: &GameConfig,
     fid: &str,
-) -> Vec<(BodyId, f64, f64, f64, f64)> {
-    let to = state.capital_body(fid);
-    if to.is_empty() || state.body(&to).is_none() {
-        return Vec::new();
-    }
-    let depots = stocked_depots(state, fid);
-    let total: f64 = depots.iter().map(|(_, u)| *u).sum();
+) -> Vec<(BodyId, BodyId, f64, f64, f64, f64)> {
+    let lns = lanes(state, config, fid);
+    let total: f64 = lns.iter().map(|l| l.units).sum();
     if total <= 0.0 {
         return Vec::new();
     }
-    let own_of: BTreeMap<BodyId, f64> = {
-        let serve = serving_freighters(state, config, fid);
-        depots
-            .iter()
-            .map(|(body, units)| {
-                let rate: f64 = serve
-                    .iter()
-                    .map(|s| trip_throughput(state, config, s, body, &to))
-                    .sum();
-                (body.clone(), rate * (units / total))
-            })
-            .collect()
-    };
-    let mut committed: BTreeMap<BodyId, f64> = BTreeMap::new();
+    let serve = serving_freighters(state, config, fid);
+    let mut committed: BTreeMap<(BodyId, BodyId), f64> = BTreeMap::new();
     for c in state.contracts.contracts.iter().filter(|c| c.shipper == fid && c.is_hired()) {
-        *committed.entry(c.from.clone()).or_insert(0.0) += c.capacity;
+        *committed.entry((c.from.clone(), c.to.clone())).or_insert(0.0) += c.capacity;
     }
-    depots
-        .iter()
-        .map(|(body, _)| {
-            let need = crate::model::required_throughput(state, config, body, &to);
-            let own = own_of.get(body).copied().unwrap_or(0.0);
-            let hired = committed.get(body).copied().unwrap_or(0.0);
-            (body.clone(), need, own, hired, (need - own - hired).max(0.0))
+    lns.iter()
+        .map(|l| {
+            let rate: f64 = serve
+                .iter()
+                .map(|s| trip_throughput(state, config, s, &l.from, &l.to))
+                .sum();
+            let own = rate * (l.units / total);
+            let need = crate::model::required_throughput(state, config, &l.from, &l.to);
+            let hired = committed
+                .get(&(l.from.clone(), l.to.clone()))
+                .copied()
+                .unwrap_or(0.0);
+            (l.from.clone(), l.to.clone(), need, own, hired, (need - own - hired).max(0.0))
         })
         .collect()
 }
@@ -528,11 +835,11 @@ pub(crate) fn capacity_ledger(
 /// 这是**造货船的需求信号**（[`crate::autocontrol::shipbuilding::retool_haulers`]）：
 /// **已经雇到人**的那部分不算缺口——雇佣市场本来就该顶掉它。所以「一直雇不到人、或雇到了
 /// 也不够」才会推动船坞改产货船；而「雇得到」的势力本来就不必自己造船（分工，而不是重复建设）。
-/// 没有积压（或没有首都）⇒ 0。
+/// 没有货要动（或没有首都）⇒ 0。
 pub fn haul_gap(state: &State, config: &GameConfig, fid: &str) -> f64 {
     let ledger = capacity_ledger(state, config, fid);
-    let need: f64 = ledger.iter().map(|(_, n, _, _, _)| n).sum();
-    let uncovered: f64 = ledger.iter().map(|(_, _, _, _, u)| u).sum();
+    let need: f64 = ledger.iter().map(|(_, _, n, _, _, _)| n).sum();
+    let uncovered: f64 = ledger.iter().map(|(_, _, _, _, _, u)| u).sum();
     if need <= 0.0 {
         0.0
     } else {
@@ -579,45 +886,56 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
     fids.sort(); // 确定性：写状态的顺序不依赖势力表的排列
     let mut plan: Vec<Plan> = Vec::new();
     for fid in &fids {
-        // 照公理：目的永远是自己的首都（首都即集散地）。没有首都（或首都天体不存在）
-        // 就没有「集散地」，也就无从挂单。
-        let to = state.capital_body(fid);
-        if to.is_empty() || state.body(&to).is_none() {
+        // 照公理：集散地是自己的首都。没有首都（或首都天体不存在）就没有「集散地」，
+        // 也就无从挂单——两条腿（出口/进口）都以它为另一端。
+        let cap = state.capital_body(fid);
+        if cap.is_empty() || state.body(&cap).is_none() {
             continue;
         }
-        let depots = stocked_depots(state, fid);
-        let total: f64 = depots.iter().map(|(_, u)| *u).sum();
-        // 本势力**未接单**的单子（按起运地索引）——下面要么改它、要么撤它，不会堆成一片。
-        let open: BTreeMap<BodyId, u64> = state
+        let lns = lanes(state, config, fid);
+        let total: f64 = lns.iter().map(|l| l.units).sum();
+        // 本势力**未接单**的单子（按**整条腿** `(起点, 终点)` 索引）——下面要么改它、要么撤它，
+        // 不会堆成一片。⚠ 从前只按 `from` 索引，两个方向的腿都以首都为起点时（两条进口腿）
+        // 会互相认错，所以键必须是整条腿。
+        let open: BTreeMap<(BodyId, BodyId), u64> = state
             .contracts
             .contracts
             .iter()
             .filter(|c| c.shipper == *fid && c.is_open())
-            .map(|c| (c.from.clone(), c.id))
+            .map(|c| ((c.from.clone(), c.to.clone()), c.id))
             .collect();
-        // 货栈**空了**的未接单：撤回（`stocked_depots` 会滤掉空货栈，所以它们不会出现在下面的循环里）。
-        let alive: BTreeSet<BodyId> = depots.iter().map(|(b, _)| b.clone()).collect();
-        for (body, id) in &open {
-            if !alive.contains(body) {
+        // **这条腿没活了**的未接单：撤回（`lanes` 只列出此刻真有货要动的腿，所以没被列出的
+        // 就是「没活了」——需求信号必须跟着现实走，**哪怕现实是「货搬完了」**，
+        // 否则受雇方会照着一条不存在的需求派船过来）。
+        let alive: BTreeSet<(BodyId, BodyId)> =
+            lns.iter().map(|l| (l.from.clone(), l.to.clone())).collect();
+        for (lane, id) in &open {
+            if !alive.contains(lane) {
                 plan.push(Plan::Drop { id: *id });
             }
         }
         if total <= 0.0 {
-            continue; // 没有积压 ⇒ 没有需求（上面的清扫已经把旧单撤掉了）
+            continue; // 没有货要动 ⇒ 没有需求（上面的清扫已经把旧单撤掉了）
         }
-        // **每一处货栈的运力账**（要求 / 自有期望份额 / 已雇 / 缺口），一本账供两处用：
+        // **每一条腿的运力账**（要求 / 自有期望份额 / 已雇 / 缺口），一本账供两处用：
         // 这里挂单，[`crate::autocontrol::shipbuilding::retool_haulers`] 据此决定要不要
         // 腾个船坞去造货船——各算一份必然漂移。
         let ledger = capacity_ledger(state, config, fid);
-        let by_body: BTreeMap<&BodyId, (f64, f64, f64, f64)> =
-            ledger.iter().map(|(b, n, o, h, u)| (b, (*n, *o, *h, *u))).collect();
-        for (body, _) in &depots {
-            let Some((_need, _own, _hired, uncovered)) = by_body.get(body).copied() else {
+        let by_lane: BTreeMap<(BodyId, BodyId), (f64, f64, f64, f64)> = ledger
+            .iter()
+            .map(|(f, t, n, o, h, u)| ((f.clone(), t.clone()), (*n, *o, *h, *u)))
+            .collect();
+        for l in &lns {
+            let key = (l.from.clone(), l.to.clone());
+            let Some((_need, _own, _hired, uncovered)) = by_lane.get(&key).copied() else {
                 continue;
             };
-            let Some(map) = state.depots.get(&(fid.clone(), body.clone())) else { continue };
-            let Some(resource) = principal_resource(map) else { continue };
-            match open.get(body) {
+            // 主货种 = 这条腿上**此刻的货**里最多的那种（出口 = 净剩余，进口 = 缺口）：
+            // 它只用来折算货值（门槛与自评闸）与给人看，不约束承运人装什么。
+            let Some(resource) = principal_resource(&lane_cargo(state, config, fid, &l.from, &l.to)) else {
+                continue;
+            };
+            match open.get(&key) {
                 // 已有的未接单：改成此刻的缺口；不缺了就撤回。
                 Some(id) => {
                     if uncovered <= 1e-9 {
@@ -634,8 +952,8 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
                             shipper: fid.clone(),
                             resource,
                             capacity: uncovered,
-                            from: body.clone(),
-                            to: to.clone(),
+                            from: l.from.clone(),
+                            to: l.to.clone(),
                         });
                     }
                 }

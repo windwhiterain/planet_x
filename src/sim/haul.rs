@@ -85,15 +85,25 @@ pub fn cargo_owner(state: &State, fid: &str, ship_id: &str) -> FactionId {
         .unwrap_or_else(|| fid.to_string())
 }
 
-/// **装货**：把 `from` 处**货主**的产地货栈装进 `ship` 的货舱。
+/// **装货**：把 `from` 处**货主**手上的货装进 `ship` 的货舱。
 ///
 /// 上限 = 有效舱容（[`cargo_capacity`]：舰级舱容 × 战损折算）− 已在舱；分配按 [`haul_split`]。
 ///
+/// **货从哪来取决于 `from` 是哪**（[`State::stock_at`]，用户裁决「完全禁止瞬移」）：
+/// * `from` = **货主的首都** ⇒ 装**首都池**——这是**补给腿**（首都 → 殖民地）的起点，
+///   从前这里只认货栈，于是「首都发不出货」，非首都站点永远等不来材料；
+/// * 其余天体 ⇒ 装该处**产地货栈**（集货腿，产出在原地等船）。
+///
+/// **补给腿只装对面真的缺的**（`to` 处的建设缺口，`freight::site_deficit`）：首都池里
+/// 什么都有，照单全装会把用不上的货堆到殖民地门口——而那些货下一回合就会被集货签
+/// 判定为「净剩余」**原路运回来**（两条腿自己和自己打架）。所以进口只装缺口里的货，
+/// 与出口的「净剩余」口径互为镜像：同一件货不可能同时出现在两条腿上。
+///
 /// **受雇跑的线没有任何额外上限**：雇主挂的是**运力**（单位/回合），不是「要搬多少件」，
-/// 所以受雇的船到了货栈能装多少装多少——与雇主自己的运输舰完全一样（旧形态里这里还有一道
+/// 所以受雇的船到了地方能装多少装多少——与雇主自己的运输舰完全一样（旧形态里这里还有一道
 /// 「这张单还差多少」的闸，那是「一票货」形态的遗留）。返回**实际装走的总件数**
 /// （0 = 那里没货，舰该原地等）。
-pub fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str) -> f64 {
+pub fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str, to: &str) -> f64 {
     let Some(ship) = state.ship(ship_id) else {
         return 0.0;
     };
@@ -102,11 +112,19 @@ pub fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &st
         return 0.0;
     }
     let owner = cargo_owner(state, fid, ship_id);
-    let avail = state.depot(&owner, from).cloned().unwrap_or_default();
+    let mut avail = state.stock_at(&owner, from).cloned().unwrap_or_default();
+    // 补给腿（起点是货主的首都）：只装终点缺的货。
+    if from == state.capital_body(&owner) && to != from {
+        let want = autocontrol::freight::site_deficit(state, config, &owner, to);
+        avail.retain(|rt, amt| {
+            *amt = amt.min(want.get(rt).copied().unwrap_or(0.0));
+            *amt > 1e-9
+        });
+    }
     let plan = haul_split(&avail, room);
     let mut moved: ResourceMap = ResourceMap::new();
     for (rt, want) in &plan {
-        let got = state.depot_take(&owner, from, rt, *want);
+        let got = state.stock_take(&owner, from, rt, *want);
         if got > 0.0 {
             moved.insert(rt.clone(), got);
         }
@@ -204,12 +222,16 @@ pub fn haul_unload(state: &mut State, _config: &GameConfig, fid: &str, ship_id: 
 }
 
 /// 一条运输路线本回合到达泊位后的**动作**（装或卸），返回这一步的记录。
+///
+/// `leg` 是本回合要办的那一端、`other` 是另一端——**装货要知道对面是谁**：补给腿
+/// （`leg` 是货主的首都）只装对面缺的货（见 [`haul_load`]）。卸货用不到 `other`。
 pub fn haul_act(
     state: &mut State,
     config: &GameConfig,
     fid: &str,
     ship_id: &str,
     leg: &str,
+    other: &str,
     holding: bool,
 ) -> HaulStep {
     if holding {
@@ -221,7 +243,7 @@ pub fn haul_act(
             into_pool: state.capital_body(&cargo_owner(state, fid, ship_id)) == leg,
         }
     } else {
-        let units = haul_load(state, config, fid, ship_id, leg);
+        let units = haul_load(state, config, fid, ship_id, leg, other);
         if units > 0.0 {
             HaulStep::Loaded {
                 body: leg.to_string(),
@@ -258,11 +280,12 @@ pub fn haul_step(
     let pos = ship.position;
     let holding = !ship.cargo.is_empty();
     let leg = if holding { to } else { from };
+    let other = if holding { from } else { to };
     let target = state.body_position(leg);
     let eps = config.combat.arrival_eps;
     // 已经停在泊位内：本回合直接办事（与 Colonize 一样是「到达即行动」）。
     if dist(pos, target) <= eps {
-        return haul_act(state, config, &fid, ship_id, leg, holding);
+        return haul_act(state, config, &fid, ship_id, leg, other, holding);
     }
     // **kiting 姿态照常生效**（用户裁决：角色不影响 kiting）：附近有敌舰时，航路上的软目标
     // 会被拉开/压近。它只改**移动**、不改「到没到」——到达判定看真实位置，且上面那一步
@@ -271,7 +294,7 @@ pub fn haul_step(
     move_toward(state, config, ship_id, class, dest);
     let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
     if dist(np, target) <= eps {
-        return haul_act(state, config, &fid, ship_id, leg, holding);
+        return haul_act(state, config, &fid, ship_id, leg, other, holding);
     }
     HaulStep::EnRoute {
         body: leg.to_string(),

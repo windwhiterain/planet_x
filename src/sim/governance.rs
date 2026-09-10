@@ -289,6 +289,23 @@ pub fn defect_city(state: &mut State, config: &GameConfig, city: &str, from: &st
         c.faction_id = to.to_string();
         c.loyalty = 1.0;
         c.razed = false;
+        // **图纸不跟着城走**（实测逼出来的修复）：设计图是**势力设计库**里的东西
+        // （[`ControllableState::blueprints`]），城换了主，新主的库里没有那些名字 ⇒ 建造区
+        // 立刻变成**悬空指针**，而 `build_city` 明写「悬空 ⇒ 停产」、`autocontrol::blueprints`
+        // 又明写「悬空是玩家/agent 删图造成的，AI 不替他收拾」——两条规则叠起来就是
+        // **永久停产**：这座城从此再也造不出一艘船。
+        //
+        // 实测（seed 7 / 200 回合，全面改成「消耗只吃本地库存」之后）：两个幸存势力 20 个
+        // 建造区里 **18 个悬空**（都是打下来的城），全世界造不出船 ⇒ 没有船 ⇒ 运不来料 ⇒
+        // 造不出船，**0 舰的冻结态**。这不是那条「悬空」规则的原意（它防的是"玩家删了图却
+        // 看起来像成功"），而是**易主**顺手带出来的。
+        //
+        // 清掉指针 ⇒ 新主下一回合由 [`crate::autocontrol`] 按自己的舰级重新建图，回到
+        // 「无图 ⇒ 出厂现算」那条正式路径。**玩家自己删图**那种悬空照旧停产语义不变
+        // （那条路不经过这里）。
+        for b in &mut c.buildings {
+            b.blueprint = None;
+        }
     }
 
     // 控制转移：把旧主控制面里 keyed-by-(city, building) 的叶子搬到新主名下。

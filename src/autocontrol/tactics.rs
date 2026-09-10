@@ -475,10 +475,10 @@ pub(crate) fn ai_ship_turn(
 
     // --- 角色 = 运输舰：这一回合的活就是跑集货路线（找仗打不是它的活）-----------------
     //
-    // 路线从 `freight::route_for` 来：优先续用现有路线（货栈还有货/舱里载着货），否则按
-    // **积压占比抽签**挑一处新的。挑不到（没有积压、或定编还没收回去）就这一回合不派活。
+    // 路线从 `freight::route_for` 来：优先续用现有路线（这条腿还有活/舱里载着货），否则按
+    // **货量占比抽签**在两个方向里挑一条新的。挑不到（没有货要动、或定编还没收回去）就这一回合不派活。
     if freighter {
-        match freight::route_for(state, &owner, ship_id) {
+        match freight::route_for(state, config, &owner, ship_id) {
             Some((from, to)) => {
                 let behavior = ShipBehavior::Haul { from: from.clone(), to: to.clone() };
                 if let Some(c) = state.control_mut(owner.clone()) {

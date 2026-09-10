@@ -75,7 +75,29 @@ pub fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
     }
 }
 
+/// **首都天体上不留货栈**（迁都留下的旧中转点会被并回池子）——[`State::stock_at`] 的
+/// 「首都 ⇒ 池子、其余 ⇒ 货栈」这条二分只有在**首都天体没有货栈**时才自洽。
+///
+/// 迁都把一处非首都天体变成首都：那处原本攒着「等船运走」的货栈，此刻既不属于「本地产出」
+/// （首都产出直接进池），也不再是 [`State::stock_at`] 会去读的地方——不并回池子，
+/// 那些货就**谁也拿不到**（既装不上船，也花不出去）。所以每回合开头归一一次。
+///
+/// 反过来（首都变成普通天体）不需要任何动作：它从此按普通站点收自己的产出，池子照旧是池子。
+fn merge_capital_depots(state: &mut State) {
+    let fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
+    for fid in fids {
+        let cap = state.capital_body(&fid);
+        let Some(map) = state.depots.remove(&(fid.clone(), cap)) else { continue };
+        if let Some(f) = state.faction_mut(&fid) {
+            for (rt, amt) in map {
+                *f.resources.entry(rt).or_insert(0.0) += amt;
+            }
+        }
+    }
+}
+
 pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
+    merge_capital_depots(state);
     let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.name.clone()).collect();
     for cid in city_ids {
         let (body_id, faction_id, population, razed) = {
@@ -251,6 +273,10 @@ pub fn budget_remaining(limit: &ResourceMap, spent: &ResourceMap, rt: &str) -> f
 ///
 /// `pub(crate)`：自动控制估计**造舰时间**用的就是这一把尺子（[`crate::autocontrol::shipbuilding::build_rounds`]）
 /// ——各写一份必然漂移，于是「AI 以为要 5 回合、实际要 50 回合」这种错就会悄悄发生。
+///
+/// **同一个函数也用来卡「这个站点手上到底有没有这些货」**（把 `limit` 传成
+/// [`State::stock_at`] 的副本、`spent` 传空表）：建造的可负担量 = `min(预算速率, 站点库存)`，
+/// 两个上限共用一条算术，不再各写一份。
 pub fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, spent: &ResourceMap, cap: f64) -> f64 {
     let mut inc = cap;
     for (rt, c) in cost_per_area {
@@ -263,12 +289,27 @@ pub fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, 
     inc.max(0.0)
 }
 
-pub fn commit_spend(state: &mut State, fid: &str, spent: &mut ResourceMap, cost: &[(String, f64)]) {
+/// **这个站点此刻买得起多少**：把一笔单位成本与**该天体的库存**一起过一遍
+/// [`max_affordable_inc`]（`limit` = [`State::stock_at`]、`spent` = 空、速率上限 = `cap`）。
+///
+/// 与 [`commit_spend`] 配对使用：先卡到「站点付得起」，再从站点扣。两处分开写必然漂移，
+/// 而漂移的后果正是 `.agents/notes/freight-collection.md` 要堵的那个洞——**凭空造出**。
+pub fn site_affordable(state: &State, fid: &str, body: &str, cost: &[(String, f64)], cap: f64) -> f64 {
+    let stock = state.stock_at(fid, body).cloned().unwrap_or_default();
+    max_affordable_inc(cost, &stock, &ResourceMap::new(), cap)
+}
+
+/// 在**某座城所在天体**上花掉一笔实物（建楼 / 造舰 / 装模块都走这里）。
+///
+/// * **首都天体** ⇒ 扣势力池（与旧行为逐字节相同）；
+/// * **非首都天体** ⇒ 扣该处货栈，**够了才花**（调用方已经用 [`max_affordable_inc`] 把
+///   `cost` 卡在站点库存之内）——非首都手上没有的货，只能靠船运过去。
+///
+/// `spent` 是**本回合这个势力在这类预算上花掉的量**（记账用，与 `build_city` 的
+/// `inv_spent`/`con_spent` 同形）：它记的是**账单**，与从哪处库存扣无关。
+pub fn commit_spend(state: &mut State, fid: &str, body: &str, spent: &mut ResourceMap, cost: &[(String, f64)]) {
     for (rt, c) in cost {
-        if let Some(f) = state.faction_mut(fid) {
-            let e = f.resources.entry(rt.clone()).or_insert(0.0);
-            *e = (*e - c).max(0.0);
-        }
+        state.stock_take(fid, body, rt, *c);
         *spent.entry(rt.clone()).or_insert(0.0) += c;
     }
 }

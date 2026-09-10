@@ -171,9 +171,14 @@ fn accepting_an_order_hires_a_faction_and_then_staffs_it_with_ships() {
         for ship in state.contracts.ships_of(c.id) {
             let s = state.ship(&ship).expect("派工指向的船必须存在");
             assert_eq!(s.faction_id, carrier, "只能派自己的船");
-            let route = freight::route_for(&state, &carrier, &ship).expect("接活的舰要有路线");
+            let route = freight::route_for(&state, &config, &carrier, &ship).expect("接活的舰要有路线");
             assert_eq!(route, (c.from.clone(), c.to.clone()), "跑的是雇主的路线");
-            assert_eq!(route.1, state.capital_body(&c.shipper), "目的 = 雇主首都");
+            // 每条腿都有一端是雇主的首都（集散地）：集货腿的**终点**是首都，补给腿的**起点**
+            // 是首都——「完全禁止瞬移」之后两个方向都是正式的单子。
+            assert!(
+                route.0 == state.capital_body(&c.shipper) || route.1 == state.capital_body(&c.shipper),
+                "每条腿都该有一端是雇主首都，实为 {route:?}"
+            );
         }
     }
 }

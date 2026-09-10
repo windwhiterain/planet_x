@@ -593,7 +593,7 @@ fn write_round(
                 // 和平/殖民 > 1），`freighter_quota` 是「目标运输舰条数」= 需求 × 倾向。
                 // 有这两列，「这个国家为什么少跑运输」是可读的，而不是只能从行为反推。
                 "freight_lean": r2(crate::autocontrol::freight::freight_lean(state, &f.name)),
-                "freighter_quota": r2(crate::autocontrol::freight::freighter_quota(state, &f.name)),
+                "freighter_quota": r2(crate::autocontrol::freight::freighter_quota(state, config, &f.name)),
                 // **造舰的两条动机**（用户裁决：解耦）——
                 // `threat_motive`：敌对国比自己强多少（造战斗舰）；
                 // `haul_gap`：集货运力**搬不动的比例**（造货船；已雇到的部分不算缺口）。
