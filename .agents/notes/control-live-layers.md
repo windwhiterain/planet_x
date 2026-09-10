@@ -522,5 +522,86 @@ cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 ### 11.6 下一步
 
 ③ **蓝图**（`ship-blueprint-spec.md` §8.0 十条裁决 + 附 A 改动地图），连同 `spawned_round`
-一次升 `SCHEMA_VERSION` **7 → 8**。⚠ 蓝图那一步要注意：`order_source` 必须把
+一次升 `SCHEMA_VERSION`（**9 → 10**，见下条）。⚠ 蓝图那一步要注意：`order_source` 必须把
 「叶不存在」与「叶写着 `Inherit`」分开报——本轮已经证明这两者在**取值**上不等价。
+
+## 12. 本轮：**角色轴（第三条风格轴）补齐 + remove**（`feature/role-axis-parity`）
+
+这一轮的起点是一次**合并**，不是新功能：`main`（`a1c6359`）把 `feature/freight-collection`
+（运输：货舱 + Haul + 按积压抽签派单，schema v9）合到了 §11 之上，而两条特性**此前从没碰过面**
+——freight 给 `control.rs` 加了**第三条风格轴**（角色：运输舰↔战舰，`default_freighter` +
+`ship_freighter`），那 113 行是纯新增、与 §11 的 `remove` 无冲突，但它**没有经过 ②/A 那套规矩**。
+
+### 12.1 合并暴露的缺口（为什么必须补）
+
+1. **新轴没有 `remove`**：11 片控制叶都能删，唯独这条轴不能 ⇒ 直接违反已裁决的
+   「所有控制叶都可删」。而且它那两处写入**内联在 `apply_diff` 里**，没走抽出来的 `apply_*`
+   助手（抽助手的原因正是"十条规则必须逐片一致"）。
+2. **web 面板不认识它**：`LEAF_SPEC` / `KIND` / `RAW_LEAF` / `DEFAULT_LEAF` 只有指令 + 风格两轴
+   ⇒ 玩家**既看不见 AI 每回合写下的定编结论，也钉不住**（`Player`）这艘舰。
+3. **kit 也不认识它**：`LEAF_KINDS` / `_VALUE_FIELD` 里没有这两片叶 ⇒ 读面有、`surface()` 看不见
+   （`engine-data-plane.md` §8.1 那条老教训：契约是发射端 **+** 消费端两处）。
+
+### 12.2 轴间不对称（本轮查实，写进三端文档）
+
+| | 逐舰风格两轴（doctrine/kiting） | 角色轴（freighter） |
+| --- | --- | --- |
+| 谁写这片叶 | **只有玩家/agent** | **自动控制每回合也写**（`autocontrol::freight` 按积压定编，写 `Control::inherit(role)`） |
+| `Auto` 的含义 | 空头承诺：没人会来重估，值冻着 | **名副其实**：AI 会重估并改写（`Player` 才是闸门） |
+| **删叶**的含义 | 回到出厂快照，**从此冻结** | **放手**：交回自动定编（AI 下回合可能立刻又写下结论） |
+| 势力级默认叶 | 玩家 `Player` 时才供值（§3.1 修正后的规则） | 同规则（`State::ship_freighter` 实测一致）；⚠ 但 AI **不写**这片默认叶，所以它的 `Auto` 仍属空头承诺 |
+
+值规则**没有**新东西：`leaf.map(|l| l.value).unwrap_or(record)`，舰队默认只在自身 `Player` 时压过
+叶片值（`ship_style_chain` 的 `StyleAxis::Freighter` 臂）——我核对过，与另两轴逐字同形。
+
+### 12.3 三端接口（补齐后）
+
+| 端 | 动作 |
+| --- | --- |
+| 引擎 | `DefaultFreighter.remove` / `ShipFreighterPatch.remove`（`skip_serializing_if = "is_false"`，读面不带）；新助手 `apply_default_freighter` / `apply_ship_freighter`（**删叶 → 实体校验 → 写**，与另十条一致：删叶不要求舰还在）；`apply_diff` 里那两段内联代码删掉 |
+| kit | `LEAF_KINDS` + `_VALUE_FIELD` 收下两片叶；`set_freighter` / `set_default_freighter`（值必须 `bool`，写值必须明说归属）/ `remove_freighter` / `remove_default_freighter`；`_check_bool` 把 `1`/`0` 挡在配方期 |
+| web | 逐舰第 4 片叶「角色」（下拉：运输舰／战舰）+ 势力级「舰队默认角色」一行；`RAW_LEAF` / `DEFAULT_LEAF` / `LEAF_SPEC` / `LEAF_OPTIONS` 全部登记；「恢复出厂值」自动跟着出现；舰行的批量下拉从"三片叶"改成按实际片数说话 |
+
+### 12.4 验证
+
+* `cargo test --workspace` 全绿：`planet_x` lib **118**+1ignored（新增 2 条：角色轴的删叶三规则、
+  删叶=交回自动定编）、`longhorizon` 6+10ignored、`projection_derived` 4、`planet_x_web` **18**（新增
+  `the_role_axis_round_trips_through_the_web_surface`：读面一行/写值接管/删叶回源/势力级默认叶）。
+* **行为中性**：合并后的新基线 `--seed 42 --round 240 --digest 20` =
+  `293725C43A0E26DC516977C04A5BD9C99977252B8C08D683EC2EA2749ADEDBC4`（12 行；取法：只取 `^\{` 行、
+  `\n` 连接、UTF-8 无 BOM），本轮改完**逐字节相同**，且连跑两次相同（确定性）。
+  旧基线 `70D5A34E…` 随 v9 运输落地作废——那是**行为的**改变，不是噪声。
+* **kit**：`demo.py` 新增「[4b] 角色轴」一节（10 条断言）后**全部断言通过**：写值即接管 →
+  真实 `--apply --save` → 删叶（回执里出现它）→ 幂等再删 → 势力级默认叶建成 → 删它在回执里
+  （`exists` 由 True 翻回 False）；另加一条配方期拒绝（喂 `1` 当角色）。`README` 补
+  「角色轴删叶 = 放手」与 API 两行。
+* **实机 web**（`scripts/web.ps1`，3001，pid 19620 / 截图 `scratch/role-axis-panel.png`）：
+  长城「角色」行 → 改归属为玩家 → 下拉选「运输舰」→ 发出的载荷是
+  `{"ship_freighter":[{"ship":"长城","freighter":true,"mode":"Player"}]}` → 应用后
+  `state.control.中国.ship_freighter == {长城:{mode:"Player",value:true}}`；点「恢复出厂值」→
+  载荷 `{"ship":"长城","remove":true}` → 应用后回到 `{}`、按钮自己消失、那一行改口
+  「当前跟随：出厂快照（战舰）——这一层还没有叶，自动控制随时可以给这艘舰定编」。
+  再把**舰队默认角色**设成玩家 + 运输舰 → `default_freighter == {mode:"Player",value:true}`，
+  长城的行跟着改口「当前跟随：舰队默认（运输舰）——它是玩家钉的 ⇒ 自动控制的逐舰定编不碰这艘舰」
+  （正确的**例外**：势力级默认是玩家时，逐舰行也归玩家 ⇒ 编辑器开放）。另外 8 个势力的
+  control 段全程一个字节没动。
+
+### 12.5 顺带：两条"文档也会过期"的修正 + 一条断言的教训
+
+* `ship-blueprint-spec.md` 里的版本号**已经过期**（它写 7→8，而合并后 `SCHEMA_VERSION = 9`）。
+  已按现状改成 **9 → 10**（§1 改动地图、§6 迁移、§8 动手顺序、§9 附 A 四处 + 顶部状态行），
+  并写明 v7→v8（产地货栈）、v8→v9（货舱 + Haul）**都已被 freight 用掉**。
+  ⚠ 动手前先 `grep SCHEMA_VERSION src/model/state.rs`——版本号是最容易被并行会话吃掉的东西。
+* `web/static/app.js` 里那句「风格两轴上的 `Auto` 是空头承诺」加了限定：**逐舰角色叶是例外**
+  （AI 真的每回合写它）。势力级默认角色叶**不**是例外（没人写它），UI 提示因此是两句不同的话
+  ——最初照抄逐舰那句「由自动控制定编」，实机一看是假话，当场改掉（note §3.2 的措辞纪律）。
+* **`verify` 是只读演习**这条又咬了一次：新写的 demo 里有两条断言（"再删一次是幂等的"、"删势力级
+  默认叶在回执里"）**默认了第一次删叶/建叶已经落地**，而它们其实只被 `verify` 演习过 ⇒ 两条假失败。
+  修法是先 `--apply --save` 再对**新 checkpoint** 断言，并把这条坑写进 demo 的注释里（§11 那轮
+  也踩过同一个坑——一个坑踩两次，说明它该出现在被复制的地方，而不只是笔记里）。
+
+### 12.6 下一步
+
+③ **蓝图**，按 `ship-blueprint-spec.md`（版本号已校正为 **9 → 10**），`Ship.spawned_round`
+一并落地；再往后是排队项（方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者、
+`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的 `effective`）。

@@ -1,6 +1,7 @@
 # 舰船设计图（blueprint）实现规格 —— 待裁决，未开工
 
-> 状态 `[~]`（规格已就绪；**§8 的 10 条开放问题待用户裁决**，裁决前不要动 `src/`） ｜
+> 状态 `[~]`（规格已就绪；**§8 的 10 条开放问题待用户裁决**，裁决前不要动 `src/`；⚠ 版本号已按
+> 合并后的 `main`（`SCHEMA_VERSION = 9`）校正为 **9 → 10**，见 §6 与 附 A） ｜
 > 索引：[notes.md](../notes.md) ｜ 关联：[`ship-blueprint.md`](ship-blueprint.md)（**设计/裁决篇**：
 > 四条语义已拍板）、`control-live-layers.md`（控制属性=活层，本规格是它的对偶）、
 > `engine-data-plane.md`（读面/投影契约）、`agent-control-long-game.md` §6（`ship_type` 被 AI 重估）
@@ -146,7 +147,7 @@ config/*.ron` 零命中）⇒ 今天所有舰出厂都是 `{0,0}` / `0.0`。
 | CLI | `--control`（`main.rs:360`）、`--apply` 回执（`main.rs:276-310`）、`--control-schema` | 自动跟随 |
 | web | `StateView{control,scope,info}`（`web/src/lib.rs:99-110/172-181`）+ `buildingEditor`（`web/static/app.js:653-712`）、`ship_type` 下拉（`app.js:667-669/710`） | 建造区编辑器要加一行 |
 | 投影 | `LAZY`（`projection.rs:64-74`）、`DERIVED`（`:92-97`）、ships 行（`:311-356`）、cities 内联 `buildings[]`（`:360-375`）、派生发射（`:494-527`）、schema（`:573-700`） | **加表要改三处**：`DERIVED` 声明 + 发射 + schema（注释 `:90-91`，守卫 `:1202-1235`） |
-| 迁移 | `SCHEMA_VERSION = 7`（`state.rs:12`）、`migrate()`（`state.rs:482-492`，注意 `0..=6` 那一臂） | 升档要改这一臂 |
+| 迁移 | `SCHEMA_VERSION = 9`（`state.rs:12`）、`migrate()`（`state.rs:488-500`，注意 `0..=8` 那一臂） | 升档要改这一臂（**下一档是 10**：v8 = 货舱、v9 = 运输 Haul 已被 `feature/freight-collection` 用掉） |
 
 ---
 
@@ -640,9 +641,10 @@ q.cities(12).explode("buildings").assign(
 
 ## 6. 迁移
 
-* `SCHEMA_VERSION` 7 → **8**（`state.rs:12`；⚠ v7 已被 `feature/freight-collection` 的产地货栈用掉）。
-* `migrate()`（`state.rs:482-492`）：把 `0 | 1 | 2 | 3 | 4 | 5 | 6` 那一臂改成 `0..=7`，
-  并在文档注释里加一段 `v7 → v8`。
+* `SCHEMA_VERSION` 9 → **10**（`state.rs:12`；⚠ v7→v8 是产地货栈、v8→v9 是货舱 + 运输 Haul，
+  都已被 `feature/freight-collection` 用掉 —— 动手前先 `grep SCHEMA_VERSION src/model/state.rs` 确认）。
+* `migrate()`（`state.rs:488-500`）：把 `0 | 1 | … | 8` 那一臂改成 `0..=9`，
+  并在文档注释里加一段 `v9 → v10`。
 * **零信息损失**（要写进注释，照 `state.rs:455-481` 的体例）：
   新增四个字段全部 `#[serde(default)]`——
   `ControllableState.blueprints`（旧档 ⇒ 空库）、`Building.blueprint`（旧档 ⇒ `None`）、
@@ -778,7 +780,8 @@ q.cities(12).explode("buildings").assign(
    图层的意图轴若要表达"我不管"，得想清楚是写 `Inherit` 还是**删掉这片叶**——两者后果不同。
 
 **动手顺序（用户已确认）**：① web 三条（`control-live-layers.md` §8）→ ② 两轴叶（同篇 §3.1）
-→ ③ 本规格（连同 Q9 一次升 `SCHEMA_VERSION` 8）。
+→ ③ 本规格（连同 Q9 一次升 `SCHEMA_VERSION`，**9 → 10**：v7→v8 是产地货栈、v8→v9 是货舱 +
+运输 Haul，都已被 `feature/freight-collection` 用掉）。
 
 ---
 
@@ -859,9 +862,9 @@ q.cities(12).explode("buildings").assign(
    图名换代是**玩家主动重命名**（= 删旧建新）。两者的共同后果：任何按名字写的 diff 下一回合
    可能指向不存在的东西 ⇒ **引用了不存在的图必须响亮报 `no_such_blueprint`**，
    绝不能静默回落到生成器。
-2. **旧档加载**：四个新字段全部 `#[serde(default)]`；`migrate()` 的 `0..=6` 臂要改
-   （`state.rs:484`）；别忘了 `RoundState` 也有自己的 `schema_version`（`state.rs:93-95`）。
-   另一条：`SCHEMA_VERSION` 注释里要写清 v7→v8 的**零信息损失论证**（照 `state.rs:455-481` 的体例）。
+2. **旧档加载**：四个新字段全部 `#[serde(default)]`；`migrate()` 的 `0..=8` 臂要改
+   （`state.rs:488`）；别忘了 `RoundState` 也有自己的 `schema_version`（`state.rs:93-95`）。
+   另一条：`SCHEMA_VERSION` 注释里要写清 **v9→v10** 的**零信息损失论证**（照 `state.rs:461-487` 的体例）。
 3. **AI 与玩家的所有权冲突有两条路**，只堵一条没用：
    ① 图的归属（本规格）；② **`retool_shipyards` 改 `ship_type`**（`shipbuilding.rs:259-310`，
    今天不看任何归属）。必须按 §4.7 给 retool 加 gate，否则玩家钉的图会被
@@ -915,7 +918,7 @@ q.cities(12).explode("buildings").assign(
 | `src/model/control.rs` | `ControllableState.blueprints`（`:251-308`）；`BlueprintEntry` 读面；`FactionControlView.blueprints`（`:90-108`）；`control_view`（`:511-535`）；`round_view`（`:575-635`）；`BlueprintPatch` + `FactionControlPatch.blueprints`（`:308-351`）；`apply_diff` 的新分支（写值即接管 + skip 码）；`BuildingPatch.blueprint`（`:259-285`）+ `apply_building_patch`（`:1276-1288` 附近） |
 | `src/model/building.rs` | `Building.blueprint`（`:22-36`） |
 | `src/model/ship.rs` | `Ship.blueprint`（`:49-102`） |
-| `src/model/state.rs` | `SCHEMA_VERSION 7→8`（`:12`）；`migrate()`（`:482-492`）+ 注释；`blueprint_control`；`ship_behavior` 插新层（`:230-245`） |
+| `src/model/state.rs` | `SCHEMA_VERSION 9→10`（`:12`）；`migrate()`（`:488-500`）+ 注释；`blueprint_control`；`ship_behavior` 插新层（`:230-245`） |
 | `src/model/game_config.rs` | `GameConfig.blueprints`（可选种子表，`:534-578`） |
 | `src/model/event.rs` | （可选）`ShipSpawned` 加 `blueprint: Option<String>`（`:171`）——**读面/事件归因**；加了要同步 `history_row`（`:395`）与 headline（`:573-578`） |
 | `src/world.rs` | 种子表 → `control[fid].blueprints`；开局舰队 `blueprint: None`（`:832-850` 不变） |

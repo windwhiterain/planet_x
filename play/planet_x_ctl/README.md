@@ -81,6 +81,8 @@ s.set_behavior(mine, "Dock:地球", mode="Player")                # "Idle" / "Fo
 s.set_default_ship_order("中国", behavior="Dock:地球", mode="Player")   # ONE leaf, new ships follow
 s.set_kiting(mine, -1.0)                                        # 贴脸（clamped to [-1, 1]）
 s.set_doctrine(mine, temper=0.4)
+s.set_freighter(mine, True, mode="Player")                      # 角色：True = 运输舰，False = 战舰
+s.set_default_freighter("中国", True, mode="Player")            # 一片叶：全舰队转运输，且 AI 定编不碰
 s.set_budget("中国", "construction_budget", {"硅": 4.0, "铁": 12.0}, mode="Player")
 s.set_loyalty_budget("中国", {"珠三角": 2.5}, mode="Player")
 s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, mode="Player")
@@ -92,7 +94,9 @@ s.set_scope(factions={"中国": "Player"})                        # scope nodes 
 s.remove("中国", "ship_doctrine", "长城")
 s.remove_doctrine(mine)                                         # 通配：这些舰的风格回出厂快照/舰队默认
 s.remove_kiting(mine)
+s.remove_freighter(mine)                                        # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
 s.remove_default_doctrine("中国")                                # 势力级默认叶：删了就不再供值
+s.remove_default_freighter("中国")
 s.remove_default_ship_order("中国")
 
 diff = s.emit()                       # {"control": […], "scope": {…}} → ready for `--apply`
@@ -238,6 +242,10 @@ Two things worth knowing about the kit's side of `remove`:
 * `Report.removed` / `removed_leafs` 给出真的被删掉的那些叶；`describe()` 会把它们列出来。
   逐舰叶的**存在性**读面看不出来（风格两行对每艘舰都在，列的是有效值），所以逐舰删叶的
   "落地了没有"以**引擎回执**为准，不以读面为准。
+* ⚠ **角色轴（`ship_freighter`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
+  （按积压定编谁去跑集货路线），所以删掉它是**放手**——AI 下回合可能立刻又写下它的结论，
+  而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
+  没有这个执行者，删掉就等于回到出厂快照。
 
 The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, and
 `effective_order_value_approx` shows what the chain would resolve to. Which brings us to the next

@@ -216,6 +216,10 @@ pub struct DefaultFreighter {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**（势力级这一层回到"没有说话"）。与 `freighter`/`mode` 同时出现 ⇒ 拒绝；
+    /// 叶不存在时是幂等成功。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
@@ -288,6 +292,11 @@ pub struct ShipFreighterPatch {
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
     #[serde(default)]
     pub mode: Option<ControlMode>,
+    /// **删掉这片叶**：这艘舰回到"没有自己的角色" ⇒ **交回自动定编**（`Inherit` 之下 AI 下回合
+    /// 可能立刻又写下它的结论——想让结论稳定就得写 `Player` 而不是删叶）。叶不存在时是幂等成功；
+    /// 与 `freighter`/`mode` 同时出现 ⇒ 拒绝。舰已战沉也能删（删的是控制面里的叶）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remove: bool,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -656,6 +665,7 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
         default_freighter: c.default_freighter.as_ref().map(|d| DefaultFreighter {
             freighter: Some(d.value),
             mode: Some(d.mode),
+            remove: false,
         }),
         ship_orders,
         ship_doctrine,
@@ -916,6 +926,57 @@ fn apply_default_kiting(
     report.applied += 1;
 }
 
+/// 舰队默认**角色**（势力级，第三条风格轴）：与 [`apply_default_kiting`] 同形，
+/// 外加这片叶特有的用途——设成 `Player` 是「AI 定编别碰我的舰队」的闸门。
+fn apply_default_freighter(
+    state: &mut State,
+    fid: &FactionId,
+    d: &DefaultFreighter,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.default_freighter");
+    let mut present = Vec::new();
+    if d.freighter.is_some() {
+        present.push("freighter");
+    }
+    if d.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(d.remove, &present, &path, report) {
+        return;
+    }
+    if d.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .default_freighter
+            .take()
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    let wrote = d.freighter.is_some();
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .default_freighter
+        .get_or_insert_with(|| Control::inherit(false));
+    if let Some(v) = d.freighter {
+        ctrl.value = v;
+    }
+    match (d.mode, wrote) {
+        (Some(m), _) => ctrl.mode = m,
+        (None, true) => {
+            ctrl.mode = ControlMode::Player;
+            report.took_over(path);
+        }
+        (None, false) => {}
+    }
+    report.applied += 1;
+}
+
 /// 逐舰指令补丁：`behavior` 替换该舰行为、`mode` 指定由谁决定、`remove` 删掉这片叶。
 fn apply_ship_order(
     state: &mut State,
@@ -1096,6 +1157,63 @@ fn apply_ship_kiting(
         k.mode,
         k.kiting.is_some(),
         format!("{fid}.ship_kiting[{i}]"),
+        report,
+    );
+    report.applied += 1;
+}
+
+/// 逐舰**角色**补丁（第三条风格轴）：与 [`apply_ship_kiting`] 同一条路（叶片 + 写值即接管 +
+/// 删叶）。唯一与另两条轴的差别：这片叶**自动控制也会写**（按积压定编），所以
+/// 「删叶」在这条轴上的意思是**交回自动定编**（AI 可能下回合立刻又写下结论），
+/// 而不是「从此保持某个值」——要后者就写 `Player`。
+fn apply_ship_freighter(
+    state: &mut State,
+    fid: &FactionId,
+    f: &ShipFreighterPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    let path = format!("{fid}.ship_freighter[{i}].ship");
+    let mut present = Vec::new();
+    if f.freighter.is_some() {
+        present.push("freighter");
+    }
+    if f.mode.is_some() {
+        present.push("mode");
+    }
+    if remove_conflicts(f.remove, &present, &path, report) {
+        return;
+    }
+    // 与另两条轴一样：删叶**不要求舰还在**（陈叶清理）。
+    if f.remove {
+        let existed = state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_freighter
+            .remove(&f.ship)
+            .is_some();
+        leaf_removed(report, path, existed);
+        return;
+    }
+    if resolve_own_ship(state, fid, &f.ship, &path, report).is_none() {
+        return;
+    }
+    let base = state.ship_freighter(f.ship.clone());
+    let value = f.freighter.unwrap_or(base);
+    let ctrl = state
+        .control
+        .entry(fid.clone())
+        .or_default()
+        .ship_freighter
+        .entry(f.ship.clone())
+        .or_insert_with(|| Control::inherit(base));
+    ctrl.value = value;
+    write_mode_leaf(
+        &mut ctrl.mode,
+        f.mode,
+        f.freighter.is_some(),
+        format!("{fid}.ship_freighter[{i}]"),
         report,
     );
     report.applied += 1;
@@ -1471,26 +1589,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 舰队默认**角色**（势力级，第三条风格轴）。写它 = 全舰队按这个角色走；
         // 设成 `Player` 之后自动控制的逐舰定编不再生效（那片叶归玩家）。
         if let Some(d) = &fac.default_freighter {
-            let path = format!("{fid}.default_freighter");
-            let wrote = d.freighter.is_some();
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .default_freighter
-                .get_or_insert_with(|| Control::inherit(false));
-            if let Some(v) = d.freighter {
-                ctrl.value = v;
-            }
-            match (d.mode, wrote) {
-                (Some(m), _) => ctrl.mode = m,
-                (None, true) => {
-                    ctrl.mode = ControlMode::Player;
-                    report.took_over(path.clone());
-                }
-                (None, false) => {}
-            }
-            report.applied += 1;
+            apply_default_freighter(state, &fid, d, &mut report);
         }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
             apply_ship_order(state, &fid, sp, i, &mut report);
@@ -1505,22 +1604,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 与另两条轴的差别：这片叶自动控制**也会写**，但**玩家写过（`Player`）之后 AI 不再碰**
         // ——所以「手动给某艘舰定活」是一次性的、且能一直压住自动定编。
         for (i, f) in fac.ship_freighter.iter().enumerate() {
-            let path = format!("{fid}.ship_freighter[{i}].ship");
-            if resolve_own_ship(state, &fid, &f.ship, &path, &mut report).is_none() {
-                continue;
-            }
-            let base = state.ship_freighter(f.ship.clone());
-            let value = f.freighter.unwrap_or(base);
-            let ctrl = state
-                .control
-                .entry(fid.clone())
-                .or_default()
-                .ship_freighter
-                .entry(f.ship.clone())
-                .or_insert_with(|| Control::inherit(base));
-            ctrl.value = value;
-            write_mode_leaf(&mut ctrl.mode, f.mode, f.freighter.is_some(), format!("{fid}.ship_freighter[{i}]"), &mut report);
-            report.applied += 1;
+            apply_ship_freighter(state, &fid, f, i, &mut report);
         }
         for (i, bp) in fac.investment_budget.iter().enumerate() {
             apply_budget(state, config, &fid, BudgetKind::Investment, bp, i, &mut report);
@@ -2695,6 +2779,99 @@ mod tests {
         assert_eq!(r.removed.len(), 2, "{:?}", r.removed);
         let c = state.control.get(&fid).expect("control");
         assert!(c.investment_budget.get("铁").is_none() && c.capital.is_none());
+    }
+
+    /// **第三条风格轴（角色）也守同一套删叶规矩**——并且它有一条另两条轴没有的含义：
+    /// 删叶 = **交回自动定编**（`Inherit` 之下 AI 下回合可以立刻又写下结论），而不是
+    /// 「从此保持某个值」（要后者得写 `Player`）。
+    #[test]
+    fn the_role_axis_obeys_the_same_delete_rules() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+        // 出厂记录值给成 `true`：否则「删叶回到记录值」与「钉在 false」分不出来。
+        for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
+            s.freighter = true;
+        }
+
+        // ① 逐舰角色叶（玩家钉「打仗」）：有效值 = 叶里的值，归属 = Player（AI 从此不许碰）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "freighter": false}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert!(!state.ship_freighter(ship.clone()));
+        assert_eq!(state.ship_freighter_control(ship.clone()), ControlMode::Player);
+
+        // ② 删叶 ⇒ 回到出厂记录值，叶真的没了，并且**交回自动定编**（归属不再是 Player）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean(), "{:?}", r.skipped);
+        assert_eq!(r.removed.len(), 1, "{:?}", r.removed);
+        assert!(r.removed[0].contains("ship_freighter"), "{:?}", r.removed);
+        assert!(state.ship_freighter(ship.clone()), "删叶之后回落到出厂记录值 true");
+        assert!(
+            state.control.get(&fid).and_then(|c| c.ship_freighter.get(&ship)).is_none(),
+            "叶必须真的没了"
+        );
+        assert_ne!(
+            state.ship_freighter_control(ship.clone()),
+            ControlMode::Player,
+            "删叶 = 交回自动定编：AI 下回合作出的结论可以再写进这片叶"
+        );
+
+        // ③ 幂等：再删一次仍然**成功**（目标状态已达成），但不进回执、不算丢弃。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean() && r.removed.is_empty() && r.applied == 1, "{:?}", r);
+
+        // ④ `remove` 带值 / 带归属 ⇒ 拒绝（删与写是两件事）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true, "freighter": false}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert_eq!(r.skipped.len(), 1, "{:?}", r);
+        assert_eq!(r.skipped[0].code, "remove_conflicts_with_value");
+        assert!(state.ship_freighter(ship.clone()), "被拒绝的补丁一个字节都不许动");
+
+        // ⑤ 势力级默认角色叶：`Player` 时它的值压过叶片值（AI 定编的闸门）；删掉它 ⇒ 不再供值。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_freighter": {"freighter": false, "mode": "Player"}}]
+        });
+        assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
+        assert!(!state.ship_freighter(ship.clone()), "舰队默认是 Player ⇒ 它的值说了算");
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "default_freighter": {"remove": true}}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
+        assert!(r.removed[0].contains("default_freighter"), "{:?}", r.removed);
+        assert!(state.ship_freighter(ship.clone()), "默认叶没了 ⇒ 回落到舰上记录值 true");
+
+        // ⑥ 陈叶（舰已不在）照删不误：与另两条轴同一条规矩。
+        state.ships.retain(|s| s.name != ship);
+        state
+            .control
+            .entry(fid.clone())
+            .or_default()
+            .ship_freighter
+            .insert(ship.clone(), Control::inherit(true));
+        let diff = serde_json::json!({
+            "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        });
+        let r = apply_patch(&mut state, &config, &diff).unwrap();
+        assert!(r.is_clean(), "删陈叶不该因为舰没了而被丢弃：{:?}", r.skipped);
+        assert_eq!(r.removed.len(), 1, "{:?}", r.removed);
     }
 
     /// **两轴叶的"新建"必须两条轴一起给**：`default_doctrine` 只给一条轴的话，另一条会静默
