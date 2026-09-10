@@ -3192,7 +3192,7 @@ mod tests {
                 .clone()
         };
 
-        let surface = control_surface(&state);
+        let surface = control_surface(&state, &config);
         let rows = surface["control"]
             .as_array()
             .unwrap()
@@ -3222,7 +3222,7 @@ mod tests {
         let report = apply_patch(&mut state, &config, &surface).expect("模板必须能原样回传");
         assert!(report.is_clean(), "模板回传不许丢叶子: {:?}", report.skipped);
         assert_eq!(
-            control_surface(&state).to_string(),
+            control_surface(&state, &config).to_string(),
             before,
             "读面不是不动点：回传模板改变了它自己的形状"
         );
@@ -3241,13 +3241,13 @@ mod tests {
             }]
         });
         apply_patch(&mut state, &config, &diff).expect("舰队默认落地");
-        let surface = control_surface(&state);
+        let surface = control_surface(&state, &config);
         assert_eq!(row(&surface, &unnamed)["behavior"], serde_json::json!({"Colonize": {"body": "火星"}}));
         assert_eq!(row(&surface, &inherit_leaf)["behavior"], serde_json::json!({"Colonize": {"body": "火星"}}));
         assert_eq!(row(&surface, &player_leaf)["behavior"], serde_json::json!({"Dock": {"body": "地球"}}));
         let before = surface.to_string();
         apply_patch(&mut state, &config, &surface).expect("模板必须能原样回传");
-        assert_eq!(control_surface(&state).to_string(), before, "有了舰队默认之后读面仍须是不动点");
+        assert_eq!(control_surface(&state, &config).to_string(), before, "有了舰队默认之后读面仍须是不动点");
     }
 
     /// 读面的 `behavior: null` 与「叶不存在」是**同一件事**的两面，所以回传它**不许建叶**；

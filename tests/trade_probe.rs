@@ -974,3 +974,117 @@ fn probe_contract_market() {
         }
     }
 }
+
+/// 【探针·思潮→角色】长局里「思潮 → 派多少条腿去运货」是否真的分出了高低，以及差额是被
+/// **自运**补上的还是被**雇佣**补上的（M5 的观察面：这一层此前完全不可见）。
+///
+/// 每行：思潮两轴 → 尚武度 → 倾向倍数 / 目标头数 / 实际运输舰数（全程均值），以及
+/// 自有船搬回家的件数、雇人搬回（净入池）的件数、替别人跑赚到的抽成、压在货栈里的存货（均值）。
+#[test]
+#[ignore]
+fn probe_ideology_freight() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut own: BTreeMap<String, f64> = BTreeMap::new();
+        let mut hired_in: BTreeMap<String, f64> = BTreeMap::new();
+        let mut earned: BTreeMap<String, f64> = BTreeMap::new();
+        let mut hauler_rounds: BTreeMap<String, f64> = BTreeMap::new();
+        let mut depot_sum: BTreeMap<String, f64> = BTreeMap::new();
+        let mut ships_at_200: BTreeMap<String, usize> = BTreeMap::new();
+        let mut first_hauler: BTreeMap<String, u32> = BTreeMap::new();
+        for r in 1..=n {
+            sim::advance(&mut state, &config, &mut rng);
+            if r == 200 {
+                for f in state.factions.clone() {
+                    ships_at_200.insert(
+                        f.name.clone(),
+                        state.ships.iter().filter(|s| s.hull > 0.0 && s.faction_id == f.name).count(),
+                    );
+                }
+            }
+            for f in state.factions.clone() {
+                let hauling = state
+                    .ships
+                    .iter()
+                    .any(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()));
+                if hauling {
+                    first_hauler.entry(f.name.clone()).or_insert(r);
+                }
+            }
+            for e in &state.events {
+                match e {
+                    GameEvent::CargoDelivered { owner, into_pool, cargo, .. } => {
+                        // 只算**进池**的那一卸（中转卸货不算到家）。
+                        if *into_pool {
+                            *own.entry(owner.clone()).or_insert(0.0) += cargo.values().sum::<f64>();
+                        }
+                    }
+                    GameEvent::ContractDelivered { shipper, carrier, amount, cut, .. } => {
+                        *hired_in.entry(shipper.clone()).or_insert(0.0) += amount - cut;
+                        *earned.entry(carrier.clone()).or_insert(0.0) += cut;
+                    }
+                    _ => {}
+                }
+            }
+            for f in state.factions.clone() {
+                let c = state
+                    .ships
+                    .iter()
+                    .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_freighter(s.name.clone()))
+                    .count() as f64;
+                *hauler_rounds.entry(f.name.clone()).or_insert(0.0) += c;
+                let d: f64 = state
+                    .depots
+                    .iter()
+                    .filter(|((ff, _), _)| ff == &f.name)
+                    .map(|(_, m)| m.values().sum::<f64>())
+                    .sum();
+                *depot_sum.entry(f.name.clone()).or_insert(0.0) += d;
+            }
+        }
+        println!("--- seed {seed} / {n} 回合：思潮 → 集货（头数均值 / 件数累计）---");
+        for f in &state.factions {
+            let martial = f.ideology.peace_military - f.ideology.nature_colony;
+            let lean = planet_x::autocontrol::freight::freight_lean(&state, &f.name);
+            let quota = planet_x::autocontrol::freight::freighter_quota(&state, &f.name);
+            let ships = state.ships.iter().filter(|s| s.hull > 0.0 && s.faction_id == f.name).count();
+            // 诊断：**动得了**的舰（有推进模块 ⇒ 运力 > 0）与「角色轴归玩家」的舰数。
+            // 若某个势力有舰却一条运输舰都派不出来，答案通常在这两列里。
+            let movable = state
+                .ships
+                .iter()
+                .filter(|s| {
+                    s.hull > 0.0
+                        && s.faction_id == f.name
+                        && planet_x::autocontrol::freight::freight_tonnage(&config, s) > 0.0
+                })
+                .count();
+            let pinned = state
+                .ships
+                .iter()
+                .filter(|s| {
+                    s.hull > 0.0
+                        && s.faction_id == f.name
+                        && state.ship_freighter_control(s.name.clone()).is_player()
+                })
+                .count();
+            println!(
+                "{:>10}: 军国{:+5.2} 殖民{:+5.2} ⇒ 尚武{martial:+5.2} 倾向{lean:.2} 配额{quota:>5.1} \
+                 | 舰{ships:>2} 可动{movable:>2} 玩家钉{pinned:>2} 运输舰(均){:>5.2} 自运{:>8.0} 雇入{:>7.0} 赚运费{:>7.0} 货栈(均){:>7.0} r200舰{:>2} 首运r{:>3}",
+                f.name,
+                f.ideology.peace_military,
+                f.ideology.nature_colony,
+                hauler_rounds.get(&f.name).copied().unwrap_or(0.0) / n as f64,
+                own.get(&f.name).copied().unwrap_or(0.0),
+                hired_in.get(&f.name).copied().unwrap_or(0.0),
+                earned.get(&f.name).copied().unwrap_or(0.0),
+                depot_sum.get(&f.name).copied().unwrap_or(0.0) / n as f64,
+                ships_at_200.get(&f.name).copied().unwrap_or(0),
+                first_hauler.get(&f.name).copied().unwrap_or(0),
+            );
+        }
+    }
+}

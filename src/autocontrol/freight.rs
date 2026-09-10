@@ -2,8 +2,11 @@
 //!
 //! 三件事，都是**纯函数**（只读 `State`，不掷骰、不写状态）：
 //!
-//! 1. [`needed_freighters`]：本势力**该有多少艘运输舰**（一处有积压的货栈配一条船）；
-//! 2. [`should_be_freighter`]：**这艘舰**是不是该跑运输（按上一个数定编，与遍历顺序无关）；
+//! 1. [`needed_freighters`] / [`freighter_quota`]：本势力**该有多少艘运输舰**——一处有
+//!    积压的货栈配一条船（需求），再乘上**思潮倾向**（[`freight_lean`]：军国少投、
+//!    和平/殖民多投）；
+//! 2. [`should_be_freighter`]：**这艘舰**是不是该跑运输——按「目标头数 − 现状头数」
+//!    这个**缺口抽签**（概率分布 = 想要的比例 ⇒ 期望入伙数 = 缺口），与遍历顺序无关；
 //! 3. [`route_for`]：这艘舰**该跑哪条线**——`from` 按**积压占比抽签**、`to` 永远是首都。
 //!
 //! # 为什么「选哪处积压」用抽签而不是贪心
@@ -27,6 +30,10 @@
 //! （[`State::ship_freighter`](crate::model::State::ship_freighter)）说了算，
 //! 而「该有几艘」是这里的 [`needed_freighters`]——自动控制把结论写回那片叶
 //! （`Player` 的叶不碰），于是玩家能覆写、AI 也不必每回合重新发明结论。
+//!
+//! 那片叶同时是**现状的记忆**：角色判据读的正是它（上一回合的结论），所以算的是
+//! 「**还缺/超了几条腿**」而不是「我是谁」——于是头数正好等于目标时**谁都不动**，
+//! 不会出现「每回合重掷身份 ⇒ 路线反复作废」。
 
 use crate::model::*;
 use crate::sim;
@@ -79,73 +86,176 @@ pub fn freight_tonnage(config: &GameConfig, ship: &Ship) -> f64 {
     cargo_capacity(config, ship) * panel.speed / panel.upkeep.max(1e-6)
 }
 
-/// **这艘舰是不是该跑运输**。纯函数、与舰的遍历顺序无关（自动控制逐舰调用它，结论必须一致）。
+// --- 思潮 → 角色（用户裁决：「**由国家思潮决定自动控制下舰船倾向于运输还是战斗**」）----
+//
+// 「谁是运输舰」从**硬定编**（按运力排名取前 N、一刀切）改成**思潮驱动的概率**：
+// 需求（[`needed_freighters`]：一处有积压的货栈 = 一条腿）仍然说**要多少条腿**，
+// 思潮说**本势力愿意投多少条腿**。
+//
+// 系数**写死在这里、不进 config**（用户裁决：「不要配置了，直接耦合思潮写死」）：
+// 改行为就改下面这几个带量纲注释的常数。
+
+/// 思潮轴权重（**和平端 −1 ⟷ 军国端 +1**）：军国 ⇒ 尚武 ⇒ **少**跑运输。
+const LEAN_MILITARY: f64 = 1.0;
+/// 思潮轴权重（**自然端 −1 ⟷ 殖民端 +1**）：殖民 ⇒ 要给远方殖民地送补给 ⇒ **多**跑运输
+/// ⇒ 对「尚武度」是**负**贡献。
 ///
-/// 规则，按优先级：
-/// 1. **舱里有货 ⇒ 一定是运输舰**。角色一改，就再没人执行那条路线，货会永远烂在舱里；
-/// 2. 否则按**定编**取：本势力活舰按 [`freight_tonnage`]（舱容 × 速度 ÷ 维护费）大者优先、
-///    同分按名字序，前 `needed_freighters`（扣掉已在运货的那些）名是运输舰。
+/// 两轴**同权反号**（用户裁决：就这两轴），于是「既军国又殖民」的势力两股力量互相抵消
+/// （`+1, +1 ⇒ 0`）——扩张既要打仗也要补给，它们撞在同一个标量上，不是巧合。
+const LEAN_COLONY: f64 = -1.0;
+/// 尚武度 → 头数倍数的斜率。**中庸（尚武度 0）⇒ 倍数正好 1.0** = 旧硬定编的行为，
+/// 于是这条改动在世界的中位上**行为中性**：思潮只负责把它往两边推。
+const LEAN_GAIN: f64 = 1.5;
+/// **岗位轮换率**（用户裁决：「运输/战斗是**动态调整**的，而非固定」）：即使头数正好等于
+/// 配额，也按 `它 × 现状头数` 的期望换手——**入伙与退伍两侧的期望相等**，所以**头数不动、
+/// 换的只是「谁来干」**。岗位平均任期 ≈ `1 ÷ 它`（0.05 ⇒ 约 20 个回合，够跑几趟来回）。
 ///
-/// # 为什么排序键长这样
+/// 没有它，配额处两侧概率都恰好是 0 ⇒ 谁去运货**一次定终身**（那是「固定」而不是「动态」）。
+const ROLE_ROTATION: f64 = 0.05;
+/// **效率票的温度**：一张票 = `e^(效率加成 ÷ 它)`（见 [`should_be_freighter`] 的抽签）。
+/// 越小越接近「只让最好的船去运」（断崖就在那个极限里），越大越是「谁去都行」。
+/// 取 0.5 时最好的船与最差的船票数之比 = `e^(ROLE_EFF_GAIN ÷ 0.5)` ≈ 20 倍。
+const ROLE_WIDTH: f64 = 0.5;
+/// **运力效率偏好**：票数按 `运力 ÷ 队内最大运力 − 1 ∈ [−1, 0]` 加成。
 ///
-/// 先试过**只看舱容**——它有两个实测出来的硬伤：
+/// 它是旧「按运力排名取前 N」的**软版本**：最好的船加成 0、最差的 `−ROLE_EFF_GAIN`，
+/// 两者入伙概率之比 = `e^(ROLE_EFF_GAIN ÷ ROLE_WIDTH)` ≈ 20 倍——**偏好很硬、但没有断崖**
+///（遵 `AGENTS.md`：不设进不去的目标——真没人运货时，战列舰照样会去跑）。
+const ROLE_EFF_GAIN: f64 = 1.5;
+
+/// 本势力此刻的**尚武度**（两轴加权和，权重见上面两个常数）。
+fn martial(state: &State, fid: &str) -> f64 {
+    let Some(f) = state.faction(fid) else { return 0.0 };
+    LEAN_MILITARY * f.ideology.peace_military + LEAN_COLONY * f.ideology.nature_colony
+}
+
+/// 思潮 → **集货倾向**：本势力愿意投在集货上的**头数倍数**（`目标头数 = 需求 × 它`）。
 ///
-/// 1. **把主力舰从战线上抽走**：实测 seed 7 / r120，俄罗斯按舱容选出的 8 条运输舰里有
-///    **5 条战列舰**（载火力 2.0 的一锤定音舰全去拉货了）。
-/// 2. **不算速度**：一趟装多少只是每趟的量，**单位时间的运力 = 舱容 × 速度**。
+/// `2σ(−LEAN_GAIN × 尚武度)`：中庸 ⇒ 1.0；军国 ⇒ **< 1**（宁可缺货、宁可雇人，也要把船留在
+/// 战线上）；和平 / 殖民 ⇒ **> 1**（囤运力，多出来的船正好去做承运人）。
+pub fn freight_lean(state: &State, fid: &str) -> f64 {
+    2.0 * super::contract::sigmoid(-LEAN_GAIN * martial(state, fid))
+}
+
+/// 本回合的**目标头数**（连续量，不取整）：`需求 × 思潮倾向`。
 ///
-/// 换成 `舱容 × 速度 ÷ 维护费`（速度取**实装推进模块**的有效值，不是舰级系数）后，
-/// 排序天然对上舰级身份与招牌（航母=散货船、驱逐=远洋部署、战列=最不该拉货的那条）：
+/// 需求是 [`needed_freighters`]（一处有积压的货栈 = 一条腿）——**倾向乘在需求上**，
+/// 所以「**没有积压 ⇒ 目标 0 ⇒ 谁都不去跑运输**」这条不变量不会被思潮冲掉。
+pub fn freighter_quota(state: &State, fid: &str) -> f64 {
+    needed_freighters(state, fid) as f64 * freight_lean(state, fid)
+}
+
+/// 本势力此刻**已经是运输舰**的舰数（不含 `except`）——抽签的**现状项**。
 ///
-/// | 舰级 | 舱容 | speed_mult | 维护费 | 运力÷维护费（同型推进下） |
-/// |---|---|---|---|---|
-/// | 航母 | 20 | 1.0 | 7.5 | **2.67** |
-/// | 驱逐 | 4 | **1.3** | 2.5 | 2.08（远洋部署 = 天生的护航/集货舰） |
-/// | 护卫 | 2 | 1.0 | 1.5 | 1.33 |
-/// | 巡洋 | 6 | 1.0 | 6.0 | 1.00 |
-/// | 战列 | 6 | 0.9 | 6.5 | 0.83（**最不该去拉货的一条**） |
+/// 取的是**有效角色**（叶 → 舰队默认 → 记录值）= **上一回合定下来的那个结论**，这就是迟滞
+/// 的来源：船不是每回合从头掷「我是谁」，而是掷「**要不要换岗**」。玩家的钉子与舱里有货的舰
+/// 都算进来——它们**确实在跑运输**，占着运力的名额。
+fn hauler_headcount(state: &State, fid: &str, except: &str) -> f64 {
+    state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0 && s.name != except)
+        .filter(|s| state.ship_freighter(s.name.clone()))
+        .count() as f64
+}
+
+/// **这艘舰本回合的角色**（`true` = 运输舰）。**纯函数**：同一回合对同一艘舰多次调用结果
+/// 一致（骰子由 `(势力, 舰名, 回合, "role")` 派生 ⇒ `assign_roles` 与更早的 `step_contracts`
+/// 拿到同一个答案），且**不消费主 `Prng`**。
+///
+/// 四层，从硬到软：
+/// 1. **硬承诺**：正在执行承包单的舰、舱里有货的舰 ⇒ **必须是**运输舰。角色一改，那条线就
+///    再没人跑、那票货就烂在舱里（所以这两条压过抽签）；
+/// 2. **玩家表态**：这条轴归属解析为 `Player` ⇒ 用玩家的值，AI 一个骰子都不掷；
+/// 3. **物理**：运力为 0 的舰（没有推进模块 ⇒ 速度 0）**运不了货**——派它去等于派一尊雕像；
+/// 4. **思潮驱动的配额 → 按票抽签**：目标头数 = `需求 × 思潮倾向`（[`freighter_quota`]），
+///    而**每个候选舰的入伙概率 = 缺口 × 它的票 ÷ 同侧总票数**——与 [`route_for`] 的
+///    「按积压占比抽签」是同一条纪律（**概率分布 = 想要的比例**），于是：
+///    * **期望入伙数正好 = 缺口**，不多不少（不是「每人各掷一次身份」，那样缺口大时
+///      全舰队会**一起**入伙、下一回合又一起退伍——实测 12 艘舰配额 4 时会在 0 与 12
+///      之间两极震荡）；
+///    * **头数钉在目标上、但人员是流动的**：目标处净变化为 0（判据里不出现被这个动作本身
+///      改变的量），再叠一层**轮换**（[`ROLE_ROTATION`]）——走一个、来一个，头数不动而
+///      「谁来干」每回合都在动（用户裁决：「运输/战斗是**动态调整**的，而非固定」）；
+///    * **票**把旧的「按运力排名取前 N」变成软的：票 = `e^(效率加成 ÷ ROLE_WIDTH)`，
+///      最好的船票最重（≈ 最差船的 20 倍）⇒ **偏好很硬、但没有断崖**
+///      （`AGENTS.md`：不设进不去的目标——真没人运货时，战列舰照样会被抽中）；
+///    * **退伍的票按低效率**：超额时先走的是运力最差的那些（于是名单会自己换成好船）。
+///
+/// 名单（**同侧总票数**的分母）只算**掷得动的船**：玩家钉住的、舱里有货的、正在执行承包单的
+/// 舰都不在名单上——票不该投给动不了的人，否则期望入伙数会凭空少掉。
 pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> bool {
-    // 0) **正在执行承包单的舰必须是运输舰**（M4b）。那条链接（`ContractState::assignments`）
-    //    是接单时立的**承诺**：角色轴每回合由自动控制重写，若不认识它，一艘接到一半的单
-    //    会被定编收走、改回战舰——单子就永远送不完了。
+    // 1) 硬承诺（见上）。
     if state.contracts.assignment_of(ship_id).is_some() {
         return true;
     }
-    // 1) 舱里有货：它必须把货送完（否则货烂在舱里）。这条**故意压过**运力排序——
-    //    哪怕它刚被打残、运力掉到很低，也得把手上那票货交出去（或死在路上）。
-    if state
-        .ship(ship_id)
-        .map(|s| !s.cargo.is_empty())
-        .unwrap_or(false)
-    {
+    let Some(ship) = state.ship(ship_id) else { return false };
+    if !ship.cargo.is_empty() {
         return true;
     }
-    let needed = needed_freighters(state, fid);
-    if needed == 0 {
+    // 2) 玩家表态：AI 不掷骰，直接用玩家的值（`Player` 的逐舰叶或舰队默认）。
+    let cur = state.ship_freighter(ship_id.to_string());
+    if state.ship_freighter_control(ship_id.to_string()).is_player() {
+        return cur;
+    }
+    // 3) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
+    if freight_tonnage(config, ship) <= 0.0 {
         return false;
     }
-    // 2) 定编：先把「舱里有货」的舰排在最前（它们已经占掉名额），再按运力/维护费。
-    //    **只算自动控制开的舰**（玩家开的舰不替玩家派活），**且必须动得了**（运力 > 0）。
-    //    执行承包单的舰也**不参与**这轮排序（它们已由上面的第 0 条钉住）——否则它们会
-    //    再占掉一个自有集货的名额，等于把承包的运力算两遍。
-    let mut cands: Vec<(String, bool, f64)> = state
+    // 4) 配额 → 抽签。
+    let quota = freighter_quota(state, fid);
+    let others = hauler_headcount(state, fid, ship_id);
+    let temp = ROLE_WIDTH.max(1e-9);
+    // 运力效率加成（以**队内最大运力**为基准，尺度无关）：最好的船 = 0、最差的 = −gain。
+    let best = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0)
-        .filter(|s| state.ship_control(s.name.clone()) == ControlMode::Auto)
-        .filter(|s| state.contracts.assignment_of(&s.name).is_none())
-        .map(|s| (s.name.clone(), !s.cargo.is_empty(), freight_tonnage(config, s)))
-        .filter(|(_, holding, tonnage)| *holding || *tonnage > 0.0)
-        .collect();
-    cands.sort_by(|a, b| {
-        b.1.cmp(&a.1) // 载着货的优先
-            .then_with(|| b.2.total_cmp(&a.2)) // 运力/维护费大者优先
-            .then_with(|| a.0.cmp(&b.0)) // 名字序兜底（确定性）
-    });
-    cands
-        .iter()
-        .take(needed)
-        .any(|(name, _, _)| name == ship_id)
+        .map(|s| freight_tonnage(config, s))
+        .fold(0.0f64, f64::max);
+    let tonnage = |s: &Ship| freight_tonnage(config, s);
+    // 一张票：**入伙**按高效率（最好的船票最重）、**退伍**按低效率（最差的船先走）。
+    let ticket = |s: &Ship| -> f64 {
+        let eff = if best > 0.0 { ROLE_EFF_GAIN * (tonnage(s) / best - 1.0) } else { 0.0 };
+        if cur { (-eff / temp).exp() } else { (eff / temp).exp() }
+    };
+    let mut mine = 0.0;
+    let mut tickets = 0.0;
+    for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
+        if tonnage(s) <= 0.0 || state.ship_freighter(s.name.clone()) != cur {
+            continue;
+        }
+        if s.name != ship_id {
+            // 钉住的舰不在这张名单上（玩家表态 / 舱里有货 / 正在执行承包单）。
+            if state.ship_freighter_control(s.name.clone()).is_player()
+                || state.contracts.assignment_of(&s.name).is_some()
+                || !s.cargo.is_empty()
+            {
+                continue;
+            }
+        }
+        let t = ticket(s);
+        tickets += t;
+        if s.name == ship_id {
+            mine = t;
+        }
+    }
+    let tickets = tickets.max(1e-9);
+    // 缺口（我入伙时是「还缺几条腿」，我退伍时是「带上我超了几条腿」）——两者都由同一个
+    // `others` 算出，所以这个动作**不改变判据本身**。
+    let gap = if cur { (others + 1.0 - quota).max(0.0) } else { (quota - others).max(0.0) };
+    // **轮换**：配额处也要换手（用户裁决：角色是动态调整的）。两侧都是 `ROLE_ROTATION × h`
+    // ⇒ 期望「走的」与「来的」一样多 ⇒ **头数不动，换的只是谁来干**（效率票决定换谁：
+    // 低效率的先走、高效率的先上）。
+    let headcount = others + if cur { 1.0 } else { 0.0 };
+    let flow = gap + ROLE_ROTATION * headcount;
+    let p = (flow * mine / tickets).min(1.0);
+    let flip = sim::derived_roll(fid, ship_id, state.round, "role") < p;
+    if cur {
+        !flip
+    } else {
+        flip
+    }
 }
 
 /// **本回合的定编**：把「谁是运输舰」一次性写进第三条风格轴
@@ -540,6 +650,60 @@ mod tests {
         (config, state)
     }
 
+    /// 某势力此刻的**运输舰名单**（按舰名序）——用例里到处要看它。
+    fn roster(state: &State, fid: &str) -> Vec<String> {
+        let mut v: Vec<String> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+            .map(|s| s.name.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 钉住一个势力的**思潮两轴**（只有这两轴进集货倾向，见 `LEAN_MILITARY`/`LEAN_COLONY`）。
+    fn set_ideology(state: &mut State, fid: &str, military: f64, colony: f64) {
+        let f = state
+            .factions
+            .iter_mut()
+            .find(|f| f.name == fid)
+            .unwrap_or_else(|| panic!("没有势力 {fid}"));
+        f.ideology.peace_military = military;
+        f.ideology.nature_colony = colony;
+    }
+
+    /// 把某势力的舰队克隆 `times` 倍（名字加后缀）——用例需要一支**够大的**舰队，
+    /// 否则「按比例投几条腿」会被舰队规模顶住，看不出思潮的差别。
+    fn grow_fleet(state: &mut State, fid: &str, times: usize) {
+        let base: Vec<Ship> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid)
+            .cloned()
+            .collect();
+        for k in 1..=times {
+            for s in &base {
+                let mut c = s.clone();
+                c.name = format!("{}-{k}", s.name);
+                state.ships.push(c);
+            }
+        }
+    }
+
+    /// 连跑 `rounds` 个回合的**角色定编**（每回合先推进 `round` 再定编，与 `sim` 同步：
+    /// 骰子是 `(势力, 舰名, 回合, "role")` 派生的，**换回合才换骰子**）。
+    /// 返回每回合的运输舰名单。
+    fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> Vec<Vec<String>> {
+        let mut hist = Vec::new();
+        for _ in 0..rounds {
+            state.round += 1;
+            assign_roles(state, config);
+            hist.push(roster(state, fid));
+        }
+        hist
+    }
+
     /// **定编 = 有积压的货栈数**，且它随积压清空自动归零（船自然改回战舰）。
     #[test]
     fn crew_size_is_one_ship_per_stocked_depot() {
@@ -583,33 +747,43 @@ mod tests {
 
     /// **角色是控制属性、AI 会写它、玩家能压住它**（用户裁决：像风格一样）。
     ///
-    /// 三件事一起钉：定编按舱容选船；结论确实落在叶子上；**玩家把叶设成 `Player` 之后
-    /// 自动定编再也不碰它**（哪怕积压清空——否则「我明明钉了角色却没生效」）。
+    /// 三件事一起钉：有积压时 AI 会把运输舰定出来（结论确实落在叶子上、模式是 `Inherit`）；
+    /// **运力最好的船优先**（旧的硬排序现在是**软**的，但偏好仍要看得出来）；**玩家把叶设成
+    /// `Player` 之后自动控制再也不碰它**（哪怕积压清空——否则「我明明钉了角色却没生效」）。
     #[test]
     fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
         let (config, mut state) = fresh(42);
         state.depots.clear();
-        // 中国开局：两艘护卫（舱容 2）+ 一艘驱逐（舱容 4）。一处积压 ⇒ 只定一艘，且该是驱逐。
         state.depot_add("中国", "金星", "碳", 100.0);
-        assign_roles(&mut state, &config);
-        let haulers: Vec<String> = state
+        let hist = run_roles(&mut state, &config, "中国", 60);
+        let with_hauler = hist.iter().filter(|r| !r.is_empty()).count();
+        assert!(with_hauler > 35, "有积压就该有人跑运输（60 回合里只有 {with_hauler} 回合有）");
+        // 运力最好的船优先：开局是「护卫 ×2 + 驱逐 ×1」，驱逐的运力最高
+        //（4×1.3÷2.5 = 2.08 vs 2×1.0÷1.5 = 1.33），它被选中的回合数该多于任何一艘护卫。
+        let destroyer = state
             .ships
             .iter()
-            .filter(|s| s.faction_id == "中国" && state.ship_freighter(s.name.clone()))
-            .map(|s| s.name.clone())
-            .collect();
-        assert_eq!(haulers.len(), 1, "一处积压配一条船：{haulers:?}");
-        let hauler = haulers[0].clone();
-        assert_eq!(
-            state.ship(&hauler).unwrap().class,
-            "destroyer",
-            "按运力（舱容 × 速度 ÷ 维护费）大者优先——同样的舰队规模，舱容与速度一起决定吞吐"
-        );
-        let leaf = state
+            .find(|s| s.faction_id == "中国" && s.class == "destroyer")
+            .expect("中国开局有驱逐舰")
+            .name
+            .clone();
+        let d = hist.iter().filter(|r| r.contains(&destroyer)).count();
+        let c_max = hist
+            .iter()
+            .map(|r| r.iter().filter(|n| **n != destroyer).count())
+            .max()
+            .unwrap_or(0);
+        assert!(d > c_max, "运力高的船该被优先选中：驱逐 {d} 回合 vs 单艘护卫最多 {c_max} 回合");
+        // 结论落在叶子上，且模式是 `Inherit`（玩家把**舰队默认**设成 Player 时能压过 AI）。
+        let (hauler, leaf) = state
             .control("中国".to_string())
-            .and_then(|c| c.ship_freighter.get(&hauler))
-            .expect("结论要落在叶子上（否则每回合都要重新发明）");
-        assert!(leaf.value, "这艘是运输舰");
+            .and_then(|c| {
+                c.ship_freighter
+                    .iter()
+                    .find(|(_, l)| l.value)
+                    .map(|(n, l)| (n.clone(), l.clone()))
+            })
+            .expect("AI 该在某个回合写过一片 true 的叶");
         assert_eq!(
             leaf.mode,
             ControlMode::Inherit,
@@ -643,8 +817,8 @@ mod tests {
     }
 
     /// **删叶 = 交回自动定编**：玩家给某艘舰钉过角色（`Player`）之后 AI 一个字都不写；
-    /// 把这片叶删掉，这艘舰立刻回到「AI 按积压定编」的自由状态——下回合 AI 会把结论重新写进
-    /// 一片新叶。这正是这条轴与另两条风格轴的差别：**删叶不是"锁成某个值"，而是"放手"**。
+    /// 把这片叶删掉，这艘舰立刻回到「AI 按积压 + 思潮定编」的自由状态——之后 AI 会把结论
+    /// 重新写进一片新叶。这正是这条轴与另两条风格轴的差别：**删叶不是"锁成某个值"，而是"放手"**。
     #[test]
     fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
         let (config, mut state) = fresh(42);
@@ -655,7 +829,7 @@ mod tests {
             .find(|s| s.faction_id == "中国")
             .map(|s| s.name.clone())
             .expect("中国至少有一艘舰");
-        // 玩家钉死「它是运输舰」，而此刻没有任何积压 ⇒ 定编本来会把它判成战舰。
+        // 玩家钉死「它是运输舰」，而此刻没有任何积压 ⇒ AI 本来不会给它这个角色。
         state
             .control_mut("中国".to_string())
             .unwrap()
@@ -679,16 +853,13 @@ mod tests {
             "叶必须真的没了"
         );
 
-        // 有积压 ⇒ 定编重新生效（谁去运由运力排序决定，但必须有人运）。
+        // 有积压 ⇒ 定编重新生效（角色是掷骰定的，所以看的是「若干回合内有人被定上」）。
         state.depot_add("中国", "金星", "碳", 100.0);
-        assign_roles(&mut state, &config);
-        let haulers: Vec<String> = state
-            .ships
-            .iter()
-            .filter(|s| s.faction_id == "中国" && state.ship_freighter(s.name.clone()))
-            .map(|s| s.name.clone())
-            .collect();
-        assert_eq!(haulers.len(), 1, "删掉玩家的钉子之后 AI 重新定编：{haulers:?}");
+        let hist = run_roles(&mut state, &config, "中国", 40);
+        assert!(
+            hist.iter().any(|r| !r.is_empty()),
+            "删掉玩家的钉子之后 AI 重新定编：40 回合里一个运输舰都没定出来"
+        );
     }
 
     /// **运力要算速度**（用户点破的那条）：一趟装多少只是**每趟**的量，单位时间的运力是
@@ -700,8 +871,6 @@ mod tests {
         state.depots.clear();
         state.depot_add("中国", "金星", "碳", 100.0);
         state.depot_add("中国", "火星", "铁", 100.0);
-        // **三处**积压 ⇒ 定编 3，而中国只有 3 艘舰、其中 1 艘将被拆成裸舰 ⇒ 动得了的只有 2 艘。
-        // 这样「0 速的舰要被剔出运力名单」才有判别力：没有剔除时它会被凑进定编（3 条）。
         state.depot_add("中国", "水星", "硅", 100.0);
         // 把一艘护卫拆成**裸舰**：没有推进模块 ⇒ 巡航速度 0。
         let stripped = state
@@ -726,34 +895,6 @@ mod tests {
             0.0,
             "速度 0 ⇒ 运力为零（不是「很小」）"
         );
-        assign_roles(&mut state, &config);
-        assert!(
-            !state.ship_freighter(stripped.clone()),
-            "速度 0 的舰物理上运不了货——不该被派去跑运输"
-        );
-        // 选中的人必须**正好是按「舱容 × 速度 ÷ 维护费」排出来的前二**。
-        let mut ranked: Vec<(String, f64)> = state
-            .ships
-            .iter()
-            .filter(|s| s.faction_id == "中国" && s.hull > 0.0)
-            .map(|s| (s.name.clone(), freight_tonnage(&config, s)))
-            .collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let chosen: Vec<String> = state
-            .ships
-            .iter()
-            .filter(|s| s.faction_id == "中国" && state.ship_freighter(s.name.clone()))
-            .map(|s| s.name.clone())
-            .collect();
-        assert_eq!(
-            chosen.len(),
-            2,
-            "定编 3（三处积压）但只有 2 艘动得了 ⇒ 只该定 2 条运输舰，实为 {chosen:?}"
-        );
-        assert!(
-            !chosen.contains(&stripped),
-            "速度 0 的舰不该混进定编：{chosen:?}"
-        );
         // 公式本身：运力 = 舱容 × 速度 ÷ 维护费，其中舱容按战损**连续**折算
         //（把一艘完好的舰打到半血 ⇒ 运力减半）。
         let intact = state
@@ -770,13 +911,36 @@ mod tests {
             (freight_tonnage(&config, &hurt) - t * 0.5).abs() < 1e-9,
             "装甲掉一半 ⇒ 舱容减半 ⇒ 运力减半"
         );
-        let top2: Vec<&String> = ranked.iter().take(2).map(|(n, _)| n).collect();
-        for name in &chosen {
-            assert!(
-                top2.contains(&name),
-                "选中的必须是运力前二：选中 {chosen:?}，排名 {ranked:?}"
-            );
-        }
+
+        // 速度 0 的舰**一个回合都不会**被定成运输舰（物理，不是「排序靠后」）。
+        let hist = run_roles(&mut state, &config, "中国", 200);
+        assert!(
+            hist.iter().all(|r| !r.contains(&stripped)),
+            "速度 0 的舰物理上运不了货——一回合都不该被派去跑运输"
+        );
+        // 三处积压 ⇒ 目标头数 3（中庸），而只有 2 艘动得了 ⇒ 那两艘该基本都常在名单上。
+        let mean = hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64;
+        assert!(mean > 1.85, "缺口大过候选数 ⇒ 两艘动得了的基本常驻名单（平均 {mean:.2}）");
+        // **软排序**：两艘里运力高的那艘被选中的回合数不少于低的那艘。
+        let movable: Vec<(String, f64)> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == "中国" && s.hull > 0.0 && s.name != stripped)
+            .map(|s| (s.name.clone(), freight_tonnage(&config, s)))
+            .collect();
+        assert_eq!(movable.len(), 2, "用例前提：只剩两艘动得了的船");
+        let hits = |n: &str| hist.iter().filter(|r| r.contains(&n.to_string())).count();
+        let (a, ta) = &movable[0];
+        let (b, tb) = &movable[1];
+        let (hi, lo) = if ta > tb { (a, b) } else { (b, a) };
+        assert!(
+            hits(hi) >= hits(lo),
+            "运力高的船该更容易被选中：{hi}（{:.2}）{hits_hi} 回合 vs {lo}（{:.2}）{hits_lo} 回合",
+            ta.max(*tb),
+            ta.min(*tb),
+            hits_hi = hits(hi),
+            hits_lo = hits(lo)
+        );
     }
 
     /// **有效角色的取值链**：叶 → 舰队默认 → 舰上记录值，与前两条风格轴同形。
@@ -814,6 +978,67 @@ mod tests {
         );
     }
 
+    /// **思潮决定倾向**（用户裁决：「由国家思潮决定自动控制下舰船倾向于运输还是战斗」）。
+    ///
+    /// 同一个世界、同一批骰子、同一份积压，**只改思潮两轴**：军国端少跑运输、殖民/和平端
+    /// 多跑运输；而**中庸端正好是 1.0 = 旧硬定编**（这条改动在世界的中位上是行为中性的）。
+    #[test]
+    fn ideology_decides_how_much_of_the_fleet_hauls() {
+        let (config, base) = fresh(42);
+        let stock_four = |st: &mut State| {
+            st.depots.clear();
+            for b in ["金星", "水星", "火星", "木星"] {
+                st.depot_add("中国", b, "碳", 100.0);
+            }
+        };
+        let mean_headcount = |mil: f64, col: f64| -> f64 {
+            let mut st = base.clone();
+            set_ideology(&mut st, "中国", mil, col);
+            grow_fleet(&mut st, "中国", 3); // 12 艘 ⇒ 舰队规模不顶住「按比例投几条腿」
+            stock_four(&mut st);
+            let hist = run_roles(&mut st, &config, "中国", 120);
+            hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64
+        };
+
+        // 中庸（尚武度 0）⇒ 倍数**恰好** 1.0：`2σ(0) = 1` ⇒ 目标头数 = 需求 = 4 处货栈。
+        let mut neutral_state = base.clone();
+        set_ideology(&mut neutral_state, "中国", 0.0, 0.0);
+        stock_four(&mut neutral_state);
+        assert!(
+            (freight_lean(&neutral_state, "中国") - 1.0).abs() < 1e-12,
+            "中庸必须回到旧硬定编（倍数 1.0），实为 {}",
+            freight_lean(&neutral_state, "中国")
+        );
+        assert!((freighter_quota(&neutral_state, "中国") - 4.0).abs() < 1e-12);
+
+        let militarist = mean_headcount(1.0, 0.0);
+        let neutral = mean_headcount(0.0, 0.0);
+        let pacifist = mean_headcount(-1.0, 0.0);
+        let colonist = mean_headcount(0.0, 1.0);
+        // 抽签的期望**正好**是配额（实测 200 回合：1.52 vs 1.46、3.97 vs 4.00、6.47 vs 6.54）。
+        // 这条是「概率分布 = 想要的比例」那条纪律的守卫：机制走形（比如每人各掷一次身份）
+        // 时它立刻会炸——实测过那种写法会在 0 与 12 之间两极震荡。
+        for (mil, col, quota) in [(1.0, 0.0, 1.46), (0.0, 0.0, 4.0), (-1.0, 0.0, 6.54)] {
+            let got = mean_headcount(mil, col);
+            assert!(
+                (got - quota).abs() < 0.35,
+                "平均头数该贴着配额（思潮 {mil}×军事 + {col}×殖民 ⇒ 配额 {quota}）：实为 {got:.2}"
+            );
+        }
+        assert!(militarist < neutral, "军国端该少跑运输：{militarist:.2} vs {neutral:.2}");
+        assert!(pacifist > neutral, "和平端该多跑运输：{pacifist:.2} vs {neutral:.2}");
+        assert!(
+            colonist > neutral,
+            "殖民端要给远方殖民地送补给 ⇒ 该多跑运输（所以它在「尚武度」上是负权重）：{colonist:.2} vs {neutral:.2}"
+        );
+        // 两轴**同权反号**：既军国又殖民 ⇒ 两股力量抵消（回到中庸附近）。
+        let both = mean_headcount(1.0, 1.0);
+        assert!(
+            (both - neutral).abs() < 1.0,
+            "军国 + 殖民该互相抵消：{both:.2} vs 中庸 {neutral:.2}"
+        );
+    }
+
     /// **AI 端到端（线路接通）**：有积压时自动控制会定出运输舰并给它排一条线；积压清空后
     /// 那名额自然收回（船改回战舰）。
     #[test]
@@ -821,30 +1046,98 @@ mod tests {
         let (config, mut state) = fresh(42);
         state.depots.clear();
         state.depot_add("中国", "金星", "碳", 100.0);
+        // 角色是**掷骰**定的（有积压只是「有人去运」的概率高），所以这里跑几个回合而不是一个：
+        // 这正是与旧版硬定编的行为差别，用例必须照新语义写，而不是照旧结论写。
         let mut rng = crate::prng::Prng::new(42);
-        sim::advance(&mut state, &config, &mut rng);
-        let hauler = state
-            .ships
-            .iter()
-            .find(|s| s.faction_id == "中国" && state.ship_freighter(s.name.clone()))
-            .map(|s| s.name.clone())
-            .expect("有积压 ⇒ 自动控制该定一艘运输舰");
+        let mut found = None;
+        for _ in 0..20 {
+            sim::advance(&mut state, &config, &mut rng);
+            if let Some(n) = roster(&state, "中国").into_iter().next() {
+                found = Some(n);
+                break;
+            }
+        }
+        let hauler = found.expect("有积压 ⇒ 若干回合内该定出运输舰");
         assert!(
             matches!(state.ship_behavior(hauler.clone()), Some(ShipBehavior::Haul { .. })),
             "运输舰该有一条路线，实为 {:?}",
             state.ship_behavior(hauler.clone())
         );
-        // 积压清空 + 舱里也没货 ⇒ 定编收回。这里**直接重跑定编**而不是再跑一回合模拟：
-        // 模拟里金星会当期产出新的碳、货栈立刻又有货（那是正确行为，不是这个用例要测的事）。
-        state.depots.clear();
-        for s in state.ships.iter_mut() {
-            s.cargo.clear();
+        // 积压清空 + 舱里也没货 ⇒ 名额收回。这里**每回合都清货栈**（模拟里金星会当期产出新的碳、
+        // 货栈立刻又有货——那是正确行为，不是这个用例要测的事）。
+        let mut recalled = false;
+        for _ in 0..20 {
+            state.depots.clear();
+            for s in state.ships.iter_mut() {
+                s.cargo.clear();
+            }
+            state.round += 1;
+            assign_roles(&mut state, &config);
+            if !state.ship_freighter(hauler.clone()) {
+                recalled = true;
+                break;
+            }
         }
-        assign_roles(&mut state, &config);
+        assert!(recalled, "没有积压了 ⇒ 该把运输舰的名额收回去（船改回战舰）");
+        // 配额为 0 时**超额是确定的**（带上我就是超一条），所以收回是必然的、且很快。
+    }
+
+    /// **头数稳、人员流动**（用户裁决：「运输/战斗是**动态调整**的，而非固定」；同时也是
+    /// 笔记里那条「判据里不要出现被这个动作本身改变的量」的守卫——角色读的是上一回合的结论）。
+    ///
+    /// 两件事一起钉：
+    /// 1. **条数**钉在配额上（±1 的呼吸），不会两极震荡；
+    /// 2. **谁去干**每回合都在换（轮换）——既不钉死，也不每回合翻烙饼。
+    #[test]
+    fn the_headcount_holds_at_the_quota_while_the_crew_rotates() {
+        let (config, base) = fresh(42);
+        let setup = |mil: f64, col: f64, depots: &[&str]| {
+            let mut st = base.clone();
+            set_ideology(&mut st, "中国", mil, col);
+            grow_fleet(&mut st, "中国", 3);
+            st.depots.clear();
+            for b in depots {
+                st.depot_add("中国", b, "碳", 100.0);
+            }
+            st
+        };
+        // 1) 头数围着目标（4）站住，不会在两极之间摆。
+        let mut st = setup(0.0, 0.0, &["金星", "水星", "火星", "木星"]);
+        let hist = run_roles(&mut st, &config, "中国", 200);
+        // 整数配额（需求 4 × 中庸 1.0）⇒ 头数该贴着 4（±1 的呼吸，而不是两极震荡）。
+        let in_band = hist.iter().filter(|r| (3..=5).contains(&r.len())).count();
         assert!(
-            !state.ship_freighter(hauler.clone()),
-            "没有积压了 ⇒ 不该再占着运输舰的名额（船改回战舰）"
+            in_band as f64 / hist.len() as f64 > 0.9,
+            "头数该贴着目标：{in_band} / {} 回合落在 3..=5",
+            hist.len()
         );
+        // 2) 换岗是**慢**的：平均每回合进出的船数远小于 1。
+        let churn: usize = hist
+            .windows(2)
+            .map(|w| w[1].iter().filter(|n| !w[0].contains(n)).count())
+            .sum();
+        let per_round = churn as f64 / (hist.len() - 1) as f64;
+        // **动态但不抖**：轮换让岗位一直换手，而缺口项把换手量压在「岗位数」这个量级里
+        //（实测 0.52 条/回合 ⇒ 每条岗位平均 8 个回合换人 ≈ 跑得完几趟来回）。
+        assert!(
+            (0.2..1.5).contains(&per_round),
+            "换手该是「一直在动、但不成片翻烙饼」（实为 {per_round:.3} 条/回合）"
+        );
+        // 3) 没有积压 ⇒ 全员战舰；新积压一出现 ⇒ 几回合内补得上（不是「一旦改成战舰就回不去」）。
+        let mut st = setup(0.0, 0.0, &[]);
+        run_roles(&mut st, &config, "中国", 10);
+        assert!(roster(&st, "中国").is_empty(), "没有积压 ⇒ 谁都不该占着运输舰的名额");
+        st.depot_add("中国", "金星", "碳", 100.0);
+        let mut waited = 0;
+        for _ in 0..20 {
+            st.round += 1;
+            assign_roles(&mut st, &config);
+            waited += 1;
+            if !roster(&st, "中国").is_empty() {
+                break;
+            }
+        }
+        assert!(waited <= 10, "新积压该在几回合内被顶上（实为 {waited} 回合）");
     }
 
     /// **续用现有路线**：货栈还有货时不改道（常驻路线不抖动）；货栈空了才重掷。
@@ -932,6 +1225,12 @@ mod tests {
                 .name
                 .clone();
             st.ships.retain(|s| s.faction_id != "中国" || s.name == keep);
+            // 这艘船必须**确实在跑运输**：角色现在是掷骰定的（思潮驱动），所以这里用一片
+            // `Player` 的叶把它钉住——`should_be_freighter` 对归玩家的轴不掷骰。
+            st.control_mut("中国".to_string())
+                .unwrap()
+                .ship_freighter
+                .insert(keep.clone(), Control::player(true));
             st.depots.clear();
             st.contracts.contracts.clear();
             st.depot_add("中国", "金星", "碳", 100.0);
@@ -1116,4 +1415,88 @@ mod tests {
         assert_eq!(a, b, "同种子同回合的挂单必须逐字相同");
         assert!(!a.is_empty(), "造了缺口就该有单子可测（否则这条守卫是空转的）");
     }
+    /// 【探针·思潮→角色】逐思潮打印：倾向倍数、目标头数、平均头数、换岗率、头数分布。
+    /// 跑法：`cargo test --lib probe_ideology_roles -- --ignored --nocapture`。
+    #[test]
+    #[ignore]
+    fn probe_ideology_roles() {
+        let (config, base) = fresh(42);
+        println!("--- 思潮 → 集货倾向（配额 4 处货栈、12 艘舰、200 回合）---");
+        for (tag, mil, col) in [
+            ("军国 +1", 1.0, 0.0),
+            ("偏军国 +0.5", 0.5, 0.0),
+            ("中庸  0", 0.0, 0.0),
+            ("偏和平 -0.5", -0.5, 0.0),
+            ("和平 -1", -1.0, 0.0),
+            ("殖民 +1", 0.0, 1.0),
+            ("军国+殖民", 1.0, 1.0),
+        ] {
+            let mut st = base.clone();
+            set_ideology(&mut st, "中国", mil, col);
+            grow_fleet(&mut st, "中国", 3);
+            st.depots.clear();
+            for b in ["金星", "水星", "火星", "木星"] {
+                st.depot_add("中国", b, "碳", 100.0);
+            }
+            let lean = freight_lean(&st, "中国");
+            let quota = freighter_quota(&st, "中国");
+            let hist = run_roles(&mut st, &config, "中国", 200);
+            let mean = hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64;
+            let churn: usize = hist
+                .windows(2)
+                .map(|w| w[1].iter().filter(|n| !w[0].contains(n)).count())
+                .sum();
+            let mut dist = std::collections::BTreeMap::<usize, usize>::new();
+            for r in &hist {
+                *dist.entry(r.len()).or_insert(0) += 1;
+            }
+            println!(
+                "{tag:>14}: lean={lean:.3} 配额={quota:.2} 平均头数={mean:.2} 换岗={:.3}/回合 分布={dist:?}",
+                churn as f64 / (hist.len() - 1) as f64
+            );
+        }
+        println!("--- 单处货栈（需求 1）：第一艘运输舰要等几回合 ---");
+        for (tag, mil, col) in [("军国 +1", 1.0, 0.0), ("中庸 0", 0.0, 0.0), ("和平 -1", -1.0, 0.0)] {
+            let mut st = base.clone();
+            set_ideology(&mut st, "中国", mil, col);
+            grow_fleet(&mut st, "中国", 3);
+            st.depots.clear();
+            st.depot_add("中国", "金星", "碳", 100.0);
+            let mut waited = 0;
+            for _ in 0..200 {
+                st.round += 1;
+                assign_roles(&mut st, &config);
+                waited += 1;
+                if !roster(&st, "中国").is_empty() {
+                    break;
+                }
+            }
+            println!("{tag:>14}: 第 {waited} 回合出现第一条运输舰");
+        }
+        println!("--- 单处货栈清空之后：名额收回要几回合 ---");
+        for (tag, mil, col) in [("军国 +1", 1.0, 0.0), ("中庸 0", 0.0, 0.0), ("和平 -1", -1.0, 0.0)] {
+            let mut st = base.clone();
+            set_ideology(&mut st, "中国", mil, col);
+            grow_fleet(&mut st, "中国", 3);
+            st.depots.clear();
+            st.depot_add("中国", "金星", "碳", 100.0);
+            for _ in 0..40 {
+                st.round += 1;
+                assign_roles(&mut st, &config);
+            }
+            let before = roster(&st, "中国").len();
+            st.depots.clear();
+            let mut waited = 0;
+            for _ in 0..200 {
+                st.round += 1;
+                assign_roles(&mut st, &config);
+                waited += 1;
+                if roster(&st, "中国").is_empty() {
+                    break;
+                }
+            }
+            println!("{tag:>14}: 清空前 {before} 条 ⇒ 第 {waited} 回合清空");
+        }
+    }
+
 }
