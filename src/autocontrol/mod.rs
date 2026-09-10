@@ -17,13 +17,18 @@
 //! * [`budget`]       预算重算（Ai 每回合从库存重算，Player 只读命令）。
 //! * [`shipbuilding`] 舰种 / 组件选装 + 海军随威胁重构。
 //! * [`tactics`]      战术选目标（克制/距离/行为风格）+ 单舰 AI 回合。
+//! * [`freight`]      集货：自有舰队怎么跑（定编 + 按积压占比抽签派单）+ **承包的挂单侧**。
+//! * [`contract`]     **承包的承运方**：门槛 / 影子价格 λ / σ 软化 / 按信誉加权抽签撮合。
 //! * [`economy`]      经济→成本预览（`--control-plan`）。
 //!
-//! 各子模块之间尽量不互相依赖；唯一的例外是 [`economy`] 阅读 [`budget`] 的预算并把
-//! 引擎原语向 [`crate::sim`] 借。对外的接口统一由本文件 `pub use` 重新导出，保持
-//! `autocontrol::<name>` 的调用方式不变。
+//! 各子模块之间尽量不互相依赖；两个例外：[`economy`] 阅读 [`budget`] 的预算，
+//! 而 [`contract`] 借 [`freight`] 的**运力助手**（`trip_throughput` / `route_for` /
+//! `should_be_freighter`）来挑船、排线、钉角色——承包与自有集货用的是同一套「谁在运货、
+//! 运力怎么算」的定义，各写一份必然漂移，所以这里**故意复用**。
+//! 对外的接口统一由本文件 `pub use` 重新导出，保持 `autocontrol::<name>` 的调用方式不变。
 
 pub mod budget;
+pub mod contract;
 pub mod economy;
 pub mod freight;
 pub mod shipbuilding;

@@ -215,7 +215,16 @@ pub enum GameEvent {
     /// **装货**：一艘运输舰在某天体的**产地货栈**里装走一批货（`cargo` = 这次装了什么、各多少）。
     /// 这是「离岸产出 → 首都池」那条链的**上半段**，下半段是 [`GameEvent::CargoDelivered`]。
     /// 有了这两条，「池子里的铁是哪来的」可以一路追到产地与那艘船。
-    CargoLoaded { ship: ShipId, faction: FactionId, body: BodyId, cargo: ResourceMap },
+    CargoLoaded {
+        ship: ShipId,
+        faction: FactionId,
+        /// **货主**（这批货是谁的）。自己运自己的货时等于 `faction`；执行承包单时是**托运方**
+        /// ——业主与船东分离，而「这批货进了谁的池子」必须可判（`.agents/notes/
+        /// freight-collection.md` 的已定项：**在途货物跨势力时要在舰上标明货主**）。
+        owner: FactionId,
+        body: BodyId,
+        cargo: ResourceMap,
+    },
     /// **卸货**：一艘运输舰把在舱货物卸进某天体。`into_pool = true` 表示**直接进了势力池**
     /// （即该天体就是本势力首都，货从此可用）——那是集货腿的终点；`false` 表示卸进了该天体
     /// 的货栈（中转，还得再运一程）。`cargo` 是这一批货。
@@ -225,6 +234,9 @@ pub enum GameEvent {
     CargoDelivered {
         ship: ShipId,
         faction: FactionId,
+        /// **货主**（收货方）。`into_pool` 说的是**货主**的池子，不是船东的——承包交付时
+        /// 两者不同，光看 `faction` 会把货记到承运人头上。
+        owner: FactionId,
         body: BodyId,
         cargo: ResourceMap,
         into_pool: bool,
@@ -245,6 +257,64 @@ pub enum GameEvent {
         to: BodyId,
         /// 承运人抽成比例（`0.15` = 自留 15%）。
         share: f64,
+    },
+    /// **有人接下了承包单**：`carrier` 派 `ship` 去把 `shipper` 的 `resource` 从 `from` 运到 `to`。
+    ///
+    /// 接单是**承诺**：从这一刻起这艘舰被钉在那张单上（`ContractState::assignments`），
+    /// 角色轴再也不能把它收回去当战舰（见 `autocontrol::freight::should_be_freighter`）；
+    /// 而超期也**不作废**（Q11：只扣一次信誉，货照运、抽成照拿）。
+    ContractAccepted {
+        /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
+        contract: u64,
+        shipper: FactionId,
+        carrier: FactionId,
+        ship: ShipId,
+        resource: String,
+        /// 接单时还差多少没送到（不是挂单总量：中途可能已经送过一部分）。
+        amount: f64,
+        from: BodyId,
+        to: BodyId,
+    },
+    /// **承包单交付**：`carrier` 的 `ship` 把货交到了托运方手里，`cut` 是它按抽成自留的部分。
+    ///
+    /// 这是集货腿第二条路的**终点**（对应自有集货的 `cargo_delivered`）：货进了托运方的池子，
+    /// 承运人拿到报酬（Q10：**就是它没交出去的那部分货**，没有货币转移），并且**信誉上涨**
+    /// （`gain`：涨多少按货值与 `risk_value_ref` 折算——搬了不值钱的货就涨不了多少）。
+    ContractDelivered {
+        contract: u64,
+        shipper: FactionId,
+        carrier: FactionId,
+        ship: ShipId,
+        resource: String,
+        /// 这一趟交付给托运方的量（单位，**不含**承运人自留的抽成）。
+        amount: f64,
+        /// 承运人这一趟自留的抽成（单位）——它的全部报酬。
+        cut: f64,
+        /// 这一趟给承运人加的信誉。
+        gain: f64,
+    },
+    /// **承包单超期**（已接单的合同过了截止期）。**只扣一次信誉，合同不作废**（Q11）：
+    /// 承运人照旧把货送到、照旧拿抽成——掉的信誉是「你的承诺不值你自己说的价」。
+    ContractLate {
+        contract: u64,
+        shipper: FactionId,
+        carrier: FactionId,
+        ship: ShipId,
+        /// 超了几个回合。
+        rounds_late: u32,
+        /// 扣掉的信誉。
+        penalty: f64,
+    },
+    /// **承运人把单子丢了**（押上的舰被击沉/报废）：合同**回到挂单簿**让别人接，
+    /// 承运人掉一次信誉。Q1(b) 之后**没有货值赔偿**——掉信誉就是全部的代价。
+    ContractLost {
+        contract: u64,
+        shipper: FactionId,
+        carrier: FactionId,
+        ship: ShipId,
+        /// 丢的是哪艘舰（`ShipDestroyed` 里能查到怎么没的）。
+        reason: String,
+        penalty: f64,
     },
 }
 
@@ -503,17 +573,24 @@ impl GameEvent {
                 extra(&mut r, EventRole::Victim, EntityKind::Body, from);
                 r.data = json!({"faction": faction, "from": from, "to": to, "reason": reason});
             }
-            GameEvent::CargoLoaded { ship, faction, body, cargo } => {
+            GameEvent::CargoLoaded { ship, faction, owner, body, cargo } => {
                 set_actor(&mut r, EntityKind::Ship, ship);
                 set_target(&mut r, EntityKind::Body, body);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
-                r.data = json!({"ship": ship, "faction": faction, "body": body, "cargo": cargo});
+                if owner != faction {
+                    extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, owner);
+                }
+                r.data = json!({"ship": ship, "faction": faction, "owner": owner,
+                                "body": body, "cargo": cargo});
             }
-            GameEvent::CargoDelivered { ship, faction, body, cargo, into_pool } => {
+            GameEvent::CargoDelivered { ship, faction, owner, body, cargo, into_pool } => {
                 set_actor(&mut r, EntityKind::Ship, ship);
                 set_target(&mut r, EntityKind::Body, body);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, faction);
-                r.data = json!({"ship": ship, "faction": faction, "body": body,
+                if owner != faction {
+                    extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, owner);
+                }
+                r.data = json!({"ship": ship, "faction": faction, "owner": owner, "body": body,
                                 "cargo": cargo, "into_pool": into_pool});
             }
             GameEvent::ContractPosted { contract, shipper, resource, amount, from, to, share } => {
@@ -525,6 +602,49 @@ impl GameEvent {
                 extra(&mut r, EventRole::Third, EntityKind::Body, from);
                 r.data = json!({"contract": contract, "shipper": shipper, "resource": resource,
                                 "amount": amount, "from": from, "to": to, "share": share});
+            }
+            GameEvent::ContractAccepted {
+                contract,
+                shipper,
+                carrier,
+                ship,
+                resource,
+                amount,
+                from,
+                to,
+            } => {
+                // 发起方 = **承运方**（接单的人），直接对象 = **那艘被押上的舰**，
+                // 托运方是第三个参与方。三者都要在标题里逐字出现（有个守卫钉这条）。
+                set_actor(&mut r, EntityKind::Faction, carrier);
+                set_target(&mut r, EntityKind::Ship, ship);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+                // 起讫天体**不进参与方槽位**（它们已经在 `contract_posted` 里当过参与方了，
+                // 这里再挂一遍只会让「这艘舰的历史」多出一堆天体行）；它们留在 `data` 里。
+                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
+                                "ship": ship, "resource": resource, "amount": amount,
+                                "from": from, "to": to});
+            }
+            GameEvent::ContractDelivered { contract, shipper, carrier, ship, resource, amount, cut, gain } => {
+                set_actor(&mut r, EntityKind::Faction, carrier);
+                set_target(&mut r, EntityKind::Ship, ship);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
+                                "ship": ship, "resource": resource, "amount": amount,
+                                "cut": cut, "gain": gain});
+            }
+            GameEvent::ContractLate { contract, shipper, carrier, ship, rounds_late, penalty } => {
+                set_actor(&mut r, EntityKind::Faction, carrier);
+                set_target(&mut r, EntityKind::Ship, ship);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
+                                "ship": ship, "rounds_late": rounds_late, "penalty": penalty});
+            }
+            GameEvent::ContractLost { contract, shipper, carrier, ship, reason, penalty } => {
+                set_actor(&mut r, EntityKind::Faction, carrier);
+                set_target(&mut r, EntityKind::Ship, ship);
+                extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
+                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
+                                "ship": ship, "reason": reason, "penalty": penalty});
             }
         }
         r
@@ -553,6 +673,10 @@ impl GameEvent {
             GameEvent::CargoLoaded { .. } => "cargo_loaded",
             GameEvent::CargoDelivered { .. } => "cargo_delivered",
             GameEvent::ContractPosted { .. } => "contract_posted",
+            GameEvent::ContractAccepted { .. } => "contract_accepted",
+            GameEvent::ContractDelivered { .. } => "contract_delivered",
+            GameEvent::ContractLate { .. } => "contract_late",
+            GameEvent::ContractLost { .. } => "contract_lost",
         }
     }
 
@@ -677,16 +801,30 @@ impl GameEvent {
                 "{faction} 迁都 {from} → {to}（{}）",
                 capital_reason(reason)
             ),
-            // 标题必须点到名：`faction` 也是本事件的参与方（`extra` 里的第三角色），
-            // 所以它必须逐字出现在标题里（守卫 `headline_names_every_participant` 钉住这条）。
-            GameEvent::CargoLoaded { ship, faction, body, cargo } => {
-                format!("{faction} 的 {ship} 在 {body} 装 {}", cargo_summary(cargo))
+            // 标题必须点到名：`faction` 与 `owner`（货主）都是本事件的参与方，所以它们必须
+            // 逐字出现在标题里（守卫 `headline_names_every_participant` 钉住这条）。
+            // 自己运自己的货时两者相同 ⇒ 只写一次（同一个 id 出现一次就够守卫用了）。
+            GameEvent::CargoLoaded { ship, faction, owner, body, cargo } => {
+                if owner == faction {
+                    format!("{faction} 的 {ship} 在 {body} 装 {}", cargo_summary(cargo))
+                } else {
+                    format!(
+                        "{faction} 的 {ship} 在 {body} 装 {owner} 的 {}",
+                        cargo_summary(cargo)
+                    )
+                }
             }
-            GameEvent::CargoDelivered { ship, faction, body, cargo, into_pool } => format!(
-                "{faction} 的 {ship} 在 {body} 卸 {}（{}）",
-                cargo_summary(cargo),
-                if *into_pool { "入首都池" } else { "入中转货栈" }
-            ),
+            GameEvent::CargoDelivered { ship, faction, owner, body, cargo, into_pool } => {
+                let what = if *into_pool { "入首都池" } else { "入中转货栈" };
+                if owner == faction {
+                    format!("{faction} 的 {ship} 在 {body} 卸 {}（{what}）", cargo_summary(cargo))
+                } else {
+                    format!(
+                        "{faction} 的 {ship} 在 {body} 卸 {owner} 的 {}（{what}）",
+                        cargo_summary(cargo)
+                    )
+                }
+            }
             // 参与方三个：托运方（actor）、目的天体（target）、起运天体（third）——标题里
             // 三者都要逐字出现（守卫 `headline_names_every_participant` 钉住这条）。
             GameEvent::ContractPosted { shipper, resource, amount, from, to, share, .. } => format!(
@@ -694,6 +832,27 @@ impl GameEvent {
                 num(*amount),
                 share * 100.0
             ),
+            // 参与方三个：承运方（actor）、被押上的舰（target）、托运方（third）——标题里
+            // 三者都要逐字出现（守卫 `headline_names_every_participant` 钉住这条）。
+            GameEvent::ContractAccepted { carrier, ship, shipper, resource, amount, from, to, .. } => {
+                format!(
+                    "{carrier} 的 {ship} 接下 {shipper} 的承包单：{from} → {to} 运 {resource} {} 件",
+                    num(*amount)
+                )
+            }
+            GameEvent::ContractDelivered { carrier, ship, shipper, resource, amount, cut, .. } => {
+                format!(
+                    "{carrier} 的 {ship} 向 {shipper} 交付承包货 {resource} {} 件（自留抽成 {}）",
+                    num(*amount),
+                    num(*cut)
+                )
+            }
+            GameEvent::ContractLate { carrier, ship, shipper, rounds_late, .. } => format!(
+                "{carrier} 的 {ship} 为 {shipper} 运的承包单超期 {rounds_late} 个回合"
+            ),
+            GameEvent::ContractLost { carrier, ship, shipper, reason, .. } => {
+                format!("{carrier} 的 {ship} 丢了 {shipper} 的承包单（{reason}）")
+            }
         }
     }
 
@@ -740,6 +899,15 @@ impl GameEvent {
             // 任何归属，只是一条「有人想买运力」的公开信息。给人看的排序里不该压过
             // 撤退/指令降级，更不该进故事板。
             GameEvent::ContractPosted { .. } => 1,
+            // 接单也是市场记账一档：它本身不改变任何归属（不像城市易主），只是「这张单
+            // 有人认领了」。真正的重头戏是交付/超期（M4c 的事件）。
+            GameEvent::ContractAccepted { .. } => 1,
+            // 超期是市场记账（承诺没兑现，但货还在路上）。
+            GameEvent::ContractLate { .. } => 1,
+            // 交付是**集货腿真正完成**的那一刻（与 `cargo_delivered` 同一档）。
+            GameEvent::ContractDelivered { .. } => 2,
+            // 丢单：一艘舰沉了 + 一份承诺黄了——比交付更值得读。
+            GameEvent::ContractLost { .. } => 2,
             // 逐发流水：按判据连读者都没有（只为 agent 分析而记录），也不该出现在故事板里。
             GameEvent::Attack { .. } | GameEvent::Siege { .. } => 0,
         }

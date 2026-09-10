@@ -708,16 +708,13 @@ fn probe_collection_backlog() {
     }
 }
 
-/// 10) **承包市场的需求侧（M4a）**：挂单侧在真实局面里到底挂出了什么。
+/// 10) **承包市场（M4）**：挂单、接单、交付、超期、丢单——整条腿的真实流量。
 ///
-/// M4a 只有**托运方**那一半（承运方的接单/履约在 M4b–M4c），所以这里测的是**需求**：
-///
-/// * **谁在挂、挂多少**——一处积压一张单，单子的体量（件数）与承运人能拿到的抽成量；
-/// * **挂出的量 ÷ 期末积压**——这就是「一个回合搬不动的比例」。它是**连续量**：
-///   自己的船越少、积压越大，这个比例越接近 1，但**不存在断点**；
-/// * **滞留**：没人接的单会一直躺在挂单簿上，直到过了截止期被托运方收回 ⇒
-///   打印「挂单总数 / 期末仍在挂单簿 / 已收回」。**这是 M4b 的对照组**：
-///   承运方一上线，滞留数必须掉下来（否则说明市场没运转）。
+/// * **需求侧**：谁在挂、挂多少、单子多大；
+/// * **成交**：多少单被接走、**多少货真的被搬到了托运方首都**（`contract_delivered` 的
+///   `amount` 之和 = 承运人抽成之后的实收量）、承运人拿到了多少抽成；
+/// * **信誉**：期末各家的信誉（起点都是 1.0）——它是不是**动起来了**（涨的、跌的都有）；
+/// * **滞留**：期末在簿的单量与积压之比、还没人接的有多少。
 #[test]
 #[ignore]
 fn probe_contract_market() {
@@ -727,11 +724,28 @@ fn probe_contract_market() {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
         let mut posted: Vec<(String, f64, u32)> = Vec::new(); // (托运方, 件数, 挂单回合)
+        let mut accepted = 0usize;
+        let mut paid = 0.0; // 交给托运方的量（抽成后）
+        let mut cut = 0.0; // 承运人自留的量
+        let mut late = 0usize;
+        let mut lost = 0usize;
+        let mut trust: BTreeMap<String, f64> = BTreeMap::new(); // 承运人信誉变化
         for _ in 0..n {
             sim::advance(&mut state, &config, &mut rng);
             for e in &state.events {
-                if let GameEvent::ContractPosted { shipper, amount, .. } = e {
-                    posted.push((shipper.clone(), *amount, state.round));
+                match e {
+                    GameEvent::ContractPosted { shipper, amount, .. } => {
+                        posted.push((shipper.clone(), *amount, state.round))
+                    }
+                    GameEvent::ContractAccepted { .. } => accepted += 1,
+                    GameEvent::ContractDelivered { amount, cut: c, carrier, .. } => {
+                        paid += amount;
+                        cut += c;
+                        *trust.entry(carrier.clone()).or_insert(0.0) += 1.0;
+                    }
+                    GameEvent::ContractLate { .. } => late += 1,
+                    GameEvent::ContractLost { .. } => lost += 1,
+                    _ => {}
                 }
             }
         }
@@ -746,7 +760,7 @@ fn probe_contract_market() {
             }
             (c, units)
         };
-        println!("== 承包挂单 seed {seed}（{n} 回合，抽成 {:.0}%）==", config.freight.share * 100.0);
+        println!("== 承包市场 seed {seed}（{n} 回合，抽成 {:.0}%）==", config.freight.share * 100.0);
         let (mut tot_posted, mut tot_units) = (0usize, 0.0);
         for f in &state.factions {
             let name = f.name.as_str();
@@ -758,26 +772,64 @@ fn probe_contract_market() {
                 .filter(|((fid, _), _)| fid == name)
                 .map(|(_, m)| m.values().sum::<f64>())
                 .sum();
-            if mine.is_empty() && backlog <= 0.0 {
+            if mine.is_empty() && backlog <= 0.0 && open_n == 0 {
                 continue;
             }
             tot_posted += mine.len();
             tot_units += mine.iter().map(|(_, a, _)| *a).sum::<f64>();
-            let mean = if mine.is_empty() { 0.0 } else { mine.iter().map(|(_, a, _)| *a).sum::<f64>() / mine.len() as f64 };
+            let mean = if mine.is_empty() {
+                0.0
+            } else {
+                mine.iter().map(|(_, a, _)| *a).sum::<f64>() / mine.len() as f64
+            };
             let max = mine.iter().map(|(_, a, _)| *a).fold(0.0f64, f64::max);
             let cover = if backlog > 0.0 { 100.0 * open_units / backlog } else { 0.0 };
             let lapsed = mine.len() - open_n;
-            let n = mine.len();
+            let delivered = trust.get(name).copied().unwrap_or(0.0);
             println!(
-                "    {name:<14} 挂单 {n:<3} 张（均 {mean:>7.1} / 最大 {max:>7.1} 件）  \
-                 期末在簿 {open_n} 张 = {open_units:>8.1} 件 ÷ 积压 {backlog:>8.1} 件 = **{cover:>5.1}%**  已收回 {lapsed}"
+                "    {name:<14} 挂单 {:<3} 张（均 {mean:>7.1} / 最大 {max:>7.1} 件）  \
+                 期末在簿 {open_n} 张 = {open_units:>8.1} 件 ÷ 积压 {backlog:>8.1} 件 = {cover:>5.1}%  \
+                 已收回 {lapsed}  承运交付 {delivered:>3.0} 趟  信誉 {:.2}",
+                mine.len(),
+                state.faction(name).unwrap().reputation
             );
         }
         let reward: f64 = state.contracts.contracts.iter().map(|c| c.carrier_cut(c.amount)).sum();
+        // **价格发现**（用户裁决「价格做成动态平衡」）：没人接的单子会一路抬价，
+        // 所以这里要看到两件事——在簿单的抽成**已经抬上去了**，而成交单的实付抽成是多少。
+        let open_shares: Vec<f64> = state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.carrier.is_none())
+            .map(|c| c.share)
+            .collect();
+        let (lo, hi) = (
+            open_shares.iter().cloned().fold(f64::INFINITY, f64::min),
+            open_shares.iter().cloned().fold(0.0f64, f64::max),
+        );
+        let mean_share = if open_shares.is_empty() {
+            0.0
+        } else {
+            open_shares.iter().sum::<f64>() / open_shares.len() as f64
+        };
+        let paid_share = if paid + cut > 0.0 { cut / (paid + cut) } else { 0.0 };
         println!(
-            "    —— 合计：挂出 {tot_posted} 张 / {tot_units:.0} 件；期末在簿 {} 张 / 待运 {:.0} 件（承运人抽成后可拿 {reward:.0} 件）",
+            "    —— 挂出 {tot_posted} 张 / {tot_units:.0} 件；成交 {accepted} 单；\
+             **搬到位 {paid:.0} 件**（承运人自留 {cut:.0} 件 = 它的全部报酬，**实付抽成 {:.1}%**，\
+             开叫价 {:.0}%）；超期 {late} / 丢单 {lost}",
+            paid_share * 100.0,
+            config.freight.share * 100.0
+        );
+        println!(
+            "    —— 期末在簿 {} 张 / 待运 {:.0} 件（抽成已抬到 {:.1}%–{:.1}%，均 {:.1}%；\
+             上限 {:.0}%）；承运人若接完能拿 {reward:.0} 件",
             state.contracts.contracts.len(),
-            state.contracts.contracts.iter().map(|c| c.amount).sum::<f64>()
+            state.contracts.contracts.iter().map(|c| c.amount).sum::<f64>(),
+            if open_shares.is_empty() { 0.0 } else { lo * 100.0 },
+            hi * 100.0,
+            mean_share * 100.0,
+            config.freight.share_max * 100.0
         );
     }
 }

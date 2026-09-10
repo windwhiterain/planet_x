@@ -105,6 +105,12 @@ pub fn freight_tonnage(config: &GameConfig, ship: &Ship) -> f64 {
 /// | 巡洋 | 6 | 1.0 | 6.0 | 1.00 |
 /// | 战列 | 6 | 0.9 | 6.5 | 0.83（**最不该去拉货的一条**） |
 pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> bool {
+    // 0) **正在执行承包单的舰必须是运输舰**（M4b）。那条链接（`ContractState::assignments`）
+    //    是接单时立的**承诺**：角色轴每回合由自动控制重写，若不认识它，一艘接到一半的单
+    //    会被定编收走、改回战舰——单子就永远送不完了。
+    if state.contracts.assignment_of(ship_id).is_some() {
+        return true;
+    }
     // 1) 舱里有货：它必须把货送完（否则货烂在舱里）。这条**故意压过**运力排序——
     //    哪怕它刚被打残、运力掉到很低，也得把手上那票货交出去（或死在路上）。
     if state
@@ -120,11 +126,14 @@ pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_i
     }
     // 2) 定编：先把「舱里有货」的舰排在最前（它们已经占掉名额），再按运力/维护费。
     //    **只算自动控制开的舰**（玩家开的舰不替玩家派活），**且必须动得了**（运力 > 0）。
+    //    执行承包单的舰也**不参与**这轮排序（它们已由上面的第 0 条钉住）——否则它们会
+    //    再占掉一个自有集货的名额，等于把承包的运力算两遍。
     let mut cands: Vec<(String, bool, f64)> = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0)
         .filter(|s| state.ship_control(s.name.clone()) == ControlMode::Auto)
+        .filter(|s| state.contracts.assignment_of(&s.name).is_none())
         .map(|s| (s.name.clone(), !s.cargo.is_empty(), freight_tonnage(config, s)))
         .filter(|(_, holding, tonnage)| *holding || *tonnage > 0.0)
         .collect();
@@ -191,6 +200,14 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
 /// **优先续用现有路线**（舱里有货、或那处货栈还有货）——常驻路线不该每回合重掷。
 /// 抽签细节见本模块的文档。
 pub fn route_for(state: &State, fid: &str, ship_id: &str) -> Option<(BodyId, BodyId)> {
+    // **执行承包单的舰**跑的是那张单的路线（接单时立的承诺，不是抽签抽出来的）：
+    // 起运在**托运方**的货栈、目的在**托运方**的首都——与自有集货的目标（自己的首都）
+    // 完全不同，所以这条要压在最前面，不能让它去抽自己的签。
+    if let Some(id) = state.contracts.assignment_of(ship_id) {
+        if let Some(c) = state.contracts.get(id) {
+            return Some((c.from.clone(), c.to.clone()));
+        }
+    }
     let to = state.capital_body(fid);
     if to.is_empty() || state.body(&to).is_none() {
         return None;
@@ -278,32 +295,46 @@ fn serving_freighters<'a>(
         .collect()
 }
 
-/// 这一单的**截止回合**：`宽限 + 余量 × 估算航程回合数`。
+/// **无人接的单不收回，而是「加价 + 延期」**（用户裁决：价格与时限做成**动态平衡**）。
 ///
-/// 用的是**参考巡航速度**（`config.freight.reference_speed`）而不是接单者的真实速度：
-/// 挂单时还不知道谁会来接，而截止期必须**在挂单时就定死**（同一张单的时限不能随接单者变，
-/// 否则确定性就没了）。于是「慢船接远单」会真的超期——那是**设计要的**风险（超期掉信誉）。
-fn deadline_for(state: &State, config: &GameConfig, from: &str, to: &str) -> u32 {
-    let d = sim::dist(state.body_position(from), state.body_position(to));
-    let v = config.freight.reference_speed.max(1e-6);
-    let rounds = config.freight.deadline_base + config.freight.deadline_slack * 2.0 * d / v;
-    state.round + rounds.ceil().max(1.0) as u32
-}
-
-/// 收回**没人接**的过期挂单。返回收回的张数。
+/// 这是本市场最重要的一条自调节机制，也是「难单自然报厚」的落点：
 ///
-/// **这不是 Q11 说的「不作废」**：Q11 管的是**已有人接**的合同——有人承诺了，就得负责到底
-/// （超期只扣一次信誉，货照运、抽成照拿）。而一张**没人接**的单子上没有任何承诺，
-/// 过期不收回只会永远堵着那个 `(货栈, 资源)` 的口子（[`ContractState::has_unfinished`]），
-/// 让积压再也挂不出去。所以：**无人接 ⇒ 过期即收回，不掉任何人的信誉。**
-pub(crate) fn retire_stale_open(state: &mut State) -> usize {
+/// * 挂单的**开叫价**统一（`freight.share`，人人都从 15% 起叫）；
+/// * 一回合没人接、且过了自己报的截止期 ⇒ **抽成抬一档 + 重新给一个完整窗口**；
+/// * 抬到 `freight.share_max` 就不再加（托运方宁可让货烂在产地，也不会把大半货送人）。
+///
+/// 于是**深空/大单/战区的价格是市场自己抬上去的**，而不是设计者用一个难度公式猜出来的：
+/// 近地小单开叫就被抢走（价格留在 15%），柯伊伯带的单会一路抬到有人点头为止。
+/// 这同时取代了「没人接就作废/收回」那条规则——单子留在簿上继续叫价，直到**货没了**
+/// （数量被 `post_contracts` 改成 0 ⇒ 当已完成移出）。
+///
+/// **已有人接的单一个字都不动**：那时抽成与截止期是**承诺**（Q11 的超期只扣信誉说的就是它）。
+/// 所以加价只对 `carrier.is_none()` 的单生效。
+fn escalate_open_contracts(state: &mut State, config: &GameConfig) {
+    let f = &config.freight;
+    let factor = f.share_escalation.max(1.0);
+    let cap = f.share_max.max(f.share);
     let round = state.round;
-    let before = state.contracts.contracts.len();
-    state
+    // 先算完再写（同一回合内几个势力的结论互不影响；也免得边遍历边借用）。
+    let plan: Vec<(u64, f64, u32)> = state
         .contracts
         .contracts
-        .retain(|c| !(c.is_open() && round > c.deadline));
-    before - state.contracts.contracts.len()
+        .iter()
+        .filter(|c| c.is_open() && !c.is_fulfilled() && round > c.deadline)
+        .map(|c| {
+            (
+                c.id,
+                (c.share * factor).min(cap),
+                crate::model::deadline_for(state, config, c.amount, &c.from, &c.to),
+            )
+        })
+        .collect();
+    for (id, share, deadline) in plan {
+        if let Some(c) = state.contracts.contracts.iter_mut().find(|c| c.id == id) {
+            c.share = share;
+            c.deadline = deadline; // 重新给一个完整窗口（下一档要到新的截止期才会触发）
+        }
+    }
 }
 
 /// **挂单**：把「自己一个回合搬不动的积压」挂到承包市场上（每处货栈、每种货各一张）。
@@ -339,6 +370,9 @@ pub(crate) fn retire_stale_open(state: &mut State) -> usize {
 ///
 /// 每回合**新建**的单也是这么算的（同一处只有一张 ⇒ 要么新建、要么改数，不会堆成一片）。
 pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
+    // 先加价：没人接、又过了自己报的截止期的单子，**抬一档抽成并重新给个窗口**。
+    // 放在写新单之前，是为了让「这一回合挂出去的开叫价」与「旧单抬过的价」在同一帧里都成立。
+    escalate_open_contracts(state, config);
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort(); // 确定性：写状态的顺序不依赖势力表的排列
     // 先把要挂的单**全部算完**（只读），再一次性写状态：同一回合内几个势力的结论互不影响。
@@ -445,7 +479,10 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
             }
             continue; // 改数不发事件：它只是「需求变了」，不是一件**发生的事**
         }
-        let deadline = deadline_for(state, config, &from, &to);
+        // 条款在**挂单这一刻**算好并冻结（截止期、门槛）：天体在动，每回合重算会让
+        // 同一张单的条件漂移，而合同一旦挂出去，条件就该是固定的。
+        let deadline = deadline_for(state, config, amount, &from, &to);
+        let min_reputation = required_reputation(state, config, &resource, amount, &from, &to);
         let share = config.freight.share;
         let id = state.contracts.post(
             shipper.clone(),
@@ -456,6 +493,7 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
             share,
             state.round,
             deadline,
+            min_reputation,
         );
         sim::ev(
             state,
@@ -862,25 +900,55 @@ mod tests {
         assert!(state.contracts.contracts.is_empty());
     }
 
-    /// **无人接的过期单收回；已接单的合同永不收回**——Q11 的边界在这里。
+    /// **没人接 ⇒ 加价 + 延期；已接单的冻结成承诺**（用户裁决：价格与时限做成**动态平衡**）。
     ///
-    /// 「不作废」说的是**有人承诺过**的合同（超期只扣一次信誉，货照运、抽成照拿）；
-    /// 而一张没人接的单子上没有任何承诺，过期不收回只会永久堵住那个 `(货栈, 资源)` 口子。
+    /// 这条取代了早先「无人接的过期单收回」那条规则：单子留在簿上继续叫价，价格由市场自己
+    /// 抬到有人点头为止（上限 = `share_max`），而**已有人接**的合同一个字都不动
+    /// （超期只扣一次信誉，Q11）。
     #[test]
-    fn an_unaccepted_contract_lapses_but_an_accepted_one_never_does() {
-        let (_config, mut state) = fresh(42);
+    fn an_unaccepted_contract_escalates_but_an_accepted_one_is_frozen() {
+        let (config, mut state) = fresh(42);
         let open = state.contracts.post(
-            "中国".into(), "碳".into(), 5.0, "金星".into(), "地球".into(), 0.15, 0, 0,
+            "中国".into(), "碳".into(), 5.0, "金星".into(), "地球".into(), config.freight.share, 0, 0, 0.6,
         );
         let taken = state.contracts.post(
-            "中国".into(), "铁".into(), 5.0, "水星".into(), "地球".into(), 0.15, 0, 0,
+            "中国".into(), "铁".into(), 5.0, "水星".into(), "地球".into(), config.freight.share, 0, 0, 0.6,
         );
         state.contracts.contracts.iter_mut().find(|c| c.id == taken).unwrap().carrier =
             Some("美国".into());
-        assert_eq!(retire_stale_open(&mut state), 0, "还没过截止期 ⇒ 一张都不收回");
-        state.round = 1; // 越过 deadline = 0
-        assert_eq!(retire_stale_open(&mut state), 1, "只收回没人接的那张");
-        assert!(state.contracts.get(open).is_none(), "没人接的过期单要收回");
+        let share0 = state.contracts.get(open).unwrap().share;
+        escalate_open_contracts(&mut state, &config);
+        assert_eq!(
+            state.contracts.get(open).unwrap().share,
+            share0,
+            "还没过截止期 ⇒ 不加价（单子该有机会在开叫价上被接走）"
+        );
+        state.round = 1; // 越过 deadline = 0 ⇒ 抬一档
+        escalate_open_contracts(&mut state, &config);
+        let c = state.contracts.get(open).expect("没人接的单**留在簿上**继续叫价");
+        assert!(
+            (c.share - share0 * config.freight.share_escalation).abs() < 1e-9,
+            "过期一次该抬一档：{share0:.3} → {:.3}",
+            c.share
+        );
+        assert!(c.deadline > state.round, "加价的同时要**重新给一个完整窗口**");
+        assert_eq!(
+            state.contracts.get(taken).unwrap().share,
+            share0,
+            "已接单的合同抽成**冻结**（那是承诺）"
+        );
+        // 反复过期 ⇒ 抬到上限为止。
+        for _ in 0..40 {
+            state.round += 1000;
+            escalate_open_contracts(&mut state, &config);
+        }
+        let c = state.contracts.get(open).unwrap();
+        assert!(
+            (c.share - config.freight.share_max).abs() < 1e-9,
+            "抬价有上限（{:.2}）：实为 {:.3}",
+            config.freight.share_max,
+            c.share
+        );
         assert!(
             state.contracts.get(taken).is_some(),
             "已接单的合同**不作废**（Q11）：超期只扣信誉，货照运"

@@ -295,17 +295,35 @@ mod tests {
                 reason: "destroyed".into(),
             },
             GameEvent::CargoLoaded {
-                ship: "长征".into(), faction: "中国".into(), body: "金星".into(),
+                ship: "长征".into(), faction: "中国".into(), owner: "中国".into(),
+                body: "金星".into(),
                 cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
             },
             GameEvent::CargoDelivered {
-                ship: "长征".into(), faction: "中国".into(), body: "地球".into(),
+                ship: "长征".into(), faction: "中国".into(), owner: "中国".into(),
+                body: "地球".into(),
                 cargo: [("碳".to_string(), 4.0)].into_iter().collect(),
                 into_pool: true,
             },
             GameEvent::ContractPosted {
                 contract: 0, shipper: "中国".into(), resource: "碳".into(), amount: 12.0,
                 from: "金星".into(), to: "地球".into(), share: 0.15,
+            },
+            GameEvent::ContractAccepted {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
+                resource: "碳".into(), amount: 12.0, from: "金星".into(), to: "地球".into(),
+            },
+            GameEvent::ContractDelivered {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
+                resource: "碳".into(), amount: 10.2, cut: 1.8, gain: 0.13,
+            },
+            GameEvent::ContractLate {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
+                rounds_late: 2, penalty: 0.15,
+            },
+            GameEvent::ContractLost {
+                contract: 0, shipper: "中国".into(), carrier: "美国".into(), ship: "自由号".into(),
+                reason: "ship_gone".into(), penalty: 0.35,
             },
         ]
     }
@@ -331,7 +349,11 @@ mod tests {
             | GameEvent::CapitalRelocated { .. }
             | GameEvent::CargoLoaded { .. }
             | GameEvent::CargoDelivered { .. }
-            | GameEvent::ContractPosted { .. } => {}
+            | GameEvent::ContractPosted { .. }
+            | GameEvent::ContractAccepted { .. }
+            | GameEvent::ContractDelivered { .. }
+            | GameEvent::ContractLate { .. }
+            | GameEvent::ContractLost { .. } => {}
         }
     }
 

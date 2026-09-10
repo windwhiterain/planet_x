@@ -493,6 +493,14 @@ fn write_round(
                 "from": c.from,
                 "to": c.to,
                 "share": r2(c.share),
+                "min_reputation": r2(c.min_reputation),
+                // 执行这张单的那艘舰（`assignments` 的反查；null = 还没人接）。
+                "ship": state
+                    .contracts
+                    .assignments
+                    .iter()
+                    .find(|(_, id)| **id == c.id)
+                    .map(|(s, _)| s.clone()),
                 "posted_round": c.posted_round,
                 "deadline": c.deadline,
                 "late": state.round > c.deadline,
@@ -737,10 +745,12 @@ pub fn projection_schema() -> serde_json::Value {
             "contracts" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "**承包挂单簿**：一行一单，只含**未完成**的单子（等人接的 + 正在履行的）。完成的单子不在这里——“成交了/怎么结束的”去 `events` 里按类型查（`contract_posted` 及后续类型）。按 (round, contract_id) 索引。",
-                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","amount":"number","delivered":"number","outstanding":"number","from":"string","to":"string","share":"number","posted_round":"integer","deadline":"integer","late":"boolean"},
+                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","amount":"number","delivered":"number","outstanding":"number","from":"string","to":"string","share":"number","min_reputation":"number","ship":"string","posted_round":"integer","deadline":"integer","late":"boolean"},
                 "column_docs": {
                     "shipper": "托运方（挂单的人）。",
                     "carrier": "承运方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
+                    "ship": "**执行这张单的舰名**（null = 还没人接）。接单时押上的那艘舰，它跑的是**托运方**的路线——起运在托运方货栈、目的在托运方首都，与承运人自己的集货路线**方向不同**。",
+                    "min_reputation": "托运方定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((承运人信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是托运方唯一的自我保护（承运人不赔货值，押在陌生人手里的是它全部货值）。",
                     "amount": "挂单总量（单位）。",
                     "delivered": "**已交付给托运方**的量——不含承运人自留的抽成（见 `share`）。",
                     "outstanding": "还差多少没送到 = `amount - delivered`。",

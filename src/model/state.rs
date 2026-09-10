@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 fn default_schema_version() -> u32 {
     0
 }
@@ -579,9 +579,15 @@ enum StyleAxis {
 /// 与全新开局在同一条起跑线上。这不是信息损失，而是新旧语义之间唯一自洽的接法：
 /// 旧档里不存在任何可以折算成信誉的东西（旧语义下集货腿还只是「自己派船运」，
 /// 没有对手方，也就没有「谁说话算数」这个问题）。
+///
+/// v10 → v11（运输分支）：承包市场有了**承运方**——[`Contract`] 多了
+/// `min_reputation`（托运方的信誉门槛，挂单时算好冻结）与 [`ContractState::assignments`]
+/// （哪艘舰在执行哪张单）。两者都是 `#[serde(default)]` 的新语义，而 v10 档里的单子
+/// **一个承运人都没有**（那时还只有挂单侧），所以「门槛按 0 起步、没有任何执行关系」
+/// 正是它的真实状态：**零信息损失**。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

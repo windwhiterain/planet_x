@@ -1138,12 +1138,19 @@ fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
 // 依据与裁决见 `.agents/notes/freight-collection.md` §4（Q1(b) 只扣信誉 / Q2 挂单制 /
 // Q4 禁运同样挡承包 / Q10 抽成制 / Q11 超期不作废）。
 fn step_contracts(state: &mut State, config: &GameConfig) {
-    // 先收回**没人接**的过期挂单（无人承诺 ⇒ 收回不掉任何人的信誉，见该函数的文档），
-    // 再挂新的：所以一处积压不会因为一张没人接的单而永久堵住。
-    autocontrol::freight::retire_stale_open(state);
+    // 挂单（内含**加价 + 延期**：没人接的单子自己涨价，见 `freight::escalate_open_contracts`）
     autocontrol::freight::post_contracts(state, config);
+    // 挂完就撮合：看得见、又愿意接的承运人**按信誉加权抽签**接下单子，并当场押上一条船
+    // （`carrier` + `assignments`）。路线与角色叶**不在这里写**——`step_ships` 的运输舰分支
+    // 与 `assign_roles` 会照常处理（它们都认识 `assignments`），每个叶子只有一个写者。
+    autocontrol::contract::match_carriers(state, config);
+    // 履约巡检：**超期**（只扣一次信誉，Q11）+ **丢单**（押上的舰没了 ⇒ 合同回挂单簿）。
+    // 交付不在这里——它发生在 `haul_unload` 那一刻（船真的靠了泊位）。
+    autocontrol::contract::settle_contracts(state, config);
     // 已完成的单子移出挂单簿（挂单簿只留未完成的；「成交了」由事件与流水账记录）。
     state.contracts.retire_fulfilled();
+    // 单子没了（完成/收回）⇒ 清掉指向它的执行关系，免得有舰永远钉在一张不存在的单上。
+    state.contracts.drop_dangling_assignments();
 }
 
 /// 某势力此刻挂单簿上的**总价值**（= 它的购买力：能拿出来交换的实物值多少）。
@@ -2516,9 +2523,26 @@ impl HaulStep {
     }
 }
 
-/// **装货**：把本势力在 `from` 的产地货栈装进 `ship` 的货舱。
+/// 这批货的**货主**（收货方）：执行承包单时是**托运方**，否则是船主自己。
+///
+/// 「货主」是本作里必须显式存在的概念（`.agents/notes/freight-collection.md` 的已定项）：
+/// 承包让**船东与业主分离**，于是「装谁的货、卸进谁的池子、卸出来的货算谁的进度」
+/// 三件事都不能再默认等于船主。判据是 [`ContractState::assignments`]（哪艘舰跑哪张单），
+/// 不去猜「路线像不像」——同一处货栈可以有两张不同托运方的单。
+fn cargo_owner(state: &State, fid: &str, ship_id: &str) -> FactionId {
+    state
+        .contracts
+        .assignment_of(ship_id)
+        .and_then(|id| state.contracts.get(id))
+        .map(|c| c.shipper.clone())
+        .unwrap_or_else(|| fid.to_string())
+}
+
+/// **装货**：把 `from` 处**货主**的产地货栈装进 `ship` 的货舱。
 ///
 /// 上限 = 有效舱容（[`cargo_capacity`]：舰级舱容 × 战损折算）− 已在舱；分配按 [`haul_split`]。
+/// 执行承包单时还多一道上限：**这张单还差多少**——承运人只替托运方搬它挂出来（且还没送到）
+/// 的量，多装了等于运了没谈过价的货。
 /// 返回**实际装走的总件数**（0 = 那里没货，舰该原地等）。
 fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, from: &str) -> f64 {
     let Some(ship) = state.ship(ship_id) else {
@@ -2528,11 +2552,23 @@ fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, f
     if free <= 1e-9 {
         return 0.0;
     }
-    let avail = state.depot(fid, from).cloned().unwrap_or_default();
-    let plan = haul_split(&avail, free);
+    let owner = cargo_owner(state, fid, ship_id);
+    let room = match state
+        .contracts
+        .assignment_of(ship_id)
+        .and_then(|id| state.contracts.get(id))
+    {
+        Some(c) => free.min(c.outstanding()),
+        None => free,
+    };
+    if room <= 1e-9 {
+        return 0.0; // 这张单已经送够了（等挂单簿收尾），别再装
+    }
+    let avail = state.depot(&owner, from).cloned().unwrap_or_default();
+    let plan = haul_split(&avail, room);
     let mut moved: ResourceMap = ResourceMap::new();
     for (rt, want) in &plan {
-        let got = state.depot_take(fid, from, rt, *want);
+        let got = state.depot_take(&owner, from, rt, *want);
         if got > 0.0 {
             moved.insert(rt.clone(), got);
         }
@@ -2551,6 +2587,7 @@ fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, f
         GameEvent::CargoLoaded {
             ship: ship_id.to_string(),
             faction: fid.to_string(),
+            owner,
             body: from.to_string(),
             cargo: moved,
         },
@@ -2558,10 +2595,15 @@ fn haul_load(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, f
     units
 }
 
-/// **卸货**：把 `ship` 的整个货舱卸进 `to`。`to` 是本势力首都 ⇒ 直接进**势力池**
+/// **卸货**：把 `ship` 的整个货舱卸进 `to`。`to` 是**货主**的首都 ⇒ 直接进货主的**势力池**
 /// （[`Faction::resources`]：集货腿的终点，货从此可用）；否则进该天体的货栈（中转，还得再运一程）。
+///
+/// 执行承包单时多做一件事：**按抽成留下承运人的那一份**（Q10）——留下来的货直接进
+/// 承运人自己的首都池（用户批准的简化：报酬**就是它没交出去的那部分货**，没有货币转移）。
+/// 真正的「回程把自己那份拉回家」需要把 `Haul` 的无状态腿规则撑开（舱里不是空的就是满的
+/// 那条判据不够用了），留作后续钩子。
 /// 返回卸下的货（空 = 本来就空舱）。
-fn haul_unload(state: &mut State, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
+fn haul_unload(state: &mut State, config: &GameConfig, fid: &str, ship_id: &str, to: &str) -> ResourceMap {
     let cargo = state
         .ship_mut(ship_id)
         .map(|s| std::mem::take(&mut s.cargo))
@@ -2569,16 +2611,39 @@ fn haul_unload(state: &mut State, fid: &str, ship_id: &str, to: &str) -> Resourc
     if cargo.is_empty() {
         return cargo;
     }
-    let into_pool = state.capital_body(fid) == to;
+    let owner = cargo_owner(state, fid, ship_id);
+    // 承包单：先按抽成切出承运人的那一份（Q10）。
+    let contract = state
+        .contracts
+        .assignment_of(ship_id)
+        .and_then(|id| state.contracts.get(id).cloned());
+    let loaded: f64 = cargo.values().sum(); // 卸出舱的**总量**（合同进度按它记）
+    let mut delivered = cargo.clone();
+    let mut cut_units = 0.0;
+    if let Some(c) = &contract {
+        for (rt, amt) in delivered.iter_mut() {
+            let cut = c.carrier_cut(*amt);
+            *amt -= cut;
+            cut_units += cut;
+            if cut > 0.0 {
+                // 承运人的报酬进它自己的首都池（Q10 的机制落点：没有货币转移）。
+                if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
+                    *f.resources.entry(rt.clone()).or_insert(0.0) += cut;
+                }
+            }
+        }
+        delivered.retain(|_, amt| *amt > 1e-9);
+    }
+    let into_pool = state.capital_body(&owner) == to;
     if into_pool {
-        if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
-            for (rt, amt) in &cargo {
+        if let Some(f) = state.factions.iter_mut().find(|f| f.name == owner) {
+            for (rt, amt) in &delivered {
                 *f.resources.entry(rt.clone()).or_insert(0.0) += amt;
             }
         }
     } else {
-        for (rt, amt) in &cargo {
-            state.depot_add(fid, to, rt, *amt);
+        for (rt, amt) in &delivered {
+            state.depot_add(&owner, to, rt, *amt);
         }
     }
     ev(
@@ -2586,11 +2651,16 @@ fn haul_unload(state: &mut State, fid: &str, ship_id: &str, to: &str) -> Resourc
         GameEvent::CargoDelivered {
             ship: ship_id.to_string(),
             faction: fid.to_string(),
+            owner: owner.clone(),
             body: to.to_string(),
-            cargo: cargo.clone(),
+            cargo: delivered.clone(),
             into_pool,
         },
     );
+    // 承包的账在货物落地之后结：进度 + 信誉 + `contract_delivered` 事件。
+    if contract.is_some() && loaded > 1e-9 {
+        autocontrol::contract::on_delivery(state, config, ship_id, loaded, cut_units);
+    }
     cargo
 }
 
@@ -2604,11 +2674,12 @@ fn haul_act(
     holding: bool,
 ) -> HaulStep {
     if holding {
-        let cargo = haul_unload(state, fid, ship_id, leg);
+        let cargo = haul_unload(state, config, fid, ship_id, leg);
         HaulStep::Delivered {
             body: leg.to_string(),
             units: cargo.values().sum(),
-            into_pool: state.capital_body(fid) == leg,
+            // 「进池」说的是**货主**的池子（承包时货主是托运方，不是船东）。
+            into_pool: state.capital_body(&cargo_owner(state, fid, ship_id)) == leg,
         }
     } else {
         let units = haul_load(state, config, fid, ship_id, leg);
@@ -4939,6 +5010,94 @@ mod tests {
             "金星采的碳进了首都池——这就是集货腿的终点"
         );
         assert!((total(&state) - before).abs() < 1e-9, "卸货不许毁货");
+    }
+
+    /// **承包交付的记账（M4c，Q10 抽成制）**：卸下来的货**分两份**——抽成归承运人自己的
+    /// 首都池，余数进**托运方**的池子（不是船东的！）。
+    ///
+    /// 这一条把「货主与船东分离」这件事钉在最细的粒度上（不跑 `advance`，所以池子不会被
+    /// 维护费/建造搅浑）：**同一个天体、同一批货，进的是两个不同势力的池子**。
+    #[test]
+    fn a_contract_delivery_splits_the_cargo_between_carrier_and_shipper() {
+        let (config, mut state) = fresh_world(42);
+        let share = config.freight.share;
+        state.depots.clear();
+        // 托运方：中国在金星积压 10 件碳，**它自己没有船**。
+        state.depot_add("中国", "金星", "碳", 10.0);
+        // 承运人：美国的一艘驱逐舰（舱容 4）。
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "美国" && s.class == "destroyer")
+            .expect("美国开局有驱逐舰")
+            .name
+            .clone();
+        let class = state.ship(&ship).unwrap().class.clone();
+        let id = state.contracts.post(
+            "中国".into(),
+            "碳".into(),
+            10.0,
+            "金星".into(),
+            "地球".into(),
+            share,
+            0,
+            99,
+            0.0,
+        );
+        state.contracts.assign(ship.clone(), id);
+        state.contracts.contracts.iter_mut().find(|c| c.id == id).unwrap().carrier =
+            Some("美国".into());
+        // 停在**托运方货栈**的泊位上 → 装货该装的是**中国的**货。
+        let vpos = state.body_position("金星");
+        state.ship_mut(&ship).unwrap().position = vpos;
+        let cap = cargo_capacity(&config, state.ship(&ship).unwrap());
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        let loaded = match step {
+            HaulStep::Loaded { units, .. } => units,
+            other => panic!("停在托运方货栈上该装货，实为 {other:?}"),
+        };
+        assert!(loaded > 0.0 && loaded <= cap, "装的不能超过舱容");
+        assert!(
+            state.depot("中国", "金星").is_none()
+                || (state.depot("中国", "金星").unwrap().values().sum::<f64>() - (10.0 - loaded)).abs()
+                    < 1e-9,
+            "装走的必须是**中国**货栈里的货"
+        );
+        // 卸到中国的首都（地球）：抽成归美国、余数归中国。
+        let (cn0, us0) = (
+            state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+            state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        );
+        state.ship_mut(&ship).unwrap().position = state.body_position("地球");
+        let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球");
+        assert!(
+            matches!(step, HaulStep::Delivered { into_pool: true, .. }),
+            "目的 = 托运方首都 ⇒ 该进池子，实为 {step:?}"
+        );
+        let (cn1, us1) = (
+            state.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+            state.faction("美国").unwrap().resources.get("碳").copied().unwrap_or(0.0),
+        );
+        let cut = loaded * share;
+        assert!(
+            (cn1 - cn0 - (loaded - cut)).abs() < 1e-9,
+            "托运方该收到 {} 件（装的 {} 减去抽成 {cut:.2}），实收 {:.3}",
+            loaded - cut,
+            loaded,
+            cn1 - cn0
+        );
+        assert!(
+            (us1 - us0 - cut).abs() < 1e-9,
+            "承运人的报酬就是它自留的那份货：{cut:.3}，实收 {:.3}",
+            us1 - us0
+        );
+        // 合同进度按**卸出舱的总量**记（抽成是搬运费，不能从合同的量里扣）。
+        let c = state.contracts.get(id).expect("10 件还没送完，合同该还在");
+        assert!(
+            (c.delivered - loaded).abs() < 1e-9,
+            "进度 = 卸出舱的总量 {loaded}，实为 {}",
+            c.delivered
+        );
     }
 
     /// **常驻路线 + 腿别由货舱决定（Q7 A / Q5 A）**：同一对 `from/to`、**不存任何额外状态**，
