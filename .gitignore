@@ -4,6 +4,8 @@
 /play/*
 !/play/planet_xq
 !/play/planet_x_ctl
+# 数据级测试（Python，不用框架）——是**代码**，进版本库；跑出来的投影不进（在 target/ 下）。
+!/play/tests
 # Python (uv) artifacts — never committed; the kit source + uv.lock are.
 .venv/
 __pycache__/

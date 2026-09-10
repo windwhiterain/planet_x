@@ -89,6 +89,20 @@ q.round_inputs(round=12)       # ★ THE INPUT FACE (B5): what the round *consum
                                #   order (C7: the per-ship resolution order) / relation_noise (C13) / rolls
 ```
 
+### 批量读：`load(dir, only=(...))`
+
+一份 1000 回合的投影有 ~170 MB，**全装 ≈ 12 s**（`round_inputs` / `control` / `blueprints`
+就占一半多），而多数问题只碰两三张表。`only` 只装点名的表（没装到的表访问时会明确报
+「这次没装」，不会让人误以为投影里没有）：
+
+```python
+q = planet_xq.load("out", only=("events", "ships", "factions"))   # 长局扫描的常用组合
+```
+
+另外：**浮点解析是精确的**（`precise_float=True`，不是默认值）。pandas 默认的快速解析器对
+某些需要 16 位有效数字的值会落到**相邻的 double** 上（实测 `1.989510667009421` 读成
+`1.9895106670094211`）——那正是引擎开 serde_json `float_roundtrip` 要掐掉的漂移。
+
 **Two faces, one round (B5).** `view` is the **settled** face (observations + the round's process
 quantities); `round_inputs` is the **consumed** face — the dice the engine rolled and the inputs its
 judgments saw. The rule is by *kind*, not by which values exist today: anything that is (or could

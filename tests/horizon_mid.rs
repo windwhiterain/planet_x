@@ -1,35 +1,16 @@
-//! **中档（T2，49–480 回合）**的端到端行为用例。
+//! **中档（T2，49–480 回合）**的端到端行为用例——**这个二进制现在是空的**。
 //!
-//! 快档（默认 `cargo nextest run`）不选这个二进制；`-P mid` / `-P full` 选。
-//! 长档（T3，>480 回合）在 `tests/horizon_long.rs`，探针诊断在 `tests/trade_probe.rs`。
-
-use planet_x::config::load_config;
-use planet_x::model::*;
-use planet_x::prng::Prng;
-use planet_x::sim;
-use planet_x::world;
-
-/// 确定性复现：同一种子 + 相同配置 + 相同回合数 → 输出逐字节一致（spec 的硬性要求）。
-/// 这也锁定了新增机制（治理/重建/本土防御/MOND）不会破坏可复现性。
-#[test]
-fn same_seed_reproduces_identically() {
-    let config = load_config();
-    let mut a = world::default_state(&config, 42);
-    let mut ra = Prng::new(42);
-    let mut b = world::default_state(&config, 42);
-    let mut rb = Prng::new(42);
-    let mut derived_a = RoundView::default();
-    let mut derived_b = RoundView::default();
-    for _ in 0..200 {
-        derived_a = sim::advance(&mut a, &config, &mut ra);
-        derived_b = sim::advance(&mut b, &config, &mut rb);
-    }
-    // 用最后一回合的 Derived 渲染（携带产出/维护/治理流 + 总结指标），验证这些中间量同样可复现。
-    let sa = planet_x::agent::render_state(&a, &derived_a);
-    let sb = planet_x::agent::render_state(&b, &derived_b);
-    assert_eq!(
-        sa, sb,
-        "same seed 42 at round 200 must reproduce identical agent state"
-    );
-    assert_eq!(a.round, b.round);
-}
+//! 它唯一的用例 `same_seed_reproduces_identically`（seed 42 / 200 回合，比 `render_state`
+//! 的两次渲染）已搬到 Python 侧：`play/tests/g1_contract.py` 的「同 seed 重跑逐字节一致」
+//! ——判据更强（比的是**整份投影的每个文件**的 sha256，不只是末回合的一份渲染），而且
+//! **不重编**（见 `.agents/notes/test-decoupled-suite.md`）。
+//!
+//! ```text
+//! uv run --project play/planet_xq python play/tests/run.py 1
+//! ```
+//!
+//! ⚠ `.config/nextest.toml` 里 `binary(horizon_mid)` 那两条 filter 仍然留着：档位是**按
+//! 模块名/二进制名**认的，留着不会选到不存在的用例，哪天这里又长出中档用例时也不用改配置。
+//!
+//! 文件本身留着（而不是删掉）是为了让「中档在 Rust 侧空了」这件事**看得见**，
+//! 而不是让人以为是漏了一步。

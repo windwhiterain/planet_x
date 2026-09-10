@@ -1,104 +1,22 @@
-//! **中档（T2，49–480 回合）**的 sim 行为用例。
-//!
-//! 400 回合：「同回合复垦」「出厂风格」；60 回合：编年史 / 参与者 / 战痕地板。
+//! **中档（T2，49–480 回合）**的 sim 行为用例：60 回合一类（编年史 / 参与者 / 战痕地板）。
 //! 它们要的**模拟时长就是判据本身**，所以不进快档——默认 `cargo nextest run` 不选它们，
 //! `cargo nextest run -P mid` 选。
+//!
+//! ## 两条 400 回合的用例已搬到 Python 侧（`play/tests/g2_mid.py`）
+//!
+//! 2026-10（用户裁决：*「测试应该和游戏二进制解耦，直接测跑出来的数据」*）：
+//!
+//! * `a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round` —— 判据完全在
+//!   **事件层**（`city_razed` 的 `data.owner` 与同回合 `colony_founded` 的 actor 比先后与归属），
+//!   读面就够；现在住 `g2_mid.py`「被拆平的城不在同回合被旧主复垦」（同种子 `[1,7,42]`、
+//!   同 400 回合、同「拆平数 ≥ 20」的防空转下限）。
+//! * `long_run_produces_customized_ships` —— 判据在**舰表**（`hull > 0` + `components` 非空），
+//!   同样口径（「整局里出现过」而不是「末回合还剩着」）。
+//!
+//! 留在 Rust 的是需要 crate 内部量/夹具的（战痕地板要读 `war_scar_rounds` 的关系序列、
+//! 编年史要 `fresh_world` 夹具）：搬不动的两栏对账见 `.agents/notes/test-decoupled-suite.md`。
 
 use super::*;
-
-/// **同回合抵消不变量（复垦侧）**。
-///
-/// 一座城在本回合被拆平之后，**不该被它自己的旧主在本回合复垦**：那对事件对归属的净效果是
-/// A→A（只剩人口/建筑被重置），却照样记 `city_razed` + `colony_founded` + `ship_spawned`
-/// 三条事件，还白送一艘种子舰——并把它钉成「拆平→复垦→再拆平」的极限环。
-///
-/// 实测 seed 7 @200 回合，修正前：137 次拆平里 **93 次（68%）** 是这种同回合自我复垦，
-/// `水星熔炉基地` 一座城循环 **22 次**、被拆平 32 次；修正后 0 次，该城不再出现在「被拆平
-/// 最多」的前五，事件总量 2273 → 1964。
-///
-/// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。删除 `step_resurgence`
-/// （D5）之后，同回合复垦只剩「殖民舰恰好当回合抵达」这一条路径，**拆平本身也变少了**
-/// （120 回合只剩 13 次）——所以把视野拉到 400 回合，让样本重新够用。
-///
-/// ⚠ 视野改成**多个种子合计**（而不是只跑 seed 7）：风格轴 + 设计图两个执行者落地之后，
-/// seed 7 这条轨迹安静下来了（400 回合 10 次拆平 / 4 艘舰，同一个种子上基线是 57 次 /
-/// 33 艘）——**非空这条要求因此不能只押在一个种子上**（那种世界是怎么变的，记在
-/// `.agents/notes/control-live-layers.md` §15，是待上层裁决的平衡项，不是这里放宽判据）。
-/// 不变式本身对**每一个**种子每一回合都照旧检查，只是样本从三个种子里凑。
-#[test]
-fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
-    let config = load_config();
-    let mut razings = 0usize;
-    for seed in [1u64, 7, 42] {
-        let mut state = default_state(&config, seed);
-        let mut rng = crate::prng::Prng::new(seed);
-        for _ in 0..400 {
-            advance(&mut state, &config, &mut rng);
-            // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 也由
-            // step_military 里的殖民路径发（拆平在前、复垦在后），正是要抓的顺序。
-            let mut razed: std::collections::BTreeMap<String, String> =
-                std::collections::BTreeMap::new();
-            for e in &state.events {
-                match e {
-                    GameEvent::CityRazed { city, owner, .. } => {
-                        razed.insert(city.clone(), owner.clone());
-                        razings += 1;
-                    }
-                    GameEvent::ColonyFounded { city, owner, .. } => {
-                        if let Some(loser) = razed.get(city) {
-                            assert_ne!(
-                                loser, owner,
-                                "seed {seed} 第 {} 回合：{city} 被 {loser} 丢掉后又被**同一个势力**复垦——\
-                                 一对净效果为零的事件（拆平在同回合被自己抹掉）",
-                                state.round
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    assert!(
-        razings >= 20,
-        "三个种子各 400 回合只发生 {razings} 次拆平，样本太小，守卫会空转"
-    );
-}
-
-/// 功能性验证：长局里确实会出现「定制化」舰（资源→组件选择真的被 AI 执行）。
-///
-/// ⚠ **口径 = 「整局里出现过」，而不是「400 回合末还剩着」**（M2 之后改的）。
-/// 原来数的是**末回合快照**，于是这条非空守卫押在一个轨迹事实上：世界是混沌的
-/// （任何一处机制改动都会重掷整条轨迹），而舰队在长局里会被打光。实测（400 回合 × seed
-/// 7/42，同一个探针在两条树上各跑一次）：
-///   * `main`（`23bdb25`）：出厂 206 / 230 条，末回合活舰 **0 / 27**；
-///   * 本分支（MOND 掌握度连续化 + 飞船在场渠道）：出厂 105 / 92 条，末回合活舰 **0 / 0**。
-/// 两条树上**机制都在正常工作**（出厂的舰基本全都带组件：100/105、87/92），
-/// 差别只是「末回合那片场地上还剩几条舰」。所以判据改成**累计**：
-/// 只要整局里有任何一个回合存在过「装了组件的活舰」，AI 的选装就被验证过了——
-/// 这个口径比原来**更不容易空转**（末回合快照会随轨迹归零，累计不会），
-/// 而它检验的仍然是同一件事。
-#[test]
-fn long_run_produces_customized_ships() {
-    let config = load_config();
-    let mut customized = 0usize;
-    for seed in [7u64, 42] {
-        let mut state = default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        for _ in 0..400u32 {
-            advance(&mut state, &config, &mut rng);
-            customized += state
-                .ships
-                .iter()
-                .filter(|s| s.hull > 0.0 && !s.components.is_empty())
-                .count();
-        }
-    }
-    assert!(
-        customized > 0,
-        "customized (component-fitted) ships should appear over a long run, got {customized}"
-    );
-}
 
 /// 剧情编年史：RoundAt 节拍按回合触发、编年史按发生先后单调增长、id 唯一，且
 /// 同一种子完全确定（重跑逐字节一致）。
