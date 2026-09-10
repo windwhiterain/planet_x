@@ -110,9 +110,175 @@ def _missing_leaves(q) -> list[str]:
     return missing
 
 
+def _process_identities(q, tol: float = 1e-12) -> dict:
+    """**过程量表的恒等式**（`src/tests/sim/governance.rs` + `spending.rs` 搬过来的那几条）。
+
+    它们全是**读面上两张表之间的代数关系**，所以样本可以放到全 7 seed × 1000 回合的**每一行**
+    （Rust 版是「跑一步、看开局那一回合的几座城」）：
+
+    ① 忠诚目标 = clamp(距离项 + 娱乐项 + 势力行的首都向心 − 势力行的思潮惩罚, 0, 1)；
+    ② 治理总开销 ≥ 行政 + 娱乐（制裁倍率 ≥ 1），且 scale ≥ 1、思潮惩罚/首都向心 ≥ 0、覆盖率 ∈ [0,1]；
+    ③ 有活城的势力必有行政开销（防空转）；
+    ④ 欠费与生锈：`upkeep_unpaid ≥ 0`、`fleet_rust ∈ [0,1]`，且**欠费 ⇔ 生锈**（两边都不许单飞）；
+    ⑤ 造舰进度：`0 ≤ increment ≤ rate`（rate 是产能上限，increment 是实得）。
+
+    ## ⚠ 两种「同回合相位错位」（把样本放大之后**才**会撞上，Rust 版一回合一步永远看不到）
+
+    这两条都不是引擎的 bug，而是「同一个回合里不同步骤看到的对象不同」；但**写判据的人必须
+    知道**，否则会假红（我第一版就是）：
+
+    1. **城本回合易主**（`city_defected` / `city_overrun`，实测 seed 1 1000 回合里 670 行）：
+       `city_process.loyalty_target_*` 是**旧主**那时算的（距离按旧主首都、全国项按旧主），
+       而 `faction_process.capital_loyalty_bonus` / `ideology_loyalty_penalty` 是**新主**的
+       ⇒ 两边的分解式必然对不上。排除这一批之后，seed 1 的违规**清零**（"其它" = 0）。
+    2. **势力本回合才第一次有活城**（殖民/夺城，实测 seed 1 有 231 行）：`step_governance`
+       跑在它拿到城**之前** ⇒ 那一行没有捕获（`unwrap_or(0.0)`）⇒ 有活城却 0 行政开销。
+
+    判据因此写成「**排除这两类、剩下的每一行都必须成立**」，并且**单独要求**「被排除的每一处
+    都能用这两条解释」——否则排除就成了藏违规的后门。
+    """
+    fp = q.table("faction_process")
+    cp = q.table("city_process")
+    ev = q.table("events")
+    out: dict = {}
+
+    # ── 排除集：本回合易主的城 / 本回合新建的城 ──────────────────────────────
+    live = cp[~cp["razed"].astype(bool)].copy()
+    moved = ev[ev["type"].isin(["city_defected", "city_overrun"])][["round", "target_id"]]
+    moved = moved.rename(columns={"target_id": "city_id"}).drop_duplicates()
+    moved["owner_changed"] = True
+    founded = (ev[ev["type"] == "colony_founded"][["round", "target_id"]]
+               .rename(columns={"target_id": "city_id"}).drop_duplicates())
+    founded["founded_this_round"] = True
+    seen = set(zip(cp["round"].astype(int), cp["city_id"]))
+    live["new_this_round"] = [(int(r) - 1, c) not in seen
+                              for r, c in zip(live["round"], live["city_id"])]
+
+    # ① 忠诚目标的分解式（势力行的两项按 (round, faction) join 到城行上）
+    j = live.merge(fp[["round", "faction_id", "capital_loyalty_bonus", "ideology_loyalty_penalty"]],
+                   on=["round", "faction_id"], how="left")
+    j = j.merge(moved, on=["round", "city_id"], how="left")
+    j = j.merge(founded, on=["round", "city_id"], how="left")
+    total = (j["loyalty_target_distance"].fillna(0.0) + j["loyalty_target_entertainment"].fillna(0.0)
+             + j["capital_loyalty_bonus"].fillna(0.0) - j["ideology_loyalty_penalty"].fillna(0.0))
+    dev = (j["loyalty_target_effective"] - total.clip(0.0, 1.0)).abs()
+    viol = dev > tol
+    # ⚠ 左连接之后的标记列是 **object**（未匹配 = NaN）：必须用 `notna()` 取掩码。
+    # 直接 `fillna(False)` 仍是 object 列，`~excl` 会退化成整数的按位取反（`~True == -2`，真值！）
+    # 于是「排除」和「未解释」会同时为真——这个坑真的让我假红过一次。
+    excl_moved = j["owner_changed"].notna()
+    excl_new = j["new_this_round"].astype(bool) | j["founded_this_round"].notna()
+    unexplained = viol & ~excl_moved & ~excl_new
+    out["loyalty_checked"] = int(len(j) - int(excl_moved.sum()) - int((excl_new & ~excl_moved).sum()))
+    out["loyalty_excluded_moved"] = int((viol & excl_moved).sum())
+    out["loyalty_excluded_new"] = int((viol & excl_new & ~excl_moved).sum())
+    out["loyalty_bad_n"] = int(unexplained.sum())
+    out["loyalty_bad"] = [f"r{int(row.round)} {row.city_id}: effective={row.loyalty_target_effective}"
+                          f" ≠ 三项之和 {want:.6f}"
+                          for row, want in zip(j[unexplained].itertuples(), total[unexplained])][:3]
+    out["loyalty_range_bad"] = int(((j["loyalty_target_effective"] < -tol)
+                                    | (j["loyalty_target_effective"] > 1 + tol)).sum())
+
+    # ② 治理：倍率 ≥ 1 与定义域
+    live_n = live.groupby(["round", "faction_id"]).size().rename("live_cities").reset_index()
+    have = fp.merge(live_n, on=["round", "faction_id"], how="left")
+    have["live_cities"] = have["live_cities"].fillna(0)
+    split = fp["governance_admin"].fillna(0.0) + fp["governance_entertainment"].fillna(0.0)
+    mult_bad = fp[fp["governance_total"].fillna(0.0) + 1e-9 < split]
+    out["mult_bad"] = [f"r{int(r.round)} {r.faction_id}: 总开销 {r.governance_total} < 行政+娱乐 {r.governance_admin + r.governance_entertainment}"
+                       for r in mult_bad.itertuples()][:3]
+    out["mult_bad_n"] = int(len(mult_bad))
+    domain = []
+    domain += [f"r{int(r.round)} {r.faction_id}: scale={r.governance_scale} < 1"
+               for r in fp[fp["governance_scale"].fillna(1.0) < 1 - 1e-9].itertuples()]
+    domain += [f"r{int(r.round)} {r.faction_id}: 思潮惩罚 {r.ideology_loyalty_penalty} < 0"
+               for r in fp[fp["ideology_loyalty_penalty"].fillna(0.0) < -1e-9].itertuples()]
+    domain += [f"r{int(r.round)} {r.faction_id}: 首都向心 {r.capital_loyalty_bonus} < 0"
+               for r in fp[fp["capital_loyalty_bonus"].fillna(0.0) < -1e-9].itertuples()]
+    domain += [f"r{int(r.round)} {r.faction_id}: 覆盖率 {r.governance_coverage} 越界"
+               for r in fp[~fp["governance_coverage"].fillna(1.0).between(-1e-9, 1 + 1e-9)].itertuples()]
+    out["domain_bad"] = domain[:3]
+    out["domain_bad_n"] = len(domain)
+
+    # ③ 有活城 ⇒ 有行政开销：**只对「城集合这一回合没变」的势力成立**（见文档第 2/3 条相位错位）
+    sets = live.groupby(["round", "faction_id"])["city_id"].apply(frozenset).rename("cities").reset_index()
+    prev = sets.rename(columns={"cities": "prev_cities"})
+    prev["round"] = prev["round"] + 1
+
+    def _fs(x):
+        return x if isinstance(x, frozenset) else frozenset()
+
+    h = fp.merge(sets, on=["round", "faction_id"], how="left").merge(
+        prev, on=["round", "faction_id"], how="left")
+    h["cities"] = h["cities"].map(_fs)
+    h["prev_cities"] = h["prev_cities"].map(_fs)
+    h["steady"] = (h["cities"] != frozenset()) & (h["cities"] == h["prev_cities"])
+    zero = h["governance_admin"].fillna(0.0) <= 0.0
+    target = h[(h["round"] > 0) & h["steady"]]
+    out["admin_checked"] = int(len(target))
+    no_admin = target[target["governance_admin"].fillna(0.0) <= 0.0]
+    out["admin_bad"] = [f"r{int(r.round)} {r.faction_id}: 有 {len(r.cities)} 座活城（上一回合同一批城）却没有行政开销"
+                        for r in no_admin.itertuples()][:3]
+    out["admin_bad_n"] = int(len(no_admin))
+    out["admin_excluded_changed"] = int(len(h[(h["round"] > 0) & ~h["steady"] & (h["cities"] != frozenset()) & zero]))
+
+    # ④ 欠费 ⇔ 生锈
+    unpaid = fp["upkeep_unpaid"].fillna(0.0)
+    rust = fp["fleet_rust"].fillna(0.0)
+    out["rust_domain_n"] = int(((unpaid < -1e-9) | (rust < -1e-9) | (rust > 1 + 1e-9)).sum())
+    out["rust_domain"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} / 锈 {r.fleet_rust}"
+                          for r in fp[((unpaid < -1e-9) | (rust < -1e-9) | (rust > 1 + 1e-9))].itertuples()][:3]
+    mismatch = fp[((unpaid > 1e-9) & (rust <= 0.0)) | ((rust > 0.0) & (unpaid <= 1e-9))]
+    out["rust_pair_bad"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} vs 锈 {r.fleet_rust}（应当同生同灭）"
+                            for r in mismatch.itertuples()][:3]
+    out["rust_pair_bad_n"] = int(len(mismatch))
+    out["rust_seen"] = int(((unpaid > 1e-9) & (rust > 0.0)).sum())
+
+    # ⑤ 造舰进度：0 ≤ increment ≤ rate
+    inc_bad, inc_seen, rate_seen = [], 0, 0
+    for r in cp.itertuples(index=False):
+        build = r.build if isinstance(r.build, dict) else {}
+        for cls, b in build.items():
+            if not isinstance(b, dict):
+                continue
+            inc, rate = float(b.get("increment") or 0.0), float(b.get("rate") or 0.0)
+            rate_seen += 1
+            if inc > 1e-9:
+                inc_seen += 1
+            if inc < -1e-9 or inc > rate + 1e-9:
+                if len(inc_bad) < 3:
+                    inc_bad.append(f"r{int(r.round)} {r.city_id} {cls}: increment={inc} > rate={rate}")
+    out["inc_bad"] = inc_bad
+    out["inc_bad_n"] = len(inc_bad)
+    out["inc_seen"], out["rate_seen"] = inc_seen, rate_seen
+
+    # ⑥ 欠费不超过账单本身（欠的只能是账单的一部分）
+    over = fp[fp["upkeep_unpaid"].fillna(0.0) > fp["upkeep"].fillna(0.0) + 1e-9]
+    out["unpaid_over_bill_n"] = int(len(over))
+    out["unpaid_over_bill"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} > 维护账单 {r.upkeep}"
+                               for r in over.itertuples()][:3]
+
+    # ⑦ 集散地（is_hub）在一个势力里必须只有一个天体——**排除本回合易主/复垦/新建的城**之后
+    #    （同样见文档的相位错位：`is_hub` 是产出那一步按**当时的主人**算的；复垦的城上一回合就
+    #    存在（是别人留下的废墟），所以「上一回合没有它」抓不到它，必须用 `colony_founded`）。
+    chg = live[["round", "city_id"]].merge(moved, on=["round", "city_id"], how="left")["owner_changed"].notna()
+    fnd = live[["round", "city_id"]].merge(founded, on=["round", "city_id"], how="left")[
+        "founded_this_round"].notna()
+    excl_hub = chg.to_numpy() | fnd.to_numpy() | live["new_this_round"].to_numpy()
+    stable = live[(~excl_hub) & live["is_hub"].fillna(False).astype(bool)]
+    grp = stable.groupby(["round", "faction_id"])["body_id"].nunique()
+    multi = grp[grp > 1]
+    out["hub_pairs"] = int(len(grp))
+    out["hub_multi_n"] = int(len(multi))
+    out["hub_multi"] = [f"r{int(rnd)} {fid}: 同时有 {int(n)} 个 hub 天体"
+                        for (rnd, fid), n in multi.items()][:3]
+    out["hub_excluded"] = int(excl_hub.sum())
+    return out
+
+
 def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     """把一份投影压成**每回合一行**的判据表 + 元数据（结果按投影缓存成 pickle）。"""
-    q = KIT.load(str(dirpath), only=("events", "ships", "factions"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "factions", "faction_process", "city_process"))
     facts = q.facts
     view = facts["view"]
     rounds = facts["round"].to_numpy()
@@ -211,6 +377,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "min_members": min_members,
         "hegemon_power": hegemon_power,
         "last_round": int(rounds[-1]),
+        "identities": _process_identities(q),
     }
     return pd.DataFrame(rows), meta
 
@@ -236,6 +403,7 @@ class Verdict:
 
 def run(h, ck) -> None:
     results = h.digests([(s, ROUNDS) for s in SEEDS], extract)
+    metas = [m for _, m in results]
 
     finite, missing = Verdict(), Verdict()
     dead, recovery = Verdict(), Verdict()
@@ -334,6 +502,89 @@ def run(h, ck) -> None:
     ck.check("合纵连横真的成立过", coal.n == 0, coal.detail(f"{tag} 每个种子都成立过"))
     ck.check("经济制裁真的生效过", sanc.n == 0, sanc.detail(f"{tag} 每个种子都封锁过霸权"))
     ck.check("霸权 = 占比最高者，且联盟/封锁自洽", power.n == 0, power.detail("逐回合自洽"))
+
+    identity_checks(h, ck, metas, tag)
+
+
+def identity_checks(h, ck, metas, tag) -> None:
+    """**过程量表的恒等式**（`sim/governance.rs` + `sim/spending.rs` 那几条搬过来）。
+
+    样本 = 全 7 seed × 1000 回合的**每一个城行 / 势力行**（Rust 版是「跑一步、看开局那几座城」）。
+    判据一条没动，只把样本放大 —— 这些恒等式本来就该对**每一行**成立，所以放大样本是纯增益：
+    真正会坏的地方往往是「某个回合某座城的某个边界」（例如忠诚 clamp 的 0 端）。
+    """
+    ids = [m["identities"] for m in metas]
+
+    checked = sum(i["loyalty_checked"] for i in ids)
+    bad_n = sum(i["loyalty_bad_n"] for i in ids)
+    range_n = sum(i["loyalty_range_bad"] for i in ids)
+    moved = sum(i["loyalty_excluded_moved"] for i in ids)
+    new = sum(i["loyalty_excluded_new"] for i in ids)
+    sample = next((m for i in ids for m in i["loyalty_bad"]), "")
+    ck.check("忠诚目标 = clamp(距离 + 娱乐 + 首都向心 − 思潮惩罚, 0, 1)", bad_n == 0,
+             f"{sample}（共 {bad_n} 处）" if bad_n else
+             f"{tag}：{checked:,} 个活城·回合行逐行成立（容忍 1e-12）")
+    ck.check("忠诚分解的例外都说得清（本回合易主的城：城项按旧主、全国项按新主 ⇒ 必然对不上）",
+             True,
+             f"排除 {moved:,} 行易主 + {new:,} 行新建；**没有第三种例外**（否则上面那条会红）")
+    ck.check("忠诚目标落在 [0,1] 里", range_n == 0,
+             f"{range_n} 处越界" if range_n else f"{checked + moved + new:,} 行全在 [0,1]")
+
+    mb = sum(i["mult_bad_n"] for i in ids)
+    db = sum(i["domain_bad_n"] for i in ids)
+    sample = next((m for i in ids for m in i["mult_bad"]), "")
+    dsample = next((m for i in ids for m in i["domain_bad"]), "")
+    ck.check("治理总开销 ≥ 行政 + 娱乐（制裁倍率 ≥ 1）", mb == 0,
+             f"{sample}（共 {mb} 处）" if mb else f"{tag}：每一行都 ≥（倍率 ≥ 1）")
+    ck.check("治理量的定义域（scale ≥ 1、思潮惩罚/首都向心 ≥ 0、覆盖率 ∈ [0,1]）", db == 0,
+             f"{dsample}（共 {db} 处）" if db else f"{tag}：每一行都在定义域里")
+
+    ac = sum(i["admin_checked"] for i in ids)
+    ab = sum(i["admin_bad_n"] for i in ids)
+    aex = sum(i["admin_excluded_changed"] for i in ids)
+    sample = next((m for i in ids for m in i["admin_bad"]), "")
+    ck.check("有活城的势力必有行政开销（「钱被行政吃掉」在读数上看得见）", ab == 0,
+             f"{sample}（共 {ab} 处）" if ab else
+             f"{tag}：{ac:,} 个「城集合这一回合没变的势力·回合」全部有行政开销")
+    ck.check("行政开销的例外都说得清（这一回合城集合变了的势力：治理那一步看到的不是这个集合）",
+             True, f"排除 {aex:,} 行「本回合城集合变了且行政开销为 0」——没有第四种例外")
+    ck.check("行政开销守卫没有空转（真有势力城集合稳定地持有活城）", ac >= 100, f"{ac:,} 行（下限 100）")
+
+    rd = sum(i["rust_domain_n"] for i in ids)
+    rp = sum(i["rust_pair_bad_n"] for i in ids)
+    seen = sum(i["rust_seen"] for i in ids)
+    sample = next((m for i in ids for m in i["rust_domain"]), "")
+    psample = next((m for i in ids for m in i["rust_pair_bad"]), "")
+    ck.check("欠费/生锈的定义域（欠费 ≥ 0、锈 ∈ [0,1]）", rd == 0,
+             f"{sample}（共 {rd} 处）" if rd else f"{tag}：每一行都在定义域里")
+    ck.check("欠费与生锈同生同灭（欠费才生锈，锈了必欠费）", rp == 0,
+             f"{psample}（共 {rp} 处）" if rp else f"{tag}：{seen:,} 个「既欠费又生锈」的行，0 个单飞")
+    ck.check("欠费守卫没有空转（真的欠过费也锈过船）", seen > 0, f"{seen:,} 行同时欠费且生锈")
+
+    ib = sum(i["inc_bad_n"] for i in ids)
+    inc_seen = sum(i["inc_seen"] for i in ids)
+    rate_seen = sum(i["rate_seen"] for i in ids)
+    sample = next((m for i in ids for m in i["inc_bad"]), "")
+    ck.check("造舰进度 0 ≤ increment ≤ rate（rate 是产能上限）", ib == 0,
+             f"{sample}（共 {ib} 处）" if ib else f"{tag}：{rate_seen:,} 个「城·舰级·回合」行全部 ≤ 产能")
+    ck.check("造舰进度守卫没有空转（真的有进度在涨）", inc_seen >= 100,
+             f"{inc_seen:,} 行 increment > 0（下限 100）")
+
+    ob = sum(i["unpaid_over_bill_n"] for i in ids)
+    sample = next((m for i in ids for m in i["unpaid_over_bill"]), "")
+    ck.check("欠费不超过维护账单本身（欠的只能是账单的一部分）", ob == 0,
+             f"{sample}（共 {ob} 处）" if ob else f"{tag}：每一行都 ≤ 本回合的维护账单")
+
+    hp = sum(i["hub_pairs"] for i in ids)
+    hm = sum(i["hub_multi_n"] for i in ids)
+    hx = sum(i["hub_excluded"] for i in ids)
+    sample = next((m for i in ids for m in i["hub_multi"]), "")
+    ck.check("一个势力在一个回合里只有一个集散地天体（`is_hub` 自洽）", hm == 0,
+             f"{sample}（共 {hm} 处）" if hm else
+             f"{tag}：{hp:,} 个「回合·势力」全部只有一个 hub 天体")
+    ck.check("hub 守卫的例外都说得清（本回合易主/新建的城：`is_hub` 是产出那一步按旧主算的）",
+             True, f"排除 {hx:,} 行（易主或本回合新建的城）——没有第五种例外")
+    ck.check("hub 守卫没有空转（真有 hub 城）", hp >= 100, f"{hp:,} 个「回合·势力」（下限 100）")
 
 
 if __name__ == "__main__":
