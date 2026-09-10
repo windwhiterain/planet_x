@@ -3468,6 +3468,58 @@ mod tests {
         assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
     }
 
+    /// 舰队默认指令要真的管住**新造出来的舰**：它出厂时没有任何指令叶片（不点名 = 不在
+    /// 任何 diff 里），但不能因此默认归系统、被 AI 拿去远征或停在 Idle —— 它应当直接执行
+    /// 势力的默认意图。
+    ///
+    /// 这条是 note `agent-control-long-game.md` §5 的端到端守卫（控制面单测在
+    /// `control::tests::fleet_default_order_covers_new_ships`）。
+    #[test]
+    fn fleet_default_governs_newly_built_ships() {
+        let (config, mut state) = fresh_world(42);
+        let fid = "中国".to_string();
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "default_ship_order": {"behavior": {"type": "dock", "body": "地球"}}
+            }]
+        });
+        crate::control::apply_patch(&mut state, &config, &diff).expect("fleet default applies");
+
+        // 与船坞出厂同一条漏斗造一艘新舰（不带指令叶片）。
+        let pos = state.body_position("水星");
+        let name = spawn_ship(&mut state, &config, ShipSpawn {
+            owner: fid.clone(),
+            class: "corvette",
+            position: pos,
+            city: None,
+            via: SpawnVia::Resurgence,
+            pay_components: false,
+        });
+        // 出厂时 `spawn_ship` 给它一条**没有说话**（`Inherit`）的叶片——它不在玩家的任何
+        // diff 里，所以「谁负责、干什么」只能由更宽的那一层回答。
+        let leaf = state
+            .control(fid.clone())
+            .and_then(|c| c.ship_orders.get(&name).cloned())
+            .expect("spawn_ship seeds an order leaf");
+        assert_eq!(leaf.mode, ControlMode::Inherit, "a freshly built ship has no opinion of its own");
+        assert_eq!(leaf.value, ShipBehavior::Idle, "…and its recorded value is a mere placeholder");
+        assert_eq!(state.ship_control(name.clone()), ControlMode::Player, "…so the fleet default owns it");
+        assert_eq!(
+            state.ship_behavior(name.clone()),
+            Some(ShipBehavior::Dock { body: "地球".to_string() }),
+            "…and it inherits the faction's intent instead of standing idle"
+        );
+
+        // 推进一回合：AI 不许碰它（归属解析在它身上给出 Player），而且它照着默认意图动。
+        let mut rng = Prng::new(42);
+        let before = state.ship(&name).expect("ship").position;
+        advance(&mut state, &config, &mut rng);
+        assert_eq!(state.ship_control(name.clone()), ControlMode::Player, "the system must not take it over");
+        let after = state.ship(&name).map(|s| s.position).unwrap_or(before);
+        let to_earth = dist(after, state.body_position("地球")) < dist(before, state.body_position("地球"));
+        assert!(to_earth, "the new ship must sail for 地球 per the fleet default, not be sent off by the AI");
+    }
+
     /// 玩家点名的殖民舰建完城之后必须**仍然是玩家的**。
     ///
     /// 殖民是「命令 → 执行 → 指令失效」的一次性动作：收尾只该把**值**复位成 `Idle`，
@@ -4360,9 +4412,11 @@ mod tests {
 
         // 交圈数设为评估周期（12）：非 Player 首都在评估轮迁到人口中心。
         state.round = 12;
-        // 把中国首都先钉到 水星（较远），保留现值 → mode 沿线默认 Ai。
+        // 把中国首都先钉到 水星（较远），**显式写 `mode: Auto`** 让 AI 继续评估：
+        // 「写值即接管」之后，只写 value 会被当成玩家的首都（mode=Player），
+        // 那样这条测试考的就不再是 AI 评估了。
         let diff = serde_json::json!({
-            "control": [{"faction_id": "中国", "capital": {"value": "水星"}}]
+            "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Auto"}}]
         });
         crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
         assert_eq!(state.capital_body("中国"), "水星");

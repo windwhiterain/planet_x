@@ -83,6 +83,8 @@ pub struct LoyaltyBudgetEntry {
 pub struct FactionControlView {
     pub faction_id: FactionId,
     pub capital: Option<Control<BodyId>>,
+    /// 舰队默认指令（势力级）：新舰出生就继承它，一次性指令执行完也回落到它。
+    pub default_ship_order: Option<DefaultShipOrder>,
     pub ship_orders: Vec<ShipOrderEntry>,
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
     pub ship_kiting: Vec<ShipKitingEntry>,
@@ -104,12 +106,30 @@ pub struct ControlSurface {
 
 // --- presence-aware control patches (the "diff" the agent writes) ----------
 
+/// 舰队默认指令（势力级）：**读面即写面**，与其它叶片同形——`behavior` = 默认干什么，
+/// `mode` = 谁负责。
+///
+/// 它是「新舰默认归谁、干什么」的正解，也是「一次性指令执行完回落到哪」的答案：
+/// 叶子上没有说话（`Inherit`）或压根没有叶子（**刚下水的新舰**）的舰，都取这里的值。
+/// 单舰特例仍写在 `ship_orders[]`（更具体的层优先）。
+#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct DefaultShipOrder {
+    /// 默认行为（缺省 = 保留现值；写值即接管，见 [`apply_diff`]）。
+    #[serde(default)]
+    pub behavior: Option<ShipBehavior>,
+    /// 由谁决定：Inherit（这一层没有说话）/ Auto（系统自动）/ Player（玩家）。
+    /// 缺省 = 保留现模式。
+    #[serde(default)]
+    pub mode: Option<ControlMode>,
+}
+
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipOrderPatch {
     /// 目标舰（唯一名 identity）。
     pub ship: ShipId,
     /// 新行为（Idle/Move/Follow/DockCity/Dock/Colonize）。缺省 = 保留现值。
+    /// **写了值却没写 mode = 接管**（该叶变成玩家指令），免得「我明明写了指令却没生效」。
     #[serde(default)]
     pub behavior: Option<ShipBehavior>,
     /// 由谁决定：Inherit（继承，撤销本层的表态）/ Auto（系统自动）/ Player（玩家）。
@@ -243,6 +263,9 @@ pub struct FactionControlPatch {
     /// 迁都（首都天体）补丁。
     #[serde(default)]
     pub capital: Option<CapitalPatch>,
+    /// 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
+    #[serde(default)]
+    pub default_ship_order: Option<DefaultShipOrder>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
     pub ship_orders: Vec<ShipOrderPatch>,
@@ -307,15 +330,18 @@ pub struct SkippedLeaf {
 }
 
 /// 一次 `--apply` / `POST /api/command` **实际做了什么**：落地了几个叶片、
-/// 丢了哪些（[`SkippedLeaf`]）。CLI 在 stderr 上以 `WARN_APPLY_SKIPPED` 报出
-/// 丢弃项（stdout 必须保持零噪声的状态流）；web 的 `POST /api/command` 整面
-/// 回传，丢弃是预期内的，故刻意忽略。
+/// 丢了哪些（[`SkippedLeaf`]）、**隐含接管**了哪些。CLI 在 stderr 上以
+/// `WARN_APPLY_SKIPPED` / `NOTE_APPLY_TOOKOVER` 报出（stdout 必须保持零噪声的状态流）；
+/// web 的 `POST /api/command` 整面回传，丢弃是预期内的，故刻意忽略。
 #[derive(Debug, Default, Clone, Serialize, JsonSchema)]
 pub struct ApplyReport {
     /// 成功落到状态上的叶片数（一个 `ship_orders[]` 条目 / 一条预算 / 一次迁都… 算一个）。
     pub applied: usize,
     /// 没落地的叶片，附带为什么。
     pub skipped: Vec<SkippedLeaf>,
+    /// **只写了值、没写 mode** 而被隐含接管成玩家指令的叶片路径（见 [`apply_diff`] 的
+    /// 「写值即接管」）。它不是错误，但 agent 需要知道「这一条从这一刻起不再由系统改写」。
+    pub took_over: Vec<String>,
 }
 
 impl ApplyReport {
@@ -333,6 +359,11 @@ impl ApplyReport {
             code: code.to_string(),
             reason: reason.into(),
         });
+    }
+
+    /// 记一条隐含接管（只写值、没写 mode）。
+    fn took_over(&mut self, path: impl Into<String>) {
+        self.took_over.push(path.into());
     }
 
     /// 是否一切都落地了。
@@ -415,6 +446,10 @@ pub fn control_view(state: &State, fid: FactionId, c: &ControllableState) -> Fac
     FactionControlView {
         faction_id: fid,
         capital: c.capital.clone(),
+        default_ship_order: c.default_ship_order.as_ref().map(|d| DefaultShipOrder {
+            behavior: Some(d.value.clone()),
+            mode: Some(d.mode),
+        }),
         ship_orders,
         ship_doctrine,
         ship_kiting,
@@ -467,6 +502,10 @@ fn round_view(v: FactionControlView) -> FactionControlView {
     FactionControlView {
         faction_id: v.faction_id,
         capital: v.capital,
+        default_ship_order: v.default_ship_order.map(|d| DefaultShipOrder {
+            behavior: d.behavior.map(round_behavior),
+            mode: d.mode,
+        }),
         ship_orders: v
             .ship_orders
             .into_iter()
@@ -571,8 +610,34 @@ fn resolve_own_ship(
     }
 }
 
-/// 校验一对 `(city, building)`：两个名字/下标都必须在**同一座城**里对得上。
-/// `building` 是 u32 下标（在它所属城内部唯一，见 `.agents/notes/name-as-unique-key.md`
+/// 落一条「值 + 三态」的叶片补丁（预算 / 权重 / 忠诚预算共用）：**写值即接管**——
+/// 只写了值、没写 `mode`，就意味着这是玩家的指令（该叶变成 `Player`），并在回执里记一笔。
+///
+/// 为什么：值写进去、而 mode 仍解析成 `Auto` 时，系统下一回合就会按自己的逻辑覆盖它。
+/// stdout 与退出码一切正常，agent 却会带着「命令已下达」的错觉玩下去——这正是本项目
+/// 反复吃过的「失败看起来像成功」。
+fn write_value_leaf<T>(
+    ctrl: &mut Control<T>,
+    value: Option<T>,
+    mode: Option<ControlMode>,
+    path: String,
+    report: &mut ApplyReport,
+) {
+    let wrote_value = value.is_some();
+    if let Some(v) = value {
+        ctrl.value = v;
+    }
+    match mode {
+        Some(m) => ctrl.mode = m,
+        None if wrote_value => {
+            ctrl.mode = ControlMode::Player;
+            report.took_over(path);
+        }
+        None => {}
+    }
+}
+
+/// 校验一对 `(city, building)`：两个名字/下标都必须在**同一座城**里对得上。/// `building` 是 u32 下标（在它所属城内部唯一，见 `.agents/notes/name-as-unique-key.md`
 /// 的裁决），所以换一座城
 /// 就得换下标——这是 agent 手写权重时最容易错的地方。
 fn check_city_building(
@@ -642,6 +707,27 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 注意：这里**不能**提前 `let c = state.control.entry(..)`——那会把
         // `state.control` 借出去，后面所有需要 `state.city(..)` 的校验都借不动。
         // 每个写点各自取一次 entry（同名 `fid` 的 `Control` 是同一个）。
+        // 舰队默认指令（势力级）：新舰出生与一次性指令收尾都回落到它。
+        if let Some(d) = &fac.default_ship_order {
+            let path = format!("{fid}.default_ship_order");
+            let c = state.control.entry(fid.clone()).or_default();
+            let ctrl = c
+                .default_ship_order
+                .get_or_insert_with(|| Control::inherit(ShipBehavior::Idle));
+            if let Some(v) = &d.behavior {
+                ctrl.value = v.clone();
+            }
+            // 写值即接管（与叶子同一条规则）：只写默认行为、没写 mode，就是「这是我的默认」。
+            match (d.mode, d.behavior.is_some()) {
+                (Some(m), _) => ctrl.mode = m,
+                (None, true) => {
+                    ctrl.mode = ControlMode::Player;
+                    report.took_over(path.clone());
+                }
+                (None, false) => {}
+            }
+            report.applied += 1;
+        }
         for (i, sp) in fac.ship_orders.iter().enumerate() {
             // Resolve the ship by its **name** (the unique key): an order only
             // applies to a ship that exists and that this faction actually owns,
@@ -649,6 +735,17 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             let path = format!("{fid}.ship_orders[{i}].ship");
             let Some(ship_name) = resolve_own_ship(state, &fid, &sp.ship, &path, &mut report) else {
                 continue;
+            };
+            // 「写值即接管」：只写了 behavior 而没写 mode，就意味着这是**玩家的指令**
+            // （否则值会被系统下一回合按自己的逻辑覆盖，而 agent 以为命令已下达——
+            // 这正是 `agent-play-friction` 里那类「失败看起来像成功」）。
+            let implied = match (sp.mode, sp.behavior.is_some()) {
+                (Some(m), _) => m,
+                (None, true) => {
+                    report.took_over(format!("{fid}.ship_orders[{i}].behavior"));
+                    ControlMode::Player
+                }
+                (None, false) => ControlMode::Inherit,
             };
             let ctrl = state
                 .control
@@ -658,13 +755,15 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 .entry(ship_name)
                 .or_insert_with(|| Control {
                     value: sp.behavior.clone().unwrap_or(ShipBehavior::Idle),
-                    mode: sp.mode.unwrap_or_default(),
+                    mode: implied,
                 });
             if let Some(v) = &sp.behavior {
                 ctrl.value = v.clone();
             }
             if let Some(m) = sp.mode {
                 ctrl.mode = m;
+            } else if sp.behavior.is_some() {
+                ctrl.mode = ControlMode::Player;
             }
             report.applied += 1;
         }
@@ -709,12 +808,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 value: bp.value.unwrap_or(0.0),
                 mode: bp.mode.unwrap_or_default(),
             });
-            if let Some(v) = bp.value {
-                ctrl.value = v;
-            }
-            if let Some(m) = bp.mode {
-                ctrl.mode = m;
-            }
+            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.investment_budget[{i}].value"), &mut report);
             report.applied += 1;
         }
         for (i, bp) in fac.construction_budget.iter().enumerate() {
@@ -731,12 +825,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 value: bp.value.unwrap_or(0.0),
                 mode: bp.mode.unwrap_or_default(),
             });
-            if let Some(v) = bp.value {
-                ctrl.value = v;
-            }
-            if let Some(m) = bp.mode {
-                ctrl.mode = m;
-            }
+            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.construction_budget[{i}].value"), &mut report);
             report.applied += 1;
         }
         for (i, ip) in fac.invest_weights.iter().enumerate() {
@@ -748,12 +837,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 value: ip.value.unwrap_or(0.0),
                 mode: ip.mode.unwrap_or_default(),
             });
-            if let Some(v) = ip.value {
-                ctrl.value = v;
-            }
-            if let Some(m) = ip.mode {
-                ctrl.mode = m;
-            }
+            write_value_leaf(ctrl, ip.value, ip.mode, format!("{fid}.invest_weights[{i}].value"), &mut report);
             report.applied += 1;
         }
         for (i, bp) in fac.build_weights.iter().enumerate() {
@@ -765,12 +849,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 value: bp.value.unwrap_or(0.0),
                 mode: bp.mode.unwrap_or_default(),
             });
-            if let Some(v) = bp.value {
-                ctrl.value = v;
-            }
-            if let Some(m) = bp.mode {
-                ctrl.mode = m;
-            }
+            write_value_leaf(ctrl, bp.value, bp.mode, format!("{fid}.build_weights[{i}].value"), &mut report);
             report.applied += 1;
         }
         for (i, lp) in fac.loyalty_budget.iter().enumerate() {
@@ -799,12 +878,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 value: lp.value.unwrap_or(0.0),
                 mode: lp.mode.unwrap_or_default(),
             });
-            if let Some(v) = lp.value {
-                ctrl.value = v;
-            }
-            if let Some(m) = lp.mode {
-                ctrl.mode = m;
-            }
+            write_value_leaf(ctrl, lp.value, lp.mode, format!("{fid}.loyalty_budget[{i}].value"), &mut report);
             report.applied += 1;
         }
         for (i, bpatch) in fac.buildings.iter().enumerate() {
@@ -839,11 +913,18 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             {
                 let ctrl = state.control.entry(fac.faction_id.clone()).or_default();
                 let ctrl = ctrl.capital.get_or_insert_with(|| Control::inherit(cur));
+                // 无效天体（上面刚跳过）不算「写了值」，否则会记一条假的隐含接管。
+                let wrote = new_value.is_some();
                 if let Some(v) = new_value {
                     ctrl.value = v;
                 }
-                if let Some(m) = cap.mode {
-                    ctrl.mode = m;
+                match (cap.mode, wrote) {
+                    (Some(m), _) => ctrl.mode = m,
+                    (None, true) => {
+                        ctrl.mode = ControlMode::Player;
+                        report.took_over(format!("control[{fi}].capital.value"));
+                    }
+                    (None, false) => {}
                 }
             }
             report.applied += 1;
@@ -1143,13 +1224,22 @@ fn normalize_behavior(v: &mut serde_json::Value, where_: &str) -> Result<(), Str
     Ok(())
 }
 
-/// Walk a control diff and normalize every `ship_orders[].behavior` (see
-/// [`normalize_behavior`]). Only the apply-side JSON path; the state's `order`
+/// Walk a control diff and normalize every ship behavior leaf
+/// (`ship_orders[].behavior` **与** `default_ship_order.behavior`，见
+/// [`normalize_behavior`]）。Only the apply-side JSON path; the state's `order`
 /// view is untouched. Errors carry the **diff path** of the offending order so
 /// the agent knows which line to fix.
 fn normalize_control_diffs(value: &mut serde_json::Value) -> Result<(), String> {
     let Some(control) = value.get_mut("control").and_then(|c| c.as_array_mut()) else { return Ok(()) };
     for (fi, fac) in control.iter_mut().enumerate() {
+        // 舰队默认指令也是「行为」字段，tagged 写法同样要认（手册 §4.3 的承诺对每个
+        // behavior 字段都成立，否则这个字段只能用默认枚举形式写，成为暗坑）。
+        if let Some(behavior) = fac
+            .get_mut("default_ship_order")
+            .and_then(|d| d.get_mut("behavior"))
+        {
+            normalize_behavior(behavior, &format!("control[{fi}].default_ship_order"))?;
+        }
         let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else { continue };
         for (oi, order) in orders.iter_mut().enumerate() {
             let ship = order.get("ship").and_then(|s| s.as_str()).unwrap_or("?").to_string();
@@ -1282,6 +1372,118 @@ mod tests {
         let w = state.ship("华盛顿").expect("华盛顿 exists").doctrine;
         assert_eq!(w.temper, 0.0, "other-faction ship must be untouched");
         assert_eq!(state.ship("华盛顿").unwrap().kiting, 0.0, "other-faction ship must be untouched");
+    }
+
+    /// 舰队默认指令（`default_ship_order`）：**新舰出生就有意图**，而且**一个叶片改全舰队**。
+    ///
+    /// 这是 note `agent-control-long-game.md` §5 的正解：以前新下水的舰不在任何 diff 里
+    /// → 默认归系统 → 玩家每段都要重新枚举活舰名（而舰名会换代）。现在归属与意图都在
+    /// 更宽的那一层有答案，点名单舰只剩「例外」一种用途。
+    #[test]
+    fn fleet_default_order_covers_new_ships() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+        let fid = "中国".to_string();
+
+        // 造一艘锚点：舰队默认是**势力级**的，所以先只对「没有任何叶片的舰」验证语义。
+        // 拿一艘中国的舰、**删掉它的叶片**来模拟「刚下水、还没人点名」。
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .expect("a chinese ship");
+        state.control_mut(fid.clone()).expect("control").ship_orders.remove(&ship);
+        assert_eq!(state.ship_control(ship.clone()), ControlMode::Auto, "no leaf, no default → system");
+        assert_eq!(state.ship_behavior(ship.clone()), None, "no leaf, no default → no order at all");
+
+        // 写一个舰队默认（不带 mode → 写值即接管 = Player）。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "default_ship_order": {"behavior": {"type": "dock", "body": "地球"}}
+            }]
+        });
+        apply_patch(&mut state, &config, &diff).expect("fleet default applies");
+
+        assert_eq!(
+            state.ship_control(ship.clone()),
+            ControlMode::Player,
+            "a ship with no leaf inherits the faction default's ownership"
+        );
+        assert_eq!(
+            state.ship_behavior(ship.clone()),
+            Some(ShipBehavior::Dock { body: "地球".to_string() }),
+            "…and its intent (this is the whole point: the new ship has orders without being named)"
+        );
+
+        // 单舰特例仍然压过舰队默认（更具体的层优先）——而且这是「改主意」的批量手段：
+        // 改**一个**势力级叶片 = 全舰队改主意（B 不需要了）。
+        let batch = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "default_ship_order": {"behavior": {"type": "idle"}, "mode": "Player"}
+            }]
+        });
+        apply_patch(&mut state, &config, &batch).expect("fleet default retarget applies");
+        assert_eq!(state.ship_behavior(ship.clone()), Some(ShipBehavior::Idle), "one leaf, whole fleet");
+
+        let exception = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "ship_orders": [{"ship": ship.clone(), "behavior": {"type": "colonize", "body": "火星"}, "mode": "Player"}]
+            }]
+        });
+        apply_patch(&mut state, &config, &exception).expect("per-ship exception applies");
+        assert_eq!(
+            state.ship_behavior(ship.clone()),
+            Some(ShipBehavior::Colonize { body: "火星".to_string() }),
+            "a named ship overrides the fleet default"
+        );
+
+        // 舰队默认读面即写面：`--control` 里看得见它，且值能原样回传。
+        let view = control_view(&state, fid.clone(), state.control(fid.clone()).expect("control"));
+        let d = view.default_ship_order.expect("the fleet default is part of the read surface");
+        assert_eq!(d.mode, Some(ControlMode::Player));
+        assert_eq!(d.behavior, Some(ShipBehavior::Idle));
+    }
+
+    /// 「写值即接管」：只写值、不写 mode 的 diff 必须真的生效（而不是被系统下一回合
+    /// 按自己的逻辑覆盖掉），并在回执里有一条 `took_over` 记录。
+    #[test]
+    fn writing_a_value_without_mode_takes_over() {
+        let config = crate::config::load_config();
+        let mut state = crate::world::default_state(&config, 42);
+
+        // 不带 mode 写一条舰指令 + 一条预算。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "ship_orders": [{"ship": "长城", "behavior": {"type": "dock", "body": "地球"}}],
+                "construction_budget": [{"resource": "铁", "value": 3.5}]
+            }]
+        });
+        let report = apply_patch(&mut state, &config, &diff).expect("diff applies");
+
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Player, "a written value is an order");
+        assert_eq!(
+            state.ship_behavior("长城".to_string()),
+            Some(ShipBehavior::Dock { body: "地球".to_string() })
+        );
+        assert_eq!(
+            state.construction_budget_control("中国".to_string(), "铁"),
+            ControlMode::Player,
+            "same rule for budgets: the value would otherwise be recomputed away"
+        );
+        assert_eq!(report.took_over.len(), 2, "the receipt must name every implicitly taken-over leaf: {:?}", report.took_over);
+        assert!(report.took_over.iter().any(|p| p.contains("ship_orders[0].behavior")), "{:?}", report.took_over);
+        assert!(report.took_over.iter().any(|p| p.contains("construction_budget[0].value")), "{:?}", report.took_over);
+
+        // 显式写 `Inherit` 仍然能把叶片交还给作用域链（这不是接管，是撤销表态）。
+        let give_back = serde_json::json!({
+            "control": [{"faction_id": "中国",
+                "ship_orders": [{"ship": "长城", "mode": "Inherit"}]
+            }]
+        });
+        let report = apply_patch(&mut state, &config, &give_back).expect("diff applies");
+        assert!(report.took_over.is_empty(), "an explicit mode is not a takeover: {:?}", report.took_over);
+        assert_eq!(state.ship_control("长城".to_string()), ControlMode::Auto, "Inherit hands it back to the system");
     }
 
     /// Setting a faction's scope to Player must actually take over its leaves

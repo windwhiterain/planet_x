@@ -109,6 +109,8 @@ body {
 .tnode-tab:hover { border-color: var(--accent); color: var(--text); }
 .tnode-tab.sel { background: #1e3a6b; border-color: var(--accent); color: var(--text); font-weight: 600; }
 .tnode-kids { padding: 2px 6px 6px; }
+/* 一行说明（例如「这片叶子现在由系统自动决定」）：只解释，不可编辑。 */
+.tnode-hint { padding: 2px 8px 8px; color: var(--muted); font-size: 11px; }
 .tnode select.mode {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 4px; font-size: 12px; flex: none;

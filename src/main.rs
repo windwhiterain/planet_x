@@ -257,19 +257,34 @@ fn main() {
             // 没下达」的渠道**：stdout 必须保持零噪声的状态流，而丢弃的常见原因
             // （舰已战沉/改名、城已易主、building 下标换城）恰恰是必须知道的那种。
             // 静默即成功，所以只在真的丢了东西时才说话。
-            Ok(report) if !report.is_clean() => {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "ok": true,
-                        "code": "WARN_APPLY_SKIPPED",
-                        "applied": report.applied,
-                        "skipped": report.skipped,
-                        "hint": "some diff leaves did not land; the diff itself is valid, the entities it names are not (stale ship/city names, wrong faction, building index from another city).",
-                    })
-                );
+            Ok(report) => {
+                if !report.is_clean() {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "code": "WARN_APPLY_SKIPPED",
+                            "applied": report.applied,
+                            "skipped": report.skipped,
+                            "hint": "some diff leaves did not land; the diff itself is valid, the entities it names are not (stale ship/city names, wrong faction, building index from another city).",
+                        })
+                    );
+                }
+                // 「写值即接管」的回执：你只写了值、没写 mode，那些叶片从此归你（系统不再改写）。
+                // 这不是错误，但 agent 必须知道——它决定了下一回合谁在动它们。
+                if !report.took_over.is_empty() {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": true,
+                            "code": "NOTE_APPLY_TOOKOVER",
+                            "applied": report.applied,
+                            "took_over": report.took_over,
+                            "hint": "writing a value without `mode` means `mode: Player` (the system stops overwriting that leaf). Pass an explicit mode (`Auto` / `Inherit`) if you only meant to nudge the recorded value.",
+                        })
+                    );
+                }
             }
-            Ok(_) => {}
         }
     }
 
