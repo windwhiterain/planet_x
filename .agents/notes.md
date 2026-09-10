@@ -186,11 +186,21 @@
 ## 快速参考：验证手段
 
 测试按**模拟时间**分档（判据 = 用例真正推进的回合数），细节见
-[`notes/test-tiers.md`](notes/test-tiers.md)：
+[`notes/test-tiers.md`](notes/test-tiers.md)。分两层，口令也见 [`AGENTS.md`](../AGENTS.md)
+的「验证」一节（**合流门 = 两条都要绿**）：
 
-- **内循环（快档，~4 s）**：`cargo nextest run` —— T0 + T1（不推进回合 / ≤48 回合）
-- **中档（~30 s）**：`cargo nextest run -P mid` —— 加上 T2（49–480 回合）
-- **全档（~96 s，合流门）**：`cargo nextest run -P full` —— 全部非 ignore 用例
+**① 数据级（`play/tests/`，跑在读面上，不用重编；改断言即刻生效）**
+
+- **三组全跑（合流门，缓存命中 ~4 s）**：`uv run --project play/planet_xq python play/tests/run.py all`
+- 单组：`… run.py 1`（读面契约，≤60 回合）/ `2`（中组 400 回合）/ `3`（长组 1000 回合 × 7 seed）
+- 长局用 `--bin release`（默认）、短局 `--bin debug` 更划算；`--refresh` 无视缓存；
+  `-j N` 并行跑几个世界。缓存落在 `target/test-fixtures/`（代码一改自动失效）。
+
+**② Rust 侧（搬不走的那半）**
+
+- **内循环（快档）**：`cargo nextest run` —— T0 + T1（不推进回合 / ≤48 回合）
+- **中档**：`cargo nextest run -P mid` —— 加上 T2（49–480 回合）
+- **全档（合流门）**：`cargo nextest run -P full` —— 全部非 ignore 用例
 - 探针/诊断（只打印不断言，`#[ignore]`）：`cargo nextest run -P full --run-ignored all`
 - 没装 nextest 的退路：`cargo test --workspace`（**仍然是全档，慢**）
 - 一次简短观察：`cargo run --bin planet_x -- --seed 7 --round 30 --digest 10`（每 10 月一行故事板）

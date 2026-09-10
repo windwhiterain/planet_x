@@ -241,12 +241,17 @@ Python 侧再用一个不精确的解析器 = 把那个坑从后门放回来。�
 
 ## 10.5 还没做 / 下一轮
 
-* **`--index` 没有表过滤**：长组只要 main/events/ships/factions 四份，却要写 169 MB
-  （`round_inputs` 25 MB + `control` 29 MB 全在里面），7 个种子 ≈ **1.2 GB** 缓存。
-  加一个 `--index-tables main,events,ships,factions` 能把时间和磁盘都砍到 ~1/3——但它是
-  **读面**的改动（缺表的投影会让 `q.load()` 报错），**要不要做请用户裁决**。
-* `g1` 的对账现在只覆盖 `faction_process` 的 9 列；`decisions` / `market_trades` /
-  `haul_steps` / `round_inputs` 的逐列对账仍在 `tests/projection_derived.rs`（下一轮按表搬）。
-* 「读面每个叶子都声明了中性值」**反向那一半**仍在 Rust（要走 schemars 类型 schema）。
-* 要不要把 `python play/tests/run.py all` 写进合流门（`AGENTS.md` 的验证约定）——现在是
-  各组自己绿，**没人替它把关**。这一条要用户点头才改 `AGENTS.md`。
+* **`--index` 不加表过滤**（用户裁决 2026-10：*「不过滤了，省的后面新测试又要改」*）。
+  背景：长组只要 main/events/ships/factions 四份，却要写 169 MB（`round_inputs` 25 MB +
+  `control` 29 MB 全在里面），7 个种子 ≈ **1.2 GB** 缓存。加表过滤能把时间和磁盘砍到 ~1/3，
+  但代价是「投影少了几张表」会变成一个新的坏档形态（`q.load()` 报错、每条新断言都要先问
+  「这张表在这个投影里有吗」）——**省下的时间不值得让后面每个测试都多一层判断**。
+  缓存落在 `target/`（`cargo clean` 清掉），需要时用 `--every K` 降采样即可。
+* **合流门已写进 [`AGENTS.md`](../../AGENTS.md) 的「验证」一节**（+ `notes.md` 的「验证手段」）：
+  数据级 `python play/tests/run.py all` 与 `cargo nextest run -P full` **两条都要绿**。
+* `g1` 的对账已经覆盖 `faction_process` / `city_process` / `decisions` / `market_trades` /
+  `haul_steps` / `round_inputs` / `control` / `scope`（原 `projection_derived.rs` 六条全搬）；
+  还留在 Rust 的是「读面每个叶子都声明了中性值」**反向那一半**（要走 schemars 类型 schema）。
+* 未搬的只剩**探针**（`tests/` 下 29 条 `#[ignore]`，只打印不断言）与 `src/tests/**` 的
+  224 条快档单测——按 §6 的两栏对账它们没有「跑出来的数据」可测。真要调平衡时，探针更适合
+  搬到 Python（缓存之后比在 Rust 里跑快得多），但那要等下一个具体问题。
