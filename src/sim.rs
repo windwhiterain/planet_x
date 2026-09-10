@@ -634,7 +634,9 @@ fn deposit_area(deposits: &[(String, f64)], rt: &str) -> f64 {
 }
 
 /// A city's labour ratio: population vs. total staff required by its buildings.
-fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
+///
+/// `pub(crate)`：与 [`max_affordable_inc`] 同理——自动控制估建造时间时必须用**同一把**尺子。
+pub(crate) fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
     let population = state.city(cid).map(|c| c.population as f64).unwrap_or(0.0);
     let mut staff_req = 0.0;
     if let Some(c) = state.city(cid) {
@@ -1246,7 +1248,11 @@ fn budget_remaining(limit: &ResourceMap, spent: &ResourceMap, rt: &str) -> f64 {
     limit.get(rt).copied().unwrap_or(0.0) - spent.get(rt).copied().unwrap_or(0.0)
 }
 
-fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, spent: &ResourceMap, cap: f64) -> f64 {
+/// 在**预算**（`limit`，一件/回合）与**速率上限**（`cap`）下，这个回合最多能推多少进度。
+///
+/// `pub(crate)`：自动控制估计**造舰时间**用的就是这一把尺子（[`crate::autocontrol::shipbuilding::build_rounds`]）
+/// ——各写一份必然漂移，于是「AI 以为要 5 回合、实际要 50 回合」这种错就会悄悄发生。
+pub(crate) fn max_affordable_inc(cost_per_area: &[(String, f64)], limit: &ResourceMap, spent: &ResourceMap, cap: f64) -> f64 {
     let mut inc = cap;
     for (rt, c) in cost_per_area {
         if *c <= 1e-9 {
@@ -1306,7 +1312,17 @@ fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
     // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
     let retool_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     for fid in retool_ids {
+        // **两条动机、两条通道**（用户裁决：造货船的动机与造战争船的动机解耦）：
+        // 战时重构先跑（行为与旧版逐字节相同），集货侧重构只认**它剩下的**船坞
+        //（`claimed`）——于是「有威胁」不会把「缺运力」淹没掉。
+        let before = flow.decisions.retools.len();
         autocontrol::retool_shipyards(state, config, &fid, rng, &mut flow.decisions.retools);
+        let claimed: std::collections::BTreeSet<(CityId, BuildingId)> = flow.decisions.retools
+            [before..]
+            .iter()
+            .map(|r| (r.city.clone(), r.building))
+            .collect();
+        autocontrol::retool_haulers(state, config, &fid, &claimed, &mut flow.decisions.retools);
     }
 }
 

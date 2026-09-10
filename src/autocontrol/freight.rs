@@ -471,6 +471,75 @@ enum Plan {
     Post { shipper: FactionId, resource: String, capacity: f64, from: BodyId, to: BodyId },
 }
 
+/// 本势力**每一处货栈的运力账**：`(天体, 要求运力, 自有运力, 已雇运力, 缺口)`。
+///
+/// * **自有运力**落到每一处的那一份是**期望值**：派单是**按积压占比抽签**的（[`route_for`]），
+///   所以「期望落到这处的那一份」= `Σ(各运输舰在这条线上的吞吐) × (这处积压 ÷ 总积压)`
+///   ——与真实派单**同口径**，不是另编一个模型；
+/// * **已雇运力**按**已接单合同的 `capacity`** 算（接单就是承诺），不看此刻有几条船在跑；
+/// * **缺口** = `max(0, 要求 − 自有 − 已雇)`：**连续量、无阈值**，雇够了自己归零。
+///
+/// 一本账供两处用：雇主挂单（[`post_contracts`]）与「该不该腾个船坞去造货船」
+/// （[`crate::autocontrol::shipbuilding::retool_haulers`]）。
+pub(crate) fn capacity_ledger(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+) -> Vec<(BodyId, f64, f64, f64, f64)> {
+    let to = state.capital_body(fid);
+    if to.is_empty() || state.body(&to).is_none() {
+        return Vec::new();
+    }
+    let depots = stocked_depots(state, fid);
+    let total: f64 = depots.iter().map(|(_, u)| *u).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let own_of: BTreeMap<BodyId, f64> = {
+        let serve = serving_freighters(state, config, fid);
+        depots
+            .iter()
+            .map(|(body, units)| {
+                let rate: f64 = serve
+                    .iter()
+                    .map(|s| trip_throughput(state, config, s, body, &to))
+                    .sum();
+                (body.clone(), rate * (units / total))
+            })
+            .collect()
+    };
+    let mut committed: BTreeMap<BodyId, f64> = BTreeMap::new();
+    for c in state.contracts.contracts.iter().filter(|c| c.shipper == fid && c.is_hired()) {
+        *committed.entry(c.from.clone()).or_insert(0.0) += c.capacity;
+    }
+    depots
+        .iter()
+        .map(|(body, _)| {
+            let need = crate::model::required_throughput(state, config, body, &to);
+            let own = own_of.get(body).copied().unwrap_or(0.0);
+            let hired = committed.get(body).copied().unwrap_or(0.0);
+            (body.clone(), need, own, hired, (need - own - hired).max(0.0))
+        })
+        .collect()
+}
+
+/// 本势力**搬不动的比例** = `Σ缺口 ÷ Σ要求运力` ∈ [0, 1]（0 = 自己的船够，1 = 一件也搬不动）。
+///
+/// 这是**造货船的需求信号**（[`crate::autocontrol::shipbuilding::retool_haulers`]）：
+/// **已经雇到人**的那部分不算缺口——雇佣市场本来就该顶掉它。所以「一直雇不到人、或雇到了
+/// 也不够」才会推动船坞改产货船；而「雇得到」的势力本来就不必自己造船（分工，而不是重复建设）。
+/// 没有积压（或没有首都）⇒ 0。
+pub fn haul_gap(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    let ledger = capacity_ledger(state, config, fid);
+    let need: f64 = ledger.iter().map(|(_, n, _, _, _)| n).sum();
+    let uncovered: f64 = ledger.iter().map(|(_, _, _, _, u)| u).sum();
+    if need <= 0.0 {
+        0.0
+    } else {
+        (uncovered / need).clamp(0.0, 1.0)
+    }
+}
+
 /// **挂单**：把「自己派不出船的运力缺口」挂到雇佣市场上（一处货栈一张）。
 ///
 /// # 派单逻辑与派自己的船**完全同源**（用户裁决）
@@ -536,35 +605,16 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
         if total <= 0.0 {
             continue; // 没有积压 ⇒ 没有需求（上面的清扫已经把旧单撤掉了）
         }
-        // 自有运力落到**每一处货栈**的那一份（期望值，与派单抽签同口径）。
-        // 整块算完再进写循环：`serve` 借用着 `state`，而下面的计划要可变借用它。
-        let own_of: BTreeMap<BodyId, f64> = {
-            let serve = serving_freighters(state, config, fid);
-            depots
-                .iter()
-                .map(|(body, units)| {
-                    let rate: f64 = serve
-                        .iter()
-                        .map(|s| trip_throughput(state, config, s, body, &to))
-                        .sum();
-                    (body.clone(), rate * (units / total))
-                })
-                .collect()
-        };
-        // 这一处**已经雇到**的运力（已接单的承诺，按 capacity 计）。
-        let committed: BTreeMap<BodyId, f64> = {
-            let mut m: BTreeMap<BodyId, f64> = BTreeMap::new();
-            for c in state.contracts.contracts.iter().filter(|c| c.shipper == *fid && c.is_hired())
-            {
-                *m.entry(c.from.clone()).or_insert(0.0) += c.capacity;
-            }
-            m
-        };
+        // **每一处货栈的运力账**（要求 / 自有期望份额 / 已雇 / 缺口），一本账供两处用：
+        // 这里挂单，[`crate::autocontrol::shipbuilding::retool_haulers`] 据此决定要不要
+        // 腾个船坞去造货船——各算一份必然漂移。
+        let ledger = capacity_ledger(state, config, fid);
+        let by_body: BTreeMap<&BodyId, (f64, f64, f64, f64)> =
+            ledger.iter().map(|(b, n, o, h, u)| (b, (*n, *o, *h, *u))).collect();
         for (body, _) in &depots {
-            let need = crate::model::required_throughput(state, config, body, &to);
-            let own = own_of.get(body).copied().unwrap_or(0.0);
-            let hired = committed.get(body).copied().unwrap_or(0.0);
-            let uncovered = (need - own - hired).max(0.0); // 连续量，无阈值
+            let Some((_need, _own, _hired, uncovered)) = by_body.get(body).copied() else {
+                continue;
+            };
             let Some(map) = state.depots.get(&(fid.clone(), body.clone())) else { continue };
             let Some(resource) = principal_resource(map) else { continue };
             match open.get(body) {

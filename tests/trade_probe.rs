@@ -1088,3 +1088,62 @@ fn probe_ideology_freight() {
         }
     }
 }
+
+/// 【探针·威胁动机】造战斗舰的动机改成「敌对国与自己的实力差距」之后，**世界层面**变了什么：
+/// 逐 100 回合打印拆平数、开战数、各势力动机（均值/最大）、旗舰数与船坞改装去向。
+///
+/// 动机是**纯函数**，所以可以直接逐势力算，不必等它落到行为上。
+#[test]
+#[ignore]
+fn probe_threat_motive() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut razings = 0usize;
+        let mut wars = 0usize;
+        let mut retools: BTreeMap<String, usize> = BTreeMap::new();
+        println!("--- seed {seed} / {n} 回合：威胁动机 ---");
+        for r in 1..=n {
+            let d = sim::advance(&mut state, &config, &mut rng);
+            for e in &state.events {
+                match e {
+                    GameEvent::CityRazed { .. } => razings += 1,
+                    GameEvent::WarStarted { .. } => wars += 1,
+                    _ => {}
+                }
+            }
+            for t in &d.flow.decisions.retools {
+                *retools.entry(format!("{}→{}", t.from, t.to)).or_insert(0) += 1;
+            }
+            if r % 100 == 0 {
+                let mut motives: Vec<(String, f64)> = state
+                    .factions
+                    .iter()
+                    .map(|f| (f.name.clone(), planet_x::autocontrol::shipbuilding::threat_motive(&state, &config, &f.name)))
+                    .collect();
+                motives.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let mean = motives.iter().map(|(_, m)| m).sum::<f64>() / motives.len().max(1) as f64;
+                let flagship = state
+                    .ships
+                    .iter()
+                    .filter(|s| s.hull > 0.0 && (s.class == "carrier" || s.class == "battleship"))
+                    .count();
+                let top: Vec<String> = motives
+                    .iter()
+                    .take(3)
+                    .map(|(n, m)| format!("{n} {m:.2}"))
+                    .collect();
+                println!(
+                    "r{r:>3}: 拆平{razings:>3} 开战{wars:>3} 重舰{flagship:>3} 动机均{mean:.2} \
+                     最高[{}]",
+                    top.join(" / ")
+                );
+            }
+        }
+        let mut rs: Vec<(String, usize)> = retools.into_iter().collect();
+        rs.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("改装去向（前 12）：{:?}", &rs[..rs.len().min(12)]);
+    }
+}

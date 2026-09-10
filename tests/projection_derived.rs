@@ -258,8 +258,11 @@ fn decisions_table_matches_the_derived_record() {
     let ckpt = s.0.join("ckpt.ron");
     let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
 
-    // 跑到有仗打的回合（seed 7：r3 开战）——否则 engage 之类的分支永远走不到。
-    let st = run(&["--seed", "7", "--round", "20", "--index", out_s, "--save", ckpt_s]);
+    // 跑到**确实有仗打**的回合——否则 engage 之类的分支永远走不到。跑 40 回合而不是 20：
+    // 「seed 7 在 r3 开战」是旧轨迹上的事实，造舰动机那次改动把它推后了（r20 时全场一炮没放，
+    // 判定表里只有 haul/hold），于是这条守卫会翻车。守卫要防的是「表退化成空的」，
+    // 不是「某个特定回合有仗打」——所以给足回合数。
+    let st = run(&["--seed", "7", "--round", "40", "--index", out_s, "--save", ckpt_s]);
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
 
     let st = run(&["--start", ckpt_s, "--derived"]);
@@ -318,11 +321,18 @@ fn decisions_table_matches_the_derived_record() {
     }
 
     // 防空转：这 20 回合里必须真的发生过接战（否则上面对得再齐也只是空表对空表）。
-    let verdicts: std::collections::BTreeSet<&str> =
-        order_rows.iter().map(|r| r["verdict"].as_str().unwrap()).collect();
+    //
+    // ⚠ **范围是整局而不是最后一回合**：最后一回合放没放炮取决于当回合的态势，把它钉死会让
+    // 这条守卫随着世界轨迹漂移而随机翻车——实测踩过（造舰动机那次改动之后，seed 7 的 r20
+    // 恰好一炮没放，而前后各回合照打）。守卫要防的是「表退化成空的」，不是「r20 有仗打」。
+    let verdicts: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter(|r| r["kind"] == serde_json::json!("ship_order"))
+        .map(|r| r["verdict"].as_str().unwrap())
+        .collect();
     assert!(
         verdicts.contains("engage"),
-        "seed 7 的 20 回合里应当真的出现过接战判定，实际只见到 {verdicts:?}"
+        "seed 7 的前 40 回合里应当真的出现过接战判定，实际只见到 {verdicts:?}"
     );
     assert!(
         order_rows.len() >= 4,
