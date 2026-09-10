@@ -98,19 +98,29 @@ fn control_rusts_back_when_the_fleet_leaves() {
     );
 }
 
-/// 开局打点与前沿读数：**现在没人白拿**（`config.mond.initial` 是空表），
-/// 但机制仍在——表里写了名字就照给。前沿：凡人 30 AU、掌握 1.0 无穷。
+/// 开局打点与前沿读数：**只有崇拜教天生 1.0**（用户裁决），**其余一个都不白拿**；
+/// 机制仍在——表里写谁的名字就照给。前沿：凡人 30 AU、掌握 1.0 无穷。
 #[test]
 fn initial_mastery_comes_from_config_and_frontier_reads_it() {
     let (config, state) = fresh_world(42);
+    assert_eq!(
+        state.faction("行星X崇拜教").unwrap().mond_control,
+        1.0,
+        "崇拜教开局就是 1.0（用户裁决：「崇拜教初始就是1.0」）"
+    );
     for f in &state.factions {
+        if f.name == "行星X崇拜教" {
+            continue;
+        }
         assert_eq!(f.mond_control, 0.0, "{} 不该白拿 MOND（用户裁决：特权删掉）", f.name);
     }
-    // 机制还在：表里写一个名字就照给（用一份改过的 config，不动世界）。
+    // 机制是「按名字打点」，不是「写死 cult」：换一份 config 里的名字，给的就是那个名字。
     let mut loaded = config.clone();
-    loaded.mond.initial.insert("行星X崇拜教".to_string(), 1.0);
+    loaded.mond.initial.remove("行星X崇拜教");
+    loaded.mond.initial.insert("中国".to_string(), 0.4);
     let seeded = default_state(&loaded, 42);
-    assert_eq!(seeded.faction("行星X崇拜教").unwrap().mond_control, 1.0);
+    assert_eq!(seeded.faction("中国").unwrap().mond_control, 0.4);
+    assert_eq!(seeded.faction("行星X崇拜教").unwrap().mond_control, 0.0);
 
     assert!(mond_frontier(&config, 1.0).is_infinite(), "掌握度 1 ⇒ 前沿无穷（指哪打哪）");
     let mortal = mond_frontier(&config, 0.0);
