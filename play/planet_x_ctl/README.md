@@ -69,6 +69,9 @@ s.leaf("中国", "build_weights", ("珠三角", 7))
 s.scope_of("factions", "中国")         # the scope tree's opinion at one node (Inherit if silent)
 
 ships  = ctl.ships(ckpt)              # projection ships × their control leaves (+ faction default)
+                                      # ⚠ the **effective order** columns are the ENGINE's answer
+                                      #   (`effective_order_mode` / `effective_order_value` /
+                                      #   `order_source`) — see §"effective columns" below
 cities = ctl.cities(ckpt)             # projection cities × loyalty_budget / weight aggregates
 both   = ctl.ships_and_cities(ckpt)    # one frame for a whole empire (tagged by `kind`)
 bs     = ctl.buildings(ckpt)          # the (city, building) index table
@@ -171,8 +174,12 @@ rep.describe()         # one readable paragraph
 >
 > ⚠ It also can only see what the **read face** shows. That face is now **lossless** (the old 2-decimal
 > rounding of every numeric leaf is gone), so `--control` reproduces the stored value bit for bit and
-> `verify` compares floats exactly (bar float-repr epsilon). What you cannot see there is the
-> **effective** value behind an `Inherit` leaf — see the gaps list below.
+> `verify` compares floats exactly (bar float-repr epsilon). Two things it *still* cannot see, and both
+> are reported deliberately instead of guessed at: **whether a per-ship style leaf exists at all**
+> (those rows are listed for every ship — 删叶 的落地以引擎回执 `NOTE_APPLY_REMOVED` 为准), and a
+> **derived** column the engine adds for its own convenience (e.g. a blueprint's `ship_count`).
+> The effective order **is** visible now — both in `--control` (`behavior`) and in `ships()`
+> (`effective_order_value` + `order_source`).
 
 ## Hard constraint: **same-round transform**
 
@@ -202,6 +209,13 @@ engine will skip), unknown resources, cities that belong to another faction, and
 
 ```rust
 if leaf.mode == Inherit {
+    // ① 舰级层：本舰出厂那张**设计图**上的 order（图上写了它、且那张图归 Player）
+    if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
+        if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player() {
+            return bp.value.order.clone();
+        }
+    }
+    // ② 势力级舰队默认（只在它自己是 Player 时供值）
     if let Some(d) = &c.default_ship_order { if d.mode.is_player() { return Some(d.value) } }
 }
 leaf.value      // ← otherwise: the leaf's own record, which may be an expired AI writing
@@ -212,7 +226,9 @@ So **"release to the upper layer" (`mode: "Inherit"`) is only clean when the fle
 round); when the leaf is `Player` but the fleet default is **not** `Player`, the old value lingers on
 screen for a long time — looking like an order nobody gave.
 
-**What this kit does about it:** releasing is a two-leaf operation, and the recipe should say both.
+**Do not re-derive that chain in Python.** `ships()` hands you the engine's answer
+(`effective_order_value` + `order_source`, see the note above) — that is the whole point of the
+engine/kit split. The kit's own job here is only to make releasing say **both** leaves:
 
 ```python
 s.set_default_ship_order(fac, mode="Player")                 # the layer that will now speak…
@@ -254,23 +270,72 @@ Two things worth knowing about the kit's side of `remove`:
 * `remove` **不能**和值 / `mode` 同时写（引擎报 `remove_conflicts_with_value`）：一条同时说着
   "删掉它"和"把它设成 0.5"的补丁没有正确答案，所以两件事请分两条补丁发。
 * `Report.removed` / `removed_leafs` 给出真的被删掉的那些叶；`describe()` 会把它们列出来。
-  逐舰叶的**存在性**读面看不出来（风格两行对每艘舰都在，列的是有效值），所以逐舰删叶的
-  "落地了没有"以**引擎回执**为准，不以读面为准。
+  逐舰叶的**存在性**在 `--control` 上读不出来（那片现在对每艘舰都有一行，列的是有效值），
+  所以逐舰删叶的"落地了没有"以**引擎回执**为准，不以 `--control` 为准。要问「这片叶还在不在」
+  用投影的 **`q.control()`**（`idx/control.jsonl`，只列真实存在的叶）——`ships()` 的
+  `order_leaf` 就是从那里来的（见下）。
 * ⚠ **角色轴（`ship_freighter`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
   （按积压定编谁去跑集货路线），所以删掉它是**放手**——AI 下回合可能立刻又写下它的结论，
   而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
   没有这个执行者，删掉就等于回到出厂快照。
 
-The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, and
-`effective_order_value_approx` shows what the chain would resolve to. Which brings us to the next
-warning.
+The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, while
+`effective_order_value` is what the chain actually resolves to (`order_source` says **who supplied
+it**). Which brings us to the next warning.
 
-> ⚠ **The `*_approx` columns are the kit's LOCAL APPROXIMATION, not the engine's answer.** The engine
-> has no per-entity `effective` column yet (`engine-data-plane.md` §2), so `effective_order_mode_approx`
-> / `effective_order_value_approx` / `effective_authority_approx` re-implement the resolution chain
-> from the read face. **That is a drift source**: the moment the engine's chain changes, these columns
-> are wrong while everything else stays right. Treat them as a hint for recipes, never as authority —
-> and when the engine starts emitting `effective`, this kit will switch to reading it (one accessor).
+> ### Where each of those two answers comes from (and what `--control` can no longer tell you)
+>
+> | question | columns | source |
+> |---|---|---|
+> | 「本舰**那片叶**还在吗？它自己记着什么？」 | `order_leaf` / `order_mode` / `order_value` / `order_behavior` | the projection's **`derived.control`** table (`idx/control.jsonl`, `kind == "ship_order"`) — the engine emits one row per **real** leaf by walking `ControllableState::ship_orders` |
+> | 「**有效**指令是什么？**归谁**？这条值**谁供的**？」 | `effective_order_mode` / `effective_order_value` / `order_source` | the projection's ships table: `order_effective_mode` / `order_effective` / `order_source` (`State::ship_control` / `ship_behavior` / `ship_behavior_source`) |
+>
+> ⚠ **`--control` is not a leaf-existence face.** Since that read face went "one row per ship"
+> (`control-live-layers.md` §13) it lists **every** ship, and the `behavior` it shows is the
+> **effective** value. Reading leaf existence off it (as this kit did for one commit) made
+> `order_leaf` permanently `True` and silently re-pointed `order_behavior` at the effective value
+> while keeping the old column name — the exact failure mode `.agents/notes/engine-data-plane.md`
+> calls out (「引擎给答案，Python 只负责筛」), except this time the answer was *the kit's own*.
+> The authoritative existence face is **`derived.control`**; a projection old enough to lack the
+> `derived` section raises there instead of guessing.
+>
+> Having both groups on one frame is what makes 「叶里的记录值 ≠ 有效值」 readable: a ship whose leaf
+> says `Inherit` while the faction's fleet default is `Player` shows the old record in
+> `order_behavior`, the default's order in `effective_order_value`, and `order_source ==
+> "fleet_default"`. `demo.py` §[4d] asserts exactly that, including a **deleted** leaf
+> (`order_leaf == False` while the effective value still comes from the fleet default).
+
+> ### `ships()`: the effective columns are the **engine's** answer (the `*_approx` hole is closed)
+>
+> `effective_order_mode` / `effective_order_value` / `order_source` are read **straight off** the
+> projection's own ships columns `order_effective_mode` / `order_effective` / `order_source` —
+> i.e. `State::ship_control` / `State::ship_behavior` / `State::ship_behavior_source`. That code
+> knows the **design-blueprint layer** (`叶 → 出厂图 → 舰队默认 → 势力 → 全局`), so it is the only
+> correct answer for a ship that was **built from a blueprint**.
+>
+> This kit used to **re-implement** that chain in Python and hand back the result as
+> `effective_order_*_approx` / `effective_authority_approx`. That re-implementation predated the
+> blueprint layer, so it gave **wrong** answers for blueprint-built ships — a drift source by
+> construction (`.agents/notes/engine-data-plane.md`: 「引擎给答案，Python 只负责筛」).
+> **`APPROX_COLUMNS` are now a fallback only**, used when the projection has no
+> `order_effective_mode` at all (an index directory written by an **older** engine). The face never
+> lies about which one you are holding:
+>
+> | frame | columns | `effective_order_from_engine` |
+> |---|---|---|
+> | engine columns present | `effective_order_mode` / `effective_order_value` / `order_source` | `True` |
+> | engine columns absent | `effective_order_mode_approx` / `effective_order_value_approx` / `effective_authority_approx` | `False` |
+>
+> The names differ **on purpose** (two answers must not wear the same column name), and
+> `ctl.EFFECTIVE_PROVENANCE_COLUMN` lets a recipe ask the question in one `df.query(...)`. The
+> fallback is also *documented as wrong in one specific place*: it has no blueprint step, so treat it
+> as a hint, never as authority. `demo.py` runs both paths and asserts them.
+>
+> `effective_authority_approx` and `effective_order_mode_approx` were **two columns answering one
+> question**, and neither was the engine's; in the engine branch they are replaced by the single pair
+> (`order_source` = who supplied the **value**, `effective_order_mode` = who **owns** the ship).
+> The engine's `order_source` also separates「叶**不存在**」from「叶写着 `Inherit`」— the former can
+> fall through to `blueprint:<名>` / `fleet_default`, the latter honestly reports `leaf`.
 
 ### §1.3 — the kit can only produce **one-shot numbers**
 
@@ -347,18 +412,25 @@ guessing. They are listed because they are cheap to close and expensive to work 
    index_dir=…)` does the one-pass thing for you.
    *(As of this writing `idx/flow.jsonl` and `idx/city_flow.jsonl` are already being written, which
    is half of the `engine-data-plane.md` §2 fix — see the next point for what is still missing.)*
-2. **The new read-face tables exist on disk but are not declared in `schema.json`.** A recent build
-   writes `idx/flow.jsonl`, `idx/city_flow.jsonl`, `idx/control.jsonl`, `idx/scope.jsonl`, yet
-   `schema.json`'s `lazy` map still lists only
-   `bodies / cities / events / factions / settlements / ships` — so `planet_xq.load()` cannot see the
-   new tables at all, and no consumer can rely on them. That is precisely the "每加一张表，两处都要动，
-   别漏 schema" hazard from `engine-data-plane.md` §2. `idx/control.jsonl` also has no `effective`
-   column yet (`{round, faction_id, kind, key, sub, mode, value}`, with `kind` in the singular, e.g.
-   `"ship_order"`). This kit keeps its `--control` backend until `effective` lands; switching is then
-   a one-accessor change, exactly as `python-control-authoring.md` §3 step 4 predicts.
-3. **No per-entity `effective` on the control read face.** `--control` shows the leaf's *recorded*
-   value; when the leaf says `Inherit` the effective order may come from the fleet default or a scope
-   node. Python must re-implement `resolve_chain`, which is a drift source (see §1.2 above).
+2. **~~The new read-face tables exist on disk but are not declared in `schema.json`.~~** — **closed**:
+   the derived tables live in the schema's own `derived` section (not `lazy` — they join on columns
+   `main.jsonl` already carries), and `planet_xq.load()` reads it, so `q.derived(name, round)` /
+   `q.flow()` / `q.control()` / `q.blueprints()` all work. `idx/control.jsonl` has no `effective`
+   column — it lists **leaves** (kind/key/sub/value/mode), and "which layer wins" is a **per-ship**
+   answer that belongs on the ships table, where the engine now puts it (next point). What that table
+   *is* good for: it is the one read face that answers **「这片叶真的存在吗」** for per-ship leaves
+   (`--control` lists every ship since §13) — `ships()` reads it for `order_leaf` for exactly that
+   reason, and `q.control()` is the public accessor.
+3. **~~No per-entity `effective` on the control read face.~~** — **closed** (blueprint round,
+   `SCHEMA_VERSION` 9 → 10): the projection's ships table carries the engine's own
+   `order_effective_mode` / `order_effective` / `order_source`, and `ships()` now **reads** them
+   instead of re-implementing `resolve_chain` (see the "effective columns" note above). The old
+   `*_approx` trio survives only as the fallback for index directories written by an older engine.
+   ⚠ `--control` shows the *effective* order on that row too (`control-live-layers.md` §13): a ship
+   whose whole chain is silent reports `"behavior": null`, and one whose leaf is `Inherit` but whose
+   fleet default is `Player` reports the **default's** value. That is deliberate — it matches the
+   projection — and the template is still a fixed point (`--control` → `--apply` → `--control` is
+   byte-identical; a `null` row does not invent a leaf).
 4. **~~The control read face rounds every numeric leaf value to 2 decimals~~** — **fixed** (the
    rounding is gone: `--control` is now bit-for-bit the stored value, so "dump → edit → send back" is
    lossless; guard: `src/control.rs::the_control_template_never_rounds_a_leaf_value`). Historical note
@@ -392,13 +464,21 @@ guessing. They are listed because they are cheap to close and expensive to work 
    carries it as `spawned_round` (`null` = old checkpoint ⇒ unknown). `DEFAULT_REFRESH_RULE` now
    uses it before name order, and `demo.py` proves the tie-break with a pair of same-score ships of
    different ages whose name order would pick the other one.
-8. **The blueprint layer is not modeled by the kit's `*_approx` columns.** `ships()` still computes
-   `effective_order_*_approx` over `leaf → fleet default → faction scope → global`, which predates
-   the design-blueprint layer (`leaf → **blueprint** → fleet default → …`). It is documented as an
-   approximation, and the **engine's own** columns are right there: use `order_effective_mode` /
-   `order_effective` / **`order_source`** (`leaf` / `blueprint:<名>` / `fleet_default`). Closing the
-   gap means replacing the `_approx` columns with the engine's answers (tracked in
-   `notes/control-live-layers.md` §12.6).
+8. ~~**The blueprint layer is not modeled by the kit's `*_approx` columns.**~~ — **closed**: `ships()`
+   reads the engine's own `order_effective_mode` / `order_effective` / `order_source` (which include
+   the blueprint step) and exposes them as `effective_order_mode` / `effective_order_value` /
+   `order_source`. The local chain is now only the **fallback** for index directories written by an
+   older engine, where it keeps the `_approx` names and `effective_order_from_engine = False`. So the
+   remaining honest caveat is narrow and stated on the face of the frame: **the fallback is
+   blueprint-blind** (`leaf → fleet default → faction scope → global`, with no `blueprint` step), which
+   is exactly why it may not wear the engine's column names.
+   *Not staged in `demo.py`*: a blueprint-built ship (the one case where the two disagree). Getting one
+   needs a real shipyard launch — a Player-owned blueprint that the faction cannot afford deliberately
+   waits (Q4(b)), the pointer lives on a yard whose city defect/raze churn is heavy in a 12-round
+   fixture, and a cheap corvette still needs ~dozens of rounds of build points. The demo therefore
+   asserts the **contract** (engine fresh, fallback labelled, values identical on a frame with no
+   blueprint-built ship) instead of staging the divergence. See
+   `notes/control-live-layers.md` §13「未做」.
 
 ## Layout
 

@@ -1093,6 +1093,59 @@ mod tests {
         assert_eq!((d.freighter, d.mode), (Some(true), Some(ControlMode::Player)));
     }
 
+    /// **指令行（`ship_orders`）在 web 读面上「每舰一行」**——包括**没有叶**的舰。
+    ///
+    /// 前端那棵树是**从指令行长出来**的（`app.js::buildTree` 遍历 `fc.ship_orders`，一艘舰的
+    /// 风格 / 角色两行是它的子节点），所以以前「叶被删掉」⇒ 这艘舰**整行从控制树里消失**，
+    /// 玩家连它的风格都没法再单独设归属（`control-live-layers.md` §10.5 记的缺口）。
+    ///
+    /// 这条同时钉住前端要区分的那两件事：`behavior`（**有效值**，链上没人说话 = `null`）
+    /// 与 `mode`（**叶自己的表态**，没有叶 = `Inherit`）。
+    #[test]
+    fn the_order_read_face_lists_ships_without_a_leaf() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        let ours: Vec<String> = w
+            .state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == fid)
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(ours.len() >= 2, "这个势力得有两艘以上舰");
+        let vanished = ours[0].clone();
+
+        // 把一艘舰的指令叶删掉 —— 正是「恢复出厂值」（`remove: true`）之后的状态。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid, "ship_orders": [{ "ship": vanished, "remove": true }] }]
+        }))
+        .unwrap();
+        assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
+
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        let rows: Vec<String> = fc.ship_orders.iter().map(|e| e.ship.clone()).collect();
+        assert_eq!(rows, ours, "指令读面必须每舰一行（含叶被删掉的舰），顺序同 `state.ships`");
+
+        let row = fc.ship_orders.iter().find(|e| e.ship == vanished).unwrap();
+        assert_eq!(row.behavior, None, "链上没人说话 ⇒ `null`（前端据此显示「无人表态」）");
+        assert_eq!(row.mode, ControlMode::Inherit, "没有叶 ⇒ 这一层没有说话");
+        for other in fc.ship_orders.iter().filter(|e| e.ship != vanished) {
+            assert!(other.behavior.is_some(), "「{}」的叶还在 ⇒ 有效值是一个真行为", other.ship);
+        }
+
+        // 前端「只回传差异」的载荷（身份键 + 只改过的字段）：给这艘没有叶的舰设归属必须落地。
+        let req: CommandReq =
+            serde_json::from_value(serde_json::json!({ "control": [{ "faction_id": fid,
+                "ship_orders": [{ "ship": vanished, "mode": "Player" }] }] }))
+            .unwrap();
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "{:?}", report.skipped);
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        let row = fc.ship_orders.iter().find(|e| e.ship == vanished).unwrap();
+        assert_eq!(row.mode, ControlMode::Player, "叶被建出来了（只写表态不建叶的规则只管 Inherit）");
+        assert!(row.behavior.is_some(), "建叶时那份值就是当时的有效值兜底（`Idle`）");
+    }
+
     /// **设计图**在 web 的读写两面上走通：读面给出图库（`blueprints`，含引擎算的 `ship_count`）、
     /// 写面能建图 / 改图 / 删图，建造区的指针（`buildings[].blueprint`）能挂上、能拆掉。
     ///
