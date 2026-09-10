@@ -95,6 +95,7 @@ pub(crate) fn regulate_styles(
     config: &GameConfig,
     decisions: &[ShipDecision],
     out: &mut Vec<StyleDecision>,
+    inputs: &mut RoundInputs,
 ) {
     let ac = &config.autocontrol;
     if ac.style_chance <= 0.0 {
@@ -146,6 +147,7 @@ pub(crate) fn regulate_styles(
                     "temper",
                     doc.temper,
                     temper_target,
+                    inputs,
                 ) {
                     hits.push((
                         "temper",
@@ -166,6 +168,7 @@ pub(crate) fn regulate_styles(
                     "lone_wolf",
                     doc.lone_wolf,
                     lone_target,
+                    inputs,
                 ) {
                     hits.push((
                         "lone_wolf",
@@ -209,6 +212,7 @@ pub(crate) fn regulate_styles(
                     "kiting",
                     kiting,
                     target,
+                    inputs,
                 ) {
                     if let Some(c) = state.control_mut(fid.clone()) {
                         c.ship_kiting
@@ -288,10 +292,28 @@ fn step_value(
     component: &str,
     cur: f64,
     target: f64,
+    inputs: &mut RoundInputs,
 ) -> Option<f64> {
     let ac = &config.autocontrol;
     let chance_salt = format!("{}:{component}", axis.name());
-    if sim::derived_roll(fid, ship_id, round, &chance_salt) >= ac.style_chance {
+    let chance_roll = sim::derived_roll(fid, ship_id, round, &chance_salt);
+    // **输入面（B5）**：这道概率闸决定「这一回合这条轴动不动」。⚠ 它**只记到闸门那一层**：
+    // 闸门没过 ⇒ 记 `skip`；过了 ⇒ 记 `retune`，而**步长**（下一枚骰子）不单独记——
+    // 它是同一个决定的第二个数，读面已经从轴的新值看出了结果（记两次会让「一条抽签 = 一个
+    // 决定」这条口径破掉）。
+    inputs.record_gate(
+        "style_chance",
+        fid,
+        &format!("{ship_id}:{chance_salt}"),
+        chance_roll,
+        ac.style_chance,
+        if chance_roll < ac.style_chance {
+            "retune"
+        } else {
+            "skip"
+        },
+    );
+    if chance_roll >= ac.style_chance {
         return None; // 这一回合这艘舰的这条轴不重估（概率触发，不是每回合都动）。
     }
     let step_salt = format!("{}:{component}:step", axis.name());

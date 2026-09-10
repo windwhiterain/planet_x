@@ -93,7 +93,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
                         colonize(state, config, rng, &ship_id, body, &mut next_building_id);
                         continue;
                     }
-                    move_toward(state, config, &ship_id, &class, bpos);
+                    move_toward(state, config, &ship_id, &class, bpos, Some(&mut flow.inputs));
                     let np = state.ship(&ship_id).map(|s| s.position).unwrap_or(pos);
                     if dist(np, bpos) <= config.combat.arrival_eps {
                         colonize(state, config, rng, &ship_id, body, &mut next_building_id);
@@ -103,7 +103,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
                 ShipBehavior::Idle => {
                     // 待命：软目标——原地保持；但附近有敌舰时按 kiting 姿态自动软移动（风筝拉开/贴脸压近）。
                     let dest = autocontrol::kiting_dest(state, config, &ship_id).unwrap_or(pos);
-                    move_toward(state, config, &ship_id, &class, dest);
+                    move_toward(state, config, &ship_id, &class, dest, Some(&mut flow.inputs));
                 }
                 // 运输：**整条路线本回合都在 `haul_step` 里执行**（择腿 + 移动 + 装卸），
                 // 所以这里不再自己移动——落到下面的自动接战，运输舰在航线上照样开火/轰炸。
@@ -111,14 +111,14 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
                     // 记这一步（B3 的中间量）：`Waiting`/`EnRoute` **既不落 State 也不发事件**，
                     // 于是「派它去拉货，为什么一件没运回来」此前根本没有读法。玩家舰这条路径
                     // 不产生 `decisions.ships` 行，所以读面专门有 `haul_steps` 收它（两条路径同一个口）。
-                    let step = haul_step(state, config, &ship_id, &class, from, to);
+                    let step = haul_step(state, config, &ship_id, &class, from, to, &mut flow.inputs);
                     flow.haul_steps.insert(ship_id.clone(), step);
                 }
                 _ => {
                     // Move / Follow / DockCity / Dock：驶向行为目的地（软目标）；附近有敌舰时由 kiting 姿态调整。
                     let base = behavior_dest(state, &behavior);
                     let dest = autocontrol::kiting_dest(state, config, &ship_id).unwrap_or(base);
-                    move_toward(state, config, &ship_id, &class, dest);
+                    move_toward(state, config, &ship_id, &class, dest, Some(&mut flow.inputs));
                 }
             }
             // --- 自动战斗：攻击与轰炸不需要行为（射程内自动发生）---
@@ -151,6 +151,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
         config,
         &flow.decisions.ships,
         &mut flow.decisions.styles,
+        &mut flow.inputs,
     );
 
     // 护甲再生（%/时间）：每回合幸存舰只按舰级 hull_regen 恢复其最大护甲的一

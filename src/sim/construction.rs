@@ -87,18 +87,18 @@ pub fn step_construction(
         // 战时重构先跑（行为与旧版逐字节相同），集货侧重构只认**它剩下的**船坞
         //（`claimed`）——于是「有威胁」不会把「缺运力」淹没掉。
         let before = flow.decisions.retools.len();
-        autocontrol::retool_shipyards(state, config, &fid, rng, &mut flow.decisions.retools);
+        autocontrol::retool_shipyards(state, config, &fid, rng, &mut flow.decisions.retools, &mut flow.inputs);
         let claimed: std::collections::BTreeSet<(CityId, BuildingId)> = flow.decisions.retools
             [before..]
             .iter()
             .map(|r| (r.city.clone(), r.building))
             .collect();
-        autocontrol::retool_haulers(state, config, &fid, &claimed, &mut flow.decisions.retools);
+        autocontrol::retool_haulers(state, config, &fid, &claimed, &mut flow.decisions.retools, &mut flow.inputs);
     }
     // **设计图的执行者**（`Auto` 图那一层的真写入者）：AI 自己建图 / 重估选装 / 去重复用 /
     // 回收没人指向的自建图。放在 `retool_shipyards` **之后**：舰级重估刚刚落定，这一趟就能把
     // 「图与建造区对得上」顺手收敛（retool 改了舰级 ⇒ 图的名字与舰级跟着换）。
-    autocontrol::design_fleets(state, config, &mut flow.decisions.blueprints);
+    autocontrol::design_fleets(state, config, &mut flow.decisions.blueprints, &mut flow.inputs);
 }
 
 #[allow(clippy::too_many_arguments)]

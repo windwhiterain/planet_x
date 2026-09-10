@@ -66,6 +66,7 @@ pub(crate) fn design_fleets(
     state: &mut State,
     config: &GameConfig,
     out: &mut Vec<BlueprintDecision>,
+    inputs: &mut RoundInputs,
 ) {
     if config.autocontrol.blueprint_themes.is_empty() {
         return; // 空表 = 不建图（退回「所有建造区无图、出厂现算」）。
@@ -73,7 +74,7 @@ pub(crate) fn design_fleets(
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort();
     for fid in fids {
-        design_one_faction(state, config, &fid, out);
+        design_one_faction(state, config, &fid, out, inputs);
     }
 }
 
@@ -82,6 +83,7 @@ fn design_one_faction(
     config: &GameConfig,
     fid: &str,
     out: &mut Vec<BlueprintDecision>,
+    inputs: &mut RoundInputs,
 ) {
     let round = state.round;
     // ① 归 AI 管的建造区，按**舰级**分组（图是舰级的函数 ⇒ 同舰级的区共用一张图）。
@@ -124,11 +126,22 @@ fn design_one_faction(
         // ② 本舰级此刻的**设计意图**：图的身份就写在名字里（`自动{主题}·{舰级}`），
         //    而建造区指着哪张图就是"上一次抽到了什么主题"——所以这条意图不需要额外状态。
         let current = current_theme(&lib, config, &class, &yards);
-        let redraw = sim::derived_roll(fid, &class, round, "blueprint_intent")
-            < config.autocontrol.blueprint_intent_chance;
+        // **输入面（B5）**：这一步是「图要不要重抽主题」的闸门——记下掷出的值与机会值，
+        // `picked` 说出结论（`redraw` = 重抽主题 / `keep` = 沿用上一次抽到的主题）。
+        let intent_roll = sim::derived_roll(fid, &class, round, "blueprint_intent");
+        let intent_chance = config.autocontrol.blueprint_intent_chance;
+        let redraw = intent_roll < intent_chance;
+        inputs.record_gate(
+            "blueprint_intent",
+            fid,
+            &class,
+            intent_roll,
+            intent_chance,
+            if redraw { "redraw" } else { "keep" },
+        );
         let theme = match current {
             Some(t) if !redraw => t,
-            _ => draw_theme(config, fid, &class, round, war),
+            _ => draw_theme(config, fid, &class, round, war, inputs),
         };
         let intended = design_name(&theme.name, &class, config);
         // 想用的名字被玩家的图占了 ⇒ 这一轮对这个舰级什么都不做（宁可不动，也不改名/抢名字）。
@@ -151,8 +164,18 @@ fn design_one_faction(
             .map(|l| l.value.components.clone())
             .unwrap_or_default();
         if let Some(existing) = lib.get(&intended) {
-            let retune = sim::derived_roll(fid, &class, round, "blueprint_retune")
-                < config.autocontrol.blueprint_chance;
+            // **输入面（B5）**：同一张图这一回合要不要**重估选装**。
+            let retune_roll = sim::derived_roll(fid, &class, round, "blueprint_retune");
+            let retune_chance = config.autocontrol.blueprint_chance;
+            let retune = retune_roll < retune_chance;
+            inputs.record_gate(
+                "blueprint_retune",
+                fid,
+                &class,
+                retune_roll,
+                retune_chance,
+                if retune { "retune" } else { "keep" },
+            );
             // 舰级对不上（`retool` 改了区、或别的路径改过）⇒ 无论如何都要修（口径 A）。
             let mut write = existing.value.class != class;
             if retune {
@@ -340,6 +363,7 @@ fn draw_theme<'a>(
     class: &str,
     round: u32,
     war: f64,
+    inputs: &mut RoundInputs,
 ) -> &'a DesignTheme {
     let themes = &config.autocontrol.blueprint_themes;
     let total: f64 = themes
@@ -349,15 +373,21 @@ fn draw_theme<'a>(
     if total <= 1e-9 {
         return &themes[0];
     }
-    let mut x = sim::derived_roll(fid, class, round, "blueprint_theme") * total;
+    // **输入面（B5）**：主题是**加权抽签**抽出来的（权重 = 主题基础权重 + 战况加成）——
+    // 记下掷出的值、池子的总权重与抽中的主题，于是「船坞为什么画了这张图」可查。
+    let roll = sim::derived_roll(fid, class, round, "blueprint_theme");
+    let mut x = roll * total;
     let mut last = &themes[0];
     for t in themes {
         last = t;
         x -= (t.weight + war * t.war_weight).max(0.0);
         if x <= 0.0 {
+            inputs.record_draw("blueprint_theme", fid, class, roll, total, &t.name);
             return t;
         }
     }
+    // 浮点兜底：落在池子末尾之外 ⇒ 取最后一条（与旧行为逐字相同）。
+    inputs.record_draw("blueprint_theme", fid, class, roll, total, &last.name);
     last
 }
 

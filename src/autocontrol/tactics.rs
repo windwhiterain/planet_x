@@ -566,7 +566,7 @@ pub(crate) fn ai_ship_turn(
                         to_body: cap_body,
                     },
                 );
-                sim::move_toward(state, config, ship_id, &class, cap_pos);
+                sim::move_toward(state, config, ship_id, &class, cap_pos, Some(inputs));
                 return;
             }
         }
@@ -613,7 +613,7 @@ pub(crate) fn ai_ship_turn(
                     c.ship_orders
                         .insert(ship_id.to_string(), Control::inherit(behavior.clone()));
                 }
-                let step = sim::haul_step(state, config, ship_id, &class, &from, &to);
+                let step = sim::haul_step(state, config, ship_id, &class, &from, &to, inputs);
                 // 记这一步（B3 的「这趟货为什么没运回来」）：读面里 `haul_steps` 一舰一行
                 // （`waiting`/`en_route` 既不落 State 也不发事件，不记就永远读不到）。
                 haul_steps.insert(ship_id.to_string(), step.clone());
@@ -703,7 +703,7 @@ pub(crate) fn ai_ship_turn(
         order: Some(behavior.clone()),
         ..base.clone()
     });
-    sim::move_toward(state, config, ship_id, &class, dest);
+    sim::move_toward(state, config, ship_id, &class, dest, Some(inputs));
 
     // 移动后：自动接战（攻击不要行为）→ 自动轰炸 → 殖民落地。
     if let Some(ship) = state.ship(ship_id) {

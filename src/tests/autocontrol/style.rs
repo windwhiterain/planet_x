@@ -46,7 +46,7 @@ fn the_executor_writes_style_leaves_instead_of_freezing_them() {
         s.hull = s.hull_max * 0.3; // 打残 ⇒ 目标 temper 应当被压向负（理智）
     }
     let mut styles = Vec::new();
-    regulate_styles(&mut state, &config, &[], &mut styles);
+    regulate_styles(&mut state, &config, &[], &mut styles, &mut crate::model::RoundInputs::default());
     assert!(!styles.is_empty(), "开了执行者却没有一条风格重估记录");
     let c = state.control(fid.clone()).unwrap();
     assert!(
@@ -130,7 +130,7 @@ fn retuning_one_axis_keeps_the_other_axis_value() {
         lone_wolf: 1.0,
     };
     let mut styles = Vec::new();
-    regulate_styles(&mut state, &config, &[], &mut styles);
+    regulate_styles(&mut state, &config, &[], &mut styles, &mut crate::model::RoundInputs::default());
     let leaf = state
         .control(fid.clone())
         .unwrap()
@@ -171,7 +171,7 @@ fn the_executor_respects_every_player_gate() {
             }),
         );
     let mut styles = Vec::new();
-    regulate_styles(&mut state, &config, &[], &mut styles);
+    regulate_styles(&mut state, &config, &[], &mut styles, &mut crate::model::RoundInputs::default());
     let leaf = state
         .control(fid.clone())
         .unwrap()
@@ -208,7 +208,7 @@ fn the_executor_respects_every_player_gate() {
     };
     let before = snap(&state);
     let mut styles2 = Vec::new();
-    regulate_styles(&mut state, &config, &[], &mut styles2);
+    regulate_styles(&mut state, &config, &[], &mut styles2, &mut crate::model::RoundInputs::default());
     assert_eq!(
         before,
         snap(&state),
@@ -222,7 +222,7 @@ fn the_executor_respects_every_player_gate() {
     // ②b 再把风筝那条默认叶也钉成 Player ⇒ 这条轴也不写了。
     state.control_mut(fid.clone()).unwrap().default_kiting = Some(Control::player(0.9));
     let mut styles3 = Vec::new();
-    regulate_styles(&mut state, &config, &[], &mut styles3);
+    regulate_styles(&mut state, &config, &[], &mut styles3, &mut crate::model::RoundInputs::default());
     assert!(
         !styles3.iter().any(|s| s.axis == "kiting"),
         "风筝轴的默认叶归玩家 ⇒ 这条轴的逐舰叶也不写"
@@ -235,7 +235,7 @@ fn the_executor_respects_every_player_gate() {
         .factions
         .insert(fid.clone(), ControlMode::Player);
     let mut styles4 = Vec::new();
-    regulate_styles(&mut state3, &config, &[], &mut styles4);
+    regulate_styles(&mut state3, &config, &[], &mut styles4, &mut crate::model::RoundInputs::default());
     assert!(
         !styles4.iter().any(|s| s.faction == fid),
         "势力归玩家 ⇒ 这个势力一条都不许改（别的势力照旧）"
@@ -258,7 +258,7 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
     let (mut config, _state) = fresh(42);
     config.autocontrol.style_chance = 0.0;
     assert!(
-        step_value(
+        step(
             &config,
             "中国",
             "长城",
@@ -273,7 +273,7 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
     );
     config.autocontrol.style_chance = 1.0;
     config.autocontrol.style_step_max = 0.5;
-    let next = step_value(
+    let next = step(
         &config,
         "中国",
         "长城",
@@ -287,7 +287,7 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
     assert!(next > 0.0 && next <= 0.5, "一步最多走完差距的一半：{next}");
     // 同一 (势力, 舰, 回合, 用途) 的骰子是**派生**的 ⇒ 逐字可复现（不消费主 Prng 流）。
     assert_eq!(
-        step_value(
+        step(
             &config,
             "中国",
             "长城",
@@ -302,7 +302,7 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
     );
     // 另一条轴拿的是**另一枚**骰子（同一片叶、两条轴不该被同一枚骰子绑在一起）。
     assert!(
-        step_value(
+        step(
             &config,
             "中国",
             "长城",
@@ -316,7 +316,7 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
     );
     // 已经到位 ⇒ 不写叶。
     assert!(
-        step_value(
+        step(
             &config,
             "中国",
             "长城",
@@ -329,4 +329,31 @@ fn the_step_is_probabilistic_and_stops_at_the_target() {
         .is_none(),
         "值就在目标上 ⇒ 不写叶（避免控制面 diff 噪声）"
     );
+}
+
+
+/// [`step_value`](super::step_value) 的测试包装：输入面在用例里不关心，
+/// 所以补一个默认的（B5 给那个函数加了 `&mut RoundInputs` 参数）。
+#[allow(clippy::too_many_arguments)]
+fn step(
+    config: &GameConfig,
+    fid: &str,
+    ship_id: &str,
+    round: u32,
+    axis: StyleAxis,
+    component: &str,
+    cur: f64,
+    target: f64,
+) -> Option<f64> {
+    super::step_value(
+        config,
+        fid,
+        ship_id,
+        round,
+        axis,
+        component,
+        cur,
+        target,
+        &mut crate::model::RoundInputs::default(),
+    )
 }

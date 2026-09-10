@@ -439,10 +439,20 @@ prev  : production={硅:20,碳:0.75,铁:40}, upkeep=20.6, governance_cost=6.0
     > ⇒「没人接我的单」原来是**根本没听说**，而不是「听说了不接」。
     ⚠ 用例踩坑：`fresh_world` 把角色轴钉成「全员战舰」⇒ 定编两族骰子**根本不掷**，
     「防空转」的断言必须换**没钉**的世界（`default_state`），否则是在断言一个假象。
-  * ⏳ **B5b-2 待接**：`blueprint_intent` / `blueprint_retune` / `blueprint_theme`（蓝图）、
-    `retool`（war / hauler 两处）、`observe_body`、风格 `chance` / `step`、
-    `nav_roll`（空盐那一档 = MOND 偏航）。形状同上（纯函数 + 调用方掷骰）。
-* **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
+  * ✅ **B5b-2 也已落地**：蓝图 `blueprint_intent` / `blueprint_retune` / `blueprint_theme`、
+    船坞 `retool`（`war-retool` / `hauler-retool` 两处，`subject` 区分）、风格轴
+    `style_chance`、导航 `nav`（MOND 偏航，**幅度骰**：两个判据字段都空，`picked` = 落点）。
+    实测 seed 7 / 30 回合 **3944 条 ≈ 127 条/回合 ≈ 21.6 KB/回合**（`main.jsonl` 26.2 KB/回合
+    ⇒ 输入面已与整份视图**同量级**），大户是 `style_chance`（逐舰逐轴，1371 条 / 220 KB）与
+    合同 `gate`（逐势力逐单，643 条 / 101 KB）。
+    > ⚠ **量本身是个发现**（用户说「不管体积」照做，但值得记一笔）：输入面从 B5b-1 的
+    > 37 条/回合涨到 **127 条/回合**，就是「逐舰逐轴 / 逐势力逐单」这类**笛卡尔积**型记录撑大的。
+    > 若哪天真要压：`style_chance` 的 `skip`（1371 条里绝大多数是「这回合没动」）可以折成
+    > 「每舰每轴一行、只记动没动」，或把 `subject` 里的冗余前缀（`长城:doctrine:temper`）
+    > 拆成两列。**现在不做**——记全的收益（能回答「为什么它没动」）大于这几 KB。
+  * ⏳ **还剩 B5b-3（小）**：`observe_body`（观测舰选靶，`(势力, 回合/EPOCH, "observe_body")`
+    的加权抽签）与风格 `step`（步长那第二枚骰子，**有意不单独记**：同一个决定的第二个数，
+    读面已从轴的新值看出结果——记两次会破「一条抽签 = 一个决定」的口径）。* **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
   积压占比、合同的 `eligibility`……它们是**回合中段的 state 快照** ⇒ 属 ③，同样只在拍板处记。
   B5b-1 已经把**判据本身**记进去了（闸门的 `threshold`、抽签的 `pool_total` 就是它们）；
   剩下的「候选池全表要不要逐项收」等 B5b-2 之后再定——那一项会让记录从 ~37 条/回合涨到

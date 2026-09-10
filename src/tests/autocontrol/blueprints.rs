@@ -41,7 +41,7 @@ fn the_ai_creates_a_design_for_every_yard_it_owns() {
     let (config, mut state) = fresh(42);
     let fid = "中国".to_string();
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     assert!(!out.is_empty(), "AI 该给归它管的建造区建图");
     let l = lib(&state, &fid);
     assert!(!l.is_empty(), "{fid} 的图库该有图");
@@ -80,12 +80,12 @@ fn designs_are_deduped_by_class_and_signature() {
     let (config, mut state) = fresh(7);
     let fid = "中国".to_string();
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let first = lib(&state, &fid);
     assert!(!first.is_empty());
     // 幂等：同样的状态再跑一趟，图库一个字节都不长。
     let mut out2 = Vec::new();
-    design_fleets(&mut state, &config, &mut out2);
+    design_fleets(&mut state, &config, &mut out2, &mut crate::model::RoundInputs::default());
     let second = lib(&state, &fid);
     assert_eq!(
         first.keys().collect::<Vec<_>>(),
@@ -149,7 +149,7 @@ fn a_player_pinned_design_and_its_yard_are_left_alone() {
     ]});
     apply_patch(&mut state, &config, &diff).expect("pin + pointer applies");
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let leaf = lib(&state, &fid)
         .get("玩家的守卫图")
         .cloned()
@@ -193,7 +193,7 @@ fn a_dangling_pointer_is_left_dangling() {
         }
     }
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let ptr = yards(&state, &fid)
         .into_iter()
         .find(|(c, b, _)| *c == city && *b == bid)
@@ -229,7 +229,7 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
         }),
     );
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let l = lib(&state, &fid);
     assert!(!l.contains_key("自动强袭·陈图"), "没人指向的自建图该被回收");
     assert!(l.contains_key("玩家自己的图"), "不是 AI 命名的图不许碰");
@@ -260,7 +260,7 @@ fn retuning_a_design_never_touches_ships_already_in_space() {
         .unwrap();
     // 先让 AI 建图并指过去，然后照这张图造一艘舰。
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let ptr = yards(&state, &fid)
         .into_iter()
         .find(|(c, b, _)| *c == city && *b == bid)
@@ -296,7 +296,7 @@ fn retuning_a_design_never_touches_ships_already_in_space() {
     let mut config2 = config.clone();
     config2.autocontrol.blueprint_chance = 1.0; // 让"这一回合重估"变成确定事件
     let mut out2 = Vec::new();
-    design_fleets(&mut state, &config2, &mut out2);
+    design_fleets(&mut state, &config2, &mut out2, &mut crate::model::RoundInputs::default());
     let after = state.ship(&ship).cloned().unwrap();
     assert_eq!(
         after.components, before.components,
@@ -317,7 +317,7 @@ fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
         .next()
         .expect("中国有建造区");
     let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out);
+    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
     let old = yards(&state, &fid)
         .into_iter()
         .find(|(c, b, _)| *c == city && *b == bid)
@@ -337,7 +337,7 @@ fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
         }
     }
     let mut out2 = Vec::new();
-    design_fleets(&mut state, &config, &mut out2);
+    design_fleets(&mut state, &config, &mut out2, &mut crate::model::RoundInputs::default());
     let ptr = yards(&state, &fid)
         .into_iter()
         .find(|(c, b, _)| *c == city && *b == bid)

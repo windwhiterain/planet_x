@@ -184,7 +184,7 @@ fn war_retools_over_abundant_shipyard_toward_a_war_class() {
     let before = shipyard_types(&state, "中国".to_string());
     let mut rng = Prng::new(7);
     let mut retools = Vec::new();
-    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
+    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools, &mut crate::model::RoundInputs::default());
     let after = shipyard_types(&state, "中国".to_string());
     assert!(
         after.iter().any(|(_, t)| t != "corvette"),
@@ -339,7 +339,7 @@ fn player_pinned_blueprint_is_not_retooled() {
     }
     let mut rng = Prng::new(7);
     let mut retools = Vec::new();
-    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
+    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools, &mut crate::model::RoundInputs::default());
 
     let rec = retools
         .iter()
@@ -417,7 +417,7 @@ fn an_auto_blueprint_is_retooled_as_a_blueprint() {
     }
     let mut rng = Prng::new(7);
     let mut retools = Vec::new();
-    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
+    retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools, &mut crate::model::RoundInputs::default());
     let rec = retools
         .iter()
         .find(|r| r.faction == "中国")

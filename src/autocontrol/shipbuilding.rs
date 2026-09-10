@@ -719,12 +719,23 @@ pub(crate) fn retool_shipyards(
     fid: &str,
     rng: &mut Prng,
     retools: &mut Vec<RetoolDecision>,
+    inputs: &mut RoundInputs,
 ) {
     // **威胁动机取代「是否处于战争」这个布尔**（连续、且只有**比自己强的**敌人才算威胁）。
     // 用概率闸而不是 `motive > 常数`：动机 0.9 ⇒ 九成回合照旧重构；动机 0.1 ⇒ 偶尔提前备战
     // （冷战期也会造舰——那正是「动机连续」的意义）。骰子走 `derived_roll`，不消费主 `Prng`。
     let motive = threat_motive(state, config, fid);
-    if sim::derived_roll(fid, "war-retool", state.round, "retool") >= motive {
+    let roll = sim::derived_roll(fid, "war-retool", state.round, "retool");
+    // **输入面（B5）**：整个势力的战时重构闸门——记一次就够（不是逐船坞掷）。
+    inputs.record_gate(
+        "retool",
+        fid,
+        "war-retool",
+        roll,
+        motive,
+        if roll < motive { "retool" } else { "keep" },
+    );
+    if roll >= motive {
         return;
     }
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -861,6 +872,7 @@ pub(crate) fn retool_haulers(
     fid: &str,
     claimed: &BTreeSet<(CityId, BuildingId)>,
     retools: &mut Vec<RetoolDecision>,
+    inputs: &mut RoundInputs,
 ) {
     let Some(hauler) = hauler_class(state, config, fid) else {
         return;
@@ -877,7 +889,22 @@ pub(crate) fn retool_haulers(
     let p = (sigmoid((freight::haul_gap(state, config, fid) - HAUL_MID) / HAUL_WIDTH)
         * freight::freight_lean(state, fid))
     .clamp(0.0, 1.0);
-    if p <= 0.0 || sim::derived_roll(fid, "hauler-retool", state.round, "retool") >= p {
+    if p <= 0.0 {
+        // 缺口为 0 ⇒ 概率为 0 ⇒ **不掷骰**（没掷就是没掷，输入面里不该出现这一条）。
+        return;
+    }
+    let roll = sim::derived_roll(fid, "hauler-retool", state.round, "retool");
+    // **输入面（B5）**：集货侧重构的闸门（与上面那条战时重构**同用途名、不同对象**：
+    // `subject` 区分它们——`war-retool` vs `hauler-retool`）。
+    inputs.record_gate(
+        "retool",
+        fid,
+        "hauler-retool",
+        roll,
+        p,
+        if roll < p { "retool" } else { "keep" },
+    );
+    if roll >= p {
         return;
     }
     // 每一级现在有几艘（挑**冗余最小**的那一级改产）。

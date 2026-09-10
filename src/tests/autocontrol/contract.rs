@@ -519,7 +519,7 @@ fn quitting_never_hands_the_cargo_in_transit_to_the_carrier() {
     // 停在雇主货栈的泊位上装货（装的是**中国**的货）。
     let vpos = state.body_position("金星");
     state.ship_mut(&ship).unwrap().position = vpos;
-    let loaded = match sim::haul_step(&mut state, &config, &ship, &class, "金星", "地球") {
+    let loaded = match sim::haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default()) {
         sim::HaulStep::Loaded { units, .. } => units,
         other => panic!("停在雇主货栈上该装货，实为 {other:?}"),
     };
@@ -550,7 +550,7 @@ fn quitting_never_hands_the_cargo_in_transit_to_the_carrier() {
     state.ship_mut(&ship).unwrap().position = state.body_position("地球");
     assert!(
         matches!(
-            sim::haul_step(&mut state, &config, &ship, &class, "金星", "地球"),
+            sim::haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default()),
             sim::HaulStep::Delivered {
                 into_pool: true,
                 ..

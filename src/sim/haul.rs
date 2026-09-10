@@ -262,6 +262,7 @@ pub fn haul_step(
     class: &str,
     from: &str,
     to: &str,
+    inputs: &mut crate::model::RoundInputs,
 ) -> HaulStep {
     let Some(ship) = state.ship(ship_id) else {
         return HaulStep::EnRoute {
@@ -283,7 +284,7 @@ pub fn haul_step(
     // 会被拉开/压近。它只改**移动**、不改「到没到」——到达判定看真实位置，且上面那一步
     // 「已在泊位内就直接办事」先于移动，所以**靠了泊位的运输舰不会被敌人推得卸不了货**。
     let dest = autocontrol::kiting_dest(state, config, ship_id).unwrap_or(target);
-    move_toward(state, config, ship_id, class, dest);
+    move_toward(state, config, ship_id, class, dest, Some(inputs));
     let np = state.ship(ship_id).map(|s| s.position).unwrap_or(pos);
     if dist(np, target) <= eps {
         return haul_act(state, config, &fid, ship_id, leg, other, holding);

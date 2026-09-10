@@ -22,12 +22,17 @@ pub fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
 }
 
 /// Move a ship one round's step toward `dest`, capped by its class speed.
+///
+/// **B5**：`inputs` 收「这一回合这艘舰**偏航了多少**」（MOND 的 `nav_roll`，空盐那一档）——
+/// 它是**主 `Prng` 之外**的派生骰子（`(势力, 舰名, 回合)` 的哈希），回答「为什么它没到指令
+/// 坐标」。`None` = 这一趟不记账（只读/复算的调用方，例如测试与读面）。
 pub fn move_toward(
     state: &mut State,
     config: &GameConfig,
     ship_id: &str,
     _class: &str,
     dest: [f64; 2],
+    inputs: Option<&mut RoundInputs>,
 ) {
     let Some(ship) = state.ship(ship_id).cloned() else {
         return;
@@ -39,12 +44,22 @@ pub fn move_toward(
     // 派生）：这一回合偏多少是确定的，但**下回合是全新的一次尝试**——所以深处目标不是
     // 「进不去」，而是「要多试几个回合」。
     let control = mond_control(state, &fid);
-    let dest = mond_drift(
-        config,
-        control,
-        dest,
-        nav_roll(&fid, &ship.name, state.round),
-    );
+    let roll = nav_roll(&fid, &ship.name, state.round);
+    let dest = mond_drift(config, control, dest, roll);
+    // **输入面（B5）**：登记这次偏航——「指令坐标 vs 实际坐标」的差就是它造成的。
+    if let Some(rec) = inputs {
+        rec.push_roll(crate::model::Roll {
+            purpose: "nav".to_string(),
+            faction: fid.clone(),
+            subject: ship.name.clone(),
+            value: roll,
+            // 导航没有「闸门」：它是一枚**幅度骰**（偏移 = roll 派生的量）。所以两个判据字段
+            // 都留空，`picked` 记下**实际算出来的落点**——那才是「偏到哪儿去了」。
+            threshold: None,
+            pool_total: None,
+            picked: Some(format!("{:.3},{:.3}", dest[0], dest[1])),
+        });
+    }
     let distance = dist(pos, dest);
     if distance <= 1e-9 {
         return;

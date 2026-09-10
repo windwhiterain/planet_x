@@ -825,12 +825,16 @@ class PlanetXQ:
         * `relation_noise` —— **C13 · 每对势力的关系噪声**（`{势力: {势力: 增量}}`）：
           「关系为什么**无端抖了一下**」。
         * `rolls` —— `derived_roll` 家族的抽签记录，每条含**掷出的值**与**当时的判据**
-          （判据不可重算，骰子可重算）。两种形状：**闸门**（`threshold` 有值，判据
-          `value < threshold`，`picked` = 走的那一支）与**加权抽签**（`pool_total` 有值，
-          `picked` = 选中的那一段）。已接的用途：
-          `role`/`observe_role`（定编）、`route`（派单）、`gate`/`accept`/`pick`/`assign`/
-          `quit`/`review`/`renew`（合同撮合与考核）。⚠ 「**没人接我的单**」看 `gate`：
-          `unheard`（没听说过）与 `unwilling`（听说了不接）是两件事，只读事件是分不出来的。
+          （判据不可重算，骰子可重算）。**三种形状**：**闸门**（`threshold` 有值，判据
+          `value < threshold`，`picked` = 走的那一支）、**加权抽签**（`pool_total` 有值，
+          `picked` = 选中的那一段）、**幅度骰**（两者都空，只有 `nav`：掷出的数直接当偏移量，
+          `picked` = 落点坐标）。已接的用途：定编 `role`/`observe_role`、派单 `route`、合同
+          `gate`/`accept`/`pick`/`assign`/`quit`/`review`/`renew`、船坞
+          `retool`/`blueprint_intent`/`blueprint_retune`/`blueprint_theme`、风格轴
+          `style_chance`、导航 `nav`。⚠ 「**没人接我的单**」看 `gate`：`unheard`（没听说过）
+          与 `unwilling`（听说了不接）是两件事，只读事件是分不出来的。
+          ⚠ **量**：实测 ~127 条/回合（约 21.6 KB/回合，与整份 `view` 同量级）——
+          只想看一件事时先按 `purpose` 过滤（`pd.DataFrame(rolls)` 之后 `groupby('purpose')`）。
 
         ⚠ 这一面**不在 `main.jsonl` 里**（按回合 join 这张表更省），也**不在 `--derived` 的
         `post` 里**——问「谁先手 / 掷了什么」就来这里。空 = 这一回合没跑（round 0 / 起点行）。

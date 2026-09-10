@@ -197,12 +197,32 @@ fn roll_records_are_well_formed_and_actually_happen() {
                     assert!(total > 0.0, "抽签池的总权重必须为正：{r:?}");
                     assert!(r.picked.is_some(), "抽签要记下选中谁：{r:?}");
                 }
-                other => panic!("既不闸门也不抽签的形状：{other:?}（{r:?}）"),
+                (None, None) => {
+                    // **幅度骰**：判据不是一个「机会值」，掷出的数直接被当成量用——
+                    // 目前只有导航（`nav`：偏移幅度取自 `mond_drift(config, control, dest, roll)`），
+                    // 它的「结果」就是 `picked` 里的落点。
+                    assert_eq!(
+                        r.purpose, "nav",
+                        "除导航外不该有第三个形状（既不是闸门也不是抽签）：{r:?}"
+                    );
+                }
+                (Some(_), Some(_)) => panic!("不能既是闸门又是抽签：{r:?}"),
             }
             *seen.entry(r.purpose.clone()).or_default() += 1;
         }
     }
-    for want in ["gate", "accept", "assign", "role", "review", "renew"] {
+    for want in [
+        "gate",
+        "accept",
+        "assign",
+        "role",
+        "review",
+        "renew",
+        "retool",
+        "nav",
+        "style_chance",
+        "blueprint_intent",
+    ] {
         assert!(
             seen.contains_key(want),
             "30 回合里一次 `{want}` 抽签都没记到（已记到：{seen:?}）——那一族没接上？"
