@@ -1,10 +1,37 @@
-# 舰船设计图（blueprint）实现规格 —— 待裁决，未开工
+# 舰船设计图（blueprint）实现规格 —— **已实现**（`feature/ship-blueprint`）
 
-> 状态 `[~]`（规格已就绪；**§8 的 10 条开放问题待用户裁决**，裁决前不要动 `src/`；⚠ 版本号已按
-> 合并后的 `main`（`SCHEMA_VERSION = 9`）校正为 **9 → 10**，见 §6 与 附 A） ｜
+> 状态 `[x]`（**十条裁决逐条落地，三端齐活**）｜ 实现记录 / 验收数据 / 未做项：
+> [`ship-blueprint.md`](ship-blueprint.md) §6 ｜ 分支 `feature/ship-blueprint`，
+> **实现提交 `fe534ff`**（本行随文档修订提交补记；`git log --oneline main..feature/ship-blueprint` 看全），
+> `SCHEMA_VERSION` **9 → 10**（v7→v8 产地货栈、v8→v9 货舱 + 运输 Haul 已被
+> `feature/freight-collection` 用掉）｜
 > 索引：[notes.md](../notes.md) ｜ 关联：[`ship-blueprint.md`](ship-blueprint.md)（**设计/裁决篇**：
 > 四条语义已拍板）、`control-live-layers.md`（控制属性=活层，本规格是它的对偶）、
 > `engine-data-plane.md`（读面/投影契约）、`agent-control-long-game.md` §6（`ship_type` 被 AI 重估）
+>
+> **验收（2026-10）**：`--seed 7 --round 240 --digest 20` 的 12 行 JSON 与基线**逐字节相同**
+> （sha256 `395E7D01…61DC8D`）；「v9 旧档 + 新二进制」与「v9 旧档 + 旧二进制」
+> `--digest` 同一 sha256（`3FF7B191…72A9FD`）；`cargo test --workspace` 全绿
+> （lib 139 / longhorizon 6 / projection_derived 4 / planet_x_web 19+2，ignored 11 不变）；
+> `play/planet_x_ctl` 的 demo 全部断言通过。
+>
+> **实现时相对本规格的偏离（四条，都写在这里而不是藏着）**：
+> 1. §4.3 的代码片段用 `bp.mode.is_player()`（图叶**自己**的表态）判定图层供值；实现改用
+>    **§2.4/Q4 明说的「归属解析为 `Player`」**（`State::blueprint_control`：图叶 → 势力 scope →
+>    全局）。理由：同一个仓库里「归属」一律指**解析后**的三态，读面给的也是 `effective_mode`；
+>    用叶自己的表态会让 scope 层永远接管不了图这一层（与其它每一条叶都不对称）。
+> 2. §4.7 的括注「改**图**（`class` 与重算选装）」只做了 `class`：**选装不预生成**
+>    （§2.4 的硬约束：一旦在这里算，出厂成本就从「下水那一刻」变成「改装那一刻」，不是行为中立）。
+> 3. §5.3 的蓝图表多了一列 `launch_waiting`（Q4(b) 要的**可见标记**）。它是**状态的可观察后果**
+>    （回合末进度 ≥ `build_points` 却没下水），所以不落新状态、也不加事件——正常路径下进度
+>    每下水一艘就减一次，因此那个不等式只在「有下水被卡住」时成立。
+> 4. 新增两个丢弃码 `no_such_class` / `missing_class`（§4.6 的表里没有）：`config.ship_spec()`
+>    对未知舰级是 **panic**，所以「建图时舰级写错」必须在写面响亮拒绝而不是让它进状态。
+>
+> 另有两处**规格内部冲突**按更硬的那条办：Q9 的目的（「解编制表 tie-break」）要求
+> `spawned_round` **进投影**（§5.1 只列了三列、§9 还承认那条 engine gap 仍然成立）⇒
+> `ships.jsonl` 加了 `spawned_round` 列 + kit 的 `DEFAULT_REFRESH_RULE` 用它；
+> §5.1 的三列之外还加了 `order_source`（Q2=(b) 明说要「出处列」，而 Q2 正出自 §8.0 的裁决表）。
 >
 > 这一篇是**实现规格**：现状核实（带 `文件:行号`）/ 数据结构 / config 形状 / 控制面叶片与解析规则 /
 > 读面投影 / 迁移 / 测试计划 / 风险，外加「附 A 改动地图」「附 B 验证命令」。设计动机与已拍板的

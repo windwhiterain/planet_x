@@ -168,7 +168,19 @@ pub enum GameEvent {
     },
     /// 新舰从某城出厂（`via` 区分船坞建造 / 剧情赠舰）。`city` 只在船坞出厂时给出
     /// （剧情赠舰在天体附近下水，没有出厂城）。
-    ShipSpawned { ship: ShipId, owner: FactionId, class: String, city: Option<CityId>, via: SpawnVia },
+    ///
+    /// `blueprint` = 出厂所用的**设计图名**（`None` = 无图：旧档、开局预置舰队、剧情赠舰）。
+    /// 它是**归因**：事后能回答「这艘舰是哪张图印出来的」（投影 `events.data.blueprint`）。
+    /// `#[serde(default)]` + 只在 `Some` 时进 headline ⇒ 无图那一路的读面**一个字节不变**。
+    ShipSpawned {
+        ship: ShipId,
+        owner: FactionId,
+        class: String,
+        city: Option<CityId>,
+        via: SpawnVia,
+        #[serde(default)]
+        blueprint: Option<crate::model::BlueprintId>,
+    },
     /// 新殖民 / 再殖民城市建立。`how` 区分「全新定居点」与「复垦空白城」，
     /// `prev_owner` 在复垦时给出**这座城倒下时的主人**（diaspora claim），使
     /// 「被夷平然后被殖民」与「改旗易帜」在一条记录里就分得清。
@@ -409,13 +421,14 @@ impl GameEvent {
                 r.data = json!({"city": city, "owner": owner, "fallen_to": fallen_to,
                                 "by_ship": by_ship, "damage": damage, "pop_before": pop_before});
             }
-            GameEvent::ShipSpawned { ship, owner, class, city, via } => {
+            GameEvent::ShipSpawned { ship, owner, class, city, via, blueprint } => {
                 set_actor(&mut r, EntityKind::Faction, owner);
                 set_target(&mut r, EntityKind::Ship, ship);
                 if let Some(c) = city {
                     extra(&mut r, EventRole::Third, EntityKind::City, c);
                 }
-                r.data = json!({"ship": ship, "owner": owner, "class": class, "city": city, "via": via});
+                r.data = json!({"ship": ship, "owner": owner, "class": class, "city": city,
+                                "via": via, "blueprint": blueprint});
             }
             GameEvent::ColonyFounded { city, owner, body, seeded_ship_class, how, prev_owner } => {
                 set_actor(&mut r, EntityKind::Faction, owner);
@@ -602,15 +615,23 @@ impl GameEvent {
                 "{fallen_to} 的 {by_ship} 夷平 {owner} 的 {city}（人口 {pop_before} → 0，{} 伤害）",
                 num(*damage)
             ),
-            GameEvent::ShipSpawned { ship, owner, class, city, via } => match (via, city) {
-                (SpawnVia::Shipyard, Some(c)) => {
-                    format!("{owner} 的 {c} 出厂一艘 {class}「{ship}」")
+            GameEvent::ShipSpawned { ship, owner, class, city, via, blueprint } => {
+                let base = match (via, city) {
+                    (SpawnVia::Shipyard, Some(c)) => {
+                        format!("{owner} 的 {c} 出厂一艘 {class}「{ship}」")
+                    }
+                    (SpawnVia::Shipyard, None) => format!("{owner} 出厂一艘 {class}「{ship}」"),
+                    (SpawnVia::Story, _) => {
+                        format!("{owner} 因剧情得到一艘 {class}「{ship}」")
+                    }
+                };
+                // 只有真挂了设计图才多说一句——无图那一路的句子**逐字不变**（digest 拿它
+                // 当故事板，凭空加字会改变既有基线的输出）。
+                match blueprint {
+                    Some(bp) => format!("{base}（设计图：{bp}）"),
+                    None => base,
                 }
-                (SpawnVia::Shipyard, None) => format!("{owner} 出厂一艘 {class}「{ship}」"),
-                (SpawnVia::Story, _) => {
-                    format!("{owner} 因剧情得到一艘 {class}「{ship}」")
-                }
-            },
+            }
             GameEvent::ColonyFounded { city, owner, body, how, prev_owner, .. } => match (how, prev_owner) {
                 (FoundingHow::NewSite, _) => format!("{owner} 在 {body} 新建城市 {city}"),
                 (FoundingHow::Refounded, Some(p)) => {

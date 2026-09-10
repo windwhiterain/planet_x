@@ -10,11 +10,14 @@
 > `feature/freight-collection` 合进 `main` 时加进来的 `ship_freighter` / `default_freighter` 当时
 > 没走 ②/A 的规矩——没有 `remove`、web 与 kit 都不认识它；现在三端齐了，并查实这条轴是**唯一
 > AI 会写的风格叶**（删叶 = 交回自动定编，不是冻结）；见该篇 **§12**）
-> → ③ **舰船设计图**（[`ship-blueprint-spec.md`](notes/ship-blueprint-spec.md) §8.0 十条已裁决 +
-> 附 A 改动地图，连同 `spawned_round` 一次升 `SCHEMA_VERSION`，⚠ 现在是 **9 → 10**：
-> v7→v8 产地货栈、v8→v9 货舱 + 运输 Haul 都已被 `feature/freight-collection` 用掉。
-> 动手前先 `grep SCHEMA_VERSION src/model/state.rs`）。⚠ 蓝图那一步的 `order_source` 要把
-> 「叶不存在」与「叶写着 `Inherit`」分开报——已证明这两者在**取值**上不等价。
+> → ③ ~~**舰船设计图**~~ → `[x]` **已完成**（`feature/ship-blueprint`，实现提交 `fe534ff`：
+> `SCHEMA_VERSION` **9 → 10**，
+> 引擎 + `planet_x_ctl` + web 三端齐活，同 seed `--digest` **逐字不变**；实现记录、验收数据、
+> 未做项见 [`ship-blueprint.md`](notes/ship-blueprint.md) §6 与规格篇顶部状态行。
+> 下一步（本轮之后）：`control-live-layers.md` §12.6 的排队项（方案 B「逐舰取值规则与文档对齐」、
+> 风格轴要不要真的 AI 执行者、`ship_orders` 读面列出每一艘舰、kit 的 `_approx` 列换成引擎的
+> `effective`/`order_source`）＋ `military-combat.md` 的 refit（把新图套到老舰上）＋
+> `eras-technology.md` 的时代门控（图库容器已就绪）。
 > 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变
 > （合并后的基线 = `293725C43A0E26DC516977C04A5BD9C99977252B8C08D683EC2EA2749ADEDBC4`，
 > `--seed 42 --round 240 --digest 20`；旧的 `70D5A34E…` 随 v9 运输落地作废）。
@@ -57,8 +60,8 @@
 | `[x]` | [战斗行为风格](notes/combat-behavior-doctrine.md) | per-舰 `doctrine`、逐武器索敌与统一权重已落地，思潮实验也接上。 | doctrine 扩到经济/造舰；政治系统 M1–M3 |
 | `[ ]` | [时代与科技演进](notes/eras-technology.md) | 用解锁式舰级、材料升级与舰种分支，给上千回合铺时代节奏；三条都还只在纸面。 | 舰级解锁、结构演进、设计图分支全未开工 |
 | `[~]` | [军事与战斗](notes/military-combat.md) | 拟真战斗与舰船定制（组件/护盾/点防/命中折减）已落地，AI 拟人化那批也做完。 | 舰船退役换装、换模块/再装配；长局可玩性 |
-| `[~]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮） |
-| `[~]` | [舰船设计图：实现规格](notes/ship-blueprint-spec.md)（**十条已裁决**） | 现状核实（带 `文件:行号`）、数据结构、config/叶片/投影形状、迁移、测试计划、改动地图；更正旧 note 两处事实（出厂风格 config 从未填过、造舰只剩两条路）。**§8.0 = 十条裁决**（Q1 图压舰队默认但意图轴默认沉默 / Q2 活层 + `order_source` / Q3 `ship_type` 仍是唯一真相 / Q4 买不起就不下水 / Q10 悬空指针停产报错…）。 | 实现（排在 web 三条 → 两轴叶之后），照「附 A 改动地图」走，连同 `spawned_round` 升 `SCHEMA_VERSION` **8**（v7 已被产地货栈用掉，规格里的行号引用已同步修正） |
+| `[x]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部（`feature/ship-blueprint`）；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮）；实现记录见该篇 §6 |
+| `[x]` | [舰船设计图：实现规格](notes/ship-blueprint-spec.md)（**十条已裁决**） | 现状核实（带 `文件:行号`）、数据结构、config/叶片/投影形状、迁移、测试计划、改动地图；更正旧 note 两处事实（出厂风格 config 从未填过、造舰只剩两条路）。**§8.0 = 十条裁决**（Q1 图压舰队默认但意图轴默认沉默 / Q2 活层 + `order_source` / Q3 `ship_type` 仍是唯一真相 / Q4 买不起就不下水 / Q10 悬空指针停产报错…）。 | 已按「附 A 改动地图」实现完毕（`SCHEMA_VERSION` **9 → 10**，`spawned_round` 一并落地）；顶部状态行写着实际提交、验证数据与**偏离项** |
 | `[~]` | [MOND 引力异常](notes/mond-anomaly.md) | 异常区导航偏移已实现（崇拜教免疫）；战斗光环、矿产红利与科技扩散未做。 | 异常区战斗光环；矿藏加成；MOND 扩散 |
 | `[ ]` | [行星X 回归](notes/planet-x-return.md) | 把行星X 做成第 19 号长周期天体 + 全球回归效应；现在只是第 60 回合的纯散文节拍。 | 天体、回归效应、配置、harness 断言全未开工 |
 | `[x]` | [舰级点防修正](notes/ship-class-pd-mult.md) | 五级舰按 spec 重新定性并新增 `pd_mult`，联动模型/配置/选装/meta，测试与长局全过。 | — |

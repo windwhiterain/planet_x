@@ -7,6 +7,11 @@
 //!
 //! 另外钉住：没有 checkpoint 时 `--derived` 必须**明说**自己是从当前状态重算的（`note`），
 //! 而不是默默给出一份 `flow` 为空、看起来像"本回合没有任何产出"的假数据。
+//!
+//! ⚠ **这条不变量不适用于 `idx/blueprints.jsonl`**（舰船设计图库）：它**不在** `Derived` 里，
+//! 而是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以没有「两个读面
+//! 各说各话」的问题，也**不该**把它硬塞进 `Derived`（那会让 `--derived` 也依赖 state 的额外
+//! 计算，破坏「post 是 state 的函数」这条既有理由）。见 `ship-blueprint-spec.md` §5.3/§9.10。
 
 use std::path::PathBuf;
 use std::process::Command;

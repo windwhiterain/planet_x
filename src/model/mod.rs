@@ -23,6 +23,7 @@
 //! namespace:
 //!
 //! * [`identity`]   — id aliases + resource bundles/definitions.
+//! * [`blueprint`]  — 舰船**设计图**（「还不存在的舰」的出厂规格：舰级 + 选装 + 舰级默认意图）。
 //! * [`market`]     — 星际市场的持久状态（挂单/价格/成交量/滑窗需求）。
 //! * [`body`]       — orbits, celestial bodies and 定居点.
 //! * [`building`]   — a continuous-area building allocation + its spec.
@@ -41,6 +42,7 @@
 //! `default_capital_body` (in [`faction`]) are `pub(crate)`; everything else
 //! shared internally is `pub` and re-exported below.
 
+mod blueprint;
 mod body;
 mod building;
 mod city;
@@ -56,6 +58,7 @@ mod ship;
 mod ship_combat;
 mod state;
 
+pub use blueprint::*;
 pub use body::*;
 pub use building::*;
 pub use city::*;

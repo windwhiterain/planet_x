@@ -1092,4 +1092,79 @@ mod tests {
         let d = fc.default_freighter.expect("势力级默认角色叶要在读面里");
         assert_eq!((d.freighter, d.mode), (Some(true), Some(ControlMode::Player)));
     }
+
+    /// **设计图**在 web 的读写两面上走通：读面给出图库（`blueprints`，含引擎算的 `ship_count`）、
+    /// 写面能建图 / 改图 / 删图，建造区的指针（`buildings[].blueprint`）能挂上、能拆掉。
+    ///
+    /// 这一条同时钉住 `app.js` 的建造区编辑器依赖的那两个事实：**图库来自 control 读面**、
+    /// **指针通过 `buildings` 结构补丁写**（`null` = 拆掉，不是缺席）。
+    #[test]
+    fn the_blueprint_library_round_trips_through_the_web_surface() {
+        let mut w = world();
+        let fid = w.state.factions[0].name.clone();
+        // 找一座本势力的建造区（web 的建造区编辑器就在这一行上加「设计图」下拉）。
+        let (cid, bid, ship_type) = w
+            .state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid)
+            .find_map(|c| {
+                c.buildings
+                    .iter()
+                    .find(|b| b.is_shipyard())
+                    .map(|b| (c.name.clone(), b.id, b.ship_type.clone().unwrap_or_default()))
+            })
+            .expect("这个势力得有建造区");
+
+        // ① 开局：图库是空的（用户裁决 Q8：不预置标准图）。
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        assert!(fc.blueprints.is_empty(), "开局不该有任何设计图");
+
+        // ② 写面：建一张**舰级对得上**的图，并把建造区指过去（同一份 diff：一次成功）。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid,
+                "blueprints": [{"name": "重甲护卫", "class": ship_type,
+                                "components": ["kinetic", "ion_drive"], "mode": "Player"}],
+                "buildings": [{"city": cid, "building": bid, "blueprint": "重甲护卫"}] }]
+        }))
+        .unwrap();
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "{:?}", report.skipped);
+
+        // ③ 读面：图库一行，选装**全量**给出（否则回传时会静默清空），指针在建造区上。
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        let row = fc.blueprints.iter().find(|b| b.name == "重甲护卫").expect("读面要给出图库");
+        assert_eq!(row.class, ship_type);
+        assert_eq!(row.components, vec!["kinetic".to_string(), "ion_drive".to_string()]);
+        assert_eq!(row.mode, ControlMode::Player);
+        assert_eq!(row.ship_count, 0, "还没造过 ⇒ 0（派生量，现算）");
+        assert_eq!(
+            w.state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint.as_deref(),
+            Some("重甲护卫")
+        );
+
+        // ④ 拆指针（前端「（无：自动选装）」那一格发的就是 `null`）⇒ 回到自动选装。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid, "buildings": [
+                {"city": cid, "building": bid, "blueprint": null}] }]
+        }))
+        .unwrap();
+        assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
+        assert_eq!(
+            w.state.city(&cid).unwrap().buildings.iter().find(|b| b.id == bid).unwrap().blueprint,
+            None,
+            "`null` 拆掉指针"
+        );
+
+        // ⑤ 删整张图（`remove`）：回执里点名到叶，图库里就没了。
+        let req: CommandReq = serde_json::from_value(serde_json::json!({
+            "control": [{ "faction_id": fid, "blueprints": [{"name": "重甲护卫", "remove": true}] }]
+        }))
+        .unwrap();
+        let report = apply_diff(&mut w.state, &w.config, &req);
+        assert!(report.is_clean(), "{:?}", report.skipped);
+        assert_eq!(report.removed.len(), 1, "{:?}", report.removed);
+        let fc = state_view(&w).control.into_iter().find(|c| c.faction_id == fid).unwrap();
+        assert!(fc.blueprints.is_empty(), "图被删掉了");
+    }
 }

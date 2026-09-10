@@ -89,6 +89,20 @@ s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, m
 s.set_capital("中国", "月球", mode="Player")
 s.set_scope(factions={"中国": "Player"})                        # scope nodes carry ownership, not values
 
+# **设计图（blueprint）** —— 「还不存在的舰」的出厂规格：舰级 + 选装 + 该图给新舰的默认意图。
+# 建造区**指向**一张图（结构叶），下水那一刻把图**印成**一艘舰（`components` 是快照，
+# 之后改图**不动**已有的舰）。口径 A：图的 `class` 必须 == 该建造区的 `ship_type`，
+# 所以**图与建造区要一起写**（`set_blueprint_and_retool` 就是那条正解）。
+s.set_blueprint("中国", "重甲护卫", class_="corvette", components=["kinetic", "ion_drive"],
+                mode="Player")                                  # 写值必须明说归属（写值即接管）
+s.set_blueprint("中国", "守家护卫", class_="corvette", order="Dock:地球", mode="Player")
+s.set_blueprint_and_retool("中国", "重甲护卫", class_="destroyer",
+                           city="珠三角", building=7, mode="Player")   # 图 + 该区的 ship_type 一起改
+s.silence_blueprint_order("中国", "守家护卫")                    # 意图轴回到沉默（**不是**删图！）
+s.set_blueprint_pointer("中国", "珠三角", 7, "重甲护卫")           # 指过去
+s.set_blueprint_pointer("中国", "珠三角", 7, None)                # 拆掉指针（写 `null`，不是"缺席"）
+s.remove_blueprint("中国", "重甲护卫")                            # 删整张图（⚠ 挂它的区变悬空指针 ⇒ 停产）
+
 # 删叶（`remove: true`）：这一层**不再说话**，而且叶里的值也不再参与取值 ——
 # 这是「恢复出厂值」的唯一做法（`mode: "Inherit"` 做不到，见 §1.2 与下面的 "删叶" 一节）
 s.remove("中国", "ship_doctrine", "长城")
@@ -283,11 +297,17 @@ spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
 ctl.roster(ckpt, spec)   # → slot, query, refresh_rule, matched, candidates, + the matched ship's columns
 ```
 
-**Deterministic tie-break** (`DEFAULT_REFRESH_RULE = ("-hull", "-hull_max", "ship_id")`): highest
-current hull → highest `hull_max` → name ascending. Two notes on that choice:
+**Deterministic tie-break** (`DEFAULT_REFRESH_RULE = ("-hull", "-hull_max", "spawned_round",
+"ship_id")`): highest current hull → highest `hull_max` → **oldest first** (`spawned_round`
+ascending) → name ascending. Three notes on that choice:
 
-* "oldest" would need a birth round, and the projection's ships table does not carry one (no
-  `spawned_round` column) — so name order stands in for seniority. **Engine gap**, see below.
+* "oldest" **is** available: the engine ships `Ship.spawned_round` as the projection's
+  `spawned_round` column (the roster tie-break was its stated purpose). `null` = the ship predates
+  the column (an old checkpoint) ⇒ **unknown**, and pandas sorts NaN last, so a known age always
+  beats an unknown one and those ties fall through to name order.
+* a rule column the frame does not carry (an index directory written by an **older** engine) is
+  **skipped**, not an error — the roster degrades to the remaining columns; the row's
+  `rule_columns_missing` says which. It never raises.
 * pass `rule=` (or a third element in a spec entry) to override, using `"-col"` for descending.
 
 A roster is an **intent, not a standing promise**: "the flagship is replaced automatically when it
@@ -366,8 +386,19 @@ guessing. They are listed because they are cheap to close and expensive to work 
 6. **`(city, building)` is a per-city `u32` index.** Correct and documented, but it forces every
    recipe to be a same-round transform and makes any cross-round diff silently wrong. A stable
    building identity (or an `--index` column naming it) would remove a whole class of footguns.
-7. **No `spawned_round` on the projection's ships table**, so "oldest" (the natural roster tie-break
-   for a flagship) is unavailable and name order has to stand in.
+7. ~~**No `spawned_round` on the projection's ships table**, so "oldest" (the natural roster tie-break
+   for a flagship) is unavailable and name order has to stand in.~~ **Closed** (blueprint round,
+   `SCHEMA_VERSION` 9 → 10): the engine records `Ship.spawned_round` and the projection ships table
+   carries it as `spawned_round` (`null` = old checkpoint ⇒ unknown). `DEFAULT_REFRESH_RULE` now
+   uses it before name order, and `demo.py` proves the tie-break with a pair of same-score ships of
+   different ages whose name order would pick the other one.
+8. **The blueprint layer is not modeled by the kit's `*_approx` columns.** `ships()` still computes
+   `effective_order_*_approx` over `leaf → fleet default → faction scope → global`, which predates
+   the design-blueprint layer (`leaf → **blueprint** → fleet default → …`). It is documented as an
+   approximation, and the **engine's own** columns are right there: use `order_effective_mode` /
+   `order_effective` / **`order_source`** (`leaf` / `blueprint:<名>` / `fleet_default`). Closing the
+   gap means replacing the `_approx` columns with the engine's answers (tracked in
+   `notes/control-live-layers.md` §12.6).
 
 ## Layout
 

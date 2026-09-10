@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 fn default_schema_version() -> u32 {
     0
 }
@@ -248,20 +248,41 @@ impl State {
     /// 这艘舰当前的**有效指令**——由「归属」决定取哪一层的值：
     ///
     /// * 叶子自己有意见（`Player`/`Auto`）→ 取**叶子**的值（单舰特例，最具体）；
-    /// * 叶子没有说话（`Inherit` / 压根没有叶片——**新下水的舰就是这样**）→ 取势力级
+    /// * 叶子没有说话（`Inherit` / 压根没有叶片——**新下水的舰就是这样**）→ 取
+    ///   **舰级层**（本舰出厂那张设计图的 `order`，只有图上真写了它、且那张图归属解析为
+    ///   `Player` 时才供值）→ 再取势力级
     ///   [`default_ship_order`](ControllableState::default_ship_order) 的值；
     /// * 都没有 → `None`（调用方按 `Idle` 兜底）。
     ///
     /// 这条规则是「新舰默认归 AI、每段必须重新点名」的正解：舰的归属与意图都在更宽的
     /// 那一层有答案，所以**点名单舰只剩「例外」这一种用途**。
+    ///
+    /// **舰级层（设计图）的三个前置条件**（三者缺一，这一层就等于没有说话）：
+    /// 1. 本舰有出厂图（`Ship.blueprint`，旧档/预置舰队/剧情赠舰都是 `None`）；
+    /// 2. 图上真写了 `order`（Q1(c)：**图的意图轴默认 `Inherit`——建图 ≠ 表态**）；
+    /// 3. 那张图的**归属解析为 `Player`**（Q2=(b) 的活层 + §4.2 的归属链；`Auto` 图上的
+    ///    `order` 是流水，不能当指令——与舰队默认叶同一条规则）。
+    ///
+    /// ⚠ 「叶不存在」与「叶写着 `Inherit`」在**归属**上等价、在**取值**上**不等价**
+    /// （最后一行 `leaf.map(|l| l.value)`：叶存在就用叶里的值，与 `mode` 无关）。
+    /// 想知道这条意图**是谁供的值**，读 [`State::ship_behavior_source`]。
     pub fn ship_behavior(&self, ship_id: ShipId) -> Option<ShipBehavior> {
         let s = self.ship(&ship_id)?;
         let c = self.control(s.faction_id.clone())?;
         let leaf = c.ship_orders.get(&ship_id);
-        // 叶子没有说话 → 高层（舰队默认）说了算——但**只在高层是玩家的表态时取值**：
+        // 叶子没有说话 → 高层（舰级图 / 舰队默认）说了算——但**只在高层是玩家的表态时取值**：
         // 高层若说「自动」，那么这一艘的值应当由系统每回合现写（叶子上的记录值），
         // 而不是去用高层里那个可能早已过期的值。
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
+            // ① 舰级层：本舰出厂那张图的默认意图（Q1(c) 插在舰队默认**之前**）。
+            if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
+                if bp.value.order.is_some()
+                    && self.blueprint_control(&s.faction_id, id).is_player()
+                {
+                    return bp.value.order.clone();
+                }
+            }
+            // ② 势力级舰队默认（现状不变）
             if let Some(d) = &c.default_ship_order {
                 if d.mode.is_player() {
                     return Some(d.value.clone());
@@ -271,7 +292,59 @@ impl State {
         leaf.map(|l| l.value.clone())
     }
 
-    /// 决定一艘舰的指令由谁控制：叶子 → 舰队默认 → 势力 → 全局。
+    /// **这条有效指令是谁供的值**——Q2=(b) 那条「读面必须能回答『这条意图是谁下的』」。
+    ///
+    /// 取值（与 [`State::ship_behavior`] 的取值路径逐条对应）：
+    /// * `leaf` —— 本舰的指令叶**存在**（`mode` 是 `Inherit` 也算：叶存在就用叶里的值）；
+    /// * `blueprint:<图名>` —— 值来自本舰**出厂那张图**上的 `order`（图上写了它，且那张图
+    ///   的归属解析为 `Player`）；
+    /// * `fleet_default` —— 值来自势力级舰队默认叶（`Player`）；
+    /// * `scope` / `record` —— **在指令链上不会出现**：作用域节点只表态「谁负责」、不携带值；
+    ///   而指令没有「出厂记录值」（那是风格三轴的兜底，见 [`State::ship_doctrine`]）。
+    ///   这两个取值留在**取值域**里是为了让读面的枚举与「控制属性的层次链」一一对应，
+    ///   不是漏了分支（投影的 `column_docs` 里也写明这一点，免得后人以为是 bug）。
+    ///
+    /// `None` = **没有任何一层说话**（调用方按 `Idle` 兜底）——这正是「叶不存在」那一侧；
+    /// 而「叶存在但写着 `Inherit`」会诚实地报 `leaf`，因为那时**值真的来自那片叶**。
+    pub fn ship_behavior_source(&self, ship_id: ShipId) -> Option<OrderSource> {
+        let s = self.ship(&ship_id)?;
+        let c = self.control(s.faction_id.clone())?;
+        let leaf = c.ship_orders.get(&ship_id);
+        if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
+            if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
+                if bp.value.order.is_some()
+                    && self.blueprint_control(&s.faction_id, id).is_player()
+                {
+                    return Some(OrderSource::Blueprint(id.clone()));
+                }
+            }
+            if let Some(d) = &c.default_ship_order {
+                if d.mode.is_player() {
+                    return Some(OrderSource::FleetDefault);
+                }
+            }
+        }
+        // 叶存在 ⇒ 值（哪怕是叶里的旧值）来自它；叶不存在且上面没人供值 ⇒ 没有来源。
+        leaf.map(|_| OrderSource::Leaf)
+    }
+
+    /// 本舰出厂那张图**在势力库里的那一片叶**（图不存在 / 没有出厂图 ⇒ `None`）。
+    fn ship_blueprint_leaf<'a, 'b>(
+        &'a self,
+        s: &'b Ship,
+    ) -> Option<(&'b BlueprintId, &'a Control<Blueprint>)> {
+        let id = s.blueprint.as_ref()?;
+        let c = self.control(s.faction_id.clone())?;
+        let leaf = c.blueprints.get(id)?;
+        Some((id, leaf))
+    }
+
+    /// 决定一艘舰的指令由谁控制：叶子 → **出厂图** → 舰队默认 → 势力 → 全局。
+    ///
+    /// 新增的「出厂图」那一层**只在图上真写了 `order` 时才参与**（Q1(c)：图的意图轴默认
+    /// `Inherit`——建图 ≠ 表态）。否则「钉死选装」会连带把整支舰队的指令权都收走
+    /// （钉了 `Player` 的图 ⇒ `ship_control` 变 `Player` ⇒ AI 不再给这些舰写指令叶 ⇒
+    /// 舰队停在 `Idle`），而 Q5 明确说那个耦合**只应该在「真想连意图一起钉」时出现**。
     pub fn ship_control(&self, ship_id: ShipId) -> ControlMode {
         let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Auto;
@@ -284,8 +357,24 @@ impl State {
             ),
             None => (ControlMode::Inherit, ControlMode::Inherit),
         };
+        let blueprint = match self.ship_blueprint_leaf(s) {
+            Some((id, bp)) if bp.value.order.is_some() => self.blueprint_control(&fid, id),
+            _ => ControlMode::Inherit,
+        };
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, default, faction, self.scope.global])
+        resolve_chain(&[leaf, blueprint, default, faction, self.scope.global])
+    }
+
+    /// 谁负责**这张设计图**：图叶 → 势力 scope → 全局（**没有**「舰队默认」这一档——
+    /// 设计图是**势力的库**，不是某支舰队的指令）。
+    ///
+    /// `Player` = 系统不许重估这张图（出厂按图装配；图上写了 `order` 时那艘舰的意图也归
+    /// 玩家）；`Auto`/全链继承 ⇒ `Auto` = 系统可重估它（[`crate::autocontrol::retool_shipyards`]）。
+    /// 与 [`State::investment_budget_control`] 同形。
+    pub fn blueprint_control(&self, fid: &FactionId, bp: &BlueprintId) -> ControlMode {
+        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.blueprints.get(bp)));
+        let faction = self.scope.factions.get(fid).copied().unwrap_or_default();
+        resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     // --- 控制模式判定（沿作用域链上溯，最具体者优先） ----------------------
@@ -474,6 +563,116 @@ fn leaf_mode<T>(leaf: Option<&Control<T>>) -> ControlMode {
     leaf.map(|c| c.mode).unwrap_or_default()
 }
 
+/// 一条**有效指令**的出处：这条值到底是谁供的（用户裁决 Q2=(b) 的读面答案）。
+///
+/// 读面（投影 `ships.order_source` 列）给的是**引擎解析后的答案**——Python 侧不要自己
+/// 重实现这条链（那是漂移源，见 `.agents/notes/engine-data-plane.md`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrderSource {
+    /// 本舰的指令叶**存在**（`mode` 是 `Inherit` 也算——叶存在就用叶里的值）。
+    Leaf,
+    /// 本舰**出厂那张设计图**上的 `order`（图上写了它，且那张图的归属解析为 `Player`）。
+    Blueprint(BlueprintId),
+    /// 势力级**舰队默认指令**叶（`Player`）。
+    FleetDefault,
+    /// 作用域节点——**指令链上不会出现**（作用域只表态「谁负责」，不携带值）。
+    Scope,
+    /// 舰上的出厂记录值——**指令链上不会出现**（指令没有记录值，那是风格三轴的兜底）。
+    Record,
+}
+
+impl OrderSource {
+    /// 读面的稳定拼写：`leaf` / `blueprint:<图名>` / `fleet_default` / `scope` / `record`。
+    pub fn label(&self) -> String {
+        match self {
+            OrderSource::Leaf => "leaf".to_string(),
+            OrderSource::Blueprint(id) => format!("blueprint:{id}"),
+            OrderSource::FleetDefault => "fleet_default".to_string(),
+            OrderSource::Scope => "scope".to_string(),
+            OrderSource::Record => "record".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config;
+
+    /// **旧档加载**（§6 的 `v9 → v10` / §7.5-20）：v9 档里根本没有设计图那一轮的字段。
+    ///
+    /// 这里拿一份**真的旧格式文本**来测，而不是「把字段设成 None 再存一遍」：把当前状态
+    /// 序列化成 RON，然后**逐字删掉** v9→v10 新增的四个字段
+    /// （`ControllableState.blueprints` / `Building.blueprint` / `Ship.blueprint` /
+    /// `Ship.spawned_round`）并把版本号写回 9 —— 那就是一份 v9 档（同一代里没有这些键）。
+    ///
+    /// 断言三件事：
+    /// 1. 它**能读进来**（四个字段都是 `#[serde(default)]`）；
+    /// 2. `migrate` **只推版本号**（`Ok`，且落到 `SCHEMA_VERSION`）——这一档零信息损失；
+    /// 3. 补齐的值就是「空库 / 无指针 / 未知回合」，且实体一个不少（旧档行为逐值不变）。
+    #[test]
+    fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
+        let config = load_config();
+        let mut state = crate::world::default_state(&config, 7);
+        let mut rng = crate::prng::Prng::new(7);
+        for _ in 0..8 {
+            crate::sim::advance(&mut state, &config, &mut rng);
+        }
+        let ships = state.ships.len();
+        let cities = state.cities.len();
+        let buildings: usize = state.cities.iter().map(|c| c.buildings.len()).sum();
+        // 先把 `spawned_round` 归零：v9 档里**没有这个键**，而紧凑 RON 里 `Some(12)` 没法用
+        // 一次字符串替换干净地删掉（`None` 可以）。这不妨碍本测试的目的——它测的是
+        // 「文件里没有那个键时会发生什么」。
+        for s in state.ships.iter_mut() {
+            s.spawned_round = None;
+        }
+        let text = ron::to_string(&state).expect("serialize the state");
+        for needle in ["blueprint:None", "blueprints:{}"] {
+            assert!(
+                text.contains(needle),
+                "序列化里应当出现 `{needle}`（改过 RON 形状的话，这条手术要先更新）"
+            );
+        }
+        let old_text = text
+            .replace(",blueprint:None", "")
+            .replace(",blueprints:{}", "")
+            .replace(",spawned_round:None", "")
+            .replace("schema_version:10", "schema_version:9");
+        assert!(
+            !old_text.contains("blueprint") && !old_text.contains("spawned_round"),
+            "手术没做干净：v9 档里不该出现设计图那四个字段"
+        );
+
+        let mut restored: State = ron::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");
+        assert_eq!(restored.schema_version, 9, "档里写的就是 9");
+        migrate(&mut restored).expect("v9 必须能迁到当前版本");
+        assert_eq!(restored.schema_version, SCHEMA_VERSION);
+        assert_eq!(restored.ships.len(), ships, "实体不许在迁移里丢");
+        assert_eq!(restored.cities.len(), cities);
+        assert_eq!(restored.cities.iter().map(|c| c.buildings.len()).sum::<usize>(), buildings);
+        for (fid, c) in &restored.control {
+            assert!(c.blueprints.is_empty(), "{fid} 的设计图库在旧档里必须是空的");
+        }
+        for s in &restored.ships {
+            assert_eq!(s.blueprint, None, "旧档的舰没有出厂图");
+            assert_eq!(s.spawned_round, None, "旧档缺 spawned_round ⇒ 未知（不是第 0 回合）");
+        }
+        for c in &restored.cities {
+            for b in &c.buildings {
+                assert_eq!(b.blueprint, None, "旧档的建造区没有图指针 ⇒ 走 choose_loadout");
+            }
+        }
+        // 没有图 ⇒ 指令链上新增的那一层恒为空 ⇒ 取值与旧档一致：舰上的叶（出厂时那条
+        // `Inherit` 的 `Idle`）就是它的答案，归属仍是「系统自动」（除非 scope 另有表态）。
+        if let Some(ship) = restored.ships.first().map(|s| s.name.clone()) {
+            assert_eq!(restored.ship_behavior_source(ship.clone()), Some(OrderSource::Leaf));
+            assert_eq!(restored.ship_behavior(ship.clone()), Some(ShipBehavior::Idle));
+            assert_eq!(restored.ship_control(ship), ControlMode::Auto);
+        }
+    }
+}
+
 /// 三条**风格轴**（都是「叶 → 舰队默认 → 舰上记录值」的同形链，共用归属判定）。
 /// 名字里的「风格」是仓库里的旧称：它们都是「比指令更持久、比舰级更具体」的 per-舰 控制属性。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -563,9 +762,30 @@ enum StyleAxis {
 /// （v8 的 `ShipBehavior` 没有 `Haul`，货也不会动、也没有「运输舰」这个角色），
 /// 所以这一档同样**零信息损失**：旧档加载后没有任何舰在跑路线、没有货在舱里、
 /// 每艘舰都按 `Ship.freighter = false`（= 战舰）继续过——那正是旧档的真实状态。
+///
+/// v9 → v10（设计图分支）：新增**舰船设计图**（[`Blueprint`]）这条链——
+/// [`ControllableState::blueprints`]（势力级设计图库）、[`Building::blueprint`]（建造区
+/// 指向一张图）、[`Ship::blueprint`]（出厂归因）、[`Ship::spawned_round`]（下水回合）、
+/// [`GameConfig::blueprints`](crate::model::GameConfig::blueprints)（开局种子表，默认空）。
+///
+/// **这一档同样是零信息损失**，四个新字段全部 `#[serde(default)]`：
+/// * `ControllableState.blueprints` ⇒ 空库；`Building.blueprint` ⇒ `None`；
+///   `Ship.blueprint` ⇒ `None`；`GameConfig.blueprints` ⇒ 空种子表。
+/// * ⇒ **每一条建造路径都走 `choose_loadout`**（`resolve_loadout` 没有图时就是今天那条
+///   代码路径、同一时点：`sim.rs` 的船坞出厂那一刻按当时库存算）；
+/// * ⇒ **面板/成本完全不变**（图里不存数值，config 仍是一元真值）；
+/// * ⇒ **意图**：`Ship.blueprint = None` ⇒ 指令链上新增的那一层恒为空 ⇒
+///   [`State::ship_behavior`] 的取值与今天逐值相同；
+/// * ⇒ **归属**：`ship_control` 的链多一个恒为 `Inherit` 的层（没有图就没有这一层），
+///   最具体的「有意见者」仍是原来那个；
+/// * ⇒ **`retool_shipyards`**：旧档没有图 ⇒ 新的归属 gate 不触发，改的仍是 `ship_type`；
+/// * ⇒ `spawned_round` 是纯归因（谁都不读它做决策），旧档一律「未知」。
+///
+/// 于是「**旧档 + 新二进制**」与「旧档 + 旧二进制」在同一 seed 下 `--digest` **逐字相同**
+/// （实测见 `.agents/notes/ship-blueprint.md` 的实现记录）。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => {
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

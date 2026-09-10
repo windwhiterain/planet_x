@@ -1,8 +1,9 @@
 # 舰船设计图（非控制属性 = 建造单位上的模板）
 
-> 状态 `[~]`（设计已定 + 实现规格已就绪；**规格 §8 的十条已裁决**，见
-> [`ship-blueprint-spec.md`](ship-blueprint-spec.md) §8.0。实现排在 **web 三条 → 两轴叶**之后，
-> 并与 `spawned_round` 同一次升 `SCHEMA_VERSION`） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
+> 状态 `[x]`（**已实现并提交**，`feature/ship-blueprint`：规格 §8.0 的十条逐条照办，
+> `SCHEMA_VERSION` **9 → 10**，引擎 + `play/planet_x_ctl` + web 三端齐活，
+> 同 seed `--digest` 与基线**逐字节相同**；实现记录 / 验收数据 / 未做项见本文 **§6**） ｜
+> 索引：[notes.md](../notes.md) ｜ 关联：
 > `ship-blueprint-spec.md`（**实现篇**：改动地图 / 叶片形状 / 测试计划）、
 > `control-live-layers.md`（它的对偶：控制属性=活层）、`eras-technology.md`（「设计图分支」
 > 剩余项就是它）、`military-combat.md`（换模块/再装配剩余项）、`agent-control-long-game.md`
@@ -125,3 +126,91 @@ pub struct Blueprint {
   （`slots`）必须仍然生效；否则这是新的失衡入口（spec 的 Q4/Q7 也在这条线上）。
 * **与 `eras-technology` 的解锁**：解锁式设计图需要一个「什么时代能造什么图」的门控表，
   那属于 `eras-technology.md` 的范畴，本 note 只把**容器**做好。
+
+## 6. 实现记录（`feature/ship-blueprint`，实现提交 `fe534ff`，`SCHEMA_VERSION` 9 → 10）
+
+**一句话**：设计图 = 势力级库（`ControllableState.blueprints: BTreeMap<图名, Control<Blueprint>>`）
++ 建造区指针（`Building.blueprint`）+ 出厂快照（`Ship.components` / `Ship.blueprint`）。
+十条裁决逐条落地的位置：
+
+| 裁决 | 落地处 |
+| --- | --- |
+| Q1(c) 链插一层、**图的意图轴默认沉默** | `State::ship_control` / `State::ship_behavior`（`src/model/state.rs`）：图那一层**只在 `Blueprint.order.is_some()` 时参与**（建图 ≠ 表态），链 = `叶 → 图 → 舰队默认 → 势力 scope → 全局 scope` |
+| Q2(b) 活层 + **出处列** | 舰上只记 `blueprint`（图名），取值时现查；投影 `ships.order_source` = `leaf` / `blueprint:<名>` / `fleet_default`（`State::ship_behavior_source`）。⚠ 它把「**叶不存在**」与「叶写着 `Inherit`」分开报：后者报 `leaf` |
+| Q3 A `ship_type` 仍是唯一真相 | `apply_diff` 的**双向守卫**：改图或改区只要让二者不等就报 `blueprint_class_mismatch`；两处**一起写**（同一份 diff）则一次成功（`yard_ship_type_intent`） |
+| Q4(b) 买不起不下水（**只对 `Player` 归属**） | `sim::blueprint_launch_blocked`（下水循环里按库存校验，买不起就 `break`、进度继续攒）＋ 可见标记：投影蓝图表 `launch_waiting` 列（由「回合末进度 ≥ `build_points` 却没下水」从状态推出来，**不落新状态**） |
+| Q5 一张图一个 mode（不拆） | 图叶一个 `Control<Blueprint>`；`Auto` 只重估舰级/选装，**不**供 `order` 值 |
+| Q6 图里不带面板修正 | `Blueprint` 只有 `class` / `components` / `order`；面板仍由 `config` + `ship_panel` 现算 |
+| Q7 组件不许重复 | `apply_blueprint` 报 `duplicate_component`（另有 `no_such_component` / `too_many_components` / `no_such_class` / `missing_class`） |
+| Q8 不预置标准图 | 世界生成零张图；`GameConfig.blueprints`（种子表）留着但**空**，且种子一律以 `Inherit` 写入 |
+| Q9 `Ship.spawned_round` 同一次升档 | 状态字段 + 投影 `ships.spawned_round` 列（`null` = 旧档 ⇒ 未知）+ kit 的 `DEFAULT_REFRESH_RULE` 用它做「同分取最老的」 |
+| Q10(a) 悬空指针停产 | `build_city` 收集建造区时跳过指针悬空的那些（不贡献产出速率 ⇒ 进度不涨）；`--apply` 报 `no_such_blueprint`；读面（`cities.buildings[].blueprint`）**原样输出**指针 |
+
+其余三端（**写面 = 读面**）：
+* **控制面**：`FactionControlView.blueprints`（读，含引擎算的 `ship_count`）/ `FactionControlPatch.blueprints`
+  （写，`BlueprintPatch` 自带 `deny_unknown_fields` 白名单，收下只读的 `ship_count`）；
+  `BuildingPatch.blueprint: Option<Option<String>>`（缺席 = 不动 / `null` = 拆指针 / 名字 = 指过去）；
+  `BlueprintPatch.order` 同样是双 Option（缺席 = 不动 / `null` = **意图轴回到沉默**）；
+  `blueprints` 在 `apply_diff` 里**先于** `buildings` 应用（同一份 diff 建图 + 挂指针要一次成功）；
+  tagged 写法（`{"type":"dock","body":"地球"}`）在 `order` 上同样被 `normalize_behavior` 接受。
+* **投影**：`ships` 加 5 列（`blueprint` / `blueprint_mode` / `order_blueprint_mode` / `order_source` /
+  `spawned_round`）；`cities.buildings[]` 加 `blueprint`；新**派生表** `idx/blueprints.jsonl`
+  （12 列，含 `effective_mode` / `ship_count` / `class_slots` / `component_cost` / `launch_waiting`）；
+  `projection_schema()` 三处同步（ships 列 + 派生表条目 + `control` 表描述里写明「设计图**不在**本表」）。
+* **kit**：`LEAF_KINDS["blueprints"]`、复合值分支（`_leaf_value`）、`set_blueprint` /
+  `set_blueprint_and_retool` / `silence_blueprint_order` / `remove_blueprint` /
+  `set_blueprint_pointer`、`buildings()` 加 `blueprint` 列、`roster()` 的 tie-break 换成
+  `spawned_round`（缺列时跳过而不是抛错）；`planet_xq` 加三行的 `q.blueprints(round)`。
+* **web**：建造区编辑器加「设计图」下拉（含「（无：自动选装）」= 拆指针、以及**悬空指针**的显式显示）。
+* **迁移**：`v9 → v10` 只推版本号（四个新字段全部 `#[serde(default)]` ⇒ 空库 / 无指针 / 未知回合，
+  每条建造路径都回到 `choose_loadout`）；`src/sim.rs` 的测试用**真的删掉那四个字段的 RON 文本**
+  来证明这一点。
+
+**验收数据**（2026-10，Git Bash + PowerShell，`--seed 7 --round 240 --digest 20`）：
+`--digest` 的 12 行 JSON 与基线**逐字节相同**（sha256 `395E7D01…61DC8D`，改动前后同一个值；
+改前/改后文件级的 sha256 只差一行编译器警告的行号——⚠ 第一次比对时把 stderr 也重定向进了文件，
+别犯这个错）。「旧档 + 新二进制」`--start scratch/ckpt_v9.ron --round 228 --digest 20` 与
+「旧档 + 旧二进制」同一 sha256（`3FF7B191…72A9FD`，11 行）。`cargo test --workspace` 全绿
+（lib 139 + longhorizon 6 + projection_derived 4 + web 19 + web-main 2，ignored 11 条不变）。
+kit demo「全部断言通过」，其中**同分取最老**由一对真实同分舰证明（`福煦`@r0 vs `北辰`@r4：
+名字序会挑 `北辰`，编制表挑 `福煦`）。
+
+**未做 / 偏离**（详见规格篇顶部状态行的同一张表）：refit（老舰套新图）、时代门控、
+web 里**编辑/新建图**的面板（只做了建造区那一行的指针 + 悬空指针显示）、AI 主动建图
+（`Auto` 图的执行者只有「重估已有图」这一半）、图形化的「买不起」提示（只有投影列）。
+
+## 7. 独立验收（**审查方**用另一套量具重跑，2026-10）
+
+实现方自述只当线索：下面是**另一个进程**用自己的量具、不看实现代码、只对契约跑出来的结果
+（两把量具都在 `scratch/`，gitignored）。
+
+1. **总量具** `scratch/accept_blueprint.ps1`：
+   * `cargo test --workspace` 全绿：lib **138 passed / 1 ignored**、longhorizon 6+10ignored、
+     projection_derived 4、web **19 + 2**、doc-tests 0（共 9 份 `test result`）。
+   * **行为中性**：`--seed 42 --round 240 --digest 20` 的 digest 行 sha256 = `293725C4…DBC4`
+     —— 与合并前 main（v9）**逐字节相同**（取法：只取 `^\{` 行、`\n` 连接、UTF-8 无 BOM）。
+   * **旧档零损失**：审查方自己那份 v9 档（`scratch/blueprint_fixture/ckpt_v9.ron`）在新二进制下
+     跑 `--round 240 --digest 20`，与 **v9 二进制**逐字节相同（`38E08F94…`）。
+   * **旧档读面 / 投影**：`--control` 只多出 `blueprints`（空库），其余**全部 9 个势力逐字段相同**；
+     投影里 13 艘舰与 22 个建造区的 `blueprint` 全 `null`，`spawned_round` 全 `null`（= 未知）。
+2. **契约探针** `scratch/accept_blueprint_contract.py`（A–E 五段**全部通过**）：
+   * A 读面=写面：建图 → 读回**全量** `components` → **原样回传是不动点**；`remove` 删图也支持；
+   * B 六个丢弃码一字不差地报出来（`no_such_component` / `duplicate_component` /
+     `too_many_components` / `blueprint_class_mismatch` / `no_such_blueprint` / `not_a_shipyard`）；
+   * C 链与出处四态齐全（`None` / `leaf` / `fleet_default` / `blueprint:守家`），且
+     **图层压过舰队默认**由**一艘真下水的舰**（`玉衡`）验证：`order_source = blueprint:守家`、
+     有效意图 = 图里的 `Dock 月球`；
+   * D 投影与 `schema.json` 声明齐、`cities.buildings[].blueprint` 在、ships 五列齐
+     （`spawned_round` 有真值）；
+   * E `--control-schema` 有 `blueprints`、`--schema` 有 `blueprint`。
+3. **kit 端到端**：`demo.py` **全部断言通过**（含 `[4b]`/`[4c]` 与「同分取最老」的真实同分对证明）。
+4. **web 实机**（审查方自己点的一遍，3001；证据 `scratch/blueprint-web-verified.png`）：
+   建图 → 建造区那一行显示 `设计图 [侦察护卫（护卫舰·Player）]` → **删图后**同一行变成
+   `侦察护卫（库里没有这张图 ⇒ 本区停产）`（Q10(a) 在界面上可见）。
+   ⚠ 第一次挂指针被**正确地拒了**：AI 的 `retool_shipyards` 早已把 `长三角#3` 从 `battleship`
+   改成 `corvette`，而图还是按旧舰级建的 ⇒ `blueprint_class_mismatch`。这条顺带证明**守卫真的在工作**。
+
+**审查方另外钉住的一条语义**（探针两个方向都测了）：指令轴上「叶写着 `Inherit` + 舰队默认是
+**Player**」⇒ **舰队默认的值压过叶里的值**（出处诚实地报 `fleet_default`）；「叶存在就用叶里的值」
+出现在**舰队默认不是玩家**时（出处报 `leaf`）。风格三轴与指令轴在这里**不一样**——
+`order_source` 存在的意义就是把这件事说出来。

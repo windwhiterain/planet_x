@@ -137,6 +137,24 @@ pub struct Ship {
     /// 折算见 [`crate::model::cargo_capacity`]。空 = 空舱（出厂/旧档）。
     #[serde(default)]
     pub cargo: ResourceMap,
+    /// 本舰**出厂所用**的设计图名（快照的溯源，也是「按舰级默认意图」那一层的查表键）。
+    ///
+    /// `None` = 无图（旧档 / 开局预置舰队 / 剧情赠舰）。
+    ///
+    /// ⚠ 它**不**表示「本舰的选装可以随图变化」——`components` 是**快照**
+    /// （用户裁决 §3.1）。它的两个用途：
+    /// * **归因**：这艘舰是哪张图造出来的（投影 `ships.blueprint` 列、读面 join 蓝图表）；
+    /// * **意图是活层**（Q2=(b)）：舰上只记图名，取值时现查图——改图的 `order` 会立刻对
+    ///   这张图的所有舰（指令叶沉默者）生效，而面板/组件仍是快照。
+    #[serde(default)]
+    pub blueprint: Option<crate::model::BlueprintId>,
+    /// 本舰**下水所在回合**（建造漏斗 `spawn_ship` 写入；`None` = 旧档缺字段 ⇒ **未知**）。
+    ///
+    /// 用途：编制表/花名册的**确定性 tie-break**（「同分取最老的」——在此之前只能用名字序
+    /// 当代理，而名字序与年龄无关）。旧档的舰一律是 `None`，读者要**回落名字序**，不能把
+    /// 「未知」当成第 0 回合下水（那会让旧档里所有舰并列最老）。
+    #[serde(default)]
+    pub spawned_round: Option<u32>,
 }
 
 fn default_hull_max() -> f64 {

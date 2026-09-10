@@ -252,6 +252,38 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
     chosen
 }
 
+/// **出厂选装的唯一入口**：有设计图就按图装配，没有（或图交给系统）就走生成器。
+///
+/// 三条路（`.agents/notes/ship-blueprint-spec.md` §2.4）：
+/// * 图存在、图的**归属解析为 `Player`**、且 `components` 非空 ⇒ **用图上的选装**（原样，
+///   顺序 = 槽位顺序；合法性由 `--apply` 在写入时守卫）；
+/// * 图存在但归属是 `Auto`/`Inherit`（`blueprint_control` 的答案）⇒ **现场**调
+///   [`choose_loadout`]（与今天同一条代码路径、**同一时点**）；
+/// * 没有图（旧档 / 开局预置舰队 / 剧情赠舰）⇒ 同上，也是现场调 [`choose_loadout`]。
+///
+/// ⚠ **`components` 为空 = 「交给生成器」**（与 `mode` 无关）：一张只钉意图/舰级的图
+/// 不必把选装也抄一遍。
+///
+/// ⚠ **不许在回合步进里预生成 `Auto` 图的选装**：今天选装是在**出厂那一刻**按当时库存
+/// 算的，提前算会改变成本时点与结果（行为不中性）。本函数因此是**纯读**的：
+/// 它不改状态，也不消费 RNG。
+pub(crate) fn resolve_loadout(
+    state: &State,
+    config: &GameConfig,
+    fid: FactionId,
+    class: &str,
+    blueprint: Option<&BlueprintId>,
+) -> Vec<String> {
+    if let Some(id) = blueprint {
+        if let Some(leaf) = state.control(fid.clone()).and_then(|c| c.blueprints.get(id)) {
+            if !leaf.value.components.is_empty() && state.blueprint_control(&fid, id).is_player() {
+                return leaf.value.components.clone();
+            }
+        }
+    }
+    choose_loadout(state, config, fid, class)
+}
+
 /// 威胁响应（海军随威胁重构）：交战中，若某势力的舰队被单一舰型统治（占比 > `over_share`），
 /// 就把它产出该舰型的最小 id 船坞重定向到 `choose_next_class` 选出的**战局感知新舰型**
 /// （战争加分——多造重舰；去重加分——避免单调）。和平时不重定向（船坞保持生产既有舰型）。
@@ -259,6 +291,16 @@ pub(crate) fn choose_loadout(state: &State, config: &GameConfig, fid: FactionId,
 ///
 /// 真的改了就往 `retools` **追加一行**（纯记录）：这是少数几个**不留事件的 AI 决策**之一，
 /// 事后只能从 `ship_type` 的变化反推、且看不出是什么时候改的。
+///
+/// **设计图的归属 gate**（spec §4.7：不堵这条路，「玩家钉住的图 AI 不许重估」就会因为
+/// 另一条路径（改 `ship_type` 造成 `blueprint_class_mismatch`）而失效）：
+/// * 目标舰坞挂了**归属解析为 `Player`** 的图 ⇒ **跳过它**，另选一个；一个都没有就什么都不做；
+/// * 挂了 `Auto` 图 ⇒ 改的是**图**（`class`，并保持 `ship_type` 与它一致），而不是只改
+///   `ship_type`（那样会让图与区对不上，等于把图作废）；
+/// * 挂了**悬空指针**（图不存在）⇒ 那个区本来就停产（Q10(a)），跳过。
+///
+/// ⚠ **RNG 消耗次序不变**：`choose_next_class` 的 `rng.unit()` 仍在同一位置、同样次数被调用
+/// （归属只影响它**之后**的目标选择），否则同 seed 的 `--digest` 会变。
 pub(crate) fn retool_shipyards(
     state: &mut State,
     config: &GameConfig,
@@ -290,29 +332,52 @@ pub(crate) fn retool_shipyards(
     if new_class == over_class {
         return;
     }
-    // 找到产出 over_class 的最小 id 船坞（按城市 id、再按建筑 id）。
-    let mut target: Option<(CityId, BuildingId)> = None;
+    // 找到产出 over_class 的**可改装**船坞（按城市 id、再按建筑 id）：
+    // 挂 `Player` 图的跳过（玩家钉住的图 AI 不许重估），挂悬空指针的跳过（那个区已停产）。
+    let fid_owned = fid.to_string();
+    let mut target: Option<(CityId, BuildingId, Option<BlueprintId>)> = None;
     for c in &state.cities {
         if c.faction_id != fid {
             continue;
         }
         for b in &c.buildings {
             if b.is_shipyard() && b.ship_type.as_deref() == Some(over_class.as_str()) {
-                target = Some((c.name.clone(), b.id));
-                break;
+                match b.blueprint.as_ref() {
+                    // 悬空指针 ⇒ 该区停产，改装它没有意义。
+                    Some(bp) if !blueprint_known(state, &fid_owned, bp) => continue,
+                    // 玩家钉住的图 ⇒ 跳过，另选一个。
+                    Some(bp) if state.blueprint_control(&fid_owned, bp).is_player() => continue,
+                    other => {
+                        target = Some((c.name.clone(), b.id, other.cloned()));
+                        break;
+                    }
+                }
             }
         }
         if target.is_some() {
             break;
         }
     }
-    if let Some((cid, bid)) = target {
+    if let Some((cid, bid, bp)) = target {
         if let Some(c) = state.city_mut(&cid) {
             for b in &mut c.buildings {
                 if b.id == bid {
                     b.ship_type = Some(new_class.clone());
                     break;
                 }
+            }
+        }
+        // 挂了 `Auto` 图 ⇒ **改图**（舰级），而不是只改 `ship_type`：口径 A 要求两者相等，
+        // 只改一边会让这张图对不上它自己的建造区（`blueprint_class_mismatch` 的形态）。
+        // 选装**不预生成**（`components` 保持原样 = 空 ⇒ 出厂时由生成器现算，见
+        // `resolve_loadout`）：在这里算一次会把「出厂那一刻按当时库存算」变成
+        // 「改装那一刻算」，那是行为改变（spec §2.4 的硬约束）。
+        if let Some(bp) = bp {
+            if let Some(leaf) = state
+                .control_mut(fid.to_string())
+                .and_then(|c| c.blueprints.get_mut(&bp))
+            {
+                leaf.value.class = new_class.clone();
             }
         }
         retools.push(RetoolDecision {
@@ -323,6 +388,14 @@ pub(crate) fn retool_shipyards(
             to: new_class,
         });
     }
+}
+
+/// 这个势力库里**有没有**这张图（`Building.blueprint` 是悬空指针吗）。
+fn blueprint_known(state: &State, fid: &str, bp: &str) -> bool {
+    state
+        .control(fid.to_string())
+        .map(|c| c.blueprints.contains_key(bp))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -492,8 +565,7 @@ mod tests {
 
     /// 拟人指挥官：军舰选装要「又能打、又能扛」（…）；战局感知也在此测试。
     #[test]
-    fn choose_loadout_is_balanced_and_threat_aware() {
-        let (config, mut state) = fresh_world(42);
+    fn choose_loadout_is_balanced_and_threat_aware() {        let (config, mut state) = fresh_world(42);
         if let Some(f) = state.faction_mut("中国") {
             for (r, amt) in [
                 ("铀", 300.0), ("金", 300.0), ("氦-3", 300.0), ("铂", 300.0),
@@ -523,5 +595,139 @@ mod tests {
             war_w >= peace_w,
             "at war the AI should field at least as many weapons (war {war_w} >= peace {peace_w}); war={war:?} peace={peace:?}"
         );
+    }
+
+    // ---- 设计图的归属 gate（spec §4.7：AI 重估不许绕过玩家的图）-------------------
+
+    /// 让中国进入「被单一舰型统治 + 交战」的状态，并把它的**前两座建造区**都设成 corvette。
+    ///
+    /// 返回 `[(城名, 建筑下标); 2]`（按 `state.cities` 的顺序，与 `retool_shipyards` 的
+    /// 挑选顺序一致）。少于两座就直接 panic——用例需要「一个可以另选」的候选。
+    fn two_corvette_yards(state: &mut State) -> [(CityId, BuildingId); 2] {
+        for s in state.ships.iter_mut() {
+            if s.faction_id == "中国" {
+                s.class = "corvette".to_string();
+            }
+        }
+        state.faction_mut("中国").unwrap().relations.insert("美国".to_string(), -35.0);
+        state.faction_mut("美国").unwrap().relations.insert("中国".to_string(), -35.0);
+        let mut yards: Vec<(CityId, BuildingId)> = Vec::new();
+        for c in state.cities.iter().filter(|c| c.faction_id == "中国") {
+            for b in c.buildings.iter().filter(|b| b.is_shipyard()) {
+                yards.push((c.name.clone(), b.id));
+            }
+        }
+        assert!(yards.len() >= 2, "中国的建造区要 ≥2 座，实际 {}", yards.len());
+        let picked = [yards[0].clone(), yards[1].clone()];
+        for (cid, bid) in &picked {
+            if let Some(city) = state.city_mut(cid) {
+                for b in city.buildings.iter_mut() {
+                    if b.id == *bid {
+                        b.ship_type = Some("corvette".to_string());
+                    }
+                }
+            }
+        }
+        picked
+    }
+
+    /// **玩家钉住的图，AI 不许重估**（§7.2-5）：目标舰坞挂 `Player` 图 ⇒ 跳过它、另选一个；
+    /// 挂 `Auto` 图 ⇒ **改图**（`class`）并保持 `ship_type` 与它一致（口径 A）。
+    #[test]
+    fn player_pinned_blueprint_is_not_retooled() {
+        let (config, mut state) = fresh_world(42);
+        let [first, second] = two_corvette_yards(&mut state);
+        state.control.entry("中国".to_string()).or_default().blueprints.insert(
+            "玩家钉的护卫".to_string(),
+            Control::player(Blueprint {
+                class: "corvette".to_string(),
+                components: vec!["kinetic".to_string(), "ion_drive".to_string()],
+                order: None,
+            }),
+        );
+        if let Some(city) = state.city_mut(&first.0) {
+            for b in city.buildings.iter_mut() {
+                if b.id == first.1 {
+                    b.blueprint = Some("玩家钉的护卫".to_string());
+                }
+            }
+        }
+        let mut rng = Prng::new(7);
+        let mut retools = Vec::new();
+        retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
+
+        let rec = retools.iter().find(|r| r.faction == "中国").expect("战时过度单一 ⇒ 必须有一次改装");
+        assert_eq!(
+            (rec.city.clone(), rec.building),
+            second.clone(),
+            "挂了 Player 图的舰坞必须被**跳过**，改装落在另一个区上"
+        );
+        // 被钉住的那座：舰级、图的舰级、图的选装**都没变**。
+        let bp = state.control["中国"].blueprints["玩家钉的护卫"].clone();
+        assert_eq!(bp.value.class, "corvette", "玩家钉的图的舰级不许被 AI 改");
+        assert_eq!(bp.value.components, vec!["kinetic".to_string(), "ion_drive".to_string()], "选装不许被改");
+        let pinned = state
+            .city(&first.0)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == first.1)
+            .unwrap()
+            .ship_type
+            .clone();
+        assert_eq!(pinned.as_deref(), Some("corvette"), "被钉住的建造区不许被改装");
+        // 另一个区照旧被重定向到战局需要的舰级。
+        let other = state
+            .city(&second.0)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == second.1)
+            .unwrap()
+            .ship_type
+            .clone();
+        assert_ne!(other.as_deref(), Some("corvette"), "没挂图的那个区照旧被改装：{other:?}");
+        assert_eq!(other, Some(rec.to.clone()));
+    }
+
+    /// 挂 **`Auto`** 图的舰坞：改装要**改图**（`class`），并让图的舰级与区的舰级保持一致。
+    #[test]
+    fn an_auto_blueprint_is_retooled_as_a_blueprint() {
+        let (config, mut state) = fresh_world(42);
+        let [first, _second] = two_corvette_yards(&mut state);
+        state.control.entry("中国".to_string()).or_default().blueprints.insert(
+            "auto:corvette".to_string(),
+            Control::auto(Blueprint {
+                class: "corvette".to_string(),
+                components: Vec::new(),
+                order: None,
+            }),
+        );
+        if let Some(city) = state.city_mut(&first.0) {
+            for b in city.buildings.iter_mut() {
+                if b.id == first.1 {
+                    b.blueprint = Some("auto:corvette".to_string());
+                }
+            }
+        }
+        let mut rng = Prng::new(7);
+        let mut retools = Vec::new();
+        retool_shipyards(&mut state, &config, "中国", &mut rng, &mut retools);
+        let rec = retools.iter().find(|r| r.faction == "中国").expect("必须有一次改装");
+        assert_eq!((rec.city.clone(), rec.building), first, "Auto 图不挡改装（第一个候选就是它）");
+        let bp = state.control["中国"].blueprints["auto:corvette"].clone();
+        assert_eq!(bp.value.class, rec.to, "改的是**图**的舰级");
+        assert_eq!(bp.mode, ControlMode::Auto, "归属不许被改装动作改掉");
+        assert!(bp.value.components.is_empty(), "选装**不预生成**（出厂那一刻由生成器现算）");
+        let yard = state
+            .city(&first.0)
+            .unwrap()
+            .buildings
+            .iter()
+            .find(|b| b.id == first.1)
+            .unwrap()
+            .ship_type
+            .clone();
+        assert_eq!(yard, Some(rec.to.clone()), "口径 A：区的 ship_type 必须与图的 class 相等");
     }
 }
