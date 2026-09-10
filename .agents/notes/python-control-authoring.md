@@ -1,9 +1,10 @@
-# 用 Python 统计地编辑控制面 diff
+# 用 Python 统计地编辑控制面 diff（`play/planet_x_ctl`）
 
-> 状态 `[ ]`（未开工） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
-> `lazy-index-pandas.md`（读侧那套 Python kit）、`agent-play-friction.md` §18.1（语义指令
-> 助手）、`semantic-view-api.md`（把裸 jq 降为逃生舱）、`agent-control-long-game.md`
-> §1/§7/§8（预算封顶、幽灵权重、只报丢弃不报生效）、`control-live-layers.md`（写面的形状）
+> 状态 `[~]`（spec 已定、kit 开工） ｜ 索引：[notes.md](../notes.md) ｜ 关联：
+> **`engine-data-plane.md`（先读那篇：引擎产出/接受什么，本 note 是它的客户端篇）**、
+> `lazy-index-pandas.md`（读侧那套 Python kit `play/planet_xq`）、`control-live-layers.md`
+> （写面的形状：三态 + 链 + 写值即接管）、`name-as-unique-key.md`（名字即唯一键）、
+> `agent-control-long-game.md` §1/§7/§8（预算封顶、幽灵权重、只报丢弃不报生效）
 
 ## 0. 目标
 
@@ -11,91 +12,129 @@ agent 玩长局时，「施政」这一步现在靠**手写 JSON diff**（`--app
 退化得很快：城市几十座、舰十几艘、名字还会换代，凡是「按统计量批量决定」的意图
 （按维护费占比压预算、按忠诚/距离撒娱乐预算、按舰级设默认指令）都得靠人肉枚举。
 
-要的是：**读侧用 pandas 筛、写侧产出合法 diff**，即 `planet_x_control`（名字待定）——
-一个和 `play/planet_xq` 并列的 Python 套件。
+要的是：**读侧用 pandas 筛、写侧产出合法 diff** —— `play/planet_x_ctl`，与 `play/planet_xq`
+并列的第二个 uv 工程。**引擎不为此加任何功能**（`engine-data-plane.md` §1）：
 
-## 1. 现状与缺口
+* 引擎管**还不存在的实体**的规则（链上的默认、舰船模板）；
+* kit 管**现存**实体的批量与统计操作，**展开成显式叶**。
 
-* **读侧已有**：`play/planet_xq`（`--index` 投影的 lazy 索引 + pandas）。能力见
-  `lazy-index-pandas.md`：`q.meta` / `q.spec(section)` / `q.<lazy表>(round=r)` /
-  `q.join('<field>', round=r)` / `q.facts`。
-* **缺口一：投影里没有控制面**。`src/projection.rs` 的 `LAZY` 常量只有
-  `ships / cities / factions / events / bodies / settlements`——`control` 与 `scope` 都
-  不在投影里。所以 Python 侧**读不到**「我现在给谁下了什么指令、预算多少」。
-* **缺口二：没有 diff 构造器**。写面是 presence-aware 的多级补丁
-  （`{control:[{faction_id, ship_orders[], default_ship_order, investment_budget[], …,
-  buildings[]}], scope:{…}}`，见 `--control-schema`），手写容易错在：
-  名字换代（`长城`→`长城2`）、`building` 下标只在城内唯一、`mode` 省略 = 写值即接管。
-* **形状已经稳定**（这对本 note 是关键前提，别再改）：三态 `Inherit/Auto/Player`
-  （`control-live-layers.md` §1）、读面即写面（`--control` 的模板原样回传安全）、
-  `default_ship_order` 已有。
+### 0.1 这不是假想的痛点（`play/exp2` 的现场）
 
-## 2. 打算怎么做
+| 证据 | 说明 |
+| --- | --- |
+| `diff_p1..p7.json` | 一次实验里**手写了 7 份**施政 diff |
+| `apply_p3.jsonl` | 那一次的回执：**19 片叶丢了 6 片**，原因清一色「`创神星采矿站` 属于 **欧盟**，不是 中国 的城」——手抄城名时没核对归属 |
+| `control_r144.json` | 控制面模板已 **86 KB**（r12 时才 23 KB） |
+| `meta_ships.py` / `brief.py` / `timeline.py` | 一局里**临时写了 4 个一次性脚本**，做完就扔——正是本套件该收编的 |
 
-### 2.1 读控制面（两条路，先选便宜的）
+手抄会错在四个地方（都是形状本身的坑）：**名字换代**（`ShipId = String`；p192 里已有
+`方舟3/4/5`、`摆渡7`）· **`(city, building)` 的 building 是城内下标**（`src/model/control.rs:47`）
+· **`mode` 省略 = 写值即接管** · **`deny_unknown_fields`**（打错字段名当场报错——好事，但手写正是错字来源）。
 
-* **A（推荐先做）**：Python 侧 shell out `planet_x --start <ckpt> --control`（一个 JSON
-  值，读面即写面）。够用、零引擎改动。
-* **B（以后再说）**：给投影加一段 control（`idx/control.jsonl`，按 round+势力）。
-  好处是能看「控制面随时间怎么变」——那正是 `agent-control-long-game.md` §7 幽灵权重、
-  §8「只报丢弃不报生效」这类问题的诊断数据。
-
-### 2.2 与投影按名字 join
-
-两边的公共键就是**唯一名字**（舰名 / 城名 / 势力名 / 天体名），`name-as-unique-key.md`
-的裁决。所以：
+## 1. kit 的职责与 API
 
 ```python
-ctl = pxctl.surface(ckpt)              # 控制面（模板）
-ships = q.ships(round=r)               # 投影的懒表
+import planet_x_ctl as ctl
+
+s = ctl.surface("ckpt_r12.ron")            # 控制面（= `--control` 的读面，读面即写面）
+s.factions                                  # 势力名列表
+s.faction("中国")                            # 该势力的叶片：ship_orders / default_ship_order /
+                                            # 预算 / 权重 / loyalty_budget / buildings / capital
+s.leaf("中国", "ship_orders", "长城")        # 单叶：值 + mode（三态）
+
+ships  = ctl.ships("ckpt_r12.ron")          # 投影的 ships 表（名字 join 控制面）
+cities = ctl.ships_and_cities("ckpt_r12.ron")   # 便捷 join：舰/城 × 其控制叶 × 归属
+
 mine = ships.query("faction_id == '中国' and hull > 0")
-ctl.ship_orders(mine.ship_id)          # 按名字取/改叶片
+
+# —— 通配：引擎没有通配，这里展开成显式叶（同一个东西，只是不用手抄）——
+s.set_mode(mine, "Auto")                    # 全舰队交回系统（`{ship, mode:"Auto"}` 逐条）
+s.set_mode(mine, "Player")                   # 全舰队归我
+s.set_default_ship_order("中国", behavior="Dock:地球", mode="Player")  # 一片叶，新舰自动跟随
+s.set_kiting(mine.query("class == 'battleship'"), -1.0)                # 贴脸
+s.set_budget("中国", "construction_budget", {"铁": 4.0, "硅": 2.5})     # 值 + 隐含接管
+
+diff = s.emit()                             # → {control:[...], scope:{...}}，可直接 --apply
+ctl.write(diff, "steer.json")
+ctl.verify("ckpt_r12.ron", "steer.json")    # 只读试算：前后读面 + 回执（见 §1.2）
 ```
 
-### 2.3 统计 → diff（这是本 note 的实质）
+1. **`roster()` —— 编制表（本套件的核心，不是附注）**：名字是唯一键，但**名字会换代**
+   （上一艘沉了才换代——那正是手抄最不可靠的时刻）。所以要有「`第1舰队·旗舰 → 方舟3`」这层：
 
-把「筛选 + 聚合」的结果落成叶片，例如：
+   ```python
+   spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
+           ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
+   r = ctl.roster("ckpt_r12.ron", spec)     # → DataFrame[faction_id, slot, ship_id, class, hull, matched_by]
+   ```
 
-* 按维护费占比压 `construction_budget`：`upkeep / production_value > 0.4` → 把该势力的
-  造舰预算按比例降到「可养上限」以下（`--control-plan` 已经给出 `fleet_upkeep_cap` 作为
-  读数，见 `agent-play-friction.md` §45）；
-* 按忠诚/距离撒 `loyalty_budget`：`loyalty < 0.4 or gov_distance > 3` 的城，按人口加权
-  分配（`governance-loyalty.md` 的治理模型）；
-* 按舰级/角色设舰队默认（等 `control-live-layers.md` §3 的按舰级默认落地后）；
-* 按矿产/面积挑 `invest_weights` 与 `build_weights`。
+   **刷新规则必须写在配方里**（"旗舰 = hull_max 最大的巡洋舰，同分取最老的"），不能留在
+   agent 脑子里——否则断一回合就永远补不回来。边界：编制表是**意图**不是**持续承诺**；
+   "旗舰沉了自动补一艘"该由引擎规则或"配方每回合重跑"承担。
 
-### 2.4 边界（别让 Python 变成"每回合重跑的假公式"）
+2. **`verify(ckpt, diff)` —— 客户端补丁，补 §8「只报丢弃不报生效」**：
+   `--apply` 是**先叠加、再输出**且**不写盘**（`src/main.rs:250` 在 `--control` 的 `:304` 之前，
+   写盘只由 `--save` 触发），所以验证是**纯只读**的：
 
-Python 只能产出**一次性数值**。「跟着产出走」「维护费不超过产出的 X%」这类**持续意图**
-必须由引擎表达（`agent-control-long-game.md` §1 的 `BudgetPatch.value` 支持
-`{\"frac_of_production\": 0.3}`、`upkeep_ceiling`），Python 侧顶多在落地前当"预览计算器"。
-两边各补一半，别互相假装。
+   ```
+   planet_x --start ckpt.ron --apply my.json --control   # stdout=叠加后的读面, stderr=回执
+   planet_x --start ckpt.ron --control                    # stdout=叠加前的读面
+   ```
 
-## 3. 唯一未裁决项（用户已确认其余全部裁决，只留本 note 待解释后定）
+   一比就知道：想改的叶变了没、**顺手接管了别的叶没**（`NOTE_APPLY_TOOKOVER`）、被丢弃了没
+   （`WARN_APPLY_SKIPPED`）。**但它只能证明"引擎收下了"，不能证明"局面按你想的走"**，别自欺。
 
-* **§3.1 一次性 diff vs 可复现配方**：Python 只吐一份 `steer.json`，还是吐一份**配方**
-  （脚本 + seed + round → 同一份 diff，可重放、可进 git）？
-  *推荐：配方*。这个项目全程「确定性可复现」，配方即代码，也让 `play/` 里的战记能附上
-  「当时凭什么这么算」。
-* **§3.2 要不要给投影加 control 段**（§2.1 B）。*推荐：先不加*（shell out 够用），
-  等真的出现「控制面随时间」的分析需求再加——它会让投影变重，而投影是每次 `--index`
-  都要写一遍的东西。
-* **§3.3 套件名字与位置**：`play/planet_x_ctl`（与 `play/planet_xq` 并列，uv 工程）？
-  *推荐：并列一个新 uv 工程*，但共用 lazy 表读取（可以 import planet_xq，或抽一个
-  `read_index` 公共函数）。
+3. **同回合变换（硬约束）**：读 ckpt → 出 diff → 应用到**同一个** ckpt。`building` 是城内下标，
+   只有同回合才自洽；跨回合拼凑必错。
 
-## 4. 落地步骤草案（等拍板后执行）
+### 1.1 读面的两半怎么拿到
 
-1. `play/planet_x_ctl/pyproject.toml` + `planet_x_ctl/__init__.py`：
-   * `surface(ckpt_or_state) -> ControlSurface`（shell out `--control`，缓存到临时文件）；
-   * `class Surface`：`.factions` / `.faction(name)` / 各叶片的 get/set（**保留 `mode` 语义**：
-     `set_value(path, v)` 默认接管成 `Player`，要「只改流水」得显式传 `mode='Auto'`）；
-   * `emit(path)`：产出 `${control, scope}` JSON（可直接 `--apply`）；
-   * `verify(ckpt, diff)`：先 `--apply` 到一个**副本**上读回执（`NOTE_APPLY_TOOKOVER` /
-     `WARN_APPLY_SKIPPED`），把「是否真的落地」在施政前就判定掉——这是对 §8 缺口的
-     客户端补丁。
-2. 一个示例配方 `play/exp*/recipes/*.py`（用某一局的 checkpoint 复现一两条统计施政），
-   跑一遍 `--apply` + `--round` 确认没有 `warn/note`。
-3. README + `agent-play.md` 里加一节「用 Python 写施政」。
-4. （可选，§3.2 拍板后）投影加 control 段 + schema 更新 + `lazy-index-pandas.md` 的
-   剩余项减一。
+* **控制面**：`--control`（读面即写面）。若 `engine-data-plane.md` §2 的 tidy 表落地，则改为直接
+  join 投影（`control` 段 + 每实体 `effective`），**不要**自己重实现 `resolve_chain`——那是漂移源；
+  `effective` 列由引擎给。
+* **世界事实**：复用 `play/planet_xq` 的懒表读取（`import planet_xq`，或抽公共 `read_index`），
+  **不要**复制 join 逻辑。
+
+### 1.2 一个必须写进 README 的取值坑
+
+「交回上层」（`mode:"Inherit"`）**只在舰队默认是 `Player` 时才是干净的**：`ship_behavior`
+（`src/model/state.rs:186-193`）在"叶 Inherit + 舰队默认非 Player"时**回落到叶上那个可能已过期的
+记录值**。归属是 `Auto` 时自愈（系统下回合重写）；归属是 `Player` 时会长期显示旧值。
+处理：凡"释放到上层"，**同时**把 `default_ship_order` 写成 `Player`（一片叶），语义闭合。
+
+### 1.3 边界（别让 kit 变成"每回合重跑的假公式"）
+
+kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过产出的 X%」这类**持续意图**必须由引擎
+表达（`BudgetPatch.value` 支持 `{"frac_of_production":0.3}`、`upkeep_ceiling`），kit 顶多在落地前
+当"预览计算器"。两边各补一半，别互相假装。
+
+## 2. 裁决记录（用户已确认）
+
+* ✅ **一次性 diff vs 可复现配方 → 配方**：写成 `policy(surface, ships, cities, seed, round) -> diff`，
+  可重放（同一 ckpt 重跑断言 byte-identical）、可进 git、可**先预览**（拿旧 ckpt 试跑"当时我会怎么写"）、
+  战记能附上"凭什么这么算"。**编制表的刷新规则尤其必须在配方里**（§1.1）。
+* ✅ **投影的 control 段 → 要**（但由**引擎**加 tidy 表，见 `engine-data-plane.md` §2；kit 不再
+  shell out `--control` 做统计）。
+* ✅ **套件位置 → `play/planet_x_ctl`**，与 `play/planet_xq` 并列的新 uv 工程，复用懒表读取。
+  记得加 gitignore 例外（`/play/*` 默认忽略，`!/play/planet_xq` 是现成的先例，新目录要照抄一行）。
+* ❌ **引擎侧通配/清叶动词 → 已否决**（理由与替代见 `engine-data-plane.md` §1.1）。
+
+## 3. 落地步骤
+
+1. `play/planet_x_ctl/`：`pyproject.toml`（uv，依赖只需 pandas）+ `planet_x_ctl/__init__.py`
+   （§1 的 API）+ `README.md`（含 §1.2/§1.3 的坑）+ `demo.py`（对真实 ckpt 跑一遍：筛 → 改 →
+   `verify` → 断言无 `warn`）。
+2. 一个示例配方 `play/exp*/recipes/*.py`（用某一局的 ckpt 复现一两条统计施政），跑
+   `--apply` + `--round` 确认没有 `warn/note`。
+3. `agent-play.md` 加一节「用 Python 写施政」，并补上引擎侧的原生写法（`default_ship_order` +
+   逐舰 `mode`），免得"批量改归属"看起来像 Python 独有能力。
+4. 等 `engine-data-plane.md` 的 tidy 表落地后，把 `surface()` 的后端从 shell out 切到 join
+   （只改一个访问器）。
+
+## 4. 复现 / 验证
+
+```bash
+cd play/planet_x_ctl && uv sync && uv run python demo.py
+# 引擎侧对照（同一份 diff 手写版长什么样）：
+planet_x --start play/exp2/ckpt_r12.ron --apply steer.json --control 2>receipt.jsonl
+```
