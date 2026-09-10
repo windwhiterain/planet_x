@@ -92,7 +92,11 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
                 // 运输：**整条路线本回合都在 `haul_step` 里执行**（择腿 + 移动 + 装卸），
                 // 所以这里不再自己移动——落到下面的自动接战，运输舰在航线上照样开火/轰炸。
                 ShipBehavior::Haul { from, to } => {
-                    haul_step(state, config, &ship_id, &class, from, to);
+                    // 记这一步（B3 的中间量）：`Waiting`/`EnRoute` **既不落 State 也不发事件**，
+                    // 于是「派它去拉货，为什么一件没运回来」此前根本没有读法。玩家舰这条路径
+                    // 不产生 `decisions.ships` 行，所以读面专门有 `haul_steps` 收它（两条路径同一个口）。
+                    let step = haul_step(state, config, &ship_id, &class, from, to);
+                    flow.haul_steps.insert(ship_id.clone(), step);
                 }
                 _ => {
                     // Move / Follow / DockCity / Dock：驶向行为目的地（软目标）；附近有敌舰时由 kiting 姿态调整。
@@ -115,6 +119,7 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
             &focus_of,
             &mut next_building_id,
             &mut flow.decisions.ships,
+            &mut flow.haul_steps,
         );
         continue;
     }

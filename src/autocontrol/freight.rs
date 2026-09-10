@@ -664,7 +664,7 @@ pub fn haul_gap(state: &State, config: &GameConfig, fid: &str) -> f64 {
 ///
 /// **一旦有人接了** ⇒ `capacity` 冻结（`open_mut` 只找 `carrier.is_none()` 的单）：那时它已经
 /// 不是需求而是**承诺**了。
-pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
+pub(crate) fn post_contracts(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     // 先加价：一个考核周期没人接的单子，**抬一档抽成并重新起叫**。
     escalate_open_contracts(state, config);
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
@@ -701,6 +701,22 @@ pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
         // 这里挂单，[`crate::autocontrol::shipbuilding::retool_haulers`] 据此决定要不要
         // 腾个船坞去造货船——各算一份必然漂移。
         let ledger = capacity_ledger(state, config, fid);
+        // 记这本账（B3 的中间量）：**挂单用的就是它**，而它此前只以势力级的 `haul_gap`
+        // （`Σ缺口 ÷ Σ要求`）露出来——「哪一处货栈在积压、缺口多少」没有读法。
+        // ⚠ 记的是**这一步算出来的**那份：回合末重算会得到另一个数（那时船已经动过、货已经装卸过）。
+        flow.freight_gap.insert(
+            fid.clone(),
+            ledger
+                .iter()
+                .filter(|(_, need, _, _, _)| *need > 1e-9)
+                .map(|(b, need, own, hired, uncovered)| {
+                    (
+                        b.clone(),
+                        FreightGap { need: *need, own: *own, hired: *hired, uncovered: *uncovered },
+                    )
+                })
+                .collect(),
+        );
         let by_body: BTreeMap<&BodyId, (f64, f64, f64, f64)> =
             ledger.iter().map(|(b, n, o, h, u)| (b, (*n, *o, *h, *u))).collect();
         for (body, _) in &depots {

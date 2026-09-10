@@ -765,6 +765,24 @@ fn flow_table_matches_the_derived_record() {
                 "{fid} 的 {col} 与视图不一致（读了两个不同的数）"
             );
         }
+        // B3（市场与运输）：购买力/买方名次/逐货栈运力账。名次是 `Option` ⇒ `null` 合法
+        // （那一回合没排队），所以这里比的是「两个读面给同一个值」，不是「一定有值」。
+        for (col, got, want) in [
+            ("purchasing_power", row["purchasing_power"].as_f64().unwrap(),
+             expect_row.map(|r| r.purchasing_power).unwrap_or(0.0)),
+        ] {
+            assert_eq!(got, want, "{fid} 的 {col} 与视图不一致");
+        }
+        assert_eq!(
+            row["market_rank"],
+            serde_json::to_value(expect_row.and_then(|r| r.market_rank)).unwrap(),
+            "{fid} 的买方名次与视图不一致"
+        );
+        assert_eq!(
+            row["freight_gap"],
+            serde_json::to_value(expect_row.map(|r| r.freight_gap.clone()).unwrap_or_default()).unwrap(),
+            "{fid} 的运力账与视图不一致"
+        );
         checked += 1;
     }
     assert!(checked >= 2, "只检查了 {checked} 个势力的过程量行——守卫太空");

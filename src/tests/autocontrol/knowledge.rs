@@ -355,6 +355,7 @@ fn an_observer_is_ordered_to_dock_at_a_body_inside_the_anomaly() {
     let mut decisions = Vec::new();
     let focus_of: BTreeMap<FactionId, Option<FactionId>> = BTreeMap::new();
     let mut next_building_id = 0;
+    let mut haul_steps = BTreeMap::new();
     ai_ship_turn(
         &mut state,
         &config,
@@ -363,6 +364,7 @@ fn an_observer_is_ordered_to_dock_at_a_body_inside_the_anomaly() {
         &focus_of,
         &mut next_building_id,
         &mut decisions,
+        &mut haul_steps,
     );
     match state.ship_behavior(ship.clone()) {
         Some(ShipBehavior::Dock { body }) => {

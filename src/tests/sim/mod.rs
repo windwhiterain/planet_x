@@ -17,6 +17,7 @@ mod knowledge;
 mod mond;
 mod spending;
 mod story;
+mod trade;
 
 mod horizon_mid;
 

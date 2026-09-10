@@ -169,3 +169,43 @@ else:
         {k: int(v) for k, v in build["bottleneck"].value_counts().items()},
         "（money=钱批光了 / capacity=产能封顶 / idle=有产能却一分钱没批到）",
     )
+
+print()
+print("--- B3: 市场与运输（为什么是这个价 / 我买到的货为什么少了 / 这趟货为什么没运回来）---")
+tr = q.view_trade(last_round, "中国")
+trades, blocked = tr["trades"], tr["blocked"]
+if trades is None or trades.empty:
+    print(f"中国 @ round {last_round}: 这一回合它没有成交（稀疏：没成交就没有行）")
+else:
+    cols = ["buyer", "seller", "price_mult", "dist_au", "depth", "mond_extra",
+            "freight_rate", "rel_mult", "mastery", "loss", "delivered_units"]
+    print(trades[[c for c in cols if c in trades.columns]].to_string(index=False))
+    # 勾稽：`price_mult` 就是**引擎给的两个分解项之和**（Python 只做一次加法，不重算公式）。
+    row_t = trades.iloc[0]
+    assert abs(row_t["price_mult"] - (row_t["rel_mult"] + row_t["freight_rate"])) < 1e-9
+    rt = next(iter(row_t["moved"]))
+    world = q.facts[q.facts["round"] == last_round].iloc[0]["view"]
+    price = (world or {}).get("market_price", {})
+    print(
+        f"  举例：买 {rt} 的成交价 = 市场价 {round(float(price.get(rt, float('nan'))), 3)}"
+        f" × {round(float(row_t['price_mult']), 4)}（关系 {round(float(row_t['rel_mult']), 3)}"
+        f" + 运费 {round(float(row_t['freight_rate']), 4)}）"
+    )
+    if float(row_t["loss"]) > 0.0:
+        print(
+            f"  ⚠ 这条线穿了异常带（深度 {round(float(row_t['depth']), 3)}）："
+            f"丢了 {round(float(row_t['loss']) * 100, 1)}% 的货"
+        )
+print("  谁不卖给我、为什么：")
+print(blocked.to_string(index=False) if not blocked.empty else "  （这一回合谁都跟我做生意）")
+
+fr = q.view_freight(last_round, "中国")
+print("  每一处货栈的运力账（need = 要求运力；uncovered = 缺口）：")
+print(fr["depots"].to_string(index=False) if not fr["depots"].empty else "  （没有积压）")
+print("  在跑运输的舰这一回合走了哪一步：")
+cols = [c for c in ("ship_id", "step", "body", "units", "cargo") if c in fr["steps"].columns]
+print(
+    fr["steps"][cols].to_string(index=False)
+    if not fr["steps"].empty
+    else "  （这一回合没有在跑的运输舰）"
+)

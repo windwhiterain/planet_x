@@ -117,7 +117,7 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundV
     // （货栈是本回合刚更新过的），而在 `step_military` 的逐舰循环之前——挂单估运力用的是
     // `should_be_role`（纯函数），它与本回合稍后真正写进角色叶、并据此派单的那批舰
     // **同口径**，所以不存在「先挂单、再发现自己其实有闲船」的错位。
-    step_contracts(state, config);
+    step_contracts(state, config, &mut sink);
     step_upkeep(state, config, &mut sink);
     step_market(state, config, &mut sink);
     step_construction(state, config, rng, &mut sink);

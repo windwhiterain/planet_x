@@ -35,7 +35,15 @@ use crate::model::*;
 /// 各城用工系数、住房容量、是否集散地、每舰级造舰速率与实得进度），`State` 一个字段没动。
 /// 于是合并后取 **18**，`13 | 14 | 15 | 16 | 17` **整段只推号**（17 那一档：main 线的档没有
 /// `mond_control` 键 ⇒ 缺省 0，与本支 v14/v15 档的处理同一条约定）。
-pub const SCHEMA_VERSION: u32 = 18;
+///
+/// **v18 = 「钱去哪了」的中间量**（`feature/b2-money`）：派生读面增列（各势力实际花掉的投资/建造
+/// 预算、欠付维护费与生锈比例；各城用工系数、住房容量、是否集散地、每舰级造舰速率与实得进度），
+/// `State` 一个字段没动。
+/// **v19 = 「市场与运输」的中间量**（`feature/b3-market`）：派生读面再添两片——本回合**真的成交的
+/// 贸易**（一笔一对一行：价格分解 + 丢货率）与**每艘在跑运输的舰走了哪一步**；另加各势力的
+/// 购买力/买方名次、每一处货栈的运力账，`FactionRow.trade_blocked_by` 从计数升级成「名单 + 三档
+/// 原因」。`State` 仍然一个字段没动。
+pub const SCHEMA_VERSION: u32 = 19;
 fn default_schema_version() -> u32 {
     0
 }
@@ -800,14 +808,14 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }
-        // **v13–v17：五个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
+        // **v13–v18：六个号都被两条历史各自用过**（见 [`SCHEMA_VERSION`] 的对照表）⇒ 整段只推号。
         // 这几档里 `State` 只在**一条**历史上真动过字段（`mond_control`），而它在**没有那条历史
         // 的档**里 serde 缺省 0 = 凡人；其余动过的全是**派生读面**（本来就不持久，包括
-        // `feature/b2-money` 那一档的「钱去哪了」）。
+        // `feature/b2-money` 的「钱去哪了」与 `feature/b3-market` 的「市场与运输」）。
         // **这里不做「把 cult 补成 1.0」的补丁**：掌握度的真值只有一份（`config.mond.initial`），
         // 而 `migrate` 拿不到 config；硬编码势力名会造出第二份真相。
         // 旧档在掌握度这一点上不保真（用户裁决：不考虑向前兼容）。
-        13 | 14 | 15 | 16 | 17 => {
+        13 | 14 | 15 | 16 | 17 | 18 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

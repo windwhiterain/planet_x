@@ -282,6 +282,14 @@ const PROCESS_PATHS: &[&str] = &[
     "cities[].housing_capacity",
     "cities[].is_hub",
     "cities[].build",
+    // B3（市场与运输）：本回合的结算事实 + 市场里的位置 + 集货运力账。
+    // ⚠ `market_rank` 的中性值是 **`null`**（还没排队），不是 0（那是「第一个挑」）；
+    // `freight_gap` 只把**容器**列进来（`pre` 里是 `{}`，条目内部一个值都取不到——列叶子会红）。
+    "market_trades",
+    "haul_steps",
+    "factions[].purchasing_power",
+    "factions[].market_rank",
+    "factions[].freight_gap",
 ];
 
 #[test]

@@ -182,6 +182,23 @@ const DERIVED: &[DerivedTable] = &[
         join_on: "faction_ids",
         round: true,
     },
+    // **本回合真的成交的贸易**（B3）：一笔买卖一行（买方 × 卖方），带价格分解与丢货率。
+    // 稀疏（没成交的回合零行）；`moved` 是那一对在这一回合买了些什么、各多少件。
+    DerivedTable {
+        name: "market_trades",
+        table: "idx/market_trades.jsonl",
+        key: "buyer",
+        join_on: "faction_ids",
+        round: true,
+    },
+    // **本回合每艘在跑运输的舰走了哪一步**（B3）：一舰一行，`Waiting`/`EnRoute` 的**唯一**读法。
+    DerivedTable {
+        name: "haul_steps",
+        table: "idx/haul_steps.jsonl",
+        key: "ship_id",
+        join_on: "ship_ids",
+        round: true,
+    },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -198,6 +215,8 @@ struct Writers {
     scope: BufWriter<File>,
     decisions: BufWriter<File>,
     blueprints: BufWriter<File>,
+    market_trades: BufWriter<File>,
+    haul_steps: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
 }
@@ -222,6 +241,8 @@ impl Writers {
             scope: open("scope")?,
             decisions: open("decisions")?,
             blueprints: open("blueprints")?,
+            market_trades: open("market_trades")?,
+            haul_steps: open("haul_steps")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
         })
@@ -240,6 +261,8 @@ impl Writers {
             &mut self.control,
             &mut self.scope,
             &mut self.blueprints,
+            &mut self.market_trades,
+            &mut self.haul_steps,
             &mut self.bodies,
             &mut self.settlements,
         ] {
@@ -739,6 +762,11 @@ fn write_round(
                 "construction_spent": row.map(|r| r.construction_spent.clone()).unwrap_or_default(),
                 "upkeep_unpaid": row.map(|r| r.upkeep_unpaid).unwrap_or(0.0),
                 "fleet_rust": row.map(|r| r.fleet_rust).unwrap_or(0.0),
+                // B3：市场里的位置（结算那一刻的购买力与名次）与集货运力账（一势力一对象，
+                // 键 = 货栈所在天体；空对象 = 没有积压）。
+                "purchasing_power": row.map(|r| r.purchasing_power).unwrap_or(0.0),
+                "market_rank": row.map(|r| r.market_rank).flatten(),
+                "freight_gap": row.map(|r| r.freight_gap.clone()).unwrap_or_default(),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -1151,9 +1179,49 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
 
+    // **本回合真的成交的贸易**（B3）：一笔一对一行。价格分解是**这一对**的属性（与该笔买哪种
+    // 矿无关）——每种矿的成交价 = `view.market_price[资源] × (rel_mult + freight_rate)`。
+    // ⚠ **不做 r2 舍入**：这几张过程量表是视图的平铺版，两个读面必须逐值相同（同上面那段约定）。
+    for t in &view.market_trades {
+        writeln!(
+            w.market_trades,
+            "{}",
+            json!({
+                "round": state.round,
+                "buyer": t.buyer,
+                "seller": t.seller,
+                "moved": t.moved,
+                "dist_au": t.dist_au,
+                "depth": t.depth,
+                "mond_extra": t.mond_extra,
+                "freight_rate": t.freight_rate,
+                "rel_mult": t.rel_mult,
+                "mastery": t.mastery,
+                "loss": t.loss,
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // **本回合每艘在跑运输的舰走了哪一步**（B3）：`waiting`/`en_route` 既不落 state 也不发事件，
+    // 所以这张表是它们**唯一**的读法。同样不做舍入。
+    for (ship, step) in &view.haul_steps {
+        writeln!(
+            w.haul_steps,
+            "{}",
+            json!({
+                "round": state.round,
+                "ship_id": ship,
+                "step": step.step(),
+                "body": step.body(),
+                "units": step.units(),
+                "into_pool": step.into_pool(),
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
-
 /// 本舰叶片自己的表态（没有叶片 = `Inherit`，即"这一层没有说话"）。
 fn leaf_mode_of(state: &State, fid: &FactionId, ship: &ShipId) -> ControlMode {
     state
@@ -1319,7 +1387,7 @@ pub fn projection_schema() -> serde_json::Value {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='investment_budget'`/`'construction_budget'`）。",
-                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number"},
+                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number","purchasing_power":"number","market_rank":"any","freight_gap":"object"},
                 "column_docs": {
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
@@ -1334,6 +1402,9 @@ pub fn projection_schema() -> serde_json::Value {
                     "construction_spent": "本回合**实际花掉**的建造（造舰）预算，按资源——语义同 `investment_spent`（限额 join `kind='construction_budget'`）。⚠ 它是**进度预付款**：钱按 `build_cost ÷ build_points × 进度增量` 付，付了不等于下水（下水还要另外付组件钱，见 `derived.decisions` 的 `kind='ship_order'`）。",
                     "upkeep_unpaid": "本回合**付不起**的那部分舰队维护费（市场价值 = `max(0, 维护费 − 库存价值)`）；0 = 付清。分子有了，看 `fleet_rust` 知道后果。⚠ 它是「**欠费并因此生锈**的那部分」，不是「付了多少」的反面：**流亡舰队**（无活城，被豁免抽库存）与零舰队势力这里同样是 0——所以别拿 `upkeep − 本列` 当「实际付出去的钱」。",
                     "fleet_rust": "本回合**每艘舰被锈掉的船体比例**：该舰本回合掉的船体 = `hull_max × 本列`。**欠费拆船只有锈到 0 才发事件**（`ship_destroyed`，`cause=upkeep_shortfall`），所以「我的船为什么一直在掉血」只能靠这一列。⚠ 它不是「欠费比例」：引擎有可见性下限（欠一丁点也至少锈 0.2），欠得少时本列反而**大于** `upkeep_unpaid ÷ upkeep` —— 读这一列，别自己按欠费比例重算。",
+                    "purchasing_power": "本回合**购买力**（市场价值）：结算开始那一刻本势力**可出口富余**的总价值——**买方就是按它降序排队**的（同额按名字）。「为什么有货在卖我却没买到」的第一个答案：钱多的人先挑。",
+                    "market_rank": "**在买方队列里的名次**（0 = 第一个挑）。它与 `purchasing_power` 一起读——名次是**排序的结果**，别自己拿购买力重排一遍（同额时的名字序是引擎里写死的 tie-break）。⚠ 可能是 `null`：那一回合还没排过队（`pre` 面）。",
+                    "freight_gap": "本回合**每一处货栈的运力账**：`{天体: {need, own, hired, uncovered}}`（雇主挂单用的是**同一本账**，`autocontrol::freight::capacity_ledger`）。`need` = 把这处积压按一个往返运回首都所需的吞吐；`own` = **自有运力的期望份额**（派单是按积压占比抽签的，所以这一份也是期望值，与真实派单同口径）；`hired` = 已接单合同的运力承诺；`uncovered` = `max(0, need − own − hired)`。**稀疏**：只列 `need > 0` 的货栈（空对象 = 没有积压）。势力级的总账在 `factions` 表的 `haul_gap`（= `Σuncovered ÷ Σneed`）。",
                 },
             }),
             "city_process" => json!({
@@ -1398,6 +1469,34 @@ pub fn projection_schema() -> serde_json::Value {
                     "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped；capital：relocate（评估后真的迁了）/ review（评估过、判据不成立 ⇒ **没迁**）/ forced（亡城强迁，没有评估）。",
                     "target": "判定的对象：舰名（接战/撤退到首都）／城名（轰炸）／天体名（殖民）／新舰级（retool）／**舰级**（blueprint）／**新首都天体名**（capital，没迁为 null——评估时的候选城在 `detail.candidate` 里）；纯位置机动与 style_retune 为 null（看 `detail`）。",
                     "detail": "该 kind 的专属事实。ship_order：`hull_ratio`/`retreat_hull`（撤退判定的两个输入）、`kiting`（当时的有效风筝距离）、`enemy_in_range`、`after_move`（这次判定是否发生在移动之后——**一艘舰一回合最多两行**：先机动、到位后再判一次）、`destination`（驶向的坐标）、`order`（实际写回指令叶的行为，null = 没写叶）。retool：`from`（改装前舰级）、`building`（船坞在该城内的建筑下标，只在城内唯一）。style_retune：`from`/`to`（这条轴改动前后的值）、`goal`（这次重估朝它走的**战况目标**）、`drivers`（当时读到的战况输入：temper 是 war/win/damage/withdraw，lone_wolf 是 neighbors，kiting 是 power/hardness/hurt）。blueprint：`theme`（设计主题）/ `components`（落到图上的选装）/ `city`+`building`（这次决策发生在哪个建造区；reaped 为 null）。capital：`reviewed`（本回合是否做过周期性评估）、`candidate`（人口最高的活城——评估时的候选）、`current_cost`/`candidate_cost`（现首都与候选各自到全势力各城的**总治理距离成本** AU；**「为什么没迁」就是候选 − 现首都还不够 `capital_relocate_threshold`**）、`relocated_from`（旧首都）、`relocate_loyalty_cost`（迁都当回合对**全国每座城**的忠诚扣减 = 旧首都人口占比 × `capital_share_relocate_cost`）。",
+                },
+            }),
+            "market_trades" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**本回合真的成交的星际贸易**（`RoundView::market_trades`）：一笔买卖一行（买方 × 卖方），带**价格是怎么算出来的**与**货运路上丢了多少**。⚠ 粒度是**一对一行**，不是「一对 × 一资源一行」：`dist_au`/`depth`/`mond_extra`/`freight_rate`/`rel_mult`/`mastery`/`loss` 全部**只由这一对决定**（与该笔买的是哪种矿无关）——每种矿的成交价 = `view.market_price[资源] × (rel_mult + freight_rate)`；「这一对买了些什么、各多少件」在 `moved` 里。**稀疏**：没成交的回合零行。这些数此前算完就扔（`view.market_settled` 只给全世界的成交量、`net_import` 只给各家的净值），所以「为什么是这个价」「我的货为什么少了」在此表之前没有解释面。",
+                "columns": {"round":"integer","buyer":"string","seller":"string","moved":"object","dist_au":"number","depth":"number","mond_extra":"number","freight_rate":"number","rel_mult":"number","mastery":"number","loss":"number"},
+                "column_docs": {
+                    "buyer/seller": "买方（掏钱）/ 卖方（出货）。join `factions` 表按 `faction_id`。",
+                    "moved": "这一对之间**卖方交出的件数**，按资源（只列真成交的 ⇒ 稀疏）。⚠ 语义 = **交出的量**（途中失联那部分还没扣）：买方收到的是 `moved[资源] × (1 − loss)`，而 `view.market_settled` 记的正是**收到**的那份。",
+                    "dist_au": "两个贸易锚点（各自首都天体）之间的距离（AU）。",
+                    "depth": "这条线路上**引力异常带的浸入深度**（0 = 不穿带）。",
+                    "mond_extra": "穿带的**额外运费倍率** = `mond_freight_mult × depth ÷ (depth + 1)`（0 = 不穿带）——它是连续的：越深越贵，但没有「进不去」的断崖。",
+                    "freight_rate": "**运费率** = `freight_per_au × dist_au × (1 + mond_extra)`：加在价格上的那一份。",
+                    "rel_mult": "**关系倍率**（`sim::relation_price_mult`）：向敌人买更贵、向朋友买更便宜。`rel_mult + freight_rate` 就是成交价相对市场价的倍数。",
+                    "mastery": "这条线上**最好的掌握度** = `max(买卖双方的 mond_control)`（0 = 都是凡人，1 = 有一方到顶）。它决定丢货率，也是「谁在深空贸易里当承运人」的那个量。",
+                    "loss": "**丢货比例**（0..`mond_loss_cap`）：非 0 = 这批货走异常带时**部分失联**，「我买到的货为什么少了」的答案。确定性比例（`mond_loss_per_au × depth × (1 − mastery)`），不是掷骰。",
+                },
+            }),
+            "haul_steps" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**本回合每艘在跑运输的舰走了哪一步**（`RoundView::haul_steps`）：一舰一行。`waiting`（停在**空货栈**干等）与 `en_route`（在路上，装/卸都还没发生）**既不落持久状态、也不发事件**——所以「我派它去拉货，为什么一件没运回来」在 B3 之前**没有任何读法**；`loaded`/`delivered` 说明这一步真的搬了货。⚠ 两条执行路径（AI 的 `ai_ship_turn` 与**玩家指令**的 `step_military`）都写这张表，所以**玩家舰也在里面**。",
+                "columns": {"round":"integer","ship_id":"string","step":"string","body":"string","units":"number","into_pool":"boolean"},
+                "column_docs": {
+                    "ship_id": "舰名；join `ships` 表拿势力/舰级/位置/货舱（`ships.cargo` 非空 = 舱里有货）。",
+                    "step": "loaded（在这一步装上了货）/ delivered（卸了货）/ waiting（停在空货栈干等——**不是**故障，是「没货就不走」）/ en_route（在路上，正驶向 `body`）。",
+                    "body": "这一步发生在哪个天体（`en_route` = **正驶向的那一端**：舱里有货 ⇒ 目的地，空舱 ⇒ 起运地）。",
+                    "units": "这一步搬动的件数（`waiting`/`en_route` = 0：没搬）。装货时按 `haul_split` 在货舱容量的上限内分配，所以它可能小于「货栈里的全部积压」。",
+                    "into_pool": "**卸货是不是卸进了货主的首都池**（只对 `delivered` 有意义）——true = 这趟集货**算完成**（进了可用库存）。⚠ 「货主」在承包时是**托运方**，不是船东；其余变体恒为 false。",
                 },
             }),
             _ => continue,

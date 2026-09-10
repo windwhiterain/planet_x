@@ -1,7 +1,8 @@
 # Step 中间量清单：36 条「算完就扔」的量
 
 > 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）、
-> **B2（钱去哪了）已落地**（`feature/b2-money`，见 §6.3）；B3–B5 仍是候选，一行代码都还没写。
+> **B2（钱去哪了）已落地**（`feature/b2-money`，见 §6.3）、
+> **B3（市场与运输）已落地**（`feature/b3-market`，见 §6.4）；B4/B5 仍是候选，一行代码都还没写。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md) §5（本篇是那一条的展开）、
 > [`unified-metrics.md`](unified-metrics.md)（上一次「总结 = 步进中间量」的合并；它的「候选」第一条
 > 就是本篇的 **B1**）、[`engine-data-plane.md`](engine-data-plane.md) §7.4（`pre` 面的真相 = 本篇 **B5**
@@ -109,8 +110,9 @@
   B 组购买力序位 / 禁运三档 / 合同四闸门 / 单次导航成功率；C 组思潮 target / `war_scar_floor` / `aff` /
   `deterrence` / `kiting_dest` / 集体安全级联。
   照 [`unified-metrics.md`](unified-metrics.md) 的老规矩（**总结不该被独立重算一遍**），这批也归引擎。
-  ⚠ **B2 实测发现这批里有两条连「重算」都不成立**：`labor` 取的是人口增长**之前**的人口、
-  `is_hub` 取决于**本回合中途**的迁都/易主 ⇒ 回合末重算会给出另一个数。所以它们其实是**甲**。
+  ⚠ **B2/B3 实测发现这批里有几条连「重算」都不成立**：`labor` 取的是人口增长**之前**的人口、
+  `is_hub` 取决于**本回合中途**的迁都/易主、`capacity_ledger` 与 `haul_gap` 是**挂单那一步**
+  （回合中段，船还没动、货还没装卸）算的 ⇒ 回合末重算会给出另一个数。所以它们其实是**甲**。
 * **丙 · 吃骰子 ⇒ 读面看不到「掷了什么」**：C7（主 `Prng` 洗牌）、C13（主 `Prng` 噪声），
   加上 B 组 6 条 `derived_roll` 判定（`role` / `route` / `gate` / `accept` / `pick` / 派工退约）。
   **这一批必须进 `pre` 面**（B5）。
@@ -121,7 +123,7 @@
 | --- | --- | --- | --- |
 | ✅ **B1** 治理/忠诚（**已落地**，见 §6.1） | A 组 `target_eff` 分项、`ideo_penalty`、行政 vs 娱乐拆分、`overload`、迁都判据（`cur_cost`/`best_cost` + `old_share`/`loyalty_cost`） | `unified-metrics.md` 候选第一条；「帝国为何要崩」的预警面；全是确定性、粒度天然对齐「每城一行 / 每势力一行」 | 否 |
 | ✅ **B2** 钱去哪了（**已落地**，见 §6.3） | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
-| **B3** 市场与运输 | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
+| ✅ **B3** 市场与运输（**已落地**，见 §6.4） | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
 | **B4** 战斗 | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
 | **B5** `pre` 面 | C7 洗牌顺序、C13 关系噪声、B 组 6 条 `derived_roll` 判定（含合同三闸门、派单、定编） | 唯一一批**必须**改 `advance`：让它同时产出「AI 看到/掷出了什么」 | **是** |
 
@@ -248,6 +250,62 @@ effective = clamp(distance + entertainment
 **B2 之后的重新测量**（与「要不要做通用稀疏层」有关）落在
 [`dense-face-sparse-store.md`](dense-face-sparse-store.md) §9：那里把「中性值能省多少」从
 印象值换成了实测上界（**占整个 view 的 25%、3826 B/行**），并据此改写了触发条件。
+
+### 6.4 B3 落地记录（`feature/b3-market`，全部实测）
+
+**读面新增 5 片**（`RoundView`；中性值全部在 `model::neutral` 声明，`PROCESS_PATHS` 守卫跟着扩）：
+
+| 位置 | 新东西 | 中性值 | 它回答什么 |
+| --- | --- | --- | --- |
+| `view.market_trades`（**数组**） | 一笔成交一行：`buyer`/`seller`/`moved`/`dist_au`/`depth`/`mond_extra`/`freight_rate`/`rel_mult`/`mastery`/`loss` | `[]` | 「**为什么是这个价**」（分解式）与「**我买到的货为什么少了**」（丢货率） |
+| `view.haul_steps`（**map：舰名 → 动作**） | `HaulStep` 四档：`loaded`/`delivered`/`waiting`/`en_route` | `{}` | 「**这趟货为什么没运回来**」——`waiting`/`en_route` **既不落 state 也不发事件**，此前零读法 |
+| `factions[].purchasing_power` + `market_rank` | 结算那一刻的可出口富余价值 + **买方队列名次** | `0.0` / **`null`** | 「**有货在卖我却没买到**」= 钱多的人先挑，我排第几 |
+| `factions[].freight_gap`（map：天体 → 账） | `need`/`own`/`hired`/`uncovered`（**挂单用的同一本账**） | `{}` | 「**哪处货栈在积压、缺口多少**」——势力级只有 `haul_gap` 一个比值 |
+| `factions[].trade_blocked_by`（**升级**） | 从 `usize` 计数 → `{对方势力: war｜cold｜coalition}` | `{}` | 「**谁不卖我、为什么**」——三档对策完全不同，计数答不了 |
+
+**三条形状裁决**（都写进了 `schema.json` 的列说明，并被用例钉住）：
+
+1. **成交清单的粒度是「一对（买方 × 卖方）一行」，不是「一对 × 一资源一行」**。那一行里除了
+   `moved`，其余每个数**只由这一对决定**（距离/异常带深度/关系倍率都与买哪种矿无关），
+   所以每种矿的成交价就是 `view.market_price[资源] × (rel_mult + freight_rate)`——而 `p` 本来就
+   在 `market_price` 里。按「一对 × 资源」展开会把同一组分解数抄 N 遍（贵且容易漂）。
+2. **`moved` 的语义是「卖方交出的量」**，买方收到的是 `moved × (1 − loss)`——**后者**才是
+   `view.market_settled` 记的那份。这条恒等式有用例逐资源对账（漏一行/重复计/写反语义都会红）。
+3. **`haul_steps` 两条执行路径都写**：AI 的 `ai_ship_turn` 与**玩家指令**的 `step_military`
+   （玩家舰不产生 `decisions.ships` 行，所以不能塞进判定表——它是「结算事实」不是「AI 判定」）。
+   `HaulStep` 的定义因此**搬进了 `model`**（`model/haul.rs`）：`model` 不许依赖 `sim`，
+   而它同时是引擎内部类型与读面类型 ⇒ 定义只留一份（`sim::haul` 只做转出）。
+
+**体积账**（同口径 `--seed 7 --round 30`，31 行，逐子树实测；键名与分隔符都算）：
+
+| 项 | B/行 | 条目/行 |
+| --- | --- | --- |
+| `view.market_trades` | 631.5 | 3.0 笔 |
+| `view.haul_steps` | 305.3 | 6.6 舰 |
+| `factions[].freight_gap` | 652.1 | 7.3 处货栈 |
+| `factions[].trade_blocked_by`（升级净增） | +333.4 | 522.4 − 189.0（旧计数） |
+| `factions[].purchasing_power` / `market_rank` | 268.9 / 144.9 | |
+| **B3 合计净增** | **+2336 B/行** | view 的 11.8% |
+
+**新读面顺手量出来的两件事**（都不是 B3 引入的，是它第一次看得见）：
+
+* **同一天体上的两家之间没有运费**：`dist_au = 0 ⇒ freight_rate = 0`（地球上五座城属于不同
+  势力，它们之间当然不该有星际运费）。所以「运费分解」要跨回合看才看得到非零项——用例里
+  专门留了一档断言，免得守卫在「全是零运费」时静默空转。
+* **雇主眼里的「自有运力」会把被雇走的船扣掉**（`serving_freighters` 的既定设计），于是会出现
+  `freight_gap` 里 `own = 0`、而同一回合这个势力自己的船**明明在跑运输**（跑的是**别人的**线）。
+  这不是矛盾，是分工；读面第一次把这两半摆在一起。⚠ 顺带发现：这种「一个能派的船都没有」的
+  `own` 会写成 **`-0.0`**（Rust 对**空迭代器**求和从 `-0.0` 起折的符号位），数值上等于 0——
+  判空请用 `== 0.0`，文档里也标了。
+
+验收：digest `--seed 42 --round 240 --digest 20` **逐字不变**（= `81A197…1811`，与合并后的
+`main` 相同 ⇒ 纯追加、行为中性）；`cargo nextest run -P full` **225 绿 / 0 红 / 28 skipped**
+（B2 时 218，新增 6 条 B3 单测）；两张新派生表进 `DERIVED`（`idx/market_trades.jsonl`、
+`idx/haul_steps.jsonl`，**不做 r2 舍入**——过程量表是视图的平铺版，两个读面必须逐值相同），
+跨进程逐值一致 + 整局防空转都有用例；`SCHEMA_VERSION` 18 → 19（仍只动派生读面）；
+kit 新增 `market_trades()` / `haul_steps()` / `view_trade()` / `view_freight()`，
+`view_economy` 补购买力/名次/`haul_gap`/禁运名单，demo 端到端勾稽通过（勾稽式：
+`price_mult == rel_mult + freight_rate`）。
 
 ## 7. 待裁决（三个设计点，动 B4/B5 之前必须先定）
 

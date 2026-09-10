@@ -581,7 +581,7 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             c.accepted_round = Some(0);
             c.expires_round = 99;
         }
-        post_contracts(state, &config);
+        post_contracts(state, &config, &mut RoundSink::default());
         state.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum()
     };
     let need = gap_at(&mut state, 0.0);
@@ -616,7 +616,7 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
         st.depots.clear();
         st.contracts.contracts.clear();
         st.depot_add("中国", "金星", "碳", 100.0);
-        post_contracts(&mut st, &config);
+        post_contracts(&mut st, &config, &mut RoundSink::default());
         st.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum::<f64>()
     };
     assert!(
@@ -641,7 +641,7 @@ fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
         if stock > 0.0 {
             state.depot_add("中国", "金星", "碳", stock);
         }
-        post_contracts(state, &config);
+        post_contracts(state, &config, &mut RoundSink::default());
     };
     post(&mut state, 1000.0);
     assert_eq!(state.contracts.contracts.len(), 1, "一处货栈一张单");

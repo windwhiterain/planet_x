@@ -436,4 +436,110 @@ fn decisions_table_matches_the_derived_record() {
         rust_seen && unpaid_seen,
         "这 60 回合里应当至少有一家付不起维护费（欠费与生锈两列一起才说明它真的在发生）"
     );
+
+    // B3 的防空转：整局里必须真的成交过、也真的有过在跑的运输舰（同上，范围取整局）。
+    let trades_all = derived_rows_all(&out, "market_trades");
+    assert!(
+        trades_all.iter().any(|r| r["dist_au"].as_f64().unwrap_or(0.0) > 0.0),
+        "60 回合里一笔跨天体的贸易都没有——价格分解那几列等于空转"
+    );
+    let hauls_all = derived_rows_all(&out, "haul_steps");
+    let steps: std::collections::BTreeSet<&str> =
+        hauls_all.iter().map(|r| r["step"].as_str().unwrap()).collect();
+    assert!(
+        steps.contains("loaded") || steps.contains("delivered"),
+        "60 回合里没有一次装卸（只见到 {steps:?}）——`haul_steps` 没在记真的动作"
+    );
+    assert!(
+        steps.contains("waiting") || steps.contains("en_route"),
+        "只见到装卸（{steps:?}）——`waiting`/`en_route` 这两档**没有别的读法**，它们不出现就说明 \
+         这条路径没跑过，用例没在检查东西"
+    );
+    let _ = &faction_all; // 上面已经用过它（B2 那几条），这里再次借它只为下面的货栈账
+    assert!(
+        faction_all.iter().any(|r| r["freight_gap"]
+            .as_object()
+            .map(|o| o.values().any(|g| g["uncovered"].as_f64().unwrap_or(0.0) > 0.0))
+            .unwrap_or(false)),
+        "60 回合里一处积压缺口都没有——`freight_gap` 那列等于空转"
+    );
+}
+
+/// **B3 的两张新派生表**（`market_trades` / `haul_steps`）必须是 `--derived` 里同一份数的
+/// 平铺版：跨进程、跨两条代码路径给出**逐值相同**的结果。
+///
+/// 它们与 `decisions` 表是同一类东西（本回合的结算事实，状态里没有），所以「两个读面各说各话」
+/// 的风险也一样大——尤其是价格分解：读者会照着它调贸易策略。
+#[test]
+fn b3_tables_match_the_derived_record() {
+    let s = Scratch::new("b3tables");
+    let out = s.0.join("out");
+    let ckpt = s.0.join("ckpt.ron");
+    let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
+
+    // 30 回合：够到「跨天体贸易」与「在途/等待」都出现过（防空转见下）。
+    let st = run(&["--seed", "7", "--round", "30", "--index", out_s, "--save", ckpt_s]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+
+    // 表里最后出现的回合必须就是最后一回合——否则下面的「最后一回合逐值比对」会退化成空转。
+    let trades = derived_rows_all(&out, "market_trades");
+    let hauls = derived_rows_all(&out, "haul_steps");
+    assert!(trades.iter().any(|r| r["round"] == serde_json::json!(30)), "第 30 回合没有成交行——把 `--round` 调大一点，别让这条守卫空转");
+    assert!(hauls.iter().any(|r| r["round"] == serde_json::json!(30)), "第 30 回合没有运输动作行——同上");
+
+    let st = run(&["--start", ckpt_s, "--derived"]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
+    assert_eq!(v["round"], serde_json::json!(30));
+
+    // ① 成交清单：逐字段与视图相等（`moved` 也是一个值，直接比）。
+    let want = v["post"]["market_trades"].as_array().expect("view.market_trades 是数组");
+    let rows = derived_rows(&out, "market_trades", 30);
+    assert_eq!(rows.len(), want.len(), "成交笔数两个读面不一致");
+    for (row, w) in rows.iter().zip(want.iter()) {
+        for col in ["buyer", "seller", "moved", "dist_au", "depth", "mond_extra",
+                    "freight_rate", "rel_mult", "mastery", "loss"] {
+            assert_eq!(row[col], w[col], "成交行的 {col} 两个读面不一致：{row}");
+        }
+    }
+
+    // ② 运输动作：视图是 `{舰名: 动作}` 的 map，表是平铺行——把三个共同字段逐条对上。
+    let steps = v["post"]["haul_steps"].as_object().expect("view.haul_steps 是对象");
+    let hrows = derived_rows(&out, "haul_steps", 30);
+    assert_eq!(hrows.len(), steps.len(), "运输动作条数两个读面不一致");
+    for row in &hrows {
+        let ship = row["ship_id"].as_str().unwrap();
+        let w = &steps[ship];
+        assert_eq!(row["step"], w["step"], "{ship} 的动作名两个读面不一致");
+        assert_eq!(row["body"], w["body"], "{ship} 的动作天体两个读面不一致");
+        // ⚠ 视图是**tag 枚举**（变体专属载荷只在它自己那一档出现），表是**平铺列**（每行都有）。
+        // 所以 `units`/`into_pool` 只在该档真有这个字段时逐值比，其余档要求表里是那个「没有」
+        // 的中性值（0 / false）——这正是这两种表示之间的接缝，写下来免得下次有人「顺手统一」。
+        match w["step"].as_str().unwrap() {
+            "loaded" | "delivered" => {
+                assert_eq!(row["units"], w["units"], "{ship} 的搬动件数两个读面不一致");
+            }
+            _ => {
+                assert_eq!(row["units"], serde_json::json!(0.0), "{ship}: 等待/在途不该有件数");
+                assert_eq!(w.get("units"), None, "{ship}: 视图里等待/在途不该出现 `units` 字段");
+            }
+        }
+        if w["step"] == serde_json::json!("delivered") {
+            assert_eq!(row["into_pool"], w["into_pool"], "{ship} 的「进了首都池」两个读面不一致");
+        } else {
+            assert_eq!(row["into_pool"], serde_json::json!(false), "{ship}: 非卸货档的 into_pool 应为 false");
+        }
+    }
+
+    // ③ 防空转：这一局里必须既有跨天体成交，也有「没有别的读法」的那两档动作。
+    assert!(
+        trades.iter().any(|r| r["dist_au"].as_f64().unwrap_or(0.0) > 0.0),
+        "30 回合里一笔跨天体贸易都没有——价格分解那几列没被检查到"
+    );
+    let kinds: std::collections::BTreeSet<&str> =
+        hauls.iter().map(|r| r["step"].as_str().unwrap()).collect();
+    assert!(
+        kinds.contains("waiting") || kinds.contains("en_route"),
+        "没见到 waiting/en_route（{kinds:?}）——这两档不落 state、不发事件，不出现就等于没检查"
+    );
 }

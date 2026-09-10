@@ -389,6 +389,10 @@ pub(crate) fn ai_ship_turn(
     focus_of: &BTreeMap<FactionId, Option<FactionId>>,
     next_building_id: &mut BuildingId,
     decisions: &mut Vec<ShipDecision>,
+    // 本回合的**运输动作**账（`view.haul_steps`）：运输舰这一回合走了哪一步。
+    // 与 `decisions` 分开传是因为调用方（`sim::step_military`）两者都在 `RoundSink` 里
+    // ——借两个不相交的字段，读卡不打架。
+    haul_steps: &mut BTreeMap<ShipId, HaulStep>,
 ) {
     let Some(ship) = state.ship(ship_id) else { return };
     if ship.hull <= 0.0 {
@@ -486,7 +490,9 @@ pub(crate) fn ai_ship_turn(
                     c.ship_orders.insert(ship_id.to_string(), Control::inherit(behavior.clone()));
                 }
                 let step = sim::haul_step(state, config, ship_id, &class, &from, &to);
-                decisions.push(ShipDecision {
+                // 记这一步（B3 的「这趟货为什么没运回来」）：读面里 `haul_steps` 一舰一行
+                // （`waiting`/`en_route` 既不落 State 也不发事件，不记就永远读不到）。
+                haul_steps.insert(ship_id.to_string(), step.clone());                decisions.push(ShipDecision {
                     verdict: ShipVerdict::Haul,
                     target: Some(step.body().to_string()),
                     destination: Some(state.body_position(step.body())),

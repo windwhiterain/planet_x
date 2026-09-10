@@ -226,12 +226,15 @@ fn probe_embargo() {
             let mut any = false;
             let mut pairs = 0usize;
             for (fid, fm) in &d.factions {
-                if fm.trade_blocked_by > 0 {
+                // B3：这列从「计数」变成「名单 + 原因」（`{对方: war|cold|coalition}`），
+                // 探针关心的是规模，所以取它的条目数。
+                let blocked_n = fm.trade_blocked_by.len();
+                if blocked_n > 0 {
                     any = true;
                     *blocked_rounds.entry(fid.clone()).or_insert(0) += 1;
                     let e = max_blocked.entry(fid.clone()).or_insert(0);
-                    *e = (*e).max(fm.trade_blocked_by);
-                    pairs += fm.trade_blocked_by;
+                    *e = (*e).max(blocked_n);
+                    pairs += blocked_n;
                 }
             }
             if any {
@@ -325,7 +328,7 @@ fn probe_armament_gate() {
                 }
             }
             let d = sim::observe(&state, &config, &RoundSink::default());
-            let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by).sum();
+            let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by.len()).sum();
             println!("== 武器质量 seed {seed} 市场额度={arm}（{n} 回合）== 出厂舰={spawned}");
             print!("   武器:");
             for (c, k) in &weapons {
