@@ -23,6 +23,7 @@
 //! namespace:
 //!
 //! * [`identity`]   — id aliases + resource bundles/definitions.
+//! * [`market`]     — 星际市场的持久状态（挂单/价格/成交量/滑窗需求）。
 //! * [`body`]       — orbits, celestial bodies and 定居点.
 //! * [`building`]   — a continuous-area building allocation + its spec.
 //! * [`ship`]       — the ship entity, its doctrine/behavior + naming.
@@ -47,6 +48,7 @@ mod event;
 mod faction;
 mod game_config;
 mod identity;
+mod market;
 mod metrics;
 mod ship;
 mod ship_combat;
@@ -60,6 +62,7 @@ pub use event::*;
 pub use faction::*;
 pub use game_config::*;
 pub use identity::*;
+pub use market::*;
 pub use metrics::*;
 pub use ship::*;
 pub use ship_combat::*;

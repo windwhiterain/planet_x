@@ -9,7 +9,7 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 fn default_schema_version() -> u32 {
     0
 }
@@ -63,6 +63,11 @@ pub struct State {
     /// 纯显示用（不参与战斗/经济语义）；`#[serde(default)]` 让旧档缺字段也能加载。
     #[serde(default)]
     pub ship_name_seq: BTreeMap<FactionId, u64>,
+    /// 星际市场的持久状态（挂单/价格/成交量/滑窗需求）。见 [`MarketState`] 与
+    /// `.agents/notes/trade-and-sanctions.md`：市场是**真实交换所**（有卖家、有价、
+    /// 可禁运、有配给），不是常数价无限供货的自动贩卖机。
+    #[serde(default)]
+    pub market: MarketState,
 }
 
 /// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
@@ -272,9 +277,15 @@ impl State {
 ///
 /// 此后的约定：一旦某层真的积累了「计算回看」的历史，升版就**不该**再继续「只升版本号」，
 /// 届时应在此处写真正的迁移（而不是把历史一起丢掉）。
+///
+/// v4 → v5：新增 [`State::market`]（[`MarketState`]：挂单/价格/成交量/滑窗需求）。
+/// 它是 `#[serde(default)]` 的新字段，v4 档没有它、也没有任何可迁移的等价物
+/// （旧市场是**无状态**的常数价兑换，不产生跨回合的价格/挂单历史），所以同样只升版本号：
+/// 旧档加载后市场从空开始，**第一回合就由各势力的当期富余重新挂出**——这一点新旧档案
+/// 完全一致，不构成信息损失。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
-        0 | 1 | 2 | 3 => {
+        0 | 1 | 2 | 3 | 4 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

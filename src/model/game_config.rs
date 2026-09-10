@@ -201,22 +201,64 @@ pub struct DiplomacyConfig {
     /// Upper clamp on any relation (bounded friendliness).
     pub friendship_ceiling: f64,
 }
-/// Market tuning. An automatic interstellar exchange that lets each faction buy
-/// the minerals it is short of (so shipyards rarely stall on a single drought)
-/// by selling its scarce-value surpluses. This gives the economy a **sink** for
-/// surplus stockpiles and a **supply** that keeps a faction building even when
-/// it cannot mine a keystone mineral (e.g. carbon).
+/// Market tuning. 星际市场是**真实交换所**：供给来自各势力真实的富余（挂单记名卖家），
+/// 价格由「库存够全世界用几回合」逐回合算出（稀缺 → 高价），成交按挂单**配给**
+/// （买不到就是买不到），并且禁运可以让某个卖家**根本不卖给你**。
+/// 见 `.agents/notes/trade-and-sanctions.md`。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MarketConfig {
-    /// Per-round cap, in market value (credits), on how much a faction may
-    /// auto-trade. `0.0` disables the market entirely.
+    /// Per-round cap, in market value (credits), on how much a faction may buy
+    /// this round. `0.0` disables the market entirely (无市场：谁缺料谁自己扛).
     pub auto_trade_limit: f64,
-    /// Each yard-critical resource is kept at least this many units in stock;
-    /// the market tops it up when it falls short.
+    /// 买方每资源想维持的库存（单位）——低于它才会去买。这是**军工目标库存**。
     pub working_buffer: f64,
-    /// Market fee: a faction sells `(1+spread)`× worth to buy `1×` worth, a
-    /// small friction that stops trades from being perfect conversions.
+    /// 市场手续费：买方要交出 `cost × (1+spread)` 的实物才能换到价值 `cost` 的货，
+    /// 差额是**市场烧掉的价值**（sink）——贸易不是免费的价值搬运。
     pub spread: f64,
+    /// 卖方保留比例：挂单前先留下自己库存的这个比例（1.0 = 一毛不卖）。
+    /// 卖方供给 = 库存 − max(自己需要的 working_buffer, 库存 × reserve_fraction)。
+    pub reserve_fraction: f64,
+    /// 价格发现的目标「覆盖回合数」：世界的库存应当够全世界用这么多回合。
+    /// 库存只够用 1 回合 → 价格顶到 [`Self::price_ceiling`]；够用这么多回合 → 基价。
+    pub coverage_rounds: f64,
+    /// 稀缺指数：`mult = (coverage_rounds / 覆盖回合数)^price_alpha`。1.0 = 线性。
+    pub price_alpha: f64,
+    /// 价格下限（倍率）：严重过剩时最多折到这里（0.4 = 四折）。
+    pub price_floor: f64,
+    /// 价格上限（倍率）：断供时最高涨到这里（8.0 = 八倍）——「超高价」的上限。
+    pub price_ceiling: f64,
+    /// 「覆盖回合数」的下限：库存为 0 时用它代替，免得除零（0.5 = 半个月的用量）。
+    pub cover_floor: f64,
+    /// 需求滑窗的每回合更新比例（0.1 = 用 10% 的本回合消费修正滑窗）。
+    pub demand_smoothing: f64,
+    /// 需求地板（单位/回合）：低于它的资源视为「几乎没人消费」，价格不升不降（基价）。
+    /// 否则一个没人用的矿会因为「库存 0」被永久顶在天价上。
+    pub demand_min: f64,
+    /// 友好门槛：某势力对另一势力的关系达到此值即算友好，享价格折扣。
+    pub friendly_relation: f64,
+    /// 友好折扣上限（0.15 = 最多打 85 折买对方的货）。
+    pub friendly_price_discount: f64,
+    /// 敌对加价上限（1.5 = 关系冷到交战边缘时，买对方的货要付 2.5 倍价）。
+    /// 这让「关系」直接变成**成本**——同一个矿，向敌人买贵得多。
+    pub hostile_price_markup: f64,
+    /// **全面禁运**阈值：某势力对另一势力的关系 ≤ 此值即「根本不卖给你」（所有资源）。
+    /// 比交战阈值更早生效：还没开打，供货就已经断了。
+    pub embargo_relation: f64,
+    /// **运费率**：每 1 AU 距离、按货值计的运费（0.02 = 30 AU 加价 60%）。
+    /// 货物不是瞬移的——深空的货真的更贵（与 `economy-depth.md` 的「距离运费」同一条）。
+    pub freight_per_au: f64,
+    /// **穿越引力异常带的运费倍率**：运费按「浸入异常带的深度」再加这么多倍（见
+    /// [`crate::sim::route_depth`]）。没有掌握 MOND 的势力只能花大价钱（或冒险）走这条线。
+    pub mond_freight_mult: f64,
+    /// **异常区丢货率**：非 master 的货物每「浸入异常带 1 AU」损失的货值比例
+    /// （确定性比例，不是掷骰——掷骰会污染 `Prng` 流、破坏同种子复现）。
+    pub mond_loss_per_au: f64,
+    /// 丢货率上限（整批货最多损失到这个比例）。
+    pub mond_loss_cap: f64,
+    /// 异常带运费中**付给承运人**（掌握了 MOND 的 master）的比例：
+    /// 只有 master 能可靠穿越异常带，于是它天然成为柯伊伯带的垄断承运人、对这条线上的
+    /// 贸易抽税。其余部分（以及没有 master 存世时的全部）与手续费一样被**烧掉**（sink）。
+    pub carrier_share: f64,
 }
 /// 光速治理 (lightspeed governance) tuning。
 ///
@@ -352,11 +394,11 @@ pub struct BalanceOfPowerConfig {
     /// 弱国「倒向联盟」的疏远阈值：某弱者对霸权的关系 ≤ 此值即视为已加入反制联盟
     /// （被遏制/疏远了霸权、转而与弱国抱团）。与交战阈值（war_threshold）无关——
     /// 遏制是冷战式的「疏远 + 经济封锁」，不必然导致开战。
+    ///
+    /// **这是经济封锁的判据**：已倒向联盟的弱者 ↔ 被锁定的霸权之间**全面禁运**
+    /// （见 `sim::trade_blocked`）——取代了旧的 `sanction_trade_mult`（那只是「少卖一点」，
+    /// 现在是真的「不卖给你」）。
     pub coalition_estrange: f64,
-    /// 经济制裁：当一个反制联盟（≥ [`Self::min_members`]）成立并对霸权实施封锁时，
-    /// 霸权保留的自动市场交易额度比例（0..1；1 = 不制裁）。这会给一家独大的经济体
-    /// 造成资源封锁与失衡——它难以再靠市场兑换到短缺矿物（如铀/氦-3），产业受抑。
-    pub sanction_trade_mult: f64,
     /// 经济制裁的「治理代价」：被封锁的霸权维持帝国（行政 + 娱乐/福利）的成本倍率。
     /// >1 表示被孤立/封锁的霸权要把更多稀缺资源中转去维持领地与治安，导致**远端/边缘
     /// 殖民地更难养、更易离心叛乱**——把「多国资源封锁」转化为「霸权扩张受限」，让
@@ -379,7 +421,6 @@ impl Default for BalanceOfPowerConfig {
             collective_defense_delta: -15.0,
             min_members: 2,
             coalition_estrange: -10.0,
-            sanction_trade_mult: 1.0,
             sanction_cost_mult: 1.6,
         }
     }
