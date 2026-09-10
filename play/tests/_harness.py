@@ -178,8 +178,12 @@ class Harness:
         if self.misses:
             total = sum(e for _, e in self.misses)
             print(f"  缓存：新跑 {len(self.misses)} 份（{total:.1f} s），命中 {len(self.hits)} 份")
-        else:
+        elif self.hits:
             print(f"  缓存：全部命中（{len(self.hits)} 份，0 s 重跑）")
+        else:
+            # 组自己起短局、拿单点 dump 对账（如 `g4_spec`）时一份投影都不碰——说清楚，
+            # 免得「全部命中（0 份）」被读成「缓存生效」。
+            print("  缓存：这一组没跑投影（自己起短局 + 单点 dump）")
 
 
 def _dir_size(p: Path) -> int:

@@ -194,15 +194,80 @@
 * ⚠ **不再跑 `cargo nextest` / `cargo test`**：`web/src/views_tests.rs`（488 行）**搬到 `g4_spec.py` 之后删掉**，
   原处留一行「搬到哪儿」的指针（与 `test-decoupled-suite` 的做法一致）。
 
-## 7. 待裁决（请用户拍）
+## 7. 待裁决（请用户拍 —— ✅ **2026-10 已全部按「推荐」批准**）
 
-| # | 问题 | 我的推荐 |
-| --- | --- | --- |
-| **S1** | 叶种类注册表放**引擎**还是前端 `controls.json`？ | **引擎发结构事实**（§4），前端只发呈现——唯一能消灭两份手抄的位置 |
-| **S2** | 左栏「控制 / 读面」两个模式**合并成一个**？ | **合并**（穿插的前提）；作用域归属退成 `owner` 行，控制树不再单独存在 |
-| **S3** | 多键叶（预算 / 权重 / 设计图）在表里怎么给？ | 表内只给**单值叶**；多键叶进「这条记录的卡片」（行内展开） |
-| **S4** | `web/src/views_tests.rs`（488 行 Rust 检查）怎么办？ | 搬到 `g4_spec.py` 后**删掉**，留指针 |
-| **S5** | 本轮做到哪一步？ | 先交**第一步**（穿插可见 + 引擎发 leaves + `g4` 全绿），第二步（删手写控制树）紧接着 |
+| # | 问题 | 我的推荐 | 裁决 |
+| --- | --- | --- | --- |
+| **S1** | 叶种类注册表放**引擎**还是前端 `controls.json`？ | **引擎发结构事实**（§4），前端只发呈现——唯一能消灭两份手抄的位置 | ✅ 按推荐 |
+| **S2** | 左栏「控制 / 读面」两个模式**合并成一个**？ | **合并**（穿插的前提）；作用域归属退成 `owner` 行，控制树不再单独存在 | ✅ 按推荐（旧控制树第一步先降级成一个页，第二步删） |
+| **S3** | 多键叶（预算 / 权重 / 设计图）在表里怎么给？ | 表内只给**单值叶**；多键叶进「这条记录的卡片」（行内展开） | ✅ 按推荐 |
+| **S4** | `web/src/views_tests.rs`（488 行 Rust 检查）怎么办？ | 搬到 `g4_spec.py` 后**删掉**，留指针 | ✅ 按推荐 |
+| **S5** | 本轮做到哪一步？ | 先交**第一步**（穿插可见 + 引擎发 leaves + `g4` 全绿），第二步（删手写控制树）紧接着 | ✅ 按推荐 |
+
+用户追加的口径（2026-10）：**「用词规范先不管，最后再来统一」**——本轮不动措辞，能复用旧文案就复用。
+
+---
+
+## 11. 实现记录（第一步，分支 `feature/web-control-spec`）
+
+### 11.1 引擎：一份结构事实
+
+| 文件 | 是什么 |
+| --- | --- |
+| `src/control/leaves.rs`（新） | `LEAVES`（14 条）/ `ACTIONS`（1 条）/ `OWNER_FIELD` / `REMOVE_FIELD` + `facts()`。每条声明 `field`（= patch 字段名）、`keys`（身份键，空 = 势力级单叶）、`values`（值字段）、`carries`（读面顺带带过来的 state 属性）、`read_only`（读面有、写面不写回） |
+| `src/control/view.rs` | `control_schema_value()` 把 `facts()` **并进同一份 JSON**（不新增命令、不新增端点）；`schemars` 那边一个字节没动 |
+| `web/src/lib.rs` | 新增 `GET /api/control-schema`（前端启动拉**一次**，不是每帧） |
+
+**实测**（`--control-schema` vs `schemars`）：
+`leaves(14) ∪ actions(1) ∪ {faction_id}` **≡** `FactionControlPatch.properties(16)`，双向相等。
+⇒ 「加字段不写声明」与「写一个不存在的叶」都**当场红**，这是读面 `neutral.rs` 那条守卫在写面的对偶。
+
+### 11.2 `web/static/views.json` v2：四种行住进同一个数组
+
+* `path`（读）/ `leaf`（一片控制叶，路径就是它在 `@control` 上的读路径）/ `owner`（作用域归属）/
+  `action`（命令列表）。**顺序 = 穿插的顺序**：势力页上「首都库存、产出/月（读）」紧挨
+  「投资预算、建造预算（控制）」；舰队页上「船体（读）」紧挨「指令（控制）」；城市页上
+  「忠诚三项（读）」紧挨「娱乐/福利预算（控制）」。
+* 顶层三张**呈现**表：`leaf_ui`（编辑器/标签/`key_label_from`/`keys_from`/`hint`）、`action_ui`、
+  `write_omit`（没被任何行认领的叶，**理由必填**）。
+* `keys_from` 是给「**还没有这片叶**」用的：今天的界面根本没法给一个还没写过叶的资源设预算
+  （旧树只列已存在的叶）——现在候选键来自 `config.resources` / 本势力的城，改它 = 新建这片叶。
+* 实测（`seed 7 / r30` 的 `--control`）：`investment_budget` 每资源一行、`capital` 是**单叶且没有
+  `remove`**、`loyalty_budget`/`blueprints` 在早期回合是**空数组** ⇒「没有叶也能建」是**主路径**。
+* 认领账（`g4_spec` 实测）：`leaf` 行认领 11 种、`action` 行 1 种、`write_omit` 带理由地免掉 3 种
+  （`invest_weights` / `build_weights` 住在建筑行里、`blueprints` 仍住在旧页），**14+1 一个不落**。
+
+### 11.3 测试：纪律检查整段搬到 Python（用户裁决：本轮只用 Python 测试）
+
+* **新组 `play/tests/g4_spec.py`**（14 条判据，**0.3–0.4 s**，不吃投影缓存）：静态纪律五条（从
+  `views_tests.rs` 搬）+ 写面对账 + 读面对账 + 认领完整性 + 防空转。做法是
+  `--seed 42 --round 40 --save` 起短局 → 用**哨兵值**把 14 片叶各写一次（`--apply`）→
+  `--control` 读回来 → **315 个读面条目**逐条对字段集 == `keys ∪ values ∪ carries ∪ read_only ∪ {mode}`。
+  防空转 = 每片叶按哨兵**从读面**认领回来（不信 apply 回执）。
+* `play/tests/run.py`：注册组 4，`DEFAULT = ("1","4")` ⇒ 内循环 2.9 s；`_harness.report()` 多一个
+  分支——**没跑投影的组不再打印「全部命中（0 份）」**（那是假话）。
+* **删掉 `web/src/views_tests.rs`（488 行）**，`web/src/lib.rs` 原处留一张「三条原测试 → 现在住
+  g4 的哪一族」的指针表；`cargo check -p planet_x_web --all-targets` 绿。
+* **反向验证 `play/tests/_g4_negative.py`**（不是组，不进 `run.py`）：把 `views.json` 与
+  `--control-schema` 的**副本**逐个改坏喂给 `g4_spec.run`，要求「该红的红、基线绿」。
+  实测 **16 个注入错全部咬住**。**一条不会红的守卫等于没有守卫**，这份就是那条判据的量具。
+* ⚠ 与设计稿不符、以引擎实测为准的一条：**读面从不发 `remove`**（315 个条目里 0 次）。
+  `DefaultDoctrine`/`DefaultKiting`/`DefaultShipRole` 构造时写死 `remove: false` 而该字段
+  `skip_serializing_if = "is_false"`；`capital` 是 `Control<BodyId>`，根本没这个字段。
+  所以 g4 把 `remove` 实现成**宽容侧**（出现即允许、但只在势力级单叶上），并在 detail 里如实报「实测 0 次」。
+
+### 11.4 行为中性：判据改用「与 `main` 同机同口径」
+
+* 本分支实测：`--seed 42 --round 240 --digest 20`（12 行）= **`C928C3F1…06A9`**，
+  与 `main`（`e430532` 与 `0385025` 两棵树）× `release`/`debug` 两种档**四个组合都逐字节相同**。
+* ⚠ 这同时暴露一件事：`notes.md` 里那条基线 `975DC8A9…C2E41B` 在本机**复现不出来**（详情与处置见
+  [`notes.md`](../notes.md) 末尾那条警告）。所以本轮起行为中性的判据是
+  **「与 `main` 同机、同 config、同口径逐字节相同」**——不依赖任何历史记录，可当场复现。
+
+### 11.5 前端（`specview.js` / `controls.js` / `app.js`）
+
+见 §12（前端落地记录）。
+
 
 ## 8. 风险
 

@@ -29,15 +29,16 @@ GROUPS: list[tuple[str, str, str]] = [
     ("1", "g1_contract.py", "读面契约（≤48 回合）：确定性、pre/post 同源、没有非有限的数"),
     ("2", "g2_mid.py", "中组（49–480 回合）：机制不变量（同回合复垦、选装、编年史）"),
     ("3", "g3_long.py", "长组（1000 回合 × 7 seed）：世界健康 + 政治机制"),
+    ("4", "g4_spec.py", "声明纪律（40 回合）：views.json 静态 + 写面/读面对账 + 认领完整性"),
 ]
 # 默认档 = 快组：内循环用这条（与 `cargo nextest run` 同一档语义）。
-DEFAULT = ("1",)
+DEFAULT = ("1", "4")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("groups", nargs="*", help="组号（1/2/3）或 all；缺省 = 快组")
+    ap.add_argument("groups", nargs="*", help="组号（1/2/3/4）或 all；缺省 = 快组")
     ap.add_argument("--list", action="store_true", help="列出组")
     ap.add_argument("--bin", default="release", help="release | debug | 二进制路径（透传给每个组）")
     ap.add_argument("--refresh", action="store_true", help="无视缓存重跑投影")

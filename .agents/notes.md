@@ -237,6 +237,16 @@
   世界行为的变化只发生在"有人真的写了那些叶"的局面上（见
   [`notes/blueprint-stance.md`](notes/blueprint-stance.md) §5）。
   `SCHEMA_VERSION` 之后又走到 **22**（B5 输入面 21 / 本轮 22）。
+- ⚠⚠ **那个 `975DC8A9…C2E41B` 复现不出来（2026-10 实测，请下一个 agent 留意）**：在
+  `main` 的 `e430532` 与 `0385025` 两棵树上、`release` 与 `debug` 两种档，`--seed 42
+  --round 240 --digest 20`（同样的取行口径、12 行）**四个组合都给同一个值** =
+  **`C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9`**
+  —— 也就是上面那个**更早**的基线。也就是说 `975DC8A9…` 要么来自一份**带本地改动的
+  `config/game.ron`**（本仓做 A/B 时有先例：`sed` 拨 `autocontrol.style_chance` 那类开关），
+  要么当时量具的口径不同（例如没剥 `\r`、或数了不同行数）。**没法判定谁对**，所以：
+  * 本轮及之后的**行为中性验收改用「与 `main` 同机、同 config、同口径逐字节相同」**这条判据
+    （它不依赖任何历史记录，可当场复现）；
+  * 谁要是能让 `975DC8A9…` 复现，请把复现命令原文补在这里；否则别再拿它当基线。
 - ⚠ **别裸跑 `git stash pop`**：这个仓库里躺着**别的分支留下的旧 stash**（当前
   `stash@{0}` = `On feature/military-ships: pre-refactor worktree state`）。它一旦被弹出，会
   把**拆分之前那个 195 KB 的 `src/sim.rs` 单体**复活到工作树（`DU src/sim.rs` 冲突；
