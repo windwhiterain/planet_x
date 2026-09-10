@@ -49,9 +49,12 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
   | **debug：`cargo build` + `run.py 1 --bin debug`** | 3.3 + 8.9 ≈ **12 s** |
 
   长组反过来：debug 下模拟慢 ~4×（投影 1000 回合 8.6 s → ~35 s）⇒ `run.py all` 用 release。
-- 现在的耗时结构（谁是大头）与两个未决的口子见
-  [笔记 §11](.agents/notes/test-decoupled-suite.md)：**Rust 门 62 s 里 58 s 是 test 档编译、
-  真跑只有 4.2 s**；投影每 1000 回合 169 MB（纯模拟 5.7 s vs 带投影 8.6 s ⇒ 写盘占 34%）。
+- 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md)：
+  **Rust 门 62 s 里 58 s 是 test 档编译、真跑只有 4.2 s**；投影每 1000 回合 169 MB 多花
+  ~+3.5 s 墙钟（**是构造 JSON，不是磁盘**：这台 NVMe 写 169 MB 只要 0.1 s）。
+- **只想要最终 state**（不要逐回合轨迹）：`--round N --digest N --save ckpt.ron`
+  —— 实测 5.7 s / 0.09 MB，与纯模拟同价；单独 `--save` 不会变快，因为 `--round` 的合同
+  就是每回合吐一行（≈40 MB/1000 回合）。
 - 加一条断言：写进 `play/tests/g*.py` 的 `run()` 里（判据写 `run()`、数据取自摘要 ⇒ 改断言
   不重读投影）；**每条守卫都要带防空转判据**（「这一局里真的发生过 X」）。
 - 分档口径不变（[笔记：测试分档](.agents/notes/test-tiers.md)）：快组 ≈ T0/T1、中组 ≈ T2、长组 ≈ T3。
