@@ -125,6 +125,21 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 | `settlements` | 全局一次 | `settlement_id body_id name total_area ecological_capacity construction_speed_mod resources` |
 | `events` | 每回合 | `event_id("回合:序号") type headline weight salience actor_*/target_*/extra + data`（类型列叫 **`type`**） |
 
+另有**派生表**（`idx/*.jsonl`，按同样的名字 join）：数据**不在状态里**，是引擎算出来的量——
+
+| 派生表 | 粒度 | 关键列 | 回答什么 |
+|---|---|---|---|
+| `flow` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`main` 的 `metrics` 里也有嵌套的一份，这是可 join 的平铺版） |
+| `city_flow` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
+| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/default_ship_order/default_doctrine/default_kiting/各类预算与权重/capital） |
+| `scope` | 每回合 × 显式节点 | `level(global/faction/body/city) key mode` | 作用域树里谁有意见 |
+
+`ships` 表另有几列是**引擎解析后的答案**，别自己重算链：`order_leaf_mode`、
+`order_default_mode`、`order_effective_mode`、`order_effective`、`doctrine`、`kiting`。
+单点查（不想跑整个 `--index`）：`planet_x --start ckpt.ron --derived` 给出这一回合存下来的
+`{round, source, pre, post}`（`post.flow` 就是上面那张 flow 表的来源；没档时会按当前状态重算
+并附 `note`，那种情况下 flow 是空的）。
+
 ### planet_xq 快速配方
 ```python
 import planet_xq
@@ -186,15 +201,23 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 
 ## 3. 决策面：你能控制什么（指令 / control）
 
-每个势力有一个 `ControllableState`，叶子都带 `mode`：`Player`（你说了算，系统只读你的值）
-/ `Ai`（系统自动决定）/ `null`（继承上面 `scope`）。`scope` 是一棵「谁负责」的作用域树
-（全局→势力→天体→城市）。
+每个势力有一个 `ControllableState`，叶子都带 `mode`（**三态**）：`"Player"`（你说了算，系统
+只读你的值）/ `"Auto"`（系统自动决定）/ `"Inherit"`（这一层没有说话，往上继承）。
+`scope` 是一棵「谁负责」的作用域树（全局→势力→天体→城市）。旧档里的 `"Ai"` 与 `null`
+分别按 `Auto` / `Inherit` 读入（`SCHEMA_VERSION` v4→v5 的零损失映射）。
+
+**归属链（舰的指令与风格都是这条）**：`叶 → 舰队默认 → 势力 scope → 全局 scope`，
+最具体的那层**有意见**（`Player`/`Auto`）就它说了算；一路 `Inherit` 就到 `Auto`。
+所以「新舰出厂归谁、干什么」的答案是**舰队默认**，不必逐舰点名。
 
 | 指令面 | 含义 | 关键点 |
 |---|---|---|
 | `ship_orders` | 每艘舰的**移动/停泊**行为 | `Idle / Move / Follow / DockCity / Dock / Colonize`（见下） |
-| `ship_doctrine` | 每舰**行为风格**（per-舰） | `temper`（理智↔热血，欺软怕硬↔飞蛾扑火）、`lone_wolf`（护航↔独狼），各 `[-1,1]`、`0`=基线 |
-| `ship_kiting` | 每舰**风筝↔贴脸**姿态 | `[-1,1]`、`0`=基线。**软属性**：Move/Follow/Dock/Idle 都是软目标，附近有敌舰时自动微调位置，**玩家也不能硬控制** |
+| `default_ship_order` | **舰队默认指令**（势力级一片） | `{"behavior":…,"mode":…}`。**新舰出生就继承它**；一次性指令执行完也回落到它 |
+| `default_doctrine` | **舰队默认行为风格**（势力级一片） | `{"temper":…,"lone_wolf":…,"mode":…}`。全舰队一个风格 = 一片叶 |
+| `default_kiting` | **舰队默认风筝↔贴脸**（势力级一片） | `{"kiting":…,"mode":…}` |
+| `ship_doctrine` | 每舰**行为风格**（per-舰叶片） | `temper`（理智↔热血，欺软怕硬↔飞蛾扑火）、`lone_wolf`（护航↔独狼），各 `[-1,1]`、`0`=基线 |
+| `ship_kiting` | 每舰**风筝↔贴脸**姿态（per-舰叶片） | `[-1,1]`、`0`=基线。**软属性**：Move/Follow/Dock/Idle 都是软目标，附近有敌舰时自动微调位置，**玩家也不能硬控制** |
 | `investment_budget` | **建设**投资预算（每资源 / 月） | 用于建建筑、扩生产 |
 | `construction_budget` | **造舰**建造预算（每资源 / 月） | 用于造舰；会先给维护费留**预留**（见下） |
 | `invest_weights` | 各建设任务优先级 | 谁先吃投资预算。key = `city` + `building`（`building` 是**城内的 u32 下标**） |
@@ -202,6 +225,12 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 | `loyalty_budget` | 每城娱乐/福利（月） | 提「忠诚」压低叛乱 |
 | `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
 | `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效） |
+
+> **风格与指令是同一个形状**（`--apply` 里的两片名字不同，语义同构）：写值即接管、
+> 缺省轴保留现值、`mode` 显式给出时以它为准。
+> **读面里的风格值是「有效值」**（叶 → 舰队默认 → 舰上记录值），而 `mode` 是**叶片自己的
+> 表态**——所以整面 dump 回来安全；但**改值请把 `mode` 一起写成 `Player`/`Auto`**，
+> 只改值而留 `Inherit` 等于说"这一层没有意见"（除非舰队默认也是 `Player`，那个值不会被采用）。
 
 #### `ship_orders` 的六种行为（**攻击/轰炸不在其中**）
 
@@ -240,9 +269,15 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 4. **攻击是自动的，指令只管「去哪」**：见 §0 的提示。想让舰队「守住地球」就 `dock` 地球，
    而不是找一条「攻击」指令——敌舰进射程会自动打。
 
-> 想**整体接管**一个势力：`{"scope":{"factions":[[3,"Player"]]}}`（叶子 `mode:null` 都继承
-> Player）。想只接管某几艘舰/某条预算：给具体叶子显式 `"mode":"Player"` 即可，别整面接管
-> （否则新造出来的舰默认 Idle 没人指挥、经济预算也不再 AI 调）。
+> 想**整体接管**一个势力：`{"scope":{"factions":[["中国","Player"]]}}` —— 但这**管不了已经
+> 自己有叶片的舰**（叶比 scope 更具体）。要让全舰队真正听话，两条一起做：
+> ① 势力级**舰队默认**（`default_ship_order` / `default_doctrine` / `default_kiting`）=
+> 新舰与"没说话"的舰的答案；② 逐舰把叶片交回上层（`{"ship":"长城","mode":"Inherit"}`，
+> 只写 mode 不动值）或钉成 `Player`。
+> **写值即接管**：diff 里只写值、不写 `mode` ⇒ 那片叶变 `Player`（回执 `NOTE_APPLY_TOOKOVER`
+> 会点名）。想只改"流水记录"而不接管，显式写 `"mode":"Auto"`/`"Inherit"`。
+> 旧手册那句「注意这会让新造出来的舰默认 Idle」现在有了正解：**给势力设舰队默认**，
+> 新舰出厂就继承意图，不必每段重新点名。
 
 ---
 
@@ -250,7 +285,8 @@ snap["metrics"]["upkeep"], snap["metrics"]["production_value"]
 
 `--apply <file.json>` 接受 `{control:[...], scope:{...}}`（与 web `POST /api/command` 同形）。
 它是**多层级结构化补丁**：只触碰 diff 里出现的势力/叶子；某个叶子省略 `value`/`behavior`
-保留当前值、省略 `mode` 保留当前模式。
+保留当前值；**省略 `mode` 时：写了值就接管（变 `Player`），什么都没写才保留当前模式**。
+风格轴同理（`ship_doctrine` / `ship_kiting` / `default_doctrine` / `default_kiting`）。
 
 ### 4.1 先从模板改
 ```bash
@@ -287,11 +323,20 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
   舰"北斗"**守卫**"赤霄"（`follow` 一艘**友**舰 = 护航）。
 - "赤霄"自己 `dock` 地球 = 回本土驻守。**三艘舰都在射程内自动开火**——你不需要（也不能）
   写「攻击」。
-- ⚠ **新造出来的舰不在 diff 里**：它们的指令仍是 AI 的（或被继承的默认 `Idle`）。
-  只接管几艘舰时，"新舰谁来指挥"是你自己要接的问题（见下条）。
-- 若想**整体接管**一个势力（所有叶子都归你），才写
-  `{"scope":{"factions":[["中国","Player"]]}}`。注意这会让**新造出来的舰默认 Idle**、经济预算也不再
-  AI 调——你同时要能扛起这些决策。
+- ⚠ **新造出来的舰不在 diff 里**：它们的指令取决于**舰队默认**（`default_ship_order`）。
+  只接管几艘舰时，"新舰谁来指挥"由那一片叶回答——所以**接管单个势力时，第一件事通常是
+  写一片舰队默认**：
+  ```jsonc
+  {"control":[{"faction_id":"中国",
+    "default_ship_order":{"behavior":{"type":"dock","body":"地球"},"mode":"Player"},
+    "default_kiting":{"kiting":-1.0,"mode":"Player"}
+  }]}
+  ```
+  这两片一写：**所有"没有说话"的舰（含以后下水的）都按它走**，单舰特例仍写在 `ship_orders`。
+- 若想**整体接管**一个势力（所有叶子都归你），写
+  `{"scope":{"factions":[["中国","Player"]]}}`。注意**叶比 scope 更具体**：已经自己有叶片的舰
+  不会被 scope 翻转，要逐舰写 `{"ship":"长城","mode":"Player"}`（只写 mode，不动值）或
+  `"Inherit"`（交回上层）。整面接管意味着经济/造舰决策也归你扛。
 
 ### 4.3 behavior 两种写法都认
 - **tagged 形式**（就是你从舰的 `order` 字段里看到的）：`{"type":"follow","ship":"华盛顿"}`、
@@ -425,10 +470,11 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--milestones [<N>]` | **里程碑层**：后续计算需要**无限过去**的事件。**按当前判据为空（`count: 0`）**——见下方「接手旧存档」那条警告；要读一整局的历史用 `--index` + `planet_xq` |
 | `--control` | 可编辑控制面模板 |
 | `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
+| `--derived` | 这一回合存下来的派生态 `{round, source, pre, post}`（`post.flow` = 本回合产出/维护/治理的中间量；与 `--index` 的 `derived.flow` 同值） |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |
 | `--every <K>` | 每 K 回合一个全量快照（降采样） |
 | `--digest <K>` | 每 K 回合一行语义故事板（世界/各势力/战争/事件计数/剧情节拍） |
-| `--index <DIR>` | 投影成 lean 主流 + 按 id 索引的 lazy 表（ships/cities/factions/bodies/settlements/events）+ schema.json（planet_xq 读） |
+| `--index <DIR>` | 投影成 lean 主流 + lazy 表（ships/cities/factions/bodies/settlements/events）+ **派生表**（flow/city_flow/control/scope）+ schema.json（planet_xq 读） |
 
 > 注意：**没有交互式 REPL**、没有 `--query`。这正是设计：stdout 零噪声、确定性、可复现；
 > 分析在外部（planet_xq / pandas）做，控制走 `--apply` diff。

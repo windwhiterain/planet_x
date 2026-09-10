@@ -59,16 +59,17 @@ pub(crate) fn read_budget(
             BudgetKind::Investment => state.investment_budget_control(fid.clone(), rt),
             BudgetKind::Construction => state.construction_budget_control(fid.clone(), rt),
         };
-        let value = match mode {
-            ControlMode::Ai => ai_value * con_scale,
-            ControlMode::Player => state
+        let value = if mode.is_player() {
+            state
                 .control(fid.clone())
                 .and_then(|c| match kind {
                     BudgetKind::Investment => c.investment_budget.get(rt),
                     BudgetKind::Construction => c.construction_budget.get(rt),
                 })
                 .map(|c| c.value)
-                .unwrap_or(ai_value * con_scale),
+                .unwrap_or(ai_value * con_scale)
+        } else {
+            ai_value * con_scale
         };
         budget.insert(rt.clone(), value);
         modes.push((rt.clone(), mode));
@@ -87,18 +88,19 @@ pub(crate) fn write_budget(
 ) {
     if let Some(c) = state.control_mut(fid.clone()) {
         for (rt, value) in budget {
-            let mode = modes.iter().find(|(r, _)| r == rt).map(|(_, m)| *m).unwrap_or(ControlMode::Ai);
+            let mode = modes.iter().find(|(r, _)| r == rt).map(|(_, m)| *m).unwrap_or(ControlMode::Auto);
             let slot = match kind {
                 BudgetKind::Investment => &mut c.investment_budget,
                 BudgetKind::Construction => &mut c.construction_budget,
             };
-            match mode {
-                ControlMode::Ai => {
-                    slot.insert(rt.clone(), Control::inherit(*value));
-                }
-                ControlMode::Player => {
-                    slot.entry(rt.clone()).or_insert_with(|| Control::player(*value));
-                }
+            if mode.is_player() {
+                // 玩家指令：值由玩家给，系统只是把「玩家会用的那个值」抄进读面——
+                // 叶子已存在时绝不覆盖（`or_insert_with`）。
+                slot.entry(rt.clone()).or_insert_with(|| Control::player(*value));
+            } else {
+                // 系统自动决定：写成**继承**叶（`mode = Inherit`）——它的值只是「本回合
+                // 实际用了多少」的流水记录，不构成指令。
+                slot.insert(rt.clone(), Control::inherit(*value));
             }
         }
     }

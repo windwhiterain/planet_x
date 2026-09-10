@@ -35,6 +35,7 @@
 | `[x]` | [战斗行为风格](notes/combat-behavior-doctrine.md) | per-舰 `doctrine`、逐武器索敌与统一权重已落地，思潮实验也接上。 | doctrine 扩到经济/造舰；政治系统 M1–M3 |
 | `[ ]` | [时代与科技演进](notes/eras-technology.md) | 用解锁式舰级、材料升级与舰种分支，给上千回合铺时代节奏；三条都还只在纸面。 | 舰级解锁、结构演进、设计图分支全未开工 |
 | `[~]` | [军事与战斗](notes/military-combat.md) | 拟真战斗与舰船定制（组件/护盾/点防/命中折减）已落地，AI 拟人化那批也做完。 | 舰船退役换装、换模块/再装配；长局可玩性 |
+| `[ ]` | [舰船设计图](notes/ship-blueprint.md)（设计长文） | 非控制属性（面板/选装/造价）放在**建造单位**上作为出厂快照的设计图；也是「还不存在的实体的规则」的家（含按舰级默认）。 | 全部；文内 §3 四条语义已裁决（快照 / 三态 / `choose_loadout` 降级 / refit 出本轮） |
 | `[~]` | [MOND 引力异常](notes/mond-anomaly.md) | 异常区导航偏移已实现（崇拜教免疫）；战斗光环、矿产红利与科技扩散未做。 | 异常区战斗光环；矿藏加成；MOND 扩散 |
 | `[ ]` | [行星X 回归](notes/planet-x-return.md) | 把行星X 做成第 19 号长周期天体 + 全球回归效应；现在只是第 60 回合的纯散文节拍。 | 天体、回归效应、配置、harness 断言全未开工 |
 | `[x]` | [舰级点防修正](notes/ship-class-pd-mult.md) | 五级舰按 spec 重新定性并新增 `pd_mult`，联动模型/配置/选装/meta，测试与长局全过。 | — |
@@ -56,6 +57,10 @@
 | `[~]` | [agent 控制面](notes/agent-control-api.md) | 已把 coalition 格局与城市 loyalty/距离暴露给 agent；summary 级联与目标模板仍缺。 | summary/delta 级联；control 目标模板命令 |
 | `[~]` | [agent 游玩摩擦](notes/agent-play-friction.md) | 六类摩擦已补护栏与控制面预览（`--control-schema`/`--control-plan`/`--profile`）。 | 语义指令助手、语义视图命令仍是空白 |
 | `[x]` | [agent 游玩打磨](notes/agent-play-polish.md) | 真以 agent 身份玩了一局，修掉「失败看起来像成功」并重写手册，行为中性已验证。 | 语义指令助手、`--control` 瘦身（其余低危） |
+| `[~]` | [控制属性 = 活层](notes/control-live-layers.md) | 三态归属 + 势力级默认指令 + 写值即接管 + **风格活层（doctrine/kiting）**全部落地；§4 四条已裁决。 | web 差两行默认风格；`agent-play.md` 跟改 |
+| `[~]` | [引擎=数据平面，Python kit=策略平面](notes/engine-data-plane.md) | 引擎产出 tidy 统计表 + 接受同形状 diff：`flow`/`city_flow`/`control`/`scope` 四表 + `--derived` 已落地，消费者（`planet_xq`）也已接上；通配/编制表全归 kit。 | "AI 掷了什么"要单独捕获（`pre` 不是它）；`--control` 的 2 位舍入；`spawned_round` |
+| `[~]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析；**新增 `derived` 段与 `q.flow()/q.control()` 等派生表读法**。 | parquet、更多 lazy 字段、剩余统计函数 |
+| `[~]` | [长局控制面缺口](notes/agent-control-long-game.md) | 192 月长局实测：预算只能限速不能封顶、无外交/交战规则/放弃城市叶片、结构性叶片所有权不明、幽灵权重。 | §5 新舰默认归 AI 已被 `control-live-layers.md` 解掉；其余全部（§1 维护费上限、§2 ROE 最关键） |
 
 ## WebUI
 
@@ -71,6 +76,7 @@
 | --- | --- | --- | --- |
 | `[~]` | [超长轨迹降采样](notes/coarse-trajectory-views.md) | 超长轨迹可用 `--every`/`--digest` 采样粗看；极致画像目前只有纯 jq 版。 | 分层缩放 `--zoom`；窗口一句话事件文案 |
 | `[x]` | [Lazy 索引分析层](notes/lazy-index-pandas.md) | 重型字段拆成按 id 的懒表，Python/uv 套件读 schema 后 join 分析。 | parquet、更多 lazy 字段、剩余统计函数 |
+| `[~]` | [用 Python 统计地编辑控制面 diff](notes/python-control-authoring.md) | `planet_x_ctl` 已建（`play/` 并列 uv 工程）：批量改归属、编制表、统计配方、`verify` 全在 demo 里自断言通过。 | `agent-play.md` 一节；`surface()` 换 join 后端并删掉本地 `_approx` 重算 |
 | `[x]` | [名字即唯一 key](notes/name-as-unique-key.md) | 实体身份统一用名字作主键，删掉数字 id 与影子结构。 | web 投影收敛；派生字段预计算 |
 | `[ ]` | [Schema/查询架构调研](notes/schema-query-architecture.md)（设计长文） | 四套并行投影、隐式 schema、宽容查询、无版本迁移——诊断 + 分层方案。 | 文内 §6「触手可及的首步」 |
 | `[ ]` | [Schema 查询重构（候选清单）](notes/schema-query-refactor.md) | 四痛点里的 P0–P3 已落地：`meta_value` 止血、schema 自描述、响亮失败、版本迁移。 | P4 收敛并行投影（拆 `AgentState` 镜像 struct） |
