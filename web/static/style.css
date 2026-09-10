@@ -71,10 +71,22 @@ body {
   padding: 12px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; backdrop-filter: blur(4px);
 }
 
-/* 底部 bar body */
-#diffBar { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 16px; backdrop-filter: blur(4px); }
-#readout { color: var(--text); font-size: 12px; min-height: 16px; }
-#diffText { color: var(--muted); font-size: 11px; margin-top: 4px; }
+/* 底部 bar body：一条「选中对象」标题行 + 该对象的完整记录（generic widget 渲染） */
+#diffBar {
+  background: var(--panel); border-top: 1px solid var(--line); padding: 8px 16px;
+  backdrop-filter: blur(4px);
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 42vh;
+}
+.sel-bar { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+.sel-bar .sel-kind {
+  background: #1e3a6b; border: 1px solid var(--accent); border-radius: 5px;
+  padding: 0 6px; font-size: 11px; color: var(--text);
+}
+.sel-bar .sel-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.sel-bar .sel-path { font-size: 11px; color: var(--muted); }
+#readout { color: var(--text); font-size: 12px; min-height: 16px; overflow: auto; }
+#diffText { color: var(--muted); font-size: 11px; }
 
 /* panels / tree */
 .panel { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
