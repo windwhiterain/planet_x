@@ -6,11 +6,18 @@
 > 实机数据见该篇 §10）→ ② ~~**两轴叶**~~ ＋ ②b ~~**删叶（方案 A）**~~ → `[x]` **都已完成**
 > （`feature/leaf-existence`：单轴新建两轴叶被引擎拒（`partial_doctrine_leaf`）、`remove: true`
 > 删叶 + `NOTE_APPLY_REMOVED` 回执、kit 的 `remove_*`、web 行上的「恢复出厂值」；见该篇 §11）
+> → ②c ~~**角色轴（第三条风格轴）补齐**~~ → `[x]` **已完成**（`feature/role-axis-parity`：运输
+> `feature/freight-collection` 合进 `main` 时加进来的 `ship_freighter` / `default_freighter` 当时
+> 没走 ②/A 的规矩——没有 `remove`、web 与 kit 都不认识它；现在三端齐了，并查实这条轴是**唯一
+> AI 会写的风格叶**（删叶 = 交回自动定编，不是冻结）；见该篇 **§12**）
 > → ③ **舰船设计图**（[`ship-blueprint-spec.md`](notes/ship-blueprint-spec.md) §8.0 十条已裁决 +
-> 附 A 改动地图，连同 `spawned_round` 一次升 `SCHEMA_VERSION`，⚠ 现在是 **7 → 8**：
-> 产地货栈已用掉 v7）。⚠ 蓝图那一步的 `order_source` 要把「叶不存在」与「叶写着 `Inherit`」
-> 分开报——本轮已证明这两者在**取值**上不等价。
-> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变。
+> 附 A 改动地图，连同 `spawned_round` 一次升 `SCHEMA_VERSION`，⚠ 现在是 **9 → 10**：
+> v7→v8 产地货栈、v8→v9 货舱 + 运输 Haul 都已被 `feature/freight-collection` 用掉。
+> 动手前先 `grep SCHEMA_VERSION src/model/state.rs`）。⚠ 蓝图那一步的 `order_source` 要把
+> 「叶不存在」与「叶写着 `Inherit`」分开报——已证明这两者在**取值**上不等价。
+> 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` **逐字**不变
+> （合并后的基线 = `293725C43A0E26DC516977C04A5BD9C99977252B8C08D683EC2EA2749ADEDBC4`，
+> `--seed 42 --round 240 --digest 20`；旧的 `70D5A34E…` 随 v9 运输落地作废）。
 > ⚠ §10.4 那个坑（「恢复继承」撤不掉叶里的值）**已解**：方案 A 落地（引擎 + kit + web 三端，
 > 见该篇 §11.1/§11.3）。取值规则本身没动——方案 B 仍留在桌上（§10.4 的表）。
 

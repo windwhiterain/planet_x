@@ -346,6 +346,55 @@ mod tests {
         );
     }
 
+    /// **删叶 = 交回自动定编**：玩家给某艘舰钉过角色（`Player`）之后 AI 一个字都不写；
+    /// 把这片叶删掉，这艘舰立刻回到「AI 按积压定编」的自由状态——下回合 AI 会把结论重新写进
+    /// 一片新叶。这正是这条轴与另两条风格轴的差别：**删叶不是"锁成某个值"，而是"放手"**。
+    #[test]
+    fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
+        let (config, mut state) = fresh(42);
+        state.depots.clear();
+        let ship = state
+            .ships
+            .iter()
+            .find(|s| s.faction_id == "中国")
+            .map(|s| s.name.clone())
+            .expect("中国至少有一艘舰");
+        // 玩家钉死「它是运输舰」，而此刻没有任何积压 ⇒ 定编本来会把它判成战舰。
+        state
+            .control_mut("中国".to_string())
+            .unwrap()
+            .ship_freighter
+            .insert(ship.clone(), Control::player(true));
+        assign_roles(&mut state, &config);
+        assert!(state.ship_freighter(ship.clone()));
+        assert!(
+            state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+            "玩家的叶 AI 不碰，所以它还在"
+        );
+
+        // 删叶：玩家放手 ⇒ 归属不再拦着 AI。
+        let diff = serde_json::json!({
+            "control": [{"faction_id": "中国", "ship_freighter": [{"ship": ship, "remove": true}]}]
+        });
+        let r = crate::control::apply_patch(&mut state, &config, &diff).expect("diff applies");
+        assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
+        assert!(
+            !state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+            "叶必须真的没了"
+        );
+
+        // 有积压 ⇒ 定编重新生效（谁去运由运力排序决定，但必须有人运）。
+        state.depot_add("中国", "金星", "碳", 100.0);
+        assign_roles(&mut state, &config);
+        let haulers: Vec<String> = state
+            .ships
+            .iter()
+            .filter(|s| s.faction_id == "中国" && state.ship_freighter(s.name.clone()))
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(haulers.len(), 1, "删掉玩家的钉子之后 AI 重新定编：{haulers:?}");
+    }
+
     /// **运力要算速度**（用户点破的那条）：一趟装多少只是**每趟**的量，单位时间的运力是
     /// `舱容 × 速度`（航程一定时，跑得快 = 跑得勤）。而且速度完全来自推进模块 ⇒
     /// **没有推进模块的船速度是 0，派它去运货等于派一尊雕像**：它必须被剔出运力名单。

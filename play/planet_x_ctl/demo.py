@@ -273,6 +273,63 @@ def main(argv=None) -> int:
               | {(leaf, "exists", True) for leaf in rep_c.took_over_leafs}),
           f"{[(c.leaf, c.field, c.before, c.after) for c in rep_c.incidental]}")
 
+    # ---------------------------------------------------------------- 4b. the third style axis
+    print("\n[4b] 第三条风格轴**角色**（运输舰↔战舰）：写值即接管 · AI 定编的闸门 · 删叶 = 交回定编")
+    hero = names[0]
+    s_r = ctl.surface(ckpt, index_dir=proj)
+    check("角色轴进得了 surface()（读面每艘舰一行 `ship_freighter`）",
+          all(s_r.leaf(faction, "ship_freighter", n).value is not None for n in names),
+          f"{len(names)} 艘")
+    # ① 写值即接管：这艘舰归玩家，自动控制的逐舰定编从此不碰它。
+    s_r.set_freighter(hero, True, take_over=True)
+    path_r = ctl.write(s_r.emit(), work / "steer_r.json")
+    rep_r = ctl.verify(ckpt, path_r)
+    print(rep_r.describe())
+    check("R: 写角色值 = 一次接管（回执指的就是那片叶）",
+          rep_r.took_over_leafs == [f"{faction}.ship_freighter[{hero}]"], f"{rep_r.took_over_leafs}")
+    check("R: 值真的写成了运输舰", rep_r.after.leaf(faction, "ship_freighter", hero).value is True)
+
+    # 真的落地：verify 只是演习，而删叶必须对着「那片叶真的在」的 checkpoint 来。
+    ckpt_r = work / "ckpt_r.ron"
+    app_r = ctl.apply(ckpt, path_r, save=ckpt_r)
+    check("R: --apply --save 成功，checkpoint 里这艘舰的角色已归玩家",
+          app_r.ok and not app_r.skipped
+          and ctl.surface(ckpt_r).leaf(faction, "ship_freighter", hero).mode == ctl.PLAYER,
+          f"{ctl.surface(ckpt_r).leaf(faction, 'ship_freighter', hero)}")
+
+    # ② 删叶 = **交回自动定编**（不是"锁成某个值"）。逐舰叶的存在性读面看不出来，
+    #    所以"落地了没有"以引擎的 NOTE_APPLY_REMOVED 回执为准。
+    #    ⚠ `verify` 是**只读演习**：要验证"再删一次是幂等的"，必须先把第一次删叶真的
+    #    apply 下来——否则第二次删的仍然是"那片叶还在"的 checkpoint（这个坑笔记里记过，
+    #    这里当场演示一遍）。
+    s_r2 = ctl.surface(ckpt_r)
+    s_r2.remove_freighter(hero)
+    path_r2 = ctl.write(s_r2.emit(), work / "steer_r2.json")
+    rep_r2 = ctl.verify(ckpt_r, path_r2)
+    print(rep_r2.describe())
+    check("R: 删叶在引擎回执里出现（读面看不出来，靠回执）",
+          rep_r2.removed_leafs == [f"{faction}.ship_freighter[{hero}]"], f"{rep_r2.removed_leafs}")
+    ckpt_r2 = work / "ckpt_r2.ron"
+    check("R: 删叶真的落地（--apply --save：这一步之后那片叶才真的没了）",
+          ctl.apply(ckpt_r, path_r2, save=ckpt_r2).ok)
+    rep_r3 = ctl.verify(ckpt_r2, ctl.surface(ckpt_r2).remove_freighter(hero).emit())
+    check("R: 再删同一片叶 = 幂等成功（不进回执、也不算丢弃）",
+          rep_r3.ok and rep_r3.removed_leafs == [] and not rep_r3.skipped, str(rep_r3.removed_leafs))
+
+    # ③ 势力级默认角色叶：一片叶管住全舰队；`Player` 就是「AI 定编别碰我的舰队」那道闸门。
+    s_r3 = ctl.surface(ckpt_r)
+    s_r3.set_default_freighter(faction, True, mode=ctl.PLAYER)
+    path_r3 = ctl.write(s_r3.emit(), work / "steer_r3.json")
+    rep_r4 = ctl.verify(ckpt_r, path_r3)
+    d_leaf = rep_r4.after.leaf(faction, "default_freighter")
+    check("R: 势力级默认角色叶建成（读面里出现，值是玩家钉的运输舰）",
+          d_leaf.value is True and d_leaf.mode == ctl.PLAYER, f"{d_leaf}")
+    ckpt_r3 = work / "ckpt_r3.ron"
+    check("R: 势力级默认叶真的落地", ctl.apply(ckpt_r, path_r3, save=ckpt_r3).ok)
+    rep_r5 = ctl.verify(ckpt_r3, ctl.surface(ckpt_r3).remove_default_freighter(faction).emit())
+    check("R: 删势力级默认角色叶也在回执里（`exists` 由 True 翻回 False）",
+          rep_r5.removed_leafs == [f"{faction}.default_freighter"], f"{rep_r5.removed_leafs}")
+
     # ---------------------------------------------------------------- 5. determinism
     print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
     d1, _ = recipe_policy(ckpt, proj)
@@ -330,6 +387,9 @@ def main(argv=None) -> int:
             lambda: ctl.surface(ckpt, index_dir=proj).set_budget(
                 faction, "construction_budget", {"不存在": 1.0}, mode=ctl.PLAYER),
             "不在已知表里")
+    refuses("角色轴喂一个数字 → 当场拒绝（它是开关，不是数值轴）",
+            lambda: ctl.surface(ckpt).set_freighter(names[:1], 1),
+            "只接受 True/False")
 
     hand_written = {"control": [{"faction_id": faction, "ship_orders": [
         {"ship": names[0], "mode": "Auto"}, {"ship": "方舟3", "mode": "Player"}]}]}
@@ -356,6 +416,9 @@ def main(argv=None) -> int:
     print(f"  C 统计封顶   : requested={len(rep_c.requests)} changed={len(rep_c.changed)} "
           f"noop={len(rep_c.noop_requests)} skipped={len(rep_c.skipped)} "
           f"took_over={len(rep_c.took_over)} incidental={len(rep_c.incidental)} ok={rep_c.ok}")
+    print(f"  R 角色轴     : requested={len(rep_r.requests)} took_over={len(rep_r.took_over)} "
+          f"removed={len(rep_r2.removed_leafs)}+{len(rep_r5.removed_leafs)} "
+          f"ok={rep_r.ok and rep_r2.ok and rep_r5.ok}")
     print(f"    封顶 {len(table)} 条预算，涉 {table['faction_id'].nunique() if len(table) else 0} 个势力；"
           f"新增舰队默认 {len(expected_took)} 处")
     if len(table):

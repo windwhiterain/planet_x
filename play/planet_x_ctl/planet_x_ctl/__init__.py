@@ -17,11 +17,16 @@ Tri-state ownership (``.agents/notes/control-live-layers.md``)
 Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing) / ``Auto`` (the
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
 ``leaf → faction default_ship_order → faction scope → global scope``; the most specific layer that
-is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The two **style** axes have the
-same shape with their own faction-level default: ``ship_doctrine → default_doctrine`` and
-``ship_kiting → default_kiting``; ``default_doctrine`` speaks **two axes in one leaf** (``temper`` +
-``lone_wolf``), which is why this kit refuses to create it from a single-axis patch (see
-``Surface._require_both_axes``).
+is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The **three style** axes have the
+same shape with their own faction-level default: ``ship_doctrine → default_doctrine``,
+``ship_kiting → default_kiting`` and ``ship_freighter → default_freighter`` (角色：运输舰↔战舰);
+``default_doctrine`` speaks **two axes in one leaf** (``temper`` + ``lone_wolf``), which is why this
+kit refuses to create it from a single-axis patch (see ``Surface._require_both_axes``).
+
+⚠ One axis is **alive**: ``ship_freighter`` is written by the automatic controller every round
+(集货定编, ``autocontrol::freight``), but only under ``Inherit`` — a ``Player`` leaf freezes it. So on
+that axis "不表态" means "AI 可以每回合重新决定", and deleting the leaf means **放手**, not freezing
+(``Surface.remove_freighter``).
 
 **写值即接管 (writing a value takes over).** In a diff, writing a leaf's ``value``/``behavior``
 while omitting ``mode`` silently turns that leaf into ``Player`` (the engine reports it on stderr as
@@ -105,9 +110,14 @@ LEAF_KINDS: dict[str, tuple[str, ...]] = {
     # 那正是 `engine-data-plane.md` §8.1 的教训：契约是发射端 + 消费者两处。
     "default_doctrine": (),
     "default_kiting": (),
+    # 势力级默认**角色**（运输舰↔战舰，第三条风格轴）、逐舰角色叶。与另两条风格轴同形，
+    # 但有一条轴间差别：**逐舰那片叶自动控制每回合也会写**（按积压定编，
+    # `autocontrol::freight`）；玩家钉住（`mode='Player'`）之后 AI 不再碰它。
+    "default_freighter": (),
     "ship_orders": ("ship",),
     "ship_doctrine": ("ship",),
     "ship_kiting": ("ship",),
+    "ship_freighter": ("ship",),
     "investment_budget": ("resource",),
     "construction_budget": ("resource",),
     "invest_weights": ("city", "building"),
@@ -122,7 +132,8 @@ _KEY_FIELDS = frozenset({"ship", "city", "building", "resource"})
 #: write ``kiting``. `ShipDoctrinePatch`/`DefaultDoctrine` have two axes at once
 #: (``temper`` / ``lone_wolf``).
 _VALUE_FIELD = {"ship_orders": "behavior", "default_ship_order": "behavior",
-                "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value"}
+                "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value",
+                "ship_freighter": "freighter", "default_freighter": "freighter"}
 
 _TWO_AXIS_KINDS = ("ship_doctrine", "default_doctrine")
 
@@ -396,6 +407,18 @@ def _check_mode(mode: str) -> str:
 
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return float(min(hi, max(lo, float(x))))
+
+
+def _check_bool(v: Any, what: str) -> bool:
+    """`角色` 轴是个开关：只收真正的 ``bool``。
+
+    ``True``/``False`` 在 Python 里是 ``int`` 的子类，所以 ``1``/``0`` 会**悄悄**通过 ``bool()``
+    转换——但这条轴的读面写的是 ``true``/``false``，而 ``1`` 这种写法在补丁里几乎总是"我抄了
+    别的轴的例子"。宁可在这里响亮地拒绝，也不要在引擎里变成一个看不懂的类型错。
+    """
+    if not isinstance(v, bool):
+        raise ValueError(f"{what} 只接受 True/False（收到 {v!r}）——角色轴是个开关，不是数值轴")
+    return v
 
 
 def normalize_behavior(behavior: Any) -> Any:
@@ -913,6 +936,29 @@ class Surface:
         self._add(faction, "default_kiting", (), patch)
         return self
 
+    def set_default_freighter(self, faction: str, freighter: bool | None = None, *,
+                              mode: str | None = None, take_over: bool = False) -> "Surface":
+        """势力级默认**角色**（``True`` = 全舰队转运输）——**一片叶**管住「没有自己表态」的舰。
+
+        与 :meth:`set_default_kiting` 同形，但它有一条别的轴没有的用法：把它设成
+        ``mode='Player'`` 就是「**自动控制的逐舰定编别再碰我的舰队**」那道闸门。自动控制每回合
+        按积压改写逐舰角色叶，但它只写 ``Inherit`` 的叶，而舰队默认归玩家时玩家的值压过那些
+        结论（``State::ship_freighter``）——所以"整支舰队交给我定"是**一片叶**的事。
+        """
+        if freighter is None and mode is None:
+            raise ValueError("set_default_freighter 至少要给 freighter= 或 mode= 之一")
+        patch: dict = {}
+        if freighter is not None:
+            patch["freighter"] = _check_bool(freighter, f"set_default_freighter({faction!r})")
+        if mode is not None:
+            patch["mode"] = _check_mode(mode)
+        else:
+            m = self._mode_or_takeover(None, take_over, f"set_default_freighter({faction!r})")
+            if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
+                patch["mode"] = m
+        self._add(faction, "default_freighter", (), patch)
+        return self
+
     def set_default_doctrine(self, faction: str, temper: float | None = None,
                              lone_wolf: float | None = None, *,
                              mode: str | None = None, take_over: bool = False) -> "Surface":
@@ -989,6 +1035,29 @@ class Surface:
         return self
 
     # -- mutations: budgets / weights / capital ----------------------------------------
+
+    def set_freighter(self, selection: Any, freighter: bool, *,
+                      mode: str | None = None, take_over: bool = False) -> "Surface":
+        """**逐舰角色**：``True`` = 运输舰（自动控制给它排集货路线），``False`` = 战舰（找仗打）。
+
+        写值必须明说归属（``mode=`` 或 ``take_over=True``），与另两条风格轴同一条纪律。
+        ⚠ 这条轴上"不表态"的代价比别处大：**这片叶自动控制本来每回合也会写**，所以含糊的写法
+        会被定编覆盖，而现象是「我明明设了它却没用」。
+
+        角色只决定自动控制**派哪种活**，不解除武装：运输舰在射程内照样自动开火、照样按
+        ``kiting`` 姿态软移动。它是"同一个舰长的两种活"，不是"军舰/民船"的军备差别。
+        """
+        f = _check_bool(freighter, f"set_freighter({selection!r})")
+        for faction, ship in self._ship_pairs(selection):
+            patch = {"ship": ship, "freighter": f}
+            if mode is not None:
+                patch["mode"] = _check_mode(mode)
+            else:
+                m = self._mode_or_takeover(None, take_over, f"set_freighter({ship!r})")
+                if m is not None:  # pragma: no cover
+                    patch["mode"] = m
+            self._add(faction, "ship_freighter", (ship,), patch)
+        return self
 
     def set_budget(self, faction: str, kind: str, values: Mapping[str, float],
                    *, mode: str | None = None, take_over: bool = False,
@@ -1131,6 +1200,21 @@ class Surface:
         """逐舰：删掉**风筝姿态叶** ⇒ 回到「舰队默认 / 出厂快照」。"""
         for faction, ship in self._ship_pairs(selection):
             self._add(faction, "ship_kiting", (ship,), {"ship": ship, "remove": True})
+        return self
+
+    def remove_freighter(self, selection: Any) -> "Surface":
+        """逐舰：删掉**角色叶** ⇒ **交回自动定编**（AI 下回合可能立刻又写下它的结论）。
+
+        ⚠ 这与另两条风格轴上的"删叶"含义不同：那里删掉 = 回到出厂快照并**从此冻结**；
+        这里删掉 = **放手**。想让某个角色稳定下来就写 ``mode='Player'``，而不是删叶。
+        """
+        for faction, ship in self._ship_pairs(selection):
+            self._add(faction, "ship_freighter", (ship,), {"ship": ship, "remove": True})
+        return self
+
+    def remove_default_freighter(self, faction: str) -> "Surface":
+        """势力级：删掉**默认角色叶** ⇒ 这一层不再供值，自动控制的逐舰定编重新说了算。"""
+        self._add(faction, "default_freighter", (), {"remove": True})
         return self
 
     def remove_default_doctrine(self, faction: str) -> "Surface":
@@ -1811,8 +1895,13 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 # `remove` 也算一个被请求的字段：删叶请求没有值可写（`_leaf_fields` 那边靠
                 # `exists` 翻转看结果），漏掉它会让"删一片势力级叶"在 `requests` 里**消失**，
                 # 于是 `verify` 看上去"什么都没请求"——静默的成功比失败更难查。
+                # ⚠ 值字段名**按 kind 查表**（`capital`→`value`、`default_freighter`→`freighter`…）：
+                # 写成一张写死的名单时，新轴的写值会在 `requests` 里静默消失，与漏掉 `remove` 同一个坑。
+                wanted = {"mode", "remove", _VALUE_FIELD.get(kind, "value")}
+                if kind in _TWO_AXIS_KINDS:
+                    wanted |= {"temper", "lone_wolf"}
                 out.setdefault(f"{fid}.{kind}", {}).update(
-                    {k: v for k, v in raw.items() if k in ("mode", "value", "behavior", "remove")})
+                    {k: v for k, v in raw.items() if k in wanted})
                 continue
             for entry in fac.get(kind) or []:
                 key = _entry_key(kind, entry)

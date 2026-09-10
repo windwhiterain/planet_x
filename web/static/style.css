@@ -119,9 +119,14 @@ body {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 4px; font-size: 12px; flex: none;
 }
-/* 舰行上的**便利**下拉：一次改三片叶的归属（只写 mode，永不写值）。做得比子叶的下拉弱，
-   免得看起来像"这条舰的归属"——归属永远在子叶那一行（三片叶各有各的链）。 */
+/* 舰行上的**便利**下拉：一次改这条舰各片叶的归属（只写 mode，永不写值）。做得比子叶的下拉弱，
+   免得看起来像"这条舰的归属"——归属永远在子叶那一行（各片叶各有各的链）。 */
 .tnode select.mode.bulk { background: #101733; color: var(--muted); font-size: 11px; padding: 1px 3px; }
+/* 角色轴编辑器（运输舰↔战舰）：它不是 [-1,1] 的轴，而是一条开关，所以是一个下拉。 */
+.ship-editor select.role {
+  background: #0d1226; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 4px; font-size: 12px;
+}
 /* 「恢复继承」：撤销这片叶的表态（值不动）。比子叶的三态下拉更直白，所以给它一个按钮。 */
 .tnode .restore, .ship-editor .restore {
   background: #14203c; color: var(--text); border: 1px solid var(--line);
