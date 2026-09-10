@@ -161,6 +161,57 @@ body {
 button.primary { background: #1d4ed8; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
 button.primary:hover { background: #2563eb; }
 
+/* 「应用到服务器」+ 它的回执：**钉在面板底部**。长树会把按钮滚出视口（真实的踩坑记录：
+   Playwright 点不到它、底部读面 bar 展开时还会接走指针事件），而回执更必须在"你刚点完"
+   的那一眼里——所以两者一起 sticky，谁也不用去滚。 */
+.side-foot {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; flex-direction: column; gap: 6px;
+  padding-top: 6px; background: var(--panel);
+}
+/* 回执：引擎实际做了什么（落地几片叶 / 拒了哪些 / 为什么）。
+   被拒的一栏是**破坏性**的信息，所以它自己带颜色——静默吞掉丢弃等于「失败看起来像成功」。 */
+.api-report { max-height: 30vh; overflow: auto; }
+.api-report.ok .api-report-head { color: #7ee787; }
+.api-report.bad {
+  border: 1px solid #b91c1c; border-radius: 6px; background: rgba(80, 16, 16, .35);
+  padding: 4px 6px;
+}
+.api-report.bad .api-report-head { color: #fca5a5; font-weight: 600; }
+.api-report-head { font-size: 12px; padding: 2px 4px; }
+.api-skip { border-top: 1px solid rgba(185, 28, 28, .5); padding: 3px 4px; font-size: 11px; }
+.api-skip .api-code {
+  color: #ffd0d0; background: #4a1d1d; border-radius: 3px; padding: 0 4px; margin-right: 6px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.api-skip .api-path { color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.api-skip .api-reason { color: #ffd0d0; }
+
+/* ---- 设计图库（势力级图库：舰级 / 组件多选 / 意图 / 删图） ----------------- */
+.bp-editor { align-items: flex-start; }
+.bp-add { border: 1px dashed var(--line); border-radius: 6px; margin: 4px 6px; }
+/* 新建表单的标题：独占一行（`.tnode-label` 是 `flex: 1`，在 430px 的面板里会被挤成一列一个字）。 */
+.bp-add-title { flex: 0 0 100%; font-weight: 600; font-size: 12px; }
+.bp-add input.bp-name {
+  background: #0d1226; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 6px; width: 140px;
+}
+.bp-comps { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 2px 8px 4px; }
+.bp-comps-head { color: var(--muted); font-size: 12px; }
+.bp-comp-list { display: flex; flex-wrap: wrap; gap: 2px 8px; }
+.bp-comp {
+  display: flex; align-items: center; gap: 3px; font-size: 11.5px; color: var(--muted);
+  border: 1px solid transparent; border-radius: 4px; padding: 0 3px; cursor: pointer;
+}
+.bp-comp.on { color: var(--text); background: #16224a; border-color: var(--accent); }
+.bp-comp.full { opacity: .45; cursor: not-allowed; }
+.bp-comp input[type="checkbox"] { accent-color: var(--accent); }
+.bp-order { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; width: 100%; }
+/* **买不起 ⇒ 未下水**（Q4(b) 的可见标记）：建造区那一行上的常亮小牌。 */
+.bp-waiting {
+  color: #ffd479; background: #3a2c0a; border: 1px solid #a16207; border-radius: 4px;
+  padding: 0 5px; font-size: 11.5px;
+}
 #status { color: var(--muted); }
 
 /* ---- 右侧「状态」面板：普通 state 全量读数（generic widget） ------------- */
