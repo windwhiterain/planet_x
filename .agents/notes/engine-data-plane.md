@@ -90,8 +90,9 @@ leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
    跨进程一致性测试（`tests/projection_derived.rs`）。
 2. `[ ]` **"AI 到底掷了什么"要单独捕获**（见 §7.4）：`pre` **不是**这个（它只是回合前的观测），
    要真数据得在 `sim`/`autocontrol` 的决策点补一次**结构化捕获**，并证明行为中性。
-3. `[ ]` **风格活层**（`control-live-layers.md` §4.1+4.2+4.4：`default_doctrine`/`default_kiting` +
-   `Ship.doctrine/kiting` 降级为记录值）——与第 1 步同在 `src/control.rs`，所以**串行**做。
+3. `[x]` **风格活层**（`control-live-layers.md` §4.1+4.2+4.4）：`default_doctrine`/`default_kiting`
+   + `Ship.doctrine/kiting` 降级为记录值 + ships 表的 `doctrine`/`kiting` 有效值列。
+   提交 `70e15e5`，含**行为中性**验证（60 回合状态流 sha256 改前=改后）。
 4. `[ ]` **舰船模板**（`ship-blueprint.md`，含按舰级默认）。
 5. 引擎侧**不加**通配/清叶动词（§1.1）。
 

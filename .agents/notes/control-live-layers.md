@@ -87,58 +87,70 @@ AI 最后写的行为上——那是「活层」最危险的坑。
   （叶 → 舰队默认 → 势力 → 全局，`app.js::effectiveMode`）开放；改行为/改值即把该叶钉成
   `Player`；不可编辑时给一行说明（`.tnode-hint`）。三态下拉是「继承/自动/玩家」。
   ⚠ **只跑了 crate 测试与 round-trip 守卫，没实机点过**（未按 `scripts/web.ps1` 起服务）。
+* `[x]` **风格（doctrine / kiting）也是活层**（提交 `70e15e5`，见 §6）：每舰叶片 +
+  势力级 `default_doctrine`/`default_kiting` + `Ship` 字段降级为记录值 + AI 5 个读点改走有效值。
+  **实测行为中性**（同 seed 的 60 回合完整状态流 sha256 改前=改后；240 回合 `--digest` 逐行相同）。
 
 ## 3. 剩余
 
-* `[ ]` **doctrine / kiting 也变成活层**（本轮只做了「指令」）。
-  现状：它们还是 `Ship` 上的**裸字段**（`ship.doctrine` / `ship.kiting`），出厂时从
-  `ShipSpec.default_doctrine`/`default_kiting` 拷一份（`sim.rs::spawn_ship`），`--apply` 的
-  `ship_doctrine`/`ship_kiting` 补丁**直接改字段**——没有三态、没有活层、也没有舰队级默认。
-  改造面**很小**（已数过）：
-  * AI 读点 5 处：`autocontrol/tactics.rs:90`（temper）、`:246`/`:264`（kiting）、
-    `:338`（lone_wolf）、`:389`（kiting）；
-  * AI **从不写** doctrine/kiting（`tactics.rs` 里那两处写点在 `mod tests` 内）→
-    不存在「AI 覆盖玩家风格」的既成问题；
-  * 读面/补丁面已有（`control_view` 的 `ship_doctrine`/`ship_kiting` + 两个 patch 结构）。
-  改法：加势力级 `default_doctrine`/`default_kiting`（与 `default_ship_order` 同形同链），
-  读点改走新加的 `State::ship_doctrine(id)` / `State::ship_kiting(id)` 有效值解析，
-  `Ship` 上的字段降级成**记录值**。收益：「全舰队风筝 −1、战列舰贴脸 +1」= 两片叶子。
-* `[ ]` **舰队默认的粒度**：现在只有「势力级单值」，表达不了「护卫舰守家、巡洋舰殖民、
-  战列舰自由接战」。按舰级的 map（`BTreeMap<舰级, Control<ShipBehavior>>`，舰级取
-  `Ship.class`，链 `叶 → 舰级 → 势力 → scope → 全局`）能表达。**待拍板 §4.2**。
-* `[ ]` **读面看不出「有效值」**：`--control` 给的 `ship_orders[].behavior` 是**叶上的值**
-  （`Auto` 时是系统流水），而某舰的**有效指令**可能来自舰队默认。web 已经自己算
-  `effectiveMode`，但 agent 侧读不到。可选：给 `ShipOrderEntry` 加一个**只读**字段
-  `effective`——注意 `FactionControlPatch` 是 `deny_unknown_fields`，加字段必须同时让
-  patch 接受它（否则「编辑模板再回传」会当场报错）。
+* `[x]` **doctrine / kiting 也变成活层** —— 已落地（提交 `70e15e5`），实现见 §6。
+* `[x]` **读面看不出「有效值」** —— 已落地（同一条提交）：不再是给 `--control` 加字段，
+  而是**投影的表**给答案（`ships` 表 `order_leaf_mode`/`order_default_mode`/
+  `order_effective_mode`/`order_effective`/`doctrine`/`kiting`）——符合 `engine-data-plane.md`
+  的分工：**引擎给答案，Python 只负责筛**。`ShipDoctrineEntry`/`ShipKitingEntry` 也加了
+  `mode`（值取有效值、mode 取叶片表态 ⇒ 模板原样回传安全）。
+* `[ ]` **舰队默认的粒度**：现在只有「势力级单值」，表达不了「护卫舰守家、巡洋舰殖民」。
+  用户已裁决：**按舰级 = 舰船模板的功能**（"还不存在的实体的规则"），并进
+  `ship-blueprint.md`；控制面不另立一层。现有的替代做法：kit 侧按 `class` 筛现存舰展开成叶
+  （新舰不跟随，这是"现存 vs 未来"那条分界线的必然结果）。
 * `[ ]` **`agent-play.md` 要跟着改**：§3/§4.2 那句「注意这会让新造出来的舰默认 Idle」现在
   有了正解（舰队默认），要改写成「设舰队默认 = 新舰自动继承意图」；「省略 mode 保留当前
-  模式」要补一句「但写值即接管」。
+  模式」要补一句「但写值即接管」；另外要补 `--derived` 与四张派生表。
+* `[ ]` **web 侧还差两行**：`default_doctrine`/`default_kiting` 没进 `web/static/app.js`
+  （「舰队默认指令」那一行是现成的模板，照抄即可）。⚠ 本轮 web 改动**仍只跑了 crate 测试**，
+  没按 `scripts/web.ps1` 实机点过。
 
-## 4. 裁决（✅ 用户已确认，本节即下一轮的实现依据）
+## 4. 裁决（✅ 用户已确认，且 §4.1/4.2/4.4 已实现）
 
-四条**按推荐全数通过**，不再有开放项：
-
-* ✅ **§4.1 风格降级为记录值**：`Ship.doctrine`/`Ship.kiting` 保留在舰上（出厂快照 + AI
-  流水），**有效值**改由活层链解析，与 `ship_orders` 的叶值同构。
-* ✅ **§4.2 风格两片**：势力级 `default_doctrine` + `default_kiting`，**不做** `default_style`
-  包装——链与指令同形，读面/补丁面各多一条 vec 即可。
-* ✅ **§4.3 舰级默认 = 舰船模板的功能**：不做成本层的一片 `BTreeMap<舰级, …>`（那会分叉出
-  两套概念）。"新造的护卫舰自动守家"属于**"还不存在的实体的规则"**，与出厂面板/选装/造价
-  同源——整体并进 `ship-blueprint.md`。细节见 `engine-data-plane.md` §1.2。
-* ✅ **§4.4 读面加只读 `effective`**：同一轮改 `FactionControlPatch` 的白名单——
-  它是 `deny_unknown_fields`，「编辑模板再回传」必须不报错（见 §3 第三条 + `control.rs:1722`
-  那条测试的用意）。
-
-执行顺序：**§4.1+4.2+4.4 同轮**（都动同一个读点/读面），**§4.3 留给设计图那一轮**。
+* ✅ **§4.1 风格降级为记录值** —— 实现：`Ship.doctrine`/`Ship.kiting` 仍是字段（出厂快照 +
+  AI 流水），有效值走 `State::ship_doctrine`/`ship_kiting`。
+* ✅ **§4.2 风格两片**：`default_doctrine` + `default_kiting`（没有 `default_style` 包装）。
+* ✅ **§4.3 舰级默认 = 舰船模板的功能**（并进 `ship-blueprint.md`，控制面不另立一层）。
+* ✅ **§4.4 读面的 `effective`** —— 实现方式见 §3 第二条（走投影表 + 两个 entry 的 `mode`）。
 
 ## 5. 复现 / 验证
 
 ```bash
-cargo test --lib                       # 87 通过（含 fleet_default_* / writing_a_value_without_mode_takes_over）
+cargo test --lib                       # 91 通过（含 fleet_default_* / fleet_default_style_* / writing_a_value_without_mode_takes_over）
 cargo test --test longhorizon          # 6 通过（8 ignored 是慢诊断）
-cargo test --workspace                 # 再加 web crate 的 15
+cargo test --workspace                 # 再加 web crate 的 15 与 tests/projection_derived.rs 的 2
 # 旧档无损迁移的实机检查（旧二进制写的 checkpoint 用新二进制读）：
 cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --control
 #   → 长城/赤霄/北斗 = "Player"、北辰 = "Inherit"（与旧档的 Some(Player)/None 逐值一致）
+```
+
+## 6. 风格活层的实现记录（提交 `70e15e5`）
+
+* **数据面**：`ControllableState` 四片新叶（`ship_doctrine` / `ship_kiting` 每舰一片，
+  `default_doctrine` / `default_kiting` 势力级各一片），全部 `#[serde(default)]`；
+  `SCHEMA_VERSION` 5→6，`migrate()` 的 v5→v6 段写明**零信息损失**（旧档没有这四片 ⇒
+  一路继承 ⇒ 兜底到舰上记录值 ⇒ 有效风格逐舰不变）。
+* **取值**：`State::ship_doctrine(id) -> ShipDoctrine` / `ship_kiting(id) -> f64`（叶 →
+  舰队默认 → **舰上记录值**）。与 `ship_behavior` 的规则**刻意同形**：叶 Inherit 且舰队默认
+  是 `Player` ⇒ 取默认值；否则取叶上的值。归属链是 `ship_*_control()`（叶 → 默认 → 势力 → 全局）。
+* **AI**：5 个读点全改走有效值（`temper`、两处 `kiting`、`lone_wolf`、撤退阈值）。
+  实测**行为中性**：同 seed 的 60 回合完整状态流 sha256 改前=改后（`827be5b2…`），
+  seed 42 的 240 回合 `--digest` 逐行相同。这条中性是可预期的——AI 从不写这两条轴，
+  而"叶 Inherit / 没有叶"的舰一律兜底到记录值，改前改后取到的是同一个数。
+* **写面**：`ship_doctrine` / `ship_kiting` 补丁改为写**叶片**（写值即接管 + 钳制 [-1,1]；
+  缺省轴保留**当前有效值** ⇒ 只写一条轴不会把另一条清零）；新增 `default_doctrine` /
+  `default_kiting` 补丁（同一条「写值即接管」规则）。
+* **读面**：`ShipDoctrineEntry` / `ShipKitingEntry` 加 `mode`——**值取有效值、mode 取叶片表态**。
+  这样「模板原样回传」安全（没改过的行写回去仍然没有意见，有效值原样落进一片 Inherit 的叶），
+  而 web 的每舰风格编辑器不会因为"没有叶片"就消失。
+  ⚠ 一个要知道的语义：**改值请同时把 `mode` 改成 `Player`/`Auto`**——只改值而留着 `Inherit`
+  等于说"这一层没有意见"，除非舰队默认也是 `Player`，那个值不会被采用。
+* **投影**：`ships` 表加 `doctrine` / `kiting` 两列（引擎解析后的有效风格），
+  与 `order_*` 四列同一思路——**Python 不该自己重实现链**。
+* **web**：`default_doctrine` / `default_kiting` 两行**还没加**（见 §3 剩余）。
 ```
