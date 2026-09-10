@@ -248,9 +248,24 @@ pub fn control_surface(state: &State, config: &GameConfig) -> serde_json::Value 
 /// ([`CommandReq`]). Handed to the agent so it can write a steering diff without
 /// memorising the contract. Auto-derived from the same structs the diff is
 /// deserialised into, so it can never drift from `apply_patch`'s shape.
+///
+/// ⚠ 除了 `schemars` 派生的**形状**，这里还并进 [`super::leaves::facts`] 那几段
+/// **结构事实**（`leaves` / `actions` / `owner_field` / `remove_field`）：
+/// schemars 只知道「有这么个字段」，不知道「哪几个字段是身份键、哪几个是值、
+/// 哪些是只读派生列」。写面（web 的控制行、kit 的 `set_*`）要的正是后者——
+/// 见 [`super::leaves`] 的模块文档（一份事实、三端共用）。
+/// 并进来的键名与 `schemars` 的不冲突（`$schema`/`title`/`type`/`properties`/`$defs`）。
 pub fn control_schema_value() -> serde_json::Value {
     let schema = schemars::schema_for!(CommandReq);
-    serde_json::to_value(schema).expect("control schema is serializable")
+    let mut out = serde_json::to_value(schema).expect("control schema is serializable");
+    let facts =
+        serde_json::to_value(super::leaves::facts()).expect("control facts are serializable");
+    if let (Some(top), Some(facts)) = (out.as_object_mut(), facts.as_object()) {
+        for (k, v) in facts {
+            top.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 // --- write side (diff application) ------------------------------------------

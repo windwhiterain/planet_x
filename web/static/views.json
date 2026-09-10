@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "note": "组织点（view spec）声明。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。",
+  "version": 2,
+  "note": "组织点（view spec）声明 —— **读与控制的同一份声明**。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。控制那一侧的对应纪律：`--control-schema` 的 leaves 里每个叶要么被某条 leaf 行认领、要么在 write_omit 里写明理由。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。**四种行**：`path`（读）/ `leaf`（一片控制叶，值就是那条路径在 @control 上取到的东西）/ `owner`（作用域归属）/ `action`（命令列表）。四种住在同一个数组里 ⇒ 顺序就是「读与控制穿插」的顺序。",
   "tagged_behavior": {
     "map": {
       "Idle": "待命",
@@ -13,6 +13,32 @@
     },
     "empty": "待命"
   },
+
+  "leaf_ui": {
+    "capital": { "label": "首都（迁都）", "editor": "body" },
+    "default_doctrine": { "label": "舰队默认风格", "editor": "doctrine" },
+    "default_kiting": { "label": "舰队默认风筝姿态", "editor": "kiting" },
+    "default_role": { "label": "舰队默认角色", "editor": "role" },
+    "ship_orders": { "label": "指令", "editor": "behavior", "key_label": "ship" },
+    "ship_doctrine": { "label": "风格", "editor": "doctrine", "key_label": "ship", "follows": "default_doctrine" },
+    "ship_kiting": { "label": "风筝姿态", "editor": "kiting", "key_label": "ship", "follows": "default_kiting" },
+    "ship_role": { "label": "角色", "editor": "role", "key_label": "ship", "follows": "default_role" },
+    "investment_budget": { "label": "投资预算/回合", "editor": "number", "key_label": "resource", "key_label_from": "config.resources", "keys_from": { "path": "config.resources", "key": "@key" }, "hint": "每回合拨给「建楼」的资源量；没写就是这一层没表态（沿链上溯）" },
+    "construction_budget": { "label": "建造预算/回合", "editor": "number", "key_label": "resource", "key_label_from": "config.resources", "keys_from": { "path": "config.resources", "key": "@key" }, "hint": "每回合拨给「造舰」的资源量" },
+    "loyalty_budget": { "label": "娱乐/福利预算", "editor": "number", "key_label": "city", "keys_from": { "path": "@state.cities[*]", "where": "faction_id=${name}", "key": "name" }, "hint": "按城建：给这座城拨多少娱乐/福利资源（忠诚目标里的娱乐项）" },
+    "invest_weights": { "label": "建设权重", "editor": "number", "key_label": "building" },
+    "build_weights": { "label": "建造权重", "editor": "number", "key_label": "building" },
+    "blueprints": { "label": "设计图", "editor": "blueprint", "key_label": "name" }
+  },
+  "action_ui": {
+    "buildings": { "label": "建筑", "editor": "building" }
+  },
+  "write_omit": [
+    { "field": "invest_weights", "why": "随「建筑与建造区」行显示：每一片权重叶属于某个建造区，住在地点卡片的 building 行里（action: buildings）" },
+    { "field": "build_weights", "why": "同上（建造区的建造权重）" },
+    { "field": "blueprints", "why": "设计图库仍住在旧「控制树」页的设计图库分组里；第二步搬进卡片" }
+  ],
+
   "inline": [
     {
       "id": "inline-raw",
@@ -127,7 +153,7 @@
     {
       "id": "factions",
       "title": "势力",
-      "hint": "一行一势力：位置、军事、钱、以及「为什么穷 / 为什么离心」的分项",
+      "hint": "一行一势力：位置、军事、钱 —— **库存（读）紧挨预算（控制）**，改完点底部「应用到服务器」",
       "views": [
         {
           "id": "faction-table",
@@ -137,6 +163,7 @@
           "source": "@state.factions[*]",
           "key": "name",
           "select_kind": "faction",
+          "card": "sel-faction",
           "order": [{ "by": "@post.power_share.${name}", "dir": "desc" }],
           "columns": [
             { "path": "name", "label": "势力", "dot": "color", "click": "faction" },
@@ -146,7 +173,12 @@
             { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
             { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
             { "path": "@post.factions.${name}.fleet_value", "label": "舰队", "fmt": "num", "digits": 0 },
-            { "path": "@post.factions.${name}.production_value", "label": "产出/月", "fmt": "num", "digits": 1 },
+            { "leaf": "@control[?faction_id=${name}].default_role", "compact": true },
+            { "path": "resources", "label": "首都库存", "fmt": "map", "digits": 0, "missing": "空" },
+            { "path": "@post.factions.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
+            { "path": "@post.factions.${name}.production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
+            { "leaf": "@control[?faction_id=${name}].investment_budget", "compact": true },
+            { "leaf": "@control[?faction_id=${name}].construction_budget", "compact": true },
             { "path": "@post.factions.${name}.upkeep", "label": "维护/月", "fmt": "num", "digits": 1 },
             { "path": "@post.factions.${name}.upkeep_unpaid", "label": "没付上的维护", "fmt": "num", "digits": 1 },
             { "path": "@post.factions.${name}.governance_cost", "label": "治理/月", "fmt": "num", "digits": 1 },
@@ -154,7 +186,8 @@
             { "path": "@post.factions.${name}.purchasing_power", "label": "购买力", "fmt": "num", "digits": 0 },
             { "path": "@post.factions.${name}.market_rank", "label": "市场中排名", "fmt": "int", "missing": "—" },
             { "path": "@post.factions.${name}.freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
-            { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 }
+            { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
+            { "owner": "factions", "label": "归谁" }
           ],
           "omit": [
             { "path": "symbol", "why": "图形符号（地图上用），文字界面不显示" },
@@ -167,7 +200,7 @@
     {
       "id": "fleet",
       "title": "舰队",
-      "hint": "一舰一行：在哪、归谁、角色、船体、有效指令 + 这话是谁说的",
+      "hint": "一舰一行：在哪、归谁、角色、船体、**有效指令 + 这句话谁说的**，指令可以直接在这一行改",
       "views": [
         {
           "id": "ship-table",
@@ -177,6 +210,7 @@
           "source": "@state.ships[*]",
           "key": "name",
           "select_kind": "ship",
+          "card": "sel-ship",
           "group": { "by": "faction_id", "dot": "@state.factions[?name=${faction_id}].color" },
           "order": [{ "by": "role", "dir": "asc" }, { "by": "name", "dir": "asc" }],
           "columns": [
@@ -184,8 +218,8 @@
             { "path": "class", "label": "舰级", "fmt": "enum", "label_from": "config.ships" },
             { "path": "role", "label": "角色", "fmt": "enum", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
             { "path": "hull", "label": "船体", "with": "hull_max", "fmt": "ratio", "digits": 0 },
-            { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].behavior", "label": "指令（有效）", "fmt": "tagged", "map_ref": "tagged_behavior" },
-            { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].mode", "label": "这叶的归属", "fmt": "owner", "missing": "没有叶", "map": { "Player": "玩家（系统只读）", "Auto": "自动（系统每回合可改写）", "Inherit": "叶没表态（用叶里的值）" } },
+            { "leaf": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}]" },
+            { "leaf": "@control[?faction_id=${faction_id}].ship_role[?ship=${name}]", "compact": true },
             { "path": "@post.haul_steps.${name}.step", "label": "运输此刻", "fmt": "enum", "missing": "—", "map": { "loaded": "在装", "en_route": "在途", "waiting": "等货", "delivered": "已交货" } },
             { "path": "@post.decisions.ships[?ship=${name}].verdict", "label": "意志", "fmt": "enum", "missing": "—", "map": { "haul": "跑运输", "move": "机动", "engage": "接战", "bombard": "轰炸", "colonize": "殖民", "withdraw": "自保撤退", "hold": "没派活" } },
             { "path": "@post.decisions.ships[?ship=${name}].target", "label": "目标", "missing": "—" },
@@ -197,7 +231,7 @@
     {
       "id": "cities",
       "title": "城市",
-      "hint": "一城一行：人口、忠诚，以及忠诚目标拆出的两个原因项（距离 / 娱乐）",
+      "hint": "一城一行：人口、忠诚、**忠诚目标拆出的原因项**，以及能改它的娱乐/福利预算",
       "views": [
         {
           "id": "city-table",
@@ -207,6 +241,7 @@
           "source": "@state.cities[*]",
           "key": "name",
           "select_kind": "city",
+          "card": "sel-city",
           "group": { "by": "faction_id", "dot": "@state.factions[?name=${faction_id}].color" },
           "order": [{ "by": "loyalty", "dir": "asc" }],
           "columns": [
@@ -215,11 +250,13 @@
             { "path": "@post.cities.${name}.loyalty_target.effective", "label": "忠诚目标", "fmt": "pct", "digits": 0 },
             { "path": "@post.cities.${name}.loyalty_target.distance", "label": "↳ 距离项", "fmt": "pct", "digits": 0 },
             { "path": "@post.cities.${name}.loyalty_target.entertainment", "label": "↳ 娱乐项", "fmt": "pct", "digits": 0 },
+            { "leaf": "@control[?faction_id=${faction_id}].loyalty_budget[?city=${name}]" },
             { "path": "@post.cities.${name}.build", "label": "在造（进度/速率）", "fmt": "progress", "missing": "没在造" },
             { "path": "@post.cities.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
             { "path": "population", "label": "人口", "fmt": "int" },
             { "path": "body_id", "label": "天体" },
-            { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "" } }
+            { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "" } },
+            { "owner": "cities", "label": "归谁" }
           ]
         }
       ]
@@ -309,16 +346,15 @@
         { "path": "faction_id", "label": "势力", "dot": "@state.factions[?name=${faction_id}].color" },
         { "path": "class", "label": "舰级", "fmt": "enum", "label_from": "config.ships" },
         { "path": "blueprint", "label": "出厂图", "missing": "（无图，按舰级默认）" },
-        { "path": "role", "label": "角色", "fmt": "enum", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
+        { "path": "role", "label": "角色（有效值）", "fmt": "enum", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
         { "path": "hull", "label": "船体", "with": "hull_max", "fmt": "ratio", "digits": 0 },
         { "path": "shield", "label": "护盾", "with": "shield_max", "fmt": "ratio", "digits": 0 },
-        { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].behavior", "label": "指令（有效）", "fmt": "tagged", "map_ref": "tagged_behavior" },
-        { "path": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}].mode", "label": "这叶的归属", "fmt": "owner", "missing": "没有叶", "map": { "Player": "玩家（系统只读）", "Auto": "自动（系统每回合可改写）", "Inherit": "叶没表态（用叶里的值）" } },
-        { "path": "doctrine", "label": "风格", "fmt": "fields", "fields": [["temper", "理智↔热血"], ["lone_wolf", "护航↔独狼"]], "digits": 2 },
-        { "path": "kiting", "label": "姿态（风筝↔贴脸）", "fmt": "num", "digits": 2 },
-        { "path": "@control[?faction_id=${faction_id}].blueprints[?name=${blueprint}].role", "label": "出厂图上的角色", "fmt": "enum", "missing": "图没表态", "map": { "War": "战舰", "Freight": "运输舰", "Observe": "观测舰" } },
-        { "path": "@control[?faction_id=${faction_id}].blueprints[?name=${blueprint}].kiting", "label": "出厂图上的姿态", "fmt": "num", "digits": 2, "missing": "图没表态" },
-        { "path": "@control[?faction_id=${faction_id}].blueprints[?name=${blueprint}].doctrine", "label": "出厂图上的风格", "fmt": "fields", "fields": [["temper", "理智↔热血"], ["lone_wolf", "护航↔独狼"]], "digits": 2, "missing": "图没表态" },
+        { "path": "doctrine", "label": "风格（有效值）", "fmt": "fields", "fields": [["temper", "理智↔热血"], ["lone_wolf", "护航↔独狼"]], "digits": 2 },
+        { "path": "kiting", "label": "姿态（有效值，风筝↔贴脸）", "fmt": "num", "digits": 2 },
+        { "leaf": "@control[?faction_id=${faction_id}].ship_orders[?ship=${name}]" },
+        { "leaf": "@control[?faction_id=${faction_id}].ship_doctrine[?ship=${name}]" },
+        { "leaf": "@control[?faction_id=${faction_id}].ship_kiting[?ship=${name}]" },
+        { "leaf": "@control[?faction_id=${faction_id}].ship_role[?ship=${name}]" },
         { "path": "@control[?faction_id=${faction_id}].blueprints[?name=${blueprint}].mode", "label": "出厂图的归属", "fmt": "owner", "missing": "没有图", "map": { "Player": "玩家（图的话算数）", "Auto": "自动（图上的倾向只是流水）", "Inherit": "图没表态（沿作用域链上溯）" } },
         { "path": "@post.haul_steps.${name}.step", "label": "运输此刻", "fmt": "enum", "missing": "—", "map": { "loaded": "在装", "en_route": "在途", "waiting": "等货", "delivered": "已交货" } },
         { "path": "cargo", "label": "载货", "fmt": "map", "digits": 1, "missing": "空" },
@@ -345,13 +381,16 @@
         { "path": "@post.cities.${name}.loyalty_target.effective", "label": "忠诚目标", "fmt": "pct", "digits": 0 },
         { "path": "@post.cities.${name}.loyalty_target.distance", "label": "↳ 距离项", "fmt": "pct", "digits": 0 },
         { "path": "@post.cities.${name}.loyalty_target.entertainment", "label": "↳ 娱乐项", "fmt": "pct", "digits": 0 },
+        { "leaf": "@control[?faction_id=${faction_id}].loyalty_budget[?city=${name}]" },
         { "path": "@post.cities.${name}.labor", "label": "劳动力", "fmt": "pct", "digits": 0 },
         { "path": "@post.cities.${name}.housing_capacity", "label": "住房容量", "fmt": "num", "digits": 0 },
         { "path": "@post.cities.${name}.is_hub", "label": "集散枢纽", "fmt": "bool", "map": { "true": "是", "false": "否" } },
         { "path": "@post.cities.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
         { "path": "@post.cities.${name}.production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
         { "path": "@post.cities.${name}.build", "label": "在造（进度/速率）", "fmt": "progress", "missing": "没在造" },
-        { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "否" } }
+        { "action": "buildings", "label": "建筑与建造区" },
+        { "path": "razed", "label": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "否" } },
+        { "owner": "cities", "label": "这座城归谁" }
       ]
     },
     {
@@ -371,7 +410,8 @@
         { "path": "orbit.perihelion_distance", "label": "近日点 AU", "fmt": "num", "digits": 2 },
         { "path": "orbit.period", "label": "公转（月）", "fmt": "num", "digits": 1 },
         { "path": "settlements[*].name", "label": "定居点", "fmt": "list" },
-        { "path": "settlements", "label": "定居点明细", "fmt": "rows", "fields": ["total_area", "ecological_capacity", "construction_speed_mod"] }
+        { "path": "settlements", "label": "定居点明细", "fmt": "rows", "fields": ["total_area", "ecological_capacity", "construction_speed_mod"] },
+        { "owner": "bodies", "label": "这个天体归谁" }
       ]
     },
     {
@@ -386,21 +426,30 @@
         { "path": "name", "label": "势力", "dot": "color" },
         { "path": "@post.power_share.${name}", "label": "实力占比", "fmt": "pct", "digits": 0 },
         { "path": "@post.factions.${name}.at_war", "label": "状态", "fmt": "bool", "map": { "true": "交战", "false": "和平" } },
-        { "path": "@state.control.${name}.capital.value", "label": "首都", "missing": "—" },
-        { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
-        { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
+        { "leaf": "@control[?faction_id=${name}].capital" },
         { "path": "resources", "label": "首都库存", "fmt": "map", "digits": 0, "missing": "空" },
         { "path": "@post.factions.${name}.production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
+        { "path": "@post.factions.${name}.production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
+        { "leaf": "@control[?faction_id=${name}].investment_budget" },
+        { "leaf": "@control[?faction_id=${name}].construction_budget" },
         { "path": "@post.factions.${name}.upkeep", "label": "舰队维护/月", "fmt": "num", "digits": 1 },
         { "path": "@post.factions.${name}.upkeep_unpaid", "label": "没付上的维护", "fmt": "num", "digits": 1 },
         { "path": "@post.factions.${name}.governance_cost", "label": "治理/月", "fmt": "num", "digits": 1 },
         { "path": "@post.factions.${name}.governance_coverage", "label": "治理覆盖", "fmt": "pct", "digits": 0 },
+        { "leaf": "@control[?faction_id=${name}].loyalty_budget" },
+        { "path": "@post.factions.${name}.city_count", "label": "城", "fmt": "int" },
+        { "path": "@post.factions.${name}.ship_count", "label": "舰", "fmt": "int" },
+        { "path": "@post.factions.${name}.fleet_value", "label": "舰队", "fmt": "num", "digits": 0 },
+        { "leaf": "@control[?faction_id=${name}].default_role" },
+        { "leaf": "@control[?faction_id=${name}].default_doctrine" },
+        { "leaf": "@control[?faction_id=${name}].default_kiting" },
         { "path": "@post.factions.${name}.purchasing_power", "label": "购买力", "fmt": "num", "digits": 0 },
         { "path": "@post.factions.${name}.trade_blocked_by", "label": "被谁挡住贸易", "fmt": "map", "missing": "没人挡" },
         { "path": "@post.factions.${name}.freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
         { "path": "mond_control", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
         { "path": "reputation", "label": "名声", "fmt": "map", "digits": 0, "missing": "—" },
-        { "path": "relations", "label": "关系", "fmt": "map", "digits": 0, "missing": "—" }
+        { "path": "relations", "label": "关系", "fmt": "map", "digits": 0, "missing": "—" },
+        { "owner": "factions", "label": "这个势力归谁" }
       ]
     }
   ]

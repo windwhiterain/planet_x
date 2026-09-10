@@ -542,7 +542,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | `--meta` | 游戏规则字典（resources/buildings/ships/economy/combat…） |
 | `--schema` | 状态视图的 JSON Schema |
 | `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |
-| `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema |
+| `--control-schema` | `--apply` diff 能写哪些字段的 JSON Schema，**外加控制叶的结构事实**（`leaves` / `actions` / `owner_field` / `remove_field`）：每片叶的键名、**身份键**（`keys` 空 = 势力级单叶）、**值字段**、随行属性 `carries`、只读派生列 `read_only`。这一份是 web 与 kit 共用的唯一声明（`src/control/leaves.rs`，纪律见 `play/tests/g4_spec.py`） |
 | `--derived` | 这一回合的**视图对** `{round, source, pre, post}`（两个槽都是 `RoundView` 且同形：`pre` = 回合开始时的世界、`post` = 回合结束时的世界 + 本回合过程量；`post.decisions` = **本回合 AI 的判定**）；与 `--index` 的过程量表同值 |
 | `--control-plan [<faction>]` | 给势力算「成本→收益」（产出/维护/治理/净流/可养舰上限/清算倒计时） |
 | `--every <K>` | 每 K 回合一个全量快照（降采样）。**只管 stdout 轨迹，不动 `--index` 投影** |

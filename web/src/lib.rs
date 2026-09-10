@@ -5,6 +5,11 @@
 //! deterministic RNG, and exposes a hotseat-style JSON API over the engine
 //! (`planet_x` crate) as a library:
 //!
+//! * `GET  /api/control-schema` the control face's **structural facts** (leaf kinds:
+//!                         identity keys / value fields / read-only columns / owner
+//!                         & remove field names) — one declaration shared by the
+//!                         WebUI, the Python kit and the docs. See the engine's
+//!                         `control::leaves`.
 //! * `GET  /api/state`     the current world (bodies, cities, factions, ships,
 //!                         per-faction controllable state, control scope) **plus**
 //!                         the generic read-only info tree ([`InfoRoot`]).
@@ -450,6 +455,14 @@ async fn get_state(AxState(shared): AxState<Shared>) -> Json<StateView> {
     Json(state_view(&world))
 }
 
+/// 控制面的**结构事实**（`--control-schema` 那一份，见引擎的 `control::leaves`）。
+///
+/// 前端把它拉**一次**（不是每帧）：写面的行由 `web/static/views.json` 声明，
+/// 而「每片叶靠哪几个字段定位、值写在哪几个字段」这一半由引擎发——一份事实、三端共用。
+async fn get_control_schema() -> Json<serde_json::Value> {
+    Json(planet_x::control::control_schema_value())
+}
+
 async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) -> Json<StateView> {
     let mut guard = shared.lock().unwrap();
     let world = &mut *guard;
@@ -591,6 +604,7 @@ pub fn router(shared: Shared, web: WebCtx) -> Router {
         .unwrap_or_else(|_| format!("{}/static", env!("CARGO_MANIFEST_DIR")));
     Router::new()
         .route("/api/state", get(get_state))
+        .route("/api/control-schema", get(get_control_schema))
         .route("/api/advance", post(advance))
         .route("/api/command", post(command))
         .route("/api/new", post(new_game))
@@ -610,9 +624,24 @@ pub fn router(shared: Shared, web: WebCtx) -> Router {
 #[path = "tests.rs"]
 mod tests;
 
-/// `web/static/views.json`（组织点声明）的守门人：静态合法性 + 对真实世界的路径存在性。
-/// 声明是**数据**，写错不会编译报错，只会让某个视图静静少一列——纪律放在这里。
-/// 见 `.agents/notes/web-human-views.md` 与该文件头。
-#[cfg(test)]
-#[path = "views_tests.rs"]
-mod views_tests;
+// `web/static/views.json`（组织点声明）的纪律检查**已搬到 Python 侧**：`play/tests/g4_spec.py`。
+//
+// 为什么搬（用户裁决 2026-10：「测试应该和游戏二进制解耦，直接测跑出来的数据」；见
+// `.agents/notes/test-decoupled-suite.md` 与 `.agents/notes/web-control-spec.md` §6）：
+// 那份声明是**数据**，写错了不会编译报错——只会让某个视图静静地少一列、或者让新加的控制叶
+// 在界面上**凭空消失**。而检查它需要「跑真世界」，正是数据级那套擅长的事：改断言不用重编
+// 测试二进制（本轮起不再跑 `cargo nextest` / `cargo test`，只用 Python）。
+//
+// 搬走的是 `views_tests.rs`（488 行）里的三条：
+//
+// | 原处（已删除） | 现在住 `play/tests/g4_spec.py` |
+// | --- | --- |
+// | `views_json_is_well_formed`：id 唯一 / 引用完整 / `omit` 不与列重叠 / 路径合文法 / `@根` 已知 | 「静态纪律」五条 |
+// | `every_view_path_resolves_against_real_worlds`：相对列首段在真记录里存在 | 换成「**写面对账**（`leaves` ∪ `actions` ∪ `{faction_id}` ≡ `FactionControlPatch` 的属性集）+ **读面对账**（跑一局、每片叶写一次、读回来对字段集）」 |
+// | `coverage_report_is_printed_and_claimed_fields_actually_exist`：覆盖率报告 | 换成「**认领完整性**」（每个叶要么被 `leaf`/`action` 行认领、要么在 `write_omit` 里写明理由） |
+//
+// ⚠ 这不是丢检查，是**换口径**：原来那两条存在性检查只对得上「路径合文法」，而写面的缺口
+// （`role-axis-parity` / `blueprint-stance` 两次踩的都是它）住在**集合**上——所以现在是
+// **双向集合相等**：加字段不写声明 = 红、写一个不存在的叶 = 红、新叶没人认领 = 红。
+//
+// 原为 `#[cfg(test)] #[path = "views_tests.rs"] mod views_tests;`（2026-10 随文件一起删除）。
