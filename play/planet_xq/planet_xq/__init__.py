@@ -810,6 +810,32 @@ class PlanetXQ:
             df = self._flatten_data(df)
         return df
 
+    def round_inputs(self, round: int | None = None) -> dict | None:
+        """★ **本回合的输入面**（B5）：引擎这一回合**消费掉**了什么 —— 掷出的随机数 + 判定输入。
+
+        它与同一行的 `view`（**结算面**：观测 + 过程量）是一对，分工由用户裁决：
+        *「凡是可能未来与随机/输入有关的东西都放 `pre`」*。这一面**只存在于回合中段**
+        （主 `Prng` 的流一旦前进就再也拿不回来），所以它是唯一记下来的地方。
+
+        返回 `{"round", "order": [...], "relation_noise": {...}, "rolls": [...]}`：
+
+        * `order` —— **C7 · 本回合的逐舰解算顺序**：它是「**为什么这艘舰一炮未发就被击沉**」
+          的答案（互杀时它排在击沉它的那艘舰**之后**）。⚠ 名单是**洗牌那一刻**的舰集：
+          含这一回合稍后被打沉的舰、不含稍后才下水的舰，所以长度可以**大于**回合末的舰数。
+        * `relation_noise` —— **C13 · 每对势力的关系噪声**（`{势力: {势力: 增量}}`）：
+          「关系为什么**无端抖了一下**」。
+        * `rolls` —— `derived_roll` 家族的抽签记录（定编/派单/合同闸门/风格/蓝图/知识……），
+          每条含掷出的值**与当时的判据**（骰子可重算，判据不可）。
+
+        ⚠ 这一面**不在 `main.jsonl` 里**（按回合 join 这张表更省），也**不在 `--derived` 的
+        `post` 里**——问「谁先手 / 掷了什么」就来这里。空 = 这一回合没跑（round 0 / 起点行）。
+        """
+        df = self.derived("round_inputs", round)
+        if df is None or df.empty:
+            return None
+        # 一行一回合 ⇒ 交出一个**普通 dict**（调用方要的是 `r["order"]`，不是 pandas 标量）。
+        return {k: v for k, v in df.iloc[0].to_dict().items()}
+
     def salvos(
         self,
         round: int | None = None,

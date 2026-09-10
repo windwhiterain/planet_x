@@ -15,6 +15,9 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
         let j = rng.range(i as u64 + 1) as usize;
         order.swap(i, j);
     }
+    // **输入面（C7）**：这一手洗牌由**主 `Prng`** 掷出，不记就永久丢失——而「为什么这艘舰
+    // 一炮未发就被击沉」的答案正在这个顺序里（它排在击沉它的那艘舰**之后**）。
+    flow.inputs.order = order.clone();
 
     let mut next_building_id = state
         .cities

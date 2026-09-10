@@ -399,7 +399,7 @@ fn ideology_similarity_shifts_diplomatic_affinity_directionally() {
             fb.relations.insert(a.clone(), 0.0);
         }
         let mut rng = Prng::new(42);
-        step_diplomacy(&mut state, &config, &mut rng);
+        step_diplomacy(&mut state, &config, &mut rng, &mut RoundSink::default());
         relation(&state, &a, &b)
     };
 

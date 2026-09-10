@@ -116,7 +116,12 @@ pub fn adjust_relation(state: &mut State, config: &GameConfig, a: &str, b: &str,
 ///
 /// Hostile acts (`attack_delta` / `capture_delta` applied in [`adjust_relation`])
 /// still push relations down during combat, which is what keeps an active war hot.
-pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
+pub fn step_diplomacy(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    flow: &mut RoundSink,
+) {
     let d = &config.diplomacy;
     let band = 2.0;
 
@@ -214,7 +219,15 @@ pub fn step_diplomacy(state: &mut State, config: &GameConfig, rng: &mut Prng) {
             }
 
             // Little random fluctuation so relations wobble and cross thresholds.
-            rel += rng.range_f64(-d.noise, d.noise);
+            let noise = rng.range_f64(-d.noise, d.noise);
+            rel += noise;
+            // **输入面（C13）**：这一掷由主 `Prng` 出，是「关系为什么无端抖了一下」的唯一答案
+            // （`aff` 与漂移率都是确定的）。记的是**掷出的值**，不是掷完的关系。
+            flow.inputs
+                .relation_noise
+                .entry(a.clone())
+                .or_default()
+                .insert(b.clone(), noise);
 
             // 写入走**唯一漏斗**：钳位 + 战争疤痕地板（记恨）都在里面，所以随机扰动压不过地板。
             // 关系有多个写入者（这里的外交漂移、攻击/夺城 delta、合纵的相互靠拢、剧情效果），

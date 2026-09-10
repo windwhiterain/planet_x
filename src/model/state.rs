@@ -124,15 +124,23 @@ pub struct State {
     pub contracts: ContractState,
 }
 
-/// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
-/// 整个结构落盘（`--save`/`--start`）。`advance` 就地改 `state` 并把本回合的 `pre`/`post`
-/// 写回这两个字段。
+/// 一个可复现的**回合**：规范的持久世界 + `pre`（**输入面**）+ `post`（**结算面**）。
+/// 整个结构落盘（`--save`/`--start`）。
 ///
-/// * **`pre`**：依赖本次 rng **掷出的随机决策**的快照（造什么舰、海军重组、出战顺序、外交
-///   扰动……），是 `(state, rng)` 的函数。**不当作冻结的真理**——回退到某回合、换一个 rng，
-///   `pre` 就按新 rng 重算，故事自然分叉。这就是 `rng → pre_derived` 的关系。
-/// * **`post`**：依赖**当前 `state`** 的纯观测（实力占比/霸权/联盟/制裁/战争/产量/维护费/
-///   治理……），是 `state` 的函数。同一 `state` 恒定，供 agent 与测试读取。
+/// # 两个面的分工（用户裁决，B5）
+///
+/// | 面 | 类型 | 装什么 | 能不能事后重算 |
+/// | --- | --- | --- | --- |
+/// | **`post`** | [`RoundView`] | 这一回合**结算出来**的：**观测**（回合末世界的纯观测）+ **过程量**（产出/维护/治理/成交/运输/判定……，B1–B4 逐步捕获） | 观测能（[`crate::sim::view_from_state`] 同一把尺子）；**过程量不能**——回合中段算完就扔，回合末重算会给出另一个数（B2/B3 实测过） |
+/// | **`pre`** | [`RoundInputs`] | 这一回合**消费掉**的：**掷出的随机数** + **判定时看到的输入** | **不能**——主 `Prng` 的流已前进；`derived_roll` 的骰子虽可重算，但它比较的判据已经变了 |
+///
+/// **归属判据（用户原话）**：*「凡是可能未来与随机/输入有关的东西都放 `pre`，不一定要求当前的
+/// 实现有关」*——一个量只要**概念上**是输入或掷骰（哪怕今天恰好是确定值）就归 `pre`；
+/// 「这一回合结算出了什么」归 `post`。
+///
+/// ⚠ **`pre` 不再装观测**（B5 改的）：从前它是「回合开始时的观测副本」——同一份 `state`、同一个
+/// `observe`、空 sink 只把过程量抹成中性值，于是它与**上一回合的 `post`** 逐字段相同，**零信息量**。
+/// 要读「回合开始时的世界」请读上一行的 `post`（round 0 那份用 [`crate::sim::view_from_state`]）。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RoundState {
     /// 状态/schema 版本（同 [`State::schema_version`] 语义）。
@@ -140,9 +148,10 @@ pub struct RoundState {
     pub schema_version: u32,
     /// 规范的持久世界（实体）：天体/城/势力/舰/控制面/作用域/事件/编年史。
     pub state: State,
-    /// 本回合依赖 rng 的随机决策快照（`(state, rng)` 的函数，换 rng 即重算）。
-    pub pre: RoundView,
-    /// 本回合依赖 state 的纯观测快照（`state` 的函数）。
+    /// **输入面**：本回合掷出的随机数与判定输入（[`RoundInputs`]）。空 = 这一回合没跑。
+    #[serde(default)]
+    pub pre: RoundInputs,
+    /// **结算面**：本回合的观测 + 过程量（[`RoundView`]）。
     pub post: RoundView,
 }
 impl State {

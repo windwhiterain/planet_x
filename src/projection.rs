@@ -199,6 +199,16 @@ const DERIVED: &[DerivedTable] = &[
         join_on: "ship_ids",
         round: true,
     },
+    // **本回合的输入面**（B5）：一回合一行 —— 掷出的逐舰解算顺序 + 每对势力的关系噪声 +
+    // 抽签记录。它是 `pre` 那一侧的平铺版（`--derived` 不含 events，本表是 `--index` 侧唯一
+    // 能读到输入面的地方）。join 键是 `round`——这一面按**回合**读，不按实体。
+    DerivedTable {
+        name: "round_inputs",
+        table: "idx/round_inputs.jsonl",
+        key: "round",
+        join_on: "",
+        round: true,
+    },
 ];
 
 /// 投影的全部写出端，一次建好再传进 [`write_round`]（参数已经太多，别再往签名里塞）。
@@ -217,6 +227,7 @@ struct Writers {
     blueprints: BufWriter<File>,
     market_trades: BufWriter<File>,
     haul_steps: BufWriter<File>,
+    round_inputs: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
 }
@@ -243,6 +254,7 @@ impl Writers {
             blueprints: open("blueprints")?,
             market_trades: open("market_trades")?,
             haul_steps: open("haul_steps")?,
+            round_inputs: open("round_inputs")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
         })
@@ -263,6 +275,7 @@ impl Writers {
             &mut self.blueprints,
             &mut self.market_trades,
             &mut self.haul_steps,
+            &mut self.round_inputs,
             &mut self.bodies,
             &mut self.settlements,
         ] {
@@ -272,12 +285,13 @@ impl Writers {
     }
 }
 
-/// 投影产出的**收尾态**：本回合的 `pre`（推进前的观测）与 `post`（推进后的观测 + 流量）。
+/// 投影产出的**收尾态**：本回合的 `pre`（**输入面**：掷出的随机数 + 判定输入）与 `post`
+/// （**结算面**：观测 + 过程量）——见 [`crate::model::RoundState`] 的两面分工。
 ///
 /// 返回它们是为了 `--index --save` 能存下一份**没丢掉流量**的 checkpoint——否则
-/// `--index` 路径存出来的档里本回合的过程量是 0，「同一回合两个读面各说各话」。
+/// `--index` 路径存出来的档里本回合的过程量与输入面都是 0/空，「同一回合两个读面各说各话」。
 pub struct IndexOutcome {
-    pub pre: RoundView,
+    pub pre: RoundInputs,
     pub post: RoundView,
 }
 
@@ -294,20 +308,20 @@ pub fn write_index(
     write_index_seeded(state, config, rng, rounds, dir, None)
 }
 
-/// [`write_index`]，但允许把**起点回合的派生态**交进来。
+/// [`write_index`]，但允许把**起点回合的两对面**交进来。
 ///
 /// `--start <ckpt> --index` 时档里存着**产生当前状态的那一回合**的派生态：那一行的 state 就是
-/// 那一回合的结果，所以用档里的 `post` 比用 `view_from_state`（过程量为 0、观测里
-/// 的产出/维护/治理全被抹成 0）**更真**——否则「投影一份 checkpoint」会让 agent 看到「全世界
+/// 那一回合的结果，所以用档里的 `(post, pre)` 比用 `view_from_state`（过程量为 0、观测里的
+/// 产出/维护/治理全被抹成 0）**更真**——否则「投影一份 checkpoint」会让 agent 看到「全世界
 /// 零产出、零维护」，而真相是这些量只在它是回合结果时才有。全新开局（`--seed`）没有这一对，
-/// 传 `None`（回合 0 就是初始世界，没有流量）。
+/// 传 `None`（回合 0 就是初始世界，没有流量、也没有掷过骰子）。
 pub fn write_index_seeded(
     state: &mut State,
     config: &GameConfig,
     rng: &mut Prng,
     rounds: u32,
     dir: &Path,
-    start: Option<RoundView>,
+    start: Option<(RoundView, RoundInputs)>,
 ) -> Result<IndexOutcome, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir.join(IDX_DIR)).map_err(|e| e.to_string())?;
@@ -366,20 +380,21 @@ pub fn write_index_seeded(
 
     // Round 0 (start state) then each advancing round.
     //
-    // 起点那一行的派生态：有档就用档里那一对（见 [`write_index_seeded`]），没有就按当前状态重算。
+    // 起点那一行的两对面：有档就用档里那一对（见 [`write_index_seeded`]），没有就按当前状态
+    // 重算（输入面为空 = 这一回合没跑）。
     let (mut pre, mut post) = match start {
-        Some(s) => (s.clone(), s),
+        Some((v, i)) => (i, v),
         None => {
             let d = sim::view_from_state(state, config);
-            (d.clone(), d)
+            (RoundInputs::default(), d)
         }
     };
-    write_round(&mut w, state, config, &post)?;
+    write_round(&mut w, state, config, &post, &pre)?;
     for _ in 0..rounds {
-        // `pre` = 本回合开头的观测（随机决策尚未落地）；`post` = 结尾的观测 + 本回合流量。
-        pre = sim::view_from_state(state, config);
-        post = sim::advance(state, config, rng);
-        write_round(&mut w, state, config, &post)?;
+        // `pre` = 本回合**消费掉**的输入（掷出的随机数 + 判定输入，B5）；
+        // `post` = 本回合**结算出来**的观测 + 过程量。
+        post = sim::advance_round(state, config, rng, &mut pre);
+        write_round(&mut w, state, config, &post, &pre)?;
     }
 
     w.flush_all()?;
@@ -387,19 +402,25 @@ pub fn write_index_seeded(
 }
 
 /// Write one round's main line, event rows, ship rows, city rows, faction rows, and the
-/// derived tables (`faction_process` / `city_process` / `control` / `scope` / `decisions`).
+/// derived tables (`faction_process` / `city_process` / `control` / `scope` / `decisions` /
+/// `round_inputs` / `market_trades` / `haul_steps`).
 fn write_round(
     w: &mut Writers,
     state: &State,
     config: &GameConfig,
     view: &RoundView,
+    inputs: &RoundInputs,
 ) -> Result<(), String> {
     let row = json!({
         "round": state.round,
         "time_month": r2(state.time_month),
         "chronicle": state.chronicle,
-        // 本回合的**视图**（`RoundView`）：观测 + 本回合过程量，整份内联。
+        // 本回合的**结算面**（`RoundView`）：观测 + 本回合过程量，整份内联。
         "view": view,
+        // ⚠ **输入面不在这一行里**（B5）：它是 `RoundInputs`（掷出的随机数 + 判定输入），
+        // 住在 `idx/round_inputs.jsonl`（一行一回合，按 `round` join）。
+        // 为什么不内联：C7 的解算顺序是**整份舰名列表**（几十个名字），而它只对「那一回合
+        // 谁先手」这一个问题有用——按 B4 的同一笔账（事件只内联 id），这里也只留 join。
         "event_ids": (0..state.events.len())
             .map(|i| event_id(state.round, i))
             .collect::<Vec<_>>(),
@@ -419,6 +440,21 @@ fn write_round(
             .collect::<Vec<_>>(),
     });
     writeln!(w.main, "{row}").map_err(|e| e.to_string())?;
+
+    // **本回合的输入面**（B5）：一行一回合——掷出的解算顺序 + 每对势力的关系噪声 + 抽签记录。
+    // 与 `post` 同一份来源（`advance_round` 交出来的），所以两个读面（`--derived` 的 `pre` 与
+    // 这张表）给的是同一个值。
+    writeln!(
+        w.round_inputs,
+        "{}",
+        json!({
+            "round": state.round,
+            "order": inputs.order,
+            "relation_noise": inputs.relation_noise,
+            "rolls": inputs.rolls,
+        })
+    )
+    .map_err(|e| e.to_string())?;
 
     // 本回合事件的**归一化行**（见 `GameEvent::history_row`）：固定列、无同名多义，
     // 参与方在统一的 (actor/target/extra) 槽位里。Python 侧因此可以按任意实体 join
@@ -1458,6 +1494,16 @@ pub fn projection_schema() -> serde_json::Value {
                     "launch_waiting": "**进度满了却不下水的可见标记**（用户裁决 Q4(b)）：本回合这张图在某个挂了它的城里，该舰级的进度已经 ≥ `build_points` 却没下水——因为**买不起**它的选装（只对 **Player 归属**的图可能为 true；Auto 图与无图保持旧行为）。进度**不会丢**，下回合攒够钱就下水。",
                 },
             }),
+            "round_inputs" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**本回合的输入面**（B5，`RoundInputs` = `--derived` 的 `pre` 那一侧）：一回合一行——引擎这一回合**消费掉**了什么。它和同一行的 `view`（**结算面**：观测 + 过程量）是一对，分工是用户裁决：*「凡是可能未来与随机/输入有关的东西都放 pre，不一定要求当前的实现有关」*。⚠ 这一面**不在 `main.jsonl` 里**（`pre` 的两样东西里，解算顺序是整份舰名列表，按回合 join 更省），也**不在 `--derived` 的 `post` 里**——`--index` 侧只有这张表能读到它。⚠ 空 = 这一回合没跑（round 0 / `--start` 起点行），**不是**「掷出了 0」。",
+                "columns": {"round":"integer","order":"array","relation_noise":"object","rolls":"array"},
+                "column_docs": {
+                    "order": "**C7 · 本回合的逐舰解算顺序**（`sim::step_military` 开头由**主 `Prng`** 洗出）：它是「**为什么这艘舰一炮未发就被击沉**」的答案——互杀时它排在击沉它的那艘舰**之后**（`hull <= 0` 的舰在循环里跳过）。⚠ 含**所有**舰（已沉的也在洗牌池里，只是轮到时不行动）。",
+                    "relation_noise": "**C13 · 本回合每对势力的关系噪声**（`rel += rng.range_f64(-noise, noise)` 里掷出的那个增量），`{势力: {势力: 噪声}}`，键是**有序**的一对（同一对只出现一次）。它回答「关系为什么**无端抖了一下**」——`aff` 与漂移率都是确定的，唯一无缘无故的动就是这个。",
+                    "rolls": "**`derived_roll` 家族的抽签记录**（定编 / 派单 / 合同闸门 / 风格 / 蓝图 / 知识……）：每条 = `{purpose, faction, subject, value, threshold, pool_total, picked}`——`value` 是掷出的值 ∈ [0,1)，`threshold` 是闸门比较的机会值，`pool_total` 是加权抽签池的总权重，`picked` 是结果。⚠ 这些骰子**不消费主 `Prng`**（`(势力, 对象, 回合, 用途)` 的哈希 ⇒ 可重算），但**判据不可重算**（候选池/权重/机会值都是那一刻的）——所以记录里两者都留。（B5a 先把面与两处主 `Prng` 接上；逐族接入见笔记。）",
+                },
+            }),
             "decisions" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）+ **首都评估/迁都**（稀疏：只在评估回合或迁都回合有行）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
@@ -1486,8 +1532,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "loss": "**丢货比例**（0..`mond_loss_cap`）：非 0 = 这批货走异常带时**部分失联**，「我买到的货为什么少了」的答案。确定性比例（`mond_loss_per_au × depth × (1 − mastery)`），不是掷骰。",
                 },
             }),
-            "haul_steps" => json!({
-                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+            "haul_steps" => json!({                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合每艘在跑运输的舰走了哪一步**（`RoundView::haul_steps`）：一舰一行。`waiting`（停在**空货栈**干等）与 `en_route`（在路上，装/卸都还没发生）**既不落持久状态、也不发事件**——所以「我派它去拉货，为什么一件没运回来」在 B3 之前**没有任何读法**；`loaded`/`delivered` 说明这一步真的搬了货。⚠ 两条执行路径（AI 的 `ai_ship_turn` 与**玩家指令**的 `step_military`）都写这张表，所以**玩家舰也在里面**。",
                 "columns": {"round":"integer","ship_id":"string","step":"string","body":"string","units":"number","into_pool":"boolean"},
                 "column_docs": {

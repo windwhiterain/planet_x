@@ -5,7 +5,7 @@
 //!    （两边集合相等，且中性值的类型与 schema 类型相容）；
 //! 2. `struct_defaults_equal_the_declared_neutrals`——Rust 的 `Default` 就是声明的中性值
 //!    （serde 缺字段走的就是它，两者不一致 = 「同一份存储两个读者两个值」）；
-//! 3. `pre_face_process_fields_equal_their_declared_neutral`——**引擎的实证**：一个真实世界里
+//! 3. `unadvanced_world_process_fields_equal_their_declared_neutral`——**引擎的实证**：一个真实世界里
 //!    「这一步还没跑」的字段，吐出来的值必须逐字段等于声明；
 //! 4. `value_consts_match_the_table`——引擎用的具名常量与表同值（常量给人读，表给 schema 读）；
 //! 5. `schema_publishes_the_neutral_table`——发出去的 `schema.json` 段等于本表。
@@ -303,10 +303,13 @@ const PROCESS_PATHS: &[&str] = &[
 ];
 
 #[test]
-fn pre_face_process_fields_equal_their_declared_neutral() {
+fn unadvanced_world_process_fields_equal_their_declared_neutral() {
     let config = load_config();
     let state = default_state(&config, 42);
-    // `view_from_state` = 喂一个空 sink 的观测 ⇒ 正是「`pre` 面」的形状（`--start` 载入 / 回合 0）。
+    // `view_from_state` = 喂一个空 sink 的观测 ⇒ 正是「**这一步还没跑**」那一档的形状。
+    // ⚠ B5 之后它**不再叫「`pre` 面」**：`pre` 已经是**输入面**（`RoundInputs`：掷出的随机数 +
+    // 判定输入），不再是「回合开始的观测」。这里守的是**空 sink 的中性值约定**——它仍在两处
+    // 重要：round 0 的观测，以及「按当前状态重算一份观测」那个工具（`--derived` 无档时走它）。
     let view = serde_json::to_value(crate::sim::view_from_state(&state, &config)).unwrap();
 
     // 下限只是防空转（原本 ~32 条；`capital` 判定搬进稀疏数组、两个全国项上移势力行后少了几条）。
@@ -319,7 +322,7 @@ fn pre_face_process_fields_equal_their_declared_neutral() {
             neutral_for(path).is_some(),
             "{path} 在过程量清单里，却没在 READ_FACE_NEUTRALS 里声明"
         );
-        assert_path_is_neutral(&view, path, path, "引擎的 pre 面");
+        assert_path_is_neutral(&view, path, path, "没推进过的世界（空 sink）");
     }
 }
 

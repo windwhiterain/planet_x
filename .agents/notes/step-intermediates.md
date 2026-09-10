@@ -3,7 +3,8 @@
 > 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）、
 > **B2（钱去哪了）已落地**（`feature/b2-money`，见 §6.3）、
 > **B3（市场与运输）已落地**（`feature/b3-market`，见 §6.4）、
-> **B4（战斗：中间量进事件层）已落地**（`feature/b4-combat`，见 §6.5，用户裁决 Q1 = (b)）；B5 仍是候选。
+> **B4（战斗：中间量进事件层）已落地**（`feature/b4-combat`，见 §6.5，用户裁决 Q1 = (b)）、
+> **B5（输入面 `pre`：掷出的随机数 + 判定输入）已落地（B5a）**（`feature/b5-inputs`，见 §6.6）。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md) §5（本篇是那一条的展开）、
 > [`unified-metrics.md`](unified-metrics.md)（上一次「总结 = 步进中间量」的合并；它的「候选」第一条
 > 就是本篇的 **B1**）、[`engine-data-plane.md`](engine-data-plane.md) §7.4（`pre` 面的真相 = 本篇 **B5**
@@ -126,7 +127,7 @@
 | ✅ **B2** 钱去哪了（**已落地**，见 §6.3） | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
 | ✅ **B3** 市场与运输（**已落地**，见 §6.4） | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
 | ✅ **B4** 战斗（**已落地**，见 §6.5） | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
-| **B5** `pre` 面 | C7 洗牌顺序、C13 关系噪声、B 组 6 条 `derived_roll` 判定（含合同三闸门、派单、定编） | 唯一一批**必须**改 `advance`：让它同时产出「AI 看到/掷出了什么」 | **是** |
+| 🚧 **B5** `pre` 面（**B5a 已落地**，见 §6.6；B5b/B5c 待接） | C7 洗牌顺序、C13 关系噪声、`derived_roll` 家族（**实测 ~18 处**，不是 6 条）、判定时看到的候选池 | 唯一一批**必须**从回合中段捕获（`advance_round` 把输入面交出来）；面的分工已在用户裁决下定死 | 否（`advance` 保留原签名） |
 
 每批的验收门（缺一不可）：
 
@@ -356,7 +357,78 @@ kit 新增 **`q.salvos()`**（把 `data.shots` 摊平，含算好的 `score` 列
 记新基线**——`notes.md` 的「快速参考」里当下仍是 `81A197…1811`，实测**当前 main 已是
 `C928C3F1…06A9`**。B4 这一条正好落在它之后，所以两边一起写进去了（见 `notes.md` 的基线链）。
 
-## 7. 待裁决（剩下的设计点，动 B5 之前必须先定）
+### 6.6 B5 落地记录：两个面的分工（`feature/b5-inputs`）
+
+**这一批先改的是「面」本身，不是某一族量。** 起因是用户对 `pre` 的两问（原话）：
+
+> 「如果回合开始观测的那部分数据不依赖随机/输入，为啥不放 post？此外数据只有依赖当回合的
+> state 才应该在 post」
+>
+> 「现在只有可能未来与随机/输入有关的东西都放 pre，不一定要求当前的实现有关。其他 confirm」
+
+**先把事实量清楚（用户第一问的答案）**：`pre` 当时是 `view_from_state(state)` = 拿**空 sink**
+观测回合开始的世界。实测（seed 7 / round 6 的档，与**上一回合**那一行的 `post` 比）：
+
+```text
+pre 的观测      ==  上一回合 post 的观测   →  True
+post 的观测     ==  上一回合 post 的观测   →  False（世界已经变了）
+pre   : production={}, upkeep=0.0, governance_cost=0.0, investment_spent={}
+prev  : production={硅:20,碳:0.75,铁:40}, upkeep=20.6, governance_cost=6.0
+```
+
+⇒ `pre` 当时**信息量为零**：观测那一半是上一回合 `post` 的**副本**（同一份 state、同一个
+`observe`、空 sink 只按中性值表抹平过程量），过程那一半**按构造恒为中性值**（还有一条守卫
+钉着）。**第一问的答案是：那半既不该留在 `pre`，也不必塞进 `post`——该删掉**（要读「回合开始
+的世界」读上一行的 `post`）。
+
+**第二问把判据换掉了**：文档里「`post` 是 `state` 的函数」这句**在 B1–B4 之后已不成立**
+（`labor` 取人口增长前的人口、`is_hub` 取决于回合中段的迁都、`capacity_ledger` 是挂单那一步
+算的——都**不可**由回合末 state 重算）。于是真正的划分是**三类**，而 `pre`/`post` 是按**时间**
+切的，两套切法错位才是这个面一直别扭的根因：
+
+| 类 | 是什么 | 能不能事后重算 | 归属（B5 之后） |
+| --- | --- | --- | --- |
+| ① state 派生的观测 | 实力占比/霸权/战争/人口/舰队价值/市场价…… | **能**（`view_from_state`） | `post` |
+| ② 回合过程事实 | 产出/维护/治理/成交/运输/逐发/判定…… | **不能** | `post` |
+| ③ 回合的**输入** | C7 顺序、C13 噪声、`derived_roll` 家族、判定时看到的候选池 | **不能** | **`pre`**（B5 新装） |
+
+**裁决与实现**（B5a）：
+
+1. **`pre` 的类型换成 `RoundInputs`**（新文件 `src/model/inputs.rs`）——不再是 `RoundView`：
+   它现在装 `order`（C7）、`relation_noise`（C13）、`rolls`（`derived_roll` 家族，通用记录
+   类型已定：`{purpose, faction, subject, value, threshold, pool_total, picked}`，闸门与加权
+   抽签两种用法都能表达）。
+2. **砍掉观测副本**：投影/CLI 的循环不再 `pre = view_from_state(...)`，改为把
+   `advance_round` 交出来的输入面接住。`view_from_state` 保留，但用途降级为「随时重算一份
+   观测」（round 0、`--derived` 无档时）。
+3. **产出方式 = Q2 的 (b)**：`RoundSink` 多一格 `inputs`，回合末整份交给调用方。核心函数
+   **保留 `advance` 的原签名**（98 个调用点里 92 个在测试里——不为这个改 92 处），另加
+   `advance_round(state, config, rng, &mut RoundInputs) -> RoundView`；`advance` 就是它的薄壳。
+4. **两个读面都能读到**：`--derived` 的 `pre`（档里存的那一面）+ `--index` 的新派生表
+   **`idx/round_inputs.jsonl`**（一回合一行，按 `round` 读）。⚠ **不内联进 `main.jsonl`**
+   （C7 的顺序是整份舰名列表，几十个名字，只对「谁先手」有用——与 B4「事件只内联 id」同一笔账）。
+5. **`SCHEMA_VERSION` 19 → 20 → 21**：`RoundState.pre` 的类型变了（档的形状变了），旧档的
+   `Attack.shots`/`pre` 靠 `#[serde(default)]` 各自补空。
+
+**实测到的两处「回合中段」真相**（写进文档，免得下一个人当成漏记）：
+
+* **C7 的顺序名单不等于回合末的舰集**：它是**洗牌那一刻**的 `state.ships`——含这一回合稍后
+  被打沉/除名的舰（死亡清扫在 `step_military` 收尾才做），不含稍后才下水的舰。第一次写用例
+  时按「等于回合末舰集」判，第 2 回合就红了（21 vs 16），才发现这条。
+* **记录不消费随机流**：C7/C13 都是「读一次用一次」，把值抄下来不影响后续骰子 ⇒
+  **digest 逐字不变**（`C928C3F1…06A9`，与合并后的 `main` 相同）。
+
+**还剩什么（B5b/B5c，已定形状）**：
+
+* **B5b · `derived_roll` 家族（约 18 处、8 个文件）**：接入形状是**「骰子由调用方掷、传进去」**
+  ——因为这些函数是**纯函数**（`should_be_role` / `route_for` / 闸门判定），而且**同一枚骰子
+  可能被问两次**（`should_be_role` 既被「挂单估运力」问、又被「定编拍板」问）⇒ **只在拍板处
+  记一条**（记的是「谁做了什么决定」，不是「谁算过」）。
+* **B5c · 判定时看到的输入**（用户 confirm 要收）：`build_fire_plan` 的候选池、`route` 的
+  积压占比、合同的 `eligibility`/`pool_total`……它们是**回合中段的 state 快照** ⇒ 属 ③，
+  同样只在拍板处记。
+
+## 7. 待裁决（剩下的设计点）
 
 * **Q1 · 「每次结算 / 舰对」粒度的量放哪？** ✅ **已裁决：(b) 进事件层**（实现见 §6.5）。
   当时的背景：战斗五条（C1–C5）与索敌计划是**逐舰逐发**的，塞不进「每势力一行 / 每城一行」的
@@ -368,11 +440,12 @@ kit 新增 **`q.salvos()`**（把 `data.shots` 摊平，含算好的 `score` 列
   （c）**不捕获明细**，只把聚合折进 `FactionRow`（如「本回合被规避掉多少伤害」）。
   **裁决 = (b)**；理由与代价（`--derived` 看不到 events、`State` 变胖、`relations` 的交火判据
   必须一起加闸）都记在 §6.5。
-* **Q2 · `pre` 面怎么产？** B5 要让 `advance` 同时吐 pre。两种形状：
-  （a）`advance` 返回 `(pre_view, post_view)`；
-  （b）保持单返回值，但把 `RoundSink` 扩成也收「判定流水」，回合末由 `observe` 一次折出两档。
-  顺带一个语义问题：`pre` 现在是「回合开始时的观测」，B5 之后它会变成「回合开始时 AI 看到 + 掷出
-  的判定」——**这个名字要不要改**（比如 `pre` 不变、另开一个 `rolls` 段）？
+* **Q2 · `pre` 面怎么产？** ✅ **已裁决并落地**（见 §6.6）。当时问的是两种形状：
+  （a）`advance` 返回 `(pre, post)`；（b）保持单返回值，把 `RoundSink` 扩成也收「判定流水」，
+  回合末折两档。**取 (b)**，并且进一步**没有改 `advance` 的签名**（92 个测试调用点不动），
+  另加 `advance_round(state, config, rng, &mut RoundInputs) -> RoundView`。
+  命名那个问题也定了：**保名 `pre`/`post`**（改动面小、已被大量用例与笔记引用），
+  但把两条定义**逐字写进 `RoundState` 的文档**，并删掉那句错话（「`post` 是 `state` 的函数」）。
 * **Q3 · 体积**。`main.jsonl` 已经内联整份 `view`（含 `decisions`）。B4 若把逐发索敌计划也算进
   `view`，一局长局的 jsonl 会明显变大。备选：只在 `--derived` 里给、或单独成表 + `--every` 降采样
   （[`coarse-trajectory-views.md`](coarse-trajectory-views.md) 已有这套机制）。

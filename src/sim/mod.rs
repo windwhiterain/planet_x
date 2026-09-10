@@ -98,7 +98,26 @@ pub fn view_from_state(state: &State, config: &GameConfig) -> RoundView {
 ///
 /// This is the `(state, rng) -> (state', rng', RoundView)` data-flow principle: `state` is mutated
 /// in place, `rng` is consumed via `&mut`, and all derived data rides out in one view.
+///
+/// **B5**：本函数是 [`advance_round`] 的薄壳（丢掉输入面）。要拿「本回合掷了什么」
+/// （[`RoundInputs`]）就用 [`advance_round`]——只有它能把那一面带出来。
 pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundView {
+    advance_round(state, config, rng, &mut RoundInputs::default())
+}
+
+/// [`advance`]，但把本回合的**输入面**（[`RoundInputs`]：掷出的随机数 + 判定时看到的输入）
+/// 一并交出来。
+///
+/// 为什么需要这一条：输入面**只存在于回合中段**——主 `Prng` 的流一旦前进，掷出的顺序/噪声就
+/// 再也拿不回来。`advance` 的返回值是**结算面**（`post`），输入面只能由调用方接住。
+///
+/// `inputs` 被**整份覆盖**（不是追加），所以跨回合复用同一个缓冲区不会串味。
+pub fn advance_round(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    inputs: &mut RoundInputs,
+) -> RoundView {
     state.round += 1;
     state.time_month += 1.0;
     // 本回合事件日志从空开始，回合演化中追加。
@@ -131,7 +150,7 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundV
     // 迁都：亡城强迁（首都天体失守→人口最高活城）+ 周期性 AI 评估。放在这里，
     // 让本回合刚靠殖民舰立起立足点的势力也能当回合被认领新首都。
     step_capital(state, config, &mut sink);
-    step_diplomacy(state, config, rng);
+    step_diplomacy(state, config, rng, &mut sink);
     // 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力结成反制联盟——
     // 军事上联手制衡，经济上多国资源封锁。这给「一家独大」一个自然的众矢之的。
     step_balance_of_power(state, config);
@@ -179,6 +198,8 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> RoundV
     // 结回合：把 `sink` 里的过程量折进本回合的 `post` 视图。`observe` 复用
     // `balance_picture`/`sanctioned_hegemon`/`faction_power` 等 step 同源计算，因此视图里的
     // 观测与游戏逻辑**严格一致**；`faction_power` 是单一权威。
+    // 输入面（B5）整份交给调用方：它只活在这一回合的 `sink` 里。
+    *inputs = std::mem::take(&mut sink.inputs);
     observe(state, config, &sink)
 }
 

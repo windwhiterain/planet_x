@@ -85,7 +85,26 @@ q.salvos(round=12)             # ★ PER-SHOT combat breakdown (B4): one row per
                                #   WHY it aimed there (score_basic / score_temper / score_spread → score)
                                #   + WHAT it did (hit / def_mult / pd / pd_absorbed / absorbed / soak /
                                #     armor_soak / hull_pen / damage / killed / skipped)
+q.round_inputs(round=12)       # ★ THE INPUT FACE (B5): what the round *consumed* rather than produced —
+                               #   order (C7: the per-ship resolution order) / relation_noise (C13) / rolls
 ```
+
+**Two faces, one round (B5).** `view` is the **settled** face (observations + the round's process
+quantities); `round_inputs` is the **consumed** face — the dice the engine rolled and the inputs its
+judgments saw. The rule is by *kind*, not by which values exist today: anything that is (or could
+later become) an input or a roll lives on the input face, everything the round produced lives on the
+settled face. Two things this buys you:
+
+- **`order` answers "why did my ship die without firing once"**: ships resolve in a shuffled order
+  (`main Prng`, recorded per round); a ship that is resolved *after* the one that sank it never gets
+  its shot. ⚠ the list is the ship set **at shuffle time** — it can include a ship sunk later that
+  same round and omit one launched later, so it may be longer than the round's closing roster.
+- **`relation_noise` answers "why did that relation wobble for no reason"**: `aff` and the drift
+  rate are deterministic; the ±noise roll is the only unmotivated move.
+
+⚠ The input face is **not** in `main.jsonl` and **not** in `--derived`'s `post` — it is the
+`pre` side (what `--derived` prints as `pre`, and what `round_inputs` holds in an `--index`
+projection). Empty means the round never ran (round 0 / a `--start` row), not "rolled a zero".
 
 `decisions` is the one table that answers "**why** did my ship do that": `verdict` is one of
 `withdraw` / `engage` / `colonize` / `bombard` / `move` / `hold` (`hold` = the AI **did not give

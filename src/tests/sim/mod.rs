@@ -13,6 +13,7 @@ mod fleet;
 mod governance;
 mod haul;
 mod ideology;
+mod inputs;
 mod knowledge;
 mod mond;
 mod shots;

@@ -759,3 +759,66 @@ fn b3_tables_match_the_derived_record() {
         "没见到 waiting/en_route（{kinds:?}）——这两档不落 state、不发事件，不出现就等于没检查"
     );
 }
+
+/// **B5：输入面两个读面必须给同一份数** —— `--index` 的 `round_inputs` 表 vs `--derived` 的
+/// `pre`（档里存的那一面）。
+///
+/// 这一条是 B5 的**核心契约**：`pre` 从「回合开始的观测副本」换成了「这一回合掷了什么」，
+/// 而掷出的东西**只存在于回合中段**——两个读面要是各说各话，就不可能有第二个来源去对账。
+/// 同时钉住「输入面里**没有**观测字段」（B5 砍掉的那一份重复）。
+#[test]
+fn b5_input_face_matches_between_the_two_read_faces() {
+    let s = Scratch::new("b5inputs");
+    let out = s.0.join("out");
+    let ckpt = s.0.join("ckpt.ron");
+    let (out_s, ckpt_s) = (out.to_str().unwrap(), ckpt.to_str().unwrap());
+
+    let st = run(&["--seed", "7", "--round", "12", "--index", out_s, "--save", ckpt_s]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+
+    let st = run(&["--start", ckpt_s, "--derived"]);
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
+    assert_eq!(v["round"], serde_json::json!(12));
+    let pre = &v["pre"];
+
+    // ① 输入面里不该有观测字段（B5 砍掉的那一份重复）。
+    let obj = pre.as_object().expect("输入面是个对象");
+    for banned in ["factions", "cities", "wars", "power_share", "fleet_value", "decisions"] {
+        assert!(
+            !obj.contains_key(banned),
+            "`pre` 里出现了观测字段 `{banned}`——它属于 `post`"
+        );
+    }
+
+    // ② 与表逐字段对上。
+    let rows = derived_rows(&out, "round_inputs", 12);
+    assert_eq!(rows.len(), 1, "第 12 回合应当恰好一行输入面");
+    let row = &rows[0];
+    assert_eq!(row["order"], pre["order"], "解算顺序两个读面不一致");
+    assert_eq!(
+        row["relation_noise"], pre["relation_noise"],
+        "关系噪声两个读面不一致"
+    );
+    assert_eq!(row["rolls"], pre["rolls"], "抽签记录两个读面不一致");
+
+    // ③ 防空转：这一回合必须真的掷过（顺序是一整份名单、噪声覆盖每一对）。
+    let order = pre["order"].as_array().expect("order 是数组");
+    assert!(
+        order.len() >= 5,
+        "第 12 回合的解算顺序只有 {} 个名字——输入面没接到东西？",
+        order.len()
+    );
+    let noise = pre["relation_noise"].as_object().expect("relation_noise 是对象");
+    assert!(
+        noise.len() >= 2,
+        "关系噪声只覆盖 {} 个势力——防空转",
+        noise.len()
+    );
+
+    // ④ 起点行（round 0）没有掷过骰子 ⇒ 输入面是空的（「没跑」而不是「掷出了 0」）。
+    let first = derived_rows(&out, "round_inputs", 0);
+    assert_eq!(first.len(), 1, "round 0 也该有一行（空的那一行）");
+    assert_eq!(first[0]["order"], serde_json::json!([]));
+    assert_eq!(first[0]["relation_noise"], serde_json::json!({}));
+}

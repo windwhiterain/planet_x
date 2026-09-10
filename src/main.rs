@@ -73,7 +73,7 @@ use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{
-    FactionId, GameConfig, GameEvent, RoundState, RoundView, SCHEMA_VERSION, State,
+    FactionId, GameConfig, GameEvent, RoundInputs, RoundState, RoundView, SCHEMA_VERSION, State,
 };
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, control, projection, sim, world};
@@ -336,20 +336,19 @@ fn main() {
 
     // State-reflecting dumps.
     //
-    // `--derived`：这一回合引擎到底算出了什么（`pre` = 回合开始的世界；`post` = 回合结束的世界
-    // + 本回合过程量）。
+    // `--derived`：这一回合引擎到底算出/消费了什么。
+    // **两面分工（B5）**：`pre` = **输入面**（本回合掷出的随机数 + 判定输入，`RoundInputs`）；
+    // `post` = **结算面**（回合末的观测 + 本回合过程量，`RoundView`）。两者形状不同是**有意的**：
+    // 从前 `pre` 是「回合开始时的观测副本」，与上一回合的 `post` 逐字段相同、零信息量。
     // 有档就报**档里存的**那一对——于是它与 `--index` 的过程量表对同一回合给同一个值
     // （有 `tests/projection_derived.rs` 把这条钉住）；没档（或叠加了 `--apply`，此时状态已变）
-    // 只能按当前状态重算，那种情况下没有流量，`note` 明说，别让人误以为流水为零。
+    // 只能按当前状态重算，那种情况下没有流量、也没有掷过骰子，`note` 明说，别让人误以为流水为零。
     if cli.derived {
         let from_checkpoint = stored.is_some() && cli.apply.is_none();
         let (pre, post) = match (&stored, cli.apply.is_some()) {
             (Some(rs), false) => (rs.pre.clone(), rs.post.clone()),
             (Some(rs), true) => (rs.pre.clone(), sim::view_from_state(&state, &config)),
-            (None, _) => {
-                let d = sim::view_from_state(&state, &config);
-                (d.clone(), d)
-            }
+            (None, _) => (RoundInputs::default(), sim::view_from_state(&state, &config)),
         };
         let mut v = json!({
             "round": state.round,
@@ -359,9 +358,10 @@ fn main() {
         });
         if !from_checkpoint {
             v["note"] = json!(
-                "这份视图是**按当前状态重算**的，没有档存的「本回合过程量」，所以 pre/post 里的产出、维护费、\
-                 治理与判定流水全是 0 / 空。要看真正的过程量，请用 `--index` 投影的过程量表，或用 `--save`\
-                 出来的 checkpoint（它带真正的 pre/post）。"
+                "这份视图是**按当前状态重算**的，没有档存的「本回合过程量」、也没有本回合的输入面\
+                 （掷出的随机数只存在于回合中段）。`post` 里的产出、维护费、治理与判定流水全是 0 / 空，\
+                 `pre` 是空的。要看真正的过程量请用 `--index` 投影的过程量表（`faction_process` / \
+                 `city_process` / `round_inputs` …），或 `--save` 出来的 checkpoint（它带真正的两面）。"
             );
         }
         emit(&v.to_string());
@@ -415,7 +415,7 @@ fn main() {
         // 从 checkpoint 起跑时，把档里那一对派生态交给投影当**起点回合**的行（见
         // `projection::write_index_seeded`）：那一行的 state 就是那一回合的结果，所以
         // 「产出/维护/治理」应当是那一回合的数，而不是被抹成 0。
-        let start_derived = stored.as_ref().map(|rs| rs.post.clone());
+        let start_derived = stored.as_ref().map(|rs| (rs.post.clone(), rs.pre.clone()));
         let outcome = match projection::write_index_seeded(
             &mut state,
             &config,
@@ -524,13 +524,11 @@ fn run_rounds(
         state,
         &sim::view_from_state(state, config),
     )); // round 0 / start
-    let mut last_pre = sim::view_from_state(state, config);
-    let mut last_post = last_pre.clone();
+    let mut last_pre = RoundInputs::default();
+    let mut last_post = sim::view_from_state(state, config);
     for _ in 0..n {
-        // `pre` = 本回合开头的世界快照（要掷的随机还没落地）；`post` = 结尾的观测。
-        last_pre = sim::view_from_state(state, config);
-        let derived = sim::advance(state, config, rng);
-        last_post = derived;
+        // `pre` = 本回合**消费掉**的输入（掷出的随机数）；`post` = 本回合**结算出来**的观测。
+        last_post = sim::advance_round(state, config, rng, &mut last_pre);
         if state.round % every == 0 {
             emit(&agent::render_state(state, &last_post));
         }
@@ -564,12 +562,10 @@ fn run_trajectory(
         state,
         &sim::view_from_state(state, config),
     )];
-    let mut last_pre = sim::view_from_state(state, config);
-    let mut last_post = last_pre.clone();
+    let mut last_pre = RoundInputs::default();
+    let mut last_post = sim::view_from_state(state, config);
     for _ in 0..n {
-        last_pre = sim::view_from_state(state, config);
-        let derived = sim::advance(state, config, rng);
-        last_post = derived;
+        last_post = sim::advance_round(state, config, rng, &mut last_pre);
         if state.round % every == 0 {
             snaps.push(agent::state_json(state, &last_post));
         }
@@ -676,11 +672,10 @@ fn run_digest(
     let mut events_acc: Vec<GameEvent> = Vec::new();
     let mut prod_acc: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut story_idx = state.chronicle.len();
-    let mut last_pre = sim::view_from_state(state, config);
-    let mut last_post = last_pre.clone();
+    let mut last_pre = RoundInputs::default();
+    let mut last_post = sim::view_from_state(state, config);
     for _ in 0..n {
-        last_pre = sim::view_from_state(state, config);
-        let derived = sim::advance(state, config, rng);
+        let derived = sim::advance_round(state, config, rng, &mut last_pre);
         events_acc.extend(state.events.iter().cloned());
         // 累计本窗口各方产出（窗口级总开采价值），让 digest 的 `production` 是**窗口总量**，
         // 而非某一点时值。只累有产出的势力（空表 = 这回合没开采，不必在账上多一行 0）。

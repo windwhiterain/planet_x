@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::{BodyId, CityId, FactionId, HaulStep, ResourceMap, ShipId};
+use crate::model::{BodyId, CityId, FactionId, HaulStep, ResourceMap, RoundInputs, ShipId};
 
 /// 一回合的**视图**——`pre`（推进前）与 `post`（推进后）用的是**同一个类型**：
 ///
@@ -335,9 +335,16 @@ pub struct LoyaltyTarget {
 ///    **一次**算好的（`sim::observe` 复用游戏逻辑本身用的那套计算）——两类量本来就不该在同一个
 ///    时刻由同一段代码写。
 ///
-/// 读面里**没有这个名字**：`--derived`/`--index`/web 看到的只有 `pre`/`post` 两个 [`RoundView`]。
+/// 读面里**没有这个名字**：`--derived`/`--index`/web 看到的是 `pre`（[`RoundInputs`]，
+/// **输入面**）与 `post`（[`RoundView`]，**结算面**）两个面。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RoundSink {
+    /// 本回合的**输入面**（B5）：掷出的随机数 + 判定时看到的输入。
+    ///
+    /// 与上面那些「过程量」的区别：那些是「世界变成了什么样」（`post` 那一侧），
+    /// 这一格是「引擎**消费**掉了什么」（`pre` 那一侧）——两者都不可事后重算，但归属不同面。
+    #[serde(default)]
+    pub inputs: RoundInputs,
     /// 每城每资源的本回合开采产出。
     pub city_production: BTreeMap<CityId, ResourceMap>,
     /// 每势力每资源的本回合开采产出。

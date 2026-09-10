@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::model::{
-    DeathCause, FoundingHow, GameEvent, Killer, RoundState, SCHEMA_VERSION, SpawnVia, State,
+    DeathCause, FoundingHow, GameEvent, Killer, RoundInputs, RoundState, SCHEMA_VERSION, SpawnVia,
+    State,
 };
 use crate::sim;
 use crate::world;
@@ -39,7 +40,7 @@ fn checkpoint_survives_save_and_resume_identically() {
     let rs = RoundState {
         schema_version: SCHEMA_VERSION,
         state: a.clone(),
-        pre: derived.clone(),
+        pre: RoundInputs::default(),
         post: derived,
     };
     save_checkpoint(&path, &rs, &rng_a).expect("save_checkpoint");

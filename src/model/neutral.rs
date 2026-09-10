@@ -15,7 +15,7 @@
 //! 4. 三条测试钉住它（见 `src/tests/model/neutral.rs`）：
 //!    * `every_read_face_field_declares_a_neutral`——用 schemars 遍历读面结构，
 //!      **新加字段必须同时声明中性值**（两边集合相等，且类型相容）；
-//!    * `declared_neutral_matches_the_engine_pre_face`——拿一个真实世界做实证：
+//!    * `unadvanced_world_process_fields_equal_their_declared_neutral`——拿一个真实世界做实证：
 //!      「这一步还没跑」时引擎吐出来的值必须**逐字段等于**声明；
 //!    * `schema_publishes_the_neutral_table`——发出去的 schema 段等于本表（发布路径不许漂）。
 //!
@@ -101,7 +101,7 @@ pub mod value {
 
 /// 读面（`RoundView`）每个**叶子字段**的中性值。
 ///
-/// 路径相对读面根（= `main.jsonl` 每行的 `view`、`--derived` 的 `pre`/`post`）；
+/// 路径相对读面根（= `main.jsonl` 每行的 `view`、`--derived` 的 **`post`**；`--derived` 的 `pre` 是另一面 = `RoundInputs`）；
 /// map / 数组的值用 `[]` 表示，例如 `factions[].governance_scale` 指「每个势力那一行里
 /// 的 `governance_scale`」。
 ///
@@ -126,7 +126,7 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     // ── 每势力一行 / 每城一行 ──
     ("factions", Neutral::EmptyMap),
     ("cities", Neutral::EmptyMap),
-    // ── 本回合的结算事实（过程；`pre` 里为空）──
+    // ── 本回合的结算事实（过程；空 sink 折出来的那一份里为空）──
     // 一笔成交一行 / 一艘在跑运输的舰一行——两者都是**稀疏**的：没成交、没跑运输就是空的。
     ("market_trades", Neutral::EmptyArray),
     ("haul_steps", Neutral::EmptyMap),
@@ -222,7 +222,7 @@ pub fn neutral_table_json() -> serde_json::Map<String, serde_json::Value> {
 pub fn schema_section() -> serde_json::Value {
     serde_json::json!({
         "root": "view",
-        "description": "读面（`view`；= 主流每行的 `view`、`--derived` 的 `pre`/`post`）**每个叶子字段的中性值（缺省值）**。\n· 语义：字段处于中性值 ⇔「这一步还没跑 / 这件事没发生」，**不是**「它的值是零」——例如 `factions[].governance_scale` 的中性值是 1.0（未超载）；`decisions.capital` 那种稀疏数组的中性值是 `[]`（这一回合没有那条判定），条目内部不再逐字段声明。\n· **一处声明**：这张表由 Rust `model::neutral::READ_FACE_NEUTRALS` 生成，引擎自己的运行时缺省读同一批常量，所以「引擎怎么补」与「这里怎么写」不可能不一致（有三条测试钉住）。\n· 路径相对 `view` 根；map / 数组的值用 `[]` 表示。\n· ⚠ **缺键时按这里的值补装，不要自己编缺省**——历史上 `flow.jsonl` 补 0、`metrics` 补 1.0，同一回合两个读面各说各话，就是这么来的。",
+        "description": "读面（`view`；= 主流每行的 `view`、`--derived` 的 **`post`**）**每个叶子字段的中性值（缺省值）**。\n· 语义：字段处于中性值 ⇔「这一步还没跑 / 这件事没发生」，**不是**「它的值是零」——例如 `factions[].governance_scale` 的中性值是 1.0（未超载）；`decisions.capital` 那种稀疏数组的中性值是 `[]`（这一回合没有那条判定），条目内部不再逐字段声明。\n· **一处声明**：这张表由 Rust `model::neutral::READ_FACE_NEUTRALS` 生成，引擎自己的运行时缺省读同一批常量，所以「引擎怎么补」与「这里怎么写」不可能不一致（有三条测试钉住）。\n· 路径相对 `view` 根；map / 数组的值用 `[]` 表示。`--derived` 的 **`pre`** 是**另一面**（`RoundInputs` = 本回合掷出的随机数 + 判定输入），它的空是**自明**的（没掷就是 `[]`/`{}`），所以不在这张表里。\n· ⚠ **缺键时按这里的值补装，不要自己编缺省**——历史上 `flow.jsonl` 补 0、`metrics` 补 1.0，同一回合两个读面各说各话，就是这么来的。",
         "fields": neutral_table_json(),
     })
 }
