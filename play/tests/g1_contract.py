@@ -87,6 +87,11 @@ def _rounds(rows: list, rnd: int) -> list:
     return [r for r in rows if r.get("round") == rnd]
 
 
+def read_round(proj: Path, index: int) -> dict:
+    """主流里第 index 行（-1 = 最后一回合）。"""
+    return _main_rows(proj)[index]
+
+
 def _dig(node, path: str):
     """按 `a.b.c` 取值（`loyalty_target.effective` 这种）。"""
     for seg in path.split("."):
@@ -219,6 +224,47 @@ def checkpoint_flow(h, ck, tmp: Path) -> None:
     ck.check("全新开局的回合 0 没有过程量（那是初始世界）",
              bool(fresh_rows) and all((r["upkeep"] or 0.0) == 0.0 for r in fresh_rows),
              f"{len(fresh_rows)} 行，维护费全 0")
+
+
+def spending_within_batch(h, ck, tmp: Path) -> None:
+    """**花掉的钱不超过批的额度**（`src/tests/sim/spending.rs` 那条搬过来）。
+
+    两个读面各给一半：`factions[].investment_spent` / `construction_spent` 是**真花掉的**
+    （投影的过程量表），`--control` 的 `investment_budget` / `construction_budget` 是**批了多少**
+    （控制面的**有效**值）。差额就是文档承诺的「批了却没花掉的那部分」，它必须 ≥ 0。
+
+    ⚠ 必须跑够回合再看：开局那一回合既没有在建建筑、也没有攒到启封的造舰进度，**谁都还没花钱**
+    ——拿回合 0 当样本就是「空表比空表」（Rust 版用 8 回合，这里用 60 回合那份档）。
+    """
+    proj, ckpt = tmp / "dec", tmp / "dec.ron"       # 复用 decisions 那一段跑出来的档（60 回合）
+    rnd = read_round(proj, -1)
+    surface = json.loads(h.capture(["--start", str(ckpt), "--control"]))
+    spent = {"investment_budget": "investment_spent", "construction_budget": "construction_spent"}
+    bad, flowed, unspent = [], 0, 0
+    for face in surface["control"]:
+        fid = face["faction_id"]
+        row = (rnd["view"].get("factions") or {}).get(fid)
+        if row is None:
+            bad.append(f"{fid} 在投影里没有势力行")
+            continue
+        for limit_kind, spent_field in spent.items():
+            limits = {e["resource"]: e["value"] for e in (face.get(limit_kind) or [])}
+            used = row.get(spent_field) or {}
+            for rt, amt in used.items():
+                limit = limits.get(rt, 0.0)
+                if amt > limit + 1e-9:
+                    bad.append(f"{fid}.{limit_kind}[{rt}]：花了 {amt} > 批的 {limit}")
+                if amt > 0.0:
+                    flowed += 1
+            for rt, limit in limits.items():
+                if limit - used.get(rt, 0.0) < -1e-9:
+                    bad.append(f"{fid}.{limit_kind}[{rt}]：出现了负余额")
+                if limit - used.get(rt, 0.0) > 1e-9:
+                    unspent += 1
+    ck.check("花掉的钱不超过批的额度（逐势力逐资源）", not bad,
+             "；".join(bad[:3]) or f"第 {rnd['round']} 回合：{len(surface['control'])} 个势力的两本账都对得上")
+    ck.check("预算守卫没有空转（真的花过钱、也真的有没花掉的）", flowed >= 1 and unspent >= 1,
+             f"{flowed} 处真的花了钱、{unspent} 处有没花掉的余额")
 
 
 def derived_without_checkpoint(h, ck, tmp: Path) -> None:
@@ -475,6 +521,7 @@ def run(h, ck) -> None:
     checkpoint_flow(h, ck, tmp)
     derived_without_checkpoint(h, ck, tmp)
     decisions_table(h, ck, tmp)
+    spending_within_batch(h, ck, tmp)
     b3_tables(h, ck, tmp)
     input_face(h, ck, tmp)
     control_fixed_point(h, ck, tmp)
