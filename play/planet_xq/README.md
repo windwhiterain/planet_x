@@ -133,8 +133,13 @@ Two things worth knowing:
   (`flow.jsonl` used to say "0% covered" while `metrics` said "100% covered" for the same round).
 - For **per-ship effective intent** read the `ships` table columns
   `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
-  `doctrine` / `kiting` — the engine resolves the ownership chain, so **do not re-implement it**
-  (a Python re-implementation is a drift source).
+  `doctrine` / `kiting` / `role` / `role_mode` — the engine resolves the ownership chain, so
+  **do not re-implement it** (a Python re-implementation is a drift source).
+  ⚠ `role` is a **three-valued string** (`"War"` 战舰 / `"Freight"` 运输舰 / `"Observe"` 观测舰);
+  it replaced the old **boolean** `freighter` column (and `freighter_mode` → `role_mode`), so a
+  recipe that filtered `df["freighter"] == True` must now filter `df["role"] == "Freight"`.
+  `role_mode` is that leaf's effective ownership (`Auto` = the automatic controller wrote this
+  conclusion, `Player` = a player pinned it).
 
 
 ## Usage (uv)
@@ -172,6 +177,9 @@ snap["relations"]              # {faction: rel} 两两外交关系
 snap["view"]                   # this faction's row of the round view:
                                # city_count / ship_count / production_value / upkeep / …
 snap["city_ids"], snap["ship_ids"]  # it owns these cities / ships (names)
+snap["observer_quota"]             # 观测配额（目标头数）：该派几艘舰去 MOND 异常区蹲着喂掌握度
+snap["observer_count"], snap["observer_target"]   # 现在真在观测的舰数 / 编队驻地天体
+snap["freighter_quota"], snap["freighter_count"]  # 集货那条同形的一对（目标条数 / 现状条数）
 
 # buildable insight: which of my shipyards make what
 cities = q.city_buildings(12, "中国")
@@ -189,9 +197,18 @@ Key ideas:
 - **factions** is the diplomacy + economy table: per-faction `resources` (stockpile), `relations`
   (toward every other faction), and the faction's own `city_ids`/`ship_ids`. `faction_snapshot(r, name)`
   merges it with that faction's row of the round `view` (`view.factions[<faction>]`) into one read.
+  It also carries the engine's own **编队配额** columns (per faction, per round — read them instead of
+  re-deriving the automatic controller's judgements; the full column docs are in `schema.json`):
+  `observer_quota` (观测配额 = **target head count** of ships that should sit in the MOND anomaly
+  band; `0` once 掌握度 is maxed out), `observer_count` (ships actually observing right now, i.e.
+  effective `role == "Observe"` — read it next to the quota to tell 「不想学」 from 「没人可派」),
+  `observer_target` (the band body the observer flotilla garrisons; `null` = no candidate),
+  `mond_ships_in_band`, and the freight twin `freighter_quota` / `freighter_count`.
 - **ships** carries the effective panel: `attack`, `attack_range`, `speed`, `accel`, `hardness`,
   `intercept`, `shield_regen`, `hull_regen`, `upkeep`, plus `components`/`component_hp` — so an agent
-  can plan/engage without recomputing.
+  can plan/engage without recomputing. It also carries the three style axes the engine resolved:
+  `doctrine` / `kiting` / `role` (＋ that leaf's ownership in `role_mode`), where `role` is the
+  string `"War" | "Freight" | "Observe"` (战舰 / 运输舰 / 观测舰).
 - **rules** (the static tuning dictionary) live in `meta.json` and load as DataFrames: `q.meta`
   (raw dict), `q.ships_spec()` / `q.buildings_spec()` / `q.components_spec()` /
   `q.structures_spec()` (index = spec name/key; nested `build_cost`/`cost` stay as dict-valued

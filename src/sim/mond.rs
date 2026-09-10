@@ -17,32 +17,51 @@ pub fn route_depth(config: &GameConfig, a: [f64; 2], b: [f64; 2]) -> f64 {
     (deep_ref - config.mond.radius).max(0.0)
 }
 
-/// 是否掌握 MOND 修正引力（异常区内无导航偏移，因而能可靠承运）。
-pub fn is_mond_master(config: &GameConfig, fid: &str) -> bool {
-    config.mond.masters.iter().any(|x| x == fid)
+/// 势力当前的 **MOND 掌握度**（0..1，缺省 0 = 凡人）。这是科技体系的干线：
+/// 它连续地决定异常区里「一次导航尝试的胜算」，而不是某个档位上的开关。
+pub fn mond_control(state: &State, fid: &str) -> f64 {
+    state.faction(fid).map(|f| f.mond_control).unwrap_or(0.0).clamp(0.0, 1.0)
 }
 
-/// MOND 主力导航偏移：舰船所在势力未掌握 MOND 修正引力（见 [`MondConfig::masters`]）
-/// 且目标点进入异常区（距太阳超过 `mond.radius`）时，返回一个沿切向偏移的**伪目标**。
-/// 非 master 舰因此难以精确机动到深处目标（难以轰炸/殖民/停靠、也运不出货），
+/// **前沿海拔**：掌握度 `control` 的势力在异常区内能**一次到位**（`p = 1`）的最远日心距。
+///
+/// `r* = radius + arrival_eps / (drift_per_au × (1 − control))`，`control = 1` ⇒ 无穷。
+/// 它是干线上最直观的读数（`0 → 30.0`、`0.35 → 31.1`、`0.70 → 34.7`、`0.90 → 48.0` AU）：
+/// 前沿之外不是「进不去」，而是「期望要试 `1/p` 次」。
+pub fn mond_frontier(config: &GameConfig, control: f64) -> f64 {
+    let m = &config.mond;
+    let mastery = 1.0 - control.clamp(0.0, 1.0);
+    if m.drift_per_au <= 0.0 || mastery <= 0.0 {
+        return f64::INFINITY;
+    }
+    m.radius + config.combat.arrival_eps / (m.drift_per_au * mastery)
+}
+
+/// MOND 主力导航偏移：`control` 是舰船所在势力的掌握度（见 [`mond_control`]）；
+/// 目标点进入异常区（距太阳超过 `mond.radius`）时，返回一个沿切向偏移的**伪目标**。
+/// 掌握度越低越难精确机动到深处目标（难以轰炸/殖民/停靠、也运不出货），
 /// 体现「指令坐标与实际坐标产生偏移」。
 ///
 /// **偏移幅度是伪随机的、不是写死的**（用户裁决，见 `.agents/notes/freight-collection.md`）：
 /// `roll ∈ [0,1)`（由 [`nav_roll`] 按「势力 × 舰名 × 回合」确定性派生）决定这一次尝试
-/// 偏多少——`roll = 0` 就是**指哪打哪**。于是：
+/// 偏多少——`roll = 0` 就是**指哪打哪**。掌握度连续化之后（`tech-system.md` §2）
+/// 上界再乘 `(1 − control)`，于是：
 ///
 /// ```text
-/// 一次尝试的成功率  p = P(偏移 ≤ arrival_eps) = min(1, arrival_eps / (depth × drift_per_au))
+/// 一次尝试的成功率  p = P(偏移 ≤ arrival_eps)
+///                     = min(1, arrival_eps / (depth × drift_per_au × (1 − control)))
 /// ```
 ///
-/// **任何深度都 p > 0**（哪怕深度 100 AU、MOND 再强，也只是多试几个回合，而不是永远进不去），
-/// 而 p 随深度单调递减：`伊克西翁 30.17 AU → p≈0.92`、`妊神星 35.01 → 0.29`、
-/// `创神星 38.16 → 0.20`。所以「深处难去」不再是硬墙，而是**要试几次**。
+/// **任何深度、任何掌握度都 p > 0**（哪怕深度 100 AU、MOND 再强，也只是多试几个回合，
+/// 而不是永远进不去），而 p 随深度单调递减、随掌握度单调递增：
+/// `伊克西翁 30.17 AU`（depth 2.17）→ 凡人 p≈0.92；`创神星 38.16`（depth 10.16）→
+/// 凡人 0.20、掌握 0.35 时 0.30、0.70 时 0.66。`control = 1` ⇒ 偏移恒 0（今天的 cult）。
 ///
 /// 确定性：`roll` 由调用方给（纯函数），不消费主 `Prng` 流。
-pub fn mond_drift(config: &GameConfig, fid: &str, dest: [f64; 2], roll: f64) -> [f64; 2] {
+pub fn mond_drift(config: &GameConfig, control: f64, dest: [f64; 2], roll: f64) -> [f64; 2] {
     let m = &config.mond;
-    if m.drift_per_au <= 0.0 || m.masters.iter().any(|x| x == fid) {
+    let mastery = 1.0 - control.clamp(0.0, 1.0);
+    if m.drift_per_au <= 0.0 || mastery <= 0.0 {
         return dest;
     }
     let r = (dest[0] * dest[0] + dest[1] * dest[1]).sqrt();
@@ -50,10 +69,10 @@ pub fn mond_drift(config: &GameConfig, fid: &str, dest: [f64; 2], roll: f64) -> 
     if depth <= 0.0 {
         return dest;
     }
-    // 这一次尝试偏多少：幅度 = 上界 × roll^shape（`roll = 0` ⇒ 精确命中）。
+    // 这一次尝试偏多少：幅度 = 上界 × (1 − 掌握度) × roll^shape（`roll = 0` ⇒ 精确命中）。
     // `drift_shape < 1` 让偏移偏向大值（更常迷航在远处），但**永远留着蒙对的可能**。
     let shape = if m.drift_shape > 0.0 { m.drift_shape } else { 1.0 };
-    let drift = depth * m.drift_per_au * roll.clamp(0.0, 1.0).powf(shape);
+    let drift = depth * m.drift_per_au * mastery * roll.clamp(0.0, 1.0).powf(shape);
     // 切向（垂直于径向），代表轨道力学计算错误。
     let inv = if r > 1e-9 { 1.0 / r } else { 0.0 };
     let tx = -dest[1] * inv;
@@ -110,21 +129,23 @@ pub fn derived_roll(fid: &str, ship: &str, round: u32, salt: &str) -> f64 {
     Prng::from_state(fnv1a(bytes.into_iter())).unit()
 }
 
-/// [`mond_drift`] 一次尝试的**成功率**：`偏移 = 上界 × roll^shape`，`roll` 均匀 ∈ `[0,1)`，
-/// 而「到达」要求偏移 ≤ `arrival_eps`，于是
+/// [`mond_drift`] 一次尝试的**成功率**：`偏移 = 上界 × (1 − 掌握度) × roll^shape`，
+/// `roll` 均匀 ∈ `[0,1)`，而「到达」要求偏移 ≤ `arrival_eps`，于是
 ///
 /// ```text
-/// p = min(1, (arrival_eps / (depth × drift_per_au))^(1/shape))
+/// p = min(1, (arrival_eps / (depth × drift_per_au × (1 − control)))^(1/shape))
 /// ```
 ///
-/// `shape = 1`（默认）时就是 `eps/(depth×drift)`。只服务观察与守卫（结算读 [`mond_drift`]）：
-/// **p 恒 > 0**，深度越大只会越难、需要越多次尝试，永远没有「进不去」。
-pub fn mond_arrival_chance(config: &GameConfig, depth: f64) -> f64 {
+/// `shape = 1`（默认）时就是 `eps/(depth×drift×(1−control))`。只服务观察与守卫
+/// （结算读 [`mond_drift`]）：**p 恒 > 0**，深度越大只会越难、需要越多次尝试，
+/// 永远没有「进不去」；掌握度越高 p 越大，`control = 1` ⇒ 恒 1（指哪打哪）。
+pub fn mond_arrival_chance(config: &GameConfig, depth: f64, control: f64) -> f64 {
     let m = &config.mond;
-    if m.drift_per_au <= 0.0 || depth <= 0.0 {
+    let mastery = 1.0 - control.clamp(0.0, 1.0);
+    if m.drift_per_au <= 0.0 || depth <= 0.0 || mastery <= 0.0 {
         return 1.0;
     }
-    let ratio = config.combat.arrival_eps / (depth * m.drift_per_au);
+    let ratio = config.combat.arrival_eps / (depth * m.drift_per_au * mastery);
     if ratio >= 1.0 {
         return 1.0;
     }

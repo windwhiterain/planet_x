@@ -52,7 +52,7 @@ pub fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn<'_>) -
         velocity: 0.0,
         doctrine: cspec.default_doctrine,
         kiting: cspec.default_kiting,
-        freighter: cspec.default_freighter,
+        role: cspec.default_role,
         attack_hist: BTreeMap::new(),
         cargo: BTreeMap::new(),
         // 出厂归因：这艘舰是哪张图印出来的（`None` = 无图）。快照的溯源，不是活层。

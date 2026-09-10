@@ -107,8 +107,9 @@ pub struct FactionRow {
     pub governance_coverage: f64,
     /// 本回合付出的**运费**（市场价值）：距离 × 运费率，穿越引力异常带再加倍。
     pub freight_paid: f64,
-    /// 本回合收到的**承运费**（市场价值）：只有掌握了 MOND 的势力能可靠穿越异常带，
-    /// 所以它是柯伊伯带贸易的垄断承运人，对这条线上的货运抽税。
+    /// 本回合收到的**承运费**（市场价值）：承运人由**掌握度最高**的第三方充当，抽成 `∝` 它的
+    /// `mond_control`（**不是布尔**——见 `sim::market`、`.agents/notes/tech-system.md` §2），
+    /// 所以这一列量的是「它在深空贸易里抽到多少税」，而不是「它是不是那个 master」。
     pub carrier_income: f64,
     /// 本回合**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。这是「谁靠贸易活着」
     /// 的观察面：一个净进口常年为 0 的势力，其实没在参与市场。
@@ -264,7 +265,8 @@ pub struct RoundSink {
     pub market_net: BTreeMap<FactionId, f64>,
     /// 每势力本回合**付出的运费**（市场价值）——距离与引力异常带的代价。
     pub market_freight: BTreeMap<FactionId, f64>,
-    /// 每势力本回合**收到的承运费**（市场价值）——掌握 MOND 的 master 靠穿越异常带抽的税。
+    /// 每势力本回合**收到的承运费**（市场价值）——由当时**掌握度最高**的第三方抽走，
+    /// 抽成 `∝` 它的 `mond_control`（连续量，不再是「master 名单」里的布尔身份）。
     /// 这是「垄断承运人」的观察面：一个势力靠承运挣多少，说明它在深空贸易里的地位。
     pub market_carrier_income: BTreeMap<FactionId, f64>,
     /// 每势力本回合治理流（总成本 / 覆盖率 / 行政娱乐拆分 / 人口超载倍率 / 思潮惩罚）。

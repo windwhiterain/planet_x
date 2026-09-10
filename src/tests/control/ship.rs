@@ -175,66 +175,66 @@ fn the_role_axis_obeys_the_same_delete_rules() {
         .expect("中国至少有一艘舰");
     // 出厂记录值给成 `true`：否则「删叶回到记录值」与「钉在 false」分不出来。
     for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.freighter = true;
+        s.role = ShipRole::Freight;
     }
 
     // ① 逐舰角色叶（玩家钉「打仗」）：有效值 = 叶里的值，归属 = Player（AI 从此不许碰）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "freighter": false}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "role": "War"}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
-    assert!(!state.ship_freighter(ship.clone()));
-    assert_eq!(state.ship_freighter_control(ship.clone()), ControlMode::Player);
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::War);
+    assert_eq!(state.ship_role_control(ship.clone()), ControlMode::Player);
 
     // ② 删叶 ⇒ 回到出厂记录值，叶真的没了，并且**交回自动定编**（归属不再是 Player）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
     assert_eq!(r.removed.len(), 1, "{:?}", r.removed);
-    assert!(r.removed[0].contains("ship_freighter"), "{:?}", r.removed);
-    assert!(state.ship_freighter(ship.clone()), "删叶之后回落到出厂记录值 true");
+    assert!(r.removed[0].contains("ship_role"), "{:?}", r.removed);
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight, "删叶之后回落到出厂记录值 Freight");
     assert!(
-        state.control.get(&fid).and_then(|c| c.ship_freighter.get(&ship)).is_none(),
+        state.control.get(&fid).and_then(|c| c.ship_role.get(&ship)).is_none(),
         "叶必须真的没了"
     );
     assert_ne!(
-        state.ship_freighter_control(ship.clone()),
+        state.ship_role_control(ship.clone()),
         ControlMode::Player,
         "删叶 = 交回自动定编：AI 下回合作出的结论可以再写进这片叶"
     );
 
     // ③ 幂等：再删一次仍然**成功**（目标状态已达成），但不进回执、不算丢弃。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean() && r.removed.is_empty() && r.applied == 1, "{:?}", r);
 
     // ④ `remove` 带值 / 带归属 ⇒ 拒绝（删与写是两件事）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true, "freighter": false}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true, "role": "War"}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert_eq!(r.skipped.len(), 1, "{:?}", r);
     assert_eq!(r.skipped[0].code, "remove_conflicts_with_value");
-    assert!(state.ship_freighter(ship.clone()), "被拒绝的补丁一个字节都不许动");
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight, "被拒绝的补丁一个字节都不许动");
 
     // ⑤ 势力级默认角色叶：`Player` 时它的值压过叶片值（AI 定编的闸门）；删掉它 ⇒ 不再供值。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_freighter": {"freighter": false, "mode": "Player"}}]
+        "control": [{"faction_id": fid, "default_role": {"role": "War", "mode": "Player"}}]
     });
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
-    assert!(!state.ship_freighter(ship.clone()), "舰队默认是 Player ⇒ 它的值说了算");
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::War, "舰队默认是 Player ⇒ 它的值说了算");
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_freighter": {"remove": true}}]
+        "control": [{"faction_id": fid, "default_role": {"remove": true}}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
-    assert!(r.removed[0].contains("default_freighter"), "{:?}", r.removed);
-    assert!(state.ship_freighter(ship.clone()), "默认叶没了 ⇒ 回落到舰上记录值 true");
+    assert!(r.removed[0].contains("default_role"), "{:?}", r.removed);
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight, "默认叶没了 ⇒ 回落到舰上记录值 Freight");
 
     // ⑥ 陈叶（舰已不在）照删不误：与另两条轴同一条规矩。
     state.ships.retain(|s| s.name != ship);
@@ -242,10 +242,10 @@ fn the_role_axis_obeys_the_same_delete_rules() {
         .control
         .entry(fid.clone())
         .or_default()
-        .ship_freighter
-        .insert(ship.clone(), Control::inherit(true));
+        .ship_role
+        .insert(ship.clone(), Control::inherit(ShipRole::Freight));
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": fid, "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean(), "删陈叶不该因为舰没了而被丢弃：{:?}", r.skipped);

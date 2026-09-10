@@ -15,7 +15,7 @@ fn roster(state: &State, fid: &str) -> Vec<String> {
     let mut v: Vec<String> = state
         .ships
         .iter()
-        .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_freighter(s.name.clone()))
+        .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_role(s.name.clone()) == ShipRole::Freight)
         .map(|s| s.name.clone())
         .collect();
     v.sort();
@@ -54,7 +54,18 @@ fn grow_fleet(state: &mut State, fid: &str, times: usize) {
 /// 连跑 `rounds` 个回合的**角色定编**（每回合先推进 `round` 再定编，与 `sim` 同步：
 /// 骰子是 `(势力, 舰名, 回合, "role")` 派生的，**换回合才换骰子**）。
 /// 返回每回合的运输舰名单。
+///
+/// ⚠ **这份用例集测的是集货定编**，而角色轴上现在还有**优先级更高**的第三态（观测舰，
+/// 用户裁决「观测 > 运输 > 战斗」）——不把它从棋盘上拿开的话，运输舰的名额会被观测抢走
+/// （实测：本文件里四条用例当场翻红，平均头数从 1.46 掉到 1.00），测出来的就不是集货的定编了。
+/// 拿开的方式用的是**真实存在的一种状态**：把本势力标成**已经学满 MOND**
+/// （`mond_control = 1.0` ⇒ 棘轮之下没有东西可学 ⇒ `observer_quota = 0` ⇒ 没人去观测），
+/// 而不是把观测那条机制关掉或改常数。
+/// 观测自己的定编/选靶/优先级由 `src/tests/autocontrol/knowledge.rs` 专门覆盖。
 fn run_roles(state: &mut State, config: &GameConfig, fid: &str, rounds: u32) -> Vec<Vec<String>> {
+    if let Some(f) = state.factions.iter_mut().find(|f| f.name == fid) {
+        f.mond_control = 1.0;
+    }
     let mut hist = Vec::new();
     for _ in 0..rounds {
         state.round += 1;
@@ -138,9 +149,9 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
     let (hauler, leaf) = state
         .control("中国".to_string())
         .and_then(|c| {
-            c.ship_freighter
+            c.ship_role
                 .iter()
-                .find(|(_, l)| l.value)
+                .find(|(_, l)| l.value == ShipRole::Freight)
                 .map(|(n, l)| (n.clone(), l.clone()))
         })
         .expect("AI 该在某个回合写过一片 true 的叶");
@@ -155,19 +166,19 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(hauler.clone(), Control::player(true));
+        .ship_role
+        .insert(hauler.clone(), Control::player(ShipRole::Freight));
     state.depots.clear();
     assign_roles(&mut state, &config);
     assert!(
-        state.ship_freighter(hauler.clone()),
+        state.ship_role(hauler.clone()) == ShipRole::Freight,
         "玩家钉的角色：AI 不得改写（哪怕没有积压）"
     );
     assert_eq!(
         state
             .control("中国".to_string())
             .unwrap()
-            .ship_freighter
+            .ship_role
             .get(&hauler)
             .unwrap()
             .mode,
@@ -193,23 +204,23 @@ fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(ship.clone(), Control::player(true));
+        .ship_role
+        .insert(ship.clone(), Control::player(ShipRole::Freight));
     assign_roles(&mut state, &config);
-    assert!(state.ship_freighter(ship.clone()));
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight);
     assert!(
-        state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+        state.control("中国".to_string()).unwrap().ship_role.contains_key(&ship),
         "玩家的叶 AI 不碰，所以它还在"
     );
 
     // 删叶：玩家放手 ⇒ 归属不再拦着 AI。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "ship_freighter": [{"ship": ship, "remove": true}]}]
+        "control": [{"faction_id": "中国", "ship_role": [{"ship": ship, "remove": true}]}]
     });
     let r = crate::control::apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
     assert!(
-        !state.control("中国".to_string()).unwrap().ship_freighter.contains_key(&ship),
+        !state.control("中国".to_string()).unwrap().ship_role.contains_key(&ship),
         "叶必须真的没了"
     );
 
@@ -316,24 +327,24 @@ fn the_effective_role_follows_the_leaf_then_the_fleet_default_then_the_record() 
         .name
         .clone();
     // 记录值（出厂快照）：护卫舰 = 战舰。
-    assert!(!state.ship_freighter(ship.clone()), "护卫舰出厂不是运输舰");
+    assert_eq!(state.ship_role(ship.clone()), ShipRole::War, "护卫舰出厂不是运输舰");
     // 舰队默认（Player）⇒ 全舰队改口。
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .default_freighter = Some(Control::player(true));
+        .default_role = Some(Control::player(ShipRole::Freight));
     assert!(
-        state.ship_freighter(ship.clone()),
+        state.ship_role(ship.clone()) == ShipRole::Freight,
         "叶没有说话（压根没有）时，Player 的舰队默认说了算"
     );
     // 逐舰的叶（Player）更具体 ⇒ 压过舰队默认。
     state
         .control_mut("中国".to_string())
         .unwrap()
-        .ship_freighter
-        .insert(ship.clone(), Control::player(false));
+        .ship_role
+        .insert(ship.clone(), Control::player(ShipRole::War));
     assert!(
-        !state.ship_freighter(ship.clone()),
+        state.ship_role(ship.clone()) != ShipRole::Freight,
         "更具体的叶（逐舰 Player）压过舰队默认"
     );
 }
@@ -404,6 +415,12 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
 #[test]
 fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let (config, mut state) = fresh(42);
+    // ⚠ 先把观测那一支**从棋盘上拿开**（把本势力标成已学满 MOND ⇒ 观测主张 0）：角色轴上
+    // 现在还有第三态，而它**优先级更高**（用户裁决 观测 > 运输 > 战斗）——不清场的话，
+    // 「名额收回」之后那艘船会变成**观测舰**而不是战舰，测出来的就不是集货的收回；
+    // 而且观测抽走的运力会让本势力把船**雇出去**（下面的承包承诺），又多一层干扰。
+    // 拿开用的是真实存在的一种状态，不是把机制关掉（与 `run_roles` 同一处置）。
+    state.faction_mut("中国").unwrap().mond_control = 1.0;
     state.depots.clear();
     state.depot_add("中国", "金星", "碳", 100.0);
     // 角色是**掷骰**定的（有积压只是「有人去运」的概率高），所以这里跑几个回合而不是一个：
@@ -412,7 +429,12 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let mut found = None;
     for _ in 0..20 {
         sim::advance(&mut state, &config, &mut rng);
-        if let Some(n) = roster(&state, "中国").into_iter().next() {
+        // 只挑**没有承包承诺**的运输舰：在役的承包舰被硬承诺（`should_be_role` 第 1 条）钉在
+        // 运输位上，配额清空也收不回去——那是正确行为，不是本用例要测的事。
+        if let Some(n) = roster(&state, "中国")
+            .into_iter()
+            .find(|n| state.contracts.assignment_of(n).is_none())
+        {
             found = Some(n);
             break;
         }
@@ -433,7 +455,7 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
         }
         state.round += 1;
         assign_roles(&mut state, &config);
-        if !state.ship_freighter(hauler.clone()) {
+        if state.ship_role(hauler.clone()) != ShipRole::Freight {
             recalled = true;
             break;
         }
@@ -586,11 +608,11 @@ fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
             .clone();
         st.ships.retain(|s| s.faction_id != "中国" || s.name == keep);
         // 这艘船必须**确实在跑运输**：角色现在是掷骰定的（思潮驱动），所以这里用一片
-        // `Player` 的叶把它钉住——`should_be_freighter` 对归玩家的轴不掷骰。
+        // `Player` 的叶把它钉住——`should_be_role` 对归玩家的轴不掷骰。
         st.control_mut("中国".to_string())
             .unwrap()
-            .ship_freighter
-            .insert(keep.clone(), Control::player(true));
+            .ship_role
+            .insert(keep.clone(), Control::player(ShipRole::Freight));
         st.depots.clear();
         st.contracts.contracts.clear();
         st.depot_add("中国", "金星", "碳", 100.0);

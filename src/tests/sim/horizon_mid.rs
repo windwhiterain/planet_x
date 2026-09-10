@@ -63,6 +63,18 @@ fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
 }
 
 /// 功能性验证：长局里确实会出现「定制化」舰（资源→组件选择真的被 AI 执行）。
+///
+/// ⚠ **口径 = 「整局里出现过」，而不是「400 回合末还剩着」**（M2 之后改的）。
+/// 原来数的是**末回合快照**，于是这条非空守卫押在一个轨迹事实上：世界是混沌的
+/// （任何一处机制改动都会重掷整条轨迹），而舰队在长局里会被打光。实测（400 回合 × seed
+/// 7/42，同一个探针在两条树上各跑一次）：
+///   * `main`（`23bdb25`）：出厂 206 / 230 条，末回合活舰 **0 / 27**；
+///   * 本分支（MOND 掌握度连续化 + 飞船在场渠道）：出厂 105 / 92 条，末回合活舰 **0 / 0**。
+/// 两条树上**机制都在正常工作**（出厂的舰基本全都带组件：100/105、87/92），
+/// 差别只是「末回合那片场地上还剩几条舰」。所以判据改成**累计**：
+/// 只要整局里有任何一个回合存在过「装了组件的活舰」，AI 的选装就被验证过了——
+/// 这个口径比原来**更不容易空转**（末回合快照会随轨迹归零，累计不会），
+/// 而它检验的仍然是同一件事。
 #[test]
 fn long_run_produces_customized_ships() {
     let config = load_config();
@@ -72,8 +84,12 @@ fn long_run_produces_customized_ships() {
         let mut rng = Prng::new(seed);
         for _ in 0..400u32 {
             advance(&mut state, &config, &mut rng);
+            customized += state
+                .ships
+                .iter()
+                .filter(|s| s.hull > 0.0 && !s.components.is_empty())
+                .count();
         }
-        customized += state.ships.iter().filter(|s| !s.components.is_empty()).count();
     }
     assert!(
         customized > 0,

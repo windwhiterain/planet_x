@@ -375,7 +375,7 @@ pub fn trip_rounds(
     from: &str,
     to: &str,
     speed: f64,
-    mond_master: bool,
+    mond_control: f64,
 ) -> f64 {
     if speed <= 0.0 {
         return f64::INFINITY;
@@ -384,10 +384,12 @@ pub fn trip_rounds(
     let b = state.body_position(to);
     let flight = 2.0 * crate::sim::dist(a, b) / speed;
     let depth = crate::sim::route_depth(config, a, b);
-    let travel = if depth <= 0.0 || mond_master {
+    let travel = if depth <= 0.0 {
         flight
     } else {
-        let p = crate::sim::mond_arrival_chance(config, depth).clamp(1e-3, 1.0);
+        // 深处一腿的期望回合数 = `flight ÷ 一次尝试的胜算`：掌握度越高，这条线越短。
+        // 掌握度连续化之后这里**不再分「master / 非 master」两档**，而是同一条公式。
+        let p = crate::sim::mond_arrival_chance(config, depth, mond_control).clamp(1e-3, 1.0);
         flight / p
     };
     travel.ceil().max(1.0) + 1.0
@@ -399,8 +401,8 @@ pub fn trip_rounds(
 /// 于是**没有一个是设计者猜出来的数**——它们全是「这条线有多远」的函数
 /// （用户裁决：数值要用动态平衡产生）。
 ///
-/// 用 `mond_master = true` 是**刻意的**：要求运力是「一条**称职的**参考船」的水准。
-/// 近地航线 `route_depth ≤ 0`，人人都是这个速度；而深处的非 master 期望回合数要高一个
+/// 用掌握度 `1.0` 是**刻意的**：要求运力是「一条**称职的**参考船」的水准。
+/// 近地航线 `route_depth ≤ 0`，人人都是这个速度；而深处的凡人期望回合数要高一个
 /// 数量级 ⇒ 它们的达标率天然上不去 ⇒ 深空雇佣单**自然只落在掌握 MOND 的人手里**。
 /// 这正是设计 D（垄断表现为时间优势）在市场里的落点，不需要另写一条「只有 master 能接深单」。
 pub fn lane_rounds(
@@ -409,7 +411,7 @@ pub fn lane_rounds(
     from: &str,
     to: &str,
 ) -> f64 {
-    trip_rounds(state, config, from, to, config.freight.reference_speed, true)
+    trip_rounds(state, config, from, to, config.freight.reference_speed, 1.0)
 }
 
 /// 一条线的**雇佣节奏**：考核周期 `interval` 与固定期 `term`（都是回合数）。

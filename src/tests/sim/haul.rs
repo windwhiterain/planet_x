@@ -422,7 +422,7 @@ fn a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool() {
                 to: "地球".to_string(),
             }),
         );
-        c.ship_freighter.insert(ship.clone(), Control::player(true));
+        c.ship_role.insert(ship.clone(), Control::player(ShipRole::Freight));
     }
     let mut rng = Prng::new(42);
     let mut delivered = 0.0;
