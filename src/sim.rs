@@ -1517,17 +1517,25 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     // 三个漏斗各自负责「改状态 + 记事件」，调用方无处可漏。
     //
     // 「本回合已经易主过的城」——anchor 4（难民夺城）必须避开它们，否则会和本回合别的步进
-    // （离心倒戈 / 舰炮拆平后的复垦）在同一回合里互相抵消，或让一座城一回合内易主三次。
-    // 初始快照来自 `step_military`/`step_governance`；循环内每落实一个立足点就**追加**进去，
-    // 因此**同一个回合里没有哪座城会被重建/夺取两次**（守卫
+    // （离心倒戈 / 舰炮拆平后的复垦 / 殖民舰复垦）在同一回合里互相抵消，或让一座城一回合内
+    // 易主三次。初始快照来自 `step_military`/`step_governance`；循环内每落实一个立足点就
+    // **追加**进去，因此**同一个回合里没有哪座城会被重建/夺取两次**（守卫
     // `no_city_changes_owner_twice_in_one_round` 钉住这条不变量）。
+    //
+    // **`ColonyFounded` 必须在这个集合里**——否则「谁算本回合已易主」这件事会有两套互相矛盾的
+    // 定义：守卫把「活城易主」定义为 `city_defected / city_overrun / colony_founded` 三者之和，
+    // 而这里曾经只收 `{defected, overrun, razed}`，于是**本回合刚被殖民舰复垦的城**在 anchor 4
+    // 眼里不算「已易主」，可以被同回合的难民夺走——正是这条不变量要禁止的自相抵消。实测
+    // seed 7 回合 76/79 的 `大红斑科学站`：先「深空运输联盟 复垦 俄罗斯 留下的废墟」，同回合又被
+    // 「联合国的难民夺取」，两条 `colony_founded`/`city_overrun` 净效果为零。
     let mut flipped_this_round: BTreeSet<CityId> = state
         .events
         .iter()
         .filter_map(|e| match e {
             GameEvent::CityDefected { city, .. }
             | GameEvent::CityOverrun { city, .. }
-            | GameEvent::CityRazed { city, .. } => Some(city.clone()),
+            | GameEvent::CityRazed { city, .. }
+            | GameEvent::ColonyFounded { city, .. } => Some(city.clone()),
             _ => None,
         })
         .collect();
@@ -1545,9 +1553,33 @@ fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
         let seeded_ship_class = autocontrol::choose_next_class(state, &fid, config, rng);
 
         // Anchor 1/2: this faction's own lowest-name footprint, else any razed refuge.
-        let anchor = state.cities.iter().filter(|c| c.faction_id == fid).min_by_key(|c| c.name.clone()).map(|c| c.name.clone());
+        //
+        // **同回合抵消在 anchor 1/2 上也要排除**（此前只对 anchor 4 做了，见
+        // [`displace_city_for_refugee`] 的说明）：一座城刚在本回合被拆平，就不该被**它自己的
+        // 旧主**在本回合立刻复垦——那让「拆平」的后果在同一回合里被抹掉（归属 A→A，净变化只剩
+        // 「人口/建筑被重置」，却照样记 razed + colony_founded + ship_spawned + resurgence 四条
+        // 事件、还白送一艘种子舰）。实测 seed 7 @200 回合：**137 次拆平里有 93 次（68%）**是这种
+        // 同回合自我复垦，`水星熔炉基地` 一座城循环了 **22 次**。
+        //
+        // **但不能因此把重建推到下一回合**（我试过：`continue` 那条路会让被拆平的势力在**本回合末
+        // 真的没有立足点**，于是 `zombie_factions_are_bounded` 采样到的僵尸峰值 0 → 6、
+        // `world_is_multipolar` 也红）。反僵尸保证的是「回合末总有立足点」，不能被这条过滤破坏。
+        // 正确做法与 anchor 4 完全同构：**排除掉那块刚丢的废墟，改在别的立足点重建**
+        // （自己的另一块废墟 → 任何空白避风港 → 未占据定居点新建），于是既没有净效果为零的
+        // 同回合抵消，也没有任何一个回合末留下无立足点的势力。
+        let anchor = state
+            .cities
+            .iter()
+            .filter(|c| c.faction_id == fid && !flipped_this_round.contains(&c.name))
+            .min_by_key(|c| c.name.clone())
+            .map(|c| c.name.clone());
         let anchor_id = anchor.or_else(|| {
-            state.cities.iter().filter(|c| c.razed).min_by_key(|c| c.name.clone()).map(|c| c.name.clone())
+            state
+                .cities
+                .iter()
+                .filter(|c| c.razed && !flipped_this_round.contains(&c.name))
+                .min_by_key(|c| c.name.clone())
+                .map(|c| c.name.clone())
         });
 
         let (body, city) = if let Some(anchor_id) = anchor_id {
@@ -4485,5 +4517,50 @@ mod tests {
             "最短战争 {shortest} 回合 < 地板承诺的 {min_age} 回合——\
              说明有某个关系写入者绕过了地板（见 set_relation_sym 的说明）"
         );
+    }
+    /// **同回合抵消不变量（复垦侧）**。
+    ///
+    /// 一座城在本回合被拆平之后，**不该被它自己的旧主在本回合复垦**：那对事件对归属的净效果是
+    /// A→A（只剩人口/建筑被重置），却照样记 `city_razed` + `colony_founded` + `ship_spawned` +
+    /// `resurgence` 四条事件，还白送一艘种子舰——并把它钉成「拆平→复垦→再拆平」的极限环。
+    ///
+    /// 实测 seed 7 @200 回合，修正前：137 次拆平里 **93 次（68%）** 是这种同回合自我复垦，
+    /// `水星熔炉基地` 一座城循环 **22 次**、被拆平 32 次；修正后 0 次，该城不再出现在「被拆平
+    /// 最多」的前五，事件总量 2273 → 1964。
+    ///
+    /// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。
+    #[test]
+    fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
+        let config = load_config();
+        let mut state = default_state(&config, 7);
+        let mut rng = crate::prng::Prng::new(7);
+        let mut razings = 0usize;
+        for _ in 0..120 {
+            advance(&mut state, &config, &mut rng);
+            // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 由
+            // step_resurgence 发，后者在后——所以「拆平在前、复垦在后」正是要抓的顺序。
+            let mut razed: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for e in &state.events {
+                match e {
+                    GameEvent::CityRazed { city, owner, .. } => {
+                        razed.insert(city.clone(), owner.clone());
+                        razings += 1;
+                    }
+                    GameEvent::ColonyFounded { city, owner, .. } => {
+                        if let Some(loser) = razed.get(city) {
+                            assert_ne!(
+                                loser, owner,
+                                "第 {} 回合：{city} 被 {loser} 丢掉后又被**同一个势力**复垦——\
+                                 一对净效果为零的事件（见 step_resurgence 的 anchor 1/2 说明）",
+                                state.round
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(razings >= 20, "120 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
     }
 }
