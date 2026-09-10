@@ -42,10 +42,18 @@
   <button id="toggleSide" class="edge-toggle left" title="展开/收起控制层级" data-closed-arrow="▶" data-open-arrow="◀">▶</button>
   <aside id="side" class="edge-panel left">
     <div class="panel" id="treePanel">
-      <h2>控制层级 <span class="hint">全局 · 势力 · 天体 · 城市 · 叶片</span></h2>
+      <h2>控制层级 <span class="hint">全局 · 势力 · 天体 · 城市 · 设计图 · 叶片</span></h2>
       <div id="tree"></div>
     </div>
-    <button id="applyBtn" class="primary">✓ 应用到服务器</button>
+    <!-- 「应用到服务器」＋它的**回执**：两者钉在面板底部（`position: sticky`）——以前
+         按钮会随长树滚出视口（读面 bar 展开时还点不动），而回执更必须在**你刚点完**的地方。
+         引擎实际做了什么：落地几片叶、拒了哪些、为什么。静默吞掉丢弃就是「失败看起来像成功」
+         ——设计图那几条守卫（blueprint_class_mismatch / duplicate_component /
+         too_many_components）就靠这一块显示出来，而不是被吞掉。 -->
+    <div class="side-foot">
+      <div id="report" class="api-report"></div>
+      <button id="applyBtn" class="primary">✓ 应用到服务器</button>
+    </div>
   </aside>
 
   <!-- 底部边缘 bar：**选中对象读面**（generic widget）+ 回合 diff（默认收起）。
