@@ -71,7 +71,7 @@
 
 use clap::Parser;
 use planet_x::agent;
-use planet_x::config::{load_config, load_initial, parse_seed, save_checkpoint};
+use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
 use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, State, SCHEMA_VERSION};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, control, projection, sim, world};
@@ -209,11 +209,22 @@ struct Cli {
 
     /// 索引投影模式：与 --round N 连用，把 N+1 回合投影成一份**lean 主流**（main.jsonl，
     /// 每回合一行：eager 字段 + metrics + id 数组）+ 按 id 索引的 **lazy 表**（idx/*.jsonl，
-    /// ships/cities/bodies 的完整对象）+ **agent 可读的投影 schema**（schema.json，声明哪些
-    /// 字段 eager / 哪些 lazy 及其表/key/列类型）。重型字段不再内联；agent 用 Python kit
-    /// （play/planet_xq，uv 管理）按 id join。确定性：同 seed 复现字节一致。
+    /// ships/cities/bodies 的完整对象）+ **派生表**（idx/flow.jsonl、idx/city_flow.jsonl、
+    /// idx/control.jsonl、idx/scope.jsonl：引擎内部中间量与控制面，状态里没有）+ **agent 可读
+    /// 的投影 schema**（schema.json，声明哪些字段 eager / 哪些 lazy / 哪些 derived 及其
+    /// 表/key/join 列/列类型）。重型字段不再内联；agent 用 Python kit（play/planet_xq，
+    /// uv 管理）按 id join。确定性：同 seed 复现字节一致。
     #[arg(long, value_name = "DIR")]
     index: Option<PathBuf>,
+
+    /// 输出这一回合存下来的**派生态**：`{round, source, pre, post, [note]}`。
+    /// `pre` = 推进前的观测，`post` = 推进后的观测 + **本回合流量中间量**（`Derived.flow`：
+    /// 各势力/各城的产出、舰队维护费、治理成本与覆盖率——这些量不落持久状态，只有这里和
+    /// `--index` 的 derived.flow 表能读到）。
+    /// 从 `--start <ckpt>` 读的是**档里存的**那一对（与 `--index` 同一回合的值完全相同，
+    /// 不做舍入）；没有档时按当前状态重算，这时 `post.flow` 是空的，`note` 会说明。
+    #[arg(long)]
+    derived: bool,
 }
 
 fn main() {
@@ -240,8 +251,21 @@ fn main() {
     }
 
     // Build the world: from a checkpoint (state + RNG) or generated procedurally.
+    //
+    // `--derived` 要的是**档里存下来的**那一对 `pre`/`post`（尤其 `post.flow` 的流量中间量，
+    // 那是状态里没有的东西），所以这条路径保留整份 `RoundState`；其余路径继续用 `load_initial`
+    // （它接受 session checkpoint 与裸 state 两种档）。
     let seed = parse_seed(&cli.seed);
+    let mut stored: Option<RoundState> = None;
     let (mut state, mut rng) = match &cli.start {
+        Some(path) if cli.derived => match load_checkpoint(path) {
+            Ok((rs, prng)) => {
+                let s = rs.state.clone();
+                stored = Some(rs);
+                (s, prng)
+            }
+            Err(_) => load_initial(path, seed),
+        },
         Some(path) => load_initial(path, seed),
         None => (world::default_state(&config, seed), Prng::new(seed)),
     };
@@ -289,6 +313,36 @@ fn main() {
     }
 
     // State-reflecting dumps.
+    //
+    // `--derived`：这一回合引擎到底算出了什么（`pre` = 推进前的观测；`post` = 推进后 + 流量）。
+    // 有档就报**档里存的**那一对——于是它与 `--index` 的 `derived.flow` 表对同一回合给同一个值
+    // （有 `tests/projection_derived.rs` 把这条钉住）；没档（或叠加了 `--apply`，此时状态已变）
+    // 只能按当前状态重算，那种情况下没有流量，`note` 明说，别让人误以为流水为零。
+    if cli.derived {
+        let from_checkpoint = stored.is_some() && cli.apply.is_none();
+        let (pre, post) = match (&stored, cli.apply.is_some()) {
+            (Some(rs), false) => (rs.pre.clone(), rs.post.clone()),
+            (Some(rs), true) => (rs.pre.clone(), sim::derived_from_state(&state, &config)),
+            (None, _) => {
+                let d = sim::derived_from_state(&state, &config);
+                (d.clone(), d)
+            }
+        };
+        let mut v = json!({
+            "round": state.round,
+            "source": if from_checkpoint { "checkpoint" } else { "state" },
+            "pre": pre,
+            "post": post,
+        });
+        if !from_checkpoint {
+            v["note"] = json!(
+                "这份派生态是**按当前状态重算**的，没有档存的本回合流量中间量，所以 post.flow 是空的。\
+                 要真正的流量请用 `--index` 投影的 derived.flow 表，或用 `--save` 出来的 checkpoint（它带 pre/post）。"
+            );
+        }
+        emit(&v.to_string());
+        return;
+    }
     if cli.story {
         emit(&agent::story_value(&state).to_string());
         return;
@@ -334,12 +388,22 @@ fn main() {
             );
             std::process::exit(10);
         };
-        if let Err(e) = projection::write_index(&mut state, &config, &mut rng, n, dir) {
-            eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
-            std::process::exit(10);
-        }
-        let last = sim::derived_from_state(&state, &config);
-        let round_state = RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last.clone(), post: last };
+        let outcome = match projection::write_index(&mut state, &config, &mut rng, n, dir) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
+                std::process::exit(10);
+            }
+        };
+        // 存一份**没丢流量**的档：`pre`/`post` 直接取投影收尾回合的那一对。此前这里重新
+        // `derived_from_state`，把本回合的 `flow` 存成了空表——于是同一回合的两个读面
+        // （`--index` 的 derived.flow 表 vs 档里的 post）会各说各话。
+        let round_state = RoundState {
+            schema_version: SCHEMA_VERSION,
+            state: state.clone(),
+            pre: outcome.pre,
+            post: outcome.post,
+        };
         save_if_requested(cli.save.as_deref(), &round_state, &rng);
         return;
     }

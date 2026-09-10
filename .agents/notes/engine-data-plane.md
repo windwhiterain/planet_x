@@ -42,17 +42,19 @@ diff。** 通配、编制表、统计筛选、配方、verify——全部是 Pyt
 ## 2. 引擎欠的表（读面）——这就是"标准的统计学数据格式"
 
 投影已经是项目选定的标准：`idx/*.jsonl` 一行一个 `(round, 实体)`、列名固定、**按名字 join**
-（`FactionId`/`CityId`/`ShipId` 全是 `String`）。缺的只是"引擎内部中间量"没有出门：
+（`FactionId`/`CityId`/`ShipId` 全是 `String`）。本节写下"当时以为缺什么"，**实际的修正见 §7.2/§7.4**
+（写下来是为了让下一个 agent 看到"动手前先核实"这条教训本身）：
 
-| 欠的东西 | 数据在哪 | 今天的状态 |
+| 欠的东西 | 数据在哪 | 当时的状态（⚠ 见 §7.2 的修正） |
 | --- | --- | --- |
-| **`flow` 表**（`idx/flow.jsonl` 回合×势力：各资源产出 / `upkeep` / `governance.total` / `coverage`；`idx/city_flow.jsonl` 回合×城×资源产出） | `RoundFlow`（`src/model/metrics.rs:103`，文档原话："各 step 计算并应用、**不落到持久状态、原本不对外暴露的量**"） | `write_round`（`src/projection.rs:160-334`）**一张 flow 表都没发**——`city_production`/`faction_production`/`upkeep`/`governance` 四张按名字键的表 join 不到 |
-| **`pre` 段**（回合×势力：本回合依赖 rng 的随机决策） | `RoundState.pre: Derived`（`src/model/state.rs:85`） | 投影只用 post（r0 用 `derived_from_state`，之后用 `advance` 的返回值）；"AI 这回合掷了什么"**任何读面都没有** |
-| **控制面 tidy 表 + 每实体 `effective`** | `State.control` / `State.scope` | `--control` 有（读面即写面），但**不是投影里的表**，Python 要 join 得再起一次进程；`effective` 没有 → Python 只能自己重实现 `resolve_chain`（`src/model/state.rs:179-211`），**那是漂移源** |
-| **`--derived` 单点导出**（一个 ckpt → `{pre, post}`） | 同上 | 没有；不想为一次 join 跑整个 `--index` |
+| **`flow` 表**（`idx/flow.jsonl` 回合×势力：各资源产出 / `upkeep` / `governance.total` / `coverage`；`idx/city_flow.jsonl` 回合×城×资源产出） | `RoundFlow`（`src/model/metrics.rs:103`，文档原话："各 step 计算并应用、**不落到持久状态、原本不对外暴露的量**"） | 作为**表**确实一张都没发；但**数值**早已被 `round_metrics` 抄进 `metrics`（内联在 main 行里）——所以真实收益是**形状**不是数据，见 §7.2 |
+| **`pre` 段**（当时以为 = "本回合依赖 rng 的随机决策"） | `RoundState.pre: Derived`（`src/model/state.rs:85`） | ❌ 这个描述**是错的**：`pre` 只是"推进前的观测"（`flow` 恒空）。真正的"AI 掷了什么"任何地方都没记录，要新捕获，见 §7.4 |
+| **控制面 tidy 表 + 每实体 `effective`** | `State.control` / `State.scope` | 这条**是真的**：`--control` 有（读面即写面）但**不是投影里的表**，Python 要 join 得再起一次进程；`effective` 没有 → Python 只能自己重实现 `resolve_chain`（`src/model/state.rs:179-211`），**那是漂移源**。✅ 本轮已做 |
+| **`--derived` 单点导出**（一个 ckpt → `{pre, post}`） | 同上 | 没有；不想为一次 join 跑整个 `--index`。✅ 本轮已做 |
 
 **硬约束（写成测试）**：`post` 是 `state` 的函数（同一 state 恒定），所以 **`--derived` 与 `--index`
-里的同一个数必须逐字节一致**。两个读面各说各话，比缺数据更坏。
+里的同一个数必须完全相同**。两个读面各说各话，比缺数据更坏。→ `tests/projection_derived.rs`
+（跨进程：`--index --save` 一份 ckpt，再 `--derived` 读它，逐值比对）。
 
 投影 schema 是发射端与 Python kit 共享的契约（`projection_schema()`，有测试断言 `LAZY` 与 schema
 一一对应：`src/projection.rs:480`）——**每加一张表，两处都要动，别漏 schema**。
@@ -81,20 +83,63 @@ leaf.value      // ← 否则落到叶子上那个可能已经过期的记录值
 * 归属是 `Player` 而舰队默认不是 `Player` 时**会长期显示旧值**。
 * kit 的处理：凡"释放到上层"，通常**同时**把 `default_ship_order` 写成 `Player`（一片叶），语义闭合。
 
-## 5. 引擎侧落地顺序（用户授权自行决定）
+## 5. 落地状态（用户授权自行决定顺序）
 
-1. `[ ]` **读面补表**：`flow` / `city_flow` / `pre` / 控制面 + `effective` + `--derived` + schema 同步 +
-   一致性测试（`--derived` vs `--index` 逐字节）。
-2. `[ ]` **风格活层**（`control-live-layers.md` §4.1+4.2+4.4：`default_doctrine`/`default_kiting` +
-   `Ship.doctrine/kiting` 降级为记录值 + 读面 `effective`）——与第 1 步同在 `src/control.rs`，
-   所以**串行**做。
-3. `[ ]` **舰船模板**（`ship-blueprint.md`，含按舰级默认）。
-4. 引擎侧**不加**通配/清叶动词（§1.1）。
+1. `[x]` **读面补表**（本轮做完，见 §7）：`flow` / `city_flow` / `control` / `scope` 四张派生表 +
+   ships 表的 `order_*` 列（引擎解析的归属/有效指令）+ `--derived` 单点导出 + schema 同步 +
+   跨进程一致性测试（`tests/projection_derived.rs`）。
+2. `[ ]` **"AI 到底掷了什么"要单独捕获**（见 §7.4）：`pre` **不是**这个（它只是回合前的观测），
+   要真数据得在 `sim`/`autocontrol` 的决策点补一次**结构化捕获**，并证明行为中性。
+3. `[ ]` **风格活层**（`control-live-layers.md` §4.1+4.2+4.4：`default_doctrine`/`default_kiting` +
+   `Ship.doctrine/kiting` 降级为记录值）——与第 1 步同在 `src/control.rs`，所以**串行**做。
+4. `[ ]` **舰船模板**（`ship-blueprint.md`，含按舰级默认）。
+5. 引擎侧**不加**通配/清叶动词（§1.1）。
 
 ## 6. 复现 / 验证
 
 ```bash
 cargo test --workspace
-cargo run --bin planet_x -- --seed 7 --round 6 --index out/     # 看 idx/ 是否多了 flow/pre
-cargo run --bin planet_x -- --start ../planet_x/play/exp2/ckpt_r12.ron --derived
+cargo run --bin planet_x -- --seed 7 --round 6 --index out/          # 看 idx/{flow,city_flow,control,scope}.jsonl
+cargo run --bin planet_x -- --seed 7 --round 6 --index out/ --save ckpt.ron
+cargo run --bin planet_x -- --start ckpt.ron --derived               # 与上面同一回合，值必须完全相同
 ```
+
+## 7. 落地记录（2026-10，`feature/control-tri-state`）
+
+### 7.1 做了什么
+
+* `idx/flow.jsonl`（回合 × 势力：`production` / `upkeep` / `governance_total` / `governance_coverage`）、
+  `idx/city_flow.jsonl`（回合 × 城，含 razed 空城）、`idx/control.jsonl`（每个叶片一行：
+  `kind` / `key` / `sub` / `value` / `mode`）、`idx/scope.jsonl`（显式作用域节点）。
+  四张表由 `projection.rs` 的 `DERIVED` 声明驱动，schema 里有对应的 `derived` 段（测试断言
+  声明／写出／schema 三处一致）。
+* ships 表加四列：`order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective`
+  ——**引擎解析的答案**，Python 不该自己重实现链。
+* `--derived`：打印这一回合存下来的 `{round, source, pre, post}`；有档就是**档里那一对**，
+  没档（或叠加了 `--apply`）就按当前状态重算并附 `note`（否则空 flow 会被误读成"本回合零产出"）。
+* 顺手修掉两个"静默不实"：
+  * `--index --save` 存出来的 checkpoint 里 `pre`/`post` 都是**丢了流量**的重算值
+    （`write_index` 现在返回 `IndexOutcome{pre, post}`），于是同一回合的两个读面会对不上；
+  * `serde_json` 默认的**浮点解析不精确**（实测：文件写 `1.4000000000000001`，读回来是 `1.4`）——
+    换成 `features = ["float_roundtrip"]`。这个坑不止影响测试：`--apply` 的 diff 里的数也走同一条解析。
+
+### 7.2 修正一个我先前的说法（重要）
+
+`RoundFlow` 的**数值**并不是"从未暴露"：`round_metrics` 已经把 flow 抄进了 `metrics`
+（`FactionMetrics::{production, production_value, upkeep, governance_cost, governance_coverage}`、
+`CityMetrics::{production, production_value, …}`），而 `metrics` **内联在每行 main.jsonl 里**。
+所以本轮新表的真实收益是**形状**（可 join 的平铺行、按 `faction_id`/`city_id` 键、列类型稳定、
+razed 城也在），**不是**"拿到了以前拿不到的数"。教训照旧：动手前先把"我以为没有"核实一遍。
+
+### 7.3 `{}` vs `null` 的契约
+
+投影表**永远给对象**（没产出就是 `{}`，不是 null），这样 Python 侧列类型稳定；`Derived` 里没有
+这个势力的键时是 `null`。集成测试用一层 `res_map()` 翻译这两者——语义相同，形状不同。
+
+### 7.4 `pre` 的真相（下一步的依据）
+
+`RoundState.pre` 现在是 `derived_from_state(推进前状态)`：`flow` **恒为空**、`metrics` 是推进前的
+观测。它**不是**"本回合 rng 掷出的随机决策"——那个东西**任何地方都没有被结构化记录**（AI 造了什么舰、
+舰队怎么重组、谁接战了，只散在事件与状态差里）。想要"AI 在想什么"的读面，得在
+`sim`/`autocontrol` 的决策点补一次捕获（新的 `Decisions`），并且必须**行为中性**——
+判据：同 seed/同回合的 `--digest` 输出与捕获前**逐字相同**，长局 harness 全绿。
