@@ -626,13 +626,63 @@ mod tests {
     /// 主人的 diaspora claim），而同回合稍后的 `reseed_city` 会把它改成新主，于是事后再读
     /// 只会读到**抢城的人**。活体样本 seed 7 r24：大红斑科学站被欧盟夷平、同回合被无国界
     /// 科学组织复垦，战功被记到了抢城者头上。
+    ///
+    /// **样本改为确定性构造**：原先靠长局恰好撞上「被 A 夷平、同回合被 B 复垦」，而唯一大量
+    /// 产生这种巧合的 `step_resurgence` 已删除（D5），长局样本随之消失、守卫空转。现在直接用
+    /// 真实漏斗造出这个巧合（`raze_city` → `reseed_city`，同一回合），再让投影把 round 0 的
+    /// 事件落盘校验——**守卫再也不会空转**。
     #[test]
     fn city_razed_records_the_loser_not_the_refounder() {
         let cfg = load_config();
         let mut state = default_state(&cfg, 7);
         let mut rng = Prng::new(7);
         let s = Scratch::new("razed_loser");
-        write_index(&mut state, &cfg, &mut rng, 60, &s.0).unwrap();
+
+        // 挑一座活城（失城方 A）与一支别的势力（抢城方 B）。
+        let (city, loser) = state
+            .cities
+            .iter()
+            .find(|c| !c.razed)
+            .map(|c| (c.name.clone(), c.faction_id.clone()))
+            .expect("世界生成必须至少有一座活城");
+        let founder = state
+            .factions
+            .iter()
+            .map(|f| f.name.clone())
+            .find(|f| f != &loser)
+            .expect("世界必须至少有两个势力");
+        let body = state.city(&city).map(|c| c.body_id.clone()).expect("city");
+
+        // 同一回合：先被 A 的对头夷平，再被 B 复垦（= 那个会写错战功的巧合）。
+        crate::sim::raze_city(
+            &mut state,
+            &city,
+            crate::sim::RazeCause::Bombardment {
+                by_ship: "测试舰".to_string(),
+                by_faction: founder.clone(),
+                damage: 1.0,
+            },
+        );
+        let mut next_building = state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1);
+        let class = state
+            .ships
+            .iter()
+            .find(|sh| sh.faction_id == founder)
+            .map(|sh| sh.class.clone())
+            .unwrap_or_else(|| "corvette".to_string());
+        assert!(
+            crate::sim::reseed_city(&mut state, &cfg, &city, &founder, &class, &mut next_building),
+            "复垦应当成功（同回合制造出「夷平 → 被别家复垦」这个巧合）"
+        );
+        let _ = body;
+
+        // 只落盘 round 0（不要推进回合，否则 advance 会清空本回合事件）。
+        write_index(&mut state, &cfg, &mut rng, 0, &s.0).unwrap();
 
         let events = jsonl(&s.0.join("idx/events.jsonl"));
         let mut razed_with_revival = 0usize;
@@ -645,6 +695,7 @@ mod tests {
             let owner = e["data"]["owner"].as_str().unwrap();
             let fallen_to = e["data"]["fallen_to"].as_str().unwrap();
             assert_ne!(owner, fallen_to, "夷平一座城不该由它的持有者自己造成（{city}）");
+            assert_eq!(owner, loser, "city_razed.owner 必须是失城方，而不是抢城者");
             // 同回合、同一座城的复垦者若存在，必然**不是** owner 被写成的那个名字。
             for f in &events {
                 if f["type"] != "colony_founded" || f["round"].as_u64() != Some(round) {
@@ -653,17 +704,17 @@ mod tests {
                 if f["data"]["city"].as_str() != Some(city) {
                     continue;
                 }
-                let founder = f["data"]["owner"].as_str().unwrap_or_default();
+                let fdr = f["data"]["owner"].as_str().unwrap_or_default();
                 let prev = f["data"]["prev_owner"].as_str().unwrap_or_default();
-                assert_eq!(prev, owner, "{city} 同回合被 {founder} 复垦，prev_owner 应等于失城方 {owner}");
-                if founder != owner {
+                assert_eq!(prev, owner, "{city} 同回合被 {fdr} 复垦，prev_owner 应等于失城方 {owner}");
+                if fdr != owner {
                     razed_with_revival += 1;
                 }
             }
         }
         assert!(
             razed_with_revival >= 1,
-            "样本里没有「被 A 夷平、同回合被 B 复垦」的城——这条守卫没能真的验到那个坑"
+            "确定性样本里没有「被 A 夷平、同回合被 B 复垦」的城——这条守卫没能真的验到那个坑"
         );
     }
 

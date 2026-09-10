@@ -205,6 +205,14 @@ fn diagnose_long_horizon() {
 /// The world must never panic and must never produce a non-finite number across
 /// a long, war-torn run (here on the default diplomacy curve which opens
 /// peacefully and escalates on its own).
+///
+/// **活体判据（机制层，不是平衡层）**：世界不能变成「没有任何活城」的僵局——那时既没有产出、
+/// 也没有造舰、也没有殖民，游戏真的结束了。
+///
+/// 这里**曾经**还断言「舰不能全没了」（`all ships gone`）。删掉 `step_resurgence`（D5）之后
+/// 这条不再是机制不变量：舰队被战争清空是**合法状态**，只要还有活城 + 造船区，舰队就能重造
+/// ——实测 seed 42 在 r816 前后确实出现过「全世界零舰」，随后由城里的造船区重新长出舰队。
+/// 把「零舰」当崩坏是把**平衡观测**误当**机制不变量**，所以改成记录（打印）而不断言。
 #[test]
 fn no_nonfinite_over_long_run() {
     let config = load_config();
@@ -212,6 +220,8 @@ fn no_nonfinite_over_long_run() {
     let mut rng = Prng::new(42);
     let horizon = 1000u32;
     let mut nonfinite_round = None;
+    let mut shipless_rounds = 0u32;
+    let mut citiless_rounds = 0u32;
     for _ in 0..horizon {
         sim::advance(&mut state, &config, &mut rng);
         let (bad, samples) = count_nonfinite(&state, &config);
@@ -219,12 +229,18 @@ fn no_nonfinite_over_long_run() {
             nonfinite_round = Some((state.round, samples));
             break;
         }
-        // The board should never be empty of ships (a "dead" universe) — if every
-        // faction lost everything, the game has collapsed and is no longer a game.
         if state.ships.is_empty() {
-            panic!("all ships gone by round {}", state.round);
+            shipless_rounds += 1;
+        }
+        if !state.cities.iter().any(|c| !c.razed) {
+            citiless_rounds += 1;
         }
     }
+    println!("diagnostic: 零舰回合={shipless_rounds} 零活城回合={citiless_rounds}");
+    assert_eq!(
+        citiless_rounds, 0,
+        "世界出现了「没有任何活城」的僵局——那时既无产出也无殖民，游戏真的结束了"
+    );
     let Some((round, samples)) = nonfinite_round else { return };
     panic!("non-finite numbers at round {}: {:?}", round, samples);
 }
@@ -256,26 +272,77 @@ fn world_value_is_bounded() {
     }
 }
 
-/// 反僵尸/反垄断：在长局中，被彻底消灭（无舰又无活城）的势力应保持稀少——否则游戏
-/// 会收敛成少数几个永久旁观者（「崩坏」）。反僵尸重建（resurgence）保证这点。
+/// **机制不变量：建城必须由一艘此刻在场的活舰解释**（没有凭空变城）。
+///
+/// `step_resurgence` 删除（D5）之后，**造一座新城**的路径只剩一条：殖民舰开到
+/// `arrival_eps` 之内 → `sim::colonize`（里面还有两条 debug 断言钉住同一条不变量）。
+/// 本守卫在**长局事件层**复核它：凡某回合出现 `ColonyFounded`，其 owner 在该回合结束时必须
+/// 仍有活舰——殖民舰**不被消耗**（只把行为重置为 `Idle`）。
+///
+/// **注意「建城」与「城易主」是两回事**：离心倒戈（`CityDefected`）把一座**已存在**的城交给
+/// 意识形态最对立者，**不需要舰**。所以一个「城舰两空」的势力仍可能靠**倒戈**复生——实测
+/// seed 1 里联合国/无国界科学组织就是这样反复回来的。那是合法机制（认同你的城民还在），
+/// **不是**凭空变城；这条守卫只钉「新城的诞生」。
 #[test]
-fn zombie_factions_are_bounded() {
+fn city_founding_requires_a_ship_there() {
     let config = load_config();
+    let mut foundings = 0usize;
+    let mut violations: Vec<String> = Vec::new();
     for seed in [1u64, 42] {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
-        let mut max_dead = 0usize;
         for _ in 0..1000 {
             sim::advance(&mut state, &config, &mut rng);
-            check_state(&state, &config);
-            max_dead = max_dead.max(zombie_count(&state));
+            for e in &state.events {
+                if let GameEvent::ColonyFounded { owner, city, .. } = e {
+                    foundings += 1;
+                    let ships = state
+                        .ships
+                        .iter()
+                        .filter(|s| &s.faction_id == owner && s.hull > 0.0)
+                        .count();
+                    if ships == 0 && violations.len() < 5 {
+                        violations.push(format!("seed {seed} r{}: {owner} 造了 {city} 却一艘舰都没有", state.round));
+                    }
+                }
+            }
         }
-        // A handful may be momentarily wiped mid-cycle, but the world must not
-        // degrade to a board of permanent bystanders.
-        assert!(
-            max_dead <= 2,
-            "seed {}: too many permanently-neutral factions (max {max_dead} zombies)",
-            seed
+    }
+    assert!(violations.is_empty(), "凭空变城：{violations:?}");
+    assert!(foundings > 0, "1000 回合里一次建城都没发生——这条守卫会空转");
+}
+
+/// 平衡观测（`--ignored`）：删掉 resurgence 之后，世界的**整合程度**——还剩几家有城、
+/// 几家亡国、最强的城占多少。这是**待调的平衡目标**（不是机制不变量），所以只记录不断言。
+///
+/// 实测（`config/game.ron` 默认值，1000 回合）：
+/// * seed 1：3 家有城 / 6 家亡国；seed 7：3 / 6；seed 42：4 / 4。
+/// * 唯一「有立足点保证」的旧时代（`step_resurgence`）是 9 家全活、峰值僵尸 ≤2、城占峰值 <0.85。
+/// 也就是说：**「允许亡国」这一条机制改动，把世界从 9 家整合到 3-4 家**。
+#[test]
+#[ignore]
+fn probe_world_health() {
+    let config = load_config();
+    for seed in [1u64, 7, 42] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut max_dead = 0usize;
+        let mut max_top_share: f64 = 0.0;
+        for _ in 0..1000 {
+            sim::advance(&mut state, &config, &mut rng);
+            let dead = zombie_count(&state);
+            max_dead = max_dead.max(dead);
+            let (_, share) = top_power(&state, &config);
+            max_top_share = max_top_share.max(share);
+        }
+        let alive = state
+            .factions
+            .iter()
+            .filter(|f| state.cities.iter().any(|c| c.faction_id == f.name && !c.razed))
+            .count();
+        println!(
+            "seed {seed}: 末态有城势力={alive}/{} 亡国峰值={max_dead} 城占峰值={max_top_share:.3}",
+            state.factions.len()
         );
     }
 }
@@ -305,17 +372,52 @@ fn same_seed_reproduces_identically() {
     assert_eq!(a.round, b.round);
 }
 
-/// 多极与霸权制衡：合纵连横机制应让世界**不收敛成一家独大**——没有任何势力能长期
-/// 垄断全部城市（最高城占低于一致阈值）、最强势力会**轮换**（不是同一霸主锁死），
-/// 且反制联盟确实会成立（机制是活的，不是摆设）。上千回合后游戏仍是多方参与。
+/// **机制不变量：合纵连横是活的**——长局里反制联盟真的成立过（不是摆设），
+/// 霸权真的被针对过。这是**机制**是否生效，与「世界最后剩几家」无关。
 #[test]
+fn coalition_mechanism_is_alive() {
+    let config = load_config();
+    for seed in [1u64, 42] {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut coalition_seen = false;
+        let mut sanction_seen = false;
+        for _ in 0..1000u32 {
+            sim::advance(&mut state, &config, &mut rng);
+            check_state(&state, &config);
+            if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
+                coalition_seen = true;
+            }
+            let m = sim::round_metrics(&state, &config, &RoundFlow::default());
+            if m.sanctioned.is_some() {
+                sanction_seen = true;
+            }
+        }
+        assert!(coalition_seen, "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）");
+        assert!(sanction_seen, "seed {seed}: 长局从未出现被封锁的霸权（经济制裁未生效）");
+    }
+}
+
+/// 多极格局（**平衡目标，待调**）：没有任何势力能长期垄断接近全部城市（峰值城占 < 0.85），
+/// 且后半程的「最强者」会轮换（不是同一个人锁死）。
+///
+/// 这条**曾经**是机制保证——`step_resurgence` 让「无舰无城的势力」总能重新立足，于是没有谁能
+/// 把对手彻底抹掉。D5 删掉它之后，「亡国」成为合法终局，世界会自然整合：
+/// 实测 1000 回合，seed 1/7 只剩 3 家有城、seed 42 剩 4 家，城占峰值 1.000，后半程最强者
+/// 在 seed 1 锁死为俄罗斯。
+///
+/// 所以这两条现在是**待调的平衡目标**（用户明确要求「平衡性慢慢调，先确立机制的正确性」）：
+/// 用 `#[ignore]` 明确挂起并把实测值记在这里，**不是**悄悄删掉或放宽阈值。
+/// 要让它变绿，需要补的是**平衡手段**（例如让战争更倾向于「易主」而不是「拆平」、给劣势方
+/// 更强的复垦激励、或调维护费/治理曲线），而不是恢复凭空造城。
+#[test]
+#[ignore = "平衡待调（D5 允许亡国后世界整合到 3-4 家）：见 .agents/notes/trade-and-sanctions.md"]
 fn world_is_multipolar() {
     let config = load_config();
     for seed in [1u64, 42] {
         let mut state = world::default_state(&config, seed);
         let mut rng = Prng::new(seed);
         let mut max_top_share: f64 = 0.0;
-        let mut coalition_seen = false;
         let mut leaders = BTreeSet::new();
         for _ in 0..1000u32 {
             sim::advance(&mut state, &config, &mut rng);
@@ -325,17 +427,12 @@ fn world_is_multipolar() {
             if state.round >= 500 {
                 leaders.insert(top);
             }
-            if state.events.iter().any(|e| matches!(e, GameEvent::CoalitionFormed { .. })) {
-                coalition_seen = true;
-            }
         }
         // 不统一：没有势力能吞并到接近 100% 的城市（峰值留出余量）。
         assert!(
             max_top_share < 0.85,
             "seed {seed}: 单一势力城市占比峰值 {max_top_share:.3} —— 世界有被一家独大垄断的趋势"
         );
-        // 制衡是活的 + 霸权轮换：长局里应出现过反制联盟，且最强势力不止一个（不是锁死）。
-        assert!(coalition_seen, "seed {seed}: 长局从未出现反制联盟（合纵连横未生效）");
         assert!(
             leaders.len() >= 2,
             "seed {seed}: 后半程最强势力始终是同一个人 {leaders:?} —— 存在长期锁死的单极霸权"

@@ -79,11 +79,12 @@ pub fn advance(state: &mut State, config: &GameConfig, rng: &mut Prng) -> Derive
     step_military(state, config, rng);
     // 光速治理：以距离首都为代价的管理/忠诚度，给超大帝国一个自然上限。
     step_governance(state, config, &mut flow);
-    // 重建（反僵尸/反垄断）：趁着本回合只剩「残骸」的势力还没被永久旁观，先让它在
-    // 自己的残骸足迹上重新立足。放在治理之后：被叛乱夷平到零的势力也能当回合重建。
-    step_resurgence(state, config, rng);
-    // 迁都：亡城强迁（首都天体失守→人口最高活城）+ 周期性 AI 评估。放在重建之后，
-    // 让重建出立足点的势力也能当回合被认领新首都。
+    // 重建没有「步进」了：唯一的重建路径是**殖民舰开到空白定居点**（见 `sim::colonize`，
+    // 由 `step_military` 里的殖民行为触发）。既无舰又无活城的势力就此亡国——见
+    // `tests/longhorizon.rs` 的亡国守卫。
+    //
+    // 迁都：亡城强迁（首都天体失守→人口最高活城）+ 周期性 AI 评估。放在这里，
+    // 让本回合刚靠殖民舰立起立足点的势力也能当回合被认领新首都。
     step_capital(state, config);
     step_diplomacy(state, config, rng);
     // 合纵连横 / 均势外交：当一方被判定为「霸权」时，其余较弱势力结成反制联盟——
@@ -392,7 +393,9 @@ pub(crate) fn spawn_ship(state: &mut State, config: &GameConfig, spec: ShipSpawn
 }
 
 /// 一座城被**夷平**的方式（决定记哪条事件）。
-enum RazeCause {
+///
+/// `pub(crate)`：投影守卫要用它构造一个确定性的「先夷平、同回合再被别家复垦」样本。
+pub(crate) enum RazeCause {
     /// 被舰炮拆平 → `CityRazed`（带拆城的舰/势力、伤害、夷平前人口）。
     Bombardment { by_ship: ShipId, by_faction: FactionId, damage: f64 },
     /// 离心叛乱：市民自己散伙，无外部攻击者 → `Revolt`。
@@ -404,7 +407,10 @@ enum RazeCause {
 /// 两条路径（舰炮拆平 / 离心叛乱）统一走这里。**刻意保留两条路径各自对忠诚度的效果**
 /// （炮击不动 `loyalty`、叛乱清零）：治理步进跳过 razed 城，故该值对模拟是惰性的，但它是
 /// 投影 `cities.loyalty` 列的一部分——改它会改变已发布的轨迹。
-fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
+///
+/// `pub(crate)`：投影守卫需要一个**确定性**的「先夷平、同回合再被别家复垦」样本，
+/// 否则只能靠长局恰好撞上（而唯一大量产生这种巧合的 `step_resurgence` 已删除）。
+pub(crate) fn raze_city(state: &mut State, cid: &CityId, cause: RazeCause) {
     let pop_before = state.city(cid).map(|c| c.population).unwrap_or(0);
     // 「谁失去了这座城市」**只有在此刻才知道**：夷平不改 `faction_id`（空白城保留最后主人的
     // diaspora claim），但同一回合后来的 `reseed_city`/`found_city` 会把它改写成新主。
@@ -463,9 +469,10 @@ fn wire_city_control(state: &mut State, config: &GameConfig, cid: &CityId, to: &
 /// `prev_owner` 由漏斗自己读（改归属**之前**的持有者 = 空白城保留的 diaspora claim），
 /// 所以「谁失去了这座城市」不可能被调用方漏掉。
 ///
-/// 两条路径统一走这里：殖民舰复垦、反僵尸重建的 diaspora 复垦（含回到自己的废墟）。
+/// 由**殖民舰抵达**触发（见 `colonize`）——这是唯一能让一座空白城重新立起来的路径：
+/// 重建必须**有船跑到那里**，不再是凭空变城。
 /// 返回 `false` = 该城没有可用的定居点（调用方自行处理）。
-fn reseed_city(
+pub(crate) fn reseed_city(
     state: &mut State,
     config: &GameConfig,
     cid: &CityId,
@@ -539,36 +546,6 @@ fn found_city(
         how: FoundingHow::NewSite,
         prev_owner: None,
     });
-    true
-}
-
-/// 难民**夺取一座活城**（漏斗）：重新播种并换主，记 `CityOverrun { from, to }`。
-///
-/// `from` 由漏斗自己读（改归属**之前**的持有者），所以「这座城市是从谁手里被夺走的」
-/// 不可能被漏掉。这条路径此前**完全不发事件**——一座活城从 A 到 B 静默发生。
-fn overrun_city(
-    state: &mut State,
-    config: &GameConfig,
-    cid: &CityId,
-    to: &FactionId,
-    seeded_ship_class: &str,
-    next_building_id: &mut BuildingId,
-) -> bool {
-    let Some(settlement) = state.city_settlement(cid).cloned() else { return false };
-    let from = state.city(cid).map(|c| c.faction_id.clone()).unwrap_or_default();
-    let pop = (settlement.ecological_capacity * 20.0).round().max(40.0) as u32;
-    let buildings = seed_colony_buildings(&settlement, pop, seeded_ship_class, config, next_building_id);
-    if let Some(c) = state.city_mut(cid) {
-        c.razed = false;
-        c.faction_id = to.clone();
-        c.population = pop;
-        c.buildings = buildings;
-        c.ship_progress.clear();
-        c.ship_progress.insert(seeded_ship_class.to_string(), 0.0);
-        c.loyalty = 1.0;
-    }
-    wire_city_control(state, config, cid, to);
-    ev(state, GameEvent::CityOverrun { city: cid.clone(), from, to: to.clone() });
     true
 }
 
@@ -738,6 +715,13 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
 /// This is the continuous resource **sink** that bounds fleet size: big fleets
 /// need a big economy to sustain, so the navy grows only as fast as the
 /// economy feeds it rather than snowballing unboundedly.
+///
+/// **例外：无活城的势力（流亡舰队）不因维护费被拆解。** 维护费是**港口/后勤**的成本——
+/// 没有港口就无从「欠费拆解」，舰队只能靠打捞、掠夺、拆东墙补西墙自持。这条例外是
+/// `step_resurgence` 被删除（D5）之后**唯一的立足点保证**：复垦必须由**航行**完成
+/// （派船去空白定居点，见 `colonize`），所以流亡舰队必须先**活到**能开过去。
+/// 没有这条，实测 seed 1/7/42 跑到 1000 回合会**只剩 1-4 个势力有城、5-8 个永久亡国**
+/// ——战争拆掉最后一座城 → 无产出 → 库存被维护费抽干 → 全舰队生锈拆解 → 永远回不来。
 fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
@@ -751,6 +735,11 @@ fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
         // 记录本回合舰队维护费（step_upkeep 的「中间量」）。
         flow.upkeep.insert(fid.clone(), upkeep_total);
         if upkeep_total <= 1e-9 {
+            continue;
+        }
+        // 流亡舰队（无活城）：不抽库存、不生锈——见上面的「例外」。
+        let landless = !state.cities.iter().any(|c| c.faction_id == fid && !c.razed);
+        if landless {
             continue;
         }
         let stock = state.faction(&fid).map(|f| f.resources.clone()).unwrap_or_default();
@@ -1639,210 +1628,21 @@ fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng) {
     debug_assert_eq!(invented, 0, "有 {invented} 艘舰死亡却没有事件：某条路径漏了 kill_ship");
 }
 
-// --- resurgence (anti-zombie / anti-monopoly) -------------------------------
-
-/// If a faction ends a round with no ship and no living city, it has become a
-/// permanent bystander (「僵尸」): with no city it can never build a ship, and with
-/// no ship it can never re-colonize a razed city. Over a long horizon this
-/// shrinks the board to a handful of power blocs and leaves the rest frozen —
-/// the world stops being a game.
-///
-/// 重建 (resurgence) breaks that trap: on the round a faction reaches 0 ships +
-/// 0 living cities, it re-establishes a foothold on its own lowest-id razed city
-/// (a *diaspora claim* — a razed city keeps its last owner's `faction_id` until
-/// someone else re-colonizes it) and launches one affordable colony ship there.
-/// Deterministic: no RNG beyond the existing affordable-class pick. A faction
-/// that has been fully absorbed (has no footprint anywhere) is left eliminated —
-/// the rare, legitimate end of a civ.
-/// 找一个「尚无任何城市占据」的定居点（含空白/从未殖民）；城市占用即排除。返回
-/// (body_id, settlement_name)。用于反僵尸重建的**强制立足点**兜底：当世界暂时没有空白
-/// 城足迹、又必须给被灭势力一个落脚点时，就在未占用定居点上新建一座城。
-fn find_vacant_settlement(state: &State) -> Option<(BodyId, String)> {
-    for b in &state.bodies {
-        if b.settlements.is_empty() {
-            continue;
-        }
-        let occupied: BTreeSet<String> = state
-            .cities
-            .iter()
-            .filter(|c| c.body_id == b.name)
-            .map(|c| c.settlement.clone())
-            .collect();
-        for s in &b.settlements {
-            if !occupied.contains(&s.name) {
-                return Some((b.name.clone(), s.name.clone()));
-            }
-        }
-    }
-    None
-}
-
-/// 反僵尸重建的**最后兜底**：当世界已满（每个定居点都被活城占据）、被灭势力既无自己
-/// 的空白足迹、也找不到未占用定居点时，难民潮会**夺取当前控制城数最多的那个势力的最小
-/// id 活城**（一个边缘殖民地被难民潮占据），作为重新立足点。这保证「被完全吞并」的旧
-/// 势力也总能重返——既维持「上千回合不崩坏、无永久旁观者」，又给大帝国一个「难民危机」
-/// 式的代价。确定性（无 RNG）。返回被夺取的城市 id。
-fn displace_city_for_refugee(state: &State, exclude: &BTreeSet<CityId>) -> Option<CityId> {
-    let mut counts: BTreeMap<FactionId, usize> = BTreeMap::new();
-    for c in &state.cities {
-        if !c.razed {
-            *counts.entry(c.faction_id.clone()).or_insert(0) += 1;
-        }
-    }
-    let holder = counts.iter().max_by_key(|(_, n)| **n).map(|(k, _)| k.clone())?;
-    state
-        .cities
-        .iter()
-        .filter(|c| c.faction_id == holder && !c.razed)
-        // **不夺本回合已经易主过的城**：`step_governance` 先跑，可能刚刚把一座城从「本回合
-        // 变成僵尸的那个势力」手里倒戈走；若这里又把它夺回来，两个步进在同一回合里**正好
-        // 互相抵消**（净效果为零，却照样记两条里程碑事件、还白造一艘种子舰）。实测 seed 7
-        // 的 `冥王星前哨` 就是这样被钉进 4 回合一轮的「倒戈—夺回」循环（60 回合 41 次）。
-        // 排除之后，一个回合内同一座城不会易主两次——这是可断言的**同回合不变量**
-        // （见 `no_city_changes_owner_twice_in_one_round`）。
-        .filter(|c| !exclude.contains(&c.name))
-        .min_by_key(|c| c.name.clone())
-        .map(|c| c.name.clone())
-}
-
-/// 反僵尸重建（`Resurgence` 事件）。若一支势力在一回合结束时**既无舰又无活城**（已被
-/// 彻底消灭、无从再殖民/重建的下限），它会在自己仍持有的**残骸足迹**上重新立足：重建
-/// 一座城并出场一艘廉价种子舰——保证没有势力会**永久**变成旁观者。确定性：无未播种 RNG；
-/// 位置/舰名/id 全由状态推导，同种子完全复现。
-///
-/// 立足点优先级（确保「总能重返」）：
-/// 1. 该势力自己最低 id 的空白城（diaspora claim，空白城保留最后主人的 id）；
-/// 2. 全系统最低 id 的任意空白城（难民避风港）；
-/// 3. 若无任何空白城，则在一个**从未被占据**的定居点上新建一座城（强制立足点）。
-fn step_resurgence(state: &mut State, config: &GameConfig, rng: &mut Prng) {
-    let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
-    let mut next_building = state
-        .cities
-        .iter()
-        .flat_map(|c| c.buildings.iter().map(|b| b.id))
-        .max()
-        .map_or(0, |m| m + 1);
-
-    // 这次重建「落脚」的方式——决定走哪个漏斗（`reseed_city` / `found_city` / `overrun_city`），
-    // 使一次重建在历史里可读成「复垦了自己的废墟 / 占了一块新地 / 夺取了别人的活城」。
-    // 三个漏斗各自负责「改状态 + 记事件」，调用方无处可漏。
-    //
-    // 「本回合已经易主过的城」——anchor 4（难民夺城）必须避开它们，否则会和本回合别的步进
-    // （离心倒戈 / 舰炮拆平后的复垦 / 殖民舰复垦）在同一回合里互相抵消，或让一座城一回合内
-    // 易主三次。初始快照来自 `step_military`/`step_governance`；循环内每落实一个立足点就
-    // **追加**进去，因此**同一个回合里没有哪座城会被重建/夺取两次**（守卫
-    // `no_city_changes_owner_twice_in_one_round` 钉住这条不变量）。
-    //
-    // **`ColonyFounded` 必须在这个集合里**——否则「谁算本回合已易主」这件事会有两套互相矛盾的
-    // 定义：守卫把「活城易主」定义为 `city_defected / city_overrun / colony_founded` 三者之和，
-    // 而这里曾经只收 `{defected, overrun, razed}`，于是**本回合刚被殖民舰复垦的城**在 anchor 4
-    // 眼里不算「已易主」，可以被同回合的难民夺走——正是这条不变量要禁止的自相抵消。实测
-    // seed 7 回合 76/79 的 `大红斑科学站`：先「深空运输联盟 复垦 俄罗斯 留下的废墟」，同回合又被
-    // 「联合国的难民夺取」，两条 `colony_founded`/`city_overrun` 净效果为零。
-    let mut flipped_this_round: BTreeSet<CityId> = state
-        .events
-        .iter()
-        .filter_map(|e| match e {
-            GameEvent::CityDefected { city, .. }
-            | GameEvent::CityOverrun { city, .. }
-            | GameEvent::CityRazed { city, .. }
-            | GameEvent::ColonyFounded { city, .. } => Some(city.clone()),
-            _ => None,
-        })
-        .collect();
-    for fid in faction_ids {
-        // Already a participant (has a ship or a living city)? Nothing to do.
-        let has_ship = state.ships.iter().any(|s| s.faction_id == fid && s.hull > 0.0);
-        if has_ship {
-            continue;
-        }
-        let has_living_city = state.cities.iter().any(|c| c.faction_id == fid && !c.razed);
-        if has_living_city {
-            continue;
-        }
-
-        let seeded_ship_class = autocontrol::choose_next_class(state, &fid, config, rng);
-
-        // Anchor 1/2: this faction's own lowest-name footprint, else any razed refuge.
-        //
-        // **同回合抵消在 anchor 1/2 上也要排除**（此前只对 anchor 4 做了，见
-        // [`displace_city_for_refugee`] 的说明）：一座城刚在本回合被拆平，就不该被**它自己的
-        // 旧主**在本回合立刻复垦——那让「拆平」的后果在同一回合里被抹掉（归属 A→A，净变化只剩
-        // 「人口/建筑被重置」，却照样记 razed + colony_founded + ship_spawned + resurgence 四条
-        // 事件、还白送一艘种子舰）。实测 seed 7 @200 回合：**137 次拆平里有 93 次（68%）**是这种
-        // 同回合自我复垦，`水星熔炉基地` 一座城循环了 **22 次**。
-        //
-        // **但不能因此把重建推到下一回合**（我试过：`continue` 那条路会让被拆平的势力在**本回合末
-        // 真的没有立足点**，于是 `zombie_factions_are_bounded` 采样到的僵尸峰值 0 → 6、
-        // `world_is_multipolar` 也红）。反僵尸保证的是「回合末总有立足点」，不能被这条过滤破坏。
-        // 正确做法与 anchor 4 完全同构：**排除掉那块刚丢的废墟，改在别的立足点重建**
-        // （自己的另一块废墟 → 任何空白避风港 → 未占据定居点新建），于是既没有净效果为零的
-        // 同回合抵消，也没有任何一个回合末留下无立足点的势力。
-        let anchor = state
-            .cities
-            .iter()
-            .filter(|c| c.faction_id == fid && !flipped_this_round.contains(&c.name))
-            .min_by_key(|c| c.name.clone())
-            .map(|c| c.name.clone());
-        let anchor_id = anchor.or_else(|| {
-            state
-                .cities
-                .iter()
-                .filter(|c| c.razed && !flipped_this_round.contains(&c.name))
-                .min_by_key(|c| c.name.clone())
-                .map(|c| c.name.clone())
-        });
-
-        let (body, city) = if let Some(anchor_id) = anchor_id {
-            // 复垦一座空白城（自己的废墟 / 任何空白避风港）→ `reseed_city` 漏斗。
-            let Some(body) = state.city(&anchor_id).map(|c| c.body_id.clone()) else { continue };
-            if !reseed_city(state, config, &anchor_id, &fid, &seeded_ship_class, &mut next_building) {
-                continue;
-            }
-            (body, anchor_id)
-        } else if let Some((body, sname)) = find_vacant_settlement(state) {
-            // Anchor 3: 在从未被占据的定居点上新建一座收容所 → `found_city` 漏斗。
-            let Some(settlement) = state.body_settlement(&body, &sname).cloned() else { continue };
-            let base = if settlement.name.is_empty() {
-                state.body(&body).map(|b| b.name.clone()).unwrap_or_else(|| format!("#{body}"))
-            } else {
-                settlement.name.clone()
-            };
-            let new_cid = format!("{}-收容所", base);
-            if !found_city(state, config, &new_cid, &body, &settlement, &fid, &seeded_ship_class, &mut next_building) {
-                continue;
-            }
-            (body, new_cid)
-        } else {
-            // Anchor 4: 世界完全满员 → 难民夺取最强殖民者的最小 id 边缘城 → `overrun_city` 漏斗。
-            let Some(host_cid) = displace_city_for_refugee(state, &flipped_this_round) else { continue };
-            let Some(body) = state.city(&host_cid).map(|c| c.body_id.clone()) else { continue };
-            if !overrun_city(state, config, &host_cid, &fid, &seeded_ship_class, &mut next_building) {
-                continue;
-            }
-            (body, host_cid)
-        };
-
-        let cpos = state.body_position(&body);
-        let pos = [cpos[0] + 0.05, cpos[1] + 0.05];
-        // 这个立足点本回合已经定下：后面的势力不许再在同一回合动它。
-        flipped_this_round.insert(city.clone());
-
-        // Launch one affordable colony ship from the rebuilt/founded city.
-        // 舰级 = 平台修正器：重建种子舰也必须装配组件（至少一件武器），否则没有火力。
-        // 走 `spawn_ship` 漏斗 → 种子舰也有 `ShipSpawned` 事件。此前这条路径**完全不发**
-        // 造舰事件（只发 Resurgence），投影实测 63 次出生里 46 次无解释。
-        let seed_name = spawn_ship(state, config, ShipSpawn {
-            owner: fid.clone(),
-            class: seeded_ship_class.as_str(),
-            position: pos,
-            city: Some(city.clone()),
-            via: SpawnVia::Resurgence,
-            pay_components: false,
-        });
-        ev(state, GameEvent::Resurgence { faction: fid, body, ship: seed_name, city });
-    }
-}
+// --- 重建：只有一条路——派殖民舰去复垦 ---------------------------------------
+//
+// 这里原本是 `step_resurgence`（反僵尸重建）：一支势力一旦「无舰又无活城」，就**凭空**在自己的
+// 残骸足迹 / 任何空白城 / 任何未占据定居点上重新立起一座城，甚至夺取城数最多者的活城，还白送
+// 一艘种子舰。它保证了「回合末总有立足点」，但代价是**反科学**：城市凭空出现、货物凭空出现
+// （补贴市场）、组件凭空装配——三处「免费午餐」互相掩护，于是「缺矿」既不更贵、也不致命。
+//
+// 已删除（D5）。现在世界只有一条重建路径，且它是物理的：
+//   **造一艘殖民舰 → 把它开到一处空白定居点 → `colonize` 复垦。**
+// 见 `ShipBehavior::Colonize`（自动控制在「无仗可打」时就会就近挑一处被夷平的定居点）
+// 与 `sim::colonize`（`reseed_city` / `found_city` 两个漏斗）。
+//
+// 后果（有意接受的）：一支**既无舰又无活城**的势力确实再也回不来了——那是亡国，是合法的
+// 结局，而不是需要被掩盖的状态。守卫因此改判为「亡国不许滚雪球」+「有舰的流亡势力必须
+// 自己复垦回来」，见 `tests/longhorizon.rs`。
 
 // --- governance (light-speed management) -------------------------------------
 
@@ -2707,6 +2507,21 @@ pub(crate) fn colonize(
     next_building_id: &mut BuildingId,
 ) {
     let faction = state.ship(ship_id).map(|s| s.faction_id.clone()).expect("ship gone");
+    // **机制不变量（反凭空造城）**：建城必须由**一艘此刻就在场的活舰**解释。这是
+    // `step_resurgence` 删除（D5）之后世界唯一的建城路径——调用方只在舰已进入
+    // `combat.arrival_eps` 时才调这里（见 `autocontrol::tactics`）。若将来有人再加一条
+    // 「凭空变城」的路径，这两条断言会在任何 debug 测试里立刻炸掉。
+    debug_assert!(
+        state.ship(ship_id).map(|s| s.hull > 0.0).unwrap_or(false),
+        "colonize 必须由一艘活着的舰触发（没有凭空变城）"
+    );
+    debug_assert!(
+        state
+            .ship(ship_id)
+            .map(|s| dist(s.position, state.body_position(body)) <= config.combat.arrival_eps)
+            .unwrap_or(false),
+        "colonize 的舰必须已经在目标天体的 arrival_eps 之内"
+    );
     let seeded_ship_class = autocontrol::choose_next_class(state, &faction, config, rng);
 
     // 1) A razed (blank) city keeps occupying its settlement: re-seed it there.
@@ -4753,24 +4568,26 @@ mod tests {
     /// **同回合抵消不变量（复垦侧）**。
     ///
     /// 一座城在本回合被拆平之后，**不该被它自己的旧主在本回合复垦**：那对事件对归属的净效果是
-    /// A→A（只剩人口/建筑被重置），却照样记 `city_razed` + `colony_founded` + `ship_spawned` +
-    /// `resurgence` 四条事件，还白送一艘种子舰——并把它钉成「拆平→复垦→再拆平」的极限环。
+    /// A→A（只剩人口/建筑被重置），却照样记 `city_razed` + `colony_founded` + `ship_spawned`
+    /// 三条事件，还白送一艘种子舰——并把它钉成「拆平→复垦→再拆平」的极限环。
     ///
     /// 实测 seed 7 @200 回合，修正前：137 次拆平里 **93 次（68%）** 是这种同回合自我复垦，
     /// `水星熔炉基地` 一座城循环 **22 次**、被拆平 32 次；修正后 0 次，该城不再出现在「被拆平
     /// 最多」的前五，事件总量 2273 → 1964。
     ///
-    /// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。
+    /// 这条守卫**必须非空**：局里要真的发生过拆平，否则断言就是空转。删除 `step_resurgence`
+    /// （D5）之后，同回合复垦只剩「殖民舰恰好当回合抵达」这一条路径，**拆平本身也变少了**
+    /// （120 回合只剩 13 次）——所以把视野拉到 400 回合，让样本重新够用。
     #[test]
     fn a_city_razed_this_round_is_not_refounded_by_its_own_loser_this_round() {
         let config = load_config();
         let mut state = default_state(&config, 7);
         let mut rng = crate::prng::Prng::new(7);
         let mut razings = 0usize;
-        for _ in 0..120 {
+        for _ in 0..400 {
             advance(&mut state, &config, &mut rng);
-            // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 由
-            // step_resurgence 发，后者在后——所以「拆平在前、复垦在后」正是要抓的顺序。
+            // 同一个回合里按事件顺序扫：`city_razed` 由 step_military 发，`colony_founded` 也由
+            // step_military 里的殖民路径发（拆平在前、复垦在后），正是要抓的顺序。
             let mut razed: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
             for e in &state.events {
@@ -4784,7 +4601,7 @@ mod tests {
                             assert_ne!(
                                 loser, owner,
                                 "第 {} 回合：{city} 被 {loser} 丢掉后又被**同一个势力**复垦——\
-                                 一对净效果为零的事件（见 step_resurgence 的 anchor 1/2 说明）",
+                                 一对净效果为零的事件（拆平在同回合被自己抹掉）",
                                 state.round
                             );
                         }
@@ -4793,6 +4610,6 @@ mod tests {
                 }
             }
         }
-        assert!(razings >= 20, "120 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
+        assert!(razings >= 20, "400 回合只发生 {razings} 次拆平，样本太小，守卫会空转");
     }
 }

@@ -342,7 +342,90 @@ fn probe_armament_gate() {
     }
 }
 
-/// 5) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
+/// 5) **删掉 resurgence 之后世界会怎样**（D5 的代价与收益）。
+///
+/// * 「流亡」= 无活城但有舰（**还能自己复垦回来**：派船去空白定居点）。
+/// * 「亡国」= 无活城且无舰（**再也回不来了**：无城不能造舰、无舰不能殖民）。
+/// 关键问题：亡国会不会滚雪球（世界退化成少数永久旁观者），以及流亡能不能靠**航行**恢复。
+#[test]
+#[ignore]
+fn probe_no_resurgence() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let mut landless_total: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut landless_run: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut landless_max: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut dead_total: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut dead_run: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut dead_max: BTreeMap<FactionId, u32> = BTreeMap::new();
+        let mut dead_peak = 0usize;
+        let mut dead_last = 0usize;
+        let mut alive_trace: Vec<(u32, usize, usize)> = Vec::new();
+        for _ in 0..n {
+            sim::advance(&mut state, &config, &mut rng);
+            let mut dead_now = 0usize;
+            let mut alive_now = 0usize;
+            for f in &state.factions {
+                let c = live_cities(&state, &f.name);
+                let sh = live_ships(&state, &f.name);
+                if c > 0 {
+                    alive_now += 1;
+                }
+                let lr = landless_run.entry(f.name.clone()).or_insert(0);
+                let dr = dead_run.entry(f.name.clone()).or_insert(0);
+                if c == 0 {
+                    *landless_total.entry(f.name.clone()).or_insert(0) += 1;
+                    *lr += 1;
+                    let m = landless_max.entry(f.name.clone()).or_insert(0);
+                    *m = (*m).max(*lr);
+                    if sh == 0 {
+                        dead_now += 1;
+                        *dr += 1;
+                        *dead_total.entry(f.name.clone()).or_insert(0) += 1;
+                        let dm = dead_max.entry(f.name.clone()).or_insert(0);
+                        *dm = (*dm).max(*dr);
+                    } else {
+                        *dr = 0;
+                    }
+                } else {
+                    *lr = 0;
+                    *dr = 0;
+                }
+            }
+            dead_peak = dead_peak.max(dead_now);
+            dead_last = dead_now;
+            alive_trace.push((state.round, alive_now, dead_now));
+        }
+        println!("== 删掉 resurgence 之后 seed {seed}（{n} 回合）==");
+        println!("  亡国（无城无舰）峰值={dead_peak} 末态={dead_last}   末态仍有活城的势力数={}", alive_trace.last().map(|t| t.1).unwrap_or(0));
+        // 每 1/4 段打印一次「仍有活城 / 亡国」的走向。
+        let step = (n / 4).max(1);
+        print!("  走向(回合:活城势力/亡国):");
+        for (r, alive, dead) in &alive_trace {
+            if r % step == 0 || *r == n {
+                print!(" {r}:{alive}/{dead}");
+            }
+        }
+        println!();
+        for f in &state.factions {
+            println!(
+                "    {:<14} 无城回合={:<5}(最长{:<4}) 亡国回合={:<5}(最长{:<4}) 末态: 城={:<3} 舰={:<3}",
+                f.name,
+                landless_total.get(&f.name).copied().unwrap_or(0),
+                landless_max.get(&f.name).copied().unwrap_or(0),
+                dead_total.get(&f.name).copied().unwrap_or(0),
+                dead_max.get(&f.name).copied().unwrap_or(0),
+                live_cities(&state, &f.name),
+                live_ships(&state, &f.name),
+            );
+        }
+    }
+}
+
+/// 6) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
 fn probe_landless() {
