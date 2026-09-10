@@ -9,7 +9,11 @@ use super::faction::default_capital_body;
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
 /// old `.ron` files are explicitly upgraded — or clearly rejected as "too new" —
 /// instead of being silently loaded under new semantics.
-pub const SCHEMA_VERSION: u32 = 10;
+/// **v13 = 两条独立历史的汇合点**（设计图分支曾用 10、承包市场分支曾用到 12）：
+/// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
+/// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
+/// 所以不能按号细判，只能整段按最保守的方式接）。
+pub const SCHEMA_VERSION: u32 = 13;
 fn default_schema_version() -> u32 {
     0
 }
@@ -77,6 +81,13 @@ pub struct State {
     /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
     #[serde(default)]
     pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
+    /// **承包市场**（托运方挂单、承运方接单）的持久状态：挂单簿 + 单号分配器。
+    ///
+    /// 依据：`.agents/notes/freight-collection.md` §4——集货腿的**第二条路**：自己没有运力
+    /// （或运力不够）的势力，把「搬不动的那部分积压」挂出去请人来运。报酬是**抽成**
+    /// （承运人交付时从货里自留，见 [`Contract::share`]），砸单**只掉信誉、不赔货值**。
+    #[serde(default)]
+    pub contracts: ContractState,
 }
 
 /// 一个可复现的**回合**: 规范的持久世界 + pre(pre==rng 派生态) + post(post==state 派生态)。
@@ -638,7 +649,10 @@ mod tests {
             .replace(",blueprint:None", "")
             .replace(",blueprints:{}", "")
             .replace(",spawned_round:None", "")
-            .replace("schema_version:10", "schema_version:9");
+            // 用 `SCHEMA_VERSION` 拼针脚，而不是写死当时那个号：这条手术的目的是**造一份真的
+            // v9 档**，而版本号每升一档都会变（合并设计图/承包市场两条分支时就已经撞过一次：
+            // 写死 `10` 的针脚在 v13 上什么都不替换，于是「v9 档」里写着 13）。
+            .replace(&format!("schema_version:{SCHEMA_VERSION}"), "schema_version:9");
         assert!(
             !old_text.contains("blueprint") && !old_text.contains("spawned_round"),
             "手术没做干净：v9 档里不该出现设计图那四个字段"
@@ -783,9 +797,45 @@ enum StyleAxis {
 ///
 /// 于是「**旧档 + 新二进制**」与「旧档 + 旧二进制」在同一 seed 下 `--digest` **逐字相同**
 /// （实测见 `.agents/notes/ship-blueprint.md` 的实现记录）。
+///
+/// v9 → v10（运输分支）：新增 [`State::contracts`]（**承包市场**：[`ContractState`] 的挂单簿）
+/// 与 [`Faction::reputation`]（**势力级信誉**）。两者都是 `#[serde(default)]` 的新字段，
+/// v9 档没有它们——而那个世界里**根本没有承包这件事**：没人挂过单，也就没人有履约履历。
+/// 所以这一档的处理是**让所有势力从中性信誉起步**（[`REPUTATION_NEUTRAL`]），
+/// 与全新开局在同一条起跑线上：旧档里不存在任何可以折算成信誉的东西
+///（旧语义下集货腿还只是「自己派船运」，没有对手方，也就没有「谁说话算数」这个问题）。
+///
+/// v10 → v11（运输分支）：承包市场有了**受雇方**——[`Contract`] 多了 `min_reputation`
+/// （雇主的信誉门槛，挂单时算好冻结）与 [`ContractState::assignments`]（哪艘舰此刻在跑哪张单）。
+/// 两者都是 `#[serde(default)]` 的新语义，而 v10 档里的单子**一个受雇方都没有**（那时还只有
+/// 挂单侧），所以「门槛按 0 起步、没有任何派工」正是它的真实状态：**零信息损失**。
+///
+/// v11 → v12（运输分支）：**单子从「一票货」改写成「一份运力雇佣」**（用户裁决）。
+/// [`Contract`] 的字段换了一茬：`amount`/`outstanding`/`deadline`/`late_penalized` 被
+/// `capacity`（单位/回合）/`accepted_round`/`expires_round`/`review_round`/`served_rounds` 取代，
+/// 事件也从 `contract_late`/`contract_lost` 换成 `contract_reviewed`/`contract_ended`。
+/// 旧形态的单子在新语义下没有任何意义（它写的是「搬 47 件铁」，新语义问的是「每月几件运力」），
+/// 两者之间没有等价的折算——硬凑一个只会让第一期的考核凭空判人不达标。
+///
+/// **v10–v12 汇流成 v13**（设计图分支与承包市场分支的合并）：两条分支各自从 v9 出发，
+/// **同一个号在两条历史里含义不同**（设计图分支的 v10 = [`Blueprint`] 那条链；
+/// 承包市场分支的 v10/v11/v12 = 挂单簿/信誉/派工，其中 v12 含那次「一票货 → 雇佣运力」的改写）。
+/// 号本身因此**不能再判语义**了。合并后整段 `10..=12` 按最保守的方式接：
+/// **清空挂单簿** + 推版本号。为什么清簿不算信息损失：挂单簿是**瞬时状态**（谁此刻想雇人），
+/// 每回合都会由 `freight::post_contracts` 重新挂——旧档里那些没被接走的单子本来就没人接，
+/// 清了它们不影响任何势力的实际处境；而**已经发生过的**成交都留在事件流里。
+/// 设计图那几个字段本来就有 `#[serde(default)]`，缺了会退化成「空库 / 无指针 / 未知回合」，
+/// 与它们各自那一档的接法一致。
 pub fn migrate(state: &mut State) -> Result<(), String> {
     match state.schema_version {
+        // v9 及更早：承包市场与设计图都还不存在（各自都是 serde default 的新增字段）⇒ 推号即可。
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => {
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        // v10–v12：**两条独立历史共用过这一段号**（见上面的说明）⇒ 整段保守处理。
+        10 | 11 | 12 => {
+            state.contracts = Default::default();
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

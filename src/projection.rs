@@ -65,6 +65,9 @@ const LAZY: &[LazyField] = &[
     LazyField { name: "ships", table: "idx/ships.jsonl", key: "ship_id", id_col: "ship_ids", round: true },
     LazyField { name: "cities", table: "idx/cities.jsonl", key: "city_id", id_col: "city_ids", round: true },
     LazyField { name: "factions", table: "idx/factions.jsonl", key: "faction_id", id_col: "faction_ids", round: true },
+    // 承包挂单簿：**只留未完成的单子**（等人接的 + 正在履行的），所以它是「此刻在市场上
+    // 的运力需求」的权威读面。完成/收回的单子不在这里——它们只留在 `events` 里。
+    LazyField { name: "contracts", table: "idx/contracts.jsonl", key: "contract_id", id_col: "contract_ids", round: true },
     // 事件历史：**归一化**的一行一事件（固定列 + 统一参与方槽位），取代此前内联在
     // main.jsonl 里的「serde 直接摊开的 tagged enum」——那种表 74.8% 的单元格是 null、
     // 且 `from`/`to` 一列两义（city_defected 是势力、capital_relocated 是天体）。
@@ -110,6 +113,7 @@ struct Writers {
     ships: BufWriter<File>,
     cities: BufWriter<File>,
     factions: BufWriter<File>,
+    contracts: BufWriter<File>,
     flow: BufWriter<File>,
     city_flow: BufWriter<File>,
     control: BufWriter<File>,
@@ -131,6 +135,7 @@ impl Writers {
             ships: open("ships")?,
             cities: open("cities")?,
             factions: open("factions")?,
+            contracts: open("contracts")?,
             flow: open("flow")?,
             city_flow: open("city_flow")?,
             control: open("control")?,
@@ -145,6 +150,7 @@ impl Writers {
     fn flush_all(&mut self) -> Result<(), String> {
         for w in [
             &mut self.main, &mut self.events, &mut self.ships, &mut self.cities, &mut self.factions,
+            &mut self.contracts,
             &mut self.flow, &mut self.city_flow, &mut self.control, &mut self.scope,
             &mut self.blueprints, &mut self.bodies, &mut self.settlements,
         ] {
@@ -290,6 +296,9 @@ fn write_round(
         // 恰恰是历史查询最关心的实体。是否算「活城」交给查询方看 `razed` 列。
         "city_ids": state.cities.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
         "faction_ids": state.factions.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+        // 承包挂单簿（join `contracts` 表用）。挂单号是 `u64`（不是实体名），所以这里是
+        // 数字数组——与本表其它 id 数组（都是名字）不同，别把它当实体 id 用。
+        "contract_ids": state.contracts.contracts.iter().map(|c| c.id).collect::<Vec<_>>(),
         "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
         "settlement_ids": state.bodies
             .iter()
@@ -486,6 +495,9 @@ fn write_round(
                 },
                 "resources": f.resources,
                 "relations": f.relations,
+                // 信誉（承包市场的准入资产，势力级）。它是**唯一的抵押品**：承运人不赔货值
+                // （Q1(b)），托运方靠这一列决定敢不敢把货交给它。
+                "reputation": r2(f.reputation),
                 "city_ids": city_ids,
                 "ship_ids": ship_ids,
             })
@@ -493,8 +505,45 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
 
+    // 雇佣挂单簿（**只留没结束的合同**：等人接的 + 还在雇佣期内的）。`carrier` 为 null
+    // 表示还在挂单簿上等人接；`ships` 是**此刻在替这张单跑的舰**（可以是零条、也可以多条
+    // ——用户：「对方派几艘船都无所谓」）。结束的合同不在这张表里，去 `events` 里查。
+    for c in &state.contracts.contracts {
+        writeln!(
+            w.contracts,
+            "{}",
+            json!({
+                "round": state.round,
+                "contract_id": c.id,
+                "shipper": c.shipper,
+                "carrier": c.carrier,
+                "resource": c.resource,
+                // 要求的运力（单位/回合）——不是「要搬多少件」（雇佣形态）。
+                "capacity": r2(c.capacity),
+                "delivered": r2(c.delivered),
+                // 考核的分母：本期「起运货栈有货」的回合数。
+                "served_rounds": c.served_rounds,
+                // 扣除在途宽免之后的**产出期**（考核真正用的分母）。
+                "output_rounds": r2(c.output_rounds(config)),
+                // 实测吞吐达标率（1.0 = 一个考核周期搬回一舱货 = 一条参考船的水准）；
+                // null = **还不到看账的时候**（账上的产出还不满一个货舱）。
+                "ratio": c.throughput_ratio(config).map(r2),
+                "from": c.from,
+                "to": c.to,
+                "share": r2(c.share),
+                "min_reputation": r2(c.min_reputation),
+                // 此刻在跑这张单的舰（`assignments` 的反查；空数组 = 还没派人）。
+                "ships": state.contracts.ships_of(c.id),
+                "posted_round": c.posted_round,
+                "accepted_round": c.accepted_round,
+                "expires_round": c.expires_round,
+                "review_round": c.review_round,
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     // —— 派生表：本回合的流量中间量（引擎内部算过、但不落持久状态的量）——
-    //
     // **不做 r2 舍入**：`--derived` 直接序列化同一个 `Derived`，两个读面必须给出相同的 JSON
     // 值（这是"同一回合两个读面不许各说各话"的可检查形式）。
     for f in &state.factions {
@@ -808,8 +857,30 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
-                "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","city_ids":"array","ship_ids":"array"},
+                "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","city_ids":"array","ship_ids":"array"},
+                "column_docs": {
+                    "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
+                },
+            }),
+            "contracts" => json!({
+                "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
+                "description": "**雇佣运力挂单簿**：一行一单，只含**没结束**的合同（等人接的 + 还在雇佣期内的）。结束的合同不在这里——“怎么结束的”去 `events` 里按 `contract_ended` 查。按 (round, contract_id) 索引。单子要求的是**运力**（单位/回合），不是一票货：受雇方自己决定派几条船来跑（`ships` 可以为空、也可以多条）。",
+                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","capacity":"number","delivered":"number","served_rounds":"integer","ratio":"number","from":"string","to":"string","share":"number","min_reputation":"number","ships":"array","posted_round":"integer","accepted_round":"integer","expires_round":"integer","review_round":"integer"},
+                "column_docs": {
+                    "shipper": "雇主（挂单的人）。",
+                    "carrier": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
+                    "ships": "**此刻在替这张单跑的舰名数组**（空数组 = 还没派人，或多条船组队）。派几条船、派哪条，是**受雇方的内部事务**（用户：「对方派几艘船都无所谓」）——它跑的是**雇主**的路线：起运在雇主货栈、目的在雇主首都，与受雇方自己的集货路线**方向不同**。",
+                    "min_reputation": "雇主定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((受雇方信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是雇主唯一的自我保护（受雇方不赔货值）。**到期续约用的是同一个闸**。",
+                    "capacity": "**要求的运力**（单位/回合）= 一条参考船在这条线上的吞吐（`nominal_hold ÷ 参考往返回合数`）。未接单时每回合被改成此刻的缺口（雇主自己搬不动的部分），接单后**冻结**成承诺。",
+                    "delivered": "本雇佣期内**已从雇主货栈搬走**的量（含受雇方自留的抽成——抽成是搬运费，不该从运力里扣）。",
+                    "served_rounds": "考核的**分母**：本期「起运货栈有货」的回合数。没货可运的回合不算在受雇方头上。",
+                    "ratio": "**实测吞吐达标率** = `delivered ÷ (capacity × served_rounds)`：1.0 = 恰好是一条参考船的水准（一个考核期搬回一舱货）。null = 本期还没有有货可运的回合 ⇒ 无从考核（不是考零分）。雇主按它掷骰子给好评/差评。",
+                    "from/to": "起运天体（雇主的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是雇主首都）。",
+                    "share": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
+                    "posted_round": "**本轮叫价的起点**：一个考核周期没人接就抬一档抽成并把这一列挪到当时回合（免得一挂出来就连续加价）。",
+                    "accepted_round/expires_round/review_round": "雇佣起算回合 / 固定期到期回合 / 下次考核回合。期限与考核周期都从**航程**算（一个考核周期 = 这条线的一个往返），所以不同航线的刻度差一个数量级。",
+                },
             }),
             "events" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
@@ -925,7 +996,7 @@ pub fn projection_schema() -> serde_json::Value {
 
     json!({
         "title": "planet_x 投影：lean 主流 + lazy id 索引表 + 派生表",
-        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查，需要引擎算出来的量（本回合流量、控制面）时读派生表。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/faction_ids/body_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。\n· 派生表（derived）：数据**不在状态里**（引擎内部中间量/控制面），按 join_on 指的 main 列 join。",
+        "description": "agent 读 main.jsonl（每回合一行 lean 事实），需要重型明细时按 id 去 lazy 表查，需要引擎算出来的量（本回合流量、控制面）时读派生表。\n· eager 字段直接内联在 main.jsonl 里。\n· lazy 字段**不内联**：main.jsonl 只带它们的 id 数组（ship_ids/city_ids/faction_ids/body_ids/contract_ids），完整对象在 lazy 表里、按 id 索引。\n· 取 lazy 字段：Python kit 里 q.<field>(round=r) 或 q.join('<field>', round=r)；round=r 可省略则返回全量。\n· 派生表（derived）：数据**不在状态里**（引擎内部中间量/控制面），按 join_on 指的 main 列 join。",
         "generator": "planet_x",
         "schema_version": 2,
         "main_stream": MAIN,
@@ -939,6 +1010,7 @@ pub fn projection_schema() -> serde_json::Value {
             "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
             "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合**全部**城 id（=城名，join cities 表用）。含已夷平的空白城（razed 列筛）；与 cities 表逐行一致。"},
             "faction_ids": {"type": "array", "items": {"type": "string"}, "description": "本回合势力 id（=势力名，join factions 表用）。"},
+            "contract_ids": {"type": "array", "items": {"type": "integer"}, "description": "本回合**未完成**的承包单号（join contracts 表用）。注意它是**数字**而不是实体名——挂单号由 `ContractState::next_id` 分配、单调递增不复用，所以历史事件里的单号永远指得准。"},
             "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"},
             "settlement_ids": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点 id（=定居点名，join settlements 表用）。"}
         },
@@ -1028,6 +1100,7 @@ mod tests {
             }
             // 事件已改为 lazy：主流只带 event_ids，不再内联 events。
             assert!(!row.as_object().unwrap().contains_key("events"), "main 不应内联 events（已 lazy 化）");
+            assert!(row["contract_ids"].is_array(), "main 每行要有 contract_ids（join contracts 用）");
             let ids = row["ship_ids"].as_array().unwrap();
             assert!(!ids.is_empty(), "main 每行要有 ship_ids（join 用）");
             assert!(row["event_ids"].is_array(), "main 每行要有 event_ids（join events 用）");
@@ -1040,6 +1113,26 @@ mod tests {
         assert!(s.0.join("idx/events.jsonl").exists());
         assert!(s.0.join("idx/bodies.jsonl").exists());
         assert!(s.0.join("idx/settlements.jsonl").exists());
+        // 雇佣挂单簿：表必须存在，且列面与 schema 声明一致（挂单号/雇主/受雇方/要求运力/期限）。
+        assert!(s.0.join("idx/contracts.jsonl").exists(), "缺 idx/contracts.jsonl（雇佣挂单簿）");
+        let contract_rows = jsonl(&s.0.join("idx/contracts.jsonl"));
+        assert!(
+            !contract_rows.is_empty(),
+            "6 回合内该有挂单（离岸产出落进货栈、自己运不动就挂出去）——空表会让下面的列面守卫空转"
+        );
+        for row in contract_rows {
+            for col in ["contract_id", "shipper", "carrier", "capacity", "expires_round"] {
+                assert!(row.get(col).is_some(), "contracts 表缺列 {col}: {row}");
+            }
+            assert!(
+                row.get("ships").map(|v| v.is_array()).unwrap_or(false),
+                "contracts 表的 ships 必须是**数组**（一张单可以跑几条船）: {row}"
+            );
+            assert!(
+                row.get("served_rounds").is_some() && row.get("ratio").is_some(),
+                "contracts 表要有考核的分母与达标率（served_rounds / ratio）: {row}"
+            );
+        }
         let ships = jsonl(&s.0.join("idx/ships.jsonl"));
         assert!(!ships.is_empty());
         assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");

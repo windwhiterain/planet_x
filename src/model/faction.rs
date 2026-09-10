@@ -63,6 +63,27 @@ pub struct Faction {
     /// 当前的思潮偏向（可变化）。见 [`Ideology`]。
     #[serde(default)]
     pub ideology: Ideology,
+    /// **信誉**（势力级，用户裁决 Q3）：承包市场上「这个势力说的话值多少」。
+    ///
+    /// 它是**准入资产**，不是钱包——承运人**不赔货值**（Q1(b)），砸单只掉它；
+    /// 而托运方按它决定**敢不敢把货交给你**。所以它在机制上是**唯一的抵押品**：
+    /// 低信誉者结构上接不到贵单/难单（见 `.agents/notes/freight-collection.md` §C1）。
+    ///
+    /// 公开值（市场信号）、不随回合自然衰减（去掉它需要一个明确的**行为**：
+    /// 按时交付涨、超期与丢货跌）。旧档没有它 ⇒ serde default = 中性值
+    /// [`REPUTATION_NEUTRAL`]，「谁都没做过承包生意」正是那个世界的真实状态。
+    #[serde(default = "default_reputation")]
+    pub reputation: f64,
+}
+
+/// **中性信誉**：没有任何承包履历的势力从这里起步。
+///
+/// 它同时是 serde 的缺省（旧档）与世界的开局值（`world::default_state`），
+/// 所以「旧档加载」与「新开局」在同一把尺子上——不存在「旧档一上来就比别人矮一截」。
+pub const REPUTATION_NEUTRAL: f64 = 1.0;
+
+fn default_reputation() -> f64 {
+    REPUTATION_NEUTRAL
 }
 
 pub(crate) fn default_capital_body() -> BodyId {

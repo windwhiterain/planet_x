@@ -541,6 +541,78 @@ fn probe_freight_ab() {
     }
 }
 
+/// 8c) **雇佣市场的 A/B（因果读数）**：同一颗种子、同一段回合，**只切「雇佣市场开/关」一个开关**。
+///
+/// 关的做法：把**雇主的准入闸抬到没人够得着**（`freight.gate_base = 100`）——于是单子照旧
+/// 挂出去（需求信号仍在，世界走向的确定性与开的那一侧逐字相同），但**没有一家能受雇**，
+/// 整条雇佣腿的搬运量归零。这是**同一颗种子上只动一个数**的因果读数，不是跨提交对照
+/// （同种子在不同提交上本来就能差出几倍，见 §5.2 的读数纪律）。
+///
+/// 与 8b（集货 A/B）合起来回答的是同一个问题：**「请人运」这条路到底搬走了多少货**
+/// ——它是自有集货的补充，还是只是在内部倒手。
+#[test]
+#[ignore]
+fn probe_hire_ab() {
+    let config = load_config();
+    let n = rounds();
+    let depot_units =
+        |state: &State| -> f64 { state.depots.values().flat_map(|m| m.values()).sum() };
+    let pool_value = |state: &State| -> f64 {
+        state
+            .factions
+            .iter()
+            .flat_map(|f| f.resources.iter())
+            .map(|(rt, amt)| amt * value_of(&config, rt))
+            .sum()
+    };
+    for seed in seeds() {
+        let mut line = String::new();
+        for hiring in [false, true] {
+            let mut cfg = config.clone();
+            if !hiring {
+                // 准入闸抬到天上 ⇒ 谁都不够格受雇（单子照挂，需求信号不受影响）。
+                cfg.freight.gate_base = 100.0;
+            }
+            let mut state = world::default_state(&cfg, seed);
+            let mut rng = Prng::new(seed);
+            let (mut to_pool, mut by_hire) = (0.0, 0.0);
+            let mut hires = 0usize;
+            for _ in 0..n {
+                sim::advance(&mut state, &cfg, &mut rng);
+                for e in &state.events {
+                    match e {
+                        GameEvent::CargoDelivered { cargo, into_pool, owner, faction, .. } => {
+                            let u: f64 = cargo.values().sum();
+                            if *into_pool {
+                                to_pool += u;
+                            }
+                            // 受雇跑的船：**货主不是船东**（`cargo_owner` 认派工记录）。
+                            // 不看 `into_pool`：雇主可能在雇佣期内迁都，那时货卸进货栈而不是池子，
+                            // 但它照样是**受雇搬走的货**。
+                            if owner != faction {
+                                by_hire += u;
+                            }
+                        }
+                        GameEvent::ContractAccepted { .. } => hires += 1,
+                        _ => {}
+                    }
+                }
+            }
+            let tag = if hiring { "雇佣**开**" } else { "雇佣关" };
+            line.push_str(&format!(
+                "  {tag}：期末积压 {:.0} 单位 / 首都池值 {:.0}（积压/池值 {:.0}%）  集货进池 {:.0} 件（其中受雇搬运 {:.0} 件）  成交 {} 单\n",
+                depot_units(&state),
+                pool_value(&state),
+                if pool_value(&state) > 0.0 { 100.0 * depot_units(&state) / pool_value(&state) } else { 0.0 },
+                to_pool,
+                by_hire,
+                hires,
+            ));
+        }
+        println!("== 雇佣市场 A/B seed {seed}（{n} 回合）==\n{line}");
+    }
+}
+
 /// 9) 流亡态：势力在「无城」状态下能撑多久、靠什么撑。
 #[test]
 #[ignore]
@@ -622,7 +694,7 @@ fn probe_collection_backlog() {
         // (装货件数, 卸货件数, 其中**卸进首都池**的件数)——最后一项才是「集货真正完成」。
         let (mut loaded, mut delivered, mut to_pool) = (0.0, 0.0, 0.0);
         let (mut load_trips, mut delivery_trips) = (0u32, 0u32);
-        let mut tally = |state: &State,
+        let tally = |state: &State,
                          loaded: &mut f64,
                          delivered: &mut f64,
                          to_pool: &mut f64,
@@ -705,5 +777,200 @@ fn probe_collection_backlog() {
             "    —— 集货吞吐：装 {loaded:.0} 件（{load_trips} 趟，**每趟 {per_load:.1} 件**）/ 卸 {delivered:.0} 件（{delivery_trips} 趟），\
              其中**进首都池 {to_pool:.0} 件**（集货真正完成的那部分）"
         );
+    }
+}
+
+/// 10) **雇佣运力市场**：挂单、受雇、派工、考核、续约/抽手——整条腿的真实流量。
+///
+/// 雇佣形态下要看的量与「一票货」形态**完全不同**：
+///
+/// * **需求侧**：谁在挂、要求多少运力（单位/回合）、抬价抬到哪儿；
+/// * **成交与履约**：多少单被接下、**多少货真的被搬到了雇主首都**、受雇方拿到多少抽成；
+/// * **考核**（信誉的唯一来源）：好评/差评各多少、**达标率**的分布；
+/// * **关系的存续**：固定期到期换人（`term`）、无货可运收单（`no_cargo`）、受雇方缺船抽手
+///   （`recalled`）各多少——**市场是否在换手**是这一版的健康指标；
+/// * **派几条船**：用户说「对方派几艘船都无所谓」，所以要看到每张在期单子上实际有几条船。
+#[test]
+#[ignore]
+fn probe_contract_market() {
+    let config = load_config();
+    let n = rounds();
+    for seed in seeds() {
+        let mut state = world::default_state(&config, seed);
+        let mut rng = Prng::new(seed);
+        let (mut posted, mut posted_cap) = (0usize, 0.0);
+        let mut accepted = 0usize;
+        let (mut paid, mut cut, mut trips) = (0.0, 0.0, 0usize);
+        let (mut good, mut bad) = (0usize, 0usize);
+        let mut ratios: Vec<f64> = Vec::new();
+        // 达标率要连着**要求运力**一起看：一个「要求 0.01 件/回合」的单，随便搬点货就是
+        // 几百倍达标率——那不是干得好，是尺子坏了。
+        let mut pairs: Vec<(f64, u32, f64, u32, f64)> = Vec::new();
+        let mut ended: BTreeMap<String, usize> = BTreeMap::new();
+        let mut income: BTreeMap<String, f64> = BTreeMap::new(); // 受雇方的抽成收入（件）
+        let mut runs: BTreeMap<String, usize> = BTreeMap::new(); // 受雇方跑了几趟
+        for _ in 0..n {
+            sim::advance(&mut state, &config, &mut rng);
+            for e in &state.events {
+                match e {
+                    GameEvent::ContractPosted { capacity, .. } => {
+                        posted += 1;
+                        posted_cap += capacity;
+                    }
+                    GameEvent::ContractAccepted { .. } => accepted += 1,
+                    GameEvent::ContractDelivered { amount, cut: c, carrier, .. } => {
+                        paid += amount;
+                        cut += c;
+                        trips += 1;
+                        *income.entry(carrier.clone()).or_insert(0.0) += c;
+                        *runs.entry(carrier.clone()).or_insert(0) += 1;
+                    }
+                    GameEvent::ContractReviewed { ratio, good: g, contract, .. } => {
+                        if *g {
+                            good += 1;
+                        } else {
+                            bad += 1;
+                        }
+                        ratios.push(*ratio);
+                        if let Some(k) = state.contracts.get(*contract) {
+                            pairs.push((
+                                k.capacity,
+                                k.served_rounds,
+                                k.delivered,
+                                state.round.saturating_sub(k.accepted_round.unwrap_or(state.round)),
+                                *ratio,
+                            ));
+                        }
+                    }
+                    GameEvent::ContractEnded { reason, .. } => {
+                        *ended.entry(reason.clone()).or_insert(0) += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let _ = trips;
+        println!(
+            "== 雇佣运力市场 seed {seed}（{n} 回合，开叫抽成 {:.0}%）==",
+            config.freight.share * 100.0
+        );
+        for f in &state.factions {
+            let name = f.name.as_str();
+            let backlog: f64 = state
+                .depots
+                .iter()
+                .filter(|((fid, _), _)| fid == name)
+                .map(|(_, m)| m.values().sum::<f64>())
+                .sum();
+            let mine: Vec<&Contract> = state
+                .contracts
+                .contracts
+                .iter()
+                .filter(|c| c.shipper == name)
+                .collect();
+            let open = mine.iter().filter(|c| c.is_open()).count();
+            let hired = mine.iter().filter(|c| c.is_hired()).count();
+            let my_ships = state.ships.iter().filter(|s| s.faction_id == name && s.hull > 0.0).count();
+            let serving: usize = state
+                .contracts
+                .assignments
+                .iter()
+                .filter(|(s, _)| {
+                    state.ship(s.as_str()).map(|sh| sh.faction_id == name).unwrap_or(false)
+                })
+                .count();
+            let inc = income.get(name).copied().unwrap_or(0.0);
+            if backlog <= 0.0 && mine.is_empty() && inc <= 0.0 && my_ships == 0 {
+                continue;
+            }
+            println!(
+                "    {name:<14} 积压 {backlog:>8.1} 件  舰 {my_ships:>2}（替人跑 {serving}）  \
+                 自己挂的单 {open} 张等人接 / {hired} 张在雇佣期  受雇收入 {inc:>7.1} 件（{} 趟）  信誉 {:.2}",
+                runs.get(name).copied().unwrap_or(0),
+                state.faction(name).unwrap().reputation
+            );
+        }
+        let mean_ratio = if ratios.is_empty() {
+            0.0
+        } else {
+            ratios.iter().sum::<f64>() / ratios.len() as f64
+        };
+        let under = ratios.iter().filter(|r| **r < 1.0).count();
+        let paid_share = if paid + cut > 0.0 { cut / (paid + cut) } else { 0.0 };
+        println!(
+            "    —— 挂出 {posted} 张（要求运力合计 {posted_cap:.1} 件/回合）；成交 {accepted} 单；搬到位 {paid:.0} 件（{trips} 趟，受雇方自留 {cut:.0} 件 = 它的全部报酬，实付抽成 {:.1}%，开叫价 {:.0}%）",
+            paid_share * 100.0,
+            config.freight.share * 100.0
+        );
+        println!(
+            "    —— 考核 {} 次：好评 {good} / 差评 {bad}；平均达标率 {mean_ratio:.2}（未达标 {under}/{} 次 ⇒ 雇主的耐心在往哪边走）",
+            good + bad,
+            ratios.len()
+        );
+        let reason = |k: &str| ended.get(k).copied().unwrap_or(0);
+        println!(
+            "    —— 结束 {} 份关系：到期换人 {} / 无货收单 {} / 受雇方抽手 {}",
+            ended.values().sum::<usize>(),
+            reason("term"),
+            reason("no_cargo"),
+            reason("recalled")
+        );
+        // **派几条船**：一张单可以跑多条船，所以要看到在期单子的实际编制。
+        let staff: Vec<usize> = state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.is_hired())
+            .map(|c| state.contracts.ships_of(c.id).len())
+            .collect();
+        let open_shares: Vec<f64> = state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.is_open())
+            .map(|c| c.share)
+            .collect();
+        let (lo, hi) = (
+            open_shares.iter().cloned().fold(f64::INFINITY, f64::min),
+            open_shares.iter().cloned().fold(0.0f64, f64::max),
+        );
+        let mean_share = if open_shares.is_empty() {
+            0.0
+        } else {
+            open_shares.iter().sum::<f64>() / open_shares.len() as f64
+        };
+        println!(
+            "    —— 期末在簿 {} 张（等人接 {} 张，抽成已抬到 {:.1}%–{:.1}%，均 {:.1}%；上限 {:.0}%）；在期单子的编制 {:?}（每张几条船）",
+            state.contracts.contracts.len(),
+            state.contracts.contracts.iter().filter(|c| c.is_open()).count(),
+            if open_shares.is_empty() { 0.0 } else { lo * 100.0 },
+            hi * 100.0,
+            mean_share * 100.0,
+            config.freight.share_max * 100.0,
+            staff
+        );
+        // 达标率 × 要求运力：低要求运力的单会把平均达标率**假性**拉高（尺子坏了，
+        // 不是干得好），所以这一段必须逐条看。
+        let mut caps: Vec<f64> = pairs.iter().map(|(c, _, _, _, _)| *c).collect();
+        caps.sort_by(f64::total_cmp);
+        let med_cap = caps.get(caps.len() / 2).copied().unwrap_or(0.0);
+        let tiny = pairs.iter().filter(|(c, _, _, _, _)| *c < 0.2).count();
+        println!(
+            "    —— 考核时的要求运力：中位 {med_cap:.3} 件/回合、最小 {:.4}、最大 {:.2}；\
+             其中 {tiny}/{} 次的要求运力 < 0.2（这些单子的达标率没有意义）",
+            caps.first().copied().unwrap_or(0.0),
+            caps.last().copied().unwrap_or(0.0),
+            pairs.len()
+        );
+        // 尺子坏了要看清是哪一段坏的：把**要求运力 / 有货回合 / 雇佣期长度 / 交付量 / 达标率**
+        // 摆在一起。达标率 = 交付 ÷ (要求运力 × 有货回合)；若「有货回合 ≪ 雇佣期长度」，
+        // 这条公式就在奖励「搬积压」而不是奖励「提供运力」。
+        for (cap, served, delivered, elapsed, ratio) in pairs.iter().take(8) {
+            println!(
+                "        · 要求 {cap:>7.3}/回合 × 有货 {served:>3} 回合 ÷ 雇佣 {elapsed:>3} 回合 \
+                 ⇒ 应搬 {:>7.3}，实交 {delivered:>7.3} ⇒ 达标率 {ratio:>7.2}",
+                cap * *served as f64
+            );
+        }
     }
 }

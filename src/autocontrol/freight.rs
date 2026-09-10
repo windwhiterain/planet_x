@@ -30,6 +30,7 @@
 
 use crate::model::*;
 use crate::sim;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 一批货栈存货的**总件数**（不折算价值：「把东西搬回来」与「值多少钱」是两件事，
 /// 后者交给市场）。
@@ -104,6 +105,12 @@ pub fn freight_tonnage(config: &GameConfig, ship: &Ship) -> f64 {
 /// | 巡洋 | 6 | 1.0 | 6.0 | 1.00 |
 /// | 战列 | 6 | 0.9 | 6.5 | 0.83（**最不该去拉货的一条**） |
 pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> bool {
+    // 0) **正在执行承包单的舰必须是运输舰**（M4b）。那条链接（`ContractState::assignments`）
+    //    是接单时立的**承诺**：角色轴每回合由自动控制重写，若不认识它，一艘接到一半的单
+    //    会被定编收走、改回战舰——单子就永远送不完了。
+    if state.contracts.assignment_of(ship_id).is_some() {
+        return true;
+    }
     // 1) 舱里有货：它必须把货送完（否则货烂在舱里）。这条**故意压过**运力排序——
     //    哪怕它刚被打残、运力掉到很低，也得把手上那票货交出去（或死在路上）。
     if state
@@ -119,11 +126,14 @@ pub fn should_be_freighter(state: &State, config: &GameConfig, fid: &str, ship_i
     }
     // 2) 定编：先把「舱里有货」的舰排在最前（它们已经占掉名额），再按运力/维护费。
     //    **只算自动控制开的舰**（玩家开的舰不替玩家派活），**且必须动得了**（运力 > 0）。
+    //    执行承包单的舰也**不参与**这轮排序（它们已由上面的第 0 条钉住）——否则它们会
+    //    再占掉一个自有集货的名额，等于把承包的运力算两遍。
     let mut cands: Vec<(String, bool, f64)> = state
         .ships
         .iter()
         .filter(|s| s.faction_id == fid && s.hull > 0.0)
         .filter(|s| state.ship_control(s.name.clone()) == ControlMode::Auto)
+        .filter(|s| state.contracts.assignment_of(&s.name).is_none())
         .map(|s| (s.name.clone(), !s.cargo.is_empty(), freight_tonnage(config, s)))
         .filter(|(_, holding, tonnage)| *holding || *tonnage > 0.0)
         .collect();
@@ -190,6 +200,14 @@ pub(crate) fn assign_roles(state: &mut State, config: &GameConfig) {
 /// **优先续用现有路线**（舱里有货、或那处货栈还有货）——常驻路线不该每回合重掷。
 /// 抽签细节见本模块的文档。
 pub fn route_for(state: &State, fid: &str, ship_id: &str) -> Option<(BodyId, BodyId)> {
+    // **执行承包单的舰**跑的是那张单的路线（接单时立的承诺，不是抽签抽出来的）：
+    // 起运在**托运方**的货栈、目的在**托运方**的首都——与自有集货的目标（自己的首都）
+    // 完全不同，所以这条要压在最前面，不能让它去抽自己的签。
+    if let Some(id) = state.contracts.assignment_of(ship_id) {
+        if let Some(c) = state.contracts.get(id) {
+            return Some((c.from.clone(), c.to.clone()));
+        }
+    }
     let to = state.capital_body(fid);
     if to.is_empty() || state.body(&to).is_none() {
         return None;
@@ -230,6 +248,284 @@ pub fn route_for(state: &State, fid: &str, ship_id: &str) -> Option<(BodyId, Bod
         x -= u;
     }
     Some((from, to))
+}
+
+// --- 雇佣运力市场：雇主侧（挂单）-----------------------------------------------
+//
+// 集货腿有**两条路**：自己派船（上面那套定编 + 抽签派单），或**雇人来运**。
+// 这一层负责第二条路里**雇主**的那一半：把自己派不出船的**运力缺口**挂出去。
+//
+// 用户裁决把这条腿定成**雇佣**：单子要求的是**运力**（单位/回合），不是一票货；
+// 雇主挂单的逻辑与派自己的船**同源**（一处积压配一条船的运力，缺多少挂多少）；
+// 受雇方自己派船（派几条都无所谓）。机制依据见 `.agents/notes/freight-collection.md` §4。
+// **接单/派工/考核/续约/解约**（受雇方那一半 + 雇主的验货）在 `autocontrol::contract`。
+
+/// 一艘运输舰跑**某条具体航线**的吞吐（单位/回合）：`舱容 × 每回合能跑几趟`。
+///
+/// 每回合的趟数 = `巡航速度 ÷ 往返航程`（往返 = `2 × 距离`）——**距离必然要进来**：
+/// 同样的船，跑 0.3 AU 的金星和跑 30 AU 的柯伊伯带，单位时间的运力差两个数量级。
+/// 距离为 0（起终点同一天体，例如迁都留下的旧中转货栈）时按**一回合一趟**算。
+///
+/// 与 [`freight_tonnage`] 的分工：那个是**定编**用的排序键（跨舰比较，不含航程——
+/// 比的是船本身的运输效率），这个是**某条航线**上的实际吞吐（含航程）。两者不可互换。
+pub fn trip_throughput(state: &State, config: &GameConfig, ship: &Ship, from: &str, to: &str) -> f64 {
+    let panel = ship_panel(config, ship);
+    if panel.speed <= 0.0 {
+        return 0.0; // 动不了 ⇒ 吞吐是零（与定编同一个判据）。
+    }
+    let d = sim::dist(state.body_position(from), state.body_position(to));
+    let round_trip = 2.0 * d;
+    let trips = if round_trip <= 1e-9 { 1.0 } else { panel.speed / round_trip };
+    cargo_capacity(config, ship) * trips
+}
+
+/// 本势力**此刻能去跑运输的舰**（[`should_be_freighter`] 的名单，**扣掉正在替别人跑的**）。
+///
+/// 挂单发生在 `assign_roles` **之前**（见 `sim::step_contracts` 的注解），所以这里不能读
+/// 角色叶——那片叶还是上一回合的结论。`should_be_freighter` 是**纯函数**，拿它算出来的
+/// 正是本回合稍后会写进叶子、并据此派单的那批舰，因此估算与实际派单同口径。
+///
+/// **受雇在外的舰不算我的集货运力**：`should_be_freighter` 的第 0 条说「替别人跑的舰也是
+/// 运输舰」（它得跑完那条线），但那是**别人的**线——把它算进「我自己能搬多少」会让雇主
+/// 以为积压有着落了，从而少雇人（旧形态里这条估算还不会露馅，因为一张单只押一艘舰）。
+fn serving_freighters<'a>(
+    state: &'a State,
+    config: &GameConfig,
+    fid: &str,
+) -> Vec<&'a Ship> {
+    state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .filter(|s| state.contracts.assignment_of(&s.name).is_none())
+        .filter(|s| should_be_freighter(state, config, fid, &s.name))
+        .collect()
+}
+
+/// 一处货栈里**积压最多的那种货**（同量按名字序 ⇒ 确定性）。`None` = 空了。
+///
+/// 它只是合同的**主货种**（用来折算货值、给人看）：受雇的船到了货栈装的是**当时有什么**
+/// ——与雇主自己的运输舰完全一样（用户：「单主派发单的逻辑和派发自己运输船的逻辑一样」）。
+/// 所以一处货栈**只有一张单**（旧形态是「一处货栈 × 一种货」各一张）。
+fn principal_resource(map: &ResourceMap) -> Option<String> {
+    let mut best: Option<(String, f64)> = None;
+    for (r, v) in map {
+        if *v > 1e-9 && best.as_ref().map(|(_, bv)| *v > *bv).unwrap_or(true) {
+            best = Some((r.clone(), *v));
+        }
+    }
+    best.map(|(r, _)| r)
+}
+
+/// **没人接的单不收回，而是「加价」**（用户裁决：价格做成**动态平衡**）。
+///
+/// * 挂单的**开叫价**统一（`freight.share`，人人都从 15% 起叫）；
+/// * 一个**考核周期**（= 这条线的一个往返，与受雇方的验货节拍同一把尺子）没人接
+///   ⇒ **抽成抬一档**，并把叫价起点挪到本回合（下一档要再等一个周期）；
+/// * 抬到 `freight.share_max` 就不再加（雇主宁可让货烂在产地，也不会把大半货送人）。
+///
+/// 于是**深空/战区的价格是市场自己抬上去的**，而不是设计者用一个难度公式猜出来的。
+/// **已有人接的单一个字都不动**：那时抽成是**承诺**（一份合同的条件下不该因结算顺序而变）。
+fn escalate_open_contracts(state: &mut State, config: &GameConfig) {
+    let f = &config.freight;
+    let factor = f.share_escalation.max(1.0);
+    let cap = f.share_max.max(f.share);
+    let round = state.round;
+    // 先算完再写（同一回合内几个势力的结论互不影响；也免得边遍历边借用）。
+    let plan: Vec<(u64, f64)> = state
+        .contracts
+        .contracts
+        .iter()
+        .filter(|c| c.is_open())
+        .filter(|c| {
+            let interval = crate::model::hire_terms(state, config, &c.from, &c.to).interval;
+            round >= c.posted_round.saturating_add(interval)
+        })
+        .map(|c| (c.id, (c.share * factor).min(cap)))
+        .collect();
+    for (id, share) in plan {
+        if let Some(c) = state.contracts.get_mut(id) {
+            c.share = share;
+            c.posted_round = round; // 重新起叫：下一档要再等一个完整周期
+        }
+    }
+}
+
+/// 雇主这一回合要动的一张单（先只读算完，再一次性写状态 ⇒ 同回合内几个势力互不影响）。
+enum Plan {
+    /// 改一张**未接单**的缺口（需求信号跟着现实走）。
+    Revise { id: u64, resource: String, capacity: f64 },
+    /// 撤回一张**没人接**的单（这条线不再缺运力，或货栈空了）。
+    Drop { id: u64 },
+    /// 挂一张新单。
+    Post { shipper: FactionId, resource: String, capacity: f64, from: BodyId, to: BodyId },
+}
+
+/// **挂单**：把「自己派不出船的运力缺口」挂到雇佣市场上（一处货栈一张）。
+///
+/// # 派单逻辑与派自己的船**完全同源**（用户裁决）
+///
+/// 雇主先按**已有的定编规则**把自己的船派出去：一处有积压的货栈要**一条船的运力**
+/// （`needed_freighters` 的那条口径），而「这条线需要多少运力」正是
+/// [`crate::model::required_throughput`]（= 一条参考船在这条线上的吞吐）。
+/// 两者**同尺度**，所以「我缺多少」不需要另编一套估算：
+///
+/// ```text
+/// 缺口 = 要求运力 − 自有运力（落到这处的期望份额） − 已雇到的运力（已接单的 capacity）
+/// ```
+///
+/// * **自有运力**那一份为什么是期望值：派单是**按积压占比抽签**的（[`route_for`]），
+///   所以「期望落到这处的那一份」= `Σ(各运输舰在这条线上的吞吐) × (这处积压 ÷ 总积压)`。
+///   这与真实派单**同口径**——不是另编一个模型。
+/// * **已雇到的运力**按**已接单合同的 `capacity`** 算，不看此刻有几条船在跑：接下就是承诺，
+///   接单那一刻它就该顶掉缺口（否则雇主要在收到第一条船之前反复挂单）。
+///
+/// 于是「连续量、无阈值」这条纪律自动成立：运力缺口为 0 的线**一件不挂**（`max(0, ·)`），
+/// 缺口大的线挂得多——挂的是**吞吐**而不是「几条船」，所以受雇方派几条船都行。
+///
+/// # 需求信号跟着现实走，接单后冻结
+///
+/// 同一处货栈**只有一张未接单**，且它**每回合被改成此刻的缺口**（[`ContractState::open_mut`]）：
+/// * 积压涨了、自己的船少了 ⇒ 缺口变大；自己的船补上了 ⇒ 缺口变小甚至**撤单**
+///   （这条线不缺运力了，没必要继续请人——这是**内生的撤单**，不是「挂出去就等人接」）；
+/// * 货栈被自己的船搬空 ⇒ 那张未接单直接撤回（需求信号必须跟着现实走，**哪怕现实是「没货了」**，
+///   否则受雇方会照着一条不存在的需求派船过来）。
+///
+/// **一旦有人接了** ⇒ `capacity` 冻结（`open_mut` 只找 `carrier.is_none()` 的单）：那时它已经
+/// 不是需求而是**承诺**了。
+pub(crate) fn post_contracts(state: &mut State, config: &GameConfig) {
+    // 先加价：一个考核周期没人接的单子，**抬一档抽成并重新起叫**。
+    escalate_open_contracts(state, config);
+    let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
+    fids.sort(); // 确定性：写状态的顺序不依赖势力表的排列
+    let mut plan: Vec<Plan> = Vec::new();
+    for fid in &fids {
+        // 照公理：目的永远是自己的首都（首都即集散地）。没有首都（或首都天体不存在）
+        // 就没有「集散地」，也就无从挂单。
+        let to = state.capital_body(fid);
+        if to.is_empty() || state.body(&to).is_none() {
+            continue;
+        }
+        let depots = stocked_depots(state, fid);
+        let total: f64 = depots.iter().map(|(_, u)| *u).sum();
+        // 本势力**未接单**的单子（按起运地索引）——下面要么改它、要么撤它，不会堆成一片。
+        let open: BTreeMap<BodyId, u64> = state
+            .contracts
+            .contracts
+            .iter()
+            .filter(|c| c.shipper == *fid && c.is_open())
+            .map(|c| (c.from.clone(), c.id))
+            .collect();
+        // 货栈**空了**的未接单：撤回（`stocked_depots` 会滤掉空货栈，所以它们不会出现在下面的循环里）。
+        let alive: BTreeSet<BodyId> = depots.iter().map(|(b, _)| b.clone()).collect();
+        for (body, id) in &open {
+            if !alive.contains(body) {
+                plan.push(Plan::Drop { id: *id });
+            }
+        }
+        if total <= 0.0 {
+            continue; // 没有积压 ⇒ 没有需求（上面的清扫已经把旧单撤掉了）
+        }
+        // 自有运力落到**每一处货栈**的那一份（期望值，与派单抽签同口径）。
+        // 整块算完再进写循环：`serve` 借用着 `state`，而下面的计划要可变借用它。
+        let own_of: BTreeMap<BodyId, f64> = {
+            let serve = serving_freighters(state, config, fid);
+            depots
+                .iter()
+                .map(|(body, units)| {
+                    let rate: f64 = serve
+                        .iter()
+                        .map(|s| trip_throughput(state, config, s, body, &to))
+                        .sum();
+                    (body.clone(), rate * (units / total))
+                })
+                .collect()
+        };
+        // 这一处**已经雇到**的运力（已接单的承诺，按 capacity 计）。
+        let committed: BTreeMap<BodyId, f64> = {
+            let mut m: BTreeMap<BodyId, f64> = BTreeMap::new();
+            for c in state.contracts.contracts.iter().filter(|c| c.shipper == *fid && c.is_hired())
+            {
+                *m.entry(c.from.clone()).or_insert(0.0) += c.capacity;
+            }
+            m
+        };
+        for (body, _) in &depots {
+            let need = crate::model::required_throughput(state, config, body, &to);
+            let own = own_of.get(body).copied().unwrap_or(0.0);
+            let hired = committed.get(body).copied().unwrap_or(0.0);
+            let uncovered = (need - own - hired).max(0.0); // 连续量，无阈值
+            let Some(map) = state.depots.get(&(fid.clone(), body.clone())) else { continue };
+            let Some(resource) = principal_resource(map) else { continue };
+            match open.get(body) {
+                // 已有的未接单：改成此刻的缺口；不缺了就撤回。
+                Some(id) => {
+                    if uncovered <= 1e-9 {
+                        plan.push(Plan::Drop { id: *id });
+                    } else if let Some(c) = state.contracts.get(*id) {
+                        if (c.capacity - uncovered).abs() > 1e-9 || c.resource != resource {
+                            plan.push(Plan::Revise { id: *id, resource, capacity: uncovered });
+                        }
+                    }
+                }
+                None => {
+                    if uncovered > 1e-9 {
+                        plan.push(Plan::Post {
+                            shipper: fid.clone(),
+                            resource,
+                            capacity: uncovered,
+                            from: body.clone(),
+                            to: to.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for p in plan {
+        match p {
+            // 改数/撤单不发事件：它们只是「需求变了」，不是一件**发生的事**（只有新单才是）。
+            Plan::Revise { id, resource, capacity } => {
+                if let Some(c) = state.contracts.get_mut(id) {
+                    c.resource = resource;
+                    c.capacity = capacity;
+                }
+            }
+            Plan::Drop { id } => {
+                state.contracts.release(id); // 未接单的本就没有船，收尾而已
+                state.contracts.remove(id);
+            }
+            Plan::Post { shipper, resource, capacity, from, to } => {
+                // 条款在**挂单这一刻**算好并冻结（门槛）：天体在动，每回合重算会让
+                // 同一张单的条件漂移，而合同一旦挂出去，条件就该是固定的。
+                let min_reputation =
+                    crate::model::required_reputation(state, config, &resource, &from, &to);
+                let share = config.freight.share;
+                let id = state.contracts.post(
+                    shipper.clone(),
+                    resource.clone(),
+                    capacity,
+                    from.clone(),
+                    to.clone(),
+                    share,
+                    state.round,
+                    min_reputation,
+                );
+                sim::ev(
+                    state,
+                    GameEvent::ContractPosted {
+                        contract: id,
+                        shipper,
+                        resource,
+                        capacity,
+                        from,
+                        to,
+                        share,
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -583,5 +879,241 @@ mod tests {
         state.depots.remove(&("中国".to_string(), "金星".to_string()));
         let picked = route_for(&state, "中国", &ship).unwrap();
         assert_eq!(picked.0, "水星", "原路线没货了 ⇒ 重新抽签");
+    }
+
+    // --- 雇佣挂单（雇主的缺口口径）---------------------------------------------
+
+    /// 挂的是**自己派不出船的运力缺口**：`要求运力 − 自有运力（落到这处的期望份额）− 已雇到的`。
+    ///
+    /// 这里**不重算实现里的公式**，而是先量出「一条船都没有时挂多少」（= 这条线的要求运力），
+    /// 再用它预测「已经有受雇方顶掉一部分」时该挂多少。这样验证的是**形状**
+    /// （仿射、斜率 −1、下界处夹到 0），而不是把实现抄一遍——公式改了但形状错了，它照样报错。
+    #[test]
+    fn the_order_asks_for_the_capacity_the_employer_cannot_cover() {
+        let (config, mut state) = fresh(42);
+        state.ships.retain(|s| s.faction_id != "中国"); // 中国的船全没了 ⇒ 自有运力 0
+        let gap_at = |state: &mut State, hired: f64| -> f64 {
+            state.depots.clear();
+            state.contracts.contracts.clear();
+            state.depot_add("中国", "金星", "碳", 100.0);
+            if hired > 0.0 {
+                // 一张**已接单**的合同，承诺了 `hired` 的运力（它就该顶掉缺口）。
+                let id = state.contracts.post(
+                    "中国".into(), "碳".into(), hired, "金星".into(), "地球".into(), 0.1, 0, 0.0,
+                );
+                let c = state.contracts.get_mut(id).unwrap();
+                c.carrier = Some("美国".into());
+                c.accepted_round = Some(0);
+                c.expires_round = 99;
+            }
+            post_contracts(state, &config);
+            state.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum()
+        };
+        let need = gap_at(&mut state, 0.0);
+        assert!(need > 0.0, "一条船都没有 ⇒ 该把整条线的要求运力挂出去（实为 {need:.3}）");
+        // 已经雇到四成 ⇒ 只该挂剩下的六成。
+        let partial = gap_at(&mut state, need * 0.4);
+        assert!(
+            (partial - need * 0.6).abs() < 1e-9,
+            "已雇到 40% ⇒ 该挂 60%（{:.3}），实为 {partial:.3}",
+            need * 0.6
+        );
+        // 雇够了（甚至雇多了）⇒ 一件都不挂（`max(0, ·)` 的下界，不是阈值判断）。
+        assert_eq!(gap_at(&mut state, need * 1.2), 0.0, "雇够了 ⇒ 不必再请人");
+        // 自己有船 ⇒ 缺口变小（缺口可以小到 0：自己的船把这条线顶上了，那就不必请人）。
+        let with_ships = {
+            let (config, mut st) = fresh(42);
+            // 只留**一艘**护卫（舱容 2、速度 1.0）：能顶掉一部分，但顶不满整条线的要求运力。
+            let keep = st
+                .ships
+                .iter()
+                .find(|s| s.faction_id == "中国" && s.class == "corvette")
+                .expect("中国开局有护卫舰")
+                .name
+                .clone();
+            st.ships.retain(|s| s.faction_id != "中国" || s.name == keep);
+            st.depots.clear();
+            st.contracts.contracts.clear();
+            st.depot_add("中国", "金星", "碳", 100.0);
+            post_contracts(&mut st, &config);
+            st.contracts.contracts.iter().filter(|c| c.is_open()).map(|c| c.capacity).sum::<f64>()
+        };
+        assert!(
+            with_ships > 0.0 && with_ships < need,
+            "一条小船顶不满 ⇒ 缺口该在 (0, {need:.3}) 之间，实为 {with_ships:.3}"
+        );
+    }
+
+    /// **一处货栈只有一张未接单，而且它每回合跟着缺口走；已接单的冻结成承诺。**
+    ///
+    /// 三个必须成立的行为：缺口变了**改的是同一张单**（不新开、不留旧数）；
+    /// 货栈被搬空 ⇒ **撤单**（受雇方不该照着不存在的需求派船过来）；
+    /// 有人接了 ⇒ 一个字都不再动。
+    #[test]
+    fn an_open_order_follows_the_gap_while_a_hired_one_is_frozen() {
+        let (config, mut state) = fresh(42);
+        state.ships.retain(|s| s.faction_id != "中国"); // 没有运力 ⇒ 挂单 = 整条线的要求运力
+        state.depots.clear();
+        state.contracts.contracts.clear();
+        let post = |state: &mut State, stock: f64| {
+            state.depots.clear();
+            if stock > 0.0 {
+                state.depot_add("中国", "金星", "碳", stock);
+            }
+            post_contracts(state, &config);
+        };
+        post(&mut state, 1000.0);
+        assert_eq!(state.contracts.contracts.len(), 1, "一处货栈一张单");
+        let id = state.contracts.contracts[0].id;
+        let capacity = state.contracts.contracts[0].capacity;
+        assert!(capacity > 0.0, "该挂出这条线的要求运力");
+        assert_eq!(state.contracts.contracts[0].resource, "碳", "主货种 = 积压最多的那种");
+
+        // 积压变小/变大 ⇒ **同一张单**（运力要求与积压量无关，所以这里该一个字都不变）。
+        post(&mut state, 400.0);
+        assert_eq!(state.contracts.contracts.len(), 1, "仍是同一张单，不是第二张");
+        assert_eq!(state.contracts.contracts[0].id, id, "单号不变（改数不是新单）");
+
+        // 有人接了 ⇒ 冻结：此后货栈怎么变都不再改这张单（它已经是**承诺**）。
+        state.contracts.contracts[0].carrier = Some("美国".into());
+        state.contracts.contracts[0].accepted_round = Some(0);
+        state.contracts.contracts[0].expires_round = 99;
+        post(&mut state, 100.0);
+        assert!(
+            (state.contracts.contracts[0].capacity - capacity).abs() < 1e-9,
+            "已接单的合同冻结，实为 {}",
+            state.contracts.contracts[0].capacity
+        );
+        assert_eq!(state.contracts.contracts.len(), 1, "有人接了就不再开第二张");
+
+        // 没人接 + 货没了 ⇒ **撤单**（需求信号必须跟着现实走，哪怕现实是「没货了」）。
+        state.contracts.contracts[0].carrier = None;
+        state.contracts.contracts[0].accepted_round = None;
+        post(&mut state, 0.0);
+        assert!(state.contracts.contracts.is_empty(), "货栈空了 ⇒ 未接单的该撤回");
+    }
+
+    /// **没人接 ⇒ 每过一个考核周期抬一档抽成**（用户裁决：价格做成**动态平衡**）。
+    ///
+    /// 抬价的节拍就是**这条线的一个往返**（与受雇方的验货节拍同一把尺子），不是另设一个
+    /// 「多久没人接就加价」的数；抬到 `share_max` 就不再加。**已接单的冻结**。
+    #[test]
+    fn an_unaccepted_order_escalates_once_per_review_period() {
+        let (config, mut state) = fresh(42);
+        let open = state.contracts.post(
+            "中国".into(), "碳".into(), 3.0, "金星".into(), "地球".into(), config.freight.share, 0, 0.6,
+        );
+        let taken = state.contracts.post(
+            "中国".into(), "铁".into(), 3.0, "水星".into(), "地球".into(), config.freight.share, 0, 0.6,
+        );
+        {
+            let c = state.contracts.get_mut(taken).unwrap();
+            c.carrier = Some("美国".into());
+            c.accepted_round = Some(0);
+            c.expires_round = 99;
+        }
+        let interval = crate::model::hire_terms(&state, &config, "金星", "地球").interval;
+        assert!(interval >= 1, "考核周期至少一回合");
+        let share0 = state.contracts.get(open).unwrap().share;
+        // 还没过一个周期 ⇒ 不加价（单子该有机会在开叫价上被接走）。
+        for r in 0..interval {
+            state.round = r;
+            escalate_open_contracts(&mut state, &config);
+        }
+        assert_eq!(
+            state.contracts.get(open).unwrap().share,
+            share0,
+            "一个考核周期之内不该加价"
+        );
+        // 满一个周期 ⇒ 抬一档，并把叫价起点挪到本回合。
+        state.round = interval;
+        escalate_open_contracts(&mut state, &config);
+        let c = state.contracts.get(open).expect("没人接的单**留在簿上**继续叫价");
+        assert!(
+            (c.share - share0 * config.freight.share_escalation).abs() < 1e-9,
+            "满一个周期该抬一档：{share0:.3} → {:.3}",
+            c.share
+        );
+        assert_eq!(c.posted_round, state.round, "抬价后重新起叫（下一档要再等一个完整周期）");
+        assert_eq!(
+            state.contracts.get(taken).unwrap().share,
+            share0,
+            "已接单的合同抽成**冻结**（那是承诺）"
+        );
+        // 反复过期 ⇒ 抬到上限为止。
+        for _ in 0..40 {
+            state.round += 1000;
+            escalate_open_contracts(&mut state, &config);
+        }
+        let c = state.contracts.get(open).unwrap();
+        assert!(
+            (c.share - config.freight.share_max).abs() < 1e-9,
+            "抬价有上限（{:.2}）：实为 {:.3}",
+            config.freight.share_max,
+            c.share
+        );
+        assert!(state.contracts.get(taken).is_some(), "已接单的合同不会因为加价被动过");
+    }
+
+    /// **AI 端到端**：一条船都没有 ⇒ 把整条线的**要求运力**挂到雇佣市场上，并发一条事件。
+    #[test]
+    fn the_ai_posts_an_order_for_the_capacity_it_cannot_cover() {
+        let (config, mut state) = fresh(42);
+        state.depots.clear();
+        state.depot_add("中国", "金星", "碳", 100.0);
+        state.ships.retain(|s| s.faction_id != "中国"); // 中国没有舰 ⇒ 自有运力 0
+        let mut rng = crate::prng::Prng::new(42);
+        sim::advance(&mut state, &config, &mut rng);
+        // 挂出来的那张单**可能已经在本回合被接走**（撮合与派工都在 `step_contracts` 里）——
+        // 所以要看的是「簿上那张属于中国的单」，而不是「还没人接的单」。
+        let mine: Vec<&crate::model::Contract> =
+            state.contracts.contracts.iter().filter(|c| c.shipper == "中国").collect();
+        assert_eq!(mine.len(), 1, "一处积压一张单，实为 {:?}", state.contracts.contracts);
+        let need =
+            crate::model::required_throughput(&state, &config, "金星", &state.capital_body("中国"));
+        assert!(
+            (mine[0].capacity - need).abs() < 1e-9,
+            "没有运力 ⇒ 该挂整条线的要求运力（应挂 {need:.3}，实为 {:.3}）",
+            mine[0].capacity
+        );
+        assert_eq!(mine[0].from, "金星", "起运 = 产地货栈");
+        assert_eq!(mine[0].to, state.capital_body("中国"), "目的照公理 = 雇主首都");
+        assert!((mine[0].share - config.freight.share).abs() < 1e-12, "抽成 = 配置里的费率");
+        assert!(mine[0].min_reputation > 0.0, "门槛要在挂单时算好并冻结");
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ContractPosted { .. })),
+            "挂单要发事件（否则投影/故事板里这件事不存在）"
+        );
+    }
+
+    /// **挂单是确定性的**：同一个世界跑两次，挂出来的单子逐字相同。
+    ///
+    /// 这条是 `AGENTS.md` 那条纪律的守卫：新机制**绝不消费主 `Prng` 流**——挂单用的是纯
+    /// 公式（连派生骰子都没用），所以「多挂一张单」不会改变世界后续的掷骰。
+    ///
+    /// 布景要**明确造出缺口**（把一个势力的船全撤走）：默认开局里各家舰队基本都能顶上自己
+    /// 那几处货栈，一回合下来往往一张单都不挂——那样这条守卫就是空转的。
+    #[test]
+    fn posting_the_same_world_twice_yields_the_same_orders() {
+        let (config, state0) = fresh(42);
+        let run = || {
+            let mut state = state0.clone();
+            state.ships.retain(|s| s.faction_id != "中国"); // 中国没有船 ⇒ 必然要请人
+            let mut rng = crate::prng::Prng::new(42);
+            sim::advance(&mut state, &config, &mut rng);
+            state
+                .contracts
+                .contracts
+                .iter()
+                .map(|c| (c.id, c.shipper.clone(), c.from.clone(), c.capacity, c.share, c.min_reputation))
+                .collect::<Vec<_>>()
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a, b, "同种子同回合的挂单必须逐字相同");
+        assert!(!a.is_empty(), "造了缺口就该有单子可测（否则这条守卫是空转的）");
     }
 }
