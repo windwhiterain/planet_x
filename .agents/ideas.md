@@ -911,13 +911,15 @@ agent（尤其想「称霸」的）会踩「单极→被联合制裁→反噬」
   **map3d.js 一字未动**，因为那份文件当时正被用户大改，避免撞车）。验证：`cargo test --workspace`
   全绿（56+6+2）；:3012 实机点城/舰/天体/势力→读面自动展开且内容正确、无 JS 报错、左树（含建筑编辑器
   与「+ 新建」）/右面板/推进/重建/应用均无回归。
-- `[ ]`（下一步）**把「有效首都」变成 state 里的显式事实**：`State::capital_body(fid)` 是算出来的
-  （控制叶子 `capital` 的值，无叶子时兜底 `default_capital_body()` = 地球），所以 `info` 的原始 dump 里
-  看不到它——删掉 `FactionView` 后，map3d 的「首都色点」就失去了数据源，本轮只能在 app.js 适配层用
-  `DEFAULT_CAPITAL_BODY = '地球'` 兜住（与引擎常量重复，是个味道）。更干净的做法：建世界时就给每个势力
-  播种 `control[fid].capital = Control::inherit(该势力首都天体)`，让「有效首都」在 state 里**始终有值**，
-  前端/agent 都不用再兜底，`default_capital_body()` 退回纯防御。（注意 round 0 现在所有势力都兜到地球，
-  于是地球上会叠 8 个势力的色点——正是播种后能顺手修掉的小毛病。）
+- `[x]` **（事实澄清，非待办）首都是「控制 state 的一部分」，不是要补的东西**：`Faction` 刻意不存首都
+  （`world.rs` 的 `initial_capital` 注释：单源无 shadow 双状态），**建世界时就把
+  `control[势力].capital = Control::inherit(initial_capital(势力))` 播种好了**（联合国→月球、美国→火星、
+  中国→地球、…，round 0 实测 9/9 势力都有该叶子），之后由 sim 的迁都步骤维护。所以：
+  ①`info` 的 `state` 根里本来就能读到有效首都（`state.control.<势力>.capital.value`）；
+  ②本轮删掉的 `FactionView.capital_body` 只是这个事实的**派生副本**（web crate 的 wire struct，
+  由 `State::capital_body()` 算出来），删掉它是对的——但下游（map3d 的「首都色点」）必须改从控制叶子读，
+  这一点最初漏了（见下条）；③绝不要在适配层另造兜底（我一开始写了 `'地球'` 兜底，属于凭错误前提
+  引入的假事实，已删）。
 - `[ ]`（下一步）**左侧控制面树的读侧也可以吃 `info`**：树节点现在按 `st.bodies/cities/ships/factions`
   自己查实体名（`KIND_ARRAY` 那套），可以进一步走「按路径取子树」的统一入口；另外 `behaviorSummary`
   仍是手写的行为→中文摘要（写面需要语义，暂可接受），若要彻底 generic，可让后端在 `info` 的
