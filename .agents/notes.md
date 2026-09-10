@@ -23,6 +23,10 @@
 > （同一分支：`ships()` 优先读引擎的 `order_effective_mode`/`order_effective`/`order_source`
 > ——含**设计图层**；只有旧 index 目录才退回本地近似，且列名带 `_approx` + 布尔来源列
 > `effective_order_from_engine`；见该篇 **§13.3**）
+> 　②b ~~**审查方钉住的洞：kit 那三列的语义被「读面改形状」静默换掉**~~ → `[x]` **已修**
+> （提交 `f1be7fb`：`order_leaf`/`order_value`/`order_behavior` 回到**真实的叶**——权威读面 =
+> 投影的 `derived.control`（`--control` 改「每舰一行」之后答不了叶存在性）；顺带让
+> 「叶里的记录值 ≠ 有效值」在 kit 上可读，`demo.py` §[4d] 钉死；见该篇 **§13.6**）
 > 　③ 剩下的排队项：方案 B「逐舰取值规则与文档对齐」、风格轴要不要真的 AI 执行者 ＋
 > `military-combat.md` 的 refit（把新图套到老舰上）＋
 > `eras-technology.md` 的时代门控（图库容器已就绪）。
