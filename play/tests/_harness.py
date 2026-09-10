@@ -130,13 +130,17 @@ class Harness:
             tail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
             raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{tail}")
 
-    def capture(self, args: list[str]) -> str:
-        """跑一次二进制、拿它的 stdout（`--derived` 这类单点导出）。不缓存。"""
+    def capture(self, args: list[str], stderr: bool = False):
+        """跑一次二进制、拿它的 stdout（`--derived` / `--control` 这类单点导出）。不缓存。
+
+        `stderr=True` 时返回 `(stdout, stderr)`——`--apply` 的回执（`NOTE_APPLY_*` /
+        `WARN_APPLY_*`）走的是 stderr，那些回执本身也是契约的一部分。
+        """
         p = subprocess.run([str(self.path), *args], cwd=str(REPO), capture_output=True,
                            text=True, encoding="utf-8")
         if p.returncode != 0:
             raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-2000:]}")
-        return p.stdout
+        return (p.stdout, p.stderr) if stderr else p.stdout
 
     def prewarm(self, keys: list[tuple[int, int]], every: int = 1) -> list[Path]:
         """并行把一批 (seed, 回合数) 备好（多个进程跑多个世界，互不干扰）。"""

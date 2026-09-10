@@ -180,18 +180,28 @@
 | `[x]` | [测试按模拟时间分档](notes/test-tiers.md) | 用 `cargo nextest` 的 group/profile 按**推进回合数**分档：快档 178 条 / 4 s（原 110 s）、中档 184 / 30 s、全档 189 / 96 s；档位写在模块名 `horizon_mid`/`horizon_long` 里，加用例不用改配置。 | 读面契约用例（80–120 回合）仍留在快档的取舍与升级路径见该篇 §6 |
 | `[~]` | [测试墙钟：热点清单与待办](notes/test-wall-clock.md) | 测试走的是 dev 档（`opt-level = 0`）⇒ **P0 已加 `[profile.test] opt-level = 2` 并实测**：最重的长局 77.2 → **18.1 s（4.27×）**、快档 4.4 → 2.0 s、中档 29.7 → 8.0 s（全档只推算没实测）；行为中性的两条依据见该篇 §0.1。另附一份「每回合被重复算多次」的热点清单（带文件名/函数名，行号已删——见该篇 §2 开头）。 | P1 纯去重（`faction_power_share` 一回合约 10+ 次、索敌内层逐候选重算）／P2 深缓存／P3 测试侧改读 `advance` 返回的 `RoundView`；全档重测 + P1 的 digest 对账 |
 | `[x]` | [读面统一：只有 pre 和 post](notes/pre-post-unify.md) | 派生数据不再分 `flow`+`metrics` 两段，一回合只有**一份视图** `RoundView`（`pre`/`post` 同形）；`RoundFlow` 退成引擎内部的写入口袋 `RoundSink`；`--derived`/`--index`/轨迹/web 三处读面一起换名，`SCHEMA_VERSION` 13→14。⚠ B5 之后 `pre` 已是**输入面**（`RoundInputs`）、`post` 是**结算面**——「同形」这条前提作废，见 `step-intermediates.md` §6.6。 | 数据面（中间量捕获）的下一批见 `notes/pre-post-unify.md` §5 |
-| `[~]` | [测试与二进制解耦：数据级断言 + 轨迹复用](notes/test-decoupled-suite.md) | **已落地一半**（`feature/test-decoupled-suite`）：用户裁决*「不一定测试框架，就弄几个 python 脚本分组跑」* ⇒ `play/tests/`（`run.py` + `g1_contract` 1.8 s / `g2_mid` 7.6 s / `g3_long` 13 s；缓存命中后几乎全零）。长组把 `tests/horizon_long.rs` 那五条不变量搬到**读面数据**上（1000 回合 × **7 seed**，判据与阈值一条没动、种子还放宽），中组搬了同回合复垦与选装，Rust 侧对应用例已删并在原处留了「搬到哪儿」的表。缓存两级：**投影**（`target/test-fixtures/`，指纹 = 二进制 + `config/game.ron` ⇒ 自动失效）+ **摘要**（每回合一行，失效键 = 抽取逻辑的代码指纹 ⇒ 只改断言不重算）。实测：1000 回合投影 13.1 s / 169 MB·seed、摘要 ~2 s·seed、命中后 0。⚠ 方案 §4 的 Stage 1（进程内 `OnceLock` 共享轨迹）**是错的**：`cargo nextest` 是 process-per-test，跨进程共享只能落盘。 | §10.5 待办：`--index` 要不要加表过滤（7 seed 缓存 1.2 GB）、其余派生表的逐列对账、要不要把 `python play/tests/run.py all` 写进合流门（要改 `AGENTS.md`）；`g1` 的对账目前只覆盖 `faction_process` 的 9 列 |
+| `[~]` | [测试与二进制解耦：数据级断言 + 轨迹复用](notes/test-decoupled-suite.md) | **Rust 侧只留搬不走的了**（`feature/test-migrate-rest`）：`play/tests/` 三组共 **53 条**判据（`g1_contract` 31 / `g2_mid` 12 / `g3_long` 10），命中缓存后 **约 4 s** 跑完（含 7 seed × 1000 + 3 seed × 400 回合）。两轮共搬出 **16 条** Rust 用例（长局五条不变量、确定性、同回合复垦/选装、`projection_derived` 6 条、`control_read_face` 1 条、编年史 2 条、战争最长/最短回合那一半），并**丢掉 3 个过时探针**（被 `probe_multipolar` 取代的两个 + 一次性调试器 `probe_zombies`）。缓存两级：**投影**（指纹 = 二进制 + config ⇒ 自动失效）+ **摘要**（失效键 = 抽取逻辑的代码指纹 ⇒ 只改断言不重算）。⚠ 方案 §4 的 Stage 1（进程内 `OnceLock`）**不成立**：`cargo nextest` 是 process-per-test。另修了 pandas 的 1 ULP 浮点解析（kit 加 `precise_float=True`）。 | §10.5 待办：`--index` 要不要加表过滤（7 seed 缓存 1.2 GB）、要不要把 `run.py all` 写进合流门（要改 `AGENTS.md`）；未搬的只剩 `tests/` 下的探针（只打印不断言）与 `src/tests/**` 的快档单测 |
 
 ---
 
 ## 快速参考：验证手段
 
 测试按**模拟时间**分档（判据 = 用例真正推进的回合数），细节见
-[`notes/test-tiers.md`](notes/test-tiers.md)：
+[`notes/test-tiers.md`](notes/test-tiers.md)。分两层，口令也见 [`AGENTS.md`](../AGENTS.md)
+的「验证」一节（**合流门 = 两条都要绿**）：
 
-- **内循环（快档，~4 s）**：`cargo nextest run` —— T0 + T1（不推进回合 / ≤48 回合）
-- **中档（~30 s）**：`cargo nextest run -P mid` —— 加上 T2（49–480 回合）
-- **全档（~96 s，合流门）**：`cargo nextest run -P full` —— 全部非 ignore 用例
+**① 数据级（`play/tests/`，跑在读面上，不用重编；改断言即刻生效）**
+
+- **三组全跑（合流门，缓存命中 ~4 s）**：`uv run --project play/planet_xq python play/tests/run.py all`
+- 单组：`… run.py 1`（读面契约，≤60 回合）/ `2`（中组 400 回合）/ `3`（长组 1000 回合 × 7 seed）
+- 长局用 `--bin release`（默认）、短局 `--bin debug` 更划算；`--refresh` 无视缓存；
+  `-j N` 并行跑几个世界。缓存落在 `target/test-fixtures/`（代码一改自动失效）。
+
+**② Rust 侧（搬不走的那半）**
+
+- **内循环（快档）**：`cargo nextest run` —— T0 + T1（不推进回合 / ≤48 回合）
+- **中档**：`cargo nextest run -P mid` —— 加上 T2（49–480 回合）
+- **全档（合流门）**：`cargo nextest run -P full` —— 全部非 ignore 用例
 - 探针/诊断（只打印不断言，`#[ignore]`）：`cargo nextest run -P full --run-ignored all`
 - 没装 nextest 的退路：`cargo test --workspace`（**仍然是全档，慢**）
 - 一次简短观察：`cargo run --bin planet_x -- --seed 7 --round 30 --digest 10`（每 10 月一行故事板）

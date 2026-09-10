@@ -37,6 +37,21 @@
 //!
 //! 留在这里的是**探针**（`#[ignore]`，只打印不断言）与 `world_is_multipolar`——它是待调的
 //! **平衡目标**，不是机制不变量。它们要用 crate 内部量（`sim::observe` 等），所以不搬。
+//!
+//! ## 顺手丢掉的三个**过时探针**（2026-10，用户：*「一些过时的测试就丢掉」*）
+//!
+//! | 丢掉 | 为什么 |
+//! | --- | --- |
+//! | `probe_world_health` | 被 `probe_multipolar` **取代**了：后者就是它的升级版（同一批指标 + 逐回合平均 / 末态 / 吉尼 / 轮换次数），它自己的文档也写着「实测值已记在笔记里」。留两份同源仪器，改了一处另一处就开始说谎。 |
+//! | `probe_sanction` | 同上（1200 回合的 max_dead/max_top/leaders 是 `probe_multipolar` 3000 回合口径的子集）。 |
+//! | `probe_zombies` | 一次性调试器：打印**第一次**出现 ≥3 个僵尸势力的那一回合就 `return`，是为当时那次「僵尸夺城—倒戈振荡」调查写的一次性探针；全球僵尸数现在由 `probe_multipolar` 的 `zombies` 列覆盖。 |
+//!
+//! 留下的探针各有**独一份**的问题：`diagnose_long_horizon`（每 50/200/500/1000… 回合的健康
+//! 报告）、`probe_multipolar`（多极健康报告：avg_top/terminal_top/rotations/alive/zombies/gini）、
+//! `probe_peak`（峰值那一回合最强者的城市距离分布 = 紧凑帝国 vs 四处扩张）、
+//! `probe_debuff_behavior` + `probe_polar_ideology`（思潮 debuff 的一对：前者看惩罚值、
+//! 后者扫 `ideology_affinity_span` 找单极化的思潮画像）、`probe_tech_vs_science`
+//! （科学与技术哪一端更容易坐上最强位）。
 
 use planet_x::config::load_config;
 use planet_x::model::*;
@@ -256,46 +271,6 @@ fn diagnose_long_horizon() {
     }
 }
 
-/// 平衡观测（`--ignored`）：删掉 resurgence 之后，世界的**整合程度**——还剩几家有城、
-/// 几家亡国、最强的城占多少。这是**待调的平衡目标**（不是机制不变量），所以只记录不断言。
-///
-/// 实测（`config/game.ron` 默认值，1000 回合）：
-/// * seed 1：3 家有城 / 6 家亡国；seed 7：3 / 6；seed 42：4 / 4。
-/// * 唯一「有立足点保证」的旧时代（`step_resurgence`）是 9 家全活、峰值僵尸 ≤2、城占峰值 <0.85。
-/// 也就是说：**「允许亡国」这一条机制改动，把世界从 9 家整合到 3-4 家**。
-#[test]
-#[ignore]
-fn probe_world_health() {
-    let config = load_config();
-    for seed in [1u64, 7, 42] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        let mut max_dead = 0usize;
-        let mut max_top_share: f64 = 0.0;
-        for _ in 0..1000 {
-            sim::advance(&mut state, &config, &mut rng);
-            let dead = zombie_count(&state);
-            max_dead = max_dead.max(dead);
-            let (_, share) = top_power(&state, &config);
-            max_top_share = max_top_share.max(share);
-        }
-        let alive = state
-            .factions
-            .iter()
-            .filter(|f| {
-                state
-                    .cities
-                    .iter()
-                    .any(|c| c.faction_id == f.name && !c.razed)
-            })
-            .count();
-        println!(
-            "seed {seed}: 末态有城势力={alive}/{} 亡国峰值={max_dead} 城占峰值={max_top_share:.3}",
-            state.factions.len()
-        );
-    }
-}
-
 /// 多极格局（**平衡目标，待调**）：没有任何势力能长期垄断接近全部城市（峰值城占 < 0.85），
 /// 且后半程的「最强者」会轮换（不是同一个人锁死）。
 ///
@@ -348,39 +323,6 @@ fn top_power(state: &State, config: &GameConfig) -> (FactionId, f64) {
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(k, v)| (k.clone(), *v))
         .unwrap_or((String::new(), 0.0))
-}
-
-/// 观测：合纵连横制裁严苛度调参（`--ignored`）。
-#[test]
-#[ignore]
-fn probe_sanction() {
-    let config = load_config();
-    for seed in [1u64, 42, 12345] {
-        let mut state = world::default_state(&config, seed);
-        let mut rng = Prng::new(seed);
-        let mut max_dead = 0usize;
-        let mut max_top_share: f64 = 0.0;
-        let mut top_sum: f64 = 0.0;
-        let mut top_count = 0u32;
-        let mut sm = std::collections::BTreeSet::new();
-        for _ in 0..1200u32 {
-            let flow = sim::advance(&mut state, &config, &mut rng);
-            let dead = zombie_count(&state);
-            let (top, share) = top_power(&state, &config);
-            max_dead = max_dead.max(dead);
-            max_top_share = max_top_share.max(share);
-            if state.round >= 600 {
-                top_sum += share;
-                top_count += 1;
-                sm.insert(top);
-            }
-            let _ = flow;
-        }
-        let avg = top_sum / top_count as f64;
-        println!(
-            "seed {seed}: max_dead={max_dead} max_top={max_top_share:.3} avg_top(half)={avg:.3} leaders={sm:?}"
-        );
-    }
 }
 
 /// 多极「科学测量」(`--ignored`)：不再只看「峰值 < 0.85 + 会轮换」，而是量化
@@ -503,51 +445,6 @@ fn probe_peak() {
             ds.last().copied().unwrap_or(0.0)
         );
     }
-}
-
-/// 诊断：seed 1 中僵尸（无舰无活城）势力出现 3 个时的回合与各家状态。`--ignored`。
-#[test]
-#[ignore]
-fn probe_zombies() {
-    let config = load_config();
-    let mut state = world::default_state(&config, 1);
-    let mut rng = Prng::new(1);
-    for _ in 0..1000u32 {
-        sim::advance(&mut state, &config, &mut rng);
-        if zombie_count(&state) >= 3 {
-            println!(
-                "--- round {} dead {} ---",
-                state.round,
-                zombie_count(&state)
-            );
-            for f in &state.factions {
-                let ships = state
-                    .ships
-                    .iter()
-                    .filter(|s| s.faction_id == f.name)
-                    .count();
-                let cities = state
-                    .cities
-                    .iter()
-                    .filter(|c| c.faction_id == f.name && !c.razed)
-                    .count();
-                let razed = state
-                    .cities
-                    .iter()
-                    .filter(|c| c.faction_id == f.name && c.razed)
-                    .count();
-                println!(
-                    "  {} ships={ships} cities={cities} own_razed={razed}",
-                    f.name
-                );
-            }
-            let total_settlements: usize = state.bodies.iter().map(|b| b.settlements.len()).sum();
-            let total_cities = state.cities.len();
-            println!("  settlements={total_settlements} cities={total_cities}");
-            return;
-        }
-    }
-    println!("never reached 3 zombies");
 }
 
 /// 【探针·debuff 行为】单种子快速观测：逐回合打印「最强势力 + 各势力思潮 debuff 惩罚」，
