@@ -224,11 +224,13 @@ mod tests {
                 ev.weight()
             );
         }
-        // 阶梯本身：逐发流水 < 撤退 < 舰存亡 < 重建/剧情 <= 城市易主 <= 世界格局。
+        // 阶梯本身：逐发流水 < 撤退 < 舰存亡 < 剧情 <= 城市易主 <= 世界格局。
+        // （「重建」那一档随 `step_resurgence` 删除而消失——现在**没有**任何「势力复活」
+        // 事件：重建走殖民舰，记的是 `colony_founded`，属于城市易主档。）
         assert!(by_kind("attack") < by_kind("withdraw"), "逐发流水必须在阶梯底部");
         assert!(by_kind("withdraw") < by_kind("ship_destroyed"));
-        assert!(by_kind("ship_destroyed") < by_kind("resurgence"));
-        assert!(by_kind("resurgence") <= by_kind("city_razed"));
+        assert!(by_kind("ship_destroyed") < by_kind("story"));
+        assert!(by_kind("story") <= by_kind("city_razed"));
         assert!(by_kind("city_razed") <= by_kind("war_started"));
         assert_eq!(by_kind("attack"), 0, "逐发流水 = 0");
         assert_eq!(by_kind("war_started"), 9, "世界格局级必须是阶梯顶端");
@@ -237,7 +239,7 @@ mod tests {
         assert!(w.iter().any(|&x| x >= 8), "门槛 8 切不出任何东西");
         assert!(w.iter().any(|&x| x < 8), "门槛 8 等于全量，等于没筛");
     }
-    /// 全部 18 个 `GameEvent` 变体各一个样本。
+    /// 全部 `GameEvent` 变体各一个样本。
     fn samples() -> Vec<GameEvent> {
         vec![
             GameEvent::Attack { attacker: "a".into(), target: "b".into(), damage: 1.5 },
@@ -268,10 +270,6 @@ mod tests {
                 ship: "s".into(), owner: "f".into(), class: "corvette".into(),
                 city: None, via: SpawnVia::Story,
             },
-            GameEvent::ShipSpawned {
-                ship: "s".into(), owner: "f".into(), class: "corvette".into(),
-                city: Some("c".into()), via: SpawnVia::Resurgence,
-            },
             GameEvent::ColonyFounded {
                 city: "c".into(), owner: "f".into(), body: "地球".into(),
                 seeded_ship_class: "corvette".into(), how: FoundingHow::NewSite, prev_owner: None,
@@ -286,14 +284,10 @@ mod tests {
             GameEvent::WarStarted { a: "f".into(), b: "g".into() },
             GameEvent::WarEnded { a: "f".into(), b: "g".into() },
             GameEvent::Story { id: "p".into(), title: "序章".into(), participants: vec!["f".into()] },
-            GameEvent::Resurgence {
-                faction: "f".into(), body: "地球".into(), ship: "s".into(), city: "c".into(),
-            },
             GameEvent::Revolt { city: "c".into(), faction: "f".into(), loyalty: 0.0 },
             GameEvent::CityDefected {
                 city: "c".into(), from: "f".into(), to: "g".into(), loyalty: 0.2,
             },
-            GameEvent::CityOverrun { city: "c".into(), from: "f".into(), to: "g".into() },
             GameEvent::CoalitionFormed { hegemon: "f".into(), members: vec!["g".into(), "h".into()] },
             GameEvent::CoalitionEnded { hegemon: "f".into(), members: vec!["g".into()] },
             GameEvent::CapitalRelocated {
@@ -317,10 +311,8 @@ mod tests {
             | GameEvent::WarStarted { .. }
             | GameEvent::WarEnded { .. }
             | GameEvent::Story { .. }
-            | GameEvent::Resurgence { .. }
             | GameEvent::Revolt { .. }
             | GameEvent::CityDefected { .. }
-            | GameEvent::CityOverrun { .. }
             | GameEvent::CoalitionFormed { .. }
             | GameEvent::CoalitionEnded { .. }
             | GameEvent::CapitalRelocated { .. } => {}
@@ -336,7 +328,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&DeathCause::Scrapped).unwrap(), "\"scrapped\"");
         assert_eq!(serde_json::to_string(&SpawnVia::Shipyard).unwrap(), "\"shipyard\"");
         assert_eq!(serde_json::to_string(&SpawnVia::Story).unwrap(), "\"story\"");
-        assert_eq!(serde_json::to_string(&SpawnVia::Resurgence).unwrap(), "\"resurgence\"");
         assert_eq!(serde_json::to_string(&FoundingHow::NewSite).unwrap(), "\"new_site\"");
         assert_eq!(serde_json::to_string(&FoundingHow::Refounded).unwrap(), "\"refounded\"");
         // 认不出的标签要**明确报错**，不退回默认变体。

@@ -3235,8 +3235,7 @@ fn military_deltas(events: &[GameEvent]) -> BTreeMap<FactionId, f64> {
                 bump(owner, -1.0);
                 bump(fallen_to, 1.0);
             }
-            GameEvent::CityDefected { from, to, .. }
-            | GameEvent::CityOverrun { from, to, .. } => {
+            GameEvent::CityDefected { from, to, .. } => {
                 bump(from, -1.0);
                 bump(to, 1.0);
             }
@@ -3482,15 +3481,12 @@ mod tests {
         assert_eq!(d(&razed_then_refounded, "甲"), 1.0, "拆城方得一分");
         assert_eq!(d(&razed_then_refounded, "丙"), 0.0, "复垦是殖民行为，不进军事轴");
 
-        // 4) 活城易主的两条分支必须同分：倒戈 / 难民夺城 / 叛乱兜底。
-        for ev in [
-            GameEvent::CityDefected { city: "城".into(), from: "乙".into(), to: "甲".into(), loyalty: 0.2 },
-            GameEvent::CityOverrun { city: "城".into(), from: "乙".into(), to: "甲".into() },
-        ] {
-            let one = vec![ev.clone()];
-            assert_eq!(d(&one, "乙"), -1.0, "{:?} 失主必须扣分（与 Revolt 兜底同分）", ev.kind());
-            assert_eq!(d(&one, "甲"), 1.0);
-        }
+        // 4) 活城易主（离心倒戈）必须与叛乱兜底同分。
+        let defect = vec![GameEvent::CityDefected {
+            city: "城".into(), from: "乙".into(), to: "甲".into(), loyalty: 0.2,
+        }];
+        assert_eq!(d(&defect, "乙"), -1.0, "失主必须扣分（与 Revolt 兜底同分）");
+        assert_eq!(d(&defect, "甲"), 1.0);
         let revolt = vec![GameEvent::Revolt { city: "城".into(), faction: "乙".into(), loyalty: 0.0 }];
         assert_eq!(d(&revolt, "乙"), -1.0);
 

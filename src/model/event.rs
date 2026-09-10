@@ -96,9 +96,6 @@ pub enum SpawnVia {
     Shipyard,
     /// 剧情效果白送（[`StoryEffect::GrantShip`]）——此前**完全不发事件**，舰凭空出现。
     Story,
-    /// 反僵尸重建的种子舰（[`GameEvent::Resurgence`] 同时发出）——这条路径此前也**不发**
-    /// 造舰事件，投影对账实测 63 次出生里 46 次无解释。
-    Resurgence,
 }
 
 impl SpawnVia {
@@ -106,12 +103,11 @@ impl SpawnVia {
         match self {
             SpawnVia::Shipyard => "shipyard",
             SpawnVia::Story => "story",
-            SpawnVia::Resurgence => "resurgence",
         }
     }
 }
 
-stringly_unit_enum!(SpawnVia { "shipyard" => Shipyard, "story" => Story, "resurgence" => Resurgence });
+stringly_unit_enum!(SpawnVia { "shipyard" => Shipyard, "story" => Story });
 
 /// 新殖民 / 复垦的**方式**。
 ///
@@ -196,14 +192,6 @@ pub enum GameEvent {
     /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
     /// `participants` 是参与方可读名（事件型触发时为具体对象）。
     Story { id: String, title: String, participants: Vec<String> },
-    /// 重建（反僵尸/反垄断）：一支被彻底消灭（既无舰又无活城）的势力在一处它仍
-    /// 拥有残骸足迹的定居点上重新建立前进基地，并获一艘种子舰。这保证游戏在上千
-    /// 回合后仍是多方参与的局面，而不是收敛成少数几个永久旁观者。
-    ///
-    /// `city` 是被它重新立足的那座城（复垦 / 新建 / 夺取）——每次成功的重建都必然落在
-    /// 一座具体的城上，故非 `Option`。此前这个事件**不带 city**，于是「一座城在夷平后
-    /// 同回合被重建」的易主在历史里完全不可见——只能靠 `body` 与城的 `body_id` 反查。
-    Resurgence { faction: FactionId, body: BodyId, ship: ShipId, city: CityId },
     /// 离心叛乱（光速治理的代价）：城市忠诚度跌破叛变阈值，居民脱离其统治势力，
     /// 城市被夷平为空白（可再殖民）。这是超大帝国管理廉价的远方殖民地失败的结果。
     /// `loyalty` 是爆发时的忠诚度（可读的量级）。
@@ -214,12 +202,6 @@ pub enum GameEvent {
     /// 被夷平/旁观的小势力能**接盘**城市、成长为真正的多极棋子，而不是退化成永久旁观者。
     /// 与 [`GameEvent::Revolt`] 并存：`Revolt` 是无可倒戈目标时的兜底（夷为空白）。
     CityDefected { city: CityId, from: FactionId, to: FactionId, loyalty: f64 },
-    /// 难民夺城（反僵尸重建的最后一档）：世界每个定居点都已被活城占据、被灭势力既无自己的
-    /// 空白足迹也找不到未占用定居点时，难民潮**夺取当前城数最多的那个势力的最小 id 活城**。
-    ///
-    /// 这此前**完全不发事件**——一座活城从 A 到 B 静默发生，是「城易主查不到原因」最直接的
-    /// 一个洞。城市被占据即易主，故单独成事件，不与 [`GameEvent::Resurgence`] 混淆。
-    CityOverrun { city: CityId, from: FactionId, to: FactionId },
     /// 合纵连横：一方势力被判定为「霸权」后，其余较弱势力结成反制联盟（`members`
     /// 为联盟成员，不含霸权 `hegemon`）。这是「一家独大 → 众人围剿」的政治跃迁，
     /// 让上千回合的博弈维持多方参与。
@@ -455,14 +437,6 @@ impl GameEvent {
                 }
                 r.data = json!({"id": id, "title": title, "participants": participants});
             }
-            GameEvent::Resurgence { faction, body, ship, city } => {
-                set_actor(&mut r, EntityKind::Faction, faction);
-                // 落脚点是**城**（重建必然落在某座城上）；天体与种子舰进 extra。
-                set_target(&mut r, EntityKind::City, city);
-                extra(&mut r, EventRole::Third, EntityKind::Body, body);
-                extra(&mut r, EventRole::Third, EntityKind::Ship, ship);
-                r.data = json!({"faction": faction, "body": body, "ship": ship, "city": city});
-            }
             GameEvent::Revolt { city, faction, loyalty } => {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, faction);
@@ -473,12 +447,6 @@ impl GameEvent {
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, from);
                 extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, to);
                 r.data = json!({"city": city, "from": from, "to": to, "loyalty": loyalty});
-            }
-            GameEvent::CityOverrun { city, from, to } => {
-                set_target(&mut r, EntityKind::City, city);
-                extra(&mut r, EventRole::Victim, EntityKind::Faction, from);
-                extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, to);
-                r.data = json!({"city": city, "from": from, "to": to});
             }
             GameEvent::CoalitionFormed { hegemon, members } => {
                 // 联盟是**冲着**霸权结成的：霸权是被针对的目标，不是发起者。
@@ -520,10 +488,8 @@ impl GameEvent {
             GameEvent::WarStarted { .. } => "war_started",
             GameEvent::WarEnded { .. } => "war_ended",
             GameEvent::Story { .. } => "story",
-            GameEvent::Resurgence { .. } => "resurgence",
             GameEvent::Revolt { .. } => "revolt",
             GameEvent::CityDefected { .. } => "city_defected",
-            GameEvent::CityOverrun { .. } => "city_overrun",
             GameEvent::CoalitionFormed { .. } => "coalition_formed",
             GameEvent::CoalitionEnded { .. } => "coalition_ended",
             GameEvent::CapitalRelocated { .. } => "capital_relocated",
@@ -612,14 +578,6 @@ impl GameEvent {
                 (SpawnVia::Story, _) => {
                     format!("{owner} 因剧情得到一艘 {class}「{ship}」")
                 }
-                // 重建种子舰：`Resurgence` 事件会紧跟着说「在哪里重新立足」，所以这一句专注
-                // 说「下水了哪艘舰」，两条消息不互相复读。
-                (SpawnVia::Resurgence, Some(c)) => {
-                    format!("{owner} 的 {class}「{ship}」在 {c} 下水（重建种子舰）")
-                }
-                (SpawnVia::Resurgence, None) => {
-                    format!("{owner} 的 {class}「{ship}」下水（重建种子舰）")
-                }
             },
             GameEvent::ColonyFounded { city, owner, body, how, prev_owner, .. } => match (how, prev_owner) {
                 (FoundingHow::NewSite, _) => format!("{owner} 在 {body} 新建城市 {city}"),
@@ -639,9 +597,6 @@ impl GameEvent {
                     format!("{title}（{}）", participants.join("、"))
                 }
             }
-            GameEvent::Resurgence { faction, body, ship, city } => {
-                format!("{faction} 在 {body} 的 {city} 重新立足（种子舰 {ship}）")
-            }
             GameEvent::Revolt { city, faction, loyalty } => format!(
                 "{faction} 的 {city} 叛乱，城市化为废墟（忠诚 {}）",
                 num(*loyalty)
@@ -650,9 +605,6 @@ impl GameEvent {
                 "{from} 的 {city} 倒戈至 {to}（忠诚 {}）",
                 num(*loyalty)
             ),
-            GameEvent::CityOverrun { city, from, to } => {
-                format!("{to} 的难民夺取 {from} 的 {city}")
-            }
             GameEvent::CoalitionFormed { hegemon, members } => format!(
                 "{} 结成联盟对抗霸权 {hegemon}",
                 members.join("、")
@@ -695,11 +647,10 @@ impl GameEvent {
             // 城市易主/毁灭：地图要重画的事件。
             GameEvent::CityRazed { .. }
             | GameEvent::CityDefected { .. }
-            | GameEvent::CityOverrun { .. }
             | GameEvent::ColonyFounded { .. }
             | GameEvent::Revolt { .. } => 8,
-            // 势力重建（世界格局的复活）与剧情节拍。
-            GameEvent::Resurgence { .. } | GameEvent::Story { .. } => 7,
+            // 剧情节拍。
+            GameEvent::Story { .. } => 7,
             // 舰的存亡。
             GameEvent::ShipDestroyed { .. } | GameEvent::ShipSpawned { .. } => 5,
             // 值得注意但不改变归属。

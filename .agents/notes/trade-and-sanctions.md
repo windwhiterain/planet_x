@@ -109,8 +109,9 @@
 * `[ ]` **M6 MOND 运费**：成交价 += 运费（随买卖双方距离 + 是否穿越 28 AU 异常带递增），
   非 master 有丢货率 → 崇拜教成为柯伊伯带唯一可靠承运人。MOND 的第三条通道（经济）。
 * `[ ]` **平衡调参**（见 7.3）。
-* `[ ]` **清理死代码**：`GameEvent::Resurgence` / `CityOverrun` / `SpawnVia::Resurgence`
-  三个 variant 现在**没有任何生产者**了，应删掉（并同步 `config.rs`/`projection.rs` 的测试与注释）。
+* `[x]` **死代码清理**：`GameEvent::Resurgence` / `CityOverrun` / `SpawnVia::Resurgence`
+  三个 variant 已删（`step_resurgence` 删除后它们没有任何生产者）；`config.rs` 的分级守卫
+  与样本、`sim.rs` 的军事轴测试同步改判。
 * `[ ]` 出口端：`FactionMetrics` 可以再暴露「本回合买了什么/卖了什么」，让 agent 看得见贸易结构。
 
 ---
