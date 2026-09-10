@@ -99,6 +99,26 @@ function behaviorFromInput(type, d) {
   }
 }
 
+// --- 风格辅助（行为风格两轴 + 风筝<->贴脸姿态） -----------------------------
+// 三个轴都取 [-1,1]、0 = 基线（引擎 `ShipDoctrine` / `Ship.kiting` 的约定）：
+//   temper     理智↔热血：<0 欺软怕硬（打威慑低于自己的），>0 飞蛾扑火（打威慑高于自己的）
+//   lone_wolf  护航↔独狼：<0 空闲时贴旗舰护航，>0 空闲时自行就近接战
+//   kiting     风筝↔贴脸：<0 风筝（保持最远武器射程、敌近则拉开、更早撤），>0 贴脸（压近、打得更久）
+function num2(v) {
+  const n = +v || 0;
+  return (n >= 0 ? '+' : '') + n.toFixed(2);
+}
+function doctrineSummary(l) { return '理智↔热血 ' + num2(l.temper) + ' · 护航↔独狼 ' + num2(l.lone_wolf); }
+function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
+
+// 势力级**默认风格**行的摘要：只有它自己是「玩家」时那个值才真的被采用（引擎的取值规则：
+// 默认叶为 `Inherit`/`Auto` 时不供值），所以这两种情况都不显示那几个数——显示了会骗人。
+function fleetStyleLabel(leaf, summary) {
+  const m = normMode(leaf.mode);
+  if (m === 'Player') return ' · ' + summary(leaf);
+  return m === 'Auto' ? ' · 自动（值由系统写）' : ' · 未表态';
+}
+
 // --- 节点类型注册表 ---------------------------------------------------------
 // 每种的 per-kind 行为统一放在这里：renderNode/modeToggleFor 不再 switch 裸字符串。
 //  childMode  'tabs'  容器：tab 带，仅展开激活子节点
@@ -108,16 +128,28 @@ function behaviorFromInput(type, d) {
 //             null 无 toggle（纯分组容器）；'global' edScope.global；
 //             'factions'/'bodies'/'cities' scopeVal(edScope[k], id)；'leaf' node.leaf.mode
 //             （三态：Inherit=继承上层 / Auto=系统自动 / Player=玩家；读面永远给全三态之一）
-//  editor     'ship'  舰行为编辑器（仅 Player）| 'value' 数值叶子编辑器 | 'building' 建筑
+//  editor     'ship'  舰行为编辑器 | 'doctrine' 行为风格两轴（理智↔热血/护航↔独狼）|
+//             'kiting' 风筝↔贴脸姿态 | 'value' 数值叶子编辑器 | 'building' 建筑
+//             （前三种都只在**有效归属是玩家**时给编辑器，否则给一行 .tnode-hint）
 const KIND = {
   global:    { childMode: 'tabs', scope: 'global' },
   faction:   { childMode: 'tabs', scope: 'factions', selectFaction: true },
   group:     { childMode: 'list', scope: null },
   body:      { childMode: 'tabs', scope: 'bodies' },
   city:      { childMode: 'list', scope: 'cities' },
-  ship:      { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
-  // 势力级「舰队默认指令」：新舰出生与一次性指令收尾都回落到它，所以它也带行为编辑器。
-  fleetorder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
+  // 一条舰 = 一个**三叶容器**（指令 / 风格 / 风筝姿态）。三片叶的归属链各自独立
+  // （叶 → 舰队默认 → 势力 → 全局），所以「归谁」的下拉在子叶那一行，不在这容器上。
+  ship:      { childMode: 'tabs' },
+  shiporder: { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
+  // 逐舰风格两叶：值 = **有效风格**（叶 → 舰队默认 → 舰上记录值），mode = 该叶自己的表态。
+  shipdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => ' · ' + doctrineSummary(n.leaf) },
+  shipkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => ' · ' + kitingSummary(n.leaf) },
+  // 势力级**三条默认**：指令 / 风格 / 风筝姿态。它们是「舰」这一组的前提（先定默认，例外才少写）。
+  // 后两片与「舰队默认指令」同形，只是「风格」有两个轴：doctrine = 理智↔热血 + 护航↔独狼，
+  // kiting = 风筝↔贴脸。摘要见 fleetStyleLabel（没表态就不显示数——那两个数还不算数）。
+  fleetorder:    { childMode: 'leaf', scope: 'leaf', editor: 'ship', decorateLabel: (n, w) => ' · ' + behaviorSummary(n.leaf.behavior, w) },
+  fleetdoctrine: { childMode: 'leaf', scope: 'leaf', editor: 'doctrine', decorateLabel: (n) => fleetStyleLabel(n.leaf, doctrineSummary) },
+  fleetkiting:   { childMode: 'leaf', scope: 'leaf', editor: 'kiting', decorateLabel: (n) => fleetStyleLabel(n.leaf, kitingSummary) },
   resource:  { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '投资预算/回合' },
   conbudget: { childMode: 'leaf', scope: 'leaf', editor: 'value', editorLabel: '建造预算/回合' },
   building:  { childMode: 'leaf', scope: 'leaf', editor: 'building' },
@@ -366,13 +398,15 @@ function buildTree() {
     const fc = getControl(fid);
     const fn = { key: 'f' + fid, kind: 'faction', id: fid, name: f.name, color: f.color, fid, children: [] };
 
-    const shipLeaves = (fc.ship_orders || []).map((ord) => {
-      const s = st.ships.find((x) => x.name === ord.ship);
-      return { key: 'ship' + ord.ship, kind: 'ship', id: ord.ship, name: (s ? s.name : '船#' + ord.ship), leaf: ord, fid };
-    });
-    // 势力级的「舰队默认指令」也是一片可编辑叶子：新舰出生就继承它，一次性指令收尾回落
-    // 到它。它排在「舰」分组**之前**——因为它是这一组的前提（先定默认，例外才少写）。
-    const fleetLeaf = (fc.default_ship_order = fc.default_ship_order || { behavior: 'Idle', mode: 'Inherit' });
+    const shipNodes = (fc.ship_orders || []).map((ord) => shipNode(fc, ord));
+    // 势力级**三条默认**（指令 / 风格 / 风筝姿态）也是可编辑叶片：新舰出生就继承它们，
+    // 一次性指令收尾也回落到它们。它们排在「舰」分组**之前**——因为它们是这一组的前提
+    // （先定默认，例外才少写）。读面里没有这条叶 = 没有人表态，这里补一片 `Inherit` 的叶
+    // 让它出现在树上（与作用域里「没列出的层 ≡ 继承」同义；回传时值会落进一片 Inherit 的
+    // 叶，引擎刻意允许——「模板原样回传安全」，值不会被采用）。
+    const fleetOrder = (fc.default_ship_order = fc.default_ship_order || { behavior: 'Idle', mode: 'Inherit' });
+    const fleetDoctrine = (fc.default_doctrine = fc.default_doctrine || { temper: 0, lone_wolf: 0, mode: 'Inherit' });
+    const fleetKiting = (fc.default_kiting = fc.default_kiting || { kiting: 0, mode: 'Inherit' });
 
     const invLeaves = (fc.investment_budget || []).map((e) => ({
       key: 'inv' + fid + ':' + e.resource, kind: 'resource', name: resName(e.resource), leaf: e, fid,
@@ -406,9 +440,12 @@ function buildTree() {
     });
 
     const cats = [];
-    if (shipLeaves.length || fleetLeaf) {
-      const kids = [{ key: 'fleet' + fid, kind: 'fleetorder', id: fid, name: '舰队默认指令', leaf: fleetLeaf, fid }]
-        .concat(shipLeaves);
+    if (shipNodes.length || fleetOrder) {
+      const kids = [
+        { key: 'fleet' + fid, kind: 'fleetorder', id: fid, name: '舰队默认指令', leaf: fleetOrder, fid },
+        { key: 'fleetdoc' + fid, kind: 'fleetdoctrine', id: fid, name: '舰队默认风格', leaf: fleetDoctrine, fid },
+        { key: 'fleetkit' + fid, kind: 'fleetkiting', id: fid, name: '舰队默认风筝姿态', leaf: fleetKiting, fid },
+      ].concat(shipNodes);
       cats.push({ key: 'gs' + fid, kind: 'group', name: '舰', fid, children: kids });
     }
     if (budgetKids.length) cats.push({ key: 'gbd' + fid, kind: 'group', name: '预算', fid, children: budgetKids });
@@ -420,6 +457,40 @@ function buildTree() {
   return root;
 }
 
+// 一条舰 = 一个三叶容器：**指令**（干什么）+ **风格**（理智↔热血 / 护航↔独狼）+
+// **风筝姿态**（风筝↔贴脸）。三片叶的归属链各自独立，所以「归谁」的下拉跟着子叶走。
+//
+// 风格两叶的读面**总是**给（哪怕状态里根本没有那片叶）：值 = **有效值**（叶 → 舰队默认
+// → 舰上记录值）、mode = 这片叶自己的表态。所以这里显示的就是「这艘舰现在实际用的风格」。
+// ⚠ `Ship.doctrine` / `Ship.kiting` 只是出厂快照（**记录值**），改它们没有任何控制效果
+// ——那正是「我明明改了风格却没反应」的坑；要改就走这两片叶。
+function shipNode(fc, ord) {
+  const name = ord.ship;
+  const s = st.ships.find((x) => x.name === name);
+  const kids = [{ key: 'ord' + name, kind: 'shiporder', id: name, name: '指令', leaf: ord, fid: fc.faction_id }];
+  // 世界里已经没有这艘舰（战沉 / 改名换代）时只留指令行：它的风格叶写进去也只会被丢弃。
+  if (s) {
+    kids.push({
+      key: 'doc' + name, kind: 'shipdoctrine', id: name, name: '风格', fid: fc.faction_id,
+      leaf: styleLeaf(fc, 'ship_doctrine', name, { ship: name, temper: 0, lone_wolf: 0, mode: 'Inherit' }),
+    });
+    kids.push({
+      key: 'kit' + name, kind: 'shipkiting', id: name, name: '风筝姿态', fid: fc.faction_id,
+      leaf: styleLeaf(fc, 'ship_kiting', name, { ship: name, kiting: 0, mode: 'Inherit' }),
+    });
+  }
+  return { key: 'ship' + name, kind: 'ship', id: name, name: (s ? s.name : '船#' + name), fid: fc.faction_id, children: kids };
+}
+
+// 逐舰风格叶：读面里每艘舰都有一行（值 = 有效值、mode = 叶片表态），正常路径就是取它。
+// 兜底那支（读面里没有 = 老服务端/新舰）补一片 `Inherit` 的叶：回传等于「这一层没有意见」。
+function styleLeaf(fc, key, ship, blank) {
+  const list = (fc[key] = fc[key] || []);
+  let e = list.find((x) => x.ship === ship);
+  if (!e) { e = blank; list.push(e); }
+  return e;
+}
+
 function renderTree() {
   const tree = $('#tree');
   tree.innerHTML = '';
@@ -428,7 +499,9 @@ function renderTree() {
 
 function renderNode(node) {
   const spec = KIND[node.kind] || {};
-  const wrap = el('div', { class: 'tnode' });
+  // `data-key` = 这棵树里的稳定节点键（「哪个势力的哪片叶」）。纯属可读性/可自动化：
+  // 人和脚本都能 `[data-key="fleetdoc中国"]` 一步点到那一行，不必靠中文文本猜。
+  const wrap = el('div', { class: 'tnode', 'data-key': node.key });
   const head = el('div', { class: 'tnode-head' });
 
   const lbl = el('span', { class: 'tnode-label' });
@@ -486,6 +559,15 @@ function renderNode(node) {
     // 改行为时会把叶子显式钉成 Player（写值即接管，与 `--apply` 同一条规则）。
     if (effectiveMode(node) === 'Player') wrap.appendChild(shipEditor(node.leaf, node));
     else wrap.appendChild(hintLine('由系统自动决定（要自己指挥就把左边的归属改成「玩家」）'));
+  } else if (spec.editor === 'doctrine') {
+    // 行为风格两轴（理智↔热血 / 护航↔独狼）：与「舰队默认指令」同一套开放规则——按有效归属
+    // 判断能不能编辑（继承舰队默认风格也算你的），改值即把这片叶钉成玩家。
+    if (effectiveMode(node) === 'Player') wrap.appendChild(doctrineEditor(node.leaf));
+    else wrap.appendChild(hintLine('由系统自动决定（要自己定风格就把左边的归属改成「玩家」）'));
+  } else if (spec.editor === 'kiting') {
+    // 风筝↔贴脸姿态（单片叶）：同上。
+    if (effectiveMode(node) === 'Player') wrap.appendChild(kitingEditor(node.leaf));
+    else wrap.appendChild(hintLine('由系统自动决定（要自己定风筝姿态就把左边的归属改成「玩家」）'));
   } else if (spec.editor === 'value') {
     wrap.appendChild(leafValueEditor(node.leaf, spec.editorLabel, node));
   } else if (spec.editor === 'building') {
@@ -500,15 +582,26 @@ function hintLine(text) {
   return d;
 }
 
-/// 一片叶子的**有效归属**：叶子自己 → （舰：势力的舰队默认指令）→ 势力 → 全局。
-/// 这是 `State::ship_control` / `State::*_control` 在前端的对应读法，UI 用它决定
-/// 「这片叶子现在归谁、能不能编辑」。
+/// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 全局。
+/// 这是 `State::ship_control` / `ship_doctrine_control` / `ship_kiting_control` 在前端的
+/// 对应读法，UI 用它决定「这片叶子现在归谁、能不能编辑」。
+///
+/// 「该轴对应的默认叶」不是写死的 `default_ship_order`：引擎里三条轴各有一片势力级默认
+/// （指令 → `default_ship_order`、风格 → `default_doctrine`、风筝姿态 → `default_kiting`），
+/// 见 [`DEFAULT_LEAF`]。
+const DEFAULT_LEAF = {
+  shiporder: 'default_ship_order',
+  shipdoctrine: 'default_doctrine',
+  shipkiting: 'default_kiting',
+};
+
 function effectiveMode(node) {
   const own = normMode(node.leaf && node.leaf.mode);
   if (own !== 'Inherit') return own;
-  if (node.kind === 'ship') {
+  const dkey = DEFAULT_LEAF[node.kind];
+  if (dkey) {
     const fc = getControl(node.fid);
-    const d = normMode(fc.default_ship_order && fc.default_ship_order.mode);
+    const d = normMode(fc[dkey] && fc[dkey].mode);
     if (d !== 'Inherit') return d;
   }
   const fac = normMode(scopeVal(edScope.factions, node.fid));
@@ -538,6 +631,43 @@ function modeToggleFor(node) {
 
 // 读面的三态是权威拼写；缺省（null/undefined，例如 scope 里没列出的层）算「继承」。
 function normMode(m) { return m || 'Inherit'; }
+
+// --- 风格编辑器（行为风格两轴 / 风筝↔贴脸一条轴）-----------------------------
+// 两片都写**叶片**（逐舰是 `ship_doctrine`/`ship_kiting`，势力级是 `default_doctrine`/
+// `default_kiting`），**不碰** `Ship.doctrine`/`Ship.kiting`——那对字段在引擎里已降级为
+// 「记录值」（出厂快照 + AI 流水），写它不产生任何控制效果。
+// 每条轴取 [-1,1]（0 = 基线），钳在两端；值一改就把这片叶钉成 Player（写值即接管，
+// 与 `--apply` 同一条规则：只写值不写 mode ⇒ 该叶变成玩家指令）。
+function setStyleAxis(leaf, key, raw) {
+  leaf[key] = Math.max(-1, Math.min(1, +raw || 0));
+  if (normMode(leaf.mode) === 'Inherit') leaf.mode = 'Player';
+}
+
+function styleField(label, title, val, onSet) {
+  const w = el('span', { class: 'style-field' });
+  w.appendChild(el('span', { class: 'lv-label' }, label + ' '));
+  const inp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+val || 0).toFixed(2) });
+  if (title) inp.title = title;
+  inp.addEventListener('input', () => onSet(inp.value));
+  // `change`（离开这一格 / 回车）后重画一次：行摘要显示的就是叶里现在那个数。
+  // 输入过程中不重画——那会把正在编辑的输入框换掉（与数值叶编辑器同一条取舍）。
+  inp.addEventListener('change', () => renderTree());
+  w.appendChild(inp);
+  return w;
+}
+
+function doctrineEditor(leaf) {
+  const box = el('div', { class: 'ship-editor' });
+  box.appendChild(styleField('理智↔热血', '负 = 欺软怕硬（挑威慑比自己低的）；正 = 飞蛾扑火（挑威慑比自己高的）；0 = 基线', leaf.temper, (v) => setStyleAxis(leaf, 'temper', v)));
+  box.appendChild(styleField('护航↔独狼', '负 = 空闲时贴本势力旗舰护航；正 = 独狼（空闲时自行就近接战）；0 = 基线', leaf.lone_wolf, (v) => setStyleAxis(leaf, 'lone_wolf', v)));
+  return box;
+}
+
+function kitingEditor(leaf) {
+  const box = el('div', { class: 'ship-editor' });
+  box.appendChild(styleField('风筝↔贴脸', '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线', leaf.kiting, (v) => setStyleAxis(leaf, 'kiting', v)));
+  return box;
+}
 
 function shipEditor(leaf, node) {
   const edit = el('div', { class: 'ship-editor' });
