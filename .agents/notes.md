@@ -35,18 +35,25 @@
 > 　③ ~~**方案 B「逐舰取值规则与文档对齐」**~~ → **已否决**（[`control-value-rule.md`](notes/control-value-rule.md)：
 > 模型**没有歧义**、不改，只把取值规则写进文档。理由：AI 写的叶就是 `Auto` 那一档的**值存储**，
 > 若让 `Inherit` 不供值，玩家钉的 `Player` 舰队默认会被逐舰 `Auto` 叶压住 ⇒ §8 失效）
-> 　④ 剩下的：风格轴与 `Auto` 设计图的**真执行者**（**进行中** `feature/ai-agency`）＋
-> `military-combat.md` 的 refit（把新图套到老舰上）＋
-> `eras-technology.md` 的时代门控（图库容器已就绪）。
+> 　④ ~~**风格轴与 `Auto` 设计图的真执行者**~~ → `[x]` **已合并**（`feature/ai-agency`）：
+> `autocontrol::style`（风格三轴按战况概率重估）+ `autocontrol::blueprints`（AI 建图/重估/
+> 去重/回收）——**§3.2 那条"风格轴没有执行者"的空头承诺还清**；见 `control-live-layers.md` §16–§18。
+> 剩下的：`military-combat.md` 的 refit（把新图套到老舰上）＋
+> `eras-technology.md` 的时代门控（图库容器已就绪）——**都还等用户裁决**。
 > 每步都要过：`cargo test --workspace` 全绿 + 同 seed `--digest` 比较。
-> ⚠ **基线已换代（2026-10）**：`293725C4…DBC4` 是 v10（设计图）时代的基线，已被**另一个会话**
-> 合进 main 的 `feature/freight-contract`（合并提交 `05fe04f`，雇佣运力市场，
-> `SCHEMA_VERSION` 10 → **13**）**作废**——那是**有意的行为改变**（运输仍在 WIP，用户明说
-> 数值以后再调）。`--seed 42 --round 240 --digest 20` 在 `3b6873a`（freight-contract +
-> 读面/写面对齐 + web 设计图库面板）上的新基线 =
-> `B6F234FB22703C8132C298CE4C0BB2429A3461EF98AE85DC838E23E5451DCB06`（12 行，连跑两次相同）。
-> 核对过：那两条分支**各自**在自己的树上都是 `293725C4…`（行为中性），换代完全来自 freight-contract
-> ——所以别再拿 `293725C4…` 去比新树，那会误报成"某分支改了行为"。
+> ⚠ **基线已换代（2026-10）**：`293725C4…DBC4` 是 v10（设计图）时代的基线，已作废——
+> 三个合并一起把它换掉了：另一个会话的 `feature/freight-contract`（`05fe04f`，雇佣运力市场，
+> `SCHEMA_VERSION` 10 → **13**）＋ 本会话的「读面/写面两侧对齐」`feature/read-face-parity`
+> 与 `feature/web-blueprint-editor`，以及 `feature/ai-agency`（**两个 `Auto` 执行者第一次真动手**）。
+> 这些**都是有意的行为改变**（运输仍在 WIP，用户明说数值以后再调），不是噪声。
+>
+> **当前基线（`main` = `52eb2bf`）**：`--seed 42 --round 240 --digest 20`（只取 `^{` 行、`\n`
+> 连接、UTF-8 无 BOM）=
+> `B6078F7ED778AB13299E9C8B498FDA14BA5E36F1A74BEBD94B163602882BB126`（12 行，连跑两次相同）。
+> 对账用（别拿来比合并后的树）：`freight-contract + 读面/web 两条` 时是 `B6F234FB…CB06`；
+> `ai-agency` 在自己的旧基线上是 `D693E838…9273`。
+> 行为中性的替身（`config/game.ron`）：`autocontrol.style_chance = 0` +
+> `autocontrol.blueprint_themes = []` ⇒ 退回旧行为（`control-live-layers.md` §18.1）。
 > ⚠ §10.4 那个坑（「恢复继承」撤不掉叶里的值）**已解**：方案 A 落地（引擎 + kit + web 三端，
 > 见该篇 §11.1/§11.3）。取值规则本身没动——方案 B 仍留在桌上（§10.4 的表）。
 
