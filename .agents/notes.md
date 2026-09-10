@@ -177,4 +177,6 @@
 - 一键拿故事素材：`planet_x --seed 7 --round 60 --index out/`，再用 `play/planet_xq`
   (`planet_xq.load('out').facts`) 读主流与 `chronicle`（累计编年史按 `(round,id)` 去重）。
 - 纯搬运/拆文件类改动的行为验证：`--seed 42 --round 240 --digest 20` 的 SHA-256 必须逐字节
-  不变（当前基线 `657F2DC9…6665`，取行口径见 [`notes/code-layout.md`](notes/code-layout.md) §3）。
+  不变（取行口径见 [`notes/code-layout.md`](notes/code-layout.md) §3）。
+  **当前基线（`main` = `98c4b70`，重构合并点）**：`657F2DC97901BD612E6F784B97FA10A73EC677C7C4AEBD4B1F17179723576665`
+  （12 行）——与重构**前**（`8b96aef`）逐字节相同，这是「纯搬运」的验收证据。
