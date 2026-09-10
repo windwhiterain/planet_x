@@ -31,12 +31,103 @@ ROUNDS = 400
 MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会空转，得报出来
 
 
+def _named_entities(ev):
+    """每回合「被事件命名过的实体」集合：`(kind, id)` —— 来自 actor / target / extra 三处。
+
+    这是完备性审计的另一半：密集快照说「变了什么」，这里说「引擎自己说了什么原因」。
+    """
+    named: dict[int, set] = {}
+    for r in ev.itertuples(index=False):
+        s = named.setdefault(int(r.round), set())
+        for kc, ic in (("actor_kind", "actor_id"), ("target_kind", "target_id")):
+            k, i = getattr(r, kc), getattr(r, ic)
+            if isinstance(k, str) and isinstance(i, str):
+                s.add((k, i))
+        for p in (r.extra if isinstance(r.extra, list) else []):
+            if isinstance(p, dict) and isinstance(p.get("kind"), str) and isinstance(p.get("id"), str):
+                s.add((p["kind"], p["id"]))
+    return named
+
+
+def reconcile_cities(q, ev):
+    """**城的完备性审计**：密集快照里每一次「归属 / 存亡」变化，都要有事件命名这座城。
+
+    这是「历史能证明自己什么都没丢」的那条证明（Rust 侧 `every_city_state_change_…`）。
+    """
+    named = _named_entities(ev)
+    cities = q.table("cities")[["round", "city_id", "faction_id", "razed"]]
+    prev: dict[str, tuple] = {}
+    checked, unexplained = 0, []
+    for rnd, grp in cities.groupby("round", sort=True):
+        cur = {r.city_id: (r.faction_id or "", bool(r.razed)) for r in grp.itertuples(index=False)}
+        for cid, now in cur.items():
+            was = prev.get(cid)
+            if was is not None and was != now:
+                checked += 1
+                if ("city", cid) not in named.get(int(rnd), ()):
+                    unexplained.append(f"r{int(rnd)} 城 {cid}：{was} → {now}")
+        prev = cur
+    return checked, unexplained
+
+
+def reconcile_ships(q, ev):
+    """**舰的完备性审计**：出现 = 造舰事件、消失 = 死因事件（船表只在活着时写行）。"""
+    ships = q.table("ships")[["round", "ship_id"]]
+    alive: dict[int, set] = {int(r): set(g["ship_id"]) for r, g in ships.groupby("round")}
+
+    def by_type(ty):
+        out: dict[int, set] = {}
+        for r in ev[ev["type"] == ty].itertuples(index=False):
+            if isinstance(r.target_id, str):
+                out.setdefault(int(r.round), set()).add(r.target_id)
+        return out
+
+    dead, born = by_type("ship_destroyed"), by_type("ship_spawned")
+    deaths = births = 0
+    unexplained: list[str] = []
+    for r in range(1, (max(alive) if alive else 0) + 1):
+        prev, cur = alive.get(r - 1, set()), alive.get(r, set())
+        for sid in prev - cur:
+            deaths += 1
+            if sid not in dead.get(r, set()):
+                unexplained.append(f"r{r} 舰 {sid} 消失但没有死因事件")
+        for sid in cur - prev:
+            births += 1
+            if sid not in born.get(r, set()):
+                unexplained.append(f"r{r} 舰 {sid} 出现但没有造舰事件")
+    return deaths, births, unexplained
+
+
+def owner_flips(ev):
+    """**同回合归属翻转不变量**：一个回合内同一座城不能易主两次（净效果为零的振荡）。"""
+    live = ("city_defected", "city_overrun", "colony_founded")
+    flip = ev[ev["type"].isin(live)]
+    bad = [f"r{int(rnd)} 城 {cid} 同回合易主 {len(g)} 次"
+           for (rnd, cid), g in flip.groupby(["round", "target_id"]) if len(g) > 1]
+    return len(flip), bad
+
+
+def headline_check(ev):
+    """**标题必须点到名**：事件命名的每个实体都要逐字出现在 `headline` 里。"""
+    bad, checked = [], 0
+    for r in ev.itertuples(index=False):
+        h = r.headline if isinstance(r.headline, str) else ""
+        parts = [getattr(r, ic) for ic in ("actor_id", "target_id") if isinstance(getattr(r, ic), str)]
+        parts += [p["id"] for p in (r.extra if isinstance(r.extra, list) else [])
+                  if isinstance(p, dict) and isinstance(p.get("id"), str)]
+        for p in parts:
+            checked += 1
+            if p not in h:
+                bad.append(f"r{int(r.round)} {r.type}：标题里没有「{p}」——{h[:60]}")
+    return checked, bad
+
+
 def extract(dirpath):
-    """事件层 + 舰表 + 编年史 → 一份小结（按投影缓存成 pickle）。
+    """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
-    q = KIT.load(str(dirpath), only=("events", "ships"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "cities"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -75,9 +166,19 @@ def extract(dirpath):
         elif pair in open_wars:
             durations.append(rnd - open_wars.pop(pair))
 
+    # ⑤ 完备性审计（Rust 侧 `src/tests/projection/mod.rs` 那两条的同源守卫）。
+    city_checked, city_unexplained = reconcile_cities(q, ev)
+    deaths, births, ship_unexplained = reconcile_ships(q, ev)
+    flips, flip_bad = owner_flips(ev)
+    hl_checked, hl_bad = headline_check(ev)
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
+            "city_checked": city_checked, "city_unexplained": city_unexplained,
+            "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
+            "flips": flips, "flip_bad": flip_bad,
+            "headline_checked": hl_checked, "headline_bad": hl_bad,
             "meta": q.meta}
 
 
@@ -98,8 +199,45 @@ def run(h, ck) -> None:
              f"{tag}：累计 {customized} 舰·回合（舰表 {sum(d['ships'] for d in out)} 行）")
     ck.check("建城事件确实在发（与复垦那条互为对照）", foundings > 0, f"{tag} 共 {foundings} 次建城")
 
+    audit_checks(h, ck, out)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def audit_checks(h, ck, out) -> None:
+    """**投影完备性审计**（`src/tests/projection/mod.rs` 的四条搬过来，样本更宽）。
+
+    它们要证明的是「历史什么都没丢」：密集快照里每一次变化，引擎自己都给得出原因。
+    Rust 版跑 seed 42 / 120 回合；这里跑 3 个种子 × 400 回合（样本大一个量级）。
+    """
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+
+    checked = sum(d["city_checked"] for d in out)
+    bad = [f"seed {s}: {m}" for s, d in zip(SEEDS, out) for m in d["city_unexplained"]]
+    ck.check("城的每次归属/存亡变化都有事件命名它", not bad,
+             "；".join(bad[:3]) or f"{tag}：{checked} 次变化全部有事件解释")
+    ck.check("城审计没有空转（真检查到了变化）", checked >= 20,
+             f"{checked} 次变化（下限 20；Rust 版只要求 5）")
+
+    deaths = sum(d["ship_deaths"] for d in out)
+    births = sum(d["ship_births"] for d in out)
+    sbad = [f"seed {s}: {m}" for s, d in zip(SEEDS, out) for m in d["ship_unexplained"]]
+    ck.check("舰的出现有造舰事件、消失有死因事件", not sbad,
+             "；".join(sbad[:3]) or f"{tag}：{births} 次出生 / {deaths} 次死亡全部有事件解释")
+    ck.check("舰审计没有空转（真的出生过也死过）", deaths >= 5 and births >= 5,
+             f"{births} 次出生 / {deaths} 次死亡")
+
+    flips = sum(d["flips"] for d in out)
+    fbad = [f"seed {s}: {m}" for s, d in zip(SEEDS, out) for m in d["flip_bad"]]
+    ck.check("一回合内同一座城不会易主两次（净效果为零的振荡）", not fbad,
+             "；".join(fbad[:3]) or f"{tag}：{flips} 次活城易主，0 次同回合翻转两遍")
+    ck.check("易主守卫没有空转（真的易主过）", flips >= 5, f"{flips} 次活城易主（下限 5）")
+
+    hl = sum(d["headline_checked"] for d in out)
+    hbad = [f"seed {s}: {m}" for s, d in zip(SEEDS, out) for m in d["headline_bad"]]
+    ck.check("事件的 headline 逐字点到每个参与者（索引指向谁，句子就说谁）", not hbad,
+             "；".join(hbad[:3]) or f"{tag}：{hl} 个实体全部出现在标题里")
+    ck.check("标题守卫没有空转（真的检查了实体）", hl >= 100, f"{hl} 个实体（下限 100）")
 
 
 def story_checks(h, ck, out) -> None:
