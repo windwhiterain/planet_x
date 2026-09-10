@@ -94,6 +94,9 @@ pub mod value {
     pub const GOVERNANCE_COVERAGE: f64 = 1.0;
     /// 人口超载倍率的中性值：未超载。
     pub const GOVERNANCE_SCALE: f64 = 1.0;
+    /// 用工系数的中性值：**不缺人手**（没有用工缺口 ⇒ 不打折）。同上面两个 1.0 的道理——
+    /// 写 0 会被读成「全城没人上工」，那是另一回事。
+    pub const CITY_LABOR: f64 = 1.0;
 }
 
 /// 读面（`RoundView`）每个**叶子字段**的中性值。
@@ -156,6 +159,13 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     ("factions[].freight_paid", Neutral::Zero),
     ("factions[].carrier_income", Neutral::Zero),
     ("factions[].net_import", Neutral::Zero),
+    // ── FactionRow：钱去哪了（B2）──
+    // 「批了多少」是控制面的持久叶（`control` 的 investment_budget/construction_budget），
+    // 不在读面里；这里只有「真花掉的」，所以它的中性值是空 map（不是「没批」）。
+    ("factions[].investment_spent", Neutral::EmptyMap),
+    ("factions[].construction_spent", Neutral::EmptyMap),
+    ("factions[].upkeep_unpaid", Neutral::Zero),
+    ("factions[].fleet_rust", Neutral::Zero),
     // ── CityRow ──
     ("cities[].population", Neutral::ZeroInt),
     ("cities[].loyalty", Neutral::Zero),
@@ -165,6 +175,14 @@ pub const READ_FACE_NEUTRALS: &[(&str, Neutral)] = &[
     ("cities[].loyalty_target.entertainment", Neutral::Zero),
 
     ("cities[].loyalty_target.effective", Neutral::Zero),
+    // ── CityRow：产出与建造的中间量（B2）──
+    // 用工系数的中性值是 **1.0**（不缺人手），不是 0——写 0 会被读成「全城没人上工」。
+    ("cities[].labor", Neutral::One),
+    ("cities[].housing_capacity", Neutral::Zero),
+    ("cities[].is_hub", Neutral::False),
+    ("cities[].build", Neutral::EmptyMap),
+    ("cities[].build[].rate", Neutral::Zero),
+    ("cities[].build[].increment", Neutral::Zero),
 ];
 
 /// 查一个路径的中性值（路径口径见 [`READ_FACE_NEUTRALS`]）。

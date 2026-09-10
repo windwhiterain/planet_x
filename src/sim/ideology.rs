@@ -104,7 +104,7 @@ pub fn step_ideology(state: &mut State, config: &GameConfig, flow: &RoundSink) {
             .get(&name)
             .map(|m| m.iter().map(|(k, v)| v * value_of(k)).sum())
             .unwrap_or(0.0);
-        let upkeep = flow.upkeep.get(&name).copied().unwrap_or(0.0);
+        let upkeep = flow.upkeep.get(&name).map(|u| u.total).unwrap_or(0.0);
         let gov = flow.governance.get(&name).map(|g| g.total).unwrap_or(0.0);
         let net = prod - upkeep - gov;
         // 人均面积（全部定居点面积 / 总人口）

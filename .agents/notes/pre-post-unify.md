@@ -111,4 +111,10 @@ pub struct RoundView {
   `unified-metrics.md` §候选第一条（把治理中间量并入读面，给「帝国为何要崩」的预警）就是 B1。
   → **B1 已经落地**（`feature/step-intermediates-b1`：`view.cities[].loyalty_target` 四项分项 +
   `view.factions[]` 的行政/娱乐拆分、人口超载倍率、思潮忠诚惩罚、`capital` 迁都判据），
-  digest 逐字不变、全档 192 绿——见该篇 **§6.1**。
+  digest 逐字不变、全档 192 绿——见该篇 **§6.1**；B1 的两处形状浪费随后用约定收掉
+  （`feature/capital-decisions`，见 §6.2）。
+  → **B2 也已经落地**（`feature/b2-money`）：`view.factions[]` 的 `investment_spent` /
+  `construction_spent` / `upkeep_unpaid` / `fleet_rust`、`view.cities[]` 的 `labor` /
+  `housing_capacity` / `is_hub` / `build`——同样是**捕获**（不是事后重算），
+  digest 逐字不变、全档 203 绿，见该篇 **§6.3**；「批了多少留在控制面、读面只记已花」那条
+  形状裁决也在那里。

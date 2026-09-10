@@ -101,8 +101,10 @@ Two things worth knowing:
   `view.factions[<faction>]` object (`production`, `production_value`, `upkeep`,
   `governance_cost`, `governance_coverage`, the **B1 governance split** `governance_admin` /
   `governance_entertainment` / `governance_scale` / `ideology_loyalty_penalty` /
-  `capital_loyalty_bonus`, plus the trade terms `freight_paid` / `carrier_income` / `net_import`);
-  the per-city ore output and the **`loyalty_target` object** likewise sit in `view.cities[<city>]`
+  `capital_loyalty_bonus`, the trade terms `freight_paid` / `carrier_income` / `net_import`, and the
+  **B2 money** terms `investment_spent` / `construction_spent` / `upkeep_unpaid` / `fleet_rust`);
+  the per-city ore output, the **`loyalty_target` object** and the **B2 build terms** `labor` /
+  `housing_capacity` / `is_hub` / `build` likewise sit in `view.cities[<city>]`
   (that map skips razed cities, while `city_process` keeps their rows with `production = {}`).
   These tables are the **joinable reshape** of the same numbers (stable dtypes, one row per
   `(round, name)`), which is what you want for pandas work.
@@ -114,6 +116,11 @@ Two things worth knowing:
   relocation (`kind="capital"`) only exists on rounds where something happened
   (`11/12` rounds have no row at all — read `q.view_economy(round, f)["capital"]`, which is `None`
   then, instead of expecting a per-faction object full of `null`s).
+  **③「what was spent」 is in the view, 「what was granted」 is in `control`** (B2): the batch limits
+  are persistent control leaves (`investment_budget` / `construction_budget`, one row per resource in
+  `derived.control`), and the view carries only `investment_spent` / `construction_spent`. Subtract
+  them to get "granted but not spent" — `q.view_spending(round, f)["budget"]` does the join for you.
+  Storing the limit in the view too would be a second copy of the same number.
 - **过程量 — the round's production / upkeep / governance / trade / AI judgments — only exists for
   rounds the engine actually advanced; in `pre` it is 0/empty.** A projection started from a
   checkpoint (`--start ckpt.ron --round 0 --index out/`) therefore puts that checkpoint's **stored
@@ -356,13 +363,14 @@ q.view_loyalty(12, "中国")        # WHY each city's loyalty is dropping (engin
                                #   = 3 per-city columns + the 2 faction-wide ones joined in
 q.view_market(12, "中国")         # my stockpile valued at market prices (per-resource + total)
 q.view_economy(12, "中国")        # production vs upkeep vs governance (+ admin/entertainment split), net flow, coverage
+q.view_spending(12, "中国")       # WHERE THE MONEY WENT: batch − spent per resource, build bottleneck, fleet rust
 q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, indexed by round) — e.g. is it being drained?
 ```
 
 - `view_sitrep` / `view_frontier` / `view_loyalty` / `view_market` / `view_economy` /
-  `resource_series` are all **pure retrieval** — they re-read the round `view` (mostly
-  `view.factions[<faction>]`) / the lazy + derived tables and do trivial arithmetic
-  (`net = production − upkeep − governance`).
+  `view_spending` / `resource_series` are all **pure retrieval** — they re-read the round `view`
+  (mostly `view.factions[<faction>]`) / the lazy + derived tables and do trivial arithmetic
+  (`net = production − upkeep − governance`, `unspent = batch − spent`).
 - `view_loyalty` is the **B1 payoff**: one row per city with the engine's own loyalty-target split —
   `loyalty_target_distance` (too far from the capital, amplified by population overload) and
   `loyalty_target_entertainment` (that city's entertainment budget × governance coverage) per city,
@@ -378,6 +386,22 @@ q.resource_series("中国", "铁")     # my 铁 stockpile over time (monthly, in
   (`production_value − upkeep − governance_cost`), while `net_import` is the engine's own **trade**
   net for the round (bought − sold by market value, `> 0` = net importer) lifted straight out of
   this faction's `view` row.
+- `view_spending` is the **B2 payoff** ("批了钱为什么没花掉 / 造舰慢是缺钱还是缺产能 / 我的船为什么在掉血"):
+  * `budget` — one row per resource, `investment_batch − investment_spent = investment_unspent`
+    (same for `construction_`). The **batch** is a control leaf, the **spent** is a captured
+    mid-step local; the join happens here because the read face deliberately stores only one of them.
+  * `build` — one row per (city, class): `rate` is the capacity ceiling, `increment` the progress
+    actually paid for, and `bottleneck` is the verdict — `money` (the budget ran out: `increment < rate`),
+    `capacity` (money was left over but the shipyard/crew capped it), `idle` (capacity exists and
+    **not one unit of budget reached it**). A class with no row means this city has no shipyard for it.
+  * `upkeep_unpaid` / `fleet_rust` — the maintenance the faction could not pay, and the **hull fraction
+    every ship lost** because of it (`hull_max × fleet_rust`). Rusting to zero is the only case that
+    emits an event, so these two columns are the only place the bleeding is visible.
+    ⚠ `fleet_rust` is **not** `upkeep_unpaid ÷ upkeep`: the engine has a visibility floor (a tiny
+    shortfall still rusts 0.2), so read the column instead of recomputing it.
+    ⚠ `upkeep_unpaid` is *"unpaid **and therefore rusting**"*, not the complement of "what was paid":
+    a landless (exiled) faction is exempt from the stockpile drain, so its `upkeep_unpaid` is `0`
+    even though it pays nothing — don't read `upkeep − upkeep_unpaid` as "what was actually paid".
 - The one thing they deliberately **don't** judge is *"is my commanded build budget sustainable?"*
   — that's `planet_x --control-plan <faction>` (game logic: the upkeep-reserve cap + a dry-run
   `advance`). Python `view_economy` gives the raw process quantities; the verdict comes from Rust.

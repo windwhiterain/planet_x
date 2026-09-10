@@ -204,7 +204,9 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 > **语义视图（纯读取，把模拟算好的打包给你）**：`q.view_sitrep(12)`（世界政治：霸权/联盟/制裁/战争/
 > 实力占比/各势力）；`q.view_frontier(12, "中国")`（我的失稳城，含 sim 算好的 `loyalty`/
 > `gov_distance`/`revolt_risk`）；`q.view_market(12, "中国")`（库存按市场价）；`q.view_economy(12, "中国")`
-> （产/维护/治理/净流/止血标记）；`q.resource_series("中国","铁")`（某资源逐月库存走势，看是否被抽干）。
+> （产/维护/治理/净流/止血标记）；`q.view_spending(12, "中国")`（**钱去哪了**：批了多少 − 花了多少
+> = 没花掉的、造舰是缺钱还是缺产能、每艘舰这个月被锈掉多少船体）；`q.resource_series("中国","铁")`
+> （某资源逐月库存走势，看是否被抽干）。
 > **这些只读、不重算游戏公式**。唯一要「游戏逻辑」判断的
 > ——「我下令的造舰预算可持续吗？」——用 Rust 的 `--control-plan <faction>` 看 `verdict`，
 > 不要在 Python 里自己估。

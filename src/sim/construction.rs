@@ -33,8 +33,16 @@ pub fn step_construction(state: &mut State, config: &GameConfig, rng: &mut Prng,
                 &mut con_spent,
                 &mut next_building_id,
                 rng,
+                flow,
             );
         }
+        // 记录本回合**实际花掉的**投资/建造预算（B2 的中间量，写完即弃的局部变量）。
+        // 批了多少不在这里——限额是控制面的持久叶（`investment_budget`/`construction_budget`，
+        // 上面 `write_budget` 刚写回当回合用的额度），两者相减 = 「批了却没花掉的那部分」。
+        flow.spend.insert(
+            fid.clone(),
+            crate::model::SpendFlow { investment: inv_spent, construction: con_spent },
+        );
     }
     // 威胁响应（整支舰队随威胁重构）：战时把过度生产的「轻舰」船坞按战况重定向到更重/更
     // 需要的舰型，让威胁响应不只作用于新建舰厂。确定性（seeded RNG）。
@@ -71,6 +79,7 @@ pub fn build_city(
     con_spent: &mut ResourceMap,
     next_building_id: &mut BuildingId,
     _rng: &mut Prng,
+    flow: &mut RoundSink,
 ) {
     if state.city(&cid).map(|c| c.razed).unwrap_or(true) {
         return;
@@ -301,6 +310,13 @@ pub fn build_city(
         let launch_blueprint = class_blueprint.get(cls).cloned().flatten();
         let per_progress: Vec<(String, f64)> = spec.build_cost.iter().map(|(rt, c)| (rt.clone(), c / bp)).collect();
         let increment = max_affordable_inc(&per_progress, con_limit, con_spent, *rate).max(0.0);
+        // 记本回合这一舰级的**产能速率上限**与**实得进度**（B2 的中间量）——「造舰慢是缺钱还是缺
+        // 产能」的唯一入口。⚠ **`increment = 0` 也要占位**（本城有建造区、速率摆在那儿、却一分钱
+        // 没批到 = 预算被别人吃光了）；只有「本城根本没这个舰级的建造区」才没有行。
+        flow.city_flow.entry(cid.clone()).or_default().build.insert(
+            cls.clone(),
+            crate::model::BuildLine { rate: *rate, increment },
+        );
         if increment <= 1e-9 {
             continue;
         }

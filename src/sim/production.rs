@@ -136,6 +136,18 @@ pub fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundS
             (population as f64 / staff_req).clamp(config.economy.min_efficiency, 1.0)
         };
 
+        // 记录本回合的**用工系数 / 住房容量 / 是否集散地**（B2 的中间量）：这三个数此前算完就扔，
+        // 而它们正是「这座城产量为什么低 / 人口为什么不涨 / 挖出来的矿为什么用不了」的答案。
+        // ⚠ 记的是**这一步用的**值：`labor` 取的是人口增长**之前**的人口（上面那段才涨），
+        // 事后拿回合末的 state 重算会得到另一个数——建造那一步另算的那把，已经折进
+        // `step_construction` 写的 `build.rate` 里，不在这里存第二份。
+        {
+            let cf = flow.city_flow.entry(cid.clone()).or_default();
+            cf.labor = labor;
+            cf.housing_capacity = housing_capacity;
+            cf.is_hub = is_hub;
+        }
+
         // Mining output.
         for (rt, area) in mines {
             let effective = area.min(deposit_area(&deposits, &rt));
@@ -188,8 +200,9 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
             .map(|s| ship_panel(config, s).upkeep)
             .sum();
-        // 记录本回合舰队维护费（step_upkeep 的「中间量」）。
-        flow.upkeep.insert(fid.clone(), upkeep_total);
+        // 记录本回合舰队维护费（step_upkeep 的「中间量」）。欠费与生锈在下面补进同一格
+        // （「付不起会怎样」和「该付多少」是同一件事的两面，所以只占一个位置）。
+        flow.upkeep.entry(fid.clone()).or_default().total = upkeep_total;
         if upkeep_total <= 1e-9 {
             continue;
         }
@@ -212,9 +225,14 @@ pub fn step_upkeep(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
         }
         // Unpaid upkeep rusts the fleet; hull reaching 0 scrapped.
         let short = (upkeep_total - total_value).max(0.0);
+        // 记「欠了多少」：付不起的那部分（0 = 付清）。它就是生锈的分子。
+        flow.upkeep.entry(fid.clone()).or_default().unpaid = short;
         if short > 1e-9 {
             let frac = (short / upkeep_total).min(1.0);
             let frac = frac.max(0.2); // at least a visible rust when short
+            // 记**实际用的**那个比例（含 0.2 下限）：每艘舰掉的船体 = `hull_max × 这个数`。
+            // 只有锈到 0 才留事件，所以掉血本身只有这一个读法。
+            flow.upkeep.entry(fid.clone()).or_default().rust = frac;
             let mut scrap: Vec<ShipId> = Vec::new();
             for s in state.ships.iter_mut() {
                 if s.faction_id != fid || s.hull <= 0.0 {

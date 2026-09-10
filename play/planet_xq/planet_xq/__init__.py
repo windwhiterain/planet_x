@@ -162,7 +162,14 @@ class PlanetXQ:
         return self.derived("faction_process", round)
 
     def city_process(self, round: int | None = None) -> pd.DataFrame:
-        """每回合每城的**过程量**：开采产出（含已夷平的空白城，`razed` 列筛）。"""
+        """每回合每城的**过程量**：开采产出 + 忠诚目标值分项 + 产出/建造的中间量
+        （含已夷平的空白城，`razed` 列筛）。
+
+        B2 那四列：`labor`（用工系数，**中性值 1.0**，乘在采矿产出与造舰速率上）、
+        `housing_capacity`（人口天花板）、`is_hub`（本城天体是不是首都集散地 ⇒ 产出直进势力池
+        还是先落产地货栈）、`build`（`{舰级: {rate, increment}}`——缺钱还是缺产能，用
+        :meth:`view_spending` 直接读判据）。
+        """
         return self.derived("city_process", round)
 
     def control(self, round: int | None = None) -> pd.DataFrame:
@@ -395,6 +402,83 @@ class PlanetXQ:
             out = out[out["faction_id"] == faction]
         return out.sort_values("loyalty_target_effective")
 
+    def view_spending(self, round: int, faction: str) -> dict:
+        """**「钱去哪了」**（B2）：本回合该势力的预算去向 + 造舰是缺钱还是缺产能 + 舰队为什么掉血。
+
+        三个读面在这里合成一屏（都是引擎算的中间量，Python 只做减法与 join）：
+
+        * `budget`（DataFrame，逐资源）：**批了多少 − 花了多少 = 没花掉的**。
+          限额来自 `derived.control` 的 `investment_budget`/`construction_budget` 叶（引擎每回合把
+          当回合用的额度写回去），已花来自 `view.factions[].investment_spent`/`construction_spent`
+          ——**同一个数不在两个读面各存一份**，所以这里才要 join。
+        * `build`（DataFrame，逐城 × 舰级）：`rate` 是产能上限、`increment` 是实得进度，
+          `bottleneck` 直接给出判据——`money`（钱批光了）/ `capacity`（产能封顶）/ `idle`
+          （有产能却一分钱没批到）/ `-`（进度满仓在等下水）。
+        * `upkeep_unpaid` / `fleet_rust`：付不起的维护费与由此**每艘舰被锈掉的船体比例**
+          （锈到 0 才发事件，所以掉血只有这两个数看得见）。
+
+        示例：``q.view_spending(round=30, faction="中国")["budget"]``。
+        """
+        fm = self._faction_row(round, faction)
+        inv_spent = dict(fm.get("investment_spent", self.neutral("factions[].investment_spent")) or {})
+        con_spent = dict(fm.get("construction_spent", self.neutral("factions[].construction_spent")) or {})
+
+        ctl = self.control(round)
+        def batch(kind: str) -> dict:
+            if ctl is None or ctl.empty or "kind" not in ctl.columns:
+                return {}
+            sel = ctl[(ctl["kind"] == kind) & (ctl["faction_id"] == faction)]
+            return {r["key"]: float(r["value"]) for _, r in sel.iterrows()}
+
+        inv_lim, con_lim = batch("investment_budget"), batch("construction_budget")
+        rows = []
+        for rt in sorted(set(inv_lim) | set(inv_spent) | set(con_lim) | set(con_spent)):
+            row = {"resource": rt}
+            for kind, lim, spent in (("investment", inv_lim, inv_spent), ("construction", con_lim, con_spent)):
+                want = float(lim.get(rt, 0.0))
+                got = float(spent.get(rt, 0.0))
+                row[f"{kind}_batch"] = want
+                row[f"{kind}_spent"] = got
+                row[f"{kind}_unspent"] = want - got
+            rows.append(row)
+        budget = pd.DataFrame(rows)
+
+        # 造舰：每城每舰级的速率与实得进度。判据只用两列比较，不在这里重算引擎公式。
+        cs = self.city_process(round)
+        build = pd.DataFrame()
+        if cs is not None and not cs.empty and "build" in cs.columns:
+            missing = [c for c in ("labor", "housing_capacity", "is_hub", "build") if c not in cs.columns]
+            if missing:
+                raise KeyError(
+                    f"derived.city_process 缺列 {missing}——这份投影是「B2 中间量」之前的构建产出的，"
+                    f"请用当前 planet_x 重新 `--index`"
+                )
+            sel = cs[cs["faction_id"] == faction]
+            recs = []
+            for _, crow in sel.iterrows():
+                for cls, line in (crow["build"] or {}).items():
+                    rate = float(line.get("rate", 0.0))
+                    inc = float(line.get("increment", 0.0))
+                    if inc <= 0.0:
+                        why = "idle"          # 有产能、一分钱没批到
+                    elif inc >= rate - 1e-9:
+                        why = "capacity"      # 顶到产能上限（钱还剩着）
+                    else:
+                        why = "money"         # 钱批光了
+                    recs.append({
+                        "city_id": crow["city_id"], "class": cls,
+                        "rate": rate, "increment": inc, "bottleneck": why,
+                    })
+            build = pd.DataFrame(recs)
+
+        return {
+            "round": round, "faction": faction,
+            "budget": budget,
+            "build": build,
+            "upkeep_unpaid": fm.get("upkeep_unpaid", self.neutral("factions[].upkeep_unpaid")),
+            "fleet_rust": fm.get("fleet_rust", self.neutral("factions[].fleet_rust")),
+        }
+
     def view_market(self, round: int, faction: str) -> dict | None:
         """A faction's stockpile valued at market prices: per-resource amount & value + total.
         Reads ``resources`` (sim stockpile) and the ``meta.resource_value`` table."""
@@ -475,6 +559,16 @@ class PlanetXQ:
             "capital_loyalty_bonus": fm.get(
                 "capital_loyalty_bonus", self.neutral("factions[].capital_loyalty_bonus")
             ),
+            # B2（钱去哪了）：**已花**的预算（缺省从 `schema.json` 取）、付不起的维护费与由此
+            # 每艘舰被锈掉的比例。「批了多少」不在这里——它住在控制面，用 `view_spending()` 相减。
+            "investment_spent": fm.get(
+                "investment_spent", self.neutral("factions[].investment_spent")
+            ),
+            "construction_spent": fm.get(
+                "construction_spent", self.neutral("factions[].construction_spent")
+            ),
+            "upkeep_unpaid": fm.get("upkeep_unpaid", self.neutral("factions[].upkeep_unpaid")),
+            "fleet_rust": fm.get("fleet_rust", self.neutral("factions[].fleet_rust")),
             # 首都评估/迁都是**稀疏判定**（大多数回合 `None`）⇒ 从 derived.decisions 取，不在
             # 每势力一行里。`None` = 这一回合既没评估也没迁。
             "capital": self._capital_decision(round, faction),

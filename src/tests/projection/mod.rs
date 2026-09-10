@@ -740,6 +740,31 @@ fn flow_table_matches_the_derived_record() {
         if row["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
             admin_seen += 1;
         }
+        // B2（钱去哪了）：花掉的投资/建造预算、欠费与生锈比例，逐值必须与视图相同。
+        // ⚠ 这一局只有 8 回合，**不能**在这里要求它们非零（开局那几回合往往真的没花钱）——
+        // 「真的非零」由 `src/tests/sim/spending.rs` 与 60 回合的集成用例钉住。
+        for (col, got, want) in [
+            ("upkeep_unpaid", row["upkeep_unpaid"].as_f64().unwrap(),
+             expect_row.map(|r| r.upkeep_unpaid).unwrap_or(0.0)),
+            ("fleet_rust", row["fleet_rust"].as_f64().unwrap(),
+             expect_row.map(|r| r.fleet_rust).unwrap_or(0.0)),
+        ] {
+            assert_eq!(got, want, "{fid} 的 {col} 与视图不一致（读了两个不同的数）");
+        }
+        let want_spend = (
+            expect_row.map(|r| r.investment_spent.clone()).unwrap_or_default(),
+            expect_row.map(|r| r.construction_spent.clone()).unwrap_or_default(),
+        );
+        for (col, got, want) in [
+            ("investment_spent", row["investment_spent"].clone(), want_spend.0.clone()),
+            ("construction_spent", row["construction_spent"].clone(), want_spend.1.clone()),
+        ] {
+            assert_eq!(
+                got,
+                serde_json::to_value(&want).unwrap(),
+                "{fid} 的 {col} 与视图不一致（读了两个不同的数）"
+            );
+        }
         checked += 1;
     }
     assert!(checked >= 2, "只检查了 {checked} 个势力的过程量行——守卫太空");
@@ -773,6 +798,32 @@ fn flow_table_matches_the_derived_record() {
         if want_eff > 0.0 {
             targets_seen += 1;
         }
+        // B2：产出与建造的中间量（平铺列 vs 视图里的嵌套对象）也必须同源。
+        let crow = outcome.post.cities.get(cid);
+        assert_eq!(
+            row["labor"].as_f64().unwrap(),
+            crow.map(|r| r.labor).unwrap_or(1.0),
+            "{cid} 的用工系数不一致"
+        );
+        assert!(
+            row["labor"].as_f64().unwrap() > 0.0,
+            "{cid}: 用工系数不该是 0（中性值是 1.0，见 schema 的 neutral 段）"
+        );
+        assert_eq!(
+            row["housing_capacity"].as_f64().unwrap(),
+            crow.map(|r| r.housing_capacity).unwrap_or(0.0),
+            "{cid} 的住房容量不一致"
+        );
+        assert_eq!(
+            row["is_hub"],
+            serde_json::to_value(crow.map(|r| r.is_hub).unwrap_or(false)).unwrap(),
+            "{cid} 的集散地标记不一致"
+        );
+        assert_eq!(
+            row["build"],
+            serde_json::to_value(crow.map(|r| r.build.clone()).unwrap_or_default()).unwrap(),
+            "{cid} 的造舰进度不一致"
+        );
     }
     assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——新的列等于空转");
 }

@@ -61,5 +61,8 @@
   `step_governance` **本来就在算的**那几个中间量捕获下来（`view.cities[].loyalty_target` /
   `view.factions[]` 的 `governance_admin|entertainment|scale|ideology_loyalty_penalty` + `capital`）——
   「与模拟逐字一致」而不是「事后重算一遍」。见该篇 §6.1。
+  **B2（钱去哪了）也已落地**（`feature/b2-money`）：同一手法的第二站——各势力**实际花掉**的投资/建造
+  预算、欠付维护费与生锈比例，各城的用工系数/住房容量/集散地标记/每舰级造舰进度，全部由
+  `step_production` / `step_upkeep` / `step_construction` 自己写进 `RoundSink`。见该篇 §6.3。
 - `[ ]` Web（玩家界面）要不要共享 `observe` 折出来的那份视图（现在刻意不动它）——若玩家也想要
   「世界一目了然的概览面板」可复用，但形状是面向玩家，另行设计。

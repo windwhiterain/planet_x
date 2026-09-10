@@ -236,7 +236,7 @@ fn ideology_economy_bad_drives_toward_populism_and_stays_bounded() {
 
     // 经济转负：净流 = 产出(0) − 维护(100) − 治理(0) < 0 → 人民（民粹反弹）。
     let mut flow = RoundSink::default();
-    flow.upkeep.insert(fname.clone(), 100.0);
+    flow.upkeep.entry(fname.clone()).or_default().total = 100.0;
     step_ideology(&mut state, &config, &flow);
 
     let after = state.faction(&fname).unwrap().ideology.people_elite;

@@ -142,6 +142,19 @@ fn derived_matches_the_projection_for_the_same_round() {
         ] {
             assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
         }
+        // B2（钱去哪了）：花掉的投资/建造预算、欠付维护费与生锈比例也必须跨进程逐值相同。
+        // ⚠ 「批了多少」**不在**这一行里——限额是控制面的持久叶（join `derived.control` 的
+        // `kind='investment_budget'`/`'construction_budget'`），两份相减才是「没花掉的」。
+        // 这条守卫管的是「已花」那一半；它是否**真的非零**由 `src/tests/sim/spending.rs` 钉
+        // （那里跑 8 回合，确保真有花钱的回合），这里只保证两个读面给同一个数。
+        for col in [
+            "investment_spent",
+            "construction_spent",
+            "upkeep_unpaid",
+            "fleet_rust",
+        ] {
+            assert_eq!(row[col], expect[col], "{fid} 的 {col} 两个读面不一致");
+        }
         if expect["governance_admin"].as_f64().unwrap_or(0.0) > 0.0 {
             admin_seen += 1;
         }
@@ -175,6 +188,7 @@ fn derived_matches_the_projection_for_the_same_round() {
         .collect();
     assert!(!with_prod.is_empty(), "最后一回合没有任何带产出的城行");
     let mut targets_seen = 0usize;
+    let mut hubs_seen = false;
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
         assert_eq!(
@@ -194,8 +208,27 @@ fn derived_matches_the_projection_for_the_same_round() {
         if lt["effective"].as_f64().unwrap_or(0.0) > 0.0 {
             targets_seen += 1;
         }
+        // B2：产出与建造的中间量——用工系数 / 住房容量 / 是否集散地 / 每舰级造舰进度
+        // （`build` 是嵌套对象：平铺列里就是它本身，逐值相同）。
+        let b2 = &v["post"]["cities"][cid];
+        assert_eq!(row["labor"], b2["labor"], "{cid} 的用工系数两个读面不一致");
+        assert_eq!(
+            row["housing_capacity"], b2["housing_capacity"],
+            "{cid} 的住房容量两个读面不一致"
+        );
+        assert_eq!(row["is_hub"], b2["is_hub"], "{cid} 的集散地标记两个读面不一致");
+        assert_eq!(row["build"], b2["build"], "{cid} 的造舰进度两个读面不一致");
+        // 中性值约定：用工系数**永远不该是 0**（0 会被读成「全城没人上工」，中性值是 1.0）。
+        assert!(
+            row["labor"].as_f64().unwrap_or(0.0) > 0.0,
+            "{cid}: 用工系数落到了 0——中性值约定被破坏了（应为 1.0 起步）"
+        );
+        let hubs_seen_here = row["is_hub"] == serde_json::json!(true);
+        hubs_seen |= hubs_seen_here;
     }
     assert!(targets_seen >= 1, "没有任何城报出忠诚目标值——B1 那几列等于空转");
+    // 集散地至少要有真的一处（否则「产出直进势力池」这条路永远是 false，列等于空转）。
+    assert!(hubs_seen, "没有任何城被标成集散地（首都）——`is_hub` 那列等于空转");
 
     // 6) 控制面表也要在（读面即写面的 tidy 版），并且 join 列真的存在于主流。
     for table in ["control", "scope"] {
@@ -380,5 +413,27 @@ fn decisions_table_matches_the_derived_record() {
         order_rows.len() >= 4,
         "最后一回合的逐舰判定只有 {} 条——守卫太空",
         order_rows.len()
+    );
+
+    // B2 的防空转：**整局**（60 回合）里必须真的花过钱、也真的有过造舰进度行——
+    // 否则上面那几列只是「空表比空表」，跨进程相等毫无意义。范围取整局的理由同上：
+    // 某一回合有没有在建的东西取决于当回合的态势，钉死单帧会随轨迹漂移而翻车。
+    let faction_all = derived_rows_all(&out, "faction_process");
+    let spend_seen = faction_all.iter().any(|r| {
+        ["investment_spent", "construction_spent"].iter().any(|k| {
+            r[*k].as_object().map(|o| o.values().any(|v| v.as_f64().unwrap_or(0.0) > 0.0)).unwrap_or(false)
+        })
+    });
+    assert!(spend_seen, "seed 7 的前 60 回合里应当真的花过钱（投资或造舰）——B2 那几列等于空转");
+    let city_all = derived_rows_all(&out, "city_process");
+    let lines_seen = city_all
+        .iter()
+        .any(|r| r["build"].as_object().map(|o| !o.is_empty()).unwrap_or(false));
+    assert!(lines_seen, "没有任何城报出造舰进度行——`build` 那列等于空转");
+    let rust_seen = faction_all.iter().any(|r| r["fleet_rust"].as_f64().unwrap_or(0.0) > 0.0);
+    let unpaid_seen = faction_all.iter().any(|r| r["upkeep_unpaid"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(
+        rust_seen && unpaid_seen,
+        "这 60 回合里应当至少有一家付不起维护费（欠费与生锈两列一起才说明它真的在发生）"
     );
 }

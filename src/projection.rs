@@ -684,6 +684,13 @@ fn write_round(
                 // B1 的另两个「按势力算一次」的量：首都向心项（它和上面的思潮惩罚一起，
                 // 构成每座城忠诚目标式里的全国项——城表不重复它们）。
                 "capital_loyalty_bonus": row.map(|r| r.capital_loyalty_bonus).unwrap_or(0.0),
+                // B2：钱去哪了。**只发「真花掉的」与「没付起的」**——批了多少是控制面的持久叶
+                // （`derived.control` 的 `investment_budget`/`construction_budget`），相减即得
+                // 没花掉的部分，同一个数不在两个读面各存一份。
+                "investment_spent": row.map(|r| r.investment_spent.clone()).unwrap_or_default(),
+                "construction_spent": row.map(|r| r.construction_spent.clone()).unwrap_or_default(),
+                "upkeep_unpaid": row.map(|r| r.upkeep_unpaid).unwrap_or(0.0),
+                "fleet_rust": row.map(|r| r.fleet_rust).unwrap_or(0.0),
             })
         )
         .map_err(|e| e.to_string())?;
@@ -697,6 +704,14 @@ fn write_round(
         // ⚠ 只平铺**逐城不同**的三项：另两项（首都向心项、思潮惩罚）按势力算一次，在
         // `faction_process` 的 `capital_loyalty_bonus` / `ideology_loyalty_penalty` 里。
         let lt = crow.map(|r| r.loyalty_target.clone()).unwrap_or_default();
+        // B2：产出与建造的中间量（用工系数 / 住房容量 / 是否集散地 / 每舰级造舰进度）。
+        // 用工系数的缺省走**具名常量 1.0**（不缺人手），与 `view.cities[].labor` 同源。
+        let labor = crow
+            .map(|r| r.labor)
+            .unwrap_or(crate::model::neutral::value::CITY_LABOR);
+        let housing_capacity = crow.map(|r| r.housing_capacity).unwrap_or(0.0);
+        let is_hub = crow.map(|r| r.is_hub).unwrap_or(false);
+        let build = crow.map(|r| r.build.clone()).unwrap_or_default();
         writeln!(
             w.city_process,
             "{}",
@@ -710,6 +725,11 @@ fn write_round(
                 "loyalty_target_effective": lt.effective,
                 "loyalty_target_distance": lt.distance,
                 "loyalty_target_entertainment": lt.entertainment,
+                "labor": labor,
+                "housing_capacity": housing_capacity,
+                "is_hub": is_hub,
+                // 每舰级一行 {rate, increment}（稀疏：本城有这个舰级的建造区才有键）。
+                "build": build,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -1241,8 +1261,8 @@ pub fn projection_schema() -> serde_json::Value {
         let entry = match t.name {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。",
-                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number"},
+                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='investment_budget'`/`'construction_budget'`）。",
+                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number"},
                 "column_docs": {
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
@@ -1253,17 +1273,25 @@ pub fn projection_schema() -> serde_json::Value {
                     "governance_scale": "**人口超载放大倍率** = `1 + max(0, 人口 ÷ 管理容量 − 1)`，同时乘在行政开销与每座城的忠诚距离项上。**中性缺省 1.0**（不是 0：缺的是「没有账」，不是「治理能力归零」）——同 `governance_coverage` 的缺省约定，零城势力因此不会被读成崩溃。",
                     "ideology_loyalty_penalty": "本回合**思潮优势端自平衡**的忠诚惩罚（0..`max_loyalty_penalty`）：身处垄断优势端思潮却言行不符时的扣分（军国却不打仗、科学却不探异常区）。**按势力算一次**——它是每座城忠诚目标式里的扣项，但只在这里存一份（城表不重复它）。",
                     "capital_loyalty_bonus": "本回合**首都向心项** = 首都人口占全势力比例 × `capital_share_loyalty_buff`。**按势力算一次**（城表不重复它）：城表那三列 + 本列 − `ideology_loyalty_penalty`，clamp 到 0..1 就是那座城的 `loyalty_target_effective`。把首都放在人口中心有真实收益，迁都则要付忠诚代价。",
+                    "investment_spent": "本回合**实际花掉**的投资（建设建筑）预算，按资源（resource → 数量，只列真花过的 ⇒ 可能是 `{}`）。**批了多少不在这里**：限额是控制面的持久叶 —— join `derived.control` 的 `kind='investment_budget'`（每资源一行，引擎每回合写回当回合用的额度）。**「批了 100 铁为何只花 30」= 限额 − 本列**。这些钱写完即弃（既不落状态也没有别的读法）。",
+                    "construction_spent": "本回合**实际花掉**的建造（造舰）预算，按资源——语义同 `investment_spent`（限额 join `kind='construction_budget'`）。⚠ 它是**进度预付款**：钱按 `build_cost ÷ build_points × 进度增量` 付，付了不等于下水（下水还要另外付组件钱，见 `derived.decisions` 的 `kind='ship_order'`）。",
+                    "upkeep_unpaid": "本回合**付不起**的那部分舰队维护费（市场价值 = `max(0, 维护费 − 库存价值)`）；0 = 付清。分子有了，看 `fleet_rust` 知道后果。⚠ 它是「**欠费并因此生锈**的那部分」，不是「付了多少」的反面：**流亡舰队**（无活城，被豁免抽库存）与零舰队势力这里同样是 0——所以别拿 `upkeep − 本列` 当「实际付出去的钱」。",
+                    "fleet_rust": "本回合**每艘舰被锈掉的船体比例**：该舰本回合掉的船体 = `hull_max × 本列`。**欠费拆船只有锈到 0 才发事件**（`ship_destroyed`，`cause=upkeep_shortfall`），所以「我的船为什么一直在掉血」只能靠这一列。⚠ 它不是「欠费比例」：引擎有可见性下限（欠一丁点也至少锈 0.2），欠得少时本列反而**大于** `upkeep_unpaid ÷ upkeep` —— 读这一列，别自己按欠费比例重算。",
                 },
             }),
             "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项**，按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
-                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number"},
+                "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项** + **产出与建造的中间量**（用工系数 / 住房容量 / 是否集散地 / 每舰级造舰速率与实得进度），按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
+                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","labor":"number","housing_capacity":"number","is_hub":"boolean","build":"object"},
                 "column_docs": {
                     "loyalty_target_effective": "本回合这座城的**忠诚目标值**（0..1）：实际忠诚每回合朝它恢复（治理覆盖得住时），覆盖不住则改用欠费惩罚。所以「忠诚在掉」= 它低。「为什么低」看下面四列。",
                     "loyalty_target_distance": "距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`。越远的城越低——这是「帝国太大管不住」的第一来源。",
                     "loyalty_target_entertainment": "娱乐/福利项：`本城娱乐预算 × 治理覆盖率 ÷ entertainment_cost`。**乘了覆盖率**：批了预算但治理没到位，这部分不落地（`coverage < 1` 时同一笔钱打折进忠诚）。",
                     "⚠ 全国项不在本表": "忠诚目标式里的另外两项——首都向心项与思潮优势端惩罚——**按势力算一次**，所以在 `faction_process` 的 `capital_loyalty_bonus` / `ideology_loyalty_penalty` 里（join 键 = `faction_id`）。同一个数只存一个位置：城表只放逐城不同的三项。",
+                    "labor": "本回合的**用工系数** = `人口 ÷ 建筑用工需求`，钳到 `[min_efficiency, 1]`——直接乘在采矿产出与造舰速率上。「这座城产量低」= 人手不足（人口→劳力的传导点）。**中性缺省 1.0**（不缺人手），不是 0：写 0 会被读成「全城没人上工」。⚠ 它是**生产那一步**用的数（人口增长**之前**取的人口）；建造那一步另算的那把已经折进 `build.<舰级>.rate`，所以本表不存第二份。",
+                    "housing_capacity": "本回合的**住房容量** = `住宅面积 × 该天体生态容量`——人口增长的**天花板**（人口每回合朝它涨）。「为什么人口不涨了、产出提不上去」的答案就在这里。0 = 这一回合没算（或这座城真的一点住宅都没有）。",
+                    "is_hub": "本城天体是不是本势力的**首都**（集散地）：true ⇒ 产出**直进势力池**；false ⇒ 先落**产地货栈**等船运。`production` 列只记**开采量**、不分入库路径，所以「我挖出来的矿为什么用不了」看这一列。⚠ `pre` 面里它是 `false`（这个月的入库路径还没定）：要读「此刻谁是集散地」别用 `pre`——拿 `derived.control` 的 `kind='capital'` 叶与城的 `body_id` 比。",
+                    "build": "本回合**造舰**的每舰级数：`{舰级: {rate, increment}}`。`rate` = 该舰级的产能速率上限（各建造区面积 × 生产率 × 用工系数之和），`increment` = 实得进度。**`increment < rate` ⇒ 钱是瓶颈**（建造预算批光了）；**`increment ≈ rate` ⇒ 产能封顶**（预算还有，是船坞/人手不够）。稀疏：**本城有这个舰级的建造区才有键**——有键而 `increment = 0` 是有效的一格（有产能却一分钱没批到）。进度池按**舰级**合并（`cities.ship_progress`），所以同城两张同舰级的图共用一行。",
                 },
             }),
             "control" => json!({

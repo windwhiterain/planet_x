@@ -1,7 +1,7 @@
 # Step 中间量清单：36 条「算完就扔」的量
 
-> 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）；B2–B5 仍是候选，
-> 一行代码都还没写。
+> 状态 `[~]` **B1（治理/忠诚）已落地**（`feature/step-intermediates-b1`，见 §6.1）、
+> **B2（钱去哪了）已落地**（`feature/b2-money`，见 §6.3）；B3–B5 仍是候选，一行代码都还没写。
 > 相关：[`pre-post-unify.md`](pre-post-unify.md) §5（本篇是那一条的展开）、
 > [`unified-metrics.md`](unified-metrics.md)（上一次「总结 = 步进中间量」的合并；它的「候选」第一条
 > 就是本篇的 **B1**）、[`engine-data-plane.md`](engine-data-plane.md) §7.4（`pre` 面的真相 = 本篇 **B5**
@@ -38,7 +38,7 @@
 
 ## 2. A 组 · 经济与治理（12 条）
 
-> **`✅B1` = 已在 B1 批落地**（字段形状与实测见 §6.1）；其余仍是候选。
+> **`✅B1` = 已在 B1 批落地**、**`✅B2` = 已在 B2 批落地**（字段形状与实测见 §6.1 / §6.3）；其余仍是候选。
 
 | `文件:行号` | 量 | 粒度 | 骰子 | 它能回答什么问题 |
 | --- | --- | --- | --- | --- |
@@ -46,12 +46,12 @@
 | ✅B1 `sim/governance.rs:209` | `ideo_penalty`（`ideology_loyalty_debuff`：`viol_mil/sci/elite/col`） | 每势力 | 无 | 「优势端思潮 vs 行为不符」扣的**全国**忠诚惩罚——为何全国忠诚一起掉（军国却不打仗、科学却不探 MOND）。⚠ 盘点时写的「`faction_ideology_debuffs`（`:129`）全仓库零调用者」**是错的**：`tests/horizon_long.rs:710` 的探针在用（每个 150 回合打印一次），漏判因为当时只 grep 了 `src/`。它不是读面的一部分，所以 B1 之前只有那条探针看得见这个数 |
 | ✅B1 `sim/governance.rs:173-178` | `total_admin` vs `ent_total`（行政 vs 娱乐拆分） | 每势力 | 无 | 「钱没花在我想的地方」：娱乐预算拉满却被行政（距离 × 人口超载）吃掉。B1 之前只捕获了合计 |
 | ✅B1 `sim/governance.rs:171-172` | `overload` / `scale = 1.0 + overload` | 每势力 | 无 | 人口超管理容量后**放大所有远距离城**的治理费与忠诚惩罚——「为什么治理费比上回合暴涨」 |
-| `sim/production.rs:133` | `labor`（= `labor_ratio`；`sim/construction.rs:95` 用的是**同一把尺**） | 每城 | 无 | 人口 / 建筑用工之比，直接乘在采矿产出上——「为什么这座城产量低」= 人手不足（人口→劳力的传导点） |
-| `sim/production.rs:91` | `is_hub` | 每城 | 无 | 产出**直进势力池**还是**先落产地货栈等船运**——「我挖出来的矿为什么用不了」。`view.cities[].production` 明确只记开采量、不分入库路径 |
-| `sim/production.rs:121` | `housing_capacity`（+ `:103 housing_area`） | 每城 | 无 | 人口增长的**住房天花板**——「为什么人口不涨了、产出提不上去」= 住宅面积 × 生态容量封顶 |
-| `sim/production.rs:214,216` | `short` / `frac`（`:217` 的 `.max(0.2)`；每舰 `hull_max*frac` @`:223`） | 每势力（落到每舰 hull） | 无 | 付不起维护费时舰队**按比例生锈**——「为什么我的船在掉血」。只有锈到 0 才留 `DeathCause::UpkeepShortfall` 事件，**掉血本身零记录** |
-| `sim/construction.rs:20-21` | `inv_spent` / `con_spent`（对比 `investment`/`construction` 限额；写入点 `:218`、`:308`） | 每势力（按资源） | 无（该 step 的 rng 只被 `retool_shipyards`/`design_fleets` 消费） | 本回合**实际花掉的**投资/建造预算——「批了 100 铁为何只花 30」。限额是持久 control 叶（可见），已花量是纯局部变量（写完即弃） |
-| `sim/construction.rs:303` | `increment`（+ `:267-272 class_rate`/`class_weight`） | 每城（按舰级） | 无 | 该舰级本回合**实得建造进度** vs 产能速率上限——造舰慢是缺钱还是缺产能；哪个舰级在抢同一笔建造预算 |
+| ✅B2 `sim/production.rs:133` | `labor`（= `labor_ratio`；`sim/construction.rs:95` 用的是**同一把尺**） | 每城 | 无 | 人口 / 建筑用工之比，直接乘在采矿产出上——「为什么这座城产量低」= 人手不足（人口→劳力的传导点）。⚠ 已落地的是**生产那一步**用的那把（人口增长**之前**）；建造那一步另算的那把折进了 `build.<舰级>.rate`，读面不存第二份 |
+| ✅B2 `sim/production.rs:91` | `is_hub` | 每城 | 无 | 产出**直进势力池**还是**先落产地货栈等船运**——「我挖出来的矿为什么用不了」。`view.cities[].production` 明确只记开采量、不分入库路径 |
+| ✅B2 `sim/production.rs:121` | `housing_capacity`（+ `:103 housing_area`） | 每城 | 无 | 人口增长的**住房天花板**——「为什么人口不涨了、产出提不上去」= 住宅面积 × 生态容量封顶 |
+| ✅B2 `sim/production.rs:214,216` | `short` / `frac`（`:217` 的 `.max(0.2)`；每舰 `hull_max*frac` @`:223`） | 每势力（落到每舰 hull） | 无 | 付不起维护费时舰队**按比例生锈**——「为什么我的船在掉血」。只有锈到 0 才留 `DeathCause::UpkeepShortfall` 事件，**掉血本身零记录** |
+| ✅B2 `sim/construction.rs:20-21` | `inv_spent` / `con_spent`（对比 `investment`/`construction` 限额；写入点 `:218`、`:308`） | 每势力（按资源） | 无（该 step 的 rng 只被 `retool_shipyards`/`design_fleets` 消费） | 本回合**实际花掉的**投资/建造预算——「批了 100 铁为何只花 30」。限额是持久 control 叶（可见），已花量是纯局部变量（写完即弃）⇒ 读面只记已花，**相减**才是没花掉的 |
+| ✅B2 `sim/construction.rs:303` | `increment`（+ `:267-272 class_rate`/`class_weight`） | 每城（按舰级） | 无 | 该舰级本回合**实得建造进度** vs 产能速率上限——造舰慢是缺钱还是缺产能；哪个舰级在抢同一笔建造预算。`class_weight` **不捕获**（它是 AI 写进 `control.build_weight` 的输入，不是丢失量） |
 | ✅B1 `sim/capital.rs:47-48` | `cur_cost` / `best_cost`（+ `:45 best`） | 每势力 | 无 | **迁都判据数字**：新旧首都的「总治理距离成本」各是多少、候选城是谁。事件 `CapitalRelocated` 只带 `reason` 字符串，**不带数字** |
 | ✅B1 `sim/capital.rs:60-61` | `old_share` / `loyalty_cost` | 每势力 | 无 | 迁都当回合对**全国每座城**的忠诚扣减及其来源（旧首都人口占比）——「为什么迁都以后忠诚集体掉了一截」 |
 
@@ -103,12 +103,14 @@
   A 组 `target_eff` 分项 / `inv_spent` / `con_spent` / `increment` / `cur_cost` / `best_cost` / `old_share` /
   `short`；B 组 `p_eff` / `loss` / `HaulStep` / `capacity_ledger`；C 组 `hit` / `build_fire_plan` /
   `doctrine_weight` / `armor_soak` / `pd`。**这批是捕获的主要理由**——它们是「唯一真相」而不是
-  「另一个副本」。
+  「另一个副本」。（A 组这八条**已全部落地**：B1 收前五条、B2 收后三条。）
 * **乙 · 不持久、但可从回合末 state 重算 ⇒ 捕获的收益是「与引擎逐字一致」**（不必额外维护一条公式）：
   A 组 `ideo_penalty` / 行政娱乐拆分 / `overload` / `labor` / `is_hub` / `housing_capacity`；
   B 组购买力序位 / 禁运三档 / 合同四闸门 / 单次导航成功率；C 组思潮 target / `war_scar_floor` / `aff` /
   `deterrence` / `kiting_dest` / 集体安全级联。
   照 [`unified-metrics.md`](unified-metrics.md) 的老规矩（**总结不该被独立重算一遍**），这批也归引擎。
+  ⚠ **B2 实测发现这批里有两条连「重算」都不成立**：`labor` 取的是人口增长**之前**的人口、
+  `is_hub` 取决于**本回合中途**的迁都/易主 ⇒ 回合末重算会给出另一个数。所以它们其实是**甲**。
 * **丙 · 吃骰子 ⇒ 读面看不到「掷了什么」**：C7（主 `Prng` 洗牌）、C13（主 `Prng` 噪声），
   加上 B 组 6 条 `derived_roll` 判定（`role` / `route` / `gate` / `accept` / `pick` / 派工退约）。
   **这一批必须进 `pre` 面**（B5）。
@@ -118,7 +120,7 @@
 | 批 | 内容 | 为什么这个顺序 | 是否要动 `advance` 返回值 |
 | --- | --- | --- | --- |
 | ✅ **B1** 治理/忠诚（**已落地**，见 §6.1） | A 组 `target_eff` 分项、`ideo_penalty`、行政 vs 娱乐拆分、`overload`、迁都判据（`cur_cost`/`best_cost` + `old_share`/`loyalty_cost`） | `unified-metrics.md` 候选第一条；「帝国为何要崩」的预警面；全是确定性、粒度天然对齐「每城一行 / 每势力一行」 | 否 |
-| **B2** 钱去哪了 | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
+| ✅ **B2** 钱去哪了（**已落地**，见 §6.3） | A 组 `inv_spent`/`con_spent`、`increment`/`class_rate`、生锈 `frac`、`labor`、`housing_capacity`、`is_hub` | 回答「批了为什么没花」；`FactionRow`/`CityRow` 各加几列即可 | 否 |
 | **B3** 市场与运输 | B 组 12 条里的**确定性 6 条**（`p_eff` 分解、丢货、购买力序位、禁运三档、`HaulStep`、`capacity_ledger`） | `HaulStep` 是「货为什么没运回来」的唯一入口（连事件都没有）；`capacity_ledger` 补上「挂单数量从哪来」 | 否 |
 | **B4** 战斗 | C 组 `hit`、`armor_soak`、`pd`、`deterrence` + 索敌计划（`build_fire_plan` / `doctrine_weight`） | 玩家最想要的一批（「为什么我打不中」），**但粒度最麻烦**——见 §7 Q1 | 否 |
 | **B5** `pre` 面 | C7 洗牌顺序、C13 关系噪声、B 组 6 条 `derived_roll` 判定（含合同三闸门、派单、定编） | 唯一一批**必须**改 `advance`：让它同时产出「AI 看到/掷出了什么」 | **是** |
@@ -190,6 +192,62 @@ effective = clamp(distance + entertainment
 3653 → **1908 B/行**。`SCHEMA_VERSION` 15 → 16；`idx/decisions.jsonl` 多一类 `kind="capital"` 行；
 `faction_process` 多一列 `capital_loyalty_bonus`，`city_process` 少两列。
 验收：digest **仍逐字不变**、全档 **198 绿**、kit 端到端勾稽通过。
+
+### 6.3 B2 落地记录（`feature/b2-money`，全部实测）
+
+**读面新增 8 个字段**（`RoundView`，`pre`/`post` 同形；中性值全部在 `model::neutral` 声明）：
+
+| 位置 | 新字段 | 中性值 | 它回答什么 |
+| --- | --- | --- | --- |
+| `factions[]` | `investment_spent` / `construction_spent` | `{}` | 本回合**真花掉**的投资/建造预算，按资源（写完即弃的局部变量） |
+| `factions[]` | `upkeep_unpaid` | `0.0` | 付不起的那部分维护费（= 生锈的分子） |
+| `factions[]` | `fleet_rust` | `0.0` | 每艘舰被锈掉的**船体比例**（`hull_max × 它`；锈到 0 才发事件） |
+| `cities[]` | `labor` | **`1.0`** | 用工系数（人口 ÷ 用工需求）——产量为什么低 |
+| `cities[]` | `housing_capacity` | `0.0` | 住房天花板（住宅面积 × 生态容量）——人口为什么不涨 |
+| `cities[]` | `is_hub` | `false` | 本城天体是不是首都集散地（产出直进势力池 vs 先落产地货栈） |
+| `cities[]` | `build`（`{舰级: {rate, increment}}`） | `{}` | 造舰是**缺钱**还是**缺产能** |
+
+**一条形状裁决（与 B1 的「同一个数只有一个位置」同源）**：「**批了多少**」不进读面。
+限额是控制面的**持久叶**（`control` 的 `investment_budget`/`construction_budget`，`write_budget`
+每回合把当回合用的额度写回去、已摊在 `derived.control` 表里），所以读面只记「已花」，
+**两者相减** = 「批了却没花掉」。存第三个数（余额）就是第二个副本。这条 join 写进了
+`schema.json` 的列说明，也有测试钉着（`spent_never_exceeds_the_batch_and_the_gap_is_the_unspent_part`）。
+
+**中性值里最容易被改错的两个**（都进了 `PROCESS_PATHS` 守卫）：
+用工系数的中性值是 **1.0**（不缺人手）而不是 0（那会被读成「全城没人上工」）；
+`is_hub` 在 `pre` 里是 `false`（这个月的入库路径还没定），**不是**「它不是首都」——
+要读「此刻谁是集散地」得拿 `control` 的 `capital` 叶比 `body_id`。
+
+**体积账**（同口径 `--seed 7 --round 6`，7 行，`main.jsonl` 文件字节；字段级含键名）：
+
+| 量 | B1（`29cb1d1`） | B2 | 说明 |
+| --- | --- | --- | --- |
+| `main.jsonl` | 15652 B/行 | **18662 B/行**（+19.2%） | 整行含转义 |
+| B2 新增合计 | — | **+2993 B/行** | 城侧 +2061、势力侧 +932 |
+| `cities[].build` | — | 920 B/行（41.8 B/值，69% 有值） | B2 里最贵的一项（逐城 × 舰级两个全精度浮点） |
+| `cities[].housing_capacity` | — | 554 B/行 | |
+| `factions[].construction_spent` | — | 352 B/行 | |
+| `cities[].is_hub` | — | 323 B/行（67% 是 `false`） | |
+| `cities[].labor` | — | 264 B/行 | |
+| `factions[].investment_spent` | — | 229 B/行 | |
+| `factions[].upkeep_unpaid` / `fleet_rust` | — | 189 / 162 B/行 | |
+
+**新读面顺手量出来的一件事**（不是 B2 引入的，是它第一次看得见）：`--seed 7` 的 r30 上，
+中国的**投资预算 41 铁批了、花 0**，而**造舰预算只剩 0.02 铁**——`read_budget` 的
+「维护费保留」（`upkeep_reserve_mult`）把库存吃到只剩零头，于是 4 个建造区里 3 个是
+`idle`（有产能、一分钱没批到）、1 个是 `money`（批到的那点钱只够 0.0057 进度）。
+这正是 B2 想让玩家看见的那一格：「我的船坞为什么空转」= 钱被舰队维护费的预留吃掉了。
+（**行为一行没改**——digest 逐字不变；要改的是平衡，不是读面。）
+
+验收：digest `--seed 42 --round 240 --digest 20` **仍逐字不变**（纯追加 ⇒ 行为中性）；
+`cargo nextest run -P full` **203 绿 / 0 红 / 25 skipped**（B1 时 198）；新增 5 条 B2 单测
+（`src/tests/sim/spending.rs`）+ 两条投影契约列（跨进程逐值一致，且整局防空转）；
+`SCHEMA_VERSION` 16 → 17（迁移档只推号，`State` 字段没动）；kit 新增 `view_spending()`
+（批−花−没花 × 逐资源、造舰瓶颈判据、掉血），端到端 demo 勾稽通过。
+
+**B2 之后的重新测量**（与「要不要做通用稀疏层」有关）落在
+[`dense-face-sparse-store.md`](dense-face-sparse-store.md) §9：那里把「中性值能省多少」从
+印象值换成了实测上界（**占整个 view 的 25%、3826 B/行**），并据此改写了触发条件。
 
 ## 7. 待裁决（三个设计点，动 B4/B5 之前必须先定）
 

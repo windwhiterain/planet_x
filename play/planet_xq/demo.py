@@ -132,3 +132,40 @@ print(
     "勾稽通过：effective = clamp(distance + entertainment"
     " + capital_loyalty_bonus − ideology_loyalty_penalty)"
 )
+
+print()
+print("--- B2: 钱去哪了（批了多少 − 花了多少 = 没花掉的；以及掉血与造舰瓶颈）---")
+sp = q.view_spending(last_round, "中国")
+b = sp["budget"]
+if b.empty:
+    print(f"中国 @ round {last_round}: 这一回合两边都没有预算行（没有库存键？）")
+else:
+    print(b.to_string(index=False))
+    # 勾稽：没花掉的 = 批的 − 花的（**同一个数不在两个读面各存一份**，所以这一列只在 Python 侧算）。
+    for kind in ("investment", "construction"):
+        lhs = b[f"{kind}_batch"] - b[f"{kind}_spent"]
+        assert (lhs - b[f"{kind}_unspent"]).abs().max() < 1e-9, (kind, b)
+    # 引擎不会超批：花掉的永远不超过批的。
+    for kind in ("investment", "construction"):
+        assert (b[f"{kind}_spent"] <= b[f"{kind}_batch"] + 1e-9).all(), (kind, b)
+    assert (b["investment_unspent"] >= -1e-9).all() and (b["construction_unspent"] >= -1e-9).all()
+    print(
+        "勾稽通过：花了 ≤ 批了，且 没花掉的 = 批的 − 花的",
+        "| 本回合未花总额 =",
+        round(float((b["investment_unspent"] + b["construction_unspent"]).sum()), 2),
+    )
+print(
+    f"  维护欠费 {round(sp['upkeep_unpaid'], 3)} ⇒ 每艘舰被锈掉船体的"
+    f" {round(sp['fleet_rust'], 4)} 倍 hull_max"
+    f"（锈到 0 才发事件，所以掉血只有这一处看得见）"
+)
+build = sp["build"]
+if build.empty:
+    print("  这一回合这座势力没有建造区的进度行")
+else:
+    print(build.to_string(index=False))
+    print(
+        "  瓶颈票数：",
+        {k: int(v) for k, v in build["bottleneck"].value_counts().items()},
+        "（money=钱批光了 / capacity=产能封顶 / idle=有产能却一分钱没批到）",
+    )

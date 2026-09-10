@@ -132,6 +132,32 @@ pub struct FactionRow {
     /// 本回合**首都向心项**：首都人口占全势力比例 × `capital_share_loyalty_buff`（按势力算一次）。
     /// 同 [`FactionRow::ideology_loyalty_penalty`]：它是每座城忠诚目标式里的加项，只在势力行存一份。
     pub capital_loyalty_bonus: f64,
+
+    // ── 过程：钱去哪了（B2）──
+    /// 本回合**实际花掉**的**投资**（建设建筑）预算，按资源（`step_construction` 的中间量，
+    /// 写完即弃的局部变量）。只列真花过的资源（稀疏 map）。
+    ///
+    /// **批了多少不在这里**：那是控制面的持久叶 `control`（`kind="investment_budget"`，每资源
+    /// 一行），引擎每回合把当回合用的额度写回去。所以「批了 100 铁为何只花 30」= 限额 − 这里，
+    /// 读面不重复存第三个数（未花掉的余额）。
+    pub investment_spent: ResourceMap,
+    /// 本回合**实际花掉**的**建造**（造舰）预算，按资源——语义同
+    /// [`FactionRow::investment_spent`]（限额见 `control` 的 `construction_budget` 叶）。
+    pub construction_spent: ResourceMap,
+    /// 本回合**付不起**的那部分舰队维护费（市场价值 = `max(0, 维护费 − 库存价值)`）：付不出的
+    /// 每一分钱都变成生锈（见 [`FactionRow::fleet_rust`]）。0 = 付清了。
+    ///
+    /// ⚠ 它是「**欠费并因此生锈**的那部分」，不是「付了多少」的反面：**流亡舰队**（无活城）与
+    /// 零舰队势力的这一格同样是 0——前者被引擎豁免抽库存（欠着，但没锈，见 `sim::step_upkeep`
+    /// 的例外），后者根本没账。所以别拿 `upkeep − 这个数` 当「实际付出去的钱」。
+    pub upkeep_unpaid: f64,
+    /// 本回合**每艘舰被锈掉的船体比例**（`step_upkeep` 的中间量）：该舰本回合掉的船体 =
+    /// `hull_max × 这个比例`。只有锈到 0 才留 `DeathCause::UpkeepShortfall` 事件——**掉血本身
+    /// 就靠这一个数才看得见**。
+    ///
+    /// ⚠ 它**不是**「欠费比例」：引擎有个可见性下限（欠一丁点也至少锈 `0.2`），所以欠费很小时
+    /// 这个数反而比 `upkeep_unpaid ÷ upkeep` 大——**读这个数，别自己按欠费比例重算**。
+    pub fleet_rust: f64,
 }
 
 /// 单座城的一行（[`RoundView::cities`] 的一项）。
@@ -148,6 +174,41 @@ pub struct CityRow {
     /// **过程**：本回合忠诚的**目标值**及其分项（`step_governance` 的中间量）。忠诚每回合朝
     /// `effective` 靠近（治理覆盖得住时），所以这些分项就是「这座城的忠诚为什么在掉」的答案。
     pub loyalty_target: LoyaltyTarget,
+    /// **过程**：本回合的**用工系数**（人口 ÷ 建筑用工需求，钳到 `[min_efficiency, 1]`）——
+    /// 直接乘在采矿产出与造舰速率上。「这座城产量低」= 人手不足。
+    ///
+    /// ⚠ 它是**生产那一步用的人手**（`step_production` 在人口增长**之前**取的数）；建造那一步
+    /// 会重新算一把（那时人口已经涨过了），而它已经折进每舰级的
+    /// [`BuildLine::rate`] 里，所以这里不存第二份。
+    pub labor: f64,
+    /// **过程**：本回合的**住房容量**（住宅面积 × 该天体生态容量）——人口增长的**天花板**。
+    /// 「为什么人口不涨了、产出提不上去」的答案。0 = 这一回合没算（`pre`）。
+    pub housing_capacity: f64,
+    /// **过程**：本城天体是不是本势力的**首都**（集散地）：是 ⇒ 产出**直进势力池**，否 ⇒ 先落
+    /// **产地货栈**等船运。「我挖出来的矿为什么用不了」的答案（`view.cities[].production` 只记
+    /// 开采量，不分入库路径）。
+    ///
+    /// ⚠ 它在 `pre` 里是中性值 `false`（这个月的入库路径**还没定**）。要读「此刻谁是集散地」，
+    /// 别用 `pre` 面：拿 `control` 的 `capital` 叶 + 城的 `body_id` 比。
+    pub is_hub: bool,
+    /// **过程**：本回合**造舰**的每舰级速率与实得进度（`step_construction` 的中间量）。键 =
+    /// 舰级；**本城有这个舰级的建造区就有行**，包括 `increment = 0` 的那种（有产能却一分钱没
+    /// 批到——正是要看的那一格）。
+    pub build: BTreeMap<String, BuildLine>,
+}
+
+/// 一座城本回合**某个舰级**的造舰过程量（[`CityRow::build`] 的一项）。
+///
+/// 造舰进度池按**舰级**合并（`City.ship_progress`），所以这一对数是「造舰慢是因为缺钱还是缺
+/// 产能」的唯一入口：`increment` 是实得进度，`rate` 是这个舰级本回合的产能上限——
+/// **`increment < rate` ⇒ 钱是瓶颈**（建造预算批光了），**`increment ≈ rate` ⇒ 产能封顶**
+/// （预算还剩着，是船坞/人手不够）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct BuildLine {
+    /// 该舰级的产能速率上限 = `Σ(建造区面积 × 生产率 × 用工系数)`（所有同舰级的建造区相加）。
+    pub rate: f64,
+    /// 该舰级本回合**实得进度**（受建造预算与 `rate` 双向封顶）。
+    pub increment: f64,
 }
 
 /// 一座城本回合的**忠诚目标值**及其分项（[`CityRow::loyalty_target`]）。
@@ -196,8 +257,8 @@ pub struct RoundSink {
     pub city_production: BTreeMap<CityId, ResourceMap>,
     /// 每势力每资源的本回合开采产出。
     pub faction_production: BTreeMap<FactionId, ResourceMap>,
-    /// 每势力本回合舰队维护费（市场价值）。
-    pub upkeep: BTreeMap<FactionId, f64>,
+    /// 每势力本回合**舰队维护**流：该付多少 / 欠了多少 / 锈掉多少比例。
+    pub upkeep: BTreeMap<FactionId, UpkeepFlow>,
     /// 每势力本回合**贸易净额**（买 − 卖，按市场价值；>0 = 净进口）。
     /// 由 `sim::step_market` 在结算时记录——这是「谁真的在市场上买卖」的权威账。
     pub market_net: BTreeMap<FactionId, f64>,
@@ -210,6 +271,11 @@ pub struct RoundSink {
     pub governance: BTreeMap<FactionId, GovernanceFlow>,
     /// 每城本回合的**忠诚目标值**分项（`step_governance` 的中间量）。
     pub city_loyalty: BTreeMap<CityId, LoyaltyTarget>,
+    /// 每势力本回合**投资/建造预算实际花掉的**（按资源；`step_construction` 的中间量）。
+    pub spend: BTreeMap<FactionId, SpendFlow>,
+    /// 每城本回合的**用工系数 / 住房容量 / 是否集散地 / 每舰级造舰进度**（B2 的中间量，
+    /// `step_production` 与 `step_construction` 各写自己那几格）。
+    pub city_flow: BTreeMap<CityId, CityFlow>,
     /// 本回合 **AI 的判定**（“掷了什么”）：逐舰的行为判定 + 船坞改装。**纯追加、行为中性**
     /// ——见 [`crate::model::RoundDecisions`]（那里解释了为什么它必须单独捕获：指令叶只记结果，
     /// 不记过程）。
@@ -235,4 +301,44 @@ pub struct GovernanceFlow {
     /// 首都向心项（按势力算一次）——每座城忠诚目标式里的加项，见
     /// [`FactionRow::capital_loyalty_bonus`]。
     pub capital_bonus: f64,
+}
+
+/// 一个势力的本回合**舰队维护**流（`RoundSink::upkeep` 的一项）——维护费是「预算压顶」那一类
+/// 问题的入口：一个数说该付多少，另两个数说付不起时发生了什么。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UpkeepFlow {
+    /// 本回合该付的舰队维护费（市场价值）。
+    pub total: f64,
+    /// 付不起的那部分（`max(0, total − 库存价值)`；0 = 付清）。
+    pub unpaid: f64,
+    /// 每艘舰实际被锈掉的船体比例（含可见性下限；0 = 没锈）。
+    pub rust: f64,
+}
+
+/// 一个势力的本回合**投资/建造预算花销**（`RoundSink::spend` 的一项）。
+///
+/// 与限额的关系：限额是控制面的持久叶（`control` 的 `investment_budget`/`construction_budget`），
+/// 引擎每回合把当回合用的额度写回去，所以两者相减就是「批了没花掉的」——**同一个数不存两处**。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SpendFlow {
+    /// 实际花掉的投资预算，按资源（只列真花过的）。
+    pub investment: ResourceMap,
+    /// 实际花掉的建造（造舰）预算，按资源。
+    pub construction: ResourceMap,
+}
+
+/// 一座城本回合的**产出与建造过程量**（`RoundSink::city_flow` 的一项）。
+///
+/// 写它的有**两步**（所以是「一格一格填」而不是「一次构造」）：`step_production` 填用工系数 /
+/// 住房容量 / 是否集散地，`step_construction` 填每舰级的造舰速率与实得进度。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CityFlow {
+    /// 生产那一步用的用工系数（见 [`CityRow::labor`]）。
+    pub labor: f64,
+    /// 住房容量（见 [`CityRow::housing_capacity`]）。
+    pub housing_capacity: f64,
+    /// 本城天体是不是本势力的首都集散地（见 [`CityRow::is_hub`]）。
+    pub is_hub: bool,
+    /// 每舰级的造舰速率与实得进度（见 [`CityRow::build`]）。
+    pub build: BTreeMap<String, BuildLine>,
 }

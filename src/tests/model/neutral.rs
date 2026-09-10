@@ -200,6 +200,10 @@ fn every_read_face_field_declares_a_neutral() {
     assert_eq!(neutral_for("factions[].governance_scale"), Some(Neutral::One));
     assert_eq!(neutral_for("factions[].governance_coverage"), Some(Neutral::One));
     assert_eq!(neutral_for("factions[].capital_loyalty_bonus"), Some(Neutral::Zero));
+    // B2：用工系数的中性值同样是 **1.0**（不缺人手），不是 0——「全城没人上工」是另一回事。
+    assert_eq!(neutral_for("cities[].labor"), Some(Neutral::One));
+    // 集散地的中性值是 false（这个月的入库路径还没定），不是「它不是首都」。
+    assert_eq!(neutral_for("cities[].is_hub"), Some(Neutral::False));
     // 稀疏数组：整条存在或整条缺席，中性值是空数组（条目内部不逐字段声明）。
     assert_eq!(neutral_for("decisions.capital"), Some(Neutral::EmptyArray));
 }
@@ -223,6 +227,15 @@ fn struct_defaults_equal_the_declared_neutrals() {
     for (path, _) in READ_FACE_NEUTRALS {
         if let Some(rest) = path.strip_prefix("cities[].loyalty_target.") {
             assert_path_is_neutral(&light, rest, path, "LoyaltyTarget::default()");
+        }
+    }
+
+    // B2 的每舰级造舰行（map 的**值**结构）：缺一个键时读到的是「本城没这个舰级的建造区」，
+    // 而一旦有键，两个叶子各自按声明填（`Default` = 两项都是 0）。
+    let line = serde_json::to_value(crate::model::BuildLine::default()).unwrap();
+    for (path, _) in READ_FACE_NEUTRALS {
+        if let Some(rest) = path.strip_prefix("cities[].build[].") {
+            assert_path_is_neutral(&line, rest, path, "BuildLine::default()");
         }
     }
 }
@@ -258,6 +271,17 @@ const PROCESS_PATHS: &[&str] = &[
     "cities[].loyalty_target.distance",
     "cities[].loyalty_target.entertainment",
     "cities[].loyalty_target.effective",
+    // B2（钱去哪了）：这八个都是「这一步还没跑」⇒ 中性值。⚠ 用工系数与集散地**特别容易写错**：
+    // 前者的中性值是 1.0（不缺人手，不是「没人上工」），后者的中性值是 `false`（这个月的入库
+    // 路径还没定，不是「它不是首都」——要后者请拿 `control` 的 `capital` 叶比 `body_id`）。
+    "factions[].investment_spent",
+    "factions[].construction_spent",
+    "factions[].upkeep_unpaid",
+    "factions[].fleet_rust",
+    "cities[].labor",
+    "cities[].housing_capacity",
+    "cities[].is_hub",
+    "cities[].build",
 ];
 
 #[test]
@@ -294,6 +318,12 @@ fn value_consts_match_the_table() {
     );
     assert_eq!(value::GOVERNANCE_COVERAGE, 1.0);
     assert_eq!(value::GOVERNANCE_SCALE, 1.0);
+    assert_eq!(
+        neutral_for("cities[].labor"),
+        Some(Neutral::One),
+        "用工系数常量与表不一致"
+    );
+    assert_eq!(value::CITY_LABOR, 1.0);
     assert_eq!(
         Neutral::One.to_json(),
         serde_json::json!(value::GOVERNANCE_SCALE),
