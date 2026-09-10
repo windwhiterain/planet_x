@@ -10,7 +10,7 @@
 //! * **有配给**——仓里有多少卖多少，买不到就是买不到。
 //!
 //! 价格与成交量是**世界状态**（随回合演化、随存档持久化），不是派生观测，所以住在
-//! [`State`] 里而不是 `Derived` 里；回合的派生观测（本回合成交明细）由 `round_metrics`
+//! [`State`] 里而不是 `Derived` 里；回合的派生观测（本回合成交明细）由 `observe`
 //! 汇总给 agent。
 
 use serde::{Deserialize, Serialize};

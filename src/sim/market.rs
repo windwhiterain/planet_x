@@ -94,7 +94,7 @@ pub fn trade_block_cause(state: &State, config: &GameConfig, a: &str, b: &str) -
 /// 与旧实现的根本差别：旧版是**常数价的无限贩卖机**（没有卖家、没有仓、没有价格），
 /// 所以「缺某种矿」不可能更贵、也不可能「不卖给你」。见
 /// `.agents/notes/trade-and-sanctions.md` 的实测基线。
-pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
+pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink) {
     let m = &config.market;
     if m.auto_trade_limit <= 0.0 {
         return;

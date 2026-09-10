@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::model::*;
 use super::control::resolve_chain;
 use super::faction::default_capital_body;
+use crate::model::*;
 
 /// The current persisted `State` schema version. Bump this whenever `State`'s
 /// field structure or semantics change, and add a matching arm to [`migrate`] so
@@ -13,7 +13,13 @@ use super::faction::default_capital_body;
 /// 合并之后取 **13**，且 `migrate` 把 **10..=12 整段**都当成「设计图/承包市场之前的世界」
 /// 处理——见 [`migrate`] 的 `v10..=12` 一档（那一段里同一个号在两条历史中含义不同，
 /// 所以不能按号细判，只能整段按最保守的方式接）。
-pub const SCHEMA_VERSION: u32 = 13;
+/// **v14 = 派生读面换代**（`feature/pre-post-unify`）：派生数据不再分 `flow` + `metrics`
+/// 两段，只有**一回合一份视图** [`RoundView`]（`pre`/`post` 同形）——`--derived` 的
+/// `{flow, metrics}` 变成 `{view}`、`--index` 的 `idx/flow.jsonl`/`idx/city_flow.jsonl`
+/// 变成 `idx/faction_process.jsonl`/`idx/city_process.jsonl`、每回合轨迹的 `metrics`
+/// 变成 `view`。**世界状态本身（`State`）没有变**，变的是派生读面，故不写迁移档
+/// （旧档照常读；旧派生态不复用，本来也不持久）。
+pub const SCHEMA_VERSION: u32 = 14;
 fn default_schema_version() -> u32 {
     0
 }
@@ -107,9 +113,9 @@ pub struct RoundState {
     /// 规范的持久世界（实体）：天体/城/势力/舰/控制面/作用域/事件/编年史。
     pub state: State,
     /// 本回合依赖 rng 的随机决策快照（`(state, rng)` 的函数，换 rng 即重算）。
-    pub pre: Derived,
+    pub pre: RoundView,
     /// 本回合依赖 state 的纯观测快照（`state` 的函数）。
-    pub post: Derived,
+    pub post: RoundView,
 }
 impl State {
     /// Look up a body by its unique **name** (the schema's identity key).
@@ -287,8 +293,7 @@ impl State {
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
             // ① 舰级层：本舰出厂那张图的默认意图（Q1(c) 插在舰队默认**之前**）。
             if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some()
-                    && self.blueprint_control(&s.faction_id, id).is_player()
+                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
                 {
                     return bp.value.order.clone();
                 }
@@ -323,8 +328,7 @@ impl State {
         let leaf = c.ship_orders.get(&ship_id);
         if leaf.map(|l| l.mode).unwrap_or_default() == ControlMode::Inherit {
             if let Some((id, bp)) = self.ship_blueprint_leaf(s) {
-                if bp.value.order.is_some()
-                    && self.blueprint_control(&s.faction_id, id).is_player()
+                if bp.value.order.is_some() && self.blueprint_control(&s.faction_id, id).is_player()
                 {
                     return Some(OrderSource::Blueprint(id.clone()));
                 }
@@ -509,21 +513,30 @@ impl State {
 
     /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
     pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.investment_budget.get(resource)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.investment_budget.get(resource)),
+        );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某建造预算（造舰用）由谁控制：资源 → 势力 → 全局。
     pub fn construction_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.construction_budget.get(resource)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.construction_budget.get(resource)),
+        );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
     /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
     pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.loyalty_budget.get(&cid)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.loyalty_budget.get(&cid)),
+        );
         let city = self.scope.cities.get(&cid).copied().unwrap_or_default();
         let body_id = self.city(&cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -536,7 +549,10 @@ impl State {
     /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
     pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.invest_weights.get(key)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.invest_weights.get(key)),
+        );
         let city = self.scope.cities.get(cid).copied().unwrap_or_default();
         let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -549,7 +565,10 @@ impl State {
     /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力 → 全局。
     pub fn build_control(&self, fid: FactionId, key: &BuildKey) -> ControlMode {
         let (cid, _) = key;
-        let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.build_weights.get(key)));
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.build_weights.get(key)),
+        );
         let city = self.scope.cities.get(cid).copied().unwrap_or_default();
         let body_id = self.city(cid).map(|c| c.body_id.clone());
         let body = body_id
@@ -563,7 +582,10 @@ impl State {
     /// `Player` 时 sim 的周期迁移不覆盖（除非首都亡城——硬规则仍强迁）；
     /// `Auto`/`Inherit` 时由 sim 的周期迁都步骤重估。
     pub fn capital_control(&self, fid: &str) -> ControlMode {
-        let leaf = leaf_mode(self.control(fid.to_string()).and_then(|c| c.capital.as_ref()));
+        let leaf = leaf_mode(
+            self.control(fid.to_string())
+                .and_then(|c| c.capital.as_ref()),
+        );
         let faction = self.scope.factions.get(fid).copied().unwrap_or_default();
         resolve_chain(&[leaf, faction, self.scope.global])
     }
@@ -758,6 +780,12 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // v10–v12：**两条独立历史共用过这一段号**（见上面的说明）⇒ 整段保守处理。
         10 | 11 | 12 => {
             state.contracts = Default::default();
+            state.schema_version = SCHEMA_VERSION;
+            Ok(())
+        }
+        // v13：`feature/pre-post-unify` 之前那一版。它变的是**派生读面**（`flow` + `metrics`
+        // 两段 → 一回合一份 `RoundView`），`State` 的字段一个没动 ⇒ 推号即可（存档照旧可用）。
+        13 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

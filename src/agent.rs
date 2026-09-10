@@ -50,11 +50,11 @@ pub struct Trajectory {
     pub events: Vec<GameEvent>,
     /// 剧情编年史：整段已展开的叙事弧。
     pub chronicle: Vec<ChronicleEntry>,
-    /// 本回合的**总结指标**（[`crate::sim::round_metrics`] 计算的中间聚合量）：存量/政治
-    /// （实力占比/霸权/联盟/制裁/交战/世界总量）+ **流量**（各势力·各城的开采产出、舰队
-    /// 维护费、治理开销与覆盖率——由步进时捕获的中间量，与模拟逐回合一致）。与直接状态
-    /// 同源自步进函数，故与本节实体字段**严格一致**。
-    pub metrics: RoundMetrics,
+    /// 本回合的**视图**（[`RoundView`]）——世界观测（世界总量/政治/市场/每势力一行/每城一行）
+    /// **加上本回合的过程量**（产出、舰队维护费、治理开销与覆盖率、市场运费/承运费/净进口，
+    /// 以及 AI 的判定流水 [`RoundView::decisions`]）。这些过程量由步进时捕获，与模拟逐回合一致；
+    /// 观测部分与直接状态同源，故与本节实体字段**严格一致**。
+    pub view: RoundView,
 }
 
 /// The canonical, atomic per-round agent view as a `serde_json::Value` — one line
@@ -64,7 +64,7 @@ pub struct Trajectory {
 /// copy of the narrative in every snapshot; the chronicle is delivered separately
 /// as `--story` / the `story` field of the `--traj` pack. Floats are rounded to 2
 /// decimals for token-noise reduction.
-pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
+pub fn state_json(state: &State, view: &RoundView) -> serde_json::Value {
     let t = Trajectory {
         round: state.round,
         time_month: state.time_month,
@@ -74,8 +74,8 @@ pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
         ships: state.ships.clone(),
         events: state.events.clone(),
         chronicle: state.chronicle.clone(),
-        // `metrics` 直接取自 `advance` 已算好的 `Derived::metrics`（单一来源），不再重算一遍。
-        metrics: derived.metrics.clone(),
+        // 视图直接取自 `advance` 已算好的那一份（单一来源），不再重算一遍。
+        view: view.clone(),
     };
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
     // 舰的**风格**在这里给**有效值**（叶 → 舰队默认 → 舰上记录值），不是 `Ship` 上那份记录：
@@ -86,7 +86,8 @@ pub fn state_json(state: &State, derived: &Derived) -> serde_json::Value {
     // 放在 `round_value` **之前**，让这些值也一起按两位小数规整（避免 token 噪声）。
     if let Some(ships) = v.get_mut("ships").and_then(|s| s.as_array_mut()) {
         for (row, s) in ships.iter_mut().zip(state.ships.iter()) {
-            row["doctrine"] = serde_json::to_value(state.ship_doctrine(s.name.clone())).expect("doctrine is serializable");
+            row["doctrine"] = serde_json::to_value(state.ship_doctrine(s.name.clone()))
+                .expect("doctrine is serializable");
             row["kiting"] = json!(state.ship_kiting(s.name.clone()));
             // 第三条风格轴（角色）：`true` = 运输舰。同样给**有效值**——自动控制每回合会写
             // 这片叶（按积压定编），所以 `Ship.freighter` 那份记录值常常不是它此刻的活。
@@ -114,7 +115,7 @@ pub fn schema_value() -> serde_json::Value {
 }
 
 /// Zero-noise rendering of one state as a single-line JSON object.
-pub fn render_state(state: &State, derived: &Derived) -> String {
+pub fn render_state(state: &State, derived: &RoundView) -> String {
     state_json(state, derived).to_string()
 }
 
@@ -248,8 +249,14 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
 /// 身份即名字：`owner`/`body_id` 都是势力的名字/天体名（唯一 key）。
 pub fn governance_distance(state: &State, owner: &str, body_id: &str) -> f64 {
     let capital = state.capital_body(owner);
-    let bpos = state.body(body_id).map(|b| b.position).unwrap_or([0.0, 0.0]);
-    let cpos = state.body(&capital).map(|b| b.position).unwrap_or([0.0, 0.0]);
+    let bpos = state
+        .body(body_id)
+        .map(|b| b.position)
+        .unwrap_or([0.0, 0.0]);
+    let cpos = state
+        .body(&capital)
+        .map(|b| b.position)
+        .unwrap_or([0.0, 0.0]);
     ((bpos[0] - cpos[0]).powi(2) + (bpos[1] - cpos[1]).powi(2)).sqrt()
 }
 

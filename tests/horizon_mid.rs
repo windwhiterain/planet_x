@@ -18,8 +18,8 @@ fn same_seed_reproduces_identically() {
     let mut ra = Prng::new(42);
     let mut b = world::default_state(&config, 42);
     let mut rb = Prng::new(42);
-    let mut derived_a = Derived::default();
-    let mut derived_b = Derived::default();
+    let mut derived_a = RoundView::default();
+    let mut derived_b = RoundView::default();
     for _ in 0..200 {
         derived_a = sim::advance(&mut a, &config, &mut ra);
         derived_b = sim::advance(&mut b, &config, &mut rb);

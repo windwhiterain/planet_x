@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundFlow) {
+pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flow: &mut RoundSink) {
     // 进入本步进时**还活着**的舰：漏斗兜底的断言只对它们成立（见 `sweep_dead_ships`）。
     let alive_at_step_start: BTreeSet<ShipId> = state
         .ships

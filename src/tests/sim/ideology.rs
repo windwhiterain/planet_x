@@ -218,7 +218,7 @@ fn ideology_military_win_drives_toward_militarism() {
         cause: DeathCause::Combat,
         by: None,
     });
-    step_ideology(&mut state, &config, &RoundFlow::default());
+    step_ideology(&mut state, &config, &RoundSink::default());
 
     let after = state.faction(&fname).unwrap().ideology.peace_military;
     assert!(
@@ -235,7 +235,7 @@ fn ideology_economy_bad_drives_toward_populism_and_stays_bounded() {
     let start = state.faction(&fname).unwrap().ideology.people_elite;
 
     // 经济转负：净流 = 产出(0) − 维护(100) − 治理(0) < 0 → 人民（民粹反弹）。
-    let mut flow = RoundFlow::default();
+    let mut flow = RoundSink::default();
     flow.upkeep.insert(fname.clone(), 100.0);
     step_ideology(&mut state, &config, &flow);
 

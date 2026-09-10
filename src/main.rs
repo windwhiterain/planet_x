@@ -72,7 +72,9 @@
 use clap::Parser;
 use planet_x::agent;
 use planet_x::config::{load_checkpoint, load_config, load_initial, parse_seed, save_checkpoint};
-use planet_x::model::{FactionId, GameConfig, GameEvent, RoundMetrics, RoundState, State, SCHEMA_VERSION};
+use planet_x::model::{
+    FactionId, GameConfig, GameEvent, RoundState, RoundView, SCHEMA_VERSION, State,
+};
 use planet_x::prng::Prng;
 use planet_x::{autocontrol, control, projection, sim, world};
 use serde_json::json;
@@ -208,21 +210,23 @@ struct Cli {
     digest: Option<u32>,
 
     /// 索引投影模式：与 --round N 连用，把 N+1 回合投影成一份**lean 主流**（main.jsonl，
-    /// 每回合一行：eager 字段 + metrics + id 数组）+ 按 id 索引的 **lazy 表**（idx/*.jsonl，
-    /// ships/cities/bodies 的完整对象）+ **派生表**（idx/flow.jsonl、idx/city_flow.jsonl、
-    /// idx/control.jsonl、idx/scope.jsonl：引擎内部中间量与控制面，状态里没有）+ **agent 可读
+    /// 每回合一行：eager 字段 + **本回合的视图 `view`** + id 数组）+ 按 id 索引的 **lazy 表**
+    /// （idx/*.jsonl，ships/cities/bodies 的完整对象）+ **派生表**（idx/faction_process.jsonl、
+    /// idx/city_process.jsonl、idx/control.jsonl、idx/scope.jsonl、idx/decisions.jsonl：本回合的
+    /// 过程量与控制面，状态里没有）+ **agent 可读
     /// 的投影 schema**（schema.json，声明哪些字段 eager / 哪些 lazy / 哪些 derived 及其
     /// 表/key/join 列/列类型）。重型字段不再内联；agent 用 Python kit（play/planet_xq，
     /// uv 管理）按 id join。确定性：同 seed 复现字节一致。
     #[arg(long, value_name = "DIR")]
     index: Option<PathBuf>,
 
-    /// 输出这一回合存下来的**派生态**：`{round, source, pre, post, [note]}`。
-    /// `pre` = 推进前的观测，`post` = 推进后的观测 + **本回合流量中间量**（`Derived.flow`：
-    /// 各势力/各城的产出、舰队维护费、治理成本与覆盖率——这些量不落持久状态，只有这里和
-    /// `--index` 的 derived.flow 表能读到）。
+    /// 输出这一回合的**视图对**：`{round, source, pre, post, [note]}`。
+    /// 两个槽都是 `RoundView`（同形）：`pre` = 回合开始时的世界，`post` = 回合结束时的世界
+    /// **+ 本回合的过程量**（各势力/各城的产出、舰队维护费、治理成本与覆盖率、市场运费/承运费/
+    /// 净进口，以及 AI 的判定流水——这些量不落持久状态，只有这里、`--index` 的过程量表和 web
+    /// 的信息树能读到）。
     /// 从 `--start <ckpt>` 读的是**档里存的**那一对（与 `--index` 同一回合的值完全相同，
-    /// 不做舍入）；没有档时按当前状态重算，这时 `post.flow` 是空的，`note` 会说明。
+    /// 不做舍入）；没有档时按当前状态重算（此时 `pre` 与 `post` 相同、过程量全 0），`note` 会说明。
     #[arg(long)]
     derived: bool,
 }
@@ -275,7 +279,10 @@ fn main() {
     if let Some(path) = &cli.apply {
         match apply_diff(&mut state, &config, path) {
             Err(e) => {
-                eprintln!("{}", json!({"ok": false, "code": "ERR_APPLY", "message": e}));
+                eprintln!(
+                    "{}",
+                    json!({"ok": false, "code": "ERR_APPLY", "message": e})
+                );
                 std::process::exit(10);
             }
             // 有叶片没落地 → 在 stderr 上报。**这是 agent 唯一能发现「命令其实
@@ -329,17 +336,18 @@ fn main() {
 
     // State-reflecting dumps.
     //
-    // `--derived`：这一回合引擎到底算出了什么（`pre` = 推进前的观测；`post` = 推进后 + 流量）。
-    // 有档就报**档里存的**那一对——于是它与 `--index` 的 `derived.flow` 表对同一回合给同一个值
+    // `--derived`：这一回合引擎到底算出了什么（`pre` = 回合开始的世界；`post` = 回合结束的世界
+    // + 本回合过程量）。
+    // 有档就报**档里存的**那一对——于是它与 `--index` 的过程量表对同一回合给同一个值
     // （有 `tests/projection_derived.rs` 把这条钉住）；没档（或叠加了 `--apply`，此时状态已变）
     // 只能按当前状态重算，那种情况下没有流量，`note` 明说，别让人误以为流水为零。
     if cli.derived {
         let from_checkpoint = stored.is_some() && cli.apply.is_none();
         let (pre, post) = match (&stored, cli.apply.is_some()) {
             (Some(rs), false) => (rs.pre.clone(), rs.post.clone()),
-            (Some(rs), true) => (rs.pre.clone(), sim::derived_from_state(&state, &config)),
+            (Some(rs), true) => (rs.pre.clone(), sim::view_from_state(&state, &config)),
             (None, _) => {
-                let d = sim::derived_from_state(&state, &config);
+                let d = sim::view_from_state(&state, &config);
                 (d.clone(), d)
             }
         };
@@ -351,8 +359,9 @@ fn main() {
         });
         if !from_checkpoint {
             v["note"] = json!(
-                "这份派生态是**按当前状态重算**的，没有档存的本回合流量中间量，所以 post.flow 是空的。\
-                 要真正的流量请用 `--index` 投影的 derived.flow 表，或用 `--save` 出来的 checkpoint（它带 pre/post）。"
+                "这份视图是**按当前状态重算**的，没有档存的「本回合过程量」，所以 pre/post 里的产出、维护费、\
+                 治理与判定流水全是 0 / 空。要看真正的过程量，请用 `--index` 投影的过程量表，或用 `--save`\
+                 出来的 checkpoint（它带真正的 pre/post）。"
             );
         }
         emit(&v.to_string());
@@ -375,19 +384,19 @@ fn main() {
         return;
     }
     match &cli.control_plan {
-        Some(Some(fid)) => {
-            match autocontrol::control_plan(&state, &config, fid) {
-                Some(v) => emit(&v.to_string()),
-                None => {
-                    eprintln!(
-                        "{}",
-                        json!({"ok": false, "code": "ERR_PLAN_FACTION", "message": format!("--control-plan 未知势力: {fid}（用 --control 或 --schema 看有哪些势力）")})
-                    );
-                    std::process::exit(10);
-                }
+        Some(Some(fid)) => match autocontrol::control_plan(&state, &config, fid) {
+            Some(v) => emit(&v.to_string()),
+            None => {
+                eprintln!(
+                    "{}",
+                    json!({"ok": false, "code": "ERR_PLAN_FACTION", "message": format!("--control-plan 未知势力: {fid}（用 --control 或 --schema 看有哪些势力）")})
+                );
+                std::process::exit(10);
             }
+        },
+        Some(None) => {
+            emit(&json!({"factions": autocontrol::control_plan_all(&state, &config)}).to_string())
         }
-        Some(None) => emit(&json!({"factions": autocontrol::control_plan_all(&state, &config)}).to_string()),
         None => {}
     }
     if cli.control_plan.is_some() {
@@ -407,16 +416,26 @@ fn main() {
         // `projection::write_index_seeded`）：那一行的 state 就是那一回合的结果，所以
         // 「产出/维护/治理」应当是那一回合的数，而不是被抹成 0。
         let start_derived = stored.as_ref().map(|rs| rs.post.clone());
-        let outcome = match projection::write_index_seeded(&mut state, &config, &mut rng, n, dir, start_derived) {
+        let outcome = match projection::write_index_seeded(
+            &mut state,
+            &config,
+            &mut rng,
+            n,
+            dir,
+            start_derived,
+        ) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("{}", json!({"ok": false, "code": "ERR_INDEX", "message": e}));
+                eprintln!(
+                    "{}",
+                    json!({"ok": false, "code": "ERR_INDEX", "message": e})
+                );
                 std::process::exit(10);
             }
         };
-        // 存一份**没丢流量**的档：`pre`/`post` 直接取投影收尾回合的那一对。此前这里重新
-        // `derived_from_state`，把本回合的 `flow` 存成了空表——于是同一回合的两个读面
-        // （`--index` 的 derived.flow 表 vs 档里的 post）会各说各话。
+        // 存一份**没丢过程量**的档：`pre`/`post` 直接取投影收尾回合的那一对。此前这里重新
+        // `view_from_state`，把本回合的过程量存成了 0——于是同一回合的两个读面
+        // （`--index` 的过程量表 vs 档里的 post）会各说各话。
         let round_state = RoundState {
             schema_version: SCHEMA_VERSION,
             state: state.clone(),
@@ -429,11 +448,26 @@ fn main() {
 
     // Trajectory runs.
     if let Some(n) = cli.traj {
-        run_trajectory(&mut state, &config, &mut rng, n, cli.every, cli.save.as_deref());
+        run_trajectory(
+            &mut state,
+            &config,
+            &mut rng,
+            n,
+            cli.every,
+            cli.save.as_deref(),
+        );
         return;
     }
     if let Some(n) = cli.round {
-        run_rounds(&mut state, &config, &mut rng, n, cli.every, cli.digest, cli.save.as_deref());
+        run_rounds(
+            &mut state,
+            &config,
+            &mut rng,
+            n,
+            cli.every,
+            cli.digest,
+            cli.save.as_deref(),
+        );
         return;
     }
 
@@ -452,7 +486,8 @@ fn apply_diff(
     config: &GameConfig,
     path: &Path,
 ) -> Result<control::ApplyReport, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     control::apply_patch(state, config, &value)
@@ -485,12 +520,15 @@ fn run_rounds(
         return;
     }
     let every = every.max(1);
-    emit(&agent::render_state(state, &sim::derived_from_state(state, config))); // round 0 / start
-    let mut last_pre = sim::derived_from_state(state, config);
+    emit(&agent::render_state(
+        state,
+        &sim::view_from_state(state, config),
+    )); // round 0 / start
+    let mut last_pre = sim::view_from_state(state, config);
     let mut last_post = last_pre.clone();
     for _ in 0..n {
         // `pre` = 本回合开头的世界快照（要掷的随机还没落地）；`post` = 结尾的观测。
-        last_pre = sim::derived_from_state(state, config);
+        last_pre = sim::view_from_state(state, config);
         let derived = sim::advance(state, config, rng);
         last_post = derived;
         if state.round % every == 0 {
@@ -499,7 +537,12 @@ fn run_rounds(
     }
     save_if_requested(
         save,
-        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        &RoundState {
+            schema_version: SCHEMA_VERSION,
+            state: state.clone(),
+            pre: last_pre,
+            post: last_post,
+        },
         rng,
     );
 }
@@ -517,11 +560,14 @@ fn run_trajectory(
     save: Option<&Path>,
 ) {
     let every = every.max(1);
-    let mut snaps = vec![agent::state_json(state, &sim::derived_from_state(state, config))];
-    let mut last_pre = sim::derived_from_state(state, config);
+    let mut snaps = vec![agent::state_json(
+        state,
+        &sim::view_from_state(state, config),
+    )];
+    let mut last_pre = sim::view_from_state(state, config);
     let mut last_post = last_pre.clone();
     for _ in 0..n {
-        last_pre = sim::derived_from_state(state, config);
+        last_pre = sim::view_from_state(state, config);
         let derived = sim::advance(state, config, rng);
         last_post = derived;
         if state.round % every == 0 {
@@ -537,7 +583,12 @@ fn run_trajectory(
     emit(&pack.to_string());
     save_if_requested(
         save,
-        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        &RoundState {
+            schema_version: SCHEMA_VERSION,
+            state: state.clone(),
+            pre: last_pre,
+            post: last_post,
+        },
         rng,
     );
 }
@@ -598,7 +649,10 @@ fn milestone_value(state: &State, tail: Option<u32>) -> serde_json::Value {
 fn save_if_requested(save: Option<&Path>, round_state: &RoundState, rng: &Prng) {
     if let Some(path) = save {
         if let Err(e) = save_checkpoint(path, round_state, rng) {
-            eprintln!("{}", json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()}));
+            eprintln!(
+                "{}",
+                json!({"ok": false, "code": "ERR_SAVE", "message": e.to_string()})
+            );
             std::process::exit(10);
         }
     }
@@ -609,34 +663,58 @@ fn save_if_requested(save: Option<&Path>, round_state: &RoundState, rng: &Prng) 
 /// active wars, event-type counts, and the story beats fired). This is the
 /// "storyboard" an agent reads for a very long run without wading through
 /// thousands of full snapshots. Only complete windows are emitted.
-fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, window: u32, save: Option<&Path>) {
+fn run_digest(
+    state: &mut State,
+    config: &GameConfig,
+    rng: &mut Prng,
+    n: u32,
+    window: u32,
+    save: Option<&Path>,
+) {
     let window = window.max(1);
     let mut win_start = state.round;
     let mut events_acc: Vec<GameEvent> = Vec::new();
     let mut prod_acc: BTreeMap<FactionId, f64> = BTreeMap::new();
     let mut story_idx = state.chronicle.len();
-    let mut last_pre = sim::derived_from_state(state, config);
+    let mut last_pre = sim::view_from_state(state, config);
     let mut last_post = last_pre.clone();
     for _ in 0..n {
-        last_pre = sim::derived_from_state(state, config);
+        last_pre = sim::view_from_state(state, config);
         let derived = sim::advance(state, config, rng);
         events_acc.extend(state.events.iter().cloned());
         // 累计本窗口各方产出（窗口级总开采价值），让 digest 的 `production` 是**窗口总量**，
-        // 而非某一点时值。
-        for (fid, res) in &derived.flow.faction_production {
-            let v: f64 = res
+        // 而非某一点时值。只累有产出的势力（空表 = 这回合没开采，不必在账上多一行 0）。
+        for (fid, row) in &derived.factions {
+            if row.production.is_empty() {
+                continue;
+            }
+            let v: f64 = row
+                .production
                 .iter()
                 .map(|(k, amt)| amt * config.resources.get(k).map(|r| r.value).unwrap_or(1.0))
                 .sum();
             *prod_acc.entry(fid.clone()).or_default() += v;
         }
         if state.round - win_start >= window {
-            let story: Vec<String> =
-                state.chronicle[story_idx..].iter().map(|c| c.id.clone()).collect();
-            // 窗口末态的「总结指标」直接取自 `advance` 已算好的 `Derived::metrics`
+            let story: Vec<String> = state.chronicle[story_idx..]
+                .iter()
+                .map(|c| c.id.clone())
+                .collect();
+            // 窗口末态的观测/总结直接取自 `advance` 已算好的那份 `RoundView`
             // （与逐回合 agent 视图同源），不再在 digest 里独立重算一遍。
-            let metrics = &derived.metrics;
-            emit(&digest_value(state, metrics, &prod_acc, win_start, state.round, &events_acc, &story).to_string());
+            let view = &derived;
+            emit(
+                &digest_value(
+                    state,
+                    view,
+                    &prod_acc,
+                    win_start,
+                    state.round,
+                    &events_acc,
+                    &story,
+                )
+                .to_string(),
+            );
             win_start = state.round;
             events_acc.clear();
             prod_acc.clear();
@@ -646,7 +724,12 @@ fn run_digest(state: &mut State, config: &GameConfig, rng: &mut Prng, n: u32, wi
     }
     save_if_requested(
         save,
-        &RoundState { schema_version: SCHEMA_VERSION, state: state.clone(), pre: last_pre, post: last_post },
+        &RoundState {
+            schema_version: SCHEMA_VERSION,
+            state: state.clone(),
+            pre: last_pre,
+            post: last_post,
+        },
         rng,
     );
 }
@@ -658,19 +741,19 @@ fn r2(v: f64) -> f64 {
 
 /// The coarse per-window summary value. State-derived fields (world totals, per-faction
 /// city/ship/fleet, power share, hegemon/coalition/sanction, wars) are taken directly from
-/// the [`RoundMetrics`] the step functions computed at this window's end — the same numbers
+/// the [`RoundView`] `advance` computed at this window's end — the same numbers
 /// the per-round agent view carries — so the digest can never drift from the simulation.
 /// Only the window-accumulated fields (event counts, story beats) are built here.
 fn digest_value(
     state: &State,
-    metrics: &RoundMetrics,
+    view: &RoundView,
     production: &BTreeMap<FactionId, f64>,
     from: u32,
     to: u32,
     events_acc: &[GameEvent],
     story: &[String],
 ) -> serde_json::Value {
-    let factions: Vec<serde_json::Value> = metrics
+    let factions: Vec<serde_json::Value> = view
         .factions
         .iter()
         .map(|(fid, m)| {
@@ -696,17 +779,19 @@ fn digest_value(
         "to": to,
         "rounds": to.saturating_sub(from),
         "world": {
-            "cities": metrics.cities,
-            "ships": metrics.ships,
-            "fleet_value": r2(metrics.fleet_value),
-            "population": metrics.population,
+            // 键名保持 `cities`/`ships`（digest 是**给窗口级故事板读的粗粒度摘要**，
+            // 键名不必跟视图内部改名——保持它，digest 的字节基线才不动）。
+            "cities": view.city_count,
+            "ships": view.ship_count,
+            "fleet_value": r2(view.fleet_value),
+            "population": view.population,
         },
         "factions": factions,
-        "power_share": metrics.power_share.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
-        "hegemon": metrics.hegemon,
-        "coalition_members": metrics.coalition_members,
-        "sanctioned": metrics.sanctioned,
-        "wars": metrics.wars,
+        "power_share": view.power_share.iter().map(|(k, v)| (k.clone(), r2(*v))).collect::<BTreeMap<_, _>>(),
+        "hegemon": view.hegemon,
+        "coalition_members": view.coalition_members,
+        "sanctioned": view.sanctioned,
+        "wars": view.wars,
         "events": event_counts(events_acc),
         "top_events": top_events(events_acc),
         "story": story,

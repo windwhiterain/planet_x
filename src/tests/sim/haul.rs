@@ -21,7 +21,7 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
         "用例前提：科学组织首都在木星"
     );
 
-    let mut flow = RoundFlow::default();
+    let mut flow = RoundSink::default();
     let cn_silicon = |s: &State| {
         s.faction("中国").unwrap().resources.get("硅").copied().unwrap_or(0.0)
     };

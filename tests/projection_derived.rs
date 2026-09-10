@@ -70,34 +70,11 @@ fn derived_rows_all(dir: &std::path::Path, table: &str) -> Vec<serde_json::Value
         .collect()
 }
 
-/// 归一化一张「资源 → 数量」映射：缺项（null）与空表等价。
-///
-/// 投影表的契约是"**永远**给一个对象"（`{}`），这样 Python 侧 `production` 列的 dtype 稳定、
-/// 不必为"没产出"写 `isna()` 分支；而 `Derived` 里根本没有这个势力的键（`null`）。
-/// 两者语义相同，这个函数就是那道翻译。
-fn res_map(v: &serde_json::Value) -> serde_json::Value {
-    if v.is_null() {
-        serde_json::json!({})
-    } else {
-        v.clone()
-    }
-}
-
-/// 治理流的**存在性翻译**（与 `res_map` 同一类）：本回合**没跑治理步骤**的势力
-/// （零城势力——`step_governance` 在 `cities.is_empty()` 时 `continue`）在
-/// `Derived::flow.governance` 里没有键，而投影表仍旧给它一行，值是引擎自己的约定
-/// `total 0.0 / coverage 1.0`（`sim.rs` 的 `governance_total ≈ 0 ⇒ coverage = 1.0`，
-/// 也就是「无账可付」，而不是 `GovernanceFlow::default()` 的 0.0「付不起」）。
-///
-/// 这条差值曾经真的在合并后炸出来过：`flow.jsonl` 说覆盖 0%、同回合的
-/// `metrics.factions[].governance_coverage` 说 100%——两个读面各说各话正是这张表
-/// 要防的事，所以默认值也必须与引擎同源。
-fn gov_of(post_flow: &serde_json::Value, fid: &str) -> (serde_json::Value, serde_json::Value) {
-    match post_flow["governance"].get(fid) {
-        Some(g) => (g["total"].clone(), g["coverage"].clone()),
-        None => (serde_json::json!(0.0), serde_json::json!(1.0)),
-    }
-}
+// ⚠ **两张翻译函数已经删掉了**（2026-10，`feature/pre-post-unify`）：`res_map`（null ↔ `{}`）
+// 与 `gov_of`（治理的"存在性"翻译）存在的唯一理由，是「`flow` 表缺键」与「`metrics` 缺省值」
+// 曾经是两套约定——`flow.jsonl` 说覆盖 0%、同回合的 `metrics.factions[].governance_coverage`
+// 说 100%，两个读面各说各话。现在两个读面**读的是同一份 `RoundView`**：每势力一行、默认值由
+// `observe` 一处给出，所以这里可以直接**逐值相等**地比，不需要任何翻译。
 
 #[test]
 fn derived_matches_the_projection_for_the_same_round() {
@@ -118,38 +95,42 @@ fn derived_matches_the_projection_for_the_same_round() {
     assert_eq!(v["round"], serde_json::json!(6));
     assert!(v.get("note").is_none(), "有档时不该有 note（那份派生态是真的）");
 
-    // 3) 主流最后一行的 metrics：必须等于 ckpt 里 post.metrics（逐值相等，不是"差不多"）。
+    // 3) 主流最后一行的 `view`：必须等于 ckpt 里整个 `post`（逐值相等，不是"差不多"）。
     let main = last_main_row(&out);
     assert_eq!(main["round"], serde_json::json!(6));
     assert_eq!(
-        main["metrics"], v["post"]["metrics"],
-        "main.jsonl 的 metrics 与 ckpt 的 post.metrics 不是同一个值——两个读面各说各话"
+        main["view"], v["post"],
+        "main.jsonl 的 view 与 ckpt 的 post 不是同一个值——两个读面各说各话"
     );
 
-    // 4) flow 表最后回合的每一行：必须等于 ckpt 里 post.flow 的对应项。
-    let flow = derived_rows(&out, "flow", 6);
-    assert!(!flow.is_empty(), "idx/flow.jsonl 在最后一回合应有行");
-    let post_flow = &v["post"]["flow"];
+    // 4) **过程量表**最后回合的每一行：必须等于 ckpt 里 `post.factions[<势力>]` 的对应列。
+    //    两个读面读的是同一份视图 ⇒ 直接逐值相等，不再需要任何"存在性翻译"。
+    let proc = derived_rows(&out, "faction_process", 6);
+    assert!(!proc.is_empty(), "idx/faction_process.jsonl 在最后一回合应有行");
+    let rows = &v["post"]["factions"];
     let mut checked = 0usize;
     let mut governance_ran = 0usize;
-    for row in &flow {
+    for row in &proc {
         let fid = row["faction_id"].as_str().unwrap();
-        let expect_upkeep = &post_flow["upkeep"][fid];
+        let expect = &rows[fid];
         assert!(
-            !expect_upkeep.is_null(),
-            "ckpt 的 post.flow 里没有 {fid} 的 upkeep——checkpoint 丢了流量（--index --save 的旧 bug）"
+            !expect.is_null(),
+            "ckpt 的 post.factions 里没有 {fid} 的行——视图丢了过程量"
         );
-        assert_eq!(&row["upkeep"], expect_upkeep, "{fid} 的 upkeep 两个读面不一致");
+        assert_eq!(row["upkeep"], expect["upkeep"], "{fid} 的 upkeep 两个读面不一致");
         assert_eq!(
-            res_map(&row["production"]),
-            res_map(&post_flow["faction_production"][fid]),
+            row["production"], expect["production"],
             "{fid} 的 production 两个读面不一致"
         );
-        // 治理同理，只是多一层**存在性**翻译，见 `gov_of` 的说明。
-        let (exp_total, exp_cov) = gov_of(post_flow, fid);
-        assert_eq!(row["governance_total"], exp_total, "{fid} 的治理总开销两个读面不一致");
-        assert_eq!(row["governance_coverage"], exp_cov, "{fid} 的治理覆盖率两个读面不一致");
-        if !post_flow["governance"][fid].is_null() {
+        assert_eq!(
+            row["governance_total"], expect["governance_cost"],
+            "{fid} 的治理总开销两个读面不一致"
+        );
+        assert_eq!(
+            row["governance_coverage"], expect["governance_coverage"],
+            "{fid} 的治理覆盖率两个读面不一致"
+        );
+        if expect["governance_cost"].as_f64().unwrap_or(0.0) > 0.0 {
             governance_ran += 1;
         }
         checked += 1;
@@ -157,12 +138,12 @@ fn derived_matches_the_projection_for_the_same_round() {
     assert!(checked >= 2, "只比对到 {checked} 个势力——守卫太空（至少要有 >=2 个）");
     assert!(
         governance_ran >= 1,
-        "这一回合没有任何势力真的跑过治理——那条「存在性翻译」会退化成空转，守卫就白写了"
+        "这一回合没有任何势力真的跑过治理——这条守卫会退化成空转"
     );
 
-    // 5) city_flow 同理，且必须真有带产出的行（否则等于没检查）。
-    let city_flow = derived_rows(&out, "city_flow", 6);
-    let with_prod: Vec<&serde_json::Value> = city_flow
+    // 5) 城的过程量表同理，且必须真有带产出的行（否则等于没检查）。
+    let city_proc = derived_rows(&out, "city_process", 6);
+    let with_prod: Vec<&serde_json::Value> = city_proc
         .iter()
         .filter(|r| r["production"].as_object().map(|o| !o.is_empty()).unwrap_or(false))
         .collect();
@@ -170,8 +151,7 @@ fn derived_matches_the_projection_for_the_same_round() {
     for row in with_prod {
         let cid = row["city_id"].as_str().unwrap();
         assert_eq!(
-            res_map(&row["production"]),
-            res_map(&post_flow["city_production"][cid]),
+            row["production"], v["post"]["cities"][cid]["production"],
             "{cid} 的产出两个读面不一致"
         );
     }
@@ -186,7 +166,7 @@ fn derived_matches_the_projection_for_the_same_round() {
 /// **投影一份 checkpoint 时，起点那一行的流量必须是那一回合的真数**，不是 0。
 ///
 /// 档里的 `post` 就是「产生这个状态的那一回合」的派生态，而 `--start ckpt --round 0 --index`
-/// 写出的回合 0 行的 state 正是那个状态。若这里退回 `derived_from_state`，agent 会看到
+/// 写出的回合 0 行的 state 正是那个状态。若这里退回 `view_from_state`，agent 会看到
 /// 「全世界零产出、零维护、零治理」——一个数字上自洽、语义上骗人的读面。
 #[test]
 fn projecting_a_checkpoint_keeps_that_rounds_flow() {
@@ -211,18 +191,17 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
     let main = last_main_row(&proj);
     assert_eq!(main["round"], serde_json::json!(round));
     assert_eq!(
-        main["metrics"], v["post"]["metrics"],
-        "起点回合的 metrics 必须是档里那一回合的观测，不是重算（重算会把产出/维护/治理抹成 0）"
+        main["view"], v["post"],
+        "起点回合的视图必须是档里那一回合的，不是重算（重算会把过程量抹成 0）"
     );
-    let flow = derived_rows(&proj, "flow", round);
-    assert!(!flow.is_empty(), "起点回合应有 flow 行");
+    let proc = derived_rows(&proj, "faction_process", round);
+    assert!(!proc.is_empty(), "起点回合应有过程量行");
     let mut nonzero = 0usize;
-    for row in &flow {
+    for row in &proc {
         let fid = row["faction_id"].as_str().unwrap();
-        assert_eq!(&row["upkeep"], &v["post"]["flow"]["upkeep"][fid], "{fid} 的 upkeep 应为档里的真数");
+        assert_eq!(row["upkeep"], v["post"]["factions"][fid]["upkeep"], "{fid} 的 upkeep 应为档里的真数");
         assert_eq!(
-            res_map(&row["production"]),
-            res_map(&v["post"]["flow"]["faction_production"][fid]),
+            row["production"], v["post"]["factions"][fid]["production"],
             "{fid} 的 production 应为档里的真数"
         );
         if row["upkeep"].as_f64().unwrap_or(0.0) > 0.0 {
@@ -236,8 +215,10 @@ fn projecting_a_checkpoint_keeps_that_rounds_flow() {
     let st = run(&["--seed", "7", "--round", "0", "--index", fresh.to_str().unwrap()]);
     assert!(st.status.success());
     assert!(
-        derived_rows(&fresh, "flow", 0).iter().all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0),
-        "全新开局的回合 0 不该有流量"
+        derived_rows(&fresh, "faction_process", 0)
+            .iter()
+            .all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0),
+        "全新开局的回合 0 不该有过程量"
     );
 }
 
@@ -247,11 +228,20 @@ fn derived_without_checkpoint_says_it_was_recomputed() {
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     assert_eq!(v["source"], serde_json::json!("state"));
-    assert!(v["note"].is_string(), "按当前状态重算时必须给出 note，别让空的 flow 看起来像事实");
-    // 没有档就没有本回合流量：这里必须是空的（而不是报错/编数）。
-    assert_eq!(v["post"]["flow"]["upkeep"], serde_json::json!({}));
-    // 但 metrics 仍然是真的（从当前状态汇总），不该是空壳。
-    assert!(v["post"]["metrics"]["factions"].as_object().unwrap().len() >= 2);
+    assert!(
+        v["note"].is_string(),
+        "按当前状态重算时必须给出 note，别让全 0 的过程量看起来像事实"
+    );
+    // 没有档就没有本回合过程量：每个势力的过程列都必须是 0/空（而不是报错/编数）。
+    let rows = v["post"]["factions"].as_object().unwrap();
+    assert!(!rows.is_empty());
+    assert!(
+        rows.values().all(|r| r["upkeep"].as_f64().unwrap_or(0.0) == 0.0
+            && r["production"].as_object().map(|o| o.is_empty()).unwrap_or(true)),
+        "按状态重算时不该凭空出现过程量"
+    );
+    // 但观测部分仍然是真的（从当前状态汇总），不该是空壳。
+    assert!(rows.len() >= 2);
 }
 
 /// **判定表（`idx/decisions.jsonl`）的契约**：它必须与 `--derived` 里**同一回合存下来的**
@@ -276,7 +266,7 @@ fn decisions_table_matches_the_derived_record() {
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let v: serde_json::Value = serde_json::from_slice(&st.stdout).unwrap();
     let round = v["round"].as_u64().unwrap();
-    let dec = &v["post"]["flow"]["decisions"];
+    let dec = &v["post"]["decisions"];
     let ships = dec["ships"].as_array().expect("decisions.ships 是数组");
     let retools = dec["retools"].as_array().expect("decisions.retools 是数组");
 

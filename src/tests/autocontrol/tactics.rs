@@ -264,12 +264,11 @@ fn damaged_far_ai_ship_withdraws_to_heal() {
     // …而且**判定本身**要被记下来（不发事件的那一半）：从「它撤了」到「为什么撤」，
     // 只有 `decisions` 能回答——当时的血量比与撤退阈值就是判据。
     let rec = derived
-        .flow
         .decisions
         .ships
         .iter()
         .find(|d| d.ship == ship2 && d.verdict == ShipVerdict::Withdraw)
-        .unwrap_or_else(|| panic!("撤退判定必须被记下来，decisions={:?}", derived.flow.decisions.ships));
+        .unwrap_or_else(|| panic!("撤退判定必须被记下来，decisions={:?}", derived.decisions.ships));
     assert_eq!(rec.target.as_deref(), Some("地球"), "撤退目标是首都天体");
     assert!(
         (rec.retreat_hull - effective_retreat_hull(&config, rec.kiting)).abs() < 1e-12,
@@ -299,7 +298,7 @@ fn decisions_are_consistent_and_at_most_two_per_ship() {
     let (config, mut state) = fresh_world(42);
     let mut rng = Prng::new(7);
     let derived = advance(&mut state, &config, &mut rng);
-    let ds = &derived.flow.decisions.ships;
+    let ds = &derived.decisions.ships;
     assert!(!ds.is_empty(), "一回合至少要留下一批判定");
 
     let mut per_ship: std::collections::BTreeMap<String, Vec<&ShipDecision>> = std::collections::BTreeMap::new();

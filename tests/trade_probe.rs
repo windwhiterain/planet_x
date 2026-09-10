@@ -154,20 +154,20 @@ fn probe_market_prices() {
                     *cum_spawns.entry(owner.clone()).or_insert(0) += 1;
                 }
             }
-            let settled = &d.metrics.market_settled;
-            let offered = &d.metrics.market_offered;
+            let settled = &d.market_settled;
+            let offered = &d.market_offered;
             let sv: f64 = settled
                 .iter()
-                .map(|(rt, amt)| amt * d.metrics.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt)))
+                .map(|(rt, amt)| amt * d.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt)))
                 .sum();
             cum_settled_value += sv;
-            for (fid, v) in &d.metrics.market_net_import {
-                *cum_net.entry(fid.clone()).or_insert(0.0) += *v;
+            for (fid, row) in &d.factions {
+                *cum_net.entry(fid.clone()).or_insert(0.0) += row.net_import;
             }
             if checkpoints.contains(&r) {
                 print!("  r{r:<5} 价格倍数:");
                 for rt in &order {
-                    let p = d.metrics.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt));
+                    let p = d.market_price.get(rt).copied().unwrap_or_else(|| value_of(&config, rt));
                     let base = value_of(&config, rt);
                     print!(" {rt}={:.2}", if base > 0.0 { p / base } else { 1.0 });
                 }
@@ -225,7 +225,7 @@ fn probe_embargo() {
             }
             let mut any = false;
             let mut pairs = 0usize;
-            for (fid, fm) in &d.metrics.factions {
+            for (fid, fm) in &d.factions {
                 if fm.trade_blocked_by > 0 {
                     any = true;
                     *blocked_rounds.entry(fid.clone()).or_insert(0) += 1;
@@ -324,7 +324,7 @@ fn probe_armament_gate() {
                     }
                 }
             }
-            let d = sim::round_metrics(&state, &config, &RoundFlow::default());
+            let d = sim::observe(&state, &config, &RoundSink::default());
             let blocked: usize = d.factions.values().map(|m| m.trade_blocked_by).sum();
             println!("== 武器质量 seed {seed} 市场额度={arm}（{n} 回合）== 出厂舰={spawned}");
             print!("   武器:");
@@ -440,13 +440,13 @@ fn probe_freight() {
         let mut deep_routes = 0u32;
         for _ in 0..n {
             let d = sim::advance(&mut state, &config, &mut rng);
-            for (fid, v) in &d.flow.market_freight {
-                *freight.entry(fid.clone()).or_insert(0.0) += *v;
+            for (fid, row) in &d.factions {
+                *freight.entry(fid.clone()).or_insert(0.0) += row.freight_paid;
             }
             let mut any = false;
-            for (fid, v) in &d.flow.market_carrier_income {
-                *carrier.entry(fid.clone()).or_insert(0.0) += *v;
-                if *v > 0.0 {
+            for (fid, row) in &d.factions {
+                *carrier.entry(fid.clone()).or_insert(0.0) += row.carrier_income;
+                if row.carrier_income > 0.0 {
                     any = true;
                 }
             }
@@ -1114,7 +1114,7 @@ fn probe_threat_motive() {
                     _ => {}
                 }
             }
-            for t in &d.flow.decisions.retools {
+            for t in &d.decisions.retools {
                 *retools.entry(format!("{}→{}", t.from, t.to)).or_insert(0) += 1;
             }
             if r % 100 == 0 {
