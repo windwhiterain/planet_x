@@ -21,10 +21,13 @@ uv run --project play/planet_xq python play/tests/g3_long.py       # 单跑一�
 
 | 组 | 档 | 现在装的是什么 |
 | --- | --- | --- |
-| `g1_contract.py` | T0/T1（≤48 回合） | 读面契约：同 seed 逐字节可复现、`--derived` 的 `post` ≡ `--index` 的 `view`、过程量表与视图同源、中性值表里没有死路径 |
-| `g2_mid.py` | T2（400 回合） | 机制不变量：拆平的城不被旧主同回合复垦、整局里出现过装组件的活舰 |
-| `g3_long.py` | T3（1000 回合 × 7 seed） | 世界健康与政治机制：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
+| `g1_contract.py` | T0/T1（≤60 回合） | **读面契约**：同 seed 逐字节可复现；`--derived` 的 `post` ≡ `--index` 的 `view`；过程量表（`faction_process`/`city_process`）、判定表（`decisions`）、贸易两张表（`market_trades`/`haul_steps`）、输入面（`round_inputs` ≡ `pre`）逐值对账；从档投影时起点行保留真过程量；无档的 `--derived` 自报重算；`--control` 是不动点（dump→回传→逐字节相同）；中性值表里没有死路径 |
+| `g2_mid.py` | T2（400 回合） | **机制不变量**：拆平的城不被旧主同回合复垦；整局里出现过装组件的活舰；编年史（RoundAt 节拍都触发/顺序单调/id 唯一/参与者具体）；没有一场战争短于疤痕承诺的回合数 |
+| `g3_long.py` | T3（1000 回合 × 7 seed） | **世界健康与政治机制**：读面没有非有限的数、不进吸收态、零活城复生、经济有界、建城必须有舰、合纵连横/制裁活着、霸权叙事自洽 |
 | `g4_spec.py` | T0/T1（40 回合 + 两个单点 dump） | **声明纪律**（从 `web/src/views_tests.rs` 搬来，原处留指针）：① 静态——id 唯一 / 引用完整（`use`/`use_at`/`card`/`map_ref`/`label_from`）/ `omit` 不与列重叠 / 路径表达式合文法 / `@根` 已知；② 写面对账——`--control-schema` 的 `leaves[].field` ∪ `actions[].field` ∪ `{faction_id}` **双向等于** `FactionControlPatch.properties`；③ 读面对账——**跑一局**、每片叶写一次（哨兵值）、再 `--control` 读回来，对条目字段集与「`keys` 空 ⇔ 对象」的形状；④ 认领完整性——每个叶都被 `leaf`/`action` 行认领，或在 `write_omit` 里写明理由（否则它在界面上凭空消失） |
+
+每一条都带**防空转**判据（「这一局里真的发生过 X」），红的时候打印前几条样例 + 总处数，
+样例里带 `(seed, 回合)`。
 
 ## 两件让它快的事
 

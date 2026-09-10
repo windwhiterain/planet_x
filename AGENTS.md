@@ -24,6 +24,38 @@
   给出 pid / 端口 / 二进制 + 构建时长——对不上就是连错了实例。
 - 细节与坑见 [笔记：服务生命周期](.agents/notes/web-lifecycle.md)。
 
+## 验证（合流门前都要过）
+
+分两层，**判据住在哪一层由「能不能只看跑出来的数据」决定**（见
+[笔记：测试与二进制解耦](.agents/notes/test-decoupled-suite.md)）：
+
+```bash
+# ① 数据级（不需要重编 Rust；改断言 = 改 .py，立刻生效）
+uv run --project play/planet_xq python play/tests/run.py all      # 三组 53 条判据；缓存命中 ~4 s
+uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（内循环）
+
+# ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
+cargo nextest run -P full                    # 合流门
+cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
+```
+
+- 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
+  世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
+- **内循环走 debug、合流门走 release**（实测，改一个引擎文件之后）：
+
+  | 路线 | 编 + 跑 |
+  | --- | --- |
+  | release：`cargo build --release` + `run.py 1` | 39.5 + 3.7 ≈ **44 s** |
+  | **debug：`cargo build` + `run.py 1 --bin debug`** | 3.3 + 8.9 ≈ **12 s** |
+
+  长组反过来：debug 下模拟慢 ~4×（投影 1000 回合 8.6 s → ~35 s）⇒ `run.py all` 用 release。
+- 现在的耗时结构（谁是大头）与两个未决的口子见
+  [笔记 §11](.agents/notes/test-decoupled-suite.md)：**Rust 门 62 s 里 58 s 是 test 档编译、
+  真跑只有 4.2 s**；投影每 1000 回合 169 MB（纯模拟 5.7 s vs 带投影 8.6 s ⇒ 写盘占 34%）。
+- 加一条断言：写进 `play/tests/g*.py` 的 `run()` 里（判据写 `run()`、数据取自摘要 ⇒ 改断言
+  不重读投影）；**每条守卫都要带防空转判据**（「这一局里真的发生过 X」）。
+- 分档口径不变（[笔记：测试分档](.agents/notes/test-tiers.md)）：快组 ≈ T0/T1、中组 ≈ T2、长组 ≈ T3。
+
 ## 给 agent 的工作约定
 
 - 永远用相对数值比例而非绝对数值
