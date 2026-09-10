@@ -1,12 +1,14 @@
-//! 观测舰（角色轴第三态）的单元测试：配额、选靶、期望入伙数、优先级、行为。
+//! 观测舰（角色轴第三态）的单元测试：**三个动机怎么抢一支舰队**、选靶、期望入伙数、行为。
 //!
-//! 这些用例是 §11 验收判据的前半段（后半段是世界级的探针：`tests/tech_probe.rs` 里
-//! 「至少一家把掌握度推到 1.0」）。分工：
-//! * **本文件**：机制本身（尺子、配额、抽签的期望、优先级、指令）；
-//! * **探针**：整个世界跑 600 回合之后，这件事到底发生了没有。
+//! 用户裁决（第二轮追加）：「加硬阈值只能说明动机设计的不够好，把资源堆积的运输动机和战争
+//! 威胁动机覆盖了，**不能加阈值要自然**」。所以这一份用例的重点是**挤压关系**：
+//! 积压涨 ⇒ 观测分到的少；威胁涨 ⇒ 观测分到的少；思潮（科学↔技术）决定观测那一支值多少。
+//! 分工：**本文件**测机制本身；**探针**（`tests/tech_probe.rs`）测整个世界跑 600 回合之后
+//! 到底有没有人学会 MOND。
 
 use super::*;
-use crate::autocontrol::freight::assign_roles;
+use crate::autocontrol::freight::{assign_roles, observer_quota, role_quotas};
+use crate::autocontrol::knowledge::{observe_claim, observe_lean};
 use crate::autocontrol::tactics::ai_ship_turn;
 use crate::config::load_config;
 use crate::world::default_state;
@@ -18,18 +20,38 @@ fn fresh(seed: u64) -> (GameConfig, State) {
     (config, state)
 }
 
-/// 某势力此刻在观测的舰（按舰名序）——用例里到处要看它。
+/// 某势力此刻在观测的舰（按舰名序）。
 fn observers(state: &State, fid: &str) -> Vec<String> {
     let mut v: Vec<String> = state
         .ships
         .iter()
         .filter(|s| {
-            s.faction_id == fid && s.hull > 0.0 && state.ship_role(s.name.clone()) == ShipRole::Observe
+            s.faction_id == fid
+                && s.hull > 0.0
+                && state.ship_role(s.name.clone()) == ShipRole::Observe
         })
         .map(|s| s.name.clone())
         .collect();
     v.sort();
     v
+}
+
+/// 把某势力的舰队克隆 `times` 倍（名字加后缀）——用例需要一支**够大的**舰队，
+/// 否则「各支能分到多少」会被舰队规模顶住，看不出动机之间的挤压。
+fn grow_fleet(state: &mut State, fid: &str, times: usize) {
+    let base: Vec<Ship> = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid)
+        .cloned()
+        .collect();
+    for k in 1..=times {
+        for s in &base {
+            let mut c = s.clone();
+            c.name = format!("{}-{k}", c.name);
+            state.ships.push(c);
+        }
+    }
 }
 
 /// **尺子**：`期望在场收益 = p(深度, 掌握度) × (1 + 深度 × depth_weight)`。
@@ -45,62 +67,172 @@ fn expected_presence_gain_keeps_mortals_near_the_frontier_and_masters_deep() {
     let (config, _state) = fresh(42);
     let shallow = 2.0; // 海王星一带（30 AU）
     let deep = 10.2; // 创神星/阋神星一带（约 38 AU）
-    let mortal = crate::autocontrol::knowledge::body_weight(&config, 0.0, shallow)
-        > crate::autocontrol::knowledge::body_weight(&config, 0.0, deep);
-    assert!(mortal, "凡人该蹲前沿边上（深处期望收益更低），实为 {:.2} vs {:.2}",
-        crate::autocontrol::knowledge::body_weight(&config, 0.0, shallow),
-        crate::autocontrol::knowledge::body_weight(&config, 0.0, deep));
-    let master = crate::autocontrol::knowledge::body_weight(&config, 1.0, deep)
-        > crate::autocontrol::knowledge::body_weight(&config, 1.0, shallow);
-    assert!(master, "指哪打哪的势力该往深处去（p 都是 1 ⇒ 收益就是在场价值）");
-    // 中间是**连续**的过渡，不是开关：0.9 的势力在深处的收益已经超过凡人。
+    let w = |c: f64, d: f64| crate::autocontrol::knowledge::body_weight(&config, c, d);
     assert!(
-        crate::autocontrol::knowledge::body_weight(&config, 0.9, deep)
-            > crate::autocontrol::knowledge::body_weight(&config, 0.0, deep)
+        w(0.0, shallow) > w(0.0, deep),
+        "凡人该蹲前沿边上（深处期望收益更低）：{:.2} vs {:.2}",
+        w(0.0, shallow),
+        w(0.0, deep)
+    );
+    assert!(
+        w(1.0, deep) > w(1.0, shallow),
+        "指哪打哪的势力该往深处去（p 都是 1 ⇒ 收益 = 在场价值）"
+    );
+    // 中间是**连续**的过渡，不是开关。
+    assert!(w(0.9, deep) > w(0.0, deep));
+}
+
+/// **三支力量抢舰队**（用户裁决：不许加阈值，要自然）——这条用例把三处挤压关系一次钉住：
+///
+/// 1. **没有任何角色上限**：没有积压、没有威胁时，观测能拿到**超过一半**的舰队
+///    （第一版那条「最多占一半」写死的上限会在这里翻红——它正是被否掉的东西）；
+/// 2. **资源堆积的运输动机能把它顶回去**：堆几处货栈 ⇒ 运输主张变大 ⇒ 观测分到的变少；
+/// 3. **战争威胁动机能把它顶回去**：把一支比自己强的敌军摆到开战关系上 ⇒ 战舰那一份吃掉
+///    余量 ⇒ 观测（和运输）一起缩。
+#[test]
+fn the_three_motives_share_the_fleet_with_no_cap_anywhere() {
+    let (config, base) = fresh(42);
+    let fid = "中国";
+    let mut calm = base.clone();
+    grow_fleet(&mut calm, fid, 4); // 15 艘：够大，配额不会被舰队规模顶住
+    let fleet =
+        |s: &State| s.ships.iter().filter(|x| x.faction_id == fid && x.hull > 0.0).count() as f64;
+    let n = fleet(&calm);
+    assert!(n >= 15.0, "用例前提：克隆出一支大舰队（{n}）");
+    assert!(
+        crate::autocontrol::shipbuilding::threat_motive(&calm, &config, fid) < 0.2,
+        "用例前提：这一支没有威胁"
+    );
+
+    // ① 无积压、无威胁 ⇒ 观测能拿走**过半**的舰队。⚠ 这里用**小舰队**：观测的主张是
+    //    `学满所需头数 × 思潮倾向`（在 15 艘的舰队里它可能只有 5–6 艘，于是「全额兑现」而
+    //    不到一半）——「没有上限」这件事在小舰队上才看得出来：3 艘里能有 2 艘去观测，
+    //    而第一版那条写死的「最多占一半」会把这里卡在 1.5 艘。
+    let small = base.clone();
+    let small_n =
+        small.ships.iter().filter(|x| x.faction_id == fid && x.hull > 0.0).count() as f64;
+    let (_, sm_frt, sm_obs) = role_quotas(&small, &config, fid);
+    assert!(small_n >= 3.0, "用例前提：中国开局有舰（{small_n}）");
+    assert!(
+        sm_obs > 0.5 * small_n,
+        "没有别的动机时，观测该能拿到过半的舰队（{sm_obs:.2} / {small_n}）\
+         ——这正是「一律最多一半」那条上限做不到的事"
+    );
+    assert!(sm_frt + sm_obs <= small_n + 1e-9);
+
+    // ① b 大舰队：主张装得下预算 ⇒ **全额兑现**（不封顶，也不被舰队规模硬压）。
+    let (war, frt, obs) = role_quotas(&calm, &config, fid);
+    let claim = observe_claim(&calm, &config, fid);
+    assert!(
+        (obs - claim).abs() < 1e-9,
+        "装得下就各得其所：观测配额该等于它的主张（{obs:.2} vs 主张 {claim:.2}）"
+    );
+    assert!(
+        war + frt + obs <= n + 1e-9,
+        "三支加起来不该超过舰队：{war:.2}+{frt:.2}+{obs:.2} vs {n}"
+    );
+    assert!(war / n > 0.2, "常备军那一份仍在（{:.2}）", war / n);
+
+    // ② 堆货栈 ⇒ 运输主张变大。⚠ 要点满到**主张超过预算**才会挤压：水位配给的规矩是
+    //    「装得下就各得其所」——只有加起来超了，才会按相对大小成比例缩水。所以这里堆够
+    //    十处货栈，并**断言前提**（主张之和确实超了预算），免得这条用例悄悄退化成空转。
+    let mut stocked = calm.clone();
+    let bodies = [
+        "金星", "水星", "火星", "木星", "土星", "天王星", "海王星", "冥王星", "卡戎", "谷神星",
+    ];
+    for (i, body) in bodies.iter().enumerate() {
+        stocked.depot_add(fid, body, "碳", 500.0 * (i as f64 + 1.0));
+    }
+    let freight_claim = crate::autocontrol::freight::freighter_quota(&stocked, fid);
+    let observe_claim_v = observe_claim(&stocked, &config, fid);
+    assert!(
+        freight_claim + observe_claim_v > (war + frt + obs - war) + 1e-9,
+        "用例前提：两支主张加起来要超过可分预算才会挤压（主张 {:.2} vs 预算 {:.2}）",
+        freight_claim + observe_claim_v,
+        frt + obs
+    );
+    let (_, frt2, obs2) = role_quotas(&stocked, &config, fid);
+    assert!(frt2 > frt, "积压上来，运输该多分到（{frt:.2} → {frt2:.2}）");
+    assert!(
+        obs2 < obs,
+        "**资源堆积的运输动机该把观测顶回去**：{obs:.2} → {obs2:.2}"
+    );
+
+    // ③ 一支比自己强的敌军摆到开战关系上 ⇒ 战舰那一份吃掉余量 ⇒ 观测（与运输）再缩。
+    let mut threatened = stocked.clone();
+    // 40 倍：威胁读的是 `faction_power_share`（城 + 舰体占全星系的比例），要把 15 艘舰的
+    // 中国压成弱势，对手得真的**大一个数量级**（×6 只有 0.16，因为中国的城与舰本来就多）。
+    grow_fleet(&mut threatened, "美国", 40);
+    for f in ["中国", "美国"] {
+        let other = if f == "中国" { "美国" } else { "中国" };
+        threatened
+            .faction_mut(f)
+            .unwrap()
+            .relations
+            .insert(other.to_string(), -200.0);
+    }
+    let threat = crate::autocontrol::shipbuilding::threat_motive(&threatened, &config, fid);
+    assert!(threat > 0.5, "用例前提：这一支确实被强敌压着（威胁 {threat:.2}）");
+    let (war3, frt3, obs3) = role_quotas(&threatened, &config, fid);
+    assert!(war3 > war, "威胁上来，战舰那一份该变大（{war:.2} → {war3:.2}）");
+    assert!(
+        obs3 < obs2,
+        "**战争威胁动机该把观测顶回去**：{obs2:.2} → {obs3:.2}"
+    );
+    assert!(
+        frt3 < frt2,
+        "余量被战舰吃掉，运输也一起缩（{frt2:.2} → {frt3:.2}）"
+    );
+    assert!(
+        war3 + frt3 + obs3 <= n + 1e-9,
+        "极端威胁下也该装得进舰队：{war3:.2}+{frt3:.2}+{obs3:.2} vs {n}"
     );
 }
 
-/// **配额**：`学满所需的在场强度 ÷ 每艘在目标深度的价值`，且被「舰队的一半」压住。
-///
-/// 两条上界的意图不同，用例都要钉住：
-/// * `mastery_presence` 是**绝对量**（学满的资格）⇒ 人得一直派够，不能随掌握度缩水；
-/// * 「一半」是**政策**（观测是副业）⇒ 小势力不会被抽干。
+/// **思潮决定观测那一支值多少**（与集货的 `freight_lean` 同形）：科学端 > 中庸 > 技术端。
+/// 方向与 `governance` 那条「科学端 + 舰不在异常区 = 言行不符」的忠诚惩罚**同向**。
 #[test]
-fn observer_quota_targets_mastery_and_never_eats_the_whole_fleet() {
-    let (config, state) = fresh(42);
+fn the_science_axis_decides_how_much_the_fleet_wants_to_observe() {
+    let (config, base) = fresh(42);
     let fid = "中国";
-    // 默认世界：中国有 3 艘舰 ⇒ 配额被「一半」压住（12 ÷ 每艘约 1.5 = 8 艘 > 1.5）。
-    let quota = crate::autocontrol::knowledge::observer_quota(&state, &config, fid);
-    let fleet = state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count() as f64;
-    assert!(fleet > 0.0, "用例前提：中国开局有舰");
+    let claim = |sci: f64| -> f64 {
+        let mut st = base.clone();
+        st.faction_mut(fid).unwrap().ideology.science_tech = sci;
+        observe_claim(&st, &config, fid)
+    };
+    let (science, neutral, tech) = (claim(-1.0), claim(0.0), claim(1.0));
     assert!(
-        (quota - 0.5 * fleet).abs() < 1e-9,
-        "三艘舰 ⇒ 配额该被「一半」顶住（{quota:.2} vs 一半 {:.2}）",
-        0.5 * fleet
+        science > neutral && neutral > tech,
+        "科学端 > 中庸 > 技术端：{science:.2} / {neutral:.2} / {tech:.2}"
     );
-    // 舰队变大 ⇒ 配额改由「学满的资格」决定，且**不再随舰队线性增长**。
-    let mut big = state.clone();
-    for k in 1..=9 {
-        for s in state.ships.iter().filter(|s| s.faction_id == fid).cloned().collect::<Vec<_>>() {
-            let mut c = s;
-            c.name = format!("{}-{k}", c.name);
-            big.ships.push(c);
-        }
-    }
-    let big_fleet =
-        big.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count() as f64;
-    let big_quota = crate::autocontrol::knowledge::observer_quota(&big, &config, fid);
-    assert!(big_fleet > 20.0, "用例前提：克隆出一支大舰队（{big_fleet}）");
-    assert!(big_quota < 0.5 * big_fleet, "大舰队时上界换成「学满的资格」：{big_quota:.2}");
-    assert!(big_quota > 0.0, "还没学满 ⇒ 配额必须为正");
-    // **已经到顶（棘轮）⇒ 配额 0**：没有东西可学了。这不是断崖，是棘轮的另一面。
-    let mut mastered = state.clone();
-    mastered.faction_mut(fid).unwrap().mond_control = 1.0;
-    assert_eq!(
-        crate::autocontrol::knowledge::observer_quota(&mastered, &config, fid),
-        0.0,
-        "学满之后没有必要再派人观测"
+    let lean = |sci: f64| -> f64 {
+        let mut st = base.clone();
+        st.faction_mut(fid).unwrap().ideology.science_tech = sci;
+        observe_lean(&st, fid)
+    };
+    assert!((lean(0.0) - 1.0).abs() < 1e-9, "中庸（0）⇒ 倾向正好 1.0");
+    assert!(
+        lean(-1.0) > 1.0 && lean(1.0) < 1.0,
+        "科学端 > 1、技术端 < 1：{:.2} / {:.2}",
+        lean(-1.0),
+        lean(1.0)
     );
+    assert!(science > 1.3 * tech, "两端该拉开可见的差距（{:.2}×）", science / tech);
+}
+
+/// **学满之后不再主张**：掌握度到顶（棘轮）⇒ 观测主张 0 ⇒ 配额 0。
+/// 这不是阈值断崖，而是 `sim::step_knowledge` 里那条棘轮的同一句话（到顶不再变化 ⇒ 也没必要派人）。
+#[test]
+fn a_mastered_faction_claims_nothing_and_keeps_its_ships_at_war() {
+    let (config, mut state) = fresh(42);
+    let fid = "中国";
+    state.faction_mut(fid).unwrap().mond_control = 1.0;
+    assert_eq!(observe_claim(&state, &config, fid), 0.0);
+    let (war, frt, obs) = role_quotas(&state, &config, fid);
+    assert_eq!(obs, 0.0, "学满 ⇒ 观测配额 0");
+    assert_eq!(frt, 0.0, "没有积压 ⇒ 运输配额 0");
+    let fleet = state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count() as f64;
+    assert_eq!(war, fleet, "两支都没主张 ⇒ 全军留在战位");
 }
 
 /// **期望入伙数 = 缺口**（与集货同一条纪律）。用户裁决的「概率分布而不是硬阈值」在这里的
@@ -110,31 +242,22 @@ fn observer_quota_targets_mastery_and_never_eats_the_whole_fleet() {
 fn the_observer_headcount_lands_on_the_quota() {
     let (config, base) = fresh(42);
     let fid = "中国";
-    // 克隆到一支中等舰队，让配额由「学满的资格」决定（而不是被「一半」顶住）。
     let mut state = base.clone();
-    for k in 1..=4 {
-        for s in base.ships.iter().filter(|s| s.faction_id == fid).cloned().collect::<Vec<_>>() {
-            let mut c = s;
-            c.name = format!("{}-{k}", c.name);
-            state.ships.push(c);
-        }
-    }
-    let quota = crate::autocontrol::knowledge::observer_quota(&state, &config, fid);
-    assert!(quota > 1.0 && quota < 12.0, "用例前提：配额由学满的资格决定（{quota:.2}）");
+    grow_fleet(&mut state, fid, 4);
     // ⚠ 比的是**逐回合的均值**：配额本身会动——每 12 回合按期望在场收益重抽目标天体，
-    // 抽到深处（在场价值高）⇒ 每艘顶得上更多 ⇒ 配额低；抽到前沿边上 ⇒ 配额高。拿
-    // 某一回合的瞬时值去比 400 回合的均值，比的是两件不同的事。
+    // 抽到深处（在场价值高）⇒ 每艘顶得上更多 ⇒ 主张低；抽到前沿边上 ⇒ 主张高。
     let mut sum = 0.0;
     let mut sum_quota = 0.0;
     let rounds = 400;
     for _ in 0..rounds {
         state.round += 1;
-        sum_quota += crate::autocontrol::knowledge::observer_quota(&state, &config, fid);
+        sum_quota += observer_quota(&state, &config, fid);
         assign_roles(&mut state, &config);
         sum += observers(&state, fid).len() as f64;
     }
     let mean = sum / rounds as f64;
     let mean_quota = sum_quota / rounds as f64;
+    assert!(mean_quota > 1.0, "用例前提：观测确实分到了船（配额均值 {mean_quota:.2}）");
     assert!(
         (mean - mean_quota).abs() < 0.5,
         "平均观测头数该贴着配额（逐回合均值 {mean_quota:.2}，实测均值 {mean:.2}）"
@@ -159,24 +282,28 @@ fn the_observer_headcount_lands_on_the_quota() {
     );
 }
 
-/// **优先级：观测 > 运输 > 战斗**（用户裁决）。同一批舰、同一份积压，观测先挑人，
-/// 剩下的才轮得到集货——因为观测是**唯一没有替代品**的角色（运输缺船还能雇人）。
+/// **两种角色同时存在、各自贴着配额**：有积压（运输主张）也有知识缺口（观测主张）时，
+/// 舰队被分成两拨——观测**先挑**（优先级），但它挑的条数是水位配给给的，
+/// 所以运输也真的拿到它那一份（不是「观测吃饱、运输饿着」）。
 #[test]
-fn observers_are_picked_before_haulers() {
+fn observers_and_haulers_both_get_their_share() {
     let (config, mut state) = fresh(42);
     let fid = "中国";
-    // 一份很大的积压 ⇒ 集货配额很高（4 处货栈 + 中庸倾向 ⇒ 4 条腿）。
+    grow_fleet(&mut state, fid, 4);
     state.depots.clear();
     for b in ["金星", "水星", "火星", "木星"] {
         state.depot_add(fid, b, "碳", 100.0);
     }
     let mut sum_obs = 0.0;
     let mut sum_freight = 0.0;
-    let mut sum_quota = 0.0;
+    let mut sum_obs_quota = 0.0;
+    let mut sum_frt_quota = 0.0;
     let rounds = 200;
     for _ in 0..rounds {
         state.round += 1;
-        sum_quota += crate::autocontrol::knowledge::observer_quota(&state, &config, fid);
+        let (_, fq, oq) = role_quotas(&state, &config, fid);
+        sum_frt_quota += fq;
+        sum_obs_quota += oq;
         assign_roles(&mut state, &config);
         sum_obs += observers(&state, fid).len() as f64;
         sum_freight += state
@@ -189,25 +316,18 @@ fn observers_are_picked_before_haulers() {
             })
             .count() as f64;
     }
-    let obs = sum_obs / rounds as f64;
-    let frt = sum_freight / rounds as f64;
-    // 同样比逐回合均值（配额随「重抽目标天体」在动）。
-    let quota = sum_quota / rounds as f64;
-    let freight_quota = crate::autocontrol::freight::freighter_quota(&state, fid);
-    assert!(obs > 0.5, "有观测配额就该真的有人去观测（实测 {obs:.2}）");
+    let (obs, frt) = (sum_obs / rounds as f64, sum_freight / rounds as f64);
+    let (oq, fq) = (sum_obs_quota / rounds as f64, sum_frt_quota / rounds as f64);
     assert!(
-        (obs - quota).abs() < 0.6,
-        "观测先挑人，且挑满自己的配额（配额 {quota:.2}，实测 {obs:.2}）"
+        oq > 0.5 && fq > 0.5,
+        "用例前提：两支都分到了船（观测 {oq:.2} / 运输 {fq:.2}）"
     );
-    assert!(frt > 0.5, "剩下的船照常被派去跑运输（实测 {frt:.2}）");
+    assert!((obs - oq).abs() < 0.6, "观测贴着它的配额（{oq:.2} vs 实测 {obs:.2}）");
+    assert!((frt - fq).abs() < 0.6, "运输也贴着它的配额（{fq:.2} vs 实测 {frt:.2}）");
     let fleet = state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0).count() as f64;
     assert!(
         obs + frt <= fleet + 0.01,
         "两种角色互斥（枚举保证），且不该凭空超过舰队规模：{obs:.2} + {frt:.2} vs {fleet}"
-    );
-    assert!(
-        frt <= freight_quota + 1.0,
-        "集货拿到的是**剩下的**船，不该超过它自己的配额（{frt:.2} vs {freight_quota:.2}）"
     );
 }
 
@@ -244,15 +364,13 @@ fn an_observer_is_ordered_to_dock_at_a_body_inside_the_anomaly() {
         &mut next_building_id,
         &mut decisions,
     );
-    let order = state.ship_behavior(ship.clone());
-    match order {
+    match state.ship_behavior(ship.clone()) {
         Some(ShipBehavior::Dock { body }) => {
             let depth = sim::dist(state.body_position(&body), [0.0, 0.0]) - config.mond.radius;
             assert!(depth > 0.0, "驻地必须在异常区里（{body} 深 {depth:.2}）");
         }
         other => panic!("观测舰该被派去 Dock 异常区的天体，实为 {other:?}"),
     }
-    // 它不是在「打仗」这一档上被派活：决策里没有接战/追击那一类结论。
     assert!(
         decisions.iter().all(|d| !matches!(d.verdict, ShipVerdict::Engage)),
         "观测舰不追敌（照常开火由 auto_combat 负责，不改写指令）"

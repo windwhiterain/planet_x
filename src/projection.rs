@@ -576,11 +576,13 @@ fn write_round(
                     && crate::sim::dist(s.position, [0.0, 0.0]) > config.mond.radius
             })
             .count();
-        // **观测定编**（`autocontrol::knowledge`）：本势力本回合想要的观测舰头数、抽签抽中的
-        // 目标天体、以及此刻真的在观测的舰数。三列一起读就能回答「它为什么没在学 MOND」——
-        // 是配额 0（不想学 / 已经学满），还是没人可派（配额 > 0 但 `observer_count` 跟不上）。
-        let observer_quota =
-            r2(crate::autocontrol::knowledge::observer_quota(state, config, &f.name));
+        // **三支力量抢舰队的结果**（`autocontrol::freight::role_quotas` 的水位配给）：
+        // 战舰 / 运输 / 观测各自的**目标头数**。它们与三个动机列一起读，就能回答
+        // 「它为什么没在学 MOND」：是没人主张（学满了 / 没积压），还是主张被别人抢走了
+        // （大军压境 ⇒ 战舰那一份吃光余量；积压成山 ⇒ 运输主张更大）。
+        let (war_quota, freight_share, observer_quota) =
+            crate::autocontrol::freight::role_quotas(state, config, &f.name);
+        let observer_lean = crate::autocontrol::knowledge::observe_lean(state, &f.name);
         let observer_target = crate::autocontrol::knowledge::target_body(state, config, &f.name)
             .map(|(b, _)| json!(b))
             .unwrap_or(serde_json::Value::Null);
@@ -638,10 +640,12 @@ fn write_round(
                 "mond_control": r2(f.mond_control),
                 "mond_ships_in_band": ships_in_band,
                 "mond_frontier_au": frontier_json,
-                // **观测定编**（第三条角色轴的第三态）：`observer_quota` = 本回合想要的观测舰
-                // 头数（连续量）、`observer_count` = 此刻真的在观测的舰数、`observer_target` =
-                // 抽签抽中的驻地天体。配额与新不学得到顶是同一句话（掌握度到顶 ⇒ 配额 0）。
-                "observer_quota": observer_quota,
+                // **三支力量抢舰队的结果**（水位配给）：三列加起来 = 舰队规模或更少，差额留在
+                // 战位上。`observer_lean` 是观测那一支的**思潮倾向**（科学端 > 1、技术端 < 1）。
+                "war_quota": r2(war_quota),
+                "freighter_quota_share": r2(freight_share),
+                "observer_quota": r2(observer_quota),
+                "observer_lean": r2(observer_lean),
                 "observer_count": observer_count,
                 "observer_target": observer_target,
                 // 此刻实际在跑运输的舰数（有效角色为 true；含玩家钉住与舱里有货的）。
@@ -1159,12 +1163,15 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","observer_quota":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
                     "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
                     "mond_control": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
                     "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
-                    "observer_quota": "**观测配额**（目标头数，连续量）：本势力**该有几艘舰去异常区蹲着** = `学满所需的在场强度 ÷ 一艘舰在目标天体处值多少`（`autocontrol::knowledge`），再被「舰队的一半」压住（观测是副业：一支三艘舰的小势力把船全派去蹲点，既打不了仗也运不了货，而三艘舰根本够不到学满）。掌握度**到顶 ⇒ 配额 0**（棘轮之下没有东西可学了，这不是断崖，是同一条棘轮的另一面）。",
+                    "observer_quota": "**观测配额**（目标头数）——**三个动机抢一支舰队**之后观测分到的那一份（水位配给，`autocontrol::freight::role_quotas`）：`战位先按威胁留出一份，剩下的余量由运输与观测按各自主张的相对大小分`。主张装得下就各得其所、装不下就按比例缩水，**没有任何角色上限**（用户裁决：不许加阈值，要自然）。掌握度**到顶 ⇒ 主张 0**（棘轮之下没有东西可学）。",
+                    "war_quota": "**战舰配额**（目标头数）：`舰队 × (0.25 + 0.6 × threat_motive)`。它是三支力量里的**第一顺位**——`威胁`（被强敌压的程度）越狠，留作战舰的越多，运输与观测能分的余量越小。⚠ 它读的 `threat_motive` 实测**确实是情境量**：长局里当霸权的中国/俄罗斯 ≈ 0.01，被压着打的星系矿业/无国界科学组织 ≈ 0.8–0.9。",
+                    "freighter_quota_share": "**运输配额**（目标头数）：水位配给**之后**运输真能派出去的那一份。与 `freighter_quota`（**主张** = 想派多少）对照着读：两者相等 = 它的主张全额兑现；后者更大 = 它被观测/战舰挤了。",
+                    "observer_lean": "**观测倾向**（头数倍数，中庸 = 1.0）：**科学↔技术**思潮轴给观测那一支的价值加权（科学端 > 1、技术端 < 1）。与集货的 `freight_lean` 同形：**思潮决定倾向，缺口决定量级**。方向与 `governance` 那条「科学端 + 舰不在异常区 = 言行不符」的忠诚惩罚**同向**——同一个世界的两处读法不能自相矛盾。",
                     "observer_count": "**此刻真的在观测的舰数**（有效角色 = `Observe`）。与 `observer_quota` 一起读就能分清「不想学」（配额 0）与「没人可派」（配额 > 0 但这一列跟不上）。",
                     "observer_target": "**观测编队的驻地天体**：候选 = 异常区内的天体，按**期望在场收益**（`p(深度, 掌握度) × (1 + 深度 × depth_weight)`）**抽签**（不是取最大者），每 12 回合重抽一次 ⇒ 掌握度涨上去之后编队会自然往外挪（凡人先蹲前沿边上的海王星/冥王星，掌握度高了才轮到创神星/阋神星）。`null` = 没有带内天体。",
                     "mond_frontier_au": "**前沿海拔**（AU）：一次导航尝试就能精确到位（p = 1）的最远日心距 = `radius + arrival_eps/(drift_per_au×(1−mond_control))`。前沿**之外**不是「进不去」，而是「期望要试 `1/p` 次」；掌握度到顶时为 `null`（无穷远，指哪打哪）。",

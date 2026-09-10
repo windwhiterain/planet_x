@@ -123,6 +123,76 @@ const ROLE_WIDTH: f64 = 0.5;
 ///（遵 `AGENTS.md`：不设进不去的目标——真没人运货时，战列舰照样会去跑）。
 const ROLE_EFF_GAIN: f64 = 1.5;
 
+// --- 三个角色怎么瓜分一支舰队（用户裁决：不许加阈值，要自然）---------------------------
+//
+// 角色轴上有三支力量在抢同一批船，各自有一个**主张**（头数，连续量）：
+//   战舰：`威胁`（被强敌压的程度）—— 压得越狠越要多留人打仗；
+//   运输：`积压 × 思潮倾向`（[`freighter_quota`]）—— 货堆得越多越想派人去搬；
+//   观测：`离学满的缺口 × 思潮倾向`（`knowledge::observe_claim`）—— 想学的人才会派人去蹲。
+//
+// 配给规则是**水位**（water-filling），**没有任何角色上限**：
+//   1. 战舰那一份先按威胁定：`war_share = WAR_BASE + WAR_THREAT_GAIN × threat_motive`，
+//      剩下的 `预算 = 舰队 × (1 − war_share)` 留给运输与观测；
+//   2. 两支主张都装得进预算 ⇒ **各得其所**（想要多少给多少，剩下的船留在战位上）；
+//   3. 加起来超了预算 ⇒ **按主张的相对大小成比例缩水**（谁的主张大谁少挨刀）。
+//
+// 为什么不是「每个角色一条上限」（第一版给观测写死「最多占一半」，用户当场否掉：
+// 「加硬阈值只能说明动机设计的不够好，把资源堆积的运输动机和战争威胁动机覆盖了，
+// 不能加阈值要自然」）：上限会**越过**另外两个动机——积压堆成山、大军压境都压不动它，
+// 因为那个数是写死的。水位配给里三支力量**互相挤压**：积压涨 ⇒ 运输的主张涨 ⇒ 观测分到的少；
+// 威胁涨 ⇒ 战舰那一份涨 ⇒ 可分的余量小 ⇒ 运输与观测一起缩。这就是「自然」。
+//
+// 威胁读的是 [`super::shipbuilding::threat_motive`]——实测它**确实是情境量、不是常量**：
+// 长局里当霸权的中国/俄罗斯 ≈ 0.01（没人威胁得了它），被压着打的星系矿业/无国界科学组织
+// ≈ 0.8–0.9。
+const WAR_BASE: f64 = 0.25;
+/// 威胁 → 战舰份额的斜率。威胁 1.0 ⇒ `0.25 + 0.6 = 0.85`：**极端威胁下几乎全留作战舰，
+/// 观测与运输一起被挤到边上**——那正是「要被打死了谁还去搞科研、谁还去搬货」。
+const WAR_THREAT_GAIN: f64 = 0.6;
+
+/// **三支力量抢舰队的结果**：`(战舰, 运输, 观测)` 的目标头数（连续量；差额留在战位上）。
+///
+/// 纯函数、只读 `State`（[`should_be_role`] 每艘舰都会调它，所以它**必须与调用顺序无关**）。
+pub fn role_quotas(state: &State, config: &GameConfig, fid: &str) -> (f64, f64, f64) {
+    let fleet = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .count() as f64;
+    if fleet <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let threat = super::shipbuilding::threat_motive(state, config, fid);
+    let war_share = (WAR_BASE + WAR_THREAT_GAIN * threat).clamp(0.0, 1.0);
+    let war = fleet * war_share;
+    let budget = fleet - war;
+    let freight = freighter_quota(state, fid);
+    let observe = super::knowledge::observe_claim(state, config, fid);
+    let claims = freight + observe;
+    if claims <= 1e-9 {
+        // 两支都没主张（没有积压、也学满了）⇒ 全军留在战位上。
+        return (fleet, 0.0, 0.0);
+    }
+    if claims <= budget {
+        // 装得下 ⇒ 各得其所；余下的船留在战位（没人主张就不该派活，而不是「补齐给谁」）。
+        return (fleet - claims, freight, observe);
+    }
+    // 装不下 ⇒ 按相对主张成比例缩水。
+    let scale = budget / claims;
+    (war, freight * scale, observe * scale)
+}
+
+/// 本势力本回合的**观测配额**（= [`role_quotas`] 里那一支）——观察面与调用方用它。
+pub fn observer_quota(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    role_quotas(state, config, fid).2
+}
+
+/// 本势力本回合的**运输配额**（水位配给**之后**的那一支）。注意与 [`freighter_quota`]
+/// 那个**主张**不同：主张是「想派多少」，这里是「抢完舰队之后真的能派多少」。
+pub fn freighter_quota_share(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    role_quotas(state, config, fid).1
+}
+
 /// 本势力此刻的**尚武度**（两轴加权和，权重见上面两个常数）。
 fn martial(state: &State, fid: &str) -> f64 {
     let Some(f) = state.faction(fid) else { return 0.0 };
@@ -198,21 +268,25 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
     if state.ship_role_control(ship_id.to_string()).is_player() {
         return role;
     }
-    // 3) **观测优先**（用户裁决：观测 > 运输 > 战斗）：观测是**唯一没有替代品**的角色——
-    //    渠道空转就是零掌握度，而运输缺一条船还能雇人（承包市场就是干这个的）。配额、选靶与
-    //    抽签在 `autocontrol::knowledge`（与这里**同形**的缺口抽签）；它自己读
-    //    `state.ship_role` 判断「我现在是不是观测舰」，所以入伙与退伍都在那一个函数里定。
-    if super::knowledge::should_observe(state, config, fid, ship_id) {
+    // 3) **三个动机抢舰队**（水位配给，见 [`role_quotas`]）：先算出本回合观测与运输各自的
+    //    配额。观测**先挑**（优先级，见下一条），但**挑几条**由配给说了算——所以一处积压
+    //    成山（运输主张大）或一支大军压境（战舰那一份大）都会真的把观测挤小。
+    let (_, freighter_quota_share, observe_quota) = role_quotas(state, config, fid);
+    // 4) **观测优先**（用户裁决：观测 > 运输 > 战斗）：观测是**唯一没有替代品**的角色——
+    //    渠道空转就是零掌握度，而运输缺一条船还能雇人（承包市场就是干这个的）。选靶与抽签
+    //    在 `autocontrol::knowledge`（与这里**同形**的缺口抽签）；它自己读 `state.ship_role`
+    //    判断「我现在是不是观测舰」，所以入伙与退伍都在那一个函数里定。
+    if super::knowledge::should_observe(state, config, fid, ship_id, observe_quota) {
         return ShipRole::Observe;
     }
-    // 4) 当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
+    // 5) 当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
     let cur = role == ShipRole::Freight;
-    // 5) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
+    // 6) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
     if freight_tonnage(config, ship) <= 0.0 {
         return ShipRole::War;
     }
-    // 6) 配额 → 抽签。
-    let quota = freighter_quota(state, fid);
+    // 7) 配额 → 抽签（用**水位配给之后**的那一支，不是主张）。
+    let quota = freighter_quota_share;
     let others = hauler_headcount(state, fid, ship_id);
     let temp = ROLE_WIDTH.max(1e-9);
     // 运力效率加成（以**队内最大运力**为基准，尺度无关）：最好的船 = 0、最差的 = −gain。
@@ -231,7 +305,15 @@ pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &s
     let mut mine = 0.0;
     let mut tickets = 0.0;
     for s in state.ships.iter().filter(|s| s.faction_id == fid && s.hull > 0.0) {
-        if tonnage(s) <= 0.0 || (state.ship_role(s.name.clone()) == ShipRole::Freight) != cur {
+        // ⚠ **观测那一支是另一本账**：它**先挑**（优先级 观测 > 运输 > 战斗），挑走的船这一回合
+        // 不再参与集货的抽签。不排掉它们的话，分母里会一直挂着「永远不加入」的观测舰，
+        // 于是集货的期望入伙数被稀释、头数系统性低于配额（实测 4.30 的配额只跑到 3.65）。
+        // 被观测那一支释放出来的船**下一回合**才回到这本账上——一轮的延迟，换一本干净的账。
+        let s_role = state.ship_role(s.name.clone());
+        if tonnage(s) <= 0.0
+            || s_role == ShipRole::Observe
+            || (s_role == ShipRole::Freight) != cur
+        {
             continue;
         }
         if s.name != ship_id {

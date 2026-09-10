@@ -415,6 +415,12 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
 #[test]
 fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let (config, mut state) = fresh(42);
+    // ⚠ 先把观测那一支**从棋盘上拿开**（把本势力标成已学满 MOND ⇒ 观测主张 0）：角色轴上
+    // 现在还有第三态，而它**优先级更高**（用户裁决 观测 > 运输 > 战斗）——不清场的话，
+    // 「名额收回」之后那艘船会变成**观测舰**而不是战舰，测出来的就不是集货的收回；
+    // 而且观测抽走的运力会让本势力把船**雇出去**（下面的承包承诺），又多一层干扰。
+    // 拿开用的是真实存在的一种状态，不是把机制关掉（与 `run_roles` 同一处置）。
+    state.faction_mut("中国").unwrap().mond_control = 1.0;
     state.depots.clear();
     state.depot_add("中国", "金星", "碳", 100.0);
     // 角色是**掷骰**定的（有积压只是「有人去运」的概率高），所以这里跑几个回合而不是一个：
@@ -423,7 +429,12 @@ fn the_ai_assigns_a_route_when_there_is_a_backlog_and_recalls_it_after() {
     let mut found = None;
     for _ in 0..20 {
         sim::advance(&mut state, &config, &mut rng);
-        if let Some(n) = roster(&state, "中国").into_iter().next() {
+        // 只挑**没有承包承诺**的运输舰：在役的承包舰被硬承诺（`should_be_role` 第 1 条）钉在
+        // 运输位上，配额清空也收不回去——那是正确行为，不是本用例要测的事。
+        if let Some(n) = roster(&state, "中国")
+            .into_iter()
+            .find(|n| state.contracts.assignment_of(n).is_none())
+        {
             found = Some(n);
             break;
         }
