@@ -634,13 +634,17 @@ fn labor_ratio(state: &State, config: &GameConfig, cid: &str) -> f64 {
 fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow) {
     let city_ids: Vec<CityId> = state.cities.iter().map(|c| c.name.clone()).collect();
     for cid in city_ids {
-        let (_body_id, faction_id, population, razed) = {
+        let (body_id, faction_id, population, razed) = {
             let c = state.city(&cid).expect("city disappeared");
             (c.body_id.clone(), c.faction_id.clone(), c.population, c.razed)
         };
         if razed {
             continue;
         }
+        // **首都即集散地**（`.agents/notes/freight-collection.md`）：首都天体的产出免运输、
+        // 直接进势力池；其余天体的产出**先落在产地货栈**，要等船来运回首都才可用。
+        // 于是「非首都产出必须靠运输」不是一句设定，而是产出落库路径本身。
+        let is_hub = state.capital_body(&faction_id) == body_id;
         let (ecocap, deposits) = {
             let s = state.city_settlement(&cid);
             match s {
@@ -697,11 +701,16 @@ fn step_production(state: &mut State, config: &GameConfig, flow: &mut RoundFlow)
             let spec = config.building_spec("mining");
             let output = effective * labor * spec.productivity * config.economy.production_rate;
             // 记录本回合产出（step_production 的「中间量」），供 round_metrics 做 agent 总结：
-            // 每城 + 每势力各记一份；随后仍照旧把产出写进势力库存。
+            // 每城 + 每势力各记一份；**记的是开采量**（不管它落在首都还是产地货栈）；
+            // 随后按 `is_hub` 决定入库路径。
             *flow.city_production.entry(cid.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
             *flow.faction_production.entry(faction_id.clone()).or_default().entry(rt.clone()).or_insert(0.0) += output;
-            if let Some(f) = state.faction_mut(&faction_id) {
-                *f.resources.entry(rt).or_insert(0.0) += output;
+            if is_hub {
+                if let Some(f) = state.faction_mut(&faction_id) {
+                    *f.resources.entry(rt).or_insert(0.0) += output;
+                }
+            } else {
+                state.depot_add(&faction_id, &body_id, &rt, output);
             }
         }
     }
@@ -4278,6 +4287,98 @@ mod tests {
         // MOND 势力（行星X崇拜教=8）：掌握修正引力，无偏移、指哪打哪。
         let m = mond_drift(&config, "行星X崇拜教", dest);
         assert_eq!(m, dest, "a MOND master must compute the destination exactly");
+    }
+
+    /// **产地货栈（M1）**：首都天体的产出直接进势力池（**首都即集散地**，免运输），
+    /// 其余天体的产出落在**产地货栈**里，**不会自己跑到池子里**——只有运输能把它送到首都。
+    ///
+    /// 用例（seed 42 的真实开局布局）：
+    /// * **中国**：首都地球，矿在**两边都有**——长三角/珠三角（地球，采 铁/硅）是首都产出，
+    ///   金星浮空之城（金星，采 碳）是离岸产出。碳 只从金星出、铁硅 只从地球出，
+    ///   所以「池子里多了铁硅、碳却没动、金星货栈里有碳」正好把两条路径分开。
+    /// * **无国界科学组织**：它的矿**全在非首都天体**（土星，采 氢；首都是木星）
+    ///   → 产出**整批积压**，池子一分钱都不涨。这就是运输机制要解决的问题本身。
+    #[test]
+    fn off_capital_production_lands_in_the_depot_not_the_pool() {
+        let (config, mut state) = fresh_world(42);
+        assert_eq!(state.capital_body("中国"), "地球", "用例前提：中国首都在地球");
+        assert_eq!(
+            state.capital_body("无国界科学组织"),
+            "木星",
+            "用例前提：科学组织首都在木星"
+        );
+
+        let mut flow = RoundFlow::default();
+        let cn_silicon = |s: &State| {
+            s.faction("中国").unwrap().resources.get("硅").copied().unwrap_or(0.0)
+        };
+        let cn_carbon = |s: &State| {
+            s.faction("中国").unwrap().resources.get("碳").copied().unwrap_or(0.0)
+        };
+        let sci_value = |s: &State| {
+            let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+            s.faction("无国界科学组织")
+                .unwrap()
+                .resources
+                .iter()
+                .map(|(rt, amt)| amt * value_of(rt))
+                .sum::<f64>()
+        };
+
+        let (si0, c0, sci0) = (cn_silicon(&state), cn_carbon(&state), sci_value(&state));
+        step_production(&mut state, &config, &mut flow);
+
+        // —— 中国：首都产出进池，离岸产出进货栈 ——
+        assert!(
+            cn_silicon(&state) > si0,
+            "地球（首都）上的硅应直接进池"
+        );
+        assert!(
+            state.depot("中国", "地球").is_none(),
+            "首都天体的产出不进货栈（免运输、直接进池）"
+        );
+        let venus = state
+            .depot("中国", "金星")
+            .expect("金星上的产出必须落在产地货栈");
+        assert!(
+            venus.get("碳").copied().unwrap_or(0.0) > 0.0,
+            "金星采的碳应压在产地货栈里，实为 {venus:?}"
+        );
+        assert!(
+            (cn_carbon(&state) - c0).abs() < 1e-9,
+            "碳只从金星（非首都）出，所以池子里的碳一格都不该动——运输才是货栈的上游"
+        );
+
+        // —— 科学组织：矿全在非首都 → 整批积压，池子不动 ——
+        let saturn = state
+            .depot("无国界科学组织", "土星")
+            .expect("土星上的产出必须落在产地货栈");
+        assert!(
+            saturn.get("氢").copied().unwrap_or(0.0) > 0.0,
+            "土星的氢应压在产地货栈里，实为 {saturn:?}"
+        );
+        assert!(
+            (sci_value(&state) - sci0).abs() < 1e-9,
+            "一个「矿全在非首都天体」的势力，产出会整批积压在产地（= 等船来运）"
+        );
+
+        // —— 再跑一回合：货栈继续涨、池子仍不因它增长（库存冻结）——
+        let carbon_in_depot = venus.get("碳").copied().unwrap_or(0.0);
+        step_production(&mut state, &config, &mut flow);
+        assert!(
+            state
+                .depot("中国", "金星")
+                .unwrap()
+                .get("碳")
+                .copied()
+                .unwrap_or(0.0)
+                > carbon_in_depot,
+            "没有船来运 → 货栈继续涨"
+        );
+        assert!(
+            (cn_carbon(&state) - c0).abs() < 1e-9,
+            "两回合过去，金星的碳一格都没进池——这就是「等船来运」"
+        );
     }
 
     /// **运输能力的地基（机制不变量）**：非 master 舰船**能否抵达**某天体是**算出来的**，

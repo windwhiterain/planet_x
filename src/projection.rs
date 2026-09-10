@@ -355,6 +355,9 @@ fn write_round(
         .map_err(|e| e.to_string())?;
     }
 
+    // 资源价值（与 `sim` 同一把尺子）：产地货栈按它折算成可比的价值列。
+    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
+
     for c in &state.cities {
         let deployed: f64 = c.buildings.iter().map(|b| b.deployed).sum();
         let buildings: Vec<serde_json::Value> = c
@@ -392,6 +395,18 @@ fn write_round(
                 // 治理到首都的距离（AU，游戏规则：距 capital_body 越远治理越费、忠诚越低）。
                 // 由模拟算出（复用 agent::governance_distance），agent 只读；夷平城无主，置 0。
                 "gov_distance": r2(if c.razed { 0.0 } else { crate::agent::governance_distance(state, &c.faction_id, &c.body_id) }),
+                // **产地货栈**：这座城所在天体上、属于该势力的冻结存货（按资源价值计）。
+                // 非首都产出不会直接进势力库存——它先落在这里，要靠船运回首都才可用
+                // （见 `.agents/notes/freight-collection.md`）。所以这一列是「这里压了多少
+                // 运不出去的货」：>0 且长期不动 = 这座城市接不上运输。
+                "depot_value": r2(if c.razed {
+                    0.0
+                } else {
+                    state
+                        .depot(&c.faction_id, &c.body_id)
+                        .map(|m| m.iter().map(|(rt, amt)| amt * value_of(rt)).sum::<f64>())
+                        .unwrap_or(0.0)
+                }),
                 // 离心风险：忠诚低于叛变阈值即爆发 Revolt（夷平为空白）。模拟算好的信号。
                 "revolt_risk": !c.razed && c.loyalty <= config.governance.loyalty_revolt,
             })
@@ -589,7 +604,7 @@ pub fn projection_schema() -> serde_json::Value {
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "城的完整对象（人口/忠诚/治理距离/建筑清单/离心风险），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array","gov_distance":"number","revolt_risk":"boolean"},
+                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array","gov_distance":"number","depot_value":"number","revolt_risk":"boolean"},
             }),
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
@@ -808,6 +823,10 @@ mod tests {
         let cities = jsonl(&s.0.join("idx/cities.jsonl"));
         assert!(!cities.is_empty());
         assert!(cities[0].get("gov_distance").is_some(), "cities 表要有 gov_distance（治理距离）");
+        assert!(
+            cities[0].get("depot_value").is_some(),
+            "cities 表要有 depot_value（产地货栈：压在产地、还没运回首都的存货价值）"
+        );
         assert!(cities[0].get("revolt_risk").is_some(), "cities 表要有 revolt_risk（离心风险）");
 
         // events table: 归一化固定列（一行一事件），参与方走统一槽位。
