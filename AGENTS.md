@@ -30,10 +30,12 @@
 [笔记：测试与二进制解耦](.agents/notes/test-decoupled-suite.md)）：
 
 ```bash
-# ① 数据级（不需要重编 Rust；改断言 = 改 .py，立刻生效）
-uv run --project play/planet_xq python play/tests/run.py all      # 四组 67 条判据；缓存命中 ~4 s
+# ① 数据级 —— **流程就是「build release + python 测试」**：run.py 会先按需
+#    `cargo build --release`（二进制比 src/config 旧或不存在时），再跑各组。
+uv run --project play/planet_xq python play/tests/run.py all      # 四组 75 条判据；缓存命中 ~4 s
 uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
-uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 18 个错，全咬住
+uv run --project play/planet_xq python play/tests/run.py --no-build  # 跳过前置编译
+uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 19 个错，全咬住
 
 # ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
 cargo nextest run -P full                    # 合流门
@@ -42,17 +44,19 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
 
 - 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
   世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
-- **内循环走 debug、合流门走 release**（实测，改一个引擎文件之后）：
-
-  | 路线 | 编 + 跑 |
-  | --- | --- |
-  | release：`cargo build --release` + `run.py 1` | 39.5 + 3.7 ≈ **44 s** |
-  | **debug：`cargo build` + `run.py 1 --bin debug`** | 3.3 + 8.9 ≈ **12 s** |
-
-  长组反过来：debug 下模拟慢 ~4×（投影 1000 回合 8.6 s → ~35 s）⇒ `run.py all` 用 release。
-- 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md)：
-  **Rust 门 62 s 里 58 s 是 test 档编译、真跑只有 4.2 s**；投影每 1000 回合 169 MB 多花
-  ~+3.5 s 墙钟（**是构造 JSON，不是磁盘**：这台 NVMe 写 169 MB 只要 0.1 s）。
+- **数据级一律走 release 二进制**（用户裁决：*「python 测试的方式改为 build release 加 python 测试」*）
+  ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
+- 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与
+  [test-wall-clock §0.2](.agents/notes/test-wall-clock.md)：
+  - **Rust 门**：增量（改一个库文件）**~13–16 s** = 编译 ~10 s + 真跑 4–5 s；
+    **冷/切档首次 62–89 s**（那个大数只在换 worktree / 切档时出现，别拿它当稳态）。
+  - **test 档不提 `opt-level`**（2026-10 起：长局搬走后提档的依据消失，编译成了大头）。
+    ⚠ 实测 `opt-level = 1` + `debug = 1` 是甜点（真跑与 O2 相同、编译更省，一轮门 13.2 s
+    vs O0 的 ~28.6 s）——**要不要切 O1 待用户裁决**。
+  - **`tests/` 下 5 个集成二进制每次改库文件都要重编+链接，合计 ~5–6 s**（约占增量编译一半；
+    空的 `horizon_mid.rs` 一个就 0.4 s）。合并成单个 `probes.rs` 能省 ~4–5 s，**待裁决**。
+  - 投影每 1000 回合 169 MB 多花 ~+3.5 s 墙钟（**是构造 JSON，不是磁盘**：这台 NVMe 写
+    169 MB 只要 0.1 s）。
 - **只想要最终 state**（不要逐回合轨迹）：`--round N --quiet --save ckpt.ron`
   —— 1000 回合实测 5.2 s / **stdout 0 字节** / 档 0.09 MB（不加 `--quiet` 是 6.3 s / 40.3 MB；
   单独 `--save` 不会变快，因为 `--round` 的合同就是每回合吐一行）。
