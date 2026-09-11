@@ -403,12 +403,15 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     }
 
     // --- 4) 写回：挂单（原始清单，供观测）/ 价格 / 成交 / 需求滑窗 ---------------
+    // 国内市场状态（价格/未用额度）是独立的一层，原样保留。
+    let domestic = state.market.domestic.clone();
     state.market = MarketState {
         offers,
         price,
         settled,
         avg_demand,
         last_stock: world_stock,
+        domestic,
     };
     for (fid, v) in net_import {
         flow.market_net.insert(fid, v);

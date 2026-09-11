@@ -53,6 +53,21 @@ pub fn step_construction(
         let mut inv_spent: ResourceMap = ResourceMap::new();
         let mut con_spent: ResourceMap = ResourceMap::new();
 
+        // **国内市场**（可选）：把势力级资源预算按城市权重/recipe 分配成每城预算。
+        // 关闭时返回 None，下面走旧的全局预算路径，逐字节不变。
+        let market_plan = if config.domestic_market.enabled {
+            Some(domestic_market::plan_faction(
+                state,
+                config,
+                &fid,
+                &investment,
+                &construction,
+            ))
+        } else {
+            None
+        };
+        let empty = ResourceMap::new();
+
         let city_ids: Vec<CityId> = state
             .cities
             .iter()
@@ -60,13 +75,20 @@ pub fn step_construction(
             .map(|c| c.name.clone())
             .collect();
         for cid in city_ids {
+            let (invest_limit, con_limit) = match &market_plan {
+                Some(plan) => (
+                    plan.development.get(&cid).unwrap_or(&empty),
+                    plan.construction.get(&cid).unwrap_or(&empty),
+                ),
+                None => (&investment, &construction),
+            };
             build_city(
                 state,
                 config,
                 cid,
                 fid.clone(),
-                &investment,
-                &construction,
+                invest_limit,
+                con_limit,
                 &mut inv_spent,
                 &mut con_spent,
                 &mut next_building_id,

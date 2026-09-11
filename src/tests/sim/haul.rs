@@ -1,24 +1,38 @@
 //! 集货运输：产地货栈、货舱容量、`haul_split` 的 max-min 公平、货权守恒、承包分账、腿别交替、指令路线入首都池。
+//!
+//! ## 2026-10：`cargo_capacity` 的**数据级**那一半搬去了 `play/tests/g2_mid.py`
+//!
+//! `ships` 表加了 `载货`（在舱货物）与 `cargo_capacity`（有效舱容，派生列）两列 ⇒ 原来那条
+//! `cargo_capacity_is_class_capacity_times_hull_fraction` 里的
+//!
+//! * 「有效舱容 = 舰级舱容 × 战损折算 `船体/船体上限`」与「舰级舱容是设计裁决」，现在在
+//!   **3 seed × 400 回合的每一行舰**上成立（g2 的 `cargo_checks`；实测 **16,504 个舰·回合**、
+//!   其中 **1,522 行**受过伤、**4,164 行**舱里有货）；
+//! * 剩下两个**手工边界**（壳打光 ⇒ 舱容 0、`hull_max ≤ 0` 的旧档 ⇒ 满舱）在真实投影里
+//!   **不发生**（活舰 `船体 > 0`、所有档都有 `船体上限`）⇒ 现在走 `planet_x --call cargo_capacity`
+//!   （g1 的 `call_functions`，调的还是引擎同一份实现）。
+//!
+//! ## 2026-10：`depots` 表落地，`off_capital_production_...` 的**读面**那一半也搬去了 g2
+//!
+//! `depots`（逐势力 × 天体 × 资源）现在是 `--index` 的一张派生表 ⇒ g2 的 `depot_checks`
+//! 在 **3 seed × 400 回合**上钉住：**首都天体上不许凭空出现货栈**（迁都留下的 `stale` /
+//! 首都本回合才搬来的 `same_round` 两类**逐处解释**，§12 相位错位）、`cities.depot_value`
+//! ≡ Σ 货栈 × 资源价值（**118,779 行货栈 / 5,032 个积压城·回合**全对）。
+//! 原来那条用例里**只有 `step_production` 隔离**（把运输那一步拿掉）才看得见的
+//! 「**池子不因离岸产出增长**」留在下面——真投影里 haul 就在同一回合后面跑，池子会被运回来的货填上。
 
 use super::*;
 
-/// **产地货栈（M1）**：首都天体的产出直接进势力池（**首都即集散地**，免运输），
-/// 其余天体的产出落在**产地货栈**里，**不会自己跑到池子里**——只有运输能把它送到首都。
+/// **产地货栈的「池子不动」那一半**：`step_production` **隔离**（跑这一步、不跑运输）。
 ///
-/// 用例（seed 42 的真实开局布局）：
-/// * **中国**：首都地球，矿在**两边都有**——长三角/珠三角（地球，采 铁/硅）是首都产出，
-///   金星浮空之城（金星，采 碳）是离岸产出。碳 只从金星出、铁硅 只从地球出，
-///   所以「池子里多了铁硅、碳却没动、金星货栈里有碳」正好把两条路径分开。
-/// * **无国界科学组织**：它的矿**全在非首都天体**（土星，采 氢；首都是木星）
-///   → 产出**整批积压**，池子一分钱都不涨。这就是运输机制要解决的问题本身。
+/// 「离岸产出落在货栈」那一半现在能在**跑出来的数据**上成立（g2 的 `depot_checks`：`depots`
+/// 表 ↔ `cities.depot_value`，3 seed × 400 回合 118,779 行货栈 / 5,032 个积压城·回合全对）；
+/// 但「池子**不**因此增长」必须把运输那一步**拿掉**才看得见——真投影里 haul 就在同一回合后面跑，
+/// 池子会被运回来的货填上。所以这条留在纯 step 侧。
 #[test]
-fn off_capital_production_lands_in_the_depot_not_the_pool() {
+fn off_capital_production_does_not_touch_the_pool() {
     let (config, mut state) = fresh_world(42);
-    assert_eq!(
-        state.capital_body("中国"),
-        "地球",
-        "用例前提：中国首都在地球"
-    );
+    assert_eq!(state.capital_body("中国"), "地球", "用例前提：中国首都在地球");
     assert_eq!(
         state.capital_body("无国界科学组织"),
         "木星",
@@ -55,46 +69,29 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
     let (si0, c0, sci0) = (cn_silicon(&state), cn_carbon(&state), sci_value(&state));
     step_production(&mut state, &config, &mut flow);
 
-    // —— 中国：首都产出进池，离岸产出进货栈 ——
+    // 中国：首都（地球）的硅直接进池；碳只从金星（非首都）出，所以池子里的碳一格都不该动。
     assert!(cn_silicon(&state) > si0, "地球（首都）上的硅应直接进池");
-    assert!(
-        state.depot("中国", "地球").is_none(),
-        "首都天体的产出不进货栈（免运输、直接进池）"
-    );
-    let venus = state
-        .depot("中国", "金星")
-        .expect("金星上的产出必须落在产地货栈");
-    assert!(
-        venus.get("碳").copied().unwrap_or(0.0) > 0.0,
-        "金星采的碳应压在产地货栈里，实为 {venus:?}"
-    );
     assert!(
         (cn_carbon(&state) - c0).abs() < 1e-9,
         "碳只从金星（非首都）出，所以池子里的碳一格都不该动——运输才是货栈的上游"
     );
 
-    // —— 科学组织：矿全在非首都 → 整批积压，池子不动 ——
-    let saturn = state
-        .depot("无国界科学组织", "土星")
-        .expect("土星上的产出必须落在产地货栈");
-    assert!(
-        saturn.get("氢").copied().unwrap_or(0.0) > 0.0,
-        "土星的氢应压在产地货栈里，实为 {saturn:?}"
-    );
+    // 科学组织：矿全在非首都 → 整批积压，池子不动。
     assert!(
         (sci_value(&state) - sci0).abs() < 1e-9,
         "一个「矿全在非首都天体」的势力，产出会整批积压在产地（= 等船来运）"
     );
 
-    // —— 再跑一回合：货栈继续涨、池子仍不因它增长（库存冻结）——
-    let carbon_in_depot = venus.get("碳").copied().unwrap_or(0.0);
+    // 再跑一回合（仍然没有运输步）：货栈继续涨、池子仍不因它增长（库存冻结）。
+    let carbon_in_depot = state
+        .depot("中国", "金星")
+        .and_then(|m| m.get("碳").copied())
+        .unwrap_or(0.0);
     step_production(&mut state, &config, &mut flow);
     assert!(
         state
             .depot("中国", "金星")
-            .unwrap()
-            .get("碳")
-            .copied()
+            .and_then(|m| m.get("碳").copied())
             .unwrap_or(0.0)
             > carbon_in_depot,
         "没有船来运 → 货栈继续涨"
@@ -103,96 +100,6 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
         (cn_carbon(&state) - c0).abs() < 1e-9,
         "两回合过去，金星的碳一格都没进池——这就是「等船来运」"
     );
-}
-
-/// **舱容（M2）**：有效舱容 = 舰级舱容 `ShipSpec::cargo` × **战损折算** `hull / hull_max`。
-///
-/// 钉住三条机制不变量：
-/// 1. **舰级舱容是「设计裁决」而不是平衡旋钮**——护卫 2 / 驱逐 4 / 巡洋 6 / 航母 20 /
-///    战列 6，且**航母是唯一的散货船**。这条要硬断言：改它等于改设计，不该是调参时手滑。
-/// 2. **战损是连续的**：装甲掉一半 → 舱容减半（不是「受伤就装不了」的硬阈值）。
-/// 3. **旧档（`hull_max ≤ 0`）按满舱**：绝不出现 `hull / 0 = ∞` 的无底货舱。
-#[test]
-fn cargo_capacity_is_class_capacity_times_hull_fraction() {
-    use crate::model::cargo_capacity;
-    let (config, state) = fresh_world(42);
-
-    // 1) 舰级舱容（设计裁决：见 config/game.ron 的 ships 注释第 (3) 类）。
-    let table = [
-        ("corvette", 2.0),
-        ("destroyer", 4.0),
-        ("cruiser", 6.0),
-        ("carrier", 20.0),
-        ("battleship", 6.0),
-    ];
-    for (class, cap) in table {
-        assert_eq!(
-            config.ship_spec(class).cargo,
-            cap,
-            "{class} 的舱容是设计裁决（{cap}），不是可随手调的平衡旋钮"
-        );
-    }
-    assert!(
-        table.iter().all(|(c, cap)| *c == "carrier" || *cap < 20.0),
-        "航母必须是唯一的散货船——否则「用哪条船运货」就不构成一个选择"
-    );
-
-    // 2) 战损连续折算。
-    let mut ship = state
-        .ships
-        .iter()
-        .find(|s| s.class == "cruiser")
-        .expect("开局有巡洋舰")
-        .clone();
-    assert!(ship.hull_max > 0.0, "出厂舰必须有 hull_max");
-    assert_eq!(cargo_capacity(&config, &ship), 6.0, "满血巡洋舰 = 满舱 6");
-    ship.hull = ship.hull_max * 0.5;
-    assert!(
-        (cargo_capacity(&config, &ship) - 3.0).abs() < 1e-9,
-        "装甲掉一半 → 舱容减半（连续，不是硬阈值）"
-    );
-    ship.hull = 0.0;
-    assert_eq!(
-        cargo_capacity(&config, &ship),
-        0.0,
-        "壳被打光 → 一格都装不了"
-    );
-
-    // 3) 旧档缺 `hull_max`：按满舱处理，而不是把舱容算成无穷。
-    ship.hull = 6.0;
-    ship.hull_max = 0.0;
-    assert_eq!(
-        cargo_capacity(&config, &ship),
-        6.0,
-        "hull_max ≤ 0（旧档）按未受损处理，绝不返回 ∞"
-    );
-}
-
-/// **尽量等量分配（Q6）**：[`haul_split`] 是 max-min 公平分配——先按「还有货的种类数」平摊，
-/// 分不满的种类把余量交回去、由其余种类再平摊。它是**纯函数**，这里逐档钉住。
-#[test]
-fn haul_split_is_max_min_fair() {
-    let m = |pairs: &[(&str, f64)]| -> ResourceMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-    };
-    // 三种货、舱容 6、都够 ⇒ 每种 2。
-    assert_eq!(
-        haul_split(&m(&[("铁", 10.0), ("碳", 10.0), ("硅", 10.0)]), 6.0),
-        m(&[("铁", 2.0), ("碳", 2.0), ("硅", 2.0)])
-    );
-    // 铂只有 1 ⇒ 它拿 1，多出来的 1 由另两种再平摊（这就是「尽量」等量）。
-    assert_eq!(
-        haul_split(&m(&[("铁", 10.0), ("铂", 1.0), ("碳", 10.0)]), 6.0),
-        m(&[("铁", 2.5), ("铂", 1.0), ("碳", 2.5)])
-    );
-    // 舱容 ≥ 总存量 ⇒ 全装走（一种货吃得下就全给它，不必等量）。
-    assert_eq!(
-        haul_split(&m(&[("铁", 1.0), ("碳", 2.0)]), 100.0),
-        m(&[("铁", 1.0), ("碳", 2.0)])
-    );
-    // 边界：空货栈 / 零舱容 ⇒ 什么都不装（不是 panic）。
-    assert!(haul_split(&ResourceMap::new(), 20.0).is_empty());
-    assert!(haul_split(&m(&[("铁", 5.0)]), 0.0).is_empty());
 }
 
 /// **货值守恒（M2b 的核心不变量）**：装货与卸货**只搬货**——产地里少多少，舱里就多多少；

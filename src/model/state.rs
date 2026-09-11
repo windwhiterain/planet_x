@@ -62,7 +62,11 @@ use crate::model::*;
 /// serde 忽略**（`Blueprint` 多出的三轴 `#[serde(default)]` ⇒ `None` = 图对倾向沉默），
 /// 于是**旧档能加载**，但**旧的指令归属会回到作用域链**（`Auto`）：那些依赖"全舰队默认"
 /// 的局面会在这一档改变行为。要让旧局面对齐，把指令**逐舰**重写一遍（或在图上写角色）。
-pub const SCHEMA_VERSION: u32 = 23;
+/// **v24 = 国内市场（第一版）**：`State::market`（[`MarketState`]）新增
+/// `domestic: BTreeMap<FactionId, DomesticMarket>`，存每势力的开发/建造国内价格与未用额度。
+/// 旧档缺该键 ⇒ serde default 空表 = 未启用；`config.domestic_market.enabled` 默认 `false`，
+/// 世界逐字节不变。见 `.agents/notes/domestic-market.md`。
+pub const SCHEMA_VERSION: u32 = 24;
 fn default_schema_version() -> u32 {
     0
 }
@@ -936,7 +940,7 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // 这是**有意的行为变化**，不是迁移漏了：要复原旧局面的做法是**逐舰重写指令**。
         // **这里不做「把舰队默认摊到每艘舰」的补丁**：那会把一条早就过期的站桩令**变成**
         // 全舰队的显式指令叶（玩家以后再也看不出它是哪来的），比丢失它更糟。
-        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => {
+        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

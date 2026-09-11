@@ -16,6 +16,16 @@
 ⚠ 两处**刻意不写死**（写死就是给下一个人埋雷）：RoundAt 节拍的清单从 `meta.json` 的
 `story` 读（不写「prologue 在 1 回合、planet_x_arrives 在 60 回合」），疤痕的最短回合从
 配置算（不写常量）。
+* **贸易三账**（`src/tests/sim/trade.rs` 搬走的三条）：成交清单逐回合 ↔ `view.market_settled`、
+  价格分解逐项重算、买方名次 = 引擎的购买力序。
+* **货舱（M2）**：`ships.cargo_capacity` = 舰级舱容 × 战损折算 `船体/船体上限`，且舰级舱容
+  是设计裁决（`src/tests/sim/haul.rs` 的 `cargo_capacity_...` 数据级那一半）。
+* **产地货栈（M1）**：`depots` 表 = 非首都天体的在栈存量；首都天体上不许"凭空"出现货栈，
+  且 `cities.depot_value` 必须等于同一本账按价值计的城视角合计
+  （`src/tests/sim/haul.rs` 的 `off_capital_production_...` 数据级那一半）。
+* **派单抽签**：`round_inputs.rolls` 里每条 `route` 记录的 `pool`（每条腿那一刻的权重）
+  与 `value`/`pool_total`/`picked` 逐条复算——抽签就是按积压占比切成区间
+  （`src/tests/autocontrol/freight.rs` 的 `route_lottery_...`）。
 """
 
 from __future__ import annotations
@@ -29,6 +39,11 @@ from _harness import CACHE_ROOT, KIT, group_main  # noqa: E402
 SEEDS = (1, 7, 42)
 ROUNDS = 400
 MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会空转，得报出来
+MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1366 笔
+MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1200 个「排过队」的回合
+MIN_CARGO_ROWS = 1000     # 货舱防空转：3 seed × 400 回合的「舰·回合」行数下限
+MIN_DEPOT_ROWS = 100      # 货栈防空转：3 seed × 400 回合的货栈行数下限
+MIN_ROUTE_DRAWS = 50      # 派单抽签防空转：3 seed × 400 回合的 route 记录下限
 
 
 def _named_entities(ev):
@@ -408,12 +423,306 @@ def id_report(q) -> dict:
     return {"ids": len(life), "gaps": sample, "gap_n": len(gaps), "gone_n": len(gone)}
 
 
+def trade_report(q) -> dict:
+    """贸易三账（B3）：`src/tests/sim/trade.rs` 里三条只看数据的判据小结。
+
+    数据：`market_trades`（每笔一对一行）+ 主流每回合的 `view.market_settled` + `meta.json`
+    的 `market` 配置。判据住在 :func:`trade_checks` 里（只改阈值/措辞不重读投影）。
+
+    * **成交对账**：逐回合把每笔的 `moved[资源] × (1 − loss)` 加起来，必须等于那一回合
+      `view.market_settled` 里**收到**的量（逐资源、双向）。
+    * **价格分解**：拿同一行的 `depth` / `dist_au` 与 `meta.market` 的常数重算
+      `mond_extra` / `freight_rate`——读面给的分解式必须自洽。
+    * **买方名次**：`factions[].market_rank` 是引擎排好的购买力序（降序、同额按名字升序），
+      读者不该自己重排。
+    """
+    mt = q.table("market_trades")
+    market = (q.meta or {}).get("market") or {}
+
+    # ① 成交清单 ↔ 世界收到的量（逐回合；不能跨回合求和，`market_settled` 是每回合一份）。
+    by_round = {int(r): g.to_dict("records") for r, g in mt.groupby("round")}
+    recon_bad: list[str] = []
+    trades = 0
+    recon_rounds = 0
+    for _, fact in q.facts.iterrows():
+        rnd = int(fact["round"])
+        rows = by_round.get(rnd) or []
+        if not rows:
+            continue
+        settled = fact["view"].get("market_settled") or {}
+        received: dict[str, float] = {}
+        for row in rows:
+            trades += 1
+            moved = row.get("moved") or {}
+            if not moved:
+                recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} 没有货，不该占位")
+            if row["buyer"] == row["seller"]:
+                recon_bad.append(f"r{rnd}：{row['buyer']} 自己跟自己成交")
+            if not (0.0 <= row["loss"] <= 1.0):
+                recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} loss={row['loss']} 越界")
+            for rt, take in moved.items():
+                if take <= 0.0:
+                    recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} 的 {rt} 报了非正的 {take}")
+                received[rt] = received.get(rt, 0.0) + take * (1.0 - row["loss"])
+        for rt, got in settled.items():
+            if got <= 1e-9:
+                continue
+            back = received.get(rt, 0.0)
+            if abs(back - got) > 1e-6:
+                recon_bad.append(f"r{rnd} {rt}：成交清单加起来 {back}，世界账却是 {got}")
+        for rt in received:
+            if settled.get(rt, 0.0) <= 1e-9:
+                recon_bad.append(f"r{rnd} {rt}：清单里有成交，世界账上却是 0")
+        recon_rounds += 1
+
+    # ② 价格分解逐项重算（同一条定义式；`depth = 0` ⇒ 不穿带 ⇒ 零运费、零丢货）。
+    price_bad: list[str] = []
+    seen_freight = seen_same_body = seen_mond = 0
+    for row in mt.to_dict("records"):
+        if row["dist_au"] < 0.0 or row["depth"] < 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：距离/深度为负 "
+                             f"{row['dist_au']}/{row['depth']}")
+        if row["rel_mult"] <= 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：关系倍率 {row['rel_mult']} ≤ 0")
+        if not (0.0 <= row["mastery"] <= 1.0):
+            price_bad.append(f"{row['buyer']}→{row['seller']}：掌握度 {row['mastery']} 越界")
+        want_mond = (market["mond_freight_mult"] * (row["depth"] / (row["depth"] + 1.0))
+                     if row["depth"] > 0.0 else 0.0)
+        if abs(row["mond_extra"] - want_mond) >= 1e-9:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：穿带溢价 "
+                             f"{row['mond_extra']} ≠ {want_mond}")
+        want_freight = market["freight_per_au"] * row["dist_au"] * (1.0 + row["mond_extra"])
+        if abs(row["freight_rate"] - want_freight) >= 1e-9:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：运费率 "
+                             f"{row['freight_rate']} ≠ {want_freight}")
+        if row["depth"] == 0.0 and row["loss"] != 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：没穿带却丢货 {row['loss']}")
+        if row["freight_rate"] > 0.0:
+            seen_freight += 1
+        if row["dist_au"] == 0.0:
+            seen_same_body += 1
+        if row["mond_extra"] > 0.0:
+            seen_mond += 1
+            if row["depth"] <= 0.0:
+                price_bad.append(f"{row['buyer']}→{row['seller']}：有穿带溢价却没有深度")
+            # 掌握度到顶 ⇒ 一点货都不丢；否则穿了带必须丢（崇拜教开局掌握度就是 1.0）。
+            if row["mastery"] < 1.0 - 1e-9:
+                if not (row["loss"] > 0.0):
+                    price_bad.append(f"{row['buyer']}→{row['seller']}：穿带且掌握度只有 "
+                                     f"{row['mastery']:.3f}，却不丢货")
+            elif row["loss"] != 0.0:
+                price_bad.append(f"{row['buyer']}→{row['seller']}：掌握度到顶却丢货 {row['loss']}")
+
+    # ③ 买方名次 = 引擎排好的购买力序（名次必须是 0..n-1 的排列）。
+    rank_bad: list[str] = []
+    rank_rounds = 0
+    for _, fact in q.facts.iterrows():
+        rnd = int(fact["round"])
+        rows = [(name, r.get("market_rank"), r.get("purchasing_power") or 0.0)
+                for name, r in fact["view"]["factions"].items()]
+        if any(rk is None for _, rk, _ in rows):
+            # 回合 0 是 `pre` 面：市场还没跑 ⇒ 中性缺省就是 `null`（见 `neutral.rs`）。
+            if rnd == 0:
+                continue
+            rank_bad.append(f"r{rnd}：有势力没有名次"
+                            f"（{sum(1 for _, rk, _ in rows if rk is None)} 个）")
+            continue
+        rank_rounds += 1
+        for i, (name, rank, _) in enumerate(sorted(rows, key=lambda t: (-t[2], t[1]))):
+            if rank != i:
+                rank_bad.append(f"r{rnd} {name}：名次 {rank} ≠ 按购买力/名字应是 {i}")
+                break
+
+    return {"trades": trades, "recon_bad": recon_bad, "recon_rounds": recon_rounds,
+            "price_bad": price_bad,
+            "price_seen": {"freight": seen_freight, "same_body": seen_same_body, "mond": seen_mond},
+            "rank_bad": rank_bad, "rank_rounds": rank_rounds}
+
+
+def cargo_report(q) -> dict:
+    """货舱（M2 / 施工图 §5 第 2 批）：有效舱容公式 + 舰级舱容的设计裁决。
+
+    `ships` 表现已发 `载货`（按资源的在舱货物）与 `cargo_capacity`（有效舱容）。判据住在
+    :func:`cargo_checks` 里。
+
+    ⚠ `船体` / `船体上限` / `cargo_capacity` 都按 **r2** 发（读面约定：标量留两位压 token），
+    所以公式对账走**舍入区间**（真值必须落在 `船体±0.005`、`船体上限±0.005` 推出的区间，
+    再给 `cargo_capacity` 自身的 r2 留 ±0.005），不是逐位相等。
+    """
+    ships = q.table("ships")
+    meta = q.meta or {}
+    spec_cargo = {cls: s.get("cargo") for cls, s in (meta.get("ships") or {}).items()}
+
+    formula_bad: list[str] = []
+    checked = damaged = with_cargo = 0
+    for r in ships.to_dict("records"):
+        cls = r["舰级"]
+        spec = spec_cargo.get(cls)
+        if spec is None:
+            formula_bad.append(f"r{r['round']} {r['ship_id']}：舰级 {cls} 不在 meta.ships 里")
+            continue
+        checked += 1
+        hmax, hull = r["船体上限"], r["船体"]
+        if hmax <= 0.0:
+            lo = hi = spec
+        else:
+            lo = spec * max(0.0, min(1.0, (hull - 0.005) / (hmax + 0.005)))
+            hi = spec * max(0.0, min(1.0, (hull + 0.005) / max(hmax - 0.005, 1e-9)))
+        got = r["cargo_capacity"]
+        if not (lo - 0.005 - 1e-9 <= got <= hi + 0.005 + 1e-9):
+            formula_bad.append(f"r{r['round']} {r['ship_id']}（{cls}）：舱容 {got} 不在 "
+                               f"[{lo:.4f}, {hi:.4f}]（船体 {hull}/{hmax} × 舰级 {spec}）")
+        if hmax > 0.0 and hull < hmax - 1e-9:
+            damaged += 1
+        if r.get("载货"):
+            with_cargo += 1
+
+    # 舰级舱容是「设计裁决」：见 config/game.ron 的 ships 注释第 (3) 类。
+    design = {"corvette": 2.0, "destroyer": 4.0, "cruiser": 6.0,
+              "carrier": 20.0, "battleship": 6.0}
+    design_bad = [f"{cls}：meta.ships 给 {spec_cargo.get(cls)} ≠ 设计裁决 {cap}"
+                  for cls, cap in design.items() if spec_cargo.get(cls) != cap]
+    bulk = sorted(cls for cls, cap in spec_cargo.items() if (cap or 0.0) >= 20.0)
+    return {"checked": checked, "damaged": damaged, "with_cargo": with_cargo,
+            "formula_bad": formula_bad, "design_bad": design_bad, "bulk": bulk,
+            "classes": sorted(spec_cargo)}
+
+
+def depot_report(q) -> dict:
+    """产地货栈（M1 / 施工图 §5 第 3 批）：`depots` 表 ↔ `cities.depot_value`，以及「首都即集散地」。
+
+    判据住在 :func:`depot_checks` 里。
+
+    ⚠ **§12 同回合相位错位**：一条货栈行落在**当前**首都天体上时，只有两种说得清的可能——
+    * `stale`：迁都**之前**它就在那儿（货栈冻结、不会自己搬走）；
+    * `same_round`：首都本回合才搬过来——产出那一步看到的还是旧首都，所以往这里放了货。
+    两者都要**逐处解释**（排除即断言）；其余一律算违规。
+    """
+    dep = q.table("depots")
+    fac = q.table("factions")
+    cities = q.table("cities")
+    rv = ((q.meta or {}).get("market") or {}).get("resource_value") or {}
+    capital = {(int(r["round"]), r["faction_id"]): r["capital_body"]
+               for r in fac.to_dict("records")}
+
+    rows = dep.to_dict("records")
+    pos_bad: list[str] = []
+    seen: set = set()
+    for r in rows:
+        key = (int(r["round"]), r["faction_id"], r["body_id"], r["resource"])
+        if r["amount"] <= 0.0:
+            pos_bad.append(f"r{key[0]} {key[1]}@{key[2]} {key[3]}={r['amount']} 非正")
+        if key in seen:
+            pos_bad.append(f"r{key[0]} {key[1]}@{key[2]} {key[3]} 重复行")
+        seen.add(key)
+
+    presence: dict = {}
+    for r in rows:
+        presence.setdefault((r["faction_id"], r["body_id"]), set()).add(int(r["round"]))
+    stale = same_round = 0
+    unexplained: list[str] = []
+    for r in rows:
+        rnd, fid, body = int(r["round"]), r["faction_id"], r["body_id"]
+        if body != capital.get((rnd, fid)):
+            continue
+        prior = [rr for rr in presence[(fid, body)]
+                 if rr < rnd and capital.get((rr, fid)) != body]
+        prev_cap = capital.get((rnd - 1, fid))
+        if prior:
+            stale += 1
+        elif prev_cap is not None and prev_cap != body:
+            same_round += 1
+        else:
+            unexplained.append(f"r{rnd} {fid}@{body} {r['resource']}：首都天体上凭空出现货栈")
+
+    agg: dict = {}
+    for r in rows:
+        k = (int(r["round"]), r["faction_id"], r["body_id"])
+        agg[k] = agg.get(k, 0.0) + r["amount"] * rv.get(r["resource"], 1.0)
+    agg_bad: list[str] = []
+    nonzero = 0
+    for c in cities.to_dict("records"):
+        if c["已焚毁"]:
+            continue
+        want = agg.get((int(c["round"]), c["faction_id"], c["body_id"]), 0.0)
+        got = c["depot_value"]
+        if got > 0.0:
+            nonzero += 1
+        if abs(got - want) > 0.006:
+            agg_bad.append(f"r{int(c['round'])} {c['city_id']}: depot_value={got} ≠ Σ货栈={want}")
+
+    return {"rows": len(rows), "pos_bad": pos_bad, "stale": stale, "same_round": same_round,
+            "unexplained": unexplained, "agg_bad": agg_bad, "nonzero": nonzero,
+            "bodies": len(presence)}
+
+
+def dispatch_report(q) -> dict:
+    """派单抽签（`autocontrol::freight::route_for`）：`round_inputs.rolls` 里的 `route` 记录。
+
+    ⚠ **为什么不建 `haul_lanes` 表**（施工图 §5 第 4 批的建议）：`route_for` 在
+    `step_military` 里**逐舰**调用，每艘舰看到的腿都是**那一刻**的（前面的舰已经把货搬走、
+    池子改了，见 `haul_step` 在同一循环里）⇒ 一张「每回合每势力一条」的 `lanes()` 表既不
+    忠实（§12 同回合相位错位）、也会和抽签记录打架。而抽签记录里的 `pool` 正是**那一刻、
+    那艘舰**看到的候选腿（权重 = 货量），所以这一页用 `round_inputs` 就够了，**零新增序列化**。
+
+    判据：逐条把 `value × pool_total` 按池子顺序切段，落点必须 == `picked`；且
+    `pool_total == Σ权重`、权重全正、`picked` 在池子里。
+    """
+    ri = q.table("round_inputs")
+    bad: list[str] = []
+    draws = multi = 0
+    for r in ri.to_dict("records"):
+        rnd = int(r["round"])
+        for roll in (r.get("rolls") or []):
+            if roll.get("purpose") != "route":
+                continue
+            draws += 1
+            who = roll.get("subject")
+            pool = roll.get("pool") or []
+            total = roll.get("pool_total")
+            picked = roll.get("picked")
+            val = roll.get("value")
+            if not pool:
+                bad.append(f"r{rnd} {who}：route 抽签没有候选池")
+                continue
+            if any((p.get("weight") or 0.0) <= 0.0 for p in pool):
+                bad.append(f"r{rnd} {who}：候选池里有非正的权重")
+            ssum = sum(float(p.get("weight") or 0.0) for p in pool)
+            if total is None or abs(ssum - total) > 1e-9 * max(1.0, abs(total)):
+                bad.append(f"r{rnd} {who}：pool_total={total} ≠ Σ权重={ssum}")
+            names = [p.get("name") for p in pool]
+            if len(set(names)) != len(names):
+                bad.append(f"r{rnd} {who}：候选池里有重名腿")
+            for n in names:
+                parts = (n or "").split("→")
+                if len(parts) != 2 or not parts[0] or not parts[1] or parts[0] == parts[1]:
+                    bad.append(f"r{rnd} {who}：腿名 {n!r} 不是 A→B（或两端相同）")
+            if picked not in names:
+                bad.append(f"r{rnd} {who}：picked={picked!r} 不在候选池里")
+                continue
+            if len(pool) >= 2:
+                multi += 1
+            # 精确复算 `route_for` 的切段：x = value × total；落在哪段就选哪条。
+            x = float(val) * float(total)
+            got = pool[-1].get("name")
+            for p in pool:
+                if x < float(p["weight"]):
+                    got = p["name"]
+                    break
+                x -= float(p["weight"])
+            if got != picked:
+                bad.append(f"r{rnd} {who}：picked={picked!r} ≠ value×total 落在的 {got!r}")
+    return {"draws": draws, "multi": multi, "bad": bad}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
-    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
+                                      "market_trades", "depots", "factions",
+                                      "round_inputs"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -470,7 +779,114 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "blueprints": blueprints, "ids": ids, "meta": q.meta}
+            "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
+            "depot": depot_report(q), "dispatch": dispatch_report(q),
+            "meta": q.meta}
+
+
+def trade_checks(h, ck, out) -> None:
+    """贸易三账（B3）：`src/tests/sim/trade.rs` 搬过来的三条判据。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["trade"] for d in out]
+    trades = sum(r["trades"] for r in rep)
+
+    recon_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["recon_bad"]]
+    ck.check("每笔成交的实收都归到世界账（成交清单 ↔ view.market_settled 逐回合对账）",
+             not recon_bad,
+             "；".join(m for _, m in recon_bad[:3]) or
+             f"{tag}：{trades:,} 笔成交、{sum(r['recon_rounds'] for r in rep)} 个成交回合全部对账")
+    ck.check("成交对账没有空转（真的成交过）", trades >= MIN_TRADES,
+             f"{tag} 共 {trades:,} 笔成交（下限 {MIN_TRADES}）")
+
+    price_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["price_bad"]]
+    seen = {k: sum(r["price_seen"][k] for r in rep) for k in ("freight", "same_body", "mond")}
+    ck.check("价格分解逐项自洽（拿记录下来的 depth/dist 与 meta.market 重算）",
+             not price_bad,
+             "；".join(m for _, m in price_bad[:3]) or
+             f"{tag}：{trades:,} 笔的 mond_extra / freight_rate 全部咬合")
+    ck.check("价格分解没有空转（真出现过跨天体运费与同天体零运费两档）",
+             seen["freight"] >= 1 and seen["same_body"] >= 1,
+             f"跨天体运费 {seen['freight']} 笔、同天体零运费 {seen['same_body']} 笔"
+             f"（穿带溢价 {seen['mond']} 笔，轨迹相关，不强制出现）")
+
+    rank_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["rank_bad"]]
+    rank_rounds = sum(r["rank_rounds"] for r in rep)
+    ck.check("买方名次就是引擎排好的购买力序（降序、同额按名字升序、名次是 0..n-1）",
+             not rank_bad,
+             "；".join(m for _, m in rank_bad[:3]) or
+             f"{tag}：{rank_rounds} 个市场的排队全部是 0..n-1 的购买力序")
+    ck.check("名次守卫没有空转（真有排过队的回合）", rank_rounds >= MIN_RANK_ROUNDS,
+             f"{tag} 共 {rank_rounds} 个回合排过队（下限 {MIN_RANK_ROUNDS}）")
+
+
+def cargo_checks(h, ck, out) -> None:
+    """货舱（M2）：有效舱容公式 + 舰级舱容的设计裁决。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["cargo"] for d in out]
+    checked = sum(r["checked"] for r in rep)
+    damaged = sum(r["damaged"] for r in rep)
+    with_cargo = sum(r["with_cargo"] for r in rep)
+
+    formula_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["formula_bad"]]
+    ck.check("有效舱容 = 舰级舱容 × 战损折算 hull/hull_max（真实舰·回合逐行）", not formula_bad,
+             "；".join(m for _, m in formula_bad[:3]) or
+             f"{tag}：{checked:,} 个舰·回合的舱容都落在舍入区间里（其中 {damaged:,} 行受过伤）")
+    ck.check("舱容守卫没有空转（真受过伤、真装过货）",
+             checked >= MIN_CARGO_ROWS and damaged >= 10 and with_cargo >= 10,
+             f"{checked:,} 个舰·回合（下限 {MIN_CARGO_ROWS}）、{damaged:,} 行 hull<hull_max、"
+             f"{with_cargo:,} 行舱里有货")
+
+    design_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["design_bad"]]
+    bulk = sorted({c for r in rep for c in r["bulk"]})
+    ck.check("舰级舱容是设计裁决（护卫2 / 驱逐4 / 巡洋6 / 航母20 / 战列6，航母唯一散货船）",
+             not design_bad and bulk == ["carrier"],
+             "；".join(m for _, m in design_bad[:3]) or
+             f"五个舰级全对；唯一散货船 = {bulk}（其余都 < 20）")
+
+
+def depot_checks(h, ck, out) -> None:
+    """产地货栈（M1）：首都即集散地 + `cities.depot_value` 的城视角合计。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["depot"] for d in out]
+    rows = sum(r["rows"] for r in rep)
+    nonzero = sum(r["nonzero"] for r in rep)
+    stale = sum(r["stale"] for r in rep)
+    same_round = sum(r["same_round"] for r in rep)
+
+    pos_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["pos_bad"]]
+    ck.check("货栈行都是正的、不重复（稀疏：没积压的天体不占行）", not pos_bad,
+             "；".join(m for _, m in pos_bad[:3]) or f"{tag}：{rows:,} 行全为正且唯一")
+
+    unexplained = [(s, m) for s, r in zip(SEEDS, rep) for m in r["unexplained"]]
+    ck.check("首都天体上没有凭空的货栈（首都即集散地；迁都的相位错位逐处解释）", not unexplained,
+             "；".join(m for _, m in unexplained[:3]) or
+             f"{tag}：{rows:,} 行里只有 {stale} 行 stale + {same_round} 行 same_round 落在首都天体上，全部有解释")
+    ck.check("货栈守卫没有空转（真有货栈、也真解释过迁都）",
+             rows >= MIN_DEPOT_ROWS and (stale + same_round) >= 1,
+             f"{rows:,} 行货栈（下限 {MIN_DEPOT_ROWS}）、{stale} stale / {same_round} same_round")
+
+    agg_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["agg_bad"]]
+    ck.check("cities.depot_value ≡ Σ depots × 资源价值（城视角合计）", not agg_bad,
+             "；".join(m for _, m in agg_bad[:3]) or
+             f"{tag}：{nonzero:,} 个「有积压的城·回合」的 depot_value 全部对得上")
+    ck.check("合计守卫没有空转（真有积压的城）", nonzero >= 10,
+             f"{nonzero:,} 个「有积压的城·回合」（下限 10）")
+
+
+def dispatch_checks(h, ck, out) -> None:
+    """派单抽签（`autocontrol::freight`）：按积压占比切成区间。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["dispatch"] for d in out]
+    draws = sum(r["draws"] for r in rep)
+    multi = sum(r["multi"] for r in rep)
+    bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["bad"]]
+    ck.check("派单抽签逐条自洽（pool_total=Σ权重、picked=value×total 落在的那一段）",
+             not bad,
+             "；".join(m for _, m in bad[:3]) or
+             f"{tag}：{draws:,} 条 route 抽签全部按池子占比落段（其中 {multi:,} 条多候选）")
+    ck.check("派单抽签没有空转（真有抽签、且真有多候选）",
+             draws >= MIN_ROUTE_DRAWS and multi >= MIN_ROUTE_DRAWS,
+             f"{draws:,} 条 route 抽签（下限 {MIN_ROUTE_DRAWS}），多候选 {multi:,}")
 
 
 def run(h, ck) -> None:
@@ -492,6 +908,10 @@ def run(h, ck) -> None:
 
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
+    trade_checks(h, ck, out)
+    cargo_checks(h, ck, out)
+    depot_checks(h, ck, out)
+    dispatch_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
