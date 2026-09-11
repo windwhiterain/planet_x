@@ -843,7 +843,7 @@ def extract(dirpath):
     """
     q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
                                       "market_trades", "depots", "factions",
-                                      "round_inputs", "body_positions"))
+                                      "round_inputs", "body_positions", "haul_steps"))
     ev = q.table("events")
     fac_all = q.table("factions")
 
@@ -1005,6 +1005,7 @@ def extract(dirpath):
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
             "launch": _launch_report(ships),
+            "haul_leg": haul_leg_report(q),
             "trade_block": {"n": tb_n, "bad": tb_bad[:4], "causes": sorted(tb_causes),
                             "rounds": sorted(tb_at_round), "by_round": tb_at_round},
             "story_bad": story_bad, "story_rel_checked": rel_checked,
@@ -1144,6 +1145,7 @@ def run(h, ck) -> None:
     dispatch_checks(h, ck, out)
     new_ship_checks(h, ck, out)
     trade_block_checks(h, ck, out)
+    haul_leg_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2192,6 +2194,77 @@ def trade_block_checks(h, ck, out) -> None:
     ck.check("禁运名单：与引擎判据**同源**（逐条目问 `--call trade_block_cause`，逐字相等）",
              bool(mism) is False and checked > 0,
              "；".join(mism[:3]) or f"第 {rnd} 回合 {checked} 条逐个复核相等")
+
+
+def haul_leg_report(q) -> dict:
+    """**运输腿别由货舱决定**（`sim/tests/haul.rs::a_haul_route_alternates_legs_because_of_the_cargo`，第 7 批）。
+
+    读面两份就够，**不用新列**：`ships.order_effective` 里**声明的** `Haul{from, to}`
+    （路线是引擎给的，不是我推的）+ `haul_steps`（这一步在哪、干什么）+ `ships.载货`。
+    判据 = 那三步各自该在哪一端：
+
+    * `en_route`：**舱里有货 ⇒ 目标是 `to`；空舱 ⇒ 目标是 `from`**（这就是「腿别由货舱决定」）；
+    * `waiting`：只在 `from`，且舱必须是空的（「货栈空就原地等」）；
+    * `loaded` 只在 `from`、`delivered` 只在 `to`。
+
+    ⚠ 第一版我拿「观测到的装卸天体」去推 from/to，结果单路线舰里还有 196 处反例——**推出来的路线
+    是错的**（承包投递的卸货端与货主不是一回事）。声明路线就在读面上，不用推。
+    """
+    hs, sh = q.table("haul_steps"), q.table("ships")
+    route: dict = {}
+    cargo: dict = {}
+    for _, r in sh.iterrows():
+        key = (int(r["round"]), r["舰名"])
+        o = r["order_effective"]
+        h = (o or {}).get("Haul") if isinstance(o, dict) else None
+        route[key] = ((h or {}).get("from"), (h or {}).get("to")) if h else None
+        cargo[key] = sum((r["载货"] or {}).values())
+    bad: list[str] = []
+    n = orphan = 0
+    kinds: set = set()
+    for _, r in hs.iterrows():
+        key = (int(r["round"]), r["舰名"])
+        rt = route.get(key)
+        if not rt or not rt[0]:
+            orphan += 1
+            continue
+        frm, to = rt
+        n += 1
+        kinds.add(r["step"])
+        where = f"r{key[0]} {r['舰名']}（{frm}→{to}）"
+        c = cargo.get(key, 0.0)
+        step, body = r["step"], r["body"]
+        if step == "en_route":
+            if c > 1e-9 and body != to:
+                bad.append(f"{where}：舱里有货却开向 {body}（该去卸货端 {to}）")
+            elif c <= 1e-9 and body != frm:
+                bad.append(f"{where}：空舱却开向 {body}（该回装货端 {frm}）")
+        elif step == "waiting":
+            if body != frm:
+                bad.append(f"{where}：在卸货端干等")
+            elif c > 1e-9:
+                bad.append(f"{where}：舱里有货却在干等")
+        elif step == "loaded" and body != frm:
+            bad.append(f"{where}：在卸货端装货")
+        elif step == "delivered" and body != to:
+            bad.append(f"{where}：在装货端卸货")
+    return {"n": n, "orphan": orphan, "bad": bad[:4], "kinds": sorted(kinds)}
+
+
+def haul_leg_checks(h, ck, out) -> None:
+    """**运输腿别**（`sim/tests/haul.rs`，第 7 批搬来）。"""
+    reps = [d["haul_leg"] for d in out]
+    n = sum(r["n"] for r in reps)
+    orphan = sum(r["orphan"] for r in reps)
+    kinds = sorted({k for r in reps for k in r["kinds"]})
+    bad = [(s, m) for s, r in zip(SEEDS, reps) for m in r["bad"]]
+    ck.check("运输腿别：`en_route` 的目标由**货舱**决定（有货去卸货端、空舱回装货端），"
+             "`waiting` 只在装货端且舱是空的，装/卸各在自己那一端",
+             not bad, "；".join(m for _, m in bad[:3]) or
+             f"{len(SEEDS)} seed 共 {n:,} 步全部落在声明路线该在的那一端")
+    ck.check("运输腿别守卫没有空转（四种步骤都出现过，且真等到过货）",
+             set(kinds) == {"loaded", "delivered", "waiting", "en_route"} and n >= 500,
+             f"{n:,} 步，步骤 {kinds}；无声明路线的 {orphan} 步（回合末刚被改派的那种）")
 
 
 def id_checks(h, ck, out) -> None:

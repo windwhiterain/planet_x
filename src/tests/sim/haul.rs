@@ -1,5 +1,15 @@
 //! 集货：产地货栈的池子不动、装/卸的货值守恒、雇佣交付的分账、腿别由货舱决定。
 //!
+//! ## 2026-10（第 7 批）：`a_haul_route_alternates_legs_because_of_the_cargo` 搬去了 g2
+//!
+//! 读面两份就够，**不用新列**：`ships.order_effective` 里**声明的** `Haul{from, to}`
+//! （路线是引擎给的）+ `haul_steps` + `ships.载货`。判据 = **腿别由货舱决定**：
+//! `en_route` 有货 ⇒ 目标是 `to`、空舱 ⇒ 目标是 `from`；`waiting` 只在 `from` 且舱空；
+//! `loaded` 只在 `from`、`delivered` 只在 `to`。3 seed 共 **11,621** 步**零违规**。
+//!
+//! ⚠ 第一版拿「观测到的装卸天体」去**推** from/to ⇒ 单路线舰里还有 196 处反例。
+//! 推出来的路线是错的（承包投递的卸货端与货主不是一回事）；声明路线本来就在读面上。
+//!
 //! ## 2026-10（第 7 批）：`a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`
 //! 搬去了 g2 **合成场景 · 玩家钉的常驻运输线**（6 条判据）
 //!
@@ -315,57 +325,5 @@ fn a_hired_delivery_splits_the_cargo_between_carrier_and_shipper() {
         (c.delivered - loaded).abs() < 1e-9,
         "进度 = 卸出舱的总量 {loaded}，实为 {}",
         c.delivered
-    );
-}
-
-/// **常驻路线 + 腿别由货舱决定（Q7 A / Q5 A）**：同一对 `from/to`、**不存任何额外状态**，
-/// 空舱就去装、装到货就改跑 `to`、货栈空就原地等——三件事全部由「舱里有货吗」推出来。
-#[test]
-fn a_haul_route_alternates_legs_because_of_the_cargo() {
-    let (config, mut state) = fresh_world(42);
-    state.depots.clear();
-    let ship = state
-        .ships
-        .iter()
-        .find(|s| s.faction_id == "中国")
-        .expect("中国开局有舰")
-        .name
-        .clone();
-    let class = state.ship(&ship).unwrap().class.clone();
-    let vpos = state.body_position("月球");
-    state.ship_mut(&ship).unwrap().position = vpos;
-
-    // 1) 货栈是空的 ⇒ **原地等**（「有货就走」的另一半是「没货就不走」），位置不动。
-    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
-    assert!(
-        matches!(step, HaulStep::Waiting { ref body } if body == "月球"),
-        "空货栈应当原地等，实为 {step:?}"
-    );
-    assert_eq!(
-        state.ship(&ship).unwrap().position,
-        vpos,
-        "等的时候不许乱跑"
-    );
-    assert!(state.ship(&ship).unwrap().cargo.is_empty());
-
-    // 2) 来货了就装，且**这一回合不再跑**（与殖民一样是「到达即行动」）。
-    state.depot_add("中国", "月球", "碳", 3.0);
-    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
-    assert!(
-        matches!(step, HaulStep::Loaded { .. }),
-        "有货就装，实为 {step:?}"
-    );
-    assert!(!state.ship(&ship).unwrap().cargo.is_empty(), "舱里该有货");
-
-    // 3) 舱里有货 ⇒ 腿别翻到 `to`（哪怕 `from` 还有货）。同一对 from/to、零额外状态。
-    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
-    assert_eq!(
-        step.body(),
-        "地球",
-        "舱里有货 ⇒ 这一腿去卸货端，实为 {step:?}"
-    );
-    assert!(
-        !matches!(step, HaulStep::Waiting { .. } | HaulStep::Loaded { .. }),
-        "有货时不该再在装货端打转，实为 {step:?}"
     );
 }
