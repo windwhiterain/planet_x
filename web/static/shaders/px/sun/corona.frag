@@ -160,13 +160,15 @@
     // 位置随场景连续变化 —— 所以它既正确、又不会造出硬边。
     if (uHasDepth > 0.5) {
       float dz = texture(uDepth, gl_FragCoord.xy / uResolution).x;
-      // 窗口深度 → 视空间 z（负值）
+      // 窗口深度 → 沿**视线方向**的距离（正值）。⚠ 这个式子的输出是正距离，**不是**负的视空间 z。
+      // 我第一次就栽在这儿：拿它去除一个负的 dirView.z ⇒ tScene 变负 ⇒ t1 < t0 ⇒ **每个片元
+      // 都被 discard** ⇒ 日冕整个消失（用户一眼看出「根本没有日晕日珥」）。
       float n = uNearFar.x, f = uNearFar.y;
-      float viewZ = (2.0 * n * f) / (f + n - (2.0 * dz - 1.0) * (f - n));
-      // 视空间射线方向：world 方向用 viewMatrix 转过去即可（片元里有 viewMatrix）
+      float viewDist = (2.0 * n * f) / (f + n - (2.0 * dz - 1.0) * (f - n));
+      // 视空间射线方向（world 方向用 viewMatrix 转过去；片元里有 viewMatrix）
       vec3 dirView = (viewMatrix * vec4(rd, 0.0)).xyz;
-      // 沿射线的距离 = 视空间 z / 方向的 z 分量（两者同为负 ⇒ 结果为正）
-      float tScene = viewZ / min(dirView.z, -1e-6);
+      // 沿射线的距离 = 视轴上的距离 / 方向与视轴夹角的余弦 = viewDist / (−dirView.z)
+      float tScene = viewDist / max(-dirView.z, 1e-6);
       t1 = min(t1, tScene);
     }
     if (t1 <= t0) discard;

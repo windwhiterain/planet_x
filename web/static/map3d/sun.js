@@ -128,7 +128,8 @@ export function createSun(tier) {
       if (camera) coronaMat.uniforms.uProj.value.copy(camera.projectionMatrix);
       // 深度预趟产物 + 相机参数：体积积分靠它们夹断（每帧都要更新，窗口会变）
       if (depth) {
-        coronaMat.uniforms.uDepth.value = depth.texture;
+        // 用**深度纹理**（24 位），而不是 RT 的颜色纹理（8 位，会分层）
+        coronaMat.uniforms.uDepth.value = depth.depthTexture || depth.texture;
         coronaMat.uniforms.uResolution.value.set(depth.width, depth.height);
       }
       coronaMat.uniforms.uHasDepth.value = depth ? 1 : 0;
