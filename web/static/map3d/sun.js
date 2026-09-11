@@ -65,6 +65,12 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uChromo: { value: 1.0 },
     // 片元里拿不到 projectionMatrix（three 只在顶点前缀给），自己传
     uProj: { value: new THREE.Matrix4() },
+    // 场景深度：体积积分必须在**最近的实体表面**处停下（见 CORONA_FRAG 里的夹断），
+    // 否则遮挡物**背后**的介质也会被累加进来。这张纹理来自 postfx 的深度预趟。
+    uDepth: { value: null },
+    uResolution: { value: new THREE.Vector2(1, 1) },
+    uNearFar: { value: new THREE.Vector2(0.1, 1000) },
+    uHasDepth: { value: 0 },
     uFalloff: { value: 2.6 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
@@ -115,11 +121,18 @@ export function createSun(tier) {
   return {
     group: g,
     photosphere,
-    update(t, camera) {
+    update(t, camera, depth) {
       photosphereMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
       // 相机矩阵会变（变焦/改 FOV），所以每帧同步，不能只在创建时设一次
       if (camera) coronaMat.uniforms.uProj.value.copy(camera.projectionMatrix);
+      // 深度预趟产物 + 相机参数：体积积分靠它们夹断（每帧都要更新，窗口会变）
+      if (depth) {
+        coronaMat.uniforms.uDepth.value = depth.texture;
+        coronaMat.uniforms.uResolution.value.set(depth.width, depth.height);
+      }
+      coronaMat.uniforms.uHasDepth.value = depth ? 1 : 0;
+      if (camera) coronaMat.uniforms.uNearFar.value.set(camera.near, camera.far);
     },
     setIntensity(v) {
       photosphereMat.uniforms.uIntensity.value = v;

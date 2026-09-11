@@ -666,7 +666,7 @@ function tick() {
     c.mat.uniforms.uSpin.value = c.phase;
     c.mat.uniforms.uTime.value = timeS;      // 云自己的漂移照旧（那是 uTime，不是自转）
   }
-  if (sun) sun.update(timeS, camera);   // camera 是为了日冕体积的深度（见 CORONA_FRAG 尾部）
+  if (sun) sun.update(timeS, camera, post ? post.depthTarget : null);   // 深度：日冕积分靠它夹断
   tickPlumes(timeS);
 
   // 轨道线的彗头跟住天体当前（可能还在过渡中）的位置。
@@ -807,6 +807,8 @@ function init(container) {
   renderer.setSize(w, h);
   post = createPostFX(renderer, tier, { w, h });
   post.setScene(scene, camera);
+  // 深度预趟**不**包含日冕自己 —— 否则它会挡住自己（预趟用的是覆盖材质，会照写深度）。
+  post.setDepthExclude([sun.group]);
   post.setExposure(TUNING.exposure);
   post.applyTuning();
 
