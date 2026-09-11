@@ -71,7 +71,14 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uResolution: { value: new THREE.Vector2(1, 1) },
     uNearFar: { value: new THREE.Vector2(0.1, 1000) },
     uHasDepth: { value: 0 },
-    uFalloff: { value: 2.6 },
+    // 这个指数决定「日冕能伸多远」。两个极端都试过，都用错了：
+    //   · **2.6**（原来）：2.5 R 处仍有 rr^-2.6 = 9% ⇒ 一路糊到行星轨道上。
+    //   · **9.0**（我改的）：rr=2 处就低于 2e-3 的早退阈值 ⇒ **日冕本身被裁掉了**
+    //     （用户：「你把日晕给删了」）。为消一层雾而把主体删掉，是我搞反了因果 ——
+    //     那层雾的两个真因（色球漏夹断、相机在体积内深度测试失效）都已经单独修好了。
+    //   · **6.0**（现在）：1.5 R ⇒ 0.13，2.5 R ⇒ 6.4e-3（行星轨道处只剩 0.6%，雾基本不可见），
+    //     而 3 R 处仍有 1.4e-3 —— 日冕保持可见、有体量，又不至于罩住行星。
+    uFalloff: { value: 6.0 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
   },
@@ -80,7 +87,10 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
   transparent: true,
   blending: THREE.AdditiveBlending,
   depthWrite: false,
-  depthTest: true,
+  // **不要深度测试**：遮挡判据在着色器里用**解析夹断**做（`t1 = min(t1, tScene)` + discard），
+  // 它不依赖深度缓冲，相机在体积内/外/被部分遮挡全都成立。交给深度测试反而会错 ——
+  // BackSide 的天然深度是**远壁**，球内一切都会把体积挡掉（「裸体太阳」）。
+  depthTest: false,
   // **背面**：相机在体积外时渲染远表面、在体积内时渲染的还是远表面 —— 两种情况都有片元，
   // 不用按位置切换 side（切 side 会改 define ⇒ 触发重编译）。
   side: THREE.BackSide,
