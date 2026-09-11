@@ -124,11 +124,19 @@ const CHROMO_FRAG = /* glsl */`
 const CORONA_VERT = /* glsl */`
   uniform float uSize;
   varying vec2 vP;
+  varying vec3 vDir;      // 世界空间单位方向：太阳 → 该像素
   void main(){
     vP = position.xy * 2.0;                 // -1..1 的盘面坐标
     // 手写 billboard：把平面的局部 xy 直接加到「太阳中心在视图空间的位置」上。
     // 这样永远正对镜头（日冕是光学薄发射体，这就是对的近似），也不吃背面剔除。
     // 半边长 = uSize ⇒ vP=1 处正好离日心 uSize，于是 uCore 可以直接写成 R/uSize。
+    //
+    // vDir：把「屏幕 xy 轴」反查回**世界**方向（viewMatrix 的行向量就是世界→视图的轴），
+    // 片元里用它当噪声坐标 ⇒ 冕流固定在世界里。**这是转镜头时冕流跟着转的修复点**：
+    // 以前噪声吃的是 billboard 的局部极角，那是锁死在屏幕上的。
+    vec3 rightW = vec3(viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2]);
+    vec3 upW    = vec3(viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2]);
+    vDir = normalize(rightW * position.x + upW * position.y);
     vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
     mv.xy += position.xy * uSize * 2.0;
     gl_Position = projectionMatrix * mv;
@@ -144,6 +152,7 @@ const CORONA_FRAG = /* glsl */`
   uniform float uCore;      // 被光球盖住的半径（以盘面坐标为单位）
   uniform float uFalloff;   // 径向幂律指数
   varying vec2 vP;
+  varying vec3 vDir;        // 世界空间单位方向：太阳 → 该像素
 
   void main(){
     float r = length(vP);
@@ -152,46 +161,51 @@ const CORONA_FRAG = /* glsl */`
     // 先算**便宜**的径向包络，再决定要不要跑昂贵的噪声。
     // 这一条很关键：日冕 billboard 的半径是 4 个太阳半径，相机贴近行星时它会铺满整个
     // 屏幕——不早退的话，每帧要对全屏跑一次 fbm+ridged（集显上直接吃掉一半帧时间）。
+    // 阈值必须**远低于可见**：discard 是硬切，门限一高就在画面上切出一圈硬边
+    // （0.0025 时远处那层 halo 的硬边正好落在画面内，实测看得到）。
     float rc0 = max(uCore, 0.04);
-    float fall = pow(rc0 / max(r, rc0), uFalloff) * smoothstep(1.0, 0.72, r);
-    if (fall * uIntensity < 0.0025) discard;
+    float fall = pow(rc0 / max(r, rc0), uFalloff);
+    if (fall * uIntensity < 1.0e-4) discard;
 
-    float a = atan(vP.y, vP.x);
     float t = uTime;
-
-    // 冕流：沿角向拉长的噪声，在径向缓慢流动。极坐标 → 三维噪声坐标（用 (cos,sin,r) 保角向周期）。
-    vec3 q = vec3(cos(a), sin(a), 0.0) * 3.2 + vec3(0.0, 0.0, r * 1.6 - t * 0.10);
-    float streamer = fbm(q);
-    float fine = ridged(vec3(cos(a), sin(a), 0.0) * 9.0 + vec3(0.0, 0.0, r * 3.0 - t * 0.22));
-    // 径向衰减在 main() 开头已经算好（fall）。**必须是幂律**（K-日冕在天空平面上的
-    // 投影大致 ~r^-2.6），不能用 pow(1-r,k) 那种「到边缘才归零」的浅包络——后者在相机
-    // 贴近太阳时会让整个画面蒙上一层灰。
-    // 冕流要有**对比**：有底噪的日冕只是一层灰雾。基底压到 0.02，让「流苏之间」真的接近
-    // 全黑——真实日冕照片里最抓人的就是那些放射状亮条之间的暗。
-    float shape = 0.02 + 2.30 * pow(smoothstep(0.22, 0.80, streamer), 1.8) + 0.30 * fine;
-
-    // 日珥：紧贴光球的一圈弧状等离子体，随时间涨落。
-    float band = exp(-pow((r - uCore * 1.14) / (uCore * 0.16), 2.0));
-    float prom = smoothstep(0.45, 0.95, fbm(vec3(cos(a), sin(a), 0.0) * 5.5 + vec3(0.0, 0.0, t * 0.13)));
-    vec3 promCol = vec3(1.5, 0.30, 0.18);
 
     // 日冕的色：内圈偏白黄（自由电子散射的近白），外圈偏冷的淡蓝紫（F-corona / 尘埃散射）。
     vec3 inner = vec3(1.15, 0.90, 0.62);
     vec3 outer = vec3(0.42, 0.52, 0.95);
 #ifdef CORONA_SIMPLE
-    // 远处的弥散光晕只需要一条幂律：跳过全部噪声（全屏 fbm 是这个 pass 的成本大头）。
+    // 远处的弥散光晕只需要一条幂律：**真的一条噪声都不跑**（全屏 fbm 是这个 pass 的成本大头）。
+    // 注意 streamer/fine 必须写在 #else 里——写在 #ifdef 外面的话这句注释就是假的。
     vec3 col = mix(inner, outer, smoothstep(uCore, 1.0, r)) * fall;
 #else
+    // 冕流：在**世界空间方向**上采噪声（vDir），不是 billboard 的局部极角。
+    // 旧写法吃的是 atan(vP.y, vP.x)：那个角只在噪声的 cos/sin 圆上走、径向频率又低，
+    // 噪声被拉成一根根**硬边直辐条**（星芒滤镜感），而且锁死在屏幕上、转镜头整片跟着转。
+    // 换成世界方向后：① 冕流待在世界里不动；② 噪声在球面/锥面上正常展开，辐条散掉。
+    // 径向仍用 r 调制采样尺度，让冕流越往外越细。
+    float streamer = fbm(vDir * (3.4 + r * 2.4) + vec3(0.0, 0.0, -t * 0.10));
+    float fine     = ridged(vDir * (8.5 + r * 4.5) + vec3(0.0, 0.0, -t * 0.22));
+
+    // 径向衰减在 main() 开头已经算好（fall）。**必须是幂律**（K-日冕在天空平面上的
+    // 投影大致 ~r^-2.6），不能用 pow(1-r,k) 那种「到边缘才归零」的浅包络——后者在相机
+    // 贴近太阳时会让整个画面蒙上一层灰。
+    // 对比度：旧版 base 0.02 / 峰值 ~2.32（100:1）⇒ 那正是「硬辐条」的来源。压到 ~9:1，
+    // 冕流仍读得出来，但不再像星芒滤镜。
+    float shape = 0.14 + 1.05 * smoothstep(0.20, 0.86, streamer) + 0.26 * fine;
     vec3 col = mix(inner, outer, smoothstep(uCore, 1.0, r)) * fall * shape;
+
+    // 日珥：紧贴光球的一圈弧状等离子体，随时间涨落。
+    float band = exp(-pow((r - uCore * 1.14) / (uCore * 0.16), 2.0));
+    float prom = smoothstep(0.45, 0.95, fbm(vDir * 5.5 + vec3(0.0, 0.0, t * 0.13)));
+    col += vec3(1.5, 0.30, 0.18) * band * prom * 1.9;
 #endif
-    col += promCol * band * prom * 1.9;
 
     // 靠近核心处补一层紧致辉光，让「日冕→光球」没有断层。**必须带窗口**：r^-3 的尾巴
     // 拖到 1.5 个太阳半径之外就成了一层盖住行星的灰。窗口让它到 0.45 就消失。
     col += vec3(1.2, 0.85, 0.55) * pow(max(0.0, uCore / max(r, 1e-3)), 3.0) * 0.42
          * smoothstep(0.52, 0.24, r);
-    // 远处归零（避免 billboard 的方形边界露出来）。
-    col *= smoothstep(1.0, 0.55, r);
+    // 远处归零。**必须在 vP=1（四边形边界）之前就归零并留余量**：旧版用 smoothstep(1.0,…)
+    // 正好落在边界上，浮点误差会让四条直边露出来（quad 是方的、包络是圆的，圆只内切）。
+    col *= smoothstep(0.90, 0.42, r);
 
     gl_FragColor = vec4(col * uIntensity, 1.0);
   }
