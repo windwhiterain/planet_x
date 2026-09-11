@@ -572,3 +572,24 @@ pub mod key2 {
 #[cfg(test)]
 #[path = "tests/json.rs"]
 mod tests;
+
+// --- 存档（`--save` / `--start`）：JSON 出口 + **元组键**的反向还原 ----------------
+//
+// 2026-10 起存档格式是 **JSON**（不再是 RON）：RON 要求结构体字段名是合法标识符，
+// 而「字段名就是给人看的中文名词」是本仓的方向（见 `.agents/notes/field-naming.md`），
+// 带空格/符号的名字（`和平↔军国`、`MOND 掌握度`）RON 根本写不出来。
+//
+// [`to_value`] 已经把**非字符串的 map key** 转成了 `"城|7"` 这种字符串（见模块文档），
+// 所以反方向只要把这两个形状的键拆回来即可——JSON 里只有这两处：
+
+/// 把模型序列化成**给人看、可 diff** 的 JSON（键序 = 结构体声明顺序，见 `preserve_order`）。
+pub fn to_string_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&to_value(value)?)
+}
+
+/// 从 JSON 文本还原模型。元组键由 [`de_keys_ss`] / [`de_keys_su`] 在各字段上还原。
+pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(text)
+}
+
+

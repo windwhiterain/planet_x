@@ -23,9 +23,11 @@ pub struct City {
     pub faction_id: FactionId,
     /// 人口, limits production efficiency.
     pub population: u32,
-    pub buildings: Vec<Building>,
-    /// 建造进度 (以城市为单位): ship class -> progress.
-    pub ship_progress: BTreeMap<String, f64>,
+    /// 忠诚度 (0..1)：城市对其统治势力的向心力。治理到位（能付清光速管理费）时
+    /// 向「距离目标」恢复；欠费时下降；低于叛变阈值则爆发「离心叛乱」，城市被
+    /// 夷平为空白。这让超大帝国难以维持遥远殖民地——光速治理延迟的体现。
+    #[serde(default = "default_loyalty")]
+    pub loyalty: f64,
     /// 被夷平为空白 (razed): no buildings / population; colonizable again.
     pub razed: bool,
     /// 城市形态：`true` = 轨道空间站（建在气态/冰巨行星的轨道上，如木星/土星/天王星/
@@ -33,11 +35,9 @@ pub struct City {
     /// 供前端按行星相对坐标放置模型（地面城市贴星体表面、空间站悬在更高轨道）。
     #[serde(default)]
     pub space_station: bool,
-    /// 忠诚度 (0..1)：城市对其统治势力的向心力。治理到位（能付清光速管理费）时
-    /// 向「距离目标」恢复；欠费时下降；低于叛变阈值则爆发「离心叛乱」，城市被
-    /// 夷平为空白。这让超大帝国难以维持遥远殖民地——光速治理延迟的体现。
-    #[serde(default = "default_loyalty")]
-    pub loyalty: f64,
+    pub buildings: Vec<Building>,
+    /// 建造进度 (以城市为单位): ship class -> progress.
+    pub ship_progress: BTreeMap<String, f64>,
 }
 
 fn default_loyalty() -> f64 {

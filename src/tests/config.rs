@@ -21,7 +21,7 @@ fn checkpoint_survives_save_and_resume_identically() {
     let seed = 7u64;
     let dir = std::env::temp_dir().join(format!("planet_x_ckpt_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("s.ron");
+    let path = dir.join("s.json");
 
     // 一路跑到底（参照组）。
     let mut straight = world::default_state(&config, seed);
@@ -582,9 +582,13 @@ fn each_layer_only_takes_its_own_salience() {
     assert!(ms.entries.is_empty(), "里程碑层当前没有任何 variant 属于它");
 }
 
-/// 载入一个**裸 `State`** 的 RON 也要能过（`--start` 的另一条路径）。
+/// 载入一个**裸 `State`**（不带 RNG 的快照）也要能过（`--start` 的另一条路径）。
+///
+/// ⚠ 2026-10：存档格式从 RON 换成 **JSON**（RON 要求字段名是合法标识符，而本仓要把
+/// 字段名写成给人看的中文名词，见 `.agents/notes/field-naming.md`）。所以这条往返测的是
+/// [`crate::json`]——它还要负责把 `"城|7"` 这种**元组键**还原回 `(String, u32)`。
 #[test]
-fn bare_state_round_trips_through_ron() {
+fn bare_state_round_trips_through_json() {
     let config = load_config();
     let seed = 42u64;
     let mut state = world::default_state(&config, seed);
@@ -592,10 +596,10 @@ fn bare_state_round_trips_through_ron() {
     for _ in 0..5 {
         sim::advance(&mut state, &config, &mut rng);
     }
-    let text = ron::to_string(&state).expect("serialize");
-    let back: State = match ron::from_str(&text) {
+    let text = crate::json::to_string_pretty(&state).expect("serialize");
+    let back: State = match crate::json::from_str(&text) {
         Ok(v) => v,
-        Err(e) => panic!("裸 State 无法从 RON 读回: {e}"),
+        Err(e) => panic!("裸 State 无法从 JSON 读回: {e}"),
     };
     assert_eq!(back.round, state.round);
     assert_eq!(back.events.len(), state.events.len());

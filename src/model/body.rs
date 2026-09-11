@@ -121,9 +121,6 @@ pub struct Settlement {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Body {
     pub name: String,
-    pub orbit: Orbit,
-    /// 当前位置 (current position in AU, recomputed each round from `orbit`).
-    pub position: [f64; 2],
     /// 天体类型 key（config `body_kinds` 表）。**state 只存一个类型 key**，类型/视觉元数据
     /// （颜色/尺寸/类别/星环等）由 `config/game.ron` 的 `body_kinds` 表提供——这就是
     /// 「视觉属性数据化、body 引用」：引擎不内联任何视觉数据，只记录引用。
@@ -133,6 +130,9 @@ pub struct Body {
     /// 是这颗天体本身的特征（而非类型属性——同为气态巨行星的木星无环），故落在 body 上。
     #[serde(default)]
     pub ring: bool,
+    pub orbit: Orbit,
+    /// 当前位置 (current position in AU, recomputed each round from `orbit`).
+    pub position: [f64; 2],
     pub settlements: Vec<Settlement>,
 }
 

@@ -104,8 +104,6 @@ pub struct Ship {
     pub name: String,
     pub class: String,
     pub faction_id: FactionId,
-    /// Position in AU (same plane as the orbits).
-    pub position: [f64; 2],
     /// Current hull (armor) — must never exceed [`Self::hull_max`].
     pub hull: f64,
     /// 本舰最大护甲（含组件加成）。`hull` 是当前值；再生/损毁以 `hull_max` 为上限。
@@ -117,15 +115,6 @@ pub struct Ship {
     /// 最大能量护盾（护盾组件的 `shield` 加总；无护盾组件为 0）。
     #[serde(default)]
     pub shield_max: f64,
-    /// 本舰装配的组件 id（舰船定制）。空 = 裸舰（仅按 class 基础面板）。
-    /// 由模拟在造舰出厂时确定性挑选并扣成本；agent 可直读以了解舰队构成。
-    #[serde(default)]
-    pub components: Vec<String>,
-    /// 每个组件的完整度（与 `components` 同下标）。战斗中被击中会「溢出」损坏组件——
-    /// 完整度 ≤0 即该组件被击毁，不贡献面板/武器（渐进丧失战力，而非满血抗到壳破）。
-    /// 空 = 旧数据/裸舰（视为全部完好）。
-    #[serde(default)]
-    pub component_hp: Vec<f64>,
     /// 当前速度（AU/月）：每回合按推进模块的 `accel` 提升、最多到巡航速度 `speed`。
     /// 体现「加速到巡航需要时间」——推进模块给的加速度决定多快抵达战术位置。
     #[serde(default)]
@@ -159,11 +148,15 @@ pub struct Ship {
     /// 换句话说：它不是「军舰/民船」的军备差别，而是**同一个舰长的三种活**。
     #[serde(default)]
     pub role: ShipRole,
-    /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
-    /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
-    /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
+    /// 本舰装配的组件 id（舰船定制）。空 = 裸舰（仅按 class 基础面板）。
+    /// 由模拟在造舰出厂时确定性挑选并扣成本；agent 可直读以了解舰队构成。
     #[serde(default)]
-    pub attack_hist: BTreeMap<ShipId, f64>,
+    pub components: Vec<String>,
+    /// 每个组件的完整度（与 `components` 同下标）。战斗中被击中会「溢出」损坏组件——
+    /// 完整度 ≤0 即该组件被击毁，不贡献面板/武器（渐进丧失战力，而非满血抗到壳破）。
+    /// 空 = 旧数据/裸舰（视为全部完好）。
+    #[serde(default)]
+    pub component_hp: Vec<f64>,
     /// **在舱货物**：这艘舰此刻实际装着什么、各多少（`资源 → 数量`）。这是**真实物理量**，
     /// 不是账面数字——它只能由装卸两个动作改变：
     ///
@@ -177,6 +170,8 @@ pub struct Ship {
     /// 折算见 [`crate::model::cargo_capacity`]。空 = 空舱（出厂/旧档）。
     #[serde(default)]
     pub cargo: ResourceMap,
+    /// Position in AU (same plane as the orbits).
+    pub position: [f64; 2],
     /// 本舰**出厂所用**的设计图名（快照的溯源，也是「按舰级默认意图」那一层的查表键）。
     ///
     /// `None` = 无图（旧档 / 开局预置舰队 / 剧情赠舰）。
@@ -188,6 +183,11 @@ pub struct Ship {
     ///   这张图的所有舰（指令叶沉默者）生效，而面板/组件仍是快照。
     #[serde(default)]
     pub blueprint: Option<crate::model::BlueprintId>,
+    /// 本舰的攻击历史：目标舰名 -> 「最近被本舰攻击过」的新鲜度 (0..1)。每回合衰减；本舰
+    /// 刚攻击某目标就把它的新鲜度刷新到 1。各武器的火力分配层据此**降低最近打过目标的
+    /// 权重**（雨露均沾），聚焦武器则反向加权（死磕补刀）。空 = 无历史（基线）。
+    #[serde(default)]
+    pub attack_hist: BTreeMap<ShipId, f64>,
     /// 本舰**下水所在回合**（建造漏斗 `spawn_ship` 写入；`None` = 旧档缺字段 ⇒ **未知**）。
     ///
     /// 用途：编制表/花名册的**确定性 tie-break**（「同分取最老的」——在此之前只能用名字序
