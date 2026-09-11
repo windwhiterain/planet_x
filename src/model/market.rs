@@ -65,7 +65,7 @@ pub struct MarketState {
 }
 
 /// 国内市场的一个类别（开发/建造）的持久状态。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DomesticMarketSide {
     /// 本回合的国内价格（每资源）。
     #[serde(default)]
@@ -79,7 +79,7 @@ pub struct DomesticMarketSide {
 }
 
 /// 一个势力的国内市场状态：开发、建造两个独立市场。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DomesticMarket {
     #[serde(default)]
     pub development: DomesticMarketSide,
