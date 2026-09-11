@@ -1,5 +1,14 @@
 //! 战斗拟真：杀伤、护盾、规避、防空屏护，以及本土修船。
 //!
+//! ## 2026-10（第 7 批）：`combat_respects_shields_and_speed_evasion` 搬走
+//!
+//! * **回避**那半早在 g1 的 `--call hit_factor` 里压着（目标越快命中折减越低）。
+//! * **护盾先吸、船体吃溢出**那半**长局读面证不了**：seed 42 / 400 回合的 **249 发**里
+//!   `absorbed > 0` 的有 **0 发**（没人装护盾组件）⇒ g2 **造**一仗：攻方装 `railgun`、
+//!   守方装 `shield`（护盾打满 12、船体 24）、两家关系压到 `-35`、摆在远离首都处
+//!   （本土倍率 = 1）。实测那一发 `damage 12.6 / absorbed 8.82 / hull_pen 8.19`，
+//!   守方护盾 12.00→4.73、船体 24.00→18.21 且**没被打死**。
+//!
 //! ## 2026-10（第 7 批）：`fire_degrades_components_under_damage` 搬去了 g2 `combat_report`
 //!
 //! 长局两半：**没挨打 ⇒ 组件耐久一点不掉**（3 seed 共 **22,644** 个「没挨打」的舰·回合零反例）
@@ -83,65 +92,5 @@ fn fleet_air_defense_covers_nearby_missile_targets() {
     assert!(
         cover_far < cover_with,
         "cover should drop once the PD ship is far (with {cover_with}, far {cover_far})"
-    );
-}
-
-/// 战斗拟真：护盾池优先吸收，快速目标对低追踪武器规避更强（确定性命中折减）。
-#[test]
-fn combat_respects_shields_and_speed_evasion() {
-    let (config, mut state) = fresh_world(42);
-    // Attacker: China corvette (id 0) fitted with a railgun; target: US destroyer (id 3)
-    // fitted with an energy shield. Both pinned far from any capital so home-field
-    // defense is neutral (mult = 1.0). Hostile so the volley is a real attack.
-    let ship0 = state.ships[0].name.clone();
-    let ship3 = state.ships[3].name.clone();
-    if let Some(s) = state.ship_mut(&ship0) {
-        s.position = [80.0, 80.0];
-        s.components = vec!["railgun".to_string()];
-    }
-    if let Some(s) = state.ship_mut(&ship3) {
-        s.position = [80.4, 80.0];
-        s.components = vec!["shield".to_string()];
-        s.hull = 24.0;
-        s.hull_max = 24.0;
-        s.shield = 12.0;
-        s.shield_max = 12.0;
-    }
-    state
-        .faction_mut("中国")
-        .unwrap()
-        .relations
-        .insert("美国".to_string(), -35.0);
-    state
-        .faction_mut("美国")
-        .unwrap()
-        .relations
-        .insert("中国".to_string(), -35.0);
-
-    let shield_before = state.ship(&ship3).map(|s| s.shield).unwrap();
-    let hull_before = state.ship(&ship3).map(|s| s.hull).unwrap();
-    fire_concentrate(&mut state, &config, &ship0, &ship3);
-
-    let shield_after = state.ship(&ship3).map(|s| s.shield).unwrap();
-    let hull_after = state.ship(&ship3).map(|s| s.hull).unwrap();
-    assert!(
-        shield_after < shield_before,
-        "shield pool must absorb damage"
-    );
-    assert!(
-        hull_after < hull_before,
-        "hull should take spill damage too"
-    );
-    assert!(
-        hull_after > 0.0,
-        "a single volley on a destroyer should not one-shot it"
-    );
-
-    // Evasion: a fast target is hit less by a low-tracking weapon than a slow one.
-    let fast_hit = hit_factor(2.0, 2.6); // corvette speed
-    let slow_hit = hit_factor(2.0, 1.2); // destroyer speed
-    assert!(
-        fast_hit < slow_hit,
-        "fast ship should evade a low-tracking weapon more (fast {fast_hit} vs slow {slow_hit})"
     );
 }

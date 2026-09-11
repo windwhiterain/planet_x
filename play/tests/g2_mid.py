@@ -95,6 +95,8 @@ COLONIZE_ROUNDS = 40
 KNOW_FID = "中国"
 # 治理那两条：城搬到离首都最远的天体 / 国库清零，两臂只差 `MOND 掌握度`。
 GOV_FID, GOV_ROUNDS = "中国", 5
+# 护盾那条：造一仗（攻方装炮、守方装盾、两家关系压到 -35、摆在远离首都处）。
+DUEL_ATK, DUEL_DEF, DUEL_GUN, DUEL_ROUNDS = "中国", "美国", "railgun", 3
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1152,6 +1154,7 @@ def run(h, ck) -> None:
     haul_leg_checks(h, ck, out)
     knowledge_scenario_checks(h, ck)
     governance_scenario_checks(h, ck)
+    duel_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2406,6 +2409,60 @@ def governance_scenario_checks(h, ck) -> None:
              and ds["owner"][-1] == GOV_FID and ds["loy"][-1] > 0.6,
              f"掌握者忠诚 {[round(x, 3) for x in ds['loy']]}（凡人末端 {dm['loy'][-1]:.3f}）；"
              f"末端归属 {ds['owner'][-1]}")
+
+def duel_scenario_checks(h, ck) -> None:
+    """**合成场景 · 护盾先吸、船体再吃溢出**（`sim/combat.rs::combat_respects_shields_and_speed_evasion` 的**前半**，第 7 批）。
+
+    这条**长局读面证不了**：seed 42 / 400 回合的 **249 发**里，`absorbed > 0` 的有 **0 发**
+    ——没人装护盾组件。所以照原件那样**造**一仗：把一艘中国舰装 `railgun`、把一艘美国舰装
+    `shield`（护盾打满、船体 24），两舰摆在远离任何首都的地方（本土防御倍率 = 1），
+    再把两家的关系压到 `-35` ⇒ 下个回合就是一场真仗。全部字段（`坐标`/`组件`/`护盾`/`船体`/`关系`）
+    都有身份键，直接 `patch`。
+
+    后半（**回避**：目标越快命中折减越低）早在 g1 的 `--call hit_factor` 里压着。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_duel_probe.json", seed))
+    atk = next(s for s in st["ships"] if s["势力"] == DUEL_ATK)
+    dfd = next(s for s in st["ships"] if s["势力"] == DUEL_DEF)
+    patch = {"ships": {
+        atk["舰名"]: {"坐标": [80.0, 80.0], "组件": [DUEL_GUN], "组件耐久": [18.0]},
+        dfd["舰名"]: {"坐标": [80.4, 80.0], "组件": ["shield"], "组件耐久": [18.0],
+                      "船体": 24.0, "船体上限": 24.0,
+                      "护盾": 12.0, "护盾上限": 12.0}},
+        "factions": {DUEL_ATK: {"关系": {DUEL_DEF: -35.0}},
+                     DUEL_DEF: {"关系": {DUEL_ATK: -35.0}}}}
+    proj = h.scenario("duel_live", seed, DUEL_ROUNDS, patch)
+    q = KIT.load(str(proj), only=("events", "ships"))
+    ev = q.table("events")
+    shots = [s for _, r in ev[ev["type"] == "attack"].iterrows()
+             if r["target_id"] == dfd["舰名"]
+             for s in (r["data"] or {}).get("shots") or [] if not s.get("skipped")]
+    ck.check("合成场景（护盾）：那一仗真的打起来了（有齐射指着守方，防空转）",
+             bool(shots), f"{atk['舰名']}→{dfd['舰名']}：{len(shots)} 发"
+             if shots else "一發都没有（构造成立？）")
+    if not shots:
+        return
+    absorbing = [s for s in shots if float(s["absorbed"] or 0) > 1e-9]
+    spill = [s for s in shots if float(s["hull_pen"] or 0) > 1e-9]
+    ck.check("合成场景（护盾）：**护盾池优先吸收**（`absorbed > 0`，且不超过这一发的伤害）",
+             bool(absorbing) and all(float(s["absorbed"]) <= float(s["damage"]) + 1e-9
+                                     for s in absorbing),
+             f"{len(absorbing)}/{len(shots)} 发被吸收；样本 "
+             f"{[(round(float(s['damage']), 3), round(float(s['absorbed']), 3)) for s in absorbing[:2]]}")
+    ck.check("合成场景（护盾）：**船体也吃溢出**（护盾挡不完 ⇒ `hull_pen > 0`）",
+             bool(spill),
+             f"{len(spill)}/{len(shots)} 发打进船体；样本 "
+             f"{[(round(float(s['absorbed']), 3), round(float(s['hull_pen']), 3)) for s in spill[:2]]}")
+    sh = q.table("ships")
+    mine = sh[sh["舰名"] == dfd["舰名"]].sort_values("round")
+    first, last = mine.iloc[0], mine.iloc[-1]
+    ck.check("合成场景（护盾）：守方的护盾与船体都掉了，但**没被一炮打死**",
+             float(last["护盾"]) < float(first["护盾"]) and float(last["船体"]) < float(first["船体"])
+             and float(last["船体"]) > 0.0,
+             f"护盾 {float(first['护盾']):.2f} → {float(last['护盾']):.2f}；"
+             f"船体 {float(first['船体']):.2f} → {float(last['船体']):.2f}")
+
 
 def id_checks(h, ck, out) -> None:
     """**建筑 id 永不复用**（State.next_building_id 单调计数器，见 id_report）。"""
