@@ -21,12 +21,12 @@ Directory layout written by ``planet_x --round N --index DIR``:
     DIR/main.jsonl       one lean fact row per round
     DIR/idx/events.jsonl (round, seq, event_id, ...)  the **sparse event milestones**: one row per
                                                       event, normalized participant slots
-    DIR/idx/ships.jsonl  (round, ship_id, ...)        per-round ship detail (+ effective panel)
-    DIR/idx/cities.jsonl (round, city_id, ...)        per-round city detail (+ buildings list)
-    DIR/idx/factions.jsonl (round, faction_id, ...)   per-round faction detail (resources/relations/
+    DIR/idx/ships.jsonl  (round, 舰名, ...)        per-round ship detail (+ effective panel)
+    DIR/idx/cities.jsonl (round, 城名, ...)        per-round city detail (+ buildings list)
+    DIR/idx/factions.jsonl (round, 势力, ...)   per-round faction detail (resources/relations/
                                                       own cities/ships)
-    DIR/idx/bodies.jsonl (body_id, ...)               global master table
-    DIR/idx/settlements.jsonl (settlement_id, ...)    global 定居点 master
+    DIR/idx/bodies.jsonl (天体名, ...)               global master table
+    DIR/idx/settlements.jsonl (定居点, ...)    global 定居点 master
 
 Typical use::
 
@@ -39,7 +39,7 @@ Typical use::
     q.faction_snapshot(10, "中国")  # one-call decision view (meta + stockpile + relations)
     q.bodies()              # global master
     q.settlements()         # global 定居点 master
-    q.join("ships", round=10)  # explode main.ship_ids and merge with the ship detail table
+    q.join("ships", round=10)  # explode main.舰名表 and merge with the ship detail table
     q.ships_spec()          # config: ship class -> spec as a DataFrame (joinable with q.facts)
     q.resource_value()      # config: resource key (可读名) -> value
     q.yearly_avg("view.city_count")             # 年均 (round = 1 month, 12/年)
@@ -118,7 +118,7 @@ class PlanetXQ:
                                               precise_float=True)
         # **派生表**（`schema.derived`）：数据不在状态里、是引擎算出来的量（本回合流量中间量、
         # 控制面）。它们不像 lazy 表那样由 main 的某个 id 数组索引，而是用 `join_on` 指向
-        # main 已有的列（`faction_ids`/`city_ids`）——所以它们单独一段，但读法与 lazy 表一样。
+        # main 已有的列（`势力表`/`城名表`）——所以它们单独一段，但读法与 lazy 表一样。
         # 旧版投影没有这一段（`.get(..., {})` ⇒ 空，方法会报出「该投影没有这张表」）。
         for name, cfg in self.schema.get("derived", {}).items():
             if self._only is not None and name not in self._only:
@@ -253,7 +253,7 @@ class PlanetXQ:
         return self.derived("decisions", round)
 
     def blueprints(self, round: int | None = None) -> pd.DataFrame:
-        """**舰船设计图库**：一行一张图（`blueprint_id`/`class`/`components`/`order`/`mode`/…）。
+        """**舰船设计图库**：一行一张图（`图名`/`class`/`components`/`order`/`mode`/…）。
 
         * `mode` = 图叶**自己的**三态表态；`effective_mode` = **引擎解析**的归属
           （图叶 → 势力 scope → 全局；全继承 ⇒ Auto）——别自己重算链。
@@ -274,7 +274,7 @@ class PlanetXQ:
 
     def factions(self, round: int | None = None) -> pd.DataFrame:
         """Factions per round: identity + 库存(resources) + 外交(relations) + 自有城/舰清单。
-        ``relations``/``resources``/``city_ids``/``ship_ids`` stay dict- / list-valued cells
+        ``relations``/``resources``/``城名表``/``舰名表`` stay dict- / list-valued cells
         (use :meth:`faction` or :meth:`faction_snapshot` to unpack into a plain read).
 
         引擎还在这张表上放了**编队配额**那几列（一行一势力、每回合重算），读它们就不用自己
@@ -302,7 +302,7 @@ class PlanetXQ:
         df = self.factions(round)
         if df.empty:
             return None
-        row = df[df["faction_id"] == name]
+        row = df[df["势力"] == name]
         return row.iloc[0].to_dict() if len(row) else None
 
     def faction_snapshot(self, round: int, name: str) -> dict:
@@ -328,18 +328,18 @@ class PlanetXQ:
 
     def fleet(self, round: int | None, faction: str) -> pd.DataFrame:
         """A faction's ships at a round, with the effective panel columns the projection now carries."""
-        return self.ships(round).query("faction_id == @faction")
+        return self.ships(round).query("势力 == @faction")
 
     def city_buildings(self, round: int | None, faction: str) -> pd.DataFrame:
         """A faction's cities at a round, including each city's ``buildings`` list (dict-valued)."""
-        return self.cities(round).query("faction_id == @faction")
+        return self.cities(round).query("势力 == @faction")
 
     def relations(self, round: int | None = None) -> pd.DataFrame:
-        """Every faction's diplomacy as a **long** table: ``(round, faction_id, other, relation)``.
+        """Every faction's diplomacy as a **long** table: ``(round, 势力, other, relation)``.
 
         ``关系``（factions 表的列）is a dict-valued cell; this explodes it into one row
         per (source faction → target faction) so you can query "who is hostile to whom" directly,
-        e.g. ``q.relations(round=12).query("faction_id=='中国' and relation < -20")``.
+        e.g. ``q.relations(round=12).query("势力=='中国' and relation < -20")``.
         """
         df = self.factions(round)
         if df.empty:
@@ -348,8 +348,8 @@ class PlanetXQ:
         for _, r in df.iterrows():
             rel = r.get("关系") or {}
             for other, v in rel.items():
-                rows.append({"round": r["round"], "faction_id": r["faction_id"], "other": other, "relation": v})
-        return pd.DataFrame(rows, columns=["round", "faction_id", "other", "relation"])
+                rows.append({"round": r["round"], "势力": r["势力"], "other": other, "relation": v})
+        return pd.DataFrame(rows, columns=["round", "势力", "other", "relation"])
 
     def _faction_row(self, round: int, name: str) -> dict:
         """That faction's row of the round ``view`` (``view.factions[name]``, sim-computed)."""
@@ -370,7 +370,7 @@ class PlanetXQ:
         if len(fact) == 0:
             return None
         v = fact.iloc[0].get("view") or {}
-        fid_f = fact.iloc[0].get("faction_ids") or []
+        fid_f = fact.iloc[0].get("势力表") or []
         factions = []
         for fid in fid_f:
             fm = (v.get("factions") or {}).get(fid, {})
@@ -403,7 +403,7 @@ class PlanetXQ:
         if c is None or c.empty:
             return c
         if faction is not None:
-            c = c[c["faction_id"] == faction]
+            c = c[c["势力"] == faction]
         if min_loyalty is not None:
             c = c[c["忠诚度"] <= min_loyalty]
         return c.sort_values("忠诚度")
@@ -446,13 +446,13 @@ class PlanetXQ:
         if c is None or c.empty or p is None or p.empty or f is None or f.empty:
             return pd.DataFrame()
         cols = [
-            "round", "city_id",
+            "round", "城名",
             "loyalty_target_effective", "loyalty_target_distance",
             "loyalty_target_entertainment",
         ]
         # 另两项**按势力算一次**（首都向心项、思潮优势端惩罚）⇒ join `faction_process` 拿，
         # 不在城表里重复存（「同一个数只有一个位置」，见 schema 的 city_process 说明）。
-        fcols = ["round", "faction_id", "capital_loyalty_bonus", "ideology_loyalty_penalty"]
+        fcols = ["round", "势力", "capital_loyalty_bonus", "ideology_loyalty_penalty"]
         for table, need, cols_ in (("city_process", cols, p.columns), ("faction_process", fcols, f.columns)):
             missing = [x for x in need if x not in cols_]
             if missing:
@@ -460,10 +460,10 @@ class PlanetXQ:
                     f"derived.{table} 缺列 {missing}——这份投影是「B1 中间量」之前的构建产出的，"
                     f"请用当前 planet_x 重新 `--index`（各字段的中性值见 schema.json 的 neutral 段）"
                 )
-        out = c.merge(p[cols], on=["round", "city_id"], how="left")
-        out = out.merge(f[fcols], on=["round", "faction_id"], how="left")
+        out = c.merge(p[cols], on=["round", "城名"], how="left")
+        out = out.merge(f[fcols], on=["round", "势力"], how="left")
         if faction is not None:
-            out = out[out["faction_id"] == faction]
+            out = out[out["势力"] == faction]
         return out.sort_values("loyalty_target_effective")
 
     def view_spending(self, round: int, faction: str) -> dict:
@@ -491,7 +491,7 @@ class PlanetXQ:
         def batch(kind: str) -> dict:
             if ctl is None or ctl.empty or "kind" not in ctl.columns:
                 return {}
-            sel = ctl[(ctl["kind"] == kind) & (ctl["faction_id"] == faction)]
+            sel = ctl[(ctl["kind"] == kind) & (ctl["势力"] == faction)]
             return {r["key"]: float(r["value"]) for _, r in sel.iterrows()}
 
         inv_lim, con_lim = batch("investment_budget"), batch("construction_budget")
@@ -517,7 +517,7 @@ class PlanetXQ:
                     f"derived.city_process 缺列 {missing}——这份投影是「B2 中间量」之前的构建产出的，"
                     f"请用当前 planet_x 重新 `--index`"
                 )
-            sel = cs[cs["faction_id"] == faction]
+            sel = cs[cs["势力"] == faction]
             recs = []
             for _, crow in sel.iterrows():
                 for cls, line in (crow["build"] or {}).items():
@@ -530,7 +530,7 @@ class PlanetXQ:
                     else:
                         why = "money"         # 钱批光了
                     recs.append({
-                        "city_id": crow["city_id"], "class": cls,
+                        "城名": crow["城名"], "class": cls,
                         "rate": rate, "increment": inc, "bottleneck": why,
                     })
             build = pd.DataFrame(recs)
@@ -612,17 +612,17 @@ class PlanetXQ:
         frow = self._faction_row(round, faction)
         gap = frow.get("freight_gap", self.neutral("factions[].freight_gap")) or {}
         depots = pd.DataFrame(
-            [{"body_id": b, **{k: float(v.get(k, 0.0)) for k in ("need", "own", "hired", "uncovered")}}
+            [{"天体名": b, **{k: float(v.get(k, 0.0)) for k in ("need", "own", "hired", "uncovered")}}
              for b, v in gap.items()]
         )
         hs = self.haul_steps(round)
-        if hs is None or hs.empty or "ship_id" not in hs.columns:
+        if hs is None or hs.empty or "舰名" not in hs.columns:
             return {"round": round, "faction": faction, "depots": depots, "steps": pd.DataFrame()}
         ships = self.ships(round)
-        cols = [c for c in ("round", "ship_id", "faction_id", "舰级", "船体", "载货", "x", "y")
+        cols = [c for c in ("round", "舰名", "势力", "舰级", "船体", "载货", "x", "y")
                 if c in ships.columns]
-        mine = hs.merge(ships[cols], on=["round", "ship_id"], how="left")
-        mine = mine[mine["faction_id"] == faction]
+        mine = hs.merge(ships[cols], on=["round", "舰名"], how="left")
+        mine = mine[mine["势力"] == faction]
         return {"round": round, "faction": faction, "depots": depots, "steps": mine}
 
     def view_market(self, round: int, faction: str) -> dict | None:
@@ -655,7 +655,7 @@ class PlanetXQ:
         d = self.decisions(round)
         if d is None or d.empty or "kind" not in d.columns:
             return None
-        sel = d[(d["kind"] == "capital") & (d["faction_id"] == faction)]
+        sel = d[(d["kind"] == "capital") & (d["势力"] == faction)]
         if sel.empty:
             return None
         row = sel.iloc[-1]
@@ -731,7 +731,7 @@ class PlanetXQ:
         df = self.factions()
         if df.empty:
             return pd.Series(dtype=float, name=resource)
-        sub = df[df["faction_id"] == faction]
+        sub = df[df["势力"] == faction]
         s = pd.Series(
             [ (r.get("资源") or {}).get(resource, 0.0) for _, r in sub.iterrows() ],
             index=sub["round"].to_numpy(),
@@ -1178,7 +1178,7 @@ class PlanetXQ:
         """**纯 dense-diff 视图**：某个实体在密集表里的关键列**发生变化的那些回合**。
 
         与事件历史互证——这是「不靠事件、只看快照差异」的独立口径（:meth:`audit` 就是两者的
-        差集）。城默认比较 `faction_id`/`razed`/`population`；舰比较 `faction_id`/`hull`/`class`。
+        差集）。城默认比较 `势力`/`razed`/`population`；舰比较 `势力`/`hull`/`class`。
 
         **它单独用是不够的**：dense-diff **因果盲**（说不出被谁击毁 / 被谁夷平），而且
         **同回合的 raze→recolonize 差异为空**（事件才是正本）。对舰它还会显式给出
@@ -1187,9 +1187,9 @@ class PlanetXQ:
         alias = {"cities": "city", "ships": "ship", "factions": "faction"}
         kind = alias.get(kind, kind)
         spec = {
-            "city": ("cities", "city_id", ["faction_id", "已焚毁", "人口"]),
-            "ship": ("ships", "ship_id", ["faction_id", "船体", "舰级"]),
-            "faction": ("factions", "faction_id", ["capital_body"]),
+            "city": ("cities", "城名", ["势力", "已焚毁", "人口"]),
+            "ship": ("ships", "舰名", ["势力", "船体", "舰级"]),
+            "faction": ("factions", "势力", ["capital_body"]),
         }
         if kind not in spec:
             raise ValueError(f"changes() 支持 city/ship/faction，收到 {kind!r}")
@@ -1218,7 +1218,7 @@ class PlanetXQ:
         这里把它暴露给 agent：若返回非空，说明当前投影回答不了「这座城市为什么变了」。
         """
         cities = self.cities()
-        cols = ["round", "city_id", "was", "now"]
+        cols = ["round", "城名", "was", "now"]
         if cities is None or cities.empty:
             return pd.DataFrame(columns=cols)
         named = self.actors()
@@ -1226,17 +1226,17 @@ class PlanetXQ:
         out = []
         prev: dict[str, tuple] = {}
         prev_round = None
-        for _, r in cities.sort_values(["round", "city_id"]).iterrows():
+        for _, r in cities.sort_values(["round", "城名"]).iterrows():
             if r["round"] != prev_round:
                 prev, prev_round = {}, r["round"]
-            now = (r["faction_id"], bool(r["已焚毁"]))
-            was = prev.get(r["city_id"])
+            now = (r["势力"], bool(r["已焚毁"]))
+            was = prev.get(r["城名"])
             if was is not None and was != now:
-                hit = named[(named["round"] == r["round"]) & (named["entity_id"] == r["city_id"])]
+                hit = named[(named["round"] == r["round"]) & (named["entity_id"] == r["城名"])]
                 if hit.empty:
-                    out.append({"round": int(r["round"]), "city_id": r["city_id"],
+                    out.append({"round": int(r["round"]), "城名": r["城名"],
                                 "was": was, "now": now})
-            prev[r["city_id"]] = now
+            prev[r["城名"]] = now
         return pd.DataFrame(out, columns=cols)
 
     def spec(self, section: str) -> pd.DataFrame | None:
@@ -1352,7 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         r = 0
         joined = q.join("ships", round=r)
         print(f"# join('ships', round={r}): {joined.shape}")
-        cols = [c for c in ("round", "ship_id", "faction_id", "舰级", "船体", "x", "y") if c in joined.columns]
+        cols = [c for c in ("round", "舰名", "势力", "舰级", "船体", "x", "y") if c in joined.columns]
         print(joined[cols].head(5).to_string(index=False))
     # The sparse event history + its completeness self-check (empty = all history is explained).
     try:

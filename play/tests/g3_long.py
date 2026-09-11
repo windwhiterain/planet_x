@@ -145,20 +145,20 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     # ── 排除集：本回合易主的城 / 本回合新建的城 ──────────────────────────────
     live = cp[~cp["已焚毁"].astype(bool)].copy()
     moved = ev[ev["type"].isin(["city_defected", "city_overrun"])][["round", "target_id"]]
-    moved = moved.rename(columns={"target_id": "city_id"}).drop_duplicates()
+    moved = moved.rename(columns={"target_id": "城名"}).drop_duplicates()
     moved["owner_changed"] = True
     founded = (ev[ev["type"] == "colony_founded"][["round", "target_id"]]
-               .rename(columns={"target_id": "city_id"}).drop_duplicates())
+               .rename(columns={"target_id": "城名"}).drop_duplicates())
     founded["founded_this_round"] = True
-    seen = set(zip(cp["round"].astype(int), cp["city_id"]))
+    seen = set(zip(cp["round"].astype(int), cp["城名"]))
     live["new_this_round"] = [(int(r) - 1, c) not in seen
-                              for r, c in zip(live["round"], live["city_id"])]
+                              for r, c in zip(live["round"], live["城名"])]
 
     # ① 忠诚目标的分解式（势力行的两项按 (round, faction) join 到城行上）
-    j = live.merge(fp[["round", "faction_id", "capital_loyalty_bonus", "ideology_loyalty_penalty"]],
-                   on=["round", "faction_id"], how="left")
-    j = j.merge(moved, on=["round", "city_id"], how="left")
-    j = j.merge(founded, on=["round", "city_id"], how="left")
+    j = live.merge(fp[["round", "势力", "capital_loyalty_bonus", "ideology_loyalty_penalty"]],
+                   on=["round", "势力"], how="left")
+    j = j.merge(moved, on=["round", "城名"], how="left")
+    j = j.merge(founded, on=["round", "城名"], how="left")
     total = (j["loyalty_target_distance"].fillna(0.0) + j["loyalty_target_entertainment"].fillna(0.0)
              + j["capital_loyalty_bonus"].fillna(0.0) - j["ideology_loyalty_penalty"].fillna(0.0))
     dev = (j["loyalty_target_effective"] - total.clip(0.0, 1.0)).abs()
@@ -173,43 +173,43 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     out["loyalty_excluded_moved"] = int((viol & excl_moved).sum())
     out["loyalty_excluded_new"] = int((viol & excl_new & ~excl_moved).sum())
     out["loyalty_bad_n"] = int(unexplained.sum())
-    out["loyalty_bad"] = [f"r{int(row.round)} {row.city_id}: effective={row.loyalty_target_effective}"
+    out["loyalty_bad"] = [f"r{int(row.round)} {row.城名}: effective={row.loyalty_target_effective}"
                           f" ≠ 三项之和 {want:.6f}"
                           for row, want in zip(j[unexplained].itertuples(), total[unexplained])][:3]
     out["loyalty_range_bad"] = int(((j["loyalty_target_effective"] < -tol)
                                     | (j["loyalty_target_effective"] > 1 + tol)).sum())
 
     # ② 治理：倍率 ≥ 1 与定义域
-    live_n = live.groupby(["round", "faction_id"]).size().rename("live_cities").reset_index()
-    have = fp.merge(live_n, on=["round", "faction_id"], how="left")
+    live_n = live.groupby(["round", "势力"]).size().rename("live_cities").reset_index()
+    have = fp.merge(live_n, on=["round", "势力"], how="left")
     have["live_cities"] = have["live_cities"].fillna(0)
     split = fp["governance_admin"].fillna(0.0) + fp["governance_entertainment"].fillna(0.0)
     mult_bad = fp[fp["governance_total"].fillna(0.0) + 1e-9 < split]
-    out["mult_bad"] = [f"r{int(r.round)} {r.faction_id}: 总开销 {r.governance_total} < 行政+娱乐 {r.governance_admin + r.governance_entertainment}"
+    out["mult_bad"] = [f"r{int(r.round)} {r.势力}: 总开销 {r.governance_total} < 行政+娱乐 {r.governance_admin + r.governance_entertainment}"
                        for r in mult_bad.itertuples()][:3]
     out["mult_bad_n"] = int(len(mult_bad))
     domain = []
-    domain += [f"r{int(r.round)} {r.faction_id}: scale={r.governance_scale} < 1"
+    domain += [f"r{int(r.round)} {r.势力}: scale={r.governance_scale} < 1"
                for r in fp[fp["governance_scale"].fillna(1.0) < 1 - 1e-9].itertuples()]
-    domain += [f"r{int(r.round)} {r.faction_id}: 思潮惩罚 {r.ideology_loyalty_penalty} < 0"
+    domain += [f"r{int(r.round)} {r.势力}: 思潮惩罚 {r.ideology_loyalty_penalty} < 0"
                for r in fp[fp["ideology_loyalty_penalty"].fillna(0.0) < -1e-9].itertuples()]
-    domain += [f"r{int(r.round)} {r.faction_id}: 首都向心 {r.capital_loyalty_bonus} < 0"
+    domain += [f"r{int(r.round)} {r.势力}: 首都向心 {r.capital_loyalty_bonus} < 0"
                for r in fp[fp["capital_loyalty_bonus"].fillna(0.0) < -1e-9].itertuples()]
-    domain += [f"r{int(r.round)} {r.faction_id}: 覆盖率 {r.governance_coverage} 越界"
+    domain += [f"r{int(r.round)} {r.势力}: 覆盖率 {r.governance_coverage} 越界"
                for r in fp[~fp["governance_coverage"].fillna(1.0).between(-1e-9, 1 + 1e-9)].itertuples()]
     out["domain_bad"] = domain[:3]
     out["domain_bad_n"] = len(domain)
 
     # ③ 有活城 ⇒ 有行政开销：**只对「城集合这一回合没变」的势力成立**（见文档第 2/3 条相位错位）
-    sets = live.groupby(["round", "faction_id"])["city_id"].apply(frozenset).rename("cities").reset_index()
+    sets = live.groupby(["round", "势力"])["城名"].apply(frozenset).rename("cities").reset_index()
     prev = sets.rename(columns={"cities": "prev_cities"})
     prev["round"] = prev["round"] + 1
 
     def _fs(x):
         return x if isinstance(x, frozenset) else frozenset()
 
-    h = fp.merge(sets, on=["round", "faction_id"], how="left").merge(
-        prev, on=["round", "faction_id"], how="left")
+    h = fp.merge(sets, on=["round", "势力"], how="left").merge(
+        prev, on=["round", "势力"], how="left")
     h["cities"] = h["cities"].map(_fs)
     h["prev_cities"] = h["prev_cities"].map(_fs)
     h["steady"] = (h["cities"] != frozenset()) & (h["cities"] == h["prev_cities"])
@@ -217,7 +217,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     target = h[(h["round"] > 0) & h["steady"]]
     out["admin_checked"] = int(len(target))
     no_admin = target[target["governance_admin"].fillna(0.0) <= 0.0]
-    out["admin_bad"] = [f"r{int(r.round)} {r.faction_id}: 有 {len(r.cities)} 座活城（上一回合同一批城）却没有行政开销"
+    out["admin_bad"] = [f"r{int(r.round)} {r.势力}: 有 {len(r.cities)} 座活城（上一回合同一批城）却没有行政开销"
                         for r in no_admin.itertuples()][:3]
     out["admin_bad_n"] = int(len(no_admin))
     out["admin_excluded_changed"] = int(len(h[(h["round"] > 0) & ~h["steady"] & (h["cities"] != frozenset()) & zero]))
@@ -226,10 +226,10 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     unpaid = fp["upkeep_unpaid"].fillna(0.0)
     rust = fp["fleet_rust"].fillna(0.0)
     out["rust_domain_n"] = int(((unpaid < -1e-9) | (rust < -1e-9) | (rust > 1 + 1e-9)).sum())
-    out["rust_domain"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} / 锈 {r.fleet_rust}"
+    out["rust_domain"] = [f"r{int(r.round)} {r.势力}: 欠费 {r.upkeep_unpaid} / 锈 {r.fleet_rust}"
                           for r in fp[((unpaid < -1e-9) | (rust < -1e-9) | (rust > 1 + 1e-9))].itertuples()][:3]
     mismatch = fp[((unpaid > 1e-9) & (rust <= 0.0)) | ((rust > 0.0) & (unpaid <= 1e-9))]
-    out["rust_pair_bad"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} vs 锈 {r.fleet_rust}（应当同生同灭）"
+    out["rust_pair_bad"] = [f"r{int(r.round)} {r.势力}: 欠费 {r.upkeep_unpaid} vs 锈 {r.fleet_rust}（应当同生同灭）"
                             for r in mismatch.itertuples()][:3]
     out["rust_pair_bad_n"] = int(len(mismatch))
     out["rust_seen"] = int(((unpaid > 1e-9) & (rust > 0.0)).sum())
@@ -247,7 +247,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
                 inc_seen += 1
             if inc < -1e-9 or inc > rate + 1e-9:
                 if len(inc_bad) < 3:
-                    inc_bad.append(f"r{int(r.round)} {r.city_id} {cls}: increment={inc} > rate={rate}")
+                    inc_bad.append(f"r{int(r.round)} {r.城名} {cls}: increment={inc} > rate={rate}")
     out["inc_bad"] = inc_bad
     out["inc_bad_n"] = len(inc_bad)
     out["inc_seen"], out["rate_seen"] = inc_seen, rate_seen
@@ -255,7 +255,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     # ⑥ 欠费不超过账单本身（欠的只能是账单的一部分）
     over = fp[fp["upkeep_unpaid"].fillna(0.0) > fp["upkeep"].fillna(0.0) + 1e-9]
     out["unpaid_over_bill_n"] = int(len(over))
-    out["unpaid_over_bill"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} > 维护账单 {r.upkeep}"
+    out["unpaid_over_bill"] = [f"r{int(r.round)} {r.势力}: 欠费 {r.upkeep_unpaid} > 维护账单 {r.upkeep}"
                                for r in over.itertuples()][:3]
 
     # ⑦ 集散地（is_hub）在一个势力里必须只有一个天体——**不排除任何行**。
@@ -264,7 +264,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     #    7 seed 里 5 例，Rust 版跑一步永远看不到）。**引擎侧已修**（`sim/metrics.rs` 改成按写行
     #    时的主人重算）⇒ 现在这条是**严格**的：错了就是真错了，没有豁免名单。
     stable = live[live["is_hub"].fillna(False).astype(bool)]
-    grp = stable.groupby(["round", "faction_id"])["body_id"].nunique()
+    grp = stable.groupby(["round", "势力"])["天体名"].nunique()
     multi = grp[grp > 1]
     out["hub_pairs"] = int(len(grp))
     out["hub_rows"] = int(len(stable))
@@ -285,7 +285,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     #    `hull > 0` 的舰数（投影的舰表 = 回合末状态，与 Rust 版「回合末仍有活舰」同口径）。
     ev = q.table("events")
     cf = ev[ev["type"] == "colony_founded"]
-    live = q.table("ships").query("船体 > 0").groupby(["round", "faction_id"]).size()
+    live = q.table("ships").query("船体 > 0").groupby(["round", "势力"]).size()
     found_bad: dict[int, list[str]] = {}
     for _, row in cf.iterrows():
         rnd, owner = int(row["round"]), row["actor_id"]
@@ -303,7 +303,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         relations = {}
         for _, r in q.table("factions").iterrows():
             rel = r["关系"]
-            relations[(int(r["round"]), r["faction_id"])] = rel if isinstance(rel, dict) else {}
+            relations[(int(r["round"]), r["势力"])] = rel if isinstance(rel, dict) else {}
 
     rows: list[dict] = []
     cells = maps = 0

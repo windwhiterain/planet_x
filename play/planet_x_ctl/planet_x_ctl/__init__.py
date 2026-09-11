@@ -54,7 +54,7 @@ Typical use::
     s.factions                               # faction names
     s.leaf("中国", "ship_orders", "长城")      # one leaf: value + mode
     ships = ctl.ships(ckpt)                  # projection ships × their control leaves
-    mine = ctl.query(ships, "faction_id == '中国'")   # (extra columns include `class`, a keyword)
+    mine = ctl.query(ships, "势力 == '中国'")   # (extra columns include `class`, a keyword)
 
     s.set_mode(mine, "Auto")                 # wildcard, client-side: N × {ship, mode}
     s.set_behavior(mine, "Dock:地球", mode="Player")
@@ -109,7 +109,7 @@ MODES = (INHERIT, AUTO, PLAYER)
 #: web 的 `LEAF_SPEC` 各手抄一份，谁漏了改，**新叶就在那一端静静消失**——
 #: `role-axis-parity`（角色轴补三端）与 `blueprint-stance`（本表缺了 `default_*` 三片）
 #: 两次踩的都是这个缺口。现在三端读同一份，纪律由 `play/tests/g4_spec.py` 守：
-#: `leaves` ∪ `actions` ∪ `{faction_id}` 必须与 `schemars` 从 `FactionControlPatch`
+#: `leaves` ∪ `actions` ∪ `{势力}` 必须与 `schemars` 从 `FactionControlPatch`
 #: 派生的属性集**双向相等**（加字段不写声明、或声明一片不存在的叶，都当场红）。
 #:
 #: 它是个 `Mapping`（不是 dict），这样老代码 `LEAF_KINDS[kind]` / `in` / 迭代照旧；
@@ -131,8 +131,8 @@ class _LeafFacts(Mapping[str, tuple[str, ...]]):
                 "carries": {l["field"]: tuple(l.get("carries") or ()) for l in leaves},
                 "read_only": {l["field"]: tuple(l.get("read_only") or ()) for l in leaves},
                 "actions": tuple(a["field"] for a in (d.get("actions") or ())),
-                "owner_field": d.get("owner_field") or "mode",
-                "remove_field": d.get("remove_field") or "remove",
+                "owner_field": d.get("owner_field") or "归属",
+                "remove_field": d.get("remove_field") or "删叶",
             }
         return self._doc
 
@@ -208,7 +208,7 @@ def _fix_query(expr: str) -> str:
     The projection's ships table has a column literally named ``class`` — a Python keyword, which
     ``DataFrame.query`` refuses unless it is back-quoted (``SyntaxError: Python keyword not valid
     identifier in numexpr query``). The recipes in the notes are written as
-    ``"class=='cruiser' and faction_id=='中国'"``, so :func:`query` (and :func:`roster`) add the
+    ``"class=='cruiser' and 势力=='中国'"``, so :func:`query` (and :func:`roster`) add the
     backticks for you. Anything already back-quoted is left alone.
     """
     return re.sub(r"(?<![\w`])class(?![\w`])", "`class`", expr)
@@ -218,7 +218,7 @@ def query(df: pd.DataFrame, expr: str, **names) -> pd.DataFrame:
     """``df.query(expr)``, but tolerant of the engine's keyword-named ``class`` column.
 
     ``@name`` references are resolved against **your** frame (not this helper's), so recipes can keep
-    writing ``df.query("faction_id == @faction")``-style expressions.
+    writing ``df.query("势力 == @faction")``-style expressions.
     """
     if not len(df):
         return df
@@ -237,8 +237,8 @@ def query(df: pd.DataFrame, expr: str, **names) -> pd.DataFrame:
     return df.query(fixed, **names)
 
 
-_WEIGHT_KINDS = ("invest_weights", "build_weights")
-_BUDGET_KINDS = ("investment_budget", "construction_budget")
+_WEIGHT_KINDS = ("建设权重", "建造权重")
+_BUDGET_KINDS = ("投资预算", "建造预算")
 
 #: The **engine's own answer** to "what is this ship's effective order, and who supplied it".
 #: `ships()` reads these straight out of the projection's ships table whenever they are there
@@ -628,7 +628,7 @@ def _entry_key(kind: str, entry: Mapping) -> tuple:
     keys = []
     for f in LEAF_KINDS[kind]:
         v = entry.get(f)
-        keys.append(int(v) if f == "building" and v is not None else v)
+        keys.append(int(v) if f == "建筑" and v is not None else v)
     return tuple(keys)
 
 
@@ -714,7 +714,7 @@ class Surface:
         self._index: dict[tuple, dict] = {}
         self._rank: dict[tuple, int] = {}
         for fac in self._factions:
-            fid = fac.get("faction_id")
+            fid = fac.get("势力")
             for kind in _kind_order():
                 if not LEAF_KINDS[kind]:
                     continue
@@ -735,12 +735,12 @@ class Surface:
     @property
     def factions(self) -> list[str]:
         """Faction names, in the order the engine listed them (canonical diff order)."""
-        return [f.get("faction_id") for f in self._factions]
+        return [f.get("势力") for f in self._factions]
 
     def raw_faction(self, faction: str) -> dict | None:
         """The untouched read-face entry for one faction (as ``--control`` printed it)."""
         for f in self._factions:
-            if f.get("faction_id") == faction:
+            if f.get("势力") == faction:
                 return f
         return None
 
@@ -785,17 +785,17 @@ class Surface:
             if entry is None:
                 return Leaf(faction, kind, kt, exists=False)
             return Leaf(faction, kind, kt, exists=True,
-                        mode=entry.get("mode", INHERIT), value=_leaf_value(kind, entry), raw=entry)
+                        mode=entry.get("归属", INHERIT), value=_leaf_value(kind, entry), raw=entry)
         entry = self.raw_faction(faction).get(kind)
         if entry is None:
             return Leaf(faction, kind, (), exists=False)
-        return Leaf(faction, kind, (), exists=True, mode=entry.get("mode", INHERIT),
+        return Leaf(faction, kind, (), exists=True, mode=entry.get("归属", INHERIT),
                     value=_leaf_value(kind, entry), raw=entry)
 
     def faction(self, faction: str) -> dict:
         """One faction's leaves, keyed by kind — ``{kind: {key: Leaf}}`` (singletons → ``Leaf``)."""
         self._require_faction(faction)
-        out: dict[str, Any] = {"faction_id": faction}
+        out: dict[str, Any] = {"势力": faction}
         for kind in _kind_order():
             if not LEAF_KINDS[kind]:
                 out[kind] = self.leaf(faction, kind)
@@ -851,14 +851,14 @@ class Surface:
                 # 输出的**列名保持本 kit 的旧名字**（它是 kit 的读模型 API，不是引擎的形状）。
                 for b in (c.get("建筑") or []):
                     rows.append({
-                        "city": c["city_id"], "building": int(b["建筑编号"]),
-                        "faction_id": c["faction_id"], "kind": b.get("类型"),
+                        "city": c["城名"], "building": int(b["建筑编号"]),
+                        "势力": c["势力"], "kind": b.get("类型"),
                         "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
                         "structure": b.get("结构"), "area": b.get("面积"),
                         "deployed": b.get("已建成面积"), "armor": b.get("护甲"),
                     })
             self._building_index_cache = pd.DataFrame(
-                rows, columns=["city", "building", "faction_id", "kind", "resource",
+                rows, columns=["city", "building", "势力", "kind", "resource",
                                "ship_type", "structure", "area", "deployed", "armor"])
         return self._building_index_cache
 
@@ -920,7 +920,7 @@ class Surface:
     def _ship_faction(self, ship: str) -> str:
         """Which faction owns a ship — from the surface's own leaves, else the same checkpoint."""
         for (fac, kind, key) in self._index:
-            if kind in ("ship_orders", "ship_doctrine", "ship_kiting") and key and key[0] == ship:
+            if kind in ("指令", "风格", "姿态") and key and key[0] == ship:
                 return fac
         if self.ckpt is not None:
             try:
@@ -929,9 +929,9 @@ class Surface:
             except Exception:  # pragma: no cover - projection unavailable
                 df = None
             if df is not None and len(df):
-                hit = df[df["ship_id"] == ship]
+                hit = df[df["舰名"] == ship]
                 if len(hit):
-                    return str(hit.iloc[0]["faction_id"])
+                    return str(hit.iloc[0]["势力"])
         raise ValueError(
             f"控制面里没有名为「{ship}」的舰。舰名会换代（「方舟」战沉后重建的是「方舟2」「方舟3」），"
             "别手抄——用 ctl.ships(ckpt) / ctl.roster(ckpt, spec) 拿现名。"
@@ -943,18 +943,18 @@ class Surface:
         if isinstance(selection, pd.DataFrame):
             if selection.empty:
                 return []
-            col = next((c for c in ("ship_id", "name", "ship") if c in selection.columns), None)
+            col = next((c for c in ("舰名", "舰") if c in selection.columns), None)
             if col is None:
                 raise ValueError(
-                    "传入的 DataFrame 没有舰名列（ship_id / name / ship）——用 ctl.ships(ckpt) "
+                    "传入的 DataFrame 没有舰名列（舰名 / 舰）——用 ctl.ships(ckpt) "
                     "或 ctl.ships_and_cities(ckpt) 筛出来的帧。"
                 )
-            has_fac = "faction_id" in selection.columns
+            has_fac = "势力" in selection.columns
             for _, row in selection.iterrows():
                 ship = row[col]
                 if not isinstance(ship, str) or not ship:
                     continue
-                fac = str(row["faction_id"]) if has_fac else None
+                fac = str(row["势力"]) if has_fac else None
                 pairs.append((fac or self._ship_faction(ship), ship))
         elif isinstance(selection, str):
             pairs = [(self._ship_faction(selection), selection)]
@@ -1044,7 +1044,7 @@ class Surface:
         """
         mode = _check_mode(mode)
         for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "ship_orders", (ship,), {"ship": ship, "mode": mode})
+            self._add(faction, "指令", (ship,), {"舰": ship, "归属": mode})
         return self
 
     def set_behavior(self, selection: Any, behavior: Any,
@@ -1053,10 +1053,10 @@ class Surface:
         value = normalize_behavior(behavior)
         m = self._mode_or_takeover(mode, take_over, f"set_behavior({behavior_str(value)!r})")
         for faction, ship in self._ship_pairs(selection):
-            patch = {"ship": ship, "behavior": value}
+            patch = {"舰": ship, "行为": value}
             if m is not None:
-                patch["mode"] = m
-            self._add(faction, "ship_orders", (ship,), patch)
+                patch["归属"] = m
+            self._add(faction, "指令", (ship,), patch)
         return self
 
     def set_default_kiting(self, faction: str, kiting: float | None = None, *,
@@ -1071,14 +1071,14 @@ class Surface:
             raise ValueError("set_default_kiting 至少要给 kiting= 或 mode= 之一")
         patch: dict = {}
         if kiting is not None:
-            patch["kiting"] = _clamp(kiting)
+            patch["姿态"] = _clamp(kiting)
         if mode is not None:
-            patch["mode"] = _check_mode(mode)
+            patch["归属"] = _check_mode(mode)
         else:
             m = self._mode_or_takeover(None, take_over, f"set_default_kiting({faction!r})")
             if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
-                patch["mode"] = m
-        self._add(faction, "default_kiting", (), patch)
+                patch["归属"] = m
+        self._add(faction, "舰队默认姿态", (), patch)
         return self
 
     def set_default_role(self, faction: str, role: str | None = None, *,
@@ -1097,14 +1097,14 @@ class Surface:
             raise ValueError("set_default_role 至少要给 role= 或 mode= 之一")
         patch: dict = {}
         if role is not None:
-            patch["role"] = _check_role(role, f"set_default_role({faction!r})")
+            patch["角色"] = _check_role(role, f"set_default_role({faction!r})")
         if mode is not None:
-            patch["mode"] = _check_mode(mode)
+            patch["归属"] = _check_mode(mode)
         else:
             m = self._mode_or_takeover(None, take_over, f"set_default_role({faction!r})")
             if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
-                patch["mode"] = m
-        self._add(faction, "default_role", (), patch)
+                patch["归属"] = m
+        self._add(faction, "舰队默认角色", (), patch)
         return self
 
     def set_default_doctrine(self, faction: str, temper: float | None = None,
@@ -1123,15 +1123,15 @@ class Surface:
         if lone_wolf is not None:
             patch["lone_wolf"] = _clamp(lone_wolf)
         if patch:
-            self._require_both_axes(faction, "default_doctrine", None, temper, lone_wolf,
+            self._require_both_axes(faction, "舰队默认风格", None, temper, lone_wolf,
                                     f"set_default_doctrine({faction!r})")
         if mode is not None:
-            patch["mode"] = _check_mode(mode)
+            patch["归属"] = _check_mode(mode)
         elif patch:
             m = self._mode_or_takeover(None, take_over, f"set_default_doctrine({faction!r})")
             if m is not None:  # pragma: no cover - _mode_or_takeover returns None here
-                patch["mode"] = m
-        self._add(faction, "default_doctrine", (), patch)
+                patch["归属"] = m
+        self._add(faction, "舰队默认风格", (), patch)
         return self
 
     def set_kiting(self, selection: Any, kiting: float, *,
@@ -1145,14 +1145,14 @@ class Surface:
         """
         k = _clamp(kiting)
         for faction, ship in self._ship_pairs(selection):
-            patch = {"ship": ship, "kiting": k}
+            patch = {"舰": ship, "姿态": k}
             if mode is not None:
-                patch["mode"] = _check_mode(mode)
+                patch["归属"] = _check_mode(mode)
             else:
                 m = self._mode_or_takeover(None, take_over, f"set_kiting({ship!r})")
                 if m is not None:  # pragma: no cover
-                    patch["mode"] = m
-            self._add(faction, "ship_kiting", (ship,), patch)
+                    patch["归属"] = m
+            self._add(faction, "姿态", (ship,), patch)
         return self
 
     def set_doctrine(self, selection: Any, temper: float | None = None,
@@ -1166,20 +1166,20 @@ class Surface:
         if temper is None and lone_wolf is None:
             raise ValueError("set_doctrine 至少要给 temper= 或 lone_wolf= 之一")
         for faction, ship in self._ship_pairs(selection):
-            patch = {"ship": ship}
+            patch = {"舰": ship}
             if temper is not None:
                 patch["temper"] = _clamp(temper)
             if lone_wolf is not None:
                 patch["lone_wolf"] = _clamp(lone_wolf)
-            self._require_both_axes(faction, "ship_doctrine", (ship,), temper, lone_wolf,
+            self._require_both_axes(faction, "风格", (ship,), temper, lone_wolf,
                                     f"set_doctrine({ship!r})")
             if mode is not None:
-                patch["mode"] = _check_mode(mode)
+                patch["归属"] = _check_mode(mode)
             else:
                 m = self._mode_or_takeover(None, take_over, f"set_doctrine({ship!r})")
                 if m is not None:  # pragma: no cover
-                    patch["mode"] = m
-            self._add(faction, "ship_doctrine", (ship,), patch)
+                    patch["归属"] = m
+            self._add(faction, "风格", (ship,), patch)
         return self
 
     # -- mutations: budgets / weights / capital ----------------------------------------
@@ -1199,14 +1199,14 @@ class Surface:
         """
         r = _check_role(role, f"set_role({selection!r})")
         for faction, ship in self._ship_pairs(selection):
-            patch = {"ship": ship, "role": r}
+            patch = {"舰": ship, "角色": r}
             if mode is not None:
-                patch["mode"] = _check_mode(mode)
+                patch["归属"] = _check_mode(mode)
             else:
                 m = self._mode_or_takeover(None, take_over, f"set_role({ship!r})")
                 if m is not None:  # pragma: no cover
-                    patch["mode"] = m
-            self._add(faction, "ship_role", (ship,), patch)
+                    patch["归属"] = m
+            self._add(faction, "角色", (ship,), patch)
         return self
 
     def set_budget(self, faction: str, kind: str, values: Mapping[str, float],
@@ -1232,9 +1232,9 @@ class Surface:
                     f"资源 key {resource!r} 不在已知表里（引擎会回 WARN_APPLY_SKIPPED: "
                     f"no_such_resource）。现有：{sorted(known)}；传 strict=False 可绕过。"
                 )
-            patch = {"resource": resource, "value": float(value)}
+            patch = {"资源": resource, "值": float(value)}
             if m is not None:
-                patch["mode"] = m
+                patch["归属"] = m
             self._add(faction, kind, (resource,), patch)
         return self
 
@@ -1251,10 +1251,10 @@ class Surface:
                     f"城 {city!r} 不属于 {faction!r}（引擎会回 WARN_APPLY_SKIPPED）。"
                     f"它的城是：{sorted(known)}"
                 )
-            patch = {"city": city, "value": float(value)}
+            patch = {"城": city, "值": float(value)}
             if m is not None:
-                patch["mode"] = m
-            self._add(faction, "loyalty_budget", (city,), patch)
+                patch["归属"] = m
+            self._add(faction, "城市福利预算", (city,), patch)
         return self
 
     def set_weights(self, faction: str, kind: str, values: Any,
@@ -1285,17 +1285,17 @@ class Surface:
                 )
             (city, selector), value = item
             idx = self.resolve_building(city, selector)
-            patch = {"city": city, "building": idx, "value": float(value)}
+            patch = {"城": city, "建筑": idx, "值": float(value)}
             if m is not None:
-                patch["mode"] = m
+                patch["归属"] = m
             self._add(faction, kind, (city, idx), patch)
         return self
 
     def set_invest_weights(self, faction: str, values: Any, **kw) -> "Surface":
-        return self.set_weights(faction, "invest_weights", values, **kw)
+        return self.set_weights(faction, "建设权重", values, **kw)
 
     def set_build_weights(self, faction: str, values: Any, **kw) -> "Surface":
-        return self.set_weights(faction, "build_weights", values, **kw)
+        return self.set_weights(faction, "建造权重", values, **kw)
 
     def set_capital(self, faction: str, body: str | None = None,
                     *, mode: str | None = None, take_over: bool = False) -> "Surface":
@@ -1308,14 +1308,14 @@ class Surface:
             known = self._known_bodies()
             if known and body not in known:
                 raise ValueError(f"天体 {body!r} 不存在。现有：{sorted(known)}")
-            patch["value"] = body
+            patch["值"] = body
         if mode is not None:
-            patch["mode"] = _check_mode(mode)
+            patch["归属"] = _check_mode(mode)
         else:
             m = self._mode_or_takeover(None, take_over, f"set_capital({faction!r})")
             if m is not None:  # pragma: no cover
-                patch["mode"] = m
-        self._add(faction, "capital", (), patch)
+                patch["归属"] = m
+        self._add(faction, "首都", (), patch)
         return self
 
     # -- mutations: deleting leaves ("remove") ----------------------------------------
@@ -1334,7 +1334,7 @@ class Surface:
         """
         self._require_faction(faction)
         key = _normalize_key(kind, key)
-        patch: dict = {"remove": True}
+        patch: dict = {"删叶": True}
         for f, v in zip(LEAF_KINDS[kind], key):
             patch[f] = v
         self._add(faction, kind, key, patch)
@@ -1343,13 +1343,13 @@ class Surface:
     def remove_doctrine(self, selection: Any) -> "Surface":
         """逐舰：删掉**风格叶** ⇒ 这些舰的风格回到「舰队默认 / 出厂快照」。"""
         for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "ship_doctrine", (ship,), {"ship": ship, "remove": True})
+            self._add(faction, "风格", (ship,), {"舰": ship, "删叶": True})
         return self
 
     def remove_kiting(self, selection: Any) -> "Surface":
         """逐舰：删掉**风筝姿态叶** ⇒ 回到「舰队默认 / 出厂快照」。"""
         for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "ship_kiting", (ship,), {"ship": ship, "remove": True})
+            self._add(faction, "姿态", (ship,), {"舰": ship, "删叶": True})
         return self
 
     def remove_role(self, selection: Any) -> "Surface":
@@ -1359,22 +1359,22 @@ class Surface:
         这里删掉 = **放手**。想让某个角色稳定下来就写 ``mode='Player'``，而不是删叶。
         """
         for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "ship_role", (ship,), {"ship": ship, "remove": True})
+            self._add(faction, "角色", (ship,), {"舰": ship, "删叶": True})
         return self
 
     def remove_default_role(self, faction: str) -> "Surface":
         """势力级：删掉**默认角色叶** ⇒ 这一层不再供值，自动控制的逐舰定编重新说了算。"""
-        self._add(faction, "default_role", (), {"remove": True})
+        self._add(faction, "舰队默认角色", (), {"删叶": True})
         return self
 
     def remove_default_doctrine(self, faction: str) -> "Surface":
         """势力级：删掉**默认风格叶** ⇒ 这一层不再供值（回落到作用域链 / 舰上记录值）。"""
-        self._add(faction, "default_doctrine", (), {"remove": True})
+        self._add(faction, "舰队默认风格", (), {"删叶": True})
         return self
 
     def remove_default_kiting(self, faction: str) -> "Surface":
         """势力级：删掉**默认风筝姿态叶** ⇒ 这一层不再供值。"""
-        self._add(faction, "default_kiting", (), {"remove": True})
+        self._add(faction, "舰队默认姿态", (), {"删叶": True})
         return self
 
     def remove_default_ship_order(self, faction: str) -> "Surface":
@@ -1421,28 +1421,28 @@ class Surface:
         ``no_such_blueprint``）。
         """
         _BLUEPRINT_CLASS = class_
-        patch: dict = {"name": name}
+        patch: dict = {"图名": name}
         wrote = False
         if _BLUEPRINT_CLASS is not None:
-            patch["class"] = _BLUEPRINT_CLASS
+            patch["舰级"] = _BLUEPRINT_CLASS
             wrote = True
         if components is not None:
-            patch["components"] = [_component_id(c) for c in components]
+            patch["选装"] = [_component_id(c) for c in components]
             wrote = True
         if doctrine is not None:
-            patch["doctrine"] = _check_doctrine(doctrine, f"set_blueprint({name!r})")
+            patch["风格"] = _check_doctrine(doctrine, f"set_blueprint({name!r})")
             wrote = True
         if kiting is not None:
-            patch["kiting"] = _clamp(kiting)
+            patch["姿态"] = _clamp(kiting)
             wrote = True
         if role is not None:
-            patch["role"] = _check_role(role, f"set_blueprint({name!r})")
+            patch["角色"] = _check_role(role, f"set_blueprint({name!r})")
             wrote = True
         m = self._mode_or_takeover(mode, take_over, f"set_blueprint({name!r})") if wrote else (
             _check_mode(mode) if mode is not None else None)
         if m is not None:
-            patch["mode"] = m
-        self._add(faction, "blueprints", (name,), patch)
+            patch["归属"] = m
+        self._add(faction, "设计图库", (name,), patch)
         return self
 
     def silence_blueprint_stance(self, faction: str, name: str, *,
@@ -1456,16 +1456,16 @@ class Surface:
         （那条轴的链继续往下降到舰队默认），图与建造区指针都还在；删图会让挂它的建造区变成
         **悬空指针 ⇒ 停产**。
         """
-        patch: dict = {"name": name}
+        patch: dict = {"图名": name}
         if doctrine:
-            patch["doctrine"] = None
+            patch["风格"] = None
         if kiting:
-            patch["kiting"] = None
+            patch["姿态"] = None
         if role:
-            patch["role"] = None
+            patch["角色"] = None
         if len(patch) == 1:
             raise ValueError("silence_blueprint_stance 至少要勾一条轴（doctrine= / kiting= / role=）")
-        self._add(faction, "blueprints", (name,), patch)
+        self._add(faction, "设计图库", (name,), patch)
         return self
 
     def silence_blueprint_order(self, faction: str, name: str) -> "Surface":
@@ -1487,7 +1487,7 @@ class Surface:
         读面照旧把那个指针原样输出。想让它们回去自动选装，逐个
         :meth:`set_blueprint_pointer(..., blueprint=None)`。
         """
-        return self.remove(faction, "blueprints", name)
+        return self.remove(faction, "设计图库", name)
 
     def set_blueprint_pointer(self, faction: str, city: str, building: Any,
                               blueprint: str | None) -> "Surface":
@@ -1499,7 +1499,7 @@ class Surface:
         ``None`` 写的是 ``null``（**拆掉**），不是"缺席"（缺席 = 不动这一格）。
         """
         idx = self.resolve_building(city, building)
-        entry = {"city": city, "building": idx, "blueprint": blueprint}
+        entry = {"城": city, "建筑": idx, "设计图": blueprint}
         self._require_faction(faction)
         self._pending_buildings.setdefault(faction, []).append(entry)
         return self
@@ -1521,7 +1521,7 @@ class Surface:
         idx = self.resolve_building(city, building)
         self._require_faction(faction)
         self._pending_buildings.setdefault(faction, []).append(
-            {"city": city, "building": idx, "ship_type": class_, "blueprint": name})
+            {"城": city, "建筑": idx, "建造舰级": class_, "设计图": name})
         return self
 
     def set_scope(self, *, global_mode: str | None = None,
@@ -1566,12 +1566,12 @@ class Surface:
             return set()
         q = self.projection()
         r = _last_round(q)
-        return set(q.cities(round=r).query("faction_id == @faction")["city_id"])
+        return set(q.cities(round=r).query("势力 == @faction")["城名"])
 
     def _known_bodies(self) -> set[str]:
         if self.ckpt is None:
             return set()
-        return set(self.projection().bodies()["body_id"])
+        return set(self.projection().bodies()["天体名"])
 
     # -- emit --------------------------------------------------------------------------
 
@@ -1593,7 +1593,7 @@ class Surface:
             buildings = self._pending_buildings.get(faction) or []
             if not kinds and not buildings:
                 continue
-            entry: dict[str, Any] = {"faction_id": faction}
+            entry: dict[str, Any] = {"势力": faction}
             for kind in _kind_order():
                 if not kinds or kind not in kinds:
                     continue
@@ -1607,7 +1607,7 @@ class Surface:
             # 结构叶（设计图指针）：**追加顺序**即调用顺序（同一格被写两次时，后一条覆盖前一条
             # ——引擎按顺序应用，所以 emit 的顺序就是语义）。
             if buildings:
-                entry["buildings"] = copy.deepcopy(buildings)
+                entry["建筑"] = copy.deepcopy(buildings)
             if len(entry) > 1:
                 control.append(entry)
         return {"control": control, "scope": self._scope_patch()}
@@ -1642,7 +1642,7 @@ def _normalize_key(kind: str, key: Any) -> tuple:
         raise ValueError(f"{kind} 的 key 需要 {len(fields)} 个字段 {fields}，收到 {key!r}")
     vals = []
     for f, v in zip(fields, key):
-        vals.append(int(v) if f == "building" else v)
+        vals.append(int(v) if f == "建筑" else v)
     return tuple(vals)
 
 
@@ -1722,7 +1722,7 @@ def _leaf_lookup(s: Surface) -> dict[tuple, Leaf]:
 
 
 def _real_order_leaves(q, r: int) -> dict[tuple[str, str], dict]:
-    """``(faction_id, ship) -> {"mode", "value"}`` for the ship-order leaves that **really exist**.
+    """``(势力, ship) -> {"mode", "value"}`` for the ship-order leaves that **really exist**.
 
     Source: the projection's **``derived.control``** table (``idx/control.jsonl``), whose
     ``kind == "ship_order"`` rows the engine emits by walking ``ControllableState::ship_orders`` —
@@ -1743,7 +1743,7 @@ def _real_order_leaves(q, r: int) -> dict[tuple[str, str], dict]:
     if not len(rows):
         return out
     for _, row in rows[rows["kind"] == "ship_order"].iterrows():
-        out[(row["faction_id"], row["key"])] = {"mode": row["mode"], "value": row["value"]}
+        out[(row["势力"], row["key"])] = {"mode": row["mode"], "value": row["value"]}
     return out
 
 
@@ -1751,7 +1751,7 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
           index_dir=None) -> pd.DataFrame:
     """The projection's ``ships`` table **joined against the control leaves**.
 
-    Per ship: ``ship_id``/``name``/``class``/``faction_id``/``hull`` + the ship's own order leaf
+    Per ship: ``舰名``/``name``/``class``/``势力``/``hull`` + the ship's own order leaf
     (``order_leaf`` / ``order_mode`` / ``order_value`` / ``order_behavior``) + the faction's
     ``default_role_mode`` / ``default_role_value``（舰队默认**角色**叶）+ the **effective** style axes
     (``doctrine_temper`` / ``doctrine_lone_wolf`` / ``kiting`` / ``role``).
@@ -1801,7 +1801,7 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     def L(fac, kind, key):
         return leaves.get((fac, kind, key))
 
-    defaults = {f: s.leaf(f, "default_role") for f in s.factions}
+    defaults = {f: s.leaf(f, "舰队默认角色") for f in s.factions}
     gscope = s.scope_of("global")
     fscope = {f: s.scope_of("factions", f) for f in s.factions}
 
@@ -1810,7 +1810,7 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     dt, dlw, kit = [], [], []
     eff_mode, eff_value, eff_auth = [], [], []
     for _, row in df.iterrows():
-        fac, ship = row["faction_id"], row["ship_id"]
+        fac, ship = row["势力"], row["舰名"]
         # **本舰那片叶**（存在性 + 记录值）走投影的 `derived.control`，不走 `--control`（见 docstring）。
         lf = real.get((fac, ship))
         omode = lf["mode"] if lf is not None else INHERIT
@@ -1822,10 +1822,10 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         d = defaults.get(fac)
         dso_mode.append(d.mode if d is not None else INHERIT)
         dso_value.append(d.value if d is not None else None)
-        doc = L(fac, "ship_doctrine", (ship,))
+        doc = L(fac, "风格", (ship,))
         dt.append((doc.raw or {}).get("temper") if doc is not None and doc.exists else None)
         dlw.append((doc.raw or {}).get("lone_wolf") if doc is not None and doc.exists else None)
-        kk = L(fac, "ship_kiting", (ship,))
+        kk = L(fac, "姿态", (ship,))
         kit.append(kk.value if kk is not None and kk.exists else None)
         # ---- local approximation (fallback only: 旧索引目录没有引擎那几列) ----
         # `leaf → faction scope → global`（指令链，**不建模**已删除的舰队默认叶与图层——
@@ -1909,14 +1909,14 @@ def cities(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
             if leaf.mode == PLAYER:
                 st[f"{pre}_player"] += 1
     for _, row in df.iterrows():
-        city = row["city_id"]
-        lf = s.leaf(row["faction_id"], "loyalty_budget", (city,))
+        city = row["城名"]
+        lf = s.leaf(row["势力"], "城市福利预算", (city,))
         lb_mode.append(lf.mode if lf.exists else INHERIT)
         lb_value.append(lf.value if lf.exists else None)
     df["loyalty_budget_mode"] = lb_mode
     df["loyalty_budget_value"] = lb_value
     for col in ("invest_n", "invest_sum", "invest_player", "build_n", "build_sum", "build_player"):
-        df[col] = [agg.get(c, {}).get(col, 0) for c in df["city_id"]]
+        df[col] = [agg.get(c, {}).get(col, 0) for c in df["城名"]]
     return df
 
 
@@ -1936,15 +1936,15 @@ def buildings(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=Non
         # ——投影里嵌的建筑对象与裸 state 不一致（state 那边叫 `建筑编号`），已报给改 Rust 的那位。
         # 本表输出的列名保持 kit 的旧名字（那是 kit 的读模型 API）。
         for b in (c.get("建筑") or []):
-            rows.append({"city": c["city_id"], "building": int(b["建筑编号"]),
-                         "faction_id": c["faction_id"], "kind": b.get("类型"),
+            rows.append({"city": c["城名"], "building": int(b["建筑编号"]),
+                         "势力": c["势力"], "kind": b.get("类型"),
                          "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
                          # **设计图指针**（原样输出：指向一张不存在/被改名的图时也照样在这里，
                          # 那个建造区**停产**——见 Q10(a)）。
                          "blueprint": b.get("设计图"),
                          "structure": b.get("结构"), "area": b.get("面积"),
                          "deployed": b.get("已建成面积"), "armor": b.get("护甲")})
-    return pd.DataFrame(rows, columns=["city", "building", "faction_id", "kind", "resource",
+    return pd.DataFrame(rows, columns=["city", "building", "势力", "kind", "resource",
                                        "ship_type", "blueprint", "structure", "area", "deployed",
                                        "armor"])
 
@@ -1953,13 +1953,13 @@ def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, plane
                      index_dir=None) -> pd.DataFrame:
     """One frame for "everything I control": ships and cities, tagged by ``kind``.
 
-    Columns the two tables share (``name``/``faction_id``/``hull``/…) line up; the rest are padded
+    Columns the two tables share (``name``/``势力``/``hull``/…) line up; the rest are padded
     with ``NaN``. Handy for one ``df.query(...)`` over a whole empire.
     """
     sh = ships(ckpt, round=round, planet_x=planet_x, index_dir=index_dir)
     ci = cities(ckpt, round=round, planet_x=planet_x, index_dir=index_dir)
-    sh = sh.rename(columns={"ship_id": "entity_id"}).assign(kind="ship")
-    ci = ci.rename(columns={"city_id": "entity_id"}).assign(kind="city")
+    sh = sh.rename(columns={"舰名": "entity_id"}).assign(kind="ship")
+    ci = ci.rename(columns={"城名": "entity_id"}).assign(kind="city")
     return pd.concat([sh, ci], ignore_index=True, sort=False)
 
 
@@ -1975,7 +1975,7 @@ def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, plane
 #: ⚠ ``下水回合`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
 #: NaN **last** in ascending order, so "unknown" never wins the tie-break; those ties fall through to
 #: the name order, which is what the rule did before this column existed.
-DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-船体", "-船体上限", "下水回合", "ship_id")
+DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-船体", "-船体上限", "下水回合", "舰名")
 
 
 def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=None,
@@ -1987,8 +1987,8 @@ def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=
     turn, which is what makes the roster survive name generations — a sunk 旗舰 is back-filled from
     the query, without anyone hand-copying a name::
 
-        spec = [("第1舰队·旗舰", "舰级=='cruiser' and faction_id=='中国'"),
-                ("第1舰队·护卫", "舰级=='corvette' and faction_id=='中国'")]
+        spec = [("第1舰队·旗舰", "舰级=='cruiser' and 势力=='中国'"),
+                ("第1舰队·护卫", "舰级=='corvette' and 势力=='中国'")]
         r = ctl.roster(ckpt, spec)
 
     **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``船体`` → highest ``船体上限``
@@ -2238,7 +2238,7 @@ class Report:
         return "\n".join(lines)
 
 
-_ENGINE_PATH_RE = re.compile(r"^(?P<fac>[^.]+)\.(?P<kind>[a-z_]+)(\[(?P<i>\d+)\])?(\.(?P<field>.+))?$")
+_ENGINE_PATH_RE = re.compile(r"^(?P<fac>[^.]+)\.(?P<kind>[^.\[\]]+)(\[(?P<i>\d+)\])?(\.(?P<field>.+))?$")
 
 
 def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
@@ -2264,7 +2264,7 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
     """
     out: dict[str, dict[str, Any]] = {}
     for fac in s.raw.get("control") or []:
-        fid = fac.get("faction_id")
+        fid = fac.get("势力")
         for kind in _kind_order():
             if not LEAF_KINDS[kind]:
                 raw = fac.get(kind)
@@ -2273,7 +2273,7 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
                     # 值字段可能不止一个（两轴风格叶 / 设计图），所以**全给 null**：
                     # 只写一个 `value: None` 会让另一条轴在 `verify` 的 before/after 里凭空消失。
                     miss = {v: None for v in LEAF_KINDS.values(kind)}
-                    out[name] = {"exists": False, "mode": INHERIT, **miss}
+                    out[name] = {"exists": False, "归属": INHERIT, **miss}
                 else:
                     out[name] = {"exists": True, **raw}
                 continue
@@ -2290,7 +2290,7 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
     """``leaf name → {field: value}`` for the **fields the diff writes** (absent = untouched)."""
     out: dict[str, dict[str, Any]] = {}
     for fac in (diff or {}).get("control") or []:
-        fid = fac.get("faction_id")
+        fid = fac.get("势力")
         for kind in _kind_order():
             if kind not in fac:
                 continue
@@ -2306,7 +2306,7 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 # 值字段**按 kind 问 manifest**（`capital`→`value`、`default_role`→`role`、
                 # 两轴风格叶→两个字段…）：写成一张写死的名单时，新轴的写值会在 `requests` 里
                 # 静默消失，与漏掉 `remove` 同一个坑。多字段于是不需要特例。
-                wanted = {"mode", "remove", *LEAF_KINDS.values(kind)}
+                wanted = {"归属", "删叶", *LEAF_KINDS.values(kind)}
                 out.setdefault(f"{fid}.{kind}", {}).update(
                     {k: v for k, v in raw.items() if k in wanted})
                 continue
@@ -2328,7 +2328,7 @@ def _engine_path_to_leaf(diff: Mapping, path: str) -> str | None:
         return path
     entry = None
     for f in (diff or {}).get("control") or []:
-        if f.get("faction_id") != fac:
+        if f.get("势力") != fac:
             continue
         lst = f.get(kind) or []
         i = int(idx)
@@ -2446,7 +2446,7 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
             # 「删叶」是**另一种**请求：它的成功不是"字段变成了这个值"，而是"这片叶没了"
             # （`remove` 只存在于写面，读面永远没有这个字段）。权威信号是引擎的回执：
             # 没被丢弃 = 落地（幂等删除也算落地，只是不进 `NOTE_APPLY_REMOVED` 的名单）。
-            is_remove = fld == "remove" and bool(val)
+            is_remove = fld == "删叶" and bool(val)
             removed_here = leaf in removed_leafs
             rep.requests.append(Request(
                 leaf=leaf, field=fld, value=val, before=b, after=a,
@@ -2571,9 +2571,9 @@ def main(argv: list[str] | None = None) -> int:
         s = surface(a.ckpt)
         out: dict = {}
         for name in s.factions:
-            entry = {"faction_id": name}
+            entry = {"势力": name}
             for kind, val in s.faction(name).items():
-                if kind == "faction_id":
+                if kind == "势力":
                     continue
                 if isinstance(val, Leaf):
                     entry[kind] = val.as_dict()
@@ -2589,7 +2589,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if rep.ok else 1
     if a.cmd == "roster":
         df = ships(a.ckpt)
-        cols = [c for c in ("ship_id", "faction_id", "class", "hull", "hull_max",
+        cols = [c for c in ("舰名", "势力", "舰级", "船体", "船体上限",
                             "order_mode", "order_behavior", "default_role_mode")
                 if c in df.columns]
         print(df[cols].to_string(index=False))

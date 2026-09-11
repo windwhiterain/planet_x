@@ -66,7 +66,17 @@ use crate::model::*;
 /// `domestic: BTreeMap<FactionId, DomesticMarket>`，存每势力的开发/建造国内价格与未用额度。
 /// 旧档缺该键 ⇒ serde default 空表 = 未启用；`config.domestic_market.enabled` 默认 `false`，
 /// 世界逐字节不变。见 `.agents/notes/domestic-market.md`。
-pub const SCHEMA_VERSION: u32 = 24;
+/// **v25 = 控制面 + 读面连接键的中文名**（`feature/control-nouns`，用户裁决 2026-10）：字段的
+/// serde 名就是给人看的中文名词（批次 A 已把实体字段改完，这一档把**控制面**与**投影的连接键**
+/// 补上）：`ControllableState` 的 17 片叶、`FactionControlPatch` 的 17 片叶 + `势力`/`建筑`、
+/// `leaves.rs` 的 `field`/`keys`/`values`/`carries`/`read_only`、`projection` 的
+/// `key`/`id_col`/`join_on`（`舰名`/`城名`/`势力`/`图名`/`合同号`/`天体名`/`定居点` 与 `*表`）。
+///
+/// **档的形状变了**（同一个世界的 JSON 键名不同）⇒ 推号：旧档里的英文键按新名找不到
+/// （**不迁移**，按本仓库「不考虑向前兼容」的约定）。**语义与随机流一律不变**：
+/// `--seed 42 --round 240 --digest 20` 的 sha256 逐字节相同（改的只是名字）。
+/// 见 `.agents/notes/field-naming.md`。
+pub const SCHEMA_VERSION: u32 = 25;
 fn default_schema_version() -> u32 {
     0
 }

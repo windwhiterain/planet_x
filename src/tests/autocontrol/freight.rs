@@ -269,7 +269,7 @@ fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
 
     // 删叶：玩家放手 ⇒ 归属不再拦着 AI。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "ship_role": [{"ship": ship, "remove": true}]}]
+        "control": [{"势力": "中国", "角色": [{"舰": ship, "删叶": true}]}]
     });
     let r = crate::control::apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);

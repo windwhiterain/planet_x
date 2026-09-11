@@ -15,7 +15,7 @@ pub fn check_city_building(
 ) -> bool {
     let Some(c) = state.city(city) else {
         report.skip(
-            format!("{path}.city"),
+            format!("{path}.城"),
             city,
             "no_such_city",
             format!("没有名为「{city}」的城（城被夷平后名字会从活城列表里消失）。"),
@@ -24,7 +24,7 @@ pub fn check_city_building(
     };
     if c.faction_id != fid {
         report.skip(
-            format!("{path}.city"),
+            format!("{path}.城"),
             city,
             "not_your_city",
             format!("「{city}」属于 {}，不是 {fid} 的城。", c.faction_id),
@@ -34,7 +34,7 @@ pub fn check_city_building(
     if !c.buildings.iter().any(|b| b.id == building) {
         let ids: Vec<String> = c.buildings.iter().map(|b| b.id.to_string()).collect();
         report.skip(
-            format!("{path}.building"),
+            format!("{path}.建筑"),
             building.to_string(),
             "no_such_building",
             format!("「{city}」里没有 building={building}；它的建筑下标是 [{}]（下标只在城内部唯一，换城要换下标）。", ids.join(", ")),
@@ -60,7 +60,7 @@ pub fn apply_building_patch(
 ) -> bool {
     let Some(cid) = patch.city.clone() else {
         report.skip(
-            format!("{path}.city"),
+            format!("{path}.城"),
             "",
             "missing_city",
             "建筑补丁必须指明 city（城名）。",
@@ -77,7 +77,7 @@ pub fn apply_building_patch(
         let Some(spec) = config.buildings.get(&kind) else {
             let kinds: Vec<&str> = config.buildings.keys().map(String::as_str).collect();
             report.skip(
-                format!("{path}.kind"),
+                format!("{path}.类型"),
                 &kind,
                 "no_such_kind",
                 format!("没有建筑类型「{kind}」（可选：{}）。", kinds.join(" / ")),
@@ -89,7 +89,7 @@ pub fn apply_building_patch(
         match state.city(&cid) {
             None => {
                 report.skip(
-                    format!("{path}.city"),
+                    format!("{path}.城"),
                     &cid,
                     "no_such_city",
                     format!("没有名为「{cid}」的城。"),
@@ -98,7 +98,7 @@ pub fn apply_building_patch(
             }
             Some(c) if c.faction_id != fid => {
                 report.skip(
-                    format!("{path}.city"),
+                    format!("{path}.城"),
                     &cid,
                     "not_your_city",
                     format!(
@@ -117,7 +117,7 @@ pub fn apply_building_patch(
         if !config.structures.contains_key(&structure) {
             let all: Vec<&str> = config.structures.keys().map(String::as_str).collect();
             report.skip(
-                format!("{path}.structure"),
+                format!("{path}.结构"),
                 &structure,
                 "no_such_structure",
                 format!("没有结构「{structure}」（可选：{}）。", all.join(" / ")),
@@ -151,7 +151,7 @@ pub fn apply_building_patch(
             if let Some(name) = want {
                 if kind != "construction" {
                     report.skip(
-                        format!("{path}.blueprint"),
+                        format!("{path}.设计图"),
                         name,
                         "not_a_shipyard",
                         format!("新建的是「{kind}」而不是建造区（kind=construction），只有建造区能挂设计图。"),
@@ -165,7 +165,7 @@ pub fn apply_building_patch(
                 match bp_class {
                     None => {
                         report.skip(
-                            format!("{path}.blueprint"),
+                            format!("{path}.设计图"),
                             name,
                             "no_such_blueprint",
                             format!("{fid} 的设计图库里没有「{name}」——新建造区要么不挂图（走 `ship_type` + 生成器），要么挂一张已经存在的图。"),
@@ -174,7 +174,7 @@ pub fn apply_building_patch(
                     }
                     Some(bp_class) if ship_type.as_deref() != Some(bp_class.as_str()) => {
                         report.skip(
-                            format!("{path}.blueprint"),
+                            format!("{path}.设计图"),
                             name,
                             "blueprint_class_mismatch",
                             format!(
@@ -221,7 +221,7 @@ pub fn apply_building_patch(
         let owned = state.city(&cid).map(|c| c.faction_id.as_str()) == Some(fid.as_str());
         if !owned {
             report.skip(
-                format!("{path}.city"),
+                format!("{path}.城"),
                 &cid,
                 "not_your_city",
                 format!("「{cid}」不是 {fid} 的城（或不存在）——不能删别家的建筑。"),
@@ -233,7 +233,7 @@ pub fn apply_building_patch(
             .is_some_and(|c| !c.buildings.iter().any(|b| b.id == bid))
         {
             report.skip(
-                format!("{path}.building"),
+                format!("{path}.建筑"),
                 bid.to_string(),
                 "no_such_building",
                 format!("「{cid}」里没有 building={bid}，没有可删的东西。"),
@@ -253,7 +253,7 @@ pub fn apply_building_patch(
     // Modify an existing building's attributes (e.g. structure / ship_type).
     if state.city(&cid).map(|c| c.faction_id.as_str()) != Some(fid.as_str()) {
         report.skip(
-            format!("{path}.city"),
+            format!("{path}.城"),
             &cid,
             "not_your_city",
             format!("「{cid}」不是 {fid} 的城（或不存在）。"),
@@ -265,7 +265,7 @@ pub fn apply_building_patch(
         .and_then(|c| c.buildings.iter().find(|b| b.id == bid))
     else {
         report.skip(
-            format!("{path}.building"),
+            format!("{path}.建筑"),
             bid.to_string(),
             "no_such_building",
             format!("「{cid}」里没有 building={bid}（下标只在城内部唯一，换城要换下标）。"),
@@ -284,7 +284,7 @@ pub fn apply_building_patch(
     if let Some(want) = &patch.blueprint {
         if !is_shipyard {
             report.skip(
-                format!("{path}.blueprint"),
+                format!("{path}.设计图"),
                 want.clone().unwrap_or_default(),
                 "not_a_shipyard",
                 format!("「{cid}」的 building={bid} 不是建造区（kind={target_kind}），只有建造区能挂设计图（图决定这个区把「还不存在的舰」造成什么样）。"),
@@ -300,7 +300,7 @@ pub fn apply_building_patch(
                         .map(|l| l.value.class.clone());
                     match bp_class {
                         None => report.skip(
-                            format!("{path}.blueprint"),
+                            format!("{path}.设计图"),
                             name,
                             "no_such_blueprint",
                             format!("{fid} 的设计图库里没有「{name}」。**绝不静默回落生成器**：引用不存在的图会让这个建造区**停产**（进度不再增加）——想回到自动选装就写 `\"blueprint\": null`。"),
@@ -311,7 +311,7 @@ pub fn apply_building_patch(
                             let target_st = patch.ship_type.clone().or_else(|| cur_ship_type.clone());
                             if target_st.as_deref() != Some(bp_class.as_str()) {
                                 report.skip(
-                                    format!("{path}.blueprint"),
+                                    format!("{path}.设计图"),
                                     name,
                                     "blueprint_class_mismatch",
                                     format!(
@@ -344,7 +344,7 @@ pub fn apply_building_patch(
                     if bp_class != *st {
                         ship_type_blocked = true;
                         report.skip(
-                            format!("{path}.ship_type"),
+                            format!("{path}.建造舰级"),
                             st,
                             "blueprint_class_mismatch",
                             format!("这个建造区挂着设计图「{bp}」（{bp_class} 级），而你要把它改成 {st} 级。要么同一份 diff 里把图的 `class` 也改成 {st}（`blueprints[].class`），要么先拆掉指针（`\"blueprint\": null`）——留着对不上的图等于把它作废。"),
@@ -364,7 +364,7 @@ pub fn apply_building_patch(
                 } else {
                     let all: Vec<&str> = config.structures.keys().map(String::as_str).collect();
                     report.skip(
-                        format!("{path}.structure"),
+                        format!("{path}.结构"),
                         s,
                         "no_such_structure",
                         format!("没有结构「{s}」（可选：{}）。", all.join(" / ")),
@@ -374,7 +374,7 @@ pub fn apply_building_patch(
             if let Some(s) = &patch.ship_type {
                 if !is_shipyard {
                     report.skip(
-                        format!("{path}.ship_type"),
+                        format!("{path}.建造舰级"),
                         s,
                         "not_a_shipyard",
                         format!("「{cid}」的 building={bid} 不是建造区（kind={target_kind}），只有建造区能定 ship_type（决定该区造哪一级舰）。"),
@@ -393,7 +393,7 @@ pub fn apply_building_patch(
                 } else {
                     let kinds: Vec<&str> = config.buildings.keys().map(String::as_str).collect();
                     report.skip(
-                        format!("{path}.kind"),
+                        format!("{path}.类型"),
                         k,
                         "no_such_kind",
                         format!("没有建筑类型「{k}」（可选：{}）。", kinds.join(" / ")),
@@ -406,7 +406,7 @@ pub fn apply_building_patch(
                     touched = true;
                 } else {
                     report.skip(
-                        format!("{path}.resource"),
+                        format!("{path}.资源"),
                         r,
                         "not_a_mining_building",
                         format!("「{cid}」的 building={bid} 不是开采区（kind={}），只有开采区能定开采哪种资源。", b.kind),

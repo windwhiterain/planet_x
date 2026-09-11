@@ -44,9 +44,9 @@ fn pin_blueprint(
     mode: &str,
 ) -> (CityId, BuildingId) {
     let (cid, bid, _) = some_building(state, "中国", true);
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": name, "class": class, "components": components, "mode": mode}],
-        "buildings": [{"city": cid, "building": bid, "ship_type": class, "blueprint": name}],
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": name, "舰级": class, "选装": components, "归属": mode}],
+        "建筑": [{"城": cid, "建筑": bid, "建造舰级": class, "设计图": name}],
     }]});
     let rep = apply_patch(state, config, &diff).expect("建图 + 挂图必须一次成功");
     assert!(rep.is_clean(), "正解用法不该被丢弃：{:?}", rep.skipped);

@@ -329,9 +329,9 @@ fn fleet_default_style_rows_round_trip_through_the_web_surface() {
     // 第一步：前端把这两行的归属改成「玩家」——**只写 mode、不写值**是合法的（值不动），
     // 也不算「写值即接管」。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "default_doctrine": { "mode": "Player" },
-            "default_kiting": { "mode": "Player" } }]
+        "control": [{ "势力": fid,
+            "舰队默认风格": { "归属": "Player" },
+            "舰队默认姿态": { "归属": "Player" } }]
     }))
     .expect("前端写的就是这个形状");
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -345,9 +345,9 @@ fn fleet_default_style_rows_round_trip_through_the_web_surface() {
     // 第二步：写值（编辑器里的两个数 / 一个数）。读面必须立刻回显——
     // 「点了应用、刷新页面还在」靠的就是这条链。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "default_doctrine": { "temper": 0.4, "lone_wolf": -0.6 },
-            "default_kiting": { "kiting": -1.0 } }]
+        "control": [{ "势力": fid,
+            "舰队默认风格": { "temper": 0.4, "lone_wolf": -0.6 },
+            "舰队默认姿态": { "姿态": -1.0 } }]
     }))
     .expect("前端写的就是这个形状");
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -400,9 +400,9 @@ fn posting_the_read_surface_back_keeps_effective_style() {
     // 让舰队默认风格成为**玩家表态**：这样「叶 Inherit ⇒ 取默认值」这条路径也真的参与进来。
     let fid = w.state.factions[0].name.clone();
     let take: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "default_doctrine": { "temper": 0.5, "lone_wolf": -0.25, "mode": "Player" },
-            "default_kiting": { "kiting": -0.8, "mode": "Player" } }]
+        "control": [{ "势力": fid,
+            "舰队默认风格": { "temper": 0.5, "lone_wolf": -0.25, "归属": "Player" },
+            "舰队默认姿态": { "姿态": -0.8, "归属": "Player" } }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &take).is_clean());
@@ -537,7 +537,7 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
     // ② 逐轴提交：只写 temper。缺省的那条轴保留**当前有效值**，且这片叶因「写了值没写 mode」
     //    被接管；别的舰、这条舰的另一条轴一律不动。
     let one: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_doctrine": [{ "ship": ship, "temper": 0.33 }] }]
+        "control": [{ "势力": fid, "风格": [{ "舰": ship, "temper": 0.33 }] }]
     }))
     .unwrap();
     let r = apply_diff(&mut w.state, &w.config, &one);
@@ -577,7 +577,7 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
     // ③ 「恢复继承」（`{mode: Inherit}`）：只撤表态、值不动——而且引擎的取值规则让叶里那个数
     //    **继续生效**。补丁接口只能新建/改写叶、删不掉叶，所以"收回出厂快照"今天做不到。
     let back: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_doctrine": [{ "ship": ship, "mode": "Inherit" }] }]
+        "control": [{ "势力": fid, "风格": [{ "舰": ship, "归属": "Inherit" }] }]
     }))
     .unwrap();
     let r = apply_diff(&mut w.state, &w.config, &back);
@@ -607,7 +607,7 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
 }
 
 /// 「恢复出厂值」（**删叶**）走 web 的写面：前端那个按钮发的就是
-/// `{"ship": …, "remove": true}`。它与「恢复继承」（只写 mode）**不是**一回事——
+/// `{"舰": …, "删叶": true}`。它与「恢复继承」（只写 mode）**不是**一回事——
 /// 叶只要还在，引擎就优先用叶里的值，所以只有删掉它才能回到出厂快照。
 #[test]
 fn removing_a_ship_style_leaf_returns_the_factory_record() {
@@ -632,8 +632,8 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
 
     // ① 先写一片叶（两轴一起给，避免 `partial_doctrine_leaf`）。
     let take: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "ship_doctrine": [{ "ship": ship, "temper": -1.0, "lone_wolf": 0.5 }] }]
+        "control": [{ "势力": fid,
+            "风格": [{ "舰": ship, "temper": -1.0, "lone_wolf": 0.5 }] }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &take).is_clean());
@@ -641,8 +641,8 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
 
     // ② 前端那个按钮的补丁：只带身份键 + `remove`。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "ship_doctrine": [{ "ship": ship, "remove": true }] }]
+        "control": [{ "势力": fid,
+            "风格": [{ "舰": ship, "删叶": true }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -717,7 +717,7 @@ fn the_role_axis_round_trips_through_the_web_surface() {
 
     // ② 写面：把一艘舰钉成运输舰（写值即接管 ⇒ 归属变 Player，AI 定编从此不碰它）。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_role": [{ "ship": ship, "role": "Freight" }] }]
+        "control": [{ "势力": fid, "角色": [{ "舰": ship, "角色": "Freight" }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -728,7 +728,7 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     // ③ 前端那个「恢复出厂值」按钮发的补丁：只带身份键 + `remove`。
     let record = w.state.ship(&ship).unwrap().role;
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_role": [{ "ship": ship, "remove": true }] }]
+        "control": [{ "势力": fid, "角色": [{ "舰": ship, "删叶": true }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -761,7 +761,7 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     // ④ 势力级默认角色叶（`Option`：有叶才有一行）也走读写两面。
     //    这里用第三态 `Observe`：它是本轮新加的那一档，顺手钉住「字符串收发得回去」。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "default_role": { "role": "Observe", "mode": "Player" } }]
+        "control": [{ "势力": fid, "舰队默认角色": { "角色": "Observe", "归属": "Player" } }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
@@ -806,7 +806,7 @@ fn the_order_read_face_lists_ships_without_a_leaf() {
 
     // 把一艘舰的指令叶删掉 —— 正是「恢复出厂值」（`remove: true`）之后的状态。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "ship_orders": [{ "ship": vanished, "remove": true }] }]
+        "control": [{ "势力": fid, "指令": [{ "舰": vanished, "删叶": true }] }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
@@ -838,8 +838,8 @@ fn the_order_read_face_lists_ships_without_a_leaf() {
 
     // 前端「只回传差异」的载荷（身份键 + 只改过的字段）：给这艘没有叶的舰设归属必须落地。
     let req: CommandReq =
-        serde_json::from_value(serde_json::json!({ "control": [{ "faction_id": fid,
-            "ship_orders": [{ "ship": vanished, "mode": "Player" }] }] }))
+        serde_json::from_value(serde_json::json!({ "control": [{ "势力": fid,
+            "指令": [{ "舰": vanished, "归属": "Player" }] }] }))
         .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
@@ -896,10 +896,10 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
 
     // ② 写面：建一张**舰级对得上**的图，并把建造区指过去（同一份 diff：一次成功）。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "blueprints": [{"name": "重甲护卫", "class": ship_type,
-                            "components": ["kinetic", "ion_drive"], "mode": "Player"}],
-            "buildings": [{"city": cid, "building": bid, "blueprint": "重甲护卫"}] }]
+        "control": [{ "势力": fid,
+            "设计图库": [{"图名": "重甲护卫", "舰级": ship_type,
+                            "选装": ["kinetic", "ion_drive"], "归属": "Player"}],
+            "建筑": [{"城": cid, "建筑": bid, "设计图": "重甲护卫"}] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -942,8 +942,8 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
 
     // ④ 拆指针（前端「（无：自动选装）」那一格发的就是 `null`）⇒ 回到自动选装。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "buildings": [
-            {"city": cid, "building": bid, "blueprint": null}] }]
+        "control": [{ "势力": fid, "建筑": [
+            {"城": cid, "建筑": bid, "设计图": null}] }]
     }))
     .unwrap();
     assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
@@ -962,7 +962,7 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
 
     // ⑤ 删整张图（`remove`）：回执里点名到叶，图库里就没了。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid, "blueprints": [{"name": "重甲护卫", "remove": true}] }]
+        "control": [{ "势力": fid, "设计图库": [{"图名": "重甲护卫", "删叶": true}] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
@@ -991,10 +991,10 @@ fn the_blueprint_read_face_carries_launch_waiting_and_still_round_trips() {
 
     // 建图（玩家归属 + 两件选装）+ 把建造区指过去。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "blueprints": [{"name": "等钱的图", "class": ship_type,
-                            "components": ["kinetic", "ion_drive"], "mode": "Player"}],
-            "buildings": [{"city": cid, "building": bid, "blueprint": "等钱的图"}] }]
+        "control": [{ "势力": fid,
+            "设计图库": [{"图名": "等钱的图", "舰级": ship_type,
+                            "选装": ["kinetic", "ion_drive"], "归属": "Player"}],
+            "建筑": [{"城": cid, "建筑": bid, "设计图": "等钱的图"}] }]
     }))
     .unwrap();
     let view = apply_command(&mut w, &req);
@@ -1081,9 +1081,9 @@ fn a_rejected_blueprint_patch_comes_back_in_the_command_report() {
 
     // 先建一张**舰级对得上**的图并挂上指针（合法）。
     let ok: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "blueprints": [{"name": "被拒的图", "class": ship_type, "components": ["kinetic"], "mode": "Player"}],
-            "buildings": [{"city": cid, "building": bid, "blueprint": "被拒的图"}] }]
+        "control": [{ "势力": fid,
+            "设计图库": [{"图名": "被拒的图", "舰级": ship_type, "选装": ["kinetic"], "归属": "Player"}],
+            "建筑": [{"城": cid, "建筑": bid, "设计图": "被拒的图"}] }]
     }))
     .unwrap();
     assert!(apply_command(&mut w, &ok).report.unwrap().is_clean());
@@ -1097,8 +1097,8 @@ fn a_rejected_blueprint_patch_comes_back_in_the_command_report() {
         .cloned()
         .expect("至少有两个舰级");
     let bad: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "faction_id": fid,
-            "blueprints": [{"name": "被拒的图", "class": other}] }]
+        "control": [{ "势力": fid,
+            "设计图库": [{"图名": "被拒的图", "舰级": other}] }]
     }))
     .unwrap();
     let view = apply_command(&mut w, &bad);

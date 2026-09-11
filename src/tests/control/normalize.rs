@@ -76,8 +76,8 @@ fn apply_patch_accepts_tagged_ship_order() {
     // 长城 = 中国 (faction 3) 的起始护卫舰；华盛顿 = 美国的一艘舰。舰名即唯一 key。
     let tagged = serde_json::json!({
         "control": [{
-            "faction_id": "中国",
-            "ship_orders": [{"ship": "长城", "behavior": {"type": "follow", "ship": "华盛顿"}, "mode": "Player"}]
+            "势力": "中国",
+            "指令": [{"舰": "长城", "行为": {"type": "follow", "ship": "华盛顿"}, "归属": "Player"}]
         }]
     });
     apply_patch(&mut state, &config, &tagged).expect("tagged diff applies");

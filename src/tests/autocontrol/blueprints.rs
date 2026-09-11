@@ -108,13 +108,13 @@ fn a_player_pinned_design_and_its_yard_are_left_alone() {
         .find(|b| b.id == bid)
         .and_then(|b| b.ship_type.clone())
         .unwrap();
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": "玩家的守卫图", "class": class, "components": ["kinetic", "ion_drive"]}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": "玩家的守卫图", "舰级": class, "选装": ["kinetic", "ion_drive"]}]}]});
     apply_patch(&mut state, &config, &diff).expect("player design applies");
     // 钉成 Player + 把建造区指过去。
     let diff = serde_json::json!({"control": [
-        {"faction_id": "中国", "blueprints": [{"name": "玩家的守卫图", "mode": "Player"}]},
-        {"faction_id": "中国", "buildings": [{"city": city, "building": bid, "blueprint": "玩家的守卫图"}]}
+        {"势力": "中国", "设计图库": [{"图名": "玩家的守卫图", "归属": "Player"}]},
+        {"势力": "中国", "建筑": [{"城": city, "建筑": bid, "设计图": "玩家的守卫图"}]}
     ]});
     apply_patch(&mut state, &config, &diff).expect("pin + pointer applies");
     let mut out = Vec::new();
@@ -184,9 +184,9 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
     // ⚠ 这里必须显式写 `mode: "Inherit"`：`--apply` 的「写值即接管」会把没写 mode 的图
     // 钉成 `Player`（= 玩家写的），而 AI 自己写叶走的是直接状态改写、写的是 `Inherit`
     // ——"回收只碰自己造的"这条安全属性正是靠这个区分成立的。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "自动强袭·陈图", "class": "corvette", "components": ["kinetic"], "mode": "Inherit"},
-        {"name": "玩家自己的图", "class": "corvette", "components": ["kinetic"]}
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "自动强袭·陈图", "舰级": "corvette", "选装": ["kinetic"], "归属": "Inherit"},
+        {"图名": "玩家自己的图", "舰级": "corvette", "选装": ["kinetic"]}
     ]}]});
     apply_patch(&mut state, &config, &diff).expect("designs apply");
     state.control_mut(fid.clone()).unwrap().blueprints.insert(

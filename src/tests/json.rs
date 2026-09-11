@@ -25,14 +25,14 @@ fn tuple_keys_become_strings() {
         .insert((city.clone(), 7), Control::auto(2.5));
 
     let v = to_value(&state).expect("a tuple-keyed state must dump to JSON");
-    let inv = &v["control"][fid.as_str()]["invest_weights"];
+    let inv = &v["control"][fid.as_str()]["建设权重"];
     let key = format!("{city}|7");
     assert_eq!(
-        inv[&key]["value"],
+        inv[&key]["值"],
         serde_json::json!(1.5),
         "tuple key must be `城市|建筑id`"
     );
-    assert_eq!(inv[&key]["mode"], serde_json::json!("Player"));
+    assert_eq!(inv[&key]["归属"], serde_json::json!("Player"));
     assert!(
         inv.get("value").is_none(),
         "the tuple key must not collapse into the map"

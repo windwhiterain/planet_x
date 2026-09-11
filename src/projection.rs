@@ -65,22 +65,22 @@ const LAZY: &[LazyField] = &[
     LazyField {
         name: "ships",
         table: "idx/ships.jsonl",
-        key: "ship_id",
-        id_col: "ship_ids",
+        key: "舰名",
+        id_col: "舰名表",
         round: true,
     },
     LazyField {
         name: "cities",
         table: "idx/cities.jsonl",
-        key: "city_id",
-        id_col: "city_ids",
+        key: "城名",
+        id_col: "城名表",
         round: true,
     },
     LazyField {
         name: "factions",
         table: "idx/factions.jsonl",
-        key: "faction_id",
-        id_col: "faction_ids",
+        key: "势力",
+        id_col: "势力表",
         round: true,
     },
     // 承包挂单簿：**只留未完成的单子**（等人接的 + 正在履行的），所以它是「此刻在市场上
@@ -88,8 +88,8 @@ const LAZY: &[LazyField] = &[
     LazyField {
         name: "contracts",
         table: "idx/contracts.jsonl",
-        key: "contract_id",
-        id_col: "contract_ids",
+        key: "合同号",
+        id_col: "合同号表",
         round: true,
     },
     // 事件历史：**归一化**的一行一事件（固定列 + 统一参与方槽位），取代此前内联在
@@ -105,15 +105,15 @@ const LAZY: &[LazyField] = &[
     LazyField {
         name: "bodies",
         table: "idx/bodies.jsonl",
-        key: "body_id",
-        id_col: "body_ids",
+        key: "天体名",
+        id_col: "天体名表",
         round: false,
     },
     LazyField {
         name: "settlements",
         table: "idx/settlements.jsonl",
-        key: "settlement_id",
-        id_col: "settlement_ids",
+        key: "定居点",
+        id_col: "定居点表",
         round: false,
     },
 ];
@@ -138,22 +138,22 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable {
         name: "faction_process",
         table: "idx/faction_process.jsonl",
-        key: "faction_id",
-        join_on: "faction_ids",
+        key: "势力",
+        join_on: "势力表",
         round: true,
     },
     DerivedTable {
         name: "city_process",
         table: "idx/city_process.jsonl",
-        key: "city_id",
-        join_on: "city_ids",
+        key: "城名",
+        join_on: "城名表",
         round: true,
     },
     DerivedTable {
         name: "control",
         table: "idx/control.jsonl",
         key: "key",
-        join_on: "faction_ids",
+        join_on: "势力表",
         round: true,
     },
     DerivedTable {
@@ -167,7 +167,7 @@ const DERIVED: &[DerivedTable] = &[
         name: "decisions",
         table: "idx/decisions.jsonl",
         key: "actor",
-        join_on: "faction_ids",
+        join_on: "势力表",
         round: true,
     },
     // **舰船设计图库**（势力级）：一行 = 一张图。设计图是**结构叶**（`{class, components[],
@@ -178,8 +178,8 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable {
         name: "blueprints",
         table: "idx/blueprints.jsonl",
-        key: "blueprint_id",
-        join_on: "faction_ids",
+        key: "图名",
+        join_on: "势力表",
         round: true,
     },
     // **本回合真的成交的贸易**（B3）：一笔买卖一行（买方 × 卖方），带价格分解与丢货率。
@@ -188,15 +188,15 @@ const DERIVED: &[DerivedTable] = &[
         name: "market_trades",
         table: "idx/market_trades.jsonl",
         key: "buyer",
-        join_on: "faction_ids",
+        join_on: "势力表",
         round: true,
     },
     // **本回合每艘在跑运输的舰走了哪一步**（B3）：一舰一行，`Waiting`/`EnRoute` 的**唯一**读法。
     DerivedTable {
         name: "haul_steps",
         table: "idx/haul_steps.jsonl",
-        key: "ship_id",
-        join_on: "ship_ids",
+        key: "舰名",
+        join_on: "舰名表",
         round: true,
     },
     // **产地货栈的逐资源存量**（M1 / 施工图 §5 第 3 批）：一 (势力, 天体, 资源) 一行。非首都
@@ -205,8 +205,8 @@ const DERIVED: &[DerivedTable] = &[
     DerivedTable {
         name: "depots",
         table: "idx/depots.jsonl",
-        key: "faction_id",
-        join_on: "faction_ids",
+        key: "势力",
+        join_on: "势力表",
         round: true,
     },
     // **本回合的输入面**（B5）：一回合一行 —— 掷出的逐舰解算顺序 + 每对势力的关系噪声 +
@@ -353,8 +353,7 @@ pub fn write_index_seeded(
             w.bodies,
             "{}",
             json!({
-                "body_id": b.name.clone(),
-                "天体名": b.name,
+                "天体名": b.name.clone(),
                 "近日点距离": o.perihelion_distance,
                 "远日点距离": o.aphelion_distance,
                 "公转周期": o.period,
@@ -376,10 +375,9 @@ pub fn write_index_seeded(
                 w.settlements,
                 "{}",
                 json!({
-                    "settlement_id": s.name.clone(),
-                    "body_id": b.name.clone(),
-                    "index": i,
                     "定居点": s.name.clone(),
+                    "天体名": b.name.clone(),
+                    "index": i,
                     "总面积": s.total_area,
                     "生态容量": s.ecological_capacity,
                     "建设速度修正": s.construction_speed_mod,
@@ -437,17 +435,17 @@ fn write_round(
         "event_ids": (0..state.events.len())
             .map(|i| event_id(state.round, i))
             .collect::<Vec<_>>(),
-        "ship_ids": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        "舰名表": state.ships.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
         // **全部**城（含已夷平的空白城）：投影表 `cities` 里本来就有 razed 行，这里若把
         // razed 城筛掉，`q.join('cities')` 就会与 `q.cities()` 不一致——而「被夷平的城」
         // 恰恰是历史查询最关心的实体。是否算「活城」交给查询方看 `razed` 列。
-        "city_ids": state.cities.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
-        "faction_ids": state.factions.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+        "城名表": state.cities.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "势力表": state.factions.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
         // 承包挂单簿（join `contracts` 表用）。挂单号是 `u64`（不是实体名），所以这里是
         // 数字数组——与本表其它 id 数组（都是名字）不同，别把它当实体 id 用。
-        "contract_ids": state.contracts.contracts.iter().map(|c| c.id).collect::<Vec<_>>(),
-        "body_ids": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
-        "settlement_ids": state.bodies
+        "合同号表": state.contracts.contracts.iter().map(|c| c.id).collect::<Vec<_>>(),
+        "天体名表": state.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
+        "定居点表": state.bodies
             .iter()
             .flat_map(|b| b.settlements.iter().map(|s| s.name.clone()))
             .collect::<Vec<_>>(),
@@ -497,10 +495,9 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "ship_id": s.name.clone(),
-                "faction_id": s.faction_id,
+                "舰名": s.name.clone(),
+                "势力": s.faction_id,
                 "舰级": s.class,
-                "舰名": s.name,
                 "x": r2(s.position[0]),
                 "y": r2(s.position[1]),
                 "船体": r2(s.hull),
@@ -595,11 +592,10 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "city_id": c.name.clone(),
-                "城名": c.name,
-                "body_id": c.body_id,
+                "城名": c.name.clone(),
+                "天体名": c.body_id,
                 "定居点": c.settlement.clone(),
-                "faction_id": c.faction_id,
+                "势力": c.faction_id,
                 "人口": c.population,
                 "忠诚度": r2(c.loyalty),
                 "已焚毁": c.razed,
@@ -681,8 +677,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": f.name.clone(),
-                "势力": f.name,
+                "势力": f.name.clone(),
                 "符号": f.symbol,
                 "capital_body": state.capital_body(&f.name),
                 "阵营倾向": r2(f.alignment),
@@ -735,8 +730,8 @@ fn write_round(
                     .iter()
                     .filter(|s| s.hull > 0.0 && s.faction_id == f.name && state.ship_role(s.name.clone()) == ShipRole::Freight)
                     .count(),
-                "city_ids": city_ids,
-                "ship_ids": ship_ids,
+                "城名表": city_ids,
+                "舰名表": ship_ids,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -751,7 +746,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "contract_id": c.id,
+                "合同号": c.id,
                 "托运方": c.shipper,
                 "承运方": c.carrier,
                 "货": c.resource,
@@ -798,7 +793,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": f.name.clone(),
+                "势力": f.name.clone(),
                 "production": row.map(|r| r.production.clone()).unwrap_or_default(),
                 "upkeep": row.map(|r| r.upkeep).unwrap_or(0.0),
                 "governance_total": row.map(|r| r.governance_cost).unwrap_or(0.0),
@@ -851,9 +846,9 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "city_id": c.name.clone(),
-                "body_id": c.body_id,
-                "faction_id": c.faction_id,
+                "城名": c.name.clone(),
+                "天体名": c.body_id,
+                "势力": c.faction_id,
                 "已焚毁": c.razed,
                 "production": prod,
                 "loyalty_target_effective": lt.effective,
@@ -885,7 +880,7 @@ fn write_round(
             writeln!(
                 w.control,
                 "{}",
-                json!({"round": state.round, "faction_id": fid, "kind": kind, "key": key, "sub": sub, "value": value, "mode": mode})
+                json!({"round": state.round, "势力": fid, "kind": kind, "key": key, "sub": sub, "value": value, "mode": mode})
             )
             .map_err(|e| e.to_string())
         };
@@ -1072,8 +1067,8 @@ fn write_round(
                 "{}",
                 json!({
                     "round": state.round,
-                    "faction_id": fid,
-                    "blueprint_id": id,
+                    "势力": fid,
+                    "图名": id,
                     "舰级": leaf.value.class,
                     // 选装：**全量**输出（空数组 = 交给生成器现算），与 `--control` 一致。
                     "选装": leaf.value.components,
@@ -1143,7 +1138,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": d.faction,
+                "势力": d.faction,
                 "kind": "ship_order",
                 "actor": d.ship,
                 "verdict": d.verdict,
@@ -1167,7 +1162,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": r.faction,
+                "势力": r.faction,
                 "kind": "retool",
                 "actor": r.city,
                 "verdict": "retool",
@@ -1185,7 +1180,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": s.faction,
+                "势力": s.faction,
                 "kind": "style_retune",
                 "actor": s.ship,
                 "verdict": s.axis,
@@ -1213,7 +1208,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": c.faction,
+                "势力": c.faction,
                 "kind": "capital",
                 "actor": c.faction,
                 "verdict": verdict,
@@ -1237,7 +1232,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "faction_id": d.faction,
+                "势力": d.faction,
                 "kind": "blueprint",
                 "actor": d.blueprint,
                 "verdict": d.action,
@@ -1284,7 +1279,7 @@ fn write_round(
             "{}",
             json!({
                 "round": state.round,
-                "ship_id": ship,
+                "舰名": ship,
                 "step": step.step(),
                 "body": step.body(),
                 "units": step.units(),
@@ -1306,8 +1301,8 @@ fn write_round(
                 "{}",
                 json!({
                     "round": state.round,
-                    "faction_id": fid,
-                    "body_id": body,
+                    "势力": fid,
+                    "天体名": body,
                     "resource": rt,
                     "amount": amt,
                 })
@@ -1349,10 +1344,10 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","舰级":"string","舰名":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","载货":"object","cargo_capacity":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
+                "columns": {"round":"integer","舰名":"string","势力":"string","舰级":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","载货":"object","cargo_capacity":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
                 "column_docs": {
-                    "舰名": "**舰名**（势力内唯一）：舰的**身份键**，也是所有 join 用的 id（`ship_ids` / `events.target_id` / `control.key`）。改名不改船——同一艘舰从下水到战沉都用这一个名字。",
-                    "faction_id": "这艘舰**归属的势力**（= 势力名）。舰必须被某个势力控制（设计 spec「舰船：必须被势力控制」），所以它不会是 null。",
+                    "舰名": "**舰名**（势力内唯一）：舰的**身份键**，也是所有 join 用的 id（`舰名表` / `events.target_id` / `control.key`）。改名不改船——同一艘舰从下水到战沉都用这一个名字。",
+                    "势力": "这艘舰**归属的势力**（= 势力名）。舰必须被某个势力控制（设计 spec「舰船：必须被势力控制」），所以它不会是 null。",
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案——2026-10 起就是**那片逐舰叶里的值**（叶不存在 ⇒ null，调用方按 Idle 兜底）。Python 侧不要自己重算。",
@@ -1371,18 +1366,17 @@ pub fn projection_schema() -> serde_json::Value {
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "城的完整对象（人口/忠诚/治理距离/建筑清单/离心风险），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","城名":"string","body_id":"string","定居点":"string","faction_id":"string","人口":"integer","忠诚度":"number","已焚毁":"boolean","deployed_area":"number","building_count":"integer","建筑":"array","gov_distance":"number","depot_value":"number","revolt_risk":"boolean"},
+                "columns": {"round":"integer","城名":"string","天体名":"string","定居点":"string","势力":"string","人口":"integer","忠诚度":"number","已焚毁":"boolean","deployed_area":"number","building_count":"integer","建筑":"array","gov_distance":"number","depot_value":"number","revolt_risk":"boolean"},
             }),
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","城名表":"array","舰名表":"array"},
                 "column_docs": {
-                    "势力": "**势力名**（全世界唯一）：势力的**身份键**，join 用（`faction_ids` / `relations` 的键）。",
-                    "faction_id": "势力名本身（与前一个键同值）——为了与别的表用同一个 join 列名。",
-                    "城名": "**城名**（全世界唯一）：城的**身份键**，join 用（`city_ids` / `events.target_id`）。⚠ 城会**易主**（`faction_id` 变）甚至被**夷平**（`已焚毁` = true，行还在、人口清零）——名字永远跟着这座城。",
+                    "势力": "**势力名**（全世界唯一）：势力的**身份键**，join 用（`势力表` / `relations` 的键）。",
+                    "城名": "**城名**（全世界唯一）：城的**身份键**，join 用（`城名表` / `events.target_id`）。⚠ 城会**易主**（`faction_id` 变）甚至被**夷平**（`已焚毁` = true，行还在、人口清零）——名字永远跟着这座城。",
                     "所在天体": "这座城建在**哪个天体**上（= 天体名，join `bodies` 表）。它决定产出能进哪条货栈、离首都有多远（治理距离项的第一项）。",
-                    "faction_id": "这座城**此刻归谁**（= 势力名）。会变：易主时这一列改，忠诚度跟着按新主重算。",
+                    "势力": "这座城**此刻归谁**（= 势力名）。会变：易主时这一列改，忠诚度跟着按新主重算。",
                     "名声": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
                     "MOND 掌握度": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
                     "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
@@ -1403,7 +1397,7 @@ pub fn projection_schema() -> serde_json::Value {
             "contracts" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "**雇佣运力挂单簿**：一行一单，只含**没结束**的合同（等人接的 + 还在雇佣期内的）。结束的合同不在这里——“怎么结束的”去 `events` 里按 `contract_ended` 查。按 (round, contract_id) 索引。单子要求的是**运力**（单位/回合），不是一票货：受雇方自己决定派几条船来跑（`ships` 可以为空、也可以多条）。",
-                "columns": {"round":"integer","contract_id":"integer","托运方":"string","承运方":"string","货":"string","运力":"number","已交付":"number","已服务回合":"integer","ratio":"number","起点":"string","终点":"string","分成":"number","最低名声":"number","ships":"array","挂单回合":"integer","接单回合":"integer","到期回合":"integer","考核回合":"integer"},
+                "columns": {"round":"integer","合同号":"integer","托运方":"string","承运方":"string","货":"string","运力":"number","已交付":"number","已服务回合":"integer","ratio":"number","起点":"string","终点":"string","分成":"number","最低名声":"number","ships":"array","挂单回合":"integer","接单回合":"integer","到期回合":"integer","考核回合":"integer"},
                 "column_docs": {
                     "托运方": "雇主（挂单的人）。",
                     "承运方": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
@@ -1444,12 +1438,12 @@ pub fn projection_schema() -> serde_json::Value {
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "天体主表（name/轨道/定居点数），几乎不变，全局一次。按 body_id 索引。",
-                "columns": {"body_id":"string","天体名":"string","近日点距离":"number","远日点距离":"number","公转周期":"number","x":"number","y":"number","settlement_count":"integer"},
+                "columns": {"天体名":"string","近日点距离":"number","远日点距离":"number","公转周期":"number","x":"number","y":"number","settlement_count":"integer"},
             }),
             "settlements" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "定居点主表（每个天体上的空间位：名字/面积/生态容量/建设修正/资源矿藏），几乎不变，全局一次。按 body_id 过滤 + settlement_id 索引。",
-                "columns": {"settlement_id":"string","body_id":"string","index":"integer","定居点":"string","总面积":"number","生态容量":"number","建设速度修正":"number","建设资源修正":"number","资源":"array"},
+                "columns": {"定居点":"string","天体名":"string","index":"integer","总面积":"number","生态容量":"number","建设速度修正":"number","建设资源修正":"number","资源":"array"},
             }),
             _ => continue,
         };
@@ -1464,9 +1458,9 @@ pub fn projection_schema() -> serde_json::Value {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='investment_budget'`/`'construction_budget'`）。",
-                "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number","purchasing_power":"number","market_rank":"any","freight_gap":"object"},
+                "columns": {"round":"integer","势力":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number","purchasing_power":"number","market_rank":"any","freight_gap":"object"},
                 "column_docs": {
-                    "天体名": "**天体名**（全世界唯一）：天体的**身份键**，join 用（`body_ids` / 城与货栈的 `body_id`）。",
+                    "天体名": "**天体名**（全世界唯一）：天体的**身份键**，join 用（`天体名表` / 城与货栈的 `天体名`）。",
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
                     "governance_total": "本回合治理总开销（行政 + 娱乐，含制裁倍率）。",
@@ -1488,7 +1482,7 @@ pub fn projection_schema() -> serde_json::Value {
             "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项** + **产出与建造的中间量**（用工系数 / 住房容量 / 是否集散地 / 每舰级造舰速率与实得进度），按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
-                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","已焚毁":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","labor":"number","housing_capacity":"number","is_hub":"boolean","build":"object"},
+                "columns": {"round":"integer","城名":"string","天体名":"string","势力":"string","已焚毁":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","labor":"number","housing_capacity":"number","is_hub":"boolean","build":"object"},
                 "column_docs": {
                     "loyalty_target_effective": "本回合这座城的**忠诚目标值**（0..1）：实际忠诚每回合朝它恢复（治理覆盖得住时），覆盖不住则改用欠费惩罚。所以「忠诚在掉」= 它低。「为什么低」看下面四列。",
                     "loyalty_target_distance": "距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`。越远的城越低——这是「帝国太大管不住」的第一来源。",
@@ -1503,7 +1497,7 @@ pub fn projection_schema() -> serde_json::Value {
             "control" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认倾向三片 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
-                "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
+                "columns": {"round":"integer","势力":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
                     "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / welfare_budget / invest_weight / build_weight / loyalty_budget / development_money / construction_money / capital。⚠ `default_ship_order` 已删（2026-10：指令是即时操作，只写逐舰叶）。",
                     "key": "该叶的键：舰名 / 资源名 / 城名；`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
@@ -1523,9 +1517,9 @@ pub fn projection_schema() -> serde_json::Value {
             "blueprints" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `RoundView`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
-                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","舰级":"string","选装":"array","风格":"object","姿态":"number","角色":"string","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
+                "columns": {"round":"integer","势力":"string","图名":"string","舰级":"string","选装":"array","风格":"object","姿态":"number","角色":"string","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
                 "column_docs": {
-                    "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
+                    "图名": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
                     "舰级": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
                     "选装": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器；非空 ⇒ **出厂就按它装配**（与图的归属无关：归属只管「谁能改这张图」）。",
                     "风格": "本图给这型舰的**行为风格**（`{temper, lone_wolf}`；null = 本图对该轴沉默）。⚠ 只在图的归属解析为 `Player` 时供值。",
@@ -1552,10 +1546,10 @@ pub fn projection_schema() -> serde_json::Value {
             "decisions" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）+ **首都评估/迁都**（稀疏：只在评估回合或迁都回合有行）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
-                "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
+                "columns": {"round":"integer","势力":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
                 "column_docs": {
                     "ship": "这条判定属于**哪艘舰**（= 舰名，join `ships` 表）。",
-                    "faction_id": "这条判定是**为哪个势力**想的（= 势力名）。⚠ 与 `actor` 不是一回事：`actor` 是这条流水的主语（可能是舰、城或势力），`faction_id` 恒定是势力的视角。",
+                    "势力": "这条判定是**为哪个势力**想的（= 势力名）。⚠ 与 `actor` 不是一回事：`actor` 是这条流水的主语（可能是舰、城或势力），本列恒定是势力的视角。",
                     "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）/ capital（首都评估与迁都，**稀疏**）。",
                     "actor": "作判定的一方：舰名（ship_order / style_retune）/ 船坞所在城名（retool）/ **图名**（blueprint）/ 势力名（capital——判定者就是那个势力本身）。",
                     "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped；capital：relocate（评估后真的迁了）/ review（评估过、判据不成立 ⇒ **没迁**）/ forced（亡城强迁，没有评估）。",
@@ -1582,19 +1576,19 @@ pub fn projection_schema() -> serde_json::Value {
             "depots" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**产地货栈的逐资源存量**（M1）：非首都天体的产出/送到的货先冻在这里，只有运输能把它送到首都池（`freight-collection.md` §1 的「首都即集散地」）。一行 = 一个 (势力, 天体, 资源) 的**真存量**；**稀疏**（没积压的天体不占行、量归零即删行），所以「哪处货栈在积压」= 这张表里有行。`cities[].depot_value` 是同一本账按 `meta.resources[].value` 计的**城视角合计**（r2）；本表给**逐资源原量**（不折算价值）。",
-                "columns": {"round":"integer","faction_id":"string","body_id":"string","resource":"string","amount":"number"},
+                "columns": {"round":"integer","势力":"string","天体名":"string","resource":"string","amount":"number"},
                 "column_docs": {
-                    "faction_id": "货主势力名（join `factions` 的 `faction_id`）。⚠ 承包交付时货主是**托运方**，不是承运船东。",
-                    "body_id": "货栈所在天体（join `bodies` 的 `body_id`）。⚠ 它**不是**该势力当前首都：首都即集散地，首都天体的产出免运输直接进池。",
+                    "势力": "货主势力名（join `factions` 的 `势力`）。⚠ 承包交付时货主是**托运方**，不是承运船东。",
+                    "天体名": "货栈所在天体（join `bodies` 的 `天体名`）。⚠ 它**不是**该势力当前首都：首都即集散地，首都天体的产出免运输直接进池。",
                     "resource": "资源名（配置 `resources` 的键）。",
                     "amount": "在栈件数（与 `ships.载货`/`cargo_capacity` 同一把尺子：单位，不折算价值）。正数；归零的行被引擎删掉（稀疏）。",
                 },
             }),
             "haul_steps" => json!({                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合每艘在跑运输的舰走了哪一步**（`RoundView::haul_steps`）：一舰一行。`waiting`（停在**空货栈**干等）与 `en_route`（在路上，装/卸都还没发生）**既不落持久状态、也不发事件**——所以「我派它去拉货，为什么一件没运回来」在 B3 之前**没有任何读法**；`loaded`/`delivered` 说明这一步真的搬了货。⚠ 两条执行路径（AI 的 `ai_ship_turn` 与**玩家指令**的 `step_military`）都写这张表，所以**玩家舰也在里面**。",
-                "columns": {"round":"integer","ship_id":"string","step":"string","body":"string","units":"number","into_pool":"boolean"},
+                "columns": {"round":"integer","舰名":"string","step":"string","body":"string","units":"number","into_pool":"boolean"},
                 "column_docs": {
-                    "ship_id": "舰名；join `ships` 表拿势力/舰级/位置/货舱（`ships.载货` 非空 = 舱里有货）。",
+                    "舰名": "这艘舰（join `ships` 表拿势力/舰级/位置/货舱：`ships.载货` 非空 = 舱里有货）。",
                     "step": "loaded（在这一步装上了货）/ delivered（卸了货）/ waiting（停在空货栈干等——**不是**故障，是「没货就不走」）/ en_route（在路上，正驶向 `body`）。",
                     "body": "这一步发生在哪个天体（`en_route` = **正驶向的那一端**：舱里有货 ⇒ 目的地，空舱 ⇒ 起运地）。",
                     "units": "这一步搬动的件数（`waiting`/`en_route` = 0：没搬）。装货时按 `haul_split` 在货舱容量的上限内分配，所以它可能小于「货栈里的全部积压」。",
@@ -1619,12 +1613,12 @@ pub fn projection_schema() -> serde_json::Value {
             "event_ids":  {"type": "array", "items": {"type": "string"}, "description": "本回合事件 id（`<round>:<seq>`，join events 表用）。事件本体不再内联——见 lazy.events。"},
             "chronicle":  {"type": "array", "description": "剧情编年史（round id title body participants，累计叙事）。"},
             "view":       {"type": "object", "description": "**本回合的视图**（与 --derived 的 post、--schema 的 Trajectory.view 同构）：世界总量/实力占比/霸权/联盟/制裁/交战 + 每势力一行/每城一行（观测 + 本回合过程量）+ 市场四表 + AI 判定流水。这就是 agent 的决策视图。"},
-            "ship_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰 id（=舰名，join ships 表用）。"},
-            "city_ids":   {"type": "array", "items": {"type": "string"}, "description": "本回合**全部**城 id（=城名，join cities 表用）。含已夷平的空白城（razed 列筛）；与 cities 表逐行一致。"},
-            "faction_ids": {"type": "array", "items": {"type": "string"}, "description": "本回合势力 id（=势力名，join factions 表用）。"},
-            "contract_ids": {"type": "array", "items": {"type": "integer"}, "description": "本回合**未完成**的承包单号（join contracts 表用）。注意它是**数字**而不是实体名——挂单号由 `ContractState::next_id` 分配、单调递增不复用，所以历史事件里的单号永远指得准。"},
-            "body_ids":   {"type": "array", "items": {"type": "string"}, "description": "天体 id（=天体名，join bodies 表用）。"},
-            "settlement_ids": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点 id（=定居点名，join settlements 表用）。"}
+            "舰名表":   {"type": "array", "items": {"type": "string"}, "description": "本回合存在的舰名（join ships 表用）。"},
+            "城名表":   {"type": "array", "items": {"type": "string"}, "description": "本回合**全部**城名（join cities 表用）。含已夷平的空白城（razed 列筛）；与 cities 表逐行一致。"},
+            "势力表": {"type": "array", "items": {"type": "string"}, "description": "本回合势力名（join factions 表用）。"},
+            "合同号表": {"type": "array", "items": {"type": "integer"}, "description": "本回合**未完成**的承包单号（join contracts 表用）。注意它是**数字**而不是实体名——挂单号由 `ContractState::next_id` 分配、单调递增不复用，所以历史事件里的单号永远指得准。"},
+            "天体名表":   {"type": "array", "items": {"type": "string"}, "description": "天体名（join bodies 表用）。"},
+            "定居点表": {"type": "array", "items": {"type": "string"}, "description": "全世界定居点名（join settlements 表用）。"}
         },
         "lazy": lazy,
         "derived": derived_tables,

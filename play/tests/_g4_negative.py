@@ -164,7 +164,7 @@ def main() -> int:
     d = clone()
     for v in walk_views(d):
         for c in v.get("columns") or []:
-            if isinstance(c.get("leaf"), str) and c["leaf"].endswith(".default_role"):
+            if isinstance(c.get("leaf"), str) and c["leaf"].endswith(".舰队默认角色"):
                 c["new"] = True
     run_case("new-on-single-leaf", d)
 
@@ -179,7 +179,7 @@ def main() -> int:
     # ⑥ 认领完整性：把 `capital` 的全部 leaf 行删掉（它只在 sel-faction 里被认领）
     d = clone()
     for _, c in walk_columns(d):
-        if isinstance(c.get("leaf"), str) and c["leaf"].endswith(".capital"):
+        if isinstance(c.get("leaf"), str) and c["leaf"].endswith(".首都"):
             del c["leaf"]
             c["path"] = "resources"
     run_case("unclaimed-leaf", d)
@@ -187,8 +187,8 @@ def main() -> int:
     # ⑦ 认领完整性：leaf 行指向一片不存在的叶
     d = clone()
     for _, c in walk_columns(d):
-        if isinstance(c.get("leaf"), str) and "default_role" in c["leaf"]:
-            c["leaf"] = c["leaf"].replace("default_role", "default_roles")
+        if isinstance(c.get("leaf"), str) and "舰队默认角色" in c["leaf"]:
+            c["leaf"] = c["leaf"].replace("舰队默认角色", "舰队默认角色s")
     run_case("orphan-leaf-row", d)
 
     # ⑧ 认领完整性：leaf_ui 多了个孤儿键
@@ -211,7 +211,7 @@ def main() -> int:
 
     # ⑪ 写面对账：声明少一片叶（= 加字段没写声明）
     def drop_leaf(s):
-        s["leaves"] = [x for x in s["leaves"] if x["field"] != "loyalty_budget"]
+        s["leaves"] = [x for x in s["leaves"] if x["field"] != "城市福利预算"]
         return s
 
     run_case("decl-missing-leaf", None, drop_leaf)
@@ -228,8 +228,8 @@ def main() -> int:
     # ⑬ 读面对账：values 多了一个读面上没有的字段
     def bad_values(s):
         for x in s["leaves"]:
-            if x["field"] == "capital":
-                x["values"] = ["value", "ghost"]
+            if x["field"] == "首都":
+                x["values"] = ["值", "ghost"]
         return s
 
     run_case("decl-ghost-value", None, bad_values)
@@ -237,8 +237,8 @@ def main() -> int:
     # ⑭ 读面对账：carries 漏了一个读面真有的字段（invest_weights 少了 structure）
     def bad_carries(s):
         for x in s["leaves"]:
-            if x["field"] == "invest_weights":
-                x["carries"] = ["kind", "resource", "ship_type"]
+            if x["field"] == "建设权重":
+                x["carries"] = ["类型", "资源", "建造舰级"]
         return s
 
     run_case("decl-short-carries", None, bad_carries)
@@ -246,7 +246,7 @@ def main() -> int:
     # ⑮ 读面对账：把一片列表叶的 keys 清空
     def bad_keys(s):
         for x in s["leaves"]:
-            if x["field"] == "ship_orders":
+            if x["field"] == "指令":
                 x["keys"] = []
         return s
 
@@ -255,7 +255,7 @@ def main() -> int:
     # ⑯ 读面对账：把一片单叶的 keys 加一个
     def bad_keys2(s):
         for x in s["leaves"]:
-            if x["field"] == "capital":
+            if x["field"] == "首都":
                 x["keys"] = ["body"]
         return s
 

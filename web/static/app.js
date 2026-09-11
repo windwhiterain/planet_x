@@ -103,7 +103,7 @@ function num2(v) {
   return (n >= 0 ? '+' : '') + n.toFixed(2);
 }
 function doctrineSummary(l) { return '理智↔热血 ' + num2(l.temper) + ' · 护航↔独狼 ' + num2(l.lone_wolf); }
-function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
+function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.姿态); }
 // 第三条风格轴**角色**不是 [-1,1] 的连续轴，也不是一个开关，而是**三选一的枚举**
 // （引擎的 `ShipRole`，serde 的 JSON 形态就是这三个字符串）。它只决定自动控制派哪种活：
 //   战舰   `War`     —— 找仗打（接战 / 轰炸 / 殖民）
@@ -115,16 +115,16 @@ function kitingSummary(l) { return '风筝↔贴脸 ' + num2(l.kiting); }
 const ROLE_LABEL = { War: '战舰', Freight: '运输舰', Observe: '观测舰' };
 /// 角色 → 中文标签。未知取值**原样显示**（引擎加了第四态时不会静默显示成"战舰"骗人）。
 function roleSummary(l) {
-  const r = l && l.role;
+  const r = l && l.角色;
   return ROLE_LABEL[r] || r || '战舰';
 }
 
 // **「自动」这一档到底有没有执行者**——措辞必须与引擎一致（note：control-live-layers §3.2/§13）。
 // 三种情况，三句不同的话：
-//   ① 逐舰**风格两叶**（`ship_doctrine`/`ship_kiting`）：本轮**有执行者**了
+//   ① 逐舰**风格两叶**（`风格`/`姿态`）：本轮**有执行者**了
 //      （`autocontrol::style` 每回合按战况概率重估、写回叶片）⇒ 照实说「会改写」。
-//   ② 逐舰**角色叶**（`ship_role`）：自动控制按积压定编 ⇒ 也照实说「会改写」。
-//   ③ **势力级默认叶**（`default_doctrine`/`default_kiting`/`default_role`）：AI **不写**
+//   ② 逐舰**角色叶**（`角色`）：自动控制按积压定编 ⇒ 也照实说「会改写」。
+//   ③ **势力级默认叶**（`舰队默认风格`/`舰队默认姿态`/`舰队默认角色`）：AI **不写**
 //      这片叶，而且引擎的取值规则是"默认叶只在**它自己是玩家**时供值" ⇒ 它 `Auto` 时的存储值
 //      是**没人读的**。诚实的说法是「本层不供值」，绝不能写成"值由系统写"。
 //      （一句话解释这个组合：`Auto` 的默认叶 = AI 的答案是**"不设全舰队默认、逐舰自己说"**，
@@ -132,9 +132,9 @@ function roleSummary(l) {
 /// 三组**字段名**：哪一片叶属于哪种措辞（归属下拉里「自动」那一档的说明文字读它）。
 /// 用字段名而不是 kind：`kind` 只是控制树内部的行键，字段名才是与引擎对齐的那一个
 /// （manifest / 读面 / 补丁都用它）。
-const AUTO_RETUNED_FIELDS = ['ship_doctrine', 'ship_kiting'];
-const AUTO_WRITTEN_FIELDS = ['ship_role'];
-const AUTO_UNWRITTEN_FIELDS = ['default_doctrine', 'default_kiting', 'default_role'];
+const AUTO_RETUNED_FIELDS = ['风格', '姿态'];
+const AUTO_WRITTEN_FIELDS = ['角色'];
+const AUTO_UNWRITTEN_FIELDS = ['舰队默认风格', '舰队默认姿态', '舰队默认角色'];
 
 /// 节点的字段名：控制行由 `controls.js` 直接给 `field`（引擎 manifest 里的那个拼写）。
 function leafFieldOf(node) { return (node && (node.field || node.kind)) || ''; }
@@ -186,7 +186,7 @@ function bindSpecView() {
     tip: (node, col) => {
       if (!window.Tip) return;
       const label = col.label || col.path || col.leaf || col.owner || col.action;
-      // 兜底：控制行用**叶的字段名**（`investment_budget`…，控制面还没改名）；
+      // 兜底：控制行用**叶的字段名**（`投资预算`…，2026-10 起字段名本身就是中文名词）；
       // 读行用**裸字段路径**（`舰名`/`忠诚度`…）——因为 `label` 允许覆盖引擎的名词
       // （`舰名`→`舰`），覆盖之后按 label 就查不到解释了。表达式路径（`@post…`）不兜底。
       const bare = typeof col.path === 'string' && /^[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*$/.test(col.path)
@@ -543,7 +543,7 @@ function buildEdits() {
   rebuildLeafSpec();
   edControl = structuredClone(world.control || []);
   edScope = structuredClone(world.scope);
-  edControl.forEach((c) => { c.buildings = c.buildings || []; });
+  edControl.forEach((c) => { c.建筑 = c.建筑 || []; });
   // 回传 diff 的基准 = **载入时**的读面（不是编辑面：编辑面里有界面自己补出来的壳）。
   baseControl = structuredClone(world.control || []);
   baseScope = structuredClone(world.scope || {});
@@ -589,8 +589,8 @@ function rebuildLeafSpec() {
 }
 
 /// 归属三态写在哪个字段里 / 删叶写在哪个字段里——由引擎发（不再散落一堆字面量）。
-function modeField() { return (window.Controls && Controls.ownerField()) || 'mode'; }
-function removeFieldName() { return (window.Controls && Controls.removeField()) || 'remove'; }
+function modeField() { return (window.Controls && Controls.ownerField()) || '归属'; }
+function removeFieldName() { return (window.Controls && Controls.removeField()) || '删叶'; }
 
 /// 这片叶跟着哪片「舰队默认」叶（`leaf_ui.<field>.follows`）——**轴间关系是前端的呈现**，
 /// 引擎不知道「逐舰风格叶和舰队默认风格叶是同一条轴」这件事。
@@ -621,7 +621,7 @@ function pairOrigins() {
   leafOrigin.clear();
   autoPinned = new WeakSet();
   edControl.forEach((fac) => {
-    const base = baseControl.find((b) => b.faction_id === fac.faction_id);
+    const base = baseControl.find((b) => b.势力 === fac.势力);
     if (!base) return;
     LEAF_OPTIONS.forEach((name) => {
       if (fac[name] && base[name]) rememberOrigin(fac[name], Object.assign({}, base[name]), LEAF_SPEC[name], false);
@@ -715,7 +715,7 @@ function buildScopeDiff() {
 function buildCommandDiff() {
   const control = [];
   edControl.forEach((fac) => {
-    const out = { faction_id: fac.faction_id };
+    const out = { 势力: fac.势力 };
     let n = 0;
     LEAF_OPTIONS.forEach((name) => {
       if (!fac[name]) return;
@@ -730,7 +730,7 @@ function buildCommandDiff() {
     });
     // `buildings` 是**命令列表**（按下「新建 / 移除 / 改属性」才存在的一条条意图），不是快照：
     // 里面的每一条本来就只该发一次，原样回传。
-    if (fac.buildings && fac.buildings.length) { out.buildings = fac.buildings; n++; }
+    if (fac.建筑 && fac.建筑.length) { out.建筑 = fac.建筑; n++; }
     if (n) control.push(out);
   });
   const req = { control: control };
@@ -749,11 +749,11 @@ function setFaction(fid) {
 }
 
 function getControl(fid) {
-  let c = edControl.find((x) => x.faction_id === fid);
+  let c = edControl.find((x) => x.势力 === fid);
   if (!c) {
     // 桶按 manifest 建：**键叶 = 数组**（每片叶一个条目）、**单叶 = null**（还没有叶，
     // 由写面按需造壳——「没有叶」与「有叶但没表态」不是一回事，见 `controls.js`）。
-    c = { faction_id: fid, buildings: [] };
+    c = { 势力: fid, 建筑: [] };
     Object.keys(LEAF_SPEC).forEach((f) => { c[f] = LEAF_SPEC[f].keys.length ? [] : null; });
     edControl.push(c);
   }
@@ -777,15 +777,15 @@ function kindName(k) { return cfg.buildings && cfg.buildings[k] ? cfg.buildings[
 function shipClassName(c) { return cfg.ships && cfg.ships[c] ? cfg.ships[c].label : c; }
 
 function investLeaf(fc, city, bid) {
-  return (fc.invest_weights || []).find((e) => e.city === city && e.building === bid);
+  return (fc.建设权重 || []).find((e) => e.城 === city && e.建筑 === bid);
 }
 function buildLeaf(fc, city, bid) {
-  return (fc.build_weights || []).find((e) => e.city === city && e.building === bid);
+  return (fc.建造权重 || []).find((e) => e.城 === city && e.建筑 === bid);
 }
 function buildingLabel(b) {
   let s = kindName(b.类型);
-  if (b.开采资源) s += '·' + resName(b.resource);
-  if (b.建造舰级) s += '·' + shipClassName(b.ship_type);
+  if (b.开采资源) s += '·' + resName(b.开采资源);
+  if (b.建造舰级) s += '·' + shipClassName(b.建造舰级);
   s += '·' + structName(b.结构);
   s += '×' + (b.已建成面积 || 0).toFixed(1);
   return s;
@@ -847,8 +847,8 @@ function mapWorld() {
   const ctrl = st.control || {};
   return Object.assign({}, st, {
     factions: (st.factions || []).map((f) => {
-      const cap = ctrl[f.势力] && ctrl[f.势力].capital;
-      return Object.assign({}, f, { id: f.势力, capital_body: cap ? cap.value : undefined });
+      const cap = ctrl[f.势力] && ctrl[f.势力].首都;
+      return Object.assign({}, f, { id: f.势力, capital_body: cap ? cap.值 : undefined });
     }),
   });
 }
@@ -1020,8 +1020,8 @@ function renderLeafNode(node, opts) {
   // 「恢复出厂值」/「删掉这张图」：**删掉这片叶**（取值真的回到上层/出厂快照；设计图那一片
   // 叶就是整张图）。只在状态里真的有这片叶时出现。
   if (node.leaf && rawLeafOf(node)) {
-    head.appendChild(leafFieldOf(node) === 'blueprints'
-      ? removeLeafButton(node, '删掉这张图', '删掉整张设计图（`{"name":…,"remove":true}`）：挂它的建造区随后是悬空指针 ⇒ 本区停产（进度不再涨，Q10(a)），已下水的舰不受影响（快照）。点「应用到服务器」才生效。')
+    head.appendChild(leafFieldOf(node) === '设计图库'
+      ? removeLeafButton(node, '删掉这张图', '删掉整张设计图（`{"图名":…,"删叶":true}`）：挂它的建造区随后是悬空指针 ⇒ 本区停产（进度不再涨，Q10(a)），已下水的舰不受影响（快照）。点「应用到服务器」才生效。')
       : removeLeafButton(node));
   }
   // 新控制行的行首一句实话（「没有叶（这一层没表态）」这类）。
@@ -1030,7 +1030,7 @@ function renderLeafNode(node, opts) {
 
   // 被标记删除的叶：不再给编辑器（点「应用」它就没了），只说明会发生什么。
   if (node.leaf && removedLeaves.has(node.leaf)) {
-    wrap.appendChild(hintLine(leafFieldOf(node) === 'blueprints'
+    wrap.appendChild(hintLine(leafFieldOf(node) === '设计图库'
       ? '已标记删除：点「应用到服务器」之后这张图从库里消失，'
         + yardCountText(node.fid, node.id)
         + '（再点一次按钮可撤销）'
@@ -1064,7 +1064,7 @@ function renderLeafNode(node, opts) {
     // 角色（战舰 / 运输舰 / 观测舰，单片叶）。这里「由系统自动决定」**不是空话**——自动控制
     // 每回合按积压与观测需求定编，所以提示要说清它真的会替你决定。
     if (open) wrap.appendChild(roleEditor(node));
-    else if (leafFieldOf(node) === 'default_role') {
+    else if (leafFieldOf(node) === '舰队默认角色') {
       // ⚠ 势力级这片默认叶**没有执行者**：自动控制只写逐舰角色叶，从不写它。
       // 所以这里不能照抄逐舰那句「由自动控制定编」——那是假话（note §3.2 的措辞纪律）。
       wrap.appendChild(hintLine('未表态：这片默认叶只在它自己是「玩家」时才供值（自动控制的定编只写逐舰角色叶，不写它）——要「全舰队听我的」就把它改成「玩家」'));
@@ -1093,10 +1093,10 @@ function renderLeafNode(node, opts) {
   if (o.alwaysEditable) {
     const fh = ctlFollowHint(node);
     if (fh) wrap.appendChild(fh);
-  } else if (f === 'ship_doctrine' || f === 'ship_kiting') {
+  } else if (f === '风格' || f === '姿态') {
     const fh = styleFollowHint(node);
     if (fh) wrap.appendChild(fh);
-  } else if (f === 'ship_role') {
+  } else if (f === '角色') {
     const fh = roleFollowHint(node);
     if (fh) wrap.appendChild(fh);
   }
@@ -1165,7 +1165,7 @@ function rawLeafOf(node) {
   const leaf = node.leaf || {};
   // ⚠ 原始 state 里的**键叶是映射**（键 = 第一个身份键），而读面给的是**数组**
   // （`control_view` 把映射摊成"一行一片"）——两种形状都要认：
-  //   `investment_budget: {"碳": {value, mode}}`（原始） vs `[{resource:"碳", …}]`（读面）。
+  //   `投资预算: {"碳": {值, 归属}}`（原始） vs `[{"资源":"碳", …}]`（读面）。
   // 多键叶（城 + 建筑）在原始状态里的键是元组键的线格式：`"亚特兰大|10"`。
   if (Array.isArray(bucket)) {
     return bucket.find((e) => spec.keys.every((k) => String(e[k]) === String(leaf[k]))) || null;
@@ -1227,7 +1227,7 @@ function modeToggleFor(node) {
   const mf0 = modeField();
   const mode = node.leaf[mf0];
   const set = (v) => { node.leaf[mf0] = v; };
-  const isBp = leafFieldOf(node) === 'blueprints';
+  const isBp = leafFieldOf(node) === '设计图库';
   // 这片叶上的「自动」有没有执行者（措辞必须与引擎一致，见上面三组 kind 的说明）。
   // ⚠ 风格三轴的逐舰叶**本轮起真的有执行者**（`autocontrol::style`），所以它不再算「冻住」；
   // 势力级默认叶仍然没人写（`AUTO_UNWRITTEN_FIELDS`），措辞必须分开说。
@@ -1337,7 +1337,7 @@ function doctrineEditor(node) {
 function kitingEditor(node) {
   const leaf = node.leaf;
   const box = el('div', { class: 'ship-editor' });
-  box.appendChild(styleField('kiting', '风筝↔贴脸', '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线', leaf.kiting, (v) => setStyleAxis(leaf, 'kiting', v), node));
+  box.appendChild(styleField('姿态', '风筝↔贴脸', '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线', leaf.姿态, (v) => setStyleAxis(leaf, '姿态', v), node));
   return box;
 }
 
@@ -1355,7 +1355,7 @@ function roleEditor(node) {
   [['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']].forEach(([v, lbl]) => {
     const o = el('option', { value: v });
     o.textContent = lbl + '（' + roleHint(v) + '）';
-    o.selected = (leaf.role || 'War') === v;
+    o.selected = (leaf.角色 || 'War') === v;
     sel.appendChild(o);
   });
   sel.title = '角色只决定自动控制派哪种活：战舰找仗打、运输舰按积压跑集货路线、'
@@ -1363,7 +1363,7 @@ function roleEditor(node) {
     + '它不是 [-1,1] 的连续轴，也不解除武装——运输舰 / 观测舰在射程内照样自动开火、'
     + '照样按 kiting 姿态软移动。';
   sel.addEventListener('change', () => {
-    leaf.role = sel.value;
+    leaf.角色 = sel.value;
     // 与另两条风格轴同一条规则：值变了 ⇒ 写值即接管（把这片叶钉成玩家，AI 定编从此不碰它）。
     wroteValue(leaf);
     controlRerender();
@@ -1374,12 +1374,12 @@ function roleEditor(node) {
 
 function shipEditor(leaf, node) {
   const edit = el('div', { class: 'ship-editor' });
-  const t = behaviorType(leaf.behavior);
-  const d = behaviorToInput(leaf.behavior);
+  const t = behaviorType(leaf.行为);
+  const d = behaviorToInput(leaf.行为);
   // 改行为 = 变成你自己的指令（写值即接管）：否则这次编辑会被系统下一回合按自己的逻辑
   // 覆盖掉，而界面上看起来「我明明改了」。
   const commit = (b) => {
-    leaf.behavior = b;
+    leaf.行为 = b;
     // 写值即接管（否则这次编辑会被系统下一回合按自己的逻辑覆盖掉，而界面上看起来
     // 「我明明改了」）；把行为改回**载入时那个**行为则不算表态，同风格轴的规则。
     wroteValue(leaf);
@@ -1455,14 +1455,14 @@ function leafValueEditor(leaf, label, node, opts) {
   const wrap = el('div', { class: 'leaf-val' });
   const t = el('span', { class: 'lv-label' });
   t.textContent = (label == null ? '' : label) + ' ';
-  const inp = el('input', { type: 'number', class: 'num', value: leaf.value, step: '0.1' });
+  const inp = el('input', { type: 'number', class: 'num', value: leaf.值, step: '0.1' });
   // 只有「有效归属是玩家」的叶子才可编辑（可能继承自势力/天体/城市层的作用域）。
   // `force`（新控制行）跳过这道闸门：它的归属 chip 就在值旁边，而「还没有叶」的行更必须能
   // 写值——那是新建这片叶的唯一入口（写值即接管，与 `--apply` 同一条规则）。
   inp.disabled = !force && (!node || effectiveMode(node) !== 'Player');
   inp.addEventListener('input', () => {
     if (inp.disabled) return;
-    leaf.value = +inp.value || 0;
+    leaf.值 = +inp.value || 0;
     // 写值即接管；值改回**载入时那个数**不算表态（note §8 第 2 条，与风格轴同一条规则）。
     wroteValue(leaf);
     syncOwnership(node); // 接管了就立刻把那一行的归属下拉跟上（输入框不重画）
@@ -1472,7 +1472,7 @@ function leafValueEditor(leaf, label, node, opts) {
   return wrap;
 }
 
-/// 建造区那两片**权重叶**（`invest_weights` / `build_weights`）的一行：值 + **它自己的归属**。
+/// 建造区那两片**权重叶**（`建设权重` / `建造权重`）的一行：值 + **它自己的归属**。
 /// ⚠ 2026-10 修掉一个真 bug：以前这里把 `leafValueEditor` 当纯显示调（第三个参数 `node` 不传），
 /// 而那个函数在 `!force && !node` 时把输入框 `disabled` ⇒ **界面上这两格根本改不动**
 /// （`views.json` 的 `write_omit` 却写着"住在建筑行里"——说谎的是界面）。现在它可编辑，
@@ -1495,7 +1495,7 @@ function weightRow(leaf, field, label, owner) {
 function bodyEditor(leaf, node, opts) {
   const wrap = el('div', { class: 'leaf-val' });
   const sel = el('select', { class: 'body-pick', 'data-axis': 'body' });
-  if (leaf.value == null) {
+  if (leaf.值 == null) {
     const o = el('option', { value: '' });
     o.textContent = '（这一层还没有说首都是谁）';
     o.selected = true;
@@ -1504,13 +1504,13 @@ function bodyEditor(leaf, node, opts) {
   (st.bodies || []).forEach((bd) => {
     const o = el('option', { value: bd.天体名 });
     o.textContent = bd.天体名 + (bd.定居点 && bd.定居点.length ? '' : '（无定居点）');
-    o.selected = bd.天体名 === leaf.value;
+    o.selected = bd.天体名 === leaf.值;
     sel.appendChild(o);
   });
   sel.title = '这一档说的首都是哪个天体（`capital` 是一片叶：写值即接管；建世界时播种，之后由迁都步骤维护）';
   sel.addEventListener('change', () => {
     if (!sel.value) return;
-    leaf.value = sel.value;
+    leaf.值 = sel.value;
     wroteValue(leaf);
     controlRerender();
   });
@@ -1540,9 +1540,9 @@ function labelWrap(label, control) {
 }
 function pushModify(fid, cityId, bid, attrs) {
   const fc = getControl(fid);
-  const i = fc.buildings.findIndex((p) => p.building === bid && !p.remove);
-  if (i >= 0) fc.buildings[i] = Object.assign({}, fc.buildings[i], attrs, { city: cityId, building: bid });
-  else fc.buildings.push(Object.assign({ city: cityId, building: bid }, attrs));
+  const i = fc.建筑.findIndex((p) => p.建筑 === bid && !p.删叶);
+  if (i >= 0) fc.建筑[i] = Object.assign({}, fc.建筑[i], attrs, { 城: cityId, 建筑: bid });
+  else fc.建筑.push(Object.assign({ 城: cityId, 建筑: bid }, attrs));
 }
 
 // --- 设计图库（势力级） ------------------------------------------------------
@@ -1569,7 +1569,7 @@ function compSlots(cls) {
   return s ? (+s.slots || 0) : 0;
 }
 function blueprintOf(fc, name) {
-  return name ? (fc.blueprints || []).find((b) => b.name === name) || null : null;
+  return name ? (fc.设计图库 || []).find((b) => b.图名 === name) || null : null;
 }
 /// 本势力所有**指着这张图**的建造区（城名 / 下标 / 该区当前的舰级）。
 function blueprintYards(fid, name) {
@@ -1639,19 +1639,19 @@ function blueprintEditor(node) {
   Object.keys(cfg.ships || {}).forEach((k) => {
     const o = el('option', { value: k });
     o.textContent = shipClassName(k) + '（' + k + '）';
-    o.selected = k === leaf.class;
+    o.selected = k === leaf.舰级;
     classSel.appendChild(o);
   });
-  if (!(cfg.ships || {})[leaf.class]) classSel.value = leaf.class || '';
+  if (!(cfg.ships || {})[leaf.舰级]) classSel.value = leaf.舰级 || '';
   classSel.title = '这张图的舰级（`config.ships` 的 key）。口径 A：它必须与每个挂了这张图的建造区的「舰型」相等，否则引擎会拒（blueprint_class_mismatch）。';
   classSel.addEventListener('change', () => {
-    leaf.class = classSel.value;
+    leaf.舰级 = classSel.value;
     wroteValue(leaf); // 写值即接管：改配方 = 表态（与引擎的「写值即接管」同一条规则）
     controlRerender();
   });
   box.appendChild(labelWrap('舰级', classSel));
 
-  const bad = blueprintYardMismatch(fid, leaf.name, leaf.class);
+  const bad = blueprintYardMismatch(fid, leaf.图名, leaf.舰级);
   if (bad.length) {
     box.appendChild(hintLine('⚠ 有 ' + bad.length + ' 个建造区挂着这张图，但产的是别的舰级（'
       + bad.map((y) => y.city + '/' + y.id + '=' + shipClassName(y.ship_type)).join('、')
@@ -1680,8 +1680,8 @@ function blueprintEditor(node) {
 /// 重画整棵树会把它们悄悄清空——这正是"我填了图名，点两下组件，图名没了"的成因。
 function componentPicker(leaf, opts) {
   const inPlace = !!(opts && opts.inPlace);
-  const slots = compSlots(leaf.class);
-  const chosen = (leaf.components = leaf.components || []);
+  const slots = compSlots(leaf.舰级);
+  const chosen = (leaf.选装 = leaf.选装 || []);
   const wrap = el('div', { class: 'bp-comps' });
   const head = el('div', { class: 'bp-comps-head' });
   const warn = el('div', { class: 'tnode-hint' });
@@ -1698,7 +1698,7 @@ function componentPicker(leaf, opts) {
     });
     const over = chosen.length - slots;
     warn.textContent = over > 0
-      ? ('⚠ 这张图装了 ' + chosen.length + ' 件，而 ' + shipClassName(leaf.class) + ' 只有 ' + slots
+      ? ('⚠ 这张图装了 ' + chosen.length + ' 件，而 ' + shipClassName(leaf.舰级) + ' 只有 ' + slots
         + ' 个槽位 ⇒ 引擎会拒（`too_many_components`）。取消 ' + over + ' 件，或换一个大一点的舰级。')
       : '';
     warn.hidden = over <= 0; // 空告警不要占一行（它只是一个位置）
@@ -1749,30 +1749,30 @@ function stanceEditor(leaf) {
     .forEach(([v, lbl]) => {
       const o = el('option', { value: v });
       o.textContent = v ? lbl + '（' + roleHint(v) + '）' : lbl;
-      o.selected = (leaf.role || '') === v;
+      o.selected = (leaf.角色 || '') === v;
       roleSel.appendChild(o);
     });
   roleSel.title = '这型舰的**角色**：战舰找仗打、运输舰按积压跑集货路线、观测舰驻到太阳系外缘的引力异常区。'
     + '选了它，之后按这张图造出来的新舰一出厂就是这个角色（角色是活层：改这张图，角色叶沉默的老舰也一起跟）。'
     + '「不表态」= 引擎里的 `role: null`：这一层没有说话，链往下降到舰队默认角色。';
   roleSel.addEventListener('change', () => {
-    leaf.role = roleSel.value || null; // 空串 = 明确写 null（这一轴回到沉默；缺席才是"不动这一格"）
+    leaf.角色 = roleSel.value || null; // 空串 = 明确写 null（这一轴回到沉默；缺席才是"不动这一格"）
     commit();
   });
   box.appendChild(labelWrap('角色', roleSel));
 
   // ② 风格（两轴一片叶：理智↔热血 + 护航↔独狼）。
   const docOn = el('input', { type: 'checkbox', 'data-role': 'bp-doctrine-on' });
-  docOn.checked = leaf.doctrine != null;
+  docOn.checked = leaf.风格 != null;
   const docFields = el('span', { class: 'style-field' });
-  const docVals = leaf.doctrine || { temper: 0, lone_wolf: 0 };
+  const docVals = leaf.风格 || { temper: 0, lone_wolf: 0 };
   const temperInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+docVals.temper || 0).toFixed(2), 'data-axis': 'temper' });
   temperInp.title = '负 = 欺软怕硬（挑威慑比自己低的）；正 = 飞蛾扑火（挑威慑比自己高的）；0 = 基线';
   const wolfInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+docVals.lone_wolf || 0).toFixed(2), 'data-axis': 'lone_wolf' });
   wolfInp.title = '负 = 空闲时贴本势力旗舰护航；正 = 独狼（空闲时自行就近接战）；0 = 基线';
   const pushDoctrine = () => {
-    if (!docOn.checked) { leaf.doctrine = null; return; }
-    leaf.doctrine = {
+    if (!docOn.checked) { leaf.风格 = null; return; }
+    leaf.风格 = {
       temper: Math.max(-1, Math.min(1, +temperInp.value || 0)),
       lone_wolf: Math.max(-1, Math.min(1, +wolfInp.value || 0)),
     };
@@ -1796,11 +1796,11 @@ function stanceEditor(leaf) {
 
   // ③ 风筝姿态（单值轴）。
   const kitOn = el('input', { type: 'checkbox', 'data-role': 'bp-kiting-on' });
-  kitOn.checked = leaf.kiting != null;
-  const kitInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+leaf.kiting || 0).toFixed(2), 'data-axis': 'kiting' });
+  kitOn.checked = leaf.姿态 != null;
+  const kitInp = el('input', { type: 'number', class: 'num', step: '0.1', min: '-1', max: '1', value: (+leaf.姿态 || 0).toFixed(2), 'data-axis': 'kiting' });
   kitInp.title = '负 = 风筝（保持最远武器射程、敌近则拉开、更早撤）；正 = 贴脸（压近敌舰、打得更久）；0 = 基线';
   const pushKiting = () => {
-    leaf.kiting = kitOn.checked ? Math.max(-1, Math.min(1, +kitInp.value || 0)) : null;
+    leaf.姿态 = kitOn.checked ? Math.max(-1, Math.min(1, +kitInp.value || 0)) : null;
   };
   kitOn.addEventListener('change', () => { pushKiting(); kitInp.hidden = !kitOn.checked; commit(); });
   kitInp.addEventListener('input', pushKiting);
@@ -1825,14 +1825,14 @@ function yardStatusBox(fc, node, chosen) {
     return box;
   }
   if (!bp) return box;
-  if (bp.class !== b.建造舰级) {
-    box.appendChild(hintLine('⚠ 这个建造区产的是 ' + shipClassName(b.建造舰级) + '，而指针上的图「' + bp.name + '」是 ' + shipClassName(bp.class)
+  if (bp.舰级 !== b.建造舰级) {
+    box.appendChild(hintLine('⚠ 这个建造区产的是 ' + shipClassName(b.建造舰级) + '，而指针上的图「' + bp.name + '」是 ' + shipClassName(bp.舰级)
       + ' 级 ⇒ 引擎会拒这份补丁（`blueprint_class_mismatch`）：把「舰型」改成同一级，或在图上改（同一份改动里两处一起写也合法）。'));
   }
   // **买不起 ⇒ 未下水**（用户裁决 Q4(b) 的可见标记）。以前它只活在投影
   // （`idx/blueprints.jsonl.launch_waiting`），界面上看不见——于是「进度攒满了却不出舰」
   // 看起来像 bug。判据见 yardWaiting（引擎的派生列 + 本城的进度）。
-  if (yardWaiting(fc, node.city, Object.assign({}, b, { blueprint: name }))) {
+  if (yardWaiting(fc, node.city, Object.assign({}, b, { 设计图: name }))) {
     const tag = el('span', { class: 'bp-waiting', 'data-role': 'bp-waiting' }, '买不起 ⇒ 未下水（进度在攒）');
     tag.title = '这个建造区本舰级的进度已经攒够 `build_points`，却没放舰下水：这张图（' + bp.name
       + '）的选装此刻买不起。进度不会丢，攒够钱就下水（用户裁决 Q4(b)，只对「玩家」归属的图生效）。';
@@ -1850,7 +1850,7 @@ function buildingEditor(node) {
 
   wrap.appendChild(labelWrap('结构', optSelect(cfg.structures, Object.keys(cfg.structures || {}), b.结构, (v) => {
     b.结构 = v;
-    pushModify(fid, cityId, b.建筑编号, { structure: v });
+    pushModify(fid, cityId, b.建筑编号, { 结构: v });
     controlRerender();
   })));
 
@@ -1858,7 +1858,7 @@ function buildingEditor(node) {
   if (spec && spec.role === 'shipyard') {
     wrap.appendChild(labelWrap('舰型', optSelect(cfg.ships, Object.keys(cfg.ships || {}), b.建造舰级, (v) => {
       b.建造舰级 = v;
-      pushModify(fid, cityId, b.建筑编号, { ship_type: v });
+      pushModify(fid, cityId, b.建筑编号, { 建造舰级: v });
       controlRerender();
     })));
     // **设计图**：这个建造区把「还不存在的舰」造成什么样。
@@ -1867,23 +1867,23 @@ function buildingEditor(node) {
     // （`buildings[].blueprint`）——「（无：自动选装）」= 拆掉指针（写 `null`，不是
     // 缺席：缺席 = 不动这一格，两者后果不同）。图的内容（选装/倾向/归属）在图上改，
     // 引擎会在 `--apply` 时报 `blueprint_class_mismatch`（图的舰级必须与舰型相等）。
-    const bps = fc.blueprints || [];
+    const bps = fc.设计图库 || [];
     const bpSel = el('select', { 'data-key': 'blueprint-' + cityId + '-' + b.id });
     const none = el('option', { value: '' });
     none.textContent = '（无：自动选装）';
     none.selected = !b.设计图;
     bpSel.appendChild(none);
     bps.forEach((bp) => {
-      const o = el('option', { value: bp.name });
+      const o = el('option', { value: bp.图名 });
       // 归属是本势力的 scope 链解析出来的（这里只有叶自己的表态，够用：Player = 系统不许动）。
-      o.textContent = bp.name + '（' + shipClassName(bp.class) + '·' + normMode(bp[modeField()]) + '）';
-      o.selected = bp.name === b.设计图;
+      o.textContent = bp.图名 + '（' + shipClassName(bp.舰级) + '·' + normMode(bp[modeField()]) + '）';
+      o.selected = bp.图名 === b.设计图;
       bpSel.appendChild(o);
     });
-    if (b.设计图 && !bps.some((bp) => bp.name === b.设计图)) {
+    if (b.设计图 && !bps.some((bp) => bp.图名 === b.设计图)) {
       // **悬空指针**（图被改名/删掉了）：读面原样输出它，这里也必须显示出来——它意味着
       // **这个建造区停产**，静默吞掉就等于「失败看起来像成功」。
-      const o = el('option', { value: b.blueprint });
+      const o = el('option', { value: b.设计图 });
       o.textContent = b.设计图 + '（库里没有这张图 ⇒ 本区停产）';
       o.selected = true;
       bpSel.appendChild(o);
@@ -1896,7 +1896,7 @@ function buildingEditor(node) {
     bpSel.addEventListener('change', () => {
       // `''` ⇒ `null`（**拆掉指针**，回到自动选装），给名字 ⇒ 指过去。
       const chosen = bpSel.value || null;
-      pushModify(fid, cityId, b.建筑编号, { blueprint: chosen });
+      pushModify(fid, cityId, b.建筑编号, { 设计图: chosen });
       const fresh = yardStatusBox(fc, node, chosen);
       wrap.replaceChild(fresh, status);
       status = fresh;
@@ -1904,15 +1904,15 @@ function buildingEditor(node) {
     });
     wrap.appendChild(labelWrap('设计图', bpSel));
     wrap.appendChild(status);
-    if (node.buildLeaf) wrap.appendChild(weightRow(node.buildLeaf, 'build_weights', '建造权重', node));
+    if (node.buildLeaf) wrap.appendChild(weightRow(node.buildLeaf, '建造权重', '建造权重', node));
   }
 
-  if (node.leaf) wrap.appendChild(weightRow(node.leaf, 'invest_weights', '建设权重', node));
+  if (node.leaf) wrap.appendChild(weightRow(node.leaf, '建设权重', '建设权重', node));
 
   const rm = el('button', { class: 'rm' }, '移除');
   rm.addEventListener('click', () => {
     const fc = getControl(fid);
-    fc.buildings.push({ city: cityId, building: b.建筑编号, remove: true });
+    fc.建筑.push({ 城: cityId, 建筑: b.建筑编号, 删叶: true });
     applyControl();
   });
   wrap.appendChild(rm);
@@ -1940,10 +1940,10 @@ function addBuildingButton(node) {
   add.addEventListener('click', () => {
     const kind = kindSel.value;
     const fc = getControl(node.fid);
-    const patch = { city: node.cityId, building: null, kind, structure: structSel.value, area: +areaInp.value || 4 };
-    if (kind === 'mining') patch.resource = resSel.value;
-    if (kind === 'construction') patch.ship_type = shipSel.value;
-    fc.buildings.push(patch);
+    const patch = { 城: node.cityId, 建筑: null, 类型: kind, 结构: structSel.value, 面积: +areaInp.value || 4 };
+    if (kind === 'mining') patch.资源 = resSel.value;
+    if (kind === 'construction') patch.建造舰级 = shipSel.value;
+    fc.建筑.push(patch);
     applyControl();
   });
   wrap.appendChild(add);
@@ -2051,7 +2051,7 @@ function countDiffLeaves(req) {
   let n = 0;
   (req.control || []).forEach((fac) => {
     Object.keys(fac).forEach((k) => {
-      if (k === 'faction_id') return;
+      if (k === '势力') return;
       n += Array.isArray(fac[k]) ? fac[k].length : 1;
     });
   });
