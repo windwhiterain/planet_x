@@ -200,7 +200,9 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             state.welfare_budget_control(fid.clone(), rt).is_player()
                 && welfare_leaves.contains_key(rt)
         });
-        let mut _welfare_budget: ResourceMap = ResourceMap::new();
+        // **福利叶的口径是「总市场价值」，不是逐资源支付向量**（P1-5 的口径裁决）：
+        // 叶里的资源值只用来求 `Σ 数量 × 市值`；实际支付仍与治理费同源，从全部库存
+        // 按价值比例扣。这样避免「叶写了 100 铁，却从 100 铱里扣」的 WYSIWYG 缺口。
         let mut computed_welfare_value = 0.0;
         for rt in config.resources.keys() {
             let mode = state.welfare_budget_control(fid.clone(), rt);
@@ -214,7 +216,6 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             };
             if value > 0.0 {
                 computed_welfare_value += value * value_of(rt);
-                _welfare_budget.insert(rt.clone(), value);
             }
         }
         // **默认路径必须逐字节等价于旧行为**：没有 Player 福利叶时，福利总价值就是
