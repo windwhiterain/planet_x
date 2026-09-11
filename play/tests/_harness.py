@@ -185,12 +185,34 @@ class Harness:
                 self.warnings.append("没落地的补丁字段：" + "、".join(misses))
         return dest
 
-    # 实体在 state 里的**身份键**。引擎把序列化字段名改成给人看的中文名词了
-    # （`.agents/notes/field-naming.md`），而「按名字找那条记录」得知道**哪种实体靠哪个字段认人**。
-    # ⚠ 这张表是引擎字段名的镜像：引擎改名它要跟着改。将来 `--schema` 若直接发
-    # `identity_key`，这里就该删掉、改成读声明（像前端那样）。
-    _ID_KEY = {"ships": "舰名", "cities": "城名", "factions": "势力",
-               "bodies": "天体名", "settlements": "定居点", "contracts": "合同号"}
+    _id_cache: dict[str, str] | None = None
+
+    def identity_keys(self) -> dict[str, str]:
+        """`{state 里的表名: 身份键}`（如 `{"ships": "舰名", …}`）——**问引擎，不手抄**。
+
+        唯一真值是 `model::IDENTITY`（Rust 一处声明），随 `--nouns`（= web 的
+        `GET /api/schema`）发出来；这里只是把「结构体名 → state 里的表名」用 state schema
+        自带的 `properties.<kind>.items.$ref` 接上。
+
+        以前这里手抄过一张 `_ID_KEY` 镜像表：引擎改名它**不会红**，只会悄悄用一个旧键去
+        找记录（找不到就报"补丁没落地"，把人引向错误的方向）。现在这类镜像表一律删掉。
+        """
+        if self._id_cache is None:
+            doc = json.loads(self.capture(["--nouns"]))
+            structs = (doc.get("identity") or {}).get("structs") or {}
+            props = (doc.get("state") or {}).get("properties") or {}
+            out: dict[str, str] = {}
+            for kind, spec in props.items():
+                ref = ((spec or {}).get("items") or {}).get("$ref") or ""
+                struct = ref.rsplit("/", 1)[-1]
+                if struct in structs:
+                    out[kind] = structs[struct]
+            if not structs or not out:
+                raise RuntimeError(
+                    "引擎的 `--nouns` 没给出身份键（identity.structs / state.properties 为空）"
+                    "——`declared` 与真实世界对不上时，这里必须响亮地失败，不许静默回落")
+            self._id_cache = out
+        return self._id_cache
 
     def edit(self, ckpt: Path, patch: dict) -> list[str]:
         """**Python 直接改档**：按名字找实体、改字面量。返回没落地的字段（空 = 全成）。
@@ -208,7 +230,11 @@ class Harness:
                 misses += [f"{kind}.{name}.{k}" for name, f in entities.items() for k in f]
                 continue
             for name, fields in entities.items():
-                id_key = self._ID_KEY.get(kind, "name")
+                id_key = self.identity_keys().get(kind)
+                if id_key is None:
+                    # 引擎没声明这种实体的身份键 ⇒ 响亮地报（不猜 `name`）
+                    misses += [f"{kind}.{name}.{k}（引擎没声明 {kind} 的身份键）" for k in fields]
+                    continue
                 row = next((r for r in table if r.get(id_key) == name), None)
                 if row is None:
                     misses += [f"{kind}.{name}.{k}" for k in fields]
