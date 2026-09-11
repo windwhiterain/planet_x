@@ -1,4 +1,23 @@
 //! 集货派单的单元测试。
+//!
+//! ## 2026-10：**抽签**那一半搬去了 `play/tests/g2_mid.py`
+//!
+//! `route_lottery_is_proportional_to_the_backlog` 原来在合成世界上掷 4000 次、看 3:1 的落点
+//! 分布。现在 `round_inputs.rolls` 的每条 `route` 记录都带着**那一刻那艘舰**看到的候选腿池
+//! （`pool`，权重 = 货量）+ 掷出的 `value` + 选中的 `picked` ⇒ g2 的 `dispatch_checks` 可以
+//! **逐条精确复算**：`value × pool_total` 按池子顺序切段，落点必须 == `picked`（比 4000 次抽样
+//! 更强：它验证的是同一段代码，而不是统计近似）。
+//!
+//! ⚠ **为什么不建 `haul_lanes` 表**（施工图 §5 第 4 批的建议）：`route_for` 在 `step_military`
+//! 里**逐舰**调用，前面的舰已经把货搬走/池子改了（`haul_step` 就在同一循环里）⇒ 每艘舰看到的
+//! 腿都不同。一张「每回合每势力一条」的 `lanes()` 表既不忠实（§12 同回合相位错位）、也会和
+//! 抽签记录打架。**决策时刻的腿 = 抽签记录里的 `pool`**，而且是逐舰的 ⇒ 零新增序列化就够了。
+//!
+//! **留在这里的**：`crew_size_...` / `the_headcount_...` / `ideology_decides_...`（定编配额，
+//! 要手工摆世界或直接调 `needed_haulers`）、`the_ai_writes_the_role_leaf_...` /
+//! `deleting_the_role_leaf_...` / `the_effective_role_...`（控制叶取值链）、
+//! `the_hub_supplies_the_yard_...`（保留量/双向腿，要 `site_reserve`/`site_deficit`）、
+//! `freight_tonnage_...`，以及承包市场那 6 条。
 
 use super::*;
 use crate::config::load_config;
@@ -138,34 +157,6 @@ fn crew_size_is_one_ship_per_stocked_depot() {
     assert!(
         trickle > 0.0 && trickle < 1.0,
         "1 件货只该分到几分之一艘（实为 {trickle:.3}）"
-    );
-}
-
-/// **抽签分布 = 每条腿的货量占比**（用户裁决）：两处货栈积压 3:1 时，多条舰抽出来的比例要贴近 3:1。
-///
-/// 这里直接验证机制而不跑模拟：同一回合里换舰名掷骰子，看落点分布。
-/// 两处都放**没有城的天体**上，并把首都池清空 ⇒ 表里只剩这两条**出口腿**
-/// （保留量的抵扣、进口腿各有自己的守卫，本用例测的只有抽签本身）。
-#[test]
-fn route_lottery_is_proportional_to_the_backlog() {
-    let (config, mut state) = fresh(42);
-    export_only(&mut state, "中国", &["冥王星", "卡戎"], 0.0);
-    state.depot_add("中国", "冥王星", "碳", 30.0);
-    state.depot_add("中国", "卡戎", "铁", 10.0);
-    let mut hits = std::collections::BTreeMap::<String, usize>::new();
-    for i in 0..4000 {
-        let ship = format!("抽签舰{i}");
-        if let Some((from, _)) = route_for(&state, &config, "中国", &ship, &mut crate::model::RoundInputs::default()) {
-            *hits.entry(from).or_insert(0) += 1;
-        }
-    }
-    let pluto = hits.get("冥王星").copied().unwrap_or(0) as f64;
-    let charon = hits.get("卡戎").copied().unwrap_or(0) as f64;
-    assert!(pluto + charon > 3900.0, "每艘舰都该抽到一处：{hits:?}");
-    let ratio = pluto / charon;
-    assert!(
-        (2.6..3.4).contains(&ratio),
-        "积压 3:1 ⇒ 抽中比例应贴近 3:1，实为 {ratio:.2}（{hits:?}）"
     );
 }
 

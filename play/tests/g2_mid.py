@@ -23,6 +23,9 @@
 * **产地货栈（M1）**：`depots` 表 = 非首都天体的在栈存量；首都天体上不许"凭空"出现货栈，
   且 `cities.depot_value` 必须等于同一本账按价值计的城视角合计
   （`src/tests/sim/haul.rs` 的 `off_capital_production_...` 数据级那一半）。
+* **派单抽签**：`round_inputs.rolls` 里每条 `route` 记录的 `pool`（每条腿那一刻的权重）
+  与 `value`/`pool_total`/`picked` 逐条复算——抽签就是按积压占比切成区间
+  （`src/tests/autocontrol/freight.rs` 的 `route_lottery_...`）。
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1
 MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1200 个「排过队」的回合
 MIN_CARGO_ROWS = 1000     # 货舱防空转：3 seed × 400 回合的「舰·回合」行数下限
 MIN_DEPOT_ROWS = 100      # 货栈防空转：3 seed × 400 回合的货栈行数下限
+MIN_ROUTE_DRAWS = 50      # 派单抽签防空转：3 seed × 400 回合的 route 记录下限
 
 
 def _named_entities(ev):
@@ -652,13 +656,73 @@ def depot_report(q) -> dict:
             "bodies": len(presence)}
 
 
+def dispatch_report(q) -> dict:
+    """派单抽签（`autocontrol::freight::route_for`）：`round_inputs.rolls` 里的 `route` 记录。
+
+    ⚠ **为什么不建 `haul_lanes` 表**（施工图 §5 第 4 批的建议）：`route_for` 在
+    `step_military` 里**逐舰**调用，每艘舰看到的腿都是**那一刻**的（前面的舰已经把货搬走、
+    池子改了，见 `haul_step` 在同一循环里）⇒ 一张「每回合每势力一条」的 `lanes()` 表既不
+    忠实（§12 同回合相位错位）、也会和抽签记录打架。而抽签记录里的 `pool` 正是**那一刻、
+    那艘舰**看到的候选腿（权重 = 货量），所以这一页用 `round_inputs` 就够了，**零新增序列化**。
+
+    判据：逐条把 `value × pool_total` 按池子顺序切段，落点必须 == `picked`；且
+    `pool_total == Σ权重`、权重全正、`picked` 在池子里。
+    """
+    ri = q.table("round_inputs")
+    bad: list[str] = []
+    draws = multi = 0
+    for r in ri.to_dict("records"):
+        rnd = int(r["round"])
+        for roll in (r.get("rolls") or []):
+            if roll.get("purpose") != "route":
+                continue
+            draws += 1
+            who = roll.get("subject")
+            pool = roll.get("pool") or []
+            total = roll.get("pool_total")
+            picked = roll.get("picked")
+            val = roll.get("value")
+            if not pool:
+                bad.append(f"r{rnd} {who}：route 抽签没有候选池")
+                continue
+            if any((p.get("weight") or 0.0) <= 0.0 for p in pool):
+                bad.append(f"r{rnd} {who}：候选池里有非正的权重")
+            ssum = sum(float(p.get("weight") or 0.0) for p in pool)
+            if total is None or abs(ssum - total) > 1e-9 * max(1.0, abs(total)):
+                bad.append(f"r{rnd} {who}：pool_total={total} ≠ Σ权重={ssum}")
+            names = [p.get("name") for p in pool]
+            if len(set(names)) != len(names):
+                bad.append(f"r{rnd} {who}：候选池里有重名腿")
+            for n in names:
+                parts = (n or "").split("→")
+                if len(parts) != 2 or not parts[0] or not parts[1] or parts[0] == parts[1]:
+                    bad.append(f"r{rnd} {who}：腿名 {n!r} 不是 A→B（或两端相同）")
+            if picked not in names:
+                bad.append(f"r{rnd} {who}：picked={picked!r} 不在候选池里")
+                continue
+            if len(pool) >= 2:
+                multi += 1
+            # 精确复算 `route_for` 的切段：x = value × total；落在哪段就选哪条。
+            x = float(val) * float(total)
+            got = pool[-1].get("name")
+            for p in pool:
+                if x < float(p["weight"]):
+                    got = p["name"]
+                    break
+                x -= float(p["weight"])
+            if got != picked:
+                bad.append(f"r{rnd} {who}：picked={picked!r} ≠ value×total 落在的 {got!r}")
+    return {"draws": draws, "multi": multi, "bad": bad}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
     q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
-                                      "market_trades", "depots", "factions"))
+                                      "market_trades", "depots", "factions",
+                                      "round_inputs"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -716,7 +780,7 @@ def extract(dirpath):
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
-            "depot": depot_report(q),
+            "depot": depot_report(q), "dispatch": dispatch_report(q),
             "meta": q.meta}
 
 
@@ -809,6 +873,22 @@ def depot_checks(h, ck, out) -> None:
              f"{nonzero:,} 个「有积压的城·回合」（下限 10）")
 
 
+def dispatch_checks(h, ck, out) -> None:
+    """派单抽签（`autocontrol::freight`）：按积压占比切成区间。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["dispatch"] for d in out]
+    draws = sum(r["draws"] for r in rep)
+    multi = sum(r["multi"] for r in rep)
+    bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["bad"]]
+    ck.check("派单抽签逐条自洽（pool_total=Σ权重、picked=value×total 落在的那一段）",
+             not bad,
+             "；".join(m for _, m in bad[:3]) or
+             f"{tag}：{draws:,} 条 route 抽签全部按池子占比落段（其中 {multi:,} 条多候选）")
+    ck.check("派单抽签没有空转（真有抽签、且真有多候选）",
+             draws >= MIN_ROUTE_DRAWS and multi >= MIN_ROUTE_DRAWS,
+             f"{draws:,} 条 route 抽签（下限 {MIN_ROUTE_DRAWS}），多候选 {multi:,}")
+
+
 def run(h, ck) -> None:
     out = h.digests([(s, ROUNDS) for s in SEEDS], extract)
 
@@ -831,6 +911,7 @@ def run(h, ck) -> None:
     trade_checks(h, ck, out)
     cargo_checks(h, ck, out)
     depot_checks(h, ck, out)
+    dispatch_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
