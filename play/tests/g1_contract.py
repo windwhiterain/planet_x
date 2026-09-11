@@ -753,7 +753,7 @@ def call_functions(h, ck, tmp: Path) -> None:
     KD = lambda a, b: {"舰": a, "势力": b, "弹种": "kinetic"}  # noqa: E731
     killed = lambda ship, owner, by: {"type": "ship_destroyed", "舰": ship, "舰主": owner,  # noqa: E731
                                       "舰级": "corvette", "击毁原因": "combat", "凶手": by}
-    razed = {"type": "city_razed", "城": "城", "失城方": "乙", "拆城方": "甲",
+    razed = {"type": "city_razed", "城": "城", "旧主": "乙", "拆城方": "甲",
              "拆城舰": "甲舰", "伤害": 9.0, "拆前人口": 200}
     founded = lambda owner, how, prev: {"type": "colony_founded", "城": "城", "新主": owner,  # noqa: E731
                                         "天体": "木星", "播种舰级": "corvette",
@@ -764,8 +764,8 @@ def call_functions(h, ck, tmp: Path) -> None:
     rusted = md([{"type": "ship_destroyed", "舰": "锈舰", "舰主": "丙", "舰级": "corvette",
                   "击毁原因": "upkeep_shortfall", "凶手": None}])
     raze_then = md([razed, founded("丙", "refounded", "乙")])
-    defect = md([{"type": "city_defected", "城": "城", "失城方": "乙", "新主": "甲", "忠诚度": 0.2}])
-    revolt = md([{"type": "revolt", "城": "城", "失城方": "乙", "忠诚度": 0.0}])
+    defect = md([{"type": "city_defected", "城": "城", "旧主": "乙", "新主": "甲", "忠诚度": 0.2}])
+    revolt = md([{"type": "revolt", "城": "城", "旧主": "乙", "忠诚度": 0.0}])
     new_site = md([founded("丙", "new_site", None)])
     ck.check("--call military_deltas：**互杀双方各得一分战功**（净 0，不是「最后一条 Attack 说了算」）",
              mutual.get("甲") == 0.0 and mutual.get("乙") == 0.0, f"互杀 ⇒ {mutual}")
@@ -773,7 +773,7 @@ def call_functions(h, ck, tmp: Path) -> None:
              one.get("甲") == 1.0 and one.get("乙") == -1.0
              and rusted.get("丙") == -1.0 and rusted.get("甲", 0.0) == 0.0,
              f"单方面 {one}｜欠费报废 {rusted}")
-    ck.check("--call military_deltas：拆城 ⇒ 失城方 −1、拆城方 +1，**复垦者不因此得分**（复垦是殖民）",
+    ck.check("--call military_deltas：拆城 ⇒ 失城方（读面「旧主」） −1、拆城方 +1，**复垦者不因此得分**（复垦是殖民）",
              raze_then.get("乙") == -1.0 and raze_then.get("甲") == 1.0
              and raze_then.get("丙", 0.0) == 0.0,
              f"拆平+复垦 ⇒ {raze_then}")

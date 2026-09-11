@@ -877,7 +877,7 @@ def extract(dirpath):
     for _, r in ev[ev["type"] == "city_razed"].iterrows():
         razings += 1
         data = r["data"] if isinstance(r["data"], dict) else {}
-        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("失城方"))
+        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("旧主"))
     bad: list[str] = []
     for _, r in ev[ev["type"] == "colony_founded"].iterrows():
         hit = losers.get((int(r["round"]), r["target_id"]))
