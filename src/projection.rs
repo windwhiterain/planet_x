@@ -505,6 +505,11 @@ fn write_round(
                 "intercept": r2(p.intercept),
                 "shield_regen": r2(p.shield_regen),
                 "hull_regen": r2(p.hull_regen),
+                // —— 货舱（M2 / 施工图 §5 第 2 批）——
+                // `cargo`：在舱货物（按资源）；`cargo_capacity`：本回合有效舱容 = 舰级舱容 ×
+                // 战损折算 `hull / hull_max`（连续；`hull_max ≤ 0` 的旧档按满舱，绝不 ∞）。
+                "cargo": s.cargo,
+                "cargo_capacity": r2(cargo_capacity(config, s)),
                 "upkeep": r2(p.upkeep),
                 // —— 指令归属的**引擎解析结果**（别让 Python 自己重实现链：那是漂移源）——
                 // `order_leaf_mode`：本舰叶片自己的表态（没有叶片 = Inherit）；
@@ -1279,7 +1284,7 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","spawned_round":"integer"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","cargo":"object","cargo_capacity":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","spawned_round":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
@@ -1292,6 +1297,8 @@ pub fn projection_schema() -> serde_json::Value {
                     "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
                     "spawned_round": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
+                    "cargo": "**在舱货物**（按资源）：`{资源: 件数}`，空 = 空舱（出厂/旧档）。件数与 `cargo_capacity` 同一把尺子（都是「单位」，不折算价值）——装货判「还能装多少」用它，卸货不设上限。",
+                    "cargo_capacity": "**本回合有效舱容** = 舰级舱容（`meta.json` 的 `ships[class].cargo`）× 战损折算 `hull / hull_max`（钳到 [0,1]）。**连续**：装甲掉一半 ⇒ 舱容减半，不是「受伤就装不了」的硬阈值；`hull_max ≤ 0`（旧档缺字段）按满舱处理，绝不返回 ∞。",
                 },
             }),
             "cities" => json!({

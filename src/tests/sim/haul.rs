@@ -1,4 +1,16 @@
 //! 集货运输：产地货栈、货舱容量、`haul_split` 的 max-min 公平、货权守恒、承包分账、腿别交替、指令路线入首都池。
+//!
+//! ## 2026-10：`cargo_capacity` 的**数据级**那一半搬去了 `play/tests/g2_mid.py`
+//!
+//! `ships` 表加了 `cargo`（在舱货物）与 `cargo_capacity`（有效舱容）两列 ⇒ 原来那条
+//! `cargo_capacity_is_class_capacity_times_hull_fraction` 里的
+//!
+//! * 「有效舱容 = 舰级舱容 × 战损折算 `hull/hull_max`」与「舰级舱容是设计裁决」，现在在
+//!   **3 seed × 400 回合的每一行舰**上成立（g2 的 `cargo_checks`；实测 **16,504 个舰·回合**、
+//!   其中 **1,522 行**受过伤、**4,164 行**舱里有货）；
+//! * 剩下两个**手工边界**（壳打光 ⇒ 舱容 0、`hull_max ≤ 0` 的旧档 ⇒ 满舱）在真实投影里
+//!   **不发生**（活舰 `hull > 0`、所有档都有 `hull_max`）⇒ 留给下面那条纯函数用例；
+//!   等 `--call <fn>`（施工图 `test-migration-backlog.md` §5 第 5 批）落地后再一起搬。
 
 use super::*;
 
@@ -105,39 +117,15 @@ fn off_capital_production_lands_in_the_depot_not_the_pool() {
     );
 }
 
-/// **舱容（M2）**：有效舱容 = 舰级舱容 `ShipSpec::cargo` × **战损折算** `hull / hull_max`。
+/// `cargo_capacity` 的两个**合成边界**：壳打光 ⇒ 0；`hull_max ≤ 0`（旧档）⇒ 满舱。
 ///
-/// 钉住三条机制不变量：
-/// 1. **舰级舱容是「设计裁决」而不是平衡旋钮**——护卫 2 / 驱逐 4 / 巡洋 6 / 航母 20 /
-///    战列 6，且**航母是唯一的散货船**。这条要硬断言：改它等于改设计，不该是调参时手滑。
-/// 2. **战损是连续的**：装甲掉一半 → 舱容减半（不是「受伤就装不了」的硬阈值）。
-/// 3. **旧档（`hull_max ≤ 0`）按满舱**：绝不出现 `hull / 0 = ∞` 的无底货舱。
+/// 数据级那一半（= 舰级舱容 × 战损折算、舰级舱容是设计裁决）已搬到
+/// `play/tests/g2_mid.py::cargo_checks`（3 seed × 400 回合每一行舰）；这两个边界在真实投影里
+/// **不发生**（活舰 `hull > 0`、所有档都有 `hull_max`），要手工摆船体 ⇒ 留在纯函数侧。
 #[test]
-fn cargo_capacity_is_class_capacity_times_hull_fraction() {
+fn cargo_capacity_clamps_zero_hull_and_legacy_saves() {
     use crate::model::cargo_capacity;
     let (config, state) = fresh_world(42);
-
-    // 1) 舰级舱容（设计裁决：见 config/game.ron 的 ships 注释第 (3) 类）。
-    let table = [
-        ("corvette", 2.0),
-        ("destroyer", 4.0),
-        ("cruiser", 6.0),
-        ("carrier", 20.0),
-        ("battleship", 6.0),
-    ];
-    for (class, cap) in table {
-        assert_eq!(
-            config.ship_spec(class).cargo,
-            cap,
-            "{class} 的舱容是设计裁决（{cap}），不是可随手调的平衡旋钮"
-        );
-    }
-    assert!(
-        table.iter().all(|(c, cap)| *c == "carrier" || *cap < 20.0),
-        "航母必须是唯一的散货船——否则「用哪条船运货」就不构成一个选择"
-    );
-
-    // 2) 战损连续折算。
     let mut ship = state
         .ships
         .iter()
@@ -145,20 +133,10 @@ fn cargo_capacity_is_class_capacity_times_hull_fraction() {
         .expect("开局有巡洋舰")
         .clone();
     assert!(ship.hull_max > 0.0, "出厂舰必须有 hull_max");
-    assert_eq!(cargo_capacity(&config, &ship), 6.0, "满血巡洋舰 = 满舱 6");
-    ship.hull = ship.hull_max * 0.5;
-    assert!(
-        (cargo_capacity(&config, &ship) - 3.0).abs() < 1e-9,
-        "装甲掉一半 → 舱容减半（连续，不是硬阈值）"
-    );
-    ship.hull = 0.0;
-    assert_eq!(
-        cargo_capacity(&config, &ship),
-        0.0,
-        "壳被打光 → 一格都装不了"
-    );
 
-    // 3) 旧档缺 `hull_max`：按满舱处理，而不是把舱容算成无穷。
+    ship.hull = 0.0;
+    assert_eq!(cargo_capacity(&config, &ship), 0.0, "壳被打光 ⇒ 一格都装不了");
+
     ship.hull = 6.0;
     ship.hull_max = 0.0;
     assert_eq!(
