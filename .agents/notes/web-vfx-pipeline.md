@@ -37,7 +37,7 @@
 它复刻 three.js 给 `ShaderMaterial` 注入的前缀（`#version 300 es` + 内置 uniform 声明，
 注意注入是**不对称**的：`modelMatrix/modelViewMatrix/projectionMatrix/normalMatrix` 只在**顶点**阶段，
 `viewMatrix/cameraPosition/isOrthographic` 两阶段都有），再用 glslang 编一遍。
-当前 **24/24 个 stage 全过**。glslang 是可选外部工具（`scratch/glsl-tools/`，不在版本库里），
+当前 **24/24 个 stage 全过**。glslang 是可选外部工具（现在固定在 `<仓库父目录>/.tools/glsl-tools/`，不在版本库里也**不属于任何 worktree** —— 工具是机器级的，不是分支级的），
 缺了脚本自己跳过。
 
 **验证 GLSL 的姿势**：`#version 300 es`、`glslang -S frag|vert`、**不要**加

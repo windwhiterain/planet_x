@@ -31,18 +31,24 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// glslang 是**外部**工具，不进版本库（体积 + 平台相关）。默认去 scratch/glsl-tools 找；
-// 找不到就跳过（让 scripts/check-js.sh 仍然能过），并用 `--glslang PATH` 或环境变量覆盖。
-// 装法见 scratch/glsl-tools/README.md；那是一个一次性的开发工具，不是构建依赖。
+// glslang 是**外部**工具（体积 + 平台相关），不进版本库。
+//
+// ⚠ **它不住在任何 worktree 里** —— 放在所有 worktree 之外的固定位置：
+//   <仓库的父目录>/.tools/glsl-tools/
+// 以前放在「各 worktree 自己的 scratch/」下，结果是**每开一个 worktree 就复制一份 67M**
+// （最多同时存在三份），而清掉那个 worktree 时门又会「静默跳过」却报绿 —— 两头都错。
+// 开发工具是**机器级**的，不是**分支级**的。
+//
+// 仍可用 `GLSLANG=PATH` 或 `--glslang PATH` 覆盖；装法见 .tools/glsl-tools/README.md。
 const CANDIDATES = [
   process.env.GLSLANG,
-  fileURLToPath(new URL('../scratch/glsl-tools/glslang-16.5.0/bin/glslang.exe', import.meta.url)),
-  fileURLToPath(new URL('../scratch/glsl-tools/glslang.exe', import.meta.url)),
+  fileURLToPath(new URL('../../.tools/glsl-tools/glslang-16.5.0/bin/glslang.exe', import.meta.url)),
+  fileURLToPath(new URL('../../.tools/glsl-tools/glslang.exe', import.meta.url)),
 ].filter(Boolean);
 const DEFAULT_GLSLANG = CANDIDATES.find((p) => { try { return existsSync(p); } catch (e) { return false; } }) || CANDIDATES[0];
 
 if (!existsSync(DEFAULT_GLSLANG) && !process.argv.includes('--glslang') && !process.env.GLSLANG) {
-  console.log('check-shaders: 跳过（没找到 glslang；装法见 scratch/glsl-tools/README.md，或用 GLSLANG=PATH 指定）');
+  console.log('check-shaders: 跳过（没找到 glslang；装法见 <仓库父目录>/.tools/glsl-tools/README.md，或用 GLSLANG=PATH 指定）');
   process.exit(0);
 }
 
