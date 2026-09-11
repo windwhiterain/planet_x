@@ -52,7 +52,7 @@ export const CHUNKS = [
   'px/sky/star.vert',
   'px/sun/corona.frag',
   'px/sun/corona.vert',
-  'px/sun/sun-photo.frag',
+  'px/sun/photo.frag',
   'px/sun/sun.vert',
 ];
 

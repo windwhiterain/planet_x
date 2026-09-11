@@ -26,7 +26,7 @@ import { TUNING } from './tuning.js';
 const SUN_VERT = INC('px/sun/sun.vert');
 
 // --- ① 光球 -----------------------------------------------------------------
-const SUN_PHOTO_FRAG = INC('px/sun/sun-photo.frag');
+const SUN_PHOTO_FRAG = INC('px/sun/photo.frag');
 
 // --- ③ 日冕 / 日珥 / ④ 光晕：一张 billboard，在顶点里手动做面向相机 -------------
 // 为什么用 billboard 而不是「大一号的球」：日冕是**光学薄**的发射体，看到的是沿视线积分的

@@ -52,6 +52,19 @@ const walk = (d, out = []) => {
 };
 const disk = walk(SHADERS).sort();
 
+// ⚠ 名字必须能被 three 的 include 正则匹配：/^[ \t]*#include +<([\w\d./]+)>/gm
+// 那个字符类**不含连字符**，所以 `px/sun/sun-photo.frag` 这种名字会让 #include 整行原样
+// 喂给 GLSL 编译器（报 `'include' : invalid directive name`），**网格直接不渲染**。
+// 这个坑真发生过：全项目只有那一个文件名带连字符，于是偏偏只有太阳的光球消失，
+// 而当时的门禁只拼装 .glsl→.glsl 的 include，**看不见只出现在 JS 里的入口 chunk 名**。
+const THREE_INCLUDE_NAME = /^[\w\d./]+$/;
+const badName = listed.filter((f) => !THREE_INCLUDE_NAME.test(f));
+if (badName.length) {
+  console.log('  这些 chunk 名匹配不了 three 的 include 正则（会整行不解析）: ' + badName.join(', '));
+  console.log('  合法字符只有 [A-Za-z0-9_./]，**连字符不行**。');
+  process.exit(1);
+}
+
 const missing = disk.filter((f) => !listed.includes(f));
 const extra = listed.filter((f) => !disk.includes(f));
 
