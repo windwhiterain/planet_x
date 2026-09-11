@@ -103,6 +103,8 @@ PD_ATK, PD_DEF, PD_ROUNDS = "中国", "美国", 3
 INTC_ATK, INTC_DEF, INTC_ROUNDS = "中国", "美国", 3
 # 跟随那条：跟随者 + 友舰同在原点，一艘敌舰贴在射程内。
 FOLLOW_FID, FOLLOW_ENEMY, FOLLOW_ROUNDS = "中国", "美国", 3
+# 谁给城出钱：把城改成「还差一半没建」，只拨池子。
+SITE_FID, SITE_STOCK = "中国", ("铁", "碳", "硅")
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1164,6 +1166,7 @@ def run(h, ck) -> None:
     pd_cover_scenario_checks(h, ck)
     intercept_scenario_checks(h, ck)
     follow_scenario_checks(h, ck)
+    site_build_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2611,6 +2614,71 @@ def follow_scenario_checks(h, ck) -> None:
              bool(orders) and all("Follow" in o and friend["舰名"] in o for o in orders)
              and set(modes) == {"Player"},
              f"{len(orders)} 个回合的指令 {sorted(set(orders))}；叶片 {sorted(set(modes))}")
+
+
+def site_build_scenario_checks(h, ck) -> None:
+    """**合成场景 · 谁能给城出钱**（`sim/tests/site_supply.rs` 的前两条，第 7 批）。
+
+    开局 `depots` 本来就是空的 ⇒ 原件的 `gut_all_stock`（清池 + 清货栈）在回合 0 是**空操作**，
+    所以这两条能原样造：把城改成「还差一半没建」（`建筑[].已建成面积 = 面积 × 0.5`，
+    `护甲` 跟着改），再只拨**池子**。
+
+    | 原件 | 判据 |
+    | --- | --- |
+    | `the_capital_body_spends_the_faction_pool` | 首都城：池满 ⇒ **第 1 回合就长**；池空 ⇒ 第 1 回合不长 |
+    | `only_the_local_depot_can_fund_an_offsite_city` | 非首都城：池满 ⇒ **第 1 回合不变**（池子到不了别人家门口）；自然跑 40 回合里**确实长过**（本地货栈就是它的钱包） |
+
+    ⚠ 判据只敢看**第 1 回合**：城自己会产出，「池空」臂到 r3 也会长起来（实测 60→69.12），
+    而「非首都·池满」臂到 r4 也会开始长 ⇒ 拿多回合当判据会变成假绿。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("cities", "factions"))
+    ci, fr = q0.table("cities"), q0.table("factions")
+    f0 = fr[fr["round"] == 0]
+    cap_body = str(list(f0[f0["势力"] == SITE_FID]["capital_body"])[0])
+    mine = ci[(ci["round"] == 0) & (ci["势力"] == SITE_FID)]
+    cap_city = mine[mine["天体名"] == cap_body].iloc[0]
+    off_city = mine[mine["天体名"] != cap_body].iloc[0]
+    rich = {r["势力"]: {"资源": ({k: 5000.0 for k in SITE_STOCK} if r["势力"] == SITE_FID else {})}
+            for _, r in f0.iterrows()}
+    broke = {r["势力"]: {"资源": {}} for _, r in f0.iterrows()}
+    ck.check("合成场景（谁给城出钱）：首都城与非首都城都找到了（防空转）",
+             cap_city["城名"] != off_city["城名"] and len(cap_city["建筑"]) >= 1,
+             f"首都城 {cap_city['城名']}@{cap_body}（{len(cap_city['建筑'])} 栋）；"
+             f"非首都城 {off_city['城名']}@{off_city['天体名']}（{len(off_city['建筑'])} 栋）")
+
+    def half(city):
+        return [dict(b, **{"已建成面积": float(b["面积"]) * 0.5,
+                           "护甲": float(b["面积"]) * 0.5}) for b in city["建筑"]]
+
+    def built(rows, name):
+        out = []
+        for _, r in rows[rows["城名"] == name].sort_values("round").iterrows():
+            out.append(round(sum(float(b["已建成面积"]) for b in r["建筑"]), 4))
+        return out
+
+    arms = {}
+    for tag, city, res, rnds in (("cap_rich", cap_city, rich, 3), ("cap_broke", cap_city, broke, 3),
+                                 ("off_rich", off_city, rich, 3), ("off_natural", off_city, None, 40)):
+        patch = {"cities": {city["城名"]: {"建筑": half(city)}}}
+        if res:
+            patch["factions"] = res
+        proj = h.scenario(f"site_{tag}", seed, rnds, patch)
+        rows = KIT.load(str(proj), only=("cities",)).table("cities")
+        arms[tag] = built(rows, city["城名"])
+
+    ck.check("合成场景（谁给城出钱）：**首都城第 1 回合就花池子长**（池满）",
+             arms["cap_rich"][1] > arms["cap_rich"][0] + 1e-9,
+             f"首都城已建面积 {arms['cap_rich']}")
+    ck.check("合成场景（谁给城出钱）：**池空则第 1 回合不长**（防空转：长的是池子出的钱）",
+             arms["cap_broke"][1] == arms["cap_broke"][0],
+             f"池空臂已建面积 {arms['cap_broke']}")
+    ck.check("合成场景（谁给城出钱）：**非首都城池满也长不动**（池子到不了别人家门口）",
+             arms["off_rich"][1] == arms["off_rich"][0],
+             f"非首都城（池满 5000）已建面积 {arms['off_rich']}")
+    ck.check("合成场景（谁给城出钱）：**本地货栈才是它的钱包**——自然跑 40 回合里确实长过",
+             arms["off_natural"][-1] > arms["off_natural"][0] + 1e-9,
+             f"非首都城（不给池子）已建面积 {arms['off_natural'][0]} → {arms['off_natural'][-1]}")
 
 
 def id_checks(h, ck, out) -> None:

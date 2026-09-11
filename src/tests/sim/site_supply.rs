@@ -1,5 +1,25 @@
 //! **站点自给**：池子里的货到不了异地城市、首都天体的城花的就是池子、站点保留量约束装货。
 //!
+//! ## 2026-10（第 7 批）：两条搬去了 g2 **合成场景 · 谁能给城出钱**
+//!
+//! 开局 `depots` 本来就是空的 ⇒ 原件的 `gut_all_stock`（清池 + 清货栈）在回合 0 是**空操作**，
+//! 所以直接造：把城改成「还差一半没建」（`建筑[].已建成面积 = 面积 × 0.5`，`护甲` 跟着改），
+//! 再只拨**池子**。实测：首都城池满 ⇒ **r1 就长**（60→69.12）；池空 ⇒ r1 不长；
+//! 非首都城池满 5000 ⇒ **r1 不变**（池子到不了别人家门口）；自然跑 40 回合 ⇒ 20.89→41.77
+//! （本地货栈就是它的钱包）。
+//!
+//! ⚠ 判据只敢看**第 1 回合**：城自己会产出，「池空」臂到 r3 也长起来（60→69.12），
+//! 「非首都·池满」臂到 r4 也开始长 ⇒ 拿多回合当判据就是假绿。
+//!
+//! ## `an_export_haul_never_loads_the_site_reserve` **没搬**（试过两版都红）
+//!
+//! 想用「装完货栈里剩下的 ≥ 本地保留量」当读面判据，两版都被打回：
+//! * 「残余 ≥ 保留量」：r11 金星见底时存量 0 < 保留量 6——**引擎的规则是「只能装走超出保留量的
+//!   那部分」**，本来就见底时装到 0 是合规的；
+//! * 「要么留够、要么见底」：r25 水星.碳 存量 6.075 < 保留量 6.080——**城自己也在从货栈花钱**，
+//!   残余本来就可能低于保留量。
+//! 真正的判据要**装货前那一刻**的存量与保留量，读面上没有 ⇒ 留这里（§4）。
+//!
 //! ## 2026-10：能只看数据的那两条搬走了（第 7 批）
 //!
 //! | 原用例 | 现在住 | 为什么能搬 |
@@ -48,75 +68,6 @@ fn built_area(state: &State, cid: &str) -> f64 {
         .city(cid)
         .map(|c| c.buildings.iter().map(|b| b.deployed).sum())
         .unwrap_or(0.0)
-}
-
-/// **池子里的货到不了别人家门口**（「完全禁止瞬移」的核心）：同一座非首都城市，
-/// 池子里堆满也只长不动；往**它所在的天体**放货，它立刻开始长。
-#[test]
-fn only_the_local_depot_can_fund_an_offsite_city() {
-    let (config, mut state) = fresh_world(42);
-    // 水星熔炉基地 = 中国的非首都城市（首都 = 地球）。
-    let cid = "水星熔炉基地".to_string();
-    assert_ne!(
-        state.capital_body("中国"),
-        "水星",
-        "用例前提：水星不是中国的首都"
-    );
-    gut_all_stock(&mut state);
-    half_built(&mut state, &cid);
-    let before = built_area(&state, &cid);
-
-    // ① 池子里堆满料（首都那一份），但**水星本地什么都没有** ⇒ 一寸也长不动。
-    if let Some(f) = state.faction_mut("中国") {
-        for rt in ["铁", "碳", "硅"] {
-            f.resources.insert(rt.to_string(), 5000.0);
-        }
-    }
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    let after_pool_only = built_area(&state, &cid);
-    assert!(
-        (after_pool_only - before).abs() < 1e-6,
-        "池子里有货不等于水星有货：那座城不该长出任何面积（{before:.3} → {after_pool_only:.3}）"
-    );
-
-    // ② 往**水星**放同样的料 ⇒ 它当场开始长（本地货栈就是它的钱包）。
-    state.depot_add("中国", "水星", "铁", 5000.0);
-    state.depot_add("中国", "水星", "碳", 5000.0);
-    state.depot_add("中国", "水星", "硅", 5000.0);
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    let after_local = built_area(&state, &cid);
-    assert!(
-        after_local > after_pool_only + 1e-6,
-        "本地有货就该长（{after_pool_only:.3} → {after_local:.3}）"
-    );
-}
-
-/// **首都天体不受影响**（公理「首都即集散地」）：首都上的城花的就是池子。
-#[test]
-fn the_capital_body_spends_the_faction_pool() {
-    let (config, mut state) = fresh_world(42);
-    let cid = "长三角".to_string();
-    assert_eq!(
-        state.city(&cid).unwrap().body_id,
-        state.capital_body("中国"),
-        "用例前提"
-    );
-    gut_all_stock(&mut state);
-    half_built(&mut state, &cid);
-    if let Some(f) = state.faction_mut("中国") {
-        for rt in ["铁", "碳", "硅"] {
-            f.resources.insert(rt.to_string(), 5000.0);
-        }
-    }
-    let before = built_area(&state, &cid);
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    assert!(
-        built_area(&state, &cid) > before + 1e-6,
-        "首都上的城花池子，池子里有货就该长"
-    );
 }
 
 /// **实际装货也受出口保留量约束**：起点不是货主首都时，`haul_load` 只能装
