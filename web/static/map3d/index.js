@@ -42,7 +42,7 @@ import {
   computeLayout, systemScale, orbitPoints, compress, compressRadius,
   cityDir, specFor, planeFor,
 } from './layout.js';
-import { axialTilt, spinSpeed } from './kinds.js';
+import { axialTilt, spinSpeed, variantOf } from './kinds.js';
 import { planetMaterial, createAtmosphere, createClouds, createRing, planeQuaternion, CITY_MAX } from './planet.js';
 import { createSun } from './sun.js';
 import { bakeSky, createStarfield } from './sky.js';
@@ -306,7 +306,7 @@ function buildBodies(world, visuals, newPrev) {
     const p = node.pos;
     const r = node.radius;
     const plane = layout.planes.get(b.天体名);
-    const cls = spec.class;
+    const variant = variantOf(spec);
 
     // 每个天体一个 holder：属于它的东西全挂在 holder 上，位置过渡时只动 holder。
     const holder = new THREE.Group();
@@ -338,7 +338,7 @@ function buildBodies(world, visuals, newPrev) {
 
     spinners.push({ mat, speed: spinSpeed(spec), phase: hashFloat(b.天体名, 'phase') * 6.283 });
 
-    if (cls === 'terran' || cls === 'venus') {
+    if (variant === 'Terran' || variant === 'Venus') {
       const clouds = createClouds(r, spec, tier);
       clouds.quaternion.copy(orient);
       holder.add(clouds);

@@ -380,6 +380,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "identities": _process_identities(q),
         "capital": _capital_summary(q),
         "mond": _mond_summary(q),
+        "ideology": _ideology_summary(q),
     }
     return pd.DataFrame(rows), meta
 
@@ -563,6 +564,7 @@ def run(h, ck) -> None:
     identity_checks(h, ck, metas, tag)
     capital_checks(h, ck, metas, tag)
     mond_checks(h, ck, metas, tag)
+    ideology_checks(h, ck, metas, tag)
 
 
 def capital_checks(h, ck, metas, tag) -> None:
@@ -701,6 +703,57 @@ def mond_checks(h, ck, metas, tag) -> None:
              "；".join(mism[:3]) or f"{len(frontier)} 个不同掌握度、{sum(len(v) for v in frontier.values())} 行全在夹逼区间里")
     ck.check("MOND：前沿对账没有空转（掌握度真的跨了很宽的一段）",
              len(frontier) >= 5, f"{len(frontier)} 个不同掌握度")
+
+
+def _ideology_summary(q) -> dict:
+    """**思潮四轴的逐势力时间序列**（`src/tests/sim/ideology.rs` 那几条的读面那一半）。"""
+    fa = q.table("factions")[["round", "势力", "思潮"]]
+    out: dict = {}
+    for f, rows in fa.groupby("势力"):
+        rows = rows.sort_values("round")
+        out[f] = [(int(r["round"]), dict(r["思潮"])) for _, r in rows.iterrows()]
+    return out
+
+
+def ideology_checks(h, ck, metas, tag) -> None:
+    """**思潮四轴**的有界性与步长上限（`sim/ideology.rs::ideology_economy_bad_drives_toward_populism_and_stays_bounded`
+    的「有界」那半，第 7 批）。
+
+    引擎的松弛是 `cur + drift_rate × (target − cur)` 的**凸组合**，而目标钳在 `[-1, 1]`
+    ⇒ ① 每一轴恒在 `[-1, 1]`；② 每回合位移不超过 `drift_rate × 2`（两端相距最多 2）。
+
+    ⚠ **「朝目标走」那半没搬**，试过两种写法都不成立：
+    * **逐回合法条**：列过 `r2`、每回合位移 ≤ `drift_rate`(0.05) ⇒ 判据会退化成「怎么都过」；
+    * **区间夹逼**（下一回合的值必须落在「旧值 ↔ 目标」之间）：把四轴的目标都从读面复算
+      （军事走 `--call military_deltas` 喂当回合事件、经济按 `production × 价值 − upkeep − governance`、
+      科学按异常区城数 − 舰数、自然按人均面积）后，**越界率仍有 2.6%**——试过把目标错后一回合
+      （相位差）反而更差（3.9% / 6.0%）。剩下的偏差来自 `step_ideology` 用的是**走那一刻**的
+      state 与 flow，读面只有回合末的值。
+    """
+    axes = ("和平↔军国", "科学↔技术", "人民↔精英", "自然↔殖民")
+    rate = float(json.loads(h.capture(["--meta"]))["ideology"]["drift_rate"])
+    bound, step = Verdict(), Verdict()
+    steps = 0
+    moved = {a: 0 for a in axes}
+    for m in metas:
+        for f, seq in m["ideology"].items():
+            for (r0, a), (r1, b) in zip(seq, seq[1:]):
+                steps += 1
+                for ax in axes:
+                    v = float(b[ax])
+                    if not (-1.0 <= v <= 1.0):
+                        bound.add(f"{f} r{r1} {ax}: {v} 越界")
+                    d = v - float(a[ax])
+                    if abs(d) > rate * 2.0 + 0.011:
+                        step.add(f"{f} r{r1} {ax}: 位移 {d:.4f} 超过 drift_rate×2 = {rate * 2:.3f}")
+                    if abs(d) > 1e-9:
+                        moved[ax] += 1
+    ck.check("思潮：四轴恒在 [-1,1]（松弛是凸组合、目标钳在 [-1,1]）", bound.n == 0,
+             bound.detail(f"{tag}：{steps} 个势力·回合 × 4 轴"))
+    ck.check(f"思潮：每一轴的每回合位移不超过 `drift_rate × 2`（= {rate * 2:.3f}）", step.n == 0,
+             step.detail(f"{tag}：{steps} 个势力·回合"))
+    ck.check("思潮守卫没有空转（四轴都真的动过）", all(v > 0 for v in moved.values()),
+             f"各轴动过的次数 {moved}")
 
 
 def identity_checks(h, ck, metas, tag) -> None:

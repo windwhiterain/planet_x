@@ -239,6 +239,9 @@ pub fn meta_value(config: &GameConfig) -> serde_json::Value {
         "freight": config_json(&config.freight),
         "governance": config_json(&config.governance),
         "mond": config_json(&config.mond),
+        // **思潮的换算系数与松弛率**（第 7 批）：四轴的目标 = `clamp(信号 × 系数, −1, 1)`，
+        // 每回合按 `drift_rate` 朝它松弛。判据要复算「朝目标走了没有」就得有这几个数。
+        "ideology": config_json(&config.ideology),
         "balance": config_json(&config.balance),
         "story": config
             .story

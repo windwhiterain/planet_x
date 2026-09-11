@@ -15,7 +15,6 @@
 
 use super::*;
 use crate::config::load_config;
-use crate::model::GameEvent;
 use crate::world::default_state;
 
 mod blueprints;
@@ -29,7 +28,10 @@ mod mond;
 mod site_supply;
 mod spending;
 mod trade;
-mod war_scar;
+// 战争疤痕（`war_scar.rs`）**整族搬走**（2026-10 第 7 批），文件不再存在：
+// 形状判据落在 g2 **合成场景 · 战争疤痕的形状**（`--call war_scar_floor` + 四个年龄的档：
+// 满额敌意 / 单调抬高 / 窗口内 <0 / 出窗口 null / 顺序无关 / 没打过仗的一对没有疤）；
+// 「真实长局」那一半早就在 g2 里（最短战争回合数 ≥ 地板抬过阈值所需的年龄）。
 
 /// Build the config + a fresh deterministic world (round 0)，并把**角色轴钉成「全员战舰」**。
 ///
