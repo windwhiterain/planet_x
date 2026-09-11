@@ -37,6 +37,13 @@ uv run --project play/planet_xq python play/tests/run.py all
 ```
 
 
+**dirty 机制（2026-10，用户裁决「过了的就 clean 不再跑，轨迹变了全 dirty」）**：
+一个组**上次全绿**、且 **源码**（组文件 + `_harness.py` + 读面 kit）与 **输入**（投影缓存的
+文件树 + `web/static/**` + 二进制/config 指纹）都没变 ⇒ 这个组**整组跳过**（打印 `**clean**`），
+快组 ~12 s → ~2 s。强制重跑：`--no-clean`（只重跑判据）/ `--refresh`（连投影一起重算）。
+粒度是**组**：`ck.check(name, cond)` 的 `cond` 在调用点就已求值，逐条跳得改 357 个调用点。
+
+
 ## 给 agent 的工作约定
 
 - 永远用相对数值比例而非绝对数值
