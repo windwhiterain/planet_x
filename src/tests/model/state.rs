@@ -101,7 +101,7 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
         }
     }
     let mut doc = crate::json::to_value(&state).expect("serialize the state");
-    let dropped = ["blueprints", "设计图", "出厂图", "下水回合"];
+    let dropped = ["设计图库", "设计图", "出厂图", "下水回合"];
     for key in dropped {
         assert!(
             serde_json::to_string(&doc).unwrap().contains(&format!("\"{key}\"")),

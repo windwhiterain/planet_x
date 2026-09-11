@@ -151,9 +151,9 @@ fn entertainment_holds_a_distant_city() {
     // 铁价 1 ⇒ 5000 铁 = 5000 市场价值福利池；权重 500 让绝大部分落到这座城。
     let diff = serde_json::json!({
         "control": [{
-            "faction_id": "星系矿业",
-            "welfare_budget": [{"resource": "铁", "value": 5000.0, "mode": "Player"}],
-            "loyalty_budget": [{"city": city19.clone(), "value": 500.0, "mode": "Player"}]
+            "势力": "星系矿业",
+            "福利预算": [{"资源": "铁", "值": 5000.0, "归属": "Player"}],
+            "城市福利预算": [{"城": city19.clone(), "值": 500.0, "归属": "Player"}]
         }]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("apply welfare budget/weight");

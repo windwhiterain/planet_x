@@ -49,10 +49,13 @@ where
 /// **每舰一行**（`control-live-layers.md` §10.5 记的那个读面缺口）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipOrderEntry {
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     /// **有效指令**；`null` = 链上没有任何一层说话（引擎按 `Idle` 兜底）。
+    #[serde(rename = "行为")]
     pub behavior: Option<ShipBehavior>,
     /// 本舰指令叶**自己的**表态（没有叶片 = `Inherit`）。
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
@@ -65,9 +68,11 @@ pub struct ShipOrderEntry {
 /// 等于说"这一层没有意见"，除非舰队默认也是 `Player`，否则那个值不会被采用。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipDoctrineEntry {
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     pub temper: f64,
     pub lone_wolf: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
@@ -76,8 +81,11 @@ pub struct ShipDoctrineEntry {
 /// 值与 `mode` 的语义见 [`ShipDoctrineEntry`]。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipKitingEntry {
+    #[serde(rename = "舰")]
     pub ship: ShipId,
+    #[serde(rename = "姿态")]
     pub kiting: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
@@ -89,43 +97,65 @@ pub struct ShipKitingEntry {
 /// 才是「玩家钉的、AI 不碰」。它**只管自动控制派哪种活**，不解除武装（照样自动开火/kiting）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipRoleEntry {
+    #[serde(rename = "舰")]
     pub ship: ShipId,
+    #[serde(rename = "角色")]
     pub role: ShipRole,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BudgetEntry {
+    #[serde(rename = "资源")]
     pub resource: String,
+    #[serde(rename = "值")]
     pub value: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InvestWeightEntry {
+    #[serde(rename = "城")]
     pub city: CityId,
+    #[serde(rename = "建筑")]
     pub building: BuildingId,
+    #[serde(rename = "类型")]
     pub kind: String,
+    #[serde(rename = "资源")]
     pub resource: Option<String>,
+    #[serde(rename = "建造舰级")]
     pub ship_type: Option<String>,
+    #[serde(rename = "结构")]
     pub structure: String,
+    #[serde(rename = "值")]
     pub value: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BuildWeightEntry {
+    #[serde(rename = "城")]
     pub city: CityId,
+    #[serde(rename = "建筑")]
     pub building: BuildingId,
+    #[serde(rename = "建造舰级")]
     pub ship_type: Option<String>,
+    #[serde(rename = "值")]
     pub value: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LoyaltyBudgetEntry {
+    #[serde(rename = "城")]
     pub city: CityId,
+    #[serde(rename = "值")]
     pub value: f64,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
@@ -144,15 +174,22 @@ pub struct LoyaltyBudgetEntry {
 ///   [`BlueprintPatch::launch_waiting`]）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BlueprintEntry {
+    #[serde(rename = "图名")]
     pub name: BlueprintId,
+    #[serde(rename = "舰级")]
     pub class: String,
+    #[serde(rename = "选装")]
     pub components: Vec<String>,
     /// 本图给这型舰的**行为风格**（`None` = 本图对该轴沉默）。
+    #[serde(rename = "风格")]
     pub doctrine: Option<ShipDoctrine>,
     /// 本图给这型舰的**风筝↔贴脸姿态**（`None` = 本图对该轴沉默）。
+    #[serde(rename = "姿态")]
     pub kiting: Option<f64>,
     /// 本图给这型舰的**角色**（`None` = 本图对该轴沉默）。
+    #[serde(rename = "角色")]
     pub role: Option<ShipRole>,
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
     /// 本图造了多少艘（`state.ships` 里 `blueprint == name` 的条数，现算、不落状态）。
     pub ship_count: usize,
@@ -165,33 +202,51 @@ pub struct BlueprintEntry {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FactionControlView {
+    #[serde(rename = "势力")]
     pub faction_id: FactionId,
+    #[serde(rename = "首都")]
     pub capital: Option<Control<BodyId>>,
     /// 舰队默认**行为风格**（势力级）：叶 Inherit 的舰取它的值。
+    #[serde(rename = "舰队默认风格")]
     pub default_doctrine: Option<DefaultDoctrine>,
     /// 舰队默认**风筝<->贴脸姿态**（势力级）：与 `default_doctrine` 同形的另一片。
+    #[serde(rename = "舰队默认姿态")]
     pub default_kiting: Option<DefaultKiting>,
     /// 舰队默认**角色**（势力级，第三条风格轴）。
+    #[serde(rename = "舰队默认角色")]
     pub default_role: Option<DefaultShipRole>,
     /// **势力级设计图库**：一行 = 一张图（厂房里「还不存在的舰」的出厂规格）。
     /// 建造区指向其中一张（`buildings[].blueprint` → 结构叶 [`BuildingPatch::blueprint`]）。
+    #[serde(rename = "设计图库")]
     pub blueprints: Vec<BlueprintEntry>,
+    #[serde(rename = "指令")]
     pub ship_orders: Vec<ShipOrderEntry>,
+    #[serde(rename = "风格")]
     pub ship_doctrine: Vec<ShipDoctrineEntry>,
+    #[serde(rename = "姿态")]
     pub ship_kiting: Vec<ShipKitingEntry>,
     /// 本势力各舰的**角色**（有效值 + 那片叶自己的表态）。
+    #[serde(rename = "角色")]
     pub ship_role: Vec<ShipRoleEntry>,
+    #[serde(rename = "投资预算")]
     pub investment_budget: Vec<BudgetEntry>,
+    #[serde(rename = "建造预算")]
     pub construction_budget: Vec<BudgetEntry>,
     /// **势力级福利预算**（每资源一行）。
+    #[serde(rename = "福利预算")]
     pub welfare_budget: Vec<BudgetEntry>,
+    #[serde(rename = "建设权重")]
     pub invest_weights: Vec<InvestWeightEntry>,
+    #[serde(rename = "建造权重")]
     pub build_weights: Vec<BuildWeightEntry>,
     /// 城市**福利权重**（旧字段名 `loyalty_budget`，语义已改成权重）。
+    #[serde(rename = "城市福利预算")]
     pub loyalty_budget: Vec<LoyaltyBudgetEntry>,
     /// 逐城开发货币预算（国内市场开启时使用）。
+    #[serde(rename = "开发货币预算")]
     pub development_money: Vec<LoyaltyBudgetEntry>,
     /// 逐城建造货币预算（国内市场开启时使用）。
+    #[serde(rename = "建造货币预算")]
     pub construction_money: Vec<LoyaltyBudgetEntry>,
 }
 
@@ -231,9 +286,11 @@ pub struct DefaultDoctrine {
     pub lone_wolf: Option<f64>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（这一层回到"没有说话"。注意：与它自己的两条轴同时出现 ⇒ 拒绝）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -242,12 +299,15 @@ pub struct DefaultDoctrine {
 pub struct DefaultKiting {
     /// 默认姿态（缺省 = 保留现值；写值即接管）。
     #[serde(default)]
+    #[serde(rename = "姿态")]
     pub kiting: Option<f64>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（这一层回到"没有说话"）。与 `kiting`/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -259,13 +319,16 @@ pub struct DefaultKiting {
 pub struct DefaultShipRole {
     /// 默认角色（缺省 = 保留现值；写值即接管）。
     #[serde(default)]
+    #[serde(rename = "角色")]
     pub role: Option<ShipRole>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（势力级这一层回到"没有说话"）。与 `role`/`mode` 同时出现 ⇒ 拒绝；
     /// 叶不存在时是幂等成功。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -273,18 +336,22 @@ pub struct DefaultShipRole {
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipOrderPatch {
     /// 目标舰（唯一名 identity）。
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     /// 新行为（Idle/Move/Follow/DockCity/Dock/Colonize）。缺省 = 保留现值。
     /// **写了值却没写 mode = 接管**（该叶变成玩家指令），免得「我明明写了指令却没生效」。
     #[serde(default)]
+    #[serde(rename = "行为")]
     pub behavior: Option<ShipBehavior>,
     /// 由谁决定：Inherit（继承，撤销本层的表态）/ Auto（系统自动）/ Player（玩家）。
     /// 缺省 = 保留现值。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（这艘舰回到"没有自己的指令" ⇒ 取舰队默认）。与 `behavior`/`mode` 同时出现 ⇒ 拒绝。
     /// 舰已战沉也能删（删的是**控制面**里的叶，不要求实体还在 ⇒ 顺带是清理陈叶的路）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -296,6 +363,7 @@ pub struct ShipOrderPatch {
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipDoctrinePatch {
     /// 目标舰（唯一名 identity）。
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     #[serde(default)]
     pub temper: Option<f64>,
@@ -303,10 +371,12 @@ pub struct ShipDoctrinePatch {
     pub lone_wolf: Option<f64>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管，没写值就保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（这艘舰回到"没有自己的风格" ⇒ 有效风格回落到舰队默认 / **出厂快照**）。
     /// 叶不存在时是**幂等成功**（目标状态就是"没有这片叶"）。与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -315,14 +385,18 @@ pub struct ShipDoctrinePatch {
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipKitingPatch {
     /// 目标舰（唯一名 identity）。
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     #[serde(default)]
+    #[serde(rename = "姿态")]
     pub kiting: Option<f64>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（回落到舰队默认 / 出厂快照）。叶不存在时是幂等成功；与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -333,16 +407,20 @@ pub struct ShipKitingPatch {
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct ShipRolePatch {
     /// 目标舰（唯一名 identity）。
+    #[serde(rename = "舰")]
     pub ship: ShipId,
     #[serde(default)]
+    #[serde(rename = "角色")]
     pub role: Option<ShipRole>,
     /// 由谁决定：Inherit / Auto / Player。缺省 = 写了值就接管。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**：这艘舰回到"没有自己的角色" ⇒ **交回自动定编**（`Inherit` 之下 AI 下回合
     /// 可能立刻又写下它的结论——想让结论稳定就得写 `Player` 而不是删叶）。叶不存在时是幂等成功；
     /// 与 `role`/`mode` 同时出现 ⇒ 拒绝。舰已战沉也能删（删的是控制面里的叶）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -350,56 +428,74 @@ pub struct ShipRolePatch {
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct BudgetPatch {
     /// 资源 raw-key（见 --meta 的 resources：raw-key→中文名）。
+    #[serde(rename = "资源")]
     pub resource: String,
     /// 新的预算额（资源投放量）。缺省 = 保留现值。
     #[serde(default)]
+    #[serde(rename = "值")]
     pub value: Option<f64>,
     /// 由谁决定：Inherit（继承）/ Auto（系统自动）/ Player（玩家）。缺省 = 保留现值。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（该资源回到"这一层没有说话"）。与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
 /// 某城某「建设投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct InvestWeightPatch {
+    #[serde(rename = "城")]
     pub city: CityId,
+    #[serde(rename = "建筑")]
     pub building: BuildingId,
     #[serde(default)]
+    #[serde(rename = "值")]
     pub value: Option<f64>,
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
 /// 某城某建造区「建造投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct BuildWeightPatch {
+    #[serde(rename = "城")]
     pub city: CityId,
+    #[serde(rename = "建筑")]
     pub building: BuildingId,
     #[serde(default)]
+    #[serde(rename = "值")]
     pub value: Option<f64>,
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
 /// 某城「娱乐/福利预算」补丁：`value` 替换预算额，`mode` 指定由谁决定。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct LoyaltyBudgetPatch {
+    #[serde(rename = "城")]
     pub city: CityId,
     #[serde(default)]
+    #[serde(rename = "值")]
     pub value: Option<f64>,
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；城已易主/被夷平也能删（清理陈叶）。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -422,33 +518,41 @@ pub struct LoyaltyBudgetPatch {
 #[serde(deny_unknown_fields)]
 pub struct BlueprintPatch {
     /// 图名（势力内的唯一 key）。改名 = 删旧建新（指向旧名的建造区会变成悬空指针）。
+    #[serde(rename = "图名")]
     pub name: BlueprintId,
     /// 舰级（`config.ships` 的 key）。新建图**必须**给；口径 A 下它必须与该建造区的
     /// `ship_type` 相等（不等报 `blueprint_class_mismatch`）。
     #[serde(default)]
+    #[serde(rename = "舰级")]
     pub class: Option<String>,
     /// 选装表（组件 id，顺序 = 槽位顺序）。`[]` = 交给生成器（`choose_loadout`）。
     /// 校验：组件必须存在（`no_such_component`）、不许重复（`duplicate_component`）、
     /// 数量不许超过该舰级的槽位（`too_many_components`）。
     #[serde(default)]
+    #[serde(rename = "选装")]
     pub components: Option<Vec<String>>,
     /// 本图给这型舰的**行为风格**（长期倾向之一）。`null` = 本图对该轴没有说话
     /// （三层含义见 [`double_option`]：缺席 = 不动 / `null` = 清空这一层 / 给值 = 表态）。
     #[serde(default, deserialize_with = "double_option")]
+    #[serde(rename = "风格")]
     pub doctrine: Option<Option<ShipDoctrine>>,
     /// 本图给这型舰的**风筝↔贴脸姿态**（长期倾向之二）。`null` = 本图对该轴没有说话。
     #[serde(default, deserialize_with = "double_option")]
+    #[serde(rename = "姿态")]
     pub kiting: Option<Option<f64>>,
     /// 本图给这型舰的**角色**（长期倾向之三，也是"新舰一造出来就干什么"的落点）。
     /// `null` = 本图对该轴没有说话。
     #[serde(default, deserialize_with = "double_option")]
+    #[serde(rename = "角色")]
     pub role: Option<Option<ShipRole>>,
     /// 三态归属：Inherit / Auto / Player。缺省 = 写了值就接管、没写值就保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉整张图**（挂它的建造区随后是悬空指针 ⇒ 停产，见 Q10(a)）。
     /// 图不存在时是**幂等成功**；与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
     /// **只读回显**：本图造了多少艘（读面给的派生量）。写面**收下但不写**它——它不落状态，
     /// 由引擎现算。收下是为了「读面即写面、模板原样回传安全」（否则整面回传会被
@@ -467,18 +571,23 @@ pub struct BlueprintPatch {
 pub struct BuildingPatch {
     /// Which city to add to / remove from.
     #[serde(default)]
+    #[serde(rename = "城")]
     pub city: Option<CityId>,
     /// Some(id) = target an existing building; None = add a new one.
     #[serde(default)]
+    #[serde(rename = "建筑")]
     pub building: Option<BuildingId>,
     /// For a new building: kind key (residential | mining | construction).
     #[serde(default)]
+    #[serde(rename = "类型")]
     pub kind: Option<String>,
     /// For a new (mining) building: the mined resource key.
     #[serde(default)]
+    #[serde(rename = "资源")]
     pub resource: Option<String>,
     /// For a new (建造区) building: the ship class it produces.
     #[serde(default)]
+    #[serde(rename = "建造舰级")]
     pub ship_type: Option<String>,
     /// 这个建造区的**设计图**（名字，在所属势力的设计图库里查）。**三层含义**（见
     /// [`double_option`]）：**缺席** = 不动；`null` = **拆掉指针**（回到
@@ -488,15 +597,19 @@ pub struct BuildingPatch {
     /// `no_such_blueprint`（**响亮**，绝不静默回落生成器）；图的 `class` 与该区的
     /// `ship_type` 不等 ⇒ `blueprint_class_mismatch`（口径 A；两处**一起写**就都合法）。
     #[serde(default, deserialize_with = "double_option")]
+    #[serde(rename = "设计图")]
     pub blueprint: Option<Option<BlueprintId>>,
     /// For a new or modified building: structure key (concrete | steel).
     #[serde(default)]
+    #[serde(rename = "结构")]
     pub structure: Option<String>,
     /// For a new building: planned area.
     #[serde(default)]
+    #[serde(rename = "面积")]
     pub area: Option<f64>,
     /// Remove the referenced building.
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -507,14 +620,17 @@ pub struct BuildingPatch {
 pub struct CapitalPatch {
     /// 新的首都天体（天体唯一名）。缺省 = 保留现值。
     #[serde(default)]
+    #[serde(rename = "值")]
     pub value: Option<BodyId>,
     /// 由谁决定：Auto（系统周期性迁移）/Player（玩家，系统不改写，除非首都亡城强迁）/
     /// Inherit（撤销本层的表态，沿作用域链上溯）。缺省 = 保留现模式。
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
     /// **删掉这片叶**（回落到 [`default_capital_body`](crate::model::default_capital_body) 的兜底）。
     /// 与 `value`/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(rename = "删叶")]
     pub remove: bool,
 }
 
@@ -528,18 +644,23 @@ pub struct CapitalPatch {
 #[derive(Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FactionControlPatch {
+    #[serde(rename = "势力")]
     pub faction_id: FactionId,
     /// 迁都（首都天体）补丁。
     #[serde(default)]
+    #[serde(rename = "首都")]
     pub capital: Option<CapitalPatch>,
     /// 舰队默认行为风格（势力级，两片之一）：叶 Inherit 的舰取它的值。
     #[serde(default)]
+    #[serde(rename = "舰队默认风格")]
     pub default_doctrine: Option<DefaultDoctrine>,
     /// 舰队默认风筝<->贴脸姿态（势力级，两片之二）。
     #[serde(default)]
+    #[serde(rename = "舰队默认姿态")]
     pub default_kiting: Option<DefaultKiting>,
     /// 舰队默认**角色**（势力级，第三条风格轴）。
     #[serde(default)]
+    #[serde(rename = "舰队默认角色")]
     pub default_role: Option<DefaultShipRole>,
     /// **设计图库补丁**（势力级）：新建/改值/改归属/删图。写值即接管（⇒ `Player`）。
     ///
@@ -547,45 +668,59 @@ pub struct FactionControlPatch {
     /// 建造区指过去」必须一次成功（否则 agent 得写两条命令，中间那一条会报
     /// `no_such_blueprint`）。
     #[serde(default)]
+    #[serde(rename = "设计图库")]
     pub blueprints: Vec<BlueprintPatch>,
     /// 本势力各舰的指令补丁。
     #[serde(default)]
+    #[serde(rename = "指令")]
     pub ship_orders: Vec<ShipOrderPatch>,
     /// 本势力各舰的行为风格补丁（per-舰 可配置）。
     #[serde(default)]
+    #[serde(rename = "风格")]
     pub ship_doctrine: Vec<ShipDoctrinePatch>,
     /// 本势力各舰的风筝<->贴脸姿态补丁（per-舰 普通控制属性）。
     #[serde(default)]
+    #[serde(rename = "姿态")]
     pub ship_kiting: Vec<ShipKitingPatch>,
     /// 本势力各舰的**角色**补丁（per-舰，第三条风格轴）。
     #[serde(default)]
+    #[serde(rename = "角色")]
     pub ship_role: Vec<ShipRolePatch>,
     /// 投资预算补丁（建设）。
     #[serde(default)]
+    #[serde(rename = "投资预算")]
     pub investment_budget: Vec<BudgetPatch>,
     /// 建造预算补丁（造舰）。
     #[serde(default)]
+    #[serde(rename = "建造预算")]
     pub construction_budget: Vec<BudgetPatch>,
     /// **福利预算补丁**（每资源一行）。
     #[serde(default)]
+    #[serde(rename = "福利预算")]
     pub welfare_budget: Vec<BudgetPatch>,
     /// 建设投资权重补丁。
     #[serde(default)]
+    #[serde(rename = "建设权重")]
     pub invest_weights: Vec<InvestWeightPatch>,
     /// 建造投资权重补丁。
     #[serde(default)]
+    #[serde(rename = "建造权重")]
     pub build_weights: Vec<BuildWeightPatch>,
     /// 城市福利权重补丁（旧名 `loyalty_budget`）。
     #[serde(default)]
+    #[serde(rename = "城市福利预算")]
     pub loyalty_budget: Vec<LoyaltyBudgetPatch>,
     /// 逐城开发货币预算补丁。
     #[serde(default)]
+    #[serde(rename = "开发货币预算")]
     pub development_money: Vec<LoyaltyBudgetPatch>,
     /// 逐城建造货币预算补丁。
     #[serde(default)]
+    #[serde(rename = "建造货币预算")]
     pub construction_money: Vec<LoyaltyBudgetPatch>,
     /// 结构性建筑补丁（新增/删除/改属性）。
     #[serde(default)]
+    #[serde(rename = "建筑")]
     pub buildings: Vec<BuildingPatch>,
 }
 

@@ -11,9 +11,9 @@ fn writing_a_value_without_mode_takes_over() {
 
     // 不带 mode 写一条舰指令 + 一条预算。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": "长城", "behavior": {"type": "dock", "body": "地球"}}],
-            "construction_budget": [{"resource": "铁", "value": 3.5}]
+        "control": [{"势力": "中国",
+            "指令": [{"舰": "长城", "行为": {"type": "dock", "body": "地球"}}],
+            "建造预算": [{"资源": "铁", "值": 3.5}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("diff applies");
@@ -44,7 +44,7 @@ fn writing_a_value_without_mode_takes_over() {
         report
             .took_over
             .iter()
-            .any(|p| p.contains("ship_orders[0].behavior")),
+            .any(|p| p.contains("指令[0].行为")),
         "{:?}",
         report.took_over
     );
@@ -52,15 +52,15 @@ fn writing_a_value_without_mode_takes_over() {
         report
             .took_over
             .iter()
-            .any(|p| p.contains("construction_budget[0].value")),
+            .any(|p| p.contains("建造预算[0].值")),
         "{:?}",
         report.took_over
     );
 
     // 显式写 `Inherit` 仍然能把叶片交还给作用域链（这不是接管，是撤销表态）。
     let give_back = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": "长城", "mode": "Inherit"}]
+        "control": [{"势力": "中国",
+            "指令": [{"舰": "长城", "归属": "Inherit"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &give_back).expect("diff applies");
@@ -116,7 +116,7 @@ fn scope_player_takes_over_independent_faction() {
     // An explicit leaf mode still overrides scope in the opposite direction:
     // hand 长城 back to the system inside a Player faction.
     let leaf_diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Auto"}]}]
+        "control": [{"势力": "中国", "指令": [{"舰": "长城", "归属": "Auto"}]}]
     });
     apply_patch(&mut state, &config, &leaf_diff).expect("leaf diff applies");
     assert_eq!(
@@ -127,7 +127,7 @@ fn scope_player_takes_over_independent_faction() {
 
     // …and an explicit `Inherit` leaf un-does that override, falling back to scope.
     let back = serde_json::json!({
-        "control": [{"faction_id": "中国", "ship_orders": [{"ship": "长城", "mode": "Inherit"}]}]
+        "control": [{"势力": "中国", "指令": [{"舰": "长城", "归属": "Inherit"}]}]
     });
     apply_patch(&mut state, &config, &back).expect("inherit leaf applies");
     assert_eq!(
@@ -254,7 +254,7 @@ fn apply_loyalty_budget_patch() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "loyalty_budget": [{"city": "长三角", "value": 40.0, "mode": "Player"}]}]
+        "control": [{"势力": "中国", "城市福利预算": [{"城": "长三角", "值": 40.0, "归属": "Player"}]}]
     });
     apply_patch(&mut state, &config, &diff).expect("loyalty budget diff applies");
     assert_eq!(
@@ -279,10 +279,10 @@ fn a_valid_diff_reports_clean_and_counts_every_leaf() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": "长城", "behavior": {"type": "dock", "body": "地球"}, "mode": "Player"}],
-            "loyalty_budget": [{"city": "长三角", "value": 2.0, "mode": "Player"}],
-            "construction_budget": [{"resource": "铁", "value": 1.0, "mode": "Player"}]
+        "control": [{"势力": "中国",
+            "指令": [{"舰": "长城", "行为": {"type": "dock", "body": "地球"}, "归属": "Player"}],
+            "城市福利预算": [{"城": "长三角", "值": 2.0, "归属": "Player"}],
+            "建造预算": [{"资源": "铁", "值": 1.0, "归属": "Player"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("valid diff applies");
@@ -310,8 +310,8 @@ fn a_vanished_ship_is_reported_not_dropped_silently() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": "长城2", "behavior": {"type": "idle"}, "mode": "Player"}]
+        "control": [{"势力": "中国",
+            "指令": [{"舰": "长城2", "行为": {"type": "idle"}, "归属": "Player"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("diff itself is valid");
@@ -325,7 +325,7 @@ fn a_vanished_ship_is_reported_not_dropped_silently() {
     assert_eq!(s.code, "no_such_ship");
     assert_eq!(s.value, "长城2");
     assert!(
-        s.path.contains("ship_orders[0]"),
+        s.path.contains("指令[0]"),
         "path must point at the leaf: {}",
         s.path
     );
@@ -337,8 +337,8 @@ fn another_factions_ship_is_reported_with_its_own_code() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_orders": [{"ship": "华盛顿", "behavior": {"type": "idle"}, "mode": "Player"}]
+        "control": [{"势力": "中国",
+            "指令": [{"舰": "华盛顿", "行为": {"type": "idle"}, "归属": "Player"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("diff itself is valid");
@@ -359,7 +359,7 @@ fn a_typo_faction_id_does_not_invent_a_phantom_faction() {
     let mut state = crate::world::default_state(&config, 42);
     let before = state.control.len();
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国洋", "construction_budget": [{"resource": "铁", "value": 9.9, "mode": "Player"}]}]
+        "control": [{"势力": "中国洋", "建造预算": [{"资源": "铁", "值": 9.9, "归属": "Player"}]}]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("diff itself is valid");
     assert_eq!(report.applied, 0);
@@ -376,7 +376,7 @@ fn a_typo_faction_id_does_not_invent_a_phantom_faction() {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|f| f["faction_id"].as_str())
+        .filter_map(|f| f["势力"].as_str())
         .collect();
     assert!(
         !ids.contains(&"中国洋"),
@@ -392,8 +392,8 @@ fn a_building_index_from_another_city_is_reported_with_the_real_indices() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "build_weights": [{"city": "长三角", "building": 21, "value": 0.5, "mode": "Player"}]
+        "control": [{"势力": "中国",
+            "建造权重": [{"城": "长三角", "建筑": 21, "值": 0.5, "归属": "Player"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("diff itself is valid");
@@ -413,8 +413,8 @@ fn a_misspelled_control_field_is_rejected_rather_than_ignored() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国",
-            "ship_order": [{"ship": "长城", "behavior": {"type": "idle"}, "mode": "Player"}]
+        "control": [{"势力": "中国",
+            "ship_order": [{"舰": "长城", "行为": {"type": "idle"}, "归属": "Player"}]
         }]
     });
     let err = apply_patch(&mut state, &config, &diff).expect_err("a typo'd field must be an error");
@@ -423,7 +423,7 @@ fn a_misspelled_control_field_is_rejected_rather_than_ignored() {
         "error must name the bad field: {err}"
     );
     assert!(
-        err.contains("ship_orders"),
+        err.contains("指令"),
         "error must list the legal fields: {err}"
     );
 }
@@ -456,7 +456,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
 
     // ① 写一片逐舰风格叶：有效值 = 叶里的值，这片叶**钉住**了它。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "temper": -1.0, "lone_wolf": 0.5}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "temper": -1.0, "lone_wolf": 0.5}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
@@ -464,7 +464,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
 
     // ② 「恢复继承」（只写 mode）撤不掉那个数：叶还在，取值优先用叶里的值。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "mode": "Inherit"}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "归属": "Inherit"}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
@@ -476,7 +476,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
 
     // ③ 删叶 ⇒ 有效值回到**出厂快照**，而且这片叶真的从控制面里消失。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
@@ -486,7 +486,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
         "真的删掉了要留一条 NOTE_APPLY_REMOVED 回执：{:?}",
         r.removed
     );
-    assert!(r.removed[0].contains("ship_doctrine"), "{:?}", r.removed);
+    assert!(r.removed[0].contains("风格"), "{:?}", r.removed);
     assert_eq!(
         state.ship_doctrine(ship.clone()),
         record,
@@ -503,7 +503,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
 
     // ④ 幂等：再删一次不报错、不算丢弃、也不进 `removed`（目标状态已经达成）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert!(r.is_clean(), "{:?}", r.skipped);
@@ -516,7 +516,7 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
 
     // ⑤ `remove` 与值同时出现 ⇒ **拒绝**（任何一种静默优先级都会让人误判另一件事发生了）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true, "temper": 0.5}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true, "temper": 0.5}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
     assert_eq!(r.skipped.len(), 1, "{:?}", r);
@@ -544,7 +544,7 @@ fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
 
     // 势力级默认风格：建成"玩家表态"的叶 ⇒ 叶 Inherit 的舰取它的值。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_doctrine": {"temper": 0.4, "lone_wolf": -0.6, "mode": "Player"}}]
+        "control": [{"势力": fid, "舰队默认风格": {"temper": 0.4, "lone_wolf": -0.6, "归属": "Player"}}]
     });
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     assert_eq!(
@@ -557,7 +557,7 @@ fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
 
     // 删掉这片默认叶 ⇒ 这一层不再供值（回落到舰上记录值 / 作用域链）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "default_doctrine": {"remove": true}}]
+        "control": [{"势力": fid, "舰队默认风格": {"删叶": true}}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
@@ -590,7 +590,7 @@ fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
             }),
         );
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_doctrine": [{"ship": ship, "remove": true}]}]
+        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(
@@ -602,15 +602,15 @@ fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
 
     // 预算叶与迁都叶：同一套 `remove` 语义（这里只钉"删得掉"，值语义由各自的取值规则决定）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid,
-            "investment_budget": [{"resource": "铁", "value": 3.0}],
-            "capital": {"value": "地球", "mode": "Player"}}]
+        "control": [{"势力": fid,
+            "投资预算": [{"资源": "铁", "值": 3.0}],
+            "首都": {"值": "地球", "归属": "Player"}}]
     });
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid,
-            "investment_budget": [{"resource": "铁", "remove": true}],
-            "capital": {"remove": true}}]
+        "control": [{"势力": fid,
+            "投资预算": [{"资源": "铁", "删叶": true}],
+            "首都": {"删叶": true}}]
     });
     let r = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(r.is_clean(), "{:?}", r.skipped);

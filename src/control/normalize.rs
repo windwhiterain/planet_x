@@ -68,7 +68,7 @@ pub fn normalize_behavior(v: &mut serde_json::Value, where_: &str) -> Result<(),
 }
 
 /// Walk a control diff and normalize every ship behavior leaf
-/// (`ship_orders[].behavior`)：唯一还能写"行为"的地方就是**逐舰指令叶**
+/// (`指令[].行为`)：唯一还能写"行为"的地方就是**逐舰指令叶**
 /// （舰队默认指令那片叶已删，见 [`crate::model::State::ship_behavior`]）。
 /// Only the apply-side JSON path; the state's `order` view is untouched. Errors carry
 /// the **diff path** of the offending order so the agent knows which line to fix.
@@ -77,19 +77,19 @@ pub fn normalize_control_diffs(value: &mut serde_json::Value) -> Result<(), Stri
         return Ok(());
     };
     for (fi, fac) in control.iter_mut().enumerate() {
-        let Some(orders) = fac.get_mut("ship_orders").and_then(|o| o.as_array_mut()) else {
+        let Some(orders) = fac.get_mut("指令").and_then(|o| o.as_array_mut()) else {
             continue;
         };
         for (oi, order) in orders.iter_mut().enumerate() {
             let ship = order
-                .get("ship")
+                .get("舰")
                 .and_then(|s| s.as_str())
                 .unwrap_or("?")
                 .to_string();
-            if let Some(behavior) = order.get_mut("behavior") {
+            if let Some(behavior) = order.get_mut("行为") {
                 normalize_behavior(
                     behavior,
-                    &format!("control[{fi}].ship_orders[{oi}] (ship 「{ship}」)"),
+                    &format!("control[{fi}].指令[{oi}]（舰「{ship}」）"),
                 )?;
             }
         }

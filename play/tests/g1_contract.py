@@ -167,7 +167,7 @@ def derived_vs_index(h, ck, tmp: Path) -> None:
         return bad
 
     rows = _rounds(_table(proj, "faction_process"), FACE_ROUNDS)
-    bad = compare(rows, post.get("factions") or {}, FACTION_COLUMNS, "factions", "faction_id")
+    bad = compare(rows, post.get("factions") or {}, FACTION_COLUMNS, "factions", "势力")
     ck.check("过程量表 faction_process ≡ 视图里那一行", not bad,
              "；".join(bad[:3]) or f"{len(rows)} 个势力行 × {len(FACTION_COLUMNS)} 列全等")
     governance_ran = sum(1 for f in (post.get("factions") or {}).values()
@@ -179,12 +179,12 @@ def derived_vs_index(h, ck, tmp: Path) -> None:
     #   ⇒ 只能比**有产出的那些行**（Rust 版同口径）。
     crows = _rounds(_table(proj, "city_process"), FACE_ROUNDS)
     with_prod = [r for r in crows if r.get("production")]
-    cbad = compare(with_prod, post.get("cities") or {}, CITY_COLUMNS, "cities", "city_id")
+    cbad = compare(with_prod, post.get("cities") or {}, CITY_COLUMNS, "cities", "城名")
     ck.check("过程量表 city_process ≡ 视图里那一行（有产出的城）", not cbad,
              "；".join(cbad[:3]) or f"{len(with_prod)}/{len(crows)} 个城行 × {len(CITY_COLUMNS)} 列全等")
     targets = sum(1 for r in with_prod
-                  if (_dig(post.get("cities", {}).get(r.get("city_id"), {}), "loyalty_target.effective") or 0) > 0)
-    hubs = any((post.get("cities", {}).get(r.get("city_id"), {}).get("is_hub")) for r in with_prod)
+                  if (_dig(post.get("cities", {}).get(r.get("城名"), {}), "loyalty_target.effective") or 0) > 0)
+    hubs = any((post.get("cities", {}).get(r.get("城名"), {}).get("is_hub")) for r in with_prod)
     labor_ok = all((r.get("labor") or 0.0) > 0.0 for r in with_prod)
     ck.check("城过程量表没有空转（有产出/有忠诚目标/有集散地/用工系数不为 0）",
              bool(with_prod) and targets >= 1 and hubs and labor_ok,
@@ -212,8 +212,8 @@ def checkpoint_flow(h, ck, tmp: Path) -> None:
              last["round"] == rnd and last["view"] == v["post"],
              f"r{rnd}：起点视图与档里的 post 逐值相等={last['view'] == v['post']}")
     rows = _rounds(_table(proj, "faction_process"), rnd)
-    bad = [f"{r['faction_id']}.upkeep={r['upkeep']} ≠ {v['post']['factions'][r['faction_id']]['upkeep']}"
-           for r in rows if r["upkeep"] != v["post"]["factions"][r["faction_id"]]["upkeep"]]
+    bad = [f"{r['势力']}.upkeep={r['upkeep']} ≠ {v['post']['factions'][r['势力']]['upkeep']}"
+           for r in rows if r["upkeep"] != v["post"]["factions"][r["势力"]]["upkeep"]]
     nonzero = sum(1 for r in rows if (r["upkeep"] or 0.0) > 0.0)
     ck.check("起点行的维护费是档里的真数（且真的非零）", bool(rows) and not bad and nonzero > 0,
              "；".join(bad[:2]) or f"{len(rows)} 行、{nonzero} 家维护费非零")
@@ -230,7 +230,7 @@ def spending_within_batch(h, ck, tmp: Path) -> None:
     """**花掉的钱不超过批的额度**（`src/tests/sim/spending.rs` 那条搬过来）。
 
     两个读面各给一半：`factions[].investment_spent` / `construction_spent` 是**真花掉的**
-    （投影的过程量表），`--control` 的 `investment_budget` / `construction_budget` 是**批了多少**
+    （投影的过程量表），`--control` 的 `投资预算` / `建造预算` 是**批了多少**
     （控制面的**有效**值）。差额就是文档承诺的「批了却没花掉的那部分」，它必须 ≥ 0。
 
     ⚠ 必须跑够回合再看：开局那一回合既没有在建建筑、也没有攒到启封的造舰进度，**谁都还没花钱**
@@ -239,16 +239,16 @@ def spending_within_batch(h, ck, tmp: Path) -> None:
     proj, ckpt = tmp / "dec", tmp / "dec.json"       # 复用 decisions 那一段跑出来的档（60 回合）
     rnd = read_round(proj, -1)
     surface = json.loads(h.capture(["--start", str(ckpt), "--control"]))
-    spent = {"investment_budget": "investment_spent", "construction_budget": "construction_spent"}
+    spent = {"投资预算": "investment_spent", "建造预算": "construction_spent"}
     bad, flowed, unspent = [], 0, 0
     for face in surface["control"]:
-        fid = face["faction_id"]
+        fid = face["势力"]
         row = (rnd["view"].get("factions") or {}).get(fid)
         if row is None:
             bad.append(f"{fid} 在投影里没有势力行")
             continue
         for limit_kind, spent_field in spent.items():
-            limits = {e["resource"]: e["value"] for e in (face.get(limit_kind) or [])}
+            limits = {e["资源"]: e["值"] for e in (face.get(limit_kind) or [])}
             used = row.get(spent_field) or {}
             for rt, amt in used.items():
                 limit = limits.get(rt, 0.0)
@@ -307,7 +307,7 @@ def decisions_table(h, ck, tmp: Path) -> None:
         if hit is None:
             bad.append(f"表里缺 {d['ship']} 的判定行")
             continue
-        for col, want in (("faction_id", d["faction"]), ("target", d["target"]),
+        for col, want in (("势力", d["faction"]), ("target", d["target"]),
                           ("detail.hull_ratio", d["hull_ratio"]), ("detail.retreat_hull", d["retreat_hull"]),
                           ("detail.kiting", d["kiting"]), ("detail.enemy_in_range", d["enemy_in_range"]),
                           ("detail.destination", d["destination"]), ("detail.order", d["order"])):
@@ -321,7 +321,7 @@ def decisions_table(h, ck, tmp: Path) -> None:
         if hit is None:
             bad.append(f"表里缺 {r['city']} 的改装行")
             continue
-        for col, want in (("faction_id", r["faction"]), ("target", r["to"]),
+        for col, want in (("势力", r["faction"]), ("target", r["to"]),
                           ("detail.from", r["from"]), ("detail.building", r["building"])):
             got = hit[col] if col in hit else _dig(hit, col)
             if got != want:
@@ -371,7 +371,7 @@ def b3_tables(h, ck, tmp: Path) -> None:
     hrows = _rounds(_table(proj, "haul_steps"), rnd)
     hbad = [] if len(hrows) == len(steps) else [f"运输动作条数 {len(hrows)} ≠ view 的 {len(steps)}"]
     for row in hrows:
-        ship = row["ship_id"]
+        ship = row["舰名"]
         w = steps.get(ship)
         if w is None:
             hbad.append(f"view 里没有 {ship} 的动作")
@@ -453,8 +453,8 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
     vanished = ours[0]
 
     rm = tmp / "rm.json"
-    rm.write_text(json.dumps({"control": [{"faction_id": fid,
-                                           "ship_orders": [{"ship": vanished, "remove": True}]}]}),
+    rm.write_text(json.dumps({"control": [{"势力": fid,
+                                           "指令": [{"舰": vanished, "删叶": True}]}]}),
                   encoding="utf-8")
     _, err = h.capture(["--start", str(ck0), "--apply", str(rm), "--round", "0", "--save", str(ck1)],
                        stderr=True)
@@ -463,19 +463,19 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
 
     def orders(surface, faction):
         for f in surface["control"]:
-            if f["faction_id"] == faction:
-                return f["ship_orders"]
+            if f["势力"] == faction:
+                return f["指令"]
         raise AssertionError(f"控制面里没有势力 {faction}")
 
     before = h.capture(["--start", str(ck1), "--control"])
     surface = json.loads(before)
-    rows = [r["ship"] for r in orders(surface, fid)]
+    rows = [r["舰"] for r in orders(surface, fid)]
     ck.check("指令读面每舰一行且顺序与 state.ships 一致（含叶被删掉的那艘）", rows == ours,
              f"{fid}：读面 {len(rows)} 行 / 世界 {len(ours)} 艘" + ("" if rows == ours else f"，差异 {set(rows) ^ set(ours)}"))
-    row = next((r for r in orders(surface, fid) if r["ship"] == vanished), None)
+    row = next((r for r in orders(surface, fid) if r["舰"] == vanished), None)
     ck.check("叶被删掉的舰：behavior 是 null、mode 是 Inherit",
-             row == {"ship": vanished, "behavior": None, "mode": "Inherit"}, f"{row}")
-    others_ok = all(next(r for r in orders(surface, fid) if r["ship"] == s)["behavior"] is not None
+             row == {"舰": vanished, "行为": None, "归属": "Inherit"}, f"{row}")
+    others_ok = all(next(r for r in orders(surface, fid) if r["舰"] == s)["行为"] is not None
                     for s in ours if s != vanished)
     ck.check("叶还在的舰：有效值必须是一个真行为（不是 null）", others_ok,
              f"{len(ours) - 1} 艘有叶的舰都给了真行为")
@@ -490,10 +490,10 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
     ck.check("读面是不动点（原样回传不改变它自己的形状）", before == after,
              "逐字节相同" if before == after else "回传后读面变了")
     surface2 = json.loads(after)
-    row2 = next((r for r in orders(surface2, fid) if r["ship"] == vanished), None)
+    row2 = next((r for r in orders(surface2, fid) if r["舰"] == vanished), None)
     state2 = json.loads(h.capture(["--start", str(ck2), "--round", "0"]).splitlines()[0])
     ck.check("回传不许偷偷把 null 变成 Idle（那一行还必须说「链上没人说话」）",
-             row2 == {"ship": vanished, "behavior": None, "mode": "Inherit"},
+             row2 == {"舰": vanished, "行为": None, "归属": "Inherit"},
              f"{row2}")
     ck.check("回传不增删舰，且仍然每舰一行",
              [s["舰名"] for s in state2["ships"] if s["势力"] == fid] == ours

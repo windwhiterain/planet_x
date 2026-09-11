@@ -34,11 +34,11 @@ const MAJOR_EAGER: &[&str] = &[
     "event_ids",
     "chronicle",
     "view",
-    "ship_ids",
-    "city_ids",
-    "faction_ids",
-    "body_ids",
-    "settlement_ids",
+    "舰名表",
+    "城名表",
+    "势力表",
+    "天体名表",
+    "定居点表",
 ];
 
 /// A scratch dir for one test, removed on drop.
@@ -110,10 +110,10 @@ fn projection_writes_lean_main_and_indexed_tables() {
             "main 不应内联 events（已 lazy 化）"
         );
         assert!(
-            row["contract_ids"].is_array(),
+            row["合同号表"].is_array(),
             "main 每行要有 contract_ids（join contracts 用）"
         );
-        let ids = row["ship_ids"].as_array().unwrap();
+        let ids = row["舰名表"].as_array().unwrap();
         assert!(!ids.is_empty(), "main 每行要有 ship_ids（join 用）");
         assert!(
             row["event_ids"].is_array(),
@@ -140,7 +140,7 @@ fn projection_writes_lean_main_and_indexed_tables() {
     );
     for row in contract_rows {
         for col in [
-            "contract_id",
+            "合同号",
             "托运方",
             "承运方",
             "运力",
@@ -159,7 +159,7 @@ fn projection_writes_lean_main_and_indexed_tables() {
     }
     let ships = jsonl(&s.0.join("idx/ships.jsonl"));
     assert!(!ships.is_empty());
-    assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");
+    assert!(ships[0].get("舰名").is_some(), "ships 表要有 ship_id 列");
     assert!(
         ships[0].get("组件").is_some(),
         "ships 表要有 components 列"
@@ -168,7 +168,7 @@ fn projection_writes_lean_main_and_indexed_tables() {
     let factions = jsonl(&s.0.join("idx/factions.jsonl"));
     assert!(!factions.is_empty());
     assert!(
-        factions[0].get("faction_id").is_some(),
+        factions[0].get("势力").is_some(),
         "factions 表要有 faction_id 列"
     );
     assert!(
@@ -552,8 +552,8 @@ fn blueprints_table_matches_the_control_face() {
     for r in &rows {
         seen.insert(
             (
-                r["faction_id"].as_str().unwrap().to_string(),
-                r["blueprint_id"].as_str().unwrap().to_string(),
+                r["势力"].as_str().unwrap().to_string(),
+                r["图名"].as_str().unwrap().to_string(),
             ),
             r.clone(),
         );
@@ -651,7 +651,7 @@ fn flow_table_matches_the_derived_record() {
     let mut checked = 0usize;
     let mut admin_seen = 0usize;
     for row in last {
-        let fid = row["faction_id"].as_str().unwrap();
+        let fid = row["势力"].as_str().unwrap();
         let expect_upkeep = outcome
             .post
             .factions
@@ -805,7 +805,7 @@ fn flow_table_matches_the_derived_record() {
     );
     let mut targets_seen = 0usize;
     for row in with_prod {
-        let cid = row["city_id"].as_str().unwrap();
+        let cid = row["城名"].as_str().unwrap();
         let expect = outcome
             .post
             .cities
@@ -947,7 +947,7 @@ fn control_table_holds_every_leaf() {
     let rows = jsonl(&s.0.join("idx/control.jsonl"));
     let has = |kind: &str| {
         rows.iter()
-            .any(|r| r["kind"] == json!(kind) && r["faction_id"] == json!(fid))
+            .any(|r| r["kind"] == json!(kind) && r["势力"] == json!(fid))
     };
     assert!(has("construction_budget"), "缺预算行");
     assert!(
@@ -1007,7 +1007,7 @@ fn control_table_holds_every_leaf() {
     let ships = jsonl(&s.0.join("idx/ships.jsonl"));
     let mut checked = 0usize;
     for row in ships.iter().filter(|r| r["round"] == json!(0)) {
-        let name = row["ship_id"].as_str().unwrap();
+        let name = row["舰名"].as_str().unwrap();
         assert_eq!(
             row["order_effective_mode"],
             serde_json::to_value(state.ship_control(name.to_string())).unwrap(),

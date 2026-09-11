@@ -132,7 +132,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // 看起来像一个真的（只是永远不动）势力——一个错别字污染整个世界。
         if state.faction(&fid).is_none() {
             report.skip(
-                format!("control[{fi}].faction_id"),
+                format!("control[{fi}].势力"),
                 &fid,
                 "no_such_faction",
                 format!("没有名为「{fid}」的势力（势力名是唯一 key；用 --index + planet_xq 的 q.facts 看现名）。"),
@@ -266,13 +266,13 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             if state.faction(&fac.faction_id).is_none() {
                 continue; // 已在上面的循环里记过 no_such_faction。
             }
-            let path = format!("control[{fi}].capital");
+            let path = format!("control[{fi}].首都");
             let mut present = Vec::new();
             if cap.value.is_some() {
-                present.push("value");
+                present.push("值");
             }
             if cap.mode.is_some() {
-                present.push("mode");
+                present.push("归属");
             }
             if remove_conflicts(cap.remove, &present, &path, &mut report) {
                 continue;
@@ -292,7 +292,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
             let new_value = match cap.value.as_ref() {
                 Some(v) if state.body(v).is_none() => {
                     report.skip(
-                        format!("{path}.value"),
+                        format!("{path}.值"),
                         v,
                         "no_such_body",
                         format!("没有名为「{v}」的天体（天体名是唯一 key）。"),
@@ -313,7 +313,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                     (Some(m), _) => ctrl.mode = m,
                     (None, true) => {
                         ctrl.mode = ControlMode::Player;
-                        report.took_over(format!("{path}.value"));
+                        report.took_over(format!("{path}.值"));
                     }
                     (None, false) => {}
                 }

@@ -68,7 +68,7 @@ fn ai_periodic_review_relocates_capital_to_population_center() {
     // 「写值即接管」之后，只写 value 会被当成玩家的首都（mode=Player），
     // 那样这条测试考的就不再是 AI 评估了。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Auto"}}]
+        "control": [{"势力": "中国", "首都": {"值": "水星", "归属": "Auto"}}]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
     assert_eq!(state.capital_body("中国"), "水星");
@@ -125,7 +125,7 @@ fn capital_review_is_sparse_in_the_decision_log() {
     // 非评估回合（12k+1）：就算首都是 Auto，也不该产生任何判定行。
     state.round = 13;
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Auto"}}]
+        "control": [{"势力": "中国", "首都": {"值": "水星", "归属": "Auto"}}]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("set far capital");
     let mut sink = RoundSink::default();
@@ -171,7 +171,7 @@ fn player_capital_not_overridden_by_ai_review() {
     let (config, mut state) = fresh_world(42);
     // 玩家把首都迁到 水星 并标 Player；中国在 水星 仍有活城（水星熔炉基地），非亡城。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "capital": {"value": "水星", "mode": "Player"}}]
+        "control": [{"势力": "中国", "首都": {"值": "水星", "归属": "Player"}}]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("player move capital");
     assert_eq!(state.capital_body("中国"), "水星");

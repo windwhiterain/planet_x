@@ -3,7 +3,7 @@
 // 与 jsonview.js 守同一条铁律：本文件里不出现 bodies/cities/ships/factions/control 这类
 // 领域词汇，也不假设任何字段的类型或含义。它认的是这些**通用**东西：
 //
-//   路径表达式   `hull` / `@post.factions.${name}.upkeep` / `ship_orders[?ship=${name}]`
+//   路径表达式   `船体` / `@post.factions.${势力}.upkeep` / `指令[?舰=${name}]`
 //                / `cargo` / `@key`（映射表的键）/ `${字段}`（模板，取自当前记录）
 //   格式化器     num / pct / ratio / enum / map / sum / top / tagged / …（一张通用表）
 //   布局         table / sheet / cards / timeline / pairs
@@ -88,7 +88,7 @@
   // 首段以 '@' 开头 = **绝对路径**（@state/@post/@config/@pre/@session/@control/@scope），
   // 否则相对当前记录。绝对路径让「跨根 join」成为同一套语法里的普通写法：
   //   @post.factions.${name}.upkeep          —— 势力行 ⋈ 本回合的过程量
-  //   @control[?faction_id=${faction_id}].ship_orders[?ship=${name}].behavior
+  //   @control[?势力=${势力}].指令[?舰=${name}].行为
   //                                          —— 舰 ⋈ 它的**有效**指令
   function splitSegments(expr) {
     const out = [];
@@ -133,7 +133,7 @@
 
   // 一段 = **两步**：① 取名字（空名 = 当前值，`@key` = 这一条在映射表/数组里的键）
   //              ② 施加方括号（下标 / `[*]` 展开 / `[?f=v]` 挑一条）
-  // 顺序不能反：`chronicle[*]` 必须先取到 `chronicle` 再展开，`ship_orders[?ship=x]` 必须先
+  // 顺序不能反：`chronicle[*]` 必须先取到 `chronicle` 再展开，`指令[?舰=x]` 必须先
   // 取到那个数组再挑——忘了第 ① 步就会在**父对象**上展开/挑选（本轮真踩过：`chron 0..17`
   // 的键就是这么来的），症状是整页"值全是 ·"。
   function step(cur, parts, i, rec, recKey) {

@@ -60,25 +60,25 @@ pub fn apply_blueprint(
     yard_intent: &BTreeMap<(CityId, BuildingId), String>,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.blueprints[{i}]");
+    let path = format!("{fid}.设计图库[{i}]");
     let mut present = Vec::new();
     if patch.class.is_some() {
-        present.push("class");
+        present.push("舰级");
     }
     if patch.components.is_some() {
-        present.push("components");
+        present.push("选装");
     }
     if patch.doctrine.is_some() {
-        present.push("doctrine");
+        present.push("风格");
     }
     if patch.kiting.is_some() {
-        present.push("kiting");
+        present.push("姿态");
     }
     if patch.role.is_some() {
-        present.push("role");
+        present.push("角色");
     }
     if patch.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(patch.remove, &present, &path, report) {
         return;
@@ -108,7 +108,7 @@ pub fn apply_blueprint(
     // 一个错别字会造出一张谁都不认识的图，它随后出现在读面里，看起来像真的）。
     if current.is_none() && !wrote_value {
         report.skip(
-            format!("{path}.name"),
+            format!("{path}.图名"),
             &patch.name,
             "no_such_blueprint",
             format!(
@@ -124,7 +124,7 @@ pub fn apply_blueprint(
         (None, Some(v)) => v.value.class.clone(),
         (None, None) => {
             report.skip(
-                format!("{path}.class"),
+                format!("{path}.舰级"),
                 "",
                 "missing_class",
                 "新建一张设计图必须给 `class`（舰级 = config.ships 的 key）：图是「还不存在的舰」的出厂规格，没有舰级的图印不出舰。",
@@ -135,7 +135,7 @@ pub fn apply_blueprint(
     if !config.ships.contains_key(&class) {
         let all: Vec<&str> = config.ships.keys().map(String::as_str).collect();
         report.skip(
-            format!("{path}.class"),
+            format!("{path}.舰级"),
             &class,
             "no_such_class",
             format!("没有舰级「{class}」（可选：{}）。", all.join(" / ")),
@@ -152,7 +152,7 @@ pub fn apply_blueprint(
         if !config.components.contains_key(c) {
             let all: Vec<&str> = config.components.keys().map(String::as_str).collect();
             report.skip(
-                format!("{path}.components"),
+                format!("{path}.选装"),
                 c,
                 "no_such_component",
                 format!(
@@ -167,7 +167,7 @@ pub fn apply_blueprint(
     for c in &components {
         if !seen.insert(c.clone()) {
             report.skip(
-                format!("{path}.components"),
+                format!("{path}.选装"),
                 c,
                 "duplicate_component",
                 format!(
@@ -180,7 +180,7 @@ pub fn apply_blueprint(
     let slots = config.ship_spec(&class).slots as usize;
     if components.len() > slots {
         report.skip(
-            format!("{path}.components"),
+            format!("{path}.选装"),
             components.len().to_string(),
             "too_many_components",
             format!(
@@ -200,7 +200,7 @@ pub fn apply_blueprint(
             continue;
         }
         report.skip(
-            format!("{path}.class"),
+            format!("{path}.舰级"),
             &class,
             "blueprint_class_mismatch",
             format!(

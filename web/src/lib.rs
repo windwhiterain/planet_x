@@ -665,7 +665,7 @@ mod tests;
 // | 原处（已删除） | 现在住 `play/tests/g4_spec.py` |
 // | --- | --- |
 // | `views_json_is_well_formed`：id 唯一 / 引用完整 / `omit` 不与列重叠 / 路径合文法 / `@根` 已知 | 「静态纪律」五条 |
-// | `every_view_path_resolves_against_real_worlds`：相对列首段在真记录里存在 | 换成「**写面对账**（`leaves` ∪ `actions` ∪ `{faction_id}` ≡ `FactionControlPatch` 的属性集）+ **读面对账**（跑一局、每片叶写一次、读回来对字段集）」 |
+// | `every_view_path_resolves_against_real_worlds`：相对列首段在真记录里存在 | 换成「**写面对账**（`leaves` ∪ `actions` ∪ `{势力}` ≡ `FactionControlPatch` 的属性集）+ **读面对账**（跑一局、每片叶写一次、读回来对字段集）」 |
 // | `coverage_report_is_printed_and_claimed_fields_actually_exist`：覆盖率报告 | 换成「**认领完整性**」（每个叶要么被 `leaf`/`action` 行认领、要么在 `write_omit` 里写明理由） |
 //
 // ⚠ 这不是丢检查，是**换口径**：原来那两条存在性检查只对得上「路径合文法」，而写面的缺口

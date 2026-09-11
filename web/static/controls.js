@@ -51,8 +51,8 @@
     return {
       leaves,
       actions,
-      ownerField: doc.owner_field || 'mode',
-      removeField: doc.remove_field || 'remove',
+      ownerField: doc.owner_field || '归属',
+      removeField: doc.remove_field || '删叶',
       raw: doc,
     };
   }
@@ -66,8 +66,8 @@
   function actionSpec(field) {
     return (MANIFEST && MANIFEST.actions[field]) || null;
   }
-  function ownerField() { return (MANIFEST && MANIFEST.ownerField) || 'mode'; }
-  function removeField() { return (MANIFEST && MANIFEST.removeField) || 'remove'; }
+  function ownerField() { return (MANIFEST && MANIFEST.ownerField) || '归属'; }
+  function removeField() { return (MANIFEST && MANIFEST.removeField) || '删叶'; }
   /// `shellLeaf` / `rememberOrigin` 要的那点东西（身份键 + 值字段）。
   function specOf(field) {
     const s = leafSpec(field);
@@ -79,8 +79,8 @@
   }
 
   // 路径的最后一段**去掉方括号**就是叶的字段名：
-  // `@control[?faction_id=${name}].investment_budget` → `investment_budget`
-  // `@control[?faction_id=${faction_id}].ship_orders[?ship=${name}]` → `ship_orders`
+  // `@control[?势力=${name}].投资预算` → `投资预算`
+  // `@control[?势力=${势力}].指令[?舰=${name}]` → `指令`
   function fieldOf(path) {
     const segs = String(path || '').split('.');
     return String(segs[segs.length - 1] || '').replace(/\[.*$/, '');
@@ -88,7 +88,7 @@
 
   /// 路径最后一段里的 `[?k=v]` ⇒ 这条控制行指的是**一片具体的叶**（不是整个列表）。
   /// `v` 里的 `${…}` 相对当前记录求值（与求值器的模板同一条规则）。
-  /// 例：`ship_orders[?ship=${name}]` ⇒ `{field: 'ship', value: <这艘舰的名字>}`。
+  /// 例：`指令[?舰=${name}]` ⇒ `{field: '舰', value: <这艘舰的名字>}`。
   function pickOf(path, rec, recKey) {
     const segs = String(path || '').split('.');
     const m = /\[\?([^=\]]+)=([^\]]*)\]/.exec(segs[segs.length - 1] || '');
@@ -204,8 +204,8 @@
 
   // --- 当前记录 → 它属于哪个势力 / 它叫什么 ------------------------------------
   // 表里的记录要么自己就是势力（`势力` = 势力名），要么带着 `势力`（城的势力字段）；
-  // `@control[*]` 那种**读面**记录仍带着 `faction_id`（写面键，不随 state 改名走）。
-  function fidOf(rec) { return rec ? (rec.faction_id || rec.势力) : null; }
+  // `@control[*]` 那种**读面**记录也带着 `势力`（2026-10 起读写面同名，键名就是它）。
+  function fidOf(rec) { return rec ? rec.势力 : null; }
   // ⚠ 记录叫什么**不在这里猜**：`recKey` 由 specview 按视图声明的 `key` 求好传进来
   //（`recordKeyOf`，与 `views.json` 同源），旧代码那句 `rec.name` 已经不再成立。
   function fcOf(rec) { return getControl(fidOf(rec)); }
@@ -243,12 +243,12 @@
   function blankOf(field, ui) {
     const ed = (ui && ui.editor) || 'number';
     if (ed === 'doctrine') return { temper: 0, lone_wolf: 0 };
-    if (ed === 'kiting') return { kiting: 0 };
-    if (ed === 'role') return { role: 'War' };
-    if (ed === 'body') return { value: null };
-    if (ed === 'behavior') return { behavior: null };
-    if (ed === 'blueprint') return { class: '', components: [], doctrine: null, kiting: null, role: null };
-    return { value: 0 };
+    if (ed === 'kiting') return { 姿态: 0 };
+    if (ed === 'role') return { 角色: 'War' };
+    if (ed === 'body') return { 值: null };
+    if (ed === 'behavior') return { 行为: null };
+    if (ed === 'blueprint') return { 舰级: '', 选装: [], 风格: null, 姿态: null, 角色: null };
+    return { 值: 0 };
   }
 
   // --- `leaf` 行 --------------------------------------------------------------
@@ -261,7 +261,7 @@
     const raw = window.SpecView.evalPath(col.leaf, rec, recKey);
     if (col.compact && where === 'table') return compactCell(col, field, spec, fc, raw, rec, recKey);
     // 「一行一片叶」的三种情形：
-    //   ① `keys` 为空 = 势力级**单叶**（`capital` / `default_role`…）；
+    //   ① `keys` 为空 = 势力级**单叶**（`首都` / `舰队默认角色`…）；
     //   ② 路径带 `[?k=v]` = **已经挑出来**的那一片叶（逐舰四叶、逐城娱乐预算）；
     //   ③ 读面给回来的**就是一个对象**（路径本身就把叶挑出来了，与 ② 等价但更保险）。
     // 其余情形（路径指的是一整个列表）走下面的候选网格。
@@ -277,7 +277,7 @@
       return leafNodeBox(col, field, leaf, rowInfo, rec, recKey, where);
     }
     // 多键叶：**读面里已有的叶** ∪ **候选键里还没有叶的那些** —— 一行一片叶。
-    // 后者是主路径（r30 实测 `loyalty_budget`/`blueprints` 是空数组、`default_role` 是 null）：
+    // 后者是主路径（r30 实测 `城市福利预算`/`设计图库` 是空数组、`舰队默认角色` 是 null）：
     // 今天的界面根本没法给一个还没有叶的资源设预算，这里补上。
     const box = el('div', 'ctl-grid');
     const rows = candidates(col, spec, raw, rec, recKey);
@@ -442,8 +442,8 @@
     return out;
   }
 
-  /// 候选里那些键 → 一片叶的身份键。第一个键来自 `keys_from`，其余键（如 `invest_weights`
-  /// 的 `city`/`building`）从当前记录里取。
+  /// 候选里那些键 → 一片叶的身份键。第一个键来自 `keys_from`，其余键（如 `建设权重`
+  /// 的 `城`/`建筑`）从当前记录里取。
   function buildKv(spec, kf, key, cand) {
     const kv = {};
     spec.keys.forEach((k) => {
@@ -454,7 +454,7 @@
     return kv;
   }
 
-  /// `where: "faction_id=${name}"` —— 左边相对候选求值，`${…}` 相对当前记录求值。
+  /// `where: "势力=${势力}"` —— 左边相对候选求值，`${…}` 相对当前记录求值。
   function whereOk(where, cand, candKey, rec, recKey) {
     if (!where) return true;
     const m = /^([^=]+)=(.*)$/.exec(String(where));
@@ -479,16 +479,16 @@
     return key;
   }
 
-  /// 身份是数字 id 的叶（`invest_weights`：`city` + 数字 `building`）不能直接印数字——
+  /// 身份是数字 id 的叶（`建设权重`：`城` + 数字 `建筑`）不能直接印数字——
   /// 用读面顺带带回来的 state 属性（`carries`）说清「这是座什么楼」。
   function carryText(entry, spec) {
     const c = (spec && spec.carries) || [];
     if (!c.length || !entry) return null;
     const bits = [];
-    if (entry.kind && kindName) bits.push(kindName(entry.kind));
-    if (entry.resource && resName) bits.push(resName(entry.resource));
-    if (entry.ship_type && shipClassName) bits.push(shipClassName(entry.ship_type));
-    if (entry.structure && structName) bits.push(structName(entry.structure));
+    if (entry.类型 && kindName) bits.push(kindName(entry.类型));
+    if (entry.资源 && resName) bits.push(resName(entry.资源));
+    if (entry.建造舰级 && shipClassName) bits.push(shipClassName(entry.建造舰级));
+    if (entry.结构 && structName) bits.push(structName(entry.结构));
     return bits.length ? bits.join('·') : null;
   }
 
@@ -611,7 +611,7 @@
   function actionRow(col, rec, recKey, where) {
     const field = col.action;
     if (!actionSpec(field)) return errBox('引擎的 actions 里没有「' + field + '」');
-    if (field !== 'buildings') return errBox('views.json 写了一条还没有渲染器的命令列表：「' + field + '」');
+    if (field !== '建筑') return errBox('views.json 写了一条还没有渲染器的命令列表：「' + field + '」');
     const fid = fidOf(rec);
     const cityId = recKey;
     if (!fid || !cityId) return el('span', 'sv-missing', '（这条记录不是一座城：命令列表按城给）');
