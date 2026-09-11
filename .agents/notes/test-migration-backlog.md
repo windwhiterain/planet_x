@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 250**（g1 67 / g2 146 / g3 34 / g4 23）；**Rust 171**（+31 探针 ignored）。
-> **sim 74 → 36**（第 7 批搬走/删掉 38 条；其中 1 条是只打印的探针）。
+> 计数：**Python 270**（g1 71 / g2 159 / g3 36 / g4 23）；**Rust 164**（+31 探针 ignored）。
+> **sim 74 → 29**（第 7 批搬走/删掉 45 条；其中 1 条是只打印的探针）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -350,7 +350,23 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 3. **`haul_steps` 的键集与「活着」两半有回合末伪影**：表里多出的舰是**回合末被改派**的，
    而表里 22 行「已沉」是**同回合晚些才沉**的 ⇒ 这两半读面证不了（那条留在 Rust）。
 
-**剩下 36 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第五段（sim 36 → 29）：补读面，一次解锁一簇**
+
+| 新读面 | 解锁 |
+| --- | --- |
+| `factions.贸易禁运`（`{禁运方: 档位}`）+ `--call trade_block_cause` | `trade::trade_block_list_names_the_blocker_and_the_tier`（3 seed **17,712** 条；同源复核逐条目相等） |
+| `--call mond_drift` / `mond_arrival_chance` | `mond` 两条**纯函数测**（`roll=0` 必然蒙对、**任意有限深度都还有胜算**、门槛 = `arrival_eps ÷ drift_per_au`） |
+| `factions.mond_presence` / `factions.mond_target` + 两个同名 `--call` | `knowledge` **三条**（带内 ⇒ 强度 0；强度 = 舰数 × `(1+深度×权重)`；深驻泊第 48 回合学满） |
+| （不需要新面） | `haul::a_haul_route_alternates_legs_because_of_the_cargo` —— 声明的 `Haul{from,to}` **本来就在** `ships.order_effective` 上，3 seed **11,621** 步零违规 |
+
+**两条方法论**（都值得复用）：
+1. **先问「这个量读面上有没有」再动手**：haul 那条我第一版去「推」路线（拿观测到的装卸天体反推），
+   单路线舰里还有 196 处反例——而**声明的路线就在读面上**。推出来的东西不可信。
+2. **法条不一定能照抄**：`m' = m + rate×(target−m)` 看似现成，但两列都是**回合末**的值，
+   而 `step_knowledge` 用的是**走那一刻**的在场强度 ⇒ 最大偏差 0.0267（只看「目标稳定」的回合
+   也还有 77 处）。**先量偏差再写判据**，别把时序当公式。
+
+**剩下 29 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
@@ -358,9 +374,10 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 * **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints` 1）、`route_depth`（`mond` 1）、
   `ideology_similarity`（`ideology` 2）——第 5 批那套现成的。
 * **还能用同一配方做的**：`haul::a_hired_delivery_splits_the_cargo_between_carrier_and_shipper`
-  （`contract_delivered` 事件带 `amount`/`cut`，抽成比落在 `[share, share_max]`——**但池子去向那半
-  事件里没有**）、`governance` 的两条 A/B（要能写 `mond_control`）、`knowledge` 的两条
-  （要「在场强度」这个量，现在只有带内舰数）。
+  （`contract_delivered` 事件带 `amount`/`cut`，抽成比落在**配置区间** `[share, share_max]`；
+  ⚠ **池子去向那半**事件里没有，要搬就得把分账两头也进事件/读面）；
+  `governance::player_welfare_budget…`（要能读「按库存价值比例支付」，现在产出/贸易同时在动库存）；
+  `combat::fleet_air_defense_covers_nearby_missile_targets`（要构造编队）。
 * **要新读面列**：`factions.贸易禁运`（trade 1）、`ships`/`faction_process` 的「在场强度」
   （knowledge 3，现在是**带内舰数**，而机制用的是 `1 + 深度 × depth_weight`）、
   `haul_steps` 的 from/to（haul 1）。再加一个 `--call mond_drift` / `nav_roll` 能解 mond 2。
