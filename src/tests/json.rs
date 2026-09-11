@@ -38,10 +38,24 @@ fn tuple_keys_become_strings() {
         "the tuple key must not collapse into the map"
     );
 
-    // 原生 serde_json 确实做不了这件事（守住这条测试的动机）。
+    // 2026-10：`json::key2` 适配器上线后，**原生** serde_json 也能编这两张元组键的表了
+    // （键写成 `名|序号`）——这条断言因此从 `is_err` 翻成 `is_ok`。`to_value` 剩下的价值是
+    // 「**任何**古怪键类型（枚举/嵌套元组/整数）都一律字符串化」的通用兜底。
     assert!(
-        serde_json::to_value(&state).is_err(),
-        "serde_json cannot key a map by a tuple"
+        serde_json::to_value(&state).is_ok(),
+        "key2 适配器应当让元组键也过得了原生 serde_json"
+    );
+
+    // 更要紧的是**读得回来**：`--save x.json` → `--start x.json` 那条往返（Python 直接改档
+    // 就靠它）。适配器写 `名|序号`、读时按 `|` 拆回元组，两边必须对称。
+    // 比的是**整份再序列化出来的文本**（比逐字段断言更强，而且不用给 `Control<T>` 加 `PartialEq`；
+    // `BTreeMap` 有序 ⇒ 文本确定）。
+    let text = serde_json::to_string(&state).expect("state → JSON");
+    let back: crate::model::State = serde_json::from_str(&text).expect("JSON → state");
+    assert_eq!(
+        serde_json::to_string(&back).expect("再编一次"),
+        text,
+        "JSON 往返回来的状态必须逐字节相同（元组键写 `名|序号`、读按 `|` 拆）"
     );
 }
 

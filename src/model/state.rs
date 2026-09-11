@@ -129,6 +129,7 @@ pub struct State {
     /// 货**不会消失**：没船就冻在产地（矿物不会烂），势力可以攒着等重建舰队、
     /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
     #[serde(default)]
+    #[serde(with = "crate::json::key2")]
     pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
     /// **承包市场**（托运方挂单、承运方接单）的持久状态：挂单簿 + 单号分配器。
     ///

@@ -328,8 +328,10 @@ pub struct ControllableState {
     /// 投资权重竞争（每资源一个 Control）。
     pub construction_budget: BTreeMap<String, Control<f64>>,
     /// 本方各建筑的「建设投资权重」（每建筑一个 Control）。
+    #[serde(with = "crate::json::key2")]
     pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
     /// 本方各建造区的「建造投资权重」（每建造区一个 Control）。
+    #[serde(with = "crate::json::key2")]
     pub build_weights: BTreeMap<BuildKey, Control<f64>>,
     /// 本方各城的「娱乐/福利预算」（每城一个 Control，市场价值/回合）：把资源投入
     /// 城市娱乐以提升忠诚度。这是「枪支与黄油」的现实权衡——花钱安抚居民，就少了

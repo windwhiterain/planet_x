@@ -263,9 +263,35 @@ fn main() {
                 stored = Some(rs);
                 (s, prng)
             }
-            Err(_) => load_initial(path, seed),
+            // ⚠ 兜底到 `load_initial` 时**不要把第一个错吞掉**：档的格式错（比如 JSON 档里
+            // 有个键读不回来）会被写成「初始状态解析失败: Expected opening `(` for struct State」
+            // ——那句 RON 的报错是**兜底路径**发出来的，跟真正的原因没关系。两个错都报出来，
+            // 谁在骗人一眼可见。
+            Err(checkpoint_err) => match load_initial(path, seed) {
+                Ok(got) => got,
+                Err(initial_err) => {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": false,
+                            "code": "ERR_START",
+                            "message": format!(
+                                "{} 两种读法都失败。按 checkpoint 读：{checkpoint_err}；按裸 state 读：{initial_err}",
+                                path.display()
+                            ),
+                        })
+                    );
+                    std::process::exit(10);
+                }
+            },
         },
-        Some(path) => load_initial(path, seed),
+        Some(path) => match load_initial(path, seed) {
+            Ok(got) => got,
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_START", "message": e}));
+                std::process::exit(10);
+            }
+        },
         None => (world::default_state(&config, seed), Prng::new(seed)),
     };
 
