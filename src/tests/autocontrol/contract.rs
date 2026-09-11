@@ -609,6 +609,19 @@ fn a_hired_ship_delivers_to_the_employer_and_pays_itself_in_cargo() {
     state.contracts.contracts.clear();
     state.ships.retain(|s| s.faction_id != "中国");
     state.depot_add("中国", "金星", "碳", 12.0);
+    // 关掉金星的碳开采：否则 8 回合里采出的碳会把「船有没有把货搬走」的读数淹掉。
+    if let Some(city) = state
+        .cities
+        .iter_mut()
+        .find(|c| c.faction_id == "中国" && c.body_id == "金星")
+    {
+        for b in city.buildings.iter_mut() {
+            if b.kind == "mining" && b.resource.as_deref() == Some("碳") {
+                b.kind = "residential".to_string();
+                b.resource = None;
+            }
+        }
+    }
     // 把所有人关系拉正：这一条测的是**运输腿**，不是战争。实测过不这么做会怎样——
     // 美国的驱逐舰在第 2 回合被打沉，于是"交付"这件事根本没发生。
     for f in state.factions.iter_mut() {
@@ -692,13 +705,15 @@ fn a_hired_ship_delivers_to_the_employer_and_pays_itself_in_cargo() {
         (paid / (paid + cut) - (1.0 - share)).abs() < 1e-9,
         "抽成比例必须恰好是 85%（实收 {paid:.3} / 自留 {cut:.3}）"
     );
-    // 货真的从**雇主的货栈**搬走了。
+    // 货真的从**雇主的碳货栈**搬走了。金星货栈里可能同时有别的补给货/副产资源，
+    // 所以只看被承运的那种货：碳。
     let left: f64 = state
         .depots
         .get(&("中国".to_string(), "金星".to_string()))
-        .map(|m| m.values().sum())
+        .and_then(|m| m.get("碳"))
+        .copied()
         .unwrap_or(0.0);
-    assert!(left < 12.0, "受雇的船该把货装走：金星货栈还剩 {left:.2} 件");
+    assert!(left < 12.0, "受雇的船该把碳装走：金星货栈还剩 {left:.2} 件碳");
     // **交付不动信誉**：雇佣形态下信誉只由考核产生（这个用例里 review_round=99，不评）。
     assert!(
         (state.faction("美国").unwrap().reputation - rep_us0).abs() < 1e-9,
@@ -764,5 +779,69 @@ fn mond_control_is_priced_into_throughput_and_acceptance() {
     assert!(
         accept_high > accept_low,
         "非 master 对深空单应更保守：master {accept_high:.4} vs mortal {accept_low:.4}"
+    );
+}
+
+/// **同一受雇方同一回合不会接下多张新单**（P1-3）：撮合前订单只写 `carrier`、不派船，
+/// 若不局部保留，后续订单会把同一批空闲船的运力重复承诺出去。
+#[test]
+fn one_carrier_takes_at_most_one_new_contract_per_round() {
+    let (config, mut state) = fresh(42);
+    state.contracts.contracts.clear();
+    // 只留一艘中国空闲舰作为唯一候选；关系拉暖，避免禁运先把它挡掉。
+    let ship_name = state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == "中国" && s.hull > 0.0)
+        .map(|s| s.name.clone())
+        .expect("用例前提：中国开局有舰");
+    state.ships.retain(|s| s.name == ship_name);
+    for f in state.factions.iter_mut() {
+        f.reputation = 4.0;
+        for v in f.relations.values_mut() {
+            *v = 50.0;
+        }
+    }
+    let throughput = available_throughput(&state, &config, "中国", "金星", "地球");
+    assert!(throughput > 0.0, "用例前提：唯一候选有正运力");
+
+    // 每张单都接近满运力：两张承诺之和 > 可用运力，若同回合都成交就是 P1-3。
+    let capacity = throughput * 0.75;
+    let first = contract(&mut state, &config, "美国", capacity, "金星", "地球", 0.0);
+    let second = contract(&mut state, &config, "美国", capacity, "金星", "地球", 0.0);
+    assert!(
+        capacity * 2.0 > throughput + 1e-9,
+        "用例前提：两张单的承诺运力之和应超过唯一候选的可用运力"
+    );
+
+    // 撮合走派生骰子；找一个让第一张单的 gate/accept 都通过的回合，避免用例随机失败。
+    let c = state.contracts.get(first).unwrap().clone();
+    let gate = eligibility(&config, state.faction("中国").unwrap().reputation, &c);
+    let accept = accept_chance(&state, &config, &c, "中国");
+    let key = format!("契约{first}");
+    let round = (0u32..100_000)
+        .find(|r| {
+            sim::derived_roll("中国", &key, *r, "gate") < gate
+                && sim::derived_roll("中国", &key, *r, "accept") < accept
+        })
+        .expect("派生骰子空间里应存在一个让第一张单通过的回合");
+    state.round = round;
+
+    let mut inputs = crate::model::RoundInputs::default();
+    match_carriers(&mut state, &config, &mut inputs);
+
+    assert_eq!(
+        state
+            .contracts
+            .get(first)
+            .and_then(|c| c.carrier.clone())
+            .as_deref(),
+        Some("中国"),
+        "第一张单该被唯一候选接走——守卫不能空转"
+    );
+    assert_eq!(
+        state.contracts.get(second).and_then(|c| c.carrier.clone()),
+        None,
+        "同一回合同一受雇方不能再接第二张新单（否则会重复承诺空闲运力）"
     );
 }
