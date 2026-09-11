@@ -58,15 +58,22 @@
    * **§8b 没有折叠桶**（静态）：`specview.js` 的**代码**里 `其余` / `sv-th-res` /
      `sv-residual` / `residualCell` / `renderResidualInto` 一个都不许再出现，而追加接线
      （`sv-th-auto` / `sv-td-auto` / `sv-sheet-row-auto` / `residualCols` / `autoTh`）一个都不能少。
-   * **§8c 追加列的名词覆盖率**：中文追加字段名必须查得到解释（走与手工列同一条查词链）；
-     引擎内部的 ASCII 槽位名（`events` 的 `attacker`/`shipper`…）如实记账，不算红
-     ——它们是**引擎缺命名**，不是本机制缺接线。
+   * **§8c 追加列的名词覆盖率**：追加字段名必须查得到解释（走与手工列同一条查词链）。
+     2026-10 第 10 步**收紧**：从前 ASCII 名一律"如实记账、不算红"，现在**一个都不许弹不出
+     解释**——确实还剩下的必须逐条自报（`KNOWN_UNNAMED_AUTO`）并写明理由（实测 1 个：
+     `faction`，批 C 的决策结构体字段）。中文追加名字实测 **78** 个全命中。
    * **§8d 投影对账**（用户要的「把每张声明的表与投影真实列做集合对账」）：
      `(声明 ∪ 追加 ∪ 不看) ∩ 投影列 == 投影列 ∩ 实体 schema 字段`（`--index` 的
      `schema.json`）。为什么不直接 `== 投影列`：投影自己有派生列、也真的丢字段
      （实测 `factions` 不发 `颜色`、`ships` 不发 `坐标`/`攻击历史`），能对的是**交集**。
+   * **§8e 读面自检（数据级）**（2026-10 第 10 步）：**声明过的读列在真世界里必须至少取到过
+     一次非空值**——接手第 9 步随「未组织」页删掉的**运行时**自检 `renderSpecCheck`
+     （列全空 = 引擎改了字段名 / 声明写错词，界面只会安静地印一排「·」）。口径照抄那段
+     运行时自检：只看读列、只看**非空**（`null`/空数组/空串/空对象都不算）；`source: null`
+     的视图另按「路径解析得到东西」算（它不取记录）。实测数字（表数/列数）写进判据文本。
    非恒真由 `play/tests/_g4_negative.py` ㉙（剪断追加路径 ⇒ §8a 红）㉚（桶回来 ⇒ §8b 红）
-   ㉛（删掉一列 ⇒ 不红，但文本必须指出「这一列现在只能靠追加」）盯着。
+   ㉛（删掉一列 ⇒ 不红，但文本必须指出「这一列现在只能靠追加」）㉞（把一条声明列的 `path`
+   改坏 ⇒ §8e 红）㉟（把 `source: null` 那条作用域账的 `path` 改坏 ⇒ §8e 红）盯着。
 
 9. **读面没有页级兜底桶**（§9，2026-10 第 9 步）：用户裁决 *「我不希望有『其余』这样的栏目」*
    在第 8 步删掉了**列级 / 行级**的折叠桶；第 9 步删的是**页级**的同一个概念 —— 左栏那张
@@ -1774,9 +1781,17 @@ def run(h, ck) -> None:
              ) or f"{len(APPEND_MARKERS)} 个接线标记全在，折叠桶 0 处"
                   f"（`residualCols` 把残差摆成 {'、'.join(['th.sv-th-auto', 'td.sv-td-auto', 'div.sv-sheet-row-auto'])}）")
 
-    # 8c. 追加列的**名词覆盖率**：中文追加字段名必须查得到解释（否则 hover 是空框）。
-    #     口径与 §5 对控制行的宽容一致：**ASCII 槽位名**（`events` 的 `attacker`/`shipper`…
-    #     那些是引擎内部枚举的字段名，本来就不是界面名词）如实记账，不算红。
+    # 8c. 追加列的**名词覆盖率**：追加字段名必须查得到解释（否则 hover 是空框）。
+    #
+    # 第 10 步（`feature/event-nouns`）把口径**收紧**了。从前这里只查**中文**追加名，ASCII 的
+    # 一律"如实记账、不算红"——那是对的**过渡**状态（`events` 表那 11 个载荷键还没有中文名），
+    # 但它有个洞：一条**新加的**英文列会静静地混进"记账"里，没人拦。
+    # 现在事件载荷字段全都有了中文名 ⇒ 改成：**追加列一个都不许弹不出解释**；确实还剩下的，
+    # 必须在 `KNOWN_UNNAMED_AUTO` 里**逐条自报 + 写理由**（与 §7.9 的 `not_in_index` 同一套
+    # 纪律：例外要声明、理由要非空），否则红。
+    #
+    # ⚠ 口径与前端一致：`tip.js::attach` 的查词顺序是**显示的那个词 → 字段名**，追加列两者
+    # 都是键名，所以「查得到」= 键名在语料里（`nouns_corpus`）。
     zh_auto: list[str] = []
     ascii_auto: list[str] = []
     for v in covered:
@@ -1785,16 +1800,33 @@ def run(h, ck) -> None:
     zh_names = sorted({x.split(".", 1)[1] for x in zh_auto})
     ascii_names = sorted({x.split(".", 1)[1] for x in ascii_auto})
     no_doc = [k for k in zh_names if k not in nouns_corpus]
+    # 还没名字、也弹不出解释的追加列：**逐条自报**（键名 → 为什么合法）。空 = 一个都没有。
+    # 收紧前的实测：14 个 ASCII 追加列里 13 个**其实弹得出**（语料里有同名词条），
+    # 只有 `faction`（`ai-ships` 的 `decisions.ships[].faction`）真的没有——那是批 C
+    # （决策/派生读面）的活，不在第 10 步（事件载荷）的范围里。
+    KNOWN_UNNAMED_AUTO: dict[str, str] = {
+        "faction": "批 C 未做：`decisions.ships[].faction`（`ShipDecision` 的字段，AI 判定的势力）"
+                   "——事件载荷那一批（第 10 步）不含决策结构体",
+    }
+    unnamed = [k for k in sorted(set(zh_names) | set(ascii_names)) if k not in nouns_corpus]
+    undeclared = [k for k in unnamed if k not in KNOWN_UNNAMED_AUTO]
+    stale_decl = [k for k in KNOWN_UNNAMED_AUTO if k not in unnamed]
     ck.check(f"名词覆盖率·追加列：{len(zh_names)} 个中文追加字段名全都能弹出解释"
-             f"（走与手工列**同一条**查词链；ASCII 槽位名 {len(ascii_names)} 个如实记账）",
-             corpus_ok and not no_doc and len(zh_names) >= 5,
-             "；".join(f"`{k}` 在语料里查不到（hover 空框）" for k in no_doc[:4]) or
-             (f"中文追加字段 {len(zh_names)} 个全部命中语料"
-              f"（{'、'.join(zh_names[:8])}…）；"
-              f"引擎内部 ASCII 槽位 {len(ascii_names)} 个没有中文名词（如 "
-              f"{'、'.join(ascii_names[:6])}）——那几条 hover 弹不出解释，是**引擎缺命名**，"
-              f"不是本机制缺接线"
-              if len(zh_names) >= 5 else f"只算到 {len(zh_names)} 个中文追加字段 ⇒ 判据可能空转了"))
+             f"（走与手工列**同一条**查词链）；追加列里**弹不出解释的 {len(unnamed)} 个**"
+             f"都在声明里逐条写明了理由（ASCII 追加名 {len(ascii_names)} 个）",
+             corpus_ok and not no_doc and not undeclared and len(zh_names) >= 40,
+             "；".join(
+                 [f"`{k}` 在语料里查不到（hover 空框）" for k in no_doc[:4]]
+                 + [f"`{k}` 弹不出解释、也没在 `KNOWN_UNNAMED_AUTO` 里自报（新加的英文列？）"
+                    for k in undeclared[:4]]
+             ) or
+             (f"中文追加字段 {len(zh_names)} 个全部命中语料（{'、'.join(zh_names[:8])}…）；"
+              + (f"弹不出解释的 {len(unnamed)} 个已在声明里带理由："
+                 + "、".join(f"{k}（{KNOWN_UNNAMED_AUTO[k][:24]}…）" for k in unnamed)
+                 if unnamed else "**追加列里弹不出解释的 = 0**")
+              + (f"；⚠ `KNOWN_UNNAMED_AUTO` 里有已修好的陈旧条目 {stale_decl}（该删了）"
+                 if stale_decl else "")
+              if len(zh_names) >= 40 else f"只算到 {len(zh_names)} 个中文追加字段 ⇒ 判据可能空转了"))
 
     # 8d. **对投影真实列**（用户要的「把每张声明的表与投影真实列做集合对账」）：
     #     对 `@state.<表>[*]` 的读面，读面上看得见的字段（声明 ∪ 追加 ∪ 不看）与
@@ -1843,6 +1875,68 @@ def run(h, ck) -> None:
              (f"{'；'.join(proj_evidence)}"
               if (proj_tables >= 3 and proj_live_cols > 0)
               else f"只对到 {proj_tables} 张表 / {proj_live_cols} 个交集字段 ⇒ 判据可能空转了"))
+
+    # 8e. **声明过的读列在真世界里必须真的取到过值**（第 10 步，2026-10）。
+    #
+    # 这一条**接手一个被删掉的运行时自检**：第 9 步随「未组织」页一起删掉了
+    # `app.js::renderSpecCheck`——它原本在浏览器里拿**真的求值器**把每条视图跑一遍，报
+    # 「这一帧哪条列取不到值」。页没了之后这件事**没有任何读者**，而它正是最安静的一类失败：
+    # 引擎改了字段名 / 声明里写错一个词 ⇒ 界面不报错，只是整列印一排「·」。
+    # （第 9 步的提交信息自己把这条记为待办：「值得用一条**数据级**判据补回来」。）
+    #
+    # 口径**照抄那段运行时自检**（不另立一套，见 `_append_probe.js::columnReport`）：
+    #   * 只看**读列**（`leaf` / `owner` / `action` 三类写行不算——它们的 `null` 是
+    #     「这一层还没有叶」，报成"取不到值"是反方向的谎话）；
+    #   * 「取到值」= 这一列在**整表**里至少有一格非空：`null`/`undefined` 不算，
+    #     空数组 / 空串 / 空对象也不算（那正是"有列没数据"的样子）；
+    #   * 求值走 Node 探针里 `specview.js` 自己的 `evalPath` —— 判据不抄第二份求值器。
+    #
+    # `source: null` 的视图（「全局」页那条作用域账）**另算**：它不取任何记录，所以口径更松
+    # ——只要求那几条路径**解析得到东西**（`[]`/`{}` 也算：那是「这一层还没有人表态」的
+    # 正常状态）。塞进主口径会把合法的空账报成红，而完全不查又会让
+    # `@scope.factions` 写错一个词没人报。
+    #
+    # 防空转：视图数 / 列数都写进判据文本并钉下限（实测 14 张有记录的表 130 条读列、
+    # 另有 1 张 `source: null` 的 3 条）。
+    # 非恒真（见 `play/tests/_g4_negative.py` ㉞㉟）：㉞ 把一列的 `path` 改成一个记录上不存在
+    # 的字段（⇒ 这一条**自己**红，报出是哪张表哪一列全空）；㉟ 把 `source: null` 那条账的
+    # `path` 改坏（⇒ 同样自己红，证明那半边也不是恒绿）。
+    ns_views = (got or {}).get("nullSource") or []
+    live_views = [v for v in covered if v.get("cols")]
+    live_cols_total = 0
+    empty_cols: list[str] = []
+    for v in live_views:
+        for c in v["cols"]:
+            live_cols_total += 1
+            if c["nonEmpty"] == 0:
+                empty_cols.append(f"{v['id']}.{c['path']}（{c['rows']} 行里 0 格非空"
+                                  f"{'，非空值也没有' if c['nonNil'] == 0 else '，只有空值'}）")
+    ns_cols = ns_dead = 0
+    for v in ns_views:
+        for c in v.get("cols") or []:
+            ns_cols += 1
+            if c["nonNil"] == 0:
+                ns_dead += 1
+                empty_cols.append(f"{v['id']}.{c['path']}（`source: null`：这条路径在作用域根上"
+                                  f"**解析不出东西**——写错词了？）")
+    # 证据里那一个「真的取到过值」的样本（防空转的证据要看得见**值**，不只是一句"全绿"）。
+    sample = next((f"{v['id']}.{c['path']} = 「{c['sample']}」"
+                   for v in live_views for c in v["cols"] if c["sample"]), "（没有可印的样本）")
+    CK_VIEWS_MIN, CK_COLS_MIN = 10, 80
+    ck.check(f"读面自检（数据级）：{len(live_views)} 张有记录的读面表里，{live_cols_total} 条"
+             f"**声明读列**在整表里都至少取到过一次非空值（另有 {len(ns_views)} 张 "
+             f"`source: null` 的 {ns_cols} 条读列按更松的口径查「解析得到东西」）"
+             f"——接手第 9 步随「未组织」页删掉的运行时自检 `renderSpecCheck`"
+             f"（下限 {CK_VIEWS_MIN} 视图/{CK_COLS_MIN} 列）",
+             bool(got) and not empty_cols and ns_dead == 0
+             and len(live_views) >= CK_VIEWS_MIN and live_cols_total >= CK_COLS_MIN
+             and ns_cols >= 1,
+             "；".join(empty_cols[:5]) or
+             (f"实测 {len(live_views)} 张表 / {live_cols_total} 条读列全部取到过非空值"
+              f"（如 {sample}），另有 {ns_cols} 条作用域账解析得到（可为空数组）"
+              if (len(live_views) >= CK_VIEWS_MIN and live_cols_total >= CK_COLS_MIN
+                  and ns_cols >= 1)
+              else f"只查到 {len(live_views)} 张表 / {live_cols_total} 条读列 ⇒ 判据可能空转了）"))
 
 
     # ══ 9. 读面**没有页级兜底桶**（第 9 步，2026-10）════════════════════════════════

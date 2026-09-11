@@ -11,7 +11,7 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**38 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**40 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
@@ -43,6 +43,11 @@ uv run --project play/planet_xq python play/tests/_g4_negative.py
 「追加接线仍在」那一支点亮（它把 `sv-th-auto` 改回 `sv-th-res` = 断了一根接线）。
 ⚠ ㉕㉖㉙㉚㉝ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
 跑完还原——**真文件一个字节都不碰**（与上面那些 views.json 的注入同一纪律）。
+㉞㉟ 是 §8e 条（**读面自检·数据级**，2026-10 第 10 步：声明过的读列在真世界里必须至少取到过
+一次非空值——接手第 9 步随「未组织」页删掉的**运行时**自检 `renderSpecCheck`）的量具：
+㉞ 把一条**裸字段列**的 `path` 改坏（`trades.moved` → `moved_typo`）；㉟ 把一条**表达式列**
+的 `path` 改坏（`@post.power_share.${势力}` 后面接一个不存在的子字段）——后者**只有 §8e
+看得见**（表达式列不进 §8a 的 `claimed` 口径），是「这一条不是恒绿」的最强证据。
 """
 
 import json
@@ -603,6 +608,41 @@ def main() -> int:
         app9.write_text(orig_app9, encoding="utf-8")
     finally:
         g4_spec.STATIC_JS = static_real
+
+    # ㉞㉟ **读面自检（数据级）**（§8e，2026-10 第 10 步）的量具。这一条接手第 9 步随
+    #     「未组织」页删掉的**运行时**自检 `renderSpecCheck`：声明过的读列在真世界里必须
+    #     至少取到过一次非空值。它的失败样子最安静——引擎改了字段名 / 声明写错一个词，
+    #     界面不报错，只是整列印一排「·」，所以这条守卫自己必须会红：
+    #     ㉞ 把 `trades` 表一条**裸字段列**的 `path` 改坏（`moved` → `moved_typo`）——
+    #        那一列在全表里一格非空都没有 ⇒ §8e 红（同时 §8a 会因"声明了记录上没有的字段"红，
+    #        这是对的：两条从不同角度看同一件事）；
+    #     ㉟ 把 `faction-table` 一条**表达式列**的 `path` 改坏（在真实路径后面接一个不存在的
+    #        子字段）——表达式列**不进** §8a 的 `claimed` 口径（`claimedKeys` 跳过 `@` 开头的
+    #        路径），所以这一条**只有 §8e 看得见**：它是"这一条不是恒绿"的最强证据。
+    COL_CHECK = "读面自检（数据级）"
+
+    d = clone()
+    hit = 0
+    for _, c in walk_columns(d):
+        if isinstance(c, dict) and c.get("path") == "moved":
+            c["path"] = "moved_typo"
+            hit += 1
+    assert hit == 1, "views.json 里没有 `moved` 那一列：判据/声明换了口径？"
+    bad = run_case("declared-column-path-broken", d)
+    if not any(COL_CHECK in n for n in bad):
+        MISBEHAVED.append(f"declared-column-path-broken：§8e 没红（实际红：{bad}）")
+
+    d = clone()
+    hit = 0
+    for _, c in walk_columns(d):
+        if isinstance(c, dict) and c.get("path") == "@post.power_share.${势力}":
+            c["path"] = "@post.power_share.${势力}.并不存在的子字段"
+            hit += 1
+            break
+    assert hit == 1, "views.json 里没有 `@post.power_share.${势力}` 那一列：判据/声明换了口径？"
+    bad = run_case("declared-expr-path-broken", d)
+    if not any(COL_CHECK in n for n in bad):
+        MISBEHAVED.append(f"declared-expr-path-broken：§8e 没红（实际红：{bad}）")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

@@ -62,7 +62,7 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uOuterRatio: { value: CORONA_OUTER_RATIO },
     uIntensity: { value: 0.055 },
     // 色球强度是**另一个量纲**（比日冕亮约 1e4 倍），别和 uIntensity 混为一谈
-    uChromo: { value: 1.0 },
+    uChromo: { value: 5.0 },
     // 片元里拿不到 projectionMatrix（three 只在顶点前缀给），自己传
     uProj: { value: new THREE.Matrix4() },
     // 场景深度：体积积分必须在**最近的实体表面**处停下（见 CORONA_FRAG 里的夹断），
@@ -78,7 +78,7 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     //     那层雾的两个真因（色球漏夹断、相机在体积内深度测试失效）都已经单独修好了。
     //   · **6.0**（现在）：1.5 R ⇒ 0.13，2.5 R ⇒ 6.4e-3（行星轨道处只剩 0.6%，雾基本不可见），
     //     而 3 R 处仍有 1.4e-3 —— 日冕保持可见、有体量，又不至于罩住行星。
-    uFalloff: { value: 6.0 },
+    uFalloff: { value: 2.6 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
   },

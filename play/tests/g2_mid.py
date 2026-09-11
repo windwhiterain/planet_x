@@ -246,18 +246,18 @@ def combat_report(q, tol: float = 1e-9) -> dict:
     salvo_bad: list[str] = []
     salvo_n = skipped_n = no_live = 0
     for r in ev[ev["type"] == "attack"].itertuples(index=False):
-        shots = (r.data or {}).get("shots") or []
+        shots = (r.data or {}).get("逐发") or []
         salvo_n += 1
         if not shots:
             if len(salvo_bad) < 3:
                 salvo_bad.append(f"r{int(r.round)} {r.actor_id}→{r.target_id}: 齐射没带逐发明细")
             continue
-        tot = sum(float(sh.get("damage") or 0.0) for sh in shots)
+        tot = sum(float(sh.get("伤害") or 0.0) for sh in shots)
         if abs(tot - float(r.magnitude or 0.0)) > 0.0101:  # `magnitude` 过 r2
             if len(salvo_bad) < 3:
                 salvo_bad.append(f"r{int(r.round)} {r.actor_id}→{r.target_id}: 逐发之和 {tot:.4f}"
                                  f" ≠ 聚合 {r.magnitude}")
-        live = [sh for sh in shots if not sh.get("skipped")]
+        live = [sh for sh in shots if not sh.get("未击发")]
         skipped_n += len(shots) - len(live)
         if not live:
             no_live += 1
@@ -267,13 +267,13 @@ def combat_report(q, tol: float = 1e-9) -> dict:
 
     for r in ev[ev["type"] == "attack"].itertuples(index=False):
         rnd, tgt = int(r.round), r.target_id
-        for sh in (r.data or {}).get("shots") or []:
+        for sh in (r.data or {}).get("逐发") or []:
             out["shots"] += 1
-            dmg = float(sh.get("damage") or 0.0)
-            pen = float(sh.get("hull_pen") or 0.0)
+            dmg = float(sh.get("伤害") or 0.0)
+            pen = float(sh.get("实入船体") or 0.0)
             if pen:
                 hull_lost[(rnd, tgt)] = hull_lost.get((rnd, tgt), 0.0) + pen
-            if sh.get("killed"):
+            if sh.get("补刀"):
                 killed_shot.add((rnd, tgt))
                 kill_checked += 1
                 # **那一发的 `hull_pen` 必须够打掉它自己记下的「开火前船体」**——引擎就是
@@ -281,32 +281,32 @@ def combat_report(q, tol: float = 1e-9) -> dict:
                 # （① 别用 `damage`：`hull_mult` 可 > 1，`hull_pen` 能比 `damage` 大；
                 #   ② 别用「上一回合末的船体」：改装的船下一回合 `hull_max` 就变了——
                 #   实测 r86 莱茵4 上一回合 24.0、本回合按 12.0 的船体被打掉。）
-                if pen + tol < float(sh.get("target_hull_before") or 0.0):
+                if pen + tol < float(sh.get("战前船体") or 0.0):
                     if len(kill_short) < 3:
                         kill_short.append(
                             f"r{rnd} {tgt}: 这一发打进 {pen:.4f} < 开火前船体 {sh.get('target_hull_before')}")
             why = None
-            if not (0.0 <= float(sh.get("hit") or 0.0) <= 1.0):
+            if not (0.0 <= float(sh.get("命中折减") or 0.0) <= 1.0):
                 why = "命中折减越界"
-            elif not sh.get("skipped") and not (0.2 <= float(sh.get("hit") or 0.0) <= 1.0):
+            elif not sh.get("未击发") and not (0.2 <= float(sh.get("命中折减") or 0.0) <= 1.0):
                 why = "命中折减低于下限 0.2"
-            elif not sh.get("skipped") and not (0.0 <= float(sh.get("soak") or 0.0) <= 1.0):
+            elif not sh.get("未击发") and not (0.0 <= float(sh.get("护盾吸收比") or 0.0) <= 1.0):
                 why = "护盾吸收比例越界"
-            elif not sh.get("skipped") and not (0.0 <= float(sh.get("armor_soak") or 0.0) <= 0.85):
+            elif not sh.get("未击发") and not (0.0 <= float(sh.get("护甲减伤") or 0.0) <= 0.85):
                 why = "护甲减伤越界"
-            elif not sh.get("skipped") and float(sh.get("def_mult") or 0.0) <= 0.0:
+            elif not sh.get("未击发") and float(sh.get("本土防御") or 0.0) <= 0.0:
                 why = "本土防御倍率非正"
-            elif not sh.get("skipped") and float(sh.get("score_spread") or 0.0) <= 0.0:
+            elif not sh.get("未击发") and float(sh.get("分配乘数") or 0.0) <= 0.0:
                 why = "火力分配乘数非正"
-            elif not sh.get("skipped") and float(sh.get("target_hull_before") or 0.0) <= 0.0:
+            elif not sh.get("未击发") and float(sh.get("战前船体") or 0.0) <= 0.0:
                 why = "打的时候目标已经死了"
             elif dmg < -tol or pen < -tol:
                 why = "伤害为负"
-            elif dmg > tol and (sh.get("skipped") or not sh.get("in_range")):
+            elif dmg > tol and (sh.get("未击发") or not sh.get("在射程内")):
                 why = "射程外/被跳过却掉血"
-            elif float(sh.get("hit") or 0.0) <= tol and dmg > tol:
+            elif float(sh.get("命中折减") or 0.0) <= tol and dmg > tol:
                 why = "没命中却有伤害"
-            elif float(sh.get("pd") or 0.0) <= tol and float(sh.get("pd_absorbed") or 0.0) > tol:
+            elif float(sh.get("点防拦截") or 0.0) <= tol and float(sh.get("点防吃掉") or 0.0) > tol:
                 why = "没有点防却拦截了"
             if why and len(shot_bad.get(why, [])) < 2:
                 shot_bad.setdefault(why, []).append(f"r{rnd} {r.actor_id}→{tgt}: {why}")
@@ -317,10 +317,10 @@ def combat_report(q, tol: float = 1e-9) -> dict:
     #      浅伤折到组件上的量小到看不见）。
     pen: dict = {}
     for e in ev[ev["type"] == "attack"].itertuples(index=False):
-        for sh in (e.data or {}).get("shots") or []:
-            if not sh.get("skipped"):
+        for sh in (e.data or {}).get("逐发") or []:
+            if not sh.get("未击发"):
                 key = (int(e.round), e.target_id)
-                pen[key] = pen.get(key, 0.0) + float(sh.get("hull_pen") or 0.0)
+                pen[key] = pen.get(key, 0.0) + float(sh.get("实入船体") or 0.0)
     shp = q.table("ships")
     series: dict = {}
     for r in shp.itertuples(index=False):
@@ -346,7 +346,7 @@ def combat_report(q, tol: float = 1e-9) -> dict:
 
     # **只有战死的才必须有那一发**：欠费生锈报废（`upkeep_shortfall`）与战斗无关。
     dead = ev[ev["type"] == "ship_destroyed"]
-    dead_cause = {(int(r.round), r.target_id): ((r.data or {}).get("cause") or "?")
+    dead_cause = {(int(r.round), r.target_id): ((r.data or {}).get("击毁原因") or "?")
                   for r in dead.itertuples(index=False)}
     dead_pairs = set(dead_cause)
     combat_dead = {k for k, c in dead_cause.items() if c == "combat"}
@@ -465,7 +465,7 @@ def blueprint_report(q) -> dict:
 
     attr: dict = {}
     for e in ev[ev["type"] == "ship_spawned"].itertuples(index=False):
-        attr[(int(e.round), e.target_id)] = (e.data or {}).get("blueprint")
+        attr[(int(e.round), e.target_id)] = (e.data or {}).get("出厂图")
     mis: list[str] = []
     for r in spawned.itertuples(index=False):
         key = (int(r.round), r.舰名)
@@ -877,7 +877,7 @@ def extract(dirpath):
     for _, r in ev[ev["type"] == "city_razed"].iterrows():
         razings += 1
         data = r["data"] if isinstance(r["data"], dict) else {}
-        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("owner"))
+        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("失城方"))
     bad: list[str] = []
     for _, r in ev[ev["type"] == "colony_founded"].iterrows():
         hit = losers.get((int(r["round"]), r["target_id"]))
@@ -2097,7 +2097,7 @@ def colonize_scenario_checks(h, ck) -> None:
     q = KIT.load(str(proj), only=("events", "ships", "cities"))
     ev = q.table("events")
     hits = [(int(r["round"]), r["actor_id"], r["target_id"]) for _, r in ev[ev["type"] == "colony_founded"].iterrows()
-            if (r["data"] or {}).get("body") == body]
+            if (r["data"] or {}).get("天体") == body]
     sh = q.table("ships")
     mine = sh[sh["舰名"] == ship["舰名"]].sort_values("round")
     modes = [str(m) for m in mine["order_leaf_mode"]]
@@ -2166,7 +2166,7 @@ def defection_scenario_checks(h, ck) -> None:
     ideo0 = {r["势力"]: dict(r["思潮"]) for _, r in sc[sc["round"] == 0].iterrows()}
     ev = q.table("events")
     hits = [(int(r["round"]), (r["data"] or {})) for _, r in ev[ev["type"] == "city_defected"].iterrows()
-            if (r["data"] or {}).get("city") == city["城名"]]
+            if (r["data"] or {}).get("城") == city["城名"]]
     ck.check("合成场景（改旗易帜）：忠诚低于阈值 ⇒ 那座城**倒戈了**（不是被夷平）",
              bool(hits) and not bool(list(rows["已焚毁"])[-1]),
              f"{city['城名']} 的倒戈事件：{hits[:2]}；已焚毁 {list(rows['已焚毁'])[-1]}")
@@ -2174,7 +2174,7 @@ def defection_scenario_checks(h, ck) -> None:
     # 「倒向谁」= 与旧主**思潮相似度最低**的那个（用引擎自己的相似度函数算）。
     sims = {f: call_ideology_similarity(h, ideo0[DEFECT_FID], ideo0[f]) for f in others}
     want = min(sims, key=lambda f: sims[f])
-    got = hits[0][1].get("to") if hits else None
+    got = hits[0][1].get("新主") if hits else None
     ck.check("合成场景（改旗易帜）：倒向的是**思潮最对立**的那一家（相似度最低，引擎自己算的）",
              got == want and got is not None,
              f"相似度 {sorted((round(v, 3), k) for k, v in sims.items())} ⇒ 应倒向 {want}，实为 {got}")
@@ -2471,23 +2471,23 @@ def duel_scenario_checks(h, ck) -> None:
     ev = q.table("events")
     shots = [s for _, r in ev[ev["type"] == "attack"].iterrows()
              if r["target_id"] == dfd["舰名"]
-             for s in (r["data"] or {}).get("shots") or [] if not s.get("skipped")]
+             for s in (r["data"] or {}).get("逐发") or [] if not s.get("未击发")]
     ck.check("合成场景（护盾）：那一仗真的打起来了（有齐射指着守方，防空转）",
              bool(shots), f"{atk['舰名']}→{dfd['舰名']}：{len(shots)} 发"
              if shots else "一發都没有（构造成立？）")
     if not shots:
         return
-    absorbing = [s for s in shots if float(s["absorbed"] or 0) > 1e-9]
-    spill = [s for s in shots if float(s["hull_pen"] or 0) > 1e-9]
+    absorbing = [s for s in shots if float(s["护盾吸收"] or 0) > 1e-9]
+    spill = [s for s in shots if float(s["实入船体"] or 0) > 1e-9]
     ck.check("合成场景（护盾）：**护盾池优先吸收**（`absorbed > 0`，且不超过这一发的伤害）",
-             bool(absorbing) and all(float(s["absorbed"]) <= float(s["damage"]) + 1e-9
+             bool(absorbing) and all(float(s["护盾吸收"]) <= float(s["伤害"]) + 1e-9
                                      for s in absorbing),
              f"{len(absorbing)}/{len(shots)} 发被吸收；样本 "
-             f"{[(round(float(s['damage']), 3), round(float(s['absorbed']), 3)) for s in absorbing[:2]]}")
+             f"{[(round(float(s['伤害']), 3), round(float(s['护盾吸收']), 3)) for s in absorbing[:2]]}")
     ck.check("合成场景（护盾）：**船体也吃溢出**（护盾挡不完 ⇒ `hull_pen > 0`）",
              bool(spill),
              f"{len(spill)}/{len(shots)} 发打进船体；样本 "
-             f"{[(round(float(s['absorbed']), 3), round(float(s['hull_pen']), 3)) for s in spill[:2]]}")
+             f"{[(round(float(s['护盾吸收']), 3), round(float(s['实入船体']), 3)) for s in spill[:2]]}")
     sh = q.table("ships")
     mine = sh[sh["舰名"] == dfd["舰名"]].sort_values("round")
     first, last = mine.iloc[0], mine.iloc[-1]
@@ -2523,11 +2523,11 @@ def pd_cover_scenario_checks(h, ck) -> None:
         proj = h.scenario(f"pd_{tag}", seed, PD_ROUNDS, patch)
         ev = KIT.load(str(proj), only=("events",)).table("events")
         shots = [s for _, r in ev[ev["type"] == "attack"].iterrows() if r["target_id"] == dfd["舰名"]
-                 for s in (r["data"] or {}).get("shots") or [] if not s.get("skipped")]
+                 for s in (r["data"] or {}).get("逐发") or [] if not s.get("未击发")]
         arms[tag] = {"n": len(shots),
-                     "pd": [float(s["pd"] or 0.0) for s in shots],
-                     "absorbed": [float(s["pd_absorbed"] or 0.0) for s in shots],
-                     "dmg": [float(s["damage"] or 0.0) for s in shots]}
+                     "pd": [float(s["点防拦截"] or 0.0) for s in shots],
+                     "absorbed": [float(s["点防吃掉"] or 0.0) for s in shots],
+                     "dmg": [float(s["伤害"] or 0.0) for s in shots]}
     ck.check("合成场景（防空）：两臂都真的打起来了（防空转）",
              arms["near"]["n"] >= 1 and arms["far"]["n"] >= 1,
              f"近处 PD {arms['near']['n']} 发、远处 PD {arms['far']['n']} 发")
@@ -2571,7 +2571,7 @@ def intercept_scenario_checks(h, ck) -> None:
         ev = KIT.load(str(proj), only=("events",)).table("events")
         rows = [r for _, r in ev[ev["type"] == "attack"].iterrows() if r["target_id"] == dfd["舰名"]]
         arms[tag] = {"salvos": len(rows), "mag": [float(r["magnitude"] or 0.0) for r in rows],
-                     "shots": [s for r in rows for s in (r["data"] or {}).get("shots") or []]}
+                     "shots": [s for r in rows for s in (r["data"] or {}).get("逐发") or []]}
     bare, full = arms["bare"], arms["two_pd"]
     ck.check("合成场景（拦光齐射）：两臂都真的打起来了（防空转）",
              bare["shots"] and full["shots"],
@@ -2579,17 +2579,17 @@ def intercept_scenario_checks(h, ck) -> None:
     if not (bare["shots"] and full["shots"]):
         return
     ck.check("合成场景（拦光齐射）：两层点防把这一发**吃光**（`damage == 0`、`hull_pen == 0`、吸收为正）",
-             all(float(s["damage"]) == 0.0 and float(s["hull_pen"]) == 0.0
-                 and float(s["pd_absorbed"]) > 0.0 for s in full["shots"]),
-             f"逐发 {[(s['pd'], s['pd_absorbed'], s['damage']) for s in full['shots']]}")
+             all(float(s["伤害"]) == 0.0 and float(s["实入船体"]) == 0.0
+                 and float(s["点防吃掉"]) > 0.0 for s in full["shots"]),
+             f"逐发 {[(s['点防拦截'], s['点防吃掉'], s['伤害']) for s in full['shots']]}")
     ck.check("合成场景（拦光齐射）：**被拦光也照样留一条 `attack` 事件**（只有伤害是 0）",
              full["salvos"] >= 1 and all(m == 0.0 for m in full["mag"])
-             and all(not s.get("skipped") and s.get("in_range") for s in full["shots"]),
+             and all(not s.get("未击发") and s.get("在射程内") for s in full["shots"]),
              f"{full['salvos']} 条齐射、聚合伤害 {full['mag']}，逐发 skipped/in_range = "
-             f"{[(s.get('skipped'), s.get('in_range')) for s in full['shots']]}")
+             f"{[(s.get('未击发'), s.get('在射程内')) for s in full['shots']]}")
     ck.check("合成场景（拦光齐射）：**空手臂真的打得出伤害**（0 伤害不是世界本来就这样）",
-             all(float(s["pd"]) == 0.0 and float(s["damage"]) > 0.0 for s in bare["shots"]),
-             f"空手臂逐发 pd/damage = {[(s['pd'], s['damage']) for s in bare['shots']]}")
+             all(float(s["点防拦截"]) == 0.0 and float(s["伤害"]) > 0.0 for s in bare["shots"]),
+             f"空手臂逐发 pd/damage = {[(s['点防拦截'], s['伤害']) for s in bare['shots']]}")
     ck.check("合成场景（拦光齐射）：一件武器一发 = **一条逐发记录**（齐射数与逐发数一一对应）",
              all(len(arms[t]["shots"]) == len(arms[t]["mag"]) for t in arms),
              f"齐射 {full['salvos']} 条 / 逐发 {len(full['shots'])} 条")
@@ -2746,7 +2746,7 @@ def ideology_war_scenario_checks(h, ck) -> None:
         pm = [float(x["和平↔军国"]) for x in ff["思潮"]]
         ev = q.table("events")
         kills = [r for _, r in ev[ev["type"] == "ship_destroyed"].iterrows()
-                 if ((r["data"] or {}).get("by") or {}).get("faction") == fid]
+                 if ((r["data"] or {}).get("凶手") or {}).get("势力") == fid]
         arms[tag] = {"pm": pm, "kills": len(kills), "d": round(pm[-1] - pm[0], 4)}
 
     ck.check("合成场景（战争推思潮）：打仗那一臂**真的产生了我方击杀**（防空转）",
