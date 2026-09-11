@@ -22,7 +22,7 @@ colored = "2"
 # double 上（实测：文件里写着 `1.4000000000000001`，默认解析读回来是 `1.4`）——于是
 # 「读出来的数 ≠ 写出去的数」。这个项目全靠数值说话（投影 → Python → diff → 回读），
 # 这种静默漂移必须掐掉。
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 
 [profile.release]
 opt-level = 3
