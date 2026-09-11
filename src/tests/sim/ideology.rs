@@ -6,7 +6,17 @@
 //! 内部标记 `type`）。原件的六个用例逐条复现：**互杀双方各得一分**（各 0）、单方面 +1/−1、
 //! 欠费报废只扣失主、拆城 ±1 而**复垦者不计分**、**活城易主与叛乱兜底同分**、新建城不计分。
 //!
-//! **留在这里的**：另外三条要**往世界里注入事件**再跑 `step_ideology`
+//! `ideology_military_win_drives_toward_militarism` 也走了，但走的是**另一条路**：
+//! 不去注入事件，而是 g2 **造一场真仗**（把最偏和平端那家的舰摆成「一发即沉」、两家关系压到
+//! `-35`）⇒ 那一回合真的产生一次**我方击杀**。实测打仗臂 `和平↔军国` **−0.60 → −0.54**
+//! （Δ=0.06），对照臂（只差关系、无击杀）**−0.60 → −0.57**（Δ=0.03）——正是
+//! `0.05 × (0.5 − (−0.6))` 与 `0.05 × (0 − (−0.6))` 的预期倍差。
+//!
+//! ⚠ **逐回合法条没搬**：`和平↔军国` 列过 `r2`，而每回合位移 ≤ `drift_rate`(0.05)
+//! ⇒ 法条判据会退化成「怎么都过」的假绿；**方向性窗口统计**也试过（20 回合窗口累计信号 vs 轴位移），
+//! 一致率只有 **0.784**——因为信号为 0 的回合会把轴往 0 拉，淹没窗口里那点净信号。
+//!
+//! **留在这里的两条**：要**往世界里注入事件**再跑 `step_ideology`
 //! （`--call` 是**纯函数**契约，加「可变调用」是设计改动）⇒ 归 §4 内部契约/手工世界。
 //!
 //! ## 2026-10（第 7 批）：`low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing`
@@ -33,48 +43,6 @@
 //! 同 = 1、全对极 = 0、恒在 `[0,1]`，外加**对称**与沿轴**单调**（原件只比了「自己 ≥ 别人」）。
 
 use super::*;
-
-/// 思潮：战争得利把「和平↔军国」推向军国端。
-#[test]
-fn ideology_military_win_drives_toward_militarism() {
-    let (config, mut state) = fresh_world(42);
-    let fname = state.factions[2].name.clone(); // 欧盟（开局有舰，且初始偏和平端）
-    let my_ship = state
-        .ships
-        .iter()
-        .find(|s| s.faction_id == fname)
-        .map(|s| s.name.clone())
-        .expect("a ship");
-    let enemy = state
-        .ships
-        .iter()
-        .find(|s| s.faction_id != fname)
-        .map(|s| (s.name.clone(), s.faction_id.clone()))
-        .expect("enemy ship");
-    let start = state.faction(&fname).unwrap().ideology.peace_military;
-
-    // 注入一回合「战争得利」：我方舰击毁一艘敌舰。击毁归属由 Attack→ShipDestroyed 反推。
-    state.events.push(GameEvent::Attack {
-        attacker: my_ship.clone(),
-        target: enemy.0.clone(),
-        damage: 10.0,
-        shots: Vec::new(),
-    });
-    state.events.push(GameEvent::ShipDestroyed {
-        ship: enemy.0.clone(),
-        owner: enemy.1.clone(),
-        class: "corvette".to_string(),
-        cause: DeathCause::Combat,
-        by: None,
-    });
-    step_ideology(&mut state, &config, &RoundSink::default());
-
-    let after = state.faction(&fname).unwrap().ideology.peace_military;
-    assert!(
-        after > start,
-        "war victory must push 和平↔军国 toward 军国: start={start} after={after}"
-    );
-}
 
 /// 思潮：经济转负把「人民↔精英」推向人民端；且所有轴恒可有界、有限。
 #[test]

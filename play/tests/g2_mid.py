@@ -105,6 +105,8 @@ INTC_ATK, INTC_DEF, INTC_ROUNDS = "中国", "美国", 3
 FOLLOW_FID, FOLLOW_ENEMY, FOLLOW_ROUNDS = "中国", "美国", 3
 # 谁给城出钱：把城改成「还差一半没建」，只拨池子。
 SITE_FID, SITE_STOCK = "中国", ("铁", "碳", "硅")
+# 战争推思潮：把最偏和平端那家的舰摆成「一发即沉」的仗。
+IDEO_ROUNDS = 1
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1167,6 +1169,7 @@ def run(h, ck) -> None:
     intercept_scenario_checks(h, ck)
     follow_scenario_checks(h, ck)
     site_build_scenario_checks(h, ck)
+    ideology_war_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2679,6 +2682,64 @@ def site_build_scenario_checks(h, ck) -> None:
     ck.check("合成场景（谁给城出钱）：**本地货栈才是它的钱包**——自然跑 40 回合里确实长过",
              arms["off_natural"][-1] > arms["off_natural"][0] + 1e-9,
              f"非首都城（不给池子）已建面积 {arms['off_natural'][0]} → {arms['off_natural'][-1]}")
+
+
+def ideology_war_scenario_checks(h, ck) -> None:
+    """**合成场景 · 战争得利把思潮推向军国**（`sim/ideology.rs::ideology_military_win_drives_toward_militarism`，第 7 批）。
+
+    两臂**只差两家关系**：把「开局最偏和平端」那个势力的一艘舰装 `railgun`、敌舰船体压到 1
+    （一发即沉），摆在远离首都处；打仗臂把两家关系压到 `-35` ⇒ 那一回合真的产生一次**我方击杀**。
+
+    为什么能这么判：`和平↔军国` 的目标**只**由军事信号决定（`clamp(净战果 × military_scale)`）
+    ⇒ 有击杀时它朝 `+0.5` 走、没击杀时朝 `0` 走，两者的位移**必然差一截**（实测 **0.06 vs 0.03**，
+    正是 `0.05 × (0.5 − (−0.6))` 与 `0.05 × (0 − (−0.6))`）。判据只看**方向 + 谁走得多**，
+    不去逐回合复算法条（列过 `r2`、每回合位移 ≤ 0.05 ⇒ 法条判据会退化成「怎么都过」）。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("factions", "ships"))
+    fac, sh = q0.table("factions"), q0.table("ships")
+    f0 = fac[fac["round"] == 0].copy()
+    f0["pm"] = [float(x["和平↔军国"]) for x in f0["思潮"]]
+    row = f0.loc[f0["pm"].idxmin()]
+    fid = str(row["势力"])
+    armed = set(sh[sh["round"] == 0]["势力"])
+    enemy = next((str(r["势力"]) for _, r in f0.iterrows()
+                  if r["势力"] != fid and r["势力"] in armed), None)
+    ck.check("合成场景（战争推思潮）：找得到「最偏和平端且有敌可打」的那一对（防空转）",
+             enemy is not None and float(row["pm"]) < 0.0,
+             f"{fid}（和平↔军国 = {row['pm']}）vs {enemy}")
+    if enemy is None:
+        return
+    atk = sh[(sh["round"] == 0) & (sh["势力"] == fid)].iloc[0]
+    tgt = sh[(sh["round"] == 0) & (sh["势力"] == enemy)].iloc[0]
+    arms = {}
+    for tag in ("fight", "peace"):
+        patch = {"ships": {
+            atk["舰名"]: {"坐标": [80.0, 80.0], "组件": ["railgun"], "组件耐久": [18.0]},
+            tgt["舰名"]: {"坐标": [80.4, 80.0], "船体": 1.0, "船体上限": 1.0,
+                          "护盾": 0.0, "护盾上限": 0.0}}}
+        if tag == "fight":
+            patch["factions"] = {fid: {"关系": {enemy: -35.0}}, enemy: {"关系": {fid: -35.0}}}
+        proj = h.scenario(f"ideo_{tag}", seed, IDEO_ROUNDS, patch)
+        q = KIT.load(str(proj), only=("factions", "events"))
+        ff = q.table("factions")
+        ff = ff[ff["势力"] == fid].sort_values("round")
+        pm = [float(x["和平↔军国"]) for x in ff["思潮"]]
+        ev = q.table("events")
+        kills = [r for _, r in ev[ev["type"] == "ship_destroyed"].iterrows()
+                 if ((r["data"] or {}).get("by") or {}).get("faction") == fid]
+        arms[tag] = {"pm": pm, "kills": len(kills), "d": round(pm[-1] - pm[0], 4)}
+
+    ck.check("合成场景（战争推思潮）：打仗那一臂**真的产生了我方击杀**（防空转）",
+             arms["fight"]["kills"] >= 1 and arms["peace"]["kills"] == 0,
+             f"打仗臂击杀 {arms['fight']['kills']}｜对照臂 {arms['peace']['kills']}")
+    ck.check("合成场景（战争推思潮）：**战争得利把「和平↔军国」推向军国端**",
+             arms["fight"]["d"] > 0.0 and arms["fight"]["pm"][-1] > arms["fight"]["pm"][0],
+             f"打仗臂 {arms['fight']['pm']}（Δ={arms['fight']['d']}）")
+    ck.check("合成场景（战争推思潮）：**有战果的比没战果的走得多**（对照臂只是朝 0 松弛）",
+             arms["fight"]["d"] > arms["peace"]["d"],
+             f"打仗臂 Δ={arms['fight']['d']} > 对照臂 Δ={arms['peace']['d']}；"
+             f"对照臂 {arms['peace']['pm']}")
 
 
 def id_checks(h, ck, out) -> None:
