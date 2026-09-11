@@ -792,6 +792,34 @@ def extract(dirpath):
     blueprints = blueprint_report(q)
     ids = id_report(q)
 
+    # ⑦ 剧情的机械后果（`src/tests/sim/story.rs::story_effects_apply` 那一条，2026-10 第 7 批）。
+    #    节拍清单与**后果**都从 `meta.story` 读（不写死「prologue 在第 1 回合给谁降多少」），
+    #    逐条对着 `factions.关系` 看方向对不对。⚠ 只判**方向**：关系每回合还会被外交漂移
+    #    与噪声推着走，`after - before == delta` 不是不变量（Rust 原件也只判了方向）。
+    rel_at = {(int(r["round"]), r["势力"]): (r["关系"] or {}) for _, r in q.table("factions").iterrows()}
+    story_bad: list[str] = []
+    rel_checked = 0
+    for b in q.meta.get("story") or []:
+        trig = b.get("trigger") or {}
+        rnd = int(trig.get("round") or 0)
+        if trig.get("kind") != "round_at" or not 1 <= rnd <= ROUNDS:
+            continue
+        if not any(c["id"] == b["id"] for c in chronicle):
+            continue
+        for e in b.get("effects") or []:
+            if e.get("kind") != "relations":
+                continue
+            a, other, delta = e["a"], e["b"], float(e["delta"])
+            before = (rel_at.get((rnd - 1, a)) or {}).get(other)
+            after = (rel_at.get((rnd, a)) or {}).get(other)
+            if before is None or after is None:
+                story_bad.append(f"{b['id']}：读面上找不到 {a}↔{other} 的关系")
+                continue
+            rel_checked += 1
+            if (delta > 0 and not after > before) or (delta < 0 and not after < before):
+                story_bad.append(f"r{rnd} {b['id']}：{a}↔{other} 该{'升' if delta > 0 else '降'} "
+                                 f"{delta:+g}，却 {before:g}→{after:g}")
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
@@ -799,6 +827,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
+            "story_bad": story_bad, "story_rel_checked": rel_checked,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
             "depot": depot_report(q), "dispatch": dispatch_report(q),
             "meta": q.meta}
@@ -1502,6 +1531,14 @@ def story_checks(h, ck, out) -> None:
     ck.check("编年史守卫没有空转（真触发了节拍）",
              all(len(rows) >= len(beats) for rows in chron),
              f"各种子触发 {[len(r) for r in chron]} 条（RoundAt 节拍 {len(beats)} 条）")
+
+    # 机械后果真的落到读面上（`story.rs::story_effects_apply` 那一条，2026-10 第 7 批）：
+    # 声明了 `relations` 后果的每个节拍，触发那一回合那对势力的关系必须往**声明方向**动。
+    eff_bad = [(s, m) for s, d in zip(SEEDS, out) for m in d["story_bad"]]
+    eff_n = sum(d["story_rel_checked"] for d in out)
+    ck.check("剧情的机械后果真的落到读面上（声明的每处关系增减都发生了）", not eff_bad,
+             "；".join(f"seed {s}: {m}" for s, m in eff_bad[:3]) or f"{eff_n} 处关系增减逐处对上")
+    ck.check("剧情后果守卫没有空转（真有声明了关系增减的节拍触发过）", eff_n > 0, f"{eff_n} 处")
 
     # 参与者具体：事件型节拍写的是本回合的实际对象（谁与谁开战、哪座城被夷平、谁建立了殖民地）。
     CONCRETE = {"first_war": 2, "first_raze": 2, "first_colony": 2}

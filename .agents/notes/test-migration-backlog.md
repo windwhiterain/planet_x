@@ -3,7 +3,7 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 179**（g1 45 / g2 83 / g3 28 / g4 23）；**Rust 202**（+31 探针 ignored）。
+> 计数：**Python 186**（g1 50 / g2 85 / g3 28 / g4 23）；**Rust 198**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -14,7 +14,7 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 7 批 A 类 + `capital` 族后）** | **179**（g1 45 / g2 83 / g3 28 / g4 23） | **202**（+31 探针 `#[ignore]`） |
+| **现在（第 7 批：A 类 + `capital`/`inputs`/`story` 三族后）** | **186**（g1 50 / g2 85 / g3 28 / g4 23） | **198**（+31 探针 `#[ignore]`） |
 
 > 组数里 g4 18→23、Rust 196→205 里的大部分是**同步 `main` 带进来的**（另一批在扩 g4 纪律，并给
 > `sim::site_supply`、`domestic_market`、`market`、`contract` 各加了用例），不是第 6 批搬的；
@@ -214,6 +214,31 @@ g2 这边的 `_yards_of` 跟着走：**身份键问引擎**，剩下三个名字
    「`target` ∈ 人口最高**那一组**天体」，不能只认 `max()` 的第一个。
 3. 「Player 不被覆盖」单看一边**证明不了任何事**：默认 `admin_range = 6.0` 而水星到地球才
    0.61 AU ⇒ 评估本来就不想迁。必须补 `Auto` 那半边（同位置、同窗口，它**必须**被评估过）。
+
+**B 类·第 2 族 `inputs`（已落地，3 条 → 整文件删除）**
+
+`round_inputs` 早就在读面上（`order`/`relation_noise`/`rolls`），补齐 `ships`（**保持世界的舰序**）
++ `events[ship_destroyed]` + `factions` + `meta.diplomacy.noise` 就够：
+
+| Rust 原件 | 怎么判（g1 `input_face_shape`，逐回合） |
+| --- | --- |
+| 解算顺序是不重不漏的名单 | 无重复、覆盖回合末还活着的舰、**多出来的每一个都是本回合 `ship_destroyed` 的**、顺序真的被打乱过（≠ 舰表顺序） |
+| 关系噪声覆盖每一对、落在 `±noise` | 对数 = `n(n-1)/2`、无自环、`|v| ≤ meta.diplomacy.noise`（`noise = 0` ⇒ 这一节必须为空） |
+| `rolls` 的形状与内容 | 逐条：`value ∈ [0,1)`、`faction`/`subject` 不空、闸门 xor 加权抽签（导航是第三种：幅度骰）、池非空且**权重和 = `pool_total`**、`picked` 在池里 |
+
+实测 12 回合（`INPUT_ROUNDS` 没改）就盖住**全部 17 个用途**（Rust 原件要的 10 个都在），
+1443 条抽签逐条判过。
+
+**B 类·第 3 族 `story`（半落地）**
+
+`meta.story` 把后果**声明式**发出来了（`{"kind":"relations"|"grant_resources"|"grant_ship"}`）⇒
+g2 的新判据**不写死**「prologue 在第 1 回合给谁降多少」，而是逐条对着 `factions.关系` 看方向
+（3 seed 共 **21 处**）。
+
+* `story_effects_apply` ⇒ **整条搬走**（g2「剧情的机械后果真的落到读面上」）。
+* `story_grant_ship_spawns_a_fleet_member` ⇒ **留下**：它要断言出厂位置**恰好是天体当前位置 +
+  (0.05, 0.05)**，而读面上的 `bodies` 表是**静态**的（只有轨道根数，没有逐回合位置）⇒
+  在 Python 里算那个位置就是把轨道公式抄第二遍（§4 明说不搬）。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 

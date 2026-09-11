@@ -440,6 +440,122 @@ def input_face(h, ck, tmp: Path) -> None:
              len(zero) == 1 and zero[0].get("order") == [] and zero[0].get("relation_noise") == {},
              f"{len(zero)} 行，order={zero[0].get('order') if zero else None}")
 
+    input_face_shape(h, ck, proj, ckpt)
+
+
+def input_face_shape(h, ck, proj: Path, ckpt: Path) -> None:
+    """输入面**逐回合**的三条形状判据（`src/tests/sim/inputs.rs` 那三条搬来，2026-10 第 7 批）。
+
+    读面 = `round_inputs.{order, relation_noise, rolls}` + `ships`（回合末、**保持世界的舰序**）
+    + `events[ship_destroyed]` + `factions` + `meta.diplomacy.noise`：
+
+    | Rust 原件 | 怎么判 |
+    | --- | --- |
+    | 解算顺序是不重不漏的名单 | 逐回合：无重复、覆盖回合末还活着的舰、**多出来的每一个都是本回合 `ship_destroyed` 的**，且顺序真的被打乱过（≠ 舰表顺序） |
+    | 关系噪声覆盖每一对、落在 `±noise` | 逐回合：对数 = `n(n-1)/2`、无自环、`|v| ≤ meta.diplomacy.noise`（`noise = 0` ⇒ 这一节必须为空） |
+    | `rolls` 的形状与内容 | 逐条：`value ∈ [0,1)`、`faction`/`subject` 不空、闸门 xor 加权抽签（导航是第三种：幅度骰）、抽签池非空且**权重和 = `pool_total`**、`picked` 在池里 |
+    """
+    ri = _table(proj, "round_inputs")
+    ships = _table(proj, "ships")
+    ev = _table(proj, "events")
+    facs = _table(proj, "factions")
+    noise_cfg = float(json.loads(h.capture(["--start", str(ckpt), "--meta"]))["diplomacy"]["noise"])
+
+    world_order: dict[int, list[str]] = {}
+    alive: dict[int, list[str]] = {}
+    for s in ships:
+        world_order.setdefault(s["round"], []).append(s["舰名"])
+        if (s.get("船体") or 0.0) > 0.0:
+            alive.setdefault(s["round"], []).append(s["舰名"])
+    fids: dict[int, set[str]] = {}
+    for f in facs:
+        fids.setdefault(f["round"], set()).add(f["势力"])
+    sunk = {(e["round"], e["target_id"]) for e in ev if e["type"] == "ship_destroyed"}
+
+    order_bad: list[str] = []
+    noise_bad: list[str] = []
+    roll_bad: list[str] = []
+    shuffled = dead_extra = 0
+    purposes: dict[str, int] = {}
+    for r in ri:
+        rnd = r["round"]
+        if rnd == 0:  # 起点行没掷过骰子，另有判据盯着
+            continue
+        o = r.get("order") or []
+        if not o:
+            order_bad.append(f"r{rnd}: 解算顺序是空的")
+        if len(set(o)) != len(o):
+            order_bad.append(f"r{rnd}: 顺序里有重复的舰")
+        live, listed = set(alive.get(rnd, [])), set(o)
+        miss = sorted(live - listed)
+        if miss:
+            order_bad.append(f"r{rnd}: 幸存者 {miss[:2]} 不在顺序里")
+        extra = sorted(listed - live)
+        dead_extra += len(extra)
+        not_dead = [n for n in extra if (rnd, n) not in sunk]
+        if not_dead:
+            order_bad.append(f"r{rnd}: {not_dead[:2]} 不在世界末态里、也不是本回合沉的")
+        if len(o) > 3:
+            head = [n for n in world_order.get(rnd, []) if n in listed]
+            if o == head:
+                order_bad.append(f"r{rnd}: 顺序与舰表逐字相同（洗牌没生效？）")
+            else:
+                shuffled += 1
+
+        noise = r.get("relation_noise") or {}
+        pairs = [(a, b, v) for a, row in noise.items() for b, v in row.items()]
+        if noise_cfg > 0.0:
+            n_fid = len(fids.get(rnd, ()))
+            if len(pairs) != n_fid * (n_fid - 1) // 2:
+                noise_bad.append(f"r{rnd}: 只记了 {len(pairs)} 对，{n_fid} 个势力应有 {n_fid * (n_fid - 1) // 2} 对")
+            for a, b, val in pairs:
+                if a == b:
+                    noise_bad.append(f"r{rnd}: {a} 跟自己有噪声")
+                elif abs(val) > noise_cfg + 1e-9:
+                    noise_bad.append(f"r{rnd}: {a}→{b} 的噪声 {val} 超出 ±{noise_cfg}")
+        elif pairs:
+            noise_bad.append(f"r{rnd}: 配置里 noise = 0，却记了 {len(pairs)} 对")
+
+        for x in r.get("rolls") or []:
+            purposes[x["purpose"]] = purposes.get(x["purpose"], 0) + 1
+            where = f"r{rnd} {x['purpose']}"
+            if not (0.0 <= x["value"] < 1.0):
+                roll_bad.append(f"{where}: value={x['value']} 不在 [0,1)")
+            if not x["faction"] or not x["subject"]:
+                roll_bad.append(f"{where}: 指不回「谁、对什么」")
+            th, pt = x["threshold"], x["pool_total"]
+            if th is not None and pt is not None:
+                roll_bad.append(f"{where}: 既是闸门又是抽签")
+            elif th is not None:
+                if not (0.0 <= th <= 1.0) or x["picked"] is None:
+                    roll_bad.append(f"{where}: 闸门的机会值/走了哪一支不对（{th}/{x['picked']}）")
+            elif pt is not None:
+                pool = x.get("pool") or []
+                if pt <= 0.0 or not pool:
+                    roll_bad.append(f"{where}: 抽签池空或总权重 ≤ 0")
+                else:
+                    tot = sum(e["weight"] for e in pool)
+                    if abs(tot - pt) > 1e-9:
+                        roll_bad.append(f"{where}: 池内权重和 {tot} ≠ pool_total {pt}")
+                    if x["picked"] not in {e["name"] for e in pool}:
+                        roll_bad.append(f"{where}: 抽中的 {x['picked']} 不在候选池里")
+            elif x["purpose"] != "nav":
+                roll_bad.append(f"{where}: 除导航外不该有第三种形状（既非闸门也非抽签）")
+
+    ck.check("输入面：解算顺序是不重不漏的名单（多出来的都是本回合战沉）", not order_bad,
+             "；".join(order_bad[:3]) or f"{len(ri) - 1} 个回合全部自洽")
+    ck.check("输入面：解算顺序守卫没有空转（洗牌真打乱过、也真有战沉）",
+             shuffled > 0 and dead_extra > 0, f"{shuffled} 个回合顺序被打乱，多出来的战沉共 {dead_extra} 舰")
+    ck.check("输入面：关系噪声覆盖每一对、且落在 ±%g 里" % noise_cfg, not noise_bad,
+             "；".join(noise_bad[:3]) or f"{len(ri) - 1} 个回合逐对成立")
+    ck.check("输入面：抽签记录形状自洽（闸门 / 加权抽签 / 导航各按各的规矩）", not roll_bad,
+             "；".join(roll_bad[:3]) or f"共 {sum(purposes.values())} 条抽签，形状全对")
+    want = ("gate", "accept", "assign", "role", "review", "renew", "retool", "nav",
+            "style_chance", "blueprint_intent")
+    missing = [w for w in want if w not in purposes]
+    ck.check("输入面：抽签守卫没有空转（十个用途都真的掷过）", not missing,
+             f"缺 {missing}" if missing else f"{len(purposes)} 个用途都出现了：{sorted(purposes)}")
+
 
 def control_fixed_point(h, ck, tmp: Path) -> None:
     """`--control` 是不动点：dump → 原样回传 → 再 dump 必须逐字节相同（`control_read_face.rs`）。
