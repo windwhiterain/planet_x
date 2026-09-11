@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 215**（g1 58 / g2 106 / g3 28 / g4 23）；**Rust 189**（+31 探针 ignored）。
-> **sim 74 → 54**（第 7 批搬走/删掉 20 条）。
+> 计数：**Python 233**（g1 61 / g2 115 / g3 34 / g4 23）；**Rust 180**（+31 探针 ignored）。
+> **sim 74 → 45**（第 7 批搬走/删掉 29 条）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -291,11 +291,32 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 * `site_ledger` 只按 `state.depots` 收站点 ⇒ **回合 0 是空表**；垫国库时用了**预算表**的键
   （`硅/碳/铁`）而选装要 **氦-3/金** ⇒ 「垫厚」那一臂其实还是穷的。**两处都是判据会绿但没在测**。
 
-**剩下 54 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批后半（同一轮里继续，sim 54 → 45）**
+
+| 族 | 结果 | 靠什么 |
+| --- | --- | --- |
+| `blueprints` 5 | 删（该文件只剩 1 条） | g2 一个合成场景两臂（只差图的 `归属`）：选装/角色/舰队默认/倾向/`order_source` |
+| `knowledge` 2 | 删 | g3 MOND（棘轮 **7652 个顶上势力·回合**、涨 ⇒ 带内必有舰 **1323 次**、前沿**夹逼对账** 477 行）+ g1 开局打点**从配置读** |
+| `shots` 2 | 删 | g2 齐射一级对账（561 条齐射 / 566 发）+ 「至少一发真打出去」 |
+
+**再挂两个 `--call`**：`mond_frontier`（纯函数，掌握到顶给 `null`）。
+
+⚠ 这一轮又抓到三处「判据会绿但没在测」：
+1. **`势力` 过滤**：g2 的「没图可言的舰」第一版没按势力收窄 ⇒ 把别国的舰混进来，角色集合里多出 `Freight`。
+2. **前沿对账的容差**：`MOND 掌握度` 自己过 `r2`，而前沿按**全精度**掌握度算 ⇒ 逐值相等差 ~0.015。
+   改成**夹逼**（拿引擎函数在 `m ± 0.005` 求值）后不再需要任何人肉容差常数。
+3. **`锈 ⇒ 带内没舰` 不成立**：读面给「带内舰数」，目标是「在场强度」（逐舰深度不同）
+   ——实测 123 次回落里 **9 次带内有舰**。只能搬「涨 ⇒ 带内有舰」那半。
+
+**剩下 45 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
-* **要先把「建筑已建面积」做成可写的入口**（`site_supply` 那 2 条 + `governance` 的 A/B）⇒ 一个状态补丁形状能解锁一族；
-* **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints`）、`mond_drift`（`mond`/`knowledge`）、思潮各轴（`ideology`）。
+* **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
+  ⇒ `site_supply` 那 2 条 A/B 造不出来（要么扩引擎的 `--nouns` 声明「map 型属性的键部件」，要么留 §4）。
+* **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints` 1）、`route_depth`（`mond` 1）、
+  `ideology_similarity`（`ideology` 2）——第 5 批那套现成的。
+* **要构造的世界**：`shots` 1（两层点防吃光一发导弹，实测 7×1000 回合里只有 2 条）、
+  `knowledge` 1（够深的在场）、`combat` 里的 PD 屏护/修船 A/B。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 
