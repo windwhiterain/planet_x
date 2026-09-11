@@ -27,7 +27,6 @@ mod ideology;
 mod knowledge;
 mod market;
 mod mond;
-mod shots;
 mod site_supply;
 mod spending;
 mod trade;

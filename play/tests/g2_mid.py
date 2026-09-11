@@ -99,6 +99,8 @@ GOV_FID, GOV_ROUNDS = "中国", 5
 DUEL_ATK, DUEL_DEF, DUEL_GUN, DUEL_ROUNDS = "中国", "美国", "railgun", 3
 # 舰队防空那条：两臂只差 PD 友舰的坐标。
 PD_ATK, PD_DEF, PD_ROUNDS = "中国", "美国", 3
+# 拦光那条：两臂只差守方装不装点防。
+INTC_ATK, INTC_DEF, INTC_ROUNDS = "中国", "美国", 3
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1158,6 +1160,7 @@ def run(h, ck) -> None:
     governance_scenario_checks(h, ck)
     duel_scenario_checks(h, ck)
     pd_cover_scenario_checks(h, ck)
+    intercept_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2511,6 +2514,57 @@ def pd_cover_scenario_checks(h, ck) -> None:
              and min(arms["far"]["dmg"]) > min(arms["near"]["dmg"]),
              f"远处拦截 {arms['far']['pd']}、伤害 {arms['far']['dmg']}；"
              f"近处拦截 {arms['near']['pd']}、伤害 {arms['near']['dmg']}")
+
+
+def intercept_scenario_checks(h, ck) -> None:
+    """**合成场景 · 被拦光的齐射也留一条事件**（`sim/shots.rs::a_fully_intercepted_salvo_still_leaves_an_event`，第 7 批）。
+
+    两臂**只差守方装不装点防**：攻方一发 `missile`，守方空手 / 两层 `point_defense`。
+    「被拦光」这件事长局里几乎不出现（seed 42 / 400 回合里那种齐射只有 **2 条**，多数种子 0 条）
+    ⇒ 只能造。判据：
+
+    * 拦光臂：`pd_absorbed > 0`、`pd` 盖过一发导弹、**`damage == 0` 且 `hull_pen == 0`**，
+      而**那条 `attack` 事件照样在**（`magnitude == 0` 不等于不发事件——这正是这条要回答的那一格）；
+    * 空手臂：`pd == 0` 且 `damage > 0`（防空转：证明「0 伤害」是拦截的功劳）；
+    * 一件武器一发 = **一条逐发记录**。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_intc_probe.json", seed))
+    atk = next(s for s in st["ships"] if s["势力"] == INTC_ATK)
+    dfd = next(s for s in st["ships"] if s["势力"] == INTC_DEF)
+    arms = {}
+    for tag, comps in (("bare", []), ("two_pd", ["point_defense", "point_defense"])):
+        patch = {"ships": {
+            atk["舰名"]: {"坐标": [40.5, 40.0], "组件": ["missile"], "组件耐久": [18.0]},
+            dfd["舰名"]: {"坐标": [40.0, 40.0], "组件": comps, "组件耐久": [18.0] * len(comps)}},
+            "factions": {INTC_ATK: {"关系": {INTC_DEF: -35.0}},
+                         INTC_DEF: {"关系": {INTC_ATK: -35.0}}}}
+        proj = h.scenario(f"intc_{tag}", seed, INTC_ROUNDS, patch)
+        ev = KIT.load(str(proj), only=("events",)).table("events")
+        rows = [r for _, r in ev[ev["type"] == "attack"].iterrows() if r["target_id"] == dfd["舰名"]]
+        arms[tag] = {"salvos": len(rows), "mag": [float(r["magnitude"] or 0.0) for r in rows],
+                     "shots": [s for r in rows for s in (r["data"] or {}).get("shots") or []]}
+    bare, full = arms["bare"], arms["two_pd"]
+    ck.check("合成场景（拦光齐射）：两臂都真的打起来了（防空转）",
+             bare["shots"] and full["shots"],
+             f"空手臂 {len(bare['shots'])} 发、两层点防臂 {len(full['shots'])} 发")
+    if not (bare["shots"] and full["shots"]):
+        return
+    ck.check("合成场景（拦光齐射）：两层点防把这一发**吃光**（`damage == 0`、`hull_pen == 0`、吸收为正）",
+             all(float(s["damage"]) == 0.0 and float(s["hull_pen"]) == 0.0
+                 and float(s["pd_absorbed"]) > 0.0 for s in full["shots"]),
+             f"逐发 {[(s['pd'], s['pd_absorbed'], s['damage']) for s in full['shots']]}")
+    ck.check("合成场景（拦光齐射）：**被拦光也照样留一条 `attack` 事件**（只有伤害是 0）",
+             full["salvos"] >= 1 and all(m == 0.0 for m in full["mag"])
+             and all(not s.get("skipped") and s.get("in_range") for s in full["shots"]),
+             f"{full['salvos']} 条齐射、聚合伤害 {full['mag']}，逐发 skipped/in_range = "
+             f"{[(s.get('skipped'), s.get('in_range')) for s in full['shots']]}")
+    ck.check("合成场景（拦光齐射）：**空手臂真的打得出伤害**（0 伤害不是世界本来就这样）",
+             all(float(s["pd"]) == 0.0 and float(s["damage"]) > 0.0 for s in bare["shots"]),
+             f"空手臂逐发 pd/damage = {[(s['pd'], s['damage']) for s in bare['shots']]}")
+    ck.check("合成场景（拦光齐射）：一件武器一发 = **一条逐发记录**（齐射数与逐发数一一对应）",
+             all(len(arms[t]["shots"]) == len(arms[t]["mag"]) for t in arms),
+             f"齐射 {full['salvos']} 条 / 逐发 {len(full['shots'])} 条")
 
 
 def id_checks(h, ck, out) -> None:
