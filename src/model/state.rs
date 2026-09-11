@@ -128,7 +128,8 @@ pub struct State {
     /// 首都↔首都），所以首都天体的产出免运输直接进池，其余地方的货得等人来运。
     /// 货**不会消失**：没船就冻在产地（矿物不会烂），势力可以攒着等重建舰队、
     /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
-    #[serde(default, deserialize_with = "crate::json::de_keys_ss")]
+    #[serde(default)]
+    #[serde(with = "crate::json::key2")]
     pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
     /// **承包市场**（托运方挂单、承运方接单）的持久状态：挂单簿 + 单号分配器。
     ///

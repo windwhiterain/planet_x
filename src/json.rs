@@ -500,6 +500,75 @@ impl ser::SerializeTupleVariant for KeySeq {
     }
 }
 
+/// **二元键 map 的格式无关适配器**：键写成 `"名|序号"`（与 [`KeyAsString`] 的约定一致）。
+///
+/// 为什么需要它：`to_value` 那条路只**写**（JSON dump 给前端看），读写不对称的后果是
+/// **档存成 JSON 以后读不回来**——实测 `--start w.json` 报
+/// `invalid type: string "水星熔炉基地|21", expected a tuple of size 2`（`InvestKey` =
+/// `(城市名, 建筑序号)`）。而「Python 直接改档」正需要这条往返（合成场景型用例：把库存清零、
+/// 把船体改成一半）。
+///
+/// 用法：`#[serde(with = "crate::json::key2")]` 加在 `BTreeMap<(String, T), V>` 字段上。
+/// ⚠ 它对 **RON 也生效**（一个约定两个格式，反而更好读），所以**旧的 RON 档**里那种元组字面量
+/// 键读不回来了——仓库的规矩是「不考虑向前兼容」，重存一份即可。
+pub mod key2 {
+    use serde::de::{Error as _, MapAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::marker::PhantomData;
+    use std::str::FromStr;
+
+    pub fn serialize<S, K, V>(map: &BTreeMap<(String, K), V>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Display,
+        V: Serialize,
+    {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(map.len()))?;
+        for ((a, b), v) in map {
+            m.serialize_entry(&format!("{a}|{b}"), v)?;
+        }
+        m.end()
+    }
+
+    pub fn deserialize<'de, D, K, V>(d: D) -> Result<BTreeMap<(String, K), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: FromStr + Ord,
+        K::Err: Display,
+        V: Deserialize<'de>,
+    {
+        struct Vis<K, V>(PhantomData<(K, V)>);
+        impl<'de, K, V> Visitor<'de> for Vis<K, V>
+        where
+            K: FromStr + Ord,
+            K::Err: Display,
+            V: Deserialize<'de>,
+        {
+            type Value = BTreeMap<(String, K), V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "一个以 `名|序号` 为键的映射")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut acc: A) -> Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(key) = acc.next_key::<String>()? {
+                    let (a, b) = key.split_once('|').ok_or_else(|| {
+                        A::Error::custom(format!("键 `{key}` 不是 `名|序号` 的形状"))
+                    })?;
+                    let b = b
+                        .parse::<K>()
+                        .map_err(|e| A::Error::custom(format!("键 `{key}` 的序号: {e}")))?;
+                    out.insert((a.to_string(), b), acc.next_value::<V>()?);
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(Vis(PhantomData))
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/json.rs"]
 mod tests;
@@ -513,9 +582,6 @@ mod tests;
 // [`to_value`] 已经把**非字符串的 map key** 转成了 `"城|7"` 这种字符串（见模块文档），
 // 所以反方向只要把这两个形状的键拆回来即可——JSON 里只有这两处：
 
-use serde::Deserialize;
-use std::collections::BTreeMap;
-
 /// 把模型序列化成**给人看、可 diff** 的 JSON（键序 = 结构体声明顺序，见 `preserve_order`）。
 pub fn to_string_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&to_value(value)?)
@@ -526,39 +592,4 @@ pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, serde_j
     serde_json::from_str(text)
 }
 
-/// `(势力, 天体)` 形状的 map 键（[`crate::model::State::depots`] 在用）。
-pub fn de_keys_ss<'de, D, V>(d: D) -> Result<BTreeMap<(String, String), V>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    V: serde::Deserialize<'de>,
-{
-    let raw = BTreeMap::<String, V>::deserialize(d)?;
-    raw.into_iter()
-        .map(|(k, v)| match k.split_once('|') {
-            Some((a, b)) => Ok(((a.to_string(), b.to_string()), v)),
-            None => Err(serde::de::Error::custom(format!(
-                "键 `{k}` 不是 `势力|天体` 形状（存档是被手改过？）"
-            ))),
-        })
-        .collect()
-}
 
-/// `(城, 建筑编号)` 形状的 map 键（`invest_weights` / `build_weights` 在用）。
-pub fn de_keys_su<'de, D, V>(d: D) -> Result<BTreeMap<(String, u32), V>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    V: serde::Deserialize<'de>,
-{
-    let raw = BTreeMap::<String, V>::deserialize(d)?;
-    raw.into_iter()
-        .map(|(k, v)| match k.split_once('|') {
-            Some((a, b)) => b
-                .parse::<u32>()
-                .map(|n| ((a.to_string(), n), v))
-                .map_err(|_| serde::de::Error::custom(format!("键 `{k}` 的建筑编号不是整数"))),
-            None => Err(serde::de::Error::custom(format!(
-                "键 `{k}` 不是 `城|建筑编号` 形状（存档是被手改过？）"
-            ))),
-        })
-        .collect()
-}
