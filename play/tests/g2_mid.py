@@ -845,6 +845,7 @@ def extract(dirpath):
                                       "market_trades", "depots", "factions",
                                       "round_inputs", "body_positions"))
     ev = q.table("events")
+    fac_all = q.table("factions")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
     #    `city_razed`：target = 城、`data.owner` = 丢城的一方；`colony_founded`：actor = 建城方。
@@ -960,6 +961,42 @@ def extract(dirpath):
                 if s["order_effective"] != "Idle":
                     grant_bad.append(f"r{rnd} {s['舰名']}：出厂指令 {s['order_effective']} ≠ Idle")
 
+    # ⑨ 贸易禁运名单（`sim/tests/trade.rs::trade_block_list_names_the_blocker_and_the_tier`，
+    #    第 7 批）。以前只有 `--derived` 的 `metrics.factions[].trade_blocked_by` 读得到 ⇒
+    #    投影侧给 `factions` 补了一列 `贸易禁运`（`{禁运方: 档位}`）。这里只判**结构**，
+    #    「与引擎判据同源」那半在 `trade_block_checks` 里拿 `--call trade_block_cause` 复核。
+    known = set(fac_all["势力"])
+    rel_at = {(int(r["round"]), r["势力"]): (r["关系"] or {}) for _, r in fac_all.iterrows()}
+    war_threshold = float((q.meta.get("combat") or {}).get("war_threshold") or 0.0)
+    TIERS = {"war", "cold", "coalition"}
+    tb_bad: list[str] = []
+    tb_n = 0
+    tb_causes: set = set()
+    tb_at_round: dict = {}
+    for _, r in fac_all.iterrows():
+        rnd, fid = int(r["round"]), r["势力"]
+        for blocker, cause in (r["贸易禁运"] or {}).items():
+            tb_n += 1
+            tb_causes.add(cause)
+            where = f"r{rnd} {blocker}→{fid}"
+            tb_at_round.setdefault(rnd, []).append((blocker, fid, cause))
+            if blocker == fid:
+                tb_bad.append(f"{where}：把自己列进禁运名单了")
+            elif blocker not in known:
+                tb_bad.append(f"{where}：{blocker} 不是这个世界的势力")
+            elif cause not in TIERS:
+                tb_bad.append(f"{where}：没见过这一档（{cause}）")
+            elif cause == "war":
+                # ⚠ `war` 档 = **敌对**（`hostile` = 关系 ≤ `combat.war_threshold`），
+                # 不是「宣战过」——第一版拿 `war_started` 重建去对，整片假红。
+                a = (rel_at.get((rnd, blocker)) or {}).get(fid)
+                b = (rel_at.get((rnd, fid)) or {}).get(blocker)
+                if a is None or b is None:
+                    tb_bad.append(f"{where}：读面上读不到这一对的关系")
+                elif min(a, b) > war_threshold + 1e-9:
+                    tb_bad.append(f"{where}：报的是战争禁运，但两边关系 {a:g}/{b:g} "
+                                  f"都在交战阈值 {war_threshold:g} 之上")
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
@@ -968,6 +1005,8 @@ def extract(dirpath):
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
             "launch": _launch_report(ships),
+            "trade_block": {"n": tb_n, "bad": tb_bad[:4], "causes": sorted(tb_causes),
+                            "rounds": sorted(tb_at_round), "by_round": tb_at_round},
             "story_bad": story_bad, "story_rel_checked": rel_checked,
             "grant_bad": grant_bad, "grant_n": grant_n,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
@@ -1104,6 +1143,7 @@ def run(h, ck) -> None:
     depot_checks(h, ck, out)
     dispatch_checks(h, ck, out)
     new_ship_checks(h, ck, out)
+    trade_block_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2107,6 +2147,51 @@ def call_ideology_similarity(h, a: dict, b: dict) -> float:
     return float(json.loads(h.capture(["--call", "ideology_similarity",
                                        "--args", json.dumps({"a": a, "b": b},
                                                              ensure_ascii=False)]))["value"])
+
+
+def trade_block_checks(h, ck, out) -> None:
+    """**贸易禁运名单**（`sim/tests/trade.rs::trade_block_list_names_the_blocker_and_the_tier`，第 7 批）。
+
+    投影 `factions` 新补了一列 `贸易禁运` = `{禁运方: 档位}`（三档 `war`/`cold`/`coalition`，
+    由 `sim::trade_block_cause` 判定）。判据两半：
+
+    * **结构**（全回合）：名单里没有自己、禁运方是真势力、档位在取值域里，
+      而且 `war` 档**两边关系真的在 `combat.war_threshold` 之下**（`war` 档 = **敌对**，
+      不是「宣战过」——第一版拿 `war_started` 事件去重建，整片假红）；
+    * **同源复核**：挑一个回合，逐个条目问 `--call trade_block_cause(禁运方, 我)`，
+      要求与名单**逐字相等**——这正是「别在读面另编一套」的检查。
+    """
+    rep = [d["trade_block"] for d in out]
+    n = sum(r["n"] for r in rep)
+    bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["bad"]]
+    causes = sorted({c for r in rep for c in r["causes"]})
+    ck.check("禁运名单：没有自己禁运自己、禁运方是真势力、档位在 war/cold/coalition 里、"
+             "`war` 档两边关系真的在交战阈值之下",
+             not bad, "；".join(m for _, m in bad[:3]) or
+             f"{len(SEEDS)} seed 共 {n:,} 条名单，档位 {causes}")
+    ck.check("禁运名单守卫没有空转（真的出现过禁运，且不止一档）",
+             n >= 10 and len(causes) >= 2, f"{n:,} 条、{len(causes)} 档 {causes}")
+
+    # 同源复核：一个回合、逐个条目问引擎。
+    reps = [r for r in rep if r["rounds"]]
+    if not reps:
+        ck.check("禁运名单：同源复核（有可复核的回合）", False, "没有任何回合有禁运条目")
+        return
+    rnd = reps[0]["rounds"][len(reps[0]["rounds"]) // 2]
+    seed = SEEDS[rep.index(reps[0])]
+    ckpt = h.gen(CACHE_ROOT / "scenario" / f"_tb_s{seed}_r{rnd}.json", seed, rnd)
+    mism = []
+    checked = 0
+    for blocker, fid, cause in reps[0]["by_round"][rnd]:
+        want = json.loads(h.capture(["--start", str(ckpt), "--call", "trade_block_cause",
+                                     "--args", json.dumps({"a": blocker, "b": fid},
+                                                           ensure_ascii=False)]))["value"]
+        checked += 1
+        if want != cause:
+            mism.append(f"{blocker}→{fid}：名单 {cause} vs 引擎 {want}")
+    ck.check("禁运名单：与引擎判据**同源**（逐条目问 `--call trade_block_cause`，逐字相等）",
+             bool(mism) is False and checked > 0,
+             "；".join(mism[:3]) or f"第 {rnd} 回合 {checked} 条逐个复核相等")
 
 
 def id_checks(h, ck, out) -> None:

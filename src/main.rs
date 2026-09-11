@@ -693,6 +693,16 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **禁运判据**（第 7 批）：`sim::trade_block_cause(state, config, a, b)` ——
+        // 投影 `factions.贸易禁运` 那一列就是它逐对算出来的，判据据此**同源复核**（别在读面另编一套）。
+        "trade_block_cause" => {
+            let a = args.get("a").and_then(|v| v.as_str()).ok_or("args.a 缺失")?;
+            let b = args.get("b").and_then(|v| v.as_str()).ok_or("args.b 缺失")?;
+            match sim::trade_block_cause(state, config, a, b) {
+                Some(c) => json!(c),
+                None => serde_json::Value::Null,
+            }
+        }
         // **引力异常浸入深度**（第 7 批）：两端可以是天体名（用引擎自己的位置）或 `[x, y]`。
         // 内侧↔内侧 = 0；一端深空 = 那一端；两端都深空 = **较浅**那端（航线只穿到那儿）。
         "route_depth" => {

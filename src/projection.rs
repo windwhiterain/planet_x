@@ -726,6 +726,11 @@ fn write_round(
                 // 「谁能去多深」的唯一读数。另两列给出它的**来路**与**结论**：
                 // `mond_ships_in_band` = 此刻在异常区里的自己的活舰数（唯一的知识渠道），
                 // `mond_frontier_au` = 一次到位的最远日心距。
+                // **贸易禁运名单**（第 7 批）：`{谁: 为什么}` —— 三档原因 `war` / `cold` /
+                // `coalition`（`sim::trade_block_cause` 就是判据）。以前只有 `--derived` 的
+                // `metrics.factions[].trade_blocked_by` 读得到，投影侧看不见。
+                "贸易禁运": view.factions.get(&f.name).map(|r| r.trade_blocked_by.clone())
+                    .unwrap_or_default(),
                 "MOND 掌握度": r2(f.mond_control),
                 "mond_ships_in_band": ships_in_band,
                 "mond_frontier_au": frontier_json,
@@ -1414,7 +1419,7 @@ pub fn projection_schema() -> serde_json::Value {
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","城名表":"array","舰名表":"array"},
+                "columns": {"round":"integer","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","贸易禁运":"object","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","城名表":"array","舰名表":"array"},
                 "column_docs": {
                     "势力": "**势力名**（全世界唯一）：势力的**身份键**，join 用（`势力表` / `relations` 的键）。",
                     "城名": "**城名**（全世界唯一）：城的**身份键**，join 用（`城名表` / `events.target_id`）。⚠ 城会**易主**（`faction_id` 变）甚至被**夷平**（`已焚毁` = true，行还在、人口清零）——名字永远跟着这座城。",
@@ -1429,6 +1434,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "observer_lean": "**观测倾向**（头数倍数，中庸 = 1.0）：**科学↔技术**思潮轴给观测那一支的价值加权（科学端 > 1、技术端 < 1）。与集货的 `freight_lean` 同形：**思潮决定倾向，缺口决定量级**。方向与 `governance` 那条「科学端 + 舰不在异常区 = 言行不符」的忠诚惩罚**同向**——同一个世界的两处读法不能自相矛盾。",
                     "observer_count": "**此刻真的在观测的舰数**（有效角色 = `Observe`）。与 `observer_quota` 一起读就能分清「不想学」（配额 0）与「没人可派」（配额 > 0 但这一列跟不上）。",
                     "observer_target": "**观测编队的驻地天体**：候选 = 异常区内的天体，按**期望在场收益**（`p(深度, 掌握度) × (1 + 深度 × depth_weight)`）**抽签**（不是取最大者），每 12 回合重抽一次 ⇒ 掌握度涨上去之后编队会自然往外挪（凡人先蹲前沿边上的海王星/冥王星，掌握度高了才轮到创神星/阋神星）。`null` = 没有带内天体。",
+                    "贸易禁运": "**谁在禁运我、为什么**：`{禁运方: 档位}`。三档 = `war`（交战）/ `cold`（关系冷到 `market.embargo_relation`）/ `coalition`（已倒向联盟的弱者 ↔ 被锁定的霸权）。**空对象 = 没人禁运我**（不是「没算」）。⚠ 这是**别人**对我禁运；我对别人的那一份在他们自己的行里。",
                     "mond_frontier_au": "**前沿海拔**（AU）：一次导航尝试就能精确到位（p = 1）的最远日心距 = `radius + arrival_eps/(drift_per_au×(1−mond_control))`。前沿**之外**不是「进不去」，而是「期望要试 `1/p` 次」；掌握度到顶时为 `null`（无穷远，指哪打哪）。",
                     "freight_lean": "**思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）= `2σ(−1.5 × 尚武度)`，**尚武度 = +和平↔军国 − 自然↔殖民**（两轴同权反号，写死在 `autocontrol::freight`）。中庸 = 1.0 = 旧的硬定编；**军国 < 1**（宁可缺货、宁可雇人也要把船留在战线上）、**和平/殖民 > 1**（殖民要给远方殖民地送补给 ⇒ 多跑运输）。",
                     "freighter_quota": "**目标运输舰条数**（连续量）= `需求 × freight_lean`，需求 = 有积压的货栈数。自动控制按「目标 − 现状」这个**缺口抽签**派人（概率 = 缺口 × 本舰的票 ÷ 同侧总票数，票按运力效率 ⇒ 期望入伙数正好是缺口）。**没有积压 ⇒ 配额 0 ⇒ 全员战舰**。",

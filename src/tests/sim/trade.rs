@@ -1,4 +1,15 @@
 //! 市场与运输：B3 批——把「为什么是这个价 / 我买到的货为什么少了 / 有货在卖我却没买到 /
+//!
+//! ## 2026-10（第 7 批）：`trade_block_list_names_the_blocker_and_the_tier` 搬去了 g2
+//!
+//! 投影 `factions` 新补了一列 **`贸易禁运`** = `{禁运方: 档位}`（以前只有 `--derived` 的
+//! `metrics.factions[].trade_blocked_by` 读得到）。判据两半：
+//! * **结构**（3 seed 共 **17,712** 条）：没有自己禁运自己、禁运方是真势力、档位在
+//!   `war`/`cold`/`coalition` 里，且 `war` 档**两边关系真的 ≤ `combat.war_threshold`**；
+//! * **同源复核**：挑一个回合逐条目问新挂的 `--call trade_block_cause`，要求逐字相等。
+//!
+//! ⚠ `war` 档 = **敌对**（`hostile` = 关系 ≤ 阈值），**不是**「宣战过」：第一版拿
+//! `war_started`/`war_ended` 重建去对账，整片假红。
 //! 这趟货为什么没运回来 / 哪处货栈在积压」从**算完就扔**变成读面。
 //!
 //! 清单与批次见 `.agents/notes/step-intermediates.md` §6（B3）。规矩同 B1/B2：观测与过程
@@ -33,59 +44,6 @@
 //!   读面（施工图 §5 第 3–4 批）。
 
 use super::*;
-
-/// **禁运三档**：`trade_blocked_by` 是一张「谁 + 为什么」的名单，三个原因都来自
-/// `trade_block_cause`（战争 / 关系冷 / 联盟封锁），且**战争那一档必须在 `view.wars` 里**。
-#[test]
-fn trade_block_list_names_the_blocker_and_the_tier() {
-    let (config, mut state) = fresh_world(7);
-    let mut rng = Prng::new(7);
-    let mut view = view_from_state(&state, &config);
-    for _ in 0..20 {
-        view = advance(&mut state, &config, &mut rng);
-    }
-    const TIERS: [&str; 3] = ["war", "cold", "coalition"];
-    let mut seen = std::collections::BTreeSet::new();
-    let mut entries = 0usize;
-    for (fid, row) in &view.factions {
-        for (blocker, cause) in &row.trade_blocked_by {
-            entries += 1;
-            assert_ne!(blocker, fid, "{fid} 把自己列进禁运名单了");
-            assert!(
-                state.faction(blocker).is_some(),
-                "{blocker} 不是这个世界的势力"
-            );
-            assert!(
-                TIERS.contains(&cause.as_str()),
-                "没见过这一档：{blocker} → {fid} = {cause}"
-            );
-            seen.insert(cause.clone());
-            if cause == "war" {
-                let pair = if fid < blocker {
-                    (fid.clone(), blocker.clone())
-                } else {
-                    (blocker.clone(), fid.clone())
-                };
-                assert!(
-                    view.wars.contains(&pair)
-                        || view.wars.contains(&(pair.1.clone(), pair.0.clone())),
-                    "{blocker} 与 {fid} 报的是战争禁运，但 `view.wars` 里没有这一对"
-                );
-            }
-            // 名单与判据同源：拿引擎的函数复核一遍（这正是「别在读面另编一套」的检查）。
-            let want = trade_block_cause(&state, &config, blocker, fid);
-            assert_eq!(
-                want.map(|c| c.to_string()).as_deref(),
-                Some(cause.as_str()),
-                "{blocker} → {fid} 的原因与引擎判据不一致"
-            );
-        }
-    }
-    assert!(
-        entries >= 1,
-        "20 回合里一次禁运都没有——这条守卫会退化成空转（见过 {seen:?}）"
-    );
-}
 
 /// **每艘在跑运输的舰都有一步记录**：`haul_steps` 的键集恰好是「本回合按 `Haul` 跑过的舰」。
 ///
