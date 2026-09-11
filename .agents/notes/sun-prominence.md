@@ -6,7 +6,7 @@
 > 量具：[shot-harness.md](shot-harness.md)、`scripts/shots/refstat.mjs`
 
 用户的目标是两张参考图：**SDO/AIA 304Å 的真日面**（定形态与配色），
-以及一张**高对比的艺术渲染**（`scratch/ref/sun2.png`，定"光从里往外迸发"的亮度层次）。
+以及一张**高对比的艺术渲染**（`refs/sun2.png`，定"光从里往外迸发"的亮度层次）。
 原话（按时间）：
 - 「把太阳的日珥做成这个效果」
 - 「重点不是颜色分布近似，重点是**纹理**，以及**日珥的形态** —— 那种很多**须须喷发出来**的感觉」
@@ -327,7 +327,7 @@ node scripts/shots/run.mjs --solve 192,62,8   →  HDR [0.5627, 0.0756, 0.0026]
 ## 9. 量具（这一轮新加的）
 
 ```bash
-node scripts/shots/refstat.mjs scratch/ref/sdo-304.png            # 自动找日面
+node scripts/shots/refstat.mjs refs/sdo-304.png            # 自动找日面
 node scripts/shots/refstat.mjs ref.png --disk 236.8,145.4,112     # 手动给圆心+半径
 node scripts/shots/refstat.mjs ref.png --box 120,240,520,220      # 只量一块矩形（特写图）
 node scripts/shots/refstat.mjs ours.png ref.png                   # 并排对比
