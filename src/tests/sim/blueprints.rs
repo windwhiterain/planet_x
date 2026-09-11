@@ -1,5 +1,19 @@
 //! 设计图（`--apply` 的 blueprint 叶）与船坞下水：出厂快照、图上的**倾向**、`order_source`、悬空指针停产、买不起就不下水。夹具 `attach_blueprint`/`spawn_at`/`stock` 在 `super`。
 
+//! ## 2026-10：能只看数据的那几条搬去了 `play/tests/g2_mid.py`
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `editing_a_blueprint_does_not_touch_existing_ships` / `retuning_a_design_never_touches_ships_already_in_space` | g2「**出厂快照不随时间变**」（一条舰的选装一生恒定，400 条舰零漂移） | `ships.components` 与 `blueprints.components` 都在读面上 |
+//! | `ship_spawned_event_carries_the_blueprint_only_when_there_is_one` | g2「造舰事件的图归因与舰表一致」（374 条事件） | 事件层 `ship_spawned.data.blueprint` ↔ 舰表 `blueprint` |
+//! | `designs_are_deduped_by_class_and_signature` | g2「图按 `(舰级, 选装)` 去重」（18,691 个签名） | 图库表逐回合可查 |
+//! | `a_class_drift_between_the_yard_and_its_design_is_reconciled` | g2「建造区挂了图就必须挂到存在的图上」+「舰级不符只是**滞后**、会自己收敛」（16,709 个建造区·回合；实测 3 行不符、最长滞后 1 回合） | `cities.buildings[].{ship_type,blueprint}` + 图库表 |
+//!
+//! **留在这里的**：`a_player_pinned_design_and_its_yard_are_left_alone`、`a_dangling_pointer_is_left_dangling`、
+//! `only_unreferenced_selfmade_designs_are_reaped`、`the_ai_creates_a_design_for_every_yard_it_owns`
+//! ——前三条要**拨控制叶/删指针**造 A/B，第四条要「每个区的**有效**归属」（读面只有逐个区自己的
+//! `blueprint` 指针，判不出「AI 该不该给它建图」）。
+
 use super::*;
 
 /// **出厂快照**（§7.1-1）：船坞挂了 `Player` 图 ⇒ 下水那艘舰的选装就是图上的选装。
@@ -75,53 +89,6 @@ fn spawn_uses_the_yard_blueprint() {
         );
     }
     let _ = (cid, bid);
-}
-
-/// **改图不碰已经下水的舰**（§7.1-2，`ship-blueprint.md` §3.1 的可检查形式）。
-#[test]
-fn editing_a_blueprint_does_not_touch_existing_ships() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国".to_string();
-    stock(&mut state, &config, &fid, 400.0);
-    let (_, _, class) = attach_blueprint(
-        &mut state,
-        &config,
-        &fid,
-        "护卫甲",
-        "corvette",
-        &["kinetic", "ion_drive"],
-        (None, None, None),
-        ControlMode::Player,
-    );
-    let name = spawn_at(&mut state, &config, &fid, &class, "地球", Some("护卫甲"));
-    let before = state.ship(&name).cloned().expect("the new ship");
-
-    // 改图：换选装（写值即接管，仍然是 Player）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫甲", "components": ["plasma"], "mode": "Player"}
-    ]}]});
-    let report = apply_patch(&mut state, &config, &diff).expect("editing a blueprint applies");
-    assert!(report.is_clean(), "改图本身必须干净：{:?}", report.skipped);
-
-    let after = state
-        .ship(&name)
-        .cloned()
-        .expect("the old ship is still there");
-    assert_eq!(
-        after.components, before.components,
-        "**已下水的舰的选装是快照**，改图不许动它"
-    );
-    assert_eq!(after.hull_max, before.hull_max);
-    assert_eq!(after.shield_max, before.shield_max);
-    assert_eq!(after.component_hp, before.component_hp);
-
-    // 再下水一艘 ⇒ 带**新**选装。
-    let name2 = spawn_at(&mut state, &config, &fid, &class, "地球", Some("护卫甲"));
-    assert_eq!(
-        state.ship(&name2).unwrap().components,
-        vec!["plasma".to_string()],
-        "之后下水的舰按**新**图装配"
-    );
 }
 
 /// **图的选装是出厂规格**（本轮改掉的旧语义）：`components` 非空 ⇒ 出厂就按它装配，
@@ -579,45 +546,3 @@ fn a_player_blueprint_that_cannot_be_afforded_waits_for_money() {
     );
 }
 
-/// 出厂事件带上**归因**（哪张图造的），而无图那一路的句子**逐字不变**（digest 拿它当故事板）。
-#[test]
-fn ship_spawned_event_carries_the_blueprint_only_when_there_is_one() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国".to_string();
-    attach_blueprint(
-        &mut state,
-        &config,
-        &fid,
-        "有图",
-        "corvette",
-        &["kinetic", "ion_drive"],
-        (None, None, None),
-        ControlMode::Player,
-    );
-    let with_bp = spawn_at(&mut state, &config, &fid, "corvette", "地球", Some("有图"));
-    let plain = spawn_at(&mut state, &config, &fid, "corvette", "地球", None);
-    let headline = |ship: &str| {
-        state
-            .events
-            .iter()
-            .find_map(|e| match e {
-                GameEvent::ShipSpawned {
-                    ship: s, blueprint, ..
-                } if s == ship => Some((e.headline(), blueprint.clone())),
-                _ => None,
-            })
-            .expect("spawn_ship must emit an event")
-    };
-    let (h_bp, bp) = headline(&with_bp);
-    assert_eq!(bp.as_deref(), Some("有图"));
-    assert!(
-        h_bp.contains("设计图：有图"),
-        "挂了图的事件句子带归因：{h_bp}"
-    );
-    let (h_plain, bp2) = headline(&plain);
-    assert_eq!(bp2, None);
-    assert!(
-        !h_plain.contains("设计图"),
-        "无图那一路的句子不许变（digest 的故事板拿它比对）：{h_plain}"
-    );
-}

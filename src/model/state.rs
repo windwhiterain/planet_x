@@ -62,7 +62,7 @@ use crate::model::*;
 /// serde 忽略**（`Blueprint` 多出的三轴 `#[serde(default)]` ⇒ `None` = 图对倾向沉默），
 /// 于是**旧档能加载**，但**旧的指令归属会回到作用域链**（`Auto`）：那些依赖"全舰队默认"
 /// 的局面会在这一档改变行为。要让旧局面对齐，把指令**逐舰**重写一遍（或在图上写角色）。
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 fn default_schema_version() -> u32 {
     0
 }
@@ -116,6 +116,19 @@ pub struct State {
     /// 纯显示用（不参与战斗/经济语义）；`#[serde(default)]` 让旧档缺字段也能加载。
     #[serde(default)]
     pub ship_name_seq: BTreeMap<FactionId, u64>,
+    /// **建筑 id 的单调计数器**（**永不复用**）。
+    ///
+    /// `Building` 是唯一没有名字的实体（地址 = `(城名, 建筑序号)`，见
+    /// [`BuildingId`](crate::model::BuildingId) 与 `.agents/notes/name-as-unique-key.md` §2），
+    /// 所以那个序号就是它的身份。以前分配器是「每回合扫全场取 `max(id) + 1`」——**最高 id 的
+    /// 建筑一被拆，下个新建筑就拿回那个号**：此刻不会撞号（活着的建筑唯一），但把 id 当**长期
+    /// 引用**（跨回合的 UI 选中态、agent 笔记、两份存档对比）会指错人。
+    ///
+    /// 现在它是一次性校准 + 单向递增：分配 = `max(这个数, 场上 max+1)`（后者是**老档/手改档**
+    /// 的兜底——档可以存成 JSON 被 Python 直接改），写回时只增不减。
+    /// `#[serde(default)]`：0 = 老档缺字段 ⇒ 由 [`migrate`] 校准到 `场上 max + 1`。
+    #[serde(default)]
+    pub next_building_id: BuildingId,
     /// 星际市场的持久状态（挂单/价格/成交量/滑窗需求）。见 [`MarketState`] 与
     /// `.agents/notes/trade-and-sanctions.md`：市场是**真实交换所**（有卖家、有价、
     /// 可禁运、有配给），不是常数价无限供货的自动贩卖机。
@@ -885,6 +898,17 @@ enum StyleAxis {
 /// 设计图那几个字段本来就有 `#[serde(default)]`，缺了会退化成「空库 / 无指针 / 未知回合」，
 /// 与它们各自那一档的接法一致。
 pub fn migrate(state: &mut State) -> Result<(), String> {
+    // **建筑 id 计数器的校准（v23）**：老档没有这个字段（serde default = 0）⇒ 一次性补到
+    // 「场上 max(id) + 1」。写在 `match` **之前**而不是某个版本臂里：它是幂等的（有值就不动），
+    // 而档现在可以被 Python 直接改（JSON 档），手改过的档也该走同一条兜底。
+    if state.next_building_id == 0 {
+        state.next_building_id = state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1);
+    }
     match state.schema_version {
         // v9 及更早：承包市场与设计图都还不存在（各自都是 serde default 的新增字段）⇒ 推号即可。
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => {
@@ -911,7 +935,7 @@ pub fn migrate(state: &mut State) -> Result<(), String> {
         // 这是**有意的行为变化**，不是迁移漏了：要复原旧局面的做法是**逐舰重写指令**。
         // **这里不做「把舰队默认摊到每艘舰」的补丁**：那会把一条早就过期的站桩令**变成**
         // 全舰队的显式指令叶（玩家以后再也看不出它是哪来的），比丢失它更糟。
-        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 => {
+        13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 => {
             state.schema_version = SCHEMA_VERSION;
             Ok(())
         }

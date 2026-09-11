@@ -1255,6 +1255,9 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
         notables: Notables::default(),
         chronicle: Vec::new(),
         ship_name_seq,
+        // 建筑 id 的单调计数器接上开局发出去的号：世界生成按顺序发 0..n-1，所以下一个是 n。
+        // （`migrate` 也会在缺字段的老档上做同样的校准；这里写死是为了**生成即正确**。）
+        next_building_id,
         // 市场从空开始：挂单/价格在第一个回合由各势力的当期富余重新挂出（见
         // `sim::step_market`）——世界生成不预置市场，正如开局不预置成交历史。
         market: MarketState::default(),

@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _harness import KIT, group_main  # noqa: E402
+from _harness import CACHE_ROOT, KIT, group_main  # noqa: E402
 
 SEEDS = (1, 7, 42)
 ROUNDS = 400
@@ -280,7 +280,9 @@ def blueprint_report(q) -> dict:
     out["drift_n"] = len(drift)
     out["drift"] = [f"{k}: {list(v)[:2]}" for k, v in list(drift.items())[:3]]
 
-    design = {(int(r.round), r.faction_id, r.blueprint_id): r for r in bps.itertuples(index=False)}
+    # ⚠ `class` 是 Python 关键字，`itertuples` 会改名 ⇒ 这里存成普通 dict（键名原样）。
+    design = {(int(r["round"]), r["faction_id"], r["blueprint_id"]):
+              {"class": r["class"], "components": r["components"]} for _, r in bps.iterrows()}
     same = prev = neither = 0
     snap_ex: list[str] = []
     spawned = ships[ships["round"] == ships["下水回合"]]
@@ -339,7 +341,71 @@ def blueprint_report(q) -> dict:
             dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['blueprint_id']}）")
         seen[sig] = r["blueprint_id"]
     out["dup_bad"], out["dup_sigs"] = dup, len(seen)
+
+    # 建造区 ↔ 设计图（`autocontrol/blueprints.rs`）：① 有指针 ⇒ 图必须**存在**（不许悬空）；
+    # ② 图与建造区的舰级不符 ⇒ **只允许滞后几回合**（retool 当回合改了舰级，AI 那一趟下一回合
+    # 才把图对齐；实测 3 例全是这样），**窗口末尾不许还挂着不符的图**。
+    cities = q.table("cities")
+    yard_rows = 0
+    dangling: list[str] = []
+    streak: dict = {}
+    bad_streak: dict = {}
+    # ⚠ `last` 必须先取**全局**最大回合：写在循环里累加的话，每一行都会被当成「窗口末尾」。
+    last = int(cities["round"].max())
+    for r in cities.itertuples(index=False):
+        rnd, fid = int(r.round), r.faction_id
+        for b in r.buildings or []:
+            st = b.get("ship_type")
+            if not st:
+                continue
+            yard_rows += 1
+            ptr = b.get("blueprint")
+            key = (r.city_id, b["id"])
+            row = design.get((rnd, fid, ptr)) if ptr else None
+            if ptr and row is None:
+                if len(dangling) < 3:
+                    dangling.append(f"r{rnd} {r.city_id} 建筑{b['id']}：指针「{ptr}」在图库里不存在")
+            if row is not None and row["class"] != st:
+                streak[key] = streak.get(key, 0) + 1
+                bad_streak[key] = bad_streak.get(key, 0) + 1
+                if rnd == last and len(dangling) < 3:
+                    dangling.append(f"窗口末尾 {r.city_id} 建筑{b['id']}：区说造 {st}，图说 {row['class']}")
+            else:
+                streak[key] = 0
+    out["yard_rows"] = yard_rows
+    out["yard_dangling"] = dangling
+    out["yard_max_streak"] = max(bad_streak.values(), default=0)
+    out["yard_mismatch"] = sum(bad_streak.values())
     return out
+
+
+def id_report(q) -> dict:
+    """**建筑 id 永不复用**（`State.next_building_id` 单调计数器）。
+
+    `Building` 是唯一没有名字的实体 ⇒ 它的身份就是 `(城名, 序号)`（见笔记 §2），那个序号**必须**
+    经得起当长期引用：跨回合的 UI 选中态、agent 笔记里的「建筑 21」、两份存档的对比。
+
+    ⚠ 旧分配器是「每回合扫全场取 `max(id) + 1`」⇒ **最高 id 的建筑一被拆，下个新建筑就拿回那个
+    号**。A/B 实测（seed 1 / 400 回合）：旧分配器 **3 个 id 被复用**（91/92/93 在 r104 出现、消失、
+    又在 r128 前后落到另一座城），换单调计数器后 **0 例**。
+
+    判据：一个 id 的出现回合**必须连成一段**（有洞 = 消失后又回来 = 复用了）。
+    """
+    cities = q.table("cities")
+    life: dict = {}
+    last = 0
+    for r in cities.itertuples(index=False):
+        rnd = int(r.round)
+        last = max(last, rnd)
+        for b in r.buildings or []:
+            life.setdefault(b["id"], set()).add(rnd)
+    gaps = [i for i, rs in life.items() if max(rs) - min(rs) + 1 != len(rs)]
+    gone = [i for i, rs in life.items() if max(rs) < last]      # 窗口内消失过（防空转用）
+    sample = []
+    for i in gaps[:3]:
+        rs = sorted(life[i])
+        sample.append(f"id {i}：出现于 {rs[0]}…{rs[-1]} 共 {len(rs)} 个回合（中间有洞）")
+    return {"ids": len(life), "gaps": sample, "gap_n": len(gaps), "gone_n": len(gone)}
 
 
 def extract(dirpath):
@@ -395,6 +461,7 @@ def extract(dirpath):
     # ⑥ 战斗/损伤（`src/tests/sim/combat.rs` 里能只看数据的那几条）。
     combat = combat_report(q)
     blueprints = blueprint_report(q)
+    ids = id_report(q)
 
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
@@ -403,7 +470,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "blueprints": blueprints, "meta": q.meta}
+            "combat": combat, "blueprints": blueprints, "ids": ids, "meta": q.meta}
 
 
 def run(h, ck) -> None:
@@ -426,8 +493,88 @@ def run(h, ck) -> None:
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
     blueprint_checks(h, ck, out)
+    id_checks(h, ck, out)
+    scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def scenario_checks(h, ck) -> None:
+    """**合成场景**：造世界 → 用 Python 改档 → 推进 → 只看数据断言。
+
+    这些用例以前只能在 Rust 里做（`fresh_world(42)` + `state.ship_mut(&name).hull = 6.0` +
+    调内部 API 断言）。现在档能存成 JSON（`--save w.json`，见 `config::CheckpointFormat`）：
+    「造」用 `planet_x`、「捏」用 Python 的 `json` 模块（`h.gen(patch=…)`），**断言仍然只看投影**。
+
+    搬过来的两条（各删掉一条 Rust 原件）：
+
+    ① `combat::damaged_ship_regenerates_hull_each_round`——把一艘舰的船体改成一半、扔到
+       `[80, 80]`（远离本土），每回合应当**恰好**长回 `hull_max × (hull_regen + 本土加成)`：
+       本土加成的有无是**两个离散值**（在不在自家 `home_radius` 内），所以「增量 ∈ {基础, 基础+
+       加成}」是可以逐位判的，不是模糊的「大概长了点」。
+    ② `spending::labor_and_housing_capacity_are_captured_from_this_steps_state`——把一座城的
+       人口压到 1 ⇒ 用工系数掉到 `min_efficiency`（配置值，不是写死的 0.1）；而且**回合 0 那一行
+       的中性值是 1.0**（「这一步还没跑」= 不缺人手，不是「全城没人上工」）。
+    """
+    # ① 护甲再生
+    seed = 42
+    w = h.gen(CACHE_ROOT / "scenario" / "_probe.json", seed)
+    st = h.state_dump(w)
+    ship = st["ships"][0]
+    name, hmax = ship["name"], float(ship["hull_max"])
+    proj = h.scenario("regen", seed, 3, patch={"ships": {name: {"hull": hmax / 2, "position": [80.0, 80.0]}}})
+    q = KIT.load(str(proj), only=("ships", "factions"))
+    rows = q.table("ships")
+    mine = rows[rows["ship_id"] == name].sort_values("round")
+    steps, capped, bad = 0, 0, []
+    hulls = list(mine["hull"])
+    regen = float(mine["hull_regen"].iloc[0])
+    bonus = float(q.table("factions").pipe(lambda t: t[t["faction_id"] == ship["faction_id"]])[
+        "home_regen_bonus"].iloc[0])
+    base, boosted = regen * hmax, (regen + bonus) * hmax
+    for i in range(len(hulls) - 1):
+        delta = hulls[i + 1] - hulls[i]
+        if abs(delta) < 1e-9:
+            capped += 1                       # 已经满了（不超上限）
+        elif abs(delta - base) < 1e-6 or abs(delta - boosted) < 1e-6:
+            steps += 1
+        else:
+            bad.append(f"r{i}→r{i + 1}: 增量 {delta:.6f} 既不是基础 {base:.6f} 也不是含加成 {boosted:.6f}")
+    ck.check("合成场景：受伤的舰每回合按 hull_max × 再生率长回来（本土加成是另一个离散值）",
+             not bad and steps >= 2,
+             "；".join(bad[:2]) or
+             f"{name}（{hmax:g} 船体）：船体 {hulls[0]:.2f} → {hulls[-1]:.2f}，{steps} 次按 {base:.4f}/回合 增长"
+             f"（含加成档 {boosted:.4f}，另有 {capped} 次已满）")
+    ck.check("合成场景：护甲再生守卫没有空转（真的有可长回来的回合）", steps >= 2, f"{steps} 次增量（下限 2）")
+
+    # ② 用工系数
+    city = max(st["cities"], key=lambda c: c["population"])
+    proj2 = h.scenario("labor", seed, 3, patch={"cities": {city["name"]: {"population": 1}}})
+    q2 = KIT.load(str(proj2), only=("city_process",))
+    cp = q2.table("city_process")
+    mine2 = cp[cp["city_id"] == city["name"]].sort_values("round")
+    floor = float(q2.meta["economy"]["min_efficiency"])
+    labor = list(mine2["labor"])
+    housing = float(mine2["housing_capacity"].iloc[-1])
+    ck.check("合成场景：人口压到 1 ⇒ 用工系数掉到 min_efficiency（配置值，不是写死的）",
+             len(labor) >= 2 and abs(labor[0] - 1.0) < 1e-12 and abs(labor[1] - floor) < 1e-9,
+             f"{city['name']}：回合 0 用工 {labor[0]:g}（没跑那一步 ⇒ 中性值 1.0）→ "
+             f"回合 1 {labor[1]:.4f}（下限 {floor:g}），住房容量 {housing:g}")
+    ck.check("合成场景：用工系数守卫没有空转（真有住房容量可算）", housing > 0, f"住房容量 {housing:g}")
+
+
+def id_checks(h, ck, out) -> None:
+    """**建筑 id 永不复用**（State.next_building_id 单调计数器，见 id_report）。"""
+    tag = f"{len(SEEDS)} seed x {ROUNDS} 回合"
+    gaps = sum(d["ids"]["gap_n"] for d in out)
+    total = sum(d["ids"]["ids"] for d in out)
+    gone = sum(d["ids"]["gone_n"] for d in out)
+    sample = next((m for d in out for m in d["ids"]["gaps"]), "")
+    ck.check("建筑 id 一旦消失就不再回来（单调计数器 ⇒ 永不复用）", gaps == 0,
+             f"{sample}（共 {gaps} 个）" if gaps else
+             f"{tag}：{total:,} 个建筑 id 的出现回合都连成一段")
+    ck.check("id 守卫没有空转（真的有 id 在窗口内消失过）", gone >= 5,
+             f"{gone:,} 个 id 在本局内消失（下限 5）")
 
 
 def blueprint_checks(h, ck, out) -> None:
@@ -462,6 +609,18 @@ def blueprint_checks(h, ck, out) -> None:
     sample = next((m for b in bp for m in b["count_bad"]), "")
     ck.check("图表的 ship_count 是算出来的（== 该回合指向它的舰数）", cb == 0,
              sample or f"{tag}：{rows:,} 张图快照的计数全部自洽")
+
+    yr = sum(b["yard_rows"] for b in bp)
+    dg = sum(len(b["yard_dangling"]) for b in bp)
+    sample = next((m for b in bp for m in b["yard_dangling"]), "")
+    ck.check("建造区挂了图就必须挂到**存在**的图上（不许悬空，也不许窗口末尾还挂着不符的图）",
+             dg == 0, f"{sample}（共 {dg} 处）" if dg else
+             f"{tag}：{yr:,} 个「建造区·回合」的图指针全部落在图库里，且没有留下的舰级不符")
+    ms = max((b["yard_max_streak"] for b in bp), default=0)
+    mm = sum(b["yard_mismatch"] for b in bp)
+    ck.check("守守卫没有空转（真检查过建造区）", yr >= 1000, f"{yr:,} 行（下限 1000）")
+    ck.check("舰级不符只是**滞后**、会自己收敛（实测最长滞后）", ms <= 4,
+             f"共 {mm} 行不符，最长连续 {ms} 回合（retool 当回合改了舰级、AI 下一趟把图对齐）")
 
     db = sum(len(b["dup_bad"]) for b in bp)
     sigs = sum(b["dup_sigs"] for b in bp)
