@@ -149,18 +149,19 @@ pub fn plan_faction(
         con_base_money,
     );
 
-    let (dev_alloc, dev_price, dev_unspent) =
+    let (dev_alloc, dev_price, dev_unspent, dev_actual_demand) =
         clear_market(config, b_dev, &dev_money, &dev_demands, dev_price0);
-    let (con_alloc, con_price, con_unspent) =
+    let (con_alloc, con_price, con_unspent, con_actual_demand) =
         clear_market(config, b_con, &con_money, &con_demands, con_price0);
 
     let entry = state.market.domestic.entry(fid.clone()).or_default();
     entry.development.price = dev_price.clone();
     entry.development.unspent = dev_unspent;
-    entry.development.last_demand = sum_demands(&dev_demands);
+    // P2-2：记的是**按最终价、经货币约束后、配给前**的实际需求，不是原始 recipe 需求。
+    entry.development.last_demand = dev_actual_demand;
     entry.construction.price = con_price.clone();
     entry.construction.unspent = con_unspent;
-    entry.construction.last_demand = sum_demands(&con_demands);
+    entry.construction.last_demand = con_actual_demand;
 
     DomesticPlan {
         development: dev_alloc,
@@ -182,16 +183,6 @@ where
             *dst.entry(rt.clone()).or_insert(0.0) += *c * scale;
         }
     }
-}
-
-fn sum_demands(demands: &BTreeMap<CityId, ResourceMap>) -> ResourceMap {
-    let mut out = ResourceMap::new();
-    for d in demands.values() {
-        for (rt, q) in d {
-            *out.entry(rt.clone()).or_insert(0.0) += *q;
-        }
-    }
-    out
 }
 
 fn base_price(config: &GameConfig, rt: &str) -> f64 {
@@ -300,13 +291,13 @@ fn clear_market(
     city_money: &BTreeMap<CityId, f64>,
     base_demands: &BTreeMap<CityId, ResourceMap>,
     mut price: ResourceMap,
-) -> (BTreeMap<CityId, ResourceMap>, ResourceMap, ResourceMap) {
+) -> (BTreeMap<CityId, ResourceMap>, ResourceMap, ResourceMap, ResourceMap) {
     let mut alloc: BTreeMap<CityId, ResourceMap> = base_demands
         .keys()
         .map(|c| (c.clone(), ResourceMap::new()))
         .collect();
     if base_demands.is_empty() {
-        return (alloc, price, supply.clone());
+        return (alloc, price, supply.clone(), ResourceMap::new());
     }
 
     // 补全价格表：所有配置资源 + 供给/需求里出现的资源。
@@ -417,7 +408,7 @@ fn clear_market(
         }
     }
 
-    (alloc, price, unspent)
+    (alloc, price, unspent, total_demand)
 }
 
 #[cfg(test)]
@@ -443,7 +434,7 @@ mod tests {
         db.insert("铁".to_string(), 999.0);
         demands.insert("A".to_string(), da);
         demands.insert("B".to_string(), db);
-        let (alloc, _price, _unspent) = clear_market(
+        let (alloc, _price, _unspent, _demand) = clear_market(
             &config,
             &supply,
             &money,
@@ -468,7 +459,7 @@ mod tests {
         d.insert("铁".to_string(), 100.0);
         demands.insert("A".to_string(), d);
         let p0 = base_price(&config, "铁");
-        let (_alloc, price, _unspent) = clear_market(
+        let (_alloc, price, _unspent, _demand) = clear_market(
             &config,
             &supply,
             &money,
@@ -490,7 +481,7 @@ mod tests {
         d.insert("铁".to_string(), 20.0);
         demands.insert("A".to_string(), d);
         let p0 = initial_price(&config, &ResourceMap::new());
-        let (alloc, price, unspent) = clear_market(&config, &supply, &money, &demands, p0.clone());
+        let (alloc, price, unspent, demand) = clear_market(&config, &supply, &money, &demands, p0.clone());
         for (rt, p) in &p0 {
             assert!(
                 (price.get(rt).copied().unwrap_or(0.0) - *p).abs() < 1e-12,
@@ -504,6 +495,10 @@ mod tests {
             alloc["A"]["铁"]
         );
         assert!(unspent.get("铁").copied().unwrap_or(0.0) <= 1e-9, "供给已被需求吃满");
+        assert!(
+            (demand.get("铁").copied().unwrap_or(0.0) - 20.0).abs() < 1e-9,
+            "last_demand 口径应是配给前的实际需求 20（不是供给配给后的 10）"
+        );
     }
 
     #[test]

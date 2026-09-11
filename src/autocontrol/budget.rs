@@ -98,6 +98,15 @@ pub(crate) fn write_budget(
     modes: &[(String, ControlMode)],
 ) {
     if let Some(c) = state.control_mut(fid.clone()) {
+        // P2-9：清掉本回合不再出现的旧叶子，避免控制读面/后续回合看见“幽灵预算”。
+        // ⚠ Player 叶是玩家的持久命令，即使当前库存里没有这个 key 也保留。
+        {
+            let slot = match kind {
+                BudgetKind::Investment => &mut c.investment_budget,
+                BudgetKind::Construction => &mut c.construction_budget,
+            };
+            slot.retain(|rt, leaf| budget.contains_key(rt) || leaf.mode.is_player());
+        }
         for (rt, value) in budget {
             let mode = modes
                 .iter()
@@ -129,6 +138,37 @@ mod tests {
     use super::*;
     use crate::config::load_config;
     use crate::world::default_state;
+
+    /// **P2-9：`write_budget` 清掉本回合不存在的旧 AI 叶，但保留 Player 命令**。
+    #[test]
+    fn write_budget_prunes_stale_auto_keys_but_keeps_player_commands() {
+        let config = load_config();
+        let mut state = default_state(&config, 42);
+        let fid = state.factions[0].name.clone();
+        {
+            let c = state.control.entry(fid.clone()).or_default();
+            c.construction_budget
+                .insert("旧自动".to_string(), Control::inherit(1.0));
+            c.construction_budget
+                .insert("旧玩家".to_string(), Control::player(2.0));
+        }
+        write_budget(
+            &mut state,
+            fid.clone(),
+            BudgetKind::Construction,
+            &ResourceMap::new(),
+            &[],
+        );
+        let c = state.control(fid).expect("control 还在");
+        assert!(
+            !c.construction_budget.contains_key("旧自动"),
+            "旧 AI 叶应被 prune，避免幽灵预算"
+        );
+        assert!(
+            c.construction_budget.contains_key("旧玩家"),
+            "Player 叶是持久命令，即使当前库存没有该 key 也要保留"
+        );
+    }
 
     /// **P1-5：Player 的 construction 预算也受维护费 reserve 约束**。
     ///
