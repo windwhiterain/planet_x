@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 243**（g1 67 / g2 123 / g3 34 / g4 23）；**Rust 176**（+31 探针 ignored）。
-> **sim 74 → 41**（第 7 批搬走/删掉 33 条；其中 1 条是只打印的探针）。
+> 计数：**Python 250**（g1 67 / g2 146 / g3 34 / g4 23）；**Rust 171**（+31 探针 ignored）。
+> **sim 74 → 36**（第 7 批搬走/删掉 38 条；其中 1 条是只打印的探针）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -328,17 +328,39 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
   而承包投递的「卸货端」与「货主」不是一回事（单路线舰里仍有 196 处反例）。
 * `ideology` 的三条 `step_ideology` 单元测：要**往世界里注入事件**（读面没有事件的写入口）。
 
-**剩下 41 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第四段（sim 41 → 36）：全是「合成场景」**
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `haul::a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool` | g2 玩家钉的常驻运输线（6 条） | 指令 **61 回合一字不变**；r40 装 1.7 件 → r41 **进池**卸货 |
+| `ideology::entertainment_holds_a_distant_city` | g2 重金娱乐拉住远城（4 条） | 重金臂 `0.35→0.52` 逐回合不降；**对照臂 `0.35→0.31` 真在下滑**（防空转） |
+| `fleet::colonize_keeps_player_ownership` | g2 殖民（6 条） | r33 建城、一次性指令花掉变 `Idle`、**叶片全程 `Player`**；早退臂同 |
+| `ideology::low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing` | g2 改旗易帜（4 条） | r1 倒向相似度**最低**那家（`0.0` vs 其余 `0.5`，相似度用 `--call` 现算） |
+| `combat::fire_degrades_components_under_damage` | g2 组件损耗（3 条） | **22,644** 个「没挨打」的舰·回合**零掉血**；238 次真伤里 7 次观察到组件下降 |
+
+**这一段的通用配方**（值得复用）：**捏 + 钉**——
+`h.scenario(patch=…)` 捏**有身份键的实体**（势力思潮/国库、城市忠诚度、舰的坐标与组件），
+`--apply` 钉**玩家叶**（`福利预算`/`城市福利预算`/`Haul`/`Colonize`），然后只看读面。
+**起点回合与目标天体从长局里扫出来**（殖民那条第 29 回合才有空定居点），不写死。
+
+⚠ **这一轮抓到的三处「绿了但没在测」**（都写进注释了）：
+1. **思潮从对照局读**：改旗易帜那条第一版把 `思潮` 从**没打补丁**的投影读 ⇒ 相似度算的是默认值，
+   判据只是**碰巧**还是那一家（修正后是 `0.0` vs `0.5`，才算真的在测）；
+2. **`colony_founded` 的 `target_id` 是城名**，天体在 `data.body`——按天体找一条都找不到；
+3. **`haul_steps` 的键集与「活着」两半有回合末伪影**：表里多出的舰是**回合末被改派**的，
+   而表里 22 行「已沉」是**同回合晚些才沉**的 ⇒ 这两半读面证不了（那条留在 Rust）。
+
+**剩下 36 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
   ⇒ `site_supply` 那 2 条 A/B 造不出来（要么扩引擎的 `--nouns` 声明「map 型属性的键部件」，要么留 §4）。
 * **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints` 1）、`route_depth`（`mond` 1）、
   `ideology_similarity`（`ideology` 2）——第 5 批那套现成的。
-* **能用「捏实体」做的场景（最值得做）**：`governance::player_welfare_budget_is_a_total_value…`
-  （`福利预算` 叶）、`haul::a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`
-  （Player `Haul` 指令）、`ideology::entertainment_holds_a_distant_city`（`娱乐预算` 叶）、
-  `fleet::colonize_keeps_player_ownership`（Player `Colonize` 指令）——都是「钉一片玩家叶 + 看读面」。
+* **还能用同一配方做的**：`haul::a_hired_delivery_splits_the_cargo_between_carrier_and_shipper`
+  （`contract_delivered` 事件带 `amount`/`cut`，抽成比落在 `[share, share_max]`——**但池子去向那半
+  事件里没有**）、`governance` 的两条 A/B（要能写 `mond_control`）、`knowledge` 的两条
+  （要「在场强度」这个量，现在只有带内舰数）。
 * **要新读面列**：`factions.贸易禁运`（trade 1）、`ships`/`faction_process` 的「在场强度」
   （knowledge 3，现在是**带内舰数**，而机制用的是 `1 + 深度 × depth_weight`）、
   `haul_steps` 的 from/to（haul 1）。再加一个 `--call mond_drift` / `nav_roll` 能解 mond 2。
