@@ -17,7 +17,7 @@
 // K/M 橙红），亮度走幂律（绝大多数暗、极少数亮），最亮的那批带十字衍射。
 
 import * as THREE from 'three';
-import { NOISE_GLSL, rnd } from './util.js';
+import { NOISE_GLSL, fbmOct, rnd } from './util.js';
 
 // ---------------------------------------------------------------------------
 // ① 银河带 / 星云（低频，烘 cubemap）
@@ -50,7 +50,7 @@ const SKY_FRAG = /* glsl */`
     // 银心方向（银经 0 附近最亮最厚）。
     float coreness = exp(-pow(length(vec2(dot(d, gu), dot(d, gv) - 1.0)) / 0.85, 2.0));
     // 云状结构：域扰动 fbm，再用 ridged 抠出暗尘带。
-    vec3 wp = warp(d * 5.5, 1.35, 0.0);
+    vec3 wp = warp(d * 5.5, 0.65, 0.0, 0.45);
     float cloud = fbm(wp * 1.7);
     float dust = ridged(d * 7.5 + 3.1);
     // 暗尘带要**黑得下去**（对照 scratch/ref/milkyway-core.jpg：银河最抓人的是亮星云
@@ -77,7 +77,7 @@ const SKY_FRAG = /* glsl */`
       float dd = length(d - nc);
       float fall = exp(-pow(dd / 0.42, 2.0));
       if (fall > 0.002) {
-        vec3 nq = warp(d * 9.0 + float(i) * 21.0, 2.2, 0.0);
+        vec3 nq = warp(d * 9.0 + float(i) * 21.0, 1.07, 0.0, 0.28);
         float fil = ridged(nq * 1.4);
         float wisp = smoothstep(0.42, 0.95, fil) * (0.35 + 0.65 * fbm(nq * 3.1));
         col += NEB_COL[i] * fall * wisp * 0.075;
@@ -114,7 +114,7 @@ export function bakeSky(renderer, res) {
     side: THREE.BackSide,
     depthTest: false,
     depthWrite: false,
-    defines: { FBM_OCT: 4 },
+    uniforms: { uFbmOct: fbmOct(4) },
   });
   const geo = new THREE.SphereGeometry(1, 48, 32);
   const mesh = new THREE.Mesh(geo, mat);
