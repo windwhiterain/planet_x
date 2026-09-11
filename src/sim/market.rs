@@ -115,6 +115,14 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             *world_stock.entry(rt.clone()).or_insert(0.0) += *v;
         }
     }
+    // **口径 A（世界总库存）**：产地货栈里等船运的产出也是世界库存的一部分。
+    // 不把 `depots` 算进来时，`consumed = last_pool + all_production − current_pool`
+    // 会把「刚挖出来、还在货栈等船」的产出误判成消费，系统性抬高价格信号。
+    for depot in state.depots.values() {
+        for (rt, v) in depot {
+            *world_stock.entry(rt.clone()).or_insert(0.0) += *v;
+        }
+    }
     let mut produced: ResourceMap = ResourceMap::new();
     for prod in flow.faction_production.values() {
         for (rt, v) in prod {

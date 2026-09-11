@@ -20,6 +20,7 @@ mod haul;
 mod ideology;
 mod inputs;
 mod knowledge;
+mod market;
 mod mond;
 mod shots;
 mod site_supply;
