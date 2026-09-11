@@ -3,7 +3,7 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 186**（g1 50 / g2 85 / g3 28 / g4 23）；**Rust 198**（+31 探针 ignored）。
+> 计数：**Python 193**（g1 50 / g2 92 / g3 28 / g4 23）；**Rust 196**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -14,7 +14,7 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 7 批：A 类 + `capital`/`inputs`/`story` 三族后）** | **186**（g1 50 / g2 85 / g3 28 / g4 23） | **198**（+31 探针 `#[ignore]`） |
+| **现在（第 7 批：A 类 + `capital`/`inputs`/`story` + C 类第一刀）** | **193**（g1 50 / g2 92 / g3 28 / g4 23） | **196**（+31 探针 `#[ignore]`） |
 
 > 组数里 g4 18→23、Rust 196→205 里的大部分是**同步 `main` 带进来的**（另一批在扩 g4 纪律，并给
 > `sim::site_supply`、`domestic_market`、`market`、`contract` 各加了用例），不是第 6 批搬的；
@@ -239,6 +239,30 @@ g2 的新判据**不写死**「prologue 在第 1 回合给谁降多少」，而�
 * `story_grant_ship_spawns_a_fleet_member` ⇒ **留下**：它要断言出厂位置**恰好是天体当前位置 +
   (0.05, 0.05)**，而读面上的 `bodies` 表是**静态**的（只有轨道根数，没有逐回合位置）⇒
   在 Python 里算那个位置就是把轨道公式抄第二遍（§4 明说不搬）。
+
+**C 类第一刀：新派生表 `body_positions`（已落地）**
+
+**动机**：`bodies` 是**静态**母表（只有轨道根数 + 写表那一刻的位置），而天体在动、`ships.x/y` 是
+绝对坐标 ⇒「这艘舰此刻**相对某个天体**在哪儿」以前**没有读法**。一条表解锁一族。
+
+* `src/projection.rs`：`DERIVED` 加 `body_positions`（`join_on = "天体名表"`、`round = true`）+
+  writer + `write_round` 发射 + `projection_schema` 的条目（**每列一句话**，g4 会逐个对账）。
+  列：`round / 天体名 / x / y`（AU，`r2`；与 `ships.x/y` **同一把绝对坐标尺子**）。
+* **纯追加**：不参与任何计算 ⇒ **digest 逐字不变**（实测）。
+* 既有守卫自动盯上它：`src/tests/projection/mod.rs::derived_tables_are_written_and_declared`
+  （`DERIVED.len() == schema.derived.len()` + 每张声明的表真的写出来）。
+
+**靠它搬走的两条**（sim 63 → 61，Rust 198 → 196）：
+
+| Rust 原件 | 现在住 | 关键 |
+| --- | --- | --- |
+| `fleet::dock_follows_body_and_idle_holds_position` | g2 **合成场景 · 停泊与待命**（4 条判据） | 钉成 `Player` 后：`Dock` 逐回合持久 + 到目标天体的距离**逐回合缩短**（30.79 → 19.59）；`Idle` 的位置**逐字不动**。⚠ 防空转在 `Idle` 那边：窗口里天体真的在公转（否则「位置不动」是废话） |
+| `story::story_grant_ship_spawns_a_fleet_member` | g2「剧情 `grant_ship` 的出厂位置与指令」（2 条判据） | 出厂位置 = **天体这一刻的位置 + (0.05, 0.05)**、指令 `Idle`；判据由 `meta.story` 的 `grant_ship` 驱动（3 seed 共 15 次）。⚠ 读面 `x/y` 过 `r2` ⇒ 偏移只能判到 **±0.01**，判不到 1e-9 |
+
+⚠ **一条踩过的坑（值得记）**：`fleet::dock_…` 一开始我想写成**长局不变量**「`order_effective` 是
+Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，
+因为 AI 会在回合末刚派完 Dock、下一回合开头就改派 ⇒ 那些叶子**从没执行过**。必须像原件那样
+**钉成 `Player`** 才是这条用例本来测的东西。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 

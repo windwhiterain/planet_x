@@ -209,6 +209,16 @@ const DERIVED: &[DerivedTable] = &[
         join_on: "势力表",
         round: true,
     },
+    // **天体逐回合位置**（第 7 批）：`bodies` 是**静态**母表（只有轨道根数 + 写表那一刻的位置），
+    // 而天体在动、`ships.x/y` 是绝对坐标 ⇒ 「这艘舰相对某天体在哪儿」以前**没地方可读**
+    // （`Dock` 跟不跟得上、故事出厂那个 `+0.05` 偏移都判不了）。一回合一行 = 一个天体的位置。
+    DerivedTable {
+        name: "body_positions",
+        table: "idx/body_positions.jsonl",
+        key: "天体名",
+        join_on: "天体名表",
+        round: true,
+    },
     // **本回合的输入面**（B5）：一回合一行 —— 掷出的逐舰解算顺序 + 每对势力的关系噪声 +
     // 抽签记录。它是 `pre` 那一侧的平铺版（`--derived` 不含 events，本表是 `--index` 侧唯一
     // 能读到输入面的地方）。join 键是 `round`——这一面按**回合**读，不按实体。
@@ -238,6 +248,7 @@ struct Writers {
     market_trades: BufWriter<File>,
     haul_steps: BufWriter<File>,
     depots: BufWriter<File>,
+    body_positions: BufWriter<File>,
     round_inputs: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
@@ -266,6 +277,7 @@ impl Writers {
             market_trades: open("market_trades")?,
             haul_steps: open("haul_steps")?,
             depots: open("depots")?,
+            body_positions: open("body_positions")?,
             round_inputs: open("round_inputs")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
@@ -288,6 +300,7 @@ impl Writers {
             &mut self.market_trades,
             &mut self.haul_steps,
             &mut self.depots,
+            &mut self.body_positions,
             &mut self.round_inputs,
             &mut self.bodies,
             &mut self.settlements,
@@ -1311,6 +1324,23 @@ fn write_round(
         }
     }
 
+    // **天体逐回合位置**（第 7 批）：`bodies` 母表只有轨道根数（静态），而 `ships.x/y` 是绝对
+    // 坐标 ⇒ 想知道「这艘舰相对那个天体在哪儿」（Dock 跟没跟上 / 故事出厂的 +0.05 偏移）
+    // 就非得有这一张。**纯追加**：不参与任何计算，digest 逐字不变。
+    for b in &state.bodies {
+        writeln!(
+            w.body_positions,
+            "{}",
+            json!({
+                "round": state.round,
+                "天体名": b.name.clone(),
+                "x": r2(b.position[0]),
+                "y": r2(b.position[1]),
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 /// 本舰叶片自己的表态（没有叶片 = `Inherit`，即"这一层没有说话"）。
@@ -1544,6 +1574,16 @@ pub fn projection_schema() -> serde_json::Value {
                     "class_slots": "该舰级的槽位上限（配置表 `ShipSpec.slots` 的派生量，省得每个配方自己 join meta.json）。null = 舰级不在配置表里（正常状态不会出现）。",
                     "component_cost": "这张图的选装**一次性成本**（Σ组件 `cost`，配置表派生量）。造一艘的总花费还要加上舰级的 `build_cost`（那是进度池的账）。",
                     "launch_waiting": "**进度满了却不下水的可见标记**（用户裁决 Q4(b)）：本回合这张图在某个挂了它的城里，该舰级的进度已经 ≥ `build_points` 却没下水——因为**买不起**它的选装（只对 **Player 归属**的图可能为 true；Auto 图与无图保持旧行为）。进度**不会丢**，下回合攒够钱就下水。",
+                },
+            }),
+            "body_positions" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**天体逐回合位置**（第 7 批）：`bodies` 是**静态**母表（只有轨道根数 + 写表那一刻的位置），而天体在动、`ships.x/y` 是绝对坐标 ⇒ 「这艘舰此刻**相对某个天体**在哪儿」以前没有读法。一行 = 一个天体这一回合的位置；判「跟住了没有」join `ships` 的 `x`/`y`，判「停泊跟不跟得上公转」要逐回合比。",
+                "columns": {"round":"integer","天体名":"string","x":"number","y":"number"},
+                "column_docs": {
+                    "天体名": "天体名（join `bodies` 拿轨道根数、join `ships.x/y` 判相对位置）。",
+                    "x": "这一回合该天体在**日心绝对坐标**里的 x（AU，r2）。⚠ 与 `ships.x` **同一把尺子**（都是绝对坐标）⇒ 相减就是真实距离。",
+                    "y": "同上，y（AU，r2）。⚠ 卫星（`bodies.母天体` 非空）给的是**它自己的绝对坐标**，不是相对主星的偏移。",
                 },
             }),
             "round_inputs" => json!({

@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -61,6 +62,10 @@ FID = "中国"
 CAPITAL_ROUNDS = 49
 # 拨到一个**离人口中心很远**但该势力确实有城的天体（水星熔炉基地在水星）。
 CAPITAL_FAR = "水星"
+# 停泊那条场景（`fleet.rs::dock_follows_body…`）：把一艘钉 `Dock`、另一艘钉 `Idle`。
+# 名字是种子 42 开局的（`DOCK_SHIP` 在前、`IDLE_SHIP` 在后），场景里有一条防空转判据盯着它们还在不在。
+DOCK_SHIP, IDLE_SHIP, DOCK_BODY = "长城", "赤霄", "海王星"
+DOCK_ROUNDS = 12
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -742,7 +747,7 @@ def extract(dirpath):
     """
     q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
                                       "market_trades", "depots", "factions",
-                                      "round_inputs"))
+                                      "round_inputs", "body_positions"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -820,6 +825,45 @@ def extract(dirpath):
                 story_bad.append(f"r{rnd} {b['id']}：{a}↔{other} 该{'升' if delta > 0 else '降'} "
                                  f"{delta:+g}，却 {before:g}→{after:g}")
 
+    # ⑧ 剧情 `grant_ship` 的出厂位置（`story.rs::story_grant_ship_spawns_a_fleet_member`，
+    #    2026-10 第 7 批）：读面补了 `body_positions` 之后，「出厂位置 = 天体这一刻的位置 +
+    #    (0.05, 0.05)」终于判得了（以前 `bodies` 是静态母表，只能靠引擎内部算）。
+    bpos = {(int(r["round"]), r["天体名"]): (r["x"], r["y"])
+            for _, r in q.table("body_positions").iterrows()}
+    by_round = {}
+    for _, s in ships.iterrows():
+        by_round.setdefault(int(s["round"]), {})[s["舰名"]] = s
+    grant_bad: list[str] = []
+    grant_n = 0
+    for b in q.meta.get("story") or []:
+        trig = b.get("trigger") or {}
+        rnd = int(trig.get("round") or 0)
+        if trig.get("kind") != "round_at" or not 1 <= rnd <= ROUNDS:
+            continue
+        if not any(c["id"] == b["id"] for c in chronicle):
+            continue
+        for e in b.get("effects") or []:
+            if e.get("kind") != "grant_ship":
+                continue
+            at, before = by_round.get(rnd, {}), by_round.get(rnd - 1, {})
+            fresh = [s for n, s in at.items()
+                     if n not in before and s["势力"] == e["faction"] and s["舰级"] == e["class"]]
+            if not fresh:
+                grant_bad.append(f"r{rnd} {b['id']}：{e['faction']} 没有多出一艘 {e['class']}")
+                continue
+            grant_n += 1
+            for s in fresh:
+                bp = bpos.get((rnd, e["body"]))
+                if bp is None:
+                    grant_bad.append(f"r{rnd} {b['id']}：读面上没有 {e['body']} 这一回合的位置")
+                    continue
+                # ⚠ 读面的 x/y 都过 `r2`（两位小数）⇒ 偏移只能判到 ±0.01，判不到 1e-9。
+                off = (round(s["x"] - bp[0], 4), round(s["y"] - bp[1], 4))
+                if abs(off[0] - 0.05) > 0.0101 or abs(off[1] - 0.05) > 0.0101:
+                    grant_bad.append(f"r{rnd} {s['舰名']}：出厂偏移 {off} ≠ (0.05, 0.05)")
+                if s["order_effective"] != "Idle":
+                    grant_bad.append(f"r{rnd} {s['舰名']}：出厂指令 {s['order_effective']} ≠ Idle")
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
@@ -828,6 +872,7 @@ def extract(dirpath):
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
             "story_bad": story_bad, "story_rel_checked": rel_checked,
+            "grant_bad": grant_bad, "grant_n": grant_n,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
             "depot": depot_report(q), "dispatch": dispatch_report(q),
             "meta": q.meta}
@@ -966,6 +1011,7 @@ def run(h, ck) -> None:
     scenario_checks(h, ck)
     blueprint_scenario_checks(h, ck)
     capital_scenario_checks(h, ck)
+    dock_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1285,6 +1331,66 @@ def blueprint_scenario_checks(h, ck) -> None:
              f"{class_} 的 rate：批满 {sorted(rates['rich'])} / 批 0 {sorted(rates['poor'])}")
 
 
+def dock_scenario_checks(h, ck) -> None:
+    """**合成场景 · 停泊与待命**：`sim/tests/fleet.rs::dock_follows_body_and_idle_holds_position`。
+
+    这条以前搬不动——「Dock 跟不跟得上公转」要**逐回合的天体位置**，而 `bodies` 是静态母表
+    （只有轨道根数）。第 7 批补了派生表 `body_positions`（一行 = 一个天体这一回合的位置，
+    与 `ships.x/y` 同一把绝对坐标尺子）⇒ 现在读得出来了。
+
+    ⚠ **必须钉成 `Player`**：AI 会在回合末刚派完 Dock、下一回合开头就改派（实测长局里
+    `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，就是这种没执行过的叶子）。
+    钉住归属才是这条用例本来测的东西。
+
+    **防空转的一半在 `Idle` 那边**：天体在走，所以「位置不动」不是「世界静止」的必然结果——
+    那个舰到海王星的距离每回合都在变（30.733 → 30.737），变的只有天体。
+    """
+    seed = SCENARIO_SEED
+    diff = {"control": [{"势力": FID, "指令": [
+        {"舰": DOCK_SHIP, "行为": {"Dock": {"body": DOCK_BODY}}, "归属": "Player"},
+        {"舰": IDLE_SHIP, "行为": "Idle", "归属": "Player"},
+    ]}]}
+    proj = h.scenario_apply("fleet_dock", seed, DOCK_ROUNDS, [diff])
+    q = KIT.load(str(proj), only=("ships", "body_positions"))
+    sh, bp = q.table("ships"), q.table("body_positions")
+
+    body = {(int(r["round"]), r["天体名"]): (r["x"], r["y"]) for _, r in bp.iterrows()}
+    ck.check("合成场景（停泊）：探针世界里那两艘舰与那个天体都在（防空转）",
+             len(sh[sh["舰名"] == DOCK_SHIP]) >= 2 and len(sh[sh["舰名"] == IDLE_SHIP]) >= 2
+             and len(body) >= DOCK_ROUNDS,
+             f"{DOCK_SHIP}/{IDLE_SHIP} 各 {len(sh[sh['舰名'] == DOCK_SHIP])} 行、"
+             f"天体位置 {len(body)} 行")
+
+    rows = {n: sh[sh["舰名"] == n].sort_values("round") for n in (DOCK_SHIP, IDLE_SHIP)}
+    dock_seq = [(int(r["round"]), r["order_effective"], (r["x"], r["y"])) for _, r in rows[DOCK_SHIP].iterrows()]
+    idle_seq = [(int(r["round"]), r["order_effective"], (r["x"], r["y"])) for _, r in rows[IDLE_SHIP].iterrows()]
+
+    # ① Dock 的**指令持久**（不退化成 Idle）。
+    want_dock = {"Dock": {"body": DOCK_BODY}}
+    drifted = [r for r, e, _ in dock_seq if e != want_dock]
+    ck.check(f"合成场景（停泊）：`Dock` 指令逐回合持久（不退化成 Idle）", not drifted,
+             f"{len(dock_seq)} 个回合全在，指令 = {dock_seq[0][1]}")
+
+    # ② Dock 的舰**真的朝那个天体去**：逐回合与天体当前位置的距离单调缩短。
+    dist = [(r, math.dist(p, body[(r, DOCK_BODY)])) for r, _, p in dock_seq if (r, DOCK_BODY) in body]
+    grew = [(a, b) for (ra, a), (rb, b) in zip(dist, dist[1:]) if b > a + 1e-9]
+    ck.check("合成场景（停泊）：`Dock` 的舰逐回合朝目标天体靠近（在走，不是冻着）",
+             len(dist) >= 3 and not grew,
+             f"{DOCK_SHIP} 到 {DOCK_BODY} 的距离：{[round(d, 3) for _, d in dist[:6]]}"
+             + (f"…；逆增 {grew[:2]}" if grew else "（逐回合缩短）"))
+
+    # ③ Idle 的舰**位置逐字不动**。
+    moved = [(r, p) for (_, _, p0), (r, _, p) in zip(idle_seq, idle_seq[1:]) if p != p0]
+    ck.check("合成场景（停泊）：`Idle` 的舰位置逐字不动（待命就是待命，不漂移）", not moved,
+             "；".join(f"r{r} 跑到 {p}" for r, p in moved[:3]) or f"{len(idle_seq)} 个回合同一个坐标 {idle_seq[0][2]}")
+
+    # ④ 防空转的另一半：窗口里天体**真的在动**（否则 ③ 是「世界静止」的废话）。
+    bmove = [math.dist(body[(r, DOCK_BODY)], body[(r + 1, DOCK_BODY)])
+             for r in range(DOCK_ROUNDS) if (r, DOCK_BODY) in body and (r + 1, DOCK_BODY) in body]
+    ck.check("合成场景（停泊）：窗口里目标天体真的在公转（否则「位置不动」是废话）",
+             bool(bmove) and max(bmove) > 1e-6, f"{DOCK_BODY} 每回合最大位移 {max(bmove):.4f} AU")
+
+
 def capital_scenario_checks(h, ck) -> None:
     """**合成场景 · Player 钉的首都**：`sim/tests/capital.rs::player_capital_not_overridden_by_ai_review`。
 
@@ -1539,6 +1645,14 @@ def story_checks(h, ck, out) -> None:
     ck.check("剧情的机械后果真的落到读面上（声明的每处关系增减都发生了）", not eff_bad,
              "；".join(f"seed {s}: {m}" for s, m in eff_bad[:3]) or f"{eff_n} 处关系增减逐处对上")
     ck.check("剧情后果守卫没有空转（真有声明了关系增减的节拍触发过）", eff_n > 0, f"{eff_n} 处")
+
+    # `grant_ship` 的出厂位置与指令（`story_grant_ship_spawns_a_fleet_member`，第 7 批搬来）：
+    # 位置 = 那个天体**这一刻**的位置 + (0.05, 0.05)，指令 Idle。判据由 `meta.story` 驱动。
+    g_bad = [(s, m) for s, d in zip(SEEDS, out) for m in d["grant_bad"]]
+    g_n = sum(d["grant_n"] for d in out)
+    ck.check("剧情 `grant_ship` 真的多出一艘、且出厂位置 = 天体位置 + (0.05, 0.05)、指令 Idle",
+             not g_bad, "；".join(f"seed {s}: {m}" for s, m in g_bad[:3]) or f"{g_n} 次出厂逐次对上")
+    ck.check("剧情 `grant_ship` 守卫没有空转（真有节拍发过舰）", g_n > 0, f"{g_n} 次")
 
     # 参与者具体：事件型节拍写的是本回合的实际对象（谁与谁开战、哪座城被夷平、谁建立了殖民地）。
     CONCRETE = {"first_war": 2, "first_raze": 2, "first_colony": 2}

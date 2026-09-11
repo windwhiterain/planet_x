@@ -23,7 +23,6 @@ mod mond;
 mod shots;
 mod site_supply;
 mod spending;
-mod story;
 mod trade;
 mod war_scar;
 

@@ -5,6 +5,7 @@
 //! | 原用例 | 现在住 | 为什么能搬 |
 //! | --- | --- | --- |
 //! | `advance_populates_round_events` | g1「全新开局的回合 0 没有事件」「推进过就有事件（事件层真的在写）」 | 原用例只断言「回合 0 空 → 跑几回合非空」，读面上这两半都在（`events` 表按 `round` 分组即可） |
+//! | `dock_follows_body_and_idle_holds_position` | g2 **合成场景 · 停泊与待命**（4 条判据） | 第 7 批给读面补了派生表 **`body_positions`**（逐回合天体位置，与 `ships.x/y` 同一把绝对坐标尺子）⇒「Dock 有没有朝那个天体去」「Idle 的位置有没有动」都判得了。⚠ 必须钉成 `Player`：AI 会在回合末刚派完 Dock、下一回合开头就改派（实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，就是这种没执行过的叶子） |
 
 use super::*;
 
@@ -325,56 +326,4 @@ fn follow_ship_auto_attacks_hostile_but_not_the_followed_friend() {
             ship: ship1.clone()
         })
     );
-}
-
-/// 停泊轨道 (Dock) follows a body's current position; 待命 (Idle) holds
-/// position. Dock persists (never degrades), and Idle never moves the ship.
-#[test]
-fn dock_follows_body_and_idle_holds_position() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-
-    // China (3) corvette id=0 docks body 4 (火星); id=1 is ordered Idle.
-    let ship0 = state.ships[0].name.clone();
-    let ship1 = state.ships[1].name.clone();
-    let diff = serde_json::json!({
-        "control": [{
-            "势力": "中国",
-            "指令": [
-                {"舰": ship0.clone(), "行为": {"Dock": {"body": "火星"}}, "归属": "Player"},
-                {"舰": ship1.clone(), "行为": "Idle", "归属": "Player"}
-            ]
-        }]
-    });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("apply dock/idle order");
-
-    // Pin ship 0 away from the body so `Dock` must move it toward the body.
-    if let Some(s) = state.ship_mut(&ship0) {
-        s.position = [5.0, 5.0];
-    }
-    if let Some(s) = state.ship_mut(&ship1) {
-        s.position = [3.0, 3.0];
-    }
-    let dock_pos_before = state.ship(&ship0).map(|s| s.position).unwrap();
-    let idle_pos_before = state.ship(&ship1).map(|s| s.position).unwrap();
-
-    advance(&mut state, &config, &mut rng);
-
-    // Dock: the ship moved toward the body (not froze, not degraded).
-    let dock_pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
-    assert_ne!(
-        dock_pos_after, dock_pos_before,
-        "docked ship should move toward the body"
-    );
-    assert_eq!(
-        state.ship_behavior(ship0.clone()),
-        Some(ShipBehavior::Dock {
-            body: "火星".to_string()
-        }),
-        "dock order must persist (not degrade to Idle)"
-    );
-    // Idle: the ship did not move.
-    let idle_pos_after = state.ship(&ship1).map(|s| s.position).unwrap();
-    assert_eq!(idle_pos_after, idle_pos_before, "Idle must hold position");
-    assert_eq!(state.ship_behavior(ship1.clone()), Some(ShipBehavior::Idle));
 }
