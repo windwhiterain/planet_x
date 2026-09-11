@@ -549,7 +549,7 @@ fn hauler_headcount(state: &State, fid: &str, except: &str) -> f64 {
 /// 舰都不在名单上——票不该投给动不了的人，否则期望入伙数会凭空少掉。
 pub fn should_be_role(state: &State, config: &GameConfig, fid: &str, ship_id: &str) -> ShipRole {
     let roll = sim::derived_roll(fid, ship_id, state.round, "role");
-    role_with_roll(state, config, fid, ship_id, roll, None).0
+    role_with_roll(state, config, fid, ship_id, roll).0
 }
 
 /// [`should_be_role`] 的**拍板**入口（B5）：同一套判据，但**把这次抽签记进输入面**。
@@ -562,13 +562,15 @@ pub(crate) fn decide_role(
     fid: &str,
     ship_id: &str,
     inputs: &mut RoundInputs,
-) -> (ShipRole, Option<(f64, Vec<crate::model::PoolEntry>)>) {
+) -> (ShipRole, RoleOdds) {
     let roll = sim::derived_roll(fid, ship_id, state.round, "role");
-    let (role, probe) = role_with_roll(state, config, fid, ship_id, roll, Some(inputs));
-    if let Some((p, pool)) = probe.clone() {
+    let (role, odds) = role_with_roll(state, config, fid, ship_id, roll);
+    // **记账只在这里**：闸门记「谁做了什么决定」（拍板那条路），估算那条路（`should_be_role`）
+    // 不问就不记。用途与机会值都来自 `RoleOdds`，所以观测/运输两支共用一段。
+    if let (Some(purpose), Some(p)) = (odds.purpose, odds.observe.or(odds.freight)) {
         inputs
             .record_gate(
-                "role",
+                purpose,
                 fid,
                 ship_id,
                 roll,
@@ -580,10 +582,9 @@ pub(crate) fn decide_role(
                 },
             )
             // **候选池（B5c）**：同侧每艘候选舰各持多少票——「为什么是它被定编」就在这张表里。
-            .pool = pool;
+            .pool = odds.pool.clone();
     }
-    // **把机会值一并交给调用方**（定编分布的期望要用它加总，见 `RoundInputs::role_distribution`）。
-    (role, probe)
+    (role, odds)
 }
 
 /// 定编的**判据**（纯函数，吃骰子）：返回角色 + **这次抽签的机会值与候选池**。
@@ -591,29 +592,61 @@ pub(crate) fn decide_role(
 /// 第二个值是 `Some((p, pool))` 当且仅当**这枚骰子真的被用到了**（判据是 `roll < p`）；
 /// 早退的那几档（硬承诺 / 玩家表态 / 观测优先 / 运力为 0）返回 `None`——
 /// 于是记账那边不必复制一遍早退逻辑（**判据只有一处**）。
+/// 取某一支那份账的可变引用（`assign_roles` 记账用）。
+fn share_mut<'a>(
+    d: &'a mut crate::model::RoleDistribution,
+    r: ShipRole,
+) -> &'a mut crate::model::RoleShare {
+    match r {
+        ShipRole::War => &mut d.war,
+        ShipRole::Freight => &mut d.freight,
+        ShipRole::Observe => &mut d.observe,
+    }
+}
+
+/// 一次定编抽签的**全部机会值**（给 `RoundInputs::role_distribution` 对账用）。
+///
+/// 定编是**级联**的：先观测（优先级 1）、再运输（优先级 2）、都没中 ⇒ 战舰。所以一艘舰
+/// 落到三支的概率是 `p_obs` / `(1−p_obs)·p_frt` / `(1−p_obs)(1−p_frt)`——这里把**两个门槛**
+/// 都交出来（而不是只交落中的那一支的 p，那会让"期望"少一项）。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RoleOdds {
+    /// 观测那一支这次抽签的机会值（`None` = 那枚骰子没被用到）。
+    pub observe: Option<f64>,
+    /// 运输那一支这次抽签的机会值（`None` = 没走到）。
+    pub freight: Option<f64>,
+    /// 命中的那一支的候选池（B5c 记账用）。
+    pub pool: Vec<crate::model::PoolEntry>,
+    /// 记账的用途名（`observe_role` / `role`）——只有真的掷了的档才记。
+    pub purpose: Option<&'static str>,
+    /// 不掷骰就定性的那一档（硬承诺 / 有货 / 玩家表态 / 动不了 / 没配额 / 没这条舰）。
+    pub fixed: Option<&'static str>,
+}
+
 fn role_with_roll(
     state: &State,
     config: &GameConfig,
     fid: &str,
     ship_id: &str,
     roll: f64,
-    // 拍板那条路把输入面传进来（记观测那一支的抽签）；估算那条路传 None。
-    mut recorder: Option<&mut RoundInputs>,
-) -> (ShipRole, Option<(f64, Vec<crate::model::PoolEntry>)>) {
+) -> (ShipRole, RoleOdds) {
+    // **记账不在这里**：`decide_role`（拍板那条路）拿 `RoleOdds` 统一记；`should_be_role`
+    // （估算那条路）不问就不记。判据仍然只有一处。
+    let fixed = |why: &'static str| RoleOdds { fixed: Some(why), ..Default::default() };
     // 1) 硬承诺（见上）。
     if state.contracts.assignment_of(ship_id).is_some() {
-        return (ShipRole::Freight, None);
+        return (ShipRole::Freight, fixed("承包单硬承诺"));
     }
     let Some(ship) = state.ship(ship_id) else {
-        return (ShipRole::War, None);
+        return (ShipRole::War, fixed("没有这条舰"));
     };
     if !ship.cargo.is_empty() {
-        return (ShipRole::Freight, None);
+        return (ShipRole::Freight, fixed("舱里有货"));
     }
     // 2) 玩家表态：AI 不掷骰，直接用玩家的值（`Player` 的逐舰叶或舰队默认）。
     let role = state.ship_role(ship_id.to_string());
     if state.ship_role_control(ship_id.to_string()).is_player() {
-        return (role, None);
+        return (role, fixed("玩家表态"));
     }
     // 3) **三个动机抢舰队**（水位配给，见 [`role_quotas`]）：先算出本回合观测与运输各自的
     //    配额。观测**先挑**（优先级，见下一条），但**挑几条**由配给说了算——所以一处积压
@@ -635,26 +668,33 @@ fn role_with_roll(
         observe_quota,
         observe_roll,
     );
-    if let (Some((p, pool)), Some(rec)) = (observe_p, recorder.as_deref_mut()) {
-        // **候选池（B5c）**：观测那一支的候选舰各持多少票。
-        rec.record_gate(
-            "observe_role",
-            fid,
-            ship_id,
-            observe_roll,
-            p,
-            if observe { "observe" } else { "war" },
-        )
-        .pool = pool.into_iter().map(|(n, w)| crate::model::PoolEntry { name: n, weight: w }).collect();
-    }
     if observe {
-        return (ShipRole::Observe, None);
+        let (obs_p, _clamped, pool) = match observe_p {
+            Some((p, pool)) => (
+                Some(p),
+                p >= 1.0 - 1e-12,
+                pool.into_iter()
+                    .map(|(n, w)| crate::model::PoolEntry { name: n, weight: w })
+                    .collect(),
+            ),
+            None => (None, false, Vec::new()),
+        };
+        return (
+            ShipRole::Observe,
+            RoleOdds {
+                observe: obs_p,
+                pool,
+                purpose: Some("observe_role"),
+                fixed: None,
+                freight: None,
+            },
+        );
     }
     // 5) 当前角色不是运输舰 ⇒ 归零成「战舰」基线再掷运输的骰子。
     let cur = role == ShipRole::Freight;
     // 6) 物理：动不了的舰运不了货（不是阈值，是「没有推进模块就没有速度」）。
     if freight_tonnage(config, ship) <= 0.0 {
-        return (ShipRole::War, None);
+        return (ShipRole::War, fixed("动不了"));
     }
     // 7) 配额 → 抽签（用**水位配给之后**的那一支，不是主张）。
     let quota = freighter_quota_share;
@@ -740,7 +780,19 @@ fn role_with_roll(
     } else {
         ShipRole::War
     };
-    (role, Some((p, pool)))
+    (
+        role,
+        RoleOdds {
+            freight: Some(p),
+            pool,
+            purpose: Some("role"),
+            fixed: None,
+            // **观测那一支的机会值也要留着**：这艘舰没被观测挑走，但它**确实掷过**观测的骰子
+            // （`observe_with_roll` 总是被调），所以落在"观测"那一支的概率就是 `p_obs`。
+            // 只记落中的那一支（`rolls` 的闸门就是这么记的）时，`Σp` 会永远缺这一项。
+            observe: observe_p.as_ref().map(|(p, _)| *p),
+        },
+    )
 }
 
 /// **本回合的定编**：把「谁是运输舰」一次性写进第三条风格轴
@@ -762,13 +814,31 @@ pub(crate) fn assign_roles(
     let mut fids: Vec<String> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort();
     for fid in fids {
-        // 先算完整个势力的名单再写：同一回合内几个势力的结论互不影响（也更好推理）。
-        let (qw, qf, qo) = role_quotas(state, config, &fid);
-        let mut dist = crate::model::RoleDistribution {
-            war: crate::model::RoleShare { quota: qw, ..Default::default() },
-            freight: crate::model::RoleShare { quota: qf, ..Default::default() },
-            observe: crate::model::RoleShare { quota: qo, ..Default::default() },
+        // 本回合**开始**时三支各有多少头（在任 + 硬承诺）——配给与两支抽签都以它为基准。
+        let held = |r: ShipRole| -> f64 {
+            state
+                .ships
+                .iter()
+                .filter(|s| s.faction_id == fid && s.hull > 0.0 && state.ship_role(s.name.clone()) == r)
+                .count() as f64
         };
+        let (qw, qf, qo) = role_quotas(state, config, &fid);
+        let mk = |q: f64, h: f64, rot: f64| {
+            crate::model::RoleShare {
+                quota: q,
+                held: h,
+                gap_join: (q - h).max(0.0),
+                gap_leave: (h - q).max(0.0),
+                rotation: rot,
+                ..Default::default()
+            }
+        };
+        let mut dist = crate::model::RoleDistribution {
+            war: mk(qw, held(ShipRole::War), 0.0),
+            freight: mk(qf, held(ShipRole::Freight), ROLE_ROTATION),
+            observe: mk(qo, held(ShipRole::Observe), super::knowledge::OBSERVER_ROTATION),
+        };
+        // 先算完整个势力的名单再写：同一回合内几个势力的结论互不影响（也更好推理）。
         let mut plan: Vec<(String, ShipRole)> = Vec::new();
         for s in state
             .ships
@@ -776,38 +846,23 @@ pub(crate) fn assign_roles(
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
         {
             let name = s.name.clone();
-            let share = match state.ship_role(name.clone()) {
-                ShipRole::War => &mut dist.war,
-                ShipRole::Freight => &mut dist.freight,
-                ShipRole::Observe => &mut dist.observe,
-            };
+            let was = state.ship_role(name.clone());
             // 轮不到自动控制决定的（玩家的叶钉死 / 订单叶不是 Auto）算**外生**：配额算的是
-            // 全舰队，所以对账时要单独摆出来，别混进 `expected`。
+            // 全舰队，所以对账时要单独摆出来，别混进抽签那本账。
             if state.ship_control(name.clone()) != ControlMode::Auto
                 || state.ship_role_control(name.clone()).is_player()
             {
-                share.exogenous += 1.0;
+                share_mut(&mut dist, was).exogenous += 1.0;
                 continue;
             }
-            let (role, probe) = decide_role(state, config, &fid, &name, inputs);
-            let share = match role {
-                ShipRole::War => &mut dist.war,
-                ShipRole::Freight => &mut dist.freight,
-                ShipRole::Observe => &mut dist.observe,
-            };
-            share.actual += 1.0;
-            // 抽签档 ⇒ 加 `p`；**早退档**（硬承诺 / 玩家表态 / 观测优先 / 运力为 0）
-            // ⇒ 确定的 1（那几档返回 `None`，见 `role_with_roll` 的注解）。
-            match probe {
-                Some((p, _)) => {
-                    share.rolled += p;
-                    share.expected += p;
-                }
-                None => {
-                    share.fixed += 1.0;
-                    share.expected += 1.0;
-                }
+            let (role, odds) = decide_role(state, config, &fid, &name, inputs);
+            // 级联的两个门槛：观测那一支的机会值归观测那份账，运输的归运输那份；
+            // **入伙/退伍**按「这只舰原先是哪一支」分两侧。
+            let _ = (was, odds.observe, odds.freight);
+            if odds.fixed.is_some() {
+                share_mut(&mut dist, role).fixed += 1.0;
             }
+            share_mut(&mut dist, role).actual += 1.0;
             plan.push((name, role));
         }
         inputs.role_distribution.insert(fid.clone(), dist);
