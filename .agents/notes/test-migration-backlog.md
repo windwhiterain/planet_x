@@ -3,7 +3,7 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 171**（g1 43 / g2 79 / g3 26 / g4 23）；**Rust 205**（+31 探针 ignored）。
+> 计数：**Python 173**（g1 45 / g2 79 / g3 26 / g4 23）；**Rust 206**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -14,7 +14,7 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 6 批 + 同步 `main` 后）** | **171**（g1 43 / g2 79 / g3 26 / g4 23） | **205**（+31 探针 `#[ignore]`） |
+| **现在（第 7 批 A 类后 + 同步 `main` 后）** | **173**（g1 45 / g2 79 / g3 26 / g4 23） | **206**（+31 探针 `#[ignore]`） |
 
 > 组数里 g4 18→23、Rust 196→205 里的大部分是**同步 `main` 带进来的**（另一批在扩 g4 纪律，并给
 > `sim::site_supply`、`domestic_market`、`market`、`contract` 各加了用例），不是第 6 批搬的；
@@ -170,6 +170,28 @@ g2 这边的 `_yards_of` 跟着走：**身份键问引擎**，剩下三个名字
   `an_auto_blueprint_is_retooled_as_a_blueprint`）——**等字段命名批 B/C 收口后**再搬。
 * `sim/spending.rs::build_lines_separate_…` 的**「不看库存」那份**（直接调一次 `step_construction`）
   ——活回合里库存是第二个瓶颈，见上面那个 ⚠；两份都留是**故意**的，不是漏删。
+
+### §5.7 第 7 批（把 `sim` 搬空）——**在做**
+
+**为什么做**：用户要把 Rust 门压下来（「rust 侧 test 不跑 sim」）。先量了账：**光过滤只省 ~2 s**
+（sim 77 条里 70 条会跑，真跑 ~2.3 s），**要省到编译那 2–3 s 必须把 `src/tests/sim/*.rs` 真删掉**。
+2026-10 已把一轮门从 23 s 压到 **7–8 s**（`[profile.test] opt-level = 1` + `tests/` 四探针合一，
+见 `test-wall-clock.md` §0.2/§0.3）⇒ 现在按族搬便宜得多。
+
+**分类口径**（74 条 → 71 条）：
+* **A 已重复 ⇒ 直接删**（本轮做完，见下）
+* **B 搬得动**（用第 6 批的 `h.scenario_apply` 摆场景 / 读面本来就够）≈ 45 条
+* **C 要新 `--call` 或新读面列** ≈ 12–15 条
+* **D §4 明说不搬**（内部契约 / 手工世界 / 错误路径）≈ 6–8 条 ⇒ **最后要用户裁决**：
+  留一个**写死理由**的白名单，还是把它们降级成 `#[ignore]` 探针
+
+**A 类（已落地）**：删了 3 条，判据都被 g1 现有判据**严格覆盖**：
+
+| 删掉的 Rust 原件 | 现在住哪儿 | 为什么不是丢判据 |
+| --- | --- | --- |
+| `sim/tests/fleet.rs::advance_populates_round_events` | g1「全新开局的回合 0 没有事件」+「推进过就有事件」 | 原件只断言「回合 0 空 → 跑几回合非空」，那两半读面上都在（`events` 表按 `round` 分组）⇒ **先补 g1 判据、再删原件** |
+| `sim/tests/inputs.rs::pre_is_the_input_face_not_an_observation_copy` | g1「输入面里没有观测字段（它属于 post）」 | **同一份 banned 名单**逐字；「`pre` 必须有 `order`/`relation_noise`」那半由 g1「输入面没有空转」覆盖 |
+| `sim/tests/inputs.rs::the_input_face_reproduces_byte_for_byte` | g1「同 seed 重跑逐字节一致」 | 那条比的是**整份投影每个文件**的 sha256（`round_inputs` 在里面）⇒ 严格更强 |
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 

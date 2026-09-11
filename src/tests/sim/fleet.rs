@@ -1,4 +1,10 @@
-//! 舰队行为与默认：逐舰指令的归属、殖民归属、陈旧 follow 退化成 idle、跟随友舰时自动开火只打敌对者、回合事件日志、dock/idle 的位姿。
+//! 舰队行为与默认：逐舰指令的归属、殖民归属、陈旧 follow 退化成 idle、跟随友舰时自动开火只打敌对者、dock/idle 的位姿。
+//!
+//! ## 2026-10：能只看数据的那条搬去了 `play/tests/g1_contract.py`
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `advance_populates_round_events` | g1「全新开局的回合 0 没有事件」「推进过就有事件（事件层真的在写）」 | 原用例只断言「回合 0 空 → 跑几回合非空」，读面上这两半都在（`events` 表按 `round` 分组即可） |
 
 use super::*;
 
@@ -318,23 +324,6 @@ fn follow_ship_auto_attacks_hostile_but_not_the_followed_friend() {
         Some(ShipBehavior::Follow {
             ship: ship1.clone()
         })
-    );
-}
-
-/// Events must populate as the world advances (growth / spurious events are
-/// fine; the round log must simply be populated and contain no panics).
-#[test]
-fn advance_populates_round_events() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-    assert!(state.events.is_empty(), "round 0 has no events yet");
-    for _ in 0..6 {
-        advance(&mut state, &config, &mut rng);
-    }
-    // After a few rounds of a war-torn seed, an event log should exist.
-    assert!(
-        !state.events.is_empty(),
-        "after 6 rounds there should be events"
     );
 }
 

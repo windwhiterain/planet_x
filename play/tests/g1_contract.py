@@ -224,6 +224,14 @@ def checkpoint_flow(h, ck, tmp: Path) -> None:
     ck.check("全新开局的回合 0 没有过程量（那是初始世界）",
              bool(fresh_rows) and all((r["upkeep"] or 0.0) == 0.0 for r in fresh_rows),
              f"{len(fresh_rows)} 行，维护费全 0")
+    # 事件层那两半（原 Rust `sim/tests/fleet.rs::advance_populates_round_events`，2026-10 搬来：
+    # 那边只断言「回合 0 空 → 跑几回合非空」，而这两半在读面上都在）。
+    ev0 = _rounds(_table(fresh, "events"), 0)
+    ck.check("全新开局的回合 0 没有事件（初始世界什么都没发生过）",
+             ev0 == [], f"回合 0 竟有 {len(ev0)} 条事件")
+    ev_all = _table(proj, "events")
+    ck.check("推进过就有事件（事件层真的在写，不是空表通过）", len(ev_all) > 0,
+             f"r{rnd} 的投影里累计 {len(ev_all)} 条事件")
 
 
 def spending_within_batch(h, ck, tmp: Path) -> None:

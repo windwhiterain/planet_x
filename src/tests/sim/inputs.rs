@@ -4,9 +4,19 @@
 //! 并顺手砍掉了它原来装的那份**零信息量的观测副本**（同一份 state、同一个 `observe`、空 sink
 //! 只把过程量抹成中性值 ⇒ 与上一回合的 `post` 逐字段相同）。
 //!
-//! 用例钉四件事：① 解算顺序是**不重不漏的名单**（覆盖所有幸存者，多出来的都是本回合战沉）；
-//! ② 关系噪声落在配置的 `±noise` 里且**每对都有**；③ `pre` 里**没有**观测字段（B5 砍掉的那份
-//! 重复）；④ 记录本身**不改世界**（同 seed 两次跑出同一份输入面）。
+//! 用例钉两件事：① 解算顺序是**不重不漏的名单**（覆盖所有幸存者，多出来的都是本回合战沉）；
+//! ② 关系噪声落在配置的 `±noise` 里且**每对都有**。
+//!
+//! ## 2026-10：能只看数据的那两条搬去了 `play/tests/g1_contract.py`
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `pre_is_the_input_face_not_an_observation_copy` | g1「输入面里没有观测字段（它属于 post）」 | **同一份 banned 名单**（`factions`/`cities`/`wars`/`power_share`/`fleet_value`/`decisions`）逐字搬的；「`pre` 必须有 `order`/`relation_noise`」那半由 g1「输入面没有空转」覆盖 |
+//! | `the_input_face_reproduces_byte_for_byte` | g1「同 seed 重跑逐字节一致」 | 那条比的是**整份投影每个文件**的 sha256（`round_inputs` 在里面），判据严格更强 |
+//!
+//! **留在这里的**：① 要的是「**洗牌那一刻**的名单」——读面上 `round_inputs.order` 与回合末的
+//! `ships` 天然对不上（这一回合稍后沉的舰在名单里、稍后下水的在名单外，见该用例的文档），
+//! 要判它得把 `ship_destroyed` 事件一起拉进来；② 要一个**改配置**的世界（`noise = 0` ⇒ 什么都不掷）。
 
 use super::*;
 use crate::sim::advance_round;
@@ -113,50 +123,6 @@ fn relation_noise_covers_every_pair_and_stays_in_range() {
     }
 }
 
-/// **`pre` 不再装观测**（B5 砍掉的那一份重复）：拿同一回合的 `pre` 与**上一回合的 `post`** 比，
-/// 观测那一半必须**不再**由 `pre` 提供——`pre` 里压根没有那些字段。
-///
-/// 这条挡的是「有人图省事又把 `view_from_state` 塞回 `pre`」：那会让 `pre` 重新变成上一回合
-/// `post` 的副本（零信息量），而真正该在那里的是**掷了什么**。
-#[test]
-fn pre_is_the_input_face_not_an_observation_copy() {
-    let (config, mut state) = fresh_world(7);
-    let mut rng = Prng::new(7);
-    let mut inputs = RoundInputs::default();
-    advance_round(&mut state, &config, &mut rng, &mut inputs);
-
-    let v = serde_json::to_value(&inputs).unwrap();
-    let obj = v.as_object().expect("RoundInputs 是个对象");
-    let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-    for banned in ["factions", "cities", "wars", "power_share", "decisions", "fleet_value"] {
-        assert!(
-            !obj.contains_key(banned),
-            "输入面里出现了观测字段 `{banned}`——它属于 `post`（`{keys:?}`）"
-        );
-    }
-    assert!(
-        obj.contains_key("order") && obj.contains_key("relation_noise"),
-        "输入面必须有 `order` / `relation_noise`（B5a 接上的两处主 Prng）：{keys:?}"
-    );
-}
-
-/// **同一 seed 两次跑出同一份输入面**（记录不改世界，也不吃第二遍骰子）。
-///
-/// 主 `Prng` 的两处（洗牌、噪声）都是**读一次用一次**：记录它们**不额外消费**随机流，
-/// 所以同 seed 的输入面必须逐字节一致——这条与 digest 逐字不变是同一件事的两面。
-#[test]
-fn the_input_face_reproduces_byte_for_byte() {
-    let run = |seed: u64| {
-        let (config, mut state) = fresh_world(seed);
-        let mut rng = Prng::new(seed);
-        let mut inputs = RoundInputs::default();
-        for _ in 0..8 {
-            advance_round(&mut state, &config, &mut rng, &mut inputs);
-        }
-        serde_json::to_value(&inputs).unwrap()
-    };
-    assert_eq!(run(7), run(7), "同 seed 的输入面不一致 ⇒ 记录改变了随机流");
-}
 
 /// **`rolls` 的形状与内容**（B5b）：每条要么是**闸门**（`threshold` + 走的那一支），要么是
 /// **加权抽签**（`pool_total` + 选中谁）；`value ∈ [0,1)`；势力与对象都不空。
