@@ -167,6 +167,28 @@ function specRoot(name) {
   return infoValueOf(world, name);
 }
 
+// 悬停弹窗（**名词 → 解释**）的**唯一一处宿主决策**：读面（specview.js 的 `ctx.tip`）与
+// 原始 JSON 视图（jsonview.js 的 `ctx.tip`）都走这里——各家只把「界面上显示的那个名字 /
+// 那条列声明」递过来，**不许自己查表**（查表只发生在 tip.js 里）。这样「显示的名词是什么、
+// 查不到时用哪个字段名兜底」只有一份实现，两边不会漂移。
+//
+//   * `col` 是列声明（读行 / 控制行）或是 `{path: 字段名}`（JSON 视图递来的裸键名）；
+//   * `label` = **界面上印出来的那个词**（优先用它查语料）；
+//   * `field` = **字段名兜底**（控制行用叶的字段名；读行用裸字段路径；
+//     表达式列用自己声明的 `noun`）——因为 `label` 允许覆盖引擎的名词（`舰名`→`舰`），
+//     覆盖之后按 label 就查不到解释了。表达式路径（`@post…`）不兜底：**别去表达式里猜**，
+//     `@state.ships[?舰名=…].势力` 的裸段是 `ships`，猜出来必错。
+function nounTip(node, col) {
+  if (!window.Tip || !node || col == null) return;
+  const c = typeof col === 'object' ? col : { path: String(col) };
+  const label = c.label || c.path || c.leaf || c.owner || c.action;
+  const bare = typeof c.path === 'string' && /^[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*$/.test(c.path)
+    ? c.path
+    : null;
+  const field = c.noun || (c.leaf && window.Controls ? Controls.fieldOf(c.leaf) : bare);
+  window.Tip.attach(node, label, field);
+}
+
 function bindSpecView() {
   if (!window.SpecView) return;
   window.SpecView.bind({
@@ -179,26 +201,8 @@ function bindSpecView() {
     // 写面那一半（`leaf` / `owner` / `action` 三种行）：求值器只把节点要过去，**不解释它**
     // ——与它不认识 bodies/cities 是同一条纪律。实现在 `web/static/controls.js`。
     controlNode: (col, rec, recKey, opts) => (window.Controls ? Controls.controlNode(col, rec, recKey, opts) : null),
-    // 悬停弹窗（**名词 → 解释**）：求值器只把「这条列声明」递过来，由这里决定
-    // 「显示出来的那个名词是什么、查不到时用哪个字段名兜底」——
-    // 控制行的名词在 `views.json` 的 `leaf_ui` 里（中文），而它对应的**叶字段名**
-    // 由 manifest 的 `fieldOf` 取（现在还是英文，等控制面那批改名）。
-    tip: (node, col) => {
-      if (!window.Tip) return;
-      const label = col.label || col.path || col.leaf || col.owner || col.action;
-      // 兜底：控制行用**叶的字段名**（`投资预算`…，2026-10 起字段名本身就是中文名词）；
-      // 读行用**裸字段路径**（`舰名`/`忠诚度`…）——因为 `label` 允许覆盖引擎的名词
-      // （`舰名`→`舰`），覆盖之后按 label 就查不到解释了。表达式路径（`@post…`）不兜底。
-      const bare = typeof col.path === 'string' && /^[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*$/.test(col.path)
-        ? col.path
-        : null;
-      const field = col.noun || (col.leaf && window.Controls ? Controls.fieldOf(col.leaf) : bare);
-      // `col.noun`：**表达式列的声明**——「这一列说的是哪个名词」（`"noun": "power_share"`）。
-      // 表达式是**取数路径**、不是名词（`@post.power_share.${势力}` 里没有"名词"那一层），
-      // 所以只有声明才知道该查哪条解释。**别去表达式里猜**：`@state.ships[?舰名=…].势力`
-      // 的裸段是 `ships`，猜出来必错。裸字段列不需要写 `noun`（列头就是键名）。
-      window.Tip.attach(node, label, field);
-    },
+    // 悬停弹窗：求值器把「这条列声明」递过来，下面是那份唯一实现。
+    tip: nounTip,
   });
 }
 
@@ -473,7 +477,7 @@ function jsonToggle(label, get, rootPath) {
     if (open && !built) {
       built = true;
       if (window.JsonView) {
-        window.JsonView.render(box, get(), { rootPath, expandDepth: 1, onPathClick: copyPath, rerender: renderReadPanel });
+        window.JsonView.render(box, get(), { rootPath, expandDepth: 1, onPathClick: copyPath, rerender: renderReadPanel, tip: nounTip });
       } else box.textContent = JSON.stringify(get());
     }
   });
@@ -950,6 +954,7 @@ function renderSelection() {
     onPathClick: copyPath,
     inline: inlineSpec,
     rerender: renderSelection,
+    tip: nounTip,              // 通用树里的字段名同样是名词（宿主那一份唯一实现）
   });
 }
 
@@ -1985,6 +1990,7 @@ function renderInfo() {
     onPathClick: copyPath,
     inline: inlineSpec,        // 原位组织点（本文件决定；widget 只认这个钩子）
     rerender: () => renderInfo(),
+    tip: nounTip,              // 字段名/表头/行名是名词 ⇒ 悬停弹解释（同一套 Tip.attach）
   });
 }
 

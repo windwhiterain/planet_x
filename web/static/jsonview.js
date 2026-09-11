@@ -23,6 +23,7 @@
 //     state: { expanded: Set },     // 跨渲染保留的展开状态（调用方持有）
 //     filter: '治理',                // 子串过滤（大小写不敏感；命中祖先自动展开）
 //     onPathClick: (path, v) => {}, // 点击叶子：拿到它的 JSON 路径与值
+//     tip: (node, {path}) => {},    // 悬停弹窗：字段名/表头是名词 ⇒ 交给宿主查解释
 //   });
 'use strict';
 
@@ -129,10 +130,20 @@
     }
     return s;
   }
+  // 字段名/行名 = **名词** ⇒ 交给宿主的弹窗钩子（`ctx.tip`），与表头/控制行**同一套**
+  // `Tip.attach`，本文件不另造一套、也依然不认识任何领域词：它只把「界面上显示的那个名字」
+  // 递出去，宿主查不到就不弹（与现在行为一致，不报错）。
+  //
+  // ⚠ 只挂**名字**（`jv-key` 键名/行名、`jv-th` 表头），**不给值挂**（`jv-val`/`jv-chip`/
+  //   `jv-sum`）——给每个值挂弹窗只会变成噪音，而且值不是名词。
+  function tipKey(node, key, ctx) {
+    if (ctx && ctx.tip) ctx.tip(node, { path: String(key) });
+    return node;
+  }
   // 一行 key | value
   function leafEl(v, key, path, ctx) {
     const row = el('div', 'jv-leaf');
-    if (key !== undefined) row.appendChild(el('span', 'jv-key', String(key)));
+    if (key !== undefined) row.appendChild(tipKey(el('span', 'jv-key', String(key)), key, ctx));
     row.appendChild(valSpan(v, path, ctx));
     return row;
   }
@@ -148,7 +159,7 @@
     const head = el('div', 'jv-head');
     const caret = el('span', 'jv-caret');
     head.appendChild(caret);
-    head.appendChild(el('span', 'jv-key', String(key)));
+    head.appendChild(tipKey(el('span', 'jv-key', String(key)), key, ctx));
     head.appendChild(el('span', 'jv-kind', isArr(v) ? '[' + v.length + ']' : '{' + Object.keys(v).length + '}'));
     const pv = el('span', 'jv-preview', preview(v));
     head.appendChild(pv);
@@ -198,7 +209,8 @@
     const thead = el('thead');
     const htr = el('tr');
     htr.appendChild(el('th', 'jv-th jv-th-key', ''));
-    cols.forEach((c) => htr.appendChild(el('th', 'jv-th', c)));
+    // 自动表格的**列头就是内层字段名**（也是名词）⇒ 与 `jv-key` 一样挂弹窗。
+    cols.forEach((c) => htr.appendChild(tipKey(el('th', 'jv-th', c), c, ctx)));
     if (hiddenCols.length) {
       const th = el('th', 'jv-th jv-th-hidden', '… 还有 ' + hiddenCols.length + ' 列');
       th.title = '被列上限挡住的列：' + hiddenCols.join('、');
@@ -273,7 +285,8 @@
   function rowEl(e, cols, ctx, depth) {
     const tr = el('tr', 'jv-tr');
     const td0 = el('td', 'jv-td jv-td-key');
-    const lbl = el('span', 'jv-key' + (ctx.onPathClick ? ' clickable' : ''), String(e.label));
+    const lbl = tipKey(el('span', 'jv-key' + (ctx.onPathClick ? ' clickable' : ''), String(e.label)),
+                       e.label, ctx);
     if (ctx.onPathClick) lbl.addEventListener('click', () => ctx.onPathClick(e.path, e.value));
     td0.appendChild(lbl);
     tr.appendChild(td0);
@@ -395,6 +408,10 @@
       // 调用方提供的**原位重组点**钩子：path → 节点（没有就返回 null，走通用渲染）。
       // widget 依然不认识任何领域字段名——它只知道有这么个钩子。
       inline: o.inline || null,
+      // 悬停弹窗（**名词 → 解释**）：把「这个字段名 / 表头 / 行名」交给宿主，由它查语料
+      // （`web/static/tip.js`）。与读面的表头、控制行标签**用的是同一套钩子**——
+      // widget 只递名字，不查表、不认识任何领域词。不传就只是这次不弹。
+      tip: o.tip || null,
       // 列上限被用户放宽之后，谁来重画（不传就只是本次不生效，不会静默丢列）。
       rerender: o.rerender || null,
     };

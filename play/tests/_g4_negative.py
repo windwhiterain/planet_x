@@ -11,16 +11,22 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**30 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**32 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
 ㉓㉔ 是第 5b 条（文档对账）的量具：㉓在发射端把一条 `**加粗**` 开头的 `description` 剥掉一个
 `*`（**复刻 schemars 0.8.22 那段 hack 的效果**，就是 46 条弹窗坏 markdown 的成因），
 ㉔把一条字段的 `description` 悄悄删掉——两条都要求「文档对账」那一族自己红。
+㉕㉖ 是 §5d 条（名词覆盖率·**静态**）的量具：㉕剪掉 `jsonview.js` 的 tip 挂载（= 实机症状
+「原始 JSON 视图里的字段名 hover 无反应」），㉖把宿主的 `Tip.attach` 改名（= 换翻译层时
+最容易漏的那种断线：`ctx.tip` 转发到空处）——两条都要求 §5d 自己红。
+⚠ ㉕㉖ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
+跑完还原——**真文件一个字节都不碰**（与上面那 30 条同一纪律）。
 """
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -369,6 +375,40 @@ def main() -> int:
     bad = run_case("doc-silently-dropped", None, None, mutate_nouns=drop_one_doc)
     if not any(n.startswith(DOC_CHECK) for n in bad):
         MISBEHAVED.append(f"doc-silently-dropped：文档对账没红（实际红：{bad}）")
+
+    # ㉕㉖ 名词覆盖率·**静态**（§5d）：量具自己也要有量具 —— 把「渲染字段名标签 ⇒ 挂 tip」
+    #     这条接线从**拷贝**里剪断，要求 §5d 那一族**自己**红。
+    #     ⚠ 同样只动 tempfile 里的拷贝（`g4_spec.STATIC_JS` 指向它），真文件一个字节不碰。
+    #     ㉕ 剪掉 `jsonview.js` 的挂载（= 实机症状「原始 JSON 视图里的字段名 hover 无反应」）；
+    #     ㉖ 把宿主里的 `Tip.attach` 改名（= 换翻译层时最容易漏的那种断线）。
+    TIP_CHECK = "渲染字段名标签的 JS 模块都挂了 tip"
+    static_real = g4_spec.STATIC_JS
+    static_tmp = T / "static-inject"
+    if static_tmp.exists():
+        shutil.rmtree(static_tmp)
+    shutil.copytree(static_real, static_tmp)
+    g4_spec.STATIC_JS = static_tmp
+    try:
+        jv = static_tmp / "jsonview.js"
+        orig_jv = jv.read_text(encoding="utf-8")
+        assert "ctx.tip(node" in orig_jv, "jsonview.js 里没有 `ctx.tip(node`：判据/代码换了口径？"
+        jv.write_text("\n".join(l for l in orig_jv.splitlines()
+                                if "ctx.tip(" not in l) + "\n", encoding="utf-8")
+        bad = run_case("tip-mount-removed")
+        if not any(TIP_CHECK in n for n in bad):
+            MISBEHAVED.append(f"tip-mount-removed：§5d 没红（实际红：{bad}）")
+        jv.write_text(orig_jv, encoding="utf-8")
+
+        app = static_tmp / "app.js"
+        orig_app = app.read_text(encoding="utf-8")
+        assert "Tip.attach(" in orig_app, "app.js 里没有 `Tip.attach(`：判据/代码换了口径？"
+        app.write_text(orig_app.replace("Tip.attach(", "Tip.mountTip("), encoding="utf-8")
+        bad = run_case("tip-attach-renamed")
+        if not any(TIP_CHECK in n for n in bad):
+            MISBEHAVED.append(f"tip-attach-renamed：§5d 没红（实际红：{bad}）")
+        app.write_text(orig_app, encoding="utf-8")
+    finally:
+        g4_spec.STATIC_JS = static_real
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")
