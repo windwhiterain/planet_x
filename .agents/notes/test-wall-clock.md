@@ -1,9 +1,10 @@
-# 测试墙钟：热点清单与待办（**P0 已于 2026-10 回退**，P1–P3 未做）
+# 测试墙钟：热点清单与待办（**§0.2/§0.3 已落地**，P1–P3 未做）
 
 > 状态：P0（`[profile.test] opt-level = 2`）**已回退**——它当初的依据（长局住在 Rust 里）
 > 随测试解耦消失了，而它自己变成了编译时间的大头；回退的实测与「其实 O1 才是甜点」见 §0.2。
-> P1 / P2 / P3 **只是清单，一行代码
-> 都没动**。相关：[`test-tiers.md`](test-tiers.md)（分档本身已经把「内循环 4 s」做出来了——
+> **2026-10 已把 §0.2 的甜点与 §0.3 的合并做掉**（用户裁决）：
+> `[profile.test] opt-level = 1 + debug = 1`，`tests/` 四个探针合成一个 `probes`。
+> **实测一轮门 23 s → 7–8 s**（真跑 ~10–12 s → **2.2 s**）。P1 / P2 / P3 **仍只是清单**。相关：[`test-tiers.md`](test-tiers.md)（分档本身已经把「内循环 4 s」做出来了——
 > 这篇管的是**全档/长局本身跑多久**）、[`code-layout.md`](code-layout.md)（同一次重构里的文件拆分）、
 > [`test-decoupled-suite.md`](test-decoupled-suite.md)（长局搬去 Python 的那一轮 = P0 依据消失的原因）。
 
@@ -67,9 +68,29 @@
 | 空的 `horizon_mid`（没有用例，只剩一个编译单元 + 一次链接） | **0.4 s** |
 
 ⇒ `tests/` 下 5 个集成二进制合计 ~5–6 s，**约占每次增量编译的一半**（另一半是 lib 本身）。
-把它们合成一个 `tests/probes.rs`（+ 删掉空的 `horizon_mid.rs`）能省 ~4–5 s/次，**与档位选择无关**。
-⚠ 这会动 `tests/` 的文件布局（探针跑法 `cargo test --test trade_probe -- --ignored` 会变成
-`cargo nextest run -E 'test(/probes::trade/)' --run-ignored all`），**要不要做请用户裁决**。
+
+### 0.3.1 落地（2026-10）：合并完成，与 §0.2 一起把一轮门从 23 s 压到 7–8 s
+
+* **一个二进制**：`tests/probes/main.rs` + `{horizon_long,site_supply,tech,trade}.rs`
+  （`git mv`，内容未动）；空的 `horizon_mid.rs` **删掉**（它想表达的「Rust 侧中档空了」
+  搬进 `probes/main.rs` 的模块头 + `.config/nextest.toml` 的注释）。
+* **跑法变了**（以前 `cargo test --test trade_probe -- --ignored --nocapture`）：
+  `cargo nextest run -P full --run-ignored all`（全部 31 条）／
+  `-E 'test(/^trade::/)'`（只跑一份）。⚠ 用例名是 `<模块>::<函数>`（`trade::probe_landless`），
+  **不带** `probes` 前缀——那是**二进制 id**（`planet_x::probes`）。
+* ⚠ `.config/nextest.toml` 里的 `binary(horizon_mid)` / `binary(horizon_long)` **必须删**：
+  nextest 对「匹配不到任何二进制」的 `binary(...)` 是**报错**（不是警告）。档位一律按模块名认。
+* 顺带查出一件事：**Rust 侧的 T2/T3 现在都是空的**——`probes/horizon_long.rs` 那 7 条全是
+  `#[ignore]` 探针 ⇒ 默认档 / `-P mid` / `-P full` 选中的是**同一批 208 条**（实测三档都是 208）。
+* 实测（同一协议：`touch src/sim/mod.rs` 后整跑 `-P full`）：
+
+| | 一轮门 | 真跑 |
+| --- | --- | --- |
+| O0 + 5 个二进制（原来） | **23 s** | ~10–12 s |
+| O1 + 一个 `probes`（现在） | **7–8 s** | **2.2 s** |
+
+  一次性代价：切档要按新档重编一次（本机 ~81 s）。**行为中性**：release 档没动 ⇒
+  digest 逐字不变（实测）。
 
 ## 1. 诊断方法（可复现）
 

@@ -40,15 +40,20 @@
 高档用例必须住在名叫 `horizon_mid` / `horizon_long` 的模块里：
 
 * 单元测试：`src/tests/<区>/horizon_mid.rs` → 用例名带 `sim::tests::horizon_mid::…`
-* 集成测试：整个二进制就叫这个名字 → `tests/horizon_mid.rs` / `tests/horizon_long.rs`
+* 集成测试：**模块**就叫这个名字 → `tests/probes/horizon_long.rs`（用例名 `horizon_long::…`）
+  ⚠ 2026-10 起 `tests/` 下只有一个二进制 `probes`（4 个探针文件合一）⇒ filterset 里
+  **不要再写 `binary(horizon_mid)` / `binary(horizon_long)`**（nextest 对匹配不到任何二进制的
+  `binary(...)` 是**报错**，不是警告）。档位一律按模块名认。
+  ⚠ **Rust 侧的 T2/T3 现在是空的**：中档/长局判据全搬去了 `play/tests/`，`probes/horizon_long.rs`
+  里那 7 条**全是 `#[ignore]` 探针** ⇒ 默认档 / `-P mid` / `-P full` 选中的是**同一批 208 条**。
 
 `.config/nextest.toml` 里三个 profile 用 filterset 选档：
 
 ```toml
 [profile.default]
-default-filter = 'not (test(/horizon_mid/) | test(/horizon_long/) | binary(horizon_mid) | binary(horizon_long))'
+default-filter = 'not (test(/horizon_mid/) | test(/horizon_long/))'
 [profile.mid]
-default-filter = 'not (test(/horizon_long/) | binary(horizon_long))'
+default-filter = 'not test(/horizon_long/)'
 [profile.full]
 default-filter = 'all()'
 ```
