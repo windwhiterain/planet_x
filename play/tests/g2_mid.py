@@ -66,6 +66,10 @@ CAPITAL_FAR = "水星"
 # 名字是种子 42 开局的（`DOCK_SHIP` 在前、`IDLE_SHIP` 在后），场景里有一条防空转判据盯着它们还在不在。
 DOCK_SHIP, IDLE_SHIP, DOCK_BODY = "长城", "赤霄", "海王星"
 DOCK_ROUNDS = 12
+# 「买不起就在等钱」的 A/B 窗口：要跑过「进度攒满」（corvette `build_points = 15`、# 实测 `rate = 10`/回合）+ 至少再两回合，`launch_waiting` 才亮得住。
+AFFORD_ROUNDS = 6
+# 清空/垫厚国库要写**国库里真有的键**（`factions.资源`）**加上选装要的货**（那份货中国开局没有，# 不写进去「垫厚」那一臂也还是买不起——第一版就是这么假绿的）。
+AFFORD_RESOURCES = ("氦-3", "金", "硅", "碳", "铁")
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1208,7 +1212,7 @@ def blueprint_scenario_checks(h, ck) -> None:
                       "建筑": [{"城": city, "建筑": bid, "设计图": ghost}]}]},
         {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删叶": True}]}]},
     ])
-    q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
+    q = KIT.load(str(proj), only=("cities", "blueprints", "decisions", "city_process", "ships"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
     ck.check("合成场景（设计图）：悬空指针原样保留（AI 不替你修）",
              bool(ptrs) and all(p == ghost for p in ptrs.values()),
@@ -1223,6 +1227,14 @@ def blueprint_scenario_checks(h, ck) -> None:
     ck.check("合成场景（设计图）：AI 那一趟真的跑了（同一局里它给别的建造区建了图）",
              any(d["verdict"] in ("created", "reused") for d in acts),
              f"{FID} 的设计图判定 {len(acts)} 行：{sorted({d['verdict'] for d in acts})}")
+    # `sim/blueprints.rs::a_dangling_blueprint_pointer_stops_the_yard`（第 7 批搬来）：
+    # **停产 = `city_process.build` 里根本没有那一行**（不是 `increment = 0`——那是「缺钱」，
+    # 见下面 ④；两种停法在读面上分得开）。防空转靠 ④：同一座城在批满时**有**建造行。
+    dangling_rows = _build_lines(q.table("city_process"), city)
+    ck.check("合成场景（设计图）：指针悬空 ⇒ 那个建造区连建造行都没有（进度一点不涨、也不下水）",
+             not dangling_rows,
+             f"{city} 在悬空窗口里的建造行：{dangling_rows}" if dangling_rows
+             else f"{city} 在整个窗口里零建造行（{len(q.table('ships'))} 行舰表，没有新舰）")
 
     # ② 玩家的图一个字都不许动 -------------------------------------------------
     mine = "玩家的守卫图"
@@ -1329,6 +1341,51 @@ def blueprint_scenario_checks(h, ck) -> None:
     ck.check("合成场景（预算）：rate 是产能、与批了多少钱无关（同一舰级两种预算同一个 rate）",
              bool(rates["rich"]) and rates["rich"] == rates["poor"],
              f"{class_} 的 rate：批满 {sorted(rates['rich'])} / 批 0 {sorted(rates['poor'])}")
+    # ① 的反向防空转：同一座城在**批满**时是有建造行的（所以「悬空 ⇒ 零行」不是「这城不造船」）。
+    ck.check("合成场景（设计图）：悬空那半的防空转（同一座城批满时有建造行）",
+             bool(rich), f"{city} 批满时 {class_} 的建造行 {len(rich)} 条（悬空那臂是 0 条）")
+
+    # ⑤ 买不起 ⇒ 在等钱（`sim/blueprints.rs::a_player_blueprint_that_cannot_be_afforded_waits_for_money`）
+    #    **A/B 两侧只差国库一个变量**：同一个图、同一根指针，一次把国库清零、一次垫厚。
+    #    `blueprints.launch_waiting` 就是那个「进度满了却没下水」的可见标记。
+    rich_name = "豪华护卫"
+    # 中国**开局国库里真有的键**（读面 `factions.资源`）——用来防空转：那份选装要的货里有它
+    # 没有的东西，「买不起」才是真的买不起（第一版把预算表的键当国库键，垫厚那臂其实还是穷的）。
+    fr = KIT.load(str(h.projection(seed, SCENARIO_ROUNDS)), only=("factions",)).table("factions")
+    stock_keys = sorted((list(fr[(fr["round"] == 0) & (fr["势力"] == FID)]["资源"])[0] or {}).keys())
+    cost = None
+    arms = {}
+    for tag, amt in (("poor", 0.0), ("rich", 1e6)):
+        proj = h.scenario_apply(f"bp_afford_{tag}", seed, AFFORD_ROUNDS, [
+            {"control": [{"势力": FID,
+                          "设计图库": [{"图名": rich_name, "舰级": class_,
+                                          "选装": ["plasma", "ion_drive"]}],
+                          "建筑": [{"城": city, "建筑": bid, "设计图": rich_name}]}]}],
+            patch=_stock_patch(FID, amt, AFFORD_RESOURCES))
+        q = KIT.load(str(proj), only=("blueprints", "ships", "city_process"))
+        bp = _bp_rows(q.table("blueprints"), FID, rich_name)
+        sh = q.table("ships")
+        sh = sh[sh["出厂图"] == rich_name]
+        cost = cost or next((r["component_cost"] for r in bp.values() if r["component_cost"]), None)
+        arms[tag] = {
+            "waiting": [(r, bool(bp[r]["launch_waiting"])) for r in sorted(bp)],
+            "launched": sorted({int(x) for x in sh["round"]}),
+            "inc": [v["increment"] for _, _, v in _build_lines(q.table("city_process"), city)],
+        }
+    ck.check("合成场景（设计图）：那份选装真的要国库里没有的货（否则「买不起」是废话）",
+             bool(cost) and bool(set(cost) - set(stock_keys)),
+             f"「{rich_name}」的组件成本 {cost}；中国开局国库只有 {stock_keys}")
+    ck.check("合成场景（设计图）：买不起 ⇒ 一次都不下水，且 `launch_waiting` 亮起来（等待可见）",
+             not arms["poor"]["launched"] and any(w for _, w in arms["poor"]["waiting"]),
+             f"清空国库那一臂：下水 {arms['poor']['launched']}、"
+             f"launch_waiting {arms['poor']['waiting']}")
+    ck.check("合成场景（设计图）：进度继续攒（车坞没停，是钱没到）",
+             bool(arms["poor"]["inc"]) and any(v > 0 for v in arms["poor"]["inc"]),
+             f"清空国库那一臂的逐回合 increment：{[round(v, 3) for v in arms['poor']['inc']]}")
+    ck.check("合成场景（设计图）：垫厚国库 ⇒ 同一个图就下水了（A/B 的另一半，进度没丢）",
+             len(arms["rich"]["launched"]) >= 1,
+             f"垫厚那一臂：下水回合 {arms['rich']['launched']}、"
+             f"launch_waiting {arms['rich']['waiting']}")
 
 
 def dock_scenario_checks(h, ck) -> None:

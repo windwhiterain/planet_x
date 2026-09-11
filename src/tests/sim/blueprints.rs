@@ -1,4 +1,5 @@
-//! 设计图（`--apply` 的 blueprint 叶）与船坞下水：出厂快照、图上的**倾向**、`order_source`、悬空指针停产、买不起就不下水。夹具 `attach_blueprint`/`spawn_at`/`stock` 在 `super`。
+//! 设计图（`--apply` 的 blueprint 叶）与船坞下水：出厂快照、图上的**倾向**、`order_source`。
+//! 夹具 `attach_blueprint`/`spawn_at`/`stock` 在 `super`。
 
 //! ## 2026-10：能只看数据的那几条搬去了 `play/tests/g2_mid.py`
 //!
@@ -6,6 +7,8 @@
 //! | --- | --- | --- |
 //! | `editing_a_blueprint_does_not_touch_existing_ships` / `retuning_a_design_never_touches_ships_already_in_space` | g2「**出厂快照不随时间变**」（一条舰的选装一生恒定，400 条舰零漂移） | `ships.components` 与 `blueprints.components` 都在读面上 |
 //! | `ship_spawned_event_carries_the_blueprint_only_when_there_is_one` | g2「造舰事件的图归因与舰表一致」（374 条事件） | 事件层 `ship_spawned.data.blueprint` ↔ 舰表 `blueprint` |
+//! | `a_dangling_blueprint_pointer_stops_the_yard` | g2「指针悬空 ⇒ 那个建造区**连建造行都没有**」 | 停产在读面上就是 `city_process.build` 里**没有那一行**（与「缺钱」的 `increment = 0` 分得开）；防空转 = 同一座城批满时**有**建造行 |
+//! | `a_player_blueprint_that_cannot_be_afforded_waits_for_money` | g2「买不起 ⇒ 不下水 + `launch_waiting` 亮着」/「垫厚国库 ⇒ 同一个图就下水」（**A/B 只差国库一个变量**） | `blueprints.launch_waiting` 就是那个可见标记；国库用 `_stock_patch` 拨（状态补丁），进度看 `city_process.build.increment` |
 //! | `designs_are_deduped_by_class_and_signature` | g2「图按 `(舰级, 选装)` 去重」（18,691 个签名） | 图库表逐回合可查 |
 //! | `a_class_drift_between_the_yard_and_its_design_is_reconciled` | g2「建造区挂了图就必须挂到存在的图上」+「舰级不符只是**滞后**、会自己收敛」（16,709 个建造区·回合；实测 3 行不符、最长滞后 1 回合） | `cities.buildings[].{ship_type,blueprint}` + 图库表 |
 //!
@@ -430,119 +433,6 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
         state.ship_kiting(name.clone()),
         0.7,
         "另外两条轴不受影响（逐轴独立）"
-    );
-}
-
-/// **悬空图指针 ⇒ 该建造区停产**（Q10(a)）：进度不再增加，也没有舰凭空冒出来。
-#[test]
-fn a_dangling_blueprint_pointer_stops_the_yard() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国".to_string();
-    stock(&mut state, &config, &fid, 400.0);
-    let (cid, bid, class) = attach_blueprint(
-        &mut state,
-        &config,
-        &fid,
-        "会被删掉的图",
-        "corvette",
-        &["kinetic", "ion_drive"],
-        (None, None, None),
-        ControlMode::Player,
-    );
-    // 把进度清零，再把指针改成一张**不存在**的图（模拟玩家改名/删图之后的现场）。
-    if let Some(city) = state.city_mut(&cid) {
-        city.ship_progress.insert(class.clone(), 0.0);
-        for b in city.buildings.iter_mut() {
-            if b.id == bid {
-                b.blueprint = Some("已经不存在的图".to_string());
-            }
-        }
-    }
-    let ships_before = state.ships.len();
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    assert_eq!(
-        state.ships.len(),
-        ships_before,
-        "悬空指针不许凭空产出（也不许静默回落生成器）"
-    );
-    let progress = state
-        .city(&cid)
-        .unwrap()
-        .ship_progress
-        .get(&class)
-        .copied()
-        .unwrap_or(0.0);
-    assert!(
-        progress <= 1e-9,
-        "那个建造区停产 ⇒ 进度必须一点不涨，got {progress}"
-    );
-    // 建区还在、指针**原样**保留（读面据此能一眼看出「这个区指着一张不存在的图」）。
-    assert_eq!(
-        state
-            .city(&cid)
-            .unwrap()
-            .buildings
-            .iter()
-            .find(|b| b.id == bid)
-            .unwrap()
-            .blueprint
-            .as_deref(),
-        Some("已经不存在的图"),
-        "指针原样输出，不被静默清掉"
-    );
-}
-
-/// **玩家归属的图买不起 ⇒ 不下水、进度继续攒**（Q4(b)），并留下可见标记。
-#[test]
-fn a_player_blueprint_that_cannot_be_afforded_waits_for_money() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国".to_string();
-    // 一件**稀有到买不起**的选装（等离子炮要氦-3/金）。
-    let (cid, _, class) = attach_blueprint(
-        &mut state,
-        &config,
-        &fid,
-        "豪华护卫",
-        "corvette",
-        &["plasma", "ion_drive"],
-        (None, None, None),
-        ControlMode::Player,
-    );
-    if let Some(f) = state.faction_mut(&fid) {
-        for v in f.resources.values_mut() {
-            *v = 0.0;
-        }
-    }
-    let ships_before = state.ships.len();
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    assert_eq!(state.ships.len(), ships_before, "买不起就不下水");
-    let progress = state
-        .city(&cid)
-        .unwrap()
-        .ship_progress
-        .get(&class)
-        .copied()
-        .unwrap_or(0.0);
-    assert!(
-        progress >= config.ship_spec(&class).build_points - 1e-9,
-        "进度**继续攒**（下回合再试），got {progress}"
-    );
-    assert!(
-        crate::sim::blueprint_launch_waiting(&state, &config, &fid, &"豪华护卫".to_string()),
-        "要有**可见标记**：进度满了却没下水（投影蓝图表 launch_waiting 列就是它）"
-    );
-
-    // 给钱 → 下一回合就下水。
-    stock(&mut state, &config, &fid, 400.0);
-    advance(&mut state, &config, &mut rng);
-    assert!(
-        state
-            .ships
-            .iter()
-            .any(|s| s.blueprint.as_deref() == Some("豪华护卫")),
-        "攒够钱之后必须下水（进度没丢）"
     );
 }
 
