@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 348**（g1 77 / g2 199 / g3 44 / g4 28）；**Rust 153**（+31 探针 ignored）。
-> **sim 74 → 14**（第 7 批搬走/删掉 60 条；其中 1 条是只打印的探针）。
+> 计数：**Python 351**（g1 77 / g2 202 / g3 44 / g4 28）；**Rust 153**（+31 探针 ignored）。
+> **sim 74 → 13**（第 7 批搬走/删掉 61 条；其中 1 条是只打印的探针）。
 > **整族搬空并删文件**：`combat.rs`、`shots.rs`、`fleet.rs`。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
