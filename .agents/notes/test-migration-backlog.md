@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 343**（g1 77 / g2 194 / g3 44 / g4 28）；**Rust 153**（+31 探针 ignored）。
-> **sim 74 → 15**（第 7 批搬走/删掉 59 条；其中 1 条是只打印的探针）。
+> 计数：**Python 348**（g1 77 / g2 199 / g3 44 / g4 28）；**Rust 153**（+31 探针 ignored）。
+> **sim 74 → 14**（第 7 批搬走/删掉 60 条；其中 1 条是只打印的探针）。
 > **整族搬空并删文件**：`combat.rs`、`shots.rs`、`fleet.rs`。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
@@ -484,7 +484,15 @@ step 当场用的那个对不上"，于是把 `knowledge` 与 `ideology` 的那�
    （产出先到账）、要么 `unpaid = upkeep`（`rust = 1.0`，舰队当场锈光）**没有中间态**。
 3. **`market` / `domestic_market` 四条确认 §4**：价格序列与「逐城 spent」都不在读面上。
 
-**剩下 17 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第十一段（sim 17 → 14）**：见上面的 **⚠ 订正** 一节 + 下表
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `knowledge::control_rusts_back_when_the_fleet_leaves` | g3 **MOND 逐回合定律** | 目标稳定 **61,578 个势力·回合逐字相等**；目标中途变过 1,422 个落进夹逼区间 ⇒ `knowledge.rs` 整族删除 |
+| `ideology::ideology_economy_bad_…` | g3 **思潮经济轴逐回合定律** | **63,000 个势力·回合 0 违规** ⇒ `ideology.rs` 整族删除 |
+| `spending::build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` | g2 合成场景（三条臂：库存 × 预算） | 两头足 ⇒ `increment = rate = 11.92`；钱 0 ⇒ **0**；库存 0 ⇒ **≈0** |
+
+**剩下 14 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
