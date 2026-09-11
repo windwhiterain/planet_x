@@ -115,6 +115,16 @@ pub struct RoleShare {
     /// 入伙/退伍侧被 `min(1,·)` 截断的舰数（>0 时 `Σp` 会**低于** `flow`）。
     pub clamped_join: f64,
     pub clamped_leave: f64,
+    /// 该侧**记下来的舰**的票之和，与它们各自的票数之和——**相等才说明"记下的舰 = 池子"**。
+    /// （舰自己可能被排除在自己的池子外：例如 `cur` 为假但它是观测舰 ⇒ 池子为空 ⇒ `my_ticket = 0`
+    /// ⇒ `p = 0` 合法，此时 `flow` 根本不是这一侧的总期望，不能拿来对账。）
+    pub tickets_join: f64,
+    pub tickets_leave: f64,
+    pub sum_mine_join: f64,
+    pub sum_mine_leave: f64,
+    /// 该侧记下的舰数（`0` = 这一侧没有可摊的舰，跳过对账）。
+    pub mine_join: f64,
+    pub mine_leave: f64,
     /// **不掷骰就定性**的头数（承包单硬承诺 / 舱里有货 / 玩家表态 / 动不了 / 没配额）。
     pub fixed: f64,
     /// 本回合**实得**头数。

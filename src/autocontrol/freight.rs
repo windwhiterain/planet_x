@@ -568,8 +568,8 @@ pub(crate) fn decide_role(
     // **记账只在这里**：闸门记「谁做了什么决定」（拍板那条路），估算那条路（`should_be_role`）
     // 不问就不记。用途与机会值都来自 `RoleOdds`，所以观测/运输两支共用一段。
     let fired = match odds.purpose {
-        Some("observe_role") => odds.observe.map(|(p, _)| p),
-        _ => odds.freight.map(|(p, _)| p),
+        Some("observe_role") => odds.observe.map(|(p, _, _, _)| p),
+        _ => odds.freight.map(|(p, _, _, _)| p),
     };
     if let (Some(purpose), Some(p)) = (odds.purpose, fired) {
         inputs
@@ -617,9 +617,9 @@ fn share_mut<'a>(
 pub(crate) struct RoleOdds {
     /// 观测那一支的 `(机会值, 引擎自己算的 flow)`（`None` = 那枚骰子没被用到）。
     /// **两枚骰子各带各的 `flow`**：同一艘舰会先后掷两枚，共用一个字段会被后一枚覆盖。
-    pub observe: Option<(f64, f64)>,
-    /// 运输那一支的 `(机会值, flow)`（`None` = 没走到）。
-    pub freight: Option<(f64, f64)>,
+    pub observe: Option<(f64, f64, f64, f64)>,
+    /// 运输那一支的 `(机会值, flow, 我的票, 同侧总票)`（`None` = 没走到）。
+    pub freight: Option<(f64, f64, f64, f64)>,
     /// 命中的那一支的候选池（B5c 记账用）。
     pub pool: Vec<crate::model::PoolEntry>,
     /// 记账的用途名（`observe_role` / `role`）——只有真的掷了的档才记。
@@ -674,20 +674,21 @@ fn role_with_roll(
         observe_roll,
     );
     if observe {
-        let (obs_p, _clamped, pool) = match observe_p {
+        let (obs_p, obs_mine, obs_tickets, pool) = match observe_p {
             Some((p, pool)) => (
                 Some(p),
-                p >= 1.0 - 1e-12,
+                pool.iter().find(|(n, _)| n == ship_id).map(|(_, w)| *w).unwrap_or(0.0),
+                pool.iter().map(|(_, w)| *w).sum::<f64>(),
                 pool.into_iter()
                     .map(|(n, w)| crate::model::PoolEntry { name: n, weight: w })
                     .collect(),
             ),
-            None => (None, false, Vec::new()),
+            None => (None, 0.0, 0.0, Vec::new()),
         };
         return (
             ShipRole::Observe,
             RoleOdds {
-                observe: obs_p.map(|p| (p, observe_flow)),
+                observe: obs_p.map(|p| (p, observe_flow, obs_mine, obs_tickets)),
                 pool,
                 purpose: Some("observe_role"),
                 fixed: None,
@@ -788,14 +789,21 @@ fn role_with_roll(
     (
         role,
         RoleOdds {
-            freight: Some((p, flow)),
+            freight: Some((p, flow, mine, tickets)),
             pool,
             purpose: Some("role"),
             fixed: None,
             // **观测那一支的机会值也要留着**：这艘舰没被观测挑走，但它**确实掷过**观测的骰子
             // （`observe_with_roll` 总是被调），所以落在"观测"那一支的概率就是 `p_obs`。
             // 只记落中的那一支（`rolls` 的闸门就是这么记的）时，`Σp` 会永远缺这一项。
-            observe: observe_p.as_ref().map(|(p, _)| (*p, observe_flow)),
+            observe: observe_p.as_ref().map(|(p, pool)| {
+                (
+                    *p,
+                    observe_flow,
+                    pool.iter().find(|(n, _)| n == ship_id).map(|(_, w)| *w).unwrap_or(0.0),
+                    pool.iter().map(|(_, w)| *w).sum::<f64>(),
+                )
+            }),
         },
     )
 }
@@ -868,17 +876,23 @@ pub(crate) fn assign_roles(
                 (ShipRole::Observe, odds.observe),
                 (ShipRole::Freight, odds.freight),
             ] {
-                let Some((p, flow)) = lot else { continue };
+                let Some((p, flow, mine, tickets)) = lot else { continue };
                 let sh = share_mut(&mut dist, r);
                 if was == r {
                     sh.flow_leave = flow;
                     sh.sum_p_leave += p;
+                    sh.sum_mine_leave += mine;
+                    sh.tickets_leave = tickets;
+                    sh.mine_leave += 1.0;
                     if p >= 1.0 - 1e-12 {
                         sh.clamped_leave += 1.0;
                     }
                 } else {
                     sh.flow_join = flow;
                     sh.sum_p_join += p;
+                    sh.sum_mine_join += mine;
+                    sh.tickets_join = tickets;
+                    sh.mine_join += 1.0;
                     if p >= 1.0 - 1e-12 {
                         sh.clamped_join += 1.0;
                     }

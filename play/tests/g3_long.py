@@ -951,46 +951,48 @@ def _role_dist_summary(q) -> dict:
                 x = v[role]
                 for side in ("join", "leave"):
                     rows.append((rnd, f, role, side, float(x[f"flow_{side}"]),
-                                 float(x[f"sum_p_{side}"]), float(x[f"clamped_{side}"])))
+                                 float(x[f"sum_p_{side}"]), float(x[f"tickets_{side}"]),
+                                 float(x[f"sum_mine_{side}"]), float(x[f"mine_{side}"]),
+                                 float(x[f"clamped_{side}"])))
     return {"rows": rows, "pins": pins}
 
 
 def distribution_checks(h, ck, metas, tag) -> None:
-    """**定编分布的逐回合对账**（`autocontrol::freight::assign_roles` 的两枚骰子）。
+    """**定编分布的逐回合对账**（`autocontrol::freight::assign_roles` 的两枚骰子，第 7 批）。
 
-    引擎的设计契约是 `p = (缺口 + 轮换 × 头数) × 我的票 ÷ 同侧总票数`，而**池子只有一侧**
-    ⇒ `Σ我的票 = 同侧总票数` ⇒ **`Σp` 应当正好等于 `flow`**。这条判据是为了替掉两条抽样判据
-    （跑 400 / 200 回合比均值——实测 `r1 中国` 观测配额 1.51 而在册 2，那条 ±0.5 的容差一直在
-    **吸收 0.49 的系统性偏差**）。
+    引擎的契约（`knowledge.rs` 原话：「缺口 → 按票抽签 `p = (缺口 + 轮换) × 我的票 ÷ 同侧总票数`
+    ⇒ **期望入伙数正好等于缺口**」）写成可对账的形式就是 —— 池子只有一侧、`Σ我的票 = 同侧总票数`
+    ⇒ **`Σp` 必须正好等于 `flow`**。这条替掉了两条抽样判据（跑 400 / 200 回合比均值：实测
+    `r1 中国` 观测配额 1.51 而在册 2，那条 ±0.5 的容差一直在**吸收 0.49 的系统性偏差**）。
 
-    ⚠ **实测：等号只在大约 91% 的行上成立**（7 seed × 1000 回合：25158 行相等、2306 行
-    `Σp < flow`）⇒ 引擎的**分母口径**与"在册头数"确实有一处不一致（`Σp < flow` 说明池子里摊了
-    票、而那些票没被记成机会值）。**原因还没定**：先用 `order_leaf_mode` 判"被玩家钉死"时
-    看着像 103 行全对上，改用引擎真正看的 `order_effective_mode` 之后那一类变成 **0 行**
-    ⇒ 与玩家钉死**无关**。（下一步要记池子人数与票数才能定因。）
-    所以这里只压**单向界**（`Σp ≤ flow`：稀释只会让它变小、不会反超），等号那一半**如实报数**、
-    不判红——**不拿一条自己还没吃透的判据去删掉那两条循环**。
+    **口径**（这条我错了四次才对，写清楚）：只有这三件事同时成立才拿来对账 ——
+    1. 这一侧**记到过舰**（`mine_* > 0`）；
+    2. 池子**非空**（`tickets_* > 1e-8`；等于 `1e-9` 是 `max(1e-9)` 的**地板值** ⇒ 池子空 ——
+       例如该舰是观测舰，按设计被排在自己的运输池外 ⇒ `我的票 = 0` ⇒ `p = 0` **合法**，
+       但那个 `flow` 根本不是这一侧的总期望）；
+    3. **记下的舰正好是池子**（`Σ我的票 == 同侧总票数`）且没有被 `min(1,·)` 截断。
+
+    实测（3 seed × 300 回合）：**对上的行 721/487、837/772、778/586，违反 0**（另有「没记到舰」
+    「池子空」「被截断」三类合法跳过）。⚠ 我还用闸门里带的池子名单点过名：**池子里没有一艘
+    "有票却没有闸门"的舰**（0 例）⇒ 不存在"分母里挂着永远不会被定编的舰"那种稀释
+    （引擎注释里记的那次事故是**已经修好的历史**，现行实现是自洽的）。
     """
-    oneway = Verdict()
-    n = diluted = clipped = 0
+    law = Verdict()
+    n = skipped = 0
     for m in metas:
-        for rnd, f, role, side, flow, sp, cl in m["role_dist"]["rows"]:
-            if cl > 0:
-                clipped += 1
-                continue
-            if flow == 0.0 and sp == 0.0:
+        for rnd, f, role, side, flow, sp, tk, sm, mn, cl in m["role_dist"]["rows"]:
+            if mn == 0 or tk <= 1e-8 or abs(sm - tk) > 1e-9 or cl > 0:
+                skipped += 1
                 continue
             n += 1
-            if sp > flow + 1e-9:
-                oneway.add(f"{f} r{rnd} {role}/{side}: Σp {sp:.6f} > flow {flow:.6f}")
-            elif abs(sp - flow) > 1e-9:
-                diluted += 1
-    ck.check("定编：**Σp 不会反超引擎自己算的 `flow`**（池子只有一侧 ⇒ 分摊只会让 Σp 变小）",
-             oneway.n == 0,
-             oneway.detail(f"{tag}：{n} 行；其中等号 {n - diluted} 行、`Σp < flow` {diluted} 行"
-                           f"（⚠ 这 {diluted} 行是**引擎分母口径不一致**的旁证，原因待定，见施工图），"
-                           f"另有 {clipped} 行被 `min(1,·)` 截断"))
-    ck.check("定编分布对账没有空转（真的对过账、也真的掷出过非平凡的概率）", n >= 500,
+            if abs(sp - flow) > 1e-9:
+                law.add(f"{f} r{rnd} {role}/{side}: Σp {sp:.6f} ≠ flow {flow:.6f}"
+                        f"（票 {sm:.6f}/{tk:.6f}、截断 {cl:.0f}）")
+    ck.check("定编：**`Σp` 正好等于引擎自己算的 `flow`**（观测/运输两枚骰子 × 入伙/退伍两侧；"
+             "`flow = 缺口 + 轮换 × 头数`）", law.n == 0,
+             law.detail(f"{tag}：{n} 行逐字对上；另有 {skipped} 行属于「这一侧没记到舰 / 池子空 / "
+                        f"被 `min(1,·)` 截断」三类，按口径跳过"))
+    ck.check("定编分布对账没有空转（真的对过账、也真的掷出过非平凡的概率）", n >= 2000,
              f"{tag}：{n} 行")
 
 
