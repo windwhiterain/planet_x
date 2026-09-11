@@ -77,7 +77,7 @@ pub(crate) fn read_budget(
                     BudgetKind::Investment => c.investment_budget.get(rt),
                     BudgetKind::Construction => c.construction_budget.get(rt),
                 })
-                .map(|c| c.value)
+                .map(|c| c.value * con_scale)
                 .unwrap_or(ai_value * con_scale)
         } else {
             ai_value * con_scale
@@ -111,6 +111,8 @@ pub(crate) fn write_budget(
             if mode.is_player() {
                 // 玩家指令：值由玩家给，系统只是把「玩家会用的那个值」抄进读面——
                 // 叶子已存在时绝不覆盖（`or_insert_with`）。
+                // ⚠ 注意 `read_budget` 读的时候已经乘过 `con_scale`（维护费 reserve 保护），
+                // 所以这里写回的是**保护后的可执行额度**，玩家叶本身不动。
                 slot.entry(rt.clone())
                     .or_insert_with(|| Control::player(*value));
             } else {
@@ -119,5 +121,73 @@ pub(crate) fn write_budget(
                 slot.insert(rt.clone(), Control::inherit(*value));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config;
+    use crate::world::default_state;
+
+    /// **P1-5：Player 的 construction 预算也受维护费 reserve 约束**。
+    ///
+    /// 低库存、高出勤舰队时，玩家批再大的 construction 额度，可执行值也必须被
+    /// `con_scale` 压到 0；库存垫厚后同一片叶才恢复原值（守卫不空转）。
+    #[test]
+    fn player_construction_budget_respects_the_upkeep_reserve() {
+        let config = load_config();
+        let mut state = default_state(&config, 42);
+        let fid = state
+            .factions
+            .iter()
+            .find(|f| {
+                state
+                    .ships
+                    .iter()
+                    .any(|s| s.faction_id == f.name && s.hull > 0.0)
+            })
+            .map(|f| f.name.clone())
+            .expect("世界至少有一个带舰势力");
+        let rt = config
+            .resources
+            .keys()
+            .next()
+            .cloned()
+            .expect("配置至少一种资源");
+        let value = config.resources.get(&rt).map(|r| r.value).unwrap_or(1.0);
+
+        // 玩家把 construction 叶写大；库存却只有一点点 ⇒ reserve 把可执行额度压到 0。
+        if let Some(f) = state.faction_mut(&fid) {
+            f.resources.clear();
+            f.resources.insert(rt.clone(), 1e-6 / value.max(1e-9));
+        }
+        state
+            .control_mut(fid.clone())
+            .expect("势力有 control")
+            .construction_budget
+            .insert(rt.clone(), Control::player(1e9));
+        let (budget, _) = read_budget(&state, &config, fid.clone(), BudgetKind::Construction);
+        assert_eq!(
+            budget.get(&rt).copied().unwrap_or(0.0),
+            0.0,
+            "低库存时玩家 construction 预算必须被 reserve 压到 0"
+        );
+
+        // 把库存垫到远高于 reserve，同一片叶应该恢复成玩家值（proves the guard isn't vacuous）。
+        if let Some(f) = state.faction_mut(&fid) {
+            f.resources.insert(rt.clone(), 1e9);
+        }
+        state
+            .control_mut(fid.clone())
+            .unwrap()
+            .construction_budget
+            .insert(rt.clone(), Control::player(123.0));
+        let (budget, _) = read_budget(&state, &config, fid, BudgetKind::Construction);
+        assert!(
+            (budget.get(&rt).copied().unwrap_or(0.0) - 123.0).abs() < 1e-9,
+            "库存垫厚后玩家叶应恢复为可执行值 123，实为 {:?}",
+            budget.get(&rt)
+        );
     }
 }

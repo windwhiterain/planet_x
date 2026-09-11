@@ -147,12 +147,16 @@ fn build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling() {
     }
 
     // 全资源预算钉成一个值（玩家叶 ⇒ `read_budget` 原样取用）。
-    let keys: Vec<String> = state
-        .faction(&fid)
-        .map(|f| f.resources.keys().cloned().collect())
-        .unwrap_or_default();
-    assert!(!keys.is_empty(), "势力总有库存键");
+
+    let keys: Vec<String> = config.resources.keys().cloned().collect();
     let set_budget = |state: &mut State, v: f64| {
+        // P1-5 之后 Player 的 construction 值会先乘维护 reserve 的 `con_scale`；
+        // 这条用例测的是「批满 vs 批 0」，所以要先把库存垫到 reserve 之上。
+        if let Some(f) = state.faction_mut(&fid) {
+            for rt in &keys {
+                f.resources.insert(rt.clone(), 1e6);
+            }
+        }
         let c = state.control.entry(fid.clone()).or_default();
         for rt in &keys {
             c.construction_budget.insert(rt.clone(), Control::player(v));
