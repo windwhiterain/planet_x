@@ -237,11 +237,11 @@ fn the_ai_writes_the_role_leaf_but_never_over_a_player() {
     );
 }
 
-/// **删叶 = 交回自动定编**：玩家给某艘舰钉过角色（`Player`）之后 AI 一个字都不写；
-/// 把这片叶删掉，这艘舰立刻回到「AI 按积压 + 思潮定编」的自由状态——之后 AI 会把结论
-/// 重新写进一片新叶。这正是这条轴与另两条风格轴的差别：**删叶不是"锁成某个值"，而是"放手"**。
+/// **把角色叶交回自动定编 = 归属写 `Auto`**（不是删叶）：玩家给某艘舰钉过角色
+/// （`Player`）之后 AI 一个字都不写；把归属改成 `Auto`，这艘舰立刻回到「AI 按积压 + 思潮
+/// 定编」的自由状态。
 #[test]
-fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
+fn releasing_the_role_leaf_via_auto_hands_the_ship_back_to_auto_planning() {
     let (config, mut state) = fresh(42);
     state.depots.clear();
     let ship = state
@@ -258,36 +258,22 @@ fn deleting_the_role_leaf_hands_the_ship_back_to_auto_planning() {
         .insert(ship.clone(), Control::player(ShipRole::Freight));
     assign_roles(&mut state, &config, &mut crate::model::RoundInputs::default());
     assert_eq!(state.ship_role(ship.clone()), ShipRole::Freight);
-    assert!(
-        state
-            .control("中国".to_string())
-            .unwrap()
-            .ship_role
-            .contains_key(&ship),
-        "玩家的叶 AI 不碰，所以它还在"
-    );
+    assert_eq!(state.ship_role_control(ship.clone()), ControlMode::Player);
 
-    // 删叶：玩家放手 ⇒ 归属不再拦着 AI。
+    // 放手：写 `归属: Auto`，不再拦着 AI。
     let diff = serde_json::json!({
-        "control": [{"势力": "中国", "角色": [{"舰": ship, "删叶": true}]}]
+        "control": [{"势力": "中国", "角色": [{"舰": ship, "归属": "Auto"}]}]
     });
     let r = crate::control::apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
-    assert!(
-        !state
-            .control("中国".to_string())
-            .unwrap()
-            .ship_role
-            .contains_key(&ship),
-        "叶必须真的没了"
-    );
+    assert!(r.is_clean(), "{:?}", r.skipped);
+    assert_eq!(state.ship_role_control(ship.clone()), ControlMode::Auto);
 
     // 有积压 ⇒ 定编重新生效（角色是掷骰定的，所以看的是「若干回合内有人被定上」）。
     state.depot_add("中国", "金星", "碳", 100.0);
     let hist = run_roles(&mut state, &config, "中国", 40);
     assert!(
         hist.iter().any(|r| !r.is_empty()),
-        "删掉玩家的钉子之后 AI 重新定编：40 回合里一个运输舰都没定出来"
+        "把归属交回 Auto 之后 AI 重新定编：40 回合里一个运输舰都没定出来"
     );
 }
 

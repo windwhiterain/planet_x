@@ -4,7 +4,7 @@
 //   * 读面是**通用求值器**：路径 / 格式化器 / 布局 / 组织——一个领域词都没有；
 //   * 写面**必然认识领域**（「一片叶靠哪几个字段定位、值写在哪几个字段、编辑器长什么样」），
 //     所以它单独住一个文件。但**每片叶的事实不在本文件里手抄**：
-//       - **结构事实**（身份键 / 值字段 / 只读派生列 / 归属与删叶的字段名）来自引擎发的
+//       - **结构事实**（身份键 / 值字段 / 只读派生列 / 归属字段名）来自引擎发的
 //         `GET /api/control-schema`（`src/control/leaves.rs`）——一份事实，web 与 Python kit 共用；
 //       - **呈现**（中文标签、编辑器种类、候选键从哪来、跟随哪片默认叶）来自 `views.json`
 //         的 `leaf_ui` / `action_ui`；
@@ -14,13 +14,13 @@
 // `action` 命令）⇒ 「读与控制穿插」不是额外机制，是那条数组顺序的直接结果。
 //
 // ⚠ 差异回传的五条语义**一条没改**（只回传变过的字段 / 写值即接管 / 原地改回则撤回界面自己钉的
-// `Player` / 壳被碰过就整片发 / `remove` 与值不可同条）——它们住在 `app.js`（`diffLeaf` 等），
+// `Player` / 壳被碰过就整片发 / 设计图「删除」与值不可同条）——它们住在 `app.js`（`diffLeaf` 等），
 // 本文件只负责**让那些函数找得到该找的东西**：每片叶都住在 `edControl[势力][字段]` 里。
 'use strict';
 
 (function () {
   // --- 引擎发来的结构事实（启动拉**一次**） ------------------------------------
-  let MANIFEST = null;      // {leaves:{field:{keys,values,carries,read_only}}, actions:{...}, ownerField, removeField}
+  let MANIFEST = null;      // {leaves:{field:{keys,values,carries,read_only}}, actions:{...}, ownerField}
   let MANIFEST_ERR = null;  // 拉不到就**响亮**：控制行渲染成红字，底部「应用」也点不动
 
   async function load() {
@@ -52,7 +52,6 @@
       leaves,
       actions,
       ownerField: doc.owner_field || '归属',
-      removeField: doc.remove_field || '删叶',
       raw: doc,
     };
   }
@@ -67,7 +66,6 @@
     return (MANIFEST && MANIFEST.actions[field]) || null;
   }
   function ownerField() { return (MANIFEST && MANIFEST.ownerField) || '归属'; }
-  function removeField() { return (MANIFEST && MANIFEST.removeField) || '删叶'; }
   /// `shellLeaf` / `rememberOrigin` 要的那点东西（身份键 + 值字段）。
   function specOf(field) {
     const s = leafSpec(field);
@@ -627,6 +625,5 @@
     uiFor,
     fieldOf,
     ownerField,
-    removeField,
   };
 })();

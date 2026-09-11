@@ -2,12 +2,12 @@
 
 use super::*;
 
-/// `remove` 的序列化开关：**只在真的要删叶时才出现在线格式里**。
+/// `删除` / `拆掉` 的序列化开关：**只在真的要删除时才出现在线格式里**。
 ///
 /// 为什么需要它：读面（`--control` / web 的 `control` 段）复用 `DefaultShipOrder` /
-/// `DefaultDoctrine` / `DefaultKiting` 这几个结构体来**回显**叶片，而 `remove` 是**写面**
+/// `DefaultDoctrine` / `DefaultKiting` 这几个结构体来**回显**叶片，而 `删除` 是**写面**
 /// 的东西（读面表达"没有这片叶"的方式是 `null`）。不跳过的话读面里会多出一堆
-/// `"remove": false`，而 kit 的 `verify` 是按字段比对读面的——那一列会立刻变成
+/// `"删除": false`，而 kit 的 `verify` 是按字段比对读面的——那一列会立刻变成
 /// 每次都出现的"假变动"。
 pub fn is_false(b: &bool) -> bool {
     !*b
@@ -44,9 +44,8 @@ where
 ///   否则「链上没人说话」会被静默变成「叶里记着 `Idle`」。
 ///
 /// ⚠ **它以前只列「有叶的舰」**（`control_view` 遍历的是 `c.ship_orders`），于是
-/// `remove: true` 删掉一片指令叶之后，这艘舰就**整行从控制树里消失**（web 上连它的风格 /
-/// 角色两行也一起没了），玩家/agent 再也没法在界面上单独给它设归属。现在与风格三轴一样
-/// **每舰一行**（`control-live-layers.md` §10.5 记的那个读面缺口）。
+/// 它以前只列「有叶的舰」，读面会缺行；现在与风格三轴一样**每舰一行**，
+/// 「没有自己的叶」就是 `mode: Inherit` + `behavior: null`。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ShipOrderEntry {
     #[serde(rename = "舰")]
@@ -288,10 +287,6 @@ pub struct DefaultDoctrine {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（这一层回到"没有说话"。注意：与它自己的两条轴同时出现 ⇒ 拒绝）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 舰队默认**风筝<->贴脸姿态**（势力级，两片之二），与 [`DefaultDoctrine`] 同形。
@@ -305,10 +300,6 @@ pub struct DefaultKiting {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（这一层回到"没有说话"）。与 `kiting`/`mode` 同时出现 ⇒ 拒绝。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 舰队默认**角色**（势力级，第三条风格轴），与 [`DefaultKiting`] 同形。
@@ -325,11 +316,6 @@ pub struct DefaultShipRole {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（势力级这一层回到"没有说话"）。与 `role`/`mode` 同时出现 ⇒ 拒绝；
-    /// 叶不存在时是幂等成功。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 一艘舰的指令补丁：`behavior` 用它替换该舰行为；`mode` 指定由谁决定。
@@ -348,11 +334,6 @@ pub struct ShipOrderPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（这艘舰回到"没有自己的指令" ⇒ 取舰队默认）。与 `behavior`/`mode` 同时出现 ⇒ 拒绝。
-    /// 舰已战沉也能删（删的是**控制面**里的叶，不要求实体还在 ⇒ 顺带是清理陈叶的路）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 一艘舰的行为风格补丁（per-舰 可配置）：覆盖 `ship` 的某条轴；缺省轴保留现值。
@@ -373,11 +354,6 @@ pub struct ShipDoctrinePatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（这艘舰回到"没有自己的风格" ⇒ 有效风格回落到舰队默认 / **出厂快照**）。
-    /// 叶不存在时是**幂等成功**（目标状态就是"没有这片叶"）。与值/`mode` 同时出现 ⇒ 拒绝。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 一艘舰的风筝<->贴脸姿态补丁（普通舰船控制属性，per-舰）：覆盖 `ship` 的姿态叶；
@@ -394,10 +370,6 @@ pub struct ShipKitingPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（回落到舰队默认 / 出厂快照）。叶不存在时是幂等成功；与值/`mode` 同时出现 ⇒ 拒绝。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 一艘舰的**角色**补丁（per-舰，第三条风格轴）：覆盖 `ship` 的角色叶。
@@ -416,12 +388,6 @@ pub struct ShipRolePatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**：这艘舰回到"没有自己的角色" ⇒ **交回自动定编**（`Inherit` 之下 AI 下回合
-    /// 可能立刻又写下它的结论——想让结论稳定就得写 `Player` 而不是删叶）。叶不存在时是幂等成功；
-    /// 与 `role`/`mode` 同时出现 ⇒ 拒绝。舰已战沉也能删（删的是控制面里的叶）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 资源预算补丁（投资/建造共用）：`value` 替换预算额，`mode` 指定由谁决定。
@@ -438,10 +404,6 @@ pub struct BudgetPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（该资源回到"这一层没有说话"）。与值/`mode` 同时出现 ⇒ 拒绝。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 某城某「建设投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -457,10 +419,6 @@ pub struct InvestWeightPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 某城某建造区「建造投资权重」补丁：`value` 替换权重，`mode` 指定由谁决定。
@@ -476,10 +434,6 @@ pub struct BuildWeightPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；建筑已经没了也能删（清理陈叶）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 某城「娱乐/福利预算」补丁：`value` 替换预算额，`mode` 指定由谁决定。
@@ -493,10 +447,6 @@ pub struct LoyaltyBudgetPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**。与值/`mode` 同时出现 ⇒ 拒绝；城已易主/被夷平也能删（清理陈叶）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 一张**设计图**的补丁（势力级设计图库的一项）：**读面即写面**。
@@ -506,12 +456,12 @@ pub struct LoyaltyBudgetPatch {
 /// * 只写 `mode` 合法（值不动）：`{"name":"重甲巡洋","mode":"Auto"}` = 交回系统重估；
 /// * **图名不存在时不许凭空造图**（只写 `mode` ⇒ 报 `no_such_blueprint`，同
 ///   `no_such_faction` 防幽灵势力的理由）；
-/// * `remove: true` ⇒ **删掉整张图**（与「让意图轴沉默」是两件事，见下）。
+/// * `删除: true` ⇒ **删掉整张图**（与「让意图轴沉默」是两件事，见下）。
 ///
 /// `order` 是**三层含义**的双 Option（见 [`double_option`]）：
 /// * **缺席** = 不动这一层；
 /// * `null` = **本图对意图没有说话**（意图轴回到沉默 ⇒ 链继续往下降到舰队默认）。
-///   这与「删掉这张图」（`remove: true`）后果完全不同：删图会让挂它的建造区变成
+///   这与「删掉这张图」（`删除: true`）后果完全不同：删图会让挂它的建造区变成
 ///   **悬空指针 ⇒ 停产**（Q10(a)），而清空 `order` 只是收回这一层的表态；
 /// * 给值 = 表态（`{"type":"dock","body":"地球"}` 这种 tagged 写法 `--apply` 同样接受）。
 #[derive(Deserialize, Default, JsonSchema)]
@@ -552,7 +502,7 @@ pub struct BlueprintPatch {
     /// **删掉整张图**（挂它的建造区随后是悬空指针 ⇒ 停产，见 Q10(a)）。
     /// 图不存在时是**幂等成功**；与值/`mode` 同时出现 ⇒ 拒绝。
     #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
+    #[serde(rename = "删除")]
     pub remove: bool,
     /// **只读回显**：本图造了多少艘（读面给的派生量）。写面**收下但不写**它——它不落状态，
     /// 由引擎现算。收下是为了「读面即写面、模板原样回传安全」（否则整面回传会被
@@ -609,7 +559,7 @@ pub struct BuildingPatch {
     pub area: Option<f64>,
     /// 拆掉这座建筑（不是"改属性"）：`true` = 拆。
     #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
+    #[serde(rename = "拆掉")]
     pub remove: bool,
 }
 
@@ -627,11 +577,6 @@ pub struct CapitalPatch {
     #[serde(default)]
     #[serde(rename = "归属")]
     pub mode: Option<ControlMode>,
-    /// **删掉这片叶**（回落到 [`default_capital_body`](crate::model::default_capital_body) 的兜底）。
-    /// 与 `value`/`mode` 同时出现 ⇒ 拒绝。
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(rename = "删叶")]
-    pub remove: bool,
 }
 
 /// 单个势力的可控状态补丁（`--apply` / `POST /api/command` 的 `control[]` 元素）。
@@ -724,16 +669,53 @@ pub struct FactionControlPatch {
     pub buildings: Vec<BuildingPatch>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(JsonSchema)]
 pub struct CommandReq {
     /// 各势力的**可控状态补丁**：只有**出现在 diff 里**的势力/叶片会被动到，
     /// 其余一律保持原样（presence-aware，读面模板原样回传因此安全）。
-    #[serde(default)]
     pub control: Vec<FactionControlPatch>,
     /// Optional scope (AI/玩家 boundary tree) overlay.
-    #[serde(default)]
     pub scope: Option<ControlScopePatch>,
+}
+
+/// 递归扫描任意 JSON，只要**任何一层对象**带着旧的 `"删叶"` 键就拒绝。
+///
+/// 控制叶的「恢复出厂值 / 删叶」机制已删除（2026-10 用户裁决：出厂默认只是初始值）。
+/// 旧客户端/旧脚本发 `"删叶": true` 时绝不能静默变成 no-op——那正是这个仓库最忌的
+/// 「失败看起来像成功」。设计图删除用 `"删除"`，建筑拆除用 `"拆掉"`。
+fn contains_removed_leaf_key(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(map) => {
+            map.contains_key("删叶") || map.values().any(contains_removed_leaf_key)
+        }
+        serde_json::Value::Array(a) => a.iter().any(contains_removed_leaf_key),
+        _ => false,
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandReq {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(default)]
+            control: Vec<FactionControlPatch>,
+            #[serde(default)]
+            scope: Option<ControlScopePatch>,
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if contains_removed_leaf_key(&value) {
+            return Err(serde::de::Error::custom(
+                "`删叶` 机制已删除（2026-10 裁决：出厂默认只是初始值，不是可恢复的目标）。\
+                 控制叶没有 `remove`/`删叶`；设计图删除用 `删除`，建筑拆除用 `拆掉`。",
+            ));
+        }
+        let raw = Raw::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(CommandReq { control: raw.control, scope: raw.scope })
+    }
 }
 
 // --- write-side result (what a diff actually did) ---------------------------
@@ -769,16 +751,16 @@ pub struct SkippedLeaf {
 #[derive(Debug, Default, Clone, Serialize, JsonSchema)]
 pub struct ApplyReport {
     /// 成功落到状态上的叶片数（一个 `ship_orders[]` 条目 / 一条预算 / 一次迁都… 算一个）。
-    /// **删叶也算**（包括"本来就没有那片叶"的幂等删除：目标状态达成了）。
+    /// 删除设计图也算一次落地。
     pub applied: usize,
     /// 没落地的叶片，附带为什么。
     pub skipped: Vec<SkippedLeaf>,
     /// **只写了值、没写 mode** 而被隐含接管成玩家指令的叶片路径（见 [`apply_diff`] 的
     /// 「写值即接管」）。它不是错误，但 agent 需要知道「这一条从这一刻起不再由系统改写」。
     pub took_over: Vec<String>,
-    /// 真的被**删掉**的叶片路径（`remove: true` 且那片叶确实存在）。它值得一条回执，因为
-    /// 「删叶」的后果是**有效值换来源**（逐舰风格回出厂快照、舰队默认回"没有说话"），
-    /// 而"删了一片本来就不存在的叶"不进这个列表（那是幂等的 no-op，见 [`apply_diff`]）。
+    /// 真的被**删掉**的设计图路径（蓝图补丁 `删除: true` 且那张图确实存在）。它值得
+    /// 一条回执，因为挂它的建造区会变成悬空指针 ⇒ 停产（Q10(a)）；"删一张本来
+    /// 就不存在的图"不进这个列表（那是不改状态的幂等 no-op）。
     pub removed: Vec<String>,
 }
 
@@ -804,7 +786,7 @@ impl ApplyReport {
         self.took_over.push(path.into());
     }
 
-    /// 记一条删叶（只记**真的**删掉了的；幂等删除不记）。
+    /// 记一条设计图删除（只记**真的**删掉了的；幂等删除不记）。
     pub fn removed(&mut self, path: impl Into<String>) {
         self.removed.push(path.into());
     }

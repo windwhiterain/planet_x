@@ -1,4 +1,4 @@
-//! 写面与报告：写值即接管、scope 压过独立势力、旧拼写仍可载入、报告要 `is_clean` 且逐叶计数、消失的舰/别人的舰/拼错的势力或字段都要**响亮报错**而不是静默丢、删叶把值还给来源。
+//! 写面与报告：写值即接管、scope 压过独立势力、旧拼写仍可载入、报告要 `is_clean` 且逐叶计数、消失的舰/别人的舰/拼错的势力或字段都要**响亮报错**而不是静默丢；旧的 `删叶` 键在 API 边界被拒。
 
 use super::*;
 
@@ -428,13 +428,10 @@ fn a_misspelled_control_field_is_rejected_rather_than_ignored() {
     );
 }
 
-/// **删叶**（`remove: true`）：控制叶的"存在性"本身就是一种状态——「没有叶」= 这一层
-/// 没有说话。而取值规则里「叶不存在」与「叶写着 `Inherit`」**不**等价
-/// （`leaf.map(|l| l.value).unwrap_or(record)`：叶存在就用叶里的值，与 `mode` 无关），
-/// 所以"碰过一次的风格叶"以前永远钉着那个数。这条测试把三段都钉住：
-/// ① 写叶 ⇒ 钉住；② 「恢复继承」撤**不掉**它；③ **删叶**才真的回到出厂快照。
+/// **删叶机制已删除**（2026-10 用户裁决：出厂默认只是初始值，不是可恢复的目标）：
+/// 旧客户端发 `"删叶": true` 必须**响亮失败**，不能静默 no-op。
 #[test]
-fn removing_a_leaf_returns_the_value_to_its_source() {
+fn removing_a_leaf_is_rejected_and_leaves_the_value_untouched() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let fid = "中国".to_string();
@@ -444,177 +441,64 @@ fn removing_a_leaf_returns_the_value_to_its_source() {
         .find(|s| s.faction_id == fid)
         .map(|s| s.name.clone())
         .expect("中国至少有一艘舰");
-    // 出厂记录值给成非零：`config/*.ron` 从来没填过 `default_doctrine`，开局记录值是 {0,0}，
-    // 那样子"回到出厂快照"与"钉在 0"分不出来。
-    for s in state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.doctrine = ShipDoctrine {
-            temper: 0.71,
-            lone_wolf: -0.2,
-        };
-    }
-    let record = state.ship(&ship).unwrap().doctrine;
+    let before = state.ship_doctrine(ship.clone());
 
-    // ① 写一片逐舰风格叶：有效值 = 叶里的值，这片叶**钉住**了它。
+    // 先写一片逐舰风格叶（正常路径仍然可用）。
     let diff = serde_json::json!({
         "control": [{"势力": fid, "风格": [{"舰": ship, "temper": -1.0, "lone_wolf": 0.5}]}]
     });
-    let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean(), "{:?}", r.skipped);
-    assert_eq!(state.ship_doctrine(ship.clone()).temper, -1.0);
+    apply_patch(&mut state, &config, &diff).expect("diff applies");
+    let leaf_before = state.ship_doctrine(ship.clone());
+    assert_ne!(leaf_before, before, "前置条件：叶真的写进去了");
 
-    // ② 「恢复继承」（只写 mode）撤不掉那个数：叶还在，取值优先用叶里的值。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "风格": [{"舰": ship, "归属": "Inherit"}]}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean(), "{:?}", r.skipped);
-    assert_eq!(
-        state.ship_doctrine(ship.clone()).temper,
-        -1.0,
-        "叶存在就用叶里的值（哪怕它写着 Inherit）——这正是「恢复继承」不够用的原因"
-    );
-
-    // ③ 删叶 ⇒ 有效值回到**出厂快照**，而且这片叶真的从控制面里消失。
+    // 旧删叶键现在应该在 API 边界被拒——整份 diff 不落地。
     let diff = serde_json::json!({
         "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
     });
-    let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean(), "{:?}", r.skipped);
-    assert_eq!(
-        r.removed.len(),
-        1,
-        "真的删掉了要留一条 NOTE_APPLY_REMOVED 回执：{:?}",
-        r.removed
+    let err = apply_patch(&mut state, &config, &diff).unwrap_err();
+    assert!(err.contains("删叶"), "{err}");
+    assert!(
+        err.contains("已删除"),
+        "错误必须说明机制已删：{err}"
     );
-    assert!(r.removed[0].contains("风格"), "{:?}", r.removed);
     assert_eq!(
         state.ship_doctrine(ship.clone()),
-        record,
-        "删叶之后有效风格必须回到出厂快照"
-    );
-    assert!(
-        state
-            .control
-            .get(&fid)
-            .and_then(|c| c.ship_doctrine.get(&ship))
-            .is_none(),
-        "叶必须真的没了"
-    );
-
-    // ④ 幂等：再删一次不报错、不算丢弃、也不进 `removed`（目标状态已经达成）。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert!(r.is_clean(), "{:?}", r.skipped);
-    assert!(
-        r.removed.is_empty(),
-        "删一片本来就不存在的叶不进回执：{:?}",
-        r.removed
-    );
-    assert_eq!(r.applied, 1, "但它是**成功的**（目标状态达成），不是被丢弃");
-
-    // ⑤ `remove` 与值同时出现 ⇒ **拒绝**（任何一种静默优先级都会让人误判另一件事发生了）。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true, "temper": 0.5}]}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).expect("diff applies");
-    assert_eq!(r.skipped.len(), 1, "{:?}", r);
-    assert_eq!(r.skipped[0].code, "remove_conflicts_with_value");
-    assert_eq!(
-        state.ship_doctrine(ship.clone()),
-        record,
+        leaf_before,
         "被拒绝的补丁一个字节都不许动"
     );
+
+    // 风格叶、势力级默认叶、预算、迁都：旧键在嵌套的任何一层都拒绝。
+    for diff in [
+        serde_json::json!({
+            "control": [{"势力": fid, "舰队默认风格": {"删叶": true}}]
+        }),
+        serde_json::json!({
+            "control": [{"势力": fid, "投资预算": [{"资源": "铁", "删叶": true}]}]
+        }),
+        serde_json::json!({
+            "control": [{"势力": fid, "首都": {"删叶": true}}]
+        }),
+    ] {
+        let err = apply_patch(&mut state, &config, &diff).unwrap_err();
+        assert!(err.contains("删叶") && err.contains("已删除"), "{err}");
+    }
 }
 
-/// 删叶的三个边角：**势力级默认叶**（删了 ⇒ 这一层不再供值）、**舰已不在**（陈叶清理）、
-/// 以及**预算/迁都**这几片同形的叶（同一套规则，不是只给风格轴开的后门）。
+/// 读面仍然可以原样回传；控制叶不再因为模板里有旧字段而被改写。
 #[test]
-fn removing_works_for_fleet_defaults_stale_ships_and_budgets() {
+fn the_control_template_round_trips_without_any_remove_mechanism() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
     let fid = "中国".to_string();
-    let ship = state
-        .ships
+    let template = crate::control::control_surface(&state, &config);
+    let fac = template["control"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|s| s.faction_id == fid)
-        .map(|s| s.name.clone())
-        .expect("中国至少有一艘舰");
-
-    // 势力级默认风格：建成"玩家表态"的叶 ⇒ 叶 Inherit 的舰取它的值。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "舰队默认风格": {"temper": 0.4, "lone_wolf": -0.6, "归属": "Player"}}]
-    });
-    assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
-    assert_eq!(
-        (
-            state.ship_doctrine(ship.clone()).temper,
-            state.ship_doctrine(ship.clone()).lone_wolf
-        ),
-        (0.4, -0.6)
-    );
-
-    // 删掉这片默认叶 ⇒ 这一层不再供值（回落到舰上记录值 / 作用域链）。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "舰队默认风格": {"删叶": true}}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).unwrap();
-    assert!(r.is_clean() && r.removed.len() == 1, "{:?}", r);
-    assert!(
-        state
-            .control
-            .get(&fid)
-            .and_then(|c| c.default_doctrine.as_ref())
-            .is_none()
-    );
-    let rec = state.ship(&ship).unwrap().doctrine;
-    assert_eq!(
-        state.ship_doctrine(ship.clone()),
-        rec,
-        "默认叶没了 ⇒ 回落到舰上记录值"
-    );
-
-    // 舰已不在（战沉/换代）：它的陈叶仍然能被删掉——删的是**控制面**里的叶，不要求实体还在。
-    state.ships.retain(|s| s.name != ship);
-    state
-        .control
-        .entry(fid.clone())
-        .or_default()
-        .ship_doctrine
-        .insert(
-            ship.clone(),
-            Control::inherit(ShipDoctrine {
-                temper: 0.9,
-                lone_wolf: 0.9,
-            }),
-        );
-    let diff = serde_json::json!({
-        "control": [{"势力": fid, "风格": [{"舰": ship, "删叶": true}]}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).unwrap();
-    assert!(
-        r.is_clean(),
-        "删陈叶不该因为舰没了而被丢弃：{:?}",
-        r.skipped
-    );
-    assert_eq!(r.removed.len(), 1, "陈叶也是真的被删掉了：{:?}", r.removed);
-
-    // 预算叶与迁都叶：同一套 `remove` 语义（这里只钉"删得掉"，值语义由各自的取值规则决定）。
-    let diff = serde_json::json!({
-        "control": [{"势力": fid,
-            "投资预算": [{"资源": "铁", "值": 3.0}],
-            "首都": {"值": "地球", "归属": "Player"}}]
-    });
-    assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
-    let diff = serde_json::json!({
-        "control": [{"势力": fid,
-            "投资预算": [{"资源": "铁", "删叶": true}],
-            "首都": {"删叶": true}}]
-    });
-    let r = apply_patch(&mut state, &config, &diff).unwrap();
+        .find(|c| c["势力"] == fid)
+        .unwrap()
+        .clone();
+    let diff = serde_json::json!({"control": [fac]});
+    let r = apply_patch(&mut state, &config, &diff).expect("read face must round-trip");
     assert!(r.is_clean(), "{:?}", r.skipped);
-    assert_eq!(r.removed.len(), 2, "{:?}", r.removed);
-    let c = state.control.get(&fid).expect("control");
-    assert!(c.investment_budget.get("铁").is_none() && c.capital.is_none());
 }

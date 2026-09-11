@@ -15,30 +15,6 @@ pub fn apply_default_doctrine(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.舰队默认风格");
-    let mut present = Vec::new();
-    if d.temper.is_some() {
-        present.push("temper");
-    }
-    if d.lone_wolf.is_some() {
-        present.push("lone_wolf");
-    }
-    if d.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(d.remove, &present, &path, report) {
-        return;
-    }
-    if d.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .default_doctrine
-            .take()
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     let wrote = d.temper.is_some() || d.lone_wolf.is_some();
     // **两轴叶的"新建"必须两条轴一起给**（`0.0` 是个正常取值：静默把它填进另一条轴，
     // 事后从读面完全看不出来——这正是这条守卫存在的理由）。叶已存在时单轴写仍然合法
@@ -53,7 +29,7 @@ pub fn apply_default_doctrine(
             path,
             "",
             "partial_doctrine_leaf",
-            "`default_doctrine` 是**两轴一片叶**（temper + lone_wolf），而这片叶还不存在：只给一条轴会把另一条静默设成 0.0（= 基线），而 0.0 是个正常取值，事后从读面看不出来。三条路任选：① 两条轴一起给；② 先只写 `mode`（先表态归属，值下次再给）；③ `remove: true` 删掉这片叶（回到「没有说话」）。",
+            "`default_doctrine` 是**两轴一片叶**（temper + lone_wolf），而这片叶还不存在：只给一条轴会把另一条静默设成 0.0（= 基线），而 0.0 是个正常取值，事后从读面看不出来。两条路任选：① 两条轴一起给；② 先只写 `mode`（先表态归属，值下次再给）。",
         );
         return;
     }
@@ -88,27 +64,6 @@ pub fn apply_default_kiting(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.舰队默认姿态");
-    let mut present = Vec::new();
-    if d.kiting.is_some() {
-        present.push("姿态");
-    }
-    if d.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(d.remove, &present, &path, report) {
-        return;
-    }
-    if d.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .default_kiting
-            .take()
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     let wrote = d.kiting.is_some();
     let ctrl = state
         .control
@@ -139,27 +94,6 @@ pub fn apply_default_role(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.舰队默认角色");
-    let mut present = Vec::new();
-    if d.role.is_some() {
-        present.push("角色");
-    }
-    if d.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(d.remove, &present, &path, report) {
-        return;
-    }
-    if d.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .default_role
-            .take()
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     let wrote = d.role.is_some();
     let ctrl = state
         .control
@@ -181,7 +115,7 @@ pub fn apply_default_role(
     report.applied += 1;
 }
 
-/// 逐舰指令补丁：`behavior` 替换该舰行为、`mode` 指定由谁决定、`remove` 删掉这片叶。
+/// 逐舰指令补丁：`behavior` 替换该舰行为、`mode` 指定由谁决定。
 pub fn apply_ship_order(
     state: &mut State,
     fid: &FactionId,
@@ -190,28 +124,6 @@ pub fn apply_ship_order(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.指令[{i}].舰");
-    let mut present = Vec::new();
-    if sp.behavior.is_some() {
-        present.push("行为");
-    }
-    if sp.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(sp.remove, &present, &path, report) {
-        return;
-    }
-    // 删叶**不要求舰还在**：删的是我们控制面里的那片叶（陈叶清理也是它的用途之一）。
-    if sp.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .ship_orders
-            .remove(&sp.ship)
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     // Resolve the ship by its **name** (the unique key): an order only applies to a
     // ship that exists and that this faction actually owns, so ordering another
     // faction's ship (or a vanished one) is a no-op.
@@ -231,11 +143,11 @@ pub fn apply_ship_order(
     };
     // **不建"空叶"**：读面每舰一行之后，模板里会出现
     // `{"ship": X, "behavior": null, "mode": "Inherit"}` —— 它说的正是「这一层没有说话」。
-    // 若无条件 `or_insert_with`，回传模板会给每一艘**叶被删过**的舰重新建出一片
+    // 若无条件 `or_insert_with`，回传模板会给每一艘**还没有叶**的舰重新建出一片
     // `value = Idle` 的叶，于是「链上没人说话」（有效值 `null`）静默变成「叶里记着 Idle」
     // （有效值 `Some(Idle)`）——模板回传就不再是不动点，而且这是一次**没人要求**的写操作。
     // 规则：既没写值、表态又是 `Inherit` ⇒ 幂等成功（目标状态"这一层没有说话"已经成立），
-    // 与「删一片本来就不存在的叶」同一条语义（`control-live-layers.md` §11.1 规则 2）。
+    // 与「这一层没有说话」同义（模板回传必须是不动点）。
     let leaf_exists = state
         .control
         .get(fid)
@@ -267,7 +179,7 @@ pub fn apply_ship_order(
 }
 
 /// 逐舰**行为风格**补丁：写的是**叶片**（值 + 三态），不是舰上那个记录值——`Ship.doctrine`
-/// 只是出厂快照 / AI 流水。每条轴钳制到 [-1,1]；缺省轴保留「当前有效」的那条（所以只写一条轴
+/// 是 AI 流水之外的记录值。每条轴钳制到 [-1,1]；缺省轴保留「当前有效」的那条（所以只写一条轴
 /// 不会把另一条清零，也**不会**把另一条变成 0）。写值即接管（与其它叶同一条规则）。
 pub fn apply_ship_doctrine(
     state: &mut State,
@@ -277,32 +189,6 @@ pub fn apply_ship_doctrine(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.风格[{i}].舰");
-    let mut present = Vec::new();
-    if d.temper.is_some() {
-        present.push("temper");
-    }
-    if d.lone_wolf.is_some() {
-        present.push("lone_wolf");
-    }
-    if d.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(d.remove, &present, &path, report) {
-        return;
-    }
-    // 删叶 ⇒ 有效风格回落到舰队默认 / **出厂快照**（叶不存在 = 这一层没有说话，且叶里的值
-    // 不再参与取值）。舰已战沉也能删。
-    if d.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .ship_doctrine
-            .remove(&d.ship)
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     if resolve_own_ship(state, fid, &d.ship, &path, report).is_none() {
         return;
     }
@@ -332,7 +218,7 @@ pub fn apply_ship_doctrine(
     report.applied += 1;
 }
 
-/// 逐舰**风筝<->贴脸姿态**补丁：与 [`apply_ship_doctrine`] 同一条路（叶片 + 写值即接管 + 删叶）。
+/// 逐舰**风筝<->贴脸姿态**补丁：与 [`apply_ship_doctrine`] 同一条路（叶片 + 写值即接管）。
 pub fn apply_ship_kiting(
     state: &mut State,
     fid: &FactionId,
@@ -341,27 +227,6 @@ pub fn apply_ship_kiting(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.姿态[{i}].舰");
-    let mut present = Vec::new();
-    if k.kiting.is_some() {
-        present.push("姿态");
-    }
-    if k.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(k.remove, &present, &path, report) {
-        return;
-    }
-    if k.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .ship_kiting
-            .remove(&k.ship)
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     if resolve_own_ship(state, fid, &k.ship, &path, report).is_none() {
         return;
     }
@@ -385,10 +250,9 @@ pub fn apply_ship_kiting(
     report.applied += 1;
 }
 
-/// 逐舰**角色**补丁（第三条风格轴）：与 [`apply_ship_kiting`] 同一条路（叶片 + 写值即接管 +
-/// 删叶）。唯一与另两条轴的差别：这片叶**自动控制也会写**（按积压定编），所以
-/// 「删叶」在这条轴上的意思是**交回自动定编**（AI 可能下回合立刻又写下结论），
-/// 而不是「从此保持某个值」——要后者就写 `Player`。
+/// 逐舰**角色**补丁（第三条风格轴）：与 [`apply_ship_kiting`] 同一条路（叶片 + 写值即接管）。
+/// 唯一与另两条轴的差别：这片叶**自动控制也会写**（按积压定编），所以想稳住结论
+/// 就写 `Player`。
 pub fn apply_ship_role(
     state: &mut State,
     fid: &FactionId,
@@ -397,28 +261,6 @@ pub fn apply_ship_role(
     report: &mut ApplyReport,
 ) {
     let path = format!("{fid}.角色[{i}].舰");
-    let mut present = Vec::new();
-    if f.role.is_some() {
-        present.push("角色");
-    }
-    if f.mode.is_some() {
-        present.push("归属");
-    }
-    if remove_conflicts(f.remove, &present, &path, report) {
-        return;
-    }
-    // 与另两条轴一样：删叶**不要求舰还在**（陈叶清理）。
-    if f.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .ship_role
-            .remove(&f.ship)
-            .is_some();
-        leaf_removed(report, path, existed);
-        return;
-    }
     if resolve_own_ship(state, fid, &f.ship, &path, report).is_none() {
         return;
     }
