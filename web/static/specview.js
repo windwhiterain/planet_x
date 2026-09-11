@@ -550,7 +550,7 @@
     box.style.display = open ? '' : 'none';
     if (open) {
       if (window.JsonView) {
-        window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick });
+        window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
       } else box.textContent = JSON.stringify(res);
     }
     btn.addEventListener('click', () => {
@@ -571,7 +571,7 @@
     btn.title = '其余字段（' + keys.length + '）：' + keys.join('、');
     box.style.display = open ? '' : 'none';
     if (open && !box.childElementCount) {
-      if (window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick });
+      if (window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
       else box.textContent = JSON.stringify(res);
     }
   }
@@ -845,7 +845,7 @@
       btn.title = '没有被这条视图认领的字段（引擎加字段会自动出现在这里）：' + keys.join('、');
       const box = el('div', 'sv-residual-box');
       box.style.display = open ? '' : 'none';
-      if (open && window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick });
+      if (open && window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
       btn.addEventListener('click', () => {
         const now = !ctx.expanded.has(rowId);
         if (now) ctx.expanded.add(rowId);

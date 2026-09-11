@@ -32,6 +32,11 @@
    反向再查一遍「源码带 `///` 的字段都真的发射了」。量的是「`///` → 弹窗文案」这条管线本身，
    不是某个症状——schemars 0.8.22 曾把单行 `/// **加粗**…` 剥成一个 `*`（46 条坏 markdown），
    就是这么被抓住的。见 `.agents/notes/doc-pipeline.md`。
+7. **名词覆盖率**（§5 声明侧 + §5d 接线侧，2026-10 新增 §5d）：用户裁决「所有 UI 都用名词，
+   **鼠标移上去弹窗显示注释/解释**」。§5 查**声明**（`views.json` 里当名词显示的列都得在
+   `--nouns` 语料里查得到）；§5d 查**接线**（渲染字段名标签的 JS 模块都必须挂
+   `Tip.attach`/`ctx.tip`）——通用 widget 自己渲染出来的字段名不在任何 `columns` 里，
+   §5 够不着它们。两条合起来才是「界面上每个名词都弹得出解释」。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
@@ -53,6 +58,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import REPO, group_main  # noqa: E402
 
 VIEWS_JSON = REPO / "web" / "static" / "views.json"
+# 前端**全部** JS 模块。§5d（名词覆盖率·静态）扫这里：`_g4_negative.py` 把它指到一份
+# tempfile 拷贝上去注入错，**真文件一个字节都不碰**（同 `VIEWS_JSON` 的用法）。
+STATIC_JS = REPO / "web" / "static"
+# §5d 的两份「声明」——
+#
+# `FIELD_LABEL_CLASSES`：「字段名标签」的类名。这些元素里装的是**名词**（键名 / 表头 /
+# 控制行标签），悬停就该弹解释。清单是**声明式**的：新写一个展示名词的视图，要么复用这些
+# 类名（那它立刻被 §5d 咬住），要么把新类名加到这里——加这一行在 diff 里看得见。
+FIELD_LABEL_CLASSES = ("jv-key", "jv-th", "sv-th", "sv-sheet-k")
+# `TIP_MOUNTS`：「挂了 tip」的两种写法——宿主直接调 `Tip.attach`，或经求值器的钩子 `ctx.tip`。
+# 用**词边界**匹配（不是子串）：把 `Tip.attach` 改名成 `Tip.attachX` 也算断线（写这条时的
+# 实测：子串匹配会让「改名」骗过判据——`"Tip.attach" in "Tip.attachRenamed"` 为真）。
+TIP_MOUNTS = (re.compile(r"\bTip\.attach\b"), re.compile(r"\bctx\.tip\b"))
+# 那条链的**末端**（`Tip.attach`）单独留一份：`ctx.tip` 转发得再勤，末端没人接也是哑的。
+TIP_HOST = re.compile(r"\bTip\.attach\b")
+# §5d 只认**真的接线**、不认注释里提了一嘴：扫之前先把注释去掉（否则「把挂载删掉、注释里还写着
+# `ctx.tip`」这种改动会骗过判据——写这条时的实测：`controls.js` 就只在注释里提过 `Tip.attach`）。
+# ⚠ 这个剥离器的适用边界：它假设源码里没有把 `//` 写进字符串或正则（本目录实测 0 处）。
+_JS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_JS_LINE_COMMENT = re.compile(r"//[^\n]*")
+
+
+def _js_code(path: Path) -> str:
+    """JS 源码**去掉注释**之后的样子（判据在这上面找类名与挂载点）。"""
+    return _JS_LINE_COMMENT.sub("", _JS_BLOCK_COMMENT.sub("", path.read_text(encoding="utf-8")))
 
 # 读面的根：与 `/api/state` 的 `info` 五个根 + 写面的两个读模板同批（`_frame` 侧同口径）。
 ROOTS = ("state", "pre", "post", "config", "session", "control", "scope")
@@ -1001,6 +1031,50 @@ def run(h, ck) -> None:
     ck.check("名词覆盖率：裸字段列的 `label` 不与引擎键名逐字重复（列头默认就是键名）",
              not dup_labels,
              "；".join(dup_labels[:4]) or "0 条重复（`label` 只在要覆盖/加格式时才写）")
+
+    # ══ 5d. 名词覆盖率（**静态**）：渲染字段名标签的 JS 模块都必须挂 tip ═══════════════
+    #
+    # 为什么要有这一条（§5 看不见的那半边）：上面 §5 查的是**声明**——`views.json` 里
+    # `columns` 中当名词显示的列。可是**通用 widget 自己渲染出来的**字段名不在任何 `columns`
+    # 里，§5 对它们**一条都不红**。`jsonview.js` 的原始 JSON 视图就是实机反例：
+    # `{字段名: 值}` 的树里 `global`/`bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
+    # 明明在界面上、语料（`--nouns`）里也有，却**从不挂弹窗**（hover 无反应）。
+    # 这是**哑巴失败**的典型：没有报错、没有空白屏，只是「没反应」——本仓最拉黑的那种。
+    #
+    # 判据：扫 `web/static/*.js`（**去掉注释**后的代码），算出三份清单——
+    #   * 「渲染字段名标签的文件」= 代码里出现 `FIELD_LABEL_CLASSES` 里任一**字段名标签类名**；
+    #   * 「挂 tip 的文件」= 代码里出现 `TIP_MOUNTS` 里任一写法（`Tip.attach` / `ctx.tip`）；
+    #   * 「真的调 `Tip.attach` 的文件」= 那条链的**末端**（widget → `ctx.tip` → 宿主 →
+    #     `Tip.attach` → tip.js）。末端没人接，前面挂得再全也是哑的。
+    # 要求：前者 **⊆** 中间那份（谁渲染了名词标签，谁就得把 tip 挂上——机制是同一套
+    # `Tip.attach`，各家不许自己查表），且末端**至少有一个**。
+    # **防空转**：清单非空 + 标签出现次数有下限，实测数字印在 detail 里。
+    #
+    # ⚠ 这条守的是「**接线**在不在」，不守「每个键在语料里查得到」——后者是 §5 的活。
+    #   查不到的键 `Tip.attach` 静默不弹（与从前行为一致），那是引擎缺文档，由 §5/§5b 报。
+    label_files, tip_files, host_files, label_hits = [], [], [], 0
+    for js_path in sorted(STATIC_JS.glob("*.js")):
+        src = _js_code(js_path)
+        found = [c for c in FIELD_LABEL_CLASSES if c in src]
+        if found:
+            label_files.append(js_path.name)
+            label_hits += sum(src.count(c) for c in found)
+        if any(m.search(src) for m in TIP_MOUNTS):
+            tip_files.append(js_path.name)
+        if TIP_HOST.search(src):
+            host_files.append(js_path.name)
+    unmounted = [f for f in label_files if f not in tip_files]
+    ck.check(f"名词覆盖率：{len(label_files)} 个渲染字段名标签的 JS 模块都挂了 tip"
+             f"（{label_hits} 处标签、{len(host_files)} 个模块真的调了 `Tip.attach`；"
+             f"没有「看得见却弹不出解释」的视图）",
+             not unmounted and bool(host_files) and len(label_files) >= 2 and label_hits >= 8,
+             "；".join(
+                 [f"`{f}` 渲染字段名标签却不挂 tip ⇒ 界面上那些名词 hover 没反应" for f in unmounted]
+                 + ([] if host_files else
+                    ["没有任何模块调 `Tip.attach` ⇒ `ctx.tip` 转发到空处，全部弹窗哑掉"])
+             ) or
+             (f"标签模块 {label_files} ⊆ 挂 tip 的模块 {tip_files}（宿主 {host_files}）；"
+              f"标签 {label_hits} 处 / 模块 {len(label_files)} 个（下限 8 处 / 2 个）"))
 
     # `new: true`（身份键由人现填）只对**多键叶**成立；写在势力级单叶上是声明写错。
     new_rows_total = sum(1 for v in views for c in (v.get("columns") or []) if c.get("new"))

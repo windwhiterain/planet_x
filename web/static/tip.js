@@ -32,10 +32,35 @@ window.Tip = (function () {
     return box;
   }
 
+  /// **rustdoc intra-doc 链接 → 人话**（在转义/排版**之前**先做，免得转义把反引号搅乱）。
+  ///
+  /// 源码注释是 rustdoc，引用别处写成链接：`` [`crate::sim::foo`] `` / `` [`Self::hull_max`] ``
+  /// / `` [`State`](crate::model::State) ``。直接印出来就是「方括号 + 模块路径」的天书，
+  /// 而**改源码注释是禁止的**（注释是唯一真值，`g4_spec.py` §5b 拿它逐字对账）——所以还原
+  /// 只能发生在**渲染这一层**。读者要的是那个名字，不是给它指路的路径：
+  ///
+  ///   `` [`crate::sim::foo`] ``             → `` `sim::foo` ``（`crate::` 只是「本 crate」的壳）
+  ///   `` [`Self::hull_max`] ``              → `` `hull_max` ``（`Self::` = 本结构体，读者不需要）
+  ///   `` [`State`] ``                       → `` `State` ``
+  ///   `` [`State`](crate::model::State) ``  → `` `State` ``（括号里那半只给 rustdoc 用）
+  ///
+  /// **未知形式一律原样留下**：`[serde(default)]`、区间 `[-1,1]`、正文里其它方括号都**不碰**
+  /// ——宁可印得丑，不许猜错。剥 `crate::`/`Self::` 也**只在这两种链接形态里**做，
+  /// 正文里单独出现的 `crate::foo` 不动。
+  function unlink(text) {
+    const human = (code) => code.replace(/^crate::/, '').replace(/^Self::/, '');
+    return text
+      // ① 带目标的链接 `` [`X`](目标) ``：括号那半只给 rustdoc，先吃掉（顺序不能倒，
+      //    否则 ② 会先咬掉 `[`X`]`、把 `(目标)` 留在原地）。
+      .replace(/\[`([^`]+)`\]\([^)\s]*\)/g, (m, code) => '`' + human(code) + '`')
+      // ② 裸 intra-doc 链接 `` [`X`] ``。
+      .replace(/\[`([^`]+)`\]/g, (m, code) => '`' + human(code) + '`');
+  }
+
   /// 极简排版：先转义，再认 **粗体** 与 `代码`，换行保留。
   /// （文档注释是写给读者的中文散文，直接 textContent 会把 `**` 和反引号一起印出来。）
   function render(text) {
-    const esc = text
+    const esc = unlink(text)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
