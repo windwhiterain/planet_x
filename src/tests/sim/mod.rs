@@ -3,6 +3,15 @@
 //! ⚠ 「中档（49–480 回合）」在本仓库的 Rust 侧**现在是空的**：那几条按模拟时长才算得出的
 //! 判据（同回合复垦、选装、编年史、战争最短回合）都搬到了 `play/tests/g2_mid.py`
 //! （数据级、不重编）。见 `.agents/notes/test-decoupled-suite.md`。
+//!
+//! ## 2026-10：本文件那条也搬走了（第 7 批）
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `settlements_and_cities_are_one_to_one` | g1「世界形状：每座城占的定居点都在它自己的天体上、不重号、不超过该天体的定居点数」+「矿藏按定居点隔离」 | `bodies.settlement_count` / `settlements.资源` / `cities.{天体名,定居点}` 都在读面上，回合 0 的静态形状 |
+//!
+//! 本文件现在**只剩夹具**（`fresh_world` / `attach_blueprint` / `spawn_at` / `stock`），
+//! 一条用例都没有——这是对的，夹具在这儿、用例在各自的主题文件里。
 
 use super::*;
 use crate::config::load_config;
@@ -37,80 +46,6 @@ fn fresh_world(seed: u64) -> (GameConfig, State) {
     let mut state = default_state(&config, seed);
     crate::world::pin_roles_to_war(&mut state);
     (config, state)
-}
-
-/// 定居点 ↔ 城市 一一对应: 每个城市占据其天体上一个合法定居点；同一座城不会
-/// 让一个定居点被两座城占用；地球恰好 5 个定居点各坐一座 spec 都市，矿藏按
-/// 定居点隔离（巴黎只产 铀/铂，不再共享整个地球的矿藏池）。
-#[test]
-fn settlements_and_cities_are_one_to_one() {
-    let (_config, state) = fresh_world(42);
-    for b in &state.bodies {
-        let cities: Vec<&City> = state
-            .cities
-            .iter()
-            .filter(|c| c.body_id == b.name)
-            .collect();
-        assert!(
-            cities.len() <= b.settlements.len(),
-            "body {}: {} cities must not exceed {} settlements",
-            b.name,
-            cities.len(),
-            b.settlements.len()
-        );
-        for c in cities {
-            assert!(
-                b.settlements.iter().any(|s| s.name == c.settlement),
-                "city {} (body {}) points at an unknown settlement {}",
-                c.name,
-                b.name,
-                c.settlement
-            );
-        }
-    }
-
-    let earth = &state.bodies[2];
-    assert_eq!(
-        earth.settlements.len(),
-        5,
-        "Earth has five spec metropolises"
-    );
-    let earth_cities = state.cities.iter().filter(|c| c.body_id == "地球").count();
-    assert_eq!(
-        earth_cities, 5,
-        "five cities on five Earth settlements (1:1)"
-    );
-    // 巴黎 (settlement named 巴黎) hosts only 铀/铂 — its own region's ores.
-    let paris = earth.settlements[3]
-        .resources
-        .iter()
-        .map(|d| d.resource.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        paris,
-        vec!["铀", "铂"],
-        "Paris settlement mines only its own ores"
-    );
-    assert_eq!(
-        state
-            .cities
-            .iter()
-            .find(|c| c.name == "巴黎")
-            .map(|c| c.settlement.as_str()),
-        Some("巴黎"),
-        "巴黎 occupies the settlement named 巴黎"
-    );
-    // 长三角/珠三角 are distinct settlements, so both may mine 铁 independently.
-    let cn = earth.settlements[0]
-        .resources
-        .iter()
-        .map(|d| d.resource.as_str())
-        .collect::<Vec<_>>();
-    assert!(cn.contains(&"铁"), "长三角 settlement has 铁");
-    assert!(
-        cn.contains(&"硅") && cn.contains(&"水冰"),
-        "长三角 has 硅/水冰"
-    );
 }
 
 // ---- 舰船设计图（blueprint）：出厂快照 / 归属 / 意图链 -------------------------

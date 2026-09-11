@@ -12,45 +12,6 @@
 
 use super::*;
 
-/// `pre` 面（不推进、喂空 sink 观测）里 B1 那几列必须是**中性缺省**，不是看起来像事实的假数据：
-/// 拆分是 0、倍率是 **1**（与 `coverage` 缺省 1.0 同一条约定——0 会被读成「治理能力归零」）、
-/// 迁都是「没评估也没迁」（`reviewed=false` + `Option` 全 `None`）、忠诚目标值全 0。
-///
-/// 为什么值得单钉：缺省值是**读面契约的一半**——`pre`/`post` 同形的代价就是那几个 0 必须
-/// 说话算话（见 `pre-post-unify.md` §3 规矩 2）。
-#[test]
-fn pre_view_has_neutral_b1_defaults() {
-    let (config, state) = fresh_world(42);
-    let view = view_from_state(&state, &config);
-    let row = view.factions.get("中国").expect("视图里必须有中国");
-
-    assert_eq!(row.governance_admin, 0.0);
-    assert_eq!(row.governance_entertainment, 0.0);
-    assert_eq!(
-        row.governance_scale, 1.0,
-        "中性缺省是 1.0——0 会被读成「治理能力归零」，那是另一回事"
-    );
-    assert_eq!(row.ideology_loyalty_penalty, 0.0);
-
-    assert_eq!(row.capital_loyalty_bonus, 0.0, "没跑治理 ⇒ 首都向心项是 0");
-    assert_eq!(row.ideology_loyalty_penalty, 0.0);
-    // 首都判定是**稀疏数组**：没推进过 ⇒ 空数组（不是「有行但全是 null」）。
-    assert!(
-        view.decisions.capital.is_empty(),
-        "没推进过就不该有首都判定行，实际 {:?}",
-        view.decisions.capital
-    );
-
-    assert!(!view.cities.is_empty());
-    for (cid, c) in &view.cities {
-        assert_eq!(
-            c.loyalty_target.effective, 0.0,
-            "{cid} 的过程量在 pre 里必须是 0"
-        );
-        assert_eq!(c.loyalty_target.distance, 0.0);
-    }
-}
-
 /// **A/B 同一个世界，只改一个数**：同一个势力、同一座城、同样的库存，只把
 /// `mond_control` 从 0 拨到 1，看那座**深处**的城忠诚往哪走。
 ///

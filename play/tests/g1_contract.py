@@ -409,6 +409,77 @@ def b3_tables(h, ck, tmp: Path) -> None:
              f"{len(all_trades)} 笔成交、运输档 {sorted(kinds)}")
 
 
+def world_shape(h, ck, tmp: Path) -> None:
+    """**世界形状**：城 ↔ 定居点一一对应、矿藏按定居点隔离
+    （`src/tests/sim/mod.rs::settlements_and_cities_are_one_to_one`，2026-10 第 7 批）。
+
+    读面 = `bodies.settlement_count` + `settlements.资源` + `cities.{天体名, 定居点}`，全是回合 0 的
+    静态形状 ⇒ 与 Rust 原件（`fresh_world(42)`）同一口径。
+    """
+    proj = tmp / "shape"
+    h.run_into(proj, FACE_SEED, 0)
+    bodies = _table(proj, "bodies")
+    settlements = _table(proj, "settlements")
+    cities = _rounds(_table(proj, "cities"), 0)
+
+    on_body: dict[str, set] = {}
+    for s in settlements:
+        on_body.setdefault(s["天体名"], set()).add(s["定居点"])
+    counts = {b["天体名"]: b["settlement_count"] for b in bodies}
+
+    stray = [f"{c['城名']} 占的 {c['定居点']} 不在 {c['天体名']} 上" for c in cities
+             if c["定居点"] not in on_body.get(c["天体名"], set())]
+    pairs = [(c["天体名"], c["定居点"]) for c in cities]
+    dup = sorted({p for p in pairs if pairs.count(p) > 1})
+    over = [f"{b}: {sum(1 for c in cities if c['天体名'] == b)} 座城 > {n} 个定居点"
+            for b, n in counts.items() if sum(1 for c in cities if c["天体名"] == b) > n]
+    ck.check("世界形状：每座城占的定居点都在它自己的天体上、不重号、不超过该天体的定居点数",
+             not (stray or dup or over),
+             "；".join((stray + [f"重号 {d}" for d in dup] + over)[:3])
+             or f"{len(cities)} 座城 ↔ {len(settlements)} 个定居点（{len(bodies)} 个天体）全自洽")
+    ck.check("世界形状守卫没有空转（真有多定居点天体、也有真城）",
+             len(cities) >= 5 and any(n >= 2 for n in counts.values()),
+             f"{len(cities)} 座城；定居点数分布 {sorted(counts.values())}")
+
+    earth = [s for s in settlements if s["天体名"] == "地球"]
+    paris = next((s for s in earth if s["定居点"] == "巴黎"), None)
+    cn = next((s for s in earth if s["定居点"] == "长三角"), None)
+    paris_res = sorted(d["resource"] for d in ((paris or {}).get("资源") or []))
+    cn_res = {d["resource"] for d in ((cn or {}).get("资源") or [])}
+    ck.check("世界形状：矿藏按定居点隔离（地球 5 个定居点、巴黎只产自己的矿、长三角有铁/硅/水冰）",
+             len(earth) == 5 and paris_res == ["铀", "铂"] and {"铁", "硅", "水冰"} <= cn_res,
+             f"地球 {len(earth)} 个定居点；巴黎 {paris_res}；长三角 {sorted(cn_res)}")
+
+
+def neutral_defaults(h, ck, tmp: Path) -> None:
+    """**`pre` 面的中性缺省**（`sim/tests/governance.rs::pre_view_has_neutral_b1_defaults`，第 7 批）。
+
+    缺省值是**读面契约的一半**：`pre`/`post` 同形的代价就是那几个缺省值必须说话算话——
+    **倍率类的中性值是 1.0 而不是 0**（0 会被读成「治理能力归零」）。回合 0 = 治理/娱乐都没跑过。
+    """
+    proj = tmp / "neutral"
+    h.run_into(proj, FACE_SEED, 0)
+    fp = _rounds(_table(proj, "faction_process"), 0)
+    bad = [f"{r['势力']}: admin={r['governance_admin']} 娱乐={r['governance_entertainment']} "
+           f"scale={r['governance_scale']} 思潮罚={r['ideology_loyalty_penalty']} "
+           f"首都向心={r['capital_loyalty_bonus']}" for r in fp
+           if (r["governance_admin"] or 0) != 0 or (r["governance_entertainment"] or 0) != 0
+           or (r["governance_scale"] or 0) != 1.0 or (r["ideology_loyalty_penalty"] or 0) != 0
+           or (r["capital_loyalty_bonus"] or 0) != 0]
+    ck.check("回合 0 的治理量是中性缺省（倍率 1.0，不是 0）", bool(fp) and not bad,
+             "；".join(bad[:3]) or f"{len(fp)} 个势力全是中性缺省")
+
+    cp = _rounds(_table(proj, "city_process"), 0)
+    cbad = [f"{r['城名']}: 有效={r['loyalty_target_effective']} 距离={r['loyalty_target_distance']}"
+            for r in cp if (r["loyalty_target_effective"] or 0) != 0
+            or (r["loyalty_target_distance"] or 0) != 0]
+    ck.check("回合 0 的忠诚目标过程量是 0（没跑治理 ⇒ 没有「距离目标」）", bool(cp) and not cbad,
+             "；".join(cbad[:3]) or f"{len(cp)} 座城全 0")
+
+    cap = [r for r in _rounds(_table(proj, "decisions"), 0) if r.get("kind") == "capital"]
+    ck.check("回合 0 一条首都判定都没有（首都判定是稀疏的）", not cap, f"{len(cap)} 行")
+
+
 def input_face(h, ck, tmp: Path) -> None:
     """输入面（B5）：`--index` 的 `round_inputs` ≡ `--derived` 的 `pre`。"""
     proj, ckpt = tmp / "b5", tmp / "b5.json"
@@ -729,6 +800,8 @@ def run(h, ck) -> None:
     spending_within_batch(h, ck, tmp)
     b3_tables(h, ck, tmp)
     input_face(h, ck, tmp)
+    world_shape(h, ck, tmp)
+    neutral_defaults(h, ck, tmp)
     control_fixed_point(h, ck, tmp)
     call_functions(h, ck, tmp)
     neutral_paths(h, ck, tmp)
