@@ -1074,7 +1074,8 @@ def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
 def blueprint_scenario_checks(h, ck) -> None:
     """**合成场景 · 拨控制叶**：`autocontrol/blueprints.rs` + `sim/spending.rs` 剩下那几条。
 
-    搬过来的四条（各删掉一条 Rust 原件）：
+    搬过来的：前三条**整条**（Rust 原件删了），第四条只搬**读面那一半**（另一半留在 Rust，
+    因为只有直接调一次 `step_construction` 才能保证库存不是瓶颈）。
 
     ① `a_dangling_pointer_is_left_dangling`——删图是玩家/agent 的动作，那个区停产**本身就是
        可见后果** ⇒ AI 不替他收拾（不建新图、不改指针）。
@@ -1083,9 +1084,10 @@ def blueprint_scenario_checks(h, ck) -> None:
     ③ `only_unreferenced_selfmade_designs_are_reaped`——回收只碰**自己造的**：名字带 AI 前缀、
        没人指向、且**不是玩家钉的**（`mode: Inherit` 才是流水；`--apply` 只写值会把它钉成
        `Player`，那这条安全属性就整个反过来了）。
-    ④ `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`——造舰慢是缺钱还是
-       缺产能：同一座城只改预算一个变量，`increment < rate`（钱）与 `increment ≈ rate`（产能）
-       两个极端都要造出来。
+    ④ `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**活回合那一半**
+       ——同一座城只改预算一个变量：批 0 ⇒ 建造行**还在**、`rate > 0`、`increment = 0`（是缺钱
+       不是没船坞）；批满 ⇒ 进度真的在走；`rate` 与钱无关。⚠ `increment ≈ rate` **不在这里**
+       （活回合有第二个瓶颈：库存），见下面那段注释。
     """
     seed = SCENARIO_SEED
     st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_bp_probe.json", seed))
@@ -1199,16 +1201,21 @@ def blueprint_scenario_checks(h, ck) -> None:
                              "investment_budget": [{"resource": r, "value": v} for r in res]}]}
 
     lines = {}
+    # ⚠ **只推一回合**：活回合的忠实类比是「调一次 `step_construction`」（= 删掉的那条单测）。
+    # 推长一点，**库存**就会变成第二个瓶颈，两个极端就分不出来了——实测 `main@1ccbb2c`
+    # （P1-4 改市场定价之后）批满 1e6 的同一座城：回合 1 是 `10.0 == 10.0`，回合 2 掉到 7.27、
+    # 回合 3 干脆 0。所以「`increment ≈ rate`」只在**第一回合**（= 开局库存）读得出来；
+    # 不靠开局库存的那份守卫留在 Rust 原件里（`sim/spending.rs`，模块头有说明）。
     for tag, v in (("rich", 1e6), ("poor", 0.0)):
-        p = h.scenario_apply(f"bp_budget_{tag}", seed, SCENARIO_ROUNDS, [leaves(v)])
+        p = h.scenario_apply(f"bp_budget_{tag}", seed, 1, [leaves(v)])
         lines[tag] = _build_lines(KIT.load(str(p), only=("city_process",)).table("city_process"), city)
 
     rich = [(r, k, l) for r, k, l in lines["rich"] if k == class_]
     capped = [(r, k, l) for r, k, l in rich
               if l["rate"] > 0 and abs(l["increment"] - l["rate"]) <= 1e-9 * max(1.0, abs(l["rate"]))]
-    ck.check("合成场景（预算）：批满 ⇒ increment ≈ rate（钱管够，是产能封顶）",
+    ck.check("合成场景（预算）：批满 ⇒ 顶到产能上限（钱管够，是船坞的产能封顶）",
              bool(rich) and len(capped) == len(rich),
-             f"{city} 的 {class_}：{[(r, round(l['rate'], 4), round(l['increment'], 4)) for r, _, l in rich]}")
+             f"{city} 的 {class_}（第一回合）：{[(r, round(l['rate'], 4), round(l['increment'], 4)) for r, _, l in rich]}")
     poor = lines["poor"]
     zero = all(float(l["increment"]) == 0.0 for _, _, l in poor)
     pos = [(r, k, l) for r, k, l in poor if l["rate"] > 0]
@@ -1216,6 +1223,13 @@ def blueprint_scenario_checks(h, ck) -> None:
              bool(poor) and zero and bool(pos),
              f"{city} 逐行：{[(r, k, round(l['rate'], 4), round(l['increment'], 4)) for r, k, l in poor][:4]}"
              f"（{len(poor)} 行，其中 {len(pos)} 行 rate > 0）")
+    # `rate` 是产能、与钱无关：同一座城同一舰级，两种预算给**同一个**值。
+    rates = {}
+    for tag, rows in (("rich", rich), ("poor", [(r, k, l) for r, k, l in poor if k == class_])):
+        rates[tag] = {(r, round(l["rate"], 6)) for r, _, l in rows if l["rate"] > 0}
+    ck.check("合成场景（预算）：rate 是产能、与批了多少钱无关（同一舰级两种预算同一个 rate）",
+             bool(rates["rich"]) and rates["rich"] == rates["poor"],
+             f"{class_} 的 rate：批满 {sorted(rates['rich'])} / 批 0 {sorted(rates['poor'])}")
 
 
 def id_checks(h, ck, out) -> None:
