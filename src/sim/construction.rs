@@ -23,17 +23,27 @@ pub fn step_construction(
     );
 
     for fid in faction_ids {
-        let (investment, inv_modes) = autocontrol::read_budget(
+        let (mut investment, inv_modes) = autocontrol::read_budget(
             state,
             config,
             fid.clone(),
             autocontrol::BudgetKind::Investment,
         );
-        let (construction, con_modes) = autocontrol::read_budget(
+        let (mut construction, con_modes) = autocontrol::read_budget(
             state,
             config,
             fid.clone(),
             autocontrol::BudgetKind::Construction,
+        );
+        // **P1-5 联合上限**：Investment 与 Construction 各自都有预算，但两者同时花
+        // 可能击穿舰队维护 reserve。先把两笔预算按市场价值比例缩到 `库存 − reserve`。
+        // 单个 kind 的 `read_budget` 仍负责各自的口径；这一道只加**联合闸**。
+        autocontrol::budget::cap_joint_budgets(
+            state,
+            config,
+            &fid,
+            &mut investment,
+            &mut construction,
         );
         autocontrol::write_budget(
             state,
@@ -153,6 +163,7 @@ fn record_spend(spent: &mut ResourceMap, cost: &[(String, f64)]) {
         *spent.entry(rt.clone()).or_insert(0.0) += c;
     }
 }
+
 
 pub fn build_city(
     state: &mut State,
