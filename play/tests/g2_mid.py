@@ -250,12 +250,104 @@ def combat_report(q, tol: float = 1e-9) -> dict:
     return out
 
 
+def _nan(x) -> bool:
+    return x is None or (isinstance(x, float) and x != x)
+
+
+def blueprint_report(q) -> dict:
+    """**设计图（blueprint）的数据级判据**（`src/tests/sim/blueprints.rs` + `autocontrol/blueprints.rs`）。
+
+    读面上三处 join 就能验「**出厂快照**」这条语义：
+
+    ① **快照不随时间变**：一条舰的 `components` 在它一生里恒定（改图不碰已下水的舰）；
+    ② **出厂那一刻取自图**：`spawned_round` 的 `components` == 那张图**本回合或上一回合**的
+       `components`——⚠ 两个都要认：同一回合里可能**先下水、后改图**（实测 9/76 例），
+       而图那一行是**回合末**的状态，舰身上留的是**下水那一刻**的（这正是快照语义本身）；
+    ③ **事件归因与表一致**：`ship_spawned.data.blueprint` == 该舰行上的 `blueprint`；
+    ④ **`ship_count` 是算出来的**：图表的计数 == 该回合指向它的舰数；
+    ⑤ **图按 `(舰级, 选装)` 去重**：同一势力同一回合不允许两张签名相同的图（防「设计图爆炸」）。
+    """
+    ships = q.table("ships")
+    bps = q.table("blueprints")
+    ev = q.table("events")
+    out: dict = {}
+
+    life: dict = {}
+    for r in ships.itertuples(index=False):
+        life.setdefault(r.ship_id, set()).add(tuple(r.components or []))
+    drift = {k: v for k, v in life.items() if len(v) > 1}
+    out["ship_kinds"] = len(life)
+    out["drift_n"] = len(drift)
+    out["drift"] = [f"{k}: {list(v)[:2]}" for k, v in list(drift.items())[:3]]
+
+    design = {(int(r.round), r.faction_id, r.blueprint_id): r for r in bps.itertuples(index=False)}
+    same = prev = neither = 0
+    snap_ex: list[str] = []
+    spawned = ships[ships["round"] == ships["spawned_round"]]
+    for r in spawned.itertuples(index=False):
+        if not r.blueprint:
+            continue
+        rnd, fid = int(r.round), r.faction_id
+        cur = design.get((rnd, fid, r.blueprint))
+        if cur is None or not (cur.components or []):
+            continue                      # 这一回合图没快照 / 空选装 = 交给生成器
+        got = {c for c in (r.components or [])}
+        if got == set(cur.components):
+            same += 1
+        elif (before := design.get((rnd - 1, fid, r.blueprint))) is not None \
+                and got == set(before.components or []):
+            prev += 1
+        else:
+            neither += 1
+            if len(snap_ex) < 3:
+                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur.components)}")
+    out["snap_same"], out["snap_prev"], out["snap_bad"], out["snap_ex"] = same, prev, neither, snap_ex
+
+    attr: dict = {}
+    for e in ev[ev["type"] == "ship_spawned"].itertuples(index=False):
+        attr[(int(e.round), e.target_id)] = (e.data or {}).get("blueprint")
+    mis: list[str] = []
+    for r in spawned.itertuples(index=False):
+        key = (int(r.round), r.ship_id)
+        if key not in attr:
+            continue
+        # ⚠ pandas 把缺失值给成 NaN，事件里是 `null`/None ⇒ 比之前要归一（否则「None vs nan」假红）。
+        mine = None if _nan(r.blueprint) else r.blueprint
+        theirs = None if _nan(attr[key]) else attr[key]
+        if mine != theirs and len(mis) < 3:
+            mis.append(f"r{int(r.round)} {r.ship_id}: 事件说 {theirs}，表说 {mine}")
+    out["attr_bad"], out["attr_checked"] = mis, len(attr)
+
+    cnt: dict = {}
+    for r in ships.itertuples(index=False):
+        if r.blueprint:
+            k = (int(r.round), r.faction_id, r.blueprint)
+            cnt[k] = cnt.get(k, 0) + 1
+    sc_bad: list[str] = []
+    for r in bps.itertuples(index=False):
+        k = (int(r.round), r.faction_id, r.blueprint_id)
+        if int(r.ship_count or 0) != cnt.get(k, 0) and len(sc_bad) < 3:
+            sc_bad.append(f"r{int(r.round)} {r.faction_id}/{r.blueprint_id}: 表说 {r.ship_count}，实为 {cnt.get(k, 0)}")
+    out["count_bad"], out["bp_rows"] = sc_bad, len(bps)
+
+    seen: dict = {}
+    dup: list[str] = []
+    # ⚠ `class` 是 Python 关键字，`itertuples` 会把它改名 ⇒ 这里用 `iterrows`。
+    for _, r in bps.iterrows():
+        sig = (int(r["round"]), r["faction_id"], r["class"], tuple(r["components"] or []))
+        if sig in seen and len(dup) < 3:
+            dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['blueprint_id']}）")
+        seen[sig] = r["blueprint_id"]
+    out["dup_bad"], out["dup_sigs"] = dup, len(seen)
+    return out
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
-    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -302,6 +394,7 @@ def extract(dirpath):
 
     # ⑥ 战斗/损伤（`src/tests/sim/combat.rs` 里能只看数据的那几条）。
     combat = combat_report(q)
+    blueprints = blueprint_report(q)
 
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
@@ -310,7 +403,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "meta": q.meta}
+            "combat": combat, "blueprints": blueprints, "meta": q.meta}
 
 
 def run(h, ck) -> None:
@@ -332,8 +425,49 @@ def run(h, ck) -> None:
 
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
+    blueprint_checks(h, ck, out)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def blueprint_checks(h, ck, out) -> None:
+    """**设计图**（`sim/blueprints.rs` + `autocontrol/blueprints.rs` 里能只看数据的那几条）。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    bp = [d["blueprints"] for d in out]
+
+    kinds = sum(b["ship_kinds"] for b in bp)
+    dr = sum(b["drift_n"] for b in bp)
+    sample = next((m for b in bp for m in b["drift"]), "")
+    ck.check("出厂快照不随时间变（一条舰的选装一生恒定：改图不碰已下水的舰）", dr == 0,
+             f"{sample}（共 {dr} 条）" if dr else f"{tag}：{kinds:,} 条舰的选装全程没变过")
+    ck.check("快照守卫没有空转（真的看过舰）", kinds >= 100, f"{kinds:,} 条舰")
+
+    same = sum(b["snap_same"] for b in bp)
+    prev = sum(b["snap_prev"] for b in bp)
+    nb = sum(b["snap_bad"] for b in bp)
+    sample = next((m for b in bp for m in b["snap_ex"]), "")
+    ck.check("出厂那一刻的选装取自那张图（本回合的图，或「同回合先下水后改图」前的上一版）", nb == 0,
+             f"{sample}（共 {nb} 例）" if nb else
+             f"{tag}：{same + prev} 条有图新舰全部对得上（其中 {prev} 条属「先下水后改图」）")
+    ck.check("出厂快照守卫没有空转（真有带图下水的新舰）", same + prev >= 10, f"{same + prev} 条（下限 10）")
+
+    ab = sum(len(b["attr_bad"]) for b in bp)
+    ac = sum(b["attr_checked"] for b in bp)
+    sample = next((m for b in bp for m in b["attr_bad"]), "")
+    ck.check("造舰事件的图归因与舰表一致（有图才写，写了就要对）", ab == 0,
+             sample or f"{tag}：{ac:,} 条造舰事件的归因全部与表一致")
+
+    cb = sum(len(b["count_bad"]) for b in bp)
+    rows = sum(b["bp_rows"] for b in bp)
+    sample = next((m for b in bp for m in b["count_bad"]), "")
+    ck.check("图表的 ship_count 是算出来的（== 该回合指向它的舰数）", cb == 0,
+             sample or f"{tag}：{rows:,} 张图快照的计数全部自洽")
+
+    db = sum(len(b["dup_bad"]) for b in bp)
+    sigs = sum(b["dup_sigs"] for b in bp)
+    sample = next((m for b in bp for m in b["dup_bad"]), "")
+    ck.check("图按 (舰级, 选装) 去重（同一势力同一回合没有两张同签名的图）", db == 0,
+             sample or f"{tag}：{sigs:,} 个 (回合,势力,舰级,选装) 签名各只有一张图")
 
 
 def combat_checks(h, ck, out) -> None:
