@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Offline GLSL validator for planet_x-vfx's three.js shaders.
 //
-//   node check-shaders.mjs [--defines F=5,C=12] [--raw] <file.js|file.glsl> ...
+//   node check-shaders.mjs [--defines C=12] [--glslang PATH] [file.vert|file.frag ...]
+//
+// GLSL **住在独立文件里**（web/static/shaders/**），不在 JS 模板字符串里了。引用关系走
+// three.js 的 `#include <px/...>`，所以本脚本必须**镜像 three 的解析语义**再喂给 glslang
+// （见下面 resolveIncludes 那段）。不带参数时校验目录下全部 `.vert`/`.frag`。
 //
 // Why a prelude is needed
 // -----------------------
-// The project writes shaders as GLSL inside JS template literals and hands them
-// to THREE.ShaderMaterial. three.js r169 (web/static/index.html importmap)
+// The project hands these sources to THREE.ShaderMaterial. three.js r169 (web/static/index.html importmap)
 // ALWAYS prepends `#version 300 es` plus a pile of `#define`s and the built-in
 // attribute/uniform declarations for any non-RawShaderMaterial
 // (three.module.js, WebGLProgram: "GLSL 3.0 conversion for built-in materials
@@ -22,10 +25,10 @@
 // from the project's `defines: { ... }` blocks. Defaults are the largest values
 // the project uses, i.e. the strictest thing to validate.
 
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // glslang 是**外部**工具，不进版本库（体积 + 平台相关）。默认去 scratch/glsl-tools 找；
@@ -46,7 +49,10 @@ if (!existsSync(DEFAULT_GLSLANG) && !process.argv.includes('--glslang') && !proc
 const argv = process.argv.slice(2);
 let glslang = DEFAULT_GLSLANG;
 let raw = false;
-let defines = { FBM_OCT: 5, CITY_MAX: 12, GODRAY_SAMPLES: 24, STREAK_TAPS: 12, GHOST_COUNT: 6 };
+// 只剩 CITY_MAX：噪声八度数与 godray/streak/ghost 的循环上界**都改成 uniform 了**
+// （常量上界会被 D3D 的 fxc 完全展开 —— 那份教训见
+//  .agents/notes/shader-compile-stall.md），所以它们不再是 #define。
+let defines = { CITY_MAX: 12 };
 const inputs = [];
 
 for (let i = 0; i < argv.length; i++) {
@@ -61,10 +67,7 @@ for (let i = 0; i < argv.length; i++) {
   } else inputs.push(a);
 }
 
-if (inputs.length === 0) {
-  console.error('usage: node check-shaders.mjs [--defines F=5] [--raw] [--glslang PATH] <file.js|file.glsl> ...');
-  process.exit(64);
-}
+// 无参数不是错误：下面按「校验 web/static/shaders 下全部 .vert/.frag 入口」处理。
 
 // --- three.js r169 ShaderMaterial prefix (trimmed of light/fog/map chunks) ---
 const PRECISION = ['float', 'int', 'sampler2D', 'samplerCube', 'sampler3D', 'sampler2DArray',
@@ -132,30 +135,51 @@ ${FRAG_UNIFORMS}
 `;
 }
 
-// --- extraction -------------------------------------------------------------
-const BLOCK = /(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\/\*\s*glsl\s*\*\/\s*)?`([\s\S]*?)`\s*;/g;
+// --- chunk 加载 + include 解析 -------------------------------------------------
+// 逐字照抄 three r169 `src/renderers/webgl/WebGLProgram.js` 的语义：
+//   const includePattern = /^[ \t]*#include +<([\w\d./]+)>/gm;
+//   function resolveIncludes(s){ return s.replace(includePattern, includeReplacer); }
+//   function includeReplacer(m, include){ ...; return resolveIncludes(string); }   ← 递归
+// 包括「找不到就抛」这一条：门禁松了，运行时才炸就没意义了。
+//
+// ⚠ three 这套解析器**没有 include guard、也不去重**：同一个 chunk 经两条路径进来就会
+// 重复定义函数。所以每个 .glsl 必须自带 `#ifndef PX_...` 守卫（本目录全部如此）——
+// glslang 会在守卫写错时报重定义，那正是我们要它守的东西。
+const SHADER_DIR = fileURLToPath(new URL('../web/static/shaders', import.meta.url));
+const INCLUDE = /^[ \t]*#include +<([\w\d./]+)>/gm;
 
-function extract(src) {
-  const out = [];
-  let m;
-  BLOCK.lastIndex = 0;
-  while ((m = BLOCK.exec(src)) !== null) out.push({ name: m[1], body: m[2] });
-  return out;
+function loadChunks() {
+  const map = new Map();
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else map.set(relative(SHADER_DIR, p).split(sep).join('/'), readFileSync(p, 'utf8'));
+    }
+  };
+  walk(SHADER_DIR);
+  return map;
 }
 
-// Resolve ${NAME} - the project splices shared snippets this way. Unknown names
-// are left verbatim so glslang reports them instead of us silently passing.
-function expand(body, table, seen = new Set()) {
-  return body.replace(/\$\{([A-Za-z_$][\w$]*)\}/g, (whole, name) => {
-    if (!(name in table)) return whole;
-    if (seen.has(name)) return `/* cyclic ${name} */`;
-    return expand(table[name], table, new Set([...seen, name]));
+const CHUNKS = loadChunks();
+
+function resolveIncludes(text, stack = []) {
+  return text.replace(INCLUDE, (_m, name) => {
+    const chunk = CHUNKS.get(name);
+    if (chunk === undefined) throw new Error('Can not resolve #include <' + name + '>');
+    if (stack.includes(name)) throw new Error('include 成环: ' + [...stack, name].join(' -> '));
+    return resolveIncludes(chunk, [...stack, name]);
   });
 }
 
-const table = {};
-for (const input of inputs) {
-  for (const { name, body } of extract(readFileSync(input, 'utf8'))) table[name] = body;
+// 不带参数 ⇒ 校验全部入口（`.vert` / `.frag`）。公共块是 `.glsl`，只经 include 进来。
+const entries = (inputs.length ? inputs : [...CHUNKS.keys()]
+  .filter((k) => k.endsWith('.vert') || k.endsWith('.frag'))
+  .map((k) => join(SHADER_DIR, k))).sort();
+
+if (entries.length === 0) {
+  console.error('check-shaders: web/static/shaders 下没有 .vert/.frag 入口');
+  process.exit(1);
 }
 
 const dir = mkdtempSync(join(tmpdir(), 'glslcheck-'));
@@ -176,23 +200,19 @@ function validate(stage, text, label) {
   return false;
 }
 
-for (const input of inputs) {
-  const src = readFileSync(input, 'utf8');
-
-  if (raw || input.endsWith('.glsl')) {
-    const stage = /\bgl_Position\b/.test(src) ? 'vert' : 'frag';
-    checked++;
-    if (!validate(stage, src, basename(input))) failed++;
+for (const file of entries) {
+  const stage = file.endsWith('.vert') ? 'vert' : 'frag';
+  const label = relative(SHADER_DIR, file).split(sep).join('/');
+  let body;
+  try {
+    body = resolveIncludes(readFileSync(file, 'utf8'));
+  } catch (e) {
+    console.log(`  FAIL  ${label}  (${e.message})`);
+    failed++; checked++;
     continue;
   }
-
-  const blocks = extract(src);
-  for (const { name, body } of blocks) {
-    if (!/\bvoid\s+main\s*\(/.test(body)) continue; // shared snippet, not a stage
-    const stage = /_VERT$/i.test(name) || /\bgl_Position\b/.test(body) ? 'vert' : 'frag';
-    checked++;
-    if (!validate(stage, prelude(stage) + expand(body, table), name)) failed++;
-  }
+  checked++;
+  if (!validate(stage, prelude(stage) + body, label)) failed++;
 }
 
 console.log(`\n${checked - failed}/${checked} stage shader(s) valid  (GLSL ES 3.00, three.js ShaderMaterial prefix)`);

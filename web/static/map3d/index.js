@@ -34,6 +34,7 @@
 //     UnrealBloom 产生，而不是在物体外画一圈半透明橙色。
 
 import * as THREE from 'three';
+import { INC, loadShaders } from './glsl.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import { TUNING, TIERS, detectTier, parseTier } from './tuning.js';
@@ -134,8 +135,13 @@ function applyTier(name, opts = {}) {
   }
 }
 
+// GLSL 现在是**分文件 fetch** 装进来的（见 glsl.js）。装完之前任何烘焙都会当场编译着色器
+// 而编译失败，所以本函数在 ready 之前是**空操作**（init 末尾那条链会在 ready 之后烘一次；
+// 质量档切换那条路径也走同一个守卫）。
+let shadersReady = false;
+
 function rebuildSky() {
-  if (!renderer || !scene) return;
+  if (!renderer || !scene || !shadersReady) return;
   if (sky) { try { sky.dispose(); } catch (e) { /* 忽略 */ } }
   sky = bakeSky(renderer, tier.skyRes);
   scene.background = sky.texture;
@@ -160,29 +166,8 @@ function resizeRenderer() {
 // --- 轨道线 -----------------------------------------------------------------
 // 画成 additive 的发光细丝：天体**当前所在处**有一个亮「彗头」，越靠近越亮；被行星/太阳
 // 挡住时由深度测试自然消失（这一层是几何，不是 UI 标记，所以它**要**参与深度测试）。
-const ORBIT_VERT = /* glsl */`
-  varying vec3 vWorldPos;
-  void main(){
-    vec4 wp = modelMatrix * vec4(position, 1.0);
-    vWorldPos = wp.xyz;
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
-const ORBIT_FRAG = /* glsl */`
-  precision highp float;
-  uniform vec3  uColor;
-  uniform vec3  uHead;
-  uniform float uHeadSharp;
-  uniform float uOpacity;
-  uniform float uHeadGain;
-  varying vec3 vWorldPos;
-  void main(){
-    float d = distance(vWorldPos, uHead);
-    float head = exp(-d * d * uHeadSharp);
-    float a = uOpacity * (0.62 + 0.38 * head) + head * uHeadGain;
-    gl_FragColor = vec4(uColor * (0.55 + 2.1 * head), a);
-  }
-`;
+const ORBIT_VERT = INC('px/misc/orbit.vert');
+const ORBIT_FRAG = INC('px/misc/orbit.frag');
 function orbitLineMesh(pts, rgb, alpha = 0.30) {
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   let rmax = 1;
@@ -749,6 +734,11 @@ function applyResolution() {
 }
 
 // --- init -------------------------------------------------------------------
+// ⚠ **必须保持同步**。app.js 是 `initMap()`（同步）→ … → `renderMap()`（拉完 state 之后）
+// → `setWorld()` 这样调下来的。一旦这里变成 async，`setWorld` 就会在 scene/renderer 还没
+// 建起来时跑 —— 实测症状是 `bodies=0`、**行星一个都不显示**（只剩星云和日冕）。
+// GLSL 分文件带来的异步，改用「同步建场 + 把依赖 GLSL 的两步挂到 ready 上」消化，
+// 见本函数末尾那段。
 function init(container) {
   if (started) return;
   started = true;
@@ -807,7 +797,8 @@ function init(container) {
   scene.add(beltsG, bodiesG, citiesG, shipsG);
 
   markers = createMarkers();
-  rebuildSky();
+  // 注意这里**没有** rebuildSky()：它会当场烘焙天空（渲染进立方体贴图 ⇒ 立刻编译着色器），
+  // 必须等 GLSL 装完。见本函数末尾那条 ready 链。
 
   const w = container.clientWidth || 800;
   const h = container.clientHeight || 600;
@@ -830,7 +821,19 @@ function init(container) {
   }).observe(container);
   window.addEventListener('resize', resizeRenderer);
 
-  tick();
+  // --- 依赖 GLSL 的两步，串在同一个 ready 上 ---------------------------------
+  //   ① rebuildSky()：bakeSky 立刻渲染进立方体贴图 ⇒ **当场编译**天空着色器
+  //   ② tick()：首帧会编译**其余全部**材质
+  // 两者都不允许抢在 chunk 装完之前。装载失败就明确报出来并停摆 —— 缺一个 chunk 的症状
+  // 是 three 抛「Can not resolve #include <...>」，比这里报得晚得多、也难懂得多。
+  loadShaders().then(() => {
+    shadersReady = true;
+    rebuildSky();
+    tick();
+  }).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error('[map3d] GLSL 装载失败，地图无法渲染：', e);
+  });
 }
 
 // --- debug query 应用（只在第一次 setWorld 后生效一次）-----------------------

@@ -17,79 +17,15 @@
 // K/M 橙红），亮度走幂律（绝大多数暗、极少数亮），最亮的那批带十字衍射。
 
 import * as THREE from 'three';
+import { INC } from './glsl.js';
 import { NOISE_GLSL, fbmOct, rnd } from './util.js';
 
 // ---------------------------------------------------------------------------
 // ① 银河带 / 星云（低频，烘 cubemap）
 // ---------------------------------------------------------------------------
-const SKY_VERT = /* glsl */`
-  varying vec3 vDir;
-  void main(){
-    vDir = position;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
+const SKY_VERT = INC('px/sky/sky.vert');
 
-const SKY_FRAG = /* glsl */`
-  precision highp float;
-  ${NOISE_GLSL}
-  varying vec3 vDir;
-
-  // 银道极（随便取一个不与坐标轴平行的方向，让银河斜着穿过天空）。
-  const vec3 GAL_N = vec3(0.3180, 0.8000, -0.5080);
-
-  void main(){
-    vec3 d = normalize(vDir);
-    vec3 col = vec3(0.0);
-
-    vec3 gu = normalize(cross(GAL_N, vec3(0.0, 0.0, 1.0)));
-    vec3 gv = cross(GAL_N, gu);
-    float lat = abs(dot(d, GAL_N));
-    // 银道面：|sin(b)| 的高斯型包络。
-    float band = exp(-pow(lat / 0.19, 1.7));
-    // 银心方向（银经 0 附近最亮最厚）。
-    float coreness = exp(-pow(length(vec2(dot(d, gu), dot(d, gv) - 1.0)) / 0.85, 2.0));
-    // 云状结构：域扰动 fbm，再用 ridged 抠出暗尘带。
-    vec3 wp = warp(d * 5.5, 0.65, 0.0, 0.45);
-    float cloud = fbm(wp * 1.7);
-    float dust = ridged(d * 7.5 + 3.1);
-    // 暗尘带要**黑得下去**（对照 scratch/ref/milkyway-core.jpg：银河最抓人的是亮星云
-    // 与黑尘带的强对比，而不是一层均匀的灰雾）。
-    float bright = band * (0.10 + 0.90 * cloud) * (1.0 - 0.88 * smoothstep(0.28, 0.86, dust));
-    // 银河的色：银心偏暖黄（老年星族），外围偏冷蓝（年轻星族 + 尘埃散射）。
-    vec3 galCol = mix(vec3(0.42, 0.52, 0.86), vec3(1.05, 0.92, 0.70), coreness * 0.85 + 0.12);
-    col += galCol * bright * 0.165;
-    // 弥漫的银道面辉光（不带结构的底光）。
-    col += vec3(0.28, 0.33, 0.55) * band * 0.020;
-
-    // --- 星云：几团定点 + fbm 调制；发射线配色（Hα 红 / OIII 青 / 反射星云蓝）------
-    // 中心是**固定常量**，不是随机——星空每次加载必须一模一样，截图才可比。
-    const vec3 NEB[3] = vec3[3](
-      vec3(0.86, 0.31, 0.24), vec3(-0.62, 0.44, 0.65), vec3(0.15, -0.78, 0.60)
-    );
-    const vec3 NEB_COL[3] = vec3[3](
-      vec3(1.00, 0.24, 0.30),   // Hα
-      vec3(0.22, 0.90, 0.78),   // OIII
-      vec3(0.35, 0.48, 1.00)    // 反射星云
-    );
-    for (int i = 0; i < 3; i++) {
-      vec3 nc = normalize(NEB[i]);
-      float dd = length(d - nc);
-      float fall = exp(-pow(dd / 0.42, 2.0));
-      if (fall > 0.002) {
-        vec3 nq = warp(d * 9.0 + float(i) * 21.0, 1.07, 0.0, 0.28);
-        float fil = ridged(nq * 1.4);
-        float wisp = smoothstep(0.42, 0.95, fil) * (0.35 + 0.65 * fbm(nq * 3.1));
-        col += NEB_COL[i] * fall * wisp * 0.075;
-      }
-    }
-
-    // 极暗的「未分辨恒星」底噪：真实长曝光下天空从不全黑。
-    col += vec3(0.014, 0.017, 0.028);
-
-    gl_FragColor = vec4(col, 1.0);
-  }
-`;
+const SKY_FRAG = INC('px/sky/sky.frag');
 
 /**
  * 烘一张程序化银河/星云 cubemap（**不含**恒星，恒星走 `createStarfield`）。
@@ -143,42 +79,9 @@ export function bakeSky(renderer, res) {
 // ---------------------------------------------------------------------------
 // ② 恒星（几何，一次 draw call）
 // ---------------------------------------------------------------------------
-const STAR_VERT = /* glsl */`
-  attribute float aSize;
-  attribute vec3  aColor;
-  uniform float uPixelRatio;
-  uniform float uScale;
-  varying vec3 vCol;
-  varying float vSize;
-  void main(){
-    vCol = aColor;
-    vSize = aSize;
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * mv;
-    // 恒定屏幕像素：不做距离衰减。uPixelRatio 抵消 DPR 缩放，星点在 HiDPI 下不变粗。
-    gl_PointSize = max(1.0, aSize * uPixelRatio * uScale);
-  }
-`;
+const STAR_VERT = INC('px/sky/star.vert');
 
-const STAR_FRAG = /* glsl */`
-  precision highp float;
-  varying vec3 vCol;
-  varying float vSize;
-  void main(){
-    vec2 p = gl_PointCoord * 2.0 - 1.0;
-    float r2 = dot(p, p);
-    if (r2 > 1.0) discard;
-    float core = exp(-r2 * 4.2);
-    // 只有大点（=亮星）才画十字衍射，与「人眼/望远镜看亮星」一致。
-    float spike = 0.0;
-    if (vSize > 2.0) {
-      vec2 ap = abs(p);
-      spike = (exp(-ap.x * 16.0) * exp(-ap.y * 1.8) + exp(-ap.y * 16.0) * exp(-ap.x * 1.8));
-      spike *= smoothstep(2.0, 3.4, vSize) * 0.32;
-    }
-    gl_FragColor = vec4(vCol * (core + spike), 1.0);
-  }
-`;
+const STAR_FRAG = INC('px/sky/star.frag');
 
 // 黑体色温 → 线性 RGB（与 util.js 里的 GLSL 版本同一套拟合）。
 function blackbodyJS(k) {

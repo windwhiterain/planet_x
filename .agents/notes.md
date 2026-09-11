@@ -192,6 +192,7 @@
 | `[~]` | [测试全搬的施工图：判据缺什么数据就往序列化里装什么](notes/test-migration-backlog.md) | 用户 2026-10 裁决：**目标是全搬**——判据缺的数据就装进序列化。现状 **171 条 Python 判据 / 205 条 Rust 用例**（g1 43 / g2 79 / g3 26 / g4 23），剩下的按「缺什么」分四类：**A 数据没序列化**（第 1–3 批已落地：`ships.载货`/`cargo_capacity`、逐资源货栈 `depots`；集货腿 `haul_lanes` **否决**——§5.4）、**B 纯函数**（第 5 批 `planet_x --call <fn>` 已落地）、**C 合成场景**（第 6 批已落地：`_harness.scenario_apply` 走引擎自己的 `--apply` 拨控制叶，4 条用例 / 17 条判据进 g2）、**D 内部契约/错误路径**（`--apply` 报错、`migrate` 分支、中性值表 ⇒ **故意不搬**，清单在 §4）。§5 排了七批的执行顺序，每批都要证明装数据那次**行为中性**（digest 逐字不变）。第 6 批已同步 `main`、四道门全绿，正在合流。 | 施工图 §0.1 / §5.6 / §6.5 |
 | `[~]` | [测试与二进制解耦：数据级断言 + 轨迹复用](notes/test-decoupled-suite.md) | **Rust 侧只留搬不走的了**（`feature/test-migrate-rest`）：`play/tests/` 四组共 **120 条**判据（g1 33 / g2 46 / g3 26 / g4 14），命中缓存后 **约 4 s** 跑完（含 7 seed × 1000 + 3 seed × 400 回合）。两轮共搬出 **16 条** Rust 用例（长局五条不变量、确定性、同回合复垦/选装、`projection_derived` 6 条、`control_read_face` 1 条、编年史 2 条、战争最长/最短回合那一半），并**丢掉 3 个过时探针**（被 `probe_multipolar` 取代的两个 + 一次性调试器 `probe_zombies`）。缓存两级：**投影**（指纹 = 二进制 + config ⇒ 自动失效）+ **摘要**（失效键 = 抽取逻辑的代码指纹 ⇒ 只改断言不重算）。⚠ 方案 §4 的 Stage 1（进程内 `OnceLock`）**不成立**：`cargo nextest` 是 process-per-test。另修了 pandas 的 1 ULP 浮点解析（kit 加 `precise_float=True`）。 | §10.5 待办：`--index` 要不要加表过滤（7 seed 缓存 1.2 GB）、要不要把 `run.py all` 写进合流门（要改 `AGENTS.md`）；未搬的只剩 `tests/` 下的探针（只打印不断言）与 `src/tests/**` 的快档单测 |
 | [程序化行星参数化](notes/planet-visual-params.md) | 外观从 config 的 body_kinds[].params 驱动；变体即着色器分支 |
+| [GLSL 拆成独立文件](notes/glsl-files.md) | `#include <px/...>` 引用关系；反引号坑从此绝迹 |
 
 ---
 
