@@ -500,6 +500,75 @@ impl ser::SerializeTupleVariant for KeySeq {
     }
 }
 
+/// **二元键 map 的格式无关适配器**：键写成 `"名|序号"`（与 [`KeyAsString`] 的约定一致）。
+///
+/// 为什么需要它：`to_value` 那条路只**写**（JSON dump 给前端看），读写不对称的后果是
+/// **档存成 JSON 以后读不回来**——实测 `--start w.json` 报
+/// `invalid type: string "水星熔炉基地|21", expected a tuple of size 2`（`InvestKey` =
+/// `(城市名, 建筑序号)`）。而「Python 直接改档」正需要这条往返（合成场景型用例：把库存清零、
+/// 把船体改成一半）。
+///
+/// 用法：`#[serde(with = "crate::json::key2")]` 加在 `BTreeMap<(String, T), V>` 字段上。
+/// ⚠ 它对 **RON 也生效**（一个约定两个格式，反而更好读），所以**旧的 RON 档**里那种元组字面量
+/// 键读不回来了——仓库的规矩是「不考虑向前兼容」，重存一份即可。
+pub mod key2 {
+    use serde::de::{Error as _, MapAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::marker::PhantomData;
+    use std::str::FromStr;
+
+    pub fn serialize<S, K, V>(map: &BTreeMap<(String, K), V>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Display,
+        V: Serialize,
+    {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(Some(map.len()))?;
+        for ((a, b), v) in map {
+            m.serialize_entry(&format!("{a}|{b}"), v)?;
+        }
+        m.end()
+    }
+
+    pub fn deserialize<'de, D, K, V>(d: D) -> Result<BTreeMap<(String, K), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: FromStr + Ord,
+        K::Err: Display,
+        V: Deserialize<'de>,
+    {
+        struct Vis<K, V>(PhantomData<(K, V)>);
+        impl<'de, K, V> Visitor<'de> for Vis<K, V>
+        where
+            K: FromStr + Ord,
+            K::Err: Display,
+            V: Deserialize<'de>,
+        {
+            type Value = BTreeMap<(String, K), V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "一个以 `名|序号` 为键的映射")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut acc: A) -> Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(key) = acc.next_key::<String>()? {
+                    let (a, b) = key.split_once('|').ok_or_else(|| {
+                        A::Error::custom(format!("键 `{key}` 不是 `名|序号` 的形状"))
+                    })?;
+                    let b = b
+                        .parse::<K>()
+                        .map_err(|e| A::Error::custom(format!("键 `{key}` 的序号: {e}")))?;
+                    out.insert((a.to_string(), b), acc.next_value::<V>()?);
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(Vis(PhantomData))
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/json.rs"]
 mod tests;

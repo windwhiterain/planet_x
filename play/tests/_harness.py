@@ -28,6 +28,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "config" / "game.ron"
 CACHE_ROOT = REPO / "target" / "test-fixtures"
+_CACHE_NAME = re.compile(r"^[0-9a-f]{16}-s\d+-r\d+$")   # 投影缓存的命名（扫描时只认它）
 
 
 # ── 投影缓存 ────────────────────────────────────────────────────────────────
@@ -68,6 +70,7 @@ class Harness:
             )
         self.hits: list[str] = []
         self.misses: list[tuple[str, float]] = []
+        self.warnings: list[str] = []          # `planet_x_state` 的回执（只在真跳过东西时说话）
         self._kit = KIT
 
     # 指纹 = 二进制（mtime+size）+ 配置哈希。**代码一改，缓存自动失效**——这是整套方案的
@@ -95,9 +98,8 @@ class Harness:
         cur = self.fingerprint()
         freed = 0
         for d in CACHE_ROOT.glob("*"):
-            if not d.is_dir() or d.name.startswith(cur):
-                continue
-            if d.name.startswith(".") or ".tmp" in d.name:      # 别人正在写的临时目录先别动
+            # 只扫**投影缓存**那种名字（`<指纹>-s<seed>-r<回合>`）：`scenario/` 这类别的东西不碰
+            if not d.is_dir() or d.name.startswith(cur) or not _CACHE_NAME.match(d.name):
                 continue
             freed += _dir_size(d)
             shutil.rmtree(d, ignore_errors=True)
@@ -138,7 +140,11 @@ class Harness:
         return dest
 
     def run_into(self, dest: Path, seed: int, rounds: int, extra=()) -> None:
-        """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。"""
+        """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。
+
+        `extra` 用来追加开关，例如 `("--start", "w.ron")`：从**捏过的档**起跑（那时 `--seed`
+        被忽略）。
+        """
         args = [
             str(self.path),
             "--seed", str(seed),
@@ -153,6 +159,77 @@ class Harness:
         if p.returncode != 0:
             tail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
             raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{tail}")
+
+    # ── 合成场景：造世界 → 捏世界 → 推进 → **只看数据**断言 ──────────────────────
+    #
+    # 「合成场景」型用例（把某艘舰的船体改成一半、把库存清零、把一座城的人口压到 1……）以前只能
+    # 在 Rust 里做——要编进 crate、调内部 API。现在**档本身可以存成 JSON**
+    # （`--save w.json`，见 `config::CheckpointFormat`），于是「造」用 `planet_x`、「捏」用 Python
+    # 的 `json` 模块就够了：
+    #
+    # * **不进 Rust**：不用维护一份「哪些字段可改」的清单（那份清单会无限长）；
+    # * **状态字段是字面量**，没有控制面那种 `Inherit` 链语义（链才需要引擎解析有效值）；
+    # * `serde_json` 开了 `float_roundtrip` ⇒ f64 往返逐位不变（g1 有「JSON 档与 RON 档推进出
+    #   同一份投影」那条守卫盯着），而 `json::key2` 让元组键（`城|建筑id`）也往返得回来。
+
+    def gen(self, dest: Path, seed: int, round: int = 0, patch: dict | None = None) -> Path:
+        """造一个世界（**存成 JSON 档**，所以 Python 能直接改），可选先推进 `round` 回合再捏。"""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        args = [str(self.path), "--seed", str(seed), "--round", str(round), "--quiet", "--save", str(dest)]
+        p = subprocess.run(args, cwd=str(REPO), capture_output=True, text=True, encoding="utf-8")
+        if p.returncode != 0:
+            raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-1500:]}")
+        if patch:
+            misses = self.edit(dest, patch)
+            if misses:
+                self.warnings.append("没落地的补丁字段：" + "、".join(misses))
+        return dest
+
+    def edit(self, ckpt: Path, patch: dict) -> list[str]:
+        """**Python 直接改档**：按名字找实体、改字面量。返回没落地的字段（空 = 全成）。
+
+        `patch` 的形状与读面同名同形：`{"ships": {"北辰": {"hull": 6.0}}, "factions": {...},
+        "cities": {...}}`。名字对不上、字段名打错 ⇒ 进返回值（**响亮**，不静默跳过）。
+        """
+        doc = json.loads(ckpt.read_text(encoding="utf-8"))
+        state = doc["round_state"]["state"]
+        misses: list[str] = []
+        for kind, entities in patch.items():
+            table = state.get(kind)
+            if table is None:
+                misses += [f"{kind}.{name}.{k}" for name, f in entities.items() for k in f]
+                continue
+            for name, fields in entities.items():
+                row = next((r for r in table if r.get("name") == name), None)
+                if row is None:
+                    misses += [f"{kind}.{name}.{k}" for k in fields]
+                    continue
+                for k, v in fields.items():
+                    if k not in row:
+                        misses.append(f"{kind}.{name}.{k}")
+                    else:
+                        row[k] = v
+        ckpt.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        return misses
+
+    def state_dump(self, ckpt: Path) -> dict:
+        """读出档里的状态（Python 拿它算补丁：某势力的库存、某舰的 `hull_max`……）。"""
+        return json.loads(ckpt.read_text(encoding="utf-8"))["round_state"]["state"]
+
+    def scenario(self, name: str, seed: int, rounds: int, patch: dict | None = None,
+                 start_round: int = 0) -> Path:
+        """一条龙：造（可捏）→ 推进 `rounds` 回合 → 投影，返回投影目录。
+
+        场景**不进指纹缓存**（几回合、零点几秒就重造），放在 `target/test-fixtures/scenario/<名字>/`
+        ——`sweep_stale` 只扫投影缓存那种名字（`<指纹>-s<seed>-r<回合>`），不会碰它。
+        """
+        base = CACHE_ROOT / "scenario" / name
+        shutil.rmtree(base, ignore_errors=True)
+        base.mkdir(parents=True, exist_ok=True)
+        ckpt = self.gen(base / "w.json", seed, round=start_round, patch=patch)
+        proj = base / "out"
+        self.run_into(proj, seed, rounds, extra=("--start", str(ckpt)))
+        return proj
 
     def capture(self, args: list[str], stderr: bool = False):
         """跑一次二进制、拿它的 stdout（`--derived` / `--control` 这类单点导出）。不缓存。
