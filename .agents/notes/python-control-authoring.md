@@ -36,14 +36,14 @@ agent 玩长局时，「施政」这一步现在靠**手写 JSON diff**（`--app
 ```python
 import planet_x_ctl as ctl
 
-s = ctl.surface("ckpt_r12.ron")            # 控制面（= `--control` 的读面，读面即写面）
+s = ctl.surface("ckpt_r12.json")            # 控制面（= `--control` 的读面，读面即写面）
 s.factions                                  # 势力名列表
 s.faction("中国")                            # 该势力的叶片：ship_orders / default_role /
                                             # 预算 / 权重 / loyalty_budget / buildings / capital
 s.leaf("中国", "ship_orders", "长城")        # 单叶：值 + mode（三态）
 
-ships  = ctl.ships("ckpt_r12.ron")          # 投影的 ships 表（名字 join 控制面）
-cities = ctl.ships_and_cities("ckpt_r12.ron")   # 便捷 join：舰/城 × 其控制叶 × 归属
+ships  = ctl.ships("ckpt_r12.json")          # 投影的 ships 表（名字 join 控制面）
+cities = ctl.ships_and_cities("ckpt_r12.json")   # 便捷 join：舰/城 × 其控制叶 × 归属
 
 mine = ships.query("faction_id == '中国' and hull > 0")
 
@@ -56,7 +56,7 @@ s.set_budget("中国", "construction_budget", {"铁": 4.0, "硅": 2.5})     # �
 
 diff = s.emit()                             # → {control:[...], scope:{...}}，可直接 --apply
 ctl.write(diff, "steer.json")
-ctl.verify("ckpt_r12.ron", "steer.json")    # 只读试算：前后读面 + 回执（见 §1.2）
+ctl.verify("ckpt_r12.json", "steer.json")    # 只读试算：前后读面 + 回执（见 §1.2）
 ```
 
 1. **`roster()` —— 编制表（本套件的核心，不是附注）**：名字是唯一键，但**名字会换代**
@@ -65,7 +65,7 @@ ctl.verify("ckpt_r12.ron", "steer.json")    # 只读试算：前后读面 + 回�
    ```python
    spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
            ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
-   r = ctl.roster("ckpt_r12.ron", spec)     # → DataFrame[faction_id, slot, ship_id, class, hull, matched_by]
+   r = ctl.roster("ckpt_r12.json", spec)     # → DataFrame[faction_id, slot, ship_id, class, hull, matched_by]
    ```
 
    **刷新规则必须写在配方里**（"旗舰 = hull_max 最大的巡洋舰，同分取最老的"），不能留在
@@ -77,8 +77,8 @@ ctl.verify("ckpt_r12.ron", "steer.json")    # 只读试算：前后读面 + 回�
    写盘只由 `--save` 触发），所以验证是**纯只读**的：
 
    ```
-   planet_x --start ckpt.ron --apply my.json --control   # stdout=叠加后的读面, stderr=回执
-   planet_x --start ckpt.ron --control                    # stdout=叠加前的读面
+   planet_x --start ckpt.json --apply my.json --control   # stdout=叠加后的读面, stderr=回执
+   planet_x --start ckpt.json --control                    # stdout=叠加前的读面
    ```
 
    一比就知道：想改的叶变了没、**顺手接管了别的叶没**（`NOTE_APPLY_TOOKOVER`）、被丢弃了没
@@ -175,7 +175,7 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
 ```bash
 cd play/planet_x_ctl && uv sync && uv run python demo.py     # 自断言，退出码 0 = 全过
 # 引擎侧对照（同一份 diff 手写版长什么样）：
-planet_x --start play/exp2/ckpt_r12.ron --apply steer.json --control 2>receipt.jsonl
+planet_x --start play/exp2/ckpt_r12.json --apply steer.json --control 2>receipt.jsonl
 # 读派生表（引擎算出来的量）：
 planet_x --seed 7 --round 6 --index out/ && python -c "
 import planet_xq; q = planet_xq.load('out')

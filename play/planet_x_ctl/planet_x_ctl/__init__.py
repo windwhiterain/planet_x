@@ -49,7 +49,7 @@ Typical use::
 
     import planet_x_ctl as ctl
 
-    ckpt = "ckpt_r12.ron"
+    ckpt = "ckpt_r12.json"
     s = ctl.surface(ckpt)                    # `--control` (read face == write face)
     s.factions                               # faction names
     s.leaf("中国", "ship_orders", "长城")      # one leaf: value + mode
@@ -2510,7 +2510,7 @@ def apply(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
 
         rep = ctl.verify(ckpt, diff)          # read-only rehearsal
         assert rep.ok
-        ctl.apply(ckpt, diff, save="ckpt2.ron")   # now it is real
+        ctl.apply(ckpt, diff, save="ckpt2.json")   # now it is real
 
     ``rounds`` defaults to 0: overlay and persist *without advancing time*.
     """

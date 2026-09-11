@@ -143,7 +143,7 @@ def determinism(h, ck, tmp: Path) -> None:
 
 def derived_vs_index(h, ck, tmp: Path) -> None:
     """`--derived` 的 `post` ≡ `--index` 同一回合的 `view`，且过程量表逐列同源。"""
-    proj, ckpt = tmp / "face", tmp / "face.ron"
+    proj, ckpt = tmp / "face", tmp / "face.json"
     h.run_into(proj, FACE_SEED, FACE_ROUNDS, extra=("--save", str(ckpt)))
     v = json.loads(h.capture(["--start", str(ckpt), "--derived"]))
     last = _main_rows(proj)[-1]
@@ -201,7 +201,7 @@ def derived_vs_index(h, ck, tmp: Path) -> None:
 
 def checkpoint_flow(h, ck, tmp: Path) -> None:
     """起点那一行的过程量必须是**档里的真数**（退回重算会把过程量抹成 0）。"""
-    run, ckpt = tmp / "flow", tmp / "flow.ron"
+    run, ckpt = tmp / "flow", tmp / "flow.json"
     h.run_into(run, FACE_SEED, 4, extra=("--save", str(ckpt)))
     v = json.loads(h.capture(["--start", str(ckpt), "--derived"]))
     rnd = v["round"]
@@ -236,7 +236,7 @@ def spending_within_batch(h, ck, tmp: Path) -> None:
     ⚠ 必须跑够回合再看：开局那一回合既没有在建建筑、也没有攒到启封的造舰进度，**谁都还没花钱**
     ——拿回合 0 当样本就是「空表比空表」（Rust 版用 8 回合，这里用 60 回合那份档）。
     """
-    proj, ckpt = tmp / "dec", tmp / "dec.ron"       # 复用 decisions 那一段跑出来的档（60 回合）
+    proj, ckpt = tmp / "dec", tmp / "dec.json"       # 复用 decisions 那一段跑出来的档（60 回合）
     rnd = read_round(proj, -1)
     surface = json.loads(h.capture(["--start", str(ckpt), "--control"]))
     spent = {"investment_budget": "investment_spent", "construction_budget": "construction_spent"}
@@ -286,7 +286,7 @@ def decisions_table(h, ck, tmp: Path) -> None:
     这是一张「空白也有意义」的表（`hold` = 这回合 AI 没派活），最容易悄悄退化成永远为空——
     那比没有表更坏，它看起来像「AI 这一回合什么也没决定」。
     """
-    proj, ckpt = tmp / "dec", tmp / "dec.ron"
+    proj, ckpt = tmp / "dec", tmp / "dec.json"
     h.run_into(proj, FACE_SEED, DECISIONS_ROUNDS, extra=("--save", str(ckpt)))
     v = json.loads(h.capture(["--start", str(ckpt), "--derived"]))
     rnd = v["round"]
@@ -353,7 +353,7 @@ def decisions_table(h, ck, tmp: Path) -> None:
 
 def b3_tables(h, ck, tmp: Path) -> None:
     """贸易两张表 ≡ `post`（跨进程、跨两条代码路径给同一份数）。"""
-    proj, ckpt = tmp / "b3", tmp / "b3.ron"
+    proj, ckpt = tmp / "b3", tmp / "b3.json"
     h.run_into(proj, FACE_SEED, B3_ROUNDS, extra=("--save", str(ckpt)))
     v = json.loads(h.capture(["--start", str(ckpt), "--derived"]))
     rnd = v["round"]
@@ -403,7 +403,7 @@ def b3_tables(h, ck, tmp: Path) -> None:
 
 def input_face(h, ck, tmp: Path) -> None:
     """输入面（B5）：`--index` 的 `round_inputs` ≡ `--derived` 的 `pre`。"""
-    proj, ckpt = tmp / "b5", tmp / "b5.ron"
+    proj, ckpt = tmp / "b5", tmp / "b5.json"
     h.run_into(proj, FACE_SEED, INPUT_ROUNDS, extra=("--save", str(ckpt)))
     v = json.loads(h.capture(["--start", str(ckpt), "--derived"]))
     rnd = v["round"]
@@ -439,7 +439,7 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
     它同时钉住两件事：指令读面**每舰一行**（叶被删掉之后那艘舰不许从控制树里消失）、
     以及 `behavior: null`（链上没人说话）回传时**不许建叶**。
     """
-    ck0, ck1, ck2 = tmp / "w0.ron", tmp / "w1.ron", tmp / "w2.ron"
+    ck0, ck1, ck2 = tmp / "w0.json", tmp / "w1.json", tmp / "w2.json"
     out = h.capture(["--seed", str(WRITE_SEED), "--round", str(WRITE_ROUNDS),
                      "--save", str(ck0)])
     state = json.loads(h.capture(["--start", str(ck0), "--round", "0"]).splitlines()[0])

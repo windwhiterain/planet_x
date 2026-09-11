@@ -44,28 +44,23 @@ pub struct Blueprint {
     ///
     /// ⚠ 口径 A（用户裁决 Q3）：`Building.ship_type` 仍是「这个区造哪一级」的**唯一真相**，
     /// 图的 `class` 必须与它**相等**（不等在 apply 时报 `blueprint_class_mismatch`）。
-    #[serde(rename = "舰级")]
     pub class: String,
     /// 选装表（组件 id，顺序 = 槽位顺序）。**空 = 「交给生成器」**（= 今天的
     /// `autocontrol::choose_loadout`），与 `mode` 无关——所以一张只钉倾向/舰级的图
     /// 不必把选装也抄一遍。
     #[serde(default)]
-    #[serde(rename = "选装")]
     pub components: Vec<String>,
     /// 本图给这型舰的**行为风格**（理智↔热血 + 护航↔独狼）。`None` = 本图对该轴没有说话。
     #[serde(default)]
-    #[serde(rename = "风格")]
     pub doctrine: Option<ShipDoctrine>,
     /// 本图给这型舰的**风筝↔贴脸姿态**（`[-1,1]`）。`None` = 本图对该轴没有说话。
     #[serde(default)]
-    #[serde(rename = "姿态")]
     pub kiting: Option<f64>,
     /// 本图给这型舰的**角色**（战舰 / 运输舰 / 观测舰）。`None` = 本图对该轴没有说话。
     ///
     /// 这是"新舰出厂就有的倾向"里最有用的一片：**运输舰图**会让这型舰一造出来就被自动控制
     /// 派去跑集货路线（`autocontrol::freight` 按积压派活），**观测舰图**会派它们去引力异常区。
     #[serde(default)]
-    #[serde(rename = "角色")]
     pub role: Option<ShipRole>,
 }
 
@@ -81,26 +76,20 @@ pub struct Blueprint {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BlueprintSeed {
     /// 图名（势力内唯一）。
-    #[serde(rename = "图名")]
     pub name: BlueprintId,
     /// 舰级。
-    #[serde(rename = "舰级")]
     pub class: String,
     /// 选装（空 = 交给生成器）。
     #[serde(default)]
-    #[serde(rename = "选装")]
     pub components: Vec<String>,
     /// 行为风格（省略 = 本图对该轴没有说话）。
     #[serde(default)]
-    #[serde(rename = "风格")]
     pub doctrine: Option<ShipDoctrine>,
     /// 风筝↔贴脸姿态（省略 = 本图对该轴没有说话）。
     #[serde(default)]
-    #[serde(rename = "姿态")]
     pub kiting: Option<f64>,
     /// 角色（省略 = 本图对该轴没有说话）。
     #[serde(default)]
-    #[serde(rename = "角色")]
     pub role: Option<ShipRole>,
 }
 

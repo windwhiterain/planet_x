@@ -503,3 +503,62 @@ impl ser::SerializeTupleVariant for KeySeq {
 #[cfg(test)]
 #[path = "tests/json.rs"]
 mod tests;
+
+// --- 存档（`--save` / `--start`）：JSON 出口 + **元组键**的反向还原 ----------------
+//
+// 2026-10 起存档格式是 **JSON**（不再是 RON）：RON 要求结构体字段名是合法标识符，
+// 而「字段名就是给人看的中文名词」是本仓的方向（见 `.agents/notes/field-naming.md`），
+// 带空格/符号的名字（`和平↔军国`、`MOND 掌握度`）RON 根本写不出来。
+//
+// [`to_value`] 已经把**非字符串的 map key** 转成了 `"城|7"` 这种字符串（见模块文档），
+// 所以反方向只要把这两个形状的键拆回来即可——JSON 里只有这两处：
+
+use serde::Deserialize;
+use std::collections::BTreeMap;
+
+/// 把模型序列化成**给人看、可 diff** 的 JSON（键序 = 结构体声明顺序，见 `preserve_order`）。
+pub fn to_string_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&to_value(value)?)
+}
+
+/// 从 JSON 文本还原模型。元组键由 [`de_keys_ss`] / [`de_keys_su`] 在各字段上还原。
+pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(text)
+}
+
+/// `(势力, 天体)` 形状的 map 键（[`crate::model::State::depots`] 在用）。
+pub fn de_keys_ss<'de, D, V>(d: D) -> Result<BTreeMap<(String, String), V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::Deserialize<'de>,
+{
+    let raw = BTreeMap::<String, V>::deserialize(d)?;
+    raw.into_iter()
+        .map(|(k, v)| match k.split_once('|') {
+            Some((a, b)) => Ok(((a.to_string(), b.to_string()), v)),
+            None => Err(serde::de::Error::custom(format!(
+                "键 `{k}` 不是 `势力|天体` 形状（存档是被手改过？）"
+            ))),
+        })
+        .collect()
+}
+
+/// `(城, 建筑编号)` 形状的 map 键（`invest_weights` / `build_weights` 在用）。
+pub fn de_keys_su<'de, D, V>(d: D) -> Result<BTreeMap<(String, u32), V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::Deserialize<'de>,
+{
+    let raw = BTreeMap::<String, V>::deserialize(d)?;
+    raw.into_iter()
+        .map(|(k, v)| match k.split_once('|') {
+            Some((a, b)) => b
+                .parse::<u32>()
+                .map(|n| ((a.to_string(), n), v))
+                .map_err(|_| serde::de::Error::custom(format!("键 `{k}` 的建筑编号不是整数"))),
+            None => Err(serde::de::Error::custom(format!(
+                "键 `{k}` 不是 `城|建筑编号` 形状（存档是被手改过？）"
+            ))),
+        })
+        .collect()
+}

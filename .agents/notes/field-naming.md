@@ -46,7 +46,7 @@
 | **A（建议本轮）** | 核心实体 + 控制叶：`Ship` / `City` / `Body` / `Settlement` / `Orbit` / `Faction` / `Ideology` / `Building` / `Blueprint` / `Contract` / `Control` / `State` + `ControllableState` 的 14 片叶 | UI 读得最多、spec 覆盖最全；先把**规则**定下来 |
 | B | `events` / 编年史 / 决策（`EventRow`/`StoryEvent`/`ChronicleEntry`/`ShipDecision`/…） | spec 基本没有，得靠问 |
 | C | 派生读面（`projection.rs`：`RoundView`/`FactionRow`/`CityRow`/`MarketTrade`/`GovernanceFlow`/…） | 名字多是引擎造的复合词（"治理覆盖""没付上的维护"），要一起对齐 |
-| D | 配置 `config/game.ron`（`ShipSpec`/`ComponentSpec`/`EconomyConfig`/…）+ **改配置文件本身的键** | 最大且最痛（500 行 `.ron` 重写）；也可以选择**只改 dump 出去的名字、不动文件键** |
+| D | 配置 `config/game.ron`（`ShipSpec`/`ComponentSpec`/`EconomyConfig`/…）+ **改配置文件本身的键** | 最大且最痛（500 行 `.json` 重写）；也可以选择**只改 dump 出去的名字、不动文件键** |
 
 ## 4. 样例名词表（批 A，❓ = 我不确定的，按用户要求列出来问）
 
@@ -174,7 +174,7 @@
     还是只让 dump 出去的名字是中文、文件键保持英文？（我倾向**也改**，否则 UI 的配置页还是英文键）
 11. **字段顺序的规则**：按 `web-human-views.md` §4.1 的重要性序（身份 → 此刻结论 → 原因/来源 →
     量与资源 → 引用/位置 → 内部元数据），并把它当成**读面默认列序**——同意吗？
-12. **不接受向前兼容**：`SCHEMA_VERSION` → 23、旧 `.ron` 存档直接读不了、digest 换基线（附映射回旧名的
+12. **不接受向前兼容**：`SCHEMA_VERSION` → 23、旧 `.json` 存档直接读不了、digest 换基线（附映射回旧名的
     逐值等价证明）——确认？
 
 ## 6. 风险
@@ -185,3 +185,65 @@
    （各自在自己的对象里），但**读面的路径拼接**要小心，`views.json` 的路径得逐条核对。
 3. **文档注释就是产品文案**了：85% 有注释，缺的 91 个要补，而且既有注释里有不少是写给实现者的
    （"⚠ `null` 是第四种情况"），悬停弹窗里要能读懂 ⇒ 可能要**把注释分成「给实现的」与「给玩家的」**。
+
+## 7. 落地记录
+
+### 7.1 裁决（2026-10）
+
+* 除「权重/预算那一块」外**全部按推荐**：spec 原词、引用用实体名、成对上下限用「X / X上限」、
+  `role` 三值 = 战舰/运输舰/观测舰、`doctrine`/`kiting` 叫「风格/姿态」、`ship_orders` 叫「指令」、
+  配置 `game.ron` 的键也一起中文化（批 D）、字段顺序按重要性并当作读面默认列序、
+  `SCHEMA_VERSION` 23 + 换 digest 基线。
+* **权重/预算那 5 片叶暂缓**（用户「先不管权重这一块，我在仔细考虑考虑」）：
+  `investment_budget` / `construction_budget` / `loyalty_budget` / `invest_weights` / `build_weights`
+  的**名字与语义**都还没定，先不动。
+
+### 7.2 第 1 步（已落地）：字段顺序 + 存档改 JSON
+
+**① 存档格式 RON → JSON**（前提，用户已批「可以接受不用 ron」）
+
+* 为什么必须换：**RON 要求结构体字段名是合法标识符**。实测 `ron 0.8` 连 `天体名` 都不收
+  （`ERR_SAVE: Invalid identifier`），`ron 0.10` 收纯中文但**连未改名的模型都读不回来**
+  （`missing field round in State`，与改名无关）⇒ 这条路上没有出路。
+* 改法：`json::to_string_pretty` / `json::from_str`（`src/json.rs`），`save_state` /
+  `save_checkpoint` / `load_checkpoint` / `load_state` 四个入口换掉。
+  `to_value` 早就把**元组键**写成 `"城|7"`，反方向由 `#[serde(deserialize_with = "…::de_keys_ss/de_keys_su")]`
+  在这三处还原（`State.depots` / `invest_weights` / `build_weights`）。
+* **忠实性实测**：`--seed 7 --round 10 --save X` 与「跑 3 → 存档 → 再跑 7 → 存 Y」的
+  X/Y **逐字节相同** ✓（这是「分段讲故事」的全部基础）。
+* 仍留在 RON 的只有 `config/game.ron`（手写配置，批 D 再议）。
+
+**② 实体字段按重要性重排**（11 个结构体、约 90 个字段）
+
+顺序规则：**身份 → 此刻结论 → 倾向与意图 → 量与资源 → 引用与位置 → 内部与溯源**。
+实测（`--seed 7 --round 1`）：`ships[0]` 键序 = `name, class, faction_id, hull, hull_max, shield,
+shield_max, velocity, doctrine, kiting, role, components, component_hp, cargo, position, blueprint,
+attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `serde_json/preserve_order`）。
+
+**③ 行为中性**：键序变了 ⇒ **digest 换基线**
+
+* 新基线：`748B4AA66FE169E8F316169D61CB5239057D0F3515CF59A50C629E76BF489603`
+  （旧 `C928C3F19AFE3BA9D36A70DF8E340E3849271574663920D544AE62AFF70B06A9`）。
+* **等价性证明**：把两边的 digest 行递归按键排序归一后再哈希，**完全相同**
+  （`AA8240A5F16964E8DB20BBB87BFB…`）⇒ 只有键序不同、**值逐值相同**。
+
+**④ 两层门**：Rust `213/213`（31 skipped）+ Python 四组 `111/111`。
+
+### 7.3 踩过的坑（写下来，别再踩）
+
+1. **`#[serde(rename)]` 撤回脚本删过头**：它按正则删掉 `src/model/**` 里所有 `rename`，
+   把仓库里**原有的** `#[serde(rename = "type")]`（`EventRow.kind`）也删了 ⇒ 事件表少一列、
+   两条投影守卫红。**教训：批量脚本只该删"自己加的"那些**（用白名单/上下文锚定）。
+2. **`preserve_order` 已由 main 打开**（另一个会话加过）：我曾"为了排查"把它关掉，那实际上
+   是**相对 main 的功能倒退**；现在恢复成与 main 一致。
+3. **依赖键序的测试**：v9 档那条测试原来用「逐行删键」造旧档，`preserve_order` 一开后
+   `spawned_round` 排在对象末尾 ⇒ 删完留一个悬空逗号（`trailing comma`）。已改成**结构化**
+   （解析成 `Value` → 递归删键 → 再序列化），与键序无关。
+
+### 7.4 下一步
+
+* **第 2 步**：加 `#[serde(rename = "中文名")]`（现在 RON 不再是障碍）+ 三端消费者跟随。
+  名词表见本文 §4（`❓` 已按 §7.1 定名）。
+* **第 3 步**：`--schema` 的 `description` 接到 web（`GET /api/schema`）+ 悬停弹窗，
+  `views.json` 的 `label` 逐条退掉。
+* 权重/预算那 5 片叶：等用户裁决。

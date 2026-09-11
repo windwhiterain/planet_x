@@ -8,8 +8,8 @@
 //! lazy tables) through the `play/planet_xq` Python kit (uv / pandas); `jq` is
 //! removed and is no longer a dependency.
 //!
-//! Usage: `planet_x [--seed <s|random>] [--start <path.ron>]`
-//! `[--apply <file.json>] [--round <n>] [--traj <n>] [--save <path.ron>]`
+//! Usage: `planet_x [--seed <s|random>] [--start <path.json>]`
+//! `[--apply <file.json>] [--round <n>] [--traj <n>] [--save <path.json>]`
 //! `[--meta] [--schema] [--control-schema] [--story] [--control] [--control-plan <faction>]`
 //!
 //! * `--start`  load an initial `State` from a RON checkpoint (state + RNG); else
@@ -115,10 +115,10 @@ Inherit（继承上层，缺省）| Auto（系统自动决策）| Player（玩�
 【讲故事流程】\n\
 - `planet_x --seed 42 --round 240 --index out/`    # 跑一段轨迹 + 投影（lean 主流 + 索引表）\n\
 - `planet_xq.load('out').facts`                    # 读主流；`q.join('ships', round=r)` 按 id join\n\
-- `planet_x --start s240.ron --apply steer.json --round 240`      # 分段续玩 + 定向\n\
-- `planet_x --start s240.ron --round 0 --index out/` # 续玩前先读「这局最近在打什么」\n\
+- `planet_x --start s240.json --apply steer.json --round 240`      # 分段续玩 + 定向\n\
+- `planet_x --start s240.json --round 0 --index out/` # 续玩前先读「这局最近在打什么」\n\
   （`q.notables()` / `q.history()`；窗口层与里程碑层都在投影里，按 `salience` 列筛）\n\
-- `planet_x --seed 42 --round 1000 --quiet --save end.ron`        # 只要最终 state，不要逐回合轨迹\n\
+- `planet_x --seed 42 --round 1000 --quiet --save end.json`        # 只要最终 state，不要逐回合轨迹\n\
 - 先 `--schema` 查视图字段、`--control-schema` 查 --apply 能写啥、`--meta` 查规则；分析用\n\
   `--index` + `play/planet_xq`，别用 jq。",
     after_help = "agent 专用：stdout 只输出零噪声机器可读 JSON（无颜色/星图/表格/散文）。\n\
@@ -131,7 +131,7 @@ struct Cli {
     #[arg(long, default_value = "random", value_name = "SEED")]
     seed: String,
 
-    /// 从指定的 checkpoint（state + RNG）.ron 文件开始
+    /// 从指定的 checkpoint（state + RNG）.json 文件开始
     #[arg(long, value_name = "PATH")]
     start: Option<PathBuf>,
 

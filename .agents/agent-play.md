@@ -14,7 +14,7 @@
    （`cd play/planet_xq && uv sync`）一行拿决策视图：
    `q.faction_snapshot(r, "中国")` → 该势力的库存/外交/经济/舰队/所属城。
 2. **下指令**：写一个 `{control:[...]}` diff（`--apply` 文件），把目标势力/舰/预算钉成
-   `"mode":"Player"`，再 `planet_x --start ckpt.ron --apply diff.json --round K --save ckpt.ron`
+   `"mode":"Player"`，再 `planet_x --start ckpt.json --apply diff.json --round K --save ckpt.json`
    （`--start`/`--save` 保 RNG，可复现、可回滚）。
 3. **看点子**：详细 loop、可选指令面、坑与边界，见下（这是本手册的正文）。
 
@@ -69,7 +69,7 @@ print(q.join('ships', round=10))             # 第 10 月所有舰（按 id join
 
 # 3) 决定一条指令，写成 diff 文件
 # 4) 应用并推进，保存 checkpoint 以便复现续玩
-planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
+planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.json
 #    ⚠ 一定要看 stderr：{"code":"WARN_APPLY_SKIPPED",...} = 有叶片没落地（没输出 = 全落地）
 ```
 
@@ -150,7 +150,7 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.ron
 `spawned_round`（下水回合；`null` = 旧档 ⇒ 未知）。
 ⚠ `order_source` 把「**叶不存在**」与「叶写着 `Inherit`」**分开报**：后者报 `leaf`——那时值
 真的来自那片叶（`leaf.map(|l| l.value).unwrap_or(..)`），只有叶不存在才可能落到图/舰队默认。
-单点查（不想跑整个 `--index`）：`planet_x --start ckpt.ron --derived` 给出这一回合存下来的
+单点查（不想跑整个 `--index`）：`planet_x --start ckpt.json --derived` 给出这一回合存下来的
 **视图对** `{round, source, pre, post}`——两个槽都是 `RoundView` 且**同形**：`pre` = 回合开始时
 看到的世界（过程量全 0/空），`post` = 回合结束时的世界 **+ 本回合过程量**（就是上面那几张派生表
 的来源）。没档时会按当前状态重算：此时 `pre` 与 `post` 相同、过程量全 0，并附 `note` 说明。
@@ -213,7 +213,7 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 
 > 先 `--digest K --round N` 看整段走势的故事板，再对感兴趣窗口 `--index` 精读，别一把梭全量。
 
-> **接手一局旧存档时**：先 `planet_x --start ckpt.ron --round 0 --index out/` 读「这局最近在打什么」
+> **接手一局旧存档时**：先 `planet_x --start ckpt.json --round 0 --index out/` 读「这局最近在打什么」
 > ——窗口层（`State::notables`）里是**后续计算要回看的那一段历史**（当前 = 开战/停战，供「记恨
 > 地板」判定），在投影里是 `q.notables()`（按 `salience` 列筛出来的 `war_started`/`war_ended`）。
 > 它随 checkpoint 存活，不需要当初的 `--index` 目录。
@@ -475,16 +475,16 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 ```
 观察  planet_x --seed 7 --index out/ ;  planet_xq 读
 决策  写 diff.json（见 §4）
-应用  planet_x --seed 7 --apply diff.json --round 30 --save ckpt30.ron 2>apply.jsonl
+应用  planet_x --seed 7 --apply diff.json --round 30 --save ckpt30.json 2>apply.jsonl
 回执  看 apply.jsonl：WARN_APPLY_SKIPPED = 有叶片没落地（见 §4.5）。别跳过这一步
-再看  planet_x --start ckpt30.ron --round 0 --index out3/  （q.notables()：这局最近在打什么）
-续玩  planet_x --start ckpt30.ron --round 30 --index out2/   （续玩 + 精读）
+再看  planet_x --start ckpt30.json --round 0 --index out3/  （q.notables()：这局最近在打什么）
+续玩  planet_x --start ckpt30.json --round 30 --index out2/   （续玩 + 精读）
 ```
 
 - **确定性**：同 seed（或同 checkpoint + 已保存 RNG 位置）→ 后续逐字节一致。
-  `--save`/`--start` 是分段续玩 / 复现的关键；`--start` 也接受旧单 `State` `.ron`（此时重播
+  `--save`/`--start` 是分段续玩 / 复现的关键；`--start` 也接受旧单 `State` `.json`（此时重播
   seed、随机流不延续）。
-- **`--save` 在 `--index` 模式下也生效**：`--start ckpt --apply diff.json --round 30 --save ckpt.ron
+- **`--save` 在 `--index` 模式下也生效**：`--start ckpt --apply diff.json --round 30 --save ckpt.json
   --index out/` 一次同时拿到「续玩存档 + 精读投影」，不用跑两遍。
 - **省 token**：先 `--digest K --round N`（每 K 月一行语义故事板），锁定要放的窗口，再
   `--index` 精读那一段，最后 `--round`/`--apply` 介入。别把 `--round 3000` 的全量 JSON 灌进上下文。
@@ -543,11 +543,11 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 | 参数 | 作用 |
 |---|---|
 | `--seed <S>` | 确定性种子（数字），默认 `random` |
-| `--start <ckpt.ron>` | 从 checkpoint（State+RNG）续玩 |
+| `--start <ckpt.json>` | 从 checkpoint（State+RNG）续玩 |
 | `--round <N>` | 输出 N+1 行全量状态 JSON（回合 0 先） |
 | `--quiet` | 与 `--round` 连用：**只推进、不吐轨迹**（1000 回合省掉 40 MB stdout）。要留东西配 `--save`/`--index`/`--digest` |
 | `--apply <diff.json>` | 叠加控制 diff 后继续 |
-| `--save <ckpt.ron>` | 结束后写 checkpoint |
+| `--save <ckpt.json>` | 结束后写 checkpoint |
 | `--meta` | 游戏规则字典（resources/buildings/ships/economy/combat…） |
 | `--schema` | 状态视图的 JSON Schema |
 | `--control` | 可编辑控制面模板。**读面不舍入**：里面的数就是状态里存的数（逐位），所以"原样回传"是**无损**的——只改你想改的那几行 |

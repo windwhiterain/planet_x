@@ -481,7 +481,7 @@ def run(h, ck) -> None:
 
     # ══ 3. 读面对账：跑一局真世界，把每一片叶都写一次，再读回来 ══════════════════════
     tmp = Path(tempfile.mkdtemp(prefix="px-g4-"))
-    ckpt, diff_path = tmp / "ckpt.ron", tmp / "diff.json"
+    ckpt, diff_path = tmp / "ckpt.json", tmp / "diff.json"
     rc, _, err = _run(h, ["--seed", str(SEED), "--round", str(ROUNDS), "--save", str(ckpt)])
     if rc != 0:
         ck.check("读面对账：起一局（seed 42 / 40 回合）", False,

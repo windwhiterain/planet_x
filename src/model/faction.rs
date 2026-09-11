@@ -18,16 +18,12 @@ use crate::model::{BodyId, FactionId, ResourceMap};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, JsonSchema)]
 pub struct Ideology {
     #[serde(default)]
-    #[serde(rename = "和平↔军国")]
     pub peace_military: f64,
     #[serde(default)]
-    #[serde(rename = "科学↔技术")]
     pub science_tech: f64,
     #[serde(default)]
-    #[serde(rename = "人民↔精英")]
     pub people_elite: f64,
     #[serde(default)]
-    #[serde(rename = "自然↔殖民")]
     pub nature_colony: f64,
 }
 
@@ -37,25 +33,19 @@ pub struct Ideology {
 /// here.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Faction {
-    #[serde(rename = "势力")]
     pub name: String,
     /// Marker glyph on the CLI ASCII map (e.g. 'U').
-    #[serde(rename = "符号")]
     pub symbol: char,
     /// Display colour (CSS hex string) shown in the web UI, defined directly
     /// on the faction itself.
-    #[serde(rename = "颜色")]
     pub color: String,
     /// 意识形态位置（约 -1..1；越负越「东方/教派」，越正越「西方/国际」）。
     /// 由它推算出两两之间的静息亲和（阵营亲缘），驱动外交漂移，令国际关系波动。
-    #[serde(rename = "阵营倾向")]
     pub alignment: f64,
     /// 好战度（0..1）：越高的势力越会加速与异己阵营走向敌对。
-    #[serde(rename = "好战度")]
     pub aggression: f64,
     /// 当前的思潮偏向（可变化）。见 [`Ideology`]。
     #[serde(default)]
-    #[serde(rename = "思潮")]
     pub ideology: Ideology,
     /// **信誉**（势力级，用户裁决 Q3）：承包市场上「这个势力说的话值多少」。
     ///
@@ -67,7 +57,6 @@ pub struct Faction {
     /// 按时交付涨、超期与丢货跌）。旧档没有它 ⇒ serde default = 中性值
     /// [`REPUTATION_NEUTRAL`]，「谁都没做过承包生意」正是那个世界的真实状态。
     #[serde(default = "default_reputation")]
-    #[serde(rename = "名声")]
     pub reputation: f64,
     /// **MOND 掌握度**（0..1）——科技体系的**干线**（见 `.agents/notes/tech-system.md`）。
     ///
@@ -82,28 +71,22 @@ pub struct Faction {
     /// **学到顶（1.0）就永久持有**（棘轮）；1.0 之下会随「不在场」慢慢锈回凡人。
     /// `serde(default)` = 0 让旧档退化成凡人。
     #[serde(default)]
-    #[serde(rename = "MOND 掌握度")]
     pub mond_control: f64,
     /// Stockpiled resources (key -> amount).
-    #[serde(rename = "资源")]
     pub resources: ResourceMap,
     /// Relation of this faction toward another faction. Negative means hostile.
-    #[serde(rename = "关系")]
     pub relations: BTreeMap<FactionId, f64>,
     /// 本土防御半径（AU）：本方城市/舰在此半径（距有效首都，见
     /// [`State::capital_body`]）内获得本土防御。
     /// cult 的数值按 MOND 异常放大——它「掌握了正确的牛顿修正引力」，孤悬柯伊伯带，
     /// 被围攻时依靠此异常自保。
     #[serde(default = "default_home_radius")]
-    #[serde(rename = "本土半径")]
     pub home_radius: f64,
     /// 在本方本土区域内，敌方对其造成的伤害倍率（<1 = 削弱入侵者）。
     #[serde(default = "default_home_attack_mult")]
-    #[serde(rename = "本土攻击倍率")]
     pub home_attack_mult: f64,
     /// 在本方本土区域内，本方舰只的额外护甲再生（占最大护甲/回合）。
     #[serde(default = "default_home_regen_bonus")]
-    #[serde(rename = "本土再生加成")]
     pub home_regen_bonus: f64,
 }
 
