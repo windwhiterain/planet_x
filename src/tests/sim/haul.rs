@@ -1,4 +1,14 @@
-//! 集货运输：产地货栈、货舱容量、`haul_split` 的 max-min 公平、货权守恒、承包分账、腿别交替、指令路线入首都池。
+//! 集货：产地货栈的池子不动、装/卸的货值守恒、雇佣交付的分账、腿别由货舱决定。
+//!
+//! ## 2026-10（第 7 批）：`a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`
+//! 搬去了 g2 **合成场景 · 玩家钉的常驻运输线**（6 条判据）
+//!
+//! 钉一片玩家 `Haul{from, to}` 叶 + 角色钉成运输舰，**不再下任何指令**：实测起点选**灶神星**
+//! （本地需求小、产出能攒出可出口余量）时，r40 装货、r41 卸进池（1.7 件），指令 61 个回合一字不变。
+//!
+//! ⚠ 水星/火星/木星**都不行**：本地建设把余量吃光，船合规地一直 `waiting`——那正是 P0-1 的
+//! 「出口腿不许装走本地保留量」。⚠ 判据用 `haul_steps`（`loaded` → `delivered` 且 `into_pool`）
+//! 与「指令逐回合不变」，**不**拿首都池净增量（池子同时在花钱，收进来的是毛额）。
 //!
 //! ## 2026-10：`cargo_capacity` 的**数据级**那一半搬去了 `play/tests/g2_mid.py`
 //!
@@ -357,68 +367,5 @@ fn a_haul_route_alternates_legs_because_of_the_cargo() {
     assert!(
         !matches!(step, HaulStep::Waiting { .. } | HaulStep::Loaded { .. }),
         "有货时不该再在装货端打转，实为 {step:?}"
-    );
-}
-
-/// **端到端（玩家路径）**：给一艘舰写一条 `Haul` 指令，货真的从**产地货栈**走到**首都池**，
-/// 而且走的是一条不需要重下的**常驻路线**（两个回合内装完并卸到池里）。
-///
-/// 用「首都天体上的货栈」把航程压成 0 回合：它本来就是为了「迁都把旧中转点留在新首都」
-/// 准备的合法路线（`Haul { from: cap, to: cap }`，见 `behavior_is_valid`），正好也是最短的
-/// 端到端用例。
-#[test]
-fn a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool() {
-    let (config, mut state) = fresh_world(42);
-    state.depots.clear();
-    state.depot_add("中国", "地球", "碳", 9.0); // 首都是地球；这处货栈压着 9 件碳
-    let ship = state
-        .ships
-        .iter()
-        .find(|s| s.faction_id == "中国" && s.class == "destroyer")
-        .expect("中国开局有一艘驱逐舰")
-        .name
-        .clone();
-    let epos = state.body_position("地球");
-    state.ship_mut(&ship).unwrap().position = epos;
-    // 玩家指令（`Player` = 自动控制不碰它）：路线 地球→地球，角色钉成运输舰。
-    {
-        let c = state.control_mut("中国".to_string()).unwrap();
-        c.ship_orders.insert(
-            ship.clone(),
-            Control::player(ShipBehavior::Haul {
-                from: "地球".to_string(),
-                to: "地球".to_string(),
-            }),
-        );
-        c.ship_role
-            .insert(ship.clone(), Control::player(ShipRole::Freight));
-    }
-    let mut rng = Prng::new(42);
-    let mut delivered = 0.0;
-    // 驱逐舰舱容 4、货栈 9 件 ⇒ 要跑三趟（4+4+1）；每趟「装一回合 + 卸一回合」，
-    // 所以 8 个回合足够，也正是「常驻路线自己往复」的证据（不需要重下指令）。
-    for _ in 0..8 {
-        advance(&mut state, &config, &mut rng);
-        for e in &state.events {
-            if let GameEvent::CargoDelivered {
-                cargo,
-                into_pool: true,
-                ..
-            } = e
-            {
-                delivered += cargo.values().sum::<f64>();
-            }
-        }
-    }
-    assert!(
-        delivered >= 9.0 - 1e-9,
-        "压在货栈里的那 9 件必须整批运进首都池（实为 {delivered}，其中还含金星当期产出的那部分）"
-    );
-    // 注意：**不要**拿首都池的增量当判据——池子同时在花钱（建设/造舰/维护），
-    // 收进来的货是**毛额**、池子的净变化是另一回事。判据用事件（到货的毛额）
-    // 与「货栈条目消失」（没有货留在产地）这两条。
-    assert!(
-        state.depot("中国", "地球").is_none(),
-        "空货栈条目要被清掉（AI 派单靠键集合读积压）"
     );
 }

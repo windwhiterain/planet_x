@@ -83,6 +83,9 @@ LAUNCH_DOCTRINE = {"temper": 0.5, "lone_wolf": -0.5}
 LAUNCH_KITING = 0.7
 # 修船那条场景：造一个受损组件，两臂只差坐标（本土 / 外海）。
 REPAIR_COMPONENT, REPAIR_START, REPAIR_ROUNDS = "railgun", 5.0, 4
+# 玩家钉的常驻运输线：起点天体选法见 `commanded_haul_checks` 的说明（本地需求小、
+# 能攒出可出口余量；实测 r41 才等到货 ⇒ 窗口 60 回合）。
+HAUL_SHIP, HAUL_FROM, HAUL_TO, HAUL_ROUNDS = "北斗", "灶神星", "地球", 60
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1074,6 +1077,7 @@ def run(h, ck) -> None:
     site_ledger_checks(h, ck)
     blueprint_launch_checks(h, ck)
     combat_scenario_checks(h, ck)
+    commanded_haul_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1829,6 +1833,58 @@ def new_ship_checks(h, ck, out) -> None:
     ck.check("新舰归**系统**（有效归属 Auto——没有任何更高的一层替它表态）",
              mode == ["Auto"], f"{n} 艘新舰的有效归属：{mode}（来源 {src}）")
     ck.check("新舰指令守卫没有空转（真的有一批刚出厂的舰）", n >= 50, f"{n} 艘（下限 50）")
+
+
+def commanded_haul_checks(h, ck) -> None:
+    """**合成场景 · 玩家钉的常驻运输线**（`sim/haul.rs::a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`）。
+
+    钉一片**玩家**的 `Haul{from, to}` 叶（自动控制不碰它）+ 把角色钉成运输舰，然后**不再下任何指令**：
+    货要从**产地货栈**走进**首都池**，而且这条路线自己往复。
+
+    ⚠ 判据用 `haul_steps`（`loaded` 之后 `delivered` 且 `into_pool: true`）与「指令逐回合不变」，
+    **不**拿首都池的净增量当判据——池子同时在花钱（建设/造舰/维护），收进来的货是毛额。
+    原件也写明了这一点。
+
+    ⚠ 起点选**灶神星**是有理由的：本地城的需求小，产出能攒出**可出口余量**；实测水星/火星/木星
+    都不行（本地建设把余量吃光了，船合规地一直 `waiting`——那正是 P0-1 的
+    「出口腿不许装走本地保留量」）。实测 r41 才等到第一批货（1.7 件），所以窗口给足 60 回合，
+    并把「真等到过货」写成防空转判据。
+    """
+    seed = SCENARIO_SEED
+    diff = {"control": [{"势力": FID, "指令": [
+        {"舰": HAUL_SHIP, "行为": {"Haul": {"from": HAUL_FROM, "to": HAUL_TO}},
+         "归属": "Player", "角色": "Freight"}]}]}
+    proj = h.scenario_apply("haul_commanded", seed, HAUL_ROUNDS, [diff])
+    q = KIT.load(str(proj), only=("haul_steps", "ships", "depots", "factions"))
+    hs = q.table("haul_steps")
+    mine = hs[hs["舰名"] == HAUL_SHIP].sort_values("round")
+    steps = [(int(r["round"]), str(r["step"]), float(r["units"] or 0.0), bool(r["into_pool"]))
+             for _, r in mine.iterrows()]
+    sh = q.table("ships")
+    orders = [str(o) for o in sh[sh["舰名"] == HAUL_SHIP]["order_effective"]]
+
+    ck.check("合成场景（玩家运输线）：探针世界里那艘舰与那条线都成立（防空转）",
+             len(steps) >= 10, f"{HAUL_SHIP} 在 {HAUL_ROUNDS} 回合里有 {len(steps)} 条运输动作")
+    ck.check("合成场景（玩家运输线）：玩家钉的路线**逐回合不变**（不需要重下指令）",
+             len(set(orders)) == 1 and HAUL_FROM in orders[0] and HAUL_TO in orders[0],
+             f"{len(orders)} 个回合的指令：{sorted(set(orders))}")
+
+    loaded = [s for s in steps if s[1] == "loaded"]
+    delivered = [s for s in steps if s[1] == "delivered" and s[3]]
+    ck.check("合成场景（玩家运输线）：货真的从**产地货栈**装上了船",
+             bool(loaded) and all(u > 0 for _, _, u, _ in loaded),
+             f"装货 {[(r, round(u, 2)) for r, _, u, _ in loaded]}")
+    ck.check("合成场景（玩家运输线）：卸下来的货**进了首都池**（`into_pool`）",
+             bool(delivered), f"进池卸货 {[(r, round(u, 2)) for r, _, u, _ in delivered]}")
+    # 「两个回合内装完并卸到池里」：每一次装货之后，下一回合就是一次进池卸货。
+    pairs = []
+    for r, _, _, _ in loaded[:6]:
+        pairs.append(any(dr in (r, r + 1) for dr, _, _, _ in delivered))
+    ck.check("合成场景（玩家运输线）：装完那一回合/下一回合就卸进池（常驻路线自己往复）",
+             bool(pairs) and all(pairs), f"每个装货回合之后都跟着进池卸货：{pairs}")
+    ck.check("合成场景（玩家运输线）：守卫没有空转（真等到过货、也真等待过）",
+             len(loaded) >= 1 and any(s[1] == "waiting" for s in steps),
+             f"{len(loaded)} 次装货、{sum(1 for s in steps if s[1] == 'waiting')} 回合等待")
 
 
 def id_checks(h, ck, out) -> None:
