@@ -20,10 +20,11 @@
 //! 本土加成的有无是**两个离散值**，所以「增量 ∈ {基础, 基础+加成}」可判（实测 6.00 → 7.44，
 //! 三次 +0.4800 = 12 × 0.04）——比原先「造一个世界、打一炮」更贴真实长局，也不必再编进 crate。
 //!
-//! **留在这里的**：本土防御光环、面板随选装变化的**确切公式**、点防按舰级缩放、逐组件损伤与
-//! 友方领土修理、舰队防空、护盾与速度规避——这些要么直接调内部函数（`home_defense_mult`、
-//! `ship_panel`），要么要**拨一个旋钮造 A/B**（把库存改到只够付一半维护费之类）。把它们的
-//! 公式抄进 Python 就成了「同一个数两个位置」。
+//! **留在这里的**：逐组件损伤与友方领土修理、舰队防空、护盾与速度规避的**整炮 A/B**——这些要
+//! **拨一个旋钮造 A/B**（把库存改到只够付一半维护费、摆两艘对轰之类）。
+//! 公式类（`home_defense_mult`、`ship_panel`）已通过 `planet_x --call <fn>` 搬到 g1 的
+//! `call_functions`（调的是引擎**同一份实现**，不是抄公式）；`hit_factor` 也有一条 `--call`
+//! 判据，但整炮规避那条 A/B 仍在这里。
 //!
 //! ⚠ 两条踩过的坑记在这（写数据级战斗判据时会再遇到）：① 扣船体的是 **`hull_pen`**，不是
 //! `damage`（`hull_mult` 可 > 1，`hull_pen` 能比 `damage` 大）；② 「被击杀」不能用**上一回合末
@@ -31,101 +32,6 @@
 //! 按 12.0 的船体被打掉）。
 
 use super::*;
-
-/// 本土防御（首都即强弩）：靠近首都的目标被削弱，远离首都的没有。
-#[test]
-fn home_field_weakens_attackers_near_the_capital() {
-    let (_config, state) = fresh_world(42);
-    let cap = state.body_position("地球"); // 地球（中国首都）。
-    let mult_near = home_defense_mult(&state, "中国", cap);
-    assert!(
-        mult_near < 1.0,
-        "near the capital should be defended (mult {mult_near})"
-    );
-    let mult_far = home_defense_mult(&state, "中国", [80.0, 80.0]);
-    assert_eq!(
-        mult_far, 1.0,
-        "far from the capital should have no home-field defense"
-    );
-}
-
-/// 舰船定制面板：装了护盾+轨道炮+推进的舰，其 effective 面板反映组件的护盾池/火力/射程/
-/// 速度。新模型：船体(hull_max) 是舰级**直接**属性、模块不改它；攻击/护盾/速度/射程都由
-/// 模块贡献、被舰级修正系数缩放；**速度来自推进模块（无推进=跑不动）**。
-#[test]
-fn ship_panel_reflects_fitted_components() {
-    let (config, mut state) = fresh_world(42);
-    let base = config.ship_spec("corvette");
-    let ship0 = state.ships[0].name.clone();
-    if let Some(s) = state.ship_mut(&ship0) {
-        s.components = vec![
-            "shield".to_string(),
-            "railgun".to_string(),
-            "ion_drive".to_string(),
-        ];
-    }
-    let s = state.ship(&ship0).unwrap();
-    let panel = ship_panel(&config, s);
-    // 船体 = 舰级直接属性，模块不改它（护盾/装甲只吸收/减伤，不加血）。
-    assert!(
-        (panel.hull_max - base.hull).abs() < 1e-9,
-        "hull is a direct class attribute"
-    );
-    // 护盾池 = 模块 × 舰级 shield_mult。
-    let shield_spec = config.component_spec("shield");
-    assert!((panel.shield_max - shield_spec.shield * base.shield_mult).abs() < 1e-9);
-    // 攻击 = 武器模块 × 舰级 attack_mult。
-    let rail_spec = config.component_spec("railgun");
-    assert!((panel.attack - rail_spec.damage * base.attack_mult).abs() < 1e-9);
-    // 射程 = 武器 × 舰级 range_mult（无舰级基础值）。
-    assert!((panel.attack_range - rail_spec.range * base.range_mult).abs() < 1e-9);
-    // 速度 = 推进模块 × 舰级 speed_mult；加速度 = 推进 accel × 舰级 accel_mult。
-    let drive_spec = config.component_spec("ion_drive");
-    assert!((panel.speed - drive_spec.speed * base.speed_mult).abs() < 1e-9);
-    assert!((panel.accel - drive_spec.accel * base.accel_mult).abs() < 1e-9);
-    assert!(
-        panel.upkeep > base.upkeep,
-        "components should raise maintenance"
-    );
-    // 护甲=硬度：这艘船没装装甲，硬度应为 0。
-    assert!((panel.hardness).abs() < 1e-9);
-}
-
-/// 舰级「点防御修正 pd_mult」（spec 新增属性）应缩放所搭载点防模块的拦截强度：
-/// 同一枚 point_defense 组件，装在高点防修正的舰（如战列 pd_mult>1）上比装在低点防
-/// 修正的舰上拦截更强——「舰级=平台修正器」的一环，而不是给舰叠加独立点防面板。
-#[test]
-fn ship_panel_scales_intercept_by_class_pd_mult() {
-    let (config, mut state) = fresh_world(42);
-    let pd_spec = config.component_spec("point_defense");
-    // 从旗舰队里挑两艘从属不同舰级的舰，验证 intercept 恰为 组件 intercept × 该舰级 pd_mult。
-    // 用按 class 归类的方式选：一艘 pd_mult 高、一艘 pd_mult 低（若存在）最能证明缩放生效。
-    let mut tested = std::collections::BTreeMap::<String, f64>::new();
-    for s in state.ships.iter_mut() {
-        let class = s.class.clone();
-        tested.entry(class.clone()).or_insert_with(|| {
-            let spec = config.ship_spec(&class);
-            s.components = vec!["point_defense".to_string()];
-            s.component_hp = vec![component_integrity(&config, "point_defense")];
-            let pd_mult = spec.pd_mult;
-            let intercept = ship_panel(&config, s).intercept;
-            assert!(
-                (intercept - pd_spec.intercept * pd_mult).abs() < 1e-9,
-                "{class} intercept should be {:.3} × pd_mult {:.2}, got {intercept}",
-                pd_spec.intercept,
-                pd_mult
-            );
-            pd_mult
-        });
-    }
-    // 至少应有两点防修正不同的舰级，证明缩放不是常数（否则这个属性形同虚设）。
-    let distinct: std::collections::BTreeSet<String> =
-        tested.iter().map(|(c, m)| format!("{c}:{m:.3}")).collect();
-    assert!(
-        distinct.len() >= 2,
-        "expected ship classes to differ in pd_mult; got {tested:?}"
-    );
-}
 
 #[test]
 fn fire_degrades_components_under_damage() {
