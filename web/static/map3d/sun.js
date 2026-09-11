@@ -249,8 +249,12 @@ export function createSun(tier) {
       uTime: { value: 0 },
       uGrow: { value: 1 },
       uIntensity: { value: 0.85 },
-      // 顶点和片元都要采噪声（顶点定"朝哪边倒"、片元切"须"），所以两件都挂
-      uFbmOct: fbmOct(Math.min(3, oct)),
+      // 顶点和片元都要采噪声（顶点定"朝哪边倒"+上缘起伏、片元切"丝"），所以两件都挂。
+      // ⚠ 每一片要采 ~7 次 `fbmP`（顶点）× 2 次 `ridgedP`（片元），**八度数是这里最贵的旋钮**：
+      //   实测（RTX，特写视角，5000 片）oct 3→2 省 **~4 ms**，少一次 `ridgedP` 省 ~2.5 ms。
+      //   旧的 `min(3, oct)` 对 oct≥3 的档**恒等于 3** ⇒ 等于没分档（medium/low 白花钱）。
+      //   现在是 `oct-2` 且上下夹住：ultra 3、high 3、medium 2、low 1。
+      uFbmOct: fbmOct(Math.max(1, Math.min(3, oct - 2))),
       // 顺场倾倒的总幅度（弧度尺度）：**"朝向不再一样"就是靠它**
       uTilt: { value: 0.75 },
       // 顺场扭的幅度（中轴沿长度往场的方向歪出去多少）
