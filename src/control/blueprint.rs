@@ -50,7 +50,7 @@ pub fn yard_ship_type_intent(fac: &FactionControlPatch) -> BTreeMap<(CityId, Bui
 /// 指令是即时操作，只写逐舰叶）——原来的 `order` 字段已删。
 ///
 /// 校验与丢弃码见 [`BlueprintPatch`] 与 `.agents/notes/ship-blueprint-spec.md` §4.6。
-/// 顺序与其它叶一致：**删叶（含冲突检查）→ 校验 → 写**。
+/// 顺序与其它叶一致：**删除（含冲突检查）→ 校验 → 写**（这是蓝图专用动作，不是控制叶的删叶）。
 pub fn apply_blueprint(
     state: &mut State,
     config: &GameConfig,

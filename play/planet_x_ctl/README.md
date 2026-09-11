@@ -111,14 +111,9 @@ s.set_blueprint_pointer("中国", "珠三角", 7, "重甲护卫")           # �
 s.set_blueprint_pointer("中国", "珠三角", 7, None)                # 拆掉指针（写 `null`，不是"缺席"）
 s.remove_blueprint("中国", "重甲护卫")                            # 删整张图（⚠ 挂它的区变悬空指针 ⇒ 停产）
 
-# 删叶（`remove: true`）：这一层**不再说话**，而且叶里的值也不再参与取值 ——
-# 这是「恢复出厂值」的唯一做法（`mode: "Inherit"` 做不到，见 §1.2 与下面的 "删叶" 一节）
-s.remove("中国", "风格", "长城")
-s.remove_doctrine(mine)                                         # 通配：这些舰的风格回出厂快照/舰队默认
-s.remove_kiting(mine)
-s.remove_role(mine)                                             # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
-s.remove_default_doctrine("中国")                                # 势力级默认叶：删了就不再供值
-s.remove_default_role("中国")
+# 控制叶**没有**「恢复出厂值 / 删叶」机制（2026-10 用户裁决：出厂默认只是初始值，不是可恢复的目标）。
+# 旧 `remove*` 方法已删除；旧 `"删叶": true` 会在引擎 API 边界被拒（响亮失败，不静默 no-op）。
+# 想让自动控制重新决定一条逐舰轴，用对应的 `set_*` 把 `mode="Auto"` 写回去（不是删叶）。
 
 diff = s.emit()                       # {"control": […], "scope": {…}} → ready for `--apply`
 ctl.write(diff, "steer.json")         # canonical, deterministic JSON (byte-identical on replay)
@@ -196,7 +191,7 @@ rep.describe()         # one readable paragraph
 > rounding of every numeric leaf is gone), so `--control` reproduces the stored value bit for bit and
 > `verify` compares floats exactly (bar float-repr epsilon). Two things it *still* cannot see, and both
 > are reported deliberately instead of guessed at: **whether a per-ship style leaf exists at all**
-> (those rows are listed for every ship — 删叶 的落地以引擎回执 `NOTE_APPLY_REMOVED` 为准), and a
+> (those rows are listed for every ship; use projection `derived.control` for the real leaf face), and a
 > **derived** column the engine adds for its own convenience (e.g. a blueprint's `ship_count`).
 > The effective order **is** visible now — both in `--control` (`behavior`) and in `ships()`
 > (`effective_order_value` + `order_source`).
@@ -237,7 +232,7 @@ c.ship_orders.get(&ship_id).map(|l| l.value.clone())
 * **叶里写着什么，就是这艘舰在干什么**（与 `mode` 无关）。`Inherit` 不是"回到上层"，而是"叶里那句旧记录继续算数" ——
   旧的「舰队默认指令」与「图上 order」两片叶都已删除，**没有东西能盖掉它**。
 * **叶不存在** = 没有任何一层说话 ⇒ 有效值是空的，调用方按 `Idle` 兜底（读面 `order_effective` / `effective_order_value` 给 `null`）。
-  想表达"待命"就**明确写** `Idle`，不要靠删叶。
+  想表达"待命"就**明确写** `Idle`，不要靠缺席空叶。
 
 **风格 / 风筝姿态 / 角色**（长期倾向）则**有**更高的层，而且是**三层**：
 
@@ -253,54 +248,25 @@ leaf.map(|l| l.value).unwrap_or(record)   // ← 叶**存在**就用叶里的值
 所以那边仍然有"叶在、叶说 `Inherit`，但叶里躺着一句旧值"的现象。**别在 Python 里重算这条链**：
 `ships()` 直接给引擎的答案（`effective_order_value` + `order_source`，见下一节）。
 
-要让一队舰真的"跟着舰队默认走"，两件事都要做（`ships()` 的 `order_source` 会告诉你现在是谁在供值）：
+要让一队舰真的"跟着舰队默认走"，就把**逐舰叶的归属交回去**——不是删叶（那个机制已删除），
+而是给对应的 `set_*` 写 `mode="Auto"`；`ships()` 的 `order_source` 会告诉你现在是谁在供值。
 
-```python
-s.set_default_role(fac, "Freight", mode="Player")   # 现在说话的那一层…
-s.remove_role(fleet)                                # …以及**不再供值**的那些叶（删叶，不是写 Inherit）
-```
+### 控制叶没有「删叶 / 恢复出厂值」机制
 
-### 删叶 (`remove`): `mode: "Inherit"` 撤不掉叶里的值
+This was removed in 2026-10 by user ruling: **the factory default is only an initial value, not a
+restorable target.** The old `remove: true` family (`Surface.remove` / `remove_doctrine` /
+`remove_kiting` / `remove_role` / `remove_default_*`) is gone.
 
-This is the trap §1.2 of `python-control-authoring.md` hides one level deeper, and it is worth
-spelling out because the symptom is「我改了舰队默认，这艘舰却不跟」:
+What used to be "delete the leaf and fall back to the factory record" is now simply **not a thing
+you can express**. If you want the automatic controller to decide a per-ship axis again, write
+`mode="Auto"` on that leaf; the leaf's value still exists, but the AI may overwrite it next round.
 
-```rust
-// State::ship_doctrine — the *value* rule, and it does not look at `mode`
-if leaf.mode == Inherit {
-    if let Some(d) = &c.default_doctrine { if d.mode.is_player() { return d.value } }
-}
-leaf.map(|l| l.value).unwrap_or(record)   // ← 叶**存在**就用叶里的值
-```
+For contrast, **blueprint deletion is still supported** and is a different action: it uses the
+blueprint-specific `删除` key and deletes the whole design object (dangling yard pointers then stop
+production). It is not the old control-leaf removal mechanism.
 
-So an existing leaf supplies its value **whatever its mode says**, while a *missing* leaf falls back
-to `Ship.doctrine` (the factory record). 「叶不存在」and「叶写着 `Inherit`」are therefore equal for
-*ownership* and different for *value*.
-
-```python
-s = ctl.surface(ckpt)
-s.set_doctrine("长城", temper=0.7, lone_wolf=-0.4, mode="Player")   # pins the leaf…
-s.set_doctrine("长城", mode="Inherit")                              # …this only releases ownership
-# 有效风格**仍然是** 0.7 / -0.4（叶里的值优先于出厂快照）
-s.remove_doctrine("长城")                                           # ← 这才是「恢复出厂值」
-```
-
-Two things worth knowing about the kit's side of `remove`:
-
-* 删一片**本来就不存在**的叶是**幂等成功**（引擎既不报丢弃，也不进 `NOTE_APPLY_REMOVED`）；
-  `Report.requests` 里那条请求仍然是 `satisfied`，所以 `rep.ok` 不会因为它变红。
-* `remove` **不能**和值 / `mode` 同时写（引擎报 `remove_conflicts_with_value`）：一条同时说着
-  "删掉它"和"把它设成 0.5"的补丁没有正确答案，所以两件事请分两条补丁发。
-* `Report.removed` / `removed_leafs` 给出真的被删掉的那些叶；`describe()` 会把它们列出来。
-  逐舰叶的**存在性**在 `--control` 上读不出来（那片现在对每艘舰都有一行，列的是有效值），
-  所以逐舰删叶的"落地了没有"以**引擎回执**为准，不以 `--control` 为准。要问「这片叶还在不在」
-  用投影的 **`q.control()`**（`idx/control.jsonl`，只列真实存在的叶）——`ships()` 的
-  `order_leaf` 就是从那里来的（见下）。
-* ⚠ **角色轴（`角色`，Rust 侧 `ship_role`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
-  （按积压定编谁去跑集货路线 + 派观测舰去异常区蹲着喂 MOND 掌握度），所以删掉它是**放手**
-  ——AI 下回合可能立刻又写下它的结论，
-  而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
-  没有这个执行者，删掉就等于回到出厂快照。
+Old diffs/scripts that still send `"删叶": true` fail loudly at the API boundary instead of silently
+becoming a no-op.
 
 The kit never hides this: `ships()["order_behavior"]` is the leaf's *record*, while
 `effective_order_value` is what the chain actually resolves to (`order_source` says **who supplied
@@ -324,7 +290,7 @@ it**). Which brings us to the next warning.
 >
 > ⚠ **对指令而言，两组列现在是同一个答案**（2026-10：舰队默认指令与图上 `order` 两片叶都已删除）：
 > `order_behavior` 与 `effective_order_value` 逐行相同、`order_source` 只会是 `leaf` 或空。
-> `demo.py` §[4d] 钉的就是这条新不变式（还有「删叶 ⇒ 有效值变空、**没有**任何一层接手」）。
+> `demo.py` §[4d] 钉的就是这条新不变式（叶不存在 ⇒ 有效值变空、**没有**任何一层接手）。
 > 两组列在**倾向三轴**上仍然是两件事（那边的链有图层与舰队默认，见 §1.2）。
 
 > ### `ships()`: the effective columns are the **engine's** answer (the `*_approx` hole is closed)
@@ -483,8 +449,8 @@ guessing. They are listed because they are cheap to close and expensive to work 
    the fleet-level leaf needs both axes; a per-ship leaf seeds the missing axis from the value the
    ship is actually using, i.e. the record value when no default is `Player`), and the kit still
    refuses it at recipe time so the author sees it while writing, not at apply time.
-   The same ruling added `remove: true` (删叶) — the only way to get a style leaf **back** to the
-   factory record (see the 「删叶」 section above).
+   The later `remove: true` mechanism was **removed** by user ruling (2026-10): the factory default
+   is only an initial value, not a restorable target. 控制叶没有删叶；蓝图删除仍用专门的 `删除`。
 6. **`(city, building)` is a per-city `u32` index.** Correct and documented, but it forces every
    recipe to be a same-round transform and makes any cross-round diff silently wrong. A stable
    building identity (or an `--index` column naming it) would remove a whole class of footguns.

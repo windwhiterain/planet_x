@@ -651,14 +651,16 @@ def input_face_shape(h, ck, proj: Path, ckpt: Path) -> None:
 
 
 def control_fixed_point(h, ck, tmp: Path) -> None:
-    """`--control` 是不动点：dump → 原样回传 → 再 dump 必须逐字节相同（`control_read_face.rs`）。
+    """`--control` 是不动点：dump → 原样回传 → 再 dump 必须逐字节相同。
 
-    它同时钉住两件事：指令读面**每舰一行**（叶被删掉之后那艘舰不许从控制树里消失）、
+    它同时钉住两件事：指令读面**每舰一行**（哪怕这艘舰没有指令叶）、
     以及 `behavior: null`（链上没人说话）回传时**不许建叶**。
+    控制叶的「删叶 / 恢复出厂值」机制已删除（2026-10 用户裁决），所以下面不再制造
+    「叶被删掉」的状态——round 0 的默认世界里本来就有很多舰没有叶。
     """
-    ck0, ck1, ck2 = tmp / "w0.json", tmp / "w1.json", tmp / "w2.json"
-    out = h.capture(["--seed", str(WRITE_SEED), "--round", str(WRITE_ROUNDS),
-                     "--save", str(ck0)])
+    ck0, ck1 = tmp / "w0.json", tmp / "w1.json"
+    h.capture(["--seed", str(WRITE_SEED), "--round", str(WRITE_ROUNDS),
+               "--save", str(ck0)])
     state = json.loads(h.capture(["--start", str(ck0), "--round", "0"]).splitlines()[0])
     ships = state["ships"]
     fid = next((f for f in {s["势力"] for s in ships}
@@ -667,16 +669,6 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
         ck.check("写面不动点：有可用的势力", False, "没有任何势力有 2 艘以上舰——守卫会空转")
         return
     ours = [s["舰名"] for s in ships if s["势力"] == fid]
-    vanished = ours[0]
-
-    rm = tmp / "rm.json"
-    rm.write_text(json.dumps({"control": [{"势力": fid,
-                                           "指令": [{"舰": vanished, "删叶": True}]}]}),
-                  encoding="utf-8")
-    _, err = h.capture(["--start", str(ck0), "--apply", str(rm), "--round", "0", "--save", str(ck1)],
-                       stderr=True)
-    ck.check("删叶会留下回执（删的是叶，不是值）", "NOTE_APPLY_REMOVED" in err,
-             "stderr 里有 NOTE_APPLY_REMOVED" if "NOTE_APPLY_REMOVED" in err else f"stderr={err[-200:]}")
 
     def orders(surface, faction):
         for f in surface["control"]:
@@ -684,38 +676,37 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
                 return f["指令"]
         raise AssertionError(f"控制面里没有势力 {faction}")
 
-    before = h.capture(["--start", str(ck1), "--control"])
+    before = h.capture(["--start", str(ck0), "--control"])
     surface = json.loads(before)
     rows = [r["舰"] for r in orders(surface, fid)]
-    ck.check("指令读面每舰一行且顺序与 state.ships 一致（含叶被删掉的那艘）", rows == ours,
-             f"{fid}：读面 {len(rows)} 行 / 世界 {len(ours)} 艘" + ("" if rows == ours else f"，差异 {set(rows) ^ set(ours)}"))
-    row = next((r for r in orders(surface, fid) if r["舰"] == vanished), None)
-    ck.check("叶被删掉的舰：behavior 是 null、mode 是 Inherit",
-             row == {"舰": vanished, "行为": None, "归属": "Inherit"}, f"{row}")
-    others_ok = all(next(r for r in orders(surface, fid) if r["舰"] == s)["行为"] is not None
-                    for s in ours if s != vanished)
-    ck.check("叶还在的舰：有效值必须是一个真行为（不是 null）", others_ok,
-             f"{len(ours) - 1} 艘有叶的舰都给了真行为")
+    ck.check("指令读面每舰一行且顺序与 state.ships 一致", rows == ours,
+             f"{fid}：读面 {len(rows)} 行 / 世界 {len(ours)} 艘"
+             + ("" if rows == ours else f"，差异 {set(rows) ^ set(ours)}"))
+    null_rows = [r for r in orders(surface, fid) if r["行为"] is None]
+    ck.check("behavior=null 的行 mode 必须是 Inherit（两者一致；这条状态不保证出现）",
+             all(r["归属"] == "Inherit" for r in null_rows),
+             f"{len(null_rows)} 行 behavior=null")
 
     t0 = tmp / "t0.json"
     t0.write_text(before, encoding="utf-8")
-    _, err = h.capture(["--start", str(ck1), "--apply", str(t0), "--round", "0", "--save", str(ck2)],
+    _, err = h.capture(["--start", str(ck0), "--apply", str(t0), "--round", "0", "--save", str(ck1)],
                        stderr=True)
-    after = h.capture(["--start", str(ck2), "--control"])
+    after = h.capture(["--start", str(ck1), "--control"])
     ck.check("原样回传模板不丢叶子", "WARN_APPLY_SKIPPED" not in err,
              "stderr 干净" if "WARN_APPLY_SKIPPED" not in err else f"stderr={err[-200:]}")
     ck.check("读面是不动点（原样回传不改变它自己的形状）", before == after,
              "逐字节相同" if before == after else "回传后读面变了")
+
     surface2 = json.loads(after)
-    row2 = next((r for r in orders(surface2, fid) if r["舰"] == vanished), None)
-    state2 = json.loads(h.capture(["--start", str(ck2), "--round", "0"]).splitlines()[0])
-    ck.check("回传不许偷偷把 null 变成 Idle（那一行还必须说「链上没人说话」）",
-             row2 == {"舰": vanished, "行为": None, "归属": "Inherit"},
-             f"{row2}")
+    state2 = json.loads(h.capture(["--start", str(ck1), "--round", "0"]).splitlines()[0])
     ck.check("回传不增删舰，且仍然每舰一行",
              [s["舰名"] for s in state2["ships"] if s["势力"] == fid] == ours
              and len(orders(surface2, fid)) == len(ours),
              f"{len(orders(surface2, fid))} 行 / {len(ours)} 艘")
+    null2 = [r for r in orders(surface2, fid) if r["行为"] is None]
+    ck.check("回传不许偷偷把 null 变成 Idle",
+             all(r["归属"] == "Inherit" for r in null2) and len(null2) >= len(null_rows),
+             f"{null2[:2]}")
 
 
 def call_functions(h, ck, tmp: Path) -> None:
