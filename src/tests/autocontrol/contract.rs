@@ -709,3 +709,60 @@ fn a_hired_ship_delivers_to_the_employer_and_pays_itself_in_cargo() {
     let c = state.contracts.get(id).expect("合同还在雇佣期内");
     assert!(c.delivered > 0.0, "交付要记进度（实为 {:.2}）", c.delivered);
 }
+
+/// **MOND 掌握度进入吞吐与接单自评**（P1-2）：同型舰、同一条深空航线，
+/// 掌握度 1.0 的期望吞吐必须明显高于 0.0；受雇方在深空单上的接单概率也应更低。
+#[test]
+fn mond_control_is_priced_into_throughput_and_acceptance() {
+    let (config, state) = fresh(42);
+    let from = "创神星";
+    let to = "地球";
+    let depth = sim::route_depth(
+        &config,
+        state.body_position(from),
+        state.body_position(to),
+    );
+    assert!(depth > 0.0, "用例前提：创神星↔地球要穿过 MOND 异常带（depth={depth}）");
+
+    let ship_name = state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == "中国" && s.hull > 0.0)
+        .map(|s| s.name.clone())
+        .expect("用例前提：中国开局有舰");
+    let ship = state.ship(&ship_name).unwrap().clone();
+    let t_mortal = freight::trip_throughput(&state, &config, &ship, from, to, 0.0);
+    let t_master = freight::trip_throughput(&state, &config, &ship, from, to, 1.0);
+    assert!(t_mortal > 0.0, "非 master 的吞吐仍应是正数（只是低）");
+    assert!(
+        t_master > t_mortal * 1.5,
+        "掌握度 1.0 的吞吐必须显著更高：{t_master:.4} vs {t_mortal:.4}"
+    );
+
+    // 同一张深空单：只让中国有一艘空闲舰，比较两个掌握度下的受雇方自评。
+    let mut base = state.clone();
+    base.contracts.contracts.clear();
+    base.depots.clear();
+    let id = contract(&mut base, &config, "美国", 1.0, from, to, 0.0);
+    let c = base.contracts.get(id).unwrap().clone();
+    let mut low = base.clone();
+    let mut high = base.clone();
+    for st in [&mut low, &mut high] {
+        st.ships.retain(|s| s.name == ship_name);
+        st.faction_mut("中国").unwrap().reputation = 1.0;
+    }
+    low.faction_mut("中国").unwrap().mond_control = 0.0;
+    high.faction_mut("中国").unwrap().mond_control = 1.0;
+    let mt_low = available_throughput(&low, &config, "中国", from, to);
+    let mt_high = available_throughput(&high, &config, "中国", from, to);
+    assert!(
+        mt_high > mt_low * 1.5,
+        "候选池可用吞吐也应把 MOND 算进去：{mt_high:.4} vs {mt_low:.4}"
+    );
+    let accept_low = accept_chance(&low, &config, &c, "中国");
+    let accept_high = accept_chance(&high, &config, &c, "中国");
+    assert!(
+        accept_high > accept_low,
+        "非 master 对深空单应更保守：master {accept_high:.4} vs mortal {accept_low:.4}"
+    );
+}
