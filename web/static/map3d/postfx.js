@@ -45,6 +45,8 @@ const SUNFLARE_FRAG = INC('px/post/sunflare.frag');
 // ---------------------------------------------------------------------------
 const GRADE_FRAG = INC('px/post/grade.frag');
 
+let sceneRef = null, cameraRef = null;
+
 export function createPostFX(renderer, tier, size) {
   const pr = renderer.getPixelRatio();
   const w = Math.max(2, Math.floor(size.w * pr));
@@ -67,6 +69,25 @@ export function createPostFX(renderer, tier, size) {
   const composer = new EffectComposer(renderer, rt);
   composer.setPixelRatio(pr);
   composer.setSize(size.w, size.h);
+
+  // --- 深度预趟用的资源 -------------------------------------------------------
+  // 为什么需要：体积积分必须在**场景深度**处夹断，否则它会把遮挡物**背后**的介质也累加进来
+  // （用户：「raymarching 必须在深度前面停下来」）。而在场景那一趟里**做不到** —— 日冕渲染进
+  // 的那个 framebuffer，深度附件就是我们要采的纹理，**同一 framebuffer 的附件不能同时被采样**
+  // （反馈环，规范禁止）。所以先在**另一张纹理**里备一份深度。
+  const depthTex = new THREE.DepthTexture(w, h);
+  depthTex.type = THREE.UnsignedIntType;
+  depthTex.name = 'px-scene-depth';
+  const depthRT = new THREE.WebGLRenderTarget(w, h, {
+    depthTexture: depthTex,
+    depthBuffer: true,
+    stencilBuffer: false,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+  });
+  // 预趟用覆盖材质：只关心深度，不跑任何材质着色器。
+  const depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking });
+  const depthExclude = [];   // 不参与预趟的对象（由 index.js 注册）
 
   const renderPass = new RenderPass(null, null);
   composer.addPass(renderPass);
@@ -137,12 +158,20 @@ export function createPostFX(renderer, tier, size) {
     setScene(scene, camera) {
       renderPass.scene = scene;
       renderPass.camera = camera;
+      sceneRef = scene;
+      cameraRef = camera;
     },
+
+    // 日冕的体积积分要用的：场景深度纹理 + 不参与预趟的对象
+    depthTexture: depthTex,
+    depthTarget: depthRT,
+    setDepthExclude(list) { depthExclude.length = 0; depthExclude.push(...list); },
 
     setSize(width, height) {
       composer.setPixelRatio(renderer.getPixelRatio());
       composer.setSize(width, height);
       const pr2 = renderer.getPixelRatio();
+      depthRT.setSize(Math.max(2, Math.floor(width * pr2)), Math.max(2, Math.floor(height * pr2)));
       curW = Math.max(2, Math.floor(width * pr2));
       curH = Math.max(2, Math.floor(height * pr2));
       bloom.setSize(curW, curH);
@@ -195,6 +224,24 @@ export function createPostFX(renderer, tier, size) {
     },
 
     render(dt) {
+      // --- 深度预趟（见上面 depthRT 处那段说明）--------------------------------
+      if (sceneRef && cameraRef) {
+        const saved = depthExclude.map((o) => (o ? o.visible : false));
+        depthExclude.forEach((o) => { if (o) o.visible = false; });
+        // 顺手排除所有 Sprite（标签 / 准星 / 远景 billboard）：它们本来就是 depthTest:false 的
+        // UI 性质对象，让它们写深度会在日冕上凭空抠出一堆小洞。
+        const sprites = [];
+        sceneRef.traverse((o) => { if (o.isSprite && o.visible) { sprites.push(o); o.visible = false; } });
+        const prevOverride = sceneRef.overrideMaterial;
+        sceneRef.overrideMaterial = depthMat;
+        renderer.setRenderTarget(depthRT);
+        renderer.clear(true, true, false);
+        renderer.render(sceneRef, cameraRef);
+        sceneRef.overrideMaterial = prevOverride;
+        sprites.forEach((o) => { o.visible = true; });
+        depthExclude.forEach((o, i) => { if (o) o.visible = saved[i]; });
+        renderer.setRenderTarget(null);
+      }
       composer.render(dt);
     },
 
@@ -204,6 +251,7 @@ export function createPostFX(renderer, tier, size) {
       sunFlare.dispose();
       grade.dispose();
       fxaa.dispose();
+      depthRT.dispose();
       rt.dispose();
     },
   };
