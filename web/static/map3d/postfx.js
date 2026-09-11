@@ -85,15 +85,10 @@ export function createPostFX(renderer, tier, size) {
       uVis: { value: 1 },
       uTexel: { value: new THREE.Vector2(1 / w, 1 / h) },
       uAspect: { value: new THREE.Vector2(1, 1) },
-      uGodStrength: { value: TUNING.godrayStrength },
-      uDecay: { value: TUNING.godrayDecay },
-      uDensity: { value: TUNING.godrayDensity },
-      uWeight: { value: TUNING.godrayWeight },
-      uThreshold: { value: TUNING.godrayThreshold },
+      uThreshold: { value: TUNING.flareThreshold },
       uStreak: { value: TUNING.streakStrength },
       uGhost: { value: TUNING.ghostStrength },
       // 采样数/环数改由 uniform 驱动（原来是 defines，会全展开）。见 SHADER 里的注释。
-      uGodraySamples: { value: Math.max(6, TUNING.godraySamples | 0) },
       uStreakTaps: { value: 12 },
       uGhostCount: { value: 3 },
     },
@@ -103,7 +98,7 @@ export function createPostFX(renderer, tier, size) {
     depthWrite: false,
   });
   const sunFlare = new ShaderPass(flareMat);
-  sunFlare.enabled = !!(tier.godrays || tier.flare);
+  sunFlare.enabled = !!tier.flare;
   composer.addPass(sunFlare);
 
   const output = new OutputPass();
@@ -176,11 +171,7 @@ export function createPostFX(renderer, tier, size) {
       bloom.strength = TUNING.bloomStrength;
       bloom.radius = TUNING.bloomRadius;
       bloom.threshold = TUNING.bloomThreshold;
-      flareMat.uniforms.uGodStrength.value = TUNING.godrayStrength;
-      flareMat.uniforms.uDecay.value = TUNING.godrayDecay;
-      flareMat.uniforms.uDensity.value = TUNING.godrayDensity;
-      flareMat.uniforms.uWeight.value = TUNING.godrayWeight;
-      flareMat.uniforms.uThreshold.value = TUNING.godrayThreshold;
+      flareMat.uniforms.uThreshold.value = TUNING.flareThreshold;
       flareMat.uniforms.uStreak.value = TUNING.streakStrength;
       flareMat.uniforms.uGhost.value = TUNING.ghostStrength;
       gradeMat.uniforms.uCA.value = TUNING.caStrength;
@@ -192,10 +183,9 @@ export function createPostFX(renderer, tier, size) {
     setTier(tier) {
       const on = TUNING.postfx !== false;
       bloom.enabled = on && !!tier.bloom;
-      sunFlare.enabled = on && !!(tier.godrays || tier.flare);
+      sunFlare.enabled = on && !!tier.flare;
       flareMat.uniforms.uStreak.value = tier.flare ? TUNING.streakStrength : 0;
       flareMat.uniforms.uGhost.value = tier.flare ? TUNING.ghostStrength : 0;
-      flareMat.uniforms.uGodStrength.value = tier.godrays ? TUNING.godrayStrength : 0;
       grade.enabled = on && !!tier.grade;
       fxaa.enabled = !(tier.msaa > 0);
     },

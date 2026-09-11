@@ -72,14 +72,9 @@ export const TUNING = {
   bloomRadius: 0.55,
   bloomThreshold: 0.90,
   // 体积光（god rays）：从太阳屏幕位置做径向散射。
-  godrayStrength: 0.032,
-  godrayDecay: 0.94,
-  godrayDensity: 0.86,
-  godrayWeight: 0.42,
-  godraySamples: 24,
   // 参与散射的亮度门槛（线性 HDR）。只有真的比白更亮的东西（日面/日冕/羽流）才拉丝，
   // 否则整幅画面会被自己的行星和轨道线糊成一片雾。
-  godrayThreshold: 0.85,
+  flareThreshold: 0.85,
   // 各向异性拉丝（变形宽银幕镜头那道横线）。
   streakStrength: 0.16,
   // 镜头鬼影（沿「太阳→屏幕中心」连线的几个彩色光圈）。
@@ -130,7 +125,6 @@ export const TIERS = {
     skyRes: 1024,
     stars: 16000,
     bloom: true,
-    godrays: true,
     flare: true,
     grade: true,
     atmo: true,
@@ -150,7 +144,6 @@ export const TIERS = {
     skyRes: 512,
     stars: 6500,
     bloom: true,
-    godrays: true,
     flare: true,
     grade: true,
     atmo: true,
@@ -170,7 +163,6 @@ export const TIERS = {
     skyRes: 384,
     stars: 3800,
     bloom: true,
-    godrays: true,
     flare: false,
     grade: true,
     atmo: true,
@@ -190,7 +182,6 @@ export const TIERS = {
     skyRes: 256,
     stars: 1800,
     bloom: true,
-    godrays: false,
     flare: false,
     grade: false,
     atmo: true,
@@ -210,7 +201,6 @@ export const TIERS = {
     skyRes: 128,
     stars: 700,
     bloom: false,
-    godrays: false,
     flare: false,
     grade: false,
     atmo: false,
