@@ -7,6 +7,18 @@
 > [`coarse-trajectory-views.md`](coarse-trajectory-views.md)（`--every`/`--traj` 那一轮）、
 > [`engine-data-plane.md`](engine-data-plane.md)（「引擎给答案」的总方针）。
 
+### `--nouns`（2026-10 新加）
+
+`planet_x --nouns` 发**名词 → 解释**的四半语料 `{state, view, projection, control}`，与
+`GET /api/schema` **同一个实现**（`agent::noun_schema_value()`）。它是**悬停弹窗的唯一文字来源**：
+前端 `web/static/tip.js` 只做「拿界面上显示的名词来这里查」，自己**不认识任何领域词**。
+
+* 语料来自 `///` 文档注释（`schemars` 收进 `description`）+ 投影的 `column_docs`。
+* 用途：界面上的名词（列头/控制行标签/卡片字段名）hover 时弹它的解释；
+  `g4` 有一条判据钉住「界面当名词显示的列**必须**能在这里查到词条，不许弹空框」。
+* 还没有词条的两类：**表达式列**（如「实力占比」，需要列上声明 `noun: "power_share"`，待做）
+  与少数**注释仍是英文**的实体字段（属「用词统一」那一趟）。
+
 ## 1. 一句话
 
 **判据 = 「这东西 `--index` 投影里有没有？」有 ⇒ CLI 上的专用 dump 开关就删掉。**

@@ -1324,6 +1324,8 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
                 "columns": {"round":"integer","ship_id":"string","faction_id":"string","舰级":"string","舰名":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","载货":"object","cargo_capacity":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
                 "column_docs": {
+                    "舰名": "**舰名**（势力内唯一）：舰的**身份键**，也是所有 join 用的 id（`ship_ids` / `events.target_id` / `control.key`）。改名不改船——同一艘舰从下水到战沉都用这一个名字。",
+                    "faction_id": "这艘舰**归属的势力**（= 势力名）。舰必须被某个势力控制（设计 spec「舰船：必须被势力控制」），所以它不会是 null。",
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案——2026-10 起就是**那片逐舰叶里的值**（叶不存在 ⇒ null，调用方按 Idle 兜底）。Python 侧不要自己重算。",
@@ -1349,6 +1351,11 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
                 "columns": {"round":"integer","faction_id":"string","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
+                    "势力": "**势力名**（全世界唯一）：势力的**身份键**，join 用（`faction_ids` / `relations` 的键）。",
+                    "faction_id": "势力名本身（与前一个键同值）——为了与别的表用同一个 join 列名。",
+                    "城名": "**城名**（全世界唯一）：城的**身份键**，join 用（`city_ids` / `events.target_id`）。⚠ 城会**易主**（`faction_id` 变）甚至被**夷平**（`已焚毁` = true，行还在、人口清零）——名字永远跟着这座城。",
+                    "所在天体": "这座城建在**哪个天体**上（= 天体名，join `bodies` 表）。它决定产出能进哪条货栈、离首都有多远（治理距离项的第一项）。",
+                    "faction_id": "这座城**此刻归谁**（= 势力名）。会变：易主时这一列改，忠诚度跟着按新主重算。",
                     "名声": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
                     "MOND 掌握度": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
                     "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
@@ -1432,6 +1439,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='investment_budget'`/`'construction_budget'`）。",
                 "columns": {"round":"integer","faction_id":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number","purchasing_power":"number","market_rank":"any","freight_gap":"object"},
                 "column_docs": {
+                    "天体名": "**天体名**（全世界唯一）：天体的**身份键**，join 用（`body_ids` / 城与货栈的 `body_id`）。",
                     "production": "本回合该势力各资源产出（resource → 数量）。**没有产出也给 `{}`**（不是 null），这样 Python 侧列类型稳定。同一批数在主流 `view.factions[<势力>].production` 里也有一份（嵌套对象）——**同一个数、同一个来源**（`observe` 折出来的那份视图），这张表是它的**可 join 平铺版**。",
                     "upkeep": "本回合该势力的舰队维护费（市场价值）。这是「预算压顶」判据的分子，`--control-plan` 的 `fleet_upkeep_cap` 是引擎给出的上限读数。",
                     "governance_total": "本回合治理总开销（行政 + 娱乐，含制裁倍率）。",
@@ -1519,6 +1527,8 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**本回合 AI 的判定**（`RoundView::decisions`）：逐舰「选了什么、当时的关键输入是多少」+ 船坞改装的「从什么改成什么」+ **风格重估**（`Auto` 风格叶的执行者每改一条轴一行）+ **设计图**（AI 建图/重估/复用/回收）+ **首都评估/迁都**（稀疏：只在评估回合或迁都回合有行）。这些判定**既不发事件、也不落持久状态**（指令叶只留结果），所以除了这张表和 `planet_x --derived` 没有别的读法——它回答的是「我的舰为什么跑到那儿去送死」「这条风格轴为什么会变」「这张图是谁画的」。空白有意义：`verdict=\"hold\"` = 这回合 AI 没给这艘舰派活。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","actor":"string","verdict":"string","target":"string","detail":"object"},
                 "column_docs": {
+                    "ship": "这条判定属于**哪艘舰**（= 舰名，join `ships` 表）。",
+                    "faction_id": "这条判定是**为哪个势力**想的（= 势力名）。⚠ 与 `actor` 不是一回事：`actor` 是这条流水的主语（可能是舰、城或势力），`faction_id` 恒定是势力的视角。",
                     "kind": "判定的种类：ship_order（逐舰行为判定）/ retool（船坞改装）/ style_retune（风格轴重估：`Auto` 风格叶的执行者）/ blueprint（设计图：AI 建图/重估/复用/回收）/ capital（首都评估与迁都，**稀疏**）。",
                     "actor": "作判定的一方：舰名（ship_order / style_retune）/ 船坞所在城名（retool）/ **图名**（blueprint）/ 势力名（capital——判定者就是那个势力本身）。",
                     "verdict": "ship_order：withdraw（自保撤退）/ engage（接战）/ colonize（殖民复垦）/ bombard（就地轰炸）/ move（常规机动）/ haul（运输：跑集货路线，装/卸/在途都记成它）/ **hold（没派活）**；retool 固定为 retool；style_retune：temper / lone_wolf / kiting（**哪条轴**被改）；blueprint：created / retuned / reused / reaped；capital：relocate（评估后真的迁了）/ review（评估过、判据不成立 ⇒ **没迁**）/ forced（亡城强迁，没有评估）。",

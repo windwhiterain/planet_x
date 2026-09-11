@@ -164,6 +164,13 @@ struct Cli {
     #[arg(long)]
     schema: bool,
 
+    /// **名词与解释**（悬停弹窗的语料）：`{state, view, projection}` 三份 schema 合成一个值
+    /// —— 界面上能出现的每个名词（列头 / 控制行标签 / 卡片字段名）都能在这里查到它的
+    /// `///` 注释或 `column_docs`，所以前端**不需要任何翻译表**。web 的 `GET /api/schema`
+    /// 与它是同一个实现（一份事实、两个出口）。
+    #[arg(long)]
+    nouns: bool,
+
     /// 输出可编辑控制面（control + scope）JSON——agent 写 --apply diff 的模板。
     #[arg(long)]
     control: bool,
@@ -254,6 +261,10 @@ fn main() {
     }
     if cli.schema {
         emit(&agent::schema_value().to_string());
+        return;
+    }
+    if cli.nouns {
+        emit(&agent::noun_schema_value().to_string());
         return;
     }
     if cli.control_schema {

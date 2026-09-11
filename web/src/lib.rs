@@ -10,6 +10,12 @@
 //!                         & remove field names) — one declaration shared by the
 //!                         WebUI, the Python kit and the docs. See the engine's
 //!                         `control::leaves`.
+//! * `GET  /api/schema`    the **nouns and their explanations**: the full schemars
+//!                         schema of the round view (field `description`s harvested
+//!                         from `///` doc comments) plus the projection schema
+//!                         (per-column `column_docs`). The UI shows the key name and
+//!                         pops the explanation on hover — the doc comments **are**
+//!                         the product copy.
 //! * `GET  /api/state`     the current world (bodies, cities, factions, ships,
 //!                         per-faction controllable state, control scope) **plus**
 //!                         the generic read-only info tree ([`InfoRoot`]).
@@ -463,6 +469,27 @@ async fn get_control_schema() -> Json<serde_json::Value> {
     Json(planet_x::control::control_schema_value())
 }
 
+/// **名词与它们的解释**（`--schema` + `--index` 的 `schema.json` 那一份）。
+///
+/// 前端把它拉**一次**，建「名词 → 解释」的查找表：列头/控制行标签/卡片字段名 hover 时弹的
+/// 那段文字，就是这里的 `description`（`schemars` 自动收的 `///` 文档注释）与 `column_docs`。
+/// 于是**注释就是产品文案**：写文档的人不必再去另一张表里抄一遍。
+///
+/// 两半各自覆盖**不同的名词**（合起来才是"所有 UI 名词"）：
+/// * `view`：回合视图（`产出`/`维护`/`治理`…）——派生读面里那些量；
+/// * `projection`：投影每张表的列（含 `derived.*` 派生平铺表）与 `column_docs`——
+///   实体字段那几个名词（`舰名`/`忠诚度`/`所属天体`…）也在这里，因为实体表就是它们的镜像。
+///
+/// ⚠ 为什么不再发一份 `schemars::schema_for!(State)`：`State` 现在**没有** `JsonSchema`，
+/// 给它加会连带 `ControllableState`/`ControlScope`/`MarketState`/`Milestones`… 一整串
+/// （`#[serde(with = "json::key2")]` 那几个元组键字段还要 `#[schemars(with=…)]` 才过得去）。
+/// 那条路能让「模型 `///` 就是唯一来源」，但它是**独立一刀**，不该混进悬停弹窗这一步；
+/// 已经记在 `.agents/notes/field-naming.md`。
+async fn get_schema() -> Json<serde_json::Value> {
+    // 与 CLI 的 `--nouns` 同一个实现（一份事实、两个出口）。
+    Json(planet_x::agent::noun_schema_value())
+}
+
 async fn advance(AxState(shared): AxState<Shared>, Json(req): Json<AdvanceReq>) -> Json<StateView> {
     let mut guard = shared.lock().unwrap();
     let world = &mut *guard;
@@ -605,6 +632,7 @@ pub fn router(shared: Shared, web: WebCtx) -> Router {
     Router::new()
         .route("/api/state", get(get_state))
         .route("/api/control-schema", get(get_control_schema))
+        .route("/api/schema", get(get_schema))
         .route("/api/advance", post(advance))
         .route("/api/command", post(command))
         .route("/api/new", post(new_game))

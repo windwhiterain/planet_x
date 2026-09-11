@@ -71,7 +71,7 @@ fn default_schema_version() -> u32 {
     0
 }
 /// The complete world snapshot.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct State {
     /// 状态/schema 版本。每次改动 `State` 的**语义/字段结构**时递增（见 [`SCHEMA_VERSION`]
     /// 与 [`migrate`]）；旧 `.ron` 缺该字段时 serde default 为 0，由 [`migrate`] 逐档升级，
@@ -147,6 +147,7 @@ pub struct State {
     /// 或挂单请承运人来取。这使「运输任务 = 舰船的真实行为」有了物理落点。
     #[serde(default)]
     #[serde(with = "crate::json::key2")]
+    #[schemars(with = "std::collections::BTreeMap<String, ResourceMap>")]
     pub depots: BTreeMap<(FactionId, BodyId), ResourceMap>,
     /// **承包市场**（托运方挂单、承运方接单）的持久状态：挂单簿 + 单号分配器。
     ///
@@ -174,7 +175,7 @@ pub struct State {
 /// ⚠ **`pre` 不再装观测**（B5 改的）：从前它是「回合开始时的观测副本」——同一份 `state`、同一个
 /// `observe`、空 sink 只把过程量抹成中性值，于是它与**上一回合的 `post`** 逐字段相同，**零信息量**。
 /// 要读「回合开始时的世界」请读上一行的 `post`（round 0 那份用 [`crate::sim::view_from_state`]）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct RoundState {
     /// 状态/schema 版本（同 [`State::schema_version`] 语义）。
     #[serde(default = "default_schema_version")]

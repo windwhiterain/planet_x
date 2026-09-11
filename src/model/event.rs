@@ -475,7 +475,7 @@ pub enum GameEvent {
 // --- 归一化投影 API（历史/事件查询的唯一契约） --------------------------------
 
 /// 事件参与的**实体种类**。与 id 一起构成「任意实体 → 它的事件」的索引键。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
     City,
@@ -498,7 +498,7 @@ impl EntityKind {
 }
 
 /// 参与方在事件里的**语义角色**：谁做的、对谁做的、谁受损、谁受益、以及次要第三方。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventRole {
     /// 动作发起者（攻击者 / 夷平者 / 复垦者 / 倒戈的目的地…）。
@@ -515,7 +515,7 @@ pub enum EventRole {
 }
 
 /// 一个参与方引用：`(角色, 实体种类, 实体 id)`。id 永远是**字符串名**（与全局身份约定一致）。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Participant {
     pub role: EventRole,
     pub kind: EntityKind,
@@ -537,7 +537,7 @@ impl Participant {
 /// 这三条是**设计约束，不是描述**：它决定一条事件必须被存进哪一层，所以新增 variant 时
 /// 要问的是「后面的逻辑要回看它吗、要回看多久」，而不是「它听起来重不重要」。反过来，
 /// 每一条定级都应当能指到**具体的读者**——见 [`GameEvent::salience`] 里的读者盘点。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Salience {
     /// 后续计算需要访问**无限的过去历史**。→ 必须长存进 [`State::milestones`]，随 checkpoint
@@ -564,7 +564,7 @@ pub enum Salience {
 /// 的字段布局**就能按任意实体 join。variant 专属的载荷统一收进 `data` 一个对象列
 /// （一列只承载一种类型：不再有「同时是标量和列表」的列，也不再有 `from`/`to` 这种
 /// 在 `city_defected` 是势力、在 `capital_relocated` 是天体的同名列）。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct EventRow {
     /// 事件类型名（与 serde 的 `type` 判别式**逐字一致**，有守卫测试钉住）。
     #[serde(rename = "type")]
@@ -1353,7 +1353,7 @@ fn entity_kind_from_str(s: &str) -> EntityKind {
 /// 「本回合」的流水里），跨回合的存档必须自己带上时间戳——这是本类型存在的唯一理由。
 ///
 /// [`Milestones`] 与 [`Notables`] 共用它：两层的差别只在**保留多久**，不在记录形状。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct HistoryEntry {
     pub round: u32,
     pub event: GameEvent,
@@ -1375,7 +1375,7 @@ pub struct HistoryEntry {
 ///
 /// **容量**：默认不设上限（`history.max_milestones: 0` = 无损）；一旦截断，丢弃量与丢到哪一
 /// 回合都记在 [`Milestones::dropped`]/[`Milestones::dropped_through_round`] 里——截断可见。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct Milestones {
     /// 里程碑记录，最旧 → 最新。
     pub entries: Vec<HistoryEntry>,
@@ -1442,7 +1442,7 @@ impl Milestones {
 ///
 /// `window == 0` = **不裁剪**（与 `max_milestones: 0` 同义：无损）。注意此时本层退化成无限
 /// 长存，那说明这条判据被绕过了——真要无限长存，该提升进 [`Milestones`]。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct Notables {
     /// 窗口内的记录，最旧 → 最新。
     pub entries: Vec<HistoryEntry>,
@@ -1501,7 +1501,7 @@ pub struct ChronicleEntry {
     pub participants: Vec<String>,
 }
 /// 一条剧情事件何时触发。数据驱动，全部可确定复现；一次事件默认只触发一次。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub enum StoryTrigger {
     /// 到达或超过某回合时触发（时间线上的「节拍」）。
     RoundAt { round: u32 },
@@ -1523,7 +1523,7 @@ pub enum StoryTrigger {
     },
 }
 /// 剧情事件的机械后果（可选；刻意保持小幅、确定性，避免扰动经济/军事平衡太久）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub enum StoryEffect {
     /// 调整 a↔b 的关系（双向）。
     Relations {
@@ -1549,7 +1549,7 @@ pub enum StoryEffect {
 ///
 /// `trigger` 决定何时火（见 [`StoryTrigger`]）；`effects` 是可选的小幅机械后果；
 /// `participants` 是可读参与方名。整张表数据驱动，模拟只按它触发即可复现地展开剧情。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct StoryEvent {
     pub id: String,
     pub title: String,
