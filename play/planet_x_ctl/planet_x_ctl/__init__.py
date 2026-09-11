@@ -18,13 +18,15 @@ Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
 ``leaf → faction scope → global scope``; the most specific layer that
 is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The **three style** axes have the
-same shape with their own faction-level default: ``ship_doctrine → default_doctrine``,
-``ship_kiting → default_kiting`` and ``ship_role → default_role`` (角色：``War`` 战舰 / ``Freight``
+same shape with their own faction-level default: ``风格 → 舰队默认风格``,
+``姿态 → 舰队默认姿态`` and ``角色 → 舰队默认角色`` (角色：``War`` 战舰 / ``Freight``
 运输舰 / ``Observe`` 观测舰 —— 三值**字符串**枚举，不再是 ``true``/``false``);
-``default_doctrine`` speaks **two axes in one leaf** (``temper`` + ``lone_wolf``), which is why this
+``舰队默认风格`` speaks **two axes in one leaf** (``temper`` + ``lone_wolf``), which is why this
 kit refuses to create it from a single-axis patch (see ``Surface._require_both_axes``).
+（叶名 = ``--control-schema`` 的 ``leaves[].field``，**中文**；Rust 侧字段名另叫
+``ship_doctrine`` / ``default_doctrine``…，读面/写面上都不出现。见 :data:`LEAF_KINDS`。）
 
-⚠ One axis is **alive**: ``ship_role`` is written by the automatic controller every round
+⚠ One axis is **alive**: ``角色`` is written by the automatic controller every round
 (集货定编 ``autocontrol::freight`` + 派观测舰去异常区 ``autocontrol::knowledge``), but only under
 ``Inherit`` — a ``Player`` leaf freezes it. So on that axis "不表态" means "AI 可以每回合重新决定",
 and deleting the leaf means **放手**, not freezing (``Surface.remove_role``).
@@ -38,7 +40,7 @@ bulk helper in this kit therefore *requires* an explicit ``mode`` — or an expl
 Same-round transform (hard constraint)
 --------------------------------------
 
-``building`` inside ``build_weights`` / ``invest_weights`` is a **per-city ``u32`` index**
+``building`` inside ``建造权重`` / ``建设权重`` is a **per-city ``u32`` index**
 (``InvestKey = BuildKey = (CityId, BuildingId)``). Indices are only self-consistent within one
 round, so the only correct workflow is **read a checkpoint → emit a diff → apply it to that same
 checkpoint**. Cross-round mixing of building indices is silently wrong. This kit enforces it: every
@@ -52,14 +54,14 @@ Typical use::
     ckpt = "ckpt_r12.json"
     s = ctl.surface(ckpt)                    # `--control` (read face == write face)
     s.factions                               # faction names
-    s.leaf("中国", "ship_orders", "长城")      # one leaf: value + mode
+    s.leaf("中国", "指令", "长城")            # one leaf: value + mode（kind = 叶的中文名词）
     ships = ctl.ships(ckpt)                  # projection ships × their control leaves
     mine = ctl.query(ships, "势力 == '中国'")   # (extra columns include `class`, a keyword)
 
     s.set_mode(mine, "Auto")                 # wildcard, client-side: N × {ship, mode}
     s.set_behavior(mine, "Dock:地球", mode="Player")
     s.set_default_role("中国", role="Freight", mode="Player")   # 长期倾向才有舰队级默认
-    s.set_budget("中国", "construction_budget", {"硅": 4.0}, mode="Player")
+    s.set_budget("中国", "建造预算", {"硅": 4.0}, mode="Player")
 
     diff = s.emit()                          # {"control":[…], "scope":{…}} → `--apply`
     ctl.write(diff, "steer.json")
@@ -238,6 +240,10 @@ def query(df: pd.DataFrame, expr: str, **names) -> pd.DataFrame:
     return df.query(fixed, **names)
 
 
+#: 本 kit 按 kind 取数的几片叶。⚠ 这些**不是**第二套词表：取值逐字等于 `--control-schema`
+#: 的 `leaves[].field`（读面 `derived.control` 的 `kind` 列、`--control` 的键、`--apply` 的键
+#: 现在是**同一个中文名词**，从前读面发英文 kind、写面用中文键是同一个概念两套名）。
+#: 取值由 `play/tests/g4_spec.py` 与 manifest 逐字对账。
 _WEIGHT_KINDS = ("建设权重", "建造权重")
 _BUDGET_KINDS = ("投资预算", "建造预算")
 
@@ -758,16 +764,17 @@ class Surface:
     def leaf(self, faction: str, kind: str, key: Any = None) -> Leaf:
         """One leaf: its **value and its mode** (三态).
 
-        ``key`` is the leaf's identity — the ship name for ``ship_orders``/``ship_doctrine``/
-        ``ship_kiting``, the resource key for the budgets, the city name for ``loyalty_budget``, a
-        ``(city, building)`` tuple for the weight kinds, and ``None`` for the per-faction singletons
-        ``default_doctrine`` / ``default_kiting`` / ``default_role`` / ``capital``.
+        ``key`` is the leaf's identity — the ship name for ``指令``/``风格``/``姿态``/``角色``,
+        the resource key for the budgets, the city name for ``城市福利预算``, a
+        ``(city, building)`` tuple for the weight kinds (``建设权重``/``建造权重``), and ``None``
+        for the per-faction singletons ``舰队默认风格`` / ``舰队默认姿态`` / ``舰队默认角色`` /
+        ``首都``。``kind`` 一律是**叶的中文名词**（``--control-schema`` 的 ``leaves[].field``）。
 
         A leaf the read face did not list is **not an error**: it means "nobody has spoken here"
         (``mode == "Inherit"``), which is the same as an explicitly-written ``Inherit``.
 
         ⚠ **``exists`` does not mean "the state holds this leaf"** for the **per-ship list kinds**
-        (``ship_orders`` / ``ship_doctrine`` / ``ship_kiting`` / ``ship_role``): those rows are
+        (``指令`` / ``风格`` / ``姿态`` / ``角色``): those rows are
         listed for **every** ship, so ``exists`` only ever means "the read face listed this row"
         (``control-live-layers.md`` §13/§13.6). What that row holds is the **effective** value, not
         the leaf's record. The authoritative **leaf-existence** face is the projection's
@@ -1219,7 +1226,7 @@ class Surface:
                    strict: bool = True) -> "Surface":
         """Set budget amounts per resource.
 
-        ``kind`` ∈ ``construction_budget`` (造舰) / ``investment_budget`` (建设) — same wire shape.
+        ``kind`` ∈ ``建造预算`` (造舰) / ``投资预算`` (建设) — same wire shape.
         ``values`` is ``{resource_raw_key: amount}`` (e.g. ``{"硅": 4.0}``).
 
         A budget value is a **one-shot number**, not a persistent intent: if you want "跟着产出走",
@@ -1749,9 +1756,13 @@ def _real_order_leaves(q, r: int) -> dict[tuple[str, str], dict]:
     """``(势力, ship) -> {"mode", "value"}`` for the ship-order leaves that **really exist**.
 
     Source: the projection's **``derived.control``** table (``idx/control.jsonl``), whose
-    ``kind == "ship_order"`` rows the engine emits by walking ``ControllableState::ship_orders`` —
+    ``kind == "指令"`` rows the engine emits by walking ``ControllableState::ship_orders`` —
     so a row is exactly "this faction has an order leaf for this ship", and ``value``/``mode`` are
     what that leaf holds. That makes it the authoritative **leaf-existence** face for the order axis.
+
+    ⚠ ``kind`` 是**控制叶的中文名词**（逐字 = ``--control-schema`` 的 ``leaves[].field``）；
+    中文名只在引擎的 ``control::leaves::LEAVES`` 里声明一次（``g4_spec.py`` 对账），
+    这里的字符串是**消费者**，不是第二份声明。
 
     ⚠ **Not** the ``--control`` read face: since that face went "one row per ship"
     (``control-live-layers.md`` §13) it lists every ship, with the **effective** value and the leaf's
@@ -1766,7 +1777,7 @@ def _real_order_leaves(q, r: int) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     if not len(rows):
         return out
-    for _, row in rows[rows["kind"] == "ship_order"].iterrows():
+    for _, row in rows[rows["kind"] == "指令"].iterrows():
         out[(row["势力"], row["key"])] = {"mode": row["mode"], "value": row["value"]}
     return out
 
@@ -1908,8 +1919,14 @@ def cities(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
            index_dir=None) -> pd.DataFrame:
     """The projection's ``cities`` table joined against the city-keyed control leaves.
 
-    Adds ``loyalty_budget_mode`` / ``loyalty_budget_value`` plus per-city weight aggregates
-    (``invest_weight_*`` / ``build_weight_*``: count, sum, and how many leaves are ``Player``).
+    Adds ``loyalty_budget_mode`` / ``loyalty_budget_value``（``城市福利预算`` 那片叶自己的值与表态）
+    plus per-city weight aggregates computed from the ``建设权重`` / ``建造权重`` leaves
+    (``invest_n`` / ``invest_sum`` / ``invest_player`` and the ``build_*`` trio: count, sum, and how
+    many leaves are ``Player``).
+
+    ⚠ 本帧的**列名是 kit 自己的读模型**（``loyalty_budget_*`` / ``invest_*`` / ``build_*``），
+    不跟着控制叶改名——它们是聚合列、不是叶名，改名会动 ``demo.py`` 与 README 的一整套读法。
+    按 kind 取数的地方（本函数与 :func:`_real_order_leaves`）用的**已经是**中文叶名。
     """
     q = projection(ckpt, planet_x=planet_x, index_dir=index_dir)
     r = _last_round(q) if round is None else int(round)
@@ -1926,7 +1943,10 @@ def cities(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
                 continue
             st = agg.setdefault(key[0], {"invest_n": 0, "invest_sum": 0.0, "invest_player": 0,
                                          "build_n": 0, "build_sum": 0.0, "build_player": 0})
-            pre = "invest" if kind == "invest_weights" else "build"
+            # ⚠ 比较的是**中文叶名**（`_WEIGHT_KINDS` 已经统一到 manifest 的词）。
+            # 这里曾经写 `kind == "invest_weights"`（Rust 字段名）⇒ 恒 False ⇒ 建设权重
+            # 的账**全记到建造那边**，`invest_*` 三列恒 0。是「看起来有值」的哑巴错误。
+            pre = "invest" if kind == _WEIGHT_KINDS[0] else "build"
             leaf = leaves[(fac, kd, key)]
             st[f"{pre}_n"] += 1
             st[f"{pre}_sum"] += float(leaf.value or 0.0)
@@ -2271,8 +2291,8 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
     A leaf the read face does not list is normalized to ``Inherit`` — 「叶不存在」≡「显式写
     Inherit」as far as *ownership* goes, so an absent leaf and an explicitly-silent leaf compare equal
     and neither shows up as a spurious change. Field **names are kept exactly as the engine spells
-    them** (``behavior`` for the orders, ``value`` for capital/budgets/weights, ``kiting`` for the
-    kiting leaf).
+    them** (``行为`` for the orders, ``值`` for 首都/预算/权重, ``姿态`` for the posture leaf —
+    the manifest's ``leaves[].values`` is the authority, `_leaf_value` asks it).
 
     ⚠ That equivalence does **not** hold for the *value*: an existing style leaf supplies its value
     even when its mode is ``Inherit`` (``State::ship_doctrine`` is
@@ -2325,9 +2345,9 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 # `remove` 也算一个被请求的字段：删叶请求没有值可写（`_leaf_fields` 那边靠
                 # `exists` 翻转看结果），漏掉它会让"删一片势力级叶"在 `requests` 里**消失**，
                 # 于是 `verify` 看上去"什么都没请求"——静默的成功比失败更难查。
-                # ⚠ 值字段名**按 kind 查表**（`capital`→`value`、`default_role`→`role`…）：
+                # ⚠ 值字段名**按 kind 查表**（`首都`→`值`、`舰队默认角色`→`角色`…）：
                 # 写成一张写死的名单时，新轴的写值会在 `requests` 里静默消失，与漏掉 `remove` 同一个坑。
-                # 值字段**按 kind 问 manifest**（`capital`→`value`、`default_role`→`role`、
+                # 值字段**按 kind 问 manifest**（`首都`→`值`、`舰队默认角色`→`角色`、
                 # 两轴风格叶→两个字段…）：写成一张写死的名单时，新轴的写值会在 `requests` 里
                 # 静默消失，与漏掉 `remove` 同一个坑。多字段于是不需要特例。
                 wanted = {"归属", "删叶", *LEAF_KINDS.values(kind)}
@@ -2459,7 +2479,7 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
     # The engine reports takeover paths by *diff index*; translate them back to leaf identities.
     rep.took_over_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.took_over})
     took_leafs = set(rep.took_over_leafs)
-    # 删叶同理：回执里给的是 `中国.ship_doctrine[0].ship` 这种**下标路径**，翻成叶名再比。
+    # 删叶同理：回执里给的是 `中国.风格[0].舰` 这种**下标路径**，翻成叶名再比。
     rep.removed_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.removed})
     removed_leafs = set(rep.removed_leafs)
     for leaf, fields in requested.items():

@@ -19,6 +19,7 @@ pub mod json;
 pub mod model;
 pub mod prng;
 pub mod projection;
+pub mod schema;
 pub mod sim;
 pub mod visual;
 pub mod world;

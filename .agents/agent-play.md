@@ -21,9 +21,9 @@
 ### 三条最容易踩的坑（先记住）
 
 - **id 是「有名字的实体」的唯一名**（舰/城/势力/天体/定居点 = 它的名字），不是整数编号；
-  `--apply` diff 里的 `city`/`ship`/`faction_id`/`body` 写名字。
-  **唯一例外：`building` 是 u32 下标**，而且在**城内部**才唯一——同一个下标换个城就是
-  另一栋楼。`invest_weights`/`build_weights` 里的 `city`+`building` 必须**配套**用。
+  `--apply` diff 里的 `城`/`舰`/`势力`/`天体` 写名字。
+  **唯一例外：`建筑` 是 u32 下标**，而且在**城内部**才唯一——同一个下标换个城就是
+  另一栋楼。`建设权重`/`建造权重` 里的 `城`+`建筑` 必须**配套**用。
 - **`--apply` 会告诉你哪些叶片没落地——所以一定要读 stderr。** diff 里点名的实体不存在
   （舰已战沉/改名成 `长城2`、城已易主、building 下标来自别的城）时，那条叶片会被丢掉，
   但退出码仍是 0、stdout 仍是正常状态流。丢掉的东西以
@@ -51,7 +51,7 @@
   <faction>` 先算「成本→收益」；`--control-schema` 查 diff 能写哪些字段。
 - **写错了问谁**：`--apply` 的报错与丢弃报告**都在 stderr**。行为名写错会在**解析阶段**就
   报错并列出合法行为（退出码 10）；指着不存在的实体则报 `WARN_APPLY_SKIPPED`（退出码 0）
-  ——两者都点名到叶（`中国.ship_orders[0]`）。**别猜，读 stderr。**
+  ——两者都点名到叶（`中国.指令[0]`，路径用的是**中文叶名**）。**别猜，读 stderr。**
 
 下面再给一份可直接跑的通用手把手示例（bash）：
 ```bash
@@ -119,8 +119,8 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.json
             "cities": {"长三角": {"population":410,"loyalty":0.86,
                                   "production_value":28.4, ...}},
             "decisions": { ... } },
-  "ship_ids": ["长城", ...], "city_ids": ["长三角", ...], "faction_ids": ["中国", ...],
-  "body_ids": ["地球", ...], "settlement_ids": ["长三角", ...] }
+  "舰名表": ["长城", ...], "城名表": ["长三角", ...], "势力表": ["中国", ...],
+  "天体名表": ["地球", ...], "定居点表": ["长三角", ...] }
 ```
 
 > `view` = 这一回合的**一份视图**（与 `--derived` 的 `post`、`--schema` 里 `Trajectory.view` 同构）：
@@ -132,22 +132,22 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.json
 
 | 表 | 粒度 | 关键列 |
 |---|---|---|
-| `factions` | 每回合 | `faction_id resources(库存) relations(外交) capital_body alignment aggression home_* city_ids ship_ids` |
-| `ships` | 每回合 | `ship_id faction_id class x y hull hull_max shield shield_max velocity components component_hp attack attack_range speed accel hardness intercept shield_regen hull_regen upkeep blueprint blueprint_mode order_blueprint_mode order_source spawned_round` |
-| `cities` | 每回合 | `city_id faction_id body_id name population loyalty razed deployed_area building_count buildings[]`（`buildings[]` 里每栋有 `id`（= `--apply` 要的 u32 下标）`kind resource ship_type blueprint structure area deployed armor`） |
-| `bodies` | 全局一次 | `body_id name x y perihelion_distance aphelion_distance period settlement_count` |
-| `settlements` | 全局一次 | `settlement_id body_id name total_area ecological_capacity construction_speed_mod resources` |
+| `factions` | 每回合 | `势力 符号 capital_body 阵营倾向 好战度 本土半径 本土攻击倍率 本土再生加成 思潮 资源(库存) 关系(外交) 名声 MOND 掌握度 mond_ships_in_band mond_frontier_au war_quota … 城名表 舰名表`（写世界的那几条 `*_quota` 逐列解释见 `--nouns` 的 `derived.factions.column_docs`） |
+| `ships` | 每回合 | `舰名 势力 舰级 x y 船体 船体上限 护盾 护盾上限 速度 组件 组件耐久 attack attack_range speed accel hardness intercept shield_regen hull_regen 载货 cargo_capacity upkeep order_leaf_mode order_effective_mode order_effective order_source 风格 姿态 角色 role_mode 出厂图 blueprint_mode 下水回合` |
+| `cities` | 每回合 | `城名 天体名 定居点 势力 人口 忠诚度 已焚毁 deployed_area building_count 建筑 gov_distance depot_value revolt_risk`（`建筑[]` 里每栋有 `建筑编号`（= `--apply` 要的 u32 下标）`类型 开采资源 建造舰级 设计图 结构 面积` …逐列见 `--nouns`） |
+| `bodies` | 全局一次 | `天体名 近日点距离 远日点距离 公转周期 x y settlement_count` |
+| `settlements` | 全局一次 | `定居点 天体名 index 总面积 生态容量 建设速度修正 建设资源修正 资源` |
 | `events` | 每回合 | `event_id("回合:序号") type headline weight salience actor_*/target_*/extra + data`（类型列叫 **`type`**） |
 
 另有**派生表**（`idx/*.jsonl`，按同样的名字 join）：数据**不在状态里**，是引擎算出来的量——
 
 | 派生表 | 粒度 | 关键列 | 回答什么 |
 |---|---|---|---|
-| `faction_process` | 每回合 × 势力 | `faction_id production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`view.factions[<势力>]` 是**同一个来源**的另一份读法，这是可 join 的平铺版） |
-| `city_process` | 每回合 × 城 | `city_id body_id faction_id razed production{}` | 每座城每回合在挖多少（含已夷平的空城） |
-| `control` | 每回合 × 叶片 | `faction_id kind key sub value mode` | **谁在控制什么**（`kind` = ship_order/ship_doctrine/ship_kiting/ship_role/default_doctrine/default_kiting/default_role/各类预算与权重/capital）。⚠ **没有 `default_ship_order`**（2026-10 删除：指令是即时操作，只写逐舰叶）。⚠ **设计图不在本表**（它是结构叶，见下一行） |
+| `faction_process` | 每回合 × 势力 | `势力 production{} upkeep governance_total governance_coverage` | 这回合产出/维护/治理到底是多少（`view.factions[<势力>]` 是**同一个来源**的另一份读法，这是可 join 的平铺版） |
+| `city_process` | 每回合 × 城 | `城名 天体名 势力 已焚毁 production{}` | 每座城每回合在挖多少（含已夷平的空城） |
+| `control` | 每回合 × 叶片 | `势力 kind key sub value mode` | **谁在控制什么**（`kind` = **上面那张表的中文叶名**，逐字等于 `--control-schema` 的 `leaves[].field`；两边由 `play/tests/g4_spec.py` 对账）。⚠ **没有舰队默认指令**那一片（2026-10 删除：指令是即时操作，只写逐舰叶）。⚠ **设计图库不在本表**（它是结构叶，见下一行） |
 | `scope` | 每回合 × 显式节点 | `level(global/faction/body/city) key mode` | 作用域树里谁有意见 |
-| `blueprints` | 每回合 × 设计图 | `faction_id blueprint_id class components[] doctrine{} kiting role mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + **倾向三轴**：风格 / 风筝姿态 / 角色）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
+| `blueprints` | 每回合 × 设计图 | `势力 图名 舰级 选装[] 风格{} 姿态 角色 mode effective_mode ship_count class_slots component_cost launch_waiting` | 这个势力的**设计图库**：一张图 = 「还不存在的舰」的出厂规格（舰级 + 选装 + **倾向三轴**：风格 / 风筝姿态 / 角色）。`ships.blueprint` 与 `cities.buildings[].blueprint` 都 join 它 |
 
 `ships` 表另有几列是**引擎解析后的答案**，别自己重算链：`order_leaf_mode`、
 `order_default_mode`、`order_effective_mode`、`order_effective`、**`order_source`**
@@ -182,8 +182,8 @@ q.bodies() ; q.settlements()             # 天体 / 定居点主表
 q.decisions(round=12)                    # 本回合 AI 的判定（逐舰 verdict + 判定的输入 + 船坞改装）
 q.blueprints(round=12)                   # 设计图库（一行一图：舰级/选装/默认意图/归属/造过多少艘）
 q.fleet(12, "中国") ; q.city_buildings(12, "中国")   # 某势力的舰 / 城
-q.ids("ships", 12)                       # 第 12 月的 ship_id（=舰名）数组
-q.join("ships", round=12)                # explode 主流 ship_ids 并按 (round,id) merge 完整对象
+q.ids("ships", 12)                       # 第 12 月的舰名数组
+q.join("ships", round=12)                # explode 主流 `舰名表` 并按 (round,id) merge 完整对象
 ```
 
 常用判断：
@@ -201,7 +201,7 @@ snap = q.faction_snapshot(q.facts.iloc[-1]["round"], "中国")
 snap["relations"]; snap["resources"]
 
 # 边缘失稳城（忠诚低，易叛乱）
-q.join("cities", round=12).query("faction_id=='中国' and loyalty < 0.5")
+q.join("cities", round=12).query("势力 == '中国' and 忠诚度 < 0.5")
 
 # 舰队维护费 vs 生产（翻车前看这个：upkeep > production → 先扩产）
 snap["view"]["upkeep"], snap["view"]["production_value"]
@@ -251,28 +251,36 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 ⚠ 图的每条倾向轴**默认沉默**：建图（哪怕归玩家）**不等于**表态，只有图上真写了那条轴，
 它才参与；而且只在该图的归属解析为 `Player` 时才供值。
 
-| 指令面 | 含义 | 关键点 |
+**叶名一律是中文名词**（2026-10 起）：读面 `--index` 的 `control` 表 `kind` 列、写面
+`--apply` 的键、`--control-schema` 的 `leaves[].field` 是**同一个词**（下表第一列）。
+身份键 / 值字段也是中文（`舰`/`资源`/`城`/`建筑`/`图名`、`行为`/`值`/`姿态`/`角色`/`舰级`/`选装`），
+归属字段叫 `归属`、删叶叫 `删叶`。
+
+| 叶（= `--control-schema` 的 `field`） | 含义 | 身份键 → 值字段 |
 |---|---|---|
-| `ship_orders` | 每艘舰的**移动/停泊**行为 | `Idle / Move / Follow / DockCity / Dock / Colonize`（见下） |
-| `default_doctrine` | **舰队默认行为风格**（势力级一片，长期倾向） | `{"temper":…,"lone_wolf":…,"mode":…}`。全舰队一个风格 = 一片叶 |
-| `default_kiting` | **舰队默认风筝↔贴脸**（势力级一片） | `{"kiting":…,"mode":…}` |
-| `default_role` | **舰队默认角色**（势力级一片，第三条风格轴） | `{"role":"War"\|"Freight"\|"Observe","mode":…}`。角色决定自动控制**派哪种活**（战舰找仗打／运输舰跑集货／观测舰蹲异常区喂 MOND 掌握度），不解除武装 |
-| `ship_doctrine` | 每舰**行为风格**（per-舰叶片） | `temper`（理智↔热血，欺软怕硬↔飞蛾扑火）、`lone_wolf`（护航↔独狼），各 `[-1,1]`、`0`=基线 |
-| `ship_kiting` | 每舰**风筝↔贴脸**姿态（per-舰叶片） | `[-1,1]`、`0`=基线。**软属性**：Move/Follow/Dock/Idle 都是软目标，附近有敌舰时自动微调位置，**玩家也不能硬控制** |
-| `ship_role` | 每舰**角色**（per-舰叶片） | `War`/`Freight`/`Observe`。⚠ 这片叶**自动控制每回合也会写**（按积压定编集货 + 派舰去异常区），玩家钉 `mode=Player` 之后它不再碰 |
-| `investment_budget` | **建设**投资预算（每资源 / 月） | 用于建建筑、扩生产 |
-| `construction_budget` | **造舰**建造预算（每资源 / 月） | 用于造舰；会先给维护费留**预留**（见下） |
-| `invest_weights` | 各建设任务优先级 | 谁先吃投资预算。key = `city` + `building`（`building` 是**城内的 u32 下标**） |
-| `build_weights` | 各建造区优先级 | 哪个船坞先造。key 同上 |
-| `loyalty_budget` | 每城娱乐/福利（月） | 提「忠诚」压低叛乱 |
-| `capital` | **迁都**：换首都天体 | `{"value":"<天体名>","mode":"Player"}`；首都=光速治理/本土防御锚点 |
-| `buildings` | 结构性增删改建 | 加/删建筑、改 `structure`、改 `ship_type`（只对建造区有效）、**挂/拆设计图指针**（`{"city":…,"building":…,"blueprint":"<图名>"}`；`"blueprint": null` = 拆掉指针回到自动选装） |
-| `blueprints` | **设计图库**（势力级，一张图一片叶） | `{"name":"<图名>","class":"<舰级>","components":[…],"role":"War","kiting":-0.5,"doctrine":{"temper":0,"lone_wolf":0},"mode":…}`——见 §3 末尾。⚠ 图上**不能**写指令（`"order"` 是未知字段） |
+| `指令` | 每艘舰的**移动/停泊**行为（即时操作） | `舰` → `行为`（`"Idle"` / `{"Follow":{"ship":"<舰名>"}}`…见下） |
+| `舰队默认风格` | **舰队默认行为风格**（势力级一片，长期倾向） | 无 → `temper` + `lone_wolf`（**两轴一片叶**，新建必须一起给） |
+| `舰队默认姿态` | **舰队默认风筝↔贴脸**（势力级一片） | 无 → `姿态` |
+| `舰队默认角色` | **舰队默认角色**（势力级一片，第三条风格轴） | 无 → `角色`（`War`/`Freight`/`Observe`）。角色决定自动控制**派哪种活**（战舰找仗打／运输舰跑集货／观测舰蹲异常区喂 MOND 掌握度），不解除武装 |
+| `风格` | 每舰**行为风格**（per-舰叶片） | `舰` → `temper` + `lone_wolf`（各 `[-1,1]`、`0`=基线） |
+| `姿态` | 每舰**风筝↔贴脸**姿态（per-舰叶片） | `舰` → `姿态`（`[-1,1]`、`0`=基线。**软属性**：附近有敌舰时自动微调位置，玩家也不能硬控制） |
+| `角色` | 每舰**角色**（per-舰叶片） | `舰` → `角色`。⚠ 这片叶**自动控制每回合也会写**（按积压定编集货 + 派舰去异常区），玩家钉 `归属=Player` 之后它不再碰 |
+| `投资预算` | **建设**投资预算（每资源 / 月） | `资源` → `值` |
+| `建造预算` | **造舰**建造预算（每资源 / 月） | `资源` → `值`（会先给维护费留**预留**，见下） |
+| `福利预算` | 势力级福利预算（每资源 / 月） | `资源` → `值` |
+| `建设权重` | 各建设任务优先级 | `城` + `建筑`（**城内的 u32 下标**） → `值` |
+| `建造权重` | 各建造区优先级 | `城` + `建筑` → `值` |
+| `城市福利预算` | 每城娱乐/福利（月） | `城` → `值` |
+| `开发货币预算` | 每城开发货币（市场价值/月，国内市场开启时才有用） | `城` → `值` |
+| `建造货币预算` | 每城建造货币（同上） | `城` → `值` |
+| `首都` | **迁都**：换首都天体 | 无 → `值`（`{"值":"<天体名>","归属":"Player"}`）；首都=光速治理/本土防御锚点 |
+| `设计图库` | **设计图库**（势力级，一张图一片叶） | `图名` → `舰级`/`选装`/`风格`/`姿态`/`角色`——见 §3 末尾。⚠ 图上**不能**写指令 |
+| `建筑`（**命令，不是叶**） | 结构性增删改建 | `城`+`建筑` → 加/删建筑、改 `结构`、改 `建造舰级`（只对建造区有效）、**挂/拆设计图指针**（`{"城":…,"建筑":…,"设计图":"<图名>"}`；`"设计图": null` = 拆掉指针回到自动选装） |
 
 > ⚠ **这张表是文档，不是权威**：权威是引擎发的 `--control-schema` 的
 > `leaves` / `actions` 段（`src/control/leaves.rs`：每片叶的键名 / **身份键** / **值字段** /
 > 只读派生列）。**先跑那个，别看这张表**——2026-10 实测它就漏了两片叶
-> （`default_role` / `ship_role`，角色轴那次），补上就是因为这件事。
+> （`舰队默认角色` / `角色`，角色轴那次），补上就是因为这件事。
 > 三端（引擎 / web 的 `views.json` / Python kit）现在读同一份声明，
 > 纪律见 [`notes/web-control-spec.md`](notes/web-control-spec.md) 与 `play/tests/g4_spec.py`。
 
@@ -296,22 +304,26 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 > 而 `mode` 是**叶片自己的表态**——所以整面 dump 回来安全；但**改值请把 `mode`
 > 一起写成 `Player`/`Auto`**，只改值而留 `Inherit` 等于说"这一层没有意见"（除非舰队默认也是
 > `Player`，那个值不会被采用）。
-> ⚠ **`ship_orders` 每艘舰都有一行**（与三条风格轴一致），`behavior` 是**有效值**：
-> `"behavior": null` = **链上没有任何一层说话**（叶不存在 + 出厂图没写意图 + 舰队默认不是
-> 玩家的），引擎才按 `Idle` 兜底——它不是"有人说了待命"。`mode` 是你/系统在那片叶上的表态
+> ⚠ **`指令` 叶每艘舰都有一行**（与三条风格轴一致），`行为` 是**有效值**：
+> `"行为": null` = **链上没有任何一层说话**（叶不存在 + 出厂图没写意图 + 舰队默认不是
+> 玩家的），引擎才按 `Idle` 兜底——它不是"有人说了待命"。`归属` 是你/系统在那片叶上的表态
 > （没有叶 = `Inherit`）。整面原样回传是**无损**的：读面 → `--apply` → 读面**逐字节相同**
-> （`behavior: null` 的那一行不会凭空建出一片叶来）。
+> （`行为: null` 的那一行不会凭空建出一片叶来）。
 
-#### `ship_orders` 的六种行为（**攻击/轰炸不在其中**）
+#### `指令` 叶的六种行为（**攻击/轰炸不在其中**）
 
-| 行为 | 写法 | 干什么 |
+⚠ 写法是 serde 的**外部标签**枚举（不是 `{"type":…}`）：无参变体就是一个字符串，带参变体是
+`{"变体名":{…}}`。变体名与参数字段名**有意保持英文**（它们是行为词汇，不是叶名；见
+`notes/field-naming.md` 的「有意保持英文的字符串」）。
+
+| 行为 | 写法（写进 `指令` 叶的 `行为` 字段） | 干什么 |
 |---|---|---|
-| `Idle` | `"Idle"` 或 `{"type":"idle"}` | 原地保持（不移动）。**不会停止开火**——射程内照样自动接战 |
-| `Move` | `{"type":"move","position":[x,y]}` | 驶向一个 2D 坐标（AU） |
-| `Follow` | `{"type":"follow","ship":"<舰名>"}` | 持续驶向某舰当前位置。**所随的可以是友舰（护航）也可以是敌舰（追袭）**；跟随本身不开火，但射程内自动接战 |
-| `DockCity` | `{"type":"dock_city","city":"<城名>"}` | 驶向某城；**若该城敌对且进入围城射程则自动轰炸** |
-| `Dock` | `{"type":"dock","body":"<天体名>"}` | 跟随某天体轨道巡航/停靠（**守家最常用**） |
-| `Colonize` | `{"type":"colonize","body":"<天体名>"}` | 前往定居点天体并（再）建一座城 |
+| `Idle` | `"Idle"` | 原地保持（不移动）。**不会停止开火**——射程内照样自动接战 |
+| `Move` | `{"Move":{"position":[x,y]}}` | 驶向一个 2D 坐标（AU） |
+| `Follow` | `{"Follow":{"ship":"<舰名>"}}` | 持续驶向某舰当前位置。**所随的可以是友舰（护航）也可以是敌舰（追袭）**；跟随本身不开火，但射程内自动接战 |
+| `DockCity` | `{"DockCity":{"city":"<城名>"}}` | 驶向某城；**若该城敌对且进入围城射程则自动轰炸** |
+| `Dock` | `{"Dock":{"body":"<天体名>"}}` | 跟随某天体轨道巡航/停靠（**守家最常用**） |
+| `Colonize` | `{"Colonize":{"body":"<天体名>"}}` | 前往定居点天体并（再）建一座城 |
 
 - **守卫友舰 = `follow` 那艘友舰**（没有 `guard`/`guard_ship` 这个类型；旧手册里的
   `TargetShip{attack:false}` 已随行为重构移除）。
@@ -327,26 +339,26 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 > 放在人口中心，但迁都是豪赌不是免费优化。
 
 ### 四条必须懂的语义
-1. **两条预算独立、按权重竞争**：`investment_budget` 建「楼」，`construction_budget` 造「舰」；
-   各自内部按权重（`invest_weights`/`build_weights`）分钱，互不竞争。
+1. **两条预算独立、按权重竞争**：`投资预算` 建「楼」，`建造预算` 造「舰」；
+   各自内部按权重（`建设权重`/`建造权重`）分钱，互不竞争。
 2. **造舰先给维护费留底**：`upkeep × upkeep_reserve_mult`(≈4) 的市场价值**先被预留**，
    剩下的才用于造舰——**别把造舰预算拉满到经济承载之上**，否则维护费拖垮经济、引发治理
    崩溃与叛乱（这是最常见的翻车方式：造一堆养不起的船，帝国崩给你看）。
 3. **舰型 ≠ 预算**：某建造区造什么由该建筑的 `ship_type`（如 `corvette`/`battleship`）决定，
    不是靠提高预算自动变高级舰。要让「整支舰队随威胁重构」，得改 `buildings[].ship_type` 或
-   用 `build_weights` 加权。**注意 `ship_type` 只对建造区（`is_shipyard`）有效**，写在开采区
+   用 `建造权重` 加权。**注意 `建造舰级`（建筑行里那个 `ship_type` 列）只对建造区有效**，写在开采区
    上会被丢弃并报 `not_a_shipyard`。
 4. **攻击是自动的，指令只管「去哪」**：见 §0 的提示。想让舰队「守住地球」就 `dock` 地球，
    而不是找一条「攻击」指令——敌舰进射程会自动打。
 
 > 想**整体接管**一个势力：`{"scope":{"factions":[["中国","Player"]]}}` —— 但这**管不了已经
 > 自己有叶片的舰**（叶比 scope 更具体）。要让全舰队真正听话，两条一起做：
-> ① 势力级**长期倾向的默认**（`default_doctrine` / `default_kiting` / `default_role`）=
+> ① 势力级**长期倾向的默认**（`舰队默认风格` / `舰队默认姿态` / `舰队默认角色`）=
 > "没说话"的舰的答案（⚠ **指令没有**势力级默认：它是即时操作，只写逐舰叶）；② 逐舰把叶片
-> 交回上层（`{"ship":"长城","mode":"Inherit"}`，只写 mode 不动值）或钉成 `Player`；
-> ③ 想让全舰队去干同一件事就**逐舰点名**（`{"ship":"…","behavior":…}` 多写几行——这是唯一的路）。
-> **写值即接管**：diff 里只写值、不写 `mode` ⇒ 那片叶变 `Player`（回执 `NOTE_APPLY_TOOKOVER`
-> 会点名）。想只改"流水记录"而不接管，显式写 `"mode":"Auto"`/`"Inherit"`。
+> 交回上层（`{"舰":"长城","归属":"Inherit"}`，只写归属不动值）或钉成 `Player`；
+> ③ 想让全舰队去干同一件事就**逐舰点名**（`{"舰":"…","行为":…}` 多写几行——这是唯一的路）。
+> **写值即接管**：diff 里只写值、不写 `归属` ⇒ 那片叶变 `Player`（回执 `NOTE_APPLY_TOOKOVER`
+> 会点名）。想只改"流水记录"而不接管，显式写 `"归属":"Auto"`/`"Inherit"`。
 > 旧手册那句「注意这会让新造出来的舰默认 Idle」的答案现在是：**新舰出厂默认归 AI**
 > （作用域链），它会自己决定干什么；要它按你的意思来，就在**设计图**上写**角色**
 > （运输舰图 / 战舰图）——那是"这型舰是什么"，而不是"这艘舰现在去哪"。
@@ -356,13 +368,13 @@ snap["view"]["upkeep"], snap["view"]["production_value"]
 ## 4. 下一条指令：写 `--apply` 的 diff
 
 `--apply <file.json>` 接受 `{control:[...], scope:{...}}`（与 web `POST /api/command` 同形）。
-它是**多层级结构化补丁**：只触碰 diff 里出现的势力/叶子；某个叶子省略 `value`/`behavior`
-保留当前值；**省略 `mode` 时：写了值就接管（变 `Player`），什么都没写才保留当前模式**。
-风格轴同理（`ship_doctrine` / `ship_kiting` / `default_doctrine` / `default_kiting`）。
+它是**多层级结构化补丁**：只触碰 diff 里出现的势力/叶子；某个叶子省略 `值`/`行为`
+保留当前值；**省略 `归属` 时：写了值就接管（变 `Player`），什么都没写才保留当前模式**。
+风格轴同理（`风格` / `姿态` / `舰队默认风格` / `舰队默认姿态`）。
 
 ### 4.1 先从模板改
 ```bash
-planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders/预算/权重/scope）
+planet_x --seed 7 --control    # 整面可编辑模板（每势力：指令/预算/权重/scope）
 # 这是「整面」模板（所有势力都在）；挑出你要改的那几片叶子写进 diff 即可。
 # 想看/控制面收敛到单个势力：见 agent-play.md 的 §3/§4（按 scope 接管），或先 `--index` +
 # planet_xq 的 q.faction_snapshot(r, 名字) 只读你关心的那个势力。
@@ -374,17 +386,17 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 ```jsonc
 {
   "control": [{
-    "faction_id": "中国",
-    "construction_budget": [
-      {"resource": "硅", "value": 1.0, "mode": "Player"},
-      {"resource": "碳", "value": 2.0, "mode": "Player"},
-      {"resource": "铁", "value": 2.5, "mode": "Player"}
+    "势力": "中国",
+    "建造预算": [
+      {"资源": "硅", "值": 1.0, "归属": "Player"},
+      {"资源": "碳", "值": 2.0, "归属": "Player"},
+      {"资源": "铁", "值": 2.5, "归属": "Player"}
     ],
-    "loyalty_budget": [ {"city": "长三角", "value": 2.0, "mode": "Player"} ],
-    "ship_orders": [
-      {"ship": "长城", "behavior": {"type": "follow", "ship": "华盛顿"}, "mode": "Player"},
-      {"ship": "北斗", "behavior": {"type": "follow", "ship": "赤霄"},   "mode": "Player"},
-      {"ship": "赤霄", "behavior": {"type": "dock",   "body": "地球"},   "mode": "Player"}
+    "城市福利预算": [ {"城": "长三角", "值": 2.0, "归属": "Player"} ],
+    "指令": [
+      {"舰": "长城", "行为": {"Follow": {"ship": "华盛顿"}}, "归属": "Player"},
+      {"舰": "北斗", "行为": {"Follow": {"ship": "赤霄"}},   "归属": "Player"},
+      {"舰": "赤霄", "行为": {"Dock":   {"body": "地球"}},   "归属": "Player"}
     ]
   }]
 }
@@ -397,54 +409,59 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
   写「攻击」。
 - ⚠ **新造出来的舰不在 diff 里**：它出厂时**归 AI**（作用域链），指令是空的（`Idle`）。
   只接管几艘舰时，"新舰干什么"由**图的角色**回答（"这型舰是运输舰" ⇒ 它一出来就被派去跑
-  集货路线）；要它去某个具体地方，就**逐舰下指令**（一次写一队也行：`ship_orders` 里多写几行）：
+  集货路线）；要它去某个具体地方，就**逐舰下指令**（一次写一队也行：`指令` 里多写几行）：
   ```jsonc
-  {"control":[{"faction_id":"中国",
-    "ship_orders":[{"ship":"长城","behavior":{"type":"dock","body":"地球"}},
-                   {"ship":"北斗","behavior":{"type":"dock","body":"地球"}}],
-    "default_kiting":{"kiting":-1.0,"mode":"Player"}
+  {"control":[{"势力":"中国",
+    "指令":[{"舰":"长城","行为":{"Dock":{"body":"地球"}}},
+            {"舰":"北斗","行为":{"Dock":{"body":"地球"}}}],
+    "舰队默认姿态":{"姿态":-1.0,"归属":"Player"}
   }]}
   ```
   ⚠ **指令没有"舰队默认"那一片叶**（2026-10 裁决：它是即时操作）——写 `default_ship_order`
-  会被引擎**拒绝**（未知字段）。舰队级只剩长期倾向三片（`default_doctrine` / `default_kiting` /
-  `default_role`），写了它们，**所有"没有说话"的舰（含以后下水的）**在那三条轴上按它走。
+  会被引擎**拒绝**（未知字段）。舰队级只剩长期倾向三片（`舰队默认风格` / `舰队默认姿态` /
+  `舰队默认角色`），写了它们，**所有"没有说话"的舰（含以后下水的）**在那三条轴上按它走。
 - **按舰级编排**（"新造的护卫舰守家、巡洋舰远征"）用**设计图**，而不是给每艘舰点名：
   ```jsonc
-  {"control":[{"faction_id":"中国",
-    "blueprints":[{"name":"护卫-守家","class":"corvette",
-                   "components":["kinetic","ion_drive"],      // 空数组 = 出厂时交给生成器现算
-                   "role":"War",                                // 图上写了它，这条轴才参与
-                   "kiting":-0.5,                               // 第二条轴：稍微贴脸一点
-                   "mode":"Player"}],
-    "buildings":[{"city":"珠三角","building":7,"ship_type":"corvette","blueprint":"护卫-守家"}]
+  {"control":[{"势力":"中国",
+    "设计图库":[{"图名":"护卫-守家","舰级":"corvette",
+                   "选装":["kinetic","ion_drive"],             // 空数组 = 出厂时交给生成器现算
+                   "角色":"War",                                // 图上写了它，这条轴才参与
+                   "姿态":-0.5,                                 // 第二条轴：稍微贴脸一点
+                   "归属":"Player"}],
+    "建筑":[{"城":"珠三角","建筑":7,"建造舰级":"corvette","设计图":"护卫-守家"}]
   }]}
   ```
   这一份 diff 说：`珠三角` 的 7 号建造区以后按「护卫-守家」出厂（选装钉死 + 这型舰是**战舰**、
   稍微贴脸），而且这张图**归玩家**——AI 不许重估它。**图与建造区的舰级必须一起写**（口径 A）。
   ⚠ 图上**不能**写指令（`"order"` 已是未知字段）：要"这型舰守地球"，就写 `"role":"War"` 让它去
-  找仗打、再用**逐舰** `ship_orders` 点几艘名；或者干脆把那张图当作"选装模板"，倾向全留空
+  找仗打、再用**逐舰** `指令` 点几艘名；或者干脆把那张图当作"选装模板"，倾向全留空
   （`"role": null` 这种 = 该轴沉默，交给舰队默认 / 出厂快照）。
 - 若想**整体接管**一个势力（所有叶子都归你），写
   `{"scope":{"factions":[["中国","Player"]]}}`。注意**叶比 scope 更具体**：已经自己有叶片的舰
-  不会被 scope 翻转，要逐舰写 `{"ship":"长城","mode":"Player"}`（只写 mode，不动值）或
+  不会被 scope 翻转，要逐舰写 `{"舰":"长城","归属":"Player"}`（只写归属，不动值）或
   `"Inherit"`（交回上层）。整面接管意味着经济/造舰决策也归你扛。
 
-### 4.3 behavior 两种写法都认
-- **tagged 形式**（就是你从舰的 `order` 字段里看到的）：`{"type":"follow","ship":"华盛顿"}`、
-  `{"type":"idle"}`、`{"type":"dock","body":"地球"}`、`{"type":"dock_city","city":"长三角"}`、
-  `{"type":"move","position":[-0.5,0.3]}`、`{"type":"colonize","body":"火星"}`。
-- **默认枚举形式**：`"Idle"`、`{"Follow":{"ship":"华盛顿"}}`、`{"Dock":{"body":"地球"}}`。
-- 把 `--control` 里的 `order` 原样粘进 diff 即可（`--apply` 会自动归一化）。
+### 4.3 behavior 两种写法都认（**读面只发一种**）
+- **官方枚举形式** = **读面发的那种**（`--control` 的 `指令[].行为`、`--index` 的 `ships.order_effective`
+  与 `control` 表的 `value`）：`"Idle"`、`{"Follow":{"ship":"华盛顿"}}`、`{"Dock":{"body":"地球"}}`、
+  `{"DockCity":{"city":"长三角"}}`、`{"Move":{"position":[-0.5,0.3]}}`、`{"Colonize":{"body":"火星"}}`。
+  ⚠ 变体名与参数字段名**有意保持英文**（行为词汇，不是叶名）。
+- **tagged 简写**（写面额外收下、`--apply` 会归一化成上面那种；**读面不会发它**）：
+  `{"type":"follow","ship":"华盛顿"}`、`{"type":"idle"}`、`{"type":"dock","body":"地球"}`、
+  `{"type":"dock_city","city":"长三角"}`、`{"type":"move","position":[-0.5,0.3]}`、
+  `{"type":"colonize","body":"火星"}`。合法 tag 全表在 `--control-schema` 的 `ShipBehavior.oneOf`
+  与引擎的 `BEHAVIOR_TAGS`（一处声明）。
+- 把 `--control` 里的 `行为` 原样粘进 diff 即可（`--apply` 两种都认）。
 - **写错 tag 会当场报错**（退出码 10），错误里会给合法 tag 全表；若你写的是已移除的
   `target_ship`/`target_settlement`，错误里还会直接给出替代写法。**不要靠试错猜行为名——
   读报错，或先 `--control-schema` 看 `ShipBehavior` 的 `oneOf`。**
 
 ### 4.4 关键：**有名字的用名字，`building` 用下标**
-`city`/`faction`/`ship`/`body`/`settlement` 一律用**名字**（唯一名），不是整数编号。
-**唯一的例外是 `building`**：它是 u32 下标，**只在所属城内部唯一**，所以
-`invest_weights`/`build_weights` 的 `{"city":…,"building":…}` 必须配套——同一个下标换座城
-就是另一栋楼。查 id：`planet_x --control`（可编辑模板，含每城的 building 下标与它的
-`kind`/`ship_type`）、`--index` + `planet_xq` 的 `q.cities(r)`（`buildings[]` 里带 `id`）；
+`城`/`势力`/`舰`/`天体`/`定居点` 一律用**名字**（唯一名），不是整数编号。
+**唯一的例外是 `建筑`**：它是 u32 下标，**只在所属城内部唯一**，所以
+`建设权重`/`建造权重` 的 `{"城":…,"建筑":…}` 必须配套——同一个下标换座城
+就是另一栋楼。查下标：`planet_x --control`（可编辑模板，含每城的建筑下标与它的
+`类型`/`建造舰级`/`设计图`）、`--index` + `planet_xq` 的 `q.cities(r)`（`建筑[]` 里带 `建筑编号`）；
 资源 key 同理（WYSIWYG，状态里的「铁」就是 diff 里的「铁」）。
 
 ### 4.5 `--apply` 的回执：**读 stderr**
@@ -510,7 +527,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
    `verdict`**：`bleeding`（净流为负）时停扩军、先扩产；`over-committed` 表示你的命令造舰预算
    超过了 AI 的保守上限（维护费预留后），大概率会持续失血。
 3. **边地要喂忠诚**：治理模型按「距首都距离 × 人口超载」叠惩罚；低忠诚城会 `Revolt` 夷平为空白。
-   给偏远/新占城市投 `loyalty_budget`；必要时放弃过度扩张的远端殖民地。
+   给偏远/新占城市投 `城市福利预算`；必要时放弃过度扩张的远端殖民地。
 4. **多极的杠杆**：弱者抱团制衡霸权是系统自动的（合纵/遏制/集体安全/制裁）——你的角色通常是
    「在合适时机加入或维持制衡」，而不是靠武力硬吃。
 5. **别只看城数**：`production_value`/`upkeep`/`governance_cost` 的差值决定一个帝国能不能撑过
@@ -532,7 +549,7 @@ planet_x --seed 7 --control    # 整面可编辑模板（每势力：ship_orders
 
 - **被动基线**：`中国` 出兵去追打强敌 → 舰队在 r20–30 全灭（`0` 舰）→ r29–34 四座城被
   欧盟/美国舰队逐个夷平 → r35 只剩 1 城，此后 AI 继续造养不起的舰（`upkeep` 一路涨到 53）。
-- **被引导**：把舰钉在**本土**（`dock 地球`）并调成**风筝姿态**（`ship_kiting: -1.0`）→
+- **被引导**：把舰钉在**本土**（`Dock` 地球）并调成**风筝姿态**（`姿态: -1.0`）→
   r30 时 6 艘舰**满血**（基线 0 艘）、4 城全在、世界仍是多极（无霸权）。
   **但**：一路赢下去到 r60 变成 **11 城 / 份额 0.51** → 招来全网合纵 + 制裁 →
   r75 `upkeep 97.9 > 产出 83.1` → **r90 崩回 1 城**。

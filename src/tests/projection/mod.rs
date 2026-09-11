@@ -22,6 +22,9 @@
 
 use super::*;
 use crate::config::load_config;
+// 控制表的 `kind` 词表只在 `control::leaves::LEAVES` 里声明一次 —— 测试也从那里取，
+// 不再抄一份中文名（抄一份就是本刀要消掉的「同名不同物」）。
+use crate::control::leaves::kind_of;
 use crate::prng::Prng;
 use crate::world::default_state;
 use std::collections::{BTreeMap, BTreeSet};
@@ -949,16 +952,35 @@ fn control_table_holds_every_leaf() {
         rows.iter()
             .any(|r| r["kind"] == json!(kind) && r["势力"] == json!(fid))
     };
-    assert!(has("construction_budget"), "缺预算行");
+    assert!(has(kind_of("construction_budget")), "缺预算行");
     assert!(
         !has("default_ship_order"),
-        "`default_ship_order` 已删（2026-10）⇒ 控制表里不该再有这一行"
+        "舰队默认**指令**那片叶已删（2026-10）⇒ 控制表里不该再有它的行"
+    );
+    // **没有第二套词**：投影里出现的每个 `kind` 都必须是 `LEAVES` 声明里的 `field`
+    // （中文名词）。这条是 `g4_spec` 那条数据级对账的进程内前哨——`kind_of` 之外
+    // 任何人再往发射器里写一个英文串，这里立刻红。
+    let declared = crate::control::leaves::index_kinds();
+    for r in &rows {
+        let k = r["kind"].as_str().unwrap_or("");
+        assert!(
+            declared.contains(&k),
+            "控制表里出现了声明之外的 kind `{k}`（合法的是 {declared:?}）"
+        );
+    }
+    assert!(
+        !rows.is_empty() && rows.iter().any(|r| r["kind"] == json!(kind_of("capital"))),
+        "本局一片可空叶（首都）都没有 ⇒ 上面那条防空转"
+    );
+    assert!(
+        declared.iter().any(|k| *k == kind_of("construction_budget")),
+        "index_kinds() 里没有建造预算 ⇒ 声明侧自己空转了"
     );
     // 风格四片叶：值与**自己的** mode 都要在（不是有效值、不是有效归属）。
     let doc = rows
         .iter()
         .find(|r| {
-            r["kind"] == json!("ship_doctrine")
+            r["kind"] == json!(kind_of("ship_doctrine"))
                 && r["key"] == json!(ship.clone().unwrap_or_default())
         })
         .expect("缺逐舰风格叶行");
@@ -970,23 +992,23 @@ fn control_table_holds_every_leaf() {
     assert_eq!(doc["mode"], json!("Player"));
     assert!(
         rows.iter()
-            .any(|r| r["kind"] == json!("ship_kiting") && r["value"] == json!(-0.6)),
+            .any(|r| r["kind"] == json!(kind_of("ship_kiting")) && r["value"] == json!(-0.6)),
         "缺逐舰风筝姿态叶行"
     );
     let dd = rows
         .iter()
-        .find(|r| r["kind"] == json!("default_doctrine"))
+        .find(|r| r["kind"] == json!(kind_of("default_doctrine")))
         .expect("缺舰队默认风格行");
     assert_eq!(
         dd["mode"],
         json!("Auto"),
         "势力级默认风的 mode 也要如实带出来"
     );
-    assert!(has("default_kiting"), "缺舰队默认风筝姿态行");
+    assert!(has(kind_of("default_kiting")), "缺舰队默认风筝姿态行");
     if let Some(ship) = &ship {
         let row = rows
             .iter()
-            .find(|r| r["kind"] == json!("ship_order") && r["key"] == json!(ship))
+            .find(|r| r["kind"] == json!(kind_of("ship_orders")) && r["key"] == json!(ship))
             .expect("缺该舰的指令叶行");
         assert_eq!(row["mode"], json!("Player"), "叶的 mode 应与状态一致");
     }

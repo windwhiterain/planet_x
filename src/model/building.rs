@@ -50,7 +50,7 @@ pub struct Building {
     pub area: f64,
     #[serde(rename = "已建成面积")]
     pub deployed: f64,
-    /// Current hardness (armor). Max approaches `deployed × armor_per_area`.
+    /// 当前硬度（护甲）。上限趋近 `已展开面积 × armor_per_area`。
     #[serde(rename = "护甲")]
     pub armor: f64,
 }

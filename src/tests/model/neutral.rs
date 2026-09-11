@@ -71,7 +71,7 @@ fn assert_path_is_neutral(json: &Value, dig_path: &str, full_path: &str, where_:
 
 /// 把 schemars 的读面 schema 摊成「叶子路径 → 该字段允许的 JSON 类型」。
 fn read_face_leaves() -> Vec<(String, Vec<String>)> {
-    let schema = serde_json::to_value(schemars::schema_for!(RoundView)).unwrap();
+    let schema = crate::schema::of::<RoundView>();
     let defs = schema.get("definitions").cloned().unwrap_or(Value::Null);
     let mut out = Vec::new();
     walk(&schema, &defs, "", &mut out);

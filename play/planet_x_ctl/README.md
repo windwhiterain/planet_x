@@ -34,9 +34,9 @@ The line is a ruling, not a preference (`.agents/notes/engine-data-plane.md`):
 
 Two things are therefore **deliberately absent** from the engine, and present here instead:
 
-* ❌ engine-side `{"ship": "*"}` wildcard → ✅ `s.set_mode(df, "Auto")` expands to N explicit
-  `{ship, mode}` leaves (the same thing as hand-writing them, minus the typos);
-* ❌ `clear_ship_orders` → ✅ `{"ship": …, "mode": "Inherit"}` means "this leaf stops speaking".
+* ❌ engine-side `{"舰": "*"}` wildcard → ✅ `s.set_mode(df, "Auto")` expands to N explicit
+  `{舰, 归属}` leaves (the same thing as hand-writing them, minus the typos);
+* ❌ `clear_ship_orders` → ✅ `{"舰": …, "归属": "Inherit"}` means "this leaf stops speaking".
 
 ### Ownership is tri-state, and the kit never takes a fleet over by accident
 
@@ -64,19 +64,19 @@ ckpt = "ckpt_r12.ron"
 s = ctl.surface(ckpt)                 # `planet_x --start ckpt --control` (read face == write face)
 s.factions                            # faction names, in the engine's order
 s.faction("中国")                      # {kind: {key: Leaf}} — the whole faction's leaves
-s.leaf("中国", "ship_orders", "长城")   # one leaf: `.value` + `.mode` (+ `.exists`)
-s.leaf("中国", "build_weights", ("珠三角", 7))
+s.leaf("中国", "指令", "长城")           # one leaf: `.value` + `.mode` (+ `.exists`)
+s.leaf("中国", "建造权重", ("珠三角", 7))  # ⚠ `kind` 是**中文叶名**（= --control-schema 的 leaves[].field）
 s.scope_of("factions", "中国")         # the scope tree's opinion at one node (Inherit if silent)
 
 ships  = ctl.ships(ckpt)              # projection ships × their control leaves (+ faction default role)
                                       # ⚠ the **effective order** columns are the ENGINE's answer
                                       #   (`effective_order_mode` / `effective_order_value` /
                                       #   `order_source`) — see §"effective columns" below
-cities = ctl.cities(ckpt)             # projection cities × loyalty_budget / weight aggregates
+cities = ctl.cities(ckpt)             # projection cities × `城市福利预算` / `建设权重`·`建造权重` aggregates
 both   = ctl.ships_and_cities(ckpt)    # one frame for a whole empire (tagged by `kind`)
 bs     = ctl.buildings(ckpt)          # the (city, building) index table
 
-mine = ctl.query(ships, "faction_id == '中国' and hull > 0")   # `class` is auto back-quoted
+mine = ctl.query(ships, "势力 == '中国' and 船体 > 0")   # 中文列名不必 back-quote
 
 s.set_mode(mine, "Auto")                                       # 通配：N × {ship, mode}
 s.set_mode(mine, "Player")
@@ -89,7 +89,7 @@ s.set_role(mine, "Freight", mode="Player")                      # 角色：三�
                                                                 #   "War" 战舰 / "Freight" 运输舰 /
                                                                 #   "Observe" 观测舰（去异常区蹲着喂 MOND 掌握度）
 s.set_default_role("中国", "Freight", mode="Player")            # 一片叶：全舰队转运输，且 AI 定编不碰
-s.set_budget("中国", "construction_budget", {"硅": 4.0, "铁": 12.0}, mode="Player")
+s.set_budget("中国", "建造预算", {"硅": 4.0, "铁": 12.0}, mode="Player")
 s.set_loyalty_budget("中国", {"珠三角": 2.5}, mode="Player")
 s.set_invest_weights("中国", {("珠三角", "construction:destroyer"): 2.0}, mode="Player")
 s.set_capital("中国", "月球", mode="Player")
@@ -113,7 +113,7 @@ s.remove_blueprint("中国", "重甲护卫")                            # 删整
 
 # 删叶（`remove: true`）：这一层**不再说话**，而且叶里的值也不再参与取值 ——
 # 这是「恢复出厂值」的唯一做法（`mode: "Inherit"` 做不到，见 §1.2 与下面的 "删叶" 一节）
-s.remove("中国", "ship_doctrine", "长城")
+s.remove("中国", "风格", "长城")
 s.remove_doctrine(mine)                                         # 通配：这些舰的风格回出厂快照/舰队默认
 s.remove_kiting(mine)
 s.remove_role(mine)                                             # ⚠ 角色轴：删叶 = **交回自动定编**（不是冻结）
@@ -127,14 +127,14 @@ assert rep.ok
 ctl.apply(ckpt, diff, save="ckpt2.ron")   # now it is real (--round 0 = overlay without advancing)
 
 # 编制表 (roster): stable slot names that survive name generations
-r = ctl.roster(ckpt, [("旗舰", "faction_id == '中国'"),
-                      ("护卫队", "faction_id == '中国' and class == 'corvette'")])
+r = ctl.roster(ckpt, [("旗舰", "势力 == '中国'"),
+                      ("护卫队", "势力 == '中国' and 舰级 == 'corvette'")])
 ```
 
 `ctl.projection(x)` accepts **either** a checkpoint (projected on the fly) **or** an existing
 `--index` directory; `ships()` / `cities()` / `buildings()` / `roster()` all take `index_dir=` too.
 
-### 角色轴（`ship_role` / `default_role`）是**三值字符串枚举**
+### 角色轴（`角色` / `舰队默认角色`）是**三值字符串枚举**
 
 第三条风格轴不再是 `true`/`false` 的开关，而是 serde 的 `ShipRole`，JSON 形态就是三个字符串
 （`ctl.ROLES`）：
@@ -178,7 +178,7 @@ planet_x --start ckpt --control                   # stdout = read face BEFORE
 | `skipped` | the engine rejected the leaf (`WARN_APPLY_SKIPPED`), with its own reason |
 | `failed_requests` | neither landed nor skipped — the alarming case; `rep.ok` is `False` |
 | `incidental` | leaves that moved **without being asked** — the honest takeover list |
-| `took_over` | raw engine paths (`中国.ship_orders[2].behavior`); `took_over_leafs` = leaf names |
+| `took_over` | raw engine paths (`中国.指令[2].行为`，**中文叶名**); `took_over_leafs` = leaf names |
 
 ```python
 rep.summary()          # tidy DataFrame: one row per requested field
@@ -205,7 +205,7 @@ rep.describe()         # one readable paragraph
 
 Read a checkpoint → emit a diff → apply it to **that same checkpoint**. Nothing else is correct.
 
-`building` inside `build_weights` / `invest_weights` is a **per-city `u32` index**
+`building` inside `建造权重` / `建设权重` is a **per-city `u32` index**
 (`InvestKey = BuildKey = (CityId, BuildingId)`), so it is only self-consistent inside one round. The
 engine validates the pair and answers a wrong one with `WARN_APPLY_SKIPPED … no_such_building`
 (helpfully listing the city's real indices), but by then you have already shipped a broken recipe.
@@ -225,10 +225,10 @@ engine will skip), unknown resources, cities that belong to another faction, and
 
 ### §1.2 — 指令**没有**更高的一层了；倾向三轴有（而且图在最前面）
 
-**指令**（`ship_orders`）的取值链在 2026-10 之后只剩**那一片逐舰叶**（用户裁决：指令是**即时操作**）：
+**指令**（Rust 侧字段 `ship_orders`，读面/写面上叫 `指令`）的取值链在 2026-10 之后只剩**那一片逐舰叶**（用户裁决：指令是**即时操作**）：
 
 ```rust
-// State::ship_behavior
+// State::ship_behavior（Rust 侧字段名仍是 `ship_orders`）
 c.ship_orders.get(&ship_id).map(|l| l.value.clone())
 ```
 
@@ -296,7 +296,7 @@ Two things worth knowing about the kit's side of `remove`:
   所以逐舰删叶的"落地了没有"以**引擎回执**为准，不以 `--control` 为准。要问「这片叶还在不在」
   用投影的 **`q.control()`**（`idx/control.jsonl`，只列真实存在的叶）——`ships()` 的
   `order_leaf` 就是从那里来的（见下）。
-* ⚠ **角色轴（`ship_role`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
+* ⚠ **角色轴（`角色`，Rust 侧 `ship_role`）上「删叶」的含义不一样**：那片叶**自动控制每回合也会写**
   （按积压定编谁去跑集货路线 + 派观测舰去异常区蹲着喂 MOND 掌握度），所以删掉它是**放手**
   ——AI 下回合可能立刻又写下它的结论，
   而不是"从此冻结"。想让某个角色稳定下来就写 `mode="Player"`（那才是闸门）。另两条风格轴
@@ -310,7 +310,7 @@ it**). Which brings us to the next warning.
 >
 > | question | columns | source |
 > |---|---|---|
-> | 「本舰**那片叶**还在吗？它自己记着什么？」 | `order_leaf` / `order_mode` / `order_value` / `order_behavior` | the projection's **`derived.control`** table (`idx/control.jsonl`, `kind == "ship_order"`) — the engine emits one row per **real** leaf by walking `ControllableState::ship_orders` |
+> | 「本舰**那片叶**还在吗？它自己记着什么？」 | `order_leaf` / `order_mode` / `order_value` / `order_behavior` | the projection's **`derived.control`** table (`idx/control.jsonl`, `kind == "指令"`) — the engine emits one row per **real** leaf by walking `ControllableState::ship_orders` |
 > | 「**有效**指令是什么？**归谁**？这条值**谁供的**？」 | `effective_order_mode` / `effective_order_value` / `order_source` | the projection's ships table: `order_effective_mode` / `order_effective` / `order_source` (`State::ship_control` / `ship_behavior` / `ship_behavior_source`) |
 >
 > ⚠ **`--control` is not a leaf-existence face.** Since that read face went "one row per ship"
@@ -379,17 +379,17 @@ generation (沉了一艘才换代: `方舟` → `方舟2` → `方舟3`). That i
 A roster pins a *slot* to a *query*, and the refresh rule lives in the recipe:
 
 ```python
-spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
-        ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
+spec = [("第1舰队·旗舰", "舰级=='cruiser' and 势力=='中国'"),
+        ("第1舰队·护卫", "舰级=='corvette' and 势力=='中国'")]
 ctl.roster(ckpt, spec)   # → slot, query, refresh_rule, matched, candidates, + the matched ship's columns
 ```
 
-**Deterministic tie-break** (`DEFAULT_REFRESH_RULE = ("-hull", "-hull_max", "spawned_round",
-"ship_id")`): highest current hull → highest `hull_max` → **oldest first** (`spawned_round`
-ascending) → name ascending. Three notes on that choice:
+**Deterministic tie-break** (`DEFAULT_REFRESH_RULE = ("-船体", "-船体上限", "下水回合", "舰名")` ——
+元组里的名字**就是投影读面上的列名**，中文): highest current hull → highest hull_max →
+**oldest first**（`下水回合` ascending）→ name ascending. Three notes on that choice:
 
-* "oldest" **is** available: the engine ships `Ship.spawned_round` as the projection's
-  `spawned_round` column (the roster tie-break was its stated purpose). `null` = the ship predates
+* "oldest" **is** available: the engine ships `Ship.下水回合` as the projection's `下水回合`
+  column (the roster tie-break was its stated purpose). `null` = the ship predates
   the column (an old checkpoint) ⇒ **unknown**, and pandas sorts NaN last, so a known age always
   beats an unknown one and those ties fall through to name order.
 * a rule column the frame does not carry (an index directory written by an **older** engine) is
@@ -465,7 +465,7 @@ guessing. They are listed because they are cheap to close and expensive to work 
    would have changed under that rounding, i.e. it bought no token savings and only carried risk.
 5. **~~`ship_kiting` / `ship_doctrine` are not live layers yet~~** — **fixed upstream**
    (`control-live-layers.md` §4.1): both are tri-state leaves with a faction-level default
-   (`default_kiting` / `default_doctrine`), so "the whole fleet goes 贴脸" is **one leaf** that new
+   （读面上叫 `姿态` / `舰队默认姿态`、`风格` / `舰队默认风格`）, so "the whole fleet goes 贴脸" is **one leaf** that new
    ships inherit too. `set_kiting` / `set_doctrine` demand an explicit ownership (`mode=` or
    `take_over=True`) like every other value write.
    ⚠ **The lesson this cost is now structural (2026-10)**: leaving a kind out of this kit's table made
@@ -473,10 +473,10 @@ guessing. They are listed because they are cheap to close and expensive to work 
    table is no longer ours: `LEAF_KINDS` is a **lazy `Mapping` read from the engine's
    `--control-schema`** (`src/control/leaves.rs`), and the same declaration feeds the WebUI. Adding a
    leaf means touching the engine once; this kit (and the UI) follow automatically.
-   `play/tests/g4_spec.py` guards it on the data: `leaves` ∪ `actions` ∪ `{faction_id}` must equal
+   `play/tests/g4_spec.py` guards it on the data: `leaves` ∪ `actions` ∪ `{势力}` must equal
    `FactionControlPatch.properties` **both ways**.
-   ⚠ One engine-side trap this exposed: creating a **two-axis** leaf (`default_doctrine` /
-   `ship_doctrine`) from a single-axis patch used to initialize the *other* axis to `0.0`
+   ⚠ One engine-side trap this exposed: creating a **two-axis** leaf（`舰队默认风格` / `风格`，
+   Rust 侧 `default_doctrine` / `ship_doctrine`）from a single-axis patch used to initialize the *other* axis to `0.0`
    (`Control::inherit(ShipDoctrine::default())`, `src/control.rs`), not to the ship's record value
    — a fleet-wide change that looks perfectly normal afterwards. **Now settled on both ends**: the
    *engine* rejects such a patch (code `partial_doctrine_leaf`, `control-live-layers.md` §3.1 —

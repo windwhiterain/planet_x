@@ -209,12 +209,12 @@ pub struct FactionRow {
     /// 本回合**实际花掉**的**投资**（建设建筑）预算，按资源（`step_construction` 的中间量，
     /// 写完即弃的局部变量）。只列真花过的资源（稀疏 map）。
     ///
-    /// **批了多少不在这里**：那是控制面的持久叶 `control`（`kind="investment_budget"`，每资源
+    /// **批了多少不在这里**：那是控制面的持久叶 `control`（`kind="投资预算"`，每资源
     /// 一行），引擎每回合把当回合用的额度写回去。所以「批了 100 铁为何只花 30」= 限额 − 这里，
     /// 读面不重复存第三个数（未花掉的余额）。
     pub investment_spent: ResourceMap,
     /// 本回合**实际花掉**的**建造**（造舰）预算，按资源——语义同
-    /// [`FactionRow::investment_spent`]（限额见 `control` 的 `construction_budget` 叶）。
+    /// [`FactionRow::investment_spent`]（限额见 `control` 的 `建造预算` 叶）。
     pub construction_spent: ResourceMap,
     /// 本回合**付不起**的那部分舰队维护费（市场价值 = `max(0, 维护费 − 库存价值)`）：付不出的
     /// 每一分钱都变成生锈（见 [`FactionRow::fleet_rust`]）。0 = 付清了。
@@ -420,7 +420,7 @@ pub struct UpkeepFlow {
 
 /// 一个势力的本回合**投资/建造预算花销**（`RoundSink::spend` 的一项）。
 ///
-/// 与限额的关系：限额是控制面的持久叶（`control` 的 `investment_budget`/`construction_budget`），
+/// 与限额的关系：限额是控制面的持久叶（`control` 的 `投资预算`/`建造预算`），
 /// 引擎每回合把当回合用的额度写回去，所以两者相减就是「批了没花掉的」——**同一个数不存两处**。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SpendFlow {

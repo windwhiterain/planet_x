@@ -38,21 +38,22 @@ import planet_x_ctl as ctl
 
 s = ctl.surface("ckpt_r12.json")            # 控制面（= `--control` 的读面，读面即写面）
 s.factions                                  # 势力名列表
-s.faction("中国")                            # 该势力的叶片：ship_orders / default_role /
-                                            # 预算 / 权重 / loyalty_budget / buildings / capital
-s.leaf("中国", "ship_orders", "长城")        # 单叶：值 + mode（三态）
+s.faction("中国")                            # 该势力的叶片：指令 / 舰队默认角色 /
+                                            # 预算 / 权重 / 城市福利预算 / 建筑 / 首都
+s.leaf("中国", "指令", "长城")               # 单叶：值 + mode（三态）
+                                            # ⚠ `kind` = 中文叶名（--control-schema 的 leaves[].field）
 
 ships  = ctl.ships("ckpt_r12.json")          # 投影的 ships 表（名字 join 控制面）
 cities = ctl.ships_and_cities("ckpt_r12.json")   # 便捷 join：舰/城 × 其控制叶 × 归属
 
-mine = ships.query("faction_id == '中国' and hull > 0")
+mine = ships.query("势力 == '中国' and 船体 > 0")
 
 # —— 通配：引擎没有通配，这里展开成显式叶（同一个东西，只是不用手抄）——
-s.set_mode(mine, "Auto")                    # 全舰队交回系统（`{ship, mode:"Auto"}` 逐条）
+s.set_mode(mine, "Auto")                    # 全舰队交回系统（`{舰, 归属:"Auto"}` 逐条）
 s.set_mode(mine, "Player")                   # 全舰队归我
 s.set_default_role("中国", "Freight", mode="Player")   # 一片叶：全舰队转运输（**长期倾向**才有舰队级默认）
-s.set_kiting(mine.query("class == 'battleship'"), -1.0)                # 贴脸
-s.set_budget("中国", "construction_budget", {"铁": 4.0, "硅": 2.5})     # 值 + 隐含接管
+s.set_kiting(mine.query("舰级 == 'battleship'"), -1.0)                  # 贴脸
+s.set_budget("中国", "建造预算", {"铁": 4.0, "硅": 2.5})                # 值 + 隐含接管
 
 diff = s.emit()                             # → {control:[...], scope:{...}}，可直接 --apply
 ctl.write(diff, "steer.json")
@@ -63,9 +64,9 @@ ctl.verify("ckpt_r12.json", "steer.json")    # 只读试算：前后读面 + 回
    （上一艘沉了才换代——那正是手抄最不可靠的时刻）。所以要有「`第1舰队·旗舰 → 方舟3`」这层：
 
    ```python
-   spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
-           ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
-   r = ctl.roster("ckpt_r12.json", spec)     # → DataFrame[faction_id, slot, ship_id, class, hull, matched_by]
+   spec = [("第1舰队·旗舰", "舰级=='cruiser' and 势力=='中国'"),
+           ("第1舰队·护卫", "舰级=='corvette' and 势力=='中国'")]
+   r = ctl.roster("ckpt_r12.json", spec)     # → DataFrame[势力, slot, 舰名, 舰级, 船体, matched_by]
    ```
 
    **刷新规则必须写在配方里**（"旗舰 = hull_max 最大的巡洋舰，同分取最老的"），不能留在
@@ -161,11 +162,11 @@ kit 只能产出**一次性数值**。「跟着产出走」「维护费不超过
    * `_leaf_value` 按 manifest 的 `values` 取（一个字段直取、多个给 dict）⇒ **加一条轴不用改 kit**；
    * `_diff_fields` 的「被请求字段」= `{mode, remove} ∪ values(kind)` ⇒ 两轴不再需要特例分支；
    * `_leaf_fields`/`_diff_fields` 过滤身份键改成**按这片叶自己的 `keys`**（旧并集语义会把
-     `invest_weights` 顺带带过来的 `resource` 属性一起抹掉）；
+     `建设权重` 顺带带过来的 `资源` 属性一起抹掉）；
    * 「叶不存在」那一行把**全部值字段**给 `null`（旧代码只写一个 `value: null` ⇒
      两轴风格叶的另一条轴会在 `verify` 的 before/after 里凭空消失）。
    验证：`demo.py` **全部断言通过**（这一局 297 片叶）、数据级四组 67 条全绿；纪律
-   （`leaves` ∪ `actions` ∪ `{faction_id}` ≡ `FactionControlPatch.properties`，双向）
+   （`leaves` ∪ `actions` ∪ `{势力}` ≡ `FactionControlPatch.properties`，双向）
    由 `play/tests/g4_spec.py` 守，不再靠"记得改这边"。
    这一条与 web 那半是**同一件事**：三端（引擎 / kit / WebUI）现在读同一份声明，
    见 [`web-control-spec.md`](web-control-spec.md)。
@@ -179,5 +180,5 @@ planet_x --start play/exp2/ckpt_r12.json --apply steer.json --control 2>receipt.
 # 读派生表（引擎算出来的量）：
 planet_x --seed 7 --round 6 --index out/ && python -c "
 import planet_xq; q = planet_xq.load('out')
-print(q.derived('faction_process', 6)[['faction_id','upkeep']]); print(q.control(6)['kind'].value_counts())"
+print(q.derived('faction_process', 6)[['势力','upkeep']]); print(q.control(6)['kind'].value_counts())"
 ```

@@ -11,10 +11,22 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**16 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**32 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
+把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
+标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
+㉓㉔ 是第 5b 条（文档对账）的量具：㉓在发射端把一条 `**加粗**` 开头的 `description` 剥掉一个
+`*`（**复刻 schemars 0.8.22 那段 hack 的效果**，就是 46 条弹窗坏 markdown 的成因），
+㉔把一条字段的 `description` 悄悄删掉——两条都要求「文档对账」那一族自己红。
+㉕㉖ 是 §5d 条（名词覆盖率·**静态**）的量具：㉕剪掉 `jsonview.js` 的 tip 挂载（= 实机症状
+「原始 JSON 视图里的字段名 hover 无反应」），㉖把宿主的 `Tip.attach` 改名（= 换翻译层时
+最容易漏的那种断线：`ctx.tip` 转发到空处）——两条都要求 §5d 自己红。
+⚠ ㉕㉖ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
+跑完还原——**真文件一个字节都不碰**（与上面那 30 条同一纪律）。
 """
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -284,6 +296,119 @@ def main() -> int:
         if v.get("id") == "ship-table":
             v["key"] = "舰级"
     run_case("identity-view-key-drift", d)
+
+    # ⑳ kind 词表对账：把 `control` 表里某片叶的 `kind` 换成**声明里没有的词** ⇒ 必须红。
+    #    注入点在真文件上（`g4_spec.INDEX_HOOK`）：判据读到的确实是那份被改坏的表。
+    KIND_CHECK = "kind 词表对账"
+
+    def rename_one_kind_in_index(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if line.strip():
+                row = json.loads(line)
+                row["kind"] = "幽灵叶"          # ← 声明里没有这个词（也不在 actions 里）
+                lines[i] = json.dumps(row, ensure_ascii=False)
+                break
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    g4_spec.INDEX_HOOK = rename_one_kind_in_index
+    try:
+        bad = run_case("kind-not-declared")
+    finally:
+        g4_spec.INDEX_HOOK = None
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append("kind-not-declared：红了，但**不是**第 7 条 kind 对账红的那一条"
+                          f"（实际红：{bad}）")
+
+    # ㉑ kind 词表对账（声明侧）：把一片**真的在表里**的叶标成 `not_in_index`（"它不在表里"）——
+    #    声明与实测立刻对不上 ⇒ 第 7 条红（只有它红：别的判据不看这个键）。
+    def mark_live_leaf_absent(s):
+        for x in s["leaves"]:
+            if x["field"] == "指令":
+                x["not_in_index"] = "装作它不在 control 表里"
+        return s
+
+    bad = run_case("decl-excludes-live-leaf", None, mark_live_leaf_absent)
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append(f"decl-excludes-live-leaf：第 7 条没红（实际红：{bad}）")
+
+    # ㉒ kind 词表对账（理由必须写出来）：把 `not_in_index` 的理由改成空白 ⇒ 逃生门 ⇒ 必须红
+    def blank_exclusion_reason(s):
+        for x in list(s["leaves"]) + list(s["actions"]):
+            if x.get("not_in_index"):
+                x["not_in_index"] = "   "
+        return s
+
+    bad = run_case("blank-exclusion-reason", None, blank_exclusion_reason)
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append(f"blank-exclusion-reason：第 7 条没红（实际红：{bad}）")
+
+    # ㉓㉔ 文档对账（§5b）：量具自己也要有量具 —— 在**发射端**动一个字符 / 丢一段文档，
+    #     要求「文档对账」那一族**自己**红（不是"碰巧别处红了"）。
+    #     ㉓ 造的是**真实发生过的那个错**：把一条 `**加粗**` 开头的 description 剥掉一个 `*`
+    #     ——schemars 0.8.22 的 `get_doc` 就是这么干的（46 条弹窗坏 markdown 的成因）。
+    DOC_CHECK = "文档对账"
+
+    def strip_one_bold_star(d):
+        for sec in ("state", "view", "control"):
+            for spec in ((d.get(sec) or {}).get("definitions") or {}).values():
+                for f in (spec.get("properties") or {}).values():
+                    desc = f.get("description")
+                    if isinstance(desc, str) and desc.startswith("**"):
+                        f["description"] = "*" + desc[2:]      # ← 0.8 那段 hack 的效果
+                        return d
+        raise AssertionError("语料里找不到以 `**` 开头的 description（判据换了口径？）")
+
+    bad = run_case("doc-star-stripped", None, None, mutate_nouns=strip_one_bold_star)
+    if not any(n.startswith(DOC_CHECK) for n in bad):
+        MISBEHAVED.append(f"doc-star-stripped：文档对账没红（实际红：{bad}）")
+
+    def drop_one_doc(d):
+        for sec in ("state", "view", "control"):
+            for spec in ((d.get(sec) or {}).get("definitions") or {}).values():
+                for f in (spec.get("properties") or {}).values():
+                    if isinstance(f.get("description"), str) and f["description"].strip():
+                        del f["description"]                      # ← 文档被悄悄丢了
+                        return d
+        raise AssertionError("语料里找不到带 description 的字段（判据换了口径？）")
+
+    bad = run_case("doc-silently-dropped", None, None, mutate_nouns=drop_one_doc)
+    if not any(n.startswith(DOC_CHECK) for n in bad):
+        MISBEHAVED.append(f"doc-silently-dropped：文档对账没红（实际红：{bad}）")
+
+    # ㉕㉖ 名词覆盖率·**静态**（§5d）：量具自己也要有量具 —— 把「渲染字段名标签 ⇒ 挂 tip」
+    #     这条接线从**拷贝**里剪断，要求 §5d 那一族**自己**红。
+    #     ⚠ 同样只动 tempfile 里的拷贝（`g4_spec.STATIC_JS` 指向它），真文件一个字节不碰。
+    #     ㉕ 剪掉 `jsonview.js` 的挂载（= 实机症状「原始 JSON 视图里的字段名 hover 无反应」）；
+    #     ㉖ 把宿主里的 `Tip.attach` 改名（= 换翻译层时最容易漏的那种断线）。
+    TIP_CHECK = "渲染字段名标签的 JS 模块都挂了 tip"
+    static_real = g4_spec.STATIC_JS
+    static_tmp = T / "static-inject"
+    if static_tmp.exists():
+        shutil.rmtree(static_tmp)
+    shutil.copytree(static_real, static_tmp)
+    g4_spec.STATIC_JS = static_tmp
+    try:
+        jv = static_tmp / "jsonview.js"
+        orig_jv = jv.read_text(encoding="utf-8")
+        assert "ctx.tip(node" in orig_jv, "jsonview.js 里没有 `ctx.tip(node`：判据/代码换了口径？"
+        jv.write_text("\n".join(l for l in orig_jv.splitlines()
+                                if "ctx.tip(" not in l) + "\n", encoding="utf-8")
+        bad = run_case("tip-mount-removed")
+        if not any(TIP_CHECK in n for n in bad):
+            MISBEHAVED.append(f"tip-mount-removed：§5d 没红（实际红：{bad}）")
+        jv.write_text(orig_jv, encoding="utf-8")
+
+        app = static_tmp / "app.js"
+        orig_app = app.read_text(encoding="utf-8")
+        assert "Tip.attach(" in orig_app, "app.js 里没有 `Tip.attach(`：判据/代码换了口径？"
+        app.write_text(orig_app.replace("Tip.attach(", "Tip.mountTip("), encoding="utf-8")
+        bad = run_case("tip-attach-renamed")
+        if not any(TIP_CHECK in n for n in bad):
+            MISBEHAVED.append(f"tip-attach-renamed：§5d 没红（实际红：{bad}）")
+        app.write_text(orig_app, encoding="utf-8")
+    finally:
+        g4_spec.STATIC_JS = static_real
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

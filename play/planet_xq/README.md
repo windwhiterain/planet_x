@@ -29,20 +29,19 @@ judgments (`view.decisions`). Any dotted path below starts at `view` for exactly
 ```
 planet_x --seed 7 --round 12 --index out/
 # out/main.jsonl        lean per-round facts (round, time_month, chronicle, view,
-#                       event_ids[], ship_ids[], city_ids[], faction_ids[], body_ids[],
-#                       settlement_ids[])
+#                       event_ids[], 舰名表[], 城名表[], 势力表[], 天体名表[], 定居点表[])
 # out/schema.json       agent-readable projection contract (eager / lazy / columns / read_order)
 # out/meta.json         static rules dictionary (ships/buildings/components/structures/economy/…,
 #                       same source as `planet_x --meta`) — loadable as DataFrames
 # out/idx/events.jsonl     (round, seq, event_id, ...) the sparse event log: one row per event,
 #                          normalized participant slots + a human-readable `headline`
 #                          (see "History" below)
-# out/idx/ships.jsonl      (round, ship_id, ...) per-round ship detail (+ effective panel)
-# out/idx/cities.jsonl     (round, city_id, ...) per-round city detail (+ buildings list)
-# out/idx/factions.jsonl   (round, faction_id, ...) per-round faction detail (resources/relations/
-#                           own city + ship ids)
-# out/idx/bodies.jsonl     (body_id, ...) global master table
-# out/idx/settlements.jsonl (settlement_id, ...) global 定居点 master
+# out/idx/ships.jsonl      (round, 舰名, ...) per-round ship detail (+ effective panel)
+# out/idx/cities.jsonl     (round, 城名, ...) per-round city detail (+ 建筑 list)
+# out/idx/factions.jsonl   (round, 势力, ...) per-round faction detail (资源/关系/
+#                           城名表 + 舰名表)
+# out/idx/bodies.jsonl     (天体名, ...) global master table
+# out/idx/settlements.jsonl (定居点, ...) global 定居点 master
 ```
 
 `schema.json` is the single contract both Rust and this kit share: it declares which fields are
@@ -62,7 +61,7 @@ leaf), **the AI's own judgments** (`decisions`: why a ship withdrew / engaged / 
 and which shipyard was retooled), and the **ship-blueprint library** (`blueprints`: one row per
 design — class / components / default order / ownership / how many ships came off it). Their
 schema entry therefore carries `join_on` (a column that
-*already exists* in `main.jsonl`, usually `faction_ids`/`city_ids`) instead of `id_col`.
+*already exists* in `main.jsonl`, usually `势力表`/`城名表`) instead of `id_col`.
 
 ```python
 q = planet_xq.load("out")
@@ -73,6 +72,7 @@ q.faction_process(round=12)    # per-round × faction: production{} / upkeep / g
 q.city_process(round=12)       # per-round × city: production{} (razed cities included, `razed` column)
                                #   + loyalty_target_* : WHY this city's loyalty is dropping
 q.control(round=12)            # one row per control leaf: kind / key / sub / value / mode
+                               #   ⚠ `kind` 是**控制叶的中文名词**（= --control-schema 的 leaves[].field）
 q.scope(round=12)              # explicit scope nodes only: level (global/faction/body/city) / key / mode
 q.decisions(round=12)          # one row per AI judgment: kind / actor / verdict / target / detail
                                #   kind: ship_order / retool / style_retune / blueprint / capital
@@ -182,7 +182,7 @@ Two things worth knowing:
   (`11/12` rounds have no row at all — read `q.view_economy(round, f)["capital"]`, which is `None`
   then, instead of expecting a per-faction object full of `null`s).
   **③「what was spent」 is in the view, 「what was granted」 is in `control`** (B2): the batch limits
-  are persistent control leaves (`investment_budget` / `construction_budget`, one row per resource in
+  are persistent control leaves (`投资预算` / `建造预算` —— **中文叶名**，one row per resource in
   `derived.control`), and the view carries only `investment_spent` / `construction_spent`. Subtract
   them to get "granted but not spent" — `q.view_spending(round, f)["budget"]` does the join for you.
   Storing the limit in the view too would be a second copy of the same number.
@@ -210,12 +210,12 @@ Two things worth knowing:
   from the *same* declarations, and that is exactly what keeps two read faces from disagreeing
   (`flow.jsonl` used to say "0% covered" while `metrics` said "100% covered" for the same round).
 - For **per-ship effective intent** read the `ships` table columns
-  `order_leaf_mode` / `order_default_mode` / `order_effective_mode` / `order_effective` /
-  `doctrine` / `kiting` / `role` / `role_mode` — the engine resolves the ownership chain, so
+  `order_leaf_mode` / `order_effective_mode` / `order_effective` / `order_source` /
+  `风格` / `姿态` / `角色` / `role_mode` — the engine resolves the ownership chain, so
   **do not re-implement it** (a Python re-implementation is a drift source).
-  ⚠ `role` is a **three-valued string** (`"War"` 战舰 / `"Freight"` 运输舰 / `"Observe"` 观测舰);
+  ⚠ `角色` is a **three-valued string** (`"War"` 战舰 / `"Freight"` 运输舰 / `"Observe"` 观测舰);
   it replaced the old **boolean** `freighter` column (and `freighter_mode` → `role_mode`), so a
-  recipe that filtered `df["freighter"] == True` must now filter `df["role"] == "Freight"`.
+  recipe that filtered `df["freighter"] == True` must now filter `df["角色"] == "Freight"`.
   `role_mode` is that leaf's effective ownership (`Auto` = the automatic controller wrote this
   conclusion, `Player` = a player pinned it).
 
@@ -234,8 +234,8 @@ print(q.factions(round=10))    # per-faction resources + relations + own city/sh
 print(q.faction_snapshot(10, '中国'))   # one-call decision view (view row + stockpile + relations)
 print(q.ships(round=10))       # ships at round 10 (from the index), with effective panel
 print(q.city_buildings(10, '中国'))     # that faction's cities, each with a buildings list
-merged = q.join('ships', round=10)   # explode main ship_ids and merge with ship detail
-print(merged[['ship_id','class','hull','x','y','attack','upkeep']])
+merged = q.join('ships', round=10)   # explode main 舰名表 and merge with ship detail
+print(merged[['舰名','舰级','船体','x','y','attack','upkeep']])
 print(q.bodies())              # global master table
 print(q.settlements())         # global 定居点 master (area/capacity/resources)
 print(q.ships_spec())          # static rules: ship class -> spec (hull/upkeep/build_points/…)
@@ -254,26 +254,26 @@ snap["resources"]              # {resource: amount} 库存
 snap["relations"]              # {faction: rel} 两两外交关系
 snap["view"]                   # this faction's row of the round view:
                                # city_count / ship_count / production_value / upkeep / …
-snap["city_ids"], snap["ship_ids"]  # it owns these cities / ships (names)
+snap["城名表"], snap["舰名表"]       # it owns these cities / ships (names)
 snap["observer_quota"]             # 观测配额（目标头数）：该派几艘舰去 MOND 异常区蹲着喂掌握度
 snap["observer_count"], snap["observer_target"]   # 现在真在观测的舰数 / 编队驻地天体
 snap["freighter_quota"], snap["freighter_count"]  # 集货那条同形的一对（目标条数 / 现状条数）
 
 # buildable insight: which of my shipyards make what
 cities = q.city_buildings(12, "中国")
-ships = q.fleet(12, "中国")[["ship_id", "class", "attack", "attack_range", "upkeep"]]
+ships = q.fleet(12, "中国")[["舰名", "舰级", "attack", "attack_range", "upkeep"]]
 ```
 
 Key ideas:
 
 - **eager fields** are inline in `main.jsonl`; an agent reads them as the lightweight decision view.
-- **lazy fields** are NOT inline. `main.jsonl` carries their id-array (`ship_ids`/`city_ids`/
-  `faction_ids`/`body_ids`); the full objects live in the `idx/*.jsonl` table keyed by id.
+- **lazy fields** are NOT inline. `main.jsonl` carries their id-array (`舰名表`/`城名表`/
+  `势力表`/`天体名表`/`定居点表`/`event_ids`); the full objects live in the `idx/*.jsonl` table keyed by id.
   `q.join(field, round)` explodes the id-array and merges the detail in one call.
 - **per-round** lazy tables merge on `(round, key)`; the global `bodies` / `settlements` masters
   merge on `key` only.
 - **factions** is the diplomacy + economy table: per-faction `resources` (stockpile), `relations`
-  (toward every other faction), and the faction's own `city_ids`/`ship_ids`. `faction_snapshot(r, name)`
+  (toward every other faction), and the faction's own `城名表`/`舰名表`. `faction_snapshot(r, name)`
   merges it with that faction's row of the round `view` (`view.factions[<faction>]`) into one read.
   It also carries the engine's own **编队配额** columns (per faction, per round — read them instead of
   re-deriving the automatic controller's judgements; the full column docs are in `schema.json`):

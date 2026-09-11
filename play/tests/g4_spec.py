@@ -20,6 +20,23 @@
 4. **认领完整性**（铁律 R 的写面对偶）：每个 `leaves[].field` / `actions[].field` 要么被某条
    `leaf` / `action` 行认领，要么在 `write_omit` 里有一条**带非空 why** 的记录；
    反过来，`leaf` / `action` / `owner` 行与 `leaf_ui` / `action_ui` 的键**不许有孤儿**。
+5. **`kind` 词表对账**（第 7 条，2026-10 新增）：`--index` 的 `control` 派生表里**出现过的
+   `kind` 取值集合**，必须**逐字等于** `--control-schema` 声明的叶名
+   （`leaves[].field ∪ actions[].field`）减去每条声明自报的 `not_in_index`（**带理由**的例外）。
+   从前 `kind` 是发射器里手写的**英文**串（`ship_order`/`investment_budget`…），而同一片叶在
+   patch / 读面上叫**中文**（`指令`/`投资预算`）——同一个概念两套名：Python 按英文 kind 筛、
+   apply 用中文键，写错了哪一边都**不红**，只会静默查不到（"看起来有值"）。现在名字只在引擎的
+   `control::leaves::LEAVES` 里声明一次（`kind_of` 是唯一翻译点），本条钉住它不再漂回去。
+6. **文档对账**（§5b，2026-10 新增）：`--nouns` 里 state / view / control 三份 schema 的**每一条**
+   `description`（根 / 定义级 / 字段级 / `oneOf` 变体级）都要在源码里找到那条 `///` 且**逐字相等**；
+   反向再查一遍「源码带 `///` 的字段都真的发射了」。量的是「`///` → 弹窗文案」这条管线本身，
+   不是某个症状——schemars 0.8.22 曾把单行 `/// **加粗**…` 剥成一个 `*`（46 条坏 markdown），
+   就是这么被抓住的。见 `.agents/notes/doc-pipeline.md`。
+7. **名词覆盖率**（§5 声明侧 + §5d 接线侧，2026-10 新增 §5d）：用户裁决「所有 UI 都用名词，
+   **鼠标移上去弹窗显示注释/解释**」。§5 查**声明**（`views.json` 里当名词显示的列都得在
+   `--nouns` 语料里查得到）；§5d 查**接线**（渲染字段名标签的 JS 模块都必须挂
+   `Tip.attach`/`ctx.tip`）——通用 widget 自己渲染出来的字段名不在任何 `columns` 里，
+   §5 够不着它们。两条合起来才是「界面上每个名词都弹得出解释」。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
@@ -29,6 +46,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import subprocess
@@ -40,6 +58,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import REPO, group_main  # noqa: E402
 
 VIEWS_JSON = REPO / "web" / "static" / "views.json"
+# 前端**全部** JS 模块。§5d（名词覆盖率·静态）扫这里：`_g4_negative.py` 把它指到一份
+# tempfile 拷贝上去注入错，**真文件一个字节都不碰**（同 `VIEWS_JSON` 的用法）。
+STATIC_JS = REPO / "web" / "static"
+# §5d 的两份「声明」——
+#
+# `FIELD_LABEL_CLASSES`：「字段名标签」的类名。这些元素里装的是**名词**（键名 / 表头 /
+# 控制行标签），悬停就该弹解释。清单是**声明式**的：新写一个展示名词的视图，要么复用这些
+# 类名（那它立刻被 §5d 咬住），要么把新类名加到这里——加这一行在 diff 里看得见。
+FIELD_LABEL_CLASSES = ("jv-key", "jv-th", "sv-th", "sv-sheet-k")
+# `TIP_MOUNTS`：「挂了 tip」的两种写法——宿主直接调 `Tip.attach`，或经求值器的钩子 `ctx.tip`。
+# 用**词边界**匹配（不是子串）：把 `Tip.attach` 改名成 `Tip.attachX` 也算断线（写这条时的
+# 实测：子串匹配会让「改名」骗过判据——`"Tip.attach" in "Tip.attachRenamed"` 为真）。
+TIP_MOUNTS = (re.compile(r"\bTip\.attach\b"), re.compile(r"\bctx\.tip\b"))
+# 那条链的**末端**（`Tip.attach`）单独留一份：`ctx.tip` 转发得再勤，末端没人接也是哑的。
+TIP_HOST = re.compile(r"\bTip\.attach\b")
+# §5d 只认**真的接线**、不认注释里提了一嘴：扫之前先把注释去掉（否则「把挂载删掉、注释里还写着
+# `ctx.tip`」这种改动会骗过判据——写这条时的实测：`controls.js` 就只在注释里提过 `Tip.attach`）。
+# ⚠ 这个剥离器的适用边界：它假设源码里没有把 `//` 写进字符串或正则（本目录实测 0 处）。
+_JS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_JS_LINE_COMMENT = re.compile(r"//[^\n]*")
+
+
+def _js_code(path: Path) -> str:
+    """JS 源码**去掉注释**之后的样子（判据在这上面找类名与挂载点）。"""
+    return _JS_LINE_COMMENT.sub("", _JS_BLOCK_COMMENT.sub("", path.read_text(encoding="utf-8")))
 
 # 读面的根：与 `/api/state` 的 `info` 五个根 + 写面的两个读模板同批（`_frame` 侧同口径）。
 ROOTS = ("state", "pre", "post", "config", "session", "control", "scope")
@@ -176,8 +219,135 @@ def _run(h, args: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
-# --- 一局要写的叶：每片一条 patch + 一条「读回来怎么认它」的哨兵 -------------------
-# 值都取互不相同的哨兵：写进去之后**从读面上按哨兵认领回来**，这样「这一局真的写进去了
+# --- 「源码 `///` → 发射的 description」对账用的源码扫描 -------------------------
+#
+# 为什么要**读源码**：`--nouns` 里的 `description` 是 schemars 从 `///` 派生的，中间隔着
+# derive + JSON Schema 两层。这两层曾经**默默改字**——schemars 0.8.22 的
+# `attr/doc.rs::get_doc` 里有一段向后兼容 hack：只要文档的**所有行**都以 `*` 开头，就当成
+# `/** … */` 风格把每行首的 `*` 剥掉。于是**单行**注释若以 `**加粗**` 开头就被误判，
+# 发射出来是 `*加粗**`（坏 markdown，实测 46 条）。只看 `--nouns` 自己**看不出对错**
+# （它自洽），必须拿源码当尺子。
+#
+# 扫描口径：只认本仓的源码形状（`struct` / `enum` + 紧挨着的 `///`，`#[serde(rename = "…")]`
+# 把 Rust 字段名换成读面的键名）。解析不出来的发射项**不许静默跳过**——调用方把它们记进
+# `unmapped` 并判红（见 `run()` 的 §5b）。
+_DOC_LINE = re.compile(r"^\s*///(.*)$")
+_TYPE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(struct|enum)\s+([A-Za-z_]\w*)")
+_SERDE_RENAME = re.compile(r'#\[\s*serde\s*\(.*?rename\s*=\s*"([^"]+)"')
+_FIELD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:")
+_VARIANT_DECL = re.compile(r"^\s*([A-Za-z_]\w*)\s*([({,]|$)")
+
+
+def _strip_strings(line: str) -> str:
+    """挖掉字符串/字符字面量再数括号（`rename = "a{b"` 不许骗到深度）。"""
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            i += 1
+            while i < len(line):
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "'" and i + 2 < len(line) and line[i + 2] == "'":
+            i += 3          # 字符字面量 `'x'`；生命周期 `'a` 不会被误吃
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=1)
+def doc_containers() -> dict:
+    """`src/**/*.rs` → `{类型名: {kind, doc, file, fields, variants}}`。
+
+    * `doc`：类型自己的 `///` 块；
+    * `fields`：`{读面键名: (注释, Rust 字段名)}`（有 `#[serde(rename)]` 就用它当键）；
+    * `variants`：enum 的变体按**声明序**，每个带自己的 `doc` 与 `fields`（结构变体的字段）。
+    """
+    found: dict[str, dict] = {}
+    for path in sorted((REPO / "src").rglob("*.rs")):
+        rel = path.relative_to(REPO).as_posix()
+        docs: list[str] = []
+        attrs: list[str] = []
+        cur: str | None = None
+        var: dict | None = None
+        depth = 0
+        for lineno, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+            m = _DOC_LINE.match(raw)
+            if m:
+                docs.append(m.group(1))
+                continue
+            code = _strip_strings(raw)
+            if not code.strip():
+                continue
+            if code.lstrip().startswith("#["):
+                attrs.append(raw)
+                continue
+            if cur is None:
+                m = _TYPE_DECL.match(code)
+                if m and "{" in code:
+                    cur = m.group(2)
+                    found[cur] = {"kind": m.group(1), "doc": "\n".join(docs).strip("\n"),
+                                  "file": rel, "line": lineno, "fields": {}, "variants": []}
+                    depth = code.count("{") - code.count("}")
+                    var = None
+                    if depth <= 0:
+                        cur = None
+                docs, attrs = [], []
+                continue
+            if depth == 1 and found[cur]["kind"] == "struct":
+                m = _FIELD_DECL.match(code)
+                if m and ":" in code:
+                    key = m.group(1)
+                    rn = _SERDE_RENAME.search(" ".join(attrs))
+                    found[cur]["fields"][rn.group(1) if rn else key] = (
+                        "\n".join(docs).strip("\n"), key)
+            elif depth == 1:
+                m = _VARIANT_DECL.match(code)
+                if m:
+                    found[cur]["variants"].append({
+                        "name": m.group(1), "doc": "\n".join(docs).strip("\n"), "fields": {},
+                        "file": rel, "line": lineno})
+                    var = found[cur]["variants"][-1] if ("{" in code or "(" in code) else None
+            elif depth == 2 and found[cur]["kind"] == "enum" and var is not None:
+                m = _FIELD_DECL.match(code)
+                if m and ":" in code:
+                    key = m.group(1)
+                    rn = _SERDE_RENAME.search(" ".join(attrs))
+                    var["fields"][rn.group(1) if rn else key] = ("\n".join(docs).strip("\n"), key)
+            depth += code.count("{") - code.count("}")
+            docs, attrs = [], []
+            if depth <= 0:
+                cur, var = None, None
+    return found
+
+
+def _norm_text(text: str) -> str:
+    """**空白归一**：换行/缩进是排版，不是文案（弹窗会把 `\\n\\n` 渲染成换行，但
+    "同一段里的硬换行 vs 空格"不该让这条判据红）。归一之后只比**字**。"""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _doc_to_description(doc: str) -> str:
+    """源码 `///` 块 → 该发的 `description`。
+
+    schemars 的规则：首行若是 `# 标题` 就当 `title`、**不进** `description`
+    （0.8 与 1.x 都是这条规则）。本仓当前没有这种注释，但判据按规则写，
+    免得将来有人加了一条标题行就以为判据坏了。
+    """
+    if doc.lstrip().startswith("#"):
+        doc = doc.split("\n", 1)[1] if "\n" in doc else ""
+    return _norm_text(doc)
+
+
+# --- 一局要写的叶：每片一条 patch + 一条「读回来怎么认它」的哨兵 -------------------# 值都取互不相同的哨兵：写进去之后**从读面上按哨兵认领回来**，这样「这一局真的写进去了
 # N 片叶」就不是靠回执自证，而是读面说了算。
 D_TEMPER, D_LONE = 0.1, -0.2      # 舰队默认风格（两轴一起给）
 D_KITING = 0.25                   # 舰队默认风筝姿态
@@ -334,6 +504,43 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             missing.append(f"{f}：本组不认识这片叶（新加的叶要么在这里写上怎么写，要么进 write_omit）")
 
     return plans, missing
+
+
+#: **测试注入点**：`_control_kinds_from_index` 在真文件上读到 `idx/control.jsonl` 之前会调一次它
+#: （参数是那个文件路径）。生产路径上**没有人设置它**（默认 `None`），只有
+#: `play/tests/_g4_negative.py` 用它把某片叶的 `kind` 改成一个**声明里没有的词**，
+#: 验证第 7 条对账真的会红——一条不会红的守卫只是看起来在守纪律。
+INDEX_HOOK = None
+
+
+def _control_kinds_from_index(h, ckpt: Path, diff_path: Path, tmp: Path):
+    """跑一局**每一片叶都写过**的世界，从 `--index` 的 `control` 表里取 `kind` 集合与行数。
+
+    为什么不在第 6 条那趟 `--index`（seed 42 / 40 回合）上顺手取：那张表的行数是**元素**
+    稀疏的——没人设过的叶（比如初期一条都没有的 `城市福利预算`）根本不会有行，
+    于是「声明 16 片、表里 9 种」看起来像红，其实是**世界没写过**。
+    所以这里复用第 3 节那份「把每一片叶都写一次」的 checkpoint + diff（`_plan_leaves`
+    覆盖全部 17 片），再跑一趟 `--index`：写过的叶都在，稀疏性就从等式里消掉了。
+
+    返回 `(kinds, rows)`：`kinds` = 出现过的 kind 集合，`rows` = 验证过的总行数
+    （防空转的量：0 行 ⇒ 这条对账等于没跑）。
+    """
+    idx = tmp / "idx-kinds"
+    rc, _, err = _run(h, ["--start", str(ckpt), "--apply", str(diff_path),
+                          "--round", "1", "--index", str(idx), "--quiet"])
+    path = idx / "idx" / "control.jsonl"
+    if rc != 0 or not path.exists():
+        return set(), 0
+    if INDEX_HOOK is not None:
+        INDEX_HOOK(path)
+    kinds: set[str] = set()
+    rows = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows += 1
+        kinds.add(json.loads(line).get("kind"))
+    return kinds, rows
 
 
 def _pick_entry(v, keys: list[str], keyvals: dict):
@@ -825,12 +1032,201 @@ def run(h, ck) -> None:
              not dup_labels,
              "；".join(dup_labels[:4]) or "0 条重复（`label` 只在要覆盖/加格式时才写）")
 
+    # ══ 5d. 名词覆盖率（**静态**）：渲染字段名标签的 JS 模块都必须挂 tip ═══════════════
+    #
+    # 为什么要有这一条（§5 看不见的那半边）：上面 §5 查的是**声明**——`views.json` 里
+    # `columns` 中当名词显示的列。可是**通用 widget 自己渲染出来的**字段名不在任何 `columns`
+    # 里，§5 对它们**一条都不红**。`jsonview.js` 的原始 JSON 视图就是实机反例：
+    # `{字段名: 值}` 的树里 `global`/`bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
+    # 明明在界面上、语料（`--nouns`）里也有，却**从不挂弹窗**（hover 无反应）。
+    # 这是**哑巴失败**的典型：没有报错、没有空白屏，只是「没反应」——本仓最拉黑的那种。
+    #
+    # 判据：扫 `web/static/*.js`（**去掉注释**后的代码），算出三份清单——
+    #   * 「渲染字段名标签的文件」= 代码里出现 `FIELD_LABEL_CLASSES` 里任一**字段名标签类名**；
+    #   * 「挂 tip 的文件」= 代码里出现 `TIP_MOUNTS` 里任一写法（`Tip.attach` / `ctx.tip`）；
+    #   * 「真的调 `Tip.attach` 的文件」= 那条链的**末端**（widget → `ctx.tip` → 宿主 →
+    #     `Tip.attach` → tip.js）。末端没人接，前面挂得再全也是哑的。
+    # 要求：前者 **⊆** 中间那份（谁渲染了名词标签，谁就得把 tip 挂上——机制是同一套
+    # `Tip.attach`，各家不许自己查表），且末端**至少有一个**。
+    # **防空转**：清单非空 + 标签出现次数有下限，实测数字印在 detail 里。
+    #
+    # ⚠ 这条守的是「**接线**在不在」，不守「每个键在语料里查得到」——后者是 §5 的活。
+    #   查不到的键 `Tip.attach` 静默不弹（与从前行为一致），那是引擎缺文档，由 §5/§5b 报。
+    label_files, tip_files, host_files, label_hits = [], [], [], 0
+    for js_path in sorted(STATIC_JS.glob("*.js")):
+        src = _js_code(js_path)
+        found = [c for c in FIELD_LABEL_CLASSES if c in src]
+        if found:
+            label_files.append(js_path.name)
+            label_hits += sum(src.count(c) for c in found)
+        if any(m.search(src) for m in TIP_MOUNTS):
+            tip_files.append(js_path.name)
+        if TIP_HOST.search(src):
+            host_files.append(js_path.name)
+    unmounted = [f for f in label_files if f not in tip_files]
+    ck.check(f"名词覆盖率：{len(label_files)} 个渲染字段名标签的 JS 模块都挂了 tip"
+             f"（{label_hits} 处标签、{len(host_files)} 个模块真的调了 `Tip.attach`；"
+             f"没有「看得见却弹不出解释」的视图）",
+             not unmounted and bool(host_files) and len(label_files) >= 2 and label_hits >= 8,
+             "；".join(
+                 [f"`{f}` 渲染字段名标签却不挂 tip ⇒ 界面上那些名词 hover 没反应" for f in unmounted]
+                 + ([] if host_files else
+                    ["没有任何模块调 `Tip.attach` ⇒ `ctx.tip` 转发到空处，全部弹窗哑掉"])
+             ) or
+             (f"标签模块 {label_files} ⊆ 挂 tip 的模块 {tip_files}（宿主 {host_files}）；"
+              f"标签 {label_hits} 处 / 模块 {len(label_files)} 个（下限 8 处 / 2 个）"))
+
     # `new: true`（身份键由人现填）只对**多键叶**成立；写在势力级单叶上是声明写错。
     new_rows_total = sum(1 for v in views for c in (v.get("columns") or []) if c.get("new"))
     ck.check(f"认领完整性：{new_rows_total} 条 `new: true` 行都挂在多键叶上"
              f"（单叶每势力一片，「现造一个身份键」对它不成立）",
              not new_rows,
              "；".join(new_rows[:3]) or f"本帧 {new_rows_total} 条，全部合法（防空转）")
+
+
+    # ══ 5b. 文档对账：**发射的每一条 `description` == 源码里那条 `///`** ════════════
+    #
+    # 为什么单看 `--nouns` 不够：它**自洽**。真实的腐蚀长这样——schemars 0.8.22 的
+    # `attr/doc.rs::get_doc` 里有一段向后兼容 hack：只要文档的**所有行**都以 `*` 开头，
+    # 就当成 `/** … */` 风格逐行剥掉一个 `*`。于是**单行**注释若以 `**加粗**` 开头
+    # （`/// **完整的世界快照**（…`）就被误判，弹窗里收到的是 `*完整的世界快照**（…`
+    # ——**坏掉的 markdown**（实测 46 条，且 46/46 全是单行注释）。语料本身看不出对错，
+    # 必须拿**源码**当尺子。（那段 hack 已随 schemars 1.2.2 消失；这条判据是**量具**，
+    # 防的是这一类：剥字符、吞行、把 A 结构体的注释发射到 B 上、静默丢文档……）
+    #
+    # 两个方向都查：
+    #   * 正向：state / view / control 三份 schemars schema 里**每一条** `description`
+    #     （三份的根 / 定义级 / 字段级 / `oneOf` 变体级）都要在源码里找到出处，
+    #     且**空白归一后逐字相等**；
+    #   * 反向：schema 里出现的每个结构体，**源码里带 `///` 的字段都真的发射了**
+    #     （丢一段文档 = 弹窗少一段话，正是"失败看起来像成功"）。
+    #
+    # ⚠ 口径与边界（写清楚，免得下一个人以为它没在守）：
+    #   * 只认本仓的源码形状（`struct`/`enum` + 紧挨着的 `///`；`#[serde(rename)]` 换键名）；
+    #     **解析不出来的发射项一律判红**（`unmapped`），不许静默跳过；
+    #   * `projection` 那半（`column_docs` / 列内联 `description`）是**手写**文案、不走
+    #     schemars，不在本判据范围——它们由上面 §5 的覆盖率判据盯着；
+    #   * 枚举**变体级**的 `///` 只查正向：`#[serde(into/try_from)]` 的 enum
+    #     （`DeathCause` / `SpawnVia` / `FoundingHow`）在新版 schemars 下不再发射变体级
+    #     schema（见 `.agents/notes/doc-pipeline.md`），源码有注释而发射端没有 ⇒
+    #     反向着对变体不成立。
+    try:
+        doc_nouns = json.loads(h.capture(["--nouns"]))
+    except Exception as e:  # noqa: BLE001  （拿不到语料本身就是红）
+        doc_nouns = None
+        nouns_fail = f"{type(e).__name__}: {e}"
+    else:
+        nouns_fail = ""
+
+    containers = doc_containers()
+    _GENERIC_N = re.compile(r"^(.+?)\d+$")     # schemars 给重名实例编的号（`Control` → `Control2`…）
+
+    pairs: list[tuple[str, str, str]] = []      # (位置, 源码期望, 发射原文)
+    unmapped: list[str] = []                    # 发射了、但源码里找不到出处的
+    src_files: set[str] = set()                 # 贡献过对账的源文件
+    structs_seen: set[str] = set()              # schema 里出现过的结构体（反向判据用）
+
+    def resolve(name: str) -> dict | None:
+        cont = containers.get(name)
+        if cont is None:
+            m = _GENERIC_N.match(name)
+            if m:
+                cont = containers.get(m.group(1))   # `Control2` → `Control`
+        return cont
+
+    def add_pair(where: str, doc: str, emitted: str, file: str) -> None:
+        src_files.add(file)
+        pairs.append((where, _doc_to_description(doc), emitted))
+
+    for sec in ("state", "view", "control"):
+        sch = (doc_nouns or {}).get(sec) if isinstance(doc_nouns, dict) else None
+        if not isinstance(sch, dict):
+            continue
+        # 根：schemars 把根的类型名写在 `title` 里
+        root = resolve(str(sch.get("title"))) if isinstance(sch.get("title"), str) else None
+        if root is not None and isinstance(sch.get("description"), str):
+            add_pair(f"{sec}（根 {sch['title']}）", root["doc"], sch["description"], root["file"])
+        for name, spec in sorted((sch.get("definitions") or {}).items()):
+            spec = spec if isinstance(spec, dict) else {}
+            cont = resolve(name)
+            if cont is None:
+                if isinstance(spec.get("description"), str):
+                    unmapped.append(f"{sec}:{name}（定义）")
+                continue
+            structs_seen.add(f"{sec}:{name}")
+            if isinstance(spec.get("description"), str):
+                add_pair(f"{sec}:{name}", cont["doc"], spec["description"], cont["file"])
+            one = spec.get("oneOf")
+            # 枚举变体按**声明序**对齐 `oneOf`（两边长度不等就不猜，那些项落进 unmapped）
+            aligned = (cont["kind"] == "enum" and isinstance(one, list)
+                       and len(one) == len(cont["variants"]))
+            for i, sub in enumerate(one if isinstance(one, list) else []):
+                sub = sub if isinstance(sub, dict) else {}
+                var = cont["variants"][i] if aligned else None
+                if isinstance(sub.get("description"), str):
+                    if var is None:
+                        unmapped.append(f"{sec}:{name}#{i}（变体）")
+                    else:
+                        add_pair(f"{sec}:{name}#{i}（{var['name']}）", var["doc"],
+                                 sub["description"], var["file"])
+                for key, field in sorted((sub.get("properties") or {}).items()):
+                    field = field if isinstance(field, dict) else {}
+                    src = (var or {}).get("fields", {}).get(key)
+                    if not isinstance(field.get("description"), str):
+                        continue
+                    if src is None:
+                        unmapped.append(f"{sec}:{name}#{i}.{key}（变体字段）")
+                    else:
+                        add_pair(f"{sec}:{name}#{i}.{key}", src[0], field["description"],
+                                 (var or {}).get("file", cont["file"]))
+            for key, field in sorted((spec.get("properties") or {}).items()):
+                field = field if isinstance(field, dict) else {}
+                src = cont["fields"].get(key)
+                if not isinstance(field.get("description"), str):
+                    continue
+                if src is None:
+                    unmapped.append(f"{sec}:{name}.{key}（字段）")
+                else:
+                    add_pair(f"{sec}:{name}.{key}", src[0], field["description"], cont["file"])
+
+    drifted = [(w, want, got) for w, want, got in pairs if want != _norm_text(got)]
+    ck.check(f"文档对账：{len(pairs)} 条 description 逐字 == 源码 `///`"
+             f"（{len(src_files)} 个源文件）",
+             bool(nouns_fail) is False and len(pairs) >= 550 and len(src_files) >= 10
+             and not drifted,
+             nouns_fail or "；".join(
+                 f"{w}：源码 `{want[:40]}` ≠ 发射 `{got[:40]}`" for w, want, got in drifted[:5]
+             ) or (f"实测 {len(pairs)} 条全部逐字相等（下限 550），来自 {len(src_files)} 个源文件"
+                   f"（下限 10）" if len(pairs) >= 550 and len(src_files) >= 10 else
+                   f"只对到 {len(pairs)} 条 / {len(src_files)} 个源文件 ⇒ 判据可能空转了"))
+
+    # 反向：源码写了注释的字段，发射端**不许悄悄丢**（丢文档 = 弹窗少一段话）。
+    dropped: list[str] = []
+    reverse_checked = 0
+    for tag in sorted(structs_seen):
+        sec, name = tag.split(":", 1)
+        cont = resolve(name)
+        spec = (((doc_nouns or {}).get(sec) or {}).get("definitions") or {}).get(name) or {}
+        emitted = spec.get("properties") or {}
+        for key, (doc, _rust) in cont["fields"].items():
+            if not _doc_to_description(doc):
+                continue
+            reverse_checked += 1
+            got = (emitted.get(key) or {}).get("description")
+            if not isinstance(got, str) or not got.strip():
+                dropped.append(f"{sec}:{name}.{key}")
+    ck.check(f"文档对账：{reverse_checked} 个带 `///` 的字段都真的发射了（无静默丢文档）",
+             not nouns_fail and not dropped and reverse_checked >= 150,
+             nouns_fail or "；".join(f"{d} 有注释没发射" for d in dropped[:5])
+             or (f"实测 {reverse_checked} 个字段带注释、全部发射（下限 150）"
+                 if reverse_checked >= 150 else
+                 f"只查到 {reverse_checked} 个带注释的字段 ⇒ 判据可能空转了"))
+
+    ck.check(f"文档对账：发射的 {len(pairs)} 条 description 都能在源码里找到出处"
+             f"（{len(containers)} 个类型里查）",
+             not nouns_fail and not unmapped,
+             nouns_fail or "；".join(unmapped[:5]) or
+             f"{len(pairs)} 条全部对上了源头的 `///`（无凭空出现的文案）")
 
 
     # ══ 6. 身份键：谁靠哪个字段认人 —— 引擎**一处**声明，且在真世界里**存在且唯一** ══
@@ -958,6 +1354,45 @@ def run(h, ck) -> None:
                  "；".join(drift[:4]) or
                  (f"{views_checked} 个视图逐字一致（如 ship-table→舰名）"
                   if views_checked else "一个实体视图都没验到 ⇒ 判据空转了"))
+
+    # ══ 7. `control` 表的 `kind` 词表 == 声明里的叶名（逐字、双向）══════════════════
+    #
+    # 见模块文档第 5 条。这里只说**为什么口径是「声明 − not_in_index」而不是「等于全部声明」**：
+    # 设计图库（结构叶，住 `derived.blueprints`）与 `建筑`（命令，不是叶）**结构上就不该**出现在
+    # 这张标量表里，把它们算进来等于逼引擎发一份注定漂移的第二表示（`value: any` 列塞不下结构）。
+    # 所以例外不是"测试放过"，而是**引擎声明里带理由的事实**（`leaves[].not_in_index`），
+    # 本判据逐条查它的理由非空，并用下限挡住"把所有叶都标成例外"这条逃生门。
+    ctrl_kinds, ctrl_rows = _control_kinds_from_index(h, ckpt, diff_path, tmp)
+    declared_all = {s["field"] for s in leaves} | {a["field"] for a in actions}
+    absent, why_bad = {}, []
+    for spec in list(leaves) + list(actions):
+        if "not_in_index" not in spec:
+            why_bad.append(f"{spec.get('field')}：声明里没有 `not_in_index` 这个键"
+                           f"（引擎的 `LeafSpec::not_in_index` 被删了？）")
+            continue
+        why = spec["not_in_index"]
+        if why is None:
+            continue
+        if not isinstance(why, str) or not why.strip():
+            why_bad.append(f"{spec.get('field')}：`not_in_index` 必须有非空理由"
+                           f"（空/空白 = 拿「排除」当逃生门）")
+            continue
+        absent[spec["field"]] = why
+    declared_index = declared_all - set(absent)
+    extra = sorted(ctrl_kinds - declared_index)   # 表里有、声明没有 = 第二套词
+    missing = sorted(declared_index - ctrl_kinds)  # 声明有、表里没发 = 悄悄少一片叶
+    ck.check(f"kind 词表对账：`control` 表实测 {len(ctrl_kinds)} 种 kind == 声明 "
+             f"{len(declared_index)} 片（leaves∪actions 减 {len(absent)} 条自报例外），逐字双向相等",
+             not extra and not missing and not why_bad
+             and bool(ctrl_kinds) and bool(declared_index) and ctrl_rows > 0
+             and len(declared_index) >= 14 and len(absent) >= 1,
+             "；".join(
+                 ([f"表里有而声明没有（第二套词）：{extra}"] if extra else [])
+                 + ([f"声明有而表里没发（悄悄少一片叶）：{missing}"] if missing else [])
+                 + why_bad[:3]
+             ) or (f"{ctrl_rows} 行、{len(ctrl_kinds)} 种 kind："
+                   f"{' / '.join(sorted(ctrl_kinds))}；"
+                   f"自报例外 {len(absent)} 条（{'、'.join(f'{k}（{v[:24]}…）' for k, v in absent.items())}）"))
 
 
 if __name__ == "__main__":
