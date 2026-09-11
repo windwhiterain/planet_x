@@ -14,6 +14,12 @@
 //! | 面板域 | `0 < hull ≤ hull_max`、`0 ≤ shield ≤ shield_max`、attack/speed/组件完整度 ≥ 0 |
 //! | 安静回合的护甲再生 | 只增不减、不超上限（**基础再生量是下界**——本土加成读面看不到，不断言等式） |
 //!
+//! 2026-10 又搬走一条（**合成场景**那一类）：`damaged_ship_regenerates_hull_each_round`
+//! ⇒ g2 的 `scenario_checks`「受伤的舰每回合按 `hull_max × 再生率` 长回来」。档现在能存成 JSON
+//! （`--save w.json`）⇒ Python 直接把船体改成一半、扔到 `[80, 80]`，推进 3 回合后**逐位**判增量：
+//! 本土加成的有无是**两个离散值**，所以「增量 ∈ {基础, 基础+加成}」可判（实测 6.00 → 7.44，
+//! 三次 +0.4800 = 12 × 0.04）——比原先「造一个世界、打一炮」更贴真实长局，也不必再编进 crate。
+//!
 //! **留在这里的**：本土防御光环、面板随选装变化的**确切公式**、点防按舰级缩放、逐组件损伤与
 //! 友方领土修理、舰队防空、护盾与速度规避——这些要么直接调内部函数（`home_defense_mult`、
 //! `ship_panel`），要么要**拨一个旋钮造 A/B**（把库存改到只够付一半维护费之类）。把它们的
@@ -25,53 +31,6 @@
 //! 按 12.0 的船体被打掉）。
 
 use super::*;
-
-/// 护甲再生 (ShipSpec.hull_regen): a damaged ship regains a fraction of its
-/// max hull each round; full-hull ships stay capped; destroyed ships stay gone.
-#[test]
-fn damaged_ship_regenerates_hull_each_round() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-
-    // Take China's Earth corvette (id 0, hull_max 12, hull_regen 0.04) and
-    // damage it to exactly half; pin it away from all hostiles so the round
-    // is quiet and only regeneration acts on it.
-    let ship0 = state.ships[0].name.clone();
-    let ship1 = state.ships[1].name.clone();
-    if let Some(s) = state.ship_mut(&ship0) {
-        s.hull = 6.0;
-        s.position = [80.0, 80.0];
-    }
-    let class = state.ship(&ship0).map(|s| s.class.clone()).unwrap();
-    let regen = config.ship_spec(&class).hull_regen;
-
-    advance(&mut state, &config, &mut rng);
-
-    let hull = state
-        .ship(&ship0)
-        .map(|s| s.hull)
-        .expect("ship 0 still alive");
-    let expected = (6.0 + 12.0 * regen).min(12.0);
-    assert!(
-        (hull - expected).abs() < 1e-9,
-        "hull should heal to {expected}, got {hull}"
-    );
-
-    // A full-hull ship stays capped (no over-heal).
-    if let Some(s) = state.ship_mut(&ship1) {
-        s.hull = config.ship_spec(&s.class).hull;
-        s.position = [80.0, 80.0];
-    }
-    advance(&mut state, &config, &mut rng);
-    let max1 = config
-        .ship_spec(&state.ship(&ship1).map(|s| s.class.clone()).unwrap())
-        .hull;
-    let hull1 = state.ship(&ship1).map(|s| s.hull).unwrap();
-    assert!(
-        (hull1 - max1).abs() < 1e-9,
-        "full hull must not over-heal, got {hull1}"
-    );
-}
 
 /// 本土防御（首都即强弩）：靠近首都的目标被削弱，远离首都的没有。
 #[test]

@@ -8,6 +8,21 @@
 //! 这一批的关键约定有一条与 B1 不同，专门钉在下面的用例里：**「批了多少」不进读面**——限额是
 //! 控制面的持久叶（`control` 的 `investment_budget`/`construction_budget`），`RoundView` 只记
 //! 「真花掉的」，两者相减才是「批了却没花掉的那部分」（同一个数不存两处）。
+//!
+//! ## 2026-10：能只看数据的那几条搬去了 Python
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `spent_never_exceeds_the_batch_and_the_gap_is_the_unspent_part` | g1「花掉的 ≤ 批的额度」 | 两个读面各给一半：`factions[].investment_spent`（真花掉的）+ `--control` 的额度（批了多少） |
+//! | `is_hub_matches_the_capital_body` | g3「一个回合里只有一个 hub 天体」 | `city_process.is_hub` 与 `capital_body` 都在读面上（且修掉了同回合易主/复垦的相位错位） |
+//! | `labor_and_housing_capacity…` 的**用工系数那一半** | g2 **合成场景**「人口压到 1 ⇒ 用工系数掉到 `min_efficiency`」 | 档能存成 JSON（`--save w.json`）⇒ Python 把人口改成 1 再推进，断言读面（连同「回合 0 的中性值是 1.0」） |
+//! | `upkeep_shortfall…` 的**读面那一半** | g3「欠费 ⇔ 生锈」「欠费 ≤ 账单」 | 全 7 seed × 1000 回合逐行 |
+//!
+//! **留在这里的**：`upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes`
+//! （要「库存恰好只够付一半」的精确构造，而且「每艘舰真的掉了 `hull_max × rust`」得在**只有锈、
+//! 没有再生**的一步里看——合成场景推的是整回合，再生同时发生）与
+//! `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`
+//! （「批 0 ⇒ increment = 0 而 rate > 0」要拨预算造 A/B；其中 `increment ≤ rate` 那一半已在 g3）。
 
 use super::*;
 
@@ -210,87 +225,5 @@ fn build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling() {
         row.build.contains_key(&class),
         "{cid} 的 build 表里必须有 {class}——有键而 increment=0 才是「有产能没批到钱」"
     );
-}
-
-/// **用工系数与住房容量**是「这座城产量为什么低 / 人口为什么不涨」的两个答案，且都只由
-/// **这一步用的** state 算出来（不是事后重算的近似值）。
-///
-/// 用工系数取的是人口增长**之前**的人口，所以用例从两边夹：把人口压到 1 ⇒ 必然掉到
-/// `min_efficiency` 下限；把住房加满不缺人 ⇒ 必然是 1.0。住房容量则按引擎的定义
-/// （住宅面积 × 生态容量）在测试里重算一遍对账。
-#[test]
-fn labor_and_housing_capacity_are_captured_from_this_steps_state() {
-    let (config, mut state) = fresh_world(42);
-    let fid = state.factions[0].name.clone();
-    let cid = state
-        .cities
-        .iter()
-        .find(|c| c.faction_id == fid && !c.razed)
-        .map(|c| c.name.clone())
-        .expect("中国开局应有城");
-
-    // —— 人手极度不足：人口 1 ⇒ 用工系数掉到下限 ——
-    if let Some(c) = state.city_mut(&cid) {
-        c.population = 1;
-    }
-    let mut sink = RoundSink::default();
-    step_production(&mut state, &config, &mut sink);
-    let cf = sink
-        .city_flow
-        .get(&cid)
-        .expect("step_production 必须记这一格");
-    assert!(
-        (cf.labor - config.economy.min_efficiency).abs() < 1e-12,
-        "{cid}: 人口压到 1 之后用工系数应当是下限 {}，实际 {}",
-        config.economy.min_efficiency,
-        cf.labor
-    );
-    assert!(
-        (0.0..=1.0).contains(&cf.labor),
-        "{cid} 的用工系数越界：{}",
-        cf.labor
-    );
-
-    // —— 住房容量 = 住宅面积 × 生态容量（照引擎的定义重算对账）——
-    let (ecocap, want_housing) = {
-        let ecocap = state
-            .city_settlement(&cid)
-            .map(|s| s.ecological_capacity)
-            .unwrap_or(0.0);
-        let area: f64 = state
-            .city(&cid)
-            .expect("刚查过")
-            .buildings
-            .iter()
-            .filter(|b| config.building_spec(&b.kind).role == "housing")
-            .map(|b| b.deployed * building_health(b, &config))
-            .sum();
-        (ecocap, area * ecocap)
-    };
-    assert!(
-        cf.housing_capacity > 0.0,
-        "{cid} 开局应有住宅（否则这条对账没意义）"
-    );
-    assert!(
-        (cf.housing_capacity - want_housing).abs() < 1e-6,
-        "{cid}: 住房容量 {} ≠ 住宅面积 × 生态容量 {want_housing}（生态容量 {ecocap}）",
-        cf.housing_capacity
-    );
-
-    // 折进视图以后是同一个数；`pre` 面（没跑这一步）用工系数是**中性值 1.0**，不是 0。
-    let view = observe(&state, &config, &sink);
-    let row = view.cities.get(&cid).expect("活城");
-    assert_eq!(row.labor, cf.labor);
-    assert_eq!(row.housing_capacity, cf.housing_capacity);
-    let pre = view_from_state(&state, &config);
-    for (cid, c) in &pre.cities {
-        assert_eq!(
-            c.labor, 1.0,
-            "{cid}: 「这一步还没跑」的用工系数中性值是 1.0（不缺人手），不是 0（全城没人上工）"
-        );
-        assert_eq!(c.housing_capacity, 0.0);
-        assert!(!c.is_hub, "{cid}: pre 面里入库路径还没定 ⇒ 中性值 false");
-        assert!(c.build.is_empty(), "{cid}: pre 面里还没有造舰进度");
-    }
 }
 

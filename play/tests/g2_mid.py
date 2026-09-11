@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _harness import KIT, group_main  # noqa: E402
+from _harness import CACHE_ROOT, KIT, group_main  # noqa: E402
 
 SEEDS = (1, 7, 42)
 ROUNDS = 400
@@ -457,8 +457,73 @@ def run(h, ck) -> None:
     combat_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
+    scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def scenario_checks(h, ck) -> None:
+    """**合成场景**：造世界 → 用 Python 改档 → 推进 → 只看数据断言。
+
+    这些用例以前只能在 Rust 里做（`fresh_world(42)` + `state.ship_mut(&name).hull = 6.0` +
+    调内部 API 断言）。现在档能存成 JSON（`--save w.json`，见 `config::CheckpointFormat`）：
+    「造」用 `planet_x`、「捏」用 Python 的 `json` 模块（`h.gen(patch=…)`），**断言仍然只看投影**。
+
+    搬过来的两条（各删掉一条 Rust 原件）：
+
+    ① `combat::damaged_ship_regenerates_hull_each_round`——把一艘舰的船体改成一半、扔到
+       `[80, 80]`（远离本土），每回合应当**恰好**长回 `hull_max × (hull_regen + 本土加成)`：
+       本土加成的有无是**两个离散值**（在不在自家 `home_radius` 内），所以「增量 ∈ {基础, 基础+
+       加成}」是可以逐位判的，不是模糊的「大概长了点」。
+    ② `spending::labor_and_housing_capacity_are_captured_from_this_steps_state`——把一座城的
+       人口压到 1 ⇒ 用工系数掉到 `min_efficiency`（配置值，不是写死的 0.1）；而且**回合 0 那一行
+       的中性值是 1.0**（「这一步还没跑」= 不缺人手，不是「全城没人上工」）。
+    """
+    # ① 护甲再生
+    seed = 42
+    w = h.gen(CACHE_ROOT / "scenario" / "_probe.json", seed)
+    st = h.state_dump(w)
+    ship = st["ships"][0]
+    name, hmax = ship["name"], float(ship["hull_max"])
+    proj = h.scenario("regen", seed, 3, patch={"ships": {name: {"hull": hmax / 2, "position": [80.0, 80.0]}}})
+    q = KIT.load(str(proj), only=("ships", "factions"))
+    rows = q.table("ships")
+    mine = rows[rows["ship_id"] == name].sort_values("round")
+    steps, capped, bad = 0, 0, []
+    hulls = list(mine["hull"])
+    regen = float(mine["hull_regen"].iloc[0])
+    bonus = float(q.table("factions").pipe(lambda t: t[t["faction_id"] == ship["faction_id"]])[
+        "home_regen_bonus"].iloc[0])
+    base, boosted = regen * hmax, (regen + bonus) * hmax
+    for i in range(len(hulls) - 1):
+        delta = hulls[i + 1] - hulls[i]
+        if abs(delta) < 1e-9:
+            capped += 1                       # 已经满了（不超上限）
+        elif abs(delta - base) < 1e-6 or abs(delta - boosted) < 1e-6:
+            steps += 1
+        else:
+            bad.append(f"r{i}→r{i + 1}: 增量 {delta:.6f} 既不是基础 {base:.6f} 也不是含加成 {boosted:.6f}")
+    ck.check("合成场景：受伤的舰每回合按 hull_max × 再生率长回来（本土加成是另一个离散值）",
+             not bad and steps >= 2,
+             "；".join(bad[:2]) or
+             f"{name}（{hmax:g} 船体）：船体 {hulls[0]:.2f} → {hulls[-1]:.2f}，{steps} 次按 {base:.4f}/回合 增长"
+             f"（含加成档 {boosted:.4f}，另有 {capped} 次已满）")
+    ck.check("合成场景：护甲再生守卫没有空转（真的有可长回来的回合）", steps >= 2, f"{steps} 次增量（下限 2）")
+
+    # ② 用工系数
+    city = max(st["cities"], key=lambda c: c["population"])
+    proj2 = h.scenario("labor", seed, 3, patch={"cities": {city["name"]: {"population": 1}}})
+    q2 = KIT.load(str(proj2), only=("city_process",))
+    cp = q2.table("city_process")
+    mine2 = cp[cp["city_id"] == city["name"]].sort_values("round")
+    floor = float(q2.meta["economy"]["min_efficiency"])
+    labor = list(mine2["labor"])
+    housing = float(mine2["housing_capacity"].iloc[-1])
+    ck.check("合成场景：人口压到 1 ⇒ 用工系数掉到 min_efficiency（配置值，不是写死的）",
+             len(labor) >= 2 and abs(labor[0] - 1.0) < 1e-12 and abs(labor[1] - floor) < 1e-9,
+             f"{city['name']}：回合 0 用工 {labor[0]:g}（没跑那一步 ⇒ 中性值 1.0）→ "
+             f"回合 1 {labor[1]:.4f}（下限 {floor:g}），住房容量 {housing:g}")
+    ck.check("合成场景：用工系数守卫没有空转（真有住房容量可算）", housing > 0, f"住房容量 {housing:g}")
 
 
 def id_checks(h, ck, out) -> None:
