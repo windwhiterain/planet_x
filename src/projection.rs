@@ -1123,12 +1123,7 @@ fn write_round(
     }
 
     // `scope`：只发**显式表态**的节点（`Inherit` = 这一层没有说话，不必占行）。
-    writeln!(
-        w.scope,
-        "{}",
-        json!({"round": state.round, "level": "global", "key": "", "mode": state.scope.global})
-    )
-    .map_err(|e| e.to_string())?;
+    // ⚠ 没有 `global` 行：2026-10 用户裁决删掉了全局那一档（见 `model::ControlScope`）。
     for (fid, m) in &state.scope.factions {
         writeln!(
             w.scope,
@@ -1587,10 +1582,10 @@ pub fn projection_schema() -> serde_json::Value {
             }),
             "scope" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**作用域树的显式表态**：谁负责 AI 决策（全局 / 势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。归属链：**指令** = 叶 → 势力 → 全局；**风格三轴** = 叶 → 出厂图 → 舰队默认 → 势力 → 全局。",
+                "description": "**作用域树的显式表态**：谁负责 AI 决策（势力 / 天体 / 城）。只发显式节点——`Inherit` 等于「这一层没有说话」，不占行。归属链：**指令** = 叶 → 势力；**风格三轴** = 叶 → 出厂图 → 舰队默认 → 势力（链尾都是引擎兜底 `Auto`）。",
                 "columns": {"round":"integer","level":"string","key":"string","mode":"string"},
                 "column_docs": {
-                    "level": "节点层级：global / faction / body / city（`global` 的 key 为 `\"\"`）。",
+                    "level": "节点层级：faction / body / city（全局那一档 2026-10 已删）。",
                 },
             }),
             "blueprints" => json!({

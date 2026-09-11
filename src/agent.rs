@@ -132,7 +132,7 @@ pub fn noun_schema_value() -> serde_json::Value {
         "state": state_schema_value(),
         "view": schema_value(),
         "projection": crate::projection::projection_schema(),
-        // 控制面（写面）也要：控制行的名词（`首都`/`开发预算`… 的字段名，以及 `global`
+        // 控制面（写面）也要：控制行的名词（`首都`/`开发预算`… 的字段名，以及 `factions`
         // 这类作用域键）住在它的 schema 里。**四半合起来**才是"界面上能出现的所有名词"。
         "control": crate::control::control_schema_value(),
         // **谁靠哪个字段认人**：也一并发出去，三端（Python 测试 / kit / 前端）都来问这里，

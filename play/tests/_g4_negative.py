@@ -217,17 +217,27 @@ def main() -> int:
     run_case("omit-overlap", d)
 
     # ⑤b `source` 的三种形态（2026-10 新增）：键必须存在，值可以是字符串或**显式** null
-    #     （null = 「这张卡故意不依赖记录」，例如全局归属那条）；漏写键仍然要红。
+    #     （null = 「这张卡故意不依赖记录」）；漏写键仍然要红。
+    #     ⚠ 2026-10：声明里**已经没有** `source: null` 的视图了（唯一那条随「全局作用域」页一起
+    #     被删，见用户裁决）⇒ 注入**自己造**一张合法的 null-source 视图，再把它的 `source` 删掉
+    #     （不造就没有宾语，这条注入会退化成空转——量具自己的纪律）。
+    def _null_source_view(vid, **over):
+        v = {"id": vid, "title": "负例（不取记录）", "mount": "panel", "layout": "sheet",
+             "source": None, "single": "负例：这张视图故意不依赖任何记录（`source: null` 是合法形态）",
+             "columns": []}
+        v.update(over)
+        return v
+
     d = clone()
+    d["pages"][0]["views"].append(_null_source_view("neg-null-source"))
     for v in walk_views(d):
-        if v.get("id") == "global-scope":
+        if v.get("id") == "neg-null-source":
             del v["source"]
     run_case("source-key-missing", d)
 
     d = clone()
-    for v in walk_views(d):
-        if v.get("source") is None and v.get("layout") != "table":
-            v["layout"] = "table"  # 表没有来源没意义
+    # 表布局没有来源没意义（`source: null` 只对 sheet / cards 成立）⇒ 注入一张 table + null。
+    d["pages"][0]["views"].append(_null_source_view("neg-null-source-table", layout="table"))
     run_case("null-source-on-table", d)
 
     # ⑤d 名词覆盖率：把一个**裸字段列**的 path 改成引擎不认识的名词 ⇒ 要红
@@ -244,7 +254,7 @@ def main() -> int:
     d = clone()
     for v in walk_views(d):
         for c in (v.get("columns") or []):
-            if isinstance(c, dict) and isinstance(c.get("owner"), str) and c.get("owner") == "global":
+            if isinstance(c, dict) and isinstance(c.get("owner"), str) and c.get("owner") == "factions":
                 c["owner"] = "不存在的键"
     run_case("owner-without-doc", d)
 

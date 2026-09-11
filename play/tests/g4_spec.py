@@ -792,7 +792,8 @@ def run(h, ck) -> None:
         # `source` 的三种合法形态：
         #   * 字符串 = 常规来源；
         #   * **`null`（键必须在）** = 「这张卡故意不依赖任何记录」，只放不取记录的行
-        #     （例如 `{ "owner": "global" }` 那条全局归属）——显式写 null 才允许，
+        #     （`source: null` 今天**没有实例**：唯一那条随「全局作用域」页一起删了，
+        #     但形态本身仍在（语言特性，与没人用的 `layout: cards/timeline` 同理））——显式写 null 才允许，
         #     **漏写**仍然红（那多半是打错/漏了，而不是有意）；
         #   * inline 那条本来就不含列（它只是「路径 → 哪条视图」的映射表）。
         if mount != "inline":
@@ -1134,7 +1135,7 @@ def run(h, ck) -> None:
                 eat(doc_nouns.get("state") or {}, corpus, 0)
                 eat(doc_nouns.get("view") or {}, corpus, 0)
                 # 控制面那半：控制行的**字段名**（`首都`/`投资预算`…）与
-                # 作用域键（`global`/`factions`…）。界面显示的是中文标签，标签查不到时按字段名查。
+                # 作用域键（`factions`/`bodies`/`cities`）。界面显示的是中文标签，标签查不到时按字段名查。
                 eat(doc_nouns.get("control") or {}, corpus, 0)
                 for sec, tables in (doc_nouns.get("projection") or {}).items():
                     if not isinstance(tables, dict):
@@ -1171,7 +1172,8 @@ def run(h, ck) -> None:
     #   * 兜底的字段名（`Tip.attach` 的 field）= `noun` → 叶的字段名（`Controls.fieldOf`）
     #     → 裸字段名的 `path`。
     # 悬停弹得出东西 ⇔ 这两个词里**有一个**在语料里（`tip.js::attach` 的查词顺序）。
-    OWNER_LABEL = {"global": "全局归谁", "factions": "这个势力归谁",
+    # ⚠ 2026-10：`global` 那一档已删（用户裁决），这里是 `controls.js` 的 `OWNER_LABEL` 镜像。
+    OWNER_LABEL = {"factions": "这个势力归谁",
                    "bodies": "这个天体归谁", "cities": "这座城归谁"}
 
     def field_of_row(path: object) -> str:
@@ -1314,7 +1316,7 @@ def run(h, ck) -> None:
     # 为什么要有这一条（§5 看不见的那半边）：上面 §5 查的是**声明**——`views.json` 里
     # `columns` 中当名词显示的列。可是**通用 widget 自己渲染出来的**字段名不在任何 `columns`
     # 里，§5 对它们**一条都不红**。`jsonview.js` 的原始 JSON 视图就是实机反例：
-    # `{字段名: 值}` 的树里 `global`/`bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
+    # `{字段名: 值}` 的树里 `bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
     # 明明在界面上、语料（`--nouns`）里也有，却**从不挂弹窗**（hover 无反应）。
     # 这是**哑巴失败**的典型：没有报错、没有空白屏，只是「没反应」——本仓最拉黑的那种。
     #

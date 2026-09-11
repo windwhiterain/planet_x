@@ -163,7 +163,7 @@ pub fn control_view(
         })
         .collect();
     // 设计图库：**每张图一行**。`ship_count` 是**现算的派生量**（不落状态），`mode` 是图叶
-    // 自己的表态；有效归属（图叶 → 势力 scope → 全局）走 `State::blueprint_control`，
+    // 自己的表态；有效归属（图叶 → 势力 scope）走 `State::blueprint_control`，
     // 读面在投影的 `blueprints.effective_mode` 列里给（`--control` 是**写面模板**，
     // 多给派生列只会让模板与写面漂移）。
     //
@@ -229,7 +229,6 @@ pub fn control_view(
 /// 意外清掉。
 pub fn scope_view(s: &ControlScope) -> ControlScopePatch {
     ControlScopePatch {
-        global: (s.global != ControlMode::Inherit).then_some(s.global),
         factions: explicit(&s.factions),
         bodies: explicit(&s.bodies),
         cities: explicit(&s.cities),

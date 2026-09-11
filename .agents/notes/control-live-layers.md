@@ -38,7 +38,7 @@ pub enum ControlMode { Inherit, Auto, Player }   // #[default] Inherit
 
 | 轴 | 谁在回答 | 各层 |
 | --- | --- | --- |
-| **归属**（谁负责） | `ControlMode` | 叶子 → （舰：舰队默认）→ 城市 → 天体 → 势力 scope → 全局 |
+| **归属**（谁负责） | `ControlMode` | 叶子 → （舰：舰队默认）→ 城市 → 天体 → 势力 scope → **引擎兜底 `Auto`**（全局那一档 2026-10 已删，见 §20） |
 | **值**（干什么） | 各层自己的 `value` | 叶子值 / 舰队默认值 / （作用域节点**不带值**） |
 
 作用域节点（`ControlScope`）**只表态归属、装不了值**——这是「只把势力设成 `Player`，新舰
@@ -1037,3 +1037,47 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
 * `.ctl-grid` 里每片叶外面那圈 `.tnode` 边框 + `margin: 4px 0` 还在（一行 28px 里占 8px）。
   要再挤，就在 `.ctl-grid > .tnode` 上去掉边框/外边距——但那会改变"每片叶是一个盒子"的观感，
   没做之前先问。
+
+## 20. 本轮：**删掉「全局」那一档作用域**（2026-10 用户裁决）
+
+### 20.1 用户原话
+
+> 「现在"全局"页面是干啥的，好像没啥用」→（我列出它现在的样子与三条走法后）
+> 「直接不要全局的控制设置了，谁会全局玩家控制啊，自己和自己下棋吗」
+
+### 20.2 为什么它是个空壳（实测，不是印象）
+
+* 归属链的最后一站 `scope.global` 的**唯一**作用就是「链上谁都没说话时按谁」，而
+  `resolve_chain` 的兜底本来就是 `Auto`（`src/model/control.rs`）⇒ 在这一档上
+  **「自动」与「继承」效果完全一样**，三态下拉里唯一有区别的取值是 `Player`。
+* `Player` 的实际含义 = 把**所有**还没被更具体层接管的叶子一次归玩家 ⇒ AI 一个字节都不写
+  （预算/角色/风格/派单全停）。这就是用户说的「自己和自己下棋」。
+* 那一页 `views.json` 的 `global-scope` 视图渲染出来 = **1 个下拉 + 3 行空表**
+  （`有表态的势力/天体/城` 还漏出一个孤零零的 `·`），而逐条的「归谁」入口本来就在各实体页里
+  （势力/天体/城详情各一行）⇒ 三行清单只是重复的汇总。
+
+### 20.3 删了哪些（一个概念，七处落点）
+
+| 层 | 改动 |
+| --- | --- |
+| 模型 | `ControlScope.global` 与 `ControlScopePatch.global` **整字段删掉**；`overlay()` 少了那一支 |
+| 链 | `State::*_control()` 12 处 `resolve_chain(&[…, self.scope.global])` → 链尾去掉（兜底仍是 `Auto`） |
+| 读/写面 | `scope_view()` 不再发 `global`；`apply` 的「被触碰节点数」不再算它 |
+| 投影 | `idx/scope.jsonl` **不再有常驻的 `global` 行**（表变成纯表态驱动：没人表态就是 0 行） |
+| web | 「全局」页整页删（第 7 页 → 6 页）；`owner: global` 行、`OWNER_LABEL/HELP.global`、`edScope.global`、`buildScopeDiff` 的 global 支、`effectiveMode` 的链尾 |
+| kit | `scope_of("global")` / `set_scope(global_mode=…)` / `emit` 的 `global` 键 / `effective_authority_approx` 的 `global_scope` 档 |
+| 文档 | `agent-play.md` §3 的链、`control-value-rule.md` §1、`README.md`、`views.json` 的 `note` |
+
+**没有**动：势力/天体/城三档照旧（内层 `Auto` 在外层 `Player` 时仍是「这一块交给 AI」的例外写法）。
+
+### 20.4 三处判据跟着改（如实记下）
+
+1. `g1_contract.py`「控制面两张表在该回合有行」：`scope` 现在是**表态驱动**的，默认世界**就该是
+   0 行** ⇒ 改成与**写面**对账（`scope` 行数 == `--control` 里显式表态数）。「有表态 ⇒ 行真在」
+   那一头由 Rust 侧 `derived_tables_are_written_and_declared` 钉（它给中国钉了 `Player`——
+   蓝图表当年也是这么处理的，同一条理由：叶驱动的表在新开局零行）。
+2. `src/tests/projection/mod.rs::derived_tables_are_written_and_declared`：同上，加一条势力表态。
+3. `_g4_negative.py` 两条注入的**宾语**没了（`global-scope` 视图与 `owner: global` 行）⇒
+   改成注入**自己造**一张合法的 `source: null` 视图再删它的 `source`（不造就退化成空转——
+   量具自己的纪律）。`source: null` 这个**声明形态**保留（与没人用的 `layout: cards/timeline`
+   同理：它是语言特性，不是机制）。

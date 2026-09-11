@@ -16,7 +16,7 @@ Tri-state ownership (``.agents/notes/control-live-layers.md``)
 
 Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing) / ``Auto`` (the
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
-``leaf → faction scope → global scope``; the most specific layer that
+``leaf → faction scope``; the most specific layer that
 is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The **three style** axes have the
 same shape with their own faction-level default: ``风格 → 舰队默认风格``,
 ``姿态 → 舰队默认姿态`` and ``角色 → 舰队默认角色`` (角色：``War`` 战舰 / ``Freight``
@@ -286,13 +286,14 @@ EFFECTIVE_PROVENANCE_COLUMN = "effective_order_from_engine"
 #:
 #: The fallback trio below re-implements the chain from the read face, so it is an *approximation* of
 #: the engine's answer and **does not model the design-blueprint layer** at all
-#: (``leaf → fleet default → faction scope → global``, missing ``leaf → **blueprint** → …``).
+#: (``leaf → fleet default → faction scope``, missing ``leaf → **blueprint** → …``).
 #: Prefer ``ENGINE_EFFECTIVE_COLUMNS``; see the README.
 APPROX_COLUMNS = (
     "effective_order_mode_approx",
     "effective_order_value_approx",
     # ⚠ 这一列是「**归属**链上最具体的有意见者」（`leaf` / `fleet_default` / `faction_scope` /
-    # `global_scope` / `auto_fallback`），**不是**引擎 `order_source` 的「**值**是谁供的」。
+    # `auto_fallback`），**不是**引擎 `order_source` 的「**值**是谁供的」。
+    # ⚠ 2026-10 用户裁决删掉了**全局那一档** ⇒ 这里不再有 `global_scope` 这个来源。
     # 名字不同是故意的：本地近似没有资格冒用引擎的列名（那正是这次要修的谎）。
     "effective_authority_approx",
 )
@@ -817,10 +818,8 @@ class Surface:
     def scope_of(self, kind: str, name: str | None = None) -> str:
         """The scope tree's opinion at one node, or ``Inherit`` when the node says nothing.
 
-        ``kind`` ∈ ``global`` / ``factions`` / ``bodies`` / ``cities``.
+        ``kind`` ∈ ``factions`` / ``bodies`` / ``cities``（``global`` 那一档 2026-10 已删）。
         """
-        if kind == "global":
-            return self.scope.get("global") or INHERIT
         for entry in self.scope.get(kind) or []:
             if entry[0] == name:
                 return entry[1]
@@ -1465,7 +1464,7 @@ class Surface:
             {"城": city, "建筑": idx, "建造舰级": class_, "设计图": name})
         return self
 
-    def set_scope(self, *, global_mode: str | None = None,
+    def set_scope(self, *,
                   factions: Mapping[str, str] | None = None,
                   bodies: Mapping[str, str] | None = None,
                   cities: Mapping[str, str] | None = None) -> "Surface":
@@ -1476,16 +1475,12 @@ class Surface:
         says otherwise. ⚠ 指令**只有逐舰叶**（2026-10 裁决：舰队默认指令那片叶已删）；势力级只剩
         **长期倾向**三片（``default_doctrine`` / ``default_kiting`` / ``default_role``）。
         """
-        if global_mode is not None:
-            self._scope_pending["global"] = _check_mode(global_mode)
         for key, table in (("factions", factions), ("bodies", bodies), ("cities", cities)):
             for node, mode in (table or {}).items():
                 self._scope_pending.setdefault(key, {})[node] = _check_mode(mode)
         return self
 
     def set_scope_mode(self, kind: str, name: str, mode: str) -> "Surface":
-        if kind == "global":
-            return self.set_scope(global_mode=mode)
         return self.set_scope(**{kind: {name: mode}})
 
     def _known_resources(self, faction: str, kind: str) -> set[str]:
@@ -1555,8 +1550,6 @@ class Surface:
 
     def _scope_patch(self) -> dict:
         out: dict[str, Any] = {}
-        if "global" in self._scope_pending:
-            out["global"] = self._scope_pending["global"]
         for key in ("factions", "bodies", "cities"):
             if key in self._scope_pending:
                 out[key] = [[node, mode] for node, mode in sorted(self._scope_pending[key].items())]
@@ -1766,7 +1759,6 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         return leaves.get((fac, kind, key))
 
     defaults = {f: s.leaf(f, "舰队默认角色") for f in s.factions}
-    gscope = s.scope_of("global")
     fscope = {f: s.scope_of("factions", f) for f in s.factions}
 
     order_leaf_, order_mode, order_value, order_behavior = [], [], [], []
@@ -1792,14 +1784,12 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         kk = L(fac, "姿态", (ship,))
         kit.append(kk.value if kk is not None and kk.exists else None)
         # ---- local approximation (fallback only: 旧索引目录没有引擎那几列) ----
-        # `leaf → faction scope → global`（指令链，**不建模**已删除的舰队默认叶与图层——
-        # 这两层在 2026-10 之后对**指令**都不存在了）。
+        # `leaf → faction scope → 兜底 Auto`（指令链，**不建模**已删除的舰队默认叶与图层——
+        # 这两层在 2026-10 之后对**指令**都不存在了；**全局那一档也已删**）。
         if omode != INHERIT:
             authority, mode = "leaf", omode
         elif fscope.get(fac, INHERIT) != INHERIT:
             authority, mode = "faction_scope", fscope[fac]
-        elif gscope != INHERIT:
-            authority, mode = "global_scope", gscope
         else:
             authority, mode = "auto_fallback", AUTO
         # 取值：叶里的值就是有效值（没有更高的一层能覆盖它）。

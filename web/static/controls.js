@@ -99,9 +99,8 @@
   }
 
   const MODES = [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']];
-  const OWNER_LABEL = { global: '全局归谁', factions: '这个势力归谁', bodies: '这个天体归谁', cities: '这座城归谁' };
+  const OWNER_LABEL = { factions: '这个势力归谁', bodies: '这个天体归谁', cities: '这座城归谁' };
   const OWNER_HELP = {
-    global: '链上谁都没说话时按这一档',
     factions: '这一档管「这个势力下的键」：它的舰、城、设计图…',
     bodies: '这一档管这个天体',
     cities: '这一档管这座城（城里的建筑权重等）',
@@ -539,8 +538,9 @@
 
   // --- `owner` 行：作用域归属（不是叶） ----------------------------------------
   function ownerRow(col, rec, recKey, where) {
+    // ⚠ 没有 `global` 那一档了（2026-10 用户裁决）⇒ 作用域行的三档都挂在一条记录上，`id` 恒为 recKey。
     const k = col.owner;
-    const id = k === 'global' ? null : recKey;
+    const id = recKey;
     const box = el('div', 'ctl-owner');
     const sel = el('select', { class: 'mode owner', 'data-role': 'owner', 'data-scope': k });
     MODES.forEach(([v, l]) => {
@@ -560,13 +560,11 @@
   // ⚠ `edScope` 是 app.js 的 `let`（`buildEdits` 会整个替换它）⇒ 引用**活绑定**，不取快照。
   function scopeGet(k, id) {
     if (!edScope) return 'Inherit';
-    if (k === 'global') return edScope.global;
     return scopeVal(edScope[k] || [], id);
   }
 
   function scopeSet(k, id, v) {
-    if (!edScope) edScope = { global: 'Inherit', factions: [], bodies: [], cities: [] };
-    if (k === 'global') { edScope.global = v; return; }
+    if (!edScope) edScope = { factions: [], bodies: [], cities: [] };
     edScope[k] = edScope[k] || [];
     setScopeVal(edScope[k], id, v);
   }
