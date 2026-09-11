@@ -43,8 +43,10 @@ fn info_roots_are_whole_model_dumps() {
         );
     }
     // 实体也要带**全部**字段（不是给地图用的那套拍平视图）。
+    // ⚠ 键名就是读面上的中文名词（2026-10 起序列化名取自 spec，见
+    // `.agents/notes/field-naming.md`）。
     let ship = &state["ships"][0];
-    for k in ["name", "faction_id", "doctrine", "kiting"] {
+    for k in ["舰名", "势力", "风格", "姿态"] {
         assert!(
             ship.get(k).is_some(),
             "Ship field `{k}` missing from the info tree"
@@ -118,15 +120,20 @@ fn info_tree_carries_real_round_flow_after_advance() {
     assert!(json["info"][0]["value"]["events"].is_array());
     // 读面**不许**再有手工投影字段：响应的顶层只有写面（control/scope）与整份树。
     // 这条测试是「想再塞一个给前端用的拍平字段」时的守门人——要读什么，从树里取。
-    let keys: Vec<&str> = json
+    let mut keys: Vec<&str> = json
         .as_object()
         .unwrap()
         .keys()
         .map(|k| k.as_str())
         .collect();
+    // ⚠ 比的是**集合**不是顺序：`preserve_order` 开着（读面键序 = 结构体声明序），
+    // 这条判据要守的是「顶层**只有**这三个键」，不是「按字母序排列」。
+    keys.sort_unstable();
+    let mut want = vec!["control", "info", "scope"];
+    want.sort_unstable();
     assert_eq!(
         keys,
-        ["control", "info", "scope"],
+        want,
         "StateView must stay control+scope+info"
     );
     let view = &json["info"][2]["value"];
