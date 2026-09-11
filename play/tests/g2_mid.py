@@ -16,6 +16,8 @@
 ⚠ 两处**刻意不写死**（写死就是给下一个人埋雷）：RoundAt 节拍的清单从 `meta.json` 的
 `story` 读（不写「prologue 在 1 回合、planet_x_arrives 在 60 回合」），疤痕的最短回合从
 配置算（不写常量）。
+* **贸易三账**（`src/tests/sim/trade.rs` 搬走的三条）：成交清单逐回合 ↔ `view.market_settled`、
+  价格分解逐项重算、买方名次 = 引擎的购买力序。
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from _harness import CACHE_ROOT, KIT, group_main  # noqa: E402
 SEEDS = (1, 7, 42)
 ROUNDS = 400
 MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会空转，得报出来
+MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1366 笔
+MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1200 个「排过队」的回合
 
 
 def _named_entities(ev):
@@ -408,12 +412,129 @@ def id_report(q) -> dict:
     return {"ids": len(life), "gaps": sample, "gap_n": len(gaps), "gone_n": len(gone)}
 
 
+def trade_report(q) -> dict:
+    """贸易三账（B3）：`src/tests/sim/trade.rs` 里三条只看数据的判据小结。
+
+    数据：`market_trades`（每笔一对一行）+ 主流每回合的 `view.market_settled` + `meta.json`
+    的 `market` 配置。判据住在 :func:`trade_checks` 里（只改阈值/措辞不重读投影）。
+
+    * **成交对账**：逐回合把每笔的 `moved[资源] × (1 − loss)` 加起来，必须等于那一回合
+      `view.market_settled` 里**收到**的量（逐资源、双向）。
+    * **价格分解**：拿同一行的 `depth` / `dist_au` 与 `meta.market` 的常数重算
+      `mond_extra` / `freight_rate`——读面给的分解式必须自洽。
+    * **买方名次**：`factions[].market_rank` 是引擎排好的购买力序（降序、同额按名字升序），
+      读者不该自己重排。
+    """
+    mt = q.table("market_trades")
+    market = (q.meta or {}).get("market") or {}
+
+    # ① 成交清单 ↔ 世界收到的量（逐回合；不能跨回合求和，`market_settled` 是每回合一份）。
+    by_round = {int(r): g.to_dict("records") for r, g in mt.groupby("round")}
+    recon_bad: list[str] = []
+    trades = 0
+    recon_rounds = 0
+    for _, fact in q.facts.iterrows():
+        rnd = int(fact["round"])
+        rows = by_round.get(rnd) or []
+        if not rows:
+            continue
+        settled = fact["view"].get("market_settled") or {}
+        received: dict[str, float] = {}
+        for row in rows:
+            trades += 1
+            moved = row.get("moved") or {}
+            if not moved:
+                recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} 没有货，不该占位")
+            if row["buyer"] == row["seller"]:
+                recon_bad.append(f"r{rnd}：{row['buyer']} 自己跟自己成交")
+            if not (0.0 <= row["loss"] <= 1.0):
+                recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} loss={row['loss']} 越界")
+            for rt, take in moved.items():
+                if take <= 0.0:
+                    recon_bad.append(f"r{rnd}：{row['buyer']}→{row['seller']} 的 {rt} 报了非正的 {take}")
+                received[rt] = received.get(rt, 0.0) + take * (1.0 - row["loss"])
+        for rt, got in settled.items():
+            if got <= 1e-9:
+                continue
+            back = received.get(rt, 0.0)
+            if abs(back - got) > 1e-6:
+                recon_bad.append(f"r{rnd} {rt}：成交清单加起来 {back}，世界账却是 {got}")
+        for rt in received:
+            if settled.get(rt, 0.0) <= 1e-9:
+                recon_bad.append(f"r{rnd} {rt}：清单里有成交，世界账上却是 0")
+        recon_rounds += 1
+
+    # ② 价格分解逐项重算（同一条定义式；`depth = 0` ⇒ 不穿带 ⇒ 零运费、零丢货）。
+    price_bad: list[str] = []
+    seen_freight = seen_same_body = seen_mond = 0
+    for row in mt.to_dict("records"):
+        if row["dist_au"] < 0.0 or row["depth"] < 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：距离/深度为负 "
+                             f"{row['dist_au']}/{row['depth']}")
+        if row["rel_mult"] <= 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：关系倍率 {row['rel_mult']} ≤ 0")
+        if not (0.0 <= row["mastery"] <= 1.0):
+            price_bad.append(f"{row['buyer']}→{row['seller']}：掌握度 {row['mastery']} 越界")
+        want_mond = (market["mond_freight_mult"] * (row["depth"] / (row["depth"] + 1.0))
+                     if row["depth"] > 0.0 else 0.0)
+        if abs(row["mond_extra"] - want_mond) >= 1e-9:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：穿带溢价 "
+                             f"{row['mond_extra']} ≠ {want_mond}")
+        want_freight = market["freight_per_au"] * row["dist_au"] * (1.0 + row["mond_extra"])
+        if abs(row["freight_rate"] - want_freight) >= 1e-9:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：运费率 "
+                             f"{row['freight_rate']} ≠ {want_freight}")
+        if row["depth"] == 0.0 and row["loss"] != 0.0:
+            price_bad.append(f"{row['buyer']}→{row['seller']}：没穿带却丢货 {row['loss']}")
+        if row["freight_rate"] > 0.0:
+            seen_freight += 1
+        if row["dist_au"] == 0.0:
+            seen_same_body += 1
+        if row["mond_extra"] > 0.0:
+            seen_mond += 1
+            if row["depth"] <= 0.0:
+                price_bad.append(f"{row['buyer']}→{row['seller']}：有穿带溢价却没有深度")
+            # 掌握度到顶 ⇒ 一点货都不丢；否则穿了带必须丢（崇拜教开局掌握度就是 1.0）。
+            if row["mastery"] < 1.0 - 1e-9:
+                if not (row["loss"] > 0.0):
+                    price_bad.append(f"{row['buyer']}→{row['seller']}：穿带且掌握度只有 "
+                                     f"{row['mastery']:.3f}，却不丢货")
+            elif row["loss"] != 0.0:
+                price_bad.append(f"{row['buyer']}→{row['seller']}：掌握度到顶却丢货 {row['loss']}")
+
+    # ③ 买方名次 = 引擎排好的购买力序（名次必须是 0..n-1 的排列）。
+    rank_bad: list[str] = []
+    rank_rounds = 0
+    for _, fact in q.facts.iterrows():
+        rnd = int(fact["round"])
+        rows = [(name, r.get("market_rank"), r.get("purchasing_power") or 0.0)
+                for name, r in fact["view"]["factions"].items()]
+        if any(rk is None for _, rk, _ in rows):
+            # 回合 0 是 `pre` 面：市场还没跑 ⇒ 中性缺省就是 `null`（见 `neutral.rs`）。
+            if rnd == 0:
+                continue
+            rank_bad.append(f"r{rnd}：有势力没有名次"
+                            f"（{sum(1 for _, rk, _ in rows if rk is None)} 个）")
+            continue
+        rank_rounds += 1
+        for i, (name, rank, _) in enumerate(sorted(rows, key=lambda t: (-t[2], t[1]))):
+            if rank != i:
+                rank_bad.append(f"r{rnd} {name}：名次 {rank} ≠ 按购买力/名字应是 {i}")
+                break
+
+    return {"trades": trades, "recon_bad": recon_bad, "recon_rounds": recon_rounds,
+            "price_bad": price_bad,
+            "price_seen": {"freight": seen_freight, "same_body": seen_same_body, "mond": seen_mond},
+            "rank_bad": rank_bad, "rank_rounds": rank_rounds}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
-    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
+                                      "market_trades"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -470,7 +591,43 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "blueprints": blueprints, "ids": ids, "meta": q.meta}
+            "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q),
+            "meta": q.meta}
+
+
+def trade_checks(h, ck, out) -> None:
+    """贸易三账（B3）：`src/tests/sim/trade.rs` 搬过来的三条判据。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["trade"] for d in out]
+    trades = sum(r["trades"] for r in rep)
+
+    recon_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["recon_bad"]]
+    ck.check("每笔成交的实收都归到世界账（成交清单 ↔ view.market_settled 逐回合对账）",
+             not recon_bad,
+             "；".join(m for _, m in recon_bad[:3]) or
+             f"{tag}：{trades:,} 笔成交、{sum(r['recon_rounds'] for r in rep)} 个成交回合全部对账")
+    ck.check("成交对账没有空转（真的成交过）", trades >= MIN_TRADES,
+             f"{tag} 共 {trades:,} 笔成交（下限 {MIN_TRADES}）")
+
+    price_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["price_bad"]]
+    seen = {k: sum(r["price_seen"][k] for r in rep) for k in ("freight", "same_body", "mond")}
+    ck.check("价格分解逐项自洽（拿记录下来的 depth/dist 与 meta.market 重算）",
+             not price_bad,
+             "；".join(m for _, m in price_bad[:3]) or
+             f"{tag}：{trades:,} 笔的 mond_extra / freight_rate 全部咬合")
+    ck.check("价格分解没有空转（真出现过跨天体运费与同天体零运费两档）",
+             seen["freight"] >= 1 and seen["same_body"] >= 1,
+             f"跨天体运费 {seen['freight']} 笔、同天体零运费 {seen['same_body']} 笔"
+             f"（穿带溢价 {seen['mond']} 笔，轨迹相关，不强制出现）")
+
+    rank_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["rank_bad"]]
+    rank_rounds = sum(r["rank_rounds"] for r in rep)
+    ck.check("买方名次就是引擎排好的购买力序（降序、同额按名字升序、名次是 0..n-1）",
+             not rank_bad,
+             "；".join(m for _, m in rank_bad[:3]) or
+             f"{tag}：{rank_rounds} 个市场的排队全部是 0..n-1 的购买力序")
+    ck.check("名次守卫没有空转（真有排过队的回合）", rank_rounds >= MIN_RANK_ROUNDS,
+             f"{tag} 共 {rank_rounds} 个回合排过队（下限 {MIN_RANK_ROUNDS}）")
 
 
 def run(h, ck) -> None:
@@ -492,6 +649,7 @@ def run(h, ck) -> None:
 
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
+    trade_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)

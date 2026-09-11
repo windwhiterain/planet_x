@@ -8,194 +8,31 @@
 //! * **成交清单的粒度是「一对（买方 × 卖方）一行」**，不是「一对 × 一资源一行」——距离/深度/
 //!   关系只由这一对决定，每种矿的成交价就是 `market_price × (rel_mult + freight_rate)`；
 //! * **`haul_steps` 一舰一行**，AI 与**玩家指令**两条执行路径都写它（玩家舰不产生判定行）。
+//!
+//! ## 2026-10：三条**只看数据**的判据搬去了 `play/tests/g2_mid.py`
+//!
+//! `market_trades`（一对一行）+ 主流每回合的 `view.market_settled` + `meta.json` 的 `market`
+//! 已经够 ⇒ **零新增序列化**；顺带把样本从「1 seed × 12–60 回合」放大到 **3 seed × 400 回合**：
+//!
+//! | 数据级判据（g2） | 原 Rust 用例 | 实测（3 seed × 400 回合） |
+//! | --- | --- | --- |
+//! | 成交清单 ↔ `view.market_settled` 逐回合对账（`moved × (1 − loss)` 求和、双向） | `trades_reconcile_with_the_world_settled_total` | 1,366 笔 / 390 个成交回合、0 例外 |
+//! | 价格分解逐项重算（`mond_extra` / `freight_rate`，同一条定义式） | `trade_price_terms_are_self_consistent` | 1,366 笔全咬合；跨天体运费 732 / 同天体零运费 634 |
+//! | 买方名次 = 引擎的购买力序（降序、同额按名字升序、名次 0..n-1） | `market_rank_is_the_engines_own_buying_order` | 1,200 个「排过队」的回合全是 0..n-1 的序 |
+//!
+//! **留在这里的**（按施工图 §4/§5 的两栏对账）：
+//! * `trade_block_list_names_the_blocker_and_the_tier`——名单本身在 `factions[].trade_blocked_by`
+//!   （读面有），但「与 `trade_block_cause` 同源」那半句要调**引擎函数**；把公式抄进 Python
+//!   就是同一个数两个位置（施工图 §4 的「内部契约」）。
+//! * `haul_steps_only_cover_ships_that_are_actually_on_a_haul_route`——要拿**回合末的内部
+//!   指令叶**（`state.control[*].ship_orders`）反查「这艘舰此刻是不是真的在跑运输」；它判的是
+//!   **运输族**（施工图 §5 第 2–4 批：货舱 / 货栈 / 集货腿）的完备性，按批次顺序与那几张表
+//!   一起搬。
+//! * `freight_gap_is_the_same_ledger_the_engine_posts_contracts_from`——要直接跑
+//!   `autocontrol::freight::post_contracts` 并读 `RoundSink.freight_gap`：那本货栈账还没进
+//!   读面（施工图 §5 第 3–4 批）。
 
 use super::*;
-
-/// **成交清单必须与世界的账对得上**：把每一笔的「买方实收」加起来，逐资源等于
-/// `view.market_settled`（全世界这一回合收到的量）。
-///
-/// 这条恒等式同时钉住四件事：① 清单**没漏行**（漏一笔就对不上）；② 一行**没重复计**
-/// （同一对买两种矿只占一行，`moved` 各记各的）；③ `moved` 的语义确实是「卖方**交出**的量」
-/// （收货要乘 `(1 − loss)`）——把它写成「收到的量」这条就红；
-/// ④ 成交清单与 `market_settled` 是同一个回合、同一份快照。
-#[test]
-fn trades_reconcile_with_the_world_settled_total() {
-    let Some((_config, _state, view)) = world_with_a_trade(7, 40) else {
-        panic!("seed 7 的 40 回合里一次都没成交——守卫会退化成空转");
-    };
-    let mut received: ResourceMap = ResourceMap::new();
-    for t in &view.market_trades {
-        assert!(
-            !t.moved.is_empty(),
-            "{} → {} 这一行没有任何货，不该占位",
-            t.buyer,
-            t.seller
-        );
-        assert_ne!(t.buyer, t.seller, "自己跟自己成交？");
-        assert!((0.0..=1.0).contains(&t.loss), "丢货比例越界：{}", t.loss);
-        for (rt, take) in &t.moved {
-            assert!(
-                *take > 0.0,
-                "{} → {} 的 {rt} 报了非正的成交 {} ",
-                t.buyer,
-                t.seller,
-                take
-            );
-            *received.entry(rt.clone()).or_insert(0.0) += take * (1.0 - t.loss);
-        }
-    }
-    for (rt, got) in &view.market_settled {
-        if *got <= 1e-9 {
-            continue;
-        }
-        let sum = received.get(rt).copied().unwrap_or(0.0);
-        assert!(
-            (sum - got).abs() < 1e-6,
-            "{rt}: 成交清单加起来 {sum}，但世界账上说收到 {got}（清单漏了/重了/语义写反了）"
-        );
-    }
-    // 反向：清单里出现的资源，世界账上必须有量（否则清单在编货）。
-    for rt in received.keys() {
-        assert!(
-            view.market_settled.get(rt).copied().unwrap_or(0.0) > 1e-9,
-            "{rt}: 清单里有成交，世界账上却是 0"
-        );
-    }
-}
-
-/// **价格分解是「这一对」自己的数**：`freight_rate` 与 `mond_extra` 必须与引擎的两条定义式
-/// 逐字咬合（拿**记录下来的** `dist_au`/`depth` 重算一遍，而不是另编一个模型）。
-///
-/// 这条守卫的理由：读面把这三个数分开给，就是为了让「为什么是这个价」可读——
-/// 如果它们之间不再自洽（比如改了配置却只更新一处），读者会照着错的分解去调策略。
-/// ⚠ **同一天体上的两家之间 `dist_au = 0` ⇒ 运费 0**（地球上有五座城属于不同势力，
-/// 它们之间没有星际运费）——那是真的，不是漏算，所以「非零运费」要跨回合找。
-#[test]
-fn trade_price_terms_are_self_consistent() {
-    let (config, mut state) = fresh_world(7);
-    let mut rng = Prng::new(7);
-    let m = config.market.clone();
-    let mut rows = 0usize;
-    let mut seen_freight = 0usize;
-    let mut seen_mond = 0usize;
-    let mut seen_same_body = 0usize;
-    for _ in 0..60 {
-        let view = advance(&mut state, &config, &mut rng);
-        for t in &view.market_trades {
-            rows += 1;
-            assert!(
-                t.dist_au >= 0.0 && t.depth >= 0.0,
-                "距离/深度不该是负数：{t:?}"
-            );
-            assert!(t.rel_mult > 0.0, "关系倍率必须是正的（价格倍率的一部分）");
-            assert!(
-                (0.0..=1.0).contains(&t.mastery),
-                "掌握度应在 0..1：{}",
-                t.mastery
-            );
-            let want_mond = if t.depth > 0.0 {
-                m.mond_freight_mult * (t.depth / (t.depth + 1.0))
-            } else {
-                0.0
-            };
-            assert!(
-                (t.mond_extra - want_mond).abs() < 1e-9,
-                "穿带溢价 {} ≠ mond_freight_mult × depth/(depth+1) = {want_mond}",
-                t.mond_extra
-            );
-            let want_freight = m.freight_per_au * t.dist_au * (1.0 + t.mond_extra);
-            assert!(
-                (t.freight_rate - want_freight).abs() < 1e-9,
-                "运费率 {} ≠ freight_per_au × dist × (1 + mond_extra) = {want_freight}",
-                t.freight_rate
-            );
-            // 丢货只可能来自穿带：不穿带的线上必须是 0。
-            if t.depth == 0.0 {
-                assert_eq!(t.loss, 0.0, "{} → {}：没穿带却有丢货", t.buyer, t.seller);
-            }
-            if t.freight_rate > 0.0 {
-                seen_freight += 1;
-            }
-            if t.mond_extra > 0.0 {
-                seen_mond += 1;
-                assert!(t.depth > 0.0, "有穿带溢价却没有深度");
-                // ⚠ **掌握度到顶 ⇒ 一点货都不丢**（`loss = mond_loss_per_au × depth × (1 − mastery)`，
-                //   `mastery` = 买卖双方里最好的那一个）——所以这一条按不住「掌握者走这条线」的情况：
-                //   崇拜教开局掌握度就是 1.0（用户裁决），它一旦在带上来往，丢货**应当**是 0。
-                if t.mastery < 1.0 - 1e-9 {
-                    assert!(
-                        t.loss > 0.0,
-                        "穿了带却一点货都没丢（掌握度只有 {:.3}，该丢）",
-                        t.mastery
-                    );
-                } else {
-                    assert_eq!(t.loss, 0.0, "掌握度到顶的线路上不该丢货");
-                }
-            }
-            if t.dist_au == 0.0 {
-                seen_same_body += 1;
-            }
-        }
-    }
-    assert!(rows >= 5, "60 回合只成交 {rows} 笔——守卫太空");
-    assert!(seen_freight >= 1, "60 回合里每一笔都零运费——分解式等于空转");
-    assert!(
-        seen_same_body >= 1,
-        "一笔「同天体」贸易都没有——那正是 `dist_au = 0 ⇒ 运费 0` 这一档，不该消失"
-    );
-    let _ = seen_mond; // 穿带那一档取决于轨迹（深层贸易），不强制出现
-}
-
-/// 跑到「市场上真的成交过」的回合：返回那一回合的视图与落定的 state。
-///
-/// 「到过、成交过」而不是「某个固定回合成交」：固定回合会让守卫随世界轨迹漂移而随机翻车
-/// （`decisions_table_matches_the_derived_record` 那条注释记着同一次踩坑）。
-fn world_with_a_trade(seed: u64, max_rounds: u32) -> Option<(GameConfig, State, RoundView)> {
-    let (config, mut state) = fresh_world(seed);
-    let mut rng = Prng::new(seed);
-    for _ in 0..max_rounds {
-        let view = advance(&mut state, &config, &mut rng);
-        if !view.market_trades.is_empty() {
-            return Some((config, state, view));
-        }
-    }
-    None
-}
-
-/// **买方名次就是引擎排好的那个顺序**：名次是 0..n 的一个排列，且与购买力降序一致
-/// （同额按名字升序——这是引擎里写死的 tie-break，别让读者重排一遍）。
-#[test]
-fn market_rank_is_the_engines_own_buying_order() {
-    let (config, mut state) = fresh_world(7);
-    let mut rng = Prng::new(7);
-    let mut view = view_from_state(&state, &config);
-    for _ in 0..12 {
-        view = advance(&mut state, &config, &mut rng);
-    }
-    let mut ranked: Vec<(usize, &FactionId, f64)> = Vec::new();
-    for (fid, row) in &view.factions {
-        let rank = row
-            .market_rank
-            .unwrap_or_else(|| panic!("{fid} 没有买方名次——这一回合跑过市场却没排队？"));
-        ranked.push((rank, fid, row.purchasing_power));
-    }
-    assert!(ranked.len() >= 2, "至少要两个势力才谈得上排队");
-    ranked.sort_by_key(|(rank, _, _)| *rank);
-    for (i, (rank, fid, _)) in ranked.iter().enumerate() {
-        assert_eq!(
-            *rank, i,
-            "{fid} 的名次不连续/重复（引擎排完就该是 0..n 的排列）"
-        );
-    }
-    for w in ranked.windows(2) {
-        let (_, a, pa) = &w[0];
-        let (_, b, pb) = &w[1];
-        assert!(
-            pa > pb || (pa == pb && a < b),
-            "{a}（购买力 {pa}）排在 {b}（{pb}）前面，但购买力更小——名次与购买力不一致"
-        );
-    }
-}
 
 /// **禁运三档**：`trade_blocked_by` 是一张「谁 + 为什么」的名单，三个原因都来自
 /// `trade_block_cause`（战争 / 关系冷 / 联盟封锁），且**战争那一档必须在 `view.wars` 里**。
