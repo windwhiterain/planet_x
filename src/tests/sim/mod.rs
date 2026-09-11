@@ -21,8 +21,17 @@ mod blueprints;
 mod domestic_market;
 mod governance;
 mod haul;
-mod ideology;
-mod knowledge;
+// 思潮（`ideology.rs`）**整族搬走**（2026-10 第 7 批），文件不再存在：
+// * 军事信号纯函数（g1 `--call military_deltas`）；
+// * 战争得利 → 军国（g2 合成场景：造一场真仗，−0.60 → −0.54 vs 对照臂 0.03）；
+// * 思潮相似度 → 静息亲和（g2 合成场景：同极 +16.6 vs 对极 −53.9）；
+// * 经济净值 → 人民↔精英（g3 `ideology_law_checks`：**63,000 个势力·回合逐字相等**）；
+// * 四轴有界 + 步长上限（g3）。
+// 知识（`knowledge.rs`）**整族搬走**（2026-10 第 7 批），文件不再存在：
+// * 在场强度/目标（`mond_presence`/`mond_target` 两列 + g2 驻泊深度场景）；
+// * 掌握度逐回合定律（g3 `mond_law_checks`：棘轮 / 学满线性 / 朝目标松弛；目标稳定 61,578 个
+//   势力·回合**逐字相等**，目标中途变过的 1,422 个落在夹逼区间里）；
+// * 「带内舰数 ⇔ 在场强度」同生同灭 + 上涨必须有强度解释（g3）。
 mod market;
 mod mond;
 mod site_supply;

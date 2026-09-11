@@ -381,6 +381,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "capital": _capital_summary(q),
         "mond": _mond_summary(q),
         "ideology": _ideology_summary(q),
+        "ideo_econ": _ideo_econ_summary(q),
     }
     return pd.DataFrame(rows), meta
 
@@ -565,6 +566,8 @@ def run(h, ck) -> None:
     capital_checks(h, ck, metas, tag)
     mond_checks(h, ck, metas, tag)
     ideology_checks(h, ck, metas, tag)
+    mond_law_checks(h, ck, metas, tag)
+    ideology_law_checks(h, ck, metas, tag)
 
 
 def capital_checks(h, ck, metas, tag) -> None:
@@ -754,6 +757,112 @@ def ideology_checks(h, ck, metas, tag) -> None:
              step.detail(f"{tag}：{steps} 个势力·回合"))
     ck.check("思潮守卫没有空转（四轴都真的动过）", all(v > 0 for v in moved.values()),
              f"各轴动过的次数 {moved}")
+
+
+def _ideo_econ_summary(q) -> dict:
+    """**思潮经济轴 vs 经济净值**的逐势力时间序列（第 7 批，订正索引后用）。
+
+    净值 = `Σ(逐资源产出 × 价值) − upkeep − governance_total`（价值表取 `meta.market.resource_value`，
+    引擎的 `value_of` 就是它、逐字相同）。"""
+    val = ((q.meta or {}).get("market") or {}).get("resource_value") or {}
+    fp = q.table("faction_process")
+    out: dict = {}
+    for _, r in fp.iterrows():
+        v = sum(float(x) * float(val.get(k, 1.0)) for k, x in (r["production"] or {}).items())
+        out.setdefault(r["势力"], []).append((int(r["round"]),
+                                             v - float(r["upkeep"]) - float(r["governance_total"])))
+    return out
+
+
+def mond_law_checks(h, ck, metas, tag) -> None:
+    """**MOND 掌握度的逐回合定律**（`sim/knowledge.rs::control_rusts_back_when_the_fleet_leaves` 的「按同一速率回落」那半，第 7 批）。
+
+    引擎：每回合 ① 到顶（≥1.0）就**棘轮**不动；② 当回合目标 ≥ 1 ⇒ 按 `1 ÷ mastery_rounds`
+    **线性爬满**（学满是「持续够格」，不是一回合）；③ 否则朝目标**松弛** `drift_rate`。
+
+    ⚠ **索引要对**：轴的 `r → r+1` 这一步用的是**第 `r+1` 行**的目标（那一行才是跑出 `掌握度(r+1)`
+    的那一步看到的东西）。第一版我配成了第 `r` 行，于是得出"相位差 0.0267、读面判不了"的**错误结论**；
+    订正后 seed 42 是 **1/3600**、seed 7 是 **0/3600**，唯一那一处是**船在回合中途进出带内**
+    （回合末的目标与走那一刻的差一档）⇒ 目标变过的回合改用「上一回合目标算的 ↔ 本回合目标算的」
+    **夹逼**复核。
+
+    「撤出后回到凡人」那半由本定律 + g2 的驻泊场景共同覆盖（长期不在场 ⇒ 目标 0 ⇒ 按同一速率回落）。
+    """
+    rate = float(json.loads(h.capture(["--meta"]))["mond"]["knowledge"]["drift_rate"])
+    mrounds = int(json.loads(h.capture(["--meta"]))["mond"]["knowledge"]["mastery_rounds"])
+    tol = 0.011  # 掌握度列过 r2（±0.005），乘上 1−rate 再叠加一次
+
+    def pred(m0: float, tgt: float) -> float:
+        if m0 >= 1.0 - 1e-9:
+            return m0
+        if tgt >= 1.0 - 1e-9:
+            return min(1.0, m0 + 1.0 / max(1, mrounds))
+        return min(1.0, max(0.0, m0 + rate * (tgt - m0)))
+
+    exact = Verdict()
+    brack = Verdict()
+    stable = moved = 0
+    for m in metas:
+        for f, seq in m["mond"].items():
+            for (r0, c0, _b0, _p0, t0, _fr0), (r1, c1, _b1, _p1, t1, _fr1) in zip(seq, seq[1:]):
+                want = pred(c0, t1)
+                if abs(t1 - t0) < 1e-9:
+                    stable += 1
+                    if abs(c1 - want) > tol:
+                        exact.add(f"{f} r{r1}: 掌握度 {c0} → {c1}，按「当回合目标 {t1}」应为 {want:.4f}")
+                else:
+                    moved += 1
+                    lo, hi = sorted((want, pred(c0, t0)))
+                    if not (lo - tol <= c1 <= hi + tol):
+                        brack.add(f"{f} r{r1}: {c0} → {c1}，目标 {t0}→{t1}，"
+                                  f"夹逼区间 [{lo:.4f}, {hi:.4f}]")
+    ck.check(f"MOND：**目标没变的回合**逐回合等于定律值（棘轮 / 学满线性 / 朝目标松弛；"
+             f"drift_rate {rate}、mastery_rounds {mrounds}）", exact.n == 0,
+             exact.detail(f"{tag}：{stable} 个势力·回合"))
+    ck.check("MOND：**目标中途变过**的回合落在「上一回合目标 ↔ 本回合目标」的夹逼区间里"
+             "（船在回合中途进出带内）", brack.n == 0,
+             brack.detail(f"{tag}：{moved} 个势力·回合"))
+    ck.check("MOND 定律守卫没有空转（两类回合都真的出现过、且真的涨过/锈过）",
+             stable > 100 and moved > 10,
+             f"{tag}：目标稳定 {stable} 个、目标变动 {moved} 个势力·回合")
+
+
+def ideology_law_checks(h, ck, metas, tag) -> None:
+    """**思潮「人民↔精英」的逐回合定律**（`sim/ideology.rs::ideology_economy_bad_drives_toward_populism_and_stays_bounded`，第 7 批）。
+
+    引擎：目标 = `clamp(净值 ÷ economy_scale, −1, 1)`；轴每回合朝它松弛 `drift_rate`。
+    净值由读面复算（逐资源产出 × 价值 − 维护 − 治理）——**索引要对**：轴的 `r → r+1` 用第 `r+1` 行。
+    订正后 seed 42 与 seed 7 各 300 回合**共 5400 样本 0 违规**（比原件"注入一次 upkeep=100 再看一回合"
+    强得多）。
+
+    ⚠ **推论**：经济转负 ⇒ 目标在人民端 ⇒ 轴朝人民端走；「四轴恒在 [-1,1]」由 :func:`ideology_checks` 压着。
+    """
+    meta = json.loads(h.capture(["--meta"]))
+    esc = float(meta["ideology"]["economy_scale"])
+    rate = float(meta["ideology"]["drift_rate"])
+    tol = 0.012  # 思潮列过 r2（±0.005），乘 (1−rate) 再叠加一次，另留一点余量
+    law = Verdict()
+    n = 0
+    moved = 0
+    for m in metas:
+        for f, seq in m["ideology"].items():
+            ne = dict(m["ideo_econ"].get(f, []))
+            for (r0, a0), (r1, a1) in zip(seq, seq[1:]):
+                if r1 not in ne:
+                    continue
+                n += 1
+                tgt = max(-1.0, min(1.0, ne[r1] / max(1e-6, esc)))
+                want = max(-1.0, min(1.0, a0["人民↔精英"] + rate * (tgt - a0["人民↔精英"])))
+                if abs(a1["人民↔精英"] - want) > tol:
+                    law.add(f"{f} r{r1}: 轴 {a0['人民↔精英']} → {a1['人民↔精英']}，"
+                            f"净值 {ne[r1]:.2f} ⇒ 目标 {tgt:.3f} ⇒ 应为 {want:.4f}")
+                if abs(a1["人民↔精英"] - a0["人民↔精英"]) > 1e-9:
+                    moved += 1
+    ck.check(f"思潮：**「人民↔精英」逐回合等于「朝当回合经济目标松弛」**"
+             f"（目标 = 净值 ÷ {esc}，drift_rate {rate}）", law.n == 0,
+             law.detail(f"{tag}：{n} 个势力·回合"))
+    ck.check("思潮定律守卫没有空转（轴真的动过）", n >= 100 and moved > 100,
+             f"{tag}：{n} 个样本里 {moved} 次位移")
 
 
 def identity_checks(h, ck, metas, tag) -> None:
