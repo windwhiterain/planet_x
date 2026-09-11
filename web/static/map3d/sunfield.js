@@ -114,6 +114,13 @@ const EPS = 0.06;
 const CURL2_E = 0.18;
 // 单条带子的总扭角上限（弧度）。2.6 ≈ 150°。
 const TWIST_MAX = 2.6;
+// 场纹理：32³ 覆盖 ±1.45R，按 8×4 个 64×64 的格子打成一张 512×256 的图集。
+// 32³ = 32768 个格点 × 6 次 fbm ≈ 20 万次噪声（~0.1 s）；场是低频的，32³ 足够。
+const FIELD_N = 32;
+const FIELD_TILE = 64;
+const FIELD_TILES_X = 8;
+const FIELD_EXTENT = 1.45;
+
 // ω 网格：20³ 覆盖 ±1.6R（带子最高长到 ~0.3R，留足余量）。
 const OMEGA_N = 20;
 const OMEGA_EXTENT = 1.6;
@@ -232,6 +239,51 @@ export class PromField {
     return this.omegaGrid;
   }
 
+  /// **把流场 F 本身烘成一张纹理**（顶点着色器要按"每个顶点自己的位置"取它）。
+  ///
+  /// 为什么需要：现在的"扭"是 CPU 上把 `½∫ω·t̂ dl` 积成一个角度、烘进 aTwist，
+  /// 顶点只是读**每片一个常数** ⇒ 一片里所有顶点共用一个方向 ⇒ 那是**刚体倾斜**。
+  /// 扭转是个**微分量**：要让**每个顶点采样自己位置上的场**，左右两缘取到的不同，
+  /// 截面才会转（而且顺带得到**剪切**，这是显式旋转给不了的）。
+  ///
+  /// 定量（实测本仓的场）：一次性位移 `amp` 造成的截面转角 ≈ `½·|ω|·amp`，
+  /// `amp=0.30 ⇒ 0.84 rad` —— 与手调出来的 `aTwist.x`×`uTwist` 中位 0.82 几乎一样。
+  ///
+  /// **打包**：GLSL1（WebGL2 的 ESSL1 兼容层）没有 `sampler3D`，所以打成
+  /// **2D 切片图集**：`N³` 的格子按 `tilesX` 个一排铺开，每个格子 `TILE×TILE` 纹素。
+  /// 顶点着色器用 `NearestFilter` + 手写三线性（8 次取纹理）——**不用线性过滤**是因为
+  /// 线性过滤会在**相邻切片之间渗色**（那是完全不同深度的数据）。
+  ///
+  /// ⚠ 这张纹理是**加载时算出来的推导产物**，不进版本库（用户裁决：
+  ///   烘焙出来的东西应当不 git track，而是能被管线在 git track 的配置下生成出来）。
+  bakeField(sunR) {
+    const n = FIELD_N;
+    const half = sunR * FIELD_EXTENT;
+    const tile = FIELD_TILE;
+    const tilesX = FIELD_TILES_X;
+    const tilesY = Math.ceil(n / tilesX);
+    const w = tilesX * tile, h = tilesY * tile;
+    const data = new Float32Array(w * h * 4);
+    const F = [0, 0, 0];
+    for (let iz = 0; iz < n; iz++) {
+      const z = -half + (2 * half * iz) / (n - 1);
+      const tx = (iz % tilesX) * tile;
+      const ty = Math.floor(iz / tilesX) * tile;
+      for (let iy = 0; iy < n; iy++) {
+        const y = -half + (2 * half * iy) / (n - 1);
+        for (let ix = 0; ix < n; ix++) {
+          const x = -half + (2 * half * ix) / (n - 1);
+          this.curl(x, y, z, F);
+          // 图集里的 y 轴朝下无所谓（顶点着色器按同一个约定换算），但**必须一致**。
+          const o = ((ty + iy) * w + (tx + ix)) * 4;
+          data[o] = F[0]; data[o + 1] = F[1]; data[o + 2] = F[2]; data[o + 3] = 1;
+        }
+      }
+    }
+    this.fieldTex = { data, width: w, height: h, n, tilesX, tile, half };
+    return this.fieldTex;
+  }
+
   /// 三线性采样 ω 网格（越界返回 0）。
   omegaAt(px, py, pz, out) {
     const gr = this.omegaGrid;
@@ -317,6 +369,10 @@ export function sampleField(field, dir, side, bend, sunR, out) {
 
   const px = dir.x * sunR, py = dir.y * sunR, pz = dir.z * sunR;
   const dot = (v, u) => v[0] * u.x + v[1] * u.y + v[2] * u.z;
+  // **根部处的原始场矢量**也要带出去：顶点着色器用的是"该顶点处的场 − 根部处的场"
+  // （见 prom.vert 的 off）—— 只有**差动**那部分才该作用在带子上；直接用 F 会把整片
+  // 刚性推走（实测：带子被推歪、变矮、散成团）。
+  out.f0 = [c0[0], c0[1], c0[2]];
   out.tilt[0] = dot(t0, side); out.tilt[1] = dot(t0, bend);
   out.twist[0] = dot(t1, side); out.twist[1] = dot(t1, bend);
   // 强度：归一化到 0..1。标度是**实测**出来的，不是拍的：|curl| 的

@@ -29,6 +29,7 @@
   attribute vec4 aFlow2;   // x,y=切平面里的"往哪边扫" z=喷发相位 w=周期倍率
   attribute vec4 aTwist;   // x=总扭角(rad，ω·t̂ 沿路径的积分) y=扭率抖动 z=截面锐度 w=丝尖参差
   attribute vec4 aStyle;   // x=丝距倍率 y=丝长倍率 z=宽度剖面(0=收细的锥 1=张开的扇) w=色温偏移
+  attribute vec3 aField0;  // 根部处的**原始场矢量**（做差动的基准）
 
   uniform float uSunR;
   uniform float uTime;
@@ -48,6 +49,42 @@
   varying float vEdge;
   varying float vLife;     // 生命期包络 0..1（片元用它调亮度）
   varying vec4 vStyle;     // 形态参数（片元用它把"每片长不一样"做出来）
+
+  // --- 世界空间流场纹理（**生成的**，见 map3d/sunfield.js::bakeField）--------------
+  // GLSL1 没有 sampler3D ⇒ 打成 2D 切片图集 + 手写三线性。
+  uniform sampler2D uFieldTex;
+  uniform vec2 uFieldAtlas;   // 图集尺寸（纹素）
+  uniform vec2 uFieldGrid;    // x = 每行几个切片，y = 每个切片的边长（纹素）
+  uniform float uFieldN;      // 每轴的格数
+  uniform float uFieldHalf;   // 世界空间的半宽
+  uniform float uDisp;        // 位移幅度
+
+  // 取图集里第 z 片、格坐标 gxy 处的一个纹素（**NearestFilter**：切片之间不能渗色）
+  vec3 promFieldFetch(vec2 gxy, float z) {
+    float tx = mod(z, uFieldGrid.x);
+    float ty = floor(z / uFieldGrid.x);
+    vec2 uv = (vec2(tx, ty) * uFieldGrid.y + gxy + 0.5) / uFieldAtlas;
+    return texture2D(uFieldTex, uv).xyz;
+  }
+
+  // 世界坐标 → 场矢量（手写三线性，8 次取纹理）
+  vec3 promFieldAt(vec3 wp) {
+    vec3 g = clamp((wp / uFieldHalf) * 0.5 + 0.5, 0.0, 1.0) * (uFieldN - 1.0);
+    vec3 g0 = floor(g);
+    vec3 g1 = min(g0 + 1.0, vec3(uFieldN - 1.0));
+    vec3 f = g - g0;
+    vec3 c000 = promFieldFetch(g0.xy, g0.z);
+    vec3 c100 = promFieldFetch(vec2(g1.x, g0.y), g0.z);
+    vec3 c010 = promFieldFetch(vec2(g0.x, g1.y), g0.z);
+    vec3 c110 = promFieldFetch(vec2(g1.x, g1.y), g0.z);
+    vec3 c001 = promFieldFetch(g0.xy, g1.z);
+    vec3 c101 = promFieldFetch(vec2(g1.x, g0.y), g1.z);
+    vec3 c011 = promFieldFetch(vec2(g0.x, g1.y), g1.z);
+    vec3 c111 = promFieldFetch(vec2(g1.x, g1.y), g1.z);
+    vec3 c00 = mix(c000, c100, f.x), c10 = mix(c010, c110, f.x);
+    vec3 c01 = mix(c001, c101, f.x), c11 = mix(c011, c111, f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+  }
   varying vec2 vShape;     // x=截面锐度 y=丝尖参差度
 
   void main(){
@@ -130,7 +167,21 @@
     vec3 dv = up
             + sideT * ((x * ww) / rad)
             + bendDir * (bendMag * hh * t * t / rad);
-    vec3 p = normalize(dv) * rad;
+    vec3 pBase = normalize(dv) * rad;
+    // ---- **顶点自己采样世界空间流场**并沿它位移 ------------------------------
+    // 这是"扭"最自然的来源，也是用户两次点出的那条路：
+    //   扭转是个**微分量** —— 每个顶点在**自己的位置**上取场，左右两缘取到的不同
+    //   ⇒ 截面自然转（而且顺带得到**剪切**，显式旋转给不了）。
+    //   ⚠ 上一版每个顶点只读**每片一个常数**（根部烘的 aTwist.x）⇒ 一片里所有顶点
+    //     共用同一个方向 ⇒ 那只是**刚体倾斜**，扭是"算出来的"。
+    // 位移随高度**渐入**（根部 25% ⇒ 尖端 100%）：光球把磁流管锚在日面上，
+    // 全量位移会把根部整片推离日面（看着像浮在半空）。
+    // ⚠ **必须是差动**：用的是 `F(顶点) − F(根部)`，不是 `F(顶点)`。
+    //   直接用 F 会把整片**刚性推走**（根部也动）—— 实测带子被推歪、变矮、散成团。
+    //   取差之后根部 natural 锚死（t=0 处 off 恒为 0），剩下的全是**差动**：
+    //   跨宽度的那份 ⇒ 截面转（扭）、跨长度的那份 ⇒ 顺场弯、二阶的那份 ⇒ 剪切。
+    vec3 off = (promFieldAt(pBase) - aField0) * uDisp;
+    vec3 p = pBase + off;
 
     vUv = vec2(uv.x, t);
     // 片上纹理是**本地空间**的（见 prom.frag）：用这条带子自己的宽/高把 uv 换算到

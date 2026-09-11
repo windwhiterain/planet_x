@@ -187,7 +187,7 @@ function pickKind(u) {
 const lerpR = (ab, u) => ab[0] + (ab[1] - ab[0]) * u;
 
 // 网格按 LOD 生成多份，见 makePromGeo。
-function buildPromAttrs(sunR) {
+function buildPromAttrs(sunR, field) {
   const rnd = mulberry32(0x5eed1234);
   const dir = new Float32Array(PROM_MAX * 3);
   const side = new Float32Array(PROM_MAX * 3);
@@ -203,10 +203,13 @@ function buildPromAttrs(sunR) {
   // 每片自己的**形态参数**（见 PROM_KINDS）：(丝距倍率, 丝长倍率, 宽度剖面, 色温偏移)。
   // 这一条是"灵性"的关键 —— 以前这些是**全局 uniform**，所以每条带子的表面长得一样。
   const style = new Float32Array(PROM_MAX * 4);
-  const field = new PromField();
-  // α 网格烘一次（**内存里的推导产物**，不是版本库里的资产；20³ 实测 ~0.15 s）
+  // 根部处的**原始场矢量**：顶点着色器要用"该顶点处的场 − 它"（差动才有扭/剪切）
+  const f0v = new Float32Array(PROM_MAX * 3);
+  // ω 网格烘一次（**内存里的推导产物**，不是版本库里的资产；20³ 实测 ~0.13 s）。
+  // 只有 `uTwist != 0`（那份**显式积分**的扭）才需要它 —— 现在扭已经交给
+  // 顶点自己采样场了（见 `bakeField`），这份留着是为了随时能 A/B。
   field.bakeOmega(sunR);
-  const fs = { tilt: [0, 0], twist: [0, 0], mag: 0, mask: 0, phase: 0 };
+  const fs = { tilt: [0, 0], twist: [0, 0], mag: 0, mask: 0, phase: 0, f0: [0, 0, 0] };
   const d = new THREE.Vector3(), sv = new THREE.Vector3(), bv = new THREE.Vector3();
   const k0v = new THREE.Vector3(), upv = new THREE.Vector3();   // 复用的临时量
   const up = new THREE.Vector3(0, 1, 0), ex = new THREE.Vector3(1, 0, 0);
@@ -284,6 +287,7 @@ function buildPromAttrs(sunR) {
     upv.copy(d).addScaledVector(k0v, tiltAmt).normalize();
     twist[i * 2] = field.twistAlong(d.x, d.y, d.z, upv.x, upv.y, upv.z, sunR, hgt);
     twist[i * 2 + 1] = 0.55 + 0.90 * rnd();                                 // 每片的扭率抖动
+    f0v[i * 3] = fs.f0[0]; f0v[i * 3 + 1] = fs.f0[1]; f0v[i * 3 + 2] = fs.f0[2];
     twist[i * 2 + 2] = lerpR(K.cross, rnd());                               // 截面：面纱 ↔ 一道脊
     twist[i * 2 + 3] = lerpR(K.len, rnd());                                 // 丝尖参差度
   }
@@ -297,6 +301,7 @@ function buildPromAttrs(sunR) {
     aFlow2: new THREE.InstancedBufferAttribute(flowB, 4),
     aTwist: new THREE.InstancedBufferAttribute(twist, 4),
     aStyle: new THREE.InstancedBufferAttribute(style, 4),
+    aField0: new THREE.InstancedBufferAttribute(f0v, 3),
   };
 }
 
@@ -342,6 +347,19 @@ export function createSun(tier) {
   g.add(corona);
 
   // 日珥插片：**自己一套材质与几何**（世界空间、真遮挡、真视差）
+  // **世界空间流场纹理**（顶点着色器按"每个顶点自己的位置"取它 ⇒ 弯/扭/剪切自然产生）。
+  // ⚠ 它是**加载时算出来的推导产物**，不进版本库（用户裁决）。详见 sunfield.js::bakeField。
+  const field = new PromField();
+  const ft = field.bakeField(R);
+  const fieldTex = new THREE.DataTexture(ft.data, ft.width, ft.height, THREE.RGBAFormat, THREE.FloatType);
+  // NearestFilter 是**必须**的：图集里相邻格子是**不同深度的切片**，线性过滤会在切片间渗色
+  // ⇒ 顶点着色器里手写三线性（8 次取纹理）。
+  fieldTex.minFilter = THREE.NearestFilter;
+  fieldTex.magFilter = THREE.NearestFilter;
+  fieldTex.wrapS = THREE.ClampToEdgeWrapping;
+  fieldTex.wrapT = THREE.ClampToEdgeWrapping;
+  fieldTex.needsUpdate = true;
+
   const promMat = new THREE.ShaderMaterial({
     uniforms: {
       uSunR: { value: R },
@@ -359,10 +377,21 @@ export function createSun(tier) {
       // 顺场扭的幅度（中轴沿长度往场的方向歪出去多少）
       // 「弯」的幅度：∇×F 的**垂直**分量掰弯场线（顺场扫出去）
       uSweep: { value: PROM_SWEEP },
-      // 「扭」的倍率：∇×F 的**场向**分量 α 的径向积分（每片已烘在 aTwist.x）
-      // 1.0 时 aTwist.x 的中位只有 0.41 rad（23°），画面上看不出来；6.0 又成了扫帚。
-      // 2.0 ⇒ 中位 ~0.8 rad、p90 ~2.3 rad（130°），是"看得出在拧"的口径。
-      uTwist: { value: PROM_TWIST },
+      // **显式积分的那份扭**（`½∫ω·t̂ dl` 烘在 aTwist.x）。现在**关掉**：
+      // 扭改由"每个顶点自己采样世界空间流场"自然产生（见 uDisp 与 prom.vert）。
+      // 留着这个旋钮是为了随时能 A/B 回显式版本。
+      uTwist: { value: 0.0 },
+      // **顶点驱动的位移幅度**（世界单位）：每个顶点沿**自己位置上**的场位移这么多。
+      // 为什么这就是"扭"：扭转是个**微分量** —— 左右两缘取到的场不同 ⇒ 截面转。
+      // 定量（实测本仓的场）：转角 ≈ ½·|ω|·amp，amp=0.30 ⇒ **0.84 rad**，
+      // 与手调出来的 aTwist.x×uTwist 中位 0.82 几乎一样；而且顺带得到**剪切**。
+      uDisp: { value: TUNING.promDisp != null ? TUNING.promDisp : 0.30 },
+      // 场纹理的取样参数（图集布局必须与 sunfield.js::bakeField 逐项一致）
+      uFieldTex: { value: fieldTex },
+      uFieldAtlas: { value: new THREE.Vector2(ft.width, ft.height) },
+      uFieldGrid: { value: new THREE.Vector2(ft.tilesX, ft.tile) },
+      uFieldN: { value: ft.n },
+      uFieldHalf: { value: ft.half },
       // 喷发周期的基准（秒）；每条带子按自己的 `aFlow2.w` 在 0.6~1.7× 之间取
       uPeriod: { value: TUNING.promPeriod || 34 },
       // 带子**内部**纹理的频率。⚠ 纹理是**本地空间**的（沿带宽/带长的 uv），
@@ -385,7 +414,7 @@ export function createSun(tier) {
   });
   // 三个 LOD 各一份网格（实例属性共享），按档位换 —— 换的是 `prom.geometry`，
   // **不触发着色器重编译**（材质没变），所以换档不会有卡顿。
-  const promAttrs = buildPromAttrs(R);
+  const promAttrs = buildPromAttrs(R, field);
   const promGeos = PROM_LOD.map(([ws, hs]) => makePromGeo(promAttrs, ws, hs, R));
   const prom = new THREE.Mesh(promGeos[0], promMat);
   prom.frustumCulled = false;
