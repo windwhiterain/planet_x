@@ -927,6 +927,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
+            "launch": _launch_report(ships),
             "story_bad": story_bad, "story_rel_checked": rel_checked,
             "grant_bad": grant_bad, "grant_n": grant_n,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
@@ -1062,6 +1063,7 @@ def run(h, ck) -> None:
     cargo_checks(h, ck, out)
     depot_checks(h, ck, out)
     dispatch_checks(h, ck, out)
+    new_ship_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -1793,6 +1795,40 @@ def combat_scenario_checks(h, ck) -> None:
              arms["home"]["d"] <= arms["home"]["radius"] < arms["away"]["d"],
              f"放在 {arms['home']['where']}/{arms['away']['where']} ⇒ 距首都 "
              f"{arms['home']['d']:.1f} ≤ 半径 {arms['home']['radius']:.1f} < {arms['away']['d']:.1f} AU")
+
+
+def _launch_report(ships) -> dict:
+    """**新舰出厂时的指令归属**（`sim/tests/fleet.rs::newly_built_ships_have_no_order_of_their_own`）。
+
+    取「下水那一回合正好等于本回合」的行（= 刚出厂的那一批），看三样：
+    `order_leaf_mode`（叶片自己的表态）、`order_effective_mode`（有效归属）、`order_source`。
+
+    ⚠ 原件还断言「叶片里的**值**是个占位 `Idle`」——那半**读面看不见**：AI 会在**同一个回合内**
+    就给它派活（实测 345 艘里只有 30 艘的 `order_effective` 还是 `Idle`，其余已经是
+    `DockCity`/`Colonize`/`Haul`）。`spawn_ship` 那一刻的状态没有读法——这条判据只看
+    「叶片有没有主张」（`Inherit`）与「谁最终说了算」（`Auto`），那才是回归面。
+    """
+    launch = ships[ships["下水回合"] == ships["round"]]
+    return {
+        "n": int(len(launch)),
+        "leaf": sorted({str(m) for m in launch["order_leaf_mode"]}),
+        "mode": sorted({str(m) for m in launch["order_effective_mode"]}),
+        "src": sorted({str(s) for s in launch["order_source"]}),
+    }
+
+
+def new_ship_checks(h, ck, out) -> None:
+    """**新舰没有自己的指令主张**（`sim/tests/fleet.rs`，2026-10 第 7 批搬来）。"""
+    reps = [d["launch"] for d in out]
+    n = sum(r["n"] for r in reps)
+    leaf = sorted({m for r in reps for m in r["leaf"]})
+    mode = sorted({m for r in reps for m in r["mode"]})
+    src = sorted({s for r in reps for s in r["src"]})
+    ck.check("新舰出厂时叶片**没有说话**（`order_leaf_mode` 只会是 Inherit）",
+             leaf == ["Inherit"], f"{n} 艘新舰的叶片模式：{leaf}")
+    ck.check("新舰归**系统**（有效归属 Auto——没有任何更高的一层替它表态）",
+             mode == ["Auto"], f"{n} 艘新舰的有效归属：{mode}（来源 {src}）")
+    ck.check("新舰指令守卫没有空转（真的有一批刚出厂的舰）", n >= 50, f"{n} 艘（下限 50）")
 
 
 def id_checks(h, ck, out) -> None:

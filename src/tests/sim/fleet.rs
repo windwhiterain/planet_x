@@ -5,80 +5,11 @@
 //! | 原用例 | 现在住 | 为什么能搬 |
 //! | --- | --- | --- |
 //! | `advance_populates_round_events` | g1「全新开局的回合 0 没有事件」「推进过就有事件（事件层真的在写）」 | 原用例只断言「回合 0 空 → 跑几回合非空」，读面上这两半都在（`events` 表按 `round` 分组即可） |
+//! | `newly_built_ships_have_no_order_of_their_own` | g2「新舰出厂时叶片没有说话 / 新舰归系统」 | 3 seed × 400 回合里 **594 艘**新舰：`order_leaf_mode` 只会是 `Inherit`、`order_effective_mode` 只会是 `Auto`（有人重新加一片「舰队默认指令叶」就会被抓住）。⚠ 原件还断言「叶片里的**值**是占位 `Idle`」——那半读面看不见（AI 同回合就派活，实测 345 艘里只有 30 艘还留着 `Idle`） |
 //! | `player_stale_follow_degrades_to_idle_and_does_not_drift` | g2 **合成场景 · 陈旧的跟随**（5 条判据，防空气转在别的舰身上） | 钉一根**从第 0 回合就悬空**的 `Follow`（写面**不校验指令目标**，与悬空图指针正相反）⇒ 退化后的值在 `order_effective`、漂没漂在 `ships.x/y`、留没留痕在 `events[stale_order]` |
 //! | `dock_follows_body_and_idle_holds_position` | g2 **合成场景 · 停泊与待命**（4 条判据） | 第 7 批给读面补了派生表 **`body_positions`**（逐回合天体位置，与 `ships.x/y` 同一把绝对坐标尺子）⇒「Dock 有没有朝那个天体去」「Idle 的位置有没有动」都判得了。⚠ 必须钉成 `Player`：AI 会在回合末刚派完 Dock、下一回合开头就改派（实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，就是这种没执行过的叶子） |
 
 use super::*;
-
-/// **新舰出厂时没有任何人给它指令**（2026-10 裁决：指令是即时操作，只写逐舰叶）。
-///
-/// 这条是 `default_ship_order` 删除之后的端到端守卫：船坞下水时写的那片叶是
-/// **沉默的 `Idle`**（归属 `Inherit` ⇒ 沿作用域链解析成 `Auto`），也就是说
-/// **新舰归系统**、下一回合由自动控制按战况/积压给它派活；玩家想让它干别的，
-/// 就给它（或给这型舰的**图**）写一条。
-///
-/// 旧行为（"新舰直接继承势力默认的一条站桩指令"）已被裁决删掉：那条默认叶实测是
-/// **全舰队接管开关**，名字与作用不符。
-#[test]
-fn newly_built_ships_have_no_order_of_their_own() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国".to_string();
-
-    // 与船坞出厂同一条漏斗造一艘新舰。
-    let pos = state.body_position("水星");
-    let name = spawn_ship(
-        &mut state,
-        &config,
-        ShipSpawn {
-            owner: fid.clone(),
-            class: "corvette",
-            position: pos,
-            city: None,
-            via: SpawnVia::Shipyard,
-            pay_components: false,
-            blueprint: None,
-        },
-    );
-    // 出厂时 `spawn_ship` 给它一条**没有说话**（`Inherit`）的叶片——它不在玩家的任何
-    // diff 里，所以「谁负责」只能由作用域链回答。
-    let leaf = state
-        .control(fid.clone())
-        .and_then(|c| c.ship_orders.get(&name).cloned())
-        .expect("spawn_ship seeds an order leaf");
-    assert_eq!(
-        leaf.mode,
-        ControlMode::Inherit,
-        "a freshly built ship has no opinion of its own"
-    );
-    assert_eq!(
-        leaf.value,
-        ShipBehavior::Idle,
-        "…and its recorded value is a mere placeholder"
-    );
-    assert_eq!(
-        state.ship_control(name.clone()),
-        ControlMode::Auto,
-        "…so it belongs to the system (no fleet default leaf exists to claim it)"
-    );
-    assert_eq!(
-        state.ship_behavior(name.clone()),
-        Some(ShipBehavior::Idle),
-        "叶里的值就是有效值（没有更高的一层能覆盖它）"
-    );
-
-    // 推进一回合：系统接手它（归属 Auto），并给它写下自己的判定。
-    let mut rng = Prng::new(42);
-    advance(&mut state, &config, &mut rng);
-    assert_eq!(
-        state.ship_control(name.clone()),
-        ControlMode::Auto,
-        "新舰归系统（旧的「舰队默认叶把它收走」已不存在）"
-    );
-    assert!(
-        state.ship(&name).is_some(),
-        "舰还在（这条用例只关心指令归属，不是存亡）"
-    );
-}
 
 /// 玩家点名的殖民舰建完城之后必须**仍然是玩家的**。
 ///
@@ -192,7 +123,6 @@ fn colonize_keeps_player_ownership() {
         "an early return must not hand the ship back either"
     );
 }
-
 
 /// Follow semantics: `Follow { ship }` escorts/drives the ship — it is a pure
 /// movement behavior. Combat is now automatic: when any hostile is inside the
