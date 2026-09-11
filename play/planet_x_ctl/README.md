@@ -29,7 +29,7 @@ The line is a ruling, not a preference (`.agents/notes/engine-data-plane.md`):
 
 | layer | owns | why |
 |---|---|---|
-| **engine** (chain + templates) | the rules for entities that **do not exist yet**: `leaf → fleet default → faction scope → global` ownership resolution, what a newly-built ship inherits, the implied **writing a value takes over** rule, ship blueprints | the kit can only speak about ships that exist *now*; "new ships inherit intent" is only true on a chain |
+| **engine** (chain + templates) | the rules for entities that **do not exist yet**: `leaf → fleet default → faction scope` ownership resolution, what a newly-built ship inherits, the implied **writing a value takes over** rule, ship blueprints | the kit can only speak about ships that exist *now*; "new ships inherit intent" is only true on a chain |
 | **Python kit** (this package) | bird's-eye operations over entities that **do exist**: wildcards, name rosters, filtering, aggregation, recipes, `verify` | that is pandas' job; the engine should not grow a pile of one-shot verbs |
 
 Two things are therefore **deliberately absent** from the engine, and present here instead:
@@ -298,7 +298,7 @@ it**). Which brings us to the next warning.
 > `effective_order_mode` / `effective_order_value` / `order_source` are read **straight off** the
 > projection's own ships columns `order_effective_mode` / `order_effective` / `order_source` —
 > i.e. `State::ship_control` / `State::ship_behavior` / `State::ship_behavior_source`. That code
-> knows the real chains (指令：`叶 → 势力 → 全局`；倾向三轴：`叶 → 出厂图 → 舰队默认 → 势力 → 全局`),
+> knows the real chains (指令：`叶 → 势力`；倾向三轴：`叶 → 出厂图 → 舰队默认 → 势力`（全局那一档 2026-10 已删）),
 > so it is the only correct answer — never re-derive it in Python.
 >
 > This kit used to **re-implement** that chain in Python and hand back the result as
@@ -466,7 +466,7 @@ guessing. They are listed because they are cheap to close and expensive to work 
    `order_source`. The local chain is now only the **fallback** for index directories written by an
    older engine, where it keeps the `_approx` names and `effective_order_from_engine = False`. So the
    remaining honest caveat is narrow and stated on the face of the frame: **the fallback is
-   blueprint-blind** (`leaf → fleet default → faction scope → global`, with no `blueprint` step), which
+   blueprint-blind** (`leaf → fleet default → faction scope`, with no `blueprint` step), which
    is exactly why it may not wear the engine's column names.
    *Not staged in `demo.py`*: a blueprint-built ship (the one case where the two disagree). Getting one
    needs a real shipyard launch — a Player-owned blueprint that the faction cannot afford deliberately

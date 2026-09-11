@@ -411,6 +411,12 @@ fn derived_tables_are_written_and_declared() {
             }
         }
     }
+    // ⚠ 同理：`scope` 表是**表态驱动**的（2026-10 起连以前那一行常驻的 `global` 都没了）⇒
+    // 新开局零行。给这个势力钉一条表态，表才有东西可写。
+    state
+        .scope
+        .factions
+        .insert("中国".to_string(), crate::model::ControlMode::Player);
     let mut rng = Prng::new(7);
     let s = Scratch::new("derived_contract");
     write_index(&mut state, &cfg, &mut rng, 3, &s.0).unwrap();
@@ -1013,11 +1019,11 @@ fn control_table_holds_every_leaf() {
             .expect("缺该舰的指令叶行");
         assert_eq!(row["mode"], json!("Player"), "叶的 mode 应与状态一致");
     }
-    // scope 表：显式节点一行（global 恒定 + 我们刚钉的势力）。
+    // scope 表：只有**显式表态**的节点（没有 `global` 那一档，2026-10 已删）。
     let scope = jsonl(&s.0.join("idx/scope.jsonl"));
     assert!(
-        scope.iter().any(|r| r["level"] == json!("global")),
-        "scope 缺 global 行"
+        scope.iter().all(|r| r["level"] != json!("global")),
+        "scope 里不该再有 global 行（全局那一档已删）"
     );
     assert!(
         scope.iter().any(|r| r["level"] == json!("faction")

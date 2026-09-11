@@ -29,9 +29,6 @@ impl ControlScope {
     /// 键的值就是三态之一：`Auto`/`Player` = 在这一层表态；`Inherit` = 撤销这一层的
     /// 表态（与「这个键不存在」等价，只是读面上更明确）。
     pub fn overlay(&mut self, other: &ControlScopePatch) {
-        if let Some(g) = other.global {
-            self.global = g;
-        }
         for (k, v) in &other.factions {
             self.factions.insert(k.clone(), *v);
         }
@@ -218,16 +215,19 @@ impl<T> Control<T> {
     }
 }
 
-/// 城市/天体/势力/全局 的控制作用域。这些不是 [`ControllableState`] 的字段，
+/// 城市/天体/势力 的控制作用域。这些不是 [`ControllableState`] 的字段，
 /// 单独建一棵作用域树；判定可控叶子的自动/玩家边界时沿链上溯。
 ///
 /// 节点值 [`ControlMode::Inherit`] 表示这一层没有说话（与「这个键不存在」等价）：
 /// 作用域节点**只表态「谁负责」**，不携带值——值属于叶子。
+///
+/// ⚠ 2026-10 用户裁决：**删掉「全局」那一档**（*「谁会全局玩家控制啊，自己和自己下棋吗」*）。
+/// 它本来只是「链上谁都没说话时按谁」的最后一站，而引擎的兜底本来就是 `Auto` ⇒ 那一档**唯一**
+/// 真有区别的取值是 `Player`（= 把整个世界一次归玩家、AI 一个字节都不写）——那正是没人要的东西。
+/// 现在链尾就是「势力也没说话 ⇒ `Auto`」。旧档里多出来的 `global` 字段由 serde 当未知字段忽略
+/// （本仓不考虑向前兼容）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ControlScope {
-    #[serde(default)]
-    /// **全局那一档**（这个世界的默认归属）：链上谁都没说话时按它。
-    pub global: ControlMode,
     #[serde(default)]
     /// **已表态的势力**（势力名 → 三态）。只存表过态的：`Inherit` 等于「这一层没有说话」，不占条目。
     pub factions: BTreeMap<FactionId, ControlMode>,
@@ -241,7 +241,6 @@ pub struct ControlScope {
 
 /// 作用域树的**补丁**（写面 `scope` 字段）：只覆盖出现的节点/键。
 ///
-/// * `global: None` = 不动全局层；`Some(Inherit)` = 撤销全局层的表态。
 /// * 三个 `Vec` 里**出现的键**就是被触碰的键，其值同样是三态（`Inherit` = 撤销该键）。
 ///
 /// 同一个类型也是作用域树的**读面**（`--control` / web 的 `scope` 字段）：读面只列出
@@ -250,10 +249,7 @@ pub struct ControlScope {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct ControlScopePatch {
     #[serde(default)]
-    /// **全局那一档**：「链上谁都没说话时按谁」——`Inherit` = 全局也不说话（那就按引擎的默认），`Auto` = 自动控制，`Player` = 玩家。它是归属链的**最后一站**。
-    pub global: Option<ControlMode>,
-    #[serde(default)]
-    /// **势力档**：`[(势力名, 三态)]`。比全局具体 ⇒ 势力表态了就轮不到全局说话。
+    /// **势力档**：`[(势力名, 三态)]`。链上最粗的一档——它没说话就落到引擎兜底 `Auto`。
     pub factions: Vec<(FactionId, ControlMode)>,
     #[serde(default)]
     /// **天体档**：`[(天体名, 三态)]`。比势力具体（“这个星球我亲自管”），但比城粗。
