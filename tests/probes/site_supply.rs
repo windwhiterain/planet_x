@@ -13,7 +13,7 @@
 //! 跑法：
 //! ```text
 //! cargo nextest run -P full --run-ignored all -E 'test(probe_site_supply)'
-//! PROBE_ROUNDS=400 PROBE_SEEDS=7,42 cargo test --test site_supply_probe -- --ignored --nocapture
+//! PROBE_ROUNDS=400 PROBE_SEEDS=7,42 cargo nextest run -P full --run-ignored all -E 'test(/^site_supply::/)'
 //! ```
 
 use planet_x::config::load_config;

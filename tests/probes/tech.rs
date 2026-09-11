@@ -6,8 +6,8 @@
 //!
 //! 跑法：
 //! ```text
-//! cargo test --test tech_probe -- --ignored --nocapture
-//! PROBE_ROUNDS=800 PROBE_SEEDS=7,42 cargo test --test tech_probe -- --ignored --nocapture
+//! cargo nextest run -P full --run-ignored all -E 'test(/^tech::/)'
+//! PROBE_ROUNDS=800 PROBE_SEEDS=7,42 cargo nextest run -P full --run-ignored all -E 'test(/^tech::/)'
 //! ```
 
 use planet_x::config::load_config;

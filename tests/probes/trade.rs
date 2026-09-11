@@ -7,8 +7,8 @@
 //!
 //! 跑法：
 //! ```text
-//! cargo test --test trade_probe -- --ignored --nocapture
-//! PROBE_ROUNDS=1000 PROBE_SEEDS=1,42 cargo test --test trade_probe -- --ignored --nocapture
+//! cargo nextest run -P full --run-ignored all -E 'test(/^trade::/)'
+//! PROBE_ROUNDS=1000 PROBE_SEEDS=1,42 cargo nextest run -P full --run-ignored all -E 'test(/^trade::/)'
 //! ```
 
 use planet_x::config::load_config;
