@@ -219,6 +219,7 @@ function buildPromAttrs(sunR, field) {
   const fs = { tilt: [0, 0], twist: [0, 0], mag: 0, mask: 0, phase: 0, f0: [0, 0, 0] };
   const d = new THREE.Vector3(), sv = new THREE.Vector3(), bv = new THREE.Vector3();
   const k0v = new THREE.Vector3(), upv = new THREE.Vector3();   // 复用的临时量
+  const f0tmp = [0, 0, 0];                                      // 根部场矢量的临时量
   const up = new THREE.Vector3(0, 1, 0), ex = new THREE.Vector3(1, 0, 0);
 
   for (let i = 0; i < PROM_MAX; i++) {
@@ -295,7 +296,12 @@ function buildPromAttrs(sunR, field) {
     upv.copy(d).addScaledVector(k0v, tiltAmt).normalize();
     twist[i * 2] = field.twistAlong(d.x, d.y, d.z, upv.x, upv.y, upv.z, sunR, hgt);
     twist[i * 2 + 1] = 0.55 + 0.90 * rnd();                                 // 每片的扭率抖动
-    f0v[i * 3] = fs.f0[0]; f0v[i * 3 + 1] = fs.f0[1]; f0v[i * 3 + 2] = fs.f0[2];
+    // **差动的基准点必须取在带子真正的根部**（`up` 方向、日面半径处），不能取 `d*sunR`。
+    // ⚠ 这是"根部浮空"的成因：`tilt` 典型 ~0.5 rad（30°）⇒ 根部沿球面偏了 30°，
+    //   而那一点的场和 `d*sunR` 处的场**不是一回事** ⇒ 差动不为 0 ⇒
+    //   位移的径向分量把根抬离球面（量级 |F|×uDisp ≈ 0.22 世界单位 ≈ 0.034R）。
+    field.curl(upv.x * (sunR - 0.015), upv.y * (sunR - 0.015), upv.z * (sunR - 0.015), f0tmp);
+    f0v[i * 3] = f0tmp[0]; f0v[i * 3 + 1] = f0tmp[1]; f0v[i * 3 + 2] = f0tmp[2];
     twist[i * 2 + 2] = lerpR(K.cross, rnd());                               // 截面：面纱 ↔ 一道脊
     twist[i * 2 + 3] = lerpR(K.len, rnd());                                 // 丝尖参差度
   }
