@@ -25,6 +25,7 @@ import * as THREE from 'three';
 import { INC } from './glsl.js';
 import { NOISE_GLSL, fbmOct } from './util.js';
 import { TUNING } from './tuning.js';
+import { PromField, sampleField } from './sunfield.js';
 
 const SUN_VERT = INC('px/sun/sun.vert');
 
@@ -139,6 +140,15 @@ function mulberry32(a) {
 //   所以任何"按位置加密"的做法都是白费（会密在直段上）；只能均匀给足。
 const PROM_LOD = [[9, 24], [7, 16], [5, 10]];
 
+// ⚠ **这些常量是 JS 与 GLSL 的耦合点**：`prom.vert` 里 `up` / `bendMag` 的算法必须与
+//   下面 `buildPromAttrs` 里烘 `up` 的那几行**逐项一致** —— 因为"扭角"是在 CPU 上沿
+//   **带子的路径**积分的，而路径方向 `up` 是顶点着色器算的。两边一旦不一致，
+//   症状是"扭的方向和带子实际的倾斜对不上"（不报错、只是看着别扭）。
+//   所以这两个值只在这里定义一次，uniform 也用它们。
+const PROM_TILT = 0.75;    // 顺场倾倒的总幅度
+const PROM_SWEEP = 0.34;   // 顺场扫出去（∇×F 的垂直分量 = 弯）
+const PROM_TWIST = 2.0;    // 扭的倍率（∇×F 的场向/路径分量沿路径的积分）
+
 // 单位插片：宽 1、长 1。
 // ⚠ uv.y = 0 是**根部**、1 是**尖端**（three 的 PlaneGeometry 就是这样）。
 // 这里只生成**每实例属性**（与 LOD 无关，5000 条带子的数据不该按 LOD 复制一份）；
@@ -150,7 +160,18 @@ function buildPromAttrs(sunR) {
   const bend = new Float32Array(PROM_MAX * 3);
   const par = new Float32Array(PROM_MAX * 4);
   const kind = new Float32Array(PROM_MAX * 3);
+  // **世界空间流场**烘出来的每实例量（朝向 / 扭转 / 场强 / 掩码 / 喷发相位 / 周期）。
+  // 为什么烘在 CPU：见 prom.vert 与 sunfield.js 顶部 —— 这些量**每片就是一个常数**，
+  // 让 250 个顶点各算一遍（每顶点约 24 次 pnoise）纯属浪费，实测值 3.5 ms。
+  const flowA = new Float32Array(PROM_MAX * 4);
+  const flowB = new Float32Array(PROM_MAX * 4);
+  const twist = new Float32Array(PROM_MAX * 2);
+  const field = new PromField();
+  // α 网格烘一次（**内存里的推导产物**，不是版本库里的资产；20³ 实测 ~0.15 s）
+  field.bakeOmega(sunR);
+  const fs = { tilt: [0, 0], twist: [0, 0], mag: 0, mask: 0, phase: 0 };
   const d = new THREE.Vector3(), sv = new THREE.Vector3(), bv = new THREE.Vector3();
+  const k0v = new THREE.Vector3(), upv = new THREE.Vector3();   // 复用的临时量
   const up = new THREE.Vector3(0, 1, 0), ex = new THREE.Vector3(1, 0, 0);
 
   for (let i = 0; i < PROM_MAX; i++) {
@@ -164,7 +185,18 @@ function buildPromAttrs(sunR) {
     // 根部标架（aDir 是"法线"，aSide/aBend 是切平面里的一对基）。
     // ⚠ 这里**不再**随机扰动 d 的方向：带子的朝向由 `promFlow` 这个世界空间场决定
     //   （见 prom.vert）。CPU 侧多搅一点随机，就等于把好不容易建立起来的"场"搅没了。
+    // ⚠ **根部横截面必须绕 d 随机滚一个角**。参考写法 `sv = up × d`（up 是世界 +Y）
+    //   恒落在**水平面**里 ⇒ 每条带子绕自身法线的滚转角恒为 0 ⇒ **从极轴看下去所有
+    //   片子的"正面"朝向完全一样**（用户报的"基本都是正的、没有斜着的"）。
+    //   侧视的三种景天然看不出这个偏置，是加了 `sun-pole` 那一景才钉住的。
+    //   滚转角用均匀随机：带子自己的初始朝向本来就该是各向同性的
+    //   （"同一个噪声空间"管的是**场**，不是每片的初始滚转）。
     sv.copy(Math.abs(d.y) > 0.9 ? ex : up).cross(d).normalize();
+    bv.copy(d).cross(sv).normalize();
+    const roll = rnd() * Math.PI * 2;
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+    const sx = sv.x, sy = sv.y, sz = sv.z;
+    sv.set(sx * cr + bv.x * sr, sy * cr + bv.y * sr, sz * cr + bv.z * sr).normalize();
     bv.copy(d).cross(sv).normalize();
 
     const isArc = rnd() < 0.12;
@@ -188,9 +220,31 @@ function buildPromAttrs(sunR) {
     side[i * 3] = sv.x; side[i * 3 + 1] = sv.y; side[i * 3 + 2] = sv.z;
     bend[i * 3] = bv.x; bend[i * 3 + 1] = bv.y; bend[i * 3 + 2] = bv.z;
     par[i * 4] = hgt; par[i * 4 + 1] = wid; par[i * 4 + 2] = curve; par[i * 4 + 3] = seed;
+    const tiltJit = rnd();                         // 顺场倾倒的抖动
     kind[i * 3] = arc;
-    kind[i * 3 + 1] = rnd();                       // 顺场倾倒的抖动
+    kind[i * 3 + 1] = tiltJit;
     kind[i * 3 + 2] = 0.70 + 0.70 * rnd();         // 宽度的每片抖动
+
+    // 采样世界空间流场：根部定"朝哪边倒"，上方 0.30R 定"往哪边扭"，
+    // 外加"哪里有日珥"的掩码与喷发相位（相位来自场 ⇒ 相邻带子相干）。
+    sampleField(field, d, sv, bv, sunR, fs);
+    flowA[i * 4] = fs.tilt[0]; flowA[i * 4 + 1] = fs.tilt[1];
+    flowA[i * 4 + 2] = fs.mag; flowA[i * 4 + 3] = fs.mask;
+    flowB[i * 4] = fs.twist[0]; flowB[i * 4 + 1] = fs.twist[1];
+    // 相位 = 场（成片）+ 一点每片的抖动（否则同一片里几十条带子整齐划一，很假）
+    flowB[i * 4 + 2] = fs.phase + 0.16 * (rnd() - 0.5);
+    flowB[i * 4 + 3] = 0.60 + 1.10 * rnd();                                 // 周期倍率
+    // **扭角** = 自转率 `½ω·t̂`（ω=∇×F 是涡量、t̂ 是带子路径切线）沿**路径**的积分。
+    // 跟着流走的材料微元，其刚体转动角速度正好是 **ω/2**，横截面绕路径方向的自转只取
+    // ω 在 t̂ 上的投影 ⇒ "顶点沿路径位移、截面自然转"，这是"扭"最自然的来源。
+    // （另一种口径 α=(F·∇×F)/|F|² 是"旋度沿**场**方向"，即 force-free 参数；
+    //   带子的 t̂ 与 F 不是一回事，所以对"沿路径长出来的插片"用路径口径才对。）
+    // 带子的**路径方向** —— 必须与 `prom.vert` 里算 `up` 的那三行同源（见 PROM_* 常量）：
+    //   tilt = uTilt·(0.25 + 1.5·场强)·(0.55 + 0.90·抖动);  up = normalize(aDir + k0·tilt)
+    const tiltAmt = PROM_TILT * (0.25 + 1.5 * fs.mag) * (0.55 + 0.90 * tiltJit);
+    upv.copy(d).addScaledVector(k0v, tiltAmt).normalize();
+    twist[i * 2] = field.twistAlong(d.x, d.y, d.z, upv.x, upv.y, upv.z, sunR, hgt);
+    twist[i * 2 + 1] = 0.55 + 0.90 * rnd();                                 // 每片的扭率抖动
   }
   return {
     aDir: new THREE.InstancedBufferAttribute(dir, 3),
@@ -198,6 +252,9 @@ function buildPromAttrs(sunR) {
     aBend: new THREE.InstancedBufferAttribute(bend, 3),
     aParam: new THREE.InstancedBufferAttribute(par, 4),
     aKind: new THREE.InstancedBufferAttribute(kind, 3),
+    aFlow: new THREE.InstancedBufferAttribute(flowA, 4),
+    aFlow2: new THREE.InstancedBufferAttribute(flowB, 4),
+    aTwist: new THREE.InstancedBufferAttribute(twist, 2),
   };
 }
 
@@ -256,9 +313,16 @@ export function createSun(tier) {
       //   现在是 `oct-2` 且上下夹住：ultra 3、high 3、medium 2、low 1。
       uFbmOct: fbmOct(Math.max(1, Math.min(3, oct - 2))),
       // 顺场倾倒的总幅度（弧度尺度）：**"朝向不再一样"就是靠它**
-      uTilt: { value: 0.75 },
+      uTilt: { value: PROM_TILT },
       // 顺场扭的幅度（中轴沿长度往场的方向歪出去多少）
-      uTwist: { value: 0.34 },
+      // 「弯」的幅度：∇×F 的**垂直**分量掰弯场线（顺场扫出去）
+      uSweep: { value: PROM_SWEEP },
+      // 「扭」的倍率：∇×F 的**场向**分量 α 的径向积分（每片已烘在 aTwist.x）
+      // 1.0 时 aTwist.x 的中位只有 0.41 rad（23°），画面上看不出来；6.0 又成了扫帚。
+      // 2.0 ⇒ 中位 ~0.8 rad、p90 ~2.3 rad（130°），是"看得出在拧"的口径。
+      uTwist: { value: PROM_TWIST },
+      // 喷发周期的基准（秒）；每条带子按自己的 `aFlow2.w` 在 0.6~1.7× 之间取
+      uPeriod: { value: TUNING.promPeriod || 34 },
       // 带子**内部**纹理的频率。⚠ 纹理是**本地空间**的（沿带宽/带长的 uv），
       // 频率只用来把 uv 换算成世界尺度（`vSize`）—— 这样窄带子和宽带子上的丝一样粗。
       // 26 ⇒ 丝的间距 ≈ 0.038 世界单位 ≈ 0.006R ⇒ 一条带子里并排 **7~26 根丝**。
@@ -340,8 +404,9 @@ export function createSun(tier) {
       photosphereMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
       promMat.uniforms.uTime.value = t;
-      // 「喷发」感：整体高度做一次很慢的呼吸（振幅小，别让它读成"整片在缩放"）
-      promMat.uniforms.uGrow.value = 1.0 + 0.16 * Math.sin(t * 0.23);
+      // 全局呼吸只留一点点：**主运动已经交给每片自己的喷发周期**（见 prom.vert），
+      // 这里再加一个大振幅的全局呼吸会和它打架（整片日缘一起涨落，很假）。
+      promMat.uniforms.uGrow.value = 1.0 + 0.05 * Math.sin(t * 0.23);
       // 相机矩阵会变（变焦/改 FOV），所以每帧同步，不能只在创建时设一次
       if (camera) coronaMat.uniforms.uProj.value.copy(camera.projectionMatrix);
       // 深度预趟产物 + 相机参数：体积积分靠它们夹断（每帧都要更新，窗口会变）

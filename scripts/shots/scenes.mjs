@@ -32,6 +32,16 @@ export function diskView(d) {
 // 「看日缘」：目标点取**从相机看过去的轮廓点** L（满足 (L−P)·L = 0 ⇒ P·L = R²），
 // 于是日缘正好横穿画面中心，一半日面一半虚空 —— 日珥就是在这条线上量的。
 // phiDeg：相机离黄道面的仰角（90° = 正上方俯视极区）。
+// 「**俯视极轴**」：相机压在 +Y 上往下看。
+// 为什么必须有这一景：带子的根部标架是从 `up=(0,1,0)` 推出来的（`sv = up × d`），
+// 那个参考系**恒落在水平面里** ⇒ 每条带子绕自身法线的滚转角恒为 0 ⇒
+// **从极轴看下去所有片子朝向完全一样**（用户报的"基本都是正的、没有斜着的"）。
+// 侧视的三种景（disk/limb/wide）都天然看不出这个问题 —— 只有俯视能钉住它。
+export function poleView(d, tiltDeg = 4) {
+  const t = rad(tiltDeg);
+  return { pos: [0, Math.cos(t) * d, Math.sin(t) * d], target: [0, 0, 0] };
+}
+
 export function limbView(d, phiDeg = 74) {
   const u = [0, Math.sin(rad(phiDeg)), Math.cos(rad(phiDeg))];
   const s = SUN_R / d;
@@ -90,6 +100,23 @@ export const SCENES = [
       edgeSpread: [12, 900],
       // 贴日面那一圈（色球/针状体）必须比更外圈亮 —— 否则「没有日珥」
       promContrast: [1.15, 1000],
+    },
+  },
+  {
+    name: 'sun-pole',
+    desc: '俯视极轴：带子根部的**滚转角**必须有各向同性的分布（全一个朝向 = 标架偏置）',
+    viewport: [1280, 800],
+    query: { q: 'ultra', tune: BASE_TUNE, hide: ['labels', 'markers'], t: 16 },
+    view: poleView(19.0),
+    geom: { kind: 'disk', d: 19.0, silThr: 45, silMaxR: 1.6 },
+    hold: 700,
+    limits: {
+      // 俯视要看的是**整圈日缘**（相机 19 ⇒ 日面半径约 290 px），重点是那圈须的朝向分布
+      diskCenterOnScreen: [1, 1],
+      // 须必须真的伸出去（俯视时量的是"日缘之外的亮度"）
+      edgeMeanOverR: [1.02, 1.45],
+      diskP90minusP50: [3, 400],
+      skyMeanLum: [0, 32],
     },
   },
   {

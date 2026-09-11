@@ -1,6 +1,6 @@
 #ifndef PX_SUN_PROM_FRAG
 #define PX_SUN_PROM_FRAG
-#include <px/sun/flow.glsl>
+#include <px/noise/perlin.glsl>
 #include <px/noise/vnoise.glsl>
 
   precision highp float;
@@ -19,12 +19,13 @@
   varying float vArc;
   varying float vMask;
   varying float vEdge;
+  varying float vLife;      // 生命期包络（顶点算好传过来）
 
   // 一条带子内部要画出**很多细小的日珥**（用户原话）。
   //
   // ⚠ **这里的噪声是本地空间的，不是世界空间的** —— 这件事第一版我做反了，记下来：
-  //   · 世界空间共享的那个场（`px/sun/flow.glsl`）负责的是**带子的扭曲/朝向**，
-  //     让相邻带子成片地倒向同一侧、扭向同一侧；
+  //   · 世界空间共享的那个场（现在烘在每实例属性里，见 `map3d/sunfield.js`）负责的是
+  //     **带子的扭曲/朝向**，让相邻带子成片地倒向同一侧、扭向同一侧；
   //   · **带子内部的纹理属于这条带子自己**（沿带宽/带长的 uv + 每片的 seed）。
   //   把内部纹理也钉在世界坐标上的后果：纹理尺度被"世界单位"锁死，一条窄带子里只剩两三根丝，
   //   而且纹理和带子的形状毫无关系（带子扭过去，纹理不动）。
@@ -77,7 +78,9 @@
                     1.0 - 0.45 * smoothstep(0.88, 1.00, t),
                     arcMix);
 
-    float a = lateral * fil * threadLen * (0.55 + 0.45 * knots) * tip * vMask * vEdge;
+    // 生命期进 alpha 与亮度：正在喷发的带子更亮更热，落回去的只剩一点余烬。
+    float life = 0.32 + 0.68 * vLife;
+    float a = lateral * fil * threadLen * (0.55 + 0.45 * knots) * tip * vMask * vEdge * life;
 
     // ⑦ **只在掠射时可见**：正对着看的带子只是一块亮 patch，不该盖住整个盘面。
     //    没这一条时，整个可见半球都被盖住（像一只毛球），
@@ -96,7 +99,7 @@
     // 拱的"亮"在**两端**（两个脚扎进色球）、中段偏冷 —— 和须正好反过来。
     float heatT = mix(1.0 - t, abs(2.0 * t - 1.0), arcMix);
     vec3 col = mix(uColorCool, uColorHot, clamp(heatT * 0.80 + knots * 0.45, 0.0, 1.0));
-    col *= 0.80 + 0.45 * knots;
+    col *= (0.80 + 0.45 * knots) * (0.72 + 0.38 * vLife);
 
     // 加色混合：日珥是**发光体**（光学薄），叠加是对的；深度的遮挡由 depthTest 保证。
     gl_FragColor = vec4(col * uIntensity * a, a);
