@@ -98,6 +98,10 @@ pub fn available_throughput(
     from: &str,
     to: &str,
 ) -> f64 {
+    let control = state
+        .faction(fid)
+        .map(|f| f.mond_control)
+        .unwrap_or(0.0);
     state
         .ships
         .iter()
@@ -105,7 +109,7 @@ pub fn available_throughput(
         .filter(|s| state.ship_control(s.name.clone()) == ControlMode::Auto)
         .filter(|s| state.contracts.assignment_of(&s.name).is_none())
         .filter(|s| s.cargo.is_empty())
-        .map(|s| freight::trip_throughput(state, config, s, from, to))
+        .map(|s| freight::trip_throughput(state, config, s, from, to, control))
         .sum()
 }
 
@@ -307,7 +311,13 @@ fn hired_throughput(state: &State, config: &GameConfig, c: &Contract) -> f64 {
         .iter()
         .filter_map(|s| state.ship(s.as_str()))
         .filter(|s| s.hull > 0.0)
-        .map(|s| freight::trip_throughput(state, config, s, &c.from, &c.to))
+        .map(|s| {
+            let control = state
+                .faction(&s.faction_id)
+                .map(|f| f.mond_control)
+                .unwrap_or(0.0);
+            freight::trip_throughput(state, config, s, &c.from, &c.to, control)
+        })
         .sum()
 }
 
