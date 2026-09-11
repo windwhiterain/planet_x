@@ -11,3 +11,29 @@
 - **config/story/剧情引用全改名字**：`mond.masters`、`Relations(a,b)`、`GrantShip(faction,body)`、`GrantResources(faction)`、`WarBetween(a,b)`、`FactionAtWar(faction)` 等全部用势力名/天体名。
 - **验证**：`cargo build` ×2 绿；`cargo test --lib` 39 passed；`cargo test --test longhorizon` 5 passed/4 ignored（含 `same_seed_reproduces_identically`、`world_is_multipolar`、`no_nonfinite_over_long_run`）；smoke `--seed 7 --round 0` 舰名如 `长城/赤霄/北斗`(中国)、`华盛顿/总统/落基`(美国)，`Ship` 无 `id` 字段、`faction_id`/`relations` key 为名字。**注意**：`config/game.ron` 与 `.ron` checkpoint 的实体身份从数字 id 换成名字，旧档不再兼容（符合「不考虑向前兼容」）。
 - `[ ]`（后续可做）**数字 id 彻底移除后的收敛**：`web.rs` 的 `StateView`/`MetaView` 仍属独立投影，可再复用同源；`agent` 未预计算派生字段（舰 panel/城 armor 等）仍靠 `--meta`/语义视图。
+
+## §2 「为什么 `BuildingId` 全局唯一了，键里还要带城名」——**2026-10 裁决：保持**
+
+一次读代码时问出来的：`InvestKey = BuildKey = (CityId, BuildingId)`，而
+`BuildingId` 其实**已经全局唯一**（`sim/construction.rs`：`next_building_id = 全场 max(id) + 1`），
+读面也把 `cities.buildings[].id` 露出来了 ⇒ 城市那一半看着冗余，「只留 id」值得问一句。
+
+**结论：保持成对键（即上面第 5 行那条规矩）。** 理由不是「id 指不到」，而是**可读性**：
+`21` 对人、对 UI、对 agent 的笔记都没有意义，「上海的建筑 21」才有意义；写面的叶本来就按
+`keys: ["city","building"]` 寻址（`control/leaves.rs`），控制树也按「城 → 建筑」分组 ⇒
+去掉城市那一半只是把一次 join 从引擎挪到每一个读的人手里。
+
+**这份冗余的价钱（照实记下，省得下一个人重新发现）**：
+
+| 代价 | 具体 |
+| --- | --- |
+| JSON 档要专门的键适配器 | `--save w.json` 把元组键写成 `"水星熔炉基地\|21"`，读回来时 `serde_json` 报 `invalid type: string …, expected a tuple of size 2` ⇒ 新增 `json::key2`（写 `名\|序号`、读按 `\|` 拆）。**`State.depots = (FactionId, BodyId)` 是真二元键**（同一天体上可有几个势力的货栈），所以这个适配器无论如何都要有 |
+| 投影的控制表多一个槽 | `derived.control` 的 `key` = 城名 + `sub` = 建筑序号（其余 kind 的 `sub` 为 null） |
+| 每个权重行背一个城名字符串 | 记忆与档都白背一点（可忽略，不入账） |
+
+**顺手记下一个真隐患（`[ ]` 未修，与上面的裁决无关）**：id 分配器是 `max(全场) + 1`、每回合重算
+⇒ **同一个 id 跨回合会被复用**（最高 id 的建筑一被拆，下个新建筑就拿回那个号）。此刻唯一性没问题
+（活着的建筑不会撞号，拆除时权重条目也一并删掉），但**「id 当长期引用」会指错人**：跨回合的 UI
+选中态、agent 笔记里写的「建筑 21」、两份存档的对比。要修就在 `State` 里放一个**单调计数器**
+（`next_building_id`，老档 `serde(default)`、迁移时取 `max+1`），让 id 永不复用——那时唯一性
+从「此刻」变成「永远」。
