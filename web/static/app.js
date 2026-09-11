@@ -389,9 +389,9 @@ function rebuildLeafSpec() {
   return true;
 }
 
-/// 归属三态写在哪个字段里 / 删叶写在哪个字段里——由引擎发（不再散落一堆字面量）。
+/// 归属三态写在哪个字段里——由引擎发；设计图的删除字段是蓝图专用动作，不走控制叶 manifest。
 function modeField() { return (window.Controls && Controls.ownerField()) || '归属'; }
-function removeFieldName() { return (window.Controls && Controls.removeField()) || '删叶'; }
+const BLUEPRINT_DELETE_FIELD = '删除';
 
 /// 这片叶跟着哪片「舰队默认」叶（`leaf_ui.<field>.follows`）——**轴间关系是前端的呈现**，
 /// 引擎不知道「逐舰风格叶和舰队默认风格叶是同一条轴」这件事。
@@ -470,14 +470,12 @@ function wroteValue(leaf) {
 function diffLeaf(leaf, spec) {
   const o = leafOrigin.get(leaf);
   if (!o) return null; // 连原值都没有 ⇒ 不敢猜，宁可不回传
-  if (removedLeaves.has(leaf)) {
-    // 删叶：只发身份键 + `remove`（引擎拒绝「删叶 + 写值」混在一条补丁里）。
-    if (o.shell) return null; // 读面里本来就没有这片叶 ⇒ 没什么可删的
+  if (removedBlueprints.has(leaf)) {
+    // 设计图删除：只发身份键 + `删除`（引擎拒绝「删除 + 写值」混在一条补丁里）。
+    if (o.shell) return null; // 读面里本来就没有这张图 ⇒ 没什么可删的
     const out = {};
     spec.keys.forEach((k) => { out[k] = leaf[k]; });
-    // ⚠ 字段名走**引擎的 manifest**（`remove_field`）：以前这里写死 `'remove'`，而隔壁
-    // `removeFieldName()` 已经准备好了那份事实却没人用——引擎一旦改名，这条会**静默**发错键。
-    out[removeFieldName()] = true;
+    out[BLUEPRINT_DELETE_FIELD] = true;
     return out;
   }
   const out = {};
@@ -776,7 +774,7 @@ function inlineSpec(path, value) {
 /// 旧树能做的每一件事都改由 `views.json` 声明的行提供：设计图库 → 「设计图」页的 `leaf` 行
 /// （带 `new: true` 的「＋ 新建」）、建筑与建造区 → 城市卡片的 `action: buildings` 行、
 /// 全局作用域 → 「全局」页的 `owner: global` 行、迁都 → 「势力」卡片的 `capital` 行、
-/// 恢复继承 / 恢复出厂值 → 每条控制行自带。见 `.agents/notes/web-control-spec.md`。
+/// 恢复继承 → 每条控制行自带；设计图删除是蓝图专用动作。见 `.agents/notes/web-control-spec.md`。
 /// ⚠ 2026-10 第 9 步：这里还挂过一张**自动生成的「未组织」页**（`id: 'leftover'`）——它是
 /// **页级的兜底桶**，与第 8 步删掉的那个「其余」列是同一个概念（用户裁决 *「我不希望有"其余"
 /// 这样的栏目」*）。它承载的两件事都有了去处，所以**整条删除**：
@@ -837,24 +835,20 @@ function renderLeafNode(node, opts) {
   // 「恢复继承」：撤销这片叶的**表态**（mode → 继承），值不动。只在它自己有表态时出现——
   // 那时"我想反悔"才有意义（把下拉调回「继承」等价，但这个按钮把撤销写在脸上）。
   if (node.leaf && normMode(node.leaf[mf]) !== 'Inherit') head.appendChild(restoreInheritButton(node.leaf));
-  // 「恢复出厂值」/「删掉这张图」：**删掉这片叶**（取值真的回到上层/出厂快照；设计图那一片
-  // 叶就是整张图）。只在状态里真的有这片叶时出现。
-  if (node.leaf && rawLeafOf(node)) {
-    head.appendChild(leafFieldOf(node) === '设计图库'
-      ? removeLeafButton(node, '删掉这张图', '删掉整张设计图（`{"图名":…,"删叶":true}`）：挂它的建造区随后是悬空指针 ⇒ 本区停产（进度不再涨，Q10(a)），已下水的舰不受影响（快照）。点「应用到服务器」才生效。')
-      : removeLeafButton(node));
+  // 设计图是库里可以删掉的对象（删图会让建造区悬空 ⇒ 停产）；这是蓝图专用动作，
+  // 与控制叶无关。控制叶不再有「恢复出厂值」机制。
+  if (node.leaf && leafFieldOf(node) === '设计图库' && rawLeafOf(node)) {
+    head.appendChild(removeBlueprintButton(node));
   }
   // 新控制行的行首一句实话（「没有叶（这一层没表态）」这类）。
   if (o.hint) head.appendChild(el('span', { class: 'ctl-none' }, o.hint));
   wrap.appendChild(head);
 
-  // 被标记删除的叶：不再给编辑器（点「应用」它就没了），只说明会发生什么。
-  if (node.leaf && removedLeaves.has(node.leaf)) {
-    wrap.appendChild(hintLine(leafFieldOf(node) === '设计图库'
-      ? '已标记删除：点「应用到服务器」之后这张图从库里消失，'
-        + yardCountText(node.fid, node.id)
-        + '（再点一次按钮可撤销）'
-      : '已标记删除：点「应用到服务器」之后这片叶消失，取值回到上层 / 出厂快照（再点一次按钮可撤销）'));
+  // 被标记删除的设计图：不再给编辑器（点「应用」它就没了），只说明会发生什么。
+  if (node.leaf && removedBlueprints.has(node.leaf)) {
+    wrap.appendChild(hintLine('已标记删除：点「应用到服务器」之后这张图从库里消失，'
+      + yardCountText(node.fid, node.id)
+      + '（再点一次按钮可撤销）'));
     return wrap;
   }
 
@@ -961,21 +955,16 @@ function restoreInheritButton(leaf) {
 
 /// 舰行上的**便利**下拉：「这条舰的各片叶（指令 / 风格 / 风筝姿态 / 角色）一起归谁」。
 ///
-// --- 删叶（「恢复出厂值」） --------------------------------------------------
-// 引擎的取值规则是「叶存在就用叶里的值」（`leaf.map(|l| l.value).unwrap_or(record)`，与叶的
-// `mode` 无关），所以「恢复继承」只交还**归属**、交还不了**数值**：碰过一次的风格叶会一直
-// 钉着那个数。真正把它放回出厂快照 / 舰队默认的动作是**删掉这片叶**（补丁的 `remove: true`）。
-// 这里就是那个动作（note §10.4 选定的方案 A）。
-const removedLeaves = new WeakSet(); // 被标记「删掉这片叶」的叶（点「应用」时才真的发出去）
+// --- 设计图删除（蓝图专用动作，与控制叶无关） ------------------------------
+// 控制叶不再支持「恢复出厂值 / 删叶」——出厂默认只是初始值，不存在一个可恢复的
+// 保存目标。设计图不一样：它是用户建的对象，可以从库里删掉；删掉后挂它的建造区
+// 变成悬空指针 ⇒ 停产（Q10(a)），但已下水的舰不受影响。
+const removedBlueprints = new WeakSet(); // 被标记「删掉这张图」的设计图叶
 
-/// 这片叶在**原始 state** 里存在吗？——删叶按钮只在真的有这片叶时出现。
-/// （读面里逐舰风格两行**总是**在，哪怕叶不存在；要知道真相得看 `state.control`。）
-///
-/// **身份键来自引擎的 manifest**：叶条目自己就带着那几个键（`ship` / `resource` /
-/// `city`+`building` / `name`），这里只按它挑一次——以前这张「kind → 名单 + 取键闭包」的表
-/// 是手抄的第四份副本（已删）。
+/// 这张图在**原始 state** 里存在吗？——删图按钮只在真的有这张图时出现。
+/// 读面里设计图行**总是**在；要知道真相得看 `state.control`。
 function rawLeafOf(node) {
-  if (!node.field) return null;   // 没有字段名的节点（如建筑行）本来就没有自己的叶
+  if (!node.field) return null;
   const raw = (st.control || {})[node.fid];
   if (!raw) return null;
   const bucket = raw[node.field];
@@ -983,10 +972,6 @@ function rawLeafOf(node) {
   const spec = LEAF_SPEC[node.field];
   if (!spec || !spec.keys.length) return bucket;
   const leaf = node.leaf || {};
-  // ⚠ 原始 state 里的**键叶是映射**（键 = 第一个身份键），而读面给的是**数组**
-  // （`control_view` 把映射摊成"一行一片"）——两种形状都要认：
-  //   `投资预算: {"碳": {值, 归属}}`（原始） vs `[{"资源":"碳", …}]`（读面）。
-  // 多键叶（城 + 建筑）在原始状态里的键是元组键的线格式：`"亚特兰大|10"`。
   if (Array.isArray(bucket)) {
     return bucket.find((e) => spec.keys.every((k) => String(e[k]) === String(leaf[k]))) || null;
   }
@@ -999,17 +984,17 @@ function rawLeafOf(node) {
   return null;
 }
 
-/// 「恢复出厂值」= **删掉这片叶**。它与「恢复继承」不是一回事（见上面的说明），所以两个
-/// 动作并存、各自写在按钮上：「恢复继承」= 交还归属；「恢复出厂值」= 把这个数也还回去。
-function removeLeafButton(node, label, title) {
-  const marked = removedLeaves.has(node.leaf);
+/// 删掉整张设计图（不是"改属性"）：只发身份键 + `删除`；挂它的建造区随后
+/// 变成悬空指针 ⇒ 本区停产（Q10(a)）。点「应用到服务器」才生效。
+function removeBlueprintButton(node) {
+  const marked = removedBlueprints.has(node.leaf);
   const b = el('button', {
-    class: 'restore rm-leaf' + (marked ? ' on' : ''), 'data-role': 'remove-leaf',
-    title: title || '删掉这片叶（不是清空）：这一层不再说话，取值回到上层 / 出厂快照。点「应用到服务器」才生效。',
-  }, marked ? '取消删除' : (label || '恢复出厂值'));
+    class: 'restore rm-leaf' + (marked ? ' on' : ''), 'data-role': 'remove-blueprint',
+    title: `删掉整张设计图（\`{"图名":…,"删除":true}\`）：挂它的建造区随后是悬空指针 ⇒ 本区停产（进度不再涨，Q10(a)），已下水的舰不受影响（快照）。点「应用到服务器」才生效。`,
+  }, marked ? '取消删除' : '删掉这张图');
   b.addEventListener('click', () => {
-    if (marked) removedLeaves.delete(node.leaf);
-    else removedLeaves.add(node.leaf);
+    if (marked) removedBlueprints.delete(node.leaf);
+    else removedBlueprints.add(node.leaf);
     controlRerender();
   });
   return b;
@@ -1309,7 +1294,7 @@ function weightRow(leaf, field, label, owner) {
 
 /// **迁都**（`capital` 这片叶，值 = 一个天体名）。旧控制树从来没给它入口（它只在读面里显示），
 /// 新控制行把它补上：一个天体下拉 + 「写值即接管」。
-/// ⚠ 这片叶**没有 `remove`**（引擎的 manifest 里 `read_only` 与值字段都不含它）⇒ 这里不提供
+/// ⚠ 控制叶没有删叶/`remove` 机制 ⇒ 这里不提供
 /// 「不表态」那一档：发一个 `value: null` 进 presence-aware 的补丁等于**什么都没说**，
 /// 给了那个选项才是骗人。要改就换一个天体，要撤就把归属改回「继承」。
 function bodyEditor(leaf, node, opts) {
@@ -1360,7 +1345,7 @@ function labelWrap(label, control) {
 }
 function pushModify(fid, cityId, bid, attrs) {
   const fc = getControl(fid);
-  const i = fc.建筑.findIndex((p) => p.建筑 === bid && !p.删叶);
+  const i = fc.建筑.findIndex((p) => p.建筑 === bid && !p.拆掉);
   if (i >= 0) fc.建筑[i] = Object.assign({}, fc.建筑[i], attrs, { 城: cityId, 建筑: bid });
   else fc.建筑.push(Object.assign({ 城: cityId, 建筑: bid }, attrs));
 }
@@ -1554,7 +1539,7 @@ function componentPicker(leaf, opts) {
 /// 要它更凶/更谨慎，写的是**风格**；要它贴着打/放风筝，写的是**风筝姿态**。
 ///
 /// 每条轴都有「**不表态**」这一档，它就是引擎里的 `null`：**本图对这条轴没有说话** ⇒
-/// 链继续往下降到舰队默认。它和「删掉这张图」（`remove: true`）是两回事——删图会让
+/// 链继续往下降到舰队默认。它和「删掉这张图」（`删除: true`）是两回事——删图会让
 /// 建造区悬空停产。三条轴**逐轴独立**：表态一条不影响另两条。
 ///
 /// ⚠ 图能供值还有一个前提（引擎侧）：这张图的**归属解析为 `Player`**。图是 `Auto` 时，
@@ -1732,7 +1717,7 @@ function buildingEditor(node) {
   const rm = el('button', { class: 'rm' }, '移除');
   rm.addEventListener('click', () => {
     const fc = getControl(fid);
-    fc.建筑.push({ 城: cityId, 建筑: b.建筑编号, 删叶: true });
+    fc.建筑.push({ 城: cityId, 建筑: b.建筑编号, 拆掉: true });
     applyControl();
   });
   wrap.appendChild(rm);
@@ -1931,10 +1916,10 @@ function renderReport() {
     box.appendChild(hintLine('隐含接管 ' + r.took_over.length + ' 片叶（只写了值没写归属 ⇒ 引擎按「写值即接管」把它们钉成玩家）：' + r.took_over.join('、')));
   }
   if ((r.removed || []).length) {
-    box.appendChild(hintLine('删掉了 ' + r.removed.length + ' 片叶：' + r.removed.join('、')));
+    box.appendChild(hintLine('删掉了 ' + r.removed.length + ' 张设计图：' + r.removed.join('、')));
   }
   if (!skipped.length && !(r.took_over || []).length && !(r.removed || []).length) {
-    box.appendChild(hintLine('（没有需要你知道的边角：没有丢弃、没有隐含接管、没有删叶。）'));
+    box.appendChild(hintLine('（没有需要你知道的边角：没有丢弃、没有隐含接管、没有删除。）'));
   }
 }
 

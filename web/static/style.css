@@ -132,8 +132,8 @@ body {
   border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 11px; flex: none;
 }
 .tnode .restore:hover, .ship-editor .restore:hover { border-color: var(--accent); }
-/* 「恢复出厂值」= 删叶：比「恢复继承」更进一步（真的把值还回去），而且是**破坏性**的，
-   所以给它一个会被注意到的颜色，标记之后常亮。 */
+/* 「删掉这张图」是蓝图专用破坏性动作（删图 ⇒ 建造区悬空停产），所以给它一个
+   会被注意到的颜色，标记之后常亮。 */
 .tnode .rm-leaf { color: #fca5a5; }
 .tnode .rm-leaf.on { background: #4a1d1d; border-color: #fca5a5; color: #ffd0d0; }
 .ship-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; }
@@ -418,7 +418,7 @@ button.primary:hover { background: #2563eb; }
 
 /* --- 声明式控制行（views.json 里的 `leaf` / `owner` / `action` 行）---------------
    读行与控制行住在**同一条行序**里（`.sv-sheet-row` / `.sv-td`），所以这里只补
-   「一行控制行里面长什么样」：值 + 归属 chip + 恢复继承/恢复出厂值 + 编辑器，
+   「一行控制行里面长什么样」：值 + 归属 chip + 恢复继承 + 编辑器，
    以及表格里的 `compact` 格（只给值 + chip，完整编辑器在卡片里）。 */
 .sv-sheet-row-ctl { align-items: start; }
 .sv-sheet-row-ctl .sv-sheet-k { color: #b9c6e6; }

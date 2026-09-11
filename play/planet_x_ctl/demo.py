@@ -423,7 +423,7 @@ def main(argv=None) -> int:
 
     # ---------------------------------------------------------------- 4b. the third style axis
     print("\n[4b] 第三条风格轴**角色**（战舰 War / 运输舰 Freight / 观测舰 Observe）："
-          "写值即接管 · AI 定编的闸门 · 删叶 = 交回定编")
+          "写值即接管 · AI 定编的闸门 · 归属 Auto = 放手")
     hero = names[0]
     s_r = ctl.surface(ckpt, index_dir=proj)
     check("角色轴进得了 surface()（读面每艘舰一行 `角色`）",
@@ -441,32 +441,13 @@ def main(argv=None) -> int:
           rep_r.after.leaf(faction, "角色", hero).value == "Freight",
           f"{rep_r.after.leaf(faction, '角色', hero).value!r}")
 
-    # 真的落地：verify 只是演习，而删叶必须对着「那片叶真的在」的 checkpoint 来。
+    # 真的落地：verify 只是演习，apply --save 才是把玩家归属真的写进 checkpoint。
     ckpt_r = work / "ckpt_r.json"
     app_r = ctl.apply(ckpt, path_r, save=ckpt_r)
     check("R: --apply --save 成功，checkpoint 里这艘舰的角色已归玩家",
           app_r.ok and not app_r.skipped
           and ctl.surface(ckpt_r).leaf(faction, "角色", hero).mode == ctl.PLAYER,
           f"{ctl.surface(ckpt_r).leaf(faction, '角色', hero)}")
-
-    # ② 删叶 = **交回自动定编**（不是"锁成某个值"）。逐舰叶的存在性读面看不出来，
-    #    所以"落地了没有"以引擎的 NOTE_APPLY_REMOVED 回执为准。
-    #    ⚠ `verify` 是**只读演习**：要验证"再删一次是幂等的"，必须先把第一次删叶真的
-    #    apply 下来——否则第二次删的仍然是"那片叶还在"的 checkpoint（这个坑笔记里记过，
-    #    这里当场演示一遍）。
-    s_r2 = ctl.surface(ckpt_r)
-    s_r2.remove_role(hero)
-    path_r2 = ctl.write(s_r2.emit(), work / "steer_r2.json")
-    rep_r2 = ctl.verify(ckpt_r, path_r2)
-    print(rep_r2.describe())
-    check("R: 删叶在引擎回执里出现（读面看不出来，靠回执）",
-          rep_r2.removed_leafs == [f"{faction}.角色[{hero}]"], f"{rep_r2.removed_leafs}")
-    ckpt_r2 = work / "ckpt_r2.json"
-    check("R: 删叶真的落地（--apply --save：这一步之后那片叶才真的没了）",
-          ctl.apply(ckpt_r, path_r2, save=ckpt_r2).ok)
-    rep_r3 = ctl.verify(ckpt_r2, ctl.surface(ckpt_r2).remove_role(hero).emit())
-    check("R: 再删同一片叶 = 幂等成功（不进回执、也不算丢弃）",
-          rep_r3.ok and rep_r3.removed_leafs == [] and not rep_r3.skipped, str(rep_r3.removed_leafs))
 
     # ③ 势力级默认角色叶：一片叶管住全舰队；`Player` 就是「AI 定编别碰我的舰队」那道闸门。
     #    这里用第三态 `Observe`——它是本轮新加的那一档（观测舰去异常区蹲着喂 MOND 掌握度）。
@@ -479,9 +460,6 @@ def main(argv=None) -> int:
           d_leaf.value == "Observe" and d_leaf.mode == ctl.PLAYER, f"{d_leaf}")
     ckpt_r3 = work / "ckpt_r3.json"
     check("R: 势力级默认叶真的落地", ctl.apply(ckpt_r, path_r3, save=ckpt_r3).ok)
-    rep_r5 = ctl.verify(ckpt_r3, ctl.surface(ckpt_r3).remove_default_role(faction).emit())
-    check("R: 删势力级默认角色叶也在回执里（`exists` 由 True 翻回 False）",
-          rep_r5.removed_leafs == [f"{faction}.舰队默认角色"], f"{rep_r5.removed_leafs}")
 
     # ---------------------------------------------------------------- 4c. 舰船设计图
     print("\n[4c] 设计图**blueprint**（「还不存在的舰」的出厂规格）：建图 · 建造区指针 · 删图")
@@ -635,28 +613,6 @@ def main(argv=None) -> int:
           and set(mine_lo["order_source"]) == {"leaf"},
           f"source={sorted(set(mine_lo['order_source']))}")
 
-    # 再把其中一艘舰的叶**删掉**：`order_leaf` 必须翻成 False，而且**没有人接手**
-    # （没有舰队默认叶、也没有图上意图）⇒ 有效值是空的，调用方按 `Idle` 兜底。
-    gone = sorted(mine_lo["舰名"])[0]
-    s_lo2 = ctl.surface(ckpt_lo)
-    s_lo2.remove(faction, "指令", gone)
-    ckpt_lo2 = work / "ckpt_leaforder2.json"
-    check("LO: 删叶真的落地",
-          ctl.apply(ckpt_lo, ctl.write(s_lo2.emit(), work / "steer_leaforder2.json"),
-                    save=ckpt_lo2).ok)
-    row_gone = ctl.ships(ckpt_lo2)
-    row_gone = row_gone[row_gone["舰名"] == gone].iloc[0]
-    check("LO: 叶被删过 ⇒ `order_leaf` 是 **False**、`order_behavior` 空、`order_mode` 回 Inherit",
-          not bool(row_gone["order_leaf"]) and pd.isna(row_gone["order_behavior"])
-          and row_gone["order_mode"] == ctl.INHERIT,
-          f"{gone}: leaf={row_gone['order_leaf']} mode={row_gone['order_mode']} "
-          f"behavior={row_gone['order_behavior']!r}")
-    check("LO: 没有叶 ⇒ **没有任何一层说话**（有效值空、出处空；旧行为的「舰队默认接手」已不存在）",
-          pd.isna(row_gone["effective_order_value"]) and pd.isna(row_gone["order_source"]),
-          f"effective={row_gone['effective_order_value']!r} source={row_gone['order_source']!r}")
-    check("LO: 别的舰照旧有自己的叶（只删了一艘）",
-          int(ctl.ships(ckpt_lo2).query("势力 == @faction")["order_leaf"].sum()) == len(mine_lo) - 1)
-
     # ---------------------------------------------------------------- 5. determinism
     print("\n[5] 确定性：同一个 ckpt + 同一份配方 → 逐字节一致的 diff")
     d1, _ = recipe_policy(ckpt, proj)
@@ -744,8 +700,7 @@ def main(argv=None) -> int:
           f"noop={len(rep_c.noop_requests)} skipped={len(rep_c.skipped)} "
           f"took_over={len(rep_c.took_over)} incidental={len(rep_c.incidental)} ok={rep_c.ok}")
     print(f"  R 角色轴     : requested={len(rep_r.requests)} took_over={len(rep_r.took_over)} "
-          f"removed={len(rep_r2.removed_leafs)}+{len(rep_r5.removed_leafs)} "
-          f"ok={rep_r.ok and rep_r2.ok and rep_r5.ok}")
+          f"ok={rep_r.ok}")
     print(f"    封顶 {len(table)} 条预算，涉 {table['势力'].nunique() if len(table) else 0} 个势力；"
           f"逐舰下发指令 {_n_written} 处（全舰队听同一句话）")
     if len(table):

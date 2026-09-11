@@ -1,5 +1,9 @@
 # 控制属性 = 活层（三态归属 + 层次化默认值）
 
+> ⚠ **2026-10 用户后续裁决**：本文所述的「删叶 / 恢复出厂值」（`remove: true`、
+> `NOTE_APPLY_REMOVED` 控制叶部分）已**整体删除**。出厂默认只是初始值，不是可恢复的目标；
+> 控制叶没有 `remove`/`删叶`，旧键会在 API 边界被拒。本文相关段落只作历史记录。
+
 > 状态 `[~]`（指令部分已实现；风格部分与按舰级默认未做） ｜ 索引：[notes.md](../notes.md) ｜
 > 关联：`agent-control-long-game.md`（§5 新舰默认归 AI、§6 结构性叶片所有权、§7 幽灵权重）、
 > `agent-control-api.md`、`agent-play.md` §3/§4（玩家手册）、`combat-behavior-doctrine.md`

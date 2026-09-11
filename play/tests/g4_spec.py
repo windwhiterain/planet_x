@@ -42,10 +42,9 @@
    出这种事——`owner` 行按「作用域键在语料里」判绿，而宿主根本不查那个词，实机 hover
    无反应（2026-10 实测的缺口）。
 
-⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
-`Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
-`remove` 带 `skip_serializing_if = "is_false"` ⇒ 读面永远不发这个字段。所以上头的 `∪ {remove}`
-是**允许集**（宽容那一侧），不是「应该有」；谁要在读面上真的看到它，本组的 detail 会报出来。
+⚠ **控制叶的删叶机制已删除**（2026-10 用户裁决：出厂默认只是初始值，不是可恢复的目标）：
+`--control-schema` 不再有 `remove_field`，读面条目也只含 keys / values / carries /
+read_only / 归属。设计图删除是蓝图专用动作，用 `删除` 键，不在下面的控制叶字段集对账里。
 
 8. **追加机制**（§8，2026-10 第 8 步）：用户裁决 *「我不希望有『其余』这样的栏目」*
    *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* —— 读面的「残差折叠桶」
@@ -884,7 +883,6 @@ def run(h, ck) -> None:
     leaves = schema.get("leaves") or []
     actions = schema.get("actions") or []
     owner_field = schema.get("owner_field")
-    remove_field = schema.get("remove_field")
     props = (((schema.get("definitions") or {}).get("FactionControlPatch") or {})
              .get("properties") or {})
     declared = {s["field"] for s in leaves} | {a["field"] for a in actions} | {"势力"}
@@ -899,7 +897,7 @@ def run(h, ck) -> None:
                  + ([f"声明了引擎没有的叶：{extra_decl}"] if extra_decl else [])
                  + ([f"leaves[].field 重复：{leaf_dups}"] if leaf_dups else [])
              ) or (f"{len(declared)} 个键两边一模一样（{len(leaves)} 叶 + {len(actions)} 命令 + 势力）；"
-                   f"owner_field={owner_field!r} remove_field={remove_field!r}"))
+                   f"owner_field={owner_field!r}，已无 remove_field"))
 
     # ══ 3. 读面对账：跑一局真世界，把每一片叶都写一次，再读回来 ══════════════════════
     tmp = Path(tempfile.mkdtemp(prefix="px-g4-"))
@@ -966,9 +964,8 @@ def run(h, ck) -> None:
              "；".join(lost[:4]) or
              f"{fid}：{len(plans)} 片叶全部按哨兵命中（{SEED} / {ROUNDS} 回合，不是空表通过）")
 
-    # 3b. 字段集：每条条目 ⊇ keys ∪ values ∪ carries ∪ read_only ∪ {mode}，⊆ 那个集合 ∪ {remove}。
+    # 3b. 字段集：每条条目 == keys ∪ values ∪ carries ∪ read_only ∪ {mode}，无缺、无多余。
     field_bad: list[str] = []
-    remove_seen: list[str] = []
     n_entries = 0
     for c in post["control"]:
         for spec in leaves:
@@ -978,13 +975,8 @@ def run(h, ck) -> None:
                 n_entries += 1
                 required = set(_keys_of(spec)) | set(spec.get("values") or []) | \
                     set(spec.get("carries") or []) | set(spec.get("read_only") or []) | {owner_field}
-                allowed = required | {remove_field}
                 miss = sorted(required - set(e))
-                extra = sorted(set(e) - allowed)
-                if remove_field in e:
-                    remove_seen.append(f"{c.get('势力')}.{spec['field']}")
-                    if _keys_of(spec):
-                        extra = extra + [f"{remove_field}（列表叶上不该有）"]
+                extra = sorted(set(e) - required)
                 if miss or extra:
                     field_bad.append(
                         f"{c.get('势力')}.{spec['field']}：缺 {miss}、多 {extra}；"
@@ -993,9 +985,7 @@ def run(h, ck) -> None:
     ck.check(f"读面对账：{n_entries} 个读面条目的字段集 == keys ∪ values ∪ carries ∪ read_only "
              f"∪ {{{owner_field}}}（无缺、无多余）",
              not field_bad,
-             f"实测 {remove_field!r} 出现 {len(remove_seen)} 次"
-             f"{'（' + '、'.join(sorted(set(remove_seen))[:5]) + '）' if remove_seen else '（读面根本不发它）'}"
-             + ("；" + "；".join(field_bad[:3]) if field_bad else ""))
+             "；".join(field_bad[:3]) or f"{n_entries} 个条目字段集全部吻合")
 
     # 3c. 形状：keys 空 ⇔ 对象；非空 ⇔ 数组且每一条带齐身份键。
     shape_bad2: list[str] = []

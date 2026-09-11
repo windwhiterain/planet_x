@@ -1397,7 +1397,7 @@ def blueprint_scenario_checks(h, ck) -> None:
                       "设计图库": [{"图名": ghost, "舰级": class_,
                                       "选装": ["kinetic"], "归属": "Inherit"}],
                       "建筑": [{"城": city, "建筑": bid, "设计图": ghost}]}]},
-        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删叶": True}]}]},
+        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删除": True}]}]},
     ])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions", "city_process", "ships"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)

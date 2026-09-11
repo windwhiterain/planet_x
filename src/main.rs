@@ -390,8 +390,8 @@ fn main() {
                         })
                     );
                 }
-                // 「删叶」的回执：这些叶片被真的删掉了 ⇒ 有效值**换了来源**（逐舰风格回出厂快照 /
-                // 舰队默认回「没有说话」）。删一片本来就不存在的叶是幂等的，不进这个列表。
+                // 「删图」的回执：这些设计图被真的删掉了 ⇒ 挂它们的建造区变成悬空指针 ⇒
+                // 停产（Q10(a)）。删一张本来就不存在的图是幂等的，不进这个列表。
                 if !report.removed.is_empty() {
                     eprintln!(
                         "{}",
@@ -400,7 +400,7 @@ fn main() {
                             "code": "NOTE_APPLY_REMOVED",
                             "applied": report.applied,
                             "removed": report.removed,
-                            "hint": "those control leaves are gone: what they used to supply now comes from the next layer (per-ship style falls back to the factory record, a fleet default falls back to the scope chain).",
+                            "hint": "those blueprints are gone: shipyards pointing at them become dangling and stop production until the pointer is cleared or a same-name blueprint is rebuilt.",
                         })
                     );
                 }

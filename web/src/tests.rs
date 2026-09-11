@@ -606,12 +606,11 @@ fn minimal_leaf_diffs_touch_only_what_changed() {
     );
 }
 
-/// 「恢复出厂值」（**删叶**）走 web 的写面：前端那个按钮发的就是
-/// `{"舰": …, "删叶": true}`。它与「恢复继承」（只写 mode）**不是**一回事——
-/// 叶只要还在，引擎就优先用叶里的值，所以只有删掉它才能回到出厂快照。
+/// **旧删叶键在 web 写面入口也会响亮失败**。前端已经没有「恢复出厂值」按钮；
+/// `CommandReq` 的自定义反序列化会递归拒绝任何 `"删叶"` 键，避免静默 no-op。
 #[test]
-fn removing_a_ship_style_leaf_returns_the_factory_record() {
-    let mut w = world();
+fn the_removed_leaf_patch_is_rejected_at_the_web_boundary() {
+    let w = world();
     let fid = w.state.factions[0].name.clone();
     let ship = w
         .state
@@ -620,73 +619,21 @@ fn removing_a_ship_style_leaf_returns_the_factory_record() {
         .find(|s| s.faction_id == fid)
         .map(|s| s.name.clone())
         .expect("这个势力得有舰");
-    // 出厂记录值给成非零（`config/*.ron` 从没填过风格，开局是 {0,0}，那样分不出
-    // "回到出厂值"和"钉在 0"）。
-    for s in w.state.ships.iter_mut().filter(|s| s.faction_id == fid) {
-        s.doctrine = planet_x::model::ShipDoctrine {
-            temper: 0.71,
-            lone_wolf: -0.2,
-        };
-    }
-    let record = w.state.ship(&ship).unwrap().doctrine;
 
-    // ① 先写一片叶（两轴一起给，避免 `partial_doctrine_leaf`）。
-    let take: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "势力": fid,
-            "风格": [{ "舰": ship, "temper": -1.0, "lone_wolf": 0.5 }] }]
+    let err = serde_json::from_value::<CommandReq>(serde_json::json!({
+        "control": [{ "势力": fid, "风格": [{ "舰": ship, "删叶": true }] }]
     }))
-    .unwrap();
-    assert!(apply_diff(&mut w.state, &w.config, &take).is_clean());
-    assert_eq!(w.state.ship_doctrine(ship.clone()).temper, -1.0);
-
-    // ② 前端那个按钮的补丁：只带身份键 + `remove`。
-    let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "势力": fid,
-            "风格": [{ "舰": ship, "删叶": true }] }]
-    }))
-    .unwrap();
-    let report = apply_diff(&mut w.state, &w.config, &req);
-    assert!(report.is_clean(), "{:?}", report.skipped);
-    assert_eq!(
-        report.removed.len(),
-        1,
-        "删叶要有回执：{:?}",
-        report.removed
-    );
-    assert_eq!(
-        w.state.ship_doctrine(ship.clone()),
-        record,
-        "删叶之后必须回到出厂记录值"
-    );
+    .err()
+    .expect("旧删叶键必须在反序列化时被拒");
     assert!(
-        w.state
-            .control
-            .get(&fid)
-            .and_then(|c| c.ship_doctrine.get(&ship))
-            .is_none(),
-        "这片叶必须真的没了（前端「当前跟随」那行会立刻改口）"
+        err.to_string().contains("删叶") && err.to_string().contains("已删除"),
+        "{err}"
     );
-    // 读面仍然给这艘舰一行（值 = 有效值 = 出厂值）——前端不必为"叶不存在"特判。
-    let fc = state_view(&w)
-        .control
-        .into_iter()
-        .find(|c| c.faction_id == fid)
-        .unwrap();
-    let row = fc
-        .ship_doctrine
-        .into_iter()
-        .find(|e| e.ship == ship)
-        .expect("每艘舰一行");
-    assert_eq!(
-        (row.temper, row.lone_wolf),
-        (record.temper, record.lone_wolf)
-    );
-    assert_eq!(row.mode, ControlMode::Inherit);
 }
 
 /// 第三条风格轴（**角色**：战舰 / 运输舰 / 观测舰，三值枚举）在 web 的读写两面上走通：读面每艘舰
 /// 一行（`ship_role`，值 = **有效角色**）、写面能定角色（写值即接管 ⇒ 自动控制不再定编这艘舰）、
-/// `remove` 能删掉这片叶把它**交回自动定编**（这与另两条风格轴上"删叶"的含义不同）。
+/// 把归属改成 `Auto` 就能把它**交回自动定编**（控制叶的删叶机制已删除）。
 ///
 /// ⚠ 这里的值型态本轮变了：`freighter: bool` → `role: "War" | "Freight" | "Observe"`。
 /// 所以下面每一处载荷都写字符串，而不是 `true`/`false`——写布尔会被 serde 当场拒（类型不符）。
@@ -725,38 +672,22 @@ fn the_role_axis_round_trips_through_the_web_surface() {
     assert_eq!(w.state.ship_role(ship.clone()), ShipRole::Freight);
     assert_eq!(w.state.ship_role_control(ship.clone()), ControlMode::Player);
 
-    // ③ 前端那个「恢复出厂值」按钮发的补丁：只带身份键 + `remove`。
-    let record = w.state.ship(&ship).unwrap().role;
+    // ③ 放手：写 `归属: Auto`（不是删叶）⇒ 自动控制下回合可以重新定编。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "势力": fid, "角色": [{ "舰": ship, "删叶": true }] }]
+        "control": [{ "势力": fid, "角色": [{ "舰": ship, "归属": "Auto" }] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
     assert!(report.is_clean(), "{:?}", report.skipped);
-    assert_eq!(
-        report.removed.len(),
-        1,
-        "删叶要有回执：{:?}",
-        report.removed
-    );
-    assert_eq!(
-        w.state.ship_role(ship.clone()),
-        record,
-        "删叶之后回到出厂记录值"
-    );
-    assert!(
-        w.state
-            .control
-            .get(&fid)
-            .and_then(|c| c.ship_role.get(&ship))
-            .is_none(),
-        "这片叶必须真的没了"
-    );
-    assert_ne!(
-        w.state.ship_role_control(ship.clone()),
-        ControlMode::Player,
-        "删叶 = 交回自动定编（而不是「锁成某个值」）"
-    );
+    assert_eq!(w.state.ship_role_control(ship.clone()), ControlMode::Auto);
+
+    // ③b 旧删叶键在 web 写面入口被拒。
+    let err = serde_json::from_value::<CommandReq>(serde_json::json!({
+        "control": [{ "势力": fid, "角色": [{ "舰": ship, "删叶": true }] }]
+    }))
+    .err()
+    .expect("旧删叶键必须在反序列化时被拒");
+    assert!(err.to_string().contains("删叶") && err.to_string().contains("已删除"), "{err}");
 
     // ④ 势力级默认角色叶（`Option`：有叶才有一行）也走读写两面。
     //    这里用第三态 `Observe`：它是本轮新加的那一档，顺手钉住「字符串收发得回去」。
@@ -775,10 +706,17 @@ fn the_role_axis_round_trips_through_the_web_surface() {
         (d.role, d.mode),
         (Some(ShipRole::Observe), Some(ControlMode::Player))
     );
+    let other = w
+        .state
+        .ships
+        .iter()
+        .find(|s| s.faction_id == fid && s.name != ship)
+        .map(|s| s.name.clone())
+        .expect("这个势力还有第二艘舰");
     assert_eq!(
-        w.state.ship_role(ship.clone()),
+        w.state.ship_role(other),
         ShipRole::Observe,
-        "舰队默认归玩家 ⇒ 它的值说了算（继承它的舰现在是观测舰）"
+        "舰队默认归玩家 ⇒ 没有自己叶片的舰继承到观测舰"
     );
 }
 
@@ -804,12 +742,11 @@ fn the_order_read_face_lists_ships_without_a_leaf() {
     assert!(ours.len() >= 2, "这个势力得有两艘以上舰");
     let vanished = ours[0].clone();
 
-    // 把一艘舰的指令叶删掉 —— 正是「恢复出厂值」（`remove: true`）之后的状态。
-    let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "势力": fid, "指令": [{ "舰": vanished, "删叶": true }] }]
-    }))
-    .unwrap();
-    assert!(apply_diff(&mut w.state, &w.config, &req).is_clean());
+    // 测试直接拿掉控制面里的指令叶（写面不再提供删叶；这个状态等价于
+    // 「这艘舰从没被点名过」）。
+    if let Some(ctl) = w.state.control.get_mut(&fid) {
+        ctl.ship_orders.remove(&vanished);
+    }
 
     let fc = state_view(&w)
         .control
@@ -962,7 +899,7 @@ fn the_blueprint_library_round_trips_through_the_web_surface() {
 
     // ⑤ 删整张图（`remove`）：回执里点名到叶，图库里就没了。
     let req: CommandReq = serde_json::from_value(serde_json::json!({
-        "control": [{ "势力": fid, "设计图库": [{"图名": "重甲护卫", "删叶": true}] }]
+        "control": [{ "势力": fid, "设计图库": [{"图名": "重甲护卫", "删除": true}] }]
     }))
     .unwrap();
     let report = apply_diff(&mut w.state, &w.config, &req);
