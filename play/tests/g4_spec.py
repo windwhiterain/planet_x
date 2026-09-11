@@ -271,12 +271,17 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             else:
                 add(f, k, {"ship": ship, "role": S_ROLE, "mode": "Player"}, {"role": S_ROLE})
 
-        elif f in ("investment_budget", "construction_budget"):
+        elif f in ("investment_budget", "construction_budget", "welfare_budget"):
             k = first(spec)
             if not k:
                 missing.append(f"{f}：这一局该势力一个资源 key 都没有，没法写")
                 continue
-            v = V_INVEST if f == "investment_budget" else V_CONSTRUCT
+            if f == "investment_budget":
+                v = V_INVEST
+            elif f == "construction_budget":
+                v = V_CONSTRUCT
+            else:
+                v = V_INVEST
             add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
 
         elif f in ("invest_weights", "build_weights"):
@@ -287,13 +292,13 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             v = W_INVEST if f == "invest_weights" else W_BUILD
             add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
 
-        elif f == "loyalty_budget":
-            # 这一局一开始一片都没有（力场级 0 条）⇒ 必须**新建**一片：城从该势力自己的
+        elif f in ("loyalty_budget", "development_money", "construction_money"):
+            # 这一局一开始一片都没有（省/市级 0 条）⇒ 必须**新建**一片：城从该势力自己的
             # 建筑权重里借一个（那些城一定属于它，写权重时引擎刚认过）。
             src = first(by_field["invest_weights"]) if "invest_weights" in by_field else None
             city = src.get("city") if src else None
             if not city:
-                cands = [e.get("city") for e in (fac.get("loyalty_budget") or [])
+                cands = [e.get("city") for e in (fac.get(f) or [])
                          if isinstance(e, dict) and e.get("city")]
                 city = cands[0] if cands else None
             if not city:

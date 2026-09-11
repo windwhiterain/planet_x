@@ -663,11 +663,51 @@ impl State {
         resolve_chain(&[leaf, faction, self.scope.global])
     }
 
+    /// 决定某「福利预算」资源由谁控制：资源 → 势力 → 全局。
+    pub fn welfare_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.welfare_budget.get(resource)),
+        );
+        let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
+        resolve_chain(&[leaf, faction, self.scope.global])
+    }
+
     /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
     pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
                 .and_then(|c| c.loyalty_budget.get(&cid)),
+        );
+        let city = self.scope.cities.get(&cid).copied().unwrap_or_default();
+        let body_id = self.city(&cid).map(|c| c.body_id.clone());
+        let body = body_id
+            .and_then(|bid| self.scope.bodies.get(&bid).copied())
+            .unwrap_or_default();
+        let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
+        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+
+    /// 决定某城「开发货币预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    pub fn development_money_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.development_money.get(&cid)),
+        );
+        let city = self.scope.cities.get(&cid).copied().unwrap_or_default();
+        let body_id = self.city(&cid).map(|c| c.body_id.clone());
+        let body = body_id
+            .and_then(|bid| self.scope.bodies.get(&bid).copied())
+            .unwrap_or_default();
+        let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
+        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+    }
+
+    /// 决定某城「建造货币预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    pub fn construction_money_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
+        let leaf = leaf_mode(
+            self.control(fid.clone())
+                .and_then(|c| c.construction_money.get(&cid)),
         );
         let city = self.scope.cities.get(&cid).copied().unwrap_or_default();
         let body_id = self.city(&cid).map(|c| c.body_id.clone());

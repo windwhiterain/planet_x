@@ -188,7 +188,7 @@ pub struct FactionRow {
     /// 本回合治理开销的**行政部分**（`Σ (admin_base + admin_per_au × 距离超程) × scale`）——
     /// 「我把娱乐预算拉满，钱却被行政吃掉」里的那个行政。
     pub governance_admin: f64,
-    /// 本回合治理开销的**娱乐/福利部分**（各城 [`city_loyalty_budget`](crate::sim::city_loyalty_budget) 之和）。
+    /// 本回合治理开销的**娱乐/福利部分**（势力级 `welfare_budget` 按城市福利权重分给各城之和）。
     pub governance_entertainment: f64,
     /// **人口超载放大倍率**：`1 + max(0, 人口 ÷ 管理容量 − 1)`。它同时乘在行政开销与每座城的
     /// 忠诚距离项上——「为什么治理费比上回合暴涨」的答案。中性缺省 = **1.0**（`pre` 里是 1.0 而

@@ -30,6 +30,7 @@ pub fn apply_budget(
         let map = match which {
             BudgetKind::Investment => &mut c.investment_budget,
             BudgetKind::Construction => &mut c.construction_budget,
+            BudgetKind::Welfare => &mut c.welfare_budget,
         };
         let existed = map.remove(&bp.resource).is_some();
         leaf_removed(report, path, existed);
@@ -48,6 +49,7 @@ pub fn apply_budget(
     let map = match which {
         BudgetKind::Investment => &mut c.investment_budget,
         BudgetKind::Construction => &mut c.construction_budget,
+        BudgetKind::Welfare => &mut c.welfare_budget,
     };
     let ctrl = map.entry(bp.resource.clone()).or_insert_with(|| Control {
         value: bp.value.unwrap_or(0.0),
@@ -68,6 +70,7 @@ pub fn apply_budget(
 pub enum BudgetKind {
     Investment,
     Construction,
+    Welfare,
 }
 
 impl BudgetKind {
@@ -75,6 +78,7 @@ impl BudgetKind {
         match self {
             BudgetKind::Investment => "investment_budget",
             BudgetKind::Construction => "construction_budget",
+            BudgetKind::Welfare => "welfare_budget",
         }
     }
 }
@@ -154,15 +158,35 @@ impl WeightKind {
     }
 }
 
-/// 某城娱乐/福利预算补丁：`value` 替换预算额、`remove` 删叶。
-pub fn apply_loyalty_budget(
+/// 城市级数值叶（福利权重 / 逐城开发货币 / 逐城建造货币）的同一条写路径。
+#[derive(Clone, Copy)]
+pub enum CityLeafKind {
+    WelfareWeight,
+    DevelopmentMoney,
+    ConstructionMoney,
+}
+
+impl CityLeafKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            CityLeafKind::WelfareWeight => "loyalty_budget",
+            CityLeafKind::DevelopmentMoney => "development_money",
+            CityLeafKind::ConstructionMoney => "construction_money",
+        }
+    }
+}
+
+/// 城市级数值叶补丁：`value` 替换值、`mode` 指定由谁决定、`remove` 删叶。
+pub fn apply_city_leaf(
     state: &mut State,
     fid: &FactionId,
+    which: CityLeafKind,
     lp: &LoyaltyBudgetPatch,
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.loyalty_budget[{i}]");
+    let name = which.name();
+    let path = format!("{fid}.{name}[{i}]");
     let mut present = Vec::new();
     if lp.value.is_some() {
         present.push("value");
@@ -174,13 +198,13 @@ pub fn apply_loyalty_budget(
         return;
     }
     if lp.remove {
-        let existed = state
-            .control
-            .entry(fid.clone())
-            .or_default()
-            .loyalty_budget
-            .remove(&lp.city)
-            .is_some();
+        let c = state.control.entry(fid.clone()).or_default();
+        let map = match which {
+            CityLeafKind::WelfareWeight => &mut c.loyalty_budget,
+            CityLeafKind::DevelopmentMoney => &mut c.development_money,
+            CityLeafKind::ConstructionMoney => &mut c.construction_money,
+        };
+        let existed = map.remove(&lp.city).is_some();
         leaf_removed(report, path, existed);
         return;
     }
@@ -208,22 +232,55 @@ pub fn apply_loyalty_budget(
         }
         Some(_) => {}
     }
-    let ctrl = state
-        .control
-        .entry(fid.clone())
-        .or_default()
-        .loyalty_budget
-        .entry(lp.city.clone())
-        .or_insert_with(|| Control {
-            value: lp.value.unwrap_or(0.0),
-            mode: lp.mode.unwrap_or_default(),
-        });
+    let c = state.control.entry(fid.clone()).or_default();
+    let map = match which {
+        CityLeafKind::WelfareWeight => &mut c.loyalty_budget,
+        CityLeafKind::DevelopmentMoney => &mut c.development_money,
+        CityLeafKind::ConstructionMoney => &mut c.construction_money,
+    };
+    let ctrl = map.entry(lp.city.clone()).or_insert_with(|| Control {
+        value: lp.value.unwrap_or(0.0),
+        mode: lp.mode.unwrap_or_default(),
+    });
     write_value_leaf(
         ctrl,
         lp.value,
         lp.mode,
-        format!("{fid}.loyalty_budget[{i}].value"),
+        format!("{fid}.{name}[{i}].value"),
         report,
     );
     report.applied += 1;
+}
+
+/// 某城**福利权重**补丁（兼容旧入口名）。
+pub fn apply_loyalty_budget(
+    state: &mut State,
+    fid: &FactionId,
+    lp: &LoyaltyBudgetPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    apply_city_leaf(state, fid, CityLeafKind::WelfareWeight, lp, i, report);
+}
+
+/// 某城**开发货币预算**补丁。
+pub fn apply_development_money(
+    state: &mut State,
+    fid: &FactionId,
+    lp: &LoyaltyBudgetPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    apply_city_leaf(state, fid, CityLeafKind::DevelopmentMoney, lp, i, report);
+}
+
+/// 某城**建造货币预算**补丁。
+pub fn apply_construction_money(
+    state: &mut State,
+    fid: &FactionId,
+    lp: &LoyaltyBudgetPatch,
+    i: usize,
+    report: &mut ApplyReport,
+) {
+    apply_city_leaf(state, fid, CityLeafKind::ConstructionMoney, lp, i, report);
 }

@@ -159,8 +159,8 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
         let capital = state.capital_body(&fid);
         let cap_pos = state.body_position(&capital);
 
-        // 该势力所有活城 + 每城到首都的距离 + 每城想投入的娱乐/福利预算。
-        let mut cities: Vec<(CityId, f64, f64)> = Vec::new(); // (name, distance, ent_budget)
+        // 该势力所有活城 + 每城到首都的距离 + 每城**福利权重**。
+        let mut cities: Vec<(CityId, f64, f64)> = Vec::new(); // (name, distance, welfare_weight)
         let mut total_pop = 0u64;
         for c in &state.cities {
             if c.faction_id != fid || c.razed {
@@ -168,31 +168,66 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             }
             total_pop += c.population as u64;
             let d = dist(state.body_position(&c.body_id), cap_pos);
-            let ent = city_loyalty_budget(state, config, fid.clone(), c.name.clone());
-            cities.push((c.name.clone(), d, ent));
+            let weight = city_welfare_weight(state, fid.clone(), c.name.clone());
+            cities.push((c.name.clone(), d, weight));
         }
         if cities.is_empty() {
             continue;
         }
-        // 人口越多，管理能力越分散——人口超载放大远距离治理难度（与距离叠加）。
-        let overload = (total_pop as f64 / g.population_capacity.max(1e-6) - 1.0).max(0.0);
-        let scale = 1.0 + overload;
-        let mut total_admin = 0.0;
-        let mut ent_total = 0.0;
-        for (_, d, ent) in &cities {
-            let a = (d - g.admin_range).max(0.0);
-            total_admin += (g.admin_base + g.admin_per_au * a) * scale;
-            ent_total += ent;
-        }
-        let governance_total = (total_admin + ent_total) * sanction_cost_mult(state, config, &fid);
 
-        // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
-        // 治理是否到位以及娱乐投入是否真正落地。
+        // 治理资金来自首都池（与维护费同源）。
         let stock = state
             .faction(&fid)
             .map(|f| f.resources.clone())
             .unwrap_or_default();
         let total_value: f64 = stock.iter().map(|(k, v)| v * value_of(k)).sum();
+
+        // **势力级福利预算**：Player 叶优先；否则 AI 按「每城 default_entertainment 的
+        // 市场价值」折成资源向量（按当前库存比例）。`total_welfare_value` 是福利总价值，
+        // 后面按城市福利权重分给各城。
+        let n_cities = cities.len() as f64;
+        let ai_welfare_value = g.default_entertainment * n_cities;
+        let ai_fraction = if total_value > 1e-9 {
+            (ai_welfare_value / total_value).min(1.0)
+        } else {
+            0.0
+        };
+        let welfare_leaves = state
+            .control(fid.clone())
+            .map(|c| c.welfare_budget.clone())
+            .unwrap_or_default();
+        let mut _welfare_budget: ResourceMap = ResourceMap::new();
+        let mut total_welfare_value = 0.0;
+        for rt in config.resources.keys() {
+            let mode = state.welfare_budget_control(fid.clone(), rt);
+            let value = if mode.is_player() {
+                welfare_leaves
+                    .get(rt)
+                    .map(|c| c.value.max(0.0))
+                    .unwrap_or(0.0)
+            } else {
+                stock.get(rt).copied().unwrap_or(0.0) * ai_fraction
+            };
+            if value > 0.0 {
+                total_welfare_value += value * value_of(rt);
+                _welfare_budget.insert(rt.clone(), value);
+            }
+        }
+        let total_weight: f64 = cities.iter().map(|(_, _, w)| *w).sum();
+
+        // 人口越多，管理能力越分散——人口超载放大远距离治理难度（与距离叠加）。
+        let overload = (total_pop as f64 / g.population_capacity.max(1e-6) - 1.0).max(0.0);
+        let scale = 1.0 + overload;
+        let mut total_admin = 0.0;
+        for (_, d, _) in &cities {
+            let a = (d - g.admin_range).max(0.0);
+            total_admin += (g.admin_base + g.admin_per_au * a) * scale;
+        }
+        let ent_total = total_welfare_value;
+        let governance_total = (total_admin + ent_total) * sanction_cost_mult(state, config, &fid);
+
+        // 用库存（按价值加权）支付治理 + 娱乐开销（与舰队维护同源）。覆盖率决定
+        // 治理是否到位以及娱乐投入是否真正落地。
         let pay = governance_total.min(total_value);
         if pay > 1e-9 {
             let ratio = (pay / total_value).min(1.0);
@@ -245,10 +280,15 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             },
         );
         let mut to_revolt = Vec::new();
-        for (cid, d, ent) in &cities {
+        for (cid, d, weight) in &cities {
             let a = (d - g.loyalty_range).max(0.0);
             let target_base =
                 (1.0 - g.loyalty_distance * a * scale * mond_distance_relief).clamp(0.0, 1.0);
+            let ent = if total_weight > 1e-9 {
+                total_welfare_value * weight / total_weight
+            } else {
+                0.0
+            };
             let ent_bonus = (ent * coverage) / g.entertainment_cost.max(1e-6);
             let target_eff = (target_base + ent_bonus + cap_bonus - ideo_penalty).clamp(0.0, 1.0);
             // 捕获这一城的忠诚目标值分项（纯追加）——「这座城的忠诚为什么在掉」的分解。
