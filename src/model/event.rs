@@ -80,9 +80,14 @@ stringly_unit_enum!(DeathCause { "combat" => Combat, "upkeep_shortfall" => Upkee
 /// 攻击者」），集火时不可判。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Killer {
+    /// 补刀的那艘舰。
+    #[serde(rename = "舰")]
     pub ship: ShipId,
+    /// 那艘舰的势力。
+    #[serde(rename = "势力")]
     pub faction: FactionId,
     /// 弹种：`kinetic` / `plasma` / `missile`。
+    #[serde(rename = "弹种")]
     pub weapon: String,
 }
 
@@ -145,46 +150,62 @@ stringly_unit_enum!(FoundingHow { "new_site" => NewSite, "refounded" => Refounde
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Shot {
     /// 武器下标（= `ship_weapons(config, attacker)` 里的位置；配合舰级可查回型号）。
+    #[serde(rename = "武器")]
     pub weapon: usize,
     /// 那一发开始时目标还剩多少船体（0 = 目标已被本回合前面的发干掉，这一发**没打出去**）。
+    #[serde(rename = "战前船体")]
     pub target_hull_before: f64,
     /// 这一发**根本没打出去**（目标在它轮到之前就沉了）。为 true 时下面所有数都是 0/中性值
     /// ——它回答的是「这门炮为什么白瞄了一场空」（谁先手由 `sim::step_military` 的逐舰顺序
     /// 决定，那一条是 B5 的 `pre` 面）。
-    #[serde(default)]
+    #[serde(default, rename = "未击发")]
     pub skipped: bool,
     // ── 选择输入（`autocontrol::build_fire_plan` 当时算的，见 `doctrine_weight`）──
     /// 基本权重（射程内的距离/克制基础分）。
+    #[serde(rename = "基础分")]
     pub score_basic: f64,
     /// 理智↔热血那一项**加了多少**（`W_TEMPER · -temper · ln(威慑比)`；无风格 = 0）。
+    #[serde(rename = "心态分")]
     pub score_temper: f64,
     /// 火力分配那一项是**乘数**（不是加项）：`×(1 − fire_spread · 新鲜度)`，`fire_spread = 0`
-    /// 时为 1.0。⇒ 选它的总分 = `(score_basic + score_temper) × score_spread`。
+    /// 时为 1.0。⇒ 选它的总分 = `(基础分 + 心态分) × 分配乘数`。
+    #[serde(rename = "分配乘数")]
     pub score_spread: f64,
-    // ── 结算分解（`sim::resolve_shot`；`skipped` 或够不着时全为中性值）──
-    /// 距离 / 射程：`true` = 这一发在射程内（`damage` 为 0 且这个为 false ⇒ 够不着）。
+    // ── 结算分解（`sim::resolve_shot`；`未击发` 或够不着时全为中性值）──
+    /// 距离 / 射程：`true` = 这一发在射程内（`伤害` 为 0 且这个为 false ⇒ 够不着）。
+    #[serde(rename = "在射程内")]
     pub in_range: bool,
     /// 本土防御倍率（`home_defense_mult`；1.0 = 不在自家门口）。
+    #[serde(rename = "本土防御")]
     pub def_mult: f64,
     /// **命中折减** = `hit_factor(武器追踪, 目标速度)`（0.2..1）：目标越快、武器追踪越差，
     /// 这一发越像「没打中」。**确定性折减，不是掷骰**。
+    #[serde(rename = "命中折减")]
     pub hit: f64,
     /// **点防拦截量**（只对导弹；`0` = 这一发不是导弹，或没人拦）：目标自身 `intercept` +
     /// 邻近友舰的防空屏护 [`crate::sim::cluster_pd_cover`]。
+    #[serde(rename = "点防拦截")]
     pub pd: f64,
     /// 被点防吃掉的伤害（`min(dmg_before_pd, pd)`）——**「齐射被吃光」就是它 = 打击力**。
+    #[serde(rename = "点防吃掉")]
     pub pd_absorbed: f64,
     /// 护盾吸收掉的伤害（`min(护盾值, dmg × shield_mult)`）。
+    #[serde(rename = "护盾吸收")]
     pub absorbed: f64,
     /// **护盾吸收比例**（`absorbed ÷ 该进护盾的那一份`；没有护盾伤害时为 1.0）。
+    #[serde(rename = "护盾吸收比")]
     pub soak: f64,
     /// **护甲硬度减伤比例**（0..0.85，反比例函数：打得越重、吃得越多）。
+    #[serde(rename = "护甲减伤")]
     pub armor_soak: f64,
     /// 真正打进船体的伤害（= `hull_dmg × (1 − soak·0.5) × (1 − armor_soak)`）。
+    #[serde(rename = "实入船体")]
     pub hull_pen: f64,
     /// 这一发实际造成的伤害（护盾 + 船体）。
+    #[serde(rename = "伤害")]
     pub damage: f64,
     /// 这一发是否是**补刀**（把目标打到 hull ≤ 0）。
+    #[serde(rename = "补刀")]
     pub killed: bool,
 }
 
@@ -219,6 +240,14 @@ impl Default for Shot {
 /// **Rust 侧的 variant 字段名保持各自领域的可读写法**（`attacker`/`fallen_to`/`owner`…），
 /// 归一化不在这里做——投影层用 [`GameEvent::history_row`] 把它们统一映射成
 /// `(actor_kind, actor_id, target_kind, target_id)`，因此 Rust 代码可读、Python 侧可 join。
+///
+/// ⚠ **读面上的键名是中文**（第 10 步，`feature/event-nouns`）：每个字段上的
+/// `#[serde(rename = "中文名")]` 是**唯一真值**，`///` 经 schemars 变成悬停弹窗的解释
+/// （`--nouns` 的 `state.definitions.GameEvent`：98 个载荷字段条条有名、条条有解释）。
+/// 所以下面各变体文档正文里出现的英文（`shots`/`owner`/`damage`…）是 **Rust 标识符**，
+/// 不是读面键名——读面键名一律照 `serde(rename)`。**判别键 `type` 与变体标签
+/// （`attack`/`city_razed`…）逐字不变**：它们是线上格式与词表枚举，不是显示名词
+/// （见 `.agents/notes/field-naming.md` §8）。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameEvent {
@@ -232,25 +261,49 @@ pub enum GameEvent {
     /// 旧规则下它**什么事件都不留**，于是 C5 想回答的问题在唯一能看见的地方是空白。
     /// 关系调整仍只在 `damage > 0` 时发生（见 `sim::fire`），所以世界行为不变。
     Attack {
+        /// 开火的那艘舰（这一对「攻击舰 × 目标」里的攻击方）。
+        #[serde(rename = "攻击方")]
         attacker: ShipId,
+        /// 被打的那艘舰。
+        #[serde(rename = "目标")]
         target: ShipId,
+        /// 本回合这一对（攻击舰 × 目标）的**总伤害**：逐发里没被跳过那些的伤害之和。
+        /// **0 也有意义**（齐射被点防吃光 ⇒ 有 `逐发`、没伤害）。
+        #[serde(rename = "伤害")]
         damage: f64,
         /// 逐发明细（每件武器的每一发一条）。空 = 旧档/非本引擎产出的事件。
-        #[serde(default)]
+        #[serde(default, rename = "逐发")]
         shots: Vec<Shot>,
     },
-    /// 舰被击毁（hull ≤ 0）。`cause` 区分战死/锈蚀报废，`by` 是补刀的凶手（战死时必有）。
+    /// 舰被击毁（hull ≤ 0）。`击毁原因` 区分战死/锈蚀报废，`凶手` 是补刀的凶手（战死时必有）。
     ShipDestroyed {
+        /// 被击毁的那艘舰。
+        #[serde(rename = "舰")]
         ship: ShipId,
+        /// 它倒下时归谁（舰主）——记的是**这一刻**的归属，不是事后回查的归属。
+        #[serde(rename = "舰主")]
         owner: FactionId,
+        /// 舰级（如 `corvette`）。
+        #[serde(rename = "舰级")]
         class: String,
+        /// 击毁原因：`combat` 被敌方火力打沉 / `upkeep_shortfall` 维护费欠缴锈蚀报废 /
+        /// `scrapped` 其它拆解（都不是战损的那些在战功统计里不算数）。
+        #[serde(rename = "击毁原因")]
         cause: DeathCause,
+        /// 补刀的**凶手**（哪艘舰、哪个势力、什么弹种）；`null` = 不是被打沉的。
+        #[serde(rename = "凶手")]
         by: Option<Killer>,
     },
     /// 围城：攻击者对本回合城市建筑造成 damage 伤害。
     Siege {
+        /// 开火的那艘舰。
+        #[serde(rename = "攻击方")]
         attacker: ShipId,
+        /// 被围的那座城。
+        #[serde(rename = "城")]
         city: CityId,
+        /// 本回合对这城建筑造成的**总伤害**。
+        #[serde(rename = "伤害")]
         damage: f64,
     },
     /// 城市被夷平（razed），可再殖民。
@@ -264,11 +317,23 @@ pub enum GameEvent {
     /// 同一回合后来的复垦/重建会把 `faction_id` 改写成新主。因此「谁丢了这座城」若不在
     /// 这一刻记下来，回看时读到的就是**新主**（错的人）。
     CityRazed {
+        /// 被夷平的那座城（之后变成可再殖民的空白城）。
+        #[serde(rename = "城")]
         city: CityId,
+        /// **失去这座城市的那一方**：夷平这一刻的持有者。空白城之后归谁与此无关。
+        #[serde(rename = "失城方")]
         owner: FactionId,
+        /// **拆平这座城市的那一方**（拆城舰的势力）。
+        #[serde(rename = "拆城方")]
         fallen_to: FactionId,
+        /// 拆掉它的那艘舰。
+        #[serde(rename = "拆城舰")]
         by_ship: ShipId,
+        /// 这次围城造成的**总伤害**。
+        #[serde(rename = "伤害")]
         damage: f64,
+        /// 夷平前的人口（这次毁灭的量级）。
+        #[serde(rename = "拆前人口")]
         pop_before: u32,
     },
     /// 新舰从某城出厂（`via` 区分船坞建造 / 剧情赠舰）。`city` 只在船坞出厂时给出
@@ -278,47 +343,110 @@ pub enum GameEvent {
     /// 它是**归因**：事后能回答「这艘舰是哪张图印出来的」（投影 `events.data.blueprint`）。
     /// `#[serde(default)]` + 只在 `Some` 时进 headline ⇒ 无图那一路的读面**一个字节不变**。
     ShipSpawned {
+        /// 新下水的那艘舰。
+        #[serde(rename = "舰")]
         ship: ShipId,
+        /// 它归谁。
+        #[serde(rename = "舰主")]
         owner: FactionId,
+        /// 舰级（如 `corvette`）。
+        #[serde(rename = "舰级")]
         class: String,
+        /// 出厂城；`null` = 剧情赠舰（在天体附近下水，没有出厂城）。
+        #[serde(rename = "出厂城")]
         city: Option<CityId>,
+        /// 造舰路径：`shipyard` 船坞建造 / `story` 剧情白送。
+        #[serde(rename = "来路")]
         via: SpawnVia,
-        #[serde(default)]
+        /// 出厂所用的**设计图名**；`null` = 无图（旧档、开局预置舰队、剧情赠舰）。
+        #[serde(default, rename = "出厂图")]
         blueprint: Option<crate::model::BlueprintId>,
     },
     /// 新殖民 / 再殖民城市建立。`how` 区分「全新定居点」与「复垦空白城」，
     /// `prev_owner` 在复垦时给出**这座城倒下时的主人**（diaspora claim），使
     /// 「被夷平然后被殖民」与「改旗易帜」在一条记录里就分得清。
     ColonyFounded {
+        /// 新建 / 复垦出来的那座城。
+        #[serde(rename = "城")]
         city: CityId,
+        /// 现在归谁（新主）。
+        #[serde(rename = "新主")]
         owner: FactionId,
+        /// 城所在的天体。
+        #[serde(rename = "天体")]
         body: BodyId,
+        /// 新城的**起步舰级**：城里的造舰队列一开局就预置这一型（复垦时是复垦舰的舰级）。
+        #[serde(rename = "播种舰级")]
         seeded_ship_class: String,
+        /// 建城方式：`new_site` 在从未被占据的定居点上新建 / `refounded` 复垦一座被夷平的空白城。
+        #[serde(rename = "建城方式")]
         how: FoundingHow,
+        /// 复垦时**这座城倒下时的主人**（空白城保留的 diaspora claim）；新建时为 `null`。
+        #[serde(rename = "旧主")]
         prev_owner: Option<FactionId>,
     },
     /// 玩家指令因目标失效而降级（陈旧目标 / 城被夷平 / 无定居点），避免船飞向原点。
-    StaleOrder { ship: ShipId, reason: String },
+    StaleOrder {
+        /// 指令失效的那艘舰。
+        #[serde(rename = "舰")]
+        ship: ShipId,
+        /// 失效的原因码（目标已不存在 / 城已被夷平 / 天体上没有定居点…）。
+        #[serde(rename = "失效原因")]
+        reason: String,
+    },
     /// 舰队战术撤退：一艘自动指挥的舰在**损伤过重且敌在本方射程内**时，向后撤往其
     /// 首都/本土修整充能，而不是死战到底（自保行为）。`to_body` 是撤退目的地天体。
-    Withdraw { ship: ShipId, to_body: BodyId },
+    Withdraw {
+        /// 后撤的那艘舰。
+        #[serde(rename = "舰")]
+        ship: ShipId,
+        /// 撤退目的地天体（本势力的首都 / 本土）。
+        #[serde(rename = "撤退目标")]
+        to_body: BodyId,
+    },
     /// 外交事件：一对势力本回合跨越战争阈值进入交战（war ≤ threshold）。
-    WarStarted { a: FactionId, b: FactionId },
+    WarStarted {
+        /// 交战的一方（势力名）。
+        #[serde(rename = "势力甲")]
+        a: FactionId,
+        /// 交战的另一方（势力名）。
+        #[serde(rename = "势力乙")]
+        b: FactionId,
+    },
     /// 外交事件：一对势力本回合停战（从交战回到和平）。
-    WarEnded { a: FactionId, b: FactionId },
+    WarEnded {
+        /// 停战的一方（势力名）。
+        #[serde(rename = "势力甲")]
+        a: FactionId,
+        /// 停战的另一方（势力名）。
+        #[serde(rename = "势力乙")]
+        b: FactionId,
+    },
     /// 剧情事件：本回合触发了一条叙事事件（详见 [`State::chronicle`] 的编年史全文）。
     /// `participants` 是参与方可读名（事件型触发时为具体对象）。
     Story {
+        /// 剧情模板 id（`config/game.ron` 的 `story` 表键）。
+        #[serde(rename = "剧情编号")]
         id: String,
+        /// 剧情标题（如「外来的回响」）。
+        #[serde(rename = "标题")]
         title: String,
+        /// 参与方的可读名（如「中国」「行星X崇拜教」），事件型触发时为具体对象。
+        #[serde(rename = "参与方")]
         participants: Vec<String>,
     },
     /// 离心叛乱（光速治理的代价）：城市忠诚度跌破叛变阈值，居民脱离其统治势力，
     /// 城市被夷平为空白（可再殖民）。这是超大帝国管理廉价的远方殖民地失败的结果。
     /// `loyalty` 是爆发时的忠诚度（可读的量级）。
     Revolt {
+        /// 叛乱的那座城（居民脱离统治，城市化为废墟，可再殖民）。
+        #[serde(rename = "城")]
         city: CityId,
+        /// **失去这座城市的那一方**（居民脱离的就是它）。
+        #[serde(rename = "失城方")]
         faction: FactionId,
+        /// 爆发时的忠诚度（0..1）。
+        #[serde(rename = "忠诚度")]
         loyalty: f64,
     },
     /// 离心「改旗易帜」：城市忠诚度跌破叛变阈值后，居民不把城市夷为荒地，而是**倒戈到
@@ -327,43 +455,77 @@ pub enum GameEvent {
     /// 被夷平/旁观的小势力能**接盘**城市、成长为真正的多极棋子，而不是退化成永久旁观者。
     /// 与 [`GameEvent::Revolt`] 并存：`Revolt` 是无可倒戈目标时的兜底（夷为空白）。
     CityDefected {
+        /// 倒戈的那座城（连同人口/建筑/船坞一起易主）。
+        #[serde(rename = "城")]
         city: CityId,
+        /// **失去它的那一方**（旧主）。
+        #[serde(rename = "失城方")]
         from: FactionId,
+        /// **接盘的那一方**（思潮与旧主最对立者）。
+        #[serde(rename = "新主")]
         to: FactionId,
+        /// 倒戈时的忠诚度（0..1）。
+        #[serde(rename = "忠诚度")]
         loyalty: f64,
     },
     /// 合纵连横：一方势力被判定为「霸权」后，其余较弱势力结成反制联盟（`members`
     /// 为联盟成员，不含霸权 `hegemon`）。这是「一家独大 → 众人围剿」的政治跃迁，
     /// 让上千回合的博弈维持多方参与。
     CoalitionFormed {
+        /// 被判定为**霸权**、众人围剿的那一方。
+        #[serde(rename = "霸权")]
         hegemon: FactionId,
+        /// 联盟成员（不含霸权）。
+        #[serde(rename = "联盟成员")]
         members: Vec<FactionId>,
     },
     /// 合纵连横：既有的反制联盟解体（`members` 为解体时的成员）。
     CoalitionEnded {
+        /// 被围剿的**霸权**。
+        #[serde(rename = "霸权")]
         hegemon: FactionId,
+        /// 解体时的联盟成员（不含霸权）。
+        #[serde(rename = "联盟成员")]
         members: Vec<FactionId>,
     },
     /// 迁都：势力把首都从 `from` 天体迁到 `to` 天体。`reason` 是触发原因
     /// （`"destroyed"`=首都亡城自动切到人口最高活城；`"ai_review"`=周期性 AI 评估证明
     /// 候选更优）。首都是光速治理/本土防御的锚点，迁都会即时改变治理距离与防御半径。
     CapitalRelocated {
+        /// 迁都的那个势力。
+        #[serde(rename = "迁都势力")]
         faction: FactionId,
+        /// 原首都天体。
+        #[serde(rename = "原首都")]
         from: BodyId,
+        /// 新首都天体。
+        #[serde(rename = "新首都")]
         to: BodyId,
+        /// 触发原因码：`destroyed` 首都沦陷后自动改立人口最高的活城 /
+        /// `ai_review` 周期性 AI 评估证明候选更优。
+        #[serde(rename = "迁都原因")]
         reason: String,
     },
     /// **装货**：一艘运输舰在某天体的**产地货栈**里装走一批货（`cargo` = 这次装了什么、各多少）。
     /// 这是「离岸产出 → 首都池」那条链的**上半段**，下半段是 [`GameEvent::CargoDelivered`]。
     /// 有了这两条，「池子里的铁是哪来的」可以一路追到产地与那艘船。
     CargoLoaded {
+        /// 装货的那艘运输舰。
+        #[serde(rename = "舰")]
         ship: ShipId,
+        /// **船东**（这艘舰归谁）。执行承包单时**不等于**货主。
+        #[serde(rename = "船东")]
         faction: FactionId,
-        /// **货主**（这批货是谁的）。自己运自己的货时等于 `faction`；执行承包单时是**托运方**
+        /// **货主**（这批货是谁的）。自己运自己的货时等于 `船东`；执行承包单时是**托运方**
         /// ——业主与船东分离，而「这批货进了谁的池子」必须可判（`.agents/notes/
         /// freight-collection.md` 的已定项：**在途货物跨势力时要在舰上标明货主**）。
+        #[serde(rename = "货主")]
         owner: FactionId,
+        /// 在哪个天体的**产地货栈**装的。
+        #[serde(rename = "天体")]
         body: BodyId,
+        /// 这次装走了什么、各多少（资源 → 数量）。
+        #[serde(rename = "载货")]
         cargo: ResourceMap,
     },
     /// **卸货**：一艘运输舰把在舱货物卸进某天体。`into_pool = true` 表示**直接进了势力池**
@@ -373,13 +535,25 @@ pub enum GameEvent {
     /// 注意：**货随舰沉没**——满载的运输舰被击沉时，舱里的货跟着没了（没有对应的
     /// `CargoLost` 事件：货的消失就是那艘舰的 `ShipDestroyed` 的一部分）。
     CargoDelivered {
+        /// 卸货的那艘运输舰。
+        #[serde(rename = "舰")]
         ship: ShipId,
+        /// **船东**（这艘舰归谁）。
+        #[serde(rename = "船东")]
         faction: FactionId,
-        /// **货主**（收货方）。`into_pool` 说的是**货主**的池子，不是船东的——承包交付时
-        /// 两者不同，光看 `faction` 会把货记到承运人头上。
+        /// **货主**（收货方）。`入首都池` 说的是**货主**的池子，不是船东的——承包交付时
+        /// 两者不同，光看 `船东` 会把货记到承运人头上。
+        #[serde(rename = "货主")]
         owner: FactionId,
+        /// 在哪个天体卸的。
+        #[serde(rename = "天体")]
         body: BodyId,
+        /// 这一批卸下的货（资源 → 数量）。
+        #[serde(rename = "载货")]
         cargo: ResourceMap,
+        /// `true` = 直接进了**货主的首都池**（货从此可用，集货腿的终点）；`false` = 卸进了
+        /// 该天体的货栈（中转，还得再运一程）。
+        #[serde(rename = "入首都池")]
         into_pool: bool,
     },
     /// **挂出一张运力雇佣单**：`shipper` 请人在 `from` → `to`（= 它的首都）这条线上提供
@@ -393,16 +567,26 @@ pub enum GameEvent {
     /// 后续各自是独立事件：接单 / 交付 / 考核 / 结束。依据与裁决见
     /// `.agents/notes/freight-collection.md` §4（挂单制 Q2、抽成制 Q10、雇佣形态）。
     ContractPosted {
-        /// 挂单号（`ContractState::next_id` 分配），与投影表 `contracts` 的 `contract_id` 同源。
+        /// 挂单号（`ContractState::next_id` 分配），与投影表 `contracts` 的 `合同号` 同源。
+        #[serde(rename = "合同号")]
         contract: u64,
+        /// **雇主**（挂单的人，也就是托运方）。
+        #[serde(rename = "托运方")]
         shipper: FactionId,
         /// **主货种**（挂单时该货栈积压最多的那种）——只用来折算货值，不是受雇方的约束。
+        #[serde(rename = "货")]
         resource: String,
-        /// **要求的运力**（单位/回合）。
+        /// **要求的运力**（单位/回合）：一条参考船在这条线上的吞吐。
+        #[serde(rename = "运力")]
         capacity: f64,
+        /// 起运天体（雇主的**产地货栈**）。
+        #[serde(rename = "起点")]
         from: BodyId,
+        /// 目的天体（照公理「首都即集散地」，`to` 永远是雇主首都）。
+        #[serde(rename = "终点")]
         to: BodyId,
-        /// 受雇方的抽成比例（`0.15` = 自留 15%）。
+        /// 受雇方的**抽成比例**（`0.15` = 自留 15%）。
+        #[serde(rename = "分成")]
         share: f64,
     },
     /// **有人接下了雇佣单**：`carrier` 接下 `shipper` 这条线上的运力要求，雇佣期从这一回合开始。
@@ -412,13 +596,25 @@ pub enum GameEvent {
     /// `ContractState::assignments` 里**此刻的派工记录**，随时可变，不是承诺。
     ContractAccepted {
         /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
+        #[serde(rename = "合同号")]
         contract: u64,
+        /// **雇主**（挂单的人）。
+        #[serde(rename = "托运方")]
         shipper: FactionId,
+        /// **受雇方**（接单的人）。
+        #[serde(rename = "承运方")]
         carrier: FactionId,
+        /// 这条线上运的**主货种**。
+        #[serde(rename = "货")]
         resource: String,
         /// 接下的运力（单位/回合）——从这一刻起**冻结**成承诺。
+        #[serde(rename = "运力")]
         capacity: f64,
+        /// 起运天体（雇主货栈）。
+        #[serde(rename = "起点")]
         from: BodyId,
+        /// 目的天体（雇主首都）。
+        #[serde(rename = "终点")]
         to: BodyId,
     },
     /// **雇佣单交付**：`carrier` 的一条船把货交到了雇主手里，`cut` 是它按抽成自留的部分。
@@ -427,14 +623,26 @@ pub enum GameEvent {
     /// 受雇方拿到报酬（Q10：**就是它没交出去的那部分货**，没有货币转移），
     /// 而**交付本身不再动信誉**——雇佣形态下信誉只由**周期考核**产生（见 `contract_reviewed`）。
     ContractDelivered {
+        /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
+        #[serde(rename = "合同号")]
         contract: u64,
+        /// **雇主**（收货的一方）。
+        #[serde(rename = "托运方")]
         shipper: FactionId,
+        /// **受雇方**（交货的一方）。
+        #[serde(rename = "承运方")]
         carrier: FactionId,
+        /// 交付这趟货的那艘舰（受雇方的船）。
+        #[serde(rename = "舰")]
         ship: ShipId,
+        /// 这条线上运的**主货种**。
+        #[serde(rename = "货")]
         resource: String,
         /// 这一趟交给雇主的量（单位，**不含**受雇方自留的抽成）。
+        #[serde(rename = "交付量")]
         amount: f64,
         /// 受雇方这一趟自留的抽成（单位）——它的全部报酬。
+        #[serde(rename = "自留抽成")]
         cut: f64,
     },
     /// **雇主的周期考核**：`shipper` 验了 `carrier` 这一期的**实测吞吐**，给出好评或差评。
@@ -448,13 +656,24 @@ pub enum GameEvent {
     /// 一条好船偶尔也会吃差评、一条烂船偶尔也会蒙到好评——这正是**信誉是市场信号**而不是
     /// 判决书的意思。**期望**严格随达标率递增（见 `autocontrol::contract::review_contract`）。
     ContractReviewed {
+        /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
+        #[serde(rename = "合同号")]
         contract: u64,
+        /// **雇主**（验货打分的人）。
+        #[serde(rename = "托运方")]
         shipper: FactionId,
+        /// **受雇方**（被评的人）。
+        #[serde(rename = "承运方")]
         carrier: FactionId,
         /// 达标率（1.0 = 一条参考船的水准）。
+        #[serde(rename = "达标率")]
         ratio: f64,
+        /// 这一票评价是好评（`true`）还是差评（`false`）——**掷骰子**决定，达标率越高越可能
+        /// 好评（期望严格随达标率递增，见 `autocontrol::contract::review_contract`）。
+        #[serde(rename = "好评")]
         good: bool,
         /// 本次给受雇方加（正）或减（负）的信誉。
+        #[serde(rename = "信誉增减")]
         delta: f64,
     },
     /// **雇佣结束**：合同离开挂单簿。三种由来（`reason`），都不是「违约」——
@@ -465,9 +684,18 @@ pub enum GameEvent {
     ///   这一期早就在考核里吃过差评了）；
     /// * `"recalled"`——受雇方自己缺船了，**提前结束雇佣**（用户：「受雇方……是否提前结束雇佣」）。
     ContractEnded {
+        /// 挂单号（与 `contract_posted` / 投影表 `contracts` 同源）。
+        #[serde(rename = "合同号")]
         contract: u64,
+        /// **雇主**。
+        #[serde(rename = "托运方")]
         shipper: FactionId,
+        /// **受雇方**。
+        #[serde(rename = "承运方")]
         carrier: FactionId,
+        /// 结束原因码：`term` 固定期到期（雇主按信誉决定换人）/ `no_output` 整个雇佣期
+        /// 一件货都没搬 / `recalled` 受雇方自己缺船、提前结束。
+        #[serde(rename = "结束原因")]
         reason: String,
     },
 }
@@ -632,7 +860,7 @@ impl GameEvent {
                 // 逐发分解进 `data.shots`（变体专属载荷只走这一个对象列，见 [`EventRow::data`]）。
                 // 聚合量 `magnitude` 保持「这个目标这一回合总共挨了多少」——逐发是**下钻**，
                 // 不是替代。
-                r.data = json!({ "shots": shots });
+                r.data = json!({ "逐发": shots });
             }
             GameEvent::ShipDestroyed {
                 ship,
@@ -648,8 +876,8 @@ impl GameEvent {
                     extra(&mut r, EventRole::Actor, EntityKind::Ship, &k.ship);
                     extra(&mut r, EventRole::Actor, EntityKind::Faction, &k.faction);
                 }
-                r.data = json!({"ship": ship, "owner": owner, "class": class,
-                                "cause": cause, "by": by});
+                r.data = json!({"舰": ship, "舰主": owner, "舰级": class,
+                                "击毁原因": cause, "凶手": by});
             }
             GameEvent::Siege {
                 attacker,
@@ -677,8 +905,8 @@ impl GameEvent {
                 // `from` 同槽位，于是「一座城的历史」用同一个查询形状就能读全。
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, owner);
                 r.magnitude = *damage;
-                r.data = json!({"city": city, "owner": owner, "fallen_to": fallen_to,
-                                "by_ship": by_ship, "damage": damage, "pop_before": pop_before});
+                r.data = json!({"城": city, "失城方": owner, "拆城方": fallen_to,
+                                "拆城舰": by_ship, "伤害": damage, "拆前人口": pop_before});
             }
             GameEvent::ShipSpawned {
                 ship,
@@ -693,8 +921,8 @@ impl GameEvent {
                 if let Some(c) = city {
                     extra(&mut r, EventRole::Third, EntityKind::City, c);
                 }
-                r.data = json!({"ship": ship, "owner": owner, "class": class, "city": city,
-                                "via": via, "blueprint": blueprint});
+                r.data = json!({"舰": ship, "舰主": owner, "舰级": class, "出厂城": city,
+                                "来路": via, "出厂图": blueprint});
             }
             GameEvent::ColonyFounded {
                 city,
@@ -710,28 +938,28 @@ impl GameEvent {
                 if let Some(p) = prev_owner {
                     extra(&mut r, EventRole::Victim, EntityKind::Faction, p);
                 }
-                r.data = json!({"city": city, "owner": owner, "body": body,
-                                "seeded_ship_class": seeded_ship_class, "how": how,
-                                "prev_owner": prev_owner});
+                r.data = json!({"城": city, "新主": owner, "天体": body,
+                                "播种舰级": seeded_ship_class, "建城方式": how,
+                                "旧主": prev_owner});
             }
             GameEvent::StaleOrder { ship, reason } => {
                 set_target(&mut r, EntityKind::Ship, ship);
-                r.data = json!({"ship": ship, "reason": reason});
+                r.data = json!({"舰": ship, "失效原因": reason});
             }
             GameEvent::Withdraw { ship, to_body } => {
                 set_actor(&mut r, EntityKind::Ship, ship);
                 set_target(&mut r, EntityKind::Body, to_body);
-                r.data = json!({"ship": ship, "to_body": to_body});
+                r.data = json!({"舰": ship, "撤退目标": to_body});
             }
             GameEvent::WarStarted { a, b } => {
                 set_actor(&mut r, EntityKind::Faction, a);
                 set_target(&mut r, EntityKind::Faction, b);
-                r.data = json!({"a": a, "b": b});
+                r.data = json!({"势力甲": a, "势力乙": b});
             }
             GameEvent::WarEnded { a, b } => {
                 set_actor(&mut r, EntityKind::Faction, a);
                 set_target(&mut r, EntityKind::Faction, b);
-                r.data = json!({"a": a, "b": b});
+                r.data = json!({"势力甲": a, "势力乙": b});
             }
             GameEvent::Story {
                 id,
@@ -742,7 +970,7 @@ impl GameEvent {
                 for p in participants {
                     extra(&mut r, EventRole::Third, EntityKind::Faction, p);
                 }
-                r.data = json!({"id": id, "title": title, "participants": participants});
+                r.data = json!({"剧情编号": id, "标题": title, "参与方": participants});
             }
             GameEvent::Revolt {
                 city,
@@ -751,7 +979,7 @@ impl GameEvent {
             } => {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, faction);
-                r.data = json!({"city": city, "faction": faction, "loyalty": loyalty});
+                r.data = json!({"城": city, "失城方": faction, "忠诚度": loyalty});
             }
             GameEvent::CityDefected {
                 city,
@@ -762,7 +990,7 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, from);
                 extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, to);
-                r.data = json!({"city": city, "from": from, "to": to, "loyalty": loyalty});
+                r.data = json!({"城": city, "失城方": from, "新主": to, "忠诚度": loyalty});
             }
             GameEvent::CoalitionFormed { hegemon, members } => {
                 // 联盟是**冲着**霸权结成的：霸权是被针对的目标，不是发起者。
@@ -770,14 +998,14 @@ impl GameEvent {
                 for m in members {
                     extra(&mut r, EventRole::Actor, EntityKind::Faction, m);
                 }
-                r.data = json!({"hegemon": hegemon, "members": members});
+                r.data = json!({"霸权": hegemon, "联盟成员": members});
             }
             GameEvent::CoalitionEnded { hegemon, members } => {
                 set_target(&mut r, EntityKind::Faction, hegemon);
                 for m in members {
                     extra(&mut r, EventRole::Actor, EntityKind::Faction, m);
                 }
-                r.data = json!({"hegemon": hegemon, "members": members});
+                r.data = json!({"霸权": hegemon, "联盟成员": members});
             }
             GameEvent::CapitalRelocated {
                 faction,
@@ -788,7 +1016,7 @@ impl GameEvent {
                 set_actor(&mut r, EntityKind::Faction, faction);
                 set_target(&mut r, EntityKind::Body, to);
                 extra(&mut r, EventRole::Victim, EntityKind::Body, from);
-                r.data = json!({"faction": faction, "from": from, "to": to, "reason": reason});
+                r.data = json!({"迁都势力": faction, "原首都": from, "新首都": to, "迁都原因": reason});
             }
             GameEvent::CargoLoaded {
                 ship,
@@ -803,8 +1031,8 @@ impl GameEvent {
                 if owner != faction {
                     extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, owner);
                 }
-                r.data = json!({"ship": ship, "faction": faction, "owner": owner,
-                                "body": body, "cargo": cargo});
+                r.data = json!({"舰": ship, "船东": faction, "货主": owner,
+                                "天体": body, "载货": cargo});
             }
             GameEvent::CargoDelivered {
                 ship,
@@ -820,8 +1048,8 @@ impl GameEvent {
                 if owner != faction {
                     extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, owner);
                 }
-                r.data = json!({"ship": ship, "faction": faction, "owner": owner, "body": body,
-                                "cargo": cargo, "into_pool": into_pool});
+                r.data = json!({"舰": ship, "船东": faction, "货主": owner, "天体": body,
+                                "载货": cargo, "入首都池": into_pool});
             }
             GameEvent::ContractPosted {
                 contract,
@@ -838,8 +1066,8 @@ impl GameEvent {
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Body, to);
                 extra(&mut r, EventRole::Third, EntityKind::Body, from);
-                r.data = json!({"contract": contract, "shipper": shipper, "resource": resource,
-                                "capacity": capacity, "from": from, "to": to, "share": share});
+                r.data = json!({"合同号": contract, "托运方": shipper, "货": resource,
+                                "运力": capacity, "起点": from, "终点": to, "分成": share});
             }
             GameEvent::ContractAccepted {
                 contract,
@@ -856,9 +1084,9 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::Faction, shipper);
                 // 起讫天体**不进参与方槽位**（它们已经在 `contract_posted` 里当过参与方了，
                 // 这里再挂一遍只会让「雇主的历史」多出一堆天体行）；它们留在 `data` 里。
-                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "resource": resource, "capacity": capacity,
-                                "from": from, "to": to});
+                r.data = json!({"合同号": contract, "托运方": shipper, "承运方": carrier,
+                                "货": resource, "运力": capacity,
+                                "起点": from, "终点": to});
             }
             GameEvent::ContractDelivered {
                 contract,
@@ -872,8 +1100,8 @@ impl GameEvent {
                 set_actor(&mut r, EntityKind::Faction, carrier);
                 set_target(&mut r, EntityKind::Ship, ship);
                 extra(&mut r, EventRole::Third, EntityKind::Faction, shipper);
-                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ship": ship, "resource": resource, "amount": amount, "cut": cut});
+                r.data = json!({"合同号": contract, "托运方": shipper, "承运方": carrier,
+                                "舰": ship, "货": resource, "交付量": amount, "自留抽成": cut});
             }
             GameEvent::ContractReviewed {
                 contract,
@@ -886,8 +1114,8 @@ impl GameEvent {
                 // 发起方 = **雇主**（验货的人），直接对象 = **受雇方**（被评的人）。
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Faction, carrier);
-                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "ratio": ratio, "good": good, "delta": delta});
+                r.data = json!({"合同号": contract, "托运方": shipper, "承运方": carrier,
+                                "达标率": ratio, "好评": good, "信誉增减": delta});
             }
             GameEvent::ContractEnded {
                 contract,
@@ -897,8 +1125,8 @@ impl GameEvent {
             } => {
                 set_actor(&mut r, EntityKind::Faction, shipper);
                 set_target(&mut r, EntityKind::Faction, carrier);
-                r.data = json!({"contract": contract, "shipper": shipper, "carrier": carrier,
-                                "reason": reason});
+                r.data = json!({"合同号": contract, "托运方": shipper, "承运方": carrier,
+                                "结束原因": reason});
             }
         }
         r

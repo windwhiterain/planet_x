@@ -233,9 +233,10 @@ fn projection_writes_lean_main_and_indexed_tables() {
         assert!(events[0].get(col).is_some(), "events 表要有 {col} 列");
     }
     // 归一化的意义：**没有任何一列是 variant 专属字段**，否则又会回到「同名多义」
-    // （`from`/`to` 一列两义）与「同角色多名」（faction/owner/fallen_to/from/to）。
+    // （`起点`/`终点` 一列两义）与「同角色多名」（托运方/舰主/失城方/…）。
+    // 这批名字现在是**中文**（第 10 步，`feature/event-nouns`）——守卫照改，语义不变。
     for forbidden in [
-        "from", "to", "a", "b", "attacker", "target", "city", "ship", "body", "owner",
+        "起点", "终点", "势力甲", "势力乙", "攻击方", "目标", "城", "舰", "天体", "货主",
     ] {
         assert!(
             events[0].get(forbidden).is_none(),
@@ -334,9 +335,9 @@ fn city_razed_records_the_loser_not_the_refounder() {
             continue;
         }
         let round = e["round"].as_u64().unwrap();
-        let city = e["data"]["city"].as_str().unwrap();
-        let owner = e["data"]["owner"].as_str().unwrap();
-        let fallen_to = e["data"]["fallen_to"].as_str().unwrap();
+        let city = e["data"]["城"].as_str().unwrap();
+        let owner = e["data"]["失城方"].as_str().unwrap();
+        let fallen_to = e["data"]["拆城方"].as_str().unwrap();
         assert_ne!(
             owner, fallen_to,
             "夷平一座城不该由它的持有者自己造成（{city}）"
@@ -347,11 +348,11 @@ fn city_razed_records_the_loser_not_the_refounder() {
             if f["type"] != "colony_founded" || f["round"].as_u64() != Some(round) {
                 continue;
             }
-            if f["data"]["city"].as_str() != Some(city) {
+            if f["data"]["城"].as_str() != Some(city) {
                 continue;
             }
-            let fdr = f["data"]["owner"].as_str().unwrap_or_default();
-            let prev = f["data"]["prev_owner"].as_str().unwrap_or_default();
+            let fdr = f["data"]["新主"].as_str().unwrap_or_default();
+            let prev = f["data"]["旧主"].as_str().unwrap_or_default();
             assert_eq!(
                 prev, owner,
                 "{city} 同回合被 {fdr} 复垦，prev_owner 应等于失城方 {owner}"

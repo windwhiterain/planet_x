@@ -897,37 +897,37 @@ class PlanetXQ:
         since: int | None = None,
         until: int | None = None,
     ) -> pd.DataFrame:
-        """★ **逐发分解**（B4）：一行 = 一件武器的一发，把 `attack` 事件的 `data.shots` 摊平。
+        """★ **逐发分解**（B4）：一行 = 一件武器的一发，把 `attack` 事件的 `data.逐发` 摊平。
 
         这是「**我为什么打不中 / 这一炮为什么没伤害**」的最终答案面——那些数在 B4 之前全部活在
         `resolve_shot` 的栈上，算完就扔：
 
-        * **选择输入**（为什么瞄它）：`score_basic`（距离/克制基础分）、`score_temper`
-          （理智↔热血项）、`score_spread`（火力分配**乘数**）——总分 =
-          `(score_basic + score_temper) × score_spread`，`q` 顺手算好放进 `score` 列。
-        * **结算分解**：`hit`（命中折减 = `hit_factor(武器追踪, 目标速度)`，**确定性折减不是掷骰**）、
-          `def_mult`（本土防御）、`pd` / `pd_absorbed`（点防拦截量 / 被它吃掉多少）、
-          `absorbed` / `soak`（护盾）、`armor_soak`（护甲硬度减伤）、`hull_pen`（真进船体的伤害）、
-          `damage`（这一发总伤害）、`killed`（是不是补刀）。
-        * `skipped=True` = **这一发根本没打出去**（目标在它轮到之前就沉了）。
-          `target_hull_before` 记着当时目标还剩多少船体。
+        * **选择输入**（为什么瞄它）：`基础分`（距离/克制基础分）、`心态分`
+          （理智↔热血项）、`分配乘数`（火力分配**乘数**）——总分 =
+          `(基础分 + 心态分) × 分配乘数`，`q` 顺手算好放进 `score` 列。
+        * **结算分解**：`命中折减`（= `hit_factor(武器追踪, 目标速度)`，**确定性折减不是掷骰**）、
+          `本土防御`（本土防御倍率）、`点防拦截` / `点防吃掉`（点防拦截量 / 被它吃掉多少）、
+          `护盾吸收` / `护盾吸收比`（护盾）、`护甲减伤`（护甲硬度减伤）、`实入船体`（真进船体的伤害）、
+          `伤害`（这一发总伤害）、`补刀`（是不是补刀）。
+        * `未击发=True` = **这一发根本没打出去**（目标在它轮到之前就沉了）。
+          `战前船体` 记着当时目标还剩多少船体。
 
-        ⚠ **`aggregate_damage = 0` 的行是真的**（齐射被点防吃光：`pd_absorbed > 0`、
-        `damage = 0`）——B4 之前这种交火**一条事件都不留**。整条事件的总伤害记在
-        `aggregate_damage` 列上，逐发是它的下钻：同一 `event_id` 内 `damage` 之和 = 它
+        ⚠ **`aggregate_damage = 0` 的行是真的**（齐射被点防吃光：`点防吃掉 > 0`、
+        `伤害 = 0`）——B4 之前这种交火**一条事件都不留**。整条事件的总伤害记在
+        `aggregate_damage` 列上，逐发是它的下钻：同一 `event_id` 内 `伤害` 之和 = 它
         （**本表里差在 `aggregate_damage` 被规整到两位小数上**，最多 0.005；state 里精确相等）。
         """
         ev = self.events(round=round, type="attack", since=since, until=until)
         if ev is None or ev.empty:
             return pd.DataFrame()
-        if "shots" not in ev.columns:
+        if "逐发" not in ev.columns:
             raise KeyError(
-                "events.data 里没有 shots 列——这份投影是「B4 战斗中间量」之前的构建产出的，"
+                "events.data 里没有 `逐发` 列——这份投影是「B4 战斗中间量」之前的构建产出的，"
                 "请用当前 planet_x 重新 `--index`"
             )
         rows = []
         for _, r in ev.iterrows():
-            for s in (r["shots"] or []):
+            for s in (r["逐发"] or []):
                 rows.append(
                     {
                         "round": r["round"],
@@ -942,12 +942,12 @@ class PlanetXQ:
         if df.empty:
             return df
         # 总分是**文档承诺的那条恒等式**（引擎给的三项，Python 只做一次乘加），不是重算判据。
-        df["score"] = (df["score_basic"] + df["score_temper"]) * df["score_spread"]
+        df["score"] = (df["基础分"] + df["心态分"]) * df["分配乘数"]
         if attacker is not None:
             df = df[df["attacker"] == attacker]
         if target is not None:
             df = df[df["target"] == target]
-        return df.sort_values(["round", "event_id", "weapon"]).reset_index(drop=True)
+        return df.sort_values(["round", "event_id", "武器"]).reset_index(drop=True)
 
     def milestones(
         self,
@@ -1142,15 +1142,15 @@ class PlanetXQ:
                         "spawned": (born.iloc[0]["data"] if len(born) else None)}
             row = dead.iloc[-1]
             data = row["data"] or {}
-            by = data.get("by") or {}
+            by = data.get("凶手") or {}
             atk = ev[(ev["type"] == "attack") & (ev["round"] == row["round"])]
             return {
                 "kind": "ship", "id": entity_id, "found": True, "alive": False,
-                "round": int(row["round"]), "death_cause": data.get("cause"),
-                "killer": by.get("ship"), "killer_faction": by.get("faction"),
-                "weapon": by.get("weapon"),
+                "round": int(row["round"]), "death_cause": data.get("击毁原因"),
+                "killer": by.get("舰"), "killer_faction": by.get("势力"),
+                "weapon": by.get("弹种"),
                 "assists": sorted({a for a in atk["actor_id"].tolist()
-                                   if isinstance(a, str) and a != by.get("ship")}),
+                                   if isinstance(a, str) and a != by.get("舰")}),
             }
         rel = ev[ev["type"].isin(["city_razed", "city_defected", "city_overrun",
                                   "colony_founded", "revolt", "resurgence"])]
@@ -1184,12 +1184,12 @@ class PlanetXQ:
 
         out = pd.DataFrame({
             "round": df["round"].to_numpy(),
-            "ship": [pick(d, "ship") for d in df["data"]],
-            "owner": [pick(d, "owner") for d in df["data"]],
-            "death_cause": [pick(d, "cause") for d in df["data"]],
-            "killer": [pick(d, "by", "ship") for d in df["data"]],
-            "killer_faction": [pick(d, "by", "faction") for d in df["data"]],
-            "weapon": [pick(d, "by", "weapon") for d in df["data"]],
+            "ship": [pick(d, "舰") for d in df["data"]],
+            "owner": [pick(d, "舰主") for d in df["data"]],
+            "death_cause": [pick(d, "击毁原因") for d in df["data"]],
+            "killer": [pick(d, "凶手", "舰") for d in df["data"]],
+            "killer_faction": [pick(d, "凶手", "势力") for d in df["data"]],
+            "weapon": [pick(d, "凶手", "弹种") for d in df["data"]],
         })
         return out
 

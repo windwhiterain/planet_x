@@ -67,33 +67,109 @@ fn checkpoint_survives_save_and_resume_identically() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **每个** `GameEvent` 变体都要能过一遍 RON 往返。
+/// **每个** `GameEvent` 变体都要能过一遍 JSON 往返。
 ///
-/// 这个守卫是为了钉住一类**结构性**缺陷：单元 enum（`DeathCause`/`SpawnVia`/`FoundingHow`）
-/// 嵌在内部标签 enum 里时，若序列化成裸标识符，RON 读不回来（见 `stringly_unit_enum`）。
+/// 这个守卫是为了钉住两类**结构性**缺陷：
+/// 1. 单元 enum（`DeathCause`/`SpawnVia`/`FoundingHow`）嵌在内部标签 enum 里时，
+///    序列化形状一旦漂了，读面/存档就整份读不回来；
+/// 2. 新增变体时**忘了**同步 `#[serde(default)]` / 判别式 / 字段名（漏一个就往返不相等）。
 /// 单看某一个变体测不出来——必须**逐个变体**试。
+///
+/// ⚠ **为什么这里不再测 RON**（第 10 步，`feature/event-nouns` 的实测）：`GameEvent` 的载荷键
+/// 现在是**中文名词**，而 RON 要求结构体字段名是合法标识符 ⇒ `ron::to_string` 直接报
+/// `InvalidIdentifier("攻击方")`，**写都写不出来**。这与 `.agents/notes/field-naming.md` §7.2
+/// 记的是同一件事（存档格式因此从 RON 换成 JSON，`src/json.rs` 的 `save_*` 只写 JSON）。
+/// 单元 enum 的 **RON 可读性**（`stringly_unit_enum` 的存在理由）改在
+/// `unit_enums_round_trip_through_ron_as_strings` 里单独守——那才是那个宏真正服务的对象。
 ///
 /// 「有没有漏掉新变体」由 `variant_checklist` 的穷尽 match 提醒：新增 variant 时那里会
 /// 编译失败，照着把样本加进 `samples()` 即可（与 `history_row`/`kind`/`headline` 同一套
 /// 「漏不掉」纪律）。
 #[test]
-fn every_game_event_variant_round_trips_through_ron() {
+fn every_game_event_variant_round_trips_through_json() {
     let samples = samples();
     for ev in &samples {
         variant_checklist(ev); // 穷尽 match：新增变体时这里编译失败
-        let text = ron::to_string(ev).expect("serialize");
-        let back: GameEvent = ron::from_str(&text)
-            .unwrap_or_else(|e| panic!("{} 无法从 RON 读回: {e}\n  {text}", ev.kind()));
-        assert_eq!(&back, ev, "{} 往返后不相等", ev.kind());
-        // JSON 侧形状同样必须稳定（agent 视图/投影吃的是这一份）。
+        // JSON 侧形状必须稳定（agent 视图/投影/WebUI 吃的就是这一份，也是唯一的存档格式）。
         let js = serde_json::to_string(ev).expect("json");
-        let back_js: GameEvent = serde_json::from_str(&js).expect("json round-trip");
-        assert_eq!(&back_js, ev);
+        let back_js: GameEvent = serde_json::from_str(&js)
+            .unwrap_or_else(|e| panic!("{} 无法从 JSON 读回: {e}\n  {js}", ev.kind()));
+        assert_eq!(&back_js, ev, "{} JSON 往返后不相等", ev.kind());
     }
     assert!(
         samples.len() >= 18,
         "样本数 {} 应覆盖全部变体",
         samples.len()
+    );
+}
+
+/// **单元 enum 的 RON 可读性**：`stringly_unit_enum` 的**唯一**存在理由。
+///
+/// 按 serde 默认表示，单元变体在 RON 里是**裸标识符**（`cause:combat`），嵌在内部标签 enum
+/// 里时 `deserialize_any` 读不回来（详见 `stringly_unit_enum` 的说明）；写成字符串之后
+/// **RON 与 JSON 都能原样读回**。`GameEvent` 整体已经写不进 RON 了（中文载荷键），所以那半条
+/// 边界由**这三个单元 enum 自己**守住——它们是那个宏真正服务的对象。
+#[test]
+fn unit_enums_round_trip_through_ron_as_strings() {
+    fn ron_round<T>(v: T, expect: &str)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+    {
+        let text = ron::to_string(&v).expect("RON 序列化");
+        assert_eq!(text, expect, "RON 形状必须是带引号的字符串");
+        let back: T = ron::from_str(&text).expect("RON 读回");
+        assert_eq!(back, v);
+    }
+    ron_round(DeathCause::Combat, "\"combat\"");
+    ron_round(DeathCause::UpkeepShortfall, "\"upkeep_shortfall\"");
+    ron_round(DeathCause::Scrapped, "\"scrapped\"");
+    ron_round(SpawnVia::Shipyard, "\"shipyard\"");
+    ron_round(SpawnVia::Story, "\"story\"");
+    ron_round(FoundingHow::NewSite, "\"new_site\"");
+    ron_round(FoundingHow::Refounded, "\"refounded\"");
+    // 认不出的标签**响亮报错**（不退回默认变体）——两条格式一致。
+    assert!(ron::from_str::<DeathCause>("\"nonsense\"").is_err());
+}
+
+/// **事件载荷的键名只有一处真值**：`#[serde(rename = "中文名")]`。
+///
+/// `history_row().data` 是**手抄**的一份子集（参与方/伤害进了统一槽位，剩下的进 `data`），
+/// 所以「改了 serde 名、忘了改 `json!` 字面量」不会红——只会在读面上**多出一个英文列**，
+/// 而那正是第 8 步如实记账的缺口（11 个追加列弹不出解释、列头是 ASCII）。这条守卫把两份
+/// 键名钉在一起：
+///
+/// 1. `data` 的每个键都必须**真的**是 serde 序列化出来的载荷键（拼错/漏改 ⇒ 红）；
+/// 2. 每个键都必须是**中文名词**（`--nouns` 才查得到解释 ⇒ 悬停弹得出东西）。
+///
+/// 防空转：参与检查的键数有下限（`samples()` 覆盖全部变体，实测约 96 个键）。
+#[test]
+fn event_payload_keys_are_the_serde_names() {
+    let mut checked = 0usize;
+    let mut kinds = 0usize;
+    for ev in samples() {
+        kinds += 1;
+        let ser = serde_json::to_value(&ev).expect("serialize");
+        let obj = ser.as_object().expect("内部标签 enum ⇒ 对象");
+        let data = ev.history_row().data;
+        let d = data.as_object().expect("data 必须是对象");
+        for k in d.keys() {
+            assert!(
+                obj.contains_key(k),
+                "{}：`data` 的键 `{k}` 不是 serde 载荷键——序列化出来的是 {:?}",
+                ev.kind(),
+                obj.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                k.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{}：`data` 的键 `{k}` 不是中文名词（读面上会是一个弹不出解释的 ASCII 列）",
+                ev.kind()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 40 && kinds >= 18,
+        "只查到 {checked} 个载荷键 / {kinds} 个样本 ⇒ 守卫可能空转"
     );
 }
 

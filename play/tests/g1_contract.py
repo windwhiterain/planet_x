@@ -748,22 +748,24 @@ def call_functions(h, ck, tmp: Path) -> None:
 
     # ⑧ 军事信号（`sim/tests/ideology.rs::military_signal_uses_the_milestones_and_is_branch_agnostic`，
     #    第 7 批）：新挂 `--call military_deltas {events}` —— 纯函数（只吃事件表）。
-    KD = lambda a, b: {"ship": a, "faction": b, "weapon": "kinetic"}  # noqa: E731
-    killed = lambda ship, owner, by: {"type": "ship_destroyed", "ship": ship, "owner": owner,  # noqa: E731
-                                      "class": "corvette", "cause": "combat", "by": by}
-    razed = {"type": "city_razed", "city": "城", "owner": "乙", "fallen_to": "甲",
-             "by_ship": "甲舰", "damage": 9.0, "pop_before": 200}
-    founded = lambda owner, how, prev: {"type": "colony_founded", "city": "城", "owner": owner,  # noqa: E731
-                                        "body": "木星", "seeded_ship_class": "corvette",
-                                        "how": how, "prev_owner": prev}
+    # ⚠ 载荷键是**中文名词**（`#[serde(rename)]` 是唯一真值，第 10 步）：`--call` 的 args 走
+    # 同一份 serde，所以这里必须用读面上的名字，不能用 Rust 标识符。
+    KD = lambda a, b: {"舰": a, "势力": b, "弹种": "kinetic"}  # noqa: E731
+    killed = lambda ship, owner, by: {"type": "ship_destroyed", "舰": ship, "舰主": owner,  # noqa: E731
+                                      "舰级": "corvette", "击毁原因": "combat", "凶手": by}
+    razed = {"type": "city_razed", "城": "城", "失城方": "乙", "拆城方": "甲",
+             "拆城舰": "甲舰", "伤害": 9.0, "拆前人口": 200}
+    founded = lambda owner, how, prev: {"type": "colony_founded", "城": "城", "新主": owner,  # noqa: E731
+                                        "天体": "木星", "播种舰级": "corvette",
+                                        "建城方式": how, "旧主": prev}
     md = lambda evs: call("military_deltas", {"events": evs})  # noqa: E731
     mutual = md([killed("乙舰", "乙", KD("甲舰", "甲")), killed("甲舰", "甲", KD("乙舰", "乙"))])
     one = md([killed("乙舰", "乙", KD("甲舰", "甲"))])
-    rusted = md([{"type": "ship_destroyed", "ship": "锈舰", "owner": "丙", "class": "corvette",
-                  "cause": "upkeep_shortfall", "by": None}])
+    rusted = md([{"type": "ship_destroyed", "舰": "锈舰", "舰主": "丙", "舰级": "corvette",
+                  "击毁原因": "upkeep_shortfall", "凶手": None}])
     raze_then = md([razed, founded("丙", "refounded", "乙")])
-    defect = md([{"type": "city_defected", "city": "城", "from": "乙", "to": "甲", "loyalty": 0.2}])
-    revolt = md([{"type": "revolt", "city": "城", "faction": "乙", "loyalty": 0.0}])
+    defect = md([{"type": "city_defected", "城": "城", "失城方": "乙", "新主": "甲", "忠诚度": 0.2}])
+    revolt = md([{"type": "revolt", "城": "城", "失城方": "乙", "忠诚度": 0.0}])
     new_site = md([founded("丙", "new_site", None)])
     ck.check("--call military_deltas：**互杀双方各得一分战功**（净 0，不是「最后一条 Attack 说了算」）",
              mutual.get("甲") == 0.0 and mutual.get("乙") == 0.0, f"互杀 ⇒ {mutual}")

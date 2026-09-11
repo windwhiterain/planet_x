@@ -76,7 +76,18 @@ use crate::model::*;
 /// （**不迁移**，按本仓库「不考虑向前兼容」的约定）。**语义与随机流一律不变**：
 /// `--seed 42 --round 240 --digest 20` 的 sha256 逐字节相同（改的只是名字）。
 /// 见 `.agents/notes/field-naming.md`。
-pub const SCHEMA_VERSION: u32 = 25;
+///
+/// **v26 = 事件载荷字段的中文名**（`feature/event-nouns`，用户裁决 2026-10，第 10 步）：批 B 的
+/// 事件词汇——[`GameEvent`] 每个变体的载荷字段、[`Shot`]、[`Killer`] 全部加
+/// `#[serde(rename = "中文名")]` 与 `///` 解释（`--nouns` 的 `state` 那一半因此把这批名字与
+/// 解释一起发出去），投影 `events` 表的 `data` 载荷键（`GameEvent::history_row`）同步换成
+/// 同一批中文名。**判别键 `type` 与变体标签（`attack`/`city_razed`…）逐字不变**——它们是线上
+/// 格式与词表枚举，不是显示名词（见 `.agents/notes/field-naming.md` §8）。
+///
+/// **档的形状变了**（事件载荷的 JSON 键名不同）⇒ 推号：旧档里那些英文键按新名读不到
+/// （**不迁移**，按本仓库「不考虑向前兼容」的约定；旧档能加载，只是事件载荷的键名对不上）。
+/// **语义与随机流一律不变**（改的只是名字，`derived_roll` 的盐一个字没动）。
+pub const SCHEMA_VERSION: u32 = 26;
 fn default_schema_version() -> u32 {
     0
 }

@@ -143,21 +143,22 @@ and `launch_waiting` flags the "progress is full but the components cannot be pa
 `buildings[].blueprint` in `q.cities()`.
 
 `salvos` is the **B4 payoff** ("why did that shot do almost nothing / why was my missile volley eaten
-alive"): `attack` events carry a per-shot record, and this flattens it. `hit` is the engine's
+alive"): `attack` events carry a per-shot record, and this flattens it. `命中折减` is the engine's
 **deterministic** tracking reduction (`hit_factor(weapon tracking, target speed)` — not a dice roll),
-`pd`/`pd_absorbed` is point defence (own `intercept` + nearby friendly ships' screen), `absorbed`/`soak`
-is the shield layer, `armor_soak` the hardness reduction, `hull_pen` what actually reached the hull.
-`skipped=True` means that shot **never fired** (its target was already dead when its turn came).
+`点防拦截`/`点防吃掉` is point defence (own `intercept` + nearby friendly ships' screen),
+`护盾吸收`/`护盾吸收比` is the shield layer, `护甲减伤` the hardness reduction, `实入船体` what actually
+reached the hull.
+`未击发=True` means that shot **never fired** (its target was already dead when its turn came).
 ⚠ two traps: (1) an `attack` event with **`magnitude == 0` is real** — a salvo fully intercepted by
 point defence leaves no damage, and before B4 it left **no event at all**, so "no attack rows" never
-meant "no shooting"; (2) `Σ shots[].damage` equals the event's `magnitude` only up to the table's
+meant "no shooting"; (2) `Σ 逐发[].伤害` equals the event's `magnitude` only up to the table's
 2-decimal rounding of `magnitude` (it is exact in the engine's own state).
 
 Two things worth knowing:
 
 - **B4 put the combat internals in the *event* layer, not in the per-faction view** (a deliberate
   ruling, see `step-intermediates.md` §7 Q1): the per-shot detail rides in
-  `events[type='attack'].data.shots`, so `main.jsonl` pays only the event *id* (~7 B) instead of
+  `events[type='attack'].data.逐发`, so `main.jsonl` pays only the event *id* (~7 B) instead of
   every row carrying the numbers. Consequences to know: **`--derived` does not include events**, so
   a checkpoint's `post` view has no shot data — read it with `q.salvos()` / `q.events(type='attack')`
   / `q.history('ship', …)` instead. The world itself is unchanged: only **damage > 0** adjusts
