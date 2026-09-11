@@ -80,13 +80,14 @@
        天体/定居点/城/建筑/势力/舰/事件/编年史 + 本回合派生态 + 全部配置表。
        由 jsonview.js 这个 schema-agnostic widget 渲染——它不认识任何字段名，只认
        JSON 形状，所以 state 结构怎么改都不用动前端。被组织点认领的集合会**就地**换成
-       整理后的表（每行仍带「其余字段」），没被认领的部分照旧通用渲染。
-       ⚠ 就地整理出来的表里，`leaf`/`owner`/`action` 三类控制行**也能改**（与左栏是同一批
-       叶对象、同一套回传差异）——所以这里不再自称「只读」。 -->
+       整理后的**分层**视图（外层总览一行一个项目，点进去看全部字段：没被声明的字段
+       追加在详情末尾），没被认领的部分照旧通用渲染。
+       ⚠ 就地整理出来的分层视图里，`leaf`/`owner`/`action` 三类控制行**也能改**（与左栏是
+       同一批叶对象、同一套回传差异）——所以这里不再自称「只读」。 -->
   <button id="toggleInfo" class="edge-toggle right" title="展开/收起状态" data-closed-arrow="◀" data-open-arrow="▶">◀</button>
   <aside id="info" class="edge-panel right">
     <div class="panel" id="infoPanel">
-      <h2>状态 <span class="hint">普通 state · 派生 · 配置（就地整理；整理出来的控制行也能改）</span></h2>
+      <h2>状态 <span class="hint">普通 state · 派生 · 配置（就地整理成分层视图；整理出来的控制行也能改）</span></h2>
       <div class="jv-toolbar">
         <input id="jvFilter" placeholder="过滤（键名 / 值）" />
         <button id="jvExpand" title="展开当前根的全部可折叠节点">全展开</button>
