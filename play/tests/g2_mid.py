@@ -205,6 +205,31 @@ def combat_report(q, tol: float = 1e-9) -> dict:
     hull_lost: dict = {}
     kill_checked = 0
     kill_short: list[str] = []
+    # B4 事件层那两条（`sim/shots.rs` 的 `the_event_breakdown_adds_up_to_the_aggregate_damage`
+    # + `a_salvo_aimed_only_at_a_corpse_does_not_emit_an_attack`，2026-10 第 7 批）：
+    # 齐射一级的账——逐发之和必须等于聚合伤害，且**每条事件至少有一发真打出去**。
+    salvo_bad: list[str] = []
+    salvo_n = skipped_n = no_live = 0
+    for r in ev[ev["type"] == "attack"].itertuples(index=False):
+        shots = (r.data or {}).get("shots") or []
+        salvo_n += 1
+        if not shots:
+            if len(salvo_bad) < 3:
+                salvo_bad.append(f"r{int(r.round)} {r.actor_id}→{r.target_id}: 齐射没带逐发明细")
+            continue
+        tot = sum(float(sh.get("damage") or 0.0) for sh in shots)
+        if abs(tot - float(r.magnitude or 0.0)) > 0.0101:  # `magnitude` 过 r2
+            if len(salvo_bad) < 3:
+                salvo_bad.append(f"r{int(r.round)} {r.actor_id}→{r.target_id}: 逐发之和 {tot:.4f}"
+                                 f" ≠ 聚合 {r.magnitude}")
+        live = [sh for sh in shots if not sh.get("skipped")]
+        skipped_n += len(shots) - len(live)
+        if not live:
+            no_live += 1
+            if len(salvo_bad) < 3:
+                salvo_bad.append(f"r{int(r.round)} {r.actor_id}→{r.target_id}: 一发真打出去的都没有，"
+                                 f"却发了事件")
+
     for r in ev[ev["type"] == "attack"].itertuples(index=False):
         rnd, tgt = int(r.round), r.target_id
         for sh in (r.data or {}).get("shots") or []:
@@ -228,6 +253,18 @@ def combat_report(q, tol: float = 1e-9) -> dict:
             why = None
             if not (0.0 <= float(sh.get("hit") or 0.0) <= 1.0):
                 why = "命中折减越界"
+            elif not sh.get("skipped") and not (0.2 <= float(sh.get("hit") or 0.0) <= 1.0):
+                why = "命中折减低于下限 0.2"
+            elif not sh.get("skipped") and not (0.0 <= float(sh.get("soak") or 0.0) <= 1.0):
+                why = "护盾吸收比例越界"
+            elif not sh.get("skipped") and not (0.0 <= float(sh.get("armor_soak") or 0.0) <= 0.85):
+                why = "护甲减伤越界"
+            elif not sh.get("skipped") and float(sh.get("def_mult") or 0.0) <= 0.0:
+                why = "本土防御倍率非正"
+            elif not sh.get("skipped") and float(sh.get("score_spread") or 0.0) <= 0.0:
+                why = "火力分配乘数非正"
+            elif not sh.get("skipped") and float(sh.get("target_hull_before") or 0.0) <= 0.0:
+                why = "打的时候目标已经死了"
             elif dmg < -tol or pen < -tol:
                 why = "伤害为负"
             elif dmg > tol and (sh.get("skipped") or not sh.get("in_range")):
@@ -238,6 +275,8 @@ def combat_report(q, tol: float = 1e-9) -> dict:
                 why = "没有点防却拦截了"
             if why and len(shot_bad.get(why, [])) < 2:
                 shot_bad.setdefault(why, []).append(f"r{rnd} {r.actor_id}→{tgt}: {why}")
+    out["salvo_bad"] = salvo_bad[:4]
+    out["salvo_n"], out["skipped_n"], out["no_live"] = salvo_n, skipped_n, no_live
     out["shot_bad"] = [m for v in shot_bad.values() for m in v][:4]
     out["shot_bad_kinds"] = len(shot_bad)
 
@@ -1766,6 +1805,19 @@ def combat_checks(h, ck, out) -> None:
              kinds == 0, "；".join(next((d["combat"]["shot_bad"] for d in out if d["combat"]["shot_bad"]), []))
              if kinds else f"{tag}：{shots:,} 发逐发成立")
     ck.check("射击守卫没有空转（真的开过火）", shots >= 500, f"{shots:,} 发（下限 500）")
+
+    # 齐射一级的两条（`sim/shots.rs`，第 7 批）：逐发之和 = 聚合伤害；每条事件至少一发真打出去。
+    sb = [(s, m) for s, d in zip(SEEDS, out) for m in d["combat"]["salvo_bad"]]
+    salvos = sum(d["combat"]["salvo_n"] for d in out)
+    skips = sum(d["combat"]["skipped_n"] for d in out)
+    nolive = sum(d["combat"]["no_live"] for d in out)
+    ck.check("齐射：逐发之和 = 聚合伤害，且每一发都在取值域里（命中折减∈[0.2,1]、护盾/护甲吸收、防御倍率、火力分配）",
+             not sb, "；".join(f"seed {s}: {m}" for s, m in sb[:3])
+             or f"{tag}：{salvos:,} 条齐射、{shots:,} 发逐发成立")
+    ck.check("齐射：**瞄一艘已经沉了的舰不发事件**（每条 attack 至少有一发真打出去）",
+             nolive == 0, f"{nolive} 条齐射全是跳过的发")
+    ck.check("齐射守卫没有空转（真有过「跳过」的发，且真开过火）",
+             skips > 0 and salvos > 0, f"{salvos:,} 条齐射里有 {skips} 发被跳过（射程外/目标已死）")
 
     # 击杀所需的伤害：**按 (回合, 目标) 累计**对账——`target_hull_before` 是那一发那一刻的记录，
     # 同一回合可能多舰轮着打，所以「一发打不死满血目标」是正常的；能对账的是「这一回合挨的总伤害

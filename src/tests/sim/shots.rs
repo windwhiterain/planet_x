@@ -1,4 +1,15 @@
-//! B4：**战斗中间量进事件层**（用户裁决 Q1 = (b)，见 `.agents/notes/step-intermediates.md` §7）。
+//! 齐射的事件层：被点防吃光的齐射也必须留一条事件。
+//!
+//! ## 2026-10（第 7 批）：两条搬去了 g2 `combat_report`/`combat_checks`
+//!
+//! | 原用例 | 判据 |
+//! | --- | --- |
+//! | `the_event_breakdown_adds_up_to_the_aggregate_damage` | **齐射一级**：`Σ shots[].damage == magnitude`（3 seed 共 561 条齐射），且逐发都在取值域里（命中折减 ∈ [0.2,1]、护盾吸收 ∈ [0,1]、护甲减伤 ∈ [0,0.85]、防御倍率 > 0、火力分配 > 0、`target_hull_before > 0`） |
+//! | `a_salvo_aimed_only_at_a_corpse_does_not_emit_an_attack` | 每条 `attack` **至少有一发真打出去**（全是被跳过的发 = 不该发事件）；防空转 = 真出现过被跳过的发（3 seed 里 2 发） |
+//!
+//! **留在这里的**：`a_fully_intercepted_salvo_still_leaves_an_event` —— 它要**构造**「两层点防
+//! 吃光一发导弹」，而读面上只看得见结果：实测 7 seed × 1000 回合里这种齐射一共只有 **2 条**
+//! （多数种子一条都没有）⇒ 「一条都没发生」时判据无法区分「机制坏了」与「没打过这种仗」。
 //!
 //! 这一批动的不是读面（`RoundView` 一个字段没加），而是 [`GameEvent::Attack`]：它长出 `shots`
 //! ——每一发的完整分解（选择三项分 + 命中/点防/护盾/护甲/破甲）。同时**放宽了发事件的闸**：
@@ -88,68 +99,4 @@ fn a_fully_intercepted_salvo_still_leaves_an_event() {
     assert_eq!(s.damage, 0.0, "全被拦下 ⇒ 这一发不打任何伤害");
     assert_eq!(s.hull_pen, 0.0);
     assert_eq!(s.absorbed, 0.0);
-}
-
-/// **逐发之和 = 聚合伤害**：事件的 `damage` 仍然是「这个目标这一回合总共挨了多少」，
-/// 逐发是它的下钻（不是替代）。同时钉住几个分解量的取值范围。
-#[test]
-fn the_event_breakdown_adds_up_to_the_aggregate_damage() {
-    let (config, mut state, shooter, victim) = duel(42, &["kinetic"], &["shield"]);
-    crate::sim::fire(&mut state, &config, &shooter, &[order(0, &victim)]);
-
-    let mut seen = 0usize;
-    for e in &state.events {
-        if let GameEvent::Attack { damage, shots, .. } = e {
-            seen += 1;
-            assert!(!shots.is_empty(), "B4 之后每条 Attack 都带逐发明细：{e:?}");
-            let sum: f64 = shots.iter().map(|s| s.damage).sum();
-            assert!(
-                (sum - damage).abs() < 1e-9,
-                "逐发之和 {sum} ≠ 聚合伤害 {damage}"
-            );
-            for s in shots {
-                if s.skipped {
-                    continue;
-                }
-                assert!(s.in_range, "计划只挑射程内的目标：{s:?}");
-                assert!(
-                    (0.2..=1.0).contains(&s.hit),
-                    "命中折减必须落在 0.2..=1（确定性折减，不是掷骰）：{}",
-                    s.hit
-                );
-                assert!((0.0..=1.0).contains(&s.soak), "护盾吸收比例越界：{}", s.soak);
-                assert!(
-                    (0.0..=0.85).contains(&s.armor_soak),
-                    "护甲减伤必须落在 0..=0.85：{}",
-                    s.armor_soak
-                );
-                assert!(s.def_mult > 0.0, "本土防御倍率不该是 0/负：{}", s.def_mult);
-                assert!(s.score_spread > 0.0, "火力分配是**乘数**，必须为正");
-                assert!(
-                    s.target_hull_before > 0.0,
-                    "非 skipped 的发，打的时候目标还活着"
-                );
-            }
-        }
-    }
-    assert!(seen >= 1, "这一枪必须打出至少一条事件（用例场景没打起来？）");
-}
-
-/// **瞄一艘已经沉了的舰不留事件**：那不是一次交火（旧规则也是这个意思，B4 只是把闸从
-/// 「伤害 > 0」换成「真朝活目标打过一发」）。这条守的是新闸的下界。
-#[test]
-fn a_salvo_aimed_only_at_a_corpse_does_not_emit_an_attack() {
-    let (config, mut state, shooter, victim) = duel(42, &["kinetic"], &["shield"]);
-    if let Some(s) = state.ship_mut(&victim) {
-        s.hull = 0.0;
-    }
-    crate::sim::fire(&mut state, &config, &shooter, &[order(0, &victim)]);
-    assert!(
-        !state
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::Attack { .. })),
-        "朝一艘已经沉了的舰开火不该留事件，实为 {:?}",
-        state.events
-    );
 }
