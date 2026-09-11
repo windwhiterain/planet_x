@@ -280,7 +280,9 @@ def blueprint_report(q) -> dict:
     out["drift_n"] = len(drift)
     out["drift"] = [f"{k}: {list(v)[:2]}" for k, v in list(drift.items())[:3]]
 
-    design = {(int(r.round), r.faction_id, r.blueprint_id): r for r in bps.itertuples(index=False)}
+    # ⚠ `class` 是 Python 关键字，`itertuples` 会改名 ⇒ 这里存成普通 dict（键名原样）。
+    design = {(int(r["round"]), r["faction_id"], r["blueprint_id"]):
+              {"class": r["class"], "components": r["components"]} for _, r in bps.iterrows()}
     same = prev = neither = 0
     snap_ex: list[str] = []
     spawned = ships[ships["round"] == ships["spawned_round"]]
@@ -289,18 +291,18 @@ def blueprint_report(q) -> dict:
             continue
         rnd, fid = int(r.round), r.faction_id
         cur = design.get((rnd, fid, r.blueprint))
-        if cur is None or not (cur.components or []):
+        if cur is None or not (cur["components"] or []):
             continue                      # 这一回合图没快照 / 空选装 = 交给生成器
         got = {c for c in (r.components or [])}
-        if got == set(cur.components):
+        if got == set(cur["components"]):
             same += 1
         elif (before := design.get((rnd - 1, fid, r.blueprint))) is not None \
-                and got == set(before.components or []):
+                and got == set(before["components"] or []):
             prev += 1
         else:
             neither += 1
             if len(snap_ex) < 3:
-                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur.components)}")
+                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur['components'])}")
     out["snap_same"], out["snap_prev"], out["snap_bad"], out["snap_ex"] = same, prev, neither, snap_ex
 
     attr: dict = {}
@@ -339,6 +341,41 @@ def blueprint_report(q) -> dict:
             dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['blueprint_id']}）")
         seen[sig] = r["blueprint_id"]
     out["dup_bad"], out["dup_sigs"] = dup, len(seen)
+
+    # 建造区 ↔ 设计图（`autocontrol/blueprints.rs`）：① 有指针 ⇒ 图必须**存在**（不许悬空）；
+    # ② 图与建造区的舰级不符 ⇒ **只允许滞后几回合**（retool 当回合改了舰级，AI 那一趟下一回合
+    # 才把图对齐；实测 3 例全是这样），**窗口末尾不许还挂着不符的图**。
+    cities = q.table("cities")
+    yard_rows = 0
+    dangling: list[str] = []
+    streak: dict = {}
+    bad_streak: dict = {}
+    # ⚠ `last` 必须先取**全局**最大回合：写在循环里累加的话，每一行都会被当成「窗口末尾」。
+    last = int(cities["round"].max())
+    for r in cities.itertuples(index=False):
+        rnd, fid = int(r.round), r.faction_id
+        for b in r.buildings or []:
+            st = b.get("ship_type")
+            if not st:
+                continue
+            yard_rows += 1
+            ptr = b.get("blueprint")
+            key = (r.city_id, b["id"])
+            row = design.get((rnd, fid, ptr)) if ptr else None
+            if ptr and row is None:
+                if len(dangling) < 3:
+                    dangling.append(f"r{rnd} {r.city_id} 建筑{b['id']}：指针「{ptr}」在图库里不存在")
+            if row is not None and row["class"] != st:
+                streak[key] = streak.get(key, 0) + 1
+                bad_streak[key] = bad_streak.get(key, 0) + 1
+                if rnd == last and len(dangling) < 3:
+                    dangling.append(f"窗口末尾 {r.city_id} 建筑{b['id']}：区说造 {st}，图说 {row['class']}")
+            else:
+                streak[key] = 0
+    out["yard_rows"] = yard_rows
+    out["yard_dangling"] = dangling
+    out["yard_max_streak"] = max(bad_streak.values(), default=0)
+    out["yard_mismatch"] = sum(bad_streak.values())
     return out
 
 
@@ -572,6 +609,18 @@ def blueprint_checks(h, ck, out) -> None:
     sample = next((m for b in bp for m in b["count_bad"]), "")
     ck.check("图表的 ship_count 是算出来的（== 该回合指向它的舰数）", cb == 0,
              sample or f"{tag}：{rows:,} 张图快照的计数全部自洽")
+
+    yr = sum(b["yard_rows"] for b in bp)
+    dg = sum(len(b["yard_dangling"]) for b in bp)
+    sample = next((m for b in bp for m in b["yard_dangling"]), "")
+    ck.check("建造区挂了图就必须挂到**存在**的图上（不许悬空，也不许窗口末尾还挂着不符的图）",
+             dg == 0, f"{sample}（共 {dg} 处）" if dg else
+             f"{tag}：{yr:,} 个「建造区·回合」的图指针全部落在图库里，且没有留下的舰级不符")
+    ms = max((b["yard_max_streak"] for b in bp), default=0)
+    mm = sum(b["yard_mismatch"] for b in bp)
+    ck.check("守守卫没有空转（真检查过建造区）", yr >= 1000, f"{yr:,} 行（下限 1000）")
+    ck.check("舰级不符只是**滞后**、会自己收敛（实测最长滞后）", ms <= 4,
+             f"共 {mm} 行不符，最长连续 {ms} 回合（retool 当回合改了舰级、AI 下一趟把图对齐）")
 
     db = sum(len(b["dup_bad"]) for b in bp)
     sigs = sum(b["dup_sigs"] for b in bp)
