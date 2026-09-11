@@ -567,7 +567,11 @@ pub(crate) fn decide_role(
     let (role, odds) = role_with_roll(state, config, fid, ship_id, roll);
     // **记账只在这里**：闸门记「谁做了什么决定」（拍板那条路），估算那条路（`should_be_role`）
     // 不问就不记。用途与机会值都来自 `RoleOdds`，所以观测/运输两支共用一段。
-    if let (Some(purpose), Some(p)) = (odds.purpose, odds.observe.or(odds.freight)) {
+    let fired = match odds.purpose {
+        Some("observe_role") => odds.observe.map(|(p, _)| p),
+        _ => odds.freight.map(|(p, _)| p),
+    };
+    if let (Some(purpose), Some(p)) = (odds.purpose, fired) {
         inputs
             .record_gate(
                 purpose,
@@ -611,10 +615,11 @@ fn share_mut<'a>(
 /// 都交出来（而不是只交落中的那一支的 p，那会让"期望"少一项）。
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RoleOdds {
-    /// 观测那一支这次抽签的机会值（`None` = 那枚骰子没被用到）。
-    pub observe: Option<f64>,
-    /// 运输那一支这次抽签的机会值（`None` = 没走到）。
-    pub freight: Option<f64>,
+    /// 观测那一支的 `(机会值, 引擎自己算的 flow)`（`None` = 那枚骰子没被用到）。
+    /// **两枚骰子各带各的 `flow`**：同一艘舰会先后掷两枚，共用一个字段会被后一枚覆盖。
+    pub observe: Option<(f64, f64)>,
+    /// 运输那一支的 `(机会值, flow)`（`None` = 没走到）。
+    pub freight: Option<(f64, f64)>,
     /// 命中的那一支的候选池（B5c 记账用）。
     pub pool: Vec<crate::model::PoolEntry>,
     /// 记账的用途名（`observe_role` / `role`）——只有真的掷了的档才记。
@@ -660,7 +665,7 @@ fn role_with_roll(
     //    **B5**：观测那一支的骰子由 `recorder` 决定记不记——拍板那条路（`decide_role`）
     //    传进来的是 `Some`，把这次抽签落进输入面；估算那条路传 `None`（同一枚骰子不记两遍）。
     let observe_roll = sim::derived_roll(fid, ship_id, state.round, "observe_role");
-    let (observe, observe_p) = super::knowledge::observe_with_roll(
+    let (observe, observe_p, observe_flow) = super::knowledge::observe_with_roll(
         state,
         config,
         fid,
@@ -682,7 +687,7 @@ fn role_with_roll(
         return (
             ShipRole::Observe,
             RoleOdds {
-                observe: obs_p,
+                observe: obs_p.map(|p| (p, observe_flow)),
                 pool,
                 purpose: Some("observe_role"),
                 fixed: None,
@@ -783,14 +788,14 @@ fn role_with_roll(
     (
         role,
         RoleOdds {
-            freight: Some(p),
+            freight: Some((p, flow)),
             pool,
             purpose: Some("role"),
             fixed: None,
             // **观测那一支的机会值也要留着**：这艘舰没被观测挑走，但它**确实掷过**观测的骰子
             // （`observe_with_roll` 总是被调），所以落在"观测"那一支的概率就是 `p_obs`。
             // 只记落中的那一支（`rolls` 的闸门就是这么记的）时，`Σp` 会永远缺这一项。
-            observe: observe_p.as_ref().map(|(p, _)| *p),
+            observe: observe_p.as_ref().map(|(p, _)| (*p, observe_flow)),
         },
     )
 }
@@ -858,7 +863,27 @@ pub(crate) fn assign_roles(
             let (role, odds) = decide_role(state, config, &fid, &name, inputs);
             // 级联的两个门槛：观测那一支的机会值归观测那份账，运输的归运输那份；
             // **入伙/退伍**按「这只舰原先是哪一支」分两侧。
-            let _ = (was, odds.observe, odds.freight);
+            // **每枚骰子各记各的账**（观测没中 ⇒ 接着掷运输 ⇒ 两枚都要入账，各用各的 `flow`）。
+            for (r, lot) in [
+                (ShipRole::Observe, odds.observe),
+                (ShipRole::Freight, odds.freight),
+            ] {
+                let Some((p, flow)) = lot else { continue };
+                let sh = share_mut(&mut dist, r);
+                if was == r {
+                    sh.flow_leave = flow;
+                    sh.sum_p_leave += p;
+                    if p >= 1.0 - 1e-12 {
+                        sh.clamped_leave += 1.0;
+                    }
+                } else {
+                    sh.flow_join = flow;
+                    sh.sum_p_join += p;
+                    if p >= 1.0 - 1e-12 {
+                        sh.clamped_join += 1.0;
+                    }
+                }
+            }
             if odds.fixed.is_some() {
                 share_mut(&mut dist, role).fixed += 1.0;
             }

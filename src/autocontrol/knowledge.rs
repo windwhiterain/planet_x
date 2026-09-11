@@ -264,16 +264,16 @@ pub(crate) fn observe_with_roll(
     ship_id: &str,
     quota: f64,
     roll: f64,
-) -> (bool, Option<(f64, Vec<(String, f64)>)>) {
+) -> (bool, Option<(f64, Vec<(String, f64)>)>, f64) {
     // 1) 没分到船就不去（配额是三个动机抢完舰队的结果，见 `freight::role_quotas`）。
     if quota <= 0.0 {
-        return (false, None);
+        return (false, None, 0.0);
     }
     let Some(ship) = state.ship(ship_id) else {
-        return (false, None);
+        return (false, None, 0.0);
     };
     if observer_tonnage(config, ship) <= 0.0 {
-        return (false, None);
+        return (false, None, 0.0);
     }
     let cur = state.ship_role(ship_id.to_string()) == ShipRole::Observe;
     let others = observer_headcount(state, fid, ship_id);
@@ -335,7 +335,7 @@ pub(crate) fn observe_with_roll(
     let p = (flow * mine / tickets).min(1.0);
     let flip = roll < p;
     let observe = if cur { !flip } else { flip };
-    (observe, Some((p, pool)))
+    (observe, Some((p, pool)), flow)
 }
 
 #[cfg(test)]

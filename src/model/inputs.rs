@@ -103,6 +103,18 @@ pub struct RoleShare {
     pub gap_leave: f64,
     /// 本支的轮换率（`flow = 缺口 + 轮换 × 头数`；战舰那一支为 0）。
     pub rotation: f64,
+    /// **引擎自己算的入伙侧 `flow`**（期望入伙数）：同侧每艘舰的 `p` 都是
+    /// `min(1, flow × 我的票 ÷ 同侧总票)`，而池子只有一侧 ⇒ 没被截断时 **`Σp` 必须正好等于它**。
+    pub flow_join: f64,
+    /// 引擎自己算的退伍侧 `flow`。
+    pub flow_leave: f64,
+    /// 池子里非在任舰的机会值之和（实测，与 `flow_join` 对账）。
+    pub sum_p_join: f64,
+    /// 池子里在任舰的机会值之和（实测，与 `flow_leave` 对账）。
+    pub sum_p_leave: f64,
+    /// 入伙/退伍侧被 `min(1,·)` 截断的舰数（>0 时 `Σp` 会**低于** `flow`）。
+    pub clamped_join: f64,
+    pub clamped_leave: f64,
     /// **不掷骰就定性**的头数（承包单硬承诺 / 舱里有货 / 玩家表态 / 动不了 / 没配额）。
     pub fixed: f64,
     /// 本回合**实得**头数。

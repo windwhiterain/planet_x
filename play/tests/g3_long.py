@@ -277,7 +277,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
 
 def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     """把一份投影压成**每回合一行**的判据表 + 元数据（结果按投影缓存成 pickle）。"""
-    q = KIT.load(str(dirpath), only=("events", "ships", "factions", "faction_process", "city_process",
+    q = KIT.load(str(dirpath), only=("events", "ships", "factions", "faction_process", "city_process", "round_inputs",
                                     "decisions", "cities"))
     facts = q.facts
     view = facts["view"]
@@ -383,6 +383,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "ideology": _ideology_summary(q),
         "ideo_econ": _ideo_econ_summary(q),
         "upkeep": _upkeep_summary(q),
+        "role_dist": _role_dist_summary(q),
     }
     return pd.DataFrame(rows), meta
 
@@ -570,6 +571,7 @@ def run(h, ck) -> None:
     mond_law_checks(h, ck, metas, tag)
     ideology_law_checks(h, ck, metas, tag)
     upkeep_law_checks(h, ck, metas, tag)
+    distribution_checks(h, ck, metas, tag)
 
 
 def capital_checks(h, ck, metas, tag) -> None:
@@ -924,6 +926,72 @@ def upkeep_law_checks(h, ck, metas, tag) -> None:
     ck.check("维护费守卫没有空转（真的欠过费、而且 0.2 下限真的起过作用）",
              short >= 20 and floored >= 1,
              f"{tag}：{short} 行欠费，其中 {floored} 行的比例低于 0.2（被下限抬上来）")
+
+
+def _role_dist_summary(q) -> dict:
+    """**定编分布的逐回合对账行** + 「本回合这个势力有没有被玩家钉死的舰」。
+
+    行 = `(round, 势力, 支, 侧, flow, Σp, 截断数)`；`flow` 是**引擎自己算的**期望
+    （`缺口 + 轮换 × 头数`），`Σp` 是池子里那一侧各舰机会值之和。**没被截断时两者必须相等**
+    ——这条就是"分母有没有被稀释"的尺子。
+    """
+    ri = q.table("round_inputs")
+    sh = q.table("ships")
+    pins: dict = {}
+    for _, s in sh.iterrows():
+        if s["order_effective_mode"] != "Auto" or s["role_mode"] == "Player":
+            pins[(int(s["round"]), s["势力"])] = True
+    rows = []
+    for _, r in ri.iterrows():
+        rnd = int(r["round"])
+        if rnd < 2:
+            continue
+        for f, v in (r["role_distribution"] or {}).items():
+            for role in ("freight", "observe"):
+                x = v[role]
+                for side in ("join", "leave"):
+                    rows.append((rnd, f, role, side, float(x[f"flow_{side}"]),
+                                 float(x[f"sum_p_{side}"]), float(x[f"clamped_{side}"])))
+    return {"rows": rows, "pins": pins}
+
+
+def distribution_checks(h, ck, metas, tag) -> None:
+    """**定编分布的逐回合对账**（`autocontrol::freight::assign_roles` 的两枚骰子）。
+
+    引擎的设计契约是 `p = (缺口 + 轮换 × 头数) × 我的票 ÷ 同侧总票数`，而**池子只有一侧**
+    ⇒ `Σ我的票 = 同侧总票数` ⇒ **`Σp` 应当正好等于 `flow`**。这条判据是为了替掉两条抽样判据
+    （跑 400 / 200 回合比均值——实测 `r1 中国` 观测配额 1.51 而在册 2，那条 ±0.5 的容差一直在
+    **吸收 0.49 的系统性偏差**）。
+
+    ⚠ **实测：等号只在大约 91% 的行上成立**（7 seed × 1000 回合：25158 行相等、2306 行
+    `Σp < flow`）⇒ 引擎的**分母口径**与"在册头数"确实有一处不一致（`Σp < flow` 说明池子里摊了
+    票、而那些票没被记成机会值）。**原因还没定**：先用 `order_leaf_mode` 判"被玩家钉死"时
+    看着像 103 行全对上，改用引擎真正看的 `order_effective_mode` 之后那一类变成 **0 行**
+    ⇒ 与玩家钉死**无关**。（下一步要记池子人数与票数才能定因。）
+    所以这里只压**单向界**（`Σp ≤ flow`：稀释只会让它变小、不会反超），等号那一半**如实报数**、
+    不判红——**不拿一条自己还没吃透的判据去删掉那两条循环**。
+    """
+    oneway = Verdict()
+    n = diluted = clipped = 0
+    for m in metas:
+        for rnd, f, role, side, flow, sp, cl in m["role_dist"]["rows"]:
+            if cl > 0:
+                clipped += 1
+                continue
+            if flow == 0.0 and sp == 0.0:
+                continue
+            n += 1
+            if sp > flow + 1e-9:
+                oneway.add(f"{f} r{rnd} {role}/{side}: Σp {sp:.6f} > flow {flow:.6f}")
+            elif abs(sp - flow) > 1e-9:
+                diluted += 1
+    ck.check("定编：**Σp 不会反超引擎自己算的 `flow`**（池子只有一侧 ⇒ 分摊只会让 Σp 变小）",
+             oneway.n == 0,
+             oneway.detail(f"{tag}：{n} 行；其中等号 {n - diluted} 行、`Σp < flow` {diluted} 行"
+                           f"（⚠ 这 {diluted} 行是**引擎分母口径不一致**的旁证，原因待定，见施工图），"
+                           f"另有 {clipped} 行被 `min(1,·)` 截断"))
+    ck.check("定编分布对账没有空转（真的对过账、也真的掷出过非平凡的概率）", n >= 500,
+             f"{tag}：{n} 行")
 
 
 def identity_checks(h, ck, metas, tag) -> None:
