@@ -505,6 +505,12 @@ fn write_round(
                 "intercept": r2(p.intercept),
                 "shield_regen": r2(p.shield_regen),
                 "hull_regen": r2(p.hull_regen),
+                // —— 货舱（M2 / 施工图 §5 第 2 批）——
+                // `载货` = `Ship.cargo`（在舱货物，按资源）；`cargo_capacity` 是**派生列**
+                // （舰级舱容 × 战损折算 `hull / hull_max`），与 `attack`/`x`/`y` 一样先留英文名，
+                // 等字段命名批 C（派生读面）再收口。
+                "载货": s.cargo,
+                "cargo_capacity": r2(cargo_capacity(config, s)),
                 "upkeep": r2(p.upkeep),
                 // —— 指令归属的**引擎解析结果**（别让 Python 自己重实现链：那是漂移源）——
                 // `order_leaf_mode`：本舰叶片自己的表态（没有叶片 = Inherit）；
@@ -1281,7 +1287,7 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","舰级":"string","舰名":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","舰级":"string","舰名":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","载货":"object","cargo_capacity":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
@@ -1294,6 +1300,8 @@ pub fn projection_schema() -> serde_json::Value {
                     "出厂图": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
                     "下水回合": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
+                    "载货": "**在舱货物**（按资源）：`{资源: 件数}`，空 = 空舱（出厂/旧档）。件数与 `cargo_capacity` 同一把尺子（都是「单位」，不折算价值）——装货判「还能装多少」用它，卸货不设上限。",
+                    "cargo_capacity": "**本回合有效舱容**（派生列）= 舰级舱容（`meta.json` 的 `ships[class].cargo`）× 战损折算 `船体 / 船体上限`（钳到 [0,1]）。**连续**：装甲掉一半 ⇒ 舱容减半，不是「受伤就装不了」的硬阈值；`船体上限 ≤ 0`（旧档缺字段）按满舱处理，绝不返回 ∞。",
                 },
             }),
             "cities" => json!({
@@ -1503,7 +1511,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**本回合每艘在跑运输的舰走了哪一步**（`RoundView::haul_steps`）：一舰一行。`waiting`（停在**空货栈**干等）与 `en_route`（在路上，装/卸都还没发生）**既不落持久状态、也不发事件**——所以「我派它去拉货，为什么一件没运回来」在 B3 之前**没有任何读法**；`loaded`/`delivered` 说明这一步真的搬了货。⚠ 两条执行路径（AI 的 `ai_ship_turn` 与**玩家指令**的 `step_military`）都写这张表，所以**玩家舰也在里面**。",
                 "columns": {"round":"integer","ship_id":"string","step":"string","body":"string","units":"number","into_pool":"boolean"},
                 "column_docs": {
-                    "ship_id": "舰名；join `ships` 表拿势力/舰级/位置/货舱（`ships.cargo` 非空 = 舱里有货）。",
+                    "ship_id": "舰名；join `ships` 表拿势力/舰级/位置/货舱（`ships.载货` 非空 = 舱里有货）。",
                     "step": "loaded（在这一步装上了货）/ delivered（卸了货）/ waiting（停在空货栈干等——**不是**故障，是「没货就不走」）/ en_route（在路上，正驶向 `body`）。",
                     "body": "这一步发生在哪个天体（`en_route` = **正驶向的那一端**：舱里有货 ⇒ 目的地，空舱 ⇒ 起运地）。",
                     "units": "这一步搬动的件数（`waiting`/`en_route` = 0：没搬）。装货时按 `haul_split` 在货舱容量的上限内分配，所以它可能小于「货栈里的全部积压」。",
