@@ -666,7 +666,7 @@ function tick() {
     c.mat.uniforms.uSpin.value = c.phase;
     c.mat.uniforms.uTime.value = timeS;      // 云自己的漂移照旧（那是 uTime，不是自转）
   }
-  if (sun) sun.update(timeS);
+  if (sun) sun.update(timeS, camera);   // camera 是为了日冕体积的深度（见 CORONA_FRAG 尾部）
   tickPlumes(timeS);
 
   // 轨道线的彗头跟住天体当前（可能还在过渡中）的位置。

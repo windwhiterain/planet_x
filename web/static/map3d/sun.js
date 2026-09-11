@@ -62,7 +62,9 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uOuterRatio: { value: CORONA_OUTER_RATIO },
     uIntensity: { value: 0.055 },
     // 色球强度是**另一个量纲**（比日冕亮约 1e4 倍），别和 uIntensity 混为一谈
-    uChromo: { value: 5.0 },
+    uChromo: { value: 1.0 },
+    // 片元里拿不到 projectionMatrix（three 只在顶点前缀给），自己传
+    uProj: { value: new THREE.Matrix4() },
     uFalloff: { value: 2.6 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
@@ -113,9 +115,11 @@ export function createSun(tier) {
   return {
     group: g,
     photosphere,
-    update(t) {
+    update(t, camera) {
       photosphereMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
+      // 相机矩阵会变（变焦/改 FOV），所以每帧同步，不能只在创建时设一次
+      if (camera) coronaMat.uniforms.uProj.value.copy(camera.projectionMatrix);
     },
     setIntensity(v) {
       photosphereMat.uniforms.uIntensity.value = v;

@@ -12,6 +12,9 @@
   // 色球的**独立强度**。色球比日冕亮约 1e4 倍 —— 把两者塞进同一个密度场、同一个
   // 强度，日缘就永远填不满（实测盘缘 200、紧挨着外面只有 143，一道台阶）。
   uniform float uChromo;
+  // three 只在**顶点**前缀里给 projectionMatrix，片元里没有 —— 所以要自己传进来
+  // （viewMatrix 片元里有）。用来把体积的深度报成**近壁**，见下面 gl_FragDepth。
+  uniform mat4 uProj;
   uniform float uFalloff;     // 径向幂律（K-日冕投影大致 ~r^-2.6）
   uniform int   uSteps;
   varying vec3 vWorld;
@@ -211,6 +214,18 @@
       }
       acc += vec3(1.45, 0.34, 0.16) * chromoAcc * uChromo;
     }
+
+    // ⚠ **体积的深度必须报「近壁」，不能沿用被渲染那一面的深度。**
+    //
+    // 这个网格是 `side: BackSide`（只渲染**远壁**，为的是相机进到球内时也有片元）。于是
+    // 片元深度 = 球的远壁 ⇒ 球**内部**的一切（太阳的光球、行星、星空）都比它近 ⇒ 深度测试
+    // 把它们当成遮挡物。后果有两个，用户一句话说清了：
+    //   · 日冕在**日面之前**的那一段永远画不出来 ——「太阳本身相当于裸体」
+    //   · **日冕背后**的物体也能把它挡住 ——「可以被任何物体遮挡」
+    // 报近壁之后，体积才真正表现为「**包围**着这些物体」，而不是被它们遮挡。
+    vec3 pn = ro + rd * max(to.x, 0.0);
+    vec4 clip = uProj * viewMatrix * vec4(pn, 1.0);
+    gl_FragDepth = clamp((clip.z / max(abs(clip.w), 1e-4)) * 0.5 + 0.5, 0.0, 1.0);
 
     gl_FragColor = vec4(acc * uIntensity, 1.0);
   }
