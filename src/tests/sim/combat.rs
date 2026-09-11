@@ -1,4 +1,13 @@
-//! 战斗与损伤：本土防御光环、面板随选装变化、点防按舰级缩放、逐组件损伤与友方领土修理、舰队防空、护盾与速度规避。
+//! 战斗拟真：杀伤、护盾、规避、防空屏护，以及本土修船。
+//!
+//! ## 2026-10（第 7 批）：`damaged_components_repair_in_friendly_territory` 搬去了 g2
+//!
+//! 长局读面**证不了**这条：实测 seed 42 / 400 回合里「未挨打却修了」的组件·回合**一共只有 1 个**，
+//! 而且它在**外地**——「本土修得更快」那半根本没有样本。所以 g2 用 `h.scenario(patch=…)` **造**一个
+//! 受损组件（`edit()` 要「带身份键的行表」，**舰有身份键** ⇒ 这处能捏）：两臂只差坐标，
+//! 本土 **+1.8/回合** vs 外海 **+0.72/回合**（距首都 0.5 / 38.4 AU，半径 6.0）。
+//!
+//! ⚠ 判据量的是「到**首都**的距离」（本土规则认的就是它），不是「到投放的那个天体」——第一版量错了。
 //!
 //! ## 2026-10：**能只看数据的那几条搬到了 `play/tests/g2_mid.py`**
 //!
@@ -82,36 +91,6 @@ fn fire_degrades_components_under_damage() {
     );
     // 被击毁后不贡献面板：把目标组件打掉，验证攻击/护盾面板下降。
     let _ = panel_before;
-}
-
-/// 母港/友方本土修船（拟人「打残→撤→修→再来」闭环）：受损组件的完整度每回合修复，
-/// 且在本土（首都 home_radius 内）修得更快。
-#[test]
-fn damaged_components_repair_in_friendly_territory() {
-    let (config, mut state) = fresh_world(42);
-    // China ship 0 停在其首都（Earth, body 2），组件受损。
-    let cap_pos = state.body_position("地球");
-    let ship0 = state.ships[0].name.clone();
-    if let Some(s) = state.ship_mut(&ship0) {
-        s.position = cap_pos;
-        s.components = vec!["railgun".to_string()];
-        s.component_hp = vec![5.0];
-        s.hull = s.hull.max(5.0);
-    }
-    let before = state
-        .ship(&ship0)
-        .map(|s| s.component_hp.first().copied().unwrap_or(0.0))
-        .unwrap_or(0.0);
-    advance(&mut state, &config, &mut Prng::new(42));
-    let after = state
-        .ship(&ship0)
-        .map(|s| s.component_hp.first().copied())
-        .flatten()
-        .unwrap_or(before);
-    assert!(
-        after > before,
-        "a damaged component should repair over rounds; before={before} after={after}"
-    );
 }
 
 /// 舰队防空（防空屏护）：有 PD 的舰会替 `pd_radius` 内的友舰拦导弹——附近有 PD 时目标

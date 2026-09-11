@@ -81,6 +81,8 @@ LAUNCH_ROUNDS = 8
 # 图上写的**倾向**（供指令的那条链 2026-10 已删：图只给倾向，不给指令）。
 LAUNCH_DOCTRINE = {"temper": 0.5, "lone_wolf": -0.5}
 LAUNCH_KITING = 0.7
+# 修船那条场景：造一个受损组件，两臂只差坐标（本土 / 外海）。
+REPAIR_COMPONENT, REPAIR_START, REPAIR_ROUNDS = "railgun", 5.0, 4
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1069,6 +1071,7 @@ def run(h, ck) -> None:
     stale_follow_scenario_checks(h, ck)
     site_ledger_checks(h, ck)
     blueprint_launch_checks(h, ck)
+    combat_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1727,6 +1730,69 @@ def blueprint_launch_checks(h, ck) -> None:
              f"图上那批舰：风格 {a['doctrine']} / 姿态 {a['kiting']}")
     ck.check("合成场景（下水）：图写得再满也不供指令（`order_source` 只会是 leaf）",
              a["src"] == ["leaf"], f"图上那批舰的 order_source：{a['src']}")
+
+
+def combat_scenario_checks(h, ck) -> None:
+    """**合成场景 · 受损组件与本土修复**（`sim/combat.rs::damaged_components_repair_in_friendly_territory`）。
+
+    长局读面证不了这条：实测 seed 42 / 400 回合里「未挨打却修了」的组件·回合**一共只有 1 个**，
+    而且它在**外地**——「本土修得更快」那半根本没有样本。所以照原件那样**造**一个受损组件：
+    `h.scenario(patch=…)` 把一艘舰的组件换成一件 `railgun`、耐久打到 5.0、坐标搬到首都天体
+    （另一臂搬到海王星）。`edit()` 要「带身份键的行表」，而**舰有身份键**（`舰名`）⇒ 这处能捏
+    （`depots` 那种复合键的 map 就不行）。
+
+    两臂**只差坐标一个变量**；`本土半径` 从读面 `factions.本土半径` 来，不用写死 AU。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_repair_probe.json", seed))
+    pos = {b["天体名"]: b["位置"] for b in st["bodies"]}
+    ship = next(s for s in st["ships"] if s["势力"] == FID)
+    full = float(json.loads(h.capture(["--call", "component_integrity",
+                                       "--args", json.dumps({"component": REPAIR_COMPONENT})]))["value"])
+
+    # 首都从读面拿；「外地」取**离首都最远**的那个天体（不写死地名）。
+    fac0 = KIT.load(str(h.projection(seed, 1)), only=("factions",)).table("factions")
+    cap_body = str(list(fac0[(fac0["round"] == 1) & (fac0["势力"] == FID)]["capital_body"])[0])
+    far_body = max((b for b in pos if b != cap_body),
+                   key=lambda b: math.dist(pos[b], pos[cap_body]))
+
+    arms = {}
+    for tag, where in (("home", cap_body), ("away", far_body)):
+        patch = {"ships": {ship["舰名"]: {"坐标": pos[where], "组件": [REPAIR_COMPONENT],
+                                          "组件耐久": [REPAIR_START]}}}
+        proj = h.scenario(f"combat_repair_{tag}", seed, REPAIR_ROUNDS, patch)
+        q = KIT.load(str(proj), only=("ships", "factions", "body_positions"))
+        rows = q.table("ships")
+        rows = rows[rows["舰名"] == ship["舰名"]].sort_values("round")
+        hp = [float(list(x)[0]) for x in rows["组件耐久"]]
+        fac = q.table("factions")
+        fac = fac[(fac["round"] == 1) & (fac["势力"] == FID)]
+        bp = q.table("body_positions")
+        b1 = bp[(bp["round"] == 1) & (bp["天体名"] == cap_body)]
+        # ⚠ 量的是「到**首都**的距离」（本土规则认的是它），不是「到投放的那个天体」。
+        d_cap = math.dist((float(rows.iloc[1]["x"]), float(rows.iloc[1]["y"])),
+                          (float(list(b1["x"])[0]), float(list(b1["y"])[0])))
+        arms[tag] = {"hp": hp, "d": d_cap, "where": where,
+                     "radius": float(list(fac["本土半径"])[0]),
+                     "gain": [round(b - a, 4) for a, b in zip(hp, hp[1:])]}
+
+    ck.check(f"合成场景（修船）：起点真的受损（{REPAIR_START} < 满值 {full}，防空转）",
+             full > REPAIR_START > 0.0, f"`{REPAIR_COMPONENT}` 的完整度满值 {full}")
+    for tag, cn in (("home", "本土"), ("away", "外地")):
+        g = arms[tag]["gain"]
+        ck.check(f"合成场景（修船）：{cn}受损组件逐回合修复（每一回合都涨）",
+                 bool(g) and all(x > 0 for x in g),
+                 f"{cn}（放在 {arms[tag]['where']}，距首都 {arms[tag]['d']:.1f} AU，"
+                 f"半径 {arms[tag]['radius']:.1f}）"
+                 f"逐回合修复量 {g}，耐久 {[round(h, 2) for h in arms[tag]['hp']]}")
+    ck.check("合成场景（修船）：**本土修得更快**（两臂只差坐标，外地的修复量逐回合都更小）",
+             all(a > b for a, b in zip(arms["home"]["gain"], arms["away"]["gain"])),
+             f"本土 {arms['home']['gain']} vs 外地 {arms['away']['gain']}"
+             f"（{arms['home']['d']:.1f} / {arms['away']['d']:.1f} AU，半径 {arms['home']['radius']:.1f}）")
+    ck.check("合成场景（修船）：两臂到**首都**的距离真的一个在内、一个在外（防空转）",
+             arms["home"]["d"] <= arms["home"]["radius"] < arms["away"]["d"],
+             f"放在 {arms['home']['where']}/{arms['away']['where']} ⇒ 距首都 "
+             f"{arms['home']['d']:.1f} ≤ 半径 {arms['home']['radius']:.1f} < {arms['away']['d']:.1f} AU")
 
 
 def id_checks(h, ck, out) -> None:
