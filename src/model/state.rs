@@ -87,7 +87,20 @@ use crate::model::*;
 /// **档的形状变了**（事件载荷的 JSON 键名不同）⇒ 推号：旧档里那些英文键按新名读不到
 /// （**不迁移**，按本仓库「不考虑向前兼容」的约定；旧档能加载，只是事件载荷的键名对不上）。
 /// **语义与随机流一律不变**（改的只是名字，`derived_roll` 的盐一个字没动）。
-pub const SCHEMA_VERSION: u32 = 26;
+///
+/// **v27 = 事件载荷名的用户裁决订正**（`feature/event-names-2`，用户裁决 2026-10，第 10b 步）：
+/// 第 10 步那批名字按「**这个名字存的是什么主体**」重订一遍——`Attack.attacker`/`Siege.attacker`
+/// （`ShipId`）「攻击方」→「攻击舰」、`Attack.target`（`ShipId`）「目标」→「目标舰」、
+/// `CityRazed.owner`/`Revolt.faction`/`CityDefected.from`（`FactionId`，都是**上一任主人**）
+/// 「失城方」→「旧主」（与 `ColonyFounded.prev_owner` 统一）、`ShipSpawned.via`
+/// 「来路」→「造舰路径」。另：`share` 的读面名统一成「抽成」（事件载荷 + 投影 `contracts` 表
+/// 那一列与 `column_docs` + 本条 [`Contract::share`] 自己，此前是「分成」）。
+///
+/// **档的形状又变了一次**（[`Contract::share`] 的 JSON 键从 `分成` 变成 `抽成`，该字段没有
+/// `#[serde(default)]` ⇒ 旧档会因缺键而**读不回来**）⇒ 推号，不迁移（同上约定）。
+/// **世界行为与随机流一律不变**：`--seed 7/42 --round 240 --digest 20` 逐字节相同
+/// （改的只是名字）。
+pub const SCHEMA_VERSION: u32 = 27;
 fn default_schema_version() -> u32 {
     0
 }

@@ -95,7 +95,7 @@ pub struct Contract {
     pub to: BodyId,
     /// 承运人抽成比例（`0.15` = 承运人自留 15%）。挂单时定死、无人接时由市场抬价
     /// （`freight::escalate_open_contracts`）、接下之后冻结——一份合同的条件不会因结算顺序而变。
-    #[serde(rename = "分成")]
+    #[serde(rename = "抽成")]
     pub share: f64,
     /// 雇主愿意雇佣的**最低信誉**（挂单时算好并冻结，见 [`required_reputation`]）。
     ///

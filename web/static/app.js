@@ -250,6 +250,10 @@ function renderReadPanel() {
   const tabsBox = $('#readTabs');
   const body = $('#readBody');
   if (!tabsBox || !body) return;
+  // ⚠ 滚动的**是 `#side`**（`#readBody` 自己不滚，见 `style.css`）：重画前先记下位置、画完还回去
+  // ——推进回合 / 应用改动之后，用户正看着的那一段不该跳回顶部（第 11 步的「位置保持」）。
+  const side = $('#side');
+  const keepScroll = side ? side.scrollTop : 0;
   tabsBox.textContent = '';
   body.textContent = '';
   if (!readLoaded) {
@@ -266,7 +270,15 @@ function renderReadPanel() {
   });
   const page = pages[readPage];
   if (page.hint) body.appendChild(el('div', { class: 'sv-pagehint' }, page.hint));
-  (page.views || []).forEach((spec) => window.SpecView.renderView(body, spec));
+  // 第 11 步：视图是**分层**的（外层总览 → 点进内层详情，见 `specview.js::renderLayers`）。
+  // 宿主只报三件事：这是哪一处实例（层状态按实例分开）、面包屑根写什么（页名只有宿主知道）、
+  // 以及进/出内层时要保住滚动的那个容器。
+  (page.views || []).forEach((spec) => window.SpecView.renderView(body, spec, {
+    instance: 'side',
+    crumb: page.title,
+    scrollHost: side,
+  }));
+  if (side) side.scrollTop = keepScroll;
 }
 
 // --- 状态加载 / 选择 --------------------------------------------------------
@@ -745,15 +757,17 @@ function renderSelection() {
 }
 
 // 通用树里的**原位重组点**：给 jsonview 的钩子。命中就返回节点，没命中返回 null（走通用渲染）。
+// ⚠ 第 11 步：重组出来的视图现在是**分层**的（外层总览 → 点进详情）。这里给它一个**独立实例名**
+// （`inline:<路径>`）⇒ 右栏点进某一项，不会把左栏那一页也一起切到详情层（层状态按实例分开）。
 function inlineSpec(path, value) {
   if (!window.SpecView || !value || typeof value !== 'object') return null;
   const spec = window.SpecView.inlineFor(path);
   if (!spec) return null;
   const box = el('div', { class: 'sv-inline' });
   const bar = el('div', { class: 'sv-inline-bar' });
-  bar.textContent = '此处由组织点「' + spec.id + '」整理（没被声明的字段自动追加在每行/每列后面）';
+  bar.textContent = '此处由组织点「' + spec.id + '」整理（外层一行一个项目，点进去看全部字段：没被声明的字段追加在详情末尾）';
   box.appendChild(bar);
-  window.SpecView.renderView(box, spec);
+  window.SpecView.renderView(box, spec, { instance: 'inline:' + path, crumb: spec.title || spec.id });
   return box;
 }
 

@@ -253,7 +253,7 @@ impl Default for Shot {
 pub enum GameEvent {
     /// 开火：攻击者对目标舰造成 damage 伤害。
     ///
-    /// `shots` 是**这一对（攻击舰 × 目标）本回合的逐发分解**（用户裁决：战斗中间量进**事件层**，
+    /// `shots` 是**这一对（攻击舰 × 目标舰）本回合的逐发分解**（用户裁决：战斗中间量进**事件层**，
     /// 不占 `RoundView` 的字节——见 `.agents/notes/step-intermediates.md` §7 Q1）。
     /// 聚合量（`damage`、标题、关系调整）不动：它仍是「这个目标这一回合总共挨了多少」。
     ///
@@ -261,13 +261,13 @@ pub enum GameEvent {
     /// 旧规则下它**什么事件都不留**，于是 C5 想回答的问题在唯一能看见的地方是空白。
     /// 关系调整仍只在 `damage > 0` 时发生（见 `sim::fire`），所以世界行为不变。
     Attack {
-        /// 开火的那艘舰（这一对「攻击舰 × 目标」里的攻击方）。
-        #[serde(rename = "攻击方")]
+        /// 开火的那艘舰（「攻击舰 × 目标舰」这一对里的攻击舰）。
+        #[serde(rename = "攻击舰")]
         attacker: ShipId,
-        /// 被打的那艘舰。
-        #[serde(rename = "目标")]
+        /// 被打的那艘舰（「攻击舰 × 目标舰」这一对里的目标舰）。
+        #[serde(rename = "目标舰")]
         target: ShipId,
-        /// 本回合这一对（攻击舰 × 目标）的**总伤害**：逐发里没被跳过那些的伤害之和。
+        /// 本回合这一对（攻击舰 × 目标舰）的**总伤害**：逐发里没被跳过那些的伤害之和。
         /// **0 也有意义**（齐射被点防吃光 ⇒ 有 `逐发`、没伤害）。
         #[serde(rename = "伤害")]
         damage: f64,
@@ -296,8 +296,8 @@ pub enum GameEvent {
     },
     /// 围城：攻击者对本回合城市建筑造成 damage 伤害。
     Siege {
-        /// 开火的那艘舰。
-        #[serde(rename = "攻击方")]
+        /// 开火的那艘舰（围城的攻击舰）。
+        #[serde(rename = "攻击舰")]
         attacker: ShipId,
         /// 被围的那座城。
         #[serde(rename = "城")]
@@ -312,7 +312,7 @@ pub enum GameEvent {
     /// 去同回合的 [`GameEvent::Siege`] 里猜）；`pop_before`/`damage` 是这次毁灭的量级，
     /// 供叙事与统计直读。
     ///
-    /// `owner` 是**失去这座城市的那一方**——这是**只有在此刻才知道**的事实：夷平只把城变成
+    /// `owner`（读面「旧主」）是**失去这座城市的那一方**——这是**只有在此刻才知道**的事实：夷平只把城变成
     /// 空白（`razed = true`），空白城**保留**最后主人的 `faction_id` 作为 diaspora claim，而
     /// 同一回合后来的复垦/重建会把 `faction_id` 改写成新主。因此「谁丢了这座城」若不在
     /// 这一刻记下来，回看时读到的就是**新主**（错的人）。
@@ -320,8 +320,8 @@ pub enum GameEvent {
         /// 被夷平的那座城（之后变成可再殖民的空白城）。
         #[serde(rename = "城")]
         city: CityId,
-        /// **失去这座城市的那一方**：夷平这一刻的持有者。空白城之后归谁与此无关。
-        #[serde(rename = "失城方")]
+        /// **旧主**：**失去这座城市的那一方**（夷平这一刻的持有者，也就是上一任主人）。空白城之后归谁与此无关。
+        #[serde(rename = "旧主")]
         owner: FactionId,
         /// **拆平这座城市的那一方**（拆城舰的势力）。
         #[serde(rename = "拆城方")]
@@ -356,7 +356,7 @@ pub enum GameEvent {
         #[serde(rename = "出厂城")]
         city: Option<CityId>,
         /// 造舰路径：`shipyard` 船坞建造 / `story` 剧情白送。
-        #[serde(rename = "来路")]
+        #[serde(rename = "造舰路径")]
         via: SpawnVia,
         /// 出厂所用的**设计图名**；`null` = 无图（旧档、开局预置舰队、剧情赠舰）。
         #[serde(default, rename = "出厂图")]
@@ -442,8 +442,8 @@ pub enum GameEvent {
         /// 叛乱的那座城（居民脱离统治，城市化为废墟，可再殖民）。
         #[serde(rename = "城")]
         city: CityId,
-        /// **失去这座城市的那一方**（居民脱离的就是它）。
-        #[serde(rename = "失城方")]
+        /// **旧主**：**失去这座城市的那一方**——居民脱离的就是它（= 爆发这一刻的持有者）。
+        #[serde(rename = "旧主")]
         faction: FactionId,
         /// 爆发时的忠诚度（0..1）。
         #[serde(rename = "忠诚度")]
@@ -458,8 +458,8 @@ pub enum GameEvent {
         /// 倒戈的那座城（连同人口/建筑/船坞一起易主）。
         #[serde(rename = "城")]
         city: CityId,
-        /// **失去它的那一方**（旧主）。
-        #[serde(rename = "失城方")]
+        /// **旧主**：**失去它的那一方**（倒戈前的主人，也就是上一任主人）。
+        #[serde(rename = "旧主")]
         from: FactionId,
         /// **接盘的那一方**（思潮与旧主最对立者）。
         #[serde(rename = "新主")]
@@ -586,7 +586,7 @@ pub enum GameEvent {
         #[serde(rename = "终点")]
         to: BodyId,
         /// 受雇方的**抽成比例**（`0.15` = 自留 15%）。
-        #[serde(rename = "分成")]
+        #[serde(rename = "抽成")]
         share: f64,
     },
     /// **有人接下了雇佣单**：`carrier` 接下 `shipper` 这条线上的运力要求，雇佣期从这一回合开始。
@@ -905,7 +905,7 @@ impl GameEvent {
                 // `from` 同槽位，于是「一座城的历史」用同一个查询形状就能读全。
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, owner);
                 r.magnitude = *damage;
-                r.data = json!({"城": city, "失城方": owner, "拆城方": fallen_to,
+                r.data = json!({"城": city, "旧主": owner, "拆城方": fallen_to,
                                 "拆城舰": by_ship, "伤害": damage, "拆前人口": pop_before});
             }
             GameEvent::ShipSpawned {
@@ -922,7 +922,7 @@ impl GameEvent {
                     extra(&mut r, EventRole::Third, EntityKind::City, c);
                 }
                 r.data = json!({"舰": ship, "舰主": owner, "舰级": class, "出厂城": city,
-                                "来路": via, "出厂图": blueprint});
+                                "造舰路径": via, "出厂图": blueprint});
             }
             GameEvent::ColonyFounded {
                 city,
@@ -979,7 +979,7 @@ impl GameEvent {
             } => {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, faction);
-                r.data = json!({"城": city, "失城方": faction, "忠诚度": loyalty});
+                r.data = json!({"城": city, "旧主": faction, "忠诚度": loyalty});
             }
             GameEvent::CityDefected {
                 city,
@@ -990,7 +990,7 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::City, city);
                 extra(&mut r, EventRole::Victim, EntityKind::Faction, from);
                 extra(&mut r, EventRole::Beneficiary, EntityKind::Faction, to);
-                r.data = json!({"城": city, "失城方": from, "新主": to, "忠诚度": loyalty});
+                r.data = json!({"城": city, "旧主": from, "新主": to, "忠诚度": loyalty});
             }
             GameEvent::CoalitionFormed { hegemon, members } => {
                 // 联盟是**冲着**霸权结成的：霸权是被针对的目标，不是发起者。
@@ -1067,7 +1067,7 @@ impl GameEvent {
                 set_target(&mut r, EntityKind::Body, to);
                 extra(&mut r, EventRole::Third, EntityKind::Body, from);
                 r.data = json!({"合同号": contract, "托运方": shipper, "货": resource,
-                                "运力": capacity, "起点": from, "终点": to, "分成": share});
+                                "运力": capacity, "起点": from, "终点": to, "抽成": share});
             }
             GameEvent::ContractAccepted {
                 contract,

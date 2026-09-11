@@ -792,7 +792,7 @@ fn write_round(
                 "ratio": c.throughput_ratio(config).map(r2),
                 "起点": c.from,
                 "终点": c.to,
-                "分成": r2(c.share),
+                "抽成": r2(c.share),
                 "最低名声": r2(c.min_reputation),
                 // 此刻在跑这张单的舰（`assignments` 的反查；空数组 = 还没派人）。
                 "ships": state.contracts.ships_of(c.id),
@@ -1460,7 +1460,7 @@ pub fn projection_schema() -> serde_json::Value {
             "contracts" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "**雇佣运力挂单簿**：一行一单，只含**没结束**的合同（等人接的 + 还在雇佣期内的）。结束的合同不在这里——“怎么结束的”去 `events` 里按 `contract_ended` 查。按 (round, contract_id) 索引。单子要求的是**运力**（单位/回合），不是一票货：受雇方自己决定派几条船来跑（`ships` 可以为空、也可以多条）。",
-                "columns": {"round":"integer","合同号":"integer","托运方":"string","承运方":"string","货":"string","运力":"number","已交付":"number","已服务回合":"integer","ratio":"number","起点":"string","终点":"string","分成":"number","最低名声":"number","ships":"array","挂单回合":"integer","接单回合":"integer","到期回合":"integer","考核回合":"integer"},
+                "columns": {"round":"integer","合同号":"integer","托运方":"string","承运方":"string","货":"string","运力":"number","已交付":"number","已服务回合":"integer","ratio":"number","起点":"string","终点":"string","抽成":"number","最低名声":"number","ships":"array","挂单回合":"integer","接单回合":"integer","到期回合":"integer","考核回合":"integer"},
                 "column_docs": {
                     "托运方": "雇主（挂单的人）。",
                     "承运方": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
@@ -1471,7 +1471,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "已服务回合": "考核的**分母**：本期「起运货栈有货」的回合数。没货可运的回合不算在受雇方头上。",
                     "ratio": "**实测吞吐达标率** = `delivered ÷ (capacity × served_rounds)`：1.0 = 恰好是一条参考船的水准（一个考核期搬回一舱货）。null = 本期还没有有货可运的回合 ⇒ 无从考核（不是考零分）。雇主按它掷骰子给好评/差评。",
                     "起点/终点": "起运天体（雇主的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是雇主首都）。",
-                    "分成": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
+                    "抽成": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
                     "挂单回合": "**本轮叫价的起点**：一个考核周期没人接就抬一档抽成并把这一列挪到当时回合（免得一挂出来就连续加价）。",
                     "接单回合/到期回合/考核回合": "雇佣起算回合 / 固定期到期回合 / 下次考核回合。期限与考核周期都从**航程**算（一个考核周期 = 这条线的一个往返），所以不同航线的刻度差一个数量级。",
                 },
@@ -1495,7 +1495,7 @@ pub fn projection_schema() -> serde_json::Value {
                     "extra": "其余参与方长表 [{role, kind, id}]，role ∈ actor/target/victim/beneficiary/third；如 city_razed 里 `拆城舰`（拆城的那艘舰）、ship_destroyed 里的凶手与旧主。",
                     "magnitude": "统一数值强度（伤害；无伤害事件为 0），便于 groupby().sum()。",
                     "headline": "**人读的一句话**（`GameEvent::headline` 的唯一产物，与 CLI `--milestones`/`--digest` 同源）。它自足（只读事件自身字段，不回查 state），所以对已归档的历史同样成立；`participants()` 列出的每个 id 都逐字出现在这句话里。机器查询仍走 actor_*/target_*/data。",
-                    "data": "该事件类型的专属载荷（可读名/舰级/击毁原因/忠诚度/建城方式…），固定只用这一个对象列。**键名与 `state.events` 里的载荷键逐字相同**（唯一真值是 `GameEvent` 变体字段上的 `#[serde(rename = \"中文名\")]`；`history_row` 的手抄子集由 Rust 守卫 `event_payload_keys_are_the_serde_names` 钉住），所以「案卷里的这一格叫什么」在两处读面上不会分叉。⚠ `type=\"attack\"` 的载荷是 **`逐发`：这一对（攻击方 × 目标）本回合的逐发明细**（B4，用户裁决「战斗中间量进事件层」）——每条 = 一件武器的一发，带**选择输入**（`基础分` / `心态分` / `分配乘数`，总分 = `(基础分 + 心态分) × 分配乘数`）与**结算分解**（`命中折减` / `本土防御` / `点防拦截` + `点防吃掉` / `护盾吸收` + `护盾吸收比` / `护甲减伤` / `实入船体` / `伤害` / `补刀` / `未击发`）。聚合量 `magnitude` 仍是「这个目标这一回合总共挨了多少」，逐发是它的下钻（`Σ 逐发[].伤害 == magnitude`，**本表里差在 `magnitude` 被规整到两位小数上**，最大 0.005；state 里是精确相等）。⚠ **`magnitude = 0` 的 attack 行真的存在**（齐射被点防吃光：`点防吃掉 > 0` 而 `伤害 = 0`），那种交火在 B4 之前**一条事件都不留**——别把「没有 attack 行」当成「没打过」。",
+                    "data": "该事件类型的专属载荷（可读名/舰级/击毁原因/忠诚度/建城方式…），固定只用这一个对象列。**键名与 `state.events` 里的载荷键逐字相同**（唯一真值是 `GameEvent` 变体字段上的 `#[serde(rename = \"中文名\")]`；`history_row` 的手抄子集由 Rust 守卫 `event_payload_keys_are_the_serde_names` 钉住），所以「案卷里的这一格叫什么」在两处读面上不会分叉。⚠ `type=\"attack\"` 的载荷是 **`逐发`：这一对（攻击舰 × 目标舰）本回合的逐发明细**（B4，用户裁决「战斗中间量进事件层」）——每条 = 一件武器的一发，带**选择输入**（`基础分` / `心态分` / `分配乘数`，总分 = `(基础分 + 心态分) × 分配乘数`）与**结算分解**（`命中折减` / `本土防御` / `点防拦截` + `点防吃掉` / `护盾吸收` + `护盾吸收比` / `护甲减伤` / `实入船体` / `伤害` / `补刀` / `未击发`）。聚合量 `magnitude` 仍是「这个目标这一回合总共挨了多少」，逐发是它的下钻（`Σ 逐发[].伤害 == magnitude`，**本表里差在 `magnitude` 被规整到两位小数上**，最大 0.005；state 里是精确相等）。⚠ **`magnitude = 0` 的 attack 行真的存在**（齐射被点防吃光：`点防吃掉 > 0` 而 `伤害 = 0`），那种交火在 B4 之前**一条事件都不留**——别把「没有 attack 行」当成「没打过」。",
                 },
             }),
             "bodies" => json!({
