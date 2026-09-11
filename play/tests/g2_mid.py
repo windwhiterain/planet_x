@@ -122,12 +122,140 @@ def headline_check(ev):
     return checked, bad
 
 
+def combat_report(q, tol: float = 1e-9) -> dict:
+    """**战斗/损伤的数据级判据**（`src/tests/sim/combat.rs` 里能只看数据的那几条）。
+
+    逐发明细住在 `attack` 事件的 `data.shots`（B4 用户裁决：战斗中间量进事件层）——每条 =
+    一件武器的一发，带选择输入与结算分解。加上舰表的 `hull/hull_max/hull_regen`，
+    下面这些就能在**全 3 seed × 400 回合的每一行**上成立（Rust 版是「造一个世界、打一炮」）：
+
+    ① **护甲再生恒等式**：没被打、也没欠费生锈的舰，
+       `hull(t+1) == min(hull_max, hull(t) + hull_regen·hull_max)`；
+    ② **面板域**：`0 < hull ≤ hull_max`、`0 ≤ shield ≤ shield_max`、`attack/speed/组件完整度 ≥ 0`；
+    ③ **射击域**：`hit ∈ [0,1]`、`damage ≥ 0`、`damage > 0 ⇒ 在射程内且没被跳过`、
+       `没命中 ⇒ 没伤害`、`没有点防 ⇒ 拦截量为 0`、`这一发击杀 ⇒ 伤害 ≥ 目标剩余船体`；
+    ④ **击杀归属**（两个方向）：每一发 `killed` 的射击都要有对应的 `ship_destroyed` 事件，
+       每条 `ship_destroyed` 也要有那一发——**沉舰这件事只能由射击解释**。
+    """
+    ships = q.table("ships")
+    ev = q.table("events")
+    fp = q.table("faction_process")
+    out: dict = {"shots": 0}
+
+    shot_bad: dict[str, list[str]] = {}
+    killed_shot: set = set()
+    # ⚠ 扣船体的是 **`hull_pen`**（过护盾/护甲之后真正打进船体的量），不是 `damage`
+    # （`damage` = 过点防后的伤害，标题里那个「N 伤害」就是它；`hull_mult` 可以 > 1，
+    # 所以一发 `hull_pen` 完全可能**大于** `damage`——我第一版用 `damage` 对账就假红了）。
+    hull_lost: dict = {}
+    kill_checked = 0
+    kill_short: list[str] = []
+    for r in ev[ev["type"] == "attack"].itertuples(index=False):
+        rnd, tgt = int(r.round), r.target_id
+        for sh in (r.data or {}).get("shots") or []:
+            out["shots"] += 1
+            dmg = float(sh.get("damage") or 0.0)
+            pen = float(sh.get("hull_pen") or 0.0)
+            if pen:
+                hull_lost[(rnd, tgt)] = hull_lost.get((rnd, tgt), 0.0) + pen
+            if sh.get("killed"):
+                killed_shot.add((rnd, tgt))
+                kill_checked += 1
+                # **那一发的 `hull_pen` 必须够打掉它自己记下的「开火前船体」**——引擎就是
+                # `hull -= hull_pen; destroyed = hull <= 0`，所以这条逐发可对账。
+                # （① 别用 `damage`：`hull_mult` 可 > 1，`hull_pen` 能比 `damage` 大；
+                #   ② 别用「上一回合末的船体」：改装的船下一回合 `hull_max` 就变了——
+                #   实测 r86 莱茵4 上一回合 24.0、本回合按 12.0 的船体被打掉。）
+                if pen + tol < float(sh.get("target_hull_before") or 0.0):
+                    if len(kill_short) < 3:
+                        kill_short.append(
+                            f"r{rnd} {tgt}: 这一发打进 {pen:.4f} < 开火前船体 {sh.get('target_hull_before')}")
+            why = None
+            if not (0.0 <= float(sh.get("hit") or 0.0) <= 1.0):
+                why = "命中折减越界"
+            elif dmg < -tol or pen < -tol:
+                why = "伤害为负"
+            elif dmg > tol and (sh.get("skipped") or not sh.get("in_range")):
+                why = "射程外/被跳过却掉血"
+            elif float(sh.get("hit") or 0.0) <= tol and dmg > tol:
+                why = "没命中却有伤害"
+            elif float(sh.get("pd") or 0.0) <= tol and float(sh.get("pd_absorbed") or 0.0) > tol:
+                why = "没有点防却拦截了"
+            if why and len(shot_bad.get(why, [])) < 2:
+                shot_bad.setdefault(why, []).append(f"r{rnd} {r.actor_id}→{tgt}: {why}")
+    out["shot_bad"] = [m for v in shot_bad.values() for m in v][:4]
+    out["shot_bad_kinds"] = len(shot_bad)
+
+    # **只有战死的才必须有那一发**：欠费生锈报废（`upkeep_shortfall`）与战斗无关。
+    dead = ev[ev["type"] == "ship_destroyed"]
+    dead_cause = {(int(r.round), r.target_id): ((r.data or {}).get("cause") or "?")
+                  for r in dead.itertuples(index=False)}
+    dead_pairs = set(dead_cause)
+    combat_dead = {k for k, c in dead_cause.items() if c == "combat"}
+    out["dead"], out["combat_dead"] = len(dead_pairs), len(combat_dead)
+    out["dead_causes"] = sorted({c for c in dead_cause.values()})
+    out["kill_unexplained"] = [f"r{rnd} {sid}：战沉却没有一发 killed 射击"
+                               for (rnd, sid) in sorted(combat_dead - killed_shot)][:3]
+    out["kill_phantom"] = [f"r{rnd} {sid}：有 killed 射击却没有沉舰事件"
+                           for (rnd, sid) in sorted(killed_shot - dead_pairs)][:3]
+
+    ship_bad: list[str] = []
+    for r in ships.itertuples(index=False):
+        if not (0.0 < float(r.hull) <= float(r.hull_max) + tol):
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: hull={r.hull} / max={r.hull_max}")
+        elif not (-tol <= float(r.shield) <= float(r.shield_max) + tol):
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: shield={r.shield} / max={r.shield_max}")
+        elif float(r.attack) < -tol or float(r.speed) < -tol:
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: attack={r.attack} speed={r.speed}")
+        elif any(float(h) < -tol for h in (r.component_hp or [])):
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: 组件完整度出现负数")
+    out["ship_bad"] = ship_bad[:3]
+    out["ship_bad_n"] = len(ship_bad)
+
+    rust_round = {(int(r.round), r.faction_id) for r in fp.itertuples(index=False)
+                  if float(r.fleet_rust or 0.0) > 0.0}
+    per_round: dict = {}
+    for r in ships.itertuples(index=False):
+        per_round.setdefault(int(r.round), {})[r.ship_id] = r
+    checked = regen_bad = regen_short = 0
+    regen_ex: list[str] = []
+    for rnd in sorted(per_round):
+        prev = per_round.get(rnd - 1)
+        if not prev:
+            continue
+        for sid, cur in per_round[rnd].items():
+            was = prev.get(sid)
+            if was is None or hull_lost.get((rnd, sid)) or (rnd, cur.faction_id) in rust_round:
+                continue
+            checked += 1
+            c_max, c_regen = float(cur.hull_max), float(cur.hull_regen)
+            base = min(c_max, float(was.hull) + c_regen * c_max)
+            got = float(cur.hull)
+            # ⚠ 只断言**下界 + 上限**，不断言等式：引擎的再生是
+            # `hull + hull_max × (hull_regen + home_regen_bonus)`——**本土防御半径内还有一份加成**
+            # （`sim/military.rs`），而那份加成读面不暴露（要看位置/首都/MOND，属于引擎内部）。
+            # 下界仍然是真判据：安静回合里**至少**要长回基础再生量，且绝不超过上限。
+            if got > c_max + 1e-9 or got + 1e-6 < base:
+                regen_bad += 1
+                if len(regen_ex) < 3:
+                    regen_ex.append(f"r{rnd} {sid}: hull {was.hull} → {got}，基础再生至少应到 {base:.4f}"
+                                    f"（上限 {c_max}）")
+            elif got > base + 1e-6:
+                regen_short += 1        # 拿到本土加成的行（计入防空转说明，不算违规）
+    out["regen_checked"], out["regen_bad"], out["regen_ex"] = checked, regen_bad, regen_ex
+    out["regen_bonus_rows"] = regen_short
+
+    # —— 击杀所需伤害：**逐发**对账（见上面那一段注释），不再按回合累计 ——
+    out["kill_checked"], out["kill_short"] = kill_checked, kill_short
+    return out
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
-    q = KIT.load(str(dirpath), only=("events", "ships", "cities"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -172,6 +300,9 @@ def extract(dirpath):
     flips, flip_bad = owner_flips(ev)
     hl_checked, hl_bad = headline_check(ev)
 
+    # ⑥ 战斗/损伤（`src/tests/sim/combat.rs` 里能只看数据的那几条）。
+    combat = combat_report(q)
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
@@ -179,7 +310,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "meta": q.meta}
+            "combat": combat, "meta": q.meta}
 
 
 def run(h, ck) -> None:
@@ -200,8 +331,56 @@ def run(h, ck) -> None:
     ck.check("建城事件确实在发（与复垦那条互为对照）", foundings > 0, f"{tag} 共 {foundings} 次建城")
 
     audit_checks(h, ck, out)
+    combat_checks(h, ck, out)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def combat_checks(h, ck, out) -> None:
+    """**战斗/损伤**（`src/tests/sim/combat.rs` 搬过来的那几条，样本放到每一行）。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    shots = sum(d["combat"]["shots"] for d in out)
+    kinds = sum(d["combat"]["shot_bad_kinds"] for d in out)
+    sample = next((m for d in out for m in d["combat"]["shot_bad"]), "")
+    ck.check("每一发都自洽（命中折减∈[0,1]、射程外不掉血、没命中没伤害、没点防不拦截）",
+             kinds == 0, "；".join(next((d["combat"]["shot_bad"] for d in out if d["combat"]["shot_bad"]), []))
+             if kinds else f"{tag}：{shots:,} 发逐发成立")
+    ck.check("射击守卫没有空转（真的开过火）", shots >= 500, f"{shots:,} 发（下限 500）")
+
+    # 击杀所需的伤害：**按 (回合, 目标) 累计**对账——`target_hull_before` 是那一发那一刻的记录，
+    # 同一回合可能多舰轮着打，所以「一发打不死满血目标」是正常的；能对账的是「这一回合挨的总伤害
+    # ≥ 上一回合结束时它的船体」（上一回合还没有它 = 本回合新造的，跳过）。
+    kshort = next((m for d in out for m in d["combat"]["kill_short"]), "")
+    kc = sum(d["combat"]["kill_checked"] for d in out)
+    ck.check("击杀那一发打进船体的量（hull_pen）≥ 它自己记下的开火前船体", not kshort,
+             kshort or f"{tag}：{kc:,} 次击杀全部满足（伤害够把它打掉）")
+    ck.check("击杀伤害守卫没有空转（有可对账的击杀发数）", kc >= 10, f"{kc:,} 次（下限 10）")
+
+    dead = sum(d["combat"]["dead"] for d in out)
+    cdead = sum(d["combat"]["combat_dead"] for d in out)
+    causes = sorted({c for d in out for c in d["combat"]["dead_causes"]})
+    unex = next((m for d in out for m in d["combat"]["kill_unexplained"]), "")
+    phan = next((m for d in out for m in d["combat"]["kill_phantom"]), "")
+    ck.check("战沉的舰都有一发 killed 射击（欠费生锈报废的不算）", not unex,
+             unex or f"{tag}：{cdead:,} 次战沉全部有那一发（死因集合 {causes}）")
+    ck.check("击杀守卫反过来也成立（killed 射击真的沉了船）", not phan,
+             phan or f"{tag}：没有「打死了却没沉」的射击")
+    ck.check("击杀守卫没有空转（真的打沉过船）", cdead >= 10, f"{cdead:,} 次战沉 / {dead:,} 次沉没（下限 10）")
+
+    sbad = sum(d["combat"]["ship_bad_n"] for d in out)
+    sample = next((m for d in out for m in d["combat"]["ship_bad"]), "")
+    ck.check("舰面板在定义域里（0 < hull ≤ max、shield ∈ [0,max]、attack/speed/组件≥0）",
+             sbad == 0, f"{sample}（共 {sbad} 处）" if sbad else
+             f"{tag}：{sum(d['ships'] for d in out):,} 个舰·回合行全部在域里")
+
+    rc = sum(d["combat"]["regen_checked"] for d in out)
+    rb = sum(d["combat"]["regen_bad"] for d in out)
+    bonus = sum(d["combat"]["regen_bonus_rows"] for d in out)
+    sample = next((m for d in out for m in d["combat"]["regen_ex"]), "")
+    ck.check("安静回合里护甲只增不减、且不超上限（基础再生量是下界；本土加成读面看不到，不断言等式）",
+             rb == 0, f"{sample}（共 {rb} 处）" if rb else
+             f"{tag}：{rc:,} 行成立，其中 {bonus:,} 行拿到了本土再生加成（> 基础量）")
+    ck.check("再生守卫没有空转（真有安静回合可查）", rc >= 500, f"{rc:,} 行（下限 500）")
 
 
 def audit_checks(h, ck, out) -> None:
