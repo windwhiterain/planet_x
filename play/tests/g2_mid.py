@@ -107,6 +107,8 @@ FOLLOW_FID, FOLLOW_ENEMY, FOLLOW_ROUNDS = "中国", "美国", 3
 SITE_FID, SITE_STOCK = "中国", ("铁", "碳", "硅")
 # 战争推思潮：把最偏和平端那家的舰摆成「一发即沉」的仗。
 IDEO_ROUNDS = 1
+# 静息亲和：两臂只差思潮，靠多回合让确定性拉力压过外交噪声。
+AFFIN_ROUNDS = 30
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1013,7 +1015,16 @@ def extract(dirpath):
                     tb_bad.append(f"{where}：报的是战争禁运，但两边关系 {a:g}/{b:g} "
                                   f"都在交战阈值 {war_threshold:g} 之上")
 
+    # 战争疤痕那条（第 7 批）要：① 一对真开过战的势力 + 那一回合；② 一对**从没打过仗**的势力。
+    starts = [(int(r["round"]), tuple(sorted((r["actor_id"], r["target_id"]))))
+              for _, r in ev[ev["type"] == "war_started"].iterrows()]
+    fought = {p for _, p in starts}
+    all_f = sorted(set(fac_all["势力"]))
+    never = next(((x, y) for i, x in enumerate(all_f) for y in all_f[i + 1:]
+                  if (x, y) not in fought and (y, x) not in fought), None)
+
     return {"razings": razings, "refound_bad": bad, "customized": customized,
+            "war_first": starts[0] if starts else None, "war_never": never,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
             "chronicle": chronicle, "war_durations": durations, "wars_open": len(open_wars),
             "city_checked": city_checked, "city_unexplained": city_unexplained,
@@ -1161,6 +1172,7 @@ def run(h, ck) -> None:
     dispatch_checks(h, ck, out)
     new_ship_checks(h, ck, out)
     trade_block_checks(h, ck, out)
+    war_scar_scenario_checks(h, ck, out)
     haul_leg_checks(h, ck, out)
     knowledge_scenario_checks(h, ck)
     governance_scenario_checks(h, ck)
@@ -1170,6 +1182,7 @@ def run(h, ck) -> None:
     follow_scenario_checks(h, ck)
     site_build_scenario_checks(h, ck)
     ideology_war_scenario_checks(h, ck)
+    affinity_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2740,6 +2753,103 @@ def ideology_war_scenario_checks(h, ck) -> None:
              arms["fight"]["d"] > arms["peace"]["d"],
              f"打仗臂 Δ={arms['fight']['d']} > 对照臂 Δ={arms['peace']['d']}；"
              f"对照臂 {arms['peace']['pm']}")
+
+
+def war_scar_scenario_checks(h, ck, out) -> None:
+    """**合成场景 · 战争疤痕的形状**（`sim/war_scar.rs::war_scar_floor_shape_decays_over_its_window`，第 7 批）。
+
+    新挂 `--call war_scar_floor {a, b}`（吃 state：它查 `notables` 里那一对的开战记录与当前回合之差）。
+    从长局里取**一对真开过战的势力**与那一回合，然后在 `age = 0 / 1 / span−1 / span` 各造一份档问它：
+
+    * `age = 0` ⇒ 正好 `diplomacy.war_scar_relation`（刚开战是满额敌意）；
+    * 年龄越大地板越**高**（单调）；窗口内（`span−1`）仍 `< 0`；出了窗口（`span`）⇒ `null`；
+    * 交换两端逐值相等；**一对从没打过仗的势力** ⇒ `null`（疤痕只属于开战的那一对）。
+
+    ⚠ 原件用**合成世界**（往 `notables` 塞一条 r10 的开战记录）⇒ 这里是**真长局**里的疤，
+    取样回合随第一场战争而定（不写死 r10）。
+    """
+    seed = SEEDS[rep_index(out, "war_first")]
+    first = next((d["war_first"] for d in out if d["war_first"]), None)
+    never = next((d["war_never"] for d in out if d["war_never"]), None)
+    span = int(meta_diplomacy(h)["war_scar_rounds"])
+    base = float(meta_diplomacy(h)["war_scar_relation"])
+    ck.check("合成场景（战争疤痕）：长局里真的打过仗，也存在从没打过仗的一对（防空转）",
+             first is not None and never is not None,
+             f"第一场 {first}｜从没打过的一对 {never}｜窗口 {span} 回合、满额敌意 {base}")
+    if first is None or never is None:
+        return
+    rnd, (a, b) = first
+
+    def floor_at(age: int, x: str, y: str):
+        ckpt = h.gen(CACHE_ROOT / "scenario" / f"_ws_s{seed}_a{age}.json", seed, rnd + age)
+        return json.loads(h.capture(["--start", str(ckpt), "--call", "war_scar_floor",
+                                     "--args", json.dumps({"a": x, "b": y}, ensure_ascii=False)]))["value"]
+
+    ages = [0, 1, 2, span - 1, span]
+    vals = [floor_at(age, a, b) for age in ages]
+    ck.check("合成场景（战争疤痕）：刚开战是**满额敌意**（`age = 0` 正好等于配置里的初值）",
+             vals[0] is not None and abs(float(vals[0]) - base) < 1e-9,
+             f"{a}×{b} 在 r{rnd} 的地板 = {vals[0]}（配置初值 {base}）")
+    ck.check("合成场景（战争疤痕）：地板随年龄**单调抬高**，窗口内仍 `< 0`，出了窗口彻底消失",
+             all(float(x) < float(y) for x, y in zip(vals[:3], vals[1:4]))
+             and float(vals[3]) < 0.0 and vals[4] is None,
+             f"年龄 {ages} ⇒ 地板 {vals}（窗口 {span}）")
+    ck.check("合成场景（战争疤痕）：**与势力顺序无关**（交换两端逐值相等）",
+             all(floor_at(age, b, a) == v for age, v in zip(ages[:3], vals[:3])),
+             f"正向 {vals[:3]}｜反向 {[floor_at(age, b, a) for age in ages[:3]]}")
+    ck.check("合成场景（战争疤痕）：**没打过仗的一对没有疤**（疤痕不牵连别人）",
+             floor_at(0, never[0], never[1]) is None and floor_at(span - 1, never[0], never[1]) is None,
+             f"{never[0]}×{never[1]} 在 age 0 / {span - 1} 都返回 null")
+
+
+def rep_index(out, key: str) -> int:
+    """哪一份摘要里有这个键（`h.gen` 要配对同一个 seed）。"""
+    return next((i for i, d in enumerate(out) if d.get(key)), 0)
+
+
+def meta_diplomacy(h) -> dict:
+    """`meta.diplomacy`（战争疤痕的窗口与初值）。"""
+    return json.loads(h.capture(["--meta"]))["diplomacy"]
+
+
+def affinity_scenario_checks(h, ck) -> None:
+    """**合成场景 · 思潮相似度决定静息亲和**（`sim/ideology.rs::ideology_similarity_shifts_diplomatic_affinity_directionally`，第 7 批）。
+
+    两臂**只差两家思潮**：都给推到同一个极（相似度 = 1）或推到你死我活的两极（相似度 = 0），
+    同时把 `阵营倾向`（alignment）压到 0、彼此的 `关系` 归零 ⇒ 关系的去向只能由思潮相似度解释。
+
+    实测 `联合国 × 美国`：同极臂关系爬到 **+16.6**、对极臂掉到 **−53.9**（判据看方向 + 巨大间距，
+    不比绝对值）。⚠ 原件把 `diplomacy.noise` 关掉（那是**配置**改动，读面没有开关）⇒ 这里靠
+    **多回合**：每回合向静息值拉 `drift_rate`(0.02)，而噪声有界 ⇒ 30 回合后间距远大于噪声。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("factions",))
+    f0 = q0.table("factions")
+    f0 = f0[f0["round"] == 0]
+    a, b = str(f0.iloc[0]["势力"]), str(f0.iloc[1]["势力"])
+    axes = ["和平↔军国", "科学↔技术", "人民↔精英", "自然↔殖民"]
+    arms = {}
+    for tag, bv in (("same", 1.0), ("opp", -1.0)):
+        patch = {"factions": {
+            a: {"思潮": {x: 1.0 for x in axes}, "阵营倾向": 0.0, "关系": {b: 0.0}},
+            b: {"思潮": {x: bv for x in axes}, "阵营倾向": 0.0, "关系": {a: 0.0}}}}
+        proj = h.scenario(f"affin_{tag}", seed, AFFIN_ROUNDS, patch)
+        ff = KIT.load(str(proj), only=("factions",)).table("factions")
+        ff = ff[ff["势力"] == a].sort_values("round")
+        arms[tag] = [float((r["关系"] or {}).get(b, 0.0)) for _, r in ff.iterrows()]
+
+    sim_same = call_ideology_similarity(h, {x: 1.0 for x in axes}, {x: 1.0 for x in axes})
+    sim_opp = call_ideology_similarity(h, {x: 1.0 for x in axes}, {x: -1.0 for x in axes})
+    ck.check("合成场景（静息亲和）：两臂的思潮相似度确实是 1 与 0（前提，防空转）",
+             abs(sim_same - 1.0) < 1e-9 and sim_opp == 0.0,
+             f"{a}×{b}：同极相似度 {sim_same}、对极 {sim_opp}")
+    ck.check("合成场景（静息亲和）：两臂的关系都真的动了（外交那一步跑了）",
+             abs(arms["same"][-1]) > 1.0 and abs(arms["opp"][-1]) > 1.0,
+             f"同极末端 {arms['same'][-1]:.3f}｜对极末端 {arms['opp'][-1]:.3f}")
+    ck.check("合成场景（静息亲和）：**思潮相似的一方静息关系更友好**（间距远大于噪声）",
+             arms["same"][-1] > arms["opp"][-1] + 10.0,
+             f"同极 {arms['same'][-1]:.3f} vs 对极 {arms['opp'][-1]:.3f}"
+             f"（间距 {arms['same'][-1] - arms['opp'][-1]:.1f}）")
 
 
 def id_checks(h, ck, out) -> None:

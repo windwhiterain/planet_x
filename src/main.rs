@@ -693,6 +693,16 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **战争疤痕地板**（第 7 批）：`war_scar_floor(state, config, a, b)` —— 吃 state
+        // （它查 `notables` 里那一对的开战记录与当前回合的差）。返回 `null` = 这一对没有疤。
+        "war_scar_floor" => {
+            let a = args.get("a").and_then(|v| v.as_str()).ok_or("args.a 缺失")?;
+            let b = args.get("b").and_then(|v| v.as_str()).ok_or("args.b 缺失")?;
+            match sim::war_scar_floor(state, config, a, b) {
+                Some(v) => json!(v),
+                None => serde_json::Value::Null,
+            }
+        }
         // **军事信号**（第 7 批）：`military_deltas(事件表)` —— 纯函数（只吃事件）。
         // 「我丢一城 / 沉一舰 → −1；夺一城 / 击沉敌舰 → +1」，欠费报废不算战功、
         // 复垦算殖民不计分。事件形状与状态里 `events` 一致（内部标记 `type`）。
