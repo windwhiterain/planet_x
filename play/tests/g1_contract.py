@@ -710,6 +710,20 @@ def call_functions(h, ck, tmp: Path) -> None:
             argv += ["--args", json.dumps(args, ensure_ascii=False)]
         return json.loads(h.capture(argv))["value"]
 
+    # ⓪ 货栈账（第 7 批，`autocontrol/freight.rs`）：`site_reserve` 的乘数是**往返回合数**，
+    #    所以「离首都越远的站点该囤越多」可以用两个真天体比出方向、不写死数字
+    #    （原 `src/tests/sim/site_supply.rs::the_reserve_grows_with_the_round_trip_time`）。
+    facs = _rounds(_table(h.projection(42, 0), "factions"), 0)
+    cap = next(r["capital_body"] for r in facs if r["势力"] == "中国")
+    near, far = "水星", "金星"
+    hops = {b: call("lane_rounds", {"from": b, "to": cap}) for b in (near, far)}
+    res = {b: call("site_reserve", {"faction": "中国", "body": b}) for b in (near, far)}
+    ck.check("--call lane_rounds：前提成立（金星那条线的一个往返更久，防空转）",
+             hops[far] > hops[near], f"往返回合数：{near} {hops[near]} / {far} {hops[far]}（首都 {cap}）")
+    ck.check("--call site_reserve：同一份建设活，离首都越远该囤的料越多",
+             bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
+             f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
+
     # ① haul_split：max-min 公平分配（原 `src/tests/sim/haul.rs`）。
     ck.check("--call haul_split：三种货、舱容 6 ⇒ 每种 2",
              call("haul_split", {"need": {"铁": 10, "碳": 10, "硅": 10}, "room": 6})

@@ -661,9 +661,73 @@ fn call_function(
             };
             json!(sim::home_defense_mult(state, faction, pos))
         }
+        // **货栈账**（第 7 批，`auto-control/freight.rs`）：这几个量以前只在 Rust 用例里看得见。
+        // `site_reserve` = 这个站点为「本地建设 + 一个往返的消耗」该囤多少（随航程变），
+        // `exportable_at` = 现货 − 保留量（能出口的净额），`site_deficit` = 保留量 − 现货（还缺多少）。
+        // ⚠ 出口净额与进口缺口**逐资源至少有一个是 0**（否则货会往返乒乓）——那是判据，不是巧合。
+        "site_reserve" | "exportable_at" | "site_deficit" => {
+            let fid = args
+                .get("faction")
+                .and_then(|v| v.as_str())
+                .ok_or("args.faction 缺失")?;
+            let body = args
+                .get("body")
+                .and_then(|v| v.as_str())
+                .ok_or("args.body 缺失")?;
+            let map = match name {
+                "site_reserve" => autocontrol::freight::site_reserve(state, config, fid, body),
+                "exportable_at" => autocontrol::freight::exportable_at(state, config, fid, body),
+                _ => autocontrol::freight::site_deficit(state, config, fid, body),
+            };
+            serde_json::to_value(map).map_err(|e| e.to_string())?
+        }
+        // 一条运输线的**往返回合数**（`site_reserve` 的乘数就是它）。
+        "lane_rounds" => {
+            let from = args
+                .get("from")
+                .and_then(|v| v.as_str())
+                .ok_or("args.from 缺失")?;
+            let to = args
+                .get("to")
+                .and_then(|v| v.as_str())
+                .ok_or("args.to 缺失")?;
+            json!(planet_x::model::lane_rounds(state, config, from, to))
+        }
+        // **每个货栈一行**的完整账（现货 / 保留 / 可出口 / 缺口）——「出口与缺口不会同时在」
+        // 这条判据要在**很多个真实站点**上成立，一次调用拿全部，省得逐站点问。
+        "site_ledger" => {
+            // 「站点」= 该势力在**非首都天体**上有城、或有货栈。两边都要收：只有货栈没有城
+            // （纯中转站）与只有城还没有货栈（还没囤到货）都是真站点，缺一边判据就空转
+            // （实测：只按 `state.depots` 收，回合 0 是一张空表）。
+            let mut sites: Vec<(String, String)> = Vec::new();
+            for c in &state.cities {
+                if state.capital_body(&c.faction_id) != c.body_id {
+                    sites.push((c.faction_id.clone(), c.body_id.clone()));
+                }
+            }
+            for ((fid, body), _) in &state.depots {
+                if state.capital_body(fid) != *body {
+                    sites.push((fid.clone(), body.clone()));
+                }
+            }
+            sites.sort();
+            sites.dedup();
+            let mut rows = Vec::new();
+            for (fid, body) in sites {
+                rows.push(json!({
+                    "势力": fid,
+                    "天体名": body,
+                    "现货": state.stock_at(&fid, &body).cloned().unwrap_or_default(),
+                    "保留": autocontrol::freight::site_reserve(state, config, &fid, &body),
+                    "可出口": autocontrol::freight::exportable_at(state, config, &fid, &body),
+                    "缺口": autocontrol::freight::site_deficit(state, config, &fid, &body),
+                }));
+            }
+            json!(rows)
+        }
         other => {
             return Err(format!(
-                "未知函数 {other}；可用：haul_split / hit_factor / cargo_used / component_integrity / cargo_capacity / ship_panel / home_defense_mult"
+                "未知函数 {other}；可用：haul_split / hit_factor / cargo_used / component_integrity / cargo_capacity / ship_panel / home_defense_mult / site_reserve / exportable_at / site_deficit / lane_rounds / site_ledger"
             ))
         }
     };

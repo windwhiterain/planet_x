@@ -73,6 +73,8 @@ AFFORD_RESOURCES = ("氦-3", "金", "硅", "碳", "铁")
 # 陈旧的跟随（`fleet.rs::player_stale_follow…`）：钉一根**从第 0 回合就悬空**的 Follow。
 STALE_SHIP = "长城"
 STALE_ROUNDS = 4
+# 货栈账在**哪几个回合**取：库存水平是真实世界自己长出来的（判据不摆库存）。
+SITE_LEDGER_ROUNDS = (80, 400)
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1020,6 +1022,7 @@ def run(h, ck) -> None:
     capital_scenario_checks(h, ck)
     dock_scenario_checks(h, ck)
     stale_follow_scenario_checks(h, ck)
+    site_ledger_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1561,6 +1564,45 @@ def stale_follow_scenario_checks(h, ck) -> None:
             moved += 1
     ck.check("合成场景（陈旧跟随）守卫没有空转（同一局里别的舰真的在动）", moved > 0,
              f"回合 0→1 有 {moved} 艘别的舰挪了位置")
+
+
+def site_ledger_checks(h, ck) -> None:
+    """**货栈账**：出口净额与进口缺口**逐资源至少有一个是 0**
+    （`sim/tests/site_supply.rs::a_site_never_exports_what_it_still_needs`，2026-10 第 7 批）。
+
+    以前这条要在 Rust 里手工把库存摆成三档（空 / 一点 / 堆成山）再直调 `exportable_at`；
+    现在**一次 `--call site_ledger` 拿每个站点一行的完整账**（现货 / 保留 / 可出口 / 缺口），
+    在几个不同回合各拿一次——库存水平是**真实世界自己长出来的**，判据里没有一行是抄的公式。
+
+    ⚠ 站点集合包含「有城但还没货栈」的：只按 `state.depots` 收的话回合 0 是空表（判据空转）。
+    """
+    rows = both = 0
+    export_ok = 0
+    bad: list[str] = []
+    for rounds in SITE_LEDGER_ROUNDS:
+        ckpt = h.gen(CACHE_ROOT / "scenario" / f"ledger_s{SCENARIO_SEED}_r{rounds}.json",
+                     SCENARIO_SEED, rounds)
+        ledger = json.loads(h.capture(["--start", str(ckpt), "--call", "site_ledger"]))["value"]
+        for row in ledger:
+            rows += 1
+            where = f"r{rounds} {row['势力']}@{row['天体名']}"
+            for rt in set(row["可出口"]) | set(row["缺口"]):
+                out = float(row["可出口"].get(rt, 0.0))
+                inc = float(row["缺口"].get(rt, 0.0))
+                if out > 1e-9 and inc > 1e-9:
+                    both += 1
+                    if len(bad) < 3:
+                        bad.append(f"{where} {rt}：出口 {out:.2f} 与缺口 {inc:.2f} 同时在")
+            for rt, stock in (row["现货"] or {}).items():
+                if float(stock) > float(row["保留"].get(rt, 0.0)) + 1e-9 \
+                        and float(row["可出口"].get(rt, 0.0)) > 0.0:
+                    export_ok += 1
+    ck.check("货栈账：出口净额与进口缺口逐资源至少有一个是 0（货不会往返乒乓）", not both,
+             "；".join(bad) or f"{rows} 个「站点·回合」逐个资源对过，一处都没有两边同时为正")
+    ck.check("货栈账：现货超过保留量 ⇒ 一定有出口（否则首都收不到货）", export_ok > 0,
+             f"{export_ok} 处「现货 > 保留」的货都算出了正出口")
+    ck.check("货栈账守卫没有空转（真看了很多站点·回合）", rows >= 20,
+             f"{rows} 个站点·回合（{len(SITE_LEDGER_ROUNDS)} 个回合的账）")
 
 
 def id_checks(h, ck, out) -> None:
