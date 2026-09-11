@@ -412,26 +412,35 @@ fn the_effective_role_follows_the_leaf_then_the_fleet_default_then_the_record() 
     );
 }
 
-/// **思潮决定倾向**（用户裁决：「由国家思潮决定自动控制下舰船倾向于运输还是战斗」）。
+/// 四条**出口腿**：四个没有城的天体 + 清空首都池 ⇒ 进口腿与保留量都不掺进来。
+fn stock_four(st: &mut State) {
+    export_only(st, "中国", &["冥王星", "卡戎", "土星", "泰坦"], 100.0);
+}
+
+/// 某一档思潮下，120 回合里「平均有几艘船在跑运输」。
 ///
-/// 同一个世界、同一批骰子、同一份积压，**只改思潮两轴**：军国端少跑运输、殖民/和平端
-/// 多跑运输；而**中庸端正好是 1.0 = 旧硬定编**（这条改动在世界的中位上是行为中性的）。
+/// ⚠ 舰队要**养到 12 艘**（`grow_fleet(.., 3)`）：否则「按比例投几条腿」会被舰队规模顶住
+/// （配额够不到）——**这一条测的是决策层的期望头数，不是活世界里的在位舰数**（活世界舰队
+/// 只有 3–4 艘、配额常有 5–14 ⇒ 那条律在长局数据上**不成立**，所以它只能住在这里）。
+fn mean_headcount(config: &GameConfig, base: &State, mil: f64, col: f64) -> f64 {
+    let mut st = base.clone();
+    set_ideology(&mut st, "中国", mil, col);
+    grow_fleet(&mut st, "中国", 3);
+    stock_four(&mut st);
+    let hist = run_roles(&mut st, config, "中国", 120);
+    hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64
+}
+
+/// **思潮决定倾向（中庸端）**（用户裁决：「由国家思潮决定自动控制下舰船倾向于运输还是战斗」）。
+///
+/// 中庸（尚武度 0）⇒ 倍数**恰好** 1.0：`2σ(0) = 1` ⇒ 目标头数 = 需求 = 4 条出口腿。
+///
+/// ⚠ 2026-10（第 7 批）把原来那一条 `ideology_decides_how_much_of_the_fleet_hauls` **拆成五条**：
+/// 它自己跑了 **8 个臂**（其中三个还重算了一遍）⇒ 5.5 s，是整道 Rust 门的**墙钟**。拆开后
+/// 总计算量不变、nextest 并行 ⇒ 每条最多两个臂。**覆盖零变化。**
 #[test]
-fn ideology_decides_how_much_of_the_fleet_hauls() {
+fn a_neutral_ideology_returns_to_the_hard_coded_establishment() {
     let (config, base) = fresh(42);
-    let stock_four = |st: &mut State| {
-        // 四个**没有城**的天体 + 清空首都池 ⇒ 正好四条**出口腿**（进口腿与保留量都不掺进来）。
-        export_only(st, "中国", &["冥王星", "卡戎", "土星", "泰坦"], 100.0);
-    };
-    let mean_headcount = |mil: f64, col: f64| -> f64 {
-        let mut st = base.clone();
-        set_ideology(&mut st, "中国", mil, col);
-        grow_fleet(&mut st, "中国", 3); // 12 艘 ⇒ 舰队规模不顶住「按比例投几条腿」
-        stock_four(&mut st);
-        let hist = run_roles(&mut st, &config, "中国", 120);
-        hist.iter().map(|r| r.len() as f64).sum::<f64>() / hist.len() as f64
-    };
-    // 中庸（尚武度 0）⇒ 倍数**恰好** 1.0：`2σ(0) = 1` ⇒ 目标头数 = 需求 = 4 条出口腿。
     let mut neutral_state = base.clone();
     set_ideology(&mut neutral_state, "中国", 0.0, 0.0);
     stock_four(&mut neutral_state);
@@ -441,35 +450,65 @@ fn ideology_decides_how_much_of_the_fleet_hauls() {
         freight_lean(&neutral_state, "中国")
     );
     assert!((freighter_quota(&neutral_state, &config, "中国") - 4.0).abs() < 1e-12);
+    // 抽签的期望**正好**是配额：实测 120 回合 3.97 vs 4.00。这条是「概率分布 = 想要的比例」
+    // 那条纪律的守卫——机制走形（比如每人各掷一次身份）时它立刻会炸（实测会 0↔12 两极震荡）。
+    let got = mean_headcount(&config, &base, 0.0, 0.0);
+    assert!(
+        (got - 4.0).abs() < 0.35,
+        "中庸的平均头数该贴着配额 4：实为 {got:.2}"
+    );
+}
 
-    let militarist = mean_headcount(1.0, 0.0);
-    let neutral = mean_headcount(0.0, 0.0);
-    let pacifist = mean_headcount(-1.0, 0.0);
-    let colonist = mean_headcount(0.0, 1.0);
-    // 抽签的期望**正好**是配额（实测 200 回合：1.52 vs 1.46、3.97 vs 4.00、6.47 vs 6.54）。
-    // 这条是「概率分布 = 想要的比例」那条纪律的守卫：机制走形（比如每人各掷一次身份）
-    // 时它立刻会炸——实测过那种写法会在 0 与 12 之间两极震荡。
-    for (mil, col, quota) in [(1.0, 0.0, 1.46), (0.0, 0.0, 4.0), (-1.0, 0.0, 6.54)] {
-        let got = mean_headcount(mil, col);
-        assert!(
-            (got - quota).abs() < 0.35,
-            "平均头数该贴着配额（思潮 {mil}×军事 + {col}×殖民 ⇒ 配额 {quota}）：实为 {got:.2}"
-        );
-    }
+/// 军国端该**少**跑运输（实测 1.52 vs 4.00）。
+#[test]
+fn militarism_hauls_less_than_a_neutral_ideology() {
+    let (config, base) = fresh(42);
+    let militarist = mean_headcount(&config, &base, 1.0, 0.0);
+    let neutral = mean_headcount(&config, &base, 0.0, 0.0);
     assert!(
         militarist < neutral,
         "军国端该少跑运输：{militarist:.2} vs {neutral:.2}"
     );
     assert!(
+        (militarist - 1.46).abs() < 0.35,
+        "军国端的平均头数该贴着配额 1.46：实为 {militarist:.2}"
+    );
+}
+
+/// 和平端该**多**跑运输（实测 6.47 vs 6.54 的配额、4.00 的中庸）。
+#[test]
+fn pacifism_hauls_more_than_a_neutral_ideology() {
+    let (config, base) = fresh(42);
+    let pacifist = mean_headcount(&config, &base, -1.0, 0.0);
+    let neutral = mean_headcount(&config, &base, 0.0, 0.0);
+    assert!(
         pacifist > neutral,
         "和平端该多跑运输：{pacifist:.2} vs {neutral:.2}"
     );
     assert!(
-        colonist > neutral,
-        "殖民端要给远方殖民地送补给 ⇒ 该多跑运输（所以它在「尚武度」上是负权重）：{colonist:.2} vs {neutral:.2}"
+        (pacifist - 6.54).abs() < 0.35,
+        "和平端的平均头数该贴着配额 6.54：实为 {pacifist:.2}"
     );
-    // 两轴**同权反号**：既军国又殖民 ⇒ 两股力量抵消（回到中庸附近）。
-    let both = mean_headcount(1.0, 1.0);
+}
+
+/// 殖民端要给远方殖民地送补给 ⇒ 该多跑运输（所以它在「尚武度」上是负权重）。
+#[test]
+fn colonialism_hauls_more_than_a_neutral_ideology() {
+    let (config, base) = fresh(42);
+    let colonist = mean_headcount(&config, &base, 0.0, 1.0);
+    let neutral = mean_headcount(&config, &base, 0.0, 0.0);
+    assert!(
+        colonist > neutral,
+        "殖民端该多跑运输：{colonist:.2} vs {neutral:.2}"
+    );
+}
+
+/// 两轴**同权反号**：既军国又殖民 ⇒ 两股力量抵消（回到中庸附近）。
+#[test]
+fn militarism_and_colonialism_cancel_out() {
+    let (config, base) = fresh(42);
+    let both = mean_headcount(&config, &base, 1.0, 1.0);
+    let neutral = mean_headcount(&config, &base, 0.0, 0.0);
     assert!(
         (both - neutral).abs() < 1.0,
         "军国 + 殖民该互相抵消：{both:.2} vs 中庸 {neutral:.2}"

@@ -1,5 +1,12 @@
 //! 治理与忠诚的两批用例（⚠ 两处都叫「B1」，说的**不是**同一件事）：
 //!
+//! ## 2026-10（第 7 批）：`mastery_does_not_pay_the_governance_bill` 也搬了（g2 合成场景）
+//!
+//! 当时判它"够不到覆盖率 0 的欠费支路"是**对的观察、错的结论**：正常回合确实够不到
+//! （产出先到账），但**把舰改成重舰**就能让维护费**结构性**超过产出 ⇒ 国库见底 ⇒
+//! `governance_coverage` 掉到 **0**（实测 r1–r3），两臂只差 `MOND 掌握度` ⇒ 忠诚 / 覆盖率 /
+//! 欠费**逐回合完全相同**（1.0, 0.75, 0.5, 1.0, 1.0, 1.0）。
+//!
 //! ## 2026-10（第 7 批）：`a_mond_master_keeps_a_deep_city_loyal_where_a_mortal_loses_it`
 //! 搬去了 g2 **合成场景 · 治理**（3 条判据）
 //!
@@ -22,41 +29,6 @@
 //!    `sim::step_governance` 的注释）。
 
 use super::*;
-
-/// 掌握度**只**动「距离」那一项：它不该顺手改掉库存付不出治理费时的暴跌支路
-/// （覆盖率 < 1 ⇒ 忠诚按 `loyalty_penalty` 掉，与距离无关）。
-#[test]
-fn mastery_does_not_pay_the_governance_bill() {
-    let (config, base) = fresh_world(42);
-    let fid = "中国";
-    let run = |control: f64| -> f64 {
-        let mut state = base.clone();
-        // 一文不名 ⇒ 覆盖率 0 ⇒ 走「欠费暴跌」那条支路。
-        state.faction_mut(fid).unwrap().resources.clear();
-        state.faction_mut(fid).unwrap().mond_control = control;
-        let cid = state
-            .cities
-            .iter()
-            .find(|c| c.faction_id == fid && !c.razed)
-            .expect("中国开局有城")
-            .name
-            .clone();
-        if let Some(c) = state.city_mut(&cid) {
-            c.loyalty = 1.0;
-        }
-        for _ in 0..4 {
-            step_governance(&mut state, &config, &mut RoundSink::default());
-        }
-        state.city(&cid).map(|c| c.loyalty).unwrap_or(0.0)
-    };
-    let mortal = run(0.0);
-    let master = run(1.0);
-    assert!(
-        (mortal - master).abs() < 1e-9,
-        "掌握度买的是「守得住」，不是「管得起」——付不出治理费时两侧该一样掉：\
-         凡人 {mortal:.3} vs 掌握 {master:.3}"
-    );
-}
 
 /// **P1-5：Player 的 `welfare_budget` 叶按「总市场价值」读，不是逐资源支付向量**。
 ///

@@ -109,6 +109,8 @@ SITE_FID, SITE_STOCK = "中国", ("铁", "碳", "硅")
 IDEO_ROUNDS = 1
 # 建造瓶颈：三条臂（库存 × 预算）看 increment 与 rate 的关系。
 BUILD_ROUNDS = 3
+# 管不起那条：把舰改成重舰 ⇒ 覆盖率结构性掉到 0，两臂只差 MOND 掌握度。
+GOV_PLATE_ROUNDS = 5
 # 静息亲和：两臂只差思潮，靠多回合让确定性拉力压过外交噪声。
 AFFIN_ROUNDS = 30
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
@@ -1185,6 +1187,7 @@ def run(h, ck) -> None:
     site_build_scenario_checks(h, ck)
     ideology_war_scenario_checks(h, ck)
     build_line_scenario_checks(h, ck)
+    gov_plate_scenario_checks(h, ck)
     affinity_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
@@ -2915,6 +2918,53 @@ def build_line_scenario_checks(h, ck) -> None:
              rich[0][1] > max(i for _, i in nostock) and rich[0][1] > max(i for _, i in poor),
              f"两头足 {rich[0][1]:.3f}｜钱 0 {max(i for _, i in poor):.3f}｜"
              f"库存 0 {max(i for _, i in nostock):.3f}")
+
+
+def gov_plate_scenario_checks(h, ck) -> None:
+    """**合成场景 · 掌握度买的是「守得住」不是「管得起」**（`sim/governance.rs::mastery_does_not_pay_the_governance_bill`，第 7 批）。
+
+    怎么把「覆盖率 0 ⇒ 欠费支路」**真的**造出来：把某势力的舰改成重舰（`battleship` + 三件重装）
+    ⇒ 维护费**结构性**超过任何产出，国库当场见底 ⇒ `governance_coverage` 掉到 0 ✓。两臂**只差
+    `MOND 掌握度`**（0 / 1），其余逐字相同。
+
+    判据：**覆盖率真的到过 0**（防空转）+ 两臂的**忠诚度 / 覆盖率 / 欠费逐回合完全相同**
+    ——付不出治理费时，掌握度一点忙也帮不上（它买的是深空城的忠诚，不是行政预算；
+    后者由 g2 的**驻泊深度/治理**场景从正面压着）。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 2)), only=("factions", "ships", "cities"))
+    sh, ci = q0.table("ships"), q0.table("cities")
+    f0 = q0.table("factions")
+    f0 = f0[f0["round"] == 0]
+    fid = str(f0.iloc[0]["势力"])
+    mine = sh[(sh["round"] == 0) & (sh["势力"] == fid)]
+    city = ci[(ci["round"] == 0) & (ci["势力"] == fid)].iloc[0]
+    ck.check("合成场景（管不起）：找得到有舰的势力与它的城（防空转）",
+             not mine.empty and bool(city["城名"]), f"{fid}：{len(mine)} 艘舰、城 {city['城名']}")
+    if mine.empty:
+        return
+    arms = {}
+    for tag, mc in (("mortal", 0.0), ("master", 1.0)):
+        patch = {"ships": {r["舰名"]: {"舰级": "battleship", "组件": ["kinetic", "armor", "shield"],
+                                       "组件耐久": [18.0] * 3} for _, r in mine.iterrows()},
+                 "factions": {fid: {"MOND 掌握度": mc}}}
+        proj = h.scenario(f"gov_plate_{tag}", seed, GOV_PLATE_ROUNDS, patch)
+        q = KIT.load(str(proj), only=("cities", "faction_process"))
+        c = q.table("cities")
+        c = c[c["城名"] == city["城名"]].sort_values("round")
+        pr = q.table("faction_process")
+        pr = pr[pr["势力"] == fid].sort_values("round")
+        arms[tag] = {"loy": [float(x) for x in c["忠诚度"]],
+                     "cov": [float(x) for x in pr["governance_coverage"]],
+                     "unpaid": [float(x) for x in pr["upkeep_unpaid"]]}
+    m, s = arms["mortal"], arms["master"]
+    ck.check("合成场景（管不起）：重舰把国库压垮 ⇒ **覆盖率真的到过 0**（欠费支路活着，防空转）",
+             min(m["cov"]) == 0.0 and max(m["unpaid"]) > 0.0,
+             f"覆盖率 {[round(x, 2) for x in m['cov']]}｜欠费 {[round(x, 2) for x in m['unpaid']]}")
+    ck.check("合成场景（管不起）：**付不出治理费时，掌握度一点忙也帮不上**（两臂逐回合完全相同）",
+             m["loy"] == s["loy"] and m["cov"] == s["cov"] and m["unpaid"] == s["unpaid"],
+             f"凡人 忠诚 {[round(x, 2) for x in m['loy']]}｜掌握 "
+             f"{[round(x, 2) for x in s['loy']]}（覆盖率与欠费也逐行相同）")
 
 
 def id_checks(h, ck, out) -> None:
