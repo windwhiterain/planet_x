@@ -853,7 +853,12 @@ function mapWorld() {
   });
 }
 function renderMap() {
-  if (window.PlanetXMap && window.PlanetXMap.setWorld) window.PlanetXMap.setWorld(mapWorld(), cfg.body_kinds);
+  // 第三个参数是**整份 config 根**：3D 层要按 `cfg.ships` 里每一级舰的 hull/armor_mult/
+  // speed_mult/… 把剪影算出来（舰的形状是数值的函数，不是在渲染层写死的常量表）。
+  // `cfg` 为 null 时不传，渲染层退回默认值。
+  if (window.PlanetXMap && window.PlanetXMap.setWorld) {
+    window.PlanetXMap.setWorld(mapWorld(), cfg.body_kinds, cfg);
+  }
 }
 
 // 地图点击 → 选中该对象（底部读面用通用 widget 渲染它的完整记录）。
