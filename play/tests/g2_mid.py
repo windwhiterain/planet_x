@@ -342,6 +342,35 @@ def blueprint_report(q) -> dict:
     return out
 
 
+def id_report(q) -> dict:
+    """**建筑 id 永不复用**（`State.next_building_id` 单调计数器）。
+
+    `Building` 是唯一没有名字的实体 ⇒ 它的身份就是 `(城名, 序号)`（见笔记 §2），那个序号**必须**
+    经得起当长期引用：跨回合的 UI 选中态、agent 笔记里的「建筑 21」、两份存档的对比。
+
+    ⚠ 旧分配器是「每回合扫全场取 `max(id) + 1`」⇒ **最高 id 的建筑一被拆，下个新建筑就拿回那个
+    号**。A/B 实测（seed 1 / 400 回合）：旧分配器 **3 个 id 被复用**（91/92/93 在 r104 出现、消失、
+    又在 r128 前后落到另一座城），换单调计数器后 **0 例**。
+
+    判据：一个 id 的出现回合**必须连成一段**（有洞 = 消失后又回来 = 复用了）。
+    """
+    cities = q.table("cities")
+    life: dict = {}
+    last = 0
+    for r in cities.itertuples(index=False):
+        rnd = int(r.round)
+        last = max(last, rnd)
+        for b in r.buildings or []:
+            life.setdefault(b["id"], set()).add(rnd)
+    gaps = [i for i, rs in life.items() if max(rs) - min(rs) + 1 != len(rs)]
+    gone = [i for i, rs in life.items() if max(rs) < last]      # 窗口内消失过（防空转用）
+    sample = []
+    for i in gaps[:3]:
+        rs = sorted(life[i])
+        sample.append(f"id {i}：出现于 {rs[0]}…{rs[-1]} 共 {len(rs)} 个回合（中间有洞）")
+    return {"ids": len(life), "gaps": sample, "gap_n": len(gaps), "gone_n": len(gone)}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
@@ -395,6 +424,7 @@ def extract(dirpath):
     # ⑥ 战斗/损伤（`src/tests/sim/combat.rs` 里能只看数据的那几条）。
     combat = combat_report(q)
     blueprints = blueprint_report(q)
+    ids = id_report(q)
 
     return {"razings": razings, "refound_bad": bad, "customized": customized,
             "ships": int(len(ships)), "foundings": int((ev["type"] == "colony_founded").sum()),
@@ -403,7 +433,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "blueprints": blueprints, "meta": q.meta}
+            "combat": combat, "blueprints": blueprints, "ids": ids, "meta": q.meta}
 
 
 def run(h, ck) -> None:
@@ -426,8 +456,23 @@ def run(h, ck) -> None:
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
     blueprint_checks(h, ck, out)
+    id_checks(h, ck, out)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
+
+
+def id_checks(h, ck, out) -> None:
+    """**建筑 id 永不复用**（State.next_building_id 单调计数器，见 id_report）。"""
+    tag = f"{len(SEEDS)} seed x {ROUNDS} 回合"
+    gaps = sum(d["ids"]["gap_n"] for d in out)
+    total = sum(d["ids"]["ids"] for d in out)
+    gone = sum(d["ids"]["gone_n"] for d in out)
+    sample = next((m for d in out for m in d["ids"]["gaps"]), "")
+    ck.check("建筑 id 一旦消失就不再回来（单调计数器 ⇒ 永不复用）", gaps == 0,
+             f"{sample}（共 {gaps} 个）" if gaps else
+             f"{tag}：{total:,} 个建筑 id 的出现回合都连成一段")
+    ck.check("id 守卫没有空转（真的有 id 在窗口内消失过）", gone >= 5,
+             f"{gone:,} 个 id 在本局内消失（下限 5）")
 
 
 def blueprint_checks(h, ck, out) -> None:

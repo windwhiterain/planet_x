@@ -19,12 +19,15 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
     // 一炮未发就被击沉」的答案正在这个顺序里（它排在击沉它的那艘舰**之后**）。
     flow.inputs.order = order.clone();
 
-    let mut next_building_id = state
-        .cities
-        .iter()
-        .flat_map(|c| c.buildings.iter().map(|b| b.id))
-        .max()
-        .map_or(0, |m| m + 1);
+    // 建筑 id 的单调计数器（同 `step_construction`：军事阶段会殖民 ⇒ 也会发号）。
+    let mut next_building_id = state.next_building_id.max(
+        state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1),
+    );
 
     // 联盟军事协同的「集火目标」：每回合每个势力各算一次（O(势力 × 实体)，摊薄到全军）。
     // 结盟势力在霸权先动手时优先集火该霸权，而非各自就近乱打。
@@ -212,6 +215,8 @@ pub fn step_military(state: &mut State, config: &GameConfig, rng: &mut Prng, flo
         invented, 0,
         "有 {invented} 艘舰死亡却没有事件：某条路径漏了 kill_ship"
     );
+    // 写回建筑 id 计数器（只增不减）——殖民会在这一阶段发号。
+    state.next_building_id = state.next_building_id.max(next_building_id);
 }
 
 // --- 重建：只有一条路——派殖民舰去复垦 ---------------------------------------

@@ -9,12 +9,18 @@ pub fn step_construction(
     flow: &mut RoundSink,
 ) {
     let faction_ids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
-    let mut next_building_id = state
-        .cities
-        .iter()
-        .flat_map(|c| c.buildings.iter().map(|b| b.id))
-        .max()
-        .map_or(0, |m| m + 1);
+    // 建筑 id 的**单调计数器**（`State.next_building_id`）：**永不复用**——以前这里是「扫全场取
+    // max+1」，最高 id 的建筑一被拆，下个新建筑就拿回那个号（id 当长期引用会指错人）。
+    // `.max(场上 max+1)` 那一半是**兜底**：老档由 `migrate` 校准，但档现在可以被 Python 直接改
+    // （JSON 档），手改过的档也不能撞号。收尾时写回（只增不减）。
+    let mut next_building_id = state.next_building_id.max(
+        state
+            .cities
+            .iter()
+            .flat_map(|c| c.buildings.iter().map(|b| b.id))
+            .max()
+            .map_or(0, |m| m + 1),
+    );
 
     for fid in faction_ids {
         let (investment, inv_modes) = autocontrol::read_budget(
@@ -99,6 +105,8 @@ pub fn step_construction(
     // 回收没人指向的自建图。放在 `retool_shipyards` **之后**：舰级重估刚刚落定，这一趟就能把
     // 「图与建造区对得上」顺手收敛（retool 改了舰级 ⇒ 图的名字与舰级跟着换）。
     autocontrol::design_fleets(state, config, &mut flow.decisions.blueprints, &mut flow.inputs);
+    // 把单调计数器写回（只增不减）：下一回合从这里接着发号。
+    state.next_building_id = state.next_building_id.max(next_building_id);
 }
 
 #[allow(clippy::too_many_arguments)]
