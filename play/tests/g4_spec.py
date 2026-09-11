@@ -759,9 +759,15 @@ def run(h, ck) -> None:
                 keys = [k for k in (label, field) if k]
             else:
                 path = c.get("path")
-                if not isinstance(path, str) or not BARE.match(path):
-                    continue        # 表达式列（`@post...`）不算"名词"：它的表头是自由文本
-                keys = [k for k in (c.get("label"), path) if k]
+                # 表达式列（`@post.power_share.${势力}`）：它**自己**不是名词，但只要列上声明了
+                # `noun`（「这一列说的是哪个名词」），它就跟裸字段列一样必须查得到解释。
+                noun = c.get("noun")
+                if isinstance(noun, str) and noun:
+                    keys = [noun]
+                elif not isinstance(path, str) or not BARE.match(path):
+                    continue        # 既不是裸字段列、也没声明 noun ⇒ 表头是自由文本
+                else:
+                    keys = [k for k in (c.get("label"), path) if k]
             if not keys:
                 continue
             considered += 1
@@ -773,6 +779,24 @@ def run(h, ck) -> None:
              "；".join(uncovered[:5]) or (
                  f"语料 {len(corpus)} 个名词，覆盖 {considered} 个界面名词（下限 40）"
                  if considered >= 40 else f"只算到 {considered} 个名词，判据可能空转了"))
+
+    # 表达式列的 `noun` 声明：**必须在语料里查得到**。
+    #
+    # 为什么需要这个字段：表达式是**取数路径**、不是名词（`@post.power_share.${势力}` 里没有
+    # "名词"那一层），所以只有声明才知道该弹哪条解释。**不许去表达式里猜**——`@state.ships
+    # [?舰名=…].势力` 的第一个裸段是 `ships`，猜出来必错。
+    declared: list[tuple[str, str]] = []
+    for v in views:
+        for c in v.get("columns") or []:
+            if isinstance(c, dict) and isinstance(c.get("noun"), str) and c["noun"]:
+                declared.append((v.get("id", "?"), c["noun"]))
+    bad_decl = [f"{vid}：`noun: {n}` 在语料里查不到（弹空框）" for vid, n in declared if n not in corpus]
+    ck.check(f"名词覆盖率：{len(declared)} 条表达式列的 `noun` 声明都能查到解释"
+             f"（这一列说的是哪个名词）",
+             corpus_ok and not bad_decl and len(declared) >= 20,
+             "；".join(bad_decl[:5]) or (
+                 f"声明 {len(declared)} 条，全部命中语料（下限 20）"
+                 if len(declared) >= 20 else f"只声明了 {len(declared)} 条，判据可能空转了"))
 
     # 另一半：**与引擎名词逐字相同**的 `label` 一律不写（"该退的都退了"）——
     # 列头默认就是键名，再抄一遍只会让"哪个是权威"变含糊；要换词（`舰名`→`舰`）或加格式时才写。

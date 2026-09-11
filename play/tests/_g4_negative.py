@@ -168,6 +168,14 @@ def main() -> int:
                 c["new"] = True
     run_case("new-on-single-leaf", d)
 
+    # ⑤d 表达式列的 `noun` 写成语料里没有的名词 ⇒ 那一列会弹空框，必须红
+    d = clone()
+    for _, c in walk_columns(d):
+        if isinstance(c.get("noun"), str):
+            c["noun"] = "语料里没有这个名词"
+            break
+    run_case("bogus-noun", d)
+
     # ⑥ 认领完整性：把 `capital` 的全部 leaf 行删掉（它只在 sel-faction 里被认领）
     d = clone()
     for _, c in walk_columns(d):
