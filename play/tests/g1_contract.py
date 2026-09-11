@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -744,6 +745,36 @@ def call_functions(h, ck, tmp: Path) -> None:
     ck.check("--call site_reserve：同一份建设活，离首都越远该囤的料越多",
              bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
              f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
+
+    # ⓪⁗ MOND 偏航与胜算（`sim/tests/mond.rs` 那两条纯函数测，第 7 批）：
+    #       `mond_drift` / `mond_arrival_chance` 都只吃 config ⇒ 可以逐值复现。
+    meta_all = json.loads(h.capture(["--meta"]))
+    dest = [60.0, 0.0]
+    far = lambda p: math.dist(p, dest)  # noqa: E731
+    ck.check("--call mond_drift：非掌握者会偏、`roll=0` 必然蒙对、幅度随 roll 单调、掌握者精确",
+             call("mond_drift", {"control": 0.0, "dest": dest, "roll": 0.5}) != dest
+             and call("mond_drift", {"control": 0.0, "dest": dest, "roll": 0.0}) == dest
+             and far(call("mond_drift", {"control": 0.0, "dest": dest, "roll": 1.0}))
+             > far(call("mond_drift", {"control": 0.0, "dest": dest, "roll": 0.5}))
+             and all(call("mond_drift", {"control": 1.0, "dest": dest, "roll": r}) == dest
+                     for r in (0.0, 0.5, 1.0)),
+             f"非掌握者 roll=0.5 → {call('mond_drift', {'control': 0.0, 'dest': dest, 'roll': 0.5})}；"
+             f"roll=0 → {call('mond_drift', {'control': 0.0, 'dest': dest, 'roll': 0.0})}")
+
+    depths = [0.5, 2.0, 10.0, 72.0, 10_000.0]
+    ps = {d: call("mond_arrival_chance", {"depth": d, "control": 0.0}) for d in depths}
+    ck.check("--call mond_arrival_chance：**任意有限深度都还有胜算**（再强也不会变成进不去）",
+             all(v > 0.0 for v in ps.values()), f"逐深度胜算 {[(d, round(v, 6)) for d, v in ps.items()]}")
+    sweep = [call("mond_arrival_chance", {"depth": i * 3.0 * 0.5, "control": 0.0}) for i in range(100)]
+    ck.check("--call mond_arrival_chance：胜算随深度**单调不增**（100 个采样点）",
+             all(b <= a + 1e-12 for a, b in zip(sweep, sweep[1:])),
+             f"深 0 → {sweep[0]:.4f}，深 {99 * 1.5:.0f} → {sweep[-1]:.6f}")
+    exact = float(meta_all["combat"]["arrival_eps"]) / float(meta_all["mond"]["drift_per_au"])
+    ck.check("--call mond_arrival_chance：一次到位的门槛 = `arrival_eps ÷ drift_per_au`（那里胜算正好 1）",
+             abs(call("mond_arrival_chance", {"depth": exact, "control": 0.0}) - 1.0) < 1e-9
+             and call("mond_arrival_chance", {"depth": exact * 2, "control": 0.0}) < 1.0,
+             f"门槛 {exact} AU ⇒ 1.0；两倍深处 ⇒ "
+             f"{call('mond_arrival_chance', {'depth': exact * 2, 'control': 0.0}):.6f}")
 
     # ⓪″ 引力异常浸入深度（`sim/tests/mond.rs::route_depth_measures_mond_immersion`）：
     #      原件用的是**裸坐标**（`inside/shallow/deep`），半径从 `meta.mond.radius` 读 ⇒ 逐字可复现。

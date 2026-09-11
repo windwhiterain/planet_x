@@ -693,6 +693,22 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **MOND 偏航**（第 7 批）：`mond_drift(config, 掌握度, 目标, roll)` —— 纯函数
+        // （只吃 config）。`roll = 0` 必然精确命中（「永远留着蒙对的可能」），掌握度到顶也精确。
+        "mond_drift" => {
+            let dest: [f64; 2] = serde_json::from_value(
+                args.get("dest").cloned().ok_or("args.dest 缺失")?,
+            )
+            .map_err(|e| format!("args.dest 必须是 [x, y]：{e}"))?;
+            serde_json::to_value(sim::mond_drift(config, num("control")?, dest, num("roll")?))
+                .map_err(|e| e.to_string())?
+        }
+        // **一次导航尝试的胜算**（第 7 批）：深度越深越小，但**永远 > 0**。
+        "mond_arrival_chance" => json!(sim::mond_arrival_chance(
+            config,
+            num("depth")?,
+            num("control")?
+        )),
         // **禁运判据**（第 7 批）：`sim::trade_block_cause(state, config, a, b)` ——
         // 投影 `factions.贸易禁运` 那一列就是它逐对算出来的，判据据此**同源复核**（别在读面另编一套）。
         "trade_block_cause" => {
