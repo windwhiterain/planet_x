@@ -53,12 +53,14 @@ const SKY_FRAG = /* glsl */`
     vec3 wp = warp(d * 5.5, 1.35, 0.0);
     float cloud = fbm(wp * 1.7);
     float dust = ridged(d * 7.5 + 3.1);
-    float bright = band * (0.10 + 0.85 * cloud) * (1.0 - 0.72 * smoothstep(0.35, 0.95, dust));
+    // 暗尘带要**黑得下去**（对照 scratch/ref/milkyway-core.jpg：银河最抓人的是亮星云
+    // 与黑尘带的强对比，而不是一层均匀的灰雾）。
+    float bright = band * (0.10 + 0.90 * cloud) * (1.0 - 0.88 * smoothstep(0.28, 0.86, dust));
     // 银河的色：银心偏暖黄（老年星族），外围偏冷蓝（年轻星族 + 尘埃散射）。
     vec3 galCol = mix(vec3(0.42, 0.52, 0.86), vec3(1.05, 0.92, 0.70), coreness * 0.85 + 0.12);
-    col += galCol * bright * 0.115;
+    col += galCol * bright * 0.165;
     // 弥漫的银道面辉光（不带结构的底光）。
-    col += vec3(0.30, 0.34, 0.52) * band * 0.016;
+    col += vec3(0.28, 0.33, 0.55) * band * 0.020;
 
     // --- 星云：几团定点 + fbm 调制；发射线配色（Hα 红 / OIII 青 / 反射星云蓝）------
     // 中心是**固定常量**，不是随机——星空每次加载必须一模一样，截图才可比。

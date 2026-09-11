@@ -176,12 +176,17 @@ const PLANET_FRAG = /* glsl */`
 
   vec3 gasColor(vec3 ds, float lat){
     // 纬向急流：把纬度当主变量，用域扰动让每条带自己是湍流的。
-    vec3 w = warp(ds * 2.4, 1.8, 0.0);
-    float shear = fbm(w * 1.6) * 0.55;
-    float b1 = sin(lat * 9.0 + shear * 5.0);
-    float b2 = sin(lat * 21.0 + shear * 9.0);
-    float band = 0.5 + 0.5 * (0.62 * b1 + 0.38 * b2);
-    band = smoothstep(0.22, 0.86, band);
+    // ⚠ 剪切量（shear 乘在纬向上）要**小**：原来乘 5.0/9.0，相位被扰动到 ±5 rad，
+    // 纬向条带被撕成一坨坨斑块，看起来不像气巨。真实的气巨带纹是**强纬向、弱经向**的，
+    // 湍流只把边界揉皱，不该把带揉没。这里把 warp 幅度也降到 0.85。
+    vec3 w = warp(ds * 3.0, 0.85, 0.0);
+    float shear = fbm(w * 2.2) * 0.5;
+    // 三层不同频率的纬向带 + 少量剪切，叠出「宽带里套细纹」的层次。
+    float b1 = sin(lat * 12.0 + shear * 1.7);
+    float b2 = sin(lat * 27.0 + shear * 3.1);
+    float b3 = sin(lat * 52.0 + shear * 5.0);
+    float band = 0.5 + 0.5 * (0.50 * b1 + 0.32 * b2 + 0.18 * b3);
+    band = smoothstep(0.26, 0.80, band);
     // 两端各自再推开：config 给的 base/accent 往往只差一点点（土星的驼 vs 暗驼），
     // 直接 mix 出来是一条没有对比的色带。
     vec3 c = mix(uAccent * 0.58, uBase * 1.16, band);
