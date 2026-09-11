@@ -61,3 +61,55 @@ Python）。清单：`a_player_pinned_design…`、`a_dangling_pointer_is_left_d
 每批的规矩（与 `test-decoupled-suite.md` 一致）：**装数据的那次提交必须证明行为中性**
 （`--seed 42 --round 240 --digest 20` 的 sha256 不变），搬走的判据要带**防空转判据**，
 并且**搬一条删一条**（Rust 原件不留在那儿等人重新困惑）。
+
+## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
+
+### §6.1 三件事分别在哪儿做
+
+| 要动的东西 | 文件 | 注意 |
+| --- | --- | --- |
+| 加一列/一张**派生表** | `src/projection.rs`：写完 `writeln!` 还要在**同一个文件**的 schema 声明里补 `columns` + `column_docs`（**每一列都要有一句话**，g4 会逐个对账） | 加表还要在 `write_index_seeded` 里开文件、在 `schema.json` 的 `derived` 段登记 |
+| 新表的**声明纪律** | `play/tests/g4_spec.py`（静态 + 读面对账 + 认领完整性）+ `play/tests/_g4_negative.py`（**给纪律自己做的量具**：注入错，必须全咬住） | 新列/新表如果没人「认领」，g4 会红——这是**故意**的 |
+| Python 侧读新表 | `play/planet_xq`（kit）：`KIT.load(dir, only=("新表", …))` + `q.table("新表")`；`meta.json` 里的配置量走 `q.meta[...]` | 表没在 `only=` 里会**响亮报错**（不会静默给空表） |
+
+### §6.2 验证命令（每批都跑这三条）
+
+```bash
+# ① 行为中性（装数据的那次提交**必须**逐字节不变；变了就是改到模拟/读面语义了，要停下来想清楚）
+target/release/planet_x.exe --seed 42 --round 240 --digest 20   # 取 sha256 == BB2EEB2B…2000
+# ② 数据级（116→ 每加判据都会涨；`-j 7` 并行）
+uv run --project play/planet_xq python play/tests/run.py all -j 7
+# ③ Rust 侧（搬一条就该少一条）
+cargo nextest run -P full
+```
+
+### §6.3 合成场景的 API（`play/tests/_harness.py`，已就绪）
+
+```python
+h = Harness("release")
+w = h.gen(Path("….json"), seed=42)                  # 造世界（JSON 档 ⇒ Python 能改）
+st = h.state_dump(w)                                 # 读状态（ships/cities/factions/control…）
+proj = h.scenario("名字", 42, 3, patch={"ships": {"长城": {"hull": 3.0}}})   # 造→捏→推进→投影
+#   patch 的形状 = 读面同名同形；打错的字段/点不到的名字会进 h.warnings（**不静默**）
+#   整表替换也行（例：改一个建筑 ⇒ 把新的 buildings 列表整个塞回去）
+```
+
+### §6.4 四条**必须**遵守的规矩（踩过，都是血）
+
+1. **同一个数只有一个位置**：能从别的列 join 出来的，不要再发一列（`spending.rs` 的注释里有先例：
+   「批了多少」留在控制面，「真花掉的」进读面，相减即得）。
+2. **「这一步没跑」给中性缺省，不是 0**：`is_hub=false`、`labor=1.0`、`governance_scale=1`…
+   写成 0 会被读成「能力归零」。中性值表在 `src/model/neutral.rs`，有守卫盯着。
+3. **⚠ 同回合相位错位**（[test-decoupled-suite.md](test-decoupled-suite.md) §12）：同一回合里
+   「按城算的量」与「按势力算的量」在**城易主 / 势力城集合变化 / 城被复垦**时**必然对不上**。
+   写判据时要么排除这几类、**要么把排除本身也写成判据**（「被排除的每一处都要有解释」）——
+   否则排除就是藏违规的后门。
+4. **搬一条删一条**：Rust 原件删掉，并在该模块头部留「搬去哪儿 + 为什么剩下这些」的对账表
+   （`src/tests/{sim,autocontrol}/*.rs` 顶上已经有好几份样板可抄）。
+
+### §6.5 现在的状态（接手时的坐标）
+
+* 分支：`feature/test-migrate-rest`（worktree `C:\resource\planet_x-decoupled`），已合到 main。
+* 计数：Python **120**（g1 33 / g2 46 / g3 26 / g4 14）；Rust **206** + 31 探针。
+* 两道门都是绿的；`target/test-fixtures/` 有自动清理（`run.py` 默认 `sweep_stale`，`--no-sweep` 可关）。
+* 判据写在 `play/tests/g*.py` 的 `run()` 里（数据取自 `extract()` 的摘要 ⇒ **改断言不重读投影**）。
