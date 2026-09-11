@@ -2,9 +2,9 @@
 //!
 //! ## 为什么需要这一份
 //!
-//! 写面（web 的控制行、kit 的 `set_*` / `silence_*` / `remove_*`）必须知道三件事：
+//! 写面（web 的控制行、kit 的 `set_*` / `silence_*` / `remove_blueprint`）必须知道三件事：
 //! **这片叶靠哪几个字段定位**（身份键）、**值写在哪几个字段**（值字段）、
-//! **归属字段叫什么**（三态 + 删叶）。这些事实**只**存在于本模块旁边那些 patch / view
+//! **归属字段叫什么**（三态）。这些事实**只**存在于本模块旁边那些 patch / view
 //! 结构体里（`wire.rs`）——但以前 web 与 kit 各自**手抄**了一份：
 //!
 //! * `web/static/app.js` 的 `LEAF_SPEC` / `LEAF_OPTIONS`
@@ -19,7 +19,7 @@
 //!
 //! | 事实 | 住哪 |
 //! | --- | --- |
-//! | 键名 / 身份键 / 值字段 / 只读派生列 / 归属与删叶字段名 | **引擎**（本模块） |
+//! | 键名 / 身份键 / 值字段 / 只读派生列 / 归属字段名 | **引擎**（本模块） |
 //! | 编辑器、中文标签、单位、行序、和哪些读行相邻、在哪一页 | **前端**（`web/static/views.json`） |
 //!
 //! ## 纪律（由数据检查强制，不靠自觉）
@@ -38,13 +38,8 @@
 //!    的两套名**（Python 按英文 kind 筛、写面用中文键），现在只有 [`LeafSpec::field`]
 //!    一处声明，[`kind_of`] 是唯一翻译点。
 //!
-//! ⚠ 一条**实测**事实（2026-10，315 个读面条目里 0 次）：读面**从不发 `remove`** ——
-//! `DefaultDoctrine` / `DefaultKiting` / `DefaultShipRole` 构造时写死 `remove: false`，
-//! 而该字段带 `skip_serializing_if = "is_false"`；`capital` 是 [`Control<BodyId>`]，根本
-//! 没有这个字段。`remove` 只活在**写面**（删叶）。所以那条对账把「条目里出现 `remove`」
-//! 实现成**宽容侧**（出现即允许），并在细节里如实报「实测 0 次」，而不是假装它该有。
-//!
-//! [`Control<BodyId>`]: crate::model::Control
+//! ⚠ **删叶机制已删除**（2026-10 用户裁决：出厂默认只是初始值，不是可恢复的目标）。
+//! 控制叶没有 `remove` 字段；读面字段集只含 keys / values / carries / read_only / 归属。
 //!
 //! 这两条合起来就是「一份事实、三端共用」的兑现处：web 与 kit 都读这一份，
 //! 不再各抄各的。
@@ -88,7 +83,7 @@ pub struct LeafSpec {
     /// * 非空 = 列表叶，键一起构成这片叶的身份（界面拿它当行标签、也是回传差异时的定位键）。
     pub keys: &'static [&'static str],
     /// **值字段**：这片叶的「值」写在哪几个字段里（身份键、[`Self::owner_field`] 的
-    /// `mode`、`remove` 都不算值）。
+    /// `mode` 不算值）。
     pub values: &'static [&'static str],
     /// **随行属性**：读面条目里顺带带着的 **state 属性**（不是控制面的一部分）。
     ///
@@ -102,8 +97,8 @@ pub struct LeafSpec {
 
 /// 一条**命令列表**的结构事实。
 ///
-/// 与叶的区别是**存在性**：叶的「存在 / 不存在」本身是一种状态（`remove` 能删掉它），
-/// 而命令列表里的每一条本来就只该执行一次（`buildings` 是「新建 / 拆掉 / 改属性」的意图）。
+/// 与叶的区别是**存在性**：叶的「存在 / 不存在」是一种状态，但写面不提供「删叶」；
+/// 命令列表里的每一条本来就只该执行一次（`buildings` 是「新建 / 拆掉 / 改属性」的意图）。
 #[derive(Serialize)]
 pub struct ActionSpec {
     /// 在 patch 里的键名（= `FactionControlPatch` 的字段名）。
@@ -120,8 +115,6 @@ pub struct ActionSpec {
 
 /// 归属三态写在哪个字段里（`"Inherit" | "Auto" | "Player"`）。
 pub const OWNER_FIELD: &str = "归属";
-/// 删叶（「恢复出厂值」）写在哪个字段里。
-pub const REMOVE_FIELD: &str = "删叶";
 
 /// 全部控制叶的结构事实。
 ///
@@ -130,8 +123,8 @@ pub const REMOVE_FIELD: &str = "删叶";
 pub const LEAVES: &[LeafSpec] = &[
     // --- 势力级单叶（`wire.rs:523-574` 里那几个 `Option<...>` 字段）-----------------
     LeafSpec {
-        // `wire.rs` 的 `CapitalPatch`：`{值, 归属, 删叶}`；
-        // 读面给的是 `Control<BodyId>` = `{值, 归属}`（`model/control.rs`，没有 `删叶`）。
+        // `wire.rs` 的 `CapitalPatch`：`{值, 归属}`；
+        // 读面给的是 `Control<BodyId>` = `{值, 归属}`（`model/control.rs`）。
         field: "首都",
         state: "capital",
         not_in_index: None,
@@ -342,13 +335,10 @@ pub fn index_kinds() -> Vec<&'static str> {
         .collect()
 }
 
-/// `--control-schema` 里那几段的总和。
 #[derive(Serialize)]
 pub struct ControlFacts {
     /// 归属三态写在这个字段里。
     pub owner_field: &'static str,
-    /// 删叶（「恢复出厂值」）写在这个字段里。
-    pub remove_field: &'static str,
     /// 控制叶。
     pub leaves: &'static [LeafSpec],
     /// 命令列表。
@@ -359,7 +349,6 @@ pub struct ControlFacts {
 pub fn facts() -> ControlFacts {
     ControlFacts {
         owner_field: OWNER_FIELD,
-        remove_field: REMOVE_FIELD,
         leaves: LEAVES,
         actions: ACTIONS,
     }

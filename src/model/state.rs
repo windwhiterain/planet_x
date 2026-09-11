@@ -87,7 +87,20 @@ use crate::model::*;
 /// **档的形状变了**（事件载荷的 JSON 键名不同）⇒ 推号：旧档里那些英文键按新名读不到
 /// （**不迁移**，按本仓库「不考虑向前兼容」的约定；旧档能加载，只是事件载荷的键名对不上）。
 /// **语义与随机流一律不变**（改的只是名字，`derived_roll` 的盐一个字没动）。
-pub const SCHEMA_VERSION: u32 = 26;
+///
+/// **v27 = 事件载荷名的用户裁决订正**（`feature/event-names-2`，用户裁决 2026-10，第 10b 步）：
+/// 第 10 步那批名字按「**这个名字存的是什么主体**」重订一遍——`Attack.attacker`/`Siege.attacker`
+/// （`ShipId`）「攻击方」→「攻击舰」、`Attack.target`（`ShipId`）「目标」→「目标舰」、
+/// `CityRazed.owner`/`Revolt.faction`/`CityDefected.from`（`FactionId`，都是**上一任主人**）
+/// 「失城方」→「旧主」（与 `ColonyFounded.prev_owner` 统一）、`ShipSpawned.via`
+/// 「来路」→「造舰路径」。另：`share` 的读面名统一成「抽成」（事件载荷 + 投影 `contracts` 表
+/// 那一列与 `column_docs` + 本条 [`Contract::share`] 自己，此前是「分成」）。
+///
+/// **档的形状又变了一次**（[`Contract::share`] 的 JSON 键从 `分成` 变成 `抽成`，该字段没有
+/// `#[serde(default)]` ⇒ 旧档会因缺键而**读不回来**）⇒ 推号，不迁移（同上约定）。
+/// **世界行为与随机流一律不变**：`--seed 7/42 --round 240 --digest 20` 逐字节相同
+/// （改的只是名字）。
+pub const SCHEMA_VERSION: u32 = 27;
 fn default_schema_version() -> u32 {
     0
 }
@@ -109,7 +122,9 @@ pub struct State {
     pub ships: Vec<Ship>,
     /// 各势力可控状态（指令控制量的集合），随状态一起序列化。
     pub control: BTreeMap<FactionId, ControllableState>,
-    /// 城市/天体/势力/全局 的控制作用域树：谁负责 AI 决策、谁收玩家指令。
+    /// 城市/天体/势力 的控制作用域树：谁负责 AI 决策、谁收玩家指令。
+    /// ⚠ 2026-10 用户裁决删掉了**全局那一档**（*「谁会全局玩家控制啊，自己和自己下棋吗」*）：
+    /// 链上谁都没说话就直接落到引擎兜底 `Auto`。
     pub scope: ControlScope,
     /// 本回合事件日志（`#[serde(default)]` 以便旧状态/旧 .ron 加载时缺字段不报错）。
     ///
@@ -455,7 +470,7 @@ impl State {
         Some((id, leaf))
     }
 
-    /// 决定一艘舰的指令由谁控制：**叶子 → 势力 → 全局**。
+    /// 决定一艘舰的指令由谁控制：**叶子 → 势力**（链尾是引擎兜底 `Auto`）。
     ///
     /// 指令是即时操作，所以链上没有"舰队默认"也没有"出厂图"（两片叶都已删除，见
     /// [`State::ship_behavior`]）。⚠ 这里刻意**不看图上写没写倾向**：钉死选装（把图设为
@@ -471,10 +486,10 @@ impl State {
             .map(|c| leaf_mode(c.ship_orders.get(&ship_id)))
             .unwrap_or(ControlMode::Inherit);
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 
-    /// 谁负责**这张设计图**：图叶 → 势力 scope → 全局（**没有**「舰队默认」这一档——
+    /// 谁负责**这张设计图**：图叶 → 势力 scope（**没有**「舰队默认」这一档——
     /// 设计图是**势力的库**，不是某支舰队的指令）。
     ///
     /// `Player` = 系统不许重估这张图（出厂按图装配；图上写了 `order` 时那艘舰的意图也归
@@ -483,13 +498,13 @@ impl State {
     pub fn blueprint_control(&self, fid: &FactionId, bp: &BlueprintId) -> ControlMode {
         let leaf = leaf_mode(self.control(fid.clone()).and_then(|c| c.blueprints.get(bp)));
         let faction = self.scope.factions.get(fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 
     // --- 控制模式判定（沿作用域链上溯，最具体者优先） ----------------------
     //
     // 每个 `*_control` 都返回三态之一：最具体的那一层**有意见**（`Auto`/`Player`）就
-    // 算它的；一路「继承」到全局也没人说话，就落到 `Auto`（系统自动决定）。所以
+    // 算它的；一路「继承」到链尾（势力也没说话）就落到 `Auto`（系统自动决定）。所以
     // 「叶子/作用域不存在」与「显式写着 Inherit」完全等价——都是没有说话。
 
     /// 这艘舰当前的**有效行为风格**：叶 → **出厂图** → 舰队默认 → **舰上的记录值**。
@@ -616,23 +631,23 @@ impl State {
         }
     }
 
-    /// 决定这艘舰的**行为风格**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
+    /// 决定这艘舰的**行为风格**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力。
     pub fn ship_doctrine_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Doctrine)
     }
 
-    /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
+    /// 决定这艘舰的**风筝<->贴脸姿态**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力。
     pub fn ship_kiting_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Kiting)
     }
 
-    /// 决定这艘舰的**角色**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力 → 全局。
+    /// 决定这艘舰的**角色**由谁控制：叶子 → 出厂图 → 舰队默认 → 势力。
     /// 自动控制据此判断「这片叶能不能写」（`Player` = 玩家说了算，AI 不碰）。
     pub fn ship_role_control(&self, ship_id: ShipId) -> ControlMode {
         self.ship_style_chain(ship_id, StyleAxis::Role)
     }
 
-    /// 三条风格轴共用的归属链：叶子 → **出厂图**（图上写了这条轴时）→ 舰队默认 → 势力 → 全局。
+    /// 三条风格轴共用的归属链：叶子 → **出厂图**（图上写了这条轴时）→ 舰队默认 → 势力。
     fn ship_style_chain(&self, ship_id: ShipId, axis: StyleAxis) -> ControlMode {
         let Some(s) = self.ship(&ship_id) else {
             return ControlMode::Auto;
@@ -662,40 +677,40 @@ impl State {
             _ => ControlMode::Inherit,
         };
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, blueprint, default, faction, self.scope.global])
+        resolve_chain(&[leaf, blueprint, default, faction])
     }
 
-    /// 决定某投资预算（建设用）由谁控制：资源 → 势力 → 全局。
+    /// 决定某投资预算（建设用）由谁控制：资源 → 势力。
     pub fn investment_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
                 .and_then(|c| c.investment_budget.get(resource)),
         );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 
-    /// 决定某建造预算（造舰用）由谁控制：资源 → 势力 → 全局。
+    /// 决定某建造预算（造舰用）由谁控制：资源 → 势力。
     pub fn construction_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
                 .and_then(|c| c.construction_budget.get(resource)),
         );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 
-    /// 决定某「福利预算」资源由谁控制：资源 → 势力 → 全局。
+    /// 决定某「福利预算」资源由谁控制：资源 → 势力。
     pub fn welfare_budget_control(&self, fid: FactionId, resource: &str) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
                 .and_then(|c| c.welfare_budget.get(resource)),
         );
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 
-    /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    /// 决定某城「娱乐/福利预算」由谁控制：城市 → 天体 → 势力。
     pub fn loyalty_budget_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
@@ -707,10 +722,10 @@ impl State {
             .and_then(|bid| self.scope.bodies.get(&bid).copied())
             .unwrap_or_default();
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+        resolve_chain(&[leaf, city, body, faction])
     }
 
-    /// 决定某城「开发货币预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    /// 决定某城「开发货币预算」由谁控制：城市 → 天体 → 势力。
     pub fn development_money_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
@@ -722,10 +737,10 @@ impl State {
             .and_then(|bid| self.scope.bodies.get(&bid).copied())
             .unwrap_or_default();
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+        resolve_chain(&[leaf, city, body, faction])
     }
 
-    /// 决定某城「建造货币预算」由谁控制：城市 → 天体 → 势力 → 全局。
+    /// 决定某城「建造货币预算」由谁控制：城市 → 天体 → 势力。
     pub fn construction_money_control(&self, fid: FactionId, cid: CityId) -> ControlMode {
         let leaf = leaf_mode(
             self.control(fid.clone())
@@ -737,10 +752,10 @@ impl State {
             .and_then(|bid| self.scope.bodies.get(&bid).copied())
             .unwrap_or_default();
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+        resolve_chain(&[leaf, city, body, faction])
     }
 
-    /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力 → 全局。
+    /// 决定某建筑「建设投资权重」由谁控制：建筑 → 城市 → 天体 → 势力。
     pub fn invest_control(&self, fid: FactionId, key: &InvestKey) -> ControlMode {
         let (cid, _) = key;
         let leaf = leaf_mode(
@@ -753,10 +768,10 @@ impl State {
             .and_then(|bid| self.scope.bodies.get(&bid).copied())
             .unwrap_or_default();
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+        resolve_chain(&[leaf, city, body, faction])
     }
 
-    /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力 → 全局。
+    /// 决定某建造区「建造投资权重」由谁控制：建造区 → 城市 → 天体 → 势力。
     pub fn build_control(&self, fid: FactionId, key: &BuildKey) -> ControlMode {
         let (cid, _) = key;
         let leaf = leaf_mode(
@@ -769,10 +784,10 @@ impl State {
             .and_then(|bid| self.scope.bodies.get(&bid).copied())
             .unwrap_or_default();
         let faction = self.scope.factions.get(&fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, city, body, faction, self.scope.global])
+        resolve_chain(&[leaf, city, body, faction])
     }
 
-    /// 决定「迁都」由谁控制：首都叶子 → 势力 → 全局（沿作用域链上溯，最具体者优先）。
+    /// 决定「迁都」由谁控制：首都叶子 → 势力（沿作用域链上溯，最具体者优先）。
     /// `Player` 时 sim 的周期迁移不覆盖（除非首都亡城——硬规则仍强迁）；
     /// `Auto`/`Inherit` 时由 sim 的周期迁都步骤重估。
     pub fn capital_control(&self, fid: &str) -> ControlMode {
@@ -781,7 +796,7 @@ impl State {
                 .and_then(|c| c.capital.as_ref()),
         );
         let faction = self.scope.factions.get(fid).copied().unwrap_or_default();
-        resolve_chain(&[leaf, faction, self.scope.global])
+        resolve_chain(&[leaf, faction])
     }
 }
 

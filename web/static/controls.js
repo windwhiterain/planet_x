@@ -4,7 +4,7 @@
 //   * 读面是**通用求值器**：路径 / 格式化器 / 布局 / 组织——一个领域词都没有；
 //   * 写面**必然认识领域**（「一片叶靠哪几个字段定位、值写在哪几个字段、编辑器长什么样」），
 //     所以它单独住一个文件。但**每片叶的事实不在本文件里手抄**：
-//       - **结构事实**（身份键 / 值字段 / 只读派生列 / 归属与删叶的字段名）来自引擎发的
+//       - **结构事实**（身份键 / 值字段 / 只读派生列 / 归属字段名）来自引擎发的
 //         `GET /api/control-schema`（`src/control/leaves.rs`）——一份事实，web 与 Python kit 共用；
 //       - **呈现**（中文标签、编辑器种类、候选键从哪来、跟随哪片默认叶）来自 `views.json`
 //         的 `leaf_ui` / `action_ui`；
@@ -14,13 +14,13 @@
 // `action` 命令）⇒ 「读与控制穿插」不是额外机制，是那条数组顺序的直接结果。
 //
 // ⚠ 差异回传的五条语义**一条没改**（只回传变过的字段 / 写值即接管 / 原地改回则撤回界面自己钉的
-// `Player` / 壳被碰过就整片发 / `remove` 与值不可同条）——它们住在 `app.js`（`diffLeaf` 等），
+// `Player` / 壳被碰过就整片发 / 设计图「删除」与值不可同条）——它们住在 `app.js`（`diffLeaf` 等），
 // 本文件只负责**让那些函数找得到该找的东西**：每片叶都住在 `edControl[势力][字段]` 里。
 'use strict';
 
 (function () {
   // --- 引擎发来的结构事实（启动拉**一次**） ------------------------------------
-  let MANIFEST = null;      // {leaves:{field:{keys,values,carries,read_only}}, actions:{...}, ownerField, removeField}
+  let MANIFEST = null;      // {leaves:{field:{keys,values,carries,read_only}}, actions:{...}, ownerField}
   let MANIFEST_ERR = null;  // 拉不到就**响亮**：控制行渲染成红字，底部「应用」也点不动
 
   async function load() {
@@ -52,7 +52,6 @@
       leaves,
       actions,
       ownerField: doc.owner_field || '归属',
-      removeField: doc.remove_field || '删叶',
       raw: doc,
     };
   }
@@ -67,7 +66,6 @@
     return (MANIFEST && MANIFEST.actions[field]) || null;
   }
   function ownerField() { return (MANIFEST && MANIFEST.ownerField) || '归属'; }
-  function removeField() { return (MANIFEST && MANIFEST.removeField) || '删叶'; }
   /// `shellLeaf` / `rememberOrigin` 要的那点东西（身份键 + 值字段）。
   function specOf(field) {
     const s = leafSpec(field);
@@ -101,9 +99,8 @@
   }
 
   const MODES = [['Inherit', '继承'], ['Auto', '自动'], ['Player', '玩家']];
-  const OWNER_LABEL = { global: '全局归谁', factions: '这个势力归谁', bodies: '这个天体归谁', cities: '这座城归谁' };
+  const OWNER_LABEL = { factions: '这个势力归谁', bodies: '这个天体归谁', cities: '这座城归谁' };
   const OWNER_HELP = {
-    global: '链上谁都没说话时按这一档',
     factions: '这一档管「这个势力下的键」：它的舰、城、设计图…',
     bodies: '这一档管这个天体',
     cities: '这一档管这座城（城里的建筑权重等）',
@@ -265,15 +262,8 @@
     const box = el('div', 'ctl-grid');
     const rows = candidates(col, spec, raw, rec, recKey);
     if (!rows.length && !col.new) {
-      box.appendChild(el('span', 'ctl-none', '（没有可以配的键：views.json 的 keys_from 没给，读面里也一片叶都没有）'));
+      box.appendChild(el('span', 'ctl-none', '（没有可配的键）'));
     } else {
-      const miss = rows.filter((r) => !r.entry).length;
-      if (rows.length) {
-        const hint = el('div', 'ctl-note');
-        hint.textContent = rows.length + ' 项：' + (rows.length - miss) + ' 项已有叶' + (miss ? '，' + miss + ' 项还没有叶（写值 = 新建这片叶）' : '')
-          + '；写值即接管（这片叶归你，系统不再改写它）';
-        box.appendChild(hint);
-      }
       rows.forEach((r) => {
         const leaf = editableLeaf(fc, field, r.kv, blankOf(field, ui));
         r.showLabel = true;   // 网格里一行一片叶 ⇒ 这一行必须自己带标签（资源名 / 城名 / 楼）
@@ -297,13 +287,11 @@
       editor: (col.ui && col.ui.editor) || 'number',
       ctl: true,
     };
-    if (rowInfo && !rowInfo.entry) node.missingLeaf = true;
     // `renderLeafNode` 在 app.js 里（它认识旧控制树那套结构）；这里只喂一个同形的节点。
     const box = renderLeafNode(node, {
       where,
       noLabel: !rowInfo || !rowInfo.showLabel,
       alwaysEditable: true,
-      hint: node.missingLeaf ? '没有叶（这一层没表态）——写一个数就是新建这片叶' : null,
       carry: rowInfo && rowInfo.entry ? carryText(rowInfo.entry, leafSpec(field)) : null,
     });
     const ro = readOnlyNote(rowInfo && rowInfo.entry, leafSpec(field), col.ui || {});
@@ -371,8 +359,6 @@
     const bar = el('div', 'ctl-new-bar');
     bar.append(btn, stat);
     box.appendChild(bar);
-    box.appendChild(el('div', 'ctl-note',
-      '新建的叶先在**编辑面**里（点「应用到服务器」才真的落地）；值还没写 ⇒ 单独一片壳不进 diff'));
     return box;
   }
 
@@ -552,8 +538,9 @@
 
   // --- `owner` 行：作用域归属（不是叶） ----------------------------------------
   function ownerRow(col, rec, recKey, where) {
+    // ⚠ 没有 `global` 那一档了（2026-10 用户裁决）⇒ 作用域行的三档都挂在一条记录上，`id` 恒为 recKey。
     const k = col.owner;
-    const id = k === 'global' ? null : recKey;
+    const id = recKey;
     const box = el('div', 'ctl-owner');
     const sel = el('select', { class: 'mode owner', 'data-role': 'owner', 'data-scope': k });
     MODES.forEach(([v, l]) => {
@@ -563,27 +550,21 @@
       sel.appendChild(o);
     });
     sel.title = '「' + (OWNER_LABEL[k] || k) + '」=' + (OWNER_HELP[k] || '') + '。它写的是**作用域**（这一层负不负责），不是某一片叶的值。';
-    const hint = el('span', 'ctl-note', '');
-    const refresh = () => { hint.textContent = '（' + k + (id ? '：' + id : '') + ' 现在 = ' + normMode(scopeGet(k, id)) + '）'; };
-    sel.addEventListener('change', () => {
-      scopeSet(k, id, sel.value);
-      refresh();
-    });
-    refresh();
-    box.append(sel, hint);
+    // 以前这里还挂一句「（cities：长三角 现在 = Inherit）」——它与**下拉本身**说的是同一件事
+    // （用户裁决：描述文字删掉），所以只留下拉。
+    sel.addEventListener('change', () => { scopeSet(k, id, sel.value); });
+    box.append(sel);
     return box;
   }
 
   // ⚠ `edScope` 是 app.js 的 `let`（`buildEdits` 会整个替换它）⇒ 引用**活绑定**，不取快照。
   function scopeGet(k, id) {
     if (!edScope) return 'Inherit';
-    if (k === 'global') return edScope.global;
     return scopeVal(edScope[k] || [], id);
   }
 
   function scopeSet(k, id, v) {
-    if (!edScope) edScope = { global: 'Inherit', factions: [], bodies: [], cities: [] };
-    if (k === 'global') { edScope.global = v; return; }
+    if (!edScope) edScope = { factions: [], bodies: [], cities: [] };
     edScope[k] = edScope[k] || [];
     setScopeVal(edScope[k], id, v);
   }
@@ -627,6 +608,5 @@
     uiFor,
     fieldOf,
     ownerField,
-    removeField,
   };
 })();

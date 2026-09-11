@@ -6,7 +6,7 @@
 //   路径表达式   `船体` / `@post.factions.${势力}.upkeep` / `指令[?舰=${name}]`
 //                / `cargo` / `@key`（映射表的键）/ `${字段}`（模板，取自当前记录）
 //   格式化器     num / pct / ratio / enum / map / sum / top / tagged / …（一张通用表）
-//   布局         table / sheet / cards / timeline / pairs
+//   布局         layers / table / sheet / cards / timeline / pairs
 //   组织         group（分组）、order（行序）、limit（上限，**必须明说藏了多少**）
 //   控制行       `leaf` / `owner` / `action` —— **本文件不解释它们**，只把节点要过来
 //                （见 isControlRow / ctx.controlNode）：写面住在 `web/static/controls.js`，
@@ -28,6 +28,13 @@
 //   所以本文件里**不出现**「其余」这个栏目：没有 `▸N` 按钮、没有可折叠的残差块、
 //   没有 `sv-th-res` / `sv-residual` 那套类名（`g4_spec.py` §8b 静态盯着这一点）。
 //   唯一能藏数据的方式是显式 omit，而界面会把省略**明说**出来（[`omitLine`]）。
+//
+//   ⚠ 2026-10 第 11 步：**残差的落点从"表格的追加列"搬到了"详情层的追加行"**（用户裁决
+//   *「不如做成分层的UI，外层显示总览，点击某个项目进入内层显示详情」* / *「不要使用表格」*）。
+//   不变式一个字没变，只是换了一层：`layout: layers` 的外层是「一行一个项目」的紧凑总览
+//   （名字 + 声明出来的 `brief` 关键指标），内层是那**一条记录**的「名字 → 值」逐条行
+//   （[`sheetOfRecord`]：声明列按人工顺序在前，引擎给的其余字段**追加在末尾成普通行**）。
+//   于是 §8a 的对账对象变成**详情层**，而"没被声明的字段"仍然一条不藏（见 [`renderLayers`]）。
 'use strict';
 
 (function () {
@@ -221,11 +228,14 @@
     if (isNil(v)) return [];
     if (isArr(v)) return v.map((value, i) => ({ key: String(i), value, path: source + '[' + i + ']' }));
     if (isObj(v)) {
+      const keys = Object.keys(v);
+      // **空对象 = 没有记录**（不是"一条空记录"）：`@post.haul_steps` 开局是 `{}`
+      // ⇒ 外层总览不许凭空多出一个「项目」（第 11 步实测：它会画出一行名字是 `·`
+      // 的幽灵行，而且点得进去）。这一条对 `source: null` 无关（那一种另走分支）。
+      if (!keys.length) return [];
       const vals = Object.values(v);
       // 「值全是对象」= 映射表（一条记录映射）。混合的（如 RoundView）当**一条记录**。
-      if (vals.length && vals.every(isObj)) {
-        return Object.keys(v).map((k) => ({ key: k, value: v[k], path: source + '.' + k }));
-      }
+      if (vals.every(isObj)) return keys.map((k) => ({ key: k, value: v[k], path: source + '.' + k }));
       return [{ key: null, value: v, path: source }];
     }
     return [{ key: null, value: v, path: source }];
@@ -622,9 +632,11 @@
   }
 
   // --- 上限的如实披露 -------------------------------------------------------
-  function limitNote(shown, total, what) {
+  /// `from === 'end'` 时说的是「**最近** N 条」（故事页取的是末尾那几条，写「前 N」就是假话）。
+  function limitNote(shown, total, what, from) {
     if (total <= shown) return null;
-    return el('div', 'sv-note', '已显示前 ' + shown + ' / 共 ' + total + ' ' + (what || '条') + '（还有 ' + (total - shown) + ' 条未显示）');
+    const head = from === 'end' ? '已显示最近 ' : '已显示前 ';
+    return el('div', 'sv-note', head + shown + ' / 共 ' + total + ' ' + (what || '条') + '（还有 ' + (total - shown) + ' 条未显示）');
   }
 
   function orderRows(rows, order) {
@@ -892,6 +904,268 @@
     container.appendChild(grid);
   }
 
+  // --- 分层：外层总览 → 内层详情（第 11 步，2026-10） --------------------------
+  //
+  // 用户裁决：*「left bar 的UI组织应当尽量用tabs，不要使用表格」*
+  // *「那不如做成分层的UI，外层显示总览，点击某个项目进入内层显示详情」*。
+  //
+  // 外层（总览）：**一行一个项目**的紧凑列表 —— 名字 + `spec.brief` 声明出来的那几条关键指标。
+  //   `brief` 里每一条都**必须命中本视图自己的某条列声明**（先按 `path`、再按显示名 `label`）：
+  //   「总览行显示什么」因此是**声明**而不是代码（前端不手抄字段清单），
+  //   自洽性由 `play/tests/g4_spec.py` §10a 静态盯着。
+  // 内层（详情）：[`sheetOfRecord`] —— 声明列按**人工顺序**逐条「名字 → 值」，引擎给的其余字段
+  //   **追加在末尾成普通行**（铁律 R 的落点从"表格的追加列"换成"详情层的追加行"，
+  //   机制一个字没退：还是 `residualKeys` 现算的集合差）。
+  //   顶部有面包屑（`总览 › 名字`，**点根那一节也能返回**）与明确的「← 返回总览」。
+  //
+  // 层状态住在模块里（`LAYERS`，键 = 宿主给的**实例名** + 视图 id）：
+  //   左栏一份、右栏"就地整理"各自一份，互不串台；推进回合后的重画会把**同一个项目**
+  //   重新打开（用户正看着的东西不会莫名其妙跳回列表）。
+  // 返回时把进内层前的滚动位置还回去（`SCROLLS`）——430px 的栏里，「点进去看一眼再回来」
+  // 不该把人丢回列表顶部（那是真实摩擦）。
+  const LAYERS = new Map();
+  const SCROLLS = new Map();
+
+  function layerIdOf(spec, opts) {
+    return ((opts && opts.instance) || 'main') + '#' + (spec && spec.id);
+  }
+
+  /// `brief` 认领的那几条列：先按 `path` 精确命中，再按**显示名**（`label`）命中。
+  /// 命中不了 ⇒ `col: null`：渲染时**明说**声明里那个名字没命中任何列（不静默当空指标）。
+  function briefCols(spec) {
+    const cols = (spec && spec.columns) || [];
+    return ((spec && spec.brief) || []).map((ref) => {
+      const r = String(ref);
+      const col = cols.find((c) => c && c.path === r)
+        || cols.find((c) => c && c.label === r)
+        || null;
+      return { ref: r, col };
+    });
+  }
+
+  /// 总览行/详情标题里的**这个名字**：`spec.key` 指的那条列（若声明了）的**格式化**结果
+  /// （事件行的 `type` 是枚举 ⇒ 行的名字是「开火」而不是 `attack`），否则回落记录键。
+  function keyColOf(spec) {
+    const k = spec && spec.key;
+    if (!k) return null;
+    return ((spec && spec.columns) || []).find((c) => c && c.path === k && !isControlRow(c)) || null;
+  }
+
+  function textOfFormatted(t) {
+    if (t == null) return null;
+    if (typeof t === 'object' && t.text != null) return String(t.text) + (t.more ? '（' + t.more + '）' : '');
+    return String(t);
+  }
+
+  function displayKeyOf(spec, r) {
+    const col = keyColOf(spec);
+    const raw = recordKeyOf(spec, r);
+    if (!col) return raw == null ? '' : String(raw);
+    const v = evalPath(col.path, r.value, r.key);
+    const t = textOfFormatted(format(v, col, r.value));
+    return t == null ? (raw == null ? '' : String(raw)) : t;
+  }
+
+  /// 总览行里的一条关键指标：显示名（名词 ⇒ 挂弹窗）+ 值（与详情层**同一个** `format`）。
+  function briefNode(r, entry) {
+    const box = el('span', 'sv-brief');
+    const k = el('span', 'sv-brief-k', entry.col ? (entry.col.label || entry.col.path) : entry.ref);
+    if (entry.col && ctx.tip) ctx.tip(k, entry.col);
+    box.appendChild(k);
+    if (!entry.col) {
+      box.appendChild(el('span', 'sv-missing', '（brief 里的这个名字没命中本视图的任何一列）'));
+      return box;
+    }
+    const v = evalPath(entry.col.path, r.value, r.key);
+    box.appendChild(valueNode(entry.col, v, format(v, entry.col, r.value)));
+    return box;
+  }
+
+  /// 一条**总览行**：整行可点（也能 Tab 聚焦 + Enter/Space）⇒「一眼看得出点得进去」。
+  /// 名字前面的色点来自 `key` 那条列声明的 `dot`（与详情层同一处声明，不另抄一份）。
+  function listRow(spec, r, entries, onEnter) {
+    const row = el('div', 'sv-lrow clickable');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    // 这一行是**哪条记录**：键（给人看/调试）与**路径**（唯一，判据拿它把「屏幕上这一行」
+    // 和「引擎发的这条记录」对上——`offers` 那种同名的多条记录只有路径分得开）。
+    if (row.setAttribute) {
+      row.setAttribute('data-rec', String(recordKeyOf(spec, r)));
+      row.setAttribute('data-path', String(r.path == null ? '' : r.path));
+    }
+    row.title = '点这一行进详情（组织点「' + spec.id + '」）：总览只放关键指标，全部字段在内层';
+    const keyCol = keyColOf(spec);
+    const name = el('span', 'sv-lkey', displayKeyOf(spec, r));
+    if (ctx.tip) ctx.tip(name, keyCol || { path: spec.key || '' });
+    if (keyCol && keyCol.dot) {
+      const c = evalPath(keyCol.dot, r.value, r.key);
+      if (typeof c === 'string' && c) {
+        const d = el('span', 'sv-dot');
+        d.style.background = c;
+        name.insertBefore(d, name.firstChild);
+      }
+    }
+    row.appendChild(name);
+    const briefs = el('span', 'sv-lbriefs');
+    entries.forEach((e) => briefs.appendChild(briefNode(r, e)));
+    row.appendChild(briefs);
+    row.appendChild(el('span', 'sv-lgo', '›'));
+    const fire = () => onEnter(r);
+    row.addEventListener('click', fire);
+    row.addEventListener('keydown', (ev) => {
+      const k = ev && ev.key;
+      if (k === 'Enter' || k === ' ' || k === 'Spacebar') {
+        if (ev.preventDefault) ev.preventDefault();
+        fire();
+      }
+    });
+    return row;
+  }
+
+  /// 内层顶部：面包屑 + 「← 返回总览」。`opts.crumb` = 这一层的名字（宿主给页名；缺省用视图标题）。
+  /// **层级再往上也能点**：点根那一节与点「返回总览」是同一件事（回到总览列表）。
+  function crumbBar(spec, r, opts, onBack) {
+    const bar = el('div', 'sv-crumbs');
+    const rootName = (opts && opts.crumb) || spec.title || spec.id;
+    const back = el('span', 'sv-back clickable', '← 返回总览');
+    back.tabIndex = 0;
+    back.title = '回到「' + rootName + '」的总览列表（进内层前的滚动位置会还给你）';
+    const trail = el('span', 'sv-crumb');
+    const root = el('span', 'sv-crumb-root clickable', rootName);
+    root.tabIndex = 0;
+    root.title = '再往上一层：回到「' + rootName + '」的总览';
+    trail.appendChild(root);
+    trail.appendChild(el('span', 'sv-crumb-sep', '›'));
+    trail.appendChild(el('span', 'sv-crumb-cur', displayKeyOf(spec, r)));
+    [back, root].forEach((n) => {
+      n.addEventListener('click', onBack);
+      n.addEventListener('keydown', (ev) => {
+        const k = ev && ev.key;
+        if (k === 'Enter' || k === ' ' || k === 'Spacebar') {
+          if (ev.preventDefault) ev.preventDefault();
+          onBack();
+        }
+      });
+    });
+    bar.append(back, trail);
+    return bar;
+  }
+
+  /// `layout: layers`：外层总览列表（名字 + brief 指标）→ 点一行进内层详情。
+  /// 内层 = `sheetOfRecord`（声明列人工顺序 + 未声明字段追加在末尾）+ `omitLine`。
+  function renderLayers(container, spec, opts) {
+    if (spec.source === null || spec.source === undefined) {
+      container.appendChild(el('div', 'sv-empty',
+        '（`layout: layers` 的 `source` 是空的：外层没有项目可列——「就一条详情」请写 `single` 理由 + sheet/pairs）'));
+      return;
+    }
+    let rows;
+    try {
+      rows = expand(spec.source);
+    } catch (e) {
+      container.appendChild(el('div', 'sv-empty', '（这条 source 展开失败：' + (e && e.message ? e.message : e) + '）'));
+      return;
+    }
+    if (!rows.length) {
+      container.appendChild(el('div', 'sv-empty', spec.empty || '（这一帧没有数据）'));
+      return;
+    }
+    const entries = briefCols(spec);
+    const id = layerIdOf(spec, opts);
+    const outer = el('div', 'sv-list');
+    const detail = el('div', 'sv-detail');
+    detail.style.display = 'none';
+
+    // 上限：`from: 'end'` 取**末尾**那几条（故事页要的是最近的节拍），否则从头取。
+    // 「显示全部」= 就地重画（与表格那边同一套：上限必须**明说**藏了多少）。
+    let shown = null;
+    const moreWrap = el('div', 'sv-more-wrap');
+    const paint = () => {
+      outer.textContent = '';
+      const n = spec.limit && spec.limit.n ? spec.limit.n : rows.length;
+      const fromEnd = !spec.limit || spec.limit.from !== 'start';
+      const ordered = orderRows(rows, spec.order);
+      const list = shown != null ? ordered : (fromEnd ? ordered.slice(Math.max(0, ordered.length - n)) : ordered.slice(0, n));
+      const emitRow = (r) => outer.appendChild(listRow(spec, r, entries, enter));
+      if (spec.group && spec.group.by) {
+        const groups = new Map();
+        list.forEach((r) => {
+          const g = evalPath(spec.group.by, r.value, r.key);
+          const k = g == null ? '（未指定）' : String(g);
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k).push(r);
+        });
+        groups.forEach((sub, k) => {
+          const head = el('div', 'sv-group');
+          if (spec.group.dot) {
+            const c = evalPath(spec.group.dot, sub[0].value, sub[0].key);
+            if (typeof c === 'string' && c) {
+              const d = el('span', 'sv-dot');
+              d.style.background = c;
+              head.appendChild(d);
+            }
+          }
+          head.appendChild(el('span', 'sv-group-name', k));
+          head.appendChild(el('span', 'sv-group-n', sub.length + ' 条'));
+          outer.appendChild(head);
+          sub.forEach(emitRow);
+        });
+      } else {
+        list.forEach(emitRow);
+      }
+      moreWrap.textContent = '';
+      const note = limitNote(list.length, rows.length, '条', fromEnd ? 'end' : 'start');
+      if (note) {
+        note.classList.add('clickable');
+        note.title = '点一下把 ' + rows.length + ' 条全部列出来';
+        note.addEventListener('click', () => {
+          shown = rows.length;
+          paint();
+        });
+        moreWrap.appendChild(note);
+      }
+    };
+
+    const back = () => {
+      detail.textContent = '';
+      detail.style.display = 'none';
+      outer.style.display = '';
+      moreWrap.style.display = '';
+      LAYERS.delete(id);
+      if (opts && opts.scrollHost && SCROLLS.has(id)) opts.scrollHost.scrollTop = SCROLLS.get(id);
+    };
+
+    function enter(r) {
+      LAYERS.set(id, String(recordKeyOf(spec, r)));
+      if (opts && opts.scrollHost) {
+        SCROLLS.set(id, opts.scrollHost.scrollTop);
+        opts.scrollHost.scrollTop = 0;
+      }
+      outer.style.display = 'none';
+      // 「已显示最近 N / 共 M 条」那条披露也跟着外层一起藏起来（它说的是外层列表，
+      // 在内层里还挂着就成了"点得动但指的是别处"的死链接）。
+      moreWrap.style.display = 'none';
+      detail.textContent = '';
+      detail.style.display = '';
+      detail.appendChild(crumbBar(spec, r, opts, back));
+      sheetOfRecord(detail, spec, r);
+      // ⚠ 2026-10：以前这里还有一句 meta 说明（「这一条的全部字段都在这里…」）——
+      // 用户裁决「UI 上的各种描述文字删掉」⇒ 删。**追加本身照旧**（铁律 R 换个落点），
+      // 只是不再用一句话解释它。`omitLine` 留着：那是 g4 静态判据要求的「省略必须说出来」。
+      const om = omitLine(spec);
+      if (om) detail.appendChild(om);
+    }
+
+    container.append(outer, moreWrap, detail);
+    paint();
+    const openKey = LAYERS.get(id);
+    if (openKey != null) {
+      const hit = rows.find((r) => String(recordKeyOf(spec, r)) === String(openKey));
+      if (hit) enter(hit);
+      else LAYERS.delete(id); // 这条记录这一帧不在了（被销毁/改名）⇒ 老实回列表
+    }
+  }
+
   function renderTimeline(container, spec) {
     let rows = expand(spec.source);
     if (!rows.length) {
@@ -982,15 +1256,28 @@
     }
   }
 
-  const LAYOUT = { table: renderTable, sheet: renderSheet, timeline: renderTimeline, pairs: renderPairs, cards: renderCards };
+  const LAYOUT = {
+    layers: renderLayers,   // ← 第 11 步的默认骨架：外层总览 → 内层详情
+    table: renderTable,
+    sheet: renderSheet,
+    timeline: renderTimeline,
+    pairs: renderPairs,
+    cards: renderCards,
+  };
 
-  // --- 视图（一个视图 = 标题 + 一行说明 + 布局；omit 的省略必须写在脸上） -----
-  function renderView(container, spec) {
+  // --- 视图（一个视图 = 标题 + 布局；omit 的省略必须写在脸上） -----------------
+  // ⚠ 2026-10：视图那一行**说明**（`spec.hint`）连同 `page.hint` 一起删了
+  // （用户裁决：*「UI 上的各种描述文字删掉」*）——说明只该住在滑过才占地方的 `title=` 里。
+  /// `opts`（宿主给的可选上下文，第 11 步加）：
+  ///   * `instance` —— 同一个视图被挂在几处（左栏 / 右栏就地整理）时的**实例名**：
+  ///     层状态按它分开，互不串台；
+  ///   * `crumb` —— 面包屑根那一节显示什么（宿主知道页名，求值器不认识"页"）；
+  ///   * `scrollHost` —— 可滚动容器：进内层/返回总览时保住外层的滚动位置。
+  function renderView(container, spec, opts) {
     const wrap = el('div', 'sv-view');
     if (spec.title) wrap.appendChild(el('h3', 'sv-title', spec.title));
-    if (spec.hint) wrap.appendChild(el('div', 'sv-hint', spec.hint));
     const body = el('div', 'sv-body');
-    (LAYOUT[spec.layout] || renderTable)(body, spec);
+    (LAYOUT[spec.layout] || renderTable)(body, spec, opts);
     wrap.appendChild(body);
     const om = omitLine(spec);
     if (om) wrap.appendChild(om);
@@ -1116,6 +1403,7 @@
     renderSheet,
     renderSelect,
     renderCard,
+    renderLayers,
     inlineFor,
     selectSpecFor,
     isControlRow,
@@ -1124,6 +1412,10 @@
     claimedKeys,
     omittedKeys,
     residualOf,
+    // 分层的两件套（第 11 步）：`briefCols` = 总览行显示哪几条列（声明 → 列声明），
+    // `layerState` = 当前打开的那条记录（宿主/判据可以读它，别自己维护第二份）。
+    briefCols,
+    layerState: LAYERS,
     // 追加机制的三件套也出口：`play/tests/g4_spec.py` §8 用 Node **真跑这一段**
     // （`residualCols` + `claimedKeys` + `omittedKeys`）去和引擎发的真记录逐字段对账 ——
     // 判据不许自己抄一份口径，抄的那一份一定会和前端的漂开。

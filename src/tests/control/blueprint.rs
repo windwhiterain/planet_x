@@ -252,7 +252,7 @@ fn a_dangling_blueprint_pointer_is_reported_not_silently_ignored() {
     );
     // 删掉整张图（挂它的建造区**不会**被自动改指针：那是玩家的话，引擎不替他猜）。
     let diff = serde_json::json!({"control": [{"势力": "中国",
-        "设计图库": [{"图名": "会被删的图", "删叶": true}]}]});
+        "设计图库": [{"图名": "会被删的图", "删除": true}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "{:?}", rep.skipped);
     assert!(
@@ -381,7 +381,7 @@ fn blueprint_and_yard_class_must_be_changed_together() {
     );
 }
 
-/// 「让图的**某条倾向轴**沉默」（`role: null`）与「删掉这张图」（`remove: true`）是两件事。
+/// 「让图的**某条倾向轴**沉默」（`role: null`）与「删掉这张图」（`删除: true`）是两件事。
 #[test]
 fn silencing_a_stance_axis_is_not_deleting_the_blueprint() {
     let config = crate::config::load_config();

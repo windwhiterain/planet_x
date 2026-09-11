@@ -24,61 +24,18 @@
   给出 pid / 端口 / 二进制 + 构建时长——对不上就是连错了实例。
 - 细节与坑见 [笔记：服务生命周期](.agents/notes/web-lifecycle.md)。
 
-## 验证（合流门前都要过）
+## 验证
 
-分两层，**判据住在哪一层由「能不能只看跑出来的数据」决定**（见
-[笔记：测试与二进制解耦](.agents/notes/test-decoupled-suite.md)）：
-
+游戏动力学行为，只在改了游戏逻辑的情况下才跑：
 ```bash
-# ① 数据级 —— **流程就是「build release + python 测试」**：run.py 会先按需
-#    `cargo build --release`（二进制比 src/config 旧或不存在时），再跑各组。
-uv run --project play/planet_xq python play/tests/run.py all      # 四组 357 条判据；温跑 ~30–60 s / 冷跑 ~96 s
-uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
-uv run --project play/planet_xq python play/tests/run.py --no-build  # 跳过前置编译
-uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 19 个错，全咬住
-
-# ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
-cargo nextest run -P full                    # 合流门
-cargo nextest run -p planet_x_web            # ⚠ **不在** `-P full` 里 —— 必须单独跑（web crate）
-cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
+cargo nextest run -P full           
+uv run --project play/planet_xq python play/tests/run.py       
+```
+长线游戏动力学行为，非用户要求不许跑：
+```bash
+uv run --project play/planet_xq python play/tests/run.py all     
 ```
 
-- 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
-  世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
-- **轨迹跨组共用 + 可截断/可续跑**（2026-10）：同 seed 的投影在各组之间共用（`_harness.projection`）：
-  请求更短的回合数 ⇒ **直接读已有长轨迹的前缀**；请求更长的 ⇒ **从短轨迹的存档（`_ckpt.json`）续跑，
-  再把前缀行拼回来**（实测 21/21 个文件与直跑**逐字全等**，续跑比直跑快 ~2.5×）。所以「只跑短组」
-  就只生成短的，「跑长的」才接着往下生成。缓存总量也小了（1 GB 上下，不再靠 1000 回合的世界撑着）。
-- **数据级一律走 release 二进制**（用户裁决：*「python 测试的方式改为 build release 加 python 测试」*）
-  ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
-- 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与
-  [test-wall-clock §0.2](.agents/notes/test-wall-clock.md)：
-  - **Rust 门**：增量（改一个库文件）**~8.5 s**（= 编译+链接 ~6 s + 真跑 ~2.5 s）；
-    **冷/切档首次 ~44 s**（那个大数只在换 worktree / 切档时出现，别拿它当稳态）。
-  - **test 档 = O0 + `debug = 1`**（2026-10 第 7 批**收口后切回**，见 `Cargo.toml` 那段注释）：
-    长局搬去 `play/tests/` 之后 **编译+链接成了稳态大头** ⇒ 背靠背实测：稳态门 **17.6 → 8.5 s**、
-    切档首次 **89 → 44 s**。另：`autocontrol` 那条跑了 8 个臂的 freight 用例**拆成 5 条**（覆盖零变化、
-    nextest 并行）⇒ 真跑 6 → 4.3 s（后来那两条抽样循环整体删掉 ⇒ **2.5 s**）。⚠ 长的 `#[ignore]` 探针在 O0 下慢 ~4×
-    （它们不在门里，别拿 `--run-ignored all` 当门）。
-  - **`tests/` 下只有一个二进制 `probes`**（2026-10：4 个探针文件合一 + 删掉空壳
-    `horizon_mid.rs`）。以前每个 `tests/*.rs` 都是独立二进制、各自静态链一遍整个 crate
-    （第一个 7.3 s、之后每个 1.0–1.3 s）。跑法变了：
-    `cargo nextest run -P full --run-ignored all -E 'test(/^trade::/)'`，见 §0.3。
-  - **同一份投影在一个进程里只装一次**（`_harness` 里对 `KIT.load` 做了 `(目录, only)` 记忆化）：
-    实测 g2 原本 `KIT.load` **63 次/31 个不同组合**（某世界 `only=("cities",)` 装了 8 遍），
-    装表耗时 **39.3 → 12.1 s**。⚠ 复用 ⇒ **帧是共享的**：只读它们（要就地改先 `.copy()`）。
-  - **时间现在主要花在「生成/解析轨迹」上，不在断言上**（2026-10 实测单世界：进程启动 0.017 s、
-    1 回合 0.05 s、30 回合 0.34 s、240 回合 3.3 s、1000 回合 **44.3 s / 404 MB**；
-    温跑里 g2 那 30–40 s 是**读缓存表**（跑前跑后缓存目录数不变），不是重算）。
-- **只想要最终 state**（不要逐回合轨迹）：`--round N --quiet --save ckpt.ron`
-  —— 1000 回合实测 5.2 s / **stdout 0 字节** / 档 0.09 MB（不加 `--quiet` 是 6.3 s / 40.3 MB；
-  单独 `--save` 不会变快，因为 `--round` 的合同就是每回合吐一行）。
-- **CLI 精简过一轮**（2026-10）：`--traj`/`--story`/`--notables`/`--milestones`/`--rounds`
-  已删（信息全在 `--index` 投影里）；**裸调用 `planet_x` 打 help**，`--seed 42` 这种
-  「有参数没动作」仍是机器可读的 `ERR_USAGE`。见 [笔记：CLI 读面](.agents/notes/cli-surface.md)。
-- 加一条断言：写进 `play/tests/g*.py` 的 `run()` 里（判据写 `run()`、数据取自摘要 ⇒ 改断言
-  不重读投影）；**每条守卫都要带防空转判据**（「这一局里真的发生过 X」）。
-- 分档口径不变（[笔记：测试分档](.agents/notes/test-tiers.md)）：快组 ≈ T0/T1、中组 ≈ T2、长组 ≈ T3。
 
 ## 给 agent 的工作约定
 

@@ -877,7 +877,7 @@ def extract(dirpath):
     for _, r in ev[ev["type"] == "city_razed"].iterrows():
         razings += 1
         data = r["data"] if isinstance(r["data"], dict) else {}
-        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("失城方"))
+        losers[(int(r["round"]), r["target_id"])] = (int(r["seq"]), data.get("旧主"))
     bad: list[str] = []
     for _, r in ev[ev["type"] == "colony_founded"].iterrows():
         hit = losers.get((int(r["round"]), r["target_id"]))
@@ -1397,7 +1397,7 @@ def blueprint_scenario_checks(h, ck) -> None:
                       "设计图库": [{"图名": ghost, "舰级": class_,
                                       "选装": ["kinetic"], "归属": "Inherit"}],
                       "建筑": [{"城": city, "建筑": bid, "设计图": ghost}]}]},
-        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删叶": True}]}]},
+        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删除": True}]}]},
     ])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions", "city_process", "ships"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)

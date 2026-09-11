@@ -100,9 +100,13 @@ body {
   border: 1px solid var(--line); border-radius: 6px;
   margin: 4px 0; background: rgba(0, 0, 0, .18);
 }
-.tnode-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 5px; }
-.tnode-head:hover { background: #18224a; }
-.tnode-label { flex: 1; display: block; cursor: default; }
+/* 一片叶 = **一行**：标签 / 值编辑器 / 归属下拉 / 旁路按钮同住这里。
+   面板只有 430px，装不下是常态 ⇒ `flex-wrap: wrap` 保证**换行而不是溢出**（元素永不被挤出屏幕）。 */
+.tnode-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 3px 8px; border-radius: 5px; }
+.tnode-line:hover { background: #18224a; }
+.tnode-label { flex: 0 1 auto; min-width: 0; display: block; cursor: default; }
+/* 编辑器自带的内层容器（`.leaf-val` / `.ship-editor`）在这一行里不再自占一行、不再自带内边距。 */
+.tnode-line > .leaf-val, .tnode-line > .ship-editor { padding: 0; }
 .tnode-label.clickable { cursor: pointer; }
 .tnode-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px 2px; }
 .tnode-tab {
@@ -132,13 +136,16 @@ body {
   border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 11px; flex: none;
 }
 .tnode .restore:hover, .ship-editor .restore:hover { border-color: var(--accent); }
-/* 「恢复出厂值」= 删叶：比「恢复继承」更进一步（真的把值还回去），而且是**破坏性**的，
-   所以给它一个会被注意到的颜色，标记之后常亮。 */
+/* 「删掉这张图」是蓝图专用破坏性动作（删图 ⇒ 建造区悬空停产），所以给它一个
+   会被注意到的颜色，标记之后常亮。 */
 .tnode .rm-leaf { color: #fca5a5; }
 .tnode .rm-leaf.on { background: #4a1d1d; border-color: #fca5a5; color: #ffd0d0; }
 .ship-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; }
-.leaf-val { display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px; color: var(--muted); }
+.leaf-val { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; color: var(--muted); }
 .leaf-val .lv-label { font-size: 12px; }
+/* 嵌套的编辑器容器（`weightRow` 把 `leafValueEditor` 塞进自己那一行）不再自带内边距 ——
+   否则「建造区那一行」会白高一层、且看起来像两条行。 */
+.leaf-val .leaf-val { padding: 0; }
 .tnode .num, .ship-editor input[type="number"], .leaf-val input[type="number"] {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 6px; width: 84px;
@@ -296,7 +303,6 @@ button.primary:hover { background: #2563eb; }
 .sv-view { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
 .sv-view:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 .sv-title { margin: 0 0 4px; font-size: 12.5px; color: #cbd5ff; }
-.sv-hint, .sv-pagehint { color: var(--muted); font-size: 11px; margin-bottom: 6px; line-height: 1.45; }
 .sv-body { display: flex; flex-direction: column; gap: 6px; }
 .sv-empty { color: var(--muted); font-size: 11px; }
 .sv-note { color: #a16207; font-size: 11px; padding: 2px 4px; }
@@ -371,9 +377,45 @@ button.primary:hover { background: #2563eb; }
 .sv-inline-bar { color: var(--muted); font-size: 10.5px; margin-bottom: 4px; }
 .sv-select { max-height: 34vh; overflow: auto; }
 /* ⚠ 2026-10 第 9 步：`.sv-list` / `.sv-lrow` / `.sv-lkey` / `.sv-lshape` / `.sv-lby` /
-   `.sv-badge(.ok|.warn)` 也一并删了 —— 全仓 grep 的结论是**只有**那张「未组织」页
-   （`app.js::renderLeftover` / `renderSpecCheck` / `renderWriteCheck` / `checkRow`）在用它们，
-   没有一个别的页/模块碰过（判据 `g4_spec.py` §9 之后会盯着这件事）。 */
+   `.sv-badge(.ok|.warn)` 随那张「未组织」页一起删了（全仓 grep 的结论是**只有**它在用）。
+   ⚠ 2026-10 第 11 步：`.sv-list` / `.sv-lrow` / `.sv-lkey` **回来了**，但换了用途：
+   它们现在是**分层 UI 的外层总览列表**（一行一个项目，名字 + `brief` 关键指标 + `›`），
+   由 `specview.js::renderLayers` 渲染 —— 与那张被删的页没有任何关系（`.sv-lshape` /
+   `.sv-lby` / `.sv-badge` 没有回来，它们只属于那个审计页）。 */
+
+/* --- 分层 UI：外层总览列表（`layout: layers` 的第一层）--------------------------
+   430px 的窄栏里，**一行一个项目**、不横向滚动：名字 + 少量关键指标（`views.json` 的 `brief`
+   声明），整行可点、也能 Tab 聚焦。关键指标多了就换行（`flex-wrap`），绝不撑出横向滚动条。 */
+.sv-list { display: flex; flex-direction: column; gap: 3px; }
+.sv-lrow {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 3px 6px; border: 1px solid transparent; border-radius: 5px;
+  background: #141b34; cursor: pointer; font-size: 12px; min-width: 0;
+}
+.sv-lrow:hover { border-color: var(--line); background: #182142; }
+.sv-lrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sv-lkey {
+  color: #9ecbff; font-weight: 600; display: inline-flex; align-items: baseline; gap: 4px;
+  min-width: 0; overflow-wrap: anywhere;
+}
+.sv-lbriefs { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sv-brief { display: inline-flex; align-items: baseline; gap: 3px; min-width: 0; }
+.sv-brief-k { color: var(--muted); font-size: 10.5px; }
+.sv-lgo { margin-left: auto; color: var(--muted); font-size: 13px; }
+.sv-lrow:hover .sv-lgo { color: var(--text); }
+.sv-detail { display: flex; flex-direction: column; gap: 6px; }
+/* 面包屑 + 「← 返回总览」：层级根那一节**也能点**（回到这一层的总览），与返回同一个动作。 */
+.sv-crumbs {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; font-size: 12px;
+}
+.sv-back { color: var(--accent); font-weight: 600; }
+.sv-back:hover, .sv-crumb-root:hover { text-decoration: underline; }
+.sv-back:focus-visible, .sv-crumb-root:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sv-crumb { display: inline-flex; align-items: baseline; gap: 5px; color: var(--muted); }
+.sv-crumb-root { color: #9ecbff; }
+.sv-crumb-sep { color: var(--muted); }
+.sv-crumb-cur { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 
 @media (max-width: 720px) {
   .edge-panel.left { width: 100%; }
@@ -382,16 +424,14 @@ button.primary:hover { background: #2563eb; }
 
 /* --- 声明式控制行（views.json 里的 `leaf` / `owner` / `action` 行）---------------
    读行与控制行住在**同一条行序**里（`.sv-sheet-row` / `.sv-td`），所以这里只补
-   「一行控制行里面长什么样」：值 + 归属 chip + 恢复继承/恢复出厂值 + 编辑器，
+   「一行控制行里面长什么样」：值 + 归属 chip + 恢复继承 + 编辑器，
    以及表格里的 `compact` 格（只给值 + chip，完整编辑器在卡片里）。 */
 .sv-sheet-row-ctl { align-items: start; }
 .sv-sheet-row-ctl .sv-sheet-k { color: #b9c6e6; }
 .sv-td-ctl { vertical-align: top; }
 .sv-compact { max-width: 230px; }
 .ctl-leaf { border-left: 2px solid #2c3a66; margin: 1px 0 3px; border-radius: 4px; }
-.ctl-leaf > .tnode-head { padding: 1px 4px; gap: 4px; }
-.ctl-leaf > .tnode-head .tnode-label { flex: 0 0 auto; }
-.ctl-leaf > .ship-editor, .ctl-leaf > .leaf-val { padding: 2px 4px 4px; }
+.ctl-leaf > .tnode-line { padding: 2px 4px; gap: 4px; }
 .ctl-grid { display: flex; flex-direction: column; gap: 1px; }
 .ctl-note { color: var(--muted); font-size: 11px; padding: 0 4px; }
 .ctl-none { color: #f0b429; font-size: 11px; }

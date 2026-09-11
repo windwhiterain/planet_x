@@ -233,10 +233,10 @@ fn projection_writes_lean_main_and_indexed_tables() {
         assert!(events[0].get(col).is_some(), "events 表要有 {col} 列");
     }
     // 归一化的意义：**没有任何一列是 variant 专属字段**，否则又会回到「同名多义」
-    // （`起点`/`终点` 一列两义）与「同角色多名」（托运方/舰主/失城方/…）。
+    // （`起点`/`终点` 一列两义）与「同角色多名」（托运方/舰主/旧主/…）。
     // 这批名字现在是**中文**（第 10 步，`feature/event-nouns`）——守卫照改，语义不变。
     for forbidden in [
-        "起点", "终点", "势力甲", "势力乙", "攻击方", "目标", "城", "舰", "天体", "货主",
+        "起点", "终点", "势力甲", "势力乙", "攻击舰", "目标舰", "城", "舰", "天体", "货主",
     ] {
         assert!(
             events[0].get(forbidden).is_none(),
@@ -256,8 +256,8 @@ fn projection_writes_lean_main_and_indexed_tables() {
     );
 }
 
-/// **失城方必须在夷平那一刻记下**：`city_razed.owner` 是夷平时的持有者，**不是**同回合
-/// 后来复垦者的名字。
+/// **失城方（读面「旧主」）必须在夷平那一刻记下**：`city_razed.owner` 是夷平时的持有者，
+/// **不是**同回合后来复垦者的名字。
 ///
 /// 这正是 `step_ideology` 那段「事后回读」栽的坑：夷平不改 `faction_id`（空白城保留最后
 /// 主人的 diaspora claim），而同回合稍后的 `reseed_city` 会把它改成新主，于是事后再读
@@ -336,13 +336,13 @@ fn city_razed_records_the_loser_not_the_refounder() {
         }
         let round = e["round"].as_u64().unwrap();
         let city = e["data"]["城"].as_str().unwrap();
-        let owner = e["data"]["失城方"].as_str().unwrap();
+        let owner = e["data"]["旧主"].as_str().unwrap();
         let fallen_to = e["data"]["拆城方"].as_str().unwrap();
         assert_ne!(
             owner, fallen_to,
             "夷平一座城不该由它的持有者自己造成（{city}）"
         );
-        assert_eq!(owner, loser, "city_razed.owner 必须是失城方，而不是抢城者");
+        assert_eq!(owner, loser, "city_razed.owner（读面「旧主」）必须是失城方，而不是抢城者");
         // 同回合、同一座城的复垦者若存在，必然**不是** owner 被写成的那个名字。
         for f in &events {
             if f["type"] != "colony_founded" || f["round"].as_u64() != Some(round) {
@@ -411,6 +411,12 @@ fn derived_tables_are_written_and_declared() {
             }
         }
     }
+    // ⚠ 同理：`scope` 表是**表态驱动**的（2026-10 起连以前那一行常驻的 `global` 都没了）⇒
+    // 新开局零行。给这个势力钉一条表态，表才有东西可写。
+    state
+        .scope
+        .factions
+        .insert("中国".to_string(), crate::model::ControlMode::Player);
     let mut rng = Prng::new(7);
     let s = Scratch::new("derived_contract");
     write_index(&mut state, &cfg, &mut rng, 3, &s.0).unwrap();
@@ -1013,11 +1019,11 @@ fn control_table_holds_every_leaf() {
             .expect("缺该舰的指令叶行");
         assert_eq!(row["mode"], json!("Player"), "叶的 mode 应与状态一致");
     }
-    // scope 表：显式节点一行（global 恒定 + 我们刚钉的势力）。
+    // scope 表：只有**显式表态**的节点（没有 `global` 那一档，2026-10 已删）。
     let scope = jsonl(&s.0.join("idx/scope.jsonl"));
     assert!(
-        scope.iter().any(|r| r["level"] == json!("global")),
-        "scope 缺 global 行"
+        scope.iter().all(|r| r["level"] != json!("global")),
+        "scope 里不该再有 global 行（全局那一档已删）"
     );
     assert!(
         scope.iter().any(|r| r["level"] == json!("faction")

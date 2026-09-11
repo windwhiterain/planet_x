@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "组织点（view spec）声明 —— **读与控制的同一份声明**。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。控制那一侧的对应纪律：`--control-schema` 的 leaves 里每个叶要么被某条 leaf 行认领、要么在 write_omit 里写明理由。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。**四种行**：`path`（读）/ `leaf`（一片控制叶，值就是那条路径在 @control 上取到的东西）/ `owner`（作用域归属）/ `action`（命令列表）。四种住在同一个数组里 ⇒ 顺序就是「读与控制穿插」的顺序。两条例外语法：`leaf` 行上的 `new: true` = 这片叶的身份键**没有名单可枚举**（设计图库：图名是开放集合），由人现填（`keys_from` 的对偶）；视图写 `source: null` = **不取任何记录**，只放不依赖记录的行（如 `owner: global`）；`layout: table` 不许 `null`（表没有来源没有意义）。**`label` 只在需要覆盖引擎的名词时才写**：列头默认就是引擎发的键名（`舰名`/`忠诚度`/`所在天体`…），与键名逐字相同的 `label` 一律不写（g4 静态判据盯着）；要换词（`舰名`→`舰`）或加格式时才写——那时它同时是 hover 弹窗的**查词键**，查不到就回落按 `path` 查。弹的那段解释全部来自引擎（`GET /api/schema` = CLI 的 `--nouns`，同一份实现）：实体字段与视图字段的 `///` 注释、投影每张表的 `column_docs`。",
+  "note": "组织点（view spec）声明 —— **读与控制的同一份声明**。铁律 R：只能整理，不能隐藏——columns 认领的字段进整理形态，其余自动进残差（其余字段），除非显式写进 omit（界面会明说）。控制那一侧的对应纪律：`--control-schema` 的 leaves 里每个叶要么被某条 leaf 行认领、要么在 write_omit 里写明理由。列的顺序 = 信息重要性的顺序，编排原则见 .agents/notes/web-human-views.md §4.1：① 身份 → ② 此刻的结论 → ③ 原因与来源 → ④ 量与资源 → ⑤ 引用与位置 → ⑥ 内部/元数据（多数落进残差）。路径语言：`记录内的字段` / `@根.路径`（跨根）/ `[*]`（展开）/ `[?f=v]`（挑一条，v 可用 ${字段} 模板）/ `@key`（映射表的键）。整条路径可空：任何一步取不到就是「没有」，列不会消失。**四种行**：`path`（读）/ `leaf`（一片控制叶，值就是那条路径在 @control 上取到的东西）/ `owner`（作用域归属）/ `action`（命令列表）。四种住在同一个数组里 ⇒ 顺序就是「读与控制穿插」的顺序。两条例外语法：`leaf` 行上的 `new: true` = 这片叶的身份键**没有名单可枚举**（设计图库：图名是开放集合），由人现填（`keys_from` 的对偶）；视图写 `source: null` = **不取任何记录**，只放不依赖记录的行（写面里今天**没有**这种视图了：唯一那条被「全局作用域」页带走，见下条）；`layout: table` 不许 `null`（表没有来源没有意义）。**`label` 只在需要覆盖引擎的名词时才写**：列头默认就是引擎发的键名（`舰名`/`忠诚度`/`所在天体`…），与键名逐字相同的 `label` 一律不写（g4 静态判据盯着）；要换词（`舰名`→`舰`）或加格式时才写——那时它同时是 hover 弹窗的**查词键**，查不到就回落按 `path` 查。弹的那段解释全部来自引擎（`GET /api/schema` = CLI 的 `--nouns`，同一份实现）：实体字段与视图字段的 `///` 注释、投影每张表的 `column_docs`。**第 11 步·分层骨架（2026-10）**：左栏每一页不再是一张宽表。**`layout: layers` = 两层**——外层是「一行一个项目」的紧凑总览（`source` 的每一条记录一行），内层是那**一条记录**的详情：`columns` 按**人工顺序**逐条「名字 → 值」渲染（读行与控制行同一条行序），引擎给的其余字段**追加在末尾**（铁律 R 换了个落点：从「表格的追加列」变成「详情层的追加行」，一条也没藏）。总览行里显示哪几条关键指标由 **`brief`** 声明：每一条要么是本视图某条列的 `path`、要么是它的显示名（`label`）——前端**不手抄**字段清单，`g4_spec.py` §10a 静态盯着这条自洽性。`brief` 之外的指标不进总览行（那是「一屏塞得下」的克制），但**全部字段都在详情层**。只有一条记录的视图（战局、价格板）**必须**写 **`single` + 非空理由**（写清楚「为什么不为它造一个只有一行的列表」），那类视图直接显示详情。",
   "tagged_behavior": {
     "map": {
       "Idle": "待命",
@@ -63,18 +63,22 @@
     {
       "id": "now",
       "title": "本回合",
-      "hint": "推进之后先看这里：故事、战局、AI 在干什么、本回合事件明细",
       "views": [
         {
           "id": "story",
           "title": "故事（编年史）",
           "mount": "panel",
-          "layout": "timeline",
+          "layout": "layers",
           "source": "@state.chronicle[*]",
-          "title_path": "title",
-          "meta": ["round", "participants"],
-          "body": "body",
+          "key": "title",
+          "brief": ["回合", "参与方"],
           "limit": { "n": 5, "from": "end" },
+          "columns": [
+            { "path": "title", "label": "标题" },
+            { "path": "round", "label": "回合", "fmt": "int" },
+            { "path": "participants", "label": "参与方", "fmt": "list", "missing": "—" },
+            { "path": "body" }
+          ],
           "empty": "还没有故事节拍——继续推进。"
         },
         {
@@ -83,6 +87,7 @@
           "mount": "panel",
           "layout": "sheet",
           "source": "@post",
+          "single": "战局是**一条**记录（`@post` 的局势汇总），不是「一行一个项目」——按规则直接显示详情，不造一个只有一行的列表再点进去",
           "columns": [
             { "path": "hegemon", "label": "霸权", "missing": "无" },
             { "path": "wars", "label": "交战", "fmt": "pairs", "sep": "↔" },
@@ -103,9 +108,10 @@
           "id": "ai-blueprints",
           "title": "AI 在改设计图",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@post.decisions.blueprints[*]",
           "key": "blueprint",
+          "brief": ["势力", "动作", "舰级", "在哪造"],
           "columns": [
             { "path": "faction", "label": "势力", "dot": "@state.factions[?势力=${faction}].颜色" },
             { "path": "action", "label": "动作", "fmt": "enum", "map": { "created": "新建", "retuned": "重估", "reaped": "回收", "skipped": "跳过" } },
@@ -120,9 +126,10 @@
           "id": "ai-ships",
           "title": "AI 给舰下的判定",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@post.decisions.ships[*]",
           "key": "ship",
+          "brief": ["判定", "目标", "船体"],
           "columns": [
             { "path": "ship", "label": "舰", "dot": "@state.factions[?势力=${faction}].颜色" },
             { "path": "verdict", "label": "判定", "fmt": "enum", "map": { "haul": "跑运输", "move": "机动", "engage": "接战", "bombard": "轰炸", "colonize": "殖民", "withdraw": "自保撤退", "hold": "没派活" } },
@@ -137,8 +144,10 @@
           "id": "events",
           "title": "本回合事件明细",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@state.events[*]",
+          "key": "type",
+          "brief": ["舰", "城", "攻击方", "合同号"],
           "columns": [
             { "path": "type", "label": "类型", "fmt": "enum", "unmapped": "?", "map": {
               "attack": "开火", "ship_destroyed": "舰被毁", "siege": "围城", "city_razed": "城被夷平",
@@ -148,7 +157,11 @@
               "capital_relocated": "迁都", "cargo_loaded": "装货", "cargo_delivered": "到货",
               "contract_posted": "挂单（运力）", "contract_accepted": "接单", "contract_delivered": "单已交付",
               "contract_reviewed": "考核承运方", "contract_ended": "单结束"
-            } }
+            } },
+            { "path": "舰", "fmt": "list", "missing": "—" },
+            { "path": "城", "fmt": "list", "missing": "—" },
+            { "path": "攻击方", "fmt": "list", "missing": "—" },
+            { "path": "合同号", "fmt": "list", "missing": "—" }
           ],
           "empty": "本回合没有事件。"
         }
@@ -157,17 +170,16 @@
     {
       "id": "factions",
       "title": "势力",
-      "hint": "一行一势力：位置、军事、钱 —— **库存（读）紧挨预算（控制）**，改完点底部「应用到服务器」",
       "views": [
         {
           "id": "faction-table",
           "title": "势力概况",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@state.factions[*]",
           "key": "势力",
           "select_kind": "faction",
-          "card": "sel-faction",
+          "brief": ["实力占比", "状态", "城", "舰"],
           "order": [{ "by": "@post.power_share.${势力}", "dir": "desc" }],
           "columns": [
             { "path": "势力", "dot": "颜色", "click": "faction" },
@@ -205,17 +217,16 @@
     {
       "id": "fleet",
       "title": "舰队",
-      "hint": "一舰一行：在哪、归谁、角色、船体、**有效指令 + 这句话谁说的**，指令可以直接在这一行改",
       "views": [
         {
           "id": "ship-table",
           "title": "全部舰",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@state.ships[*]",
           "key": "舰名",
           "select_kind": "ship",
-          "card": "sel-ship",
+          "brief": ["舰级", "角色", "船体"],
           "group": { "by": "势力", "dot": "@state.factions[?势力=${势力}].颜色" },
           "order": [{ "by": "角色", "dir": "asc" }, { "by": "舰名", "dir": "asc" }],
           "columns": [
@@ -236,17 +247,16 @@
     {
       "id": "cities",
       "title": "城市",
-      "hint": "一城一行：人口、忠诚、**忠诚目标拆出的原因项**，以及能改它的娱乐/福利预算",
       "views": [
         {
           "id": "city-table",
           "title": "全部城",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@state.cities[*]",
           "key": "城名",
           "select_kind": "city",
-          "card": "sel-city",
+          "brief": ["忠诚", "人口", "天体"],
           "group": { "by": "势力", "dot": "@state.factions[?势力=${势力}].颜色" },
           "order": [{ "by": "忠诚度", "dir": "asc" }],
           "columns": [
@@ -271,15 +281,15 @@
     {
       "id": "market",
       "title": "市场·运输",
-      "hint": "逐笔成交（含运费与丢货）、价格、以及每艘货船此刻在哪一步",
       "views": [
         {
           "id": "trades",
           "title": "本回合成交",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@post.market_trades[*]",
           "key": "buyer",
+          "brief": ["卖方", "货", "运费率"],
           "columns": [
             { "path": "buyer", "label": "买方", "dot": "@state.factions[?势力=${buyer}].颜色" },
             { "path": "seller", "label": "卖方", "dot": "@state.factions[?势力=${seller}].颜色" },
@@ -296,9 +306,10 @@
           "id": "haul",
           "title": "每艘货船此刻",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@post.haul_steps",
           "key": "@key",
+          "brief": ["这一步", "地点", "件数"],
           "columns": [
             { "path": "@key", "noun": "舰名", "label": "舰" },
             { "path": "@state.ships[?舰名=${@key}].势力", "noun": "势力", "label": "势力", "missing": "—" },
@@ -315,6 +326,7 @@
           "mount": "panel",
           "layout": "pairs",
           "source": "@post.market_price",
+          "single": "价格是一张**标量账**（资源 → 价格）：每一项没有「更多字段」可看 ⇒ 这一板自己就是详情，不为它造列表",
           "fmt": "num",
           "digits": 2,
           "sort": "desc",
@@ -324,9 +336,10 @@
           "id": "offers",
           "title": "挂单簿",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@state.market.offers[*]",
           "key": "seller",
+          "brief": ["货", "量", "要价"],
           "order": [{ "by": "amount", "dir": "desc" }],
           "columns": [
             { "path": "seller", "label": "卖家", "dot": "@state.factions[?势力=${seller}].颜色" },
@@ -341,39 +354,21 @@
     {
       "id": "blueprints",
       "title": "设计图",
-      "hint": "一行一势力：库里每张图 = 一片叶（舰级 / 选装 / 倾向三轴 / 归属），末尾可以**新建**一张",
       "views": [
         {
           "id": "bp-table",
           "title": "各势力的设计图库",
           "mount": "panel",
-          "layout": "table",
+          "layout": "layers",
           "source": "@control[*]",
           "key": "势力",
           "select_kind": "faction",
+          "brief": ["舰", "舰队"],
           "columns": [
             { "path": "势力", "click": "faction", "dot": "@state.factions[?势力=${势力}].颜色" },
+            { "path": "@post.factions.${势力}.ship_count", "noun": "ship_count", "label": "舰", "fmt": "int", "missing": "—" },
+            { "path": "@post.factions.${势力}.fleet_value", "noun": "fleet_value", "label": "舰队", "fmt": "num", "digits": 0, "missing": "—" },
             { "leaf": "@control[?势力=${势力}].设计图库", "new": true }
-          ]
-        }
-      ]
-    },
-    {
-      "id": "global",
-      "title": "全局",
-      "hint": "链上谁都没说话时按哪一档（全局作用域）。各层自己的表态（@scope 的势力/天体/城）就在下面几列",
-      "views": [
-        {
-          "id": "global-scope",
-          "title": "全局作用域",
-          "mount": "panel",
-          "layout": "sheet",
-          "source": null,
-          "columns": [
-            { "owner": "global", "noun": "global", "label": "全局默认归谁" },
-            { "path": "@scope.factions", "noun": "factions", "label": "有表态的势力", "fmt": "pairs", "sep": "=" },
-            { "path": "@scope.bodies", "noun": "bodies", "label": "有表态的天体", "fmt": "pairs", "sep": "=" },
-            { "path": "@scope.cities", "noun": "cities", "label": "有表态的城", "fmt": "pairs", "sep": "=" }
           ]
         }
       ]

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `remove: true` 同时带了别的字段 ⇒ 记一条拒绝。返回 `true` = 这条补丁到此为止。
+/// `删除: true` 同时带了别的字段 ⇒ 记一条拒绝。返回 `true` = 这条补丁到此为止。
 pub fn remove_conflicts(
     remove: bool,
     present: &[&str],
@@ -17,14 +17,14 @@ pub fn remove_conflicts(
         "",
         "remove_conflicts_with_value",
         format!(
-            "`remove: true` 不能再带 {}：删掉这片叶与给它写值/写归属是两件事（要什么值请删完再单独发一条）。",
+            "`删除: true` 不能再带 {}：删掉这张图与给它写值/写归属是两件事（要什么值请删完再单独发一条）。",
             present.join(" / ")
         ),
     );
     true
 }
 
-/// 记一次删叶的结果：**真的**删掉了才进 `removed`；本来就没有这片叶是幂等成功。
+/// 记一次删除的结果：**真的**删掉了才进 `removed`；本来就没有这张图是幂等成功。
 pub fn leaf_removed(report: &mut ApplyReport, path: String, existed: bool) {
     if existed {
         report.removed(path);
@@ -143,9 +143,9 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         // `state.control` 借出去，后面所有需要 `state.city(..)` 的校验都借不动。
         // 每个写点各自取一次 entry（同名 `fid` 的 `Control` 是同一个）。
         //
-        // 每片叶一个 `apply_*` 助手：它们各自处理「删叶 / 写值 / 写归属」三件事，
-        // 顺序统一是 **删叶（含冲突检查）→ 实体校验 → 写**。抽出来的原因不是行数：
-        // `remove` 的冲突检查与幂等语义要在**每一片**叶上完全一致。
+        // 每片叶一个 `apply_*` 助手：它们各自处理「写值 / 写归属」两件事，
+        // 顺序统一是 **实体校验 → 写**。抽出来的原因不是行数：写值即接管与
+        // presence-aware 保留现值的语义要在**每一片**叶上完全一致。
         if let Some(d) = &fac.default_doctrine {
             apply_default_doctrine(state, &fid, d, &mut report);
         }
@@ -222,7 +222,6 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 &ip.building,
                 ip.value,
                 ip.mode,
-                ip.remove,
                 i,
                 &mut report,
             );
@@ -236,7 +235,6 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 &bp.building,
                 bp.value,
                 bp.mode,
-                bp.remove,
                 i,
                 &mut report,
             );
@@ -267,27 +265,6 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 continue; // 已在上面的循环里记过 no_such_faction。
             }
             let path = format!("control[{fi}].首都");
-            let mut present = Vec::new();
-            if cap.value.is_some() {
-                present.push("值");
-            }
-            if cap.mode.is_some() {
-                present.push("归属");
-            }
-            if remove_conflicts(cap.remove, &present, &path, &mut report) {
-                continue;
-            }
-            if cap.remove {
-                let existed = state
-                    .control
-                    .entry(fac.faction_id.clone())
-                    .or_default()
-                    .capital
-                    .take()
-                    .is_some();
-                leaf_removed(&mut report, path, existed);
-                continue;
-            }
             let cur = state.capital_body(&fac.faction_id);
             let new_value = match cap.value.as_ref() {
                 Some(v) if state.body(v).is_none() => {
@@ -324,8 +301,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
     if let Some(sv) = &req.scope {
         // 作用域补丁：**每个被触碰的节点算一个叶片**（`applied` 是「落地了几个叶片」
         // 的口径，作用域节点与叶子同权）。
-        let touched = usize::from(sv.global.is_some())
-            + sv.factions.len()
+        let touched = sv.factions.len()
             + sv.bodies.len()
             + sv.cities.len();
         state.scope.overlay(sv);

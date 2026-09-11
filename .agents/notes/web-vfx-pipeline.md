@@ -223,7 +223,8 @@ RenderPass(HDR HalfFloat RT, samples:4) → UnrealBloomPass → SunFlarePass →
 | `scratch/shot.mjs` | CDP headless 截图 + 任意 JS eval |
 | `scratch/perf.mjs` | 帧时间探针（跑固定帧数取中位数/分位数，可指定视口尺寸） |
 | `scratch/interact.mjs` | 交互回归：公开 API / 拾取 / select / advance+过渡 / 新局 / 切档 / 零报错 |
-| `scratch/ref/` | 18 张**参考图**（NASA/ESA/Wikimedia，仅作视觉标定，**不进构建、不是资产**）+ `INDEX.md` |
+| `refs/` | **参考图源库**（NASA/ESA/Wikimedia + 艺术渲染）：**进版本库、不进构建**。见 §参考图那条推理 |
+| `scratch/ref/` | 参考图的**派生物**：裁图 / 放大 / `*.stats.json`（可再生产 ⇒ 不进库）。上一版这里记的"18 张 + INDEX.md"随那个 worktree 一起丢了 |
 
 **截图/测量一律用 `scratch/*.mjs` 走 `127.0.0.1:9333` 的 headless Edge**，
 不要用 DSH 的共享 `browser_*`——那个浏览器会被**别的会话**导航走（本轮就被导到

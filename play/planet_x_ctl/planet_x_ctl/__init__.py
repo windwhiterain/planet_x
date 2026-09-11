@@ -16,7 +16,7 @@ Tri-state ownership (``.agents/notes/control-live-layers.md``)
 
 Every controllable leaf carries a **mode**: ``Inherit`` (this layer says nothing) / ``Auto`` (the
 system decides) / ``Player`` (the player decides). The ownership chain for a ship's order is
-``leaf → faction scope → global scope``; the most specific layer that
+``leaf → faction scope``; the most specific layer that
 is not ``Inherit`` wins, and all-``Inherit`` falls back to ``Auto``. The **three style** axes have the
 same shape with their own faction-level default: ``风格 → 舰队默认风格``,
 ``姿态 → 舰队默认姿态`` and ``角色 → 舰队默认角色`` (角色：``War`` 战舰 / ``Freight``
@@ -29,7 +29,7 @@ kit refuses to create it from a single-axis patch (see ``Surface._require_both_a
 ⚠ One axis is **alive**: ``角色`` is written by the automatic controller every round
 (集货定编 ``autocontrol::freight`` + 派观测舰去异常区 ``autocontrol::knowledge``), but only under
 ``Inherit`` — a ``Player`` leaf freezes it. So on that axis "不表态" means "AI 可以每回合重新决定",
-and deleting the leaf means **放手**, not freezing (``Surface.remove_role``).
+把归属改成 ``Auto`` 就是**放手**，不是冻结。
 
 **写值即接管 (writing a value takes over).** In a diff, writing a leaf's ``value``/``behavior``
 while omitting ``mode`` silently turns that leaf into ``Player`` (the engine reports it on stderr as
@@ -135,7 +135,6 @@ class _LeafFacts(Mapping[str, tuple[str, ...]]):
                 "read_only": {l["field"]: tuple(l.get("read_only") or ()) for l in leaves},
                 "actions": tuple(a["field"] for a in (d.get("actions") or ())),
                 "owner_field": d.get("owner_field") or "归属",
-                "remove_field": d.get("remove_field") or "删叶",
             }
         return self._doc
 
@@ -287,13 +286,14 @@ EFFECTIVE_PROVENANCE_COLUMN = "effective_order_from_engine"
 #:
 #: The fallback trio below re-implements the chain from the read face, so it is an *approximation* of
 #: the engine's answer and **does not model the design-blueprint layer** at all
-#: (``leaf → fleet default → faction scope → global``, missing ``leaf → **blueprint** → …``).
+#: (``leaf → fleet default → faction scope``, missing ``leaf → **blueprint** → …``).
 #: Prefer ``ENGINE_EFFECTIVE_COLUMNS``; see the README.
 APPROX_COLUMNS = (
     "effective_order_mode_approx",
     "effective_order_value_approx",
     # ⚠ 这一列是「**归属**链上最具体的有意见者」（`leaf` / `fleet_default` / `faction_scope` /
-    # `global_scope` / `auto_fallback`），**不是**引擎 `order_source` 的「**值**是谁供的」。
+    # `auto_fallback`），**不是**引擎 `order_source` 的「**值**是谁供的」。
+    # ⚠ 2026-10 用户裁决删掉了**全局那一档** ⇒ 这里不再有 `global_scope` 这个来源。
     # 名字不同是故意的：本地近似没有资格冒用引擎的列名（那正是这次要修的谎）。
     "effective_authority_approx",
 )
@@ -818,10 +818,8 @@ class Surface:
     def scope_of(self, kind: str, name: str | None = None) -> str:
         """The scope tree's opinion at one node, or ``Inherit`` when the node says nothing.
 
-        ``kind`` ∈ ``global`` / ``factions`` / ``bodies`` / ``cities``.
+        ``kind`` ∈ ``factions`` / ``bodies`` / ``cities``（``global`` 那一档 2026-10 已删）。
         """
-        if kind == "global":
-            return self.scope.get("global") or INHERIT
         for entry in self.scope.get(kind) or []:
             if entry[0] == name:
                 return entry[1]
@@ -1330,81 +1328,6 @@ class Surface:
         self._add(faction, "首都", (), patch)
         return self
 
-    # -- mutations: deleting leaves ("remove") ----------------------------------------
-
-    def remove(self, faction: str, kind: str, key: Any = None) -> "Surface":
-        """**删掉一片控制叶**（引擎的 `remove: true`）：这一层回到「没有说话」。
-
-        与「把 `mode` 改回 `Inherit`」**不是**一回事：只要那片叶还在，取值就优先用**叶里的值**
-        （``State::ship_doctrine`` 是 ``leaf.map(|l| l.value).unwrap_or(record)``，与 `mode` 无关）。
-        所以想让一艘舰**真的回到出厂快照**（或让势力级默认不再供值），只能删叶。
-        删一片本来就不存在的叶是幂等的（引擎既不报丢弃、也不进 `NOTE_APPLY_REMOVED`）。
-
-        ``key`` 与读面同形：逐舰叶给舰名、预算叶给资源名、权重叶给 ``(城, 建筑下标)``、
-        势力级单片叶不给（``None``）。名字用 :meth:`remove` 而不是 ``clear`` 是为了和引擎
-        补丁里的字段同名——同一件事在两处叫两个名字正是这个仓库反复吃亏的地方。
-        """
-        self._require_faction(faction)
-        key = _normalize_key(kind, key)
-        patch: dict = {"删叶": True}
-        for f, v in zip(LEAF_KINDS[kind], key):
-            patch[f] = v
-        self._add(faction, kind, key, patch)
-        return self
-
-    def remove_doctrine(self, selection: Any) -> "Surface":
-        """逐舰：删掉**风格叶** ⇒ 这些舰的风格回到「舰队默认 / 出厂快照」。"""
-        for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "风格", (ship,), {"舰": ship, "删叶": True})
-        return self
-
-    def remove_kiting(self, selection: Any) -> "Surface":
-        """逐舰：删掉**风筝姿态叶** ⇒ 回到「舰队默认 / 出厂快照」。"""
-        for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "姿态", (ship,), {"舰": ship, "删叶": True})
-        return self
-
-    def remove_role(self, selection: Any) -> "Surface":
-        """逐舰：删掉**角色叶** ⇒ **交回自动定编**（AI 下回合可能立刻又写下它的结论）。
-
-        ⚠ 这与另两条风格轴上的"删叶"含义不同：那里删掉 = 回到出厂快照并**从此冻结**；
-        这里删掉 = **放手**。想让某个角色稳定下来就写 ``mode='Player'``，而不是删叶。
-        """
-        for faction, ship in self._ship_pairs(selection):
-            self._add(faction, "角色", (ship,), {"舰": ship, "删叶": True})
-        return self
-
-    def remove_default_role(self, faction: str) -> "Surface":
-        """势力级：删掉**默认角色叶** ⇒ 这一层不再供值，自动控制的逐舰定编重新说了算。"""
-        self._add(faction, "舰队默认角色", (), {"删叶": True})
-        return self
-
-    def remove_default_doctrine(self, faction: str) -> "Surface":
-        """势力级：删掉**默认风格叶** ⇒ 这一层不再供值（回落到作用域链 / 舰上记录值）。"""
-        self._add(faction, "舰队默认风格", (), {"删叶": True})
-        return self
-
-    def remove_default_kiting(self, faction: str) -> "Surface":
-        """势力级：删掉**默认风筝姿态叶** ⇒ 这一层不再供值。"""
-        self._add(faction, "舰队默认姿态", (), {"删叶": True})
-        return self
-
-    def remove_default_ship_order(self, faction: str) -> "Surface":
-        """**已删除**：舰队默认指令那一片叶不存在了（2026-10 用户裁决）。
-
-        指令是**即时操作**（去那里 / 跟随那艘船），没有"势力级默认"可言；实测那片叶也不是
-        "默认值"而是**全舰队接管开关**（写它 ⇒ 全舰队归属变 `Player` ⇒ 自动控制的
-        style/freight/contract 闸门全跳过、连自保撤退都不再生效）。长期倾向（风格 / 风筝姿态 /
-        角色）仍有舰队级默认，见 :meth:`set_default_role` 等。
-
-        保留这个方法名只为**响亮地失败**：它还在这里，脚本一跑就知道自己过时了。
-        """
-        raise AttributeError(
-            "remove_default_ship_order 已删除：`default_ship_order` 那片叶不存在了（2026-10 裁决："
-            "指令是即时操作，只写逐舰叶）。想让整支舰队干同一件事，用 `order(...)` 逐个点名，"
-            "或者用 `set_default_role(...)` 这类**长期倾向**的舰队级默认。"
-        )
-
     # -- 设计图（还不存在的舰的出厂规格）----------------------------------------------
 
     def set_blueprint(self, faction: str, name: str, *, class_: str | None = None,
@@ -1498,15 +1421,20 @@ class Surface:
         ⚠ 挂它的建造区**不会**被自动改指针：它们随后是**悬空指针 ⇒ 停产**（进度不再增加），
         读面照旧把那个指针原样输出。想让它们回去自动选装，逐个
         :meth:`set_blueprint_pointer(..., blueprint=None)`。
+
+        这是**蓝图专用**删除动作；控制叶没有「恢复出厂值 / 删叶」机制（2026-10 用户裁决：
+        出厂默认只是初始值，不是可恢复的目标）。
         """
-        return self.remove(faction, "设计图库", name)
+        self._require_faction(faction)
+        self._add(faction, "设计图库", (name,), {"图名": name, "删除": True})
+        return self
 
     def set_blueprint_pointer(self, faction: str, city: str, building: Any,
                               blueprint: str | None) -> "Surface":
         """把一个**建造区**指向一张图（``blueprint=名字``）或拆掉指针（``blueprint=None``）。
 
-        这是**结构叶**补丁（``buildings[]``），不是控制叶——所以它与 ``Surface.remove`` 那套
-        叶键无关。两道校验在引擎侧：库里没有那个名字 ⇒ ``no_such_blueprint``（**绝不静默回落
+        这是**结构叶**补丁（``buildings[]``），不是控制叶——所以它与已删除的控制叶删叶机制无关。
+        两道校验在引擎侧：库里没有那个名字 ⇒ ``no_such_blueprint``（**绝不静默回落
         生成器**）；图与该区的 ``ship_type`` 对不上 ⇒ ``blueprint_class_mismatch``。
         ``None`` 写的是 ``null``（**拆掉**），不是"缺席"（缺席 = 不动这一格）。
         """
@@ -1536,7 +1464,7 @@ class Surface:
             {"城": city, "建筑": idx, "建造舰级": class_, "设计图": name})
         return self
 
-    def set_scope(self, *, global_mode: str | None = None,
+    def set_scope(self, *,
                   factions: Mapping[str, str] | None = None,
                   bodies: Mapping[str, str] | None = None,
                   cities: Mapping[str, str] | None = None) -> "Surface":
@@ -1547,16 +1475,12 @@ class Surface:
         says otherwise. ⚠ 指令**只有逐舰叶**（2026-10 裁决：舰队默认指令那片叶已删）；势力级只剩
         **长期倾向**三片（``default_doctrine`` / ``default_kiting`` / ``default_role``）。
         """
-        if global_mode is not None:
-            self._scope_pending["global"] = _check_mode(global_mode)
         for key, table in (("factions", factions), ("bodies", bodies), ("cities", cities)):
             for node, mode in (table or {}).items():
                 self._scope_pending.setdefault(key, {})[node] = _check_mode(mode)
         return self
 
     def set_scope_mode(self, kind: str, name: str, mode: str) -> "Surface":
-        if kind == "global":
-            return self.set_scope(global_mode=mode)
         return self.set_scope(**{kind: {name: mode}})
 
     def _known_resources(self, faction: str, kind: str) -> set[str]:
@@ -1626,8 +1550,6 @@ class Surface:
 
     def _scope_patch(self) -> dict:
         out: dict[str, Any] = {}
-        if "global" in self._scope_pending:
-            out["global"] = self._scope_pending["global"]
         for key in ("factions", "bodies", "cities"):
             if key in self._scope_pending:
                 out[key] = [[node, mode] for node, mode in sorted(self._scope_pending[key].items())]
@@ -1837,7 +1759,6 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         return leaves.get((fac, kind, key))
 
     defaults = {f: s.leaf(f, "舰队默认角色") for f in s.factions}
-    gscope = s.scope_of("global")
     fscope = {f: s.scope_of("factions", f) for f in s.factions}
 
     order_leaf_, order_mode, order_value, order_behavior = [], [], [], []
@@ -1863,14 +1784,12 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
         kk = L(fac, "姿态", (ship,))
         kit.append(kk.value if kk is not None and kk.exists else None)
         # ---- local approximation (fallback only: 旧索引目录没有引擎那几列) ----
-        # `leaf → faction scope → global`（指令链，**不建模**已删除的舰队默认叶与图层——
-        # 这两层在 2026-10 之后对**指令**都不存在了）。
+        # `leaf → faction scope → 兜底 Auto`（指令链，**不建模**已删除的舰队默认叶与图层——
+        # 这两层在 2026-10 之后对**指令**都不存在了；**全局那一档也已删**）。
         if omode != INHERIT:
             authority, mode = "leaf", omode
         elif fscope.get(fac, INHERIT) != INHERIT:
             authority, mode = "faction_scope", fscope[fac]
-        elif gscope != INHERIT:
-            authority, mode = "global_scope", gscope
         else:
             authority, mode = "auto_fallback", AUTO
         # 取值：叶里的值就是有效值（没有更高的一层能覆盖它）。
@@ -2266,7 +2185,7 @@ class Report:
         if self.error:
             lines.append(f"  ERROR: {self.error}")
         for leaf in self.removed_leafs or self.removed:
-            lines.append(f"  removed: {leaf}（这片叶被真的删掉了 ⇒ 取值换来源）")
+            lines.append(f"  removed: {leaf}（这张设计图被真的删掉了 ⇒ 挂它的建造区悬空停产）")
         for r in self.failed_requests:
             lines.append(f"  REQUESTED-BUT-NOT-LANDED: {r.leaf}.{r.field} "
                          f"(asked {r.value!r}, read face now {r.after!r})")
@@ -2295,16 +2214,11 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
     the manifest's ``leaves[].values`` is the authority, `_leaf_value` asks it).
 
     ⚠ That equivalence does **not** hold for the *value*: an existing style leaf supplies its value
-    even when its mode is ``Inherit`` (``State::ship_doctrine`` is
-    ``leaf.map(|l| l.value).unwrap_or(record)``), while a missing leaf falls back to the ship's factory
-    record. Deleting a leaf therefore really changes behaviour, and this function has to be able to
-    see it:
-
-    * **势力级单片叶**（`default_*` / `capital`）: 读面给 `null` 就是"没有这片叶" ⇒ 多报一个
-      ``exists`` 字段（`False ⇄ True` 是一次真实的"叶被删掉/被建出来"）。
-    * **逐舰叶**：读面**看不出来**（`ship_doctrine`/`ship_kiting` 对每艘舰都有一行，列的是**有效
-      值**，哪怕叶并不存在）。所以这里不猜：逐舰删叶是否落地看引擎的
-      `NOTE_APPLY_REMOVED` 回执（[`Report.removed`]），不看读面。
+    even when its mode is ``Inherit``; a missing leaf falls back to the ship's record.  This function
+    only compares read-face shape; control-leaf deletion is no longer supported, so there is no
+    ``remove`` request to verify.  Blueprint deletion still lands as a normal read-face row
+    disappearance (and is also listed in `NOTE_APPLY_REMOVED`), so that one keeps the ``exists``
+    treatment below.
     """
     out: dict[str, dict[str, Any]] = {}
     for fac in s.raw.get("control") or []:
@@ -2342,15 +2256,12 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 raw = fac.get(kind)
                 if raw is None:
                     continue
-                # `remove` 也算一个被请求的字段：删叶请求没有值可写（`_leaf_fields` 那边靠
-                # `exists` 翻转看结果），漏掉它会让"删一片势力级叶"在 `requests` 里**消失**，
-                # 于是 `verify` 看上去"什么都没请求"——静默的成功比失败更难查。
-                # ⚠ 值字段名**按 kind 查表**（`首都`→`值`、`舰队默认角色`→`角色`…）：
-                # 写成一张写死的名单时，新轴的写值会在 `requests` 里静默消失，与漏掉 `remove` 同一个坑。
+                # 设计图删除请求没有值可写（`_leaf_fields` 那边靠读面行消失 / 回执看结果），
+                # 漏掉它会让删除在 `requests` 里**消失**，于是 `verify` 看上去"什么都没请求"。
                 # 值字段**按 kind 问 manifest**（`首都`→`值`、`舰队默认角色`→`角色`、
                 # 两轴风格叶→两个字段…）：写成一张写死的名单时，新轴的写值会在 `requests` 里
-                # 静默消失，与漏掉 `remove` 同一个坑。多字段于是不需要特例。
-                wanted = {"归属", "删叶", *LEAF_KINDS.values(kind)}
+                # 静默消失。多字段于是不需要特例。
+                wanted = {"归属", "删除", *LEAF_KINDS.values(kind)}
                 out.setdefault(f"{fid}.{kind}", {}).update(
                     {k: v for k, v in raw.items() if k in wanted})
                 continue
@@ -2479,7 +2390,7 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
     # The engine reports takeover paths by *diff index*; translate them back to leaf identities.
     rep.took_over_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.took_over})
     took_leafs = set(rep.took_over_leafs)
-    # 删叶同理：回执里给的是 `中国.风格[0].舰` 这种**下标路径**，翻成叶名再比。
+    # 设计图删除同理：回执里给的是 `中国.设计图库[0].图名` 这种**下标路径**，翻成图名再比。
     rep.removed_leafs = sorted({_engine_path_to_leaf(diff_dict, p) or p for p in rep.removed})
     removed_leafs = set(rep.removed_leafs)
     for leaf, fields in requested.items():
@@ -2487,10 +2398,10 @@ def verify(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
         for fld, val in fields.items():
             b = before_f.get(leaf, {}).get(fld, "<absent>")
             a = after_f.get(leaf, {}).get(fld, "<absent>")
-            # 「删叶」是**另一种**请求：它的成功不是"字段变成了这个值"，而是"这片叶没了"
-            # （`remove` 只存在于写面，读面永远没有这个字段）。权威信号是引擎的回执：
+            # 「删除设计图」是**另一种**请求：成功不是"字段变成了这个值"，而是"这张图没了"
+            # （`删除` 只存在于写面，读面永远没有这个字段）。权威信号是引擎的回执：
             # 没被丢弃 = 落地（幂等删除也算落地，只是不进 `NOTE_APPLY_REMOVED` 的名单）。
-            is_remove = fld == "删叶" and bool(val)
+            is_remove = fld == "删除" and bool(val)
             removed_here = leaf in removed_leafs
             rep.requests.append(Request(
                 leaf=leaf, field=fld, value=val, before=b, after=a,
@@ -2542,10 +2453,10 @@ class Applied:
 
     @property
     def removed(self) -> list[str]:
-        """Paths of the control leaves that were **actually deleted** by this apply.
+        """Paths of the **blueprints** that were actually deleted by this apply.
 
-        The engine only lists leaves that really existed; a delete of a leaf that was already gone is
-        an idempotent success and is deliberately *not* listed (see `apply_diff`'s 「删叶」).
+        The engine only lists blueprints that really existed; a delete of one that was already gone
+        is an idempotent success and is deliberately *not* listed.
         """
         out: list[str] = []
         for r in self.receipt:

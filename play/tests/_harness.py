@@ -399,7 +399,7 @@ class Harness:
         if p.returncode != 0:
             raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-2000:]}")
         # 回执的语义（`src/main.rs`）：`NOTE_APPLY_TOOKOVER` / `NOTE_APPLY_REMOVED` 是**预期
-        # 行为**（写值即接管、删叶换来源）；只有 `WARN_APPLY_SKIPPED`（叶片没落地）才是
+        # 行为**（写值即接管、设计图删除换来源）；只有 `WARN_APPLY_SKIPPED`（叶片没落地）才是
         # 「这份场景不是你以为的那样」——进 warnings，由 `report()` 响亮报出。
         for line in p.stderr.splitlines():
             line = line.strip()

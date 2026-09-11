@@ -42,17 +42,18 @@
    出这种事——`owner` 行按「作用域键在语料里」判绿，而宿主根本不查那个词，实机 hover
    无反应（2026-10 实测的缺口）。
 
-⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
-`Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
-`remove` 带 `skip_serializing_if = "is_false"` ⇒ 读面永远不发这个字段。所以上头的 `∪ {remove}`
-是**允许集**（宽容那一侧），不是「应该有」；谁要在读面上真的看到它，本组的 detail 会报出来。
+⚠ **控制叶的删叶机制已删除**（2026-10 用户裁决：出厂默认只是初始值，不是可恢复的目标）：
+`--control-schema` 不再有 `remove_field`，读面条目也只含 keys / values / carries /
+read_only / 归属。设计图删除是蓝图专用动作，用 `删除` 键，不在下面的控制叶字段集对账里。
 
 8. **追加机制**（§8，2026-10 第 8 步）：用户裁决 *「我不希望有『其余』这样的栏目」*
    *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* —— 读面的「残差折叠桶」
-   整条删掉，没被声明的字段改成**追加的普通列 / 普通行**。判据四条：
+   整条删掉，没被声明的字段改成**普通列 / 普通行**。⚠ 第 11 步把左栏改成**分层 UI**
+   （外层总览 → 内层详情），残差的落点从"表格的追加列"换到"**详情层的追加行**"，
+   下面这五条的**口径一个字没改**，只是 §8a 守的那一层换了名字（判据文本里写明）。
    * **§8a 读面覆盖**（跑真世界 + **把 `specview.js` 原样跑起来**，见 `_append_probe.js`）：
-     每一张读面表/卡片上
-     `声明列 ∪ 追加列 ∪ 声明不看列 == 该记录的全部引擎字段`，
+     每一张读面表/卡片的**详情层**上
+     `声明列 ∪ 追加行 ∪ 声明不看列 == 该记录的全部引擎字段`，
      任何一边多一个/少一个都红；防空转的实测数字（视图数/记录数/字段数/声明/追加/不看）
      写进判据文本。
    * **§8b 没有折叠桶**（静态）：`specview.js` 的**代码**里 `其余` / `sv-th-res` /
@@ -61,7 +62,7 @@
    * **§8c 追加列的名词覆盖率**：追加字段名必须查得到解释（走与手工列同一条查词链）。
      2026-10 第 10 步**收紧**：从前 ASCII 名一律"如实记账、不算红"，现在**一个都不许弹不出
      解释**——确实还剩下的必须逐条自报（`KNOWN_UNNAMED_AUTO`）并写明理由（实测 1 个：
-     `faction`，批 C 的决策结构体字段）。中文追加名字实测 **78** 个全命中。
+     `faction`，批 C 的决策结构体字段）。中文追加名字实测 **74** 个全命中。
    * **§8d 投影对账**（用户要的「把每张声明的表与投影真实列做集合对账」）：
      `(声明 ∪ 追加 ∪ 不看) ∩ 投影列 == 投影列 ∩ 实体 schema 字段`（`--index` 的
      `schema.json`）。为什么不直接 `== 投影列`：投影自己有派生列、也真的丢字段
@@ -86,6 +87,27 @@
      一起删光**作弊（那样没被声明的字段就真的不见了，比桶更糟）。
    防空转的实测数字（页数 7 / 扫过的 JS 份数 17 / 接线标记 5）写进判据文本；
    非恒真由 `_g4_negative.py` ㉜（页塞回声明）㉝（`.concat` 塞回代码）盯着。
+
+10. **左栏是分层的**（§10，2026-10 第 11 步）：用户裁决 *「left bar 的UI组织应当尽量用tabs，
+    不要使用表格」* / *「那不如做成分层的UI，外层显示总览，点击某个项目进入内层显示详情」*。
+    三条判据：
+    * **§10a 声明纪律**（静态）：左栏的 panel 视图要么是 `layout: layers`（**外层总览列表**）
+      加一个非空 `brief`（总览行显示哪几条关键指标 —— 每条必须**命中本视图的一条读列**，
+      前端不许手抄字段清单），要么写 `single` + **非空理由**（只有一条记录的视图：直接显示
+      详情，不为它造一个只有一行的列表再点进去）。旧骨架 `table` / `timeline` / `cards`
+      在 panel 视图里一个都不许剩（"不要使用表格"）；`mount: select` 的卡片本来就是详情层，
+      不许再声明 `brief` / `layers`。
+    * **§10b 每个总览行都能进详情层**（**真渲染**）：`_append_probe.js` 用一个够用的假 DOM
+      把真渲染路径跑起来，逐行走「点进去 → 读详情 → 返回」：每行都得进得去、面包屑末节
+      == 这一行的名字、「← 返回总览」在、返回后外层行数恢复；`single` 的视图在真世界里
+      必须**真的只有 ≤1 条记录**（否则那句"就一条"是假话）。防空转：总行数/视图数写进判据文本。
+    * **§10c 详情层的字段集合 == 该实体的全部字段**（真渲染）：§8a 的**渲染落点** ——
+      屏幕上真有的追加行（`.sv-sheet-row-auto` 的字段名）必须**逐字等于**前端自己算的
+      `residualKeys`，且 `(声明认领 ∩ 字段) ∪ 追加行 == 全部字段`，写面控制行也都在这一层。
+      与 §8a 不重复：§8a 查**声明求值**（前端导出的纯函数），§10c 查**屏幕上真渲染出来的行**。
+    非恒真由 `_g4_negative.py` ㊱（剪断总览行的进入路径 ⇒ §10b 红）㊲（`brief` 里写一个不命中
+    任何列的名字 ⇒ §10a 红）㊳（详情层不再追加残差行 ⇒ §10c 红、而 §8a 仍绿 —— 这正是
+    「两条不是同一条」的证据）㊴（`single` 的理由改空白 ⇒ §10a 红）盯着。
 """
 
 from __future__ import annotations
@@ -111,7 +133,7 @@ STATIC_JS = REPO / "web" / "static"
 # `FIELD_LABEL_CLASSES`：「字段名标签」的类名。这些元素里装的是**名词**（键名 / 表头 /
 # 控制行标签），悬停就该弹解释。清单是**声明式**的：新写一个展示名词的视图，要么复用这些
 # 类名（那它立刻被 §5d 咬住），要么把新类名加到这里——加这一行在 diff 里看得见。
-FIELD_LABEL_CLASSES = ("jv-key", "jv-th", "sv-th", "sv-sheet-k")
+FIELD_LABEL_CLASSES = ("jv-key", "jv-th", "sv-th", "sv-sheet-k", "sv-lkey", "sv-brief-k")
 # `TIP_MOUNTS`：「挂了 tip」的两种写法——宿主直接调 `Tip.attach`，或经求值器的钩子 `ctx.tip`。
 # 用**词边界**匹配（不是子串）：把 `Tip.attach` 改名成 `Tip.attachX` 也算断线（写这条时的
 # 实测：子串匹配会让「改名」骗过判据——`"Tip.attach" in "Tip.attachRenamed"` 为真）。
@@ -131,7 +153,7 @@ def _js_code(path: Path) -> str:
 
 # 读面的根：与 `/api/state` 的 `info` 五个根 + 写面的两个读模板同批（`_frame` 侧同口径）。
 ROOTS = ("state", "pre", "post", "config", "session", "control", "scope")
-LAYOUTS = ("table", "sheet", "cards", "timeline", "pairs")
+LAYOUTS = ("layers", "table", "sheet", "cards", "timeline", "pairs")
 # 短局：40 回合就够长出舰/城/建筑/设计图，整组几秒跑完（不进长局、不读 170 MB 投影）。
 SEED, ROUNDS = 42, 40
 
@@ -675,7 +697,12 @@ def _mirror_expand(source: str, roots: dict) -> list:
         recs = cur
     elif isinstance(cur, dict):
         vals = list(cur.values())
-        recs = vals if vals and all(isinstance(v, dict) for v in vals) else [cur]
+        # ⚠ 空对象 = **没有记录**（第 11 步：`@post.haul_steps` 开局就是 `{}`，
+        # 当成"一条空记录"的话外层总览会多一个幽灵项目）。口径与 `specview.js::wrap` 逐字对齐。
+        if not vals:
+            recs = []
+        else:
+            recs = vals if all(isinstance(v, dict) for v in vals) else [cur]
     else:
         recs = [cur]
     return [r for r in recs if isinstance(r, dict)]
@@ -712,7 +739,7 @@ def _mirror_report(doc: dict, roots: dict) -> dict:
     for page in (doc.get("pages") or []) + [{"views": doc.get("select") or []}]:
         for spec in page.get("views") or []:
             layout = spec.get("layout", "table")
-            if layout not in ("table", "sheet", "cards") or spec.get("source") in (None,):
+            if layout not in ("table", "sheet", "cards", "layers") or spec.get("source") in (None,):
                 continue
             recs = _mirror_expand(spec["source"], roots)
             claimed, omitted = _mirror_claimed_omitted(spec)
@@ -765,7 +792,8 @@ def run(h, ck) -> None:
         # `source` 的三种合法形态：
         #   * 字符串 = 常规来源；
         #   * **`null`（键必须在）** = 「这张卡故意不依赖任何记录」，只放不取记录的行
-        #     （例如 `{ "owner": "global" }` 那条全局归属）——显式写 null 才允许，
+        #     （`source: null` 今天**没有实例**：唯一那条随「全局作用域」页一起删了，
+        #     但形态本身仍在（语言特性，与没人用的 `layout: cards/timeline` 同理））——显式写 null 才允许，
         #     **漏写**仍然红（那多半是打错/漏了，而不是有意）；
         #   * inline 那条本来就不含列（它只是「路径 → 哪条视图」的映射表）。
         if mount != "inline":
@@ -856,7 +884,6 @@ def run(h, ck) -> None:
     leaves = schema.get("leaves") or []
     actions = schema.get("actions") or []
     owner_field = schema.get("owner_field")
-    remove_field = schema.get("remove_field")
     props = (((schema.get("definitions") or {}).get("FactionControlPatch") or {})
              .get("properties") or {})
     declared = {s["field"] for s in leaves} | {a["field"] for a in actions} | {"势力"}
@@ -871,7 +898,7 @@ def run(h, ck) -> None:
                  + ([f"声明了引擎没有的叶：{extra_decl}"] if extra_decl else [])
                  + ([f"leaves[].field 重复：{leaf_dups}"] if leaf_dups else [])
              ) or (f"{len(declared)} 个键两边一模一样（{len(leaves)} 叶 + {len(actions)} 命令 + 势力）；"
-                   f"owner_field={owner_field!r} remove_field={remove_field!r}"))
+                   f"owner_field={owner_field!r}，已无 remove_field"))
 
     # ══ 3. 读面对账：跑一局真世界，把每一片叶都写一次，再读回来 ══════════════════════
     tmp = Path(tempfile.mkdtemp(prefix="px-g4-"))
@@ -938,9 +965,8 @@ def run(h, ck) -> None:
              "；".join(lost[:4]) or
              f"{fid}：{len(plans)} 片叶全部按哨兵命中（{SEED} / {ROUNDS} 回合，不是空表通过）")
 
-    # 3b. 字段集：每条条目 ⊇ keys ∪ values ∪ carries ∪ read_only ∪ {mode}，⊆ 那个集合 ∪ {remove}。
+    # 3b. 字段集：每条条目 == keys ∪ values ∪ carries ∪ read_only ∪ {mode}，无缺、无多余。
     field_bad: list[str] = []
-    remove_seen: list[str] = []
     n_entries = 0
     for c in post["control"]:
         for spec in leaves:
@@ -950,13 +976,8 @@ def run(h, ck) -> None:
                 n_entries += 1
                 required = set(_keys_of(spec)) | set(spec.get("values") or []) | \
                     set(spec.get("carries") or []) | set(spec.get("read_only") or []) | {owner_field}
-                allowed = required | {remove_field}
                 miss = sorted(required - set(e))
-                extra = sorted(set(e) - allowed)
-                if remove_field in e:
-                    remove_seen.append(f"{c.get('势力')}.{spec['field']}")
-                    if _keys_of(spec):
-                        extra = extra + [f"{remove_field}（列表叶上不该有）"]
+                extra = sorted(set(e) - required)
                 if miss or extra:
                     field_bad.append(
                         f"{c.get('势力')}.{spec['field']}：缺 {miss}、多 {extra}；"
@@ -965,9 +986,7 @@ def run(h, ck) -> None:
     ck.check(f"读面对账：{n_entries} 个读面条目的字段集 == keys ∪ values ∪ carries ∪ read_only "
              f"∪ {{{owner_field}}}（无缺、无多余）",
              not field_bad,
-             f"实测 {remove_field!r} 出现 {len(remove_seen)} 次"
-             f"{'（' + '、'.join(sorted(set(remove_seen))[:5]) + '）' if remove_seen else '（读面根本不发它）'}"
-             + ("；" + "；".join(field_bad[:3]) if field_bad else ""))
+             "；".join(field_bad[:3]) or f"{n_entries} 个条目字段集全部吻合")
 
     # 3c. 形状：keys 空 ⇔ 对象；非空 ⇔ 数组且每一条带齐身份键。
     shape_bad2: list[str] = []
@@ -1116,7 +1135,7 @@ def run(h, ck) -> None:
                 eat(doc_nouns.get("state") or {}, corpus, 0)
                 eat(doc_nouns.get("view") or {}, corpus, 0)
                 # 控制面那半：控制行的**字段名**（`首都`/`投资预算`…）与
-                # 作用域键（`global`/`factions`…）。界面显示的是中文标签，标签查不到时按字段名查。
+                # 作用域键（`factions`/`bodies`/`cities`）。界面显示的是中文标签，标签查不到时按字段名查。
                 eat(doc_nouns.get("control") or {}, corpus, 0)
                 for sec, tables in (doc_nouns.get("projection") or {}).items():
                     if not isinstance(tables, dict):
@@ -1153,7 +1172,8 @@ def run(h, ck) -> None:
     #   * 兜底的字段名（`Tip.attach` 的 field）= `noun` → 叶的字段名（`Controls.fieldOf`）
     #     → 裸字段名的 `path`。
     # 悬停弹得出东西 ⇔ 这两个词里**有一个**在语料里（`tip.js::attach` 的查词顺序）。
-    OWNER_LABEL = {"global": "全局归谁", "factions": "这个势力归谁",
+    # ⚠ 2026-10：`global` 那一档已删（用户裁决），这里是 `controls.js` 的 `OWNER_LABEL` 镜像。
+    OWNER_LABEL = {"factions": "这个势力归谁",
                    "bodies": "这个天体归谁", "cities": "这座城归谁"}
 
     def field_of_row(path: object) -> str:
@@ -1296,7 +1316,7 @@ def run(h, ck) -> None:
     # 为什么要有这一条（§5 看不见的那半边）：上面 §5 查的是**声明**——`views.json` 里
     # `columns` 中当名词显示的列。可是**通用 widget 自己渲染出来的**字段名不在任何 `columns`
     # 里，§5 对它们**一条都不红**。`jsonview.js` 的原始 JSON 视图就是实机反例：
-    # `{字段名: 值}` 的树里 `global`/`bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
+    # `{字段名: 值}` 的树里 `bodies`/`cities`/`factions`/`舰队默认姿态`/`福利预算`
     # 明明在界面上、语料（`--nouns`）里也有，却**从不挂弹窗**（hover 无反应）。
     # 这是**哑巴失败**的典型：没有报错、没有空白屏，只是「没反应」——本仓最拉黑的那种。
     #
@@ -1653,14 +1673,21 @@ def run(h, ck) -> None:
                    f"{' / '.join(sorted(ctrl_kinds))}；"
                    f"自报例外 {len(absent)} 条（{'、'.join(f'{k}（{v[:24]}…）' for k, v in absent.items())}）"))
 
-    # ══ 8. 追加机制：**没被声明的字段 = 普通列 / 普通行**（铁律 R 的读面落点）════════
+    # ══ 8. 追加机制：**没被声明的字段 = 普通行**（铁律 R 的读面落点）════════════════
     #
     # 用户裁决（2026-10）：*「我不希望有『其余』这样的栏目」*
     # *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」*。
     #
-    # 判据 8a（**跑真世界 + 跑前端真代码**）：每一张读面表 / 卡片，
+    # 判据 8a（**跑真世界 + 跑前端真代码**）：每一张读面表 / 卡片 **的详情层**，
     #
-    #     显式声明的列 ∪ 自动追加的列 ∪ 声明不看的列 == 该记录的全部引擎字段
+    #     显式声明的列 ∪ 自动追加的行 ∪ 声明不看的列 == 该记录的全部引擎字段
+    #
+    # ⚠ 第 11 步（2026-10）**只换落点、不换口径**：左栏从"一张宽表"改成**分层 UI**
+    # （外层总览一行一个项目 → 点进内层详情，`layout: layers`）。残差因此从"表格的追加列"
+    # 搬到"详情层末尾的追加行"（`specview.js::sheetOfRecord` 里的 `autoSheetRow`），
+    # 上面那个不变式一个字没变。这就是为什么本判据的实现（`residualCols` / `claimedKeys` /
+    # `omittedKeys`）一行都不用改 —— 变的只是**它守的是哪一层**（§10c 再在真渲染的详情层上
+    # 复验一遍同样的集合，两条不是重复：§8a 查声明求值，§10c 查屏幕上真有的行）。
     #
     # 三样都由 `specview.js` **自己**算（Node 把文件原样加载，调它的 `expand` /
     # `claimedKeys` / `omittedKeys` / `residualCols`），真值是该实体的记录键集合
@@ -1749,11 +1776,13 @@ def run(h, ck) -> None:
         evidence.append(f"{v['id']} 声明{len(claimed & fields)}+追加{len(auto)}"
                         f"{'+不看' + str(len(omitted & fields)) if omitted & fields else ''}"
                         f"={len(fields)}：追加 {'、'.join(v['auto']) or '（无）'}")
-    # 防空转的下限：钉在**实测值**下面一点（实测 14 条视图 / 184 字段 / 79 声明 / 100 追加）。
+    # 防空转的下限：钉在**实测值**下面一点（第 11 步换落点后实测：15 条视图 / 216 条记录 /
+    # 195 个字段 / 87 声明 / 103 追加 / 5 不看 —— 一局 seed 42 · 40 回合）。
     VIEWS_MIN, FIELDS_MIN, DECL_MIN, AUTO_MIN = 10, 120, 50, 60
-    ck.check(f"追加完整性：{len(covered)} 张读面表/卡片（{n_recs} 条记录、{n_fields} 个引擎字段）上"
-             f" 声明列({n_decl}) ∪ 追加列({n_auto}) ∪ 声明不看({n_omit}) == 全部引擎字段"
-             f"（没有任何字段被藏；下限 {VIEWS_MIN} 视图/{FIELDS_MIN} 字段/{DECL_MIN} 声明/{AUTO_MIN} 追加）",
+    ck.check(f"追加完整性（**详情层**）：{len(covered)} 张读面表/卡片（{n_recs} 条记录、"
+             f"{n_fields} 个引擎字段）上 声明列({n_decl}) ∪ 追加行({n_auto}) ∪ 声明不看({n_omit})"
+             f" == 全部引擎字段（详情层里没有任何字段被藏；下限 {VIEWS_MIN} 视图/{FIELDS_MIN} 字段/"
+             f"{DECL_MIN} 声明/{AUTO_MIN} 追加）",
              not missing_f and not phantom_f and not omit_bad_f
              and len(covered) >= VIEWS_MIN and n_fields >= FIELDS_MIN
              and n_decl >= DECL_MIN and n_auto >= AUTO_MIN,
@@ -1812,9 +1841,9 @@ def run(h, ck) -> None:
     undeclared = [k for k in unnamed if k not in KNOWN_UNNAMED_AUTO]
     stale_decl = [k for k in KNOWN_UNNAMED_AUTO if k not in unnamed]
     ck.check(f"名词覆盖率·追加列：{len(zh_names)} 个中文追加字段名全都能弹出解释"
-             f"（走与手工列**同一条**查词链）；追加列里**弹不出解释的 {len(unnamed)} 个**"
+             f"（走与手工列**同一条**查词链；实测下限 60）；追加列里**弹不出解释的 {len(unnamed)} 个**"
              f"都在声明里逐条写明了理由（ASCII 追加名 {len(ascii_names)} 个）",
-             corpus_ok and not no_doc and not undeclared and len(zh_names) >= 40,
+             corpus_ok and not no_doc and not undeclared and len(zh_names) >= 60,
              "；".join(
                  [f"`{k}` 在语料里查不到（hover 空框）" for k in no_doc[:4]]
                  + [f"`{k}` 弹不出解释、也没在 `KNOWN_UNNAMED_AUTO` 里自报（新加的英文列？）"
@@ -1826,7 +1855,7 @@ def run(h, ck) -> None:
                  if unnamed else "**追加列里弹不出解释的 = 0**")
               + (f"；⚠ `KNOWN_UNNAMED_AUTO` 里有已修好的陈旧条目 {stale_decl}（该删了）"
                  if stale_decl else "")
-              if len(zh_names) >= 40 else f"只算到 {len(zh_names)} 个中文追加字段 ⇒ 判据可能空转了"))
+              if len(zh_names) >= 60 else f"只算到 {len(zh_names)} 个中文追加字段 ⇒ 判据可能空转了"))
 
     # 8d. **对投影真实列**（用户要的「把每张声明的表与投影真实列做集合对账」）：
     #     对 `@state.<表>[*]` 的读面，读面上看得见的字段（声明 ∪ 追加 ∪ 不看）与
@@ -1896,8 +1925,8 @@ def run(h, ck) -> None:
     # 正常状态）。塞进主口径会把合法的空账报成红，而完全不查又会让
     # `@scope.factions` 写错一个词没人报。
     #
-    # 防空转：视图数 / 列数都写进判据文本并钉下限（实测 14 张有记录的表 130 条读列、
-    # 另有 1 张 `source: null` 的 3 条）。
+    # 防空转：视图数 / 列数都写进判据文本并钉下限（第 11 步换落点后实测：15 张有记录的表
+    # 140 条读列、另有 1 张 `source: null` 的 3 条）。
     # 非恒真（见 `play/tests/_g4_negative.py` ㉞㉟）：㉞ 把一列的 `path` 改成一个记录上不存在
     # 的字段（⇒ 这一条**自己**红，报出是哪张表哪一列全空）；㉟ 把 `source: null` 那条账的
     # `path` 改坏（⇒ 同样自己红，证明那半边也不是恒绿）。
@@ -2005,6 +2034,212 @@ def run(h, ck) -> None:
              ) or (f"{n_pages} 张页 / {len(js_files)} 份 JS：`leftover` 0 处、`未组织` 0 处；"
                    f"追加接线 {'、'.join(sorted(js_wiring))} 全在"
                    f"（={'、'.join(APPEND_MARKERS)}）"))
+
+
+
+    # ══ 10. 左栏是**分层**的（第 11 步，2026-10）════════════════════════════════════
+    #
+    # 用户裁决：*「left bar 的UI组织应当尽量用tabs，不要使用表格」*
+    # *「那不如做成分层的UI，外层显示总览，点击某个项目进入内层显示详情」* ——
+    # 骨架换了，但第 8/9 步的守卫一条都不许丢（§8a 换落点、§8b/§9 不动、§8c/§8e 照旧），
+    # 所以这里补三条**新骨架自己的**判据（10a 声明 / 10b 进得去 / 10c 详情齐全）。
+    #
+    # ⚠ 防空转的写法与别处一致：**实测数字写进判据文本**并钉下限；只数「判据跑过了」不算数。
+    layered_ids = {x.get("id"): x for x in (got or {}).get("layered") or []}
+    probe_views_by_id = {v.get("id"): v for v in (got or {}).get("views") or []}
+
+    # 10a. **声明纪律**（静态，纯读 `views.json`）：
+    #   * panel（左栏那一页里的视图）**必须**二选一：
+    #       - `layout: layers` + 非空 `brief`：总览行显示哪几条关键指标。每一条 brief 必须
+    #         **命中本视图的一条读列**（先按 `path`、再按显示名 `label`）——「总览行显示什么」
+    #         因此是声明而不是代码（前端不手抄字段清单）；命中控制行也不算（写行不是指标）。
+    #       - `single` + **非空理由**：这条视图只有一条记录 ⇒ 直接显示详情，
+    #         不为它造一个只有一行的列表再点进去（理由非空 == 写清楚为什么）。
+    #     旧骨架 `table` / `timeline` / `cards` 在 panel 里一个都不许剩（用户：不要使用表格）。
+    #   * `mount: select` 的卡片**本来就是详情层**（底栏按名字挑一条）：不许再声明 brief/layers。
+    # 防空转：layered 视图数 / brief 条目数 / single 视图数都写进判据文本（下限见下）。
+    OLD_SKELETON = ("table", "timeline", "cards")
+    brief_bad: list[str] = []
+    n_layers = n_briefs = n_singles = 0
+    for v in views:
+        vid = v.get("id", "?")
+        mount = v.get("mount")
+        layout = v.get("layout", "table")
+        brief = v.get("brief")
+        single = v.get("single")
+        if mount == "select":
+            if brief or layout == "layers":
+                brief_bad.append(f"{vid}（mount: select）是**详情卡片**，不该再声明 "
+                                 f"brief/layers（它由名字挑一条记录渲染）")
+            continue
+        if mount != "panel":
+            continue
+        if single is not None:
+            n_singles += 1
+            if not isinstance(single, str) or not single.strip():
+                brief_bad.append(f"{vid}：`single` 必须是**非空理由**（写清楚为什么不为它造列表）")
+            if layout == "layers":
+                brief_bad.append(f"{vid}：`single`（就一条）与 `layout: layers`（外层列表）互相矛盾")
+            continue
+        if layout in OLD_SKELETON:
+            brief_bad.append(f"{vid}：panel 视图还用着旧骨架 `layout: {layout}`"
+                             f"（左栏不要使用表格：要么 layers + brief，要么 single + 理由）")
+            continue
+        if layout != "layers":
+            brief_bad.append(f"{vid}：panel 视图既不是 layers 也没有 single 理由"
+                             f"（layout: {layout}）——外层总览与「就一条」必须二选一")
+            continue
+        n_layers += 1
+        if not isinstance(brief, list) or not brief:
+            brief_bad.append(f"{vid}：`layout: layers` 必须声明非空的 `brief`"
+                             f"（总览行显示哪几条关键指标）")
+            continue
+        cols = [c for c in (v.get("columns") or []) if isinstance(c, dict)]
+        for ref in brief:
+            n_briefs += 1
+            r = str(ref)
+            hit = next((c for c in cols if c.get("path") == r), None) \
+                or next((c for c in cols if c.get("label") == r), None)
+            if hit is None:
+                brief_bad.append(f"{vid}：`brief` 里的 `{r}` 没命中本视图的任何一条列"
+                                 f"（按 path 与显示名都找不到）——总览行会空一个指标")
+            else:
+                is_ctl = any(hit.get(k) is not None for k in ("leaf", "owner", "action"))
+                if is_ctl or not isinstance(hit.get("path"), str):
+                    brief_bad.append(f"{vid}：`brief` 里的 `{r}` 命中的是**控制行**"
+                                     f"（写面不是关键指标；总览行只放读列）")
+    LAYERS_MIN, BRIEFS_MIN, SINGLES_MIN = 8, 20, 2
+    ck.check(f"第 11 步·分层声明：{n_layers} 个 panel 视图是 `layout: layers`（共 {n_briefs} 条 "
+             f"`brief` 关键指标，每条都命中本视图的一条读列）、{n_singles} 个写明了 `single` + 非空理由"
+             f"（就一条记录的视图直接显示详情），旧骨架 {'/'.join(OLD_SKELETON)} 在 panel 里 0 处"
+             f"（下限 {LAYERS_MIN} 层/{BRIEFS_MIN} 指标/{SINGLES_MIN} 单条）",
+             not brief_bad and n_layers >= LAYERS_MIN and n_briefs >= BRIEFS_MIN
+             and n_singles >= SINGLES_MIN,
+             "；".join(brief_bad[:4]) or
+             (f"实测 {n_layers} 层 / {n_briefs} 条 brief / {n_singles} 条 single 理由，全部自洽"
+              if (n_layers >= LAYERS_MIN and n_briefs >= BRIEFS_MIN and n_singles >= SINGLES_MIN)
+              else f"只数到 {n_layers} 层 / {n_briefs} 条 brief / {n_singles} 条 single ⇒ 判据可能空转了"))
+
+    # 10b. **每个总览行都能进详情层**（真渲染，假 DOM 里走完整路径）：
+    #   逐行走「点进去 → 详情出现 → 面包屑末节 == 这一行的名字 → 点「← 返回总览」→ 外层行数恢复」。
+    #   任何一行进不去（比如把进入路径剪断）= 红 —— 这正是「外层行数 ⇒ 详情可达」的反向守卫。
+    #   顺带验 `single` 那句话不是假话：声明了「就一条」的视图，真世界里必须真的 ≤1 条记录。
+    enter_bad: list[str] = []
+    n_rows = 0
+    cover_bad: list[str] = []
+    n_recs2 = n_row_fields = n_decl_cover = n_auto_cover = n_omit_cover = n_ctl = 0
+    for lid, x in layered_ids.items():
+        if x.get("error"):
+            enter_bad.append(f"{lid}：真渲染抛错 {str(x['error'])[:120]}")
+            cover_bad.append(f"{lid}：真渲染抛错")
+            continue
+        rows = x.get("rows") or []
+        exp_outer = x["records"] if not x.get("limit") else min(x["records"], x["limit"]["n"])
+        if x.get("outer") != exp_outer or len(rows) != x.get("outer"):
+            enter_bad.append(f"{lid}：外层列出 {x.get('outer')} 行、报告里 {len(rows)} 行，"
+                             f"而记录有 {x['records']} 条（limit {x.get('limit')}）")
+        if x["records"] > 0 and not rows:
+            enter_bad.append(f"{lid}：{x['records']} 条记录却一行都没列出来")
+        for r in rows:
+            n_rows += 1
+            if not r.get("detail"):
+                enter_bad.append(f"{lid}·「{r.get('label') or r.get('key')}」：点进去**没有详情层**")
+            if not r.get("back"):
+                enter_bad.append(f"{lid}·「{r.get('label')}」：详情里没有「← 返回总览」")
+            elif not r.get("backRestored"):
+                enter_bad.append(f"{lid}·「{r.get('label')}」：返回之后外层行数没恢复"
+                                 f"（{r.get('rowCountAfterBack')} != {x.get('outer')}）")
+            if r.get("crumb") != r.get("label"):
+                enter_bad.append(f"{lid}·「{r.get('label')}」：面包屑末节写成「{r.get('crumb')}」"
+                                 f"（应当就是这一行的名字）")
+            if not (r.get("crumbs") or "").strip():
+                enter_bad.append(f"{lid}·「{r.get('label')}」：面包屑整行是空的")
+    # `single` 视图：只有一条记录才配说「就一条」（`source: null` = 不取记录，另算）。
+    for v in views:
+        if not v.get("single") or v.get("source") is None:
+            continue
+        pv = probe_views_by_id.get(v.get("id"))
+        if pv is None:
+            continue
+        if pv["records"] > 1:
+            enter_bad.append(f"{v.get('id')}：声明了 `single`（就一条 ⇒ 直接显示详情），"
+                             f"可这一帧有 {pv['records']} 条记录 —— 那句话是假话（该改成分层）")
+    # **空来源的边界**（合成根，探针里那三个）：`{}` / `[]` ⇒ **一行都不许长出来**
+    #   （要显示声明的 `empty` 文案）。这一条是实测幽灵行的反向守卫：第 11 步在真浏览器里
+    #   当场看到 `@post.haul_steps = {}` 画出一行名字是 `·` 的「项目」，还点得进去 ——
+    #   根因是 `wrap()` 把空对象当成"一条空记录"（已修，口径见 `specview.js::wrap`）。
+    empty_src = (got or {}).get("emptySources") or []
+    empty_evidence = "、".join(f"{e['kind']} → {e['outer']} 行" for e in empty_src)
+    for e in empty_src:
+        if e["kind"] in ("empty_map", "empty_list") and e["outer"] != 0:
+            enter_bad.append(f"{e['kind']}：空来源却列出了 {e['outer']} 行（幽灵项目：{e['text']}）")
+        if e["kind"] == "not_empty_map" and e["outer"] != 1:
+            enter_bad.append(f"not_empty_map：有一条记录却列出 {e['outer']} 行（防空转对照）")
+    ROWS_MIN, LAY_VIEWS_MIN = 100, 8
+    ck.check(f"第 11 步·每个总览行都能进详情层：{len(layered_ids)} 个分层视图的 {n_rows} 行，"
+             f"逐行「点进去 → 面包屑末节 == 这一行的名字 → 点「← 返回总览」→ 外层行数恢复」"
+             f"全部通过；`single` 的视图在真世界里确实 ≤1 条记录；{len(empty_src)} 个空来源合成场景"
+             f"（`{{}}` / `[]` / 一条记录的对照）一行都不多不少（下限 {ROWS_MIN} 行/{LAY_VIEWS_MIN} 视图）",
+             not enter_bad and n_rows >= ROWS_MIN and len(layered_ids) >= LAY_VIEWS_MIN
+             and len(empty_src) == 3,
+             "；".join(enter_bad[:4]) or
+             (f"实测 {len(layered_ids)} 个分层视图 / {n_rows} 行全部进得去、回得来；"
+              f"空来源合成场景 {empty_evidence}"
+              if (n_rows >= ROWS_MIN and len(layered_ids) >= LAY_VIEWS_MIN and len(empty_src) == 3)
+              else f"只走到 {len(layered_ids)} 个视图 / {n_rows} 行 ⇒ 判据可能空转了"))
+
+    # 10c. **详情层的字段集合 == 该实体的全部字段**（真渲染）：§8a 的渲染落点。
+    #   §8a 查的是**声明求值**（`claimedKeys` / `residualCols` 这两个纯函数算出来的集合），
+    #   这一条查的是**屏幕上真有的行**：详情层里 `.sv-sheet-row-auto` 的字段名（追加行）
+    #   必须逐字等于前端自己的 `residualKeys(rec, spec)`，而 `(声明认领 ∩ 字段) ∪ 追加行
+    #   ∪ 声明不看` 必须 == 这条记录的全部字段（`omit` 那几项按 §8a 的老口径算「声明不看」：
+    #   它们不在详情里，但 `omitLine` 会在脸上写明）；写面控制行（`leaf`/`owner`/`action`）
+    #   也必须渲染在这一层。
+    #   ⇒ 两条一起才封住「声明层算对了、但屏幕上没摆出来」这个缺口（㊳ 就是照这个缺口注入的）。
+    for lid, x in layered_ids.items():
+        if x.get("error"):
+            continue
+        for r in x.get("rows") or []:
+            fields = set(r.get("fields") or [])
+            if not fields:
+                continue
+            n_recs2 += 1
+            claimed = set(r.get("claimed") or []) & fields
+            omitted = set(r.get("omitted") or []) & fields
+            auto = set(r.get("autoKeys") or [])
+            expected = set(r.get("expectedAuto") or [])
+            n_row_fields += len(fields)
+            n_decl_cover += len(claimed)
+            n_omit_cover += len(omitted)
+            n_auto_cover += len(auto)
+            n_ctl += int(r.get("ctlRows") or 0)
+            if auto != expected:
+                cover_bad.append(f"{lid}·「{r.get('label')}」：详情层里的追加行 {sorted(auto)} "
+                                 f"!= 前端算的残差 {sorted(expected)}")
+            if claimed | auto | omitted != fields:
+                cover_bad.append(f"{lid}·「{r.get('label')}」：详情层没盖住 "
+                                 f"{sorted(fields - (claimed | auto | omitted))}"
+                                 f"（声明 {sorted(claimed)}、追加 {sorted(auto)}、"
+                                 f"不看 {sorted(omitted)}）")
+            if auto - fields:
+                cover_bad.append(f"{lid}·「{r.get('label')}」：详情层摆出了记录上没有的字段 "
+                                 f"{sorted(auto - fields)}")
+            if (r.get("ctlDeclared") or 0) > 0 and (r.get("ctlRows") or 0) < r["ctlDeclared"]:
+                cover_bad.append(f"{lid}·「{r.get('label')}」：写面控制行少了"
+                                 f"（声明 {r['ctlDeclared']} 行，详情里只渲染了 {r.get('ctlRows')} 行）")
+    DET_RECS_MIN, DET_FIELDS_MIN, DET_AUTO_MIN = 100, 900, 50
+    ck.check(f"第 11 步·详情层覆盖：{n_recs2} 条记录的详情层上，(声明认领({n_decl_cover}) ∩ 字段) "
+             f"∪ 屏幕上的追加行({n_auto_cover}) ∪ 声明不看({n_omit_cover}) == 全部字段({n_row_fields})，"
+             f"追加行与前端自己的 `residualKeys` 逐字相等，写面控制行 {n_ctl} 条也都在这一层"
+             f"（= §8a 的**渲染落点**；下限 {DET_RECS_MIN} 记录/{DET_FIELDS_MIN} 字段/{DET_AUTO_MIN} 追加）",
+             not cover_bad and n_recs2 >= DET_RECS_MIN and n_row_fields >= DET_FIELDS_MIN
+             and n_auto_cover >= DET_AUTO_MIN,
+             "；".join(cover_bad[:4]) or
+             (f"实测 {n_recs2} 条记录 / {n_row_fields} 个字段：声明 {n_decl_cover} + 追加 "
+              f"{n_auto_cover} + 不看 {n_omit_cover} + 控制行 {n_ctl}，一条不漏"
+              if (n_recs2 >= DET_RECS_MIN and n_row_fields >= DET_FIELDS_MIN
+                  and n_auto_cover >= DET_AUTO_MIN)
+              else f"只查到 {n_recs2} 条记录 / {n_row_fields} 个字段 ⇒ 判据可能空转了"))
 
 
 if __name__ == "__main__":

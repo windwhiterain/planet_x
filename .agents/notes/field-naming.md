@@ -137,7 +137,7 @@
 | `Contract.shipper` / `carrier` | 货主 / 承运方 ❓ | 既有 UI 用「承运」 |
 | `Contract.resource` / `capacity` | 货 / 运力 ❓ | — |
 | `Contract.from` / `to` | 起点 / 终点 ❓ | （`from`/`to` 是 Rust 关键字避让，中文名没这问题） |
-| `Contract.share` / `min_reputation` | 分成 / 最低名声 ❓ | — |
+| `Contract.share` / `min_reputation` | **抽成**（第 10b 步订正，原提议「分成」）/ 最低名声 ❓ | — |
 | `Contract.posted_round` / `accepted_round` / `expires_round` / `review_round` | 挂单回合 / 接单回合 / 到期回合 / 考核回合 | 既有 UI 用词 |
 | `Contract.delivered` / `served_rounds` | 已交付 / 已服务回合 ❓ | — |
 
@@ -477,3 +477,38 @@ attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `
   一张表，同名名词**先到先得**。事件载荷里的 `载货`/`势力`/`舰级`/`城` 与实体字段同名，所以
   hover 弹出的是**先注册的那一条**（实测 `载货` 弹的是 `Ship.载货` 的解释）。真要按路径区分，
   得把语料从「名词 → 解释」改成「路径 → 解释」——那是另一刀（见 §7.6 的「表达式列表头」同类问题）。
+
+### 7.11 第 10b 步（已落地）：按用户裁决订正事件载荷名（`feature/event-names-2`）
+
+用户审了第 10 步那批名字，给了四条裁决。这一步**只改名字与注释**（`derived_roll` 的盐、
+`type` 判别键、三个单元枚举的值、世界行为与断言数字**一个字没动**；`--digest` 逐字节不变已实测）。
+
+* **裁决 1（通用规则）：按「这个字段存的是什么主体」命名**——存 `ShipId` 就叫「…舰」、
+  存 `FactionId` 就叫「…方/…势力」。据此改三处：
+  `Attack.attacker`「攻击方」→「攻击舰」、`Attack.target`「目标」→「目标舰」、
+  `Siege.attacker`「攻击方」→「攻击舰」（三处都是 `ShipId`）。
+  其余载荷字段逐条核过类型，**没有再需要改的**：`CityRazed.by_ship`「拆城舰」（`ShipId`）本来就带「舰」；
+  「船东」「货主」「舰主」「新主」「旧主」「托运方」「承运方」「势力甲/乙」都是 `FactionId` 且已经带出主体角色；
+  `Withdraw.to_body`「撤退目标」/`CapitalRelocated.from/to`「原首都/新首都」（`BodyId`）在变体语境里无歧义；
+  `Shot`/`Killer` 内字段（`舰`/`势力`/`弹种`）已被外层「凶手」「逐发」限定，且 `play/planet_xq`
+  按 `凶手.舰`/`凶手.势力` 取键 ⇒ 不动。
+* **裁决 2：`share` → 「抽成」**（原「分成」）。**同物同名**落到**三处**（不止用户点名的两处）：
+  ① 事件载荷 `ContractPosted.share`；② 投影 `contracts` 表的列 + `column_docs`（`src/projection.rs`）；
+  ③ **`Contract.share` 自己的 `#[serde(rename)]`**（`src/model/contract.rs`，原「分成」）——不跟就是
+  「同物不同名」没消灭干净（`--nouns` 的 `state.definitions.Contract` 与原始 JSON 视图读的是它）。
+  `web/static/**` 与 `play/**` 一处都不用改（grep「分成」在两边都没有载荷取键）。
+  ⚠ ③ 让 `Contract` 的档形状变了（该字段没有 `#[serde(default)]` ⇒ 旧档缺键读不回来）
+  ⇒ **`SCHEMA_VERSION` 26 → 27**。
+* **裁决 3：`prev_owner` 保留「旧主」，另三处语义相同的统一成「旧主」**——
+  `CityRazed.owner`、`CityDefected.from`、`Revolt.faction`（原都是「失城方」）。
+  **语义已逐条核过生产代码**：`raze_city` 的 `owner` = 夷平这一刻城的 `faction_id`（`sim/cities.rs`）；
+  `defect_city` 的 `from` = 移出控制面的那一方（`sim/governance.rs`）；`Revolt.faction` 是
+  `step_governance` 里那个城当前所属的 `fid`（同一个 `defect_city` 的另一分支）——
+  三处**都真的是「上一任主人 / 失去它的那一方」**，没有一个是「发起方/叛乱方/新主」，故全部套用。
+* **裁决 4：`shots` 保持「逐发」**；`ShipSpawned.via` 的读面名「来路」→「造舰路径」（与它自己的 `///` 一致）。
+  上一轮报告把它挂到 `ColonyFounded` 上是**串行误会**（`via` 只住在 `ShipSpawned` 上）。
+  全仓 grep「来路」，除这一处读面键名外只剩 `src/projection.rs` 一句散文（MOND 那一列的「来路与结论」）——
+  **没有别的字段叫「来路」**。
+* **三端跟随**：`src/tests/projection/mod.rs`（events 的 forbidden 列名 + `data["旧主"]` 取键）、
+  `play/tests/g1_contract.py`（`--call military_deltas` 的合成事件 JSON 三处）、
+  `play/tests/g2_mid.py`（拆平/复垦对账取 `data.旧主`）。`play/planet_xq` 与 `web/static/**` 不用改。

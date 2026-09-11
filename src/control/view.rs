@@ -163,7 +163,7 @@ pub fn control_view(
         })
         .collect();
     // 设计图库：**每张图一行**。`ship_count` 是**现算的派生量**（不落状态），`mode` 是图叶
-    // 自己的表态；有效归属（图叶 → 势力 scope → 全局）走 `State::blueprint_control`，
+    // 自己的表态；有效归属（图叶 → 势力 scope）走 `State::blueprint_control`，
     // 读面在投影的 `blueprints.effective_mode` 列里给（`--control` 是**写面模板**，
     // 多给派生列只会让模板与写面漂移）。
     //
@@ -193,23 +193,20 @@ pub fn control_view(
     FactionControlView {
         faction_id: fid,
         capital: c.capital.clone(),
-        // 读面这几片是**值 + 表态**（"这一层说了什么"），`remove` 只存在于**写面**：
+        // 读面这几片是**值 + 表态**（"这一层说了什么"）：
         // 读面表达"没有这片叶"的方式就是 `None`/不给这一行（见 `scope_view` 同理）。
         default_doctrine: c.default_doctrine.as_ref().map(|d| DefaultDoctrine {
             temper: Some(d.value.temper),
             lone_wolf: Some(d.value.lone_wolf),
             mode: Some(d.mode),
-            remove: false,
         }),
         default_kiting: c.default_kiting.as_ref().map(|d| DefaultKiting {
             kiting: Some(d.value),
             mode: Some(d.mode),
-            remove: false,
         }),
         default_role: c.default_role.as_ref().map(|d| DefaultShipRole {
             role: Some(d.value),
             mode: Some(d.mode),
-            remove: false,
         }),
         blueprints,
         ship_orders,
@@ -232,7 +229,6 @@ pub fn control_view(
 /// 意外清掉。
 pub fn scope_view(s: &ControlScope) -> ControlScopePatch {
     ControlScopePatch {
-        global: (s.global != ControlMode::Inherit).then_some(s.global),
         factions: explicit(&s.factions),
         bodies: explicit(&s.bodies),
         cities: explicit(&s.cities),
@@ -280,7 +276,7 @@ pub fn control_surface(state: &State, config: &GameConfig) -> serde_json::Value 
 /// deserialised into, so it can never drift from `apply_patch`'s shape.
 ///
 /// ⚠ 除了 `schemars` 派生的**形状**，这里还并进 [`super::leaves::facts`] 那几段
-/// **结构事实**（`leaves` / `actions` / `owner_field` / `remove_field`）：
+/// **结构事实**（`leaves` / `actions` / `owner_field`）：
 /// schemars 只知道「有这么个字段」，不知道「哪几个字段是身份键、哪几个是值、
 /// 哪些是只读派生列」。写面（web 的控制行、kit 的 `set_*`）要的正是后者——
 /// 见 [`super::leaves`] 的模块文档（一份事实、三端共用）。
@@ -296,20 +292,3 @@ pub fn control_schema_value() -> serde_json::Value {
     }
     out
 }
-
-// --- write side (diff application) ------------------------------------------
-
-// --- 删叶（`remove: true`） --------------------------------------------------
-//
-// 控制叶的**存在性本身就是一种状态**：「没有叶」= 这一层没有说话。而在取值规则里
-// 「叶不存在」与「叶写着 `Inherit`」并**不**等价——`State::ship_doctrine` 是
-// `leaf.map(|l| l.value).unwrap_or(record)`：**叶存在就用叶里的值**（与 `mode` 无关），
-// 只有叶真的不存在才回落到出厂记录值。于是"碰过一次的风格叶"以前永远钉着那个数
-// （`mode: Inherit` 撤不掉它），而补丁接口只能新建/改写叶、删不掉——`remove` 就是那个出口。
-//
-// 三条规则（2026-10 裁决）：
-// 1. 删的是**控制面里那片叶**，不要求实体还在（舰战沉 / 城易主 / 建筑没了 / 资源 key 已删
-//    都能删）⇒ 顺带是清理陈叶的路；
-// 2. 叶本来就不存在 ⇒ **幂等成功**（目标状态就是"没有这片叶"）：不进 `removed`，也不算丢弃；
-// 3. `remove` 与任何值 / `mode` 字段同时出现 ⇒ **拒绝**：一条同时说着"删掉它"和"设成 0.5"
-//    的补丁没有正确答案，而任何一种静默优先级都会让写补丁的人以为另一件事发生了。
