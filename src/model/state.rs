@@ -80,7 +80,7 @@ pub const SCHEMA_VERSION: u32 = 25;
 fn default_schema_version() -> u32 {
     0
 }
-/// The complete world snapshot.
+/// **完整的世界快照**（一个回合的世界状态）。
 #[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct State {
     /// 状态/schema 版本。每次改动 `State` 的**语义/字段结构**时递增（见 [`SCHEMA_VERSION`]
@@ -88,9 +88,9 @@ pub struct State {
     /// 避免「旧档案被按新语义静默错载」。
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    /// Current round number (0 = the start state).
+    /// 当前回合（从 0 起：回合 0 = 初始世界，之后每步 +1）。
     pub round: u32,
-    /// Total elapsed time in months.
+    /// 已流逝的总月数（一回合 = 一个月；= `round`，用浮点便于与时间序列计算）。
     pub time_month: f64,
     pub bodies: Vec<Body>,
     pub cities: Vec<City>,

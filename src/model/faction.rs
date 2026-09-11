@@ -39,11 +39,11 @@ pub struct Ideology {
 pub struct Faction {
     #[serde(rename = "势力")]
     pub name: String,
-    /// Marker glyph on the CLI ASCII map (e.g. 'U').
+    /// CLI ASCII 地图上的**标记字符**（如 `'U'`）。
     #[serde(rename = "符号")]
     pub symbol: char,
-    /// Display colour (CSS hex string) shown in the web UI, defined directly
-    /// on the faction itself.
+    /// **显示颜色**（CSS hex 字符串）：web UI 上这个势力的主色，直接定义在势力自己身上
+    /// （不走「按名字查色表」那一层）。
     #[serde(rename = "颜色")]
     pub color: String,
     /// 意识形态位置（约 -1..1；越负越「东方/教派」，越正越「西方/国际」）。
@@ -84,10 +84,10 @@ pub struct Faction {
     #[serde(default)]
     #[serde(rename = "MOND 掌握度")]
     pub mond_control: f64,
-    /// Stockpiled resources (key -> amount).
+    /// 势力池的**库存资源**（资源 → 数量）：首都产出的货直进这里（见 `is_hub`）。
     #[serde(rename = "资源")]
     pub resources: ResourceMap,
-    /// Relation of this faction toward another faction. Negative means hostile.
+    /// 本势力**对另一势力**的关系值（-1..1）：负 = 敌对、正 = 友好；外交漂移与开战判据都读它。
     #[serde(rename = "关系")]
     pub relations: BTreeMap<FactionId, f64>,
     /// 本土防御半径（AU）：本方城市/舰在此半径（距有效首都，见

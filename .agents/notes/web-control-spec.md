@@ -61,7 +61,7 @@
 
 | 原语 | 是什么 | 例子 |
 | --- | --- | --- |
-| `leaf` | 一片**控制叶**（状态：存在性本身有意义） | `investment_budget` / `ship_orders` / `blueprints` |
+| `leaf` | 一片**控制叶**（状态：存在性本身有意义） | `投资预算` / `指令` / `设计图库`（2026-10 起叶名 = **中文名词**） |
 | `owner` | **作用域归属**（不是叶：`global`/`factions`/`bodies`/`cities` 上的三态） | 「这个势力的舰默认归谁」 |
 | `action` | **命令**（不是状态：写了就执行一次） | 建楼 / 拆楼 / 新建设计图（今天的 `buildings`） |
 
@@ -76,17 +76,17 @@
 { "id": "faction-card", "title": "势力", "mount": "select", "select_kind": "faction",
   "layout": "sheet", "source": "@state.factions[*]", "key": "name",
   "rows": [
-    { "path": "name", "label": "势力", "dot": "color" },
-    { "path": "resources",                                  "label": "首都库存",     "fmt": "map", "digits": 0 },
-    { "path": "@post.factions.${name}.production",          "label": "产出/月",      "fmt": "map", "digits": 1 },
-    { "leaf": "investment_budget",   "label": "投资预算/回合", "editor": "number" },   // ← 控制
-    { "leaf": "construction_budget", "label": "建造预算/回合", "editor": "number" },   // ← 控制
-    { "path": "@post.factions.${name}.upkeep",              "label": "舰队维护/月",  "fmt": "num", "digits": 1 },
-    { "path": "@post.factions.${name}.upkeep_unpaid",       "label": "没付上的维护", "fmt": "num", "digits": 1 },
-    { "leaf": "default_role",  "label": "舰队默认角色", "editor": "role" },
-    { "leaf": "default_kiting","label": "舰队默认风筝姿态", "editor": "kiting" },
+    { "path": "势力", "dot": "颜色" },
+    { "path": "资源",                                        "label": "首都库存",     "fmt": "map", "digits": 0 },
+    { "path": "@post.factions.${势力}.production",           "label": "产出/月",      "fmt": "map", "digits": 1 },
+    { "leaf": "投资预算",   "label": "投资预算/回合", "editor": "number" },   // ← 控制
+    { "leaf": "建造预算",   "label": "建造预算/回合", "editor": "number" },   // ← 控制
+    { "path": "@post.factions.${势力}.upkeep",               "label": "舰队维护/月",  "fmt": "num", "digits": 1 },
+    { "path": "@post.factions.${势力}.upkeep_unpaid",        "label": "没付上的维护", "fmt": "num", "digits": 1 },
+    { "leaf": "舰队默认角色",  "label": "舰队默认角色", "editor": "role" },
+    { "leaf": "舰队默认姿态","label": "舰队默认风筝姿态", "editor": "kiting" },
     { "owner": "factions",     "label": "这个势力的舰默认归谁" },
-    { "path": "@state.control.${name}.capital.value",       "label": "首都", "missing": "—" }
+    { "path": "@state.control.${势力}.首都.值",       "label": "首都", "missing": "—" }
   ] }
 ```
 
@@ -96,8 +96,8 @@
 ### 3.3 表（多记录）里能放什么
 
 * **读列**：照旧；
-* **单值叶**（`keys: []`，每记录一片，如 `capital`/`default_*`）：**可以**当列——格子 = 值 + 归属 chip；
-* **多键叶**（`investment_budget` 是「每资源一行」、`ship_orders` 每舰一行、`blueprints` 每图一行）：
+* **单值叶**（`keys: []`，每记录一片，如 `首都` / `舰队默认*`）：**可以**当列——格子 = 值 + 归属 chip；
+* **多键叶**（`投资预算` 是「每资源一行」、`指令` 每舰一行、`设计图库` 每图一行）：
   **不进表列**，进「**这条记录展开的卡片**」（行内展开 / 底部选中卡）。
   判据来自 manifest 的 `keys` 是不是空——**不是**前端猜的。
 
@@ -116,7 +116,7 @@
 
 | 事实 | 住哪 | 为什么 |
 | --- | --- | --- |
-| patch/view 的键名（`investment_budget`…） | **引擎** | 它就是 struct 字段名，`schemars` 已经发了 |
+| patch/view 的键名（`投资预算` / `指令`…，2026-10 起是**中文名词**） | **引擎** | 它就是 struct 字段名（`#[serde(rename)]`），`schemars` 已经发了；`--index` 的 `control.kind` 与它**逐字相同**、且从同一处（`control::leaves::LEAVES`）派生 |
 | 身份键 `["resource"]` / `[]` | **引擎** | 「怎么定位一片叶」是协议，写面与 kit 都靠它 |
 | 值字段 `["value"]` / `["temper","lone_wolf"]` / `["class","components",…]` | **引擎** | 同上；kit 现在手抄了这份 |
 | 归属字段 `mode` + `remove` | **引擎** | 三态 + 删叶是协议，不是界面 |
@@ -129,26 +129,41 @@
 `--control-schema` 现在发的是 `schemars` 的 `CommandReq`。**在同一个 JSON 里**加一段
 （不新增命令、不新增端点）：
 
+**已实现**（2026-10）。下面是 `--control-schema` 的**实际**形状（叶名 = **中文名词**，
+与读面 `control` 表的 `kind`、与 `--apply` 的键**逐字相同**；节选自实跑输出）：
+
 ```jsonc
 "leaves": [
-  { "field": "capital",             "keys": [],                 "values": ["value"] },
-  { "field": "default_doctrine",    "keys": [],                 "values": ["temper", "lone_wolf"] },
-  { "field": "default_kiting",      "keys": [],                 "values": ["kiting"] },
-  { "field": "default_role",        "keys": [],                 "values": ["role"] },
-  { "field": "ship_orders",         "keys": ["ship"],           "values": ["behavior"] },
-  { "field": "ship_doctrine",       "keys": ["ship"],           "values": ["temper", "lone_wolf"] },
-  { "field": "ship_kiting",         "keys": ["ship"],           "values": ["kiting"] },
-  { "field": "ship_role",           "keys": ["ship"],           "values": ["role"] },
-  { "field": "investment_budget",   "keys": ["resource"],       "values": ["value"] },
-  { "field": "construction_budget", "keys": ["resource"],       "values": ["value"] },
-  { "field": "invest_weights",      "keys": ["city", "building"], "values": ["value"] },
-  { "field": "build_weights",       "keys": ["city", "building"], "values": ["value"] },
-  { "field": "loyalty_budget",      "keys": ["city"],           "values": ["value"] },
-  { "field": "blueprints",          "keys": ["name"],
-    "values": ["class", "components", "doctrine", "kiting", "role"],
-    "read_only": ["ship_count", "launch_waiting"] }
+  { "field": "首都",         "not_in_index": null, "keys": [],                 "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "舰队默认风格", "not_in_index": null, "keys": [],                 "values": ["temper", "lone_wolf"], "carries": [], "read_only": [] },
+  { "field": "舰队默认姿态", "not_in_index": null, "keys": [],                 "values": ["姿态"], "carries": [], "read_only": [] },
+  { "field": "舰队默认角色", "not_in_index": null, "keys": [],                 "values": ["角色"], "carries": [], "read_only": [] },
+  { "field": "指令",         "not_in_index": null, "keys": ["舰"],             "values": ["行为"], "carries": [], "read_only": [] },
+  { "field": "风格",         "not_in_index": null, "keys": ["舰"],             "values": ["temper", "lone_wolf"], "carries": [], "read_only": [] },
+  { "field": "姿态",         "not_in_index": null, "keys": ["舰"],             "values": ["姿态"], "carries": [], "read_only": [] },
+  { "field": "角色",         "not_in_index": null, "keys": ["舰"],             "values": ["角色"], "carries": [], "read_only": [] },
+  { "field": "投资预算",     "not_in_index": null, "keys": ["资源"],           "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "建造预算",     "not_in_index": null, "keys": ["资源"],           "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "福利预算",     "not_in_index": null, "keys": ["资源"],           "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "建设权重",     "not_in_index": null, "keys": ["城", "建筑"],     "values": ["值"],  "carries": ["类型", "资源", "建造舰级", "结构"], "read_only": [] },
+  { "field": "建造权重",     "not_in_index": null, "keys": ["城", "建筑"],     "values": ["值"],  "carries": ["建造舰级"], "read_only": [] },
+  { "field": "城市福利预算", "not_in_index": null, "keys": ["城"],             "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "开发货币预算", "not_in_index": null, "keys": ["城"],             "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "建造货币预算", "not_in_index": null, "keys": ["城"],             "values": ["值"],  "carries": [], "read_only": [] },
+  { "field": "设计图库",     "not_in_index": "结构叶：住在 `derived.blueprints`（有类型列的专用表），不重复发到 `derived.control`",
+    "keys": ["图名"], "values": ["舰级", "选装", "风格", "姿态", "角色"], "carries": [], "read_only": ["ship_count", "launch_waiting"] }
+],
+"actions": [
+  { "field": "建筑", "keys": ["城", "建筑"],
+    "note": "结构性建筑命令（新建 / 拆掉 / 改属性）：每一条只该执行一次，不是状态",
+    "not_in_index": "命令列表（不是叶）：`--apply` 里执行一次就完了，没有每回合可读的持久状态" }
 ]
 ```
+
+⚠ `not_in_index`（2026-10 加）是**读面事实的声明**：`--index` 的 `control` 表里**不发**这
+片叶，理由必须写在里面。`g4_spec.py` 第 7 条拿真跑出来的 `kind` 集合与
+`leaves[].field ∪ actions[].field − {自报 not_in_index}` **逐字双向对账**（见
+[field-naming.md](field-naming.md) §7.9）。
 
 **「加一个叶就要加一行声明」这条纪律由数据检查强制**（§6 第 2/4 条）：
 `schemars`（自动派生）的属性集合 **==** `leaves[].field` 集合，多一个少一个都红。
@@ -228,7 +243,7 @@
 | `web/src/lib.rs` | 新增 `GET /api/control-schema`（前端启动拉**一次**，不是每帧） |
 
 **实测**（`--control-schema` vs `schemars`）：
-`leaves(14) ∪ actions(1) ∪ {faction_id}` **≡** `FactionControlPatch.properties(16)`，双向相等。
+`leaves ∪ actions ∪ {势力}` **≡** `FactionControlPatch.properties`，双向相等（数量随叶增减，别把 14/16 当常量读）。
 ⇒ 「加字段不写声明」与「写一个不存在的叶」都**当场红**，这是读面 `neutral.rs` 那条守卫在写面的对偶。
 
 ### 11.2 `web/static/views.json` v2：四种行住进同一个数组
@@ -241,10 +256,10 @@
   `write_omit`（没被任何行认领的叶，**理由必填**）。
 * `keys_from` 是给「**还没有这片叶**」用的：今天的界面根本没法给一个还没写过叶的资源设预算
   （旧树只列已存在的叶）——现在候选键来自 `config.resources` / 本势力的城，改它 = 新建这片叶。
-* 实测（`seed 7 / r30` 的 `--control`）：`investment_budget` 每资源一行、`capital` 是**单叶且没有
-  `remove`**、`loyalty_budget`/`blueprints` 在早期回合是**空数组** ⇒「没有叶也能建」是**主路径**。
+* 实测（`seed 7 / r30` 的 `--control`）：`投资预算` 每资源一行、`首都` 是**单叶且没有
+  `删叶`**、`城市福利预算`/`设计图库` 在早期回合是**空数组** ⇒「没有叶也能建」是**主路径**。
 * 认领账（`g4_spec` 实测）：`leaf` 行认领 11 种、`action` 行 1 种、`write_omit` 带理由地免掉 3 种
-  （`invest_weights` / `build_weights` 住在建筑行里、`blueprints` 仍住在旧页），**14+1 一个不落**。
+  （`建设权重` / `建造权重` 住在建筑行里、`设计图库` 仍住在旧页），**一个不落**。
 
 ### 11.3 测试：纪律检查整段搬到 Python（用户裁决：本轮只用 Python 测试）
 
@@ -295,15 +310,15 @@
 * **列序（读紧挨控制）**：势力表 `… 首都 | 城 | 舰 | 舰队 | 舰队默认角色 | 首都库存 | 产出/月 | 产出价值 | 投资预算/回合 | 建造预算/回合 | 维护/月 | …`；舰队表 `… 船体 | **指令** | **角色** | 运输此刻 | …`；城市表 `… ↳ 娱乐项 | **娱乐/福利预算** | 在造 | …`。
 * **势力卡片**：`首都（迁都）→ 首都库存 → 产出/月 → 产出价值 → 投资预算/回合 → 建造预算/回合 → 舰队维护/月 → 没付上的维护 → 娱乐/福利预算 → 城 → 舰 → 舰队 → 舰队默认角色/风格/风筝姿态 → … → 这个势力归谁`。
 * **「还没有叶」也能建**（今天的界面本来**根本做不到**）：在投资预算格里给没有叶的 `氢` 写 `2.5` ⇒ 回传 diff 原文只有那一片
-  `{"control":[{"faction_id":"联合国","investment_budget":[{"resource":"氢","value":2.5,"mode":"Player"}]}]}`
+  `{"control":[{"势力":"联合国","投资预算":[{"资源":"氢","值":2.5,"归属":"Player"}]}]}`
   ⇒ 点应用 ⇒ 回执 `✓ 全部落地：1 条（没有丢弃、没有隐含接管、没有删叶）` ⇒ **刷新页面后读回 `氢 2.5`**（表格 compact 格：`氢 2.5 · 氦-3 0.6 · 碳 1.2 …（共 4 项）`）。
 * **指令列可改**（真事件 `browser_select`）：`北斗` 改成「殖民 + 海王星」⇒ diff
-  `{"control":[{"faction_id":"中国","ship_orders":[{"ship":"北斗","behavior":{"Colonize":{"body":"海王星"}},"mode":"Player"}]}]}`
-  （值 + `mode` 一起、只有这一片）。
-* **幂等**：给一片「还没有叶」的势力级默认叶选「玩家」⇒ diff 发整片（`{"role":"War","mode":"Player"}`，新建叶必须带全值）；再撤回「继承」⇒ diff = `{"control":[]}`。
+  `{"control":[{"势力":"中国","指令":[{"舰":"北斗","行为":{"Colonize":{"body":"海王星"}},"归属":"Player"}]}]}`
+  （值 + `归属` 一起、只有这一片）。
+* **幂等**：给一片「还没有叶」的势力级默认叶选「玩家」⇒ diff 发整片（`{"角色":"War","归属":"Player"}`，新建叶必须带全值）；再撤回「继承」⇒ diff = `{"control":[]}`。
 * **同一片叶在两个面上是同一个对象**：右栏（`state.cities` 的 inline 表）里改 `长三角` 的娱乐预算，左栏城市页同一格的输入框立刻是同一个数；`edControl` 里**只有一条**该叶，diff 也只发一条。
   ⇒ 顺手辟掉一个我担心的坑（两处各造一片壳 ⇒ diff 里出现两条同身份的叶）：**没有发生**。
-* **未组织页**：`@control` 不再是「整份未组织」，改成 `9 项 × 对象；按键的并集逐项标（共 15 个键）`，逐键写 `已整理 capital ← sel-faction` / `未组织 invest_weights`（后者在 `write_omit` 里，如实显示成未组织）。
+* **未组织页**：`@control` 不再是「整份未组织」，改成 `9 项 × 对象；按键的并集逐项标（共 15 个键）`，逐键写 `已整理 首都 ← sel-faction` / `未组织 建设权重`（后者在 `write_omit` 里，如实显示成未组织）。
 * **运行时自检**：读列与控制行分开报——`faction-table 9 条记录 / 18 个读列（含 4 条控制行，其中 1 条的叶这一帧还不存在 = 这一层没表态，界面给新建入口）`；**写面自检**把 14 片叶逐条标「被组织点认领 / 声明不看（理由）」。
 * **旧页没坏**：`控制树（旧）` 页仍渲染 `全局 → 势力 tab → 设计图库/舰/预算 tab → …`；推进 1 回合正常（`已推进 1 回合`），写进去的叶不被冲掉。
 
@@ -376,8 +391,8 @@
   → 删图 ⇒ diff **只发** `{"name":"dsh-试作甲","remove":true}` → 回执 `删掉了 1 片叶：中国.blueprints[0]`。
 * **同名新建被当场拒绝**：`已经有一片同名的叶了（在上面那几行里）`，叶数不变 ⇒ subagent 自己标记为「未实测覆盖」的那个角（本地键撞读面键）**由新建表单挡住了**。
 * **全局归属**：diff `{"control":[],"scope":{"global":"Player"}}` → 回执 ✓（只发 scope）。
-* **建筑权重**：城市卡片里 `invest_weights` 的输入框**可编辑**（6 个，以前全 `disabled`）⇒ 改 1.5→2.5 得
-  `{"invest_weights":[{"city":"长三角","building":0,"value":2.5,"mode":"Player"}]}`。
+* **建筑权重**：城市卡片里 `建设权重` 的输入框**可编辑**（6 个，以前全 `disabled`）⇒ 改 1.5→2.5 得
+  `{"建设权重":[{"城":"长三角","建筑":0,"值":2.5,"归属":"Player"}]}`。
 * **零 JS 错误**：8 个页 + 卡片 + 应用 + 推进回合全程 `errs: []`。
 * **两层门**：Rust `planet_x` **217/217**（31 skipped）+ `planet_x_web` **24/24**；Python 四组 **76/76**；
   反向验证 **19 个注入错全部咬住**（新增两条：`source` 键缺失、表上 `source: null`、`new` 挂单叶）。

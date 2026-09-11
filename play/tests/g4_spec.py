@@ -20,6 +20,13 @@
 4. **认领完整性**（铁律 R 的写面对偶）：每个 `leaves[].field` / `actions[].field` 要么被某条
    `leaf` / `action` 行认领，要么在 `write_omit` 里有一条**带非空 why** 的记录；
    反过来，`leaf` / `action` / `owner` 行与 `leaf_ui` / `action_ui` 的键**不许有孤儿**。
+5. **`kind` 词表对账**（第 7 条，2026-10 新增）：`--index` 的 `control` 派生表里**出现过的
+   `kind` 取值集合**，必须**逐字等于** `--control-schema` 声明的叶名
+   （`leaves[].field ∪ actions[].field`）减去每条声明自报的 `not_in_index`（**带理由**的例外）。
+   从前 `kind` 是发射器里手写的**英文**串（`ship_order`/`investment_budget`…），而同一片叶在
+   patch / 读面上叫**中文**（`指令`/`投资预算`）——同一个概念两套名：Python 按英文 kind 筛、
+   apply 用中文键，写错了哪一边都**不红**，只会静默查不到（"看起来有值"）。现在名字只在引擎的
+   `control::leaves::LEAVES` 里声明一次（`kind_of` 是唯一翻译点），本条钉住它不再漂回去。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
@@ -334,6 +341,43 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             missing.append(f"{f}：本组不认识这片叶（新加的叶要么在这里写上怎么写，要么进 write_omit）")
 
     return plans, missing
+
+
+#: **测试注入点**：`_control_kinds_from_index` 在真文件上读到 `idx/control.jsonl` 之前会调一次它
+#: （参数是那个文件路径）。生产路径上**没有人设置它**（默认 `None`），只有
+#: `play/tests/_g4_negative.py` 用它把某片叶的 `kind` 改成一个**声明里没有的词**，
+#: 验证第 7 条对账真的会红——一条不会红的守卫只是看起来在守纪律。
+INDEX_HOOK = None
+
+
+def _control_kinds_from_index(h, ckpt: Path, diff_path: Path, tmp: Path):
+    """跑一局**每一片叶都写过**的世界，从 `--index` 的 `control` 表里取 `kind` 集合与行数。
+
+    为什么不在第 6 条那趟 `--index`（seed 42 / 40 回合）上顺手取：那张表的行数是**元素**
+    稀疏的——没人设过的叶（比如初期一条都没有的 `城市福利预算`）根本不会有行，
+    于是「声明 16 片、表里 9 种」看起来像红，其实是**世界没写过**。
+    所以这里复用第 3 节那份「把每一片叶都写一次」的 checkpoint + diff（`_plan_leaves`
+    覆盖全部 17 片），再跑一趟 `--index`：写过的叶都在，稀疏性就从等式里消掉了。
+
+    返回 `(kinds, rows)`：`kinds` = 出现过的 kind 集合，`rows` = 验证过的总行数
+    （防空转的量：0 行 ⇒ 这条对账等于没跑）。
+    """
+    idx = tmp / "idx-kinds"
+    rc, _, err = _run(h, ["--start", str(ckpt), "--apply", str(diff_path),
+                          "--round", "1", "--index", str(idx), "--quiet"])
+    path = idx / "idx" / "control.jsonl"
+    if rc != 0 or not path.exists():
+        return set(), 0
+    if INDEX_HOOK is not None:
+        INDEX_HOOK(path)
+    kinds: set[str] = set()
+    rows = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows += 1
+        kinds.add(json.loads(line).get("kind"))
+    return kinds, rows
 
 
 def _pick_entry(v, keys: list[str], keyvals: dict):
@@ -958,6 +1002,45 @@ def run(h, ck) -> None:
                  "；".join(drift[:4]) or
                  (f"{views_checked} 个视图逐字一致（如 ship-table→舰名）"
                   if views_checked else "一个实体视图都没验到 ⇒ 判据空转了"))
+
+    # ══ 7. `control` 表的 `kind` 词表 == 声明里的叶名（逐字、双向）══════════════════
+    #
+    # 见模块文档第 5 条。这里只说**为什么口径是「声明 − not_in_index」而不是「等于全部声明」**：
+    # 设计图库（结构叶，住 `derived.blueprints`）与 `建筑`（命令，不是叶）**结构上就不该**出现在
+    # 这张标量表里，把它们算进来等于逼引擎发一份注定漂移的第二表示（`value: any` 列塞不下结构）。
+    # 所以例外不是"测试放过"，而是**引擎声明里带理由的事实**（`leaves[].not_in_index`），
+    # 本判据逐条查它的理由非空，并用下限挡住"把所有叶都标成例外"这条逃生门。
+    ctrl_kinds, ctrl_rows = _control_kinds_from_index(h, ckpt, diff_path, tmp)
+    declared_all = {s["field"] for s in leaves} | {a["field"] for a in actions}
+    absent, why_bad = {}, []
+    for spec in list(leaves) + list(actions):
+        if "not_in_index" not in spec:
+            why_bad.append(f"{spec.get('field')}：声明里没有 `not_in_index` 这个键"
+                           f"（引擎的 `LeafSpec::not_in_index` 被删了？）")
+            continue
+        why = spec["not_in_index"]
+        if why is None:
+            continue
+        if not isinstance(why, str) or not why.strip():
+            why_bad.append(f"{spec.get('field')}：`not_in_index` 必须有非空理由"
+                           f"（空/空白 = 拿「排除」当逃生门）")
+            continue
+        absent[spec["field"]] = why
+    declared_index = declared_all - set(absent)
+    extra = sorted(ctrl_kinds - declared_index)   # 表里有、声明没有 = 第二套词
+    missing = sorted(declared_index - ctrl_kinds)  # 声明有、表里没发 = 悄悄少一片叶
+    ck.check(f"kind 词表对账：`control` 表实测 {len(ctrl_kinds)} 种 kind == 声明 "
+             f"{len(declared_index)} 片（leaves∪actions 减 {len(absent)} 条自报例外），逐字双向相等",
+             not extra and not missing and not why_bad
+             and bool(ctrl_kinds) and bool(declared_index) and ctrl_rows > 0
+             and len(declared_index) >= 14 and len(absent) >= 1,
+             "；".join(
+                 ([f"表里有而声明没有（第二套词）：{extra}"] if extra else [])
+                 + ([f"声明有而表里没发（悄悄少一片叶）：{missing}"] if missing else [])
+                 + why_bad[:3]
+             ) or (f"{ctrl_rows} 行、{len(ctrl_kinds)} 种 kind："
+                   f"{' / '.join(sorted(ctrl_kinds))}；"
+                   f"自报例外 {len(absent)} 条（{'、'.join(f'{k}（{v[:24]}…）' for k, v in absent.items())}）"))
 
 
 if __name__ == "__main__":

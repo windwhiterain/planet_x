@@ -30,8 +30,8 @@ pub struct ResourceDef {
     pub value: f64,
 }
 
-/// A deposit of a single resource on a settlement. `area` bounds how much
-/// mining may be carved out of this deposit.
+/// 定居点上的**单资源矿藏**：`area`（面积）决定这片矿**最多能开采出多少**
+/// （矿场把它一点点刻出来，见 `ResourceDeposit` 的 `area`）。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ResourceDeposit {
     pub resource: String,
