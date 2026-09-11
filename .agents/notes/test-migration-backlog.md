@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 330**（g1 77 / g2 186 / g3 39 / g4 28）；**Rust 155**（+31 探针 ignored）。
-> **sim 74 → 19**（第 7 批搬走/删掉 55 条；其中 1 条是只打印的探针）。**收口**。
+> 计数：**Python 338**（g1 77 / g2 194 / g3 39 / g4 28）；**Rust 153**（+31 探针 ignored）。
+> **sim 74 → 17**（第 7 批搬走/删掉 57 条；其中 1 条是只打印的探针）。
 > **整族搬空并删文件**：`combat.rs`、`shots.rs`、`fleet.rs`。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
@@ -447,7 +447,27 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 * 同族的 **`market` / `domestic_market` 四条也确认是 §4**：价格序列与「逐城 spent」都不在读面上，
   且两条都要**手工世界**（清空全部货栈 / 造两座一模一样的城）。
 
-**剩下 19 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第十段（sim 19 → 17：不用改契约的两条）**
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `war_scar::war_scar_floor_shape_decays_over_its_window` | 新 `--call war_scar_floor {a,b}` + 四个年龄的档 | `age 0 = −30.0`（配置初值）→ 单调抬高 → 窗口内 `<0` → 出窗口 `null`；**顺序无关**；**没打过仗的一对没有疤** ⇒ `war_scar.rs` 删除 |
+| `ideology::ideology_similarity_shifts_diplomatic_affinity_directionally` | g2 合成场景（两臂只差思潮） | 同极相似度 1 ⇒ 关系爬到 **+16.6**；对极相似度 0 ⇒ 掉到 **−53.9**（间距 70.5） |
+
+**三条「试过但打回」**（这一轮的教训，值得复读）：
+1. **经济净值 → `人民↔精英` 的「方向」找不到读面判据**，三版全败：
+   * **窗口均值净值**：`欧盟` 均值 +35.6 却在窗口里把轴从 0.60 带到 0.15——它的净值**翻了号**
+     （造舰把维护费顶上去），轴跟的是**当前**净值；
+   * **末期净值**：`中国` 末期 −10.65（目标 −0.43），轴却从 −0.30 **升**到 −0.07——同理；
+   * **逐回合区间夹逼**：只量经济轴也有 **17/540 = 3.15%** 越界（`欧盟` r0：目标 0.0、轴 0.60→0.62）。
+   ⇒ 读面复算的目标与 `step_ideology` **当场**用的那个不逐回合相等（回合末的 `faction_process`
+   与它拿到手的 sink 差一截）。
+2. **`spending::upkeep_shortfall…` 的构造本身是判据的一部分**：它要「**恰好半价**」，
+   读面复现不了——我试过「把舰改成重舰 ⇒ 维护费结构性超过产出」，结果要么 `unpaid = 0`
+   （产出先到账）、要么 `unpaid = upkeep`（`rust = 1.0`，舰队当场锈光）**没有中间态**。
+3. **`market` / `domestic_market` 四条确认 §4**：价格序列与「逐城 spent」都不在读面上。
+
+**剩下 17 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
