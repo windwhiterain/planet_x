@@ -164,3 +164,47 @@ fn mastery_does_not_pay_the_governance_bill() {
          凡人 {mortal:.3} vs 掌握 {master:.3}"
     );
 }
+
+/// **P1-5：Player 的 `welfare_budget` 叶按「总市场价值」读，不是逐资源支付向量**。
+///
+/// 只在叶里写「碳」，实际治理/娱乐支付仍从全部库存按价值比例扣；因此铁和碳的
+/// 支付比例必须几乎相同，而不是「写了碳就只扣碳」。
+#[test]
+fn player_welfare_budget_is_a_total_value_not_a_payment_vector() {
+    let (config, mut state) = fresh_world(42);
+    let fid = "中国";
+    for f in state.factions.iter_mut() {
+        f.resources.clear();
+    }
+    if let Some(f) = state.faction_mut(fid) {
+        f.resources.insert("铁".to_string(), 1_000_000.0);
+        f.resources.insert("碳".to_string(), 1_000_000.0);
+    }
+    {
+        let c = state.control_mut(fid.to_string()).expect("中国有 control");
+        c.welfare_budget.clear();
+        // 叶里只写碳；若它是「支付向量」语义，铁应该一格不掉。
+        c.welfare_budget
+            .insert("碳".to_string(), Control::player(1.0));
+    }
+    let before = |s: &State, rt: &str| {
+        s.faction(fid)
+            .and_then(|f| f.resources.get(rt))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let (iron0, carbon0) = (before(&state, "铁"), before(&state, "碳"));
+    step_governance(&mut state, &config, &mut RoundSink::default());
+    let (iron1, carbon1) = (before(&state, "铁"), before(&state, "碳"));
+    let iron_paid = (iron0 - iron1) / iron0;
+    let carbon_paid = (carbon0 - carbon1) / carbon0;
+    assert!(
+        iron_paid > 0.0 && carbon_paid > 0.0,
+        "这一局真的发生了治理/娱乐支付（铁 {iron_paid:.3} / 碳 {carbon_paid:.3}）——守卫不能空转"
+    );
+    assert!(
+        (iron_paid - carbon_paid).abs() < 1e-9,
+        "实际支付必须按全部库存价值比例，而不是按 welfare 叶的资源组分：\
+         铁 {iron_paid:.6} vs 碳 {carbon_paid:.6}"
+    );
+}

@@ -34,10 +34,10 @@ CASES = 0  # 注入错的数量（基线那一跑不算）
 
 
 class FakeH:
-    """真 harness + 一个可以篡改 `--control-schema` 的钩子（只影响那一族的判据）。"""
+    """真 harness + 两个钩子：篡改 `--control-schema` 与 `--nouns`（各只影响自己那一族判据）。"""
 
-    def __init__(self, real, mutate=None):
-        self.real, self.mutate = real, mutate
+    def __init__(self, real, mutate=None, mutate_nouns=None):
+        self.real, self.mutate, self.mutate_nouns = real, mutate, mutate_nouns
         self.path = real.path
 
     def capture(self, args):
@@ -45,10 +45,13 @@ class FakeH:
         if self.mutate and any("control-schema" in a for a in args):
             d = self.mutate(json.loads(out))
             return json.dumps(d, ensure_ascii=False)
+        if self.mutate_nouns and any(a == "--nouns" for a in args):
+            d = self.mutate_nouns(json.loads(out))
+            return json.dumps(d, ensure_ascii=False)
         return out
 
 
-def run_case(label, doc=None, mutate=None, expect="red"):
+def run_case(label, doc=None, mutate=None, expect="red", mutate_nouns=None):
     """喂一份被改坏的声明给 `g4_spec.run`，返回红的判据名。"""
     global CASES
     if expect == "red":
@@ -59,7 +62,7 @@ def run_case(label, doc=None, mutate=None, expect="red"):
         g4_spec.VIEWS_JSON = p
     else:
         g4_spec.VIEWS_JSON = REPO / "web" / "static" / "views.json"
-    h = FakeH(Harness(kind="release"), mutate)
+    h = FakeH(Harness(kind="release"), mutate, mutate_nouns)
     ck = Checks("neg")
     g4_spec.run(h, ck)
     bad = [n for ok, n, _ in ck.rows if not ok]
@@ -260,6 +263,27 @@ def main() -> int:
         return s
 
     run_case("decl-keys-nonempty", None, bad_keys2)
+
+    # ⑰ 身份键：把某个结构体的身份字段改成一个**存在但不唯一**的字段（舰级：多艘舰同一级）
+    def bad_identity_struct(d):
+        d["identity"]["structs"]["Ship"] = "舰级"
+        return d
+
+    run_case("identity-struct-not-unique", None, None, mutate_nouns=bad_identity_struct)
+
+    # ⑱ 身份键：把某张表的键改成一个**根本不存在的列**
+    def bad_identity_table(d):
+        d["identity"]["tables"]["ships"] = "根本没有这一列"
+        return d
+
+    run_case("identity-table-key-missing", None, None, mutate_nouns=bad_identity_table)
+
+    # ⑲ 身份键：前端那边漂移 —— 视图声明一个**不是引擎身份字段**的 key
+    d = clone()
+    for v in walk_views(d):
+        if v.get("id") == "ship-table":
+            v["key"] = "舰级"
+    run_case("identity-view-key-drift", d)
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

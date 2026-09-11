@@ -52,6 +52,7 @@
 use crate::autocontrol::freight;
 use crate::model::*;
 use crate::sim;
+use std::collections::BTreeSet;
 
 /// 逻辑斯蒂函数 `σ(x) = 1/(1+e^-x)`：把任意实数压到 `(0,1)`。
 ///
@@ -98,6 +99,10 @@ pub fn available_throughput(
     from: &str,
     to: &str,
 ) -> f64 {
+    let control = state
+        .faction(fid)
+        .map(|f| f.mond_control)
+        .unwrap_or(0.0);
     state
         .ships
         .iter()
@@ -105,7 +110,7 @@ pub fn available_throughput(
         .filter(|s| state.ship_control(s.name.clone()) == ControlMode::Auto)
         .filter(|s| state.contracts.assignment_of(&s.name).is_none())
         .filter(|s| s.cargo.is_empty())
-        .map(|s| freight::trip_throughput(state, config, s, from, to))
+        .map(|s| freight::trip_throughput(state, config, s, from, to, control))
         .sum()
 }
 
@@ -154,6 +159,11 @@ pub fn accept_chance(state: &State, config: &GameConfig, c: &Contract, fid: &str
 ///
 /// 中选者只是**受雇**（`carrier` 落定 + 雇佣期起算）：**不押船**。派工是下一步
 /// [`assign_hired_ships`] 的事——那张单要几条船、派哪几条，是受雇方自己的内部事务。
+///
+/// **同一回合同一受雇方最多接一张新单**（P1-3）：在本回合撮合完成前，前面订单只写
+/// `carrier`、还没有 `assignments`，若允许多接，`available_throughput` 会把同一批空闲船
+/// 重复算给多张单，导致总承诺运力超自身能力。先做一回合一张的局部保留；下一回合才
+/// 按派工后的新缺口评估后续单。
 pub(crate) fn match_carriers(
     state: &mut State,
     config: &GameConfig,
@@ -161,6 +171,8 @@ pub(crate) fn match_carriers(
 ) {
     let mut fids: Vec<FactionId> = state.factions.iter().map(|f| f.name.clone()).collect();
     fids.sort(); // 确定性：候选顺序不依赖势力表的排列
+    // 本回合已经拿到新单的受雇方：同回合不再参与后续订单，避免同一批空闲运力被重复承诺。
+    let mut claimed_this_round: BTreeSet<FactionId> = BTreeSet::new();
     let open: Vec<u64> = state
         .contracts
         .contracts
@@ -187,6 +199,9 @@ pub(crate) fn match_carriers(
         for fid in &fids {
             if *fid == c.shipper {
                 continue; // 自己给自己运不算雇佣（挂单的意义就是请人）
+            }
+            if claimed_this_round.contains(fid) {
+                continue; // P1-3：本回合先到的单已经占掉这家受雇方
             }
             // **禁运同样挡雇佣**（Q4，用户裁决）：全面禁运是「根本不卖给你」——那就不该
             // 还能雇对方的船来搬货（比不卖矿更狠的一条，见 `.agents/notes/trade-and-sanctions.md`）。
@@ -248,6 +263,7 @@ pub(crate) fn match_carriers(
             x -= w;
         }
         let (carrier, _) = chosen;
+        claimed_this_round.insert(carrier.clone());
         // **候选池（B5c）**：愿意接的每家各占多少权重——「为什么是它拿到了」= 信誉加权。
         let pool: Vec<crate::model::PoolEntry> = willing
             .iter()
@@ -307,7 +323,13 @@ fn hired_throughput(state: &State, config: &GameConfig, c: &Contract) -> f64 {
         .iter()
         .filter_map(|s| state.ship(s.as_str()))
         .filter(|s| s.hull > 0.0)
-        .map(|s| freight::trip_throughput(state, config, s, &c.from, &c.to))
+        .map(|s| {
+            let control = state
+                .faction(&s.faction_id)
+                .map(|f| f.mond_control)
+                .unwrap_or(0.0);
+            freight::trip_throughput(state, config, s, &c.from, &c.to, control)
+        })
         .sum()
 }
 

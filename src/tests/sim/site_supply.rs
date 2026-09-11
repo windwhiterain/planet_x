@@ -145,6 +145,74 @@ fn a_site_never_exports_what_it_still_needs() {
     );
 }
 
+/// **实际装货也受出口保留量约束**：起点不是货主首都时，`haul_load` 只能装
+/// `exportable_at` 允许的净剩余；站点自己留着建楼/造舰的 `site_reserve` 不能被装走。
+///
+/// 这是 P0-1 的守卫：仓里本来足够留出保留量，船却会把整仓装走的那条 bug。
+#[test]
+fn an_export_haul_never_loads_the_site_reserve() {
+    let (config, mut state) = fresh_world(42);
+    let fid = "中国";
+    let body = "水星";
+    let cid = "水星熔炉基地".to_string();
+    assert_ne!(state.capital_body(fid), body, "用例前提：水星不是中国首都");
+    assert!(state.city(&cid).is_some(), "用例前提：水星上有一处中国城市");
+
+    // 只留这一处城市的建设需求，库存先清空，保证保留量全部来自该站点。
+    gut_all_stock(&mut state);
+    half_built(&mut state, &cid);
+    let reserve = freight::site_reserve(&state, &config, fid, body);
+    let (rt, need) = reserve
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(r, v)| (r.clone(), *v))
+        .expect("半建成城市必须有保留量");
+    assert!(need > 1e-9, "用例前提：该站点对 {rt} 的保留量为正");
+
+    // 库存 = 保留量 + 1：出口净剩余恰好 1，但旧代码会按「全量库存」装货。
+    state.depot_add(fid, body, &rt, need + 1.0);
+    let exportable = freight::exportable_at(&state, &config, fid, body)
+        .get(&rt)
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        (exportable - 1.0).abs() < 1e-9,
+        "用例构造失败：{rt} 的出口净剩余应为 1，实为 {exportable}"
+    );
+
+    let ship = state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .max_by(|a, b| cargo_capacity(&config, a).total_cmp(&cargo_capacity(&config, b)))
+        .map(|s| s.name.clone())
+        .expect("用例前提：中国至少有一艘舰");
+    let room = cargo_capacity(&config, state.ship(&ship).unwrap());
+    assert!(
+        room > exportable + 1.0,
+        "用例前提：有效舱容 {room} 要大于出口净剩余 {exportable}，否则旧 bug 会被舱容掩盖"
+    );
+    if let Some(s) = state.ship_mut(&ship) {
+        s.cargo.clear();
+    }
+
+    let loaded = haul_load(&mut state, &config, fid, &ship, body, "地球");
+    let left = state
+        .stock_at(fid, body)
+        .and_then(|m| m.get(&rt))
+        .copied()
+        .unwrap_or(0.0);
+    assert!(loaded > 0.0, "这条腿真的有货可装——守卫不能空转");
+    assert!(
+        loaded <= exportable + 1e-9,
+        "装货量 {loaded} 超过了出口净剩余 {exportable}（把保留量装走了）"
+    );
+    assert!(
+        left + 1e-9 >= need,
+        "装完后站点库存 {left} 低于保留量 {need}——本地建设料被运走了"
+    );
+}
+
 /// **保留量随航程变**：同一个站点、同样的建设活，**离首都越远**该囤的料越多
 /// （`site_reserve = min(计划, 每回合消耗速率 × 这条线一个往返的回合数)`）。
 ///

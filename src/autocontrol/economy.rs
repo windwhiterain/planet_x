@@ -77,11 +77,28 @@ fn plan_core(
         .map(|s| ship_panel(config, s).upkeep)
         .sum();
 
-    // 本回合订单（按当前 mode：Ai 重算 / Player 用命令），已含造舰维护保留上限。
-    let (con_budget, _) = read_budget(state, config, fid.to_string(), BudgetKind::Construction);
-    let (inv_budget, _) = read_budget(state, config, fid.to_string(), BudgetKind::Investment);
-    let con_value: f64 = con_budget.iter().map(|(k, v)| v * value_of(k)).sum();
-    let inv_value: f64 = inv_budget.iter().map(|(k, v)| v * value_of(k)).sum();
+    // 本回合订单（按当前 mode：Ai 重算 / Player 用命令）。
+    //
+    // ⚠ `read_budget` 返回的 Player 值已经乘过维护 reserve 的 `con_scale`（真正可执行
+    // 额度）；但预览要回答的是「玩家/Runner 命令了多少」，所以 Player 叶单独还原成命令值。
+    let (con_budget, con_modes) = read_budget(state, config, fid.to_string(), BudgetKind::Construction);
+    let (inv_budget, inv_modes) = read_budget(state, config, fid.to_string(), BudgetKind::Investment);
+    let con_value = budget_display_value(
+        state,
+        fid,
+        &con_budget,
+        &con_modes,
+        &value_of,
+        BudgetKind::Construction,
+    );
+    let inv_value = budget_display_value(
+        state,
+        fid,
+        &inv_budget,
+        &inv_modes,
+        &value_of,
+        BudgetKind::Investment,
+    );
     // AI 自己的保守造舰上限（维护保留后）：用于对比「命令的预算」是否更激进。
     let ai_cap = (stock_value * config.economy.invest_fraction)
         .min((stock_value - upkeep_now * config.economy.upkeep_reserve_mult).max(0.0));
@@ -133,6 +150,41 @@ fn plan_core(
         "rounds_before_insolvent": rounds.map(r2),
         "verdict": verdict,
     }))
+}
+
+/// Preview 里的预算值：Player 叶显示**命令值**（不是 reserve 缩放后的可执行值），
+/// AI 路径显示引擎本回合算出的继承值。
+fn budget_display_value(
+    state: &State,
+    fid: &str,
+    budget: &ResourceMap,
+    modes: &[(String, ControlMode)],
+    value_of: &impl Fn(&str) -> f64,
+    kind: BudgetKind,
+) -> f64 {
+    budget
+        .iter()
+        .map(|(rt, v)| {
+            let mode = modes
+                .iter()
+                .find(|(r, _)| r == rt)
+                .map(|(_, m)| *m)
+                .unwrap_or(ControlMode::Auto);
+            let raw = if mode.is_player() {
+                state
+                    .control(fid.to_string())
+                    .and_then(|c| match kind {
+                        BudgetKind::Investment => c.investment_budget.get(rt),
+                        BudgetKind::Construction => c.construction_budget.get(rt),
+                    })
+                    .map(|c| c.value)
+                    .unwrap_or(*v)
+            } else {
+                *v
+            };
+            raw * value_of(rt)
+        })
+        .sum()
 }
 
 #[cfg(test)]

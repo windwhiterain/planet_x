@@ -73,6 +73,7 @@ fallback for index directories written by an older engine).
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
@@ -943,10 +944,14 @@ class Surface:
         if isinstance(selection, pd.DataFrame):
             if selection.empty:
                 return []
-            col = next((c for c in ("舰名", "舰") if c in selection.columns), None)
+            # 舰的身份列**问引擎**（`ships` 表声明的 identity），不再"在三个候选里挑一个能对上的"：
+            # 那种猜法在引擎改名后会**悄悄挑错列**。另一候选 `ship` 是 decisions 表的列名
+            # （那份数据帧不是 `ships` 表，见上面的 docstring）。
+            col = next((c for c in (identity_of("ships"), "ship") if c in selection.columns), None)
             if col is None:
                 raise ValueError(
-                    "传入的 DataFrame 没有舰名列（舰名 / 舰）——用 ctl.ships(ckpt) "
+                    f"传入的 DataFrame 没有舰名列（引擎声明 `ships` 的身份是 "
+                    f"`{identity_of('ships')}`，decisions 帧是 `ship`）——用 ctl.ships(ckpt) "
                     "或 ctl.ships_and_cities(ckpt) 筛出来的帧。"
                 )
             has_fac = "势力" in selection.columns
@@ -1685,6 +1690,25 @@ def surface(ckpt: str | os.PathLike | None = None, *, planet_x=None,
 def control_schema(*, planet_x=None) -> dict:
     """``planet_x --control-schema`` — the machine-readable definition of a legal diff."""
     return _run_json(["--control-schema"], planet_x=planet_x)
+
+
+@lru_cache(maxsize=1)
+def identity_keys(*, planet_x=None) -> dict:
+    """``--nouns`` 里的 ``identity`` —— 「谁靠哪个字段认人」的**唯一真值**（结构体 + 表）。
+
+    结构体那半是 Rust 的 ``model::IDENTITY``，表那半是投影的 ``LAZY``；两边都有守卫钉住
+    「指名的字段真的存在、且在真世界里真的唯一」。**别再手抄**新表：镜像表在引擎改名后
+    不会红，只会悄悄用旧键。
+    """
+    return _run_json(["--nouns"], planet_x=planet_x)["identity"]
+
+
+def identity_of(table: str, *, planet_x=None) -> str:
+    """某张投影表的身份列（引擎声明）。没声明就**响亮地报**，不猜。"""
+    tables = identity_keys(planet_x=planet_x)["tables"]
+    if table not in tables:
+        raise ValueError(f"引擎没声明 `{table}` 的身份键（已声明的有：{sorted(tables)}）")
+    return tables[table]
 
 
 def run_engine(args: Sequence[str], *, planet_x=None, timeout: float = 600.0):

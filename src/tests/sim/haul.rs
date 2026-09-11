@@ -111,8 +111,8 @@ fn off_capital_production_does_not_touch_the_pool() {
 fn hauling_moves_cargo_without_creating_or_destroying_any() {
     let (config, mut state) = fresh_world(42);
     state.depots.clear();
-    state.depot_add("中国", "金星", "碳", 7.0);
-    state.depot_add("中国", "金星", "铁", 5.0);
+    state.depot_add("中国", "月球", "碳", 7.0);
+    state.depot_add("中国", "月球", "铁", 5.0);
     let ship = state
         .ships
         .iter()
@@ -121,8 +121,8 @@ fn hauling_moves_cargo_without_creating_or_destroying_any() {
         .name
         .clone();
     let class = state.ship(&ship).unwrap().class.clone();
-    // 停在金星泊位上（`arrival_eps` 之内）。
-    let vpos = state.body_position("金星");
+    // 停在月球泊位上（`arrival_eps` 之内）。
+    let vpos = state.body_position("月球");
     state.ship_mut(&ship).unwrap().position = vpos;
     let total = |s: &State| -> f64 {
         let depot: f64 = s.depots.values().flat_map(|m| m.values()).sum();
@@ -133,7 +133,7 @@ fn hauling_moves_cargo_without_creating_or_destroying_any() {
     let before = total(&state);
 
     // —— 装货：上限 = 有效舱容，两种货尽量等量 ——
-    let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default());
+    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
     let units = match step {
         HaulStep::Loaded { units, .. } => units,
         other => panic!("停在货栈泊位上应当装货，实为 {other:?}"),
@@ -145,7 +145,7 @@ fn hauling_moves_cargo_without_creating_or_destroying_any() {
     );
     let hold: f64 = state.ship(&ship).unwrap().cargo.values().sum();
     assert!((hold - units).abs() < 1e-9, "装了多少就在舱里有多少");
-    let left: f64 = state.depot("中国", "金星").unwrap().values().sum();
+    let left: f64 = state.depot("中国", "月球").unwrap().values().sum();
     assert!(
         (left - (12.0 - units)).abs() < 1e-9,
         "货栈恰好少了装走的那些：剩 {left}"
@@ -162,7 +162,7 @@ fn hauling_moves_cargo_without_creating_or_destroying_any() {
         .get("碳")
         .copied()
         .unwrap_or(0.0);
-    let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default());
+    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
     match step {
         HaulStep::Delivered {
             units: u,
@@ -181,7 +181,7 @@ fn hauling_moves_cargo_without_creating_or_destroying_any() {
             .copied()
             .unwrap_or(0.0)
             > carbon_before,
-        "金星采的碳进了首都池——这就是集货腿的终点"
+        "月球采的碳进了首都池——这就是集货腿的终点"
     );
     assert!((total(&state) - before).abs() < 1e-9, "卸货不许毁货");
 }
@@ -322,13 +322,13 @@ fn a_haul_route_alternates_legs_because_of_the_cargo() {
         .name
         .clone();
     let class = state.ship(&ship).unwrap().class.clone();
-    let vpos = state.body_position("金星");
+    let vpos = state.body_position("月球");
     state.ship_mut(&ship).unwrap().position = vpos;
 
     // 1) 货栈是空的 ⇒ **原地等**（「有货就走」的另一半是「没货就不走」），位置不动。
-    let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default());
+    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
     assert!(
-        matches!(step, HaulStep::Waiting { ref body } if body == "金星"),
+        matches!(step, HaulStep::Waiting { ref body } if body == "月球"),
         "空货栈应当原地等，实为 {step:?}"
     );
     assert_eq!(
@@ -339,8 +339,8 @@ fn a_haul_route_alternates_legs_because_of_the_cargo() {
     assert!(state.ship(&ship).unwrap().cargo.is_empty());
 
     // 2) 来货了就装，且**这一回合不再跑**（与殖民一样是「到达即行动」）。
-    state.depot_add("中国", "金星", "碳", 3.0);
-    let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default());
+    state.depot_add("中国", "月球", "碳", 3.0);
+    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
     assert!(
         matches!(step, HaulStep::Loaded { .. }),
         "有货就装，实为 {step:?}"
@@ -348,7 +348,7 @@ fn a_haul_route_alternates_legs_because_of_the_cargo() {
     assert!(!state.ship(&ship).unwrap().cargo.is_empty(), "舱里该有货");
 
     // 3) 舱里有货 ⇒ 腿别翻到 `to`（哪怕 `from` 还有货）。同一对 from/to、零额外状态。
-    let step = haul_step(&mut state, &config, &ship, &class, "金星", "地球", &mut crate::model::RoundInputs::default());
+    let step = haul_step(&mut state, &config, &ship, &class, "月球", "地球", &mut crate::model::RoundInputs::default());
     assert_eq!(
         step.body(),
         "地球",

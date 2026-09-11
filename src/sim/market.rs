@@ -115,6 +115,32 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             *world_stock.entry(rt.clone()).or_insert(0.0) += *v;
         }
     }
+    // **口径 A（世界总库存）**：产地货栈里等船运的产出也是世界库存的一部分。
+    // 不把 `depots` 算进来时，`consumed = last_pool + all_production − current_pool`
+    // 会把「刚挖出来、还在货栈等船」的产出误判成消费，系统性抬高价格信号。
+    for depot in state.depots.values() {
+        for (rt, v) in depot {
+            *world_stock.entry(rt.clone()).or_insert(0.0) += *v;
+        }
+    }
+    // **价格发现看的是可售供给，不是世界总库存**（P1-4）：
+    // 各势力会在挂单前留下自用 buffer/reserve；锁在仓库里不卖的那部分不该把价格压到地板。
+    // 这里用的是与下面挂单**同一套 keep 口径**：军工需要资源留 `working_buffer` 与
+    // `reserve_fraction` 的较大者，其余资源只留 `reserve_fraction`。
+    let mut saleable: ResourceMap = ResourceMap::new();
+    for f in &state.factions {
+        for (rt, amt) in &f.resources {
+            let keep = if need.contains(rt) {
+                m.working_buffer.max(amt * m.reserve_fraction)
+            } else {
+                amt * m.reserve_fraction
+            };
+            let over = amt - keep;
+            if over > 1e-9 {
+                *saleable.entry(rt.clone()).or_insert(0.0) += over;
+            }
+        }
+    }
     let mut produced: ResourceMap = ResourceMap::new();
     for prod in flow.faction_production.values() {
         for (rt, v) in prod {
@@ -127,6 +153,7 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
     let mut avg_demand: ResourceMap = ResourceMap::new();
     for rt in config.resources.keys() {
         let have = world_stock.get(rt).copied().unwrap_or(0.0);
+        let supply = saleable.get(rt).copied().unwrap_or(0.0);
         let made = produced.get(rt).copied().unwrap_or(0.0);
         // 消费 = 上回合市场时刻库存 + 本回合产出 − 本回合市场时刻库存。
         // 中间发生的支出：上回合的建设/治理 + 本回合的维护 + 市场手续费。
@@ -146,7 +173,8 @@ pub fn step_market(state: &mut State, config: &GameConfig, flow: &mut RoundSink)
             // 几乎没人消费它 → 没有稀缺信号，按基价（否则没人用的矿会被永久顶成天价）。
             1.0
         } else {
-            let cover = (have / demand).max(m.cover_floor);
+            // 覆盖回合数用**可售供给**，不是世界总库存（P1-4）。
+            let cover = (supply / demand).max(m.cover_floor);
             (m.coverage_rounds / cover)
                 .powf(m.price_alpha)
                 .clamp(m.price_floor, m.price_ceiling)

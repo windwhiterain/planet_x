@@ -330,6 +330,9 @@ pub fn lanes(state: &State, config: &GameConfig, fid: &str) -> Vec<Lane> {
 /// 本势力**该有多少艘运输舰**（**连续量**）：每条腿按**它有多少活**分到船的头数，
 /// **一条腿最多算一艘**（一条线同时只跑一趟）。
 ///
+/// ⚠ 这是**头数定编口径，不含航程**：远距大积压腿也最多算一艘。实际能搬多少要走
+/// [`trip_throughput`] / 合同市场的运力账；这里只回答「该派几条船过去」。
+///
 /// ```text
 /// 头数 = Σ_腿 min(1, 这条腿的货量 ÷ 一个货舱)
 /// ```
@@ -943,19 +946,19 @@ pub fn trip_throughput(
     ship: &Ship,
     from: &str,
     to: &str,
+    mond_control: f64,
 ) -> f64 {
     let panel = ship_panel(config, ship);
     if panel.speed <= 0.0 {
         return 0.0; // 动不了 ⇒ 吞吐是零（与定编同一个判据）。
     }
-    let d = sim::dist(state.body_position(from), state.body_position(to));
-    let round_trip = 2.0 * d;
-    let trips = if round_trip <= 1e-9 {
-        1.0
-    } else {
-        panel.speed / round_trip
-    };
-    cargo_capacity(config, ship) * trips
+    // 与 [`trip_rounds`](crate::model::trip_rounds) **同源**：非 master 走深空要试多次、
+    // 装卸还有离散回合，吞吐必须和合同考核用同一把尺子，不能再按「直线速度」高估。
+    let rounds = trip_rounds(state, config, from, to, panel.speed, mond_control);
+    if !rounds.is_finite() || rounds <= 0.0 {
+        return 0.0;
+    }
+    cargo_capacity(config, ship) / rounds
 }
 
 /// 本势力**此刻能去跑运输的舰**（[`should_be_role`] 的名单，**扣掉正在替别人跑的**）。
@@ -1083,9 +1086,13 @@ pub(crate) fn capacity_ledger(
     }
     lns.iter()
         .map(|l| {
+            let control = state
+                .faction(fid)
+                .map(|f| f.mond_control)
+                .unwrap_or(0.0);
             let rate: f64 = serve
                 .iter()
-                .map(|s| trip_throughput(state, config, s, &l.from, &l.to))
+                .map(|s| trip_throughput(state, config, s, &l.from, &l.to, control))
                 .sum();
             let own = rate * (l.units / total);
             let need = crate::model::required_throughput(state, config, &l.from, &l.to);

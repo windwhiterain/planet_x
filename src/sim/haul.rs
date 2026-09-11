@@ -99,6 +99,17 @@ pub fn haul_load(
     }
     let owner = cargo_owner(state, fid, ship_id);
     let mut avail = state.stock_at(&owner, from).cloned().unwrap_or_default();
+    // **出口腿不能装走本地保留量**（`site_reserve`）：起点不是货主首都时，
+    // 只有 `exportable_at = max(0, 现货 − 保留量)` 的部分才允许离站。
+    // 没有这一道，站点正在留着建楼/造舰的料会被船一起装回首都，下一回合
+    // `site_deficit` 又把同一批货列为进口需求 ⇒ 往返乒乓。
+    if from != state.capital_body(&owner) {
+        let exportable = autocontrol::freight::exportable_at(state, config, &owner, from);
+        avail.retain(|rt, amt| {
+            *amt = amt.min(exportable.get(rt).copied().unwrap_or(0.0));
+            *amt > 1e-9
+        });
+    }
     // 补给腿（起点是货主的首都）：只装终点缺的货。
     if from == state.capital_body(&owner) && to != from {
         let want = autocontrol::freight::site_deficit(state, config, &owner, to);

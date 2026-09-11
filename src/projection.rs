@@ -1337,6 +1337,19 @@ fn blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> Contro
 /// the Python kit share: fields with a `lazy` entry are NOT inline in `main.jsonl` (the main row
 /// carries their id-array), while `eager` fields are inline. Column types are listed so the agent
 /// knows the table shape without guessing.
+/// **每张投影表的身份键**（`{表名: 列名}`），单一来源 = [`LAZY`]。
+///
+/// 与 [`projection_schema`] 的 `lazy.*.key` **同源**：一个是给读的人看的完整声明，
+/// 一个是给 `--nouns` / `GET /api/schema` 的 `identity.tables` 用的紧凑形式。
+/// 目的同 [`crate::model::IDENTITY`]：别让 Python/kit/JS 各自手抄一份「谁靠哪个字段认人」。
+pub fn table_identity_keys() -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for f in LAZY {
+        m.insert(f.name.to_string(), serde_json::Value::from(f.key));
+    }
+    serde_json::Value::Object(m)
+}
+
 pub fn projection_schema() -> serde_json::Value {
     let mut lazy = serde_json::Map::new();
     for f in LAZY {

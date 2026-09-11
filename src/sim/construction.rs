@@ -23,17 +23,27 @@ pub fn step_construction(
     );
 
     for fid in faction_ids {
-        let (investment, inv_modes) = autocontrol::read_budget(
+        let (mut investment, inv_modes) = autocontrol::read_budget(
             state,
             config,
             fid.clone(),
             autocontrol::BudgetKind::Investment,
         );
-        let (construction, con_modes) = autocontrol::read_budget(
+        let (mut construction, con_modes) = autocontrol::read_budget(
             state,
             config,
             fid.clone(),
             autocontrol::BudgetKind::Construction,
+        );
+        // **P1-5 联合上限**：Investment 与 Construction 各自都有预算，但两者同时花
+        // 可能击穿舰队维护 reserve。先把两笔预算按市场价值比例缩到 `库存 − reserve`。
+        // 单个 kind 的 `read_budget` 仍负责各自的口径；这一道只加**联合闸**。
+        autocontrol::budget::cap_joint_budgets(
+            state,
+            config,
+            &fid,
+            &mut investment,
+            &mut construction,
         );
         autocontrol::write_budget(
             state,
@@ -50,8 +60,13 @@ pub fn step_construction(
             &con_modes,
         );
 
-        let mut inv_spent: ResourceMap = ResourceMap::new();
-        let mut con_spent: ResourceMap = ResourceMap::new();
+        let mut inv_spent_total: ResourceMap = ResourceMap::new();
+        let mut con_spent_total: ResourceMap = ResourceMap::new();
+        // **预算门的 spent 与总账的 spent 是两本账**（P0-2）：
+        // * 国内市场关闭：所有城市共用 `*_shared` 作为预算门，保持旧行为逐字节不变；
+        // * 国内市场开启：每个城市各有一本逐城 spent 作为预算门，`*_total` 只做汇总记账。
+        let mut inv_spent_shared: ResourceMap = ResourceMap::new();
+        let mut con_spent_shared: ResourceMap = ResourceMap::new();
 
         // **国内市场**（可选）：把势力级资源预算按城市权重/recipe 分配成每城预算。
         // 关闭时返回 None，下面走旧的全局预算路径，逐字节不变。
@@ -82,6 +97,14 @@ pub fn step_construction(
                 ),
                 None => (&investment, &construction),
             };
+            let mut inv_spent_city: ResourceMap = ResourceMap::new();
+            let mut con_spent_city: ResourceMap = ResourceMap::new();
+            let (inv_budget_spent, con_budget_spent): (&mut ResourceMap, &mut ResourceMap) =
+                if market_plan.is_some() {
+                    (&mut inv_spent_city, &mut con_spent_city)
+                } else {
+                    (&mut inv_spent_shared, &mut con_spent_shared)
+                };
             build_city(
                 state,
                 config,
@@ -89,8 +112,10 @@ pub fn step_construction(
                 fid.clone(),
                 invest_limit,
                 con_limit,
-                &mut inv_spent,
-                &mut con_spent,
+                inv_budget_spent,
+                con_budget_spent,
+                &mut inv_spent_total,
+                &mut con_spent_total,
                 &mut next_building_id,
                 rng,
                 flow,
@@ -102,8 +127,8 @@ pub fn step_construction(
         flow.spend.insert(
             fid.clone(),
             crate::model::SpendFlow {
-                investment: inv_spent,
-                construction: con_spent,
+                investment: inv_spent_total,
+                construction: con_spent_total,
             },
         );
     }
@@ -132,6 +157,14 @@ pub fn step_construction(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 把一笔实际花费也记到预算门账本上（`commit_spend` 只记总账）。
+fn record_spend(spent: &mut ResourceMap, cost: &[(String, f64)]) {
+    for (rt, c) in cost {
+        *spent.entry(rt.clone()).or_insert(0.0) += c;
+    }
+}
+
+
 pub fn build_city(
     state: &mut State,
     config: &GameConfig,
@@ -141,6 +174,8 @@ pub fn build_city(
     con_limit: &ResourceMap,
     inv_spent: &mut ResourceMap,
     con_spent: &mut ResourceMap,
+    inv_spent_total: &mut ResourceMap,
+    con_spent_total: &mut ResourceMap,
     next_building_id: &mut BuildingId,
     _rng: &mut Prng,
     flow: &mut RoundSink,
@@ -346,7 +381,8 @@ pub fn build_city(
             .iter()
             .map(|(rt, c)| (rt.clone(), *c * inc))
             .collect();
-        commit_spend(state, &fid, &body_id, inv_spent, &cost);
+        commit_spend(state, &fid, &body_id, inv_spent_total, &cost);
+        record_spend(inv_spent, &cost);
         b.deployed += inc;
     }
 
@@ -464,7 +500,8 @@ pub fn build_city(
             .iter()
             .map(|(rt, c)| (rt.clone(), *c * increment))
             .collect();
-        commit_spend(state, &fid, &body_id, con_spent, &cost);
+        commit_spend(state, &fid, &body_id, con_spent_total, &cost);
+        record_spend(con_spent, &cost);
         *to_write_progress.entry(cls.clone()).or_insert(0.0) += increment;
         // Spawn ships as their build points fill (the cost was paid as progress).
         // On launch, the ship is fitted with a deterministic component loadout chosen
