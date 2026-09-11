@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 233**（g1 61 / g2 115 / g3 34 / g4 23）；**Rust 180**（+31 探针 ignored）。
-> **sim 74 → 45**（第 7 批搬走/删掉 29 条）。
+> 计数：**Python 243**（g1 67 / g2 123 / g3 34 / g4 23）；**Rust 176**（+31 探针 ignored）。
+> **sim 74 → 41**（第 7 批搬走/删掉 33 条；其中 1 条是只打印的探针）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -308,15 +308,43 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 3. **`锈 ⇒ 带内没舰` 不成立**：读面给「带内舰数」，目标是「在场强度」（逐舰深度不同）
    ——实测 123 次回落里 **9 次带内有舰**。只能搬「涨 ⇒ 带内有舰」那半。
 
-**剩下 45 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第三段（sim 45 → 41）**
+
+| 族 | 结果 | 靠什么 |
+| --- | --- | --- |
+| `mond::route_depth_measures_mond_immersion` | 删 | 新 `--call route_depth`：原件用**裸坐标**（`[r±k, 0]`），半径从 `meta.mond.radius` 读 ⇒ **逐字可复现** |
+| `ideology::ideology_similarity_ranges_and_is_monotonic` | 删 | 新 `--call ideology_similarity`（键名与读面 `factions.思潮` 一致）；判据比原件**更强**（加对称 + 单调） |
+| `combat::damaged_components_repair_in_friendly_territory` | 删 | g2 合成场景：**捏一艘舰的组件/坐标**（本土 **+1.8/回合** vs 外海 **+0.72/回合**） |
+| `fleet::newly_built_ships_have_no_order_of_their_own` | 删 | g2：3 seed 里 **594 艘**新舰的 `order_leaf_mode` 只会是 `Inherit`、`order_effective_mode` 只会是 `Auto` |
+
+**一条重要的能力发现**：`edit()` 要「带身份键的行表」，而**舰 / 城 / 势力都有身份键**
+⇒ 它们的字段（坐标、组件、组件耐久、资源、建筑 …）**都能捏**。这是本段两处 A/B 的基础。
+**只有 `depots` 不行**（复合键的 map `"中国|水星"`）——它是 `site_supply` 那两条 A/B 的硬墙。
+
+**试过但搬不动（都记在各自模块头）**：
+* `spending::upkeep_shortfall…`：原件是 `step_upkeep` 的**单元测**——整回合里产出先到账，
+  把库存砍到半价也当场补上（实测欠费恒为 0）⇒ §4 内部契约类。
+* `haul::a_haul_route_alternates_legs_because_of_the_cargo`：读面**给不出路线的 from/to**，
+  而承包投递的「卸货端」与「货主」不是一回事（单路线舰里仍有 196 处反例）。
+* `ideology` 的三条 `step_ideology` 单元测：要**往世界里注入事件**（读面没有事件的写入口）。
+
+**剩下 41 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
   ⇒ `site_supply` 那 2 条 A/B 造不出来（要么扩引擎的 `--nouns` 声明「map 型属性的键部件」，要么留 §4）。
 * **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints` 1）、`route_depth`（`mond` 1）、
   `ideology_similarity`（`ideology` 2）——第 5 批那套现成的。
-* **要构造的世界**：`shots` 1（两层点防吃光一发导弹，实测 7×1000 回合里只有 2 条）、
-  `knowledge` 1（够深的在场）、`combat` 里的 PD 屏护/修船 A/B。
+* **能用「捏实体」做的场景（最值得做）**：`governance::player_welfare_budget_is_a_total_value…`
+  （`福利预算` 叶）、`haul::a_commanded_haul_route_delivers_depot_cargo_into_the_capital_pool`
+  （Player `Haul` 指令）、`ideology::entertainment_holds_a_distant_city`（`娱乐预算` 叶）、
+  `fleet::colonize_keeps_player_ownership`（Player `Colonize` 指令）——都是「钉一片玩家叶 + 看读面」。
+* **要新读面列**：`factions.贸易禁运`（trade 1）、`ships`/`faction_process` 的「在场强度」
+  （knowledge 3，现在是**带内舰数**，而机制用的是 `1 + 深度 × depth_weight`）、
+  `haul_steps` 的 from/to（haul 1）。再加一个 `--call mond_drift` / `nav_roll` 能解 mond 2。
+* **§4 明说不搬的残渣**：`domestic_market` 2 + `market` 2（另一个会话正在飞的内部账/定价单元测）、
+  `war_scar` 1（手工世界）、`shots` 1（要构造 duel）、`site_supply` 3（要可写货栈 / `haul_load`）、
+  `combat` 2（要构造编队/屏护）、`spending` 1、`blueprints` 1、`ideology` 4、`haul` 2。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 
