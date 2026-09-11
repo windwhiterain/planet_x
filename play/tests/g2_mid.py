@@ -18,6 +18,8 @@
 配置算（不写常量）。
 * **贸易三账**（`src/tests/sim/trade.rs` 搬走的三条）：成交清单逐回合 ↔ `view.market_settled`、
   价格分解逐项重算、买方名次 = 引擎的购买力序。
+* **货舱（M2）**：`ships.cargo_capacity` = 舰级舱容 × 战损折算 `船体/船体上限`，且舰级舱容
+  是设计裁决（`src/tests/sim/haul.rs` 的 `cargo_capacity_...` 数据级那一半）。
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ ROUNDS = 400
 MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会空转，得报出来
 MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1366 笔
 MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1200 个「排过队」的回合
+MIN_CARGO_ROWS = 1000     # 货舱防空转：3 seed × 400 回合的「舰·回合」行数下限
 
 
 def _named_entities(ev):
@@ -528,6 +531,55 @@ def trade_report(q) -> dict:
             "rank_bad": rank_bad, "rank_rounds": rank_rounds}
 
 
+def cargo_report(q) -> dict:
+    """货舱（M2 / 施工图 §5 第 2 批）：有效舱容公式 + 舰级舱容的设计裁决。
+
+    `ships` 表现已发 `载货`（按资源的在舱货物）与 `cargo_capacity`（有效舱容）。判据住在
+    :func:`cargo_checks` 里。
+
+    ⚠ `船体` / `船体上限` / `cargo_capacity` 都按 **r2** 发（读面约定：标量留两位压 token），
+    所以公式对账走**舍入区间**（真值必须落在 `船体±0.005`、`船体上限±0.005` 推出的区间，
+    再给 `cargo_capacity` 自身的 r2 留 ±0.005），不是逐位相等。
+    """
+    ships = q.table("ships")
+    meta = q.meta or {}
+    spec_cargo = {cls: s.get("cargo") for cls, s in (meta.get("ships") or {}).items()}
+
+    formula_bad: list[str] = []
+    checked = damaged = with_cargo = 0
+    for r in ships.to_dict("records"):
+        cls = r["舰级"]
+        spec = spec_cargo.get(cls)
+        if spec is None:
+            formula_bad.append(f"r{r['round']} {r['ship_id']}：舰级 {cls} 不在 meta.ships 里")
+            continue
+        checked += 1
+        hmax, hull = r["船体上限"], r["船体"]
+        if hmax <= 0.0:
+            lo = hi = spec
+        else:
+            lo = spec * max(0.0, min(1.0, (hull - 0.005) / (hmax + 0.005)))
+            hi = spec * max(0.0, min(1.0, (hull + 0.005) / max(hmax - 0.005, 1e-9)))
+        got = r["cargo_capacity"]
+        if not (lo - 0.005 - 1e-9 <= got <= hi + 0.005 + 1e-9):
+            formula_bad.append(f"r{r['round']} {r['ship_id']}（{cls}）：舱容 {got} 不在 "
+                               f"[{lo:.4f}, {hi:.4f}]（船体 {hull}/{hmax} × 舰级 {spec}）")
+        if hmax > 0.0 and hull < hmax - 1e-9:
+            damaged += 1
+        if r.get("载货"):
+            with_cargo += 1
+
+    # 舰级舱容是「设计裁决」：见 config/game.ron 的 ships 注释第 (3) 类。
+    design = {"corvette": 2.0, "destroyer": 4.0, "cruiser": 6.0,
+              "carrier": 20.0, "battleship": 6.0}
+    design_bad = [f"{cls}：meta.ships 给 {spec_cargo.get(cls)} ≠ 设计裁决 {cap}"
+                  for cls, cap in design.items() if spec_cargo.get(cls) != cap]
+    bulk = sorted(cls for cls, cap in spec_cargo.items() if (cap or 0.0) >= 20.0)
+    return {"checked": checked, "damaged": damaged, "with_cargo": with_cargo,
+            "formula_bad": formula_bad, "design_bad": design_bad, "bulk": bulk,
+            "classes": sorted(spec_cargo)}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
@@ -591,7 +643,7 @@ def extract(dirpath):
             "ship_deaths": deaths, "ship_births": births, "ship_unexplained": ship_unexplained,
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
-            "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q),
+            "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
             "meta": q.meta}
 
 
@@ -630,6 +682,31 @@ def trade_checks(h, ck, out) -> None:
              f"{tag} 共 {rank_rounds} 个回合排过队（下限 {MIN_RANK_ROUNDS}）")
 
 
+def cargo_checks(h, ck, out) -> None:
+    """货舱（M2）：有效舱容公式 + 舰级舱容的设计裁决。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["cargo"] for d in out]
+    checked = sum(r["checked"] for r in rep)
+    damaged = sum(r["damaged"] for r in rep)
+    with_cargo = sum(r["with_cargo"] for r in rep)
+
+    formula_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["formula_bad"]]
+    ck.check("有效舱容 = 舰级舱容 × 战损折算 hull/hull_max（真实舰·回合逐行）", not formula_bad,
+             "；".join(m for _, m in formula_bad[:3]) or
+             f"{tag}：{checked:,} 个舰·回合的舱容都落在舍入区间里（其中 {damaged:,} 行受过伤）")
+    ck.check("舱容守卫没有空转（真受过伤、真装过货）",
+             checked >= MIN_CARGO_ROWS and damaged >= 10 and with_cargo >= 10,
+             f"{checked:,} 个舰·回合（下限 {MIN_CARGO_ROWS}）、{damaged:,} 行 hull<hull_max、"
+             f"{with_cargo:,} 行舱里有货")
+
+    design_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["design_bad"]]
+    bulk = sorted({c for r in rep for c in r["bulk"]})
+    ck.check("舰级舱容是设计裁决（护卫2 / 驱逐4 / 巡洋6 / 航母20 / 战列6，航母唯一散货船）",
+             not design_bad and bulk == ["carrier"],
+             "；".join(m for _, m in design_bad[:3]) or
+             f"五个舰级全对；唯一散货船 = {bulk}（其余都 < 20）")
+
+
 def run(h, ck) -> None:
     out = h.digests([(s, ROUNDS) for s in SEEDS], extract)
 
@@ -650,6 +727,7 @@ def run(h, ck) -> None:
     audit_checks(h, ck, out)
     combat_checks(h, ck, out)
     trade_checks(h, ck, out)
+    cargo_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
