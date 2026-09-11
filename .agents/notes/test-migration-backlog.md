@@ -1,7 +1,7 @@
 # 测试全搬的施工图：**判据缺什么数据，就往序列化里装什么**
 
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
-> 第 1–5 批已合进 `main`；第 6 批**已同步 `main@1ccbb2c`、四道门全绿、正在合流**）。
+> 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
 > 计数：**Python 171**（g1 43 / g2 79 / g3 26 / g4 23）；**Rust 205**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
@@ -31,7 +31,7 @@
 | 3 `depots` | 新派生表 `depots` | `haul::off_capital_production…` 读面一半 → g2 `depot_checks`（5 条） | 55→60 | `7846c04` |
 | 4 派单抽签 | 零新增（用 `round_inputs.rolls`，**否决** `haul_lanes`——§5.4） | `freight::route_lottery…` → g2 `dispatch_checks`（2 条） | 60→62 | `83521f6` |
 | 5 `--call <fn>` | 新 CLI 读面（`src/main.rs`） | 纯函数 5 条 → g1 `call_functions`（10 条） | g1 33→43 | `9e1a566` |
-| 6 合成场景 | **零新增序列化**；`_harness` 加**拨控制叶**的路（`scenario_apply`，走引擎自己的 `--apply`——§5.6） | 类 C 3 条**整搬** + `build_lines…` 的**活回合那一半** → g2 `blueprint_scenario_checks`（17 条） | g2 62→79 | 待合（§6.5） |
+| 6 合成场景 | **零新增序列化**；`_harness` 加**拨控制叶**的路（`scenario_apply`，走引擎自己的 `--apply`——§5.6） | 类 C 3 条**整搬** + `build_lines…` 的**读面那一半** → g2 `blueprint_scenario_checks`（17 条） | g2 62→79 | `fadca4e`（快进） |
 
 > §1–§3 的小节标题已标注落地状态；正文里的「装哪儿（建议）」表**保留原计划**，落地口径以 §0.1 / §5 / §5.4 / §5.6 为准。
 
@@ -132,13 +132,16 @@
 | `a_dangling_pointer_is_left_dangling` | `h.scenario_apply`：**两次 diff**——① 建一张普通的自建图 + 把建造区指过去；② **删掉那张图**（`{"remove": true}` ⇒ 指针悬空） | `cities.建筑[].设计图` 逐回合原样是那个**已删掉**的名字；防空转 = 它真的不在任何图库里 + 同一局 AI 真的给别人建了图 |
 | `a_player_pinned_design_and_its_yard_are_left_alone` | `h.scenario_apply`：**一份** diff 里建图（`mode: Player`）+ 把建造区指过去 | `blueprints`：逐回合 `mode=Player`、`选装` 一字不变；`cities`：指针逐回合不变；`decisions` 里那张图**零行**（重估/回收都没碰） |
 | `only_unreferenced_selfmade_designs_are_reaped` | `h.scenario_apply`：三张没人指向的图（`Inherit` 自建 / 玩家起的名 / 玩家钉住的 AI 名） | 自建的回合 0 还在、之后没了；另两张 0–3 回合都在；`decisions` 里有 `verdict=reaped`；防空转 = 三张图回合 0 的模式真的各就各位 |
-| `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`（**活回合那一半**） | `h.scenario_apply`：**一份** diff——`buildings` 叶同时 **`blueprint: null`（拆指针）+ `ship_type`（钉死舰级）**（免得 `retool_shipyards` 换掉那一行），再把 `construction_budget`/`investment_budget` 拨到 `1e6` / `0`；**只推 1 回合** | `city_process.build`：批满 ⇒ 顶到 `increment ≈ rate`（产能封顶）；批 0 ⇒ 键**还在**、`rate > 0`、`increment = 0`（是缺钱不是没船坞）；两边的 `rate` 逐回合相同（产能与钱无关） |
+| `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`（**读面那一半**） | `h.scenario_apply`：**状态补丁先把国库垫到 `1e6`**（见下）+ **一份** diff——`buildings` 叶同时 **`blueprint: null`（拆指针）+ `ship_type`（钉死舰级）**（免得 `retool_shipyards` 换掉那一行），再把 `construction_budget`/`investment_budget` 拨到 `1e6` / `0` | `city_process.build`：批满 ⇒ 顶到 `increment ≈ rate`（产能封顶）；批 0 ⇒ 键**还在**、`rate > 0`、`increment = 0`（是缺钱不是没船坞）；两边的 `rate` 逐回合相同（产能与钱无关） |
 
-> ⚠ **为什么只推 1 回合**（踩过，别再推长）：活回合有**第二个瓶颈——库存**。实测
-> `main@1ccbb2c`（P1-4 改了市场定价之后）批满 `1e6` 的同一座城：回合 1 是 `10.0 == 10.0`、
-> **回合 2 掉到 7.27、回合 3 干脆 0**（钱批够了，货拿不出来）。「`increment ≈ rate`」在活回合里
-> **只在第一回合**（= 开局库存）成立 ⇒ 不靠开局库存的那份守卫留在 Rust 原件里
-> （`src/tests/sim/spending.rs`，模块头写了同一件事）。**别把它当成「预算 A/B 只要推长一点更稳」**。
+> ⚠ **「批满」不等于「钱管够」——先把国库垫到维护 reserve 之上**（踩了两次，写死在这儿）：
+> P1-5 之后 Player 写的 `construction_budget` 还要再乘
+> `con_scale = clamp((库存价值 − 维护 reserve) / 建舰上限, 0, 1)`（`autocontrol/budget.rs`）
+> ⇒ **库存不到 reserve 时，写 `1e6` 也是 0**。在这条落地之前，「批满 ⇒ `increment ≈ rate`」在活回合
+> 里也只撑得住 1 回合（实测 `main@1ccbb2c`：回合 1 是 `10.0 == 10.0`、回合 2 → 7.27、回合 3 → 0）；
+> P1-5 落地后**连第一回合都是 0**。所以 g2 与 Rust 原件（`src/tests/sim/spending.rs`）**两边都显式
+> 垫库存**——那是**隔离变量**（把「钱」这一个变量孤出来），不是作弊。
+> 教训：**从单测搬过来的等式，先问一句「活回合里还有没有第二个瓶颈」**。
 
 > ⚠ **原案的两处已被取代**（写在这里免得下一个人照旧文档重做一遍）：
 >
@@ -147,15 +150,17 @@
 >    「删**整张图** ⇒ 挂它的建造区随后是悬空指针 ⇒ 停产」（`src/control/blueprint.rs`），而删图
 >    本来就是玩家/agent 的动作。写面**拒绝**的只是「凭空写一个不存在的图名」（§4 那半照旧不搬）。
 > 2. §6.5 的老交接说「先补字典型深合并或 `--apply`-in-scenario」——**只有 A 需要**（见上）；
->    ④ 的「拆指针 + 钉舰级」也用 `BuildingPatch` 的 `blueprint: null` / `ship_type` 走了 `--apply`，
->    于是**只剩一处**读状态字段（认出某势力有哪些建造区，见 `_yards_of`）。
+>    ④ 的「拆指针 + 钉舰级」也用 `BuildingPatch` 的 `blueprint: null` / `ship_type` 走了 `--apply`。
+>    于是**读状态字段只剩两处**，都在 `_yards_of` / `_stock_patch` 里（一个是「认出某势力有哪些
+>    建造区」，一个是「把国库垫厚」），后者在下面那个 ⚠ 里有说明。
 
 **跟 `main` 的字段命名批对齐**（合并 `main@2b8a871` 时被它逼出来的）：`_harness` 删掉了手抄的
 `_ID_KEY`，改成问引擎（`Harness.identity_keys()` ← `--nouns` 的 `identity.structs` + state schema）。
 g2 这边的 `_yards_of` 跟着走：**身份键问引擎**，剩下三个名字（`建筑`/`建筑编号`/`建造舰级`）引擎
 还没有声明面，只能写死——但它们错了**不会静默**（找不到建造区 ⇒ 探针那条判据立刻红）。
 另外「这个势力有哪些资源」改成读 `--control` 的预算模板（`resource` 是 ASCII 键，且实测与
-`state.factions[].资源` 逐一对上），不再手抄状态字段。
+`state.factions[].资源` 逐一对上）——**资源名不再手抄**，只有「国库那个字段叫什么」（`_stock_patch`）
+还得写死。
 
 **还没搬的**（别重新论证）：
 
@@ -192,7 +197,8 @@ cargo nextest run -P full
 > `BB2EEB2B…2000`（`feature/web-control-spec` 合并**前**）→ `C928C3F1…06A9`（合并后）→
 > `748B4AA6…9603`（`feature/field-names` 批 A：11 个实体结构体 83 个字段加 serde 中文名 +
 > 字段顺序；见 `.agents/notes/field-naming.md` §7.5）→ `F550E199…DBB37`（合 `main@2b8a871` 后）
-> → **`53096F5F…94DC`**（合 `main@b12aee6`/`1ccbb2c` 后实测；见下）。
+> → **`53096F5F…94DC`**（合 `main@b12aee6` 后实测；再合到 `main@c11f054` 仍是它——那批 P2 清尾
+> 没动 240 回合的轨迹；见下）。
 >
 > **第 6 批自己是行为中性的**（`748B4AA6…9603` 在批次前后逐字节相同：整批只动 `play/tests/*`
 > 与 `src/tests/*`，后者是 `#[cfg(test)]` ⇒ 连 release 二进制都不重编）。`F550E199…DBB37` 与
@@ -247,12 +253,15 @@ proj = h.scenario_apply("名字", 42, 3, [diff, …])    # 造→**逐份 --appl
 * **两次「红」的记录**（都不是第 6 批的，但值得记——下次判断「谁弄红的」直接用这两条）：
   1. 同步到 `main@2b8a871` 时 g1「预算守卫没有空转」红（`0 处真的花过钱`）——是 main 那批
      P0-1 带来的，**P0-2（`01719eb 逐城预算门与总账分离`）已经修掉**。
-  2. 同步到 `main@1ccbb2c` 时 g2 新搬的那条预算 A/B 红——是**我自己的判据过宽**：P1-4 改了市场
-     定价 ⇒ 库存成了第二个瓶颈，3 回合窗口里两个极端分不出来。已改成**只推 1 回合**并把
-     「不看库存」那份留在 Rust（§5.6 那个 ⚠）。教训：**从单测搬过来的等式，先问一句「活回合里
-     还有没有第二个瓶颈」**。
+  2. g2 新搬的那条预算 A/B **红了两轮**——都是**我自己的判据过宽**，不是引擎坏了：
+     P1-4 改市场定价 ⇒ 库存成了第二个瓶颈（`main@1ccbb2c`：批满 1e6 的同一座城回合 1 顶到
+     `rate`、回合 2 → 7.27、回合 3 → 0）；P1-5 又给 Player 预算加了维护 reserve 的 `con_scale`
+     ⇒ **连第一回合都是 0**。最后按 Rust 原件同一把尺子**先垫国库**才修好（§5.6 那个 ⚠）。
+     教训：**从单测搬过来的等式，先问一句「活回合里还有没有第二个瓶颈」**。
 * 判据写在 `play/tests/g*.py` 的 `run()` 里（数据取自 `extract()` 的摘要 ⇒ **改断言不重读投影**）。
   ⚠ `_code_stamp` 把**除 `run` 外的全部顶层函数**算进摘要指纹 ⇒ **加一个新判据函数会让该组摘要重算一次**
   （一次性十几秒，不是缓存坏了）。
-* **第 6 批的活已经做完**（§5.6），正在合流。**再往后 = 第 7 批**：按 §4 那份**已写死**的「故意不搬」
-  清单收尾（不要再逐条重新论证）。§5.6 里还剩两条**等字段命名批 B/C 收口**的（`blueprint` 的角色/姿态）。
+* **第 6 批已合 `main`**（`fadca4e` = 快进；`.agents/notes.md` 的索引行没跟着改——那次合流时另一个
+  会话正压着同一个文件，改它就得再动一次别人的工作区，不值得）。**再往后 = 第 7 批**：按 §4 那份
+  **已写死**的「故意不搬」清单收尾（不要再逐条重新论证）。§5.6 里还剩两条**等字段命名批 B/C 收口**的
+  （`blueprint` 的角色/姿态）。
