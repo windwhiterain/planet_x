@@ -1,5 +1,16 @@
 //! 思潮与忠诚：军事信号（只由事件推出）、战争/经济如何推思潮、外交亲和方向、低忠诚倒戈、娱乐设施拉住远城。
 //!
+//! ## 2026-10（第 7 批）：`low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing`
+//! 搬去了 g2 **合成场景 · 低忠诚改旗易帜**（4 条判据）
+//!
+//! 捏三样（都有身份键 ⇒ 直接改档）：旧主思潮推到极端、一个对照势力推到相反极、其余中立，
+//! 再把一座城的忠诚压到阈值下。**「倒向谁」不写死**：拿 `--call ideology_similarity` 把
+//! 「旧主 × 每个势力」的相似度都算一遍，判据要求倒戈目标就是**相似度最低**的那一个
+//! （实测 `0.0` vs 其余 `0.5`）。另加「没被夷平 + 人口/建筑都在」。
+//!
+//! ⚠ 相似度必须从**场景自己的**投影读（补丁落地后那份）——第一版读了对照局，判据只是
+//! **碰巧**还是那一家。
+//!
 //! ## 2026-10（第 7 批）：`entertainment_holds_a_distant_city` 搬去了 g2 **合成场景 · 重金娱乐拉住远城**（4 条判据）
 //!
 //! 两臂**只差有没有那份福利预算**（同一座城 = 该势力 `gov_distance` 最大的那座、同样起点
@@ -137,107 +148,6 @@ fn military_signal_uses_the_milestones_and_is_branch_agnostic() {
         prev_owner: None,
     }];
     assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
-}
-
-/// 离心「改旗易帜」：低忠诚城市不再被夷为荒地，而是倒戈到**思潮与旧主最对立**的势力，
-/// 城市连同其人口/建筑/控制面一起易主（旧主失去一城、新主获得一城）——这是给旁观/
-/// 小势力接盘城市、避免「永久 1 城旁观者」的机制。
-#[test]
-fn low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-
-    // 珠三角 (city 1) 属中国，位于其首都(地球)上——但把忠诚压到叛变阈值之下。
-    let city = state.cities[1].name.clone();
-    let owner = "中国".to_string();
-
-    // 中国 → 极端（军国+技术+精英+殖民），无国界科学组织 → 相反极，其余全中立。
-    // 于是无国界科学组织与中国的思潮距离 = 8（唯一最大），倒戈目标唯一确定。
-    let extreme = Ideology {
-        peace_military: 1.0,
-        science_tech: 1.0,
-        people_elite: 1.0,
-        nature_colony: 1.0,
-    };
-    let oppose = Ideology {
-        peace_military: -1.0,
-        science_tech: -1.0,
-        people_elite: -1.0,
-        nature_colony: -1.0,
-    };
-    if let Some(f) = state.faction_mut("中国") {
-        f.ideology = extreme;
-    }
-    if let Some(f) = state.faction_mut("无国界科学组织") {
-        f.ideology = oppose;
-    }
-    for f in &mut state.factions {
-        if f.name != "中国" && f.name != "无国界科学组织" {
-            f.ideology = Ideology::default();
-        }
-    }
-    // 忠诚压到叛变阈值之下（0.30）。
-    if let Some(c) = state.city_mut(&city) {
-        c.loyalty = 0.05;
-    }
-    let pop_before = state.city(&city).map(|c| c.population).unwrap_or(0);
-    let buildings_before = state.city(&city).map(|c| c.buildings.len()).unwrap_or(0);
-
-    advance(&mut state, &config, &mut rng);
-
-    let c = state
-        .city(&city)
-        .expect("defected city must survive (not razed)");
-    assert_eq!(
-        c.faction_id, "无国界科学组织",
-        "low-loyalty city must defect to the most ideologically-opposed faction"
-    );
-    assert!(!c.razed, "defected city must not be razed to blank");
-    assert_eq!(
-        c.population, pop_before,
-        "defected city keeps its population"
-    );
-    assert_eq!(
-        c.buildings.len(),
-        buildings_before,
-        "defected city keeps its buildings"
-    );
-    // 忠诚在倒戈时被重置为满，随后同回合新主的治理会重新计量；断言它仍高于叛变阈值，
-    // 证明这次倒戈给了城市一个「新开始」（没有立刻又叛变/再被夷平）。
-    assert!(
-        c.loyalty > 0.05,
-        "defected city must get a fresh loyalty start (was 0.05, now {}), not stay near zero",
-        c.loyalty
-    );
-
-    // 事件必须是 CityDefected（旧主→新主），不是 Revolt。
-    assert!(
-        state.events.iter().any(|e| matches!(
-            e,
-            GameEvent::CityDefected { city: cid, from, to, .. }
-                if *cid == city && *from == owner && *to == "无国界科学组织"
-        )),
-        "expected a CityDefected event, got {:?}",
-        state.events
-    );
-
-    // 控制转移：新主(无国界科学组织)的控制面应接管这座城（invest/build 权重按 (城,建筑) 迁入）。
-    if let Some(n) = state.control("无国界科学组织".to_string()) {
-        let owned_build_keys: bool = state
-            .city(&city)
-            .map(|c| {
-                c.buildings
-                    .iter()
-                    .any(|b| n.build_weights.contains_key(&(city.clone(), b.id)))
-            })
-            .unwrap_or(false);
-        assert!(
-            n.invest_weights.keys().any(|(cid, _)| cid == &city)
-                || n.build_weights.keys().any(|(cid, _)| cid == &city),
-            "new owner control must include the defected city's buildings"
-        );
-        let _ = owned_build_keys;
-    }
 }
 
 /// 思潮：战争得利把「和平↔军国」推向军国端。

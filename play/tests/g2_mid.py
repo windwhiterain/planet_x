@@ -91,6 +91,9 @@ WELFARE_FID, WELFARE_START, WELFARE_ROUNDS = "星系矿业", 0.35, 5
 # 殖民那条：起点回合与天体**从长局里扫出来**（开局 22 座城占满 22 个定居点，
 # 得等到有城被拆平才有可复垦的空位）。
 COLONIZE_ROUNDS = 40
+# 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
+# `--call ideology_similarity` 算出来，不写死）。
+DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1085,6 +1088,7 @@ def run(h, ck) -> None:
     commanded_haul_checks(h, ck)
     welfare_scenario_checks(h, ck)
     colonize_scenario_checks(h, ck)
+    defection_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -2010,6 +2014,70 @@ def colonize_scenario_checks(h, ck) -> None:
         ck.check("合成场景（殖民）：**早退也不许把船交回系统**（叶片仍是 Player）",
                  bool(m0) and set(m0) == {"Player"},
                  f"目标天体 {target}（回合 0 已满）⇒ 叶片模式 {sorted(set(m0))}")
+
+
+def defection_scenario_checks(h, ck) -> None:
+    """**合成场景 · 低忠诚改旗易帜**（`sim/ideology.rs::low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing`）。
+
+    捏三样：**那个势力的思潮**推到极端、**对照势力**推到相反极、其余中立（全都有身份键 ⇒ 直接改档），
+    再把一座城的忠诚压到叛变阈值之下。
+
+    「倒向谁」**不写死**：拿 `--call ideology_similarity` 把「旧主 × 每个势力」的相似度都算一遍，
+    判据要求倒戈目标就是**相似度最低**的那一个（引擎自己那份实现）。另加「没被夷平、人口与建筑都在」。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("cities", "factions"))
+    ci, fr = q0.table("cities"), q0.table("factions")
+    mine = ci[(ci["round"] == 0) & (ci["势力"] == DEFECT_FID)]
+    city = mine.loc[mine["gov_distance"].idxmin()]
+    f0 = fr[fr["round"] == 0]
+    axes = ["和平↔军国", "科学↔技术", "人民↔精英", "自然↔殖民"]
+    others = [r["势力"] for _, r in f0.iterrows() if r["势力"] != DEFECT_FID]
+    ck.check("合成场景（改旗易帜）：探针世界里那个势力有城、也有别人可倒（防空转）",
+             len(mine) >= 1 and len(others) >= 2,
+             f"{DEFECT_FID} 有 {len(mine)} 座城；候选新主 {len(others)} 个")
+
+    patch = {"cities": {city["城名"]: {"忠诚度": DEFECT_LOYALTY}},
+             "factions": {r["势力"]: {"思潮": {a: (1.0 if r["势力"] == DEFECT_FID
+                                                 else -1.0 if r["势力"] == DEFECT_TARGET_HINT
+                                                 else 0.0) for a in axes}}
+                          for _, r in f0.iterrows()}}
+    proj = h.scenario("defect_live", seed, DEFECT_ROUNDS, patch)
+    q = KIT.load(str(proj), only=("cities", "events", "factions"))
+    rows = q.table("cities")
+    rows = rows[rows["城名"] == city["城名"]].sort_values("round")
+    # ⚠ 思潮要从**这个场景自己的**投影读（补丁已落地）。第一版读的是对照局 ⇒ 相似度算的是
+    # 默认思潮，判据只是**碰巧**还是那一家（又一处「绿了但没在测」）。
+    sc = q.table("factions")
+    ideo0 = {r["势力"]: dict(r["思潮"]) for _, r in sc[sc["round"] == 0].iterrows()}
+    ev = q.table("events")
+    hits = [(int(r["round"]), (r["data"] or {})) for _, r in ev[ev["type"] == "city_defected"].iterrows()
+            if (r["data"] or {}).get("city") == city["城名"]]
+    ck.check("合成场景（改旗易帜）：忠诚低于阈值 ⇒ 那座城**倒戈了**（不是被夷平）",
+             bool(hits) and not bool(list(rows["已焚毁"])[-1]),
+             f"{city['城名']} 的倒戈事件：{hits[:2]}；已焚毁 {list(rows['已焚毁'])[-1]}")
+
+    # 「倒向谁」= 与旧主**思潮相似度最低**的那个（用引擎自己的相似度函数算）。
+    sims = {f: call_ideology_similarity(h, ideo0[DEFECT_FID], ideo0[f]) for f in others}
+    want = min(sims, key=lambda f: sims[f])
+    got = hits[0][1].get("to") if hits else None
+    ck.check("合成场景（改旗易帜）：倒向的是**思潮最对立**的那一家（相似度最低，引擎自己算的）",
+             got == want and got is not None,
+             f"相似度 {sorted((round(v, 3), k) for k, v in sims.items())} ⇒ 应倒向 {want}，实为 {got}")
+
+    first, last = rows.iloc[0], rows.iloc[-1]
+    ck.check("合成场景（改旗易帜）：城连同人口与建筑一起易主（不是拆平重来）",
+             int(last["人口"]) == int(first["人口"]) and len(last["建筑"]) == len(first["建筑"])
+             and str(last["势力"]) == str(want),
+             f"人口 {first['人口']} → {last['人口']}；建筑 {len(first['建筑'])} → {len(last['建筑'])}；"
+             f"势力 {first['势力']} → {last['势力']}")
+
+
+def call_ideology_similarity(h, a: dict, b: dict) -> float:
+    """问引擎要两份思潮的相似度（`--call ideology_similarity`）。"""
+    return float(json.loads(h.capture(["--call", "ideology_similarity",
+                                       "--args", json.dumps({"a": a, "b": b},
+                                                             ensure_ascii=False)]))["value"])
 
 
 def id_checks(h, ck, out) -> None:
