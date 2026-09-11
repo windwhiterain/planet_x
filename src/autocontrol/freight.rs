@@ -1062,7 +1062,7 @@ enum Plan {
 ///
 /// 一本账供两处用：雇主挂单（[`post_contracts`]）与「该不该腾个船坞去造货船」
 /// （[`crate::autocontrol::shipbuilding::retool_haulers`]）。
-pub(crate) fn capacity_ledger(
+pub fn capacity_ledger(
     state: &State,
     config: &GameConfig,
     fid: &str,

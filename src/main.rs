@@ -693,6 +693,19 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **逐站运力账**（第 7 批）：`capacity_ledger` 一本账供两处用（挂单 + 造货船），
+        // `factions.haul_gap` 就是它的 `Σ缺口 ÷ Σ要求` ⇒ 判据据此**同源复核**（两本账漂没漂）。
+        "freight_ledger" => {
+            let fid = args.get("faction").and_then(|v| v.as_str()).ok_or("args.faction 缺失")?;
+            let rows: Vec<serde_json::Value> = autocontrol::freight::capacity_ledger(state, config, fid)
+                .into_iter()
+                .map(|(from, to, need, own, hired, uncovered)| {
+                    json!({"from": from, "to": to, "need": need, "own": own,
+                           "hired": hired, "uncovered": uncovered})
+                })
+                .collect();
+            json!(rows)
+        }
         // **在场强度与目标掌握度**（第 7 批）：前者要 state（数舰），后者是纯函数。
         "mond_presence" => {
             let fid = args.get("faction").and_then(|v| v.as_str()).ok_or("args.faction 缺失")?;

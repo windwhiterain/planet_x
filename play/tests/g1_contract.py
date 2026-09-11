@@ -746,6 +746,45 @@ def call_functions(h, ck, tmp: Path) -> None:
              bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
              f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
 
+    # ⑦ 逐站运力账（`sim/tests/trade.rs::freight_gap_is_the_same_ledger_the_engine_posts_contracts_from`，
+    #    第 7 批）：新挂 `--call freight_ledger {faction}` = `capacity_ledger` 的平铺版
+    #    （一本账供两处用：挂单 + 造货船）。判据 = 它与读面那一列 `factions.haul_gap` **同源**。
+    led_checked = led_gap = 0
+    led_bad: list[str] = []
+    for lseed, lround in ((7, 10), (1, 40)):
+        lck = h.gen(tmp / f"ledger_s{lseed}.json", lseed, lround)
+        lfac = _rounds(_table(h.projection(lseed, lround), "factions"), lround)
+        for fid_ in sorted({r["势力"] for r in lfac}):
+            rows = json.loads(h.capture(["--start", str(lck), "--call", "freight_ledger",
+                                         "--args", json.dumps({"faction": fid_}, ensure_ascii=False)]))["value"]
+            if not rows:
+                continue
+            led_checked += 1
+            for g in rows:
+                if g["need"] <= 0.0:
+                    led_bad.append(f"{fid_} {g['from']}→{g['to']}：零需求却占了键")
+                if g["own"] < 0.0 or g["hired"] < 0.0:
+                    led_bad.append(f"{fid_} {g['from']}→{g['to']}：负运力")
+                want = max(0.0, g["need"] - g["own"] - g["hired"])
+                if abs(g["uncovered"] - want) > 1e-9:
+                    led_bad.append(f"{fid_} {g['from']}→{g['to']}：缺口 {g['uncovered']:.6f} "
+                                   f"≠ need − own − hired = {want:.6f}")
+                if g["uncovered"] > 1e-9:
+                    led_gap += 1
+            need = sum(g["need"] for g in rows)
+            unc = sum(g["uncovered"] for g in rows)
+            want = 0.0 if need <= 0.0 else min(1.0, max(0.0, unc / need))
+            col = next(float(r["haul_gap"]) for r in lfac if r["势力"] == fid_)
+            if abs(want - col) > 0.0051:  # 那一列过 r2
+                led_bad.append(f"s{lseed} r{lround} {fid_}：按账算 {want:.6f} vs 读面列 {col:.6f}")
+    ck.check("--call freight_ledger：逐条自洽（缺口 = max(0, need − own − hired)），"
+             "且 `Σ缺口 ÷ Σneed` **就是读面那一列** `haul_gap`（同源复核）",
+             bool(led_checked) and not led_bad,
+             "；".join(led_bad[:3]) or f"2 个 seed 共 {led_checked} 个势力·回合的账与读面列逐条对得上")
+    ck.check("--call freight_ledger：守卫没有空转（真有势力挂着账、也真有缺口）",
+             led_checked >= 2 and led_gap >= 1,
+             f"{led_checked} 个势力·回合，其中 {led_gap} 处货栈有缺口")
+
     # ⓪⁗ MOND 偏航与胜算（`sim/tests/mond.rs` 那两条纯函数测，第 7 批）：
     #       `mond_drift` / `mond_arrival_chance` 都只吃 config ⇒ 可以逐值复现。
     meta_all = json.loads(h.capture(["--meta"]))

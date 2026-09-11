@@ -1,5 +1,13 @@
 //! 市场与运输：B3 批——把「为什么是这个价 / 我买到的货为什么少了 / 有货在卖我却没买到 /
 //!
+//! ## 2026-10（第 7 批）：`freight_gap_is_the_same_ledger_the_engine_posts_contracts_from`
+//! 搬去了 g1（新挂 `--call freight_ledger {faction}`）
+//!
+//! `capacity_ledger` 一本账供两处用（雇主挂单 + 「该不该腾船坞造货船」）⇒ 把它 `pub` 出来、
+//! 平铺成 `--call`。判据 = 逐条自洽（`缺口 == max(0, need − own − hired)`，`need > 0`，
+//! `own/hired ≥ 0`）**且** `Σ缺口 ÷ Σneed` **就是读面那一列** `factions.haul_gap`
+//! （那一列过 `r2` ⇒ 容差 `0.0051`）。两个 seed、12 个势力·回合、28 处缺口全对得上。
+//!
 //! ## 2026-10（第 7 批）：`trade_block_list_names_the_blocker_and_the_tier` 搬去了 g2
 //!
 //! 投影 `factions` 新补了一列 **`贸易禁运`** = `{禁运方: 档位}`（以前只有 `--derived` 的
@@ -122,65 +130,5 @@ fn haul_steps_only_cover_ships_that_are_actually_on_a_haul_route() {
     assert!(
         steps_seen.contains("loaded") || steps_seen.contains("delivered"),
         "一次装卸都没发生过（见过 {steps_seen:?}）——用例跑得太短"
-    );
-}
-
-/// **货栈运力账就是引擎挂单用的那一本**：逐势力的 `Σuncovered ÷ Σneed` 必须等于
-/// `haul_gap`（投影 `factions` 表里那一列），而账里的每一处货栈都要真的有积压。
-///
-/// 这条同时说明「读面为什么把账摊到每一处货栈」：势力级只有一个比值，看不到是哪处在积压。
-#[test]
-fn freight_gap_is_the_same_ledger_the_engine_posts_contracts_from() {
-    let (config, mut state) = fresh_world(7);
-    let mut rng = Prng::new(7);
-    for _ in 0..10 {
-        advance(&mut state, &config, &mut rng);
-    }
-    // 直接跑挂单那一步：它算的那本账就是读面记的那本（紧接着读 `haul_gap` 时 state 还没变）。
-    let mut sink = RoundSink::default();
-    autocontrol::freight::post_contracts(&mut state, &config, &mut sink);
-
-    let mut checked = 0usize;
-    let mut uncovered_seen = 0usize;
-    for f in &state.factions {
-        let fid = f.name.clone();
-        let ledger = sink.freight_gap.get(&fid).cloned().unwrap_or_default();
-        for (body, g) in &ledger {
-            assert!(g.need > 0.0, "{fid} 的 {body}: 零需求的货栈不该占键");
-            assert!(g.own >= 0.0 && g.hired >= 0.0, "{fid} 的 {body}: 负运力？");
-            assert!(
-                g.uncovered >= -1e-9,
-                "{fid} 的 {body}: 缺口是负数（{}）——它必须是 max(0, need − own − hired)",
-                g.uncovered
-            );
-            let want = (g.need - g.own - g.hired).max(0.0);
-            assert!(
-                (g.uncovered - want).abs() < 1e-9,
-                "{fid} 的 {body}: 缺口 {} ≠ need − own − hired = {want}",
-                g.uncovered
-            );
-            if g.uncovered > 1e-9 {
-                uncovered_seen += 1;
-            }
-        }
-        // 势力级的总账（引擎自己那把尺子）必须等于这本账的和。
-        let need: f64 = ledger.values().map(|g| g.need).sum();
-        let unc: f64 = ledger.values().map(|g| g.uncovered).sum();
-        let want = if need <= 0.0 {
-            0.0
-        } else {
-            (unc / need).clamp(0.0, 1.0)
-        };
-        let got = autocontrol::freight::haul_gap(&state, &config, &fid);
-        assert!(
-            (got - want).abs() < 1e-9,
-            "{fid}: haul_gap = {got}，但按读面那本账算是 {want}（两本账漂了）"
-        );
-        checked += 1;
-    }
-    assert!(checked >= 2, "只检查到 {checked} 个势力——守卫太空");
-    assert!(
-        uncovered_seen >= 1,
-        "10 回合后一处积压缺口都没有——这条守卫没在检查东西"
     );
 }
