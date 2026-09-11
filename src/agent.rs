@@ -109,6 +109,39 @@ pub fn schema_value() -> serde_json::Value {
     serde_json::to_value(schema).expect("schema is serializable")
 }
 
+/// A JSON Schema for the **canonical world** ([`State`] and every entity it embeds) ——
+/// 与 [`schema_value`] 同一个道理，只是低一层：卡片与实体表上那些名词（`舰名`/`忠诚度`/
+/// `所在天体`/`要价`…）的 `///` 注释就是它们在读面上的 `description`。
+///
+/// 为什么值得多这一份：悬停弹窗（`web/static/tip.js`）**只认名词**，不认来源表——
+/// 于是「模型 `///` 就是唯一的产品文案」这件事成立，前端与 kit 都不必再维护翻译。
+/// （代价：`State` 及其内嵌类型都要 `schemars::JsonSchema`；元组键字段另挂 `#[schemars(with)]`。）
+pub fn state_schema_value() -> serde_json::Value {
+    let schema = schemars::schema_for!(State);
+    serde_json::to_value(schema).expect("state schema is serializable")
+}
+
+/// **名词与解释**（悬停弹窗的语料）：三份 schema 合成一个值。
+///
+/// * `state`：规范世界（实体字段：`舰名`/`忠诚度`/`要价`…）；
+/// * `view`：回合视图（`产出`/`维护`/`治理`…）；
+/// * `projection`：投影每张表的列与 `column_docs`（含 `derived.*` 派生平铺表）；
+/// * `control`：控制面（叶/命令/作用域键）。
+///
+/// 四份都要，因为它们各自覆盖**不同的名词**；合起来才是「界面上能出现的所有名词」。
+/// 一份实现、两个出口：`--nouns`（CLI，数据级判据用它）与 `GET /api/schema`（web）。
+/// 见 `web/static/tip.js`（前端只做「拿名词查解释」）与 `play/tests/g4_spec.py`（覆盖率判据）。
+pub fn noun_schema_value() -> serde_json::Value {
+    serde_json::json!({
+        "state": state_schema_value(),
+        "view": schema_value(),
+        "projection": crate::projection::projection_schema(),
+        // 控制面（写面）也要：控制行的名词（`首都`/`开发预算`… 的字段名，以及 `global`
+        // 这类作用域键）住在它的 schema 里。**四半合起来**才是"界面上能出现的所有名词"。
+        "control": crate::control::control_schema_value(),
+    })
+}
+
 /// Zero-noise rendering of one state as a single-line JSON object.
 pub fn render_state(state: &State, derived: &RoundView) -> String {
     state_json(state, derived).to_string()

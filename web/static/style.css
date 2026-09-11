@@ -433,3 +433,24 @@ select.mode.mini {
 }
 .ctl-new-bar button:hover { border-color: var(--accent); }
 .ctl-new-stat { color: #fca5a5; font-size: 12px; }
+
+/* ── 悬停弹窗（**名词 → 解释**，见 web/static/tip.js）──────────────────────────
+   用户裁决：所有 UI 都用名词，鼠标移上去弹窗显示注释/解释。内容全部来自引擎发的
+   `GET /api/schema`（`///` 文档 + 投影的 `column_docs`），前端不认识任何领域词。
+   `pointer-events: none` 是**关键**：鼠标得能穿过它，否则弹窗自己会把自己 mouseleave 掉
+   （贴着鼠标的框会疯狂闪烁）。 */
+.tip {
+  position: fixed; z-index: 9999; left: 0; top: 0;
+  max-width: 420px; max-height: 46vh; overflow: auto;
+  padding: 7px 10px; border-radius: 6px;
+  background: rgba(6, 10, 22, 0.97); color: var(--text);
+  border: 1px solid var(--line); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  font-size: 12px; line-height: 1.55; white-space: normal;
+  opacity: 0; visibility: hidden; transition: opacity 0.09s ease;
+  pointer-events: none;
+}
+.tip.on { opacity: 1; visibility: visible; }
+.tip code { background: var(--panel2); border-radius: 3px; padding: 0 3px; font-size: 11.5px; }
+.tip strong { color: #fff; }
+/* 有解释可弹的名词给一点"可以问"的暗示（下划线在列头上太吵，用 help 光标即可）。 */
+.tip-host { cursor: help; }

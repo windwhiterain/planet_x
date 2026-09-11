@@ -30,6 +30,10 @@
       const doc = await r.json();
       MANIFEST = build(doc);
       MANIFEST_ERR = null;
+      // 顺手把这份 schema 喂给悬停弹窗：控制行的**名词**来自 `leaf_ui`（中文标签），
+      // 而它对应的**叶字段名**现在还是英文 ⇒ 标签查不到解释时按字段名兜底查
+      // （`Tip.attach` 的第三个参数）。等控制面那批也改了名，这张兜底表自然退化。
+      if (window.Tip) window.Tip.useControlSchema(doc);
     } catch (e) {
       MANIFEST = null;
       MANIFEST_ERR = String((e && e.message) || e);

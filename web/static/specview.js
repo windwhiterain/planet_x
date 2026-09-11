@@ -57,6 +57,7 @@
     selection: null,     // {kind, name}
     expanded: new Set(), // 上限展开 / 残差展开的状态（viewId#row 之类）
     controlNode: null,   // 控制行（`leaf`/`owner`/`action`）交给宿主渲染——见 isControlRow
+    tip: null,           // 悬停弹窗：把"这条列声明"交给宿主，由它查名词的解释（见 web/static/tip.js）
   };
 
   function bind(opts) {
@@ -71,6 +72,8 @@
     if (o.expanded) ctx.expanded = o.expanded;
     // 写面钩子（`web/static/controls.js`）：`(col, rec, recKey, {where}) → 一个 DOM 节点`。
     if (o.controlNode !== undefined) ctx.controlNode = o.controlNode;
+    // 悬停弹窗（`tip`）：宿主实现「这个名词是什么、查不到时用哪个字段名兜底」。
+    if (o.tip !== undefined) ctx.tip = o.tip;
   }
 
   // --- 路径表达式 ------------------------------------------------------------
@@ -666,8 +669,19 @@
       th.title = '展开这一行的卡片（组织点「' + spec.card + '」）——读行与控制行住在同一条行序里';
       htr.appendChild(th);
     }
-    htr.appendChild(el('th', 'sv-th sv-th-key', keyCol ? keyCol.label || spec.key : spec.key_label || ''));
-    cols.forEach((c) => htr.appendChild(el('th', 'sv-th', c.label || c.path)));
+    // 身份列的表头也是**名词**（`势力`/`舰`/`城`…）⇒ 同样挂弹窗（它不是 `cols` 里的一条，
+    // 所以上面那个循环盖不到它）。`spec.key` 就是那一列取值的字段名。
+    const kth = el('th', 'sv-th sv-th-key', keyCol ? keyCol.label || spec.key : spec.key_label || '');
+    if (ctx.tip) ctx.tip(kth, keyCol || { path: spec.key });
+    htr.appendChild(kth);
+    cols.forEach((c) => {
+      const th = el('th', 'sv-th', c.label || c.path);
+      // 列头是**名词** ⇒ 悬停弹它的解释。求值器仍然不认识领域词：把整条列声明交给宿主
+      // （`ctx.tip`），由它决定"这条行的名词是什么、该查哪个字段"。
+      // ⚠ 只挂给"名词"（列头 / 控制行标签 / 卡片里的字段名），**不给每个单元格挂**（太吵）。
+      if (ctx.tip) ctx.tip(th, c);
+      htr.appendChild(th);
+    });
     htr.appendChild(el('th', 'sv-th sv-th-res', '其余'));
     thead.appendChild(htr);
     table.appendChild(thead);
@@ -795,6 +809,7 @@
       if (isControlRow(c)) {
         const crow = el('div', 'sv-sheet-row sv-sheet-row-ctl');
         const ck = el('div', 'sv-sheet-k', c.label || c.leaf || c.owner || c.action);
+        if (ctx.tip) ctx.tip(ck, c);   // 卡片里的字段名同样是名词 ⇒ 悬停弹解释
         const cv = el('div', 'sv-sheet-v');
         cv.appendChild(controlNodeFor(c, r.value, recordKeyOf(spec, r), 'sheet'));
         crow.append(ck, cv);
@@ -806,6 +821,7 @@
       const text = format(v, c, r.value);
       const row = el('div', 'sv-sheet-row');
       const k = el('div', 'sv-sheet-k', c.label || c.path);
+      if (ctx.tip) ctx.tip(k, c);
       const val = el('div', 'sv-sheet-v');
       if (c.dot) {
         const col = evalPath(c.dot, r.value, r.key);

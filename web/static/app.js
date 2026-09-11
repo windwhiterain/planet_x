@@ -179,6 +179,22 @@ function bindSpecView() {
     // 写面那一半（`leaf` / `owner` / `action` 三种行）：求值器只把节点要过去，**不解释它**
     // ——与它不认识 bodies/cities 是同一条纪律。实现在 `web/static/controls.js`。
     controlNode: (col, rec, recKey, opts) => (window.Controls ? Controls.controlNode(col, rec, recKey, opts) : null),
+    // 悬停弹窗（**名词 → 解释**）：求值器只把「这条列声明」递过来，由这里决定
+    // 「显示出来的那个名词是什么、查不到时用哪个字段名兜底」——
+    // 控制行的名词在 `views.json` 的 `leaf_ui` 里（中文），而它对应的**叶字段名**
+    // 由 manifest 的 `fieldOf` 取（现在还是英文，等控制面那批改名）。
+    tip: (node, col) => {
+      if (!window.Tip) return;
+      const label = col.label || col.path || col.leaf || col.owner || col.action;
+      // 兜底：控制行用**叶的字段名**（`investment_budget`…，控制面还没改名）；
+      // 读行用**裸字段路径**（`舰名`/`忠诚度`…）——因为 `label` 允许覆盖引擎的名词
+      // （`舰名`→`舰`），覆盖之后按 label 就查不到解释了。表达式路径（`@post…`）不兜底。
+      const bare = typeof col.path === 'string' && /^[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*$/.test(col.path)
+        ? col.path
+        : null;
+      const field = col.leaf && window.Controls ? Controls.fieldOf(col.leaf) : bare;
+      window.Tip.attach(node, label, field);
+    },
   });
 }
 
@@ -188,6 +204,15 @@ async function loadViews() {
     // 2) 声明装饰（补标签 / 算 field）必须在 `setSpecs` **之前**；
     // 3) `buildEdits` 还要用这份 manifest 建差异回传的地基（`rebuildLeafSpec`）。
     if (window.Controls) await Controls.load();
+    // 4) **名词 → 解释**（`GET /api/schema`）：悬停弹窗的那段文字。同样拉一次就够，
+    //    它只随引擎的声明变，不随回合变。失败不致命（弹不出解释而已，界面照常）。
+    if (window.Tip) {
+      try {
+        window.Tip.useSchema(await fetchJSON('api/schema'));
+      } catch (e) {
+        console.warn('GET /api/schema 失败：名词弹不出解释', e);
+      }
+    }
     viewsDoc = await fetchJSON('views.json');
     if (window.Controls) Controls.decorateDoc(viewsDoc);
     if (window.SpecView) window.SpecView.setSpecs(viewsDoc);

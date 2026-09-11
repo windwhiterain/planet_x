@@ -142,6 +142,24 @@ def main() -> int:
             v["layout"] = "table"  # 表没有来源没意义
     run_case("null-source-on-table", d)
 
+    # ⑤d 名词覆盖率：把一个**裸字段列**的 path 改成引擎不认识的名词 ⇒ 要红
+    #     （这条守的是"界面上当名词显示的每一列都弹得出解释"；改名/漏文档时它会先响）
+    d = clone()
+    for v in walk_views(d):
+        for c in (v.get("columns") or []):
+            if isinstance(c, dict) and isinstance(c.get("path"), str) and c["path"] == "hegemon":
+                c["path"] = "这个名词引擎不认识"
+    run_case("noun-without-doc", d)
+
+    # ⑤e 同一条的另一面：把**控制行标签**改成语料里没有的名词也要红
+    #     （控制行的字段名查得到就不算漏 —— 所以这里连字段一起换掉）
+    d = clone()
+    for v in walk_views(d):
+        for c in (v.get("columns") or []):
+            if isinstance(c, dict) and isinstance(c.get("owner"), str) and c.get("owner") == "global":
+                c["owner"] = "不存在的键"
+    run_case("owner-without-doc", d)
+
     # ⑤c `new: true` 只对多键叶成立：挂到势力级单叶（keys 为空）上要红
     d = clone()
     for v in walk_views(d):
