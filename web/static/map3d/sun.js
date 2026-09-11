@@ -7,7 +7,10 @@
 // 现在三层叠加，从内到外：
 //   ① 光球 photosphere —— 米粒组织(ridged 反相 = 亮米粒+暗沟) + 超米粒流 + 太阳黑子(本影/半影)
 //      + **limb darkening**（临边昏暗：I(μ)=1-u1(1-μ)-u2(1-μ)²，同时压亮度并偏红）
-//   ② 色球 chromosphere —— 极薄的自发光壳，只在 μ 很小（临边）处出现，深红
+//   ② 色球 / 日珥 —— **并入日冕的体积**（见 corona.frag 的 ④ 项）。它原先是一层等半径的
+//      球壳（`R*1.012`），而**壳在几何上没有径向厚度**：外缘永远等于轮廓线，于是只能读成
+//      「一圈均匀硬红环」，怎么调噪声都救不回来（用户：「太阳的大气太耿直了，弄得像日珥
+//      一点」）。日珥的本质是径向**长短不一**的针与弧 —— 那需要体积，不需要一层壳。
 //   ③ 日冕 corona —— **世界坐标的体积渲染**：几何是一个球，片元里沿视线做射线步进，
 //      密度场在世界坐标里采样。**不是 billboard** —— 平面被行星一挡就是「薄膜破了个洞」，
 //      而那把大范围的柔光交给 bloom（摄影上的效果）去做，不用几何去假装。
@@ -24,9 +27,6 @@ const SUN_VERT = INC('px/sun/sun.vert');
 
 // --- ① 光球 -----------------------------------------------------------------
 const SUN_PHOTO_FRAG = INC('px/sun/sun-photo.frag');
-
-// --- ② 色球（薄壳，只在临边出现）---------------------------------------------
-const CHROMO_FRAG = INC('px/sun/chromo.frag');
 
 // --- ③ 日冕 / 日珥 / ④ 光晕：一张 billboard，在顶点里手动做面向相机 -------------
 // 为什么用 billboard 而不是「大一号的球」：日冕是**光学薄**的发射体，看到的是沿视线积分的
@@ -89,18 +89,6 @@ export function createSun(tier) {
   const photosphere = new THREE.Mesh(new THREE.SphereGeometry(R, tier.seg[0], tier.seg[1]), photosphereMat);
   g.add(photosphere);
 
-  const chromoMat = new THREE.ShaderMaterial({
-    uniforms: { uFbmOct: fbmOct(Math.max(2, oct - 1)), uTime: { value: 0 } },
-    vertexShader: SUN_VERT,
-    fragmentShader: CHROMO_FRAG,
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.FrontSide,
-  });
-  const chromosphere = new THREE.Mesh(new THREE.SphereGeometry(R * 1.012, tier.seg[0], tier.seg[1]), chromoMat);
-  g.add(chromosphere);
-
   // 日冕：**世界坐标的体积**（射线步进），不是 billboard。见 CORONA_FRAG 顶部的推导。
   const coronaMat = CORONA_MAT(R, tier);
   const corona = new THREE.Mesh(
@@ -108,15 +96,14 @@ export function createSun(tier) {
   corona.renderOrder = 5;
   g.add(corona);
 
-  const parts = [photosphere, chromosphere, corona];
+  const parts = [photosphere, corona];
   const setTier = (t) => {
     // 八度数现在是 **uniform**（见 util.js 里 NOISE_GLSL 那段），所以换档只改一个数值、
     // 不再触发 `needsUpdate` 重编译。步数同理。
     const oct = Math.max(1, t.oct);
     parts.forEach((m) => { if (m.material.uniforms.uFbmOct) m.material.uniforms.uFbmOct.value = oct; });
     coronaMat.uniforms.uSteps.value = Math.max(6, Math.min(18, 4 + oct * 2));
-    corona.visible = !!t.corona;
-    chromosphere.visible = !!t.corona;
+    corona.visible = !!t.corona;   // 色球/日珥现在住在日冕体积里，跟着同一个开关
   };
   setTier(tier);
 
@@ -125,7 +112,6 @@ export function createSun(tier) {
     photosphere,
     update(t) {
       photosphereMat.uniforms.uTime.value = t;
-      chromoMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
     },
     setIntensity(v) {

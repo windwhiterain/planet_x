@@ -21,7 +21,26 @@ if (!block) {
   console.log('check-glsl-manifest: glsl.js 里找不到 `export const CHUNKS = [...]`');
   process.exit(1);
 }
-const listed = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
+// **真的把数组求值**，而不是拿正则抠引号里的名字 —— 正则看不见数组空洞：
+// 生成器曾经把每一项都写成 `'x',` 又用 `,` 连接，于是 32 行全是 `'x',,`（空洞 =>
+// undefined 项），而正则版核对器照样报 OK。空值会让运行时去 fetch '/shaders/undefined'
+// （axum 的静态服务对未知路径回落到 index.html 且返回 200，所以连 404 都不会报）。
+let listed;
+try {
+  listed = new Function('return [' + block[1] + '];')();
+} catch (e) {
+  console.log('check-glsl-manifest: CHUNKS 不是合法的数组字面量 — ' + e.message);
+  process.exit(1);
+}
+// ⚠ 必须先 `[...listed]` **展开**：`Array.prototype.filter` 会**跳过数组空洞**，
+// 直接对带空洞的数组 filter 是看不见那些 undefined 的（第一版就这么漏了）。
+const flat = [...listed];
+const holes = flat.filter((v) => typeof v !== 'string' || v === '');
+if (holes.length) {
+  console.log(`  清单里有 ${holes.length} 个空洞/非字符串项（多半是多余的逗号）`);
+  process.exit(1);
+}
+listed = [...listed].sort();
 
 const walk = (d, out = []) => {
   for (const e of readdirSync(d, { withFileTypes: true })) {
