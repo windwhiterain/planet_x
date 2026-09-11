@@ -305,17 +305,10 @@ button.primary:hover { background: #2563eb; }
 .sv-more.clickable:hover { color: var(--text); }
 .sv-more-inline { color: var(--muted); }
 .sv-omit { color: #6b7280; font-size: 10.5px; margin-top: 4px; line-height: 1.4; }
-/* 「点开就地看原始 JSON」的盒子（`app.js::jsonToggle`，未组织索引里每个键一个）。
-   ⚠ 它以前借的是读面「其余字段」桶的类名 `sv-residual-box`；那个桶 2026-10 第 8 步整条
-   删掉了，所以这里给它自己的类名（样式与从前逐字相同）。
-   ⚠ 顺手实测到一个**早先就有的缺陷**（不是第 8 步引入的，也没有顺手改——不在本步范围）：
-   `jsonToggle` 只 `return btn`，那个 box **从来没被 append 进 DOM** ⇒ 未组织页的
-   「看原始数据」开关是个 no-op（点一下只换箭头）。这条 CSS 留着：等那个 box 真的接上去，
-   它就有样式了。 */
-.sv-raw-box {
-  margin: 2px 0 4px; padding: 4px 6px; border-left: 2px solid var(--line);
-  background: rgba(0, 0, 0, .25); max-height: 30vh; overflow: auto;
-}
+/* ⚠ 2026-10 第 9 步：这里删掉了 `.sv-raw-box`（「点开就地看原始 JSON」的盒子，只由
+   `app.js::jsonToggle` 用）。那个函数**实测是 no-op**（只 `return btn`，box 从来没被 append
+   进 DOM），而它唯一的宿主是那张自动生成的「未组织」页 —— 页与函数整条删掉 ⇒ 这条 CSS
+   也没有用户了。要「看原始数据」走右栏「状态」面板（`jsonview.js`，带过滤/全展开）。 */
 .sv-group {
   display: flex; align-items: center; gap: 6px; margin: 8px 0 2px;
   font-size: 12px; font-weight: 600; color: #9ecbff;
@@ -377,16 +370,10 @@ button.primary:hover { background: #2563eb; }
 .sv-inline { border: 1px dashed var(--line); border-radius: 6px; padding: 6px; margin: 4px 0; }
 .sv-inline-bar { color: var(--muted); font-size: 10.5px; margin-bottom: 4px; }
 .sv-select { max-height: 34vh; overflow: auto; }
-.sv-list { display: flex; flex-direction: column; gap: 2px; }
-.sv-lrow { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-size: 11.5px; }
-.sv-lkey { color: #9ecbff; font-family: ui-monospace, Consolas, monospace; }
-.sv-lshape { color: var(--muted); }
-.sv-lby { color: #7ee787; }
-.sv-badge {
-  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 10.5px; color: var(--muted);
-}
-.sv-badge.ok { border-color: #2f6f4a; color: #7ee787; }
-.sv-badge.warn { border-color: #a16207; color: #ffd479; }
+/* ⚠ 2026-10 第 9 步：`.sv-list` / `.sv-lrow` / `.sv-lkey` / `.sv-lshape` / `.sv-lby` /
+   `.sv-badge(.ok|.warn)` 也一并删了 —— 全仓 grep 的结论是**只有**那张「未组织」页
+   （`app.js::renderLeftover` / `renderSpecCheck` / `renderWriteCheck` / `checkRow`）在用它们，
+   没有一个别的页/模块碰过（判据 `g4_spec.py` §9 之后会盯着这件事）。 */
 
 @media (max-width: 720px) {
   .edge-panel.left { width: 100%; }

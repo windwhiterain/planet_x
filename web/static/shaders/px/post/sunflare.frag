@@ -9,13 +9,12 @@
   uniform float uVis;         // 太阳可见度（被天体挡住 → 0）
   uniform vec2  uTexel;       // 1 / 分辨率
   uniform vec2  uAspect;      // (aspect, 1)
-  uniform float uGodStrength, uDecay, uDensity, uWeight, uThreshold;
+  uniform float uThreshold;
   uniform float uStreak;
   uniform float uGhost;
   // 采样数 / 环数是 **uniform** 而不是 #define：常量上界会让编译器把循环完全展开
   // （理由与实测数据见 util.js 里 NOISE_GLSL 那段）。这三个都是全屏 pass 的主循环，
   // GODRAY 24 次、STREAK 25 次展开是实打实的编译量。
-  uniform int uGodraySamples;
   uniform int uStreakTaps;
   uniform int uGhostCount;
   varying vec2 vUv;
@@ -46,29 +45,6 @@
     if (vis <= 0.001) { gl_FragColor = base; return; }
 
     vec3 flare = vec3(0.0);
-
-    // --- ① 体积光（沿「本像素 → 太阳」的径向散射）---------------------------------
-    // delta 是**追到太阳为止**的整段路（乘以 density），所以每个像素的采样点分布相同；
-    // 屏幕上的径向梯度来自下面那条 radial 包络，而不是来自采样几何（采样几何本身给不出梯度）。
-    // 每条射线 24 次纹理采样，是全屏 pass 里最贵的一项；关掉时（低质量档）必须真的
-    // 跳过循环，而不是把结果乘 0 —— 否则「关掉体积光」一点都不会变快。
-    if (uGodStrength > 0.0) {
-      vec2 delta = (uSun - vUv) * (uDensity / float(uGodraySamples)) * uAspect;
-      vec2 uv = vUv;
-      float illum = uWeight;
-      vec3 acc = vec3(0.0);
-      for (int i = 0; i < uGodraySamples; i++) {
-        uv += delta;
-        vec3 s = texture2D(tDiffuse, uv).rgb;
-        acc += s * sourceMask(s) * illum;
-        illum *= uDecay;
-      }
-      // 归一：sum(illum) ≈ uWeight/(1-uDecay)，再乘一个整体的观感系数。
-      acc *= uGodStrength * (1.0 - uDecay) * 0.42 / max(uWeight, 1e-4);
-      // 包络：集中在太阳附近（有遮挡物时的那道「光柱」就是这个包络被物体切开的样子）。
-      float d2s = length((vUv - uSun) * uAspect);
-      flare += acc * exp(-d2s * 3.1);
-    }
 
     // --- ② 各向异性拉丝（变形宽银幕镜头那道水平蓝线） -------------------------
     // 采样是**锚在太阳的屏幕上**做的，所以整行的 st 是同一个值——必须再乘一条横向包络，

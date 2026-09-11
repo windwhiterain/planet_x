@@ -67,6 +67,18 @@
      （实测 `factions` 不发 `颜色`、`ships` 不发 `坐标`/`攻击历史`），能对的是**交集**。
    非恒真由 `play/tests/_g4_negative.py` ㉙（剪断追加路径 ⇒ §8a 红）㉚（桶回来 ⇒ §8b 红）
    ㉛（删掉一列 ⇒ 不红，但文本必须指出「这一列现在只能靠追加」）盯着。
+
+9. **读面没有页级兜底桶**（§9，2026-10 第 9 步）：用户裁决 *「我不希望有『其余』这样的栏目」*
+   在第 8 步删掉了**列级 / 行级**的折叠桶；第 9 步删的是**页级**的同一个概念 —— 左栏那张
+   自动生成的「未组织」页（`id: 'leftover'`）。判据四条合一条：
+   * 声明里 `pages[].id` 不许叫 `leftover`、`pages[].title` 不许含 `未组织`；
+   * `views.json` 的**整份文本**里不许再出现这两个词（页没了，提它的 `hint` 就是假话）；
+   * `web/static/**/*.js` 的**代码**（去注释）里一个都不许出现 —— 页不许由前端 `concat` 出来；
+   * **并且**第 8 步的追加接线（`sv-th-auto` / `sv-td-auto` / `sv-sheet-row-auto` /
+     `residualCols` / `autoTh`）5 个标记必须仍在 —— 否则"删掉兜底桶"可以靠**把追加机制
+     一起删光**作弊（那样没被声明的字段就真的不见了，比桶更糟）。
+   防空转的实测数字（页数 7 / 扫过的 JS 份数 17 / 接线标记 5）写进判据文本；
+   非恒真由 `_g4_negative.py` ㉜（页塞回声明）㉝（`.concat` 塞回代码）盯着。
 """
 
 from __future__ import annotations
@@ -600,6 +612,10 @@ BUCKET_MARKERS = ("其余", "sv-th-res", "sv-residual", "residualCell", "renderR
 # 追加机制的**接线标记**：残差必须是「普通列 / 普通行」——这几个名字少了任何一个，
 # 都说明有一条布局不再把残差摆出来（§8b 红）。
 APPEND_MARKERS = ("sv-th-auto", "sv-td-auto", "sv-sheet-row-auto", "residualCols", "autoTh")
+# **页级**兜底桶的墓碑（第 9 步，2026-10）：左栏那张自动生成的「未组织」页（`id: 'leftover'`）
+# 是「其余」在**页**这一层的版本——同一个概念的另一个尺寸。这两个词不许再作为页 id / 页标题 /
+# 渲染分支出现；**代码**（去注释）与**声明**（`views.json` 整份文本）两边都扫。§9 就是这条。
+PAGE_BUCKET_WORDS = ("leftover", "未组织")
 _ZH = re.compile(r"[\u4e00-\u9fff]")
 
 
@@ -1827,6 +1843,74 @@ def run(h, ck) -> None:
              (f"{'；'.join(proj_evidence)}"
               if (proj_tables >= 3 and proj_live_cols > 0)
               else f"只对到 {proj_tables} 张表 / {proj_live_cols} 个交集字段 ⇒ 判据可能空转了"))
+
+
+    # ══ 9. 读面**没有页级兜底桶**（第 9 步，2026-10）════════════════════════════════
+    #
+    # 用户裁决 *「我不希望有『其余』这样的栏目」* 在第 8 步删掉了**列级 / 行级**的折叠桶；
+    # 第 9 步删的是**页级**的同一个概念：左栏那张自动生成的「未组织」页（`id: 'leftover'`）
+    # ——一个把"没被任何组织点认领的东西"兜起来的去处。它在**页**这一层就是「其余」。
+    #
+    # 判据四支，合一条 check（任何一支红 ⇒ 这条红）：
+    #   a) **声明**：`views.json` 的 `pages[].id` 不许叫 `leftover`、`pages[].title` 不许含
+    #      `未组织`（页只能由声明给出，而这一张是前端自己 `concat` 出来的）；
+    #   b) **声明全文**：`views.json` 的整份文本里不许再出现这两个词——某条 `hint` 写着
+    #      「在未组织页也看得到」而页已经没了，那就是**假话**（本次实测抓到一处：
+    #      「全局」页的 `hint`）；
+    #   c) **代码**（去注释扫 `web/static/**/*.js`）：`leftover` / `未组织` 一个都不许出现
+    #      ——删页不能靠"只删 CSS / 只删 DOM 分支、把 `sidePages()` 里那段
+    #      `.concat([{id:'leftover', …}])` 留着"。注释不算（墓碑是有意的，`_js_code` 剥注释）；
+    #   d) **不许把上一步一起删掉**：第 8 步的追加接线（`APPEND_MARKERS`，5 个）必须仍在
+    #      ——否则"删掉兜底桶"可以靠**把整个追加机制一起删光**作弊：那样没被声明的字段就真的
+    #      不见了（比桶更糟）。这一条与 §8b 同源、但两处都留：§8b 守 `specview.js` 一份文件，
+    #      这里守**全部** JS 的并集。
+    #
+    # 防空转（实测数字写进判据文本）：**页 7 张**（本回合/势力/舰队/城市/市场·运输/设计图/全局）、
+    # 扫过 **17 份 JS**、追加接线 **5/5** 个标记在；下限 5 页 / 12 份 JS。
+    # 非恒真由 `_g4_negative.py` ㉜（把 `leftover` 页塞回**声明**）㉝（把 `sidePages()` 里那段
+    # `.concat` 塞回**代码**）盯着；夹带的 (d) 由 ㉚ 顺带盯着（它把 `sv-th-auto` 改回
+    # `sv-th-res`，本条必须跟着红）。
+    page_bucket_bad: list[str] = []
+    # ⚠ 别用上面那个 `doc`：§5b 的文档对账循环把它重绑成了一条字符串
+    # （`for key, (doc, _rust) in cont["fields"].items()`）⇒ 这里从 `raw` 重新解析一份。
+    vdoc = json.loads(raw)
+    for p in vdoc.get("pages") or []:
+        pid = str(p.get("id") or "")
+        ptl = str(p.get("title") or "")
+        if "leftover" in pid or "未组织" in ptl:
+            page_bucket_bad.append(f"页 id={pid!r} 标题={ptl!r}")
+    decl_bucket_bad = [w for w in PAGE_BUCKET_WORDS if w in raw]
+    n_pages = len(vdoc.get("pages") or [])
+    js_files = sorted(STATIC_JS.rglob("*.js"))
+    js_bucket_bad: list[str] = []
+    js_wiring: set[str] = set()
+    for jp in js_files:
+        code = _js_code(jp)
+        for w in PAGE_BUCKET_WORDS:
+            if w in code:
+                js_bucket_bad.append(f"{jp.name}:{w}")
+        js_wiring |= {m for m in APPEND_MARKERS if m in code}
+    wiring_missing = [m for m in APPEND_MARKERS if m not in js_wiring]
+    PAGES_MIN, JS_MIN = 5, 12
+    ck.check(f"第 9 步·没有页级兜底桶：{n_pages} 张页（{'、'.join(str(p.get('title')) for p in vdoc.get('pages') or [])}）"
+             f"里没有 `leftover` / `未组织`（id 与标题都不许），扫过的 {len(js_files)} 份 "
+             f"`web/static/**/*.js` 的**代码**里（去注释）也没有这两个词，"
+             f"且第 8 步的追加接线 {len(APPEND_MARKERS)} 个标记仍然齐全"
+             f"（下限 {PAGES_MIN} 页 / {JS_MIN} 份 JS）",
+             not page_bucket_bad and not decl_bucket_bad and not js_bucket_bad
+             and not wiring_missing
+             and n_pages >= PAGES_MIN and len(js_files) >= JS_MIN
+             and len(js_wiring) == len(APPEND_MARKERS),
+             "；".join(
+                 ([f"声明里又有页级兜底桶：{page_bucket_bad}"] if page_bucket_bad else [])
+                 + ([f"`{VIEWS_JSON.name}` 的文本里还有 {decl_bucket_bad}"
+                     f"（页没了，提它的文案就是假话）"] if decl_bucket_bad else [])
+                 + ([f"JS 代码里还有页级兜底桶的痕迹：{js_bucket_bad}"] if js_bucket_bad else [])
+                 + ([f"追加接线断了（不许用「删掉追加」来代替「删掉桶」）：{wiring_missing}"]
+                    if wiring_missing else [])
+             ) or (f"{n_pages} 张页 / {len(js_files)} 份 JS：`leftover` 0 处、`未组织` 0 处；"
+                   f"追加接线 {'、'.join(sorted(js_wiring))} 全在"
+                   f"（={'、'.join(APPEND_MARKERS)}）"))
 
 
 if __name__ == "__main__":
