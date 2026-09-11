@@ -18,7 +18,7 @@
 
 import * as THREE from 'three';
 import { NOISE_GLSL, fbmOct, hex2rgb, lighten } from './util.js';
-import { classIndex } from './kinds.js';
+import { classIndexFor, bandedFor, surfaceOf } from './kinds.js';
 import { TUNING } from './tuning.js';
 
 const PLANET_VERT = /* glsl */`
@@ -99,6 +99,38 @@ const PLANET_FRAG = /* glsl */`
   uniform float uCloudAmt;
   uniform float uCityLights;
   uniform int   uClass;
+  // ---- 程序化表面参数（config 的 body_kinds[].params）--------------------------------
+  // 名字由前端 paramUniforms() 从字段名自动派生（band_freq ⇒ uBandFreq），
+  // 所以这里**必须**与 Rust SurfaceParams 各结构体的字段名逐字对应。
+  // 每个类只用自己那几个；多余的声明是无害的（three.js 只上传程序里存在的 uniform）。
+  uniform float uBandFreq;        // Gas / IceGiant
+  uniform float uBandDetail;      // Gas
+  uniform float uBandContrast;    // Gas / IceGiant
+  uniform float uBandWeight;      // IceGiant
+  uniform float uShear;           // Gas
+  uniform float uTurbulence;      // Gas / IceGiant / Venus
+  uniform float uPolar;           // Gas
+  uniform int   uStormCount;      // Gas
+  uniform float uStormSize;       // Gas
+  uniform float uStormStrength;   // Gas
+  uniform float uHaze;            // Gas / IceGiant / Titan
+  uniform float uSpot;            // IceGiant
+  uniform float uMottle;          // Rock / Lunar / Dwarf / IceWorld
+  uniform float uPolarCap;        // Terran / Martian / Rock / Lunar / Dwarf
+  uniform float uReliefShade;     // Rock / Lunar / Dwarf
+  uniform float uCraterDensity;   // Rock / Lunar / Dwarf / IceWorld
+  uniform float uArid;            // Terran
+  uniform float uBiome;           // Terran
+  uniform float uDetail;          // Terran
+  uniform float uDarkRegion;      // Martian
+  uniform float uSwirlFreq;       // Venus
+  uniform float uSwirlAmt;        // Venus
+  uniform float uStreak;          // Venus
+  uniform float uCrackFreq;       // IceWorld
+  uniform float uCrackWidth;      // IceWorld
+  uniform float uCrackAmount;     // IceWorld
+  uniform float uLake;            // Titan
+  uniform float uLakePolar;       // Titan
   // 星环在该行星上的投影（环平面 = 过球心的平面，法线 uRingN，半径区间 [uRingIn, uRingOut]）。
   uniform float uHasRing;
   uniform vec3  uRingN;
@@ -165,16 +197,16 @@ const PLANET_FRAG = /* glsl */`
     // 覆盖率给得比「合理」更高一点：太空视角下沙漠是显眼的。
     float arid = (1.0 - smoothstep(0.22, 0.55, lat)) * (1.0 - smoothstep(0.02, 0.30, alt));
     arid *= smoothstep(0.28, 0.58, fbmFast(ds * 3.2 + 7.0) + 0.32);
-    landC = mix(landC, vec3(0.58, 0.44, 0.22), arid * 0.72);
+    landC = mix(landC, vec3(0.58, 0.44, 0.22), arid * uArid);
     // 高频细节：没有它，大陆就是一整块均匀的绿（「绿色大理石」）。同时按第二层噪声
     // 做生物群系扰动，让同一纬度上也有深浅差别。
     float detail = fbm(ds * 16.0 + 2.2);
     float biome = fbm(ds * 6.5 + 19.0);
-    landC *= 0.78 + 0.34 * detail;
-    landC = mix(landC, landC * vec3(1.18, 1.05, 0.82), smoothstep(0.40, 0.72, biome) * 0.35);
-    // 极冠：噪声破边，别是一条平滑的纬度线。
+    landC *= 0.78 + uDetail * detail;
+    landC = mix(landC, landC * vec3(1.18, 1.05, 0.82), smoothstep(0.40, 0.72, biome) * uBiome);
+    // 极冠：噪声破边，别是一条平滑的纬度线。polar_cap 越大极冠越往低纬长。
     float capNoise = fbm(ds * 5.0 + 3.3) * 0.14;
-    float pole = smoothstep(0.80 - capNoise, 0.93 - capNoise, lat);
+    float pole = smoothstep(uPolarCap - capNoise, uPolarCap + 0.13 - capNoise, lat);
     vec3 col = mix(ocean, landC, land);
     col = mix(col, vec3(0.93, 0.96, 0.99), pole * (0.55 + 0.45 * land));
     return col;
@@ -184,90 +216,125 @@ const PLANET_FRAG = /* glsl */`
     // 纬向急流：把纬度当主变量，用域扰动让每条带自己是湍流的。
     // ⚠ 剪切量（shear 乘在纬向上）要**小**：原来乘 5.0/9.0，相位被扰动到 ±5 rad，
     // 纬向条带被撕成一坨坨斑块，看起来不像气巨。真实的气巨带纹是**强纬向、弱经向**的，
-    // 湍流只把边界揉皱，不该把带揉没。这里把 warp 幅度也降到 0.85。
-    vec3 w = warp(ds * 3.0, 0.36, 0.0, 0.83);
-    float shear = fbm(w * 2.2) * 0.5;
+    // 湍流只把边界揉皱，不该把带揉没。
+    // turbulence 走 warpT：它自动保住 amt·warpK 的折叠安全乘积（见 util.js::warp），
+    // 所以可以在 config 里自由调大而不会重新引入折痕。
+    vec3 w = warpT(ds * 3.0, 0.36, 0.83, 0.0, uTurbulence);
+    float shear = fbm(w * 2.2) * 0.5 * uShear;
     // 三层不同频率的纬向带 + 少量剪切，叠出「宽带里套细纹」的层次。
-    float b1 = sin(lat * 12.0 + shear * 1.7);
-    float b2 = sin(lat * 27.0 + shear * 3.1);
-    float b3 = sin(lat * 52.0 + shear * 5.0);
-    float band = 0.5 + 0.5 * (0.50 * b1 + 0.32 * b2 + 0.18 * b3);
-    band = smoothstep(0.26, 0.80, band);
+    // band_detail 是 2/3 层的权重：1.0 = 原口径 0.50/0.32/0.18，0 = 只剩基频
+    // ⇒ 土星给 0.30 就是「带疏而柔」，木星给 1.0 是「宽带里套细纹」。
+    float b1 = sin(lat * uBandFreq + shear * 1.0);
+    float b2 = sin(lat * uBandFreq * 2.25 + shear * 1.8);
+    float b3 = sin(lat * uBandFreq * 4.33 + shear * 2.9);
+    float bd = clamp(uBandDetail, 0.0, 1.0);
+    float band = 0.5 + 0.5 * mix(b1, 0.50 * b1 + 0.32 * b2 + 0.18 * b3, bd);
+    // band_contrast：1.0 = 原窗口 (0.26, 0.80) 那种分明，0 = 近乎均匀的一颗球。
+    float half_ = mix(0.44, 0.27, clamp(uBandContrast, 0.0, 1.0));
+    band = smoothstep(0.53 - half_, 0.53 + half_, band);
     // 两端各自再推开：config 给的 base/accent 往往只差一点点（土星的驼 vs 暗驼），
     // 直接 mix 出来是一条没有对比的色带。
     vec3 c = mix(uAccent * 0.58, uBase * 1.16, band);
     // 带内细流：真实气巨的每一条带自己都是湍流的，不是一条均匀色条。
     c *= 0.90 + 0.20 * fbm(w * 7.0 + 2.0);
-    // 极区涡旋：高纬处收紧、变暗（木星/土星的极地都是暗的）。
-    float polar = smoothstep(0.72, 1.0, abs(lat));
+    // 极区涡旋：高纬处收紧、变暗（木星/土星的极地都是暗的）。polar 越大压得越宽。
+    float polar = smoothstep(1.0 - clamp(uPolar, 0.0, 1.0) * 0.40, 1.0, abs(lat));
     c = mix(c, uAccent * 0.55, polar * 0.7);
-    // 风暴：几颗定点的椭圆涡旋（大红斑是其中最大的一颗）。
+    // 风暴：椭圆涡旋（第 0 颗是「大红斑」那种最大的）。storm_count = 0 就是一颗都没有
+    // —— 土星本体确实没有大红斑那种显眼的风暴。
     const vec3 STORM[3] = vec3[3](vec3(0.55, -0.18, 0.62), vec3(-0.72, 0.26, 0.42), vec3(0.12, 0.44, -0.88));
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < uStormCount; i++) {
       vec3 sd = normalize(STORM[i]);
       float dd = length(ds - sd);
-      float spot = exp(-pow(dd / (0.13 + 0.05 * float(i)), 2.0));
+      float spot = exp(-pow(dd / (uStormSize * (1.0 + 0.38 * float(i))), 2.0));
       // 涡旋内部有环流纹理，不是一块纯色补丁。
       float swirl = 0.75 + 0.25 * sin(dd * 60.0 + fbm(ds * 8.0) * 6.0);
       vec3 sc = (i == 0) ? vec3(0.66, 0.30, 0.17) : mix(uAccent, uBase, 0.35) * 0.8;
-      c = mix(c, sc, spot * swirl * 0.85);
+      c = mix(c, sc, spot * swirl * clamp(uStormStrength, 0.0, 1.0));
     }
+    // 雾霾：往 base/accent 的中间色压，读起来更朦胧、对比更低（土星 > 木星）。
+    c = mix(c, mix(uBase, uAccent, 0.5) * 1.05, clamp(uHaze, 0.0, 1.0) * 0.55);
     return c;
   }
 
   vec3 icyColor(vec3 ds, float lat){
     if (uBanded > 0.5) {
-      // 冰巨星：带极淡、极细，整体偏青蓝。
-      vec3 w = warp(ds * 3.0, 0.36, 0.0, 0.83);
-      float band = 0.5 + 0.5 * sin(lat * 13.0 + fbm(w * 1.8) * 2.2);
-      band = smoothstep(0.34, 0.82, band);
-      return mix(uAccent, uBase, band * 0.75 + 0.12);
+      // 冰巨星：带极淡、极细，整体偏青蓝。**天王星和海王星的区别全在 config 的
+      // IceGiant 参数里** —— 天王星 band_contrast 近 0 + haze 高（真实天王星就是
+      // 一颗几乎没有细节的青球），海王星带纹明显 + spot 给出大暗斑。
+      vec3 w = warpT(ds * 3.0, 0.36, 0.83, 0.0, uTurbulence);
+      float band = 0.5 + 0.5 * sin(lat * uBandFreq + fbm(w * 1.8) * 2.2);
+      // band_contrast = 1.0 精确复现原来的 smoothstep(0.34, 0.82)。
+      float half_ = mix(0.44, 0.24, clamp(uBandContrast, 0.0, 1.0));
+      band = smoothstep(0.58 - half_, 0.58 + half_, band);
+      float bw = clamp(uBandWeight, 0.0, 1.0);
+      vec3 c = mix(uAccent, uBase, band * bw + (1.0 - bw) * 0.5);
+      // 暗斑（海王星的大暗斑）：一颗高纬的暗涡。spot = 0 就整段跳过。
+      if (uSpot > 0.001) {
+        vec3 sd = normalize(vec3(0.62, -0.42, 0.66));
+        float dd = length(ds - sd);
+        float s = exp(-pow(dd / 0.17, 2.0));
+        c = mix(c, uAccent * 0.42, s * clamp(uSpot, 0.0, 1.0));
+      }
+      // 雾霾：整体去饱和并向基色靠 —— 天王星那层厚雾把细节全糊掉。
+      float lum = dot(c, vec3(0.299, 0.587, 0.114));
+      c = mix(c, vec3(lum) * 0.9 + uBase * 0.25, clamp(uHaze, 0.0, 1.0) * 0.6);
+      return c;
     }
     // 冰封卫星：光滑冰面 + 细裂纹 + 少量坑。
     float var = fbm(ds * 2.4);
-    vec3 c = mix(uBase, uAccent, var * 0.32);
-    float crack = abs(fbm(ds * 7.0) - 0.5);
-    c = mix(c, vec3(0.86, 0.94, 1.02), smoothstep(0.14, 0.06, crack) * 0.55);
-    c += craterField(ds, 5.0, 0.35) * 0.10;
+    vec3 c = mix(uBase, uAccent, var * uMottle);
+    float crack = abs(fbm(ds * uCrackFreq) - 0.5);
+    // crack_width = 0.08 精确复现原来的 smoothstep(0.14, 0.06, ...)。
+    c = mix(c, vec3(0.86, 0.94, 1.02),
+            smoothstep(uCrackWidth * 1.75, uCrackWidth * 0.75, crack) * uCrackAmount);
+    c += craterField(ds, 5.0, uCraterDensity) * 0.10;
     return c;
   }
 
   vec3 rockColor(vec3 ds, float lat, float h){
     float var = fbm(ds * 3.0);
-    vec3 c = mix(uBase, uAccent, var * 0.7);
+    vec3 c = mix(uBase, uAccent, var * uMottle);
     if (uClass == 3) {
       // 火星：红荒漠 + 暗反照率区（Syrtis Major 那种）+ 极冠。
-      c = mix(c, uAccent * 1.05, smoothstep(0.42, 0.72, fbm(ds * 2.1 + 5.0)) * 0.75);
+      c = mix(c, uAccent * 1.05, smoothstep(0.42, 0.72, fbm(ds * 2.1 + 5.0)) * uDarkRegion);
       float capN = fbm(ds * 4.5) * 0.10;
-      float pole = smoothstep(0.84 - capN, 0.95 - capN, lat);
+      float pole = smoothstep(uPolarCap - capN, uPolarCap + 0.11 - capN, lat);
       c = mix(c, vec3(0.94, 0.95, 0.96), pole * 0.85);
     } else {
       float capN = fbm(ds * 5.0) * 0.10;
-      float pole = smoothstep(0.87 - capN, 0.96 - capN, lat);
+      float pole = smoothstep(uPolarCap - capN, uPolarCap + 0.09 - capN, lat);
       c = mix(c, vec3(0.88, 0.90, 0.94), pole * 0.6);
     }
-    // 高度分层：高处长亮、洼地压暗（月海）。
-    c *= 0.82 + 0.36 * smoothstep(-0.1, 0.7, h);
+    // 高度分层：高处长亮、洼地压暗（月海就是「洼地压暗」，所以和岩石共用同一个字段）。
+    c *= 0.82 + uReliefShade * smoothstep(-0.1, 0.7, h);
+    // 陨石坑：岩石/卫星/矮行星都有，密度由 config 的 crater_density 给
+    // （卫星最多、矮行星次之、行星最少）。没有它，这几类只能靠颜色区分。
+    c += craterField(ds, 4.6, uCraterDensity * 0.55) * 0.10;
     return c;
   }
 
   vec3 titanColor(vec3 ds, float lat){
     float latT = clamp((lat + 1.0) * 0.5, 0.0, 1.0);
     vec3 c = mix(uAccent, uBase, latT);
-    // 甲烷湖：极区少量暗斑。
-    float lake = smoothstep(0.72, 0.9, fbm(ds * 3.4 + 9.0)) * smoothstep(0.55, 0.9, abs(ds.y));
-    return mix(c, vec3(0.08, 0.10, 0.12), lake * 0.7);
+    // 甲烷湖：极区少量暗斑。lake_polar 越大湖越集中在极点。
+    float lake = smoothstep(0.72, 0.9, fbm(ds * 3.4 + 9.0))
+               * smoothstep(uLakePolar, uLakePolar + 0.35, abs(ds.y));
+    c = mix(c, vec3(0.08, 0.10, 0.12), lake * uLake);
+    // 雾霾：土卫六整颗是橙色的霾，几乎看不到地表。
+    c = mix(c, mix(uBase, uAccent, 0.5) * 1.05, clamp(uHaze, 0.0, 1.0) * 0.6);
+    return c;
   }
 
   vec3 venusColor(vec3 ds, float lat){
     // 浓厚硫磺云：**高速**纬向涡旋（金星大气 4 天绕一圈，是最有辨识度的特征）。
     // 用强域扰动把纬向条纹撕成 Y 形/涡卷，而不是一张均匀的驼色纸。
-    vec3 w = warp(ds * 6.0 + vec3(0.0, lat * 2.0, 0.0), 0.71, 0.0, 0.42);
+    vec3 w = warpT(ds * 6.0 + vec3(0.0, lat * 2.0, 0.0), 0.71, 0.42, 0.0, uTurbulence);
     float s = fbm(w * 2.6);
-    float swirl = 0.5 + 0.5 * sin(lat * 11.0 + s * 9.0);
+    float swirl = 0.5 + 0.5 * sin(lat * uSwirlFreq + s * uSwirlAmt);
     float streak = fbm(vec3(ds.x * 3.0, ds.y * 16.0, ds.z * 3.0));
     vec3 c = mix(uAccent, uBase, smoothstep(0.15, 0.85, s * 0.62 + swirl * 0.38));
-    c *= 0.86 + 0.28 * streak;
+    c *= 0.86 + uStreak * streak;
     // 极区偶极涡旋（金星南极的暖区）。
     c = mix(c, uAccent * 1.15, smoothstep(0.75, 1.0, abs(lat)) * 0.45);
     return c;
@@ -620,11 +687,24 @@ const RING_FRAG = /* glsl */`
 export const CITY_MAX = 12;
 
 // ---------------------------------------------------------------------------
+// 程序化参数 → uniform：`band_freq` ⇒ `uBandFreq`。**刻意不写映射表** —— 那张表是同一事实
+// 的第二份表示，加了字段忘了登记不会报错，只会静默变成「config 里填了但没生效」，
+// 而那种故障看起来就跟「某个参数没作用」一样，最难查。
+// GLSL 侧按同样的名字声明（见 PLANET_FRAG 顶部那串 uniform）；每个类只用到自己那几个，
+// 其余的照发不误 —— three.js 只上传程序里真的存在的 uniform，多余的会被忽略。
+function paramUniforms(spec) {
+  const out = {};
+  for (const [k, v] of Object.entries(surfaceOf(spec))) {
+    out['u' + k.replace(/(^|_)(\w)/g, (_m, _s, c) => c.toUpperCase())] = { value: v };
+  }
+  return out;
+}
+
 export function planetMaterial(spec, tier, opts = {}) {
   const [base, accent, atmo] = [hex2rgb(spec.color), hex2rgb(spec.accent), hex2rgb(spec.atmosphere)];
   const dirs = [];
   for (let i = 0; i < CITY_MAX; i++) dirs.push(new THREE.Vector3(0, 0, 0));
-  const cls = classIndex(spec.class);
+  const cls = classIndexFor(spec);
   const isGas = cls === 5;
   const hasAtmo = (spec.atmosphere && spec.atmosphere !== '#000000') || cls === 1 || cls === 2 || cls === 5 || cls === 6 || cls === 7;
 
@@ -640,7 +720,8 @@ export function planetMaterial(spec, tier, opts = {}) {
       uAccent: { value: new THREE.Vector3(...accent) },
       uAtmo: { value: new THREE.Vector3(...atmo) },
       uAtmoAmt: { value: hasAtmo ? (isGas ? 0.85 : 1.30) : 0.0 },
-      uBanded: { value: spec.banded ? 1.0 : 0.0 },
+      uBanded: { value: bandedFor(spec) ? 1.0 : 0.0 },
+      ...paramUniforms(spec),
       uEmissive: { value: spec.emissive || 0.0 },
       uRough: { value: spec.roughness != null ? spec.roughness : 0.8 },
       uMetal: { value: spec.metalness || 0.0 },
@@ -688,7 +769,7 @@ export function createAtmosphere(radius, spec, tier) {
 }
 
 export function createClouds(radius, spec, tier) {
-  const cls = classIndex(spec.class);
+  const cls = classIndexFor(spec);
   const mat = new THREE.ShaderMaterial({
     vertexShader: CLOUD_VERT,
     fragmentShader: CLOUD_FRAG,

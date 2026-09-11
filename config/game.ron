@@ -463,24 +463,50 @@
     },
     // 天体/行星**类型**表——视觉与类型元数据（纯展示）。每个 `state` 天体只存一个
     // 类型 key（`Body::kind`），本表由前端经 `/api/meta` 读出渲染（three.js/着色器）。
-    // 引擎模拟从不读它：它只是「星系长什么样」的数据化。class 是前端选 shader 的分支：
-    //   rock(陨石/岩石) / terran(类地宜居) / venus(浓厚大气) / martian(红色荒漠) /
-    //   lunar(灰岩卫星) / gas(气态巨行星,可 banded) / ice(冰封,可 banded) /
-    //   titan(雾霾卫星) / dwarf(柯伊伯矮行星)。
-    // radius 是相对类地行星(1.0)的显示尺寸；banded=横向色带；emissive=自发光 0..1；
-    // atmosphere=边缘光/大气辉光色；roughness/metalness 为材质参数。星环是 intrinsic
-    // body 属性(见 `Body::ring`，土星/天王星有)，不属于类型。
+    // 引擎模拟从不读它：它只是「星系长什么样」的数据化。
+    //
+    // `params` 是**程序化表面参数**，变体即着色器分支（见 `model::SurfaceParams`）：
+    //   Rock / Terran / Venus / Martian / Lunar / Gas / IceGiant / IceWorld / Titan / Dwarf。
+    // 每个变体带**自己那套**字段，字段名与前端 uniform 一一对应。
+    //
+    // ⚠ **同类的不同行星要各自一条**：「木星和土星长得一模一样」就是因为它们曾经共用
+    // 同一个 key。光靠 color 拉开不够 —— 颜色只差一点时读起来仍然是同一个球，必须靠
+    // params 把带纹密度/对比/风暴/湍流也分开。几处「乘数」型参数的 **1.0 = 拆分前的口径**。
+    //
+    // radius 是相对类地行星(1.0)的显示尺寸；emissive=自发光 0..1；atmosphere=边缘光/
+    // 大气辉光色；roughness/metalness 为材质参数。星环是 intrinsic body 属性
+    // （见 `Body::ring`，土星/天王星有），不属于类型。
     body_kinds: {
-        "terran":    (label: "类地行星", class: "terran",   color: "#2a6cc8", accent: "#bcd6e8", atmosphere: "#7db7e8", radius: 1.00, banded: false, emissive: 0.06, roughness: 0.75, metalness: 0.0),
-        "venusian":  (label: "浓厚大气", class: "venus",    color: "#e6c07a", accent: "#c98a3f", atmosphere: "#f2d9a0", radius: 0.95, banded: false, emissive: 0.04, roughness: 0.90, metalness: 0.0),
-        "martian":   (label: "红色荒漠", class: "martian",  color: "#c1440e", accent: "#7c3526", atmosphere: "#e08a5f", radius: 0.85, banded: false, emissive: 0.02, roughness: 0.90, metalness: 0.05),
-        "rocky":     (label: "岩石行星", class: "rock",     color: "#a8977f", accent: "#6d5f4e", atmosphere: "#141210", radius: 0.55, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.10),
-        "lunar":     (label: "灰岩卫星", class: "lunar",    color: "#c8c8d2", accent: "#9d9da8", atmosphere: "#101014", radius: 0.40, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.0),
-        "gas_giant": (label: "气态巨行星", class: "gas",    color: "#d8b18c", accent: "#a97a52", atmosphere: "#f0d9b0", radius: 2.60, banded: true,  emissive: 0.02, roughness: 0.85, metalness: 0.0),
-        "ice_giant": (label: "冰巨星",   class: "ice",     color: "#7cc4e8", accent: "#2f6aa0", atmosphere: "#a8d8f0", radius: 1.80, banded: true,  emissive: 0.0,  roughness: 0.60, metalness: 0.05),
-        "ice_world": (label: "冰封卫星", class: "ice",     color: "#e8f4ff", accent: "#b7d6ea", atmosphere: "#cfe8ff", radius: 0.55, banded: false, emissive: 0.0,  roughness: 0.50, metalness: 0.05),
-        "titan":     (label: "雾霾卫星", class: "titan",   color: "#e0a15e", accent: "#b87840", atmosphere: "#f0c080", radius: 0.60, banded: false, emissive: 0.03, roughness: 0.85, metalness: 0.0),
-        "dwarf":     (label: "矮行星",   class: "dwarf",   color: "#d6cdb8", accent: "#8f8571", atmosphere: "#9a8f7a", radius: 0.35, banded: false, emissive: 0.0,  roughness: 1.00, metalness: 0.0),
+        "terran":    (label: "类地行星", color: "#2a6cc8", accent: "#bcd6e8", atmosphere: "#7db7e8", radius: 1.00, emissive: 0.06, roughness: 0.75, metalness: 0.0,
+                      params: Terran(arid: 0.72, polar_cap: 0.80, biome: 0.35, detail: 0.34)),
+        "venusian":  (label: "浓厚大气", color: "#e6c07a", accent: "#c98a3f", atmosphere: "#f2d9a0", radius: 0.95, emissive: 0.04, roughness: 0.90, metalness: 0.0,
+                      params: Venus(swirl_freq: 11.0, swirl_amt: 9.0, streak: 0.28, turbulence: 1.0)),
+        "martian":   (label: "红色荒漠", color: "#c1440e", accent: "#7c3526", atmosphere: "#e08a5f", radius: 0.85, emissive: 0.02, roughness: 0.90, metalness: 0.05,
+                      params: Martian(dark_region: 0.75, polar_cap: 0.84)),
+        "rocky":     (label: "岩石行星", color: "#a8977f", accent: "#6d5f4e", atmosphere: "#141210", radius: 0.55, emissive: 0.0,  roughness: 1.00, metalness: 0.10,
+                      params: Rock(mottle: 0.70, polar_cap: 0.87, relief_shade: 0.36, crater_density: 0.30)),
+        "lunar":     (label: "灰岩卫星", color: "#c8c8d2", accent: "#9d9da8", atmosphere: "#101014", radius: 0.40, emissive: 0.0,  roughness: 1.00, metalness: 0.0,
+                      params: Lunar(mottle: 0.55, polar_cap: 0.90, relief_shade: 0.40, crater_density: 0.45)),
+        "titan":     (label: "雾霾卫星", color: "#e0a15e", accent: "#b87840", atmosphere: "#f0c080", radius: 0.60, emissive: 0.03, roughness: 0.85, metalness: 0.0,
+                      params: Titan(lake: 0.70, lake_polar: 0.55, haze: 0.18)),
+        "ice_world": (label: "冰封卫星", color: "#e8f4ff", accent: "#b7d6ea", atmosphere: "#cfe8ff", radius: 0.55, emissive: 0.0,  roughness: 0.50, metalness: 0.05,
+                      params: IceWorld(mottle: 0.32, crack_freq: 7.0, crack_width: 0.08, crack_amount: 0.55, crater_density: 0.35)),
+        "dwarf":     (label: "矮行星",   color: "#d6cdb8", accent: "#8f8571", atmosphere: "#9a8f7a", radius: 0.35, emissive: 0.0,  roughness: 1.00, metalness: 0.0,
+                      params: Dwarf(mottle: 0.70, crater_density: 0.55, polar_cap: 0.88, relief_shade: 0.30)),
+        // 气态巨行星。木星：强带纹 + 大红斑 + 暖橙棕 + 湍流明显。
+        "gas_giant_jovian":    (label: "气态巨行星", color: "#d8b18c", accent: "#a97a52", atmosphere: "#f0d9b0", radius: 2.60, emissive: 0.02, roughness: 0.85, metalness: 0.0,
+                      params: Gas(band_freq: 12.0, band_detail: 1.00, band_contrast: 1.00, shear: 1.7, turbulence: 1.20, polar: 0.70,
+                                  storm_count: 3, storm_size: 0.15, storm_strength: 0.90, haze: 0.0)),
+        // 土星：淡金、带疏而柔、**无风暴**、更朦胧（土星本体确实比木星平淡得多）。
+        "gas_giant_saturnian": (label: "气态巨行星", color: "#e3d0a2", accent: "#b99a63", atmosphere: "#f4e6c4", radius: 2.25, emissive: 0.02, roughness: 0.88, metalness: 0.0,
+                      params: Gas(band_freq: 7.0, band_detail: 0.30, band_contrast: 0.45, shear: 3.2, turbulence: 0.55, polar: 0.45,
+                                  storm_count: 0, storm_size: 0.10, storm_strength: 0.0, haze: 0.26)),
+        // 冰巨星。天王星：近乎无特征、青蓝、高雾霾（真实天王星就是一颗几乎没有细节的球）。
+        "ice_giant_uranian":   (label: "冰巨星", color: "#8fd4e8", accent: "#5aa6c4", atmosphere: "#b6e4f2", radius: 1.80, emissive: 0.0, roughness: 0.60, metalness: 0.05,
+                      params: IceGiant(band_freq: 9.0, band_contrast: 0.22, band_weight: 0.30, turbulence: 0.60, spot: 0.0, haze: 0.30)),
+        // 海王星：深蓝、带纹与暗斑明显（大暗斑）。
+        "ice_giant_neptunian": (label: "冰巨星", color: "#4a7fd4", accent: "#22407e", atmosphere: "#7fb0e8", radius: 1.76, emissive: 0.0, roughness: 0.58, metalness: 0.05,
+                      params: IceGiant(band_freq: 13.0, band_contrast: 0.85, band_weight: 0.80, turbulence: 1.15, spot: 0.55, haze: 0.05)),
     },
     // 舰船 5 级。舰级属性分三类：
     //   (1) 平台直接属性：船体 hull、船体再生 hull_regen —— 模块**不能**改它们（船体是

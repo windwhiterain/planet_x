@@ -186,16 +186,15 @@ pub fn resolve_positions(bodies: &mut [Body], months: f32) {
 /// 一个天体/行星**类型**的视觉与类型元数据，定义在 `config/game.ron` 的 `body_kinds` 表。
 ///
 /// 引擎只在每个 [`Body`] 上存 **类型 key**（见 [`Body::kind`]）；这张表携带前端（three.js）
-/// 用它渲染该类型的展示属性。类型是一种「分类」——很多天体共享一个条目却仍能像真实星系
-/// （terran / rocky / gas_giant / ice_giant / dwarf …）。纯展示数据：模拟从不读它，只经
-/// `/api/meta` 暴露给前端。
+/// 用它渲染该类型的展示属性。纯展示数据：模拟从不读它，只经 `/api/meta` 暴露给前端。
+///
+/// 着色器分支与「是否画色带」**由 [`BodyKindSpec::params`] 的变体推出**，不在这里各存一份：
+/// 那两个字段与变体是同一事实的第二份表示，必然漂移（改了一处忘了另一处，就是「木星土星
+/// 长得一模一样」那类问题的温床）。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct BodyKindSpec {
     /// 中文类型名（如「气态巨行星」「矮行星」）。
     pub label: String,
-    /// 渲染风格 / 着色器分支：`rock` | `terran` | `venus` | `martian` |
-    /// `lunar` | `gas` | `ice` | `titan` | `dwarf` —— 前端据此选 shader。
-    pub class: String,
     /// 基色（CSS hex）——行星表面主色。
     pub color: String,
     /// 补充色（用于条纹 / 渐变 / 云带 / 极冠）。
@@ -204,12 +203,191 @@ pub struct BodyKindSpec {
     pub atmosphere: String,
     /// 显示半径乘数（相对 1.0 的类地行星）。随类型给出「合理相对尺寸」。
     pub radius: f64,
-    /// 气态巨行星 / 冰巨星的横向色带（由 `class == "gas"` / `"ice"` 的 shader 绘制）。
-    pub banded: bool,
     /// 自发光强度 0..1（城市灯光 / 热核地表 / 潮湿大气折射等）。
     pub emissive: f64,
     /// 材质粗糙度 0..1。
     pub roughness: f64,
     /// 材质金属度 0..1。
     pub metalness: f64,
+    /// 该类型的**程序化表面参数**（见 [`SurfaceParams`]）。
+    pub params: SurfaceParams,
+}
+
+/// 程序化表面的参数。**变体即着色器分支**，每个变体带**自己那套**字段。
+///
+/// 为什么是枚举而不是「一堆 Option 字段的扁平袋」：各类型的参数集交集很小 ——
+/// 气巨要的是带纹频率 / 风暴数，类地要的是海平面 / 荒漠 / 极冠，冰封卫星要的是裂纹宽度 ——
+/// 摊平会逼所有类型共用一套字段名（只能靠 `gas_` 前缀硬凑），而「这个字段属于哪个 class」
+/// 会退化成隐式知识。
+///
+/// 为什么用**结构体变体**（`Gas { .. }`）而不是「新类型变体包一个 `GasParams` 结构」：
+/// 后者在 RON 里必须写成 `Gas((band_freq: 12.0, ..))` —— **双括号**，那层多余的括号就是
+/// 一层多余的间接，还容易写错（第一版就是这么栽的：`Expected struct GasParams but found
+/// band_freq`）。结构体变体让 config 写成 `Gas(band_freq: 12.0, ..)`，一层就是一层。
+///
+/// ⚠ 字段名有意与前端 uniform 对齐（`band_freq` ↔ `uBandFreq`），这样 `planet.js` 里
+/// 每个字面量都能一眼查到它现在从 config 的哪一项来。新增字段时两边一起改。
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub enum SurfaceParams {
+    /// 岩石行星（着色器 `rockColor`）。
+    Rock {
+        /// 大尺度色斑强度 0..1。
+        mottle: f64,
+        /// 极冠范围。
+        polar_cap: f64,
+        /// 高度分层强度（高处亮、洼地暗）0..1。
+        relief_shade: f64,
+        /// 陨石坑密度 0..1。
+        crater_density: f64,
+    },
+    /// 类地宜居（`terranColor`）。
+    Terran {
+        /// 干旱带强度 0..1（沙漠占比）。
+        arid: f64,
+        /// 极冠范围（越大极冠越往低纬长）。
+        polar_cap: f64,
+        /// 生物群系色差强度 0..1。
+        biome: f64,
+        /// 高频地表细节强度 0..1。
+        detail: f64,
+    },
+    /// 浓厚大气（`venusColor`）。
+    Venus {
+        /// 纬向涡旋频率。
+        swirl_freq: f64,
+        /// 涡旋对色相的扰动幅度。
+        swirl_amt: f64,
+        /// 高速条纹强度 0..1（金星大气 4 天绕一圈）。
+        streak: f64,
+        /// 域扰动倍数（1.0 = 基准口径）。
+        turbulence: f64,
+    },
+    /// 红色荒漠（`rockColor` 的火星分支）。
+    Martian {
+        /// 暗反照率区强度 0..1（Syrtis Major 那种）。
+        dark_region: f64,
+        /// 极冠范围。
+        polar_cap: f64,
+    },
+    /// 灰岩卫星（`rockColor`）。
+    Lunar {
+        /// 大尺度色斑强度 0..1。
+        mottle: f64,
+        /// 极冠范围。
+        polar_cap: f64,
+        /// 高度分层强度 0..1（月海就是「洼地压暗」，与岩石共用同一字段）。
+        relief_shade: f64,
+        /// 陨石坑密度 0..1。
+        crater_density: f64,
+    },
+    /// 气态巨行星（`gasColor`：强纬向色带 + 风暴）。默认档见 `default_gas()`。
+    Gas {
+        /// 纬向带基础频率（三条带 = `freq` / `freq*2.25` / `freq*4.33`）。
+        band_freq: f64,
+        /// 细带层权重：1.0 = 三层 0.50/0.32/0.18，0 = 只剩基频。
+        band_detail: f64,
+        /// 带纹对比：1.0 = 原窗口 (0.26, 0.80)，0 = 近乎均匀的一颗球。
+        band_contrast: f64,
+        /// 纬向剪切。**不能大**：大了带纹会被撕成斑块。
+        shear: f64,
+        /// 域扰动倍数（1.0 = 基准口径；走 `warpT`，自动折叠安全）。
+        turbulence: f64,
+        /// 极区压暗 0..1。
+        polar: f64,
+        /// 风暴数 0..=3（第 0 颗是「大红斑」那种最大的）。
+        storm_count: i32,
+        /// 风暴半径（第 i 颗再乘 `1 + 0.38*i`）。
+        storm_size: f64,
+        /// 风暴强度 0..1。
+        storm_strength: f64,
+        /// 整体雾霾 / 去饱和 0..1（土星比木星朦胧）。
+        haze: f64,
+    },
+    /// 冰巨星（`icyColor` 的带状分支）。
+    IceGiant {
+        /// 纬向带频率。
+        band_freq: f64,
+        /// 带纹对比 0..1。天王星给到接近 0。
+        band_contrast: f64,
+        /// 带纹在混色里的权重（越大越显色）。
+        band_weight: f64,
+        /// 域扰动倍数（1.0 = 基准口径）。
+        turbulence: f64,
+        /// 暗斑（大暗斑那种）强度 0..1。
+        spot: f64,
+        /// 整体雾霾 / 去饱和 0..1。
+        haze: f64,
+    },
+    /// 冰封卫星（`icyColor` 的无带分支：光滑冰面 + 裂纹 + 坑）。
+    IceWorld {
+        /// 大尺度色斑强度 0..1。
+        mottle: f64,
+        /// 裂纹频率。
+        crack_freq: f64,
+        /// 裂纹宽度（0.08 = 原口径）。
+        crack_width: f64,
+        /// 裂纹亮度 0..1。
+        crack_amount: f64,
+        /// 陨石坑密度 0..1。
+        crater_density: f64,
+    },
+    /// 雾霾卫星（`titanColor`）。
+    Titan {
+        /// 甲烷湖强度 0..1。
+        lake: f64,
+        /// 极区湖的集中程度（越大越集中在极点）。
+        lake_polar: f64,
+        /// 整体雾霾 0..1。
+        haze: f64,
+    },
+    /// 柯伊伯带矮行星（`rockColor`）。
+    Dwarf {
+        /// 大尺度色斑强度 0..1。
+        mottle: f64,
+        /// 陨石坑密度 0..1。
+        crater_density: f64,
+        /// 极冠范围。
+        polar_cap: f64,
+        /// 高度分层强度 0..1。
+        relief_shade: f64,
+    },
+}
+
+impl SurfaceParams {
+    /// 着色器分支整数 —— 与前端 `kinds.js::VARIANT_CLASS` 同口径，
+    /// 即 `planet.js::PLANET_FRAG` 里的 `uClass`。**顺序不能乱动**：改它等于改所有
+    /// 已生成截图的口径。
+    pub fn class_index(&self) -> i32 {
+        match self {
+            Self::Rock { .. } => 0,
+            Self::Terran { .. } => 1,
+            Self::Venus { .. } => 2,
+            Self::Martian { .. } => 3,
+            Self::Lunar { .. } => 4,
+            Self::Gas { .. } => 5,
+            Self::IceGiant { .. } | Self::IceWorld { .. } => 6,
+            Self::Titan { .. } => 7,
+            Self::Dwarf { .. } => 8,
+        }
+    }
+
+    /// 是否画横向色带（前端 `uBanded`）。只有气巨与冰巨星有。
+    pub fn banded(&self) -> bool {
+        matches!(self, Self::Gas { .. } | Self::IceGiant { .. })
+    }
+
+    /// 自转速度分组名（见前端 `kinds.js::spinSpeed`）。比 `class_index` 细一档：
+    /// 冰巨星与冰封卫星同属 `ice` 着色器分支，但转速不该一样。
+    pub fn spin_group(&self) -> &'static str {
+        match self {
+            Self::Gas { .. } => "gas",
+            Self::IceGiant { .. } => "ice_giant",
+            Self::IceWorld { .. } => "ice_world",
+            Self::Terran { .. } => "terran",
+            Self::Venus { .. } => "venus",
+            Self::Titan { .. } => "titan",
+            Self::Martian { .. } => "martian",
+            Self::Rock { .. } | Self::Lunar { .. } | Self::Dwarf { .. } => "rock",
+        }
+    }
 }
