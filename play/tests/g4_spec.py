@@ -27,6 +27,11 @@
    patch / 读面上叫**中文**（`指令`/`投资预算`）——同一个概念两套名：Python 按英文 kind 筛、
    apply 用中文键，写错了哪一边都**不红**，只会静默查不到（"看起来有值"）。现在名字只在引擎的
    `control::leaves::LEAVES` 里声明一次（`kind_of` 是唯一翻译点），本条钉住它不再漂回去。
+6. **文档对账**（§5b，2026-10 新增）：`--nouns` 里 state / view / control 三份 schema 的**每一条**
+   `description`（根 / 定义级 / 字段级 / `oneOf` 变体级）都要在源码里找到那条 `///` 且**逐字相等**；
+   反向再查一遍「源码带 `///` 的字段都真的发射了」。量的是「`///` → 弹窗文案」这条管线本身，
+   不是某个症状——schemars 0.8.22 曾把单行 `/// **加粗**…` 剥成一个 `*`（46 条坏 markdown），
+   就是这么被抓住的。见 `.agents/notes/doc-pipeline.md`。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
@@ -36,6 +41,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import subprocess
@@ -183,8 +189,135 @@ def _run(h, args: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
-# --- 一局要写的叶：每片一条 patch + 一条「读回来怎么认它」的哨兵 -------------------
-# 值都取互不相同的哨兵：写进去之后**从读面上按哨兵认领回来**，这样「这一局真的写进去了
+# --- 「源码 `///` → 发射的 description」对账用的源码扫描 -------------------------
+#
+# 为什么要**读源码**：`--nouns` 里的 `description` 是 schemars 从 `///` 派生的，中间隔着
+# derive + JSON Schema 两层。这两层曾经**默默改字**——schemars 0.8.22 的
+# `attr/doc.rs::get_doc` 里有一段向后兼容 hack：只要文档的**所有行**都以 `*` 开头，就当成
+# `/** … */` 风格把每行首的 `*` 剥掉。于是**单行**注释若以 `**加粗**` 开头就被误判，
+# 发射出来是 `*加粗**`（坏 markdown，实测 46 条）。只看 `--nouns` 自己**看不出对错**
+# （它自洽），必须拿源码当尺子。
+#
+# 扫描口径：只认本仓的源码形状（`struct` / `enum` + 紧挨着的 `///`，`#[serde(rename = "…")]`
+# 把 Rust 字段名换成读面的键名）。解析不出来的发射项**不许静默跳过**——调用方把它们记进
+# `unmapped` 并判红（见 `run()` 的 §5b）。
+_DOC_LINE = re.compile(r"^\s*///(.*)$")
+_TYPE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(struct|enum)\s+([A-Za-z_]\w*)")
+_SERDE_RENAME = re.compile(r'#\[\s*serde\s*\(.*?rename\s*=\s*"([^"]+)"')
+_FIELD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:")
+_VARIANT_DECL = re.compile(r"^\s*([A-Za-z_]\w*)\s*([({,]|$)")
+
+
+def _strip_strings(line: str) -> str:
+    """挖掉字符串/字符字面量再数括号（`rename = "a{b"` 不许骗到深度）。"""
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            i += 1
+            while i < len(line):
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "'" and i + 2 < len(line) and line[i + 2] == "'":
+            i += 3          # 字符字面量 `'x'`；生命周期 `'a` 不会被误吃
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=1)
+def doc_containers() -> dict:
+    """`src/**/*.rs` → `{类型名: {kind, doc, file, fields, variants}}`。
+
+    * `doc`：类型自己的 `///` 块；
+    * `fields`：`{读面键名: (注释, Rust 字段名)}`（有 `#[serde(rename)]` 就用它当键）；
+    * `variants`：enum 的变体按**声明序**，每个带自己的 `doc` 与 `fields`（结构变体的字段）。
+    """
+    found: dict[str, dict] = {}
+    for path in sorted((REPO / "src").rglob("*.rs")):
+        rel = path.relative_to(REPO).as_posix()
+        docs: list[str] = []
+        attrs: list[str] = []
+        cur: str | None = None
+        var: dict | None = None
+        depth = 0
+        for lineno, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+            m = _DOC_LINE.match(raw)
+            if m:
+                docs.append(m.group(1))
+                continue
+            code = _strip_strings(raw)
+            if not code.strip():
+                continue
+            if code.lstrip().startswith("#["):
+                attrs.append(raw)
+                continue
+            if cur is None:
+                m = _TYPE_DECL.match(code)
+                if m and "{" in code:
+                    cur = m.group(2)
+                    found[cur] = {"kind": m.group(1), "doc": "\n".join(docs).strip("\n"),
+                                  "file": rel, "line": lineno, "fields": {}, "variants": []}
+                    depth = code.count("{") - code.count("}")
+                    var = None
+                    if depth <= 0:
+                        cur = None
+                docs, attrs = [], []
+                continue
+            if depth == 1 and found[cur]["kind"] == "struct":
+                m = _FIELD_DECL.match(code)
+                if m and ":" in code:
+                    key = m.group(1)
+                    rn = _SERDE_RENAME.search(" ".join(attrs))
+                    found[cur]["fields"][rn.group(1) if rn else key] = (
+                        "\n".join(docs).strip("\n"), key)
+            elif depth == 1:
+                m = _VARIANT_DECL.match(code)
+                if m:
+                    found[cur]["variants"].append({
+                        "name": m.group(1), "doc": "\n".join(docs).strip("\n"), "fields": {},
+                        "file": rel, "line": lineno})
+                    var = found[cur]["variants"][-1] if ("{" in code or "(" in code) else None
+            elif depth == 2 and found[cur]["kind"] == "enum" and var is not None:
+                m = _FIELD_DECL.match(code)
+                if m and ":" in code:
+                    key = m.group(1)
+                    rn = _SERDE_RENAME.search(" ".join(attrs))
+                    var["fields"][rn.group(1) if rn else key] = ("\n".join(docs).strip("\n"), key)
+            depth += code.count("{") - code.count("}")
+            docs, attrs = [], []
+            if depth <= 0:
+                cur, var = None, None
+    return found
+
+
+def _norm_text(text: str) -> str:
+    """**空白归一**：换行/缩进是排版，不是文案（弹窗会把 `\\n\\n` 渲染成换行，但
+    "同一段里的硬换行 vs 空格"不该让这条判据红）。归一之后只比**字**。"""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _doc_to_description(doc: str) -> str:
+    """源码 `///` 块 → 该发的 `description`。
+
+    schemars 的规则：首行若是 `# 标题` 就当 `title`、**不进** `description`
+    （0.8 与 1.x 都是这条规则）。本仓当前没有这种注释，但判据按规则写，
+    免得将来有人加了一条标题行就以为判据坏了。
+    """
+    if doc.lstrip().startswith("#"):
+        doc = doc.split("\n", 1)[1] if "\n" in doc else ""
+    return _norm_text(doc)
+
+
+# --- 一局要写的叶：每片一条 patch + 一条「读回来怎么认它」的哨兵 -------------------# 值都取互不相同的哨兵：写进去之后**从读面上按哨兵认领回来**，这样「这一局真的写进去了
 # N 片叶」就不是靠回执自证，而是读面说了算。
 D_TEMPER, D_LONE = 0.1, -0.2      # 舰队默认风格（两轴一起给）
 D_KITING = 0.25                   # 舰队默认风筝姿态
@@ -875,6 +1008,151 @@ def run(h, ck) -> None:
              f"（单叶每势力一片，「现造一个身份键」对它不成立）",
              not new_rows,
              "；".join(new_rows[:3]) or f"本帧 {new_rows_total} 条，全部合法（防空转）")
+
+
+    # ══ 5b. 文档对账：**发射的每一条 `description` == 源码里那条 `///`** ════════════
+    #
+    # 为什么单看 `--nouns` 不够：它**自洽**。真实的腐蚀长这样——schemars 0.8.22 的
+    # `attr/doc.rs::get_doc` 里有一段向后兼容 hack：只要文档的**所有行**都以 `*` 开头，
+    # 就当成 `/** … */` 风格逐行剥掉一个 `*`。于是**单行**注释若以 `**加粗**` 开头
+    # （`/// **完整的世界快照**（…`）就被误判，弹窗里收到的是 `*完整的世界快照**（…`
+    # ——**坏掉的 markdown**（实测 46 条，且 46/46 全是单行注释）。语料本身看不出对错，
+    # 必须拿**源码**当尺子。（那段 hack 已随 schemars 1.2.2 消失；这条判据是**量具**，
+    # 防的是这一类：剥字符、吞行、把 A 结构体的注释发射到 B 上、静默丢文档……）
+    #
+    # 两个方向都查：
+    #   * 正向：state / view / control 三份 schemars schema 里**每一条** `description`
+    #     （三份的根 / 定义级 / 字段级 / `oneOf` 变体级）都要在源码里找到出处，
+    #     且**空白归一后逐字相等**；
+    #   * 反向：schema 里出现的每个结构体，**源码里带 `///` 的字段都真的发射了**
+    #     （丢一段文档 = 弹窗少一段话，正是"失败看起来像成功"）。
+    #
+    # ⚠ 口径与边界（写清楚，免得下一个人以为它没在守）：
+    #   * 只认本仓的源码形状（`struct`/`enum` + 紧挨着的 `///`；`#[serde(rename)]` 换键名）；
+    #     **解析不出来的发射项一律判红**（`unmapped`），不许静默跳过；
+    #   * `projection` 那半（`column_docs` / 列内联 `description`）是**手写**文案、不走
+    #     schemars，不在本判据范围——它们由上面 §5 的覆盖率判据盯着；
+    #   * 枚举**变体级**的 `///` 只查正向：`#[serde(into/try_from)]` 的 enum
+    #     （`DeathCause` / `SpawnVia` / `FoundingHow`）在新版 schemars 下不再发射变体级
+    #     schema（见 `.agents/notes/doc-pipeline.md`），源码有注释而发射端没有 ⇒
+    #     反向着对变体不成立。
+    try:
+        doc_nouns = json.loads(h.capture(["--nouns"]))
+    except Exception as e:  # noqa: BLE001  （拿不到语料本身就是红）
+        doc_nouns = None
+        nouns_fail = f"{type(e).__name__}: {e}"
+    else:
+        nouns_fail = ""
+
+    containers = doc_containers()
+    _GENERIC_N = re.compile(r"^(.+?)\d+$")     # schemars 给重名实例编的号（`Control` → `Control2`…）
+
+    pairs: list[tuple[str, str, str]] = []      # (位置, 源码期望, 发射原文)
+    unmapped: list[str] = []                    # 发射了、但源码里找不到出处的
+    src_files: set[str] = set()                 # 贡献过对账的源文件
+    structs_seen: set[str] = set()              # schema 里出现过的结构体（反向判据用）
+
+    def resolve(name: str) -> dict | None:
+        cont = containers.get(name)
+        if cont is None:
+            m = _GENERIC_N.match(name)
+            if m:
+                cont = containers.get(m.group(1))   # `Control2` → `Control`
+        return cont
+
+    def add_pair(where: str, doc: str, emitted: str, file: str) -> None:
+        src_files.add(file)
+        pairs.append((where, _doc_to_description(doc), emitted))
+
+    for sec in ("state", "view", "control"):
+        sch = (doc_nouns or {}).get(sec) if isinstance(doc_nouns, dict) else None
+        if not isinstance(sch, dict):
+            continue
+        # 根：schemars 把根的类型名写在 `title` 里
+        root = resolve(str(sch.get("title"))) if isinstance(sch.get("title"), str) else None
+        if root is not None and isinstance(sch.get("description"), str):
+            add_pair(f"{sec}（根 {sch['title']}）", root["doc"], sch["description"], root["file"])
+        for name, spec in sorted((sch.get("definitions") or {}).items()):
+            spec = spec if isinstance(spec, dict) else {}
+            cont = resolve(name)
+            if cont is None:
+                if isinstance(spec.get("description"), str):
+                    unmapped.append(f"{sec}:{name}（定义）")
+                continue
+            structs_seen.add(f"{sec}:{name}")
+            if isinstance(spec.get("description"), str):
+                add_pair(f"{sec}:{name}", cont["doc"], spec["description"], cont["file"])
+            one = spec.get("oneOf")
+            # 枚举变体按**声明序**对齐 `oneOf`（两边长度不等就不猜，那些项落进 unmapped）
+            aligned = (cont["kind"] == "enum" and isinstance(one, list)
+                       and len(one) == len(cont["variants"]))
+            for i, sub in enumerate(one if isinstance(one, list) else []):
+                sub = sub if isinstance(sub, dict) else {}
+                var = cont["variants"][i] if aligned else None
+                if isinstance(sub.get("description"), str):
+                    if var is None:
+                        unmapped.append(f"{sec}:{name}#{i}（变体）")
+                    else:
+                        add_pair(f"{sec}:{name}#{i}（{var['name']}）", var["doc"],
+                                 sub["description"], var["file"])
+                for key, field in sorted((sub.get("properties") or {}).items()):
+                    field = field if isinstance(field, dict) else {}
+                    src = (var or {}).get("fields", {}).get(key)
+                    if not isinstance(field.get("description"), str):
+                        continue
+                    if src is None:
+                        unmapped.append(f"{sec}:{name}#{i}.{key}（变体字段）")
+                    else:
+                        add_pair(f"{sec}:{name}#{i}.{key}", src[0], field["description"],
+                                 (var or {}).get("file", cont["file"]))
+            for key, field in sorted((spec.get("properties") or {}).items()):
+                field = field if isinstance(field, dict) else {}
+                src = cont["fields"].get(key)
+                if not isinstance(field.get("description"), str):
+                    continue
+                if src is None:
+                    unmapped.append(f"{sec}:{name}.{key}（字段）")
+                else:
+                    add_pair(f"{sec}:{name}.{key}", src[0], field["description"], cont["file"])
+
+    drifted = [(w, want, got) for w, want, got in pairs if want != _norm_text(got)]
+    ck.check(f"文档对账：{len(pairs)} 条 description 逐字 == 源码 `///`"
+             f"（{len(src_files)} 个源文件）",
+             bool(nouns_fail) is False and len(pairs) >= 550 and len(src_files) >= 10
+             and not drifted,
+             nouns_fail or "；".join(
+                 f"{w}：源码 `{want[:40]}` ≠ 发射 `{got[:40]}`" for w, want, got in drifted[:5]
+             ) or (f"实测 {len(pairs)} 条全部逐字相等（下限 550），来自 {len(src_files)} 个源文件"
+                   f"（下限 10）" if len(pairs) >= 550 and len(src_files) >= 10 else
+                   f"只对到 {len(pairs)} 条 / {len(src_files)} 个源文件 ⇒ 判据可能空转了"))
+
+    # 反向：源码写了注释的字段，发射端**不许悄悄丢**（丢文档 = 弹窗少一段话）。
+    dropped: list[str] = []
+    reverse_checked = 0
+    for tag in sorted(structs_seen):
+        sec, name = tag.split(":", 1)
+        cont = resolve(name)
+        spec = (((doc_nouns or {}).get(sec) or {}).get("definitions") or {}).get(name) or {}
+        emitted = spec.get("properties") or {}
+        for key, (doc, _rust) in cont["fields"].items():
+            if not _doc_to_description(doc):
+                continue
+            reverse_checked += 1
+            got = (emitted.get(key) or {}).get("description")
+            if not isinstance(got, str) or not got.strip():
+                dropped.append(f"{sec}:{name}.{key}")
+    ck.check(f"文档对账：{reverse_checked} 个带 `///` 的字段都真的发射了（无静默丢文档）",
+             not nouns_fail and not dropped and reverse_checked >= 150,
+             nouns_fail or "；".join(f"{d} 有注释没发射" for d in dropped[:5])
+             or (f"实测 {reverse_checked} 个字段带注释、全部发射（下限 150）"
+                 if reverse_checked >= 150 else
+                 f"只查到 {reverse_checked} 个带注释的字段 ⇒ 判据可能空转了"))
+
+    ck.check(f"文档对账：发射的 {len(pairs)} 条 description 都能在源码里找到出处"
+             f"（{len(containers)} 个类型里查）",
+             not nouns_fail and not unmapped,
+             nouns_fail or "；".join(unmapped[:5]) or
+             f"{len(pairs)} 条全部对上了源头的 `///`（无凭空出现的文案）")
 
 
     # ══ 6. 身份键：谁靠哪个字段认人 —— 引擎**一处**声明，且在真世界里**存在且唯一** ══

@@ -11,10 +11,13 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**28 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**30 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
+㉓㉔ 是第 5b 条（文档对账）的量具：㉓在发射端把一条 `**加粗**` 开头的 `description` 剥掉一个
+`*`（**复刻 schemars 0.8.22 那段 hack 的效果**，就是 46 条弹窗坏 markdown 的成因），
+㉔把一条字段的 `description` 悄悄删掉——两条都要求「文档对账」那一族自己红。
 """
 
 import json
@@ -333,6 +336,39 @@ def main() -> int:
     bad = run_case("blank-exclusion-reason", None, blank_exclusion_reason)
     if not any(n.startswith(KIND_CHECK) for n in bad):
         MISBEHAVED.append(f"blank-exclusion-reason：第 7 条没红（实际红：{bad}）")
+
+    # ㉓㉔ 文档对账（§5b）：量具自己也要有量具 —— 在**发射端**动一个字符 / 丢一段文档，
+    #     要求「文档对账」那一族**自己**红（不是"碰巧别处红了"）。
+    #     ㉓ 造的是**真实发生过的那个错**：把一条 `**加粗**` 开头的 description 剥掉一个 `*`
+    #     ——schemars 0.8.22 的 `get_doc` 就是这么干的（46 条弹窗坏 markdown 的成因）。
+    DOC_CHECK = "文档对账"
+
+    def strip_one_bold_star(d):
+        for sec in ("state", "view", "control"):
+            for spec in ((d.get(sec) or {}).get("definitions") or {}).values():
+                for f in (spec.get("properties") or {}).values():
+                    desc = f.get("description")
+                    if isinstance(desc, str) and desc.startswith("**"):
+                        f["description"] = "*" + desc[2:]      # ← 0.8 那段 hack 的效果
+                        return d
+        raise AssertionError("语料里找不到以 `**` 开头的 description（判据换了口径？）")
+
+    bad = run_case("doc-star-stripped", None, None, mutate_nouns=strip_one_bold_star)
+    if not any(n.startswith(DOC_CHECK) for n in bad):
+        MISBEHAVED.append(f"doc-star-stripped：文档对账没红（实际红：{bad}）")
+
+    def drop_one_doc(d):
+        for sec in ("state", "view", "control"):
+            for spec in ((d.get(sec) or {}).get("definitions") or {}).values():
+                for f in (spec.get("properties") or {}).values():
+                    if isinstance(f.get("description"), str) and f["description"].strip():
+                        del f["description"]                      # ← 文档被悄悄丢了
+                        return d
+        raise AssertionError("语料里找不到带 description 的字段（判据换了口径？）")
+
+    bad = run_case("doc-silently-dropped", None, None, mutate_nouns=drop_one_doc)
+    if not any(n.startswith(DOC_CHECK) for n in bad):
+        MISBEHAVED.append(f"doc-silently-dropped：文档对账没红（实际红：{bad}）")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")
