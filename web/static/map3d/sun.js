@@ -4,12 +4,13 @@
 // 尺度太大，在球面上抽出大块斑驳），边缘是一条硬切口（没有 limb darkening，也没有色球/日冕），
 // 所以整颗太阳读起来是「一个橙色贴纸」而不是一颗恒星。
 //
-// 现在四层叠加，从内到外：
+// 现在三层叠加，从内到外：
 //   ① 光球 photosphere —— 米粒组织(ridged 反相 = 亮米粒+暗沟) + 超米粒流 + 太阳黑子(本影/半影)
 //      + **limb darkening**（临边昏暗：I(μ)=1-u1(1-μ)-u2(1-μ)²，同时压亮度并偏红）
 //   ② 色球 chromosphere —— 极薄的自发光壳，只在 μ 很小（临边）处出现，深红
-//   ③ 日冕 corona —— **billboard** 上的程序化径向流苏（针状体/冕流）+ 临边日珥弧
-//   ④ 光晕 halo —— 一层很淡的大范围 additive 辉光，负责在远景/缩小后「太阳还在发光」
+//   ③ 日冕 corona —— **世界坐标的体积渲染**：几何是一个球，片元里沿视线做射线步进，
+//      密度场在世界坐标里采样。**不是 billboard** —— 平面被行星一挡就是「薄膜破了个洞」，
+//      而那把大范围的柔光交给 bloom（摄影上的效果）去做，不用几何去假装。
 //
 // 全部 HDR（光球输出 ~9、日冕 ~1），超出 1 的部分交给 UnrealBloom 变成辉光——真实感来自
 // 「亮的东西真的比白更亮」，而不是在球外画一圈半透明橙色。
@@ -122,104 +123,116 @@ const CHROMO_FRAG = /* glsl */`
 // 结果，视觉上就是一团以太阳为中心、向外辐射的辉光。球壳做不出「延伸到很远处的冕流」，
 // 而 billboard 上一段 2D 极坐标噪声就能做出来，而且永远正对镜头、没有背面剔除问题。
 const CORONA_VERT = /* glsl */`
-  uniform float uSize;
-  varying vec2 vP;
-  varying vec3 vDir;      // 世界空间单位方向：太阳 → 该像素
+  varying vec3 vWorld;
   void main(){
-    vP = position.xy * 2.0;                 // -1..1 的盘面坐标
-    // 手写 billboard：把平面的局部 xy 直接加到「太阳中心在视图空间的位置」上。
-    // 这样永远正对镜头（日冕是光学薄发射体，这就是对的近似），也不吃背面剔除。
-    // 半边长 = uSize ⇒ vP=1 处正好离日心 uSize，于是 uCore 可以直接写成 R/uSize。
-    //
-    // vDir：把「屏幕 xy 轴」反查回**世界**方向（viewMatrix 的行向量就是世界→视图的轴），
-    // 片元里用它当噪声坐标 ⇒ 冕流固定在世界里。**这是转镜头时冕流跟着转的修复点**：
-    // 以前噪声吃的是 billboard 的局部极角，那是锁死在屏幕上的。
-    vec3 rightW = vec3(viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2]);
-    vec3 upW    = vec3(viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2]);
-    vDir = normalize(rightW * position.x + upW * position.y);
-    vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-    mv.xy += position.xy * uSize * 2.0;
-    gl_Position = projectionMatrix * mv;
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorld = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `;
 
+// 日冕 = **体渲染**（沿视线对三维体积积分），几何是**世界坐标的球体**，不再是 billboard。
+//
+// 为什么必须换掉 billboard（用户裁决）：「只要还在用 billboard 这种问题就一直会出现」——
+// 一张平面被行星挡住就是「薄膜破了个洞」，这是**几何决定**的，调参救不了；而且它的图案
+// 只能锁在屏幕空间（转镜头整片跟着转，实测过）或做近似世界方向，怎么调都别扭。
+//
+// 现在：片元里从相机出发对日冕体积做射线步进，密度场在**世界坐标**里采样 ⇒
+//   ① 转镜头时冕流待在世界里不动；
+//   ② 遮挡是真三维遮挡（几何体有真实深度，被行星挡住的层就是不见了，不是被抠了个洞）；
+//   ③ 远近两侧沿视线自然累积出厚度 —— 读起来是**体**，不是一张纸。
+//
+// 步数上限是 uniform（见 util.js 里 NOISE_GLSL 那段：常量上界会被完全展开）。
 const CORONA_FRAG = /* glsl */`
   precision highp float;
   ${NOISE_GLSL}
   uniform float uTime;
-  uniform float uSize;
+  uniform float uSunR;        // 光球半径（世界单位）
+  uniform float uOuter;       // 体积外半径（世界单位）
+  uniform float uOuterRatio;  // uOuter / uSunR（外缘平滑归零用）
   uniform float uIntensity;
-  uniform float uCore;      // 被光球盖住的半径（以盘面坐标为单位）
-  uniform float uFalloff;   // 径向幂律指数
-  varying vec2 vP;
-  varying vec3 vDir;        // 世界空间单位方向：太阳 → 该像素
+  uniform float uFalloff;     // 径向幂律（K-日冕投影大致 ~r^-2.6）
+  uniform int   uSteps;
+  varying vec3 vWorld;
+
+  // 射线 × 球。球心在世界原点 —— 太阳就在原点（行星着色器里 lightDir 也是这么假设的）。
+  vec2 hitSphere(vec3 ro, vec3 rd, float R){
+    float b = dot(ro, rd);
+    float c = dot(ro, ro) - R * R;
+    float h = b * b - c;
+    if (h < 0.0) return vec2(-1.0, -1.0);
+    h = sqrt(h);
+    return vec2(-b - h, -b + h);
+  }
+
+  // 密度场。**高对比**是「读起来像日珥实体」而不是「一团晕」的关键（用户明确要的）：
+  // 平滑过渡会糊成灰雾，只有把低值区真的压到接近 0，丝状结构才立得起来。
+  // 山脊项由**同一次** fbm 折出来，不再多跑一遍噪声 —— 省一半 ALU。
+  float coronaDensity(vec3 p, float rr, float t){
+    float fall = pow(max(1.0 / rr, 0.0), uFalloff);
+    if (fall < 2.0e-3) return 0.0;                  // 便宜的先算：够小就别进噪声
+    float n = fbm(p * (2.6 / uSunR) + vec3(0.0, 0.0, -t * 0.10));
+    float ridge = 1.0 - abs(2.0 * n - 1.0);
+    float shape = smoothstep(0.34, 0.90, n) * (0.40 + 1.05 * smoothstep(0.30, 0.92, ridge));
+    // 外缘平滑归零：体积球本身有个硬轮廓，密度必须**在球面之前**就回到 0，
+    // 否则那个球体的剪影会在天上切出一圈硬边（和之前 billboard 的方角是同一类错）。
+    return fall * shape * smoothstep(uOuterRatio, uOuterRatio * 0.70, rr);
+  }
 
   void main(){
-    float r = length(vP);
-    if (r < uCore * 0.92) discard;          // 被光球挡住的区域直接丢，省填充率
+    vec3 ro = cameraPosition;
+    vec3 rd = normalize(vWorld - ro);
 
-    // 先算**便宜**的径向包络，再决定要不要跑昂贵的噪声。
-    // 这一条很关键：日冕 billboard 的半径是 4 个太阳半径，相机贴近行星时它会铺满整个
-    // 屏幕——不早退的话，每帧要对全屏跑一次 fbm+ridged（集显上直接吃掉一半帧时间）。
-    // 阈值必须**远低于可见**：discard 是硬切，门限一高就在画面上切出一圈硬边
-    // （0.0025 时远处那层 halo 的硬边正好落在画面内，实测看得到）。
-    float rc0 = max(uCore, 0.04);
-    float fall = pow(rc0 / max(r, rc0), uFalloff);
-    if (fall * uIntensity < 1.0e-4) discard;
+    vec2 to = hitSphere(ro, rd, uOuter);
+    if (to.y <= 0.0) discard;                       // 这条射线根本不碰体积
+    float t0 = max(to.x, 0.0);
+    float t1 = to.y;
+    // 日面之后不积分（日冕在日面背后不发光）。相机在体积内时 t0 = 0 也成立。
+    vec2 ti = hitSphere(ro, rd, uSunR * 1.004);
+    if (ti.x > 0.0) t1 = min(t1, ti.x);
+    if (t1 <= t0) discard;
 
+    // 步长由「这条射线穿过体积的长度」决定 ⇒ 不论掠射还是正穿都保证覆盖，不会漏采样。
+    float dt = (t1 - t0) / float(max(uSteps, 1));
     float t = uTime;
+    vec3 acc = vec3(0.0);
+    float trans = 1.0;                              // 光学薄，但留一点自吸收，免得贴边糊成一片
+    // 起点抖半个步长：固定步长会在球面上留下同心分层，抖一下就没有了。
+    float tt = t0 + dt * 0.5;
+    for (int i = 0; i < uSteps; i++) {
+      if (tt > t1 || trans < 0.02) break;
+      vec3 p = ro + rd * tt;
+      float rr = length(p) / uSunR;
+      float d = coronaDensity(p, rr, t);
+      if (d > 0.0) {
+        vec3 col = mix(vec3(1.15, 0.90, 0.62), vec3(0.48, 0.56, 0.95),
+                       smoothstep(1.0, 3.0, rr));
+        float a = d * dt;
+        acc += col * a * trans;
+        trans *= exp(-a * 0.5);
+      }
+      tt += dt;
+    }
 
-    // 日冕的色：内圈偏白黄（自由电子散射的近白），外圈偏冷的淡蓝紫（F-corona / 尘埃散射）。
-    vec3 inner = vec3(1.15, 0.90, 0.62);
-    vec3 outer = vec3(0.42, 0.52, 0.95);
-#ifdef CORONA_SIMPLE
-    // 远处的弥散光晕只需要一条幂律：**真的一条噪声都不跑**（全屏 fbm 是这个 pass 的成本大头）。
-    // 注意 streamer/fine 必须写在 #else 里——写在 #ifdef 外面的话这句注释就是假的。
-    vec3 col = mix(inner, outer, smoothstep(uCore, 1.0, r)) * fall;
-#else
-    // 冕流：在**世界空间方向**上采噪声（vDir），不是 billboard 的局部极角。
-    // 旧写法吃的是 atan(vP.y, vP.x)：那个角只在噪声的 cos/sin 圆上走、径向频率又低，
-    // 噪声被拉成一根根**硬边直辐条**（星芒滤镜感），而且锁死在屏幕上、转镜头整片跟着转。
-    // 换成世界方向后：① 冕流待在世界里不动；② 噪声在球面/锥面上正常展开，辐条散掉。
-    // 径向仍用 r 调制采样尺度，让冕流越往外越细。
-    float streamer = fbm(vDir * (3.4 + r * 2.4) + vec3(0.0, 0.0, -t * 0.10));
-    float fine     = ridged(vDir * (8.5 + r * 4.5) + vec3(0.0, 0.0, -t * 0.22));
-
-    // 径向衰减在 main() 开头已经算好（fall）。**必须是幂律**（K-日冕在天空平面上的
-    // 投影大致 ~r^-2.6），不能用 pow(1-r,k) 那种「到边缘才归零」的浅包络——后者在相机
-    // 贴近太阳时会让整个画面蒙上一层灰。
-    // 对比度：旧版 base 0.02 / 峰值 ~2.32（100:1）⇒ 那正是「硬辐条」的来源。压到 ~9:1，
-    // 冕流仍读得出来，但不再像星芒滤镜。
-    float shape = 0.14 + 1.05 * smoothstep(0.20, 0.86, streamer) + 0.26 * fine;
-    vec3 col = mix(inner, outer, smoothstep(uCore, 1.0, r)) * fall * shape;
-
-    // 日珥：紧贴光球的一圈弧状等离子体，随时间涨落。
-    float band = exp(-pow((r - uCore * 1.14) / (uCore * 0.16), 2.0));
-    float prom = smoothstep(0.45, 0.95, fbm(vDir * 5.5 + vec3(0.0, 0.0, t * 0.13)));
-    col += vec3(1.5, 0.30, 0.18) * band * prom * 1.9;
-#endif
-
-    // 靠近核心处补一层紧致辉光，让「日冕→光球」没有断层。**必须带窗口**：r^-3 的尾巴
-    // 拖到 1.5 个太阳半径之外就成了一层盖住行星的灰。窗口让它到 0.45 就消失。
-    col += vec3(1.2, 0.85, 0.55) * pow(max(0.0, uCore / max(r, 1e-3)), 3.0) * 0.42
-         * smoothstep(0.52, 0.24, r);
-    // 远处归零。**必须在 vP=1（四边形边界）之前就归零并留余量**：旧版用 smoothstep(1.0,…)
-    // 正好落在边界上，浮点误差会让四条直边露出来（quad 是方的、包络是圆的，圆只内切）。
-    col *= smoothstep(0.90, 0.42, r);
-
-    gl_FragColor = vec4(col * uIntensity, 1.0);
+    gl_FragColor = vec4(acc * uIntensity, 1.0);
   }
 `;
 
-const CORONA_MAT = (size, core, intensity, oct, falloff = 2.6, simple = false) => new THREE.ShaderMaterial({
-  defines: simple ? { CORONA_SIMPLE: '' } : {},
+// 体积外半径 = 几倍太阳半径。密度在 0.70×该值处就归零（见 coronaDensity 的外缘窗口），
+// 所以球体的硬剪影落在密度为 0 的地方。
+const CORONA_OUTER_RATIO = 4.0;
+
+const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
   uniforms: {
-    uFbmOct: fbmOct(oct),
+    uFbmOct: fbmOct(Math.max(2, tier.oct - 1)),
     uTime: { value: 0 },
-    uSize: { value: size },
-    uIntensity: { value: intensity },
-    uCore: { value: core },
-    uFalloff: { value: falloff },
+    uSunR: { value: sunR },
+    uOuter: { value: sunR * CORONA_OUTER_RATIO },
+    uOuterRatio: { value: CORONA_OUTER_RATIO },
+    uIntensity: { value: 0.055 },
+    uFalloff: { value: 2.6 },
+    // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
+    uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
   },
   vertexShader: CORONA_VERT,
   fragmentShader: CORONA_FRAG,
@@ -227,7 +240,9 @@ const CORONA_MAT = (size, core, intensity, oct, falloff = 2.6, simple = false) =
   blending: THREE.AdditiveBlending,
   depthWrite: false,
   depthTest: true,
-  side: THREE.DoubleSide,
+  // **背面**：相机在体积外时渲染远表面、在体积内时渲染的还是远表面 —— 两种情况都有片元，
+  // 不用按位置切换 side（切 side 会改 define ⇒ 触发重编译）。
+  side: THREE.BackSide,
 });
 
 export function createSun(tier) {
@@ -256,28 +271,21 @@ export function createSun(tier) {
   const chromosphere = new THREE.Mesh(new THREE.SphereGeometry(R * 1.012, tier.seg[0], tier.seg[1]), chromoMat);
   g.add(chromosphere);
 
-  // 日冕 billboard：`uSize` 是盘面半径（世界单位），`uCore` = R/uSize。
-  const coronaSize = R * 4.0;
-  const coronaMat = CORONA_MAT(coronaSize, R / coronaSize, 0.40, oct);
-  const corona = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), coronaMat);
-  corona.frustumCulled = false;
+  // 日冕：**世界坐标的体积**（射线步进），不是 billboard。见 CORONA_FRAG 顶部的推导。
+  const coronaMat = CORONA_MAT(R, tier);
+  const corona = new THREE.Mesh(
+    new THREE.SphereGeometry(R * CORONA_OUTER_RATIO, 48, 32), coronaMat);
   corona.renderOrder = 5;
   g.add(corona);
 
-  // 远景光晕：一片更大的、极淡的 additive，保证太阳在缩小到几个像素时仍然「在发光」。
-  const haloMat = CORONA_MAT(R * 9.0, 0.11, 0.05, Math.max(2, oct - 2), 2.2, true);
-  const halo = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), haloMat);
-  halo.frustumCulled = false;
-  halo.renderOrder = 4;
-  g.add(halo);
-
-  const parts = [photosphere, chromosphere, corona, halo];
+  const parts = [photosphere, chromosphere, corona];
   const setTier = (t) => {
     // 八度数现在是 **uniform**（见 util.js 里 NOISE_GLSL 那段），所以换档只改一个数值、
-    // 不再触发 `needsUpdate` 重编译 —— 顺带把「每换一次档就重编一遍太阳 shader」也省掉了。
-    parts.forEach((m) => { if (m.material.uniforms.uFbmOct) m.material.uniforms.uFbmOct.value = Math.max(1, t.oct); });
+    // 不再触发 `needsUpdate` 重编译。步数同理。
+    const oct = Math.max(1, t.oct);
+    parts.forEach((m) => { if (m.material.uniforms.uFbmOct) m.material.uniforms.uFbmOct.value = oct; });
+    coronaMat.uniforms.uSteps.value = Math.max(6, Math.min(18, 4 + oct * 2));
     corona.visible = !!t.corona;
-    halo.visible = !!t.corona;
     chromosphere.visible = !!t.corona;
   };
   setTier(tier);
@@ -289,11 +297,11 @@ export function createSun(tier) {
       photosphereMat.uniforms.uTime.value = t;
       chromoMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
-      haloMat.uniforms.uTime.value = t * 0.4;
     },
     setIntensity(v) {
       photosphereMat.uniforms.uIntensity.value = v;
-      coronaMat.uniforms.uIntensity.value = 0.40;
+      // 日冕的强度是它自己的（跟光球强度不是一回事）：光球强度是 HDR 亮度，
+      // 日冕是**沿视线积分后的累加值**，两者差一个 dt 量纲。别把它们写成一个数。
     },
     setTier,
     dispose() {

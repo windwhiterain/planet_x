@@ -54,18 +54,26 @@ const SUNFLARE_FRAG = /* glsl */`
   uniform float uGodStrength, uDecay, uDensity, uWeight, uThreshold;
   uniform float uStreak;
   uniform float uGhost;
+  // 采样数 / 环数是 **uniform** 而不是 #define：常量上界会让编译器把循环完全展开
+  // （理由与实测数据见 util.js 里 NOISE_GLSL 那段）。这三个都是全屏 pass 的主循环，
+  // GODRAY 24 次、STREAK 25 次展开是实打实的编译量。
+  uniform int uGodraySamples;
+  uniform int uStreakTaps;
+  uniform int uGhostCount;
   varying vec2 vUv;
 
-  // 程序化的「光圈」图案：同心环 + 六边形虹膜边。鬼影用它当核。
-  float aperture(vec2 p, float phase){
-    float r = length(p);
-    if (r > 1.0) return 0.0;
-    float ring = 0.55 + 0.45 * cos(r * 22.0 + phase * 6.283);
-    // 六边形虹膜：极角量化到 6 段，形成硬边多边形。
-    float a = atan(p.y, p.x);
-    float hex = 0.86 + 0.14 * cos(floor(a / 1.0472 + 0.5) * 1.0472 - a + 1.5708);
-    float edge = smoothstep(1.0, 0.82, r);
-    return ring * hex * edge;
+  // 光圈核：一条**柔和的光斑**。
+  // 旧版是「同心环 + 极角量化的六边形硬边」：cos(r*22.0) 画出一圈圈离散的环、
+  // 极角 floor 出六条硬边，在虚空里读起来是一个**靶子**而不是镜头反射
+  // （实测：太阳跑到画面外时，画面另一侧会浮出一整片粉色靶环 —— 用户报的「神秘的点」）。
+  // 真实的鬼影是镀膜/光圈叶片的**离焦**像：一个软核加一圈很淡的外晕，没有离散环。
+  float aperture(vec2 p){
+    float r2 = dot(p, p);
+    if (r2 > 1.0) return 0.0;
+    float core = exp(-r2 * 4.5);            // 软核
+    float halo = 0.16 * exp(-r2 * 1.5);     // 极淡的外晕
+    // 边缘窗口保证收到 0，不留硬边（旧版 smoothstep(1.0,0.82) 太窄，等于没淡出）。
+    return (core + halo) * smoothstep(1.0, 0.45, sqrt(r2));
   }
 
   // 只让「真的比白更亮」的东西参与散射（太阳本体 / 它的紧致辉光 / 引擎羽流）。
@@ -87,11 +95,11 @@ const SUNFLARE_FRAG = /* glsl */`
     // 每条射线 24 次纹理采样，是全屏 pass 里最贵的一项；关掉时（低质量档）必须真的
     // 跳过循环，而不是把结果乘 0 —— 否则「关掉体积光」一点都不会变快。
     if (uGodStrength > 0.0) {
-      vec2 delta = (uSun - vUv) * (uDensity / float(GODRAY_SAMPLES)) * uAspect;
+      vec2 delta = (uSun - vUv) * (uDensity / float(uGodraySamples)) * uAspect;
       vec2 uv = vUv;
       float illum = uWeight;
       vec3 acc = vec3(0.0);
-      for (int i = 0; i < GODRAY_SAMPLES; i++) {
+      for (int i = 0; i < uGodraySamples; i++) {
         uv += delta;
         vec3 s = texture2D(tDiffuse, uv).rgb;
         acc += s * sourceMask(s) * illum;
@@ -110,7 +118,7 @@ const SUNFLARE_FRAG = /* glsl */`
     if (uStreak > 0.0) {
       vec3 st = vec3(0.0);
       float wsum = 0.0;
-      for (int i = -STREAK_TAPS; i <= STREAK_TAPS; i++) {
+      for (int i = -uStreakTaps; i <= uStreakTaps; i++) {
         float fi = float(i);
         // 指数核（真正的横向拖尾来自下面那条 hfall，这里只负责取平均）。
         float w = exp(-abs(fi) * 0.16);
@@ -130,16 +138,21 @@ const SUNFLARE_FRAG = /* glsl */`
     if (uGhost > 0.0) {
       vec2 c = vec2(0.5);
       vec2 axis = c - uSun;
-      for (int i = 0; i < GHOST_COUNT; i++) {
+      for (int i = 0; i < uGhostCount; i++) {
         // 每个鬼影在连线上有固定的位置/大小/色相（同一颗镜头，每次看到的都一样）。
         float t = -0.45 + float(i) * 0.42;
         float sc = 0.05 + 0.075 * fract(float(i) * 0.617 + 0.23);
         vec2 gp = (uSun + axis * t - vUv) * uAspect / sc;
-        float ap = aperture(gp, fract(float(i) * 0.371));
+        float ap = aperture(gp);
         vec3 tint = 0.5 + 0.5 * cos(vec3(0.0, 2.094, 4.188) + float(i) * 1.7);
         // 鬼影的亮度跟着太阳在画面里的「入射强度」走（越靠边越暗，符合真实镀膜反射）。
         float off = smoothstep(0.0, 0.85, length(uSun - c));
-        flare += tint * ap * uGhost * (0.35 + 0.65 * off) * 0.5;
+        // **屏幕边缘遮罩**：鬼影是屏幕空间的，画面边框是硬的 —— 不做遮罩它就会被
+        // 边框**硬切**，在半空里露出半个靶环。按鬼影自己的屏幕位置（uv 0..1）淡出。
+        vec2 ep = uSun + axis * t;
+        float edge = smoothstep(0.0, 0.16, ep.x) * smoothstep(1.0, 0.84, ep.x)
+                   * smoothstep(0.0, 0.16, ep.y) * smoothstep(1.0, 0.84, ep.y);
+        flare += tint * ap * uGhost * (0.35 + 0.65 * off) * 0.5 * edge;
       }
     }
 
@@ -235,14 +248,13 @@ export function createPostFX(renderer, tier, size) {
       uThreshold: { value: TUNING.godrayThreshold },
       uStreak: { value: TUNING.streakStrength },
       uGhost: { value: TUNING.ghostStrength },
+      // 采样数/环数改由 uniform 驱动（原来是 defines，会全展开）。见 SHADER 里的注释。
+      uGodraySamples: { value: Math.max(6, TUNING.godraySamples | 0) },
+      uStreakTaps: { value: 12 },
+      uGhostCount: { value: 3 },
     },
     vertexShader: FULLSCREEN_VERT,
     fragmentShader: SUNFLARE_FRAG,
-    defines: {
-      GODRAY_SAMPLES: Math.max(6, TUNING.godraySamples | 0),
-      STREAK_TAPS: 12,
-      GHOST_COUNT: 6,
-    },
     depthTest: false,
     depthWrite: false,
   });

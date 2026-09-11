@@ -50,7 +50,7 @@ const SKY_FRAG = /* glsl */`
     // 银心方向（银经 0 附近最亮最厚）。
     float coreness = exp(-pow(length(vec2(dot(d, gu), dot(d, gv) - 1.0)) / 0.85, 2.0));
     // 云状结构：域扰动 fbm，再用 ridged 抠出暗尘带。
-    vec3 wp = warp(d * 5.5, 1.35, 0.0);
+    vec3 wp = warp(d * 5.5, 0.65, 0.0, 0.45);
     float cloud = fbm(wp * 1.7);
     float dust = ridged(d * 7.5 + 3.1);
     // 暗尘带要**黑得下去**（对照 scratch/ref/milkyway-core.jpg：银河最抓人的是亮星云
@@ -77,7 +77,7 @@ const SKY_FRAG = /* glsl */`
       float dd = length(d - nc);
       float fall = exp(-pow(dd / 0.42, 2.0));
       if (fall > 0.002) {
-        vec3 nq = warp(d * 9.0 + float(i) * 21.0, 2.2, 0.0);
+        vec3 nq = warp(d * 9.0 + float(i) * 21.0, 1.07, 0.0, 0.28);
         float fil = ridged(nq * 1.4);
         float wisp = smoothstep(0.42, 0.95, fil) * (0.35 + 0.65 * fbm(nq * 3.1));
         col += NEB_COL[i] * fall * wisp * 0.075;

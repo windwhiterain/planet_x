@@ -363,6 +363,7 @@ function buildBodies(world, visuals, newPrev) {
     // 夜面城市灯：这颗星上**真实城市**的对象空间方向。槽位由 buildCities 填。
     node.cityDirs = [];
     node.cityUniform = mat.uniforms.uCityDirs.value;
+    node.cityCountUniform = mat.uniforms.uCityCount;
 
     // 轨道线。
     const anchor = b.轨道.母天体
@@ -458,6 +459,8 @@ function buildCities(world, visuals) {
         if (i < node.cityDirs.length) u[i].copy(node.cityDirs[i]);
         else u[i].set(0, 0, 0);
       }
+      // 循环上界交给 uniform（见 PLANET_FRAG）：常量上界会把 12 次迭代全展开。
+      if (node.cityCountUniform) node.cityCountUniform.value = node.cityDirs.length;
     }
   });
 }
@@ -667,10 +670,16 @@ function tick() {
   }
 
   // 自转 / 云 / 日冕 / 羽流的时间。
-  for (const s of spinners) s.mat.uniforms.uSpin.value = timeS * s.speed + s.phase;
+  // **自转先关掉**（用户裁决）：未来的自转应当由 **state 提供**（每回合的相位），
+  // 不该由前端按墙钟自己推 —— 墙钟推的话，暂停、切档、不同机器上都不一致，
+  // 而且它一旦和法线出错叠在一起（见 planet.js 气巨那条分支修掉的 bug），
+  // 现象会伪装成「光源在自转」，极难查。
+  // 现在把 uSpin 冻结在各天体自己的 phase 上：保留「每颗星朝向不同」的多样性，
+  // 但不随时间转。`speed` 字段先留着，等 state 接上再决定去留。
+  for (const s of spinners) s.mat.uniforms.uSpin.value = s.phase;
   for (const c of cloudSpinners) {
-    c.mat.uniforms.uSpin.value = timeS * c.speed + c.phase;
-    c.mat.uniforms.uTime.value = timeS;
+    c.mat.uniforms.uSpin.value = c.phase;
+    c.mat.uniforms.uTime.value = timeS;      // 云自己的漂移照旧（那是 uTime，不是自转）
   }
   if (sun) sun.update(timeS);
   tickPlumes(timeS);

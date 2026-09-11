@@ -54,9 +54,14 @@ const COMMON_FRAG = /* glsl */`
              dot(p, vec3(113.5, 271.9, 124.6)));
     return fract(sin(p) * 43758.5453123);
   }
-  // 固定八度的 fbm（比 NOISE_GLSL 里那个由 uFbmOct 控制的版本便宜，用于求法线时的差分）。
+  // 法线差分专用的低八度 fbm。**上界也是 uniform**：原来手写成
+  // 0.5*vnoise(p) + 0.25*vnoise(p*2.02) + 0.125*vnoise(p*4.08)，就是「手工展开 3 份
+  // vnoise」，而它有 5 个调用点 ⇒ 15 份内联 vnoise。改成动态循环后只剩一份。
+  uniform int uFbmFastOct;
   float fbmFast(vec3 p){
-    return 0.5 * vnoise(p) + 0.25 * vnoise(p * 2.02) + 0.125 * vnoise(p * 4.08);
+    float a = 0.5, s = 0.0;
+    for (int i = 0; i < uFbmFastOct; i++){ s += a * vnoise(p); p *= 2.02; a *= 0.5; }
+    return s;
   }
   // 陨石坑场：每格最多一个坑，坑心被限制在格子内部（±0.16，影响半径 ≲0.34）⇒ 不需要查
   // 邻格，也不会有格边界的硬切。返回 = 碗(负) + 环脊(正)。
@@ -100,6 +105,7 @@ const PLANET_FRAG = /* glsl */`
   uniform float uRingIn;
   uniform float uRingOut;
   uniform vec3  uCityDirs[CITY_MAX];
+  uniform int   uCityCount;      // 实际有城的槽数（循环上界；CITY_MAX 只是数组容量）
   varying vec3 vObjPos;
   varying vec3 vWorldPos;
   varying vec3 vRel;
@@ -179,7 +185,7 @@ const PLANET_FRAG = /* glsl */`
     // ⚠ 剪切量（shear 乘在纬向上）要**小**：原来乘 5.0/9.0，相位被扰动到 ±5 rad，
     // 纬向条带被撕成一坨坨斑块，看起来不像气巨。真实的气巨带纹是**强纬向、弱经向**的，
     // 湍流只把边界揉皱，不该把带揉没。这里把 warp 幅度也降到 0.85。
-    vec3 w = warp(ds * 3.0, 0.85, 0.0);
+    vec3 w = warp(ds * 3.0, 0.36, 0.0, 0.83);
     float shear = fbm(w * 2.2) * 0.5;
     // 三层不同频率的纬向带 + 少量剪切，叠出「宽带里套细纹」的层次。
     float b1 = sin(lat * 12.0 + shear * 1.7);
@@ -212,7 +218,7 @@ const PLANET_FRAG = /* glsl */`
   vec3 icyColor(vec3 ds, float lat){
     if (uBanded > 0.5) {
       // 冰巨星：带极淡、极细，整体偏青蓝。
-      vec3 w = warp(ds * 3.0, 1.1, 0.0);
+      vec3 w = warp(ds * 3.0, 0.36, 0.0, 0.83);
       float band = 0.5 + 0.5 * sin(lat * 13.0 + fbm(w * 1.8) * 2.2);
       band = smoothstep(0.34, 0.82, band);
       return mix(uAccent, uBase, band * 0.75 + 0.12);
@@ -256,7 +262,7 @@ const PLANET_FRAG = /* glsl */`
   vec3 venusColor(vec3 ds, float lat){
     // 浓厚硫磺云：**高速**纬向涡旋（金星大气 4 天绕一圈，是最有辨识度的特征）。
     // 用强域扰动把纬向条纹撕成 Y 形/涡卷，而不是一张均匀的驼色纸。
-    vec3 w = warp(ds * 6.0 + vec3(0.0, lat * 2.0, 0.0), 3.4, 0.0);
+    vec3 w = warp(ds * 6.0 + vec3(0.0, lat * 2.0, 0.0), 0.71, 0.0, 0.42);
     float s = fbm(w * 2.6);
     float swirl = 0.5 + 0.5 * sin(lat * 11.0 + s * 9.0);
     float streak = fbm(vec3(ds.x * 3.0, ds.y * 16.0, ds.z * 3.0));
@@ -327,7 +333,11 @@ const PLANET_FRAG = /* glsl */`
       float c1 = fbmFast(normalize(ds + t1 * e) * 3.0);
       float c2 = fbmFast(normalize(ds + t2 * e) * 3.0);
       vec3 bump = ((c1 - c0) / e) * t1 + ((c2 - c0) / e) * t2;
-      nSurface = normalize(ds - bump * uRelief * 0.05);
+      // ⚠ 必须和上面那条分支一样**转回对象空间**再乘 vObjToWorld。
+      // ds 是「已经反转了 uSpin」的采样方向，直接当对象空间用会让气巨的法线整体多转
+      // 一个 -uSpin；而 index.js 每帧都在推进 uSpin ⇒ **明暗交界线跟着自转一起转**，
+      // 看上去就是「光源方向在自转」（用户实测：木星、土星最明显，正因为它们是气巨）。
+      nSurface = rotAxis(normalize(ds - bump * uRelief * 0.05), vec3(0.0, 1.0, 0.0), uSpin);
       n = normalize(vObjToWorld * nSurface);
     }
 
@@ -367,7 +377,9 @@ const PLANET_FRAG = /* glsl */`
       float night = smoothstep(0.10, -0.22, ndl);
       if (night > 0.001) {
         float lights = 0.0;
-        for (int i = 0; i < CITY_MAX; i++) {
+        // 循环上界用 **uniform**（真实城数）而不是数组容量 CITY_MAX：常量上界会把
+        // 12 次迭代全部展开；而且用真实数量还**顺带省掉空槽的判定**。
+        for (int i = 0; i < uCityCount; i++) {
           vec3 cd = uCityDirs[i];
           if (dot(cd, cd) < 0.5) continue;              // 空槽（未使用的槽写 0）
           float ang = dot(d, cd);
@@ -444,9 +456,14 @@ const ATMO_FRAG = /* glsl */`
     float rho = (b < uPlanetR) ? 1.0 : exp(-(b - uPlanetR) / max(uScaleH, 1e-4));
     float od = path * rho;
 
-    // 照明用**切点**的法线：大气是被视线最接近球心那一小段上的太阳高度角照亮的，
-    // 而不是被壳面上这个点的法线（后者会让盘面中央和边缘平分亮度，丢掉临边亮环）。
-    vec3 T = O + D * tc;
+    // 照明的锚点。**不能直接用切点**：b→0（盘面正中）时切点恰好穿过球心 C，
+    // normalize(T-C) 就退化成 normalize(0) = NaN ⇒ 盘心冒出一个**跟着镜头走的暗色尖点**
+    // （实测：木星/天王星/金星正中都有一道 V 形暗口；关掉大气整层就干净了 —— 这是
+    // 「镜头相关的奇怪特效」的真正来源，与 warp 折叠无关）。
+    // b < Rp 时改用**视线与行星球面的交点**当锚点：|anchor-C| = Rp，法线良定义；
+    // 而且物理上更对 —— 被挡在行星前的那段大气，本来就是被该地表点的太阳高度角照亮的。
+    // b ≥ Rp 时 inner = 0，式子退化成切点，与原来一致（那里 |T-C| = b ≥ Rp，本来就安全）。
+    vec3 T = O + D * (tc - inner);
     vec3 nT = normalize(T - C);
     vec3 sunDir = normalize(-T);            // 太阳在世界原点
     float mu = dot(nT, sunDir);
@@ -499,7 +516,7 @@ const CLOUD_FRAG = /* glsl */`
 
     // 云团：纬度带状的环流 + 域扰动，做出「涡旋/带状」而不是均匀的花花。
     float latB = 0.55 + 0.45 * sin(ds.y * 7.0 + fbm(ds * 3.0) * 2.2);
-    vec3 w = warp(ds * 5.0, 1.7, uTime * 0.02);
+    vec3 w = warp(ds * 5.0, 0.60, uTime * 0.02, 0.50);
     float cov = fbm(w * 3.0 + vec3(0.0, 0.0, uTime * 0.01));
     // 叠一层更细的云絮：只有大尺度的云看起来像一团团棉花糖。
     cov = cov * 0.72 + fbm(ds * 11.0 + vec3(4.0, 0.0, uTime * 0.03)) * 0.34;
@@ -617,6 +634,8 @@ export function planetMaterial(spec, tier, opts = {}) {
     defines: { CITY_MAX: CITY_MAX },
     uniforms: {
       uFbmOct: fbmOct(tier.oct),
+      uFbmFastOct: fbmOct(3),      // 法线差分用的低八度版（见 COMMON_FRAG）
+      uCityCount: { value: 0 },    // 由 index.js 在灌城市方向时同步
       uBase: { value: new THREE.Vector3(...base) },
       uAccent: { value: new THREE.Vector3(...accent) },
       uAtmo: { value: new THREE.Vector3(...atmo) },
