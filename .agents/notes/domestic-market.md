@@ -1,6 +1,6 @@
 # 国内市场：资源预算 → 货币预算 → 真实交易
 
-> 状态 `[~]`（本 note 记录设计；实现见 `src/sim/domestic_market.rs`，默认 `config.domestic_market.enabled = false`）
+> 状态 `[x]`（第一版 + 福利并轨 + 逐城货币预算控制叶已实现；默认 `config.domestic_market.enabled = false`，旧世界逐字节不变）
 > 关联：`spec.md`（控制属性：势力各类资源开发/建造/福利预算；城市福利权重；建造区建造权重；建筑目标面积/开发权重）、
 > `trade-and-sanctions.md`（国际市场）、`site-supply.md`（本地库存/运输）
 
@@ -182,13 +182,22 @@ M = money_multiplier × 预算按基价的价值
   - 否则走旧路径（逐字节不变）。
 - `SCHEMA_VERSION` 23 → 24，`migrate` 把 23 并进“只推号”一档。
 
-### 3.2 暂不做的
+### 3.2 本轮已补：福利并轨 + 逐城货币控制叶
 
-- 福利入口：当前 `loyalty_budget` 仍是每城标量市场价值；下一版改成
-  `welfare_budget`（势力级资源向量）+ `welfare_weights`（城市）。
-- 货币控制叶：第一版货币预算从权重自动折算，玩家仍写权重。
-- 城际双向交易：第一版只跟国库/市场买；第二版允许城市互相挂单。
-- 价格持久记忆跨存档：已存 `price`，但旧档默认空 = 首回合按配置基价。
+- **福利并轨**：
+  - 势力级新增 `welfare_budget: {资源 → Control<f64>}`（`spec.md` 的「各类资源福利预算」）。
+  - 城市旧叶 `loyalty_budget` **语义改成福利权重**（不再是每城市场价值预算）：
+    `welfare_budget` 先按市场价值求总池，再按各城权重分给城市，进入忠诚目标里的娱乐项。
+  - 默认路径（没有 Player 福利叶）严格等于旧行为：总福利价值 = `default_entertainment × 城数`，
+    不让库存/浮点重算改变确定性世界。
+- **逐城货币预算控制叶**：
+  - 新增 `development_money: {城市 → Control<f64>}` 与
+    `construction_money: {城市 → Control<f64>}`，单位是市场价值/回合。
+  - 国内市场价格反馈里，城市货币预算优先读这两片叶；缺叶/Auto 时按原有建筑/建造区权重自动折算。
+  - `Player` 写入后，该城的货币预算不再被自动折算覆盖。
+- 控制面从 **14 叶** 扩到 **17 叶**（+ `welfare_budget` / `development_money` / `construction_money`），
+  web `views.json`、`--control-schema`、投影 `derived.control` 三端同步。
+- 城际双向交易、福利专用市场仍留作后续。
 
 ## 4. 验证
 
@@ -199,6 +208,13 @@ M = money_multiplier × 预算按基价的价值
   3. 价格反馈：需求 > 供给时价格上升；供给过剩时价格下降；
   4. `enabled = false` 时 `step_construction` 与旧路径 digest 一致（用现有 spending 测试）。
 - 长局 A/B：`config.domestic_market.enabled = true`，seed 1/7/42 × 400 回合，比较产出/建成面积/舰数/库存。
+
+### 4.1 本轮全门结果
+
+- `cargo nextest run -P full`：206 passed / 31 skipped。
+- `cargo nextest run -p planet_x_web`：24 passed。
+- Python 四组：`g1 33/33`、`g2 60/60`、`g3 26/26`、`g4 15/15`。
+- 默认 `enabled = false` 下，世界 digest / 长局数据与旧行为一致。
 
 ## 5. 开放问题
 

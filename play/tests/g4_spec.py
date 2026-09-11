@@ -272,12 +272,25 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             else:
                 add(f, k, {"ship": ship, "role": S_ROLE, "mode": "Player"}, {"role": S_ROLE})
 
-        elif f in ("investment_budget", "construction_budget"):
+        elif f in ("investment_budget", "construction_budget", "welfare_budget"):
             k = first(spec)
+            if not k and f == "welfare_budget":
+                # `welfare_budget` 第一版 AI 不写回控制面 ⇒ 读面可能是空表；从同势力的
+                # 投资/建造预算里借一个真实资源 key 来新建这片叶。
+                for other in ("investment_budget", "construction_budget"):
+                    src = first(by_field[other]) if other in by_field else None
+                    if src and src.get("resource"):
+                        k = {"resource": src["resource"]}
+                        break
             if not k:
                 missing.append(f"{f}：这一局该势力一个资源 key 都没有，没法写")
                 continue
-            v = V_INVEST if f == "investment_budget" else V_CONSTRUCT
+            if f == "investment_budget":
+                v = V_INVEST
+            elif f == "construction_budget":
+                v = V_CONSTRUCT
+            else:
+                v = V_INVEST
             add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
 
         elif f in ("invest_weights", "build_weights"):
@@ -288,13 +301,13 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             v = W_INVEST if f == "invest_weights" else W_BUILD
             add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
 
-        elif f == "loyalty_budget":
-            # 这一局一开始一片都没有（力场级 0 条）⇒ 必须**新建**一片：城从该势力自己的
+        elif f in ("loyalty_budget", "development_money", "construction_money"):
+            # 这一局一开始一片都没有（省/市级 0 条）⇒ 必须**新建**一片：城从该势力自己的
             # 建筑权重里借一个（那些城一定属于它，写权重时引擎刚认过）。
             src = first(by_field["invest_weights"]) if "invest_weights" in by_field else None
             city = src.get("city") if src else None
             if not city:
-                cands = [e.get("city") for e in (fac.get("loyalty_budget") or [])
+                cands = [e.get("city") for e in (fac.get(f) or [])
                          if isinstance(e, dict) and e.get("city")]
                 city = cands[0] if cands else None
             if not city:
@@ -759,9 +772,15 @@ def run(h, ck) -> None:
                 keys = [k for k in (label, field) if k]
             else:
                 path = c.get("path")
-                if not isinstance(path, str) or not BARE.match(path):
-                    continue        # 表达式列（`@post...`）不算"名词"：它的表头是自由文本
-                keys = [k for k in (c.get("label"), path) if k]
+                # 表达式列（`@post.power_share.${势力}`）：它**自己**不是名词，但只要列上声明了
+                # `noun`（「这一列说的是哪个名词」），它就跟裸字段列一样必须查得到解释。
+                noun = c.get("noun")
+                if isinstance(noun, str) and noun:
+                    keys = [noun]
+                elif not isinstance(path, str) or not BARE.match(path):
+                    continue        # 既不是裸字段列、也没声明 noun ⇒ 表头是自由文本
+                else:
+                    keys = [k for k in (c.get("label"), path) if k]
             if not keys:
                 continue
             considered += 1
@@ -773,6 +792,24 @@ def run(h, ck) -> None:
              "；".join(uncovered[:5]) or (
                  f"语料 {len(corpus)} 个名词，覆盖 {considered} 个界面名词（下限 40）"
                  if considered >= 40 else f"只算到 {considered} 个名词，判据可能空转了"))
+
+    # 表达式列的 `noun` 声明：**必须在语料里查得到**。
+    #
+    # 为什么需要这个字段：表达式是**取数路径**、不是名词（`@post.power_share.${势力}` 里没有
+    # "名词"那一层），所以只有声明才知道该弹哪条解释。**不许去表达式里猜**——`@state.ships
+    # [?舰名=…].势力` 的第一个裸段是 `ships`，猜出来必错。
+    declared: list[tuple[str, str]] = []
+    for v in views:
+        for c in v.get("columns") or []:
+            if isinstance(c, dict) and isinstance(c.get("noun"), str) and c["noun"]:
+                declared.append((v.get("id", "?"), c["noun"]))
+    bad_decl = [f"{vid}：`noun: {n}` 在语料里查不到（弹空框）" for vid, n in declared if n not in corpus]
+    ck.check(f"名词覆盖率：{len(declared)} 条表达式列的 `noun` 声明都能查到解释"
+             f"（这一列说的是哪个名词）",
+             corpus_ok and not bad_decl and len(declared) >= 20,
+             "；".join(bad_decl[:5]) or (
+                 f"声明 {len(declared)} 条，全部命中语料（下限 20）"
+                 if len(declared) >= 20 else f"只声明了 {len(declared)} 条，判据可能空转了"))
 
     # 另一半：**与引擎名词逐字相同**的 `label` 一律不写（"该退的都退了"）——
     # 列头默认就是键名，再抄一遍只会让"哪个是权威"变含糊；要换词（`舰名`→`舰`）或加格式时才写。
@@ -794,6 +831,133 @@ def run(h, ck) -> None:
              f"（单叶每势力一片，「现造一个身份键」对它不成立）",
              not new_rows,
              "；".join(new_rows[:3]) or f"本帧 {new_rows_total} 条，全部合法（防空转）")
+
+
+    # ══ 6. 身份键：谁靠哪个字段认人 —— 引擎**一处**声明，且在真世界里**存在且唯一** ══
+    #
+    # 「一张表/一个结构体靠哪个字段认人」以前在 Python（`_harness._ID_KEY`）、kit、JS 三处
+    # 各自维护**镜像小表**：引擎改了字段名或换了身份键，它们**不会红**，只会悄悄用旧键去
+    # 找记录——典型的"失败看起来像成功"。现在唯一真值是 `model::IDENTITY`（结构体）与投影
+    # 的 `LAZY`（表），随 `--nouns`（= web 的 `GET /api/schema`）一起发出来，三端都来问它。
+    #
+    # 这条守卫不验"声明是否自洽"，而是验**声明与真实世界对不对得上**：
+    #   ① 指名的字段在 schema 里**真的存在**；
+    #   ② 在一局真跑的世界上**真的唯一**（重复 ⇒ 红，打印前几个冲突）；
+    #   ③ 防空转：结构体/表/行数都得 > 0。
+    try:
+        corpus = json.loads(h.capture(["--nouns"]))
+        nouns_err = None
+    except Exception as e:  # noqa: BLE001  （拿不到语料本身就是红）
+        corpus, nouns_err = None, f"{type(e).__name__}: {e}"
+    if corpus is None:
+        ck.check("身份键：`--nouns` 发得出 identity 声明（谁靠哪个字段认人）", False, nouns_err or "")
+    else:
+        ident = corpus.get("identity") or {}
+        id_structs = ident.get("structs") or {}
+        id_tables = ident.get("tables") or {}
+        defs = (corpus.get("state") or {}).get("definitions") or {}
+        props = (corpus.get("state") or {}).get("properties") or {}
+        lazy = ((corpus.get("projection") or {}).get("lazy") or {})
+
+        missing_attr = []
+        for struct, field in sorted(id_structs.items()):
+            spec = (defs.get(struct) or {}).get("properties") or {}
+            if field not in spec:
+                missing_attr.append(f"`{struct}.{field}` 不在 schema 的属性里（有：{sorted(spec)[:6]}）")
+        ck.check(f"身份键：{len(id_structs)} 个结构体声明的身份字段在 schema 里真的存在",
+                 bool(id_structs) and not missing_attr,
+                 "；".join(missing_attr[:4]) or "、".join(f"{k}→{v}" for k, v in sorted(id_structs.items())))
+
+        # ②a 结构体侧：拿 §3 存下来的那局 state，逐实体数组验唯一。
+        state = ((json.loads(ckpt.read_text(encoding="utf-8")).get("round_state") or {})
+                 .get("state") or {})
+        dup_rows: list[str] = []
+        checked_rows = 0
+        for kind, spec in props.items():
+            ref = ((spec or {}).get("items") or {}).get("$ref") or ""
+            field = id_structs.get(ref.rsplit("/", 1)[-1])
+            rows = state.get(kind)
+            if not field or not isinstance(rows, list):
+                continue
+            checked_rows += len(rows)
+            vals = [r.get(field) for r in rows]
+            dups = sorted({str(v) for v in vals if v is not None and vals.count(v) > 1})
+            if dups:
+                dup_rows.append(f"{kind}.{field} 有重复：{dups[:3]}")
+        ck.check(f"身份键：声明的身份字段在真世界里唯一（{checked_rows} 行实体）",
+                 not dup_rows and checked_rows > 0,
+                 "；".join(dup_rows[:3]) or
+                 (f"{checked_rows} 行里没有重复（seed {SEED} / {ROUNDS} 回合的 state）"
+                  if checked_rows else "一行都没验到 ⇒ 判据空转了"))
+
+        # ②b 表侧：跑一次 --index，**逐轮**验声明的键唯一（表是 `(round, key)` 索引的）。
+        idx = tmp / "idx-identity"
+        rc2, _, err2 = _run(h, ["--seed", str(SEED), "--round", str(ROUNDS), "--index", str(idx)])
+        if rc2 != 0:
+            ck.check("身份键：投影表的身份键在真世界里唯一", False,
+                     f"`--index` 退出码 {rc2}：{err2[-300:]}")
+        else:
+            bad_tab: list[str] = []
+            tabs, rows_tab = 0, 0
+            for name, t in sorted(lazy.items()):
+                key = id_tables.get(name)
+                if not key:
+                    continue                      # 这张表没声明键（内联/聚合表）
+                if key not in ((t or {}).get("columns") or {}):
+                    bad_tab.append(f"{name}.{key} 不在 columns 里")
+                    continue
+                # `table` 是**相对 index 输出目录**的路径（`idx/ships.jsonl`）
+                path = idx / (t.get("table") or "")
+                if not path.exists():
+                    bad_tab.append(f"{name} 的 table 文件不在：{t.get('table')}")
+                    continue
+                rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                tabs += 1
+                rows_tab += len(rows)
+                groups: dict = {}
+                if t.get("round"):
+                    for r in rows:
+                        groups.setdefault(r.get("round"), []).append(r)
+                else:
+                    groups[None] = rows
+                for rnd, rs in groups.items():
+                    vals = [r.get(key) for r in rs]
+                    dups = sorted({str(v) for v in vals if v is not None and vals.count(v) > 1})
+                    if dups:
+                        bad_tab.append(f"{name} r{rnd}：{key} 重复 {dups[:3]}")
+            ck.check(f"身份键：{tabs} 张投影表声明的键在真世界里**逐轮唯一**（{rows_tab} 行）",
+                     bool(id_tables) and not bad_tab and tabs >= 5 and rows_tab > 0,
+                     "；".join(bad_tab[:4]) or
+                     (f"{tabs} 张表 / {rows_tab} 行，按 (round, key) 分组都没有重复"
+                      if tabs >= 5 and rows_tab else
+                      f"只验到 {tabs} 张表 / {rows_tab} 行 ⇒ 判据可能空转了"))
+
+        # ③ 前端那半：`views.json` 的视图 `key` 是**它自己认人的字段**（JS 读它来配对行）。
+        # 对 `@state.<实体>[*]` 这类视图，它必须**就是引擎声明的那个身份字段**——两边漂移
+        # 的话，选行/配对会悄悄错位（前端"看起来有值"）。这样三端就都问同一处了：
+        # Python 问 `identity_keys()`、kit 问 manifest 的 `keys`、JS 问声明的 `key`（在这里被钉住）。
+        drift, views_checked = [], 0
+        for v in views:
+            src = v.get("source") or ""
+            m = re.fullmatch(r"@state\.([a-z_]+)\[\*\]", src)
+            k = v.get("key")
+            if not m or not isinstance(k, str):
+                continue
+            struct = ""
+            for kind, spec in props.items():
+                if kind == m.group(1):
+                    struct = (((spec or {}).get("items") or {}).get("$ref") or "").rsplit("/", 1)[-1]
+            want = id_structs.get(struct)
+            if not want:
+                continue
+            views_checked += 1
+            if k != want:
+                drift.append(f"{v.get('id')}（{src}）声明 key=`{k}`，引擎说 `{struct}` 的身份是 `{want}`")
+        ck.check(f"身份键：{views_checked} 个实体视图的 `key` 与引擎的身份声明一致（前端不再各认各的）",
+                 views_checked > 0 and not drift,
+                 "；".join(drift[:4]) or
+                 (f"{views_checked} 个视图逐字一致（如 ship-table→舰名）"
+                  if views_checked else "一个实体视图都没验到 ⇒ 判据空转了"))
 
 
 if __name__ == "__main__":

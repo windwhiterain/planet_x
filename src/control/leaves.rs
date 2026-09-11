@@ -169,6 +169,13 @@ pub const LEAVES: &[LeafSpec] = &[
         carries: &[],
         read_only: &[],
     },
+    LeafSpec {
+        field: "welfare_budget",
+        keys: &["resource"],
+        values: &["value"],
+        carries: &[],
+        read_only: &[],
+    },
     // --- 逐建筑权重（身份 = 城 + 建筑；读面顺带带着建筑的 state 属性）-----------------
     LeafSpec {
         field: "invest_weights",
@@ -189,6 +196,20 @@ pub const LEAVES: &[LeafSpec] = &[
     // --- 逐城的娱乐/福利预算 --------------------------------------------------------
     LeafSpec {
         field: "loyalty_budget",
+        keys: &["city"],
+        values: &["value"],
+        carries: &[],
+        read_only: &[],
+    },
+    LeafSpec {
+        field: "development_money",
+        keys: &["city"],
+        values: &["value"],
+        carries: &[],
+        read_only: &[],
+    },
+    LeafSpec {
+        field: "construction_money",
         keys: &["city"],
         values: &["value"],
         carries: &[],

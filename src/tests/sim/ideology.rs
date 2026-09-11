@@ -147,11 +147,16 @@ fn entertainment_holds_a_distant_city() {
         c.loyalty = 0.35; // 略高于叛变阈值，但本应继续下滑。
     }
     let loy0 = state.city(&city19).map(|c| c.loyalty).unwrap();
-    // 重金投入该城娱乐预算（Player 覆盖）。
+    // 重金投入福利：势力级福利预算（资源向量） + 该城福利权重（Player 覆盖）。
+    // 铁价 1 ⇒ 5000 铁 = 5000 市场价值福利池；权重 500 让绝大部分落到这座城。
     let diff = serde_json::json!({
-        "control": [{"faction_id": "星系矿业", "loyalty_budget": [{"city": city19.clone(), "value": 500.0, "mode": "Player"}]}]
+        "control": [{
+            "faction_id": "星系矿业",
+            "welfare_budget": [{"resource": "铁", "value": 5000.0, "mode": "Player"}],
+            "loyalty_budget": [{"city": city19.clone(), "value": 500.0, "mode": "Player"}]
+        }]
     });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("apply loyalty budget");
+    crate::control::apply_patch(&mut state, &config, &diff).expect("apply welfare budget/weight");
 
     advance(&mut state, &config, &mut rng);
 

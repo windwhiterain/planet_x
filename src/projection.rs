@@ -977,6 +977,15 @@ fn write_round(
                 leaf.mode,
             )?;
         }
+        for (res, leaf) in &c.welfare_budget {
+            row(
+                "welfare_budget",
+                json!(res),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
+        }
         for ((city, b), leaf) in &c.invest_weights {
             row(
                 "invest_weight",
@@ -998,6 +1007,24 @@ fn write_round(
         for (city, leaf) in &c.loyalty_budget {
             row(
                 "loyalty_budget",
+                json!(city),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
+        }
+        for (city, leaf) in &c.development_money {
+            row(
+                "development_money",
+                json!(city),
+                json!(null),
+                json!(leaf.value),
+                leaf.mode,
+            )?;
+        }
+        for (city, leaf) in &c.construction_money {
+            row(
+                "construction_money",
                 json!(city),
                 json!(null),
                 json!(leaf.value),
@@ -1315,6 +1342,19 @@ fn blueprint_mode_of(state: &State, fid: &FactionId, bp: Option<&str>) -> Contro
 /// the Python kit share: fields with a `lazy` entry are NOT inline in `main.jsonl` (the main row
 /// carries their id-array), while `eager` fields are inline. Column types are listed so the agent
 /// knows the table shape without guessing.
+/// **每张投影表的身份键**（`{表名: 列名}`），单一来源 = [`LAZY`]。
+///
+/// 与 [`projection_schema`] 的 `lazy.*.key` **同源**：一个是给读的人看的完整声明，
+/// 一个是给 `--nouns` / `GET /api/schema` 的 `identity.tables` 用的紧凑形式。
+/// 目的同 [`crate::model::IDENTITY`]：别让 Python/kit/JS 各自手抄一份「谁靠哪个字段认人」。
+pub fn table_identity_keys() -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for f in LAZY {
+        m.insert(f.name.to_string(), serde_json::Value::from(f.key));
+    }
+    serde_json::Value::Object(m)
+}
+
 pub fn projection_schema() -> serde_json::Value {
     let mut lazy = serde_json::Map::new();
     for f in LAZY {
@@ -1478,7 +1518,7 @@ pub fn projection_schema() -> serde_json::Value {
                 "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认倾向三片 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
                 "columns": {"round":"integer","faction_id":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / invest_weight / build_weight / loyalty_budget / capital。⚠ `default_ship_order` 已删（2026-10：指令是即时操作，只写逐舰叶）。",
+                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / welfare_budget / invest_weight / build_weight / loyalty_budget / development_money / construction_money / capital。⚠ `default_ship_order` 已删（2026-10：指令是即时操作，只写逐舰叶）。",
                     "key": "该叶的键：舰名 / 资源名 / 城名；`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
                     "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
                     "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是三值字符串（War/Freight/Observe）、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`role` 列。",

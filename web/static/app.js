@@ -192,7 +192,11 @@ function bindSpecView() {
       const bare = typeof col.path === 'string' && /^[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*$/.test(col.path)
         ? col.path
         : null;
-      const field = col.leaf && window.Controls ? Controls.fieldOf(col.leaf) : bare;
+      const field = col.noun || (col.leaf && window.Controls ? Controls.fieldOf(col.leaf) : bare);
+      // `col.noun`：**表达式列的声明**——「这一列说的是哪个名词」（`"noun": "power_share"`）。
+      // 表达式是**取数路径**、不是名词（`@post.power_share.${势力}` 里没有"名词"那一层），
+      // 所以只有声明才知道该查哪条解释。**别去表达式里猜**：`@state.ships[?舰名=…].势力`
+      // 的裸段是 `ships`，猜出来必错。裸字段列不需要写 `noun`（列头就是键名）。
       window.Tip.attach(node, label, field);
     },
   });

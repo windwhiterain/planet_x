@@ -129,25 +129,30 @@ pub fn plan_faction(
     let con_price0 = initial_price(config, &old_con_price);
 
     let money_mult = config.domestic_market.money_multiplier.max(0.0);
-    let dev_money = base_value(config, b_dev) * money_mult;
-    let con_money = base_value(config, b_con) * money_mult;
+    let dev_base_money = base_value(config, b_dev) * money_mult;
+    let con_base_money = base_value(config, b_con) * money_mult;
 
-    let (dev_alloc, dev_price, dev_unspent) = clear_market(
-        config,
-        b_dev,
-        &dev_weights,
+    let dev_money = city_money_map(
+        state,
+        fid,
+        MoneyKind::Development,
         &dev_demands,
-        dev_price0,
-        dev_money,
+        &dev_weights,
+        dev_base_money,
     );
-    let (con_alloc, con_price, con_unspent) = clear_market(
-        config,
-        b_con,
-        &con_weights,
+    let con_money = city_money_map(
+        state,
+        fid,
+        MoneyKind::Construction,
         &con_demands,
-        con_price0,
-        con_money,
+        &con_weights,
+        con_base_money,
     );
+
+    let (dev_alloc, dev_price, dev_unspent) =
+        clear_market(config, b_dev, &dev_money, &dev_demands, dev_price0);
+    let (con_alloc, con_price, con_unspent) =
+        clear_market(config, b_con, &con_money, &con_demands, con_price0);
 
     let entry = state.market.domestic.entry(fid.clone()).or_default();
     entry.development.price = dev_price.clone();
@@ -229,19 +234,72 @@ fn base_value(config: &GameConfig, m: &ResourceMap) -> f64 {
     m.iter().map(|(rt, q)| base_price(config, rt) * q).sum()
 }
 
+/// 逐城货币预算的来源：开发 / 建造。
+#[derive(Clone, Copy)]
+enum MoneyKind {
+    Development,
+    Construction,
+}
+
+/// 给每个有需求的城市算一笔货币预算：
+/// * 该城有 `Player` 归属的货币叶 ⇒ 用叶里的值；
+/// * 否则用 `base_money × 该城权重 / 总权重`（没有权重时均分）。
+fn city_money_map(
+    state: &State,
+    fid: &FactionId,
+    kind: MoneyKind,
+    demands: &BTreeMap<CityId, ResourceMap>,
+    weights: &BTreeMap<CityId, f64>,
+    base_money: f64,
+) -> BTreeMap<CityId, f64> {
+    let control = state.control(fid.clone());
+    let total_w: f64 = weights.values().filter(|w| **w > 0.0).sum();
+    let n = demands.len().max(1) as f64;
+    demands
+        .keys()
+        .map(|cid| {
+            let mode = match kind {
+                MoneyKind::Development => {
+                    state.development_money_control(fid.clone(), cid.clone())
+                }
+                MoneyKind::Construction => {
+                    state.construction_money_control(fid.clone(), cid.clone())
+                }
+            };
+            let w = weights.get(cid).copied().unwrap_or(0.0).max(0.0);
+            let fallback = if total_w > 1e-9 {
+                base_money * w / total_w
+            } else {
+                base_money / n
+            };
+            let value = if mode.is_player() {
+                control
+                    .and_then(|c| match kind {
+                        MoneyKind::Development => c.development_money.get(cid),
+                        MoneyKind::Construction => c.construction_money.get(cid),
+                    })
+                    .map(|leaf| leaf.value.max(0.0))
+                    .unwrap_or(fallback)
+            } else {
+                fallback
+            };
+            (cid.clone(), value)
+        })
+        .collect()
+}
+
 /// 一个类别市场的价格反馈 + 配给。
 ///
 /// * `supply`：国库本回合投放的资源预算（`g`）；
-/// * `city_weights`：城市权重（自动折算成货币预算 `m_i`）；
+/// * `city_money`：逐城货币预算 `m_i`；
 /// * `base_demands`：城市在“钱无限”时的 recipe 需求；
 /// * 返回：每城预算额度、最终价格、未用额度。
 fn clear_market(
     config: &GameConfig,
     supply: &ResourceMap,
-    city_weights: &BTreeMap<CityId, f64>,
+    city_money: &BTreeMap<CityId, f64>,
     base_demands: &BTreeMap<CityId, ResourceMap>,
     mut price: ResourceMap,
-    money_stock: f64,
 ) -> (BTreeMap<CityId, ResourceMap>, ResourceMap, ResourceMap) {
     let mut alloc: BTreeMap<CityId, ResourceMap> = base_demands
         .keys()
@@ -263,12 +321,6 @@ fn clear_market(
             .or_insert_with(|| base_price(config, rt));
     }
 
-    let total_w: f64 = city_weights
-        .values()
-        .filter(|w| **w > 0.0)
-        .sum::<f64>()
-        .max(0.0);
-
     let iterations = config.domestic_market.iterations.max(1);
     let damping = config.domestic_market.damping.clamp(0.0, 1.0);
 
@@ -277,12 +329,7 @@ fn clear_market(
         current.clear();
         let mut total_demand: ResourceMap = ResourceMap::new();
         for (cid, base) in base_demands {
-            let w = city_weights.get(cid).copied().unwrap_or(0.0).max(0.0);
-            let money = if total_w > 1e-9 {
-                money_stock * w / total_w
-            } else {
-                money_stock / base_demands.len() as f64
-            };
+            let money = city_money.get(cid).copied().unwrap_or(0.0).max(0.0);
             let mut d = base.clone();
             let cost = dot(&price, &d);
             if cost > money && cost > 1e-9 {
@@ -372,9 +419,9 @@ mod tests {
         let config = cfg();
         let mut supply = ResourceMap::new();
         supply.insert("铁".to_string(), 100.0);
-        let mut weights = BTreeMap::new();
-        weights.insert("A".to_string(), 1.0);
-        weights.insert("B".to_string(), 3.0);
+        let mut money = BTreeMap::new();
+        money.insert("A".to_string(), 25.0);
+        money.insert("B".to_string(), 75.0);
         let mut demands = BTreeMap::new();
         let mut da = ResourceMap::new();
         da.insert("铁".to_string(), 999.0);
@@ -385,10 +432,9 @@ mod tests {
         let (alloc, _price, _unspent) = clear_market(
             &config,
             &supply,
-            &weights,
+            &money,
             &demands,
             initial_price(&config, &ResourceMap::new()),
-            100.0,
         );
         let a = alloc["A"]["铁"];
         let b = alloc["B"]["铁"];
@@ -401,8 +447,8 @@ mod tests {
         let config = cfg();
         let mut supply = ResourceMap::new();
         supply.insert("铁".to_string(), 10.0);
-        let mut weights = BTreeMap::new();
-        weights.insert("A".to_string(), 1.0);
+        let mut money = BTreeMap::new();
+        money.insert("A".to_string(), 100.0);
         let mut demands = BTreeMap::new();
         let mut d = ResourceMap::new();
         d.insert("铁".to_string(), 100.0);
@@ -411,10 +457,9 @@ mod tests {
         let (_alloc, price, _unspent) = clear_market(
             &config,
             &supply,
-            &weights,
+            &money,
             &demands,
             initial_price(&config, &ResourceMap::new()),
-            100.0,
         );
         assert!(price["铁"] > p0, "price should rise: {}", price["铁"]);
     }

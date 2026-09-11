@@ -202,6 +202,17 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
                 &mut report,
             );
         }
+        for (i, bp) in fac.welfare_budget.iter().enumerate() {
+            apply_budget(
+                state,
+                config,
+                &fid,
+                BudgetKind::Welfare,
+                bp,
+                i,
+                &mut report,
+            );
+        }
         for (i, ip) in fac.invest_weights.iter().enumerate() {
             apply_weight(
                 state,
@@ -232,6 +243,12 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
         }
         for (i, lp) in fac.loyalty_budget.iter().enumerate() {
             apply_loyalty_budget(state, &fid, lp, i, &mut report);
+        }
+        for (i, lp) in fac.development_money.iter().enumerate() {
+            apply_development_money(state, &fid, lp, i, &mut report);
+        }
+        for (i, lp) in fac.construction_money.iter().enumerate() {
+            apply_construction_money(state, &fid, lp, i, &mut report);
         }
         for (i, bpatch) in fac.buildings.iter().enumerate() {
             let path = format!("{fid}.buildings[{i}]");

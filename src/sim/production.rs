@@ -38,10 +38,12 @@ pub fn build_weight(state: &State, config: &GameConfig, fid: &str, cid: &str, b:
     }
 }
 
-/// The command-controlled 娱乐/福利预算 of a city (its loyalty spending per round,
-/// in market value). Follows the control scope: the system uses the config default,
-/// a Player-commanded city uses the commanded value.
-pub fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, cid: CityId) -> f64 {
+/// 某城的**福利权重**：势力级福利预算按这些权重分给城市。
+///
+/// `Player` 的 `loyalty_budget` 叶 = 玩家钉的权重；缺叶/`Auto` = 系统默认 1.0
+/// （即所有城均分）。旧函数名 `city_loyalty_budget` 已改语义：它不再是「每城市场价值预算」，
+/// 而是 `spec.md` 里「城市 福利权重」的落点。总预算在势力级 `welfare_budget`。
+pub fn city_welfare_weight(state: &State, fid: FactionId, cid: CityId) -> f64 {
     if state
         .loyalty_budget_control(fid.clone(), cid.clone())
         .is_player()
@@ -49,10 +51,10 @@ pub fn city_loyalty_budget(state: &State, config: &GameConfig, fid: FactionId, c
         state
             .control(fid.clone())
             .and_then(|c| c.loyalty_budget.get(&cid))
-            .map(|c| c.value)
-            .unwrap_or(config.governance.default_entertainment)
+            .map(|c| c.value.max(0.0))
+            .unwrap_or(1.0)
     } else {
-        config.governance.default_entertainment
+        1.0
     }
 }
 

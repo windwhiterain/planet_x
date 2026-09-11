@@ -183,9 +183,16 @@ pub struct FactionControlView {
     pub ship_role: Vec<ShipRoleEntry>,
     pub investment_budget: Vec<BudgetEntry>,
     pub construction_budget: Vec<BudgetEntry>,
+    /// **势力级福利预算**（每资源一行）。
+    pub welfare_budget: Vec<BudgetEntry>,
     pub invest_weights: Vec<InvestWeightEntry>,
     pub build_weights: Vec<BuildWeightEntry>,
+    /// 城市**福利权重**（旧字段名 `loyalty_budget`，语义已改成权重）。
     pub loyalty_budget: Vec<LoyaltyBudgetEntry>,
+    /// 逐城开发货币预算（国内市场开启时使用）。
+    pub development_money: Vec<LoyaltyBudgetEntry>,
+    /// 逐城建造货币预算（国内市场开启时使用）。
+    pub construction_money: Vec<LoyaltyBudgetEntry>,
 }
 
 /// The editable control surface, exactly what the frontend edits and posts back
@@ -559,15 +566,24 @@ pub struct FactionControlPatch {
     /// 建造预算补丁（造舰）。
     #[serde(default)]
     pub construction_budget: Vec<BudgetPatch>,
+    /// **福利预算补丁**（每资源一行）。
+    #[serde(default)]
+    pub welfare_budget: Vec<BudgetPatch>,
     /// 建设投资权重补丁。
     #[serde(default)]
     pub invest_weights: Vec<InvestWeightPatch>,
     /// 建造投资权重补丁。
     #[serde(default)]
     pub build_weights: Vec<BuildWeightPatch>,
-    /// 娱乐/福利预算补丁。
+    /// 城市福利权重补丁（旧名 `loyalty_budget`）。
     #[serde(default)]
     pub loyalty_budget: Vec<LoyaltyBudgetPatch>,
+    /// 逐城开发货币预算补丁。
+    #[serde(default)]
+    pub development_money: Vec<LoyaltyBudgetPatch>,
+    /// 逐城建造货币预算补丁。
+    #[serde(default)]
+    pub construction_money: Vec<LoyaltyBudgetPatch>,
     /// 结构性建筑补丁（新增/删除/改属性）。
     #[serde(default)]
     pub buildings: Vec<BuildingPatch>,
