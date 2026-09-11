@@ -34,8 +34,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import KIT, group_main  # noqa: E402
 
-SEEDS = (1, 2, 3, 4, 5, 7, 11)
-ROUNDS = 1000
+SEEDS = (1, 2, 3, 4, 5, 7, 11)          # 与 g2 的主世界**共用** 1/7/11@400（同一批缓存目录）
+ROUNDS = 400
 
 # 与 `tests/horizon_long.rs` 同值：零活城之后允许拖多少回合才重新立城（殖民不依赖产出，
 # 所以给得宽——它防的是「殖民机制坏了」，不是「经济不好」）；世界总价值的上限。

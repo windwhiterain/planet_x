@@ -42,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _harness import CACHE_ROOT, KIT, group_main  # noqa: E402
 
-SEEDS = (1, 7, 42)
+SEEDS = (1, 7, 11)       # 与 g3 共用同一批 400 回合世界（轨迹确定性嵌套 ⇒ 同一目录）
 ROUNDS = 400
 MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会空转，得报出来
 MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1366 笔

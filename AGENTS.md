@@ -32,7 +32,7 @@
 ```bash
 # ① 数据级 —— **流程就是「build release + python 测试」**：run.py 会先按需
 #    `cargo build --release`（二进制比 src/config 旧或不存在时），再跑各组。
-uv run --project play/planet_xq python play/tests/run.py all      # 四组 357 条判据；缓存命中 ~4 s
+uv run --project play/planet_xq python play/tests/run.py all      # 四组 357 条判据；温跑 ~30–60 s / 冷跑 ~96 s
 uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
 uv run --project play/planet_xq python play/tests/run.py --no-build  # 跳过前置编译
 uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 19 个错，全咬住
@@ -45,6 +45,10 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
 
 - 数据级那套跑在**投影**上（`--index` 跑出来的数据）：改一个文件后**不用重编 8 个测试二进制**，
   世界按 `(二进制指纹, seed, 回合数)` 缓存在 `target/test-fixtures/`（代码一改自动失效）。
+- **轨迹跨组共用 + 可截断/可续跑**（2026-10）：同 seed 的投影在各组之间共用（`_harness.projection`）：
+  请求更短的回合数 ⇒ **直接读已有长轨迹的前缀**；请求更长的 ⇒ **从短轨迹的存档（`_ckpt.json`）续跑，
+  再把前缀行拼回来**（实测 21/21 个文件与直跑**逐字全等**，续跑比直跑快 ~2.5×）。所以「只跑短组」
+  就只生成短的，「跑长的」才接着往下生成。缓存总量也小了（1 GB 上下，不再靠 1000 回合的世界撑着）。
 - **数据级一律走 release 二进制**（用户裁决：*「python 测试的方式改为 build release 加 python 测试」*）
   ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
 - 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与

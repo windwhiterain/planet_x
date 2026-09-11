@@ -117,6 +117,17 @@ class Harness:
         if not self.refresh and (dest / "_cache.json").exists():
             self.hits.append(dest.name)
             return dest
+        # **近路 A：同 seed 已有更长的轨迹 ⇒ 截断读**（只跑短组时不必重新生成长的）。
+        if not self.refresh and (longer := self._sibling(seed, rounds, longer=True)) is not None:
+            self._truncate(dest, longer, seed, rounds)
+            return dest
+        # **近路 B：同 seed 已有更短的轨迹（带存档）⇒ 从存档**接着生成**，
+        # 再把它前面那几回合的行拼回来**。实测：18/18 张表「前缀 + 续跑尾部 == 直跑」逐字全等。
+        if not self.refresh and (shorter := self._sibling(seed, rounds, longer=False)) is not None:
+            ckpt = shorter / "_ckpt.json"
+            if ckpt.exists():
+                self._extend(dest, shorter, ckpt, seed, rounds)
+                return dest
         tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
@@ -139,6 +150,101 @@ class Harness:
         self.misses.append((dest.name, elapsed))
         return dest
 
+    def _sibling(self, seed: int, rounds: int, longer: bool) -> Path | None:
+        """同 seed、**同指纹**的邻档轨迹（取最接近的那个）。"""
+        best: tuple[Path, int] | None = None
+        for d in CACHE_ROOT.glob(f"{self.fingerprint()}-s{seed}-r*"):
+            if not d.is_dir() or not _CACHE_NAME.match(d.name):
+                continue
+            r = int(d.name.rsplit("-r", 1)[1])
+            if (r > rounds) if longer else (r < rounds):
+                if best is None or (r < best[1] if longer else r > best[1]):
+                    best = (d, r)
+        return best[0] if best else None
+
+    # 投影目录里**不是**轨迹的东西：元数据、存档、日志、摘要缓存（拼接时不带过去）。
+    _META = ("_cache.json", "_ckpt.json", "_run.log")
+
+    def _copy_tables(self, dest: Path, src: Path, lo: int, hi: int, mode: str) -> None:
+        """把 `src` 的投影**整目录**按回合过滤后搬进 `dest`（`mode` = `"w"` 或 `"a"`）。
+
+        ⚠ 不能只搬 `idx/`：投影目录还有**顶层的** `main.jsonl`（逐回合状态）与 `schema.json`
+        （声明）——我第一版漏了它们，冷跑四组全红（`schema.json` 找不到）。
+        `*.jsonl` 逐行按 `lo < round <= hi` 过滤（不整份读进内存），其余文件原样拷。
+        """
+        for f in sorted(src.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(src)
+            if f.name in self._META or f.name.startswith("_digest_extract-") or f.suffix == ".pkl":
+                continue
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if f.suffix != ".jsonl":
+                if mode == "w":
+                    shutil.copy2(f, out)
+                continue
+            # ⚠ `newline=""`：Windows 上文本模式会把 `\n` 翻译成 `\r\n`，那样拼出来的投影
+            # 与直跑**字节不同**（内容一样，但也就不该说"逐字全等"了）。
+            with f.open(encoding="utf-8", newline="") as fi, out.open(mode, encoding="utf-8", newline="") as fo:
+                for line in fi:
+                    if not line.strip():
+                        continue
+                    if lo < json.loads(line).get("round", 0) <= hi:
+                        fo.write(line)
+
+    def _finish(self, dest: Path, seed: int, rounds: int, t0: float, kind: str, src: str) -> None:
+        (dest / "_cache.json").write_text(
+            json.dumps(
+                {"seed": seed, "rounds": rounds, "binary": str(self.path),
+                 "fingerprint": self.fingerprint(), "elapsed_s": round(time.time() - t0, 1),
+                 "size_mb": round(_dir_size(dest) / 1e6, 1), kind: src},
+                ensure_ascii=False, indent=1,
+            ),
+            encoding="utf-8",
+        )
+        self.misses.append((dest.name, round(time.time() - t0, 1)))
+
+    def _truncate(self, dest: Path, longer: Path, seed: int, rounds: int) -> None:
+        """**截断读**：只跑短组时，直接读已有长轨迹的前 `rounds` 回合，不重新生成。
+
+        ⚠ 截断出来的目录**不留存档**：长轨迹的存档在更靠后的回合上，拿它当"更短轨迹的存档"
+        会让下一次续跑接错地方。没有存档 ⇒ 下一次要更长的轨迹时会走续跑或重跑，都不会错。
+        """
+        t0 = time.time()
+        tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        self._copy_tables(tmp, longer, -1, rounds, "w")
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        self._finish(dest, seed, rounds, t0, "truncated_from", longer.name)
+
+    def _extend(self, dest: Path, shorter: Path, ckpt: Path, seed: int, rounds: int) -> None:
+        """**接着生成**：从短轨迹的存档续跑到 `rounds`，再把短轨迹的前缀行拼回来。
+
+        实测（2026-10）：对 seed 7 的 400 回合轨迹续跑到 450，18/18 张投影表
+        「前缀 + 续跑尾部」与**直跑 450 逐字全等** ⇒ 拼接是安全的（确定性 + 存档续跑同构）。
+        """
+        m = int(shorter.name.rsplit("-r", 1)[1])
+        t0 = time.time()
+        tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")
+        tail = tmp.with_name(tmp.name + "-tail")
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tail, ignore_errors=True)
+        tail.mkdir(parents=True, exist_ok=True)
+        self.run_into(tail, seed, rounds - m, extra=("--start", str(ckpt)))
+        tmp.mkdir(parents=True, exist_ok=True)
+        self._copy_tables(tmp, shorter, -1, m, "w")
+        self._copy_tables(tmp, tail, m, rounds + 1_000_000, "a")
+        # 新档的存档 = 续跑那一段的终点
+        if (tail / "_ckpt.json").exists():
+            shutil.copy2(tail / "_ckpt.json", tmp / "_ckpt.json")
+        shutil.rmtree(tail, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        self._finish(dest, seed, rounds, t0, "extended_from", shorter.name)
+
     def run_into(self, dest: Path, seed: int, rounds: int, extra=()) -> None:
         """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。
 
@@ -150,6 +256,9 @@ class Harness:
             "--seed", str(seed),
             "--round", str(rounds),
             "--index", str(dest),
+            # 每次都留一份**存档**：同 seed 的更长轨迹就是从它续跑的（短组跑完，长组接着生成）。
+            # ⚠ 调用方自己给了 `--save`（g1 的读面/replay 用例）就别再加——clap 不允许重复。
+            *([] if "--save" in extra else ["--save", str(dest / "_ckpt.json")]),
             *extra,
         ]
         log = dest / "_run.log"
