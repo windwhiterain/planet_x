@@ -3,7 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 193**（g1 50 / g2 92 / g3 28 / g4 23）；**Rust 196**（+31 探针 ignored）。
+> 计数：**Python 215**（g1 58 / g2 106 / g3 28 / g4 23）；**Rust 189**（+31 探针 ignored）。
+> **sim 74 → 54**（第 7 批搬走/删掉 20 条）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -14,7 +15,7 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 7 批：A 类 + `capital`/`inputs`/`story` + C 类第一刀）** | **193**（g1 50 / g2 92 / g3 28 / g4 23） | **196**（+31 探针 `#[ignore]`） |
+| **现在（第 7 批：搬到 `blueprints`/`fleet`/`site_supply`）** | **215**（g1 58 / g2 106 / g3 28 / g4 23） | **189**（+31 探针 `#[ignore]`） |
 
 > 组数里 g4 18→23、Rust 196→205 里的大部分是**同步 `main` 带进来的**（另一批在扩 g4 纪律，并给
 > `sim::site_supply`、`domestic_market`、`market`、`contract` 各加了用例），不是第 6 批搬的；
@@ -263,6 +264,38 @@ g2 的新判据**不写死**「prologue 在第 1 回合给谁降多少」，而�
 Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，
 因为 AI 会在回合末刚派完 Dock、下一回合开头就改派 ⇒ 那些叶子**从没执行过**。必须像原件那样
 **钉成 `Player`** 才是这条用例本来测的东西。
+
+**第 7 批逐族流水（sim 74 → 54）**
+
+| 族 | 结果 | 落在哪 / 靠什么 |
+| --- | --- | --- |
+| A 类 3 条重复 | 删 | g1 早有严格覆盖 |
+| `capital` 4 | 整文件删 | g3 `capital_checks` + g2 合成场景（A/B） |
+| `inputs` 3 | 整文件删 | g1 `input_face_shape`（逐回合） |
+| `story` 1 | 半（另 1 条后来靠 `body_positions` 也搬了） | g2「剧情后果落到读面上」 |
+| `mod.rs` 1 | 删（该文件现在**只剩夹具**） | g1 `world_shape` |
+| `governance` 1 | 删 | g1 `neutral_defaults` |
+| `blueprints` 2 | 删 | g2 悬空指针停产 + 买不起等钱（A/B） |
+| `fleet` 2 | 删 | g2 陈旧的跟随 + 停泊/待命（靠新派生表） |
+| `site_supply` 2 | 删 | 新挂 5 个 `--call` + g2 `site_ledger_checks` |
+
+**两处读面/接口扩了**：
+1. **派生表 `body_positions`**（`round / 天体名 / x / y`）——`bodies` 是静态母表、`ships.x/y` 是
+   绝对坐标，「这艘舰相对某天体在哪儿」以前没读法。纯追加 ⇒ digest 不变。
+2. **`--call` 家族**：`site_reserve` / `exportable_at` / `site_deficit` / `lane_rounds` /
+   `site_ledger`。注意 `call_function(&config, &state, …)` **拿到了 state** ⇒ 有状态的纯函数也能挂。
+
+**⚠ 三条踩过的假绿/空转（都已写成注释）**：
+* `q.table()` 的**列**里 JSON `null` 是 **NaN** 不是 `None`（g3 立刻红了 1042 处）。
+* 同人口要**并列任取**（s42 r237 月球/天王星都 200 人）。
+* `site_ledger` 只按 `state.depots` 收站点 ⇒ **回合 0 是空表**；垫国库时用了**预算表**的键
+  （`硅/碳/铁`）而选装要 **氦-3/金** ⇒ 「垫厚」那一臂其实还是穷的。**两处都是判据会绿但没在测**。
+
+**剩下 54 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+`mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
+`site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
+* **要先把「建筑已建面积」做成可写的入口**（`site_supply` 那 2 条 + `governance` 的 A/B）⇒ 一个状态补丁形状能解锁一族；
+* **要挂纯函数 `--call`**：`resolve_loadout`/`choose_loadout`（`blueprints`）、`mond_drift`（`mond`/`knowledge`）、思潮各轴（`ideology`）。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 
