@@ -693,6 +693,16 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **军事信号**（第 7 批）：`military_deltas(事件表)` —— 纯函数（只吃事件）。
+        // 「我丢一城 / 沉一舰 → −1；夺一城 / 击沉敌舰 → +1」，欠费报废不算战功、
+        // 复垦算殖民不计分。事件形状与状态里 `events` 一致（内部标记 `type`）。
+        "military_deltas" => {
+            let events: Vec<planet_x::model::GameEvent> = serde_json::from_value(
+                args.get("events").cloned().ok_or("args.events 缺失")?,
+            )
+            .map_err(|e| format!("args.events 必须是事件数组：{e}"))?;
+            json!(sim::military_deltas(&events))
+        }
         // **逐站运力账**（第 7 批）：`capacity_ledger` 一本账供两处用（挂单 + 造货船），
         // `factions.haul_gap` 就是它的 `Σ缺口 ÷ Σ要求` ⇒ 判据据此**同源复核**（两本账漂没漂）。
         "freight_ledger" => {

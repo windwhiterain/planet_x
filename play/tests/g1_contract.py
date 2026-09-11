@@ -746,6 +746,40 @@ def call_functions(h, ck, tmp: Path) -> None:
              bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
              f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
 
+    # ⑧ 军事信号（`sim/tests/ideology.rs::military_signal_uses_the_milestones_and_is_branch_agnostic`，
+    #    第 7 批）：新挂 `--call military_deltas {events}` —— 纯函数（只吃事件表）。
+    KD = lambda a, b: {"ship": a, "faction": b, "weapon": "kinetic"}  # noqa: E731
+    killed = lambda ship, owner, by: {"type": "ship_destroyed", "ship": ship, "owner": owner,  # noqa: E731
+                                      "class": "corvette", "cause": "combat", "by": by}
+    razed = {"type": "city_razed", "city": "城", "owner": "乙", "fallen_to": "甲",
+             "by_ship": "甲舰", "damage": 9.0, "pop_before": 200}
+    founded = lambda owner, how, prev: {"type": "colony_founded", "city": "城", "owner": owner,  # noqa: E731
+                                        "body": "木星", "seeded_ship_class": "corvette",
+                                        "how": how, "prev_owner": prev}
+    md = lambda evs: call("military_deltas", {"events": evs})  # noqa: E731
+    mutual = md([killed("乙舰", "乙", KD("甲舰", "甲")), killed("甲舰", "甲", KD("乙舰", "乙"))])
+    one = md([killed("乙舰", "乙", KD("甲舰", "甲"))])
+    rusted = md([{"type": "ship_destroyed", "ship": "锈舰", "owner": "丙", "class": "corvette",
+                  "cause": "upkeep_shortfall", "by": None}])
+    raze_then = md([razed, founded("丙", "refounded", "乙")])
+    defect = md([{"type": "city_defected", "city": "城", "from": "乙", "to": "甲", "loyalty": 0.2}])
+    revolt = md([{"type": "revolt", "city": "城", "faction": "乙", "loyalty": 0.0}])
+    new_site = md([founded("丙", "new_site", None)])
+    ck.check("--call military_deltas：**互杀双方各得一分战功**（净 0，不是「最后一条 Attack 说了算」）",
+             mutual.get("甲") == 0.0 and mutual.get("乙") == 0.0, f"互杀 ⇒ {mutual}")
+    ck.check("--call military_deltas：单方面被击沉 ⇒ 凶手 +1、事主 −1；**欠费报废不算战功**",
+             one.get("甲") == 1.0 and one.get("乙") == -1.0
+             and rusted.get("丙") == -1.0 and rusted.get("甲", 0.0) == 0.0,
+             f"单方面 {one}｜欠费报废 {rusted}")
+    ck.check("--call military_deltas：拆城 ⇒ 失城方 −1、拆城方 +1，**复垦者不因此得分**（复垦是殖民）",
+             raze_then.get("乙") == -1.0 and raze_then.get("甲") == 1.0
+             and raze_then.get("丙", 0.0) == 0.0,
+             f"拆平+复垦 ⇒ {raze_then}")
+    ck.check("--call military_deltas：**活城易主与叛乱兜底同分**（不许「分数取决于有没有可倒戈目标」）",
+             defect.get("乙") == -1.0 and defect.get("甲") == 1.0
+             and revolt.get("乙") == -1.0 and new_site.get("丙", 0.0) == 0.0,
+             f"倒戈 {defect}｜叛乱 {revolt}｜新建城 {new_site}")
+
     # ⑦ 逐站运力账（`sim/tests/trade.rs::freight_gap_is_the_same_ledger_the_engine_posts_contracts_from`，
     #    第 7 批）：新挂 `--call freight_ledger {faction}` = `capacity_ledger` 的平铺版
     #    （一本账供两处用：挂单 + 造货船）。判据 = 它与读面那一列 `factions.haul_gap` **同源**。

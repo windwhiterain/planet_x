@@ -1,5 +1,14 @@
 //! 思潮与忠诚：军事信号（只由事件推出）、战争/经济如何推思潮、外交亲和方向、低忠诚倒戈、娱乐设施拉住远城。
 //!
+//! ## 2026-10（第 7 批）：`military_signal_uses_the_milestones_and_is_branch_agnostic` 搬去了 g1
+//!
+//! 新挂 `--call military_deltas {events}`（纯函数，只吃事件表；事件形状与状态里 `events` 一致，
+//! 内部标记 `type`）。原件的六个用例逐条复现：**互杀双方各得一分**（各 0）、单方面 +1/−1、
+//! 欠费报废只扣失主、拆城 ±1 而**复垦者不计分**、**活城易主与叛乱兜底同分**、新建城不计分。
+//!
+//! **留在这里的**：另外三条要**往世界里注入事件**再跑 `step_ideology`
+//! （`--call` 是**纯函数**契约，加「可变调用」是设计改动）⇒ 归 §4 内部契约/手工世界。
+//!
 //! ## 2026-10（第 7 批）：`low_loyalty_city_defects_to_most_opposing_ideology_instead_of_razing`
 //! 搬去了 g2 **合成场景 · 低忠诚改旗易帜**（4 条判据）
 //!
@@ -24,131 +33,6 @@
 //! 同 = 1、全对极 = 0、恒在 `[0,1]`，外加**对称**与沿轴**单调**（原件只比了「自己 ≥ 别人」）。
 
 use super::*;
-
-/// 军事信号（思潮「和平↔军国」的驱动量）必须**只**由事件历史推出，且**同一现象同分**。
-///
-/// 这里逐条钉住旧实现的两个真实缺陷：
-/// 1. **互杀吞掉战功**：旧口径是「同回合最后一条 `Attack` 的势力」，那要 `state.ship(attacker)`
-///    才知道攻击者属于谁——凶手若在本回合也被打沉，它已经不在 `state.ships` 里，于是这次
-///    击杀**领不到功**。权威的 `by` 不受影响。
-/// 2. **失城方读成了抢城者**：旧口径用 `state.city(city).faction_id` 判「谁丢了城」，而夷平
-///    不改归属、同回合稍后的复垦会把它改成新主，于是 −1 记到了**复垦者**头上。
-///
-/// 另外钉住「`CityDefected`（主路）与 `Revolt`（兜底）必须同分」——它们是同一个触发的两条
-/// 分支，旧代码却只给兜底分支扣分。
-#[test]
-fn military_signal_uses_the_milestones_and_is_branch_agnostic() {
-    let d =
-        |events: &[GameEvent], fid: &str| military_deltas(events).get(fid).copied().unwrap_or(0.0);
-
-    // 1) 互杀：A 的舰打沉 B 的舰，B 的舰同回合也打沉 A 的舰 → **双方各得一分战功**。
-    let killer = |ship: &str, faction: &str| Killer {
-        ship: ship.to_string(),
-        faction: faction.to_string(),
-        weapon: "kinetic".to_string(),
-    };
-    let mutual = vec![
-        GameEvent::ShipDestroyed {
-            ship: "乙舰".into(),
-            owner: "乙".into(),
-            class: "corvette".into(),
-            cause: DeathCause::Combat,
-            by: Some(killer("甲舰", "甲")),
-        },
-        GameEvent::ShipDestroyed {
-            ship: "甲舰".into(),
-            owner: "甲".into(),
-            class: "corvette".into(),
-            cause: DeathCause::Combat,
-            by: Some(killer("乙舰", "乙")),
-        },
-    ];
-    assert_eq!(
-        d(&mutual, "甲"),
-        0.0,
-        "甲沉一舰失一分、击沉一舰得一分，净 0"
-    );
-    assert_eq!(d(&mutual, "乙"), 0.0, "乙同理——旧口径下会有一方拿不到战功");
-    // 单方面被击沉：凶手得分，事主扣分。
-    let one_sided = vec![GameEvent::ShipDestroyed {
-        ship: "乙舰".into(),
-        owner: "乙".into(),
-        class: "corvette".into(),
-        cause: DeathCause::Combat,
-        by: Some(killer("甲舰", "甲")),
-    }];
-    assert_eq!(d(&one_sided, "甲"), 1.0);
-    assert_eq!(d(&one_sided, "乙"), -1.0);
-
-    // 2) 欠费报废：失主扣分，**没有人**领功（不是战功）。
-    let rusted = vec![GameEvent::ShipDestroyed {
-        ship: "锈舰".into(),
-        owner: "丙".into(),
-        class: "corvette".into(),
-        cause: DeathCause::UpkeepShortfall,
-        by: None,
-    }];
-    assert_eq!(d(&rusted, "丙"), -1.0);
-    assert_eq!(d(&rusted, "甲"), 0.0, "欠费报废不该被记成任何人的战功");
-
-    // 3) 城被 A 拆平、同回合被 C 复垦：扣分属于**失城方 B**，复垦者 C 不因此得军事分。
-    let razed_then_refounded = vec![
-        GameEvent::CityRazed {
-            city: "城".into(),
-            owner: "乙".into(),
-            fallen_to: "甲".into(),
-            by_ship: "甲舰".into(),
-            damage: 9.0,
-            pop_before: 200,
-        },
-        GameEvent::ColonyFounded {
-            city: "城".into(),
-            owner: "丙".into(),
-            body: "木星".into(),
-            seeded_ship_class: "corvette".into(),
-            how: FoundingHow::Refounded,
-            prev_owner: Some("乙".into()),
-        },
-    ];
-    assert_eq!(
-        d(&razed_then_refounded, "乙"),
-        -1.0,
-        "失城方是乙，不是复垦者"
-    );
-    assert_eq!(d(&razed_then_refounded, "甲"), 1.0, "拆城方得一分");
-    assert_eq!(
-        d(&razed_then_refounded, "丙"),
-        0.0,
-        "复垦是殖民行为，不进军事轴"
-    );
-
-    // 4) 活城易主（离心倒戈）必须与叛乱兜底同分。
-    let defect = vec![GameEvent::CityDefected {
-        city: "城".into(),
-        from: "乙".into(),
-        to: "甲".into(),
-        loyalty: 0.2,
-    }];
-    assert_eq!(d(&defect, "乙"), -1.0, "失主必须扣分（与 Revolt 兜底同分）");
-    assert_eq!(d(&defect, "甲"), 1.0);
-    let revolt = vec![GameEvent::Revolt {
-        city: "城".into(),
-        faction: "乙".into(),
-        loyalty: 0.0,
-    }];
-    assert_eq!(d(&revolt, "乙"), -1.0);
-
-    // 5) 新建城（真·殖民）不进军事轴。
-    let founded = vec![GameEvent::ColonyFounded {
-        city: "新城".into(),
-        owner: "丙".into(),
-        body: "地球".into(),
-        seeded_ship_class: "corvette".into(),
-        how: FoundingHow::NewSite,
-        prev_owner: None,
-    }];
-    assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
-}
 
 /// 思潮：战争得利把「和平↔军国」推向军国端。
 #[test]
