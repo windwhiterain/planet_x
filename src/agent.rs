@@ -103,8 +103,7 @@ pub fn state_json(state: &State, view: &RoundView) -> serde_json::Value {
 /// and self-describes the keys/types an agent may query (instead of memorising
 /// them). Exposed via `--schema`.
 pub fn schema_value() -> serde_json::Value {
-    let schema = schemars::schema_for!(Trajectory);
-    serde_json::to_value(schema).expect("schema is serializable")
+    crate::schema::of::<Trajectory>()
 }
 
 /// A JSON Schema for the **canonical world** ([`State`] and every entity it embeds) ——
@@ -115,8 +114,7 @@ pub fn schema_value() -> serde_json::Value {
 /// 于是「模型 `///` 就是唯一的产品文案」这件事成立，前端与 kit 都不必再维护翻译。
 /// （代价：`State` 及其内嵌类型都要 `schemars::JsonSchema`；元组键字段另挂 `#[schemars(with)]`。）
 pub fn state_schema_value() -> serde_json::Value {
-    let schema = schemars::schema_for!(State);
-    serde_json::to_value(schema).expect("state schema is serializable")
+    crate::schema::of::<State>()
 }
 
 /// **名词与解释**（悬停弹窗的语料）：三份 schema 合成一个值。

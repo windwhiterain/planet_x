@@ -284,10 +284,9 @@ pub fn control_surface(state: &State, config: &GameConfig) -> serde_json::Value 
 /// schemars 只知道「有这么个字段」，不知道「哪几个字段是身份键、哪几个是值、
 /// 哪些是只读派生列」。写面（web 的控制行、kit 的 `set_*`）要的正是后者——
 /// 见 [`super::leaves`] 的模块文档（一份事实、三端共用）。
-/// 并进来的键名与 `schemars` 的不冲突（`$schema`/`title`/`type`/`properties`/`$defs`）。
+/// 并进来的键名与 `schemars` 的不冲突（`$schema`/`title`/`type`/`properties`/`definitions`）。
 pub fn control_schema_value() -> serde_json::Value {
-    let schema = schemars::schema_for!(CommandReq);
-    let mut out = serde_json::to_value(schema).expect("control schema is serializable");
+    let mut out = crate::schema::of::<CommandReq>();
     let facts =
         serde_json::to_value(super::leaves::facts()).expect("control facts are serializable");
     if let (Some(top), Some(facts)) = (out.as_object_mut(), facts.as_object()) {
