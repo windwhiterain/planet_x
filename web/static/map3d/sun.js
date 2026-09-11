@@ -15,7 +15,7 @@
 // 「亮的东西真的比白更亮」，而不是在球外画一圈半透明橙色。
 
 import * as THREE from 'three';
-import { NOISE_GLSL } from './util.js';
+import { NOISE_GLSL, fbmOct } from './util.js';
 import { TUNING } from './tuning.js';
 
 const SUN_VERT = /* glsl */`
@@ -198,8 +198,9 @@ const CORONA_FRAG = /* glsl */`
 `;
 
 const CORONA_MAT = (size, core, intensity, oct, falloff = 2.6, simple = false) => new THREE.ShaderMaterial({
-  defines: simple ? { FBM_OCT: oct, CORONA_SIMPLE: '' } : { FBM_OCT: oct },
+  defines: simple ? { CORONA_SIMPLE: '' } : {},
   uniforms: {
+    uFbmOct: fbmOct(oct),
     uTime: { value: 0 },
     uSize: { value: size },
     uIntensity: { value: intensity },
@@ -222,19 +223,17 @@ export function createSun(tier) {
   const oct = tier.oct;
 
   const photosphereMat = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uIntensity: { value: TUNING.sunIntensity } },
+    uniforms: { uFbmOct: fbmOct(oct), uTime: { value: 0 }, uIntensity: { value: TUNING.sunIntensity } },
     vertexShader: SUN_VERT,
     fragmentShader: SUN_PHOTO_FRAG,
-    defines: { FBM_OCT: oct },
   });
   const photosphere = new THREE.Mesh(new THREE.SphereGeometry(R, tier.seg[0], tier.seg[1]), photosphereMat);
   g.add(photosphere);
 
   const chromoMat = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 } },
+    uniforms: { uFbmOct: fbmOct(Math.max(2, oct - 1)), uTime: { value: 0 } },
     vertexShader: SUN_VERT,
     fragmentShader: CHROMO_FRAG,
-    defines: { FBM_OCT: Math.max(2, oct - 1) },
     transparent: true,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
@@ -260,7 +259,9 @@ export function createSun(tier) {
 
   const parts = [photosphere, chromosphere, corona, halo];
   const setTier = (t) => {
-    parts.forEach((m) => { if (m.material.defines) { m.material.defines.FBM_OCT = t.oct; m.material.needsUpdate = true; } });
+    // 八度数现在是 **uniform**（见 util.js 里 NOISE_GLSL 那段），所以换档只改一个数值、
+    // 不再触发 `needsUpdate` 重编译 —— 顺带把「每换一次档就重编一遍太阳 shader」也省掉了。
+    parts.forEach((m) => { if (m.material.uniforms.uFbmOct) m.material.uniforms.uFbmOct.value = Math.max(1, t.oct); });
     corona.visible = !!t.corona;
     halo.visible = !!t.corona;
     chromosphere.visible = !!t.corona;

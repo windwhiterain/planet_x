@@ -17,7 +17,7 @@
 //     解析求「该点到太阳的射线是否穿过行星球」）双向都有——这两个影子是「土星感」的一半。
 
 import * as THREE from 'three';
-import { NOISE_GLSL, hex2rgb, lighten } from './util.js';
+import { NOISE_GLSL, fbmOct, hex2rgb, lighten } from './util.js';
 import { classIndex } from './kinds.js';
 import { TUNING } from './tuning.js';
 
@@ -54,7 +54,7 @@ const COMMON_FRAG = /* glsl */`
              dot(p, vec3(113.5, 271.9, 124.6)));
     return fract(sin(p) * 43758.5453123);
   }
-  // 固定八度的 fbm（比 NOISE_GLSL 里那个由 FBM_OCT 控制的版本便宜，用于求法线时的差分）。
+  // 固定八度的 fbm（比 NOISE_GLSL 里那个由 uFbmOct 控制的版本便宜，用于求法线时的差分）。
   float fbmFast(vec3 p){
     return 0.5 * vnoise(p) + 0.25 * vnoise(p * 2.02) + 0.125 * vnoise(p * 4.08);
   }
@@ -614,8 +614,9 @@ export function planetMaterial(spec, tier, opts = {}) {
   const mat = new THREE.ShaderMaterial({
     vertexShader: PLANET_VERT,
     fragmentShader: PLANET_FRAG,
-    defines: { FBM_OCT: tier.oct, CITY_MAX: CITY_MAX },
+    defines: { CITY_MAX: CITY_MAX },
     uniforms: {
+      uFbmOct: fbmOct(tier.oct),
       uBase: { value: new THREE.Vector3(...base) },
       uAccent: { value: new THREE.Vector3(...accent) },
       uAtmo: { value: new THREE.Vector3(...atmo) },
@@ -672,8 +673,8 @@ export function createClouds(radius, spec, tier) {
   const mat = new THREE.ShaderMaterial({
     vertexShader: CLOUD_VERT,
     fragmentShader: CLOUD_FRAG,
-    defines: { FBM_OCT: Math.max(3, tier.oct - 1) },
     uniforms: {
+      uFbmOct: fbmOct(Math.max(3, tier.oct - 1)),
       uTime: { value: 0 },
       uSpin: { value: 0 },
       uAmount: { value: cls === 2 ? 0.92 : 0.40 },
@@ -698,8 +699,8 @@ export function createRing(radius, spec, tier, planeQuat) {
   const mat = new THREE.ShaderMaterial({
     vertexShader: RING_VERT,
     fragmentShader: RING_FRAG,
-    defines: { FBM_OCT: Math.max(2, tier.oct - 2) },
     uniforms: {
+      uFbmOct: fbmOct(Math.max(2, tier.oct - 2)),
       uCol: { value: new THREE.Vector3(r, g, b) },
       uCol2: { value: new THREE.Vector3(r2, g2, b2) },
       uInner: { value: inner },

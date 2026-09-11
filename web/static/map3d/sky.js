@@ -17,7 +17,7 @@
 // K/M 橙红），亮度走幂律（绝大多数暗、极少数亮），最亮的那批带十字衍射。
 
 import * as THREE from 'three';
-import { NOISE_GLSL, rnd } from './util.js';
+import { NOISE_GLSL, fbmOct, rnd } from './util.js';
 
 // ---------------------------------------------------------------------------
 // ① 银河带 / 星云（低频，烘 cubemap）
@@ -114,7 +114,7 @@ export function bakeSky(renderer, res) {
     side: THREE.BackSide,
     depthTest: false,
     depthWrite: false,
-    defines: { FBM_OCT: 4 },
+    uniforms: { uFbmOct: fbmOct(4) },
   });
   const geo = new THREE.SphereGeometry(1, 48, 32);
   const mesh = new THREE.Mesh(geo, mat);

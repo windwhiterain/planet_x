@@ -68,9 +68,20 @@ export function rndDir(seed) {
 }
 
 // --- 共享 GLSL --------------------------------------------------------------
-// value-noise + fbm。旧的 map3d.js 里 fbm 是固定 4 个八度；这里改成由 `#define FBM_OCT`
-// 注入（质量档低时编 2 个八度），并加一个 ridged 版本（山脊/日珥/星云丝状结构都要它）。
+// value-noise + fbm。旧的 map3d.js 里 fbm 是固定 4 个八度；这里由 `uFbmOct`（uniform）注入。
+//
+// **八度数必须是 uniform，不能是 `#define` 常量**（2026-09 实测，别再改回去）：
+// 常量上界会让编译期把 `for` 完全展开。planet 片元里有 17 处 `fbm` + 4 处 `warp`
+// （每处 3 次 `fbm`）+ `ridged`，而每次 `fbm` 迭代内联一个 3D `vnoise`（8 次 `hash13`）
+// ⇒ oct=7 时是**两百多个内联 vnoise**。D3D 编译器（fxc）在这种规模上会退化到近乎跑不完：
+// 冷缓存实测 oct=2 停 13 s、oct=3 停 31 s、oct=5 直接**永不结束**；期间 GPU 0% / CPU 满载
+// （编译在 CPU 上），GPU 进程被占死 ⇒ 整个浏览器、所有标签页一起卡死。
+// 动态上界让循环体只出现一次，编译时间塌回可用范围；代价只是每轮一次循环开销，
+// 相对现有帧率余量可忽略。
+// **注意**：uniform 默认值是 0，漏设会让噪声全变 0（星球变平）——每个用到本块的材质
+// 都必须在 `uniforms` 里挂 `fbmOct(...)`。
 export const NOISE_GLSL = /* glsl */`
+  uniform int uFbmOct;
   float hash13(vec3 p){
     p = fract(p * 0.1031);
     p += dot(p, p.zyx + 31.32);
@@ -91,16 +102,16 @@ export const NOISE_GLSL = /* glsl */`
       mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
       mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
   }
-  // 标准 fbm：（FBM_OCT）个八度，lacunarity 2.02（避开整数倍造成的格点对齐）。
+  // 标准 fbm：uFbmOct 个八度，lacunarity 2.02（避开整数倍造成的格点对齐）。
   float fbm(vec3 p){
     float a = 0.5, s = 0.0;
-    for (int i = 0; i < FBM_OCT; i++){ s += a * vnoise(p); p *= 2.02; a *= 0.5; }
+    for (int i = 0; i < uFbmOct; i++){ s += a * vnoise(p); p *= 2.02; a *= 0.5; }
     return s;
   }
   // 山脊噪声：1-|2n-1|，八度加权更陡，用来做大陆山系 / 日珥丝 / 星云纤维。
   float ridged(vec3 p){
     float a = 0.5, s = 0.0;
-    for (int i = 0; i < FBM_OCT; i++){
+    for (int i = 0; i < uFbmOct; i++){
       float n = 1.0 - abs(2.0 * vnoise(p) - 1.0);
       s += a * n * n;
       p *= 2.13; a *= 0.5;
@@ -113,6 +124,10 @@ export const NOISE_GLSL = /* glsl */`
     return p + (q - 0.5) * amt;
   }
 `;
+
+// 每个用到 `NOISE_GLSL` 的材质都要挂这个（见上面那段：漏了 = 噪声全 0，星球变平）。
+export function fbmOct(n) { return { value: Math.max(1, Math.round(n || 1)) }; }
+
 
 // 黑体色温 → 线性 RGB（Tanner Helland 拟合，只在 1000K..40000K 有意义）。
 // 星空里每颗星的颜色按这个上色——这是「真实感」最便宜也最有效的一招。
