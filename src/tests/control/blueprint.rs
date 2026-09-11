@@ -210,10 +210,15 @@ fn the_blueprint_template_round_trips_back_through_apply() {
         serde_json::json!(false),
         "读面附加：这张图此刻没人在等钱"
     );
-    assert!(
-        row["order"].is_null(),
-        "本图对意图没有说话 ⇒ null（不是缺字段）"
-    );
+    // ⚠ 这里原来断言 `row["order"]` 是 null —— 但 `order` 那片叶 v22 就删了，而
+    // `Value` 上取**不存在的键**返回 `Null` ⇒ 那条断言**恒真**（空转，什么都咬不住）。
+    // 换成现在真的在的那三轴（意图的落点）：键必须在，值则由本图的记录决定。
+    for axis in ["风格", "姿态", "角色"] {
+        assert!(
+            row.get(axis).is_some(),
+            "读面必须给得出三轴 `{axis}`（`order` 那片叶已删，别拿它当哨兵）"
+        );
+    }
 
     for fac in surface["control"].as_array_mut().unwrap() {
         fac.as_object_mut()

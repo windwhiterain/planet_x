@@ -1041,7 +1041,7 @@ def _yards_of(h, st: dict, faction: str) -> list[tuple[str, int, str]]:
 def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
     """某个建造区的**设计图指针**逐回合（读面 `cities.建筑[].设计图`）。"""
     out = {}
-    for _, r in ci[ci["city_id"] == city].iterrows():
+    for _, r in ci[ci["城名"] == city].iterrows():
         for b in r["建筑"] or []:
             if b["建筑编号"] == bid:
                 out[int(r["round"])] = b.get("设计图")
@@ -1050,13 +1050,13 @@ def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
 
 def _bp_rows(bps, fid: str, name: str) -> dict:
     """某张设计图逐回合的行：`{回合: 行}`（读面 `blueprints`）。"""
-    mine = bps[(bps["faction_id"] == fid) & (bps["blueprint_id"] == name)]
+    mine = bps[(bps["势力"] == fid) & (bps["图名"] == name)]
     return {int(r["round"]): r for _, r in mine.iterrows()}
 
 
 def _bp_decisions(dec, fid: str, name: str | None = None) -> list[dict]:
     """设计图的判定行（`kind=blueprint`）；`name` 给了就只看那一张图。"""
-    rows = dec[(dec["kind"] == "blueprint") & (dec["faction_id"] == fid)]
+    rows = dec[(dec["kind"] == "blueprint") & (dec["势力"] == fid)]
     if name is not None:
         rows = rows[rows["actor"] == name]
     return rows.to_dict("records")
@@ -1065,7 +1065,7 @@ def _bp_decisions(dec, fid: str, name: str | None = None) -> list[dict]:
 def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
     """某城逐回合的建造行：`(回合, 舰级, {rate, increment})`（稀疏：有建造区才有键）。"""
     out = []
-    for _, r in cp[cp["city_id"] == city].iterrows():
+    for _, r in cp[cp["城名"] == city].iterrows():
         for k, v in (r["build"] or {}).items():
             out.append((int(r["round"]), k, v))
     return out
@@ -1105,11 +1105,11 @@ def blueprint_scenario_checks(h, ck) -> None:
     # 造法 = **两次 `--apply`**：先建一张普通的自建图、把建造区指过去，再**把图删掉** ⇒ 指针悬空。
     ghost = "待删的图"
     proj = h.scenario_apply("bp_dangling", seed, SCENARIO_ROUNDS, [
-        {"control": [{"faction_id": FID,
-                      "blueprints": [{"name": ghost, "class": class_,
-                                      "components": ["kinetic"], "mode": "Inherit"}],
-                      "buildings": [{"city": city, "building": bid, "blueprint": ghost}]}]},
-        {"control": [{"faction_id": FID, "blueprints": [{"name": ghost, "remove": True}]}]},
+        {"control": [{"势力": FID,
+                      "设计图库": [{"图名": ghost, "舰级": class_,
+                                      "选装": ["kinetic"], "归属": "Inherit"}],
+                      "建筑": [{"城": city, "建筑": bid, "设计图": ghost}]}]},
+        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删叶": True}]}]},
     ])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
@@ -1117,7 +1117,7 @@ def blueprint_scenario_checks(h, ck) -> None:
              bool(ptrs) and all(p == ghost for p in ptrs.values()),
              f"{city} 建筑{bid} 的指针逐回合：{ptrs}")
     # 防空转：那根指针**真的**是悬空的（不是「图还在、指针合法」蒙混过关）。
-    lib = set(q.table("blueprints")["blueprint_id"])
+    lib = set(q.table("blueprints")["图名"])
     ck.check("合成场景（设计图）：悬空指针守卫没有空转（指针真的悬空）",
              ptrs.get(0) == ghost and ghost not in lib,
              f"「{ghost}」不在任何势力的图库里（全表 {len(lib)} 个图名）")
@@ -1129,9 +1129,9 @@ def blueprint_scenario_checks(h, ck) -> None:
 
     # ② 玩家的图一个字都不许动 -------------------------------------------------
     mine = "玩家的守卫图"
-    diff = {"control": [{"faction_id": FID,
-                         "blueprints": [{"name": mine, "class": class_, "components": comps}],
-                         "buildings": [{"city": city, "building": bid, "blueprint": mine}]}]}
+    diff = {"control": [{"势力": FID,
+                         "设计图库": [{"图名": mine, "舰级": class_, "选装": comps}],
+                         "建筑": [{"城": city, "建筑": bid, "设计图": mine}]}]}
     proj = h.scenario_apply("bp_pinned", seed, SCENARIO_ROUNDS, [diff])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
     rows = _bp_rows(q.table("blueprints"), FID, mine)
@@ -1153,10 +1153,10 @@ def blueprint_scenario_checks(h, ck) -> None:
 
     # ③ 回收只碰自己造的 -------------------------------------------------------
     aic, mine2, pinned = f"{DESIGN_PREFIX}强袭·陈图", "玩家自己的图", f"{DESIGN_PREFIX}堡垒·玩家钉的"
-    diff = {"control": [{"faction_id": FID, "blueprints": [
-        {"name": aic, "class": class_, "components": ["kinetic"], "mode": "Inherit"},
-        {"name": mine2, "class": class_, "components": ["kinetic"]},
-        {"name": pinned, "class": class_, "components": []},
+    diff = {"control": [{"势力": FID, "设计图库": [
+        {"图名": aic, "舰级": class_, "选装": ["kinetic"], "归属": "Inherit"},
+        {"图名": mine2, "舰级": class_, "选装": ["kinetic"]},
+        {"图名": pinned, "舰级": class_, "选装": []},
     ]}]}
     proj = h.scenario_apply("bp_reap", seed, SCENARIO_ROUNDS, [diff])
     q = KIT.load(str(proj), only=("blueprints", "decisions"))
@@ -1188,17 +1188,18 @@ def blueprint_scenario_checks(h, ck) -> None:
     # 找不到了），再把两个预算拨到同一个极端值。资源清单**问引擎**（`--control` 的预算模板：
     # 每个势力的资源键与它逐一对上），不手抄状态字段。
     ctl = json.loads(h.capture(["--seed", str(seed), "--control"]))["control"]
-    res = sorted({e["resource"] for f in ctl if f["faction_id"] == FID
-                  for k in ("construction_budget", "investment_budget") for e in f[k]})
+    # `--control` 读面的字段名就是控制面的中文名（`建造预算`/`投资预算`）。
+    res = sorted({e["资源"] for f in ctl if f["势力"] == FID
+                  for k in ("建造预算", "投资预算") for e in f[k]})
     ck.check("合成场景（预算）：预算模板给出了这个势力的资源清单（防空转）", len(res) >= 1,
              f"{FID} 的预算资源：{res}")
 
     def leaves(v: float) -> dict:
-        return {"control": [{"faction_id": FID,
-                             "buildings": [{"city": city, "building": bid,
-                                            "blueprint": None, "ship_type": class_}],
-                             "construction_budget": [{"resource": r, "value": v} for r in res],
-                             "investment_budget": [{"resource": r, "value": v} for r in res]}]}
+        return {"control": [{"势力": FID,
+                             "建筑": [{"城": city, "建筑": bid,
+                                       "设计图": None, "建造舰级": class_}],
+                             "建造预算": [{"资源": r, "值": v} for r in res],
+                             "投资预算": [{"资源": r, "值": v} for r in res]}]}
 
     lines = {}
     # ⚠ **只推一回合**：活回合的忠实类比是「调一次 `step_construction`」（= 删掉的那条单测）。
