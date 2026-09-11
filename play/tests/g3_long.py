@@ -258,21 +258,19 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     out["unpaid_over_bill"] = [f"r{int(r.round)} {r.faction_id}: 欠费 {r.upkeep_unpaid} > 维护账单 {r.upkeep}"
                                for r in over.itertuples()][:3]
 
-    # ⑦ 集散地（is_hub）在一个势力里必须只有一个天体——**排除本回合易主/复垦/新建的城**之后
-    #    （同样见文档的相位错位：`is_hub` 是产出那一步按**当时的主人**算的；复垦的城上一回合就
-    #    存在（是别人留下的废墟），所以「上一回合没有它」抓不到它，必须用 `colony_founded`）。
-    chg = live[["round", "city_id"]].merge(moved, on=["round", "city_id"], how="left")["owner_changed"].notna()
-    fnd = live[["round", "city_id"]].merge(founded, on=["round", "city_id"], how="left")[
-        "founded_this_round"].notna()
-    excl_hub = chg.to_numpy() | fnd.to_numpy() | live["new_this_round"].to_numpy()
-    stable = live[(~excl_hub) & live["is_hub"].fillna(False).astype(bool)]
+    # ⑦ 集散地（is_hub）在一个势力里必须只有一个天体——**不排除任何行**。
+    #    ⚠ 这条判据曾经需要「排除本回合易主/复垦的城」：那时 `is_hub` 抄的是**产出那一步**的判定
+    #    （旧主），城在同回合后半段易主/被复垦后，同一个势力就出现两个 hub 天体（1000 回合 ×
+    #    7 seed 里 5 例，Rust 版跑一步永远看不到）。**引擎侧已修**（`sim/metrics.rs` 改成按写行
+    #    时的主人重算）⇒ 现在这条是**严格**的：错了就是真错了，没有豁免名单。
+    stable = live[live["is_hub"].fillna(False).astype(bool)]
     grp = stable.groupby(["round", "faction_id"])["body_id"].nunique()
     multi = grp[grp > 1]
     out["hub_pairs"] = int(len(grp))
+    out["hub_rows"] = int(len(stable))
     out["hub_multi_n"] = int(len(multi))
     out["hub_multi"] = [f"r{int(rnd)} {fid}: 同时有 {int(n)} 个 hub 天体"
                         for (rnd, fid), n in multi.items()][:3]
-    out["hub_excluded"] = int(excl_hub.sum())
     return out
 
 
@@ -576,14 +574,12 @@ def identity_checks(h, ck, metas, tag) -> None:
              f"{sample}（共 {ob} 处）" if ob else f"{tag}：每一行都 ≤ 本回合的维护账单")
 
     hp = sum(i["hub_pairs"] for i in ids)
+    hr = sum(i["hub_rows"] for i in ids)
     hm = sum(i["hub_multi_n"] for i in ids)
-    hx = sum(i["hub_excluded"] for i in ids)
     sample = next((m for i in ids for m in i["hub_multi"]), "")
     ck.check("一个势力在一个回合里只有一个集散地天体（`is_hub` 自洽）", hm == 0,
              f"{sample}（共 {hm} 处）" if hm else
-             f"{tag}：{hp:,} 个「回合·势力」全部只有一个 hub 天体")
-    ck.check("hub 守卫的例外都说得清（本回合易主/新建的城：`is_hub` 是产出那一步按旧主算的）",
-             True, f"排除 {hx:,} 行（易主或本回合新建的城）——没有第五种例外")
+             f"{tag}：{hr:,} 个 hub 城行 / {hp:,} 个「回合·势力」，**无豁免**地只有一个 hub 天体")
     ck.check("hub 守卫没有空转（真有 hub 城）", hp >= 100, f"{hp:,} 个「回合·势力」（下限 100）")
 
 

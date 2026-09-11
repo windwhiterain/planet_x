@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bin", default="release", help="release | debug | 二进制路径（透传给每个组）")
     ap.add_argument("--refresh", action="store_true", help="无视缓存重跑投影")
     ap.add_argument("--no-build", action="store_true", help="跳过前置编译（默认会按需 build）")
+    ap.add_argument("--no-sweep", action="store_true", help="跳过清理其它指纹的过期投影缓存")
     ap.add_argument("-j", "--jobs", type=int, default=0, help="并行跑几个世界（透传）")
     args = ap.parse_args(argv)
 
@@ -110,6 +111,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if ensure_binary(args.bin, args.no_build) == 2:
         return 2
+
+    # 扫掉**别的指纹**留下的投影目录：指纹一变，旧目录永远不会再被读，却各占 ~1.2 GB
+    # （实测堆到 10.9 GB 把 C 盘写满 ⇒ `--index` 报 os error 112，看上去像代码坏了）。
+    # 只在「真的会跑投影的组」前扫，避免 `--list` 之类也去动磁盘。
+    if not args.no_sweep:
+        try:
+            sys.path.insert(0, str(HERE))
+            from _harness import Harness  # noqa: PLC0415 —— 用到才导入（它要 pandas）
+            freed = Harness(args.bin).sweep_stale()
+            if freed > 1:
+                print(f"[cache] 清掉其它指纹的过期投影：{freed:,.0f} MB", flush=True)
+        except SystemExit:
+            pass          # 二进制找不到 ⇒ 让各组的报错去说话
+        except Exception as e:      # 清缓存失败不该让测试挂掉
+            print(f"[cache] 跳过清理（{e}）", flush=True)
 
     passthrough: list[str] = ["--bin", args.bin]
     if args.refresh:
