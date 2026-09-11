@@ -97,6 +97,8 @@ KNOW_FID = "中国"
 GOV_FID, GOV_ROUNDS = "中国", 5
 # 护盾那条：造一仗（攻方装炮、守方装盾、两家关系压到 -35、摆在远离首都处）。
 DUEL_ATK, DUEL_DEF, DUEL_GUN, DUEL_ROUNDS = "中国", "美国", "railgun", 3
+# 舰队防空那条：两臂只差 PD 友舰的坐标。
+PD_ATK, PD_DEF, PD_ROUNDS = "中国", "美国", 3
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1155,6 +1157,7 @@ def run(h, ck) -> None:
     knowledge_scenario_checks(h, ck)
     governance_scenario_checks(h, ck)
     duel_scenario_checks(h, ck)
+    pd_cover_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2462,6 +2465,52 @@ def duel_scenario_checks(h, ck) -> None:
              and float(last["船体"]) > 0.0,
              f"护盾 {float(first['护盾']):.2f} → {float(last['护盾']):.2f}；"
              f"船体 {float(first['船体']):.2f} → {float(last['船体']):.2f}")
+
+
+def pd_cover_scenario_checks(h, ck) -> None:
+    """**合成场景 · 舰队防空屏护**（`sim/combat.rs::fleet_air_defense_covers_nearby_missile_targets`，第 7 批）。
+
+    两臂**只差那艘 PD 友舰的坐标**：攻方装 `missile`、目标（无组件）在两艘舰当中，
+    友舰装 `point_defense`——一次摆在目标旁边（41, 40），一次摆到 (100, 100)。
+
+    判据直接用**逐发的 `pd` / `pd_absorbed`**（读面就有）：附近有 PD ⇒ 挡住一部分、
+    目标的 `damage` 更低；PD 舰一远 ⇒ 拦截归零。这比原件直调 `cluster_pd_cover` 更贴
+    「导弹有没有被拦下来」这件事。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_pd_probe.json", seed))
+    atk = next(s for s in st["ships"] if s["势力"] == PD_ATK)
+    dfd = next(s for s in st["ships"] if s["势力"] == PD_DEF)
+    friend = next(s for s in st["ships"] if s["势力"] == PD_DEF and s["舰名"] != dfd["舰名"])
+    arms = {}
+    for tag, pdpos in (("near", [41.0, 40.0]), ("far", [100.0, 100.0])):
+        patch = {"ships": {
+            atk["舰名"]: {"坐标": [40.5, 40.0], "组件": ["missile"], "组件耐久": [18.0]},
+            dfd["舰名"]: {"坐标": [40.0, 40.0], "组件": [], "组件耐久": []},
+            friend["舰名"]: {"坐标": pdpos, "组件": ["point_defense"], "组件耐久": [18.0]}},
+            "factions": {PD_ATK: {"关系": {PD_DEF: -35.0}}, PD_DEF: {"关系": {PD_ATK: -35.0}}}}
+        proj = h.scenario(f"pd_{tag}", seed, PD_ROUNDS, patch)
+        ev = KIT.load(str(proj), only=("events",)).table("events")
+        shots = [s for _, r in ev[ev["type"] == "attack"].iterrows() if r["target_id"] == dfd["舰名"]
+                 for s in (r["data"] or {}).get("shots") or [] if not s.get("skipped")]
+        arms[tag] = {"n": len(shots),
+                     "pd": [float(s["pd"] or 0.0) for s in shots],
+                     "absorbed": [float(s["pd_absorbed"] or 0.0) for s in shots],
+                     "dmg": [float(s["damage"] or 0.0) for s in shots]}
+    ck.check("合成场景（防空）：两臂都真的打起来了（防空转）",
+             arms["near"]["n"] >= 1 and arms["far"]["n"] >= 1,
+             f"近处 PD {arms['near']['n']} 发、远处 PD {arms['far']['n']} 发")
+    if not (arms["near"]["n"] and arms["far"]["n"]):
+        return
+    ck.check("合成场景（防空）：**附近有 PD 就替友舰拦导弹**（`pd > 0` 且真的吸掉了一部分）",
+             all(x > 0.0 for x in arms["near"]["pd"])
+             and all(x > 0.0 for x in arms["near"]["absorbed"]),
+             f"近处拦截量 {arms['near']['pd']}、吸收 {arms['near']['absorbed']}")
+    ck.check("合成场景（防空）：**PD 舰一远，屏护就没了**（拦截归零、目标实收伤害更高）",
+             all(x == 0.0 for x in arms["far"]["pd"])
+             and min(arms["far"]["dmg"]) > min(arms["near"]["dmg"]),
+             f"远处拦截 {arms['far']['pd']}、伤害 {arms['far']['dmg']}；"
+             f"近处拦截 {arms['near']['pd']}、伤害 {arms['near']['dmg']}")
 
 
 def id_checks(h, ck, out) -> None:
