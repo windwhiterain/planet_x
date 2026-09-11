@@ -101,6 +101,8 @@ DUEL_ATK, DUEL_DEF, DUEL_GUN, DUEL_ROUNDS = "中国", "美国", "railgun", 3
 PD_ATK, PD_DEF, PD_ROUNDS = "中国", "美国", 3
 # 拦光那条：两臂只差守方装不装点防。
 INTC_ATK, INTC_DEF, INTC_ROUNDS = "中国", "美国", 3
+# 跟随那条：跟随者 + 友舰同在原点，一艘敌舰贴在射程内。
+FOLLOW_FID, FOLLOW_ENEMY, FOLLOW_ROUNDS = "中国", "美国", 3
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1161,6 +1163,7 @@ def run(h, ck) -> None:
     duel_scenario_checks(h, ck)
     pd_cover_scenario_checks(h, ck)
     intercept_scenario_checks(h, ck)
+    follow_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2565,6 +2568,49 @@ def intercept_scenario_checks(h, ck) -> None:
     ck.check("合成场景（拦光齐射）：一件武器一发 = **一条逐发记录**（齐射数与逐发数一一对应）",
              all(len(arms[t]["shots"]) == len(arms[t]["mag"]) for t in arms),
              f"齐射 {full['salvos']} 条 / 逐发 {len(full['shots'])} 条")
+
+
+def follow_scenario_checks(h, ck) -> None:
+    """**合成场景 · 跟随者只打敌人**（`sim/fleet.rs::follow_ship_auto_attacks_hostile_but_not_the_followed_friend`，第 7 批）。
+
+    钉一片玩家 `Follow{友舰}` 叶，再把三方摆开：跟随者与友舰同在 (0,0)、一艘敌舰贴在 0.3 AU
+    （在护卫舰射程内）、其余敌舰撵到 (50,50)，两家关系压到 `-35`。判据三条：
+
+    * 跟随者**自动开火打敌人**（`attack` 事件 actor=跟随者、target=敌舰）；
+    * 跟随者**绝不打自己跟着的友舰**（没有一条指向友舰的 `attack`）；
+    * 那片 Follow 叶**没被降级**（`order_effective` 仍是 `Follow{友舰}`、叶片仍是 `Player`）。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_follow_probe.json", seed))
+    cn = [s for s in st["ships"] if s["势力"] == FOLLOW_FID]
+    us = [s for s in st["ships"] if s["势力"] == FOLLOW_ENEMY]
+    fol, friend = cn[0], cn[1]
+    enemy, rest = us[0], us[1:]
+    patch = {"ships": {fol["舰名"]: {"坐标": [0.0, 0.0]}, friend["舰名"]: {"坐标": [0.0, 0.0]},
+                       enemy["舰名"]: {"坐标": [0.3, 0.0]},
+                       **{s["舰名"]: {"坐标": [50.0, 50.0]} for s in rest}},
+             "factions": {FOLLOW_FID: {"关系": {FOLLOW_ENEMY: -35.0}},
+                          FOLLOW_ENEMY: {"关系": {FOLLOW_FID: -35.0}}}}
+    diff = {"control": [{"势力": FOLLOW_FID, "指令": [
+        {"舰": fol["舰名"], "行为": {"Follow": {"ship": friend["舰名"]}}, "归属": "Player"}]}]}
+    proj = h.scenario_apply("follow_live", seed, FOLLOW_ROUNDS, [diff], patch=patch)
+    q = KIT.load(str(proj), only=("events", "ships"))
+    ev = q.table("events")
+    at = [(int(r["round"]), r["actor_id"], r["target_id"]) for _, r in ev[ev["type"] == "attack"].iterrows()]
+    ck.check("合成场景（跟随）：跟随者**自动开火打敌人**（防空转：这仗真的打了）",
+             any(a == fol["舰名"] and t == enemy["舰名"] for _, a, t in at),
+             f"{fol['舰名']}→{enemy['舰名']}；本局攻击事件 {at[:4]}")
+    ck.check("合成场景（跟随）：跟随者**绝不打自己跟着的友舰**",
+             not any(t == friend["舰名"] for _, _, t in at),
+             f"指向 {friend['舰名']} 的攻击事件 {[x for x in at if x[2] == friend['舰名']]}")
+    sh = q.table("ships")
+    mine = sh[sh["舰名"] == fol["舰名"]].sort_values("round")
+    orders = [str(o) for o in mine["order_effective"]]
+    modes = [str(m) for m in mine["order_leaf_mode"]]
+    ck.check("合成场景（跟随）：那片 Follow 叶**没被降级**（仍是 Follow{友舰}、叶片仍是 Player）",
+             bool(orders) and all("Follow" in o and friend["舰名"] in o for o in orders)
+             and set(modes) == {"Player"},
+             f"{len(orders)} 个回合的指令 {sorted(set(orders))}；叶片 {sorted(set(modes))}")
 
 
 def id_checks(h, ck, out) -> None:

@@ -20,7 +20,6 @@ use crate::world::default_state;
 
 mod blueprints;
 mod domestic_market;
-mod fleet;
 mod governance;
 mod haul;
 mod ideology;
