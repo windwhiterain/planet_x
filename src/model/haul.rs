@@ -29,7 +29,8 @@ pub enum HaulStep {
     Delivered {
         /// 卸货的天体。
         body: BodyId,
-        /// 这一次卸下的件数。
+        /// 这一次**卸出舱**的件数（含承包抽成）。若要看雇主实收，读
+        /// `GameEvent::CargoDelivered.amount`（已扣 `cut`）；`units` 是合同进度口径。
         units: f64,
         /// 卸的是不是**货主**的首都池（承包时货主是托运方，不是船东）：true = 这趟集货算完成。
         into_pool: bool,
