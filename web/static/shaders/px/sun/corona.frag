@@ -38,10 +38,9 @@
   //   ② **足点调制**：一层低频把弧带切成「一根根」，而不是「一圈均匀」
   //   ③ **切向剪切**：时间演化走切向（差动自转）⇒ 结构会扭动，而不是整团平移
   // 山脊项仍由**同一次** fbm 折出来（多跑一遍噪声等于把 ALU 翻倍，没必要）。
-  // 返回 vec2(日冕, 色球)。两者共用同一套局部基与噪声，一次算完；但**强度必须分开**。
-  vec2 coronaDensity(vec3 p, float rr, float t){
+  float coronaDensity(vec3 p, float rr, float t){
     float fall = pow(max(1.0 / rr, 0.0), uFalloff);
-    if (fall < 2.0e-3) return vec2(0.0);                  // 便宜的先算：够小就别进噪声
+    if (fall < 2.0e-3) return 0.0;                  // 便宜的先算：够小就别进噪声
 
     // 局部正交基：u = 径向，t1/t2 = 切向。各向异性采样必须在**这个**基里做 ——
     // 直接对 p 乘不同系数是做不到「按径向拉伸」的（那只是各向异性缩放世界轴）。
@@ -81,20 +80,38 @@
     // ⚠ 峰值必须在 rr=1 **之外**（1.015）。峰值落在 rr=1 时，那一半在光球**体内**、
     // 被光球挡住，可见的只剩外侧尾巴 —— 日缘于是留下一条填不上的暗缝（实测亮度
     // 187 → 141）。色球本来就贴在光球**之上**，峰值外移既合物理也把缝补上。
-    float chromo = 0.0;
-    float base = exp(-pow((rr - 1.015) / 0.075, 2.0));
-    if (base > 0.004) {
-      // 切向频率高、径向低 ⇒ 每根针都沿**自己的法线**往外长（不是在某个固定轴上压扁 ——
-      // 旧 chromo.frag 就是 `p * vec3(38,38,9)`，针全朝对象空间的同一根轴，转到侧面就露馅）
-      vec3 qs = u * (pr * 1.2) + t1 * (pa * 7.0) + t2 * (pb * 7.0);
-      float sp = vnoise(qs * 3.0 + vec3(0.0, 0.0, -t * 0.40));
-      float needle = pow(clamp(1.0 - abs(2.0 * sp - 1.0), 0.0, 1.0), 4.0);
-      chromo = base * (0.35 + 2.20 * needle);
-    }
     // 外缘平滑归零：体积球本身有个硬轮廓，密度必须**在球面之前**就回到 0，
     // 否则那个球体的剪影会在天上切出一圈硬边（和之前 billboard 的方角是同一类错）。
     float outer = smoothstep(uOuterRatio, uOuterRatio * 0.70, rr);
-    return vec2(fall * shape, fall * chromo) * outer;
+    return fall * shape * outer;
+  }
+
+  // --- 色球：**自己一条细步长的积分** ------------------------------------------
+  // ⚠ 逻辑要点（这一段是「改数值没用」的真正原因）：
+  //   色球壳厚 σ=0.075R ≈ 0.5 世界单位，而日冕那条循环的步长来自
+  //   「穿过**外球**(4R)的整条弦 / uSteps」≈ 1.4 世界单位 —— **比壳本身还厚**。
+  //   于是壳整个掉进采样点之间：uChromo 从 26 调到 60，日缘的值一个都不变；
+  //   删掉自吸收也一样。**欠采样还会抖出又硬又碎的边**（用户报的「奇怪的硬边」）。
+  //   所以色球必须有独立的一条、步长与壳厚相称的积分。
+  float CHROMO_SIGMA = 0.075;
+  float CHROMO_PEAK  = 1.015;
+
+  float chromoField(vec3 p, float rr, float t){
+    float base = exp(-pow((rr - CHROMO_PEAK) / CHROMO_SIGMA, 2.0));
+    if (base < 0.004) return 0.0;
+    // 切向频率高、径向低 ⇒ 每根针都沿**自己的法线**往外长（不是在某个固定轴上压扁 ——
+    // 旧 chromo.frag 就是 `p * vec3(38,38,9)`，针全朝对象空间的同一根轴，转到侧面就露馅）
+    vec3 u = p / max(length(p), 1e-4);
+    vec3 ref = abs(u.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 t1 = normalize(cross(u, ref));
+    vec3 t2 = cross(u, t1);
+    float pr = dot(p, u) / uSunR;
+    float pa = dot(p, t1) / uSunR;
+    float pb = dot(p, t2) / uSunR;
+    vec3 qs = u * (pr * 1.2) + t1 * (pa * 7.0) + t2 * (pb * 7.0);
+    float sp = vnoise(qs * 3.0 + vec3(0.0, 0.0, -t * 0.40));
+    float needle = pow(clamp(1.0 - abs(2.0 * sp - 1.0), 0.0, 1.0), 4.0);
+    return base * (0.35 + 2.20 * needle);
   }
 
   void main(){
@@ -105,35 +122,77 @@
     if (to.y <= 0.0) discard;                       // 这条射线根本不碰体积
     float t0 = max(to.x, 0.0);
     float t1 = to.y;
-    // 日面之后不积分（日冕在日面背后不发光）。相机在体积内时 t0 = 0 也成立。
-    vec2 ti = hitSphere(ro, rd, uSunR * 1.004);
-    if (ti.x > 0.0) t1 = min(t1, ti.x);
+    // ⚠ **不要在光球表面截断积分** —— 那是个**不连续**，调任何数值都消不掉。
+    //
+    // 曾经的写法是 `ti = hitSphere(ro, rd, uSunR*1.004); if (ti.x > 0) t1 = min(t1, ti.x);`
+    // 意思是「日面之后不积分」。后果：
+    //   · **命中**日面的射线只积分前半段（相机 → 光球表面）
+    //   · **擦过**日面的射线积分整条弦
+    // 于是在 b = R（轮廓线）处积分长度**突降一半** ⇒ 日冕累积值在日缘阶跃 ⇒ 一条硬边。
+    // 而光球自己在那儿又最暗（临边昏暗），两者叠加成一道**黑带**（用户报的「黑边」）。
+    //
+    // 日冕是**光学薄**的：日面**前面**的日冕本来就存在，只是被亮好几个数量级的光球盖过。
+    // 所以正确做法是**整条弦一起积分** —— 路径长度因此在 b = R 处连续，硬边自然消失。
     if (t1 <= t0) discard;
 
     // 步长由「这条射线穿过体积的长度」决定 ⇒ 不论掠射还是正穿都保证覆盖，不会漏采样。
     float dt = (t1 - t0) / float(max(uSteps, 1));
     float t = uTime;
     vec3 acc = vec3(0.0);
-    float trans = 1.0;                              // 光学薄，但留一点自吸收，免得贴边糊成一片
+    // ⚠ **不要自吸收项**。这里曾经有一个 `trans *= exp(-a*0.5)`（当初的理由是「免得贴边
+    // 糊成一片」），代价是把一个**光学薄的发射体**做成了**有饱和**的：密度一涨 trans 就衰减
+    // 得更快，**累积量被钳死** —— 于是把 uChromo 从 26 调到 60，日缘的值一个数都没变
+    // （两侧都是 114/113）。用户那句「这是个逻辑问题，你改数值是没有用的」说的就是它。
+    // 日冕/色球都是光学薄的，累加就该是 Σ col·density·dt，没有透射率这一项。
     // 起点抖半个步长：固定步长会在球面上留下同心分层，抖一下就没有了。
     float tt = t0 + dt * 0.5;
     for (int i = 0; i < uSteps; i++) {
-      if (tt > t1 || trans < 0.02) break;
+      if (tt > t1) break;
       vec3 p = ro + rd * tt;
       float rr = length(p) / uSunR;
-      vec2 dd = coronaDensity(p, rr, t);
-      float d = dd.x + dd.y * uChromo;
+      float d = coronaDensity(p, rr, t);
       if (d > 0.0) {
         // 颜色沿半径走三段：rr≈1 是**色球**（深红）→ 暖白（K 日冕）→ 蓝白（外冕）。
         // 深红那一段原先由一层独立的球壳提供，现在由密度场自己带出来。
         vec3 col = mix(vec3(1.45, 0.34, 0.16), vec3(1.15, 0.90, 0.62),
                        smoothstep(1.005, 1.35, rr));
         col = mix(col, vec3(0.48, 0.56, 0.95), smoothstep(1.8, 3.2, rr));
-        float a = d * dt;
-        acc += col * a * trans;
-        trans *= exp(-a * 0.5);
+        acc += col * d * dt;
       }
       tt += dt;
+    }
+
+    // --- 色球：细步长积分（步长 ≪ 壳厚，才采得到）------------------------------
+    float hiR = (CHROMO_PEAK + 4.0 * CHROMO_SIGMA) * uSunR;
+    float loR = (CHROMO_PEAK - 4.0 * CHROMO_SIGMA) * uSunR;
+    vec2 spHi = hitSphere(ro, rd, hiR);
+    if (spHi.y > 0.0) {
+      float a0 = max(spHi.x, 0.0);
+      float a1 = spHi.y;
+      vec2 spLo = hitSphere(ro, rd, loR);
+      // 壳 = 「hi 球内、lo 球外」= 两段：近侧 [a0, spLo.x] 与远侧 [spLo.y, a1]。
+      // 与 lo 球无交时只剩一整段（射线从旁边擦过）。
+      bool two = (spLo.y > 0.0 && spLo.x > a0);
+      vec4 seg = vec4(a0, a1, 0.0, 0.0);
+      if (two) { seg = vec4(a0, min(spLo.x, a1), max(spLo.y, a0), a1); }
+      // 步长取壳厚的 1/3：再粗就会漏采样（这正是原来那个 bug 的成因）。
+      float dc = CHROMO_SIGMA * uSunR * 0.34;
+      float chromoAcc = 0.0;
+      for (int k = 0; k < 2; k++) {
+        if (k == 1 && !two) break;
+        float sa = (k == 0) ? seg.x : seg.z;
+        float sb = (k == 0) ? seg.y : seg.w;
+        float segLen = sb - sa;
+        if (segLen <= 0.0) continue;
+        int ns = int(clamp(ceil(segLen / dc), 1.0, 24.0));
+        for (int s = 0; s < 24; s++) {
+          if (s >= ns) break;
+          float sc = sa + segLen * (float(s) + 0.5) / float(ns);
+          vec3 p = ro + rd * sc;
+          chromoAcc += chromoField(p, length(p) / uSunR, t) * (segLen / float(ns));
+        }
+      }
+      acc += vec3(1.45, 0.34, 0.16) * chromoAcc * uChromo;
     }
 
     gl_FragColor = vec4(acc * uIntensity, 1.0);

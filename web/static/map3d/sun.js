@@ -62,7 +62,7 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uOuterRatio: { value: CORONA_OUTER_RATIO },
     uIntensity: { value: 0.055 },
     // 色球强度是**另一个量纲**（比日冕亮约 1e4 倍），别和 uIntensity 混为一谈
-    uChromo: { value: 26.0 },
+    uChromo: { value: 14.0 },
     uFalloff: { value: 2.6 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
