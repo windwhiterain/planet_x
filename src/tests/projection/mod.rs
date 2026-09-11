@@ -141,10 +141,10 @@ fn projection_writes_lean_main_and_indexed_tables() {
     for row in contract_rows {
         for col in [
             "contract_id",
-            "shipper",
-            "carrier",
-            "capacity",
-            "expires_round",
+            "托运方",
+            "承运方",
+            "运力",
+            "到期回合",
         ] {
             assert!(row.get(col).is_some(), "contracts 表缺列 {col}: {row}");
         }
@@ -153,7 +153,7 @@ fn projection_writes_lean_main_and_indexed_tables() {
             "contracts 表的 ships 必须是**数组**（一张单可以跑几条船）: {row}"
         );
         assert!(
-            row.get("served_rounds").is_some() && row.get("ratio").is_some(),
+            row.get("已服务回合").is_some() && row.get("ratio").is_some(),
             "contracts 表要有考核的分母与达标率（served_rounds / ratio）: {row}"
         );
     }
@@ -161,7 +161,7 @@ fn projection_writes_lean_main_and_indexed_tables() {
     assert!(!ships.is_empty());
     assert!(ships[0].get("ship_id").is_some(), "ships 表要有 ship_id 列");
     assert!(
-        ships[0].get("components").is_some(),
+        ships[0].get("组件").is_some(),
         "ships 表要有 components 列"
     );
     // factions table: has relations + resources, and its own city/ship id lists.
@@ -172,11 +172,11 @@ fn projection_writes_lean_main_and_indexed_tables() {
         "factions 表要有 faction_id 列"
     );
     assert!(
-        factions[0].get("relations").is_some(),
+        factions[0].get("关系").is_some(),
         "factions 表要有 relations"
     );
     assert!(
-        factions[0].get("resources").is_some(),
+        factions[0].get("资源").is_some(),
         "factions 表要有 resources（库存）"
     );
     // 思潮 → 集货倾向：**「这个国家为什么少跑运输」必须可读**，而不是只能从行为反推。
@@ -455,9 +455,9 @@ fn derived_tables_are_written_and_declared() {
         "order_effective",
         // 设计图那一轮新增的列（缺一列 = 读面少一个答案）。
         "order_source",
-        "blueprint",
+        "出厂图",
         "blueprint_mode",
-        "spawned_round",
+        "下水回合",
     ] {
         assert!(ships[0].get(col).is_some(), "ships 表缺 {col}");
     }
@@ -470,9 +470,9 @@ fn derived_tables_are_written_and_declared() {
     // `cities` 表的内联 `buildings[]` 要能看出「哪个下标在造哪张图」。
     let cities = jsonl(&s.0.join("idx/cities.jsonl"));
     let has_bp_key = cities.iter().any(|c| {
-        c["buildings"]
+        c["建筑"]
             .as_array()
-            .is_some_and(|bs| bs.iter().any(|b| b.get("blueprint").is_some()))
+            .is_some_and(|bs| bs.iter().any(|b| b.get("设计图").is_some()))
     });
     assert!(has_bp_key, "cities.buildings[] 缺 blueprint 键");
 }
@@ -566,12 +566,12 @@ fn blueprints_table_matches_the_control_face() {
                 .get(&(fid.clone(), id.clone()))
                 .unwrap_or_else(|| panic!("蓝图表缺 {fid}/{id}"));
             assert_eq!(
-                row["class"].as_str().unwrap(),
+                row["舰级"].as_str().unwrap(),
                 leaf.value.class,
                 "{fid}/{id} 的 class 不一致"
             );
             assert_eq!(
-                row["components"],
+                row["选装"],
                 json!(leaf.value.components),
                 "{fid}/{id} 的 components 不一致"
             );
@@ -587,17 +587,17 @@ fn blueprints_table_matches_the_control_face() {
             );
             // 图上的**倾向三轴**（默认枚举/标量形式，与 control 表一致；null = 该轴沉默）。
             assert_eq!(
-                row["doctrine"],
+                row["风格"],
                 json!(leaf.value.doctrine),
                 "{fid}/{id} 的 doctrine 不一致"
             );
             assert_eq!(
-                row["kiting"],
+                row["姿态"],
                 json!(leaf.value.kiting),
                 "{fid}/{id} 的 kiting 不一致"
             );
             assert_eq!(
-                row["role"],
+                row["角色"],
                 json!(leaf.value.role),
                 "{fid}/{id} 的 role 不一致"
             );
@@ -605,22 +605,22 @@ fn blueprints_table_matches_the_control_face() {
                 assert_eq!(row["ship_count"], json!(1), "本图造了多少艘（引擎算）");
                 assert_eq!(row["class_slots"], json!(2), "corvette 的槽位上限");
                 assert_eq!(
-                    row["role"],
+                    row["角色"],
                     json!("Freight"),
                     "图上表态的是**长期倾向**（角色），不是指令"
                 );
                 assert!(
-                    row["doctrine"].is_null() && row["kiting"].is_null(),
+                    row["风格"].is_null() && row["姿态"].is_null(),
                     "另外两条轴沉默 ⇒ null"
                 );
                 assert_eq!(row["launch_waiting"], json!(false), "没有满进度 ⇒ 不在等钱");
             }
             if id == "auto:cruiser" {
                 assert!(
-                    row["doctrine"].is_null() && row["kiting"].is_null() && row["role"].is_null(),
+                    row["风格"].is_null() && row["姿态"].is_null() && row["角色"].is_null(),
                     "本图对三条倾向轴都没说话 ⇒ 全 null"
                 );
-                assert_eq!(row["components"], json!([]));
+                assert_eq!(row["选装"], json!([]));
             }
         }
     }

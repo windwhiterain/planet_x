@@ -31,7 +31,7 @@
 ## 3. 新开关：`--quiet`
 
 ```
-planet_x --seed 42 --round 1000 --quiet --save end.ron
+planet_x --seed 42 --round 1000 --quiet --save end.json
   ⇒ 推进 1000 回合，stdout 0 字节，只落一个 0.09 MB 的档
 ```
 

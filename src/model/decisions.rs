@@ -22,7 +22,7 @@
 //!
 //! # 读它
 //!
-//! * 单回合：`planet_x --start ckpt.ron --derived` → `post.decisions`（原始嵌套结构）。
+//! * 单回合：`planet_x --start ckpt.json --derived` → `post.decisions`（原始嵌套结构）。
 //! * 整段轨迹：`planet_x --index out/` → `out/idx/decisions.jsonl` 一行一条判定，
 //!   按 `round` / `faction_id` / `actor` join（Python: `planet_xq.load('out').decisions()`）。
 

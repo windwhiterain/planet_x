@@ -6,7 +6,7 @@ use crate::config::load_config;
 /// **旧档加载**（§6 的 `v9 → v10` / §7.5-20）：v9 档里根本没有设计图那一轮的字段。
 ///
 /// 这里拿一份**真的旧格式文本**来测，而不是「把字段设成 None 再存一遍」：把当前状态
-/// 序列化成 RON，然后**逐字删掉** v9→v10 新增的四个字段
+/// 序列化成 JSON（存档格式，2026-10 由 RON 换过来），然后**逐行删掉** v9→v10 新增的四个字段
 /// （`ControllableState.blueprints` / `Building.blueprint` / `Ship.blueprint` /
 /// `Ship.spawned_round`）并把版本号写回 9 —— 那就是一份 v9 档（同一代里没有这些键）。
 ///
@@ -37,9 +37,9 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
             b.blueprint = None;
         }
     }
-    // 同时把 `spawned_round` 归零：v9 档里**没有这个键**，而紧凑 RON 里 `Some(12)` 没法用
-    // 一次字符串替换干净地删掉（`None` 可以）。这不妨碍本测试的目的——它测的是
-    // 「文件里没有那个键时会发生什么」。
+    // 同时把 `spawned_round` 归零：v9 档里**没有这个键**，而 `Some(12)` 没法用一次字符串
+    // 替换干净地删掉（`null` 可以）。这不妨碍本测试的目的——它测的是「文件里没有那个键时
+    // 会发生什么」。
     for s in state.ships.iter_mut() {
         s.blueprint = None;
         s.spawned_round = None;
@@ -60,24 +60,61 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
             o.mode = ControlMode::Inherit;
         }
     }
-    let text = ron::to_string(&state).expect("serialize the state");
-    for needle in ["blueprint:None", "blueprints:{}"] {
+    // **结构化**地造一份 v9 档：解析成 JSON、递归删掉那四个新键、把版本号写成 9。
+    // （早先这里是「逐行删」的文本手术——那段代码**依赖键序**，`preserve_order` 一开，
+    //  `spawned_round` 排在对象末尾，删掉它的那一行就留下一个悬空逗号 ⇒ 解析报
+    //  "trailing comma"。结构化处理与键序无关。）
+    fn strip_keys(v: &mut serde_json::Value, keys: &[&str]) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for k in keys {
+                    m.remove(*k);
+                }
+                for (_, c) in m.iter_mut() {
+                    strip_keys(c, keys);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for c in a.iter_mut() {
+                    strip_keys(c, keys);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn set_schema_version(v: &mut serde_json::Value, n: u32) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.contains_key("schema_version") {
+                    m.insert("schema_version".into(), serde_json::json!(n));
+                }
+                for (_, c) in m.iter_mut() {
+                    set_schema_version(c, n);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for c in a.iter_mut() {
+                    set_schema_version(c, n);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut doc = crate::json::to_value(&state).expect("serialize the state");
+    let dropped = ["blueprints", "设计图", "出厂图", "下水回合"];
+    for key in dropped {
         assert!(
-            text.contains(needle),
-            "序列化里应当出现 `{needle}`（改过 RON 形状的话，这条手术要先更新）"
+            serde_json::to_string(&doc).unwrap().contains(&format!("\"{key}\"")),
+            "序列化里应当出现 `{key}`（改过结构的话，这条手术要先更新）"
         );
     }
-    let old_text = text
-        .replace(",blueprint:None", "")
-        .replace(",blueprints:{}", "")
-        .replace(",spawned_round:None", "")
-        // 用 `SCHEMA_VERSION` 拼针脚，而不是写死当时那个号：这条手术的目的是**造一份真的
-        // v9 档**，而版本号每升一档都会变（合并设计图/承包市场两条分支时就已经撞过一次：
-        // 写死 `10` 的针脚在 v13 上什么都不替换，于是「v9 档」里写着 13）。
-        .replace(
-            &format!("schema_version:{SCHEMA_VERSION}"),
-            "schema_version:9",
-        );
+    strip_keys(&mut doc, &dropped);
+    // 用 `SCHEMA_VERSION` 而不是写死当时那个号：这条手术的目的是**造一份真的 v9 档**，
+    // 而版本号每升一档都会变（合并设计图/承包市场两条分支时就已经撞过一次：写死 `10`
+    // 的针脚在 v13 上什么都不替换，于是「v9 档」里写着 13）。
+    set_schema_version(&mut doc, 9);
+    let old_text = serde_json::to_string_pretty(&doc).expect("pretty");
+
     assert!(
         !old_text.contains("blueprint") && !old_text.contains("spawned_round"),
         "手术没做干净：v9 档里不该出现设计图那四个字段 —— 残留处：{:?}",
@@ -99,7 +136,7 @@ fn a_v9_checkpoint_loads_with_empty_blueprints_and_no_pointers() {
     );
 
     let mut restored: State =
-        ron::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");
+        crate::json::from_str(&old_text).expect("v9 档必须能读进来（serde default 补齐）");
     assert_eq!(restored.schema_version, 9, "档里写的就是 9");
     migrate(&mut restored).expect("v9 必须能迁到当前版本");
     assert_eq!(restored.schema_version, SCHEMA_VERSION);

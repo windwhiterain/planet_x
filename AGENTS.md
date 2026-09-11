@@ -32,10 +32,10 @@
 ```bash
 # ① 数据级 —— **流程就是「build release + python 测试」**：run.py 会先按需
 #    `cargo build --release`（二进制比 src/config 旧或不存在时），再跑各组。
-uv run --project play/planet_xq python play/tests/run.py all      # 四组 75 条判据；缓存命中 ~4 s
+uv run --project play/planet_xq python play/tests/run.py all      # 四组 76 条判据；缓存命中 ~4 s
 uv run --project play/planet_xq python play/tests/run.py          # 只跑快组（1 + 4，内循环）
 uv run --project play/planet_xq python play/tests/run.py --no-build  # 跳过前置编译
-uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 16 个错，全咬住
+uv run --project play/planet_xq python play/tests/_g4_negative.py # 声明纪律自己的量具：注入 19 个错，全咬住
 
 # ② Rust 侧（搬不走的那半：纯函数 / 合成场景 / 内部契约 / 错误路径 / 探针）
 cargo nextest run -P full                    # 合流门

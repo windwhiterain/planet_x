@@ -4,7 +4,7 @@
 
 What it does (all on a **fixture checkpoint it generates itself**, so it is reproducible):
 
-1. ``planet_x --seed 7 --round 12 --save ckpt.ron`` — a small but real world;
+1. ``planet_x --seed 7 --round 12 --save ckpt.json`` — a small but real world;
 2. bulk **ownership** on a whole fleet: every ship of one faction → ``Auto``, then back to
    ``Player`` (the "wildcard" that lives in Python, expanded to N explicit ``{ship, mode}`` leaves);
 3. a **statistical policy**: compare ``upkeep`` against ``production_value`` from the round's
@@ -76,8 +76,8 @@ def census(s: ctl.Surface) -> pd.DataFrame:
 #: 所以它们不在这张单子上——那不是"旧引擎缺的列"，是"没有这个列了"。
 _OLD_ENGINE_DROPS = ("order_effective_mode", "order_effective", "order_source",
                      "order_leaf_mode",
-                     "doctrine", "kiting", "role", "role_mode",
-                     "blueprint", "blueprint_mode", "spawned_round")
+                     "风格", "姿态", "角色", "role_mode",
+                     "出厂图", "blueprint_mode", "下水回合")
 
 
 def _old_engine_index(src, dst) -> Path:
@@ -198,9 +198,9 @@ def main(argv=None) -> int:
     # 一次运行同时产出 checkpoint 与投影：投影的最后一回合 == checkpoint 的状态，
     # 所以「同回合变换」这条硬约束在这里天然成立（building 下标只在同回合自洽）。
     print(f"\n[0] 生成 fixture：planet_x --seed {args.seed} --round {args.round} "
-          f"--index proj/ --save ckpt.ron")
+          f"--index proj/ --save ckpt.json")
     proj = work / "proj"
-    ckpt = Path(ctl.new_checkpoint(work / "ckpt.ron", seed=args.seed, rounds=args.round,
+    ckpt = Path(ctl.new_checkpoint(work / "ckpt.json", seed=args.seed, rounds=args.round,
                                    planet_x=engine, index_dir=proj))
     print(f"    {ckpt}（{ckpt.stat().st_size} bytes）+ {proj}")
 
@@ -222,7 +222,7 @@ def main(argv=None) -> int:
            "doctrine_temper", "doctrine_lone_wolf", "kiting"} <= set(df_ships.columns))
     # 设计图那一轮新增的引擎列（**引擎的答案**，不是本地近似）：出处列 + 出厂图 + 下水回合。
     check("ships 表带上了设计图/出处/下水回合列",
-          {"blueprint", "blueprint_mode", "order_source", "spawned_round"}
+          {"出厂图", "blueprint_mode", "order_source", "下水回合"}
           <= set(df_ships.columns),
           f"order_source={df_ships['order_source'].dropna().unique()[:3].tolist()}…")
 
@@ -268,21 +268,21 @@ def main(argv=None) -> int:
     print(f"    施政对象：{faction}（{len(names)} 艘：{'、'.join(names)}）")
 
     # 编制表：slot 名是意图，活过名字换代。刷新规则写在配方里（排序键），不留在脑子里。
-    # 注意 `class` 是引擎列名，也是 Python 关键字 —— ctl.query 会替你把反引号补上。
+    # 注意：舰级列现在叫 `舰级`（引擎的字段名就是给人看的名词），不再是 Python 关键字。
     fleet = ctl.query(df_ships, "faction_id == @faction")
-    flagship_hull = float(fleet["hull_max"].max())
-    classes = (fleet.groupby("class")["hull_max"].max()
+    flagship_hull = float(fleet["船体上限"].max())
+    classes = (fleet.groupby("舰级")["船体上限"].max()
                .sort_values(ascending=False).index.tolist())          # 决定性顺序
     spec = [("旗舰", f"faction_id == '{faction}'")] + [
-        (f"{cls} 队", f"faction_id == '{faction}' and class == '{cls}'") for cls in classes[:2]]
+        (f"{cls} 队", f"faction_id == '{faction}' and 舰级 == '{cls}'") for cls in classes[:2]]
     ros = ctl.roster(ckpt, spec, index_dir=proj)
-    print(ros[["slot", "matched", "candidates", "ship_id", "class", "hull", "hull_max",
+    print(ros[["slot", "matched", "candidates", "ship_id", "舰级", "船体", "船体上限",
                "refresh_rule"]].to_string(index=False))
     check("编制表把每个 slot 映射到现役舰（刷新规则写在配方里）",
           bool(ros["matched"].all()) and ros["slot"].tolist() == [s for s, _ in spec])
     check("编制表槽位是确定的（同分：**最老的先**，再名字序）",
           ros.iloc[0]["ship_id"]
-          == fleet.sort_values(["hull", "hull_max", "spawned_round", "ship_id"],
+          == fleet.sort_values(["船体", "船体上限", "下水回合", "ship_id"],
                                ascending=[False, False, True, True],
                                na_position="last").iloc[0]["ship_id"],
           f"旗舰={ros.iloc[0]['ship_id']}，最高 hull={flagship_hull:g}")
@@ -294,21 +294,21 @@ def main(argv=None) -> int:
     def _tie_pairs(fixture, idx_dir=None):
         d = ctl.ships(fixture, index_dir=idx_dir)
         out = []
-        key = d["hull"].astype(str) + "/" + d["hull_max"].astype(str)
+        key = d["船体"].astype(str) + "/" + d["船体上限"].astype(str)
         for _, g in d.groupby(key):
-            known = g[g["spawned_round"].notna()]
-            if len(known) >= 2 and known["spawned_round"].nunique() >= 2:
-                srt = known.sort_values(["spawned_round", "ship_id"])
+            known = g[g["下水回合"].notna()]
+            if len(known) >= 2 and known["下水回合"].nunique() >= 2:
+                srt = known.sort_values(["下水回合", "ship_id"])
                 old, new = srt.iloc[0], srt.iloc[-1]
                 if str(old["ship_id"]) > str(new["ship_id"]):   # 名字序会挑 new ⇒ 这一对能证明规则
                     out.append((str(old["ship_id"]), str(new["ship_id"]),
-                                int(old["spawned_round"]), int(new["spawned_round"])))
+                                int(old["下水回合"]), int(new["下水回合"])))
         return out
 
     tie_ckpt, tie_dir, pairs = ckpt, proj, _tie_pairs(ckpt, proj)
     if not pairs:
         # 12 回合的 fixture 里可能只有开局舰队（全是第 0 回合下水）⇒ 跑长一点再找。
-        tie_ckpt = Path(ctl.new_checkpoint(work / "ckpt_tie.ron", seed=args.seed,
+        tie_ckpt = Path(ctl.new_checkpoint(work / "ckpt_tie.json", seed=args.seed,
                                           rounds=max(args.round, 60), planet_x=engine))
         tie_dir, pairs = None, _tie_pairs(tie_ckpt)
     print(f"    同分且年龄不同的对：{pairs[:3]}{'…' if len(pairs) > 3 else ''}"
@@ -346,7 +346,7 @@ def main(argv=None) -> int:
           == {n: rep_a.after.leaf(faction, "ship_orders", n).value for n in names})
 
     # 真的落地（--save），证明这不是只在内存里演一遍
-    ckpt_a = work / "ckpt_a.ron"
+    ckpt_a = work / "ckpt_a.json"
     app = ctl.apply(ckpt, path_a, save=ckpt_a)
     check("A: 真实 --apply --save 成功（回执无 skipped）",
           app.ok and not app.skipped and ckpt_a.exists())
@@ -442,7 +442,7 @@ def main(argv=None) -> int:
           f"{rep_r.after.leaf(faction, 'ship_role', hero).value!r}")
 
     # 真的落地：verify 只是演习，而删叶必须对着「那片叶真的在」的 checkpoint 来。
-    ckpt_r = work / "ckpt_r.ron"
+    ckpt_r = work / "ckpt_r.json"
     app_r = ctl.apply(ckpt, path_r, save=ckpt_r)
     check("R: --apply --save 成功，checkpoint 里这艘舰的角色已归玩家",
           app_r.ok and not app_r.skipped
@@ -461,7 +461,7 @@ def main(argv=None) -> int:
     print(rep_r2.describe())
     check("R: 删叶在引擎回执里出现（读面看不出来，靠回执）",
           rep_r2.removed_leafs == [f"{faction}.ship_role[{hero}]"], f"{rep_r2.removed_leafs}")
-    ckpt_r2 = work / "ckpt_r2.ron"
+    ckpt_r2 = work / "ckpt_r2.json"
     check("R: 删叶真的落地（--apply --save：这一步之后那片叶才真的没了）",
           ctl.apply(ckpt_r, path_r2, save=ckpt_r2).ok)
     rep_r3 = ctl.verify(ckpt_r2, ctl.surface(ckpt_r2).remove_role(hero).emit())
@@ -477,7 +477,7 @@ def main(argv=None) -> int:
     d_leaf = rep_r4.after.leaf(faction, "default_role")
     check("R: 势力级默认角色叶建成（读面里出现，值是玩家钉的观测舰）",
           d_leaf.value == "Observe" and d_leaf.mode == ctl.PLAYER, f"{d_leaf}")
-    ckpt_r3 = work / "ckpt_r3.ron"
+    ckpt_r3 = work / "ckpt_r3.json"
     check("R: 势力级默认叶真的落地", ctl.apply(ckpt_r, path_r3, save=ckpt_r3).ok)
     rep_r5 = ctl.verify(ckpt_r3, ctl.surface(ckpt_r3).remove_default_role(faction).emit())
     check("R: 删势力级默认角色叶也在回执里（`exists` 由 True 翻回 False）",
@@ -517,7 +517,7 @@ def main(argv=None) -> int:
               f"mode={lf_bp.mode} took_over={rep_bp.took_over_leafs}")
 
         # 真的落地（verify 只是只读演习）：读面/投影里必须看得见指针。
-        ckpt_bp = work / "ckpt_bp.ron"
+        ckpt_bp = work / "ckpt_bp.json"
         check("BP: --apply --save 成功", ctl.apply(ckpt_r3, path_bp, save=ckpt_bp).ok)
         # ⚠ 换了一个 checkpoint 就要**重新投影**：`index_dir=` 是「直接用这个目录」，
         # 传上一份 ckpt 的投影目录会让读面全是旧值（本 demo 也踩过：指针显示 None）。
@@ -539,9 +539,10 @@ def main(argv=None) -> int:
               mine["effective_mode"] == ctl.PLAYER and mine["mode"] == ctl.PLAYER
               and int(mine["class_slots"]) == slots,
               f"effective_mode={mine['effective_mode']} slots={mine['class_slots']}（配置表 {slots}）")
+        # ⚠ 蓝图表（派生表）的列名已是中文名词：`角色` / `风格` / `姿态`。
         check("BP: 图上写了角色 ⇒ 蓝图表看得见它；没写的两条轴仍是 null（链继续下降到舰队默认）",
-              mine["role"] == "War" and pd.isna(mine["doctrine"]) and pd.isna(mine["kiting"]),
-              f"role={mine['role']!r} doctrine={mine['doctrine']!r} kiting={mine['kiting']!r}")
+              mine["角色"] == "War" and pd.isna(mine["风格"]) and pd.isna(mine["姿态"]),
+              f"role={mine['角色']!r} doctrine={mine['风格']!r} kiting={mine['姿态']!r}")
         check("BP: 组件成本 / 造过多少艘是引擎算的派生列",
               float(mine["component_cost"].get("铁", 0.0)) > 0 and int(mine["ship_count"]) >= 0,
               f"component_cost={dict(mine['component_cost'])} ship_count={mine['ship_count']}")
@@ -552,7 +553,7 @@ def main(argv=None) -> int:
         path_bp2 = ctl.write(s_bp2.emit(), work / "steer_bp2.json")
         rep_bp2 = ctl.verify(ckpt_bp, path_bp2)
         check("BP: 拆指针（null）落地", rep_bp2.ok and not rep_bp2.skipped)
-        ckpt_bp2 = work / "ckpt_bp2.ron"
+        ckpt_bp2 = work / "ckpt_bp2.json"
         check("BP: 拆指针真的落地", ctl.apply(ckpt_bp, path_bp2, save=ckpt_bp2).ok)
         got2 = ctl.buildings(ckpt_bp2)
         # ⚠ `pd.isna` 而不是 `is None`：引擎给的确实是 JSON `null`（Python 侧就是 `None`），但
@@ -573,7 +574,7 @@ def main(argv=None) -> int:
               rep_bp3.removed_leafs == [f"{faction}.blueprints[重甲护卫]"], f"{rep_bp3.removed_leafs}")
 
         # ⑤ 质量栏：图的舰级与建造区对不上 ⇒ 引擎**响亮**拒绝（口径 A），绝不静默。
-        other = next((c for c in sorted(set(df_ships["class"])) if c != ycls), None)
+        other = next((c for c in sorted(set(df_ships["舰级"])) if c != ycls), None)
         if other:
             s_bp5 = ctl.surface(ckpt_bp2)
             s_bp5.set_blueprint(faction, "错级图", class_=other, components=[], mode=ctl.PLAYER)
@@ -618,7 +619,7 @@ def main(argv=None) -> int:
     _fleet_lo = sorted(lf.key[0] for lf in s_lo.leaves("ship_orders") if lf.faction == faction)
     check("LO: 这一势力有舰可写（否则这一节什么都没证明）", bool(_fleet_lo), f"{len(_fleet_lo)} 艘")
     s_lo.set_behavior(_fleet_lo, "Dock:月球", mode=ctl.PLAYER)
-    ckpt_lo = work / "ckpt_leaforder.ron"
+    ckpt_lo = work / "ckpt_leaforder.json"
     app_lo = ctl.apply(ckpt, ctl.write(s_lo.emit(), work / "steer_leaforder.json"), save=ckpt_lo)
     check("LO: --apply --save 成功（全舰队逐舰 = 玩家 + Dock 月球）", app_lo.ok and not app_lo.skipped)
 
@@ -639,7 +640,7 @@ def main(argv=None) -> int:
     gone = sorted(mine_lo["ship_id"])[0]
     s_lo2 = ctl.surface(ckpt_lo)
     s_lo2.remove(faction, "ship_orders", gone)
-    ckpt_lo2 = work / "ckpt_leaforder2.ron"
+    ckpt_lo2 = work / "ckpt_leaforder2.json"
     check("LO: 删叶真的落地",
           ctl.apply(ckpt_lo, ctl.write(s_lo2.emit(), work / "steer_leaforder2.json"),
                     save=ckpt_lo2).ok)

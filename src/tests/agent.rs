@@ -33,15 +33,15 @@ fn state_view_reports_effective_doctrine_and_kiting() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["name"] == serde_json::json!(name))
+        .find(|r| r["舰名"] == serde_json::json!(name))
         .expect("该舰在视图里");
     assert_eq!(
-        row["kiting"],
+        row["姿态"],
         serde_json::json!(-1.0),
         "视图必须给有效姿态（舰队默认）"
     );
     assert_eq!(
-        row["doctrine"]["temper"],
+        row["风格"]["temper"],
         serde_json::json!(0.5),
         "视图必须给有效风格"
     );

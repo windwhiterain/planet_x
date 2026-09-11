@@ -50,7 +50,7 @@ def newest_source_mtime() -> float:
             newest = max(newest, p.stat().st_mtime)
             continue
         for f in p.rglob("*"):
-            if f.is_file() and f.suffix in (".rs", ".ron", ".toml"):
+            if f.is_file() and f.suffix in (".rs", ".json", ".toml"):
                 newest = max(newest, f.stat().st_mtime)
     return newest
 

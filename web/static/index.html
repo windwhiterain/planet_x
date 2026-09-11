@@ -45,17 +45,13 @@
          「读」与「控制」住在**同一份声明、同一条行序**里（`views.json` 的 columns 可以是
          四种行：`path` 读 / `leaf` 叶 / `owner` 归属 / `action` 命令），所以「这个势力有多少
          库存」与「我给它多少预算」是挨着的两行，不需要在两个模式之间切。
-         `#treePanel` 是旧的手写控制树，降级成其中一页（第二步才删它）。 -->
+         ⚠ 2026-10：旧的 `#treePanel`（手写控制树）已**整条删除**——它提供的每一件事
+         （设计图库 / 建筑与建造区 / 全局作用域 / 迁都）现在都由声明的行提供。 -->
   <button id="toggleSide" class="edge-toggle left" title="展开/收起左栏（读 + 控制，同一栏）" data-closed-arrow="▶" data-open-arrow="◀">▶</button>
   <aside id="side" class="edge-panel left">
     <div class="panel" id="readPanel">
       <div class="tnode-tabs" id="readTabs"></div>
       <div id="readBody" class="sv-scroll"></div>
-    </div>
-    <div class="panel" id="treePanel" style="display:none">
-      <h2>控制树（旧） <span class="hint">全局 · 势力 · 天体 · 城市 · 设计图 · 叶片</span></h2>
-      <div class="tree-old-hint sv-pagehint"></div>
-      <div id="tree"></div>
     </div>
     <!-- 「应用到服务器」＋它的**回执**：两者钉在面板底部（`position: sticky`）——以前
          按钮会随长树滚出视口（读面 bar 展开时还点不动），而回执更必须在**你刚点完**的地方。

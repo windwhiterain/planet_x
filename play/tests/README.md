@@ -66,8 +66,8 @@ ck.check("名字里带答案", not bad, "绿的时候说什么；红的时候前
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**16 个注入错全部咬住**（id 重复 / 引用不存在 / 括号没闭合 / 未知 `@根` /
+2026-10 实测：**19 个注入错全部咬住**（id 重复 / 引用不存在 / 括号没闭合 / 未知 `@根` /
 `omit` 与列重叠 / 叶没人认领 / 叶行指向不存在的叶 / `leaf_ui` 孤儿键 / `owner` 写错作用域 /
 `write_omit` 空理由 / 声明少一片叶 / 多一片幽灵叶 / 多一个 value / 少一个 carries /
-把列表叶的 keys 清空 / 把单叶的 keys 加一个）。**一条不会红的守卫等于没有守卫**——
+把列表叶的 keys 清空 / 把单叶的 keys 加一个 / 删掉 source 键 / 给表 layout 写 source: null / 把 `new: true` 挂到单叶上）。**一条不会红的守卫等于没有守卫**——
 这份脚本就是那条判据的量具。

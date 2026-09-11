@@ -49,7 +49,7 @@ Typical use::
 
     import planet_x_ctl as ctl
 
-    ckpt = "ckpt_r12.ron"
+    ckpt = "ckpt_r12.json"
     s = ctl.surface(ckpt)                    # `--control` (read face == write face)
     s.factions                               # faction names
     s.leaf("中国", "ship_orders", "长城")      # one leaf: value + mode
@@ -102,71 +102,95 @@ INHERIT, AUTO, PLAYER = "Inherit", "Auto", "Player"
 MODES = (INHERIT, AUTO, PLAYER)
 """The three serialized mode names — exactly ``"Inherit" | "Auto" | "Player"`` in JSON."""
 
-#: Leaf kinds of the control face, and the fields that form a leaf's **identity**.
-#: ``()`` = the kind is a single per-faction leaf (an object, not a list).
-LEAF_KINDS: dict[str, tuple[str, ...]] = {
-    "capital": (),
-    # ⚠ **没有 `default_ship_order` 了**（2026-10 用户裁决）：指令是**即时操作**，只写逐舰叶
-    # （`ship_orders`）；势力级只留**长期倾向**三片。往这一档写东西会被引擎当成未知字段**拒掉**。
-    #
-    # 势力级默认倾向三片：各有自己的轴——`default_doctrine` 是 temper/lone_wolf、
-    # `default_kiting` 是 kiting、`default_role` 是 War/Freight/Observe。
-    # ⚠ 少了这几项时**不会报错**，只会静静地从 surface() 里消失（读面有、这里看不见）——
-    # 那正是 `engine-data-plane.md` §8.1 的教训：契约是发射端 + 消费者两处。
-    "default_doctrine": (),
-    "default_kiting": (),
-    # 势力级默认**角色**（战舰 / 运输舰 / 观测舰，第三条风格轴）、逐舰角色叶。与另两条风格轴
-    # 同形，但有一条轴间差别：**逐舰那片叶自动控制每回合也会写**（按积压定编集货
-    # `autocontrol::freight` + 派舰去异常区蹲着喂 MOND 掌握度 `autocontrol::knowledge`）；
-    # 玩家钉住（`mode='Player'`）之后 AI 不再碰它。
-    # ⚠ 值是三值**字符串**（serde 的 `ShipRole`：`"War"` / `"Freight"` / `"Observe"`），
-    # 不是旧版的 `true`/`false`。喂别的东西（数字、布尔）由 `_check_role` 当场拒绝。
-    "default_role": (),
-    "ship_orders": ("ship",),
-    "ship_doctrine": ("ship",),
-    "ship_kiting": ("ship",),
-    "ship_role": ("ship",),
-    "investment_budget": ("resource",),
-    "construction_budget": ("resource",),
-    "invest_weights": ("city", "building"),
-    "build_weights": ("city", "building"),
-    "loyalty_budget": ("city",),
-    # **设计图库**（势力级）：图名 → 图纸。设计图是「还不存在的舰」的出厂规格——建造区**指向**
-    # 一张图（结构叶，见 `Surface.set_blueprint_pointer`），下水那一刻把图**印成**一艘舰。
-    #
-    # 它是**复合值**叶（class + components[] + order{}），所以 `_leaf_value` 有一个专用分支；
-    # 三态语义照旧：`Player` = 系统不许重估这张图（出厂按图装配）／`Auto` = 系统可重估
-    # （`retool_shipyards` 会改它的舰级）／`Inherit` = 这一层没有说话（沿 scope 链上溯）。
-    # ⚠ 图的**意图轴**默认沉默：只有图上真写了 `order`（且归属是 Player）才遮住舰队默认。
-    "blueprints": ("name",),
-}
+#: 控制叶的**结构事实**：`kind → 身份键`（`()` = 势力级单叶，不是列表）。
+#:
+#: ⚠ **这一份不再手抄**（2026-10 用户裁决「继续 spec 化」）：事实来自引擎的
+#: `--control-schema`（`src/control/leaves.rs` 的 `leaves` / `actions` 段）。以前这里与
+#: web 的 `LEAF_SPEC` 各手抄一份，谁漏了改，**新叶就在那一端静静消失**——
+#: `role-axis-parity`（角色轴补三端）与 `blueprint-stance`（本表缺了 `default_*` 三片）
+#: 两次踩的都是这个缺口。现在三端读同一份，纪律由 `play/tests/g4_spec.py` 守：
+#: `leaves` ∪ `actions` ∪ `{faction_id}` 必须与 `schemars` 从 `FactionControlPatch`
+#: 派生的属性集**双向相等**（加字段不写声明、或声明一片不存在的叶，都当场红）。
+#:
+#: 它是个 `Mapping`（不是 dict），这样老代码 `LEAF_KINDS[kind]` / `in` / 迭代照旧；
+#: **第一次用到时才去问引擎**（模块导入不发进程），之后按 `planet_x` 缓存。
+class _LeafFacts(Mapping[str, tuple[str, ...]]):
+    """叶种类的结构事实（引擎发的那一份），外加值字段 / 随行属性 / 只读列 / 命令列表。"""
 
-_KIND_ORDER = tuple(LEAF_KINDS)
-_KEY_FIELDS = frozenset({"ship", "city", "building", "resource", "name"})
-#: Which read-face field carries a leaf's **value**. Three kinds spell it something other than
-#: ``value``: `ShipOrderPatch` writes ``behavior`` (the **only** carrier of a behavior now —
-#: `default_ship_order` is gone), `ShipKitingPatch`/`DefaultKiting`
-#: write ``kiting``, `ShipRolePatch`/`DefaultShipRole` write ``role`` (a three-valued **string**,
-#: not the old boolean). `ShipDoctrinePatch`/`DefaultDoctrine` have two axes at once
-#: (``temper`` / ``lone_wolf``), and ``blueprints`` is a **composite**
-#: (class + components + doctrine/kiting/role).
-_VALUE_FIELD = {"ship_orders": "behavior",
-                "ship_kiting": "kiting", "default_kiting": "kiting", "capital": "value",
-                "ship_role": "role", "default_role": "role"}
+    def __init__(self, *, planet_x: Any = None) -> None:
+        self._planet_x = planet_x
+        self._doc: dict[str, Any] | None = None
 
-_TWO_AXIS_KINDS = ("ship_doctrine", "default_doctrine")
-#: 复合值叶（一张设计图 = 舰级 + 选装 + **倾向三轴**）。与两轴风格叶同理：值不止一个字段，
-#: 所以 `_leaf_value` 不能靠一个字段名取。
-_COMPOSITE_KINDS = ("blueprints",)
-_BLUEPRINT_FIELDS = ("class", "components", "doctrine", "kiting", "role")
+    def _load(self) -> dict[str, Any]:
+        if self._doc is None:
+            d = control_schema(planet_x=self._planet_x)  # ← 唯一的来源
+            leaves = list(d.get("leaves") or ())
+            self._doc = {
+                "keys": {l["field"]: tuple(l.get("keys") or ()) for l in leaves},
+                "values": {l["field"]: tuple(l.get("values") or ()) for l in leaves},
+                "carries": {l["field"]: tuple(l.get("carries") or ()) for l in leaves},
+                "read_only": {l["field"]: tuple(l.get("read_only") or ()) for l in leaves},
+                "actions": tuple(a["field"] for a in (d.get("actions") or ())),
+                "owner_field": d.get("owner_field") or "mode",
+                "remove_field": d.get("remove_field") or "remove",
+            }
+        return self._doc
+
+    # -- Mapping：`kind → 身份键` ------------------------------------------------
+    def __getitem__(self, kind: str) -> tuple[str, ...]:
+        return self._load()["keys"][kind]
+
+    def __iter__(self):
+        return iter(self._load()["keys"])
+
+    def __len__(self) -> int:
+        return len(self._load()["keys"])
+
+    # -- 其余事实 ---------------------------------------------------------------
+    def order(self) -> tuple[str, ...]:
+        """引擎声明里的顺序（**没有语义**，只为稳定；别拿它当优先级）。"""
+        return tuple(self._load()["keys"])
+
+    def values(self, kind: str) -> tuple[str, ...]:
+        """这片叶的「值」写在哪几个字段里（两轴风格 / 设计图是多字段）。"""
+        return self._load()["values"][kind]
+
+    def carries(self, kind: str) -> tuple[str, ...]:
+        """读面顺带带过来的 **state 属性**（不是控制面的一部分，写面必须忽略）。"""
+        return self._load()["carries"].get(kind, ())
+
+    def read_only(self, kind: str) -> tuple[str, ...]:
+        """读面有、写面收下但不写回的派生列（如设计图的 `ship_count` / `launch_waiting`）。"""
+        return self._load()["read_only"].get(kind, ())
+
+    def actions(self) -> tuple[str, ...]:
+        """**命令列表**（不是叶：每一条只该执行一次）的字段名，如 `buildings`。"""
+        return self._load()["actions"]
+
+    def value_fields(self) -> dict[str, tuple[str, ...]]:
+        return self._load()["values"]
+
+#: 叶种类表本体（懒加载；见 [`_LeafFacts`]）。**别再往这里加常量**——
+#: 要加一片叶就改引擎的 `src/control/leaves.rs`，这一份会自己跟上。
+LEAF_KINDS = _LeafFacts()
+
+
+def _kind_order() -> tuple[str, ...]:
+    """按引擎声明的顺序遍历全部叶种类（旧 `_KIND_ORDER`）。"""
+    return LEAF_KINDS.order()
 
 
 def _leaf_value(kind: str, entry: Mapping) -> Any:
-    if kind in _TWO_AXIS_KINDS:
-        return {k: entry.get(k) for k in ("temper", "lone_wolf")}
-    if kind in _COMPOSITE_KINDS:
-        return {k: entry.get(k) for k in _BLUEPRINT_FIELDS}
-    return entry.get(_VALUE_FIELD.get(kind, "value"))
+    """一片叶的**值**：值字段由引擎的 manifest 给（一个字段就直接取，多个字段给 dict）。
+
+    多字段的两种：两轴风格叶（`temper`/`lone_wolf`）与设计图（`class`/`components`/倾向三轴）。
+    以前这里靠 `_TWO_AXIS_KINDS` / `_COMPOSITE_KINDS` / `_BLUEPRINT_FIELDS` 三张手抄表，
+    现在一律问 manifest——**加了轴不用改这里**。
+    """
+    fields = LEAF_KINDS.values(kind)
+    if len(fields) == 1:
+        return entry.get(fields[0])
+    return {k: entry.get(k) for k in fields}
 
 
 def _component_id(c: Any) -> str:
@@ -691,7 +715,7 @@ class Surface:
         self._rank: dict[tuple, int] = {}
         for fac in self._factions:
             fid = fac.get("faction_id")
-            for kind in _KIND_ORDER:
+            for kind in _kind_order():
                 if not LEAF_KINDS[kind]:
                     continue
                 for i, entry in enumerate(fac.get(kind) or []):
@@ -772,7 +796,7 @@ class Surface:
         """One faction's leaves, keyed by kind — ``{kind: {key: Leaf}}`` (singletons → ``Leaf``)."""
         self._require_faction(faction)
         out: dict[str, Any] = {"faction_id": faction}
-        for kind in _KIND_ORDER:
+        for kind in _kind_order():
             if not LEAF_KINDS[kind]:
                 out[kind] = self.leaf(faction, kind)
                 continue
@@ -797,7 +821,7 @@ class Surface:
 
     def leaves(self, kind: str | None = None) -> list[Leaf]:
         """Every leaf the read face lists (optionally filtered to one kind)."""
-        kinds = [kind] if kind else [k for k in _KIND_ORDER if LEAF_KINDS[k]]
+        kinds = [kind] if kind else [k for k in _kind_order() if LEAF_KINDS[k]]
         return [self.leaf(fac, kd, key) for (fac, kd, key) in list(self._index) if kd in kinds]
 
     # -- lazy auxiliary indices (same checkpoint!) -------------------------------------
@@ -821,13 +845,17 @@ class Surface:
             r = _last_round(q)
             rows = []
             for _, c in q.cities(round=r).iterrows():
-                for b in (c.get("buildings") or []):
+                # ⚠ 城表里那串 `建筑` 是**引擎的 Building 结构体**：键名已经是中文名词
+                # （`类型`/`开采资源`/…，见 `.agents/notes/field-naming.md`）。**只有 `id` 还是英文**
+                # ——投影里嵌的建筑对象与裸 state 不一致（state 那边叫 `建筑编号`）。
+                # 输出的**列名保持本 kit 的旧名字**（它是 kit 的读模型 API，不是引擎的形状）。
+                for b in (c.get("建筑") or []):
                     rows.append({
-                        "city": c["city_id"], "building": int(b["id"]),
-                        "faction_id": c["faction_id"], "kind": b.get("kind"),
-                        "resource": b.get("resource"), "ship_type": b.get("ship_type"),
-                        "structure": b.get("structure"), "area": b.get("area"),
-                        "deployed": b.get("deployed"), "armor": b.get("armor"),
+                        "city": c["city_id"], "building": int(b["建筑编号"]),
+                        "faction_id": c["faction_id"], "kind": b.get("类型"),
+                        "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
+                        "structure": b.get("结构"), "area": b.get("面积"),
+                        "deployed": b.get("已建成面积"), "armor": b.get("护甲"),
                     })
             self._building_index_cache = pd.DataFrame(
                 rows, columns=["city", "building", "faction_id", "kind", "resource",
@@ -1566,7 +1594,7 @@ class Surface:
             if not kinds and not buildings:
                 continue
             entry: dict[str, Any] = {"faction_id": faction}
-            for kind in _KIND_ORDER:
+            for kind in _kind_order():
                 if not kinds or kind not in kinds:
                     continue
                 bucket = kinds[kind]
@@ -1824,12 +1852,16 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     df["default_role_value"] = dso_value
     df["doctrine_temper"] = dt
     df["doctrine_lone_wolf"] = dlw
-    # 风格三轴的**有效值**在引擎的 ships 表里（`doctrine` / `kiting` / `role`，都是
+    # 风格三轴的**有效值**在引擎的 ships 表里（`风格` / `姿态` / `角色`，都是
     # `State::ship_doctrine` / `ship_kiting` / `ship_role` 的答案）。旧引擎的索引目录没有
     # 这几列 ⇒ 由读面补一份（读面那些逐舰风格行给的**也是有效值**，所以逐字相同）。
     # ⚠ 只在引擎列**缺席**时才补：无条件写就是拿本地那一份去盖引擎的答案——那正是本轮在
     # `effective_order_*` 上修掉的毛病（那边本地那份还会算错）。引擎给答案，Python 只负责筛。
-    if "kiting" not in df.columns:
+    # ⚠ 引擎那一列 2026-10 起叫 `姿态`（中文名词）。本帧的读模型仍叫 `kiting` ⇒ 有引擎的答案就
+    # 用它（**引擎给答案，Python 不重算**），没有（旧索引目录）才退回本地那份。
+    if "姿态" in df.columns:
+        df["kiting"] = df["姿态"]
+    else:
         df["kiting"] = kit
     from_engine = {"order_effective_mode", "order_effective"} <= set(df.columns)
     if from_engine:
@@ -1900,15 +1932,18 @@ def buildings(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=Non
     r = _last_round(q) if round is None else int(round)
     rows = []
     for _, c in q.cities(round=r).iterrows():
-        for b in (c.get("buildings") or []):
-            rows.append({"city": c["city_id"], "building": int(b["id"]),
-                         "faction_id": c["faction_id"], "kind": b.get("kind"),
-                         "resource": b.get("resource"), "ship_type": b.get("ship_type"),
+        # ⚠ 引擎的 Building 键已是中文名词（`建筑`/`类型`/`开采资源`/…）。**只有 `id` 还是英文**
+        # ——投影里嵌的建筑对象与裸 state 不一致（state 那边叫 `建筑编号`），已报给改 Rust 的那位。
+        # 本表输出的列名保持 kit 的旧名字（那是 kit 的读模型 API）。
+        for b in (c.get("建筑") or []):
+            rows.append({"city": c["city_id"], "building": int(b["建筑编号"]),
+                         "faction_id": c["faction_id"], "kind": b.get("类型"),
+                         "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
                          # **设计图指针**（原样输出：指向一张不存在/被改名的图时也照样在这里，
                          # 那个建造区**停产**——见 Q10(a)）。
-                         "blueprint": b.get("blueprint"),
-                         "structure": b.get("structure"), "area": b.get("area"),
-                         "deployed": b.get("deployed"), "armor": b.get("armor")})
+                         "blueprint": b.get("设计图"),
+                         "structure": b.get("结构"), "area": b.get("面积"),
+                         "deployed": b.get("已建成面积"), "armor": b.get("护甲")})
     return pd.DataFrame(rows, columns=["city", "building", "faction_id", "kind", "resource",
                                        "ship_type", "blueprint", "structure", "area", "deployed",
                                        "armor"])
@@ -1932,15 +1967,15 @@ def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, plane
 # roster (编制表)
 # --------------------------------------------------------------------------------------
 
-#: The default **refresh rule** for a roster slot: highest current ``hull``, then ``hull_max``,
-#: then **oldest first** (``spawned_round`` ascending — the engine's ``Ship.spawned_round``, exposed
-#: as the ships table's ``spawned_round`` column), then name ascending (names carry the generation
+#: The default **refresh rule** for a roster slot: highest current ``船体``, then ``船体上限``,
+#: then **oldest first** (``下水回合`` ascending — the engine's ``Ship.spawned_round``, exposed
+#: as the ships table's ``下水回合`` column), then name ascending (names carry the generation
 #: suffix: 方舟 / 方舟2 / 方舟3).
 #:
-#: ⚠ ``spawned_round`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
+#: ⚠ ``下水回合`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
 #: NaN **last** in ascending order, so "unknown" never wins the tie-break; those ties fall through to
 #: the name order, which is what the rule did before this column existed.
-DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-hull", "-hull_max", "spawned_round", "ship_id")
+DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-船体", "-船体上限", "下水回合", "ship_id")
 
 
 def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=None,
@@ -1952,19 +1987,19 @@ def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=
     turn, which is what makes the roster survive name generations — a sunk 旗舰 is back-filled from
     the query, without anyone hand-copying a name::
 
-        spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
-                ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
+        spec = [("第1舰队·旗舰", "舰级=='cruiser' and faction_id=='中国'"),
+                ("第1舰队·护卫", "舰级=='corvette' and faction_id=='中国'")]
         r = ctl.roster(ckpt, spec)
 
-    **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``hull`` → highest ``hull_max``
-    → **oldest first** (``spawned_round`` ascending, unknown/``null`` last) → name ascending.
-    ``spawned_round`` is the engine's own birth round (``Ship.spawned_round``, shipped as the ships
-    table's ``spawned_round`` column); ties that involve ships from an old checkpoint (``null``) fall
+    **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``船体`` → highest ``船体上限``
+    → **oldest first** (``下水回合`` ascending, unknown/``null`` last) → name ascending.
+    ``下水回合`` is the engine's own birth round (``Ship.spawned_round``, shipped as the ships
+    table's ``下水回合`` column); ties that involve ships from an old checkpoint (``null``) fall
     back to name order, exactly as before that column existed. Pass ``rule=`` to override, using
     ``"-col"`` for descending.
 
     A rule column the frame does not carry (e.g. an index directory written by an **older** engine,
-    which has no ``spawned_round``) is **skipped** rather than raising — the roster then degrades to
+    which has no ``下水回合``）is **skipped** rather than raising — the roster then degrades to
     the remaining columns (name order), never to an exception.
 
     Returns one row per slot: ``slot``/``query``/``refresh_rule``/``matched``/``candidates`` plus the
@@ -2230,20 +2265,23 @@ def _leaf_fields(s: Surface) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for fac in s.raw.get("control") or []:
         fid = fac.get("faction_id")
-        for kind in _KIND_ORDER:
+        for kind in _kind_order():
             if not LEAF_KINDS[kind]:
                 raw = fac.get(kind)
                 name = f"{fid}.{kind}"
                 if raw is None:
-                    out[name] = {"exists": False, "mode": INHERIT,
-                                 _VALUE_FIELD.get(kind, "value"): None}
+                    # 值字段可能不止一个（两轴风格叶 / 设计图），所以**全给 null**：
+                    # 只写一个 `value: None` 会让另一条轴在 `verify` 的 before/after 里凭空消失。
+                    miss = {v: None for v in LEAF_KINDS.values(kind)}
+                    out[name] = {"exists": False, "mode": INHERIT, **miss}
                 else:
                     out[name] = {"exists": True, **raw}
                 continue
             for entry in fac.get(kind) or []:
                 key = _entry_key(kind, entry)
+                identity = set(LEAF_KINDS[kind])
                 out[_leaf_name(fid, kind, key)] = {
-                    k: v for k, v in entry.items() if k not in _KEY_FIELDS
+                    k: v for k, v in entry.items() if k not in identity
                 }
     return out
 
@@ -2253,7 +2291,7 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for fac in (diff or {}).get("control") or []:
         fid = fac.get("faction_id")
-        for kind in _KIND_ORDER:
+        for kind in _kind_order():
             if kind not in fac:
                 continue
             if not LEAF_KINDS[kind]:
@@ -2265,16 +2303,18 @@ def _diff_fields(diff: Mapping) -> dict[str, dict[str, Any]]:
                 # 于是 `verify` 看上去"什么都没请求"——静默的成功比失败更难查。
                 # ⚠ 值字段名**按 kind 查表**（`capital`→`value`、`default_role`→`role`…）：
                 # 写成一张写死的名单时，新轴的写值会在 `requests` 里静默消失，与漏掉 `remove` 同一个坑。
-                wanted = {"mode", "remove", _VALUE_FIELD.get(kind, "value")}
-                if kind in _TWO_AXIS_KINDS:
-                    wanted |= {"temper", "lone_wolf"}
+                # 值字段**按 kind 问 manifest**（`capital`→`value`、`default_role`→`role`、
+                # 两轴风格叶→两个字段…）：写成一张写死的名单时，新轴的写值会在 `requests` 里
+                # 静默消失，与漏掉 `remove` 同一个坑。多字段于是不需要特例。
+                wanted = {"mode", "remove", *LEAF_KINDS.values(kind)}
                 out.setdefault(f"{fid}.{kind}", {}).update(
                     {k: v for k, v in raw.items() if k in wanted})
                 continue
             for entry in fac.get(kind) or []:
                 key = _entry_key(kind, entry)
+                identity = set(LEAF_KINDS[kind])
                 out.setdefault(_leaf_name(fid, kind, key), {}).update(
-                    {k: v for k, v in entry.items() if k not in _KEY_FIELDS})
+                    {k: v for k, v in entry.items() if k not in identity})
     return out
 
 
@@ -2481,7 +2521,7 @@ def apply(ckpt: str | os.PathLike, diff: Mapping | str | os.PathLike, *,
 
         rep = ctl.verify(ckpt, diff)          # read-only rehearsal
         assert rep.ok
-        ctl.apply(ckpt, diff, save="ckpt2.ron")   # now it is real
+        ctl.apply(ckpt, diff, save="ckpt2.json")   # now it is real
 
     ``rounds`` defaults to 0: overlay and persist *without advancing time*.
     """

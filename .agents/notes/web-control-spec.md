@@ -208,6 +208,15 @@
 
 ---
 
+## 8. 风险
+
+1. **这是界面重构，不是加一列**：两栏合并要动 `index.html` 的 DOM 与 `style.css`；写面 1200 行要拆。
+2. **差异回传是语义，不能因为改渲染而丢**（§3.4 那五条）。→ `g4` 要把发出去的 **diff 原文**钉在数据上。
+3. **声明写错不会编译报错**——所以 §6 的第 2/4 条必须是**双向集合相等**，不是「包含」。
+4. 引擎那一改动要守住**行为中性**（只多发一段 JSON）；digest 是这条的判据。
+
+---
+
 ## 11. 实现记录（第一步，分支 `feature/web-control-spec`）
 
 ### 11.1 引擎：一份结构事实
@@ -250,7 +259,7 @@
   g4 的哪一族」的指针表；`cargo check -p planet_x_web --all-targets` 绿。
 * **反向验证 `play/tests/_g4_negative.py`**（不是组，不进 `run.py`）：把 `views.json` 与
   `--control-schema` 的**副本**逐个改坏喂给 `g4_spec.run`，要求「该红的红、基线绿」。
-  实测 **16 个注入错全部咬住**。**一条不会红的守卫等于没有守卫**，这份就是那条判据的量具。
+  实测 **16 个注入错全部咬住**（第二步又加了两条 `source` 形态的，现为 18）。**一条不会红的守卫等于没有守卫**，这份就是那条判据的量具。
 * ⚠ 与设计稿不符、以引擎实测为准的一条：**读面从不发 `remove`**（315 个条目里 0 次）。
   `DefaultDoctrine`/`DefaultKiting`/`DefaultShipRole` 构造时写死 `remove: false` 而该字段
   `skip_serializing_if = "is_false"`；`capital` 是 `Control<BodyId>`，根本没这个字段。
@@ -309,18 +318,74 @@
 4. 右侧「状态」面板不再自称**只读**：被组织点认领的集合会**就地**换成整理后的表，而那张表现在也有控制行（实测右侧面板里 **122 个**可编辑控制格，例如 `state.cities` 那张 inline 表里的娱乐/福利预算）。选择改标题而不是给 inline 单独走只读渲染——**因为它们本来就是同一批对象**（见 §12.2 那条），两边不一致的风险不存在。
 5. 编辑器对 `<select>` 类控件靠 **real 事件**（`input`）触发；合成 `change` 不会触发（验收脚本要注意这一点，我踩过一次）。
 
-### 12.4 未做（第二步及以后）
+### 12.4 未做
 
-* **第二步**：`buildTree`/`shipNode`/`renderNode`/`KIND`/编辑器 switch 整段删掉，让「控制树（旧）」页消失。
-* `blueprints`（设计图库）与 `invest_weights`/`build_weights` 搬进卡片（现在靠 `write_omit` + 旧页），
-* **kit 的三张手抄表**（`LEAF_KINDS`/`_VALUE_FIELD`/`_TWO_AXIS_KINDS`/`_COMPOSITE_KINDS`/`_BLUEPRINT_FIELDS`）改读引擎那份 manifest——`--control-schema` 已经发了，删掉它们才是「一份事实、三端共用」的完全体。
-* 用词统一（用户：**最后再来统一**）。
+* ~~第二步~~ / ~~设计图与权重搬进卡片~~ / ~~kit 改读引擎~~ → 都在 **§13** 做掉了。
+* **用词统一**（用户：**最后再来统一**）——到 §13 为止仍没做。
 
+---
 
+## 13. 实现记录（第二步：删掉手写控制树 + kit 改读引擎，`feature/control-tree-retire`）
 
-## 8. 风险
+合并提交 **`7b9e247`**（父 = `328d4c2` 之后的主线 + `545d32c`）。
 
-1. **这是界面重构，不是加一列**：两栏合并要动 `index.html` 的 DOM 与 `style.css`；写面 1200 行要拆。
-2. **差异回传是语义，不能因为改渲染而丢**（§3.4 那五条）。→ `g4` 要把发出去的 **diff 原文**钉在数据上。
-3. **声明写错不会编译报错**——所以 §6 的第 2/4 条必须是**双向集合相等**，不是「包含」。
-4. 引擎那一改动要守住**行为中性**（只多发一段 JSON）；digest 是这条的判据。
+### 13.1 旧树整条删除，能力逐条搬迁
+
+`web/static` 净 **+282/−670**（`app.js` 一处就 −500 行）。删掉的是：
+`buildTree` / `shipNode` / `styleLeaf` / `renderTree` / `renderNode` / `KIND` / `scopeAccess` /
+`bulkOwnershipSelect` / `addBlueprintButton` / `bpDraft` / `blueprintNode` / 「控制树（旧）」页 /
+`#treePanel` / 只服务它的 CSS。
+
+| 旧树独有能力 | 现在住哪 |
+| --- | --- |
+| 设计图库（新建/改舰级+选装+倾向三轴+归属/删图/显示 `ship_count`·`launch_waiting`） | 新**「设计图」页**：`@control[*]` 一行一势力 + `leaf` 行 `"new": true`（身份键由人现填） |
+| 建筑与建造区（新建/拆/改属性/**两片权重叶**） | 城市卡片的 `action: buildings` 行 |
+| 全局作用域 | 新**「全局」页**：`"source": null` + `{ "owner": "global" }` |
+| 「整棵子树一起换归属」(`bulkOwnershipSelect`) | `owner` 行（`factions`/`bodies`/`cities`/`global`）——它写的本来就是**作用域**那一档，按作用域表达更准 |
+| 迁都 / 恢复继承 / 恢复出厂值 | 各控制行自带 |
+
+**两条新原语**（写进 `views.json` 的 `note`）：
+* `source: null` = **这张卡故意不依赖任何记录**（只放 `owner: global` 这种行）。
+  g4 的判据是「**键必须存在**，值可为字符串或 null；`layout: table` 不许 null」
+  ——显式 null 放行、**漏写仍然红**（那多半是打错，不是有意）。
+* `"new": true` = **这片叶的身份键由人现填**（`keys_from` 是「从名单里挑」，这是「现造一个」）；**只对多键叶成立**，写在势力级单叶上由 g4 判红。
+
+### 13.2 kit：叶种类表改读引擎（三端同源的最后一块）
+
+`play/planet_x_ctl` 的 `LEAF_KINDS` 从写死的 dict 换成**懒加载 `Mapping`**（`_LeafFacts`），
+事实读 `--control-schema`；删掉 `_VALUE_FIELD`/`_TWO_AXIS_KINDS`/`_COMPOSITE_KINDS`/
+`_BLUEPRINT_FIELDS` 四张表与没人调用的 `_KEY_FIELDS`。三处顺带修正（详见
+[`python-control-authoring.md`](python-control-authoring.md) §3.8）：值字段按 `values` 取、
+「被请求字段」= `{mode, remove} ∪ values(kind)`、「叶不存在」那行把**全部**值字段给 `null`。
+
+### 13.3 顺手挖出并修掉的四个既有 bug（都不是这两步引入的）
+
+| # | bug | 现象 |
+| --- | --- | --- |
+| 1 | `controls.js` 的 `el(tag, cls, text)` 只认字符串 | 归属 chip 与它们的 `data-role` **一个都没设上**（`class="[object Object]"`）——第一步留下的 |
+| 2 | `buildingEditor` 调 `leafValueEditor` 不传 `node` ⇒ 恒 `disabled` | **建筑的两片权重叶在界面上根本改不动**（而 `write_omit` 里写着"住在建筑行里"——说谎的是界面） |
+| 3 | `diffLeaf` 删叶写死 `out.remove = true` | `removeFieldName()`（读 manifest）**没有任何调用方** ⇒ 引擎一改名就静默发错键 |
+| 4 | 行内卡片 / 「其余 ▸N」只有那个 20px 的 span 可点 | 点在内边距上没反应（我自己验收时踩到）⇒ 改成**整格可点** |
+
+### 13.4 验收（我自己实机重跑，不只是 subagent 说的）
+
+* **页 tab**：`本回合 / 势力 / 舰队 / 城市 / 市场·运输 / 设计图 / 全局 / 未组织`；`#treePanel`/`#sideTabs` 都不存在。
+* **设计图全流程**：新建 `dsh-试作甲`（diff 空 = 壳没动过）→ 选 `corvette` + 一个选装 + `Freight` + `Player`
+  ⇒ diff `{"blueprints":[{"name":"dsh-试作甲","class":"corvette","components":["armor"],"doctrine":null,"kiting":null,"role":"Freight","mode":"Player"}]}`
+  → 回执 `✓ 全部落地：1 条` → **刷新后读回**（`corvette` / 1 个选装 / `Freight` / `Player` / 只读行「本图造过 0」）
+  → 删图 ⇒ diff **只发** `{"name":"dsh-试作甲","remove":true}` → 回执 `删掉了 1 片叶：中国.blueprints[0]`。
+* **同名新建被当场拒绝**：`已经有一片同名的叶了（在上面那几行里）`，叶数不变 ⇒ subagent 自己标记为「未实测覆盖」的那个角（本地键撞读面键）**由新建表单挡住了**。
+* **全局归属**：diff `{"control":[],"scope":{"global":"Player"}}` → 回执 ✓（只发 scope）。
+* **建筑权重**：城市卡片里 `invest_weights` 的输入框**可编辑**（6 个，以前全 `disabled`）⇒ 改 1.5→2.5 得
+  `{"invest_weights":[{"city":"长三角","building":0,"value":2.5,"mode":"Player"}]}`。
+* **零 JS 错误**：8 个页 + 卡片 + 应用 + 推进回合全程 `errs: []`。
+* **两层门**：Rust `planet_x` **217/217**（31 skipped）+ `planet_x_web` **24/24**；Python 四组 **76/76**；
+  反向验证 **19 个注入错全部咬住**（新增两条：`source` 键缺失、表上 `source: null`、`new` 挂单叶）。
+* **行为中性**：第二步没有一行引擎改动（web + kit + 测试 + 文档）⇒ digest 与 main 仍逐字节相同。
+
+### 13.5 仍未做
+
+* **用词统一**（用户：「最后再来统一」）。**这是这一轮唯一剩下的显式待办**。
+* 设计图页一行一势力的格子会长（每张图一整个编辑器），没做折叠/上限。
+* 新建图的舰级为空时选装全标「槽位已满」，要选完舰级才可选（诚实，但可能让人愣一下）。
+* `weightRow` 多渲染一个空的 `.lv-label`（纯外观）。

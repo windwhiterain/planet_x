@@ -80,19 +80,19 @@ pub fn state_json(state: &State, view: &RoundView) -> serde_json::Value {
     let mut v = serde_json::to_value(t).expect("trajectory is serializable");
     // 舰的**风格**在这里给**有效值**（叶 → 舰队默认 → 舰上记录值），不是 `Ship` 上那份记录：
     // 风格现在是活层，`--apply` 写的是叶片，所以直接序列化 `Ship` 只能读到出厂快照——agent
-    // 会看到 `kiting: 0.0` 而以为是基线，实际上舰队默认早把它推成 -1.0 了。这类
+    // 会看到 `姿态: 0.0` 而以为是基线，实际上舰队默认早把它推成 -1.0 了。这类
     // 「读数不反映真实行为」正是本项目最忌讳的那种坑，所以在唯一的 agent 视图上就地改掉
     // （与 `round_value` 同一手法：序列化后统一修字段）。记录值仍完整地存在 checkpoint 里。
     // 放在 `round_value` **之前**，让这些值也一起按两位小数规整（避免 token 噪声）。
     if let Some(ships) = v.get_mut("ships").and_then(|s| s.as_array_mut()) {
         for (row, s) in ships.iter_mut().zip(state.ships.iter()) {
-            row["doctrine"] = serde_json::to_value(state.ship_doctrine(s.name.clone()))
+            row["风格"] = serde_json::to_value(state.ship_doctrine(s.name.clone()))
                 .expect("doctrine is serializable");
-            row["kiting"] = json!(state.ship_kiting(s.name.clone()));
+            row["姿态"] = json!(state.ship_kiting(s.name.clone()));
             // 第三条风格轴（角色，三态 `War`/`Freight`/`Observe`）：同样给**有效值**——
             // 自动控制每回合会写这片叶（按积压 + 观测需求定编），所以 `Ship.role` 那份
             // 记录值常常不是它此刻的活。归属（谁说了算）在 `role_mode`。
-            row["role"] = json!(state.ship_role(s.name.clone()));
+            row["角色"] = json!(state.ship_role(s.name.clone()));
             row["role_mode"] = json!(state.ship_role_control(s.name.clone()).name());
         }
     }

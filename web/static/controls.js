@@ -177,17 +177,33 @@
     return d;
   }
 
+  /// `el(tag, cls, text)`——`cls` 既可以是**类名字符串**，也可以是**属性对象**
+  /// （`{class, 'data-role':…, type:…, value:…}`，与 `app.js` 那边的写法一致）。
+  /// ⚠ 2026-10 修：以前只认字符串，而几处调用按 `app.js` 的习惯传了对象 ⇒ 元素上真的写着
+  /// `class="[object Object]"`：**看着像设了类名，其实一个类都没有**（样式/脚本都找不到它）。
+  /// 这种"哑巴失败"正是本仓拉黑的那一类，所以在这里一次兼容两种写法，而不是改所有调用点。
   function el(tag, cls, text) {
     const e = document.createElement(tag);
-    if (cls) e.className = cls;
+    if (typeof cls === 'string') {
+      if (cls) e.className = cls;
+    } else if (cls && typeof cls === 'object') {
+      Object.keys(cls).forEach((k) => {
+        const v = cls[k];
+        if (k === 'class' || k === 'className') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else if (v != null) e.setAttribute(k, v);
+      });
+    }
     if (text != null) e.textContent = text;
     return e;
   }
 
   // --- 当前记录 → 它属于哪个势力 / 它叫什么 ------------------------------------
-  // 表里的记录要么自己就是势力（`name` = 势力名），要么带着 `faction_id`。
-  function fidOf(rec) { return rec ? (rec.faction_id || rec.name) : null; }
-  function nameOf(rec, recKey) { return rec && rec.name != null ? rec.name : recKey; }
+  // 表里的记录要么自己就是势力（`势力` = 势力名），要么带着 `势力`（城的势力字段）；
+  // `@control[*]` 那种**读面**记录仍带着 `faction_id`（写面键，不随 state 改名走）。
+  function fidOf(rec) { return rec ? (rec.faction_id || rec.势力) : null; }
+  // ⚠ 记录叫什么**不在这里猜**：`recKey` 由 specview 按视图声明的 `key` 求好传进来
+  //（`recordKeyOf`，与 `views.json` 同源），旧代码那句 `rec.name` 已经不再成立。
   function fcOf(rec) { return getControl(fidOf(rec)); }
 
   // --- 一片叶的**可编辑副本** --------------------------------------------------
@@ -261,18 +277,23 @@
     // 今天的界面根本没法给一个还没有叶的资源设预算，这里补上。
     const box = el('div', 'ctl-grid');
     const rows = candidates(col, spec, raw, rec, recKey);
-    if (!rows.length) box.appendChild(el('span', 'ctl-none', '（没有可以配的键：views.json 的 keys_from 没给，读面里也一片叶都没有）'));
-    else {
+    if (!rows.length && !col.new) {
+      box.appendChild(el('span', 'ctl-none', '（没有可以配的键：views.json 的 keys_from 没给，读面里也一片叶都没有）'));
+    } else {
       const miss = rows.filter((r) => !r.entry).length;
-      const hint = el('div', 'ctl-note');
-      hint.textContent = rows.length + ' 项：' + (rows.length - miss) + ' 项已有叶' + (miss ? '，' + miss + ' 项还没有叶（写值 = 新建这片叶）' : '')
-        + '；写值即接管（这片叶归你，系统不再改写它）';
-      box.appendChild(hint);
+      if (rows.length) {
+        const hint = el('div', 'ctl-note');
+        hint.textContent = rows.length + ' 项：' + (rows.length - miss) + ' 项已有叶' + (miss ? '，' + miss + ' 项还没有叶（写值 = 新建这片叶）' : '')
+          + '；写值即接管（这片叶归你，系统不再改写它）';
+        box.appendChild(hint);
+      }
       rows.forEach((r) => {
         const leaf = editableLeaf(fc, field, r.kv, blankOf(field, ui));
         r.showLabel = true;   // 网格里一行一片叶 ⇒ 这一行必须自己带标签（资源名 / 城名 / 楼）
         box.appendChild(leafNodeBox(col, field, leaf, r, rec, recKey, where));
       });
+      // `new: true` ⇒ 身份键没有名单可枚举，给一个「现造一个」的入口（设计图库的图名）
+      if (col.new) box.appendChild(newKeyForm(col, field, spec, fc, rec, recKey, ui));
     }
     return box;
   }
@@ -291,16 +312,90 @@
     };
     if (rowInfo && !rowInfo.entry) node.missingLeaf = true;
     // `renderLeafNode` 在 app.js 里（它认识旧控制树那套结构）；这里只喂一个同形的节点。
-    return renderLeafNode(node, {
+    const box = renderLeafNode(node, {
       where,
       noLabel: !rowInfo || !rowInfo.showLabel,
       alwaysEditable: true,
       hint: node.missingLeaf ? '没有叶（这一层没表态）——写一个数就是新建这片叶' : null,
       carry: rowInfo && rowInfo.entry ? carryText(rowInfo.entry, leafSpec(field)) : null,
     });
+    const ro = readOnlyNote(rowInfo && rowInfo.entry, leafSpec(field), col.ui || {});
+    if (ro) box.appendChild(ro);
+    return box;
   }
 
-  /// 候选键：读面里已有的叶 + `keys_from` 给的候选（`where` 相对**当前记录**求值）。
+  /// **只读派生列**（manifest 的 `read_only`：引擎现算、写面收下但**不写回**）。
+  /// 列名与单位是**呈现**（`views.json` 的 `leaf_ui.<field>.read_only`）——本文件只说
+  /// 「把它摆出来」，不说它叫什么。`false` 的开关不占地方（`launch_waiting: false` 不是新闻）。
+  function readOnlyNote(entry, spec, ui) {
+    if (!entry || !spec || !spec.read_only || !spec.read_only.length) return null;
+    const labels = (ui && ui.read_only) || {};
+    const bits = [];
+    spec.read_only.forEach((k) => {
+      const v = entry[k];
+      if (v == null) return;
+      if (typeof v === 'boolean' && !v) return;
+      const n = typeof v === 'number' ? window.SpecView.num(v, 0) : (v === true ? '是' : String(v));
+      bits.push((labels[k] ? labels[k] + ' ' : k + ' ') + n);
+    });
+    if (!bits.length) return null;
+    return el('div', 'ctl-note', '引擎现算（写面不写回）：' + bits.join(' · '));
+  }
+
+  /// `leaf` 行上的 `new: true`：这片叶的**身份键没有名单可枚举**（设计图库的「图名」是开放
+  /// 集合），由人现填 —— 它是 `keys_from` 的对偶：那个是「从名单里挑」，这个是「现造一个」。
+  /// 身份键的**名字**来自引擎的 manifest（`keys`），这里只给一个输入框，不写死任何领域字段。
+  /// 新建出来的是一片**壳**（原值 = 它自己）⇒ 没动过就不会进 diff（与「还没有叶」那条同一条规矩）。
+  function newKeyForm(col, field, spec, fc, rec, recKey, ui) {
+    const box = el('div', 'ctl-new');
+    box.appendChild(el('div', 'ctl-new-title', '＋ 新建一片叶（' + (ui.label || field) + '）'));
+    const inputs = spec.keys.map((k) => {
+      const line = el('label', 'ctl-new-line');
+      line.appendChild(el('span', 'lv-label', (ui.key_label || k) + ' '));
+      const inp = el('input', { type: 'text', class: 'ctl-new-key', placeholder: k });
+      inp.title = '这一片叶的身份键「' + k + '」：本势力内唯一';
+      line.appendChild(inp);
+      box.appendChild(line);
+      return { k, inp };
+    });
+    const btn = el('button', {}, '新建');
+    const stat = el('span', 'ctl-new-stat');
+    btn.addEventListener('click', () => {
+      const kv = {};
+      let bad = null;
+      inputs.forEach((x) => {
+        const v = String(x.inp.value || '').trim();
+        if (!v) bad = bad || x.k;
+        kv[x.k] = v;
+      });
+      if (bad) { stat.textContent = '「' + bad + '」不能空'; return; }
+      const list = (fc[field] = fc[field] || []);
+      if (list.some((x) => spec.keys.every((k) => String(x[k]) === String(kv[k])))) {
+        stat.textContent = '已经有一片同名的叶了（在上面那几行里）';
+        return;
+      }
+      const e = Object.assign({}, blankOf(field, ui), kv);
+      e[ownerField()] = 'Inherit';
+      list.push(e);
+      if (shellLeaf) shellLeaf(e, specOf(field));
+      stat.textContent = '';
+      if (controlRerender) controlRerender();
+    });
+    const bar = el('div', 'ctl-new-bar');
+    bar.append(btn, stat);
+    box.appendChild(bar);
+    box.appendChild(el('div', 'ctl-note',
+      '新建的叶先在**编辑面**里（点「应用到服务器」才真的落地）；值还没写 ⇒ 单独一片壳不进 diff'));
+    return box;
+  }
+
+  /// 候选键：读面里已有的叶 + `keys_from` 给的候选（`where` 相对**当前记录**求值）
+  /// + **编辑面里已经有、读面里还没有的叶**。
+  ///
+  /// ⚠ 最后那一条是 2026-10 补的（`new: true` 那个「＋ 新建」把它们造出来）：新造的身份键
+  /// 读面**不可能知道**（服务器上还没有这片叶），所以只按读面列候选人 ⇒ 你刚新建的那一行会在
+  /// 下一次重画时**凭空消失**（数据还在 `edControl` 里，界面上没了）。编辑面是"读面 + 我改过的"，
+  /// 候选键必须按这个并集来（与 `diffLeaf` 认壳、`pairOrigins` 配对同一个道理）。
   function candidates(col, spec, raw, rec, recKey) {
     const ui = col.ui || {};
     const arr = Array.isArray(raw) ? raw : [];
@@ -313,6 +408,16 @@
       const key = String(e[kf]);
       seen.add(key);
       out.push({ kv, entry: e, key, label: rowLabel(col, key, e) });
+    });
+    // 编辑面里多出来的那些（新建的叶 / 别处写过的叶）：读面里没有，但**必须**留在列表里。
+    const fc = fcOf(rec);
+    (fc && Array.isArray(fc[fieldOf(col.leaf)]) ? fc[fieldOf(col.leaf)] : []).forEach((e) => {
+      const key = String(e[kf]);
+      if (seen.has(key)) return;
+      const kv = {};
+      spec.keys.forEach((k) => { kv[k] = e[k]; });
+      seen.add(key);
+      out.push({ kv, entry: e, key, label: rowLabel(col, key, e), local: true });
     });
     const kfInfo = ui.keys_from;
     if (kfInfo) {
@@ -461,7 +566,7 @@
   // --- `owner` 行：作用域归属（不是叶） ----------------------------------------
   function ownerRow(col, rec, recKey, where) {
     const k = col.owner;
-    const id = k === 'global' ? null : nameOf(rec, recKey);
+    const id = k === 'global' ? null : recKey;
     const box = el('div', 'ctl-owner');
     const sel = el('select', { class: 'mode owner', 'data-role': 'owner', 'data-scope': k });
     MODES.forEach(([v, l]) => {
@@ -504,17 +609,17 @@
     if (!actionSpec(field)) return errBox('引擎的 actions 里没有「' + field + '」');
     if (field !== 'buildings') return errBox('views.json 写了一条还没有渲染器的命令列表：「' + field + '」');
     const fid = fidOf(rec);
-    const cityId = nameOf(rec, recKey);
+    const cityId = recKey;
     if (!fid || !cityId) return el('span', 'sv-missing', '（这条记录不是一座城：命令列表按城给）');
     const fc = getControl(fid);
     const box = el('div', 'ctl-action');
-    const list = (rec.buildings || []);
+    const list = (rec.建筑 || []);
     if (!list.length) box.appendChild(el('span', 'ctl-none', '这座城还没有建筑'));
     list.forEach((b) => {
       const node = {
-        key: 'bld' + fid + ':' + cityId + ':' + b.id,
-        kind: 'building', id: b.id, name: buildingLabel(b),
-        leaf: investLeaf(fc, cityId, b.id), buildLeaf: buildLeaf(fc, cityId, b.id),
+        key: 'bld' + fid + ':' + cityId + ':' + b.建筑编号,
+        kind: 'building', id: b.建筑编号, name: buildingLabel(b),
+        leaf: investLeaf(fc, cityId, b.建筑编号), buildLeaf: buildLeaf(fc, cityId, b.建筑编号),
         b, fid, cityId, city: rec,
       };
       box.appendChild(buildingEditor(node));
