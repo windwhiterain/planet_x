@@ -196,8 +196,12 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
             .control(fid.clone())
             .map(|c| c.welfare_budget.clone())
             .unwrap_or_default();
+        let has_player_welfare = config.resources.keys().any(|rt| {
+            state.welfare_budget_control(fid.clone(), rt).is_player()
+                && welfare_leaves.contains_key(rt)
+        });
         let mut _welfare_budget: ResourceMap = ResourceMap::new();
-        let mut total_welfare_value = 0.0;
+        let mut computed_welfare_value = 0.0;
         for rt in config.resources.keys() {
             let mode = state.welfare_budget_control(fid.clone(), rt);
             let value = if mode.is_player() {
@@ -209,10 +213,18 @@ pub fn step_governance(state: &mut State, config: &GameConfig, flow: &mut RoundS
                 stock.get(rt).copied().unwrap_or(0.0) * ai_fraction
             };
             if value > 0.0 {
-                total_welfare_value += value * value_of(rt);
+                computed_welfare_value += value * value_of(rt);
                 _welfare_budget.insert(rt.clone(), value);
             }
         }
+        // **默认路径必须逐字节等价于旧行为**：没有 Player 福利叶时，福利总价值就是
+        // `default_entertainment × 城数`，不因为库存/浮点重算而改变确定性世界。
+        // 只有玩家写了 `welfare_budget` 时才用库存混出来的向量总值。
+        let total_welfare_value = if has_player_welfare {
+            computed_welfare_value
+        } else {
+            g.default_entertainment * n_cities
+        };
         let total_weight: f64 = cities.iter().map(|(_, _, w)| *w).sum();
 
         // 人口越多，管理能力越分散——人口超载放大远距离治理难度（与距离叠加）。

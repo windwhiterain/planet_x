@@ -273,6 +273,14 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
 
         elif f in ("investment_budget", "construction_budget", "welfare_budget"):
             k = first(spec)
+            if not k and f == "welfare_budget":
+                # `welfare_budget` 第一版 AI 不写回控制面 ⇒ 读面可能是空表；从同势力的
+                # 投资/建造预算里借一个真实资源 key 来新建这片叶。
+                for other in ("investment_budget", "construction_budget"):
+                    src = first(by_field[other]) if other in by_field else None
+                    if src and src.get("resource"):
+                        k = {"resource": src["resource"]}
+                        break
             if not k:
                 missing.append(f"{f}：这一局该势力一个资源 key 都没有，没法写")
                 continue
