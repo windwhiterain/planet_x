@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -378,8 +379,25 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "last_round": int(rounds[-1]),
         "identities": _process_identities(q),
         "capital": _capital_summary(q),
+        "mond": _mond_summary(q),
     }
     return pd.DataFrame(rows), meta
+
+
+def _mond_summary(q) -> dict:
+    """MOND 掌握度的**逐势力时间序列**（`src/tests/sim/knowledge.rs` 那几条，2026-10 第 7 批）。
+
+    读面三列就够：`MOND 掌握度`（活量）、`mond_ships_in_band`（在场舰数 = **唯一渠道**）、
+    `mond_frontier_au`（前沿海拔，掌握到顶是 `null` = 无穷）。
+    """
+    fa = q.table("factions")[["round", "势力", "MOND 掌握度", "mond_ships_in_band", "mond_frontier_au"]]
+    out: dict = {}
+    for f, rows in fa.groupby("势力"):
+        rows = rows.sort_values("round")
+        out[f] = [(int(r["round"]), float(r["MOND 掌握度"]), int(r["mond_ships_in_band"] or 0),
+                   None if pd.isna(r["mond_frontier_au"]) else float(r["mond_frontier_au"]))
+                  for _, r in rows.iterrows()]
+    return out
 
 
 def _capital_summary(q) -> dict:
@@ -542,6 +560,7 @@ def run(h, ck) -> None:
 
     identity_checks(h, ck, metas, tag)
     capital_checks(h, ck, metas, tag)
+    mond_checks(h, ck, metas, tag)
 
 
 def capital_checks(h, ck, metas, tag) -> None:
@@ -595,6 +614,80 @@ def capital_checks(h, ck, metas, tag) -> None:
     ck.check("首都判定守卫没有空转（三类都真的发生过）",
              forced > 0 and review > 0 and reloc > 0,
              f"{tag}：亡城强迁 {forced} / 周期评估 {review} / 评估迁都 {reloc}")
+
+
+def mond_checks(h, ck, metas, tag) -> None:
+    """**MOND 掌握度**（`src/tests/sim/knowledge.rs`，2026-10 第 7 批搬来）。
+
+    | Rust 原件 | 这里 |
+    | --- | --- |
+    | `a_real_deep_presence_reaches_the_top` / `mastery_at_one_is_a_ratchet_and_never_rusts` | 一旦到过 `1.0` **永不回落**（棘轮）；且恒在 `[0, 1]` |
+    | `presence_comes_only_from_ships_in_the_band` 的**唯一渠道**那半 | 掌握度**涨** ⇒ 那一回合带内**必须有舰**（不在带内的舰一点也不算） |
+    | `initial_mastery_comes_from_config_and_frontier_reads_it` 的**前沿**那半 | 投影那一列逐行 == `--call mond_frontier(config, 掌握度)` 的 r2（**引擎同一份实现**，不是抄公式） |
+
+    ⚠ **锈那一半搬不动**：`control_rusts_back_when_the_fleet_leaves` 只断言「撤出后回落」，
+    但读面给的是**带内舰数**，而目标是**在场强度**（`1 + 深度 × depth_weight`，逐舰不同）
+    ——实测长局里 123 次回落中有 **9 次带内有舰**（浅处一艘的强度仍低于现掌握度）。
+    所以「涨 ⇒ 带内有舰」成立，「锈 ⇒ 带内没舰」不成立，只能各论各的。
+    """
+    ratchet, rng, climb = Verdict(), Verdict(), Verdict()
+    steps = climbs = rusts = at_top = 0
+    frontier: dict = {}
+    for m in metas:
+        for f, seq in m["mond"].items():
+            for (r0, c0, b0, _), (r1, c1, b1, _) in zip(seq, seq[1:]):
+                steps += 1
+                if not (0.0 <= c1 <= 1.0):
+                    rng.add(f"{f} r{r1}: 掌握度 {c1} 越界")
+                if c0 >= 1.0 - 1e-12 and c1 < 1.0 - 1e-12:
+                    ratchet.add(f"{f} r{r1}: 到过 1.0 又掉到 {c1:.4f}")
+                if c1 > c0 + 1e-12:
+                    climbs += 1
+                    if b1 == 0:
+                        climb.add(f"{f} r{r1}: 涨了（{c0:.4f}→{c1:.4f}）可带内一艘舰都没有")
+                elif c1 < c0 - 1e-12:
+                    rusts += 1
+            for (_, c, _, fr) in seq:
+                if c >= 1.0 - 1e-12:
+                    at_top += 1
+                frontier.setdefault(c, set()).add(fr)
+
+    ck.check("MOND：掌握度恒在 [0,1]（活量，不是一次性解锁）", rng.n == 0,
+             rng.detail(f"{tag}：{steps} 个势力·回合"))
+    ck.check("MOND：**1.0 是棘轮**——到过顶就永不回落", ratchet.n == 0,
+             ratchet.detail(f"{tag}：{at_top} 个「势力·回合」在顶上，一个都没掉下来"))
+    ck.check("MOND：掌握度**只**由「带内有舰」驱动（不在带内的舰一点也不算）", climb.n == 0,
+             climb.detail(f"{tag}：{climbs} 次上涨全部有带内舰解释"))
+    ck.check("MOND：守卫没有空转（真的涨过、锈过、到过顶）",
+             climbs > 0 and rusts > 0 and at_top > 0,
+             f"{tag}：涨 {climbs} / 锈 {rusts} / 顶上 {at_top} 个势力·回合")
+
+    # 前沿海拔 = `mond_frontier(config, 掌握度)` 的 r2 —— 判据用**夹逼**，不设人肉容差：
+    # ⚠ 投影里的 `MOND 掌握度` 本身过 `r2`（只有两位小数），而前沿是按**全精度**掌握度算的
+    # ⇒ 逐值相等做不到。正确写法是拿引擎自己的函数在 `m ± 0.005`（那一格的宽度）上求值，
+    # 要求投影落在 [lo, hi] 里（两边再各让 0.005 给前沿自己的 r2）。
+    def frontier_at(m: float):
+        v = json.loads(h.capture(["--seed", "42", "--call", "mond_frontier",
+                                  "--args", json.dumps({"control": m})]))["value"]
+        return None if v is None else float(v)
+
+    mism = []
+    for c, fronts in sorted(frontier.items()):
+        lo, hi = frontier_at(max(0.0, c - 0.005)), frontier_at(min(1.0, c + 0.005))
+        for fr in fronts:
+            if hi is None:  # 上界已经是无穷 ⇒ 投影只能是 null（掌握到顶）
+                if fr is not None:
+                    mism.append(f"掌握度 {c}: 函数已到无穷，投影却是 {fr}")
+                continue
+            if fr is None:
+                mism.append(f"掌握度 {c}: 投影是 null（无穷），函数只给到 {hi}")
+            elif not (lo - 0.0051 <= fr <= hi + 0.0051):
+                mism.append(f"掌握度 {c}: 投影 {fr} 不在 [{lo}, {hi}] 里")
+    ck.check("MOND：前沿海拔逐行夹在 `mond_frontier(config, 掌握度±0.005)` 之间（引擎同一份实现）",
+             not mism,
+             "；".join(mism[:3]) or f"{len(frontier)} 个不同掌握度、{sum(len(v) for v in frontier.values())} 行全在夹逼区间里")
+    ck.check("MOND：前沿对账没有空转（掌握度真的跨了很宽的一段）",
+             len(frontier) >= 5, f"{len(frontier)} 个不同掌握度")
 
 
 def identity_checks(h, ck, metas, tag) -> None:

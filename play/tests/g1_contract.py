@@ -451,6 +451,27 @@ def world_shape(h, ck, tmp: Path) -> None:
              f"地球 {len(earth)} 个定居点；巴黎 {paris_res}；长三角 {sorted(cn_res)}")
 
 
+def mond_start_checks(h, ck, tmp: Path) -> None:
+    """**MOND 开局打点**（`sim/tests/knowledge.rs::initial_mastery_comes_from_config_and_frontier_reads_it`）。
+
+    「只有崇拜教天生 1.0，其余一个都不白拿」——判据**从 `meta.mond.initial` 读**，不写死名字：
+    配置里写谁就照给谁，没写的一个都不许有。防空转 = 配置里**真的点了名**（否则「全 0」也是「全对」）。
+    """
+    proj = tmp / "mond0"
+    h.run_into(proj, FACE_SEED, 0)
+    facs = _rounds(_table(proj, "factions"), 0)
+    initial = {k: float(v) for k, v in ((json.loads(h.capture(["--meta"])).get("mond") or {})
+                                        .get("initial") or {}).items()}
+    bad = [f"{r['势力']}：读面 {r['MOND 掌握度']} ≠ 配置 {initial.get(r['势力'], 0.0)}"
+           for r in facs if abs(float(r["MOND 掌握度"]) - initial.get(r["势力"], 0.0)) > 1e-12]
+    ck.check("MOND 开局打点从配置读（表里写谁的名字就照给，其余一个都不白拿）",
+             bool(facs) and not bad, "；".join(bad[:3]) or f"{len(facs)} 个势力的开局掌握度全对")
+    named = {r["势力"] for r in facs if float(r["MOND 掌握度"]) > 0.0}
+    ck.check("MOND 开局打点守卫没有空转（配置里真的点名了天生掌握者）",
+             named == set(initial) and bool(initial),
+             f"配置点名 {sorted(initial)}，读面上有掌握度的 {sorted(named)}")
+
+
 def neutral_defaults(h, ck, tmp: Path) -> None:
     """**`pre` 面的中性缺省**（`sim/tests/governance.rs::pre_view_has_neutral_b1_defaults`，第 7 批）。
 
@@ -724,6 +745,15 @@ def call_functions(h, ck, tmp: Path) -> None:
              bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
              f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
 
+    # ⓪′ MOND 前沿（第 7 批）：`mond_frontier(config, control)` 是**纯函数**
+    #     （`radius + arrival_eps/(drift_per_au × (1 − 掌握度))`），掌握到顶 = 无穷（JSON 给 null）。
+    sweep = [(m, call("mond_frontier", {"control": m})) for m in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    finite = [(m, v) for m, v in sweep if v is not None]
+    ck.check("--call mond_frontier：掌握度越高前沿越远（单调不减），到顶是无穷（null）",
+             len(finite) == len(sweep) - 1 and sweep[-1][1] is None
+             and all(b >= a - 1e-9 for (_, a), (_, b) in zip(finite, finite[1:])),
+             f"扫描 {sweep}")
+
     # ① haul_split：max-min 公平分配（原 `src/tests/sim/haul.rs`）。
     ck.check("--call haul_split：三种货、舱容 6 ⇒ 每种 2",
              call("haul_split", {"need": {"铁": 10, "碳": 10, "硅": 10}, "room": 6})
@@ -815,6 +845,7 @@ def run(h, ck) -> None:
     b3_tables(h, ck, tmp)
     input_face(h, ck, tmp)
     world_shape(h, ck, tmp)
+    mond_start_checks(h, ck, tmp)
     neutral_defaults(h, ck, tmp)
     control_fixed_point(h, ck, tmp)
     call_functions(h, ck, tmp)

@@ -693,6 +693,12 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **MOND 前沿**（第 7 批）：`radius + arrival_eps/(drift_per_au × (1 − 掌握度))`，
+        // 掌握到顶 = 无穷（JSON 里给 `null`）。投影 `factions.mond_frontier_au` 就是它的 r2。
+        "mond_frontier" => {
+            let f = sim::mond_frontier(config, num("control")?);
+            if f.is_finite() { json!(f) } else { serde_json::Value::Null }
+        }
         // **每个货栈一行**的完整账（现货 / 保留 / 可出口 / 缺口）——「出口与缺口不会同时在」
         // 这条判据要在**很多个真实站点**上成立，一次调用拿全部，省得逐站点问。
         "site_ledger" => {

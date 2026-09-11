@@ -1,4 +1,16 @@
-//! MOND 知识（科技干线）：**飞船在异常区**是唯一的知识渠道——派进去掌握度就涨，
+//! MOND 掌握度：**在场强度→掌握度**那条唯一的渠道。
+//!
+//! ## 2026-10（第 7 批）：两条搬去了数据级
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `initial_mastery_comes_from_config_and_frontier_reads_it` | g1「MOND 开局打点从配置读」+「前沿海拔 = `--call mond_frontier`」 | 开局打点是 `meta.mond.initial` 的**配置事实**；前沿海拔是纯函数，挂了 `--call` 后逐值扫描（0→30 / 0.5→32 / 1.0→∞） |
+//! | `mastery_at_one_is_a_ratchet_and_never_rusts` | g3「**1.0 是棘轮**——到过顶就永不回落」 | 7 seed × 1000 回合里 **7652 个「势力·回合」**在顶上，一个都没掉下来；顺带 `[0,1]` 与「涨 ⇒ 带内有舰」 |
+//!
+//! **留在这里的**：`a_real_deep_presence_reaches_the_top`（要造一个够深的在场）、
+//! `control_climbs_toward_the_presence_target_and_stops_there` /
+//! `control_rusts_back_when_the_fleet_leaves`（读面给的是**带内舰数**，目标是**在场强度**
+//! `1 + 深度 × depth_weight`，逐舰不同——实测 123 次回落里 9 次带内有舰）。
 //! 撤回来它就锈。判据与公式见 `sim::knowledge` 与 `.agents/notes/tech-system.md`。
 
 use super::*;
@@ -116,68 +128,6 @@ fn control_rusts_back_when_the_fleet_leaves() {
         state.faction(fid).unwrap().mond_control < 0.01,
         "长期不在场 ⇒ 回到凡人（实测 {}）",
         state.faction(fid).unwrap().mond_control
-    );
-}
-
-/// 开局打点与前沿读数：**只有崇拜教天生 1.0**（用户裁决），**其余一个都不白拿**；
-/// 机制仍在——表里写谁的名字就照给。前沿：凡人 30 AU、掌握 1.0 无穷。
-#[test]
-fn initial_mastery_comes_from_config_and_frontier_reads_it() {
-    let (config, state) = fresh_world(42);
-    assert_eq!(
-        state.faction("行星X崇拜教").unwrap().mond_control,
-        1.0,
-        "崇拜教开局就是 1.0（用户裁决：「崇拜教初始就是1.0」）"
-    );
-    for f in &state.factions {
-        if f.name == "行星X崇拜教" {
-            continue;
-        }
-        assert_eq!(
-            f.mond_control, 0.0,
-            "{} 不该白拿 MOND（用户裁决：特权删掉）",
-            f.name
-        );
-    }
-    // 机制是「按名字打点」，不是「写死 cult」：换一份 config 里的名字，给的就是那个名字。
-    let mut loaded = config.clone();
-    loaded.mond.initial.remove("行星X崇拜教");
-    loaded.mond.initial.insert("中国".to_string(), 0.4);
-    let seeded = default_state(&loaded, 42);
-    assert_eq!(seeded.faction("中国").unwrap().mond_control, 0.4);
-    assert_eq!(seeded.faction("行星X崇拜教").unwrap().mond_control, 0.0);
-
-    assert!(
-        mond_frontier(&config, 1.0).is_infinite(),
-        "掌握度 1 ⇒ 前沿无穷（指哪打哪）"
-    );
-    let mortal = mond_frontier(&config, 0.0);
-    let expected = config.mond.radius + config.combat.arrival_eps / config.mond.drift_per_au;
-    assert!(
-        (mortal - expected).abs() < 1e-9,
-        "凡人前沿 = radius + eps/drift = {expected}"
-    );
-    assert!(
-        mond_frontier(&config, 0.5) > mortal,
-        "掌握度越高，前沿越往外挪"
-    );
-}
-
-/// **棘轮**（用户裁决）：「一旦达到 1.0 就不会下降」——到顶之后把舰队撤回太阳系，
-/// 掌握度也**一个字节都不掉**。1.0 之下才锈（见上一条用例）。
-#[test]
-fn mastery_at_one_is_a_ratchet_and_never_rusts() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国";
-    state.faction_mut(fid).unwrap().mond_control = 1.0;
-    park(&mut state, fid, 1.0); // 舰队在太阳边上，一点都不在带内
-    for _ in 0..2000 {
-        step_knowledge(&mut state, &config);
-    }
-    assert_eq!(
-        state.faction(fid).unwrap().mond_control,
-        1.0,
-        "到顶就是永久的：不在场也不许锈"
     );
 }
 
