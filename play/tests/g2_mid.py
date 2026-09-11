@@ -20,6 +20,9 @@
   价格分解逐项重算、买方名次 = 引擎的购买力序。
 * **货舱（M2）**：`ships.cargo_capacity` = 舰级舱容 × 战损折算 `船体/船体上限`，且舰级舱容
   是设计裁决（`src/tests/sim/haul.rs` 的 `cargo_capacity_...` 数据级那一半）。
+* **产地货栈（M1）**：`depots` 表 = 非首都天体的在栈存量；首都天体上不许"凭空"出现货栈，
+  且 `cities.depot_value` 必须等于同一本账按价值计的城视角合计
+  （`src/tests/sim/haul.rs` 的 `off_capital_production_...` 数据级那一半）。
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ MIN_RAZINGS = 20          # 与 Rust 版同阈值：样本太小 ⇒ 守卫会�
 MIN_TRADES = 50           # 成交对账防空转：3 seed × 400 回合实测 1366 笔
 MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1200 个「排过队」的回合
 MIN_CARGO_ROWS = 1000     # 货舱防空转：3 seed × 400 回合的「舰·回合」行数下限
+MIN_DEPOT_ROWS = 100      # 货栈防空转：3 seed × 400 回合的货栈行数下限
 
 
 def _named_entities(ev):
@@ -580,13 +584,81 @@ def cargo_report(q) -> dict:
             "classes": sorted(spec_cargo)}
 
 
+def depot_report(q) -> dict:
+    """产地货栈（M1 / 施工图 §5 第 3 批）：`depots` 表 ↔ `cities.depot_value`，以及「首都即集散地」。
+
+    判据住在 :func:`depot_checks` 里。
+
+    ⚠ **§12 同回合相位错位**：一条货栈行落在**当前**首都天体上时，只有两种说得清的可能——
+    * `stale`：迁都**之前**它就在那儿（货栈冻结、不会自己搬走）；
+    * `same_round`：首都本回合才搬过来——产出那一步看到的还是旧首都，所以往这里放了货。
+    两者都要**逐处解释**（排除即断言）；其余一律算违规。
+    """
+    dep = q.table("depots")
+    fac = q.table("factions")
+    cities = q.table("cities")
+    rv = ((q.meta or {}).get("market") or {}).get("resource_value") or {}
+    capital = {(int(r["round"]), r["faction_id"]): r["capital_body"]
+               for r in fac.to_dict("records")}
+
+    rows = dep.to_dict("records")
+    pos_bad: list[str] = []
+    seen: set = set()
+    for r in rows:
+        key = (int(r["round"]), r["faction_id"], r["body_id"], r["resource"])
+        if r["amount"] <= 0.0:
+            pos_bad.append(f"r{key[0]} {key[1]}@{key[2]} {key[3]}={r['amount']} 非正")
+        if key in seen:
+            pos_bad.append(f"r{key[0]} {key[1]}@{key[2]} {key[3]} 重复行")
+        seen.add(key)
+
+    presence: dict = {}
+    for r in rows:
+        presence.setdefault((r["faction_id"], r["body_id"]), set()).add(int(r["round"]))
+    stale = same_round = 0
+    unexplained: list[str] = []
+    for r in rows:
+        rnd, fid, body = int(r["round"]), r["faction_id"], r["body_id"]
+        if body != capital.get((rnd, fid)):
+            continue
+        prior = [rr for rr in presence[(fid, body)]
+                 if rr < rnd and capital.get((rr, fid)) != body]
+        prev_cap = capital.get((rnd - 1, fid))
+        if prior:
+            stale += 1
+        elif prev_cap is not None and prev_cap != body:
+            same_round += 1
+        else:
+            unexplained.append(f"r{rnd} {fid}@{body} {r['resource']}：首都天体上凭空出现货栈")
+
+    agg: dict = {}
+    for r in rows:
+        k = (int(r["round"]), r["faction_id"], r["body_id"])
+        agg[k] = agg.get(k, 0.0) + r["amount"] * rv.get(r["resource"], 1.0)
+    agg_bad: list[str] = []
+    nonzero = 0
+    for c in cities.to_dict("records"):
+        if c["已焚毁"]:
+            continue
+        want = agg.get((int(c["round"]), c["faction_id"], c["body_id"]), 0.0)
+        got = c["depot_value"]
+        if got > 0.0:
+            nonzero += 1
+        if abs(got - want) > 0.006:
+            agg_bad.append(f"r{int(c['round'])} {c['city_id']}: depot_value={got} ≠ Σ货栈={want}")
+
+    return {"rows": len(rows), "pos_bad": pos_bad, "stale": stale, "same_round": same_round,
+            "unexplained": unexplained, "agg_bad": agg_bad, "nonzero": nonzero,
+            "bodies": len(presence)}
+
+
 def extract(dirpath):
     """事件层 + 舰表 + 城表 + 编年史 → 一份小结（按投影缓存成 pickle）。
 
     返回 dict（不是每回合一行的表）：这一组的判据本来就只需要计数 + 违规样例 + 少量序列。
     """
     q = KIT.load(str(dirpath), only=("events", "ships", "cities", "faction_process", "blueprints",
-                                      "market_trades"))
+                                      "market_trades", "depots", "factions"))
     ev = q.table("events")
 
     # ① 被拆平的城，**同回合内**不该被它自己的旧主复垦（一对净效果为零的事件）。
@@ -644,6 +716,7 @@ def extract(dirpath):
             "flips": flips, "flip_bad": flip_bad,
             "headline_checked": hl_checked, "headline_bad": hl_bad,
             "combat": combat, "blueprints": blueprints, "ids": ids, "trade": trade_report(q), "cargo": cargo_report(q),
+            "depot": depot_report(q),
             "meta": q.meta}
 
 
@@ -707,6 +780,35 @@ def cargo_checks(h, ck, out) -> None:
              f"五个舰级全对；唯一散货船 = {bulk}（其余都 < 20）")
 
 
+def depot_checks(h, ck, out) -> None:
+    """产地货栈（M1）：首都即集散地 + `cities.depot_value` 的城视角合计。"""
+    tag = f"{len(SEEDS)} seed × {ROUNDS} 回合"
+    rep = [d["depot"] for d in out]
+    rows = sum(r["rows"] for r in rep)
+    nonzero = sum(r["nonzero"] for r in rep)
+    stale = sum(r["stale"] for r in rep)
+    same_round = sum(r["same_round"] for r in rep)
+
+    pos_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["pos_bad"]]
+    ck.check("货栈行都是正的、不重复（稀疏：没积压的天体不占行）", not pos_bad,
+             "；".join(m for _, m in pos_bad[:3]) or f"{tag}：{rows:,} 行全为正且唯一")
+
+    unexplained = [(s, m) for s, r in zip(SEEDS, rep) for m in r["unexplained"]]
+    ck.check("首都天体上没有凭空的货栈（首都即集散地；迁都的相位错位逐处解释）", not unexplained,
+             "；".join(m for _, m in unexplained[:3]) or
+             f"{tag}：{rows:,} 行里只有 {stale} 行 stale + {same_round} 行 same_round 落在首都天体上，全部有解释")
+    ck.check("货栈守卫没有空转（真有货栈、也真解释过迁都）",
+             rows >= MIN_DEPOT_ROWS and (stale + same_round) >= 1,
+             f"{rows:,} 行货栈（下限 {MIN_DEPOT_ROWS}）、{stale} stale / {same_round} same_round")
+
+    agg_bad = [(s, m) for s, r in zip(SEEDS, rep) for m in r["agg_bad"]]
+    ck.check("cities.depot_value ≡ Σ depots × 资源价值（城视角合计）", not agg_bad,
+             "；".join(m for _, m in agg_bad[:3]) or
+             f"{tag}：{nonzero:,} 个「有积压的城·回合」的 depot_value 全部对得上")
+    ck.check("合计守卫没有空转（真有积压的城）", nonzero >= 10,
+             f"{nonzero:,} 个「有积压的城·回合」（下限 10）")
+
+
 def run(h, ck) -> None:
     out = h.digests([(s, ROUNDS) for s in SEEDS], extract)
 
@@ -728,6 +830,7 @@ def run(h, ck) -> None:
     combat_checks(h, ck, out)
     trade_checks(h, ck, out)
     cargo_checks(h, ck, out)
+    depot_checks(h, ck, out)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)

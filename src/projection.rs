@@ -199,6 +199,16 @@ const DERIVED: &[DerivedTable] = &[
         join_on: "ship_ids",
         round: true,
     },
+    // **产地货栈的逐资源存量**（M1 / 施工图 §5 第 3 批）：一 (势力, 天体, 资源) 一行。非首都
+    // 天体的产出/送到的货先冻在这里、靠运输才能进首都池；`cities.depot_value` 是同一本账的
+    // 城视角价值合计（r2），本表给逐资源原量。
+    DerivedTable {
+        name: "depots",
+        table: "idx/depots.jsonl",
+        key: "faction_id",
+        join_on: "faction_ids",
+        round: true,
+    },
     // **本回合的输入面**（B5）：一回合一行 —— 掷出的逐舰解算顺序 + 每对势力的关系噪声 +
     // 抽签记录。它是 `pre` 那一侧的平铺版（`--derived` 不含 events，本表是 `--index` 侧唯一
     // 能读到输入面的地方）。join 键是 `round`——这一面按**回合**读，不按实体。
@@ -227,6 +237,7 @@ struct Writers {
     blueprints: BufWriter<File>,
     market_trades: BufWriter<File>,
     haul_steps: BufWriter<File>,
+    depots: BufWriter<File>,
     round_inputs: BufWriter<File>,
     bodies: BufWriter<File>,
     settlements: BufWriter<File>,
@@ -254,6 +265,7 @@ impl Writers {
             blueprints: open("blueprints")?,
             market_trades: open("market_trades")?,
             haul_steps: open("haul_steps")?,
+            depots: open("depots")?,
             round_inputs: open("round_inputs")?,
             bodies: open("bodies")?,
             settlements: open("settlements")?,
@@ -275,6 +287,7 @@ impl Writers {
             &mut self.blueprints,
             &mut self.market_trades,
             &mut self.haul_steps,
+            &mut self.depots,
             &mut self.round_inputs,
             &mut self.bodies,
             &mut self.settlements,
@@ -1280,6 +1293,28 @@ fn write_round(
         )
         .map_err(|e| e.to_string())?;
     }
+    // **产地货栈**（M1 / 施工图 §5 第 3 批）：非首都天体的产出先冻在这里、靠运输才能进首都
+    // 池。一 (势力, 天体, 资源) 一行、**稀疏**（没积压的天体不占行）；`state.depots` 是真状态，
+    // 这张表是它的平铺读法（`cities.depot_value` 是同一本账按价值计的城视角合计）。
+    for ((fid, body), map) in &state.depots {
+        for (rt, amt) in map {
+            if *amt <= 1e-9 {
+                continue;
+            }
+            writeln!(
+                w.depots,
+                "{}",
+                json!({
+                    "round": state.round,
+                    "faction_id": fid,
+                    "body_id": body,
+                    "resource": rt,
+                    "amount": amt,
+                })
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
 
     Ok(())
 }
@@ -1532,6 +1567,17 @@ pub fn projection_schema() -> serde_json::Value {
                     "rel_mult": "**关系倍率**（`sim::relation_price_mult`）：向敌人买更贵、向朋友买更便宜。`rel_mult + freight_rate` 就是成交价相对市场价的倍数。",
                     "mastery": "这条线上**最好的掌握度** = `max(买卖双方的 mond_control)`（0 = 都是凡人，1 = 有一方到顶）。它决定丢货率，也是「谁在深空贸易里当承运人」的那个量。",
                     "loss": "**丢货比例**（0..`mond_loss_cap`）：非 0 = 这批货走异常带时**部分失联**，「我买到的货为什么少了」的答案。确定性比例（`mond_loss_per_au × depth × (1 − mastery)`），不是掷骰。",
+                },
+            }),
+            "depots" => json!({
+                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
+                "description": "**产地货栈的逐资源存量**（M1）：非首都天体的产出/送到的货先冻在这里，只有运输能把它送到首都池（`freight-collection.md` §1 的「首都即集散地」）。一行 = 一个 (势力, 天体, 资源) 的**真存量**；**稀疏**（没积压的天体不占行、量归零即删行），所以「哪处货栈在积压」= 这张表里有行。`cities[].depot_value` 是同一本账按 `meta.resources[].value` 计的**城视角合计**（r2）；本表给**逐资源原量**（不折算价值）。",
+                "columns": {"round":"integer","faction_id":"string","body_id":"string","resource":"string","amount":"number"},
+                "column_docs": {
+                    "faction_id": "货主势力名（join `factions` 的 `faction_id`）。⚠ 承包交付时货主是**托运方**，不是承运船东。",
+                    "body_id": "货栈所在天体（join `bodies` 的 `body_id`）。⚠ 它**不是**该势力当前首都：首都即集散地，首都天体的产出免运输直接进池。",
+                    "resource": "资源名（配置 `resources` 的键）。",
+                    "amount": "在栈件数（与 `ships.载货`/`cargo_capacity` 同一把尺子：单位，不折算价值）。正数；归零的行被引擎删掉（稀疏）。",
                 },
             }),
             "haul_steps" => json!({                "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
