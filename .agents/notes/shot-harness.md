@@ -25,7 +25,7 @@ node scripts/shots/run.mjs --all --update         # 把当前画面写成基线
 node scripts/shots/run.mjs --scene sun-disk --query 'q=ultra;tune=postfx:0,coronaOn:0'   # 一次性 A/B 探针
 
 # 量任意一张图（**参考图标定**用；不需要服务，也不需要浏览器）
-node scripts/shots/run.mjs --stats scratch/ref/sdo-304.png
+node scripts/shots/run.mjs --stats refs/sdo-304.png
 node scripts/shots/run.mjs --stats x.png --crop 500,280,280,200 --scale 3   # 裁一块放大看/量
 
 # 配色换算：参考图上的屏幕色 ⇄ 着色器要输出的线性 HDR（ACES 正/反算）
@@ -84,4 +84,13 @@ node scripts/shots/run.mjs --hdr 0.5843,0.0749,0.0036
   `edgeSpread` 这类判据只在场景的 `limits` 里卡了上下限，没有「与上一版差多少」的对照。
 - `[ ]` `perf.mjs`（帧时间探针）与 `interact.mjs`（公开 API / 拾取回归）还没搬进来 ——
   它们的写法在 `.agents/notes/web-vfx-pipeline.md` §4 有记。
-- `[ ]` 参考图（`scratch/ref/`）不进版本库（用户约束：资产必须程序生成）。要用的话自己放一张。
+- `[x]` **参考图进版本库了**（2026-09，`refs/`）—— 这条待办原来写的是"不进版本库
+  （用户约束：资产必须程序生成）"，**推理反了**。用户后来把原则说清楚了：
+  *「烘焙一个噪声图，那个噪声图应当不 git track，而是能被管线在 git track 的配置下生成出来」*
+  —— 判据是**能不能从已跟踪的东西再生出来**，不是"是不是二进制"。
+  参考图是**源输入**（别人拍的/画的太阳），**不可再生** ⇒ 恰恰**该**跟踪。
+  真正的证据是它已经在丢：本 worktree 的 `scratch/ref/` 只剩 13 个（其中 11 个还是裁图），
+  而 `web-vfx-pipeline.md` 记的是 **18 张 + `INDEX.md`** —— 那份库随上一个 worktree 消失了
+  （`scratch/` 是 per-worktree 且被 gitignore，名字就叫"草稿"）。
+  现在 `refs/` 只放**源图**（`sdo-304.png`、`sun2.png`）；裁图/放大/`*.stats.json` 这些
+  **可再生产**的仍旧留在 `scratch/ref/` 不进库。见 `refs/README.md`。
