@@ -96,3 +96,53 @@ fn domestic_market_keeps_a_budget_ledger_per_city() {
         "这一局真的发生过投资消费——守卫不能空转"
     );
 }
+
+/// **配置级 `iterations = 0`**：从 `GameConfig` 读入 0 时，`plan_faction` 仍出需求/配给，
+/// 但不改 `DomesticMarketSide.price`（0 = 只投放、不更新价格）。
+#[test]
+fn zero_iterations_config_does_not_touch_domestic_prices() {
+    let (mut config, mut state) = fresh_world(42);
+    config.domestic_market.enabled = true;
+    config.domestic_market.iterations = 0;
+
+    let fid = "中国".to_string();
+    let cid = "长三角".to_string();
+    if let Some(c) = state.city_mut(&cid) {
+        c.buildings.truncate(1);
+        if let Some(b) = c.buildings.first_mut() {
+            b.kind = "residential".to_string();
+            b.resource = None;
+            b.ship_type = None;
+            b.blueprint = None;
+            b.structure = "concrete".to_string();
+            b.area = b.area.max(1.0);
+            b.deployed = 0.0;
+            b.armor = 0.0;
+        }
+    }
+
+    let mut b_dev = ResourceMap::new();
+    let mut b_con = ResourceMap::new();
+    for rt in config.resources.keys() {
+        b_dev.insert(rt.clone(), 100.0);
+        b_con.insert(rt.clone(), 100.0);
+    }
+    let plan = plan_faction(&mut state, &config, &fid, &b_dev, &b_con);
+    let side = &state.market.domestic.get(&fid).expect("国内市场已写回").development;
+    for (rt, spec) in &config.resources {
+        let p = side.price.get(rt).copied().unwrap_or(f64::NAN);
+        assert!(
+            (p - spec.value).abs() < 1e-9,
+            "iterations=0 不应改开发价格：{rt} 基价 {} vs 实际 {p}",
+            spec.value
+        );
+    }
+    assert!(
+        plan.development
+            .get(&cid)
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+            || !plan.development_prices.is_empty(),
+        "iterations=0 仍应用初始价完成需求/配给——守卫不能空转"
+    );
+}
