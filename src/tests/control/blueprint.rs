@@ -16,7 +16,7 @@ fn blueprint_patch_reports_every_skip_code() {
             .find(|s| s.code == code)
             .unwrap_or_else(|| panic!("要报 {code}，实际 {:?}", rep.skipped));
         assert!(
-            hit.path.contains("blueprint"),
+            hit.path.contains("设计图"),
             "{code} 要点名到叶，got {}",
             hit.path
         );
@@ -24,8 +24,8 @@ fn blueprint_patch_reports_every_skip_code() {
     };
 
     // ① 建造区指向一张**不存在**的图（悬空指针）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
-        {"city": cid, "building": bid, "blueprint": "没有这张图"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "建筑": [
+        {"城": cid, "建筑": bid, "设计图": "没有这张图"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "no_such_blueprint");
     assert_eq!(
@@ -42,8 +42,8 @@ fn blueprint_patch_reports_every_skip_code() {
     );
 
     // ② 图名不存在 + 只写 mode ⇒ 同样 `no_such_blueprint`（不许凭空造图）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "没有这张图", "mode": "Auto"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "没有这张图", "归属": "Auto"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "no_such_blueprint");
     assert!(
@@ -53,9 +53,9 @@ fn blueprint_patch_reports_every_skip_code() {
 
     // ③ 舰级对不上：图是 cruiser，建造区是 corvette。
     let (cid2, bid2, st2) = some_building(&state, "中国", true);
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": "巡洋图", "class": "cruiser", "components": [], "mode": "Player"}],
-        "buildings": [{"city": cid2, "building": bid2, "blueprint": "巡洋图"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": "巡洋图", "舰级": "cruiser", "选装": [], "归属": "Player"}],
+        "建筑": [{"城": cid2, "建筑": bid2, "设计图": "巡洋图"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     // 建图本身落地了（`applied`），只有指针被丢。
     skip(&rep, "blueprint_class_mismatch");
@@ -74,8 +74,8 @@ fn blueprint_patch_reports_every_skip_code() {
     );
 
     // ④ 不存在的组件。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "坏图", "class": "corvette", "components": ["没有这个组件"], "mode": "Player"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "坏图", "舰级": "corvette", "选装": ["没有这个组件"], "归属": "Player"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "no_such_component");
     assert!(
@@ -84,34 +84,34 @@ fn blueprint_patch_reports_every_skip_code() {
     );
 
     // ⑤ 组件重复。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "双炮图", "class": "corvette", "components": ["kinetic", "kinetic"], "mode": "Player"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "双炮图", "舰级": "corvette", "选装": ["kinetic", "kinetic"], "归属": "Player"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "duplicate_component");
     assert!(!state.control["中国"].blueprints.contains_key("双炮图"));
 
     // ⑥ 超过槽位（corvette 只有 2 个槽）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "超载图", "class": "corvette",
-         "components": ["kinetic", "ion_drive", "shield"], "mode": "Player"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "超载图", "舰级": "corvette",
+         "选装": ["kinetic", "ion_drive", "shield"], "归属": "Player"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "too_many_components");
     assert!(!state.control["中国"].blueprints.contains_key("超载图"));
 
     // ⑦ 建图没给舰级 / 舰级不存在。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "无级图", "components": ["kinetic"], "mode": "Player"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "无级图", "选装": ["kinetic"], "归属": "Player"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "missing_class");
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "怪级图", "class": "无畏舰", "components": [], "mode": "Player"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "怪级图", "舰级": "无畏舰", "选装": [], "归属": "Player"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "no_such_class");
 
     // ⑧ 把图挂到**非建造区**上。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": "民用图", "class": "corvette", "components": [], "mode": "Player"}],
-        "buildings": [{"city": rcid, "building": rbid, "blueprint": "民用图"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": "民用图", "舰级": "corvette", "选装": [], "归属": "Player"}],
+        "建筑": [{"城": rcid, "建筑": rbid, "设计图": "民用图"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     skip(&rep, "not_a_shipyard");
 }
@@ -121,8 +121,8 @@ fn blueprint_patch_reports_every_skip_code() {
 fn writing_a_blueprint_value_without_mode_takes_over() {
     let config = crate::config::load_config();
     let mut state = crate::world::default_state(&config, 42);
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "我的图", "class": "corvette", "components": ["kinetic", "ion_drive"]}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "我的图", "舰级": "corvette", "选装": ["kinetic", "ion_drive"]}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "{:?}", rep.skipped);
     let leaf = state.control["中国"].blueprints["我的图"].clone();
@@ -132,7 +132,7 @@ fn writing_a_blueprint_value_without_mode_takes_over() {
         "只写值 ⇒ 这一层接管（免得「我写了图却没生效」）"
     );
     assert!(
-        rep.took_over.iter().any(|p| p.contains("blueprints[0]")),
+        rep.took_over.iter().any(|p| p.contains("设计图库[0]")),
         "{:?}",
         rep.took_over
     );
@@ -142,8 +142,8 @@ fn writing_a_blueprint_value_without_mode_takes_over() {
     );
 
     // 只写 `mode` 合法（值不动）——交回系统重估。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "我的图", "mode": "Auto"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "我的图", "归属": "Auto"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "{:?}", rep.skipped);
     let leaf = state.control["中国"].blueprints["我的图"].clone();
@@ -190,13 +190,13 @@ fn the_blueprint_template_round_trips_back_through_apply() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|f| f["faction_id"] == "中国")
-        .and_then(|f| f["blueprints"].as_array())
+        .find(|f| f["势力"] == "中国")
+        .and_then(|f| f["设计图库"].as_array())
         .and_then(|b| b.first())
         .cloned()
         .expect("读面必须给出蓝图片");
     assert_eq!(
-        row["components"],
+        row["选装"],
         serde_json::json!(["kinetic", "ion_drive"]),
         "选装要**全量**输出（少输出 = 回传时清空）"
     );
@@ -210,15 +210,20 @@ fn the_blueprint_template_round_trips_back_through_apply() {
         serde_json::json!(false),
         "读面附加：这张图此刻没人在等钱"
     );
-    assert!(
-        row["order"].is_null(),
-        "本图对意图没有说话 ⇒ null（不是缺字段）"
-    );
+    // ⚠ 这里原来断言 `row["order"]` 是 null —— 但 `order` 那片叶 v22 就删了，而
+    // `Value` 上取**不存在的键**返回 `Null` ⇒ 那条断言**恒真**（空转，什么都咬不住）。
+    // 换成现在真的在的那三轴（意图的落点）：键必须在，值则由本图的记录决定。
+    for axis in ["风格", "姿态", "角色"] {
+        assert!(
+            row.get(axis).is_some(),
+            "读面必须给得出三轴 `{axis}`（`order` 那片叶已删，别拿它当哨兵）"
+        );
+    }
 
     for fac in surface["control"].as_array_mut().unwrap() {
         fac.as_object_mut()
             .unwrap()
-            .insert("buildings".to_string(), serde_json::json!([]));
+            .insert("建筑".to_string(), serde_json::json!([]));
     }
     let rep = apply_patch(&mut state, &config, &surface).expect("模板回传必须合法");
     assert!(rep.is_clean(), "模板回传不许丢叶：{:?}", rep.skipped);
@@ -246,12 +251,12 @@ fn a_dangling_blueprint_pointer_is_reported_not_silently_ignored() {
         "Player",
     );
     // 删掉整张图（挂它的建造区**不会**被自动改指针：那是玩家的话，引擎不替他猜）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": "会被删的图", "remove": true}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": "会被删的图", "删叶": true}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "{:?}", rep.skipped);
     assert!(
-        rep.removed.iter().any(|p| p.contains("blueprints")),
+        rep.removed.iter().any(|p| p.contains("设计图库")),
         "{:?}",
         rep.removed
     );
@@ -272,8 +277,8 @@ fn a_dangling_blueprint_pointer_is_reported_not_silently_ignored() {
     );
 
     // 再有人写这个指针 ⇒ 响亮报出来。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
-        {"city": cid, "building": bid, "blueprint": "会被删的图"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "建筑": [
+        {"城": cid, "建筑": bid, "设计图": "会被删的图"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert_eq!(
         rep.skipped[0].code, "no_such_blueprint",
@@ -282,8 +287,8 @@ fn a_dangling_blueprint_pointer_is_reported_not_silently_ignored() {
     );
 
     // 拆指针是**另一件事**（回到 `ship_type` + 生成器）：`null` 与缺席必须分得开。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
-        {"city": cid, "building": bid, "blueprint": null}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "建筑": [
+        {"城": cid, "建筑": bid, "设计图": null}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "{:?}", rep.skipped);
     assert_eq!(
@@ -316,8 +321,8 @@ fn blueprint_and_yard_class_must_be_changed_together() {
     );
 
     // ① 只改图 ⇒ 拒绝（否则这张图对不上它自己的建造区）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫图", "class": "cruiser"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "护卫图", "舰级": "cruiser"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert_eq!(
         rep.skipped[0].code, "blueprint_class_mismatch",
@@ -330,8 +335,8 @@ fn blueprint_and_yard_class_must_be_changed_together() {
     );
 
     // ② 只改建造区 ⇒ 同样拒绝（另一条路，堵一条没用）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "buildings": [
-        {"city": cid, "building": bid, "ship_type": "cruiser"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "建筑": [
+        {"城": cid, "建筑": bid, "建造舰级": "cruiser"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert_eq!(
         rep.skipped[0].code, "blueprint_class_mismatch",
@@ -353,9 +358,9 @@ fn blueprint_and_yard_class_must_be_changed_together() {
     );
 
     // ③ **两处一起写** ⇒ 一次成功（正解）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "blueprints": [{"name": "护卫图", "class": "cruiser", "components": []}],
-        "buildings": [{"city": cid, "building": bid, "ship_type": "cruiser"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "设计图库": [{"图名": "护卫图", "舰级": "cruiser", "选装": []}],
+        "建筑": [{"城": cid, "建筑": bid, "建造舰级": "cruiser"}]}]});
     let rep = apply_patch(&mut state, &config, &diff).unwrap();
     assert!(rep.is_clean(), "两处一起写必须一次成功：{:?}", rep.skipped);
     assert_eq!(
@@ -389,8 +394,8 @@ fn silencing_a_stance_axis_is_not_deleting_the_blueprint() {
         &serde_json::json!(["kinetic", "ion_drive"]),
         "Player",
     );
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫-守家", "role": "Freight"}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "护卫-守家", "角色": "Freight"}]}]});
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     assert_eq!(
         state.control["中国"].blueprints["护卫-守家"].value.role,
@@ -399,8 +404,8 @@ fn silencing_a_stance_axis_is_not_deleting_the_blueprint() {
     );
 
     // 清空这条轴：图还在、指针还在，只是这一层不再说话。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国", "blueprints": [
-        {"name": "护卫-守家", "role": null}]}]});
+    let diff = serde_json::json!({"control": [{"势力": "中国", "设计图库": [
+        {"图名": "护卫-守家", "角色": null}]}]});
     assert!(apply_patch(&mut state, &config, &diff).unwrap().is_clean());
     assert_eq!(
         state.control["中国"].blueprints["护卫-守家"].value.role, None,

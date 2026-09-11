@@ -14,7 +14,7 @@ pub fn apply_default_doctrine(
     d: &DefaultDoctrine,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.default_doctrine");
+    let path = format!("{fid}.舰队默认风格");
     let mut present = Vec::new();
     if d.temper.is_some() {
         present.push("temper");
@@ -23,7 +23,7 @@ pub fn apply_default_doctrine(
         present.push("lone_wolf");
     }
     if d.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(d.remove, &present, &path, report) {
         return;
@@ -87,13 +87,13 @@ pub fn apply_default_kiting(
     d: &DefaultKiting,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.default_kiting");
+    let path = format!("{fid}.舰队默认姿态");
     let mut present = Vec::new();
     if d.kiting.is_some() {
-        present.push("kiting");
+        present.push("姿态");
     }
     if d.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(d.remove, &present, &path, report) {
         return;
@@ -138,13 +138,13 @@ pub fn apply_default_role(
     d: &DefaultShipRole,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.default_role");
+    let path = format!("{fid}.舰队默认角色");
     let mut present = Vec::new();
     if d.role.is_some() {
-        present.push("role");
+        present.push("角色");
     }
     if d.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(d.remove, &present, &path, report) {
         return;
@@ -189,13 +189,13 @@ pub fn apply_ship_order(
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.ship_orders[{i}].ship");
+    let path = format!("{fid}.指令[{i}].舰");
     let mut present = Vec::new();
     if sp.behavior.is_some() {
-        present.push("behavior");
+        present.push("行为");
     }
     if sp.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(sp.remove, &present, &path, report) {
         return;
@@ -224,7 +224,7 @@ pub fn apply_ship_order(
     let implied = match (sp.mode, sp.behavior.is_some()) {
         (Some(m), _) => m,
         (None, true) => {
-            report.took_over(format!("{fid}.ship_orders[{i}].behavior"));
+            report.took_over(format!("{fid}.指令[{i}].行为"));
             ControlMode::Player
         }
         (None, false) => ControlMode::Inherit,
@@ -276,7 +276,7 @@ pub fn apply_ship_doctrine(
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.ship_doctrine[{i}].ship");
+    let path = format!("{fid}.风格[{i}].舰");
     let mut present = Vec::new();
     if d.temper.is_some() {
         present.push("temper");
@@ -285,7 +285,7 @@ pub fn apply_ship_doctrine(
         present.push("lone_wolf");
     }
     if d.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(d.remove, &present, &path, report) {
         return;
@@ -326,7 +326,7 @@ pub fn apply_ship_doctrine(
         &mut ctrl.mode,
         d.mode,
         d.temper.is_some() || d.lone_wolf.is_some(),
-        format!("{fid}.ship_doctrine[{i}]"),
+        format!("{fid}.风格[{i}]"),
         report,
     );
     report.applied += 1;
@@ -340,13 +340,13 @@ pub fn apply_ship_kiting(
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.ship_kiting[{i}].ship");
+    let path = format!("{fid}.姿态[{i}].舰");
     let mut present = Vec::new();
     if k.kiting.is_some() {
-        present.push("kiting");
+        present.push("姿态");
     }
     if k.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(k.remove, &present, &path, report) {
         return;
@@ -379,7 +379,7 @@ pub fn apply_ship_kiting(
         &mut ctrl.mode,
         k.mode,
         k.kiting.is_some(),
-        format!("{fid}.ship_kiting[{i}]"),
+        format!("{fid}.姿态[{i}]"),
         report,
     );
     report.applied += 1;
@@ -396,13 +396,13 @@ pub fn apply_ship_role(
     i: usize,
     report: &mut ApplyReport,
 ) {
-    let path = format!("{fid}.ship_role[{i}].ship");
+    let path = format!("{fid}.角色[{i}].舰");
     let mut present = Vec::new();
     if f.role.is_some() {
-        present.push("role");
+        present.push("角色");
     }
     if f.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(f.remove, &present, &path, report) {
         return;
@@ -436,7 +436,7 @@ pub fn apply_ship_role(
         &mut ctrl.mode,
         f.mode,
         f.role.is_some(),
-        format!("{fid}.ship_role[{i}]"),
+        format!("{fid}.角色[{i}]"),
         report,
     );
     report.applied += 1;

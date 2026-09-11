@@ -84,11 +84,11 @@ def reconcile_cities(q, ev):
     这是「历史能证明自己什么都没丢」的那条证明（Rust 侧 `every_city_state_change_…`）。
     """
     named = _named_entities(ev)
-    cities = q.table("cities")[["round", "city_id", "faction_id", "已焚毁"]]
+    cities = q.table("cities")[["round", "城名", "势力", "已焚毁"]]
     prev: dict[str, tuple] = {}
     checked, unexplained = 0, []
     for rnd, grp in cities.groupby("round", sort=True):
-        cur = {r.city_id: (r.faction_id or "", bool(r.已焚毁)) for r in grp.itertuples(index=False)}
+        cur = {r.城名: (r.势力 or "", bool(r.已焚毁)) for r in grp.itertuples(index=False)}
         for cid, now in cur.items():
             was = prev.get(cid)
             if was is not None and was != now:
@@ -101,8 +101,8 @@ def reconcile_cities(q, ev):
 
 def reconcile_ships(q, ev):
     """**舰的完备性审计**：出现 = 造舰事件、消失 = 死因事件（船表只在活着时写行）。"""
-    ships = q.table("ships")[["round", "ship_id"]]
-    alive: dict[int, set] = {int(r): set(g["ship_id"]) for r, g in ships.groupby("round")}
+    ships = q.table("ships")[["round", "舰名"]]
+    alive: dict[int, set] = {int(r): set(g["舰名"]) for r, g in ships.groupby("round")}
 
     def by_type(ty):
         out: dict[int, set] = {}
@@ -231,21 +231,21 @@ def combat_report(q, tol: float = 1e-9) -> dict:
     ship_bad: list[str] = []
     for r in ships.itertuples(index=False):
         if not (0.0 < float(r.船体) <= float(r.船体上限) + tol):
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: hull={r.船体} / max={r.船体上限}")
+            ship_bad.append(f"r{int(r.round)} {r.舰名}: hull={r.船体} / max={r.船体上限}")
         elif not (-tol <= float(r.护盾) <= float(r.护盾上限) + tol):
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: shield={r.护盾} / max={r.护盾上限}")
+            ship_bad.append(f"r{int(r.round)} {r.舰名}: shield={r.护盾} / max={r.护盾上限}")
         elif float(r.attack) < -tol or float(r.speed) < -tol:
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: attack={r.attack} speed={r.speed}")
+            ship_bad.append(f"r{int(r.round)} {r.舰名}: attack={r.attack} speed={r.speed}")
         elif any(float(h) < -tol for h in (r.组件耐久 or [])):
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: 组件完整度出现负数")
+            ship_bad.append(f"r{int(r.round)} {r.舰名}: 组件完整度出现负数")
     out["ship_bad"] = ship_bad[:3]
     out["ship_bad_n"] = len(ship_bad)
 
-    rust_round = {(int(r.round), r.faction_id) for r in fp.itertuples(index=False)
+    rust_round = {(int(r.round), r.势力) for r in fp.itertuples(index=False)
                   if float(r.fleet_rust or 0.0) > 0.0}
     per_round: dict = {}
     for r in ships.itertuples(index=False):
-        per_round.setdefault(int(r.round), {})[r.ship_id] = r
+        per_round.setdefault(int(r.round), {})[r.舰名] = r
     checked = regen_bad = regen_short = 0
     regen_ex: list[str] = []
     for rnd in sorted(per_round):
@@ -254,7 +254,7 @@ def combat_report(q, tol: float = 1e-9) -> dict:
             continue
         for sid, cur in per_round[rnd].items():
             was = prev.get(sid)
-            if was is None or hull_lost.get((rnd, sid)) or (rnd, cur.faction_id) in rust_round:
+            if was is None or hull_lost.get((rnd, sid)) or (rnd, cur.势力) in rust_round:
                 continue
             checked += 1
             c_max, c_regen = float(cur.船体上限), float(cur.hull_regen)
@@ -303,14 +303,14 @@ def blueprint_report(q) -> dict:
 
     life: dict = {}
     for r in ships.itertuples(index=False):
-        life.setdefault(r.ship_id, set()).add(tuple(r.组件 or []))
+        life.setdefault(r.舰名, set()).add(tuple(r.组件 or []))
     drift = {k: v for k, v in life.items() if len(v) > 1}
     out["ship_kinds"] = len(life)
     out["drift_n"] = len(drift)
     out["drift"] = [f"{k}: {list(v)[:2]}" for k, v in list(drift.items())[:3]]
 
     # 列名就是引擎发的中文名词（`舰级`/`选装`）；`iterrows` 给的是 Series ⇒ 用 `[]` 取值。
-    design = {(int(r["round"]), r["faction_id"], r["blueprint_id"]):
+    design = {(int(r["round"]), r["势力"], r["图名"]):
               {"舰级": r["舰级"], "选装": r["选装"]} for _, r in bps.iterrows()}
     same = prev = neither = 0
     snap_ex: list[str] = []
@@ -318,7 +318,7 @@ def blueprint_report(q) -> dict:
     for r in spawned.itertuples(index=False):
         if not r.出厂图:
             continue
-        rnd, fid = int(r.round), r.faction_id
+        rnd, fid = int(r.round), r.势力
         cur = design.get((rnd, fid, r.出厂图))
         if cur is None or not (cur["选装"] or []):
             continue                      # 这一回合图没快照 / 空选装 = 交给生成器
@@ -331,7 +331,7 @@ def blueprint_report(q) -> dict:
         else:
             neither += 1
             if len(snap_ex) < 3:
-                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur['选装'])}")
+                snap_ex.append(f"r{rnd} {r.舰名}: 舰上 {sorted(got)}，图（本回合）{sorted(cur['选装'])}")
     out["snap_same"], out["snap_prev"], out["snap_bad"], out["snap_ex"] = same, prev, neither, snap_ex
 
     attr: dict = {}
@@ -339,36 +339,36 @@ def blueprint_report(q) -> dict:
         attr[(int(e.round), e.target_id)] = (e.data or {}).get("blueprint")
     mis: list[str] = []
     for r in spawned.itertuples(index=False):
-        key = (int(r.round), r.ship_id)
+        key = (int(r.round), r.舰名)
         if key not in attr:
             continue
         # ⚠ pandas 把缺失值给成 NaN，事件里是 `null`/None ⇒ 比之前要归一（否则「None vs nan」假红）。
         mine = None if _nan(r.出厂图) else r.出厂图
         theirs = None if _nan(attr[key]) else attr[key]
         if mine != theirs and len(mis) < 3:
-            mis.append(f"r{int(r.round)} {r.ship_id}: 事件说 {theirs}，表说 {mine}")
+            mis.append(f"r{int(r.round)} {r.舰名}: 事件说 {theirs}，表说 {mine}")
     out["attr_bad"], out["attr_checked"] = mis, len(attr)
 
     cnt: dict = {}
     for r in ships.itertuples(index=False):
         if r.出厂图:
-            k = (int(r.round), r.faction_id, r.出厂图)
+            k = (int(r.round), r.势力, r.出厂图)
             cnt[k] = cnt.get(k, 0) + 1
     sc_bad: list[str] = []
     for r in bps.itertuples(index=False):
-        k = (int(r.round), r.faction_id, r.blueprint_id)
+        k = (int(r.round), r.势力, r.图名)
         if int(r.ship_count or 0) != cnt.get(k, 0) and len(sc_bad) < 3:
-            sc_bad.append(f"r{int(r.round)} {r.faction_id}/{r.blueprint_id}: 表说 {r.ship_count}，实为 {cnt.get(k, 0)}")
+            sc_bad.append(f"r{int(r.round)} {r.势力}/{r.图名}: 表说 {r.ship_count}，实为 {cnt.get(k, 0)}")
     out["count_bad"], out["bp_rows"] = sc_bad, len(bps)
 
     seen: dict = {}
     dup: list[str] = []
     # ⚠ 用 `iterrows`：列名是中文名词（`舰级`/`选装`），`itertuples` 的属性名不好认。
     for _, r in bps.iterrows():
-        sig = (int(r["round"]), r["faction_id"], r["舰级"], tuple(r["选装"] or []))
+        sig = (int(r["round"]), r["势力"], r["舰级"], tuple(r["选装"] or []))
         if sig in seen and len(dup) < 3:
-            dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['blueprint_id']}）")
-        seen[sig] = r["blueprint_id"]
+            dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['图名']}）")
+        seen[sig] = r["图名"]
     out["dup_bad"], out["dup_sigs"] = dup, len(seen)
 
     # 建造区 ↔ 设计图（`autocontrol/blueprints.rs`）：① 有指针 ⇒ 图必须**存在**（不许悬空）；
@@ -382,23 +382,23 @@ def blueprint_report(q) -> dict:
     # ⚠ `last` 必须先取**全局**最大回合：写在循环里累加的话，每一行都会被当成「窗口末尾」。
     last = int(cities["round"].max())
     for r in cities.itertuples(index=False):
-        rnd, fid = int(r.round), r.faction_id
+        rnd, fid = int(r.round), r.势力
         for b in r.建筑 or []:
             st = b.get("建造舰级")
             if not st:
                 continue
             yard_rows += 1
             ptr = b.get("设计图")
-            key = (r.city_id, b["建筑编号"])
+            key = (r.城名, b["建筑编号"])
             row = design.get((rnd, fid, ptr)) if ptr else None
             if ptr and row is None:
                 if len(dangling) < 3:
-                    dangling.append(f"r{rnd} {r.city_id} 建筑{b['id']}：指针「{ptr}」在图库里不存在")
+                    dangling.append(f"r{rnd} {r.城名} 建筑{b['id']}：指针「{ptr}」在图库里不存在")
             if row is not None and row["舰级"] != st:
                 streak[key] = streak.get(key, 0) + 1
                 bad_streak[key] = bad_streak.get(key, 0) + 1
                 if rnd == last and len(dangling) < 3:
-                    dangling.append(f"窗口末尾 {r.city_id} 建筑{b['id']}：区说造 {st}，图说 {row['class']}")
+                    dangling.append(f"窗口末尾 {r.城名} 建筑{b['id']}：区说造 {st}，图说 {row['舰级']}")
             else:
                 streak[key] = 0
     out["yard_rows"] = yard_rows
@@ -573,7 +573,7 @@ def cargo_report(q) -> dict:
         cls = r["舰级"]
         spec = spec_cargo.get(cls)
         if spec is None:
-            formula_bad.append(f"r{r['round']} {r['ship_id']}：舰级 {cls} 不在 meta.ships 里")
+            formula_bad.append(f"r{r['round']} {r['舰名']}：舰级 {cls} 不在 meta.ships 里")
             continue
         checked += 1
         hmax, hull = r["船体上限"], r["船体"]
@@ -584,7 +584,7 @@ def cargo_report(q) -> dict:
             hi = spec * max(0.0, min(1.0, (hull + 0.005) / max(hmax - 0.005, 1e-9)))
         got = r["cargo_capacity"]
         if not (lo - 0.005 - 1e-9 <= got <= hi + 0.005 + 1e-9):
-            formula_bad.append(f"r{r['round']} {r['ship_id']}（{cls}）：舱容 {got} 不在 "
+            formula_bad.append(f"r{r['round']} {r['舰名']}（{cls}）：舱容 {got} 不在 "
                                f"[{lo:.4f}, {hi:.4f}]（船体 {hull}/{hmax} × 舰级 {spec}）")
         if hmax > 0.0 and hull < hmax - 1e-9:
             damaged += 1
@@ -616,14 +616,14 @@ def depot_report(q) -> dict:
     fac = q.table("factions")
     cities = q.table("cities")
     rv = ((q.meta or {}).get("market") or {}).get("resource_value") or {}
-    capital = {(int(r["round"]), r["faction_id"]): r["capital_body"]
+    capital = {(int(r["round"]), r["势力"]): r["capital_body"]
                for r in fac.to_dict("records")}
 
     rows = dep.to_dict("records")
     pos_bad: list[str] = []
     seen: set = set()
     for r in rows:
-        key = (int(r["round"]), r["faction_id"], r["body_id"], r["resource"])
+        key = (int(r["round"]), r["势力"], r["天体名"], r["resource"])
         if r["amount"] <= 0.0:
             pos_bad.append(f"r{key[0]} {key[1]}@{key[2]} {key[3]}={r['amount']} 非正")
         if key in seen:
@@ -632,11 +632,11 @@ def depot_report(q) -> dict:
 
     presence: dict = {}
     for r in rows:
-        presence.setdefault((r["faction_id"], r["body_id"]), set()).add(int(r["round"]))
+        presence.setdefault((r["势力"], r["天体名"]), set()).add(int(r["round"]))
     stale = same_round = 0
     unexplained: list[str] = []
     for r in rows:
-        rnd, fid, body = int(r["round"]), r["faction_id"], r["body_id"]
+        rnd, fid, body = int(r["round"]), r["势力"], r["天体名"]
         if body != capital.get((rnd, fid)):
             continue
         prior = [rr for rr in presence[(fid, body)]
@@ -651,19 +651,19 @@ def depot_report(q) -> dict:
 
     agg: dict = {}
     for r in rows:
-        k = (int(r["round"]), r["faction_id"], r["body_id"])
+        k = (int(r["round"]), r["势力"], r["天体名"])
         agg[k] = agg.get(k, 0.0) + r["amount"] * rv.get(r["resource"], 1.0)
     agg_bad: list[str] = []
     nonzero = 0
     for c in cities.to_dict("records"):
         if c["已焚毁"]:
             continue
-        want = agg.get((int(c["round"]), c["faction_id"], c["body_id"]), 0.0)
+        want = agg.get((int(c["round"]), c["势力"], c["天体名"]), 0.0)
         got = c["depot_value"]
         if got > 0.0:
             nonzero += 1
         if abs(got - want) > 0.006:
-            agg_bad.append(f"r{int(c['round'])} {c['city_id']}: depot_value={got} ≠ Σ货栈={want}")
+            agg_bad.append(f"r{int(c['round'])} {c['城名']}: depot_value={got} ≠ Σ货栈={want}")
 
     return {"rows": len(rows), "pos_bad": pos_bad, "stale": stale, "same_round": same_round,
             "unexplained": unexplained, "agg_bad": agg_bad, "nonzero": nonzero,
@@ -960,11 +960,11 @@ def scenario_checks(h, ck) -> None:
     proj = h.scenario("regen", seed, 3, patch={"ships": {name: {"船体": hmax / 2, "坐标": [80.0, 80.0]}}})
     q = KIT.load(str(proj), only=("ships", "factions"))
     rows = q.table("ships")
-    mine = rows[rows["ship_id"] == name].sort_values("round")
+    mine = rows[rows["舰名"] == name].sort_values("round")
     steps, capped, bad = 0, 0, []
     hulls = list(mine["船体"])
     regen = float(mine["hull_regen"].iloc[0])
-    bonus = float(q.table("factions").pipe(lambda t: t[t["faction_id"] == ship["势力"]])[
+    bonus = float(q.table("factions").pipe(lambda t: t[t["势力"] == ship["势力"]])[
         "本土再生加成"].iloc[0])
     base, boosted = regen * hmax, (regen + bonus) * hmax
     for i in range(len(hulls) - 1):
@@ -987,7 +987,7 @@ def scenario_checks(h, ck) -> None:
     proj2 = h.scenario("labor", seed, 3, patch={"cities": {city["城名"]: {"人口": 1}}})
     q2 = KIT.load(str(proj2), only=("city_process",))
     cp = q2.table("city_process")
-    mine2 = cp[cp["city_id"] == city["城名"]].sort_values("round")
+    mine2 = cp[cp["城名"] == city["城名"]].sort_values("round")
     floor = float(q2.meta["economy"]["min_efficiency"])
     labor = list(mine2["labor"])
     housing = float(mine2["housing_capacity"].iloc[-1])
@@ -1041,7 +1041,7 @@ def _yards_of(h, st: dict, faction: str) -> list[tuple[str, int, str]]:
 def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
     """某个建造区的**设计图指针**逐回合（读面 `cities.建筑[].设计图`）。"""
     out = {}
-    for _, r in ci[ci["city_id"] == city].iterrows():
+    for _, r in ci[ci["城名"] == city].iterrows():
         for b in r["建筑"] or []:
             if b["建筑编号"] == bid:
                 out[int(r["round"])] = b.get("设计图")
@@ -1050,13 +1050,13 @@ def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
 
 def _bp_rows(bps, fid: str, name: str) -> dict:
     """某张设计图逐回合的行：`{回合: 行}`（读面 `blueprints`）。"""
-    mine = bps[(bps["faction_id"] == fid) & (bps["blueprint_id"] == name)]
+    mine = bps[(bps["势力"] == fid) & (bps["图名"] == name)]
     return {int(r["round"]): r for _, r in mine.iterrows()}
 
 
 def _bp_decisions(dec, fid: str, name: str | None = None) -> list[dict]:
     """设计图的判定行（`kind=blueprint`）；`name` 给了就只看那一张图。"""
-    rows = dec[(dec["kind"] == "blueprint") & (dec["faction_id"] == fid)]
+    rows = dec[(dec["kind"] == "blueprint") & (dec["势力"] == fid)]
     if name is not None:
         rows = rows[rows["actor"] == name]
     return rows.to_dict("records")
@@ -1079,7 +1079,7 @@ def _stock_patch(faction: str, amount: float, keys) -> dict:
 def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
     """某城逐回合的建造行：`(回合, 舰级, {rate, increment})`（稀疏：有建造区才有键）。"""
     out = []
-    for _, r in cp[cp["city_id"] == city].iterrows():
+    for _, r in cp[cp["城名"] == city].iterrows():
         for k, v in (r["build"] or {}).items():
             out.append((int(r["round"]), k, v))
     return out
@@ -1120,11 +1120,11 @@ def blueprint_scenario_checks(h, ck) -> None:
     # 造法 = **两次 `--apply`**：先建一张普通的自建图、把建造区指过去，再**把图删掉** ⇒ 指针悬空。
     ghost = "待删的图"
     proj = h.scenario_apply("bp_dangling", seed, SCENARIO_ROUNDS, [
-        {"control": [{"faction_id": FID,
-                      "blueprints": [{"name": ghost, "class": class_,
-                                      "components": ["kinetic"], "mode": "Inherit"}],
-                      "buildings": [{"city": city, "building": bid, "blueprint": ghost}]}]},
-        {"control": [{"faction_id": FID, "blueprints": [{"name": ghost, "remove": True}]}]},
+        {"control": [{"势力": FID,
+                      "设计图库": [{"图名": ghost, "舰级": class_,
+                                      "选装": ["kinetic"], "归属": "Inherit"}],
+                      "建筑": [{"城": city, "建筑": bid, "设计图": ghost}]}]},
+        {"control": [{"势力": FID, "设计图库": [{"图名": ghost, "删叶": True}]}]},
     ])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
@@ -1132,7 +1132,7 @@ def blueprint_scenario_checks(h, ck) -> None:
              bool(ptrs) and all(p == ghost for p in ptrs.values()),
              f"{city} 建筑{bid} 的指针逐回合：{ptrs}")
     # 防空转：那根指针**真的**是悬空的（不是「图还在、指针合法」蒙混过关）。
-    lib = set(q.table("blueprints")["blueprint_id"])
+    lib = set(q.table("blueprints")["图名"])
     ck.check("合成场景（设计图）：悬空指针守卫没有空转（指针真的悬空）",
              ptrs.get(0) == ghost and ghost not in lib,
              f"「{ghost}」不在任何势力的图库里（全表 {len(lib)} 个图名）")
@@ -1144,9 +1144,9 @@ def blueprint_scenario_checks(h, ck) -> None:
 
     # ② 玩家的图一个字都不许动 -------------------------------------------------
     mine = "玩家的守卫图"
-    diff = {"control": [{"faction_id": FID,
-                         "blueprints": [{"name": mine, "class": class_, "components": comps}],
-                         "buildings": [{"city": city, "building": bid, "blueprint": mine}]}]}
+    diff = {"control": [{"势力": FID,
+                         "设计图库": [{"图名": mine, "舰级": class_, "选装": comps}],
+                         "建筑": [{"城": city, "建筑": bid, "设计图": mine}]}]}
     proj = h.scenario_apply("bp_pinned", seed, SCENARIO_ROUNDS, [diff])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
     rows = _bp_rows(q.table("blueprints"), FID, mine)
@@ -1168,10 +1168,10 @@ def blueprint_scenario_checks(h, ck) -> None:
 
     # ③ 回收只碰自己造的 -------------------------------------------------------
     aic, mine2, pinned = f"{DESIGN_PREFIX}强袭·陈图", "玩家自己的图", f"{DESIGN_PREFIX}堡垒·玩家钉的"
-    diff = {"control": [{"faction_id": FID, "blueprints": [
-        {"name": aic, "class": class_, "components": ["kinetic"], "mode": "Inherit"},
-        {"name": mine2, "class": class_, "components": ["kinetic"]},
-        {"name": pinned, "class": class_, "components": []},
+    diff = {"control": [{"势力": FID, "设计图库": [
+        {"图名": aic, "舰级": class_, "选装": ["kinetic"], "归属": "Inherit"},
+        {"图名": mine2, "舰级": class_, "选装": ["kinetic"]},
+        {"图名": pinned, "舰级": class_, "选装": []},
     ]}]}
     proj = h.scenario_apply("bp_reap", seed, SCENARIO_ROUNDS, [diff])
     q = KIT.load(str(proj), only=("blueprints", "decisions"))
@@ -1203,8 +1203,9 @@ def blueprint_scenario_checks(h, ck) -> None:
     # 找不到了），再把两个预算拨到同一个极端值。资源清单**问引擎**（`--control` 的预算模板：
     # 每个势力的资源键与它逐一对上），不手抄状态字段。
     ctl = json.loads(h.capture(["--seed", str(seed), "--control"]))["control"]
-    res = sorted({e["resource"] for f in ctl if f["faction_id"] == FID
-                  for k in ("construction_budget", "investment_budget") for e in f[k]})
+    # `--control` 读面的字段名就是控制面的中文名（`建造预算`/`投资预算`）。
+    res = sorted({e["资源"] for f in ctl if f["势力"] == FID
+                  for k in ("建造预算", "投资预算") for e in f[k]})
     ck.check("合成场景（预算）：预算模板给出了这个势力的资源清单（防空转）", len(res) >= 1,
              f"{FID} 的预算资源：{res}")
 
@@ -1215,11 +1216,11 @@ def blueprint_scenario_checks(h, ck) -> None:
     stock = _stock_patch(FID, 1e6, res)
 
     def leaves(v: float) -> dict:
-        return {"control": [{"faction_id": FID,
-                             "buildings": [{"city": city, "building": bid,
-                                            "blueprint": None, "ship_type": class_}],
-                             "construction_budget": [{"resource": r, "value": v} for r in res],
-                             "investment_budget": [{"resource": r, "value": v} for r in res]}]}
+        return {"control": [{"势力": FID,
+                             "建筑": [{"城": city, "建筑": bid,
+                                       "设计图": None, "建造舰级": class_}],
+                             "建造预算": [{"资源": r, "值": v} for r in res],
+                             "投资预算": [{"资源": r, "值": v} for r in res]}]}
 
     lines = {}
     for tag, v in (("rich", 1e6), ("poor", 0.0)):

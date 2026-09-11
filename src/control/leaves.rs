@@ -83,9 +83,9 @@ pub struct ActionSpec {
 }
 
 /// 归属三态写在哪个字段里（`"Inherit" | "Auto" | "Player"`）。
-pub const OWNER_FIELD: &str = "mode";
+pub const OWNER_FIELD: &str = "归属";
 /// 删叶（「恢复出厂值」）写在哪个字段里。
-pub const REMOVE_FIELD: &str = "remove";
+pub const REMOVE_FIELD: &str = "删叶";
 
 /// 全部控制叶的结构事实。
 ///
@@ -94,134 +94,134 @@ pub const REMOVE_FIELD: &str = "remove";
 pub const LEAVES: &[LeafSpec] = &[
     // --- 势力级单叶（`wire.rs:523-574` 里那几个 `Option<...>` 字段）-----------------
     LeafSpec {
-        // `wire.rs` 的 `CapitalPatch`：`{value: Option<BodyId>, mode, remove}`；
-        // 读面给的是 `Control<BodyId>` = `{value, mode}`（`model/control.rs:187`，没有 `remove`）。
-        field: "capital",
+        // `wire.rs` 的 `CapitalPatch`：`{值, 归属, 删叶}`；
+        // 读面给的是 `Control<BodyId>` = `{值, 归属}`（`model/control.rs`，没有 `删叶`）。
+        field: "首都",
         keys: &[],
-        values: &["value"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
         // `DefaultDoctrine`：两个轴一起给（单轴新建会被引擎响亮拒绝）。
-        field: "default_doctrine",
+        field: "舰队默认风格",
         keys: &[],
         values: &["temper", "lone_wolf"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "default_kiting",
+        field: "舰队默认姿态",
         keys: &[],
-        values: &["kiting"],
+        values: &["姿态"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "default_role",
+        field: "舰队默认角色",
         keys: &[],
-        values: &["role"],
+        values: &["角色"],
         carries: &[],
         read_only: &[],
     },
     // --- 逐舰四叶（`ShipId` 定位）-------------------------------------------------
     LeafSpec {
         // 指令**没有**势力级那一片（2026-10 删除）：它是即时操作，只写逐舰叶。
-        field: "ship_orders",
-        keys: &["ship"],
-        values: &["behavior"],
+        field: "指令",
+        keys: &["舰"],
+        values: &["行为"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "ship_doctrine",
-        keys: &["ship"],
+        field: "风格",
+        keys: &["舰"],
         values: &["temper", "lone_wolf"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "ship_kiting",
-        keys: &["ship"],
-        values: &["kiting"],
+        field: "姿态",
+        keys: &["舰"],
+        values: &["姿态"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "ship_role",
-        keys: &["ship"],
-        values: &["role"],
+        field: "角色",
+        keys: &["舰"],
+        values: &["角色"],
         carries: &[],
         read_only: &[],
     },
     // --- 逐资源预算 ---------------------------------------------------------------
     LeafSpec {
-        field: "investment_budget",
-        keys: &["resource"],
-        values: &["value"],
+        field: "投资预算",
+        keys: &["资源"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "construction_budget",
-        keys: &["resource"],
-        values: &["value"],
+        field: "建造预算",
+        keys: &["资源"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "welfare_budget",
-        keys: &["resource"],
-        values: &["value"],
+        field: "福利预算",
+        keys: &["资源"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     // --- 逐建筑权重（身份 = 城 + 建筑；读面顺带带着建筑的 state 属性）-----------------
     LeafSpec {
-        field: "invest_weights",
-        keys: &["city", "building"],
-        values: &["value"],
+        field: "建设权重",
+        keys: &["城", "建筑"],
+        values: &["值"],
         // `InvestWeightEntry` 从 `state` 里 join 进来的四列（`view.rs` 的
         // `invest_weights` 映射）：写面不看它们，只用来显示「这是座什么楼、在造什么」。
-        carries: &["kind", "resource", "ship_type", "structure"],
+        carries: &["类型", "资源", "建造舰级", "结构"],
         read_only: &[],
     },
     LeafSpec {
-        field: "build_weights",
-        keys: &["city", "building"],
-        values: &["value"],
-        carries: &["ship_type"],
+        field: "建造权重",
+        keys: &["城", "建筑"],
+        values: &["值"],
+        carries: &["建造舰级"],
         read_only: &[],
     },
     // --- 逐城的娱乐/福利预算 --------------------------------------------------------
     LeafSpec {
-        field: "loyalty_budget",
-        keys: &["city"],
-        values: &["value"],
+        field: "城市福利预算",
+        keys: &["城"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "development_money",
-        keys: &["city"],
-        values: &["value"],
+        field: "开发货币预算",
+        keys: &["城"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     LeafSpec {
-        field: "construction_money",
-        keys: &["city"],
-        values: &["value"],
+        field: "建造货币预算",
+        keys: &["城"],
+        values: &["值"],
         carries: &[],
         read_only: &[],
     },
     // --- 设计图库（复合值叶：舰级 + 选装 + 倾向三轴，逐轴可空 = 该轴沉默）--------------
     LeafSpec {
-        field: "blueprints",
-        keys: &["name"],
-        values: &["class", "components", "doctrine", "kiting", "role"],
+        field: "设计图库",
+        keys: &["图名"],
+        values: &["舰级", "选装", "风格", "姿态", "角色"],
         carries: &[],
-        // `BlueprintPatch` 收下这两列但**不写回状态**（`view.rs:143-146`）：
+        // `BlueprintPatch` 收下这两列但**不写回状态**（`view.rs`）：
         // 「这张图在等钱」与「有几艘舰在用」是玩家做决定要看的东西，引擎现算。
         read_only: &["ship_count", "launch_waiting"],
     },
@@ -229,8 +229,8 @@ pub const LEAVES: &[LeafSpec] = &[
 
 /// 命令列表（不是叶）：见 [`ActionSpec`]。
 pub const ACTIONS: &[ActionSpec] = &[ActionSpec {
-    field: "buildings",
-    keys: &["city", "building"],
+    field: "建筑",
+    keys: &["城", "建筑"],
     note: "结构性建筑命令（新建 / 拆掉 / 改属性）：每一条只该执行一次，不是状态",
 }];
 

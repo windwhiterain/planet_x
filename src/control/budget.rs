@@ -13,13 +13,13 @@ pub fn apply_budget(
     report: &mut ApplyReport,
 ) {
     let name = which.name();
-    let path = format!("{fid}.{name}[{i}].resource");
+    let path = format!("{fid}.{name}[{i}].资源");
     let mut present = Vec::new();
     if bp.value.is_some() {
-        present.push("value");
+        present.push("值");
     }
     if bp.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(bp.remove, &present, &path, report) {
         return;
@@ -59,7 +59,7 @@ pub fn apply_budget(
         ctrl,
         bp.value,
         bp.mode,
-        format!("{fid}.{name}[{i}].value"),
+        format!("{fid}.{name}[{i}].值"),
         report,
     );
     report.applied += 1;
@@ -76,9 +76,9 @@ pub enum BudgetKind {
 impl BudgetKind {
     pub fn name(self) -> &'static str {
         match self {
-            BudgetKind::Investment => "investment_budget",
-            BudgetKind::Construction => "construction_budget",
-            BudgetKind::Welfare => "welfare_budget",
+            BudgetKind::Investment => "投资预算",
+            BudgetKind::Construction => "建造预算",
+            BudgetKind::Welfare => "福利预算",
         }
     }
 }
@@ -100,10 +100,10 @@ pub fn apply_weight(
     let path = format!("{fid}.{name}[{i}]");
     let mut present = Vec::new();
     if value.is_some() {
-        present.push("value");
+        present.push("值");
     }
     if mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(remove, &present, &path, report) {
         return;
@@ -136,7 +136,7 @@ pub fn apply_weight(
         ctrl,
         value,
         mode,
-        format!("{fid}.{name}[{i}].value"),
+        format!("{fid}.{name}[{i}].值"),
         report,
     );
     report.applied += 1;
@@ -152,8 +152,8 @@ pub enum WeightKind {
 impl WeightKind {
     pub fn name(self) -> &'static str {
         match self {
-            WeightKind::Invest => "invest_weights",
-            WeightKind::Build => "build_weights",
+            WeightKind::Invest => "建设权重",
+            WeightKind::Build => "建造权重",
         }
     }
 }
@@ -169,9 +169,9 @@ pub enum CityLeafKind {
 impl CityLeafKind {
     pub fn name(self) -> &'static str {
         match self {
-            CityLeafKind::WelfareWeight => "loyalty_budget",
-            CityLeafKind::DevelopmentMoney => "development_money",
-            CityLeafKind::ConstructionMoney => "construction_money",
+            CityLeafKind::WelfareWeight => "城市福利预算",
+            CityLeafKind::DevelopmentMoney => "开发货币预算",
+            CityLeafKind::ConstructionMoney => "建造货币预算",
         }
     }
 }
@@ -189,10 +189,10 @@ pub fn apply_city_leaf(
     let path = format!("{fid}.{name}[{i}]");
     let mut present = Vec::new();
     if lp.value.is_some() {
-        present.push("value");
+        present.push("值");
     }
     if lp.mode.is_some() {
-        present.push("mode");
+        present.push("归属");
     }
     if remove_conflicts(lp.remove, &present, &path, report) {
         return;
@@ -211,7 +211,7 @@ pub fn apply_city_leaf(
     match state.city(&lp.city) {
         None => {
             report.skip(
-                format!("{path}.city"),
+                format!("{path}.城"),
                 &lp.city,
                 "no_such_city",
                 format!(
@@ -223,7 +223,7 @@ pub fn apply_city_leaf(
         }
         Some(city) if city.faction_id != *fid => {
             report.skip(
-                format!("{path}.city"),
+                format!("{path}.城"),
                 &lp.city,
                 "not_your_city",
                 format!("「{}」属于 {}，不是 {fid} 的城。", lp.city, city.faction_id),
@@ -246,7 +246,7 @@ pub fn apply_city_leaf(
         ctrl,
         lp.value,
         lp.mode,
-        format!("{fid}.{name}[{i}].value"),
+        format!("{fid}.{name}[{i}].值"),
         report,
     );
     report.applied += 1;

@@ -185,8 +185,10 @@ impl<'de> Deserialize<'de> for ControlMode {
 /// （舰/建筑/预算 → 城市 → 天体 → 势力 → 全局），全链 `Inherit` 时落到 `Auto`。
 #[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct Control<T> {
+    #[serde(rename = "值")]
     pub value: T,
     #[serde(default)]
+    #[serde(rename = "归属")]
     pub mode: ControlMode,
 }
 
@@ -271,6 +273,7 @@ pub struct ControlScopePatch {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ControllableState {
     /// 本方各飞船的当前指令（每艘舰一个 Control）。
+    #[serde(rename = "指令")]
     pub ship_orders: BTreeMap<ShipId, Control<ShipBehavior>>,
     /// 本方各舰的**行为风格**叶片（值 + 三态归属）。
     ///
@@ -279,9 +282,11 @@ pub struct ControllableState {
     /// 叶 → 舰队默认 → 记录值 链。AI **从不写**这片叶（它只读有效值），所以"AI 覆盖玩家风格"
     /// 这种问题在这条轴上不存在。
     #[serde(default)]
+    #[serde(rename = "风格")]
     pub ship_doctrine: BTreeMap<ShipId, Control<ShipDoctrine>>,
     /// 本方各舰的**风筝<->贴脸姿态**叶片（值 + 三态归属），与 `ship_doctrine` 同形的另一条轴。
     #[serde(default)]
+    #[serde(rename = "姿态")]
     pub ship_kiting: BTreeMap<ShipId, Control<f64>>,
     /// 本方各舰的**角色**叶片（值 + 三态归属）：[`ShipRole`] = 打仗 / 运输 / **观测**。
     /// 这是第三条风格轴，取值规则与 `ship_doctrine`/`ship_kiting` 完全同形
@@ -292,6 +297,7 @@ pub struct ControllableState {
     /// 与 `autocontrol::knowledge`），它需要把结论落在某处才稳定。三态语义照旧：玩家把这片叶
     /// 设成 `Player`，AI 就不再改写它。
     #[serde(default)]
+    #[serde(rename = "角色")]
     pub ship_role: BTreeMap<ShipId, Control<ShipRole>>,
     /// **舰队默认行为风格**（势力级）：叶 Inherit 的舰取它的值。"全舰队风筝、战列舰贴脸"
     /// 这类意图 = 一片默认叶 + 几片特例叶，不必逐舰点名。
@@ -300,13 +306,16 @@ pub struct ControllableState {
     /// （2026-10 删除）：指令是即时操作，写一片全舰队默认实测是**全舰队接管开关**，
     /// 名字与作用不符——见 [`State::ship_behavior`](crate::model::State::ship_behavior)。
     #[serde(default)]
+    #[serde(rename = "舰队默认风格")]
     pub default_doctrine: Option<Control<ShipDoctrine>>,
     /// **舰队默认风筝<->贴脸姿态**（势力级），与 `default_doctrine` 同形的另一片。
     #[serde(default)]
+    #[serde(rename = "舰队默认姿态")]
     pub default_kiting: Option<Control<f64>>,
     /// **舰队默认角色**（势力级，第三条风格轴）：叶 Inherit 的舰取它的值。
     /// 「全舰队转运输、只有两艘战列留作战舰」这类意图 = 一片默认叶 + 几片特例叶。
     #[serde(default)]
+    #[serde(rename = "舰队默认角色")]
     pub default_role: Option<Control<ShipRole>>,
     /// **设计图库**（势力级）：图名 → 图纸。
     ///
@@ -328,19 +337,24 @@ pub struct ControllableState {
     /// （建图 ≠ 表态）。只有图上真写了某条轴，这一层才可能在那条轴的链上遮住舰队默认
     /// （用户裁决 Q1(c) + 2026-10 的倾向裁决）。
     #[serde(default)]
+    #[serde(rename = "设计图库")]
     pub blueprints: BTreeMap<BlueprintId, Control<Blueprint>>,
     /// 投资预算（资源/时间）：决定拿出多少资源用于「建设（建筑）」，按各建筑
     /// 建设投资权重竞争（每资源一个 Control）。
+    #[serde(rename = "投资预算")]
     pub investment_budget: BTreeMap<String, Control<f64>>,
     /// 建造预算（资源/时间）：决定拿出多少资源用于「造舰」，按各建造区建造
     /// 投资权重竞争（每资源一个 Control）。
+    #[serde(rename = "建造预算")]
     pub construction_budget: BTreeMap<String, Control<f64>>,
     /// 本方各建筑的「建设投资权重」（每建筑一个 Control）。
     #[serde(with = "crate::json::key2")]
+    #[serde(rename = "建设权重")]
     #[schemars(with = "std::collections::BTreeMap<String, Control<f64>>")]
     pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
     /// 本方各建造区的「建造投资权重」（每建造区一个 Control）。
     #[serde(with = "crate::json::key2")]
+    #[serde(rename = "建造权重")]
     #[schemars(with = "std::collections::BTreeMap<String, Control<f64>>")]
     pub build_weights: BTreeMap<BuildKey, Control<f64>>,
     /// 本方各城的**福利权重**（每城一个 Control）：势力级
@@ -348,17 +362,21 @@ pub struct ControllableState {
     /// 折算成忠诚目标里的娱乐项。旧字段名保留为 `loyalty_budget`，但语义已从
     /// 「每城市场价值预算」改为「福利权重」。见 `.agents/notes/domestic-market.md`。
     #[serde(default)]
+    #[serde(rename = "城市福利预算")]
     pub loyalty_budget: BTreeMap<CityId, Control<f64>>,
     /// **逐城开发货币预算**（市场价值/回合）：国内市场开启时，城市拿它去买开发资源。
     /// `Inherit`/缺叶 = 系统按该城开发权重自动折算；`Player` = 玩家钉死。
     #[serde(default)]
+    #[serde(rename = "开发货币预算")]
     pub development_money: BTreeMap<CityId, Control<f64>>,
     /// **逐城建造货币预算**（市场价值/回合）：国内市场开启时，城市拿它去买造舰资源。
     #[serde(default)]
+    #[serde(rename = "建造货币预算")]
     pub construction_money: BTreeMap<CityId, Control<f64>>,
     /// **势力级福利预算**（资源/时间）：每资源一个 Control，按城市福利权重分给城市，
     /// 用于娱乐/忠诚。这是 `spec.md` 里「各类资源福利预算」的落点。
     #[serde(default)]
+    #[serde(rename = "福利预算")]
     pub welfare_budget: BTreeMap<String, Control<f64>>,
     /// 迁都（首都被命控制）：本势力当前希望的首都天体。`mode=Player` 时玩家说了算、
     /// 系统不改写（除非首都亡城——硬规则先于一切）；`mode=Auto`/`Inherit` 时由 sim 的
@@ -367,5 +385,6 @@ pub struct ControllableState {
     /// 「有效首都」的唯一事实来源就是这里，用 [`State::capital_body`](crate::model::State::capital_body)
     /// 解析——无 shadow 双状态。
     #[serde(default)]
+    #[serde(rename = "首都")]
     pub capital: Option<Control<BodyId>>,
 }

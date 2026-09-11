@@ -35,9 +35,9 @@ fn control_plan_balances_and_flags_over_committed_construction() {
 
     // Command a huge construction budget on a held resource with mode=Player.
     let diff = serde_json::json!({
-        "control": [{"faction_id": "中国", "construction_budget": [
-            {"resource": "铁", "value": 10000.0, "mode": "Player"},
-            {"resource": "碳", "value": 10000.0, "mode": "Player"}
+        "control": [{"势力": "中国", "建造预算": [
+            {"资源": "铁", "值": 10000.0, "归属": "Player"},
+            {"资源": "碳", "值": 10000.0, "归属": "Player"}
         ]}]
     });
     crate::control::apply_patch(&mut state, &config, &diff)

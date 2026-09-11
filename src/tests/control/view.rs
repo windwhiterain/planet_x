@@ -20,7 +20,7 @@ fn the_control_template_round_trips_back_through_apply() {
     {
         fac.as_object_mut()
             .expect("faction is an object")
-            .insert("buildings".to_string(), serde_json::json!([]));
+            .insert("建筑".to_string(), serde_json::json!([]));
     }
     // 整面回传：应当被接受，且没有任何叶片被丢。
     let report =
@@ -92,12 +92,12 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
             .as_array()
             .expect("control 是数组")
             .iter()
-            .find(|f| f["faction_id"] == serde_json::json!(fid))
-            .expect("控制面里必须有这个势力")["ship_orders"]
+            .find(|f| f["势力"] == serde_json::json!(fid))
+            .expect("控制面里必须有这个势力")["指令"]
             .as_array()
             .expect("ship_orders 是数组")
             .iter()
-            .find(|r| r["ship"] == serde_json::json!(ship))
+            .find(|r| r["舰"] == serde_json::json!(ship))
             .unwrap_or_else(|| panic!("读面里必须有「{ship}」这一行"))
             .clone()
     };
@@ -107,8 +107,8 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|f| f["faction_id"] == serde_json::json!(fid))
-        .unwrap()["ship_orders"]
+        .find(|f| f["势力"] == serde_json::json!(fid))
+        .unwrap()["指令"]
         .as_array()
         .unwrap()
         .len();
@@ -118,21 +118,21 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
     assert_eq!(
         row(&surface, &unnamed),
         serde_json::json!({
-            "ship": unnamed, "behavior": serde_json::Value::Null, "mode": "Inherit",
+            "舰": unnamed, "行为": serde_json::Value::Null, "归属": "Inherit",
         })
     );
     // ② 叶在、叶说 Inherit ⇒ 值取叶里的记录值，表态照实报 Inherit。
     assert_eq!(
         row(&surface, &inherit_leaf),
         serde_json::json!({
-            "ship": inherit_leaf, "behavior": {"Move": {"position": [1.5, -2.0]}}, "mode": "Inherit",
+            "舰": inherit_leaf, "行为": {"Move": {"position": [1.5, -2.0]}}, "归属": "Inherit",
         })
     );
     // ③ 叶在、叶是 Player ⇒ 值取叶值、表态是 Player。
     assert_eq!(
         row(&surface, &player_leaf),
         serde_json::json!({
-            "ship": player_leaf, "behavior": {"Dock": {"body": "地球"}}, "mode": "Player",
+            "舰": player_leaf, "行为": {"Dock": {"body": "地球"}}, "归属": "Player",
         })
     );
 
@@ -164,8 +164,8 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
     // 都吃默认值；③ 也没有角色叶，所以同样吃默认。回传之后仍然是不动点。
     // ⚠ 用**角色**这条轴（指令没有舰队默认叶了：2026-10 起指令只有逐舰叶）。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid,
-            "default_role": {"role": "Freight", "mode": "Player"}
+        "control": [{"势力": fid,
+            "舰队默认角色": {"角色": "Freight", "归属": "Player"}
         }]
     });
     apply_patch(&mut state, &config, &diff).expect("舰队默认倾向落地");
@@ -175,23 +175,23 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["faction_id"] == serde_json::json!(fid))
-            .unwrap()["ship_role"]
+            .find(|f| f["势力"] == serde_json::json!(fid))
+            .unwrap()["角色"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["ship"] == serde_json::json!(ship))
+            .find(|r| r["舰"] == serde_json::json!(ship))
             .unwrap_or_else(|| panic!("角色读面里必须有「{ship}」这一行"))
             .clone()
     };
     for ship in [&unnamed, &inherit_leaf, &player_leaf] {
         assert_eq!(
-            role_of(ship)["role"],
+            role_of(ship)["角色"],
             serde_json::json!("Freight"),
             "舰队默认角色对所有舰生效（这三艘都没有自己的角色叶）"
         );
         assert_eq!(
-            role_of(ship)["mode"],
+            role_of(ship)["归属"],
             serde_json::json!("Inherit"),
             "这一行报的是**那片叶自己的表态**（没有叶 ⇒ Inherit）；舰队默认叶的 Player 在 default_role 那一行上"
         );
@@ -201,18 +201,18 @@ fn the_order_read_face_lists_every_ship_and_is_a_fixed_point() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|f| f["faction_id"] == serde_json::json!(fid))
-        .unwrap()["default_role"]
+        .find(|f| f["势力"] == serde_json::json!(fid))
+        .unwrap()["舰队默认角色"]
         .clone();
-    assert_eq!(dflt["role"], serde_json::json!("Freight"));
-    assert_eq!(dflt["mode"], serde_json::json!("Player"));
+    assert_eq!(dflt["角色"], serde_json::json!("Freight"));
+    assert_eq!(dflt["归属"], serde_json::json!("Player"));
     // 指令**不受**舰队默认影响（那条轴已经没有舰队级那一片了）。
     assert_eq!(
-        row(&surface, &player_leaf)["behavior"],
+        row(&surface, &player_leaf)["行为"],
         serde_json::json!({"Dock": {"body": "地球"}})
     );
     assert_eq!(
-        row(&surface, &unnamed)["behavior"],
+        row(&surface, &unnamed)["行为"],
         serde_json::Value::Null,
         "没有叶 ⇒ 仍然没有人供指令（不再有舰队默认兜底）"
     );
@@ -256,8 +256,8 @@ fn a_null_behavior_row_never_invents_a_leaf() {
 
     // ① 读面那一行原样回传 ⇒ 幂等成功，但**不建叶**。
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid,
-            "ship_orders": [{"ship": no_leaf, "behavior": null, "mode": "Inherit"}]
+        "control": [{"势力": fid,
+            "指令": [{"舰": no_leaf, "行为": null, "归属": "Inherit"}]
         }]
     });
     let report = apply_patch(&mut state, &config, &diff).expect("null 行回传必须被接受");
@@ -283,7 +283,7 @@ fn a_null_behavior_row_never_invents_a_leaf() {
     // ② 只写 `mode`（哪怕写的是 `Inherit`）而**叶已经存在** ⇒ 值不动。
     let before = state.ship_behavior(has_leaf.clone());
     let diff = serde_json::json!({
-        "control": [{"faction_id": fid, "ship_orders": [{"ship": has_leaf, "mode": "Inherit"}]}]
+        "control": [{"势力": fid, "指令": [{"舰": has_leaf, "归属": "Inherit"}]}]
     });
     apply_patch(&mut state, &config, &diff).expect("只写 mode 落地");
     assert_eq!(
@@ -294,14 +294,14 @@ fn a_null_behavior_row_never_invents_a_leaf() {
 
     // ③ `mode: Auto`（表态）与写值仍然建叶 —— 那正是「给这艘没有叶的舰设归属」。
     for (i, patch) in [
-        serde_json::json!({"ship": no_leaf, "mode": "Auto"}),
-        serde_json::json!({"ship": no_leaf, "behavior": "Idle", "mode": "Inherit"}),
+        serde_json::json!({"舰": no_leaf, "归属": "Auto"}),
+        serde_json::json!({"舰": no_leaf, "行为": "Idle", "归属": "Inherit"}),
     ]
     .into_iter()
     .enumerate()
     {
         let mut s = state.clone();
-        let diff = serde_json::json!({"control": [{"faction_id": fid, "ship_orders": [patch]}]});
+        let diff = serde_json::json!({"control": [{"势力": fid, "指令": [patch]}]});
         apply_patch(&mut s, &config, &diff).expect("建叶");
         assert!(
             s.control(fid.clone())
@@ -333,11 +333,11 @@ fn the_control_template_never_rounds_a_leaf_value() {
     let noisy = 0.7131_f64;
     let diff = serde_json::json!({
         "control": [{
-            "faction_id": fid,
+            "势力": fid,
             // 两轴一片叶：这片叶还不存在，必须两条轴一起给（否则 `partial_doctrine_leaf` 拒绝）。
-            "default_doctrine": {"temper": noisy, "lone_wolf": 0.0},
-            "ship_kiting": [{"ship": ship, "kiting": noisy}],
-            "investment_budget": [{"resource": "铁", "value": noisy}]
+            "舰队默认风格": {"temper": noisy, "lone_wolf": 0.0},
+            "姿态": [{"舰": ship, "姿态": noisy}],
+            "投资预算": [{"资源": "铁", "值": noisy}]
         }]
     });
     apply_patch(&mut state, &config, &diff).expect("diff applies");
@@ -347,28 +347,28 @@ fn the_control_template_never_rounds_a_leaf_value() {
         .as_array()
         .expect("control 是数组")
         .iter()
-        .find(|f| f["faction_id"] == serde_json::json!(fid))
+        .find(|f| f["势力"] == serde_json::json!(fid))
         .expect("控制面里必须有这个势力")
         .clone();
     let exact = serde_json::json!(noisy);
     assert_eq!(
-        fac["default_doctrine"]["temper"], exact,
+        fac["舰队默认风格"]["temper"], exact,
         "势力级默认风格被舍入了"
     );
-    let kite = fac["ship_kiting"]
+    let kite = fac["姿态"]
         .as_array()
         .expect("ship_kiting 是数组")
         .iter()
-        .find(|k| k["ship"] == serde_json::json!(ship))
+        .find(|k| k["舰"] == serde_json::json!(ship))
         .expect("刚写过的那艘舰必须在读面里");
-    assert_eq!(kite["kiting"], exact, "逐舰风筝距离被舍入了");
-    let budget = fac["investment_budget"]
+    assert_eq!(kite["姿态"], exact, "逐舰风筝距离被舍入了");
+    let budget = fac["投资预算"]
         .as_array()
         .expect("investment_budget 是数组")
         .iter()
-        .find(|b| b["resource"] == serde_json::json!("铁"))
+        .find(|b| b["资源"] == serde_json::json!("铁"))
         .expect("刚写过的资源预算必须在读面里");
-    assert_eq!(budget["value"], exact, "投资预算被舍入了");
+    assert_eq!(budget["值"], exact, "投资预算被舍入了");
     // 而且它必须就是状态里真的存着的那个数（读面 = 真值，不是"看起来像"）。
     assert_eq!(state.ship_kiting(ship), noisy);
 }

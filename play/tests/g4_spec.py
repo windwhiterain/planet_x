@@ -10,7 +10,7 @@
 1. **静态纪律**（从 Rust 搬来）：id 唯一 / 引用完整（`use` / `use_at` / `map_ref` / `label_from`
    / `card` 指的都在）/ `omit` 不与列重叠 / 每条路径表达式合文法 / `@根` 都在已知根里；
 2. **写面对账**（**双向**集合相等）：`--control-schema` 的 `leaves[].field` ∪ `actions[].field`
-   ∪ `{faction_id}` **==** `schemars` 里 `FactionControlPatch.properties` 的键集合
+   ∪ `{势力}` **==** `schemars` 里 `FactionControlPatch.properties` 的键集合
    （加一个字段却不写声明 = 红；声明了一个不存在的叶 = 红）；
 3. **读面对账**（**跑真世界**，不拿声明自证）：起一局（seed 42 / 40 回合），用 `--apply` 把
    **每一片叶都写一次**（14 片，每片带一个哨兵值），再 `--control` 读回来，逐片断言：
@@ -22,7 +22,7 @@
    反过来，`leaf` / `action` / `owner` 行与 `leaf_ui` / `action_ui` 的键**不许有孤儿**。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
-`Control<BodyId>`（`{value, mode}`），而 `default_*` 是 `{…, mode, remove: false}` 且
+`Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
 `remove` 带 `skip_serializing_if = "is_false"` ⇒ 读面永远不发这个字段。所以上头的 `∪ {remove}`
 是**允许集**（宽容那一侧），不是「应该有」；谁要在读面上真的看到它，本组的 detail 会报出来。
 """
@@ -50,7 +50,7 @@ SEED, ROUNDS = 42, 40
 
 # --- 路径表达式（与 specview.js / 原 Rust 版同一套文法；这里只解析，不求值）---------
 def split_segments(expr: str) -> list[str]:
-    """按**不在方括号里**的 `.` 切段（`@control[?faction_id=x].a` → 2 段）。"""
+    """按**不在方括号里**的 `.` 切段（`@control[?势力=x].a` → 2 段）。"""
     out: list[str] = []
     buf: list[str] = []
     depth = 0
@@ -236,87 +236,87 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
         f = spec["field"]
         keys = _keys_of(spec)
 
-        if f == "capital":
-            cap = fac.get("capital")
-            body = (cap or {}).get("value") if isinstance(cap, dict) else None
+        if f == "首都":
+            cap = fac.get("首都")
+            body = (cap or {}).get("值") if isinstance(cap, dict) else None
             if not isinstance(body, str):
-                missing.append("capital：这一局的读面里没有首都天体可写")
+                missing.append("首都：这一局的读面里没有首都天体可写")
                 continue
-            add(f, {}, {"value": body, "mode": "Player"}, {"value": body, "mode": "Player"})
+            add(f, {}, {"值": body, "归属": "Player"}, {"值": body, "归属": "Player"})
 
-        elif f.startswith("default_"):
-            if f == "default_doctrine":
-                add(f, {}, {"temper": D_TEMPER, "lone_wolf": D_LONE, "mode": "Player"},
+        elif f.startswith("舰队默认"):
+            if f == "舰队默认风格":
+                add(f, {}, {"temper": D_TEMPER, "lone_wolf": D_LONE, "归属": "Player"},
                     {"temper": D_TEMPER, "lone_wolf": D_LONE})
-            elif f == "default_kiting":
-                add(f, {}, {"kiting": D_KITING, "mode": "Player"}, {"kiting": D_KITING})
-            elif f == "default_role":
-                add(f, {}, {"role": D_ROLE, "mode": "Player"}, {"role": D_ROLE})
+            elif f == "舰队默认姿态":
+                add(f, {}, {"姿态": D_KITING, "归属": "Player"}, {"姿态": D_KITING})
+            elif f == "舰队默认角色":
+                add(f, {}, {"角色": D_ROLE, "归属": "Player"}, {"角色": D_ROLE})
             else:
                 missing.append(f"{f}：本组不认识这片势力级单叶（新加的叶要在这里写上怎么写）")
 
-        elif f in ("ship_orders", "ship_doctrine", "ship_kiting", "ship_role"):
+        elif f in ("指令", "风格", "姿态", "角色"):
             k = first(spec) if keys else None
             if not k:
                 missing.append(f"{f}：这一局该势力一条 {keys} 条目都没有，没法写")
                 continue
-            ship = k["ship"]
-            if f == "ship_orders":
-                add(f, k, {"ship": ship, "behavior": S_ORDER, "mode": "Player"},
-                    {"behavior": S_ORDER})
-            elif f == "ship_doctrine":
-                add(f, k, {"ship": ship, "temper": S_TEMPER, "lone_wolf": S_LONE, "mode": "Player"},
+            ship = k["舰"]
+            if f == "指令":
+                add(f, k, {"舰": ship, "行为": S_ORDER, "归属": "Player"},
+                    {"行为": S_ORDER})
+            elif f == "风格":
+                add(f, k, {"舰": ship, "temper": S_TEMPER, "lone_wolf": S_LONE, "归属": "Player"},
                     {"temper": S_TEMPER, "lone_wolf": S_LONE})
-            elif f == "ship_kiting":
-                add(f, k, {"ship": ship, "kiting": S_KITING, "mode": "Player"}, {"kiting": S_KITING})
+            elif f == "姿态":
+                add(f, k, {"舰": ship, "姿态": S_KITING, "归属": "Player"}, {"姿态": S_KITING})
             else:
-                add(f, k, {"ship": ship, "role": S_ROLE, "mode": "Player"}, {"role": S_ROLE})
+                add(f, k, {"舰": ship, "角色": S_ROLE, "归属": "Player"}, {"角色": S_ROLE})
 
-        elif f in ("investment_budget", "construction_budget", "welfare_budget"):
+        elif f in ("投资预算", "建造预算", "福利预算"):
             k = first(spec)
-            if not k and f == "welfare_budget":
-                # `welfare_budget` 第一版 AI 不写回控制面 ⇒ 读面可能是空表；从同势力的
+            if not k and f == "福利预算":
+                # `福利预算` 第一版 AI 不写回控制面 ⇒ 读面可能是空表；从同势力的
                 # 投资/建造预算里借一个真实资源 key 来新建这片叶。
-                for other in ("investment_budget", "construction_budget"):
+                for other in ("投资预算", "建造预算"):
                     src = first(by_field[other]) if other in by_field else None
-                    if src and src.get("resource"):
-                        k = {"resource": src["resource"]}
+                    if src and src.get("资源"):
+                        k = {"资源": src["资源"]}
                         break
             if not k:
                 missing.append(f"{f}：这一局该势力一个资源 key 都没有，没法写")
                 continue
-            if f == "investment_budget":
+            if f == "投资预算":
                 v = V_INVEST
-            elif f == "construction_budget":
+            elif f == "建造预算":
                 v = V_CONSTRUCT
             else:
                 v = V_INVEST
-            add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
+            add(f, k, {**k, "值": v, "归属": "Player"}, {"值": v})
 
-        elif f in ("invest_weights", "build_weights"):
+        elif f in ("建设权重", "建造权重"):
             k = first(spec)
             if not k:
                 missing.append(f"{f}：这一局该势力一片建筑权重都没有，没法写")
                 continue
-            v = W_INVEST if f == "invest_weights" else W_BUILD
-            add(f, k, {**k, "value": v, "mode": "Player"}, {"value": v})
+            v = W_INVEST if f == "建设权重" else W_BUILD
+            add(f, k, {**k, "值": v, "归属": "Player"}, {"值": v})
 
-        elif f in ("loyalty_budget", "development_money", "construction_money"):
+        elif f in ("城市福利预算", "开发货币预算", "建造货币预算"):
             # 这一局一开始一片都没有（省/市级 0 条）⇒ 必须**新建**一片：城从该势力自己的
             # 建筑权重里借一个（那些城一定属于它，写权重时引擎刚认过）。
-            src = first(by_field["invest_weights"]) if "invest_weights" in by_field else None
-            city = src.get("city") if src else None
+            src = first(by_field["建设权重"]) if "建设权重" in by_field else None
+            city = src.get("城") if src else None
             if not city:
-                cands = [e.get("city") for e in (fac.get(f) or [])
-                         if isinstance(e, dict) and e.get("city")]
+                cands = [e.get("城") for e in (fac.get(f) or [])
+                         if isinstance(e, dict) and e.get("城")]
                 city = cands[0] if cands else None
             if not city:
                 missing.append(f"{f}：这一局拿不到该势力的城名，没法写")
                 continue
-            add(f, {"city": city}, {"city": city, "value": V_LOYALTY, "mode": "Player"},
-                {"value": V_LOYALTY})
+            add(f, {"城": city}, {"城": city, "值": V_LOYALTY, "归属": "Player"},
+                {"值": V_LOYALTY})
 
-        elif f == "blueprints":
+        elif f == "设计图库":
             k = first(spec)
             if not k:
                 missing.append(f"{f}：这一局该势力一张设计图都没有，没法写")
@@ -324,11 +324,11 @@ def _plan_leaves(leaves: list[dict], fac: dict) -> tuple[list[dict], list[str]]:
             # 只写**倾向三轴**（+ mode）：`class` / `components` 要过 `blueprint_class_mismatch`
             # 那道守卫（图与建造区的舰级必须一致），而我们只需要把这片叶**写一次**——
             # 那两个值字段在不在读面条目上由第 3 条判据（读面对账）负责，不靠这条写。
-            add(f, k, {"name": k["name"],
-                       "doctrine": {"temper": B_TEMPER, "lone_wolf": B_LONE},
-                       "kiting": B_KITING, "role": B_ROLE, "mode": "Player"},
-                {"doctrine": {"temper": B_TEMPER, "lone_wolf": B_LONE},
-                 "kiting": B_KITING, "role": B_ROLE})
+            add(f, k, {"图名": k["图名"],
+                       "风格": {"temper": B_TEMPER, "lone_wolf": B_LONE},
+                       "姿态": B_KITING, "角色": B_ROLE, "归属": "Player"},
+                {"风格": {"temper": B_TEMPER, "lone_wolf": B_LONE},
+                 "姿态": B_KITING, "角色": B_ROLE})
 
         else:
             missing.append(f"{f}：本组不认识这片叶（新加的叶要么在这里写上怎么写，要么进 write_omit）")
@@ -471,7 +471,7 @@ def run(h, ck) -> None:
     ck.check(f"静态纪律：{n_omit} 条 omit 都不与列重叠、且都写了理由",
              not omit_bad, "；".join(omit_bad[:3]) or f"{n_omit} 条全部合规")
 
-    # ══ 2. 写面对账：leaves ∪ actions ∪ {faction_id} == FactionControlPatch.properties ══
+    # ══ 2. 写面对账：leaves ∪ actions ∪ {势力} == FactionControlPatch.properties ══
     schema = json.loads(h.capture(["--control-schema"]))
     leaves = schema.get("leaves") or []
     actions = schema.get("actions") or []
@@ -479,18 +479,18 @@ def run(h, ck) -> None:
     remove_field = schema.get("remove_field")
     props = (((schema.get("definitions") or {}).get("FactionControlPatch") or {})
              .get("properties") or {})
-    declared = {s["field"] for s in leaves} | {a["field"] for a in actions} | {"faction_id"}
+    declared = {s["field"] for s in leaves} | {a["field"] for a in actions} | {"势力"}
     leaf_dups = sorted({s["field"] for s in leaves if [x["field"] for x in leaves].count(s["field"]) > 1})
     missing_decl = sorted(set(props) - declared)   # schemars 有、声明没有 = 加字段忘写声明
     extra_decl = sorted(declared - set(props))     # 声明有、schemars 没有 = 写了一个不存在的叶
-    ck.check(f"写面对账：leaves({len(leaves)}) ∪ actions({len(actions)}) ∪ {{faction_id}} "
+    ck.check(f"写面对账：leaves({len(leaves)}) ∪ actions({len(actions)}) ∪ {{势力}} "
              f"== FactionControlPatch.properties({len(props)})，双向相等且 field 不重复",
              not missing_decl and not extra_decl and not leaf_dups and bool(props) and bool(leaves),
              "；".join(
                  ([f"引擎有而声明没写：{missing_decl}（加字段忘了写声明）"] if missing_decl else [])
                  + ([f"声明了引擎没有的叶：{extra_decl}"] if extra_decl else [])
                  + ([f"leaves[].field 重复：{leaf_dups}"] if leaf_dups else [])
-             ) or (f"{len(declared)} 个键两边一模一样（{len(leaves)} 叶 + {len(actions)} 命令 + faction_id）；"
+             ) or (f"{len(declared)} 个键两边一模一样（{len(leaves)} 叶 + {len(actions)} 命令 + 势力）；"
                    f"owner_field={owner_field!r} remove_field={remove_field!r}"))
 
     # ══ 3. 读面对账：跑一局真世界，把每一片叶都写一次，再读回来 ══════════════════════
@@ -508,14 +508,14 @@ def run(h, ck) -> None:
         return sum(1 for s in leaves if _candidates(s, fac))
 
     fac = max(pre["control"], key=lambda c: (coverage(c), len(json.dumps(c, ensure_ascii=False))))
-    fid = fac["faction_id"]
+    fid = fac["势力"]
     plans, unwritable = _plan_leaves(leaves, fac)
     ck.check(f"读面对账：选中的势力「{fid}」能给出全部 {len(leaves)} 片叶的写法（每片都要一个真实身份键）",
              not unwritable and len(plans) == len(leaves),
              "；".join(unwritable[:4]) or f"{len(plans)} 片叶各有一条写请求（seed {SEED} / {ROUNDS} 回合）")
 
     # 多键叶要写成**数组**（一条一条），单值叶写成对象——diff 的形状由 keys 决定。
-    body: dict = {"faction_id": fid}
+    body: dict = {"势力": fid}
     for p in plans:
         spec = next(s for s in leaves if s["field"] == p["field"])
         body[p["field"]] = [p["patch"]] if _keys_of(spec) else p["patch"]
@@ -533,7 +533,7 @@ def run(h, ck) -> None:
         ck.check("读面对账：--apply 之后的 --control 是合法 JSON", False,
                  f"{e}；stdout 前 300 字：{out[:300]!r}")
         return
-    post_fac = next((c for c in post["control"] if c.get("faction_id") == fid), None)
+    post_fac = next((c for c in post["control"] if c.get("势力") == fid), None)
     if post_fac is None:
         ck.check("读面对账：写完之后该势力还在读面上", False, f"读面里没有 {fid}")
         return
@@ -574,12 +574,12 @@ def run(h, ck) -> None:
                 miss = sorted(required - set(e))
                 extra = sorted(set(e) - allowed)
                 if remove_field in e:
-                    remove_seen.append(f"{c.get('faction_id')}.{spec['field']}")
+                    remove_seen.append(f"{c.get('势力')}.{spec['field']}")
                     if _keys_of(spec):
                         extra = extra + [f"{remove_field}（列表叶上不该有）"]
                 if miss or extra:
                     field_bad.append(
-                        f"{c.get('faction_id')}.{spec['field']}：缺 {miss}、多 {extra}；"
+                        f"{c.get('势力')}.{spec['field']}：缺 {miss}、多 {extra}；"
                         f"条目 {json.dumps(e, ensure_ascii=False)[:200]}；"
                         f"声明 {json.dumps(spec, ensure_ascii=False)}")
     ck.check(f"读面对账：{n_entries} 个读面条目的字段集 == keys ∪ values ∪ carries ∪ read_only "
@@ -597,20 +597,20 @@ def run(h, ck) -> None:
             v = c.get(spec["field"])
             if not _keys_of(spec):
                 if isinstance(v, list):
-                    shape_bad2.append(f"{c.get('faction_id')}.{spec['field']}：keys 为空（势力级单叶）"
+                    shape_bad2.append(f"{c.get('势力')}.{spec['field']}：keys 为空（势力级单叶）"
                                       f"但读面给的是**数组**")
                 continue
             if v is None:
                 continue
             if not isinstance(v, list):
-                shape_bad2.append(f"{c.get('faction_id')}.{spec['field']}：keys={_keys_of(spec)} "
+                shape_bad2.append(f"{c.get('势力')}.{spec['field']}：keys={_keys_of(spec)} "
                                   f"但读面给的是 {type(v).__name__}，不是数组")
                 continue
             for e in v:
                 n_list_entries += 1
                 miss = [k for k in _keys_of(spec) if not isinstance(e, dict) or k not in e]
                 if miss:
-                    shape_bad2.append(f"{c.get('faction_id')}.{spec['field']}：条目缺身份键 {miss}——"
+                    shape_bad2.append(f"{c.get('势力')}.{spec['field']}：条目缺身份键 {miss}——"
                                       f"{json.dumps(e, ensure_ascii=False)[:200]}")
     ck.check("读面对账：keys 空 ⇔ 读面是对象；keys 非空 ⇔ 是数组且每条带齐身份键",
              not shape_bad2,
@@ -735,7 +735,7 @@ def run(h, ck) -> None:
             if corpus_ok:
                 eat(doc_nouns.get("state") or {}, corpus, 0)
                 eat(doc_nouns.get("view") or {}, corpus, 0)
-                # 控制面那半：控制行的**字段名**（`capital`/`investment_budget`…）与
+                # 控制面那半：控制行的**字段名**（`首都`/`投资预算`…）与
                 # 作用域键（`global`/`factions`…）。界面显示的是中文标签，标签查不到时按字段名查。
                 eat(doc_nouns.get("control") or {}, corpus, 0)
                 for sec, tables in (doc_nouns.get("projection") or {}).items():

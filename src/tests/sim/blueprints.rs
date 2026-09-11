@@ -257,8 +257,8 @@ fn blueprint_role_governs_new_ships() {
         ControlMode::Player,
     );
     // 舰队默认**同时**是 Player 且冲突 ⇒ **更具体的图赢**（叶 → 图 → 舰队默认 → …）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_role": {"role": "War"}
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "舰队默认角色": {"角色": "War"}
     }]});
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
@@ -298,8 +298,8 @@ fn fleet_default_still_covers_blueprintless_ships() {
         (None, None, None),
         ControlMode::Player,
     );
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_role": {"role": "Freight"}
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "舰队默认角色": {"角色": "Freight"}
     }]});
     apply_patch(&mut state, &config, &diff).expect("fleet default applies");
 
@@ -367,8 +367,8 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
     );
 
     // ② 舰队默认指令这片叶**已经不存在**：写它会被 apply 当成未知字段拒掉（响亮）。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_ship_order": {"behavior": {"type": "dock", "body": "火星"}}
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "default_ship_order": {"行为": {"type": "dock", "body": "火星"}}
     }]});
     assert!(
         apply_patch(&mut state, &config, &diff).is_err(),
@@ -411,9 +411,9 @@ fn order_source_separates_a_missing_leaf_from_a_silent_one() {
     assert_eq!(state.ship_role(name.clone()), ShipRole::War);
 
     // ⑤ 把图上的 `role` 清空（`role: null`）⇒ 这条轴回到链的**下一层**：舰队默认。
-    let diff = serde_json::json!({"control": [{"faction_id": "中国",
-        "default_role": {"role": "Freight", "mode": "Player"},
-        "blueprints": [{"name": "全能图", "role": null}]
+    let diff = serde_json::json!({"control": [{"势力": "中国",
+        "舰队默认角色": {"角色": "Freight", "归属": "Player"},
+        "设计图库": [{"图名": "全能图", "角色": null}]
     }]});
     apply_patch(&mut state, &config, &diff).expect("clearing the role axis applies");
     assert_eq!(

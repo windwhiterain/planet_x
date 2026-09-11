@@ -198,8 +198,8 @@ fn player_stale_follow_degrades_to_idle_and_does_not_drift() {
     let ship3 = state.ships[3].name.clone();
     let diff = serde_json::json!({
         "control": [{
-            "faction_id": "中国",
-            "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship3.clone()}}, "mode": "Player"}]
+            "势力": "中国",
+            "指令": [{"舰": ship0.clone(), "行为": {"Follow": {"ship": ship3.clone()}}, "归属": "Player"}]
         }]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("apply order");
@@ -256,8 +256,8 @@ fn follow_ship_auto_attacks_hostile_but_not_the_followed_friend() {
     let ship5 = state.ships[5].name.clone();
     let diff = serde_json::json!({
         "control": [{
-            "faction_id": "中国",
-            "ship_orders": [{"ship": ship0.clone(), "behavior": {"Follow": {"ship": ship1.clone()}}, "mode": "Player"}]
+            "势力": "中国",
+            "指令": [{"舰": ship0.clone(), "行为": {"Follow": {"ship": ship1.clone()}}, "归属": "Player"}]
         }]
     });
     crate::control::apply_patch(&mut state, &config, &diff).expect("apply follow order");
@@ -350,10 +350,10 @@ fn dock_follows_body_and_idle_holds_position() {
     let ship1 = state.ships[1].name.clone();
     let diff = serde_json::json!({
         "control": [{
-            "faction_id": "中国",
-            "ship_orders": [
-                {"ship": ship0.clone(), "behavior": {"Dock": {"body": "火星"}}, "mode": "Player"},
-                {"ship": ship1.clone(), "behavior": "Idle", "mode": "Player"}
+            "势力": "中国",
+            "指令": [
+                {"舰": ship0.clone(), "行为": {"Dock": {"body": "火星"}}, "归属": "Player"},
+                {"舰": ship1.clone(), "行为": "Idle", "归属": "Player"}
             ]
         }]
     });

@@ -43,14 +43,14 @@ if snap.get("exists"):
     print("  resources:", snap.get("resources"))
     print("  relations:", snap.get("relations"))
     print("  view (this faction's row):", snap.get("view"))
-    print("  cities:", snap.get("city_ids"), "ships:", snap.get("ship_ids"))
+    print("  cities:", snap.get("城名表"), "ships:", snap.get("舰名表"))
 else:
     print("no 中国 row (or projection produced before factions existed)")
 
 print()
 print("--- join('ships', round=6): main fact row exploded onto ship detail (with panel) ---")
 merged = q.join("ships", round=6)
-cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "hull_max", "attack", "upkeep", "x", "y") if c in merged.columns]
+cols = [c for c in ("round", "舰名", "势力", "舰级", "船体", "船体上限", "attack", "upkeep", "x", "y") if c in merged.columns]
 print(merged[cols].head(8).to_string(index=False))
 
 print()
@@ -61,7 +61,7 @@ spec = q.ships_spec()
 # main 上一直是坏的，与本 demo 无关）。改名之后正好能顺手把「规则 vs 事实」对照打出来。
 fleet = merged.merge(
     spec[["upkeep"]].rename(columns={"upkeep": "spec_upkeep"}),
-    left_on="class",
+    left_on="舰级",
     right_index=True,
 )
 print(
@@ -75,7 +75,7 @@ print(
 print()
 print("--- pull a specific round's ship ids from the main stream, then the detail ---")
 ids = q.ids("ships", 3)
-print("ship_ids at round 3:", ids[:8], "… total", len(ids))
+print("舰名表 at round 3:", ids[:8], "… total", len(ids))
 print("q.cities(round=6):", q.cities(round=6).shape)
 print("q.bodies():", q.bodies().shape, "cols", list(q.bodies().columns))
 print("q.settlements():", q.settlements().shape, "cols", list(q.settlements().columns))
@@ -111,7 +111,7 @@ print("  迁都判定（稀疏：没评估也没迁就是 None）：", econ["cap
 
 lt = q.view_loyalty(last_round, "中国")
 cols = [
-    "city_id", "loyalty", "loyalty_target_effective", "loyalty_target_distance",
+    "城名", "loyalty", "loyalty_target_effective", "loyalty_target_distance",
     "loyalty_target_entertainment",
     # 这两列按势力算一次：`view_loyalty` 从 faction_process join 进来（同一个数只存一个位置）。
     "capital_loyalty_bonus", "ideology_loyalty_penalty",
@@ -203,7 +203,7 @@ fr = q.view_freight(last_round, "中国")
 print("  每一处货栈的运力账（need = 要求运力；uncovered = 缺口）：")
 print(fr["depots"].to_string(index=False) if not fr["depots"].empty else "  （没有积压）")
 print("  在跑运输的舰这一回合走了哪一步：")
-cols = [c for c in ("ship_id", "step", "body", "units", "cargo") if c in fr["steps"].columns]
+cols = [c for c in ("舰名", "step", "body", "units", "cargo") if c in fr["steps"].columns]
 print(
     fr["steps"][cols].to_string(index=False)
     if not fr["steps"].empty

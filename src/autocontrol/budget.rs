@@ -11,6 +11,37 @@ pub(crate) enum BudgetKind {
 /// Read a faction's per-resource budget for a kind: AI resources are recomputed
 /// from the stockpile (`stockpile × invest_fraction`), player resources keep the
 /// commanded value. Returns the budget map and the per-resource control modes.
+/// 势力库存 = **首都池 + 各处产地货栈**（与预算基数同源）。
+pub(crate) fn faction_stockpile(state: &State, fid: &str) -> ResourceMap {
+    let mut stockpile: ResourceMap = state
+        .faction(fid)
+        .map(|f| f.resources.clone())
+        .unwrap_or_default();
+    for (_, m) in state.depots.iter().filter(|((f, _), _)| f == fid) {
+        for (rt, amt) in m {
+            *stockpile.entry(rt.clone()).or_insert(0.0) += amt;
+        }
+    }
+    stockpile
+}
+
+/// 一张资源表按配置市值的总价值（预算上限/联合上限共用同一把尺子）。
+pub(crate) fn resource_map_value(config: &GameConfig, map: &ResourceMap) -> f64 {
+    map.iter()
+        .map(|(rt, amt)| amt * config.resources.get(rt).map(|r| r.value).unwrap_or(1.0))
+        .sum()
+}
+
+/// 势力活舰维护费（`upkeep_reserve` 的同一口径）。
+pub(crate) fn faction_upkeep(state: &State, config: &GameConfig, fid: &str) -> f64 {
+    state
+        .ships
+        .iter()
+        .filter(|s| s.faction_id == fid && s.hull > 0.0)
+        .map(|s| ship_panel(config, s).upkeep)
+        .sum()
+}
+
 pub(crate) fn read_budget(
     state: &State,
     config: &GameConfig,
@@ -23,29 +54,14 @@ pub(crate) fn read_budget(
     // 会让「矿全在殖民地货栈里、池子空着」的势力把预算算成 0——它不是没钱，是钱在别的星球上。
     // 反过来，预算大也不等于能凭空花：每座城还各自被**本地库存**卡一道
     //（`sim::site_affordable`），所以这一条只决定「这个月愿意投多少」，决定不了「买不买得起」。
-    let mut stockpile: ResourceMap = state
-        .faction(&fid)
-        .map(|f| f.resources.clone())
-        .unwrap_or_default();
-    for (_, m) in state.depots.iter().filter(|((f, _), _)| f == &fid) {
-        for (rt, amt) in m {
-            *stockpile.entry(rt.clone()).or_insert(0.0) += amt;
-        }
-    }
-    let value_of = |rt: &str| config.resources.get(rt).map(|r| r.value).unwrap_or(1.0);
-    let stock_value: f64 = stockpile.iter().map(|(k, v)| v * value_of(k)).sum();
+    let stockpile = faction_stockpile(state, &fid);
+    let stock_value = resource_map_value(config, &stockpile);
     // 造舰的「维护费保留」：自动指挥势力在投入造舰预算前，先从库存里预留 `upkeep ×
     // upkeep_reserve_mult` 的市场价值作为维护底线，只把超出部分用于造舰——「把海军养在
     // 经济能承受的规模」。这样基线 AI 不会无脑大建，避免维护费拖垮经济、军备崩盘。
     // 只对 Construction（造舰）生效；投资基础设施（Investment）不受影响。
     let reserve = if kind == BudgetKind::Construction {
-        let upkeep: f64 = state
-            .ships
-            .iter()
-            .filter(|s| s.faction_id == fid && s.hull > 0.0)
-            .map(|s| ship_panel(config, s).upkeep)
-            .sum();
-        upkeep * config.economy.upkeep_reserve_mult
+        faction_upkeep(state, config, &fid) * config.economy.upkeep_reserve_mult
     } else {
         0.0
     };
@@ -86,6 +102,35 @@ pub(crate) fn read_budget(
         modes.push((rt.clone(), mode));
     }
     (budget, modes)
+}
+
+/// 把同一势力的投资 + 建造预算联合压到 `库存市值 − 维护费 reserve` 之内（P1-5）。
+///
+/// 单个预算由 [`read_budget`] 各自限制；但 Investment 与 Construction 同时花，两者之和仍
+/// 可能突破 reserve。这里只做一笔**比例缩放**：两笔预算保持相对优先级，总和不超过底线。
+/// 实际花费仍由 `site_affordable` 按本地库存守门。
+pub(crate) fn cap_joint_budgets(
+    state: &State,
+    config: &GameConfig,
+    fid: &str,
+    investment: &mut ResourceMap,
+    construction: &mut ResourceMap,
+) {
+    let stock_value = resource_map_value(config, &faction_stockpile(state, fid));
+    let reserve = faction_upkeep(state, config, fid) * config.economy.upkeep_reserve_mult;
+    let cap = (stock_value - reserve).max(0.0);
+    let requested = resource_map_value(config, investment)
+        + resource_map_value(config, construction);
+    if requested <= cap + 1e-9 || requested <= 1e-9 {
+        return;
+    }
+    let scale = (cap / requested).clamp(0.0, 1.0);
+    for v in investment.values_mut() {
+        *v *= scale;
+    }
+    for v in construction.values_mut() {
+        *v *= scale;
+    }
 }
 
 /// Write a computed budget back into the faction's controllable state so the
@@ -230,4 +275,55 @@ mod tests {
             budget.get(&rt)
         );
     }
+    /// **P1-5：投资与建造预算有联合上限**，两者同时花不能击穿维护费 reserve。
+    #[test]
+    fn joint_investment_and_construction_budgets_stay_above_the_reserve() {
+        let config = load_config();
+        let mut state = default_state(&config, 42);
+        let fid = state
+            .factions
+            .iter()
+            .find(|f| {
+                state
+                    .ships
+                    .iter()
+                    .any(|s| s.faction_id == f.name && s.hull > 0.0)
+            })
+            .map(|f| f.name.clone())
+            .expect("世界至少有一个带舰势力");
+        for f in state.factions.iter_mut() {
+            f.resources.clear();
+        }
+        state.depots.clear();
+        let reserve = faction_upkeep(&state, &config, &fid)
+            * config.economy.upkeep_reserve_mult;
+        assert!(reserve > 0.0, "用例前提：该势力有维护费 reserve");
+        // 库存恰好比 reserve 多 100（用市值为 1 的资源摆出来）。
+        let rt = config
+            .resources
+            .iter()
+            .find(|(_, spec)| (spec.value - 1.0).abs() < 1e-9)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_else(|| config.resources.keys().next().unwrap().clone());
+        let value = config.resources.get(&rt).map(|r| r.value).unwrap_or(1.0);
+        if let Some(f) = state.faction_mut(&fid) {
+            f.resources.insert(rt.clone(), (reserve + 100.0) / value);
+        }
+        let mut investment = ResourceMap::new();
+        investment.insert(rt.clone(), 1000.0);
+        let mut construction = ResourceMap::new();
+        construction.insert(rt.clone(), 1000.0);
+        cap_joint_budgets(&state, &config, &fid, &mut investment, &mut construction);
+        let total = resource_map_value(&config, &investment)
+            + resource_map_value(&config, &construction);
+        assert!(
+            total <= 100.0 + 1e-6,
+            "两笔预算之和必须被联合闸压到库存 − reserve = 100 以内，实为 {total}"
+        );
+        assert!(
+            total > 0.0,
+            "reserve 之上还有 100 的可用价值，不该把预算全部归零"
+        );
+    }
+
 }
