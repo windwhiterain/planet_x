@@ -1,5 +1,16 @@
 //! 治理与忠诚的两批用例（⚠ 两处都叫「B1」，说的**不是**同一件事）：
 //!
+//! ## 2026-10（第 7 批）：`a_mond_master_keeps_a_deep_city_loyal_where_a_mortal_loses_it`
+//! 搬去了 g2 **合成场景 · 治理**（3 条判据）
+//!
+//! 两臂**只差 `MOND 掌握度`**（势力状态字段，直接 `patch`）：把一座城搬到**离首都最远**的天体、
+//! 娱乐预算钉 0。凡人 0.50→**0.37**（逐回合下滑）、掌握者 0.50→**0.62**（回升、差 0.25 > 0.2、
+//! 城没丢）。「深空天体」取**离首都最远**的那个，不写死地名。
+//!
+//! ⚠ 同族的 `mastery_does_not_pay_the_governance_bill` **没搬**：它要「覆盖率 0 ⇒ 欠费暴跌支路」，
+//! 而**完整回合里够不到**——产出先到账，覆盖率恒 > 0（实测国库清零后忠诚仍稳在 1.0）。
+//! 那是 `step_governance` 的单元测。
+//!
 //! 1. **读面批**（`notes/step-intermediates.md` §6 的 B1 批）：把「为什么这座城的忠诚在掉 /
 //!    钱花在哪」从**算完就扔**变成读面。规矩是 `pre-post-unify.md` 那三条：观测与过程
 //!    **同处一行**、纯追加（不改行为 ⇒ digest 逐字不变）、「这个量在这一档不存在」用中性
@@ -11,85 +22,6 @@
 //!    `sim::step_governance` 的注释）。
 
 use super::*;
-
-/// **A/B 同一个世界，只改一个数**：同一个势力、同一座城、同样的库存，只把
-/// `mond_control` 从 0 拨到 1，看那座**深处**的城忠诚往哪走。
-///
-/// 用例把娱乐预算**钉成 0**（`Player` 的叶）：娱乐加成是另一条独立的忠诚来源，
-/// 不钉住它、再喂满库存的话，两条支路会一起把忠诚拉回来，就测不出「距离」这一项了。
-/// 钉住之后，忠诚的目标只剩 `1 − loyalty_distance × 距离 × (1 − 掌握度)` ＋首都占比 buff。
-#[test]
-fn a_mond_master_keeps_a_deep_city_loyal_where_a_mortal_loses_it() {
-    let (config, base) = fresh_world(42);
-    let fid = "中国";
-    // 伊克西翁在柯伊伯带（约 30 AU），而中国的首都在地球一带 ⇒ 距离远超
-    // `loyalty_range`，凡人的距离目标必然见底（`1 − 0.045 × 23 < 0` ⇒ 钳到 0）。
-    let deep = "伊克西翁";
-
-    let run = |control: f64| -> (f64, bool) {
-        let mut state = base.clone();
-        stock(&mut state, &config, fid, 5000.0);
-        state.faction_mut(fid).unwrap().mond_control = control;
-        let cid = state
-            .cities
-            .iter()
-            .find(|c| c.faction_id == fid && !c.razed)
-            .expect("中国开局有城")
-            .name
-            .clone();
-        // 把它搬到外缘（治理只看「城的天体 → 首都」的距离），并把娱乐预算钉成 0。
-        if let Some(c) = state.city_mut(&cid) {
-            c.body_id = deep.to_string();
-            c.loyalty = 0.5;
-        }
-        state
-            .control_mut(fid.to_string())
-            .unwrap()
-            .loyalty_budget
-            .insert(cid.clone(), Control::player(0.0));
-        for _ in 0..5 {
-            step_governance(&mut state, &config, &mut RoundSink::default());
-        }
-        // 城若已倒戈/夷平 ⇒ 不再属于本势力 ⇒ 忠诚按 0 计（那正是「守不住」的极端形态）。
-        let still_ours = state
-            .city(&cid)
-            .filter(|c| c.faction_id == fid && !c.razed)
-            .map(|c| c.loyalty)
-            .unwrap_or(0.0);
-        (
-            still_ours,
-            state
-                .city(&cid)
-                .map(|c| c.faction_id == fid)
-                .unwrap_or(false),
-        )
-    };
-
-    let (mortal, mortal_ours) = run(0.0);
-    let (master, master_ours) = run(1.0);
-
-    assert!(
-        master > mortal + 0.2,
-        "掌握者该守得住深处的城：凡人 {mortal:.3}（还在手里 {mortal_ours}） vs \
-         掌握 {master:.3}（还在手里 {master_ours}）"
-    );
-    assert!(master_ours, "掌握者的深空城不该在这一段里丢");
-    assert!(
-        master > 0.6,
-        "掌握者的深空城该往 1.0 回升（5 回合后实测 {master:.3}）"
-    );
-    assert!(
-        mortal < 0.45,
-        "凡人的深空城该往 0 掉（实测 {mortal:.3}）——目标忠诚被距离钳到 0"
-    );
-
-    // **连续**：掌握度 0.5 落在两端之间（证明这不是「≥ 某个值才生效」的开关）。
-    let (half, _) = run(0.5);
-    assert!(
-        half > mortal + 0.05 && half < master - 0.05,
-        "掌握度一半 ⇒ 忠诚该落在两端之间：凡人 {mortal:.3} < 半 {half:.3} < 掌握 {master:.3}"
-    );
-}
 
 /// 掌握度**只**动「距离」那一项：它不该顺手改掉库存付不出治理费时的暴跌支路
 /// （覆盖率 < 1 ⇒ 忠诚按 `loyalty_penalty` 掉，与距离无关）。

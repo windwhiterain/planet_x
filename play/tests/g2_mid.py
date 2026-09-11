@@ -93,6 +93,8 @@ WELFARE_FID, WELFARE_START, WELFARE_ROUNDS = "星系矿业", 0.35, 5
 COLONIZE_ROUNDS = 40
 # 驻泊深度那条：把一个势力的舰全搬到同一个日心距、钉 Idle。
 KNOW_FID = "中国"
+# 治理那两条：城搬到离首都最远的天体 / 国库清零，两臂只差 `MOND 掌握度`。
+GOV_FID, GOV_ROUNDS = "中国", 5
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1149,6 +1151,7 @@ def run(h, ck) -> None:
     trade_block_checks(h, ck, out)
     haul_leg_checks(h, ck, out)
     knowledge_scenario_checks(h, ck)
+    governance_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2355,6 +2358,54 @@ def call_mond_target(h, presence: float) -> float:
     return float(json.loads(h.capture(["--call", "mond_target",
                                        "--args", json.dumps({"presence": presence})]))["value"])
 
+
+def governance_scenario_checks(h, ck) -> None:
+    """**合成场景 · 治理的两条**（`sim/tests/governance.rs`，第 7 批）：两臂**只差 `MOND 掌握度`**。
+
+    | 原件 | 判据 |
+    | --- | --- |
+    | `a_mond_master_keeps_a_deep_city_loyal_where_a_mortal_loses_it` | 把一座城搬到**离首都最远**的天体、娱乐预算钉 0：凡人掉（0.50→0.37）、掌握者回升（0.50→0.62）、差 > 0.2、掌握者的城没丢 |
+    ⚠ `mastery_does_not_pay_the_governance_bill` **没搬**：它要「覆盖率 0 ⇒ 欠费暴跌支路」，
+    而**完整回合里够不到**——产出先到账，覆盖率恒 > 0（实测国库清零后忠诚仍然稳在 1.0）。
+    那是 `step_governance` 的单元测（§4 内部契约类）。
+
+    造法全是现成入口：势力 `MOND 掌握度` / 国库、城的 `所在天体` / `忠诚度` 走 `patch`
+    （都有身份键），娱乐预算走 `--apply` 的 `城市福利预算`。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("cities", "factions"))
+    ci, fr = q0.table("cities"), q0.table("factions")
+    mine = ci[(ci["round"] == 0) & (ci["势力"] == GOV_FID)]
+    city = mine.loc[mine["gov_distance"].idxmin()]
+    f0 = fr[(fr["round"] == 0) & (fr["势力"] == GOV_FID)]
+    keys = sorted((list(f0["资源"])[0] or {}).keys())
+    cap_body = str(list(f0["capital_body"])[0])
+    deep = max((b for b in set(ci["天体名"]) if b != cap_body),
+               key=lambda b: float(ci[(ci["天体名"] == b)]["gov_distance"].max()))
+    ck.check("合成场景（治理）：探针世界里那座城与那个深空天体都在（防空转）",
+             bool(city["城名"]) and deep != cap_body,
+             f"{GOV_FID} 取城 {city['城名']}（在首都 {cap_body}），搬到 {deep}")
+    zero_welfare = {"control": [{"势力": GOV_FID,
+                                 "城市福利预算": [{"城": city["城名"], "值": 0.0, "归属": "Player"}]}]}
+
+    # ① 深空 A/B：只拨掌握度。
+    deep_arms = {}
+    for tag, mc in (("mortal", 0.0), ("master", 1.0)):
+        patch = {"factions": {GOV_FID: {"资源": {k: 5000.0 for k in keys}, "MOND 掌握度": mc}},
+                 "cities": {city["城名"]: {"所在天体": deep, "忠诚度": 0.5}}}
+        proj = h.scenario_apply(f"gov_deep_{tag}", seed, GOV_ROUNDS, [zero_welfare], patch=patch)
+        rows = KIT.load(str(proj), only=("cities",)).table("cities")
+        rows = rows[rows["城名"] == city["城名"]].sort_values("round")
+        deep_arms[tag] = {"loy": [float(x) for x in rows["忠诚度"]], "owner": [str(x) for x in rows["势力"]]}
+    dm, ds = deep_arms["mortal"], deep_arms["master"]
+    ck.check("合成场景（治理）：**凡人守不住深空的城**（忠诚逐回合下滑，防空转）",
+             dm["loy"][-1] < dm["loy"][0] - 1e-9,
+             f"凡人（掌握 0）忠诚 {[round(x, 3) for x in dm['loy']]}")
+    ck.check("合成场景（治理）：**掌握者守得住**（忠诚回升、比凡人高 0.2 以上、城没丢）",
+             ds["loy"][-1] > ds["loy"][0] + 1e-9 and ds["loy"][-1] > dm["loy"][-1] + 0.2
+             and ds["owner"][-1] == GOV_FID and ds["loy"][-1] > 0.6,
+             f"掌握者忠诚 {[round(x, 3) for x in ds['loy']]}（凡人末端 {dm['loy'][-1]:.3f}）；"
+             f"末端归属 {ds['owner'][-1]}")
 
 def id_checks(h, ck, out) -> None:
     """**建筑 id 永不复用**（State.next_building_id 单调计数器，见 id_report）。"""
