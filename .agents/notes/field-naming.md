@@ -247,3 +247,44 @@ attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `
 * **第 3 步**：`--schema` 的 `description` 接到 web（`GET /api/schema`）+ 悬停弹窗，
   `views.json` 的 `label` 逐条退掉。
 * 权重/预算那 5 片叶：等用户裁决。
+
+### 7.5 第 2 步（批 A 实体切片）：中文名落地
+
+**做了**：11 个实体结构体、**83 个字段**加 `#[serde(rename = "中文名")]`
+（`grep -n 'serde(rename' src/model/*.rs` 是唯一来源）。实测读面：
+* 舰船 → `舰名, 舰级, 势力, 船体, 船体上限, 护盾, 护盾上限, 速度, 风格, 姿态, 角色, 组件, 组件耐久, 载货, 坐标, 出厂图, 攻击历史, 下水回合`
+* 城市 → `城名, 所在天体, 定居点, 势力, 人口, 忠诚度, 已焚毁, 轨道空间站, 建筑, 造舰进度`
+* 天体 → `天体名, 类型, 星环, 轨道, 位置, 定居点`；势力 → `势力, 符号, 颜色, 阵营倾向, 好战度, 思潮, 名声, MOND 掌握度, 资源, 关系, 本土半径, 本土攻击倍率, 本土再生加成`
+* 思潮四轴 → `和平↔军国 / 科学↔技术 / 人民↔精英 / 自然↔殖民`（**带 ↔ 的名字现在合法了**——存档是 JSON）
+
+**digest 不变**：改名前后都是 `748B4AA66FE169E8F316169D61CB5239057D0F3515CF59A50C629E76BF489603`
+——digest 行里**不带字段名**（它压的是"故事值"），所以这一批改名**连 digest 基线都不用换**；
+另外把新行的键逐条映回旧名 + 排序归一后与 main 逐字节相同（`AA8240A5F16964E8DB20BBB87BFBE496…`）。
+
+**跟随改动**：`src/projection.rs` 7 张实体表 + `projection_schema()` 的 `columns`/`column_docs`
+（157 键）、`src/agent.rs` 的三轴有效值注入键、`src/tests/**` 的读面断言、
+`web/static/**`（views.json 路径 + JS 引用）、`play/**`（三个包 + 四组测试）。
+**已验证「值没变」**：把新 digest 行的键逐条映回旧名 + 按键排序归一后，与 main **逐字节相同**
+（`AA8240A5F16964E8DB20BBB87BFBE496…`，见 `scratch/prove_values_unchanged.py`）。
+
+**`agent.rs` 抓到一个"失败看起来像成功"的坑**：`state_json` 在序列化**之后**用键名就地覆盖
+三轴的有效值（`row["doctrine"] = 有效值`）。模型改名后这些赋值会在**中文键旁边另加三个英文键**
+（中文键留记录值、英文键拿有效值）——界面上看着有值，实际是两份不同的东西。已跟着改名。
+
+**存档写侧收紧**：`save_state` / `save_checkpoint` 现在**只写 JSON**，路径不是 `.json` 当场拒
+（`存档只写 JSON：请把路径写成 …json`）——按扩展名选格式的话，一个 `.ron` 路径要么写失败、
+要么写出一份**读不回来**的档。读侧仍按扩展名（老 .ron 档还能读）。
+
+**这一步明确"留到下一批"的读面残留**（都是有意的，不是漏）：
+
+| 残留 | 为什么先不动 |
+| --- | --- |
+| 连接键 `ship_id`/`city_id`/`faction_id`/`body_id`/`blueprint_id`… | 它们同时是 Python 全套 `join_on` 的连接键**与控制面 patch 的 `faction_id`**，要和权重那一批一起收口 |
+| 建筑地址 `id`（城行内联 `buildings[].id`） | 与控制面 `invest_weights` 的键 `城\|下标` 是同一套编号，改了会断交叉引用 |
+| 派生表的判别式 `kind`、事件表 `type` | 不是实体字段（`Body.kind`/`Building.kind` 已改「类型」） |
+| decisions 表的 detail（`kiting`/`from`/`to`/`components`…） | 决策结构体不在这一批（批 B/C） |
+| 事件载荷键（`loyalty`/`shipper`/`class`… 约 20 处 `json!`） | 事件词汇（批 B） |
+| `src/control/leaves.rs` 的 `keys`/`values`/`carries` | 控制面，与权重一起（且权重还没裁决） |
+| `agent.rs::meta_value` 的配置段键 | 配置（批 D） |
+| ships 行的 `x`/`y`（`position` 的摊平） | 派生量（批 C） |
+| `column_docs` 正文里的 `Ship.doctrine` 之类 | 那是 **Rust 标识符**，本来就该这么写 ✓ |

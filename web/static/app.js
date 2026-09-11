@@ -472,7 +472,7 @@ async function init() {
   await loadViews(); // 视图声明先于第一帧（读面要用它）
   bindWorld(await fetchJSON('/api/state'));
   prevState = world;
-  selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
+  selFaction = st.factions && st.factions.length ? st.factions[0][entityIdKey('faction')] : '';
   sel = selFaction ? { kind: 'faction', name: selFaction } : null;
   initMap();
   buildEdits();
@@ -754,11 +754,11 @@ function buildLeaf(fc, city, bid) {
   return (fc.build_weights || []).find((e) => e.city === city && e.building === bid);
 }
 function buildingLabel(b) {
-  let s = kindName(b.kind);
-  if (b.resource) s += '·' + resName(b.resource);
-  if (b.ship_type) s += '·' + shipClassName(b.ship_type);
-  s += '·' + structName(b.structure);
-  s += '×' + (b.deployed || 0).toFixed(1);
+  let s = kindName(b.类型);
+  if (b.开采资源) s += '·' + resName(b.resource);
+  if (b.建造舰级) s += '·' + shipClassName(b.ship_type);
+  s += '·' + structName(b.结构);
+  s += '×' + (b.已建成面积 || 0).toFixed(1);
   return s;
 }
 
@@ -818,8 +818,8 @@ function mapWorld() {
   const ctrl = st.control || {};
   return Object.assign({}, st, {
     factions: (st.factions || []).map((f) => {
-      const cap = ctrl[f.name] && ctrl[f.name].capital;
-      return Object.assign({}, f, { id: f.name, capital_body: cap ? cap.value : undefined });
+      const cap = ctrl[f.势力] && ctrl[f.势力].capital;
+      return Object.assign({}, f, { id: f.势力, capital_body: cap ? cap.value : undefined });
     }),
   });
 }
@@ -843,12 +843,21 @@ function mapSelect(s) {
 const KIND_ARRAY = { faction: 'factions', ship: 'ships', body: 'bodies', city: 'cities' };
 const KIND_LABEL = { faction: '势力', ship: '舰', body: '天体', city: '城' };
 
+/// 一个实体在 raw state 里的**身份键**（`城名` / `舰名` / `势力` / `天体名`…）。
+///
+/// ⚠ 不在这里手抄：**从读面的声明取**（`select` 视图的 `key`，与 `views.json` 同源）。
+/// 引擎把字段名改成什么，这里跟着走——前端不认识"哪个结构体的人叫 name"。
+function entityIdKey(kind) {
+  const spec = ((viewsDoc && viewsDoc.select) || []).find((v) => v.select_kind === kind);
+  return (spec && spec.key) || 'name';
+}
+
 function findEntity(kind, name) {
   const keys = Object.keys(st).filter((k) => Array.isArray(st[k]));
   const prefer = KIND_ARRAY[kind];
   const order = prefer && keys.includes(prefer) ? [prefer].concat(keys.filter((k) => k !== prefer)) : keys;
   for (const k of order) {
-    const i = st[k].findIndex((e) => e && typeof e === 'object' && e.name === name);
+    const i = st[k].findIndex((e) => e && typeof e === 'object' && e[entityIdKey(kind)] === name);
     if (i >= 0) return { path: 'state.' + k + '[' + i + ']', value: st[k][i] };
   }
   return null;
@@ -1367,8 +1376,8 @@ function shipEditor(leaf, node) {
 
   const bodySel = () => {
     const s = el('select');
-    st.bodies.filter((x) => x.settlements && x.settlements.length).forEach((bd) => {
-      const o = el('option', { value: bd.name }); o.textContent = bd.name; o.selected = d.body === bd.name; s.appendChild(o);
+    st.bodies.filter((x) => x.定居点 && x.定居点.length).forEach((bd) => {
+      const o = el('option', { value: bd.天体名 }); o.textContent = bd.天体名; o.selected = d.body === bd.天体名; s.appendChild(o);
     });
     s.addEventListener('change', () => { d.body = s.value; commit(behaviorFromInput(typeSel.value, d)); });
     return s;
@@ -1464,9 +1473,9 @@ function bodyEditor(leaf, node, opts) {
     sel.appendChild(o);
   }
   (st.bodies || []).forEach((bd) => {
-    const o = el('option', { value: bd.name });
-    o.textContent = bd.name + (bd.settlements && bd.settlements.length ? '' : '（无定居点）');
-    o.selected = bd.name === leaf.value;
+    const o = el('option', { value: bd.天体名 });
+    o.textContent = bd.天体名 + (bd.定居点 && bd.定居点.length ? '' : '（无定居点）');
+    o.selected = bd.天体名 === leaf.value;
     sel.appendChild(o);
   });
   sel.title = '这一档说的首都是哪个天体（`capital` 是一片叶：写值即接管；建世界时播种，之后由迁都步骤维护）';
@@ -1536,9 +1545,9 @@ function blueprintOf(fc, name) {
 /// 本势力所有**指着这张图**的建造区（城名 / 下标 / 该区当前的舰级）。
 function blueprintYards(fid, name) {
   const out = [];
-  (st.cities || []).filter((c) => c.faction_id === fid).forEach((c) => {
-    (c.buildings || []).forEach((b) => {
-      if (b.blueprint === name) out.push({ city: c.name, id: b.id, ship_type: b.ship_type || '' });
+  (st.cities || []).filter((c) => c.势力 === fid).forEach((c) => {
+    (c.建筑 || []).forEach((b) => {
+      if (b.设计图 === name) out.push({ city: c.城名, id: b.建筑编号, ship_type: b.建造舰级 || '' });
     });
   });
   return out;
@@ -1561,12 +1570,12 @@ function blueprintYardMismatch(fid, name, cls) {
 ///   * 图的派生列（引擎算的、唯一真值）为真；
 ///   * 本城 `ship_progress[本区舰级] ≥ config.ships[舰级].build_points`。
 function yardWaiting(fc, city, b) {
-  if (!city || !b.blueprint) return false;
-  const bp = blueprintOf(fc, b.blueprint);
+  if (!city || !b.设计图) return false;
+  const bp = blueprintOf(fc, b.设计图);
   if (!bp || !bp.launch_waiting) return false;
-  const spec = (cfg.ships || {})[b.ship_type];
+  const spec = (cfg.ships || {})[b.建造舰级];
   if (!spec) return false;
-  const prog = ((city.ship_progress) || {})[b.ship_type] || 0;
+  const prog = ((city.造舰进度) || {})[b.建造舰级] || 0;
   return prog >= (+spec.build_points || 0) - 1e-9;
 }
 
@@ -1780,15 +1789,15 @@ function stanceEditor(leaf) {
 function yardStatusBox(fc, node, chosen) {
   const box = el('div', { class: 'bp-yard-status' });
   const b = node.b;
-  const name = chosen === undefined ? b.blueprint : chosen;
+  const name = chosen === undefined ? b.设计图 : chosen;
   const bp = blueprintOf(fc, name);
   if (name && !bp) {
     box.appendChild(hintLine('⚠ 这个建造区指着一张库里没有的图「' + name + '」⇒ 本区停产（进度不涨）。两条出路：把指针拆回「（无：自动选装）」，或者在设计图库里新建一张同名的图。'));
     return box;
   }
   if (!bp) return box;
-  if (bp.class !== b.ship_type) {
-    box.appendChild(hintLine('⚠ 这个建造区产的是 ' + shipClassName(b.ship_type) + '，而指针上的图「' + bp.name + '」是 ' + shipClassName(bp.class)
+  if (bp.class !== b.建造舰级) {
+    box.appendChild(hintLine('⚠ 这个建造区产的是 ' + shipClassName(b.建造舰级) + '，而指针上的图「' + bp.name + '」是 ' + shipClassName(bp.class)
       + ' 级 ⇒ 引擎会拒这份补丁（`blueprint_class_mismatch`）：把「舰型」改成同一级，或在图上改（同一份改动里两处一起写也合法）。'));
   }
   // **买不起 ⇒ 未下水**（用户裁决 Q4(b) 的可见标记）。以前它只活在投影
@@ -1810,17 +1819,17 @@ function buildingEditor(node) {
   const cityId = node.cityId;
   const fc = getControl(fid);
 
-  wrap.appendChild(labelWrap('结构', optSelect(cfg.structures, Object.keys(cfg.structures || {}), b.structure, (v) => {
-    b.structure = v;
-    pushModify(fid, cityId, b.id, { structure: v });
+  wrap.appendChild(labelWrap('结构', optSelect(cfg.structures, Object.keys(cfg.structures || {}), b.结构, (v) => {
+    b.结构 = v;
+    pushModify(fid, cityId, b.建筑编号, { structure: v });
     controlRerender();
   })));
 
-  const spec = cfg.buildings[b.kind];
+  const spec = cfg.buildings[b.类型];
   if (spec && spec.role === 'shipyard') {
-    wrap.appendChild(labelWrap('舰型', optSelect(cfg.ships, Object.keys(cfg.ships || {}), b.ship_type, (v) => {
-      b.ship_type = v;
-      pushModify(fid, cityId, b.id, { ship_type: v });
+    wrap.appendChild(labelWrap('舰型', optSelect(cfg.ships, Object.keys(cfg.ships || {}), b.建造舰级, (v) => {
+      b.建造舰级 = v;
+      pushModify(fid, cityId, b.建筑编号, { ship_type: v });
       controlRerender();
     })));
     // **设计图**：这个建造区把「还不存在的舰」造成什么样。
@@ -1833,32 +1842,32 @@ function buildingEditor(node) {
     const bpSel = el('select', { 'data-key': 'blueprint-' + cityId + '-' + b.id });
     const none = el('option', { value: '' });
     none.textContent = '（无：自动选装）';
-    none.selected = !b.blueprint;
+    none.selected = !b.设计图;
     bpSel.appendChild(none);
     bps.forEach((bp) => {
       const o = el('option', { value: bp.name });
       // 归属是本势力的 scope 链解析出来的（这里只有叶自己的表态，够用：Player = 系统不许动）。
       o.textContent = bp.name + '（' + shipClassName(bp.class) + '·' + normMode(bp[modeField()]) + '）';
-      o.selected = bp.name === b.blueprint;
+      o.selected = bp.name === b.设计图;
       bpSel.appendChild(o);
     });
-    if (b.blueprint && !bps.some((bp) => bp.name === b.blueprint)) {
+    if (b.设计图 && !bps.some((bp) => bp.name === b.设计图)) {
       // **悬空指针**（图被改名/删掉了）：读面原样输出它，这里也必须显示出来——它意味着
       // **这个建造区停产**，静默吞掉就等于「失败看起来像成功」。
       const o = el('option', { value: b.blueprint });
-      o.textContent = b.blueprint + '（库里没有这张图 ⇒ 本区停产）';
+      o.textContent = b.设计图 + '（库里没有这张图 ⇒ 本区停产）';
       o.selected = true;
       bpSel.appendChild(o);
     }
-    bpSel.disabled = !bps.length && !b.blueprint;
+    bpSel.disabled = !bps.length && !b.设计图;
     // 指针的状态**写在行上**，不藏在展开的下拉里（悬空 ⇒ 停产 / 舰级对不上 ⇒ 会被拒 /
     // 买不起 ⇒ 没下水）。它必须能**就地重算**：刚在下拉里换了图时，下拉里的选择领先于读面
     // （`b.blueprint` 还是载入时的值），所以这一格按"当前选中的名字"算，并整块换掉。
-    let status = yardStatusBox(fc, node, b.blueprint);
+    let status = yardStatusBox(fc, node, b.设计图);
     bpSel.addEventListener('change', () => {
       // `''` ⇒ `null`（**拆掉指针**，回到自动选装），给名字 ⇒ 指过去。
       const chosen = bpSel.value || null;
-      pushModify(fid, cityId, b.id, { blueprint: chosen });
+      pushModify(fid, cityId, b.建筑编号, { blueprint: chosen });
       const fresh = yardStatusBox(fc, node, chosen);
       wrap.replaceChild(fresh, status);
       status = fresh;
@@ -1874,7 +1883,7 @@ function buildingEditor(node) {
   const rm = el('button', { class: 'rm' }, '移除');
   rm.addEventListener('click', () => {
     const fc = getControl(fid);
-    fc.buildings.push({ city: cityId, building: b.id, remove: true });
+    fc.buildings.push({ city: cityId, building: b.建筑编号, remove: true });
     applyControl();
   });
   wrap.appendChild(rm);
@@ -2096,7 +2105,7 @@ async function newGame() {
   const seed = $('#seedInput').value || 'random';
   prevState = null;
   bindWorld(await postJSON('/api/new', { seed }));
-  selFaction = st.factions && st.factions.length ? st.factions[0].name : '';
+  selFaction = st.factions && st.factions.length ? st.factions[0][entityIdKey('faction')] : '';
   sel = selFaction ? { kind: 'faction', name: selFaction } : null;
   infoTab = 0;
   infoExpanded.clear(); // 新世界 → 展开状态重来
