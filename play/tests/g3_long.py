@@ -382,6 +382,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "mond": _mond_summary(q),
         "ideology": _ideology_summary(q),
         "ideo_econ": _ideo_econ_summary(q),
+        "upkeep": _upkeep_summary(q),
     }
     return pd.DataFrame(rows), meta
 
@@ -568,6 +569,7 @@ def run(h, ck) -> None:
     ideology_checks(h, ck, metas, tag)
     mond_law_checks(h, ck, metas, tag)
     ideology_law_checks(h, ck, metas, tag)
+    upkeep_law_checks(h, ck, metas, tag)
 
 
 def capital_checks(h, ck, metas, tag) -> None:
@@ -863,6 +865,65 @@ def ideology_law_checks(h, ck, metas, tag) -> None:
              law.detail(f"{tag}：{n} 个势力·回合"))
     ck.check("思潮定律守卫没有空转（轴真的动过）", n >= 100 and moved > 100,
              f"{tag}：{n} 个样本里 {moved} 次位移")
+
+
+def _upkeep_summary(q) -> dict:
+    """**维护费的欠费与生锈**（`src/tests/sim/spending.rs::upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes`
+    的「读面那一半」，第 7 批）。
+
+    `faction_process` 三列（`upkeep` / `upkeep_unpaid` / `fleet_rust`）+ `cities.已焚毁`
+    （判断「流亡舰队」）。"""
+    fp = q.table("faction_process")[["round", "势力", "upkeep", "upkeep_unpaid", "fleet_rust"]]
+    ci = q.table("cities")
+    live = {(int(r["round"]), r["势力"]) for _, r in ci[~ci["已焚毁"]].iterrows()}
+    return {"rows": [(int(r["round"]), r["势力"], float(r["upkeep"]),
+                      float(r["upkeep_unpaid"]), float(r["fleet_rust"]))
+                     for _, r in fp.iterrows()],
+            "live": live}
+
+
+def upkeep_law_checks(h, ck, metas, tag) -> None:
+    """**维护费的两条读面律**（`sim/spending.rs::upkeep_shortfall…` 的可读那一半，第 7 批）。
+
+    引擎（`sim/production.rs::step_upkeep`）：
+    `欠费 = max(0, 维护费 − 池子价值)`；`生锈比例 = min(欠费 ÷ 维护费, 1)`，**且不低于 0.2**
+    （「欠费就得看得出来」的可见性下限）；**流亡舰队**（无活城）不抽库存、不生锈。
+
+    判据（7 seed × 1000 回合）：
+    1. `fleet_rust == max(0.2, min(欠费 ÷ 维护费, 1))`，欠费为 0 时 `fleet_rust == 0`；
+    2. 前后两回合都**没有活城** ⇒ 欠费与锈都是 0（豁免）。
+
+    ⚠ **原件的另外三条留在 Rust**：`欠费 == 恰好半价`是**搭台子**（读面复现不了"恰好"），
+    **每艘舰掉的血 = `船体上限 × 锈`** 减的是** upkeep 那一步的船体**（回合中途，读面只有回合末），
+    「视图 == sink」是**同一份量的两个位置**（内部契约）。⇒ 那条 test 仍住 §4。
+    """
+    ratio, zero, exempt = Verdict(), Verdict(), Verdict()
+    n = short = floored = 0
+    for m in metas:
+        up = m["upkeep"]
+        live = up["live"]
+        for rnd, f, upkeep, unpaid, rust in up["rows"]:
+            n += 1
+            if unpaid <= 1e-9:
+                if rust != 0.0:
+                    zero.add(f"{f} r{rnd}: 欠费 0 却锈 {rust}")
+                continue
+            short += 1
+            want = max(0.2, min(unpaid / upkeep, 1.0))
+            if unpaid / upkeep < 0.2:
+                floored += 1
+            if abs(rust - want) > 1e-4:
+                ratio.add(f"{f} r{rnd}: 欠费/维护费 {unpaid / upkeep:.4f} ⇒ 应锈 {want:.4f}，实为 {rust:.4f}")
+            if (rnd - 1, f) not in live and (rnd, f) not in live:
+                exempt.add(f"{f} r{rnd}: 前后两回合都无活城（流亡）却有欠费 {unpaid:.2f}/锈 {rust:.4f}")
+    ck.check("维护费：**生锈比例 = `max(0.2, 欠费 ÷ 维护费)`**（含 0.2 可见性下限），"
+             "欠费为 0 就不锈", ratio.n == 0 and zero.n == 0,
+             (ratio.detail(f"{tag}：{short}/{n} 行有欠费") + " " + zero.detail("")).strip())
+    ck.check("维护费：**流亡舰队豁免**（前后两回合都没有活城 ⇒ 不欠费、不生锈）", exempt.n == 0,
+             exempt.detail(f"{tag}：{n} 个势力·回合"))
+    ck.check("维护费守卫没有空转（真的欠过费、而且 0.2 下限真的起过作用）",
+             short >= 20 and floored >= 1,
+             f"{tag}：{short} 行欠费，其中 {floored} 行的比例低于 0.2（被下限抬上来）")
 
 
 def identity_checks(h, ck, metas, tag) -> None:
