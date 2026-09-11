@@ -103,10 +103,12 @@ fn body_kind_for(name: &str) -> &'static str {
         "地球" => "terran",
         "月球" => "lunar",
         "火星" => "martian",
-        "木星" | "土星" => "gas_giant",
+        "木星" => "gas_giant_jovian",
+        "土星" => "gas_giant_saturnian",
         "欧罗巴" => "ice_world",
         "泰坦" => "titan",
-        "天王星" | "海王星" => "ice_giant",
+        "天王星" => "ice_giant_uranian",
+        "海王星" => "ice_giant_neptunian",
         "冥王星" | "卡戎" | "伊克西翁" | "妊神星" | "创神星" | "阋神星" => {
             "dwarf"
         }
@@ -1076,13 +1078,20 @@ pub fn default_state(config: &GameConfig, seed: u64) -> State {
 
     // 城市形态 = 空间站 还是 地面：建在气态/冰巨行星（体积上没有固体表面）上的定居点
     // 是轨道空间站；其余（固体天体表面）是地面城市。供前端按行星相对坐标放模型。
+    //
+    // 判定走**类型参数** `banded()` 而不是写死 kind key：气巨/冰巨星恰好就是「有色带」的
+    // 那几类。这样以后再加气巨/冰巨类型（或改名）不必回来改这里 —— 之前写死
+    // `"gas_giant" | "ice_giant"`，把两颗气巨拆成独立类型时就会静默漏判。
     for c in &mut cities {
         let kind = bodies
             .iter()
             .find(|b| b.name == c.body_id)
             .map(|b| b.kind.as_str())
             .unwrap_or("rocky");
-        c.space_station = matches!(kind, "gas_giant" | "ice_giant");
+        c.space_station = config
+            .body_kind(kind)
+            .map(|k| k.params.banded())
+            .unwrap_or(false);
     }
 
     // --- Starting navy ------------------------------------------------------

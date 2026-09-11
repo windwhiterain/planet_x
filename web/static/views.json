@@ -192,7 +192,7 @@
             { "path": "@post.factions.${势力}.market_rank", "noun": "market_rank", "label": "市场中排名", "fmt": "int", "missing": "—" },
             { "path": "@post.factions.${势力}.freight_gap", "noun": "freight_gap", "label": "运力缺口", "fmt": "sum", "of": "uncovered", "digits": 1 },
             { "path": "MOND 掌握度", "noun": "MOND 掌握度", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
-            { "owner": "factions", "label": "归谁" }
+            { "owner": "factions", "noun": "factions", "label": "归谁" }
           ],
           "omit": [
             { "path": "符号", "why": "图形符号（地图上用），文字界面不显示" },
@@ -263,7 +263,7 @@
             { "path": "人口", "fmt": "int" },
             { "path": "所在天体", "label": "天体" },
             { "path": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "" } },
-            { "owner": "cities", "label": "归谁" }
+            { "owner": "cities", "noun": "cities", "label": "归谁" }
           ]
         }
       ]
@@ -370,7 +370,7 @@
           "layout": "sheet",
           "source": null,
           "columns": [
-            { "owner": "global", "label": "全局默认归谁" },
+            { "owner": "global", "noun": "global", "label": "全局默认归谁" },
             { "path": "@scope.factions", "noun": "factions", "label": "有表态的势力", "fmt": "pairs", "sep": "=" },
             { "path": "@scope.bodies", "noun": "bodies", "label": "有表态的天体", "fmt": "pairs", "sep": "=" },
             { "path": "@scope.cities", "noun": "cities", "label": "有表态的城", "fmt": "pairs", "sep": "=" }
@@ -438,9 +438,9 @@
         { "path": "@post.cities.${城名}.production", "noun": "production", "label": "产出/月", "fmt": "map", "digits": 1, "missing": "无产出" },
         { "path": "@post.cities.${城名}.production_value", "noun": "production_value", "label": "产出价值", "fmt": "num", "digits": 1 },
         { "path": "@post.cities.${城名}.build", "noun": "build", "label": "在造（进度/速率）", "fmt": "progress", "missing": "没在造" },
-        { "action": "建筑", "label": "建筑与建造区" },
+        { "action": "建筑", "noun": "建筑", "label": "建筑与建造区" },
         { "path": "已焚毁", "fmt": "bool", "map": { "true": "⚠ 是", "false": "否" } },
-        { "owner": "cities", "label": "这座城归谁" }
+        { "owner": "cities", "noun": "cities", "label": "这座城归谁" }
       ]
     },
     {
@@ -461,7 +461,7 @@
         { "path": "轨道.公转周期", "noun": "公转周期", "label": "公转（月）", "fmt": "num", "digits": 1 },
         { "path": "定居点[*].定居点", "noun": "定居点", "label": "定居点", "fmt": "list" },
         { "path": "定居点", "label": "定居点明细", "fmt": "rows", "fields": ["total_area", "ecological_capacity", "construction_speed_mod"] },
-        { "owner": "bodies", "label": "这个天体归谁" }
+        { "owner": "bodies", "noun": "bodies", "label": "这个天体归谁" }
       ]
     },
     {
@@ -500,7 +500,7 @@
         { "path": "MOND 掌握度", "noun": "MOND 掌握度", "label": "MOND 掌握度", "fmt": "pct", "digits": 0 },
         { "path": "名声", "fmt": "map", "digits": 0, "missing": "—" },
         { "path": "关系", "fmt": "map", "digits": 0, "missing": "—" },
-        { "owner": "factions", "label": "这个势力归谁" }
+        { "owner": "factions", "noun": "factions", "label": "这个势力归谁" }
       ]
     }
   ]

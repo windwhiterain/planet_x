@@ -11,7 +11,7 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**32 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**34 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
@@ -21,6 +21,10 @@ uv run --project play/planet_xq python play/tests/_g4_negative.py
 ㉕㉖ 是 §5d 条（名词覆盖率·**静态**）的量具：㉕剪掉 `jsonview.js` 的 tip 挂载（= 实机症状
 「原始 JSON 视图里的字段名 hover 无反应」），㉖把宿主的 `Tip.attach` 改名（= 换翻译层时
 最容易漏的那种断线：`ctx.tip` 转发到空处）——两条都要求 §5d 自己红。
+㉗㉘ 是 §5 的**控制行**那一支（2026-10 补）的量具：㉗把某个 `owner` 行的 `noun` 改成语料里
+不存在的词，㉘把某个 `owner` 行的 `noun` **删掉**（前端兜底也解析不出来——它只会去查显示标签
+「归谁」）——两条都要求「名词覆盖率·控制行」**自己**红，因为那个缺口正是从这里漏出来的
+（判据按作用域键判绿，而前端不查那个词，实机 hover 无反应）。
 ⚠ ㉕㉖ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
 跑完还原——**真文件一个字节都不碰**（与上面那 30 条同一纪律）。
 """
@@ -409,6 +413,41 @@ def main() -> int:
         app.write_text(orig_app, encoding="utf-8")
     finally:
         g4_spec.STATIC_JS = static_real
+
+    # ㉗㉘ 名词覆盖率·**控制行**（§5 的控制面那一支，2026-10 补）：量具自己也要有量具。
+    #     那一支是为这个缺口补的——`owner` 行从前按「作用域键 `factions` 也在语料里」判绿，
+    #     而前端 `app.js::nounTip` **根本不拿 `owner` 去查**（field 链是 `noun` → 叶字段名 →
+    #     裸字段名）⇒ 实机 hover 无反应、判据却全绿（判据与实际解析路径不一致）。
+    #     现在口径统一到前端（**声明优先**）：
+    #     ㉗ 把某个 owner 行的 `noun` 改成语料里不存在的词（弹空框）；
+    #     ㉘ 把某个 owner 行的 `noun` **删掉** —— 前端兜底也解析不出来（它只会去查显示标签
+    #        「归谁」，语料里没有）。两条都要求「名词覆盖率·控制行」那一族**自己**红
+    #        （不是碰巧别处红了）。
+    CTL_CHECK = "名词覆盖率·控制行"
+
+    d = clone()
+    hit = 0
+    for _, c in walk_columns(d):
+        if isinstance(c, dict) and isinstance(c.get("owner"), str) and c.get("noun"):
+            c["noun"] = "语料里没有这个名词"
+            hit += 1
+            break
+    assert hit == 1, "views.json 里没有带 `noun` 的 owner 行：判据/声明换了口径？"
+    bad = run_case("owner-noun-bogus", d)
+    if not any(n.startswith(CTL_CHECK) for n in bad):
+        MISBEHAVED.append(f"owner-noun-bogus：控制行判据没红（实际红：{bad}）")
+
+    d = clone()
+    hit = 0
+    for _, c in walk_columns(d):
+        if isinstance(c, dict) and isinstance(c.get("owner"), str) and c.get("noun"):
+            del c["noun"]        # ← 只留显示标签「归谁」：前端兜底查不到任何词
+            hit += 1
+            break
+    assert hit == 1, "views.json 里没有带 `noun` 的 owner 行：判据/声明换了口径？"
+    bad = run_case("owner-noun-dropped", d)
+    if not any(n.startswith(CTL_CHECK) for n in bad):
+        MISBEHAVED.append(f"owner-noun-dropped：控制行判据没红（实际红：{bad}）")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")
