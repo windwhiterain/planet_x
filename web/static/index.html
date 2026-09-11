@@ -99,6 +99,10 @@
 
   <script type="module" src="map3d.js"></script>
   <script src="jsonview.js"></script>
+  <!-- 悬停弹窗（**名词 → 解释**）：它不认识任何领域词，只拿名词去 `GET /api/schema`
+       那份数据里查（那份数据又来自 `///` 与 `column_docs`）。要在 specview/controls 之前
+       加载——它们在建 DOM 时就会调 `Tip.attach`。 -->
+  <script src="tip.js"></script>
   <script src="specview.js"></script>
   <!-- 写面那一半：控制行（`leaf`/`owner`/`action`）的渲染与「原值配对」。
        它必须在 app.js **之前**加载吗？不必——它只在 DOMContentLoaded 之后被调用（那时

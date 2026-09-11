@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -693,6 +694,112 @@ def run(h, ck) -> None:
              (f"leaf_ui 覆盖 {len(leaf_ui)}/{len(declared_fields)} 片叶、action_ui "
               f"{len(action_ui)}/{len(declared_actions)} 条命令；owner 行的作用域键都在 "
               f"ControlScopePatch 里（{sorted(scope_props)}）"))
+
+    # ══ 5. 名词覆盖率：**界面上当名词显示的每一列，都能弹出解释** ══════════════════
+    #
+    # 用户裁决：「所有 UI 都用名词，**鼠标移上去弹窗显示注释/解释**」。弹的那段文字**全部**
+    # 来自引擎发的 `--nouns`（= web 的 `GET /api/schema`，同一份实现、两个出口）：
+    # 实体字段的 `///`、回合视图字段的 `///`、投影每张表的 `column_docs` 与列内联 description。
+    #
+    # 判据：**当名词显示的列**（裸字段列 = `path` 是单个标识符；控制行的标签）必须能在语料里
+    # 查到词条——查不到就是"弹不出东西"的哑巴失败（引擎那边缺文档，或键名对不上）。
+    # ⚠ 口径**不是**"给 128 个投影列全写文档"：只要求**界面真的显示**的那些。
+    rc, out, _ = _run(h, ["--nouns"])
+    corpus: dict[str, str] = {}
+    corpus_ok = False
+    if rc == 0:
+        try:
+            doc_nouns = json.loads(out)
+            corpus_ok = isinstance(doc_nouns, dict)
+
+            def eat(node, into, depth=0):
+                if depth > 64 or not isinstance(node, (dict, list)):
+                    return
+                if isinstance(node, list):
+                    for x in node:
+                        eat(x, into, depth + 1)
+                    return
+                props = node.get("properties")
+                if isinstance(props, dict):
+                    for k, v in props.items():
+                        d = (v or {}).get("description")
+                        if isinstance(d, str) and d.strip():
+                            into.setdefault(k, d)
+                for k, v in node.items():
+                    if k == "columns" and isinstance(v, dict):
+                        for ck_, cv in v.items():
+                            if isinstance(cv, dict) and isinstance(cv.get("description"), str):
+                                into.setdefault(ck_, cv["description"])
+                    eat(v, into, depth + 1)
+
+            if corpus_ok:
+                eat(doc_nouns.get("state") or {}, corpus, 0)
+                eat(doc_nouns.get("view") or {}, corpus, 0)
+                # 控制面那半：控制行的**字段名**（`capital`/`investment_budget`…）与
+                # 作用域键（`global`/`factions`…）。界面显示的是中文标签，标签查不到时按字段名查。
+                eat(doc_nouns.get("control") or {}, corpus, 0)
+                for sec, tables in (doc_nouns.get("projection") or {}).items():
+                    if not isinstance(tables, dict):
+                        continue
+                    for t, tv in tables.items():
+                        if not isinstance(tv, dict):
+                            continue
+                        for k, v in (tv.get("column_docs") or {}).items():
+                            corpus[k] = v
+                        for k, v in (tv.get("columns") or {}).items():
+                            if isinstance(v, dict) and isinstance(v.get("description"), str):
+                                corpus.setdefault(k, v["description"])
+        except json.JSONDecodeError:
+            corpus_ok = False
+    ck.check("名词覆盖率：`--nouns` 给得出语料（悬停弹窗的全部文字来源）",
+             corpus_ok,
+             f"名词 {len(corpus)} 个" if corpus_ok else f"退出码 {rc}：{out[:120]}")
+
+    BARE = re.compile(r"^[A-Za-z_一-鿿][\w一-鿿]*$")
+    considered = 0
+    uncovered: list[str] = []
+    for v in views:
+        vid = v.get("id", "?")
+        for c in v.get("columns") or []:
+            if not isinstance(c, dict):
+                continue
+            is_control = any(isinstance(c.get(k), str) for k in ("leaf", "owner", "action"))
+            if is_control:
+                # 控制行的名字：`label`（views.json 里声明的中文名）或叶/命令的**字段名**。
+                label = c.get("label")
+                path = c.get("leaf") or c.get("owner") or c.get("action") or ""
+                field = str(path).split(".")[-1].split("[")[0]
+                keys = [k for k in (label, field) if k]
+            else:
+                path = c.get("path")
+                if not isinstance(path, str) or not BARE.match(path):
+                    continue        # 表达式列（`@post...`）不算"名词"：它的表头是自由文本
+                keys = [k for k in (c.get("label"), path) if k]
+            if not keys:
+                continue
+            considered += 1
+            if not any(k in corpus for k in keys):
+                uncovered.append(f"{vid}：`{keys[0]}`（也试过 {keys[1:] or '无'}）")
+    ck.check(f"名词覆盖率：{considered} 个当名词显示的列全都能弹出解释"
+             f"（悬停弹窗查得到词条，不是空框）",
+             corpus_ok and not uncovered and considered >= 40,
+             "；".join(uncovered[:5]) or (
+                 f"语料 {len(corpus)} 个名词，覆盖 {considered} 个界面名词（下限 40）"
+                 if considered >= 40 else f"只算到 {considered} 个名词，判据可能空转了"))
+
+    # 另一半：**与引擎名词逐字相同**的 `label` 一律不写（"该退的都退了"）——
+    # 列头默认就是键名，再抄一遍只会让"哪个是权威"变含糊；要换词（`舰名`→`舰`）或加格式时才写。
+    dup_labels = []
+    for v in views:
+        for c in v.get("columns") or []:
+            if not isinstance(c, dict):
+                continue
+            path, label = c.get("path"), c.get("label")
+            if isinstance(path, str) and isinstance(label, str) and BARE.match(path) and path == label:
+                dup_labels.append(f"{v.get('id', '?')}：`{path}` 的 label 与键名逐字相同（该退掉）")
+    ck.check("名词覆盖率：裸字段列的 `label` 不与引擎键名逐字重复（列头默认就是键名）",
+             not dup_labels,
+             "；".join(dup_labels[:4]) or "0 条重复（`label` 只在要覆盖/加格式时才写）")
 
     # `new: true`（身份键由人现填）只对**多键叶**成立；写在势力级单叶上是声明写错。
     new_rows_total = sum(1 for v in views for c in (v.get("columns") or []) if c.get("new"))

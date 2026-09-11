@@ -1144,3 +1144,76 @@ fn zero_resources(w: &mut GameWorld, fid: &str) {
         *v = 0.0;
     }
 }
+
+/// **`/api/schema` 是「名词 → 解释」的唯一来源**：两半都得在，而且**真的带解释**。
+///
+/// 守卫的理由：前端 hover 弹的那段文字全部来自这里（`schemars` 收的 `///` 注释 +
+/// 投影的 `column_docs`）。若哪一半空了、或者注释没被 schemars 收进去，界面不会报错、
+/// 只是**弹不出东西**——那正是「失败看起来像成功」。所以这条同时钉**非空**与**条数**。
+#[tokio::test]
+async fn schema_endpoint_carries_nouns_with_explanations() {
+    let axum::Json(v) = get_schema().await;
+
+    // ① 视图半：schemars 把 `///` 收成 `description`。逐层数一遍。
+    fn count_desc(v: &serde_json::Value, n: &mut usize, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("description").and_then(|d| d.as_str()).is_some_and(|s| !s.trim().is_empty())
+                {
+                    *n += 1;
+                }
+                for x in m.values() {
+                    count_desc(x, n, depth + 1);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for x in a {
+                    count_desc(x, n, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut n_view = 0;
+    count_desc(&v["view"], &mut n_view, 0);
+    assert!(
+        n_view >= 100,
+        "视图 schema 里的 `description` 只有 {n_view} 条 ⇒ 文档注释没被 schemars 收进去（前端就弹不出解释）"
+    );
+
+    // ② 投影半：每张 lazy 表都要有 columns，且**镜像实体字段**的列要有 column_docs。
+    let lazy = v["projection"]["lazy"].as_object().expect("lazy 表");
+    assert!(lazy.len() >= 5, "lazy 表太少：{}", lazy.len());
+    let ships = &lazy["ships"];
+    let cols = ships["columns"].as_object().expect("ships.columns");
+    for key in ["舰名", "舰级", "船体", "船体上限", "出厂图", "下水回合"] {
+        assert!(cols.contains_key(key), "ships 表缺列 `{key}`（改过名的话这条要先更新）");
+    }
+    let docs = ships["column_docs"].as_object().expect("ships.column_docs");
+    let mut covered = 0;
+    for key in cols.keys() {
+        if docs.contains_key(key) {
+            covered += 1;
+        }
+    }
+    assert!(
+        covered >= 10,
+        "ships 表只有 {covered} 列带 column_docs ⇒ hover 弹不出解释"
+    );
+
+    // ③ 防空转：两半合起来得能覆盖**一批**名词，而不是碰巧一条。
+    let mut nouns = std::collections::BTreeSet::new();
+    for t in lazy.values() {
+        if let Some(d) = t.get("column_docs").and_then(|d| d.as_object()) {
+            nouns.extend(d.keys().cloned());
+        }
+    }
+    assert!(
+        nouns.len() >= 30,
+        "投影侧能弹出解释的名词只有 {} 个（下限 30）",
+        nouns.len()
+    );
+}

@@ -75,6 +75,12 @@ planet_x --seed 7 --apply steer.json --round 30 --save ckpt30.json
 
 ---
 
+## 名词与解释（`--nouns`）
+
+读面上每个**名词**（字段名/列名）都有一句解释，`planet_x --nouns` 一次发全
+（`{state, view, projection, control}` 四半，与 `GET /api/schema` 同实现）。
+「这个字段是什么意思」先查它，别猜、也别去翻源码里的结构体。
+
 ## 1. 心智模型：你「玩」的是什么
 
 - 每回合 = **1 个月**；一个 `State` 快照确定性推进（`sim::advance`），全部数值由

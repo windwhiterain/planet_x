@@ -9,8 +9,8 @@
 //!   **3 seed × 400 回合的每一行舰**上成立（g2 的 `cargo_checks`；实测 **16,504 个舰·回合**、
 //!   其中 **1,522 行**受过伤、**4,164 行**舱里有货）；
 //! * 剩下两个**手工边界**（壳打光 ⇒ 舱容 0、`hull_max ≤ 0` 的旧档 ⇒ 满舱）在真实投影里
-//!   **不发生**（活舰 `船体 > 0`、所有档都有 `船体上限`）⇒ 留给下面那条纯函数用例；
-//!   等 `--call <fn>`（施工图 `test-migration-backlog.md` §5 第 5 批）落地后再一起搬。
+//!   **不发生**（活舰 `船体 > 0`、所有档都有 `船体上限`）⇒ 现在走 `planet_x --call cargo_capacity`
+//!   （g1 的 `call_functions`，调的还是引擎同一份实现）。
 //!
 //! ## 2026-10：`depots` 表落地，`off_capital_production_...` 的**读面**那一半也搬去了 g2
 //!
@@ -100,62 +100,6 @@ fn off_capital_production_does_not_touch_the_pool() {
         (cn_carbon(&state) - c0).abs() < 1e-9,
         "两回合过去，金星的碳一格都没进池——这就是「等船来运」"
     );
-}
-
-/// `cargo_capacity` 的两个**合成边界**：壳打光 ⇒ 0；`hull_max ≤ 0`（旧档）⇒ 满舱。
-///
-/// 数据级那一半（= 舰级舱容 × 战损折算、舰级舱容是设计裁决）已搬到
-/// `play/tests/g2_mid.py::cargo_checks`（3 seed × 400 回合每一行舰）；这两个边界在真实投影里
-/// **不发生**（活舰 `hull > 0`、所有档都有 `hull_max`），要手工摆船体 ⇒ 留在纯函数侧。
-#[test]
-fn cargo_capacity_clamps_zero_hull_and_legacy_saves() {
-    use crate::model::cargo_capacity;
-    let (config, state) = fresh_world(42);
-    let mut ship = state
-        .ships
-        .iter()
-        .find(|s| s.class == "cruiser")
-        .expect("开局有巡洋舰")
-        .clone();
-    assert!(ship.hull_max > 0.0, "出厂舰必须有 hull_max");
-
-    ship.hull = 0.0;
-    assert_eq!(cargo_capacity(&config, &ship), 0.0, "壳被打光 ⇒ 一格都装不了");
-
-    ship.hull = 6.0;
-    ship.hull_max = 0.0;
-    assert_eq!(
-        cargo_capacity(&config, &ship),
-        6.0,
-        "hull_max ≤ 0（旧档）按未受损处理，绝不返回 ∞"
-    );
-}
-
-/// **尽量等量分配（Q6）**：[`haul_split`] 是 max-min 公平分配——先按「还有货的种类数」平摊，
-/// 分不满的种类把余量交回去、由其余种类再平摊。它是**纯函数**，这里逐档钉住。
-#[test]
-fn haul_split_is_max_min_fair() {
-    let m = |pairs: &[(&str, f64)]| -> ResourceMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-    };
-    // 三种货、舱容 6、都够 ⇒ 每种 2。
-    assert_eq!(
-        haul_split(&m(&[("铁", 10.0), ("碳", 10.0), ("硅", 10.0)]), 6.0),
-        m(&[("铁", 2.0), ("碳", 2.0), ("硅", 2.0)])
-    );
-    // 铂只有 1 ⇒ 它拿 1，多出来的 1 由另两种再平摊（这就是「尽量」等量）。
-    assert_eq!(
-        haul_split(&m(&[("铁", 10.0), ("铂", 1.0), ("碳", 10.0)]), 6.0),
-        m(&[("铁", 2.5), ("铂", 1.0), ("碳", 2.5)])
-    );
-    // 舱容 ≥ 总存量 ⇒ 全装走（一种货吃得下就全给它，不必等量）。
-    assert_eq!(
-        haul_split(&m(&[("铁", 1.0), ("碳", 2.0)]), 100.0),
-        m(&[("铁", 1.0), ("碳", 2.0)])
-    );
-    // 边界：空货栈 / 零舱容 ⇒ 什么都不装（不是 panic）。
-    assert!(haul_split(&ResourceMap::new(), 20.0).is_empty());
-    assert!(haul_split(&m(&[("铁", 5.0)]), 0.0).is_empty());
 }
 
 /// **货值守恒（M2b 的核心不变量）**：装货与卸货**只搬货**——产地里少多少，舱里就多多少；

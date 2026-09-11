@@ -288,3 +288,53 @@ attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `
 | `agent.rs::meta_value` 的配置段键 | 配置（批 D） |
 | ships 行的 `x`/`y`（`position` 的摊平） | 派生量（批 C） |
 | `column_docs` 正文里的 `Ship.doctrine` 之类 | 那是 **Rust 标识符**，本来就该这么写 ✓ |
+
+### 7.6 第 3a 步：悬停弹窗（注释即解释）
+
+用户原话：「所有 UI 都用名词，**鼠标移上去弹窗显示注释/解释**」。落地成三件事：
+
+**① 引擎：名词与解释是一份数据，两个出口**
+
+* `planet_x --nouns` 与 web 的 `GET /api/schema` 是**同一个实现**
+  （`agent::noun_schema_value()`），发 **四半**：
+  `state`（实体字段的 `///`）、`view`（回合视图字段的 `///`）、
+  `projection`（每张表的 `columns`/`column_docs`，含 `derived.*`）、
+  `control`（叶/命令/作用域键）。
+  四半各自覆盖不同的名词，合起来 = **界面上能出现的所有名词**。
+* 为此给 `State` 及其内嵌类型补了 `schemars::JsonSchema`（`State`/`ControllableState`/
+  `ControlScope`/`MarketState`/`Milestones`/`Notables`/`Roll`… 一串），元组键字段
+  （`depots`/`invest_weights`/`build_weights`）另挂 `#[schemars(with = "BTreeMap<String, _>")]`
+  ——schemars 不认 `#[serde(with = "模块")]`。
+* **补的文档**：实体表缺的列解释（`舰名`/`城名`/`势力`/`所在天体`/`天体名`/`faction_id`、
+  `decisions.ship`）、`ControlScope(/Patch)` 那四个作用域键的 `///`。
+
+**② 前端：`web/static/tip.js`——它不认识任何领域词**
+
+* 启动时 `GET /api/schema` 拉一次，建「名词 → 解释」表；此后 `Tip.attach(node, 名词, 字段名)`
+  纯查表。查词顺序：**显示的那个词 → 字段名 → 控制面字段表**（叶的键名现在还是英文）。
+* 挂点**只有名词**：表头（含身份列 `sv-th-key`）、控制行标签、卡片里的字段名。
+  **不给每个单元格挂**（太吵）。
+* 弹窗是**自定义 div**（不是原生 `title`）：~250ms 延迟、跟手、`max-width: 420px` /
+  `max-height: 46vh` 可滚、`pointer-events: none`（鼠标穿过它，否则贴着鼠标的框会自己
+  把自己 mouseleave 掉而闪烁）、离开/滚动/`Esc`/`blur` 即收、触摸不弹。
+* **已有原生 `title` 的节点不挂**（归属那类 `<select>` 自带长解释，叠两层会两个框一起冒）。
+* 求值器仍然不认识领域词：它只把「这条列声明」交给宿主（`ctx.tip`），由 `app.js` 决定名词与兜底字段。
+
+**③ 判据（g4，静态、带防空转）**
+
+* 名词覆盖率：**当名词显示的列**（裸字段列 + 控制行）必须能在 `--nouns` 里查到词条；
+  实测 **105 个界面名词全命中**（语料 310 个），下限 40 防空转。
+* `label` 不许与引擎键名**逐字重复**（"该退的都退了"）；`label` 只在要换词/加格式时才写，
+  那时它同时是弹窗的查词键。
+* 反向验证：新增 2 个注入错（裸字段列改成不认识的名词、控制行键改成不存在的键），
+  `_g4_negative.py` 共 **21 个注入错全部咬住**。
+
+**已知缺口（下一步）**：**表达式列**的表头（如 `@post.power_share.${势力}` 的「实力占比」）
+不在这条判据的口径里——它的表头是**标题**不是引擎名词，所以不弹。两条路：
+(a) 给这类列加一个声明字段 `noun: "power_share"`（一句"这一列说的是哪个名词"）；
+(b) 让前端从表达式里挑第一个在语料里的裸段（`power_share` ✓，但 `@state.ships[…].势力`
+会挑到 `ships` ⇒ **会挑错**）。倾向 (a)，但那是声明语言的新字段，等裁决。
+
+**另一条待办**：少数实体字段的 `///` 还是**英文**（`Ship.hull` = "Current hull (armor) …"、
+`Faction.资源` = "Stockpiled resources …"）——弹窗照实显示。要中文解释就得把那批 `///`
+中文化（属于"用词统一"那一趟）。

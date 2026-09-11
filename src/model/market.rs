@@ -22,7 +22,7 @@ use crate::model::{FactionId, ResourceMap};
 ///
 /// `ask` 在挂单时就定死（基价 × 挂单时的稀缺系数），所以同一回合里买方看到的是
 /// **确定的价格表**，不会因为结算顺序而变——determinism 优先于撮合精度。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Offer {
     /// 卖家（势力名）。买方只能买「对自己可见」的卖家的挂单（禁运的判据在此）。
     pub seller: FactionId,
@@ -38,7 +38,7 @@ pub struct Offer {
 ///
 /// `#[serde(default)]`（在 [`crate::model::State`] 上）保证旧存档/旧 `.ron` 缺这一节时
 /// 退化成「空市场」而不是加载失败。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct MarketState {
     /// 本回合的挂单（每回合重建：先清空，再由各势力的当期富余挂出）。
     #[serde(default)]
@@ -65,7 +65,7 @@ pub struct MarketState {
 }
 
 /// 国内市场的一个类别（开发/建造）的持久状态。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DomesticMarketSide {
     /// 本回合的国内价格（每资源）。
     #[serde(default)]
@@ -79,7 +79,7 @@ pub struct DomesticMarketSide {
 }
 
 /// 一个势力的国内市场状态：开发、建造两个独立市场。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DomesticMarket {
     #[serde(default)]
     pub development: DomesticMarketSide,

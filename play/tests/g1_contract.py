@@ -501,6 +501,87 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
              f"{len(orders(surface2, fid))} 行 / {len(ours)} 艘")
 
 
+def call_functions(h, ck, tmp: Path) -> None:
+    """`--call <fn> --args <json>`：把引擎里**已经在用**的纯函数直接暴露给 Python 判据。
+
+    这批把 Rust 侧「没有跑出来的数据可测」的类 B 纯函数搬成数据级：Python 拿真配置 + 真参数
+    调**同一份实现**（`haul_split` / `hit_factor` / `home_defense_mult` / `ship_panel` /
+    `cargo_capacity`）——不是抄公式，所以不会漂移。
+    """
+
+    def call(name, args=None, seed=42):
+        argv = ["--seed", str(seed), "--call", name]
+        if args is not None:
+            argv += ["--args", json.dumps(args, ensure_ascii=False)]
+        return json.loads(h.capture(argv))["value"]
+
+    # ① haul_split：max-min 公平分配（原 `src/tests/sim/haul.rs`）。
+    ck.check("--call haul_split：三种货、舱容 6 ⇒ 每种 2",
+             call("haul_split", {"need": {"铁": 10, "碳": 10, "硅": 10}, "room": 6})
+             == {"铁": 2.0, "碳": 2.0, "硅": 2.0}, "逐值相等")
+    ck.check("--call haul_split：铂只有 1 ⇒ 它拿 1、余量给另两种平摊",
+             call("haul_split", {"need": {"铁": 10, "铂": 1, "碳": 10}, "room": 6})
+             == {"铁": 2.5, "铂": 1.0, "碳": 2.5}, "逐值相等")
+    ck.check("--call haul_split：舱容 ≥ 总存量 ⇒ 全装走",
+             call("haul_split", {"need": {"铁": 1, "碳": 2}, "room": 100})
+             == {"铁": 1.0, "碳": 2.0}, "逐值相等")
+    ck.check("--call haul_split：空货栈 / 零舱容 ⇒ 空（不是 panic）",
+             call("haul_split", {"need": {}, "room": 20}) == {}
+             and call("haul_split", {"need": {"铁": 5}, "room": 0}) == {}, "两种边界都空")
+
+    # ② hit_factor：目标越快、低追踪武器越难命中（原 `src/tests/sim/combat.rs`）。
+    fast = call("hit_factor", {"tracking": 2.0, "target_speed": 2.6})
+    slow = call("hit_factor", {"tracking": 2.0, "target_speed": 1.2})
+    ck.check("--call hit_factor：目标越快命中折减越低、且折减在 (0,1]",
+             fast < slow and 0.0 < fast <= 1.0, f"fast={fast:.4f} < slow={slow:.4f}")
+
+    # ③ home_defense_mult：首都即强弩（原 `src/tests/sim/combat.rs`）。
+    near = call("home_defense_mult", {"faction": "中国", "body": "地球"})
+    far = call("home_defense_mult", {"faction": "中国", "pos": [80.0, 80.0]})
+    ck.check("--call home_defense_mult：首都附近被削弱、远处为 1",
+             near < 1.0 and far == 1.0, f"near={near} far={far}")
+
+    # ④ ship_panel / cargo_capacity：面板公式与舰级舱容（原 combat.rs / haul.rs）。
+    meta = json.loads(h.capture(["--meta"]))
+    ships, comps = meta["ships"], meta["components"]
+    spec = ships["corvette"]
+    panel = call("ship_panel", {"class": "corvette",
+                                "components": ["shield", "railgun", "ion_drive"]})
+    want = {
+        "hull_max": spec["hull"],
+        "shield_max": comps["shield"]["shield"] * spec["shield_mult"],
+        "attack": comps["railgun"]["damage"] * spec["attack_mult"],
+        "attack_range": comps["railgun"]["range"] * spec["range_mult"],
+        "speed": comps["ion_drive"]["speed"] * spec["speed_mult"],
+        "accel": comps["ion_drive"]["accel"] * spec["accel_mult"],
+        "hardness": 0.0,
+    }
+    bad = [f"{k}: {panel[k]} ≠ {v}" for k, v in want.items() if abs(panel[k] - v) > 1e-9]
+    ck.check("--call ship_panel：船体=舰级直接属性、护盾/攻击/射程/速度=组件×舰级倍率",
+             not bad and panel["upkeep"] > spec["upkeep"],
+             "；".join(bad[:3]) or "逐项咬合，组件也抬高了维护费")
+
+    pd = comps["point_defense"]["intercept"]
+    intercept_bad = []
+    for cls, s in ships.items():
+        got = call("ship_panel", {"class": cls, "components": ["point_defense"]})["intercept"]
+        if abs(got - pd * s["pd_mult"]) > 1e-9:
+            intercept_bad.append(f"{cls}: {got} ≠ {pd}×{s['pd_mult']}")
+    distinct = {round(s["pd_mult"], 6) for s in ships.values()}
+    ck.check("--call ship_panel：intercept = 组件 × 舰级 pd_mult，且舰级之间确有差异",
+             not intercept_bad and len(distinct) >= 2,
+             "；".join(intercept_bad[:3]) or f"{len(ships)} 个舰级全咬合；pd_mult 取 {len(distinct)} 种")
+
+    cc = ships["cruiser"]["cargo"]
+    ck.check("--call cargo_capacity：舰级舱容 × hull/hull_max",
+             abs(call("cargo_capacity", {"class": "cruiser", "hull": 6.0, "hull_max": 12.0}) - cc / 2) < 1e-9,
+             f"半血巡洋舰 = {cc / 2}")
+    ck.check("--call cargo_capacity：壳打光 ⇒ 0、旧档 hull_max≤0 ⇒ 满舱",
+             call("cargo_capacity", {"class": "cruiser", "hull": 0.0, "hull_max": 12.0}) == 0.0
+             and abs(call("cargo_capacity", {"class": "cruiser", "hull": 6.0, "hull_max": 0.0}) - cc) < 1e-9,
+             "两个边界都对")
+
+
 def neutral_paths(h, ck, tmp: Path) -> None:
     """`schema.json` 的 `neutral.fields` 每条路径都要能在读面上解析出来（没有死字段）。"""
     proj = h.projection(FACE_SEED, DET_ROUNDS)
@@ -525,6 +606,7 @@ def run(h, ck) -> None:
     b3_tables(h, ck, tmp)
     input_face(h, ck, tmp)
     control_fixed_point(h, ck, tmp)
+    call_functions(h, ck, tmp)
     neutral_paths(h, ck, tmp)
 
 

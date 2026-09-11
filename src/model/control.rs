@@ -183,7 +183,7 @@ impl<'de> Deserialize<'de> for ControlMode {
 ///
 /// `mode = Inherit`（缺省）表示**这一层没有说话**，沿作用域链上溯
 /// （舰/建筑/预算 → 城市 → 天体 → 势力 → 全局），全链 `Inherit` 时落到 `Auto`。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct Control<T> {
     pub value: T,
     #[serde(default)]
@@ -221,15 +221,19 @@ impl<T> Control<T> {
 ///
 /// 节点值 [`ControlMode::Inherit`] 表示这一层没有说话（与「这个键不存在」等价）：
 /// 作用域节点**只表态「谁负责」**，不携带值——值属于叶子。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ControlScope {
     #[serde(default)]
+    /// **全局那一档**（这个世界的默认归属）：链上谁都没说话时按它。
     pub global: ControlMode,
     #[serde(default)]
+    /// **已表态的势力**（势力名 → 三态）。只存表过态的：`Inherit` 等于「这一层没有说话」，不占条目。
     pub factions: BTreeMap<FactionId, ControlMode>,
     #[serde(default)]
+    /// **已表态的天体**（天体名 → 三态）。比势力具体、比城粗。
     pub bodies: BTreeMap<BodyId, ControlMode>,
     #[serde(default)]
+    /// **已表态的城**（城名 → 三态）。链上最具体的一档。
     pub cities: BTreeMap<CityId, ControlMode>,
 }
 
@@ -244,12 +248,16 @@ pub struct ControlScope {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct ControlScopePatch {
     #[serde(default)]
+    /// **全局那一档**：「链上谁都没说话时按谁」——`Inherit` = 全局也不说话（那就按引擎的默认），`Auto` = 自动控制，`Player` = 玩家。它是归属链的**最后一站**。
     pub global: Option<ControlMode>,
     #[serde(default)]
+    /// **势力档**：`[(势力名, 三态)]`。比全局具体 ⇒ 势力表态了就轮不到全局说话。
     pub factions: Vec<(FactionId, ControlMode)>,
     #[serde(default)]
+    /// **天体档**：`[(天体名, 三态)]`。比势力具体（“这个星球我亲自管”），但比城粗。
     pub bodies: Vec<(BodyId, ControlMode)>,
     #[serde(default)]
+    /// **城档**：`[(城名, 三态)]`。链上**最具体**的一档 ⇒ 它一表态，上面几档都不算数。
     pub cities: Vec<(CityId, ControlMode)>,
 }
 
@@ -260,7 +268,7 @@ pub struct ControlScopePatch {
 ///
 /// 每个叶子用 [`Control`] 包裹：值 + 谁决定它。舰/资源/建筑的粒度在各自的
 /// `mode`；城市/天体/势力/全局这些更粗的作用域在 [`State::scope`](crate::model::State::scope)。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ControllableState {
     /// 本方各飞船的当前指令（每艘舰一个 Control）。
     pub ship_orders: BTreeMap<ShipId, Control<ShipBehavior>>,
@@ -329,9 +337,11 @@ pub struct ControllableState {
     pub construction_budget: BTreeMap<String, Control<f64>>,
     /// 本方各建筑的「建设投资权重」（每建筑一个 Control）。
     #[serde(with = "crate::json::key2")]
+    #[schemars(with = "std::collections::BTreeMap<String, Control<f64>>")]
     pub invest_weights: BTreeMap<InvestKey, Control<f64>>,
     /// 本方各建造区的「建造投资权重」（每建造区一个 Control）。
     #[serde(with = "crate::json::key2")]
+    #[schemars(with = "std::collections::BTreeMap<String, Control<f64>>")]
     pub build_weights: BTreeMap<BuildKey, Control<f64>>,
     /// 本方各城的**福利权重**（每城一个 Control）：势力级
     /// [`welfare_budget`](Self::welfare_budget) 按这些权重分给城市，再按市场价值

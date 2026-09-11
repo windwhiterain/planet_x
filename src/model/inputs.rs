@@ -27,7 +27,7 @@ use crate::model::{FactionId, ShipId};
 /// 一回合的**输入面**（`RoundState::pre`）：这一回合消费掉的随机数与判定输入。
 ///
 /// 空 = 这一回合没跑（回合 0 / `--start` 载入的起点行），不是「掷出了 0」。
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct RoundInputs {
     /// **C7 · 本回合的逐舰解算顺序**（`sim::step_military` 开头由**主 `Prng`** 洗出）。
     ///
@@ -60,7 +60,7 @@ pub struct RoundInputs {
 ///
 /// 两种用法都能表达（见各字段）：**闸门**（`value < threshold` ⇒ 走哪一支）与**加权抽签**
 /// （`value × pool_total` 落在哪一段 ⇒ 选中谁）。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Roll {
     /// 用途 = `derived_roll` 的 `salt`（`"role"` / `"route"` / `"gate"` / `"accept"` / `"pick"` / …）。
     pub purpose: String,
@@ -91,7 +91,7 @@ pub struct Roll {
 }
 
 /// 加权抽签池里的一个候选（[`Roll::pool`] 的一项）。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PoolEntry {
     /// 候选的名字（天体名 / 势力名 / 主题名 / 舰名……）。
     pub name: String,

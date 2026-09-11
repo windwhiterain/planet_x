@@ -62,7 +62,7 @@ use crate::model::{BodyId, FactionId, ShipId};
 /// 条款（要求运力、门槛、期限、考核周期）在**挂单那一刻算好并冻结**——天体在动，
 /// 每回合重算会让同一张单的条件漂移。唯一每回合跟着现实走的是**未接单的**
 /// [`Contract::capacity`]（需求信号必须反映此刻的缺口），一旦有人接下就冻结成承诺。
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Contract {
     /// 单调递增的挂单号（由 [`ContractState::next_id`] 分配）——事件与投影靠它引用这一单。
     #[serde(rename = "合同号")]
@@ -210,7 +210,7 @@ impl Contract {
 ///
 /// `#[serde(default)]`（在 `State` 上）保证 v9 及更早的存档/`.ron` 缺这一节时退化成
 /// 「空挂单簿」而不是加载失败——那时的世界本来就没有承包这件事，**零信息损失**。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ContractState {
     /// 挂单簿：**只留没结束的合同**（等人接的 + 还在雇佣期内的）。结束即移出。
     #[serde(default)]
