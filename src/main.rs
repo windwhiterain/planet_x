@@ -215,6 +215,19 @@ struct Cli {
     /// 不做舍入）；没有档时按当前状态重算（此时 `pre` 与 `post` 相同、过程量全 0），`note` 会说明。
     #[arg(long)]
     derived: bool,
+
+    /// **一次纯函数调用**（机器可读）：`--call <fn> --args <json>` → 一行
+    /// `{"fn": ..., "value": ...}`。把引擎里**已经在用**的纯函数直接暴露给 Python 判据
+    /// （不是让 Python 抄公式——那会立刻漂移）。可用：`haul_split` / `hit_factor` /
+    /// `cargo_used` / `component_integrity` / `cargo_capacity` / `ship_panel` /
+    /// `home_defense_mult`。需要世界的（`home_defense_mult`）用 `--seed`/`--start`
+    /// 决定是哪个世界；其余只看 `--args`。
+    #[arg(long, value_name = "FN")]
+    call: Option<String>,
+
+    /// `--call` 的实参（JSON 对象，例如 `{"tracking":2.0,"target_speed":2.6}`）。
+    #[arg(long, value_name = "JSON")]
+    args: Option<String>,
 }
 
 fn main() {
@@ -294,6 +307,36 @@ fn main() {
         },
         None => (world::default_state(&config, seed), Prng::new(seed)),
     };
+
+    // `--call <fn> --args <json>`：一次纯函数调用、一行 JSON 回执（给 Python 判据用）。
+    // `state` 只是给 `home_defense_mult` 这类读世界的函数用（`--seed`/`--start` 决定是哪个世界）；
+    // 纯函数（haul_split/hit_factor/ship_panel…）不看它。
+    if let Some(fn_name) = &cli.call {
+        let args: serde_json::Value = match &cli.args {
+            Some(text) => match serde_json::from_str(text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        json!({"ok": false, "code": "ERR_CALL_ARGS",
+                               "message": format!("--args 不是合法 JSON：{e}")})
+                    );
+                    std::process::exit(10);
+                }
+            },
+            None => json!({}),
+        };
+        match call_function(&config, &state, fn_name, &args) {
+            Ok(v) => {
+                emit(&v.to_string());
+                return;
+            }
+            Err(e) => {
+                eprintln!("{}", json!({"ok": false, "code": "ERR_CALL", "message": e}));
+                std::process::exit(10);
+            }
+        }
+    }
 
     // Overlay a control-state diff (agent steering) before anything runs.
     if let Some(path) = &cli.apply {
@@ -489,6 +532,131 @@ fn apply_diff(
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     control::apply_patch(state, config, &value)
+}
+
+/// 从 `--call` 的 args 造一艘**最小舰**：`{class, components?, hull?, hull_max?}`。
+/// 组件耐久按满血填（`component_integrity`）——面板的攻击/拦截读它，填 0 会被读成 0。
+fn ship_from_args(
+    config: &GameConfig,
+    args: &serde_json::Value,
+) -> Result<planet_x::model::Ship, String> {
+    let class = args
+        .get("class")
+        .and_then(|v| v.as_str())
+        .ok_or("args.class 缺失（舰级 id，如 corvette）")?;
+    if !config.ships.contains_key(class) {
+        return Err(format!("未知舰级 {class}"));
+    }
+    let spec = config.ship_spec(class);
+    let components: Vec<String> = args
+        .get("components")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("args.components 必须是组件 id 数组：{e}"))?
+        .unwrap_or_default();
+    let mut component_hp = Vec::with_capacity(components.len());
+    for c in &components {
+        if !config.components.contains_key(c) {
+            return Err(format!("未知组件 {c}"));
+        }
+        component_hp.push(planet_x::model::component_integrity(config, c));
+    }
+    let hull = args.get("hull").and_then(|v| v.as_f64()).unwrap_or(spec.hull);
+    let hull_max = args
+        .get("hull_max")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(spec.hull);
+    serde_json::from_value(json!({
+        "舰名": "call-ship",
+        "舰级": class,
+        "势力": "",
+        "船体": hull,
+        "船体上限": hull_max,
+        "坐标": [0.0, 0.0],
+        "组件": components,
+        "组件耐久": component_hp,
+    }))
+    .map_err(|e| format!("造舰失败：{e}"))
+}
+
+/// `--call <fn> --args <json>` 的实现：把引擎里**已经在用**的纯函数直接暴露出来。
+///
+/// 这里只做**参数校验 + 转发**，不重写任何公式——Python 判据调的就是引擎自己那份实现。
+fn call_function(
+    config: &GameConfig,
+    state: &State,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let num = |key: &str| -> Result<f64, String> {
+        args.get(key)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| format!("args.{key} 必须是数字"))
+    };
+    let value = match name {
+        "haul_split" => {
+            let need: planet_x::model::ResourceMap = args
+                .get("need")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("args.need 必须是 {{资源: 数量}} 对象：{e}"))?
+                .unwrap_or_default();
+            serde_json::to_value(sim::haul_split(&need, num("room")?)).map_err(|e| e.to_string())?
+        }
+        "hit_factor" => json!(sim::hit_factor(num("tracking")?, num("target_speed")?)),
+        "cargo_used" => {
+            let cargo: planet_x::model::ResourceMap = args
+                .get("cargo")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("args.cargo 必须是 {{资源: 数量}} 对象：{e}"))?
+                .unwrap_or_default();
+            json!(planet_x::model::cargo_used(&cargo))
+        }
+        "component_integrity" => {
+            let id = args
+                .get("component")
+                .and_then(|v| v.as_str())
+                .ok_or("args.component 缺失")?;
+            if !config.components.contains_key(id) {
+                return Err(format!("未知组件 {id}"));
+            }
+            json!(planet_x::model::component_integrity(config, id))
+        }
+        "cargo_capacity" => {
+            let ship = ship_from_args(config, args)?;
+            json!(planet_x::model::cargo_capacity(config, &ship))
+        }
+        "ship_panel" => {
+            let ship = ship_from_args(config, args)?;
+            serde_json::to_value(planet_x::model::ship_panel(config, &ship))
+                .map_err(|e| e.to_string())?
+        }
+        "home_defense_mult" => {
+            let faction = args
+                .get("faction")
+                .and_then(|v| v.as_str())
+                .ok_or("args.faction 缺失")?;
+            let pos: [f64; 2] = if let Some(body) = args.get("body").and_then(|v| v.as_str()) {
+                state.body_position(body)
+            } else if let Some(p) = args.get("pos") {
+                serde_json::from_value(p.clone())
+                    .map_err(|e| format!("args.pos 必须是 [x, y]：{e}"))?
+            } else {
+                return Err("args 需要 body 或 pos".to_string());
+            };
+            json!(sim::home_defense_mult(state, faction, pos))
+        }
+        other => {
+            return Err(format!(
+                "未知函数 {other}；可用：haul_split / hit_factor / cargo_used / component_integrity / cargo_capacity / ship_panel / home_defense_mult"
+            ))
+        }
+    };
+    Ok(json!({"fn": name, "value": value}))
 }
 
 /// Write a line to stdout, ignoring broken-pipe errors so piping into `jq` (or an
