@@ -107,6 +107,8 @@ FOLLOW_FID, FOLLOW_ENEMY, FOLLOW_ROUNDS = "中国", "美国", 3
 SITE_FID, SITE_STOCK = "中国", ("铁", "碳", "硅")
 # 战争推思潮：把最偏和平端那家的舰摆成「一发即沉」的仗。
 IDEO_ROUNDS = 1
+# 建造瓶颈：三条臂（库存 × 预算）看 increment 与 rate 的关系。
+BUILD_ROUNDS = 3
 # 静息亲和：两臂只差思潮，靠多回合让确定性拉力压过外交噪声。
 AFFIN_ROUNDS = 30
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
@@ -1182,6 +1184,7 @@ def run(h, ck) -> None:
     follow_scenario_checks(h, ck)
     site_build_scenario_checks(h, ck)
     ideology_war_scenario_checks(h, ck)
+    build_line_scenario_checks(h, ck)
     affinity_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
@@ -2850,6 +2853,68 @@ def affinity_scenario_checks(h, ck) -> None:
              arms["same"][-1] > arms["opp"][-1] + 10.0,
              f"同极 {arms['same'][-1]:.3f} vs 对极 {arms['opp'][-1]:.3f}"
              f"（间距 {arms['same'][-1] - arms['opp'][-1]:.1f}）")
+
+
+def build_line_scenario_checks(h, ck) -> None:
+    """**合成场景 · 三条线分得开：钱、库存、产能**（`sim/spending.rs::build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`，第 7 批）。
+
+    读面本来就有那两格：`city_process.build[舰级] = {rate, increment}`（schema 的原话：
+    **"`increment < rate` ⇒ 钱是瓶颈；`increment ≈ rate` ⇒ 产能封顶"**）。造法也是现成入口：
+    **建造预算**是控制面的 Player 叶（`建造预算: [{资源, 值, 归属}]`），**库存**是势力 `资源`。
+
+    三条臂（同一座城、同一个舰级、同一个起点）：
+
+    | 臂 | 库存 | 预算 | 实测 r1 |
+    | --- | --- | --- | --- |
+    | 两头都足 | 5000 | 5000 | `increment` **= rate = 11.92**（产能封顶） |
+    | 钱批 0 | 5000 | 0 | `increment` **= 0**（钱是瓶颈） |
+    | 库存 0 | 0 | 5000 | `increment` **≈ 0**（库存是瓶颈） |
+
+    ⇒ 「钱不够」与「产能不够」是**两条不同的线**，而且第三条（库存）也看得见。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 3)), only=("city_process", "factions"))
+    cp, fa = q0.table("city_process"), q0.table("factions")
+    rows = sorted(((float(v["rate"]), r["城名"], r["势力"], cls)
+                   for _, r in cp[cp["round"] == 1].iterrows()
+                   for cls, v in (r["build"] or {}).items() if float(v.get("rate", 0)) > 0),
+                  reverse=True)
+    ck.check("合成场景（建造瓶颈）：读面上真有 `rate > 0` 的建造线（防空转）",
+             bool(rows), f"{len(rows)} 条；最大 {rows[0][1] if rows else '—'}")
+    if not rows:
+        return
+    _, city, fid, cls = rows[0]
+    res = sorted((list(fa[fa["势力"] == fid]["资源"])[0] or {}).keys())
+
+    def run(tag, stock, budget):
+        patch = {"factions": {fid: {"资源": {k: stock for k in res}}}}
+        diff = {"control": [{"势力": fid,
+                             "建造预算": [{"资源": k, "值": budget, "归属": "Player"} for k in res]}]}
+        proj = h.scenario_apply(f"buildline_{tag}", seed, BUILD_ROUNDS, [diff], patch=patch)
+        c = KIT.load(str(proj), only=("city_process",)).table("city_process")
+        out = []
+        for _, r in c[c["城名"] == city].sort_values("round").iterrows():
+            b = (r["build"] or {}).get(cls)
+            if b:
+                out.append((float(b["rate"]), float(b["increment"])))
+        return out
+
+    rich = run("rich", 5000.0, 5000.0)
+    poor = run("broke", 5000.0, 0.0)
+    nostock = run("nostock", 0.0, 5000.0)
+    ck.check("合成场景（建造瓶颈）：**两头都足 ⇒ 产能封顶**（`increment ≈ rate`）",
+             rich and abs(rich[0][1] - rich[0][0]) < 1e-6 and rich[0][0] > 0,
+             f"{city} 造 {cls}：rate {rich[0][0]:.3f}／increment {rich[0][1]:.3f}")
+    ck.check("合成场景（建造瓶颈）：**钱批 0 ⇒ 一分进度都没有**（钱是瓶颈）",
+             poor and all(i == 0.0 for _, i in poor) and poor[0][0] > 0,
+             f"rate {poor[0][0]:.3f}／increment {[round(i, 4) for _, i in poor]}")
+    ck.check("合成场景（建造瓶颈）：**库存 0 ⇒ 批满也拿不到进度**（第三条线：库存）",
+             nostock and max(i for _, i in nostock) < 0.1 * max(r for r, _ in nostock),
+             f"rate {nostock[0][0]:.3f}／increment {[round(i, 4) for _, i in nostock]}")
+    ck.check("合成场景（建造瓶颈）：三条臂真的分得开（防空转）",
+             rich[0][1] > max(i for _, i in nostock) and rich[0][1] > max(i for _, i in poor),
+             f"两头足 {rich[0][1]:.3f}｜钱 0 {max(i for _, i in poor):.3f}｜"
+             f"库存 0 {max(i for _, i in nostock):.3f}")
 
 
 def id_checks(h, ck, out) -> None:
