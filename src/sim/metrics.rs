@@ -172,7 +172,15 @@ pub fn observe(state: &State, config: &GameConfig, sink: &RoundSink) -> RoundVie
                     .map(|f| f.labor)
                     .unwrap_or(crate::model::neutral::value::CITY_LABOR),
                 housing_capacity: cf.map(|f| f.housing_capacity).unwrap_or(0.0),
-                is_hub: cf.map(|f| f.is_hub).unwrap_or(false),
+                // **按写这一行时的主人算**，不抄产出那一步的判定：城在本回合后半段易主/被复垦时，
+                // 产出那一步的 `is_hub` 是**旧主**的（旧主的首都在那个天体上），直接抄进这一行
+                // 会让同一个势力在同回合读出两个 hub 天体（实测 1000 回合 × 7 seed 里 5 例）。
+                //
+                // ⚠ 但**必须先有这一步的捕获**（`cf.is_some()`）：没跑过产出的世界（`pre` 面、
+                // 未推进的档）里，「这个月的入库路径还没定」的中性值就是 `false`——把它重算成
+                // 「首都在这个天体上 ⇒ true」会直接推翻 `cities[].is_hub` 声明的中性值
+                // （`model::neutral` 那条守卫就是这么抓到我的）。
+                is_hub: cf.is_some() && !c.razed && c.body_id == *state.capital_body(&c.faction_id),
                 build: cf.map(|f| f.build.clone()).unwrap_or_default(),
             },
         );
