@@ -26,10 +26,16 @@
 * **派单抽签**：`round_inputs.rolls` 里每条 `route` 记录的 `pool`（每条腿那一刻的权重）
   与 `value`/`pool_total`/`picked` 逐条复算——抽签就是按积压占比切成区间
   （`src/tests/autocontrol/freight.rs` 的 `route_lottery_...`）。
+* **合成场景 · 拨控制叶**（施工图 §5.6 第 6 批）：悬空指针 / 玩家钉住的图 / 回收只碰自己造的 /
+  预算的两个极端——`autocontrol/blueprints.rs` 与 `sim/spending.rs` 里剩下那几条。造世界用
+  `planet_x`、捏世界用 Python 改档（`h.scenario`）或引擎自己的 `--apply`（`h.scenario_apply`），
+  断言仍只看投影。
 """
 
 from __future__ import annotations
 
+import copy
+import json
 import sys
 from pathlib import Path
 
@@ -44,6 +50,14 @@ MIN_RANK_ROUNDS = 300     # 买方名次防空转：3 seed × 400 回合实测 1
 MIN_CARGO_ROWS = 1000     # 货舱防空转：3 seed × 400 回合的「舰·回合」行数下限
 MIN_DEPOT_ROWS = 100      # 货栈防空转：3 seed × 400 回合的货栈行数下限
 MIN_ROUTE_DRAWS = 50      # 派单抽签防空转：3 seed × 400 回合的 route 记录下限
+
+# 合成场景：造世界（0 回合）→ 拨控制叶 → 推 3 回合。回合 1 就能看见 AI 那一趟（`design_fleets`
+# 挂在 `step_construction` 末尾、每回合都跑），3 回合足够看出「它没有回头修」。
+SCENARIO_SEED = 42
+SCENARIO_ROUNDS = 3
+FID = "中国"
+# `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改，同 `_harness._ID_KEY`）。
+DESIGN_PREFIX = "自动"
 
 
 def _named_entities(ev):
@@ -915,6 +929,7 @@ def run(h, ck) -> None:
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
+    blueprint_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -981,6 +996,215 @@ def scenario_checks(h, ck) -> None:
              f"{city['城名']}：回合 0 用工 {labor[0]:g}（没跑那一步 ⇒ 中性值 1.0）→ "
              f"回合 1 {labor[1]:.4f}（下限 {floor:g}），住房容量 {housing:g}")
     ck.check("合成场景：用工系数守卫没有空转（真有住房容量可算）", housing > 0, f"住房容量 {housing:g}")
+
+
+# ── 合成场景 · 拨控制叶（施工图 §5.6 第 6 批）────────────────────────────────────
+#
+# 这一族用例的共性：要**先在世界上做一件事**（把图钉成 `Player` + 让建造区指过去 / 把指针改成
+# 悬空 / 造几张没人指向的图 / 把预算拨到两个极端），再看引擎那一趟怎么反应。以前只能在 Rust 里
+# `fresh_world(42)` + 直接改内部状态；现在两条路都不出数据面：
+#
+# * **改状态字段**（`h.scenario(patch=…)`）：舰级 / 图指针这类**字面量**。
+#   ⚠ 悬空指针**只能**这么造——`--apply` 反而**拒绝**写不存在的图（`no_such_blueprint`）。
+#   那是**写面契约**（「一个错别字不许凭空造出一张图」），在施工图 §4 里明说不搬。
+# * **拨控制叶**（`h.scenario_apply(diffs=…)`）：图库 / 预算这类**字典型**的叶库，走引擎自己的
+#   `--apply`（补丁形状由 g4 逐条对账）——Python 里不出现第二份控制面形状。
+
+
+def _yards_of(st: dict, faction: str) -> list[tuple[str, int, str, dict]]:
+    """状态档里某势力的**建造区**：`(城名, 建筑编号, 舰级, 那条城记录)`。
+
+    ⚠ 字段名是引擎发的中文名词（[field-naming](../../.agents/notes/field-naming.md)），
+    与 `_harness._ID_KEY` 同一类镜像——引擎改名要跟着改。
+    """
+    out = []
+    for c in st.get("cities") or []:
+        if c.get("势力") != faction:
+            continue
+        for b in c.get("建筑") or []:
+            if b.get("建造舰级"):
+                out.append((c["城名"], b["建筑编号"], b["建造舰级"], c))
+    return out
+
+
+def _with_yard(st: dict, city: str, bid: int, **fields) -> dict:
+    """`{city: {"建筑": …}}` 形状的补丁：把某城某建造区的几个字段改掉。
+
+    `edit()` 只做**整格替换** ⇒ 改一个字段要把整张建筑表塞回去（施工图 §6.3）。
+    """
+    doc = copy.deepcopy(st)
+    row = next(c for c in doc["cities"] if c["城名"] == city)
+    for b in row["建筑"]:
+        if b["建筑编号"] == bid:
+            b.update(fields)
+    return {"cities": {city: {"建筑": row["建筑"]}}}
+
+
+def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
+    """某个建造区的**设计图指针**逐回合（读面 `cities.建筑[].设计图`）。"""
+    out = {}
+    for _, r in ci[ci["city_id"] == city].iterrows():
+        for b in r["建筑"] or []:
+            if b["建筑编号"] == bid:
+                out[int(r["round"])] = b.get("设计图")
+    return out
+
+
+def _bp_rows(bps, fid: str, name: str) -> dict:
+    """某张设计图逐回合的行：`{回合: 行}`（读面 `blueprints`）。"""
+    mine = bps[(bps["faction_id"] == fid) & (bps["blueprint_id"] == name)]
+    return {int(r["round"]): r for _, r in mine.iterrows()}
+
+
+def _bp_decisions(dec, fid: str, name: str | None = None) -> list[dict]:
+    """设计图的判定行（`kind=blueprint`）；`name` 给了就只看那一张图。"""
+    rows = dec[(dec["kind"] == "blueprint") & (dec["faction_id"] == fid)]
+    if name is not None:
+        rows = rows[rows["actor"] == name]
+    return rows.to_dict("records")
+
+
+def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
+    """某城逐回合的建造行：`(回合, 舰级, {rate, increment})`（稀疏：有建造区才有键）。"""
+    out = []
+    for _, r in cp[cp["city_id"] == city].iterrows():
+        for k, v in (r["build"] or {}).items():
+            out.append((int(r["round"]), k, v))
+    return out
+
+
+def blueprint_scenario_checks(h, ck) -> None:
+    """**合成场景 · 拨控制叶**：`autocontrol/blueprints.rs` + `sim/spending.rs` 剩下那几条。
+
+    搬过来的四条（各删掉一条 Rust 原件）：
+
+    ① `a_dangling_pointer_is_left_dangling`——删图是玩家/agent 的动作，那个区停产**本身就是
+       可见后果** ⇒ AI 不替他收拾（不建新图、不改指针）。
+    ② `a_player_pinned_design_and_its_yard_are_left_alone`——玩家的图归玩家：不改图、不改指针、
+       回收也不碰。
+    ③ `only_unreferenced_selfmade_designs_are_reaped`——回收只碰**自己造的**：名字带 AI 前缀、
+       没人指向、且**不是玩家钉的**（`mode: Inherit` 才是流水；`--apply` 只写值会把它钉成
+       `Player`，那这条安全属性就整个反过来了）。
+    ④ `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`——造舰慢是缺钱还是
+       缺产能：同一座城只改预算一个变量，`increment < rate`（钱）与 `increment ≈ rate`（产能）
+       两个极端都要造出来。
+    """
+    seed = SCENARIO_SEED
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_bp_probe.json", seed))
+    yards = _yards_of(st, FID)
+    ck.check("合成场景（设计图）：探针世界里真有可用的建造区", len(yards) >= 2,
+             f"{FID} 开局 {len(yards)} 个建造区：{[(c, b, k) for c, b, k, _ in yards]}")
+    if not yards:
+        return
+    city, bid, class_, _ = yards[0]
+    meta = json.loads(h.capture(["--meta"]))
+    slots = int(meta["ships"][class_]["slots"])
+    comps = ["kinetic", "ion_drive"][:max(1, min(2, slots))]
+
+    # ① 悬空指针 ---------------------------------------------------------------
+    ghost = "已经删掉的图"
+    proj = h.scenario("bp_dangling", seed, SCENARIO_ROUNDS,
+                      patch=_with_yard(st, city, bid, 设计图=ghost))
+    q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
+    ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
+    ck.check("合成场景（设计图）：悬空指针原样保留（AI 不替你修）",
+             bool(ptrs) and all(p == ghost for p in ptrs.values()),
+             f"{city} 建筑{bid} 的指针逐回合：{ptrs}")
+    # 防空转：那根指针**真的**是悬空的（不是「图还在、指针合法」蒙混过关）。
+    lib = set(q.table("blueprints")["blueprint_id"])
+    ck.check("合成场景（设计图）：悬空指针守卫没有空转（指针真的悬空）",
+             ptrs.get(0) == ghost and ghost not in lib,
+             f"「{ghost}」不在任何势力的图库里（全表 {len(lib)} 个图名）")
+    # 防空转：这一趟 AI **真的**跑过（它给别人建了图）——否则「没修」可能只是「没跑」。
+    acts = _bp_decisions(q.table("decisions"), FID)
+    ck.check("合成场景（设计图）：AI 那一趟真的跑了（同一局里它给别的建造区建了图）",
+             any(d["verdict"] in ("created", "reused") for d in acts),
+             f"{FID} 的设计图判定 {len(acts)} 行：{sorted({d['verdict'] for d in acts})}")
+
+    # ② 玩家的图一个字都不许动 -------------------------------------------------
+    mine = "玩家的守卫图"
+    diff = {"control": [{"faction_id": FID,
+                         "blueprints": [{"name": mine, "class": class_, "components": comps}],
+                         "buildings": [{"city": city, "building": bid, "blueprint": mine}]}]}
+    proj = h.scenario_apply("bp_pinned", seed, SCENARIO_ROUNDS, [diff])
+    q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
+    rows = _bp_rows(q.table("blueprints"), FID, mine)
+    ck.check("合成场景（设计图）：玩家钉住的图归玩家、选装一个字都没动",
+             bool(rows) and all(str(r["mode"]) == "Player" and list(r["选装"] or []) == comps
+                                for r in rows.values()),
+             f"「{mine}」逐回合：{[(k, str(v['mode']), list(v['选装'] or []))
+                                   for k, v in sorted(rows.items())]}")
+    ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
+    ck.check("合成场景（设计图）：玩家指过去的建造区不许被改派",
+             bool(ptrs) and all(p == mine for p in ptrs.values()), f"指针逐回合：{ptrs}")
+    touched = _bp_decisions(q.table("decisions"), FID, mine)
+    ck.check("合成场景（设计图）：重估/回收都不许碰玩家的图（decisions 里零行）", not touched,
+             f"「{mine}」的判定行：{touched}" if touched else "0 行")
+    acts = _bp_decisions(q.table("decisions"), FID)
+    ck.check("合成场景（设计图）：玩家图守卫没有空转（AI 那一趟真的跑了）",
+             any(d["verdict"] in ("created", "reused") for d in acts),
+             f"{FID} 的设计图判定 {len(acts)} 行：{sorted({d['verdict'] for d in acts})}")
+
+    # ③ 回收只碰自己造的 -------------------------------------------------------
+    aic, mine2, pinned = f"{DESIGN_PREFIX}强袭·陈图", "玩家自己的图", f"{DESIGN_PREFIX}堡垒·玩家钉的"
+    diff = {"control": [{"faction_id": FID, "blueprints": [
+        {"name": aic, "class": class_, "components": ["kinetic"], "mode": "Inherit"},
+        {"name": mine2, "class": class_, "components": ["kinetic"]},
+        {"name": pinned, "class": class_, "components": []},
+    ]}]}
+    proj = h.scenario_apply("bp_reap", seed, SCENARIO_ROUNDS, [diff])
+    q = KIT.load(str(proj), only=("blueprints", "decisions"))
+    bps = q.table("blueprints")
+    a, b, c = (_bp_rows(bps, FID, n) for n in (aic, mine2, pinned))
+    mode_at0 = {n: (str(r[0]["mode"]) if 0 in r else None)
+                for n, r in ((aic, a), (mine2, b), (pinned, c))}
+    # 防空转：三张图**真的按预期建出来了**（各有回合 0 的行与模式），否则「没了/还在」判不出。
+    ck.check("合成场景（设计图）：三张图按预期建成（自建=流水、另两张=玩家）",
+             mode_at0[aic] == "Inherit" and mode_at0[mine2] == "Player"
+             and mode_at0[pinned] == "Player",
+             f"回合 0 的模式：{mode_at0}")
+    ck.check("合成场景（设计图）：没人指向的自建图被回收了（回合 0 还在、之后没了）",
+             bool(a) and 0 in a and all(r not in a for r in range(1, SCENARIO_ROUNDS + 1)),
+             f"「{aic}」出现的回合：{sorted(a)}")
+    ck.check("合成场景（设计图）：不是 AI 命名的图不许碰",
+             all(r in b for r in range(SCENARIO_ROUNDS + 1)),
+             f"「{mine2}」出现的回合：{sorted(b)}")
+    ck.check("合成场景（设计图）：玩家钉住的 AI 命名图不许回收",
+             all(r in c for r in range(SCENARIO_ROUNDS + 1)),
+             f"「{pinned}」出现的回合：{sorted(c)}")
+    reaped = [d for d in _bp_decisions(q.table("decisions"), FID) if d["verdict"] == "reaped"]
+    ck.check("合成场景（设计图）：回收在 decisions 里留了痕（verdict=reaped）",
+             any(d["actor"] == aic for d in reaped),
+             f"{len(reaped)} 条回收判定：{[d['actor'] for d in reaped][:4]}")
+
+    # ④ 造舰慢是缺钱还是缺产能 -------------------------------------------------
+    # 建造区先清掉图指针、钉死舰级（否则 `retool_shipyards` 中途改装，那一行就找不到了）。
+    res = sorted(next(f for f in st["factions"] if f["势力"] == FID)["资源"].keys())
+    ypatch = _with_yard(st, city, bid, 设计图=None, 建造舰级=class_)
+
+    def budget(v: float) -> dict:
+        return {"control": [{"faction_id": FID,
+                             "construction_budget": [{"resource": r, "value": v} for r in res],
+                             "investment_budget": [{"resource": r, "value": v} for r in res]}]}
+
+    lines = {}
+    for tag, v in (("rich", 1e6), ("poor", 0.0)):
+        p = h.scenario_apply(f"bp_budget_{tag}", seed, SCENARIO_ROUNDS, [budget(v)], patch=ypatch)
+        lines[tag] = _build_lines(KIT.load(str(p), only=("city_process",)).table("city_process"), city)
+
+    rich = [(r, k, l) for r, k, l in lines["rich"] if k == class_]
+    capped = [(r, k, l) for r, k, l in rich
+              if l["rate"] > 0 and abs(l["increment"] - l["rate"]) <= 1e-9 * max(1.0, abs(l["rate"]))]
+    ck.check("合成场景（预算）：批满 ⇒ increment ≈ rate（钱管够，是产能封顶）",
+             bool(rich) and len(capped) == len(rich),
+             f"{city} 的 {class_}：{[(r, round(l['rate'], 4), round(l['increment'], 4)) for r, _, l in rich]}")
+    poor = lines["poor"]
+    zero = all(float(l["increment"]) == 0.0 for _, _, l in poor)
+    pos = [(r, k, l) for r, k, l in poor if l["rate"] > 0]
+    ck.check("合成场景（预算）：批 0 ⇒ 建造行还在、rate > 0，而 increment = 0（是缺钱，不是没船坞）",
+             bool(poor) and zero and bool(pos),
+             f"{city} 逐行：{[(r, k, round(l['rate'], 4), round(l['increment'], 4)) for r, k, l in poor][:4]}"
+             f"（{len(poor)} 行，其中 {len(pos)} 行 rate > 0）")
 
 
 def id_checks(h, ck, out) -> None:

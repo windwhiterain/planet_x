@@ -231,6 +231,9 @@ class Harness:
 
         场景**不进指纹缓存**（几回合、零点几秒就重造），放在 `target/test-fixtures/scenario/<名字>/`
         ——`sweep_stale` 只扫投影缓存那种名字（`<指纹>-s<seed>-r<回合>`），不会碰它。
+
+        ⚠ `patch` 只能改**状态字段**（`ships`/`cities`/`factions`… 那些列表型的表）。要拨
+        **控制叶**（`state.control` 是字典型：图库 / 预算 / 舰队默认…）用 [`scenario_apply`]。
         """
         base = CACHE_ROOT / "scenario" / name
         shutil.rmtree(base, ignore_errors=True)
@@ -238,6 +241,63 @@ class Harness:
         ckpt = self.gen(base / "w.json", seed, round=start_round, patch=patch)
         proj = base / "out"
         self.run_into(proj, seed, rounds, extra=("--start", str(ckpt)))
+        return proj
+
+    # ── 合成场景 · 拨控制叶 ────────────────────────────────────────────────────
+    #
+    # `scenario()` 的 `patch` 走的是「Python 直接改档」（`edit()`），只能改**列表型的表**。
+    # 类 C 剩下的那几条要**拨控制叶**：`state.control` 是**字典型**的叶库
+    # （`{势力: {blueprints: {图名: {value, mode}}, construction_budget: {资源: …}, …}}`），
+    # Python 侧没有它的形状镜像——硬抄一份必然漂移。
+    #
+    # 所以这里走**引擎自己的写入口**：`--apply` 的 diff 形状已经定义好、而且 g4 在逐条对账
+    # （`src/control/wire.rs` 的补丁结构体）。代价只是多起几次 CLI（每次零点几秒），换来的是
+    # 「Python 里不出现第二份控制面形状」。见施工图 `.agents/notes/test-migration-backlog.md` §5.6。
+
+    def _apply_once(self, cur: Path, diff: dict, dest: Path, seed: int, tag: str) -> Path:
+        """把一份 `--apply` 补丁叠到档 `cur` 上、存成 `dest`（`--round 0` ⇒ 只叠不推进）。"""
+        dpath = dest.parent / f"{tag}.json"
+        dpath.write_text(json.dumps(diff, ensure_ascii=False), encoding="utf-8")
+        args = [str(self.path), "--seed", str(seed), "--start", str(cur),
+                "--apply", str(dpath), "--round", "0", "--quiet", "--save", str(dest)]
+        p = subprocess.run(args, cwd=str(REPO), capture_output=True, text=True, encoding="utf-8")
+        if p.returncode != 0:
+            raise RuntimeError(f"planet_x 退出码 {p.returncode}：{' '.join(args)}\n{p.stderr[-2000:]}")
+        # 回执的语义（`src/main.rs`）：`NOTE_APPLY_TOOKOVER` / `NOTE_APPLY_REMOVED` 是**预期
+        # 行为**（写值即接管、删叶换来源）；只有 `WARN_APPLY_SKIPPED`（叶片没落地）才是
+        # 「这份场景不是你以为的那样」——进 warnings，由 `report()` 响亮报出。
+        for line in p.stderr.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("code") == "WARN_APPLY_SKIPPED":
+                self.warnings.append(f"{tag}：--apply 丢了叶片 {rec.get('skipped')}")
+        return dest
+
+    def scenario_apply(self, name: str, seed: int, rounds: int, diffs: list[dict],
+                       patch: dict | None = None, start_round: int = 0) -> Path:
+        """一条龙：造（可捏）→ **逐份 `--apply` 拨控制叶** → 推进 `rounds` 回合 → 投影。
+
+        `diffs` = 一串 `--apply` 补丁（形状同写面：`{"control": [...], "scope": {...}}`），
+        **按顺序**叠加（后一份看到前一份的结果）。**一份也常常够**：`apply_diff` 里
+        `blueprints` **先于** `buildings` 应用 ⇒ 「建图 + 把建造区指过去」一次成功。
+
+        ⚠ **写值即接管**：只写值、不写 `mode` ⇒ 那片叶归 `Player`（系统从此不再改写它）。
+        要让 AI 继续管那片叶（例如「这张图是 AI 自己造的，该被回收」），得**显式**写
+        `"mode": "Inherit"`。这条不写清楚，造出来的 A/B 会整个反过来。
+        """
+        base = CACHE_ROOT / "scenario" / name
+        shutil.rmtree(base, ignore_errors=True)
+        base.mkdir(parents=True, exist_ok=True)
+        cur = self.gen(base / "w.json", seed, round=start_round, patch=patch)
+        for i, diff in enumerate(diffs):
+            cur = self._apply_once(cur, diff, base / f"w{i + 1}.json", seed, f"{name}-diff{i}")
+        proj = base / "out"
+        self.run_into(proj, seed, rounds, extra=("--start", str(cur)))
         return proj
 
     def capture(self, args: list[str], stderr: bool = False):
@@ -289,6 +349,10 @@ class Harness:
             return list(ex.map(lambda k: self.digest(k[0], k[1], build), keys))
 
     def report(self) -> None:
+        # **先报回执**：`edit()` / `scenario_apply()` 说过「有东西没落地」时，后面那些断言失败的
+        # 真正原因往往在这里——而它在缓存统计里一个字都看不见（「没静默」得真的有人读它）。
+        for w in self.warnings:
+            print(f"  ⚠ 回执：{w}")
         if self.misses:
             total = sum(e for _, e in self.misses)
             print(f"  缓存：新跑 {len(self.misses)} 份（{total:.1f} s），命中 {len(self.hits)} 份")

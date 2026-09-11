@@ -17,12 +17,11 @@
 //! | `is_hub_matches_the_capital_body` | g3「一个回合里只有一个 hub 天体」 | `city_process.is_hub` 与 `capital_body` 都在读面上（且修掉了同回合易主/复垦的相位错位） |
 //! | `labor_and_housing_capacity…` 的**用工系数那一半** | g2 **合成场景**「人口压到 1 ⇒ 用工系数掉到 `min_efficiency`」 | 档能存成 JSON（`--save w.json`）⇒ Python 把人口改成 1 再推进，断言读面（连同「回合 0 的中性值是 1.0」） |
 //! | `upkeep_shortfall…` 的**读面那一半** | g3「欠费 ⇔ 生锈」「欠费 ≤ 账单」 | 全 7 seed × 1000 回合逐行 |
+//! | `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` | g2 **合成场景 · 拨预算**（施工图 §5.6 第 6 批）：「批满 ⇒ `increment ≈ rate`（产能封顶）」「批 0 ⇒ 建造行还在、`rate > 0`，而 `increment = 0`（缺钱不是缺船坞）」 | 要拨 `investment_budget`/`construction_budget` 造 A/B——现在 `h.scenario_apply(diffs=…)` 走引擎自己的 `--apply` 拨控制叶，断言只读 `city_process.build`；其中 `increment ≤ rate` 那一半已在 g3 |
 //!
 //! **留在这里的**：`upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes`
 //! （要「库存恰好只够付一半」的精确构造，而且「每艘舰真的掉了 `hull_max × rust`」得在**只有锈、
-//! 没有再生**的一步里看——合成场景推的是整回合，再生同时发生）与
-//! `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling`
-//! （「批 0 ⇒ increment = 0 而 rate > 0」要拨预算造 A/B；其中 `increment ≤ rate` 那一半已在 g3）。
+//! 没有再生**的一步里看——合成场景推的是整回合，再生同时发生）。
 
 use super::*;
 
@@ -109,121 +108,3 @@ fn upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes() {
         "掉血必须在读面上看得见——锈到 0 之前没有任何事件"
     );
 }
-
-/// **造舰慢是缺钱还是缺产能**：`build.<舰级>.rate` 是产能上限，`increment` 是实得进度。
-///
-/// 用例把两个极端都造出来（同一把预算尺子，只改钱）：
-/// * 批满 ⇒ `increment ≈ rate`（产能封顶）；
-/// * 批 0 ⇒ 仍然有 `rate`（产能摆在那儿）而 `increment = 0`（**一分钱没批到**）。
-///
-/// 第二条正是这一列必须存在的理由：没有它，「这个船坞这个月为什么一艘没造」与「这个城根本没
-/// 这个舰级的建造区」在读面上长得一模一样。
-#[test]
-fn build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling() {
-    let (config, mut state) = fresh_world(42);
-    let fid = state.factions[0].name.clone();
-    // 找一个真有建造区的城，并把它的舰级钉死（免得自动控制中途改装把它换掉）。
-    let (cid, bid, class) = state
-        .cities
-        .iter()
-        .filter(|c| c.faction_id == fid && !c.razed)
-        .find_map(|c| {
-            c.buildings.iter().find(|b| b.is_shipyard()).map(|b| {
-                (
-                    c.name.clone(),
-                    b.id,
-                    b.ship_type.clone().unwrap_or_else(|| "护卫舰".to_string()),
-                )
-            })
-        })
-        .expect("中国开局应有建造区");
-    if let Some(city) = state.city_mut(&cid) {
-        for b in city.buildings.iter_mut() {
-            if b.id == bid {
-                b.blueprint = None;
-                b.ship_type = Some(class.clone());
-            }
-        }
-    }
-
-    // 全资源预算钉成一个值（玩家叶 ⇒ `read_budget` 原样取用）。
-    let keys: Vec<String> = state
-        .faction(&fid)
-        .map(|f| f.resources.keys().cloned().collect())
-        .unwrap_or_default();
-    assert!(!keys.is_empty(), "势力总有库存键");
-    let set_budget = |state: &mut State, v: f64| {
-        let c = state.control.entry(fid.clone()).or_default();
-        for rt in &keys {
-            c.construction_budget.insert(rt.clone(), Control::player(v));
-            c.investment_budget.insert(rt.clone(), Control::player(v));
-        }
-    };
-
-    // —— 批满：进度应当顶到产能上限 ——
-    // ⚠ 两次跑必须从**同一份** state 出发：`step_construction` 末尾的 `retool_shipyards` 会按战况
-    // 改装舰级（把上面钉死的那个舰级换掉），拿跑过的 state 再跑一遍就找不到那条建造行了。
-    let base = state.clone();
-    set_budget(&mut state, 1e6);
-    let mut rng = Prng::new(7);
-    let mut rich = RoundSink::default();
-    step_construction(&mut state, &config, &mut rng, &mut rich);
-    let rich_line = rich
-        .city_flow
-        .get(&cid)
-        .and_then(|f| f.build.get(&class))
-        .unwrap_or_else(|| panic!("{cid} 应有 {class} 的建造行（它有建造区）"))
-        .clone();
-    assert!(rich_line.rate > 0.0, "{cid} 的 {class} 产能不该是 0");
-    assert!(
-        rich_line.increment > 0.0,
-        "批了 1e6 却一点进度都没有——用例构造失败了"
-    );
-    assert!(
-        (rich_line.increment - rich_line.rate).abs() < 1e-9,
-        "钱管够时进度应当顶到产能上限（rate={} increment={}）",
-        rich_line.rate,
-        rich_line.increment
-    );
-
-    // —— 批 0：产能还在，进度归零 ——
-    let mut state2 = base;
-    set_budget(&mut state2, 0.0);
-    let mut rng = Prng::new(7);
-    let mut poor = RoundSink::default();
-    step_construction(&mut state2, &config, &mut rng, &mut poor);
-    let poor_line = poor
-        .city_flow
-        .get(&cid)
-        .and_then(|f| f.build.get(&class))
-        .unwrap_or_else(|| {
-            panic!("批 0 时 {cid} 的建造行**仍然必须在**（那是「没钱」而不是「没船坞」）")
-        })
-        .clone();
-    assert_eq!(poor_line.increment, 0.0, "批 0 就不该有进度");
-    assert_eq!(
-        poor_line.rate, rich_line.rate,
-        "产能与钱无关：同一座城同一舰级的 rate 不该因为预算变了而变"
-    );
-    assert!(
-        poor.spend
-            .get(&fid)
-            .map(|s| s.investment.is_empty())
-            .unwrap_or(false)
-            || poor
-                .spend
-                .get(&fid)
-                .map(|s| s.construction.values().all(|v| *v <= 0.0))
-                .unwrap_or(false),
-        "批 0 时不该有花销（花销表要么空、要么全是 0）"
-    );
-
-    // 折进视图：稀疏 map 里的键就是「这个城有这个舰级的建造区」。
-    let view = observe(&state2, &config, &poor);
-    let row = view.cities.get(&cid).expect("活城");
-    assert!(
-        row.build.contains_key(&class),
-        "{cid} 的 build 表里必须有 {class}——有键而 increment=0 才是「有产能没批到钱」"
-    );
-}
-

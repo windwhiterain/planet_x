@@ -9,10 +9,10 @@
 //! | `designs_are_deduped_by_class_and_signature` | g2「图按 `(舰级, 选装)` 去重」（18,691 个签名） | 图库表逐回合可查 |
 //! | `a_class_drift_between_the_yard_and_its_design_is_reconciled` | g2「建造区挂了图就必须挂到存在的图上」+「舰级不符只是**滞后**、会自己收敛」（16,709 个建造区·回合；实测 3 行不符、最长滞后 1 回合） | `cities.buildings[].{ship_type,blueprint}` + 图库表 |
 //!
-//! **留在这里的**：`a_player_pinned_design_and_its_yard_are_left_alone`、`a_dangling_pointer_is_left_dangling`、
-//! `only_unreferenced_selfmade_designs_are_reaped`、`the_ai_creates_a_design_for_every_yard_it_owns`
-//! ——前三条要**拨控制叶/删指针**造 A/B，第四条要「每个区的**有效**归属」（读面只有逐个区自己的
-//! `blueprint` 指针，判不出「AI 该不该给它建图」）。
+//! **留在这里的**（这一族住在 `src/tests/autocontrol/blueprints.rs`，本文件是船坞下水那一侧）：
+//! `the_ai_creates_a_design_for_every_yard_it_owns`——它要「每个区的**有效**归属」（读面只有
+//! 逐个区自己的 `blueprint` 指针，判不出「AI 该不该给它建图」）。另外三条（玩家钉住的图 /
+//! 悬空指针 / 回收只碰自己造的）已随第 6 批搬去 g2 的**合成场景 · 拨控制叶**（施工图 §5.6）。
 
 use super::*;
 
