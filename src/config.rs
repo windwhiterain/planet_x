@@ -75,7 +75,8 @@ pub struct Checkpoint {
 /// Serialize the current `State` to a RON file (no RNG position). Use
 /// [`save_checkpoint`] when the run must resume deterministically.
 pub fn save_state(path: &Path, state: &State) -> Result<(), String> {
-    let text = ron::to_string(state).map_err(|e| format!("serialize: {e}"))?;
+    crate::json::require_json_path(path)?;
+    let text = serde_json::to_string(state).map_err(|e| format!("serialize json: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -118,10 +119,8 @@ pub fn save_checkpoint(path: &Path, round_state: &RoundState, rng: &Prng) -> Res
         prng_state: rng.state(),
         round_state: round_state.clone(),
     };
-    let text = match CheckpointFormat::of(path) {
-        CheckpointFormat::Ron => ron::to_string(&cp).map_err(|e| format!("serialize: {e}"))?,
-        CheckpointFormat::Json => serde_json::to_string(&cp).map_err(|e| format!("serialize json: {e}"))?,
-    };
+    crate::json::require_json_path(path)?;
+    let text = serde_json::to_string(&cp).map_err(|e| format!("serialize json: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 

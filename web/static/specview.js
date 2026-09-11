@@ -170,6 +170,13 @@
   }
 
   // 求值一条路径表达式。`rec` = 当前记录，`recKey` = 它在映射表/数组里的键（@key）。
+  /// 一条记录**对外报出的身份**：视图声明了 `key`（`城名` / `舰名` / `势力` / `天体名`…）就用它
+  /// 求值，否则回落原始键（数组下标 / 映射键）。写面拿它当作用域 id（`edScope` 里的城/天体键），
+  /// 所以「这条记录叫什么」只有**一份事实：视图的声明**——前端不再自己猜 `rec.name`。
+  function recordKeyOf(spec, r) {
+    return spec && spec.key ? evalPath(spec.key, r.value, r.key) : r.key;
+  }
+
   function evalPath(expr, rec, recKey) {
     const parts = splitSegments(expr).map(parseSeg);
     if (!parts.length) return rec;
@@ -728,7 +735,7 @@
         }
         td0.appendChild(lab);
         tr.appendChild(td0);
-        cols.forEach((c) => tr.appendChild(cellNode(r.value, r.key, c, who)));
+        cols.forEach((c) => tr.appendChild(cellNode(r.value, recordKeyOf(spec, r), c, who)));
         tr.appendChild(residualCell(r.value, spec, rowId));
         tbody.appendChild(tr);
         // 展开状态住在 ctx.expanded 里 ⇒ 重画（推进回合 / 应用之后）时把开着的卡片一起重建。
@@ -789,7 +796,7 @@
         const crow = el('div', 'sv-sheet-row sv-sheet-row-ctl');
         const ck = el('div', 'sv-sheet-k', c.label || c.leaf || c.owner || c.action);
         const cv = el('div', 'sv-sheet-v');
-        cv.appendChild(controlNodeFor(c, r.value, r.key, 'sheet'));
+        cv.appendChild(controlNodeFor(c, r.value, recordKeyOf(spec, r), 'sheet'));
         crow.append(ck, cv);
         grid.appendChild(crow);
         return;

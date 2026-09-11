@@ -199,9 +199,11 @@
   }
 
   // --- 当前记录 → 它属于哪个势力 / 它叫什么 ------------------------------------
-  // 表里的记录要么自己就是势力（`name` = 势力名），要么带着 `faction_id`。
-  function fidOf(rec) { return rec ? (rec.faction_id || rec.name) : null; }
-  function nameOf(rec, recKey) { return rec && rec.name != null ? rec.name : recKey; }
+  // 表里的记录要么自己就是势力（`势力` = 势力名），要么带着 `势力`（城的势力字段）；
+  // `@control[*]` 那种**读面**记录仍带着 `faction_id`（写面键，不随 state 改名走）。
+  function fidOf(rec) { return rec ? (rec.faction_id || rec.势力) : null; }
+  // ⚠ 记录叫什么**不在这里猜**：`recKey` 由 specview 按视图声明的 `key` 求好传进来
+  //（`recordKeyOf`，与 `views.json` 同源），旧代码那句 `rec.name` 已经不再成立。
   function fcOf(rec) { return getControl(fidOf(rec)); }
 
   // --- 一片叶的**可编辑副本** --------------------------------------------------
@@ -564,7 +566,7 @@
   // --- `owner` 行：作用域归属（不是叶） ----------------------------------------
   function ownerRow(col, rec, recKey, where) {
     const k = col.owner;
-    const id = k === 'global' ? null : nameOf(rec, recKey);
+    const id = k === 'global' ? null : recKey;
     const box = el('div', 'ctl-owner');
     const sel = el('select', { class: 'mode owner', 'data-role': 'owner', 'data-scope': k });
     MODES.forEach(([v, l]) => {
@@ -607,17 +609,17 @@
     if (!actionSpec(field)) return errBox('引擎的 actions 里没有「' + field + '」');
     if (field !== 'buildings') return errBox('views.json 写了一条还没有渲染器的命令列表：「' + field + '」');
     const fid = fidOf(rec);
-    const cityId = nameOf(rec, recKey);
+    const cityId = recKey;
     if (!fid || !cityId) return el('span', 'sv-missing', '（这条记录不是一座城：命令列表按城给）');
     const fc = getControl(fid);
     const box = el('div', 'ctl-action');
-    const list = (rec.buildings || []);
+    const list = (rec.建筑 || []);
     if (!list.length) box.appendChild(el('span', 'ctl-none', '这座城还没有建筑'));
     list.forEach((b) => {
       const node = {
-        key: 'bld' + fid + ':' + cityId + ':' + b.id,
-        kind: 'building', id: b.id, name: buildingLabel(b),
-        leaf: investLeaf(fc, cityId, b.id), buildLeaf: buildLeaf(fc, cityId, b.id),
+        key: 'bld' + fid + ':' + cityId + ':' + b.建筑编号,
+        kind: 'building', id: b.建筑编号, name: buildingLabel(b),
+        leaf: investLeaf(fc, cityId, b.建筑编号), buildLeaf: buildLeaf(fc, cityId, b.建筑编号),
         b, fid, cityId, city: rec,
       };
       box.appendChild(buildingEditor(node));

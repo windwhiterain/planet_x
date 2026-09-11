@@ -21,11 +21,15 @@ use crate::model::{BuildingId, GameConfig, ResourceMap};
 /// weights live in [`ControllableState`] (keyed by [`InvestKey`]/[`BuildKey`]).
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Building {
+    #[serde(rename = "建筑编号")]
     pub id: BuildingId,
+    #[serde(rename = "类型")]
     pub kind: String,
     /// Mined resource key, for a mining (开采区) building.
+    #[serde(rename = "开采资源")]
     pub resource: Option<String>,
     /// Ship class produced, for a shipyard (建造区) building.
+    #[serde(rename = "建造舰级")]
     pub ship_type: Option<String>,
     /// 本建造区的**设计图**（舰船出厂规格，在所属势力的
     /// [`ControllableState::blueprints`](crate::model::ControllableState::blueprints) 里按名字查）。
@@ -37,12 +41,17 @@ pub struct Building {
     ///   （进度不再增加）+ `--apply` 提到它时报 `no_such_blueprint` + 读面**原样输出**这个指针
     ///   （用户裁决 Q10(a)：静默回落到生成器 = 「失败看起来像成功」）。
     #[serde(default)]
+    #[serde(rename = "设计图")]
     pub blueprint: Option<crate::model::BlueprintId>,
     /// Building's own structure attribute: "concrete" 混凝土 | "steel" 钢结构.
+    #[serde(rename = "结构")]
     pub structure: String,
+    #[serde(rename = "面积")]
     pub area: f64,
+    #[serde(rename = "已建成面积")]
     pub deployed: f64,
     /// Current hardness (armor). Max approaches `deployed × armor_per_area`.
+    #[serde(rename = "护甲")]
     pub armor: f64,
 }
 

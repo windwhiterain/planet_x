@@ -142,7 +142,7 @@ class Harness:
     def run_into(self, dest: Path, seed: int, rounds: int, extra=()) -> None:
         """**不吃缓存**地跑一次（确定性守卫要跑两遍同一份世界，就是靠它）。
 
-        `extra` 用来追加开关，例如 `("--start", "w.ron")`：从**捏过的档**起跑（那时 `--seed`
+        `extra` 用来追加开关，例如 `("--start", "w.json")`：从**捏过的档**起跑（那时 `--seed`
         被忽略）。
         """
         args = [
@@ -185,11 +185,19 @@ class Harness:
                 self.warnings.append("没落地的补丁字段：" + "、".join(misses))
         return dest
 
+    # 实体在 state 里的**身份键**。引擎把序列化字段名改成给人看的中文名词了
+    # （`.agents/notes/field-naming.md`），而「按名字找那条记录」得知道**哪种实体靠哪个字段认人**。
+    # ⚠ 这张表是引擎字段名的镜像：引擎改名它要跟着改。将来 `--schema` 若直接发
+    # `identity_key`，这里就该删掉、改成读声明（像前端那样）。
+    _ID_KEY = {"ships": "舰名", "cities": "城名", "factions": "势力",
+               "bodies": "天体名", "settlements": "定居点", "contracts": "合同号"}
+
     def edit(self, ckpt: Path, patch: dict) -> list[str]:
         """**Python 直接改档**：按名字找实体、改字面量。返回没落地的字段（空 = 全成）。
 
-        `patch` 的形状与读面同名同形：`{"ships": {"北辰": {"hull": 6.0}}, "factions": {...},
-        "cities": {...}}`。名字对不上、字段名打错 ⇒ 进返回值（**响亮**，不静默跳过）。
+        `patch` 的形状与 state 同形、**键名就是引擎的字段名**（现在是中文名词）：
+        `{"ships": {"北辰": {"船体": 6.0}}, "factions": {...}, "cities": {...}}`。
+        名字对不上、字段名打错 ⇒ 进返回值（**响亮**，不静默跳过）。
         """
         doc = json.loads(ckpt.read_text(encoding="utf-8"))
         state = doc["round_state"]["state"]
@@ -200,7 +208,8 @@ class Harness:
                 misses += [f"{kind}.{name}.{k}" for name, f in entities.items() for k in f]
                 continue
             for name, fields in entities.items():
-                row = next((r for r in table if r.get("name") == name), None)
+                id_key = self._ID_KEY.get(kind, "name")
+                row = next((r for r in table if r.get(id_key) == name), None)
                 if row is None:
                     misses += [f"{kind}.{name}.{k}" for k in fields]
                     continue
@@ -213,7 +222,7 @@ class Harness:
         return misses
 
     def state_dump(self, ckpt: Path) -> dict:
-        """读出档里的状态（Python 拿它算补丁：某势力的库存、某舰的 `hull_max`……）。"""
+        """读出档里的状态（Python 拿它算补丁：某势力的库存、某舰的 `船体上限`……）。"""
         return json.loads(ckpt.read_text(encoding="utf-8"))["round_state"]["state"]
 
     def scenario(self, name: str, seed: int, rounds: int, patch: dict | None = None,

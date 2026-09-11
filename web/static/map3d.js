@@ -11,8 +11,8 @@
 //   PlanetXMap.resetView(world) 重新适配相机（新游戏时调用）
 //   PlanetXMap.onSelect = fn    用户点击天体/城市/舰时收到 {kind, name}
 //
-// 视觉是**数据驱动**的：每个 state 天体带一个 `kind` key（config body_kinds 的键），
-// 本模块据 bodyKinds[body.kind] 解析出颜色/尺寸/类别/星环/着色器分支，不再内联猜测。
+// 视觉是**数据驱动**的：每个 state 天体带一个 `类型` key（config body_kinds 的键），
+// 本模块据 bodyKinds[body.类型] 解析出颜色/尺寸/类别/星环/着色器分支，不再内联猜测。
 // 若 CDN 加载失败，本模块整体失败，但 app.js 的控制面板不受影响。
 //
 // 几条贯穿全模块的视觉原则（改之前先读）：
@@ -130,18 +130,18 @@ function wp(pos) {
 function systemScale(world) {
   let maxAphe = 1e-6;
   world.bodies.forEach((b) => {
-    if (b && b.orbit && b.orbit.aphelion_distance) maxAphe = Math.max(maxAphe, b.orbit.aphelion_distance);
+    if (b && b.orbit && b.轨道.远日点距离) maxAphe = Math.max(maxAphe, b.轨道.远日点距离);
   });
   return 110 / Math.max(compressRadius(maxAphe), 1e-3);
 }
 
 // 由 Orbit 参数在给定 months 计算天体位置（与 Rust Orbit::position 同一套 Kepler 求解）。
 function orbitPositionAt(orbit, months) {
-  const peri = orbit.perihelion_distance;
-  const aphe = orbit.aphelion_distance;
+  const peri = orbit.近日点距离;
+  const aphe = orbit.远日点距离;
   const a = (peri + aphe) / 2;
   const e = aphe > peri ? (aphe - peri) / (aphe + peri) : 0;
-  const period = Math.max(orbit.period, 1e-9) || 1;
+  const period = Math.max(orbit.公转周期, 1e-9) || 1;
   const meanMotion = Math.PI * 2 / period;
   let M = (meanMotion * months) % (Math.PI * 2);
   if (M < 0) M += Math.PI * 2;
@@ -156,7 +156,7 @@ function orbitPositionAt(orbit, months) {
   const half = E / 2;
   const nu = 2 * Math.atan2(Math.sqrt(1 + e) * Math.sin(half), Math.sqrt(1 - e) * Math.cos(half));
   const r = a * (1 - e * Math.cos(E));
-  const apheDir = normalize2(orbit.aphelion_direction || [1, 0]);
+  const apheDir = normalize2(orbit.远日点方向 || [1, 0]);
   const periDir = [-apheDir[0], -apheDir[1]];
   const perp = [-periDir[1], periDir[0]];
   const cx = periDir[0] * Math.cos(nu) + perp[0] * Math.sin(nu);
@@ -515,29 +515,29 @@ function bodyRadius(body, spec) {
 function computeLayout(world, visuals) {
   const nodes = new Map();     // name -> { pos:Vector3, radius:number }
   world.bodies.forEach((b) => {
-    nodes.set(b.name, { pos: wp(b.position), radius: bodyRadius(b, specFor(visuals, b)) });
+    nodes.set(b.天体名, { pos: wp(b.位置), radius: bodyRadius(b, specFor(visuals, b)) });
   });
   const orbitScale = new Map(); // 卫星 name -> k（画轨道线用）
   world.bodies.forEach((b) => {
-    if (!b.orbit || !b.orbit.parent) return;
-    const me = nodes.get(b.name);
-    const par = nodes.get(b.orbit.parent);
+    if (!b.轨道 || !b.轨道.母天体) return;
+    const me = nodes.get(b.天体名);
+    const par = nodes.get(b.轨道.母天体);
     if (!me || !par) return;
-    const parBody = world.bodies.find((x) => x.name === b.orbit.parent);
-    const parReach = par.radius * (parBody && parBody.ring ? TUNING.ringOuter : 1.0);
+    const parBody = world.bodies.find((x) => x.天体名 === b.轨道.母天体);
+    const parReach = par.radius * (parBody && parBody.星环 ? TUNING.ringOuter : 1.0);
     const minSep = parReach + me.radius + TUNING.moonGap;
     const off = me.pos.clone().sub(par.pos);
     const d = off.length();
     if (d < 1e-6 || d >= minSep) return;
     const k = minSep / d;
-    orbitScale.set(b.name, k);
+    orbitScale.set(b.天体名, k);
     me.pos.copy(par.pos).addScaledVector(off, k);
   });
   return { nodes, orbitScale };
 }
 
 function specFor(visuals, body) {
-  return (visuals && visuals[body.kind]) || DEFAULT_KIND;
+  return (visuals && visuals[body.类型]) || DEFAULT_KIND;
 }
 
 // --- UI 标记层：恒定屏幕尺寸的精灵（billboard / 阵营准星环 / 标签） ------------
@@ -696,7 +696,7 @@ function orbitLine(orbit, anchor, k) {
 
 function facColorFor(world, fid) {
   const f = world.factions.find((x) => x.id === fid);
-  return (f && f.color) || '#8f9bb3';
+  return (f && f.颜色) || '#8f9bb3';
 }
 
 function addRing(parent, position, r, colorHex) {
@@ -833,18 +833,18 @@ function renderBodies(group, world, visuals, layout) {
   const capsByBody = {};
   (world.factions || []).forEach((f) => {
     if (!f.capital_body) return;
-    (capsByBody[f.capital_body] = capsByBody[f.capital_body] || []).push(f.color);
+    (capsByBody[f.capital_body] = capsByBody[f.capital_body] || []).push(f.颜色);
   });
   world.bodies.forEach((b) => {
     const spec = specFor(visuals, b);
-    const node = layout.nodes.get(b.name);
+    const node = layout.nodes.get(b.天体名);
     const p = node.pos;
     const r = node.radius;
     const geo = new THREE.SphereGeometry(r, 48, 32);
     const mat = planetMaterial(spec);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.copy(p);
-    mesh.userData = { kind: 'body', name: b.name };
+    mesh.userData = { kind: 'body', name: b.天体名 };
     group.add(mesh);
 
     // 缓慢自转（只转表面 shader 采样可见的球体）；气态/类地/冰巨星转得更明显。
@@ -853,15 +853,15 @@ function renderBodies(group, world, visuals, layout) {
     }
 
     // 星环（intrinsic body 属性：土星/天王星）。
-    if (b.ring) addRing(group, p, r, spec.accent);
+    if (b.星环) addRing(group, p, r, spec.accent);
 
     // 卫星的轨道画在它的母天体周围：anchor = 母天体的世界坐标（AU）；日心行星 anchor=[0,0]。
-    const anchor = b.orbit.parent
-      ? ((world.bodies.find((x) => x.name === b.orbit.parent) || {}).position || [0, 0])
+    const anchor = b.轨道.母天体
+      ? ((world.bodies.find((x) => x.天体名 === b.轨道.母天体) || {}).位置 || [0, 0])
       : [0, 0];
-    group.add(orbitLine(b.orbit, anchor, layout.orbitScale.get(b.name) || 1));
+    group.add(orbitLine(b.轨道, anchor, layout.orbitScale.get(b.天体名) || 1));
 
-    const lbl = makeLabel(b.name, '#dbe6ff', TUNING.labelPx, capsByBody[b.name] || []);
+    const lbl = makeLabel(b.天体名, '#dbe6ff', TUNING.labelPx, capsByBody[b.天体名] || []);
     group.add(lbl.sprite);
     labelItems.push({ sp: lbl.sprite, px: lbl.px, aspect: lbl.aspect, center: p.clone(), radius: r });
   });
@@ -872,9 +872,9 @@ function renderBodies(group, world, visuals, layout) {
 //   空间站：悬在这颗天体更高的轨道上。
 function renderCities(group, world, visuals, layout) {
   const byBody = {};
-  world.cities.forEach((c) => { (byBody[c.body_id] = byBody[c.body_id] || []).push(c); });
+  world.cities.forEach((c) => { (byBody[c.所在天体] = byBody[c.所在天体] || []).push(c); });
   Object.entries(byBody).forEach(([bodyName, cities]) => {
-    const body = world.bodies.find((b) => b.name === bodyName);
+    const body = world.bodies.find((b) => b.天体名 === bodyName);
     const node = layout.nodes.get(bodyName);
     if (!body || !node) return;
     const P = node.pos;
@@ -884,9 +884,9 @@ function renderCities(group, world, visuals, layout) {
     // 不是贴在行星上的巨型水晶。
     const s = Math.min(Math.max(r * 0.085, 0.030), 0.18);
     cities.forEach((c, idx) => {
-      const color = facColorFor(world, c.faction_id);
+      const color = facColorFor(world, c.势力);
       let model, local, orient = null, px, modelSize;
-      if (c.space_station) {
+      if (c.轨道空间站) {
         // 空间站：轨道半径略大于行星，绕行星一圈分布。
         const az = (idx / Math.max(cities.length, 1)) * Math.PI * 2 + 1.7;
         const orbR = r * 1.45;
@@ -906,9 +906,9 @@ function renderCities(group, world, visuals, layout) {
         modelSize = s * 1.2;
       }
       addMarker(group, world, {
-        kind: 'city', name: c.name, color, model, local, orient,
+        kind: 'city', name: c.城名, color, model, local, orient,
         center: P, world: new THREE.Vector3(P.x + local.x, P.y + local.y, P.z + local.z),
-        shape: c.space_station ? 'reticle' : 'dot',
+        shape: c.轨道空间站 ? 'reticle' : 'dot',
         px, modelSize,
         switchDist: Math.max(14, r * 22),
       });
@@ -919,13 +919,13 @@ function renderCities(group, world, visuals, layout) {
 function renderShips(group, world, layout) {
   world.ships.forEach((s) => {
     // 舰在星际空间里飞，不挂在任何天体下 → 直接用它的显示坐标（未被布局调整过）。
-    const p = wp(s.position);
-    const color = facColorFor(world, s.faction_id);
+    const p = wp(s.坐标);
+    const color = facColorFor(world, s.势力);
     const y = 0.6;
-    const model = shipModel(s.class);
-    const modelSize = (SHIP_LEN[s.class] || 0.4) * 0.9;
+    const model = shipModel(s.舰级);
+    const modelSize = (SHIP_LEN[s.舰级] || 0.4) * 0.9;
     addMarker(group, world, {
-      kind: 'ship', name: s.name, color, model,
+      kind: 'ship', name: s.舰名, color, model,
       local: new THREE.Vector3(0, y, 0),
       center: new THREE.Vector3(p.x, 0, p.z),
       world: new THREE.Vector3(p.x, y, p.z),
@@ -990,7 +990,7 @@ function fitCamera(world) {
   // TUNING.fitR > 0 时用固定值（调试/特殊取景用）。
   let maxR = 0;
   world.bodies.forEach((b) => {
-    const v = wp(b.position);
+    const v = wp(b.位置);
     maxR = Math.max(maxR, Math.hypot(v.x, v.z));
   });
   const R = TUNING.fitR > 0 ? TUNING.fitR : Math.max(48, maxR * TUNING.fitMargin);

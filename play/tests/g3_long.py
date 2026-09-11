@@ -143,7 +143,7 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
     out: dict = {}
 
     # ── 排除集：本回合易主的城 / 本回合新建的城 ──────────────────────────────
-    live = cp[~cp["razed"].astype(bool)].copy()
+    live = cp[~cp["已焚毁"].astype(bool)].copy()
     moved = ev[ev["type"].isin(["city_defected", "city_overrun"])][["round", "target_id"]]
     moved = moved.rename(columns={"target_id": "city_id"}).drop_duplicates()
     moved["owner_changed"] = True
@@ -285,7 +285,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     #    `hull > 0` 的舰数（投影的舰表 = 回合末状态，与 Rust 版「回合末仍有活舰」同口径）。
     ev = q.table("events")
     cf = ev[ev["type"] == "colony_founded"]
-    live = q.table("ships").query("hull > 0").groupby(["round", "faction_id"]).size()
+    live = q.table("ships").query("船体 > 0").groupby(["round", "faction_id"]).size()
     found_bad: dict[int, list[str]] = {}
     for _, row in cf.iterrows():
         rnd, owner = int(row["round"]), row["actor_id"]
@@ -302,7 +302,7 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     if any(v.get("hegemon") for v in view):
         relations = {}
         for _, r in q.table("factions").iterrows():
-            rel = r["relations"]
+            rel = r["关系"]
             relations[(int(r["round"]), r["faction_id"])] = rel if isinstance(rel, dict) else {}
 
     rows: list[dict] = []

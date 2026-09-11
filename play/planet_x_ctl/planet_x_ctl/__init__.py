@@ -845,13 +845,17 @@ class Surface:
             r = _last_round(q)
             rows = []
             for _, c in q.cities(round=r).iterrows():
-                for b in (c.get("buildings") or []):
+                # ⚠ 城表里那串 `建筑` 是**引擎的 Building 结构体**：键名已经是中文名词
+                # （`类型`/`开采资源`/…，见 `.agents/notes/field-naming.md`）。**只有 `id` 还是英文**
+                # ——投影里嵌的建筑对象与裸 state 不一致（state 那边叫 `建筑编号`）。
+                # 输出的**列名保持本 kit 的旧名字**（它是 kit 的读模型 API，不是引擎的形状）。
+                for b in (c.get("建筑") or []):
                     rows.append({
-                        "city": c["city_id"], "building": int(b["id"]),
-                        "faction_id": c["faction_id"], "kind": b.get("kind"),
-                        "resource": b.get("resource"), "ship_type": b.get("ship_type"),
-                        "structure": b.get("structure"), "area": b.get("area"),
-                        "deployed": b.get("deployed"), "armor": b.get("armor"),
+                        "city": c["city_id"], "building": int(b["建筑编号"]),
+                        "faction_id": c["faction_id"], "kind": b.get("类型"),
+                        "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
+                        "structure": b.get("结构"), "area": b.get("面积"),
+                        "deployed": b.get("已建成面积"), "armor": b.get("护甲"),
                     })
             self._building_index_cache = pd.DataFrame(
                 rows, columns=["city", "building", "faction_id", "kind", "resource",
@@ -1848,12 +1852,16 @@ def ships(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=None,
     df["default_role_value"] = dso_value
     df["doctrine_temper"] = dt
     df["doctrine_lone_wolf"] = dlw
-    # 风格三轴的**有效值**在引擎的 ships 表里（`doctrine` / `kiting` / `role`，都是
+    # 风格三轴的**有效值**在引擎的 ships 表里（`风格` / `姿态` / `角色`，都是
     # `State::ship_doctrine` / `ship_kiting` / `ship_role` 的答案）。旧引擎的索引目录没有
     # 这几列 ⇒ 由读面补一份（读面那些逐舰风格行给的**也是有效值**，所以逐字相同）。
     # ⚠ 只在引擎列**缺席**时才补：无条件写就是拿本地那一份去盖引擎的答案——那正是本轮在
     # `effective_order_*` 上修掉的毛病（那边本地那份还会算错）。引擎给答案，Python 只负责筛。
-    if "kiting" not in df.columns:
+    # ⚠ 引擎那一列 2026-10 起叫 `姿态`（中文名词）。本帧的读模型仍叫 `kiting` ⇒ 有引擎的答案就
+    # 用它（**引擎给答案，Python 不重算**），没有（旧索引目录）才退回本地那份。
+    if "姿态" in df.columns:
+        df["kiting"] = df["姿态"]
+    else:
         df["kiting"] = kit
     from_engine = {"order_effective_mode", "order_effective"} <= set(df.columns)
     if from_engine:
@@ -1924,15 +1932,18 @@ def buildings(ckpt: str | os.PathLike, *, round: int | None = None, planet_x=Non
     r = _last_round(q) if round is None else int(round)
     rows = []
     for _, c in q.cities(round=r).iterrows():
-        for b in (c.get("buildings") or []):
-            rows.append({"city": c["city_id"], "building": int(b["id"]),
-                         "faction_id": c["faction_id"], "kind": b.get("kind"),
-                         "resource": b.get("resource"), "ship_type": b.get("ship_type"),
+        # ⚠ 引擎的 Building 键已是中文名词（`建筑`/`类型`/`开采资源`/…）。**只有 `id` 还是英文**
+        # ——投影里嵌的建筑对象与裸 state 不一致（state 那边叫 `建筑编号`），已报给改 Rust 的那位。
+        # 本表输出的列名保持 kit 的旧名字（那是 kit 的读模型 API）。
+        for b in (c.get("建筑") or []):
+            rows.append({"city": c["city_id"], "building": int(b["建筑编号"]),
+                         "faction_id": c["faction_id"], "kind": b.get("类型"),
+                         "resource": b.get("开采资源"), "ship_type": b.get("建造舰级"),
                          # **设计图指针**（原样输出：指向一张不存在/被改名的图时也照样在这里，
                          # 那个建造区**停产**——见 Q10(a)）。
-                         "blueprint": b.get("blueprint"),
-                         "structure": b.get("structure"), "area": b.get("area"),
-                         "deployed": b.get("deployed"), "armor": b.get("armor")})
+                         "blueprint": b.get("设计图"),
+                         "structure": b.get("结构"), "area": b.get("面积"),
+                         "deployed": b.get("已建成面积"), "armor": b.get("护甲")})
     return pd.DataFrame(rows, columns=["city", "building", "faction_id", "kind", "resource",
                                        "ship_type", "blueprint", "structure", "area", "deployed",
                                        "armor"])
@@ -1956,15 +1967,15 @@ def ships_and_cities(ckpt: str | os.PathLike, *, round: int | None = None, plane
 # roster (编制表)
 # --------------------------------------------------------------------------------------
 
-#: The default **refresh rule** for a roster slot: highest current ``hull``, then ``hull_max``,
-#: then **oldest first** (``spawned_round`` ascending — the engine's ``Ship.spawned_round``, exposed
-#: as the ships table's ``spawned_round`` column), then name ascending (names carry the generation
+#: The default **refresh rule** for a roster slot: highest current ``船体``, then ``船体上限``,
+#: then **oldest first** (``下水回合`` ascending — the engine's ``Ship.spawned_round``, exposed
+#: as the ships table's ``下水回合`` column), then name ascending (names carry the generation
 #: suffix: 方舟 / 方舟2 / 方舟3).
 #:
-#: ⚠ ``spawned_round`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
+#: ⚠ ``下水回合`` is ``null`` for ships that predate the column (old checkpoints) — pandas sorts
 #: NaN **last** in ascending order, so "unknown" never wins the tie-break; those ties fall through to
 #: the name order, which is what the rule did before this column existed.
-DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-hull", "-hull_max", "spawned_round", "ship_id")
+DEFAULT_REFRESH_RULE: tuple[str, ...] = ("-船体", "-船体上限", "下水回合", "ship_id")
 
 
 def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=None,
@@ -1976,19 +1987,19 @@ def roster(ckpt: str | os.PathLike, spec: Sequence, *, planet_x=None, index_dir=
     turn, which is what makes the roster survive name generations — a sunk 旗舰 is back-filled from
     the query, without anyone hand-copying a name::
 
-        spec = [("第1舰队·旗舰", "class=='cruiser' and faction_id=='中国'"),
-                ("第1舰队·护卫", "class=='corvette' and faction_id=='中国'")]
+        spec = [("第1舰队·旗舰", "舰级=='cruiser' and faction_id=='中国'"),
+                ("第1舰队·护卫", "舰级=='corvette' and faction_id=='中国'")]
         r = ctl.roster(ckpt, spec)
 
-    **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``hull`` → highest ``hull_max``
-    → **oldest first** (``spawned_round`` ascending, unknown/``null`` last) → name ascending.
-    ``spawned_round`` is the engine's own birth round (``Ship.spawned_round``, shipped as the ships
-    table's ``spawned_round`` column); ties that involve ships from an old checkpoint (``null``) fall
+    **Deterministic tie-break** (``DEFAULT_REFRESH_RULE``): highest ``船体`` → highest ``船体上限``
+    → **oldest first** (``下水回合`` ascending, unknown/``null`` last) → name ascending.
+    ``下水回合`` is the engine's own birth round (``Ship.spawned_round``, shipped as the ships
+    table's ``下水回合`` column); ties that involve ships from an old checkpoint (``null``) fall
     back to name order, exactly as before that column existed. Pass ``rule=`` to override, using
     ``"-col"`` for descending.
 
     A rule column the frame does not carry (e.g. an index directory written by an **older** engine,
-    which has no ``spawned_round``) is **skipped** rather than raising — the roster then degrades to
+    which has no ``下水回合``）is **skipped** rather than raising — the roster then degrades to
     the remaining columns (name order), never to an exception.
 
     Returns one row per slot: ``slot``/``query``/``refresh_rule``/``matched``/``candidates`` plus the

@@ -55,11 +55,11 @@ def reconcile_cities(q, ev):
     这是「历史能证明自己什么都没丢」的那条证明（Rust 侧 `every_city_state_change_…`）。
     """
     named = _named_entities(ev)
-    cities = q.table("cities")[["round", "city_id", "faction_id", "razed"]]
+    cities = q.table("cities")[["round", "city_id", "faction_id", "已焚毁"]]
     prev: dict[str, tuple] = {}
     checked, unexplained = 0, []
     for rnd, grp in cities.groupby("round", sort=True):
-        cur = {r.city_id: (r.faction_id or "", bool(r.razed)) for r in grp.itertuples(index=False)}
+        cur = {r.city_id: (r.faction_id or "", bool(r.已焚毁)) for r in grp.itertuples(index=False)}
         for cid, now in cur.items():
             was = prev.get(cid)
             if was is not None and was != now:
@@ -201,13 +201,13 @@ def combat_report(q, tol: float = 1e-9) -> dict:
 
     ship_bad: list[str] = []
     for r in ships.itertuples(index=False):
-        if not (0.0 < float(r.hull) <= float(r.hull_max) + tol):
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: hull={r.hull} / max={r.hull_max}")
-        elif not (-tol <= float(r.shield) <= float(r.shield_max) + tol):
-            ship_bad.append(f"r{int(r.round)} {r.ship_id}: shield={r.shield} / max={r.shield_max}")
+        if not (0.0 < float(r.船体) <= float(r.船体上限) + tol):
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: hull={r.船体} / max={r.船体上限}")
+        elif not (-tol <= float(r.护盾) <= float(r.护盾上限) + tol):
+            ship_bad.append(f"r{int(r.round)} {r.ship_id}: shield={r.护盾} / max={r.护盾上限}")
         elif float(r.attack) < -tol or float(r.speed) < -tol:
             ship_bad.append(f"r{int(r.round)} {r.ship_id}: attack={r.attack} speed={r.speed}")
-        elif any(float(h) < -tol for h in (r.component_hp or [])):
+        elif any(float(h) < -tol for h in (r.组件耐久 or [])):
             ship_bad.append(f"r{int(r.round)} {r.ship_id}: 组件完整度出现负数")
     out["ship_bad"] = ship_bad[:3]
     out["ship_bad_n"] = len(ship_bad)
@@ -228,9 +228,9 @@ def combat_report(q, tol: float = 1e-9) -> dict:
             if was is None or hull_lost.get((rnd, sid)) or (rnd, cur.faction_id) in rust_round:
                 continue
             checked += 1
-            c_max, c_regen = float(cur.hull_max), float(cur.hull_regen)
-            base = min(c_max, float(was.hull) + c_regen * c_max)
-            got = float(cur.hull)
+            c_max, c_regen = float(cur.船体上限), float(cur.hull_regen)
+            base = min(c_max, float(was.船体) + c_regen * c_max)
+            got = float(cur.船体)
             # ⚠ 只断言**下界 + 上限**，不断言等式：引擎的再生是
             # `hull + hull_max × (hull_regen + home_regen_bonus)`——**本土防御半径内还有一份加成**
             # （`sim/military.rs`），而那份加成读面不暴露（要看位置/首都/MOND，属于引擎内部）。
@@ -238,7 +238,7 @@ def combat_report(q, tol: float = 1e-9) -> dict:
             if got > c_max + 1e-9 or got + 1e-6 < base:
                 regen_bad += 1
                 if len(regen_ex) < 3:
-                    regen_ex.append(f"r{rnd} {sid}: hull {was.hull} → {got}，基础再生至少应到 {base:.4f}"
+                    regen_ex.append(f"r{rnd} {sid}: hull {was.船体} → {got}，基础再生至少应到 {base:.4f}"
                                     f"（上限 {c_max}）")
             elif got > base + 1e-6:
                 regen_short += 1        # 拿到本土加成的行（计入防空转说明，不算违规）
@@ -274,7 +274,7 @@ def blueprint_report(q) -> dict:
 
     life: dict = {}
     for r in ships.itertuples(index=False):
-        life.setdefault(r.ship_id, set()).add(tuple(r.components or []))
+        life.setdefault(r.ship_id, set()).add(tuple(r.组件 or []))
     drift = {k: v for k, v in life.items() if len(v) > 1}
     out["ship_kinds"] = len(life)
     out["drift_n"] = len(drift)
@@ -283,24 +283,24 @@ def blueprint_report(q) -> dict:
     design = {(int(r.round), r.faction_id, r.blueprint_id): r for r in bps.itertuples(index=False)}
     same = prev = neither = 0
     snap_ex: list[str] = []
-    spawned = ships[ships["round"] == ships["spawned_round"]]
+    spawned = ships[ships["round"] == ships["下水回合"]]
     for r in spawned.itertuples(index=False):
-        if not r.blueprint:
+        if not r.出厂图:
             continue
         rnd, fid = int(r.round), r.faction_id
-        cur = design.get((rnd, fid, r.blueprint))
-        if cur is None or not (cur.components or []):
+        cur = design.get((rnd, fid, r.出厂图))
+        if cur is None or not (cur.选装 or []):
             continue                      # 这一回合图没快照 / 空选装 = 交给生成器
-        got = {c for c in (r.components or [])}
-        if got == set(cur.components):
+        got = {c for c in (r.组件 or [])}
+        if got == set(cur.选装):
             same += 1
-        elif (before := design.get((rnd - 1, fid, r.blueprint))) is not None \
-                and got == set(before.components or []):
+        elif (before := design.get((rnd - 1, fid, r.出厂图))) is not None \
+                and got == set(before.选装 or []):
             prev += 1
         else:
             neither += 1
             if len(snap_ex) < 3:
-                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur.components)}")
+                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur.选装)}")
     out["snap_same"], out["snap_prev"], out["snap_bad"], out["snap_ex"] = same, prev, neither, snap_ex
 
     attr: dict = {}
@@ -312,7 +312,7 @@ def blueprint_report(q) -> dict:
         if key not in attr:
             continue
         # ⚠ pandas 把缺失值给成 NaN，事件里是 `null`/None ⇒ 比之前要归一（否则「None vs nan」假红）。
-        mine = None if _nan(r.blueprint) else r.blueprint
+        mine = None if _nan(r.出厂图) else r.出厂图
         theirs = None if _nan(attr[key]) else attr[key]
         if mine != theirs and len(mis) < 3:
             mis.append(f"r{int(r.round)} {r.ship_id}: 事件说 {theirs}，表说 {mine}")
@@ -320,8 +320,8 @@ def blueprint_report(q) -> dict:
 
     cnt: dict = {}
     for r in ships.itertuples(index=False):
-        if r.blueprint:
-            k = (int(r.round), r.faction_id, r.blueprint)
+        if r.出厂图:
+            k = (int(r.round), r.faction_id, r.出厂图)
             cnt[k] = cnt.get(k, 0) + 1
     sc_bad: list[str] = []
     for r in bps.itertuples(index=False):
@@ -332,9 +332,9 @@ def blueprint_report(q) -> dict:
 
     seen: dict = {}
     dup: list[str] = []
-    # ⚠ `class` 是 Python 关键字，`itertuples` 会把它改名 ⇒ 这里用 `iterrows`。
+    # ⚠ 用 `iterrows`：列名是中文名词（`舰级`/`选装`），`itertuples` 的属性名不好认。
     for _, r in bps.iterrows():
-        sig = (int(r["round"]), r["faction_id"], r["class"], tuple(r["components"] or []))
+        sig = (int(r["round"]), r["faction_id"], r["舰级"], tuple(r["选装"] or []))
         if sig in seen and len(dup) < 3:
             dup.append(f"r{sig[0]} {sig[1]}: {sig[2]} {list(sig[3])} 有两张图（{seen[sig]} / {r['blueprint_id']}）")
         seen[sig] = r["blueprint_id"]
@@ -367,7 +367,7 @@ def extract(dirpath):
 
     # ② 「定制化」（装了组件的）**活舰**在整局里出现过——累计口径（末回合快照会随轨迹归零）。
     ships = q.table("ships")
-    fitted = ships[ships["hull"] > 0]["components"]
+    fitted = ships[ships["船体"] > 0]["组件"]
     customized = int(fitted.map(lambda c: bool(c) and len(c) > 0).sum())
 
     # ③ 编年史（累计，住在主流最后一行的 `chronicle` 里）：节拍、顺序、唯一性、参与者。

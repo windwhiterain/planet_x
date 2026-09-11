@@ -444,12 +444,12 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
                      "--save", str(ck0)])
     state = json.loads(h.capture(["--start", str(ck0), "--round", "0"]).splitlines()[0])
     ships = state["ships"]
-    fid = next((f for f in {s["faction_id"] for s in ships}
-                if sum(1 for s in ships if s["faction_id"] == f) >= 2), None)
+    fid = next((f for f in {s["势力"] for s in ships}
+                if sum(1 for s in ships if s["势力"] == f) >= 2), None)
     if fid is None:
         ck.check("写面不动点：有可用的势力", False, "没有任何势力有 2 艘以上舰——守卫会空转")
         return
-    ours = [s["name"] for s in ships if s["faction_id"] == fid]
+    ours = [s["舰名"] for s in ships if s["势力"] == fid]
     vanished = ours[0]
 
     rm = tmp / "rm.json"
@@ -496,7 +496,7 @@ def control_fixed_point(h, ck, tmp: Path) -> None:
              row2 == {"ship": vanished, "behavior": None, "mode": "Inherit"},
              f"{row2}")
     ck.check("回传不增删舰，且仍然每舰一行",
-             [s["name"] for s in state2["ships"] if s["faction_id"] == fid] == ours
+             [s["舰名"] for s in state2["ships"] if s["势力"] == fid] == ours
              and len(orders(surface2, fid)) == len(ours),
              f"{len(orders(surface2, fid))} 行 / {len(ours)} 艘")
 
