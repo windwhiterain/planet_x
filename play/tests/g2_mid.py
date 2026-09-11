@@ -280,9 +280,9 @@ def blueprint_report(q) -> dict:
     out["drift_n"] = len(drift)
     out["drift"] = [f"{k}: {list(v)[:2]}" for k, v in list(drift.items())[:3]]
 
-    # ⚠ `class` 是 Python 关键字，`itertuples` 会改名 ⇒ 这里存成普通 dict（键名原样）。
+    # 列名就是引擎发的中文名词（`舰级`/`选装`）；`iterrows` 给的是 Series ⇒ 用 `[]` 取值。
     design = {(int(r["round"]), r["faction_id"], r["blueprint_id"]):
-              {"class": r["class"], "components": r["components"]} for _, r in bps.iterrows()}
+              {"舰级": r["舰级"], "选装": r["选装"]} for _, r in bps.iterrows()}
     same = prev = neither = 0
     snap_ex: list[str] = []
     spawned = ships[ships["round"] == ships["下水回合"]]
@@ -291,18 +291,18 @@ def blueprint_report(q) -> dict:
             continue
         rnd, fid = int(r.round), r.faction_id
         cur = design.get((rnd, fid, r.出厂图))
-        if cur is None or not (cur.选装 or []):
+        if cur is None or not (cur["选装"] or []):
             continue                      # 这一回合图没快照 / 空选装 = 交给生成器
         got = {c for c in (r.组件 or [])}
-        if got == set(cur.选装):
+        if got == set(cur["选装"]):
             same += 1
         elif (before := design.get((rnd - 1, fid, r.出厂图))) is not None \
-                and got == set(before.选装 or []):
+                and got == set(before["选装"] or []):
             prev += 1
         else:
             neither += 1
             if len(snap_ex) < 3:
-                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur.选装)}")
+                snap_ex.append(f"r{rnd} {r.ship_id}: 舰上 {sorted(got)}，图（本回合）{sorted(cur['选装'])}")
     out["snap_same"], out["snap_prev"], out["snap_bad"], out["snap_ex"] = same, prev, neither, snap_ex
 
     attr: dict = {}
@@ -354,18 +354,18 @@ def blueprint_report(q) -> dict:
     last = int(cities["round"].max())
     for r in cities.itertuples(index=False):
         rnd, fid = int(r.round), r.faction_id
-        for b in r.buildings or []:
-            st = b.get("ship_type")
+        for b in r.建筑 or []:
+            st = b.get("建造舰级")
             if not st:
                 continue
             yard_rows += 1
-            ptr = b.get("blueprint")
-            key = (r.city_id, b["id"])
+            ptr = b.get("设计图")
+            key = (r.city_id, b["建筑编号"])
             row = design.get((rnd, fid, ptr)) if ptr else None
             if ptr and row is None:
                 if len(dangling) < 3:
                     dangling.append(f"r{rnd} {r.city_id} 建筑{b['id']}：指针「{ptr}」在图库里不存在")
-            if row is not None and row["class"] != st:
+            if row is not None and row["舰级"] != st:
                 streak[key] = streak.get(key, 0) + 1
                 bad_streak[key] = bad_streak.get(key, 0) + 1
                 if rnd == last and len(dangling) < 3:
@@ -397,8 +397,8 @@ def id_report(q) -> dict:
     for r in cities.itertuples(index=False):
         rnd = int(r.round)
         last = max(last, rnd)
-        for b in r.buildings or []:
-            life.setdefault(b["id"], set()).add(rnd)
+        for b in r.建筑 or []:
+            life.setdefault(b["建筑编号"], set()).add(rnd)
     gaps = [i for i, rs in life.items() if max(rs) - min(rs) + 1 != len(rs)]
     gone = [i for i, rs in life.items() if max(rs) < last]      # 窗口内消失过（防空转用）
     sample = []
@@ -521,16 +521,16 @@ def scenario_checks(h, ck) -> None:
     w = h.gen(CACHE_ROOT / "scenario" / "_probe.json", seed)
     st = h.state_dump(w)
     ship = st["ships"][0]
-    name, hmax = ship["name"], float(ship["hull_max"])
-    proj = h.scenario("regen", seed, 3, patch={"ships": {name: {"hull": hmax / 2, "position": [80.0, 80.0]}}})
+    name, hmax = ship["舰名"], float(ship["船体上限"])
+    proj = h.scenario("regen", seed, 3, patch={"ships": {name: {"船体": hmax / 2, "坐标": [80.0, 80.0]}}})
     q = KIT.load(str(proj), only=("ships", "factions"))
     rows = q.table("ships")
     mine = rows[rows["ship_id"] == name].sort_values("round")
     steps, capped, bad = 0, 0, []
-    hulls = list(mine["hull"])
+    hulls = list(mine["船体"])
     regen = float(mine["hull_regen"].iloc[0])
-    bonus = float(q.table("factions").pipe(lambda t: t[t["faction_id"] == ship["faction_id"]])[
-        "home_regen_bonus"].iloc[0])
+    bonus = float(q.table("factions").pipe(lambda t: t[t["faction_id"] == ship["势力"]])[
+        "本土再生加成"].iloc[0])
     base, boosted = regen * hmax, (regen + bonus) * hmax
     for i in range(len(hulls) - 1):
         delta = hulls[i + 1] - hulls[i]
@@ -548,17 +548,17 @@ def scenario_checks(h, ck) -> None:
     ck.check("合成场景：护甲再生守卫没有空转（真的有可长回来的回合）", steps >= 2, f"{steps} 次增量（下限 2）")
 
     # ② 用工系数
-    city = max(st["cities"], key=lambda c: c["population"])
-    proj2 = h.scenario("labor", seed, 3, patch={"cities": {city["name"]: {"population": 1}}})
+    city = max(st["cities"], key=lambda c: c["人口"])
+    proj2 = h.scenario("labor", seed, 3, patch={"cities": {city["城名"]: {"人口": 1}}})
     q2 = KIT.load(str(proj2), only=("city_process",))
     cp = q2.table("city_process")
-    mine2 = cp[cp["city_id"] == city["name"]].sort_values("round")
+    mine2 = cp[cp["city_id"] == city["城名"]].sort_values("round")
     floor = float(q2.meta["economy"]["min_efficiency"])
     labor = list(mine2["labor"])
     housing = float(mine2["housing_capacity"].iloc[-1])
     ck.check("合成场景：人口压到 1 ⇒ 用工系数掉到 min_efficiency（配置值，不是写死的）",
              len(labor) >= 2 and abs(labor[0] - 1.0) < 1e-12 and abs(labor[1] - floor) < 1e-9,
-             f"{city['name']}：回合 0 用工 {labor[0]:g}（没跑那一步 ⇒ 中性值 1.0）→ "
+             f"{city['城名']}：回合 0 用工 {labor[0]:g}（没跑那一步 ⇒ 中性值 1.0）→ "
              f"回合 1 {labor[1]:.4f}（下限 {floor:g}），住房容量 {housing:g}")
     ck.check("合成场景：用工系数守卫没有空转（真有住房容量可算）", housing > 0, f"住房容量 {housing:g}")
 
