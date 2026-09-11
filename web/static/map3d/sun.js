@@ -71,7 +71,12 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
     uResolution: { value: new THREE.Vector2(1, 1) },
     uNearFar: { value: new THREE.Vector2(0.1, 1000) },
     uHasDepth: { value: 0 },
-    uFalloff: { value: 2.6 },
+    // ⚠ 这个指数决定「日冕能伸多远」。原来 2.6 ⇒ 在**地球所在的 2.5 个日半径**处仍有
+    // rr^-2.6 = 9% ⇒ 日冕一路糊到行星轨道上（用户看到的「暖雾糊在地球背光面上」，
+    // 以及后来「没有深度测试就再也碰不到深度」的根源之一）。**真实**日冕在 2.5 R 处只有
+    // 约 1e-6，是本影之外的稀薄等离子体。指数 9 ⇒ 2.5^-9 ≈ 4e-4，行星轨道处自然看不见，
+    // 而 1.5 R 处仍有 0.026（日缘附近结构照旧清晰）。
+    uFalloff: { value: 9.0 },
     // 步数随档位走：这是每像素最贵的一项，弱机必须能降下来。
     uSteps: { value: Math.max(6, Math.min(18, 4 + tier.oct * 2)) },
   },
@@ -80,7 +85,10 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
   transparent: true,
   blending: THREE.AdditiveBlending,
   depthWrite: false,
-  depthTest: true,
+  // **不要深度测试**：遮挡判据在着色器里用**解析夹断**做（`t1 = min(t1, tScene)` + discard），
+  // 它不依赖深度缓冲，相机在体积内/外/被部分遮挡全都成立。交给深度测试反而会错 ——
+  // BackSide 的天然深度是**远壁**，球内一切都会把体积挡掉（「裸体太阳」）。
+  depthTest: false,
   // **背面**：相机在体积外时渲染远表面、在体积内时渲染的还是远表面 —— 两种情况都有片元，
   // 不用按位置切换 side（切 side 会改 define ⇒ 触发重编译）。
   side: THREE.BackSide,
