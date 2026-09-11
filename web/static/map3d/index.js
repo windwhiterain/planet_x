@@ -957,6 +957,8 @@ function debugInfo() {
     drawCalls: renderer ? renderer.info.render.calls : 0,
     triangles: renderer ? renderer.info.render.triangles : 0,
     programs: renderer && renderer.info.programs ? renderer.info.programs.length : 0,
+    // 日珥插片当前用的 LOD（0=最细；远景/低档会降）。见 sun.js 的 PROM_LOD。
+    promLod: sun && sun.promLod ? sun.promLod() : -1,
     bodies: layout ? layout.nodes.size : 0,
     // 夜面城市灯的槽位总数（>0 才说明 uCityDirs 真的灌进了着色器）。
     cityLights: layout

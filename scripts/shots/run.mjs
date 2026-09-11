@@ -307,6 +307,10 @@ async function main() {
     if (scene.view) await sess.eval(`window.PlanetXMap.setView(${JSON.stringify(scene.view.pos)}, ${JSON.stringify(scene.view.target)}); 1`);
     await sess.eval(WAIT_FRAMES(45));
     await sleep(scene.hold ?? 500);
+    // ⚠ `ready` 是**取景之前**读的（它在 setView 之前），所以那里的 promLod/frameMs 是
+    //   "fitCamera 的远景"那一下的数 —— 用它判断"这一景最终用了哪档 LOD"会**正好反着**：
+    //   贴近日面的 limb 景会被记成最粗的 lod=2。取景之后要再读一次。
+    const settled = await sess.eval('(() => { const d = window.PlanetXMap.debug(); return { promLod: d.promLod, frameMs: d.frameMs }; })()');
 
     const png = await sess.screenshot({ clip: rect ? { x: rect.x, y: rect.y, width: rect.w, height: rect.h } : undefined });
     const tag = args.query ? `${scene.name}.probe` : scene.name;
@@ -330,11 +334,11 @@ async function main() {
       if (drift.meanAbs > (args.strict ? 6 : 1e9)) bad.push(`基线漂移 meanAbs=${drift.meanAbs} > 6`);
     }
 
-    const rec = { desc: scene.desc, url: url2, viewport: vp, ready: { tier: ready.tier, gpu: ready.gpu, bodies: ready.bodies, programs: ready.programs }, flat, detail, limits: scene.limits, failures: bad, drift, consoleErrors: errs };
+    const rec = { desc: scene.desc, url: url2, viewport: vp, ready: { tier: ready.tier, gpu: ready.gpu, bodies: ready.bodies, programs: ready.programs, promLod: settled && settled.promLod, frameMs: settled && settled.frameMs }, flat, detail, limits: scene.limits, failures: bad, drift, consoleErrors: errs };
     fs.writeFileSync(path.join(args.out, `${tag}.json`), JSON.stringify(rec, null, 1));
     manifest.scenes[scene.name] = { flat, failures: bad, drift, gpu: ready.gpu, tier: ready.tier };
     if (bad.length) failures++;
-    console.log(`${bad.length ? '✗' : '✓'} ${scene.name.padEnd(11)} ${pngPath}  tier=${ready.tier} gpu=${String(ready.gpu).slice(0, 34)}`);
+    console.log(`${bad.length ? '✗' : '✓'} ${scene.name.padEnd(11)} ${pngPath}  tier=${ready.tier} promLod=${settled && settled.promLod} gpu=${String(ready.gpu).slice(0, 34)}`);
     for (const [k, v] of Object.entries(flat)) if (typeof v === 'number') process.stdout.write(`    ${k}=${v}`.padEnd(30).replace(/^ {4}/, '    '));
     console.log('');
     if (drift) console.log(`    基线漂移 meanAbs=${drift.meanAbs} maxAbs=${drift.maxAbs}`);

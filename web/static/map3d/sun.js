@@ -7,7 +7,7 @@
 // 现在三层叠加，从内到外：
 //   ① 光球 photosphere —— 米粒组织(ridged 反相 = 亮米粒+暗沟) + 超米粒流 + 太阳黑子(本影/半影)
 //      + **limb darkening**（临边昏暗：I(μ)=1-u1(1-μ)-u2(1-μ)²，同时压亮度并偏红）
-//   ② 色球 / 日珥 —— **世界坐标的插片几何**（`prom.vert/frag`，见下面 buildPromCards）。
+//   ② 色球 / 日珥 —— **世界坐标的插片几何**（`prom.vert/frag`，见下面 buildPromAttrs）。
 //      走过的弯路（三轮，都写进 `.agents/notes/sun-prominence.md` 了）：
 //      先是等半径球壳（没有径向厚度 ⇒ 永远是一圈硬红环），再是"并入日冕的体积积分"
 //      —— 但掠射时视线几乎与日面**平行**，穿过三十多根针的间距，积分把针**平均成一层雾**，
@@ -99,18 +99,21 @@ const CORONA_MAT = (sunR, tier) => new THREE.ShaderMaterial({
   side: THREE.BackSide,
 });
 
-// --- ②b 日珥插片 --------------------------------------------------------------
-// **世界空间的曲面片**：每一片是一条细长的带子，沿长度方向按 `aBend` 弯出去。
-// 为什么是几何而不是在片元里算（三轮试错的结论，见 prom.vert 顶部与那条笔记）：
-//   · 体积积分：掠射视线穿过三十多根针 ⇒ **平均成雾**（这是"怎么调都没须"的真正原因）
-//   · 每像素解析求交：形状能出来，但是 2.5D，没有真遮挡/真视差
-//   · 插片：真三维、真遮挡、剪影天然正确，代价只有几千个 12 顶点的小网格
+// --- ②b 日珥插片（大片曲面条带 + 片元里的世界空间纹理）-------------------------
+// 分工：**顶点**决定"在哪里、多大、朝哪边倒"（几千片曲面条带），
+//      **片元**在一个世界空间噪声场里把带子切成**细腻的须**。
+// 为什么不是"几千根细针"（上一版，见 prom.vert 顶部）：实例数就是密度的上限，
+// 每根又是光板一块 ⇒ 密和细腻只能二选一；而且每根各自 random 倾角 ⇒ 一片等距刷子。
+// 为什么不能用体积积分做（更早的三轮试错）：掠射视线穿过几十根针会把它**平均成雾**；
+// "每像素解析求交"能出形状却是 2.5D、没有真遮挡与视差。
 const PROM_VERT = INC('px/sun/prom.vert');
 const PROM_FRAG = INC('px/sun/prom.frag');
 
-// 上限（按档位只改 `instanceCount`，不重建几何）。日珥只在**日缘一圈**可见，
-// 均匀铺满球面时大约只有 1/10 落在可见的日缘带上，所以总量要给得足。
-const PROM_MAX = 12000;
+// 上限（按档位只改 `instanceCount`，不重建几何）。
+// ⚠ 这个数**从 30000 降到了 5000**：细针版靠实例数堆密度，而每条只有 8x4 个像素那么大，
+// "密"永远追不上真实日面；现在每条带子是**大片曲面**（宽度 0.045R~0.16R），
+// 密度来自片元里的世界空间纹理 ⇒ 再多的实例也只是白白重叠。
+const PROM_MAX = 5000;
 
 // 确定性 PRNG（截图要可复现；**不要**用 Math.random）
 function mulberry32(a) {
@@ -122,50 +125,92 @@ function mulberry32(a) {
   };
 }
 
-// 单位插片：宽 1、长 1，沿长度 4 段（段数决定"曲面片"弯得顺不顺）。
-// ⚠ uv.y = 0 是**根部**、1 是**尖端**（three 的 PlaneGeometry 就是这样）。
-function buildPromCards(sunR) {
-  const base = new THREE.PlaneGeometry(1, 1, 1, 4);
-  const geo = new THREE.InstancedBufferGeometry();
-  geo.index = base.index;
-  geo.setAttribute('position', base.attributes.position);
-  geo.setAttribute('uv', base.attributes.uv);
-  geo.instanceCount = PROM_MAX;
+// 条带的 **LOD 表**：`[横向段, 长度段]`。段数只影响**剪影/曲面有多顺**，
+// 纹理的细腻程度是片元的事（§prom.frag），所以低档降段数不会把质感降掉。
+//
+// ⚠ 为什么这里能谈 LOD、而"硬件曲面细分"不能（用户问过）：WebGL2 = ES 3.0，
+//   GLSL ES 3.00 里**没有** tessellation control/evaluation 这两个 stage；
+//   WebGPU/WGSL 也没有（core spec 只有 vertex/fragment/compute）。three 的
+//   `TessellateModifier`/`ParametricGeometry` 都是 **CPU 侧的一次性预剖分**。
+//   而我们的带子曲面是**解析**的（顶点着色器里算 `p(u,v)`）⇒ "细分级别"就等于
+//   "一片喂多少顶点"，与硬件特性无关，按档位给就行。
+//   `[段数] → 顶点数/片`： 9×24→250、7×16→136、5×10→66（实例数另算）。
+// ⚠ 段数只在**长度方向**堆：带子的弯/扭由噪声决定，**曲率在哪不固定**，
+//   所以任何"按位置加密"的做法都是白费（会密在直段上）；只能均匀给足。
+const PROM_LOD = [[9, 24], [7, 16], [5, 10]];
 
+// 单位插片：宽 1、长 1。
+// ⚠ uv.y = 0 是**根部**、1 是**尖端**（three 的 PlaneGeometry 就是这样）。
+// 这里只生成**每实例属性**（与 LOD 无关，5000 条带子的数据不该按 LOD 复制一份）；
+// 网格按 LOD 生成多份，见 makePromGeo。
+function buildPromAttrs(sunR) {
   const rnd = mulberry32(0x5eed1234);
   const dir = new Float32Array(PROM_MAX * 3);
   const side = new Float32Array(PROM_MAX * 3);
   const bend = new Float32Array(PROM_MAX * 3);
   const par = new Float32Array(PROM_MAX * 4);
+  const kind = new Float32Array(PROM_MAX * 3);
   const d = new THREE.Vector3(), sv = new THREE.Vector3(), bv = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0), ex = new THREE.Vector3(1, 0, 0);
 
   for (let i = 0; i < PROM_MAX; i++) {
-    // 球面均匀
+    // 根部：**均匀铺满球面**。结构不再是"根部聚类"做出来的 ——
+    // 聚类是"局部密、别处也均匀"，而这里要的是**成片**（有整片空白），
+    // 那件事交给顶点着色器里的 `promMask`（世界空间场），CPU 侧保持均匀采样最干净。
     const z = rnd() * 2 - 1;
     const phi = rnd() * Math.PI * 2;
     const r = Math.sqrt(Math.max(0, 1 - z * z));
     d.set(r * Math.cos(phi), z, r * Math.sin(phi));
-    // 让针**朝各个方向斜**（不要全是笔直的法线方向）：把方向轻轻推一下
+    // 根部标架（aDir 是"法线"，aSide/aBend 是切平面里的一对基）。
+    // ⚠ 这里**不再**随机扰动 d 的方向：带子的朝向由 `promFlow` 这个世界空间场决定
+    //   （见 prom.vert）。CPU 侧多搅一点随机，就等于把好不容易建立起来的"场"搅没了。
     sv.copy(Math.abs(d.y) > 0.9 ? ex : up).cross(d).normalize();
-    d.addScaledVector(sv, (rnd() * 2 - 1) * 0.30).normalize();
     bv.copy(d).cross(sv).normalize();
 
-    // 长度：**长尾**（多数是短须、少数窜得很高）；宽度：细（世界单位）
-    const len = sunR * (0.020 + 0.190 * Math.pow(rnd(), 2.3));
-    const wid = sunR * (0.0035 + 0.0095 * rnd());
-    const curve = (rnd() * 2 - 1) * 0.55;
+    const isArc = rnd() < 0.12;
+    // **高度**：顶点到日面的高度（世界单位）。带子**大**（0.06R~0.30R），
+    // 因为"细腻"现在由片元纹理负责，几何只需要把该占的地方占住。
+    const hgt = isArc
+      ? sunR * (0.090 + 0.210 * Math.pow(rnd(), 1.3))
+      : sunR * (0.045 + 0.235 * Math.pow(rnd(), 1.9));
+    // **宽度**：弧长。日缘看起来"一大片"的关键 —— 细针版的宽度只有 0.004R，
+    // 现在是 0.045R~0.16R（十几倍），一条带子就能盖住十几度的经度。
+    const wid = isArc
+      ? sunR * (0.100 + 0.180 * rnd())
+      : sunR * (0.075 + 0.155 * rnd());
+    const arc = isArc ? 0.50 + 0.50 * rnd() : 0.0;
+    // `aParam.z` 现在只是**弯曲方向的抖动**（不是弯曲量）：方向的主导向量来自共享场
+    // （见 prom.vert 的 bendDir），这里只让每片偏一点点 ⇒ 成片但不成复写纸。
+    const curve = (rnd() * 2 - 1) * 0.45;
     const seed = rnd();
 
     dir[i * 3] = d.x; dir[i * 3 + 1] = d.y; dir[i * 3 + 2] = d.z;
     side[i * 3] = sv.x; side[i * 3 + 1] = sv.y; side[i * 3 + 2] = sv.z;
     bend[i * 3] = bv.x; bend[i * 3 + 1] = bv.y; bend[i * 3 + 2] = bv.z;
-    par[i * 4] = len; par[i * 4 + 1] = wid; par[i * 4 + 2] = curve; par[i * 4 + 3] = seed;
+    par[i * 4] = hgt; par[i * 4 + 1] = wid; par[i * 4 + 2] = curve; par[i * 4 + 3] = seed;
+    kind[i * 3] = arc;
+    kind[i * 3 + 1] = rnd();                       // 顺场倾倒的抖动
+    kind[i * 3 + 2] = 0.70 + 0.70 * rnd();         // 宽度的每片抖动
   }
-  geo.setAttribute('aDir', new THREE.InstancedBufferAttribute(dir, 3));
-  geo.setAttribute('aSide', new THREE.InstancedBufferAttribute(side, 3));
-  geo.setAttribute('aBend', new THREE.InstancedBufferAttribute(bend, 3));
-  geo.setAttribute('aParam', new THREE.InstancedBufferAttribute(par, 4));
+  return {
+    aDir: new THREE.InstancedBufferAttribute(dir, 3),
+    aSide: new THREE.InstancedBufferAttribute(side, 3),
+    aBend: new THREE.InstancedBufferAttribute(bend, 3),
+    aParam: new THREE.InstancedBufferAttribute(par, 4),
+    aKind: new THREE.InstancedBufferAttribute(kind, 3),
+  };
+}
+
+// 一份 LOD 的网格：**实例属性是共享的**（同一个 BufferAttribute 挂到多个 geometry 上，
+// 数据只有一份；各 LOD 的差别只在 `position/uv` 这两张每个 LOD 各自的小表）。
+function makePromGeo(attrs, ws, hs, sunR) {
+  const base = new THREE.PlaneGeometry(1, 1, ws, hs);
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.index = base.index;
+  geo.setAttribute('position', base.attributes.position);
+  geo.setAttribute('uv', base.attributes.uv);
+  for (const [k, v] of Object.entries(attrs)) geo.setAttribute(k, v);
+  geo.instanceCount = PROM_MAX;
   // 插片铺满整个球面，three 从 position 算出来的包围球不含实例属性 ⇒ 关掉视锥剔除，
   // 否则相机一靠近就会被整批剔掉（现象是"日珥时有时无"）。
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), sunR * 1.5);
@@ -174,6 +219,7 @@ function buildPromCards(sunR) {
 
 export function createSun(tier) {
   const g = new THREE.Group();
+  const sunPos = new THREE.Vector3();   // 复用的临时量（每帧算 LOD 用，别在循环里 new）
 
   const R = TUNING.sunRadius;
   const oct = tier.oct;
@@ -202,10 +248,22 @@ export function createSun(tier) {
       uSunR: { value: R },
       uTime: { value: 0 },
       uGrow: { value: 1 },
-      uIntensity: { value: 1.45 },
+      uIntensity: { value: 0.85 },
+      // 顶点和片元都要采噪声（顶点定"朝哪边倒"、片元切"须"），所以两件都挂
+      uFbmOct: fbmOct(Math.min(3, oct)),
+      // 顺场倾倒的总幅度（弧度尺度）：**"朝向不再一样"就是靠它**
+      uTilt: { value: 0.75 },
+      // 顺场扭的幅度（中轴沿长度往场的方向歪出去多少）
+      uTwist: { value: 0.34 },
+      // 带子**内部**纹理的频率。⚠ 纹理是**本地空间**的（沿带宽/带长的 uv），
+      // 频率只用来把 uv 换算成世界尺度（`vSize`）—— 这样窄带子和宽带子上的丝一样粗。
+      // 26 ⇒ 丝的间距 ≈ 0.038 世界单位 ≈ 0.006R ⇒ 一条带子里并排 **7~26 根丝**。
+      // `uFilAlong` 是顺带长方向的频率比：0.14 ⇒ 丝被拉长 ~7 倍（是**长**丝，不是一粒粒）。
+      uFilFreq: { value: 26.0 },
+      uFilAlong: { value: 0.14 },
       // 304Å 的日珥：根部亮橙、尖端深红（对照参考图）
-      uColorHot: { value: new THREE.Vector3(1.35, 0.42, 0.10) },
-      uColorCool: { value: new THREE.Vector3(0.85, 0.10, 0.02) },
+      uColorHot: { value: new THREE.Vector3(2.00, 0.66, 0.09) },
+      uColorCool: { value: new THREE.Vector3(1.20, 0.20, 0.020) },
     },
     vertexShader: PROM_VERT,
     fragmentShader: PROM_FRAG,
@@ -215,13 +273,25 @@ export function createSun(tier) {
     depthTest: true,
     side: THREE.DoubleSide,
   });
-  const promGeo = buildPromCards(R);
-  const prom = new THREE.Mesh(promGeo, promMat);
+  // 三个 LOD 各一份网格（实例属性共享），按档位换 —— 换的是 `prom.geometry`，
+  // **不触发着色器重编译**（材质没变），所以换档不会有卡顿。
+  const promAttrs = buildPromAttrs(R);
+  const promGeos = PROM_LOD.map(([ws, hs]) => makePromGeo(promAttrs, ws, hs, R));
+  const prom = new THREE.Mesh(promGeos[0], promMat);
   prom.frustumCulled = false;
   prom.renderOrder = 6;    // 在日冕之后
   g.add(prom);
 
   const parts = [photosphere, corona];
+  // 当前生效的 LOD 等级（档位给上限，屏幕尺寸再往下压，见 update 里的 applyLod）。
+  let lodTier = 0;
+  let lodNow = -1;
+  const applyLod = (want) => {
+    const lod = Math.max(0, Math.min(promGeos.length - 1, want));
+    if (lod === lodNow) return;
+    lodNow = lod;
+    if (prom.geometry !== promGeos[lod]) prom.geometry = promGeos[lod];
+  };
   const setTier = (t) => {
     // 八度数现在是 **uniform**（见 util.js 里 NOISE_GLSL 那段），所以换档只改一个数值、
     // 不再触发 `needsUpdate` 重编译。步数同理。
@@ -232,7 +302,12 @@ export function createSun(tier) {
     // 日珥插片跟着同一个开关（它们和色球是同一层东西），数量随档位缩 ——
     // 只改 `instanceCount`，几何一份、不重建（换档不该有卡顿）。
     prom.visible = !!t.corona && TUNING.coronaOn !== 0;
-    promGeo.instanceCount = prom.visible ? (t.prom || 0) : 0;
+    // **LOD（档位这一维）**：段数上限走 `TUNING.TIERS[].promLod`，数量走 `instanceCount`。
+    // 两个维度分开降是有意的：段数降的是**几何平滑度**，数量降的是**密度**，
+    // 而质感（带子内部那些细丝）在片元里，两边都不动它。
+    lodTier = Math.max(0, Math.min(promGeos.length - 1, t.promLod | 0));
+    lodNow = -1;                       // 逼 applyLod 下一帧重新选
+    promGeos.forEach((gg, k) => { gg.instanceCount = prom.visible ? (t.prom || 0) : 0; });
   };
   setTier(tier);
 
@@ -240,6 +315,24 @@ export function createSun(tier) {
     group: g,
     photosphere,
     update(t, camera, depth) {
+      // **LOD（屏幕尺寸这一维）**：日珥插片的顶点开销 = 实例数 × 每片段数，
+      // 而每片段数只在"带子在屏幕上够大"时才有意义 —— 远景（`sun-wide`，日面才几十像素）
+      // 用顶档纯属浪费。实测（RTX，1280×800，ultra 5000 片）：[9,24]≈1.25M 顶点 ⇒ 8.8~10.2 ms，
+      // [5,10]≈0.33M ⇒ 6.1 ms ⇒ **顶档几何要 ~3.5 ms**，所以这一维值得按距离降。
+      // 判据是**日面在屏幕上的半径**（像素），阈值取得很宽：只有明显变小才降，
+      // 免得贴近/拉远时来回跳（`applyLod` 也只在等级真的变了才换 geometry）。
+      if (camera) {
+        const h = (depth && depth.height) || (typeof window !== 'undefined' ? window.innerHeight : 800);
+        // ⚠ 用**太阳到相机**的距离，不是"相机到原点"：两者只是在太阳恰好位于世界原点时
+        //   才相等（现在相等），但那是**巧合级**的依赖 —— 天体一动就悄悄错。
+        //   取太阳组的**世界坐标**来算，语义才对得上"LOD 按物体到相机的距离决定"。
+        g.getWorldPosition(sunPos);
+        const dist = Math.max(1e-3, camera.position.distanceTo(sunPos));
+        // proj[5] = 1/tan(fov/2) ⇒ 日面在屏幕上的半径（像素）
+        const screenR = (R / dist) * camera.projectionMatrix.elements[5] * 0.5 * h;
+        const bySize = screenR < 45 ? 2 : (screenR < 130 ? 1 : 0);
+        applyLod(Math.max(lodTier, bySize));   // 取更粗的那个
+      }
       photosphereMat.uniforms.uTime.value = t;
       coronaMat.uniforms.uTime.value = t;
       promMat.uniforms.uTime.value = t;
@@ -262,6 +355,9 @@ export function createSun(tier) {
       // 日冕是**沿视线积分后的累加值**，两者差一个 dt 量纲。别把它们写成一个数。
     },
     setTier,
+    // 当前生效的日珥 LOD 等级（0=最细）。给 `debug()` 用：LOD 是"看不见的降级"，
+    // 没有这个数就只能靠帧时间反推，判据里也没法断言"远景真的降了"。
+    promLod() { return lodNow; },
     dispose() {
       g.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
     },
