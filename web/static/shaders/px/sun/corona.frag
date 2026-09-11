@@ -9,6 +9,9 @@
   uniform float uOuter;       // 体积外半径（世界单位）
   uniform float uOuterRatio;  // uOuter / uSunR（外缘平滑归零用）
   uniform float uIntensity;
+  // 色球的**独立强度**。色球比日冕亮约 1e4 倍 —— 把两者塞进同一个密度场、同一个
+  // 强度，日缘就永远填不满（实测盘缘 200、紧挨着外面只有 143，一道台阶）。
+  uniform float uChromo;
   uniform float uFalloff;     // 径向幂律（K-日冕投影大致 ~r^-2.6）
   uniform int   uSteps;
   varying vec3 vWorld;
@@ -35,9 +38,10 @@
   //   ② **足点调制**：一层低频把弧带切成「一根根」，而不是「一圈均匀」
   //   ③ **切向剪切**：时间演化走切向（差动自转）⇒ 结构会扭动，而不是整团平移
   // 山脊项仍由**同一次** fbm 折出来（多跑一遍噪声等于把 ALU 翻倍，没必要）。
-  float coronaDensity(vec3 p, float rr, float t){
+  // 返回 vec2(日冕, 色球)。两者共用同一套局部基与噪声，一次算完；但**强度必须分开**。
+  vec2 coronaDensity(vec3 p, float rr, float t){
     float fall = pow(max(1.0 / rr, 0.0), uFalloff);
-    if (fall < 2.0e-3) return 0.0;                  // 便宜的先算：够小就别进噪声
+    if (fall < 2.0e-3) return vec2(0.0);                  // 便宜的先算：够小就别进噪声
 
     // 局部正交基：u = 径向，t1/t2 = 切向。各向异性采样必须在**这个**基里做 ——
     // 直接对 p 乘不同系数是做不到「按径向拉伸」的（那只是各向异性缩放世界轴）。
@@ -77,6 +81,7 @@
     // ⚠ 峰值必须在 rr=1 **之外**（1.015）。峰值落在 rr=1 时，那一半在光球**体内**、
     // 被光球挡住，可见的只剩外侧尾巴 —— 日缘于是留下一条填不上的暗缝（实测亮度
     // 187 → 141）。色球本来就贴在光球**之上**，峰值外移既合物理也把缝补上。
+    float chromo = 0.0;
     float base = exp(-pow((rr - 1.015) / 0.075, 2.0));
     if (base > 0.004) {
       // 切向频率高、径向低 ⇒ 每根针都沿**自己的法线**往外长（不是在某个固定轴上压扁 ——
@@ -84,11 +89,12 @@
       vec3 qs = u * (pr * 1.2) + t1 * (pa * 7.0) + t2 * (pb * 7.0);
       float sp = vnoise(qs * 3.0 + vec3(0.0, 0.0, -t * 0.40));
       float needle = pow(clamp(1.0 - abs(2.0 * sp - 1.0), 0.0, 1.0), 4.0);
-      shape += base * (0.12 + 1.55 * needle);
+      chromo = base * (0.35 + 2.20 * needle);
     }
     // 外缘平滑归零：体积球本身有个硬轮廓，密度必须**在球面之前**就回到 0，
     // 否则那个球体的剪影会在天上切出一圈硬边（和之前 billboard 的方角是同一类错）。
-    return fall * shape * smoothstep(uOuterRatio, uOuterRatio * 0.70, rr);
+    float outer = smoothstep(uOuterRatio, uOuterRatio * 0.70, rr);
+    return vec2(fall * shape, fall * chromo) * outer;
   }
 
   void main(){
@@ -115,7 +121,8 @@
       if (tt > t1 || trans < 0.02) break;
       vec3 p = ro + rd * tt;
       float rr = length(p) / uSunR;
-      float d = coronaDensity(p, rr, t);
+      vec2 dd = coronaDensity(p, rr, t);
+      float d = dd.x + dd.y * uChromo;
       if (d > 0.0) {
         // 颜色沿半径走三段：rr≈1 是**色球**（深红）→ 暖白（K 日冕）→ 蓝白（外冕）。
         // 深红那一段原先由一层独立的球壳提供，现在由密度场自己带出来。
