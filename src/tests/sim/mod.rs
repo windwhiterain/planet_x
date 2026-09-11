@@ -15,7 +15,6 @@
 
 use super::*;
 use crate::config::load_config;
-use crate::control::apply_patch;
 use crate::model::GameEvent;
 use crate::world::default_state;
 
@@ -47,16 +46,16 @@ fn fresh_world(seed: u64) -> (GameConfig, State) {
     (config, state)
 }
 
-//! 战斗拟真（`combat.rs`）**已经全部搬走**（2026-10 第 7 批），这个文件不再存在。
-//!
-//! 全部落点：
-//! * 逐发取值域与击伤守恒 → g2 `combat_report`（`hit/soak/armor_soak/def_mult/score_spread`）；
-//! * 齐射一级对账（逐发之和 == 聚合伤害）→ g2 `combat_checks`；
-//! * 组件损耗（没挨打不掉 / 打进船体就掉）→ g2 `combat_report`；
-//! * 本土修船（本土 +1.8/回合 vs 外海 +0.72/回合）→ g2 合成场景（造一个受损组件）；
-//! * 护盾先吸、船体吃溢出 → g2 合成场景（造一仗：攻方 railgun、守方 shield）；
-//! * 舰队防空屏护 → g2 合成场景（两臂只差 PD 友舰的坐标）；
-//! * 回避（目标越快命中折减越低）→ g1 `--call hit_factor`。
+// 战斗拟真（`combat.rs`）**已经全部搬走**（2026-10 第 7 批），这个文件不再存在。
+//
+// 全部落点：
+// * 逐发取值域与击伤守恒 → g2 `combat_report`（`hit/soak/armor_soak/def_mult/score_spread`）；
+// * 齐射一级对账（逐发之和 == 聚合伤害）→ g2 `combat_checks`；
+// * 组件损耗（没挨打不掉 / 打进船体就掉）→ g2 `combat_report`；
+// * 本土修船（本土 +1.8/回合 vs 外海 +0.72/回合）→ g2 合成场景（造一个受损组件）；
+// * 护盾先吸、船体吃溢出 → g2 合成场景（造一仗：攻方 railgun、守方 shield）；
+// * 舰队防空屏护 → g2 合成场景（两臂只差 PD 友舰的坐标）；
+// * 回避（目标越快命中折减越低）→ g1 `--call hit_factor`。
 
 // ---- 舰船设计图（blueprint）：出厂快照 / 归属 / 意图链 -------------------------
 //
