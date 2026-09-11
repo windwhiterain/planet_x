@@ -288,6 +288,35 @@ def combat_report(q, tol: float = 1e-9) -> dict:
                 why = "没有点防却拦截了"
             if why and len(shot_bad.get(why, [])) < 2:
                 shot_bad.setdefault(why, []).append(f"r{rnd} {r.actor_id}→{tgt}: {why}")
+    # **组件损耗**（第 7 批，`sim/combat.rs::fire_degrades_components_under_damage`）：
+    #   ① 没挨打 ⇒ 组件耐久**一点不掉**（长局逐行；这条是修复那条的孪生守卫）
+    #   ② 真打进船体（`hull_pen > 0`）⇒ **有**组件掉了——原件也是 `any(|(a,b)| a < b)` 的存在性
+    #      ⚠ 别写成「每发必掉」：实测 72 次真伤里有 3 次组件耐久一位没动（`组件耐久` 过 r2，
+    #      浅伤折到组件上的量小到看不见）。
+    pen: dict = {}
+    for e in ev[ev["type"] == "attack"].itertuples(index=False):
+        for sh in (e.data or {}).get("shots") or []:
+            if not sh.get("skipped"):
+                key = (int(e.round), e.target_id)
+                pen[key] = pen.get(key, 0.0) + float(sh.get("hull_pen") or 0.0)
+    shp = q.table("ships")
+    series: dict = {}
+    for r in shp.itertuples(index=False):
+        series.setdefault(r.舰名, {})[int(r.round)] = (list(r.组件), list(r.组件耐久))
+    no_hit = no_hit_bad = hit = hit_drop = 0
+    for name, rs in series.items():
+        for r0, r1 in zip(sorted(rs), sorted(rs)[1:]):
+            (c0, h0), (c1, h1) = rs[r0], rs[r1]
+            if c0 != c1:
+                continue
+            drop = any(y < x - 1e-9 for x, y in zip(h0, h1))
+            if pen.get((r1, name), 0.0) > 1e-9:
+                hit += 1
+                hit_drop += 1 if drop else 0
+            else:
+                no_hit += 1
+                no_hit_bad += 1 if drop else 0
+    out["comp"] = {"no_hit": no_hit, "no_hit_bad": no_hit_bad, "hit": hit, "hit_drop": hit_drop}
     out["salvo_bad"] = salvo_bad[:4]
     out["salvo_n"], out["skipped_n"], out["no_live"] = salvo_n, skipped_n, no_live
     out["shot_bad"] = [m for v in shot_bad.values() for m in v][:4]
@@ -2169,6 +2198,19 @@ def combat_checks(h, ck, out) -> None:
              nolive == 0, f"{nolive} 条齐射全是跳过的发")
     ck.check("齐射守卫没有空转（真有过「跳过」的发，且真开过火）",
              skips > 0 and salvos > 0, f"{salvos:,} 条齐射里有 {skips} 发被跳过（射程外/目标已死）")
+
+    # 组件损耗（第 7 批，`sim/combat.rs::fire_degrades_components_under_damage`）
+    comp = [d["combat"]["comp"] for d in out]
+    nh = sum(c["no_hit"] for c in comp)
+    nh_bad = sum(c["no_hit_bad"] for c in comp)
+    hit = sum(c["hit"] for c in comp)
+    hit_drop = sum(c["hit_drop"] for c in comp)
+    ck.check("组件损耗：**没挨打就不掉**（逐行；这是「修船」那条的孪生守卫）", nh_bad == 0,
+             f"{tag}：{nh:,} 个「没挨打」的舰·回合零掉血")
+    ck.check("组件损耗：**真打进船体就有组件掉了**（含被一炮打沉的）", hit > 0 and hit_drop > 0,
+             f"{hit:,} 次真伤里有 {hit_drop:,} 次观察到组件耐久下降")
+    ck.check("组件损耗守卫没有空转（既有挨打的、也有没挨打的）", nh > 0 and hit > 0,
+             f"没挨打 {nh:,} / 挨打 {hit:,}")
 
     # 击杀所需的伤害：**按 (回合, 目标) 累计**对账——`target_hull_before` 是那一发那一刻的记录，
     # 同一回合可能多舰轮着打，所以「一发打不死满血目标」是正常的；能对账的是「这一回合挨的总伤害

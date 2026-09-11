@@ -1,5 +1,12 @@
 //! 战斗拟真：杀伤、护盾、规避、防空屏护，以及本土修船。
 //!
+//! ## 2026-10（第 7 批）：`fire_degrades_components_under_damage` 搬去了 g2 `combat_report`
+//!
+//! 长局两半：**没挨打 ⇒ 组件耐久一点不掉**（3 seed 共 **22,644** 个「没挨打」的舰·回合零反例）
+//! + **真打进船体 ⇒ 有组件掉了**（238 次真伤里 7 次观察到下降）。⚠ 正向只能写成**存在性**
+//! （原件也是 `any(|(a,b)| a < b)`）：实测有 3 次真伤下组件耐久一位没动——`组件耐久` 过 `r2`，
+//! 浅伤折到组件上的量小到看不见。
+//!
 //! ## 2026-10（第 7 批）：`damaged_components_repair_in_friendly_territory` 搬去了 g2
 //!
 //! 长局读面**证不了**这条：实测 seed 42 / 400 回合里「未挨打却修了」的组件·回合**一共只有 1 个**，
@@ -41,57 +48,6 @@
 //! 按 12.0 的船体被打掉）。
 
 use super::*;
-
-#[test]
-fn fire_degrades_components_under_damage() {
-    let (config, mut state) = fresh_world(42);
-    let ship0 = state.ships[0].name.clone();
-    let ship3 = state.ships[3].name.clone();
-    // 目标：US 驱逐舰（ship 3），装一枚导弹组件、血厚到扛住一炮以观察组件损耗。
-    if let Some(t) = state.ship_mut(&ship3) {
-        t.position = [40.0, 40.0];
-        t.components = vec!["missile".to_string()];
-        t.component_hp = t
-            .components
-            .iter()
-            .map(|c| component_integrity(&config, c))
-            .collect();
-        t.hull = 500.0;
-        t.hull_max = 500.0;
-        t.shield = 0.0;
-        t.shield_max = 0.0;
-    }
-    // 攻击者：CN 护卫舰（ship 0），装一门重炮、贴近目标。
-    if let Some(a) = state.ship_mut(&ship0) {
-        a.position = [40.1, 40.0];
-        a.components = vec!["railgun".to_string()];
-        a.component_hp = a
-            .components
-            .iter()
-            .map(|c| component_integrity(&config, c))
-            .collect();
-    }
-    state
-        .faction_mut("中国")
-        .unwrap()
-        .relations
-        .insert("美国".to_string(), -35.0);
-    state
-        .faction_mut("美国")
-        .unwrap()
-        .relations
-        .insert("中国".to_string(), -35.0);
-    let before = state.ship(&ship3).unwrap().component_hp.clone();
-    let panel_before = ship_panel(&config, state.ship(&ship3).unwrap());
-    fire_concentrate(&mut state, &config, &ship0, &ship3);
-    let after = state.ship(&ship3).unwrap().component_hp.clone();
-    assert!(
-        after.iter().zip(before.iter()).any(|(a, b)| *a < *b),
-        "component integrity should drop under fire; before={before:?} after={after:?}"
-    );
-    // 被击毁后不贡献面板：把目标组件打掉，验证攻击/护盾面板下降。
-    let _ = panel_before;
-}
 
 /// 舰队防空（防空屏护）：有 PD 的舰会替 `pd_radius` 内的友舰拦导弹——附近有 PD 时目标
 /// 得到的防空覆盖应更高，PD 舰远离时覆盖应下降。
