@@ -1,10 +1,11 @@
-//! 舰队行为与默认：逐舰指令的归属、殖民归属、陈旧 follow 退化成 idle、跟随友舰时自动开火只打敌对者、dock/idle 的位姿。
+//! 舰队行为与默认：逐舰指令的归属、殖民归属、跟随友舰时自动开火只打敌对者。
 //!
 //! ## 2026-10：能只看数据的那条搬去了 `play/tests/g1_contract.py`
 //!
 //! | 原用例 | 现在住 | 为什么能搬 |
 //! | --- | --- | --- |
 //! | `advance_populates_round_events` | g1「全新开局的回合 0 没有事件」「推进过就有事件（事件层真的在写）」 | 原用例只断言「回合 0 空 → 跑几回合非空」，读面上这两半都在（`events` 表按 `round` 分组即可） |
+//! | `player_stale_follow_degrades_to_idle_and_does_not_drift` | g2 **合成场景 · 陈旧的跟随**（5 条判据，防空气转在别的舰身上） | 钉一根**从第 0 回合就悬空**的 `Follow`（写面**不校验指令目标**，与悬空图指针正相反）⇒ 退化后的值在 `order_effective`、漂没漂在 `ships.x/y`、留没留痕在 `events[stale_order]` |
 //! | `dock_follows_body_and_idle_holds_position` | g2 **合成场景 · 停泊与待命**（4 条判据） | 第 7 批给读面补了派生表 **`body_positions`**（逐回合天体位置，与 `ships.x/y` 同一把绝对坐标尺子）⇒「Dock 有没有朝那个天体去」「Idle 的位置有没有动」都判得了。⚠ 必须钉成 `Player`：AI 会在回合末刚派完 Dock、下一回合开头就改派（实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，就是这种没执行过的叶子） |
 
 use super::*;
@@ -192,59 +193,6 @@ fn colonize_keeps_player_ownership() {
     );
 }
 
-/// A player-facing regression guard for the "stale follow" bug: a player
-/// ship ordered to Follow an already-destroyed ship must degrade to Idle,
-/// never drift toward the origin ([0,0]).
-#[test]
-fn player_stale_follow_degrades_to_idle_and_does_not_drift() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-
-    // China (3) corvette id=0 is Player-ordered to Follow US (1) destroyer id=3.
-    let ship0 = state.ships[0].name.clone();
-    let ship3 = state.ships[3].name.clone();
-    let diff = serde_json::json!({
-        "control": [{
-            "势力": "中国",
-            "指令": [{"舰": ship0.clone(), "行为": {"Follow": {"ship": ship3.clone()}}, "归属": "Player"}]
-        }]
-    });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("apply order");
-
-    // Simulate the target being destroyed before the round advances. 走 `kill_ship` 漏斗——
-    // 它现在是**唯一**合法的「让一艘舰死」的方式（绕过它会被 `sweep_dead_ships` 的兜底
-    // `debug_assert` 当场抓住，这正是这条测试以前直接 `t.hull = 0.0` 会炸的原因）。
-    assert!(
-        kill_ship(&mut state, &ship3, DeathCause::Combat, None),
-        "target must get a recorded death event"
-    );
-    let pos_before = state.ship(&ship0).map(|s| s.position).unwrap();
-
-    advance(&mut state, &config, &mut rng);
-
-    // The order must have degraded to Idle ...
-    let order = state.ship_behavior(ship0.clone());
-    assert_eq!(
-        order,
-        Some(ShipBehavior::Idle),
-        "stale order must degrade to Idle"
-    );
-    // ... without moving the ship toward the origin.
-    let pos_after = state.ship(&ship0).map(|s| s.position).unwrap();
-    assert_eq!(
-        pos_after, pos_before,
-        "ship must not drift (target is dead)"
-    );
-    // ... and a StaleOrder event must be recorded.
-    assert!(
-        state
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::StaleOrder { ship: s, .. } if *s == ship0)),
-        "expected a StaleOrder event for ship 0, got {:?}",
-        state.events
-    );
-}
 
 /// Follow semantics: `Follow { ship }` escorts/drives the ship — it is a pure
 /// movement behavior. Combat is now automatic: when any hostile is inside the

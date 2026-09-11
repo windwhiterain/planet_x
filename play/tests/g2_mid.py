@@ -70,6 +70,9 @@ DOCK_ROUNDS = 12
 AFFORD_ROUNDS = 6
 # 清空/垫厚国库要写**国库里真有的键**（`factions.资源`）**加上选装要的货**（那份货中国开局没有，# 不写进去「垫厚」那一臂也还是买不起——第一版就是这么假绿的）。
 AFFORD_RESOURCES = ("氦-3", "金", "硅", "碳", "铁")
+# 陈旧的跟随（`fleet.rs::player_stale_follow…`）：钉一根**从第 0 回合就悬空**的 Follow。
+STALE_SHIP = "长城"
+STALE_ROUNDS = 4
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1016,6 +1019,7 @@ def run(h, ck) -> None:
     blueprint_scenario_checks(h, ck)
     capital_scenario_checks(h, ck)
     dock_scenario_checks(h, ck)
+    stale_follow_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1509,6 +1513,54 @@ def capital_scenario_checks(h, ck) -> None:
              not stray,
              "；".join(f"r{r}: 期望 {w} 实为 {b}" for r, (w, b) in list(stray.items())[:3])
              or f"{len(got)} 个回合全部对上（钉 {CAPITAL_FAR}）")
+
+
+def stale_follow_scenario_checks(h, ck) -> None:
+    """**合成场景 · 陈旧的跟随**：`sim/tests/fleet.rs::player_stale_follow_degrades_to_idle_and_does_not_drift`。
+
+    造法比 Rust 原件更直接：钉一根**从第 0 回合就悬空**的 `Follow`（目标舰名不存在）。
+    ⚠ 写面**不校验指令目标**（与「悬空的图指针」正相反——那个会被 `no_such_blueprint` 拒掉）
+    ⇒ 这条退化路径本来就该存在。读面三样都在：`order_effective`（退化后的值）、
+    `ships.x/y`（有没有朝原点漂）、`events[stale_order]`（退化留没留痕）。
+
+    防空转在**别的舰**身上：同一局里它们照常在动 ⇒「这艘位置不动」不是「世界静止」的废话。
+    """
+    seed = SCENARIO_SEED
+    ghost = "已经不存在的舰"
+    diff = {"control": [{"势力": FID, "指令": [
+        {"舰": STALE_SHIP, "行为": {"Follow": {"ship": ghost}}, "归属": "Player"}]}]}
+    proj = h.scenario_apply("fleet_stale_follow", seed, STALE_ROUNDS, [diff])
+    q = KIT.load(str(proj), only=("ships", "events"))
+    sh, ev = q.table("ships"), q.table("events")
+    mine = sh[sh["舰名"] == STALE_SHIP].sort_values("round")
+    seq = [(int(r["round"]), r["order_effective"], (r["x"], r["y"])) for _, r in mine.iterrows()]
+    ck.check("合成场景（陈旧跟随）：写面真的接下了那根悬空的 Follow（防空转）",
+             bool(seq) and seq[0][1] == {"Follow": {"ship": ghost}},
+             f"{STALE_SHIP} 回合 0 的指令 = {seq[0][1] if seq else None}")
+
+    idle = [r for r, e, _ in seq if r >= 1 and e == "Idle"]
+    ck.check("合成场景（陈旧跟随）：目标不存在 ⇒ 指令退化成 Idle（不追一艘不存在的舰）",
+             len(idle) == len(seq) - 1 and len(seq) >= 2,
+             f"{STALE_SHIP} 逐回合指令：{[e for _, e, _ in seq]}")
+
+    drift = [(r, p) for (_, _, p0), (r, _, p) in zip(seq, seq[1:]) if p != p0]
+    ck.check("合成场景（陈旧跟随）：舰不许朝原点漂（位置逐字不动）", not drift,
+             "；".join(f"r{r} 跑到 {p}" for r, p in drift[:3])
+             or f"{len(seq)} 个回合都是 {seq[0][2]}")
+
+    hits = [(int(r["round"]), r["target_id"]) for _, r in ev[ev["type"] == "stale_order"].iterrows()
+            if r["target_id"] == STALE_SHIP]
+    ck.check("合成场景（陈旧跟随）：退化**留痕**（`stale_order` 事件指着那艘舰）", bool(hits),
+             f"事件层：{hits[:3]}" if hits else "一条 `stale_order` 都没有")
+
+    others = sh[(sh["舰名"] != STALE_SHIP) & (sh["round"] == 1)]
+    moved = 0
+    for _, r in others.iterrows():
+        prev = sh[(sh["舰名"] == r["舰名"]) & (sh["round"] == 0)]
+        if len(prev) and (prev.iloc[0]["x"], prev.iloc[0]["y"]) != (r["x"], r["y"]):
+            moved += 1
+    ck.check("合成场景（陈旧跟随）守卫没有空转（同一局里别的舰真的在动）", moved > 0,
+             f"回合 0→1 有 {moved} 艘别的舰挪了位置")
 
 
 def id_checks(h, ck, out) -> None:
