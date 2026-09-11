@@ -343,11 +343,23 @@ pub struct ControllableState {
     #[serde(with = "crate::json::key2")]
     #[schemars(with = "std::collections::BTreeMap<String, Control<f64>>")]
     pub build_weights: BTreeMap<BuildKey, Control<f64>>,
-    /// 本方各城的「娱乐/福利预算」（每城一个 Control，市场价值/回合）：把资源投入
-    /// 城市娱乐以提升忠诚度。这是「枪支与黄油」的现实权衡——花钱安抚居民，就少了
-    /// 建设与造舰的预算；玩家/agent 用它来稳固对大/远城市的统治（见治理模型）。
+    /// 本方各城的**福利权重**（每城一个 Control）：势力级
+    /// [`welfare_budget`](Self::welfare_budget) 按这些权重分给城市，再按市场价值
+    /// 折算成忠诚目标里的娱乐项。旧字段名保留为 `loyalty_budget`，但语义已从
+    /// 「每城市场价值预算」改为「福利权重」。见 `.agents/notes/domestic-market.md`。
     #[serde(default)]
     pub loyalty_budget: BTreeMap<CityId, Control<f64>>,
+    /// **逐城开发货币预算**（市场价值/回合）：国内市场开启时，城市拿它去买开发资源。
+    /// `Inherit`/缺叶 = 系统按该城开发权重自动折算；`Player` = 玩家钉死。
+    #[serde(default)]
+    pub development_money: BTreeMap<CityId, Control<f64>>,
+    /// **逐城建造货币预算**（市场价值/回合）：国内市场开启时，城市拿它去买造舰资源。
+    #[serde(default)]
+    pub construction_money: BTreeMap<CityId, Control<f64>>,
+    /// **势力级福利预算**（资源/时间）：每资源一个 Control，按城市福利权重分给城市，
+    /// 用于娱乐/忠诚。这是 `spec.md` 里「各类资源福利预算」的落点。
+    #[serde(default)]
+    pub welfare_budget: BTreeMap<String, Control<f64>>,
     /// 迁都（首都被命控制）：本势力当前希望的首都天体。`mode=Player` 时玩家说了算、
     /// 系统不改写（除非首都亡城——硬规则先于一切）；`mode=Auto`/`Inherit` 时由 sim 的
     /// 周期迁都步骤决定。`Inherit` = 这一层没有说话（回落到

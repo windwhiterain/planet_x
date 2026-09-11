@@ -91,6 +91,15 @@ pub fn control_view(
             mode: ctrl.mode,
         })
         .collect();
+    let welfare_budget = c
+        .welfare_budget
+        .iter()
+        .map(|(rt, ctrl)| BudgetEntry {
+            resource: rt.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
+        .collect();
     let invest_weights = c
         .invest_weights
         .iter()
@@ -128,6 +137,24 @@ pub fn control_view(
         .collect();
     let loyalty_budget = c
         .loyalty_budget
+        .iter()
+        .map(|(cid, ctrl)| LoyaltyBudgetEntry {
+            city: cid.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
+        .collect();
+    let development_money = c
+        .development_money
+        .iter()
+        .map(|(cid, ctrl)| LoyaltyBudgetEntry {
+            city: cid.clone(),
+            value: ctrl.value,
+            mode: ctrl.mode,
+        })
+        .collect();
+    let construction_money = c
+        .construction_money
         .iter()
         .map(|(cid, ctrl)| LoyaltyBudgetEntry {
             city: cid.clone(),
@@ -191,9 +218,12 @@ pub fn control_view(
         ship_role,
         investment_budget,
         construction_budget,
+        welfare_budget,
         invest_weights,
         build_weights,
         loyalty_budget,
+        development_money,
+        construction_money,
     }
 }
 
