@@ -23,13 +23,11 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0 + 0.0
 }
 
-/// The agent-facing view of one world state: the **authoritative world fields**,
-/// reusing the model's own entity types (`Body`/`City`/`Faction`/`Ship` and the
-/// `GameEvent`/`ChronicleEntry` narrative types). There is no hand-written mirror
-/// projection — the JSON Schema is derived straight from these same types, so the
-/// schema and the emitted JSON are one sourced and can never drift. The
-/// controllable/steering surface (`control`/`scope`) is deliberately omitted: an
-/// agent reads the world here, and steers it separately via `--apply`.
+/// **面向 agent 的一回合世界视图**：只放**权威的世界字段**，直接复用模型自己的实体类型
+/// （`Body`/`City`/`Faction`/`Ship`，以及 `GameEvent`/`ChronicleEntry` 那套叙事类型）。
+/// 这里**没有**手写的镜像投影——JSON Schema 就是从同一批类型派生的，所以 schema 与吐出来的
+/// JSON 同源、不可能漂移。可控制/操舵面（`control`/`scope`）**刻意不在这里**：
+/// agent 在这里读世界，另走 `--apply` 操舵。
 #[derive(Serialize, JsonSchema)]
 pub struct Trajectory {
     /// 当前回合（从 0 起：回合 0 = 初始世界，之后每步 +1）。

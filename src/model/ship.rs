@@ -60,10 +60,8 @@ pub struct ShipDoctrine {
     #[serde(default)]
     pub lone_wolf: f64,
 }
-/// A ship's controllable behavior — the instruction a faction issues to one
-/// of its ships. This is command-controlled state (see [`ControllableState`]),
-/// not an event: the simulation merely reads this to decide where to move and
-/// what to fire/bombard.
+/// 一艘舰的**可控行为** —— 势力对它下的那道指令。它是**指令控制的状态**
+/// （见 [`ControllableState`]），不是事件：模拟只是**读**它来决定往哪走、打谁/轰谁。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub enum ShipBehavior {
     /// 目标地点：移动到指定位置。
@@ -94,7 +92,7 @@ pub enum ShipBehavior {
     /// 待命（无指令，原地保持当前坐标——由 AI/玩家写入的默认值）。
     Idle,
 }
-/// A spaceship. Always owned by a faction.
+/// 一艘**飞船**，必定归属某个势力。
 ///
 /// `name` is the **unique identity** (the schema's authoritative key, per the
 /// design philosophy: "name is the unique key"). There is deliberately no separate
@@ -107,7 +105,7 @@ pub struct Ship {
     pub class: String,
     #[serde(rename = "势力")]
     pub faction_id: FactionId,
-    /// Current hull (armor) — must never exceed [`Self::hull_max`].
+    /// 当前船体（护甲）——**永不超过** [`Self::hull_max`]（再生/损毁都以它为上限）。
     #[serde(rename = "船体")]
     pub hull: f64,
     /// 本舰最大护甲（含组件加成）。`hull` 是当前值；再生/损毁以 `hull_max` 为上限。
@@ -184,7 +182,7 @@ pub struct Ship {
     #[serde(default)]
     #[serde(rename = "载货")]
     pub cargo: ResourceMap,
-    /// Position in AU (same plane as the orbits).
+    /// 坐标（AU，与轨道**同一平面**）。
     #[serde(rename = "坐标")]
     pub position: [f64; 2],
     /// 本舰**出厂所用**的设计图名（快照的溯源，也是「按舰级默认意图」那一层的查表键）。

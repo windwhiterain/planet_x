@@ -565,27 +565,27 @@ pub struct BlueprintPatch {
     pub launch_waiting: Option<bool>,
 }
 
-/// A structural building patch: add a new building, remove an existing one, or
-/// change an existing building's attributes (structure / ship_type / kind).
+/// **结构性建筑命令**：新建一座建筑、拆掉一座，或改一座已有建筑的属性
+/// （结构 / 建造舰级 / 类型）。
 #[derive(Deserialize, Default, JsonSchema)]
 pub struct BuildingPatch {
-    /// Which city to add to / remove from.
+    /// 在哪座城（城名）里新建 / 拆掉这座建筑。
     #[serde(default)]
     #[serde(rename = "城")]
     pub city: Option<CityId>,
-    /// Some(id) = target an existing building; None = add a new one.
+    /// 指向哪座建筑：给下标 = 改/拆已有的那座；不给 = 新建一座（城内下标由引擎分配）。
     #[serde(default)]
     #[serde(rename = "建筑")]
     pub building: Option<BuildingId>,
-    /// For a new building: kind key (residential | mining | construction).
+    /// 新建时必给：**建筑类型**（`residential` 住宅 / `mining` 开采 / `construction` 建造区）。
     #[serde(default)]
     #[serde(rename = "类型")]
     pub kind: Option<String>,
-    /// For a new (mining) building: the mined resource key.
+    /// 新建**开采**建筑时给：它采哪种资源（资源名）。
     #[serde(default)]
     #[serde(rename = "资源")]
     pub resource: Option<String>,
-    /// For a new (建造区) building: the ship class it produces.
+    /// 新建**建造区**时给：它造哪个**舰级**（建造区必须有舰级或设计图之一）。
     #[serde(default)]
     #[serde(rename = "建造舰级")]
     pub ship_type: Option<String>,
@@ -599,15 +599,15 @@ pub struct BuildingPatch {
     #[serde(default, deserialize_with = "double_option")]
     #[serde(rename = "设计图")]
     pub blueprint: Option<Option<BlueprintId>>,
-    /// For a new or modified building: structure key (concrete | steel).
+    /// 新建或改建时给：**结构**（`concrete` 混凝土 / `steel` 钢）——决定面积上限与护甲。
     #[serde(default)]
     #[serde(rename = "结构")]
     pub structure: Option<String>,
-    /// For a new building: planned area.
+    /// 新建时给：**计划面积**（结构不同上限不同）。
     #[serde(default)]
     #[serde(rename = "面积")]
     pub area: Option<f64>,
-    /// Remove the referenced building.
+    /// 拆掉这座建筑（不是"改属性"）：`true` = 拆。
     #[serde(default, skip_serializing_if = "is_false")]
     #[serde(rename = "删叶")]
     pub remove: bool,
@@ -727,8 +727,8 @@ pub struct FactionControlPatch {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReq {
-    /// Factions' controllable-state patches. Only the factions/leaves that are
-    /// present are touched; everything else is left as-is.
+    /// 各势力的**可控状态补丁**：只有**出现在 diff 里**的势力/叶片会被动到，
+    /// 其余一律保持原样（presence-aware，读面模板原样回传因此安全）。
     #[serde(default)]
     pub control: Vec<FactionControlPatch>,
     /// Optional scope (AI/玩家 boundary tree) overlay.

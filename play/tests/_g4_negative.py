@@ -11,7 +11,10 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**16 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**28 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
+把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
+标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
 """
 
 import json
@@ -284,6 +287,52 @@ def main() -> int:
         if v.get("id") == "ship-table":
             v["key"] = "舰级"
     run_case("identity-view-key-drift", d)
+
+    # ⑳ kind 词表对账：把 `control` 表里某片叶的 `kind` 换成**声明里没有的词** ⇒ 必须红。
+    #    注入点在真文件上（`g4_spec.INDEX_HOOK`）：判据读到的确实是那份被改坏的表。
+    KIND_CHECK = "kind 词表对账"
+
+    def rename_one_kind_in_index(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if line.strip():
+                row = json.loads(line)
+                row["kind"] = "幽灵叶"          # ← 声明里没有这个词（也不在 actions 里）
+                lines[i] = json.dumps(row, ensure_ascii=False)
+                break
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    g4_spec.INDEX_HOOK = rename_one_kind_in_index
+    try:
+        bad = run_case("kind-not-declared")
+    finally:
+        g4_spec.INDEX_HOOK = None
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append("kind-not-declared：红了，但**不是**第 7 条 kind 对账红的那一条"
+                          f"（实际红：{bad}）")
+
+    # ㉑ kind 词表对账（声明侧）：把一片**真的在表里**的叶标成 `not_in_index`（"它不在表里"）——
+    #    声明与实测立刻对不上 ⇒ 第 7 条红（只有它红：别的判据不看这个键）。
+    def mark_live_leaf_absent(s):
+        for x in s["leaves"]:
+            if x["field"] == "指令":
+                x["not_in_index"] = "装作它不在 control 表里"
+        return s
+
+    bad = run_case("decl-excludes-live-leaf", None, mark_live_leaf_absent)
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append(f"decl-excludes-live-leaf：第 7 条没红（实际红：{bad}）")
+
+    # ㉒ kind 词表对账（理由必须写出来）：把 `not_in_index` 的理由改成空白 ⇒ 逃生门 ⇒ 必须红
+    def blank_exclusion_reason(s):
+        for x in list(s["leaves"]) + list(s["actions"]):
+            if x.get("not_in_index"):
+                x["not_in_index"] = "   "
+        return s
+
+    bad = run_case("blank-exclusion-reason", None, blank_exclusion_reason)
+    if not any(n.startswith(KIND_CHECK) for n in bad):
+        MISBEHAVED.append(f"blank-exclusion-reason：第 7 条没红（实际红：{bad}）")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

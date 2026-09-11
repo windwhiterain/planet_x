@@ -3,23 +3,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::ResourceDeposit;
 
-/// 2D orbit around a focus. The focus is the **sun** (at the origin) for a
-/// planet, or a **parent body** for a satellite (moon).
+/// **绕焦点的二维轨道**：焦点的定义取决于天体层级——行星的焦点是**太阳**（在原点），
+/// 卫星（月亮）的焦点是它的**母天体**。
 ///
-/// The aphelion direction is a unit vector pointing from the focus toward the
-/// farthest point of the orbit; perihelion is the opposite direction.
+/// **远日点方向**是从焦点指向轨道最远点的单位向量；近日点方向与它相反。
 ///
-/// A satellite's `perihelion_distance`/`aphelion_distance` are measured **from
-/// its parent body**, not the sun; `Orbit::position` yields the **local** offset
-/// from the focus, and the body's world (heliocentric) position is that offset
-/// plus its parent's world position (see [`resolve_positions`]).
+/// 卫星的 `近日点距离`/`远日点距离` 是**从母天体量的**、不是从太阳；
+/// `Orbit::position` 给的是**相对焦点**的局部偏移，天体的世界（日心）坐标 =
+/// 那个偏移 + 母天体的世界坐标（见 [`resolve_positions`]）。
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Orbit {
-    /// 近日点距离 (perihelion distance), in AU. For a satellite, measured from
-    /// its parent body; for a planet, from the sun.
+    /// 近日点距离（AU）：卫星从**母天体**量、行星从**太阳**量。
     #[serde(rename = "近日点距离")]
     pub perihelion_distance: f32,
-    /// 远日点距离 (aphelion distance), in AU. Same convention as perihelion.
+    /// 远日点距离（AU）：口径同近日点距离。
     #[serde(rename = "远日点距离")]
     pub aphelion_distance: f32,
     /// 远日点方向 (unit vector toward aphelion), in the shared world 2D axes.

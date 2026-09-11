@@ -19,6 +19,9 @@
 //!
 //! Determinism: the emitter only reads the state; the same seed reproduces byte-identical files.
 
+// `control` 表的 `kind` 列**不写字面量**：那些词只住在 `control::leaves::LEAVES` 里
+// （见 `leaves.rs` 的模块文档；数据级对偶 = `play/tests/g4_spec.py` 的 kind 对账）。
+use crate::control::leaves::{index_kinds, kind_of};
 use crate::model::*;
 use crate::prng::Prng;
 use crate::sim;
@@ -173,8 +176,8 @@ const DERIVED: &[DerivedTable] = &[
     // **舰船设计图库**（势力级）：一行 = 一张图。设计图是**结构叶**（`{class, components[],
     // order{}}`），塞进 `control` 表的通用 `value: any` 列会让列类型不稳、Python 侧还要
     // 二次解析 —— 所以给它一张有类型列的专用表（`engine-data-plane.md` §1 的「引擎给答案、
-    // Python 只筛」）。⚠ `control` 派生表**不发** `kind="blueprint"` 的行（两份表示 = 漂移
-    // 风险）：设计图只住这张表，`control` 表的描述里也写明了这一点。
+    // Python 只筛」）。⚠ `control` 派生表**不发**设计图库（`kind="设计图库"`）的行
+    // （两份表示 = 漂移风险）：设计图只住这张表，`control` 表的描述里也写明了这一点。
     DerivedTable {
         name: "blueprints",
         table: "idx/blueprints.jsonl",
@@ -886,7 +889,7 @@ fn write_round(
         };
         for (ship, leaf) in &c.ship_orders {
             row(
-                "ship_order",
+                kind_of("ship_orders"),
                 json!(ship),
                 json!(null),
                 json!(leaf.value),
@@ -902,7 +905,7 @@ fn write_round(
         // kiting 是数字，role 是三值字符串（War/Freight/Observe）。
         for (ship, leaf) in &c.ship_doctrine {
             row(
-                "ship_doctrine",
+                kind_of("ship_doctrine"),
                 json!(ship),
                 json!(null),
                 json!(leaf.value),
@@ -911,7 +914,7 @@ fn write_round(
         }
         for (ship, leaf) in &c.ship_kiting {
             row(
-                "ship_kiting",
+                kind_of("ship_kiting"),
                 json!(ship),
                 json!(null),
                 json!(leaf.value),
@@ -920,7 +923,7 @@ fn write_round(
         }
         for (ship, leaf) in &c.ship_role {
             row(
-                "ship_role",
+                kind_of("ship_role"),
                 json!(ship),
                 json!(null),
                 json!(leaf.value),
@@ -929,7 +932,7 @@ fn write_round(
         }
         if let Some(d) = &c.default_doctrine {
             row(
-                "default_doctrine",
+                kind_of("default_doctrine"),
                 json!(""),
                 json!(null),
                 json!(d.value),
@@ -938,7 +941,7 @@ fn write_round(
         }
         if let Some(d) = &c.default_kiting {
             row(
-                "default_kiting",
+                kind_of("default_kiting"),
                 json!(""),
                 json!(null),
                 json!(d.value),
@@ -947,7 +950,7 @@ fn write_round(
         }
         if let Some(d) = &c.default_role {
             row(
-                "default_role",
+                kind_of("default_role"),
                 json!(""),
                 json!(null),
                 json!(d.value),
@@ -956,7 +959,7 @@ fn write_round(
         }
         for (res, leaf) in &c.investment_budget {
             row(
-                "investment_budget",
+                kind_of("investment_budget"),
                 json!(res),
                 json!(null),
                 json!(leaf.value),
@@ -965,7 +968,7 @@ fn write_round(
         }
         for (res, leaf) in &c.construction_budget {
             row(
-                "construction_budget",
+                kind_of("construction_budget"),
                 json!(res),
                 json!(null),
                 json!(leaf.value),
@@ -974,7 +977,7 @@ fn write_round(
         }
         for (res, leaf) in &c.welfare_budget {
             row(
-                "welfare_budget",
+                kind_of("welfare_budget"),
                 json!(res),
                 json!(null),
                 json!(leaf.value),
@@ -983,7 +986,7 @@ fn write_round(
         }
         for ((city, b), leaf) in &c.invest_weights {
             row(
-                "invest_weight",
+                kind_of("invest_weights"),
                 json!(city),
                 json!(b),
                 json!(leaf.value),
@@ -992,7 +995,7 @@ fn write_round(
         }
         for ((city, b), leaf) in &c.build_weights {
             row(
-                "build_weight",
+                kind_of("build_weights"),
                 json!(city),
                 json!(b),
                 json!(leaf.value),
@@ -1001,7 +1004,7 @@ fn write_round(
         }
         for (city, leaf) in &c.loyalty_budget {
             row(
-                "loyalty_budget",
+                kind_of("loyalty_budget"),
                 json!(city),
                 json!(null),
                 json!(leaf.value),
@@ -1010,7 +1013,7 @@ fn write_round(
         }
         for (city, leaf) in &c.development_money {
             row(
-                "development_money",
+                kind_of("development_money"),
                 json!(city),
                 json!(null),
                 json!(leaf.value),
@@ -1019,7 +1022,7 @@ fn write_round(
         }
         for (city, leaf) in &c.construction_money {
             row(
-                "construction_money",
+                kind_of("construction_money"),
                 json!(city),
                 json!(null),
                 json!(leaf.value),
@@ -1028,7 +1031,7 @@ fn write_round(
         }
         if let Some(cap) = &c.capital {
             row(
-                "capital",
+                kind_of("capital"),
                 json!(""),
                 json!(null),
                 json!(cap.value),
@@ -1038,7 +1041,7 @@ fn write_round(
     }
     // —— 设计图库：每回合 × 每势力 × 每张图一行 ——
     //
-    // 这是**结构叶**的专用表（`control` 表那边刻意不发 `kind="blueprint"` 的行，免得出现
+    // 这是**结构叶**的专用表（`control` 表那边刻意不发 `kind="设计图库"` 的行，免得出现
     // 两份表示互相漂移）。列的口径：
     // * `mode` = 图叶**自己的**表态；`effective_mode` = `State::blueprint_control` 的答案
     //   （图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，Python 别重算。
@@ -1470,7 +1473,8 @@ pub fn projection_schema() -> serde_json::Value {
         let entry = match t.name {
             "faction_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='investment_budget'`/`'construction_budget'`）。",
+                // 描述里的两个叶名从 `LEAVES` 取，不在这份文档里再抄一遍。
+                "description": format!("**本回合各势力的过程量**（`RoundView` 的 `factions[]` 行平铺）：各资源产出、舰队维护费（该付/欠付/生锈比例）、治理总成本/覆盖率**及其行政/娱乐拆分**、人口超载倍率、思潮忠诚惩罚、**实际花掉的投资/建造预算**。这些量由各 step 计算并应用、**不落到持久状态**，所以除了这张表（与主流 `view.factions[]`）没有别的读法。与 `planet_x --derived` 的值逐字一致（不做舍入）。⚠ **批了多少预算不在这张表**：限额是控制面的持久叶，join `derived.control`（`kind='{}'`/`'{}'`）。", kind_of("investment_budget"), kind_of("construction_budget")),
                 "columns": {"round":"integer","势力":"string","production":"object","upkeep":"number","governance_total":"number","governance_coverage":"number","governance_admin":"number","governance_entertainment":"number","governance_scale":"number","ideology_loyalty_penalty":"number","capital_loyalty_bonus":"number","investment_spent":"object","construction_spent":"object","upkeep_unpaid":"number","fleet_rust":"number","purchasing_power":"number","market_rank":"any","freight_gap":"object"},
                 "column_docs": {
                     "天体名": "**天体名**（全世界唯一）：天体的**身份键**，join 用（`天体名表` / 城与货栈的 `天体名`）。",
@@ -1483,8 +1487,8 @@ pub fn projection_schema() -> serde_json::Value {
                     "governance_scale": "**人口超载放大倍率** = `1 + max(0, 人口 ÷ 管理容量 − 1)`，同时乘在行政开销与每座城的忠诚距离项上。**中性缺省 1.0**（不是 0：缺的是「没有账」，不是「治理能力归零」）——同 `governance_coverage` 的缺省约定，零城势力因此不会被读成崩溃。",
                     "ideology_loyalty_penalty": "本回合**思潮优势端自平衡**的忠诚惩罚（0..`max_loyalty_penalty`）：身处垄断优势端思潮却言行不符时的扣分（军国却不打仗、科学却不探异常区）。**按势力算一次**——它是每座城忠诚目标式里的扣项，但只在这里存一份（城表不重复它）。",
                     "capital_loyalty_bonus": "本回合**首都向心项** = 首都人口占全势力比例 × `capital_share_loyalty_buff`。**按势力算一次**（城表不重复它）：城表那三列 + 本列 − `ideology_loyalty_penalty`，clamp 到 0..1 就是那座城的 `loyalty_target_effective`。把首都放在人口中心有真实收益，迁都则要付忠诚代价。",
-                    "investment_spent": "本回合**实际花掉**的投资（建设建筑）预算，按资源（resource → 数量，只列真花过的 ⇒ 可能是 `{}`）。**批了多少不在这里**：限额是控制面的持久叶 —— join `derived.control` 的 `kind='investment_budget'`（每资源一行，引擎每回合写回当回合用的额度）。**「批了 100 铁为何只花 30」= 限额 − 本列**。这些钱写完即弃（既不落状态也没有别的读法）。",
-                    "construction_spent": "本回合**实际花掉**的建造（造舰）预算，按资源——语义同 `investment_spent`（限额 join `kind='construction_budget'`）。⚠ 它是**进度预付款**：钱按 `build_cost ÷ build_points × 进度增量` 付，付了不等于下水（下水还要另外付组件钱，见 `derived.decisions` 的 `kind='ship_order'`）。",
+                    "investment_spent": format!("本回合**实际花掉**的投资（建设建筑）预算，按资源（resource → 数量，只列真花过的 ⇒ 可能是 `{{}}`）。**批了多少不在这里**：限额是控制面的持久叶 —— join `derived.control` 的 `kind='{}'`（每资源一行，引擎每回合写回当回合用的额度）。**「批了 100 铁为何只花 30」= 限额 − 本列**。这些钱写完即弃（既不落状态也没有别的读法）。", kind_of("investment_budget")),
+                    "construction_spent": format!("本回合**实际花掉**的建造（造舰）预算，按资源——语义同 `investment_spent`（限额 join `kind='{}'`）。⚠ 它是**进度预付款**：钱按 `build_cost ÷ build_points × 进度增量` 付，付了不等于下水（下水还要另外付组件钱，见 `derived.decisions` 的 `kind='ship_order'`）。", kind_of("construction_budget")),
                     "upkeep_unpaid": "本回合**付不起**的那部分舰队维护费（市场价值 = `max(0, 维护费 − 库存价值)`）；0 = 付清。分子有了，看 `fleet_rust` 知道后果。⚠ 它是「**欠费并因此生锈**的那部分」，不是「付了多少」的反面：**流亡舰队**（无活城，被豁免抽库存）与零舰队势力这里同样是 0——所以别拿 `upkeep − 本列` 当「实际付出去的钱」。",
                     "fleet_rust": "本回合**每艘舰被锈掉的船体比例**：该舰本回合掉的船体 = `hull_max × 本列`。**欠费拆船只有锈到 0 才发事件**（`ship_destroyed`，`cause=upkeep_shortfall`），所以「我的船为什么一直在掉血」只能靠这一列。⚠ 它不是「欠费比例」：引擎有可见性下限（欠一丁点也至少锈 0.2），欠得少时本列反而**大于** `upkeep_unpaid ÷ upkeep` —— 读这一列，别自己按欠费比例重算。",
                     "purchasing_power": "本回合**购买力**（市场价值）：结算开始那一刻本势力**可出口富余**的总价值——**买方就是按它降序排队**的（同额按名字）。「为什么有货在卖我却没买到」的第一个答案：钱多的人先挑。",
@@ -1503,19 +1507,34 @@ pub fn projection_schema() -> serde_json::Value {
                     "⚠ 全国项不在本表": "忠诚目标式里的另外两项——首都向心项与思潮优势端惩罚——**按势力算一次**，所以在 `faction_process` 的 `capital_loyalty_bonus` / `ideology_loyalty_penalty` 里（join 键 = `faction_id`）。同一个数只存一个位置：城表只放逐城不同的三项。",
                     "labor": "本回合的**用工系数** = `人口 ÷ 建筑用工需求`，钳到 `[min_efficiency, 1]`——直接乘在采矿产出与造舰速率上。「这座城产量低」= 人手不足（人口→劳力的传导点）。**中性缺省 1.0**（不缺人手），不是 0：写 0 会被读成「全城没人上工」。⚠ 它是**生产那一步**用的数（人口增长**之前**取的人口）；建造那一步另算的那把已经折进 `build.<舰级>.rate`，所以本表不存第二份。",
                     "housing_capacity": "本回合的**住房容量** = `住宅面积 × 该天体生态容量`——人口增长的**天花板**（人口每回合朝它涨）。「为什么人口不涨了、产出提不上去」的答案就在这里。0 = 这一回合没算（或这座城真的一点住宅都没有）。",
-                    "is_hub": "本城天体是不是本势力的**首都**（集散地）：true ⇒ 产出**直进势力池**；false ⇒ 先落**产地货栈**等船运。`production` 列只记**开采量**、不分入库路径，所以「我挖出来的矿为什么用不了」看这一列。⚠ `pre` 面里它是 `false`（这个月的入库路径还没定）：要读「此刻谁是集散地」别用 `pre`——拿 `derived.control` 的 `kind='capital'` 叶与城的 `body_id` 比。",
+                    "is_hub": format!("本城天体是不是本势力的**首都**（集散地）：true ⇒ 产出**直进势力池**；false ⇒ 先落**产地货栈**等船运。`production` 列只记**开采量**、不分入库路径，所以「我挖出来的矿为什么用不了」看这一列。⚠ `pre` 面里它是 `false`（这个月的入库路径还没定）：要读「此刻谁是集散地」别用 `pre`——拿 `derived.control` 的 `kind='{}'` 叶与城的 `body_id` 比。", kind_of("capital")),
                     "build": "本回合**造舰**的每舰级数：`{舰级: {rate, increment}}`。`rate` = 该舰级的产能速率上限（各建造区面积 × 生产率 × 用工系数之和），`increment` = 实得进度。**`increment < rate` ⇒ 钱是瓶颈**（建造预算批光了）；**`increment ≈ rate` ⇒ 产能封顶**（预算还有，是船坞/人手不够）。稀疏：**本城有这个舰级的建造区才有键**——有键而 `increment = 0` 是有效的一格（有产能却一分钱没批到）。进度池按**舰级**合并（`cities.ship_progress`），所以同城两张同舰级的图共用一行。",
                 },
             }),
             "control" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
-                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认倾向三片 / 预算 / 权重 / 娱乐预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ **设计图不在本表**：它是结构叶（`{class, components[], order{}}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
+                "description": "**控制面的 tidy 行**：每个叶片一行（舰指令 / 舰队默认倾向三片 / 预算 / 权重 / 城市福利预算 / 首都）。值就是 `--control` 里那片叶的值，**不是**有效值——有效值见 ships 表的 `order_effective*` 列（引擎解析，别在 Python 里重实现链）。⚠ `kind` 的取值 = `--control-schema` 的 `leaves[].field`（**逐字**，中文名词，见下面 `column_docs` 的 `kind` 条）；两边由 `play/tests/g4_spec.py` 对账。⚠ **设计图不在本表**：它是结构叶（`{舰级, 选装[], 倾向三轴}`），住在 `derived.blueprints`（`value: any` 列塞不下结构，两张表示还会漂移）。",
                 "columns": {"round":"integer","势力":"string","kind":"string","key":"string","sub":"integer","value":"any","mode":"string"},
                 "column_docs": {
-                    "kind": "叶的种类：ship_order / ship_doctrine / ship_kiting / ship_role / default_doctrine / default_kiting / default_role / investment_budget / construction_budget / welfare_budget / invest_weight / build_weight / loyalty_budget / development_money / construction_money / capital。⚠ `default_ship_order` 已删（2026-10：指令是即时操作，只写逐舰叶）。",
-                    "key": "该叶的键：舰名 / 资源名 / 城名；`default_doctrine`/`default_kiting`/`default_role` 与 `capital` 为 `\"\"`。",
-                    "sub": "**仅**权重叶（invest_weight / build_weight）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
-                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、`ship_doctrine`/`default_doctrine` 是 `{temper, lone_wolf}`、`ship_kiting`/`default_kiting` 是数字、`ship_role`/`default_role` 是三值字符串（War/Freight/Observe）、预算是数字、`capital` 是城名。要有效值请读 `ships` 表的 `order_effective*`/`doctrine`/`kiting`/`role` 列。",
+                    // 种类清单**由声明拼出来**（`LEAVES` 里 `not_in_index` 为空的那批）——
+                    // 文档里再抄一份就是「同一个概念两套名」的老毛病。
+                    "kind": format!(
+                        "叶的种类（= `--control-schema` 的 `leaves[].field`，逐字相同）：{}。⚠ 设计图库（`设计图库`）**不在本表**（结构叶，住 `derived.blueprints`）；命令列表（`建筑`）也不是叶、不会有行。⚠ 舰队默认**指令**那一片已删（2026-10：指令是即时操作，只有逐舰叶）。",
+                        index_kinds().join(" / ")
+                    ),
+                    "key": format!(
+                        "该叶的键：舰名 / 资源名 / 城名（+ 权重叶的 `sub`）；势力级单叶（{} / {} / {} / {}）为 `\"\"`。",
+                        kind_of("capital"),
+                        kind_of("default_doctrine"),
+                        kind_of("default_kiting"),
+                        kind_of("default_role"),
+                    ),
+                    "sub": format!(
+                        "**仅**权重叶（{} / {}）的建筑下标（城内唯一，见 name-as-unique-key 的裁决）；其余 kind 为 null。",
+                        kind_of("invest_weights"),
+                        kind_of("build_weights"),
+                    ),
+                    "value": "叶**自己的**值（不是有效值）：指令是行为对象、风格两轴（逐舰与舰队默认）是 `{temper, lone_wolf}`、姿态是数字、角色是三值字符串（War/Freight/Observe）、预算是数字、首都叶是**天体名**（城的那一列叫 `天体名`，见 `cities` 表）。要有效值请读 `ships` 表的 `order_effective*` / `风格` / `姿态` / `角色` 列。",
                     "mode": "三态归属：Inherit（这一层没有说话）/ Auto（系统决定）/ Player（玩家决定）。写值即接管：diff 里只写值不写 mode ⇒ mode 变 Player。",
                 },
             }),

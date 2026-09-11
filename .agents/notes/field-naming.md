@@ -4,7 +4,9 @@
 > 「我们先调整 rust 字段顺序，同时给字段加序列化中文名字（避免用单独的翻译表），名字参考 spec，
 > 把不准的名词问我。**所有 UI 都用名词，鼠标移上去弹窗显示注释/解释**」
 >
-> **状态：`[ ]` 设计待裁决**——本文只写方案与名词表，**代码一行未动**。
+> **状态：`[x]` 已落地**（`[ ]` 那行是本文写下时的状态，保留作记录）。批 A→D 的改名已进 main，
+> 本刀（第 5 步，`feature/kind-nouns`）把最后一块拼上：`--index` 的 `control` 表 `kind` 词表
+> 也统一到中文叶名、并且**从 `LEAVES` 一处派生**。落地记录见 §7；**哪些字符串有意保持英文**见 §8。
 
 ## 0. 一句话
 
@@ -341,7 +343,8 @@ attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `
 
 ### 7.7 digest 变了：是**世界分岔**，不是改名（含一条旧声明更正）
 
-**观测**（口径：取 `^{` 行、去 ``、按 `
+**观测**（口径：取 `^{` 行、去 `
+`、按 `
 ` 拼接、sha256、大写）：
 * `main`（`2f6cc7a`）= `748B4AA66FE169E8F316169D61CB5239057D0F3515CF59A50C629E76BF489603`
 * 本分支（`feature/control-nouns`，第 4 步改名后）= `3CA2A8019BF81879824D4C6B50D31FDC027CDB9B2FB7EE6C2929196F4400D598`
@@ -381,3 +384,61 @@ attack_hist, spawned_round` ✓ 顺序真的出现在读面上（`main` 已开 `
 * **结论**：**属行为层，由并发 feature 工作造成，与本刀（改名）无关**。
   待行为稳定后，由**预算/国内市场功能的那位作者**判定这是预期（设计如此）还是 bug。
   **本刀没有、也不会**为了变绿去改断言/改数字/改引擎。
+
+### 7.9 第 5 步（已落地）：`control` 表的 `kind` 词表 = 叶的中文名词
+
+* **病**：`--index` 的 `control` 派生表里 `kind` 是发射器**手写的英文串**
+  （`ship_order`/`investment_budget`/`invest_weight`/`capital`…），而同一片叶在
+  `--control-schema`、`--control`、`--apply` 里叫**中文**
+  （`指令`/`投资预算`/`建设权重`/`首都`…）。于是 `planet_xq` 按英文 kind 筛、kit 与 apply 用中文键
+  ——**同一个概念两套名**，两边写错都**不会红**，只会静默查不到（"看起来有值"）。
+* **修**：名字只在 `src/control/leaves.rs` 的 `LEAVES[].field` 里写一次；`LeafSpec` 新增
+  `state`（= `ControllableState` 的 **Rust 字段名**，投影据此选叶）与
+  `not_in_index`（`Some(理由)` = 这片叶**不在** `control` 表里，理由必须非空）。
+  投影发射器改调 `leaves::kind_of("ship_orders")` ⇒ 中文名不再有第二个字面量。
+  `--index` 的 `control` 表 `kind` 列文档也由 `index_kinds()` **拼**出来（不再抄一份清单）。
+* **纪律**：`play/tests/g4_spec.py` 第 7 条拿真跑出来的 `kind` 集合与
+  `leaves[].field ∪ actions[].field − {自报 not_in_index}` **逐字双向对账**；
+  `_g4_negative.py` 的 ⑳㉑㉒ 三个注入错（真文件里换个声明里没有的 kind / 把真在表里的叶标成不在 /
+  把例外的理由改成空白）都要求**第 7 条自己红**。
+* **例外只有两条**（写在声明里、带理由）：`设计图库`（结构叶，住 `derived.blueprints`，避免两份表示
+  漂移）与 `建筑`（命令列表，不是叶、没有持久状态）。
+* `decisions` 表的 `kind`（`ship_order`/`retool`/`style_retune`/`capital`/`blueprint`）
+  **不在本步**：那是**决策类型**，另一个轴。
+
+## 8. **有意保持英文的字符串**（动不得 / 不该动）
+
+改名的边界不是"看到英文就换"。下面这些字符串**故意**保持英文，理由都归于同一条：
+**它们是哈希输入或版本号/词汇枚举，不是给用户看的名词**——改了要么让同种子的世界变样，
+要么让"可复现"这句话变成假的。
+
+| 字符串 | 住在哪 | 为什么必须保持英文 |
+| --- | --- | --- |
+| `derived_roll` 的**盐**（`"accept"` / `"gate"` / `"observe_body"` / `"blueprint_theme"` / `"route"` / `"role"` / `"style_chance"` / `"nav"` / `"retool"` / `"blueprint_intent"` …） | `sim::derived_roll(faction, subject, round, purpose)` 的 `purpose` | 它**直接进哈希**（`(势力, 对象, 回合, 用途)`）。改一个字 ⇒ **同一个种子的世界完全变样**，而且和"改名"这件事毫无关系。它们**在读面上不出现**（`round_inputs.rolls[].purpose` 里能看到，那是**记录**不是名词）。 |
+| `SCHEMA_VERSION` | `model/state.rs` | 存档/投影的**版本号**：它变 = "旧档要迁"这个信号。跟着 UI 词表跳舞会让迁移逻辑误判。 |
+| `temper` / `lone_wolf` 的**盐用法** | `autocontrol::style` 的 `derived_roll` 调用 | 序列化名**可以**中文（`风格` 叶的**值字段**就叫 `temper`/`lone_wolf`，见 `LEAVES`），但**拿去当哈希盐的那两个词必须逐字是 `temper`/`lone_wolf`**——同一个词在两处承担不同职责时，**哈希那一处不动**。 |
+| `ShipBehavior` 的变体名与参数字段名（`Idle`/`Move`/`Follow`/`DockCity`/`Dock`/`Colonize`，`position`/`ship`/`city`/`body`） | `model/ship.rs` | 它是**行为词汇**（枚举判别式），不是叶名；`指令` 叶本身的值字段叫 `行为`。改它 = 存档与 `--apply` 的兼容面整体翻一遍，收益只是"看起来更中文"。 |
+| 投影**表名**与 `derived.*` 的键（`ships` / `cities` / `blueprints` / `control` / `derived.blueprints`…） | `projection.rs` 的 `LAZY`/`DERIVED` | 它们是 **API 路径**（`q.blueprints()` / `idx/blueprints.jsonl`），不是显示名词；表**内**的列名才是名词（`图名`/`舰级`…）。 |
+| 建筑/结构的**配置键**（`residential` / `mining` / `construction` / `concrete` / `steel`）与资源**市场**列名 | `config/game.ron` / `Building.kind` 等 | 它们是**配置表的键**（数据驱动的那一端），不是 UI 名词；`--nouns` 里有逐条解释。 |
+
+> **一句话判据**：**同一个字符串如果进了哈希、进了版本号、或是"配置/代码里的键"，
+> 它就不是"名词"，不参与本轮改名**；反过来说，**凡是用户在读面上当名词看到的东西，
+> 必须只有一处声明**（`serde(rename)` / `LEAVES` / `IDENTITY` / `LAZY`），别处从它派生。
+
+### 8.1 顺手修掉的悬停弹窗英文（`///`）
+
+`--nouns` 是**悬停弹窗的全部文字来源**，所以英文的 `///` 会**照实弹英文**给用户。
+本轮把 `--nouns` 里**纯英文的属性描述**从 **36 条清到 0 条**（`Ship.船体` / `Faction.资源` /
+`Faction.关系` / `Faction.符号` / `Faction.颜色` / `Building.护甲` / `Ship.坐标` /
+`BuildingPatch` 的 7 个字段 / `ShipBehavior` / `BuildingPatch` 类型 / `Orbit` / `Trajectory` …），
+复现口径：把 `--nouns` 走一遍，收集**没有任何 CJK 字符**的 `description`（改前 36 / 改后 0）。
+
+### 8.2 顺带发现的缺陷（**未修**，留给下一刀）
+
+* **单行 `/// **强调**` 会丢一个 `*`**：实测 `--nouns` 里 **57** 条描述以**单个 `*`** 开头
+  （源里是 `**`），另有 94 条以 `**` 开头且**完好**。把 57 条逐一回溯源文件（把描述首行前面补一个
+  `*` 再去找那行 `///`）：**57/57 命中，且全部是单行 doc comment**；完好的那 94 条里能对上源行的
+  24 条**全部是多行**。于是悬停弹窗里会看到 `*库存资源**（…` 这种坏 markdown。
+  这不影响任何判据（`g4` 只查"查不查得到解释"），但**是缺陷**。
+  修法两选一：① 别让 doc 行以 `*` 开头（本轮新写的行已经这么做了）；② 在 `--nouns` 出境处做一次
+  归一化。**本轮不动**：它跨 201 处声明、属于另一刀，而本 worktree 有并发的 session 在改同一批文件。

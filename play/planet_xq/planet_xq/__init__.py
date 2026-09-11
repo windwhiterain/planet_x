@@ -89,7 +89,16 @@ import os
 
 import pandas as pd
 
-__all__ = ["load", "PlanetXQ"]
+__all__ = ["load", "PlanetXQ", "CONTROL_BUDGET_KINDS"]
+
+#: ``derived.control`` 的 ``kind`` 列取值 = **控制叶的中文名词**（逐字等于
+#: ``--control-schema`` 的 ``leaves[].field``）。本模块只按 kind 取两片预算叶，名字在
+#: **这一处**写一次，调用点（``view_spending``）从它取——不要再在函数体里写字符串。
+#:
+#: ⚠ 这不再是一份「与引擎平行的词表」：取值由 ``play/tests/g4_spec.py`` 与
+#: ``--control-schema`` **逐字对账**（多一个 / 少一个都红），所以这里写错名字会当场红，
+#: 不会像从前那样「英文 kind 静静地查不到 → 预算是 0 但看起来像成功」。
+CONTROL_BUDGET_KINDS = {"investment": "投资预算", "construction": "建造预算"}
 
 
 class PlanetXQ:
@@ -196,6 +205,14 @@ class PlanetXQ:
 
     def control(self, round: int | None = None) -> pd.DataFrame:
         """**控制面的 tidy 行**：一行一个叶片（`kind`/`key`/`sub`/`value`/`mode`）。
+
+        ⚠ `kind` 的取值是**控制叶的中文名词**，逐字等于 `--control-schema` 的
+        `leaves[].field`（`指令` / `风格` / `姿态` / `角色` / `舰队默认*` / `投资预算` /
+        `建造预算` / `福利预算` / `建设权重` / `建造权重` / `城市福利预算` /
+        `开发货币预算` / `建造货币预算` / `首都`）——**没有第二套英文词**了
+        （从前这里发的是 `ship_order`/`investment_budget`…，而写面用中文键 = 同一个概念两套名）。
+        `设计图库` 与 `建筑`（命令）**不在本表**：前者住 `q.blueprints()`（有类型列的专用表），
+        后者不是叶（`--apply` 里执行一次的命令）。这份清单由 `g4_spec.py` 与 manifest 逐字对账。
 
         `mode` 是叶片自己的三态表态（`Player`/`Auto`/`Inherit`），**不是**有效归属；
         舰的有效指令/风格/角色看 `q.ships()` 的 `order_effective*` / `doctrine` / `kiting` /
@@ -472,8 +489,9 @@ class PlanetXQ:
         三个读面在这里合成一屏（都是引擎算的中间量，Python 只做减法与 join）：
 
         * `budget`（DataFrame，逐资源）：**批了多少 − 花了多少 = 没花掉的**。
-          限额来自 `derived.control` 的 `investment_budget`/`construction_budget` 叶（引擎每回合把
-          当回合用的额度写回去），已花来自 `view.factions[].investment_spent`/`construction_spent`
+          限额来自 `derived.control` 的两片预算叶（`kind=` :data:`CONTROL_BUDGET_KINDS` 的中文名词：
+          投资预算 / 建造预算——引擎每回合把当回合用的额度写回去），已花来自
+          `view.factions[].investment_spent`/`construction_spent`
           ——**同一个数不在两个读面各存一份**，所以这里才要 join。
         * `build`（DataFrame，逐城 × 舰级）：`rate` 是产能上限、`increment` 是实得进度，
           `bottleneck` 直接给出判据——`money`（钱批光了）/ `capacity`（产能封顶）/ `idle`
@@ -494,7 +512,8 @@ class PlanetXQ:
             sel = ctl[(ctl["kind"] == kind) & (ctl["势力"] == faction)]
             return {r["key"]: float(r["value"]) for _, r in sel.iterrows()}
 
-        inv_lim, con_lim = batch("investment_budget"), batch("construction_budget")
+        inv_lim = batch(CONTROL_BUDGET_KINDS["investment"])
+        con_lim = batch(CONTROL_BUDGET_KINDS["construction"])
         rows = []
         for rt in sorted(set(inv_lim) | set(inv_spent) | set(con_lim) | set(con_spent)):
             row = {"resource": rt}
