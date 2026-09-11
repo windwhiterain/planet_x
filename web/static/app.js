@@ -139,7 +139,7 @@ const AUTO_UNWRITTEN_FIELDS = ['舰队默认风格', '舰队默认姿态', '舰�
 /// 节点的字段名：控制行由 `controls.js` 直接给 `field`（引擎 manifest 里的那个拼写）。
 function leafFieldOf(node) { return (node && (node.field || node.kind)) || ''; }
 
-/// 一个角色取值**到底在干什么**（`roleFollowHint` 与编辑器共用一句话，避免两处各说一套）。
+/// 一个角色取值**到底在干什么**（角色下拉的每个选项后面跟着它，避免两处各说一套）。
 function roleHint(r) {
   switch (r) {
     case 'Freight': return '按积压去跑集货路线';
@@ -269,7 +269,6 @@ function renderReadPanel() {
     tabsBox.appendChild(t);
   });
   const page = pages[readPage];
-  if (page.hint) body.appendChild(el('div', { class: 'sv-pagehint' }, page.hint));
   // 第 11 步：视图是**分层**的（外层总览 → 点进内层详情，见 `specview.js::renderLayers`）。
   // 宿主只报三件事：这是哪一处实例（层状态按实例分开）、面包屑根写什么（页名只有宿主知道）、
   // 以及进/出内层时要保住滚动的那个容器。
@@ -814,12 +813,18 @@ function renderApplyGate() {
 /// **一片叶那一行**。（2026-10 之前它叫「层级树的一个节点」：容器由已删除的 `renderNode` 搭，
 /// 叶片走这里。现在只有这一半留下——`controls.js` 把声明里的控制行做成同形的节点喂进来。）
 /// 节点形状：`{key, field, name, leaf, fid, editor, ctl?}`；`opts` 是呈现上的开关
-/// （`noLabel` / `alwaysEditable` / `hint` / `carry`）。
+/// （`noLabel` / `alwaysEditable` / `carry`）。
+///
+/// ⚠ 2026-10（用户裁决：*「自动/玩家选项单独一行很占地方，弄到同一行」* +
+/// *「UI 上的各种描述文字删掉」*）：一片叶现在**只有一行**——标签 / 值编辑器 / 归属下拉 /
+/// 旁路按钮全住同一个 `.tnode-line`，它 `flex-wrap: wrap` ⇒ **装不下就换行、横向永不溢出**
+/// （面板不会被撑宽，元素不会被挤出屏幕）。以前是「归属一行 head + 值一行 + 一句说明」，
+/// 一片叶三行；逐句解释改挂在 `title=`（悬停才占地方，见 `modeToggleFor`）。
 function renderLeafNode(node, opts) {
   const o = opts || {};
   const mf = modeField();
   const wrap = el('div', { class: 'tnode' + (node.ctl ? ' ctl-leaf' : ''), 'data-key': node.key });
-  const head = el('div', { class: 'tnode-head' });
+  const line = el('div', { class: 'tnode-line' });
 
   if (!o.noLabel) {
     const lbl = el('span', { class: 'tnode-label' });
@@ -827,25 +832,27 @@ function renderLeafNode(node, opts) {
     if (o.carry) labelText += '（' + o.carry + '）';
     lbl.textContent = labelText;
     if (node.color) lbl.style.color = node.color;
-    head.appendChild(lbl);
+    line.appendChild(lbl);
   }
+  wrap.appendChild(line);
 
-  const mt = modeToggleFor(node);
-  if (mt) head.appendChild(mt);
-  // 「恢复继承」：撤销这片叶的**表态**（mode → 继承），值不动。只在它自己有表态时出现——
-  // 那时"我想反悔"才有意义（把下拉调回「继承」等价，但这个按钮把撤销写在脸上）。
-  if (node.leaf && normMode(node.leaf[mf]) !== 'Inherit') head.appendChild(restoreInheritButton(node.leaf));
-  // 设计图是库里可以删掉的对象（删图会让建造区悬空 ⇒ 停产）；这是蓝图专用动作，
-  // 与控制叶无关。控制叶不再有「恢复出厂值」机制。
-  if (node.leaf && leafFieldOf(node) === '设计图库' && rawLeafOf(node)) {
-    head.appendChild(removeBlueprintButton(node));
-  }
-  // 新控制行的行首一句实话（「没有叶（这一层没表态）」这类）。
-  if (o.hint) head.appendChild(el('span', { class: 'ctl-none' }, o.hint));
-  wrap.appendChild(head);
+  /// 归属下拉 + 旁路按钮：**跟在值后面**（同一行）。它必须在编辑器之后追加，所以是一个闭包。
+  /// 「恢复继承」：撤销这片叶的**表态**（mode → 继承），值不动。只在它自己有表态时出现——
+  /// 那时"我想反悔"才有意义（把下拉调回「继承」等价，但这个按钮把撤销写在脸上）。
+  const ownBits = () => {
+    const mt = modeToggleFor(node);
+    if (mt) line.appendChild(mt);
+    if (node.leaf && normMode(node.leaf[mf]) !== 'Inherit') line.appendChild(restoreInheritButton(node.leaf));
+    // 设计图是库里可以删掉的对象（删图会让建造区悬空 ⇒ 停产）；这是蓝图专用动作，
+    // 与控制叶无关。控制叶不再有「恢复出厂值」机制。
+    if (node.leaf && leafFieldOf(node) === '设计图库' && rawLeafOf(node)) {
+      line.appendChild(removeBlueprintButton(node));
+    }
+  };
 
   // 被标记删除的设计图：不再给编辑器（点「应用」它就没了），只说明会发生什么。
   if (node.leaf && removedBlueprints.has(node.leaf)) {
+    ownBits();
     wrap.appendChild(hintLine('已标记删除：点「应用到服务器」之后这张图从库里消失，'
       + yardCountText(node.fid, node.id)
       + '（再点一次按钮可撤销）'));
@@ -865,66 +872,30 @@ function renderLeafNode(node, opts) {
   const numLabel = '';
   // 编辑器种类是**声明**（`views.json` 的 `leaf_ui.<field>.editor`），一张封闭的注册表
   // ——与读面的 `fmt` 一个道理。`behavior` 与旧控制树的 `ship` 是同一件事（`shipEditor`）。
+  // ⚠ 编辑器与归属**都进那一行**（`line`）：只有 ⚠ 告警才另起一行（它们不是描述，是状态）。
   if (editor === 'ship' || editor === 'behavior') {
-    if (open) wrap.appendChild(shipEditor(node.leaf, node));
-    else wrap.appendChild(hintLine('由系统自动决定（要自己指挥就把左边的归属改成「玩家」）'));
+    if (open) line.appendChild(shipEditor(node.leaf, node));
   } else if (editor === 'doctrine') {
-    if (open) wrap.appendChild(doctrineEditor(node));
-    else wrap.appendChild(hintLine('由系统自动决定（要自己定风格就把左边的归属改成「玩家」）'));
+    if (open) line.appendChild(doctrineEditor(node));
   } else if (editor === 'kiting') {
-    if (open) wrap.appendChild(kitingEditor(node));
-    else wrap.appendChild(hintLine('由系统自动决定（要自己定风筝姿态就把左边的归属改成「玩家」）'));
+    if (open) line.appendChild(kitingEditor(node));
   } else if (editor === 'role') {
-    // 角色（战舰 / 运输舰 / 观测舰，单片叶）。这里「由系统自动决定」**不是空话**——自动控制
-    // 每回合按积压与观测需求定编，所以提示要说清它真的会替你决定。
-    if (open) wrap.appendChild(roleEditor(node));
-    else if (leafFieldOf(node) === '舰队默认角色') {
-      // ⚠ 势力级这片默认叶**没有执行者**：自动控制只写逐舰角色叶，从不写它。
-      // 所以这里不能照抄逐舰那句「由自动控制定编」——那是假话（note §3.2 的措辞纪律）。
-      wrap.appendChild(hintLine('未表态：这片默认叶只在它自己是「玩家」时才供值（自动控制的定编只写逐舰角色叶，不写它）——要「全舰队听我的」就把它改成「玩家」'));
-    } else {
-      wrap.appendChild(hintLine('由自动控制定编（它每回合按积压派集货、按观测需求派舰去异常区蹲着喂 MOND 掌握度）；要自己钉死这艘舰，就把左边的归属改成「玩家」'));
-    }
+    if (open) line.appendChild(roleEditor(node));
   } else if (editor === 'value' || editor === 'number') {
-    wrap.appendChild(leafValueEditor(node.leaf, numLabel, node, { force: !!o.alwaysEditable }));
+    line.appendChild(leafValueEditor(node.leaf, numLabel, node, { force: !!o.alwaysEditable }));
   } else if (editor === 'body') {
     // 迁都（`capital` 这片叶）：值是一个天体名。旧控制树从来没给它入口，新控制行把它补上。
-    wrap.appendChild(bodyEditor(node.leaf, node, { force: !!o.alwaysEditable }));
+    line.appendChild(bodyEditor(node.leaf, node, { force: !!o.alwaysEditable }));
   } else if (editor === 'building') {
-    wrap.appendChild(buildingEditor(node));
+    line.appendChild(buildingEditor(node));
   } else if (editor === 'blueprint') {
     // 设计图：**总是**给编辑器（图是玩家自己建的，没有"系统替你决定"这一档）。
-    wrap.appendChild(blueprintEditor(node));
-    const oh = blueprintOwnershipHint(node);
-    if (oh) wrap.appendChild(oh);
+    line.appendChild(blueprintEditor(node));
   } else if (editor) {
-    wrap.appendChild(hintLine('（没有「' + editor + '」这个编辑器：views.json 的 leaf_ui 写了一种前端不认识的编辑器）'));
+    line.appendChild(hintLine('（没有「' + editor + '」这个编辑器：views.json 的 leaf_ui 写了一种前端不认识的编辑器）'));
   }
-
-  // 「这个数现在从哪来」：新控制行按**有效归属**说一句实话；旧控制树照旧用那两句逐轴提示
-  // （它们说的是"跟随舰队默认 / 出厂快照"，只在逐舰叶上有意义）。
-  const f = leafFieldOf(node);
-  if (o.alwaysEditable) {
-    const fh = ctlFollowHint(node);
-    if (fh) wrap.appendChild(fh);
-  } else if (f === '风格' || f === '姿态') {
-    const fh = styleFollowHint(node);
-    if (fh) wrap.appendChild(fh);
-  } else if (f === '角色') {
-    const fh = roleFollowHint(node);
-    if (fh) wrap.appendChild(fh);
-  }
+  ownBits();
   return wrap;
-}
-
-/// 新控制行的一句实话：这片叶现在**谁在供值**，以及「改一个值」会发生什么。
-/// （逐舰那两句 styleFollowHint / roleFollowHint 说的是"跟随舰队默认 / 出厂快照"，
-/// 它们靠舰上的记录值，只对逐舰叶成立；这里说的是**通用**的那条链。）
-function ctlFollowHint(node) {
-  const own = normMode(node.leaf[modeField()]);
-  if (own === 'Player') return null;
-  if (own === 'Auto') return hintLine('归属「自动」：系统每回合可以改写这片叶（改一个值就归你）');
-  return hintLine('这片叶没表态（继承）⇒ 现在按上层：' + effectiveMode(node) + '；改一个值就归你（写值即接管）');
 }
 
 function hintLine(text) {
@@ -938,7 +909,7 @@ function hintLine(text) {
 /// 但我不想再对它表态」是常见意图，而以前只能靠理解三态的含义才做得到。
 ///
 /// ⚠ 它**不是**「删掉这片叶」：引擎的取值规则是"叶存在就用叶里的值"（哪怕叶说 Inherit），
-/// 而补丁接口只能新建/改写叶、删不掉（见 styleFollowHint 的说明）。所以撤销表态之后，
+/// 而补丁接口只能新建/改写叶、删不掉。所以撤销表态之后，
 /// 叶里那个数**仍然在用**——这正是「只回传差异」为什么重要：别让界面顺手造出这些叶。
 function restoreInheritButton(leaf) {
   const b = el('button', {
@@ -1093,22 +1064,22 @@ function normMode(m) { return m || 'Inherit'; }
 // 「记录值」（出厂快照 + AI 流水），写它不产生任何控制效果。
 // 每条轴取 [-1,1]（0 = 基线），钳在两端；值一改就把这片叶钉成 Player（写值即接管，
 // 与 `--apply` 同一条规则：只写值不写 mode ⇒ 该叶变成玩家指令）。
-/// 值一写就可能接管（`Inherit` → `Player`）：把这一行 head 里的归属下拉与「恢复继承」**就地**
+/// 值一写就可能接管（`Inherit` → `Player`）：把这一行里的归属下拉与「恢复继承」**就地**
 /// 跟上去。不重画整棵子树——那会换掉你正在编辑的那个输入框（与 styleField 的取舍一致），
 /// 于是会出现「我刚敲了数，归属却还写着继承」这种骗人的画面。
 function syncOwnership(node) {
   if (!node || !node.leaf) return;
   const wrap = document.querySelector('.tnode[data-key="' + node.key + '"]');
-  const head = wrap && wrap.querySelector(':scope > .tnode-head');
-  if (!head) return;
+  const line = wrap && wrap.querySelector(':scope > .tnode-line');
+  if (!line) return;
   const mode = normMode(node.leaf[modeField()]);
-  const sel = head.querySelector('select.mode[data-role="mode"]');
+  const sel = line.querySelector('select.mode[data-role="mode"]');
   if (sel && sel.value !== mode) sel.value = mode;
-  const btn = head.querySelector('button[data-role="restore"]');
+  const btn = line.querySelector('button[data-role="restore"]');
   if (mode === 'Inherit') {
     if (btn) btn.remove();
   } else if (!btn) {
-    head.insertBefore(restoreInheritButton(node.leaf), sel ? sel.nextSibling : null);
+    line.insertBefore(restoreInheritButton(node.leaf), sel ? sel.nextSibling : null);
   }
 }
 
@@ -1159,7 +1130,10 @@ function roleEditor(node) {
   const sel = el('select', { class: 'role', 'data-axis': 'role' });
   [['War', '战舰'], ['Freight', '运输舰'], ['Observe', '观测舰']].forEach(([v, lbl]) => {
     const o = el('option', { value: v });
-    o.textContent = lbl + '（' + roleHint(v) + '）';
+    // 选项文字只留**名词**（下拉宽度由最宽的选项决定）⇒「它在干什么」那句话移进 `title=`
+    // （悬停才占地方，用户裁决：*「tooltip 又不占空间」*）。
+    o.textContent = lbl;
+    o.title = lbl + '：' + roleHint(v);
     o.selected = (leaf.角色 || 'War') === v;
     sel.appendChild(o);
   });
@@ -1283,12 +1257,14 @@ function leafValueEditor(leaf, label, node, opts) {
 /// （`views.json` 的 `write_omit` 却写着"住在建筑行里"——说谎的是界面）。现在它可编辑，
 /// 且与别的控制行同一条规矩：写值即接管（叶被钉成 `Player`）。
 function weightRow(leaf, field, label, owner) {
+  // 与 `renderLeafNode` 同一条规矩（用户裁决：归属不许自己占一行）：标签 → 值 → 归属，
+  // 装不下由 `.leaf-val` 的 `flex-wrap` 换行，绝不横向溢出。
   const box = el('div', { class: 'leaf-val' });
   box.appendChild(el('span', { class: 'lv-label' }, label + ' '));
   const node = { key: ((owner && owner.key) || '') + ':' + field, field, fid: owner && owner.fid, leaf, name: label };
+  box.appendChild(leafValueEditor(leaf, '', node, { force: true }));
   const mt = modeToggleFor(node);
   if (mt) box.appendChild(mt);
-  box.appendChild(leafValueEditor(leaf, '', node, { force: true }));
   return box;
 }
 
@@ -1411,22 +1387,6 @@ function yardWaiting(fc, city, b) {
   if (!spec) return false;
   const prog = ((city.造舰进度) || {})[b.建造舰级] || 0;
   return prog >= (+spec.build_points || 0) - 1e-9;
-}
-
-/// 设计图那一行给出的**归属**（图叶自己的表态 + 有效归属的说明）。/// 与其它叶同一条链，只是设计图库没有「舰队默认」这一档：图叶 → 势力 scope → 全局。
-///
-/// ⚠ 措辞必须与**执行者**的实际行为对齐（`autocontrol/shipbuilding.rs::retool_shipyards`）：
-/// `Auto` 图上系统改的是**舰级**（`class`），选装它不写——空选装 = 出厂那一刻由
-/// `choose_loadout` 按当时库存现算。说"重算选装"就是给自己发一张空头承诺。
-function blueprintOwnershipHint(node) {
-  const m = normMode(node.leaf[modeField()]);
-  if (m !== 'Inherit') return null;
-  const fac = normMode(scopeVal(edScope.factions, node.fid));
-  const g = normMode(edScope.global);
-  const up = fac !== 'Inherit' ? ('势力作用域：' + fac) : ('全局作用域：' + g);
-  return hintLine('这张图自己没有表态（Inherit）⇒ 往上看 ' + up
-    + '；链上都没表态就是「自动」= 自动控制会把它的舰级重估成自己算的级（`retool_shipyards`，只在有建造区挂着它时发生；选装它不写）。'
-    + '要钉死成你写的配方，把归属改成「玩家」。');
 }
 
 /// 设计图的编辑器：舰级下拉 + 组件多选 + **倾向三轴**（角色 / 风格 / 风筝姿态）。
@@ -1615,9 +1575,6 @@ function stanceEditor(leaf) {
   kitWrap.append(kitOn, kitInp);
   box.appendChild(labelWrap('风筝姿态', kitWrap));
 
-  box.appendChild(hintLine('图上写了某条轴 ⇒ 之后按这张图造出来的新舰出厂就带这条倾向'
-    + '（倾向是活层：改这张图，**该轴叶沉默**的老舰也一起跟）。'
-    + '⚠ 前提是这张图归**玩家**：图是「自动」时，上面的值只是当前值，引擎不把它当玩家的表态。'));
   return box;
 }
 function yardStatusBox(fc, node, chosen) {

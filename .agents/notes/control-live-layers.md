@@ -961,3 +961,79 @@ planet_x --start c20r.ron --control | jq '.control[] | select(.faction_id=="中�
    样本从 `seed 7` 单个种子改成 `[1, 7, 42]` 三种子合计（不变式对每个种子每一回合照旧检查）。
    原因：seed 7 这条轨迹在新行为下安静了（400 回合 10 次拆平 / 4 艘舰，同种子上基线是 57 次 /
    33 艘）——**非空这条要求不该只押在一个种子上**。
+
+## 19. 本轮：**控制行压成一行 + UI 描述文字整批删掉**（2026-10，用户裁决）
+
+### 19.1 用户原话（两条，连着说）
+
+> 「UI 中条目的 自动控制/玩家 选项单独一行很占地方，弄到同一行，但必须确保横向的 UI 不可以
+> 被挤出屏幕，只会挤到换行」
+>
+> 「怎么这么多 help，太占空间了，删掉」（澄清：*「tooltip 又不占空间，我说的是 UI 上的各种
+> 描述文字」*）
+
+### 19.2 病根：一片叶最多吃 **3 行**
+
+`renderLeafNode`（`web/static/app.js`）以前的结构是
+`head = [标签][归属下拉][恢复继承]` → `编辑器` → `跟随说明`。而左栏详情层（`layout: layers`
+的内层 = `.sv-sheet-row` 的 118px 标签列 + 1fr 值列）里标签**住在左列**，于是 `head` 那一行
+只剩一个 54px 的下拉 ⇒ 一整行只放一个下拉；下面还有一句 `ctlFollowHint` 的说明。
+实测一个资源预算行 **96px**，一屏放不下几行。
+
+### 19.3 改法（一条规矩，五处落点）
+
+**一片叶 = 一行**：标签 / 值编辑器 / 归属下拉 / 旁路按钮全住同一个新容器 `.tnode-line`。
+
+* `web/static/app.js::renderLeafNode`：`head` → `line`；归属与「恢复继承」「删图」由闭包
+  `ownBits()` 在**编辑器之后**追加（顺序：标签 → 值 → 归属 → 旁路）。
+* `web/static/app.js::syncOwnership`：就地跟进的那个查询从 `:scope > .tnode-head` 改成
+  `:scope > .tnode-line`（不然「刚敲了数，归属还写着继承」会回来）。
+* `web/static/app.js::weightRow`（建造区那两片权重叶）：同样的顺序（标签 → 值 → 归属）。
+* `web/static/style.css`：新增 `.tnode-line { display:flex; align-items:center; gap:6px;
+  **flex-wrap: wrap**; }`。**`flex-wrap` 是硬要求**——面板只有 ~430px，装不下必须**换行**，
+  不许把元素挤出屏幕；`.leaf-val` 也补上 `flex-wrap`（它以前是 `nowrap`，是同一类隐患）。
+  死的 `.tnode-head` 规则整条删掉（没有别处再造它）。
+* 角色下拉的选项文字从「战舰（找仗打（接战 / 轰炸 / 殖民））」缩成「战舰」，
+  解释移进 `option.title`（**下拉宽度由最宽的选项决定**，这是它会把归属挤下去的原因）。
+
+实测：资源预算行 **96 → 28px**（约 3.4×）；扫过所有 `.tnode-line`，没有一个子元素越过容器右缘
+（`scrollWidth == clientWidth`）。
+
+### 19.4 删掉的描述文字（**保留** ⚠ 告警与写回执）
+
+| 删 | 位置 |
+| --- | --- |
+| 「这片叶没表态（继承）⇒ 现在按上层…改一个值就归你」 | `ctlFollowHint`（整函数） |
+| 「由系统自动决定（要自己指挥就把左边的归属改成「玩家」）」×3 + 角色那两句 | `renderLeafNode` 的 else 分支 |
+| 「没有叶（这一层没表态）——写一个数就是新建这片叶」 | `controls.js::leafNodeBox` 的 `hint` |
+| 「N 项：N 项已有叶…写值即接管」 | `controls.js::leafRow` 多键叶表头 |
+| 「新建的叶先在**编辑面**里…单独一片壳不进 diff」 | `controls.js::newKeyForm` |
+| 「这张图自己没有表态（Inherit）⇒ 往上看…」 | `blueprintOwnershipHint`（整函数） |
+| 「图上写了某条轴 ⇒ 之后…出厂就带这条倾向」 | `blueprintEditor` 末尾 |
+| 「（factions：中国 现在 = Inherit）」（与下拉同义） | `controls.js::ownerRow` |
+| 「这一条的全部字段都在这里：声明过的按人工顺序在前…」 | `specview.js::renderLayers` 的 `sv-note` |
+| **页顶那 7 句**（`pages[].hint`）+ `spec.hint` 的渲染 | `views.json` / `app.js` / `specview.js` |
+
+**故意留着两条**（不是漏删）：
+1. `specview.js::omitLine`（「本视图声明不看 N 项：…」）——`g4_spec.py` §静态纪律要求
+   每条 `omit` 都写 `why`，其判据文本明说*「界面要把省略说出来」*；删了它，判据就变成假话。
+2. `controls.js::readOnlyNote`（「引擎现算（写面不写回）：…」）——那是**值**不是描述，
+   前缀只说明"这列不写回"。
+
+### 19.5 验证
+
+* `bash scripts/check-js.sh` → `check-js: OK`（25/25 着色器 + 全部脚本 `node --check`）。
+* `cargo nextest run -p planet_x_web` → **25 passed**（前端的改动不经它，但它是写面的边界）。
+* `uv run --project play/planet_xq python play/tests/run.py`（快组）→ 组 1 绿；组 4 **36/39**，
+  3 条红**全是** `events.攻击方`（「16 行里 0 格非空」）。**这 3 条与本次改动无关**：
+  把 `views.json` 换回 `HEAD` 的版本重跑，红的还是同样 3 条（实测记录在案）。
+* 实机（`scripts/web.ps1`，端口 3000）逐页看过：势力详情（舰队默认角色 = `[战舰▾][继承▾]` 一行）、
+  城市详情（`福利权重 [7][玩家▾][恢复继承]` 一行）、舰队详情（`指令 [待命▾][继承▾]`）、
+  建造区那一行（`结构/舰型/设计图/建设权重` 各一行）。**写值即接管**实测有效：
+  在输入框里敲 7 ⇒ 同一个 `.tnode-line` 里的归属就地翻成「玩家」、并长出「恢复继承」按钮。
+
+### 19.6 没做（留给下一轮）
+
+* `.ctl-grid` 里每片叶外面那圈 `.tnode` 边框 + `margin: 4px 0` 还在（一行 28px 里占 8px）。
+  要再挤，就在 `.ctl-grid > .tnode` 上去掉边框/外边距——但那会改变"每片叶是一个盒子"的观感，
+  没做之前先问。

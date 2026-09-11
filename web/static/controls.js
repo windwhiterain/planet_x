@@ -263,15 +263,8 @@
     const box = el('div', 'ctl-grid');
     const rows = candidates(col, spec, raw, rec, recKey);
     if (!rows.length && !col.new) {
-      box.appendChild(el('span', 'ctl-none', '（没有可以配的键：views.json 的 keys_from 没给，读面里也一片叶都没有）'));
+      box.appendChild(el('span', 'ctl-none', '（没有可配的键）'));
     } else {
-      const miss = rows.filter((r) => !r.entry).length;
-      if (rows.length) {
-        const hint = el('div', 'ctl-note');
-        hint.textContent = rows.length + ' 项：' + (rows.length - miss) + ' 项已有叶' + (miss ? '，' + miss + ' 项还没有叶（写值 = 新建这片叶）' : '')
-          + '；写值即接管（这片叶归你，系统不再改写它）';
-        box.appendChild(hint);
-      }
       rows.forEach((r) => {
         const leaf = editableLeaf(fc, field, r.kv, blankOf(field, ui));
         r.showLabel = true;   // 网格里一行一片叶 ⇒ 这一行必须自己带标签（资源名 / 城名 / 楼）
@@ -295,13 +288,11 @@
       editor: (col.ui && col.ui.editor) || 'number',
       ctl: true,
     };
-    if (rowInfo && !rowInfo.entry) node.missingLeaf = true;
     // `renderLeafNode` 在 app.js 里（它认识旧控制树那套结构）；这里只喂一个同形的节点。
     const box = renderLeafNode(node, {
       where,
       noLabel: !rowInfo || !rowInfo.showLabel,
       alwaysEditable: true,
-      hint: node.missingLeaf ? '没有叶（这一层没表态）——写一个数就是新建这片叶' : null,
       carry: rowInfo && rowInfo.entry ? carryText(rowInfo.entry, leafSpec(field)) : null,
     });
     const ro = readOnlyNote(rowInfo && rowInfo.entry, leafSpec(field), col.ui || {});
@@ -369,8 +360,6 @@
     const bar = el('div', 'ctl-new-bar');
     bar.append(btn, stat);
     box.appendChild(bar);
-    box.appendChild(el('div', 'ctl-note',
-      '新建的叶先在**编辑面**里（点「应用到服务器」才真的落地）；值还没写 ⇒ 单独一片壳不进 diff'));
     return box;
   }
 
@@ -561,14 +550,10 @@
       sel.appendChild(o);
     });
     sel.title = '「' + (OWNER_LABEL[k] || k) + '」=' + (OWNER_HELP[k] || '') + '。它写的是**作用域**（这一层负不负责），不是某一片叶的值。';
-    const hint = el('span', 'ctl-note', '');
-    const refresh = () => { hint.textContent = '（' + k + (id ? '：' + id : '') + ' 现在 = ' + normMode(scopeGet(k, id)) + '）'; };
-    sel.addEventListener('change', () => {
-      scopeSet(k, id, sel.value);
-      refresh();
-    });
-    refresh();
-    box.append(sel, hint);
+    // 以前这里还挂一句「（cities：长三角 现在 = Inherit）」——它与**下拉本身**说的是同一件事
+    // （用户裁决：描述文字删掉），所以只留下拉。
+    sel.addEventListener('change', () => { scopeSet(k, id, sel.value); });
+    box.append(sel);
     return box;
   }
 
