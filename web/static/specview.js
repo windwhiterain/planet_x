@@ -1149,10 +1149,11 @@
       detail.style.display = '';
       detail.appendChild(crumbBar(spec, r, opts, back));
       sheetOfRecord(detail, spec, r);
+      // ⚠ 2026-10：以前这里还有一句 meta 说明（「这一条的全部字段都在这里…」）——
+      // 用户裁决「UI 上的各种描述文字删掉」⇒ 删。**追加本身照旧**（铁律 R 换个落点），
+      // 只是不再用一句话解释它。`omitLine` 留着：那是 g4 静态判据要求的「省略必须说出来」。
       const om = omitLine(spec);
       if (om) detail.appendChild(om);
-      detail.appendChild(el('div', 'sv-note',
-        '这一条的全部字段都在这里：声明过的按人工顺序在前，**没被声明的**在末尾逐条追加（不是折叠块）'));
     }
 
     container.append(outer, moreWrap, detail);
@@ -1264,7 +1265,9 @@
     cards: renderCards,
   };
 
-  // --- 视图（一个视图 = 标题 + 一行说明 + 布局；omit 的省略必须写在脸上） -----
+  // --- 视图（一个视图 = 标题 + 布局；omit 的省略必须写在脸上） -----------------
+  // ⚠ 2026-10：视图那一行**说明**（`spec.hint`）连同 `page.hint` 一起删了
+  // （用户裁决：*「UI 上的各种描述文字删掉」*）——说明只该住在滑过才占地方的 `title=` 里。
   /// `opts`（宿主给的可选上下文，第 11 步加）：
   ///   * `instance` —— 同一个视图被挂在几处（左栏 / 右栏就地整理）时的**实例名**：
   ///     层状态按它分开，互不串台；
@@ -1273,7 +1276,6 @@
   function renderView(container, spec, opts) {
     const wrap = el('div', 'sv-view');
     if (spec.title) wrap.appendChild(el('h3', 'sv-title', spec.title));
-    if (spec.hint) wrap.appendChild(el('div', 'sv-hint', spec.hint));
     const body = el('div', 'sv-body');
     (LAYOUT[spec.layout] || renderTable)(body, spec, opts);
     wrap.appendChild(body);

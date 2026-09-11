@@ -100,9 +100,13 @@ body {
   border: 1px solid var(--line); border-radius: 6px;
   margin: 4px 0; background: rgba(0, 0, 0, .18);
 }
-.tnode-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 5px; }
-.tnode-head:hover { background: #18224a; }
-.tnode-label { flex: 1; display: block; cursor: default; }
+/* 一片叶 = **一行**：标签 / 值编辑器 / 归属下拉 / 旁路按钮同住这里。
+   面板只有 430px，装不下是常态 ⇒ `flex-wrap: wrap` 保证**换行而不是溢出**（元素永不被挤出屏幕）。 */
+.tnode-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 3px 8px; border-radius: 5px; }
+.tnode-line:hover { background: #18224a; }
+.tnode-label { flex: 0 1 auto; min-width: 0; display: block; cursor: default; }
+/* 编辑器自带的内层容器（`.leaf-val` / `.ship-editor`）在这一行里不再自占一行、不再自带内边距。 */
+.tnode-line > .leaf-val, .tnode-line > .ship-editor { padding: 0; }
 .tnode-label.clickable { cursor: pointer; }
 .tnode-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px 2px; }
 .tnode-tab {
@@ -137,8 +141,11 @@ body {
 .tnode .rm-leaf { color: #fca5a5; }
 .tnode .rm-leaf.on { background: #4a1d1d; border-color: #fca5a5; color: #ffd0d0; }
 .ship-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; }
-.leaf-val { display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px; color: var(--muted); }
+.leaf-val { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px; color: var(--muted); }
 .leaf-val .lv-label { font-size: 12px; }
+/* 嵌套的编辑器容器（`weightRow` 把 `leafValueEditor` 塞进自己那一行）不再自带内边距 ——
+   否则「建造区那一行」会白高一层、且看起来像两条行。 */
+.leaf-val .leaf-val { padding: 0; }
 .tnode .num, .ship-editor input[type="number"], .leaf-val input[type="number"] {
   background: #0d1226; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 6px; width: 84px;
@@ -296,7 +303,6 @@ button.primary:hover { background: #2563eb; }
 .sv-view { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
 .sv-view:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 .sv-title { margin: 0 0 4px; font-size: 12.5px; color: #cbd5ff; }
-.sv-hint, .sv-pagehint { color: var(--muted); font-size: 11px; margin-bottom: 6px; line-height: 1.45; }
 .sv-body { display: flex; flex-direction: column; gap: 6px; }
 .sv-empty { color: var(--muted); font-size: 11px; }
 .sv-note { color: #a16207; font-size: 11px; padding: 2px 4px; }
@@ -425,9 +431,7 @@ button.primary:hover { background: #2563eb; }
 .sv-td-ctl { vertical-align: top; }
 .sv-compact { max-width: 230px; }
 .ctl-leaf { border-left: 2px solid #2c3a66; margin: 1px 0 3px; border-radius: 4px; }
-.ctl-leaf > .tnode-head { padding: 1px 4px; gap: 4px; }
-.ctl-leaf > .tnode-head .tnode-label { flex: 0 0 auto; }
-.ctl-leaf > .ship-editor, .ctl-leaf > .leaf-val { padding: 2px 4px 4px; }
+.ctl-leaf > .tnode-line { padding: 2px 4px; gap: 4px; }
 .ctl-grid { display: flex; flex-direction: column; gap: 1px; }
 .ctl-note { color: var(--muted); font-size: 11px; padding: 0 4px; }
 .ctl-none { color: #f0b429; font-size: 11px; }
