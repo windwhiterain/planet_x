@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-build", action="store_true", help="跳过前置编译（默认会按需 build）")
     ap.add_argument("--no-sweep", action="store_true", help="跳过清理其它指纹的过期投影缓存")
     ap.add_argument("-j", "--jobs", type=int, default=0, help="并行跑几个世界（透传）")
+    ap.add_argument("--no-clean", action="store_true", help="无视 clean 记录，强制重跑选中的组")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -132,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         passthrough.append("--refresh")
     if args.jobs:
         passthrough += ["-j", str(args.jobs)]
+    if args.no_clean:
+        passthrough.append("--no-clean")
 
     results: list[tuple[str, int, float]] = []
     for gid in wanted:

@@ -301,8 +301,7 @@ pub fn apply_diff(state: &mut State, config: &GameConfig, req: &CommandReq) -> A
     if let Some(sv) = &req.scope {
         // 作用域补丁：**每个被触碰的节点算一个叶片**（`applied` 是「落地了几个叶片」
         // 的口径，作用域节点与叶子同权）。
-        let touched = usize::from(sv.global.is_some())
-            + sv.factions.len()
+        let touched = sv.factions.len()
             + sv.bodies.len()
             + sv.cities.len();
         state.scope.overlay(sv);

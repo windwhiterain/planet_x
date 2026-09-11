@@ -7,7 +7,7 @@
 // ⚠ 2026-10：**手写的控制层级树已整条删除**（`buildTree`/`shipNode`/`renderNode`/`KIND`/
 // 「＋ 新建设计图」表单那一套）。它以前是第二栏「控制」，与新面并存了一段过渡期；
 // 它提供的每一件事现在都由声明的行提供（设计图 → 「设计图」页的 leaf 行 + `new: true`、
-// 建筑与建造区 → 城市卡片的 `action: buildings` 行、全局作用域 → 「全局」页的 `owner: global` 行、
+// 建筑与建造区 → 城市卡片的 `action: buildings` 行、
 // 迁都 → 势力卡片的 `capital` 行）。**编辑器函数本身留着**——它们是 widget 注册表
 // （`leaf_ui.<field>.editor` 选一个），新行在用。见 `.agents/notes/web-control-spec.md`。
 //
@@ -495,7 +495,6 @@ function buildScopeDiff() {
   const cur = edScope || {};
   const base = baseScope || {};
   const out = {};
-  if (normMode(cur.global) !== normMode(base.global)) out.global = normMode(cur.global);
   ['factions', 'bodies', 'cities'].forEach((k) => {
     const kept = [];
     (cur[k] || []).forEach((pair) => {
@@ -772,7 +771,7 @@ function inlineSpec(path, value) {
 /// ⚠ 2026-10：这里以前还有一张「控制树（旧）」页（手写的控制层级）。它已经**整条删除**——
 /// 旧树能做的每一件事都改由 `views.json` 声明的行提供：设计图库 → 「设计图」页的 `leaf` 行
 /// （带 `new: true` 的「＋ 新建」）、建筑与建造区 → 城市卡片的 `action: buildings` 行、
-/// 全局作用域 → 「全局」页的 `owner: global` 行、迁都 → 「势力」卡片的 `capital` 行、
+/// 迁都 → 「势力」卡片的 `capital` 行、
 /// 恢复继承 → 每条控制行自带；设计图删除是蓝图专用动作。见 `.agents/notes/web-control-spec.md`。
 /// ⚠ 2026-10 第 9 步：这里还挂过一张**自动生成的「未组织」页**（`id: 'leftover'`）——它是
 /// **页级的兜底桶**，与第 8 步删掉的那个「其余」列是同一个概念（用户裁决 *「我不希望有"其余"
@@ -971,11 +970,12 @@ function removeBlueprintButton(node) {
   return b;
 }
 
-/// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 全局。
+/// 一片叶子的**有效归属**：叶子自己 → （舰：**该轴对应的**舰队默认叶）→ 势力 → 引擎兜底 `Auto`。
+/// ⚠ 2026-10 用户裁决删掉了**全局那一档**（链尾不再是「全局 scope」）。
 /// 这是 `State::ship_control` / `ship_doctrine_control` / `ship_kiting_control` /
 /// `ship_role_control` 在前端的对应读法，UI 用它决定「这片叶子现在归谁、能不能编辑」。
 ///
-/// ⚠ **指令没有舰队默认叶**（2026-10 裁决）：它是即时操作，链上是 叶 → 势力 → 全局；
+/// ⚠ **指令没有舰队默认叶**（2026-10 裁决）：它是即时操作，链上是 叶 → 势力；
 /// 风格/姿态/角色三条长期倾向各有一片势力级默认（见 [`DEFAULT_LEAF`]）。
 /// 出厂图那一层 UI 不重算（读面给的 `mode` 是叶自己的表态，图层的归属由引擎解析）——
 /// 这里少一层只会让 UI **更保守**（少显示一次「已归玩家」），不会让编辑误伤引擎。
@@ -993,7 +993,8 @@ function effectiveMode(node) {
   }
   const fac = normMode(scopeVal(edScope.factions, node.fid));
   if (fac !== 'Inherit') return fac;
-  return normMode(edScope.global);
+  // 链上谁都没说话 ⇒ 引擎兜底 `Auto`（与 `resolve_chain` 的 `unwrap_or(Auto)` 同一条口径）。
+  return 'Auto';
 }
 
 function modeToggleFor(node) {

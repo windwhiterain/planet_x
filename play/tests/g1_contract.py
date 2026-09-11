@@ -196,8 +196,17 @@ def derived_vs_index(h, ck, tmp: Path) -> None:
 
     ctl = _rounds(_table(proj, "control"), FACE_ROUNDS)
     scp = _rounds(_table(proj, "scope"), FACE_ROUNDS)
-    ck.check("控制面两张表在该回合有行（读面即写面的 tidy 版）",
-             bool(ctl) and bool(scp), f"control {len(ctl)} 行 / scope {len(scp)} 行")
+    # ⚠ 2026-10：`scope` 表是**表态驱动**的（以前每回合恒定一行 `global`，那一档按用户裁决已删）
+    # ⇒ 默认世界它**就该是 0 行**，「两张表都有行」这条老判据不再成立。改成与**写面**对账：
+    # 这份档里 `--control` 列出几条显式表态，表里就该有几行（读面即写面的 tidy 版，两边同源）。
+    # 「有表态 ⇒ 行真在」那一头由 Rust 侧 `derived_tables_are_written_and_declared` 钉（它给
+    # 一个势力钉了 `Player`）。
+    surf = json.loads(h.capture(["--start", str(ckpt), "--control"]))
+    op = surf.get("scope") or {}
+    want = sum(len(op.get(k) or []) for k in ("factions", "bodies", "cities"))
+    ck.check("控制面两张表与写面对账：control 有行、scope 的行数 == --control 里的显式表态数",
+             bool(ctl) and len(scp) == want,
+             f"control {len(ctl)} 行 / scope {len(scp)} 行；这一局 --control 的 scope = {op}")
 
 
 def checkpoint_flow(h, ck, tmp: Path) -> None:

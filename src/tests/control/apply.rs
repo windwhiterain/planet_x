@@ -204,12 +204,13 @@ fn legacy_mode_spellings_still_load() {
         "a bare RON identifier must fail loudly"
     );
 
-    // 作用域树同理：整棵树（含旧的 `global: None` 与 `Some(x)` 键值）必须能读。
+    // 作用域树同理：三层节点（`Some(x)` 与 `None` 键值）必须能读。
+    // ⚠ 2026-10：`global` 那一档**已删**（用户裁决）——本仓不考虑向前兼容，旧档里多出来的
+    // 那个字段由 serde 按未知字段忽略（这里不再拿它当判据）。
     let scope: crate::model::ControlScope = ron::from_str(
-        r#"(global: None, factions: {"中国": Some(Player), "美国": None}, bodies: {}, cities: {})"#,
+        r#"(factions: {"中国": Some(Player), "美国": None}, bodies: {}, cities: {})"#,
     )
-    .expect("legacy scope tree must load");
-    assert_eq!(scope.global, ControlMode::Inherit);
+    .expect("scope tree must load");
     assert_eq!(
         scope.factions.get("中国").copied(),
         Some(ControlMode::Player)

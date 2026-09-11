@@ -596,6 +596,67 @@ _memoize_load()
 # ── 断言记录（够用就行：一个组一份清单 + 非零退出码）────────────────────────
 
 
+# ── clean 记录：**源码与输入都没变、上次这一组全绿 ⇒ 整组跳过** ──────────────
+#
+# 用户裁决（2026-10）：*「用 dirty 机制，过了的就 clean 不再跑，轨迹变了全 dirty」*。
+#
+# 粒度是**组**，不是判据：`ck.check(name, cond)` 的 `cond` 在调用点就已经求值了，
+# 想逐条跳过一个判据就得把 357 个调用点全改成 `if ck.dirty(...):`。组的粒度是免费的，
+# 而且 99% 的开销本来就在「读投影 + 建摘要」那一段（判据自己是纳秒级）⇒ 组粒度拿走全部收益。
+#
+# 键分两半，任一变化 ⇒ 整组 dirty：
+#   * `code`   = 组文件 + `_harness.py` + 读面 kit（改判据/改摘要/改读面都算）；
+#   * `inputs` = 缓存里的投影文件（名+大小+mtime ⇒ **引擎一改指纹就变、轨迹重算 mtime 也变**）
+#                以及 `web/static/**`（g4 会读那份静态读面）。
+_CLEAN = CACHE_ROOT / "_clean.json"
+
+
+def _source_key(name: str) -> str:
+    h = hashlib.sha256()
+    for p in (REPO / "play" / "tests" / f"{name}.py", REPO / "play" / "tests" / "_harness.py",
+              REPO / "play" / "planet_xq" / "planet_xq" / "__init__.py"):
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            h.update(b"?")
+    return h.hexdigest()[:16]
+
+
+def _inputs_key() -> str:
+    """投影 + 静态读面的「输入身份」。故意用 **名+大小+mtime**：内容没变就不算变。"""
+    h = hashlib.sha256()
+    skip = ("_cache.json", "_ckpt.json", "_run.log", "_clean.json")
+    roots = [CACHE_ROOT, REPO / "web" / "static"]
+    for root in roots:
+        if not root.exists():
+            continue
+        for f in sorted(root.rglob("*")):
+            if not f.is_file() or f.name in skip or f.suffix == ".pkl":
+                continue
+            st = f.stat()
+            h.update(f"{f.relative_to(REPO)}:{st.st_size}:{st.st_mtime_ns}".encode())
+    return h.hexdigest()[:16]
+
+
+def _clean_load() -> dict:
+    try:
+        return json.loads(_CLEAN.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _clean_store(name: str, key: dict | None) -> None:
+    rec = _clean_load()
+    if key is None:
+        rec.pop(name, None)
+    else:
+        rec[name] = key
+    try:
+        _CLEAN.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass          # 记不上 clean 只是下次多跑一遍，不该让测试挂掉
+
+
 class Checks:
     def __init__(self, group: str):
         self.group = group
@@ -622,12 +683,21 @@ def group_main(name: str, run, argv: list[str] | None = None) -> int:
                     help="release（长局默认，跑得快）| debug（重编快）| 二进制路径")
     ap.add_argument("--refresh", action="store_true", help="无视缓存，重跑投影")
     ap.add_argument("-j", "--jobs", type=int, default=0, help="并行跑几个世界（默认 ~8）")
+    ap.add_argument("--no-clean", action="store_true",
+                    help="无视 clean 记录强制重跑（`--refresh` 也会，但它还会重算投影）")
     args = ap.parse_args(argv)
     kind = args.bin if args.bin in ("release", "debug") else "release"
     if args.bin not in ("release", "debug"):
         os.environ["PLANET_X_BIN"] = args.bin
     h = Harness(kind=kind, refresh=args.refresh, jobs=args.jobs)
     ck = Checks(name)
+    # 指纹 = 二进制 + `config/`：它必须进键 —— 只改了 `config/game.ron` 还没重跑投影时，
+    # 缓存目录名（名字里带指纹）还没换，光看文件树会误判成 clean。
+    key = {"code": _source_key(name), "inputs": _inputs_key(), "fp": h.fingerprint()}
+    if not args.no_clean and not args.refresh and _clean_load().get(name) == key:
+        print(f"[{name}] **clean**：源码与输入都没变、上次这一组全绿 ⇒ 整组跳过"
+              f"（要重跑用 `--no-clean`，要重算投影用 `--refresh`）")
+        return 0
     print(f"[{name}] 二进制 {h.path}（{kind}）指纹 {h.fingerprint()}")
     t0 = time.time()
     try:
@@ -635,4 +705,10 @@ def group_main(name: str, run, argv: list[str] | None = None) -> int:
     finally:
         h.report()
         print(f"[{name}] 用时 {time.time() - t0:.1f} s")
-    return ck.finish()
+    rc = ck.finish()
+    # 只有「确实跑过判据、且全绿」才记 clean；红了就把记录清掉（别让下一次误跳）。
+    # ⚠ 键要在**跑完之后**重算：这一跑可能刚生成了新投影（那属于输入变化），
+    # 拿跑前的键去存，下一次一定对不上 ⇒ 永远 clean 不了。
+    key["inputs"] = _inputs_key()
+    _clean_store(name, key if (rc == 0 and ck.rows) else None)
+    return rc
