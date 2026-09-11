@@ -44,7 +44,8 @@ pub struct MarketState {
     #[serde(default)]
     pub offers: Vec<Offer>,
     /// 本回合每种资源的**市场价**（基价 × 稀缺系数，见 `MarketConfig`）。
-    /// 价格是持久状态：它逐回合向均衡演化，而不是每回合从零算。
+    /// 价格是持久状态：它逐回合向均衡演化，而不是每回合从零算。稀缺系数用
+    /// **可售挂单供给**（库存先扣掉各自的 buffer/reserve），不是世界总库存。
     #[serde(default)]
     pub price: ResourceMap,
     /// 本回合每种资源的**成交量**（用于观测与价格发现的需求侧统计）。
