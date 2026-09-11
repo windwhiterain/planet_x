@@ -69,6 +69,19 @@ export async function ensureBrowser({ port = 9333, profileDir, width = 1280, hei
   throw new Error(`headless 浏览器 ${timeoutMs} ms 内没起来（${exe} :${port}）`);
 }
 
+// 找一个**本工具自己的**页面来复用（指向 127.0.0.1 的游戏页；`about:blank`/devtools 不算）。
+//
+// 为什么需要它：`Session.connect` 每次 `newPage` 一个，而 `run.mjs` 又**故意不关**
+// 那个页面（服务有「最后一个页面关掉就自退」的规则）⇒ **每跑一次截图就漏一个页面**，
+// 而每个页面都在跑自己的 rAF 渲染循环。实测跑了一轮性能探针之后浏览器里堆了 **37 个**
+// 活着的 WebGL 页面，把同一台机器上**用户正在玩的游戏**拖卡了（用户原话：
+// 「卡是因为和你在一起跑」）。复用同一个页面就既不会漏、也不会让服务自退。
+export async function reusablePage(port) {
+  const list = await httpJson(`http://127.0.0.1:${port}/json/list`);
+  return (Array.isArray(list) ? list : [])
+    .find((t) => t.type === 'page' && /^http:\/\/127\.0\.0\.1:\d+\//.test(t.url || '')) || null;
+}
+
 export async function newPage(port) {
   // 新版 Chrome/Edge 的 /json/new 只接受 PUT，老版只接受 GET —— 两个都试。
   for (const method of ['PUT', 'GET']) {
@@ -100,8 +113,11 @@ export class Session {
     ws.addEventListener('close', () => { this.closed = true; });
   }
 
-  static async connect(port) {
-    const target = await newPage(port);
+  static async connect(port, { reuse = true } = {}) {
+    // **优先复用**已有的游戏页面（见 `reusablePage` 上面那段：不复用会每跑一次漏一个）。
+    // 只有一个页面时会抢 —— 本工具本来就是**独占**那个私有浏览器（9333）的，
+    // 所以不并发跑两个 run.mjs 就不会撞。
+    const target = (reuse ? await reusablePage(port) : null) || await newPage(port);
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((res, rej) => {
       ws.addEventListener('open', res, { once: true });
