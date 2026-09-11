@@ -305,7 +305,14 @@ button.primary:hover { background: #2563eb; }
 .sv-more.clickable:hover { color: var(--text); }
 .sv-more-inline { color: var(--muted); }
 .sv-omit { color: #6b7280; font-size: 10.5px; margin-top: 4px; line-height: 1.4; }
-.sv-residual-box {
+/* 「点开就地看原始 JSON」的盒子（`app.js::jsonToggle`，未组织索引里每个键一个）。
+   ⚠ 它以前借的是读面「其余字段」桶的类名 `sv-residual-box`；那个桶 2026-10 第 8 步整条
+   删掉了，所以这里给它自己的类名（样式与从前逐字相同）。
+   ⚠ 顺手实测到一个**早先就有的缺陷**（不是第 8 步引入的，也没有顺手改——不在本步范围）：
+   `jsonToggle` 只 `return btn`，那个 box **从来没被 append 进 DOM** ⇒ 未组织页的
+   「看原始数据」开关是个 no-op（点一下只换箭头）。这条 CSS 留着：等那个 box 真的接上去，
+   它就有样式了。 */
+.sv-raw-box {
   margin: 2px 0 4px; padding: 4px 6px; border-left: 2px solid var(--line);
   background: rgba(0, 0, 0, .25); max-height: 30vh; overflow: auto;
 }
@@ -324,17 +331,21 @@ button.primary:hover { background: #2563eb; }
   text-align: left; color: var(--muted); font-weight: 600; padding: 2px 6px;
   border-bottom: 1px solid var(--line); white-space: nowrap;
 }
-.sv-th-res { color: #6b7280; font-weight: normal; }
+/* 追加列（没被声明的字段）：**普通列**，只是用一条更淡的分隔线把它和整理过的列分开，
+   让人一眼看出「左边是整理过的、右边是自动追加的」——但它就在表里，不藏在任何折叠块后面。 */
+.sv-th-auto { border-left: 1px dashed var(--line); font-weight: 500; }
 .sv-td {
   padding: 1px 6px; border-bottom: 1px solid rgba(42, 51, 84, .45);
   white-space: nowrap; vertical-align: top; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
 }
+/* 追加列的格子：**对象/数组要看得见内部**（`思潮` 的四条轴、`关系` 的八家）。
+   所以这里**换行**显示（不是省略号截断）——「看都看不见」正是这次要修的东西。 */
+.sv-td-auto { border-left: 1px dashed var(--line); white-space: normal; max-width: 280px; }
 .sv-td-key { color: #9ecbff; }
 .sv-tr:hover .sv-td { background: rgba(35, 46, 88, .45); }
 .sv-val.clickable { cursor: pointer; }
 .sv-val.clickable:hover { text-decoration: underline; }
 .sv-missing { color: #3d4665; }
-.sv-residual { white-space: normal; max-width: 190px; }
 .sv-bar {
   display: inline-block; width: 34px; height: 5px; background: #22305c; border-radius: 3px;
   margin-left: 5px; vertical-align: middle; overflow: hidden;
@@ -343,6 +354,8 @@ button.primary:hover { background: #2563eb; }
 .sv-bar-fill.low { background: #f59e0b; }
 .sv-sheet { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 0 0 6px; }
 .sv-sheet-row { display: grid; grid-template-columns: 118px 1fr; gap: 2px 8px; font-size: 12px; }
+/* 卡片里追加的普通行：与手工行同形，只是上面那条线是虚线（一眼看出「这些是没被声明的」）。 */
+.sv-sheet-row-auto { border-top: 1px dashed rgba(42, 51, 84, .8); margin-top: 2px; padding-top: 2px; }
 .sv-sheet-k { color: var(--muted); }
 .sv-sheet-v { color: var(--text); overflow-wrap: anywhere; }
 .sv-card {
