@@ -371,9 +371,45 @@ button.primary:hover { background: #2563eb; }
 .sv-inline-bar { color: var(--muted); font-size: 10.5px; margin-bottom: 4px; }
 .sv-select { max-height: 34vh; overflow: auto; }
 /* ⚠ 2026-10 第 9 步：`.sv-list` / `.sv-lrow` / `.sv-lkey` / `.sv-lshape` / `.sv-lby` /
-   `.sv-badge(.ok|.warn)` 也一并删了 —— 全仓 grep 的结论是**只有**那张「未组织」页
-   （`app.js::renderLeftover` / `renderSpecCheck` / `renderWriteCheck` / `checkRow`）在用它们，
-   没有一个别的页/模块碰过（判据 `g4_spec.py` §9 之后会盯着这件事）。 */
+   `.sv-badge(.ok|.warn)` 随那张「未组织」页一起删了（全仓 grep 的结论是**只有**它在用）。
+   ⚠ 2026-10 第 11 步：`.sv-list` / `.sv-lrow` / `.sv-lkey` **回来了**，但换了用途：
+   它们现在是**分层 UI 的外层总览列表**（一行一个项目，名字 + `brief` 关键指标 + `›`），
+   由 `specview.js::renderLayers` 渲染 —— 与那张被删的页没有任何关系（`.sv-lshape` /
+   `.sv-lby` / `.sv-badge` 没有回来，它们只属于那个审计页）。 */
+
+/* --- 分层 UI：外层总览列表（`layout: layers` 的第一层）--------------------------
+   430px 的窄栏里，**一行一个项目**、不横向滚动：名字 + 少量关键指标（`views.json` 的 `brief`
+   声明），整行可点、也能 Tab 聚焦。关键指标多了就换行（`flex-wrap`），绝不撑出横向滚动条。 */
+.sv-list { display: flex; flex-direction: column; gap: 3px; }
+.sv-lrow {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 3px 6px; border: 1px solid transparent; border-radius: 5px;
+  background: #141b34; cursor: pointer; font-size: 12px; min-width: 0;
+}
+.sv-lrow:hover { border-color: var(--line); background: #182142; }
+.sv-lrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sv-lkey {
+  color: #9ecbff; font-weight: 600; display: inline-flex; align-items: baseline; gap: 4px;
+  min-width: 0; overflow-wrap: anywhere;
+}
+.sv-lbriefs { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sv-brief { display: inline-flex; align-items: baseline; gap: 3px; min-width: 0; }
+.sv-brief-k { color: var(--muted); font-size: 10.5px; }
+.sv-lgo { margin-left: auto; color: var(--muted); font-size: 13px; }
+.sv-lrow:hover .sv-lgo { color: var(--text); }
+.sv-detail { display: flex; flex-direction: column; gap: 6px; }
+/* 面包屑 + 「← 返回总览」：层级根那一节**也能点**（回到这一层的总览），与返回同一个动作。 */
+.sv-crumbs {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; font-size: 12px;
+}
+.sv-back { color: var(--accent); font-weight: 600; }
+.sv-back:hover, .sv-crumb-root:hover { text-decoration: underline; }
+.sv-back:focus-visible, .sv-crumb-root:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sv-crumb { display: inline-flex; align-items: baseline; gap: 5px; color: var(--muted); }
+.sv-crumb-root { color: #9ecbff; }
+.sv-crumb-sep { color: var(--muted); }
+.sv-crumb-cur { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 
 @media (max-width: 720px) {
   .edge-panel.left { width: 100%; }

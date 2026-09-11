@@ -11,7 +11,8 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**40 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**46 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+（第 10 步时是 40 个；第 11 步加了 ㊱–㊵ 五条**分层 UI**的量具，见下面那段。）
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
@@ -43,6 +44,18 @@ uv run --project play/planet_xq python play/tests/_g4_negative.py
 「追加接线仍在」那一支点亮（它把 `sv-th-auto` 改回 `sv-th-res` = 断了一根接线）。
 ⚠ ㉕㉖㉙㉚㉝ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
 跑完还原——**真文件一个字节都不碰**（与上面那些 views.json 的注入同一纪律）。
+㊱–㊵ 是第 11 步（**分层 UI**：外层总览 → 点进内层详情，2026-10）那三条新判据的量具 ——
+用户裁决 *「不要使用表格」* / *「外层显示总览，点击某个项目进入内层显示详情」*：
+㊱ 剪断 `specview.js` 里总览行的**进入路径**（`fire` 变成空函数 = 点一行没反应）⇒「每个总览行
+   都能进详情层」自己红；
+㊲ 把一条 `brief` 改成**不命中任何列**的名字（总览行会空一个指标）⇒「分层声明」自己红；
+㊳ 让**详情层不再追加残差行**（`sheetOfRecord` 跳过 `autoSheetRow`）⇒「详情层覆盖」自己红，
+   而 §8a **仍然绿** —— 这正是「两条不是同一条」的证据（§8a 查声明求值、§10c 查屏幕上真有的行）；
+㊴ 把一条 `single` 的**理由改成空白**（拿「就一条」当逃生门）⇒「分层声明」自己红；
+㊵ 把一张多记录的表改成 `single`（"就一条"是假话）⇒「每个总览行都能进详情层」自己红
+   （它连带验的是"这句话不是空话"）；
+㊶ 让 `wrap()` 又把**空对象**当成"一条空记录"（`@post.haul_steps` 开局就是 `{}` ⇒ 实机
+   会长出一行名字是 `·` 的幽灵项目）⇒ 同一条判据夹带的**空来源合成场景**自己红。
 ㉞㉟ 是 §8e 条（**读面自检·数据级**，2026-10 第 10 步：声明过的读列在真世界里必须至少取到过
 一次非空值——接手第 9 步随「未组织」页删掉的**运行时**自检 `renderSpecCheck`）的量具：
 ㉞ 把一条**裸字段列**的 `path` 改坏（`trades.moved` → `moved_typo`）；㉟ 把一条**表达式列**
@@ -643,6 +656,110 @@ def main() -> int:
     bad = run_case("declared-expr-path-broken", d)
     if not any(COL_CHECK in n for n in bad):
         MISBEHAVED.append(f"declared-expr-path-broken：§8e 没红（实际红：{bad}）")
+
+    # ㊱–㊵ **分层 UI**（第 11 步，2026-10）的量具：用户裁决 *「不要使用表格」*
+    #     *「外层显示总览，点击某个项目进入内层显示详情」*。骨架换了 ⇒ 新骨架自己的守卫
+    #     也必须**会红**（否则它就只是一段好看的文本）：
+    LAYER_DECL_CHECK = "第 11 步·分层声明"
+    LAYER_ENTER_CHECK = "第 11 步·每个总览行都能进详情层"
+    LAYER_COVER_CHECK = "第 11 步·详情层覆盖"
+    COVER_8A_CHECK = "追加完整性（**详情层**）"
+    #     ⚠ 注入的是 `web/static/*.js` 的 tempfile 拷贝（`g4_spec.STATIC_JS` 指过去），
+    #     真文件一个字节都不碰（与 ㉕㉖㉙㉚㉝ 同一纪律）。
+    static11 = T / "static-layers-inject"
+    if static11.exists():
+        shutil.rmtree(static11)
+    shutil.copytree(static_real, static11)
+    g4_spec.STATIC_JS = static11
+    try:
+        sv11 = static11 / "specview.js"
+        orig_sv11 = sv11.read_text(encoding="utf-8")
+
+        # ㊱ **总览行的进入路径断了**（点一行没反应）：分层声明仍然自洽（§10a 绿），
+        #    但「每个总览行都能进详情层」必须自己红。
+        enter_anchor = "    const fire = () => onEnter(r);\n"
+        assert enter_anchor in orig_sv11, "specview.js 的 `const fire = () => onEnter(r);` 换了形状：判据/代码换了口径？"
+        sv11.write_text(orig_sv11.replace(
+            enter_anchor,
+            "    const fire = () => {};   // ← 注入：总览行的进入路径被剪断\n"), encoding="utf-8")
+        bad = run_case("layer-enter-broken")
+        if not any(LAYER_ENTER_CHECK in n for n in bad):
+            MISBEHAVED.append(f"layer-enter-broken：分层进入判据没红（实际红：{bad}）")
+        sv11.write_text(orig_sv11, encoding="utf-8")
+
+        # ㊳ **详情层不再追加残差行**（`sheetOfRecord` 跳过 `autoSheetRow`）：
+        #    「详情层覆盖」必须红，而 §8a（声明求值那一条）**仍然绿** ——
+        #    这就是"两条不是同一条判据"的证据（声明层算对了 ≠ 屏幕上摆出来了）。
+        append_anchor = "    residualKeys(r.value, spec).forEach((key) => grid.appendChild(autoSheetRow(r.value, key)));\n"
+        assert append_anchor in orig_sv11, "specview.js 的 `autoSheetRow` 追加行换了形状：判据/代码换了口径？"
+        sv11.write_text(orig_sv11.replace(
+            append_anchor,
+            "    void residualKeys;   // ← 注入：详情层不再追加残差行\n"), encoding="utf-8")
+        bad = run_case("detail-append-broken")
+        if not any(LAYER_COVER_CHECK in n for n in bad):
+            MISBEHAVED.append(f"detail-append-broken：详情层覆盖判据没红（实际红：{bad}）")
+        if any(COVER_8A_CHECK in n for n in bad):
+            MISBEHAVED.append(f"detail-append-broken：§8a 也红了 —— 那两条就分不开了（实际红：{bad}）")
+        sv11.write_text(orig_sv11, encoding="utf-8")
+
+        # ㊶ **空来源又长出一行**（`wrap()` 把 `{}` 当成"一条空记录" = 幽灵项目回来）：
+        #    「每个总览行都能进详情层」自己红（它夹带的空来源合成场景就是为这个缺口写的）。
+        empty_anchor = "      if (!keys.length) return [];\n      const vals = Object.values(v);\n"
+        empty_cond = "      if (vals.every(isObj)) return keys.map"
+        assert empty_anchor in orig_sv11 and empty_cond in orig_sv11, \
+            "specview.js 的 `wrap()` 空对象分支换了形状：判据/代码换了口径？"
+        sv11.write_text(orig_sv11
+                        .replace(empty_anchor, "      const vals = Object.values(v);\n")
+                        .replace(empty_cond,
+                                 "      // ← 注入：空对象又被当成一条空记录（幽灵行回来）\n"
+                                 "      if (vals.length && vals.every(isObj)) return keys.map"),
+                        encoding="utf-8")
+        bad = run_case("empty-source-phantom-row")
+        if not any(LAYER_ENTER_CHECK in n for n in bad):
+            MISBEHAVED.append(f"empty-source-phantom-row：分层进入判据没红（实际红：{bad}）")
+        sv11.write_text(orig_sv11, encoding="utf-8")
+    finally:
+        g4_spec.STATIC_JS = static_real
+
+    # ㊲ **`brief` 里写一个不命中任何列的名字**（总览行会空一个指标）⇒ 分层声明必须红。
+    d = clone()
+    hit = 0
+    for v in walk_views(d):
+        if v.get("id") != "faction-table":
+            continue
+        v["brief"] = ["实力占比改成不存在的名字"] + list(v.get("brief") or [])[1:]
+        hit += 1
+    assert hit == 1, "views.json 里没有 `faction-table.brief`：判据/声明换了口径？"
+    bad = run_case("brief-without-column", d)
+    if not any(LAYER_DECL_CHECK in n for n in bad):
+        MISBEHAVED.append(f"brief-without-column：分层声明判据没红（实际红：{bad}）")
+
+    # ㊴ **`single` 的理由写成空白**（拿「就一条」当逃生门）⇒ 分层声明必须红。
+    d = clone()
+    hit = 0
+    for v in walk_views(d):
+        if v.get("id") == "situation":
+            v["single"] = "   "
+            hit += 1
+    assert hit == 1, "views.json 里没有 `situation.single`：判据/声明换了口径？"
+    bad = run_case("single-without-reason", d)
+    if not any(LAYER_DECL_CHECK in n for n in bad):
+        MISBEHAVED.append(f"single-without-reason：分层声明判据没红（实际红：{bad}）")
+
+    # ㊵ **把一张多记录的表改成 `single`**（"就一条"是假话）⇒「每个总览行都能进详情层」
+    #    必须红：它连带验的是这句话**不是空话**（真世界里那条视图有 22 条记录）。
+    d = clone()
+    hit = 0
+    for v in walk_views(d):
+        if v.get("id") == "city-table":
+            v["layout"] = "sheet"
+            v["single"] = "就一条（← 注入：假话）"
+            v.pop("brief", None)
+            hit += 1
+    assert hit == 1, "views.json 里没有 `city-table`：判据/声明换了口径？"
+    bad = run_case("single-view-not-single", d)
+    if not any(LAYER_ENTER_CHECK in n for n in bad):
+        MISBEHAVED.append(f"single-view-not-single：分层进入判据没红（实际红：{bad}）")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")
