@@ -1,5 +1,19 @@
 //! AI 建图的单元测试。
 
+//! ## 2026-10：能只看数据的那几条搬去了 `play/tests/g2_mid.py`
+//!
+//! | 原用例 | 现在住 | 为什么能搬 |
+//! | --- | --- | --- |
+//! | `editing_a_blueprint_does_not_touch_existing_ships` / `retuning_a_design_never_touches_ships_already_in_space` | g2「**出厂快照不随时间变**」（一条舰的选装一生恒定，400 条舰零漂移） | `ships.components` 与 `blueprints.components` 都在读面上 |
+//! | `ship_spawned_event_carries_the_blueprint_only_when_there_is_one` | g2「造舰事件的图归因与舰表一致」（374 条事件） | 事件层 `ship_spawned.data.blueprint` ↔ 舰表 `blueprint` |
+//! | `designs_are_deduped_by_class_and_signature` | g2「图按 `(舰级, 选装)` 去重」（18,691 个签名） | 图库表逐回合可查 |
+//! | `a_class_drift_between_the_yard_and_its_design_is_reconciled` | g2「建造区挂了图就必须挂到存在的图上」+「舰级不符只是**滞后**、会自己收敛」（16,709 个建造区·回合；实测 3 行不符、最长滞后 1 回合） | `cities.buildings[].{ship_type,blueprint}` + 图库表 |
+//!
+//! **留在这里的**：`a_player_pinned_design_and_its_yard_are_left_alone`、`a_dangling_pointer_is_left_dangling`、
+//! `only_unreferenced_selfmade_designs_are_reaped`、`the_ai_creates_a_design_for_every_yard_it_owns`
+//! ——前三条要**拨控制叶/删指针**造 A/B，第四条要「每个区的**有效**归属」（读面只有逐个区自己的
+//! `blueprint` 指针，判不出「AI 该不该给它建图」）。
+
 use super::*;
 use crate::config::load_config;
 use crate::control::apply_patch;
@@ -74,54 +88,6 @@ fn the_ai_creates_a_design_for_every_yard_it_owns() {
         );
     }
     // 建图是**纯状态改写**：它不消费主 Prng（函数签名里根本没有 rng）。
-}
-
-/// **去重**（`ship-blueprint.md` §5 的"设计图爆炸"）：同一 `(舰级, 选装签名)` 只留一张，
-/// 而且再跑一趟**幂等**（不会每回合新造一张）。
-#[test]
-fn designs_are_deduped_by_class_and_signature() {
-    let (config, mut state) = fresh(7);
-    let fid = "中国".to_string();
-    let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
-    let first = lib(&state, &fid);
-    assert!(!first.is_empty());
-    // 幂等：同样的状态再跑一趟，图库一个字节都不长。
-    let mut out2 = Vec::new();
-    design_fleets(&mut state, &config, &mut out2, &mut crate::model::RoundInputs::default());
-    let second = lib(&state, &fid);
-    assert_eq!(
-        first.keys().collect::<Vec<_>>(),
-        second.keys().collect::<Vec<_>>(),
-        "同一状态再跑一趟不该新造图（去重 + 幂等）"
-    );
-    // 没有两张图是同一个 (舰级, 选装签名)；同舰级的建造区共用一个名字。
-    let mut seen: BTreeMap<(String, Vec<String>), String> = BTreeMap::new();
-    for (name, leaf) in &second {
-        let key = (leaf.value.class.clone(), leaf.value.components.clone());
-        if let Some(other) = seen.get(&key) {
-            // 「同签名不同名」只允许在"玩家自己也插了一张"的情形，这里没有玩家 ⇒ 不许出现。
-            panic!("图 {name} 与 {other} 是同一个 (舰级, 选装签名)，应当归并");
-        }
-        seen.insert(key, name.clone());
-    }
-    let mut by_class: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (_, _, ptr) in yards(&state, &fid) {
-        if let Some(ptr) = ptr {
-            let class = second
-                .get(&ptr)
-                .map(|l| l.value.class.clone())
-                .unwrap_or_default();
-            by_class.entry(class).or_default().insert(ptr);
-        }
-    }
-    for (class, names) in by_class {
-        assert_eq!(
-            names.len(),
-            1,
-            "同舰级的建造区该共用一张图（{class} 有 {names:?}）"
-        );
-    }
 }
 
 /// **玩家的图一个字都不许动**：玩家把图钉成 `Player` 并让建造区指着它 ⇒ 那个建造区
@@ -245,116 +211,3 @@ fn only_unreferenced_selfmade_designs_are_reaped() {
     );
 }
 
-/// **改图不影响已有的舰**（快照语义）：设计图重估了选装，已经下水的舰一个字节都不变，
-/// 而**之后**下水的舰按新图装配。
-#[test]
-fn retuning_a_design_never_touches_ships_already_in_space() {
-    let (config, mut state) = fresh(42);
-    let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid)
-        .into_iter()
-        .next()
-        .expect("中国有建造区");
-    let class = state
-        .city(&city)
-        .unwrap()
-        .buildings
-        .iter()
-        .find(|b| b.id == bid)
-        .and_then(|b| b.ship_type.clone())
-        .unwrap();
-    // 先让 AI 建图并指过去，然后照这张图造一艘舰。
-    let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
-    let ptr = yards(&state, &fid)
-        .into_iter()
-        .find(|(c, b, _)| *c == city && *b == bid)
-        .and_then(|(_, _, p)| p)
-        .expect("建造区该被指到一张图");
-    let spec = crate::sim::ShipSpawn {
-        owner: fid.clone(),
-        class: &class,
-        position: state.body_position(&state.capital_body(&fid)),
-        city: Some(city.clone()),
-        via: crate::model::SpawnVia::Shipyard,
-        pay_components: false,
-        blueprint: Some(&ptr),
-    };
-    let ship = crate::sim::spawn_ship(&mut state, &config, spec);
-    let before = state.ship(&ship).cloned().unwrap();
-    assert_eq!(
-        before.blueprint.as_deref(),
-        Some(ptr.as_str()),
-        "出厂归因：这艘舰出自那张图"
-    );
-    assert_eq!(
-        before.components,
-        lib(&state, &fid)[&ptr].value.components,
-        "按图装配（`Auto` 图的选装**真的生效**——本轮改掉的旧语义是「静默忽略」）"
-    );
-    // 把库存掏空 ⇒ 下一次重估必然给出不同的选装（甚至空），于是图会被改写。
-    if let Some(f) = state.faction_mut(&fid) {
-        for v in f.resources.values_mut() {
-            *v = 0.0;
-        }
-    }
-    let mut config2 = config.clone();
-    config2.autocontrol.blueprint_chance = 1.0; // 让"这一回合重估"变成确定事件
-    let mut out2 = Vec::new();
-    design_fleets(&mut state, &config2, &mut out2, &mut crate::model::RoundInputs::default());
-    let after = state.ship(&ship).cloned().unwrap();
-    assert_eq!(
-        after.components, before.components,
-        "**已下水的舰是快照**：改图不许追溯改它"
-    );
-    assert_eq!(after.hull_max, before.hull_max);
-    assert_eq!(after.component_hp, before.component_hp);
-}
-
-/// **舰级对不上就修**（口径 A）：`retool` 改了建造区的舰级之后，设计图那一趟要把图与区
-/// 重新对齐（换名字/换图），而不是留下"图说造 A、区说造 B"的悬空口径。
-#[test]
-fn a_class_drift_between_the_yard_and_its_design_is_reconciled() {
-    let (config, mut state) = fresh(42);
-    let fid = "中国".to_string();
-    let (city, bid, _) = yards(&state, &fid)
-        .into_iter()
-        .next()
-        .expect("中国有建造区");
-    let mut out = Vec::new();
-    design_fleets(&mut state, &config, &mut out, &mut crate::model::RoundInputs::default());
-    let old = yards(&state, &fid)
-        .into_iter()
-        .find(|(c, b, _)| *c == city && *b == bid)
-        .and_then(|(_, _, p)| p)
-        .unwrap();
-    // 把建造区改造成另一级（就像 `retool_shipyards` 做的那样）。
-    let new_class = if lib(&state, &fid)[&old].value.class == "cruiser" {
-        "corvette"
-    } else {
-        "cruiser"
-    };
-    if let Some(c) = state.city_mut(&city) {
-        for b in &mut c.buildings {
-            if b.id == bid {
-                b.ship_type = Some(new_class.to_string());
-            }
-        }
-    }
-    let mut out2 = Vec::new();
-    design_fleets(&mut state, &config, &mut out2, &mut crate::model::RoundInputs::default());
-    let ptr = yards(&state, &fid)
-        .into_iter()
-        .find(|(c, b, _)| *c == city && *b == bid)
-        .and_then(|(_, _, p)| p)
-        .unwrap();
-    let l = lib(&state, &fid);
-    assert_eq!(
-        l[&ptr].value.class, new_class,
-        "图与建造区必须重新对齐（口径 A）"
-    );
-    assert_ne!(
-        ptr, old,
-        "舰级变了 ⇒ 换一张对应舰级的图（名字里就写着舰级）"
-    );
-}
