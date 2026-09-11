@@ -139,6 +139,15 @@ pub fn noun_schema_value() -> serde_json::Value {
         // 控制面（写面）也要：控制行的名词（`首都`/`开发预算`… 的字段名，以及 `global`
         // 这类作用域键）住在它的 schema 里。**四半合起来**才是"界面上能出现的所有名词"。
         "control": crate::control::control_schema_value(),
+        // **谁靠哪个字段认人**：也一并发出去，三端（Python 测试 / kit / 前端）都来问这里，
+        // 不许各自维护镜像小表。`structs` 的唯一真值是 `model::IDENTITY`，
+        // `tables` 的是投影自己的 `LAZY`（见 `projection::table_identity_keys`）。
+        "identity": {
+            "structs": crate::model::IDENTITY.iter()
+                .map(|(s, f)| (s.to_string(), serde_json::Value::from(*f)))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
+            "tables": crate::projection::table_identity_keys(),
+        },
     })
 }
 
