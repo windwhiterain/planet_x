@@ -11,7 +11,7 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**36 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**38 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
@@ -35,7 +35,13 @@ uv run --project play/planet_xq python play/tests/_g4_negative.py
    未声明 = 自动追加，用户要的正是这个），但它必须**在判据文本里指出**这一列现在只能靠追加
    （声明 3→2、追加 7→8，且 `资源` 落在追加串里**引擎字段序**的位置上）。㉛ 走 `expect="evidence"`
    ——它验的是「判据把这件事**说出来了**」，不是"恰好没红"。
-⚠ ㉕㉖㉙㉚ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
+㉜㉝ 是 §9 条（**页级兜底桶**，2026-10 第 9 步）的量具——同一个用户裁决的**另一层**：
+第 8 步删的是列/行级的桶，第 9 步删的是页级的（左栏那张自动生成的「未组织」页）。
+㉜ 把那张页塞回**声明**（`views.json` 的 `pages`）；㉝ 把页塞回**前端代码**（复刻第 9 步以前
+`sidePages()` 里那段 `.concat([{id:'leftover', …}])`）——两条都要求「没有页级兜底桶」
+判据**自己**红（页的两个来源各堵一面，只堵一面的守卫是假守卫）。㉚ 顺带也把 §9 夹带的
+「追加接线仍在」那一支点亮（它把 `sv-th-auto` 改回 `sv-th-res` = 断了一根接线）。
+⚠ ㉕㉖㉙㉚㉝ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
 跑完还原——**真文件一个字节都不碰**（与上面那些 views.json 的注入同一纪律）。
 """
 
@@ -502,6 +508,8 @@ def main() -> int:
     #     真文件一个字节都不碰（与 ㉕㉖ 同一纪律）。
     APPEND_COVER = "张读面表/卡片"
     APPEND_BUCKET = "代码里没有折叠桶"
+    # 第 9 步那条（页级兜底桶）——㉚ 也会把它夹带的「追加接线仍在」那一支点亮，一并断言。
+    PAGE_BUCKET_CHECK = "第 9 步·没有页级兜底桶"
     static8 = T / "static-append-inject"
     if static8.exists():
         shutil.rmtree(static8)
@@ -532,6 +540,10 @@ def main() -> int:
         bad = run_case("bucket-back")
         if not any(APPEND_BUCKET in n for n in bad):
             MISBEHAVED.append(f"bucket-back：没有折叠桶判据没红（实际红：{bad}）")
+        # 这一注入同时把 `sv-th-auto` 改成了 `sv-th-res` = **追加接线断了一根** ⇒ 第 9 步那条
+        # 判据夹带的「不许把上一步的机制一起删掉」那一支也必须跟着红（否则那一支是恒绿的）。
+        if not any(PAGE_BUCKET_CHECK in n for n in bad):
+            MISBEHAVED.append(f"bucket-back：§9 的「追加接线仍在」那一支没红（实际红：{bad}）")
         sv.write_text(orig_sv, encoding="utf-8")
     finally:
         g4_spec.STATIC_JS = static_real
@@ -551,6 +563,46 @@ def main() -> int:
         hit += len(before) - len(v["columns"])
     assert hit == 1, "faction-table 里没有 `资源` 那一列：判据/声明换了口径？"
     run_case("undeclare-column", d, expect="evidence")
+
+    # ㉜㉝ **页级兜底桶**（第 9 步，2026-10）的量具：用户裁决 *「我不希望有『其余』这样的栏目」*
+    #     —— 第 8 步删的是**列级 / 行级**的桶（㉙㉚㉛ 盯着），第 9 步删的是**页级**的同一个概念：
+    #     左栏那张自动生成的「未组织」页（`id: 'leftover'`）。它不是一张声明出来的页，而是
+    #     `app.js::sidePages()` 里 `.concat([{id:'leftover', …}])` 现拼的 —— 所以**两个面**
+    #     都要有量具（只堵一面的话，另一面怎么写都绿）：
+    #     ㉜ 把那张页塞回**声明**（`views.json` 的 `pages`）；
+    #     ㉝ 把页塞回**前端代码**（复刻第 9 步以前 `sidePages()` 的那两行）。
+    #     两条都要求「没有页级兜底桶」这条判据**自己**红（不是碰巧别处红了）。
+    #     ⚠ ㉝ 注入的是 `web/static/*.js` 的 tempfile 拷贝（`g4_spec.STATIC_JS` 指过去，
+    #     与 ㉕㉖㉙㉚ 同一纪律），真文件一个字节都不碰。
+    d = clone()
+    d["pages"].append({"id": "leftover", "title": "未组织", "views": []})
+    bad = run_case("leftover-page-back-in-decl", d)
+    if not any(PAGE_BUCKET_CHECK in n for n in bad):
+        MISBEHAVED.append(f"leftover-page-back-in-decl：§9 没红（实际红：{bad}）")
+
+    static9 = T / "static-page-inject"
+    if static9.exists():
+        shutil.rmtree(static9)
+    shutil.copytree(static_real, static9)
+    g4_spec.STATIC_JS = static9
+    try:
+        app9 = static9 / "app.js"
+        orig_app9 = app9.read_text(encoding="utf-8")
+        anchor = "function sidePages() {\n  return viewsDoc.pages || [];\n}"
+        assert anchor in orig_app9, "app.js 的 `sidePages()` 换了形状：判据/代码换了口径？"
+        app9.write_text(orig_app9.replace(
+            anchor,
+            "function sidePages() {\n"
+            "  return (viewsDoc.pages || []).concat([\n"
+            "    { id: 'leftover', title: '未组织', hint: '← 注入：页级兜底桶回来了' },\n"
+            "  ]);\n"
+            "}"), encoding="utf-8")
+        bad = run_case("leftover-page-back-in-code")
+        if not any(PAGE_BUCKET_CHECK in n for n in bad):
+            MISBEHAVED.append(f"leftover-page-back-in-code：§9 没红（实际红：{bad}）")
+        app9.write_text(orig_app9, encoding="utf-8")
+    finally:
+        g4_spec.STATIC_JS = static_real
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

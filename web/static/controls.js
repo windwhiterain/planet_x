@@ -134,31 +134,14 @@
     return doc;
   }
 
-  /// 写面自检（与读面的「运行时自检」对偶）：`--control-schema` 里每个叶，
-  /// 要么被某条 `leaf` 行认领、要么在 `write_omit` 里写了理由——否则它在这个界面上
-  /// **凭空消失**（那正是铁律 R 不许的另一半：静默藏）。
-  function audit() {
-    const d = window.SpecView && window.SpecView.doc ? window.SpecView.doc() : null;
-    const out = [];
-    if (!d) return out;
-    if (MANIFEST_ERR) return [{ ok: false, field: '(manifest)', text: '拉不到 /api/control-schema：' + MANIFEST_ERR }];
-    if (!MANIFEST) return [{ ok: false, field: '(manifest)', text: '控制面结构事实还没拉回来' }];
-    const claimed = new Set();
-    const walk = (spec) => (spec.columns || []).forEach((c) => { if (c.leaf != null) claimed.add(fieldOf(c.leaf)); });
-    (d.pages || []).forEach((p) => (p.views || []).forEach(walk));
-    (d.select || []).forEach(walk);
-    const omitted = {};
-    (d.write_omit || []).forEach((o) => { omitted[o.field] = o.why; });
-    Object.keys(MANIFEST.leaves).forEach((f) => {
-      if (claimed.has(f)) out.push({ ok: true, field: f, text: '被组织点认领（可以改）' });
-      else if (omitted[f]) out.push({ ok: true, field: f, text: '声明不看：' + omitted[f] });
-      else out.push({ ok: false, field: f, text: '没有任何组织点认领它，也没写在 write_omit 里 ⇒ 界面上改不了它' });
-    });
-    Object.keys(claimed).forEach((f) => {
-      if (!MANIFEST.leaves[f]) out.push({ ok: false, field: f, text: 'views.json 认领了一个引擎不认识的叶（拼错了？）' });
-    });
-    return out;
-  }
+  // ⚠ 2026-10 第 9 步：这里以前有一个 `audit()`（写面自检：`--control-schema` 里每个叶要么被
+  // 某条 `leaf` 行认领、要么在 `write_omit` 里写了理由）。它**唯一的调用者**是
+  // `app.js::renderWriteCheck`，而那只挂在自动生成的「未组织」页上（页级兜底桶，已整条删除）
+  // ⇒ 这里也删掉（**只服务它**：全仓 grep 只有那一处调用）。
+  // **信息没丢，只是换了层**：同一件事现在由数据级守卫盯着 —— `g4_spec.py` §4「认领完整性」
+  // （每个 `leaves[].field`/`actions[].field` 要么被行认领、要么在 `write_omit` 里有非空 why，
+  // 且 `leaf`/`action`/`owner` 行与 `leaf_ui`/`action_ui` 不许有孤儿），非恒真由
+  // `_g4_negative.py` ⑥⑦⑧⑨⑩ 盯着。运行时不再重复报一遍。
 
   // --- 宿主钩子：一行控制行 → 一个节点 ----------------------------------------
   function controlNode(col, rec, recKey, opts) {
@@ -636,7 +619,6 @@
     load,
     decorateDoc,
     controlNode,
-    audit,
     manifest,
     manifestError,
     leafSpec,

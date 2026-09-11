@@ -151,7 +151,9 @@ function roleHint(r) {
 // --- 读面（组织点）---------------------------------------------------------
 // 左侧面板有两个模式：**控制**（写面，手写的控制树）与**读面**（组织点声明出来的视图）。
 // 读面的一切由 `web/static/views.json`（数据）驱动，渲染交给 `specview.js`（通用求值器）——
-// 本文件只做三件事：把根喂给它、把「未组织」审计算出来、把点击接到选中读面上。
+// 本文件只做两件事：把根喂给它、把点击接到选中读面上。
+// ⚠ 2026-10 第 9 步：以前还有第三件事——把「未组织」审计（页级兜底桶）算出来，那是**页级的
+// 「其余」**（用户裁决 *「我不希望有"其余"这样的栏目」*），整条删除；墓碑见 `sidePages`。
 // 依据与铁律见 `.agents/notes/web-human-views.md`。
 let viewsDoc = { pages: [], select: [] };   // views.json 的内容
 let readPage = 0;                            // 读面当前页（views.json 的 pages 下标）
@@ -263,231 +265,8 @@ function renderReadPanel() {
     tabsBox.appendChild(t);
   });
   const page = pages[readPage];
-  if (page.id === 'leftover') {
-    renderSpecCheck(body);
-    renderWriteCheck(body);
-    renderLeftover(body);
-    return;
-  }
   if (page.hint) body.appendChild(el('div', { class: 'sv-pagehint' }, page.hint));
   (page.views || []).forEach((spec) => window.SpecView.renderView(body, spec));
-}
-
-// --- 「未组织」索引（铁律 R 的兜底一侧）--------------------------------------
-// 引擎加了新根 / 新顶层集合 / 新字段 ⇒ 它们**自动**出现在这里（通用 widget 渲染），
-// 不需要谁来更新前端。反过来，这里也把「某条被整理过的集合里，还有哪些字段没被认领」列出来。
-function renderLeftover(body) {
-  // 把每条组织点引用的路径归一成**段**（去掉 [*] / [?..] / ${..} 与 @根），供"谁整理了什么"用。
-  const claimSegs = () => {
-    const out = [];
-    window.SpecView.claimedPaths(viewsDoc).forEach((c) => {
-      const segs = String(c.expr)
-        .split('.')
-        .map((s) => s.replace(/\[.*$/, '').replace(/\$\{[^}]*\}/g, '·'))
-        .filter((s) => s && s !== '·');
-      if (!segs.length) return;
-      const root = segs[0].replace(/^@/, '');
-      out.push({ view: c.view, root, rest: segs.slice(1) });
-    });
-    return out;
-  };
-  const claimed = claimSegs();
-  const views = (viewsDoc.pages || []).flatMap((p) => p.views || []).concat(viewsDoc.select || []);
-  const specById = (id) => views.find((v) => v.id === id);
-
-  ['state', 'pre', 'post', 'config', 'session', 'control', 'scope'].forEach((rootName) => {
-    const root = specRoot(rootName);
-    if (root === undefined || root === null) return;
-    const wrap = el('div', { class: 'sv-view' });
-    wrap.appendChild(el('h3', { class: 'sv-title' }, '@' + rootName));
-    if (Array.isArray(root)) {
-      const objs = root.filter((x) => x && typeof x === 'object' && !Array.isArray(x));
-      if (!objs.length) {
-        wrap.appendChild(el('div', { class: 'sv-hint' }, '数组：' + root.length + ' 项（未组织：整份由通用 widget 渲染）'));
-        wrap.appendChild(jsonToggle('展开原始数据', () => root, rootName));
-        body.appendChild(wrap);
-        return;
-      }
-      // 「一个数组装着一批对象」（`@control` = 每势力一条）⇒ 把**键的并集**逐项标出来：
-      // 已经被控制行认领的叶不能又被报成「未组织」（那会把「谁管着它」说反）。
-      const keys = [];
-      objs.forEach((o) => Object.keys(o).forEach((k) => { if (keys.indexOf(k) < 0) keys.push(k); }));
-      wrap.appendChild(el('div', { class: 'sv-hint' },
-        '数组：' + root.length + ' 项 × 对象；按**键的并集**逐项标（共 ' + keys.length + ' 个键）'));
-      const list = el('div', { class: 'sv-list' });
-      keys.forEach((k) => {
-        const hits = claimed.filter((c) => c.root === rootName && c.rest[0] === k);
-        const row = el('div', { class: 'sv-lrow' });
-        row.appendChild(el('span', { class: hits.length ? 'sv-badge ok' : 'sv-badge' }, hits.length ? '已整理' : '未组织'));
-        row.appendChild(el('span', { class: 'sv-lkey' }, k));
-        const any = objs.find((o) => o[k] !== undefined);
-        row.appendChild(el('span', { class: 'sv-lshape' }, shapeOf(any ? any[k] : null)));
-        if (hits.length) row.appendChild(el('span', { class: 'sv-lby' }, '← ' + [...new Set(hits.map((c) => c.view))].join('、')));
-        row.appendChild(jsonToggle('看原始数据', () => objs.map((o) => o[k]).filter((v) => v !== undefined), rootName + '[*].' + k));
-        list.appendChild(row);
-      });
-      wrap.appendChild(list);
-      body.appendChild(wrap);
-      return;
-    }
-    const list = el('div', { class: 'sv-list' });
-    Object.keys(root).forEach((k) => {
-      const v = root[k];
-      const hits = claimed.filter((c) => c.root === rootName && c.rest[0] === k);
-      const direct = hits.filter((c) => c.rest.length === 1);
-      const nested = hits.filter((c) => c.rest.length > 1);
-      const row = el('div', { class: 'sv-lrow' });
-      row.appendChild(el('span', (direct.length || nested.length) ? 'sv-badge ok' : 'sv-badge',
-        (direct.length || nested.length) ? '已整理' : '未组织'));
-      row.appendChild(el('span', { class: 'sv-lkey' }, k));
-      row.appendChild(el('span', { class: 'sv-lshape' }, shapeOf(v)));
-      if (direct.length) row.appendChild(el('span', { class: 'sv-lby' }, '← ' + [...new Set(direct.map((c) => c.view))].join('、')));
-      // 嵌套集合（如 post.decisions 下的 ships/blueprints）：整理了哪些、还剩哪些没人认领。
-      const nestedKeys = [...new Set(nested.map((c) => c.rest[1]))];
-      if (nestedKeys.length && v && typeof v === 'object' && !Array.isArray(v)) {
-        const all = Object.keys(v);
-        const left = all.filter((x) => !nestedKeys.includes(x));
-        row.appendChild(el('span', { class: 'sv-lby' }, '← ' + [...new Set(nested.map((c) => c.view))].join('、') + ' 整理了 ' + nestedKeys.join('、')));
-        if (left.length) row.appendChild(el('span', { class: 'sv-lshape' }, '· 仍未组织：' + left.join('、')));
-      }
-      // 被整理过的集合：把「这条集合里还有哪些字段没人认领」摆出来（残差的集合级视图）。
-      const spec = direct.length ? specById(direct[0].view) : null;
-      if (spec && Array.isArray(v) && v.length) {
-        const res = window.SpecView.residualOf(v[0], spec);
-        if (res) row.appendChild(el('span', { class: 'sv-lshape' }, '· 按「' + spec.id + '」每条记录里未被认领：' + Object.keys(res).join('、')));
-      }
-      row.appendChild(jsonToggle('看原始数据', () => v, rootName + '.' + k));
-      list.appendChild(row);
-    });
-    wrap.appendChild(list);
-    body.appendChild(wrap);
-  });
-}
-
-function shapeOf(v) {
-  if (Array.isArray(v)) return '数组 ' + v.length + (v.length && typeof v[0] === 'object' ? ' × 对象' : '');
-  if (v && typeof v === 'object') return '对象 ' + Object.keys(v).length + ' 键';
-  return typeof v + ' ' + JSON.stringify(v);
-}
-
-// --- 运行时自检（用**真的求值器**跑一遍每条视图）------------------------------
-// 静态纪律（`play/tests/g4_spec.py`：路径合文法、引用完整、每个控制叶都被某条行认领）只能保证
-// **声明自己**没写错；「这一帧里这条列到底取不取得到值」只有拿求值器在真数据上跑一遍才知道。
-// 所以放在这儿，**跟着当前这一帧**，永远不漂移：某列全帧取不到值 ⇒ 明说，而不是安静地显示一串「·」。
-// ⚠ 控制行要跟读列**分开判**：`leaf` 行的值是 `null` / 空数组 = 「这一层还没表态」，那是**正常**的，
-// 报成"取不到值"就是反方向的谎话（见 `controls.js` 的 `audit()`——写面自检在那边）。
-function renderSpecCheck(body) {
-  const wrap = el('div', { class: 'sv-view' });
-  wrap.appendChild(el('h3', { class: 'sv-title' }, '视图自检（这一帧）'));
-  wrap.appendChild(el('div', { class: 'sv-hint' },
-    '用真的求值器把每条视图跑一遍：哪些列这帧取不到值、哪条来源整段落空。引擎改了字段名 ⇒ 这里立刻明说，而不是在表格里留一排「·」。'));
-  const list = el('div', { class: 'sv-list' });
-  const specs = (viewsDoc.pages || []).flatMap((p) => p.views || []).concat(viewsDoc.select || []);
-  specs.forEach((spec) => {
-    if (spec.mount === 'inline') return;
-    let rows = [];
-    if (spec.source === null) {
-      // `source: null` = **不取任何记录**（只有控制行，如「全局」页那条 `owner: global`）。
-      // 报成"这一帧没有记录"是反方向的谎话——它不是没数据，是**故意不依赖记录**。
-      rows = [{ value: {}, key: null }];
-    } else {
-      try {
-        rows = window.SpecView.expand(spec.source);
-      } catch (e) {
-        list.appendChild(checkRow(spec.id, 'warn', 'source 求值抛错：' + e));
-        return;
-      }
-      if (!rows.length) {
-        list.appendChild(checkRow(spec.id, 'warn', '这一帧没有记录（' + spec.source + '）'));
-        return;
-      }
-    }
-    // 读行与控制行**分开说**：
-    //   * 读行的值是"这一帧取不到" ⇒ 那是真问题（引擎改了字段名 / 这局没有），要报；
-    //   * `leaf` 行的值是 `null` / 空数组 ⇒ 那是「**这一层还没有叶**」= 正常状态，
-    //     界面给的是"写一个值就新建这片叶"的入口。把它报成"列全帧取不到值"是**反过来的
-    //     谎话**（把能用的东西说成坏的）——本仓拉黑"失败看起来像成功"，这条是它的镜像。
-    const readCols = (spec.columns || []).filter((c) => c.leaf == null && c.owner == null && c.action == null);
-    const leafCols = (spec.columns || []).filter((c) => c.leaf != null);
-    const dead = [];
-    readCols.forEach((c) => {
-      const any = rows.some((r) => !isNilLike(window.SpecView.evalPath(c.path, r.value, r.key)));
-      if (!any) dead.push(c.path);
-    });
-    const noLeaf = leafCols.filter((c) => rows.every((r) => {
-      const v = window.SpecView.evalPath(c.leaf, r.value, r.key);
-      return isNilLike(v) || (Array.isArray(v) && !v.length);
-    }));
-    const nCtl = (spec.columns || []).length - readCols.length;
-    const tag = nCtl
-      ? ('（含 ' + nCtl + ' 条控制行' + (noLeaf.length ? '，其中 ' + noLeaf.length + ' 条的叶这一帧还不存在 = 这一层没表态，界面给新建入口' : '') + '）')
-      : '';
-    if (dead.length) {
-      list.appendChild(checkRow(spec.id, 'warn',
-        rows.length + ' 条记录 / ' + readCols.length + ' 个读列' + tag + '，其中 ' + dead.length + ' 列全帧取不到值：' + dead.join('、')));
-    } else {
-      list.appendChild(checkRow(spec.id, 'ok',
-        rows.length + ' 条记录 / ' + readCols.length + ' 个读列' + tag + '全部取到了值'));
-    }
-  });
-  wrap.appendChild(list);
-  body.appendChild(wrap);
-}
-
-function isNilLike(v) {
-  return v === null || v === undefined;
-}
-
-// --- 写面自检（与读面自检**对偶**）------------------------------------------
-// 读面那条铁律管「没被认领的数据要看得见」；写面这一侧的对应物是：**引擎 `leaves` 里每一片叶
-// 要么被某条 `leaf` 行认领、要么在 `write_omit` 里写了理由**——否则新加的叶在这个界面上
-// **凭空消失**（改不了它），而那正是"静默藏"在写面的版本。
-function renderWriteCheck(body) {
-  if (!window.Controls) return;
-  const rows = Controls.audit();
-  const wrap = el('div', { class: 'sv-view' });
-  wrap.appendChild(el('h3', { class: 'sv-title' }, '写面自检（引擎的 leaves ↔ 控制行）'));
-  wrap.appendChild(el('div', { class: 'sv-hint' },
-    '引擎发的结构事实（GET /api/control-schema）里每一片叶：被某条 leaf 行认领，或在 views.json 的 write_omit 里写明理由。两边对不上就在这儿说。'));
-  const list = el('div', { class: 'sv-list' });
-  rows.forEach((r) => list.appendChild(checkRow(r.field, r.ok ? 'ok' : 'warn', r.text)));
-  if (!rows.length) list.appendChild(el('div', { class: 'sv-lrow' }, '（还没有清单：引擎没发 leaves / 前端没拉到）'));
-  wrap.appendChild(list);
-  body.appendChild(wrap);
-}
-
-function checkRow(id, kind, text) {
-  const row = el('div', { class: 'sv-lrow' });
-  row.appendChild(el('span', { class: kind === 'ok' ? 'sv-badge ok' : 'sv-badge warn' }, kind === 'ok' ? '✓' : '⚠'));
-  row.appendChild(el('span', { class: 'sv-lkey' }, id));
-  row.appendChild(el('span', { class: 'sv-lshape' }, text));
-  return row;
-}
-
-// 一个「点开就地看原始 JSON」的小开关（未组织索引里每个键都有）。
-function jsonToggle(label, get, rootPath) {
-  const btn = el('span', { class: 'sv-more clickable' }, '▸ ' + label);
-  // ⚠ 类名以前叫 `sv-residual-box`（和读面那个「其余字段」折叠桶共用一条 CSS）。
-  // 2026-10 第 8 步把读面的桶整条删掉、那条 CSS 也清了 ⇒ 这里换成自己的类名
-  // （`sv-raw-box`，样式照旧由 `style.css` 给）——否则这个「看原始 JSON」的盒子会掉样式。
-  // ⚠ **实测（顺手发现，早先就有的缺陷，没有顺手改）**：本函数只 `return btn`，
-  // 这个 box **从来没被 append 进 DOM** ⇒ 未组织页那些「看原始数据」开关其实是 no-op
-  // （点击只换箭头，什么都不展开）。不在第 8 步范围内，留在这里给下一个人。
-  const box = el('div', { class: 'sv-raw-box' });
-  box.style.display = 'none';
-  let built = false;
-  btn.addEventListener('click', () => {
-    const open = box.style.display === 'none';
-    box.style.display = open ? '' : 'none';
-    btn.textContent = (open ? '▾ ' : '▸ ') + label;
-    if (open && !built) {
-      built = true;
-      if (window.JsonView) {
-        window.JsonView.render(box, get(), { rootPath, expandDepth: 1, onPathClick: copyPath, rerender: renderReadPanel, tip: nounTip });
-      } else box.textContent = JSON.stringify(get());
-    }
-  });
-  return btn;
 }
 
 // --- 状态加载 / 选择 --------------------------------------------------------
@@ -978,16 +757,26 @@ function inlineSpec(path, value) {
   return box;
 }
 
-/// 左栏的页：**声明里的页** + 「未组织」。
+/// 左栏的页：**就是声明里的那些页**（`views.json` 的 `pages`，顺序即页签顺序）。
 /// ⚠ 2026-10：这里以前还有一张「控制树（旧）」页（手写的控制层级）。它已经**整条删除**——
 /// 旧树能做的每一件事都改由 `views.json` 声明的行提供：设计图库 → 「设计图」页的 `leaf` 行
 /// （带 `new: true` 的「＋ 新建」）、建筑与建造区 → 城市卡片的 `action: buildings` 行、
 /// 全局作用域 → 「全局」页的 `owner: global` 行、迁都 → 「势力」卡片的 `capital` 行、
 /// 恢复继承 / 恢复出厂值 → 每条控制行自带。见 `.agents/notes/web-control-spec.md`。
+/// ⚠ 2026-10 第 9 步：这里还挂过一张**自动生成的「未组织」页**（`id: 'leftover'`）——它是
+/// **页级的兜底桶**，与第 8 步删掉的那个「其余」列是同一个概念（用户裁决 *「我不希望有"其余"
+/// 这样的栏目」*）。它承载的两件事都有了去处，所以**整条删除**：
+///   ① 「哪些字段还没被整理」的审计 ⇒ 挪到数据级守卫：`play/tests/g4_spec.py` §8a 拿真世界 +
+///      **原样跑 `specview.js`** 对账「声明列 ∪ 追加列 ∪ 不看列 == 全部引擎字段」（每个字段
+///      要么进表、要么被声明不看，没有第三种去处 —— 页级的汇总表因此不再承载任何独有信息）；
+///   ② 「看原始数据」的开关 ⇒ 删掉（理由：它**实测是 no-op**，而且右边的「状态」面板本来就是
+///      全部根的原始 JSON，带过滤/全展开/全收起）。见 `.agents/notes/web-read-append.md` §7。
+/// 同一批删掉的还有它的渲染代码（`renderLeftover` / `renderSpecCheck` / `renderWriteCheck` /
+/// `shapeOf` / `isNilLike` / `checkRow` / `jsonToggle`）与只为它存在的 CSS 类
+/// （`.sv-badge` / `.sv-lshape` / `.sv-lrow` / `.sv-lkey` / `.sv-lby` / `.sv-list` / `.sv-raw-box`）。
+/// 判据：`g4_spec.py` §9（页级兜底桶不许再出现；且不允许顺手把第 8 步的追加接线一起删掉）。
 function sidePages() {
-  return (viewsDoc.pages || []).concat([
-    { id: 'leftover', title: '未组织', hint: '没有被任何组织点认领的数据 —— 它们照旧由通用 widget 渲染' },
-  ]);
+  return viewsDoc.pages || [];
 }
 
 /// 控制面重画：控制行住在声明出来的那些页里，也可能同时出现在底部的选中卡上

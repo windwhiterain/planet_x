@@ -1000,7 +1000,7 @@
   function omitLine(spec) {
     if (!spec.omit || !spec.omit.length) return null;
     const d = el('div', 'sv-omit');
-    d.textContent = '（本视图声明不看 ' + spec.omit.length + ' 项：' + spec.omit.map((o) => o.path + '——' + o.why).join('；') + '；它们仍在「未组织」页与原始 state 里）';
+    d.textContent = '（本视图声明不看 ' + spec.omit.length + ' 项：' + spec.omit.map((o) => o.path + '——' + o.why).join('；') + '；它们仍在原始 state 里：右栏「状态」面板逐根通用渲染）';
     return d;
   }
 
@@ -1102,24 +1102,10 @@
   /// 但也住在同一份声明里；`setSpecs` 已把它们塞进 `ctx.maps`，这里给宿主一个直读口）。
   function doc() { return DOC; }
 
-  // 一个视图「认领了哪些字段」——给「未组织」审计用（铁律 R 的另一半：没被认领的要看得见）。
-  // 控制行也算认领：`leaf` 行认领的是 `@control` 上的那条路径（它由写面的控制行渲染，
-  // 不能同时又报成「未组织」），`owner` 行认领 `@scope` 的层，`action` 行认领记录上的那个字段。
-  function claimedPaths(doc) {
-    const out = [];
-    const walk = (spec) => {
-      (spec.columns || []).forEach((c) => {
-        if (c.leaf != null) out.push({ view: spec.id, expr: c.leaf, control: true });
-        else if (c.owner != null) out.push({ view: spec.id, expr: '@scope.' + c.owner, control: true });
-        else if (c.action != null) out.push({ view: spec.id, expr: c.action, control: true });
-        else out.push({ view: spec.id, expr: c.path });
-      });
-      if (spec.source) out.push({ view: spec.id, expr: spec.source });
-    };
-    (doc.pages || []).forEach((p) => (p.views || []).forEach(walk));
-    (doc.select || []).forEach(walk);
-    return out;
-  }
+  // ⚠ 2026-10 第 9 步：这里以前有一个 `claimedPaths(doc)`（「一个视图认领了哪些字段」），
+  // 唯一的调用者是 `app.js::renderLeftover`（那张自动生成的「未组织」页）。那页是**页级的
+  // 兜底桶**，已整条删除 ⇒ 这个出口也一并删掉（**只服务它**：全仓 grep 只有那一处调用，
+  // 判据 §8a 走的是 `claimedKeys`/`omittedKeys`/`residualCols`，不碰它）。
 
   window.SpecView = {
     bind,
@@ -1144,7 +1130,6 @@
     residualKeys,
     residualCols,
     autoCol,
-    claimedPaths,
     format,
     num,
     el,
