@@ -3,9 +3,9 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 281**（g1 73 / g2 169 / g3 36 / g4 23）；**Rust 160**（+31 探针 ignored）。
-> **sim 74 → 25**（第 7 批搬走/删掉 49 条；其中 1 条是只打印的探针）。
-> **`combat.rs` 整族搬空删除**（`mod combat;` 也摘了）。
+> 计数：**Python 309**（g1 73 / g2 177 / g3 36 / g4 23）；**Rust 158**（+31 探针 ignored）。
+> **sim 74 → 23**（第 7 批搬走/删掉 51 条；其中 1 条是只打印的探针）。
+> **整族搬空并删文件**：`combat.rs`、`shots.rs`、`fleet.rs`。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -385,7 +385,32 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 3. **`a_hired_delivery_splits…` 差一个读面来源**：`contract_delivered` 有 `amount`/`cut`/两端，
    但**分账两头进哪个池子**没有读面记录；扩事件字段会动 digest ⇒ 不能扩。
 
-**剩下 25 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第七段（sim 25 → 23）：把「造一仗」的配方用到底**
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `shots::a_fully_intercepted_salvo_still_leaves_an_event` | g2 合成场景（守方装**两层**点防） | `pd=12.0`、`pd_absorbed=8.1`、**`damage=0` 而事件照样在**；空手臂 `damage=8.1`（防空转） |
+| `fleet::follow_ship_auto_attacks_hostile_but_not_the_followed_friend` | g2 合成场景（钉 `Follow` 叶 + 摆三方） | 打敌人 `长城→华盛顿`、**指向友舰的攻击 0 条**、`Follow{赤霄}` 叶 4 回合没降级 |
+
+⇒ `shots.rs` 与 `fleet.rs` 各自搬空并删文件（`mod shots;` / `mod fleet;` 也摘了）。
+
+**第 7 批残渣（23 条，全部落 §4，逐条写明理由）**
+
+| 族 | 条数 | 为什么只能留 Rust |
+| --- | --- | --- |
+| `ideology` | 4 | 要**往世界里注入事件**（`--call` 是**纯函数**契约，加「可变调用」是设计改动）；`military_signal…` 直调 `military_deltas(事件表)` |
+| `site_supply` | 3 | 要**可写 `depots`**（复合键 map `"中国\|水星"`；`edit()` 只认带身份键的**行表**） |
+| `haul` | 3 | `step_production`/`haul_step` 的**隔离**调用；货值守恒还差**穿带丢货**那个 sink（实测 399 回合里 7 回合对不上） |
+| `domestic_market` / `market` | 2 + 2 | 另一个会话正在飞的**内部账/定价单元测** |
+| `governance` | 2 | `step_governance` 单元测：**覆盖率 0 的欠费支路**在完整回合里够不到（产出先到账） |
+| `spending` | 2 | `step_upkeep` / `build_lines` 单元测（同上：欠费恒为 0） |
+| `knowledge` | 1 | 两列都是**回合末**的值，更新用的是**走那一刻**的在场强度（123 次回落里仍有 9 次强度 > 0） |
+| `trade` | 1 | `haul_steps` 的**键集**与**存活**两半有回合末伪影（表里多出的舰是回合末被改派的） |
+| `blueprints` | 1 | 要「掏空库存之后**仍有新舰下水**」——没资源就不下水 ⇒ 判据必然空转 |
+| `war_scar` | 1 | **手工世界**（往 `notables` 塞历史后逐年龄问内部函数） |
+| `mond` | 1 | 只打印的 `#[ignore]` 探针 |
+
+**剩下 23 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
