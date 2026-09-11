@@ -29,7 +29,9 @@ export const CHUNKS = [
   'px/noise/fbm.glsl',
   'px/noise/hash13.glsl',
   'px/noise/pars.glsl',
+  'px/noise/perlin.glsl',
   'px/noise/ridged.glsl',
+  'px/noise/rot.glsl',
   'px/noise/vnoise.glsl',
   'px/noise/warp.glsl',
   'px/noise/warpT.glsl',
@@ -53,6 +55,8 @@ export const CHUNKS = [
   'px/sun/corona.frag',
   'px/sun/corona.vert',
   'px/sun/photo.frag',
+  'px/sun/prom.frag',
+  'px/sun/prom.vert',
   'px/sun/sun.vert',
 ];
 

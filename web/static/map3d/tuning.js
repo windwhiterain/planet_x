@@ -43,10 +43,15 @@ export const TUNING = {
   // 行星 shader：受光面之外的底光。真实太空里背光面几乎全黑，但全黑会让星球在战略图上
   // 「消失」（连城市都找不到），所以留一点点让暗面仍读得出轮廓。
   shaderAmbient: 0.055,
-  // 太阳的 HDR 强度（>1 才有 bloom）。**刻意压得不高**：ACES 在 5.8 之上就把一切压成
-  // 纯白，而米粒组织的动态范围只有百分之几十——日面开到 7 就只剩一个白饼、颗粒全丢
-  // （实测过）。1.9 让米粒的明暗刚好落在 ACES 的肩部以内，辉光交给 bloom。
-  sunIntensity: 1.25,
+  // 太阳的 HDR 强度。**现在这个 1.0 是「标定过的一比一」**：photo.frag 的配色锚点是从
+  // 参考图（SDO 304Å）经 ACES 反解出来的**绝对 HDR 值**（`run.mjs --solve`），所以这里
+  // 就该是 1.0。以前是 1.25 而配色是"看着调"的相对值 ⇒ 日面整体进了 ACES 的平顶区：
+  // 实测 (254,238,220)、盘面 p10..p90 只有 5 级 —— 一块白饼，颗粒与暗区全丢。
+  sunIntensity: 1.0,
+  // 体积层（日冕 + 色球/日珥）的总开关。`?q=<档>` 里的 `corona` 是**质量档**的一部分，
+  // 而隔离被测层（只看光球 / 只看体积）是调试与场景测试的常规需求 ⇒ 和 `postfx` 一样
+  // 给一条 tune 逃生门。默认 1。
+  coronaOn: 1,
   // 曝光交给后期的 ACES：改变这里 = 整体明暗。
   exposure: 0.78,
 
@@ -124,6 +129,7 @@ export const TIERS = {
     oct: 7,
     skyRes: 1024,
     stars: 16000,
+    prom: 12000,
     bloom: true,
     flare: true,
     grade: true,
@@ -143,6 +149,7 @@ export const TIERS = {
     oct: 5,
     skyRes: 512,
     stars: 6500,
+    prom: 5500,
     bloom: true,
     flare: true,
     grade: true,
@@ -162,6 +169,7 @@ export const TIERS = {
     oct: 4,
     skyRes: 384,
     stars: 3800,
+    prom: 3000,
     bloom: true,
     flare: false,
     grade: true,
@@ -181,6 +189,7 @@ export const TIERS = {
     oct: 3,
     skyRes: 256,
     stars: 1800,
+    prom: 1200,
     bloom: true,
     flare: false,
     grade: false,
@@ -200,6 +209,7 @@ export const TIERS = {
     oct: 2,
     skyRes: 128,
     stars: 700,
+    prom: 0,
     bloom: false,
     flare: false,
     grade: false,

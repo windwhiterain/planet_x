@@ -210,7 +210,10 @@ export function createPostFX(renderer, tier, size) {
 
     // 质量档切换：只改「开不开/多少个 tap」，不重建 composer（重建会漏资源）。
     setTier(tier) {
-      const on = TUNING.postfx !== false;
+      // ⚠ `?tune=postfx:0` 走的是**数值**覆盖（`TUNING.postfx = Number('0')` = 0），而
+      // `0 !== false` 恒为真 —— 于是这条逃生门一直是**哑的**（tune() 里那条注释说它
+      // 「完全没反应」，但归因归错了：不是 uniform 没灌进去，是这里压根没关）。用真值判断。
+      const on = !(TUNING.postfx === false || TUNING.postfx === 0);
       bloom.enabled = on && !!tier.bloom;
       sunFlare.enabled = on && !!tier.flare;
       flareMat.uniforms.uStreak.value = tier.flare ? TUNING.streakStrength : 0;

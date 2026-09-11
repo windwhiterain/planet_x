@@ -85,9 +85,10 @@ const PERF = { slowMs: 26, fastMs: 12.5, minScale: 0.6, cooldownMs: 1400 };
 //   ?focus=地球&dist=18           取景某个天体（dist 为世界单位，缺省按半径自动）
 //   ?view=160,190,120@0,0,0       直接给相机位置与目标点
 //   ?tune=radiusScale:1.2         覆盖视觉调参（见 TUNING）
-//   ?hide=labels,markers          隐藏标签/城市舰标记
+//   ?hide=labels,markers,bodies   隐藏标签/城市舰标记/全部天体（隔离被测对象用）
 //   ?q=ultra|high|medium|low      强制质量档（缺省按 GPU 自动探测）
-// 只在页面加载后的**第一次** setWorld 生效一次（`?hide`/`?q` 除外，它们是常驻开关）。
+//   ?t=12                         把时间轴**冻结**在 12 s（场景测试要逐帧可复现）
+// 只在页面加载后的**第一次** setWorld 生效一次（`?hide`/`?q`/`?t` 除外，它们是常驻开关）。
 function readDebugQuery() {
   const q = new URLSearchParams(location.search);
   const out = { applied: false, focus: q.get('focus'), view: q.get('view'), q: q.get('q') };
@@ -101,6 +102,11 @@ function readDebugQuery() {
   const hide = (q.get('hide') || '').split(',').filter(Boolean);
   out.hideLabels = hide.indexOf('labels') >= 0;
   out.hideMarkers = hide.indexOf('markers') >= 0;
+  out.hideBodies = hide.indexOf('bodies') >= 0;
+  // `?t=<秒>`：**冻结时间轴**。着色器里 uTime 驱动米粒对流、针状体剪切、云与羽流 —— 不冻结
+  // 的话两张截图永远差几万个像素，像素判据只能宽到失去意义。冻结后每帧喂同一个 t：
+  // 动画静止，但仍是"某一瞬间的真实画面"（不是把动画关掉）。
+  out.freezeT = q.has('t') ? Number(q.get('t')) : null;
   return out;
 }
 const DEBUG_Q = (typeof location !== 'undefined')
@@ -111,6 +117,7 @@ const DEBUG_Q = (typeof location !== 'undefined')
 // 隐藏那一刻置 false 会被下一帧覆盖（旧版 `?hide=labels` 就是这么失效的）。
 let labelsHidden = false;
 let markersHidden = false;
+let bodiesHidden = false;
 
 // --- 质量 -------------------------------------------------------------------
 function applyTier(name, opts = {}) {
@@ -633,7 +640,7 @@ function tick() {
   const now = performance.now() * 0.001;
   const dt = Math.min(0.05, (now - lastT) || 0.016);
   lastT = now;
-  timeS = now;
+  timeS = (DEBUG_Q.freezeT === null) ? now : DEBUG_Q.freezeT;
 
   controls.update();
 
@@ -702,6 +709,9 @@ function applyHideFlags() {
   if (labelsHidden) for (const lb of markers.labels) lb.sp.visible = false;
   if (markersHidden) { citiesG.visible = false; shipsG.visible = false; }
   else { citiesG.visible = true; shipsG.visible = true; }
+  // `?hide=bodies`：连天体、轨道线、标签一起撤掉 —— 场景测试要**隔离被测对象**
+  // （一颗行星正好飘到日面前面，像素判据就不可复现了）。
+  if (bodiesG) bodiesG.visible = !bodiesHidden;
 }
 
 function adaptive(dt) {
@@ -811,6 +821,11 @@ function init(container) {
   post.setDepthExclude([sun.group]);
   post.setExposure(TUNING.exposure);
   post.applyTuning();
+  // ⚠ `setTier` 不只是「换档」：它还是 `TUNING.postfx` 这条逃生门的**唯一**入口
+  // （`createPostFX` 里只按 tier 打开各 pass，不看 TUNING）。首帧不调它 ⇒ `?tune=postfx:0`
+  // 在页面加载时是哑的，只有运行中再 tune 一次才生效 —— 实测的 A/B 会因此得出
+  // 「关掉后期画面完全没变」这个错误结论。
+  post.setTier(tier);
 
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   renderer.domElement.addEventListener('pointerup', onPointerUp);
@@ -850,6 +865,7 @@ function applyDebugQuery() {
   }
   if (DEBUG_Q.hideLabels) labelsHidden = true;
   if (DEBUG_Q.hideMarkers) markersHidden = true;
+  if (DEBUG_Q.hideBodies) bodiesHidden = true;
 }
 
 // --- public API -------------------------------------------------------------

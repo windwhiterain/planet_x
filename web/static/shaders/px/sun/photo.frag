@@ -1,7 +1,7 @@
 #ifndef PX_SUN_SUN_PHOTO_FRAG
 #define PX_SUN_SUN_PHOTO_FRAG
-#include <px/noise/fbm.glsl>
-#include <px/noise/ridged.glsl>
+#include <px/noise/perlin.glsl>
+#include <px/noise/warpT.glsl>
 
   precision highp float;
 
@@ -11,57 +11,92 @@
   varying vec3 vWorldPos;
   varying vec3 vNormal;
 
+  // --- 配色：**线性 HDR 锚点**，不是「看着调」出来的 ---------------------------
+  // 参考图（SDO/AIA 304Å）上那几档橙，隔着 `ACES + exposure + sRGB` 三跳看，直接照着屏幕
+  // 调 HDR 会一直调歪：ACES 在 0.7 以上压得极扁、而且红通道先饱和，于是「再亮一点」的结果
+  // 是**丢掉颜色和结构**（实测：日面 (254,238,220)，p10..p90 只有 238..243 —— 一块白饼）。
+  //
+  // 下面五个常量是 `node scripts/shots/run.mjs --solve <屏幕rgb>` **反解**出来的
+  // （ACES 的逆，见 scripts/shots/grade.mjs）：先用参考图定出屏幕上的五个锚点，
+  // 再反解出 HDR，于是「配色」这一步只剩审美，不用担心亮度一调颜色就跟着跑。
+  //   C_VOID  ← 屏幕 (28,5,2)     暗条核心
+  //   C_HOLE  ← 屏幕 (105,22,5)   冕洞/暗区
+  //   C_MID   ← 屏幕 (195,62,10)  典型日面
+  //   C_ACT   ← 屏幕 (225,115,30) 活动区
+  //   C_CORE  ← 屏幕 (252,180,80) 活动区亮核（全场唯一 >1 的部分，负责喂 bloom）
+  // 注意中段：C_MID 的绿只有 0.09、蓝只有 0.008 —— 屏幕上的深橙在 ACES 之前**几乎是纯红**。
+  const vec3 C_VOID = vec3(0.0395, 0.0095, 0.0046);
+  const vec3 C_HOLE = vec3(0.1956, 0.0295, 0.0053);
+  const vec3 C_MID  = vec3(0.5843, 0.0749, 0.0036);
+  const vec3 C_ACT  = vec3(0.9140, 0.1691, 0.0121);
+  const vec3 C_CORE = vec3(1.9795, 0.4071, 0.0374);
+
+  vec3 heatColor(float h){
+    h = clamp(h, 0.0, 1.0);
+    vec3 c = mix(C_VOID, C_HOLE, smoothstep(0.08, 0.34, h));
+    c = mix(c, C_MID,  smoothstep(0.30, 0.62, h));
+    c = mix(c, C_ACT,  smoothstep(0.60, 0.86, h));
+    return mix(c, C_CORE, smoothstep(0.86, 1.00, h));
+  }
+
   void main(){
     vec3 p = normalize(vObjPos);
     vec3 n = normalize(vNormal);
     vec3 viewDir = normalize(cameraPosition - vWorldPos);
     float mu = clamp(dot(n, viewDir), 0.0, 1.0);
-
-    // 米粒组织：两套不同尺度/相位对流的噪声交叉淡入淡出，做出「沸腾」而不是「飘动」。
     float t = uTime;
+
+    // ⓪ **域扰动（distortion）**：结构场在采样之前先被一个低频位移场推一下。
+    // 参考图里那些暗区/活动区**没有一块是圆的** —— 边界全是扭的、带须的（磁流管的形状）。
+    // 直接用 fbm 阈值得到的只会是圆头圆脑的斑块，怎么调频率都不像。
+    // 位移量有硬约束：`amt · warpK ≲ 0.3`（推导见 px/noise/warp.glsl，超了映射会反折、
+    // 出现带尖点的折痕）。这里 0.50 × 0.55 = 0.275，留了余量。
+    // ⚠ 位移场的频率要**落在盘面上**才有"扭"的效果：warpK 太小时位移在整个日面上几乎是常数，
+    // 那只是把噪声整体平移了一下（等于换了个随机种子），看起来完全没有扰动。
+    vec3 pw = warpT(p, 0.50, 0.55, t * 0.04, 1.0);
+
+    // ① 米粒组织：两套不同尺度/相位对流交叉淡入淡出，做出「沸腾」而不是「飘动」。
+    //    `1-ridged` 给出的是**亮格 + 暗沟**的网状（304Å 的日面正是这种「苔藓/地毯」质感，
+    //    而不是可见光那种圆滚滚的米粒）。
+    //    米粒自身**不加扰动** —— 它该是细密均匀的，扰动只给大尺度结构。
     float ph = 0.5 + 0.5 * sin(t * 0.55);
-    float SC = 95.0;                       // 米粒的基准空间频率（见上，26 时像海绵）
-    float g1 = 1.0 - ridged(p * SC + vec3(0.0, 0.0, t * 0.35));
-    float g2 = 1.0 - ridged(p * SC + vec3(37.0, 11.0, t * 0.35 + 41.0));
-    float gran = mix(g1, g2, ph);
-    // 超米粒：更大尺度的对流胞，给米粒组织一个「群」的结构（约 10 倍于米粒）。
-    float superG = fbm(p * 9.0 + vec3(0.0, 0.0, t * 0.06));
-    // 磁网络：米粒边界上的亮环（真实太阳临边附近的 faculae）。
-    float network = smoothstep(0.55, 0.95, ridged(p * SC + vec3(0.0, 0.0, t * 0.35)));
+    float SC = 105.0;
+    float g1 = 1.0 - ridgedP(p * SC + vec3(0.0, 0.0, t * 0.35));
+    float g2 = 1.0 - ridgedP(p * SC + vec3(37.0, 11.0, t * 0.35 + 41.0));
+    float gran = smoothstep(0.10, 0.78, mix(g1, g2, ph));
+    // ② 超米粒：更大尺度的对流胞，给米粒组织一个「群」的结构（约 10 倍于米粒）。
+    float superG = smoothstep(0.30, 0.74, fbmP(pw * 9.0 + vec3(0.0, 0.0, t * 0.06)));
+    float mott = gran * 0.58 + superG * 0.42;
 
-    float heat = gran * 0.62 + superG * 0.38;
-    heat = heat * 0.82 + network * 0.22;
-    // 对比度重映射：米粒组织的自然动态范围只有 ±20%，在 ACES 之后几乎看不出结构。
-    // 以 0.50 为中心拉开 1.9 倍，让颗粒/暗沟真的读得出来。
-    heat = clamp((heat - 0.50) * 1.55 + 0.50, 0.0, 1.4);
+    // ③ 大尺度：暗区（冕洞 / 暗条通道）+ 活动区 —— **这两层才是 304Å 的看头**。
+    //    暗区：低频、大块、边界软（参考图的日面 p10 = 0：超过一成的像素基本全黑）。
+    //    ⚠ 阈值是配着**梯度噪声**调的：`fbmP` 的分布比 `fbm`（格点噪声）**窄**，
+    //    同一组阈值在换噪声之后会圈走两倍面积（第一版换完直接变成"熔岩星球"）。
+    //    极区额外压暗：参考图上半盘就是一大片暗区。
+    float hole = smoothstep(0.50, 0.68, fbmP(pw * 2.7 + vec3(5.0, 9.0, t * 0.02)));
+    hole = max(hole, 0.80 * smoothstep(0.58, 0.96, abs(p.y)));
+    // 活动区：高频、小而亮。第一版取了 4.2 的低频 ⇒ 亮斑有半个日面那么大，
+    // 读起来是「大陆与海洋」的行星地图，不是恒星表面的活动区。
+    // `ridgedP` 典型值只有 ~0.25（Σa·n²，n 平均 0.5），阈值必须比 value 版低一截。
+    float act = smoothstep(0.46, 0.86, ridgedP(pw * 7.5 + vec3(21.0, 3.0, t * 0.03)));
 
-    // 太阳黑子：大尺度的暗区，本影更黑、半影有丝状结构。
-    float spotField = fbm(p * 2.6 + vec3(5.0, 9.0, t * 0.02));
-    float penumbra = smoothstep(0.60, 0.74, spotField);
-    float umbra = smoothstep(0.70, 0.80, spotField);
-    float spot = penumbra * 0.55 + umbra * 0.65;
-    // 黑子只在低纬带出现（真实黑子集中在 ±5°..±30°），别让极区也长斑。
-    float latBand = exp(-pow(p.y / 0.55, 2.0));
-    spot *= mix(0.25, 1.0, latBand);
-    heat *= (1.0 - spot * 0.72);
+    // 合成：典型日面(C_MID, heat≈0.62) → 暗区往下压到近黑 → 活动区往上顶到亮黄。
+    float heat = 0.69 + (mott - 0.5) * 0.52
+               - 0.80 * hole
+               + 0.30 * act * (1.0 - 0.85 * hole);
+    heat = clamp(heat, 0.0, 1.0);
 
-    // 色带：冷 → 暖 → 白热。**整体往深橙红推**（对照 SDO 参考图：盘面是深橙红，
-    // 只有活动区才是亮黄）。原来 cool/mid 偏黄，整颗太阳读起来苍白。
-    vec3 cool = vec3(0.78, 0.20, 0.05);
-    vec3 mid  = vec3(1.05, 0.48, 0.12);
-    vec3 hot  = vec3(1.42, 0.82, 0.36);
-    vec3 col = mix(cool, mid, smoothstep(0.28, 0.66, heat));
-    col = mix(col, hot, smoothstep(0.62, 1.02, heat));
+    vec3 col = heatColor(heat);
 
-    // 临边昏暗：太阳最重要的「是颗球」的证据。亮度按 I(μ) 压，颜色同时偏红。
-    // 系数从 0.62/0.18 收到 0.52/0.14：原来的律在最外圈把亮度压到 0.20（盘心 240 →
-    // 日缘只剩 187），而色球又填不满那 25% 的坑，于是日缘留下一条**暗缝**（用户报的
-    // 「黑边」）。0.34 的下限保住"是颗球"的临边昏暗，同时不至于在轮廓线上割出一道黑线。
-    float limb = 1.0 - 0.52 * (1.0 - mu) - 0.14 * (1.0 - mu) * (1.0 - mu);
-    col *= clamp(limb, 0.10, 1.0);
-    col = mix(col, col * vec3(1.25, 0.55, 0.20), pow(1.0 - mu, 3.0) * 0.85);
-    // 黑子区域再压一点蓝，读起来是「暗红的斑」而不是「灰色的洞」。
-    col = mix(col, col * vec3(1.15, 0.6, 0.35), spot * 0.5);
+    // ④ 临边：**304Å 是临边增亮**（色球在切向的路径更长 ⇒ 日缘一圈更亮），
+    //    和可见光的临边昏暗正好相反。参考图 4× 放大后能直接看到那条亮边。
+    //    原先这里写的是 `1 - 0.52(1-μ) - 0.14(1-μ)²`（临边**昏暗**），在深橙盘面上会把
+    //    轮廓线压成一道暗缝 —— 那是上一个 session 反复修的那条「黑边」。
+    //    ⚠ 盘心必须**正好 1.0**：ACES 的饱和度随电平变（同一组 HDR 值压暗一点就更红），
+    //    配色锚点只在「输出电平 == 锚点电平」时才是准的。第一版拿 0.84 打底，实测盘面
+    //    被推成 (170,20,33)，比目标 (185,70,14) 红得多。
+    float limb = 1.00 + 0.55 * pow(1.0 - mu, 3.5);
+    col *= limb;
 
     gl_FragColor = vec4(col * uIntensity, 1.0);
   }
