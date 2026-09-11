@@ -27,7 +27,8 @@
   attribute vec3 aKind;    // x=拱度(0..1) y=顺场倾倒抖动 z=宽度倍率
   attribute vec4 aFlow;    // x,y=切平面里的"朝哪边倒" z=场强(0..1) w=「哪里有日珥」
   attribute vec4 aFlow2;   // x,y=切平面里的"往哪边扫" z=喷发相位 w=周期倍率
-  attribute vec2 aTwist;   // x=总扭角(rad，α 沿径向的积分) y=每片的扭率抖动
+  attribute vec4 aTwist;   // x=总扭角(rad，ω·t̂ 沿路径的积分) y=扭率抖动 z=截面锐度 w=丝尖参差
+  attribute vec4 aStyle;   // x=丝距倍率 y=丝长倍率 z=宽度剖面(0=收细的锥 1=张开的扇) w=色温偏移
 
   uniform float uSunR;
   uniform float uTime;
@@ -46,6 +47,8 @@
   varying float vMask;
   varying float vEdge;
   varying float vLife;     // 生命期包络 0..1（片元用它调亮度）
+  varying vec4 vStyle;     // 形态参数（片元用它把"每片长不一样"做出来）
+  varying vec2 vShape;     // x=截面锐度 y=丝尖参差度
 
   void main(){
     float uvT = uv.y;
@@ -100,7 +103,12 @@
     float e1 = fbmP(wq + vec3(0.0, 0.0, uTime * 0.020));
     float e2 = fbmP(wq + vec3(17.0, 5.0, uTime * 0.020));
     float hh = h * (0.78 + 0.38 * e1);
-    float ww = w * (0.88 + 0.24 * e2);
+    // **沿长度的宽度剖面**：这是"草地"和"有灵性"差得最明显的一处剪影参数 ——
+    // `vStyle.z=0` 向尖端收细（细喷流/锥），`=1` 向尖端张开（面纱/扇）。
+    // 两种都要在**最尖端收口**（不收就会是一个方块）。
+    float prof = mix(pow(max(0.0, 1.0 - 0.90 * t), 1.35), 1.0 + 1.10 * t, vStyle.z)
+               * (1.0 - smoothstep(0.93, 1.00, t));
+    float ww = w * prof * (0.88 + 0.24 * e2);
 
     // ---- **扭**：横截面绕带子自己的轴转（真正的 corkscrew）------------------
     // 扭角的**来源**是 force-free 参数 α 沿径向的积分（每片烘在 aTwist.x，见 sunfield.js）。
@@ -134,6 +142,8 @@
     vMask = mask;
     vEdge = 0.45 + 0.55 * e1;
     vLife = env;
+    vStyle = aStyle;
+    vShape = aTwist.zw;
     vec4 wp = modelMatrix * vec4(p, 1.0);
     vWorld = wp.xyz;
     gl_Position = projectionMatrix * viewMatrix * wp;

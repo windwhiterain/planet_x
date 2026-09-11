@@ -152,6 +152,40 @@ const PROM_TWIST = 2.0;    // 扭的倍率（∇×F 的场向/路径分量沿路
 // 单位插片：宽 1、长 1。
 // ⚠ uv.y = 0 是**根部**、1 是**尖端**（three 的 PlaneGeometry 就是这样）。
 // 这里只生成**每实例属性**（与 LOD 无关，5000 条带子的数据不该按 LOD 复制一份）；
+// --- 日珥的**形态种群** ------------------------------------------------------
+// 用户裁决：*「现在就像种草一样，每个都差不多，没有灵性」*。
+// 根因不是"纹理不够细"，而是**整个种群只有一个形态**：每条都是同一个锥形长条 +
+// 同一套丝距/丝长，于是读起来是一片草地。
+//
+// 真太阳上的日珥是**几种形态混着**的（304Å 一眼就能分辨）：
+//   spike 细喷流 / bush 篱笆状灌木丛 / sheet 宽面纱 / loop 大弧 / knot 亮结。
+// 每种有自己的 (高度, 宽度, 拱度) 分布，**以及自己的一套表面参数**
+// （丝距、丝长、宽度剖面、截面锐度、色温偏移、丝尖参差度）⇒ 逐个不同。
+//
+// 字段含义（都是**乘数/插值权重**，不是绝对量 —— 全局旋钮仍是 TUNING 里那些）：
+//   w     该形态占种群的比例
+//   h/wid 高度、宽度（单位 = 太阳半径）
+//   arc   拱度 0..1（1 = 尖端落回日面）
+//   fil   丝距倍率（乘 uFilFreq）  along 丝长倍率（乘 uFilAlong，越小丝越长）
+//   prof  宽度剖面 0=向尖端收细(锥) 1=向尖端张开(扇)
+//   cross 截面 0=平铺面纱 1=中间一道脊
+//   heat  色温偏移   len 丝尖参差度（每根丝末端散开的程度）
+const PROM_KINDS = [
+  { n: 'spike', w: 0.30, h: [0.055, 0.230], wid: [0.040, 0.105], arc: [0.00, 0.00], fil: [1.30, 1.90], along: [0.50, 0.95], prof: [0.00, 0.15], cross: [0.55, 0.95], heat: [0.05, 0.25], len: [0.30, 0.45] },
+  { n: 'bush', w: 0.24, h: [0.020, 0.075], wid: [0.090, 0.200], arc: [0.00, 0.35], fil: [1.50, 2.20], along: [1.10, 2.10], prof: [0.35, 0.65], cross: [0.20, 0.55], heat: [-0.10, 0.10], len: [0.45, 0.62] },
+  { n: 'sheet', w: 0.20, h: [0.070, 0.250], wid: [0.130, 0.300], arc: [0.00, 0.45], fil: [0.50, 0.80], along: [0.35, 0.80], prof: [0.10, 0.40], cross: [0.05, 0.30], heat: [-0.05, 0.15], len: [0.25, 0.40] },
+  { n: 'loop', w: 0.16, h: [0.130, 0.300], wid: [0.100, 0.230], arc: [0.55, 1.00], fil: [0.60, 1.00], along: [0.65, 1.20], prof: [0.00, 0.22], cross: [0.35, 0.70], heat: [0.00, 0.20], len: [0.30, 0.48] },
+  { n: 'knot', w: 0.10, h: [0.015, 0.055], wid: [0.055, 0.130], arc: [0.00, 0.20], fil: [1.80, 2.50], along: [1.60, 3.00], prof: [0.40, 0.75], cross: [0.45, 0.85], heat: [0.15, 0.40], len: [0.50, 0.70] },
+];
+const PROM_KIND_SUM = PROM_KINDS.reduce((a2, k) => a2 + k.w, 0);
+// 按权重抽一个形态（**概率分布而不是阈值**：权重就是它的出现频率）
+function pickKind(u) {
+  let x = u * PROM_KIND_SUM;
+  for (const k of PROM_KINDS) { x -= k.w; if (x <= 0) return k; }
+  return PROM_KINDS[PROM_KINDS.length - 1];
+}
+const lerpR = (ab, u) => ab[0] + (ab[1] - ab[0]) * u;
+
 // 网格按 LOD 生成多份，见 makePromGeo。
 function buildPromAttrs(sunR) {
   const rnd = mulberry32(0x5eed1234);
@@ -165,7 +199,10 @@ function buildPromAttrs(sunR) {
   // 让 250 个顶点各算一遍（每顶点约 24 次 pnoise）纯属浪费，实测值 3.5 ms。
   const flowA = new Float32Array(PROM_MAX * 4);
   const flowB = new Float32Array(PROM_MAX * 4);
-  const twist = new Float32Array(PROM_MAX * 2);
+  const twist = new Float32Array(PROM_MAX * 4);
+  // 每片自己的**形态参数**（见 PROM_KINDS）：(丝距倍率, 丝长倍率, 宽度剖面, 色温偏移)。
+  // 这一条是"灵性"的关键 —— 以前这些是**全局 uniform**，所以每条带子的表面长得一样。
+  const style = new Float32Array(PROM_MAX * 4);
   const field = new PromField();
   // α 网格烘一次（**内存里的推导产物**，不是版本库里的资产；20³ 实测 ~0.15 s）
   field.bakeOmega(sunR);
@@ -199,18 +236,16 @@ function buildPromAttrs(sunR) {
     sv.set(sx * cr + bv.x * sr, sy * cr + bv.y * sr, sz * cr + bv.z * sr).normalize();
     bv.copy(d).cross(sv).normalize();
 
-    const isArc = rnd() < 0.12;
-    // **高度**：顶点到日面的高度（世界单位）。带子**大**（0.06R~0.30R），
-    // 因为"细腻"现在由片元纹理负责，几何只需要把该占的地方占住。
-    const hgt = isArc
-      ? sunR * (0.090 + 0.210 * Math.pow(rnd(), 1.3))
-      : sunR * (0.045 + 0.235 * Math.pow(rnd(), 1.9));
-    // **宽度**：弧长。日缘看起来"一大片"的关键 —— 细针版的宽度只有 0.004R，
-    // 现在是 0.045R~0.16R（十几倍），一条带子就能盖住十几度的经度。
-    const wid = isArc
-      ? sunR * (0.100 + 0.180 * rnd())
-      : sunR * (0.075 + 0.155 * rnd());
-    const arc = isArc ? 0.50 + 0.50 * rnd() : 0.0;
+    // **抽一个形态**，然后这个形态的**全部**参数都从它那套分布里取 ——
+    // 高度、宽度、拱度、丝距、丝长、宽度剖面、截面、色温、丝尖参差度。
+    // （只抽"大小"是上一版的做法：大小有差别、形态没差别 ⇒ 还是草地。）
+    const K = pickKind(rnd());
+    // 高度用幂分布：多数偏矮、少数很高（长尾）；幂次按形态给（喷流尖、面纱平）
+    const hPow = K.n === 'sheet' || K.n === 'loop' ? 1.3 : 1.9;
+    const hgt = sunR * lerpR(K.h, Math.pow(rnd(), hPow));
+    const wid = sunR * lerpR(K.wid, rnd());
+    const arc = lerpR(K.arc, rnd());
+    const isArc = arc > 0.001;
     // `aParam.z` 现在只是**弯曲方向的抖动**（不是弯曲量）：方向的主导向量来自共享场
     // （见 prom.vert 的 bendDir），这里只让每片偏一点点 ⇒ 成片但不成复写纸。
     const curve = (rnd() * 2 - 1) * 0.45;
@@ -224,6 +259,10 @@ function buildPromAttrs(sunR) {
     kind[i * 3] = arc;
     kind[i * 3 + 1] = tiltJit;
     kind[i * 3 + 2] = 0.70 + 0.70 * rnd();         // 宽度的每片抖动
+    style[i * 4] = lerpR(K.fil, rnd());
+    style[i * 4 + 1] = lerpR(K.along, rnd());
+    style[i * 4 + 2] = lerpR(K.prof, rnd());
+    style[i * 4 + 3] = lerpR(K.heat, rnd());
 
     // 采样世界空间流场：根部定"朝哪边倒"，上方 0.30R 定"往哪边扭"，
     // 外加"哪里有日珥"的掩码与喷发相位（相位来自场 ⇒ 相邻带子相干）。
@@ -245,6 +284,8 @@ function buildPromAttrs(sunR) {
     upv.copy(d).addScaledVector(k0v, tiltAmt).normalize();
     twist[i * 2] = field.twistAlong(d.x, d.y, d.z, upv.x, upv.y, upv.z, sunR, hgt);
     twist[i * 2 + 1] = 0.55 + 0.90 * rnd();                                 // 每片的扭率抖动
+    twist[i * 2 + 2] = lerpR(K.cross, rnd());                               // 截面：面纱 ↔ 一道脊
+    twist[i * 2 + 3] = lerpR(K.len, rnd());                                 // 丝尖参差度
   }
   return {
     aDir: new THREE.InstancedBufferAttribute(dir, 3),
@@ -254,7 +295,8 @@ function buildPromAttrs(sunR) {
     aKind: new THREE.InstancedBufferAttribute(kind, 3),
     aFlow: new THREE.InstancedBufferAttribute(flowA, 4),
     aFlow2: new THREE.InstancedBufferAttribute(flowB, 4),
-    aTwist: new THREE.InstancedBufferAttribute(twist, 2),
+    aTwist: new THREE.InstancedBufferAttribute(twist, 4),
+    aStyle: new THREE.InstancedBufferAttribute(style, 4),
   };
 }
 

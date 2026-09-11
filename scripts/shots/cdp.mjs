@@ -10,8 +10,12 @@
 // `--headless=new` 走的是**真 GPU**（不是 SwiftShader），所以截图与帧率都有代表性
 // （`.agents/notes/web-vfx-pipeline.md` §0.3）。
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 const EDGE_CANDIDATES = [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -99,6 +103,77 @@ export async function newPage(port) {
 
 const sleepMs = (n) => new Promise((r) => setTimeout(r, n));
 
+// --- CDN 本地缓存 -------------------------------------------------------------
+//
+// **为什么要它**：`index.html` 的 importmap 把 three.js / addons 指向 jsdelivr，而本工具
+// 为了让改完的本地 .js/.frag 立刻生效，**全局关掉了浏览器缓存** ⇒ 每次重载都要重新从
+// CDN 拉一遍（three.module.js 就 1.3 MB，还有几十个 addon）。
+// 后果有二：① 每跑一景白花 1 s 网络；② **网络一抖整批截图直接失败**
+// （实测 `ERR_NETWORK_CHANGED` / `ERR_TIMED_OUT`，而同一时刻宿主 curl 是 200 ——
+//   用户那次限速到 1.3 MB / 7~10 s，20 s 的"可拍"窗口直接超时）。
+//
+// 做法：把 jsdelivr 的响应**落盘到 scratch/**（不是版本库资产，是本地构建缓存），
+// 再用 CDP 的 `Fetch` 域直接从内存回填 ⇒ 第一次跑把它填满，之后**离线可跑**。
+// 只拦 jsdelivr：本地 127.0.0.1 的请求照旧直连（那才是"改完要立刻生效"的部分）。
+const CDN_HOST = 'cdn.jsdelivr.net';
+const CDN_CACHE_DIR = path.join(ROOT, 'scratch', '.cdn-cache');
+
+function cdnCachePath(url) {
+  const u = new URL(url);
+  const rel = (u.host + u.pathname).replace(/[^A-Za-z0-9._/-]/g, '_');
+  return path.join(CDN_CACHE_DIR, rel);
+}
+
+/// 取一个 CDN 文件：命中缓存直接读盘；否则用 node 拉一次（带重试）并落盘。
+/// 失败返回 null（调用方退回让浏览器自己请求）。
+async function cdnBytes(url, { tries = 3, timeoutMs = 30000 } = {}) {
+  const p = cdnCachePath(url);
+  try { return await fs.readFile(p); } catch { /* 未命中 */ }
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      await fs.mkdir(path.dirname(p), { recursive: true });
+      await fs.writeFile(p, buf);
+      return buf;
+    } catch (e) {
+      if (i === tries - 1) return null;
+      await sleepMs(500 * (i + 1));
+    }
+  }
+  return null;
+}
+
+/// 打开 CDN 拦截（`Session.connect` 里调）。命中的请求**由我们回填**，
+/// 未命中的先拉下来（这样第一次跑就把缓存填满），拉不到才交回浏览器。
+async function installCdnCache(sess) {
+  sess.on('Fetch.requestPaused', async (params) => {
+    const { requestId, request } = params;
+    try {
+      if (!request.url.includes(CDN_HOST)) return void sess.send('Fetch.continueRequest', { requestId });
+      const buf = await cdnBytes(request.url);
+      if (!buf) return void sess.send('Fetch.continueRequest', { requestId });
+      await sess.send('Fetch.fulfillRequest', {
+        requestId,
+        responseCode: 200,
+        responseHeaders: [
+          { name: 'Content-Type', value: 'text/javascript; charset=utf-8' },
+          { name: 'Access-Control-Allow-Origin', value: '*' },
+          // 版本号在 URL 里 ⇒ 不可变，给一个长缓存（浏览器那份虽然被全局关了，但语义要对）
+          { name: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+        ],
+        body: buf.toString('base64'),
+      });
+    } catch {
+      try { await sess.send('Fetch.continueRequest', { requestId }); } catch { /* 已经走了 */ }
+    }
+  });
+  await sess.send('Fetch.enable', {
+    patterns: [{ urlPattern: `https://${CDN_HOST}/*`, requestStage: 'Request' }],
+  });
+}
+
 export class Session {
   constructor(ws, target) {
     this.ws = ws;
@@ -108,6 +183,8 @@ export class Session {
     this.logs = [];        // console 输出（error/warning）
     this.errors = [];      // 未捕获异常 + console.error + Log.entryAdded(severity=error)
     this.events = new Map();
+    // **常驻**处理器（`once` 是一次性的，Fetch 拦截这类要一直挂着）
+    this.handlers = new Map();
     this.closed = false;
     ws.addEventListener('message', (ev) => this._onMessage(ev));
     ws.addEventListener('close', () => { this.closed = true; });
@@ -131,6 +208,8 @@ export class Session {
     // **静态文件没有 cache 头** ⇒ 浏览器会按启发式缓存住旧的 map3d.js / *.frag，于是
     // 「改了代码画面不动」。这是本仓反复踩的坑，截图器从一开始就关掉缓存。
     await s.send('Network.setCacheDisabled', { cacheDisabled: true });
+    // CDN 走本地缓存回填（见 installCdnCache 上面那段：网络一抖整批截图会失败）
+    try { await installCdnCache(s); } catch { /* 老协议/enable 失败就退回直连 */ }
     return s;
   }
 
@@ -163,6 +242,16 @@ export class Session {
       this.events.set(method, []);
       waiters.forEach((w) => w(m.params));
     }
+    const hs = this.handlers.get(method);
+    if (hs) for (const h of hs) { try { h(p); } catch { /* 处理器自己负责 */ } }
+  }
+
+  /// 挂一个**常驻**的事件处理器（`once` 只等一次就没了）。
+  on(method, cb) {
+    const arr = this.handlers.get(method) || [];
+    arr.push(cb);
+    this.handlers.set(method, arr);
+    return this;
   }
 
   send(method, params = {}) {
