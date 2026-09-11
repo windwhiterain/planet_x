@@ -1,4 +1,9 @@
-//! 思潮与忠诚：军事信号（只由事件推出）、战争/经济如何推思潮、相似度性质与外交亲和方向、低忠诚倒戈、娱乐设施拉住远城。
+//! 思潮与忠诚：军事信号（只由事件推出）、战争/经济如何推思潮、外交亲和方向、低忠诚倒戈、娱乐设施拉住远城。
+//!
+//! ## 2026-10（第 7 批）：`ideology_similarity_ranges_and_is_monotonic` 搬去了 g1
+//!
+//! 新挂了 `--call ideology_similarity`（键名与读面 `factions.思潮` 一致）⇒ 判据比原件**更强**：
+//! 同 = 1、全对极 = 0、恒在 `[0,1]`，外加**对称**与沿轴**单调**（原件只比了「自己 ≥ 别人」）。
 
 use super::*;
 
@@ -347,40 +352,6 @@ fn ideology_economy_bad_drives_toward_populism_and_stays_bounded() {
             );
         }
     }
-}
-
-/// 思潮相似度函数：同=1，全对极=0，中庸=0.5；单调随轴距离下降。
-#[test]
-fn ideology_similarity_ranges_and_is_monotonic() {
-    let a = Ideology {
-        peace_military: 0.5,
-        science_tech: -0.3,
-        people_elite: 0.2,
-        nature_colony: 0.4,
-    };
-    let b = Ideology {
-        peace_military: -0.5,
-        science_tech: 0.3,
-        people_elite: -0.2,
-        nature_colony: -0.4,
-    };
-    let same = Ideology {
-        peace_military: 0.5,
-        science_tech: -0.3,
-        people_elite: 0.2,
-        nature_colony: 0.4,
-    };
-    assert_eq!(
-        ideology_similarity(&a, &same),
-        1.0,
-        "identical ideologies have unit similarity"
-    );
-    assert!(
-        ideology_similarity(&a, &a) >= ideology_similarity(&a, &b),
-        "similarity is monotonic in distance"
-    );
-    assert!((0.0..=1.0).contains(&ideology_similarity(&a, &b)));
-    assert_eq!(ideology_similarity(&a, &a), 1.0);
 }
 
 /// 思潮相似度影响外交：其它条件相同（同 seed、同 alignment、同起始关系、噪声关闭）下，

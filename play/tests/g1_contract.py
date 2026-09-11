@@ -745,6 +745,45 @@ def call_functions(h, ck, tmp: Path) -> None:
              bool(res[near]) and bool(res[far]) and sum(res[far].values()) > sum(res[near].values()),
              f"保留量合计：{near} {sum(res[near].values()):.2f} / {far} {sum(res[far].values()):.2f}")
 
+    # ⓪″ 引力异常浸入深度（`sim/tests/mond.rs::route_depth_measures_mond_immersion`）：
+    #      原件用的是**裸坐标**（`inside/shallow/deep`），半径从 `meta.mond.radius` 读 ⇒ 逐字可复现。
+    r = float(json.loads(h.capture(["--meta"]))["mond"]["radius"])
+    inside, shallow, deep = [r - 5.0, 0.0], [r + 2.0, 0.0], [r + 10.0, 0.0]
+    ck.check("--call route_depth：两端都在带外 ⇒ 0（内侧航线没有 MOND 代价）",
+             call("route_depth", {"from": inside, "to": [1.0, 0.0]}) == 0.0,
+             f"半径 {r}，两端日心距 {r - 5.0} / 1.0")
+    ck.check("--call route_depth：一端在带内、一端在 10 AU 深 ⇒ 要穿到 10 AU 深",
+             abs(call("route_depth", {"from": inside, "to": deep}) - 10.0) < 1e-9,
+             f"{call('route_depth', {'from': inside, 'to': deep})}")
+    ck.check("--call route_depth：两端都在带内 ⇒ 按**较浅**那端算（2 AU）",
+             abs(call("route_depth", {"from": shallow, "to": deep}) - 2.0) < 1e-9,
+             f"{call('route_depth', {'from': shallow, 'to': deep})}")
+    ck.check("--call route_depth：双向（交换两端结果不变）",
+             call("route_depth", {"from": inside, "to": deep})
+             == call("route_depth", {"from": deep, "to": inside}), "两条方向逐值相等")
+
+    # ⓪‴ 思潮相似度（`sim/tests/ideology.rs::ideology_similarity_ranges_and_is_monotonic`）：
+    #      键名与读面 `factions.思潮` 一致 ⇒ 判据直接用引擎产出的思潮对象。
+    def ideo(**kw) -> dict:
+        base = {"和平↔军国": 0.0, "科学↔技术": 0.0, "人民↔精英": 0.0, "自然↔殖民": 0.0}
+        base.update(kw)
+        return base
+
+    a = ideo(**{"和平↔军国": 0.5, "科学↔技术": -0.3, "人民↔精英": 0.2, "自然↔殖民": 0.4})
+    same = dict(a)
+    far = ideo(**{"和平↔军国": -1.0, "科学↔技术": -1.0, "人民↔精英": -1.0, "自然↔殖民": -1.0})
+    polar = ideo(**{"和平↔军国": 1.0, "科学↔技术": 1.0, "人民↔精英": 1.0, "自然↔殖民": 1.0})
+    sim = lambda x, y: call("ideology_similarity", {"a": x, "b": y})  # noqa: E731
+    ck.check("--call ideology_similarity：同 = 1、全对极 = 0、且恒在 [0,1]",
+             sim(a, same) == 1.0 and sim(a, a) == 1.0 and sim(far, polar) == 0.0
+             and all(0.0 <= sim(a, x) <= 1.0 for x in (same, far, polar, ideo())),
+             f"同 {sim(a, same)}｜对极 {sim(far, polar)}｜零轴 {sim(a, ideo())}")
+    ck.check("--call ideology_similarity：对称且单调（沿一条轴越远越不像）",
+             sim(a, far) == sim(far, a)
+             and sim(a, polar) == sim(polar, a)
+             and sim(a, same) >= sim(a, ideo()) >= sim(a, far),
+             f"同 {sim(a, same)} ≥ 零轴 {sim(a, ideo())} ≥ 远 {sim(a, far)}；对称 {sim(a, far) == sim(far, a)}")
+
     # ⓪′ MOND 前沿（第 7 批）：`mond_frontier(config, control)` 是**纯函数**
     #     （`radius + arrival_eps/(drift_per_au × (1 − 掌握度))`），掌握到顶 = 无穷（JSON 给 null）。
     sweep = [(m, call("mond_frontier", {"control": m})) for m in (0.0, 0.25, 0.5, 0.75, 1.0)]

@@ -1,4 +1,10 @@
-//! MOND 异常导航：非 master 命不中深处目标（但**没有进不去的目标**）、`route_depth` 度量、以及那条只打印的探针。
+//! MOND 异常导航：非 master 命不中深处目标（但**没有进不去的目标**）、以及那条只打印的探针。
+//!
+//! ## 2026-10（第 7 批）：`route_depth_measures_mond_immersion` 搬去了 g1
+//!
+//! 新挂了 `--call route_depth`（吃天体名或 `[x, y]`）⇒ 原件那四个断言**逐字可复现**
+//! （半径从 `meta.mond.radius` 读，不用挑天体）：内侧↔内侧 = 0 / 一端 10 AU 深 = 10 /
+//! 两端都深 = 按**较浅**那端算（2 AU）/ 双向对称。
 
 use super::*;
 
@@ -228,34 +234,4 @@ fn probe_mond_attempts() {
             b.name
         );
     }
-}
-
-/// **贸易路线的引力异常浸入深度**（M6）：两端都在带外 = 0（普通航线）；
-/// 一端在带内、一端在外 = 远端深度（要穿过去）；两端都在带内 = 较浅那端深度。
-/// 它是运费倍率与丢货率的唯一驱动量，所以必须有确定的语义。
-#[test]
-fn route_depth_measures_mond_immersion() {
-    let (config, _state) = fresh_world(42);
-    let r = config.mond.radius;
-    let inside = [r - 5.0, 0.0];
-    let shallow = [r + 2.0, 0.0];
-    let deep = [r + 10.0, 0.0];
-    assert_eq!(
-        route_depth(&config, inside, [1.0, 0.0]),
-        0.0,
-        "两端都在异常带外的航线没有 MOND 代价"
-    );
-    assert!(
-        (route_depth(&config, inside, deep) - 10.0).abs() < 1e-9,
-        "一端在带内、一端在 10 AU 深 → 要穿到 10 AU 深"
-    );
-    assert!(
-        (route_depth(&config, shallow, deep) - 2.0).abs() < 1e-9,
-        "两端都在带内 → 按较浅那端算（2 AU）"
-    );
-    // 确定性：交换两端不改变结果（路线是双向的）。
-    assert_eq!(
-        route_depth(&config, inside, deep),
-        route_depth(&config, deep, inside)
-    );
 }

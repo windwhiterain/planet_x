@@ -693,6 +693,28 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **引力异常浸入深度**（第 7 批）：两端可以是天体名（用引擎自己的位置）或 `[x, y]`。
+        // 内侧↔内侧 = 0；一端深空 = 那一端；两端都深空 = **较浅**那端（航线只穿到那儿）。
+        "route_depth" => {
+            let pos = |key: &str| -> Result<[f64; 2], String> {
+                if let Some(b) = args.get(key).and_then(|v| v.as_str()) {
+                    Ok(state.body_position(b))
+                } else if let Some(p) = args.get(key) {
+                    serde_json::from_value(p.clone()).map_err(|e| format!("args.{key} 需要天体名或 [x,y]：{e}"))
+                } else {
+                    Err(format!("args.{key} 缺失"))
+                }
+            };
+            json!(sim::route_depth(config, pos("from")?, pos("to")?))
+        }
+        // **思潮相似度**（第 7 批）：`{a: 思潮对象, b: 思潮对象}` —— 键名与读面 `factions.思潮` 一致。
+        "ideology_similarity" => {
+            let ideo = |key: &str| -> Result<planet_x::model::Ideology, String> {
+                serde_json::from_value(args.get(key).cloned().unwrap_or_default())
+                    .map_err(|e| format!("args.{key} 必须是一个思潮对象（四条轴）：{e}"))
+            };
+            json!(sim::ideology_similarity(&ideo("a")?, &ideo("b")?))
+        }
         // **MOND 前沿**（第 7 批）：`radius + arrival_eps/(drift_per_au × (1 − 掌握度))`，
         // 掌握到顶 = 无穷（JSON 里给 `null`）。投影 `factions.mond_frontier_au` 就是它的 r2。
         "mond_frontier" => {
