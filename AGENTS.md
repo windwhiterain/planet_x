@@ -49,11 +49,12 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
   ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
 - 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与
   [test-wall-clock §0.2](.agents/notes/test-wall-clock.md)：
-  - **Rust 门**：增量（改一个库文件）**~12 s**（= 编译+链接 ~6 s + 真跑 ~6 s）；
+  - **Rust 门**：增量（改一个库文件）**~10 s**（= 编译+链接 ~6 s + 真跑 ~4.3 s）；
     **冷/切档首次 ~44 s**（那个大数只在换 worktree / 切档时出现，别拿它当稳态）。
   - **test 档 = O0 + `debug = 1`**（2026-10 第 7 批**收口后切回**，见 `Cargo.toml` 那段注释）：
-    长局搬去 `play/tests/` 之后 **编译+链接成了稳态大头** ⇒ 背靠背实测：稳态门 **17.6 → 11.9 s**、
-    切档首次 **89 → 44 s**，代价只是真跑 **3 → 6 s**。⚠ 长的 `#[ignore]` 探针在 O0 下慢 ~4×
+    长局搬去 `play/tests/` 之后 **编译+链接成了稳态大头** ⇒ 背靠背实测：稳态门 **17.6 → 10.3 s**、
+    切档首次 **89 → 44 s**。另：`autocontrol` 那条跑了 8 个臂的 freight 用例**拆成 5 条**（覆盖零变化、
+    nextest 并行）⇒ 真跑 6 → 4.3 s。⚠ 长的 `#[ignore]` 探针在 O0 下慢 ~4×
     （它们不在门里，别拿 `--run-ignored all` 当门）。
   - **`tests/` 下只有一个二进制 `probes`**（2026-10：4 个探针文件合一 + 删掉空壳
     `horizon_mid.rs`）。以前每个 `tests/*.rs` 都是独立二进制、各自静态链一遍整个 crate
