@@ -562,10 +562,10 @@ pub(crate) fn decide_role(
     fid: &str,
     ship_id: &str,
     inputs: &mut RoundInputs,
-) -> ShipRole {
+) -> (ShipRole, Option<(f64, Vec<crate::model::PoolEntry>)>) {
     let roll = sim::derived_roll(fid, ship_id, state.round, "role");
     let (role, probe) = role_with_roll(state, config, fid, ship_id, roll, Some(inputs));
-    if let Some((p, pool)) = probe {
+    if let Some((p, pool)) = probe.clone() {
         inputs
             .record_gate(
                 "role",
@@ -582,7 +582,8 @@ pub(crate) fn decide_role(
             // **候选池（B5c）**：同侧每艘候选舰各持多少票——「为什么是它被定编」就在这张表里。
             .pool = pool;
     }
-    role
+    // **把机会值一并交给调用方**（定编分布的期望要用它加总，见 `RoundInputs::role_distribution`）。
+    (role, probe)
 }
 
 /// 定编的**判据**（纯函数，吃骰子）：返回角色 + **这次抽签的机会值与候选池**。
@@ -762,23 +763,54 @@ pub(crate) fn assign_roles(
     fids.sort();
     for fid in fids {
         // 先算完整个势力的名单再写：同一回合内几个势力的结论互不影响（也更好推理）。
+        let (qw, qf, qo) = role_quotas(state, config, &fid);
+        let mut dist = crate::model::RoleDistribution {
+            war: crate::model::RoleShare { quota: qw, ..Default::default() },
+            freight: crate::model::RoleShare { quota: qf, ..Default::default() },
+            observe: crate::model::RoleShare { quota: qo, ..Default::default() },
+        };
         let mut plan: Vec<(String, ShipRole)> = Vec::new();
         for s in state
             .ships
             .iter()
             .filter(|s| s.faction_id == fid && s.hull > 0.0)
         {
-            if state.ship_control(s.name.clone()) != ControlMode::Auto {
+            let name = s.name.clone();
+            let share = match state.ship_role(name.clone()) {
+                ShipRole::War => &mut dist.war,
+                ShipRole::Freight => &mut dist.freight,
+                ShipRole::Observe => &mut dist.observe,
+            };
+            // 轮不到自动控制决定的（玩家的叶钉死 / 订单叶不是 Auto）算**外生**：配额算的是
+            // 全舰队，所以对账时要单独摆出来，别混进 `expected`。
+            if state.ship_control(name.clone()) != ControlMode::Auto
+                || state.ship_role_control(name.clone()).is_player()
+            {
+                share.exogenous += 1.0;
                 continue;
             }
-            if state.ship_role_control(s.name.clone()).is_player() {
-                continue;
+            let (role, probe) = decide_role(state, config, &fid, &name, inputs);
+            let share = match role {
+                ShipRole::War => &mut dist.war,
+                ShipRole::Freight => &mut dist.freight,
+                ShipRole::Observe => &mut dist.observe,
+            };
+            share.actual += 1.0;
+            // 抽签档 ⇒ 加 `p`；**早退档**（硬承诺 / 玩家表态 / 观测优先 / 运力为 0）
+            // ⇒ 确定的 1（那几档返回 `None`，见 `role_with_roll` 的注解）。
+            match probe {
+                Some((p, _)) => {
+                    share.rolled += p;
+                    share.expected += p;
+                }
+                None => {
+                    share.fixed += 1.0;
+                    share.expected += 1.0;
+                }
             }
-            plan.push((
-                s.name.clone(),
-                decide_role(state, config, &fid, &s.name, inputs),
-            ));
+            plan.push((name, role));
         }
+        inputs.role_distribution.insert(fid.clone(), dist);
         for (name, role) in plan {
             let unchanged = state
                 .control(fid.clone())

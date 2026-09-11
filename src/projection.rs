@@ -479,6 +479,7 @@ fn write_round(
             "order": inputs.order,
             "relation_noise": inputs.relation_noise,
             "rolls": inputs.rolls,
+            "role_distribution": inputs.role_distribution,
         })
     )
     .map_err(|e| e.to_string())?;
@@ -1624,10 +1625,11 @@ pub fn projection_schema() -> serde_json::Value {
             "round_inputs" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合的输入面**（B5，`RoundInputs` = `--derived` 的 `pre` 那一侧）：一回合一行——引擎这一回合**消费掉**了什么。它和同一行的 `view`（**结算面**：观测 + 过程量）是一对，分工是用户裁决：*「凡是可能未来与随机/输入有关的东西都放 pre，不一定要求当前的实现有关」*。⚠ 这一面**不在 `main.jsonl` 里**（`pre` 的两样东西里，解算顺序是整份舰名列表，按回合 join 更省），也**不在 `--derived` 的 `post` 里**——`--index` 侧只有这张表能读到它。⚠ 空 = 这一回合没跑（round 0 / `--start` 起点行），**不是**「掷出了 0」。",
-                "columns": {"round":"integer","order":"array","relation_noise":"object","rolls":"array"},
+                "columns": {"round":"integer","order":"array","relation_noise":"object","rolls":"array","role_distribution":"object"},
                 "column_docs": {
                     "order": "**C7 · 本回合的逐舰解算顺序**（`sim::step_military` 开头由**主 `Prng`** 洗出）：它是「**为什么这艘舰一炮未发就被击沉**」的答案——互杀时它排在击沉它的那艘舰**之后**（`hull <= 0` 的舰在循环里跳过）。⚠ 含**所有**舰（已沉的也在洗牌池里，只是轮到时不行动）。",
                     "relation_noise": "**C13 · 本回合每对势力的关系噪声**（`rel += rng.range_f64(-noise, noise)` 里掷出的那个增量），`{势力: {势力: 噪声}}`，键是**有序**的一对（同一对只出现一次）。它回答「关系为什么**无端抖了一下**」——`aff` 与漂移率都是确定的，唯一无缘无故的动就是这个。",
+                    "role_distribution": "**本回合定编的「分布」，而不是「样本」**（`{势力: {war/freight/observe: {quota, expected, actual, exogenous}}}`，`autocontrol::freight::assign_roles` 填）：`quota` = [`role_quotas`](crate::autocontrol::freight::role_quotas) 给的目标头数、`fixed` = 早退档（硬承诺/玩家表态/观测优先/运力为 0）的确定头数、`rolled` = 抽签档的 `p` 之和、`expected` = `fixed + rolled`、`actual` = 本回合实得、`exogenous` = 轮不到自动控制的活舰（玩家的叶钉死 / 订单叶不是 Auto）。**它让「期望 = 配额」成为能逐字对账的恒等式**（`expected + exogenous == quota`），而不必靠抽样估均值——抽样判据双向都弱（分布错了可能过、分布对了可能红），而且慢。⚠ 只增不改语义：与 `rolls` 同一条口径，**没定编就是没有**（空对象）。",
                     "rolls": "**`derived_roll` 家族的抽签记录**：每条 = `{purpose, faction, subject, value, threshold, pool_total, picked, pool}`。**三种形状**：**闸门**（`threshold` 有值、`pool_total` 为空，判据是 `value < threshold`，`picked` 是走的那一支）、**加权抽签**（`pool_total` 有值、`threshold` 为空，`value × pool_total` 落在哪一段，`picked` 是选中的那一段）、**幅度骰**（两者都空 = 掷出的数直接被当成量用：只有 `nav`，`picked` 是算出来的落点）。**`pool`（B5c）= 候选池**：加权抽签时参与抽签的每个候选各占多少权重（`[{name, weight}]`，权重之和 = `pool_total`）——它回答的是「**为什么是它而不是别人**」（「为什么这艘运输舰去了冥王星而不是卡戎」＝那两条腿各有多少货）；闸门里只有定编那两处有池（同侧每艘候选舰各持多少票），其余闸门与幅度骰为空。已接的用途（B5b）：定编 `role` / `observe_role`、派单 `route`、观测选靶 `observe_body`、合同 `gate`（**为什么没人接我的单**：`heard`/`unheard`） / `accept` / `pick` / `assign` / `quit` / `review` / `renew`、船坞 `retool`（`war-retool` 与 `hauler-retool` 两类，`subject` 区分） / `blueprint_intent` / `blueprint_retune` / `blueprint_theme`、风格轴 `style_chance`（逐舰逐轴）、导航 `nav`（MOND 偏航）。⚠ 这些骰子**不消费主 `Prng`**（`(势力, 对象, 回合, 用途)` 的哈希 ⇒ 可重算），但**判据不可重算**（候选池/权重/机会值都是那一刻的）——所以两者都留。⚠ **只在「拍板处」记一条**：同一枚骰子会被「估算」与「拍板」问两次（例如挂单时估运力也问 role），记的是**决定**不是「谁算过」；没掷的档（整期无产出不续约、缺口为 0 不掷重构、承包单指定路线）**不记**。⚠ **量**：实测 seed 7 / 30 回合 **4038 条 ≈ 130 条/回合 ≈ 22 KB/回合**（`main.jsonl` 是 26 KB/回合 ⇒ 这一面已与整份视图同量级），其中 `style_chance`（逐舰逐轴）与合同 `gate`（逐势力逐单）两项占一半；带候选池的 412 条（`pick` 45 / `observe_role` 141 / `role` 43 / `observe_body` 94 / `blueprint_theme` 83 / `route` 6）。",
                 },
             }),

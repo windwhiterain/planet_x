@@ -54,6 +54,45 @@ pub struct RoundInputs {
     /// 又被「定编拍板」问）：**只在拍板处记一条**——记的是「谁做了什么决定」，不是「谁算过」。
     #[serde(default)]
     pub rolls: Vec<Roll>,
+    /// **本回合定编的「分布」，而不是「样本」**（`autocontrol::freight::assign_roles` 填）。
+    ///
+    /// 定编由两种成分合成：**早退档**（在役承包舰的硬承诺 / 玩家表态 / 观测优先 / 运力为 0
+    /// ⇒ 确定的 0 或 1）与**抽签档**（`p = (缺口 + 轮换) × 我的票 ÷ 同侧总票数` ⇒ 期望 `p`、
+    /// 实得 0/1）。只记抽签（[`Self::rolls`]）时，「期望头数」要读的人**再抄一遍早退规则**
+    /// 才补得齐——那正是「判据只有一处」要避免的。这里把**引擎自己算的期望**记下来：
+    /// `expected + 外生（被玩家的叶钉死的）+ 未定编 == quota` 于是成了能**逐字对账**的恒等式，
+    /// 而不是「跑 400 回合看均值贴不贴配额」那种抽样判据（它双向都弱：分布错了可能过、
+    /// 分布对了可能红）。
+    ///
+    /// 空 = 这一回合没有势力需要定编（与 `rolls` 同一条口径：**没掷就是没有**）。
+    #[serde(default)]
+    pub role_distribution: std::collections::BTreeMap<FactionId, RoleDistribution>,
+}
+
+/// 一个势力本回合的**定编分布**（见 [`RoundInputs::role_distribution`]）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct RoleDistribution {
+    pub war: RoleShare,
+    pub freight: RoleShare,
+    pub observe: RoleShare,
+}
+
+/// 某一支（战舰 / 运输 / 观测）的**目标 / 期望 / 实得 / 外生**头数。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct RoleShare {
+    /// [`crate::autocontrol::freight::role_quotas`] 给的**目标头数**（设计上的分配）。
+    pub quota: f64,
+    /// **早退档的确定头数**（硬承诺 / 玩家表态 / 观测优先 / 运力为 0 ⇒ 不掷骰也算 1）。
+    pub fixed: f64,
+    /// **抽签档的 `p` 之和**（那些真的掷了骰子的舰的期望）。
+    pub rolled: f64,
+    /// `fixed + rolled`（引擎自己算的期望，不在别处重算）。
+    pub expected: f64,
+    /// 本回合**实得**的头数（早退档 1、抽签档 `roll < p` 才算 1）。
+    pub actual: f64,
+    /// **外生**头数：轮不到自动控制决定的活舰（被玩家的叶钉死 / 订单叶不是 Auto）
+    /// —— 配额算的是全舰队的头数，所以对账时要把这一项单独摆出来，别混进 `expected`。
+    pub exogenous: f64,
 }
 
 /// 一次 `derived_roll` 抽签的完整记录（掷出的值 + 当时的判据 + 结果）。
