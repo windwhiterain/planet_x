@@ -75,6 +75,12 @@ STALE_SHIP = "长城"
 STALE_ROUNDS = 4
 # 货栈账在**哪几个回合**取：库存水平是真实世界自己长出来的（判据不摆库存）。
 SITE_LEDGER_ROUNDS = (80, 400)
+# 「下水那艘长什么样」两臂用的城（`--apply` 的图指向不同城的建造区，两臂互不干扰）。
+LAUNCH_YARDS = {"Player": "长三角", "Auto": "水星熔炉基地"}
+LAUNCH_ROUNDS = 8
+# 图上写的**倾向**（供指令的那条链 2026-10 已删：图只给倾向，不给指令）。
+LAUNCH_DOCTRINE = {"temper": 0.5, "lone_wolf": -0.5}
+LAUNCH_KITING = 0.7
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1023,6 +1029,7 @@ def run(h, ck) -> None:
     dock_scenario_checks(h, ck)
     stale_follow_scenario_checks(h, ck)
     site_ledger_checks(h, ck)
+    blueprint_launch_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1603,6 +1610,84 @@ def site_ledger_checks(h, ck) -> None:
              f"{export_ok} 处「现货 > 保留」的货都算出了正出口")
     ck.check("货栈账守卫没有空转（真看了很多站点·回合）", rows >= 20,
              f"{rows} 个站点·回合（{len(SITE_LEDGER_ROUNDS)} 个回合的账）")
+
+
+def blueprint_launch_checks(h, ck) -> None:
+    """**合成场景 · 下水那艘舰长什么样**：`sim/blueprints.rs` 剩下那四条（第 7 批）。
+
+    | Rust 原件 | 判据 |
+    | --- | --- |
+    | `spawn_uses_the_yard_blueprint` | 船坞挂着玩家图 ⇒ 下水那艘的 `组件` = 图上的 `选装` |
+    | `the_yard_launches_from_any_designs_components` | 同一份 `选装`、图归 `Auto` ⇒ 一样按它装配（**与图的归属无关**：归属只管「谁能改这张图」） |
+    | `blueprint_role_governs_new_ships` | 图上写了 `角色` ⇒ 新舰就是那个角色（比舰队默认更具体，链：叶 → 图 → 舰队默认） |
+    | `fleet_default_still_covers_blueprintless_ships` | 图对那条轴沉默 ⇒ 仍由**舰队默认**作答（回归守卫：新层不许把旧行为吃掉） |
+
+    两臂只差**图的归属**一个变量，而且都摆了「舰队默认 = Observe」——那是个**非缺省**值，
+    所以「图赢」与「没图听舰队默认」两条都不是空转。国库按「国库真有的键 + 选装要的货」垫
+    （P1-5 的 `con_scale`：库存不到维护 reserve 时写多大预算都是 0）。
+    """
+    seed = SCENARIO_SEED
+    meta = json.loads(h.capture(["--meta"]))
+    comps = ["kinetic", "ion_drive"]
+    cost_keys = sorted({rt for c in comps for rt in (meta["components"][c].get("cost") or {})})
+    fr = KIT.load(str(h.projection(seed, SCENARIO_ROUNDS)), only=("factions",)).table("factions")
+    stock_keys = sorted((list(fr[(fr["round"] == 0) & (fr["势力"] == FID)]["资源"])[0] or {}).keys())
+    stock = _stock_patch(FID, 1e6, sorted(set(stock_keys) | set(cost_keys) | {"铁", "碳", "硅"}))
+
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_bp_launch.json", seed))
+    yards = {c: (bid, cls) for c, bid, cls in _yards_of(h, st, FID)}
+    arms = [(mode, LAUNCH_YARDS[mode]) for mode in ("Player", "Auto")]
+    seen: dict[str, dict] = {}
+    for mode, city in arms:
+        bid, class_ = yards[city]
+        name = f"下水图·{mode}"
+        diff = {"control": [{"势力": FID,
+                             "舰队默认角色": {"角色": "Observe"},
+                             "设计图库": [{"图名": name, "舰级": class_,
+                                             "选装": comps, "角色": "Freight",
+                                             "风格": LAUNCH_DOCTRINE, "姿态": LAUNCH_KITING,
+                                             "归属": mode}],
+                             "建筑": [{"城": city, "建筑": bid, "设计图": name}]}]}
+        proj = h.scenario_apply(f"bp_launch_{mode.lower()}", seed, LAUNCH_ROUNDS, [diff], patch=stock)
+        q = KIT.load(str(proj), only=("ships",))
+        sh = q.table("ships")
+        from_bp = sh[sh["出厂图"] == name].sort_values("round")
+        plain = sh[(sh["出厂图"].isna()) & (sh["round"] == LAUNCH_ROUNDS) & (sh["势力"] == FID)]
+        seen[mode] = {
+            "city": city, "class": class_, "n": len(from_bp),
+            "comps": sorted({tuple(sorted(c or [])) for c in from_bp["组件"]}),
+            "role": sorted({str(r) for r in from_bp["角色"]}),
+            "role_mode": sorted({str(m) for m in from_bp["role_mode"]}),
+            "plain_role": sorted({str(r) for r in plain["角色"]}),
+            "plain_mode": sorted({str(m) for m in plain["role_mode"]}),
+            "doctrine": sorted({json.dumps(d, sort_keys=True) for d in from_bp["风格"]}),
+            "kiting": sorted({float(k) for k in from_bp["姿态"]}),
+            "src": sorted({str(s) for s in from_bp["order_source"]}),
+        }
+
+    a = seen["Player"]
+    ck.check("合成场景（下水）：玩家图的选装就是下水那艘的选装（防空转：真下了水）",
+             a["n"] >= 1 and a["comps"] == [tuple(sorted(comps))],
+             f"{a['city']} 的 {a['class']} 下水 {a['n']} 艘，组件 {a['comps']}")
+    b = seen["Auto"]
+    ck.check("合成场景（下水）：图归 `Auto` 也照它的选装装配（出厂规格与图的归属无关）",
+             b["n"] >= 1 and b["comps"] == a["comps"],
+             f"{b['city']} 的 {b['class']} 下水 {b['n']} 艘，组件 {b['comps']}（玩家图那臂 {a['comps']}）")
+    ck.check("合成场景（下水）：图上的 `角色` 管住新舰（比舰队默认更具体 ⇒ 图赢）",
+             a["role"] == ["Freight"] and a["role_mode"] == ["Player"],
+             f"图上下水的舰：角色 {a['role']} / 归属 {a['role_mode']}（舰队默认那条臂摆的是 Observe）")
+    ck.check("合成场景（下水）：图沉默的那条轴仍由舰队默认作答（不是缺省的 War，是摆的 Observe）",
+             bool(a["plain_role"]) and a["plain_role"] == ["Observe"]
+             and a["plain_mode"] == ["Player"],
+             f"没图可言的舰：角色 {a['plain_role']} / 归属 {a['plain_mode']}")
+    # `order_source_separates_a_missing_leaf_from_a_silent_one` 的那半：**图写得再满也不能
+    # 指挥指令**——倾向（风格/姿态/角色）从图上下来，但「这一回合干什么」只由逐舰叶供值。
+    ck.check("合成场景（下水）：图给的倾向（风格/姿态）落到新舰上",
+             a["doctrine"] == [json.dumps(LAUNCH_DOCTRINE, sort_keys=True)]
+             and a["kiting"] == [LAUNCH_KITING],
+             f"图上那批舰：风格 {a['doctrine']} / 姿态 {a['kiting']}")
+    ck.check("合成场景（下水）：图写得再满也不供指令（`order_source` 只会是 leaf）",
+             a["src"] == ["leaf"], f"图上那批舰的 order_source：{a['src']}")
 
 
 def id_checks(h, ck, out) -> None:
