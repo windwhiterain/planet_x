@@ -3,8 +3,8 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 309**（g1 73 / g2 177 / g3 36 / g4 23）；**Rust 158**（+31 探针 ignored）。
-> **sim 74 → 23**（第 7 批搬走/删掉 51 条；其中 1 条是只打印的探针）。
+> 计数：**Python 318**（g1 77 / g2 182 / g3 36 / g4 23）；**Rust 155**（+31 探针 ignored）。
+> **sim 74 → 20**（第 7 批搬走/删掉 54 条；其中 1 条是只打印的探针）。**收口**。
 > **整族搬空并删文件**：`combat.rs`、`shots.rs`、`fleet.rs`。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
@@ -410,7 +410,25 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
 | `war_scar` | 1 | **手工世界**（往 `notables` 塞历史后逐年龄问内部函数） |
 | `mond` | 1 | 只打印的 `#[ignore]` 探针 |
 
-**剩下 23 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第八段（sim 23 → 20，收口）**
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `site_supply::the_capital_body_spends_the_faction_pool` | g2 合成场景（城改「还差一半没建」+ 只拨池子） | 首都池满 ⇒ **r1 就长**（60→69.12）；池空 ⇒ r1 不长 |
+| `site_supply::only_the_local_depot_can_fund_an_offsite_city` | 同上（非首都那一臂） | 非首都池满 5000 ⇒ **r1 不变**；自然跑 40 回合 ⇒ 20.89→**41.77** |
+| `ideology::military_signal_uses_the_milestones_and_is_branch_agnostic` | 新 `--call military_deltas {events}` | 六个用例逐条：互杀各 0 / 单方面 ±1 / 欠费只扣失主 / 拆城 ±1 而复垦者不计分 / 易主与叛乱同分 / 新建城不计分 |
+
+**收口时剩下的 20 条**（前表 23 条里再去掉上面三条；逐条理由见上表）。
+
+⚠ 再记两条**判据本身出错**的经验：
+1. `site_supply::an_export_haul_never_loads_the_site_reserve` 试了两版读面判据**都被打回**：
+   「装完残余 ≥ 保留量」错在 r11 金星（见底 0 < 保留量 6——引擎的规则是「只能装走**超出**保留量的
+   那部分」）；「要么留够、要么见底」错在 r25 水星（存量 6.075 < 保留量 6.080——**城自己也在从
+   货栈花钱**）。真正的判据要**装货前那一刻**的存量与保留量 ⇒ 读面没有。
+2. **C 盘被测试投影撑满**（`ERR_INDEX: 磁盘空间不足 os error 112`）：`target/test-fixtures` 攒到
+   **18 G**（g3 的 7×1000 回合投影是大头）。清掉腾出 31 G；这些是**可再生产物**，重跑会重建。
+
+**剩下 20 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
