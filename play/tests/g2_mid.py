@@ -55,6 +55,12 @@ MIN_ROUTE_DRAWS = 50      # 派单抽签防空转：3 seed × 400 回合的 rout
 SCENARIO_SEED = 42
 SCENARIO_ROUNDS = 3
 FID = "中国"
+# 首都那条场景要**盖住至少 3 个评估轮**（`governance.capital_review_every = 12`）：
+# 49 = 4×12 + 1 ⇒ 第 12/24/36/48 回合都是评估轮。窗口短了 A/B 的另一半（`Auto` 留下评估行）
+# 就会空转——判据里有一条专门盯着这个比例。
+CAPITAL_ROUNDS = 49
+# 拨到一个**离人口中心很远**但该势力确实有城的天体（水星熔炉基地在水星）。
+CAPITAL_FAR = "水星"
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -930,6 +936,7 @@ def run(h, ck) -> None:
     id_checks(h, ck, out)
     scenario_checks(h, ck)
     blueprint_scenario_checks(h, ck)
+    capital_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1247,6 +1254,69 @@ def blueprint_scenario_checks(h, ck) -> None:
     ck.check("合成场景（预算）：rate 是产能、与批了多少钱无关（同一舰级两种预算同一个 rate）",
              bool(rates["rich"]) and rates["rich"] == rates["poor"],
              f"{class_} 的 rate：批满 {sorted(rates['rich'])} / 批 0 {sorted(rates['poor'])}")
+
+
+def capital_scenario_checks(h, ck) -> None:
+    """**合成场景 · Player 钉的首都**：`sim/tests/capital.rs::player_capital_not_overridden_by_ai_review`。
+
+    另外三条首都判据（亡城强迁 / 周期评估 / 判定稀疏）都在 g3 的长局上成立，读面
+    （`decisions[kind=capital]` + `factions.capital_body`）本来就够。**这一条不行**：它要
+    「把首都拨到一个较远的天体上、再让评估轮跑过」——那要写控制叶 ⇒ 只能造场景。
+
+    ⚠ **必须做成 A/B，否则是空转**：默认配置 `admin_range = 6.0`，水星到地球才 0.61 AU
+    ⇒ 评估**根本不会想迁**（候选成本 = 现成本）。所以「Player 没被覆盖」单看一边什么都证明不了。
+    另一半是同位置、同长度窗口下的 `Auto`：它**必须**留下评估行。两边合起来才说明
+    「Player 那几个字真的挂住了 AI 的手」，而不是「评估压根没跑」。
+    """
+    seed = SCENARIO_SEED
+    rounds = CAPITAL_ROUNDS
+    diff = lambda mode: {"control": [{"势力": FID, "首都": {"值": CAPITAL_FAR, "归属": mode}}]}  # noqa: E731
+
+    runs = {}
+    for mode in ("Player", "Auto"):
+        proj = h.scenario_apply(f"capital_{mode.lower()}", seed, rounds, [diff(mode)])
+        q = KIT.load(str(proj), only=("factions", "decisions"))
+        fa = q.table("factions")
+        fa = fa[fa["势力"] == FID].sort_values("round")
+        dec = q.table("decisions")
+        dec = dec[(dec["kind"] == "capital") & (dec["势力"] == FID)].sort_values("round")
+        runs[mode] = {
+            "body": dict(zip(fa["round"].astype(int), fa["capital_body"])),
+            # ⚠ `target` 是 DataFrame 列 ⇒ JSON 的 `null` 到这儿是 NaN，归一化掉（打印时才不刺眼）
+            "rows": [(int(r["round"]), r["verdict"],
+                      r["target"] if isinstance(r["target"], str) else None) for _, r in dec.iterrows()],
+        }
+
+    # 评估周期（从 `meta` 读真值，不写死）：窗口要盖住至少 3 个评估轮，否则 A/B 的一半会空转。
+    q = KIT.load(str(h.projection(seed, rounds)), only=("factions",))
+    every = int(q.meta["governance"]["capital_review_every"])
+    ck.check("合成场景（首都）：窗口盖住了足够多的评估轮（防空转）",
+             rounds // max(every, 1) >= 3, f"{rounds} 回合 / 每 {every} 回合评估一次")
+
+    moved = [r for r in runs["Auto"]["rows"] if r[1] in ("review", "relocate")]
+    ck.check("合成场景（首都）：同一位置、同一窗口，`Auto` 真的被评估过（A/B 的另一半）",
+             len(moved) > 0,
+             f"`Auto` 的判定行：{runs['Auto']['rows']}")
+
+    player_moved = [r for r in runs["Player"]["rows"] if r[1] in ("review", "relocate")]
+    ck.check("合成场景（首都）：Player 钉的首都既不被评估、也不被周期迁移",
+             not player_moved,
+             f"`Player` 的判定行：{runs['Player']['rows']}（只允许 `forced`——亡城硬规则照旧）")
+
+    # 有效首都逐回合 = 「钉的那个」直到最近一次迁都，此后是那个 `target`。
+    # ⚠ 从 **0** 起：投影的第 0 行是「拨完叶、还没推进」的那一态（已经能看到钉的首都）。
+    want, cur = {}, CAPITAL_FAR
+    for r in range(0, rounds + 1):
+        for pr, verdict, target in runs["Player"]["rows"]:
+            if pr == r:
+                cur = target
+        want[r] = cur
+    got = runs["Player"]["body"]
+    stray = {r: (want.get(r), b) for r, b in got.items() if want.get(r) != b}
+    ck.check("合成场景（首都）：逐回合的有效首都 = 钉的那个（亡城后 = 迁都的 target）",
+             not stray,
+             "；".join(f"r{r}: 期望 {w} 实为 {b}" for r, (w, b) in list(stray.items())[:3])
+             or f"{len(got)} 个回合全部对上（钉 {CAPITAL_FAR}）")
 
 
 def id_checks(h, ck, out) -> None:

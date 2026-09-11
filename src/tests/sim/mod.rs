@@ -11,7 +11,6 @@ use crate::model::GameEvent;
 use crate::world::default_state;
 
 mod blueprints;
-mod capital;
 mod combat;
 mod domestic_market;
 mod fleet;

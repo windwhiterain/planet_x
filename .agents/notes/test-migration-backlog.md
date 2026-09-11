@@ -3,7 +3,7 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 173**（g1 45 / g2 79 / g3 26 / g4 23）；**Rust 206**（+31 探针 ignored）。
+> 计数：**Python 179**（g1 45 / g2 83 / g3 28 / g4 23）；**Rust 202**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -14,7 +14,7 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 7 批 A 类后 + 同步 `main` 后）** | **173**（g1 45 / g2 79 / g3 26 / g4 23） | **206**（+31 探针 `#[ignore]`） |
+| **现在（第 7 批 A 类 + `capital` 族后）** | **179**（g1 45 / g2 83 / g3 28 / g4 23） | **202**（+31 探针 `#[ignore]`） |
 
 > 组数里 g4 18→23、Rust 196→205 里的大部分是**同步 `main` 带进来的**（另一批在扩 g4 纪律，并给
 > `sim::site_supply`、`domestic_market`、`market`、`contract` 各加了用例），不是第 6 批搬的；
@@ -192,6 +192,28 @@ g2 这边的 `_yards_of` 跟着走：**身份键问引擎**，剩下三个名字
 | `sim/tests/fleet.rs::advance_populates_round_events` | g1「全新开局的回合 0 没有事件」+「推进过就有事件」 | 原件只断言「回合 0 空 → 跑几回合非空」，那两半读面上都在（`events` 表按 `round` 分组）⇒ **先补 g1 判据、再删原件** |
 | `sim/tests/inputs.rs::pre_is_the_input_face_not_an_observation_copy` | g1「输入面里没有观测字段（它属于 post）」 | **同一份 banned 名单**逐字；「`pre` 必须有 `order`/`relation_noise`」那半由 g1「输入面没有空转」覆盖 |
 | `sim/tests/inputs.rs::the_input_face_reproduces_byte_for_byte` | g1「同 seed 重跑逐字节一致」 | 那条比的是**整份投影每个文件**的 sha256（`round_inputs` 在里面）⇒ 严格更强 |
+
+**B 类·第 1 族 `capital`（已落地，4 条 → 整文件删除）**
+
+读面本来就够（`decisions[kind=capital]` 带 `verdict ∈ {forced, review, relocate}` + `detail`
+里的 `reviewed`/`candidate`/`current_cost`/`candidate_cost`/`relocated_from`，加上
+`factions.capital_body` 与 `cities.{人口, 已焚毁, 天体名}`）：
+
+| Rust 原件 | 现在住 | 怎么判 |
+| --- | --- | --- |
+| 亡城强迁 ⇒ 人口最高的活城 | g3 `capital_checks` | `verdict=forced` ⇒ 不评估、无判据数字、`capital_body == target`、`target ∈ 人口最高那一组天体` |
+| 周期评估 ⇒ 迁到人口中心 | g3 `capital_checks` | `verdict=relocate` ⇒ `reviewed`、`candidate == target`、`候选成本 + 门槛 < 现成本` |
+| 判定是稀疏的 | g3 `capital_checks` | 非 `forced` 的判定只在 `capital_review_every` 的整数倍回合；`review` 行无 `target`、两头判据数字都在 |
+| Player 钉的首都不被覆盖 | g2 `capital_scenario_checks` | **合成场景 A/B**：`--apply` 写 `首都` 叶，`Player` / `Auto` 各跑 49 回合（≥3 个评估轮）；`Player` ⇒ 零 `review`/`relocate` 行，`Auto` ⇒ 必须留下评估行（否则空转） |
+
+⚠ 两个踩过的坑（都写进了代码注释）：
+1. **`target` 的 `null` 到 pandas 是 `NaN` 不是 `None`**——我第一版用手工探针读原始 JSON（`null` →
+   `None`）所以没踩到，写进 g3 立刻红了 1042 处。凡是从 `q.table()` 的**列**里取可空值，
+   都要 `pd.isna` 归一化。
+2. **并列第一**：s42 r237 月球与天王星都是 200 人，引擎挑了天王星 ⇒ 判据必须是
+   「`target` ∈ 人口最高**那一组**天体」，不能只认 `max()` 的第一个。
+3. 「Player 不被覆盖」单看一边**证明不了任何事**：默认 `admin_range = 6.0` 而水星到地球才
+   0.61 AU ⇒ 评估本来就不想迁。必须补 `Auto` 那半边（同位置、同窗口，它**必须**被评估过）。
 
 ## §6 接手须知：动手时的工具、命令与坑（照这个做，别重新发现）
 

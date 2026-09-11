@@ -276,7 +276,8 @@ def _process_identities(q, tol: float = 1e-12) -> dict:
 
 def extract(dirpath) -> tuple[pd.DataFrame, dict]:
     """把一份投影压成**每回合一行**的判据表 + 元数据（结果按投影缓存成 pickle）。"""
-    q = KIT.load(str(dirpath), only=("events", "ships", "factions", "faction_process", "city_process"))
+    q = KIT.load(str(dirpath), only=("events", "ships", "factions", "faction_process", "city_process",
+                                    "decisions", "cities"))
     facts = q.facts
     view = facts["view"]
     rounds = facts["round"].to_numpy()
@@ -376,13 +377,51 @@ def extract(dirpath) -> tuple[pd.DataFrame, dict]:
         "hegemon_power": hegemon_power,
         "last_round": int(rounds[-1]),
         "identities": _process_identities(q),
+        "capital": _capital_summary(q),
     }
     return pd.DataFrame(rows), meta
 
 
+def _capital_summary(q) -> dict:
+    """首都判定（`src/tests/sim/capital.rs` 那四条搬去数据级用的摘要）。
+
+    `decisions[kind=capital]` 每行给 `verdict ∈ {forced, review, relocate}` + `detail`
+    （`reviewed` / `candidate` / `current_cost` / `candidate_cost` / `relocated_from`）；
+    `factions.capital_body` 是**回合末**的有效首都。这里把「目标是它人口最高的活城吗」
+    也预先算好——**并列任取**：实测 s42 r237 月球与天王星都 200 人，引擎挑了天王星，
+    写判据时不能只认 `max()` 的第一个。
+    """
+    cap = q.table("decisions")
+    cap = cap[cap["kind"] == "capital"]
+    fac = q.table("factions")[["round", "势力", "capital_body"]]
+    cities = q.table("cities")
+    live = cities[(cities["已焚毁"] != True) & (cities["人口"].fillna(0) > 0)]  # noqa: E712
+    peak = live.groupby(["round", "势力"])["人口"].max()
+    body = {(int(r["round"]), r["势力"]): r["capital_body"] for _, r in fac.iterrows()}
+    out = []
+    for _, r in cap.iterrows():
+        key = (int(r["round"]), r["势力"])
+        d = r["detail"] or {}
+        top = peak.get(key)
+        tops = [] if top is None else sorted(set(
+            live[(live["round"] == key[0]) & (live["势力"] == key[1])
+                 & (live["人口"] == top)]["天体名"]))
+        out.append({
+            "round": key[0], "势力": r["势力"], "verdict": r["verdict"],
+            # ⚠ `target` 是 DataFrame 的一列 ⇒ JSON 的 `null` 到这儿是 **NaN**，不是 `None`；
+            # 归一化掉（否则「评估未迁」那类行的 `target is not None` 会假红——踩过一次）。
+            "target": None if pd.isna(r["target"]) else r["target"],
+            "from": d.get("relocated_from"), "reviewed": bool(d.get("reviewed")),
+            "candidate": d.get("candidate"), "cur": d.get("current_cost"),
+            "cand": d.get("candidate_cost"), "cap_body": body.get(key), "top_bodies": tops,
+        })
+    gov = q.meta["governance"]
+    return {"rows": out, "review_every": int(gov["capital_review_every"]),
+            "threshold": float(gov["capital_relocate_threshold"])}
+
+
 class Verdict:
     """一条不变量的判据：攒违规样例 + 计数（红的时候打印前几条 + 总处数）。"""
-
     def __init__(self) -> None:
         self.n = 0
         self.samples: list[str] = []
@@ -502,6 +541,60 @@ def run(h, ck) -> None:
     ck.check("霸权 = 占比最高者，且联盟/封锁自洽", power.n == 0, power.detail("逐回合自洽"))
 
     identity_checks(h, ck, metas, tag)
+    capital_checks(h, ck, metas, tag)
+
+
+def capital_checks(h, ck, metas, tag) -> None:
+    """**首都判定**（`src/tests/sim/capital.rs` 四条搬来，2026-10 第 7 批）。
+
+    读面 = `decisions[kind=capital]`（`verdict` + `detail`）+ `factions.capital_body`
+    + `cities.{人口, 已焚毁, 天体名}`，所以三条**整条**搬得动：
+
+    | Rust 原件 | 这里 |
+    | --- | --- |
+    | 亡城强迁 ⇒ 人口最高的活城 | `verdict=forced` ⇒ 不评估、无判据数字、`capital_body == target`、`target ∈ 人口最高那一组天体`（并列任取） |
+    | 周期评估 ⇒ 迁到人口中心 | `verdict=relocate` ⇒ `reviewed`、`candidate == target`、`候选成本 + 门槛 < 现成本`、`capital_body == target` |
+    | 判定是稀疏的 | 非 `forced` 的判定只出现在 `capital_review_every` 的整数倍回合；`review` 行 `target` 为空、两头判据数字都在 |
+
+    第四条（Player 钉的首都不被覆盖）要 `--apply` 写 `首都` 叶 ⇒ 属**合成场景**，在 g2。
+    """
+    forced = reloc = review = 0
+    bad = Verdict()
+    for m in metas:
+        c = m["capital"]
+        every, thr = c["review_every"], c["threshold"]
+        for r in c["rows"]:
+            v, where = r["verdict"], f"r{r['round']} {r['势力']}"
+            if v == "forced":
+                forced += 1
+                if r["reviewed"] or r["candidate"] is not None or r["cur"] is not None or r["cand"] is not None:
+                    bad.add(f"{where}：强迁却编出了评估数字（reviewed/candidate/成本）")
+                if r["from"] is None:
+                    bad.add(f"{where}：强迁没记 `relocated_from`")
+                if r["target"] not in r["top_bodies"]:
+                    bad.add(f"{where}：迁到 {r['target']}，人口最高的活城却在 {r['top_bodies']}")
+            elif v == "relocate":
+                reloc += 1
+                if not r["reviewed"] or r["candidate"] != r["target"] or r["from"] is None:
+                    bad.add(f"{where}：迁都行字段不成套（{r['reviewed']}/{r['candidate']}/{r['from']}）")
+                if r["cur"] is None or r["cand"] is None or not (r["cand"] + thr < r["cur"]):
+                    bad.add(f"{where}：候选 {r['cand']} + 门槛 {thr} 没比现首都 {r['cur']} 低")
+            elif v == "review":
+                review += 1
+                if r["target"] is not None or r["cur"] is None or r["cand"] is None:
+                    bad.add(f"{where}：评估未迁却带了 target / 缺判据数字")
+            else:
+                bad.add(f"{where}：未知 verdict `{v}`")
+            if v != "forced" and r["round"] % every != 0:
+                bad.add(f"{where}：`{v}` 出现在非评估回合（周期 {every}）")
+            if r["cap_body"] != r["target"] and v != "review":
+                bad.add(f"{where}：`capital_body`={r['cap_body']} ≠ target={r['target']}")
+    tot = forced + reloc + review
+    ck.check("首都判定自洽（强迁不评估 / 评估带判据数字 / 迁都按门槛）", bad.n == 0,
+             bad.detail(f"{tag}：{tot} 条首都判定全部成套"))
+    ck.check("首都判定守卫没有空转（三类都真的发生过）",
+             forced > 0 and review > 0 and reloc > 0,
+             f"{tag}：亡城强迁 {forced} / 周期评估 {review} / 评估迁都 {reloc}")
 
 
 def identity_checks(h, ck, metas, tag) -> None:
