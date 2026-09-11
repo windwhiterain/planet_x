@@ -37,6 +37,10 @@
    `--nouns` 语料里查得到）；§5d 查**接线**（渲染字段名标签的 JS 模块都必须挂
    `Tip.attach`/`ctx.tip`）——通用 widget 自己渲染出来的字段名不在任何 `columns` 里，
    §5 够不着它们。两条合起来才是「界面上每个名词都弹得出解释」。
+   §5 的**控制行那一支**按**前端的等价口径**判（`frontend_words`：声明优先 —— `noun` →
+   叶字段名/裸字段名 → 显示标签）：判据算出来的词必须 == 前端运行时算出来的词，否则就会
+   出这种事——`owner` 行按「作用域键在语料里」判绿，而宿主根本不查那个词，实机 hover
+   无反应（2026-10 实测的缺口）。
 
 ⚠ 实测（本轮 seed 42 / 40 回合）：读面条目**一个 `remove` 都没有**——`capital` 的读面是
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
@@ -963,6 +967,49 @@ def run(h, ck) -> None:
              f"名词 {len(corpus)} 个" if corpus_ok else f"退出码 {rc}：{out[:120]}")
 
     BARE = re.compile(r"^[A-Za-z_一-鿿][\w一-鿿]*$")
+
+    # --- 「前端在悬停这一刻会去查哪个词」：**照抄**宿主那两条链 --------------------
+    #
+    # 判据必须与**真实的解析路径**一致，否则它就比没有判据更坏（给人一种"已经守住了"的假象）。
+    # 2026-10 实测的缺口正是这么漏出来的：`owner` 行（`{ "owner": "factions", "label": "归谁" }`）
+    # 从前按「作用域键 `factions` 也在语料里」判绿，可宿主 `app.js::nounTip` **不把 `col.owner`
+    # 当字段名**（它的 field 链是 `noun` → 叶的字段名 → 裸字段名）⇒ 那个词前端根本不会去查，
+    # 实机 hover 无反应，而判据全绿。
+    #
+    # 所以两个分支用**同一个口径**：`views.json` 里算出来的词 == 前端运行时算出来的词。
+    # 唯一实现住在 `web/static/app.js::nounTip`（+ `controls.js::decorateDoc` 补的 label）：
+    #   * 显示的那个词（`Tip.attach` 的 noun）= `label` → `path` → `leaf` → `owner` → `action`；
+    #     控制行没写 `label` 时 `decorateDoc` 先补一个：叶/命令看 `leaf_ui`/`action_ui` 的中文名，
+    #     归属看 `OWNER_LABEL`；
+    #   * 兜底的字段名（`Tip.attach` 的 field）= `noun` → 叶的字段名（`Controls.fieldOf`）
+    #     → 裸字段名的 `path`。
+    # 悬停弹得出东西 ⇔ 这两个词里**有一个**在语料里（`tip.js::attach` 的查词顺序）。
+    OWNER_LABEL = {"global": "全局归谁", "factions": "这个势力归谁",
+                   "bodies": "这个天体归谁", "cities": "这座城归谁"}
+
+    def field_of_row(path: object) -> str:
+        """`Controls.fieldOf`：路径最后一段去掉 `[?…]`（`@control[…].投资预算` → `投资预算`）。"""
+        return re.sub(r"\[.*$", "", str(path).split(".")[-1])
+
+    def frontend_words(c: dict) -> list[str]:
+        """这条列声明递到 `Tip.attach` 时，前端会依次去查的词（顺序 == 查词顺序）。"""
+        label = c.get("label")
+        if not (isinstance(label, str) and label):
+            if isinstance(c.get("path"), str) and c["path"]:
+                label = c["path"]
+            elif isinstance(c.get("leaf"), str):
+                f = field_of_row(c["leaf"])
+                label = (leaf_ui.get(f) or {}).get("label") or f
+            elif isinstance(c.get("owner"), str):
+                label = OWNER_LABEL.get(c["owner"], "归谁")
+            elif isinstance(c.get("action"), str):
+                label = (action_ui.get(c["action"]) or {}).get("label") or c["action"]
+        noun = c.get("noun")
+        bare = c["path"] if isinstance(c.get("path"), str) and BARE.match(c["path"]) else None
+        leaf_field = field_of_row(c["leaf"]) if isinstance(c.get("leaf"), str) else None
+        field = (noun if isinstance(noun, str) and noun else None) or leaf_field or bare
+        return list(dict.fromkeys(w for w in (label, field) if isinstance(w, str) and w))
+
     considered = 0
     uncovered: list[str] = []
     for v in views:
@@ -972,11 +1019,8 @@ def run(h, ck) -> None:
                 continue
             is_control = any(isinstance(c.get(k), str) for k in ("leaf", "owner", "action"))
             if is_control:
-                # 控制行的名字：`label`（views.json 里声明的中文名）或叶/命令的**字段名**。
-                label = c.get("label")
-                path = c.get("leaf") or c.get("owner") or c.get("action") or ""
-                field = str(path).split(".")[-1].split("[")[0]
-                keys = [k for k in (label, field) if k]
+                # 控制行：**前端等价口径**（见上面 `frontend_words`）——声明优先。
+                keys = frontend_words(c)
             else:
                 path = c.get("path")
                 # 表达式列（`@post.power_share.${势力}`）：它**自己**不是名词，但只要列上声明了
@@ -1000,19 +1044,59 @@ def run(h, ck) -> None:
                  f"语料 {len(corpus)} 个名词，覆盖 {considered} 个界面名词（下限 40）"
                  if considered >= 40 else f"只算到 {considered} 个名词，判据可能空转了"))
 
-    # 表达式列的 `noun` 声明：**必须在语料里查得到**。
+    # ── 控制面那一支（单独一条，2026-10 补）──────────────────────────────────────
+    #
+    # 缺口就是这条漏出来的：`owner` 行（`{ "owner": "factions", "label": "归谁" }`）在实机
+    # hover **弹不出解释**，而上面那条覆盖率判据**全绿**——它拿「作用域键 `factions`」去语料里
+    # 查，那个名字确实在语料里；可**前端根本不会去查那个词**（`nounTip` 的 field 链里没有
+    # `owner`）。判据与实际解析路径不一致，比没有判据更坏：它给了一个「已经守住了」的假象。
+    #
+    # 口径：**每一条控制行**（`leaf` / `owner` / `action`）都按前端等价口径算词 ——
+    # **声明了 `noun` 就用 `noun`**；没声明就用前端兜底会用的那个（叶的字段名 / 裸字段名 /
+    # 显示标签，见 `frontend_words` 那两条链）。查不到就红，并把**那条行**印出来
+    # （`owner`/`leaf`/`action` + label + noun），让人一眼知道该在哪补声明。
+    control_rows = 0
+    ctl_uncovered: list[str] = []
+    for v in views:
+        vid = v.get("id", "?")
+        for c in v.get("columns") or []:
+            if not isinstance(c, dict):
+                continue
+            kind = next((k for k in ("leaf", "owner", "action") if isinstance(c.get(k), str)), None)
+            if kind is None:
+                continue
+            control_rows += 1
+            words = frontend_words(c)
+            if not words or not any(w in corpus for w in words):
+                ctl_uncovered.append(
+                    f"{vid}：{kind}={c[kind]!r} label={c.get('label')!r} noun={c.get('noun')!r}"
+                    f" ⇒ 前端会查 {words or ['（无词可查）']}，语料里一个都没有")
+    # 防空转：下限钉在**实测值**下面一点（实测 32 条 = 25 leaf + 6 owner + 1 action）。
+    # 判据要真的在数东西——声明被搬走/解析口径写错时会掉下来。
+    CONTROL_ROWS_MIN = 30
+    ck.check(f"名词覆盖率·控制行：{control_rows} 条控制行按**前端的等价口径**都查得到解释"
+             f"（声明优先：`noun` → 叶字段名/裸字段名 → 显示标签；下限 {CONTROL_ROWS_MIN} 条）",
+             corpus_ok and not ctl_uncovered and control_rows >= CONTROL_ROWS_MIN,
+             "；".join(ctl_uncovered[:4]) or (
+                 f"控制行 {control_rows} 条全部命中语料（下限 {CONTROL_ROWS_MIN}，防空转）"
+                 if control_rows >= CONTROL_ROWS_MIN
+                 else f"只算到 {control_rows} 条控制行，判据可能空转了"))
+
+    # 列上的 `noun` 声明（表达式列 / 控制行）：**必须在语料里查得到**。
     #
     # 为什么需要这个字段：表达式是**取数路径**、不是名词（`@post.power_share.${势力}` 里没有
     # "名词"那一层），所以只有声明才知道该弹哪条解释。**不许去表达式里猜**——`@state.ships
     # [?舰名=…].势力` 的第一个裸段是 `ships`，猜出来必错。
+    # 控制行同理（2026-10 补）：`owner` / `action` 行的**键名**不是前端会去查的词
+    # （`nounTip` 的 field 链里没有它们），要么标签自己查得到，要么用 `noun` 显式点名。
     declared: list[tuple[str, str]] = []
     for v in views:
         for c in v.get("columns") or []:
             if isinstance(c, dict) and isinstance(c.get("noun"), str) and c["noun"]:
                 declared.append((v.get("id", "?"), c["noun"]))
     bad_decl = [f"{vid}：`noun: {n}` 在语料里查不到（弹空框）" for vid, n in declared if n not in corpus]
-    ck.check(f"名词覆盖率：{len(declared)} 条表达式列的 `noun` 声明都能查到解释"
-             f"（这一列说的是哪个名词）",
+    ck.check(f"名词覆盖率：{len(declared)} 条 `noun` 声明都能查到解释"
+             f"（这一列/这一行说的是哪个名词）",
              corpus_ok and not bad_decl and len(declared) >= 20,
              "；".join(bad_decl[:5]) or (
                  f"声明 {len(declared)} 条，全部命中语料（下限 20）"
