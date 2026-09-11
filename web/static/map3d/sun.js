@@ -170,12 +170,15 @@ const PROM_TWIST = 2.0;    // 扭的倍率（∇×F 的场向/路径分量沿路
 //   prof  宽度剖面 0=向尖端收细(锥) 1=向尖端张开(扇)
 //   cross 截面 0=平铺面纱 1=中间一道脊
 //   heat  色温偏移   len 丝尖参差度（每根丝末端散开的程度）
+//   span  **U 形（马鞍）的两条腿分开多少**（单位 = 高度）。0 = 不收回来（直须）。
+//         ⚠ 这是**初始形态**，不是靠场弯出来的（用户裁决："马鞍形我指的是初始形态
+//         就是一个 U 形状的，然后在此基础上再受到场影响"）。
 const PROM_KINDS = [
-  { n: 'spike', w: 0.30, h: [0.055, 0.230], wid: [0.040, 0.105], arc: [0.00, 0.00], fil: [1.30, 1.90], along: [0.50, 0.95], prof: [0.00, 0.15], cross: [0.55, 0.95], heat: [0.05, 0.25], len: [0.30, 0.45] },
-  { n: 'bush', w: 0.24, h: [0.020, 0.075], wid: [0.090, 0.200], arc: [0.00, 0.35], fil: [1.50, 2.20], along: [1.10, 2.10], prof: [0.35, 0.65], cross: [0.20, 0.55], heat: [-0.10, 0.10], len: [0.45, 0.62] },
-  { n: 'sheet', w: 0.20, h: [0.070, 0.250], wid: [0.130, 0.300], arc: [0.00, 0.45], fil: [0.50, 0.80], along: [0.35, 0.80], prof: [0.10, 0.40], cross: [0.05, 0.30], heat: [-0.05, 0.15], len: [0.25, 0.40] },
-  { n: 'loop', w: 0.16, h: [0.130, 0.300], wid: [0.100, 0.230], arc: [0.55, 1.00], fil: [0.60, 1.00], along: [0.65, 1.20], prof: [0.00, 0.22], cross: [0.35, 0.70], heat: [0.00, 0.20], len: [0.30, 0.48] },
-  { n: 'knot', w: 0.10, h: [0.015, 0.055], wid: [0.055, 0.130], arc: [0.00, 0.20], fil: [1.80, 2.50], along: [1.60, 3.00], prof: [0.40, 0.75], cross: [0.45, 0.85], heat: [0.15, 0.40], len: [0.50, 0.70] },
+  { n: 'spike', w: 0.30, h: [0.030, 0.280], wid: [0.030, 0.120], arc: [0.00, 0.00], span: [0.00, 0.00], fil: [1.30, 1.90], along: [0.50, 0.95], prof: [0.00, 0.15], cross: [0.55, 0.95], heat: [0.05, 0.25], len: [0.30, 0.45] },
+  { n: 'bush', w: 0.24, h: [0.012, 0.110], wid: [0.070, 0.260], arc: [0.00, 0.35], span: [0.20, 0.70], fil: [1.50, 2.20], along: [1.10, 2.10], prof: [0.35, 0.65], cross: [0.20, 0.55], heat: [-0.10, 0.10], len: [0.45, 0.62] },
+  { n: 'sheet', w: 0.20, h: [0.040, 0.340], wid: [0.110, 0.380], arc: [0.00, 0.45], span: [0.30, 1.10], fil: [0.50, 0.80], along: [0.35, 0.80], prof: [0.10, 0.40], cross: [0.05, 0.30], heat: [-0.05, 0.15], len: [0.25, 0.40] },
+  { n: 'loop', w: 0.16, h: [0.090, 0.520], wid: [0.050, 0.190], arc: [0.65, 1.00], span: [0.90, 2.10], fil: [0.60, 1.00], along: [0.65, 1.20], prof: [0.00, 0.22], cross: [0.35, 0.70], heat: [0.00, 0.20], len: [0.30, 0.48] },
+  { n: 'knot', w: 0.10, h: [0.010, 0.070], wid: [0.045, 0.150], arc: [0.00, 0.25], span: [0.10, 0.45], fil: [1.80, 2.50], along: [1.60, 3.00], prof: [0.40, 0.75], cross: [0.45, 0.85], heat: [0.15, 0.40], len: [0.50, 0.70] },
 ];
 const PROM_KIND_SUM = PROM_KINDS.reduce((a2, k) => a2 + k.w, 0);
 // 按权重抽一个形态（**概率分布而不是阈值**：权重就是它的出现频率）
@@ -185,6 +188,10 @@ function pickKind(u) {
   return PROM_KINDS[PROM_KINDS.length - 1];
 }
 const lerpR = (ab, u) => ab[0] + (ab[1] - ab[0]) * u;
+// **对数均匀**取尺寸：`线性均匀 + pow(·,1.9)` 会把绝大多数压到区间下限附近
+// ⇒ 看上去"每条都一样大"（用户裁决："这些带子看起来都一样，你改改大小"）。
+// 对数上均匀 ⇒ 每个尺度上都有差不多多的样本，大小差别才**看得出来**。
+const lerpLog = (ab, u) => ab[0] * Math.pow(ab[1] / ab[0], u);
 
 // 网格按 LOD 生成多份，见 makePromGeo。
 function buildPromAttrs(sunR, field) {
@@ -193,7 +200,7 @@ function buildPromAttrs(sunR, field) {
   const side = new Float32Array(PROM_MAX * 3);
   const bend = new Float32Array(PROM_MAX * 3);
   const par = new Float32Array(PROM_MAX * 4);
-  const kind = new Float32Array(PROM_MAX * 3);
+  const kind = new Float32Array(PROM_MAX * 4);
   // **世界空间流场**烘出来的每实例量（朝向 / 扭转 / 场强 / 掩码 / 喷发相位 / 周期）。
   // 为什么烘在 CPU：见 prom.vert 与 sunfield.js 顶部 —— 这些量**每片就是一个常数**，
   // 让 250 个顶点各算一遍（每顶点约 24 次 pnoise）纯属浪费，实测值 3.5 ms。
@@ -244,9 +251,8 @@ function buildPromAttrs(sunR, field) {
     // （只抽"大小"是上一版的做法：大小有差别、形态没差别 ⇒ 还是草地。）
     const K = pickKind(rnd());
     // 高度用幂分布：多数偏矮、少数很高（长尾）；幂次按形态给（喷流尖、面纱平）
-    const hPow = K.n === 'sheet' || K.n === 'loop' ? 1.3 : 1.9;
-    const hgt = sunR * lerpR(K.h, Math.pow(rnd(), hPow));
-    const wid = sunR * lerpR(K.wid, rnd());
+    const hgt = sunR * lerpLog(K.h, rnd());
+    const wid = sunR * lerpLog(K.wid, rnd());
     const arc = lerpR(K.arc, rnd());
     const isArc = arc > 0.001;
     // `aParam.z` 现在只是**弯曲方向的抖动**（不是弯曲量）：方向的主导向量来自共享场
@@ -262,6 +268,8 @@ function buildPromAttrs(sunR, field) {
     kind[i * 3] = arc;
     kind[i * 3 + 1] = tiltJit;
     kind[i * 3 + 2] = 0.70 + 0.70 * rnd();         // 宽度的每片抖动
+    // U 形两条腿的分开量（**初始形态**，单位 = 高度）。arc=0 的直须用不到它。
+    kind[i * 3 + 3] = K.span[1] > 0 ? lerpR(K.span, rnd()) : 0.0;
     style[i * 4] = lerpR(K.fil, rnd());
     style[i * 4 + 1] = lerpR(K.along, rnd());
     style[i * 4 + 2] = lerpR(K.prof, rnd());
@@ -296,7 +304,7 @@ function buildPromAttrs(sunR, field) {
     aSide: new THREE.InstancedBufferAttribute(side, 3),
     aBend: new THREE.InstancedBufferAttribute(bend, 3),
     aParam: new THREE.InstancedBufferAttribute(par, 4),
-    aKind: new THREE.InstancedBufferAttribute(kind, 3),
+    aKind: new THREE.InstancedBufferAttribute(kind, 4),
     aFlow: new THREE.InstancedBufferAttribute(flowA, 4),
     aFlow2: new THREE.InstancedBufferAttribute(flowB, 4),
     aTwist: new THREE.InstancedBufferAttribute(twist, 4),
