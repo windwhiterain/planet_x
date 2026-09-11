@@ -467,7 +467,13 @@ function checkRow(id, kind, text) {
 // 一个「点开就地看原始 JSON」的小开关（未组织索引里每个键都有）。
 function jsonToggle(label, get, rootPath) {
   const btn = el('span', { class: 'sv-more clickable' }, '▸ ' + label);
-  const box = el('div', { class: 'sv-residual-box' });
+  // ⚠ 类名以前叫 `sv-residual-box`（和读面那个「其余字段」折叠桶共用一条 CSS）。
+  // 2026-10 第 8 步把读面的桶整条删掉、那条 CSS 也清了 ⇒ 这里换成自己的类名
+  // （`sv-raw-box`，样式照旧由 `style.css` 给）——否则这个「看原始 JSON」的盒子会掉样式。
+  // ⚠ **实测（顺手发现，早先就有的缺陷，没有顺手改）**：本函数只 `return btn`，
+  // 这个 box **从来没被 append 进 DOM** ⇒ 未组织页那些「看原始数据」开关其实是 no-op
+  // （点击只换箭头，什么都不展开）。不在第 8 步范围内，留在这里给下一个人。
+  const box = el('div', { class: 'sv-raw-box' });
   box.style.display = 'none';
   let built = false;
   btn.addEventListener('click', () => {
@@ -917,7 +923,8 @@ function openBottomBar() {
   if (btn) btn.textContent = btn.dataset.openArrow;
 }
 
-// 选中读面：**先问组织点**（`select` 挂载）——命中就用整理过的卡片 + 「其余字段」；
+// 选中读面：**先问组织点**（`select` 挂载）——命中就用整理过的卡片（没被声明的字段
+// 由求值器**追加成普通行**，见 `specview.js` 的铁律 R：没有折叠桶）；
 // 没命中就退回通用 widget 渲染整份记录（老行为，一条也不少）。
 function renderSelection() {
   const head = $('#selHead');
@@ -965,7 +972,7 @@ function inlineSpec(path, value) {
   if (!spec) return null;
   const box = el('div', { class: 'sv-inline' });
   const bar = el('div', { class: 'sv-inline-bar' });
-  bar.textContent = '此处由组织点「' + spec.id + '」整理（原始字段在每行的「其余字段」里）';
+  bar.textContent = '此处由组织点「' + spec.id + '」整理（没被声明的字段自动追加在每行/每列后面）';
   box.appendChild(bar);
   window.SpecView.renderView(box, spec);
   return box;

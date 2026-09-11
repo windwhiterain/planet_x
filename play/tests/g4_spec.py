@@ -46,6 +46,27 @@
 `Control<天体名>`（`{值, 归属}`），而 `舰队默认*` 是 `{…, 归属, 删叶: false}` 且
 `remove` 带 `skip_serializing_if = "is_false"` ⇒ 读面永远不发这个字段。所以上头的 `∪ {remove}`
 是**允许集**（宽容那一侧），不是「应该有」；谁要在读面上真的看到它，本组的 detail 会报出来。
+
+8. **追加机制**（§8，2026-10 第 8 步）：用户裁决 *「我不希望有『其余』这样的栏目」*
+   *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* —— 读面的「残差折叠桶」
+   整条删掉，没被声明的字段改成**追加的普通列 / 普通行**。判据四条：
+   * **§8a 读面覆盖**（跑真世界 + **把 `specview.js` 原样跑起来**，见 `_append_probe.js`）：
+     每一张读面表/卡片上
+     `声明列 ∪ 追加列 ∪ 声明不看列 == 该记录的全部引擎字段`，
+     任何一边多一个/少一个都红；防空转的实测数字（视图数/记录数/字段数/声明/追加/不看）
+     写进判据文本。
+   * **§8b 没有折叠桶**（静态）：`specview.js` 的**代码**里 `其余` / `sv-th-res` /
+     `sv-residual` / `residualCell` / `renderResidualInto` 一个都不许再出现，而追加接线
+     （`sv-th-auto` / `sv-td-auto` / `sv-sheet-row-auto` / `residualCols` / `autoTh`）一个都不能少。
+   * **§8c 追加列的名词覆盖率**：中文追加字段名必须查得到解释（走与手工列同一条查词链）；
+     引擎内部的 ASCII 槽位名（`events` 的 `attacker`/`shipper`…）如实记账，不算红
+     ——它们是**引擎缺命名**，不是本机制缺接线。
+   * **§8d 投影对账**（用户要的「把每张声明的表与投影真实列做集合对账」）：
+     `(声明 ∪ 追加 ∪ 不看) ∩ 投影列 == 投影列 ∩ 实体 schema 字段`（`--index` 的
+     `schema.json`）。为什么不直接 `== 投影列`：投影自己有派生列、也真的丢字段
+     （实测 `factions` 不发 `颜色`、`ships` 不发 `坐标`/`攻击历史`），能对的是**交集**。
+   非恒真由 `play/tests/_g4_negative.py` ㉙（剪断追加路径 ⇒ §8a 红）㉚（桶回来 ⇒ §8b 红）
+   ㉛（删掉一列 ⇒ 不红，但文本必须指出「这一列现在只能靠追加」）盯着。
 """
 
 from __future__ import annotations
@@ -53,6 +74,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -557,6 +579,130 @@ def _pick_entry(v, keys: list[str], keyvals: dict):
         if isinstance(e, dict) and all(e.get(k) == val for k, val in keyvals.items()):
             return e
     return None
+
+
+# --- §8 追加机制（铁律 R 的读面落点）的**真跑** --------------------------------
+#
+# 用户裁决（2026-10）：*「我不希望有『其余』这样的栏目」*
+# *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* ——
+# 于是读面的「残差折叠桶」整条删掉，改成**普通列 / 普通行**追加在声明之后。
+#
+# 判据为什么走 Node：**口径不许抄第二份**。`residualCols` / `claimedKeys` /
+# `omittedKeys` 的真值只在 `web/static/specview.js` 里；Python 再抄一遍，抄的那份迟早和
+# 前端漂开——而「判据与实际解析路径不一致」本仓已经吃过一次亏（§5d 那条注释记着）。
+# 所以 §8a 把前端代码**原样跑起来**，让**它自己**算「追加了哪些列、每一格印出什么」，
+# 再拿这份结果去和引擎发的真记录逐字段对账。Node 不在时退化成 Python 镜像（[`_mirror_*`]，
+# 判据文本里会**明说降级**），并且只要 Node 在，就顺手验一次「镜像 == 真代码」。
+APPEND_PROBE = Path(__file__).resolve().parent / "_append_probe.js"
+# 折叠桶的**墓碑**：这几个词一旦重新出现在 `specview.js` 的**代码**里（注释不算），
+# 说明「其余」那套又回来了 ⇒ 红。`g4` 的 §8b 就是这条。
+BUCKET_MARKERS = ("其余", "sv-th-res", "sv-residual", "residualCell", "renderResidualInto")
+# 追加机制的**接线标记**：残差必须是「普通列 / 普通行」——这几个名字少了任何一个，
+# 都说明有一条布局不再把残差摆出来（§8b 红）。
+APPEND_MARKERS = ("sv-th-auto", "sv-td-auto", "sv-sheet-row-auto", "residualCols", "autoTh")
+_ZH = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _node_append_report(roots: dict, specview: Path, views_path: Path) -> dict | None:
+    """让 Node 把 `specview.js` 原样加载、在真记录上算一遍追加结果。Node 不在 ⇒ None。"""
+    exe = shutil.which("node")
+    if not exe:
+        return None
+    p = subprocess.run(
+        [exe, str(APPEND_PROBE), str(specview), str(views_path)],
+        input=json.dumps({"roots": roots}, ensure_ascii=False),
+        cwd=str(REPO), capture_output=True, text=True, encoding="utf-8",
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"node 探针退出码 {p.returncode}：{(p.stderr or '')[-800:]}")
+    return json.loads(p.stdout)
+
+
+# 退化路径的镜像（**只在 Node 不在时用**）：逐字照抄 `specview.js` 的三条口径。
+def _mirror_expand(source: str, roots: dict) -> list:
+    """`specview.js::expand` 的镜像：`@根.a.b[*]` → 记录列表。"""
+    segs = split_segments(source)
+    if not segs or not segs[0].startswith("@"):
+        return []
+    head, _, br = segs[0][1:].partition("[")
+    cur = roots.get(head)
+    rest = (["[" + br] if br else []) + segs[1:]
+    for s in rest:
+        if s.strip() == "[*]":
+            if isinstance(cur, list):
+                pass
+            elif isinstance(cur, dict):
+                cur = list(cur.values())
+            else:
+                return []
+            continue
+        key = re.sub(r"\[.*$", "", s)
+        if isinstance(cur, dict):
+            cur = cur.get(key)
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(key)]
+            except (ValueError, IndexError):
+                return []
+        else:
+            return []
+    if cur is None:
+        return []
+    if isinstance(cur, list):
+        recs = cur
+    elif isinstance(cur, dict):
+        vals = list(cur.values())
+        recs = vals if vals and all(isinstance(v, dict) for v in vals) else [cur]
+    else:
+        recs = [cur]
+    return [r for r in recs if isinstance(r, dict)]
+
+
+def _mirror_claimed_omitted(spec: dict):
+    """`specview.js::claimedKeys` / `omittedKeys` 的镜像（口径逐条对齐，含 `spec.key`）。"""
+    claimed: list[str] = []
+    for c in spec.get("columns") or []:
+        if c.get("action"):
+            claimed.append(re.sub(r"\[.*$", "", str(c["action"])))
+        p = str(c.get("path") or "")
+        if not p or p[0] == "@":
+            continue
+        claimed.append(re.sub(r"\[.*$", "", split_segments(p)[0]))
+    k = str(spec.get("key") or "")
+    if k and k[0] != "@":
+        claimed.append(re.sub(r"\[.*$", "", split_segments(k)[0]))
+    g = spec.get("group") if isinstance(spec.get("group"), dict) else None
+    for p in [(g or {}).get("by"), spec.get("title_path"), spec.get("body")] + list(spec.get("meta") or []):
+        if p and str(p)[0] != "@":
+            claimed.append(re.sub(r"\[.*$", "", str(p)))
+    omitted = [re.sub(r"\[.*$", "", str(o.get("path"))) for o in spec.get("omit") or []]
+    seen: list[str] = []
+    for x in claimed:
+        if x and x not in seen:
+            seen.append(x)
+    return seen, omitted
+
+
+def _mirror_report(doc: dict, roots: dict) -> dict:
+    """Python 镜像版的 §8a 报告（形状与 `_append_probe.js` 的输出**同一个合同**）。"""
+    views: list[dict] = []
+    for page in (doc.get("pages") or []) + [{"views": doc.get("select") or []}]:
+        for spec in page.get("views") or []:
+            layout = spec.get("layout", "table")
+            if layout not in ("table", "sheet", "cards") or spec.get("source") in (None,):
+                continue
+            recs = _mirror_expand(spec["source"], roots)
+            claimed, omitted = _mirror_claimed_omitted(spec)
+            fields: list[str] = []
+            for r in recs:
+                for k in r:
+                    if k not in fields:
+                        fields.append(k)
+            auto = [k for k in fields if k not in claimed and k not in omitted]
+            views.append({"id": spec.get("id"), "layout": layout, "source": spec["source"],
+                          "rows": len(recs), "records": len(recs), "claimed": claimed,
+                          "omitted": omitted, "auto": auto, "fields": fields, "autoViews": []})
+    return {"views": views}
 
 
 def run(h, ck) -> None:
@@ -1116,6 +1262,12 @@ def run(h, ck) -> None:
              not dup_labels,
              "；".join(dup_labels[:4]) or "0 条重复（`label` 只在要覆盖/加格式时才写）")
 
+    # §8 要用这份「名词 → 解释」的**镜像**。⚠ 先存一个引用：下面的身份证那一节会把
+    # `corpus` 这个名字重绑成整份 `--nouns` 文档（历史遗留的遮蔽），直接用 `corpus`
+    # 会拿到一个顶层只有 state/view/projection/control/identity 五个键的字典
+    # （实测：§8c 会把 `名声`/`关系` 之类真的在语料里的名词误报成"查不到"）。
+    nouns_corpus = corpus
+
     # ══ 5d. 名词覆盖率（**静态**）：渲染字段名标签的 JS 模块都必须挂 tip ═══════════════
     #
     # 为什么要有这一条（§5 看不见的那半边）：上面 §5 查的是**声明**——`views.json` 里
@@ -1477,6 +1629,204 @@ def run(h, ck) -> None:
              ) or (f"{ctrl_rows} 行、{len(ctrl_kinds)} 种 kind："
                    f"{' / '.join(sorted(ctrl_kinds))}；"
                    f"自报例外 {len(absent)} 条（{'、'.join(f'{k}（{v[:24]}…）' for k, v in absent.items())}）"))
+
+    # ══ 8. 追加机制：**没被声明的字段 = 普通列 / 普通行**（铁律 R 的读面落点）════════
+    #
+    # 用户裁决（2026-10）：*「我不希望有『其余』这样的栏目」*
+    # *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」*。
+    #
+    # 判据 8a（**跑真世界 + 跑前端真代码**）：每一张读面表 / 卡片，
+    #
+    #     显式声明的列 ∪ 自动追加的列 ∪ 声明不看的列 == 该记录的全部引擎字段
+    #
+    # 三样都由 `specview.js` **自己**算（Node 把文件原样加载，调它的 `expand` /
+    # `claimedKeys` / `omittedKeys` / `residualCols`），真值是该实体的记录键集合
+    # （`/api/state` 的 dump —— 也就是读面真正渲染的那些记录）。**任何一边多一个字段都红**。
+    #
+    # 防空转：参与对账的视图数 / 记录数 / 字段数 / 声明列数 / 追加列数 / omit 数都写进判据文本，
+    # 并钉下限（少了说明声明被搬走、或者判据的口径写错了）。
+    #
+    # 非恒真（见 `play/tests/_g4_negative.py` ㉙㉚㉛）：
+    #   * ㉙ 把 `residualCols` 剪成 `return []`（= 追加路径坏了）⇒ 8a **红**（字段少了一大片）；
+    #   * ㉚ 把类名改回 `sv-th-res` / 把「其余」塞回代码里 ⇒ 8b 红；
+    #   * ㉛ 把 `views.json` 里的一列删掉（= 未声明）⇒ 8a **仍然绿**（这是对的：未声明 =
+    #     自动追加，用户要的正是这个），但证据文本里那一列必须**出现在「追加」那一串里**
+    #     ——「整理过」与「靠兜底」的区别就在这份清单上。
+    node_views: list[dict] = []
+    state_dump = json.loads(ckpt.read_text(encoding="utf-8"))["round_state"]
+    roots = {
+        "state": state_dump.get("state"),
+        "pre": state_dump.get("pre"),
+        "post": state_dump.get("post"),
+        # ⚠ `control` / `scope` 两个根要用**读面的那份**（`--control` 的 FactionControlView），
+        # 不是 `state.control`（那是叶库本身、没有 `势力` 这一列）。用错根 = 拿一个假时代
+        # 去对账（实测：`bp-table` 会凭空多出一个「势力 没被认领」的幻觉字段）。
+        "control": pre.get("control"),
+        "scope": pre.get("scope"),
+    }
+    degraded = ""
+    try:
+        got = _node_append_report(roots, STATIC_JS / "specview.js", VIEWS_JSON)
+    except Exception as e:  # noqa: BLE001 —— 探针跑不起来必须响亮（不许静默降级）
+        got = None
+        degraded = f"node 探针失败：{type(e).__name__}: {e}"
+    mirror = _mirror_report(json.loads(VIEWS_JSON.read_text(encoding="utf-8")), roots)
+    if got is not None:
+        node_views = [v for v in got.get("views") or [] if "error" not in v]
+        # 镜像 == 真代码（口径只有一份；镜像只在 Node 不在时才当真值用）。
+        drift_m: list[str] = []
+        by_id = {v["id"]: v for v in mirror["views"]}
+        for v in node_views:
+            mv = by_id.get(v["id"])
+            if mv is None:
+                drift_m.append(f"{v['id']}：镜像里没有这条视图")
+                continue
+            for key in ("claimed", "omitted", "auto", "fields"):
+                if list(mv[key]) != list(v[key]):
+                    drift_m.append(f"{v['id']}.{key}：镜像 {mv[key]} != 前端 {v[key]}")
+        ck.check("追加完整性：Python 镜像与前端真代码的**口径逐条一致**"
+                 f"（{len(node_views)} 条视图的 声明/不看/追加/字段 四个清单）",
+                 not drift_m,
+                 "；".join(drift_m[:3]) or
+                 f"{len(node_views)} 条视图的四个清单逐字相等（Node 在场，真值取自 `specview.js`）")
+    else:
+        node_views = mirror["views"]
+        degraded = degraded or "node 不在 ⇒ 用 Python 镜像（降级）"
+        ck.check("追加完整性：Node 探针跑得起来（判据要在**前端真代码**上对账，不是抄一份口径）",
+                 False, degraded)
+
+    covered = [v for v in node_views if v["records"] > 0]
+    missing_f: list[str] = []
+    phantom_f: list[str] = []
+    omit_bad_f: list[str] = []
+    n_fields = n_decl = n_auto = n_omit = n_recs = 0
+    evidence: list[str] = []
+    for v in covered:
+        fields = set(v["fields"])
+        claimed = set(v["claimed"])
+        omitted = set(v["omitted"])
+        auto = set(v["auto"])
+        n_recs += v["records"]
+        n_fields += len(fields)
+        n_decl += len(claimed & fields)
+        n_auto += len(auto)
+        n_omit += len(omitted & fields)
+        union = (claimed & fields) | (omitted & fields) | auto
+        if union != fields:
+            missing_f.append(f"{v['id']}：没被任何一列覆盖 {sorted(fields - union)}"
+                             f"（追加的 {sorted(auto)}、声明 {sorted(claimed & fields)}、"
+                             f"不看 {sorted(omitted & fields)}）")
+        if union - fields:
+            missing_f.append(f"{v['id']}：列出了记录上不存在的字段 {sorted(union - fields)}")
+        if claimed - fields:
+            phantom_f.append(f"{v['id']}：声明了记录上没有的字段 {sorted(claimed - fields)}"
+                             f"（写错名字，或者用了别的实体的列）")
+        if omitted - fields:
+            omit_bad_f.append(f"{v['id']}：`omit` 写了记录上没有的字段 {sorted(omitted - fields)}")
+        evidence.append(f"{v['id']} 声明{len(claimed & fields)}+追加{len(auto)}"
+                        f"{'+不看' + str(len(omitted & fields)) if omitted & fields else ''}"
+                        f"={len(fields)}：追加 {'、'.join(v['auto']) or '（无）'}")
+    # 防空转的下限：钉在**实测值**下面一点（实测 14 条视图 / 184 字段 / 79 声明 / 100 追加）。
+    VIEWS_MIN, FIELDS_MIN, DECL_MIN, AUTO_MIN = 10, 120, 50, 60
+    ck.check(f"追加完整性：{len(covered)} 张读面表/卡片（{n_recs} 条记录、{n_fields} 个引擎字段）上"
+             f" 声明列({n_decl}) ∪ 追加列({n_auto}) ∪ 声明不看({n_omit}) == 全部引擎字段"
+             f"（没有任何字段被藏；下限 {VIEWS_MIN} 视图/{FIELDS_MIN} 字段/{DECL_MIN} 声明/{AUTO_MIN} 追加）",
+             not missing_f and not phantom_f and not omit_bad_f
+             and len(covered) >= VIEWS_MIN and n_fields >= FIELDS_MIN
+             and n_decl >= DECL_MIN and n_auto >= AUTO_MIN,
+             "；".join((missing_f + phantom_f + omit_bad_f)[:4]) or
+             (f"{'；'.join(evidence)}"
+              if (len(covered) >= VIEWS_MIN and n_fields >= FIELDS_MIN
+                  and n_decl >= DECL_MIN and n_auto >= AUTO_MIN)
+              else f"只对到 {len(covered)} 视图 / {n_fields} 字段 / {n_decl} 声明 / {n_auto} 追加"
+                   f" ⇒ 判据可能空转了"))
+    if degraded:
+        print(f"  ⚠ 降级：{degraded}")
+
+    # 8b. **没有折叠桶**（静态）：`specview.js` 的代码里不许再有「其余」那套东西，
+    #     而且残差必须仍然被摆成普通列 / 普通行（接线标记一个都不能少）。
+    #     ⚠ 扫的是**去掉注释**的代码：注释里提「其余」是有意的（墓碑 + 用户原话）。
+    sv_code = _js_code(STATIC_JS / "specview.js")
+    back = [m for m in BUCKET_MARKERS if m in sv_code]
+    unwired = [m for m in APPEND_MARKERS if m not in sv_code]
+    ck.check(f"追加机制：`specview.js` 的代码里没有折叠桶（{'、'.join(BUCKET_MARKERS)} 一个都不出现）、"
+             f"追加接线 {len(APPEND_MARKERS)} 个标记齐全（{ '、'.join(APPEND_MARKERS) }）",
+             not back and not unwired,
+             "；".join(
+                 ([f"折叠桶又回来了：{back}"] if back else [])
+                 + ([f"追加接线断了（残差不再被摆成普通列/行）：{unwired}"] if unwired else [])
+             ) or f"{len(APPEND_MARKERS)} 个接线标记全在，折叠桶 0 处"
+                  f"（`residualCols` 把残差摆成 {'、'.join(['th.sv-th-auto', 'td.sv-td-auto', 'div.sv-sheet-row-auto'])}）")
+
+    # 8c. 追加列的**名词覆盖率**：中文追加字段名必须查得到解释（否则 hover 是空框）。
+    #     口径与 §5 对控制行的宽容一致：**ASCII 槽位名**（`events` 的 `attacker`/`shipper`…
+    #     那些是引擎内部枚举的字段名，本来就不是界面名词）如实记账，不算红。
+    zh_auto: list[str] = []
+    ascii_auto: list[str] = []
+    for v in covered:
+        for k in v["auto"]:
+            (zh_auto if _ZH.search(str(k)) else ascii_auto).append(f"{v['id']}.{k}")
+    zh_names = sorted({x.split(".", 1)[1] for x in zh_auto})
+    ascii_names = sorted({x.split(".", 1)[1] for x in ascii_auto})
+    no_doc = [k for k in zh_names if k not in nouns_corpus]
+    ck.check(f"名词覆盖率·追加列：{len(zh_names)} 个中文追加字段名全都能弹出解释"
+             f"（走与手工列**同一条**查词链；ASCII 槽位名 {len(ascii_names)} 个如实记账）",
+             corpus_ok and not no_doc and len(zh_names) >= 5,
+             "；".join(f"`{k}` 在语料里查不到（hover 空框）" for k in no_doc[:4]) or
+             (f"中文追加字段 {len(zh_names)} 个全部命中语料"
+              f"（{'、'.join(zh_names[:8])}…）；"
+              f"引擎内部 ASCII 槽位 {len(ascii_names)} 个没有中文名词（如 "
+              f"{'、'.join(ascii_names[:6])}）——那几条 hover 弹不出解释，是**引擎缺命名**，"
+              f"不是本机制缺接线"
+              if len(zh_names) >= 5 else f"只算到 {len(zh_names)} 个中文追加字段 ⇒ 判据可能空转了"))
+
+    # 8d. **对投影真实列**（用户要的「把每张声明的表与投影真实列做集合对账」）：
+    #     对 `@state.<表>[*]` 的读面，读面上看得见的字段（声明 ∪ 追加 ∪ 不看）与
+    #     **`--index` 的 `schema.json` 里那张表真的发的列**，在「引擎声明的实体字段」这个
+    #     交集上必须**逐字相等**：
+    #
+    #         (声明 ∪ 追加 ∪ 不看) ∩ 投影列 == 投影列 ∩ 该实体的 schema 字段
+    #
+    #     两边都算一次，差集报出来。为什么不是直接 == 投影列：投影**自己有派生列**
+    #     （`round`/`capital_body`/`capital_body` 这类投影侧算出来的），也有**丢掉的字段**
+    #     （实测 `factions` 表不发 `颜色`、`ships` 表不发 `坐标`/`攻击历史`）——所以「投影列」
+    #     与「实体字段」本来就不是一个集合，能对的是**交集**（= 两边都认的那些字段）。
+    proj_dir = h.projection(SEED, ROUNDS)
+    proj_schema = json.loads((proj_dir / "schema.json").read_text(encoding="utf-8"))
+    lazy = proj_schema.get("lazy") or {}
+    state_props = ((doc_nouns or {}).get("state") or {}).get("properties") or {}
+    state_defs = ((doc_nouns or {}).get("state") or {}).get("definitions") or {}
+    proj_bad: list[str] = []
+    proj_evidence: list[str] = []
+    proj_tables = proj_cols_total = proj_live_cols = 0
+    for v in covered:
+        m = re.fullmatch(r"@state\.([a-z_]+)\[\*\]", str(v.get("source") or ""))
+        if not m:
+            continue
+        table = m.group(1)
+        cols = set(((lazy.get(table) or {}).get("columns") or {}))
+        struct = (((state_props.get(table) or {}).get("items") or {}).get("$ref") or "").rsplit("/", 1)[-1]
+        props_set = set(((state_defs.get(struct) or {}).get("properties") or {}))
+        if not cols or not props_set:
+            proj_evidence.append(f"{table}（跳过：{'投影没有这张表' if not cols else '实体没有 properties（oneOf 枚举）'}）")
+            continue
+        visible = set(v["claimed"]) | set(v["omitted"]) | set(v["auto"])
+        lhs, rhs = visible & cols, cols & props_set
+        proj_tables += 1
+        proj_cols_total += len(cols)
+        proj_live_cols += len(rhs)
+        if lhs != rhs:
+            proj_bad.append(f"{table}（{v['id']}）：读面看得见而投影不发 {sorted(lhs - rhs)}；"
+                            f"投影发而读面看不见 {sorted(rhs - lhs)}")
+        proj_evidence.append(f"{table}: 读面∩投影 {len(lhs)} == 投影∩{struct} {len(rhs)}")
+    ck.check(f"追加完整性·投影对账：{proj_tables} 张读面表（共 {proj_cols_total} 个投影真实列、"
+             f"{proj_live_cols} 个在实体 schema 里）上，(声明 ∪ 追加 ∪ 不看) ∩ 投影列"
+             f" == 投影列 ∩ 实体字段（逐字相等，多一个/少一个都红）",
+             not proj_bad and proj_tables >= 3 and proj_cols_total > 0 and proj_live_cols > 0,
+             "；".join(proj_bad[:4]) or
+             (f"{'；'.join(proj_evidence)}"
+              if (proj_tables >= 3 and proj_live_cols > 0)
+              else f"只对到 {proj_tables} 张表 / {proj_live_cols} 个交集字段 ⇒ 判据可能空转了"))
 
 
 if __name__ == "__main__":

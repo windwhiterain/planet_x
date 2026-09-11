@@ -11,7 +11,7 @@
 uv run --project play/planet_xq python play/tests/_g4_negative.py
 ```
 
-2026-10 实测：**34 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
+2026-10 实测：**36 个注入错全部咬住**（每一个都红在该红的那条判据上），基线全绿。
 其中 ⑳㉑㉒ 是第 7 条（`control` 表的 `kind` 词表 == 声明里的叶名）的量具：⑳在**真文件**上
 把一片叶的 `kind` 改成一个声明里没有的词（走 `g4_spec.INDEX_HOOK`），㉑把一片真在表里的叶
 标成"不在表里"，㉒把例外的理由改成空白——三条都要求**第 7 条自己**红（不是"碰巧别处红了"）。
@@ -25,8 +25,18 @@ uv run --project play/planet_xq python play/tests/_g4_negative.py
 不存在的词，㉘把某个 `owner` 行的 `noun` **删掉**（前端兜底也解析不出来——它只会去查显示标签
 「归谁」）——两条都要求「名词覆盖率·控制行」**自己**红，因为那个缺口正是从这里漏出来的
 （判据按作用域键判绿，而前端不查那个词，实机 hover 无反应）。
-⚠ ㉕㉖ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
-跑完还原——**真文件一个字节都不碰**（与上面那 30 条同一纪律）。
+㉙㉚㉛ 是 §8 条（**追加机制**：没被声明的字段 = 普通列/普通行，2026-10 第 8 步）的量具
+——用户裁决 *「我不希望有『其余』这样的栏目」*：
+㉙ 把 `specview.js` 的 `residualCols` 剪成 `return []`（= **追加路径坏了**）⇒「读面覆盖」
+   判据**自己**红（差集就是那些被吞掉的字段：「situation：没被任何一列覆盖 [cities, decisions…]」）；
+㉚ 把追加列的类名改回 `sv-th-res`、并把「其余」塞回代码里（= **折叠桶回来了**）⇒
+   「没有折叠桶」那条静态判据自己红；
+㉛ 把 `faction-table` 的 `资源` 那一列删掉（= **未声明**）⇒ 覆盖判据**不红**（这是对的：
+   未声明 = 自动追加，用户要的正是这个），但它必须**在判据文本里指出**这一列现在只能靠追加
+   （声明 3→2、追加 7→8，且 `资源` 落在追加串里**引擎字段序**的位置上）。㉛ 走 `expect="evidence"`
+   ——它验的是「判据把这件事**说出来了**」，不是"恰好没红"。
+⚠ ㉕㉖㉙㉚ 注入的是 **`web/static/*.js` 的 tempfile 拷贝**（`g4_spec.STATIC_JS` 指过去），
+跑完还原——**真文件一个字节都不碰**（与上面那些 views.json 的注入同一纪律）。
 """
 
 import json
@@ -47,6 +57,7 @@ BASE = json.loads(g4_spec.VIEWS_JSON.read_text(encoding="utf-8"))
 
 MISBEHAVED: list[str] = []
 CASES = 0  # 注入错的数量（基线那一跑不算）
+LAST_ROWS: list[tuple[bool, str, str]] = []   # 最近一次跑的全部判据（`evidence` 模式要读文本）
 
 
 class FakeH:
@@ -55,6 +66,10 @@ class FakeH:
     def __init__(self, real, mutate=None, mutate_nouns=None):
         self.real, self.mutate, self.mutate_nouns = real, mutate, mutate_nouns
         self.path = real.path
+
+    def projection(self, *args, **kwargs):
+        """§8d 的投影对账要读 `--index` 的 `schema.json`（真跑，不走 Fake 的注入）。"""
+        return self.real.projection(*args, **kwargs)
 
     def capture(self, args):
         out = self.real.capture(args)
@@ -68,8 +83,15 @@ class FakeH:
 
 
 def run_case(label, doc=None, mutate=None, expect="red", mutate_nouns=None):
-    """喂一份被改坏的声明给 `g4_spec.run`，返回红的判据名。"""
-    global CASES
+    """喂一份被改坏的声明给 `g4_spec.run`，返回红的判据名。
+
+    `expect`：
+      * `"red"`      —— 这一跑必须红（算一个注入错）；
+      * `"green"`    —— 基线：必须全绿；
+      * `"evidence"` —— **证据案**（不算注入错）：必须**不红**，但判据文本里必须出现
+        某些字串（`EVIDENCE`）：用来钉「判据真的把这件事**说出来**了」，而不只是"没红"。
+    """
+    global CASES, LAST_ROWS
     if expect == "red":
         CASES += 1
     if doc is not None:
@@ -81,6 +103,7 @@ def run_case(label, doc=None, mutate=None, expect="red", mutate_nouns=None):
     h = FakeH(Harness(kind="release"), mutate, mutate_nouns)
     ck = Checks("neg")
     g4_spec.run(h, ck)
+    LAST_ROWS = list(ck.rows)
     bad = [n for ok, n, _ in ck.rows if not ok]
     if expect == "red":
         if not bad:
@@ -88,6 +111,18 @@ def run_case(label, doc=None, mutate=None, expect="red", mutate_nouns=None):
             verdict = "**全绿（没咬住！）**"
         else:
             verdict = f"红 {len(bad)} 条 ✓"
+    elif expect == "evidence":
+        want = EVIDENCE.get(label, ())
+        text = " ".join(d for _, _, d in ck.rows)
+        miss = [w for w in want if w not in text]
+        if bad:
+            MISBEHAVED.append(f"{label}：期望不红（未声明 = 自动追加），实际红了 {bad}")
+            verdict = f"红 {len(bad)} 条（**期望不红！**）"
+        elif miss:
+            MISBEHAVED.append(f"{label}：判据文本里没说出这件事：{miss}")
+            verdict = f"文本里没写 {miss}（**没指出**）"
+        else:
+            verdict = "不红，且判据文本里指出了 ✓"
     else:
         if bad:
             MISBEHAVED.append(f"{label}：基线红了 {len(bad)} 条")
@@ -103,6 +138,16 @@ def run_case(label, doc=None, mutate=None, expect="red", mutate_nouns=None):
 
 def clone():
     return json.loads(json.dumps(BASE))
+
+
+# `evidence` 模式的期望文本：判据**必须自己把这件事说出来**（不是"恰好没红"）。
+EVIDENCE: dict[str, tuple[str, ...]] = {
+    # ㉛：把 `资源` 这一列从 `faction-table` 里删掉（= 未声明）之后，读面覆盖判据仍然绿
+    # （这是对的：未声明 = 自动追加），但它必须**指出**：那一列现在只能靠追加 ——
+    # 证据就是同一张表的计数从「声明3+追加7」变成「声明2+追加8」，且 `资源` 落在追加串里
+    # **引擎字段序**的位置上（记录里 `资源` 在 `名声` 与 `关系` 之间）。
+    "undeclare-column": ("faction-table 声明2+追加8+不看3=13", "追加 好战度、思潮、名声、资源、关系"),
+}
 
 
 def walk_columns(doc):
@@ -448,6 +493,64 @@ def main() -> int:
     bad = run_case("owner-noun-dropped", d)
     if not any(n.startswith(CTL_CHECK) for n in bad):
         MISBEHAVED.append(f"owner-noun-dropped：控制行判据没红（实际红：{bad}）")
+
+    # ㉙㉚㉛ 追加机制（第 8 步）的量具：用户裁决 *「我不希望有『其余』这样的栏目」*
+    #     *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* ——
+    #     ①「没被声明的字段 = 普通列」这条机制自己必须**会红**（否则它就是一条永远绿的守卫）；
+    #     ② 折叠桶（「其余」那套）**回来**了也必须红。
+    #     ⚠ 注入的是 `web/static/*.js` 的 tempfile 拷贝（`g4_spec.STATIC_JS` 指过去），
+    #     真文件一个字节都不碰（与 ㉕㉖ 同一纪律）。
+    APPEND_COVER = "张读面表/卡片"
+    APPEND_BUCKET = "代码里没有折叠桶"
+    static8 = T / "static-append-inject"
+    if static8.exists():
+        shutil.rmtree(static8)
+    shutil.copytree(static_real, static8)
+    g4_spec.STATIC_JS = static8
+    try:
+        sv = static8 / "specview.js"
+        orig_sv = sv.read_text(encoding="utf-8")
+
+        # ㉙ **追加路径坏了**（残差算出来但一列都不摆）：读面覆盖判据必须红
+        #    ——「声明 ∪ 追加 == 全部引擎字段」的差集就是那些被吞掉的字段。
+        head = "  function residualCols(rows, spec) {\n"
+        assert head in orig_sv, "specview.js 里没有 `residualCols`：判据/代码换了口径？"
+        sv.write_text(orig_sv.replace(head, head + "    return [];   // ← 注入：追加路径坏了\n"),
+                      encoding="utf-8")
+        bad = run_case("append-path-broken")
+        if not any(APPEND_COVER in n for n in bad):
+            MISBEHAVED.append(f"append-path-broken：追加完整性没红（实际红：{bad}）")
+        sv.write_text(orig_sv, encoding="utf-8")
+
+        # ㉚ **折叠桶回来了**（把追加列的类名改回 `sv-th-res`，并把「其余」塞回代码里）：
+        #    「没有折叠桶」那条静态判据必须红（用户要的正是"别再藏起来"）。
+        assert "'sv-th sv-th-auto'" in orig_sv, "specview.js 里没有 `'sv-th sv-th-auto'`：换了口径？"
+        sv.write_text(orig_sv.replace("'sv-th sv-th-auto'", "'sv-th sv-th-res'")
+                              .replace("function autoTh(key) {",
+                                       "function autoTh(key) {\n    const other = '其余';   // ← 注入：桶回来了\n"),
+                      encoding="utf-8")
+        bad = run_case("bucket-back")
+        if not any(APPEND_BUCKET in n for n in bad):
+            MISBEHAVED.append(f"bucket-back：没有折叠桶判据没红（实际红：{bad}）")
+        sv.write_text(orig_sv, encoding="utf-8")
+    finally:
+        g4_spec.STATIC_JS = static_real
+
+    # ㉛ **未声明一列**（把 `faction-table` 里 `资源` 那一列删掉——它原本是「首都库存」）。
+    #     期望：**不红**——「没被声明」不是错误，它就该自动追加成普通列（用户要的正是这个）；
+    #     但判据文本必须**指出**这一列现在只能靠追加：声明 3→2、追加 7→8，而且它落在追加串里
+    #     **引擎字段序**的位置上（`资源` 在记录里排在 `名声` 与 `关系` 之间，不是排在末尾）。
+    #     这一条不是注入错，是**口径的量具**：它证明「整理过 / 靠兜底」在输出里分得开。
+    d = clone()
+    hit = 0
+    for v in walk_views(d):
+        if v.get("id") != "faction-table":
+            continue
+        before = list(v.get("columns") or [])
+        v["columns"] = [c for c in before if not (isinstance(c, dict) and c.get("path") == "资源")]
+        hit += len(before) - len(v["columns"])
+    assert hit == 1, "faction-table 里没有 `资源` 那一列：判据/声明换了口径？"
+    run_case("undeclare-column", d, expect="evidence")
 
     if MISBEHAVED:
         print("\n**反向验证失败**（说明上面这些判据里有不会红的）：")

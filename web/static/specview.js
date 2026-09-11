@@ -16,12 +16,18 @@
 // 于是「新增一个组织点 = 写一段 JSON」，前端一行代码都不用改。
 //
 // ⚠ **铁律 R（只能整理，不能隐藏）**：
-//   展示 = 认领（整理形态）⊎ 残差（通用形态）
-//   残差的字段集合 = 该记录实际有的顶层字段 ∖ 这一行所有列**相对路径**的首段
+//   展示 = 认领（整理形态）⊎ 追加（通用形态）
+//   追加的字段集合 = 该记录实际有的顶层字段 ∖ 这一行所有列**相对路径**的首段
 //                    ∖ 显式 omit
-//   而且残差是**渲染时用集合差算出来的**（[`residualOf`]），不是声明的 ⇒ 引擎给记录加了
-//   新字段，下一帧它就出现在「其余字段」里，组织点不用改。唯一能藏数据的方式是显式 omit，
-//   而界面会把省略**明说**出来（[`omitLine`]）。
+//   而且追加是**渲染时用集合差算出来的**（[`residualOf`] / [`residualCols`]），不是声明的 ⇒
+//   引擎给记录加了新字段，**下一帧它就作为一列普通列/一条普通行出现**（表格里追加在声明列
+//   之后，列头就是那个字段名、照样挂弹窗；卡片里追加成普通行），组织点一行都不用改。
+//
+//   **没有折叠桶**（用户裁决 2026-10）：*「我不希望有『其余』这样的栏目」*
+//   *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* ——
+//   所以本文件里**不出现**「其余」这个栏目：没有 `▸N` 按钮、没有可折叠的残差块、
+//   没有 `sv-th-res` / `sv-residual` 那套类名（`g4_spec.py` §8b 静态盯着这一点）。
+//   唯一能藏数据的方式是显式 omit，而界面会把省略**明说**出来（[`omitLine`]）。
 'use strict';
 
 (function () {
@@ -195,7 +201,7 @@
   // 展开成 [{key, value, path}]：
   //   数组        → 逐项（key = 下标）
   //   全对象的值   → 一张**映射表**（key = 映射键，记录里用 @key 取）
-  //   其余对象     → 一条记录（sheet / timeline 用）
+  //   其它对象     → 一条记录（sheet / timeline 用）
   function expand(source) {
     const parts = splitSegments(source).map(parseSeg);
     if (!parts.length) return [];
@@ -248,7 +254,7 @@
     const out = new Set();
     (spec.columns || []).forEach((c) => {
       // 控制行里 `action` 认领的**就是**记录上的那个字段（`buildings` 是城记录的一个字段，
-      // 它由「建筑与建造区」那一行渲染 ⇒ 不该再落进「其余字段」里当没被认领）。
+      // 它由「建筑与建造区」那一行渲染 ⇒ 不该再被当成没认领的字段追加一列）。
       // `leaf`/`owner` 是绝对路径（@control/@scope），不认领本条记录的字段。
       if (c.action) out.add(String(c.action).replace(/\[.*$/, ''));
       const p = String(c.path || '');
@@ -256,6 +262,12 @@
       const first = splitSegments(p)[0] || '';
       out.add(first.replace(/\[.*$/, ''));
     });
+    // 身份列（`spec.key`）**也是显示出来的**：那一格画的就是这条记录的 key 字段
+    // （`tableFor` 的 `td0` / `renderSelect` 的 `keyOf`）⇒ 它同样算认领，否则同一个字段
+    // 会在追加列里再出现一次。`@key`（映射表的键）不是记录字段，跳过。
+    const k = String(spec.key || '');
+    if (k && k.charAt(0) !== '@') out.add(String(splitSegments(k)[0] || '').replace(/\[.*$/, ''));
+
     // 分组键、行标签、timeline 的三处路径也算认领（它们在界面上出现过）。
     [spec.group && spec.group.by, spec.title_path, spec.body]
       .filter(Boolean)
@@ -533,53 +545,86 @@
     return td;
   }
 
-  // 「其余字段」：这一行的残差，交给通用的 jsonview 渲染（铁律 R）。默认收起，一条也不藏。
-  // 列里只留一个短记号（`▸9`），键名放 title——宽表在 430px 的面板里很宝贵。
-  function residualCell(rec, spec, rowId) {
-    const td = el('td', 'sv-td sv-residual');
+  // --- 追加的列 / 行（铁律 R 的读面落点） -------------------------------------
+  //
+  // 没被声明的字段**就是普通列**：表格里追加在声明列**之后**（列头 = 那个字段名），卡片里
+  // 追加成**普通行**。用户裁决（2026-10）：*「我不希望有『其余』这样的栏目」*
+  // *「你就不能直接把没组织的并在后面吗，你把它藏起来我看都看不见」* ——
+  // 所以这里既不生成 `▸N` 按钮，也不生成可折叠的块：**一条也不藏、一眼就能看见**。
+  //
+  // **顺序 = 引擎字段顺序**：`Object.keys(rec)` 就是 serde 按**结构体声明序**写出来的键序
+  // （`serde_json` 开了 `preserve_order`，见 `Cargo.toml`），与 `--nouns` 里 state schema 的
+  // `properties` 顺序**同源**（`play/tests/g4_spec.py` §8 拿两份引擎出口逐表对账）。
+  // 选它而不是投影 `schema.json` 的 `columns` 顺序：读面渲染的是 `/api/state` 的模型 dump，
+  // 而投影列是**另一张表**（多了 `round`/`capital_body` 这类派生列、少了 `颜色` 这类字段），
+  // 拿它排序会把读面排成投影的顺序。记录自己的键序才是「这条记录上引擎给的顺序」。
+  function residualKeys(rec, spec) {
     const res = residualOf(rec, spec);
-    if (!res) {
-      td.appendChild(el('span', 'sv-missing', '无'));
-      return td;
-    }
-    const keys = Object.keys(res);
-    const open = ctx.expanded.has(rowId);
-    const btn = el('span', 'sv-more clickable', (open ? '▾' : '▸') + keys.length);
-    btn.title = '其余字段（' + keys.length + '）：' + keys.join('、') + '\n（引擎给这条记录加字段，它就会出现在这里——不需要改前端）';
-    const box = el('div', 'sv-residual-box');
-    box.style.display = open ? '' : 'none';
-    if (open) {
-      if (window.JsonView) {
-        window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
-      } else box.textContent = JSON.stringify(res);
-    }
-    btn.addEventListener('click', () => {
-      const now = ctx.expanded.has(rowId);
-      if (now) ctx.expanded.delete(rowId);
-      else ctx.expanded.add(rowId);
-      renderResidualInto(box, btn, res, keys, !now);
+    return res ? Object.keys(res) : [];
+  }
+
+  /// 一张表要追加的列 = 各行残差键的**并集**。同一张表各行都是同一个结构体的实例 ⇒ 每行的
+  /// 键序都是同一份声明序的子序列，按首次出现合并之后仍是声明序。
+  /// ⚠ 表头在一次绘制里算**一次**（用全量 `rows`，不是 `limit` 之后的那一截）⇒「显示全部」
+  /// 不会让列多出来或少下去。
+  function residualCols(rows, spec) {
+    const seen = new Map();
+    (rows || []).forEach((r) => {
+      residualKeys(r.value, spec).forEach((k) => { if (!seen.has(k)) seen.set(k, null); });
     });
-    td.addEventListener('click', (ev) => {
-      if (ev.target !== btn && !box.contains(ev.target)) btn.click();  // 整格可点（同上）
-    });
-    td.append(btn, box);
+    return Array.from(seen.keys());
+  }
+
+  /// 追加字段的**列声明**：只有字段名 + 一个按值类型挑的通用格式化器。
+  /// 值可能是对象（`思潮` / `关系` / `资源`）⇒ `map`（键值全看得见，**绝不出现
+  /// `[object Object]`**，也不是 `{4}` 那种只数个数），数组 ⇒ `list`，布尔 ⇒ `bool`，
+  /// 数字 ⇒ `num`（与手工数字列同一个格式），其它按文本。
+  function autoCol(key, v) {
+    const c = { path: key, label: key, auto: true };
+    if (isObj(v)) c.fmt = 'map';
+    else if (isArr(v)) c.fmt = 'list';
+    else if (typeof v === 'boolean') c.fmt = 'bool';
+    else if (typeof v === 'number') { c.fmt = 'num'; c.digits = 2; }
+    return c;
+  }
+
+  /// 追加列的列头：**就是那个字段名**（中文名词），并且和手工列走**同一条**查词链
+  /// （`ctx.tip` → 宿主 `nounTip` → `Tip.attach`）——追加列能弹解释，靠的就是这一行。
+  function autoTh(key) {
+    const th = el('th', 'sv-th sv-th-auto', key);
+    if (ctx.tip) ctx.tip(th, { path: key });
+    return th;
+  }
+
+  /// 追加列的一格。值和手工列一样过 `format`（对象走 map），鼠标停上去也给得出字段名。
+  function autoTd(rec, key) {
+    const td = el('td', 'sv-td sv-td-auto');
+    const v = rec ? rec[key] : undefined;
+    const col = autoCol(key, v);
+    const holder = valueNode(col, v, format(v, col, rec));
+    if (holder && ctx.onPathClick && holder.title == null) holder.title = key;
+    td.appendChild(holder);
     return td;
   }
 
-  function renderResidualInto(box, btn, res, keys, open) {
-    btn.textContent = (open ? '▾' : '▸') + keys.length;
-    btn.title = '其余字段（' + keys.length + '）：' + keys.join('、');
-    box.style.display = open ? '' : 'none';
-    if (open && !box.childElementCount) {
-      if (window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
-      else box.textContent = JSON.stringify(res);
-    }
+  /// 卡片里追加的**普通行**（不是折叠块）：字段名 + 值，与手工行同一个 `.sv-sheet-row` 形状，
+  /// 字段名同样挂弹窗。
+  function autoSheetRow(rec, key) {
+    const row = el('div', 'sv-sheet-row sv-sheet-row-auto');
+    const k = el('div', 'sv-sheet-k', key);
+    if (ctx.tip) ctx.tip(k, { path: key });
+    const val = el('div', 'sv-sheet-v');
+    const v = rec ? rec[key] : undefined;
+    const col = autoCol(key, v);
+    val.appendChild(valueNode(col, v, format(v, col, rec)));
+    row.append(k, val);
+    return row;
   }
 
   // --- 上限的如实披露 -------------------------------------------------------
   function limitNote(shown, total, what) {
     if (total <= shown) return null;
-    return el('div', 'sv-note', '已显示前 ' + shown + ' / 共 ' + total + ' ' + (what || '条') + '（其余 ' + (total - shown) + ' 条未显示）');
+    return el('div', 'sv-note', '已显示前 ' + shown + ' / 共 ' + total + ' ' + (what || '条') + '（还有 ' + (total - shown) + ' 条未显示）');
   }
 
   function orderRows(rows, order) {
@@ -614,6 +659,9 @@
       container.appendChild(el('div', 'sv-empty', spec.empty || '（这一帧没有数据）'));
       return;
     }
+    // **没被声明的字段 = 追加的普通列**（铁律 R）：在这一帧的真记录上按集合差算出来，
+    // 一次算全表（含 limit 之外的行）⇒ 列集与「显示全部」无关。
+    const auto = residualCols(rows, spec);
     if (spec.group && spec.group.by) {
       const groups = new Map();
       rows.forEach((r) => {
@@ -638,7 +686,8 @@
         head.appendChild(el('span', 'sv-group-name', k));
         head.appendChild(el('span', 'sv-group-n', list.length + ' 条'));
         container.appendChild(head);
-        container.appendChild(tableFor(spec, orderRows(list, order), total, k));
+        // 追加列用**整张表**（全部行）算一次 ⇒ 分组之间列集一致，读起来不会每组一套列。
+        container.appendChild(tableFor(spec, orderRows(list, order), total, k, auto));
       });
       if (spec.limit && spec.limit.n && total > spec.limit.n) {
         const n = limitNote(spec.limit.n, total, '条');
@@ -647,10 +696,10 @@
       return;
     }
     const ordered = orderRows(rows, spec.order);
-    container.appendChild(tableFor(spec, ordered, rows.length, null));
+    container.appendChild(tableFor(spec, ordered, rows.length, null, auto));
   }
 
-  function tableFor(spec, rows, total, groupKey) {
+  function tableFor(spec, rows, total, groupKey, autoCols) {
     const limited = spec.limit && spec.limit.n ? rows.slice(0, spec.limit.n) : rows;
     // **列序即优先级**：数组的顺序就是信息重要性的顺序。
     // 首列若就是 `key`（身份字段），就把它交给那一列身份格，别再单开一列（不然名字出现两次）。
@@ -682,7 +731,8 @@
       if (ctx.tip) ctx.tip(th, c);
       htr.appendChild(th);
     });
-    htr.appendChild(el('th', 'sv-th sv-th-res', '其余'));
+    // 追加列紧跟在声明列**后面**，一个不落地摆出来（列头 = 字段名，同样挂弹窗）。
+    (autoCols || []).forEach((key) => htr.appendChild(autoTh(key)));
     thead.appendChild(htr);
     table.appendChild(thead);
     const tbody = el('tbody');
@@ -716,7 +766,7 @@
           const btn = el('span', 'sv-more clickable', open ? '▾' : '▸');
           btn.title = '展开这一行的卡片（组织点「' + spec.card + '」）——读行与控制行在同一条行序里';
           // ⚠ 监听挂在**整个格**上（不是只挂那个 20px 的 span）：点在内边距上没反应是真实摩擦
-          // ——2026-10 修；同一个毛病「其余 ▸N」那格也有，见 [`residualCell`]。
+          // ——2026-10 修（列头的整格可点也是同一条道理：命中的面积要盖住整个格）。
           btn.addEventListener('click', () => {
             const now = !ctx.expanded.has(cardKey);
             if (now) ctx.expanded.add(cardKey);
@@ -750,7 +800,8 @@
         td0.appendChild(lab);
         tr.appendChild(td0);
         cols.forEach((c) => tr.appendChild(cellNode(r.value, recordKeyOf(spec, r), c, who)));
-        tr.appendChild(residualCell(r.value, spec, rowId));
+        // 追加列：**普通格**，紧跟在声明列后面（`rowId` 不再被残差用——卡片展开状态还是它）。
+        (autoCols || []).forEach((key) => tr.appendChild(autoTd(r.value, key)));
         tbody.appendChild(tr);
         // 展开状态住在 ctx.expanded 里 ⇒ 重画（推进回合 / 应用之后）时把开着的卡片一起重建。
         if (wantCard && ctx.expanded.has(cardKey)) cardRow = cardRowFor(tr, r);
@@ -800,7 +851,7 @@
     rows.forEach((r) => sheetOfRecord(container, spec, r));
   }
 
-  // 一条记录的「键值表 + 其余字段」——sheet 布局，也是 cards 布局的一块。
+  // 一条记录的「键值表 + 追加的普通行」——sheet 布局，也是 cards 布局的一块。
   function sheetOfRecord(container, spec, r) {
     const grid = el('div', 'sv-sheet');
     (spec.columns || []).forEach((c) => {
@@ -836,25 +887,8 @@
       row.append(k, val);
       grid.appendChild(row);
     });
-    const res = residualOf(r.value, spec);
-    const rowId = spec.id + '#sheet' + (r.key == null ? '' : r.key);
-    if (res) {
-      const keys = Object.keys(res);
-      const open = ctx.expanded.has(rowId);
-      const btn = el('div', 'sv-more clickable', (open ? '▾ ' : '▸ ') + '其余字段 ' + keys.length + ' 项');
-      btn.title = '没有被这条视图认领的字段（引擎加字段会自动出现在这里）：' + keys.join('、');
-      const box = el('div', 'sv-residual-box');
-      box.style.display = open ? '' : 'none';
-      if (open && window.JsonView) window.JsonView.render(box, res, { rootPath: '', expandDepth: 1, onPathClick: ctx.onPathClick, tip: ctx.tip });
-      btn.addEventListener('click', () => {
-        const now = !ctx.expanded.has(rowId);
-        if (now) ctx.expanded.add(rowId);
-        else ctx.expanded.delete(rowId);
-        renderResidualInto(box, btn, res, keys, now);
-      });
-      grid.appendChild(btn);
-      grid.appendChild(box);
-    }
+    // 没被声明的字段：**一条一条追加成普通行**（字段名 + 值），不是折叠块。顺序 = 引擎字段序。
+    residualKeys(r.value, spec).forEach((key) => grid.appendChild(autoSheetRow(r.value, key)));
     container.appendChild(grid);
   }
 
@@ -970,7 +1004,7 @@
     return d;
   }
 
-  // **选中读面**（`mount: select`）：从来源集合里挑出**这一条**记录，摆成键值表 + 其余字段。
+  // **选中读面**（`mount: select`）：从来源集合里挑出**这一条**记录，摆成键值表 + 追加的普通行。
   // 没命中就明说「当前世界里没有这条记录」——不是空白（那就是"失败看起来像成功"）。
   function renderSelect(container, spec, name) {
     const wrap = el('div', 'sv-view');
@@ -1102,7 +1136,14 @@
     evalPath,
     expand,
     claimedKeys,
+    omittedKeys,
     residualOf,
+    // 追加机制的三件套也出口：`play/tests/g4_spec.py` §8 用 Node **真跑这一段**
+    // （`residualCols` + `claimedKeys` + `omittedKeys`）去和引擎发的真记录逐字段对账 ——
+    // 判据不许自己抄一份口径，抄的那一份一定会和前端的漂开。
+    residualKeys,
+    residualCols,
+    autoCol,
     claimedPaths,
     format,
     num,
