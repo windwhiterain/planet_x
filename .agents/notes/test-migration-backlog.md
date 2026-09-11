@@ -3,8 +3,9 @@
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
 > 第 1–6 批**都已合进 `main`**（第 6 批 `fadca4e`，快进））。
 > §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 270**（g1 71 / g2 159 / g3 36 / g4 23）；**Rust 164**（+31 探针 ignored）。
-> **sim 74 → 29**（第 7 批搬走/删掉 45 条；其中 1 条是只打印的探针）。
+> 计数：**Python 281**（g1 73 / g2 169 / g3 36 / g4 23）；**Rust 160**（+31 探针 ignored）。
+> **sim 74 → 25**（第 7 批搬走/删掉 49 条；其中 1 条是只打印的探针）。
+> **`combat.rs` 整族搬空删除**（`mod combat;` 也摘了）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -366,7 +367,25 @@ Dock ⇒ 它在动」——**错的**。实测长局里 `Dock` 的 797 个「两
    而 `step_knowledge` 用的是**走那一刻**的在场强度 ⇒ 最大偏差 0.0267（只看「目标稳定」的回合
    也还有 77 处）。**先量偏差再写判据**，别把时序当公式。
 
-**剩下 29 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
+**第 7 批第六段（sim 29 → 25）：又是「捏 + 钉」+ 一个新调用**
+
+| 原件 | 判据 | 实测 |
+| --- | --- | --- |
+| `trade::freight_gap_is_the_same_ledger…` | 新 `--call freight_ledger`（`capacity_ledger` 放开成 `pub`） | 2 seed、**12 个势力·回合**、**28 处缺口**：逐条自洽 + `Σ缺口÷Σneed` **就是读面那一列**（差 ≤ r2 舍入 4.7e-3） |
+| `governance::a_mond_master_keeps_a_deep_city_loyal…` | g2 合成场景（只拨 `MOND 掌握度`） | 凡人 **0.50→0.37**、掌握者 **0.50→0.62**（差 0.25 > 0.2、城没丢） |
+| `combat::combat_respects_shields_and_speed_evasion` | g2 合成场景（造一仗） | `damage 12.6 / absorbed 8.82 / hull_pen 8.19`；守方护盾 12→4.73、船体 24→18.21 且没死 |
+| `combat::fleet_air_defense_covers_nearby_missile_targets` | g2 合成场景（两臂只差 PD 友舰坐标） | 近处拦截 **4.0**/伤害 **4.1**；远处拦截 **0.0**/伤害 **8.1** |
+
+⚠ 三条「试过但不行」的经验（都写进模块头）：
+1. **`mastery_does_not_pay_the_governance_bill` 够不到**：它要「覆盖率 0 ⇒ 欠费暴跌支路」，而
+   **完整回合里产出先到账**，覆盖率恒 > 0（国库清零后忠诚仍稳在 1.0）⇒ 判据会退化成
+   「两臂都是 1.0」的假绿。留 §4。
+2. **`control_rusts_back_when_the_fleet_leaves` 也够不到**：换了新的**强度**列再试一次，
+   123 次回落里仍有 **9 次强度 > 0**——两列都是**回合末**的值，而更新用的是走那一刻的强度。
+3. **`a_hired_delivery_splits…` 差一个读面来源**：`contract_delivered` 有 `amount`/`cut`/两端，
+   但**分账两头进哪个池子**没有读面记录；扩事件字段会动 digest ⇒ 不能扩。
+
+**剩下 25 条的下一步**：`combat` 4 / `governance` 3 / `haul` 5 / `ideology` 7 / `knowledge` 6 /
 `mond` 4 / `shots` 3 / `trade` 3 / `spending` 2 / `domestic_market` 2 / `market` 2 / `war_scar` 1 /
 `site_supply` 3 / `blueprints` 6 / `fleet` 3。已知分两类：
 * **`depots` 不可写**：`edit()` 要「带身份键的行表」，而 `depots` 是**复合键的 map**（`"中国|水星"`）
