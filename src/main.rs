@@ -693,6 +693,12 @@ fn call_function(
                 .ok_or("args.to 缺失")?;
             json!(planet_x::model::lane_rounds(state, config, from, to))
         }
+        // **在场强度与目标掌握度**（第 7 批）：前者要 state（数舰），后者是纯函数。
+        "mond_presence" => {
+            let fid = args.get("faction").and_then(|v| v.as_str()).ok_or("args.faction 缺失")?;
+            json!(sim::mond_presence(state, config, fid))
+        }
+        "mond_target" => json!(sim::mond_target(config, num("presence")?)),
         // **MOND 偏航**（第 7 批）：`mond_drift(config, 掌握度, 目标, roll)` —— 纯函数
         // （只吃 config）。`roll = 0` 必然精确命中（「永远留着蒙对的可能」），掌握度到顶也精确。
         "mond_drift" => {

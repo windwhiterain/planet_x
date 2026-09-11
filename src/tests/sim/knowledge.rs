@@ -1,5 +1,25 @@
 //! MOND 掌握度：**在场强度→掌握度**那条唯一的渠道。
 //!
+//! ## 2026-10（第 7 批）：三条搬走了，投影侧补了两列
+//!
+//! `factions` 新增 **`mond_presence`**（在场强度 `Σ(1 + 深度 × depth_weight)`，只数带外的活舰）
+//! 与 **`mond_target`**（它的指数饱和目标）；另挂 `--call mond_presence` / `--call mond_target`。
+//!
+//! | 原用例 | 现在住 |
+//! | --- | --- |
+//! | `presence_comes_only_from_ships_in_the_band` | g2 **驻泊深度**合成场景：带内 ⇒ 强度 0；强度 == 舰数 × `(1 + 深度 × 权重)`（3 艘 × 1.5 = **4.5**）；同一批舰停深 40 AU ⇒ **33.04** |
+//! | `control_climbs_toward_the_presence_target_and_stops_there` | g2 浅驻泊臂：目标严格在 `(0,1)`（**0.89**）、掌握度朝它爬、不超过它、差距从 0.890 缩到 0.350 |
+//! | `a_real_deep_presence_reaches_the_top` | g2 深驻泊臂：目标正好 1.0，掌握度**第 48 回合**到顶（= `mastery_rounds`）；`--call mond_target` 在门槛两侧 `0.9974` / `1.0` |
+//! | （另加，g3 长局） | 「在场强度 ⇔ 带内舰数」同生同灭（63,000 个势力·回合）+「上涨必须由**强度**解释」（1,323 次） |
+//!
+//! ⚠ **逐回合定律（`m' = m + rate×(target−m)`）没有搬**：两列都是**回合末**的值，而
+//! `step_knowledge` 用的是**走那一刻**的在场强度 ⇒ 目标在动时对不上（实测最大偏差 0.0267，
+//! 即便只看「目标稳定」的回合也还有 77 处、最大 0.0208——船是回合中途进出的）。收敛那半
+//! 因此在 g2 划成「朝目标爬 / 不超目标 / 差距缩小」，而不是照抄法条。
+//!
+//! **留在这里的**：`control_rusts_back_when_the_fleet_leaves` —— 读面给的是**带内舰数**，
+//! 目标是**在场强度**（逐舰深度不同），实测 1,946 次回落里 9 次带内有舰。
+//!
 //! ## 2026-10（第 7 批）：两条搬去了数据级
 //!
 //! | 原用例 | 现在住 | 为什么能搬 |
@@ -30,76 +50,6 @@ fn park(state: &mut State, fid: &str, r: f64) {
     }
 }
 
-/// 唯一渠道：不在带内的舰**一点也不算**；带内一艘的价值 = `1 + 深度 × depth_weight`。
-#[test]
-fn presence_comes_only_from_ships_in_the_band() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国";
-    park(&mut state, fid, 1.0); // 太阳边上（带内边缘以内）
-    assert_eq!(
-        mond_presence(&state, &config, fid),
-        0.0,
-        "带外的舰不产生知识"
-    );
-    assert_eq!(
-        mond_target(&config, 0.0),
-        0.0,
-        "没有在场 ⇒ 目标是 0（道会锈）"
-    );
-
-    park(&mut state, fid, 60.0);
-    let ships = state
-        .ships
-        .iter()
-        .filter(|s| s.faction_id == fid && s.hull > 0.0)
-        .count();
-    let per_ship = 1.0 + (60.0 - config.mond.radius) * config.mond.knowledge.depth_weight;
-    assert!(ships > 0, "用例前提：中国开局有舰");
-    assert!(
-        (mond_presence(&state, &config, fid) - ships as f64 * per_ship).abs() < 1e-9,
-        "在场强度 = Σ(1 + 深度 × 权重)"
-    );
-    // 深处的一艘 > 浅处的一艘（外缘永远值得派人去）。
-    let deep = mond_presence(&state, &config, fid);
-    park(&mut state, fid, 29.0);
-    assert!(
-        mond_presence(&state, &config, fid) < deep,
-        "同样的舰，浅处观测更不值钱"
-    );
-}
-
-/// 涨：向「在场强度」决定的目标值靠拢，**指数饱和**（永远不到 1，除非掌握度到顶）。
-#[test]
-fn control_climbs_toward_the_presence_target_and_stops_there() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国";
-    // 停在浅处（深 2 AU ⇒ 每艘 1.5 的在场强度）：**故意够不到 `mastery_presence`**,
-    // 这样目标是 < 1 的饱和值，用例测的才是「爬向目标」而不是「学满 snap」。
-    park(&mut state, fid, config.mond.radius + 2.0);
-    let target = mond_target(&config, mond_presence(&state, &config, fid));
-    assert!(
-        target > 0.0 && target < 1.0,
-        "目标值必须严格在 (0,1)：饱和而非断崖"
-    );
-
-    let before = state.faction(fid).unwrap().mond_control;
-    assert_eq!(before, 0.0, "用例前提：凡人从 0 起");
-    for _ in 0..60 {
-        step_knowledge(&mut state, &config);
-    }
-    let mid = state.faction(fid).unwrap().mond_control;
-    assert!(mid > before, "在场观测必须让掌握度上升（{before} → {mid}）");
-    for _ in 0..400 {
-        step_knowledge(&mut state, &config);
-    }
-    let settled = state.faction(fid).unwrap().mond_control;
-    assert!(
-        (settled - target).abs() < 1e-3,
-        "长期停留在场 ⇒ 收敛到目标值 {target}，实际 {settled}"
-    );
-    assert!(settled <= 1.0, "掌握度必须钳在 [0,1]");
-}
-
 /// 锈：把舰队撤出异常区之后，掌握度按同一个速率回落——**知识是活量，不是一次性解锁**。
 #[test]
 fn control_rusts_back_when_the_fleet_leaves() {
@@ -128,69 +78,5 @@ fn control_rusts_back_when_the_fleet_leaves() {
         state.faction(fid).unwrap().mond_control < 0.01,
         "长期不在场 ⇒ 回到凡人（实测 {}）",
         state.faction(fid).unwrap().mond_control
-    );
-}
-
-/// **够得着的顶 + 学满即到顶 + 棘轮到顶之后仍然成立**：指数饱和永远到不了 1，
-/// 所以「学满」由 `mastery_presence` 定义——在场强度跨过它 ⇒ **直接到 1.0**。
-#[test]
-fn a_real_deep_presence_reaches_the_top() {
-    let (config, mut state) = fresh_world(42);
-    let fid = "中国";
-    let k = &config.mond.knowledge;
-    assert!(
-        mond_target(&config, k.mastery_presence - 0.1) < 1.0,
-        "差一点就是差的：目标仍 < 1（饱和曲线的延续，不是开关）"
-    );
-    assert_eq!(
-        mond_target(&config, k.mastery_presence),
-        1.0,
-        "跨过它就学满"
-    );
-
-    // 一支真的常驻深空的编队：把舰摊到深处（深 40 ⇒ 每艘 11 的在场强度）。
-    let names: Vec<String> = state
-        .ships
-        .iter()
-        .filter(|s| s.faction_id == fid && s.hull > 0.0)
-        .map(|s| s.name.clone())
-        .collect();
-    assert!(!names.is_empty(), "用例前提：中国开局有舰");
-    let deep = config.mond.radius + 40.0;
-    for n in &names {
-        if let Some(s) = state.ship_mut(n) {
-            s.position = [deep, 0.0];
-        }
-    }
-    assert!(
-        mond_presence(&state, &config, fid) >= k.mastery_presence,
-        "前提：这套阵形的在场强度要够（实测 {}）",
-        mond_presence(&state, &config, fid)
-    );
-    step_knowledge(&mut state, &config);
-    let one_round = state.faction(fid).unwrap().mond_control;
-    assert!(
-        (one_round - 1.0 / k.mastery_rounds as f64).abs() < 1e-12,
-        "够格的**一回合**只走一步（{one_round}）——一回合的巧合不该换来永久垄断"
-    );
-    for _ in 1..k.mastery_rounds {
-        step_knowledge(&mut state, &config);
-    }
-    assert_eq!(
-        state.faction(fid).unwrap().mond_control,
-        1.0,
-        "{} 个够格的回合爬满 ⇒ 正好到顶",
-        k.mastery_rounds
-    );
-
-    // 到顶之后就算把舰队全部撤回太阳系，也一个字节都不掉（棘轮）。
-    park(&mut state, fid, 1.0);
-    for _ in 0..2000 {
-        step_knowledge(&mut state, &config);
-    }
-    assert_eq!(
-        state.faction(fid).unwrap().mond_control,
-        1.0,
-        "到顶是永久的"
     );
 }

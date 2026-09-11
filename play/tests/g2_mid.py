@@ -91,6 +91,8 @@ WELFARE_FID, WELFARE_START, WELFARE_ROUNDS = "星系矿业", 0.35, 5
 # 殖民那条：起点回合与天体**从长局里扫出来**（开局 22 座城占满 22 个定居点，
 # 得等到有城被拆平才有可复垦的空位）。
 COLONIZE_ROUNDS = 40
+# 驻泊深度那条：把一个势力的舰全搬到同一个日心距、钉 Idle。
+KNOW_FID = "中国"
 # 改旗易帜那条：把旧主推到极端、一个对照势力推到相反极、其余中立（倒下谁由
 # `--call ideology_similarity` 算出来，不写死）。
 DEFECT_FID, DEFECT_TARGET_HINT, DEFECT_LOYALTY, DEFECT_ROUNDS = "中国", "无国界科学组织", 0.05, 3
@@ -1146,6 +1148,7 @@ def run(h, ck) -> None:
     new_ship_checks(h, ck, out)
     trade_block_checks(h, ck, out)
     haul_leg_checks(h, ck, out)
+    knowledge_scenario_checks(h, ck)
     blueprint_checks(h, ck, out)
     id_checks(h, ck, out)
     scenario_checks(h, ck)
@@ -2265,6 +2268,92 @@ def haul_leg_checks(h, ck, out) -> None:
     ck.check("运输腿别守卫没有空转（四种步骤都出现过，且真等到过货）",
              set(kinds) == {"loaded", "delivered", "waiting", "en_route"} and n >= 500,
              f"{n:,} 步，步骤 {kinds}；无声明路线的 {orphan} 步（回合末刚被改派的那种）")
+
+
+def knowledge_scenario_checks(h, ck) -> None:
+    """**合成场景 · 驻泊深度决定知识**（`sim/tests/knowledge.rs` 那三条，第 7 批）。
+
+    把某势力的**每一艘舰**用 `patch` 搬到同一个日心距、再用玩家 `Idle` 钉住（Idle 保持位置），
+    于是「在场强度」是一个干净的乘式。三个臂：**带内**（日心距 1 AU，在 `mond.radius` 以内）、
+    **浅**（`radius + 2`）、**深**（`radius + 40`）。
+
+    | 原件 | 这里 |
+    | --- | --- |
+    | `presence_comes_only_from_ships_in_the_band` | 带内 ⇒ 强度 0；强度 == 舰数 × `(1 + 深度 × 权重)`；同样一批舰**停得越深强度越大** |
+    | `control_climbs_toward_the_presence_target_and_stops_there` | 浅臂：目标严格在 `(0,1)`，掌握度**逐回合朝它爬、不超过它、差距在缩小**（「收敛」那半由 g3 的**逐回合定律**判，样本多三个数量级） |
+    | `a_real_deep_presence_reaches_the_top` | 深臂：目标正好 `1.0`，掌握度在 `mastery_rounds` 之内**爬到 1.0**；`--call mond_target` 在门槛两侧是 `1.0` / `< 1` |
+
+    ⚠ 浅臂窗口只给 30 回合：再长那三艘舰会战死，强度掉回 0（实测 150 回合后目标塌成 0）。
+    """
+    seed = SCENARIO_SEED
+    meta = json.loads(h.capture(["--meta"]))
+    radius = float(meta["mond"]["radius"])
+    w = float(meta["mond"]["knowledge"]["depth_weight"])
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_know_probe.json", seed))
+    names = [s["舰名"] for s in st["ships"] if s["势力"] == KNOW_FID and s["船体"] > 0]
+    ck.check("合成场景（知识）：探针世界里那个势力开局有舰（防空转）",
+             len(names) >= 1, f"{KNOW_FID} 开局 {len(names)} 艘：{names}")
+
+    arms: dict = {}
+    for tag, rau, rnds in (("in_belt", 1.0, 8), ("shallow", radius + 2.0, 30), ("deep", radius + 40.0, 60)):
+        patch = {"ships": {n: {"坐标": [rau, 0.0]} for n in names}}
+        diff = {"control": [{"势力": KNOW_FID,
+                             "指令": [{"舰": n, "行为": "Idle", "归属": "Player"} for n in names]}]}
+        proj = h.scenario_apply(f"know_{tag}", seed, rnds, [diff], patch=patch)
+        q = KIT.load(str(proj), only=("factions",))
+        f = q.table("factions")
+        f = f[f["势力"] == KNOW_FID].sort_values("round")
+        arms[tag] = {"rau": rau, "depth": rau - radius,
+                     "pres": [float(x) for x in f["mond_presence"]],
+                     "target": [float(x) for x in f["mond_target"]],
+                     "m": [float(x) for x in f["MOND 掌握度"]]}
+
+    belt = arms["in_belt"]
+    ck.check("合成场景（知识）：**带外才产生知识**——日心距在 `mond.radius` 以内的舰一点也不算",
+             all(x == 0.0 for x in belt["pres"]) and all(x == 0.0 for x in belt["target"])
+             and all(x == 0.0 for x in belt["m"]),
+             f"停在 {belt['rau']} AU（半径 {radius}）⇒ 强度 {sorted(set(belt['pres']))}、"
+             f"目标 {sorted(set(belt['target']))}、掌握度 {sorted(set(belt['m']))}")
+
+    want = len(names) * (1.0 + 2.0 * w)
+    sh = arms["shallow"]
+    ck.check("合成场景（知识）：在场强度 = 舰数 × `(1 + 深度 × 权重)`（深处的**一艘**就顶浅处好几艘）",
+             all(abs(x - want) < 0.011 for x in sh["pres"]),
+             f"停在深 {sh['depth']:.0f} AU ⇒ 强度 {sorted(set(round(x, 3) for x in sh['pres']))}，"
+             f"期望 {want:.3f}（{len(names)} 艘 × (1 + {sh['depth']:.0f} × {w})）")
+    ck.check("合成场景（知识）：同样一批舰**停得越深强度越大**（外缘永远值得派人去）",
+             max(arms["deep"]["pres"]) > max(sh["pres"]) > 0.0,
+             f"浅 {max(sh['pres']):.3f} < 深 {max(arms['deep']['pres']):.3f}")
+
+    ck.check("合成场景（知识）：**浅驻泊的目标严格在 (0,1)**（饱和而非断崖）",
+             all(0.0 < x < 1.0 for x in sh["target"]),
+             f"目标 {sorted(set(round(x, 3) for x in sh['target']))}")
+    gap = [t - m for t, m in zip(sh["target"], sh["m"])]
+    ck.check("合成场景（知识）：掌握度**朝目标爬、不超过目标、差距在缩小**",
+             all(b >= a - 1e-9 for a, b in zip(sh["m"], sh["m"][1:]))
+             and all(g >= -0.011 for g in gap)
+             and gap[-1] < gap[0] - 1e-9,
+             f"掌握度 {[round(x, 3) for x in sh['m'][:5]]}…；差 {gap[0]:.3f} → {gap[-1]:.3f}")
+
+    dp = arms["deep"]
+    rounds = int(meta["mond"]["knowledge"]["mastery_rounds"])
+    ck.check("合成场景（知识）：**真·深空常驻 ⇒ 学满**（目标正好 1.0，掌握度在 `mastery_rounds` 内到顶）",
+             all(x == 1.0 for x in dp["target"]) and dp["m"][-1] >= 1.0 - 1e-9
+             and next((i for i, x in enumerate(dp["m"]) if x >= 1.0 - 1e-9), 10**9) <= rounds + 1,
+             f"深 {dp['depth']:.0f} AU ⇒ 目标 {sorted(set(dp['target']))}，"
+             f"掌握度第 {next((i for i, x in enumerate(dp['m']) if x >= 1.0 - 1e-9), -1)} 回合到顶"
+             f"（`mastery_rounds` = {rounds}）")
+    ref = float(meta["mond"]["knowledge"]["mastery_presence"])
+    ck.check("合成场景（知识）：`--call mond_target` 在门槛两侧是 `<1` / `1.0`（差一点就是差的）",
+             call_mond_target(h, ref - 0.1) < 1.0 and call_mond_target(h, ref) == 1.0,
+             f"强度 {ref - 0.1} → {call_mond_target(h, ref - 0.1):.6f}；"
+             f"强度 {ref} → {call_mond_target(h, ref)}")
+
+
+def call_mond_target(h, presence: float) -> float:
+    """问引擎要某个在场强度对应的目标掌握度（`--call mond_target`）。"""
+    return float(json.loads(h.capture(["--call", "mond_target",
+                                       "--args", json.dumps({"presence": presence})]))["value"])
 
 
 def id_checks(h, ck, out) -> None:

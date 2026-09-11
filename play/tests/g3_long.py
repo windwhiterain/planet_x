@@ -390,11 +390,13 @@ def _mond_summary(q) -> dict:
     读面三列就够：`MOND 掌握度`（活量）、`mond_ships_in_band`（在场舰数 = **唯一渠道**）、
     `mond_frontier_au`（前沿海拔，掌握到顶是 `null` = 无穷）。
     """
-    fa = q.table("factions")[["round", "势力", "MOND 掌握度", "mond_ships_in_band", "mond_frontier_au"]]
+    fa = q.table("factions")[["round", "势力", "MOND 掌握度", "mond_ships_in_band",
+                              "mond_presence", "mond_target", "mond_frontier_au"]]
     out: dict = {}
     for f, rows in fa.groupby("势力"):
         rows = rows.sort_values("round")
         out[f] = [(int(r["round"]), float(r["MOND 掌握度"]), int(r["mond_ships_in_band"] or 0),
+                   float(r["mond_presence"] or 0.0), float(r["mond_target"] or 0.0),
                    None if pd.isna(r["mond_frontier_au"]) else float(r["mond_frontier_au"]))
                   for _, r in rows.iterrows()]
     return out
@@ -631,12 +633,19 @@ def mond_checks(h, ck, metas, tag) -> None:
     所以「涨 ⇒ 带内有舰」成立，「锈 ⇒ 带内没舰」不成立，只能各论各的。
     """
     ratchet, rng, climb = Verdict(), Verdict(), Verdict()
+    chan, hard = Verdict(), Verdict()
     steps = climbs = rusts = at_top = 0
     frontier: dict = {}
     for m in metas:
         for f, seq in m["mond"].items():
-            for (r0, c0, b0, _), (r1, c1, b1, _) in zip(seq, seq[1:]):
+            for (r0, c0, b0, p0, _t0, _), (r1, c1, b1, p1, _t1, _) in zip(seq, seq[1:]):
                 steps += 1
+                # 在场强度与「带内舰数」必须同生同灭（强度就是那批舰加权出来的）。
+                if (p1 > 1e-9) != (b1 > 0):
+                    chan.add(f"{f} r{r1}: 带内 {b1} 艘，强度却是 {p1:.4f}")
+                # 涨必须有**强度**解释（比「有舰」更紧：带内一艘停在带沿上的强度也 > 0）。
+                if c1 > c0 + 1e-12 and p1 <= 1e-9:
+                    hard.add(f"{f} r{r1}: 涨了（{c0}→{c1}）可**在场强度为 0**")
                 if not (0.0 <= c1 <= 1.0):
                     rng.add(f"{f} r{r1}: 掌握度 {c1} 越界")
                 if c0 >= 1.0 - 1e-12 and c1 < 1.0 - 1e-12:
@@ -647,7 +656,7 @@ def mond_checks(h, ck, metas, tag) -> None:
                         climb.add(f"{f} r{r1}: 涨了（{c0:.4f}→{c1:.4f}）可带内一艘舰都没有")
                 elif c1 < c0 - 1e-12:
                     rusts += 1
-            for (_, c, _, fr) in seq:
+            for (_, c, _, _p, _t, fr) in seq:
                 if c >= 1.0 - 1e-12:
                     at_top += 1
                 frontier.setdefault(c, set()).add(fr)
@@ -658,6 +667,10 @@ def mond_checks(h, ck, metas, tag) -> None:
              ratchet.detail(f"{tag}：{at_top} 个「势力·回合」在顶上，一个都没掉下来"))
     ck.check("MOND：掌握度**只**由「带内有舰」驱动（不在带内的舰一点也不算）", climb.n == 0,
              climb.detail(f"{tag}：{climbs} 次上涨全部有带内舰解释"))
+    ck.check("MOND：**在场强度**与「带内舰数」同生同灭（强度就是那批舰加权出来的）", chan.n == 0,
+             chan.detail(f"{tag}：{steps} 个势力·回合"))
+    ck.check("MOND：上涨必须由**强度**解释（带内一艘停在带沿上的强度也 > 0）", hard.n == 0,
+             hard.detail(f"{tag}：{climbs} 次上涨全部有正强度解释"))
     ck.check("MOND：守卫没有空转（真的涨过、锈过、到过顶）",
              climbs > 0 and rusts > 0 and at_top > 0,
              f"{tag}：涨 {climbs} / 锈 {rusts} / 顶上 {at_top} 个势力·回合")
