@@ -83,6 +83,26 @@ class Harness:
     def dir_for(self, seed: int, rounds: int) -> Path:
         return CACHE_ROOT / f"{self.fingerprint()}-s{seed}-r{rounds}"
 
+    def sweep_stale(self) -> int:
+        """删掉**别的指纹**留下的投影目录，返回释放的 MB。
+
+        为什么必须有这一步：一份 1000 回合的投影 ~170 MB，`run.py all` 一次就要 7 份
+        （≈1.2 GB）；而**每次改一行引擎代码，指纹就变一次** ⇒ 旧指纹的目录全成了没人再读的死重。
+        实测（2026-10）：`target/test-fixtures` 涨到 **10.9 GB / 72 个目录**，把 C 盘写到只剩
+        0.1 GB，`--index` 直接报 `os error 112（磁盘空间不足）`——测试红的样子像代码坏了，
+        其实是磁盘满了。既然「指纹变了 ⇒ 旧投影一定不会被复用」，扫掉它们永远是对的。
+        """
+        cur = self.fingerprint()
+        freed = 0
+        for d in CACHE_ROOT.glob("*"):
+            if not d.is_dir() or d.name.startswith(cur):
+                continue
+            if d.name.startswith(".") or ".tmp" in d.name:      # 别人正在写的临时目录先别动
+                continue
+            freed += _dir_size(d)
+            shutil.rmtree(d, ignore_errors=True)
+        return round(freed / 1e6, 1)
+
     def projection(self, seed: int, rounds: int) -> Path:
         """按 `(seed, 回合数)` 取一份投影目录：命中就直接返回，否则跑一次。
 
