@@ -1,8 +1,9 @@
 # 测试全搬的施工图：**判据缺什么数据，就往序列化里装什么**
 
 > 状态：**第 1–6 批已落地**（2026-10；分支 `feature/test-migrate-rest`，worktree `C:/resource/planet_x-decoupled`，
-> 第 1–5 批已合进 `main`）。§4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
-> 计数：**Python 164**（g1 43 / g2 77 / g3 26 / g4 18）；**Rust 196**（+31 探针 ignored）。
+> 第 1–5 批已合进 `main`；第 6 批**已同步 `main`、待合**——⚠ 卡在 main 自己的一条红上，见 §6.5）。
+> §4 的「故意不搬」清单已写死（第 7 批）——**不用再逐条论证**。
+> 计数：**Python 170**（g1 43 / g2 78 / g3 26 / g4 23）；**Rust 197**（+31 探针 ignored）。
 > 起点口径（本主题开工时）：Python 75 / Rust 222 单测 + 8 集成。（2026-10 用户裁决：*「总之目标是全搬，有需要的数据没序列化就把他装进序列化里」*）
 > ｜ 索引：[notes.md](../notes.md) ｜ 上层：[test-decoupled-suite.md](test-decoupled-suite.md)
 
@@ -13,7 +14,10 @@
 | 起始（本主题开工时） | 75 | 222 单测 + 8 集成 |
 | 施工图写下时 | 120（g1 33 / g2 46 / g3 26 / g4 14） | 206（+31 探针） |
 | 第 1–5 批后 | 146（g1 43 / g2 62 / g3 26 / g4 15） | 200（+31 探针 `#[ignore]`） |
-| **现在（第 1–6 批后）** | **164**（g1 43 / g2 77 / g3 26 / g4 18） | **196**（+31 探针 `#[ignore]`） |
+| **现在（第 6 批 + 同步 `main@2b8a871` 后）** | **170**（g1 43 / g2 78 / g3 26 / g4 23） | **197**（+31 探针 `#[ignore]`） |
+
+> 组数里 g4 18→23、Rust 196→197 是**同步 `main` 带进来的**（另一批在扩 g4 纪律并给
+> `sim::site_supply` 加了一条），不是第 6 批搬的；第 6 批自己的增量只有 **g2 62→78**。
 
 搬走的族（截至第 6 批）：投影审计 6、governance/spending 9、combat 8、blueprints 9、合成场景 6、trade 3、cargo 1、off_capital 1、派单 1、纯函数 5。
 
@@ -26,7 +30,7 @@
 | 3 `depots` | 新派生表 `depots` | `haul::off_capital_production…` 读面一半 → g2 `depot_checks`（5 条） | 55→60 | `7846c04` |
 | 4 派单抽签 | 零新增（用 `round_inputs.rolls`，**否决** `haul_lanes`——§5.4） | `freight::route_lottery…` → g2 `dispatch_checks`（2 条） | 60→62 | `83521f6` |
 | 5 `--call <fn>` | 新 CLI 读面（`src/main.rs`） | 纯函数 5 条 → g1 `call_functions`（10 条） | g1 33→43 | `9e1a566` |
-| 6 合成场景 | **零新增序列化**；`_harness` 加**拨控制叶**的路（`scenario_apply`，走引擎自己的 `--apply`——§5.6） | 类 C 4 条 → g2 `blueprint_scenario_checks`（15 条） | g2 62→77 | 待合 |
+| 6 合成场景 | **零新增序列化**；`_harness` 加**拨控制叶**的路（`scenario_apply`，走引擎自己的 `--apply`——§5.6） | 类 C 4 条 → g2 `blueprint_scenario_checks`（16 条） | g2 62→78 | 待合（§6.5） |
 
 > §1–§3 的小节标题已标注落地状态；正文里的「装哪儿（建议）」表**保留原计划**，落地口径以 §0.1 / §5 / §5.4 / §5.6 为准。
 
@@ -119,15 +123,32 @@
 * **回执不再静默**：`WARN_APPLY_SKIPPED`（叶片没落地）进 `h.warnings`，而 `Harness.report()`
   现在**真的会打印它们**——在这之前 `warnings` 只进列表、没有任何人读，「不静默」是句空话。
 
-**搬走的 4 条**（全在 g2 的 `blueprint_scenario_checks`，合计 15 条判据；Rust 原件已删、模块头留了
+**搬走的 4 条**（全在 g2 的 `blueprint_scenario_checks`，合计 16 条判据；Rust 原件已删、模块头留了
 对账表）：
 
 | 原用例 | 怎么造那个世界 | 数据级断言（读面） |
 | --- | --- | --- |
-| `a_dangling_pointer_is_left_dangling` | `h.scenario(patch=…)`——**整表替换** `cities.建筑`。⚠ 这条**不能**用 `--apply`：写面**拒绝**写不存在的图（`no_such_blueprint`，§4 明说不搬） | `cities.建筑[].设计图` 逐回合原样是那个不存在的名字；防空转 = 它真的不在任何图库里 + 同一局 AI 真的给别人建了图 |
+| `a_dangling_pointer_is_left_dangling` | `h.scenario_apply`：**两次 diff**——① 建一张普通的自建图 + 把建造区指过去；② **删掉那张图**（`{"remove": true}` ⇒ 指针悬空） | `cities.建筑[].设计图` 逐回合原样是那个**已删掉**的名字；防空转 = 它真的不在任何图库里 + 同一局 AI 真的给别人建了图 |
 | `a_player_pinned_design_and_its_yard_are_left_alone` | `h.scenario_apply`：**一份** diff 里建图（`mode: Player`）+ 把建造区指过去 | `blueprints`：逐回合 `mode=Player`、`选装` 一字不变；`cities`：指针逐回合不变；`decisions` 里那张图**零行**（重估/回收都没碰） |
 | `only_unreferenced_selfmade_designs_are_reaped` | `h.scenario_apply`：三张没人指向的图（`Inherit` 自建 / 玩家起的名 / 玩家钉住的 AI 名） | 自建的回合 0 还在、之后没了；另两张 0–3 回合都在；`decisions` 里有 `verdict=reaped`；防空转 = 三张图回合 0 的模式真的各就各位 |
-| `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` | `h.scenario_apply`：同一座城、同一个舰级（先清图指针 + 钉死舰级，免得 `retool_shipyards` 换掉），只把 `construction_budget`/`investment_budget` 拨到 `1e6` / `0` | `city_process.build`：批满 ⇒ 该舰级每回合 `increment ≈ rate`；批 0 ⇒ 键**还在**、`rate > 0`、`increment = 0`（是缺钱不是没船坞） |
+| `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` | `h.scenario_apply`：**一份** diff——`buildings` 叶同时 **`blueprint: null`（拆指针）+ `ship_type`（钉死舰级）**（免得 `retool_shipyards` 换掉那一行），再把 `construction_budget`/`investment_budget` 拨到 `1e6` / `0` | `city_process.build`：批满 ⇒ 该舰级每回合 `increment ≈ rate`；批 0 ⇒ 键**还在**、`rate > 0`、`increment = 0`（是缺钱不是没船坞） |
+
+> ⚠ **原案的两处已被取代**（写在这里免得下一个人照旧文档重做一遍）：
+>
+> 1. 原案说悬空指针「`cities` 整表替换即可，**不需要**控制叶」。**不要那么做**——那要往状态里
+>    手塞一个不存在的图名，而 `--apply` 的 `remove` 就能造出同一个局面，且**更忠实**：
+>    「删**整张图** ⇒ 挂它的建造区随后是悬空指针 ⇒ 停产」（`src/control/blueprint.rs`），而删图
+>    本来就是玩家/agent 的动作。写面**拒绝**的只是「凭空写一个不存在的图名」（§4 那半照旧不搬）。
+> 2. §6.5 的老交接说「先补字典型深合并或 `--apply`-in-scenario」——**只有 A 需要**（见上）；
+>    ④ 的「拆指针 + 钉舰级」也用 `BuildingPatch` 的 `blueprint: null` / `ship_type` 走了 `--apply`，
+>    于是**只剩一处**读状态字段（认出某势力有哪些建造区，见 `_yards_of`）。
+
+**跟 `main` 的字段命名批对齐**（合并 `main@2b8a871` 时被它逼出来的）：`_harness` 删掉了手抄的
+`_ID_KEY`，改成问引擎（`Harness.identity_keys()` ← `--nouns` 的 `identity.structs` + state schema）。
+g2 这边的 `_yards_of` 跟着走：**身份键问引擎**，剩下三个名字（`建筑`/`建筑编号`/`建造舰级`）引擎
+还没有声明面，只能写死——但它们错了**不会静默**（找不到建造区 ⇒ 探针那条判据立刻红）。
+另外「这个势力有哪些资源」改成读 `--control` 的预算模板（`resource` 是 ASCII 键，且实测与
+`state.factions[].资源` 逐一对上），不再手抄状态字段。
 
 **还没搬的**（别重新论证）：
 
@@ -150,7 +171,8 @@
 
 ```bash
 # ① 行为中性（装数据的那次提交**必须**逐字节不变；变了就是改到模拟/读面语义了，要停下来想清楚）
-target/release/planet_x.exe --seed 42 --round 240 --digest 20   # 取 sha256 == 748B4AA6…9603
+target/release/planet_x.exe --seed 42 --round 240 --digest 20   # 取 sha256 == F550E199…DBB37
+#   ⚠ 这个基线**只在**「已同步的 main 是 2b8a871」时有效——main 还在动（见下）。
 # ② 数据级（116→ 每加判据都会涨；`-j 7` 并行）
 uv run --project play/planet_xq python play/tests/run.py all -j 7
 # ③ Rust 侧（搬一条就该少一条）
@@ -159,10 +181,16 @@ cargo nextest run -P full
 
 > ⚠ **digest 基线的历史**（施工图早期写的 `BB2EEB2B…2000` 已作废）：
 > `BB2EEB2B…2000`（`feature/web-control-spec` 合并**前**）→ `C928C3F1…06A9`（合并后）→
-> **`748B4AA6…9603`**（`feature/field-names` 批 A：11 个实体结构体 83 个字段加 serde 中文名 +
-> 字段顺序；见 `.agents/notes/field-naming.md` §7.5）。**当前口径 = `748B4AA6…9603`**
-> （12 行、只取 `^{` 行、LF 连接、UTF-8 无 BOM）。`feature/domestic-market` 合并进来后实测仍是它
-> （配置里那一段是注释掉的）。
+> `748B4AA6…9603`（`feature/field-names` 批 A：11 个实体结构体 83 个字段加 serde 中文名 +
+> 字段顺序；见 `.agents/notes/field-naming.md` §7.5）→ **`F550E199…DBB37`**（把
+> `main@2b8a871` 合进来之后实测；见下）。
+>
+> **第 6 批自己是行为中性的**（`748B4AA6…9603` 在批次前后逐字节相同：整批只动 `play/tests/*`
+> 与 `src/tests/*`，后者是 `#[cfg(test)]` ⇒ 连 release 二进制都不重编）。**`F550E199…DBB37`
+> 是 `main` 的引擎改动带来的**（那批 P0/P1：出口腿保留量、市场世界库存口径…），不是第 6 批。
+> ⚠ 那个批次的作者自己在本子里写了「P0-3/P1-2/P1-4 会改默认行为，**需重标 digest**」——
+> **main 还在动**（合并窗口里从 `2b8a871` 一路走到 `8abbba2`），所以合流时**以当时实测为准**，
+> 别拿这里这个数当永久口径。
 
 ### §6.3 合成场景的 API（`play/tests/_harness.py`，已就绪）
 
@@ -193,19 +221,28 @@ proj = h.scenario_apply("名字", 42, 3, [diff, …])    # 造→**逐份 --appl
 
 ### §6.5 现在的状态（**2026-10 第 1–6 批后**）
 
-* 分支：`feature/test-migrate-rest`（worktree `C:/resource/planet_x-decoupled`），已同步到 `main`
-  （第 5 批合并 `9e1a566`；第 6 批动手前又合了一次 `main`，落到 `704d008`）。⚠ `main` 是**多会话共用**的、
-  会随时前进（合并窗口里就落了 `feature/field-names` 与 `feature/domestic-market`）⇒ **每批动手前先
-  `git merge main` 同步**，做完三条验证再合回 `main`（字段中文名那次就是这么撞出来的：第 1 批合早了，
-  第 2 批先补合 `main` 才接上 `载货`）。
-* 计数：Python **164**（g1 43 / g2 77 / g3 26 / g4 18）；Rust **196** + 31 探针 `#[ignore]`。
-* 当前 digest 基线：**`748B4AA66FE169E8F316169D61CB5239057D0F3515CF59A50C629E76BF489603`**（§6.2）。
-  第 6 批**零新增序列化**（只动了 `play/tests/*` 与 Rust 测试模块）⇒ 它逐字节没变（实测确认）。
-* 三道门都是绿的（第 6 批实测：`run.py all -j 7` 164/164、`nextest -P full` 196/196、
-  `nextest -p planet_x_web` 25/25、`_g4_negative.py` 21 个注入错全部咬住）；
+* 分支：`feature/test-migrate-rest`（worktree `C:/resource/planet_x-decoupled`）。第 6 批提交后**又合了
+  一次 `main`**（`cc71e35`，同步到 `main@2b8a871`；那次同步逼出两处对齐，见 §5.6 末）。
+  ⚠ `main` 是**多会话共用**的、会随时前进——这次合并窗口里它从 `704d008` 走到 `2b8a871`，**我干活期间
+  又走到 `8abbba2`**（13:07/13:09 落 P0-3、P1-1）⇒ **每批动手前先 `git merge main` 同步**，
+  做完三条验证再合回 `main`。
+* 计数：Python **170**（g1 43 / g2 78 / g3 26 / g4 23）；Rust **197** + 31 探针 `#[ignore]`。
+  （g4 18→23 与 Rust 196→197 是**同步 `main` 带进来的**；第 6 批自己的增量只有 g2 62→78。）
+* 当前 digest 基线：**`F550E199CF3444FF75B37933431D6246F76D8E6EF77D55B9677FC34D864DBB37`**（§6.2）
+  ——它是「第 6 批 + `main@2b8a871`」实测；第 6 批自己那一段仍是 `748B4AA6…9603`（行为中性）。
+* **⚠ 还没合 `main`：main 自己有一条红**（不是我造成的，但按规矩合流门前必须全绿）：
+  `g1_contract.py` 的「预算守卫没有空转（真的花过钱、也真的有没花掉的）」——实测
+  **0 处真的花了钱、58 处有没花掉的余额**。归因已经钉死：我这边的 `src/`（除 `#[cfg(test)]` 的删除）
+  与 `main@2b8a871` **逐字相同**，而拿主 worktree 里**旧的**那份二进制（12:51 编的，早于 `bebeab9`
+  那个 P0-1 修复）跑同一条判据是 **43/43 绿** ⇒ 红是 main 那批引擎改动带来的。主 worktree 的二进制
+  一直没重编，所以那边大概还没看见这条。
+  **下一步先问 main 的负责人**：等他把 P0/P1 那批收完、重编重跑（他本子里也写了「需重标 digest」），
+  再合第 6 批。
+* 其余门在合并后的树上都是绿的（实测：`g2` 78/78、`g3` 26/26、`g4` 23/23、`nextest -P full` 197/197、
+  `nextest -p planet_x_web` 25/25、`_g4_negative.py` 25 个注入错全部咬住）；
   `target/test-fixtures/` 有自动清理（`run.py` 默认 `sweep_stale`，`--no-sweep` 可关）。
 * 判据写在 `play/tests/g*.py` 的 `run()` 里（数据取自 `extract()` 的摘要 ⇒ **改断言不重读投影**）。
   ⚠ `_code_stamp` 把**除 `run` 外的全部顶层函数**算进摘要指纹 ⇒ **加一个新判据函数会让该组摘要重算一次**
   （一次性十几秒，不是缓存坏了）。
-* **第 6 批已做完**（§5.6）。**下一步 = 第 7 批**：按 §4 那份**已写死**的「故意不搬」清单收尾
-  （不要再逐条重新论证）。§5.6 里还剩两条**等字段命名批 B/C 收口**的（`blueprint` 的角色/姿态）。
+* **第 6 批的活已经做完**（§5.6，只等合流）。**再往后 = 第 7 批**：按 §4 那份**已写死**的「故意不搬」
+  清单收尾（不要再逐条重新论证）。§5.6 里还剩两条**等字段命名批 B/C 收口**的（`blueprint` 的角色/姿态）。

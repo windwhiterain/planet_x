@@ -34,7 +34,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import sys
 from pathlib import Path
@@ -56,7 +55,8 @@ MIN_ROUTE_DRAWS = 50      # 派单抽签防空转：3 seed × 400 回合的 rout
 SCENARIO_SEED = 42
 SCENARIO_ROUNDS = 3
 FID = "中国"
-# `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改，同 `_harness._ID_KEY`）。
+# `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
+# 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
 
 
@@ -1000,44 +1000,42 @@ def scenario_checks(h, ck) -> None:
 
 # ── 合成场景 · 拨控制叶（施工图 §5.6 第 6 批）────────────────────────────────────
 #
-# 这一族用例的共性：要**先在世界上做一件事**（把图钉成 `Player` + 让建造区指过去 / 把指针改成
-# 悬空 / 造几张没人指向的图 / 把预算拨到两个极端），再看引擎那一趟怎么反应。以前只能在 Rust 里
-# `fresh_world(42)` + 直接改内部状态；现在两条路都不出数据面：
+# 这一族用例的共性：要**先在世界上做一件事**（钉一张玩家的图 + 让建造区指过去 / 让某根图指针悬空 /
+# 造几张没人指向的图 / 把预算拨到两个极端），再看引擎那一趟怎么反应。以前只能在 Rust 里
+# `fresh_world(42)` + 直接改内部状态；现在**全部走引擎自己的写入口**：
 #
-# * **改状态字段**（`h.scenario(patch=…)`）：舰级 / 图指针这类**字面量**。
-#   ⚠ 悬空指针**只能**这么造——`--apply` 反而**拒绝**写不存在的图（`no_such_blueprint`）。
-#   那是**写面契约**（「一个错别字不许凭空造出一张图」），在施工图 §4 里明说不搬。
-# * **拨控制叶**（`h.scenario_apply(diffs=…)`）：图库 / 预算这类**字典型**的叶库，走引擎自己的
-#   `--apply`（补丁形状由 g4 逐条对账）——Python 里不出现第二份控制面形状。
+# * **拨控制叶**（`h.scenario_apply(diffs=…)`）：图库 / 建造区 / 预算——走 `--apply`（补丁形状由
+#   g4 逐条对账）⇒ Python 里不出现第二份控制面形状。
+# * **悬空指针**也用 `--apply` 造，而且比改状态字段**更忠实**：先建图 + 把建造区指过去，再**删掉
+#   那张图**——「删整张图 ⇒ 挂它的建造区随后是悬空指针 ⇒ 停产」（`src/control/blueprint.rs`），
+#   而**删图本来就是玩家/agent 的动作**。反过来，直接往状态里塞一个不存在的图名是绕路：写面
+#   **拒绝**写不存在的图（`no_such_blueprint`，那是写面契约，施工图 §4 明说不搬）。
+# * 只剩一处**读状态字段**：从状态档里认出「这个势力有哪些建造区」。那处字段名是引擎的镜像，
+#   见 `_yards_of`（身份键问引擎；其余名字写错**不会静默**——探针那条判据立刻红）。
 
 
-def _yards_of(st: dict, faction: str) -> list[tuple[str, int, str, dict]]:
-    """状态档里某势力的**建造区**：`(城名, 建筑编号, 舰级, 那条城记录)`。
+def _yards_of(h, st: dict, faction: str) -> list[tuple[str, int, str]]:
+    """状态档里某势力的**建造区**：`(城名, 建筑编号, 舰级)`。
 
-    ⚠ 字段名是引擎发的中文名词（[field-naming](../../.agents/notes/field-naming.md)），
-    与 `_harness._ID_KEY` 同一类镜像——引擎改名要跟着改。
+    ⚠ 这里出现的是**引擎的状态字段名**（中文名词，见 [field-naming](../../.agents/notes/field-naming.md)）
+    ——它们是镜像，所以按 `_harness` 的规矩分两半：
+
+    * **身份键问引擎**（`h.identity_keys()`；唯一真值是 `model::IDENTITY`，随 `--nouns` 发出来）：
+      城市的身份键直接取；「城市指向势力」那个字段取的是 `Faction` 的身份键——同一个名词。
+    * 剩下三个（`建筑` / `建筑编号` / `建造舰级`）引擎**还没有声明面**，只能写在这儿。写错的代价
+      是**响亮的**：一个建造区都找不到 ⇒ 下面「探针世界里真有可用的建造区」立刻红，而不是拿个
+      旧名字去改档、再把人引向「补丁没落地」那个错方向。
     """
+    keys = h.identity_keys()
+    id_key, fac_key = keys["cities"], keys["factions"]
     out = []
     for c in st.get("cities") or []:
-        if c.get("势力") != faction:
+        if c.get(fac_key) != faction:
             continue
         for b in c.get("建筑") or []:
             if b.get("建造舰级"):
-                out.append((c["城名"], b["建筑编号"], b["建造舰级"], c))
+                out.append((c[id_key], b["建筑编号"], b["建造舰级"]))
     return out
-
-
-def _with_yard(st: dict, city: str, bid: int, **fields) -> dict:
-    """`{city: {"建筑": …}}` 形状的补丁：把某城某建造区的几个字段改掉。
-
-    `edit()` 只做**整格替换** ⇒ 改一个字段要把整张建筑表塞回去（施工图 §6.3）。
-    """
-    doc = copy.deepcopy(st)
-    row = next(c for c in doc["cities"] if c["城名"] == city)
-    for b in row["建筑"]:
-        if b["建筑编号"] == bid:
-            b.update(fields)
-    return {"cities": {city: {"建筑": row["建筑"]}}}
 
 
 def _yard_ptr_by_round(ci, city: str, bid: int) -> dict:
@@ -1091,20 +1089,26 @@ def blueprint_scenario_checks(h, ck) -> None:
     """
     seed = SCENARIO_SEED
     st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_bp_probe.json", seed))
-    yards = _yards_of(st, FID)
+    yards = _yards_of(h, st, FID)
     ck.check("合成场景（设计图）：探针世界里真有可用的建造区", len(yards) >= 2,
-             f"{FID} 开局 {len(yards)} 个建造区：{[(c, b, k) for c, b, k, _ in yards]}")
+             f"{FID} 开局 {len(yards)} 个建造区：{yards}")
     if not yards:
         return
-    city, bid, class_, _ = yards[0]
+    city, bid, class_ = yards[0]
     meta = json.loads(h.capture(["--meta"]))
     slots = int(meta["ships"][class_]["slots"])
     comps = ["kinetic", "ion_drive"][:max(1, min(2, slots))]
 
     # ① 悬空指针 ---------------------------------------------------------------
-    ghost = "已经删掉的图"
-    proj = h.scenario("bp_dangling", seed, SCENARIO_ROUNDS,
-                      patch=_with_yard(st, city, bid, 设计图=ghost))
+    # 造法 = **两次 `--apply`**：先建一张普通的自建图、把建造区指过去，再**把图删掉** ⇒ 指针悬空。
+    ghost = "待删的图"
+    proj = h.scenario_apply("bp_dangling", seed, SCENARIO_ROUNDS, [
+        {"control": [{"faction_id": FID,
+                      "blueprints": [{"name": ghost, "class": class_,
+                                      "components": ["kinetic"], "mode": "Inherit"}],
+                      "buildings": [{"city": city, "building": bid, "blueprint": ghost}]}]},
+        {"control": [{"faction_id": FID, "blueprints": [{"name": ghost, "remove": True}]}]},
+    ])
     q = KIT.load(str(proj), only=("cities", "blueprints", "decisions"))
     ptrs = _yard_ptr_by_round(q.table("cities"), city, bid)
     ck.check("合成场景（设计图）：悬空指针原样保留（AI 不替你修）",
@@ -1178,18 +1182,25 @@ def blueprint_scenario_checks(h, ck) -> None:
              f"{len(reaped)} 条回收判定：{[d['actor'] for d in reaped][:4]}")
 
     # ④ 造舰慢是缺钱还是缺产能 -------------------------------------------------
-    # 建造区先清掉图指针、钉死舰级（否则 `retool_shipyards` 中途改装，那一行就找不到了）。
-    res = sorted(next(f for f in st["factions"] if f["势力"] == FID)["资源"].keys())
-    ypatch = _with_yard(st, city, bid, 设计图=None, 建造舰级=class_)
+    # 一份 diff 干三件事：**拆掉图指针 + 钉死舰级**（否则 `retool_shipyards` 中途改装，那一行就
+    # 找不到了），再把两个预算拨到同一个极端值。资源清单**问引擎**（`--control` 的预算模板：
+    # 每个势力的资源键与它逐一对上），不手抄状态字段。
+    ctl = json.loads(h.capture(["--seed", str(seed), "--control"]))["control"]
+    res = sorted({e["resource"] for f in ctl if f["faction_id"] == FID
+                  for k in ("construction_budget", "investment_budget") for e in f[k]})
+    ck.check("合成场景（预算）：预算模板给出了这个势力的资源清单（防空转）", len(res) >= 1,
+             f"{FID} 的预算资源：{res}")
 
-    def budget(v: float) -> dict:
+    def leaves(v: float) -> dict:
         return {"control": [{"faction_id": FID,
+                             "buildings": [{"city": city, "building": bid,
+                                            "blueprint": None, "ship_type": class_}],
                              "construction_budget": [{"resource": r, "value": v} for r in res],
                              "investment_budget": [{"resource": r, "value": v} for r in res]}]}
 
     lines = {}
     for tag, v in (("rich", 1e6), ("poor", 0.0)):
-        p = h.scenario_apply(f"bp_budget_{tag}", seed, SCENARIO_ROUNDS, [budget(v)], patch=ypatch)
+        p = h.scenario_apply(f"bp_budget_{tag}", seed, SCENARIO_ROUNDS, [leaves(v)])
         lines[tag] = _build_lines(KIT.load(str(p), only=("city_process",)).table("city_process"), city)
 
     rich = [(r, k, l) for r, k, l in lines["rich"] if k == class_]
