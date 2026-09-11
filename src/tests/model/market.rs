@@ -59,6 +59,7 @@ fn market_state_survives_a_round_trip() {
         settled: [("铁".to_string(), 4.0)].into_iter().collect(),
         avg_demand: [("铁".to_string(), 3.0)].into_iter().collect(),
         last_stock: [("铁".to_string(), 12.0)].into_iter().collect(),
+        domestic: Default::default(),
     };
     let text = ron::ser::to_string(&m).expect("serializable");
     let back: MarketState = ron::from_str(&text).expect("deserializable");

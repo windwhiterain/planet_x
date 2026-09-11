@@ -1,4 +1,16 @@
 (
+    // **国内市场（第一版，默认关闭）**：开启后开发/建造预算不再直接按全局权重贪心分配，
+    // 而是把势力级资源预算投放到国内市场，按城市权重折算成货币预算，城市按 recipe 竞买。
+    // 设计见 `.agents/notes/domestic-market.md`；实现见 `src/sim/domestic_market.rs`。
+    // 打开方式（取消注释并调参）：
+    // domestic_market: (
+    //     enabled: true,          // 默认 false = 旧路径逐字节不变
+    //     iterations: 4,          // 价格反馈迭代次数
+    //     damping: 0.35,          // 价格阻尼
+    //     price_floor: 0.25,      // 相对 resource.value 的底价
+    //     price_ceiling: 8.0,     // 相对 resource.value 的顶价
+    //     money_multiplier: 1.0,  // 货币投放倍率；1.0 = 货币恰好背书当期预算
+    // ),
     economy: (
         production_rate: 0.5,
         pop_growth: 0.04,

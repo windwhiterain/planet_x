@@ -58,6 +58,33 @@ pub struct MarketState {
     /// 相减即得**实测消费率**——价格发现不猜需求，而是量出来的。
     #[serde(default)]
     pub last_stock: ResourceMap,
+    /// **国内市场**（每势力一份）：价格/未用额度/上回合需求。默认空 = 未启用，
+    /// 见 `.agents/notes/domestic-market.md`。
+    #[serde(default)]
+    pub domestic: BTreeMap<FactionId, DomesticMarket>,
+}
+
+/// 国内市场的一个类别（开发/建造）的持久状态。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct DomesticMarketSide {
+    /// 本回合的国内价格（每资源）。
+    #[serde(default)]
+    pub price: ResourceMap,
+    /// 本回合未分配完的**预算额度**（不是实物库存；预算是不跨回合累加的速率）。
+    #[serde(default)]
+    pub unspent: ResourceMap,
+    /// 上回合的总需求（观测/调参用）。
+    #[serde(default)]
+    pub last_demand: ResourceMap,
+}
+
+/// 一个势力的国内市场状态：开发、建造两个独立市场。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct DomesticMarket {
+    #[serde(default)]
+    pub development: DomesticMarketSide,
+    #[serde(default)]
+    pub construction: DomesticMarketSide,
 }
 
 impl MarketState {

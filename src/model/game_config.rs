@@ -263,6 +263,65 @@ pub struct MarketConfig {
     /// 贸易抽税。其余部分（以及没有 master 存世时的全部）与手续费一样被**烧掉**（sink）。
     pub carrier_share: f64,
 }
+/// **国内市场**（`src/sim/domestic_market.rs`，设计见 `.agents/notes/domestic-market.md`）。
+///
+/// 第一版默认 `enabled = false`，保证旧世界逐字节不变。开启后：
+/// * 势力级开发/建造预算向量作为每回合投放 `g`；
+/// * 原有叶子权重自动折算为城市货币预算 `m_i`（第二版再暴露成控制叶）；
+/// * 城市按 recipe 在当前国内价格下出需求，市场做一次（或几次）价格反馈与配给。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DomesticMarketConfig {
+    /// 是否启用国内市场。默认关闭。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 每回合价格反馈迭代次数（0 = 只投放、不更新价格；默认 4）。
+    #[serde(default = "default_domestic_market_iterations")]
+    pub iterations: u32,
+    /// 价格反馈阻尼（0..1；越大越快也越容易震荡；默认 0.35）。
+    #[serde(default = "default_domestic_market_damping")]
+    pub damping: f64,
+    /// 价格下限倍率（相对资源配置 `value`；默认 0.25）。
+    #[serde(default = "default_domestic_market_price_floor")]
+    pub price_floor: f64,
+    /// 价格上限倍率（相对资源配置 `value`；默认 8.0）。
+    #[serde(default = "default_domestic_market_price_ceiling")]
+    pub price_ceiling: f64,
+    /// 货币投放倍率：本回合给下层拨的钱 = `money_multiplier × 预算按基价的价值`。
+    /// 第一版没有独立货币控制叶，用这个旋钮代替；1.0 = 货币恰好背书当期预算。
+    /// 第二版把 `money_multiplier` 换成逐城货币预算叶。
+    #[serde(default = "default_domestic_market_money_multiplier")]
+    pub money_multiplier: f64,
+}
+
+fn default_domestic_market_iterations() -> u32 {
+    4
+}
+fn default_domestic_market_damping() -> f64 {
+    0.35
+}
+fn default_domestic_market_price_floor() -> f64 {
+    0.25
+}
+fn default_domestic_market_price_ceiling() -> f64 {
+    8.0
+}
+fn default_domestic_market_money_multiplier() -> f64 {
+    1.0
+}
+
+impl Default for DomesticMarketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            iterations: default_domestic_market_iterations(),
+            damping: default_domestic_market_damping(),
+            price_floor: default_domestic_market_price_floor(),
+            price_ceiling: default_domestic_market_price_ceiling(),
+            money_multiplier: default_domestic_market_money_multiplier(),
+        }
+    }
+}
+
 /// 光速治理 (lightspeed governance) tuning。
 ///
 /// 以「距离首都」为代价的行政管理开销与忠诚度：一座城越远离其统治势力的首都，
@@ -969,6 +1028,9 @@ pub struct GameConfig {
     pub combat: CombatConfig,
     pub diplomacy: DiplomacyConfig,
     pub market: MarketConfig,
+    /// **国内市场**（默认关闭；见 `.agents/notes/domestic-market.md`）。
+    #[serde(default)]
+    pub domestic_market: DomesticMarketConfig,
     /// **承包市场**（托运方挂单、承运方接单）。`#[serde(default)]` 容忍旧配置无此节
     /// （默认值 = 抽成 15%、宽裕的截止期）。
     #[serde(default)]
