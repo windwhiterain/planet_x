@@ -566,6 +566,33 @@ def _load_kit():
 KIT = _load_kit()
 
 
+def _memoize_load():
+    """**同一份投影在一个进程里只装一次**。
+
+    实测（2026-10）：g2 一共 `KIT.load` **63 次**，只有 **31 个不同的 (目录, only) 组合**
+    ⇒ 32 次是重复装同一份表（某个世界 `only=("cities",)` 装了 **8 遍**），而 load 总耗时
+    **39.3 s** ≈ g2 的整个墙钟。这里按 `(目录, only)` 复用同一个 `PlanetXQ`。
+
+    ⚠ 复用意味着**帧是共享的**：各组只读它们（grep 过，没有就地赋值）。要就地改就先 `.copy()`。
+    ⚠ 生成（`projection`）发生在装之前；同一个 `(seed, 回合数)` 在一次运行里不会重生。
+    """
+    orig = KIT.load
+    cache: dict = {}
+
+    def load(dirpath, only=None):
+        key = (str(dirpath), tuple(only) if only is not None else None)
+        hit = cache.get(key)
+        if hit is None:
+            hit = orig(dirpath, only=only)
+            cache[key] = hit
+        return hit
+
+    KIT.load = load
+
+
+_memoize_load()
+
+
 # ── 断言记录（够用就行：一个组一份清单 + 非零退出码）────────────────────────
 
 
