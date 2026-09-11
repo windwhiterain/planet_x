@@ -89,7 +89,6 @@ mod tests;
 src/tests/
   sim/mod.rs            夹具（fresh_world / attach_blueprint / spawn_at / stock）+ 零散用例
   sim/{fleet,combat,haul,mond,ideology,capital,story,blueprints}.rs   按主题
-  sim/horizon_mid.rs    中档（T2）用例                    ← 见 test-tiers.md
   control/mod.rs        夹具（some_building / pin_blueprint）
   control/{apply,normalize,view,ship,blueprint}.rs
   projection/mod.rs
@@ -100,7 +99,9 @@ web/src/tests.rs        （web 是另一个 crate，同理 #[path] 引入）
 ```
 
 规矩：**主题文件放短档用例，档位文件（`horizon_mid`/`horizon_long`）放高档用例**——
-一个用例只属于一个文件，两者不混。子模块写 `use super::*;` 就能拿到 `mod.rs` 里的夹具
+一个用例只属于一个文件，两者不混。⚠ 2026-10 之后这条在 Rust 侧**暂时无对象**：中档/长局判据
+都搬去了 `play/tests/`（数据级），`src/tests/**` 里已经一个档位文件都没有了；集成测试那边
+`tests/probes/horizon_long.rs` 还在，但里面只剩 `#[ignore]` 探针。子模块写 `use super::*;` 就能拿到 `mod.rs` 里的夹具
 （父模块的私有项对子模块可见），所以夹具只写一份。
 
 ## 5. 还没拆的（下一轮候选）

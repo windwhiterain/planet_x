@@ -97,7 +97,9 @@
     </div>
   </aside>
 
-  <script type="module" src="map3d.js"></script>
+  <!-- 3D 地图：**只**从 `map3d/index.js` 进（`map3d/` 下是它的各个子模块）。
+       three.js 与 addons 仍走 importmap 的 CDN（见 <head>），没有本地构建步骤。 -->
+  <script type="module" src="map3d/index.js"></script>
   <script src="jsonview.js"></script>
   <!-- 悬停弹窗（**名词 → 解释**）：它不认识任何领域词，只拿名词去 `GET /api/schema`
        那份数据里查（那份数据又来自 `///` 与 `column_docs`）。要在 specview/controls 之前

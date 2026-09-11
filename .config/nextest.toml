@@ -9,13 +9,25 @@
 #   T3 >480 回合（40 年+）                  → `cargo nextest run -P full`（合流门）
 #
 # 约定：高档用例住在名叫 `horizon_mid` / `horizon_long` 的**模块**里
-# （`src/tests/<区>/horizon_mid.rs`），或者整个**集成测试二进制**就叫这个名字
-# （`tests/horizon_mid.rs` / `tests/horizon_long.rs`）。于是档位在用例名里看得见，
-# 也能被 filterset 选中。加一条新的长局用例时**不用改这个文件**——放对文件即可。
+# （`src/tests/<区>/horizon_mid.rs`，或集成测试 `tests/probes/horizon_long.rs`）。
+# 于是档位在用例名里看得见，也能被 filterset 选中。加一条新的长局用例时**不用改这个文件**
+# ——放对文件即可。
+#
+# ⚠ **Rust 侧的 T2/T3 现在是空的**：中档/长局判据都搬去了 `play/tests/`（数据级断言，跑
+# **release** 二进制 + 投影缓存，见 `test-decoupled-suite.md`）。`tests/probes/horizon_long.rs`
+# 里那 7 条**全是 `#[ignore]` 探针**，`horizon_mid` 整个文件已删 ⇒ 不带 `--run-ignored` 时，
+# 默认档 / `-P mid` / `-P full` 选中的是**同一批 208 条**（都在 `planet_x` lib 里，全 T0/T1）。
+# 档位只在**跑探针**时才分得出来。
+#
+# ⚠ 别在这里写 `binary(horizon_mid)` / `binary(horizon_long)`：`tests/` 下现在只有一个
+# 二进制 `probes`（4 个探针文件合一，见 `tests/probes/main.rs`），而 nextest 对
+# **匹配不到任何二进制**的 `binary(...)` 是**报错**（不是警告）。档位一律按**模块名**认
+# ——`test(/horizon_long/)` 能选中 `probes::horizon_long::…`。
 #
 # 探针/诊断（`#[ignore]`，只打印不断言）：
 #   cargo nextest run -P full --run-ignored all
 #   cargo nextest run -P full --run-ignored all -E 'test(/probe/)'
+#   cargo nextest run -P full --run-ignored all -E 'test(/^trade::/)'       # 只跑其中一份
 
 [test-groups]
 # 长局每条只吃 1 核，限到 5 是为了在 `-P full` 时给其余 178 条留着核。
@@ -24,20 +36,20 @@ t3-long = { max-threads = 5 }
 t2-mid = { max-threads = 6 }
 
 [[profile.default.overrides]]
-filter = 'test(/horizon_mid/) | binary(horizon_mid)'
+filter = 'test(/horizon_mid/)'
 test-group = 't2-mid'
 
 [[profile.default.overrides]]
-filter = 'test(/horizon_long/) | binary(horizon_long)'
+filter = 'test(/horizon_long/)'
 test-group = 't3-long'
 
 # 默认档 = 快档：内循环用这条（T0 + T1）。
 [profile.default]
-default-filter = 'not (test(/horizon_mid/) | test(/horizon_long/) | binary(horizon_mid) | binary(horizon_long))'
+default-filter = 'not (test(/horizon_mid/) | test(/horizon_long/))'
 
 # 中档：加上 T2（4–40 年的行为用例）。
 [profile.mid]
-default-filter = 'not (test(/horizon_long/) | binary(horizon_long))'
+default-filter = 'not test(/horizon_long/)'
 
 # 全档：合流门前跑这条。等价于「所有非 ignore 的用例」。
 [profile.full]

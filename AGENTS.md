@@ -49,13 +49,15 @@ cargo nextest run -P full --run-ignored all  # 探针（只打印不断言）
   ——长组的墙钟由模拟的机器码质量决定（debug 下慢 ~4×）；`--bin debug` 只在只跑快组时可选。
 - 现在的耗时结构（谁是大头）见 [笔记 §11](.agents/notes/test-decoupled-suite.md) 与
   [test-wall-clock §0.2](.agents/notes/test-wall-clock.md)：
-  - **Rust 门**：增量（改一个库文件）**~13–16 s** = 编译 ~10 s + 真跑 4–5 s；
-    **冷/切档首次 62–89 s**（那个大数只在换 worktree / 切档时出现，别拿它当稳态）。
-  - **test 档不提 `opt-level`**（2026-10 起：长局搬走后提档的依据消失，编译成了大头）。
-    ⚠ 实测 `opt-level = 1` + `debug = 1` 是甜点（真跑与 O2 相同、编译更省，一轮门 13.2 s
-    vs O0 的 ~28.6 s）——**要不要切 O1 待用户裁决**。
-  - **`tests/` 下 5 个集成二进制每次改库文件都要重编+链接，合计 ~5–6 s**（约占增量编译一半；
-    空的 `horizon_mid.rs` 一个就 0.4 s）。合并成单个 `probes.rs` 能省 ~4–5 s，**待裁决**。
+  - **Rust 门**：增量（改一个库文件）**~7–8 s**（= 编译+链接 ~5 s + 真跑 ~2.2 s）；
+    **冷/切档首次 ~80 s**（那个大数只在换 worktree / 切档时出现，别拿它当稳态）。
+  - **test 档 = `opt-level = 1` + `debug = 1`**（2026-10 切，见 `Cargo.toml` 那段注释）：
+    实测真跑 **16.5 → 2.2 s**、一轮门 **23 → 7–8 s**。O0 的冷建快 3×，但**稳态每轮更慢**
+    ——增量那几秒主要是**链接测试二进制**，与优化档位无关。
+  - **`tests/` 下只有一个二进制 `probes`**（2026-10：4 个探针文件合一 + 删掉空壳
+    `horizon_mid.rs`）。以前每个 `tests/*.rs` 都是独立二进制、各自静态链一遍整个 crate
+    （第一个 7.3 s、之后每个 1.0–1.3 s）。跑法变了：
+    `cargo nextest run -P full --run-ignored all -E 'test(/^trade::/)'`，见 §0.3。
   - 投影每 1000 回合 169 MB 多花 ~+3.5 s 墙钟（**是构造 JSON，不是磁盘**：这台 NVMe 写
     169 MB 只要 0.1 s）。
 - **只想要最终 state**（不要逐回合轨迹）：`--round N --quiet --save ckpt.ron`

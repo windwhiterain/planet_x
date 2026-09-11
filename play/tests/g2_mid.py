@@ -1062,6 +1062,20 @@ def _bp_decisions(dec, fid: str, name: str | None = None) -> list[dict]:
     return rows.to_dict("records")
 
 
+def _stock_patch(faction: str, amount: float, keys) -> dict:
+    """`{factions: {势力: {资源: {…}}}}` 形状的**状态补丁**：把国库垫厚。
+
+    为什么要垫：P1-5 之后 Player 写的 `construction_budget` 还要再乘一个维护 reserve 的
+    `con_scale`（`autocontrol/budget.rs`）⇒ **库存不到 reserve 时写多大的预算都是 0**
+    （详见施工图 §5.6 那个 ⚠）。这是**隔离变量**：不垫库存，「批满」根本没被批下去。
+
+    ⚠ `资源` 与城那边的 `建筑`/`建造舰级` 一样是**引擎状态字段名的镜像**（引擎还没有声明面）。
+    写错的代价是响亮的：`edit()` 找不到字段 ⇒ 进 `h.warnings`，`report()` 会印出来，而且
+    「批满」那条判据立刻红。势力名与资源名都不用在这儿写死（前者是身份键，后者从 `--control` 来）。
+    """
+    return {"factions": {faction: {"资源": {k: amount for k in keys}}}}
+
+
 def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
     """某城逐回合的建造行：`(回合, 舰级, {rate, increment})`（稀疏：有建造区才有键）。"""
     out = []
@@ -1074,8 +1088,8 @@ def _build_lines(cp, city: str) -> list[tuple[int, str, dict]]:
 def blueprint_scenario_checks(h, ck) -> None:
     """**合成场景 · 拨控制叶**：`autocontrol/blueprints.rs` + `sim/spending.rs` 剩下那几条。
 
-    搬过来的：前三条**整条**（Rust 原件删了），第四条只搬**读面那一半**（另一半留在 Rust，
-    因为只有直接调一次 `step_construction` 才能保证库存不是瓶颈）。
+    搬过来的：前三条**整条**（Rust 原件删了）；第四条搬**读面那一半**，另一半（`RoundSink`
+    的支出账、单步语义）按 §4 留在 Rust。
 
     ① `a_dangling_pointer_is_left_dangling`——删图是玩家/agent 的动作，那个区停产**本身就是
        可见后果** ⇒ AI 不替他收拾（不建新图、不改指针）。
@@ -1084,10 +1098,11 @@ def blueprint_scenario_checks(h, ck) -> None:
     ③ `only_unreferenced_selfmade_designs_are_reaped`——回收只碰**自己造的**：名字带 AI 前缀、
        没人指向、且**不是玩家钉的**（`mode: Inherit` 才是流水；`--apply` 只写值会把它钉成
        `Player`，那这条安全属性就整个反过来了）。
-    ④ `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**活回合那一半**
+    ④ `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**读面那一半**
        ——同一座城只改预算一个变量：批 0 ⇒ 建造行**还在**、`rate > 0`、`increment = 0`（是缺钱
-       不是没船坞）；批满 ⇒ 进度真的在走；`rate` 与钱无关。⚠ `increment ≈ rate` **不在这里**
-       （活回合有第二个瓶颈：库存），见下面那段注释。
+       不是没船坞）；批满 ⇒ 顶到产能上限；`rate` 与钱无关。⚠ 「批满」**要先垫国库**：P1-5 之后
+       预算值还要乘维护 reserve 的 `con_scale`，库存不到 reserve 时写 1e6 也是 0（见下面那段注释
+       与 Rust 原件 `sim/spending.rs` 的模块头）。
     """
     seed = SCENARIO_SEED
     st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_bp_probe.json", seed))
@@ -1194,6 +1209,12 @@ def blueprint_scenario_checks(h, ck) -> None:
     ck.check("合成场景（预算）：预算模板给出了这个势力的资源清单（防空转）", len(res) >= 1,
              f"{FID} 的预算资源：{res}")
 
+    # ⚠ **国库要先垫厚**：P1-5 之后 `construction_budget` 的值会再乘一个维护 reserve 的
+    # `con_scale`（`autocontrol/budget.rs`：`(库存价值 − 维护 reserve) / 建舰上限`，夹进 [0,1]）
+    # ——**库存不到 reserve 时写多大的预算都是 0**。所以要测「钱 vs 产能」，得先把库存垫到
+    # reserve 之上；这是**同一把尺子**，Rust 原件（`src/tests/sim/spending.rs`）现在也这么做。
+    stock = _stock_patch(FID, 1e6, res)
+
     def leaves(v: float) -> dict:
         return {"control": [{"势力": FID,
                              "建筑": [{"城": city, "建筑": bid,
@@ -1202,13 +1223,8 @@ def blueprint_scenario_checks(h, ck) -> None:
                              "投资预算": [{"资源": r, "值": v} for r in res]}]}
 
     lines = {}
-    # ⚠ **只推一回合**：活回合的忠实类比是「调一次 `step_construction`」（= 删掉的那条单测）。
-    # 推长一点，**库存**就会变成第二个瓶颈，两个极端就分不出来了——实测 `main@1ccbb2c`
-    # （P1-4 改市场定价之后）批满 1e6 的同一座城：回合 1 是 `10.0 == 10.0`，回合 2 掉到 7.27、
-    # 回合 3 干脆 0。所以「`increment ≈ rate`」只在**第一回合**（= 开局库存）读得出来；
-    # 不靠开局库存的那份守卫留在 Rust 原件里（`sim/spending.rs`，模块头有说明）。
     for tag, v in (("rich", 1e6), ("poor", 0.0)):
-        p = h.scenario_apply(f"bp_budget_{tag}", seed, 1, [leaves(v)])
+        p = h.scenario_apply(f"bp_budget_{tag}", seed, SCENARIO_ROUNDS, [leaves(v)], patch=stock)
         lines[tag] = _build_lines(KIT.load(str(p), only=("city_process",)).table("city_process"), city)
 
     rich = [(r, k, l) for r, k, l in lines["rich"] if k == class_]
@@ -1216,7 +1232,7 @@ def blueprint_scenario_checks(h, ck) -> None:
               if l["rate"] > 0 and abs(l["increment"] - l["rate"]) <= 1e-9 * max(1.0, abs(l["rate"]))]
     ck.check("合成场景（预算）：批满 ⇒ 顶到产能上限（钱管够，是船坞的产能封顶）",
              bool(rich) and len(capped) == len(rich),
-             f"{city} 的 {class_}（第一回合）：{[(r, round(l['rate'], 4), round(l['increment'], 4)) for r, _, l in rich]}")
+             f"{city} 的 {class_}：{[(r, round(l['rate'], 4), round(l['increment'], 4)) for r, _, l in rich]}")
     poor = lines["poor"]
     zero = all(float(l["increment"]) == 0.0 for _, _, l in poor)
     pos = [(r, k, l) for r, k, l in poor if l["rate"] > 0]

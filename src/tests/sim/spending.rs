@@ -17,19 +17,18 @@
 //! | `is_hub_matches_the_capital_body` | g3「一个回合里只有一个 hub 天体」 | `city_process.is_hub` 与 `capital_body` 都在读面上（且修掉了同回合易主/复垦的相位错位） |
 //! | `labor_and_housing_capacity…` 的**用工系数那一半** | g2 **合成场景**「人口压到 1 ⇒ 用工系数掉到 `min_efficiency`」 | 档能存成 JSON（`--save w.json`）⇒ Python 把人口改成 1 再推进，断言读面（连同「回合 0 的中性值是 1.0」） |
 //! | `upkeep_shortfall…` 的**读面那一半** | g3「欠费 ⇔ 生锈」「欠费 ≤ 账单」 | 全 7 seed × 1000 回合逐行 |
-//! | `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**活回合那一半** | g2 **合成场景 · 拨预算**（施工图 §5.6 第 6 批）：「批 0 ⇒ 建造行还在、`rate > 0`、而 `increment = 0`」「批满 ⇒ 顶到产能上限」「`rate` 与钱无关」 | 拨 `investment_budget`/`construction_budget` 走引擎自己的 `--apply`（`h.scenario_apply`），断言只读 `city_process.build`；`increment ≤ rate` 那一半已在 g3 |
+//! | `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**读面那一半** | g2 **合成场景 · 拨预算**（施工图 §5.6 第 6 批）：「批满 ⇒ 顶到产能上限」「批 0 ⇒ 建造行还在、`rate > 0`、而 `increment = 0`」「`rate` 与钱无关」 | 两边都先把国库垫到维护 reserve 之上（P1-5 的 `con_scale`，见下），再拨 `construction_budget`/`investment_budget` 走引擎自己的 `--apply`（`h.scenario_apply`），断言只读 `city_process.build`；`increment ≤ rate` 那一半已在 g3 |
 //!
 //! **留在这里的**：`upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes`
-//! （要「库存恰好只够付一半」的精确构造，而且「每艘舰真的掉了 `hull_max × rust`」得在**只有锈、
-//! 没有再生**的一步里看——合成场景推的是整回合，再生同时发生）与
-//! `build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling` 的**另一半**：
-//! 同一组断言，但**不依赖开局库存**。
+//! （要「库存恰好只够付一半」的精确构造，而且要和 `RoundSink` 对账）与
+//! `build_lines_…` 的**内部那半**：`poor.spend`（`RoundSink` 的支出账，读面看不到——§4）、
+//! 以及「两次跑必须从**同一份** state 出发」的单步语义。
 //!
-//! ⚠ 为什么「`increment ≈ rate`」两边都留：它在活回合里**只在第一回合**成立——**活回合有第二个
-//! 瓶颈（库存）**。g2 那份推一回合（= 开局库存，等于这条用例的一次 `step_construction`，
-//! 忠实但脆）；这条用例**直接调** `step_construction` 且国库随便造，所以它管的是「不看库存」
-//! 的那份。实测 `main@1ccbb2c`（P1-4 改市场定价之后）批满 1e6 的同一座城：回合 1 是
-//! `10.0 == 10.0`，**回合 2 掉到 7.27、回合 3 干脆 0**——推长一点，两个极端就分不出来了。
+//! ⚠ **别把「批满」当成「钱管够」**：P1-5 之后 Player 写的 `construction_budget` 还要再乘一个
+//! `con_scale = clamp((库存价值 − 维护 reserve) / 建舰上限, 0, 1)`（`autocontrol/budget.rs`）
+//! ——**库存不到 reserve 时，写 1e6 也是 0**。这条用例原来只设预算不垫库存，靠的是「种子 42
+//! 开局库存刚好够」；P1-5 一落地**连第一回合都掉到 0**，所以两边现在都显式垫库存（那是**
+//! 隔离变量**，不是作弊）。g2 那边有一份一模一样的注释。
 
 use super::*;
 
@@ -126,9 +125,9 @@ fn upkeep_shortfall_records_the_unpaid_part_and_the_rust_it_causes() {
 /// 第二条正是这一列必须存在的理由：没有它，「这个船坞这个月为什么一艘没造」与「这个城根本没
 /// 这个舰级的建造区」在读面上长得一模一样。
 ///
-/// ⚠ **这条用例留在这里，是为了「不看库存」那份**（见模块头）：g2 里那条合成场景版本的
-/// `increment ≈ rate` 只在**第一回合**（= 开局库存）读得出来。这里直接调一次
-/// `step_construction`、国库随便造 ⇒ 它管的是纯粹的「钱 vs 产能」。
+/// ⚠ **这里管的是「内部那半」**（见模块头）：`poor.spend`（`RoundSink` 的支出账）与单步语义。
+/// 读面那一半（`city_process.build`：批满 ⇒ 顶到产能上限、批 0 ⇒ 键还在 `rate > 0` 而
+/// `increment = 0`）已在 g2 `blueprint_scenario_checks` 里跑。
 #[test]
 fn build_lines_separate_the_money_bottleneck_from_the_capacity_ceiling() {
     let (config, mut state) = fresh_world(42);

@@ -66,8 +66,10 @@
 ——那条要走 schemars 的类型 schema 遍历，Python 侧只做了**反向**的一半：`neutral.fields` 里的路径
 都得活着）。
 
-**还没搬的**：`tests/` 下只剩探针（`trade_probe` 13 / `site_supply_probe` 6 / `tech_probe` 3 /
-`horizon_long` 7 条 ignore，全是「只打印不断言」）与空的 `horizon_mid.rs`（路标文件）。
+**还没搬的**：`tests/probes/` 下只剩探针（29 条 `#[ignore]`，全是「只打印不断言」：
+`trade` 13 / `site_supply` 6 / `tech` 3 / `horizon_long` 7）。⚠ 2026-10 起这 4 个文件合成
+**一个**二进制 `probes`（`tests/probes/main.rs`；每多一个二进制每轮门白付 1.0–1.3 s 链接），
+空的 `horizon_mid.rs` 已删——它想表达的「Rust 侧中档空了」搬进了 `probes/main.rs` 的模块头。
 `src/tests/**` 的 224 条是快档单测：纯函数、合成场景、内部契约、错误路径——按 §6 的两栏对账，
 **它们没有「跑出来的数据」可测**，所以留在原处。再往后要搬的是**探针**（数据面完全够，而且
 缓存之后比在 Rust 里跑快得多）：等哪天真要调平衡时按需搬。
