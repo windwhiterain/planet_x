@@ -17,17 +17,22 @@ use crate::model::ResourceDeposit;
 pub struct Orbit {
     /// 近日点距离 (perihelion distance), in AU. For a satellite, measured from
     /// its parent body; for a planet, from the sun.
+    #[serde(rename = "近日点距离")]
     pub perihelion_distance: f32,
     /// 远日点距离 (aphelion distance), in AU. Same convention as perihelion.
+    #[serde(rename = "远日点距离")]
     pub aphelion_distance: f32,
     /// 远日点方向 (unit vector toward aphelion), in the shared world 2D axes.
+    #[serde(rename = "远日点方向")]
     pub aphelion_direction: [f32; 2],
     /// 公转周期 in months.
+    #[serde(rename = "公转周期")]
     pub period: f32,
     /// 本轨道环绕的**母天体名**（唯一名）；`None` = 环绕太阳（日心轨道）。卫星
     /// （月球/欧罗巴/泰坦/卡戎）的 parent 是其所绕行星；其世界位置 = 母天体世界位置
     /// + 本轨道局部位置。`#[serde(default)]` 容忍旧存档无此字段（一律视为环绕太阳）。
     #[serde(default)]
+    #[serde(rename = "母天体")]
     pub parent: Option<String>,
 }
 
@@ -101,16 +106,22 @@ fn normalize2(v: [f32; 2]) -> [f64; 2] {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Settlement {
     /// 定居点名（地球的五大城市群各占一个定居点；气态巨行星的定居点为轨道空间站）。
+    #[serde(rename = "定居点")]
     pub name: String,
     /// 总面积 (total buildable area).
+    #[serde(rename = "总面积")]
     pub total_area: f64,
     /// 生态容量 (population per unit area).
+    #[serde(rename = "生态容量")]
     pub ecological_capacity: f64,
     /// 建设速度修正 (area built per unit time).
+    #[serde(rename = "建设速度修正")]
     pub construction_speed_mod: f64,
     /// 建设资源修正 (resources consumed per unit area built).
+    #[serde(rename = "建设资源修正")]
     pub construction_resource_mod: f64,
     /// 资源 deposits (resource key + area).
+    #[serde(rename = "资源")]
     pub resources: Vec<ResourceDeposit>,
 }
 
@@ -120,19 +131,25 @@ pub struct Settlement {
 /// [`City::settlement`] (the settlement's name).
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Body {
+    #[serde(rename = "天体名")]
     pub name: String,
     /// 天体类型 key（config `body_kinds` 表）。**state 只存一个类型 key**，类型/视觉元数据
     /// （颜色/尺寸/类别/星环等）由 `config/game.ron` 的 `body_kinds` 表提供——这就是
     /// 「视觉属性数据化、body 引用」：引擎不内联任何视觉数据，只记录引用。
     #[serde(default = "default_body_kind")]
+    #[serde(rename = "类型")]
     pub kind: String,
     /// 本天体是否渲染星环（如土星的显著环、天王星/海王星的细环）。**intrinsic body 属性**：
     /// 是这颗天体本身的特征（而非类型属性——同为气态巨行星的木星无环），故落在 body 上。
     #[serde(default)]
+    #[serde(rename = "星环")]
     pub ring: bool,
+    #[serde(rename = "轨道")]
     pub orbit: Orbit,
     /// 当前位置 (current position in AU, recomputed each round from `orbit`).
+    #[serde(rename = "位置")]
     pub position: [f64; 2],
+    #[serde(rename = "定居点")]
     pub settlements: Vec<Settlement>,
 }
 

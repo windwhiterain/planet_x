@@ -337,7 +337,7 @@ class PlanetXQ:
     def relations(self, round: int | None = None) -> pd.DataFrame:
         """Every faction's diplomacy as a **long** table: ``(round, faction_id, other, relation)``.
 
-        ``relations`` in the factions table is a dict-valued cell; this explodes it into one row
+        ``关系``（factions 表的列）is a dict-valued cell; this explodes it into one row
         per (source faction → target faction) so you can query "who is hostile to whom" directly,
         e.g. ``q.relations(round=12).query("faction_id=='中国' and relation < -20")``.
         """
@@ -346,7 +346,7 @@ class PlanetXQ:
             return df
         rows = []
         for _, r in df.iterrows():
-            rel = r.get("relations") or {}
+            rel = r.get("关系") or {}
             for other, v in rel.items():
                 rows.append({"round": r["round"], "faction_id": r["faction_id"], "other": other, "relation": v})
         return pd.DataFrame(rows, columns=["round", "faction_id", "other", "relation"])
@@ -405,8 +405,8 @@ class PlanetXQ:
         if faction is not None:
             c = c[c["faction_id"] == faction]
         if min_loyalty is not None:
-            c = c[c["loyalty"] <= min_loyalty]
-        return c.sort_values("loyalty")
+            c = c[c["忠诚度"] <= min_loyalty]
+        return c.sort_values("忠诚度")
 
     def neutral(self, path: str):
         """A read-face field's **neutral value** (its default), straight out of `schema.json`
@@ -619,7 +619,7 @@ class PlanetXQ:
         if hs is None or hs.empty or "ship_id" not in hs.columns:
             return {"round": round, "faction": faction, "depots": depots, "steps": pd.DataFrame()}
         ships = self.ships(round)
-        cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "cargo", "x", "y")
+        cols = [c for c in ("round", "ship_id", "faction_id", "舰级", "船体", "载货", "x", "y")
                 if c in ships.columns]
         mine = hs.merge(ships[cols], on=["round", "ship_id"], how="left")
         mine = mine[mine["faction_id"] == faction]
@@ -631,7 +631,7 @@ class PlanetXQ:
         frow = self.faction(round, faction)
         if frow is None:
             return None
-        res = frow.get("resources") or {}
+        res = frow.get("资源") or {}
         rv = self.resource_value()
         rv_map = rv["value"].to_dict() if rv is not None and len(rv) else {}
         entries = []
@@ -733,7 +733,7 @@ class PlanetXQ:
             return pd.Series(dtype=float, name=resource)
         sub = df[df["faction_id"] == faction]
         s = pd.Series(
-            [ (r.get("resources") or {}).get(resource, 0.0) for _, r in sub.iterrows() ],
+            [ (r.get("资源") or {}).get(resource, 0.0) for _, r in sub.iterrows() ],
             index=sub["round"].to_numpy(),
             name=resource,
         )
@@ -1187,8 +1187,8 @@ class PlanetXQ:
         alias = {"cities": "city", "ships": "ship", "factions": "faction"}
         kind = alias.get(kind, kind)
         spec = {
-            "city": ("cities", "city_id", ["faction_id", "razed", "population"]),
-            "ship": ("ships", "ship_id", ["faction_id", "hull", "class"]),
+            "city": ("cities", "city_id", ["faction_id", "已焚毁", "人口"]),
+            "ship": ("ships", "ship_id", ["faction_id", "船体", "舰级"]),
             "faction": ("factions", "faction_id", ["capital_body"]),
         }
         if kind not in spec:
@@ -1229,7 +1229,7 @@ class PlanetXQ:
         for _, r in cities.sort_values(["round", "city_id"]).iterrows():
             if r["round"] != prev_round:
                 prev, prev_round = {}, r["round"]
-            now = (r["faction_id"], bool(r["razed"]))
+            now = (r["faction_id"], bool(r["已焚毁"]))
             was = prev.get(r["city_id"])
             if was is not None and was != now:
                 hit = named[(named["round"] == r["round"]) & (named["entity_id"] == r["city_id"])]
@@ -1352,7 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         r = 0
         joined = q.join("ships", round=r)
         print(f"# join('ships', round={r}): {joined.shape}")
-        cols = [c for c in ("round", "ship_id", "faction_id", "class", "hull", "x", "y") if c in joined.columns]
+        cols = [c for c in ("round", "ship_id", "faction_id", "舰级", "船体", "x", "y") if c in joined.columns]
         print(joined[cols].head(5).to_string(index=False))
     # The sparse event history + its completeness self-check (empty = all history is explained).
     try:

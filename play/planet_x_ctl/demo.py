@@ -76,8 +76,8 @@ def census(s: ctl.Surface) -> pd.DataFrame:
 #: 所以它们不在这张单子上——那不是"旧引擎缺的列"，是"没有这个列了"。
 _OLD_ENGINE_DROPS = ("order_effective_mode", "order_effective", "order_source",
                      "order_leaf_mode",
-                     "doctrine", "kiting", "role", "role_mode",
-                     "blueprint", "blueprint_mode", "spawned_round")
+                     "风格", "姿态", "角色", "role_mode",
+                     "出厂图", "blueprint_mode", "下水回合")
 
 
 def _old_engine_index(src, dst) -> Path:
@@ -222,7 +222,7 @@ def main(argv=None) -> int:
            "doctrine_temper", "doctrine_lone_wolf", "kiting"} <= set(df_ships.columns))
     # 设计图那一轮新增的引擎列（**引擎的答案**，不是本地近似）：出处列 + 出厂图 + 下水回合。
     check("ships 表带上了设计图/出处/下水回合列",
-          {"blueprint", "blueprint_mode", "order_source", "spawned_round"}
+          {"出厂图", "blueprint_mode", "order_source", "下水回合"}
           <= set(df_ships.columns),
           f"order_source={df_ships['order_source'].dropna().unique()[:3].tolist()}…")
 
@@ -268,21 +268,21 @@ def main(argv=None) -> int:
     print(f"    施政对象：{faction}（{len(names)} 艘：{'、'.join(names)}）")
 
     # 编制表：slot 名是意图，活过名字换代。刷新规则写在配方里（排序键），不留在脑子里。
-    # 注意 `class` 是引擎列名，也是 Python 关键字 —— ctl.query 会替你把反引号补上。
+    # 注意：舰级列现在叫 `舰级`（引擎的字段名就是给人看的名词），不再是 Python 关键字。
     fleet = ctl.query(df_ships, "faction_id == @faction")
-    flagship_hull = float(fleet["hull_max"].max())
-    classes = (fleet.groupby("class")["hull_max"].max()
+    flagship_hull = float(fleet["船体上限"].max())
+    classes = (fleet.groupby("舰级")["船体上限"].max()
                .sort_values(ascending=False).index.tolist())          # 决定性顺序
     spec = [("旗舰", f"faction_id == '{faction}'")] + [
-        (f"{cls} 队", f"faction_id == '{faction}' and class == '{cls}'") for cls in classes[:2]]
+        (f"{cls} 队", f"faction_id == '{faction}' and 舰级 == '{cls}'") for cls in classes[:2]]
     ros = ctl.roster(ckpt, spec, index_dir=proj)
-    print(ros[["slot", "matched", "candidates", "ship_id", "class", "hull", "hull_max",
+    print(ros[["slot", "matched", "candidates", "ship_id", "舰级", "船体", "船体上限",
                "refresh_rule"]].to_string(index=False))
     check("编制表把每个 slot 映射到现役舰（刷新规则写在配方里）",
           bool(ros["matched"].all()) and ros["slot"].tolist() == [s for s, _ in spec])
     check("编制表槽位是确定的（同分：**最老的先**，再名字序）",
           ros.iloc[0]["ship_id"]
-          == fleet.sort_values(["hull", "hull_max", "spawned_round", "ship_id"],
+          == fleet.sort_values(["船体", "船体上限", "下水回合", "ship_id"],
                                ascending=[False, False, True, True],
                                na_position="last").iloc[0]["ship_id"],
           f"旗舰={ros.iloc[0]['ship_id']}，最高 hull={flagship_hull:g}")
@@ -294,15 +294,15 @@ def main(argv=None) -> int:
     def _tie_pairs(fixture, idx_dir=None):
         d = ctl.ships(fixture, index_dir=idx_dir)
         out = []
-        key = d["hull"].astype(str) + "/" + d["hull_max"].astype(str)
+        key = d["船体"].astype(str) + "/" + d["船体上限"].astype(str)
         for _, g in d.groupby(key):
-            known = g[g["spawned_round"].notna()]
-            if len(known) >= 2 and known["spawned_round"].nunique() >= 2:
-                srt = known.sort_values(["spawned_round", "ship_id"])
+            known = g[g["下水回合"].notna()]
+            if len(known) >= 2 and known["下水回合"].nunique() >= 2:
+                srt = known.sort_values(["下水回合", "ship_id"])
                 old, new = srt.iloc[0], srt.iloc[-1]
                 if str(old["ship_id"]) > str(new["ship_id"]):   # 名字序会挑 new ⇒ 这一对能证明规则
                     out.append((str(old["ship_id"]), str(new["ship_id"]),
-                                int(old["spawned_round"]), int(new["spawned_round"])))
+                                int(old["下水回合"]), int(new["下水回合"])))
         return out
 
     tie_ckpt, tie_dir, pairs = ckpt, proj, _tie_pairs(ckpt, proj)
@@ -539,9 +539,10 @@ def main(argv=None) -> int:
               mine["effective_mode"] == ctl.PLAYER and mine["mode"] == ctl.PLAYER
               and int(mine["class_slots"]) == slots,
               f"effective_mode={mine['effective_mode']} slots={mine['class_slots']}（配置表 {slots}）")
+        # ⚠ 蓝图表（派生表）的列名已是中文名词：`角色` / `风格` / `姿态`。
         check("BP: 图上写了角色 ⇒ 蓝图表看得见它；没写的两条轴仍是 null（链继续下降到舰队默认）",
-              mine["role"] == "War" and pd.isna(mine["doctrine"]) and pd.isna(mine["kiting"]),
-              f"role={mine['role']!r} doctrine={mine['doctrine']!r} kiting={mine['kiting']!r}")
+              mine["角色"] == "War" and pd.isna(mine["风格"]) and pd.isna(mine["姿态"]),
+              f"role={mine['角色']!r} doctrine={mine['风格']!r} kiting={mine['姿态']!r}")
         check("BP: 组件成本 / 造过多少艘是引擎算的派生列",
               float(mine["component_cost"].get("铁", 0.0)) > 0 and int(mine["ship_count"]) >= 0,
               f"component_cost={dict(mine['component_cost'])} ship_count={mine['ship_count']}")
@@ -573,7 +574,7 @@ def main(argv=None) -> int:
               rep_bp3.removed_leafs == [f"{faction}.blueprints[重甲护卫]"], f"{rep_bp3.removed_leafs}")
 
         # ⑤ 质量栏：图的舰级与建造区对不上 ⇒ 引擎**响亮**拒绝（口径 A），绝不静默。
-        other = next((c for c in sorted(set(df_ships["class"])) if c != ycls), None)
+        other = next((c for c in sorted(set(df_ships["舰级"])) if c != ycls), None)
         if other:
             s_bp5 = ctl.surface(ckpt_bp2)
             s_bp5.set_blueprint(faction, "错级图", class_=other, components=[], mode=ctl.PLAYER)

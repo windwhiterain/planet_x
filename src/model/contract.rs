@@ -65,11 +65,14 @@ use crate::model::{BodyId, FactionId, ShipId};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Contract {
     /// 单调递增的挂单号（由 [`ContractState::next_id`] 分配）——事件与投影靠它引用这一单。
+    #[serde(rename = "合同号")]
     pub id: u64,
     /// 托运方（挂单的人、雇主）。
+    #[serde(rename = "托运方")]
     pub shipper: FactionId,
     /// 承运方（受雇方）。`None` = 还在挂单簿上等人接。
     #[serde(default)]
+    #[serde(rename = "承运方")]
     pub carrier: Option<FactionId>,
     /// **主货种**（挂单时该货栈积压最多的那种，可读中文名）。
     ///
@@ -77,17 +80,22 @@ pub struct Contract {
     /// 受雇的船到了货栈装的是**当时有什么**——与雇主自己的运输舰完全一样
     /// （用户：「单主派发单的逻辑和派发自己运输船的逻辑一样」）。所以同一处货栈的
     /// 几种货**共用一张单**（旧形态是一处货栈、一种货各一张）。
+    #[serde(rename = "货")]
     pub resource: String,
     /// **要求的运力**（单位/回合），口径见 [`required_throughput`]。
     ///
     /// 未接单时它每回合被改成**此刻的缺口**（雇主自己搬不动的部分）；接下之后冻结。
+    #[serde(rename = "运力")]
     pub capacity: f64,
     /// 起运天体（雇主的**产地货栈**——公理「首都即集散地」下，集货腿的另一端）。
+    #[serde(rename = "起点")]
     pub from: BodyId,
     /// 目的天体（照公理 = **雇主首都**）。
+    #[serde(rename = "终点")]
     pub to: BodyId,
     /// 承运人抽成比例（`0.15` = 承运人自留 15%）。挂单时定死、无人接时由市场抬价
     /// （`freight::escalate_open_contracts`）、接下之后冻结——一份合同的条件不会因结算顺序而变。
+    #[serde(rename = "分成")]
     pub share: f64,
     /// 雇主愿意雇佣的**最低信誉**（挂单时算好并冻结，见 [`required_reputation`]）。
     ///
@@ -95,20 +103,25 @@ pub struct Contract {
     /// 低信誉者极少被选中，而不是数学上绝无可能。
     /// 到期**续约**用的是同一个闸（「你当初是怎么被选上的，现在就按同一条线续」）——
     /// 于是不需要再为「换人」发明一个阈值。
+    #[serde(rename = "最低名声")]
     pub min_reputation: f64,
     /// 挂单回合（抬价的基准：叫了这么久还没人接 ⇒ 加价档）。
+    #[serde(rename = "挂单回合")]
     pub posted_round: u32,
     /// **雇佣从哪一回合开始**（`None` = 还挂在簿上等人接）。
     ///
     /// 用显式的 `Option` 而不是哨兵值：回合 0 是一个合法回合，而「未接单」与「第 0 回合
     /// 接单」是两件不同的事（前者没有期限与进度，后者都有）。
     #[serde(default)]
+    #[serde(rename = "接单回合")]
     pub accepted_round: Option<u32>,
     /// **固定期的到期回合**（`accepted_round + hire_trips × 考核周期`）。到期由雇主决定续约或换人。
     #[serde(default)]
+    #[serde(rename = "到期回合")]
     pub expires_round: u32,
     /// **下次考核回合**。周期 = 这条线的一个往返（[`hire_terms`] 的 `interval`）。
     #[serde(default)]
+    #[serde(rename = "考核回合")]
     pub review_round: u32,
     /// 本雇佣期内**已交付给雇主**的量（单位，**不含**承运人自留的抽成，见 [`Contract::carrier_cut`]）。
     ///
@@ -116,6 +129,7 @@ pub struct Contract {
     /// （而不是雇主实收的量）：抽成是搬运费，不该从运力里扣——否则每一趟都天生差 15%，
     /// 而门槛是按「一条参考船」定的，13% 的缺口会被系统性地算成不达标。
     #[serde(default)]
+    #[serde(rename = "已交付")]
     pub delivered: f64,
     /// 本雇佣期内**起运货栈有货**的回合数——考核的分子/分母的原料。
     ///
@@ -123,6 +137,7 @@ pub struct Contract {
     /// 扫空、产地当期还没产出，都是正常事）。这一条把「运力是否达标」问成**真正能被考核的
     /// 那件事**：有活干的时候，你干得够不够。
     #[serde(default)]
+    #[serde(rename = "已服务回合")]
     pub served_rounds: u32,
 }
 

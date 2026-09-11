@@ -341,12 +341,12 @@ pub fn write_index_seeded(
             "{}",
             json!({
                 "body_id": b.name.clone(),
-                "name": b.name,
-                "perihelion_distance": o.perihelion_distance,
-                "aphelion_distance": o.aphelion_distance,
-                "period": o.period,
+                "天体名": b.name,
+                "近日点距离": o.perihelion_distance,
+                "远日点距离": o.aphelion_distance,
+                "公转周期": o.period,
                 // 母天体 id：None = 环绕太阳（日心行星），Some(名) = 该天体的卫星。
-                "parent": o.parent,
+                "母天体": o.parent,
                 "x": r2(b.position[0]),
                 "y": r2(b.position[1]),
                 "settlement_count": b.settlements.len(),
@@ -366,12 +366,12 @@ pub fn write_index_seeded(
                     "settlement_id": s.name.clone(),
                     "body_id": b.name.clone(),
                     "index": i,
-                    "name": s.name.clone(),
-                    "total_area": s.total_area,
-                    "ecological_capacity": s.ecological_capacity,
-                    "construction_speed_mod": s.construction_speed_mod,
-                    "construction_resource_mod": s.construction_resource_mod,
-                    "resources": s.resources,
+                    "定居点": s.name.clone(),
+                    "总面积": s.total_area,
+                    "生态容量": s.ecological_capacity,
+                    "建设速度修正": s.construction_speed_mod,
+                    "建设资源修正": s.construction_resource_mod,
+                    "资源": s.resources,
                 })
             )
             .map_err(|e| e.to_string())?;
@@ -486,17 +486,17 @@ fn write_round(
                 "round": state.round,
                 "ship_id": s.name.clone(),
                 "faction_id": s.faction_id,
-                "class": s.class,
-                "name": s.name,
+                "舰级": s.class,
+                "舰名": s.name,
                 "x": r2(s.position[0]),
                 "y": r2(s.position[1]),
-                "hull": r2(s.hull),
-                "hull_max": r2(s.hull_max),
-                "shield": r2(s.shield),
-                "shield_max": r2(s.shield_max),
-                "velocity": r2(s.velocity),
-                "components": s.components,
-                "component_hp": s.component_hp.iter().map(|v| r2(*v)).collect::<Vec<_>>(),
+                "船体": r2(s.hull),
+                "船体上限": r2(s.hull_max),
+                "护盾": r2(s.shield),
+                "护盾上限": r2(s.shield_max),
+                "速度": r2(s.velocity),
+                "组件": s.components,
+                "组件耐久": s.component_hp.iter().map(|v| r2(*v)).collect::<Vec<_>>(),
                 "attack": r2(p.attack),
                 "attack_range": r2(p.attack_range),
                 "speed": r2(p.speed),
@@ -522,7 +522,7 @@ fn write_round(
                 // `doctrine`/`kiting`/`role` 三列），所以原来那列 `order_blueprint_mode` 已删；
                 // 图叶自己的表态仍然是 `blueprint_mode`，而**风格三轴**的有效值在
                 // `doctrine`/`kiting`/`role` 三列（它们现在也走"叶 → 图 → 舰队默认 → 记录值"）。
-                "blueprint": s.blueprint,
+                "出厂图": s.blueprint,
                 "blueprint_mode": blueprint_mode_of(state, &s.faction_id, s.blueprint.as_deref()),
                 // **这条有效意图是谁供的值**（Q2=(b) 的出处列）。
                 // ⚠ 2026-10 起指令链**只剩逐舰叶**（舰队默认指令与图上的 `order` 两片叶都已
@@ -531,14 +531,14 @@ fn write_round(
                 "order_source": state.ship_behavior_source(s.name.clone()).map(|src| src.label()),
                 // 下水回合（编制表的确定性 tie-break：「同分取最老的」）。旧档缺字段 ⇒ null
                 // = **未知**（读者要回落名字序，不能当成第 0 回合）。
-                "spawned_round": s.spawned_round,
+                "下水回合": s.spawned_round,
                 // 三条**风格轴**的有效值（叶 → 舰队默认 → 舰上记录值）。风格是活层，
                 // `Ship.doctrine`/`Ship.kiting`/`Ship.role` 只是记录值——这里给的是
                 // 引擎解析后的答案。第三条轴（角色）与前两条的唯一差别：**AI 会写它**
                 // （按积压 + 观测需求定编），所以 `role_mode` 还会告诉你那片叶归谁。
-                "doctrine": state.ship_doctrine(s.name.clone()),
-                "kiting": state.ship_kiting(s.name.clone()),
-                "role": state.ship_role(s.name.clone()),
+                "风格": state.ship_doctrine(s.name.clone()),
+                "姿态": state.ship_kiting(s.name.clone()),
+                "角色": state.ship_role(s.name.clone()),
                 "role_mode": state.ship_role_control(s.name.clone()),
             })
         )
@@ -555,17 +555,19 @@ fn write_round(
             .iter()
             .map(|b| {
                 json!({
-                    "id": b.id,
-                    "kind": b.kind,
-                    "resource": b.resource,
-                    "ship_type": b.ship_type,
+                    // 与裸 state 的 `Building` 同名（本地图/`invest_weights` 的键是 `城|下标`，
+                    // 用的是**值**不是键名，所以这里同名不会断交叉引用）。
+                    "建筑编号": b.id,
+                    "类型": b.kind,
+                    "开采资源": b.resource,
+                    "建造舰级": b.ship_type,
                     // **设计图指针**（原样输出：指向一张已被删除/改名的图时，它照样出现在这里
                     // ——配合「进度停攒」你就能一眼看出「这个区停产了，因为图没了」，见 Q10(a)）。
-                    "blueprint": b.blueprint,
-                    "structure": b.structure,
-                    "area": r2(b.area),
-                    "deployed": r2(b.deployed),
-                    "armor": r2(b.armor),
+                    "设计图": b.blueprint,
+                    "结构": b.structure,
+                    "面积": r2(b.area),
+                    "已建成面积": r2(b.deployed),
+                    "护甲": r2(b.armor),
                 })
             })
             .collect();
@@ -575,16 +577,16 @@ fn write_round(
             json!({
                 "round": state.round,
                 "city_id": c.name.clone(),
-                "name": c.name,
+                "城名": c.name,
                 "body_id": c.body_id,
-                "settlement": c.settlement.clone(),
+                "定居点": c.settlement.clone(),
                 "faction_id": c.faction_id,
-                "population": c.population,
-                "loyalty": r2(c.loyalty),
-                "razed": c.razed,
+                "人口": c.population,
+                "忠诚度": r2(c.loyalty),
+                "已焚毁": c.razed,
                 "deployed_area": r2(deployed),
                 "building_count": c.buildings.len(),
-                "buildings": buildings,
+                "建筑": buildings,
                 // 治理到首都的距离（AU，游戏规则：距 capital_body 越远治理越费、忠诚越低）。
                 // 由模拟算出（复用 agent::governance_distance），agent 只读；夷平城无主，置 0。
                 "gov_distance": r2(if c.razed { 0.0 } else { crate::agent::governance_distance(state, &c.faction_id, &c.body_id) }),
@@ -661,25 +663,25 @@ fn write_round(
             json!({
                 "round": state.round,
                 "faction_id": f.name.clone(),
-                "name": f.name,
-                "symbol": f.symbol,
+                "势力": f.name,
+                "符号": f.symbol,
                 "capital_body": state.capital_body(&f.name),
-                "alignment": r2(f.alignment),
-                "aggression": r2(f.aggression),
-                "home_radius": r2(f.home_radius),
-                "home_attack_mult": r2(f.home_attack_mult),
-                "home_regen_bonus": r2(f.home_regen_bonus),
-                "ideology": {
-                    "peace_military": r2(f.ideology.peace_military),
-                    "science_tech": r2(f.ideology.science_tech),
-                    "people_elite": r2(f.ideology.people_elite),
-                    "nature_colony": r2(f.ideology.nature_colony),
+                "阵营倾向": r2(f.alignment),
+                "好战度": r2(f.aggression),
+                "本土半径": r2(f.home_radius),
+                "本土攻击倍率": r2(f.home_attack_mult),
+                "本土再生加成": r2(f.home_regen_bonus),
+                "思潮": {
+                    "和平↔军国": r2(f.ideology.peace_military),
+                    "科学↔技术": r2(f.ideology.science_tech),
+                    "人民↔精英": r2(f.ideology.people_elite),
+                    "自然↔殖民": r2(f.ideology.nature_colony),
                 },
-                "resources": f.resources,
-                "relations": f.relations,
+                "资源": f.resources,
+                "关系": f.relations,
                 // 信誉（承包市场的准入资产，势力级）。它是**唯一的抵押品**：承运人不赔货值
                 // （Q1(b)），托运方靠这一列决定敢不敢把货交给它。
-                "reputation": r2(f.reputation),
+                "名声": r2(f.reputation),
                 // **思潮 → 集货倾向**（用户裁决：由国家思潮决定舰船倾向于运输还是战斗）：
                 // `freight_lean` 是「愿意投在集货上的头数倍数」（中庸 = 1.0，军国 < 1、
                 // 和平/殖民 > 1），`freighter_quota` 是「目标运输舰条数」= 需求 × 倾向。
@@ -697,7 +699,7 @@ fn write_round(
                 // 「谁能去多深」的唯一读数。另两列给出它的**来路**与**结论**：
                 // `mond_ships_in_band` = 此刻在异常区里的自己的活舰数（唯一的知识渠道），
                 // `mond_frontier_au` = 一次到位的最远日心距。
-                "mond_control": r2(f.mond_control),
+                "MOND 掌握度": r2(f.mond_control),
                 "mond_ships_in_band": ships_in_band,
                 "mond_frontier_au": frontier_json,
                 // **三支力量抢舰队的结果**（水位配给）：三列加起来 = 舰队规模或更少，差额留在
@@ -731,29 +733,29 @@ fn write_round(
             json!({
                 "round": state.round,
                 "contract_id": c.id,
-                "shipper": c.shipper,
-                "carrier": c.carrier,
-                "resource": c.resource,
+                "托运方": c.shipper,
+                "承运方": c.carrier,
+                "货": c.resource,
                 // 要求的运力（单位/回合）——不是「要搬多少件」（雇佣形态）。
-                "capacity": r2(c.capacity),
-                "delivered": r2(c.delivered),
+                "运力": r2(c.capacity),
+                "已交付": r2(c.delivered),
                 // 考核的分母：本期「起运货栈有货」的回合数。
-                "served_rounds": c.served_rounds,
+                "已服务回合": c.served_rounds,
                 // 扣除在途宽免之后的**产出期**（考核真正用的分母）。
                 "output_rounds": r2(c.output_rounds(config)),
                 // 实测吞吐达标率（1.0 = 一个考核周期搬回一舱货 = 一条参考船的水准）；
                 // null = **还不到看账的时候**（账上的产出还不满一个货舱）。
                 "ratio": c.throughput_ratio(config).map(r2),
-                "from": c.from,
-                "to": c.to,
-                "share": r2(c.share),
-                "min_reputation": r2(c.min_reputation),
+                "起点": c.from,
+                "终点": c.to,
+                "分成": r2(c.share),
+                "最低名声": r2(c.min_reputation),
                 // 此刻在跑这张单的舰（`assignments` 的反查；空数组 = 还没派人）。
                 "ships": state.contracts.ships_of(c.id),
-                "posted_round": c.posted_round,
-                "accepted_round": c.accepted_round,
-                "expires_round": c.expires_round,
-                "review_round": c.review_round,
+                "挂单回合": c.posted_round,
+                "接单回合": c.accepted_round,
+                "到期回合": c.expires_round,
+                "考核回合": c.review_round,
             })
         )
         .map_err(|e| e.to_string())?;
@@ -833,7 +835,7 @@ fn write_round(
                 "city_id": c.name.clone(),
                 "body_id": c.body_id,
                 "faction_id": c.faction_id,
-                "razed": c.razed,
+                "已焚毁": c.razed,
                 "production": prod,
                 "loyalty_target_effective": lt.effective,
                 "loyalty_target_distance": lt.distance,
@@ -1026,14 +1028,14 @@ fn write_round(
                     "round": state.round,
                     "faction_id": fid,
                     "blueprint_id": id,
-                    "class": leaf.value.class,
+                    "舰级": leaf.value.class,
                     // 选装：**全量**输出（空数组 = 交给生成器现算），与 `--control` 一致。
-                    "components": leaf.value.components,
+                    "选装": leaf.value.components,
                     // `doctrine`/`kiting`/`role` = 本图给这型舰的**长期倾向**三轴
                     // （null = 本图对该轴没有说话）。⚠ 图**不再**对指令表态（2026-10）。
-                    "doctrine": leaf.value.doctrine,
-                    "kiting": leaf.value.kiting,
-                    "role": leaf.value.role,
+                    "风格": leaf.value.doctrine,
+                    "姿态": leaf.value.kiting,
+                    "角色": leaf.value.role,
                     "mode": leaf.mode,
                     "effective_mode": state.blueprint_control(fid, id),
                     "ship_count": ship_count,
@@ -1279,33 +1281,33 @@ pub fn projection_schema() -> serde_json::Value {
             "ships" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "舰的完整对象（class/组件/护甲/护盾/位置/速度 + effective 面板：attack/range/speed/upkeep 等 + 指令归属的引擎解析结果 order_*），随回合变化。按 (round, ship_id) 索引。",
-                "columns": {"round":"integer","ship_id":"string","faction_id":"string","class":"string","name":"string","x":"number","y":"number","hull":"number","hull_max":"number","shield":"number","shield_max":"number","velocity":"number","components":"array","component_hp":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","doctrine":"object","kiting":"number","role":"string","role_mode":"string","blueprint":"string","blueprint_mode":"string","spawned_round":"integer"},
+                "columns": {"round":"integer","ship_id":"string","faction_id":"string","舰级":"string","舰名":"string","x":"number","y":"number","船体":"number","船体上限":"number","护盾":"number","护盾上限":"number","速度":"number","组件":"array","组件耐久":"array","attack":"number","attack_range":"number","speed":"number","accel":"number","hardness":"number","intercept":"number","shield_regen":"number","hull_regen":"number","upkeep":"number","order_leaf_mode":"string","order_effective_mode":"string","order_effective":"object","order_source":"string","风格":"object","姿态":"number","角色":"string","role_mode":"string","出厂图":"string","blueprint_mode":"string","下水回合":"integer"},
                 "column_docs": {
                     "order_leaf_mode": "本舰**叶片自己**的表态（没有叶片 = Inherit）。",
                     "order_effective_mode": "**有效归属**：`State::ship_control` 的答案（叶 → 势力 scope → 全局 scope，最具体的有意见者胜；全继承 ⇒ Auto）。⚠ 2026-10 起指令链**只剩逐舰叶**这一层（舰队默认指令与图上的 order 两片叶已删），链上没有出厂图那一档。",
                     "order_effective": "**有效指令**：`State::ship_behavior` 的答案——2026-10 起就是**那片逐舰叶里的值**（叶不存在 ⇒ null，调用方按 Idle 兜底）。Python 侧不要自己重算。",
                     "order_source": "**这条有效意图是谁供的值**（`State::ship_behavior_source`）。⚠ 2026-10 起指令链**只剩逐舰叶**（舰队默认指令与图上的 order 两片叶已删）⇒ 实际只会出现 `leaf`（本舰的指令叶存在——`mode` 是 `Inherit` 也算）或 null（叶不存在 = 没人说话）；`scope`/`record` **在指令链上不会出现**（作用域节点只表态『谁负责』、不携带值；指令没有出厂记录值——那是 `doctrine`/`kiting`/`role` 三轴的兜底），列在取值域里是为了让枚举与控制属性的层次链一一对应，不是漏了分支。",
-                    "doctrine": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
-                    "kiting": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
-                    "role": "**有效角色**（`State::ship_role`，同一条链，**三态字符串**）：`War` = 战舰（找仗打）、`Freight` = 运输舰（自动控制给它排集货路线）、`Observe` = **观测舰**（自动控制把它派去引力异常区蹲着，喂 MOND 掌握度那条知识渠道）。**它只管自动控制派哪种活**——不解除武装，任何角色的舰在射程内照样自动开火、照样按 `kiting` 软移动。⚠ 三态**互斥**（一艘舰同一时刻只有一种活），优先级是**观测 > 运输 > 战斗**。",
+                    "风格": "**有效行为风格**（`State::ship_doctrine`：叶 → 舰队默认 → 舰上记录值）——{temper, lone_wolf}，各取 [-1,1]。舰上的 `Ship.doctrine` 只是出厂快照/AI 流水，不是这里。",
+                    "姿态": "**有效风筝<->贴脸姿态**（`State::ship_kiting`，同一条链），[-1,1]，0 = 基线。",
+                    "角色": "**有效角色**（`State::ship_role`，同一条链，**三态字符串**）：`War` = 战舰（找仗打）、`Freight` = 运输舰（自动控制给它排集货路线）、`Observe` = **观测舰**（自动控制把它派去引力异常区蹲着，喂 MOND 掌握度那条知识渠道）。**它只管自动控制派哪种活**——不解除武装，任何角色的舰在射程内照样自动开火、照样按 `kiting` 软移动。⚠ 三态**互斥**（一艘舰同一时刻只有一种活），优先级是**观测 > 运输 > 战斗**。",
                     "role_mode": "角色那片叶的**有效归属**（`State::ship_role_control`）：Auto = 这条结论是自动控制写的（它每回合按积压 + 观测需求定编），Player = 玩家钉的、AI 不碰。",
-                    "blueprint": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
+                    "出厂图": "本舰**出厂所用**的设计图名（null = 无图：旧档 / 开局预置舰队 / 剧情赠舰）。⚠ 它是**快照的溯源**——不代表本舰的选装会随图变化（`components` 是出厂快照）；join `derived.blueprints` 的 `blueprint_id` 看那张图的详情。",
                     "blueprint_mode": "那张图**在势力库里的叶表态**（Inherit/Auto/Player；缺图 = Inherit）。有效归属看蓝图表 `effective_mode`。",
-                    "spawned_round": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
+                    "下水回合": "本舰**下水所在回合**（null = 旧档缺字段 ⇒ **未知**）。用途：编制表/花名册的确定性 tie-break（同分取最老的）——遇到 null 要**回落名字序**，不能当成第 0 回合。",
                 },
             }),
             "cities" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "城的完整对象（人口/忠诚/治理距离/建筑清单/离心风险），随回合变化。按 (round, city_id) 索引。",
-                "columns": {"round":"integer","city_id":"string","name":"string","body_id":"string","settlement":"string","faction_id":"string","population":"integer","loyalty":"number","razed":"boolean","deployed_area":"number","building_count":"integer","buildings":"array","gov_distance":"number","depot_value":"number","revolt_risk":"boolean"},
+                "columns": {"round":"integer","city_id":"string","城名":"string","body_id":"string","定居点":"string","faction_id":"string","人口":"integer","忠诚度":"number","已焚毁":"boolean","deployed_area":"number","building_count":"integer","建筑":"array","gov_distance":"number","depot_value":"number","revolt_risk":"boolean"},
             }),
             "factions" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "势力的完整对象（库存/resources/relations/意识形态/本土防御 + 它拥有的城与舰 + 信誉），随回合变化。按 (round, faction_id) 索引。这是 agent 看外交 + 经济 + 军力的主表。",
-                "columns": {"round":"integer","faction_id":"string","name":"string","symbol":"string","capital_body":"string","alignment":"number","aggression":"number","home_radius":"number","home_attack_mult":"number","home_regen_bonus":"number","ideology":"object","resources":"object","relations":"object","reputation":"number","mond_control":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
+                "columns": {"round":"integer","faction_id":"string","势力":"string","符号":"string","capital_body":"string","阵营倾向":"number","好战度":"number","本土半径":"number","本土攻击倍率":"number","本土再生加成":"number","思潮":"object","资源":"object","关系":"object","名声":"number","MOND 掌握度":"number","mond_ships_in_band":"integer","mond_frontier_au":"number|null","war_quota":"number","freighter_quota_share":"number","observer_quota":"number","observer_lean":"number","observer_count":"integer","observer_target":"string|null","freight_lean":"number","freighter_quota":"number","freighter_count":"integer","threat_motive":"number","haul_gap":"number","city_ids":"array","ship_ids":"array"},
                 "column_docs": {
-                    "reputation": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
-                    "mond_control": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
+                    "名声": "**信誉**（势力级全局单值，雇佣市场的准入资产）：受雇方**不赔货值**，干砸了只掉它，而雇主按它决定敢不敢把线交给它、要不要续约——所以它是这条腿上**唯一的抵押品**，低信誉者结构上接不到贵活/难活。它**只由雇主的周期考核产生**（`contract_reviewed`：按实测吞吐掷好评/差评，各 ±`freight.reputation_gain`），不随回合自然衰减。中性值 1.0（没有任何雇佣履历）。",
+                    "MOND 掌握度": "**MOND 掌握度**（0..1，科技体系的干线）：`0` = 牛顿近似的凡人、`1` = 指哪打哪。它**连续地**决定异常区内「一次导航尝试的胜算」`p = min(1, (arrival_eps/(depth×drift_per_au×(1−它)))^(1/shape))`，于是前沿（p = 1 的日心距）`= 28 + 0.06/(0.03×(1−它))` AU：0 → 30.0、0.35 → 31.1、0.70 → 34.7、0.90 → 48.0。开局值来自 `config.mond.initial`（**现在只有行星X崇拜教 = 1.0**：它是唯一天生就懂的势力）；之后由 `sim::step_knowledge` 按**飞船在异常区的在场强度**驱动（用户裁决：先只做这一条渠道）。**它是活知识、但在 1.0 上是棘轮**：不在场会锈回去，**学到顶就永久持有**。",
                     "mond_ships_in_band": "此刻自己有**多少艘活舰在异常区里**（日心距 > `mond.radius`）——这是掌握度**唯一**的知识来源（第一版）。`mond_control` 在涨还是锈，看这一列就是答案。",
                     "observer_quota": "**观测配额**（目标头数）——**三个动机抢一支舰队**之后观测分到的那一份（水位配给，`autocontrol::freight::role_quotas`）：`战位先按威胁留出一份，剩下的余量由运输与观测按各自主张的相对大小分`。主张装得下就各得其所、装不下就按比例缩水，**没有任何角色上限**（用户裁决：不许加阈值，要自然）。掌握度**到顶 ⇒ 主张 0**（棘轮之下没有东西可学）。",
                     "war_quota": "**战舰配额**（目标头数）：`舰队 × (0.25 + 0.6 × threat_motive)`。它是三支力量里的**第一顺位**——`威胁`（被强敌压的程度）越狠，留作战舰的越多，运输与观测能分的余量越小。⚠ 它读的 `threat_motive` 实测**确实是情境量**：长局里当霸权的中国/俄罗斯 ≈ 0.01，被压着打的星系矿业/无国界科学组织 ≈ 0.8–0.9。",
@@ -1324,20 +1326,20 @@ pub fn projection_schema() -> serde_json::Value {
             "contracts" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "**雇佣运力挂单簿**：一行一单，只含**没结束**的合同（等人接的 + 还在雇佣期内的）。结束的合同不在这里——“怎么结束的”去 `events` 里按 `contract_ended` 查。按 (round, contract_id) 索引。单子要求的是**运力**（单位/回合），不是一票货：受雇方自己决定派几条船来跑（`ships` 可以为空、也可以多条）。",
-                "columns": {"round":"integer","contract_id":"integer","shipper":"string","carrier":"string","resource":"string","capacity":"number","delivered":"number","served_rounds":"integer","ratio":"number","from":"string","to":"string","share":"number","min_reputation":"number","ships":"array","posted_round":"integer","accepted_round":"integer","expires_round":"integer","review_round":"integer"},
+                "columns": {"round":"integer","contract_id":"integer","托运方":"string","承运方":"string","货":"string","运力":"number","已交付":"number","已服务回合":"integer","ratio":"number","起点":"string","终点":"string","分成":"number","最低名声":"number","ships":"array","挂单回合":"integer","接单回合":"integer","到期回合":"integer","考核回合":"integer"},
                 "column_docs": {
-                    "shipper": "雇主（挂单的人）。",
-                    "carrier": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
+                    "托运方": "雇主（挂单的人）。",
+                    "承运方": "受雇方；**null = 还在挂单簿上等人接**（这是本表最常用的一列：它是「市场上还没被吃掉的运力需求」）。",
                     "ships": "**此刻在替这张单跑的舰名数组**（空数组 = 还没派人，或多条船组队）。派几条船、派哪条，是**受雇方的内部事务**（用户：「对方派几艘船都无所谓」）——它跑的是**雇主**的路线：起运在雇主货栈、目的在雇主首都，与受雇方自己的集货路线**方向不同**。",
-                    "min_reputation": "雇主定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((受雇方信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是雇主唯一的自我保护（受雇方不赔货值）。**到期续约用的是同一个闸**。",
-                    "capacity": "**要求的运力**（单位/回合）= 一条参考船在这条线上的吞吐（`nominal_hold ÷ 参考往返回合数`）。未接单时每回合被改成此刻的缺口（雇主自己搬不动的部分），接单后**冻结**成承诺。",
-                    "delivered": "本雇佣期内**已从雇主货栈搬走**的量（含受雇方自留的抽成——抽成是搬运费，不该从运力里扣）。",
-                    "served_rounds": "考核的**分母**：本期「起运货栈有货」的回合数。没货可运的回合不算在受雇方头上。",
+                    "最低名声": "雇主定的**信誉门槛**（挂单时按难度与货值算好并冻结）：合格度 = σ((受雇方信誉 − 这一列) ÷ 宽度)。**不是硬闸**——低信誉者极少被选中，而非绝无可能。Q1(b) 之后这是雇主唯一的自我保护（受雇方不赔货值）。**到期续约用的是同一个闸**。",
+                    "运力": "**要求的运力**（单位/回合）= 一条参考船在这条线上的吞吐（`nominal_hold ÷ 参考往返回合数`）。未接单时每回合被改成此刻的缺口（雇主自己搬不动的部分），接单后**冻结**成承诺。",
+                    "已交付": "本雇佣期内**已从雇主货栈搬走**的量（含受雇方自留的抽成——抽成是搬运费，不该从运力里扣）。",
+                    "已服务回合": "考核的**分母**：本期「起运货栈有货」的回合数。没货可运的回合不算在受雇方头上。",
                     "ratio": "**实测吞吐达标率** = `delivered ÷ (capacity × served_rounds)`：1.0 = 恰好是一条参考船的水准（一个考核期搬回一舱货）。null = 本期还没有有货可运的回合 ⇒ 无从考核（不是考零分）。雇主按它掷骰子给好评/差评。",
-                    "from/to": "起运天体（雇主的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是雇主首都）。",
-                    "share": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
-                    "posted_round": "**本轮叫价的起点**：一个考核周期没人接就抬一档抽成并把这一列挪到当时回合（免得一挂出来就连续加价）。",
-                    "accepted_round/expires_round/review_round": "雇佣起算回合 / 固定期到期回合 / 下次考核回合。期限与考核周期都从**航程**算（一个考核周期 = 这条线的一个往返），所以不同航线的刻度差一个数量级。",
+                    "起点/终点": "起运天体（雇主的产地货栈）→ 目的天体（照公理“首都即集散地”，`to` 永远是雇主首都）。",
+                    "分成": "受雇方**抽成**比例：交付时从货里自留，其余进雇主首都池。没有货币转移——报酬就是它没交出去的那部分货。没人接的单子每个考核周期抬一档（上限 `freight.share_max`）。",
+                    "挂单回合": "**本轮叫价的起点**：一个考核周期没人接就抬一档抽成并把这一列挪到当时回合（免得一挂出来就连续加价）。",
+                    "接单回合/到期回合/考核回合": "雇佣起算回合 / 固定期到期回合 / 下次考核回合。期限与考核周期都从**航程**算（一个考核周期 = 这条线的一个往返），所以不同航线的刻度差一个数量级。",
                 },
             }),
             "events" => json!({
@@ -1365,12 +1367,12 @@ pub fn projection_schema() -> serde_json::Value {
             "bodies" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "天体主表（name/轨道/定居点数），几乎不变，全局一次。按 body_id 索引。",
-                "columns": {"body_id":"string","name":"string","perihelion_distance":"number","aphelion_distance":"number","period":"number","x":"number","y":"number","settlement_count":"integer"},
+                "columns": {"body_id":"string","天体名":"string","近日点距离":"number","远日点距离":"number","公转周期":"number","x":"number","y":"number","settlement_count":"integer"},
             }),
             "settlements" => json!({
                 "table": f.table, "key": f.key, "id_col": f.id_col, "round": f.round,
                 "description": "定居点主表（每个天体上的空间位：名字/面积/生态容量/建设修正/资源矿藏），几乎不变，全局一次。按 body_id 过滤 + settlement_id 索引。",
-                "columns": {"settlement_id":"string","body_id":"string","index":"integer","name":"string","total_area":"number","ecological_capacity":"number","construction_speed_mod":"number","construction_resource_mod":"number","resources":"array"},
+                "columns": {"settlement_id":"string","body_id":"string","index":"integer","定居点":"string","总面积":"number","生态容量":"number","建设速度修正":"number","建设资源修正":"number","资源":"array"},
             }),
             _ => continue,
         };
@@ -1408,7 +1410,7 @@ pub fn projection_schema() -> serde_json::Value {
             "city_process" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**本回合各城的过程量**（`RoundView` 的 `cities[]` 行平铺）：开采产出 + **忠诚目标值分项** + **产出与建造的中间量**（用工系数 / 住房容量 / 是否集散地 / 每舰级造舰速率与实得进度），按 (round, city_id) 索引。**含已夷平的空白城**（`razed` 列筛，产出为 `{}`），与 `cities` 表逐行一致。同一批数在主流 `view.cities` 里也有一份（但那张表跳过了 razed 城）——同一个数、同一个来源。",
-                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","razed":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","labor":"number","housing_capacity":"number","is_hub":"boolean","build":"object"},
+                "columns": {"round":"integer","city_id":"string","body_id":"string","faction_id":"string","已焚毁":"boolean","production":"object","loyalty_target_effective":"number","loyalty_target_distance":"number","loyalty_target_entertainment":"number","labor":"number","housing_capacity":"number","is_hub":"boolean","build":"object"},
                 "column_docs": {
                     "loyalty_target_effective": "本回合这座城的**忠诚目标值**（0..1）：实际忠诚每回合朝它恢复（治理覆盖得住时），覆盖不住则改用欠费惩罚。所以「忠诚在掉」= 它低。「为什么低」看下面四列。",
                     "loyalty_target_distance": "距离项：`1 − loyalty_distance × max(0, 距首都 − loyalty_range) × 治理倍率`。越远的城越低——这是「帝国太大管不住」的第一来源。",
@@ -1443,14 +1445,14 @@ pub fn projection_schema() -> serde_json::Value {
             "blueprints" => json!({
                 "table": t.table, "key": t.key, "join_on": t.join_on, "round": t.round,
                 "description": "**舰船设计图库**（势力级）：一行 = 一张图。设计图是「还不存在的舰」的出厂规格——建造区指向一张图，下水时把图印成一艘舰（`components` 是**快照**，改图**不**改已下水的舰）。**图 = 出厂规格（装什么），`mode` = 谁可以改这张图**：`components` 非空就按它装配（与归属无关），空数组 = 交给 `choose_loadout` 在出厂时现算。`Auto` 图的执行者是 `autocontrol::blueprints`（AI 自己建图/重估/去重复用/回收）+ `retool_shipyards`（舰级重估）。⚠ 设计图**不在** `derived.control` 表里（那是标量形状的叶；两张表示 = 漂移风险）——它就住这张表，`ships.blueprint` 与 `cities.buildings[].blueprint` join 它。⚠ 它也**不在** `RoundView`（`--derived`）里：它是**状态**的纯函数（每回合从 `state.control[*].blueprints` 现算），所以「`--derived` 与 `--index` 必须给同一份数」那条约束**不适用于这张表**。",
-                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","class":"string","components":"array","doctrine":"object","kiting":"number","role":"string","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
+                "columns": {"round":"integer","faction_id":"string","blueprint_id":"string","舰级":"string","选装":"array","风格":"object","姿态":"number","角色":"string","mode":"string","effective_mode":"string","ship_count":"integer","class_slots":"integer","component_cost":"object","launch_waiting":"boolean"},
                 "column_docs": {
                     "blueprint_id": "图名（势力内的唯一 key）。`ships` 表的 `blueprint` 列与 `cities.buildings[].blueprint` 都 join 它。图名会换代（改名 = 删旧建新）⇒ 指向不存在的图**必须**响亮报 `no_such_blueprint`（apply 时），绝不静默回落生成器。",
-                    "class": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
-                    "components": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器；非空 ⇒ **出厂就按它装配**（与图的归属无关：归属只管「谁能改这张图」）。",
-                    "doctrine": "本图给这型舰的**行为风格**（`{temper, lone_wolf}`；null = 本图对该轴沉默）。⚠ 只在图的归属解析为 `Player` 时供值。",
-                    "kiting": "本图给这型舰的**风筝↔贴脸姿态**（[-1,1]；null = 本图对该轴沉默）。",
-                    "role": "本图给这型舰的**角色**（War/Freight/Observe；null = 本图对该轴沉默）。这是「新舰一造出来就干什么」的落点。",
+                    "舰级": "舰级（口径 A：必须 == 该建造区的 `ship_type`，否则 apply 报 `blueprint_class_mismatch`）。",
+                    "选装": "选装表（组件 id，顺序 = 槽位）。空数组 = 交给 `choose_loadout` 生成器；非空 ⇒ **出厂就按它装配**（与图的归属无关：归属只管「谁能改这张图」）。",
+                    "风格": "本图给这型舰的**行为风格**（`{temper, lone_wolf}`；null = 本图对该轴沉默）。⚠ 只在图的归属解析为 `Player` 时供值。",
+                    "姿态": "本图给这型舰的**风筝↔贴脸姿态**（[-1,1]；null = 本图对该轴沉默）。",
+                    "角色": "本图给这型舰的**角色**（War/Freight/Observe；null = 本图对该轴沉默）。这是「新舰一造出来就干什么」的落点。",
                     "mode": "图叶**自己的**表态：Inherit（没有说话——**AI 建的图就是这个**：流水，不是表态）/ Auto（系统可重估：`retool_shipyards` 改舰级、`autocontrol::blueprints` 重估选装）/ Player（系统不许动）。",
                     "effective_mode": "**有效归属**（`State::blueprint_control`：图叶 → 势力 scope → 全局；全继承 ⇒ Auto）。引擎解析，别在 Python 里重算。",
                     "ship_count": "世界上 `Ship.blueprint == blueprint_id` 的舰数（引擎算）。",

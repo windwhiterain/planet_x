@@ -592,4 +592,19 @@ pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, serde_j
     serde_json::from_str(text)
 }
 
-
+/// **写存档只写 JSON**：路径不是 `.json` 就当场拒掉。
+///
+/// 为什么不是"按扩展名写"：RON 要求结构体字段名是**合法标识符**，而本仓的字段名就是
+/// 给人看的中文名词（`舰名`、`和平↔军国`、`MOND 掌握度`）——RON 根本写不出来
+/// （实测 `ERR_SAVE: serialize: Invalid identifier "舰名"`）。若按扩展名选格式，
+/// 一个 `.ron` 路径就会**写失败**（好）或者更糟：**写出一份读不回来的档**（坏）。
+/// 读的方向仍按扩展名（老档是 RON，要能读）。
+pub fn require_json_path(path: &std::path::Path) -> Result<(), String> {
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("json")) == Some(true) {
+        return Ok(());
+    }
+    Err(format!(
+        "存档只写 JSON：请把路径写成 `{}.json`（RON 写不出中文字段名；旧 .ron 档仍可读）",
+        path.display()
+    ))
+}
