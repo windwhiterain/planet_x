@@ -1,5 +1,12 @@
 //! 思潮与忠诚：军事信号（只由事件推出）、战争/经济如何推思潮、外交亲和方向、低忠诚倒戈、娱乐设施拉住远城。
 //!
+//! ## 2026-10（第 7 批）：`entertainment_holds_a_distant_city` 搬去了 g2 **合成场景 · 重金娱乐拉住远城**（4 条判据）
+//!
+//! 两臂**只差有没有那份福利预算**（同一座城 = 该势力 `gov_distance` 最大的那座、同样起点
+//! 忠诚度、同样满仓国库）：重金臂 `[0.35, 0.39, 0.43, 0.46, 0.49, 0.52]` 逐回合不降，
+//! 对照臂 `[0.35, 0.33, 0.32, 0.31, …]` 真的往下走（防空转）。
+//! 国库/忠诚度走 `h.scenario(patch=…)`，福利两片叶走 `--apply`——与原件那份 diff 同形。
+//!
 //! ## 2026-10（第 7 批）：`ideology_similarity_ranges_and_is_monotonic` 搬去了 g1
 //!
 //! 新挂了 `--call ideology_similarity`（键名与读面 `factions.思潮` 一致）⇒ 判据比原件**更强**：
@@ -130,51 +137,6 @@ fn military_signal_uses_the_milestones_and_is_branch_agnostic() {
         prev_owner: None,
     }];
     assert_eq!(d(&founded, "丙"), 0.0, "殖民归 nature_colony 轴");
-}
-
-/// 娱乐/福利预算（忠诚度）：一座远离首都的城市，其距离目标忠诚度本应很低；但若
-/// 治理势力投入足够的娱乐预算，忠诚度仍能维持/回升，而非立刻爆发离心叛乱。
-#[test]
-fn entertainment_holds_a_distant_city() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-    // 深口袋：让星系矿业(5)付得起治理 + 娱乐开销，覆盖率=1。
-    if let Some(f) = state.faction_mut("星系矿业") {
-        for k in [
-            "铁", "碳", "硅", "水冰", "铀", "铂", "金", "氦-3", "钍", "氢", "甲烷",
-        ] {
-            f.resources.insert(k.to_string(), 100_000.0);
-        }
-    }
-    // 妊神星转运站 (city 19, body 15) 远离矿业首都(泰坦, body 9)，距离目标忠诚度≈0。
-    let city19 = state.cities[19].name.clone();
-    if let Some(c) = state.city_mut(&city19) {
-        c.loyalty = 0.35; // 略高于叛变阈值，但本应继续下滑。
-    }
-    let loy0 = state.city(&city19).map(|c| c.loyalty).unwrap();
-    // 重金投入福利：势力级福利预算（资源向量） + 该城福利权重（Player 覆盖）。
-    // 铁价 1 ⇒ 5000 铁 = 5000 市场价值福利池；权重 500 让绝大部分落到这座城。
-    let diff = serde_json::json!({
-        "control": [{
-            "势力": "星系矿业",
-            "福利预算": [{"资源": "铁", "值": 5000.0, "归属": "Player"}],
-            "城市福利预算": [{"城": city19.clone(), "值": 500.0, "归属": "Player"}]
-        }]
-    });
-    crate::control::apply_patch(&mut state, &config, &diff).expect("apply welfare budget/weight");
-
-    advance(&mut state, &config, &mut rng);
-
-    let loy1 = state.city(&city19).map(|c| c.loyalty).unwrap_or(0.0);
-    assert!(
-        loy1 >= loy0,
-        "heavy entertainment funding should keep a distant city loyal (started {loy0}, now {loy1})"
-    );
-    assert_eq!(
-        state.city(&city19).map(|c| c.razed),
-        Some(false),
-        "a well-funded distant city must not revolt"
-    );
 }
 
 /// 离心「改旗易帜」：低忠诚城市不再被夷为荒地，而是倒戈到**思潮与旧主最对立**的势力，

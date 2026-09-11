@@ -1,5 +1,13 @@
 //! 舰队行为与默认：逐舰指令的归属、殖民归属、跟随友舰时自动开火只打敌对者。
 //!
+//! ## 2026-10（第 7 批）：`colonize_keeps_player_ownership` 搬去了 g2 **合成场景 · 殖民**（6 条判据）
+//!
+//! 起点回合与天体**从长局里扫出来**（开局 22 座城占满 22 个定居点，得等到有城被拆平）：
+//! 实测第 29 回合木星空出「木星轨道空间站」⇒ 钉一片玩家 `Colonize{木星}` 叶，第 33 回合建城
+//! `大红斑科学站`、`order_effective` 随后变 `Idle`（一次性指令被花掉）、`order_leaf_mode` **全程 Player**。
+//! 早退臂（回合 0 目标天体已满）同样只断言「叶片仍是 Player」。
+//! ⚠ `colony_founded` 的 `target_id` 是**城名**，天体在 `data.body`。
+//!
 //! ## 2026-10：能只看数据的那条搬去了 `play/tests/g1_contract.py`
 //!
 //! | 原用例 | 现在住 | 为什么能搬 |
@@ -10,119 +18,6 @@
 //! | `dock_follows_body_and_idle_holds_position` | g2 **合成场景 · 停泊与待命**（4 条判据） | 第 7 批给读面补了派生表 **`body_positions`**（逐回合天体位置，与 `ships.x/y` 同一把绝对坐标尺子）⇒「Dock 有没有朝那个天体去」「Idle 的位置有没有动」都判得了。⚠ 必须钉成 `Player`：AI 会在回合末刚派完 Dock、下一回合开头就改派（实测长局里 `Dock` 的 797 个「两回合同天体」样本**全部原地没动**，就是这种没执行过的叶子） |
 
 use super::*;
-
-/// 玩家点名的殖民舰建完城之后必须**仍然是玩家的**。
-///
-/// 殖民是「命令 → 执行 → 指令失效」的一次性动作：收尾只该把**值**复位成 `Idle`，
-/// 不许把**归属**一起清掉——以前无条件写 `Control::inherit(..)`，于是玩家刚下达的处置
-/// 在城建好的那一刻被静默交还给系统（AI 下一回合就把它征去别处）。
-#[test]
-fn colonize_keeps_player_ownership() {
-    let (config, mut state) = fresh_world(42);
-    let mut rng = Prng::new(42);
-    let fid = "中国".to_string();
-
-    // 空出一座城（复垦路径：空白城仍占着它的定居点），再让中国的一艘舰去殖民。
-    let victim = state
-        .cities
-        .iter()
-        .find(|c| !c.razed && c.faction_id != fid)
-        .map(|c| (c.name.clone(), c.body_id.clone(), c.faction_id.clone()))
-        .expect("a foreign city to raze");
-    let (cid, body, owner) = victim;
-    raze_city(
-        &mut state,
-        &cid,
-        RazeCause::Revolt {
-            faction: owner,
-            loyalty: 0.0,
-        },
-    );
-
-    let ship = state
-        .ships
-        .iter()
-        .find(|s| s.faction_id == fid)
-        .map(|s| s.name.clone())
-        .expect("a chinese ship");
-    let order = |state: &mut State, v: ShipBehavior| {
-        state
-            .control_mut(fid.clone())
-            .expect("control")
-            .ship_orders
-            .insert(ship.clone(), Control::player(v));
-    };
-    order(&mut state, ShipBehavior::Colonize { body: body.clone() });
-
-    let mut next_id = 100_000;
-    colonize(&mut state, &config, &mut rng, &ship, &body, &mut next_id);
-
-    let leaf = state
-        .control(fid.clone())
-        .and_then(|c| c.ship_orders.get(&ship).cloned())
-        .expect("the order leaf must still exist");
-    assert_eq!(
-        leaf.value,
-        ShipBehavior::Idle,
-        "one-shot order must be spent"
-    );
-    assert_eq!(
-        leaf.mode,
-        ControlMode::Player,
-        "…but ownership must survive the order"
-    );
-    assert!(
-        state
-            .events
-            .iter()
-            .any(|e| matches!(e, GameEvent::ColonyFounded { .. })),
-        "the city must actually have been refounded, got {:?}",
-        state.events
-    );
-
-    // 早退路径（无处可殖民）同样不许动归属：找一个所有定居点都被活的城占满的天体。
-    let full_body = state
-        .cities
-        .iter()
-        .filter(|c| !c.razed)
-        .map(|c| c.body_id.clone())
-        .find(|b| {
-            let Some(body) = state.body(b) else {
-                return false;
-            };
-            let live: std::collections::BTreeSet<String> = state
-                .cities
-                .iter()
-                .filter(|c| &c.body_id == b && !c.razed)
-                .map(|c| c.settlement.clone())
-                .collect();
-            body.settlements.iter().all(|s| live.contains(&s.name))
-        })
-        .expect("a body whose settlements are all occupied");
-    order(
-        &mut state,
-        ShipBehavior::Colonize {
-            body: full_body.clone(),
-        },
-    );
-    colonize(
-        &mut state,
-        &config,
-        &mut rng,
-        &ship,
-        &full_body,
-        &mut next_id,
-    );
-    let leaf = state
-        .control(fid.clone())
-        .and_then(|c| c.ship_orders.get(&ship).cloned())
-        .expect("the order leaf must still exist");
-    assert_eq!(
-        leaf.mode,
-        ControlMode::Player,
-        "an early return must not hand the ship back either"
-    );
-}
 
 /// Follow semantics: `Follow { ship }` escorts/drives the ship — it is a pure
 /// movement behavior. Combat is now automatic: when any hostile is inside the

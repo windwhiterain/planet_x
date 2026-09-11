@@ -86,6 +86,11 @@ REPAIR_COMPONENT, REPAIR_START, REPAIR_ROUNDS = "railgun", 5.0, 4
 # 玩家钉的常驻运输线：起点天体选法见 `commanded_haul_checks` 的说明（本地需求小、
 # 能攒出可出口余量；实测 r41 才等到货 ⇒ 窗口 60 回合）。
 HAUL_SHIP, HAUL_FROM, HAUL_TO, HAUL_ROUNDS = "北斗", "灶神星", "地球", 60
+# 娱乐拉忠诚那条：势力取一个「城市分布很散」的（远城才有低距离目标）。
+WELFARE_FID, WELFARE_START, WELFARE_ROUNDS = "星系矿业", 0.35, 5
+# 殖民那条：起点回合与天体**从长局里扫出来**（开局 22 座城占满 22 个定居点，
+# 得等到有城被拆平才有可复垦的空位）。
+COLONIZE_ROUNDS = 40
 # `autocontrol::blueprints::DESIGN_PREFIX` 的镜像（引擎改名要跟着改；这类镜像表一律删掉、
 # 问引擎要声明面是方向，但目前没有这个名字的声明面）。
 DESIGN_PREFIX = "自动"
@@ -1078,6 +1083,8 @@ def run(h, ck) -> None:
     blueprint_launch_checks(h, ck)
     combat_scenario_checks(h, ck)
     commanded_haul_checks(h, ck)
+    welfare_scenario_checks(h, ck)
+    colonize_scenario_checks(h, ck)
     story_checks(h, ck, out)
     war_floor_checks(h, ck, out)
 
@@ -1885,6 +1892,124 @@ def commanded_haul_checks(h, ck) -> None:
     ck.check("合成场景（玩家运输线）：守卫没有空转（真等到过货、也真等待过）",
              len(loaded) >= 1 and any(s[1] == "waiting" for s in steps),
              f"{len(loaded)} 次装货、{sum(1 for s in steps if s[1] == 'waiting')} 回合等待")
+
+
+def welfare_scenario_checks(h, ck) -> None:
+    """**合成场景 · 重金娱乐拉住远城**（`sim/ideology.rs::entertainment_holds_a_distant_city`）。
+
+    两臂**只差有没有那份福利预算**：同一座城（该势力 `gov_distance` 最大的那座）、同样的起点忠诚度、
+    同样的满仓国库。造法全是现成入口：国库与城市忠诚度走 `h.scenario(patch=…)`（势力/城都有身份键），
+    福利预算与城市权重走 `--apply` 的 `福利预算` / `城市福利预算` 叶——**与原件那份 diff 同形**。
+
+    防空转在**对照臂**：同样的 0.35 起点，不投福利时忠诚度**真的往下走** ⇒ 「不降」不是「世界本来
+    就这样」。⚠ 对照臂实测到 r4 会自己跳回 0.75（别的东西把它拉起来了），所以判据看的是
+    「窗口里**下滑过**」而不是「末端更低」。
+    """
+    seed = SCENARIO_SEED
+    q0 = KIT.load(str(h.projection(seed, 1)), only=("cities", "factions"))
+    ci = q0.table("cities")
+    mine = ci[(ci["round"] == 0) & (ci["势力"] == WELFARE_FID)]
+    ck.check("合成场景（娱乐拉忠诚）：探针世界里那个势力有多座城（防空转）",
+             len(mine) >= 2, f"{WELFARE_FID} 开局 {len(mine)} 座城")
+    city = mine.loc[mine["gov_distance"].idxmax()]
+    keys = sorted((list(q0.table("factions").pipe(
+        lambda x: x[(x["round"] == 0) & (x["势力"] == WELFARE_FID)])["资源"])[0] or {}).keys())
+    patch = {"factions": {WELFARE_FID: {"资源": {k: 100000.0 for k in keys}}},
+             "cities": {city["城名"]: {"忠诚度": WELFARE_START}}}
+    welfare = {"control": [{"势力": WELFARE_FID,
+                            "福利预算": [{"资源": "铁", "值": 5000.0, "归属": "Player"}],
+                            "城市福利预算": [{"城": city["城名"], "值": 500.0, "归属": "Player"}]}]}
+
+    arms = {}
+    for tag, diffs in (("none", []), ("rich", [welfare])):
+        proj = h.scenario_apply(f"welfare_{tag}", seed, WELFARE_ROUNDS, diffs, patch=patch)
+        q = KIT.load(str(proj), only=("cities",))
+        rows = q.table("cities")
+        rows = rows[rows["城名"] == city["城名"]].sort_values("round")
+        arms[tag] = {"loy": [float(x) for x in rows["忠诚度"]],
+                     "razed": [bool(x) for x in rows["已焚毁"]]}
+
+    rich, none = arms["rich"], arms["none"]
+    ck.check(f"合成场景（娱乐拉忠诚）：重金娱乐的远城忠诚**逐回合不降**（起点 {WELFARE_START}）",
+             len(rich["loy"]) >= 3 and all(b >= a - 1e-9 for a, b in zip(rich["loy"], rich["loy"][1:])),
+             f"忠诚度 {[round(x, 3) for x in rich['loy']]}（距首都 {city['gov_distance']:.1f} AU）")
+    ck.check("合成场景（娱乐拉忠诚）：对照臂（同样起点、不投福利）忠诚**真的往下走**（防空转）",
+             min(none["loy"]) < none["loy"][0] - 1e-9,
+             f"对照臂忠诚度 {[round(x, 3) for x in none['loy']]}（最低 {min(none['loy']):.3f}）")
+    ck.check("合成场景（娱乐拉忠诚）：两臂那座城都没被焚毁（有钱就不离心）",
+             not any(rich["razed"]) and not any(none["razed"]),
+             f"重金臂 {rich['razed']}｜对照臂 {none['razed']}")
+
+
+def colonize_scenario_checks(h, ck) -> None:
+    """**合成场景 · 殖民是一次性指令，但归属不是**（`sim/fleet.rs::colonize_keeps_player_ownership`）。
+
+    两个臂：
+
+    * **真殖民**：挑一个「有**空定居点**」的回合（开局 22 座城占满 22 个定居点，得等到有城被拆平），
+      钉一片玩家 `Colonize{天体}` 叶，跑一段 ⇒ ① `colony_founded` 事件真的落在那个天体上、
+      ② 一次性指令被**花掉**（`order_effective` 从 `Colonize` 变成 `Idle`）、
+      ③ **归属没被清掉**（`order_leaf_mode` 全程 `Player`）。
+    * **早退**（目标天体定居点已满）：同样钉一片玩家叶 ⇒ 早退**也不许把船交回系统**
+      （`order_leaf_mode` 仍是 `Player`）——原件那半只断言这一条。
+
+    ⚠ `colony_founded` 的 `target_id` 是**城名**，天体在 `data.body`（第一版按 `target_id == 天体`
+    去找，一条都没找到）。
+    """
+    seed = SCENARIO_SEED
+    q = KIT.load(str(h.projection(seed, ROUNDS)), only=("cities", "settlements"))
+    alls = {(r["天体名"], r["定居点"]) for _, r in q.table("settlements").iterrows()}
+    ci = q.table("cities")
+    occ: dict = {}
+    for _, r in ci.iterrows():
+        if not r["已焚毁"]:
+            occ.setdefault(int(r["round"]), set()).add((r["天体名"], r["定居点"]))
+    start = next((r for r in sorted(occ) if alls - occ[r]), None)
+    body = sorted(alls - occ[start])[0][0] if start is not None else None
+    ck.check("合成场景（殖民）：长局里真的出现过**空定居点**（否则这条判据无从谈起）",
+             start is not None, f"最早在第 {start} 回合有可复垦的定居点（天体 {body}）")
+    if start is None:
+        return
+
+    st = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_colonize.json", seed, start))
+    ship = next(s for s in st["ships"] if s["势力"] == FID)
+    diff = {"control": [{"势力": FID, "指令": [
+        {"舰": ship["舰名"], "行为": {"Colonize": {"body": body}}, "归属": "Player"}]}]}
+    proj = h.scenario_apply("colonize_real", seed, COLONIZE_ROUNDS, [diff], start_round=start)
+    q = KIT.load(str(proj), only=("events", "ships", "cities"))
+    ev = q.table("events")
+    hits = [(int(r["round"]), r["actor_id"], r["target_id"]) for _, r in ev[ev["type"] == "colony_founded"].iterrows()
+            if (r["data"] or {}).get("body") == body]
+    sh = q.table("ships")
+    mine = sh[sh["舰名"] == ship["舰名"]].sort_values("round")
+    modes = [str(m) for m in mine["order_leaf_mode"]]
+    seq = [str(o) for o in mine["order_effective"]]
+
+    ck.check("合成场景（殖民）：玩家钉的 `Colonize` 真的建成了城（事件落在那个天体上）",
+             any(a == FID for _, a, _ in hits),
+             f"{body} 上的复垦事件：{hits[:3]}")
+    ck.check("合成场景（殖民）：一次性指令被**花掉**（有效指令从 Colonize 变成 Idle）",
+             any("Colonize" in o for o in seq) and seq[-1] == "Idle",
+             f"指令序列 {seq[:2]} … {seq[-2:]}（{len(seq)} 个回合）")
+    ck.check("合成场景（殖民）：**归属没被清掉**（叶片全程 Player，不被交回系统）",
+             bool(modes) and set(modes) == {"Player"}, f"叶片模式：{sorted(set(modes))}")
+
+    # 早退：开局 22 座城占满 22 个定居点 ⇒ 目标天体无处可殖民。
+    full = {b for b, _ in alls if not (alls - occ[0])}
+    ck.check("合成场景（殖民）：早退臂的前提成立（回合 0 每个天体都满了）",
+             bool(full), f"回合 0 空定居点数 {len(alls - occ[0])}")
+    if full:
+        target = sorted(full)[0]
+        st0 = h.state_dump(h.gen(CACHE_ROOT / "scenario" / "_colonize0.json", seed, 0))
+        ship0 = next(s for s in st0["ships"] if s["势力"] == FID)
+        d0 = {"control": [{"势力": FID, "指令": [
+            {"舰": ship0["舰名"], "行为": {"Colonize": {"body": target}}, "归属": "Player"}]}]}
+        p0 = h.scenario_apply("colonize_early", seed, COLONIZE_ROUNDS, [d0])
+        s0 = KIT.load(str(p0), only=("ships",)).table("ships")
+        m0 = [str(m) for m in s0[s0["舰名"] == ship0["舰名"]]["order_leaf_mode"]]
+        ck.check("合成场景（殖民）：**早退也不许把船交回系统**（叶片仍是 Player）",
+                 bool(m0) and set(m0) == {"Player"},
+                 f"目标天体 {target}（回合 0 已满）⇒ 叶片模式 {sorted(set(m0))}")
 
 
 def id_checks(h, ck, out) -> None:
