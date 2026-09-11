@@ -46,7 +46,7 @@ export const TUNING = {
   // 太阳的 HDR 强度（>1 才有 bloom）。**刻意压得不高**：ACES 在 5.8 之上就把一切压成
   // 纯白，而米粒组织的动态范围只有百分之几十——日面开到 7 就只剩一个白饼、颗粒全丢
   // （实测过）。1.9 让米粒的明暗刚好落在 ACES 的肩部以内，辉光交给 bloom。
-  sunIntensity: 1.9,
+  sunIntensity: 1.25,
   // 曝光交给后期的 ACES：改变这里 = 整体明暗。
   exposure: 0.78,
 

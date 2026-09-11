@@ -93,12 +93,18 @@
   //   于是壳整个掉进采样点之间：uChromo 从 26 调到 60，日缘的值一个都不变；
   //   删掉自吸收也一样。**欠采样还会抖出又硬又碎的边**（用户报的「奇怪的硬边」）。
   //   所以色球必须有独立的一条、步长与壳厚相称的积分。
-  float CHROMO_SIGMA = 0.075;
-  float CHROMO_PEAK  = 1.015;
+  float CHROMO_SIGMA = 0.075;   // 基准壳厚（日半径为单位）
+  float CHROMO_PEAK  = 1.010;   // 壳的基准高度（必须在 1 之外，否则一半被光球挡住）
+  float CHROMO_TMAX  = 2.9;     // 厚度最大倍数（步长与区间按它算，保证最厚的针也采得到）
 
+  // 色球密度。**关键：壳厚不是常数，而是被一个低频高度场调制** ——
+  // 厚度恒定的壳必然读成「一圈均匀的环」（不管噪声多花），因为它的外缘就是一条等半径线。
+  // 参考图（SDO）里每根针**长短不一**，那要求"这一片有多厚"本身是个场。
   float chromoField(vec3 p, float rr, float t){
-    float base = exp(-pow((rr - CHROMO_PEAK) / CHROMO_SIGMA, 2.0));
-    if (base < 0.004) return 0.0;
+    // 便宜的先算：偏离壳的最大可能范围就直接返回，局部基与噪声一个都不用算。
+    float halfMax = 3.0 * CHROMO_SIGMA * CHROMO_TMAX;
+    if (rr > CHROMO_PEAK + halfMax || rr < CHROMO_PEAK - halfMax) return 0.0;
+
     // 切向频率高、径向低 ⇒ 每根针都沿**自己的法线**往外长（不是在某个固定轴上压扁 ——
     // 旧 chromo.frag 就是 `p * vec3(38,38,9)`，针全朝对象空间的同一根轴，转到侧面就露馅）
     vec3 u = p / max(length(p), 1e-4);
@@ -108,10 +114,20 @@
     float pr = dot(p, u) / uSunR;
     float pa = dot(p, t1) / uSunR;
     float pb = dot(p, t2) / uSunR;
+
+    // 细针：高频、切向频率高
     vec3 qs = u * (pr * 1.2) + t1 * (pa * 7.0) + t2 * (pb * 7.0);
     float sp = vnoise(qs * 3.0 + vec3(0.0, 0.0, -t * 0.40));
     float needle = pow(clamp(1.0 - abs(2.0 * sp - 1.0), 0.0, 1.0), 4.0);
-    return base * (0.35 + 2.20 * needle);
+
+    // 高度场：低频，决定「这一片针有多长」⇒ 参差的须状外缘
+    float hgt = vnoise(vec3(pa * 2.1, pb * 2.1, pr * 2.6) + vec3(0.0, 0.0, 17.3));
+    float thick = CHROMO_SIGMA * (0.45 + CHROMO_TMAX * hgt * hgt);
+    // 高的地方峰值也往外推 ⇒ 针真的"长出去"，而不是只在原地变亮
+    float peak = CHROMO_PEAK + thick * 0.45;
+    float base = exp(-pow((rr - peak) / thick, 2.0));
+    if (base < 0.004) return 0.0;
+    return base * (0.25 + 2.10 * needle);
   }
 
   void main(){
@@ -163,8 +179,8 @@
     }
 
     // --- 色球：细步长积分（步长 ≪ 壳厚，才采得到）------------------------------
-    float hiR = (CHROMO_PEAK + 4.0 * CHROMO_SIGMA) * uSunR;
-    float loR = (CHROMO_PEAK - 4.0 * CHROMO_SIGMA) * uSunR;
+    float hiR = (CHROMO_PEAK + 4.0 * CHROMO_SIGMA * CHROMO_TMAX) * uSunR;
+    float loR = max((CHROMO_PEAK - 4.0 * CHROMO_SIGMA * CHROMO_TMAX) * uSunR, 0.0);
     vec2 spHi = hitSphere(ro, rd, hiR);
     if (spHi.y > 0.0) {
       float a0 = max(spHi.x, 0.0);
@@ -176,7 +192,8 @@
       vec4 seg = vec4(a0, a1, 0.0, 0.0);
       if (two) { seg = vec4(a0, min(spLo.x, a1), max(spLo.y, a0), a1); }
       // 步长取壳厚的 1/3：再粗就会漏采样（这正是原来那个 bug 的成因）。
-      float dc = CHROMO_SIGMA * uSunR * 0.34;
+      // 步长按**最薄**的针取（厚度最小 0.45σ），否则细针照样漏采样
+      float dc = CHROMO_SIGMA * 0.45 * uSunR * 0.5;
       float chromoAcc = 0.0;
       for (int k = 0; k < 2; k++) {
         if (k == 1 && !two) break;
@@ -184,8 +201,8 @@
         float sb = (k == 0) ? seg.y : seg.w;
         float segLen = sb - sa;
         if (segLen <= 0.0) continue;
-        int ns = int(clamp(ceil(segLen / dc), 1.0, 24.0));
-        for (int s = 0; s < 24; s++) {
+        int ns = int(clamp(ceil(segLen / dc), 1.0, 48.0));
+        for (int s = 0; s < 48; s++) {
           if (s >= ns) break;
           float sc = sa + segLen * (float(s) + 0.5) / float(ns);
           vec3 p = ro + rd * sc;

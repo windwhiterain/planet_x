@@ -45,10 +45,11 @@
     spot *= mix(0.25, 1.0, latBand);
     heat *= (1.0 - spot * 0.72);
 
-    // 色带：冷 → 暖 → 白热。
-    vec3 cool = vec3(0.95, 0.42, 0.10);
-    vec3 mid  = vec3(1.00, 0.74, 0.36);
-    vec3 hot  = vec3(1.00, 0.96, 0.88);
+    // 色带：冷 → 暖 → 白热。**整体往深橙红推**（对照 SDO 参考图：盘面是深橙红，
+    // 只有活动区才是亮黄）。原来 cool/mid 偏黄，整颗太阳读起来苍白。
+    vec3 cool = vec3(0.78, 0.20, 0.05);
+    vec3 mid  = vec3(1.05, 0.48, 0.12);
+    vec3 hot  = vec3(1.42, 0.82, 0.36);
     vec3 col = mix(cool, mid, smoothstep(0.28, 0.66, heat));
     col = mix(col, hot, smoothstep(0.62, 1.02, heat));
 
