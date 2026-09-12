@@ -11,6 +11,7 @@ pub struct Warehouses {
     pub fluctuation: f32,
 }
 
+/// index with [`crate::market::Trader`]
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
 }
@@ -22,6 +23,7 @@ pub enum SellerRule {
     RevenueMax,
 }
 
+/// index with [`crate::market::Merchandise`]
 pub struct Stock {
     previous_volume: f32,
     pub volume: f32,

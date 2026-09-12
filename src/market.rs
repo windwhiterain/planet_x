@@ -6,7 +6,7 @@ mod tests;
 pub struct Market {
     pub merchandises: Vec<Merchandise>,
     pub traders: Vec<Trader>,
-    /// 键：交易者发起者，交易接受者，商品
+    /// key: deal sender, deal reciver, merchandise
     pub deals: Vec<Vec<Vec<Deal>>>,
 }
 
@@ -23,7 +23,7 @@ pub struct Trader {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraderMerchandise {
     pub price: f32,
-    /// 正卖负买
+    /// positive buy negative sell
     pub volume: f32,
     deal_price: f32,
     deal_volume: f32,
@@ -52,7 +52,7 @@ pub struct Deal {
     price_potential: f32,
     volume_potential: f32,
     distribution: f32,
-    /// 正卖负买
+    /// positive buy negative sell
     pub volume: f32,
     pub price: f32,
 }
