@@ -2,7 +2,7 @@ use fastrand::Rng;
 
 use crate::estimator::{Estimator, PowerLaw};
 use crate::market::Market;
-use crate::warehouse::{SellerRule, Warehouse};
+use crate::warehouse::{SellerRule, Warehouses};
 
 fn revenue_max_volumes(price_scale: &PowerLaw, surplus: f32) -> f32 {
     let slope = price_scale.slope();
@@ -35,66 +35,62 @@ fn fluctuation_factor(amplitude: f32, rng: &mut fastrand::Rng) -> f32 {
     (unit / (1.0 - unit)).powf(amplitude)
 }
 
-pub(super) fn step(warehouse: &mut Warehouse, market: &mut Market, rng: &mut Rng) {
-    let Warehouse {
-        traders,
+pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut Rng) {
+    let Warehouses {
+        warehouses,
         fluctuation,
         ..
-    } = warehouse;
+    } = warehouses;
     let fluctuation = *fluctuation;
-    for (i, trader) in traders.iter_mut().enumerate() {
-        for (j, merchandise) in trader.merchandises.iter_mut().enumerate() {
-            merchandise.natural_volume_delta = merchandise.volume - merchandise.previous_volume;
-            merchandise.marketing_volume =
-                merchandise.volume - merchandise.target_volume + merchandise.natural_volume_delta;
-            let sign = merchandise.marketing_volume.signum();
-            let base = if merchandise.marketing_volume > 0.0 {
-                let surplus = merchandise.marketing_volume.abs();
-                match merchandise.seller_rule {
+    for (i, warehouse) in warehouses.iter_mut().enumerate() {
+        for (j, stock) in warehouse.stocks.iter_mut().enumerate() {
+            stock.natural_volume_delta = stock.volume - stock.previous_volume;
+            stock.marketing_volume =
+                stock.volume - stock.target_volume + stock.natural_volume_delta;
+            let sign = stock.marketing_volume.signum();
+            let base = if stock.marketing_volume > 0.0 {
+                let surplus = stock.marketing_volume.abs();
+                match stock.seller_rule {
                     SellerRule::TargetVolume => surplus,
                     SellerRule::RevenueMax => {
-                        revenue_max_volumes(&merchandise.sell_volume2price_scale, surplus)
+                        revenue_max_volumes(&stock.sell_volume2price_scale, surplus)
                     }
                 }
             } else {
-                merchandise.marketing_volume.abs()
+                stock.marketing_volume.abs()
             };
             let magnitude = (base * fluctuation_factor(fluctuation, rng)).clamp(0.0, base);
-            merchandise.marketing_volume = magnitude * sign;
-            merchandise.marketing_price_scale = if merchandise.marketing_volume > 0.0 {
-                merchandise.sell_volume2price_scale.get(magnitude)
+            stock.marketing_volume = magnitude * sign;
+            stock.marketing_price_scale = if stock.marketing_volume > 0.0 {
+                stock.sell_volume2price_scale.get(magnitude)
             } else {
-                merchandise.buy_volume2price_scale.get(magnitude)
+                stock.buy_volume2price_scale.get(magnitude)
             };
-            let market_merchandise = &mut market.traders[i].merchandises[j];
-            market_merchandise.price =
-                market.merchandises[j].price * merchandise.marketing_price_scale;
-            market_merchandise.volume = merchandise.marketing_volume;
+            let merchandise = &mut market.traders[i].merchandises[j];
+            merchandise.price = market.merchandises[j].price * stock.marketing_price_scale;
+            merchandise.volume = stock.marketing_volume;
         }
     }
     market.step();
-    let traders_len = market.traders.len();
-    let merchandise_len = market.merchandises.len();
-    for i in 0..traders_len {
-        for k in 0..merchandise_len {
-            let merchandise = &mut traders[i].merchandises[k];
-            let market_merchandise = &market.traders[i].merchandises[k];
-            let deal_volume = market_merchandise.deal_volume();
-            merchandise.volume -= deal_volume;
+    for (i, warehouse) in warehouses.iter_mut().enumerate() {
+        for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
+            let merchandise = &market.traders[i].merchandises[k];
+            let deal_volume = merchandise.deal_volume();
+            stock.volume -= deal_volume;
             let market_price = market.merchandises[k].price;
             if deal_volume != 0.0 && market_price > 0.0 {
-                let realized_scale = market_merchandise.deal_price() / market_price;
+                let realized_scale = merchandise.deal_price() / market_price;
                 if deal_volume > 0.0 {
-                    merchandise
+                    stock
                         .sell_volume2price_scale
                         .update(deal_volume.abs(), realized_scale);
                 } else {
-                    merchandise
+                    stock
                         .buy_volume2price_scale
                         .update(deal_volume.abs(), realized_scale);
                 }
             }
-            merchandise.previous_volume = merchandise.volume;
+            stock.previous_volume = stock.volume;
         }
     }
 }

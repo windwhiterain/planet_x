@@ -6,13 +6,13 @@ mod tests;
 use crate::{estimator::PowerLaw, market::Market};
 use fastrand::Rng;
 
-pub struct Warehouse {
-    pub traders: Vec<Trader>,
+pub struct Warehouses {
+    pub warehouses: Vec<Warehouse>,
     pub fluctuation: f32,
 }
 
-pub struct Trader {
-    pub merchandises: Vec<Merchandise>,
+pub struct Warehouse {
+    pub stocks: Vec<Stock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -22,7 +22,7 @@ pub enum SellerRule {
     RevenueMax,
 }
 
-pub struct Merchandise {
+pub struct Stock {
     previous_volume: f32,
     pub volume: f32,
     pub target_volume: f32,
@@ -34,12 +34,12 @@ pub struct Merchandise {
     seller_rule: SellerRule,
 }
 
-impl Warehouse {
+impl Warehouses {
     pub const DEFAULT_FLUCTUATION: f32 = 0.2;
 
-    pub fn new(traders: Vec<Trader>) -> Self {
+    pub fn new(warehouses: Vec<Warehouse>) -> Self {
         Self {
-            traders,
+            warehouses,
             fluctuation: Self::DEFAULT_FLUCTUATION,
         }
     }
@@ -54,13 +54,13 @@ impl Warehouse {
     }
 }
 
-impl Trader {
-    pub fn new(merchandises: Vec<Merchandise>) -> Self {
-        Self { merchandises }
+impl Warehouse {
+    pub fn new(stocks: Vec<Stock>) -> Self {
+        Self { stocks }
     }
 }
 
-impl Merchandise {
+impl Stock {
     pub fn new(volume: f32, target_volume: f32) -> Self {
         Self {
             previous_volume: volume,

@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use super::{Merchandise, SellerRule, Trader, Warehouse};
+use super::{SellerRule, Stock, Warehouse, Warehouses};
 use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
@@ -21,17 +21,16 @@ fn deterministic_rng() -> Rng {
     Rng::with_seed(0)
 }
 
-fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouse {
-    Warehouse::new(
+fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouses {
+    Warehouses::new(
         quotes
             .iter()
             .map(|goods_quotes| {
-                Trader::new(
+                Warehouse::new(
                     goods_quotes
                         .iter()
                         .map(|&(volume, target)| {
-                            Merchandise::new(volume, target)
-                                .with_seller_rule(SellerRule::TargetVolume)
+                            Stock::new(volume, target).with_seller_rule(SellerRule::TargetVolume)
                         })
                         .collect(),
                 )
@@ -41,29 +40,29 @@ fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouse {
     .with_fluctuation(0.0)
 }
 
-fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouse {
+fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouses {
     let quotes: Vec<&[(f32, f32)]> = quotes.iter().map(|quotes| quotes.as_slice()).collect();
     warehouse(&quotes)
 }
 
-fn warehouse1(items: &[(f32, f32)]) -> Warehouse {
+fn warehouse1(items: &[(f32, f32)]) -> Warehouses {
     let quotes: Vec<&[(f32, f32)]> = items.iter().map(std::slice::from_ref).collect();
     warehouse(&quotes)
 }
 
-fn volumes(warehouse: &Warehouse) -> Vec<f32> {
+fn volumes(warehouse: &Warehouses) -> Vec<f32> {
     warehouse
-        .traders
+        .warehouses
         .iter()
-        .flat_map(|trader| trader.merchandises.iter().map(|item| item.volume))
+        .flat_map(|trader| trader.stocks.iter().map(|item| item.volume))
         .collect()
 }
 
-fn targets(warehouse: &Warehouse) -> Vec<f32> {
+fn targets(warehouse: &Warehouses) -> Vec<f32> {
     warehouse
-        .traders
+        .warehouses
         .iter()
-        .flat_map(|trader| trader.merchandises.iter().map(|item| item.target_volume))
+        .flat_map(|trader| trader.stocks.iter().map(|item| item.target_volume))
         .collect()
 }
 
@@ -75,11 +74,11 @@ fn prices(market: &Market) -> Vec<f32> {
         .collect()
 }
 
-fn total_stock(warehouse: &Warehouse) -> f32 {
+fn total_stock(warehouse: &Warehouses) -> f32 {
     warehouse
-        .traders
+        .warehouses
         .iter()
-        .flat_map(|trader| trader.merchandises.iter())
+        .flat_map(|trader| trader.stocks.iter())
         .map(|item| item.volume)
         .sum()
 }
@@ -98,9 +97,9 @@ fn assert_close(actual: f32, expected: f32, context: &str) {
     );
 }
 
-fn assert_finite_state(warehouse: &Warehouse, market: &Market) {
-    for (i, trader) in warehouse.traders.iter().enumerate() {
-        for (k, item) in trader.merchandises.iter().enumerate() {
+fn assert_finite_state(warehouse: &Warehouses, market: &Market) {
+    for (i, trader) in warehouse.warehouses.iter().enumerate() {
+        for (k, item) in trader.stocks.iter().enumerate() {
             assert!(
                 item.volume.is_finite(),
                 "交易者 {i} 商品 {k} 的库存非有限：{}",
@@ -194,7 +193,7 @@ fn declaration_sign_follows_the_gap() {
         let mut warehouse = warehouse1(&[(volume, target), (3.0, 3.0)]);
         warehouse.step(&mut market, &mut rng);
 
-        let declaration = warehouse.traders[0].merchandises[0].marketing_volume;
+        let declaration = warehouse.warehouses[0].stocks[0].marketing_volume;
         let gap = volume - target;
         assert!(
             declaration * gap >= 0.0,
@@ -215,7 +214,7 @@ fn stock_moves_toward_the_target_without_overshoot() {
 
     for step in 0..60 {
         warehouse.step(&mut market, &mut rng);
-        let gap = warehouse.traders[0].merchandises[0].volume - 4.0;
+        let gap = warehouse.warehouses[0].stocks[0].volume - 4.0;
         assert!(gap >= -1e-4, "第 {step} 步越过了目标：库存缺口 {gap}");
         assert!(
             gap <= previous_gap + 1e-4,
@@ -233,17 +232,9 @@ fn stock_is_bounded_by_the_counterparties_demand() {
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 1.0), (0.0, 2.0)]);
     warehouse.step(&mut market, &mut rng);
 
-    assert_close(warehouse.traders[0].merchandises[0].volume, 7.0, "卖方库存");
-    assert_close(
-        warehouse.traders[1].merchandises[0].volume,
-        1.0,
-        "买方 1 库存",
-    );
-    assert_close(
-        warehouse.traders[2].merchandises[0].volume,
-        2.0,
-        "买方 2 库存",
-    );
+    assert_close(warehouse.warehouses[0].stocks[0].volume, 7.0, "卖方库存");
+    assert_close(warehouse.warehouses[1].stocks[0].volume, 1.0, "买方 1 库存");
+    assert_close(warehouse.warehouses[2].stocks[0].volume, 2.0, "买方 2 库存");
     assert_close(total_stock(&warehouse), 10.0, "总库存");
 }
 
@@ -350,8 +341,8 @@ fn trader_order_permutes_the_trajectory() {
     for i in 0..4 {
         let moved = order.iter().position(|&source| source == i).unwrap();
         assert_close(
-            base_warehouse.traders[i].merchandises[0].volume,
-            permuted_warehouse.traders[moved].merchandises[0].volume,
+            base_warehouse.warehouses[i].stocks[0].volume,
+            permuted_warehouse.warehouses[moved].stocks[0].volume,
             &format!("交易者 {i} 的库存"),
         );
     }
@@ -399,21 +390,17 @@ fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0), (5.0, 5.0)]);
     warehouse.step(&mut market, &mut rng);
-    assert_close(
-        warehouse.traders[2].merchandises[0].volume,
-        5.0,
-        "闲置轮库存",
-    );
+    assert_close(warehouse.warehouses[2].stocks[0].volume, 5.0, "闲置轮库存");
 
-    warehouse.traders[0].merchandises[0].target_volume = 10.0;
-    warehouse.traders[2].merchandises[0].target_volume = 0.0;
+    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
+    warehouse.warehouses[2].stocks[0].target_volume = 0.0;
 
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
     }
-    assert_close(warehouse.traders[2].merchandises[0].volume, 0.0, "补卖者");
-    assert_close(warehouse.traders[0].merchandises[0].volume, 9.0, "回补者");
+    assert_close(warehouse.warehouses[2].stocks[0].volume, 0.0, "补卖者");
+    assert_close(warehouse.warehouses[0].stocks[0].volume, 9.0, "回补者");
 }
 
 #[test]
@@ -423,18 +410,18 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
     warehouse.step(&mut market, &mut rng);
     assert_close(market.merchandises[0].price, 10.0, "首轮清算价");
-    assert_close(warehouse.traders[0].merchandises[0].volume, 4.0, "首轮卖方");
-    assert_close(warehouse.traders[1].merchandises[0].volume, 6.0, "首轮买方");
+    assert_close(warehouse.warehouses[0].stocks[0].volume, 4.0, "首轮卖方");
+    assert_close(warehouse.warehouses[1].stocks[0].volume, 6.0, "首轮买方");
 
-    warehouse.traders[0].merchandises[0].target_volume = 10.0;
-    warehouse.traders[1].merchandises[0].target_volume = 0.0;
+    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
+    warehouse.warehouses[1].stocks[0].target_volume = 0.0;
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
     }
 
-    assert_close(warehouse.traders[0].merchandises[0].volume, 10.0, "回补者");
-    assert_close(warehouse.traders[1].merchandises[0].volume, 0.0, "回吐者");
+    assert_close(warehouse.warehouses[0].stocks[0].volume, 10.0, "回补者");
+    assert_close(warehouse.warehouses[1].stocks[0].volume, 0.0, "回吐者");
     assert!(
         (5.0..=20.0).contains(&market.merchandises[0].price),
         "同一笔交易反向后价格水位应当还在 10 附近，实际 {}",
@@ -453,7 +440,7 @@ fn a_realized_trade_pulls_the_next_quote_toward_the_realized_price() {
     assert_close(first_quote, 10.0 / 6.0, "首轮报价");
     assert_close(realized_price, 10.0, "首轮成交价");
 
-    warehouse.traders[0].merchandises[0].target_volume = 0.0;
+    warehouse.warehouses[0].stocks[0].target_volume = 0.0;
     warehouse.step(&mut market, &mut rng);
     let next_quote = market.traders[0].merchandises[0].price;
 
@@ -475,8 +462,8 @@ fn zero_target_liquidates_all_stock() {
 
     warehouse.step(&mut market, &mut rng);
 
-    assert_close(warehouse.traders[0].merchandises[0].volume, 0.0, "清仓者");
-    assert_close(warehouse.traders[1].merchandises[0].volume, 5.0, "补库者");
+    assert_close(warehouse.warehouses[0].stocks[0].volume, 0.0, "清仓者");
+    assert_close(warehouse.warehouses[1].stocks[0].volume, 5.0, "补库者");
     assert_eq!(targets(&warehouse), volumes(&warehouse));
 }
 
@@ -517,10 +504,10 @@ fn fluctuation_is_a_deterministic_power_law_draw() {
     let mut rng_a = deterministic_rng();
     let mut rng_b = deterministic_rng();
     for _ in 0..20 {
-        warehouse_a.traders[0].merchandises[0].volume += 1.0;
-        warehouse_a.traders[1].merchandises[0].volume -= 1.0;
-        warehouse_b.traders[0].merchandises[0].volume += 1.0;
-        warehouse_b.traders[1].merchandises[0].volume -= 1.0;
+        warehouse_a.warehouses[0].stocks[0].volume += 1.0;
+        warehouse_a.warehouses[1].stocks[0].volume -= 1.0;
+        warehouse_b.warehouses[0].stocks[0].volume += 1.0;
+        warehouse_b.warehouses[1].stocks[0].volume -= 1.0;
         warehouse_a.step(&mut market_a, &mut rng_a);
         warehouse_b.step(&mut market_b, &mut rng_b);
         assert_eq!(
@@ -539,10 +526,10 @@ fn fluctuation_is_a_deterministic_power_law_draw() {
     let mut rng_fluctuated = deterministic_rng();
     let mut differs = false;
     for _ in 0..20 {
-        plain.traders[0].merchandises[0].volume += 1.0;
-        plain.traders[1].merchandises[0].volume -= 1.0;
-        fluctuated.traders[0].merchandises[0].volume += 1.0;
-        fluctuated.traders[1].merchandises[0].volume -= 1.0;
+        plain.warehouses[0].stocks[0].volume += 1.0;
+        plain.warehouses[1].stocks[0].volume -= 1.0;
+        fluctuated.warehouses[0].stocks[0].volume += 1.0;
+        fluctuated.warehouses[1].stocks[0].volume -= 1.0;
         plain.step(&mut plain_market, &mut rng_plain);
         fluctuated.step(&mut fluctuated_market, &mut rng_fluctuated);
         if volumes(&plain) != volumes(&fluctuated) {
@@ -560,8 +547,8 @@ fn seed_selects_the_fluctuation_path() {
         let mut warehouse = warehouse_from(&quotes).with_fluctuation(0.5);
         let mut rng = Rng::with_seed(seed);
         for _ in 0..20 {
-            warehouse.traders[0].merchandises[0].volume += 1.0;
-            warehouse.traders[1].merchandises[0].volume -= 1.0;
+            warehouse.warehouses[0].stocks[0].volume += 1.0;
+            warehouse.warehouses[1].stocks[0].volume -= 1.0;
             warehouse.step(&mut market, &mut rng);
         }
         market.merchandises[0].price
@@ -584,16 +571,15 @@ fn seller_rule_switches_the_offered_volume() {
     let mut target_market = market(1, 10.0, 2);
     let mut withhold_market = market(1, 10.0, 2);
 
-    let target_rule = Warehouse::new(
+    let target_rule = Warehouses::new(
         quotes
             .iter()
             .map(|quotes| {
-                Trader::new(
+                Warehouse::new(
                     quotes
                         .iter()
                         .map(|&(volume, target)| {
-                            Merchandise::new(volume, target)
-                                .with_seller_rule(SellerRule::TargetVolume)
+                            Stock::new(volume, target).with_seller_rule(SellerRule::TargetVolume)
                         })
                         .collect(),
                 )
@@ -601,16 +587,15 @@ fn seller_rule_switches_the_offered_volume() {
             .collect(),
     )
     .with_fluctuation(0.0);
-    let withhold_rule = Warehouse::new(
+    let withhold_rule = Warehouses::new(
         quotes
             .iter()
             .map(|quotes| {
-                Trader::new(
+                Warehouse::new(
                     quotes
                         .iter()
                         .map(|&(volume, target)| {
-                            Merchandise::new(volume, target)
-                                .with_seller_rule(SellerRule::RevenueMax)
+                            Stock::new(volume, target).with_seller_rule(SellerRule::RevenueMax)
                         })
                         .collect(),
                 )
@@ -643,14 +628,14 @@ fn revenue_max_withholds_when_the_revenue_is_flat() {
     let mut rng = deterministic_rng();
     let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
     let mut market = market(1, 10.0, 2);
-    let mut warehouse = Warehouse::new(
+    let mut warehouse = Warehouses::new(
         quotes
             .iter()
             .map(|quotes| {
-                Trader::new(
+                Warehouse::new(
                     quotes
                         .iter()
-                        .map(|&(volume, target)| Merchandise::new(volume, target))
+                        .map(|&(volume, target)| Stock::new(volume, target))
                         .collect(),
                 )
             })
