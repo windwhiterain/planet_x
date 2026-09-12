@@ -2,6 +2,36 @@ use planet_x::department::probe::{self, Treasury};
 
 fn main() {
     let trace = std::env::args().any(|argument| argument == "--trace");
+    let learning = std::env::args().any(|argument| argument == "--learning");
+    if learning {
+        for (regime, treasury) in [
+            ("国内", Treasury::Redistributing),
+            ("国际", Treasury::Free),
+        ] {
+            for (mode, fixed_slope) in [("阶数可学", false), ("阶数钉死", true)] {
+                for forgetting in probe::LEARNING_RATES {
+                    for (label, delta) in [("同相", 0.0f32), ("递相", 2.0 * std::f32::consts::PI / 3.0)]
+                    {
+                        let report =
+                            probe::learning_sweep(treasury, forgetting, fixed_slope, 0.25, delta);
+                        println!(
+                            "{regime} {mode} 遗忘 {:.2} {label}：成交率 {:>5.1}% 价格 {:.3}~{:.3} 漂移 {:+.1}% 库存 {:.1}~{:.1} 冻结 {} [{}]",
+                            forgetting,
+                            100.0 - report.uncleared,
+                            report.min_price,
+                            report.max_price,
+                            100.0 * report.drift,
+                            report.min_stock,
+                            report.max_stock,
+                            report.frozen,
+                            report.verdict(),
+                        );
+                    }
+                }
+            }
+        }
+        return;
+    }
     let amplitude = 0.25;
     for (regime, treasury) in [
         ("国内经济循环：回收货币，统一重新发放", Treasury::Redistributing),

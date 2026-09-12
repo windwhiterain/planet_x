@@ -284,6 +284,11 @@ impl Probe {
         }
     }
 
+    fn with_learning(mut self, forgetting: f32, fixed_slope: bool) -> Self {
+        self.warehouses = self.warehouses.with_learning(forgetting, fixed_slope);
+        self
+    }
+
     fn regime(&self) -> &'static str {
         match self.treasury {
             Treasury::Redistributing => "国内",
@@ -479,6 +484,22 @@ pub const SWEEP_PHASES: [f32; 7] = [
 /// 三个部门依次相差 delta 相位；delta = 0 完全同相，delta = π 最互补
 pub fn sweep(treasury: Treasury, period: f32, delta: f32, amplitude: f32) -> Report {
     sweep_offset(treasury, period, delta, 0.0, amplitude)
+}
+
+/// 学习率扫描：固定振幅与相位，只改遗忘因子与阶数是否可学
+pub const LEARNING_RATES: [f32; 6] = [0.3, 0.6, 0.8, 0.9, 0.95, 0.99];
+
+pub fn learning_sweep(
+    treasury: Treasury,
+    forgetting: f32,
+    fixed_slope: bool,
+    amplitude: f32,
+    delta: f32,
+) -> Report {
+    let phases = [0.0, delta, 2.0 * delta];
+    Probe::new(treasury, 6.0, amplitude, phases, 11)
+        .with_learning(forgetting, fixed_slope)
+        .run_report()
 }
 
 /// offset = 0 为正正弦（涨在先），offset = π 为负正弦（跌在先）

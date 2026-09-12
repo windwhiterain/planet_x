@@ -55,6 +55,16 @@ impl Warehouses {
         self
     }
 
+    /// 学习率与阶数：forgetting 越小追得越快，fixed_slope 为真则只学水平
+    pub fn with_learning(mut self, forgetting: f32, fixed_slope: bool) -> Self {
+        for warehouse in self.warehouses.iter_mut() {
+            for stock in warehouse.stocks.iter_mut() {
+                stock.reset_estimators(forgetting, fixed_slope);
+            }
+        }
+        self
+    }
+
     pub fn step(&mut self, market: &mut Market, rng: &mut Rng) {
         step::step(self, market, rng);
     }
@@ -83,10 +93,8 @@ impl Stock {
             marketing_price_scale: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
-            buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING)
-                .with_fixed_slope(),
-            sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING)
-                .with_fixed_slope(),
+            buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
+            sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
             seller_rule: SellerRule::default(),
         }
     }
@@ -94,6 +102,22 @@ impl Stock {
     pub fn with_seller_rule(mut self, seller_rule: SellerRule) -> Self {
         self.seller_rule = seller_rule;
         self
+    }
+
+    /// 重设两侧估计器：阶数可学或钉死，遗忘因子即学习率
+    pub fn reset_estimators(&mut self, forgetting: f32, fixed_slope: bool) {
+        let buy = PowerLaw::new(1.0, 0.0, forgetting);
+        let sell = PowerLaw::new(-1.0, 0.0, forgetting);
+        self.buy_volume2price_scale = if fixed_slope {
+            buy.with_fixed_slope()
+        } else {
+            buy
+        };
+        self.sell_volume2price_scale = if fixed_slope {
+            sell.with_fixed_slope()
+        } else {
+            sell
+        };
     }
 
     pub fn sell_volume2price_scale(&self) -> &PowerLaw {
