@@ -14,6 +14,7 @@ pub struct Warehouses {
 /// index with [`crate::market::Trader`]
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
+    pub currency: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,7 +59,15 @@ impl Warehouses {
 
 impl Warehouse {
     pub fn new(stocks: Vec<Stock>) -> Self {
-        Self { stocks }
+        Self {
+            stocks,
+            currency: 0.0,
+        }
+    }
+
+    pub fn with_currency(mut self, currency: f32) -> Self {
+        self.currency = currency.max(0.0);
+        self
     }
 }
 

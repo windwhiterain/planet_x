@@ -2,7 +2,7 @@ use fastrand::Rng;
 
 use crate::estimator::{Estimator, PowerLaw};
 use crate::market::Market;
-use crate::warehouse::{SellerRule, Warehouses};
+use crate::warehouse::{SellerRule, Warehouse, Warehouses};
 
 fn revenue_max_volumes(price_scale: &PowerLaw, surplus: f32) -> f32 {
     let slope = price_scale.slope();
@@ -43,7 +43,8 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
     } = warehouses;
     let fluctuation = *fluctuation;
     for (i, warehouse) in warehouses.iter_mut().enumerate() {
-        for (j, stock) in warehouse.stocks.iter_mut().enumerate() {
+        let Warehouse { stocks, currency } = warehouse;
+        for stock in stocks.iter_mut() {
             stock.natural_volume_delta = stock.volume - stock.previous_volume;
             stock.marketing_volume =
                 stock.volume - stock.target_volume + stock.natural_volume_delta;
@@ -61,10 +62,33 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
             };
             let magnitude = (base * fluctuation_factor(fluctuation, rng)).clamp(0.0, base);
             stock.marketing_volume = magnitude * sign;
+        }
+        let budget = currency.max(0.0);
+        for _ in 0..64 {
+            let mut bill = 0.0;
+            for (j, stock) in stocks.iter().enumerate() {
+                if stock.marketing_volume >= 0.0 {
+                    continue;
+                }
+                let volume = stock.marketing_volume.abs();
+                let price = market.merchandises[j].price.max(0.0);
+                bill += volume * price * stock.buy_volume2price_scale.get(volume);
+            }
+            if bill <= budget || !(bill > 0.0) {
+                break;
+            }
+            let factor = (budget / bill).sqrt().clamp(0.0, 1.0);
+            for stock in stocks.iter_mut() {
+                if stock.marketing_volume < 0.0 {
+                    stock.marketing_volume *= factor;
+                }
+            }
+        }
+        for (j, stock) in stocks.iter_mut().enumerate() {
             stock.marketing_price_scale = if stock.marketing_volume > 0.0 {
-                stock.sell_volume2price_scale.get(magnitude)
+                stock.sell_volume2price_scale.get(stock.marketing_volume.abs())
             } else {
-                stock.buy_volume2price_scale.get(magnitude)
+                stock.buy_volume2price_scale.get(stock.marketing_volume.abs())
             };
             let merchandise = &mut market.traders[i].merchandises[j];
             merchandise.price = market.merchandises[j].price * stock.marketing_price_scale;

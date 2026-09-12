@@ -1,10 +1,8 @@
 [package]
-name = "planet_x"
+name = "game"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = ["game"]
-
 [dependencies]
 fastrand = "2"
+planet_x = { path = ".." }

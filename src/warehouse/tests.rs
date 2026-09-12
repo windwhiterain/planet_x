@@ -5,6 +5,8 @@ use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
 
+const UNBOUNDED_CURRENCY: f32 = 1e12;
+
 fn market(goods: usize, price: f32, traders: usize) -> Market {
     let merchandises = (0..goods).map(|_| MarketMerchandise { price }).collect();
     let traders = (0..traders)
@@ -34,6 +36,7 @@ fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouses {
                         })
                         .collect(),
                 )
+                .with_currency(UNBOUNDED_CURRENCY)
             })
             .collect(),
     )
@@ -583,6 +586,7 @@ fn seller_rule_switches_the_offered_volume() {
                         })
                         .collect(),
                 )
+                .with_currency(UNBOUNDED_CURRENCY)
             })
             .collect(),
     )
@@ -599,6 +603,7 @@ fn seller_rule_switches_the_offered_volume() {
                         })
                         .collect(),
                 )
+                .with_currency(UNBOUNDED_CURRENCY)
             })
             .collect(),
     )
@@ -638,6 +643,7 @@ fn revenue_max_withholds_when_the_revenue_is_flat() {
                         .map(|&(volume, target)| Stock::new(volume, target))
                         .collect(),
                 )
+                .with_currency(UNBOUNDED_CURRENCY)
             })
             .collect(),
     )
@@ -654,4 +660,46 @@ fn revenue_max_withholds_when_the_revenue_is_flat() {
     );
     assert!(ask > 1000.0, "少卖应当顶到价格尺度上限：{ask}");
     assert_eq!(dealt, 0.0, "报价过高应当无法成交：{dealt}");
+}
+
+#[test]
+fn a_warehouse_buys_no_more_than_its_currency_covers() {
+    let mut rng = deterministic_rng();
+    let quotes = [&[(100.0, 50.0)][..], &[(0.0, 8.0)][..]];
+    let mut rich_market = market(1, 10.0, 2);
+    let mut poor_market = market(1, 10.0, 2);
+    let mut rich = warehouse(&quotes);
+    let mut poor = warehouse(&quotes);
+    poor.warehouses[1].currency = 5.0;
+
+    rich.step(&mut rich_market, &mut rng);
+    poor.step(&mut poor_market, &mut rng);
+
+    let rich_demand = rich_market.traders[1].merchandises[0].volume;
+    let poor_demand = poor_market.traders[1].merchandises[0].volume;
+    assert!(rich_demand < 0.0, "有钱的仓库应当买入：{rich_demand}");
+    assert!(
+        poor_demand.abs() < rich_demand.abs(),
+        "缺钱的仓库应当买得更少：{poor_demand} / {rich_demand}",
+    );
+    let bill = poor_demand.abs() * poor_market.traders[1].merchandises[0].price;
+    assert!(
+        bill <= 5.0 + 1e-3,
+        "买入所需不得超过仓库的货币：{bill}",
+    );
+    assert!(poor_demand.abs() > 0.0, "买得起就应当买：{poor_demand}");
+}
+
+#[test]
+fn a_warehouse_without_currency_stays_out_of_the_market() {
+    let mut rng = deterministic_rng();
+    let quotes = [&[(100.0, 50.0)][..], &[(0.0, 8.0)][..]];
+    let mut market = market(1, 10.0, 2);
+    let mut warehouse = warehouse(&quotes);
+    warehouse.warehouses[1].currency = 0.0;
+
+    warehouse.step(&mut market, &mut rng);
+
+    assert_eq!(market.traders[1].merchandises[0].volume, 0.0, "没钱就不申报");
+    assert_eq!(market.traders[1].merchandises[0].deal_volume(), 0.0, "没钱就买不到");
 }
