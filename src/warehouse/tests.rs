@@ -1,4 +1,6 @@
-use super::{Merchandise, Trader, Warehouse};
+use fastrand::Rng;
+
+use super::{Merchandise, SellerRule, Trader, Warehouse};
 use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
@@ -15,6 +17,10 @@ fn market(goods: usize, price: f32, traders: usize) -> Market {
     Market::new(merchandises, traders)
 }
 
+fn deterministic_rng() -> Rng {
+    Rng::with_seed(0)
+}
+
 fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouse {
     Warehouse::new(
         quotes
@@ -23,12 +29,16 @@ fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouse {
                 Trader::new(
                     goods_quotes
                         .iter()
-                        .map(|&(volume, target)| Merchandise::new(volume, target))
+                        .map(|&(volume, target)| {
+                            Merchandise::new(volume, target)
+                                .with_seller_rule(SellerRule::TargetVolume)
+                        })
                         .collect(),
                 )
             })
             .collect(),
     )
+    .with_fluctuation(0.0)
 }
 
 fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouse {
@@ -128,12 +138,13 @@ fn assert_finite_state(warehouse: &Warehouse, market: &Market) {
 
 #[test]
 fn trader_at_target_stays_silent() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(4.0, 4.0), (8.0, 8.0), (5.0, 5.0)]);
     let before = volumes(&warehouse);
 
     for _ in 0..50 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
     }
 
     assert_eq!(before, volumes(&warehouse), "无缺口时库存不应变化");
@@ -145,10 +156,11 @@ fn trader_at_target_stays_silent() {
 
 #[test]
 fn every_reachable_target_is_cleared_in_one_step() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
 
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
 
     assert_eq!(
         targets(&warehouse),
@@ -160,14 +172,15 @@ fn every_reachable_target_is_cleared_in_one_step() {
 
 #[test]
 fn settled_state_is_a_fixed_point() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
     let settled = volumes(&warehouse);
     let settled_price = prices(&market);
 
     for step in 1..50 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_eq!(settled, volumes(&warehouse), "第 {step} 步后库存漂移");
         assert_eq!(settled_price, prices(&market), "第 {step} 步后价格漂移");
     }
@@ -175,10 +188,11 @@ fn settled_state_is_a_fixed_point() {
 
 #[test]
 fn declaration_sign_follows_the_gap() {
+    let mut rng = deterministic_rng();
     for (volume, target) in [(10.0, 4.0), (2.0, 8.0), (5.0, 5.0), (0.0, 3.0)] {
         let mut market = market(1, 10.0, 2);
         let mut warehouse = warehouse1(&[(volume, target), (3.0, 3.0)]);
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
 
         let declaration = warehouse.traders[0].merchandises[0].marketing_volume;
         let gap = volume - target;
@@ -194,12 +208,13 @@ fn declaration_sign_follows_the_gap() {
 
 #[test]
 fn stock_moves_toward_the_target_without_overshoot() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 1.0), (0.0, 2.0)]);
     let mut previous_gap = 6.0;
 
     for step in 0..60 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         let gap = warehouse.traders[0].merchandises[0].volume - 4.0;
         assert!(gap >= -1e-4, "第 {step} 步越过了目标：库存缺口 {gap}");
         assert!(
@@ -213,9 +228,10 @@ fn stock_moves_toward_the_target_without_overshoot() {
 
 #[test]
 fn stock_is_bounded_by_the_counterparties_demand() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 1.0), (0.0, 2.0)]);
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
 
     assert_close(warehouse.traders[0].merchandises[0].volume, 7.0, "卖方库存");
     assert_close(
@@ -233,6 +249,7 @@ fn stock_is_bounded_by_the_counterparties_demand() {
 
 #[test]
 fn inventory_is_conserved_over_a_long_run() {
+    let mut rng = deterministic_rng();
     let mut market = market(2, 10.0, 3);
     let mut warehouse = warehouse(&[
         &[(10.0, 4.0), (8.0, 12.0)],
@@ -242,7 +259,7 @@ fn inventory_is_conserved_over_a_long_run() {
     let initial = total_stock(&warehouse);
 
     for step in 0..200 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_close(
             total_stock(&warehouse),
             initial,
@@ -253,6 +270,7 @@ fn inventory_is_conserved_over_a_long_run() {
 
 #[test]
 fn long_horizon_state_is_finite_and_bounded() {
+    let mut rng = deterministic_rng();
     let mut market = market(2, 10.0, 3);
     market.merchandises[1].price = 12.0;
     let mut warehouse = warehouse(&[
@@ -262,7 +280,7 @@ fn long_horizon_state_is_finite_and_bounded() {
     ]);
 
     for step in 0..500 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_finite_state(&warehouse, &market);
         for (k, price) in prices(&market).iter().enumerate() {
             assert!(
@@ -290,10 +308,12 @@ fn warehouse_run_is_deterministic() {
     ];
     let mut warehouse_a = warehouse_from(&quotes);
     let mut warehouse_b = warehouse_from(&quotes);
+    let mut rng_a = deterministic_rng();
+    let mut rng_b = deterministic_rng();
 
     for _ in 0..40 {
-        warehouse_a.step(&mut market_a);
-        warehouse_b.step(&mut market_b);
+        warehouse_a.step(&mut market_a, &mut rng_a);
+        warehouse_b.step(&mut market_b, &mut rng_b);
         assert_eq!(volumes(&warehouse_a), volumes(&warehouse_b));
         assert_eq!(prices(&market_a), prices(&market_b));
     }
@@ -314,10 +334,12 @@ fn trader_order_permutes_the_trajectory() {
     let mut permuted_market = market(1, 10.0, 4);
     let mut base_warehouse = warehouse_from(&base);
     let mut permuted_warehouse = warehouse_from(&permuted);
+    let mut rng_base = deterministic_rng();
+    let mut rng_permuted = deterministic_rng();
 
     for _ in 0..20 {
-        base_warehouse.step(&mut base_market);
-        permuted_warehouse.step(&mut permuted_market);
+        base_warehouse.step(&mut base_market, &mut rng_base);
+        permuted_warehouse.step(&mut permuted_market, &mut rng_permuted);
     }
 
     assert_close(
@@ -337,12 +359,13 @@ fn trader_order_permutes_the_trajectory() {
 
 #[test]
 fn zero_price_market_is_frozen_and_finite() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 0.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0)]);
     let before = volumes(&warehouse);
 
     for _ in 0..30 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_finite_state(&warehouse, &market);
     }
 
@@ -372,9 +395,10 @@ fn assert_active_quotes_are_positive(market: &Market) {
 
 #[test]
 fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0), (5.0, 5.0)]);
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
     assert_close(
         warehouse.traders[2].merchandises[0].volume,
         5.0,
@@ -385,7 +409,7 @@ fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
     warehouse.traders[2].merchandises[0].target_volume = 0.0;
 
     for _ in 0..3 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
     }
     assert_close(warehouse.traders[2].merchandises[0].volume, 0.0, "补卖者");
@@ -394,9 +418,10 @@ fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
 
 #[test]
 fn reversing_the_same_trade_does_not_revalue_the_good() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
     assert_close(market.merchandises[0].price, 10.0, "首轮清算价");
     assert_close(warehouse.traders[0].merchandises[0].volume, 4.0, "首轮卖方");
     assert_close(warehouse.traders[1].merchandises[0].volume, 6.0, "首轮买方");
@@ -404,7 +429,7 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     warehouse.traders[0].merchandises[0].target_volume = 10.0;
     warehouse.traders[1].merchandises[0].target_volume = 0.0;
     for _ in 0..3 {
-        warehouse.step(&mut market);
+        warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
     }
 
@@ -419,16 +444,17 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
 
 #[test]
 fn a_realized_trade_pulls_the_next_quote_toward_the_realized_price() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
     let first_quote = market.traders[0].merchandises[0].price;
     let realized_price = market.merchandises[0].price;
     assert_close(first_quote, 10.0 / 6.0, "首轮报价");
     assert_close(realized_price, 10.0, "首轮成交价");
 
     warehouse.traders[0].merchandises[0].target_volume = 0.0;
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
     let next_quote = market.traders[0].merchandises[0].price;
 
     assert!(
@@ -443,12 +469,204 @@ fn a_realized_trade_pulls_the_next_quote_toward_the_realized_price() {
 
 #[test]
 fn zero_target_liquidates_all_stock() {
+    let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(5.0, 0.0), (0.0, 5.0)]);
 
-    warehouse.step(&mut market);
+    warehouse.step(&mut market, &mut rng);
 
     assert_close(warehouse.traders[0].merchandises[0].volume, 0.0, "清仓者");
     assert_close(warehouse.traders[1].merchandises[0].volume, 5.0, "补库者");
     assert_eq!(targets(&warehouse), volumes(&warehouse));
+}
+
+#[test]
+fn fluctuation_only_shrinks_the_declaration_and_keeps_its_direction() {
+    let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
+    let mut deterministic = market(1, 10.0, 2);
+    let mut fluctuated = market(1, 10.0, 2);
+    let mut rng_plain = deterministic_rng();
+    let mut rng_fluctuated = deterministic_rng();
+
+    warehouse(&quotes).step(&mut deterministic, &mut rng_plain);
+    warehouse(&quotes)
+        .with_fluctuation(0.5)
+        .step(&mut fluctuated, &mut rng_fluctuated);
+
+    for i in 0..2 {
+        let base = deterministic.traders[i].merchandises[0].volume;
+        let value = fluctuated.traders[i].merchandises[0].volume;
+        assert!(
+            value.abs() <= base.abs() + 1e-5,
+            "交易者 {i} 的申报被放大：基准 {base}，实际 {value}",
+        );
+        assert!(
+            value * base >= 0.0,
+            "交易者 {i} 的申报方向被翻转：基准 {base}，实际 {value}",
+        );
+    }
+}
+
+#[test]
+fn fluctuation_is_a_deterministic_power_law_draw() {
+    let quotes = vec![vec![(10.0, 4.0)], vec![(0.0, 6.0)], vec![(5.0, 5.0)]];
+    let mut market_a = market(1, 10.0, 3);
+    let mut market_b = market(1, 10.0, 3);
+    let mut warehouse_a = warehouse_from(&quotes).with_fluctuation(0.5);
+    let mut warehouse_b = warehouse_from(&quotes).with_fluctuation(0.5);
+    let mut rng_a = deterministic_rng();
+    let mut rng_b = deterministic_rng();
+    for _ in 0..20 {
+        warehouse_a.traders[0].merchandises[0].volume += 1.0;
+        warehouse_a.traders[1].merchandises[0].volume -= 1.0;
+        warehouse_b.traders[0].merchandises[0].volume += 1.0;
+        warehouse_b.traders[1].merchandises[0].volume -= 1.0;
+        warehouse_a.step(&mut market_a, &mut rng_a);
+        warehouse_b.step(&mut market_b, &mut rng_b);
+        assert_eq!(
+            volumes(&warehouse_a),
+            volumes(&warehouse_b),
+            "同种子应当复现"
+        );
+        assert_eq!(prices(&market_a), prices(&market_b), "同种子价格应当复现");
+    }
+
+    let mut plain_market = market(1, 10.0, 3);
+    let mut fluctuated_market = market(1, 10.0, 3);
+    let mut plain = warehouse_from(&quotes);
+    let mut fluctuated = warehouse_from(&quotes).with_fluctuation(0.5);
+    let mut rng_plain = deterministic_rng();
+    let mut rng_fluctuated = deterministic_rng();
+    let mut differs = false;
+    for _ in 0..20 {
+        plain.traders[0].merchandises[0].volume += 1.0;
+        plain.traders[1].merchandises[0].volume -= 1.0;
+        fluctuated.traders[0].merchandises[0].volume += 1.0;
+        fluctuated.traders[1].merchandises[0].volume -= 1.0;
+        plain.step(&mut plain_market, &mut rng_plain);
+        fluctuated.step(&mut fluctuated_market, &mut rng_fluctuated);
+        if volumes(&plain) != volumes(&fluctuated) {
+            differs = true;
+        }
+    }
+    assert!(differs, "波动开启后轨迹应当与关闭时不同");
+}
+
+#[test]
+fn seed_selects_the_fluctuation_path() {
+    let quotes = vec![vec![(10.0, 4.0)], vec![(0.0, 6.0)], vec![(5.0, 5.0)]];
+    let run = |seed: u64| {
+        let mut market = market(1, 10.0, 3);
+        let mut warehouse = warehouse_from(&quotes).with_fluctuation(0.5);
+        let mut rng = Rng::with_seed(seed);
+        for _ in 0..20 {
+            warehouse.traders[0].merchandises[0].volume += 1.0;
+            warehouse.traders[1].merchandises[0].volume -= 1.0;
+            warehouse.step(&mut market, &mut rng);
+        }
+        market.merchandises[0].price
+    };
+
+    assert_eq!(run(7), run(7), "同一种子应当复现同一条路径");
+    let seeds = [0u64, 1, 2, 3, 7, 11];
+    let prices: Vec<f32> = seeds.iter().map(|seed| run(*seed)).collect();
+    let first = prices[0];
+    assert!(
+        prices.iter().any(|price| *price != first),
+        "不同种子应当走出不同路径：{prices:?}",
+    );
+}
+
+#[test]
+fn seller_rule_switches_the_offered_volume() {
+    let mut rng = deterministic_rng();
+    let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
+    let mut target_market = market(1, 10.0, 2);
+    let mut withhold_market = market(1, 10.0, 2);
+
+    let target_rule = Warehouse::new(
+        quotes
+            .iter()
+            .map(|quotes| {
+                Trader::new(
+                    quotes
+                        .iter()
+                        .map(|&(volume, target)| {
+                            Merchandise::new(volume, target)
+                                .with_seller_rule(SellerRule::TargetVolume)
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+    .with_fluctuation(0.0);
+    let withhold_rule = Warehouse::new(
+        quotes
+            .iter()
+            .map(|quotes| {
+                Trader::new(
+                    quotes
+                        .iter()
+                        .map(|&(volume, target)| {
+                            Merchandise::new(volume, target)
+                                .with_seller_rule(SellerRule::RevenueMax)
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+    .with_fluctuation(0.0);
+
+    let mut target_rule = target_rule;
+    let mut withhold_rule = withhold_rule;
+    target_rule.step(&mut target_market, &mut rng);
+    withhold_rule.step(&mut withhold_market, &mut rng);
+
+    let target_offer = target_market.traders[0].merchandises[0].volume;
+    let withhold_offer = withhold_market.traders[0].merchandises[0].volume;
+    assert!(target_offer > 0.0, "基准卖方应当卖出");
+    assert!(
+        withhold_offer < target_offer,
+        "收益最大应当挂出更少的申报：基准 {target_offer}，实际 {withhold_offer}",
+    );
+    assert!(
+        withhold_market.traders[0].merchandises[0].price
+            > target_market.traders[0].merchandises[0].price,
+        "少卖应当报出更高的价格",
+    );
+}
+
+#[test]
+fn revenue_max_withholds_when_the_revenue_is_flat() {
+    let mut rng = deterministic_rng();
+    let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
+    let mut market = market(1, 10.0, 2);
+    let mut warehouse = Warehouse::new(
+        quotes
+            .iter()
+            .map(|quotes| {
+                Trader::new(
+                    quotes
+                        .iter()
+                        .map(|&(volume, target)| Merchandise::new(volume, target))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+    .with_fluctuation(0.0);
+
+    warehouse.step(&mut market, &mut rng);
+
+    let offer = market.traders[0].merchandises[0].volume;
+    let ask = market.traders[0].merchandises[0].price;
+    let dealt = market.traders[1].merchandises[0].deal_volume();
+    assert!(
+        offer > 0.0 && offer < 0.01,
+        "单位弹性下利润对该量完全平坦，应当挂出最少量的解：{offer}",
+    );
+    assert!(ask > 1000.0, "少卖应当顶到价格尺度上限：{ask}");
+    assert_eq!(dealt, 0.0, "报价过高应当无法成交：{dealt}");
 }

@@ -4,13 +4,22 @@ mod step;
 mod tests;
 
 use crate::{estimator::PowerLaw, market::Market};
+use fastrand::Rng;
 
 pub struct Warehouse {
     pub traders: Vec<Trader>,
+    pub fluctuation: f32,
 }
 
 pub struct Trader {
     pub merchandises: Vec<Merchandise>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SellerRule {
+    TargetVolume,
+    #[default]
+    RevenueMax,
 }
 
 pub struct Merchandise {
@@ -22,15 +31,26 @@ pub struct Merchandise {
     natural_volume_delta: f32,
     buy_volume2price_scale: PowerLaw,
     sell_volume2price_scale: PowerLaw,
+    seller_rule: SellerRule,
 }
 
 impl Warehouse {
+    pub const DEFAULT_FLUCTUATION: f32 = 0.2;
+
     pub fn new(traders: Vec<Trader>) -> Self {
-        Self { traders }
+        Self {
+            traders,
+            fluctuation: Self::DEFAULT_FLUCTUATION,
+        }
     }
 
-    pub fn step(&mut self, market: &mut Market) {
-        step::step(self, market);
+    pub fn with_fluctuation(mut self, fluctuation: f32) -> Self {
+        self.fluctuation = fluctuation.max(0.0);
+        self
+    }
+
+    pub fn step(&mut self, market: &mut Market, rng: &mut Rng) {
+        step::step(self, market, rng);
     }
 }
 
@@ -51,6 +71,12 @@ impl Merchandise {
             natural_volume_delta: 0.0,
             buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
             sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
+            seller_rule: SellerRule::default(),
         }
+    }
+
+    pub fn with_seller_rule(mut self, seller_rule: SellerRule) -> Self {
+        self.seller_rule = seller_rule;
+        self
     }
 }
