@@ -1,4 +1,4 @@
-use crate::utils::{conditional_swap, geometric_average, same_signature, similarity};
+use crate::utils::{conditional_swap, geometric_average, same_signature};
 
 pub(super) fn step(market: &mut super::Market) {
     let merchandises_len = market.merchandises.len();
@@ -14,11 +14,11 @@ pub(super) fn step(market: &mut super::Market) {
                     if same_signature(trader_merchandise0.volume, trader_merchandise1.volume) {
                         break 'p (0.0, 0.0);
                     }
+                    let volume_potential = trader_merchandise1.volume.abs();
                     let direction = trader_merchandise0.volume > trader_merchandise1.volume;
                     let (seller, buyer) =
                         conditional_swap(trader_merchandise0, trader_merchandise1, !direction);
                     let price_potential = (buyer.price - seller.price).max(0.0);
-                    let volume_potential = similarity(seller.volume, -buyer.volume);
                     (price_potential, volume_potential)
                 };
                 let deal = &mut market.deals[i][j][k];
