@@ -7,7 +7,7 @@ pub struct Warehouse {
 }
 
 pub struct Trader {
-    pub merchadises: Vec<Merchandise>,
+    pub merchandises: Vec<Merchandise>,
 }
 
 pub struct Merchandise {

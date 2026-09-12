@@ -1,12 +1,12 @@
-use crate::utils::{abgebraic_average, conditional_swap, cosine_similarity, same_signature};
+use crate::utils::{conditional_swap, geometric_average, same_signature, similarity};
 
 pub(super) fn step(market: &mut super::Market) {
     let merchandises_len = market.merchandises.len();
-    let traiders_len = market.traders.len();
+    let traders_len = market.traders.len();
 
     // potential
-    for i in 0..traiders_len {
-        for j in 0..traiders_len {
+    for i in 0..traders_len {
+        for j in 0..traders_len {
             for k in 0..merchandises_len {
                 let (price_potential, volume_potential) = 'p: {
                     let trader_merchandise0 = &market.traders[i].merchandises[k];
@@ -18,7 +18,7 @@ pub(super) fn step(market: &mut super::Market) {
                     let (seller, buyer) =
                         conditional_swap(trader_merchandise0, trader_merchandise1, !direction);
                     let price_potential = (buyer.price - seller.price).max(0.0);
-                    let volume_potential = cosine_similarity(seller.volume, -buyer.volume);
+                    let volume_potential = similarity(seller.volume, -buyer.volume);
                     (price_potential, volume_potential)
                 };
                 let deal = &mut market.deals[i][j][k];
@@ -30,14 +30,14 @@ pub(super) fn step(market: &mut super::Market) {
     }
 
     // distribute volume, select lower from seller and buyer
-    for i in 0..traiders_len {
+    for i in 0..traders_len {
         for k in 0..merchandises_len {
             let mut total_potential = 0.0;
-            for j in 0..traiders_len {
+            for j in 0..traders_len {
                 let deal = &market.deals[i][j][k];
                 total_potential += deal.potential;
             }
-            for j in 0..traiders_len {
+            for j in 0..traders_len {
                 let deal = &mut market.deals[i][j][k];
                 let volume = if total_potential == 0.0 {
                     0.0
@@ -50,8 +50,8 @@ pub(super) fn step(market: &mut super::Market) {
             }
         }
     }
-    for i in 0..traiders_len {
-        for j in 0..traiders_len {
+    for i in 0..traders_len {
+        for j in 0..traders_len {
             for k in 0..merchandises_len {
                 let deal0 = &market.deals[i][j][k];
                 let deal1 = &market.deals[j][i][k];
@@ -67,10 +67,10 @@ pub(super) fn step(market: &mut super::Market) {
     for k in 0..merchandises_len {
         let mut total_price_volum = 0.0;
         let mut total_volume = 0.0;
-        for i in 0..traiders_len {
-            for j in 0..traiders_len {
+        for i in 0..traders_len {
+            for j in 0..traders_len {
                 let deal = &mut market.deals[i][j][k];
-                deal.price = abgebraic_average(
+                deal.price = geometric_average(
                     market.traders[i].merchandises[k].price,
                     market.traders[j].merchandises[k].price,
                 );
@@ -78,11 +78,8 @@ pub(super) fn step(market: &mut super::Market) {
                 total_volume += deal.volume.abs();
             }
         }
-        let price = if total_volume == 0.0 {
-            f32::INFINITY
-        } else {
-            total_price_volum / total_volume
-        };
-        market.merchandises[k].price = price;
+        if total_volume > 0.0 {
+            market.merchandises[k].price = total_price_volum / total_volume;
+        }
     }
 }
