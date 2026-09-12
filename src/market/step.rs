@@ -24,7 +24,7 @@ pub(super) fn step(market: &mut super::Market) {
                 let deal = &mut market.deals[i][j][k];
                 deal.price_potential = price_potential;
                 deal.volume_potential = volume_potential;
-                deal.potential = deal.price_potential * deal.volume_potential;
+                deal.distribution = deal.price_potential * deal.volume_potential;
             }
         }
     }
@@ -35,15 +35,15 @@ pub(super) fn step(market: &mut super::Market) {
             let mut total_potential = 0.0;
             for j in 0..traders_len {
                 let deal = &market.deals[i][j][k];
-                total_potential += deal.potential;
+                total_potential += deal.distribution;
             }
             for j in 0..traders_len {
                 let deal = &mut market.deals[i][j][k];
                 let volume = if total_potential == 0.0 {
                     0.0
                 } else {
-                    let distribution = deal.potential / total_potential;
-                    let volume = market.traders[i].merchandises[k].volume * distribution;
+                    deal.distribution /= total_potential;
+                    let volume = market.traders[i].merchandises[k].volume * deal.distribution;
                     volume
                 };
                 deal.volume = volume;

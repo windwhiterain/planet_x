@@ -51,7 +51,7 @@ impl TraderMerchandise {
 pub struct Deal {
     price_potential: f32,
     volume_potential: f32,
-    potential: f32,
+    distribution: f32,
     /// 正卖负买
     pub volume: f32,
     pub price: f32,
