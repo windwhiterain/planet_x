@@ -418,6 +418,30 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
 }
 
 #[test]
+fn a_realized_trade_pulls_the_next_quote_toward_the_realized_price() {
+    let mut market = market(1, 10.0, 2);
+    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
+    warehouse.step(&mut market);
+    let first_quote = market.traders[0].merchandises[0].price;
+    let realized_price = market.merchandises[0].price;
+    assert_close(first_quote, 10.0 / 6.0, "首轮报价");
+    assert_close(realized_price, 10.0, "首轮成交价");
+
+    warehouse.traders[0].merchandises[0].target_volume = 0.0;
+    warehouse.step(&mut market);
+    let next_quote = market.traders[0].merchandises[0].price;
+
+    assert!(
+        next_quote > first_quote,
+        "观测到按市场价成交后，同样规模的报价应当上移：{first_quote} -> {next_quote}",
+    );
+    assert!(
+        next_quote <= realized_price + 1e-3,
+        "报价不应当越过实际成交价水位：{next_quote} > {realized_price}",
+    );
+}
+
+#[test]
 fn zero_target_liquidates_all_stock() {
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(5.0, 0.0), (0.0, 5.0)]);

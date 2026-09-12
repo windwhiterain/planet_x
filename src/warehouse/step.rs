@@ -8,15 +8,13 @@ pub(super) fn step(warehouse: &mut Warehouse, market: &mut Market) {
             merchandise.marketing_volume =
                 merchandise.volume - merchandise.target_volume + merchandise.natural_volume_delta;
             if merchandise.marketing_volume > 0.0 {
-                let sell_volume_scale_reciprocal = 1.0 / merchandise.marketing_volume.abs();
                 merchandise.marketing_price_scale = merchandise
-                    .sell_volume_scale_reciprocal2price_scale
-                    .get(sell_volume_scale_reciprocal);
+                    .sell_volume2price_scale
+                    .get(merchandise.marketing_volume.abs());
             } else {
-                let buy_volume_scale = merchandise.marketing_volume.abs();
                 merchandise.marketing_price_scale = merchandise
-                    .buy_volume_scale2price_scale
-                    .get(buy_volume_scale);
+                    .buy_volume2price_scale
+                    .get(merchandise.marketing_volume.abs());
             }
             let market_merchandise = &mut market.traders[i].merchandises[j];
             market_merchandise.price =
@@ -38,11 +36,11 @@ pub(super) fn step(warehouse: &mut Warehouse, market: &mut Market) {
                 let realized_scale = market_merchandise.deal_price() / market_price;
                 if deal_volume > 0.0 {
                     merchandise
-                        .sell_volume_scale_reciprocal2price_scale
-                        .update(1.0 / deal_volume.abs(), realized_scale);
+                        .sell_volume2price_scale
+                        .update(deal_volume.abs(), realized_scale);
                 } else {
                     merchandise
-                        .buy_volume_scale2price_scale
+                        .buy_volume2price_scale
                         .update(deal_volume.abs(), realized_scale);
                 }
             }
