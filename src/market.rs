@@ -25,6 +25,17 @@ pub struct TraderMerchandise {
     pub price: f32,
     /// 正卖负买
     pub volume: f32,
+    deal_price: f32,
+    deal_volume: f32,
+}
+
+impl TraderMerchandise {
+    pub fn deal_price(&self) -> f32 {
+        self.deal_price
+    }
+    pub fn deal_volume(&self) -> f32 {
+        self.deal_volume
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
