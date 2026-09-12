@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 pub trait Estimator {
     fn update(&mut self, x: f32, y: f32);
     fn get(&self, x: f32) -> f32;
@@ -5,6 +8,12 @@ pub trait Estimator {
 
 pub struct Scale {
     a: f32,
+}
+
+impl Scale {
+    pub fn new(a: f32) -> Self {
+        Self { a }
+    }
 }
 
 impl Estimator for Scale {

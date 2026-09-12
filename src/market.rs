@@ -30,6 +30,15 @@ pub struct TraderMerchandise {
 }
 
 impl TraderMerchandise {
+    pub fn new(price: f32, volume: f32) -> Self {
+        Self {
+            price,
+            volume,
+            deal_price: 0.0,
+            deal_volume: 0.0,
+        }
+    }
+
     pub fn deal_price(&self) -> f32 {
         self.deal_price
     }

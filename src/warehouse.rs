@@ -1,5 +1,8 @@
 mod step;
 
+#[cfg(test)]
+mod tests;
+
 use crate::{estimator::Scale, market::Market};
 
 pub struct Warehouse {

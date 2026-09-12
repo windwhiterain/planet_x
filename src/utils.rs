@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 pub fn same_signature(a: f32, b: f32) -> bool {
     a >= 0.0 && b >= 0.0 || a <= 0.0 && b <= 0.0
 }
