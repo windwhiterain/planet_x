@@ -4,6 +4,9 @@ use crate::estimator::{Estimator, PowerLaw};
 use crate::market::Market;
 use crate::warehouse::{SellerRule, Warehouse, Warehouses};
 
+/// 买量对市价的弹性：价高少买，价低多买
+const BUY_ELASTICITY: f32 = 0.5;
+
 fn revenue_max_volumes(price_scale: &PowerLaw, surplus: f32) -> f32 {
     let slope = price_scale.slope();
     if slope > -1.0 {
@@ -45,7 +48,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
     for (i, warehouse) in warehouses.iter_mut().enumerate() {
         let Warehouse { stocks, currency } = warehouse;
         for stock in stocks.iter_mut() {
-            stock.natural_volume_delta = stock.volume - stock.previous_volume;
+            stock.natural_volume_delta = (stock.volume - stock.previous_volume).min(0.0);
             stock.marketing_volume =
                 stock.volume - stock.target_volume + stock.natural_volume_delta;
             let sign = stock.marketing_volume.signum();
@@ -93,6 +96,13 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
             let merchandise = &mut market.traders[i].merchandises[j];
             merchandise.price = market.merchandises[j].price * stock.marketing_price_scale;
             merchandise.volume = stock.marketing_volume;
+            // 申报曲线：买盘随市价反向调节，卖盘按量走
+            merchandise.reference_price = market.merchandises[j].price;
+            merchandise.elasticity = if stock.marketing_volume < 0.0 {
+                -BUY_ELASTICITY
+            } else {
+                0.0
+            };
         }
     }
     market.step();

@@ -28,11 +28,14 @@ pub enum SellerRule {
 pub struct Stock {
     previous_volume: f32,
     pub volume: f32,
+    /// 期望持有的库存
     pub target_volume: f32,
     marketing_price_scale: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
+    /// 阶数钉在 +1：量越大报价越高
     buy_volume2price_scale: PowerLaw,
+    /// 阶数钉在 -1：量越大报价越低
     sell_volume2price_scale: PowerLaw,
     seller_rule: SellerRule,
 }
@@ -80,8 +83,10 @@ impl Stock {
             marketing_price_scale: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
-            buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
-            sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
+            buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING)
+                .with_fixed_slope(),
+            sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING)
+                .with_fixed_slope(),
             seller_rule: SellerRule::default(),
         }
     }
@@ -89,5 +94,13 @@ impl Stock {
     pub fn with_seller_rule(mut self, seller_rule: SellerRule) -> Self {
         self.seller_rule = seller_rule;
         self
+    }
+
+    pub fn sell_volume2price_scale(&self) -> &PowerLaw {
+        &self.sell_volume2price_scale
+    }
+
+    pub fn buy_volume2price_scale(&self) -> &PowerLaw {
+        &self.buy_volume2price_scale
     }
 }

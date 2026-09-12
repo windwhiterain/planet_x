@@ -6,26 +6,6 @@ pub trait Estimator {
     fn get(&self, x: f32) -> f32;
 }
 
-pub struct Scale {
-    a: f32,
-}
-
-impl Scale {
-    pub fn new(a: f32) -> Self {
-        Self { a }
-    }
-}
-
-impl Estimator for Scale {
-    fn update(&mut self, x: f32, y: f32) {
-        self.a = y / x;
-    }
-
-    fn get(&self, x: f32) -> f32 {
-        x * self.a
-    }
-}
-
 pub struct Linear {
     a: f32,
     b: f32,
@@ -46,6 +26,7 @@ pub struct PowerLaw {
     intercept: f32,
     covariance: [[f32; 2]; 2],
     forgetting: f32,
+    fixed_slope: bool,
 }
 
 impl PowerLaw {
@@ -61,7 +42,14 @@ impl PowerLaw {
             intercept,
             covariance: [[covariance, 0.0], [0.0, covariance]],
             forgetting,
+            fixed_slope: false,
         }
+    }
+
+    /// 固定阶数：只学水平，不学指数
+    pub fn with_fixed_slope(mut self) -> Self {
+        self.fixed_slope = true;
+        self
     }
 
     pub fn slope(&self) -> f32 {
@@ -72,6 +60,10 @@ impl PowerLaw {
         self.intercept
     }
 
+    pub fn is_fixed_slope(&self) -> bool {
+        self.fixed_slope
+    }
+
     fn features(x: f32) -> [f32; 2] {
         [x.ln(), 1.0]
     }
@@ -80,6 +72,21 @@ impl PowerLaw {
 impl Estimator for PowerLaw {
     fn update(&mut self, x: f32, y: f32) {
         if !x.is_finite() || x <= 0.0 || !y.is_finite() || y <= 0.0 {
+            return;
+        }
+        if self.fixed_slope {
+            let observed = y.ln() - self.slope * x.ln();
+            if !observed.is_finite() {
+                return;
+            }
+            let covariance = self.covariance[1][1];
+            let denominator = self.forgetting + covariance;
+            if !denominator.is_finite() || denominator <= 0.0 {
+                return;
+            }
+            let gain = covariance / denominator;
+            self.intercept += gain * (observed - self.intercept);
+            self.covariance[1][1] = (covariance - gain * covariance) / self.forgetting;
             return;
         }
         let feature = Self::features(x);

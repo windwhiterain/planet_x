@@ -25,6 +25,10 @@ pub struct TraderMerchandise {
     pub price: f32,
     /// positive buy negative sell
     pub volume: f32,
+    /// 申报曲线所依据的市价
+    pub reference_price: f32,
+    /// 量的价格弹性：量(p) = volume × (p / reference_price)^elasticity
+    pub elasticity: f32,
     deal_price: f32,
     deal_volume: f32,
 }
@@ -34,9 +38,19 @@ impl TraderMerchandise {
         Self {
             price,
             volume,
+            reference_price: 0.0,
+            elasticity: 0.0,
             deal_price: 0.0,
             deal_volume: 0.0,
         }
+    }
+
+    /// 申报曲线：市价给定时，这一轮愿意买卖多少
+    pub fn volume_at(&self, price: f32) -> f32 {
+        if self.elasticity == 0.0 || self.reference_price <= 0.0 || price <= 0.0 {
+            return self.volume;
+        }
+        self.volume * (price / self.reference_price).powf(self.elasticity)
     }
 
     pub fn deal_price(&self) -> f32 {

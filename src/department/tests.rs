@@ -313,9 +313,9 @@ fn the_treasury_gains_exactly_the_grants_and_nothing_is_left_over() {
 #[test]
 fn a_grant_is_what_lets_a_warehouse_buy() {
     let (mut departments, mut warehouses, mut market) = setup(
-        &[&[(100.0, 50.0)], &[(0.0, 8.0)]],
+        &[&[(100.0, 0.0)], &[(0.0, 0.0)]],
         &[&[0.0], &[0.0]],
-        &[&[], &[]],
+        &[&[], &[(&[4.0], 40.0)]],
     );
     market.merchandises[0].price = 10.0;
 
@@ -378,9 +378,9 @@ fn classic() -> (Departments, Warehouses, Market) {
         department(c, &[(good0, 20.0), (good1, 20.0)]),
     ];
     let quotes = [
-        &[(4.0, 8.0), (2.0, 0.0), (2.0, 0.0)][..],
-        &[(2.0, 0.0), (4.0, 8.0), (2.0, 0.0)][..],
-        &[(2.0, 0.0), (2.0, 0.0), (4.0, 8.0)][..],
+        &[(0.0, 0.0), (4.0, 2.0), (4.0, 2.0)][..],
+        &[(4.0, 2.0), (0.0, 0.0), (4.0, 2.0)][..],
+        &[(4.0, 2.0), (4.0, 2.0), (0.0, 0.0)][..],
     ];
 
     (

@@ -1,49 +1,26 @@
 use super::*;
 
-fn assert_close(actual: f32, expected: f32) {
-    assert!(
-        (actual - expected).abs() < 1e-6,
-        "期望 {expected}，实际 {actual}",
-    );
+#[test]
+fn power_law_keeps_a_fixed_slope_while_learning_the_level() {
+    let mut estimator = PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING).with_fixed_slope();
+    for step in 0..500 {
+        let volume = 0.5 + (step % 40) as f32 * 0.25;
+        estimator.update(volume, 3.0 / volume);
+    }
+    assert!(estimator.is_fixed_slope());
+    assert_eq!(estimator.slope(), -1.0);
+    assert_near(estimator.get(2.0), 1.5, 0.05);
 }
 
 #[test]
-fn scale_reproduces_the_observed_point() {
-    let mut scale = Scale::new(1.0);
-    scale.update(4.0, 9.0);
-    assert_close(scale.get(4.0), 9.0);
-}
-
-#[test]
-fn scale_is_linear_through_the_origin() {
-    let mut scale = Scale::new(1.0);
-    scale.update(2.0, 5.0);
-    assert_close(scale.get(0.0), 0.0);
-    assert_close(scale.get(4.0), 2.0 * scale.get(2.0));
-    assert_close(scale.get(-3.0), -scale.get(3.0));
-}
-
-#[test]
-fn scale_keeps_its_slope_when_the_target_is_its_own_output() {
-    let mut scale = Scale::new(2.0);
-    let observed = scale.get(3.0);
-    scale.update(3.0, observed);
-    assert_close(scale.get(3.0), observed);
-    assert_close(scale.get(7.0), 2.0 * 7.0);
-}
-
-#[test]
-fn scale_carries_the_sign_of_its_observation() {
-    let mut scale = Scale::new(1.0);
-    scale.update(2.0, -5.0);
-    assert_close(scale.get(1.0), -2.5);
-}
-
-#[test]
-fn scale_of_a_zero_observation_is_infinite() {
-    let mut scale = Scale::new(1.0);
-    scale.update(0.0, 5.0);
-    assert!(scale.get(1.0).is_infinite());
+fn a_fixed_slope_does_not_drift_on_unidentifiable_data() {
+    let mut estimator = PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING).with_fixed_slope();
+    for step in 0..500 {
+        let volume = 2.0 + (step % 8) as f32;
+        estimator.update(volume, 1.0);
+    }
+    assert_eq!(estimator.slope(), -1.0, "阶数被钉住就不该漂");
+    assert_near(estimator.get(4.0), 1.0, 0.4);
 }
 
 fn assert_near(actual: f32, expected: f32, tolerance: f32) {

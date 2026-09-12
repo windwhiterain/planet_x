@@ -77,9 +77,9 @@ impl DomesticEconomy {
                     let mut stocks = Vec::with_capacity(GOODS);
                     for good in 0..GOODS {
                         let (volume, target) = if good == department {
-                            (PRODUCTION, 2.0 * PRODUCTION)
+                            (0.0, 0.0)
                         } else {
-                            (CAMPAIGN / 2.0, 0.0)
+                            (CAMPAIGN, CAMPAIGN / 2.0)
                         };
                         stocks.push(
                             Stock::new(volume, target).with_seller_rule(SellerRule::TargetVolume),

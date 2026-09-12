@@ -23,6 +23,7 @@ fn policy_potential(policy: &Policy, market: &Market) -> f32 {
 }
 
 pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, market: &Market) {
+    let goods = warehouse.stocks.len();
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
         stock.volume += department.productions[k].max(0.0);
     }
@@ -32,7 +33,7 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, marke
         .iter()
         .map(|stock| stock.volume.max(0.0))
         .collect();
-    let mut withdrawal = vec![0.0; available.len()];
+    let mut withdrawal = vec![0.0; goods];
 
     let mut total = 0.0;
     for policy in department.policies.iter_mut() {
@@ -70,7 +71,9 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, marke
     let execution = execution.clamp(0.0, 1.0);
 
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-        stock.volume = (stock.volume - withdrawal[k] * execution).max(0.0);
+        let consumed = (withdrawal[k] * execution).min(stock.volume);
+        stock.volume -= consumed;
+        stock.target_volume = withdrawal[k];
     }
 
     department.policy_choice = choice;

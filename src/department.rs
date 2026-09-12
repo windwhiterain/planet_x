@@ -1,3 +1,5 @@
+pub mod probe;
+
 mod step;
 
 #[cfg(test)]
@@ -65,6 +67,40 @@ impl Departments {
         warehouses.step(market, rng);
         self.settle(warehouses, market);
         self.reclaim(warehouses);
+    }
+
+    /// 国内循环：回收上一轮的结余，再统一重新发放
+    pub fn step_redistributing(
+        &mut self,
+        warehouses: &mut Warehouses,
+        market: &mut Market,
+        rng: &mut Rng,
+    ) {
+        self.redistribute(warehouses);
+        self.plan(warehouses, market);
+        warehouses.step(market, rng);
+        self.settle(warehouses, market);
+    }
+
+    /// 国际循环：不收回、不发放，各凭手里的货币交易
+    pub fn step_free(&mut self, warehouses: &mut Warehouses, market: &mut Market, rng: &mut Rng) {
+        self.plan(warehouses, market);
+        warehouses.step(market, rng);
+        self.settle(warehouses, market);
+    }
+
+    /// 中央统筹：把全国的货币收回国库，再按部门平均发放
+    pub fn redistribute(&mut self, warehouses: &mut Warehouses) {
+        self.reclaim(warehouses);
+        let count = warehouses.warehouses.len();
+        if count == 0 {
+            return;
+        }
+        let share = self.treasury / count as f32;
+        for warehouse in &mut warehouses.warehouses {
+            warehouse.currency += share;
+        }
+        self.treasury -= share * count as f32;
     }
 
     /// 中央拨款：每轮把 [`Self::grants`] 拨进各部门的仓库
