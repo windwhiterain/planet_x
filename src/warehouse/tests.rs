@@ -1,5 +1,4 @@
 use super::{Merchandise, Trader, Warehouse};
-use crate::estimator::Scale;
 use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
@@ -16,31 +15,20 @@ fn market(goods: usize, price: f32, traders: usize) -> Market {
     Market::new(merchandises, traders)
 }
 
-fn merchandise(volume: f32, target: f32) -> Merchandise {
-    Merchandise {
-        previous_volume: volume,
-        volume,
-        target_volume: target,
-        marketing_price_scale: 1.0,
-        marketing_volume: 0.0,
-        natural_volume_delta: 0.0,
-        buy_volume_scale2price_scale: Scale::new(1.0),
-        sell_volume_scale_reciprocal2price_scale: Scale::new(1.0),
-    }
-}
-
 fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouse {
-    Warehouse {
-        traders: quotes
+    Warehouse::new(
+        quotes
             .iter()
-            .map(|goods_quotes| Trader {
-                merchandises: goods_quotes
-                    .iter()
-                    .map(|&(volume, target)| merchandise(volume, target))
-                    .collect(),
+            .map(|goods_quotes| {
+                Trader::new(
+                    goods_quotes
+                        .iter()
+                        .map(|&(volume, target)| Merchandise::new(volume, target))
+                        .collect(),
+                )
             })
             .collect(),
-    }
+    )
 }
 
 fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouse {

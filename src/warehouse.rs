@@ -25,7 +25,32 @@ pub struct Merchandise {
 }
 
 impl Warehouse {
+    pub fn new(traders: Vec<Trader>) -> Self {
+        Self { traders }
+    }
+
     pub fn step(&mut self, market: &mut Market) {
         step::step(self, market);
+    }
+}
+
+impl Trader {
+    pub fn new(merchandises: Vec<Merchandise>) -> Self {
+        Self { merchandises }
+    }
+}
+
+impl Merchandise {
+    pub fn new(volume: f32, target_volume: f32) -> Self {
+        Self {
+            previous_volume: volume,
+            volume,
+            target_volume,
+            marketing_price_scale: 1.0,
+            marketing_volume: 0.0,
+            natural_volume_delta: 0.0,
+            buy_volume_scale2price_scale: Scale::new(1.0),
+            sell_volume_scale_reciprocal2price_scale: Scale::new(1.0),
+        }
     }
 }

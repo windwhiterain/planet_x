@@ -76,15 +76,17 @@ pub(super) fn step(market: &mut super::Market) {
                     market.traders[i].merchandises[k].price,
                     market.traders[j].merchandises[k].price,
                 );
-                trader_price_volum += deal.price * deal.volume;
+                trader_price_volum += deal.price * deal.volume.abs();
                 trader_volume += deal.volume;
                 total_price_volum += deal.price * deal.volume.abs();
                 total_volume += deal.volume.abs();
             }
             let trader_merchandise = &mut market.traders[i].merchandises[k];
-            if total_volume > 0.0 {
-                trader_merchandise.deal_price = trader_price_volum / trader_volume.abs();
-            }
+            trader_merchandise.deal_price = if trader_volume != 0.0 {
+                trader_price_volum / trader_volume.abs()
+            } else {
+                0.0
+            };
             trader_merchandise.deal_volume = trader_volume;
         }
         if total_volume > 0.0 {

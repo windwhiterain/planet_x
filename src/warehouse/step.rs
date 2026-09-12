@@ -31,16 +31,20 @@ pub(super) fn step(warehouse: &mut Warehouse, market: &mut Market) {
         for k in 0..merchandise_len {
             let merchandise = &mut warehouse.traders[i].merchandises[k];
             let market_merchandise = &market.traders[i].merchandises[k];
-            merchandise.volume -= market_merchandise.deal_volume();
-            if merchandise.volume > 0.0 {
-                merchandise.sell_volume_scale_reciprocal2price_scale.update(
-                    1.0 / merchandise.volume.abs(),
-                    market_merchandise.deal_price(),
-                );
-            } else if merchandise.volume < 0.0 {
-                merchandise
-                    .buy_volume_scale2price_scale
-                    .update(merchandise.volume.abs(), market_merchandise.deal_price());
+            let deal_volume = market_merchandise.deal_volume();
+            merchandise.volume -= deal_volume;
+            let market_price = market.merchandises[k].price;
+            if deal_volume != 0.0 && market_price > 0.0 {
+                let realized_scale = market_merchandise.deal_price() / market_price;
+                if deal_volume > 0.0 {
+                    merchandise
+                        .sell_volume_scale_reciprocal2price_scale
+                        .update(1.0 / deal_volume.abs(), realized_scale);
+                } else {
+                    merchandise
+                        .buy_volume_scale2price_scale
+                        .update(deal_volume.abs(), realized_scale);
+                }
             }
             merchandise.previous_volume = merchandise.volume;
         }
