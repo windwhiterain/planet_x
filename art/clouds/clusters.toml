@@ -1,0 +1,7 @@
+frequency = 1.40
+octaves = 5
+lacunarity = 2.0
+gain = 0.50
+seed = 91
+aspect = 2.0
+spherical = true
