@@ -1,5 +1,7 @@
 mod atmosphere;
+mod clouds;
 mod planet;
+mod shaders;
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -109,6 +111,8 @@ struct Options {
     out: Option<PathBuf>,
     planet: Option<PathBuf>,
     mesh: Option<PathBuf>,
+    clouds: Option<PathBuf>,
+    cloud: Option<f32>,
     palette: planet::Palette,
     displace: Option<f32>,
     sea_level: Option<f32>,
@@ -137,6 +141,8 @@ impl Default for Options {
             out: None,
             planet: None,
             mesh: None,
+            clouds: None,
+            cloud: None,
             palette: planet::Palette::Rocky,
             displace: None,
             sea_level: None,
@@ -172,6 +178,8 @@ impl Options {
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
+                "--clouds" => options.clouds = Some(PathBuf::from(next("--clouds")?)),
+                "--cloud" => options.cloud = Some(number("--cloud")?),
                 "--scatter" => {
                     let kind = next("--scatter")?;
                     if kind != "earth" && kind != "none" {
@@ -262,6 +270,7 @@ impl Options {
             planet::PlanetSpec {
                 field: path.display().to_string(),
                 mesh: self.mesh.as_ref().map(|mesh| mesh.display().to_string()),
+                clouds: self.clouds.as_ref().map(|clouds| clouds.display().to_string()),
                 atmo: self.atmo.unwrap_or(1.0),
                 palette: self.palette,
                 displace: self.displace.unwrap_or(displace),
@@ -278,6 +287,7 @@ impl Options {
             Some(spec) => Scene::Planet {
                 field: spec.field,
                 mesh: spec.mesh,
+                clouds: spec.clouds,
                 palette: spec.palette.name().to_string(),
                 displace: spec.displace,
                 sea_level: spec.sea_level,
@@ -301,9 +311,11 @@ fn usage() -> String {
         "  px_render --stream PATH [--round N] [--out PNG] [--width W] [--height H]",
         "      经济世界：三根部门库存柱 + 三根价格柱",
         "  px_render --planet FIELD.pxart [--palette rocky|gas|ice|lava|desert] [--displace F]",
-        "            [--sea F] [--radius F] [--spin F] [--rings F] [--out PNG] [--width W] [--height H]",
+        "            [--sea F] [--radius F] [--spin F] [--rings F] [--clouds CUBEMAP.pxart]",
+        "            [--cloud F] [--out PNG] [--width W] [--height H]",
         "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景；--rings 给个",
-        "      大于 1 的倍数就加环系",
+        "      大于 1 的倍数就加环系；--clouds 给一张 CubeMap 覆盖度就加体积云，--cloud 是",
+        "      消光倍率（默认 1）",
         "  服务没在跑时会提示；要顺手拉起一个就加 --autostart",
     ]
     .join("\n")
@@ -350,6 +362,7 @@ fn request_once(options: Options) -> i32 {
             cam: options.cam,
             atmo: options.atmo,
             scatter: options.scatter.clone(),
+            cloud: options.cloud,
         },
         width: options.width,
         height: options.height,
@@ -431,6 +444,8 @@ fn serve(options: Options) -> Result<(), String> {
                 .disable::<WinitPlugin>(),
         )
         .add_plugins(atmosphere::AtmospherePlugin)
+        .add_plugins(clouds::CloudsPlugin)
+        .add_plugins(shaders::ShaderLibraryPlugin)
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -537,17 +552,39 @@ fn spawn_listener(listener: TcpListener, jobs: Sender<Job>) {
     });
 }
 
-fn watch_pipelines(cache: Res<PipelineCache>, ready: Res<RenderReady>, mut announced: Local<bool>) {
+fn pipeline_label(descriptor: &bevy::material::descriptor::PipelineDescriptor) -> String {
+    match descriptor {
+        bevy::material::descriptor::PipelineDescriptor::RenderPipelineDescriptor(render) => render
+            .label
+            .as_deref()
+            .unwrap_or("<无名渲染管线>")
+            .to_string(),
+        bevy::material::descriptor::PipelineDescriptor::ComputePipelineDescriptor(compute) => compute
+            .label
+            .as_deref()
+            .unwrap_or("<无名计算管线>")
+            .to_string(),
+    }
+}
+
+fn watch_pipelines(
+    cache: Res<PipelineCache>,
+    ready: Res<RenderReady>,
+    mut announced: Local<bool>,
+    mut reported: Local<Vec<String>>,
+) {
     if ready.0.load(Ordering::Relaxed) {
         return;
     }
     let total = cache.pipelines().count();
     let mut pending = 0usize;
-    let mut failed = 0usize;
+    let mut failures: Vec<String> = Vec::new();
     for pipeline in cache.pipelines() {
-        match pipeline.state {
+        match &pipeline.state {
             CachedPipelineState::Ok(_) => {}
-            CachedPipelineState::Err(_) => failed += 1,
+            CachedPipelineState::Err(err) => {
+                failures.push(format!("{}｜{}", pipeline_label(&pipeline.descriptor), err));
+            }
             _ => pending += 1,
         }
     }
@@ -555,9 +592,18 @@ fn watch_pipelines(cache: Res<PipelineCache>, ready: Res<RenderReady>, mut annou
         *announced = true;
         println!("首个渲染管线入队：当前 {total} 条，待编译 {pending} 条");
     }
-    if total > 0 && pending == 0 {
+    if total == 0 || pending > 0 {
+        return;
+    }
+    if failures != *reported {
+        for line in &failures {
+            eprintln!("管线编译失败｜{line}");
+        }
+        *reported = failures.clone();
+    }
+    if failures.is_empty() {
         ready.0.store(true, Ordering::Relaxed);
-        println!("渲染管线全部就绪：共 {total} 条，失败 {failed} 条");
+        println!("渲染管线全部就绪：共 {total} 条，失败 0 条");
     }
 }
 
@@ -581,7 +627,7 @@ fn new_target(images: &mut Assets<Image>, width: u32, height: u32) -> Handle<Ima
     images.add(target)
 }
 
-fn asset_root() -> String {
+pub(crate) fn asset_root() -> String {
     let mut candidates = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("px_render/assets"));
@@ -604,6 +650,7 @@ fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut atmosphere_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
+    mut cloud_materials: ResMut<Assets<clouds::CloudsMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     size: Res<InitialSize>,
@@ -652,6 +699,7 @@ fn warm_up(
         Transform::from_xyz(0.0, 1.0, 0.0),
     ));
     planet::warm_atmosphere(&mut commands, &mut meshes, &mut atmosphere_materials);
+    clouds::warm_clouds(&mut commands, &mut meshes, &mut cloud_materials);
 }
 
 fn accept_jobs(
@@ -662,6 +710,7 @@ fn accept_jobs(
     stars: Res<Stars>,
     mut images: ResMut<Assets<Image>>,
     mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
+    mut cloud_materials: ResMut<Assets<clouds::CloudsMaterial>>,
     mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -698,6 +747,7 @@ fn accept_jobs(
         Scene::Planet {
             field,
             mesh,
+            clouds,
             palette,
             displace,
             sea_level,
@@ -722,11 +772,13 @@ fn accept_jobs(
                 &stars.0,
                 &mut atmo_materials,
                 &mut media,
+                &mut cloud_materials,
                 request.view.scatter.as_deref(),
                 camera_transform,
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
+                    clouds: clouds.clone(),
                     atmo: atmo.unwrap_or(1.0),
                     palette,
                     displace: *displace,
@@ -735,6 +787,7 @@ fn accept_jobs(
                     spin: *spin,
                     rings: *rings,
                 },
+                request.view.cloud.unwrap_or(1.0) * CLOUD_EXTINCTION,
             )
         }
     };
@@ -963,6 +1016,7 @@ fn drive(
 
 const DEFAULT_AMBIENT: f32 = 80.0;
 const SKY_BRIGHTNESS: f32 = 900.0;
+const CLOUD_EXTINCTION: f32 = 900.0;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1068,6 +1122,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
         Scene::Planet {
             field,
             mesh,
+            clouds,
             palette,
             displace,
             sea_level,
@@ -1078,6 +1133,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
             planet::PlanetSpec {
                 field,
                 mesh,
+                clouds,
                 atmo: 1.0,
                 palette: planet::Palette::parse(&palette)?,
                 displace,
@@ -1123,6 +1179,8 @@ fn view(options: Options) -> Result<(), String> {
         ..default()
     }))
     .add_plugins(atmosphere::AtmospherePlugin)
+    .add_plugins(clouds::CloudsPlugin)
+    .add_plugins(shaders::ShaderLibraryPlugin)
     .insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
     .insert_resource(Viewer {
         spec,
@@ -1221,7 +1279,11 @@ fn spin_bodies(
     time: Res<Time>,
     mut bodies: Query<
         &mut Transform,
-        Or<(With<planet::PlanetBody>, With<planet::PlanetRing>)>,
+        Or<(
+            With<planet::PlanetBody>,
+            With<planet::PlanetRing>,
+            With<clouds::PlanetCloud>,
+        )>,
     >,
 ) {
     if !viewer.spin {
@@ -1368,6 +1430,7 @@ fn rebuild_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
+    mut cloud_materials: ResMut<Assets<clouds::CloudsMaterial>>,
     mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
     stars: Res<Stars>,
     viewer: Res<Viewer>,
@@ -1389,9 +1452,11 @@ fn rebuild_scene(
         &stars.0,
         &mut atmo_materials,
         &mut media,
+        &mut cloud_materials,
         None,
         Transform::from_xyz(0.0, 0.55, 3.2).looking_at(Vec3::ZERO, Vec3::Y),
         &viewer.spec,
+        CLOUD_EXTINCTION,
     ) {
         Ok(label) => println!("{label}"),
         Err(message) => eprintln!("重建场景失败：{message}"),

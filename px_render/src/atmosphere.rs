@@ -51,13 +51,6 @@ impl Material for AtmosphereMaterial {
 #[derive(Component)]
 pub struct RequestCamera;
 
-#[derive(Resource)]
-pub struct ShaderLibrary(pub Handle<Shader>);
-
-fn load_library(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(ShaderLibrary(assets.load("shaders/common.wgsl")));
-}
-
 fn sync_cameras(
     cameras: Query<
         (
@@ -99,7 +92,6 @@ pub struct AtmospherePlugin;
 impl Plugin for AtmospherePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<AtmosphereMaterial>::default())
-            .add_systems(Startup, load_library)
             .add_systems(Update, sync_cameras);
     }
 }

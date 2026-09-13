@@ -9,6 +9,7 @@ use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension}
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::atmosphere::{AtmosphereMaterial, AtmosphereParams};
+use crate::clouds::{self, CloudsMaterial};
 use px_protocol::art::{AssetKind, Domain, MeshData};
 use px_protocol::stream::{self, Frame};
 
@@ -69,6 +70,7 @@ impl Palette {
 pub struct PlanetSpec {
     pub field: String,
     pub mesh: Option<String>,
+    pub clouds: Option<String>,
     pub palette: Palette,
     pub displace: f32,
     pub sea_level: f32,
@@ -78,7 +80,7 @@ pub struct PlanetSpec {
     pub atmo: f32,
 }
 
-const SYSTEM_TILT: f32 = 0.34;
+pub const SYSTEM_TILT: f32 = 0.34;
 const ATMOSPHERE_SHELL: f32 = 1.14;
 
 #[derive(Component)]
@@ -170,9 +172,10 @@ pub fn load_field(path: &str) -> Result<Field, String> {
         Some(AssetKind::Field2D) => Domain::Equirect,
         Some(AssetKind::OctahedralField) => Domain::Octahedral,
         Some(AssetKind::CubeField) => Domain::Cube,
+        Some(AssetKind::CubeMap) => Domain::CubeMap,
         Some(other) => {
             return Err(format!(
-                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField 产物"
+                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField / CubeMap 产物"
             ));
         }
         None => return Err(format!("{path} 里没有 Art 帧")),
@@ -1175,6 +1178,54 @@ fn ring_image(width: u32, height: u32) -> Image {
     )
 }
 
+pub fn spawn_clouds(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<CloudsMaterial>,
+    images: &mut Assets<Image>,
+    spec: &PlanetSpec,
+    density: f32,
+) -> Result<String, String> {
+    let coverage = load_field(
+        spec.clouds
+            .as_deref()
+            .ok_or_else(|| "没有给云覆盖度".to_string())?,
+    )?;
+    let face = coverage.width;
+    let image = clouds::coverage_image(&coverage)?;
+    let handle = images.add(image);
+
+    let inner = spec.radius * clouds::CLOUD_BASE;
+    let outer = spec.radius * clouds::CLOUD_TOP;
+    let Ok(sphere) = Sphere::new(outer).mesh().ico(64) else {
+        return Err("云壳网格造不出来".to_string());
+    };
+
+    let orientation = Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin);
+    let mut params = clouds::CloudParams::new(inner, outer, density);
+    params.orientation = Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w);
+
+    commands.spawn((
+        crate::ScenePart,
+        clouds::PlanetCloud,
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(materials.add(CloudsMaterial {
+            params,
+            coverage: Some(handle),
+        })),
+        Transform::from_rotation(orientation),
+    ));
+
+    Ok(format!(
+        "云层：{:.3}..{:.3}｜覆盖度 {}²×{}｜消光 {:.1}",
+        inner,
+        outer,
+        face,
+        px_protocol::art::CUBE_FACES,
+        density,
+    ))
+}
+
 pub fn spawn_planet(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1183,11 +1234,18 @@ pub fn spawn_planet(
     stars: &Handle<Image>,
     atmo_materials: &mut Assets<AtmosphereMaterial>,
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
+    clouds_materials: &mut Assets<CloudsMaterial>,
     scatter: Option<&str>,
     camera: Transform,
     spec: &PlanetSpec,
+    cloud_density: f32,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
+    let cloud_note = if spec.clouds.is_some() {
+        spawn_clouds(commands, meshes, clouds_materials, images, spec, cloud_density)?
+    } else {
+        String::new()
+    };
 
     if let Some(path) = &spec.mesh {
         let mesh = load_mesh(path)?;
@@ -1234,7 +1292,7 @@ pub fn spawn_planet(
         spawn_lights(commands);
 
         return Ok(format!(
-            "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}",
+            "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}{}",
             spec.palette.name(),
             spec.field,
             field.width,
@@ -1244,6 +1302,11 @@ pub fn spawn_planet(
                 format!("｜环 ×{:.2}", spec.rings)
             } else {
                 String::new()
+            },
+            if cloud_note.is_empty() {
+                String::new()
+            } else {
+                format!("｜{cloud_note}")
             },
         ));
     }
@@ -1377,7 +1440,7 @@ pub fn spawn_planet(
     }
 
     Ok(format!(
-        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}，最远顶点 {:.4}）｜海平面 {:.2}{}",
+        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}，最远顶点 {:.4}）｜海平面 {:.2}{}{}",
         spec.field,
         spec.palette.name(),
         field.width,
@@ -1391,6 +1454,11 @@ pub fn spawn_planet(
             format!("｜环 ×{:.2}", spec.rings)
         } else {
             String::new()
+        },
+        if cloud_note.is_empty() {
+            String::new()
+        } else {
+            format!("｜{cloud_note}")
         },
     ))
 }
