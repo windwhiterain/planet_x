@@ -2,6 +2,7 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+use crate::render::{Request, Response};
 use crate::wire::{self, WireError};
 use crate::{ArtBundle, Blob, ProtocolId, WorldView};
 
@@ -14,6 +15,9 @@ pub enum Frame {
     World(WorldView),
     Art(ArtBundle),
     Blob(Blob),
+    Request(Request),
+    Response(Response),
+    Refused(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +26,9 @@ enum TextFrame {
     Protocol(ProtocolId),
     World(WorldView),
     Art(ArtBundle),
+    Request(Request),
+    Response(Response),
+    Refused { reason: String },
 }
 
 impl Frame {
@@ -35,6 +42,11 @@ impl Frame {
             Self::Protocol(inner) => Self::encode_text(TextFrame::Protocol(inner.clone())),
             Self::World(inner) => Self::encode_text(TextFrame::World(inner.clone())),
             Self::Art(inner) => Self::encode_text(TextFrame::Art(inner.clone())),
+            Self::Request(inner) => Self::encode_text(TextFrame::Request(inner.clone())),
+            Self::Response(inner) => Self::encode_text(TextFrame::Response(inner.clone())),
+            Self::Refused(reason) => Self::encode_text(TextFrame::Refused {
+                reason: reason.clone(),
+            }),
         }
     }
 
@@ -48,6 +60,9 @@ impl Frame {
                     TextFrame::Protocol(inner) => Self::Protocol(inner),
                     TextFrame::World(inner) => Self::World(inner),
                     TextFrame::Art(inner) => Self::Art(inner),
+                    TextFrame::Request(inner) => Self::Request(inner),
+                    TextFrame::Response(inner) => Self::Response(inner),
+                    TextFrame::Refused { reason } => Self::Refused(reason),
                 })
             }
             _ => Err(WireError::TruncatedFrame),
@@ -73,17 +88,35 @@ impl From<WorldView> for Frame {
     }
 }
 
+pub fn write_frame<W: Write>(writer: &mut W, frame: &Frame) -> Result<(), WireError> {
+    let payload = frame.encode()?;
+    writer
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .map_err(io_error)?;
+    writer.write_all(&payload).map_err(io_error)?;
+    Ok(())
+}
+
+pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Frame>, WireError> {
+    let mut len = [0u8; 4];
+    match reader.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(io_error(err)),
+    }
+    let len = u32::from_le_bytes(len) as usize;
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).map_err(io_error)?;
+    Ok(Some(Frame::decode(&payload)?))
+}
+
 pub fn write_stream<W: Write>(writer: &mut W, frames: &[Frame]) -> Result<(), WireError> {
     writer.write_all(&MAGIC).map_err(io_error)?;
     writer
         .write_all(&STREAM_VERSION.to_le_bytes())
         .map_err(io_error)?;
     for frame in frames {
-        let payload = frame.encode()?;
-        writer
-            .write_all(&(payload.len() as u32).to_le_bytes())
-            .map_err(io_error)?;
-        writer.write_all(&payload).map_err(io_error)?;
+        write_frame(writer, frame)?;
     }
     Ok(())
 }
@@ -101,19 +134,31 @@ pub fn read_stream<R: Read>(reader: &mut R) -> Result<Vec<Frame>, WireError> {
         return Err(WireError::BadStreamVersion(version));
     }
     let mut frames = Vec::new();
-    loop {
-        let mut len = [0u8; 4];
-        match reader.read_exact(&mut len) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(err) => return Err(io_error(err)),
-        }
-        let len = u32::from_le_bytes(len) as usize;
-        let mut payload = vec![0u8; len];
-        reader.read_exact(&mut payload).map_err(io_error)?;
-        frames.push(Frame::decode(&payload)?);
+    while let Some(frame) = read_frame(reader)? {
+        frames.push(frame);
     }
     Ok(frames)
+}
+
+pub fn read_worlds(path: &std::path::Path) -> Result<Vec<WorldView>, WireError> {
+    let bytes = std::fs::read(path).map_err(io_error)?;
+    Ok(read_stream(&mut bytes.as_slice())?
+        .into_iter()
+        .filter_map(|frame| match frame {
+            Frame::World(world) => Some(world),
+            _ => None,
+        })
+        .collect())
+}
+
+pub fn declared_protocol(path: &std::path::Path) -> Result<Option<ProtocolId>, WireError> {
+    let bytes = std::fs::read(path).map_err(io_error)?;
+    Ok(read_stream(&mut bytes.as_slice())?
+        .into_iter()
+        .find_map(|frame| match frame {
+            Frame::Protocol(id) => Some(id),
+            _ => None,
+        }))
 }
 
 fn io_error(err: io::Error) -> WireError {

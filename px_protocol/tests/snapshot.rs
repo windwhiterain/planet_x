@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
+use px_protocol::render::{Lease, Request, Response};
 use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
@@ -59,6 +60,30 @@ fn canonical() -> String {
         }],
     };
 
+    let request = Request {
+        stream: "target/world.pxstream".to_string(),
+        round: Some(200),
+        width: 960,
+        height: 640,
+        out: "target/shot.png".to_string(),
+    };
+    let response = Response {
+        out: "target/shot.png".to_string(),
+        round: 200,
+        width: 960,
+        height: 640,
+        bytes: 326452,
+        millis: 812,
+        warm: true,
+    };
+    let lease = Lease {
+        pid: 0,
+        port: 0,
+        protocol_hash: 0,
+        git_rev: "<rev>".to_string(),
+        exe: "<exe>".to_string(),
+    };
+
     let value = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "surfaces": {
@@ -66,11 +91,17 @@ fn canonical() -> String {
             "Handshake": handshake,
             "sim::WorldView": world,
             "art::ArtBundle": art,
+            "render::Request": request,
+            "render::Response": response,
+            "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),
-            "stream::Frame.kinds": ["handshake", "world", "art", "blob"],
+            "stream::Frame.kinds": [
+                "protocol", "world", "art", "blob", "request", "response", "refused"
+            ],
             "stream::MAGIC": String::from_utf8_lossy(&px_protocol::stream::MAGIC),
             "stream::STREAM_VERSION": px_protocol::stream::STREAM_VERSION,
+            "client::LEASE_PATH": px_protocol::client::LEASE_PATH,
         }
     });
 

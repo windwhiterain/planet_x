@@ -1,19 +1,19 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 1
+        "schema_version": 2
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 1
+      "schema_version": 2
     },
     "art::ArtBundle": {
       "assets": [
@@ -34,6 +34,30 @@
           }
         }
       ]
+    },
+    "client::LEASE_PATH": "target/render-server.json",
+    "render::Lease": {
+      "exe": "<exe>",
+      "git_rev": "<rev>",
+      "pid": 0,
+      "port": 0,
+      "protocol_hash": 0
+    },
+    "render::Request": {
+      "height": 640,
+      "out": "target/shot.png",
+      "round": 200,
+      "stream": "target/world.pxstream",
+      "width": 960
+    },
+    "render::Response": {
+      "bytes": 326452,
+      "height": 640,
+      "millis": 812,
+      "out": "target/shot.png",
+      "round": 200,
+      "warm": true,
+      "width": 960
     },
     "sim::WorldView": {
       "departments": [
@@ -56,7 +80,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 1,
+      "schema_version": 2,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,
@@ -67,10 +91,13 @@
       }
     },
     "stream::Frame.kinds": [
-      "handshake",
+      "protocol",
       "world",
       "art",
-      "blob"
+      "blob",
+      "request",
+      "response",
+      "refused"
     ],
     "stream::MAGIC": "PXST",
     "stream::STREAM_VERSION": 1,
