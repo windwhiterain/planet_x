@@ -102,7 +102,6 @@ impl Spec {
         spec.all_consume = true;
         spec.primary_free = false;
         spec.capacity = MODERN_CAPACITY;
-        spec.motive_ladder = SECTOR_MOTIVE.to_vec();
         for unit in 0..GOODS {
             let mut inputs = vec![0.0; GOODS];
             let mut outputs = vec![0.0; GOODS];

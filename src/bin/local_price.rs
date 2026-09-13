@@ -149,7 +149,13 @@ fn spec(args: &Args) -> Spec {
     let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
         "ladder" => return Spec::ladder(args.polities, args.food_supply),
-        "modern" => return Spec::modern(args.polities),
+        "modern" => {
+            let mut spec = Spec::modern(args.polities);
+            if args.motive_ladder {
+                spec.motive_ladder = SECTOR_MOTIVE.to_vec();
+            }
+            return spec;
+        }
         "sectors" => {
             let mut spec = Spec::sectors(args.polities);
             if args.motive_ladder {
