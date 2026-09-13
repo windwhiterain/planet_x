@@ -231,8 +231,10 @@ pub(super) fn plan(
     let execution = execution.clamp(0.0, 1.0);
 
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
+        // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
+        // 自适应（见 `warehouse::step::declared_volumes`）——部门按当轮计划写目标会让
+        // 计划为 0 的商品连目标也变成 0，于是它永远不出价买那样东西。
         stock.volume = (available[k] + delivery[k] - intake[k] * execution).max(0.0);
-        stock.target_volume = intake[k];
     }
 
     department.policy_choice = choice;

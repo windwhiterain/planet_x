@@ -104,6 +104,18 @@ fn fluctuation_factor(amplitude: f32, rng: &mut fastrand::Rng) -> f32 {
 }
 
 fn declared_volumes(stock: &mut Stock, fluctuation: f32, rng: &mut Rng) {
+    // **仓库自适应的目标水位。** 上一轮货架被取空（`volume == 0`）说明需求大过存货
+    // ⇒ 目标抬高；还有货没被取走说明压多了 ⇒ 目标压低。
+    //
+    // 这条反馈让目标**永远是活的**，于是仓库**永远有买入需求**：某种商品一旦没人卖、
+    // 各部门都取不到，它们的货架会一直空着，目标就会一轮一轮往上乘，直到出价把它买进来。
+    // 旧设计里目标由部门按当轮计划写死（`target_volume = intake`），计划一归零目标就归零，
+    // 缺口也归零 —— 那是"某种商品没人买"的死结（§16.1bis）。
+    stock.target_volume = if stock.volume <= 0.0 {
+        stock.target_volume * Stock::TARGET_GROWTH
+    } else {
+        stock.target_volume / Stock::TARGET_GROWTH
+    };
     stock.natural_volume_delta = (stock.volume - stock.previous_volume).min(0.0);
     let gap = stock.volume - stock.target_volume + stock.natural_volume_delta;
     // 旧代码这里还有一个 `clamp(0, |gap|)`：涨落只能**缩小**申报，不能放大。

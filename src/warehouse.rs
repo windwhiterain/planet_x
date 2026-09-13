@@ -211,6 +211,17 @@ impl Warehouse {
 }
 
 impl Stock {
+    /// 目标的**自适应倍率**：上一轮货架被取空 ⇒ 目标 ×k（得多买）；
+    /// 还有货没被取走 ⇒ 目标 ÷k（压多了）。
+    ///
+    /// k 要小：这是个乘法控制器，k 越大振荡越硬。取 1.1 = 每轮 ±10%。
+    pub const TARGET_GROWTH: f32 = 1.1;
+
+    /// 目标水位的初始值。**所有仓库都用同一个数**——目标从此由仓库自己
+    /// 按"货架有没有被取空"调，而不是由部门按当轮计划写死（那会让计划为 0
+    /// 的商品连目标也变成 0，于是永远没人买它）。
+    pub const INITIAL_TARGET: f32 = 100.0;
+
     pub fn new(volume: f32, target_volume: f32) -> Self {
         Self {
             previous_volume: volume,

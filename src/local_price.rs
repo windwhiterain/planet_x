@@ -338,6 +338,8 @@ pub struct GoodState {
     pub wanted_buy: f32,
     /// 想买但被"买不起"清零的部门数
     pub blocked_buy: f32,
+    /// 各仓库自适应目标的合计（诊断用）
+    pub target: f32,
     /// 实际成交量
     pub dealt: f32,
     /// 全场库存合计
@@ -405,12 +407,11 @@ impl Lab {
             for unit in 0..UNITS {
                 let mut stocks = Vec::with_capacity(GOODS);
                 for good in 0..GOODS {
-                    let (volume, target) = if good == unit {
-                        (0.0, 0.0)
-                    } else {
-                        (CAMPAIGN, CAMPAIGN / 2.0)
-                    };
-                    stocks.push(Stock::new(volume, target));
+                    // 初始库存仍是 CAMPAIGN（自有商品为 0），但**目标统一是
+                    // `Stock::INITIAL_TARGET`**：目标不再由部门按当轮计划写死，
+                    // 而是仓库自己按"货架有没有被取空"自适应。
+                    let volume = if good == unit { 0.0 } else { CAMPAIGN };
+                    stocks.push(Stock::new(volume, Stock::INITIAL_TARGET));
                 }
                 warehouses.push(
                     Warehouse::new(stocks)
@@ -702,6 +703,7 @@ impl Lab {
                 if stock.purchase_blocked {
                     state.blocked_buy += 1.0;
                 }
+                state.target += stock.target_volume;
                 let merchandise = &self.market.traders[i].merchandises[k];
                 let scale = self.warehouses.warehouses[i].stocks[k].marketing_price_scale();
                 let volume = merchandise.volume;
