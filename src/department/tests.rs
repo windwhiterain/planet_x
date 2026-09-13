@@ -272,7 +272,14 @@ fn a_cheaper_policy_takes_the_larger_share() {
         first > second,
         "同样意愿下应当更偏向便宜的资源：{first} / {second}",
     );
-    assert_close(first, 0.8, "意愿除以价格");
+    assert!(
+        second > 0.0,
+        "分布是软化过的概率，贵的那个也不应当归零：{second}",
+    );
+    assert!(
+        first > 0.9,
+        "便宜一半的资源应当拿到大头：{first}",
+    );
     assert_close(holding(&warehouses, 0)[0], 10.0 - 2.0 * first, "第一种资源按份额被提走");
 }
 

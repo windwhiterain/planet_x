@@ -3,8 +3,10 @@ use crate::market::Market;
 use crate::warehouse::Warehouse;
 
 const FREE_COST: f32 = 1e-6;
+/// 分布的软化温度：越小越接近全押一个政策（角点、会抖），越大越平均
+const POLICY_TEMPERATURE: f32 = 0.25;
 
-fn policy_potential(policy: &Policy, prices: &[f32], capacity: f32) -> f32 {
+fn policy_score(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
     let mut cost = 0.0;
     let mut revenue = 0.0;
     let mut demanded = 0.0;
@@ -16,30 +18,59 @@ fn policy_potential(policy: &Policy, prices: &[f32], capacity: f32) -> f32 {
         cost += consumption * price;
         revenue += output * price;
     }
-    let capacity_use = policy.capacity_use();
-    let per_capacity = capacity.is_finite() && capacity_use > 0.0;
-    if policy.is_transform() {
-        if cost <= 0.0 {
-            return 0.0;
-        }
+    let value = if policy.is_transform() {
         let margin = revenue - cost;
         if margin <= 0.0 {
             return 0.0;
         }
-        return if per_capacity {
-            margin / capacity_use
-        } else {
-            margin / cost
-        };
+        margin
+    } else {
+        let motive = policy.motive.max(0.0);
+        if motive <= 0.0 || demanded <= 0.0 {
+            return 0.0;
+        }
+        motive / cost.max(FREE_COST)
+    };
+    value * activity_ceiling(policy, prices, warehouse, capacity)
+}
+
+/// 这个政策独占资源时最多能跑多少：原料与产能各给一条上界。
+/// 原料按「支配力」算 —— 手里有的，加上现金还买得起的；否则买方（手里本来就没货）会被判死刑
+fn activity_ceiling(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
+    let mut ceiling = f32::INFINITY;
+    for (k, consumption) in policy.consumptions.iter().enumerate() {
+        if *consumption > 0.0 {
+            let price = prices.get(k).copied().unwrap_or(0.0);
+            let buying_power = if price > 0.0 && warehouse.currency > 0.0 {
+                warehouse.currency / price
+            } else {
+                0.0
+            };
+            let command = warehouse
+                .stocks
+                .get(k)
+                .map(|stock| stock.volume.max(0.0))
+                .unwrap_or(0.0)
+                + buying_power;
+            ceiling = ceiling.min(command / consumption);
+        }
     }
-    let motive = policy.motive.max(0.0);
-    if motive <= 0.0 || demanded <= 0.0 {
+    let capacity_use = policy.capacity_use();
+    if capacity.is_finite() && capacity_use > 0.0 {
+        ceiling = ceiling.min(capacity / capacity_use);
+    }
+    if ceiling.is_finite() {
+        ceiling.max(0.0)
+    } else {
+        1.0
+    }
+}
+
+fn policy_share(score: f32, best: f32) -> f32 {
+    if !(score > 0.0) || !(best > 0.0) {
         return 0.0;
     }
-    if per_capacity {
-        return motive / capacity_use;
-    }
-    motive / cost.max(FREE_COST)
+    ((score / best) / POLICY_TEMPERATURE).exp()
 }
 
 pub(super) fn plan(
@@ -78,35 +109,50 @@ pub(super) fn plan(
     let mut intake = vec![0.0; goods];
     let mut output = vec![0.0; goods];
 
-    let mut total = 0.0;
-    let mut produce_total = 0.0;
+    let mut consume_best = 0.0f32;
+    let mut produce_best = 0.0f32;
     for policy in department.policies.iter_mut() {
-        policy.price_potential = policy_potential(policy, &prices, department.capacity);
-        policy.distribution = policy.price_potential;
+        policy.price_potential = policy_score(policy, &prices, warehouse, department.capacity);
         if policy.is_transform() {
-            produce_total += policy.distribution;
+            produce_best = produce_best.max(policy.price_potential);
         } else {
-            total += policy.distribution;
+            consume_best = consume_best.max(policy.price_potential);
         }
     }
 
     let mut choice = department.policy_choice;
     let mut capacity_want = 0.0;
-    if total > 0.0 || produce_total > 0.0 {
-        let mut best = f32::NEG_INFINITY;
+    let mut consume_weight = 0.0;
+    let mut produce_weight = 0.0;
+    for policy in department.policies.iter_mut() {
+        let best = if policy.is_transform() {
+            produce_best
+        } else {
+            consume_best
+        };
+        policy.distribution = policy_share(policy.price_potential, best);
+        if policy.is_transform() {
+            produce_weight += policy.distribution;
+        } else {
+            consume_weight += policy.distribution;
+        }
+    }
+
+    if consume_weight > 0.0 || produce_weight > 0.0 {
+        let mut best_share = f32::NEG_INFINITY;
         for (p, policy) in department.policies.iter_mut().enumerate() {
             let family = if policy.is_transform() {
-                produce_total
+                produce_weight
             } else {
-                total
+                consume_weight
             };
             policy.distribution = if family > 0.0 {
                 policy.distribution / family
             } else {
                 0.0
             };
-            if policy.distribution > best {
-                best = policy.distribution;
+            if policy.distribution > best_share {
+                best_share = policy.distribution;
                 choice = p;
             }
             capacity_want += policy.distribution * policy.capacity_use();
@@ -123,7 +169,7 @@ pub(super) fn plan(
         }
     }
 
-    let mut execution: f32 = if total > 0.0 || produce_total > 0.0 {
+    let mut execution: f32 = if consume_weight > 0.0 || produce_weight > 0.0 {
         1.0
     } else {
         0.0

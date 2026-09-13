@@ -451,32 +451,44 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
     let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11).with_rule(LevelRule::Fixed);
     let department = lab.department_of(0, 0);
     lab.market.merchandises[0].price = 1.0;
-
     lab.market.merchandises[1].price = 1.0;
-    lab.departments.plan(&mut lab.warehouses, &lab.market);
-    let plentiful = lab.process_state(department);
-
-    lab.market.merchandises[1].price = 1.2;
-    lab.departments.plan(&mut lab.warehouses, &lab.market);
-    let tight = lab.process_state(department);
-
     let slow = 0;
     let fast = 1;
-    assert_eq!(plentiful.len(), 2, "阶梯上应当有两个工艺");
+
+    lab.warehouses.warehouses[department].stocks[1].volume = 5.0;
+    lab.departments.plan(&mut lab.warehouses, &lab.market);
+    let scarce_material = lab.process_state(department);
+
+    lab.warehouses.warehouses[department].stocks[1].volume = 20.0;
+    lab.departments.plan(&mut lab.warehouses, &lab.market);
+    let tight_capacity = lab.process_state(department);
+
+    let mut roomy = Lab::new(&Spec::ladder(3, 0.5).with_capacity(200.0), 11)
+        .with_rule(LevelRule::Fixed);
+    roomy.market.merchandises[0].price = 1.0;
+    roomy.market.merchandises[1].price = 1.0;
+    roomy.warehouses.warehouses[department].stocks[1].volume = 20.0;
+    roomy.departments.plan(&mut roomy.warehouses, &roomy.market);
+    let roomy_capacity = roomy.process_state(department);
+
+    assert_eq!(scarce_material.len(), 2, "阶梯上应当有两个工艺");
     assert!(
-        plentiful[fast].0 > plentiful[slow].0,
-        "原料充裕（便宜）时应当选费料但快的工艺：{plentiful:?}",
+        scarce_material[slow].0 > scarce_material[fast].0,
+        "原料不足时应当选省料但慢的（利润高、单位产能产出低）：{scarce_material:?}",
     );
     assert!(
-        tight[slow].0 > tight[fast].0,
-        "原料稀缺（贵）时应当选省料但慢的工艺：{tight:?}",
+        tight_capacity[fast].0 > tight_capacity[slow].0,
+        "原料充足而产能紧张时应当选费料但快的（利润低、单位产能产出高）：{tight_capacity:?}",
+    );
+    assert!(
+        roomy_capacity[slow].0 > roomy_capacity[fast].0,
+        "产能也放开之后，紧的又变回原料，应当选回省料但慢的：{roomy_capacity:?}",
     );
 
     let rate = [LADDER_THRIFTY.0, LADDER_FAST.0];
     let capacity_cost = [LADDER_THRIFTY.2, LADDER_FAST.2];
     let margin_rate = |policy: usize| (1.0 - rate[policy]) / rate[policy];
     let output_per_capacity = |policy: usize| 1.0 / (capacity_cost[policy] * (1.0 + rate[policy]));
-
     assert!(
         margin_rate(fast) < margin_rate(slow),
         "费料但快的工艺利润率更低：{:.2} 对 {:.2}",
@@ -488,17 +500,6 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
         "费料但快的工艺单位产能产出更高：{:.3} 对 {:.3}",
         output_per_capacity(fast),
         output_per_capacity(slow),
-    );
-
-    let mut roomy = Lab::new(&Spec::ladder(3, 0.5).with_capacity(200.0), 11)
-        .with_rule(LevelRule::Fixed);
-    roomy.market.merchandises[0].price = 1.0;
-    roomy.market.merchandises[1].price = 1.0;
-    roomy.departments.plan(&mut roomy.warehouses, &roomy.market);
-    let roomy = roomy.process_state(department);
-    assert!(
-        (roomy[fast].0 - plentiful[fast].0).abs() < 1e-4,
-        "产能预算变大只改变能干多少，不改变选哪个：{roomy:?} 对 {plentiful:?}",
     );
 }
 
