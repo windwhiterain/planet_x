@@ -47,11 +47,11 @@ impl Palette {
 
     pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
         match self {
-            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.750, 0.50),
-            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 2.400, 0.40),
-            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.700, 0.60),
-            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 1.900, 0.45),
-            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.900, 0.46),
+            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.300, 0.50),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 0.430, 0.40),
+            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.270, 0.60),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.340, 0.45),
+            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.340, 0.46),
         }
     }
 
@@ -759,15 +759,7 @@ pub fn warm_atmosphere(
             camera_x: 0.0,
             camera_y: 0.55,
             camera_z: 3.15,
-            screen_x: 960.0,
-            screen_y: 640.0,
-            padding_a: 0.0,
-            padding_b: 0.0,
-            padding_c: 0.0,
-            forward: Vec4::Z,
-            right: Vec4::X,
-            up: Vec4::Y,
-            reserved: Vec4::W,
+            reserved: 0.0,
         },
         tint: LinearRgba::rgb(0.44, 0.64, 0.98),
     });
@@ -801,30 +793,23 @@ fn spawn_atmosphere(
     materials: &mut Assets<AtmosphereMaterial>,
     parent: Entity,
     camera: Transform,
-    screen: Vec2,
     spec: &PlanetSpec,
 ) {
     if spec.atmo <= 0.0 {
         return;
     }
     let (tint, density, softness) = spec.palette.atmosphere();
-    let tangent = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
-    let aspect = screen.x.max(1.0) / screen.y.max(1.0);
-    let forward = camera.forward().as_vec3();
-    let right = camera.right().as_vec3() * tangent * aspect;
-    let up = camera.up().as_vec3() * tangent;
+
     let Ok(sphere) = Sphere::new(spec.radius * ATMOSPHERE_SHELL).mesh().ico(64) else {
         return;
     };
     println!(
-        "大气壳：半径 {:.3}，密度 {:.3}，相机 ({:.2},{:.2},{:.2})，屏幕 {:.0}x{:.0}",
+        "大气壳：半径 {:.3}，密度 {:.3}，相机 ({:.2},{:.2},{:.2})",
         spec.radius * ATMOSPHERE_SHELL,
         density * spec.atmo,
         camera.translation.x,
         camera.translation.y,
-        camera.translation.z,
-        screen.x,
-        screen.y
+        camera.translation.z
     );
     let material = materials.add(AtmosphereMaterial {
         params: AtmosphereParams {
@@ -835,15 +820,7 @@ fn spawn_atmosphere(
             camera_x: camera.translation.x,
             camera_y: camera.translation.y,
             camera_z: camera.translation.z,
-            screen_x: screen.x,
-            screen_y: screen.y,
-            padding_a: 0.0,
-            padding_b: 0.0,
-            padding_c: 0.0,
-            forward: Vec4::Z,
-            right: Vec4::X,
-            up: Vec4::Y,
-            reserved: Vec4::W,
+            reserved: 0.0,
         },
         tint,
     });
@@ -1208,7 +1185,6 @@ pub fn spawn_planet(
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
     scatter: Option<&str>,
     camera: Transform,
-    screen: Vec2,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1252,7 +1228,7 @@ pub fn spawn_planet(
 
         match scatter {
             Some(_) => spawn_scattering(commands, media, spec.radius),
-            None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, screen, spec),
+            None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, spec),
         }
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_lights(commands);
@@ -1418,6 +1394,11 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
 
 
 

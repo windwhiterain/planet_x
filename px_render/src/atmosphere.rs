@@ -12,15 +12,7 @@ pub struct AtmosphereParams {
     pub camera_x: f32,
     pub camera_y: f32,
     pub camera_z: f32,
-    pub screen_x: f32,
-    pub screen_y: f32,
-    pub padding_a: f32,
-    pub padding_b: f32,
-    pub padding_c: f32,
-    pub forward: Vec4,
-    pub right: Vec4,
-    pub up: Vec4,
-    pub reserved: Vec4,
+    pub reserved: f32,
 }
 
 impl AtmosphereParams {
@@ -33,15 +25,7 @@ impl AtmosphereParams {
             camera_x: 0.0,
             camera_y: 0.0,
             camera_z: 0.0,
-            screen_x: 960.0,
-            screen_y: 640.0,
-            padding_a: 0.0,
-            padding_b: 0.0,
-            padding_c: 0.0,
-            forward: Vec4::Z,
-            right: Vec4::X,
-            up: Vec4::Y,
-            reserved: Vec4::W,
+            reserved: 0.0,
         }
     }
 }
@@ -100,25 +84,13 @@ fn sync_cameras(
         .next()
         .map(|canvas| Vec2::new(canvas.size.0 as f32, canvas.size.1 as f32))
         .unwrap_or(Vec2::new(960.0, 640.0));
-    let Projection::Perspective(perspective) = projection else {
-        return;
-    };
     let position = transform.translation();
-    let tangent = (perspective.fov * 0.5).tan();
-    let aspect = size.x.max(1.0) / size.y.max(1.0);
-    let forward = transform.forward().as_vec3();
-    let right = transform.right().as_vec3() * tangent * aspect;
-    let up = transform.up().as_vec3() * tangent;
 
     for (_, material) in materials.iter_mut() {
         material.params.camera_x = position.x;
         material.params.camera_y = position.y;
         material.params.camera_z = position.z;
-        material.params.screen_x = material.params.screen_x.max(size.x);
-        material.params.screen_y = material.params.screen_y.max(size.y);
-        material.params.forward = forward.extend(0.0);
-        material.params.right = right.extend(0.0);
-        material.params.up = up.extend(0.0);
+
     }
 }
 
@@ -131,5 +103,6 @@ impl Plugin for AtmospherePlugin {
             .add_systems(Update, sync_cameras);
     }
 }
+
 
 
