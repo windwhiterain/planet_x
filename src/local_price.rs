@@ -407,11 +407,14 @@ impl Lab {
             for unit in 0..UNITS {
                 let mut stocks = Vec::with_capacity(GOODS);
                 for good in 0..GOODS {
-                    // 初始库存仍是 CAMPAIGN（自有商品为 0），但**目标统一是
-                    // `Stock::INITIAL_TARGET`**：目标不再由部门按当轮计划写死，
-                    // 而是仓库自己按"货架有没有被取空"自适应。
-                    let volume = if good == unit { 0.0 } else { CAMPAIGN };
-                    stocks.push(Stock::new(volume, Stock::INITIAL_TARGET));
+                    // 初始值与原来一致。目标从第二轮起就被"三倍取货量"覆盖，
+                    // 所以这里的初值只在第一轮起作用。
+                    let (volume, target) = if good == unit {
+                        (0.0, 0.0)
+                    } else {
+                        (CAMPAIGN, CAMPAIGN / 2.0)
+                    };
+                    stocks.push(Stock::new(volume, target));
                 }
                 warehouses.push(
                     Warehouse::new(stocks)
