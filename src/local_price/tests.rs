@@ -210,7 +210,7 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
     let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
     let department = lab.department_of(1, 0);
     for round in 0..120 {
-        if round >= 40 && round < 80 {
+        if round >= 40 {
             lab.sanction(&[department], 0.0);
         } else {
             lab.unsanction();

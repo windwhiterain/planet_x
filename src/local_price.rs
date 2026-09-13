@@ -332,7 +332,9 @@ impl Lab {
     }
 
     pub fn unsanction(&mut self) {
-        self.block(&[], 1.0);
+        let traders = self.market.traders.len();
+        self.market
+            .set_relations(&vec![vec![1.0; traders]; traders]);
     }
 
     pub fn department_of(&self, polity: usize, unit: usize) -> usize {
