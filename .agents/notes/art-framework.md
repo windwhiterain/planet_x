@@ -1490,3 +1490,66 @@ target/debug/px_render --planet target/pcg/ab/xx/yy.pxart --palette rocky --out 
 - 环**没有投在星球上的阴影**，也**没有大气边缘光** —— 加上会更像照片。
 - 沙漠色板偏灰，沙与峡谷的对比还不够"沙漠"。
 - 噪声仍是自写的值噪声，与另一条血缘的 GLSL 没对过（§14.5 第 4 条）。
+
+---
+
+## 23. 调研：球的 UV / 极点问题该怎么处理
+
+### 23.1 先把现象拆成两半
+
+极点上那团"放射状条纹"是**两个不同的问题叠在一起**：
+
+| | 是什么 | 换网格能不能治 |
+|---|---|---|
+| **① 几何退化** | UV 球的极点是一圈退化三角形（每列两个），法线与 UV 都塌到一点 | **能**。icosphere / quad sphere 没有极点顶点 |
+| **② 域不匹配** | equirect 贴图把**一整行纹素压到一个点**上：极区方位角转一点点，采样的 x 就跑过整行 ⇒ 极点周围是一圈"不同高度/颜色的楔形"，有位移就变成**放射状山脊** | **不能**。只要域还是 equirect，换什么网格都还在 |
+
+### 23.2 实测对照（同一份高度场、同一台相机）
+
+| 网格 | 气态（平滑无位移） | 岩石（有位移） |
+|---|---|---|
+| UV 球 `uv(224,112)`（原本） | 明显的三角扇汇聚 + 中心黑点 | 放射状条纹 |
+| **icosphere `ico(49)`** | **扇没了，条带平滑地翻过极点** | **仍有放射状山脊**（几何扇消失） |
+
+⇒ **结论：换网格只解决了一半。** 气态行星受益明显（它没有位移，退化三角形是主要噪声源）；
+岩石行星的放射状山脊是 ② 造成的，换网格治不了。对照图：`target/ico-gas.png`、`target/ico-rocky.png`。
+
+**顺带两个坑**：
+- Bevy 的 `SphereKind::Ico` 极轴在 **±Y**（`inclination = acos(point.y)`），而 UV 球在 **±Z**。
+  换网格时必须把 `Quat::from_rotation_x(-FRAC_PI_2)` 一起删掉，否则极点会转到侧面去。
+- Bevy 的 icosphere **是带 UV 的**，但用的是同一套 equirect 公式
+  （`[0.5 - atan2(z,x)/TAU, acos(y)/PI]`）⇒ **它不解决 ②**，只解决 ①。
+
+### 23.3 外部做法（调研结果）
+
+| 做法 | 出处 | 对我们的意义 |
+|---|---|---|
+| **Quad sphere / cube sphere**：立方体六面细分后投影到球，**每面各自一套方正 UV** | [Catlike Coding: Cube Sphere](https://catlikecoding.com/unity/tutorials/procedural-meshes/cube-sphere)、[UE5 程序化星球：cube-face 参数化](https://www.youtube.com/watch?v=JjRsfRSbr5w&vl=en) | 极点、接缝、密度不均**一次全解**；游戏工业的标准答案 |
+| **Icosphere + 自己算 UV** | [Bevy issue #4987](https://github.com/bevyengine/bevy/issues/4987) —— "There is no trivial way to uv map an icosphere" | 只解决几何退化，不解决域 |
+| **Triplanar / UV-free texturing**：按世界坐标做三向投影、按法线混合 | [Ben Golus: Normal Mapping for a Triplanar Shader](https://bgolus.medium.com/normal-mapping-for-a-triplanar-shader-10bf39dca05a) | 适合**细节层**，不适合"一整张大陆高度图"；代价是三份采样 |
+| **Cube map / 环境贴图**：按方向采样，不经网格 UV | [Blender 论坛：spherical texture mapping](https://blenderartists.org/t/how-to-achieve-this-spherical-texture-mapping/693359) | "不以网格 UV 为依据就没有极点问题" —— 与 ② 的诊断一致 |
+| **球面直接用 3D 噪声**：在球面点上求值，不烘 2D 图 | [libnoise: Creating spherical planetary terrain](https://libnoise.sourceforge.net/tutorials/tutorial8.html) | **最彻底**：无极点、无接缝、密度天然均匀；这才是"程序化星球"该有的形态 |
+| equirect 在极区有大量数据冗余 | [PanoTools: Equirectangular Projection](https://hugin.sourceforge.io/docs/manual/Equirectangular_Projection.html) | 解释了 ② 的本质 |
+
+### 23.4 五条可选路线（按代价排序）
+
+| | 做法 | 代价 | 治什么 |
+|---|---|---|---|
+| **A** | **只构图**：不让极点入镜（相机 / 自转固定） | 0 | 眼不见为净 |
+| **B** | **极点缓释**：烘色带时把顶/底若干行朝该行均值混合；位移在极区衰减 | ~30 行，全在渲染器 | ② 的可见部分（**但等于丢掉 PCG 在极区的内容，是撒谎**） |
+| **C** | **三平面细节层**：基底仍 equirect，叠一层按位置采样的高频细节 | ~40 行 | 用细节盖住极点糊掉的地方 |
+| **D** | **立方体域**：PCG 直接烘 6 个面（或一张 atlas），渲染器用 quad sphere 按面采样 | ~250 行，**要动 PCG 接口** | ①② **全治**：无极点、无接缝、密度均匀 |
+| **E** | **球面 3D 噪声**：算子按方向直接求 3D 噪声，根本不烘 2D 域 | 更大，等于改 PCG 产物形态 | 最彻底，真·程序化星球的做法 |
+
+**D 需要动 PCG 接口**（`Field` 要带"域"的概念、算子要能问"这个像素对应哪个方向"），
+所以这是一个**架构决定**，不该我替用户定。
+
+### 23.5 建议
+
+1. **立刻**：保留 icosphere（白拿的一半）+ 走 A（构图），把 D 排进路线图。
+2. 若近期就要"俯视极点"的镜头，再加 B 当权宜（并明确标注它丢掉极区内容）。
+3. D 一旦做，顺手给噪声算子加 `space = "3d"`，就往 E 靠 —— 那时"星球"才真正是**球面定义**的，
+   而不是"把一张图贴到球上"。
+
+**本轮已落地**：网格从 `uv(224,112)` 换成 `ico(49)`（顶点数相当，约 2.5 万），
+并相应去掉 `Rx(-90°)`（极轴变了）。

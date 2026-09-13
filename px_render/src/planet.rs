@@ -459,7 +459,7 @@ pub fn spawn_planet(
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
 
-    let mesh_handle = meshes.add(Sphere::new(1.0).mesh().uv(224, 112));
+    let mesh_handle = meshes.add(Sphere::new(1.0).mesh().ico(49).map_err(|err| err.to_string())?);
     let mut mesh = meshes
         .get_mut(&mesh_handle)
         .ok_or_else(|| "拿不到刚插入的球面网格".to_string())?;
@@ -517,9 +517,7 @@ pub fn spawn_planet(
             ..default()
         })),
         Transform::from_rotation(
-            Quat::from_rotation_x(SYSTEM_TILT)
-                * Quat::from_rotation_y(spec.spin)
-                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin),
         ),
     ));
 
