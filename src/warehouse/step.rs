@@ -1,10 +1,9 @@
 use fastrand::Rng;
 
 use crate::estimator::Estimator;
-use crate::estimator2d::{Estimator2D, Response};
+use crate::estimator2d::Estimator2D;
 use crate::market::Market;
 use crate::market::Trader;
-use crate::utils::normal_cdf;
 use crate::warehouse::{Book, Stock, Warehouse, Warehouses};
 
 /// 报价尺度的数值边界：见 [`crate::utils::LOG_LIMIT`]。
@@ -23,13 +22,10 @@ const SCALE_TOLERANCE: f32 = 1e-6;
 /// 细化迭代上限：即使相对容差也吃不到，也保证终止
 const SCALE_REFINE_STEPS: usize = 200;
 /// 二分的步数（区间缩到 2^-40）
-const SCALE_BISECTION_STEPS: usize = 40;
 /// 黄金分割比
 const SCALE_GOLDEN: f32 = 0.618_034;
 /// 超买目标：缺口 × e^(2σ)
-const SATURATION_MARGIN: f32 = 2.0;
 /// 「同样的达标概率下不肯多花钱」的容差
-const PROBABILITY_TOLERANCE: f32 = 1e-4;
 const LOCAL_PRICE_FORGETTING: f32 = 0.8;
 
 /// 粗扫的第 `index` 个 log 尺度
@@ -177,84 +173,52 @@ fn volume_for_dealt(share: f32, depth: f32, goal: f32) -> f32 {
     f32::INFINITY
 }
 
+/// 买方：**在局部隐含价不超过参考价的前提下尽量多买**。
+///
+/// 与 `sale_scale` 互为镜像。卖方没有持货成本，所以它最大化
+/// `成交量 × 价 × 学到的局部比率`（收入）；买方**必须**有一个估值上限，
+/// 否则"最小化花费"会把报价压到 0——实测就是这条路把申报压到 `1e-28`、
+/// 把报价压到 `参考价 × e^-44`（129 档网格的下界，`2.132e-21 = 0.0274 × e^-44`）。
+///
+/// 三条判据全部换掉旧版的 argmin：
+/// 1. **数量锚在 `need`（缺口）上**，不锚在"模型以为市场能吸收多少"上——
+///    旧版 `goal = target.min(0.9 × share × depth)` 让申报量度量模型的信念；
+/// 2. **价格由学到的局部价把关**（`buy_price_curve`：挂这个比率，我实际成交在哪个比率），
+///    而不是搜一个"期望达标概率"——`normal_cdf` 在重度短缺时恒等于 0，
+///    分辨不出缺 5 个数量级和缺 29 个数量级；
+/// 3. **没有相对阈值**。旧版 `threshold = best_probability − 1e-4` 是相对**自己**的最大值
+///    定义的，全体没戏时恒成立，于是退化成"用最便宜的方式够不着"。
 fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f32, f32)> {
     if !(need > 0.0) || !(price > 0.0) || !(cash > 0.0) {
         return None;
     }
     let response = stock.buy_response();
-    let noise = response.noise().max(Response::MIN_NOISE);
-    let target = need * (SATURATION_MARGIN * noise).exp();
-    // 给定 log 尺度，返回（达标概率，代价，申报量）
-    let evaluate = |log_scale: f32| -> (f32, f32, f32) {
-        let scale = log_scale.exp();
+    let curve = stock.buy_price_curve();
+    let mut best_dealt = 0.0f32;
+    let mut best: Option<(f32, f32)> = None;
+    for index in 0..SCALE_COARSE_STEPS {
+        let scale = coarse_log_scale(index).exp();
         if !scale.is_finite() || !(scale > 0.0) {
-            return (f32::NEG_INFINITY, f32::INFINITY, 0.0);
+            continue;
+        }
+        // 学到的局部价高于参考价 ⇒ 这个价我不出
+        let realized = curve.get(scale);
+        if !realized.is_finite() || realized > 1.0 {
+            continue;
         }
         let affordable = affordable_volume(price, scale, cash);
         if !(affordable > 0.0) {
-            return (f32::NEG_INFINITY, f32::INFINITY, 0.0);
+            continue;
         }
-        let aggressiveness = Stock::buy_aggressiveness(scale);
-        let share = response.share(aggressiveness);
-        let depth = response.depth(aggressiveness);
-        let goal = target.min(0.9 * share * depth);
-        let useful = {
-            let volume = volume_for_dealt(share, depth, goal);
-            if volume.is_finite() {
-                volume
-            } else {
-                9.0 * depth
-            }
-        };
-        let volume = affordable.min(useful);
-        if !(volume > 0.0) {
-            return (f32::NEG_INFINITY, f32::INFINITY, 0.0);
-        }
-        let dealt = response.get(volume, aggressiveness);
-        let margin = (dealt / need).max(1e-6).ln() / noise;
-        let probability = normal_cdf(margin);
-        if !probability.is_finite() {
-            return (f32::NEG_INFINITY, f32::INFINITY, 0.0);
-        }
-        (probability, volume * price * scale, volume)
-    };
-
-    let mut probabilities = [f32::NEG_INFINITY; SCALE_COARSE_STEPS];
-    let mut best_probability = f32::NEG_INFINITY;
-    for (index, slot) in probabilities.iter_mut().enumerate() {
-        let (probability, _, _) = evaluate(coarse_log_scale(index));
-        *slot = probability;
-        best_probability = best_probability.max(probability);
-    }
-    if !best_probability.is_finite() {
-        return None;
-    }
-    // 「同样的达标概率下不肯多花钱」⇒ 找**最小**的可接受尺度。
-    // 旧网格靠遍历顺序 + cost 比较实现同一件事；连续域上它是一次二分。
-    let threshold = best_probability - PROBABILITY_TOLERANCE;
-    let index = probabilities.iter().position(|value| *value >= threshold)?;
-    let mut low = if index == 0 {
-        coarse_log_scale(0)
-    } else {
-        coarse_log_scale(index - 1)
-    };
-    let mut high = coarse_log_scale(index);
-    for _ in 0..SCALE_BISECTION_STEPS {
-        let mid = 0.5 * (low + high);
-        if evaluate(mid).0 >= threshold {
-            high = mid;
-        } else {
-            low = mid;
+        // **锚在缺口上**：要多少是需求，不是预测
+        let volume = affordable.min(need);
+        let dealt = response.get(volume, Stock::buy_aggressiveness(scale));
+        if dealt.is_finite() && dealt > best_dealt {
+            best_dealt = dealt;
+            best = Some((volume, scale));
         }
     }
-    let log_scale = 0.5 * (low + high);
-    let (_, _, volume) = evaluate(log_scale);
-    let scale = log_scale.exp();
-    if volume > 0.0 && scale.is_finite() && scale > 0.0 {
-        Some((volume, scale))
-    } else {
-        None
-    }
+    best
 }
 
 fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise, reference: f32) {
