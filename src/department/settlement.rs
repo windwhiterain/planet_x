@@ -142,17 +142,19 @@ struct System {
     c: Vec<Vec<f64>>,
     w: Vec<f64>,
     supply: Vec<f64>,
+    /// `u(x) = x^θ` 的 θ，运行时给，方便扫参
+    curvature: f64,
 }
 
 impl System {
     /// 边际效用 `f'(x) = θ·motive·x^{θ−1}`
     fn marginal(&self, p: usize, x: f64) -> f64 {
-        CURVATURE * self.w[p] * x.max(TINY).powf(CURVATURE - 1.0)
+        self.curvature * self.w[p] * x.max(TINY).powf(self.curvature - 1.0)
     }
 
     /// 边际效用对 `x` 的导数 `f''(x) = θ(θ−1)·motive·x^{θ−2}`（`θ < 1` 时恒负）
     fn marginal_slope(&self, p: usize, x: f64) -> f64 {
-        CURVATURE * (CURVATURE - 1.0) * self.w[p] * x.max(TINY).powf(CURVATURE - 2.0)
+        self.curvature * (self.curvature - 1.0) * self.w[p] * x.max(TINY).powf(self.curvature - 2.0)
     }
 
     /// 影子价格 `Σ_k c_pk·λ_k`
@@ -242,8 +244,8 @@ impl System {
             for k in 0..goods {
                 let c = self.c[p][k];
                 if c > 0.0 {
-                    let by_utility =
-                        (CURVATURE * self.w[p] / (2.0 * c * mu)).powf(1.0 / (1.0 - CURVATURE));
+                    let by_utility = (self.curvature * self.w[p] / (2.0 * c * mu))
+                        .powf(1.0 / (1.0 - self.curvature));
                     let by_barrier = 1.0 / (2.0 * c);
                     let branch = if by_utility > by_barrier {
                         by_utility
@@ -458,7 +460,14 @@ fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 
 /// 结算一次。`w[p]` 是政策的 **motive（绝对值，不归一化）**，`plans[p][k]` 是**裸配方**，
 /// `supply[k]` 是本轮可用存量。返回的 `x[p]` 是**跑了几篮**。
-pub(super) fn solve(w: &[f64], plans: &[Vec<f64>], supply: &[f64], barrier: f64) -> Outcome {
+pub(super) fn solve(
+    w: &[f64],
+    plans: &[Vec<f64>],
+    supply: &[f64],
+    barrier: f64,
+    curvature: f64,
+) -> Outcome {
+    let curvature = curvature.clamp(0.01, 1.0);
     let policies = w.len();
     let goods = supply.len();
     let mut x = vec![0.0f64; policies];
@@ -515,13 +524,14 @@ pub(super) fn solve(w: &[f64], plans: &[Vec<f64>], supply: &[f64], barrier: f64)
             .collect(),
         w: active.iter().map(|p| w[*p]).collect(),
         supply: vec![1.0; used.len()],
+        curvature,
         active,
         used,
     };
 
     // 障碍的量纲取 `x = 1` 处的边际效用 `θ × 平均 motive`，`BARRIER` 是它相对边际效用的倍数。
     let mean_motive = system.w.iter().sum::<f64>() / system.w.len() as f64;
-    let scale = (CURVATURE * mean_motive).max(TINY);
+    let scale = (curvature * mean_motive).max(TINY);
     let target = (barrier * scale).max(TINY);
     let mut mu_bar = scale.max(target);
     let mut point = system.start(mu_bar);
@@ -636,7 +646,7 @@ mod tests {
     }
 
     fn run(w: &[f64], plans: &[Vec<f64>], supply: &[f64]) -> Outcome {
-        solve(w, plans, supply, BARRIER)
+        solve(w, plans, supply, BARRIER, CURVATURE)
     }
 
     fn consumed(plans: &[Vec<f64>], x: &[f64], k: usize) -> f64 {
@@ -868,7 +878,7 @@ mod tests {
             "意愿更高的政策执行率应当更高：{:?}",
             outcome.x,
         );
-        let sharp = solve(&[3.0, 1.0], &plans, &[0.4], BARRIER * 1e-3);
+        let sharp = solve(&[3.0, 1.0], &plans, &[0.4], BARRIER * 1e-3, CURVATURE);
         assert!(
             sharp.report.converged && sharp.report.utilization > outcome.report.utilization,
             "障碍调小必须吃得更干净：{} vs {}",

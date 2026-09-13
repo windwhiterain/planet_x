@@ -20,18 +20,21 @@ pub struct Departments {
     pub rationing: Rationing,
 }
 
-/// 默认障碍强度：无约束时一阶上只吃 `1 − 0.1`，精确根见 [`settlement`]
+/// 默认障碍强度：`μ = barrier × θ × 平均 motive`，读作**留货值多少**
+/// （`λ = μ/s`，越大留的余量越多、市场上越有货可卖）
 pub const DEFAULT_BARRIER: f32 = settlement::BARRIER as f32;
+
+/// 默认边际效应曲率：`u(x) = x^θ`，`θ = 1` 退回线性（需求对价格完全无弹性）
+pub const DEFAULT_CURVATURE: f32 = settlement::CURVATURE as f32;
 
 /// 消费怎么在彼此独立的政策之间分摊仓库存量
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Rationing {
     /// 原始-对偶内点法，见 [`settlement`]。
     ///
-    /// `barrier` 是障碍强度，读作**无约束时大致不吃的那部分**（一阶 `x ≈ 1 − barrier`，
-    /// 精确根见 [`settlement`] 的推导）；它同时决定解离 LP 退化面有多远、缺货过渡有多陡。
-    /// 越小越"准"、越大越"稳"。
-    Interior { barrier: f32 },
+    /// `barrier` 是障碍强度，`curvature` 是 `u(x) = x^θ` 的 `θ`：θ 越小边际效用掉得越快、
+    /// 需求曲线越平；θ → 1 就是旧版的线性目标（要多少吃多少，量对价格无弹性）。
+    Interior { barrier: f32, curvature: f32 },
     /// 旧的硬配给 `x_p = min(1, min_k 存量_k / 该商品的总意愿)`，只留作 A/B
     Hard,
 }
@@ -40,6 +43,7 @@ impl Default for Rationing {
     fn default() -> Self {
         Self::Interior {
             barrier: settlement::BARRIER as f32,
+            curvature: settlement::CURVATURE as f32,
         }
     }
 }

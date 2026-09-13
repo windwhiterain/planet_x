@@ -261,9 +261,17 @@ pub(super) fn plan(
     let inventory: Vec<f64> = supply.iter().map(|volume| *volume as f64).collect();
 
     let (_rates, eaten, settlement) = match rationing {
-        Rationing::Interior { barrier } => {
-            let outcome =
-                settlement::solve(&willingness, &plans, &inventory, barrier.max(0.0) as f64);
+        Rationing::Interior {
+            barrier,
+            curvature,
+        } => {
+            let outcome = settlement::solve(
+                &willingness,
+                &plans,
+                &inventory,
+                barrier.max(0.0) as f64,
+                curvature.max(0.0) as f64,
+            );
             (outcome.x, outcome.eaten, outcome.report)
         }
         Rationing::Hard => {

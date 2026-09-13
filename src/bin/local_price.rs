@@ -1,4 +1,4 @@
-use planet_x::department::{DEFAULT_BARRIER, Rationing};
+use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::local_price::{
     bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY,
     NAMES, SECTOR_MOTIVE,
@@ -38,6 +38,7 @@ struct Args {
     soft_eps: f32,
     rationing: String,
     barrier: f32,
+    curvature: f32,
     goods_trace: bool,
     relations: f32,
     block_from: usize,
@@ -81,6 +82,7 @@ impl Default for Args {
             soft_eps: planet_x::market::Market::DEFAULT_SOFT_EPS,
             rationing: String::from("interior"),
             barrier: DEFAULT_BARRIER,
+            curvature: DEFAULT_CURVATURE,
             goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
@@ -145,6 +147,7 @@ fn parse() -> Option<Args> {
             "--soft-eps" => args.soft_eps = value()?.parse().ok()?,
             "--rationing" => args.rationing = value()?,
             "--barrier" => args.barrier = value()?.parse().ok()?,
+            "--curvature" => args.curvature = value()?.parse().ok()?,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
@@ -234,6 +237,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
             "hard" => Rationing::Hard,
             _ => Rationing::Interior {
                 barrier: args.barrier.max(0.0),
+                curvature: args.curvature.max(0.0),
             },
         })
         .with_grant(args.grant)
