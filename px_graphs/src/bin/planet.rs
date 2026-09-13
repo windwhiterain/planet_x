@@ -10,9 +10,9 @@ fn main() {
         name: "planet".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
-        width: 512,
-        height: 512,
-        projection: px_ops::field::Projection::Octahedral,
+        width: 780,
+        height: 520,
+        projection: px_ops::field::Projection::Cube,
     });
 
     let continents = node::<ops::fbm::Fbm>("continents", &[]);
@@ -21,7 +21,7 @@ fn main() {
     let terrain = node::<ops::mix::Mix>("terrain", &[&continents, &mountains, &weight]);
     let height = node::<ops::remap::Remap>("height", &[&terrain]);
 
-    let surface = px_ops::mesh_node::<ops::octasphere::Octasphere>("surface", &[&height]);
+    let surface = px_ops::mesh_node::<ops::cubesphere::CubeSphere>("surface", &[&height]);
 
     let stats = height.field().stats();
     println!(
@@ -36,4 +36,5 @@ fn main() {
 
     finish();
 }
+
 

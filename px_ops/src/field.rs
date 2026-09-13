@@ -5,6 +5,7 @@ use px_protocol::wire::{Blob, DType, WireError};
 pub enum Projection {
     Equirect,
     Octahedral,
+    Cube,
 }
 
 impl Projection {
@@ -12,6 +13,7 @@ impl Projection {
         match self {
             Self::Equirect => AssetKind::Field2D,
             Self::Octahedral => AssetKind::OctahedralField,
+            Self::Cube => AssetKind::CubeField,
         }
     }
 
@@ -19,6 +21,7 @@ impl Projection {
         match self {
             Self::Equirect => "equirect",
             Self::Octahedral => "octahedral",
+            Self::Cube => "cube",
         }
     }
 }
@@ -100,6 +103,15 @@ impl Field {
                 [ring * phi.cos(), theta.cos(), ring * phi.sin()]
             }
             Projection::Octahedral => octahedral_direction_y_up(u, v),
+            Projection::Cube => {
+                let cell = px_protocol::art::cube_cell_size(self.width).max(1);
+                let face_size = px_protocol::art::cube_face_size(self.width).max(1);
+                let gutter = px_protocol::art::CUBE_GUTTER;
+                let face = (y / cell) * px_protocol::art::CUBE_COLUMNS + (x / cell);
+                let s = (x % cell) as f32 + 0.5 - gutter as f32;
+                let t = (y % cell) as f32 + 0.5 - gutter as f32;
+                px_protocol::art::cube_direction(face, s / face_size as f32, t / face_size as f32)
+            }
         }
     }
 
@@ -113,6 +125,18 @@ impl Field {
                 let v = direction[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
                 let u = (direction[2].atan2(direction[0]) / std::f32::consts::TAU).rem_euclid(1.0);
                 self.sample_uv(u, v)
+            }
+            Projection::Cube => {
+                let (face, s, t) = px_protocol::art::cube_face_of(direction);
+                let face_size = px_protocol::art::cube_face_size(self.width);
+                let uv = px_protocol::art::cube_atlas_uv(
+                    face,
+                    s,
+                    t,
+                    face_size,
+                    px_protocol::art::CUBE_GUTTER,
+                );
+                self.sample_uv(uv[0], uv[1])
             }
         }
     }
@@ -179,5 +203,6 @@ impl Field {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
     }
 }
+
 
 

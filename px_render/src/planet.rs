@@ -79,30 +79,50 @@ pub struct Field {
     pub data: Vec<f32>,
     pub min: f32,
     pub max: f32,
-    pub equirect: bool,
+    pub projection: Projection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection {
+    Equirect,
+    Octahedral,
+    Cube,
+}
+
+impl Projection {
+    fn direction(self, x: u32, y: u32, width: u32, height: u32) -> [f32; 3] {
+        let u = (x as f32 + 0.5) / width.max(1) as f32;
+        let v = (y as f32 + 0.5) / height.max(1) as f32;
+        match self {
+            Self::Equirect => {
+                let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
+                let phi = u * std::f32::consts::TAU;
+                let ring = theta.sin();
+                [ring * phi.cos(), theta.cos(), ring * phi.sin()]
+            }
+            Self::Octahedral => px_protocol::art::octahedral_direction_y_up(u, v),
+            Self::Cube => {
+                let cell = px_protocol::art::cube_cell_size(width).max(1);
+                let face_size = px_protocol::art::cube_face_size(width).max(1);
+                let gutter = px_protocol::art::CUBE_GUTTER;
+                let face = (y / cell) * px_protocol::art::CUBE_COLUMNS + (x / cell);
+                let s = (x % cell) as f32 + 0.5 - gutter as f32;
+                let t = (y % cell) as f32 + 0.5 - gutter as f32;
+                px_protocol::art::cube_direction(face, s / face_size as f32, t / face_size as f32)
+            }
+        }
+    }
 }
 
 impl Field {
-    pub fn latitude(&self, y: u32) -> f32 {
-        if self.equirect {
-            let v = y as f32 / (self.height.max(2) - 1) as f32;
-            return ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
-        }
-        let mut sum = 0.0;
-        for x in 0..self.width {
-            sum += self.texel_latitude(x, y);
-        }
-        sum / self.width.max(1) as f32
-    }
-
     pub fn texel_latitude(&self, x: u32, y: u32) -> f32 {
-        if self.equirect {
-            let v = y as f32 / (self.height.max(2) - 1) as f32;
-            return ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        match self.projection {
+            Projection::Equirect => {
+                let v = y as f32 / (self.height.max(2) - 1) as f32;
+                ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+            }
+            _ => self.projection.direction(x, y, self.width, self.height)[1].abs(),
         }
-        let u = (x as f32 + 0.5) / self.width.max(1) as f32;
-        let v = (y as f32 + 0.5) / self.height.max(1) as f32;
-        px_protocol::art::octahedral_direction_y_up(u, v)[1].abs()
     }
 
     pub fn ring_mean(&self, row: u32) -> f32 {
@@ -158,12 +178,13 @@ pub fn load_field(path: &str) -> Result<Field, String> {
             }
         }
     }
-    let equirect = match kind {
-        Some(AssetKind::Field2D) => true,
-        Some(AssetKind::OctahedralField) => false,
+    let projection = match kind {
+        Some(AssetKind::Field2D) => Projection::Equirect,
+        Some(AssetKind::OctahedralField) => Projection::Octahedral,
+        Some(AssetKind::CubeField) => Projection::Cube,
         Some(other) => {
             return Err(format!(
-                "{path} 是 {other:?}，星球需要 Field2D（经纬度）或 OctahedralField（八面体）产物"
+                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField 产物"
             ));
         }
         None => return Err(format!("{path} 里没有 Art 帧")),
@@ -194,7 +215,7 @@ pub fn load_field(path: &str) -> Result<Field, String> {
         data,
         min,
         max,
-        equirect,
+        projection,
     })
 }
 
@@ -378,7 +399,7 @@ fn surface_textures(
         }
     }
 
-    if field.equirect {
+    if field.projection == Projection::Equirect {
         pole_cap_filter(&mut color, field.width, field.height);
     }
     let color_image = with_wrapping(
@@ -415,7 +436,7 @@ fn surface_textures(
 
     let glow_handle = match palette {
         Palette::Lava => {
-            if field.equirect {
+            if field.projection == Projection::Equirect {
                 pole_cap_filter(&mut glow, field.width, field.height);
             }
             Some(images.add(with_wrapping(
@@ -1073,7 +1094,7 @@ pub fn spawn_planet(
         ));
     }
 
-    let mesh_handle = if field.equirect {
+    let mesh_handle = if field.projection == Projection::Equirect {
         meshes.add(uv_sphere(1.0, 224, 112))
     } else {
         meshes.add(octahedral_mesh(1.0, 320))
@@ -1095,7 +1116,7 @@ pub fn spawn_planet(
     let mut highest = f32::NEG_INFINITY;
     let flat_sea = matches!(spec.palette, Palette::Rocky | Palette::Ice);
     for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
-        let height = if field.equirect {
+        let height = if field.projection == Projection::Equirect {
             field.normalized(field.sample_capped(uv[0], uv[1]))
         } else {
             field.normalized(field.sample(uv[0], uv[1]))
@@ -1117,7 +1138,7 @@ pub fn spawn_planet(
         Some(VertexAttributeValues::Float32x3(target)) => target.clone_from(&positions),
         _ => return Err("回写位置失败".to_string()),
     }
-    if field.equirect {
+    if field.projection == Projection::Equirect {
         mesh.compute_smooth_normals();
     } else {
         grid_normals(&mut mesh, 320);
@@ -1221,6 +1242,8 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
 
 
 
