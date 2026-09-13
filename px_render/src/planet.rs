@@ -2,13 +2,46 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::color::LinearRgba;
 use bevy::image::Image;
-use bevy::mesh::{Mesh, VertexAttributeValues};
+use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use px_protocol::art::AssetKind;
-use px_protocol::render::Palette;
 use px_protocol::stream::{self, Frame};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Palette {
+    Rocky,
+    Gas,
+    Ice,
+    Lava,
+    Desert,
+}
+
+impl Palette {
+    pub const NAMES: [&'static str; 5] = ["rocky", "gas", "ice", "lava", "desert"];
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "rocky" => Some(Self::Rocky),
+            "gas" => Some(Self::Gas),
+            "ice" => Some(Self::Ice),
+            "lava" => Some(Self::Lava),
+            "desert" => Some(Self::Desert),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rocky => "rocky",
+            Self::Gas => "gas",
+            Self::Ice => "ice",
+            Self::Lava => "lava",
+            Self::Desert => "desert",
+        }
+    }
+}
 
 pub struct PlanetSpec {
     pub field: String,
@@ -17,7 +50,10 @@ pub struct PlanetSpec {
     pub sea_level: f32,
     pub radius: f32,
     pub spin: f32,
+    pub rings: f32,
 }
+
+const SYSTEM_TILT: f32 = 0.34;
 
 pub struct Field {
     pub width: u32,
@@ -179,10 +215,12 @@ fn shade(
             (color, [0.0, 0.0, 0.0])
         }
         Palette::Gas => {
-            let bands = (latitude * 17.0 + wobble * 1.5).sin() * 0.5 + 0.5;
-            let detail = (latitude * 47.0 + wobble * 2.7).sin() * 0.5 + 0.5;
-            let t = (bands * 0.68 + detail * 0.32).clamp(0.0, 1.0);
+            let bands = (latitude * 17.0 + wobble * 0.55).sin() * 0.5 + 0.5;
+            let detail = (latitude * 47.0 + wobble * 0.90).sin() * 0.5 + 0.5;
+            let t = (bands * 0.72 + detail * 0.28).clamp(0.0, 1.0);
             let mut color = ramp(GAS, t);
+            let storm = ((wobble * 1.7).sin() * 0.5 + 0.5).powf(6.0);
+            color = mix(color, [0.784, 0.514, 0.353], storm * 0.45);
             let pole = ((latitude - 0.74) / 0.26).clamp(0.0, 1.0);
             color = mix(color, [0.180, 0.145, 0.129], pole * 0.85);
             (color, [0.0, 0.0, 0.0])
@@ -206,6 +244,18 @@ fn shade(
             let color = mix(rock, [0.996, 0.443, 0.094], crack * 0.92);
             (color, glow)
         }
+        Palette::Desert => {
+            let mut color = if height < sea {
+                ramp(BASIN, water_t)
+            } else {
+                ramp(DUNE, land_t)
+            };
+            let strata = (height * 37.0).sin() * 0.5 + 0.5;
+            color = mix(color, [0.529, 0.290, 0.196], strata * land_t * 0.16);
+            let cap = ((latitude - 0.88) / 0.12).clamp(0.0, 1.0);
+            color = mix(color, [0.902, 0.925, 0.941], cap * 0.45);
+            (color, [0.0, 0.0, 0.0])
+        }
     }
 }
 
@@ -215,6 +265,19 @@ const LAVA_ROCK: &[(f32, [f32; 3])] = &[
     (0.60, [0.176, 0.125, 0.098]),
     (0.82, [0.290, 0.208, 0.157]),
     (1.00, [0.427, 0.353, 0.310]),
+];
+
+const BASIN: &[(f32, [f32; 3])] = &[
+    (0.00, [0.165, 0.122, 0.094]),
+    (1.00, [0.376, 0.271, 0.184]),
+];
+
+const DUNE: &[(f32, [f32; 3])] = &[
+    (0.00, [0.310, 0.196, 0.122]),
+    (0.18, [0.475, 0.302, 0.173]),
+    (0.42, [0.706, 0.510, 0.290]),
+    (0.70, [0.816, 0.663, 0.435]),
+    (1.00, [0.882, 0.796, 0.651]),
 ];
 
 fn push_color(bytes: &mut Vec<u8>, color: [f32; 3]) {
@@ -325,6 +388,66 @@ pub fn star_image(width: u32, height: u32) -> Image {
     image_from(width, height, data)
 }
 
+fn ring_mesh(inner: f32, outer: f32, segments: u32) -> Mesh {
+    let mut positions = Vec::with_capacity((segments as usize + 1) * 2);
+    let mut normals = Vec::with_capacity((segments as usize + 1) * 2);
+    let mut uvs = Vec::with_capacity((segments as usize + 1) * 2);
+    let mut indices = Vec::with_capacity(segments as usize * 6);
+
+    for index in 0..=segments {
+        let angle = index as f32 / segments as f32 * std::f32::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        let v = index as f32 / segments as f32;
+        positions.push([cos * inner, 0.0, sin * inner]);
+        positions.push([cos * outer, 0.0, sin * outer]);
+        normals.push([0.0, 1.0, 0.0]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([0.0, v]);
+        uvs.push([1.0, v]);
+    }
+    for index in 0..segments {
+        let base = index * 2;
+        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+fn ring_image(width: u32, height: u32) -> Image {
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for _row in 0..height {
+        for x in 0..width {
+            let t = x as f32 / (width.max(2) - 1) as f32;
+            let mut density = 0.34 + 0.32 * (t * 47.0).sin().abs();
+            density *= 0.58 + 0.42 * (t * 13.0 + 0.7).sin().abs();
+            density = (density + 0.18 * ((t * 211.0).sin() * 0.5 + 0.5)).clamp(0.0, 1.0);
+            if (t - 0.635).abs() < 0.030 {
+                density *= 0.08;
+            }
+            if (t - 0.340).abs() < 0.012 {
+                density *= 0.34;
+            }
+            let edge = (t / 0.07).clamp(0.0, 1.0) * ((1.0 - t) / 0.10).clamp(0.0, 1.0);
+            let alpha = (density * edge).clamp(0.0, 1.0);
+            let shade = 0.70 + 0.30 * (0.5 + 0.5 * (t * 61.0).sin());
+            push_color(
+                &mut data,
+                [0.878 * shade, 0.827 * shade, 0.729 * shade],
+            );
+            let last = data.len() - 1;
+            data[last] = (alpha * 240.0) as u8;
+        }
+    }
+    image_from(width, height, data)
+}
+
 pub fn spawn_planet(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -394,9 +517,30 @@ pub fn spawn_planet(
             ..default()
         })),
         Transform::from_rotation(
-            Quat::from_rotation_y(spec.spin) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_x(SYSTEM_TILT)
+                * Quat::from_rotation_y(spec.spin)
+                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
         ),
     ));
+
+    if spec.rings > 0.0 {
+        let inner = spec.radius * 1.30;
+        let outer = spec.radius * spec.rings.max(1.45);
+        commands.spawn((
+            crate::ScenePart,
+            Mesh3d(meshes.add(ring_mesh(inner, outer, 384))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color_texture: Some(images.add(ring_image(1024, 4))),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::from_rotation(
+                Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin),
+            ),
+        ));
+    }
 
     commands.spawn((
         crate::ScenePart,
@@ -436,7 +580,19 @@ pub fn spawn_planet(
     ));
 
     Ok(format!(
-        "{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}）｜海平面 {:.2}",
-        spec.field, field.width, field.height, spec.displace, lowest, highest, spec.sea_level
+        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}）｜海平面 {:.2}{}",
+        spec.field,
+        spec.palette.name(),
+        field.width,
+        field.height,
+        spec.displace,
+        lowest,
+        highest,
+        spec.sea_level,
+        if spec.rings > 0.0 {
+            format!("｜环 ×{:.2}", spec.rings)
+        } else {
+            String::new()
+        },
     ))
 }

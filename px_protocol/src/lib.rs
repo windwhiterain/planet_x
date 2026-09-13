@@ -6,12 +6,12 @@ pub mod stream;
 pub mod wire;
 
 pub use art::{ArtBundle, AssetKind, AssetManifest};
-pub use render::{ClientError, Lease, Palette, Request, Response, Scene};
+pub use render::{ClientError, Lease, Request, Response, Scene};
 pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
 

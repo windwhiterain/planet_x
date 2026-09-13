@@ -1,0 +1,7 @@
+# 扭曲场：给峡谷加蛇曲，别让它们笔直
+frequency = 1.6
+octaves = 3
+lacunarity = 2.0
+gain = 0.5
+seed = 44
+aspect = 2.0

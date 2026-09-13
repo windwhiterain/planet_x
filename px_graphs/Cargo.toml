@@ -5,7 +5,3 @@ edition = "2024"
 
 [dependencies]
 px_ops = { path = "../px_ops" }
-
-[[bin]]
-name = "planet"
-path = "src/bin/planet.rs"

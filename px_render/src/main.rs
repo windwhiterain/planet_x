@@ -19,7 +19,7 @@ use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
 use px_protocol::client;
-use px_protocol::render::{Lease, Palette, Request, Response, Scene};
+use px_protocol::render::{Lease, Request, Response, Scene};
 use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
@@ -99,11 +99,12 @@ struct Options {
     round: Option<u32>,
     out: Option<PathBuf>,
     planet: Option<PathBuf>,
-    palette: Palette,
+    palette: planet::Palette,
     displace: Option<f32>,
     sea_level: Option<f32>,
     radius: f32,
     spin: Option<f32>,
+    rings: Option<f32>,
 }
 
 impl Default for Options {
@@ -118,11 +119,12 @@ impl Default for Options {
             round: None,
             out: None,
             planet: None,
-            palette: Palette::Rocky,
+            palette: planet::Palette::Rocky,
             displace: None,
             sea_level: None,
             radius: 1.0,
             spin: None,
+            rings: None,
         }
     }
 }
@@ -147,13 +149,18 @@ impl Options {
                 "--out" => options.out = Some(PathBuf::from(next("--out")?)),
                 "--palette" => {
                     let name = next("--palette")?;
-                    options.palette = Palette::parse(&name)
-                        .ok_or_else(|| format!("--palette 只认 rocky / gas / ice / lava，收到 {name}"))?;
+                    options.palette = planet::Palette::parse(&name).ok_or_else(|| {
+                        format!(
+                            "--palette 只认 {}，收到 {name}",
+                            planet::Palette::NAMES.join(" / ")
+                        )
+                    })?;
                 }
                 "--displace" => options.displace = Some(number("--displace")?),
                 "--sea" => options.sea_level = Some(number("--sea")?),
                 "--radius" => options.radius = number("--radius")?,
                 "--spin" => options.spin = Some(number("--spin")?),
+                "--rings" => options.rings = Some(number("--rings")?),
                 "--round" => {
                     options.round = Some(
                         next("--round")?
@@ -193,19 +200,21 @@ impl Options {
     fn scene(&self) -> Scene {
         match &self.planet {
             Some(path) => {
-                let (displace, sea_level) = match self.palette {
-                    Palette::Rocky => (0.075, 0.520),
-                    Palette::Gas => (0.010, 0.450),
-                    Palette::Ice => (0.055, 0.500),
-                    Palette::Lava => (0.095, 0.480),
+                let (displace, sea_level, rings) = match self.palette {
+                    planet::Palette::Rocky => (0.075, 0.520, 0.0),
+                    planet::Palette::Gas => (0.010, 0.450, 2.35),
+                    planet::Palette::Ice => (0.055, 0.500, 0.0),
+                    planet::Palette::Lava => (0.095, 0.480, 0.0),
+                    planet::Palette::Desert => (0.085, 0.420, 0.0),
                 };
                 Scene::Planet {
                     field: path.display().to_string(),
-                    palette: self.palette,
+                    palette: self.palette.name().to_string(),
                     displace: self.displace.unwrap_or(displace),
                     sea_level: self.sea_level.unwrap_or(sea_level),
                     radius: self.radius,
                     spin: self.spin.unwrap_or(0.0),
+                    rings: self.rings.unwrap_or(rings),
                 }
             }
             None => Scene::World {
@@ -223,9 +232,10 @@ fn usage() -> String {
         "      常驻渲染服务：启动时预热管线，之后按请求出图（每次 ~0.3 s）",
         "  px_render --stream PATH [--round N] [--out PNG] [--width W] [--height H]",
         "      经济世界：三根部门库存柱 + 三根价格柱",
-        "  px_render --planet FIELD.pxart [--palette rocky|gas|ice|lava] [--displace F] [--sea F]",
-        "            [--radius F] [--spin F] [--out PNG] [--width W] [--height H]",
-        "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景",
+        "  px_render --planet FIELD.pxart [--palette rocky|gas|ice|lava|desert] [--displace F]",
+        "            [--sea F] [--radius F] [--spin F] [--rings F] [--out PNG] [--width W] [--height H]",
+        "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景；--rings 给个",
+        "      大于 1 的倍数就加环系",
         "  服务没在跑时会提示；要顺手拉起一个就加 --autostart",
     ]
     .join("\n")
@@ -578,22 +588,33 @@ fn accept_jobs(
             sea_level,
             radius,
             spin,
-        } => planet::spawn_planet(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &canvas.target,
-            &stars.0,
-            &planet::PlanetSpec {
-                field: field.clone(),
-                palette: *palette,
-                displace: *displace,
-                sea_level: *sea_level,
-                radius: *radius,
-                spin: *spin,
-            },
-        ),
+            rings,
+        } => {
+            let Some(palette) = planet::Palette::parse(palette) else {
+                let _ = job.reply.send(Frame::Refused(format!(
+                    "不认识的色板 {palette}；可用：{}",
+                    planet::Palette::NAMES.join(" / ")
+                )));
+                return;
+            };
+            planet::spawn_planet(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &canvas.target,
+                &stars.0,
+                &planet::PlanetSpec {
+                    field: field.clone(),
+                    palette,
+                    displace: *displace,
+                    sea_level: *sea_level,
+                    radius: *radius,
+                    spin: *spin,
+                    rings: *rings,
+                },
+            )
+        }
     };
 
     let label = match built {

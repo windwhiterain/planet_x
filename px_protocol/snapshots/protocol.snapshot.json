@@ -1,19 +1,19 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 3
+        "schema_version": 4
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 3
+      "schema_version": 4
     },
     "art::ArtBundle": {
       "assets": [
@@ -43,12 +43,6 @@
       "port": 0,
       "protocol_hash": 0
     },
-    "render::Palette": [
-      "rocky",
-      "gas",
-      "ice",
-      "lava"
-    ],
     "render::Request": {
       "height": 640,
       "out": "target/shot.png",
@@ -58,6 +52,7 @@
         "kind": "planet",
         "palette": "rocky",
         "radius": 1.0,
+        "rings": 0.0,
         "sea_level": 0.44999998807907104,
         "spin": 0.0
       },
@@ -98,7 +93,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 3,
+      "schema_version": 4,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
-use px_protocol::render::{Lease, Palette, Request, Response, Scene};
+use px_protocol::render::{Lease, Request, Response, Scene};
 use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
@@ -63,11 +63,12 @@ fn canonical() -> String {
     let request = Request {
         scene: Scene::Planet {
             field: "target/pcg/ab/xx/yy.pxart".to_string(),
-            palette: Palette::Rocky,
+            palette: "rocky".to_string(),
             displace: 0.06,
             sea_level: 0.45,
             radius: 1.0,
             spin: 0.0,
+            rings: 0.0,
         },
         width: 960,
         height: 640,
@@ -104,7 +105,6 @@ fn canonical() -> String {
             "render::Request": request,
             "render::Response": response,
             "render::Scene.world": world_scene,
-            "render::Palette": [Palette::Rocky, Palette::Gas, Palette::Ice, Palette::Lava],
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),

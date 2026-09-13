@@ -1,35 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Palette {
-    Rocky,
-    Gas,
-    Ice,
-    Lava,
-}
-
-impl Palette {
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "rocky" => Some(Self::Rocky),
-            "gas" => Some(Self::Gas),
-            "ice" => Some(Self::Ice),
-            "lava" => Some(Self::Lava),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Rocky => "rocky",
-            Self::Gas => "gas",
-            Self::Ice => "ice",
-            Self::Lava => "lava",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scene {
@@ -39,11 +9,12 @@ pub enum Scene {
     },
     Planet {
         field: String,
-        palette: Palette,
+        palette: String,
         displace: f32,
         sea_level: f32,
         radius: f32,
         spin: f32,
+        rings: f32,
     },
 }
 
