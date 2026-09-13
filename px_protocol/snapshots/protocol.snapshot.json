@@ -1,19 +1,19 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 6
+        "schema_version": 7
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 6
+      "schema_version": 7
     },
     "art::ArtBundle": {
       "assets": [
@@ -56,6 +56,11 @@
         "radius": 1.0,
         "rings": 0.0,
         "sea_level": 0.44999998807907104,
+        "slope": [
+          "target/pcg/ab/cc/slope_x.pxart",
+          "target/pcg/ab/cc/slope_y.pxart",
+          "target/pcg/ab/cc/slope_z.pxart"
+        ],
         "spin": 0.0
       },
       "view": {
@@ -102,7 +107,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 6,
+      "schema_version": 7,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,

@@ -113,6 +113,7 @@ struct Options {
     planet: Option<PathBuf>,
     mesh: Option<PathBuf>,
     clouds: Option<PathBuf>,
+    slope: Option<[PathBuf; 3]>,
     cloud: Option<f32>,
     fps: bool,
     novsync: bool,
@@ -146,6 +147,7 @@ impl Default for Options {
             planet: None,
             mesh: None,
             clouds: None,
+            slope: None,
             cloud: None,
             fps: false,
             novsync: false,
@@ -186,6 +188,18 @@ impl Options {
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
                 "--clouds" => options.clouds = Some(PathBuf::from(next("--clouds")?)),
+                "--cloud-slope" => {
+                    let raw = next("--cloud-slope")?;
+                    let parts: Vec<&str> = raw.split(',').collect();
+                    if parts.len() != 3 {
+                        return Err("--cloud-slope 要三个逗号分隔的路径（x,y,z）".to_string());
+                    }
+                    options.slope = Some([
+                        PathBuf::from(parts[0]),
+                        PathBuf::from(parts[1]),
+                        PathBuf::from(parts[2]),
+                    ]);
+                }
                 "--cloud" => options.cloud = Some(number("--cloud")?),
                 "--fps" => options.fps = true,
                 "--novsync" => options.novsync = true,
@@ -283,6 +297,10 @@ impl Options {
                 field: path.display().to_string(),
                 mesh: self.mesh.as_ref().map(|mesh| mesh.display().to_string()),
                 clouds: self.clouds.as_ref().map(|clouds| clouds.display().to_string()),
+                slope: self
+                    .slope
+                    .as_ref()
+                    .map(|paths| paths.each_ref().map(|path| path.display().to_string())),
                 atmo: self.atmo.unwrap_or(1.0),
                 palette: self.palette,
                 displace: self.displace.unwrap_or(displace),
@@ -301,6 +319,7 @@ impl Options {
                 field: spec.field,
                 mesh: spec.mesh,
                 clouds: spec.clouds,
+                slope: spec.slope,
                 palette: spec.palette.name().to_string(),
                 displace: spec.displace,
                 sea_level: spec.sea_level,
@@ -770,6 +789,7 @@ fn accept_jobs(
             field,
             mesh,
             clouds,
+            slope,
             palette,
             displace,
             sea_level,
@@ -801,6 +821,7 @@ fn accept_jobs(
                     field: field.clone(),
                     mesh: mesh.clone(),
                     clouds: clouds.clone(),
+                    slope: slope.clone(),
                     atmo: atmo.unwrap_or(1.0),
                     palette,
                     displace: *displace,
@@ -1259,6 +1280,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
             field,
             mesh,
             clouds,
+            slope,
             palette,
             displace,
             sea_level,
@@ -1270,6 +1292,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
                 field,
                 mesh,
                 clouds,
+                slope,
                 atmo: 1.0,
                 palette: planet::Palette::parse(&palette)?,
                 displace,

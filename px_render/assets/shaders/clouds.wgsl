@@ -22,6 +22,7 @@ struct CloudParams {
     bump: f32,
     seed: u32,
     ablate: u32,
+    slope_scale: f32,
 };
 
 const ABLATE_NONE: u32 = 0u;
@@ -29,6 +30,8 @@ const ABLATE_SUN: u32 = 1u;
 const ABLATE_NOISE: u32 = 2u;
 const ABLATE_FETCH: u32 = 3u;
 const ABLATE_DETAIL: u32 = 4u;
+const ABLATE_SURFACE: u32 = 5u;
+const ABLATE_NORMALS: u32 = 6u;
 const SHADOW_GAIN: f32 = 4.0;
 
 struct Medium {
@@ -64,6 +67,16 @@ fn coverage_of(direction: vec3<f32>) -> f32 {
         0.45,
         clamp((mask - params.coverage) / max(1.0 - params.coverage, 1e-4), 0.0, 1.0),
     );
+}
+
+fn surface_normal(direction: vec3<f32>) -> vec3<f32> {
+    let baked = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0);
+    let up = direction - baked.gba * params.slope_scale;
+    let length_squared = dot(up, up);
+    if length_squared <= 1e-8 {
+        return direction;
+    }
+    return up * inverseSqrt(length_squared);
 }
 
 fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
@@ -153,6 +166,22 @@ fn scene_distance(fragment: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    if params.ablate == ABLATE_NORMALS || params.ablate == ABLATE_SURFACE {
+        let facing = normalize(to_local(in.world_position.xyz));
+        let baked = textureSampleLevel(coverage_map, coverage_sampler, facing, 0.0);
+        let normal = surface_normal(facing);
+        if params.ablate == ABLATE_NORMALS {
+            return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
+        }
+        if baked.r < params.coverage {
+            discard;
+        }
+        let sun = normalize(SUN_DIRECTION);
+        let lit = clamp(dot(normal, sun), 0.0, 1.0);
+        let shade = 0.18 + 0.82 * lit;
+        return vec4<f32>(params.tint.rgb * shade, 1.0);
+    }
+
     let camera = view.world_position.xyz;
     let away = in.world_position.xyz - camera;
     let distance = length(away);

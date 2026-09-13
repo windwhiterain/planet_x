@@ -3,7 +3,7 @@ use px_ops::noise::fnv1a;
 use px_ops::ops;
 use px_ops::{GraphSpec, begin, finish, node};
 
-const GRAPH_VERSION: u32 = 1;
+const GRAPH_VERSION: u32 = 2;
 const SOURCE_HASH: u64 = fnv1a(include_str!("clouds.rs"));
 const FACE: u32 = 256;
 
@@ -26,6 +26,10 @@ fn main() {
     let mixed = node::<ops::mix::Mix>("mixed", &[&clusters, &carved, &weight]);
     let coverage = node::<ops::remap::Remap>("coverage", &[&mixed]);
 
+    let slope_x = node::<ops::gradient::Gradient>("slope_x", &[&coverage]);
+    let slope_y = node::<ops::gradient::Gradient>("slope_y", &[&coverage]);
+    let slope_z = node::<ops::gradient::Gradient>("slope_z", &[&coverage]);
+
     let stats = coverage.field().stats();
     println!(
         "输出 coverage：{}×{}（{} 面 × {face}²）｜值域 {:.4}..{:.4}｜均值 {:.4}",
@@ -37,10 +41,24 @@ fn main() {
         stats.mean,
         face = FACE,
     );
+    for (name, node) in [
+        ("slope_x", &slope_x),
+        ("slope_y", &slope_y),
+        ("slope_z", &slope_z),
+    ] {
+        let stats = node.field().stats();
+        println!(
+            "输出 {name}：值域 {:.4}..{:.4}｜均值 {:.4}",
+            stats.min, stats.max, stats.mean
+        );
+    }
 
     println!(
-        "渲染：px_render --planet <HEIGHT.pxart> --mesh <MESH.pxart> --palette rocky --clouds {}",
+        "渲染：px_render --planet <HEIGHT.pxart> --mesh <MESH.pxart> --palette rocky --clouds {} --cloud-slope {},{},{}",
         px_ops::artifact_path_of(&coverage.key).display(),
+        px_ops::artifact_path_of(&slope_x.key).display(),
+        px_ops::artifact_path_of(&slope_y.key).display(),
+        px_ops::artifact_path_of(&slope_z.key).display(),
     );
 
     finish();

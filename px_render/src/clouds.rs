@@ -35,6 +35,7 @@ pub struct CloudParams {
     pub bump: f32,
     pub seed: u32,
     pub ablate: u32,
+    pub slope_scale: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,8 @@ pub enum Ablate {
     Noise,
     Fetch,
     Detail,
+    Surface,
+    Normals,
 }
 
 impl Ablate {
@@ -54,8 +57,10 @@ impl Ablate {
             "noise" => Ok(Self::Noise),
             "fetch" => Ok(Self::Fetch),
             "detail" => Ok(Self::Detail),
+            "surface" => Ok(Self::Surface),
+            "normals" => Ok(Self::Normals),
             other => Err(format!(
-                "--cloud-ablate 只认 none / sun / noise / fetch / detail，不认 {other}"
+                "--cloud-ablate 只认 none / sun / noise / fetch / detail / surface / normals，不认 {other}"
             )),
         }
     }
@@ -67,6 +72,8 @@ impl Ablate {
             Self::Noise => 2,
             Self::Fetch => 3,
             Self::Detail => 4,
+            Self::Surface => 5,
+            Self::Normals => 6,
         }
     }
 }
@@ -91,6 +98,7 @@ impl CloudParams {
             bump: 0.85,
             seed: 7,
             ablate: Ablate::None.code(),
+            slope_scale: 0.08,
         }
     }
 }
@@ -157,7 +165,7 @@ fn half_from_f32(value: f32) -> u16 {
     sign | half
 }
 
-pub fn coverage_image(field: &Field) -> Result<Image, String> {
+pub fn coverage_image(field: &Field, slopes: &[Field; 3]) -> Result<Image, String> {
     if field.projection != Domain::CubeMap {
         return Err(format!(
             "云覆盖度需要 CubeMap 产物，这份是 {:?}",
@@ -172,10 +180,31 @@ pub fn coverage_image(field: &Field) -> Result<Image, String> {
             field.height
         ));
     }
+    for slope in slopes {
+        if slope.projection != Domain::CubeMap
+            || slope.width != face
+            || slope.height != field.height
+        {
+            return Err(format!(
+                "云的梯度场必须和覆盖度同形（{face}×{}），这份是 {:?} {}×{}",
+                field.height,
+                slope.projection,
+                slope.width,
+                slope.height
+            ));
+        }
+    }
 
-    let mut bytes = Vec::with_capacity(field.data.len() * 2);
-    for value in &field.data {
-        bytes.extend_from_slice(&half_from_f32(value.clamp(0.0, 1.0)).to_le_bytes());
+    let mut bytes = Vec::with_capacity(field.data.len() * 8);
+    for index in 0..field.data.len() {
+        for value in [
+            field.data[index],
+            slopes[0].data[index],
+            slopes[1].data[index],
+            slopes[2].data[index],
+        ] {
+            bytes.extend_from_slice(&half_from_f32(value).to_le_bytes());
+        }
     }
 
     let mut image = Image::new(
@@ -186,7 +215,7 @@ pub fn coverage_image(field: &Field) -> Result<Image, String> {
         },
         TextureDimension::D2,
         bytes,
-        TextureFormat::R16Float,
+        TextureFormat::Rgba16Float,
         RenderAssetUsages::default(),
     );
     image.texture_view_descriptor = Some(TextureViewDescriptor {
@@ -203,53 +232,6 @@ pub fn coverage_image(field: &Field) -> Result<Image, String> {
         ..default()
     });
     Ok(image)
-}
-
-pub fn spawn_clouds(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<CloudsMaterial>,
-    images: &mut Assets<Image>,
-    parent: Entity,
-    orientation: Quat,
-    spec: &PlanetSpec,
-    density: f32,
-) -> Result<String, String> {
-    let coverage = crate::planet::load_field(
-        spec.clouds
-            .as_deref()
-            .ok_or_else(|| "没有给云覆盖度".to_string())?,
-    )?;
-    let image = coverage_image(&coverage)?;
-    let face = coverage.width;
-    let handle = images.add(image);
-
-    let inner = spec.radius * CLOUD_BASE;
-    let outer = spec.radius * CLOUD_TOP;
-    let Ok(sphere) = Sphere::new(outer).mesh().ico(64) else {
-        return Err("云壳网格造不出来".to_string());
-    };
-
-    let mut params = CloudParams::new(inner, outer, density);
-    params.orientation = Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w);
-
-    commands.entity(parent).with_children(|parent| {
-        parent.spawn((
-            crate::ScenePart,
-            PlanetCloud,
-            Mesh3d(meshes.add(sphere)),
-            MeshMaterial3d(materials.add(CloudsMaterial {
-                params,
-                coverage: Some(handle),
-            })),
-            Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
-        ));
-    });
-
-    Ok(format!(
-        "云层：{:.3}..{:.3}｜覆盖度 {}²×{}｜消光 {:.1}",
-        inner, outer, face, CUBE_FACES, density,
-    ))
 }
 
 pub fn warm_clouds(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<CloudsMaterial>) {

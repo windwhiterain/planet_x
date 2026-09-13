@@ -11,7 +11,7 @@ pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
 

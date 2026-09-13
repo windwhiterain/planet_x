@@ -13,6 +13,8 @@ pub enum Scene {
         mesh: Option<String>,
         #[serde(default)]
         clouds: Option<String>,
+        #[serde(default)]
+        slope: Option<[String; 3]>,
         palette: String,
         displace: f32,
         sea_level: f32,

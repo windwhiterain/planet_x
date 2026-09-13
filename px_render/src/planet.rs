@@ -71,6 +71,7 @@ pub struct PlanetSpec {
     pub field: String,
     pub mesh: Option<String>,
     pub clouds: Option<String>,
+    pub slope: Option<[String; 3]>,
     pub palette: Palette,
     pub displace: f32,
     pub sea_level: f32,
@@ -1198,6 +1199,19 @@ pub fn check_scene(spec: &PlanetSpec) -> Result<(), String> {
         if field.projection != Domain::CubeMap {
             return Err(format!("云覆盖度 {clouds} 不是 CubeMap 产物"));
         }
+        let paths = spec
+            .slope
+            .as_ref()
+            .ok_or_else(|| "没有给云的梯度场（--cloud-slope x,y,z）".to_string())?;
+        for path in paths {
+            let slope = load_field(path)?;
+            if slope.projection != Domain::CubeMap
+                || slope.width != field.width
+                || slope.height != field.height
+            {
+                return Err(format!("云梯度 {path} 与覆盖度不同形"));
+            }
+        }
     }
     Ok(())
 }
@@ -1215,8 +1229,17 @@ pub fn spawn_clouds(
             .as_deref()
             .ok_or_else(|| "没有给云覆盖度".to_string())?,
     )?;
+    let paths = spec
+        .slope
+        .as_ref()
+        .ok_or_else(|| "没有给云的梯度场（--cloud-slope x,y,z）".to_string())?;
+    let slopes = [
+        load_field(&paths[0])?,
+        load_field(&paths[1])?,
+        load_field(&paths[2])?,
+    ];
     let face = coverage.width;
-    let image = clouds::coverage_image(&coverage)?;
+    let image = clouds::coverage_image(&coverage, &slopes)?;
     let handle = images.add(image);
 
     let inner = spec.radius * clouds::CLOUD_BASE;
