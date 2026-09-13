@@ -73,7 +73,7 @@ impl Default for Args {
             capacity: None,
             ladder_scale: 1.0,
             specialty_top: None,
-            soft_eps: 0.0,
+            soft_eps: planet_x::market::Market::DEFAULT_SOFT_EPS,
             goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
