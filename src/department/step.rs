@@ -6,7 +6,7 @@ const FREE_COST: f32 = 1e-6;
 /// 分布的软化温度：越小越接近全押一个政策（角点、会抖），越大越平均
 const POLICY_TEMPERATURE: f32 = 0.25;
 
-fn policy_score(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
+fn basket_value(policy: &Policy, prices: &[f32]) -> (f32, f32, f32) {
     let mut cost = 0.0;
     let mut revenue = 0.0;
     let mut demanded = 0.0;
@@ -18,20 +18,31 @@ fn policy_score(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity
         cost += consumption * price;
         revenue += output * price;
     }
-    let value = if policy.is_transform() {
-        let margin = revenue - cost;
-        if margin <= 0.0 {
-            return 0.0;
-        }
-        margin
-    } else {
-        let motive = policy.motive.max(0.0);
-        if motive <= 0.0 || demanded <= 0.0 {
-            return 0.0;
-        }
-        motive / cost.max(FREE_COST)
-    };
-    value * activity_ceiling(policy, prices, warehouse, capacity)
+    (cost, revenue, demanded)
+}
+
+/// 转换族：把全部资源都给它的话能赚多少钱 —— 每个原料与产能各给一条天花板
+fn transform_score(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
+    let (cost, revenue, _) = basket_value(policy, prices);
+    let margin = revenue - cost;
+    if margin <= 0.0 {
+        return 0.0;
+    }
+    margin * activity_ceiling(policy, prices, warehouse, capacity)
+}
+
+/// 消费族：只看价格，不看资源约束
+fn consumption_potential(policy: &Policy, prices: &[f32], capacity: f32) -> f32 {
+    let (cost, _, demanded) = basket_value(policy, prices);
+    let motive = policy.motive.max(0.0);
+    if motive <= 0.0 || demanded <= 0.0 {
+        return 0.0;
+    }
+    let capacity_use = policy.capacity_use();
+    if capacity.is_finite() && capacity_use > 0.0 {
+        return motive / capacity_use;
+    }
+    motive / cost.max(FREE_COST)
 }
 
 /// 这个政策独占资源时最多能跑多少：原料与产能各给一条上界。
@@ -109,14 +120,14 @@ pub(super) fn plan(
     let mut intake = vec![0.0; goods];
     let mut output = vec![0.0; goods];
 
-    let mut consume_best = 0.0f32;
     let mut produce_best = 0.0f32;
     for policy in department.policies.iter_mut() {
-        policy.price_potential = policy_score(policy, &prices, warehouse, department.capacity);
         if policy.is_transform() {
+            policy.price_potential =
+                transform_score(policy, &prices, warehouse, department.capacity);
             produce_best = produce_best.max(policy.price_potential);
         } else {
-            consume_best = consume_best.max(policy.price_potential);
+            policy.price_potential = consumption_potential(policy, &prices, department.capacity);
         }
     }
 
@@ -125,12 +136,11 @@ pub(super) fn plan(
     let mut consume_weight = 0.0;
     let mut produce_weight = 0.0;
     for policy in department.policies.iter_mut() {
-        let best = if policy.is_transform() {
-            produce_best
+        policy.distribution = if policy.is_transform() {
+            policy_share(policy.price_potential, produce_best)
         } else {
-            consume_best
+            policy.price_potential
         };
-        policy.distribution = policy_share(policy.price_potential, best);
         if policy.is_transform() {
             produce_weight += policy.distribution;
         } else {
