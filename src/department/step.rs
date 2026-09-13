@@ -21,14 +21,14 @@ fn basket_value(policy: &Policy, prices: &[f32]) -> (f32, f32, f32) {
     (cost, revenue, demanded)
 }
 
-/// 转换族：把全部资源都给它的话能赚多少钱 —— 每个原料与产能各给一条天花板
-fn transform_score(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
+/// 生产族：把天花板内的资源全给它能赚多少钱。天花板由调用方统一到同一把尺子上
+fn production_score(policy: &Policy, prices: &[f32], ceiling: f32) -> f32 {
     let (cost, revenue, _) = basket_value(policy, prices);
     let margin = revenue - cost;
     if margin <= 0.0 {
         return 0.0;
     }
-    margin * activity_ceiling(policy, prices, warehouse, capacity)
+    margin * ceiling.max(0.0)
 }
 
 /// 消费族：只看价格，不看资源约束
@@ -45,9 +45,8 @@ fn consumption_potential(policy: &Policy, prices: &[f32], capacity: f32) -> f32 
     motive / cost.max(FREE_COST)
 }
 
-/// 这个政策独占资源时最多能跑多少：原料与产能各给一条上界。
-/// 原料按「支配力」算 —— 手里有的，加上现金还买得起的；否则买方（手里本来就没货）会被判死刑
-fn activity_ceiling(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capacity: f32) -> f32 {
+/// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷
+fn material_ceiling(policy: &Policy, prices: &[f32], warehouse: &Warehouse) -> f32 {
     let mut ceiling = f32::INFINITY;
     for (k, consumption) in policy.consumptions.iter().enumerate() {
         if *consumption > 0.0 {
@@ -66,14 +65,16 @@ fn activity_ceiling(policy: &Policy, prices: &[f32], warehouse: &Warehouse, capa
             ceiling = ceiling.min(command / consumption);
         }
     }
+    ceiling
+}
+
+/// 产能允许这个政策跑多少篮子；没有产能占用或产能不限时返回无穷
+fn capacity_ceiling(policy: &Policy, capacity: f32) -> f32 {
     let capacity_use = policy.capacity_use();
     if capacity.is_finite() && capacity_use > 0.0 {
-        ceiling = ceiling.min(capacity / capacity_use);
-    }
-    if ceiling.is_finite() {
-        ceiling.max(0.0)
+        capacity / capacity_use
     } else {
-        1.0
+        f32::INFINITY
     }
 }
 
@@ -117,11 +118,29 @@ pub(super) fn plan(
     let mut intake = vec![0.0; goods];
     let mut output = vec![0.0; goods];
 
+    let mut ceilings = Vec::with_capacity(department.policies.len());
+    let mut reference = 0.0f32;
+    for policy in department.policies.iter() {
+        let ceiling = material_ceiling(policy, &prices, warehouse)
+            .min(capacity_ceiling(policy, department.capacity));
+        if ceiling.is_finite() {
+            reference = reference.max(ceiling);
+        }
+        ceilings.push(ceiling);
+    }
+    if !(reference > 0.0) {
+        reference = 1.0;
+    }
+
     let mut produce_best = 0.0f32;
-    for policy in department.policies.iter_mut() {
+    for (p, policy) in department.policies.iter_mut().enumerate() {
         if policy.is_production() {
-            policy.price_potential =
-                transform_score(policy, &prices, warehouse, department.capacity);
+            let ceiling = if ceilings[p].is_finite() {
+                ceilings[p]
+            } else {
+                reference
+            };
+            policy.price_potential = production_score(policy, &prices, ceiling);
             produce_best = produce_best.max(policy.price_potential);
         } else {
             policy.price_potential = consumption_potential(policy, &prices, department.capacity);
