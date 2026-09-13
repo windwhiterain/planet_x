@@ -10,8 +10,9 @@ fn main() {
         name: "planet".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
-        width: 768,
-        height: 384,
+        width: 512,
+        height: 512,
+        projection: px_ops::field::Projection::Octahedral,
     });
 
     let continents = node::<ops::fbm::Fbm>("continents", &[]);
@@ -28,3 +29,4 @@ fn main() {
 
     finish();
 }
+

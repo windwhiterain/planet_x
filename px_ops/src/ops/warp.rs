@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
+use crate::Grid;
 use crate::noise::fnv1a;
 use crate::FieldOp;
 
@@ -31,16 +32,16 @@ impl FieldOp for Warp {
     const SOURCE_HASH: u64 = fnv1a(include_str!("warp.rs"));
     const INPUTS: &'static [&'static str] = &["input", "warp"];
 
-    fn eval(params: &Params, inputs: &[&Field], size: (u32, u32)) -> Field {
+    fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {
         let (input, warp) = (inputs[0], inputs[1]);
-        let mut field = Field::filled(size.0, size.1, 0.0);
-        let half_x = size.0 / 3;
-        let half_y = (size.1 / 3).max(1);
+        let mut field = grid.filled(0.0);
+        let half_x = grid.width / 3;
+        let half_y = (grid.height / 3).max(1);
 
-        for y in 0..size.1 {
-            for x in 0..size.0 {
+        for y in 0..grid.height {
+            for x in 0..grid.width {
                 let first = warp.at(x, y) - 0.5;
-                let second = warp.at((x + half_x) % size.0, (y + half_y) % size.1) - 0.5;
+                let second = warp.at((x + half_x) % grid.width, (y + half_y) % grid.height) - 0.5;
 
                 let (offset_x, offset_y) = if params.spherical {
                     let (u, v) = field.uv(x, y);
@@ -48,16 +49,16 @@ impl FieldOp for Warp {
                     let ring = (sine * sine + 0.16).sqrt();
                     let angle = first * params.strength;
                     (
-                        (u + angle / (std::f32::consts::TAU * ring)) * size.0 as f32,
+                        (u + angle / (std::f32::consts::TAU * ring)) * grid.width as f32,
                         (v + second * params.lateral * params.strength / std::f32::consts::PI)
-                            * (size.1 as f32 - 1.0),
+                            * (grid.height as f32 - 1.0),
                     )
                 } else {
-                    let scale = params.strength * size.0 as f32;
+                    let scale = params.strength * grid.width as f32;
                     (
                         x as f32 + first * scale,
-                        y as f32 + second * params.lateral * scale * size.0 as f32
-                            / size.1 as f32,
+                        y as f32 + second * params.lateral * scale * grid.width as f32
+                            / grid.height as f32,
                     )
                 };
 
@@ -67,3 +68,5 @@ impl FieldOp for Warp {
         field
     }
 }
+
+

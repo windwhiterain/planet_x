@@ -12,6 +12,7 @@ fn main() {
         source_hash: SOURCE_HASH,
         width: 768,
         height: 384,
+        projection: px_ops::field::Projection::Equirect,
     });
 
     let plateaus = node::<ops::fbm::Fbm>("plateaus", &[]);
@@ -30,3 +31,4 @@ fn main() {
 
     finish();
 }
+

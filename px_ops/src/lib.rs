@@ -2,7 +2,7 @@ pub mod field;
 pub mod noise;
 pub mod ops;
 
-pub use field::{Field, Stats};
+pub use field::{Field, Projection, Stats};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ pub trait FieldOp {
     const VERSION: u32;
     const SOURCE_HASH: u64;
     const INPUTS: &'static [&'static str];
-    fn eval(params: &Self::Params, inputs: &[&Field], size: (u32, u32)) -> Field;
+    fn eval(params: &Self::Params, inputs: &[&Field], grid: Grid) -> Field;
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,20 @@ pub struct GraphSpec {
     pub source_hash: u64,
     pub width: u32,
     pub height: u32,
+    pub projection: Projection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid {
+    pub width: u32,
+    pub height: u32,
+    pub projection: Projection,
+}
+
+impl Grid {
+    pub fn filled(&self, value: f32) -> Field {
+        Field::filled_with(self.width, self.height, value, self.projection)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -144,6 +158,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         Op::VERSION,
         context.spec.version,
         (context.spec.width, context.spec.height),
+        context.spec.projection,
         &params_json,
         &input_keys,
     );
@@ -154,7 +169,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
     let cached = if context.fresh {
         None
     } else {
-        load_artifact(&path).ok()
+        load_artifact(&path, context.spec.projection).ok()
     };
 
     let (field, hit, bytes) = match cached {
@@ -167,7 +182,11 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
             let field = Op::eval(
                 &params,
                 &borrowed,
-                (context.spec.width, context.spec.height),
+                Grid {
+                    width: context.spec.width,
+                    height: context.spec.height,
+                    projection: context.spec.projection,
+                },
             );
             let bytes = write_artifact(&path, name, &field).unwrap_or_else(|err| {
                 panic!("写产物 {} 失败：{err}", path.display());
@@ -298,6 +317,7 @@ pub fn node_key(
     op_version: u32,
     graph_version: u32,
     canvas: (u32, u32),
+    projection: Projection,
     params_json: &str,
     input_keys: &[Key],
 ) -> Key {
@@ -308,6 +328,7 @@ pub fn node_key(
     hasher.update(&graph_version.to_le_bytes());
     hasher.update(&canvas.0.to_le_bytes());
     hasher.update(&canvas.1.to_le_bytes());
+    hasher.update(projection.name().as_bytes());
     hasher.update(params_json.as_bytes());
     for key in input_keys {
         hasher.update(key);
@@ -349,7 +370,7 @@ fn write_artifact(path: &Path, id: &str, field: &Field) -> Result<u64, String> {
     let bundle = ArtBundle {
         assets: vec![AssetManifest {
             id: id.to_string(),
-            kind: AssetKind::Field2D,
+            kind: field.projection.asset_kind(),
             params: BTreeMap::from([
                 ("width".to_string(), field.width as f64),
                 ("height".to_string(), field.height as f64),
@@ -368,7 +389,7 @@ fn write_artifact(path: &Path, id: &str, field: &Field) -> Result<u64, String> {
     Ok(bytes.len() as u64)
 }
 
-fn load_artifact(path: &Path) -> Result<Field, String> {
+fn load_artifact(path: &Path, projection: Projection) -> Result<Field, String> {
     let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
     let blob = frames
@@ -378,7 +399,9 @@ fn load_artifact(path: &Path) -> Result<Field, String> {
             _ => None,
         })
         .ok_or_else(|| "产物里没有数据块".to_string())?;
-    Field::from_blob(blob).map_err(|err| err.to_string())
+    let mut field = Field::from_blob(blob).map_err(|err| err.to_string())?;
+    field.projection = projection;
+    Ok(field)
 }
 
 fn load_index(cache_root: &Path) -> BTreeMap<String, IndexEntry> {
@@ -401,3 +424,8 @@ fn save_index(cache_root: &Path, index: &BTreeMap<String, IndexEntry>) {
         Err(err) => eprintln!("缓存索引无法序列化：{err}"),
     }
 }
+
+
+
+
+

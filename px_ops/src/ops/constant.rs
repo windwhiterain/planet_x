@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
+use crate::Grid;
 use crate::noise::fnv1a;
 use crate::FieldOp;
 
@@ -25,7 +26,10 @@ impl FieldOp for Constant {
     const SOURCE_HASH: u64 = fnv1a(include_str!("constant.rs"));
     const INPUTS: &'static [&'static str] = &[];
 
-    fn eval(params: &Params, _inputs: &[&Field], size: (u32, u32)) -> Field {
-        Field::filled(size.0, size.1, params.value)
+    fn eval(params: &Params, _inputs: &[&Field], grid: Grid) -> Field {
+        grid.filled(params.value)
     }
 }
+
+
+

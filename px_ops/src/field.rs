@@ -1,10 +1,34 @@
+use px_protocol::art::{AssetKind, octahedral_direction_y_up};
 use px_protocol::wire::{Blob, DType, WireError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection {
+    Equirect,
+    Octahedral,
+}
+
+impl Projection {
+    pub fn asset_kind(self) -> AssetKind {
+        match self {
+            Self::Equirect => AssetKind::Field2D,
+            Self::Octahedral => AssetKind::OctahedralField,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Equirect => "equirect",
+            Self::Octahedral => "octahedral",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub width: u32,
     pub height: u32,
     pub data: Vec<f32>,
+    pub projection: Projection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,6 +40,15 @@ pub struct Stats {
 
 impl Field {
     pub fn new(width: u32, height: u32, data: Vec<f32>) -> Self {
+        Self::with_projection(width, height, data, Projection::Equirect)
+    }
+
+    pub fn with_projection(
+        width: u32,
+        height: u32,
+        data: Vec<f32>,
+        projection: Projection,
+    ) -> Self {
         assert_eq!(
             data.len(),
             width as usize * height as usize,
@@ -25,14 +58,20 @@ impl Field {
             width,
             height,
             data,
+            projection,
         }
     }
 
     pub fn filled(width: u32, height: u32, value: f32) -> Self {
+        Self::filled_with(width, height, value, Projection::Equirect)
+    }
+
+    pub fn filled_with(width: u32, height: u32, value: f32, projection: Projection) -> Self {
         Self {
             width,
             height,
             data: vec![value; width as usize * height as usize],
+            projection,
         }
     }
 
@@ -46,9 +85,22 @@ impl Field {
 
     pub fn uv(&self, x: u32, y: u32) -> (f32, f32) {
         (
-            x as f32 / self.width.max(1) as f32,
-            y as f32 / (self.height.max(2) - 1) as f32,
+            (x as f32 + 0.5) / self.width.max(1) as f32,
+            (y as f32 + 0.5) / self.height.max(1) as f32,
         )
+    }
+
+    pub fn direction(&self, x: u32, y: u32) -> [f32; 3] {
+        let (u, v) = self.uv(x, y);
+        match self.projection {
+            Projection::Equirect => {
+                let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
+                let phi = u * std::f32::consts::TAU;
+                let ring = theta.sin();
+                [ring * phi.cos(), theta.cos(), ring * phi.sin()]
+            }
+            Projection::Octahedral => octahedral_direction_y_up(u, v),
+        }
     }
 
     pub fn sample_bilinear(&self, x: f32, y: f32) -> f32 {
@@ -107,3 +159,4 @@ impl Field {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
     }
 }
+

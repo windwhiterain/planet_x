@@ -78,9 +78,32 @@ pub struct Field {
     pub data: Vec<f32>,
     pub min: f32,
     pub max: f32,
+    pub equirect: bool,
 }
 
 impl Field {
+    pub fn latitude(&self, y: u32) -> f32 {
+        if self.equirect {
+            let v = y as f32 / (self.height.max(2) - 1) as f32;
+            return ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        }
+        let mut sum = 0.0;
+        for x in 0..self.width {
+            sum += self.texel_latitude(x, y);
+        }
+        sum / self.width.max(1) as f32
+    }
+
+    pub fn texel_latitude(&self, x: u32, y: u32) -> f32 {
+        if self.equirect {
+            let v = y as f32 / (self.height.max(2) - 1) as f32;
+            return ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        }
+        let u = (x as f32 + 0.5) / self.width.max(1) as f32;
+        let v = (y as f32 + 0.5) / self.height.max(1) as f32;
+        px_protocol::art::octahedral_direction_y_up(u, v)[1].abs()
+    }
+
     pub fn ring_mean(&self, row: u32) -> f32 {
         let row = row.min(self.height.saturating_sub(1));
         let start = (row * self.width) as usize;
@@ -134,11 +157,16 @@ pub fn load_field(path: &str) -> Result<Field, String> {
             }
         }
     }
-    match kind {
-        Some(AssetKind::Field2D) => {}
-        Some(other) => return Err(format!("{path} 是 {other:?}，星球需要一个 Field2D 产物")),
+    let equirect = match kind {
+        Some(AssetKind::Field2D) => true,
+        Some(AssetKind::OctahedralField) => false,
+        Some(other) => {
+            return Err(format!(
+                "{path} 是 {other:?}，星球需要 Field2D（经纬度）或 OctahedralField（八面体）产物"
+            ));
+        }
         None => return Err(format!("{path} 里没有 Art 帧")),
-    }
+    };
 
     let blob = frames
         .iter()
@@ -165,6 +193,7 @@ pub fn load_field(path: &str) -> Result<Field, String> {
         data,
         min,
         max,
+        equirect,
     })
 }
 
@@ -338,18 +367,19 @@ fn surface_textures(
     let mut glow = Vec::with_capacity((field.width * field.height * 4) as usize);
 
     for y in 0..field.height {
-        let v = y as f32 / (field.height.max(2) - 1) as f32;
-        let latitude = ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
         for x in 0..field.width {
             let raw = field.data[(y * field.width + x) as usize];
             let height = field.normalized(raw);
+            let latitude = field.texel_latitude(x, y);
             let (base, emit) = shade(palette, height, sea_level, latitude, raw * 6.283);
             push_color(&mut color, base);
             push_color(&mut glow, emit);
         }
     }
 
-    pole_cap_filter(&mut color, field.width, field.height);
+    if field.equirect {
+        pole_cap_filter(&mut color, field.width, field.height);
+    }
     let color_image = with_wrapping(
         image_from(field.width, field.height, color.clone()),
         ImageAddressMode::Repeat,
@@ -384,7 +414,9 @@ fn surface_textures(
 
     let glow_handle = match palette {
         Palette::Lava => {
-            pole_cap_filter(&mut glow, field.width, field.height);
+            if field.equirect {
+                pole_cap_filter(&mut glow, field.width, field.height);
+            }
             Some(images.add(with_wrapping(
                 image_from(field.width, field.height, glow),
                 ImageAddressMode::Repeat,
@@ -533,6 +565,95 @@ pub fn star_image(width: u32, height: u32) -> Image {
         }
     }
     image_from(width, height, data)
+}
+
+fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
+    let n = resolution.max(2);
+    let mut positions = Vec::with_capacity((n * n) as usize);
+    let mut normals = Vec::with_capacity((n * n) as usize);
+    let mut uvs = Vec::with_capacity((n * n) as usize);
+    let mut indices = Vec::with_capacity(((n - 1) * (n - 1) * 6) as usize);
+
+    for j in 0..n {
+        for i in 0..n {
+            let u = (i as f32 + 0.5) / n as f32;
+            let v = (j as f32 + 0.5) / n as f32;
+            let direction = px_protocol::art::octahedral_direction_y_up(u, v);
+            positions.push([
+                direction[0] * radius,
+                direction[1] * radius,
+                direction[2] * radius,
+            ]);
+            normals.push(direction);
+            uvs.push([u, v]);
+        }
+    }
+
+    for j in 0..n - 1 {
+        for i in 0..n - 1 {
+            let a = i + j * n;
+            let b = a + 1;
+            let c = a + n;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
+    }
+
+    let mut flipped = 0_usize;
+    let mut total = 0_usize;
+    for triangle in indices.chunks_exact(3) {
+        let a = Vec3::from(positions[triangle[0] as usize]);
+        let b = Vec3::from(positions[triangle[1] as usize]);
+        let c = Vec3::from(positions[triangle[2] as usize]);
+        let face = (b - a).cross(c - a);
+        let centroid = (a + b + c) / 3.0;
+        total += 1;
+        if face.dot(centroid) < 0.0 {
+            flipped += 1;
+        }
+    }
+    println!("八面体网格：{total} 个三角形，其中 {flipped} 个面法线朝内");
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+fn grid_normals(mesh: &mut Mesh, resolution: u32) {
+    let n = resolution.max(2);
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned()
+    else {
+        return;
+    };
+    let at = |i: u32, j: u32| {
+        let i = i.min(n - 1);
+        let j = j.min(n - 1);
+        Vec3::from(positions[(i + j * n) as usize])
+    };
+
+    let mut normals = Vec::with_capacity(positions.len());
+    for j in 0..n {
+        for i in 0..n {
+            let along_u = at(i + 1, j) - at(i.saturating_sub(1), j);
+            let along_v = at(i, j + 1) - at(i, j.saturating_sub(1));
+            let radial = at(i, j).normalize_or_zero();
+            let mut normal = along_u.cross(along_v).normalize_or_zero();
+            if normal == Vec3::ZERO {
+                normal = radial;
+            }
+            if normal.dot(radial) < 0.0 {
+                normal = -normal;
+            }
+            normals.push(normal.to_array());
+        }
+    }
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
 }
 
 fn weld_normals(mesh: &mut Mesh) {
@@ -732,7 +853,11 @@ pub fn spawn_planet(
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
 
-    let mesh_handle = meshes.add(uv_sphere(1.0, 224, 112));
+    let mesh_handle = if field.equirect {
+        meshes.add(uv_sphere(1.0, 224, 112))
+    } else {
+        meshes.add(octahedral_mesh(1.0, 320))
+    };
     let mut mesh = meshes
         .get_mut(&mesh_handle)
         .ok_or_else(|| "拿不到刚插入的球面网格".to_string())?;
@@ -750,7 +875,11 @@ pub fn spawn_planet(
     let mut highest = f32::NEG_INFINITY;
     let flat_sea = matches!(spec.palette, Palette::Rocky | Palette::Ice);
     for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
-        let height = field.normalized(field.sample_capped(uv[0], uv[1]));
+        let height = if field.equirect {
+            field.normalized(field.sample_capped(uv[0], uv[1]))
+        } else {
+            field.normalized(field.sample(uv[0], uv[1]))
+        };
         let shaped = if flat_sea && height < spec.sea_level {
             spec.sea_level
         } else {
@@ -768,8 +897,30 @@ pub fn spawn_planet(
         Some(VertexAttributeValues::Float32x3(target)) => target.clone_from(&positions),
         _ => return Err("回写位置失败".to_string()),
     }
-    mesh.compute_smooth_normals();
+    if field.equirect {
+        mesh.compute_smooth_normals();
+    } else {
+        grid_normals(&mut mesh, 320);
+    }
     weld_normals(&mut mesh);
+
+    if let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+    {
+        let mut inward = 0_usize;
+        let mut worst = 1.0_f32;
+        for (normal, position) in normals.iter().zip(positions.iter()) {
+            let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
+            let dot = Vec3::from(*normal).dot(radial);
+            if dot < 0.0 {
+                inward += 1;
+            }
+            worst = worst.min(dot);
+        }
+        println!(
+            "法线审计：{} 个顶点，{inward} 个与半径反向，最小点积 {worst:.3}",
+            normals.len()
+        );
+    }
     drop(mesh);
 
     let (color_texture, glow_texture) = surface_textures(images, &field, spec.palette, spec.sea_level);
@@ -797,6 +948,7 @@ pub fn spawn_planet(
                 emissive,
                 perceptual_roughness: 0.88,
                 metallic: 0.0,
+
                 ..default()
             })),
             Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
@@ -849,8 +1001,16 @@ pub fn spawn_planet(
         },
     ));
 
+    let mut far = 0.0_f32;
+    for position in positions.iter() {
+        far = far.max(
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt(),
+        );
+    }
+
     Ok(format!(
-        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}）｜海平面 {:.2}{}",
+        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}，最远顶点 {:.4}）｜海平面 {:.2}{}",
         spec.field,
         spec.palette.name(),
         field.width,
@@ -858,6 +1018,7 @@ pub fn spawn_planet(
         spec.displace,
         lowest,
         highest,
+        far,
         spec.sea_level,
         if spec.rings > 0.0 {
             format!("｜环 ×{:.2}", spec.rings)
@@ -866,3 +1027,14 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
+
+
+
+
+

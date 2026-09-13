@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
+use crate::Grid;
 use crate::noise::{self, FbmSettings, fnv1a};
 use crate::FieldOp;
 
@@ -35,11 +36,11 @@ impl Default for Params {
 impl FieldOp for Fbm {
     type Params = Params;
     const ID: &'static str = "field.fbm";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));
     const INPUTS: &'static [&'static str] = &[];
 
-    fn eval(params: &Params, _inputs: &[&Field], size: (u32, u32)) -> Field {
+    fn eval(params: &Params, _inputs: &[&Field], grid: Grid) -> Field {
         let settings = FbmSettings {
             frequency: params.frequency,
             octaves: params.octaves,
@@ -47,12 +48,12 @@ impl FieldOp for Fbm {
             gain: params.gain,
             seed: params.seed,
         };
-        let mut field = Field::filled(size.0, size.1, 0.0);
-        for y in 0..size.1 {
-            for x in 0..size.0 {
+        let mut field = grid.filled(0.0);
+        for y in 0..grid.height {
+            for x in 0..grid.width {
                 let (u, v) = field.uv(x, y);
                 let value = if params.spherical {
-                    noise::fbm_3(noise::direction(u, v), &settings)
+                    noise::fbm_3(field.direction(x, y), &settings)
                 } else {
                     noise::fbm(u * params.aspect, v, &settings)
                 };
@@ -62,3 +63,7 @@ impl FieldOp for Fbm {
         field
     }
 }
+
+
+
+

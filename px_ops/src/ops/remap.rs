@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
+use crate::Grid;
 use crate::noise::fnv1a;
 use crate::FieldOp;
 
@@ -35,7 +36,7 @@ impl FieldOp for Remap {
     const SOURCE_HASH: u64 = fnv1a(include_str!("remap.rs"));
     const INPUTS: &'static [&'static str] = &["input"];
 
-    fn eval(params: &Params, inputs: &[&Field], size: (u32, u32)) -> Field {
+    fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {
         let input = inputs[0];
         let span = params.in_max - params.in_min;
         let inv_span = if span.abs() < f32::EPSILON {
@@ -43,9 +44,9 @@ impl FieldOp for Remap {
         } else {
             1.0 / span
         };
-        let mut field = Field::filled(size.0, size.1, 0.0);
-        for y in 0..size.1 {
-            for x in 0..size.0 {
+        let mut field = grid.filled(0.0);
+        for y in 0..grid.height {
+            for x in 0..grid.width {
                 let mut t = ((input.at(x, y) - params.in_min) * inv_span).clamp(0.0, 1.0);
                 if params.smooth {
                     t = t * t * (3.0 - 2.0 * t);
@@ -56,3 +57,5 @@ impl FieldOp for Remap {
         field
     }
 }
+
+
