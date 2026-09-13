@@ -691,6 +691,10 @@ fn accept_jobs(
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(canvas.target.clone().into()),
+        AmbientLight {
+            brightness: request.view.ambient.unwrap_or(DEFAULT_AMBIENT),
+            ..default()
+        },
         planet::probe_camera(request.view.cam),
     ));
 
@@ -882,6 +886,8 @@ fn drive(
     let _ = job.reply.send(Frame::Response(response));
     active.0 = None;
 }
+
+const DEFAULT_AMBIENT: f32 = 16.0;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1093,6 +1099,10 @@ fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         OrbitCamera,
         Camera3d::default(),
         Msaa::Off,
+        AmbientLight {
+            brightness: DEFAULT_AMBIENT,
+            ..default()
+        },
         Transform::from_xyz(0.0, 0.55, 3.2).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
@@ -1313,6 +1323,7 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
 
 
 

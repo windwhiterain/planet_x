@@ -403,7 +403,7 @@ fn surface_textures(
         pole_cap_filter(&mut color, field.width, field.height);
     }
     let color_image = with_wrapping(
-        image_from(field.width, field.height, color.clone()),
+        image_from(field.width, field.height, color.clone(), field.projection == Projection::Cube),
         ImageAddressMode::Repeat,
         ImageAddressMode::ClampToEdge,
     );
@@ -440,7 +440,7 @@ fn surface_textures(
                 pole_cap_filter(&mut glow, field.width, field.height);
             }
             Some(images.add(with_wrapping(
-                image_from(field.width, field.height, glow),
+                image_from(field.width, field.height, glow, field.projection == Projection::Cube),
                 ImageAddressMode::Repeat,
                 ImageAddressMode::ClampToEdge,
             )))
@@ -526,7 +526,7 @@ fn pole_cap_filter(pixels: &mut [u8], width: u32, height: u32) {
     }
 }
 
-fn image_from(width: u32, height: u32, data: Vec<u8>) -> Image {
+fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> Image {
     let (chain, levels) = mip_chain(width, height, &data);
     let mut image = Image::new_fill(
         Extent3d {
@@ -586,7 +586,7 @@ pub fn star_image(width: u32, height: u32) -> Image {
             data.push(255);
         }
     }
-    image_from(width, height, data)
+    image_from(width, height, data, false)
 }
 
 fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
@@ -1021,7 +1021,7 @@ fn ring_image(width: u32, height: u32) -> Image {
         }
     }
     with_wrapping(
-        image_from(width, height, data),
+        image_from(width, height, data, false),
         ImageAddressMode::ClampToEdge,
         ImageAddressMode::Repeat,
     )
@@ -1242,6 +1242,7 @@ pub fn spawn_planet(
         },
     ))
 }
+
 
 
 

@@ -13,6 +13,24 @@ param(
 $ErrorActionPreference = "Stop"
 $env:WGPU_BACKEND = "dx12"
 
+$tilt = 0.34
+
+function AimLocal([double[]]$local) {
+    $y = $local[1] * [Math]::Cos($tilt) - $local[2] * [Math]::Sin($tilt)
+    $z = $local[1] * [Math]::Sin($tilt) + $local[2] * [Math]::Cos($tilt)
+    $x = $local[0]
+    $length = [Math]::Sqrt($x * $x + $y * $y + $z * $z)
+    @{
+        Yaw = [Math]::Atan2($x, $z) * 180 / [Math]::PI
+        Pitch = [Math]::Asin($y / $length) * 180 / [Math]::PI
+    }
+}
+
+$cornerTop = AimLocal @(1, 1, 1)
+$cornerBottom = AimLocal @(1, -1, 1)
+$edgeMiddle = AimLocal @(1, 1, 0)
+$faceCentre = AimLocal @(0, 0, 1)
+
 $views = @(
     @{ Yaw = 0;   Pitch = 8;   Tag = "equator-000" },
     @{ Yaw = 90;  Pitch = 8;   Tag = "equator-090" },
@@ -21,9 +39,11 @@ $views = @(
     @{ Yaw = 0;   Pitch = 45;  Tag = "north-045" },
     @{ Yaw = 0;   Pitch = -45; Tag = "south-045" },
     @{ Yaw = 0;   Pitch = 82;  Tag = "north-pole" },
-    @{ Yaw = 180; Pitch = 82;  Tag = "north-pole-back" },
     @{ Yaw = 0;   Pitch = -82; Tag = "south-pole" },
-    @{ Yaw = 180; Pitch = -82; Tag = "south-pole-back" }
+    @{ Yaw = $cornerTop.Yaw;    Pitch = $cornerTop.Pitch;    Tag = "cube-corner-top";    Distance = 1.40 },
+    @{ Yaw = $cornerBottom.Yaw; Pitch = $cornerBottom.Pitch; Tag = "cube-corner-bottom"; Distance = 1.40 },
+    @{ Yaw = $edgeMiddle.Yaw;   Pitch = $edgeMiddle.Pitch;   Tag = "cube-edge-middle";   Distance = 1.40 },
+    @{ Yaw = $faceCentre.Yaw;   Pitch = $faceCentre.Pitch;   Tag = "cube-face-centre";   Distance = 1.40 }
 )
 
 $shotDir = Join-Path "target" "probe"
@@ -36,7 +56,7 @@ foreach ($view in $views) {
         "--planet", $Field,
         "--palette", $Palette,
         "--ambient", "$Ambient",
-        "--cam", "$($view.Yaw),$($view.Pitch),$Distance",
+        "--cam", "$($view.Yaw),$($view.Pitch),$(if ($view.Distance) { $view.Distance } else { $Distance })",
         "--width", "$Width",
         "--height", "$Height",
         "--out", $shot
@@ -75,3 +95,5 @@ $sheet.Save((Join-Path (Get-Location) $Out), [System.Drawing.Imaging.ImageFormat
 $sheet.Dispose()
 
 Write-Host "对照图：$Out（$($views.Count) 个角度，环境光 $Ambient）"
+
+

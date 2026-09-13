@@ -77,7 +77,7 @@ impl MeshOp for CubeSphere {
         let mut positions: Vec<f32> = Vec::new();
         let mut uvs: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
-        let mut welded: HashMap<[i64; 3], u32> = HashMap::new();
+        let mut welded: HashMap<(u32, [i64; 3]), u32> = HashMap::new();
 
         for face in 0..CUBE_FACES {
             let mut patch: Vec<u32> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
@@ -86,7 +86,7 @@ impl MeshOp for CubeSphere {
                     let s = i as f32 / n as f32;
                     let t = j as f32 / n as f32;
                     let direction = cube_direction(face, s, t);
-                    let key = quantize(direction);
+                    let key = (face, quantize(direction));
                     let index = match welded.get(&key) {
                         Some(existing) => *existing,
                         None => {
@@ -193,6 +193,34 @@ impl MeshOp for CubeSphere {
             normals[slot..slot + 3].copy_from_slice(&unit);
         }
 
+        let mut by_position: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        for vertex in 0..vertices {
+            let direction = normalize(vertex_of(&positions, vertex as u32));
+            by_position
+                .entry(quantize(direction))
+                .or_default()
+                .push(vertex);
+        }
+        let mut welds = 0_usize;
+        for group in by_position.values() {
+            if group.len() < 2 {
+                continue;
+            }
+            welds += 1;
+            let mut sum = [0.0_f32; 3];
+            for vertex in group {
+                let slot = vertex * 3;
+                sum[0] += normals[slot];
+                sum[1] += normals[slot + 1];
+                sum[2] += normals[slot + 2];
+            }
+            let unit = normalize(sum);
+            for vertex in group {
+                let slot = vertex * 3;
+                normals[slot..slot + 3].copy_from_slice(&unit);
+            }
+        }
+
         let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
         for triangle in indices.chunks_exact(3) {
             for pair in 0..3 {
@@ -215,7 +243,7 @@ impl MeshOp for CubeSphere {
             worst = worst.min(dot);
         }
         println!(
-            "网格审计：{vertices} 顶点 / {} 三角形，面 {face_size}²、格子 {cell}、开口边 {open}，法线朝内 {inward}、零长 {zero}、最小点积 {worst:.3}",
+            "网格审计：{vertices} 顶点 / {} 三角形，面 {face_size}²、格子 {cell}、法线焊接 {welds} 组、开口边 {open}，法线朝内 {inward}、零长 {zero}、最小点积 {worst:.3}",
             indices.len() / 3,
         );
 
@@ -227,4 +255,5 @@ impl MeshOp for CubeSphere {
         }
     }
 }
+
 
