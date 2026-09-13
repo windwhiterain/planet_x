@@ -1,5 +1,4 @@
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::RenderTarget;
 use bevy::color::LinearRgba;
 use bevy::image::{
     Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor,
@@ -43,6 +42,16 @@ impl Palette {
             Self::Desert => "desert",
         }
     }
+
+    pub fn defaults(self) -> (f32, f32, f32) {
+        match self {
+            Self::Rocky => (0.075, 0.520, 0.0),
+            Self::Gas => (0.010, 0.450, 2.35),
+            Self::Ice => (0.055, 0.500, 0.0),
+            Self::Lava => (0.095, 0.480, 0.0),
+            Self::Desert => (0.085, 0.520, 0.0),
+        }
+    }
 }
 
 pub struct PlanetSpec {
@@ -57,6 +66,12 @@ pub struct PlanetSpec {
 
 const SYSTEM_TILT: f32 = 0.34;
 
+#[derive(Component)]
+pub struct PlanetBody;
+
+#[derive(Component)]
+pub struct PlanetRing;
+
 pub struct Field {
     pub width: u32,
     pub height: u32,
@@ -66,6 +81,30 @@ pub struct Field {
 }
 
 impl Field {
+    pub fn ring_mean(&self, row: u32) -> f32 {
+        let row = row.min(self.height.saturating_sub(1));
+        let start = (row * self.width) as usize;
+        let end = start + self.width as usize;
+        let slice = &self.data[start..end.min(self.data.len())];
+        if slice.is_empty() {
+            return 0.0;
+        }
+        slice.iter().sum::<f32>() / slice.len() as f32
+    }
+
+    pub fn sample_capped(&self, u: f32, v: f32) -> f32 {
+        let value = self.sample(u, v);
+        let rows = pole_cap_rows(self.height) as f32;
+        let position = v.clamp(0.0, 1.0) * (self.height as f32 - 1.0);
+        let from_pole = position.min(self.height as f32 - 1.0 - position);
+        if from_pole >= rows {
+            return value;
+        }
+        let weight = 1.0 - from_pole / rows;
+        let row = if position < rows { 0 } else { self.height - 1 };
+        value * (1.0 - weight) + self.ring_mean(row) * weight
+    }
+
     pub fn sample(&self, u: f32, v: f32) -> f32 {
         let x = ((u.rem_euclid(1.0)) * self.width as f32) as u32 % self.width.max(1);
         let y = (v.clamp(0.0, 1.0) * (self.height as f32 - 1.0)).round() as u32;
@@ -310,6 +349,7 @@ fn surface_textures(
         }
     }
 
+    pole_cap_filter(&mut color, field.width, field.height);
     let color_image = with_wrapping(
         image_from(field.width, field.height, color.clone()),
         ImageAddressMode::Repeat,
@@ -343,11 +383,14 @@ fn surface_textures(
     );
 
     let glow_handle = match palette {
-        Palette::Lava => Some(images.add(with_wrapping(
-            image_from(field.width, field.height, glow),
-            ImageAddressMode::Repeat,
-            ImageAddressMode::ClampToEdge,
-        ))),
+        Palette::Lava => {
+            pole_cap_filter(&mut glow, field.width, field.height);
+            Some(images.add(with_wrapping(
+                image_from(field.width, field.height, glow),
+                ImageAddressMode::Repeat,
+                ImageAddressMode::ClampToEdge,
+            )))
+        }
         _ => None,
     };
     (color_handle, glow_handle)
@@ -392,6 +435,41 @@ fn mip_chain(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
     }
 
     (chain, levels)
+}
+
+fn pole_cap_rows(height: u32) -> u32 {
+    (height / 32).max(2)
+}
+
+fn pole_cap_filter(pixels: &mut [u8], width: u32, height: u32) {
+    let rows = pole_cap_rows(height);
+    for offset in 0..rows {
+        let weight = 1.0 - offset as f32 / rows as f32;
+        for row in [offset, height - 1 - offset] {
+            let start = (row * width) as usize * 4;
+            let end = start + width as usize * 4;
+            let Some(slice) = pixels.get_mut(start..end) else {
+                continue;
+            };
+            let mut mean = [0.0_f32; 3];
+            for pixel in slice.chunks_exact(4) {
+                for channel in 0..3 {
+                    mean[channel] += pixel[channel] as f32;
+                }
+            }
+            for value in mean.iter_mut() {
+                *value /= width as f32;
+            }
+            for pixel in slice.chunks_exact_mut(4) {
+                for channel in 0..3 {
+                    pixel[channel] = (pixel[channel] as f32 * (1.0 - weight)
+                        + mean[channel] * weight)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
 }
 
 fn image_from(width: u32, height: u32, data: Vec<u8>) -> Image {
@@ -455,6 +533,129 @@ pub fn star_image(width: u32, height: u32) -> Image {
         }
     }
     image_from(width, height, data)
+}
+
+fn weld_normals(mesh: &mut Mesh) {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned()
+    else {
+        return;
+    };
+    let Some(VertexAttributeValues::Float32x3(normals)) =
+        mesh.attribute(Mesh::ATTRIBUTE_NORMAL).cloned()
+    else {
+        return;
+    };
+
+    let mut groups: std::collections::HashMap<[i32; 3], Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, position) in positions.iter().enumerate() {
+        let key = [
+            (position[0] * 65_536.0).round() as i32,
+            (position[1] * 65_536.0).round() as i32,
+            (position[2] * 65_536.0).round() as i32,
+        ];
+        groups.entry(key).or_default().push(index);
+    }
+
+    let mut welded = normals.clone();
+    for indices in groups.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let mut sum = Vec3::ZERO;
+        for &index in indices {
+            sum += Vec3::from(normals[index]);
+        }
+        let average = sum.normalize_or_zero().to_array();
+        for &index in indices {
+            welded[index] = average;
+        }
+    }
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, welded);
+}
+
+fn uv_sphere(radius: f32, sectors: u32, stacks: u32) -> Mesh {
+    let sector_count = sectors.max(3);
+    let stack_count = stacks.max(2);
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let north_base = positions.len() as u32;
+    for sector in 0..sector_count {
+        let u = (sector as f32 + 0.5) / sector_count as f32;
+        positions.push([0.0, radius, 0.0]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([u, 0.0]);
+    }
+
+    let mut rings = Vec::new();
+    for stack in 1..stack_count {
+        let v = stack as f32 / stack_count as f32;
+        let theta = v * std::f32::consts::PI;
+        let (sin_theta, cos_theta) = theta.sin_cos();
+        rings.push(positions.len() as u32);
+        for sector in 0..=sector_count {
+            let u = sector as f32 / sector_count as f32;
+            let phi = u * std::f32::consts::TAU;
+            let (sin_phi, cos_phi) = phi.sin_cos();
+            let direction = [sin_theta * cos_phi, cos_theta, sin_theta * sin_phi];
+            positions.push([
+                direction[0] * radius,
+                direction[1] * radius,
+                direction[2] * radius,
+            ]);
+            normals.push(direction);
+            uvs.push([u, v]);
+        }
+    }
+
+    let south_base = positions.len() as u32;
+    for sector in 0..sector_count {
+        let u = (sector as f32 + 0.5) / sector_count as f32;
+        positions.push([0.0, -radius, 0.0]);
+        normals.push([0.0, -1.0, 0.0]);
+        uvs.push([u, 1.0]);
+    }
+
+    let first_ring = rings[0];
+    for sector in 0..sector_count {
+        indices.extend_from_slice(&[
+            north_base + sector,
+            first_ring + sector + 1,
+            first_ring + sector,
+        ]);
+    }
+
+    for band in 0..rings.len() - 1 {
+        let (upper, lower) = (rings[band], rings[band + 1]);
+        for sector in 0..sector_count {
+            let (u0, u1) = (upper + sector, upper + sector + 1);
+            let (l0, l1) = (lower + sector, lower + sector + 1);
+            indices.extend_from_slice(&[u0, u1, l1, u0, l1, l0]);
+        }
+    }
+
+    let last_ring = *rings.last().unwrap();
+    for sector in 0..sector_count {
+        indices.extend_from_slice(&[
+            south_base + sector,
+            last_ring + sector,
+            last_ring + sector + 1,
+        ]);
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 fn ring_mesh(inner: f32, outer: f32, segments: u32) -> Mesh {
@@ -526,13 +727,12 @@ pub fn spawn_planet(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    target: &Handle<Image>,
     stars: &Handle<Image>,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
 
-    let mesh_handle = meshes.add(Sphere::new(1.0).mesh().ico(49).map_err(|err| err.to_string())?);
+    let mesh_handle = meshes.add(uv_sphere(1.0, 224, 112));
     let mut mesh = meshes
         .get_mut(&mesh_handle)
         .ok_or_else(|| "拿不到刚插入的球面网格".to_string())?;
@@ -550,7 +750,7 @@ pub fn spawn_planet(
     let mut highest = f32::NEG_INFINITY;
     let flat_sea = matches!(spec.palette, Palette::Rocky | Palette::Ice);
     for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
-        let height = field.normalized(field.sample(uv[0], uv[1]));
+        let height = field.normalized(field.sample_capped(uv[0], uv[1]));
         let shaped = if flat_sea && height < spec.sea_level {
             spec.sea_level
         } else {
@@ -569,6 +769,7 @@ pub fn spawn_planet(
         _ => return Err("回写位置失败".to_string()),
     }
     mesh.compute_smooth_normals();
+    weld_normals(&mut mesh);
     drop(mesh);
 
     let (color_texture, glow_texture) = surface_textures(images, &field, spec.palette, spec.sea_level);
@@ -578,40 +779,46 @@ pub fn spawn_planet(
         LinearRgba::rgb(0.0, 0.0, 0.0)
     };
 
-    commands.spawn((
-        crate::ScenePart,
-        Mesh3d(mesh_handle),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color_texture: Some(color_texture),
-            emissive_texture: glow_texture,
-            emissive,
-            perceptual_roughness: 0.88,
-            metallic: 0.0,
-            ..default()
-        })),
-        Transform::from_rotation(
-            Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin),
-        ),
-    ));
-
-    if spec.rings > 0.0 {
-        let inner = spec.radius * 1.30;
-        let outer = spec.radius * spec.rings.max(1.45);
-        commands.spawn((
+    let system = commands
+        .spawn((
             crate::ScenePart,
-            Mesh3d(meshes.add(ring_mesh(inner, outer, 384))),
+            Transform::from_rotation(Quat::from_rotation_x(SYSTEM_TILT)),
+            Visibility::default(),
+        ))
+        .id();
+
+    commands.entity(system).with_children(|parent| {
+        parent.spawn((
+            PlanetBody,
+            Mesh3d(mesh_handle),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color_texture: Some(images.add(ring_image(1024, 4))),
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                cull_mode: None,
+                base_color_texture: Some(color_texture),
+                emissive_texture: glow_texture,
+                emissive,
+                perceptual_roughness: 0.88,
+                metallic: 0.0,
                 ..default()
             })),
-            Transform::from_rotation(
-                Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin),
-            ),
+            Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
         ));
-    }
+
+        if spec.rings > 0.0 {
+            let inner = spec.radius * 1.30;
+            let outer = spec.radius * spec.rings.max(1.45);
+            parent.spawn((
+                PlanetRing,
+                Mesh3d(meshes.add(ring_mesh(inner, outer, 384))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color_texture: Some(images.add(ring_image(1024, 4))),
+                    alpha_mode: AlphaMode::Blend,
+                    unlit: true,
+                    cull_mode: None,
+                    ..default()
+                })),
+                Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
+            ));
+        }
+    });
 
     commands.spawn((
         crate::ScenePart,
@@ -640,14 +847,6 @@ pub fn spawn_planet(
             brightness: 16.0,
             ..default()
         },
-    ));
-
-    commands.spawn((
-        crate::ScenePart,
-        Camera3d::default(),
-        Msaa::Off,
-        RenderTarget::Image(target.clone().into()),
-        Transform::from_xyz(0.0, 0.55, 3.15).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     Ok(format!(

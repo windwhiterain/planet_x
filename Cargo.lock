@@ -4315,6 +4315,8 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "px_protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

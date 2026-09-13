@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevy::render::render_resource::{
     CachedPipelineState, PipelineCache, TextureFormat, TextureUsages,
 };
@@ -91,6 +93,9 @@ struct ActiveJob {
 #[derive(Debug)]
 struct Options {
     serve: bool,
+    view: bool,
+    show: bool,
+    shot: bool,
     autostart: bool,
     port: u16,
     width: u32,
@@ -111,6 +116,9 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             serve: false,
+            view: false,
+            show: false,
+            shot: false,
             autostart: false,
             port: 0,
             width: 960,
@@ -143,6 +151,9 @@ impl Options {
             };
             match arg.as_str() {
                 "--serve" => options.serve = true,
+                "--view" => options.view = true,
+                "--show" => options.show = true,
+                "--shot" => options.shot = true,
                 "--autostart" => options.autostart = true,
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
@@ -197,26 +208,32 @@ impl Options {
         Ok(options)
     }
 
-    fn scene(&self) -> Scene {
-        match &self.planet {
-            Some(path) => {
-                let (displace, sea_level, rings) = match self.palette {
-                    planet::Palette::Rocky => (0.075, 0.520, 0.0),
-                    planet::Palette::Gas => (0.010, 0.450, 2.35),
-                    planet::Palette::Ice => (0.055, 0.500, 0.0),
-                    planet::Palette::Lava => (0.095, 0.480, 0.0),
-                    planet::Palette::Desert => (0.085, 0.520, 0.0),
-                };
-                Scene::Planet {
-                    field: path.display().to_string(),
-                    palette: self.palette.name().to_string(),
-                    displace: self.displace.unwrap_or(displace),
-                    sea_level: self.sea_level.unwrap_or(sea_level),
-                    radius: self.radius,
-                    spin: self.spin.unwrap_or(0.0),
-                    rings: self.rings.unwrap_or(rings),
-                }
+    fn planet_spec(&self) -> Option<planet::PlanetSpec> {
+        self.planet.as_ref().map(|path| {
+            let (displace, sea_level, rings) = self.palette.defaults();
+            planet::PlanetSpec {
+                field: path.display().to_string(),
+                palette: self.palette,
+                displace: self.displace.unwrap_or(displace),
+                sea_level: self.sea_level.unwrap_or(sea_level),
+                radius: self.radius,
+                spin: self.spin.unwrap_or(0.0),
+                rings: self.rings.unwrap_or(rings),
             }
+        })
+    }
+
+    fn scene(&self) -> Scene {
+        match self.planet_spec() {
+            Some(spec) => Scene::Planet {
+                field: spec.field,
+                palette: spec.palette.name().to_string(),
+                displace: spec.displace,
+                sea_level: spec.sea_level,
+                radius: spec.radius,
+                spin: spec.spin,
+                rings: spec.rings,
+            },
             None => Scene::World {
                 stream: self.stream.display().to_string(),
                 round: self.round,
@@ -250,7 +267,17 @@ fn main() {
         }
     };
 
-    if options.serve {
+    if options.view {
+        if let Err(message) = view(options) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    } else if options.show {
+        if let Err(message) = show(&options) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    } else if options.serve {
         if let Err(message) = serve(options) {
             eprintln!("{message}");
             std::process::exit(1);
@@ -602,7 +629,6 @@ fn accept_jobs(
                 &mut meshes,
                 &mut materials,
                 &mut images,
-                &canvas.target,
                 &stars.0,
                 &planet::PlanetSpec {
                     field: field.clone(),
@@ -624,6 +650,14 @@ fn accept_jobs(
             return;
         }
     };
+
+    commands.spawn((
+        ScenePart,
+        Camera3d::default(),
+        Msaa::Off,
+        RenderTarget::Image(canvas.target.clone().into()),
+        Transform::from_xyz(0.0, 0.55, 3.15).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 
     active.0 = Some(ActiveJob {
         label,
@@ -812,4 +846,432 @@ fn drive(
     );
     let _ = job.reply.send(Frame::Response(response));
     active.0 = None;
+}
+
+const VIEW_REQUEST: &str = "target/viewer-scene.json";
+const VIEW_LEASE: &str = "target/viewer.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ViewRequest {
+    scene: Scene,
+    at: u64,
+    #[serde(default)]
+    shot: bool,
+}
+
+#[derive(Resource)]
+struct Viewer {
+    spec: planet::PlanetSpec,
+    field_modified: Option<std::time::SystemTime>,
+    request_at: u64,
+    spin: bool,
+}
+
+#[derive(Resource)]
+struct Orbit {
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+}
+
+#[derive(Resource)]
+struct Rebuild(bool);
+
+#[derive(Resource, Default)]
+struct PendingShot(Option<u32>);
+
+#[derive(Component)]
+struct OrbitCamera;
+
+fn keep_rendering(
+    error: &bevy::render::error_handler::RenderError,
+    _main: &mut World,
+    _render: &mut World,
+) -> bevy::render::error_handler::RenderErrorPolicy {
+    eprintln!("预览窗口遇到渲染错误，选择继续（不退出）：{:?}", error.ty);
+    bevy::render::error_handler::RenderErrorPolicy::Ignore
+}
+
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn describe(spec: &planet::PlanetSpec) -> String {
+    format!(
+        "{}｜位移 {:.3}｜海平面 {:.2}{}",
+        spec.palette.name(),
+        spec.displace,
+        spec.sea_level,
+        if spec.rings > 0.0 {
+            format!("｜环 ×{:.2}", spec.rings)
+        } else {
+            String::new()
+        },
+    )
+}
+
+fn lease_age() -> Option<Duration> {
+    let stamp: u64 = std::fs::read_to_string(VIEW_LEASE).ok()?.trim().parse().ok()?;
+    Some(Duration::from_nanos(now_nanos().saturating_sub(stamp)))
+}
+
+fn show(options: &Options) -> Result<(), String> {
+    let scene = options.scene();
+    if matches!(scene, Scene::World { .. }) {
+        return Err("--show 目前只支持星球场景（--planet）".to_string());
+    }
+    let request = ViewRequest {
+        scene,
+        at: now_nanos(),
+        shot: options.shot,
+    };
+    let text = serde_json::to_string_pretty(&request).map_err(|err| err.to_string())?;
+    std::fs::write(VIEW_REQUEST, text).map_err(|err| format!("写 {VIEW_REQUEST} 失败：{err}"))?;
+
+    let note = match options.planet_spec() {
+        Some(spec) => describe(&spec),
+        None => String::from("（空）"),
+    };
+    println!("已推给常驻窗口：{note}");
+    match lease_age() {
+        Some(age) if age < Duration::from_secs(5) => {
+            println!("窗口在线（心跳 {:.1} s 前）", age.as_secs_f32());
+        }
+        _ => println!("⚠ 没检测到在跑的窗口；先执行 `px_render --view` 开一个，它会一直留着"),
+    }
+    Ok(())
+}
+
+fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
+    let text = std::fs::read_to_string(VIEW_REQUEST).ok()?;
+    let request: ViewRequest = serde_json::from_str(&text).ok()?;
+    match request.scene {
+        Scene::Planet {
+            field,
+            palette,
+            displace,
+            sea_level,
+            radius,
+            spin,
+            rings,
+        } => Some((
+            planet::PlanetSpec {
+                field,
+                palette: planet::Palette::parse(&palette)?,
+                displace,
+                sea_level,
+                radius,
+                spin,
+                rings,
+            },
+            request.at,
+            request.shot,
+        )),
+        Scene::World { .. } => None,
+    }
+}
+
+fn view(options: Options) -> Result<(), String> {
+    let (spec, request_at, shot) = match read_view_request() {
+        Some(found) => found,
+        None => (
+            options.planet_spec().ok_or_else(|| {
+                "--view 需要一个起始场景：给 --planet <FIELD.pxart>，或先用 --show 推一个".to_string()
+            })?,
+            0,
+            false,
+        ),
+    };
+    let field_modified = std::fs::metadata(&spec.field)
+        .and_then(|meta| meta.modified())
+        .ok();
+    let spin = options.spin.is_none();
+    let ready = Arc::new(AtomicBool::new(false));
+
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: format!("px_render 预览 — {}", describe(&spec)),
+            resolution: (1280_u32, 800_u32).into(),
+            ..default()
+        }),
+        ..default()
+    }))
+    .insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
+    .insert_resource(Viewer {
+        spec,
+        field_modified,
+        request_at,
+        spin,
+    })
+    .insert_resource(Orbit {
+        yaw: 0.0,
+        pitch: 0.17,
+        distance: 3.2,
+    })
+    .insert_resource(Rebuild(true))
+    .insert_resource(PendingShot(shot.then_some(12)))
+    .insert_resource(RenderReady(ready.clone()))
+    .insert_resource(bevy::render::error_handler::RenderErrorHandler(
+        keep_rendering,
+    ))
+    .add_systems(Startup, view_startup)
+    .add_systems(
+        Update,
+        (
+            orbit_camera,
+            viewer_keys,
+            poll_request,
+            poll_field,
+            rebuild_scene,
+            spin_bodies,
+            auto_shot,
+            heartbeat,
+            update_title,
+        )
+            .chain(),
+    );
+
+    println!("预览窗口已开：左键拖动转视角、滚轮缩放");
+    println!("  1-5 换色板｜[ ] 调海平面｜- = 调位移｜r 切环系｜空格 自转｜s 存图｜q 退出");
+    println!("  我把新效果推进来：px_render --show --planet <文件> --palette <色板> [--shot]");
+
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app
+            .insert_resource(RenderReady(ready.clone()))
+            .add_systems(Render, watch_pipelines);
+    }
+
+    app.run();
+    let _ = std::fs::remove_file(VIEW_LEASE);
+    Ok(())
+}
+
+fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    commands.insert_resource(Stars(images.add(planet::star_image(2048, 1024))));
+    commands.spawn((
+        OrbitCamera,
+        Camera3d::default(),
+        Msaa::Off,
+        Transform::from_xyz(0.0, 0.55, 3.2).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+}
+
+fn orbit_camera(
+    buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
+    scroll: Res<AccumulatedMouseScroll>,
+    mut orbit: ResMut<Orbit>,
+    mut camera: Query<&mut Transform, With<OrbitCamera>>,
+) {
+    if buttons.pressed(MouseButton::Left) {
+        orbit.yaw -= motion.delta.x * 0.006;
+        orbit.pitch = (orbit.pitch - motion.delta.y * 0.006).clamp(-1.25, 1.25);
+    }
+    if scroll.delta.y.abs() > 0.0 {
+        orbit.distance = (orbit.distance * (1.0 - scroll.delta.y * 0.08)).clamp(1.5, 14.0);
+    }
+    let Ok(mut transform) = camera.single_mut() else {
+        return;
+    };
+    let rotation = Quat::from_rotation_y(orbit.yaw) * Quat::from_rotation_x(orbit.pitch);
+    transform.translation = rotation * Vec3::new(0.0, 0.0, orbit.distance);
+    transform.look_at(Vec3::ZERO, Vec3::Y);
+}
+
+fn spin_bodies(
+    viewer: Res<Viewer>,
+    time: Res<Time>,
+    mut bodies: Query<
+        &mut Transform,
+        Or<(With<planet::PlanetBody>, With<planet::PlanetRing>)>,
+    >,
+) {
+    if !viewer.spin {
+        return;
+    }
+    let step = time.delta_secs() * 0.12;
+    for mut transform in bodies.iter_mut() {
+        transform.rotate_y(step);
+    }
+}
+
+fn viewer_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut viewer: ResMut<Viewer>,
+    mut rebuild: ResMut<Rebuild>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let chosen = if keys.just_pressed(KeyCode::Digit1) {
+        Some(planet::Palette::Rocky)
+    } else if keys.just_pressed(KeyCode::Digit2) {
+        Some(planet::Palette::Gas)
+    } else if keys.just_pressed(KeyCode::Digit3) {
+        Some(planet::Palette::Ice)
+    } else if keys.just_pressed(KeyCode::Digit4) {
+        Some(planet::Palette::Lava)
+    } else if keys.just_pressed(KeyCode::Digit5) {
+        Some(planet::Palette::Desert)
+    } else {
+        None
+    };
+
+    let mut changed = false;
+    if let Some(palette) = chosen {
+        let (displace, sea_level, rings) = palette.defaults();
+        viewer.spec.palette = palette;
+        viewer.spec.displace = displace;
+        viewer.spec.sea_level = sea_level;
+        viewer.spec.rings = rings;
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        viewer.spec.sea_level = (viewer.spec.sea_level - 0.02).clamp(0.05, 0.95);
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        viewer.spec.sea_level = (viewer.spec.sea_level + 0.02).clamp(0.05, 0.95);
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::Minus) {
+        viewer.spec.displace = (viewer.spec.displace - 0.01).max(0.0);
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::Equal) {
+        viewer.spec.displace = (viewer.spec.displace + 0.01).min(0.40);
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        viewer.spec.rings = if viewer.spec.rings > 0.0 { 0.0 } else { 2.35 };
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        viewer.spin = !viewer.spin;
+    }
+    if keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::Escape) {
+        exit.write(AppExit::Success);
+    }
+    if changed {
+        rebuild.0 = true;
+    }
+}
+
+fn poll_request(
+    mut viewer: ResMut<Viewer>,
+    mut rebuild: ResMut<Rebuild>,
+    mut shot: ResMut<PendingShot>,
+) {
+    let Some((spec, at, wants_shot)) = read_view_request() else {
+        return;
+    };
+    if at == viewer.request_at {
+        return;
+    }
+    viewer.request_at = at;
+    viewer.field_modified = std::fs::metadata(&spec.field)
+        .and_then(|meta| meta.modified())
+        .ok();
+    viewer.spec = spec;
+    rebuild.0 = true;
+    if wants_shot {
+        shot.0 = Some(12);
+    }
+    println!("窗口切到：{}", describe(&viewer.spec));
+}
+
+fn auto_shot(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    ready: Res<RenderReady>,
+    mut pending: ResMut<PendingShot>,
+) {
+    if keys.just_pressed(KeyCode::KeyS) {
+        pending.0 = Some(3);
+    }
+    let Some(frames) = pending.0 else {
+        return;
+    };
+    if frames > 0 {
+        pending.0 = Some(frames - 1);
+        return;
+    }
+    if !ready.0.load(Ordering::Relaxed) {
+        return;
+    }
+
+    pending.0 = None;
+    let path = "target/viewer-shot.png";
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+    println!("预览截图 → {path}");
+}
+
+fn poll_field(mut viewer: ResMut<Viewer>, mut rebuild: ResMut<Rebuild>, mut ticks: Local<u32>) {
+    *ticks += 1;
+    if *ticks % 20 != 0 {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(&viewer.spec.field) else {
+        return;
+    };
+    let Ok(modified) = meta.modified() else {
+        return;
+    };
+    if viewer.field_modified != Some(modified) {
+        viewer.field_modified = Some(modified);
+        rebuild.0 = true;
+        println!("场文件更新，重载：{}", viewer.spec.field);
+    }
+}
+
+fn rebuild_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    stars: Res<Stars>,
+    viewer: Res<Viewer>,
+    mut rebuild: ResMut<Rebuild>,
+    parts: Query<Entity, With<ScenePart>>,
+) {
+    if !rebuild.0 {
+        return;
+    }
+    rebuild.0 = false;
+    for entity in parts.iter() {
+        commands.entity(entity).despawn();
+    }
+    match planet::spawn_planet(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &stars.0,
+        &viewer.spec,
+    ) {
+        Ok(label) => println!("{label}"),
+        Err(message) => eprintln!("重建场景失败：{message}"),
+    }
+}
+
+fn heartbeat(mut ticks: Local<u32>) {
+    *ticks += 1;
+    if *ticks % 30 != 0 {
+        return;
+    }
+    let _ = std::fs::write(VIEW_LEASE, format!("{}", now_nanos()));
+}
+
+fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    let wanted = format!("px_render 预览 — {}", describe(&viewer.spec));
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    if window.title != wanted {
+        window.title = wanted;
+    }
 }
