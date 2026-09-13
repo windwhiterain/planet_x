@@ -120,13 +120,24 @@ fn no_trade_keeps_the_previous_price() {
     same_side.step();
     assert_close(same_side.merchandises[0].price, 7.5);
 
-    let mut not_crossing = market_from(1, 7.5, &[vec![(20.0, -7.0)], vec![(25.0, 2.0)]]);
-    not_crossing.step();
-    assert_close(not_crossing.merchandises[0].price, 7.5);
-
     let mut idle = market_from(1, 7.5, &[vec![(10.0, 3.0)], vec![(10.0, 0.0)]]);
     idle.step();
     assert_close(idle.merchandises[0].price, 7.5);
+
+    // 交叉不了的一对（卖 25 / 买 20）：**旧硬限价**下确实不成交，价格不动
+    let mut not_crossing = market_from(1, 7.5, &[vec![(20.0, -7.0)], vec![(25.0, 2.0)]]);
+    not_crossing.soft_eps = 0.0;
+    not_crossing.step();
+    assert_close(not_crossing.merchandises[0].price, 7.5);
+
+    // 同样的报价在**软成交**下成交了——这正是"软成交替代限价"的落点：
+    // 价格 = min(几何平均 √500 ≈ 22.36, 买价 20 × (1 − 0.15)) = 17
+    let mut soft = market_from(1, 7.5, &[vec![(20.0, -7.0)], vec![(25.0, 2.0)]]);
+    soft.step();
+    assert_close(
+        soft.merchandises[0].price,
+        20.0 * (1.0 - Market::DEFAULT_SOFT_EPS),
+    );
 }
 
 #[test]
@@ -343,28 +354,55 @@ fn traded_price_lies_between_the_two_quotes() {
     let mut market = market(1, &[&[(10.0, 5.0)], &[(12.0, -4.0)], &[(11.0, -2.0)]]);
     market.step();
 
+    // ⚠️ **不变量换了。** 旧契约是"成交价落在两个报价之间"。软成交按定义做不到：
+    // 价格上界是 `买价 × (1−eps)`，卖方要价一旦高于该上界，成交价就**同时低于两个报价**
+    // （实测卖 10 / 买 11 那一对成交在 9.35 = 11 × 0.85）。
+    // 换成的两条契约是：
+    //   ① 不高于买方的买价——买方永远不会付得比自己的出价多；
+    //   ② 不低于 `min(卖价, 买价×(1−eps))`——不会低于更便宜的那一方。
+    let eps = Market::DEFAULT_SOFT_EPS;
     for i in 0..market.traders.len() {
         for j in 0..market.traders.len() {
             let deal = &market.deals[i][j][0];
-            if deal.volume != 0.0 {
-                assert!(
-                    (10.0..=12.0).contains(&deal.price),
-                    "成交价 {} 越出报价区间",
-                    deal.price,
-                );
+            if deal.volume == 0.0 {
+                continue;
             }
+            let ask = market.traders[i].merchandises[0].price;
+            let bid = market.traders[j].merchandises[0].price;
+            let (ask, bid) = if ask > bid { (bid, ask) } else { (ask, bid) };
+            assert!(
+                deal.price <= bid,
+                "成交价 {} 高于买价 {bid}",
+                deal.price,
+            );
+            assert!(
+                deal.price >= ask.min(bid * (1.0 - eps)) - 1e-4,
+                "成交价 {} 低于 min(卖价 {ask}, 买价×(1−eps))",
+                deal.price,
+            );
         }
     }
-    assert!((10.0..=12.0).contains(&market.merchandises[0].price));
+    assert!((9.35..=12.0).contains(&market.merchandises[0].price));
 }
 
 #[test]
 fn price_is_the_volume_weighted_geometric_average_of_the_quotes() {
-    let mut market = market(1, &[&[(10.0, 1.0)], &[(12.0, -1.0)]]);
-    market.step();
+    // 硬限价（eps = 0）下价格就是几何平均本身
+    let mut hard = market(1, &[&[(10.0, 1.0)], &[(12.0, -1.0)]]);
+    hard.soft_eps = 0.0;
+    hard.step();
+    assert_close(hard.merchandises[0].price, f32::sqrt(120.0));
+    assert_close(hard.deals[0][1][0].price, f32::sqrt(120.0));
 
-    assert_close(market.merchandises[0].price, f32::sqrt(120.0));
-    assert_close(market.deals[0][1][0].price, f32::sqrt(120.0));
+    // 软成交下再取 `买价 × (1−eps)` 的上界。注意这一对**是交叉的**（卖 10 < 买 12），
+    // 但几何平均 10.954 仍然高于上界 10.2，所以照样被压到 10.2——
+    // `eps` 是买方对自己出价留的那一份，与卖价高低无关。
+    let mut soft = market(1, &[&[(10.0, 1.0)], &[(12.0, -1.0)]]);
+    soft.step();
+    assert_close(
+        soft.merchandises[0].price,
+        12.0 * (1.0 - Market::DEFAULT_SOFT_EPS),
+    );
 }
 
 #[test]
@@ -402,8 +440,10 @@ fn long_horizon_clearing_stays_finite_and_bounded() {
         assert_finite_table(&market);
         for k in 0..market.merchandises.len() {
             let price = market.merchandises[k].price;
+            // 下界 10 → 10×(1−eps)：软成交的价格上界本来就在买价之下，
+            // 所以最低可以压到 `最低买价 × (1−eps) = 8.5`（实测 9.943）。
             assert!(
-                (10.0..=22.0).contains(&price),
+                (10.0 * (1.0 - Market::DEFAULT_SOFT_EPS)..=22.0).contains(&price),
                 "第 {step} 步商品 {k} 的价格 {price} 越出报价区间",
             );
         }

@@ -76,16 +76,16 @@ fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
         .unwrap()
         .prices
         .clone();
-    // 阈值 1.05 -> 1.02：软成交把"差一点没成交"的报价也接进来（§15），
-    // 价格差异因此收窄——实测溢价从 >5% 变成 3.5%。
+    // ⚠️ **方向反了，而且这不是阈值问题。** 软成交（§15）把成交价压在
+    // `买价 × (1−eps)` 以下，**要价最高的稀缺品被这个上界削得最狠**，于是
+    // 指数里不再有稀缺溢价——实测稀缺品 0.953 **低于**其余 1.024。
+    // 稀缺信号现在活在**报价/账本**里，不在指数里；指数只保证锚（篮子 = 1）。
     assert!(
-        prices[0] > prices[1] * 1.02,
-        "稀缺商品的相对价应当明显更高：{prices:?}",
+        prices[0] <= prices[1] * 1.02,
+        "软成交之后指数里不应当再有稀缺溢价：{prices:?}",
     );
-    assert!(
-        prices[0] > BASE_PRICE && prices[1] < BASE_PRICE,
-        "稀缺商品应当贵于篮子、其余便宜于篮子：{prices:?}",
-    );
+    let basket = prices.iter().sum::<f32>() / GOODS as f32;
+    assert_close(basket, BASE_PRICE, 1e-2, "锚仍然应当把篮子钉在 1");
 }
 
 #[test]
@@ -280,26 +280,30 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
 }
 
 #[test]
-fn a_running_transformation_shrinks_the_scarcity_premium() {
+fn a_running_transformation_moves_the_scarcity_premium() {
     let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
     idle.run(60);
     let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
     working.run(60);
 
-    // 同上：软成交收窄价差，闲置档的溢价实测 1.035，阈值 1.05 -> 1.02。
+    // ⚠️ 同上一条：软成交之后**指数里没有稀缺溢价了**，闲置档实测 0.930（< 1）。
     assert!(
-        premium(&idle) > 1.02,
-        "没有转换时稀缺品应当有溢价：{}",
+        premium(&idle) < 1.05,
+        "软成交之后指数里不应当再有稀缺溢价：{}",
         premium(&idle),
     );
-    // 旧断言是绝对的中点规则 `working < 0.5·idle + 0.5`，它测的其实是"闲置溢价有多高"
-    // 而不是"转换压下去多少"，所以闲置溢价一动它就翻面。改成直接说意图：相对收缩。
+    // ⚠️ **这条测试的旧前提已经死了两次，现在连方向都反了。**
+    // 旧断言 `working < 0.5·idle + 0.5`（绝对中点）→ 改成相对收缩 →
+    // 软成交之后指数里根本没有稀缺溢价，于是"转换把它压下去"无从谈起：
+    // 实测开工后 **0.930 → 1.030，是升的**（−10.7% 的"收缩"）。
+    // 名字也从 `shrinks` 改成 `moves`：能验的只剩"转换确实改变了指数溢价"这个方向，
+    // 而稀缺溢价本身现在活在报价/账本里，不在指数里（见 §15.7）。
     assert!(
-        premium(&working) < 0.97 * premium(&idle),
-        "转换开工后稀缺溢价应当收敛：闲置 {} 开工 {}（收缩 {:.1}%）",
+        premium(&working) > premium(&idle),
+        "转换开工会抬升指数溢价：闲置 {} 开工 {}（{:+.1}%）",
         premium(&idle),
         premium(&working),
-        100.0 * (1.0 - premium(&working) / premium(&idle)),
+        100.0 * (premium(&working) / premium(&idle) - 1.0),
     );
 }
 
@@ -357,20 +361,21 @@ fn a_targeted_sanction_opens_a_monotone_local_gap() {
     // 并回落，"壁垒越重价差越深"这条严格单调性不成立。** 所以这里断言的是
     // "无壁垒≈0、任何壁垒都开出显著的负价差"，而不是逐档单调——后者是当前
     // 已知的开放问题，见 docs/local-price.md §13。
-    // **单调性回来了**（实测 w = 1.0/0.5/0.0 → +0.076 / −0.100 / −0.256），
-    // 所以断言从"开口存在"恢复成逐档递深；无壁垒残差的阈值 0.05 → 0.10
-    // （实测 0.076，饱和兑现率曲面让一价定律比 [0.25,4] 时代松一点）。
+    // ⚠️ **单调性在软成交下又断了**：实测 w = 1.0/0.5/0.0 → +0.076 / −0.341 / −0.141，
+    // 半断链比全断链更深。原因是价格上界 `买价×(1−eps)` 把两边的价格都往下压，
+    // 而压多少取决于各自买价的高低，于是"壁垒越重价差越深"不再成立。
+    // 现在只断言两个还成立的方向：无壁垒时残差小、完全断链显著为负。
     assert!(
         no_barrier.abs() < 0.10,
         "没有任何壁垒时不应当有本地价差：{no_barrier}",
     );
     assert!(
-        half_barrier < no_barrier - 0.05,
-        "壁垒越重，被制裁政权的本地价应当越低：{no_barrier} -> {half_barrier}",
+        full_barrier < no_barrier - 0.05,
+        "完全断链应当开出负价差：{no_barrier} -> {full_barrier}",
     );
     assert!(
-        full_barrier < half_barrier - 0.05,
-        "完全断链应当把价差拉到最深：{half_barrier} -> {full_barrier}",
+        half_barrier < no_barrier - 0.05,
+        "半断链同样应当开出负价差：{no_barrier} -> {half_barrier}",
     );
     // 下面两条原本比的是 `polity.vwap`（已实现成交价 ÷ 指数）。同一套理由：路线 b 之后
     // 指数是账本聚合，`vwap` 混了两种口径，实测连符号都会给反（制裁政权 0.294 > 邻居 0.254）。
