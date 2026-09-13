@@ -1535,7 +1535,7 @@ JSON 每个部门多了
 `settlement{gap,mu,iterations,phases,converged,residual,degraded,blocked,utilization}`，
 轮级多了 `settlement_failures`（累计次数）——**数值出问题必须在读数里看得见**。
 
-### 18.8 待执行：去掉归一化，给 motive 一个边际效应（**已定方案，尚未落地**）
+### 18.8 去掉归一化，给 motive 一个边际效应（**已落地，见 §19**）
 
 **诊断（已在 §18.7 之后实测确认）**：需求在**量**上对价格完全没有响应。
 `solve` 的目标第一项 `Σ_p w_p·x_p` 对 `x` 是**线性**的，`w_p` 是常数，所以只要影子价格
@@ -1587,3 +1587,72 @@ Schur 对角变成 `D_p = y_p/x_p + θ(1−θ)·motive_p·x_p^{θ−2}`（两项
    删 `execution` 的全部字段与打印点。
 4. 重测重新基线：部门那五条、三条水平类测试、以及所有断言 `execution` 的地方；
    旧值新值一并记进本文件。
+
+## 19. 现状（本节之后，§16–§18 的数字多数作废）
+
+### 19.1 模型现在是什么
+
+| commit | 改动 |
+|---|---|
+| `8cfd8ec` | 结算目标换成 `max Σ_p motive_p·x_p^θ + μ[Σ_k ln s_k + Σ_p ln x_p]`，约束是仓库存量，**上界盒子整条删掉**。`θ = CURVATURE = 0.5`（CLI `--curvature`）。KKT：`θ·motive·x^{θ−1} + y = Σ 配方·λ`；`z` 与 `(1−x)z = σμ` 消失；`gap = (K+P)μ`；`μ = BARRIER·θ·平均 motive`（CLI `--barrier`）。 |
+| `73cbc45` | `plan()` 传**裸配方**与**绝对 motive**（不再归一化）；`execution` 整条删除（`Department::policy_execution`、`Polity.execution`、`Snapshot.executions`、`probe` 字段、JSON/trace/表全部列）。物理活跃度由 `intake` 承担。 |
+| `2877969` | 每个单元拆成**生产部门**（只有生产政策、不吃东西、靠卖产出）与**消费部门**（只有消费政策、靠拨款）⇒ 3 政权 × 3 单元 × 2 = 18 个部门/仓库。`Kind`、`span()`、`warehouse_polity()`、`department_of(p, u, kind)`。 |
+| `81b9ce2` | 买方报价改读**学到的局部隐含价**（`buy_price_curve`，目标 `realized = deal_price/reference`）——此前它每轮被更新却只被 `probe` 读过；卖方 `sale_scale` 一直在读。 |
+| `4a47cd9` | 买方解`min volume×unit s.t. 期望达标 ≥ need、花费 ≤ cash`。低尺度区域在此形式下**本来就不可行**（`volume_for_dealt` 反解不出有限的量），所以不再需要"取最小尺度"那种人为下界。 |
+| `1694df2` | **随机打开**：`Spec.fluctuation`（默认 0.05）+ CLI `--fluctuation`；`--seed` 从此有效（此前只喂给一个抽出来就被丢掉的随机数）。 |
+
+死掉的旧机制（不要再引用）：`distribution` 归一化当目标权重、`Response` 的
+"期望达标概率 + 相对阈值 argmin"、`evaluate` 里 `cost = volume × 买价`、
+`goal = target.min(0.9·share·depth)`（申报量度量模型信念）、`score`/`execution` 读数。
+
+### 19.2 动力学：**强回复 + 零阻尼的振荡**，不是发散
+
+跨种子（`--scenario modern --capacity 12 --specialty 2`，`--fluctuation 0.05`，800 轮，
+每 50 轮一点，极差 = 三样商品指数的 max/min）：
+
+```
+seed 3 flat:   1e+01 2e+18 2e+21 9e+20 1e+15 3e+10 6e+07 8e+08 6e+13 1e+20 1e+22 8e+17 3e+23 5e+16 2e+20 5e+16
+seed 3 ladder: 1e+01 2e+18 2e+21 1e+21 1e+15 2e+10 8e+07 2e+09 5e+05 3e+02 2e+19 7e+19 1e+13 2e+21 2e+25 2e+29
+seed 5 flat:   1e+01 5e+18 2e+21 4e+21 6e+15 2e+10 5e+06 2e+08 9e+20 3e+46 8e+21 1e+16 1e+06 1e+10 4e+20
+seed 5 ladder: 8e+22 1e+01 5e+18 2e+21 3e+21 5e+15 3e+10 4e+06 2e+10 3e+12 6e+04 5e+18 3e+18 4e+17 1e+21 5e+15
+seed 8 flat:   1e+01 3e+14 1e+17 5e+13 5e+09 6e+05 8e+01 9e+15 5e+08 6e+11 7e+11 6e+10 3e+15 3e+16 3e+19 5e+23
+seed 8 ladder: 1e+01 2e+18 2e+21 2e+20 4e+14 4e+09 2e+06 4e+11 3e+19 5e+17 3e+09 3e+14 1e+07 1e+08 2e+10 7e+06
+```
+
+- **没有一条单调**：`ln(极差)/轮` 均值 +0.018…+0.086，上升间隔只有 7–9/15，最长连升 3–5 步。
+  所以"发散"是错的说法——极差大不等于发散。
+- **回复力很强**：反复从 1e21 量级拉回来（seed 3: `2e21 → 6e07`；seed 5: `4e21 → 5e06`；
+  seed 8: `1e17 → 8e01`）。**锚在起作用，而且作用得很猛。**
+- 于是诊断是**阻尼**而不是回复力：环路增益太高、阻尼近零 ⇒ 相对价格结构一直振铃，
+  振幅 10–45 个数量级，周期约 100–200 轮。要测的是增益（`gain = 0.02`、
+  学习者 `forgetting = 0.95`、账本 `LOCAL_PRICE_FORGETTING`、定规范环路的增益），
+  把各条增益减半看振幅是否随之下降。
+- `seed 5 flat` 第 450 轮极差到 **`3e+46` > f32 最大值 `3.4e38`**：振荡已把可表示范围扫穿并
+  撞在数值截断上（`LOG_LIMIT = 44`、`Response::LOG_LIMIT`、各 `log_*` 的 clamp）。
+  **截断会反馈回动力学**，那之后的读数不能当纯粹的经济行为解读——这是第二条要修的。
+- `settlement_failures` 全程为 0，所以这些都不在结算器里。
+
+### 19.3 作废的数字（保留原文，但不要引用）
+
+- §16 洪水增长的逐轮数字、§18.6 的 3000 轮表、§18.7 的障碍权衡表：都是**零噪声单轨迹**，
+  而 §19.2 已证明零噪声下的稳态是巧合。
+- 所有 `execution` 读数（该字段已删）。
+- "缺少回复力 / 没有东西阻止它下跌"这套叙述：**错**，见 §19.2。
+- §18.8 的执行顺序：已全部落地。
+
+此后一切结论必须按**跨种子的分布**报，单条轨迹只能当例子。
+
+### 19.4 测试状态（合并时如实记录）
+
+`cargo test --lib`：**118 过 / 12 失败 / 1 ignore**。12 条失败全部在编码**已作废的行为**：
+
+- 5 条部门结算测试（`policy_is_a_pure_resource_sink`、`a_continuous_distribution_...`、
+  `a_cheaper_policy_...`、`the_higher_motive_policy_...`、
+  `execution_is_bounded_by_the_stock_on_hand`）：断言的是"旧目标 + 上界盒子"下的残留量。
+- 7 条 `local_price` 测试（`a_process_choice_follows_whichever_resource_is_tight`、
+  `the_anchor_leaves_the_relative_premium_of_a_scarce_good`、`a_transformation_*` 三条、
+  `a_targeted_sanction_opens_a_monotone_local_gap`、
+  `a_sanction_stays_local_to_the_named_department`）：直接读价格水平，与 §19.2 的振荡是同一件事。
+
+**重新基线要等 §19.2 的增益问题查清之后再做**，否则要改两遍；而且新的基线必须是
+"多个种子下的分布"（比如中位数与四分位），不能是单条轨迹的常数。
