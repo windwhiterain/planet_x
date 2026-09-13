@@ -14,5 +14,6 @@ naga = { version = "29", features = ["wgsl-in", "hlsl-out"] }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
+encase = "0.12"
 
 

@@ -4493,6 +4493,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bytemuck",
+ "encase",
  "naga",
  "pollster",
  "px_protocol",
