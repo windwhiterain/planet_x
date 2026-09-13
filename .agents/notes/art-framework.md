@@ -721,3 +721,77 @@ worktree：`.worktrees/art-stack`（off `v2` @ `3dfd8b2`）。`cargo test --work
 - 这个血缘上**没有 `.agents/notes.md` 索引文件**，所以本笔记暂时没有索引行。
 - 主 worktree 下的 `target/bevy-probe/` 是编译探针（在 gitignore 的 `target/` 里），用完应删。
   ⚠️ 教训：**`cargo init` 会自动把新包登记进根 manifest 的 `members`**（本轮污染过一次，已恢复）。
+
+---
+
+## 12. P1 完成记录：px_render 骨架（提交 `25ddd47`）
+
+**做了什么**：`px_render`（Bevy 0.19.1）读 `.pxstream` → **离屏渲染** → PNG。
+
+```
+cargo run -p game     -- -n 240 -s 11 -f 0.4 --record target/world.pxstream
+cargo run -p px_render -- --stream target/world.pxstream --round 200 --out target/shot.png
+```
+
+- 渲染内容：后排三根**部门库存柱**（按商品配色堆叠）、前排三根**价格柱**；
+  高度按**本流自身的峰值归一化**（相对比例，不是绝对量——沿用本仓「相对比例优于硬阈值」的约定）。
+- 协议指纹不匹配的流会被**拒绝**（`px_render` 显式比对 `ProtocolId.protocol_hash`）。
+- 实测：同一轮跑两次**逐字节相同**（960×640；第 60 / 200 / 240 轮都验过，且与固定帧数预热版本
+  的 sha 完全一致——因为场景是静态的，这也顺带证明了改造前后画面等价）。
+
+### 12.1 踩到的四个坑（都记下来，别再踩）
+
+**① 窗口路径在这台机器上画不出东西。** 最初开窗渲染，画面**只有清屏色**；把清屏色改成洋红后
+确认「什么都没画」。**把 Bevy 官方 `screenshot` 例子原样复刻后同样空白** ⇒ 不是我们的场景问题，
+是窗口/交换链这条路径在这台机器上不行（DX12 与 Vulkan 都试了；Vulkan 还刷一堆
+`vkAcquireNextImageKHR` semaphore 校验错误）。
+⇒ **改用离屏 render-to-image**（`Image::new_target_texture` + `RenderTarget::Image` +
+`Screenshot::image`），配合 `WindowPlugin { primary_window: None, .. }` +
+`disable::<WinitPlugin>()` + `ScheduleRunnerPlugin`。
+**这条路本来就是美术迭代该走的**：无窗口、无 DPI 缩放、`--width/--height` 就是像素数。
+
+**② 离屏也会拍到空白画面——Bevy 的管线是异步编译的。** 20 帧、120 帧都是空白，**400 帧才有内容**。
+根因：`CachedPipelineState::Creating(Task<…>)`。编译完成前画面里没有几何，**但清屏色正常**，
+所以看起来像「场景写错了」。⇒ **别用固定帧数预热**，正解是读渲染世界的 `PipelineCache`：
+
+```rust
+app.get_sub_app_mut(RenderApp).unwrap()
+   .insert_resource(RenderReady(flag.clone()))   // Arc<AtomicBool>，两个世界各插一份
+   .add_systems(Render, watch_pipelines);
+```
+
+**③ 就绪门写成「所有管线都是 Ok」会立刻开**（我的第一版 bug）：队列为空时 `pending == 0`
+天然成立，第 3 帧就"就绪"，照样拍到空白。**必须加「至少有一条管线」**：
+
+```rust
+if total > 0 && pending == 0 { ready.store(true) }
+```
+
+修正后：41 条管线 / 首帧 20 条待编译 → **第 167 帧就绪** → 从启动到出图 **7.5 s**
+（固定 600 帧是 14.7 s，而且随时可能拍到空白）。
+
+**④ DPI 会偷偷改尺寸。** 开窗时 `WindowResolution::new(960, 640)` 出来的截图是 **1680×1120**
+（这台机器 175% 缩放）⇒ 要 `with_scale_factor_override(1.0)`。离屏路径没有这个问题。
+
+### 12.2 「画面空白」的四种成因与定性手段（可直接抄进未来的门）
+
+四种失败症状都是「只有背景色」：① GPU/后端不对 ② 管线还没编译完 ③ 几何被剔除 ④ 真的没画。
+本轮**四种都遇到过**，定性手段分别是：
+
+| 手段 | 一眼看出什么 |
+|---|---|
+| **把清屏色改成洋红** | 区分「什么都没画」与「画了但很暗」——一秒钟的事，先做这个 |
+| **打印 `ViewVisibility`** | 剔除还是没画（本轮 3 根柱子堆到 12 米高跑出画面被正确剔除，一度让我误判「全被剔除了」） |
+| **打印管线队列**（总数 + 待编译数） | 「还没编译完」还是「编译失败」 |
+| **官方最小例子复刻** | 分清「我的场景错」与「环境/后端错」——本轮靠这条才没有继续在场景里瞎找 |
+
+⇒ 前三条应该成为 `px_render` 的常驻诊断（现在 `diagnose` 打印可见性，管线状态在就绪时打印一次）。
+
+### 12.3 还没做
+
+- **没有判据门**：现在只出 PNG，没有基线、没有 `stats`、没有阈值 —— 出图要人（或 agent）看。
+- **一次出图 7.5 s**，大头是管线编译。Bevy 能否借 wgpu 的磁盘管线缓存把第二次降到 <1 s，未查。
+- **`Art` / `Blob` 帧还没有消费者**：`px_render` 只读 `World` 帧。
+- 场景是「能看出状态」的最小可视化，**离真正的美术层（行星 / 星空 / 光照）还很远**。
+- 编译经济性已落地：根 `Cargo.toml` 有 `[profile.dev] debug = "line-tables-only"`，
+  实测改一行 `px_render` 重编 ≈ **6.7 s**（完整 debug info 是 ~20 s）。
