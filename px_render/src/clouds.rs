@@ -32,7 +32,7 @@ pub struct CloudParams {
     pub phase: f32,
     pub shadow: f32,
     pub steps: u32,
-    pub sun_steps: u32,
+    pub bump: f32,
     pub seed: u32,
     pub ablate: u32,
 }
@@ -43,6 +43,7 @@ pub enum Ablate {
     Sun,
     Noise,
     Fetch,
+    Detail,
 }
 
 impl Ablate {
@@ -52,8 +53,9 @@ impl Ablate {
             "sun" => Ok(Self::Sun),
             "noise" => Ok(Self::Noise),
             "fetch" => Ok(Self::Fetch),
+            "detail" => Ok(Self::Detail),
             other => Err(format!(
-                "--cloud-ablate 只认 none / sun / noise / fetch，不认 {other}"
+                "--cloud-ablate 只认 none / sun / noise / fetch / detail，不认 {other}"
             )),
         }
     }
@@ -64,6 +66,7 @@ impl Ablate {
             Self::Sun => 1,
             Self::Noise => 2,
             Self::Fetch => 3,
+            Self::Detail => 4,
         }
     }
 }
@@ -83,9 +86,9 @@ impl CloudParams {
             detail_strength: 0.55,
             erode: 0.0,
             phase: 0.62,
-            shadow: 0.85,
+            shadow: 1.0,
             steps: 56,
-            sun_steps: 4,
+            bump: 0.85,
             seed: 7,
             ablate: Ablate::None.code(),
         }

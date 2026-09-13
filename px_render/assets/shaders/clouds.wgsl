@@ -1,5 +1,5 @@
 #import planet_x::common::{SUN_DIRECTION, shell_thickness}
-#import planet_x::noise::{fbm_3, rotate_vector}
+#import planet_x::noise::{fbm_3, fbm_3_grad, rotate_vector}
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, depth_prepass_texture}
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
@@ -19,7 +19,7 @@ struct CloudParams {
     phase: f32,
     shadow: f32,
     steps: u32,
-    sun_steps: u32,
+    bump: f32,
     seed: u32,
     ablate: u32,
 };
@@ -28,6 +28,8 @@ const ABLATE_NONE: u32 = 0u;
 const ABLATE_SUN: u32 = 1u;
 const ABLATE_NOISE: u32 = 2u;
 const ABLATE_FETCH: u32 = 3u;
+const ABLATE_DETAIL: u32 = 4u;
+const SHADOW_GAIN: f32 = 4.0;
 
 struct Medium {
     direction: vec3<f32>,
@@ -99,25 +101,31 @@ fn density_of(medium: Medium, cover: f32, with_skin: bool) -> f32 {
     return shape_of(cover, medium.altitude, billows(medium.direction, medium.altitude, with_skin));
 }
 
-fn sun_transmittance(point: vec3<f32>, cover: f32, reach: f32) -> f32 {
-    if reach <= 0.0 || cover <= 0.0 || params.ablate == ABLATE_SUN {
+fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {
+    if reach <= 0.0 || params.ablate == ABLATE_SUN {
         return 1.0;
     }
     let sun = normalize(SUN_DIRECTION);
-    let steps = max(params.sun_steps, 1u);
-    let step = reach / f32(steps);
-    var optical = 0.0;
-    var along = step * 0.5;
-    for (var index = 0u; index < steps; index += 1u) {
-        optical += density_of(medium_of(point + sun * along), cover, false);
-        along += step;
-    }
-    let depth = optical * step * params.density;
+    let cover = coverage_of(medium_of(point + sun * reach * 0.5).direction);
+    let depth = cover * params.shadow * SHADOW_GAIN;
     let thin = exp(-depth);
     let middle = exp(-depth * 0.5);
     let thick = exp(-depth * 0.25);
-    let scattered = thin * 0.35 + middle * 0.35 + thick * 0.30;
-    return mix(1.0, scattered, clamp(params.shadow, 0.0, 1.0));
+    return thin * 0.35 + middle * 0.35 + thick * 0.30;
+}
+
+fn detail_shading(direction: vec3<f32>) -> f32 {
+    if params.ablate == ABLATE_DETAIL || params.bump <= 0.0 {
+        return 1.0;
+    }
+    let sample = fbm_3_grad(direction * params.detail_scale * 0.35, 3u, 2.0, 0.5, params.seed);
+    let up = direction - sample.gradient * params.bump;
+    let length_squared = dot(up, up);
+    if length_squared <= 1e-8 {
+        return 1.0;
+    }
+    let normal = up * inverseSqrt(length_squared);
+    return mix(0.45, 1.0, clamp(dot(normal, normalize(SUN_DIRECTION)) + 0.5, 0.0, 1.0));
 }
 
 fn phase_hg(cosine: f32, g: f32) -> f32 {
@@ -174,6 +182,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let opaque = 6.0 / max(params.density, 1e-4);
 
     let phase = 0.60 + 0.40 * phase_hg(dot(-ray, sun), params.phase) / phase_forward(params.phase);
+    let detail = detail_shading(medium_of(camera + ray * hit.entry).direction);
 
     var optical = 0.0;
     var scattered = 0.0;
@@ -194,7 +203,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             continue;
         }
         optical += density * step;
-        scattered += density * sun_transmittance(point, cover, sun_reach) * step;
+        scattered += density * sun_shadow(point, sun_reach) * step;
         if optical > opaque {
             break;
         }
@@ -206,5 +215,5 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let light = scattered / max(optical, 1e-6);
     let shade = mix(0.35, 1.05, clamp(light, 0.0, 1.0));
-    return vec4<f32>(params.tint.rgb * shade * phase * alpha, alpha);
+    return vec4<f32>(params.tint.rgb * shade * detail * phase * alpha, alpha);
 }
