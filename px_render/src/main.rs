@@ -1164,15 +1164,24 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
 }
 
 fn view(options: Options) -> Result<(), String> {
-    let (spec, request_at, shot) = match read_view_request() {
-        Some(found) => found,
-        None => (
-            options.planet_spec().ok_or_else(|| {
-                "--view 需要一个起始场景：给 --planet <FIELD.pxart>，或先用 --show 推一个".to_string()
-            })?,
+    let (spec, request_at, shot) = if options.planet.is_some() {
+        (
+            options
+                .planet_spec()
+                .ok_or_else(|| "命令行给的星球场景不完整".to_string())?,
             0,
-            false,
-        ),
+            options.shot,
+        )
+    } else {
+        match read_view_request() {
+            Some(found) => found,
+            None => {
+                return Err(
+                    "--view 需要一个起始场景：给 --planet <FIELD.pxart>，或先用 --show 推一个"
+                        .to_string(),
+                );
+            }
+        }
     };
     let field_modified = std::fs::metadata(&spec.field)
         .and_then(|meta| meta.modified())

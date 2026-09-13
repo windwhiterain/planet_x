@@ -53,7 +53,7 @@ impl CloudParams {
             phase: 0.62,
             shadow: 0.85,
             steps: 56,
-            sun_steps: 6,
+            sun_steps: 4,
             seed: 7,
         }
     }

@@ -23,31 +23,43 @@ struct CloudParams {
     seed: u32,
 };
 
+struct Medium {
+    direction: vec3<f32>,
+    altitude: f32,
+};
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: CloudParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var coverage_map: texture_cube<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var coverage_sampler: sampler;
 
-fn cloud_density(point: vec3<f32>) -> f32 {
-    let local = rotate_vector(vec4<f32>(-params.orientation.xyz, params.orientation.w), point);
-    let radius = length(local);
-    if radius < params.inner || radius > params.outer {
-        return 0.0;
-    }
-    let span = max(params.outer - params.inner, 1e-5);
-    let altitude = (radius - params.inner) / span;
+fn to_local(point: vec3<f32>) -> vec3<f32> {
+    return rotate_vector(vec4<f32>(-params.orientation.xyz, params.orientation.w), point);
+}
 
-    let direction = local / max(radius, 1e-5);
+fn span() -> f32 {
+    return max(params.outer - params.inner, 1e-5);
+}
+
+fn medium_of(point: vec3<f32>) -> Medium {
+    let local = to_local(point);
+    let radius = length(local);
+    return Medium(local / max(radius, 1e-5), (radius - params.inner) / span());
+}
+
+fn coverage_of(direction: vec3<f32>) -> f32 {
     let mask = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0).r;
-    let cover = smoothstep(
+    return smoothstep(
         0.0,
         0.45,
         clamp((mask - params.coverage) / max(1.0 - params.coverage, 1e-4), 0.0, 1.0),
     );
-    if cover <= 0.0 {
-        return 0.0;
-    }
+}
 
+fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
     let tower = fbm_3(direction * params.detail_scale * 0.35, 1.0, 3u, 2.0, 0.5, params.seed);
+    if !with_skin {
+        return tower;
+    }
     let skin = fbm_3(
         direction * params.detail_scale * 1.70 * (1.0 + altitude * 0.50),
         1.0,
@@ -56,8 +68,10 @@ fn cloud_density(point: vec3<f32>) -> f32 {
         0.5,
         params.seed ^ 31u,
     );
-    let noise = clamp(tower * 0.62 + skin * 0.38, 0.0, 1.0);
+    return clamp(tower * 0.62 + skin * 0.38, 0.0, 1.0);
+}
 
+fn shape_of(cover: f32, altitude: f32, noise: f32) -> f32 {
     let lobed = cover * (0.45 + 0.55 * noise);
     let floor_here = smoothstep(0.0, max(params.base, 1e-3), altitude);
     let ceiling = max(
@@ -69,18 +83,21 @@ fn cloud_density(point: vec3<f32>) -> f32 {
     return clamp((shape - params.erode) / max(1.0 - params.erode, 1e-4), 0.0, 1.0);
 }
 
-fn sun_transmittance(point: vec3<f32>) -> f32 {
-    let sun = normalize(SUN_DIRECTION);
-    let reach = shell_thickness(point, sun, params.inner, params.outer);
-    if !reach.valid || reach.exit <= 0.0 {
+fn density_of(medium: Medium, cover: f32, with_skin: bool) -> f32 {
+    return shape_of(cover, medium.altitude, billows(medium.direction, medium.altitude, with_skin));
+}
+
+fn sun_transmittance(point: vec3<f32>, cover: f32, reach: f32) -> f32 {
+    if reach <= 0.0 || cover <= 0.0 {
         return 1.0;
     }
+    let sun = normalize(SUN_DIRECTION);
     let steps = max(params.sun_steps, 1u);
-    let step = reach.exit / f32(steps);
+    let step = reach / f32(steps);
     var optical = 0.0;
     var along = step * 0.5;
     for (var index = 0u; index < steps; index += 1u) {
-        optical += cloud_density(point + sun * along);
+        optical += density_of(medium_of(point + sun * along), cover, false);
         along += step;
     }
     let depth = optical * step * params.density;
@@ -133,9 +150,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let steps = max(params.steps, 1u);
+    let ceiling_steps = f32(max(params.steps, 16u));
+    let stride = max(span() * 0.045, 1e-5);
+    let steps = u32(clamp(chord / stride, 16.0, ceiling_steps));
     let step = chord / f32(steps);
+
     let sun = normalize(SUN_DIRECTION);
+    let middle = camera + ray * (hit.entry + chord * 0.5);
+    let reach = shell_thickness(middle, sun, params.inner, params.outer);
+    let sun_reach = select(0.0, reach.exit, reach.valid && reach.exit > 0.0);
+    let opaque = 6.0 / max(params.density, 1e-4);
+
     let phase = 0.60 + 0.40 * phase_hg(dot(-ray, sun), params.phase) / phase_forward(params.phase);
 
     var optical = 0.0;
@@ -143,12 +168,24 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var along = hit.entry + step * 0.5;
     for (var index = 0u; index < steps; index += 1u) {
         let point = camera + ray * along;
-        let density = cloud_density(point);
-        if density > 0.0 {
-            optical += density * step;
-            scattered += density * sun_transmittance(point) * step;
-        }
         along += step;
+        let medium = medium_of(point);
+        if medium.altitude < 0.0 || medium.altitude > 1.0 {
+            continue;
+        }
+        let cover = coverage_of(medium.direction);
+        if cover <= 0.0 {
+            continue;
+        }
+        let density = density_of(medium, cover, true);
+        if density <= 0.0 {
+            continue;
+        }
+        optical += density * step;
+        scattered += density * sun_transmittance(point, cover, sun_reach) * step;
+        if optical > opaque {
+            break;
+        }
     }
 
     let alpha = 1.0 - exp(-optical * params.density);
