@@ -241,6 +241,13 @@ fn sync_cloud_shells(
     for (transform, handle) in shells.iter() {
         let rotation = transform.rotation();
         let wanted = Vec4::new(rotation.x, rotation.y, rotation.z, rotation.w);
+        let stale = materials
+            .get(&handle.0)
+            .map(|material| material.params.orientation != wanted)
+            .unwrap_or(false);
+        if !stale {
+            continue;
+        }
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.params.orientation = wanted;
         }

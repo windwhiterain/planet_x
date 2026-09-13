@@ -459,7 +459,8 @@ fn serve(options: Options) -> Result<(), String> {
             pid: lease.pid,
         })
         .add_systems(Startup, warm_up)
-        .add_systems(Update, (accept_jobs, drive, watch_lease));
+        .add_systems(Update, (accept_jobs, drive, watch_lease))
+        .add_systems(Update, idle_between_jobs.after(accept_jobs).before(drive));
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app
@@ -964,6 +965,19 @@ fn build_world_scene(
     ));
 
     Ok(format!("第 {} 轮", world.round))
+}
+
+fn idle_between_jobs(
+    ready: Res<RenderReady>,
+    active: Res<Active>,
+    mut cameras: Query<&mut Camera, With<Camera3d>>,
+) {
+    let wanted = active.0.is_some() || !ready.0.load(Ordering::Relaxed);
+    for mut camera in cameras.iter_mut() {
+        if camera.is_active != wanted {
+            camera.is_active = wanted;
+        }
+    }
 }
 
 fn drive(
