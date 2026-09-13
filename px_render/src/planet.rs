@@ -7,6 +7,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::atmosphere::{AtmosphereMaterial, AtmosphereParams};
 use px_protocol::art::{AssetKind, MeshData};
 use px_protocol::stream::{self, Frame};
 
@@ -43,6 +44,16 @@ impl Palette {
         }
     }
 
+    pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
+        match self {
+            Self::Rocky => (LinearRgba::rgb(0.34, 0.56, 1.00), 5.20, 1.05),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.84, 0.60), 3.60, 1.00),
+            Self::Ice => (LinearRgba::rgb(0.66, 0.88, 1.00), 5.60, 0.85),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.44, 0.18), 3.40, 1.30),
+            Self::Desert => (LinearRgba::rgb(0.94, 0.74, 0.48), 4.80, 0.70),
+        }
+    }
+
     pub fn defaults(self) -> (f32, f32, f32) {
         match self {
             Self::Rocky => (0.075, 0.520, 0.0),
@@ -63,6 +74,7 @@ pub struct PlanetSpec {
     pub radius: f32,
     pub spin: f32,
     pub rings: f32,
+    pub atmo: f32,
 }
 
 const SYSTEM_TILT: f32 = 0.34;
@@ -72,6 +84,9 @@ pub struct PlanetBody;
 
 #[derive(Component)]
 pub struct PlanetRing;
+
+#[derive(Component)]
+pub struct PlanetAtmosphere;
 
 pub struct Field {
     pub width: u32,
@@ -450,6 +465,63 @@ fn surface_textures(
     (color_handle, glow_handle)
 }
 
+fn mip_chain_cube(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
+    let mut chain = base.to_vec();
+    let mut levels = 1_u32;
+    let mut source = base.to_vec();
+    let (mut w, mut h) = (width.max(1), height.max(1));
+
+    while w > 1 && h > 1 {
+        let next_w = (w / 2).max(1);
+        let next_h = (h / 2).max(1);
+        let cell = (w / px_protocol::art::CUBE_COLUMNS).max(1);
+        let next_cell = (next_w / px_protocol::art::CUBE_COLUMNS).max(1);
+        let mut next = vec![0_u8; (next_w * next_h * 4) as usize];
+
+        for face in 0..px_protocol::art::CUBE_FACES {
+            let column = face % px_protocol::art::CUBE_COLUMNS;
+            let row = face / px_protocol::art::CUBE_COLUMNS;
+            let left = column * cell;
+            let top = row * cell;
+            for y in 0..next_cell {
+                for x in 0..next_cell {
+                    let sample_x = left + (x * 2).min(cell - 1);
+                    let sample_y = top + (y * 2).min(cell - 1);
+                    let sample_x1 = (sample_x + 1).min(left + cell - 1);
+                    let sample_y1 = (sample_y + 1).min(top + cell - 1);
+                    let mut sums = [0_u32; 4];
+                    for (ax, ay) in [
+                        (sample_x, sample_y),
+                        (sample_x1, sample_y),
+                        (sample_x, sample_y1),
+                        (sample_x1, sample_y1),
+                    ] {
+                        let index = (ay * w + ax) as usize * 4;
+                        for channel in 0..4 {
+                            sums[channel] += source[index + channel] as u32;
+                        }
+                    }
+                    let dx = column * next_cell + x;
+                    let dy = row * next_cell + y;
+                    if dx < next_w && dy < next_h {
+                        let out = (dy * next_w + dx) as usize * 4;
+                        for channel in 0..4 {
+                            next[out + channel] = (sums[channel] / 4) as u8;
+                        }
+                    }
+                }
+            }
+        }
+
+        chain.extend_from_slice(&next);
+        source = next;
+        w = next_w;
+        h = next_h;
+        levels += 1;
+    }
+
+    (chain, levels)
+}
 fn mip_chain(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
     let mut chain = base.to_vec();
     let mut levels = 1_u32;
@@ -527,7 +599,11 @@ fn pole_cap_filter(pixels: &mut [u8], width: u32, height: u32) {
 }
 
 fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> Image {
-    let (chain, levels) = mip_chain(width, height, &data);
+    let (chain, levels) = if cube {
+        mip_chain_cube(width, height, &data)
+    } else {
+        mip_chain(width, height, &data)
+    };
     let mut image = Image::new_fill(
         Extent3d {
             width,
@@ -660,7 +736,40 @@ pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
     Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
-fn spawn_lights(commands: &mut Commands, ambient: Option<f32>) {
+fn spawn_atmosphere(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<AtmosphereMaterial>,
+    parent: Entity,
+    spec: &PlanetSpec,
+) {
+    if spec.atmo <= 0.0 {
+        return;
+    }
+    let (tint, power, intensity) = spec.palette.atmosphere();
+    let Ok(sphere) = Sphere::new(spec.radius * 1.035).mesh().ico(48) else {
+        return;
+    };
+    let material = materials.add(AtmosphereMaterial {
+        params: AtmosphereParams {
+            power,
+            intensity: intensity * spec.atmo,
+            padding: Vec2::ZERO,
+        },
+        tint,
+    });
+    commands.entity(parent).with_children(|parent| {
+        parent.spawn((
+            crate::ScenePart,
+            PlanetAtmosphere,
+            Mesh3d(meshes.add(sphere)),
+            MeshMaterial3d(material),
+            Transform::default(),
+        ));
+    });
+}
+
+fn spawn_lights(commands: &mut Commands) {
     commands.spawn((
         crate::ScenePart,
         DirectionalLight {
@@ -670,13 +779,7 @@ fn spawn_lights(commands: &mut Commands, ambient: Option<f32>) {
         Transform::from_xyz(-4.2, 1.15, 2.35).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    commands.spawn((
-        crate::ScenePart,
-        AmbientLight {
-            brightness: ambient.unwrap_or(16.0),
-            ..default()
-        },
-    ));
+
 }
 
 fn spawn_stars(
@@ -1033,7 +1136,7 @@ pub fn spawn_planet(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     stars: &Handle<Image>,
-    ambient: Option<f32>,
+    atmo_materials: &mut Assets<AtmosphereMaterial>,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1075,9 +1178,10 @@ pub fn spawn_planet(
             ));
         });
 
+        spawn_atmosphere(commands, meshes, atmo_materials, system, spec);
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_stars(commands, meshes, materials, stars);
-        spawn_lights(commands, ambient);
+        spawn_lights(commands);
 
         return Ok(format!(
             "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}",
@@ -1242,6 +1346,14 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
+
+
 
 
 

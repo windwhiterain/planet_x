@@ -1,3 +1,4 @@
+mod atmosphere;
 mod planet;
 
 use std::net::TcpListener;
@@ -111,6 +112,7 @@ struct Options {
     radius: f32,
     ambient: Option<f32>,
     cam: Option<[f32; 3]>,
+    atmo: Option<f32>,
     spin: Option<f32>,
     rings: Option<f32>,
 }
@@ -137,6 +139,7 @@ impl Default for Options {
             radius: 1.0,
             ambient: None,
             cam: None,
+            atmo: None,
             spin: None,
             rings: None,
         }
@@ -164,6 +167,13 @@ impl Options {
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
+                "--atmo" => {
+                    options.atmo = Some(
+                        next("--atmo")?
+                            .parse()
+                            .map_err(|_| "--atmo 要一个数（0 关掉大气）".to_string())?,
+                    );
+                }
                 "--ambient" => {
                     options.ambient = Some(
                         next("--ambient")?
@@ -240,6 +250,7 @@ impl Options {
             planet::PlanetSpec {
                 field: path.display().to_string(),
                 mesh: self.mesh.as_ref().map(|mesh| mesh.display().to_string()),
+                atmo: self.atmo.unwrap_or(1.0),
                 palette: self.palette,
                 displace: self.displace.unwrap_or(displace),
                 sea_level: self.sea_level.unwrap_or(sea_level),
@@ -325,6 +336,7 @@ fn request_once(options: Options) -> i32 {
         view: px_protocol::render::View {
             ambient: options.ambient,
             cam: options.cam,
+            atmo: options.atmo,
         },
         width: options.width,
         height: options.height,
@@ -393,6 +405,10 @@ fn serve(options: Options) -> Result<(), String> {
     app.insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
         .add_plugins(
             DefaultPlugins
+                .set(AssetPlugin {
+                    file_path: asset_root(),
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -400,6 +416,7 @@ fn serve(options: Options) -> Result<(), String> {
                 })
                 .disable::<WinitPlugin>(),
         )
+        .add_plugins(atmosphere::AtmospherePlugin)
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -550,6 +567,25 @@ fn new_target(images: &mut Assets<Image>, width: u32, height: u32) -> Handle<Ima
     images.add(target)
 }
 
+fn asset_root() -> String {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("px_render/assets"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cursor = exe.parent().map(|path| path.to_path_buf());
+        while let Some(directory) = cursor {
+            candidates.push(directory.join("px_render/assets"));
+            cursor = directory.parent().map(|path| path.to_path_buf());
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join("shaders/atmosphere.wgsl").exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("px_render/assets"))
+        .to_string_lossy()
+        .to_string()
+}
 fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -608,6 +644,7 @@ fn accept_jobs(
     mut canvas: ResMut<Canvas>,
     stars: Res<Stars>,
     mut images: ResMut<Assets<Image>>,
+    mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     parts: Query<Entity, With<ScenePart>>,
@@ -657,16 +694,18 @@ fn accept_jobs(
                 )));
                 return;
             };
+            let atmo = request.view.atmo;
             planet::spawn_planet(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
                 &mut images,
                 &stars.0,
-                request.view.ambient,
+                &mut atmo_materials,
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
+                    atmo: atmo.unwrap_or(1.0),
                     palette,
                     displace: *displace,
                     sea_level: *sea_level,
@@ -887,7 +926,7 @@ fn drive(
     active.0 = None;
 }
 
-const DEFAULT_AMBIENT: f32 = 16.0;
+const DEFAULT_AMBIENT: f32 = 80.0;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1003,6 +1042,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
             planet::PlanetSpec {
                 field,
                 mesh,
+                atmo: 1.0,
                 palette: planet::Palette::parse(&palette)?,
                 displace,
                 sea_level,
@@ -1035,7 +1075,10 @@ fn view(options: Options) -> Result<(), String> {
     let ready = Arc::new(AtomicBool::new(false));
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    app.add_plugins(DefaultPlugins.set(AssetPlugin {
+        file_path: asset_root(),
+        ..default()
+    }).set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("px_render 预览 — {}", describe(&spec)),
             resolution: (1280_u32, 800_u32).into(),
@@ -1043,6 +1086,7 @@ fn view(options: Options) -> Result<(), String> {
         }),
         ..default()
     }))
+    .add_plugins(atmosphere::AtmospherePlugin)
     .insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
     .insert_resource(Viewer {
         spec,
@@ -1280,6 +1324,7 @@ fn rebuild_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
     stars: Res<Stars>,
     viewer: Res<Viewer>,
     mut rebuild: ResMut<Rebuild>,
@@ -1298,7 +1343,7 @@ fn rebuild_scene(
         &mut materials,
         &mut images,
         &stars.0,
-        None,
+        &mut atmo_materials,
         &viewer.spec,
     ) {
         Ok(label) => println!("{label}"),
@@ -1323,6 +1368,15 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
+
+
+
+
+
+
+
 
 
 

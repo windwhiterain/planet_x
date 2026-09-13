@@ -2128,3 +2128,37 @@ gutter 只有 2 纹素，理论上 mip 2 之后就只剩 0.5 纹素 ⇒ 整图 m
 
 `planet` 与 `desert` 都写 `target/pcg/manifest.json`，取产物只能"取最后一个同名节点" ✗ 有点脆。
 应改成**按图分文件**（`target/pcg/<图名>/manifest.json`），顺带让渲染命令能按图名找产物。
+
+---
+
+## 34. 第一个自写 shader：大气边缘光
+
+### 34.1 结构
+
+- `px_render/src/atmosphere.rs`：`AtmosphereMaterial`（`AsBindGroup` + 两个 uniform：参数、色调），
+  `impl Material` 只给 `fragment_shader()` 与 `alpha_mode() = Add`；`AtmospherePlugin` 注册 `MaterialPlugin`。
+- `px_render/assets/shaders/atmosphere.wgsl`：菲涅尔轮廓 ——
+  **把法线用 `view.view_from_world` 转到视图空间**，轮廓就是 `normal_view.z → 0`，
+  再按"朝太阳程度"调制，加法混合。
+- 几何：比星球大 3.5% 的平滑球（`Sphere::new(r*1.035).mesh().ico(48)`），挂在同一个 system 实体下。
+  **不需要正面剔除**：正对相机的部分 `dot` 自然接近 1 ⇒ 菲涅尔为 0，只在轮廓发亮。
+- 色调/强度/幂次**按调色板给**（`Palette::atmosphere()`）；`--atmo` 是渲染器侧倍率（0 关掉），
+  和 `--ambient`/`--cam` 一样放在 `Request.view` 里（属于渲染器，不属于场景）。
+
+### 34.2 三个坑
+
+**① 只在预览窗口的 App 注册了插件。** 服务端是**另一个 App**，`Assets<AtmosphereMaterial>` 不存在
+⇒ `accept_jobs` 的系统参数校验失败、整个服务 panic。两个 App 都要注册。
+
+**② `AssetPlugin.file_path` 是相对可执行文件解析的**，不是相对工作目录：
+我写 `"px_render/assets"` 结果去找 `target/debug/px_render/assets/...` ✗。
+改成 `asset_root()`：先试工作目录、再沿 exe 往上找，找到含 `shaders/atmosphere.wgsl` 的那个。
+
+**③ `DEFAULT_AMBIENT` 我拍了个 16，其实 Bevy 的全局默认是 80。**
+把环境光从"无效实体"改成"挂相机"之后，等于把场景环境光从 80 悄悄压到 16 ⇒
+整颗星球的观感都变了（发暗发蓝），我一度以为是 mip 链坏了、还做了 A/B ✗。
+**换掉一个隐式默认值之前，先量出它到底是多少。**
+
+**④ shader 里 `world_position` 的语义没查清就别用。** 第一版用
+`normalize(view.world_position - in.world_position)` 得到的是"整片糊在球面上"✗；
+换成视图空间法线后立刻正确 ✓ —— 改用一个**不依赖位置约定**的写法，比查清约定便宜。
