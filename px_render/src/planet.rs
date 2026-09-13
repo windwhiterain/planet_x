@@ -47,11 +47,11 @@ impl Palette {
 
     pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
         match self {
-            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.022, 0.50),
-            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 0.070, 0.40),
-            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.020, 0.60),
-            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.055, 0.45),
-            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.026, 0.46),
+            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.750, 0.50),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 2.400, 0.40),
+            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.700, 0.60),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 1.900, 0.45),
+            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.900, 0.46),
         }
     }
 
@@ -800,27 +800,43 @@ fn spawn_atmosphere(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<AtmosphereMaterial>,
     parent: Entity,
-    camera: Vec3,
+    camera: Transform,
+    screen: Vec2,
     spec: &PlanetSpec,
 ) {
     if spec.atmo <= 0.0 {
         return;
     }
     let (tint, density, softness) = spec.palette.atmosphere();
+    let tangent = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+    let aspect = screen.x.max(1.0) / screen.y.max(1.0);
+    let forward = camera.forward().as_vec3();
+    let right = camera.right().as_vec3() * tangent * aspect;
+    let up = camera.up().as_vec3() * tangent;
     let Ok(sphere) = Sphere::new(spec.radius * ATMOSPHERE_SHELL).mesh().ico(64) else {
         return;
     };
+    println!(
+        "大气壳：半径 {:.3}，密度 {:.3}，相机 ({:.2},{:.2},{:.2})，屏幕 {:.0}x{:.0}",
+        spec.radius * ATMOSPHERE_SHELL,
+        density * spec.atmo,
+        camera.translation.x,
+        camera.translation.y,
+        camera.translation.z,
+        screen.x,
+        screen.y
+    );
     let material = materials.add(AtmosphereMaterial {
         params: AtmosphereParams {
             inner: spec.radius,
             outer: spec.radius * ATMOSPHERE_SHELL,
             density: density * spec.atmo,
             softness,
-            camera_x: camera.x,
-            camera_y: camera.y,
-            camera_z: camera.z,
-            screen_x: 960.0,
-            screen_y: 640.0,
+            camera_x: camera.translation.x,
+            camera_y: camera.translation.y,
+            camera_z: camera.translation.z,
+            screen_x: screen.x,
+            screen_y: screen.y,
             padding_a: 0.0,
             padding_b: 0.0,
             padding_c: 0.0,
@@ -831,7 +847,6 @@ fn spawn_atmosphere(
         },
         tint,
     });
-    let _ = parent;
     commands.spawn((
         crate::ScenePart,
         PlanetAtmosphere,
@@ -1192,7 +1207,8 @@ pub fn spawn_planet(
     atmo_materials: &mut Assets<AtmosphereMaterial>,
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
     scatter: Option<&str>,
-    camera: Vec3,
+    camera: Transform,
+    screen: Vec2,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1236,7 +1252,7 @@ pub fn spawn_planet(
 
         match scatter {
             Some(_) => spawn_scattering(commands, media, spec.radius),
-            None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, spec),
+            None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, screen, spec),
         }
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_lights(commands);
@@ -1402,6 +1418,14 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
+
+
 
 
 

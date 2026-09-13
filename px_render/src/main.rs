@@ -720,7 +720,8 @@ fn accept_jobs(
                 &mut atmo_materials,
                 &mut media,
                 request.view.scatter.as_deref(),
-                camera_transform.translation,
+                camera_transform,
+                Vec2::new(request.width as f32, request.height as f32),
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
@@ -1384,7 +1385,8 @@ fn rebuild_scene(
         &mut atmo_materials,
         &mut media,
         None,
-        Vec3::new(0.0, 0.55, 3.2),
+        Transform::from_xyz(0.0, 0.55, 3.2).looking_at(Vec3::ZERO, Vec3::Y),
+        Vec2::new(1280.0, 800.0),
         &viewer.spec,
     ) {
         Ok(label) => println!("{label}"),
@@ -1409,6 +1411,8 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
 
 
 

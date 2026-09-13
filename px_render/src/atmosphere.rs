@@ -80,7 +80,6 @@ fn sync_cameras(
             &GlobalTransform,
             &Projection,
             Option<&crate::OrbitCamera>,
-            Option<&RequestCamera>,
         ),
         With<Camera3d>,
     >,
@@ -88,9 +87,9 @@ fn sync_cameras(
     mut materials: ResMut<Assets<AtmosphereMaterial>>,
 ) {
     let mut chosen = None;
-    for (transform, clip, orbit, request) in cameras.iter() {
-        if orbit.is_some() || request.is_some() {
-            chosen = Some((transform, clip));
+    for (transform, projection, orbit) in cameras.iter() {
+        if orbit.is_some() {
+            chosen = Some((transform, projection));
         }
     }
     let Some((transform, projection)) = chosen else {
@@ -115,8 +114,8 @@ fn sync_cameras(
         material.params.camera_x = position.x;
         material.params.camera_y = position.y;
         material.params.camera_z = position.z;
-        material.params.screen_x = size.x;
-        material.params.screen_y = size.y;
+        material.params.screen_x = material.params.screen_x.max(size.x);
+        material.params.screen_y = material.params.screen_y.max(size.y);
         material.params.forward = forward.extend(0.0);
         material.params.right = right.extend(0.0);
         material.params.up = up.extend(0.0);
@@ -132,4 +131,5 @@ impl Plugin for AtmospherePlugin {
             .add_systems(Update, sync_cameras);
     }
 }
+
 

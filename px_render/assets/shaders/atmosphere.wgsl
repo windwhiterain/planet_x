@@ -1,4 +1,5 @@
 #import planet_x::common::{SUN_DIRECTION, shell_thickness}
+#import bevy_pbr::forward_io::VertexOutput
 
 struct AtmosphereParams {
     inner: f32,
@@ -23,7 +24,8 @@ struct AtmosphereParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> tint: vec4<f32>;
 
 @fragment
-fn fragment(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let fragment = in.position.xy;
     let ndc = vec2<f32>(
         (fragment.x / params.screen_x) * 2.0 - 1.0,
         1.0 - (fragment.y / params.screen_y) * 2.0,
@@ -53,6 +55,8 @@ fn fragment(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let lit = 0.02 + 0.98 * pow(facing, 0.65) * (0.30 + 0.70 * soft);
     return vec4<f32>(tint.rgb * lit, alpha);
 }
+
+
 
 
 
