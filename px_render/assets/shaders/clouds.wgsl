@@ -21,7 +21,13 @@ struct CloudParams {
     steps: u32,
     sun_steps: u32,
     seed: u32,
+    ablate: u32,
 };
+
+const ABLATE_NONE: u32 = 0u;
+const ABLATE_SUN: u32 = 1u;
+const ABLATE_NOISE: u32 = 2u;
+const ABLATE_FETCH: u32 = 3u;
 
 struct Medium {
     direction: vec3<f32>,
@@ -47,6 +53,9 @@ fn medium_of(point: vec3<f32>) -> Medium {
 }
 
 fn coverage_of(direction: vec3<f32>) -> f32 {
+    if params.ablate == ABLATE_FETCH {
+        return 0.45;
+    }
     let mask = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0).r;
     return smoothstep(
         0.0,
@@ -56,6 +65,9 @@ fn coverage_of(direction: vec3<f32>) -> f32 {
 }
 
 fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
+    if params.ablate == ABLATE_NOISE {
+        return 0.55;
+    }
     let tower = fbm_3(direction * params.detail_scale * 0.35, 1.0, 3u, 2.0, 0.5, params.seed);
     if !with_skin {
         return tower;
@@ -88,7 +100,7 @@ fn density_of(medium: Medium, cover: f32, with_skin: bool) -> f32 {
 }
 
 fn sun_transmittance(point: vec3<f32>, cover: f32, reach: f32) -> f32 {
-    if reach <= 0.0 || cover <= 0.0 {
+    if reach <= 0.0 || cover <= 0.0 || params.ablate == ABLATE_SUN {
         return 1.0;
     }
     let sun = normalize(SUN_DIRECTION);

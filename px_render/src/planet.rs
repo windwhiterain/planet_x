@@ -78,6 +78,7 @@ pub struct PlanetSpec {
     pub spin: f32,
     pub rings: f32,
     pub atmo: f32,
+    pub ablate: clouds::Ablate,
 }
 
 pub const SYSTEM_TILT: f32 = 0.34;
@@ -1227,6 +1228,7 @@ pub fn spawn_clouds(
     let orientation = Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin);
     let mut params = clouds::CloudParams::new(inner, outer, density);
     params.orientation = Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w);
+    params.ablate = spec.ablate.code();
 
     commands.spawn((
         crate::ScenePart,

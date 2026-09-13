@@ -115,6 +115,8 @@ struct Options {
     clouds: Option<PathBuf>,
     cloud: Option<f32>,
     fps: bool,
+    novsync: bool,
+    cloud_ablate: clouds::Ablate,
     palette: planet::Palette,
     displace: Option<f32>,
     sea_level: Option<f32>,
@@ -146,6 +148,8 @@ impl Default for Options {
             clouds: None,
             cloud: None,
             fps: false,
+            novsync: false,
+            cloud_ablate: clouds::Ablate::None,
             palette: planet::Palette::Rocky,
             displace: None,
             sea_level: None,
@@ -184,6 +188,10 @@ impl Options {
                 "--clouds" => options.clouds = Some(PathBuf::from(next("--clouds")?)),
                 "--cloud" => options.cloud = Some(number("--cloud")?),
                 "--fps" => options.fps = true,
+                "--novsync" => options.novsync = true,
+                "--cloud-ablate" => {
+                    options.cloud_ablate = clouds::Ablate::parse(&next("--cloud-ablate")?)?
+                }
                 "--scatter" => {
                     let kind = next("--scatter")?;
                     if kind != "earth" && kind != "none" {
@@ -282,6 +290,7 @@ impl Options {
                 radius: self.radius,
                 spin: self.spin.unwrap_or(0.0),
                 rings: self.rings.unwrap_or(rings),
+                ablate: self.cloud_ablate,
             }
         })
     }
@@ -319,8 +328,9 @@ fn usage() -> String {
         "            [--cloud F] [--out PNG] [--width W] [--height H]",
         "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景；--rings 给个",
         "      大于 1 的倍数就加环系；--clouds 给一张 CubeMap 覆盖度就加体积云，--cloud 是",
-        "      消光倍率（默认 1）；--fps 进测量模式：去掉帧率上限（服务端不再 60 Hz 限速、",
-        "      窗口关 vsync）并每 120 帧打印一次平均帧时间",
+        "      消光倍率（默认 1）；--fps 打开帧时间读数：日志每 120 帧打一行平均帧时间，",
+        "      服务端不再按 60 Hz 限速（窗口仍按 vsync，那才是用户看到的手感）；",
+        "      --novsync 再把窗口的 vsync 关掉，量纯 GPU 成本",
         "  服务没在跑时会提示；要顺手拉起一个就加 --autostart",
     ]
     .join("\n")
@@ -452,6 +462,7 @@ fn serve(options: Options) -> Result<(), String> {
         .add_plugins(clouds::CloudsPlugin)
         .add_plugins(shaders::ShaderLibraryPlugin)
         .insert_resource(FrameProbe(options.fps))
+        .insert_resource(ServerAblate(options.cloud_ablate))
         .add_plugins(ScheduleRunnerPlugin::run_loop(if options.fps {
             Duration::ZERO
         } else {
@@ -715,6 +726,7 @@ fn warm_up(
 fn accept_jobs(
     mut commands: Commands,
     inbox: Res<Inbox>,
+    ablate: Res<ServerAblate>,
     mut active: ResMut<Active>,
     mut canvas: ResMut<Canvas>,
     stars: Res<Stars>,
@@ -796,6 +808,7 @@ fn accept_jobs(
                     radius: *radius,
                     spin: *spin,
                     rings: *rings,
+                    ablate: ablate.0,
                 },
                 request.view.cloud.unwrap_or(1.0) * CLOUD_EXTINCTION,
             )
@@ -978,6 +991,9 @@ fn build_world_scene(
 
 #[derive(Resource)]
 struct FrameProbe(bool);
+
+#[derive(Resource, Clone, Copy)]
+struct ServerAblate(clouds::Ablate);
 
 fn report_frame_time(
     probe: Res<FrameProbe>,
@@ -1261,6 +1277,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
                 radius,
                 spin,
                 rings,
+                ablate: clouds::Ablate::None,
             },
             request.at,
             request.shot,
@@ -1308,7 +1325,7 @@ fn view(options: Options) -> Result<(), String> {
         primary_window: Some(Window {
             title: format!("px_render 预览 — {}", describe(&spec)),
             resolution: (1280_u32, 800_u32).into(),
-            present_mode: if options.fps {
+            present_mode: if options.novsync {
                 bevy::window::PresentMode::AutoNoVsync
             } else {
                 bevy::window::PresentMode::AutoVsync

@@ -34,6 +34,38 @@ pub struct CloudParams {
     pub steps: u32,
     pub sun_steps: u32,
     pub seed: u32,
+    pub ablate: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ablate {
+    None,
+    Sun,
+    Noise,
+    Fetch,
+}
+
+impl Ablate {
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "none" => Ok(Self::None),
+            "sun" => Ok(Self::Sun),
+            "noise" => Ok(Self::Noise),
+            "fetch" => Ok(Self::Fetch),
+            other => Err(format!(
+                "--cloud-ablate 只认 none / sun / noise / fetch，不认 {other}"
+            )),
+        }
+    }
+
+    pub fn code(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Sun => 1,
+            Self::Noise => 2,
+            Self::Fetch => 3,
+        }
+    }
 }
 
 impl CloudParams {
@@ -55,6 +87,7 @@ impl CloudParams {
             steps: 56,
             sun_steps: 4,
             seed: 7,
+            ablate: Ablate::None.code(),
         }
     }
 }
