@@ -36,6 +36,8 @@ pub struct CloudParams {
     pub seed: u32,
     pub ablate: u32,
     pub slope_scale: f32,
+    pub taper: f32,
+    pub coverage_gain: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,18 @@ impl Ablate {
     }
 }
 
+pub fn describe(ablate: Ablate) -> &'static str {
+    match ablate {
+        Ablate::None => "体积云",
+        Ablate::Sun => "体积云（关自阴影）",
+        Ablate::Noise => "体积云（关噪声）",
+        Ablate::Fetch => "体积云（关覆盖度采样）",
+        Ablate::Detail => "体积云（关细节法线）",
+        Ablate::Surface => "硬表面",
+        Ablate::Normals => "法线",
+    }
+}
+
 impl CloudParams {
     pub fn new(inner: f32, outer: f32, density: f32) -> Self {
         Self {
@@ -86,7 +100,7 @@ impl CloudParams {
             inner,
             outer,
             density,
-            coverage: 0.50,
+            coverage: 0.35,
             base: 0.06,
             top: 0.62,
             detail_scale: 16.0,
@@ -99,6 +113,8 @@ impl CloudParams {
             seed: 7,
             ablate: Ablate::None.code(),
             slope_scale: 0.12,
+            taper: 0.45,
+            coverage_gain: 2.6,
         }
     }
 }

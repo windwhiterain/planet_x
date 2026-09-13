@@ -1048,8 +1048,47 @@ fn report_frame_time(
 #[derive(Component)]
 struct FpsReadout;
 
-#[derive(Resource)]
+#[derive(Resource, Clone, Copy)]
 struct ShowFps(bool);
+
+#[derive(Resource, Clone, Copy)]
+struct CloudView(clouds::Ablate);
+
+fn cloud_view_keys(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<CloudView>) {
+    let wanted = if keys.just_pressed(KeyCode::KeyV) {
+        Some(clouds::Ablate::None)
+    } else if keys.just_pressed(KeyCode::KeyM) {
+        Some(clouds::Ablate::Surface)
+    } else if keys.just_pressed(KeyCode::KeyN) {
+        Some(clouds::Ablate::Normals)
+    } else {
+        None
+    };
+    if let Some(wanted) = wanted {
+        view.0 = wanted;
+        println!("云视图切到：{}", clouds::describe(wanted));
+    }
+}
+
+fn apply_cloud_view(
+    view: Res<CloudView>,
+    mut materials: ResMut<Assets<clouds::CloudsMaterial>>,
+    shells: Query<&MeshMaterial3d<clouds::CloudsMaterial>>,
+) {
+    if !view.is_changed() {
+        return;
+    }
+    let code = view.0.code();
+    for handle in shells.iter() {
+        let stale = materials
+            .get(&handle.0)
+            .map(|material| material.params.ablate != code)
+            .unwrap_or(false);
+        if stale && let Some(mut material) = materials.get_mut(&handle.0) {
+            material.params.ablate = code;
+        }
+    }
+}
 
 fn spawn_fps_readout(mut commands: Commands) {
     commands.spawn((
@@ -1376,6 +1415,7 @@ fn view(options: Options) -> Result<(), String> {
     .insert_resource(PendingShot(shot.then_some(12)))
     .insert_resource(FrameProbe(options.fps))
     .insert_resource(ShowFps(true))
+    .insert_resource(CloudView(options.cloud_ablate))
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .insert_resource(RenderReady(ready.clone()))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
@@ -1396,12 +1436,15 @@ fn view(options: Options) -> Result<(), String> {
             update_title,
             report_frame_time,
             update_fps_readout,
+            cloud_view_keys,
+            apply_cloud_view,
         )
             .chain(),
     );
 
     println!("预览窗口已开：左键拖动转视角、滚轮缩放");
     println!("  1-5 换色板｜[ ] 调海平面｜- = 调位移｜r 切环系｜空格 自转｜f 帧率开关｜s 存图｜q 退出");
+    println!("  v 体积云｜m 硬表面（场的梯度当法线）｜n 法线可视化 —— 三个键随时来回切，不用重开");
     println!("  我把新效果推进来：px_render --show --planet <文件> --palette <色板> [--shot]");
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {

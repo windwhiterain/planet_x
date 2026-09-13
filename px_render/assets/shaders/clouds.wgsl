@@ -23,6 +23,8 @@ struct CloudParams {
     seed: u32,
     ablate: u32,
     slope_scale: f32,
+    taper: f32,
+    coverage_gain: f32,
 };
 
 const ABLATE_NONE: u32 = 0u;
@@ -35,8 +37,8 @@ const ABLATE_NORMALS: u32 = 6u;
 const SHADOW_GAIN: f32 = 4.0;
 const SLOPE_LIMIT: f32 = 0.9;
 const SURFACE_STEPS: u32 = 56;
-const SURFACE_LEVEL: f32 = 0.06;
-const SURFACE_EPSILON: f32 = 0.06;
+const SURFACE_LEVEL: f32 = 0.20;
+const SURFACE_EPSILON: f32 = 0.05;
 
 struct Medium {
     direction: vec3<f32>,
@@ -98,23 +100,36 @@ fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
     if params.ablate == ABLATE_NOISE {
         return 0.55;
     }
-    let tower = fbm_3(direction * params.detail_scale * 0.35, 1.0, 3u, 2.0, 0.5, params.seed);
+    let tower = sampled_noise(direction, altitude, params.detail_scale * 0.35, 3u, params.seed);
     if !with_skin {
         return tower;
     }
-    let skin = fbm_3(
-        direction * params.detail_scale * 1.70 * (1.0 + altitude * 0.50),
-        1.0,
+    let skin = sampled_noise(
+        direction,
+        altitude,
+        params.detail_scale * 1.70,
         2u,
-        2.0,
-        0.5,
         params.seed ^ 31u,
     );
     return clamp(tower * 0.62 + skin * 0.38, 0.0, 1.0);
 }
 
+fn sampled_noise(
+    direction: vec3<f32>,
+    altitude: f32,
+    across: f32,
+    octaves: u32,
+    seed: u32,
+) -> f32 {
+    let along = across * span();
+    return fbm_3(direction * (across + altitude * along), 1.0, octaves, 2.0, 0.5, seed);
+}
+
 fn shape_of(cover: f32, altitude: f32, noise: f32) -> f32 {
-    let lobed = cover * (0.45 + 0.55 * noise);
+    let height = clamp(altitude, 0.0, 1.0);
+    let footprint = max(cover - params.taper * height * height, 0.0);
+    let bias = footprint + noise - 1.0;
+    let lobed = clamp(bias * params.coverage_gain, 0.0, 1.0);
     let floor_here = smoothstep(0.0, max(params.base, 1e-3), altitude);
     let ceiling = max(
         params.top * mix(1.0 - params.detail_strength, 1.0, noise),
@@ -139,6 +154,18 @@ fn cloud_field(point: vec3<f32>) -> f32 {
         return 0.0;
     }
     return density_of(medium, cover, true);
+}
+
+fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
+    let step = SURFACE_EPSILON * span();
+    let x = vec3<f32>(step, 0.0, 0.0);
+    let y = vec3<f32>(0.0, step, 0.0);
+    let z = vec3<f32>(0.0, 0.0, step);
+    return vec3<f32>(
+        cloud_field(point + x) - cloud_field(point - x),
+        cloud_field(point + y) - cloud_field(point - y),
+        cloud_field(point + z) - cloud_field(point - z),
+    );
 }
 
 fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {
@@ -223,10 +250,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
 
-        let medium = medium_of(surface_point);
-        let baked = textureSampleLevel(coverage_map, coverage_sampler, medium.direction, 0.0);
-        let up = medium.direction - baked.gba * params.slope_scale;
-        let normal = to_world(normalize(up));
+        let gradient = cloud_field_gradient(surface_point);
+        let length_squared = dot(gradient, gradient);
+        if length_squared <= 1e-14 {
+            discard;
+        }
+        let normal = gradient * inverseSqrt(length_squared);
         if params.ablate == ABLATE_NORMALS {
             return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
         }
