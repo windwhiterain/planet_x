@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["game", "px_protocol"]
+members = ["game", "px_protocol", "px_render"]
+default-members = ["game", "px_protocol"]
 
 [dependencies]
 fastrand = "2"
+
+[profile.dev]
+debug = "line-tables-only"

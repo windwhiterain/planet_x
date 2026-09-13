@@ -1,0 +1,8 @@
+[package]
+name = "px_render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+bevy = "0.19"
