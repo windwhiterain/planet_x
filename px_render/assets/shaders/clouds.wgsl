@@ -141,18 +141,6 @@ fn cloud_field(point: vec3<f32>) -> f32 {
     return density_of(medium, cover, true);
 }
 
-fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
-    let step = SURFACE_EPSILON * span();
-    let x = vec3<f32>(step, 0.0, 0.0);
-    let y = vec3<f32>(0.0, step, 0.0);
-    let z = vec3<f32>(0.0, 0.0, step);
-    return vec3<f32>(
-        cloud_field(point + x) - cloud_field(point - x),
-        cloud_field(point + y) - cloud_field(point - y),
-        cloud_field(point + z) - cloud_field(point - z),
-    );
-}
-
 fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {
     if reach <= 0.0 || params.ablate == ABLATE_SUN {
         return 1.0;
@@ -235,12 +223,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
 
-        let gradient = cloud_field_gradient(surface_point);
-        let length_squared = dot(gradient, gradient);
-        if length_squared <= 1e-12 {
-            discard;
-        }
-        let normal = gradient * inverseSqrt(length_squared);
+        let medium = medium_of(surface_point);
+        let baked = textureSampleLevel(coverage_map, coverage_sampler, medium.direction, 0.0);
+        let up = medium.direction - baked.gba * params.slope_scale;
+        let normal = to_world(normalize(up));
         if params.ablate == ABLATE_NORMALS {
             return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
         }

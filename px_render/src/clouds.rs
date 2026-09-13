@@ -86,7 +86,7 @@ impl CloudParams {
             inner,
             outer,
             density,
-            coverage: 0.0,
+            coverage: 0.50,
             base: 0.06,
             top: 0.62,
             detail_scale: 16.0,
@@ -98,7 +98,7 @@ impl CloudParams {
             bump: 0.85,
             seed: 7,
             ablate: Ablate::None.code(),
-            slope_scale: 0.04,
+            slope_scale: 0.12,
         }
     }
 }
