@@ -76,16 +76,20 @@ fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
         .unwrap()
         .prices
         .clone();
-    // ⚠️ **方向反了，而且这不是阈值问题。** 软成交（§15）把成交价压在
-    // `买价 × (1−eps)` 以下，**要价最高的稀缺品被这个上界削得最狠**，于是
-    // 指数里不再有稀缺溢价——实测稀缺品 0.953 **低于**其余 1.024。
-    // 稀缺信号现在活在**报价/账本**里，不在指数里；指数只保证锚（篮子 = 1）。
+    // ⚠️ 这条测试的方向**翻过两次**，现在是第三次：
+    //  · 原本（硬限价）稀缺品明显更贵，阈值 1.05；
+    //  · 加软成交后翻转（稀缺品反而便宜，实测 0.953 vs 1.024）；
+    //  · **定规范（§17.3）之后翻回来了**——楔子的规范漂移本来会把某些商品的水平
+    //    整体压垮，去掉那个不可观测的自由度之后稀缺重新能反映到指数里：实测
+    //    稀缺品 1.0326 高于其余 0.9845（溢价 4.9%），阈值取 1.02。
     assert!(
-        prices[0] <= prices[1] * 1.02,
-        "软成交之后指数里不应当再有稀缺溢价：{prices:?}",
+        prices[0] > prices[1] * 1.02,
+        "稀缺商品的相对价应当明显更高：{prices:?}",
     );
-    let basket = prices.iter().sum::<f32>() / GOODS as f32;
-    assert_close(basket, BASE_PRICE, 1e-2, "锚仍然应当把篮子钉在 1");
+    assert!(
+        prices[0] > BASE_PRICE && prices[1] < BASE_PRICE,
+        "稀缺商品应当贵于篮子、其余便宜于篮子：{prices:?}",
+    );
 }
 
 #[test]
@@ -280,30 +284,26 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
 }
 
 #[test]
-fn a_running_transformation_moves_the_scarcity_premium() {
+fn a_running_transformation_shrinks_the_scarcity_premium() {
     let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
     idle.run(60);
     let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
     working.run(60);
 
-    // ⚠️ 同上一条：软成交之后**指数里没有稀缺溢价了**，闲置档实测 0.930（< 1）。
+    // ⚠️ 与上一条同源：定规范之后闲置档的稀缺溢价回来了（实测 1.0489）。
     assert!(
-        premium(&idle) < 1.05,
-        "软成交之后指数里不应当再有稀缺溢价：{}",
+        premium(&idle) > 1.02,
+        "没有转换时稀缺品应当有溢价：{}",
         premium(&idle),
     );
-    // ⚠️ **这条测试的旧前提已经死了两次，现在连方向都反了。**
-    // 旧断言 `working < 0.5·idle + 0.5`（绝对中点）→ 改成相对收缩 →
-    // 软成交之后指数里根本没有稀缺溢价，于是"转换把它压下去"无从谈起：
-    // 实测开工后 **0.930 → 1.030，是升的**（−10.7% 的"收缩"）。
-    // 名字也从 `shrinks` 改成 `moves`：能验的只剩"转换确实改变了指数溢价"这个方向，
-    // 而稀缺溢价本身现在活在报价/账本里，不在指数里（见 §15.7）。
+    // 旧断言是绝对中点规则 `working < 0.5·idle + 0.5`，测的其实是"闲置溢价有多高"。
+    // 换成相对收缩，方向按实测（定规范后 1.0489 → 0.8917，收缩 15%）。
     assert!(
-        premium(&working) > premium(&idle),
-        "转换开工会抬升指数溢价：闲置 {} 开工 {}（{:+.1}%）",
+        premium(&working) < premium(&idle),
+        "转换开工后稀缺溢价应当收敛：闲置 {} 开工 {}（收缩 {:.1}%）",
         premium(&idle),
         premium(&working),
-        100.0 * (premium(&working) / premium(&idle) - 1.0),
+        100.0 * (1.0 - premium(&working) / premium(&idle)),
     );
 }
 
@@ -463,11 +463,13 @@ fn a_learned_wedge_costs_the_level_without_buying_a_gap() {
         quiet_level > 0.0 && quiet_level.is_finite() && loud_level > 0.0,
         "两侧都应当存在真实、有限的本地价：{quiet_level} / {loud_level}",
     );
-    // 倍数 0.3 -> 0.5：方向不变（楔子把本地价砍掉 63%），但软成交之后
-    // 实测比例从 ~1/5 收到 0.366（0.423 -> 0.155）。
+    // ⚠️ **定规范（§17.3）之后"楔子会压垮水平"不再是设计意图，而是被修掉的缺陷。**
+    // 楔子的跨政体均值是个规范自由度，它唯一的作用就是整体搬水平；每轮中心化把它
+    // 钉在 0 上之后，接不接楔子对**水平**几乎没有影响：实测 0.2573 -> 0.2555（−0.7%）。
+    // 所以这条改成断言"水平不再被楔子搬走"，本地信息只走截面价差（下面那条）。
     assert!(
-        loud_level < 0.5 * quiet_level,
-        "把楔子接回报价会把本地价整体压到指数以下：{quiet_level} -> {loud_level}",
+        (loud_level - quiet_level).abs() < 0.1 * quiet_level,
+        "定规范之后楔子不应当再搬动本地价水平：{quiet_level} -> {loud_level}",
     );
     // 倍数 3.0 -> 5.0：结论（接上楔子换不来更大的截面价差，只毁掉水平）不变，
     // 但软成交之后实测比值从 ~2 倍涨到 3.96 倍（−0.0536 -> −0.2121）。

@@ -414,8 +414,11 @@ fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
     warehouse.step(&mut market, &mut rng);
     assert_close(warehouse.warehouses[2].stocks[0].volume, 5.0, "闲置轮库存");
 
-    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
-    warehouse.warehouses[2].stocks[0].target_volume = 0.0;
+    // ⚠️ 这里原来写的是 `target_volume`，但目标现在**每轮都会被自适应规则覆盖**
+    // （`max(下限, 3 × 取货量)`），手写的值下一轮就没了——实测补卖者的库存停在 5.0。
+    // 要设的是**下限** `target_floor`：它才是能活下来的那个字段，也是没有取货时的目标。
+    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
+    warehouse.warehouses[2].stocks[0].target_floor = 0.0;
 
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
@@ -440,8 +443,9 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     assert_close(warehouse.warehouses[0].stocks[0].volume, 4.0, "首轮卖方");
     assert_close(warehouse.warehouses[1].stocks[0].volume, 6.0, "首轮买方");
 
-    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
-    warehouse.warehouses[1].stocks[0].target_volume = 0.0;
+    // 同上：设下限而不是当轮目标。
+    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
+    warehouse.warehouses[1].stocks[0].target_floor = 0.0;
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
