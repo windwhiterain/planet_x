@@ -109,6 +109,8 @@ struct Options {
     displace: Option<f32>,
     sea_level: Option<f32>,
     radius: f32,
+    ambient: Option<f32>,
+    cam: Option<[f32; 3]>,
     spin: Option<f32>,
     rings: Option<f32>,
 }
@@ -133,6 +135,8 @@ impl Default for Options {
             displace: None,
             sea_level: None,
             radius: 1.0,
+            ambient: None,
+            cam: None,
             spin: None,
             rings: None,
         }
@@ -160,6 +164,25 @@ impl Options {
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
+                "--ambient" => {
+                    options.ambient = Some(
+                        next("--ambient")?
+                            .parse()
+                            .map_err(|_| "--ambient 要一个数".to_string())?,
+                    );
+                }
+                "--cam" => {
+                    let text = next("--cam")?;
+                    let parts: Vec<f32> = text
+                        .split(',')
+                        .map(|part| part.trim().parse::<f32>())
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| "--cam 要 yaw,pitch,dist 三个数".to_string())?;
+                    if parts.len() != 3 {
+                        return Err("--cam 要 yaw,pitch,dist 三个数".to_string());
+                    }
+                    options.cam = Some([parts[0], parts[1], parts[2]]);
+                }
                 "--out" => options.out = Some(PathBuf::from(next("--out")?)),
                 "--palette" => {
                     let name = next("--palette")?;
@@ -299,6 +322,10 @@ fn request_once(options: Options) -> i32 {
         .unwrap_or_else(|| PathBuf::from("target/shot.png"));
     let request = Request {
         scene: options.scene(),
+        view: px_protocol::render::View {
+            ambient: options.ambient,
+            cam: options.cam,
+        },
         width: options.width,
         height: options.height,
         out: out.display().to_string(),
@@ -636,6 +663,7 @@ fn accept_jobs(
                 &mut materials,
                 &mut images,
                 &stars.0,
+                request.view.ambient,
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
@@ -663,7 +691,7 @@ fn accept_jobs(
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(canvas.target.clone().into()),
-        Transform::from_xyz(0.0, 0.55, 3.15).looking_at(Vec3::ZERO, Vec3::Y),
+        planet::probe_camera(request.view.cam),
     ));
 
     active.0 = Some(ActiveJob {
@@ -1260,6 +1288,7 @@ fn rebuild_scene(
         &mut materials,
         &mut images,
         &stars.0,
+        None,
         &viewer.spec,
     ) {
         Ok(label) => println!("{label}"),
@@ -1284,5 +1313,9 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
+
+
 
 

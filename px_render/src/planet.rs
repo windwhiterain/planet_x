@@ -625,7 +625,21 @@ fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
-fn spawn_lights(commands: &mut Commands) {
+pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
+    let Some([yaw, pitch, distance]) = cam else {
+        return Transform::from_xyz(0.0, 0.55, 3.15).looking_at(Vec3::ZERO, Vec3::Y);
+    };
+    let yaw = yaw.to_radians();
+    let pitch = pitch.clamp(-89.5, 89.5).to_radians();
+    let direction = Vec3::new(
+        pitch.cos() * yaw.sin(),
+        pitch.sin(),
+        pitch.cos() * yaw.cos(),
+    );
+    Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
+}
+
+fn spawn_lights(commands: &mut Commands, ambient: Option<f32>) {
     commands.spawn((
         crate::ScenePart,
         DirectionalLight {
@@ -638,7 +652,7 @@ fn spawn_lights(commands: &mut Commands) {
     commands.spawn((
         crate::ScenePart,
         AmbientLight {
-            brightness: 16.0,
+            brightness: ambient.unwrap_or(16.0),
             ..default()
         },
     ));
@@ -729,6 +743,23 @@ pub fn load_mesh(path: &str) -> Result<Mesh, String> {
         .chunks_exact(2)
         .map(|chunk| [chunk[0], chunk[1]])
         .collect();
+
+    {
+        let mut edges: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        for triangle in data.indices.chunks_exact(3) {
+            for pair in 0..3 {
+                let (a, b) = (triangle[pair], triangle[(pair + 1) % 3]);
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edges.entry(key).or_insert(0) += 1;
+            }
+        }
+        let open = edges.values().filter(|count| **count == 1).count();
+        let odd = edges.values().filter(|count| **count > 2).count();
+        println!(
+            "网格缝合审计：{} 条边，其中 {open} 条只属于一个三角形（开口），{odd} 条属于两个以上",
+            edges.len()
+        );
+    }
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -981,6 +1012,7 @@ pub fn spawn_planet(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     stars: &Handle<Image>,
+    ambient: Option<f32>,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1024,7 +1056,7 @@ pub fn spawn_planet(
 
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_stars(commands, meshes, materials, stars);
-        spawn_lights(commands);
+        spawn_lights(commands, ambient);
 
         return Ok(format!(
             "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}",
@@ -1189,6 +1221,9 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
 
 
 

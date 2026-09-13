@@ -20,9 +20,19 @@ pub enum Scene {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct View {
+    #[serde(default)]
+    pub ambient: Option<f32>,
+    #[serde(default)]
+    pub cam: Option<[f32; 3]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub scene: Scene,
+    #[serde(default)]
+    pub view: View,
     pub width: u32,
     pub height: u32,
     pub out: String,
@@ -74,4 +84,6 @@ impl std::fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+
+
 

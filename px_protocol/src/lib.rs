@@ -6,7 +6,7 @@ pub mod stream;
 pub mod wire;
 
 pub use art::{ArtBundle, AssetKind, AssetManifest, MeshData};
-pub use render::{ClientError, Lease, Request, Response, Scene};
+pub use render::{ClientError, Lease, Request, Response, Scene, View};
 pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
@@ -100,4 +100,5 @@ impl std::fmt::Display for HandshakeError {
 }
 
 impl std::error::Error for HandshakeError {}
+
 

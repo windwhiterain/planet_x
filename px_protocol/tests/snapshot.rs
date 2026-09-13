@@ -61,6 +61,7 @@ fn canonical() -> String {
     };
 
     let request = Request {
+        view: px_protocol::View::default(),
         scene: Scene::Planet {
             field: "target/pcg/ab/xx/yy.pxart".to_string(),
             mesh: Some("target/pcg/ab/zz/mesh.pxart".to_string()),
@@ -146,4 +147,5 @@ fn snapshot_drives_the_protocol_hash() {
     let again = px_protocol::protocol_hash();
     assert_eq!(px_protocol::protocol_hash(), again);
 }
+
 
