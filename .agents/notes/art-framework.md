@@ -2162,3 +2162,38 @@ gutter 只有 2 纹素，理论上 mip 2 之后就只剩 0.5 纹素 ⇒ 整图 m
 **④ shader 里 `world_position` 的语义没查清就别用。** 第一版用
 `normalize(view.world_position - in.world_position)` 得到的是"整片糊在球面上"✗；
 换成视图空间法线后立刻正确 ✓ —— 改用一个**不依赖位置约定**的写法，比查清约定便宜。
+
+---
+
+## 35. 用标准 cubemap 统一天空（用户裁决 A 档）+ 统一到行星的代价表
+
+用户问：*「bevy 的 cubemap 能统一我们的星球和天空盒子吗？用 bevy 的标准 cubemap，我们的 pcg 管线需要引入的代价是什么」*。
+先把两条事实查实：
+
+- **`Skybox` 就是标准 cubemap，且按方向采样**：`skybox.wgsl` 里 `var skybox: texture_cube<f32>;`
+  `textureSample(skybox, skybox_sampler, ray_direction * vec3(1.0, 1.0, -1.0))` ✓
+  （那个 `vec3(1,1,-1)` 是它的面朝向约定）。`Skybox { image, brightness, rotation }` 定义在 `bevy_light`。
+- **`StandardMaterial` 收不了 cubemap**：`pbr_bindings.wgsl` 是 `var base_color_texture: texture_2d<f32>;` ✗
+  ⇒ 想让**行星**也走标准 cubemap，必须**自写 surface material**（大气那个 shader 是第一步）。
+
+**A 档（本轮做的）：只统一天空。**
+`star_cube(face)` 生成**真正的 cube `Image`**（6 层 + `TextureViewDimension::Cube` ✓），
+星点按**面内纹素**哈希 ✓；相机挂 `Skybox { image, brightness: 900 }` ✓；
+**星空球实体与它的 UV 记账全部删掉** ✓✓。12 角度对照图（`target/probe-skycube.png`）星点是干净细点 ✓。
+
+**代价（PCG 侧）：0。** 天空从来不是 PCG 产物 ✓ —— 这正好回答了用户的问题：
+*cubemap 统一的代价全在渲染器要不要自己拥有 surface shader，不在 PCG* ✓。
+
+**B 档（全面统一到行星）的代价表**（待做时按此执行）：
+
+| 项 | 代价 |
+|---|---|
+| 布局 | 小：6 张等大正方形、**无 gutter**；线格式加层轴（`BlobHeader.shape` 本是 `Vec<u32>`，写 `[face, face, 6]` 即可） |
+| 缓存 | 一次性全失效（键含画布尺寸）≈ 每图 1–2 秒 |
+| 算子规则 | **中，唯一真规则**：需要邻居的算子必须走 `sample_direction`（模糊/腐蚀/距离场/流向），不能假定整图是平面；逐纹素算子不受影响（fbm/ridged/remap/mix ✓，warp 已合规 ✓） |
+| 面朝向 | 小但真实：面序与**面内朝向**要对齐 wgpu 约定（我的面序已一致，面内朝向可用 `Skybox` 对拍一张验证） |
+| 渲染器 | **大**：自写 surface material（cube 按方向采样 albedo/roughness/emissive + 光照），等价于把 feature 栈提前做掉 |
+
+**教训（花钱买的）**：同一件事，**手工做**（图集 + per-face UV 记账）我翻车两次 ✗✗，
+**让平台做**（标准 cubemap + 按方向采样）一次通过 ✓✓ ——
+平台已经为某件事定义了标准格式时，不要手搓一个等价物。

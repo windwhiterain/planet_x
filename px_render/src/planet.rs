@@ -5,6 +5,7 @@ use bevy::image::{
 };
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
+use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::atmosphere::{AtmosphereMaterial, AtmosphereParams};
@@ -604,36 +605,70 @@ fn with_wrapping(mut image: Image, horizontal: ImageAddressMode, vertical: Image
     image
 }
 
-pub fn star_image(width: u32, height: u32) -> Image {
-    let mut data = Vec::with_capacity((width * height * 4) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let mut hash = x
-                .wrapping_mul(0x9e37_79b9)
-                .wrapping_add(y.wrapping_mul(0x85eb_ca6b))
-                .wrapping_mul(0xc2b2_ae35);
-            hash ^= hash >> 15;
-            hash = hash.wrapping_mul(0x2545_f491);
-            hash ^= hash >> 13;
-            let value = (hash & 0xffff) as f32 / 65535.0;
-            let brightness = if value > 0.99935 {
-                1.0
-            } else if value > 0.99820 {
-                0.55
-            } else if value > 0.99650 {
-                0.22
-            } else {
-                0.0
-            };
-            let blue = 0.86 + 0.14 * ((hash >> 16) as f32 / 65535.0);
-            let level = (brightness * 255.0) as u8;
-            data.push(level);
-            data.push(level);
-            data.push((level as f32 * blue) as u8);
-            data.push(255);
+pub fn star_cube(face: u32) -> Image {
+    let size = face.max(4);
+    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
+
+    for face_index in 0..px_protocol::art::CUBE_FACES {
+        for y in 0..size {
+            for x in 0..size {
+                let s = (x as f32 + 0.5) / size as f32;
+                let t = (y as f32 + 0.5) / size as f32;
+                let direction = px_protocol::art::cube_direction(face_index, s, t);
+                let mut hash = (face_index as u64)
+                    .wrapping_mul(0x9e37_79b9)
+                    .wrapping_add((x as u64).wrapping_mul(0x85eb_ca6b))
+                    .wrapping_mul(0xc2b2_ae35)
+                    .wrapping_add((y as u64).wrapping_mul(0x27d4_eb2f));
+                hash ^= hash >> 15;
+                hash = hash.wrapping_mul(0x2545_f491);
+                hash ^= hash >> 13;
+                let value = (hash & 0xffff) as f32 / 65535.0;
+                let brightness = if value > 0.99900 {
+                    1.0
+                } else if value > 0.99750 {
+                    0.55
+                } else if value > 0.99550 {
+                    0.22
+                } else {
+                    0.0
+                };
+                let blue = 0.86 + 0.14 * ((hash >> 16) as f32 / 65535.0);
+                let warp = 0.90 + 0.10 * (direction[1] * 0.5 + 0.5);
+                let level = (brightness * 255.0 * warp) as u8;
+                data.push(level);
+                data.push(level);
+                data.push((level as f32 * blue) as u8);
+                data.push(255);
+            }
         }
     }
-    image_from(width, height, data, false)
+
+    let mut image = Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: px_protocol::art::CUBE_FACES,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        address_mode_w: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
 }
 fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
     let n = resolution.max(2);
@@ -750,25 +785,6 @@ fn spawn_lights(commands: &mut Commands) {
     ));
 
 
-}
-
-fn spawn_stars(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    stars: &Handle<Image>,
-) {
-    commands.spawn((
-        crate::ScenePart,
-        Mesh3d(meshes.add(Sphere::new(90.0).mesh().uv(64, 32))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color_texture: Some(stars.clone()),
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        })),
-        Transform::default(),
-    ));
 }
 
 fn spawn_rings(
@@ -1150,7 +1166,6 @@ pub fn spawn_planet(
 
         spawn_atmosphere(commands, meshes, atmo_materials, system, spec);
         spawn_rings(commands, meshes, materials, images, spec);
-        spawn_stars(commands, meshes, materials, stars);
         spawn_lights(commands);
 
         return Ok(format!(
@@ -1287,8 +1302,6 @@ pub fn spawn_planet(
         }
     });
 
-    spawn_stars(commands, meshes, materials, stars);
-
 
     let mut far = 0.0_f32;
     for position in positions.iter() {
@@ -1316,6 +1329,10 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
 
 
 

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::Skybox;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::render::render_resource::{
@@ -602,7 +603,7 @@ fn warm_up(
         size: (size.0, size.1),
         target: handle.clone(),
     });
-    commands.insert_resource(Stars(images.add(planet::star_image(2048, 1024))));
+    commands.insert_resource(Stars(images.add(planet::star_cube(512))));
 
     commands.spawn((
         ScenePart,
@@ -730,6 +731,11 @@ fn accept_jobs(
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(canvas.target.clone().into()),
+        Skybox {
+            image: Some(stars.0.clone()),
+            brightness: SKY_BRIGHTNESS,
+            rotation: Quat::IDENTITY,
+        },
         AmbientLight {
             brightness: request.view.ambient.unwrap_or(DEFAULT_AMBIENT),
             ..default()
@@ -927,6 +933,7 @@ fn drive(
 }
 
 const DEFAULT_AMBIENT: f32 = 80.0;
+const SKY_BRIGHTNESS: f32 = 900.0;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1137,12 +1144,18 @@ fn view(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    commands.insert_resource(Stars(images.add(planet::star_image(2048, 1024))));
+fn view_startup(
+    stars: Res<Stars>,mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    commands.insert_resource(Stars(images.add(planet::star_cube(512))));
     commands.spawn((
         OrbitCamera,
         Camera3d::default(),
         Msaa::Off,
+        Skybox {
+            image: Some(stars.0.clone()),
+            brightness: SKY_BRIGHTNESS,
+            rotation: Quat::IDENTITY,
+        },
         AmbientLight {
             brightness: DEFAULT_AMBIENT,
             ..default()
@@ -1368,6 +1381,8 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
 
 
 
