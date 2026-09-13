@@ -667,7 +667,7 @@ fn json_line(lab: &Lab) -> String {
             .map(|s| format!("{:e}", s.declared_gap))
             .collect();
         departments.push_str(&format!(
-            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e}}}",
+            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"execution\":{:e},\"capacity_scale\":{:e}}}",
             stock.join(","),
             target.join(","),
             gap.join(","),
