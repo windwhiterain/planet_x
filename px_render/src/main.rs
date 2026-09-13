@@ -113,6 +113,7 @@ struct Options {
     mesh: Option<PathBuf>,
     clouds: Option<PathBuf>,
     cloud: Option<f32>,
+    fps: bool,
     palette: planet::Palette,
     displace: Option<f32>,
     sea_level: Option<f32>,
@@ -143,6 +144,7 @@ impl Default for Options {
             mesh: None,
             clouds: None,
             cloud: None,
+            fps: false,
             palette: planet::Palette::Rocky,
             displace: None,
             sea_level: None,
@@ -180,6 +182,7 @@ impl Options {
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
                 "--clouds" => options.clouds = Some(PathBuf::from(next("--clouds")?)),
                 "--cloud" => options.cloud = Some(number("--cloud")?),
+                "--fps" => options.fps = true,
                 "--scatter" => {
                     let kind = next("--scatter")?;
                     if kind != "earth" && kind != "none" {
@@ -315,7 +318,8 @@ fn usage() -> String {
         "            [--cloud F] [--out PNG] [--width W] [--height H]",
         "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景；--rings 给个",
         "      大于 1 的倍数就加环系；--clouds 给一张 CubeMap 覆盖度就加体积云，--cloud 是",
-        "      消光倍率（默认 1）",
+        "      消光倍率（默认 1）；--fps 进测量模式：去掉帧率上限（服务端不再 60 Hz 限速、",
+        "      窗口关 vsync）并每 120 帧打印一次平均帧时间",
         "  服务没在跑时会提示；要顺手拉起一个就加 --autostart",
     ]
     .join("\n")
@@ -446,9 +450,12 @@ fn serve(options: Options) -> Result<(), String> {
         .add_plugins(atmosphere::AtmospherePlugin)
         .add_plugins(clouds::CloudsPlugin)
         .add_plugins(shaders::ShaderLibraryPlugin)
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            1.0 / 60.0,
-        )))
+        .insert_resource(FrameProbe(options.fps))
+        .add_plugins(ScheduleRunnerPlugin::run_loop(if options.fps {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(1.0 / 60.0)
+        }))
         .insert_resource(RenderReady(ready.clone()))
         .insert_resource(Inbox(std::sync::Mutex::new(job_rx)))
         .insert_resource(InitialSize(options.width, options.height))
@@ -460,6 +467,7 @@ fn serve(options: Options) -> Result<(), String> {
         })
         .add_systems(Startup, warm_up)
         .add_systems(Update, (accept_jobs, drive, watch_lease))
+        .add_systems(Update, report_frame_time)
         .add_systems(Update, idle_between_jobs.after(accept_jobs).before(drive));
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -967,12 +975,45 @@ fn build_world_scene(
     Ok(format!("第 {} 轮", world.round))
 }
 
+#[derive(Resource)]
+struct FrameProbe(bool);
+
+fn report_frame_time(
+    probe: Res<FrameProbe>,
+    mut since: Local<Option<Instant>>,
+    mut frames: Local<u32>,
+) {
+    if !probe.0 {
+        return;
+    }
+    let now = Instant::now();
+    let Some(previous) = *since else {
+        *since = Some(now);
+        return;
+    };
+    *frames += 1;
+    if *frames < FRAME_PROBE_WINDOW {
+        return;
+    }
+    let elapsed = now.duration_since(previous);
+    let count = f64::from(*frames);
+    println!(
+        "帧时间 {:.2} ms（{:.1} fps，{} 帧平均）",
+        elapsed.as_secs_f64() * 1000.0 / count,
+        count / elapsed.as_secs_f64(),
+        *frames,
+    );
+    *since = Some(now);
+    *frames = 0;
+}
+
 fn idle_between_jobs(
+    probe: Res<FrameProbe>,
     ready: Res<RenderReady>,
     active: Res<Active>,
     mut cameras: Query<&mut Camera, With<Camera3d>>,
 ) {
-    let wanted = active.0.is_some() || !ready.0.load(Ordering::Relaxed);
+    let wanted = probe.0 || active.0.is_some() || !ready.0.load(Ordering::Relaxed);
     for mut camera in cameras.iter_mut() {
         if camera.is_active != wanted {
             camera.is_active = wanted;
@@ -1031,6 +1072,7 @@ fn drive(
 const DEFAULT_AMBIENT: f32 = 80.0;
 const SKY_BRIGHTNESS: f32 = 900.0;
 const CLOUD_EXTINCTION: f32 = 900.0;
+const FRAME_PROBE_WINDOW: u32 = 120;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1202,6 +1244,11 @@ fn view(options: Options) -> Result<(), String> {
         primary_window: Some(Window {
             title: format!("px_render 预览 — {}", describe(&spec)),
             resolution: (1280_u32, 800_u32).into(),
+            present_mode: if options.fps {
+                bevy::window::PresentMode::AutoNoVsync
+            } else {
+                bevy::window::PresentMode::AutoVsync
+            },
             ..default()
         }),
         ..default()
@@ -1223,6 +1270,7 @@ fn view(options: Options) -> Result<(), String> {
     })
     .insert_resource(Rebuild(true))
     .insert_resource(PendingShot(shot.then_some(12)))
+    .insert_resource(FrameProbe(options.fps))
     .insert_resource(RenderReady(ready.clone()))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         keep_rendering,
@@ -1240,6 +1288,7 @@ fn view(options: Options) -> Result<(), String> {
             auto_shot,
             heartbeat,
             update_title,
+            report_frame_time,
         )
             .chain(),
     );
