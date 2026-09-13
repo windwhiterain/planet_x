@@ -419,6 +419,7 @@ fn serve(options: Options) -> Result<(), String> {
             DefaultPlugins
                 .set(AssetPlugin {
                     file_path: asset_root(),
+                    watch_for_changes_override: Some(true),
                     ..default()
                 })
                 .set(WindowPlugin {
@@ -1409,6 +1410,8 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
 
 
 
