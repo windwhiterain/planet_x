@@ -235,6 +235,121 @@ fn a_transformation_competes_with_consumption_for_its_input() {
     );
 }
 
+fn permanently_sanctioned(rule: LevelRule, weight: f32, rounds: usize) -> Lab {
+    let mut lab = Lab::new(&scarce(), 11).with_rule(rule);
+    let department = lab.department_of(1, 0);
+    for _ in 0..rounds {
+        lab.sanction(&[department], weight);
+        lab.step();
+    }
+    lab
+}
+
+#[test]
+fn a_targeted_sanction_opens_a_monotone_local_gap() {
+    let open = permanently_sanctioned(LevelRule::Fixed, 1.0, 120);
+    let half = permanently_sanctioned(LevelRule::Fixed, 0.5, 120);
+    let shut = permanently_sanctioned(LevelRule::Fixed, 0.0, 120);
+
+    let no_barrier = open.spread(1, 0);
+    let half_barrier = half.spread(1, 0);
+    let full_barrier = shut.spread(1, 0);
+
+    assert!(
+        no_barrier.abs() < 0.02,
+        "没有任何壁垒时不应当有本地价差：{no_barrier}",
+    );
+    assert!(
+        half_barrier < no_barrier - 0.005,
+        "壁垒越重，被制裁政权的本地价应当越低：{no_barrier} -> {half_barrier}",
+    );
+    assert!(
+        full_barrier < half_barrier - 0.02,
+        "完全断链应当把价差拉到最大：{half_barrier} -> {full_barrier}",
+    );
+    assert!(
+        shut.polities[1].vwap[0] < open.polities[1].vwap[0],
+        "被制裁政权的本地价应当低于它自己无壁垒时的水平",
+    );
+    assert!(
+        shut.polities[0].vwap[0] > open.polities[0].vwap[0],
+        "被制裁者退出后，其余政权的本地价应当抬高",
+    );
+}
+
+#[test]
+fn a_sanction_stays_local_to_the_named_department() {
+    let lab = permanently_sanctioned(LevelRule::Fixed, 0.0, 80);
+    let external = lab.department_external();
+    let sanctioned = lab.department_of(1, 0);
+    let neighbour = lab.department_of(1, 1);
+    let foreign = lab.department_of(2, 0);
+
+    assert_eq!(external[sanctioned], 0.0, "被制裁的部门必须与政权外断链");
+    assert!(
+        external[neighbour] > 0.0,
+        "同一个政权里没被点名的部门照常对外做生意：{}",
+        external[neighbour],
+    );
+    assert!(
+        external[foreign] > 0.0,
+        "别的政权照常做生意：{}",
+        external[foreign],
+    );
+}
+
+#[test]
+fn a_sanctioned_department_drowns_in_its_own_output() {
+    let mut lab = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let department = lab.department_of(1, 0);
+    for _ in 0..60 {
+        lab.sanction(&[department], 0.0);
+        lab.step();
+    }
+    let early = lab.warehouses.warehouses[department].stocks[0].volume;
+    for _ in 0..60 {
+        lab.sanction(&[department], 0.0);
+        lab.step();
+    }
+    let late = lab.warehouses.warehouses[department].stocks[0].volume;
+    let fill = lab.department_fill()[department][0];
+
+    assert_eq!(lab.department_external()[department], 0.0, "制裁期间不应当有对外成交");
+    assert!(
+        late > early,
+        "卖不出去而产量照旧，库存只会越堆越高：{early} -> {late}",
+    );
+    assert!(
+        fill < 0.2,
+        "被制裁部门的兑现率应当塌掉：{fill}",
+    );
+}
+
+#[test]
+fn a_learned_wedge_wrecks_a_real_local_gap() {
+    let quiet = permanently_sanctioned(LevelRule::Fixed, 0.0, 120);
+    let loud = permanently_sanctioned(LevelRule::Counterparty, 0.0, 120);
+
+    let quiet_gap = quiet.spread(1, 0);
+    let loud_gap = loud.spread(1, 0);
+    assert!(
+        quiet_gap.abs() < 0.15,
+        "市场自己给的本地价差应当是小而可用的：{quiet_gap}",
+    );
+    assert!(
+        loud_gap.abs() > 3.0 * quiet_gap.abs(),
+        "把学到的楔子接回报价，价差被放大：安静 {quiet_gap} 接上 {loud_gap}",
+    );
+
+    let quiet_level = quiet.polities[1].vwap[0];
+    let loud_level = loud.polities[1].vwap[0];
+    assert!(quiet_level > 0.5, "对照组本地价应当贴着指数：{quiet_level}");
+    assert!(
+        loud_level < 0.3 * quiet_level,
+        "接上楔子后本地价整体塌向指数以下：{quiet_level} -> {loud_level}",
+    );
+}
+
 #[test]
 fn the_lab_is_reproducible() {
     let run = |seed: u64| {

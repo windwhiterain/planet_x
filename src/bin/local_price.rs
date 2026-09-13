@@ -1,5 +1,6 @@
 use planet_x::local_price::{bloc_relations, Lab, LevelRule, Spec, GOODS, NAMES};
 
+#[derive(Clone)]
 struct Args {
     scenario: String,
     rule: LevelRule,
@@ -14,6 +15,11 @@ struct Args {
     transform: bool,
     transform_rate: f32,
     transform_scale: f32,
+    sanction_polity: usize,
+    sanction_unit: usize,
+    sanction_from: usize,
+    sanction_to: usize,
+    sanction_w: f32,
     relations: f32,
     block_from: usize,
     block_to: usize,
@@ -37,6 +43,11 @@ impl Default for Args {
             transform: false,
             transform_rate: 1.0,
             transform_scale: 4.0,
+            sanction_polity: 1,
+            sanction_unit: 0,
+            sanction_from: 40,
+            sanction_to: 80,
+            sanction_w: 0.0,
             relations: 1.0,
             block_from: usize::MAX,
             block_to: usize::MAX,
@@ -54,6 +65,8 @@ fn main() {
     match args.scenario.as_str() {
         "sweep" => sweep(&args),
         "blockade" => blockade(&args),
+        "sanction" => sanction_run(&args),
+        "sanction-sweep" => sanction_sweep(&args),
         _ => trace(&args),
     }
 }
@@ -77,6 +90,11 @@ fn parse() -> Option<Args> {
             "--transform" => args.transform = true,
             "--transform-rate" => args.transform_rate = value()?.parse().ok()?,
             "--transform-scale" => args.transform_scale = value()?.parse().ok()?,
+            "--sanction-polity" => args.sanction_polity = value()?.parse().ok()?,
+            "--sanction-unit" => args.sanction_unit = value()?.parse().ok()?,
+            "--sanction-from" => args.sanction_from = value()?.parse().ok()?,
+            "--sanction-to" => args.sanction_to = value()?.parse().ok()?,
+            "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
@@ -285,6 +303,128 @@ fn blockade(args: &Args) {
         min_execution,
     );
     summary(&lab);
+}
+
+fn mean(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f32>() / values.len() as f32
+    }
+}
+
+fn local_prices(lab: &Lab, good: usize) -> String {
+    lab.polities
+        .iter()
+        .map(|polity| format!("{:.3}", polity.vwap[good]))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn spread(lab: &Lab, seat: usize, good: usize) -> f32 {
+    lab.spread(seat, good)
+}
+
+fn sanction_run(args: &Args) {
+    let mut lab = build(args);
+    let department = lab.department_of(args.sanction_polity, args.sanction_unit);
+    let name = lab.polities[args.sanction_polity].name;
+    println!(
+        "局部制裁：{name}(政权 {}) 第 {} 个部门 = 仓库 {department}，在 [{} , {}) 轮与政权外断链，权重 {}，规则 {}",
+        args.sanction_polity,
+        args.sanction_unit,
+        args.sanction_from,
+        args.sanction_to,
+        args.sanction_w,
+        args.rule.name(),
+    );
+    println!(
+        "{:>4} {:>5} {:>9} {:>10} {:>10} {:>9} {:>22} {:>9}",
+        "轮次", "状态", "粮食指数", "部门成交价", "部门兑现", "对外成交", "各政权本地价", "价差"
+    );
+    let mut during = Vec::new();
+    let mut after = Vec::new();
+    for round in 0..args.rounds {
+        let on = round >= args.sanction_from && round < args.sanction_to;
+        if on {
+            lab.sanction(&[department], args.sanction_w);
+        } else {
+            lab.unsanction();
+        }
+        lab.step();
+        let prices = lab.department_prices();
+        let fills = lab.department_fill();
+        let external = lab.department_external();
+        let gap = spread(&lab, args.sanction_polity, 0);
+        if on && round + 1 >= args.sanction_from + 8 {
+            during.push(gap);
+        }
+        if !on && round >= args.sanction_to + 8 {
+            after.push(gap);
+        }
+        let edge = round + 1 == args.sanction_from || round + 1 == args.sanction_to;
+        if lab.round % args.every == 0 || edge || lab.round == args.rounds {
+            println!(
+                "{:>4} {:>5} {:>9.3} {:>10} {:>10} {:>9.2} {:>22} {:>+9.3}",
+                lab.round,
+                if on { "制裁" } else { "通行" },
+                lab.market.merchandises[0].price,
+                format!("{:.3}", prices[department][0]),
+                format!("{:.2}", fills[department][0]),
+                external[department],
+                local_prices(&lab, 0),
+                gap,
+            );
+        }
+    }
+    println!(
+        "制裁期间价差均值 {:+.4}（{} 轮），解除后 {:+.4}（{} 轮）",
+        mean(&during),
+        during.len(),
+        mean(&after),
+        after.len(),
+    );
+}
+
+fn sanction_sweep(args: &Args) {
+    println!(
+        "局部制裁严重度扫描：政权 {} 第 {} 个部门，{} 轮，规则 {}",
+        args.sanction_polity,
+        args.sanction_unit,
+        args.rounds,
+        args.rule.name(),
+    );
+    println!(
+        "{:>7} {:>10} {:>12} {:>12} {:>10} {:>10}",
+        "权重", "对外成交", "制裁政权价", "其余政权价", "价差", "执行率"
+    );
+    for weight in [1.0f32, 0.75, 0.5, 0.25, 0.0] {
+        let mut local = args.clone();
+        local.sanction_w = weight;
+        let mut lab = build(&local);
+        let department = lab.department_of(local.sanction_polity, local.sanction_unit);
+        for _ in 0..args.rounds {
+            lab.sanction(&[department], weight);
+            lab.step();
+        }
+        let external = lab.department_external();
+        let seat = local.sanction_polity;
+        println!(
+            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>10.2}",
+            external[department],
+            lab.polities[seat].vwap[0],
+            mean(
+                &lab.polities
+                    .iter()
+                    .enumerate()
+                    .filter(|(p, _)| *p != seat)
+                    .map(|(_, polity)| polity.vwap[0])
+                    .collect::<Vec<f32>>()
+            ),
+            spread(&lab, seat, 0),
+            lab.polities[seat].execution,
+        );
+    }
 }
 
 fn sweep(args: &Args) {

@@ -311,8 +311,108 @@ impl Lab {
         self.market.set_relations(&relations);
     }
 
+    /// 局部制裁：只掐掉这几个部门与政权外的配对，政权内部与其余部门照常
+    pub fn sanction(&mut self, departments: &[usize], relation: f32) {
+        let traders = self.market.traders.len();
+        let mut relations = self.market.relations.clone();
+        for i in 0..traders {
+            for j in 0..traders {
+                if self.polity_of(i) == self.polity_of(j) {
+                    continue;
+                }
+                if departments.contains(&i) || departments.contains(&j) {
+                    relations[i][j] = relation;
+                }
+            }
+        }
+        self.market.set_relations(&relations);
+    }
+
+    pub fn unsanction(&mut self) {
+        self.block(&[], 1.0);
+    }
+
+    pub fn department_of(&self, polity: usize, unit: usize) -> usize {
+        polity * UNITS + unit
+    }
+
+    /// 每个部门每种商品的成交均价除以银河指数，没有成交记 0
+    pub fn department_prices(&self) -> Vec<Vec<f32>> {
+        self.market
+            .traders
+            .iter()
+            .map(|trader| {
+                trader
+                    .merchandises
+                    .iter()
+                    .enumerate()
+                    .map(|(k, merchandise)| {
+                        let price = self.market.merchandises[k].price.max(1e-9);
+                        if merchandise.deal_volume() != 0.0 && merchandise.deal_price() > 0.0 {
+                            merchandise.deal_price() / price
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub fn department_external(&self) -> Vec<f32> {
+        let traders = self.market.traders.len();
+        (0..traders)
+            .map(|i| {
+                (0..traders)
+                    .filter(|j| self.polity_of(*j) != self.polity_of(i))
+                    .map(|j| {
+                        (0..GOODS)
+                            .map(|k| self.market.deals[i][j][k].volume.abs())
+                            .sum::<f32>()
+                    })
+                    .sum()
+            })
+            .collect()
+    }
+
+    pub fn department_fill(&self) -> Vec<Vec<f32>> {
+        self.market
+            .traders
+            .iter()
+            .map(|trader| {
+                trader
+                    .merchandises
+                    .iter()
+                    .map(|merchandise| {
+                        if merchandise.volume != 0.0 {
+                            merchandise.deal_volume().abs() / merchandise.volume.abs()
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     pub fn polity_of(&self, warehouse: usize) -> usize {
         warehouse_polity(warehouse)
+    }
+
+    /// 这个政权对某种商品的实际成交价相对银河指数的偏离，正数表示它比你别人买的贵
+    pub fn spread(&self, polity: usize, good: usize) -> f32 {
+        let own = self.polities[polity].vwap[good];
+        let others: Vec<f32> = self
+            .polities
+            .iter()
+            .enumerate()
+            .filter(|(p, _)| *p != polity)
+            .map(|(_, other)| other.vwap[good])
+            .collect();
+        if others.is_empty() {
+            return 0.0;
+        }
+        own - others.iter().sum::<f32>() / others.len() as f32
     }
 
     pub fn step(&mut self) {
