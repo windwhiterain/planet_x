@@ -687,15 +687,66 @@ fn json_line(lab: &Lab) -> String {
             cells.join(","),
         ));
     }
+    // **逐地方账本**：部门决策价读的就是它（`plan` 读 `books[locality]`），
+    // 而指数是它的聚合。两者是否脱钩，只有把账本本身打出来才能看见。
+    let mut books = String::new();
+    for (locality, row) in lab.warehouses.books.iter().enumerate() {
+        if locality > 0 {
+            books.push(',');
+        }
+        let cells: Vec<String> = row
+            .iter()
+            .map(|b| format!("[{:e},{:e},{}]", b.bid, b.ask, b.observed as u8))
+            .collect();
+        books.push_str(&format!(
+            "{{\"locality\":{locality},\"book\":[{}]}}",
+            cells.join(","),
+        ));
+    }
+    // **产出来自哪种政策**：`自有商品免费生产`（consumptions 全 0）还是`阶梯工艺`
+    // （consumptions 非 0）。`入库` 的总量分不出这两者——而三产入库非零**并不能**
+    // 证明 t2 在跑。
+    let mut split_free = vec![0.0f32; lab.market.merchandises.len()];
+    let mut split_ladder = vec![0.0f32; lab.market.merchandises.len()];
+    for (i, department) in lab.departments.departments.iter().enumerate() {
+        let scale = lab
+            .departments
+            .departments
+            .get(i)
+            .map(|d| d.capacity_scale())
+            .unwrap_or(0.0);
+        for policy in department.policies.iter() {
+            if !policy.is_production() {
+                continue;
+            }
+            let free = policy.consumptions.iter().all(|c| *c <= 0.0);
+            for (k, produced) in policy.outputs.iter().enumerate() {
+                let amount = policy.distribution() * produced * scale;
+                if free {
+                    split_free[k] += amount;
+                } else {
+                    split_ladder[k] += amount;
+                }
+            }
+        }
+    }
+    let delivery_split: Vec<String> = split_free
+        .iter()
+        .zip(split_ladder.iter())
+        .map(|(f, l)| format!("[{f:e},{l:e}]"))
+        .collect();
     format!(
         concat!(
             "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
+            "\"books\":[{}],\"delivery_free_or_ladder\":[{}],",
             "\"execution_mean\":{:e},\"execution_min\":{:e},\"uncleared\":{:e}}}"
         ),
         lab.round,
         goods,
         departments,
         polities,
+        books,
+        delivery_split.join(","),
         executions.iter().sum::<f32>() / executions.len().max(1) as f32,
         executions.iter().cloned().fold(f32::INFINITY, f32::min),
         lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
