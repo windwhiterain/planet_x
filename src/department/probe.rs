@@ -253,20 +253,20 @@ fn warehouses(treasury: Treasury) -> Warehouses {
 fn departments(treasury: Treasury) -> Departments {
     let departments = (0..DEPARTMENTS)
         .map(|department| {
-            let mut productions = vec![0.0; GOODS];
-            productions[department] = BASE / 2.0;
-            productions[(department + 1) % GOODS] = BASE / 2.0;
-            Department::new(
-                productions,
+            let mut outputs = vec![0.0; GOODS];
+            outputs[department] = BASE / 2.0;
+            outputs[(department + 1) % GOODS] = BASE / 2.0;
+            let mut policies = vec![Policy::production(vec![0.0; GOODS], outputs)];
+            policies.extend(
                 (0..GOODS)
                     .filter(|good| *good != department)
                     .map(|good| {
                         let mut consumptions = vec![0.0; GOODS];
                         consumptions[good] = BASE;
-                        Policy::new(consumptions, MOTIVE)
-                    })
-                    .collect(),
-            )
+                        Policy::consumption(consumptions, MOTIVE)
+                    }),
+            );
+            Department::new(policies)
         })
         .collect();
     match treasury {
@@ -327,7 +327,7 @@ impl Probe {
     fn step(&mut self, round: usize) {
         for (i, department) in self.departments.departments.iter_mut().enumerate() {
             for good in [i, (i + 1) % GOODS] {
-                department.productions[good] =
+                department.policies[0].outputs[good] =
                     BASE / 2.0 * factor(round, self.period, self.phases[i], self.amplitude);
             }
         }

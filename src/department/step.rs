@@ -91,9 +91,6 @@ pub(super) fn plan(
     local: &[f32],
 ) {
     let goods = warehouse.stocks.len();
-    for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-        stock.volume += department.productions[k].max(0.0);
-    }
 
     let prices: Vec<f32> = (0..goods)
         .map(|k| {
@@ -122,7 +119,7 @@ pub(super) fn plan(
 
     let mut produce_best = 0.0f32;
     for policy in department.policies.iter_mut() {
-        if policy.is_transform() {
+        if policy.is_production() {
             policy.price_potential =
                 transform_score(policy, &prices, warehouse, department.capacity);
             produce_best = produce_best.max(policy.price_potential);
@@ -136,12 +133,12 @@ pub(super) fn plan(
     let mut consume_weight = 0.0;
     let mut produce_weight = 0.0;
     for policy in department.policies.iter_mut() {
-        policy.distribution = if policy.is_transform() {
+        policy.distribution = if policy.is_production() {
             policy_share(policy.price_potential, produce_best)
         } else {
             policy.price_potential
         };
-        if policy.is_transform() {
+        if policy.is_production() {
             produce_weight += policy.distribution;
         } else {
             consume_weight += policy.distribution;
@@ -151,7 +148,7 @@ pub(super) fn plan(
     if consume_weight > 0.0 || produce_weight > 0.0 {
         let mut best_share = f32::NEG_INFINITY;
         for (p, policy) in department.policies.iter_mut().enumerate() {
-            let family = if policy.is_transform() {
+            let family = if policy.is_production() {
                 produce_weight
             } else {
                 consume_weight
@@ -179,24 +176,27 @@ pub(super) fn plan(
         }
     }
 
+    let capacity_scale = if capacity_want > 0.0 {
+        (department.capacity / capacity_want).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let mut execution: f32 = if consume_weight > 0.0 || produce_weight > 0.0 {
         1.0
     } else {
         0.0
     };
+    let mut delivery = vec![0.0; goods];
     for (k, want) in intake.iter().enumerate() {
+        delivery[k] = output[k] * capacity_scale;
         if *want > 0.0 {
-            execution = execution.min(available[k] / want);
+            execution = execution.min((available[k] + delivery[k]) / want);
         }
-    }
-    if capacity_want > 0.0 {
-        execution = execution.min(department.capacity / capacity_want);
     }
     let execution = execution.clamp(0.0, 1.0);
 
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-        let net = (output[k] - intake[k]) * execution;
-        stock.volume = (stock.volume + net).max(0.0);
+        stock.volume = (available[k] + delivery[k] - intake[k] * execution).max(0.0);
         stock.target_volume = intake[k];
     }
 

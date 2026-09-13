@@ -19,8 +19,6 @@ pub struct Departments {
 
 /// index with [`crate::warehouse::Warehouse`]
 pub struct Department {
-    /// index with [`crate::warehouse::Stock`]
-    pub productions: Vec<f32>,
     pub policies: Vec<Policy>,
     /// 每轮可用的产能，无穷表示不设限
     pub capacity: f32,
@@ -30,15 +28,24 @@ pub struct Department {
     policy_execution: f32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PolicyKind {
+    /// 按意愿吃进商品
+    Consumption,
+    /// 吃进投入、产出成品，主生产也是一个消耗产能的转换
+    Production,
+}
+
 pub struct Policy {
+    pub kind: PolicyKind,
     /// index with [`crate::warehouse::Stock`]
     pub consumptions: Vec<f32>,
-    /// index with [`crate::warehouse::Stock`]，转换政策的产出
+    /// index with [`crate::warehouse::Stock`]
     pub outputs: Vec<f32>,
     /// 每单位经手物资占用的产能
     pub capacity_cost: f32,
     pub motive: f32,
-    /// 意愿除以资源价格
+    /// 意愿除以资源价格，或约束下的纯策略收益
     price_potential: f32,
     /// normalize to 1
     distribution: f32,
@@ -163,11 +170,6 @@ impl Departments {
         );
         for (i, department) in self.departments.iter().enumerate() {
             let goods = warehouses.warehouses[i].stocks.len();
-            debug_assert_eq!(
-                department.productions.len(),
-                goods,
-                "部门 {i} 的产出表必须与仓库库存表等长且同序",
-            );
             for policy in &department.policies {
                 debug_assert_eq!(
                     policy.consumptions.len(),
@@ -185,9 +187,8 @@ impl Departments {
 }
 
 impl Department {
-    pub fn new(productions: Vec<f32>, policies: Vec<Policy>) -> Self {
+    pub fn new(policies: Vec<Policy>) -> Self {
         Self {
-            productions,
             policies,
             capacity: f32::INFINITY,
             policy_choice: 0,
@@ -210,9 +211,11 @@ impl Department {
 }
 
 impl Policy {
-    pub fn new(consumptions: Vec<f32>, motive: f32) -> Self {
+    /// 消费政策：按意愿吃进商品
+    pub fn consumption(consumptions: Vec<f32>, motive: f32) -> Self {
         let outputs = vec![0.0; consumptions.len()];
         Self {
+            kind: PolicyKind::Consumption,
             consumptions,
             outputs,
             capacity_cost: 0.0,
@@ -222,9 +225,10 @@ impl Policy {
         }
     }
 
-    /// 转换政策：吃进 inputs、产出 outputs，吸引力是市价下的利润率
-    pub fn transform(inputs: Vec<f32>, outputs: Vec<f32>) -> Self {
+    /// 生产政策：吃进 inputs、产出 outputs，只看市价下的利润；主生产就是投入全为零的那种
+    pub fn production(inputs: Vec<f32>, outputs: Vec<f32>) -> Self {
         Self {
+            kind: PolicyKind::Production,
             consumptions: inputs,
             outputs,
             capacity_cost: 0.0,
@@ -254,8 +258,12 @@ impl Policy {
         self.capacity_cost * handled
     }
 
-    pub fn is_transform(&self) -> bool {
-        self.outputs.iter().any(|output| *output > 0.0)
+    pub fn is_production(&self) -> bool {
+        self.kind == PolicyKind::Production
+    }
+
+    pub fn is_consumption(&self) -> bool {
+        self.kind == PolicyKind::Consumption
     }
 
     pub fn price_potential(&self) -> f32 {

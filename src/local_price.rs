@@ -59,6 +59,7 @@ pub struct Transform {
 }
 
 pub const LADDER_CAPACITY: f32 = 8.0;
+pub const PRIMARY_CAPACITY_COST: f32 = 0.25;
 pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
 pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.2);
 
@@ -262,31 +263,30 @@ impl Lab {
                         .with_reference(vec![BASE_PRICE; GOODS])
                         .with_locality(polity),
                 );
-                let mut productions = vec![0.0; GOODS];
-                productions[unit] = BASE * spec.supply(polity, unit);
+                let mut outputs = vec![0.0; GOODS];
+                outputs[unit] = BASE * spec.supply(polity, unit);
                 let policies = {
                     let mut policies: Vec<Policy> = (0..GOODS)
                         .filter(|good| *good != unit)
                         .map(|good| {
                             let mut consumptions = vec![0.0; GOODS];
                             consumptions[good] = CAMPAIGN;
-                            Policy::new(consumptions, MOTIVE * spec.motive(polity, good))
+                            Policy::consumption(consumptions, MOTIVE * spec.motive(polity, good))
                         })
                         .collect();
                     for transform in spec.transforms(polity, unit) {
                         policies.push(
-                            Policy::transform(
-                                transform.inputs.clone(),
-                                transform.outputs.clone(),
-                            )
-                            .with_capacity_cost(transform.capacity_cost),
+                            Policy::production(transform.inputs.clone(), transform.outputs.clone())
+                                .with_capacity_cost(transform.capacity_cost),
                         );
                     }
+                    policies.push(
+                        Policy::production(vec![0.0; GOODS], outputs)
+                            .with_capacity_cost(PRIMARY_CAPACITY_COST),
+                    );
                     policies
                 };
-                departments.push(
-                    Department::new(productions, policies).with_capacity(spec.capacity),
-                );
+                departments.push(Department::new(policies).with_capacity(spec.capacity));
             }
             polities.push(Polity {
                 name: NAMES[polity % NAMES.len()],
@@ -413,7 +413,7 @@ impl Lab {
                 department
                     .policies
                     .iter()
-                    .filter(|policy| policy.is_transform())
+                    .filter(|policy| policy.is_production())
                     .map(|policy| {
                         (
                             policy.distribution(),
@@ -707,7 +707,7 @@ impl Lab {
             .departments
             .iter()
             .flat_map(|department| department.policies.iter())
-            .find(|policy| policy.is_transform());
+            .find(|policy| policy.is_production());
         let mut declared = 0.0;
         let mut dealt = 0.0;
         for k in 0..GOODS {

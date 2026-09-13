@@ -185,10 +185,10 @@ fn premium(lab: &Lab) -> f32 {
 fn a_transformation_runs_only_while_it_pays() {
     let mut paying = Lab::new(&transformation(0.5, 4.0), 11).with_rule(LevelRule::Fixed);
     paying.run(40);
-    assert_eq!(
-        paying.history.last().unwrap().transform_share,
-        1.0,
-        "半件工业品换一件粮食在溢价下应当开工",
+    let paying_share = paying.history.last().unwrap().transform_share;
+    assert!(
+        paying_share > 0.5,
+        "半件工业品换一件粮食在溢价下应当拿走大头（其余归主生产）：{paying_share}",
     );
 
     let mut losing = Lab::new(&transformation(3.0, 4.0), 11).with_rule(LevelRule::Fixed);
@@ -471,7 +471,7 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
     roomy.departments.plan(&mut roomy.warehouses, &roomy.market);
     let roomy_capacity = roomy.process_state(department);
 
-    assert_eq!(scarce_material.len(), 2, "阶梯上应当有两个工艺");
+    assert_eq!(scarce_material.len(), 3, "阶梯两个工艺加上主生产");
     assert!(
         scarce_material[slow].0 > scarce_material[fast].0,
         "原料不足时应当选省料但慢的（利润高、单位产能产出低）：{scarce_material:?}",
@@ -511,15 +511,11 @@ fn a_capacity_budget_throttles_the_department() {
         .with_rule(LevelRule::Fixed);
     loose.run(20);
 
-    let tight_execution = tight.polities[0].execution;
-    let loose_execution = loose.polities[0].execution;
+    let tight_holding = tight.warehouses.warehouses[tight.department_of(0, 0)].stocks[0].volume;
+    let loose_holding = loose.warehouses.warehouses[loose.department_of(0, 0)].stocks[0].volume;
     assert!(
-        tight_execution < 1.0,
-        "产能预算应当真的咬住：执行率 {tight_execution}",
-    );
-    assert!(
-        tight_execution < loose_execution,
-        "没有产能预算时执行率更高：紧张 {tight_execution} 宽松 {loose_execution}",
+        tight_holding < loose_holding,
+        "产能预算应当真的压住产量：紧张 {tight_holding} 宽松 {loose_holding}",
     );
 }
 

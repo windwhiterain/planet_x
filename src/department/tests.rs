@@ -34,13 +34,17 @@ fn warehouses(stocks: &[&[(f32, f32)]]) -> Warehouses {
 }
 
 fn department(productions: &[f32], policies: &[(&[f32], f32)]) -> Department {
-    Department::new(
-        productions.to_vec(),
-        policies
-            .iter()
-            .map(|(consumptions, motive)| Policy::new(consumptions.to_vec(), *motive))
-            .collect(),
-    )
+    let mut all: Vec<Policy> = policies
+        .iter()
+        .map(|(consumptions, motive)| Policy::consumption(consumptions.to_vec(), *motive))
+        .collect();
+    if productions.iter().any(|output| *output > 0.0) {
+        all.push(Policy::production(
+            vec![0.0; productions.len()],
+            productions.to_vec(),
+        ));
+    }
+    Department::new(all)
 }
 
 fn central(productions: &[&[f32]], policies: &[&[(&[f32], f32)]]) -> Departments {
@@ -153,7 +157,7 @@ fn production_lands_in_the_indexed_warehouse_only() {
 }
 
 #[test]
-fn production_runs_without_any_policy() {
+fn production_is_a_policy_like_any_other() {
     let (mut departments, mut warehouses, market) = setup(
         &[&[(10.0, 10.0)], &[(0.0, 0.0)]],
         &[&[4.0], &[0.0]],
@@ -163,7 +167,11 @@ fn production_runs_without_any_policy() {
     departments.plan(&mut warehouses, &market);
 
     assert_close(holding(&warehouses, 0)[0], 14.0, "产出应当进仓");
-    assert_close(departments.departments[0].policy_execution(), 0.0, "无政策");
+    assert_close(
+        departments.departments[0].policy_execution(),
+        1.0,
+        "主生产也是一条政策，照跑",
+    );
 }
 
 #[test]
