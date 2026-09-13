@@ -356,8 +356,8 @@ fn sanction_run(args: &Args) {
         args.rule.name(),
     );
     println!(
-        "{:>4} {:>5} {:>9} {:>10} {:>10} {:>9} {:>22} {:>9}",
-        "轮次", "状态", "粮食指数", "部门成交价", "部门兑现", "对外成交", "各政权本地价", "价差"
+        "{:>4} {:>5} {:>9} {:>10} {:>10} {:>9} {:>9} {:>22} {:>9} {:>8} {:>9}",
+        "轮次", "状态", "粮食指数", "部门成交价", "部门兑现", "部门库存", "对外成交", "各政权本地价", "价差", "转换占比", "利润率"
     );
     let mut during = Vec::new();
     let mut after = Vec::new();
@@ -381,16 +381,20 @@ fn sanction_run(args: &Args) {
         }
         let edge = round + 1 == args.sanction_from || round + 1 == args.sanction_to;
         if lab.round % args.every == 0 || edge || lab.round == args.rounds {
+            let snapshot = lab.history.last().unwrap();
             println!(
-                "{:>4} {:>5} {:>9.3} {:>10} {:>10} {:>9.2} {:>22} {:>+9.3}",
+                "{:>4} {:>5} {:>9.3} {:>10} {:>10} {:>9.1} {:>9.2} {:>22} {:>+9.3} {:>8.1}% {:>+9.3}",
                 lab.round,
                 if on { "制裁" } else { "通行" },
                 lab.market.merchandises[0].price,
                 format!("{:.3}", prices[department][0]),
                 format!("{:.2}", fills[department][0]),
+                lab.warehouses.warehouses[department].stocks[0].volume,
                 external[department],
                 local_prices(&lab, 0),
                 gap,
+                100.0 * snapshot.transform_share,
+                snapshot.transform_potential,
             );
         }
     }

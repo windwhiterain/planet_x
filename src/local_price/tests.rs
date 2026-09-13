@@ -350,6 +350,55 @@ fn a_learned_wedge_wrecks_a_real_local_gap() {
     );
 }
 
+fn with_absorber(rounds: usize) -> Lab {
+    let mut inputs = vec![0.0; GOODS];
+    let mut outputs = vec![0.0; GOODS];
+    inputs[0] = 2.0;
+    outputs[1] = 4.0;
+    let spec = scarce().with_transform(1, 1, inputs, outputs);
+    let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
+    let department = lab.department_of(1, 0);
+    for _ in 0..rounds {
+        lab.sanction(&[department], 0.0);
+        lab.step();
+    }
+    lab
+}
+
+#[test]
+fn a_profitable_absorber_runs_but_cannot_clear_a_flood() {
+    let bare = permanently_sanctioned(LevelRule::Fixed, 0.0, 80);
+    let absorbing = with_absorber(80);
+    let snapshot = absorbing.history.last().unwrap();
+
+    assert_eq!(
+        snapshot.transform_share, 1.0,
+        "能赚钱的吸收者应当满负荷开工，而不是被埋在消费政策下面",
+    );
+    assert!(
+        snapshot.transform_potential > 0.0,
+        "吸收者开工的前提是利润率为正：{}",
+        snapshot.transform_potential,
+    );
+    assert!(
+        absorbing.spread(1, 0).abs() < bare.spread(1, 0).abs(),
+        "吸收者应当压缩本地价差：无 {} 有 {}",
+        bare.spread(1, 0),
+        absorbing.spread(1, 0),
+    );
+
+    let sanctioned = absorbing.department_of(1, 0);
+    let fill = absorbing.department_fill()[sanctioned][0];
+    assert!(
+        fill < 0.2,
+        "吞吐由篮子规模决定、与价格无关，所以洪水清不掉：{fill}",
+    );
+    assert!(
+        absorbing.warehouses.warehouses[sanctioned].stocks[0].volume > 100.0,
+        "被制裁部门的库存仍然堆成山",
+    );
+}
+
 #[test]
 fn the_lab_is_reproducible() {
     let run = |seed: u64| {
