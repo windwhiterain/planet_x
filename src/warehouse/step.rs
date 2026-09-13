@@ -111,7 +111,10 @@ fn declared_volumes(stock: &mut Stock, fluctuation: f32, rng: &mut Rng) {
     // 的乘法游走：不被取空的商品一路下溢到 0，一直取空的商品一路涨到 1e29）。
     // 锚在**观测到的取货量**上就自然有界：取货量受消费能力约束。
     stock.natural_volume_delta = (stock.volume - stock.previous_volume).min(0.0);
-    stock.target_volume = Stock::TARGET_COVER * stock.natural_volume_delta.abs();
+    // 下限是构造时的初始目标：`CAMPAIGN/2`（自有商品是 0，那是对的——生产者的
+    // 自有商品本来就该全卖）。没有这个下限，目标会在"没人取货"时塌到 0 并自锁。
+    stock.target_volume =
+        (Stock::TARGET_COVER * stock.natural_volume_delta.abs()).max(stock.target_floor);
     let gap = stock.volume - stock.target_volume + stock.natural_volume_delta;
     // 旧代码这里还有一个 `clamp(0, |gap|)`：涨落只能**缩小**申报，不能放大。
     // 那也是一条策略假设，去掉。

@@ -60,6 +60,8 @@ pub struct Stock {
     pub volume: f32,
     /// 期望持有的库存
     pub target_volume: f32,
+    /// 目标水位的**下限**，等于构造时的初始目标。见 [`Stock::TARGET_COVER`]。
+    pub target_floor: f32,
     marketing_price_scale: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
@@ -223,6 +225,7 @@ impl Stock {
         Self {
             previous_volume: volume,
             volume,
+            target_floor: target_volume,
             target_volume,
             marketing_price_scale: 1.0,
             marketing_volume: 0.0,
