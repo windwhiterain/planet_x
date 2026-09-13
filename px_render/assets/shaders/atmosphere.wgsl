@@ -1,4 +1,5 @@
 #import planet_x::common::SUN_DIRECTION
+#import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::forward_io::VertexOutput
 
 struct AtmosphereParams {
@@ -19,7 +20,7 @@ struct AtmosphereParams {
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(in.world_normal);
     let surface = normal * params.outer;
-    let camera = vec3<f32>(params.camera_x, params.camera_y, params.camera_z);
+    let camera = view.world_position.xyz;
     let to_camera = normalize(camera - surface);
     let cosine = clamp(dot(normal, to_camera), 0.0, 1.0);
     let impact = params.outer * sqrt(max(1.0 - cosine * cosine, 0.0));
@@ -47,6 +48,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = 1.0 - exp(-chord * params.density);
     return vec4<f32>(tint.rgb * (0.05 + 0.95 * sunlit) * alpha, alpha);
 }
+
 
 
 
