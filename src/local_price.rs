@@ -59,13 +59,13 @@ pub struct Transform {
 }
 
 pub const LADDER_CAPACITY: f32 = 8.0;
-pub const MODERN_CAPACITY: f32 = 8.0;
+pub const MODERN_CAPACITY: f32 = 24.0;
 pub const PRIMARY_CAPACITY_COST: f32 = 0.25;
 pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
 pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.2);
 pub const SECTOR_SCALE: f32 = 8.0;
 pub const SECTOR_INPUT: f32 = 2.0;
-pub const SECTOR_CAPACITY: [f32; 3] = [0.5, 1.0, 1.5];
+pub const SECTOR_CAPACITY: [f32; 3] = [0.1, 0.2, 0.3];
 pub const SECTOR_MOTIVE: [f32; 3] = [1.0, 1.6, 2.4];
 
 pub struct Spec {
@@ -102,6 +102,7 @@ impl Spec {
         spec.all_consume = true;
         spec.primary_free = false;
         spec.capacity = MODERN_CAPACITY;
+        spec.motive_ladder = SECTOR_MOTIVE.to_vec();
         for unit in 0..GOODS {
             let mut inputs = vec![0.0; GOODS];
             let mut outputs = vec![0.0; GOODS];
