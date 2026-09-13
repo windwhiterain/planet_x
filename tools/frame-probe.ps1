@@ -57,4 +57,3 @@ foreach ($case in $Cases) {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 400
 }
-Get-Process -Name px_render -ErrorAction SilentlyContinue | Stop-Process -Force
