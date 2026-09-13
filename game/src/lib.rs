@@ -3,6 +3,8 @@ use planet_x::department::{Department, Departments, Policy};
 use planet_x::market::{Market, Merchandise, Trader, TraderMerchandise};
 use planet_x::warehouse::{Stock, Warehouse, Warehouses};
 
+pub mod project;
+
 pub const GOODS: usize = 3;
 pub const DEPARTMENTS: usize = 3;
 

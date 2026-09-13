@@ -1,0 +1,723 @@
+# 美术框架：agent 截图友好 / 热重载 shader / 热重载程序化生成管线
+
+> 状态 `[ ]` —— **只有调研与裁决点，一行实现都没写**。
+> ⚠️ **2026-09-13 用户裁决：走 Rust 栈**，sim 与 renderer 之间用**协议 crate** 规定数据格式、
+> 两边都只依赖它 ⇒ 见 **§10**（§2.2 TS 实测 / §2.3 QuickJS / §4.5 tier-1 Node 侧车**已被取代**，
+> 三条仍然有效的结论已在 §10.4 列出）。
+> 拟落地分支：`feature/art-gen` off **`feature/glsl-files`**（美术工作真正所在的分支；
+> ⚠️ 当前 checkout 的 `v2` 与它**没有共同祖先**（orphan 血缘），合不过来）。
+> ⚠️ **本文这一份是在 `v2` worktree 里写的**（该分支没有 `web/`、没有 `.agents/`），
+> 落地时整份移到美术 worktree，别在 `v2` 上提交。
+> 依据：2026-09-13 四路并行调研（DAG 层 / 几何与烘焙 / 渲染栈 / agent 视觉回路）
+> ＋ 通读 `feature/glsl-files` 的 `web/static/**`、`scripts/shots/**`、`.agents/notes/**`。
+
+---
+
+## 0. 结论（先看这三条）
+
+1. **DAG 层：写一个「图即 TS 模块 + 内容哈希记忆化求值器」**，求值器跑在**长驻 Node 进程**里，
+   浏览器只收数据。不要 DSL、不要 Houdini/Blender/Substance、不要通用编排器。
+   方向已由用户定：**要类型检查**（`ask_user_question` 2026-09-13 原文：
+   *「为啥不用 ts，有类型检查对 agent 不是更友好吗？」*）。
+2. **几何/烘焙：SDF 统一形态 + 只引两个库**（`manifold-3d` WASM 做鲁棒布尔、`meshoptimizer` 做 LOD）。
+   烘焙的真实收益是**把噪声从 shader 搬走**——本仓自己已经把账记在
+   [`shader-compile-stall.md`](shader-compile-stall.md) §4（冷编译 6–14 s，首选解法就是烘贴图）。
+3. **渲染框架：没定，而且判据变了。** 用户 2026-09-13 裁决：
+   *「不一定看 web 的，只要是面向未来的渲染框架，截图方便，重载方便，agent 用起来方便最好」*
+   ⇒ 浏览器不再是硬约束 ⇒ **「交付形态」成了头号待裁决**，它决定一切（§4）。
+
+---
+
+## 1. 现状盘点：有什么、缺什么
+
+### 1.1 已有的（都挺硬，别推翻）
+
+| 件 | 在哪 | 状态 |
+|---|---|---|
+| GLSL 分文件 + three `#include` 图 | `web/static/shaders/px/**`（38 个 chunk / 24 个入口 stage） | **已经是一张 DAG**（材质层），带 manifest 门 + glslang 离线编译门 |
+| 截图/判据 harness | `scripts/shots/`（scenes / baselines / metrics / pixdiff / field / refstat / cdp） | 场景 = 固定 URL + **解析相机** + 冻结时间；自己的 headless Edge（CDP 9333 真 GPU） |
+| 参考图标定 | `refs/` + `refstat.mjs` / `refcloud.mjs` | 已明确「只标定、不进构建」 |
+| **程序化烘焙先例** | `web/static/map3d/sunfield.js` | 流场 → 512×320 RGBA32F 切片图集 + 顶点手写三线性；烘 0.2 s，运行时**成本≈0** |
+| 参数管线 | `model::SurfaceParams` → `config/game.ron` → `kinds.js` → `planet.js` | 手工四段同步 |
+
+### 1.2 缺的（本条目的需求书）
+
+1. **热重载：完全没有**（全仓 grep 不到任何 hot reload / watch）。迭代 = 改文件 → 重载整页 →
+   冷编译 6–14 s → 截图。
+2. **同一逻辑两份实现 → 必然漂移**（本仓两次前科）：
+   `scripts/shots/cloudstat.mjs` 把 `cloud.frag::cover()` **逐行搬进 JS** 统计球面覆盖率；
+   `sun-prominence.md` §633 原话：这条路的后果是 *「同一个场有两份实现（JS 烘带级 + GLSL 算顶点级），
+   **必然漂移**」*。
+3. **四处手工同步、错了不报错**：`SurfaceParams` 字段 / `game.ron` / `kinds.js` 的
+   `SURFACE_DEFAULTS` + `VARIANT_CLASS` / `planet.js` 的 uniform 读取。
+   Rust `class_index` 与 JS `VARIANT_CLASS` 不一致时，症状只是「某类行星悄悄换了公式」。
+4. **参数填了不生效**（`crater_density` 事故）：`param → uniform → 着色器真的读它` 这条链没有结构保证。
+5. **「画面空白」分不清是哪一种失败**：GPU 选错 / context 创建失败 / shader 编译失败 / 逻辑没生效
+   —— 四种症状都是黑屏（详见 §5）。
+
+> **所以框架的第一职责不是「做个节点编辑器」，而是把「参数唯一真相」和「生成逻辑只有一份」
+> 这两件事结构性钉死。** DAG 只是手段。
+
+---
+
+## 2. Q1 —— 程序化生成 DAG：脚本？DSL？
+
+### 2.1 四条路线（逐条排除）
+
+| 路线 | 可 diff | 零构建 | 浏览器热求值 + Node 权威烘同构 | 值级增量缓存 | 判定 |
+|---|---|---|---|---|---|
+| Houdini（SOP/PDG/VEX，hython headless） | ✗ `.hip` 二进制（可 Save as text，但几何仍二进制） | ✗ 商业许可，Indie 格式与商业 license 不通 | ✗ | ✓✓ 最强（`pdg.cacheMode`） | **不采用**，只借纪律 |
+| Blender Geometry Nodes + bpy | ~（图只能靠 bpy dump） | ✗ | ✗ | ✗（depsgraph 脏标记，非内容哈希） | 不采用（`-b` 下 `bpy.app.timers` 不触发） |
+| Substance `.sbs`(XML) / Material Maker `.ptex` | ✓ | ✗ 要它们的运行时 | ✗ | ✗ | 借格式，不采用 |
+| 通用编排器（Dagster/Prefect/Snakemake/Ninja/Bazel） | ✓ | 多数要 server+DB+daemon | ✗ 图在 Python、产出是文件 | ✓✓（Bazel/Ninja/Nextflow） | **只借失效语义** |
+| 自研「图即代码 + 内容哈希记忆化求值器」 | ✓✓ | ✓✓ | ✓✓ | ✓ | ✅ **推荐** |
+
+关键事实（已核实）：
+- **没有任何现成框架同时满足**「纯文本图 + headless CLI + 强制确定性 + 亚秒热重载 + 无 bundler/无 node_modules」。
+  每一个都要写同样多的胶水，还要背它的额外重量。
+- 借鉴对象（不是采用对象）：**Ninja 的 `restat`**（= early cutoff 的最小实现）、**Bazel action cache**、
+  **Salsa 的 red-green 增量**（Rust，`ra_ap_salsa`）、**Houdini PDG 的 expand/cook 两阶段 + work-item 文件缓存**、
+  **fogleman/sdf 的 `~/.sdf` 内容寻址缓存**、**Minecraft density function**（真实工业先例：地形就是一棵
+  **纯 JSON 的密度函数 DAG**，可 diff、可版本控制、由数据包分发）。
+- SDF/CSG 小 DSL 的共同选择是 **「宿主语言 + 少量语法糖 + 一个 CLI」**，**不是发明一门新语言**
+  （libfive=Scheme、fogleman/sdf=Python、OpenSCAD=自有文本语言但**无增量缓存所以慢**）。
+
+### 2.2 为什么是 **TS** 而不是 JS —— 本机实测（这是本节最重要的一段）
+
+```
+$ node --version
+v24.14.1
+$ node probe.ts          # 含 type / interface / as const，不带任何 flag
+field/fbm:3.2:abc:1      # ✅ 直接跑通，零构建、零转译步骤
+$ node probe_enum.ts     # 同一个文件里加了 enum E { A = 1 }
+SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]:
+  TypeScript enum is not supported in strip-only mode
+```
+
+⇒ **Node 24 默认开启 type stripping**：`type` / `interface` / 注解 / 泛型 / `as` / `satisfies` /
+`as const` 全部**直接跑**，**不需要 tsc、不需要构建步骤**。只有 `enum` / `namespace` /
+构造函数参数属性 / `import =` / 装饰器被拒（要它们得 `--experimental-transform-types`，不建议）。
+**`enum` 本来就不该用**（`as const` + `keyof typeof` 是更好的写法）—— 这条限制与好风格一致。
+
+于是「类型检查对 agent 更友好」这条诉求可以**不付任何构建代价**地拿到，且有三种强度可用：
+
+| 强度 | 做法 | 代价 |
+|---|---|---|
+| 运行时（免费） | Node 直接跑 `.ts`；类型写错但**语法错**会立刻炸 | 0 |
+| **类型门（推荐）** | `tsc --noEmit` 当合流门的一道（与 `check-glsl-manifest` / `check-shaders` 并列） | 需要 dev-only 的 tsc —— 放 `scratch/ts-tools/`，**与 glslang 的先例一致**（外部工具不进版本库、缺了就跳过） |
+| 生成 Rust | 从图/节点的类型定义生成 Rust `SurfaceParams` + `class_index` | 一次性写几十行生成器 |
+
+**第三行才是真正的收益**：§1.2 的第 3、4 条（四处手工同步、错了不报错）**结构性消灭**。
+这正是本仓一贯的做法——「结构上消灭，而不是继续靠一道门看住」（`glsl-files.md` 原话）。
+
+**浏览器怎么办？** 浏览器不能跑 `.ts`。解法是**求值器根本不住在浏览器里**：
+图求值跑在长驻 Node 进程，浏览器只通过 WebSocket 收**数据 blob**（ArrayBuffer / ImageBitmap）。
+这顺带回避了另一条坑：**浏览器里 `await import(url + '?t=' + Date.now())` 绕 ESM 缓存会泄漏模块**
+（原生 ESM 没有 `import.meta.hot`，垃圾回收失效的 ESM 模块至今无解）。
+⇒ **热重载的是「数据」，不是「代码模块」。**
+
+### 2.3 为什么不引 QuickJS（用户提问，已实测）
+
+用户 2026-09-13 提问：*「此外 node 不是启动很缓慢吗，用 quickJS 之类的轻量运行库如何？」*
+
+实测本机：
+
+| 量 | 实测 |
+|---|---|
+| `node -e "0"` 冷启动 | **43.3 / 44.2 / 44.4 / 48.0 / 56.4 ms** |
+| `node file.js` 冷启动 | 45.5 / 52.4 / 74.5 ms |
+| 常驻进程内 1e6 次 `Math.sin` + `fround` | **17 ms** |
+
+**Node 不但不慢，而且冷启动在本场景根本不进热路径**：热路径是「文件变更 → 重算脏子图 → 推 blob」，
+全部发生在**已经在跑的进程内**，不重启进程 ⇒ 冷启动只付一次（~45 ms），
+QuickJS 省下的那 40 毫秒买不到任何东西。
+
+而 QuickJS 的代价是**致命的**：
+
+1. **标准 QuickJS / quickjs-ng 没有 WASM** ⇒ `manifold-3d`、`three-mesh-bvh`、`meshoptimizer`
+   这些我们打算用的几何库**在里面跑不了**（§3 的整个几何方案建立在 WASM 上）。
+2. 没有 npm 生态、没有 `fs.watch`、没有 `WebSocket`、没有 `node:crypto` —— 都要自己补。
+3. QuickJS 真正值钱的场景**现在都不成立**：① 沙箱化执行**不可信**的 agent 代码（我们写的是自己仓库里的图）；
+   ② 把 JS 引擎**嵌进 Rust 进程**（`rquickjs`）省掉一个 sidecar —— 但那会丢掉 WASM 库。
+
+**若哪天真要「Rust 进程内求值」，正确顺序是 `wasmtime` 跑 WASM 版求值器**（wasmtime 能跑 WASM 库，
+QuickJS 不能），这条路自洽得多。**结论：用 Node 做长驻 watch 进程，不引 QuickJS**；
+把「引擎可嵌入」留给未来当可选优化，先不付它的代价。
+
+### 2.4 形状（拟）
+
+```
+tools/pxgen/                     ← 一个长驻 Node 进程 + 一个 CLI（不进 web/static）
+  nodes/                         ← 一节点一文件（纪律同 shaders/px/noise/*.glsl）
+    field/{value3,fbm,ridged,curl,warp,mask,erode}.ts
+    geom/{sphere,lathe,extrude,sdfUnion,sdfSmooth,isosurface}.ts
+    assembly/{scatter,ring,kit}.ts
+  graphs/{planet,ship,station,cloud}.ts    ← 纯数据：节点声明 + 参数（唯一真相）
+  eval.ts                        ← 拓扑排序 + 内容哈希 + 记忆化 + early cutoff
+  cas.ts                         ← 内容寻址存储（大值落盘）+ GC
+  watch.ts                       ← fs.watch → 脏子图 → WS 推 blob
+  gen-rust.ts                    ← 从类型生成 Rust SurfaceParams / class_index
+```
+
+节点契约（**默认值住在节点里**，与 `SURFACE_DEFAULTS` 的教训一致）：
+
+```ts
+export const type = 'field/fbm';
+export const params = { freq: 1.0, oct: 5, lac: 2.02, gain: 0.5 } as const;
+export const backend = 'cpu' as const;              // 'cpu' 权威 | 'gpu' 缓存
+export type P = typeof params;
+export function evalNode(ctx: Ctx, p: P, ins: Ins): Out { /* 纯函数 */ }
+```
+
+图 = 声明，不是节点（一个节点文件被多张图复用）：
+
+```ts
+export default {
+  seed: 42,
+  nodes: [
+    { id: 'h', type: 'field/fbm',  params: { freq: 3.2, oct: 5 } },
+    { id: 'w', type: 'field/warp', in: { src: 'h' }, params: { amt: 0.6 } },
+  ],
+  out: { height: 'w' },
+} satisfies Graph;
+```
+
+**节点 id 用确定性可读名（`noise_continent/main`），不用随机 uuid** —— 可读 id 直接决定 diff 质量
+（反面教材：Babylon NodeMaterial 的 JSON 里 id 是生成的，diff 全是噪声）。
+
+### 2.5 三条必须抄的语义（写代码时直接用）
+
+1. **early cutoff**：节点重算后如果**输出内容哈希没变**，就**不再往下游传播**。
+   没有这一条，改一个叶参数会重算整条链，亚秒预算立刻爆。（抄 Ninja `restat` / Salsa red-green）
+2. **分层 CAS**：小值（标量、小数组）内联进结果；大值（heightfield、纹理、mesh）写
+   `blobs/<hash>` 只留引用。**这同时解决「diff 友好」与「大二进制」的矛盾**：
+   图文件永远小、永远可 diff；大资产按内容寻址、可 GC。
+3. **expand 与 cook 分离**（抄 Houdini PDG）：先展开（分配 seed / 算实例数 / 不计算），再 cook。
+   于是 agent **毫秒级**就能看到「我这改动会生成多少实例、seed 怎么分布」，不必等烘焙。
+
+**缓存键**必须包含影响正确性的全部因素：
+`hash(opVersion, params, inputHashes, rngId, precisionMode, platformTag)`。
+**改算法必须 bump `opVersion`** —— 否则「升级了 libm 之后旧缓存被静默复用、产出悄悄变了」这种 bug 迟早发生。
+
+### 2.6 一条纪律：**禁止双实现**
+
+本仓已经为「同一逻辑两处实现」烧过两次钱（§1.2 第 2 条）。规则的三种合法形态：
+
+- **(a) 只在 GPU 上实现**，CPU 侧要数据就 **readback**（本仓已有「headless Edge + 真 GPU」的现成路子）。
+  ⇒ `cloudstat.mjs` 那种「把 `cover()` 抄进 JS」从此退休。
+- **(b) 只写一份 CPU 实现**，要上 GPU 就烘成纹理（§3.2）。
+- **(c) 表达式子集同时编译到 JS 与 GLSL/WGSL** —— 成本最高，**先不做**。
+
+### 2.7 确定性铁律（跨机器）
+
+- **禁 `fract(sin(x)*43758.5453)` 这类 hash**：`sin` 跨 libm 不同 ⇒ 不可复现。用整数 hash / 位运算。
+- Rust 侧默认 RNG **不可复现**：`StdRng` / `SmallRng` 被官方标为 **non-portable**（任何 release 都可能改值）
+  ⇒ 要可复现就用 **`rand_chacha`**；`rand_distr` 的正态分布需 `libm` 特性。
+- GPU 浮点跨厂商**不保证 bit-identical** ⇒ **GPU 只能做「运行时缓存」，绝不能当基线来源**；
+  权威烘走 CPU。这一条必须写死，否则本仓辛苦建的像素判据体系会被「基线漂移」毁掉。
+
+---
+
+## 3. Q2 —— 几何库 & 贴图烘焙系统
+
+### 3.1 几何：SDF 是统一语言，**只引两个库**
+
+| 需求 | 选型 | 理由（已核实） |
+|---|---|---|
+| 布尔 / 硬表面 kitbash | **`manifold-3d`（WASM）** | v3.5.3 / 2026-09-07 / **Apache-2.0**；ESM，`Module({ wasmUrl })` **绕开 bundler**（对「无构建」是决定性的）；**v3.5.0 起跨平台浮点确定性**（CI 与浏览器产出一致）；比 CGAL 系快 1–3 个数量级；**Blender 4.5 已内置它当 boolean 求解器**；`levelSet(sdf,…)` 用 marching tetrahedra 从 SDF 出网格（**只要求 SDF 符号正确**，不要求是距离函数）；`extrude/revolve/slice/hull/decompose/simplify/calculateCurvature` 覆盖面板、旋转体、切片 |
+| 有机形态 / 小行星掏洞 | 同上 `levelSet` | 不引第二个依赖 |
+| 简化 / LOD / 量化 | **`meshoptimizer@1.2.0`（npm, MIT）** | `simplifyWithAttributes` 保 UV/法线；**`simplifyPrune` 专治 isosurface 碎片**；`compactMesh` / `encodeFilterOct`；纯 Node 可跑；⚠️ `clusterlod.h` **只有 C++ 侧**（npm 不导出），但本仓（数千小物体）用实例化 + 多级 index buffer 就够，**不需要 Nanite 式 CLOD** |
+| 运行时轻量布尔 | `three-bvh-csg` + `three-mesh-bvh`（MIT） | 纯 ESM、相对路径 + `three` 裸说明符 ⇒ 现有 importmap 直接可用；只在「必须时」用 |
+| 参数化图元 / 面板 | three 内建 `Shape`/`ExtrudeGeometry`/`LatheGeometry`/`TubeGeometry` | 零依赖；舰体是「数据决定形状」，已在本仓 `models.js` 验证 |
+
+**不要碰**：CGAL（GPL/商业双授权 + 慢）、OpenVDB/nanoVDB（GPU 侧只有 CUDA/OptiX/OpenCL/OpenGL/DirectX，
+**没有 WebGPU/WebGL**）、OCCT/opencascade.js（wasm 数十 MB）、**xatlas-web（2024-07-22 已归档）**、
+Instant Meshes / QuadriFlow（产出非确定性、需人工清理）、OpenSubdiv（无 JS 绑定）、
+**three 的 `SimplifyModifier`**（社区实测高密度网格上明显差于 `MeshoptSimplifier`）。
+**也别做**：把行星/卫星「统一成 mesh」——「解析球 + 位移」是性能与画质双赢，网格化是倒退。
+
+**UV：优先不做。** 行星 UV 是解析的（经纬 / cube-sphere）；硬表面走 triplanar / box projection。
+xatlas 只在「硬表面 UV 真的痛」时离线引入。
+
+**架构建议**：**不要把生成的 mesh 当资产传**。传 **seed + recipe**，在消费端用同一套确定性代码重新生成。
+体积≈0，且天然满足「严格程序化」约束。
+
+### 3.2 烘焙：三层分清，收益最大的那层**还没做**
+
+「烘焙」在本项目里必须先拆开，否则选型必错：
+
+| 层 | 本仓现状 | 建议 |
+|---|---|---|
+| shader 内解析计算 | 主战场（`planet.frag` 里 17 处 `fbm` + 4 处 `warp` + `ridged`） | **只留高频细节** |
+| **页内 GPU 烘 → 缓存** | 只有 `sunfield.js` 一处（流场图集） | **推进**：低频部分（大陆/带纹/云底）烘成场纹理；缓存 key = 图 hash，落 IndexedDB/CacheStorage |
+| Node/CPU 权威烘 | 无 | 用于基线 / 判据 / CI（**逐位可复现**） |
+
+- **烘焙的真实收益本仓已记账**：`shader-compile-stall.md` §4 —— 冷编译 ultra 档 **6–14 s**，
+  残留原因是「固定的内联规模」（每 program ~17 份 `vnoise` × 24 program），
+  而笔记里列的**首选解法就是「把噪声烘成贴图——shader 退化成纹理采样，编译量与运行成本一起塌」**。
+  ⇒ 这不是新想法，是**本仓自己写下但没做的那一条**。
+- **一条必须写死的纪律**：GPU 烘跨驱动**不保证逐位一致** ⇒ GPU 烘只能当**运行时缓存**，
+  **绝不能当基线来源**（与 §2.7 同一条）。
+- **噪声 LUT 是性价比最高的一招**（不改架构）：加载时生成一张 **64³/128³ RGBA8 3D 噪声纹理**
+  （1–8 MB，全材质共享），shader 里把多 octave FBM 换成「3D 纹理采样 + 手动叠 octave」。
+  依据：Khronos 论坛的噪声查表实践 + Unity 移动端「贴图永远比 procedural 便宜」的结论。
+  （显存算术：1024³ 3D 纹理 = 1 GB 不可行；**64³ = 1 MB、128³ = 8 MB 完全可行**。）
+- **派生贴图**：法线**不烘**（本仓已在算解析法线）；AO / curvature 是**唯一真正值得离线烘**的一类，
+  但只在「几件 hero 资产」上做（舰/站），数千实例靠图集 + 每实例 seed 去重复。
+- **容器**：暂**不引 KTX2/Basis**（要带 transcoder + loader，收益不抵现状）；自研 PNG（已有）够用。
+  Float 场沿用本仓已验证的 **RGBA32F + NearestFilter + 手写三线性**（float 纹理线性过滤要
+  `OES_texture_float_linear`，这正是当初选 Nearest 的原因）。
+- **AI 贴图（SD/ControlNet/ArmorLab/Meshy）排除**：非确定性（无法 byte-identical 复现）、
+  许可条款有门槛、云端方案违反「无下载资产」。可作为美术离线探索，**不进管线**。
+
+### 3.3 逐资产决策表（照抄即可）
+
+| 资产 | 策略 |
+|---|---|
+| 行星表面 / 卫星 | **shader 实时** + 3D 噪声 LUT（LOD/位移每帧变，烘了会锁死细节层级） |
+| 小行星 / 小行星带 | **加载时 GPU 烘 8–16 变体图集** + 每实例 `vec4(u0,v0,us,vs)` 选片 + seed 扰动（数千实例共享材质 = 图集方案的完美场景） |
+| 行星环 / 尾焰 | shader 实时（极便宜 / 必须动态） |
+| 地表城市 | 加载时烘（屋顶/窗户图集）+ shader 细节（重复度最高，收益最大） |
+| 舰船船体 / 空间站 | 几何靠 Manifold，**离线只烘 AO/curvature** 且只烘旗舰级 hero 资产 |
+| 星空 / 银河背景 | **CubeCamera 烘 cubemap**（已做）+ 值得补 `PMREMGenerator` 预过滤当全场景唯一 IBL |
+
+---
+
+## 4. Q3 —— 渲染框架（本节因用户裁决而**重开**）
+
+用户 2026-09-13 裁决：*「不一定看 web 的，只要是面向未来的渲染框架，截图方便，重载方便，
+agent 用起来方便最好」* ⇒ **浏览器不再是硬约束**。
+
+### 4.1 头号待裁决：**画在哪儿 = 交付形态**
+
+这不是技术偏好问题，是**架构分叉**，因为本仓最贵的一类 bug 就是「两处实现漂移」（§1.2）：
+
+- **若玩家侧的 3D 视图必须是浏览器** ⇒ 美术层也只能是 web ⇒ 「面向未来」在 web 侧**只有一条路**：
+  **TSL / WebGPU**（见 §4.3）。继续在 WebGL2 + 手写 GLSL 上加码 = 往一条不再演进的分支投资。
+- **若交付形态可以是原生**（桌面 app；浏览器可以是可选目标） ⇒ **Bevy + WGSL** 是
+  「面向未来 + 截图方便 + 重载方便 + agent 方便」四项全胜的答案（见 §4.2），
+  而且**模拟核本来就是 Rust**，渲染层可以直接链接 sim crate，
+  **把 JSON/HTTP 边界整个消灭** —— 连本仓烧时间最多的那类坑
+  （「我改的代码到底生效没有 / 我连的是哪个实例」，见 `glsl-files.md` 结尾）一起消灭。
+
+> ⚠️ **反面必须说清**：**两个渲染器 = 又一次双实现漂移**。
+> 本仓已经有过「JS 烘场 vs GLSL 算场必然漂移」「cloudstat.mjs 抄 cover()」两次前科。
+> 所以要么整条 3D 视图都走原生，要么都走 web，**不能让「agent 看到的」和「玩家看到的」是两个渲染器**。
+> 若两边都要：材质/生成逻辑必须**单一源**（Slang 离线编译到 WGSL + GLSL 是唯一自洽的现成方案），
+> 这引入新工具链，成本要单独评估。
+
+### 4.2 原生路线：Bevy + WGSL（若交付形态允许）
+
+| 判据 | Bevy 的答案 |
+|---|---|
+| **重载方便** | **WGSL 资产热重载内建**（`AssetPlugin` 文件监听 → `ShaderCache` 重处理 → pipeline 重新特化，约 100 ms–1 s）；naga 诊断带**源码 span**，`naga_oil` 组合后仍能映射回原文件行号 ⇒ 错误 UX 优于 three 的 GLSL info log |
+| **截图方便** | 无窗口 `WindowPlugin { primary_window: None }` + `headless_renderer` 模式（render-to-`Image` → CPU readback）；**`TimeUpdateStrategy::ManualDuration` 精确渲染固定 dt 的 N 帧** ⇒ 帧精确，**不依赖浏览器 / compositor / rAF / CDP**，也没有双 GPU 抽签、浏览器缓存、「连错实例」这一整类坑 |
+| **agent 方便** | 一条命令 `cargo run -- --scene sun-limb --t 12 --out shot.png --stats json`；RenderDoc 直接可用；compute 是一等公民（程序化生成 / GPU 剔除 / indirect draw） |
+| **代价** | 24 个 GLSL stage → WGSL 重写 + 后处理用 render graph 自建（Bevy 内置 bloom/tonemap/MSAA/AgX，**god rays / flare / grade 要自写**）；Bevy 渲染 API 版本间 churn 大、高层实例化封装不如 three 顺手 |
+
+### 4.3 浏览器路线：three.js + 增量 TSL（若交付形态必须是 web）
+
+**先更正本仓一条已过期的结论**：`web-vfx-pipeline.md` §6 写的是
+「`WebGPURenderer` 不支持裸 GLSL，且 `EffectComposer`/`UnrealBloomPass` 在 WebGPU 下不存在
+⇒ 后处理要整条重写」。**前半句仍然成立，后半句已经过期**：
+
+- **仍成立（已核实）**：`WebGPURenderer` 不支持裸 GLSL `ShaderMaterial`（GLSL 被忽略，
+  症状正是「物体不见了」）；raw WGSL 也不能直接用，必须走 TSL。
+  `WebGLRenderer` 从 **r164** 起彻底移除 NodeMaterial 支持。
+- **已过期（已核实）**：**three r183 引入 `RenderPipeline`** —— 节点式后处理，
+  target `WebGPURenderer` **并带 WebGL2 fallback**，effect 就是 TSL 节点函数。
+  且官方文档索引里 **`GLSLNodeBuilder` 与 `WGSLNodeBuilder` 并存** ⇒
+  **TSL 能编译到 GLSL、可以跑在 WebGL2 上**，迁移因此是**增量的、可回退的**，不是 flag day。
+- **减压阀**：TSL 有 `glsl()` / `wgsl()` 内联函数 + `GLSLNodeFunction` 节点 ⇒
+  现有 24 个 stage **不必逐行翻译**，可以整段内联。
+- **官方已内置我们手写的东西**：TSL 显示函数里有 **`godrays()`**、**`lensflare()`**、`dof`、`ssao`、
+  `ssr`、`fxaa`、`traa`、`lut3D`、`vignette`、`saturation`、`toneMapping`…（`bloom` 未确认，索引抓取被截断）。
+- **顺带一个战略级发现**：**TSL 图就是 JS 代码** ⇒ 它天然是「可热重载、可 diff、agent 可编辑的 DAG」，
+  **与 §2 的 `pxgen` 是同一族东西，将来两层可以合并**（`NodeMaterialLoader`/`NodeLoader` 存在，
+  序列化保真度未验证）。
+- **迁与不迁的判据（写死成三条，能量出来）**：① 需要 **compute** 做交互级烘焙 / GPU 剔除；
+  ② draw call 破 2–3k；③ 需要 storage texture / bindless。**为「fill rate」迁 WebGPU 是错的**
+  —— 同一块硅，fragment 成本不变；naive 重写甚至可能更慢。
+- **WebGPU 的真正收益（不是帧率）**：compute 驱动程序化生成 + 原子 compaction + indirect draw
+  （消掉每帧 CPU→GPU 同步点）、**`ReadbackBuffer`**（agent 数值回读从编码 hack 变成一等 API）、
+  **`TimestampQueryPool`**（可靠 GPU 帧时间）。
+
+**明确不采用**：Babylon（换栈 = 24 stage + 后处理全部重写；它唯一的两张牌是
+**NodeMaterial 的 JSON 序列化**（`serialize()`/`Parse()`，NME 直接产出该 JSON，且 `CustomBlock`
+可内嵌现有 GLSL）与**可能存在的运行时 GLSL→WGSL 转译**——⚠️ 后者未核实，
+**若成立会改变整个成本评估，值得单独做一小时 PoC**）；
+Godot（编辑器热重载最好、Movie Maker 帧精确，但 `--headless` 是 dummy rasterizer **拿不到像素**、
+web 导出最差）；自研 wgpu+naga（**3–6 人月**才到 parity，且没有成熟的浏览器回退；
+它的唯一工程优势是 **naga 可脱离 device 独立校验 ⇒ 天然保留 last-good pipeline**）。
+
+### 4.4 三个判据的横向对照（用户给的判据）
+
+| | three.js WebGL2（现状） | three.js + TSL（WebGPU，WebGL2 fallback） | **Bevy + WGSL** | Godot 4 | wgpu + naga |
+|---|---|---|---|---|---|
+| **重载方便** | 需自建（SSE + 影子编译，~200 行） | 自建；TSL 是 JS ⇒ 重建节点图（资源泄漏语义未验证） | ✅ **内建资产热重载** | ✅ 仅编辑器内 | 自建；naga 独立校验最优雅 |
+| **截图方便** | CDP + compositor + 自建确定性契约 | 同左 + WebGPU headless 旗标（未验证） | ✅ **无窗口离屏 + 帧精确 step** | ⚠️ `--headless` 无像素，要 Movie Maker | ✅ 离屏 readback（但全自建） |
+| **agent 方便** | 中（多实例/缓存/GPU 抽签都是坑） | 中高（节点级错误 + 节点堆栈） | ✅ **一条命令 + RenderDoc + 直连 sim** | 中 | 低（什么都要自己造） |
+| **迁移成本** | 0 | 中（post 链必须重写） | 高（WGSL 重写 + 后处理自建） | 极高 | 3–6 人月 |
+
+### 4.5 编译经济学（用户 2026-09-13 追问：Bevy 编译速度？能否让渲染器脱离 PCG 的 crate 依赖？）
+
+用户原话：*「我不在乎上不上浏览器，关键是 bevy 的编译速度支持 agent 快速迭代吗？或者说如果选择
+rust 栈，能让渲染器和我们的 PCG 美术框架脱离 crate 依赖关系吗，避免美术修改导致渲染器/ecs
+系统重新编译」*。
+
+**本机实测**（rustc 1.97.1 / `x86_64-pc-windows-msvc` / LLVM 22.1.6）：
+
+| 操作 | 时间 |
+|---|---|
+| `cargo build` 无改动（cargo 自身开销下界） | **0.07 s** |
+| 改一行 `src/lib.rs`（根 crate，`game` 依赖它）→ 重编 + 链接 | **0.47 / 0.48 / 0.58 s** |
+| `rust-lld.exe` | **已经躺在工具链里**：`<sysroot>/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe`（只是不在 PATH）⇒ 切 lld 只需 `.cargo/config.toml` 一行，**不用装东西** |
+
+**Bevy 侧本机实测**（2026-09-13；真 app：`App::new().add_plugins(DefaultPlugins)` + `Camera3d`；
+552 个 crate，冷编 193.8 s，产物 167.6 MB）—— ⚠️ **官方那条「`dynamic_linking` 影响最大」
+在本机是反的**：
+
+| 配置 | 改一行 `main.rs` → 重编 + 链接 |
+|---|---|
+| 默认（`link.exe` + 完整 debug info） | **22.6 / 19.5 / 20.1 s** |
+| **lld**（`rust-lld.exe` 本来就躺在工具链里）+ 完整 debug info | 21.0 / 25.0 / 20.7 s —— **没有帮助** |
+| **lld + `[profile.dev] debug = "line-tables-only"`** | **6.9 / 6.7 / 6.7 s** ✅（产物 167.6 → 150.7 MB） |
+| `dynamic_linking`（官方口径「影响最大」） | **40.9 / 41.1 / 40.3 s** —— **反而翻倍** |
+
+⇒ 三条结论：
+
+1. **真正的成本是调试信息，不是链接器**。`debug = "line-tables-only"` 一项就买到 3×，
+   而且保留 file:line ⇒ panic 回溯仍然可读（对 agent 很重要）。
+2. **`dynamic_linking` 在 Windows/MSVC 上是负收益**，别照抄官方那页。
+3. 剩下那 ~6.7 s 是「任何 Rust 改动」的地板；**美术迭代不该踩到它**（§10.4：图是数据 ⇒ 0 编译）。
+
+（方法论：第一轮测量是**无效的**——`cargo init` 生成的 `main.rs` 没用到 Bevy，
+量到的 0.58 s 只是「链一个空 main」。教训：**测编译速度必须让被测代码真的用到那个依赖**。）
+
+**但真正要紧的是这一句：美术迭代的热路径根本不该经过 rustc。**
+
+| 美术改动 | 是否触发 Rust 重编 |
+|---|---|
+| 改 shader 内容 | **0**（Bevy 的 WGSL 资产热重载 / three 的 SSE 通道，都只重建管线） |
+| 改参数 / 调数值 | **0**（uniform 更新） |
+| 改生成图（PCG 逻辑） | **0**（图是数据、求值器常驻 —— §10.4 已裁决为 Rust 数据驱动） |
+| 加一个新 pass / 改渲染管线结构 / 改 ECS 系统 | **要重编**（Bevy）；而 three 里这是改 JS ⇒ **0** |
+
+⇒ **Rust 栈的编译税只落在最后一类改动上**。从本仓 history 看（大气壳重做、云层重做、
+日珥改顶点驱动、噪声编译爆炸），**绝大多数是 shader 内部改动**，少数是管线结构改动
+⇒ 比例偏低但不为零。这一条是 Bevy 与 three 之间**唯一的结构性迭代速度差异**。
+
+**能不能让渲染器脱离 PCG 的 crate 依赖？—— 能，三档，由强到弱：**
+
+1. **进程隔离（推荐；且与渲染栈无关）**：PCG = Node 长驻进程（TS），产出 CAS blob / 共享内存，
+   渲染器**完全不依赖 PCG crate**。改美术 = **0 行 Rust 重编**。
+   这条同时兑现「TS 类型检查」与「零 Rust 编译」两个诉求，**并把「浏览器 vs 原生」从中
+   美术迭代速度里解耦出去** —— 渲染栈于是可以纯按「截图方便 / 重载方便 / 与 sim 的关系」来选。
+2. **数据契约 crate 平行分层**：`px_contract`（只含类型 + serde，冻结）← `px_render` 与 `px_pcg`
+   **都依赖它、彼此不依赖**。⚠️ **依赖方向是硬的：渲染器绝不能依赖 PCG 实现**，否则每次美术改动
+   都会重编 ECS / 渲染管线。节点注册走**数据驱动的注册表**，不是编译期依赖。
+3. **dylib 热插拔**（`libloading` / `abi_stable` / `bevy_dynamic_plugin`）：能，但 Rust 没有稳定 ABI，
+   跨边界只能传 `repr(C)` 或序列化，且社区明确劝退热重载场景 ⇒ **不作为主机制**。
+
+**若最终选 Bevy，快编译清单（缺一不可）**：`dynamic_linking` + lld（本机已具备）+ 
+`[profile.dev] opt-level=1`（自己的 crate）/ 依赖 `opt-level=3` + **Defender 排除 target 目录** +
+独立 target dir + `cargo nextest`（本仓已在用）。
+
+---
+
+## 5. Agent 截图友好：还缺 6 件事（现有 harness 已很硬）
+
+1. **热重载**（最大杠杆）：迭代延迟从「冷编译 6–14 s + 重载整页」降到**一次 rAF / 一次 re-eval**。
+2. **「画面空白」必须能分辨是哪一种失败**（现在四种症状都是黑屏）：
+   - **GPU 身份断言**：每次捕获都查 `UNMASKED_RENDERER_WEBGL` 是否匹配白名单（本机两块 GPU，
+     浏览器默认可能落在 Intel Iris Xe）；
+   - **context 断言**：`canvas.getContext('webgl2') !== null` 且 `!gl.isContextLost()`
+     —— ⚠️ **Edge 144 起 SwiftShader 被弃用，WebGL context 创建会直接失败**（不是静默降级），
+     这会伪装成 shader bug；
+   - **三通道 shader 错误采集**：① 逐 program `LINK_STATUS` + `getProgramInfoLog`（唯一能指出「哪个物体」）
+     ② CDP `Runtime.consoleAPICalled` + `Log.entryAdded` 关键词 ③ 不变量 `(triangles===0) !== (image_blank)`。
+     **错误通道优先级最高**：着色器编译失败时**不要把图像指标交给 agent**，否则它会去调视觉参数而不是修语法。
+3. **通用「物体消失 / 纯白」判据**：现在靠每个场景手写 `limits`；应做成默认量具
+   （非背景像素占比、clipped white/black 比例、tile 网格 Δ、edge density、熵、RAPS 斜率）。
+4. **资产指纹写进 shot JSON**：`graphHash / nodeHashes / shaderHash / tier / camera / GPU / DPR / toneMapping`
+   ⇒ 基线漂移能立刻归因到**哪一层**变了，而不是「图变了」。任何一项变 ⇒ **基线自动作废**。
+5. **`run.mjs --watch`**：SSE 驱动，改文件即重拍并覆盖图 ⇒ agent 侧就是一条 `read_image`。
+6. **确定性地基**（已有部分，补两条）：
+   - 捕获帧**与 rAF 解耦**：页面暴露 `__step(n)` / `__renderOnce()`；自检 = 「同 seed 同时刻连拍两次
+     sha256 相同」，不成立就**拒绝写基线**（这是所有其他 gate 的前置条件）。
+   - **readback 优先级**：应用内 `gl.readPixels` → base64 **>** `Page.captureScreenshot` **>** `toDataURL`
+     （前者绕开 compositor/rAF，是最确定的一条）。
+
+参考图仍按既有裁决用：**只抽无量纲统计量（分位数比例、chroma/hue 分布、RAPS 斜率）当判据，
+不比像素、不进构建**。
+
+---
+
+## 6. 门禁设计（沿用现成文化）
+
+| 门 | 抓什么 | 与现成门的关系 |
+|---|---|---|
+| `node --check` / **`tsc --noEmit`** | ES module / TS 语法与类型 | 扩 `check-js.sh` 第 ③ 道 |
+| `check-glsl-manifest` / `check-shaders` | GLSL 清单 + glslang 编译 | **不动**（现有 3 道保留） |
+| `check-gen-manifest` | 一个节点一个文件 + 登记齐全 | 抄 `check-glsl-manifest` 的形状 |
+| `check-gen-hash` | 同参数两次求值 hash 必须相同 | **确定性门**（新） |
+| `check-gen-dry` | 图能拓扑排序、无环、无未注册节点、无全局 RNG、无 `sin`-hash | 新 |
+| `shots --strict` | 像素判据 + 基线 | 现成，补 §5 的 3、4、6 |
+
+---
+
+## 7. 待裁决（用户 2026-09-13 已答的标 ✅）
+
+1. ✅ **DAG 形态**：要**类型检查** ⇒ **TS**（实测 Node 24 零构建直接跑）。
+   细则待定：求值器放 **Node 长驻**（推荐：浏览器只收数据，且天然避开「浏览器内 dynamic import
+   绕缓存会泄漏 ESM」那条坑）还是浏览器内？
+2. ✅ **图的作用域**：**兼管 sim 参数** —— 从图的类型生成 Rust `SurfaceParams` / `class_index`
+   ⇒ 真正消灭 §1.2 那类「四处手工同步、错了不报错」。
+3. ⏳ **头号：渲染栈**。用户 2026-09-13 原话：*「我不在乎上不上浏览器，关键是 bevy 的编译速度
+   支持 agent 快速迭代吗？或者说如果选择 rust 栈，能让渲染器和我们的 PCG 美术框架脱离 crate
+   依赖关系吗，避免美术修改导致渲染器 / ecs 系统重新编译」*。两问都已在 §4.5 回答：
+   - **编译税只落在「加新 pass / 改管线结构 / 改 ECS 系统」这一类改动上**；shader / 参数 / 图的改动 **0 编译**；
+   - **能脱离**：① 进程隔离（PCG 走 Node 侧车，渲染器不依赖 PCG crate）② 数据契约 crate 平行分层。
+   ⇒ 选择于是退化成二选一：**Bevy（内建热重载 / 帧精确离屏截图 / 直连 sim / compute）
+   vs three（引擎侧改动零编译 / 已有 24 stage + 后处理 / 玩家侧 UI 本来就是 web）**。
+   本机 Bevy 实测（冷编 + 改一行重编 + `dynamic_linking` 前后）后台跑着，数字回填。
+4. ⏳ **是否立刻做 §4.5 那套架构**（Node PCG 侧车 + 契约 crate）—— 它**与渲染栈无关**，
+   是先做先收益的一步，做完之后渲染栈可以慢慢选。
+5. ⏳ **`px_contract` 的边界**：哪些类型进契约（= 冻结、很少变），哪些留在 PCG 内部。
+6. ⏳ **是否把噪声烘成贴图**（`shader-compile-stall.md` §4 的三选项：砍 fbm 调用点 / 烘贴图 / 定 oct 上限）。
+7. ⏳ **几何是否引 `manifold-3d`**（WASM +~1 MB，换来鲁棒布尔 + 跨平台确定性）。
+8. ⏳ **是否开一个 spike**（一小时量级）：验 `WebGPURenderer` 吃不吃裸 GLSL、`NodeMaterialLoader`
+   往返保真、`compute()` 在 WebGL 后端的行为；顺带验 Babylon 的运行时 GLSL→WGSL 是否还成立。
+9. ⏳ **`refs/` 是否加一条 deny 路由**（现在参考图与服务静态根的关系未核）。
+10. ✅ **落地方式**：先只写笔记，不动 worktree（本文即该动作的产物）。
+
+---
+
+## 8. 证据分级
+
+**A 级（实测 / 官方来源，可直接引用）**
+- 本机实测：Node **v24.14.1** 直接跑 `.ts`（strip-only；`enum` 报 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`）；
+  冷启动 **43–56 ms**；常驻进程 1e6 次浮点 17 ms。
+- three.js：`WebGPURenderer` 不支持裸 GLSL（[forum 84845](https://discourse.threejs.org/t/having-a-hard-time-figuring-out-tsl-for-webgpu-support-dqs-implementation/84845)、
+  [forum 87974](https://discourse.threejs.org/t/tsl-and-webgl2-vs-webgpu/87974)）；r164 起 `WebGLRenderer` 移除 NodeMaterial
+  （[forum 64909](https://discourse.threejs.org/t/r164-nodes-no-longer-working-with-webgl-webgl2/64909)）；
+  **r183 `RenderPipeline`**（[2026 后处理指南](https://threejsroadmap.com/blog/the-complete-guide-to-threejs-post-processing-in-2026)）；
+  TSL 可在 WebGL 与 WebGPU 两用（[Maxime Heckel: Field Guide to TSL and WebGPU](https://blog.maximeheckel.com/posts/field-guide-to-tsl-and-webgpu)）；
+  `compileAsync`/`KHR_parallel_shader_compile`（[forum 56572](https://discourse.threejs.org/t/reducing-shader-compile-time-on-scene-initialization/56572)）、
+  `onShaderError`（[forum 40770](https://discourse.threejs.org/t/displaying-shader-error-in-console/40770)）。
+- Manifold：v3.5.3 / Apache-2.0 / WASM 可指定 `wasmUrl`（[repo](https://github.com/elalish/manifold)、
+  [npm](https://registry.npmjs.org/manifold-3d/latest)、[discussions/372](https://github.com/elalish/manifold/discussions/372)、
+  [v3.5.0 release](https://github.com/elalish/manifold/releases/tag/v3.5.0)）；Rust 绑定 `manifold-csg`（[lib.rs](https://lib.rs/crates/manifold-csg)）。
+- meshoptimizer 1.2.0 / MIT / JS API（[js README](https://github.com/zeux/meshoptimizer/blob/master/js/README.md)、
+  [v1 说明](https://meshoptimizer.org/v1.html)）；`SimplifyModifier` 劣于它（[forum 63002](https://discourse.threejs.org/t/mesh-simplification-using-meshoptimizer/63002)）。
+- xatlas（MIT，[repo](https://github.com/jpcy/xatlas)）；**xatlas-web 已归档**（[repo](https://github.com/MozillaReality/xatlas-web)）。
+- **Edge 144+ SwiftShader 弃用 ⇒ WebGL context 创建直接失败**（[Microsoft Learn](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/enableunsafeswiftshader)）。
+- headless 时间线：`--headless=old` 已不存在（M132，[Chromium headless README](https://chromium.googlesource.com/chromium/src/+/lkgr/headless/README.md)）。
+- 噪声查表实践（[Khronos 论坛](https://community.khronos.org/t/perlin-noise-in-a-fragment-shader/46986)）；
+  「贴图永远比 procedural 便宜」（[Unity 讨论](https://discussions.unity.com/t/comparing-performance-of-textures-vs-procedural-shaders-on-mobile-gpu/662156)）。
+- Rust `rand` 可复现性政策（[Rand Book](https://rust-random.github.io/book/crate-reprod.html)）；
+  浮点跨平台不确定（[Gaffer On Games](https://gafferongames.com/post/floating_point_determinism)）。
+- Salsa（[repo](https://github.com/salsa-rs/salsa)）；LiteGraph.js（客户端+服务端都能跑的图引擎，可作**可选**可视化编辑器层）。
+- Babylon `serialize()`/`Parse()` JSON（[serializationTools.ts](https://github.com/BabylonJS/Babylon.js/blob/master/packages/tools/nodeEditor/src/serializationTools.ts)）。
+- 原生 ESM 绕缓存会泄漏（[ar.al](https://ar.al/2021/02/22/cache-busting-in-node.js-dynamic-esm-imports)）。
+
+**B 级（⚠️ 未核实，用前必须复核）**
+- Babylon 的**运行时 GLSL→WGSL 转译**是否仍有效（若成立会显著改变 §4.3 的成本评估）。
+- Bevy / Godot / wgpu-naga / Slang 的**具体版本号与 API 名称**（Bevy 坏 WGSL 是否保留旧 pipeline、
+  Godot Movie Maker 旗标、naga GLSL 前端对 `#version 300 es` 的支持矩阵）。
+- three 的 `NodeMaterialLoader` 往返保真度、TSL 节点图重建的 `dispose`/泄漏语义、
+  `compute()` 在 WebGL 后端的确切行为、`bloom()` 是否为 TSL 显示函数。
+- Houdini 定价与授权边界（Indie 格式与商业 license 不互通）。
+- WebGPU 浏览器覆盖矩阵与 headless 旗标组合。
+
+---
+
+## 9. 复现命令（本轮实测用的）
+
+```bash
+node --version                                  # v24.14.1
+printf 'type P = {a:number};\nconst x: P = {a: 1};\nconsole.log(x.a);\n' > /tmp/p.ts && node /tmp/p.ts
+# ↑ 直接跑通 ⇒ 零构建 TS；把 enum 加进去 ⇒ ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX
+for i in 1 2 3 4 5; do /usr/bin/time -f '%e s' node -e '0'; done   # 冷启动 ~45 ms
+```
+
+---
+
+## 10. 已裁决（2026-09-13）：走 Rust 栈 + 协议 crate
+
+用户原话：*「那我们就走 rust 栈吧，sim 和 renderer 之间用一个协议 crate 规定数据格式，
+两边都只依赖这个协议 crate」*
+
+### 10.0 第二轮裁决（2026-09-13）与它带来的四个新结论
+
+| 裁决 | 取值 |
+|---|---|
+| 血缘 / 落地位置 | **`v2`（当前 checkout）** |
+| sim ↔ renderer | **跨进程** —— 协议 crate **同时是 wire 格式** |
+| 模块划分 | **三个模块 `sim` / `pcg` / `render`，全部 Rust**，通过协议 crate **序列化数据**连接 |
+| PCG 求值器 | **Rust 数据驱动求值器**（§10.4；Node 侧车方案撤回） |
+
+**结论 1 —— wire 格式要分两档，别用 bincode 当长期格式。**
+控制面/状态（小、要能被人和 Python kit 读、要能进 `--digest`）走 **serde_json**（本仓既有事实）；
+大数组（mesh / heightfield / 场纹理）走 **header JSON + 原生 little-endian payload**
+（`dtype`/`shape`/`stride` 写在 header 里）。bincode / postcard 快但没有 schema 演进能力，
+不适合当**跨版本**的长期 wire 格式。
+
+**结论 2 —— 跨进程的代价必须用握手兜住。** 本仓为「连错实例」白烧过七八轮
+（`glsl-files.md` 结尾）。握手报文必须带：`SCHEMA_VERSION` + `protocol_hash` + `pid` + `exe` 路径
++ `git rev`，**对不上就拒绝连接**——这是现有 `/api/ping`（只对 exe 路径）的直接延伸。
+
+**结论 3 —— 但跨进程还白送一个巨大的收益：渲染器可以消费「录制的流」而不是活的 sim。**
+`pxsim --record world.pxstream --round 240` 跑一次，之后美术迭代**根本不需要 sim 在跑**，
+而且渲染器的输入变成一个**文件**（可 hash、可 diff、可当基线、可进 CI）。
+⇒ 在美术迭代这条路径上，「连错了实例」这一类问题**直接清零**。
+
+**结论 4 —— 数据必须单向流：`sim → pcg → render`，pcg 的产出绝不回流 sim。**
+否则美术改动会污染 sim 的确定性，同 seed `--digest` 基线（本仓的核心验收手段）立刻失效。
+
+拓扑：render 同时需要 **sim 状态**（位置/选择/城市）与 **pcg 产出**（资产），
+所以协议 crate 内含两个族：`sim::*` 与 `art::*`。
+
+**⚠️ v2 血缘的现实（重要）**：`v2` 的 `src/state.rs` 目前是 **`pub struct State {}`（1 行）**，
+整个血缘约 4k 行，**没有 `web/`、没有 `.agents/`、没有 `scripts/shots/`**；
+而**全部美术工作**（24 个 GLSL stage、shots 判据体系、基线、笔记）在 `feature/glsl-files`
+那条**孤儿血缘**上。⇒ 两条推论：
+① 协议 crate 在 v2 上是**建骨架**，不是「抽已有投影面」（我上一轮那句基于另一条血缘，**作废**）；
+② 「搬视觉语言」实际只能是**按文件拷贝**（`git checkout feature/glsl-files -- <path>`
+不受血缘限制），shader / 工具 / 笔记能搬，但要连带它们的依赖一起搬（场景表、metrics、tuning）。
+
+### 10.1 crate 图（依赖方向是硬约束）
+
+```
+                    px_protocol        ← 只有类型 + serde + SCHEMA_VERSION
+                    ↑     ↑     ↑         无逻辑、无内部依赖、几乎不变
+                    │     │     │
+              px_sim │  px_render │  px_web
+              (权威) │   (Bevy)   │  (现有 axum JSON API + 现有 web UI)
+```
+
+- `px_render → px_protocol ← px_sim`：**渲染器不依赖 sim，sim 不依赖渲染器**。
+- `px_web → px_protocol ← px_sim`：现有 JSON API **从协议类型序列化** ⇒ web UI 与原生渲染器
+  **消费同一份类型**，两边不会各自演化出第二套形状。
+- 于是：改 sim 内部 / 改渲染器内部**互不重编**；改协议**两边都重编**
+  —— 这正是协议该有的性质，所以它必须**冻结、必须小**。
+
+### 10.2 语言管不住的那一个漏洞 ⇒ 用门看住（必须写进理由）
+
+**Rust 不禁止传递依赖**：`px_render` 完全可以 `use px_sim::...` 而**不报任何错**，
+于是「两边都只依赖协议 crate」在语言层面**根本没有强制力**，它会静静退化。
+
+⇒ 新门 **`scripts/check-crate-graph.mjs`**：读 `cargo metadata --format-version 1`，断言
+① `px_protocol` 的依赖集合 ⊆ 白名单（`serde`，也许 `glam`）；
+② **不存在** `px_render → px_sim` / `px_web → px_sim` 的**任何**依赖路径（不是直连，是可达性）。
+本仓一贯的做法是「结构上消灭，而不是继续靠一道门看住」——**这里是结构上做不到，
+所以只能靠门看住**，理由要写在门的注释里（否则下一个 agent 会以为它是冗余的）。
+
+### 10.3 协议版本与快照（沿用本仓已有的两个惯例）
+
+- 协议 crate 拥有 `SCHEMA_VERSION`（本仓已有 9→10→13 的先例，只是那个住在 sim 里）。
+- 新快照测试：把 `WorldView` 序列化成**稳定 JSON**，与 `px_protocol/tests/protocol.snapshot.json`
+  **逐字**比对 ⇒ 改协议**必须显式更新快照**（与 `--digest` 基线同一个思路）。
+- 精度纪律：**sim 权威 f64，渲染消费 f32**；换算只允许出现在协议 crate 里的**一处**（写明在哪）。
+
+### 10.4 顺带把编译速度问题彻底解决：**图是数据，不是 Rust 代码**
+
+这是本轮最重要的修正。上一轮我为了拿「美术改动 0 编译」建议了 **Node 侧车**；
+**同一个收益在纯 Rust 里也能拿到，只要图是数据**：
+
+| 层 | 形态 | 改它的代价 |
+|---|---|---|
+| 图的**结构 + 参数 + seed** | `.pxg.ron` / `.pxg.json` **数据**文件 | **0 编译**（当资产热重载，或自己的 watch） |
+| shader | `.wgsl` **资产** | **0 编译**（Bevy 内建资产热重载） |
+| 节点的**实现**（新算子类型） | Rust 代码 | **1–3 s**（`dynamic_linking` + lld） |
+| 渲染管线结构 / 新 pass / ECS 系统 | Rust 代码 | **1–3 s** |
+
+⇒ **日常美术迭代（改图、调参、改 shader）= 0 编译**；只有「加新算子 / 加新 pass」才付编译。
+于是 §4.5 的 tier-1（Node 侧车）**不再必要**：Rust 常驻求值器 + 数据图 = 同等收益，
+且不引第二语言、不引进程边界；几何库直接用 **Rust 绑定**（`manifold-csg`）而不是 WASM。
+
+⚠️ 因此 **§2.2（TS 实测）与 §2.3（QuickJS）在「走 Rust 栈」下大部分作废**，
+但两条结论仍然有效、并被本方案直接继承：
+① **热重载的是数据，不是代码模块**（§2.2 末）；② **禁止双实现**（§2.6）。
+另外 §2.7 的确定性铁律原样适用（整数 hash、`rand_chacha`、GPU 不当基线来源）。
+
+### 10.5 分阶段（**在 v2 上**）
+
+- **P0 建协议骨架**：`px_protocol`（类型 + serde + 两档 wire 编解码 + 快照门 + crate 图门）。
+  在 v2 上它承载的是现有 `State {}` 的投影面（很小）⇒ P0 的重点是**把管线立起来**，不是搬运。
+  **验收（自证，不需要审美裁决）= 一份 `--record` 出来的 `.pxstream` 能被重放成同一个 `WorldView`，
+  且两次序列化逐字节相同。**
+- **P1 起 `px_pcg`**：数据图（`.pxg.ron`）+ Rust 常驻求值器 + CAS；先不接渲染，
+  只出 `art::*` 数据，用 CLI + 快照验收。
+- **P2 起 `px_render`（Bevy）**：只读协议（+ 录制流）；先渲染最简场景；
+  headless 截图命令 + 判据按 `scripts/shots` 的思路重建（v2 上没有那套，要拷或重写）。
+- **P3 搬/重写视觉语言**：24 个 GLSL stage → WGSL（原文件可从 `feature/glsl-files` 拷贝参考），
+  后处理按 §4.3 的顺序迁；每步像素对照 + 帧时间对比。
+
+### 10.6 唯一还没解决的结构问题：web UI 与原生渲染器的**重叠**
+
+> ⚠️ **在 `v2` 血缘上这一节暂时不成立**：v2 **没有 `web/`**（它在 `feature/glsl-files` 那条孤儿血缘上），
+> 所以「两套渲染器并存」在 v2 上根本不会发生。将来若要把 web UI 拿回来当第二消费者，
+> 再回来看这一节（协议 crate 会让它便宜很多）。
+
+现有 web UI（状态面板 / 控制行 / 设计图库 / `map3d`）是一大笔投入。走原生之后只有三种收场：
+
+1. **web UI 保留但去掉 3D**（原生 app 负责 3D，web 继续管面板）；
+2. **整体转原生**（`bevy_egui` 之类把 UI 也重做）；
+3. 一段时间内**两套 3D 并存** —— ⚠️ 违反 §4.4 的反面纪律（两个渲染器 = 双实现漂移），
+   只能是**有期限的过渡**，且必须写清截止条件。
+
+**待用户裁决。**
+
+### 10.7 待裁决（本节更新）
+
+1. ⏳ **`.pxstream` 录什么**：sim 的**完整状态**，还是**render 需要的那部分投影**？
+   （决定文件大小，也决定「美术能脱离 sim 迭代到什么程度」）
+2. ⏳ **Bevy vs wgpu**：Bevy 白拿内建热重载 + 帧精确离屏 + ECS/render graph，
+   代价是版本 churn 与编译体量；wgpu 自己拿管线、无 churn，但整套 VFX 要自建。
+3. ⏳ **web UI 的去留**：v2 上**没有 `web/`**（它在另一条血缘）⇒ 这个问题在 v2 上暂时不存在；
+   将来要么不做 web，要么从 `feature/glsl-files` 拷 `web/` 过来当**第二个消费者**（协议 crate 让这变得便宜）。
+4. ⏳ 其余见 §7 的 4–9 项（是否烘噪声 / 是否引 manifold / spike / refs deny 路由）。
+
+---
+
+## 11. P0 完成记录（2026-09-13，分支 `feature/art-stack`）
+
+worktree：`.worktrees/art-stack`（off `v2` @ `3dfd8b2`）。`cargo test --workspace` **全绿（125 个）**。
+
+| 件 | 内容 |
+|---|---|
+| `px_protocol` crate | `sim::*`（`WorldView`）/ `art::*`（`ArtBundle`、`AssetManifest`）/ `wire::*`（**两档**：JSON 控制面 + `header JSON + LE payload` 二进制块）/ `stream::*`（`.pxstream` 录制与重放）/ `ProtocolId` + `Handshake` / `SCHEMA_VERSION` |
+| **门 1** `tests/crate_graph.rs` | ① `px_protocol` 运行时依赖集合**必须恰好 = `{serde, serde_json}`**；② **不存在** `px_render`／`px_web` → `px_sim` 的依赖（直接解析各 `Cargo.toml`，而不是在测试里调 `cargo metadata`——那会和 cargo 自己的锁死锁） |
+| **门 2** `tests/snapshot.rs` | 协议形状快照逐字比对；只有 `PX_UPDATE_SNAPSHOT=1` 才允许更新 |
+| 协议指纹 | `protocol_hash()` = 快照字节的 FNV-1a 64 ⇒ **形状一变指纹就变，跨进程握手自动拒绝旧对端**（门与运行时是连着的） |
+| 录制入口 | `cargo run -p game -- -n 240 -s 11 -f 0.4 --record target/x.pxstream` |
+| 自证 | 录制 → 重放 → 再录制**逐字节相同**；帧里 `round` 稠密有序；内容**确实随轮次变化**（防「录了一坨常数」） |
+
+### 11.1 P0 抓到的两个真问题
+
+**① 会话身份混进了内容**（我的设计错）。第一版 `Handshake` 带 `pid`/`exe` 且被录进流里
+⇒ **同 seed 两次录制字节不同**（实测 `0ED5…` vs `7EA2…`）。修法：拆成
+**`ProtocolId { schema_version, protocol_hash, git_rev }`（稳定 ⇒ 进流）**
+与 **`Handshake { id, pid, exe }`（易变 ⇒ 只用于连接握手）**。
+一句话判据：**一个字段该不该进内容，看它跨进程/跨次运行是否稳定。**
+
+**② 这个 sim 在默认参数下与 seed 无关**。`DomesticEconomy::new` 里 `with_fluctuation(0.0)`
+⇒ RNG 没被消费到影响聚合值的地方 ⇒ `-s 11` 与 `-s 12` 录出的文件**逐字节相同**（实测）。
+不是 bug，是既有性质，已固化成测试 `zero_fluctuation_makes_the_seed_irrelevant`
+（**它一旦失败，说明 sim 开始在 f=0 时消费 RNG，基线口径要重定**——这条测试是留给未来的警报）。
+为了让录制能造出真正随机的世界，CLI 新增 `--fluctuation/-f`：实测 `-f 0.4` 下
+**同 seed 可复现、换 seed 不同**（两种性质都有测试守）。
+
+⚠️ 踩过的坑：`game` 头部会打印 `种子 {seed}`，所以**「换 seed 输出不同」不能靠字符串比较判定**
+——第一版验收就是这么误判的，改成直接比录制文件的 SHA256 才看见真相。
+
+### 11.2 尚未做（P0 之外）
+
+- `.pxstream` 目前只真正用了 `Protocol` / `World` 两类帧；**`Art` / `Blob` 两条通路有类型、
+  有往返测试，但没有生产者**（P1 `px_pcg` 的任务）。
+- **直播通道没做**（socket / 握手校验 / 背压）——按 §10.0 结论 3，美术迭代走**文件流**即可；
+  直播通道等 `px_render` 真起来再说。
+- 这个血缘上**没有 `.agents/notes.md` 索引文件**，所以本笔记暂时没有索引行。
+- 主 worktree 下的 `target/bevy-probe/` 是编译探针（在 gitignore 的 `target/` 里），用完应删。
+  ⚠️ 教训：**`cargo init` 会自动把新包登记进根 manifest 的 `members`**（本轮污染过一次，已恢复）。

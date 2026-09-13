@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "surfaces": {
+    "Handshake": {
+      "exe": "<exe>",
+      "id": {
+        "git_rev": "<rev>",
+        "protocol_hash": 0,
+        "schema_version": 1
+      },
+      "pid": 0
+    },
+    "ProtocolId": {
+      "git_rev": "<rev>",
+      "protocol_hash": 0,
+      "schema_version": 1
+    },
+    "art::ArtBundle": {
+      "assets": [
+        {
+          "blobs": [
+            {
+              "dtype": "F32",
+              "shape": [
+                2,
+                2
+              ]
+            }
+          ],
+          "id": "planet/terran",
+          "kind": "Field2D",
+          "params": {
+            "relief": 0.34
+          }
+        }
+      ]
+    },
+    "sim::WorldView": {
+      "departments": [
+        {
+          "execution": 0.0,
+          "holdings": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "name": "甲(农业)",
+          "payment": 0.0,
+          "revenue": 0.0
+        }
+      ],
+      "goods": [
+        {
+          "name": "粮食",
+          "price": 1.0
+        }
+      ],
+      "round": 0,
+      "schema_version": 1,
+      "totals": {
+        "consumption": 0.0,
+        "cpi": 100.0,
+        "granted": 0.0,
+        "output": 0.0,
+        "treasury": 0.0,
+        "turnover": 0.0
+      }
+    },
+    "stream::Frame.kinds": [
+      "handshake",
+      "world",
+      "art",
+      "blob"
+    ],
+    "stream::MAGIC": "PXST",
+    "stream::STREAM_VERSION": 1,
+    "wire::Blob.payload_bytes": 16,
+    "wire::BlobHeader": {
+      "dtype": "F32",
+      "shape": [
+        2,
+        2
+      ]
+    }
+  }
+}
