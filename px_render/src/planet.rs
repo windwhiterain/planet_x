@@ -47,11 +47,11 @@ impl Palette {
 
     pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
         match self {
-            Self::Rocky => (LinearRgba::rgb(0.34, 0.58, 1.00), 0.55, 0.55),
-            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 1.20, 0.40),
-            Self::Ice => (LinearRgba::rgb(0.62, 0.86, 1.00), 0.45, 0.65),
-            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.95, 0.45),
-            Self::Desert => (LinearRgba::rgb(0.96, 0.76, 0.50), 0.65, 0.50),
+            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.035, 0.50),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 0.100, 0.40),
+            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.030, 0.60),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.085, 0.45),
+            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.040, 0.46),
         }
     }
 
@@ -762,6 +762,7 @@ fn spawn_atmosphere(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<AtmosphereMaterial>,
     parent: Entity,
+    camera: Vec3,
     spec: &PlanetSpec,
 ) {
     if spec.atmo <= 0.0 {
@@ -777,18 +778,19 @@ fn spawn_atmosphere(
             outer: spec.radius * ATMOSPHERE_SHELL,
             density: density * spec.atmo,
             softness,
+            camera,
+            padding: 0.0,
         },
         tint,
     });
-    commands.entity(parent).with_children(|parent| {
-        parent.spawn((
-            crate::ScenePart,
-            PlanetAtmosphere,
-            Mesh3d(meshes.add(sphere)),
-            MeshMaterial3d(material),
-            Transform::default(),
-        ));
-    });
+    let _ = parent;
+    commands.spawn((
+        crate::ScenePart,
+        PlanetAtmosphere,
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(material),
+        Transform::default(),
+    ));
 }
 
 fn spawn_lights(commands: &mut Commands) {
@@ -1142,6 +1144,7 @@ pub fn spawn_planet(
     atmo_materials: &mut Assets<AtmosphereMaterial>,
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
     scatter: Option<&str>,
+    camera: Vec3,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1185,7 +1188,7 @@ pub fn spawn_planet(
 
         match scatter {
             Some(_) => spawn_scattering(commands, media, spec.radius),
-            None => spawn_atmosphere(commands, meshes, atmo_materials, system, spec),
+            None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, spec),
         }
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_lights(commands);
@@ -1351,6 +1354,12 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
 
 
 

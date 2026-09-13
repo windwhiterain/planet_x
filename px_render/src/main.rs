@@ -708,6 +708,7 @@ fn accept_jobs(
                 return;
             };
             let atmo = request.view.atmo;
+            let camera_transform = planet::probe_camera(request.view.cam);
             planet::spawn_planet(
                 &mut commands,
                 &mut meshes,
@@ -717,6 +718,7 @@ fn accept_jobs(
                 &mut atmo_materials,
                 &mut media,
                 request.view.scatter.as_deref(),
+                camera_transform.translation,
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
@@ -741,6 +743,7 @@ fn accept_jobs(
     };
 
     let scattering = request.view.scatter.is_some();
+    let camera_transform = planet::probe_camera(request.view.cam);
     let camera = commands.spawn((
         ScenePart,
         Camera3d::default(),
@@ -755,7 +758,7 @@ fn accept_jobs(
             brightness: request.view.ambient.unwrap_or(DEFAULT_AMBIENT),
             ..default()
         },
-        planet::probe_camera(request.view.cam),
+        camera_transform,
     )).id();
     if scattering {
         commands.entity(camera).insert(AtmosphereSettings::default());
@@ -1378,6 +1381,7 @@ fn rebuild_scene(
         &mut atmo_materials,
         &mut media,
         None,
+        Vec3::new(0.0, 0.55, 3.2),
         &viewer.spec,
     ) {
         Ok(label) => println!("{label}"),
@@ -1402,6 +1406,7 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
 
 
 
