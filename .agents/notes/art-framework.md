@@ -1395,3 +1395,61 @@ pub const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));   // 编译期算好
 - 输入个数是常量（`INPUTS` 是 `&'static [&'static str]`）；可变输入要等真有需求。
 - 噪声是**自己写的值噪声**，与另一条血缘的 GLSL（perlin / fbm / ridged / warp）**还没对过** ——
   §14.5 第 4 条那个 CPU/GPU 一致性问题，现在正式变成一个待办。
+
+---
+
+## 21. P2c 完成记录：程序化星球（PCG → 渲染器这条通路通了）
+
+**通路**：
+
+```
+art/planet/<节点>.toml          改这里（数据，不重编）
+   ↓  cargo run -p px_graphs --bin planet          命中时 10 ms、全算 52 ms
+target/pcg/ab/<xx>/<blake3>.pxart                 高度场（px_protocol 流格式）
+   ↓  px_render --planet <该文件> --palette rocky --out shot.png     0.34 s
+PNG（960×640，星空背景 + 位移球体 + 明暗界线）
+```
+
+**关键点：渲染器不依赖 `px_ops`。** 它用 `px_protocol` 自己解 `.pxart` ——
+这是 §14.2「缓存里存的就是渲染器要吃的东西」的兑现，两个 crate 之间零转换层。
+
+**用法**：
+
+```bash
+cargo run -p px_graphs --bin planet          # 烘高度场
+target/debug/px_render --serve               # 常驻服务（一次预热，之后每张图 ~0.34 s）
+target/debug/px_render --planet target/pcg/ab/xx/yy.pxart --palette rocky --out target/planet.png
+```
+
+四个色板：`rocky`（海洋 + 陆地渐变 + 沙滩 + 雪线）/ `gas`（条带）/ `ice`（冰海 + 裂纹）/
+`lava`（暗岩 + 自发光裂缝）。`--displace / --sea / --radius / --spin` 可覆盖各色板的默认值。
+
+**全链路（改一个参数 → 烘图 → 出图）< 1 s。**
+
+### 21.1 这一段踩的三个坑（都属于「看着像那么回事、其实是错的」）
+
+**① Bevy 的 UV 球极轴在 ±Z，不在 ±Y。**
+`Sphere::mesh().uv()` 里 `z = radius * sin(stack_angle)`，v=0 就是 +Z 极点。相机在 +Z 上
+⇒ **正对北极**：一整片极地冰盖 + 放射状条纹汇聚在正中 + 中心一个黑点（极点奇异点）。
+我第一反应是"贴图错了"，看图才认出那是极点。修法：`Quat::from_rotation_x(-FRAC_PI_2)` 立起极轴。
+
+**② `emissive_texture: None` + 非零 `emissive` = 整个物体均匀发白光（最阴的一个）。**
+我给所有色板都设了 `emissive: rgb(3,3,3)`，只有熔岩配了自发光贴图。Bevy 把**缺失的自发光贴图
+当白色**，于是三个星球变成"均匀自发光"：**与光照完全无关**，既没有明暗界线、调光照也没反应
+—— 我把 illuminance 从 14000 降到 3800，画面**纹丝不动**，这就是证据。修法：无贴图时 `emissive` 必须为 0。
+
+**③ 我自己写的旋钮没接上。** `--sea` 只被**位移**用了，着色里写死了陆地色带的阈值
+⇒ 改海平面不影响陆海比例。**命名与实际不符**是最难发现的一类 bug，因为它"看起来在工作"。
+修法：着色按海平面分成水体/陆地两段，并让海面变平（`height < sea` 时取 `sea`），海岸线才干净。
+
+### 21.2 诊断方法论（延续 §12.2）
+
+这一轮靠的是**把中间产物直接量出来**，不是盯着图猜：
+
+- 白球卡了三轮后，我在贴图生成处加了一行统计（平均 RGB / 近白像素占比），
+  一眼得到"贴图不是白的（平均 (124,153,159)、近白 9.3%）" ⇒ **排除贴图**；
+- 对照：经济世界场景在 9000 lux 下颜色正常 ⇒ **排除曝光**；
+- 两条合起来只剩自发光。
+
+⇒ **在图上猜三次，不如打一行统计。** 这条应该成为美术通路的常规做法：
+每个会"看起来不对"的中间产物，都该有一行可打印的统计。
