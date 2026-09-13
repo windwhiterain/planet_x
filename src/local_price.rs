@@ -59,6 +59,7 @@ pub struct Transform {
 }
 
 pub const LADDER_CAPACITY: f32 = 8.0;
+pub const MODERN_CAPACITY: f32 = 8.0;
 pub const PRIMARY_CAPACITY_COST: f32 = 0.25;
 pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
 pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.2);
@@ -75,6 +76,7 @@ pub struct Spec {
     pub capacity: f32,
     pub self_capacity: bool,
     pub primary_free: bool,
+    pub all_consume: bool,
     pub motive_ladder: Vec<f32>,
 }
 
@@ -88,8 +90,34 @@ impl Spec {
             capacity: f32::INFINITY,
             self_capacity: false,
             primary_free: true,
+            all_consume: false,
             motive_ladder: vec![1.0; GOODS],
         }
+    }
+
+    /// 人人可搞一产、人人消耗三种产物、人人都能开各种工业。
+    /// 一产产能便宜 ⇒ 人人搞 ⇒ 过剩 ⇒ 贱；工业占产能 ⇒ 稀缺 ⇒ 贵
+    pub fn modern(polities: usize) -> Self {
+        let mut spec = Self::symmetric(polities);
+        spec.all_consume = true;
+        spec.primary_free = false;
+        spec.capacity = MODERN_CAPACITY;
+        for unit in 0..GOODS {
+            let mut inputs = vec![0.0; GOODS];
+            let mut outputs = vec![0.0; GOODS];
+            outputs[unit] = SECTOR_SCALE;
+            if unit > 0 {
+                inputs[unit - 1] = SECTOR_INPUT * SECTOR_SCALE;
+            }
+            spec.transforms.push(Transform {
+                polity: polities + 1,
+                unit: GOODS,
+                inputs,
+                outputs,
+                capacity_cost: SECTOR_CAPACITY[unit],
+            });
+        }
+        spec
     }
 
     /// 三层投入产出：一产零投入、二产吃一产、三产吃二产，产能占用逐层变高
@@ -193,7 +221,10 @@ impl Spec {
     fn transforms(&self, polity: usize, unit: usize) -> impl Iterator<Item = &Transform> {
         self.transforms
             .iter()
-            .filter(move |transform| transform.polity == polity && transform.unit == unit)
+            .filter(move |transform| {
+                (transform.polity == polity || transform.polity > self.polities)
+                    && (transform.unit == unit || transform.unit >= GOODS)
+            })
     }
 
     pub fn supply(&self, polity: usize, good: usize) -> f32 {
@@ -300,7 +331,7 @@ impl Lab {
                 );
                 let policies = {
                     let mut policies: Vec<Policy> = (0..GOODS)
-                        .filter(|good| *good != unit)
+                        .filter(|good| spec.all_consume || *good != unit)
                         .map(|good| {
                             let mut consumptions = vec![0.0; GOODS];
                             consumptions[good] = CAMPAIGN;

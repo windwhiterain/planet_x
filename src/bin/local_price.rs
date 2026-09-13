@@ -83,7 +83,7 @@ fn main() {
         "sanction" => sanction_run(&args),
         "sanction-sweep" => sanction_sweep(&args),
         "ladder" => ladder(&args),
-        "sectors" => sectors(&args),
+        "sectors" | "modern" => sectors(&args),
         _ => trace(&args),
     }
 }
@@ -149,6 +149,7 @@ fn spec(args: &Args) -> Spec {
     let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
         "ladder" => return Spec::ladder(args.polities, args.food_supply),
+        "modern" => return Spec::modern(args.polities),
         "sectors" => {
             let mut spec = Spec::sectors(args.polities);
             if args.motive_ladder {
@@ -411,7 +412,7 @@ fn sectors(args: &Args) {
     for ladder in [false, true] {
         let mut local = args.clone();
         local.motive_ladder = ladder;
-        let mut lab = build_with(&local, Spec::sectors(local.polities));
+        let mut lab = build_with(&local, spec(&local));
         lab.run(args.rounds);
         let prices: Vec<f32> = lab
             .market
