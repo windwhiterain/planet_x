@@ -47,11 +47,11 @@ impl Palette {
 
     pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
         match self {
-            Self::Rocky => (LinearRgba::rgb(0.34, 0.56, 1.00), 5.20, 1.05),
-            Self::Gas => (LinearRgba::rgb(1.00, 0.84, 0.60), 3.60, 1.00),
-            Self::Ice => (LinearRgba::rgb(0.66, 0.88, 1.00), 5.60, 0.85),
-            Self::Lava => (LinearRgba::rgb(1.00, 0.44, 0.18), 3.40, 1.30),
-            Self::Desert => (LinearRgba::rgb(0.94, 0.74, 0.48), 4.80, 0.70),
+            Self::Rocky => (LinearRgba::rgb(0.34, 0.58, 1.00), 0.55, 0.55),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 1.20, 0.40),
+            Self::Ice => (LinearRgba::rgb(0.62, 0.86, 1.00), 0.45, 0.65),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.95, 0.45),
+            Self::Desert => (LinearRgba::rgb(0.96, 0.76, 0.50), 0.65, 0.50),
         }
     }
 
@@ -79,6 +79,7 @@ pub struct PlanetSpec {
 }
 
 const SYSTEM_TILT: f32 = 0.34;
+const ATMOSPHERE_SHELL: f32 = 1.14;
 
 #[derive(Component)]
 pub struct PlanetBody;
@@ -766,15 +767,16 @@ fn spawn_atmosphere(
     if spec.atmo <= 0.0 {
         return;
     }
-    let (tint, power, intensity) = spec.palette.atmosphere();
-    let Ok(sphere) = Sphere::new(spec.radius * 1.035).mesh().ico(48) else {
+    let (tint, density, softness) = spec.palette.atmosphere();
+    let Ok(sphere) = Sphere::new(spec.radius * ATMOSPHERE_SHELL).mesh().ico(64) else {
         return;
     };
     let material = materials.add(AtmosphereMaterial {
         params: AtmosphereParams {
-            power,
-            intensity: intensity * spec.atmo,
-            padding: Vec2::ZERO,
+            inner: spec.radius,
+            outer: spec.radius * ATMOSPHERE_SHELL,
+            density: density * spec.atmo,
+            softness,
         },
         tint,
     });
@@ -1349,6 +1351,9 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
 
 
 

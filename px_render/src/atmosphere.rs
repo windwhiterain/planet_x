@@ -5,9 +5,10 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct AtmosphereParams {
-    pub power: f32,
-    pub intensity: f32,
-    pub padding: Vec2,
+    pub inner: f32,
+    pub outer: f32,
+    pub density: f32,
+    pub softness: f32,
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
@@ -35,4 +36,5 @@ impl Plugin for AtmospherePlugin {
         app.add_plugins(MaterialPlugin::<AtmosphereMaterial>::default());
     }
 }
+
 
