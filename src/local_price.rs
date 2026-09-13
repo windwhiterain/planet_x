@@ -484,7 +484,14 @@ impl Lab {
             rule: LevelRule::Counterparty,
             forgetting: 0.1,
             gain: 0.02,
-            recenter: false,
+            // **默认定规范。** `level = index × e^wedge` 在
+            // `index → index·c, wedge → wedge − ln c` 下不变，所以楔子的**均值是
+            // 一个规范自由度**：它不携带任何信息，只是把指数已经承载的水平又说了一遍。
+            // 留着它自由，环路就会沿这个方向漂——实测三产楔子漂到 −35.344，把**所有**
+            // 政体的三产水平一起压到指数的 4.5e-16，于是三产的买价变成 5.12e-17，
+            // t2 毛利 = 16×5.12e-17 − 16×3.14e-2 < 0 ⇒ 停产 ⇒ execution 冻结 ⇒ 洪水无界。
+            // 每轮跨政体中心化就把这个不可观测的自由度钉在 0 上，楔子只留相对信息。
+            recenter: true,
             anchor: true,
             gauge: vec![0.0; GOODS],
             round: 0,
