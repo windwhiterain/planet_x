@@ -1,4 +1,6 @@
-use planet_x::local_price::{bloc_relations, Lab, LevelRule, Spec, GOODS, NAMES};
+use planet_x::local_price::{
+    bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, NAMES,
+};
 
 #[derive(Clone)]
 struct Args {
@@ -24,6 +26,7 @@ struct Args {
     sanction_from: usize,
     sanction_to: usize,
     sanction_w: f32,
+    food_supply: f32,
     relations: f32,
     block_from: usize,
     block_to: usize,
@@ -56,6 +59,7 @@ impl Default for Args {
             sanction_from: 40,
             sanction_to: 80,
             sanction_w: 0.0,
+            food_supply: 0.5,
             relations: 1.0,
             block_from: usize::MAX,
             block_to: usize::MAX,
@@ -75,6 +79,7 @@ fn main() {
         "blockade" => blockade(&args),
         "sanction" => sanction_run(&args),
         "sanction-sweep" => sanction_sweep(&args),
+        "ladder" => ladder(&args),
         _ => trace(&args),
     }
 }
@@ -107,6 +112,7 @@ fn parse() -> Option<Args> {
             "--sanction-from" => args.sanction_from = value()?.parse().ok()?,
             "--sanction-to" => args.sanction_to = value()?.parse().ok()?,
             "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
+            "--food-supply" => args.food_supply = value()?.parse().ok()?,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
@@ -137,6 +143,7 @@ fn usage() {
 fn spec(args: &Args) -> Spec {
     let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
+        "ladder" => return Spec::ladder(args.polities, args.food_supply),
         _ => Spec::scarce(args.polities, 0, 0),
     };
     if args.transform {
@@ -155,16 +162,19 @@ fn spec(args: &Args) -> Spec {
     }
 }
 
-fn build(args: &Args) -> Lab {
-    let lab = Lab::new(&spec(args), args.seed)
+fn build_with(args: &Args, spec: Spec) -> Lab {
+    Lab::new(&spec, args.seed)
         .with_rule(args.rule)
         .with_forgetting(args.forgetting)
         .with_gain(args.gain)
         .with_recenter(args.recenter)
         .with_anchor(args.anchor)
         .with_grant(args.grant)
-        .with_relations(&bloc_relations(args.polities, args.relations));
-    lab
+        .with_relations(&bloc_relations(args.polities, args.relations))
+}
+
+fn build(args: &Args) -> Lab {
+    build_with(args, spec(args))
 }
 
 fn goods(values: &[f32]) -> String {
@@ -346,6 +356,43 @@ fn blockade(args: &Args) {
         min_execution,
     );
     summary(&lab);
+}
+
+fn ladder(args: &Args) {
+    println!(
+        "技术阶梯：同一个部门里两个工艺。省料但慢 = 每件粮吃 {:.2} 件工业品、产能占用 {:.2}/件；费料但快 = {:.2} 件工业品、产能占用 {:.2}/件；产能预算 {}。本例切换点在 工业品价 ÷ 粮食价 ≈ 0.86",
+        LADDER_THRIFTY.0,
+        LADDER_THRIFTY.2,
+        LADDER_FAST.0,
+        LADDER_FAST.2,
+        LADDER_CAPACITY,
+    );
+    println!(
+        "{:>9} {:>10} {:>26} {:>26} {:>10} {:>10}",
+        "粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "部门执行率", "粮食指数"
+    );
+    for supply in [0.4f32, 0.6, 0.8, 1.0, 1.5, 2.5, 4.0] {
+        let mut local = args.clone();
+        local.food_supply = supply;
+        let mut lab = build_with(&local, Spec::ladder(local.polities, supply));
+        lab.run(args.rounds);
+        let department = lab.department_of(0, 0);
+        let processes = lab.process_state(department);
+        let report = |index: usize| match processes.get(index) {
+            Some((share, potential, _)) => format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential),
+            None => String::from("—"),
+        };
+        let food = lab.market.merchandises[0].price;
+        let manufacture = lab.market.merchandises[1].price;
+        println!(
+            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>10.3} {:>10.3}",
+            manufacture / food.max(1e-9),
+            report(0),
+            report(1),
+            lab.polities[0].execution,
+            food,
+        );
+    }
 }
 
 fn mean(values: &[f32]) -> f32 {

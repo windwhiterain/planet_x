@@ -4,7 +4,7 @@ use crate::warehouse::Warehouse;
 
 const FREE_COST: f32 = 1e-6;
 
-fn policy_potential(policy: &Policy, prices: &[f32]) -> f32 {
+fn policy_potential(policy: &Policy, prices: &[f32], capacity: f32) -> f32 {
     let mut cost = 0.0;
     let mut revenue = 0.0;
     let mut demanded = 0.0;
@@ -16,6 +16,8 @@ fn policy_potential(policy: &Policy, prices: &[f32]) -> f32 {
         cost += consumption * price;
         revenue += output * price;
     }
+    let capacity_use = policy.capacity_use();
+    let per_capacity = capacity.is_finite() && capacity_use > 0.0;
     if policy.is_transform() {
         if cost <= 0.0 {
             return 0.0;
@@ -24,11 +26,18 @@ fn policy_potential(policy: &Policy, prices: &[f32]) -> f32 {
         if margin <= 0.0 {
             return 0.0;
         }
-        return margin / cost;
+        return if per_capacity {
+            margin / capacity_use
+        } else {
+            margin / cost
+        };
     }
     let motive = policy.motive.max(0.0);
     if motive <= 0.0 || demanded <= 0.0 {
         return 0.0;
+    }
+    if per_capacity {
+        return motive / capacity_use;
     }
     motive / cost.max(FREE_COST)
 }
@@ -72,7 +81,7 @@ pub(super) fn plan(
     let mut total = 0.0;
     let mut produce_total = 0.0;
     for policy in department.policies.iter_mut() {
-        policy.price_potential = policy_potential(policy, &prices);
+        policy.price_potential = policy_potential(policy, &prices, department.capacity);
         policy.distribution = policy.price_potential;
         if policy.is_transform() {
             produce_total += policy.distribution;
@@ -82,6 +91,7 @@ pub(super) fn plan(
     }
 
     let mut choice = department.policy_choice;
+    let mut capacity_want = 0.0;
     if total > 0.0 || produce_total > 0.0 {
         let mut best = f32::NEG_INFINITY;
         for (p, policy) in department.policies.iter_mut().enumerate() {
@@ -99,6 +109,7 @@ pub(super) fn plan(
                 best = policy.distribution;
                 choice = p;
             }
+            capacity_want += policy.distribution * policy.capacity_use();
             for (k, consumption) in policy.consumptions.iter().enumerate() {
                 let produced = policy.outputs.get(k).copied().unwrap_or(0.0);
                 intake[k] += policy.distribution * consumption.max(0.0);
@@ -121,6 +132,9 @@ pub(super) fn plan(
         if *want > 0.0 {
             execution = execution.min(available[k] / want);
         }
+    }
+    if capacity_want > 0.0 {
+        execution = execution.min(department.capacity / capacity_want);
     }
     let execution = execution.clamp(0.0, 1.0);
 

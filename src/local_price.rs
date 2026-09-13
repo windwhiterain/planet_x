@@ -55,13 +55,19 @@ pub struct Transform {
     pub unit: usize,
     pub inputs: Vec<f32>,
     pub outputs: Vec<f32>,
+    pub capacity_cost: f32,
 }
+
+pub const LADDER_CAPACITY: f32 = 8.0;
+pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
+pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.5);
 
 pub struct Spec {
     pub polities: usize,
     pub supply: Vec<Vec<f32>>,
     pub motive: Vec<Vec<f32>>,
-    pub transform: Option<Transform>,
+    pub transforms: Vec<Transform>,
+    pub capacity: f32,
 }
 
 impl Spec {
@@ -70,7 +76,8 @@ impl Spec {
             polities,
             supply: vec![vec![1.0; GOODS]; polities],
             motive: vec![vec![1.0; GOODS]; polities],
-            transform: None,
+            transforms: Vec::new(),
+            capacity: f32::INFINITY,
         }
     }
 
@@ -86,20 +93,71 @@ impl Spec {
         spec
     }
 
-    pub fn with_transform(mut self, polity: usize, unit: usize, inputs: Vec<f32>, outputs: Vec<f32>) -> Self {
-        self.transform = Some(Transform {
+    /// 同一个部门挂两个工艺：省料但慢、费料但快。切换点在 工业品价 ÷ 粮食价 = 1
+    pub fn ladder(polities: usize, food_supply: f32) -> Self {
+        let mut spec = Self::scarce(polities, 0, 0);
+        spec.supply[0][0] = food_supply;
+        spec.capacity = LADDER_CAPACITY;
+        for (rate, scale, capacity_cost) in [LADDER_THRIFTY, LADDER_FAST] {
+            let mut inputs = vec![0.0; GOODS];
+            let mut outputs = vec![0.0; GOODS];
+            inputs[1] = rate * scale;
+            outputs[0] = scale;
+            spec.transforms.push(Transform {
+                polity: 0,
+                unit: 0,
+                inputs,
+                outputs,
+                capacity_cost,
+            });
+        }
+        spec
+    }
+
+    pub fn with_transform(
+        mut self,
+        polity: usize,
+        unit: usize,
+        inputs: Vec<f32>,
+        outputs: Vec<f32>,
+    ) -> Self {
+        self.transforms.push(Transform {
             polity,
             unit,
             inputs,
             outputs,
+            capacity_cost: 0.0,
         });
         self
     }
 
-    fn transforms(&self, polity: usize, unit: usize) -> Option<&Transform> {
-        self.transform
-            .as_ref()
-            .filter(|transform| transform.polity == polity && transform.unit == unit)
+    pub fn with_process(
+        mut self,
+        polity: usize,
+        unit: usize,
+        inputs: Vec<f32>,
+        outputs: Vec<f32>,
+        capacity_cost: f32,
+    ) -> Self {
+        self.transforms.push(Transform {
+            polity,
+            unit,
+            inputs,
+            outputs,
+            capacity_cost,
+        });
+        self
+    }
+
+    pub fn with_capacity(mut self, capacity: f32) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
+    fn transforms(&self, polity: usize, unit: usize) -> impl Iterator<Item = &Transform> {
+        self.transforms
+            .iter()
+            .filter(move |transform| transform.polity == polity && transform.unit == unit)
     }
 
     pub fn supply(&self, polity: usize, good: usize) -> f32 {
@@ -215,15 +273,20 @@ impl Lab {
                             Policy::new(consumptions, MOTIVE * spec.motive(polity, good))
                         })
                         .collect();
-                    if let Some(transform) = spec.transforms(polity, unit) {
-                        policies.push(Policy::transform(
-                            transform.inputs.clone(),
-                            transform.outputs.clone(),
-                        ));
+                    for transform in spec.transforms(polity, unit) {
+                        policies.push(
+                            Policy::transform(
+                                transform.inputs.clone(),
+                                transform.outputs.clone(),
+                            )
+                            .with_capacity_cost(transform.capacity_cost),
+                        );
                     }
                     policies
                 };
-                departments.push(Department::new(productions, policies));
+                departments.push(
+                    Department::new(productions, policies).with_capacity(spec.capacity),
+                );
             }
             polities.push(Polity {
                 name: NAMES[polity % NAMES.len()],
@@ -339,6 +402,28 @@ impl Lab {
 
     pub fn department_of(&self, polity: usize, unit: usize) -> usize {
         polity * UNITS + unit
+    }
+
+    /// 某个部门的各个转换工艺的（份额，单位产能利润，产能占用）
+    pub fn process_state(&self, department: usize) -> Vec<(f32, f32, f32)> {
+        self.departments
+            .departments
+            .get(department)
+            .map(|department| {
+                department
+                    .policies
+                    .iter()
+                    .filter(|policy| policy.is_transform())
+                    .map(|policy| {
+                        (
+                            policy.distribution(),
+                            policy.price_potential(),
+                            policy.capacity_use(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 每个部门每种商品的成交均价除以银河指数，没有成交记 0

@@ -447,6 +447,51 @@ fn a_profitable_absorber_runs_but_cannot_clear_a_flood() {
 }
 
 #[test]
+fn a_ladder_switches_on_the_price_of_its_input() {
+    let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11).with_rule(LevelRule::Fixed);
+    let department = lab.department_of(0, 0);
+
+    lab.market.merchandises[0].price = 1.0;
+    lab.market.merchandises[1].price = 0.8;
+    lab.departments.plan(&mut lab.warehouses, &lab.market);
+    let cheap_input = lab.process_state(department);
+
+    lab.market.merchandises[1].price = 0.95;
+    lab.departments.plan(&mut lab.warehouses, &lab.market);
+    let dear_input = lab.process_state(department);
+
+    assert_eq!(cheap_input.len(), 2, "阶梯上应当有两个工艺");
+    assert!(
+        cheap_input[1].0 > cheap_input[0].0,
+        "投入便宜到切换点以下，费料但快的工艺份额应当更大：{cheap_input:?}",
+    );
+    assert!(
+        dear_input[0].0 > dear_input[1].0,
+        "投入贵过切换点，省料但慢的工艺份额应当更大：{dear_input:?}",
+    );
+}
+
+#[test]
+fn a_capacity_budget_throttles_the_department() {
+    let mut tight = Lab::new(&Spec::ladder(3, 0.5), 11).with_rule(LevelRule::Fixed);
+    tight.run(20);
+    let mut loose = Lab::new(&Spec::ladder(3, 0.5).with_capacity(f32::INFINITY), 11)
+        .with_rule(LevelRule::Fixed);
+    loose.run(20);
+
+    let tight_execution = tight.polities[0].execution;
+    let loose_execution = loose.polities[0].execution;
+    assert!(
+        tight_execution < 1.0,
+        "产能预算应当真的咬住：执行率 {tight_execution}",
+    );
+    assert!(
+        tight_execution < loose_execution,
+        "没有产能预算时执行率更高：紧张 {tight_execution} 宽松 {loose_execution}",
+    );
+}
+
+#[test]
 fn the_lab_is_reproducible() {
     let run = |seed: u64| {
         let mut lab = Lab::new(&scarce(), seed)

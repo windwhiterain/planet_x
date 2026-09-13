@@ -22,6 +22,8 @@ pub struct Department {
     /// index with [`crate::warehouse::Stock`]
     pub productions: Vec<f32>,
     pub policies: Vec<Policy>,
+    /// 每轮可用的产能，无穷表示不设限
+    pub capacity: f32,
     /// index [`Self::policies`]，份额最大的政策
     policy_choice: usize,
     /// 本轮按分布实际提货的比例
@@ -33,6 +35,8 @@ pub struct Policy {
     pub consumptions: Vec<f32>,
     /// index with [`crate::warehouse::Stock`]，转换政策的产出
     pub outputs: Vec<f32>,
+    /// 每单位经手物资占用的产能
+    pub capacity_cost: f32,
     pub motive: f32,
     /// 意愿除以资源价格
     price_potential: f32,
@@ -185,9 +189,15 @@ impl Department {
         Self {
             productions,
             policies,
+            capacity: f32::INFINITY,
             policy_choice: 0,
             policy_execution: 0.0,
         }
+    }
+
+    pub fn with_capacity(mut self, capacity: f32) -> Self {
+        self.capacity = capacity.max(0.0);
+        self
     }
 
     pub fn policy_choice(&self) -> usize {
@@ -205,6 +215,7 @@ impl Policy {
         Self {
             consumptions,
             outputs,
+            capacity_cost: 0.0,
             motive,
             price_potential: 0.0,
             distribution: 0.0,
@@ -216,10 +227,31 @@ impl Policy {
         Self {
             consumptions: inputs,
             outputs,
+            capacity_cost: 0.0,
             motive: 0.0,
             price_potential: 0.0,
             distribution: 0.0,
         }
+    }
+
+    pub fn with_capacity_cost(mut self, capacity_cost: f32) -> Self {
+        self.capacity_cost = capacity_cost.max(0.0);
+        self
+    }
+
+    /// 每单位产出占用的产能
+    pub fn capacity_use(&self) -> f32 {
+        let handled: f32 = self
+            .consumptions
+            .iter()
+            .map(|consumption| consumption.max(0.0))
+            .sum::<f32>()
+            + self
+                .outputs
+                .iter()
+                .map(|output| output.max(0.0))
+                .sum::<f32>();
+        self.capacity_cost * handled
     }
 
     pub fn is_transform(&self) -> bool {
