@@ -1144,15 +1144,15 @@ fn view(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn view_startup(
-    stars: Res<Stars>,mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    commands.insert_resource(Stars(images.add(planet::star_cube(512))));
+fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let stars = images.add(planet::star_cube(512));
+    commands.insert_resource(Stars(stars.clone()));
     commands.spawn((
         OrbitCamera,
         Camera3d::default(),
         Msaa::Off,
         Skybox {
-            image: Some(stars.0.clone()),
+            image: Some(stars),
             brightness: SKY_BRIGHTNESS,
             rotation: Quat::IDENTITY,
         },
@@ -1381,6 +1381,7 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
 
 
 
