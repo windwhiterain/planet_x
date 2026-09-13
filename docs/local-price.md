@@ -1534,3 +1534,56 @@ cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 
 JSON 每个部门多了
 `settlement{gap,mu,iterations,phases,converged,residual,degraded,blocked,utilization}`，
 轮级多了 `settlement_failures`（累计次数）——**数值出问题必须在读数里看得见**。
+
+### 18.8 待执行：去掉归一化，给 motive 一个边际效应（**已定方案，尚未落地**）
+
+**诊断（已在 §18.7 之后实测确认）**：需求在**量**上对价格完全没有响应。
+`solve` 的目标第一项 `Σ_p w_p·x_p` 对 `x` 是**线性**的，`w_p` 是常数，所以只要影子价格
+低于 `w_p` 最优就是 `x_p = 1`。实测商品 0 从第 150 轮到第 2000 轮：`wanted_buy = 9` 不变、
+缺口 `target − stock ≈ 14.5` 不变，而买价从 `0.166` 走到 `2.133e-21`——**价格动了 19 个
+数量级，需求量一点没动**。另外 `consumption_potential` 在产能有限时返回
+`motive / capacity_use`，与价格无关，连分配上的价格响应都没有。
+
+**第二个缺陷：`distribution` 归一化是与优化器打架的残留。**
+`distribution = price_potential / consume_weight`（归一化到本部门消费族内和为 1）是在解优化
+**之前**定死的，而且同一个数既当目标系数又当物质量（`c_pk = distribution_p × 配方_pk`）。
+后果：**motive 的绝对大小完全不起作用，只有比值起作用**——把所有政策的 motive 同乘 1000，
+输出逐位不变。`motive` 现在只是一个混合比例，`x_p` 只是"这套固定混合被兑现了几成"。
+
+**目标形式**：
+
+```
+max  Σ_p motive_p · x_p^θ  +  μ·[ Σ_k ln s_k + Σ_p ln x_p ]
+s.t. s_k + Σ_p 配方_pk · x_p = S_k
+     x_p > 0,  s_k > 0
+```
+
+- `motive_p` **直接进目标**（绝对值，不再归一化），其大小从此有经济含义；
+- 约束用**未缩放的配方**，`x_p` 读作"跑几篮"；
+- 混合与规模都由解给出，`distribution` 从输入降级为读数；
+- **上界 `x ≤ 1` 整个删掉**：去掉归一化后那个"1"是凭空的帽子，量约束只应当是仓库存量
+  （`s_k > 0`）。库存多 ⇒ 影子价格低 ⇒ 多吃几篮；库存紧 ⇒ `λ` 大 ⇒ 自动少吃。
+- `u(x) = x^θ`，`θ = 0.5`（首版固定）。`u' = θ·x^{θ−1}`：`x→0` 时无穷（每条政策总会吃一点），
+  `x→1` 时趋于 `θ`（有界，任何正影子价格都压得住）。`θ → 1` 退回线性（无边际效应）。
+
+**KKT**：`θ·motive_p·x_p^{θ−1} + y_p = Σ_k 配方_pk·λ_k`，配合 `s_kλ_k = x_p y_p = σμ`。
+Schur 对角变成 `D_p = y_p/x_p + θ(1−θ)·motive_p·x_p^{θ−2}`（两项都正 ⇒ 仍是对称正定）。
+`z` 与 `(1−x)z = σμ` 整条互补关系消失，`boundary` 少一个 `1−x` 的限步，`gap = (K + P)·μ`。
+`μ` 的量纲要跟着换：取 `μ = BARRIER · θ · mean(motive)`（与 `x = 1` 处的边际效用同量纲）。
+
+**`execution` 删除**（用户指令）。它的定义随归一化一起失效（`x` 变成篮数之后，
+"x 的加权平均"没有含义），而且物理活跃度已经有 `intake`（本轮实际提货量）在承担。
+删除面：`department.policy_execution`、`Polity.execution`、`Snapshot.executions`、
+`probe` 的观测字段、以及三种输出格式里的 `execution_mean` / `execution_min`。
+
+**执行顺序与安全点**（每一步都要能编译、能提交，避免半迁移的树）：
+
+1. `settlement.rs`：换目标、删上界障碍与 `z` 块、改 `start/norm/direction/boundary/gap`、
+   改 μ 量纲；`solve` 的签名不变（`w` 语义由"份额"变成"motive"，`plans` 由"份额×配方"
+   变成裸配方）。更新它那 10 条性质测试。
+2. `department/step.rs::plan()`：`plans` 传裸配方、`willingness` 传 `motive`，删掉
+   `consume_weight` 归一化那一段；删 `policy_execution` 的计算。
+3. `department.rs` / `local_price.rs` / `department/probe.rs` / `bin/local_price.rs`：
+   删 `execution` 的全部字段与打印点。
+4. 重测重新基线：部门那五条、三条水平类测试、以及所有断言 `execution` 的地方；
+   旧值新值一并记进本文件。
