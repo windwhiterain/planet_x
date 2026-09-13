@@ -3,11 +3,14 @@ mod step;
 #[cfg(test)]
 mod tests;
 
+use crate::market_state::MarketState;
+
 pub struct Market {
     pub merchandises: Vec<Merchandise>,
     pub traders: Vec<Trader>,
     /// key: deal sender, deal reciver, merchandise
     pub deals: Vec<Vec<Vec<Deal>>>,
+    pub state: MarketState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,10 +72,13 @@ impl Market {
         }
         let traders_len = traders.len();
         let deals = vec![vec![vec![Deal::default(); merchandises_len]; traders_len]; traders_len];
+        let prices: Vec<f32> = merchandises.iter().map(|item| item.price).collect();
+        let state = MarketState::new(&prices);
         Self {
             merchandises,
             traders,
             deals,
+            state,
         }
     }
 

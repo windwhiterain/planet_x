@@ -3,9 +3,9 @@ use std::f32::consts::{PI, TAU};
 use fastrand::Rng;
 
 use super::{Department, Departments, Policy};
-use crate::estimator::Estimator;
+use crate::estimator2d::Estimator2D;
 use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
-use crate::warehouse::{SellerRule, Stock, Warehouse, Warehouses};
+use crate::warehouse::{Stock, Warehouse, Warehouses};
 
 const GOODS: usize = 3;
 const DEPARTMENTS: usize = 3;
@@ -38,6 +38,7 @@ pub struct Report {
     pub min_price: f32,
     pub max_price: f32,
     pub drift: f32,
+    pub drift_online: f32,
     pub min_stock: f32,
     pub max_stock: f32,
     pub uncleared: f32,
@@ -51,7 +52,7 @@ pub struct Report {
 impl Report {
     pub fn line(&self) -> String {
         format!(
-            "{} 周期 {:>4} 幅度 {:>5.2} {}：价格 {:.3}~{:.3} 漂移 {:+.1}% 库存 {:.1}~{:.1} 未成交 {:>5.1}% 冻结 {} 透支 {} 现金 {:.2}~{:.2} 货币 {:.2}",
+            "{} 周期 {:>4} 幅度 {:>5.2} {}：价格 {:.3}~{:.3} 漂移 {:+.1}% 学漂移 {:+.1}% 库存 {:.1}~{:.1} 未成交 {:>5.1}% 冻结 {} 透支 {} 现金 {:.2}~{:.2} 货币 {:.2}",
             self.regime,
             self.period,
             self.amplitude,
@@ -59,6 +60,7 @@ impl Report {
             self.min_price,
             self.max_price,
             100.0 * self.drift,
+            100.0 * self.drift_online,
             self.min_stock,
             self.max_stock,
             self.uncleared,
@@ -88,21 +90,31 @@ pub struct Round {
     pub targets: [[f32; GOODS]; DEPARTMENTS],
     pub declared: [[f32; GOODS]; DEPARTMENTS],
     pub deal_price: [[f32; GOODS]; DEPARTMENTS],
-    pub sell_scale: [[f32; GOODS]; DEPARTMENTS],
+    pub scale: [[f32; GOODS]; DEPARTMENTS],
     pub quote: [[f32; GOODS]; DEPARTMENTS],
-    pub sell_slope: [[f32; GOODS]; DEPARTMENTS],
-    pub sell_intercept: [[f32; GOODS]; DEPARTMENTS],
+    pub fill: [[f32; GOODS]; DEPARTMENTS],
+    pub expected: [[f32; GOODS]; DEPARTMENTS],
+    pub share: [[f32; GOODS]; DEPARTMENTS],
+    pub depth: [[f32; GOODS]; DEPARTMENTS],
+    pub noise: [[f32; GOODS]; DEPARTMENTS],
+    pub price_slope: [[f32; GOODS]; DEPARTMENTS],
+    pub price_intercept: [[f32; GOODS]; DEPARTMENTS],
+    pub drift: [f32; GOODS],
     pub cash: [f32; DEPARTMENTS],
     pub net: [[f32; GOODS]; DEPARTMENTS],
     pub execution: [f32; DEPARTMENTS],
 }
 
-/// 某个部门在它自产那种商品上的学习曲线与实况
+/// 某个部门在它自产那种商品上的响应曲线与实况
 pub struct Curve {
     pub department: usize,
     pub declared: f32,
     pub dealt: f32,
-    pub learned: f32,
+    pub expected: f32,
+    pub fill: f32,
+    pub share: f32,
+    pub depth: f32,
+    pub noise: f32,
     pub realized: f32,
     pub slope: f32,
     pub intercept: f32,
@@ -111,11 +123,15 @@ pub struct Curve {
 impl Curve {
     pub fn line(&self) -> String {
         format!(
-            "[{}] 申报 {:+.2} 成交 {:+.2} 学价 {:.3} 实价 {:.3} (斜率 {:+.2} 截距 {:+.2})",
+            "[{}] 申报 {:+.2} 成交 {:+.2} 预期 {:+.2} 兑现 {:.2} 份额 {:.2} 深度 {:.2} 噪声 {:.2} 实价 {:.3} (价斜率 {:+.2} 截距 {:+.2})",
             ["甲", "乙", "丙"][self.department],
             self.declared,
             self.dealt,
-            self.learned,
+            self.expected,
+            self.fill,
+            self.share,
+            self.depth,
+            self.noise,
             self.realized,
             self.slope,
             self.intercept,
@@ -131,14 +147,18 @@ impl Round {
             department,
             declared: self.declared[department][good],
             dealt: self.net[department][good],
-            learned: self.sell_scale[department][good],
+            expected: self.expected[department][good],
+            fill: self.fill[department][good],
+            share: self.share[department][good],
+            depth: self.depth[department][good],
+            noise: self.noise[department][good],
             realized: if market > 0.0 {
                 self.deal_price[department][good] / market
             } else {
                 0.0
             },
-            slope: self.sell_slope[department][good],
-            intercept: self.sell_intercept[department][good],
+            slope: self.price_slope[department][good],
+            intercept: self.price_intercept[department][good],
         }
     }
 
@@ -148,17 +168,13 @@ impl Round {
         for i in 0..DEPARTMENTS {
             let declared = self.declared[i][good];
             parts.push(format!(
-                "{} {} {:+.2} 学价 {:.3} 报价 {:.3} 实价 {:.3} 成交 {:+.2}",
+                "{} {} {:+.2} 力度 {:.2} 报价 {:.3} 兑现 {:.2} 成交 {:+.2}",
                 ["甲", "乙", "丙"][i],
                 if declared > 0.0 { "卖" } else { "买" },
                 declared,
-                self.sell_scale[i][good],
+                self.share[i][good],
                 self.quote[i][good],
-                if self.prices[good] > 0.0 {
-                    self.deal_price[i][good] / self.prices[good]
-                } else {
-                    0.0
-                },
+                self.fill[i][good],
                 self.net[i][good],
             ));
         }
@@ -172,10 +188,16 @@ struct Observation {
     targets: [[f32; GOODS]; DEPARTMENTS],
     declared: [[f32; GOODS]; DEPARTMENTS],
     deal_price: [[f32; GOODS]; DEPARTMENTS],
-    sell_scale: [[f32; GOODS]; DEPARTMENTS],
+    scale: [[f32; GOODS]; DEPARTMENTS],
     quote: [[f32; GOODS]; DEPARTMENTS],
-    sell_slope: [[f32; GOODS]; DEPARTMENTS],
-    sell_intercept: [[f32; GOODS]; DEPARTMENTS],
+    fill: [[f32; GOODS]; DEPARTMENTS],
+    expected: [[f32; GOODS]; DEPARTMENTS],
+    share: [[f32; GOODS]; DEPARTMENTS],
+    depth: [[f32; GOODS]; DEPARTMENTS],
+    noise: [[f32; GOODS]; DEPARTMENTS],
+    price_slope: [[f32; GOODS]; DEPARTMENTS],
+    price_intercept: [[f32; GOODS]; DEPARTMENTS],
+    drift: [f32; GOODS],
     net: [[f32; GOODS]; DEPARTMENTS],
     execution: [f32; DEPARTMENTS],
     stock: f32,
@@ -215,9 +237,7 @@ fn warehouses(treasury: Treasury) -> Warehouses {
             .map(|department| {
                 let mut stocks = Vec::with_capacity(GOODS);
                 for _ in 0..GOODS {
-                    stocks.push(
-                        Stock::new(BASE / 2.0, BASE / 2.0).with_seller_rule(SellerRule::TargetVolume),
-                    );
+                    stocks.push(Stock::new(BASE / 2.0, BASE / 2.0));
                 }
                 let warehouse = Warehouse::new(stocks);
                 match treasury {
@@ -329,10 +349,16 @@ impl Probe {
             targets: [[0.0; GOODS]; DEPARTMENTS],
             declared: [[0.0; GOODS]; DEPARTMENTS],
             deal_price: [[0.0; GOODS]; DEPARTMENTS],
-            sell_scale: [[0.0; GOODS]; DEPARTMENTS],
+            scale: [[0.0; GOODS]; DEPARTMENTS],
             quote: [[0.0; GOODS]; DEPARTMENTS],
-            sell_slope: [[0.0; GOODS]; DEPARTMENTS],
-            sell_intercept: [[0.0; GOODS]; DEPARTMENTS],
+            fill: [[0.0; GOODS]; DEPARTMENTS],
+            expected: [[0.0; GOODS]; DEPARTMENTS],
+            share: [[0.0; GOODS]; DEPARTMENTS],
+            depth: [[0.0; GOODS]; DEPARTMENTS],
+            noise: [[0.0; GOODS]; DEPARTMENTS],
+            price_slope: [[0.0; GOODS]; DEPARTMENTS],
+            price_intercept: [[0.0; GOODS]; DEPARTMENTS],
+            drift: [0.0; GOODS],
             net: [[0.0; GOODS]; DEPARTMENTS],
             execution: [0.0; DEPARTMENTS],
             stock: 0.0,
@@ -342,6 +368,7 @@ impl Probe {
         };
         for (k, merchandise) in self.market.merchandises.iter().enumerate() {
             observation.prices[k] = merchandise.price;
+            observation.drift[k] = self.market.state.drift(k);
         }
         for i in 0..DEPARTMENTS {
             observation.execution[i] = self.departments.departments[i].policy_execution();
@@ -350,18 +377,38 @@ impl Probe {
                 observation.targets[i][k] = stock.target_volume;
                 observation.stock += stock.volume;
                 let declared = self.market.traders[i].merchandises[k].volume;
-                let sell = stock.sell_volume2price_scale();
-                let buy = stock.buy_volume2price_scale();
-                let scale = if declared > 0.0 {
-                    sell.get(declared)
+                let sell = declared > 0.0;
+                let scale = stock.marketing_price_scale();
+                let aggressiveness = if sell {
+                    Stock::sell_aggressiveness(scale)
                 } else {
-                    buy.get(declared.abs())
+                    Stock::buy_aggressiveness(scale)
                 };
+                let response = if sell {
+                    stock.sell_response()
+                } else {
+                    stock.buy_response()
+                };
+                let curve = if sell {
+                    stock.sell_price_curve()
+                } else {
+                    stock.buy_price_curve()
+                };
+                let dealt = self.market.traders[i].merchandises[k].deal_volume();
                 observation.declared[i][k] = declared;
-                observation.sell_scale[i][k] = scale;
-                observation.quote[i][k] = observation.prices[k] * scale;
-                observation.sell_slope[i][k] = sell.slope();
-                observation.sell_intercept[i][k] = sell.intercept();
+                observation.scale[i][k] = scale;
+                observation.quote[i][k] = self.market.traders[i].merchandises[k].price;
+                observation.fill[i][k] = if declared != 0.0 {
+                    dealt.abs() / declared.abs()
+                } else {
+                    0.0
+                };
+                observation.expected[i][k] = response.get(declared.abs(), aggressiveness);
+                observation.share[i][k] = response.share(aggressiveness);
+                observation.depth[i][k] = response.depth(aggressiveness);
+                observation.noise[i][k] = response.noise();
+                observation.price_slope[i][k] = curve.slope();
+                observation.price_intercept[i][k] = curve.intercept();
                 observation.deal_price[i][k] = self.market.traders[i].merchandises[k].deal_price();
             }
             observation.cash[i] = self.warehouses.warehouses[i].currency;
@@ -408,10 +455,16 @@ impl Probe {
         let mut uncleared = 0.0;
         let mut frozen = 0;
         let mut overdrafts = 0;
+        let mut drift_online = 0.0;
+        let mut drift_count = 0.0;
         for observation in settled {
             for price in observation.prices {
                 min_price = min_price.min(price);
                 max_price = max_price.max(price);
+            }
+            for drift in observation.drift {
+                drift_online += drift;
+                drift_count += 1.0;
             }
             min_stock = min_stock.min(observation.stock);
             max_stock = max_stock.max(observation.stock);
@@ -441,6 +494,11 @@ impl Probe {
             min_price,
             max_price,
             drift: if early > 0.0 { (late - early) / early } else { 0.0 },
+            drift_online: if drift_count > 0.0 {
+                drift_online / drift_count
+            } else {
+                0.0
+            },
             min_stock,
             max_stock,
             uncleared: uncleared / settled.len() as f32,
@@ -555,10 +613,16 @@ pub fn trace(
             targets: observation.targets,
             declared: observation.declared,
             deal_price: observation.deal_price,
-            sell_scale: observation.sell_scale,
+            scale: observation.scale,
             quote: observation.quote,
-            sell_slope: observation.sell_slope,
-            sell_intercept: observation.sell_intercept,
+            fill: observation.fill,
+            expected: observation.expected,
+            share: observation.share,
+            depth: observation.depth,
+            noise: observation.noise,
+            price_slope: observation.price_slope,
+            price_intercept: observation.price_intercept,
+            drift: observation.drift,
             cash: observation.cash,
             net: observation.net,
             execution: observation.execution,

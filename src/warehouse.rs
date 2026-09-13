@@ -3,7 +3,11 @@ mod step;
 #[cfg(test)]
 mod tests;
 
-use crate::{estimator::PowerLaw, market::Market};
+use crate::{
+    estimator::PowerLaw,
+    estimator2d::Response,
+    market::Market,
+};
 use fastrand::Rng;
 
 pub struct Warehouses {
@@ -17,13 +21,6 @@ pub struct Warehouse {
     pub currency: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SellerRule {
-    TargetVolume,
-    #[default]
-    RevenueMax,
-}
-
 /// index with [`crate::market::Merchandise`]
 pub struct Stock {
     previous_volume: f32,
@@ -33,11 +30,10 @@ pub struct Stock {
     marketing_price_scale: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
-    /// 阶数钉在 +1：量越大报价越高
-    buy_volume2price_scale: PowerLaw,
-    /// 阶数钉在 -1：量越大报价越低
-    sell_volume2price_scale: PowerLaw,
-    seller_rule: SellerRule,
+    buy_response: Response,
+    sell_response: Response,
+    buy_price_curve: PowerLaw,
+    sell_price_curve: PowerLaw,
 }
 
 impl Warehouses {
@@ -93,38 +89,68 @@ impl Stock {
             marketing_price_scale: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
-            buy_volume2price_scale: PowerLaw::new(1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
-            sell_volume2price_scale: PowerLaw::new(-1.0, 0.0, PowerLaw::DEFAULT_FORGETTING),
-            seller_rule: SellerRule::default(),
+            buy_response: Response::new(Response::DEFAULT_FORGETTING),
+            sell_response: Response::new(Response::DEFAULT_FORGETTING),
+            buy_price_curve: PowerLaw::new(0.5, 0.0, PowerLaw::DEFAULT_FORGETTING),
+            sell_price_curve: PowerLaw::new(0.5, 0.0, PowerLaw::DEFAULT_FORGETTING),
         }
-    }
-
-    pub fn with_seller_rule(mut self, seller_rule: SellerRule) -> Self {
-        self.seller_rule = seller_rule;
-        self
     }
 
     /// 重设两侧估计器：阶数可学或钉死，遗忘因子即学习率
     pub fn reset_estimators(&mut self, forgetting: f32, fixed_slope: bool) {
-        let buy = PowerLaw::new(1.0, 0.0, forgetting);
-        let sell = PowerLaw::new(-1.0, 0.0, forgetting);
-        self.buy_volume2price_scale = if fixed_slope {
+        self.buy_response = Response::new(forgetting);
+        self.sell_response = Response::new(forgetting);
+        let buy = PowerLaw::new(0.5, 0.0, forgetting);
+        let sell = PowerLaw::new(0.5, 0.0, forgetting);
+        self.buy_price_curve = if fixed_slope {
             buy.with_fixed_slope()
         } else {
             buy
         };
-        self.sell_volume2price_scale = if fixed_slope {
+        self.sell_price_curve = if fixed_slope {
             sell.with_fixed_slope()
         } else {
             sell
         };
     }
 
-    pub fn sell_volume2price_scale(&self) -> &PowerLaw {
-        &self.sell_volume2price_scale
+    pub fn buy_aggressiveness(price_scale: f32) -> f32 {
+        if price_scale.is_finite() && price_scale > 0.0 {
+            price_scale
+        } else {
+            1.0
+        }
     }
 
-    pub fn buy_volume2price_scale(&self) -> &PowerLaw {
-        &self.buy_volume2price_scale
+    pub fn sell_aggressiveness(price_scale: f32) -> f32 {
+        if price_scale.is_finite() && price_scale > 0.0 {
+            1.0 / price_scale
+        } else {
+            1.0
+        }
+    }
+
+    pub fn marketing_volume(&self) -> f32 {
+        self.marketing_volume
+    }
+
+    pub fn marketing_price_scale(&self) -> f32 {
+        self.marketing_price_scale
+    }
+
+    pub fn buy_response(&self) -> &Response {
+        &self.buy_response
+    }
+
+    pub fn sell_response(&self) -> &Response {
+        &self.sell_response
+    }
+
+    pub fn buy_price_curve(&self) -> &PowerLaw {
+        &self.buy_price_curve
+    }
+
+    pub fn sell_price_curve(&self) -> &PowerLaw {
+        &self.sell_price_curve
     }
 }

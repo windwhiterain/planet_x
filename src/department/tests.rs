@@ -2,7 +2,7 @@ use fastrand::Rng;
 
 use super::{Department, Departments, Policy};
 use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
-use crate::warehouse::{SellerRule, Stock, Warehouse, Warehouses};
+use crate::warehouse::{Stock, Warehouse, Warehouses};
 
 fn market(goods: usize, price: f32, traders: usize) -> Market {
     let merchandises = (0..goods).map(|_| Merchandise { price }).collect();
@@ -24,9 +24,7 @@ fn warehouses(stocks: &[&[(f32, f32)]]) -> Warehouses {
                 Warehouse::new(
                     goods
                         .iter()
-                        .map(|&(volume, target)| {
-                            Stock::new(volume, target).with_seller_rule(SellerRule::TargetVolume)
-                        })
+                        .map(|&(volume, target)| Stock::new(volume, target))
                         .collect(),
                 )
             })
@@ -401,21 +399,24 @@ fn the_classic_three_departments_pay_each_other_in_a_ring() {
             .map(|k| declaration(&market, i, k))
             .collect::<Vec<f32>>()
     };
-    assert_eq!(
-        net(0),
-        vec![4.0, -2.0, -2.0],
-        "甲应当卖出自己的商品，买入乙丙的商品",
-    );
-    assert_eq!(
-        net(1),
-        vec![-2.0, 4.0, -2.0],
-        "乙应当卖出自己的商品，买入甲丙的商品",
-    );
-    assert_eq!(
-        net(2),
-        vec![-2.0, -2.0, 4.0],
-        "丙应当卖出自己的商品，买入甲乙的商品",
-    );
+    for i in 0..3 {
+        for k in 0..3 {
+            let declared = declaration(&market, i, k);
+            if k == i {
+                assert_close(declared, 4.0, &format!("部门 {i} 应当卖出自己的商品"));
+            } else {
+                assert!(
+                    declared < 0.0,
+                    "部门 {i} 应当买入商品 {k}，实际申报 {declared}",
+                );
+            }
+        }
+        assert_close(
+            net(i)[(i + 1) % 3],
+            net(i)[(i + 2) % 3],
+            &format!("部门 {i} 的两笔买入应当对称"),
+        );
+    }
 
     for k in 0..3 {
         let dealt: f32 = (0..3).map(|i| declaration(&market, i, k).max(0.0)).sum();

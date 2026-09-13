@@ -98,3 +98,30 @@ fn geometric_average_ignores_signs() {
     assert_close(geometric_average(-4.0, -9.0), 6.0);
     assert_close(geometric_average(0.0, 9.0), 0.0);
 }
+
+#[test]
+fn normal_cdf_is_one_half_at_the_center() {
+    assert!((normal_cdf(0.0) - 0.5).abs() < 1e-5, "{}", normal_cdf(0.0));
+}
+
+#[test]
+fn normal_cdf_matches_the_known_quantiles() {
+    assert!((normal_cdf(1.0) - 0.8413).abs() < 1e-3, "{}", normal_cdf(1.0));
+    assert!((normal_cdf(-1.0) - 0.1587).abs() < 1e-3, "{}", normal_cdf(-1.0));
+    assert!((normal_cdf(1.6449) - 0.95).abs() < 1e-3, "{}", normal_cdf(1.6449));
+    assert!((normal_cdf(2.0) - 0.9772).abs() < 1e-3, "{}", normal_cdf(2.0));
+}
+
+#[test]
+fn normal_cdf_is_monotone_and_bounded() {
+    let mut previous = 0.0;
+    for step in -60..=60 {
+        let value = normal_cdf(step as f32 * 0.1);
+        assert!(value >= previous - 1e-6, "非单调：{value} < {previous}");
+        assert!((0.0..=1.0).contains(&value), "越界：{value}");
+        previous = value;
+    }
+    assert_eq!(normal_cdf(1e9), 1.0);
+    assert_eq!(normal_cdf(-1e9), 0.0);
+    assert_eq!(normal_cdf(f32::NAN), 0.0);
+}

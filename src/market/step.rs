@@ -90,7 +90,9 @@ pub(super) fn step(market: &mut super::Market) {
             trader_merchandise.deal_volume = trader_volume;
         }
         if total_volume > 0.0 {
-            market.merchandises[k].price = total_price_volum / total_volume;
+            let price = total_price_volum / total_volume;
+            market.merchandises[k].price = price;
+            market.state.observe(k, price);
         }
     }
 }

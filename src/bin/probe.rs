@@ -15,12 +15,13 @@ fn main() {
                         let report =
                             probe::learning_sweep(treasury, forgetting, fixed_slope, 0.25, delta);
                         println!(
-                            "{regime} {mode} 遗忘 {:.2} {label}：成交率 {:>5.1}% 价格 {:.3}~{:.3} 漂移 {:+.1}% 库存 {:.1}~{:.1} 冻结 {} [{}]",
+                            "{regime} {mode} 遗忘 {:.2} {label}：成交率 {:>5.1}% 价格 {:.3}~{:.3} 漂移 {:+.1}% 学漂移 {:+.1}% 库存 {:.1}~{:.1} 冻结 {} [{}]",
                             forgetting,
                             100.0 - report.uncleared,
                             report.min_price,
                             report.max_price,
                             100.0 * report.drift,
+                            100.0 * report.drift_online,
                             report.min_stock,
                             report.max_stock,
                             report.frozen,
@@ -43,13 +44,14 @@ fn main() {
                 for delta in probe::SWEEP_PHASES {
                     let report = probe::sweep_offset(treasury, period, delta, offset, amplitude);
                     println!(
-                        "  {sign}正弦 周期 {:>4} 相位差 {:>5.0}° 成交率 {:>5.1}% | 价格 {:.3}~{:.3} 漂移 {:+.1}% 库存 {:.1}~{:.1} 冻结 {} [{}]",
+                        "  {sign}正弦 周期 {:>4} 相位差 {:>5.0}° 成交率 {:>5.1}% | 价格 {:.3}~{:.3} 漂移 {:+.1}% 学漂移 {:+.1}% 库存 {:.1}~{:.1} 冻结 {} [{}]",
                         period,
                         delta.to_degrees(),
                         100.0 - report.uncleared,
                         report.min_price,
                         report.max_price,
                         100.0 * report.drift,
+                        100.0 * report.drift_online,
                         report.min_stock,
                         report.max_stock,
                         report.frozen,
