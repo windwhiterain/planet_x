@@ -85,6 +85,10 @@ impl Grid {
     pub fn filled(&self, value: f32) -> Field {
         Field::filled_with(self.width, self.height, value, self.projection)
     }
+
+    pub fn direction(&self, x: u32, y: u32) -> [f32; 3] {
+        field::direction_at(self.width, self.height, self.projection, x, y)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -617,4 +621,6 @@ pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
 
     Artifact { payload, key }
 }
+
+
 

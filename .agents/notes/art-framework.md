@@ -2095,3 +2095,36 @@ gutter 只有 2 纹素，理论上 mip 2 之后就只剩 0.5 纹素 ⇒ 整图 m
 因为 gutter 里装的本来就是**邻面的方向**，跨不跨面混出来的值差异小于 1/255。
 ⇒ 这一环天然正确，逐面 mip 留着（语义更清楚、未来换更大 gutter 也不会退化），但不是接缝的成因。
 之前放大看到的那条"柔和带"其实是**北极冰盖的纬度边界**，不是接缝。
+
+---
+
+## 33. `field.warp` 三维化，沙漠图迁 cube
+
+### 33.1 扭曲改成方向空间的矢量位移（v3）
+
+旧版在**图空间**做偏移：经纬度下有 `1/sinθ` 的极区换算，八面体/cube 下会跨折叠、跨面 ✗。
+新版只做三件事，全部投影无关：
+
+1. `方向 = grid.direction(x, y)`；
+2. 在该方向建**切框架** `(east, north)`（`tangent_frame`：极点附近换个 up 轴，避免退化）；
+3. 两个扭曲分量来自**同一个扭曲场**在两个方向上的采样（原方向、以及沿 east 探出 `probe` 的方向 ——
+   这样两个分量去相关，且不需要第二个输入）；位移后归一化，再用 `input.sample_direction(新方向)` 重采样。
+
+参数只剩 `strength`（弧长，弧度）/ `lateral` / `probe`，`spherical` 开关删掉（不再需要）。
+**测试**：`a_constant_warp_field_leaves_the_input_alone_in_every_projection` ——
+常量扭曲场下，三种投影（经纬度/八面体/cube）都必须"不动"，最大偏差 < 0.02 ✓。
+这条测试同时覆盖了 `direction_at` 的三个分支。
+
+顺带把方向与切框架抽成 `px_ops::field::{direction_at, tangent_frame, normalize, cross}` 与 `Grid::direction`，
+`Field::direction` 改为调用共用实现（此前渲染器里还有一份自己的 `Projection::direction` ✗，将来也应收敛）。
+
+### 33.2 沙漠图迁 cube
+
+`desert` 图：画布 780×520、投影 `Cube`、末尾加 `mesh.cubesphere` 节点（`art/desert/surface.toml`），
+`GRAPH_VERSION` 升到 2。烘出来 8 个节点 2.0 s（网格 789 ms、155526 顶点 / 307200 三角形）。
+12 视角对照图（`target/probe-desert.png`）**无接缝**，含棱/角特写 ✓。
+
+### 33.3 一个待办：两张图共用一个 manifest
+
+`planet` 与 `desert` 都写 `target/pcg/manifest.json`，取产物只能"取最后一个同名节点" ✗ 有点脆。
+应改成**按图分文件**（`target/pcg/<图名>/manifest.json`），顺带让渲染命令能按图名找产物。

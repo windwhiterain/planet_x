@@ -41,6 +41,61 @@ pub struct Stats {
     pub mean: f32,
 }
 
+pub fn normalize(vector: [f32; 3]) -> [f32; 3] {
+    let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+    if length <= f32::EPSILON {
+        return [0.0, 1.0, 0.0];
+    }
+    [vector[0] / length, vector[1] / length, vector[2] / length]
+}
+
+pub fn cross(one: [f32; 3], two: [f32; 3]) -> [f32; 3] {
+    [
+        one[1] * two[2] - one[2] * two[1],
+        one[2] * two[0] - one[0] * two[2],
+        one[0] * two[1] - one[1] * two[0],
+    ]
+}
+
+pub fn tangent_frame(direction: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let up = if direction[1].abs() > 0.99 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let east = normalize(cross(up, direction));
+    let north = cross(direction, east);
+    (east, north)
+}
+
+pub fn direction_at(
+    width: u32,
+    height: u32,
+    projection: Projection,
+    x: u32,
+    y: u32,
+) -> [f32; 3] {
+    let u = (x as f32 + 0.5) / width.max(1) as f32;
+    let v = (y as f32 + 0.5) / height.max(1) as f32;
+    match projection {
+        Projection::Equirect => {
+            let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
+            let phi = u * std::f32::consts::TAU;
+            let ring = theta.sin();
+            [ring * phi.cos(), theta.cos(), ring * phi.sin()]
+        }
+        Projection::Octahedral => px_protocol::art::octahedral_direction_y_up(u, v),
+        Projection::Cube => {
+            let cell = px_protocol::art::cube_cell_size(width).max(1);
+            let face_size = px_protocol::art::cube_face_size(width).max(1);
+            let gutter = px_protocol::art::CUBE_GUTTER;
+            let face = (y / cell) * px_protocol::art::CUBE_COLUMNS + (x / cell);
+            let s = (x % cell) as f32 + 0.5 - gutter as f32;
+            let t = (y % cell) as f32 + 0.5 - gutter as f32;
+            px_protocol::art::cube_direction(face, s / face_size as f32, t / face_size as f32)
+        }
+    }
+}
 impl Field {
     pub fn new(width: u32, height: u32, data: Vec<f32>) -> Self {
         Self::with_projection(width, height, data, Projection::Equirect)
@@ -94,27 +149,8 @@ impl Field {
     }
 
     pub fn direction(&self, x: u32, y: u32) -> [f32; 3] {
-        let (u, v) = self.uv(x, y);
-        match self.projection {
-            Projection::Equirect => {
-                let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
-                let phi = u * std::f32::consts::TAU;
-                let ring = theta.sin();
-                [ring * phi.cos(), theta.cos(), ring * phi.sin()]
-            }
-            Projection::Octahedral => octahedral_direction_y_up(u, v),
-            Projection::Cube => {
-                let cell = px_protocol::art::cube_cell_size(self.width).max(1);
-                let face_size = px_protocol::art::cube_face_size(self.width).max(1);
-                let gutter = px_protocol::art::CUBE_GUTTER;
-                let face = (y / cell) * px_protocol::art::CUBE_COLUMNS + (x / cell);
-                let s = (x % cell) as f32 + 0.5 - gutter as f32;
-                let t = (y % cell) as f32 + 0.5 - gutter as f32;
-                px_protocol::art::cube_direction(face, s / face_size as f32, t / face_size as f32)
-            }
-        }
+        direction_at(self.width, self.height, self.projection, x, y)
     }
-
     pub fn sample_direction(&self, direction: [f32; 3]) -> f32 {
         match self.projection {
             Projection::Octahedral => {
@@ -203,6 +239,7 @@ impl Field {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
     }
 }
+
 
 
 

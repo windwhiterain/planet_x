@@ -1,0 +1,5 @@
+subdivisions = 160
+radius = 1.0
+displace = 0.085
+sea_level = 0.520
+flat_sea = false

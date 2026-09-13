@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::field::Field;
-use crate::Grid;
+use crate::field::{Field, normalize, tangent_frame};
 use crate::noise::fnv1a;
-use crate::FieldOp;
+use crate::{FieldOp, Grid};
 
 pub struct Warp;
 
@@ -12,7 +11,7 @@ pub struct Warp;
 pub struct Params {
     pub strength: f32,
     pub lateral: f32,
-    pub spherical: bool,
+    pub probe: f32,
 }
 
 impl Default for Params {
@@ -20,7 +19,7 @@ impl Default for Params {
         Self {
             strength: 0.40,
             lateral: 0.50,
-            spherical: true,
+            probe: 0.07,
         }
     }
 }
@@ -28,45 +27,87 @@ impl Default for Params {
 impl FieldOp for Warp {
     type Params = Params;
     const ID: &'static str = "field.warp";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     const SOURCE_HASH: u64 = fnv1a(include_str!("warp.rs"));
     const INPUTS: &'static [&'static str] = &["input", "warp"];
 
     fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {
         let (input, warp) = (inputs[0], inputs[1]);
         let mut field = grid.filled(0.0);
-        let half_x = grid.width / 3;
-        let half_y = (grid.height / 3).max(1);
 
         for y in 0..grid.height {
             for x in 0..grid.width {
-                let first = warp.at(x, y) - 0.5;
-                let second = warp.at((x + half_x) % grid.width, (y + half_y) % grid.height) - 0.5;
+                let direction = grid.direction(x, y);
+                let (east, north) = tangent_frame(direction);
+                let first = warp.sample_direction(direction) - 0.5;
+                let probed = normalize([
+                    direction[0] + east[0] * params.probe,
+                    direction[1] + east[1] * params.probe,
+                    direction[2] + east[2] * params.probe,
+                ]);
+                let second = warp.sample_direction(probed) - 0.5;
+                let along = first * params.strength;
+                let across = second * params.lateral * params.strength;
+                let displaced = normalize([
+                    direction[0] + east[0] * along + north[0] * across,
+                    direction[1] + east[1] * along + north[1] * across,
+                    direction[2] + east[2] * along + north[2] * across,
+                ]);
 
-                let (offset_x, offset_y) = if params.spherical {
-                    let (u, v) = field.uv(x, y);
-                    let sine = (v * std::f32::consts::PI).sin();
-                    let ring = (sine * sine + 0.16).sqrt();
-                    let angle = first * params.strength;
-                    (
-                        (u + angle / (std::f32::consts::TAU * ring)) * grid.width as f32,
-                        (v + second * params.lateral * params.strength / std::f32::consts::PI)
-                            * (grid.height as f32 - 1.0),
-                    )
-                } else {
-                    let scale = params.strength * grid.width as f32;
-                    (
-                        x as f32 + first * scale,
-                        y as f32 + second * params.lateral * scale * grid.width as f32
-                            / grid.height as f32,
-                    )
-                };
-
-                field.set(x, y, input.sample_bilinear(offset_x, offset_y));
+                field.set(x, y, input.sample_direction(displaced));
             }
         }
         field
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::Projection;
 
+    #[test]
+    fn a_constant_warp_field_leaves_the_input_alone_in_every_projection() {
+        let params = Params {
+            strength: 0.2,
+            lateral: 0.5,
+            probe: 0.07,
+        };
+
+        for projection in [
+            Projection::Equirect,
+            Projection::Octahedral,
+            Projection::Cube,
+        ] {
+            let (width, height) = match projection {
+                Projection::Equirect => (96, 48),
+                Projection::Octahedral => (64, 64),
+                Projection::Cube => (78, 52),
+            };
+            let grid = Grid {
+                width,
+                height,
+                projection,
+            };
+            let mut input = Field::filled_with(width, height, 0.0, projection);
+            for y in 0..height {
+                for x in 0..width {
+                    input.set(x, y, input.direction(x, y)[1] * 0.5 + 0.5);
+                }
+            }
+            let flat = Field::filled_with(width, height, 0.5, projection);
+            let warped = Warp::eval(&params, &[&input, &flat], grid);
+
+            let mut worst = 0.0_f32;
+            for y in 0..height {
+                for x in 0..width {
+                    worst = worst.max((warped.at(x, y) - input.at(x, y)).abs());
+                }
+            }
+            assert!(
+                worst < 0.02,
+                "{projection:?} 下常量扭曲场不该移动纹素，最大偏差 {worst}"
+            );
+        }
+    }
+}
