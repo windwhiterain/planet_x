@@ -28,6 +28,8 @@ pub struct View {
     pub cam: Option<[f32; 3]>,
     #[serde(default)]
     pub atmo: Option<f32>,
+    #[serde(default)]
+    pub scatter: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ impl std::fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+
 
 
 

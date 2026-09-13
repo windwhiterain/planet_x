@@ -12,6 +12,7 @@ use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::light::Skybox;
+use bevy::pbr::AtmosphereSettings;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::render::render_resource::{
@@ -114,6 +115,7 @@ struct Options {
     ambient: Option<f32>,
     cam: Option<[f32; 3]>,
     atmo: Option<f32>,
+    scatter: Option<String>,
     spin: Option<f32>,
     rings: Option<f32>,
 }
@@ -141,6 +143,7 @@ impl Default for Options {
             ambient: None,
             cam: None,
             atmo: None,
+            scatter: None,
             spin: None,
             rings: None,
         }
@@ -168,6 +171,13 @@ impl Options {
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
                 "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
+                "--scatter" => {
+                    let kind = next("--scatter")?;
+                    if kind != "earth" && kind != "none" {
+                        return Err("--scatter 只认 earth / none".to_string());
+                    }
+                    options.scatter = if kind == "none" { None } else { Some(kind) };
+                }
                 "--atmo" => {
                     options.atmo = Some(
                         next("--atmo")?
@@ -338,6 +348,7 @@ fn request_once(options: Options) -> i32 {
             ambient: options.ambient,
             cam: options.cam,
             atmo: options.atmo,
+            scatter: options.scatter.clone(),
         },
         width: options.width,
         height: options.height,
@@ -646,6 +657,7 @@ fn accept_jobs(
     stars: Res<Stars>,
     mut images: ResMut<Assets<Image>>,
     mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
+    mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     parts: Query<Entity, With<ScenePart>>,
@@ -703,6 +715,8 @@ fn accept_jobs(
                 &mut images,
                 &stars.0,
                 &mut atmo_materials,
+                &mut media,
+                request.view.scatter.as_deref(),
                 &planet::PlanetSpec {
                     field: field.clone(),
                     mesh: mesh.clone(),
@@ -726,7 +740,8 @@ fn accept_jobs(
         }
     };
 
-    commands.spawn((
+    let scattering = request.view.scatter.is_some();
+    let camera = commands.spawn((
         ScenePart,
         Camera3d::default(),
         Msaa::Off,
@@ -741,7 +756,10 @@ fn accept_jobs(
             ..default()
         },
         planet::probe_camera(request.view.cam),
-    ));
+    )).id();
+    if scattering {
+        commands.entity(camera).insert(AtmosphereSettings::default());
+    }
 
     active.0 = Some(ActiveJob {
         label,
@@ -1338,6 +1356,7 @@ fn rebuild_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
+    mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
     stars: Res<Stars>,
     viewer: Res<Viewer>,
     mut rebuild: ResMut<Rebuild>,
@@ -1357,6 +1376,8 @@ fn rebuild_scene(
         &mut images,
         &stars.0,
         &mut atmo_materials,
+        &mut media,
+        None,
         &viewer.spec,
     ) {
         Ok(label) => println!("{label}"),
@@ -1381,6 +1402,17 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 

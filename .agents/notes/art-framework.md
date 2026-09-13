@@ -2197,3 +2197,44 @@ gutter 只有 2 纹素，理论上 mip 2 之后就只剩 0.5 纹素 ⇒ 整图 m
 **教训（花钱买的）**：同一件事，**手工做**（图集 + per-face UV 记账）我翻车两次 ✗✗，
 **让平台做**（标准 cubemap + 按方向采样）一次通过 ✓✓ ——
 平台已经为某件事定义了标准格式时，不要手搓一个等价物。
+
+---
+
+## 36. 试 Bevy 内置大气：挂起，以及已经测出来的边界
+
+按用户要求接了 Bevy 的散射大气（`Atmosphere` + `ScatteringMedium` + `AtmosphereSettings`），
+代码留在 `--scatter earth` 后面（默认关 ✓）。**结论：挂起，壳式后端继续用。**
+
+### 36.1 接口（已查实）
+
+- `Atmosphere` 是 `bevy_light::Atmosphere`（**世界坐标球**，实体的 `GlobalTransform` 即球心；
+  文档明说**用缩放在世界空间重定尺度**，`inner_radius`/`outer_radius` 单位是米）。
+  它在 `on_add` 时若 `GlobalTransform` 仍是默认值，会把球心挪到原点下方 `inner_radius` 处
+  （"站在行星上"的默认姿态 ✗ —— 轨道视角必须自己给变换）。
+- `bevy_light::atmosphere::ScatteringMedium`（`earth(256,256)` / `mars(...)` / `from_curve(...)`；
+  `Default` = `earth(256,256)`）。
+- `bevy_pbr::AtmosphereSettings` **挂在相机上**（LUT 尺寸与采样数），"最近的大气"参与渲染。
+- `AtmospherePlugin` **不在** `PbrPlugin` 里（显式添加会 panic："plugin was already added" ✗ ——
+  实际上 `DefaultPlugins` 已经带了它 ✓，加两次直接炸）。
+
+### 36.2 测出来的边界（四个数据点，都是哈希/截图）
+
+| 配置 | 结果 |
+|---|---|
+| 默认（无 `AtmosphereSettings`，壳式大气） | **行星正常** ✓（与已知好图逐字节相同） |
+| 只挂 `AtmosphereSettings`（没有 `Atmosphere` 实体） | **行星消失** ✗ 只剩星空 |
+| `AtmosphereSettings` + `Atmosphere`（真实米制半径 × 缩放 1/6.36e6） | **整帧全黑** ✗ |
+| 同上但半径改成场景单位（1.0 / 1.0125，缩放 1） | 与上一行**同一 hash** ✗ ⇒ **不是尺度问题** ✗ |
+
+也就是说：**只要让大气真正参与渲染，我们的离屏场景就被清空** ✗，且与半径标定无关 ✓。
+
+### 36.3 下次的便宜实验（按顺序）
+
+1. **在窗口相机上试**（预览窗口是真窗口 ✓，`--serve` 走的是离屏 `RenderTarget::Image` ✗）——
+   这一步能把"离屏路径的问题"与"功能本身的问题"分开 ✓，是最便宜的一刀。
+2. 检查与 `disable::<WinitPlugin>()` + `ScheduleRunnerPlugin` 驱动方式的关系
+   （大气插件往我们没跑的调度里加系统的可能性 ✗）。
+3. 若都不行 ⇒ 走我们自己可控的那条：**自写 surface material 采样 `aerial_view_lut`**
+   （`render_sky.wgsl` 已经证明这条路成立 ✓，它用深度纹理做 in-scattering + transmittance 合成 ✓）。
+
+**当前状态**：壳式大气是可用后端 ✓；散射后端挂起 ✓；默认路径经复核对已知好图**无回归** ✓。

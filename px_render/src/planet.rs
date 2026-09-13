@@ -741,6 +741,21 @@ pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
     Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
+fn spawn_scattering(
+    commands: &mut Commands,
+    media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
+    radius: f32,
+) {
+    let medium = media.add(bevy::light::atmosphere::ScatteringMedium::earth(256, 256));
+    let scale = radius / 6_360_000.0;
+    commands.spawn((
+        crate::ScenePart,
+        Transform::from_scale(Vec3::splat(scale)),
+        GlobalTransform::from_scale(Vec3::splat(scale)),
+        bevy::light::Atmosphere::earth(medium),
+    ));
+}
+
 fn spawn_atmosphere(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1123,6 +1138,8 @@ pub fn spawn_planet(
     images: &mut Assets<Image>,
     stars: &Handle<Image>,
     atmo_materials: &mut Assets<AtmosphereMaterial>,
+    media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
+    scatter: Option<&str>,
     spec: &PlanetSpec,
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
@@ -1164,7 +1181,10 @@ pub fn spawn_planet(
             ));
         });
 
-        spawn_atmosphere(commands, meshes, atmo_materials, system, spec);
+        match scatter {
+            Some(_) => spawn_scattering(commands, media, spec.radius),
+            None => spawn_atmosphere(commands, meshes, atmo_materials, system, spec),
+        }
         spawn_rings(commands, meshes, materials, images, spec);
         spawn_lights(commands);
 
@@ -1329,6 +1349,10 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
 
 
 
