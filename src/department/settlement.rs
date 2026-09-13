@@ -1,8 +1,26 @@
 //! 消费结算：把「谁吃多少」写成一个凸问题，用 **原始-对偶内点法** 解。
 //!
-//! 变量：`x_p ∈ (0,1)` 是政策 p 的执行率，`s_k > 0` 是商品 k 结算后的剩余存量。
-//! 约束：`s_k + Σ_p c_pk·x_p = S_k`，其中 `c_pk = 分布_p × 配方_pk`。**约束就是仓库存量。**
-//! 目标：`max Σ_p w_p·x_p + μ·[ Σ_k ln s_k + Σ_p ln x_p + Σ_p ln(1 − x_p) ]`，`w_p = 分布_p`。
+//! 变量：`x_p > 0` 是政策 p 跑几篮，`s_k > 0` 是商品 k 结算后的剩余存量。
+//! 约束：`s_k + Σ_p 配方_pk·x_p = S_k`。**约束就是仓库存量，上界只有它。**
+//! 目标：`max Σ_p motive_p·x_p^θ + μ·[ Σ_k ln s_k + Σ_p ln x_p ]`，`θ = CURVATURE`。
+//!
+//! # 为什么没有上界盒子，也没有归一化的 distribution
+//!
+//! 旧版的目标是 `Σ_p 分布_p·x_p`（**线性**），`x_p ∈ (0,1)`。线性 + 正系数 ⇒ 只要那样货的
+//! 影子价格低于 `分布_p`，最优就是 `x_p = 1`：**要多少吃多少，跟价格无关**。而且
+//! `分布_p` 是先归一化到和为 1 再喂进来的，同一个数既当目标系数又当物质量
+//! （`c_pk = 分布_p × 配方_pk`），于是 **motive 的绝对大小完全不起作用**：全乘 1000 结果逐位不变。
+//! 实测：商品 0 从第 150 轮到第 2000 轮 `wanted_buy = 9` 不变、缺口恒定 `≈14.5`，
+//! 而买价从 `0.166` 走到 `2.133e-21`——**价格动了 19 个数量级，需求量一点没动**。
+//!
+//! 现在：`motive` 直接进目标（绝对值），约束用**裸配方**，`x` 读作"几篮"，
+//! 混合与规模都由解给出。`u(x) = x^θ` 是凹的 ⇒ 边际效用 `θ·motive·x^{θ−1}` 随 `x` 递减，
+//! 与影子价格 `Σ_k 配方_pk·λ_k` 平衡 ⇒ **需求成了一条曲线**：库存多 ⇒ `λ = μ/s` 小 ⇒ 多吃几篮；
+//! 库存紧 ⇒ `λ` 大 ⇒ 自动少吃。上界不再需要——`λ > 0` **恒成立**（只要还有存货，
+//! `λ_k = μ/s_k > 0`），所以这个平衡点永远有限。
+//!
+//! `u' = θ·x^{θ−1}`：`x→0` 时无穷（每条政策总会吃一点，不会整条不执行），
+//! `x→1` 时趋于 `θ`（有界，任何正影子价格都压得住）。`θ → 1` 退回线性（无边际效应）。
 //!
 //! # 为什么不是那个硬 `min`
 //!
@@ -13,45 +31,46 @@
 //!
 //! # μ 是什么量纲
 //!
-//! 单政策、库存无限时 KKT 给出 `w = μ(2x−1)/(x(1−x))`，也就是 `w·x² − (w−2μ)x − μ = 0`
-//! 在 `(0,1)` 内的那个根；一阶近似是 `x ≈ 1 − μ/w`（`μ/w = 0.1` 时精确根 `0.909902`、
-//! 近似 `0.9`）。所以 `μ/w` 读作**无约束时大致不吃的那部分**。取 `μ = BARRIER × w̄`，
-//! `BARRIER` 就是"软化程度"本身，不是拟合出来的常数：它同时是"留多少余量"和"解离角点多远"。
+//! `x = 1` 处的边际效用是 `θ·motive`，所以障碍取 `μ = BARRIER × θ × 平均 motive`。
+//! `BARRIER` 读作"障碍相对边际效用有多强"：它同时决定库存留多少余量（`s = μ/λ`）
+//! 和解离边界多远。
+//!
+//! 单政策、单商品、`c = 1`、存量 `S` 时 KKT 是 `θ·motive·x^{θ−1} + μ/x = μ/(S − x)`：
+//! 左边是边际效用加下界障碍，右边是影子价格。**这就是需求曲线**，测试里对它独立二分求根。
 //!
 //! # 为什么必须解**耦合**的 KKT，而不是交替迭代
 //!
 //! 上一版用 `λ_k = μ/s_k` 与 `x_p` 交替迭代（Gauss-Seidel）。那个 Jacobian 在 `s → 0`
-//! 时爆炸：`λ` 巨大 ⇒ `x` 被顶到 0 ⇒ `s` 变大 ⇒ `λ` 变小 ⇒ `x` 跳到 1 ⇒ 来回振荡。
-//! 另外那一版的定常性方程符号是**反的**（写成 `w − μ/x + μ/(1−x) = shadow`，正确是
-//! `w + μ/x − μ/(1−x) = shadow`），于是影子价格为零时解落在 `x < 0.5` 一侧、`μ→0` 时
-//! `x → 0`——正是实测到的"三产摄入 0.025、execution 0.000"。正确符号下 `x → 1 − μ/w`。
+//! 时爆炸：`λ` 巨大 ⇒ `x` 被顶到 0 ⇒ `s` 变大 ⇒ `λ` 变小 ⇒ `x` 跳回来 ⇒ 来回振荡。
 //!
 //! 这里解的是完整系统
 //!
 //! ```text
-//! 定常性   w_p − Σ_k c_pk·λ_k + y_p − z_p = 0
-//! 原始可行 s_k + Σ_p c_pk·x_p − S_k       = 0
-//! 中心化   s_k·λ_k = σμ,  x_p·y_p = σμ,  (1−x_p)·z_p = σμ
+//! 定常性   f'(x_p) − Σ_k c_pk·λ_k + y_p = 0        f(x) = motive·x^θ
+//! 原始可行 s_k + Σ_p c_pk·x_p − S_k     = 0
+//! 中心化   s_k·λ_k = σμ,  x_p·y_p = σμ
 //! ```
 //!
-//! **乘子的符号是这套东西里唯一容易写错的地方**，判据是角点：`max x, 0 ≤ x ≤ 1` 在
-//! `x = 1` 处必须给出 `z = w > 0, y = 0`，在 `x = 0`（`w < 0`）处必须给出
-//! `y = −w > 0, z = 0`。按这个判据推出来的是**下界乘子取 `+y`、上界取 `−z`**。
-//! 写成 `−y + z` 会把解翻到障碍的另一侧——实测无约束政策会收敛到 `x = 0.011`
-//! 而不是解析解 `1 − μ/w = 0.9`，症状和上一版那个"三产不吃饭"一模一样。
+//! **下界乘子取 `+y`**，判据是 `max f(x), x ≥ 0`：`f` 还在涨时 `y = 0`，涨不动了才 `y > 0`，
+//! 所以定常性是 `f'(x) + y = Σcλ`。写成 `f'(x) − y = …` 会把解翻到障碍另一侧——
+//! 上一版实测无约束政策收敛到 `x = 0.011` 而不是 `1 − μ/w = 0.9`，症状就是"三产不吃饭"。
+//! 上界盒子已经删掉，所以那一侧的乘子 `z` 与 `(1−x)z = σμ` 整条消失。
 //!
-//! 牛顿步消去 `Δs, Δy, Δz` 之后是一个 `P×P` 的 **Schur 补** `S = diag(x/y + z/(1−x)) + C·diag(λ/s)·Cᵀ`，
-//! 对称正定 ⇒ 用对角缩放后的 Cholesky 解，不需要选主元。步长取分数步长
-//! `α = 0.99·α_max`（把 `x, 1−x, s, λ, y, z` 全部留在正侧），再按残差范数回溯。
+//! 牛顿步消去 `Δs, Δy` 之后是一个 `P×P` 的 **Schur 补**
+//! `S = diag(y/x − f''(x)) + C·diag(λ/s)·Cᵀ`；`−f''(x) = θ(1−θ)·motive·x^{θ−2} > 0`，
+//! 两项都正 ⇒ 对称正定 ⇒ 用对角缩放后的 Cholesky 解，不需要选主元。步长取分数步长
+//! `α = 0.99·α_max`（把 `x, s, λ, y` 全部留在正侧），再按残差范数回溯。
 //! `μ` 沿 `σ = 0.2` 的路径降到目标值，最后在目标 `μ` 上把残差压到 `1e-9`。
 //!
-//! 收敛证书是对偶间隙 `gap = Σ_k s_kλ_k + Σ_p [x_p y_p + (1−x_p)z_p]`，
-//! 理论上等于 `(K + 2P)·μ`——测试里就是这么验的。
+//! 收敛证书是对偶间隙 `gap = Σ_k s_kλ_k + Σ_p x_p y_p`，理论上等于 `(K + P)·μ`。
 
 use super::SettlementReport;
 
-/// 障碍强度：无约束时每条政策只吃 `1 − BARRIER` 的篮子
+/// 障碍强度：目标是 `Σ motive·x^θ`，目标量纲取 `θ × 平均 motive`（`x = 1` 处的边际效用）
 pub(super) const BARRIER: f64 = 0.1;
+
+/// 边际效应的曲率：`u(x) = x^θ`。`θ = 1` 退回线性（需求对价格完全无弹性）
+pub(super) const CURVATURE: f64 = 0.5;
 
 /// 单个 μ 上的最大牛顿步
 const NEWTON_MAX: usize = 80;
@@ -71,7 +90,7 @@ const SUFFICIENT: f64 = 1e-4;
 const TINY: f64 = 1e-300;
 
 pub(super) struct Outcome {
-    /// 逐政策执行率，index 对齐调用方的政策表；未选中/被判死的政策是 0
+    /// 逐政策**跑了几篮**，index 对齐调用方的政策表；未选中/被判死的政策是 0
     pub x: Vec<f64>,
     /// 逐商品实际消耗
     pub eaten: Vec<f64>,
@@ -85,7 +104,6 @@ struct Point {
     s: Vec<f64>,
     lambda: Vec<f64>,
     y: Vec<f64>,
-    z: Vec<f64>,
 }
 
 impl Point {
@@ -95,7 +113,6 @@ impl Point {
             s: vec![0.0; goods],
             lambda: vec![0.0; goods],
             y: vec![0.0; policies],
-            z: vec![0.0; policies],
         }
     }
 
@@ -111,7 +128,6 @@ impl Point {
         }
         for i in 0..self.y.len() {
             self.y[i] += alpha_d * step.y[i];
-            self.z[i] += alpha_d * step.z[i];
         }
     }
 }
@@ -129,12 +145,31 @@ struct System {
 }
 
 impl System {
+    /// 边际效用 `f'(x) = θ·motive·x^{θ−1}`
+    fn marginal(&self, p: usize, x: f64) -> f64 {
+        CURVATURE * self.w[p] * x.max(TINY).powf(CURVATURE - 1.0)
+    }
+
+    /// 边际效用对 `x` 的导数 `f''(x) = θ(θ−1)·motive·x^{θ−2}`（`θ < 1` 时恒负）
+    fn marginal_slope(&self, p: usize, x: f64) -> f64 {
+        CURVATURE * (CURVATURE - 1.0) * self.w[p] * x.max(TINY).powf(CURVATURE - 2.0)
+    }
+
+    /// 影子价格 `Σ_k c_pk·λ_k`
+    fn shadow(&self, p: usize, lambda: &[f64]) -> f64 {
+        let mut total = 0.0f64;
+        for k in 0..self.used.len() {
+            total += self.c[p][k] * lambda[k];
+        }
+        total
+    }
+
     /// 残差的缩放无穷范数。`step` 可以为全零向量，用来评价当前点。
     ///
     /// **每一项都按自身的量纲相对化**，这是这套东西能不能收敛的关键。定常性方程是
-    /// `w_p − Σ_k c_pk λ_k + y_p − z_p = 0`，所以它的自然量纲不是 `w_p`，而是
+    /// `f'(x_p) − Σ_k c_pk λ_k + y_p = 0`，所以它的自然量纲不是 `motive_p`，而是
     /// **这一行里最大的那一项**：某条政策几乎无货可吃时 `y_p = μ/x_p` 能到 `1e29`，
-    /// 拿 `w_p = 1` 当分母就等于要求 38 位有效数字——f64 只有 16 位，任何实现都到不了，
+    /// 拿小额的分母就等于要求 38 位有效数字——f64 只有 16 位，任何实现都到不了，
     /// 实测牛顿会在 `残差 ≈ 1` 上打满 240 步（`--motive-ladder` 二产归零前的
     /// `converged = false` 就是这个）。
     fn norm(&self, point: &Point, step: &Point, alpha_p: f64, alpha_d: f64, mu_bar: f64) -> f64 {
@@ -142,16 +177,15 @@ impl System {
         for p in 0..self.w.len() {
             let x = point.x[p] + alpha_p * step.x[p];
             let y = point.y[p] + alpha_d * step.y[p];
-            let z = point.z[p] + alpha_d * step.z[p];
             let mut shadow = 0.0f64;
             for k in 0..self.used.len() {
                 shadow += self.c[p][k] * (point.lambda[k] + alpha_d * step.lambda[k]);
             }
-            let stationarity = self.w[p] - shadow + y - z;
-            let magnitude = self.w[p] + shadow.abs() + y.abs() + z.abs();
+            let marginal = self.marginal(p, x);
+            let stationarity = marginal - shadow + y;
+            let magnitude = marginal + shadow.abs() + y.abs();
             worst = worst.max((stationarity / magnitude.max(TINY)).abs());
             worst = worst.max(((x * y - mu_bar) / mu_bar).abs());
-            worst = worst.max((((1.0 - x) * z - mu_bar) / mu_bar).abs());
         }
         for k in 0..self.used.len() {
             let s = point.s[k] + alpha_p * step.s[k];
@@ -168,14 +202,14 @@ impl System {
         worst
     }
 
-    /// 当前点的对偶间隙
+    /// 当前点的对偶间隙：`Σ_k s_kλ_k + Σ_p x_p y_p = (K + P)·μ`
     fn gap(&self, point: &Point) -> f64 {
         let mut gap = 0.0f64;
         for k in 0..self.used.len() {
             gap += point.s[k] * point.lambda[k];
         }
         for p in 0..self.w.len() {
-            gap += point.x[p] * point.y[p] + (1.0 - point.x[p]) * point.z[p];
+            gap += point.x[p] * point.y[p];
         }
         gap
     }
@@ -188,32 +222,67 @@ impl System {
         total
     }
 
-    /// 严格可行的起点：逐政策取自己最紧的那样货，再全局压一次保证联合可行
+    /// 严格可行的起点：每条政策先取**边际项 = 影子价格**的领头平衡，再逐样货压到可行。
+    ///
+    /// 左边有两项，取哪一项当领头要看 `x` 在哪一侧（`ŝ = 1/2` 时）：
+    /// - 边际效用领先：`θ·m·x^{θ−1} = 2·ĉ·μ` ⇒ `x = (θ·m/(2·ĉ·μ))^{1/(1−θ)}`
+    /// - 下界障碍领先：`μ/x = 2·ĉ·μ` ⇒ `x = 1/(2·ĉ)`
+    ///
+    /// 两者取**大**（和式由大的那项主导），再逐商品取小。
+    ///
+    /// **只取第一支是错的**：`x` 小时 `μ/x` 才是主导项，实测存量 `1e-30` 那条
+    /// 起点被算成 `2.5e-61`，真解是 `5e-31`——差 30 个数量级，牛顿爬不回来。
     fn start(&self, mu: f64) -> Point {
         let policies = self.w.len();
         let goods = self.used.len();
         let mut point = Point::zeros(policies, goods);
-        let columns: Vec<f64> = (0..goods)
-            .map(|k| (0..policies).map(|p| self.c[p][k]).sum::<f64>())
-            .collect();
+        let mut base = vec![1.0f64; policies];
         for p in 0..policies {
-            let mut share = 1.0f64;
+            let mut demand = f64::INFINITY;
             for k in 0..goods {
-                if self.c[p][k] > 0.0 && columns[k] > 0.0 {
-                    share = share.min(self.supply[k] / columns[k]);
+                let c = self.c[p][k];
+                if c > 0.0 {
+                    let by_utility =
+                        (CURVATURE * self.w[p] / (2.0 * c * mu)).powf(1.0 / (1.0 - CURVATURE));
+                    let by_barrier = 1.0 / (2.0 * c);
+                    let branch = if by_utility > by_barrier {
+                        by_utility
+                    } else {
+                        by_barrier
+                    };
+                    if branch > 0.0 && branch.is_finite() {
+                        demand = demand.min(branch);
+                    }
                 }
             }
-            point.x[p] = (0.99 * share).clamp(TINY, 0.99);
+            if demand.is_finite() && demand > 0.0 {
+                base[p] = demand;
+            }
         }
-        let mut worst = 1.0f64;
-        for k in 0..goods {
-            let consumed = self.consumed(&point.x, k);
-            if consumed > 0.0 {
-                worst = worst.max(consumed / (0.98 * self.supply[k]));
+        // 逐样货压：**只压用它的那些政策**。全局压一次是错的——最紧那样货（存量巨大、
+        // 配方系数极小 ⇒ `ĉ` 极小 ⇒ 领头平衡极大）会把另一条根本不用它的政策一起压下去，
+        // 实测把 `x₀` 从自己的平衡 `0.0185` 压到 `3.9e-10`，然后牛顿要爬 7 个数量级回来。
+        for _ in 0..8 {
+            let mut changed = false;
+            for k in 0..goods {
+                let column: f64 = (0..policies).map(|p| self.c[p][k] * base[p]).sum();
+                let limit = 0.98 * self.supply[k];
+                if column > limit && column > 0.0 {
+                    let factor = limit / column;
+                    for p in 0..policies {
+                        if self.c[p][k] > 0.0 {
+                            base[p] *= factor;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
             }
         }
         for p in 0..policies {
-            point.x[p] = (point.x[p] / worst).max(TINY);
+            point.x[p] = base[p].max(TINY);
         }
         for k in 0..goods {
             let consumed = self.consumed(&point.x, k);
@@ -223,7 +292,6 @@ impl System {
         }
         for p in 0..policies {
             point.y[p] = mu / point.x[p];
-            point.z[p] = mu / (1.0 - point.x[p]).max(TINY);
         }
         point
     }
@@ -235,32 +303,21 @@ impl System {
 
         let mut diagonal = vec![0.0f64; policies];
         let mut bound_e = vec![0.0f64; policies];
-        let mut bound_h = vec![0.0f64; policies];
         let mut bound_b = vec![0.0f64; policies];
-        let mut bound_g = vec![0.0f64; policies];
         let mut rhs = vec![0.0f64; policies];
         for p in 0..policies {
             let x = point.x[p];
             let y = point.y[p];
-            let z = point.z[p];
-            let mut shadow = 0.0f64;
-            for k in 0..goods {
-                shadow += self.c[p][k] * point.lambda[k];
-            }
-            let stationarity = self.w[p] - shadow + y - z;
-            // `Δy = b − (y/x)·Δx`、`Δz = g + (z/(1−x))·Δx`，所以对角块是
-            // `y/x + z/(1−x)`——它正是障碍的 `−Hessian`（`σμ = μ` 时与
-            // "把障碍写进目标"那一版逐项相同，这是两套写法一致的判据）。
+            let marginal = self.marginal(p, x);
+            let r = marginal - self.shadow(p, &point.lambda) + y;
+            // `Δy = b − (y/x)·Δx`，所以 Schur 对角是 `y/x − f''(x)`；`θ < 1` 时
+            // `−f''(x) = θ(1−θ)·motive·x^{θ−2} > 0`，两项都正 ⇒ 对称正定。
             let e = y / x;
-            let h = z / (1.0 - x).max(TINY);
             let b = (mu_bar - x * y) / x;
-            let g = (mu_bar - (1.0 - x) * z) / (1.0 - x).max(TINY);
-            diagonal[p] = e + h;
+            diagonal[p] = e - self.marginal_slope(p, x);
             bound_e[p] = e;
-            bound_h[p] = h;
             bound_b[p] = b;
-            bound_g[p] = g;
-            rhs[p] = stationarity + b - g;
+            rhs[p] = r + b;
         }
 
         let mut inverse_slack = vec![0.0f64; goods];
@@ -321,7 +378,6 @@ impl System {
         for p in 0..policies {
             step.x[p] = solution[p];
             step.y[p] = bound_b[p] - bound_e[p] * solution[p];
-            step.z[p] = bound_g[p] + bound_h[p] * solution[p];
         }
         for k in 0..goods {
             let mut consumed = 0.0f64;
@@ -334,7 +390,7 @@ impl System {
         (step, ok)
     }
 
-    /// 分数步长：把 `x, 1−x, s` 与 `λ, y, z` 都留在正侧
+    /// 分数步长：把 `x, s` 与 `λ, y` 都留在正侧（上界盒子删掉之后 `1−x` 那一条没有了）
     fn boundary(&self, point: &Point, step: &Point) -> (f64, f64) {
         let mut primal = 1.0f64;
         let mut dual = 1.0f64;
@@ -342,14 +398,9 @@ impl System {
             let dx = step.x[p];
             if dx < 0.0 {
                 primal = primal.min(-point.x[p] / dx);
-            } else if dx > 0.0 {
-                primal = primal.min((1.0 - point.x[p]) / dx);
             }
             if step.y[p] < 0.0 {
                 dual = dual.min(-point.y[p] / step.y[p]);
-            }
-            if step.z[p] < 0.0 {
-                dual = dual.min(-point.z[p] / step.z[p]);
             }
         }
         for k in 0..self.used.len() {
@@ -405,7 +456,8 @@ fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// 结算一次。`w[p]` 是政策的意愿份额，`plans[p][k]` 是 `分布 × 配方`，`supply[k]` 是本轮可用存量。
+/// 结算一次。`w[p]` 是政策的 **motive（绝对值，不归一化）**，`plans[p][k]` 是**裸配方**，
+/// `supply[k]` 是本轮可用存量。返回的 `x[p]` 是**跑了几篮**。
 pub(super) fn solve(w: &[f64], plans: &[Vec<f64>], supply: &[f64], barrier: f64) -> Outcome {
     let policies = w.len();
     let goods = supply.len();
@@ -467,9 +519,11 @@ pub(super) fn solve(w: &[f64], plans: &[Vec<f64>], supply: &[f64], barrier: f64)
         used,
     };
 
-    let mean_w = system.w.iter().sum::<f64>() / system.w.len() as f64;
-    let target = (barrier * mean_w).max(TINY);
-    let mut mu_bar = mean_w.max(target);
+    // 障碍的量纲取 `x = 1` 处的边际效用 `θ × 平均 motive`，`BARRIER` 是它相对边际效用的倍数。
+    let mean_motive = system.w.iter().sum::<f64>() / system.w.len() as f64;
+    let scale = (CURVATURE * mean_motive).max(TINY);
+    let target = (barrier * scale).max(TINY);
+    let mut mu_bar = scale.max(target);
     let mut point = system.start(mu_bar);
     let mut iterations = 0usize;
     let mut phases = 0usize;
@@ -589,38 +643,70 @@ mod tests {
         (0..plans.len()).map(|p| plans[p][k] * x[p]).sum()
     }
 
-    /// 单政策、库存无限时的**解析解**：`w = μ(2x−1)/(x(1−x))` 在 `(0,1)` 内的根，
-    /// 即 `w·x² − (w − 2μ)·x − μ = 0`。注意它**不是** `1 − μ/w`——那只是一阶近似：
-    /// `μ/w = 0.1` 时精确根是 `0.909902`，一阶近似给 `0.9`，差 1%。
-    fn analytic_root(w: f64, mu: f64) -> f64 {
-        let b = w - 2.0 * mu;
-        ((b + (b * b + 4.0 * w * mu).sqrt()) / (2.0 * w)).clamp(0.0, 1.0)
+    /// 单政策、单商品（配方系数 1）时的**需求曲线**：
+    /// `θ·motive·x^{θ−1} + μ/x = μ/(S − x)`——左边是边际效用加下界障碍，右边是影子价格。
+    /// 左边随 `x` 严格递减、右边严格递增，所以根唯一；这里独立二分求它当对照。
+    fn demand_root(motive: f64, mu: f64, supply: f64) -> f64 {
+        let g = |x: f64| CURVATURE * motive * x.powf(CURVATURE - 1.0) + mu / x - mu / (supply - x);
+        let (mut low, mut high) = (supply * 1e-12, supply * (1.0 - 1e-12));
+        for _ in 0..200 {
+            let mid = 0.5 * (low + high);
+            if g(mid) > 0.0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        0.5 * (low + high)
     }
 
-    /// 单政策、库存无限：解必须落在解析根上
+    /// 单政策时的障碍量纲：`μ = BARRIER × θ × motive`
+    fn single_mu(motive: f64) -> f64 {
+        BARRIER * CURVATURE * motive
+    }
+
+    /// 库存给得很大时，解必须落在需求曲线的解析根上。
     ///
-    /// 库存取 `1e12` 是为了让影子价格 `λ = μ/S = 1e-13` 远小于容差——上面的解析根
-    /// 是 `λ = 0` 的极限。库存只有 `1e6` 时影子价格是 `2e-7`，解会**正确地**偏开
-    /// `1.6e-8`，那是模型的一部分，不是误差。
+    /// 这就是"给 motive 一个边际效应"买到的东西：**量对存量（也就是影子价格）有响应**。
+    /// 旧版是线性目标 + `x ≤ 1` 的盒子，库存再大也只能吃到 1，需求完全无弹性。
     #[test]
-    fn an_unconstrained_policy_converges_to_the_analytic_root() {
-        let plans = vec![vec![1.0, 1.0]];
-        let outcome = run(&[1.0], &plans, &[1e12, 1e12]);
-        assert!(outcome.report.converged, "{:?}", outcome.report);
-        let expected = analytic_root(1.0, BARRIER);
+    fn the_demand_curve_matches_the_analytic_root() {
+        let plans = vec![vec![1.0]];
+        let mu = single_mu(1.0);
+        for supply in [1.0, 1e2, 1e4, 1e6] {
+            let outcome = run(&[1.0], &plans, &[supply]);
+            assert!(outcome.report.converged, "{:?}", outcome.report);
+            let expected = demand_root(1.0, mu, supply);
+            assert!(
+                (outcome.x[0] - expected).abs() <= 1e-6 * expected.abs().max(1.0),
+                "存量 {supply}：数值 {} vs 解析根 {expected}",
+                outcome.x[0],
+            );
+            assert!(outcome.x[0] > 0.0 && outcome.x[0] <= supply * (1.0 + 1e-9), "超取");
+        }
+    }
+
+    /// 存量越大影子价格越低 ⇒ 吃得越深（需求曲线单调，余量 `s ≈ μ/λ` 次线性增长）
+    #[test]
+    fn a_bigger_warehouse_is_eaten_deeper() {
+        let plans = vec![vec![1.0]];
+        let small = run(&[1.0], &plans, &[1e2]);
+        let large = run(&[1.0], &plans, &[1e4]);
         assert!(
-            (outcome.x[0] - expected).abs() < 1e-8,
-            "无约束执行率应为解析根 {expected}，实际 {}",
-            outcome.x[0],
+            large.x[0] > 10.0 * small.x[0],
+            "存量涨 100 倍，篮子数应当大幅跟着涨：{} → {}",
+            small.x[0],
+            large.x[0],
         );
-        // `1 − μ/w` 只是一阶近似，别拿它当判据
         assert!(
-            (expected - (1.0 - BARRIER)).abs() > 1e-3,
-            "解析根不该等于一阶近似",
+            large.report.utilization > small.report.utilization,
+            "存量越大吃得越干净：{} vs {}",
+            small.report.utilization,
+            large.report.utilization,
         );
     }
 
-    /// 收敛证书：对偶间隙 = (K + 2P)·μ
+    /// 收敛证书：对偶间隙 = (K + P)·μ（上界盒子删掉后少了 P 项）
     #[test]
     fn the_duality_gap_matches_the_theory() {
         let mut rng = Lcg(20260913);
@@ -634,7 +720,7 @@ mod tests {
         let outcome = run(&w, &plans, &supply);
         let report = &outcome.report;
         assert!(report.converged, "未收敛：{report:?}");
-        let expected = (goods + 2 * policies) as f64 * report.mu;
+        let expected = (goods + policies) as f64 * report.mu;
         assert!(
             (report.gap - expected).abs() <= 1e-6 * expected,
             "间隙 {} 与理论 {expected} 不符",
@@ -682,14 +768,19 @@ mod tests {
         let plans = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let outcome = run(&[1.0, 1.0], &plans, &[0.02, 1e6]);
         assert!(outcome.report.converged, "{:?}", outcome.report);
+        let mu = single_mu(1.0);
+        let starved = demand_root(1.0, mu, 0.02);
         assert!(
-            outcome.x[0] < 0.05,
-            "缺货的政策应当被压到很低，实际 {}",
+            (outcome.x[0] - starved).abs() <= 1e-6 * starved,
+            "缺货的政策应当落在自己的需求曲线上 {starved}，实际 {}",
             outcome.x[0],
         );
+        assert!(outcome.x[0] < 0.05, "缺货的政策应当被压得很低");
+        // 另一条不受连坐：它把自己那样货吃到只剩余量
+        let rich = demand_root(1.0, mu, 1e6);
         assert!(
-            (outcome.x[1] - analytic_root(1.0, BARRIER)).abs() < 1e-3,
-            "不缺货的政策应当照常吃满，实际 {}",
+            (outcome.x[1] - rich).abs() <= 1e-6 * rich,
+            "不缺货的政策应当落在 {rich}，实际 {}",
             outcome.x[1],
         );
     }
