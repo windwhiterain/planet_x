@@ -33,6 +33,7 @@ struct Args {
     capacity: Option<f32>,
     ladder_scale: f32,
     specialty_top: Option<f32>,
+    json: bool,
     soft_eps: f32,
     goods_trace: bool,
     relations: f32,
@@ -73,6 +74,7 @@ impl Default for Args {
             capacity: None,
             ladder_scale: 1.0,
             specialty_top: None,
+            json: false,
             soft_eps: planet_x::market::Market::DEFAULT_SOFT_EPS,
             goods_trace: false,
             relations: 1.0,
@@ -134,6 +136,7 @@ fn parse() -> Option<Args> {
             "--capacity" => args.capacity = Some(value()?.parse().ok()?),
             "--ladder-scale" => args.ladder_scale = value()?.parse().ok()?,
             "--specialty-top" => args.specialty_top = Some(value()?.parse().ok()?),
+            "--json" => args.json = true,
             "--soft-eps" => args.soft_eps = value()?.parse().ok()?,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
@@ -457,6 +460,17 @@ fn dash(value: f32) -> String {
     }
 }
 
+/// 价格专用：**科学计数**。价格会横跨 1e-30 ~ 1e30，定点格式（`{:.3}`）会把
+/// 任何小于 0.0005 的值一律打成 `0.000`，于是"塌到零"和"只是很小"分不出来——
+/// 这正好掩盖了 §16 那条链的关键一步。
+fn sci(value: f32) -> String {
+    if value.is_finite() && value > 0.0 {
+        format!("{value:.3e}")
+    } else {
+        String::from("—")
+    }
+}
+
 /// 一种商品这一轮「最低保本价」：所有能产它的工艺里，投入成本 ÷ 产出量 的最小值
 fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
     let mut best = f32::INFINITY;
@@ -598,11 +612,111 @@ fn ladder_weights(args: &Args) -> Vec<f32> {
         .collect()
 }
 
+
+/// 一行 JSON = 一个采样轮次的**全部**状态，全精度（科学计数）。
+///
+/// 存在的理由：终端表格既有定点格式吞掉小数的问题（`{:.3}` 把 1e-15 打成 `0.000`），
+/// 又只能人眼读、不能程序化分析。JSONL 让每一轮都能被脚本直接比对。
+///
+/// 维度：`goods`（逐商品聚合）· `departments`（逐部门逐商品的库存/目标/计划/执行率）
+/// · `polities`（逐政体逐商品的楔子）· 总执行率。
+fn json_line(lab: &Lab) -> String {
+    let states = lab.good_states();
+    let executions = lab.executions();
+    let wedges = lab.wedges();
+    let mut goods = String::new();
+    for (k, s) in states.iter().enumerate() {
+        if k > 0 {
+            goods.push(',');
+        }
+        goods.push_str(&format!(
+            concat!(
+                "{{\"good\":{},\"index\":{:e},\"bid\":{:e},\"ask\":{:e},\"deal_price\":{:e},",
+                "\"declared_sell\":{:e},\"declared_buy\":{:e},\"quote_sell\":{:e},\"quote_buy\":{:e},",
+                "\"scale_sell\":{:e},\"scale_buy\":{:e},\"dealt\":{:e},\"stock\":{:e},",
+                "\"delivery\":{:e},\"consumed\":{:e},\"intake\":{:e},",
+                "\"sell_ceiling\":{:e},\"buy_ceiling\":{:e},\"target\":{:e},",
+                "\"wanted_buy\":{},\"blocked_buy\":{}}}"
+            ),
+            k, s.price, s.bid, s.ask, s.deal_price,
+            s.declared_sell, s.declared_buy, s.quote_sell, s.quote_buy,
+            s.scale_sell, s.scale_buy, s.dealt, s.stock,
+            s.delivery, s.consumed, s.intake,
+            s.sell_ceiling, s.buy_ceiling, s.target,
+            s.wanted_buy, s.blocked_buy,
+        ));
+    }
+    let mut departments = String::new();
+    for (i, warehouse) in lab.warehouses.warehouses.iter().enumerate() {
+        if i > 0 {
+            departments.push(',');
+        }
+        let stock: Vec<String> = warehouse
+            .stocks
+            .iter()
+            .map(|s| format!("{:e}", s.volume))
+            .collect();
+        let target: Vec<String> = warehouse
+            .stocks
+            .iter()
+            .map(|s| format!("{:e}", s.target_volume))
+            .collect();
+        let gap: Vec<String> = warehouse
+            .stocks
+            .iter()
+            .map(|s| format!("{:e}", s.declared_gap))
+            .collect();
+        departments.push_str(&format!(
+            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e}}}",
+            stock.join(","),
+            target.join(","),
+            gap.join(","),
+            lab.departments.departments[i].intake().iter().sum::<f32>(),
+            lab.departments.departments[i].policy_execution(),
+            lab.departments.departments[i].capacity_scale(),
+        ));
+    }
+    let mut polities = String::new();
+    for (p, row) in wedges.iter().enumerate() {
+        if p > 0 {
+            polities.push(',');
+        }
+        let cells: Vec<String> = row.iter().map(|w| format!("{w:e}")).collect();
+        polities.push_str(&format!(
+            "{{\"polity\":{p},\"wedge\":[{}]}}",
+            cells.join(","),
+        ));
+    }
+    format!(
+        concat!(
+            "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
+            "\"execution_mean\":{:e},\"execution_min\":{:e},\"uncleared\":{:e}}}"
+        ),
+        lab.round,
+        goods,
+        departments,
+        polities,
+        executions.iter().sum::<f32>() / executions.len().max(1) as f32,
+        executions.iter().cloned().fold(f32::INFINITY, f32::min),
+        lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
+    )
+}
+
 fn sectors(args: &Args) {
     for ladder in [false, true] {
         let mut local = args.clone();
         local.motive_ladder = ladder;
         let mut lab = build_with(&local, spec(&local));
+        if args.json {
+            for _ in 0..args.rounds {
+                lab.step();
+                if lab.round % args.every != 0 && lab.round != args.rounds {
+                    continue;
+                }
+                println!("{}", json_line(&lab));
+            }
+            continue;
+        }
         if args.goods_trace {
             println!(
                 "=== 场景 {} 逐轮逐商品追踪（{} 轮，每 {} 轮一行）：{} ===",
@@ -642,19 +756,19 @@ fn sectors(args: &Args) {
             }
             for (k, state) in lab.good_states().iter().enumerate() {
                 println!(
-                    "{:>4} {:>5} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>9.2} {:>9.2} {:>9} {:>9.1} {:>8} {:>8} {:>8} {:>9.3} {:>9.3} {:>10.1} {:>10.1} {:>5.0} {:>5.0} {:>12.2}",
+                    "{:>4} {:>5} {:>11.3e} {:>11} {:>11} {:>9.2} {:>9.2} {:>9.2} {:>11} {:>9.1} {:>11} {:>11} {:>9.2} {:>9.3} {:>9.3} {:>10.1} {:>10.1} {:>5.0} {:>5.0} {:>12.2}",
                     lab.round,
                     GOOD_LABELS[k],
                     state.price,
-                    dash(state.bid),
-                    dash(state.ask),
+                    sci(state.bid),
+                    sci(state.ask),
                     state.declared_sell,
                     state.declared_buy,
                     state.dealt,
-                    dash(state.deal_price),
+                    sci(state.deal_price),
                     state.stock,
-                    dash(state.quote_sell),
-                    dash(state.quote_buy),
+                    sci(state.quote_sell),
+                    sci(state.quote_buy),
                     dash(state.scale_buy),
                     state.delivery,
                     state.consumed,
