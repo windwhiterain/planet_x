@@ -10,6 +10,9 @@ use crate::warehouse::{Stock, Warehouse, Warehouses};
 pub const GOODS: usize = 3;
 pub const UNITS: usize = 3;
 
+/// 默认申报涨落幅度：0.05 给出约 0.5–2 倍的乘性噪声
+pub const DEFAULT_FLUCTUATION: f32 = 0.05;
+
 /// 每个单元拆成两类部门：**生产部门**（只留生产政策，仓库里是投入品与产出品）
 /// 与**消费部门**（只留消费政策，仓库里是口粮，靠拨款过日子）。
 ///
@@ -102,6 +105,11 @@ pub struct Spec {
     pub motive: Vec<Vec<f32>>,
     pub transforms: Vec<Transform>,
     pub capacity: f32,
+    /// 申报量的乘性涨落幅度。**必须大于 0**：确定性市场里估计器没有激励，
+    /// 一条退化的轨迹（学出 `1e-27` 的局部价之类）是吸收态，永远纠正不回来。
+    /// `fluctuation_factor` 给出 `(u/(1−u))^amplitude`，`u ~ U(1e-6, 1−1e-6)`，
+    /// 所以 0.05 ≈ 0.5–2 倍、0.1 ≈ 0.25–4 倍。
+    pub fluctuation: f32,
     pub self_capacity: bool,
     pub primary_free: bool,
     pub all_consume: bool,
@@ -122,6 +130,7 @@ impl Spec {
             motive: vec![vec![1.0; GOODS]; polities],
             transforms: Vec::new(),
             capacity: f32::INFINITY,
+            fluctuation: DEFAULT_FLUCTUATION,
             self_capacity: false,
             primary_free: true,
             all_consume: false,
@@ -501,7 +510,7 @@ impl Lab {
         let departments = Departments::new(departments).with_grants(vec![GRANT; count]);
         let mut lab = Self {
             departments,
-            warehouses: Warehouses::new(warehouses).with_fluctuation(0.0),
+            warehouses: Warehouses::new(warehouses).with_fluctuation(spec.fluctuation.max(0.0)),
             market,
             polities,
             rule: LevelRule::Counterparty,

@@ -1,6 +1,6 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::local_price::{
-    bloc_relations, Kind, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
+    bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
     LADDER_THRIFTY, NAMES, SECTOR_MOTIVE,
 };
 
@@ -39,6 +39,7 @@ struct Args {
     rationing: String,
     barrier: f32,
     curvature: f32,
+    fluctuation: f32,
     goods_trace: bool,
     relations: f32,
     block_from: usize,
@@ -83,6 +84,7 @@ impl Default for Args {
             rationing: String::from("interior"),
             barrier: DEFAULT_BARRIER,
             curvature: DEFAULT_CURVATURE,
+            fluctuation: DEFAULT_FLUCTUATION,
             goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
@@ -148,6 +150,7 @@ fn parse() -> Option<Args> {
             "--rationing" => args.rationing = value()?,
             "--barrier" => args.barrier = value()?.parse().ok()?,
             "--curvature" => args.curvature = value()?.parse().ok()?,
+            "--fluctuation" => args.fluctuation = value()?.parse().ok()?,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
@@ -175,6 +178,7 @@ fn usage() {
     println!("  --trace          sectors/modern 场景逐轮逐商品打印申报、报价、尺度、成交、库存、投入产出");
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
     println!("  --seed, -s S     随机种子（默认 11）");
+    println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
 }
 
 fn spec(args: &Args) -> Spec {
@@ -182,6 +186,7 @@ fn spec(args: &Args) -> Spec {
     if let Some(capacity) = args.capacity {
         spec.capacity = capacity;
     }
+    spec.fluctuation = args.fluctuation.max(0.0);
     if let Some(factor) = args.specialty_top {
         spec = spec.with_specialty_at(GOODS - 1, factor);
     }
