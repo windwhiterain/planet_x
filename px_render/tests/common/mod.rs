@@ -3,6 +3,38 @@ use std::path::{Path, PathBuf};
 
 pub const SHADER_ROOT: &str = "assets/shaders";
 
+pub struct Gpu {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+}
+
+pub fn connect() -> Option<Gpu> {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))
+    .ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("headless probe"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        trace: wgpu::Trace::Off,
+    }))
+    .ok()?;
+    Some(Gpu {
+        instance,
+        adapter,
+        device,
+        queue,
+    })
+}
+
 pub fn shader_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(SHADER_ROOT);
