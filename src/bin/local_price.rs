@@ -15,6 +15,10 @@ struct Args {
     transform: bool,
     transform_rate: f32,
     transform_scale: f32,
+    transform_polity: usize,
+    transform_unit: usize,
+    transform_in: usize,
+    transform_out: usize,
     sanction_polity: usize,
     sanction_unit: usize,
     sanction_from: usize,
@@ -43,6 +47,10 @@ impl Default for Args {
             transform: false,
             transform_rate: 1.0,
             transform_scale: 4.0,
+            transform_polity: 0,
+            transform_unit: 0,
+            transform_in: 1,
+            transform_out: 0,
             sanction_polity: 1,
             sanction_unit: 0,
             sanction_from: 40,
@@ -90,6 +98,10 @@ fn parse() -> Option<Args> {
             "--transform" => args.transform = true,
             "--transform-rate" => args.transform_rate = value()?.parse().ok()?,
             "--transform-scale" => args.transform_scale = value()?.parse().ok()?,
+            "--transform-polity" => args.transform_polity = value()?.parse().ok()?,
+            "--transform-unit" => args.transform_unit = value()?.parse().ok()?,
+            "--transform-in" => args.transform_in = value()?.parse().ok()?,
+            "--transform-out" => args.transform_out = value()?.parse().ok()?,
             "--sanction-polity" => args.sanction_polity = value()?.parse().ok()?,
             "--sanction-unit" => args.sanction_unit = value()?.parse().ok()?,
             "--sanction-from" => args.sanction_from = value()?.parse().ok()?,
@@ -130,9 +142,14 @@ fn spec(args: &Args) -> Spec {
     if args.transform {
         let mut inputs = vec![0.0; GOODS];
         let mut outputs = vec![0.0; GOODS];
-        inputs[1] = args.transform_rate * args.transform_scale;
-        outputs[0] = args.transform_scale;
-        base.with_transform(0, 0, inputs, outputs)
+        inputs[args.transform_in] = args.transform_rate * args.transform_scale;
+        outputs[args.transform_out] = args.transform_scale;
+        base.with_transform(
+            args.transform_polity,
+            args.transform_unit,
+            inputs,
+            outputs,
+        )
     } else {
         base
     }
