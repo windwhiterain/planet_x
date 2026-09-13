@@ -60,7 +60,7 @@ pub struct Transform {
 
 pub const LADDER_CAPACITY: f32 = 8.0;
 pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
-pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.5);
+pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.2);
 
 pub struct Spec {
     pub polities: usize,
