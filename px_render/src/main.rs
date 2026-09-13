@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
 use bevy::core_pipeline::prepass::DepthPrepass;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::light::Skybox;
 use bevy::pbr::AtmosphereSettings;
@@ -1007,6 +1008,67 @@ fn report_frame_time(
     *frames = 0;
 }
 
+#[derive(Component)]
+struct FpsReadout;
+
+#[derive(Resource)]
+struct ShowFps(bool);
+
+fn spawn_fps_readout(mut commands: Commands) {
+    commands.spawn((
+        FpsReadout,
+        Text::new("fps --"),
+        TextFont {
+            font_size: bevy::text::FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.92, 0.96, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(10.0),
+            padding: UiRect::all(Val::Px(5.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+    ));
+}
+
+fn update_fps_readout(
+    diagnostics: Res<DiagnosticsStore>,
+    mut frames: Local<u32>,
+    mut slowest: Local<f32>,
+    mut readout: Query<(&mut Text, &mut Visibility), With<FpsReadout>>,
+) {
+    let Ok((mut text, mut visibility)) = readout.single_mut() else {
+        return;
+    };
+    if *visibility == Visibility::Hidden {
+        return;
+    }
+    *frames += 1;
+    let Some(millis) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|diagnostic| diagnostic.value())
+    else {
+        return;
+    };
+    let millis = millis as f32;
+    *slowest = slowest.max(millis);
+    if *frames % FPS_REFRESH_FRAMES != 0 {
+        return;
+    }
+    text.0 = format!(
+        "{:.1} fps  {:.1} ms  worst {:.1} ms",
+        1000.0 / millis.max(1e-3),
+        millis,
+        *slowest,
+    );
+    if *frames % FPS_WORST_FRAMES == 0 {
+        *slowest = 0.0;
+    }
+}
+
 fn idle_between_jobs(
     probe: Res<FrameProbe>,
     ready: Res<RenderReady>,
@@ -1073,6 +1135,8 @@ const DEFAULT_AMBIENT: f32 = 80.0;
 const SKY_BRIGHTNESS: f32 = 900.0;
 const CLOUD_EXTINCTION: f32 = 900.0;
 const FRAME_PROBE_WINDOW: u32 = 120;
+const FPS_REFRESH_FRAMES: u32 = 10;
+const FPS_WORST_FRAMES: u32 = 120;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
@@ -1271,11 +1335,13 @@ fn view(options: Options) -> Result<(), String> {
     .insert_resource(Rebuild(true))
     .insert_resource(PendingShot(shot.then_some(12)))
     .insert_resource(FrameProbe(options.fps))
+    .insert_resource(ShowFps(true))
+    .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .insert_resource(RenderReady(ready.clone()))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         keep_rendering,
     ))
-    .add_systems(Startup, view_startup)
+    .add_systems(Startup, (view_startup, spawn_fps_readout))
     .add_systems(
         Update,
         (
@@ -1289,12 +1355,13 @@ fn view(options: Options) -> Result<(), String> {
             heartbeat,
             update_title,
             report_frame_time,
+            update_fps_readout,
         )
             .chain(),
     );
 
     println!("预览窗口已开：左键拖动转视角、滚轮缩放");
-    println!("  1-5 换色板｜[ ] 调海平面｜- = 调位移｜r 切环系｜空格 自转｜s 存图｜q 退出");
+    println!("  1-5 换色板｜[ ] 调海平面｜- = 调位移｜r 切环系｜空格 自转｜f 帧率开关｜s 存图｜q 退出");
     println!("  我把新效果推进来：px_render --show --planet <文件> --palette <色板> [--shot]");
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -1373,9 +1440,12 @@ fn spin_bodies(
 }
 
 fn viewer_keys(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut viewer: ResMut<Viewer>,
     mut rebuild: ResMut<Rebuild>,
+    mut show_fps: ResMut<ShowFps>,
+    readout: Query<Entity, With<FpsReadout>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let chosen = if keys.just_pressed(KeyCode::Digit1) {
@@ -1423,6 +1493,16 @@ fn viewer_keys(
     }
     if keys.just_pressed(KeyCode::Space) {
         viewer.spin = !viewer.spin;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        show_fps.0 = !show_fps.0;
+        for entity in readout.iter() {
+            commands.entity(entity).insert(if show_fps.0 {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            });
+        }
     }
     if keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
