@@ -116,8 +116,18 @@ impl Departments {
     /// 生产与政策：增产，选中政策，再从仓库提资源
     pub fn plan(&mut self, warehouses: &mut Warehouses, market: &Market) {
         self.debug_assert_aligned(warehouses, market);
+        let Warehouses {
+            warehouses: stocks,
+            local_ratios,
+            ..
+        } = warehouses;
         for (i, department) in self.departments.iter_mut().enumerate() {
-            step::plan(department, &mut warehouses.warehouses[i], market);
+            let locality = stocks[i].locality;
+            let local: &[f32] = local_ratios
+                .get(locality)
+                .map(|ratios| ratios.as_slice())
+                .unwrap_or(&[]);
+            step::plan(department, &mut stocks[i], market, local);
         }
     }
 

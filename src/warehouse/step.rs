@@ -3,6 +3,7 @@ use fastrand::Rng;
 use crate::estimator::Estimator;
 use crate::estimator2d::{Estimator2D, Response};
 use crate::market::Market;
+use crate::market::Trader;
 use crate::utils::normal_cdf;
 use crate::warehouse::{Stock, Warehouse, Warehouses};
 
@@ -11,6 +12,7 @@ const PRICE_SCALE_CEILING: f32 = 4.0;
 const PRICE_SCALE_STEPS: usize = 49;
 const SATURATION_MARGIN: f32 = 2.0;
 const PROBABILITY_TOLERANCE: f32 = 1e-4;
+const LOCAL_PRICE_FORGETTING: f32 = 0.8;
 
 fn fluctuation_factor(amplitude: f32, rng: &mut fastrand::Rng) -> f32 {
     let unit = rng.f32().clamp(1e-6, 1.0 - 1e-6);
@@ -165,7 +167,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
     let Warehouses {
         warehouses,
         fluctuation,
-        ..
+        local_ratios,
     } = warehouses;
     let fluctuation = *fluctuation;
     let reference_prices: Vec<f32> = market
@@ -232,6 +234,36 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
             observe(stock, merchandise, references[i][k]);
             stock.previous_volume = stock.volume;
         }
+        let locality = warehouse.locality;
+        if local_ratios.len() <= locality {
+            local_ratios.resize(locality + 1, Vec::new());
+        }
+        observe_local_ratio(&market.traders[i], market, &mut local_ratios[locality]);
+    }
+}
+
+fn observe_local_ratio(trader: &Trader, market: &Market, local: &mut Vec<f32>) {
+    let goods = market.merchandises.len();
+    if local.len() != goods {
+        *local = vec![1.0; goods];
+    }
+    for k in 0..goods {
+        let merchandise = &trader.merchandises[k];
+        if merchandise.deal_volume() == 0.0 {
+            continue;
+        }
+        let deal = merchandise.deal_price();
+        let index = market.merchandises[k].price;
+        if !(deal > 0.0) || !deal.is_finite() || !(index > 0.0) {
+            continue;
+        }
+        let ratio = (deal / index).clamp(0.05, 20.0);
+        let slot = &mut local[k];
+        *slot = if slot.is_finite() {
+            LOCAL_PRICE_FORGETTING * *slot + (1.0 - LOCAL_PRICE_FORGETTING) * ratio
+        } else {
+            ratio
+        };
     }
 }
 

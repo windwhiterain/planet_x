@@ -13,6 +13,8 @@ use fastrand::Rng;
 pub struct Warehouses {
     pub warehouses: Vec<Warehouse>,
     pub fluctuation: f32,
+    /// index with 地方：同一地方共享一套「本地成交价 ÷ 指数」的比值
+    pub local_ratios: Vec<Vec<f32>>,
 }
 
 /// index with [`crate::market::Trader`]
@@ -20,6 +22,7 @@ pub struct Warehouse {
     pub stocks: Vec<Stock>,
     pub currency: f32,
     pub reference: Vec<f32>,
+    pub locality: usize,
 }
 
 /// index with [`crate::market::Merchandise`]
@@ -44,6 +47,21 @@ impl Warehouses {
         Self {
             warehouses,
             fluctuation: Self::DEFAULT_FLUCTUATION,
+            local_ratios: Vec::new(),
+        }
+    }
+
+    /// 某个地方某种商品的成交价相对指数的比值，没有成交过就返回 None
+    pub fn local_ratio(&self, locality: usize, good: usize) -> Option<f32> {
+        let ratio = self
+            .local_ratios
+            .get(locality)
+            .and_then(|ratios| ratios.get(good))
+            .copied()?;
+        if ratio > 0.0 && ratio.is_finite() {
+            Some(ratio)
+        } else {
+            None
         }
     }
 
@@ -73,7 +91,13 @@ impl Warehouse {
             stocks,
             currency: 0.0,
             reference: Vec::new(),
+            locality: 0,
         }
+    }
+
+    pub fn with_locality(mut self, locality: usize) -> Self {
+        self.locality = locality;
+        self
     }
 
     pub fn with_reference(mut self, reference: Vec<f32>) -> Self {

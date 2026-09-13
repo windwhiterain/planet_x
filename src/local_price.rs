@@ -151,6 +151,7 @@ pub struct Snapshot {
     pub gauge: Vec<f32>,
     pub transform_share: f32,
     pub transform_potential: f32,
+    pub local_ratios: Vec<Vec<f32>>,
 }
 
 pub struct Lab {
@@ -199,7 +200,9 @@ impl Lab {
                     stocks.push(Stock::new(volume, target));
                 }
                 warehouses.push(
-                    Warehouse::new(stocks).with_reference(vec![BASE_PRICE; GOODS]),
+                    Warehouse::new(stocks)
+                        .with_reference(vec![BASE_PRICE; GOODS])
+                        .with_locality(polity),
                 );
                 let mut productions = vec![0.0; GOODS];
                 productions[unit] = BASE * spec.supply(polity, unit);
@@ -669,6 +672,13 @@ impl Lab {
             gauge: self.gauge.clone(),
             transform_share: transform.map_or(0.0, |policy| policy.distribution()),
             transform_potential: transform.map_or(0.0, |policy| policy.price_potential()),
+            local_ratios: (0..self.polities.len())
+                .map(|locality| {
+                    (0..GOODS)
+                        .map(|good| self.warehouses.local_ratio(locality, good).unwrap_or(1.0))
+                        .collect()
+                })
+                .collect(),
         }
     }
 

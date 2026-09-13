@@ -264,6 +264,32 @@ fn summary(lab: &Lab) {
         .sum::<f32>()
         / GOODS as f32;
     let volume = snapshot.internal + snapshot.external;
+    let index: Vec<f32> = lab
+        .market
+        .merchandises
+        .iter()
+        .map(|merchandise| merchandise.price)
+        .collect();
+    for (p, polity) in lab.polities.iter().enumerate() {
+        let local = (0..GOODS)
+            .map(|k| {
+                format!(
+                    "{:.3}",
+                    index[k] * lab.warehouses.local_ratio(p, k).unwrap_or(1.0)
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(" ");
+        println!(
+            "  {}({}) 本地成交价 {local}   本地比值 {}",
+            polity.name,
+            p,
+            (0..GOODS)
+                .map(|k| format!("{:.3}", lab.warehouses.local_ratio(p, k).unwrap_or(1.0)))
+                .collect::<Vec<String>>()
+                .join(" "),
+        );
+    }
     println!(
         "银河指数 {} 全程漂移 {:+.1}% 未成交 {:.1}% 跨境占比 {:.1}% 国库 {:.1}",
         goods(&snapshot.prices),
@@ -397,6 +423,24 @@ fn sanction_run(args: &Args) {
                 snapshot.transform_potential,
             );
         }
+    }
+    let index = lab
+        .market
+        .merchandises
+        .iter()
+        .map(|merchandise| merchandise.price)
+        .collect::<Vec<f32>>();
+    for p in 0..lab.polities.len() {
+        let local = (0..GOODS)
+            .map(|k| {
+                format!(
+                    "{:.3}",
+                    index[k] * lab.warehouses.local_ratio(p, k).unwrap_or(1.0)
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(" ");
+        println!("  地方 {p} 本地成交价 {local}   指数 {}", goods(&index));
     }
     println!(
         "制裁期间价差均值 {:+.4}（{} 轮），解除后 {:+.4}（{} 轮）",

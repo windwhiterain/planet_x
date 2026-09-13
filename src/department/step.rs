@@ -4,12 +4,12 @@ use crate::warehouse::Warehouse;
 
 const FREE_COST: f32 = 1e-6;
 
-fn policy_potential(policy: &Policy, market: &Market) -> f32 {
+fn policy_potential(policy: &Policy, prices: &[f32]) -> f32 {
     let mut cost = 0.0;
     let mut revenue = 0.0;
     let mut demanded = 0.0;
     for (k, consumption) in policy.consumptions.iter().enumerate() {
-        let price = market.merchandises[k].price.max(0.0);
+        let price = prices.get(k).copied().unwrap_or(0.0).max(0.0);
         let consumption = consumption.max(0.0);
         let output = policy.outputs.get(k).copied().unwrap_or(0.0).max(0.0);
         demanded += consumption;
@@ -33,11 +33,33 @@ fn policy_potential(policy: &Policy, market: &Market) -> f32 {
     motive / cost.max(FREE_COST)
 }
 
-pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, market: &Market) {
+pub(super) fn plan(
+    department: &mut Department,
+    warehouse: &mut Warehouse,
+    market: &Market,
+    local: &[f32],
+) {
     let goods = warehouse.stocks.len();
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
         stock.volume += department.productions[k].max(0.0);
     }
+
+    let prices: Vec<f32> = (0..goods)
+        .map(|k| {
+            let index = market
+                .merchandises
+                .get(k)
+                .map(|merchandise| merchandise.price.max(0.0))
+                .unwrap_or(0.0);
+            let ratio = local.get(k).copied().unwrap_or(1.0);
+            let price = index * ratio;
+            if price > 0.0 && price.is_finite() {
+                price
+            } else {
+                index
+            }
+        })
+        .collect();
 
     let available: Vec<f32> = warehouse
         .stocks
@@ -50,7 +72,7 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, marke
     let mut total = 0.0;
     let mut produce_total = 0.0;
     for policy in department.policies.iter_mut() {
-        policy.price_potential = policy_potential(policy, market);
+        policy.price_potential = policy_potential(policy, &prices);
         policy.distribution = policy.price_potential;
         if policy.is_transform() {
             produce_total += policy.distribution;

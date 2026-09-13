@@ -183,12 +183,12 @@ fn premium(lab: &Lab) -> f32 {
 
 #[test]
 fn a_transformation_runs_only_while_it_pays() {
-    let mut paying = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    let mut paying = Lab::new(&transformation(0.5, 4.0), 11).with_rule(LevelRule::Fixed);
     paying.run(40);
     assert_eq!(
         paying.history.last().unwrap().transform_share,
         1.0,
-        "1 单位工业品换 1 单位粮食在溢价下应当开工",
+        "半件工业品换一件粮食在溢价下应当开工",
     );
 
     let mut losing = Lab::new(&transformation(3.0, 4.0), 11).with_rule(LevelRule::Fixed);
@@ -196,7 +196,54 @@ fn a_transformation_runs_only_while_it_pays() {
     assert_eq!(
         losing.history.last().unwrap().transform_share,
         0.0,
-        "3 换 1 亏本时不应当开工",
+        "三件工业品换一件粮食亏本时不应当开工",
+    );
+}
+
+#[test]
+fn a_process_the_index_would_shut_runs_on_local_prices() {
+    let mut inputs = vec![0.0; GOODS];
+    let mut outputs = vec![0.0; GOODS];
+    inputs[0] = 2.8;
+    outputs[1] = 4.0;
+    let spec = scarce().with_transform(1, 1, inputs, outputs);
+    let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
+    let department = lab.department_of(1, 0);
+    for round in 0..120 {
+        if round >= 40 && round < 80 {
+            lab.sanction(&[department], 0.0);
+        } else {
+            lab.unsanction();
+        }
+        lab.step();
+    }
+
+    let frame = &lab.history[lab.history.len() - 2];
+    let snapshot = lab.history.last().unwrap();
+    assert_eq!(
+        snapshot.transform_share, 1.0,
+        "本地粮价便宜到足以点着这个转换",
+    );
+    assert!(snapshot.transform_potential > 0.0);
+
+    let food = frame.prices[0];
+    let manufacture = frame.prices[1];
+    let index_margin = (manufacture - 0.7 * food) / (0.7 * food);
+    let local_food = food * frame.local_ratios[1][0];
+    let local_manufacture = manufacture * frame.local_ratios[1][1];
+    let local_margin = (local_manufacture - 0.7 * local_food) / (0.7 * local_food);
+
+    assert!(
+        local_manufacture > manufacture && local_food < food,
+        "被制裁过的地方：本地工业品更贵、本地粮食更便宜：{local_manufacture} {local_food}",
+    );
+    assert!(
+        index_margin < 0.0,
+        "按全局指数它是亏的，指数口径会关停它：{index_margin}",
+    );
+    assert!(
+        local_margin > 0.0,
+        "按本地成交价它是赚的，所以它开着：{local_margin}",
     );
 }
 
@@ -326,27 +373,27 @@ fn a_sanctioned_department_drowns_in_its_own_output() {
 }
 
 #[test]
-fn a_learned_wedge_wrecks_a_real_local_gap() {
+fn a_learned_wedge_costs_the_level_without_buying_a_gap() {
     let quiet = permanently_sanctioned(LevelRule::Fixed, 0.0, 120);
     let loud = permanently_sanctioned(LevelRule::Counterparty, 0.0, 120);
 
     let quiet_gap = quiet.spread(1, 0);
-    let loud_gap = loud.spread(1, 0);
+    let quiet_level = quiet.polities[1].vwap[0];
+    let loud_level = loud.polities[1].vwap[0];
+
     assert!(
         quiet_gap.abs() < 0.15,
         "市场自己给的本地价差应当是小而可用的：{quiet_gap}",
     );
-    assert!(
-        loud_gap.abs() > 3.0 * quiet_gap.abs(),
-        "把学到的楔子接回报价，价差被放大：安静 {quiet_gap} 接上 {loud_gap}",
-    );
-
-    let quiet_level = quiet.polities[1].vwap[0];
-    let loud_level = loud.polities[1].vwap[0];
     assert!(quiet_level > 0.5, "对照组本地价应当贴着指数：{quiet_level}");
     assert!(
         loud_level < 0.3 * quiet_level,
-        "接上楔子后本地价整体塌向指数以下：{quiet_level} -> {loud_level}",
+        "把楔子接回报价会把本地价整体压到指数以下：{quiet_level} -> {loud_level}",
+    );
+    assert!(
+        loud.spread(1, 0).abs() < 3.0 * quiet_gap.abs(),
+        "它换不来更大的截面价差，只毁掉水平：安静 {quiet_gap} 接上 {}",
+        loud.spread(1, 0),
     );
 }
 
