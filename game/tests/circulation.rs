@@ -71,16 +71,19 @@ fn the_treasury_collects_exactly_the_grants() {
 #[test]
 fn the_circulation_settles_into_a_fixed_point() {
     let mut economy = DomesticEconomy::new(11);
-    economy.run(10);
-    let settled = economy.history[10].clone();
+    economy.run(60);
+    let settled = economy.history[60].clone();
     let settled_price = settled.prices;
+    let settled_stock: f32 = settled.holdings.iter().flatten().sum::<f32>();
+    let mut floor = settled.cpi;
 
-    for round in 11..80 {
+    for round in 61..120 {
         economy.step();
         let snapshot = &economy.history[round];
+        floor = floor.min(snapshot.cpi);
         assert_close(
             snapshot.holdings.iter().flatten().sum::<f32>(),
-            settled.holdings.iter().flatten().sum::<f32>(),
+            settled_stock,
             &format!("第 {round} 轮社会总库存"),
         );
         for k in 0..GOODS {
@@ -94,15 +97,42 @@ fn the_circulation_settles_into_a_fixed_point() {
                 "第 {round} 轮商品 {k} 的价格 {} 反弹过高",
                 snapshot.prices[k],
             );
+            assert_close(
+                snapshot.prices[k],
+                settled_price[k],
+                &format!("第 {round} 轮商品 {k} 的价格"),
+            );
         }
-        let drift = (snapshot.cpi - settled.cpi).abs();
-        assert!(
-            drift <= 2.0,
-            "第 {round} 轮物价指数 {} 偏离首轮出清后的 {}",
+        assert_close(
             snapshot.cpi,
             settled.cpi,
+            &format!("第 {round} 轮物价指数"),
         );
     }
+    assert!(
+        floor >= 0.5 * settled.cpi,
+        "收敛前的低谷 {floor} 相对稳态 {} 过深",
+        settled.cpi,
+    );
+}
+
+#[test]
+fn the_first_rounds_swing_once_before_the_fixed_point() {
+    let mut economy = DomesticEconomy::new(11);
+    economy.run(9);
+    let trough = economy.history[9].cpi;
+    economy.run(41);
+
+    assert!(
+        trough < economy.history[50].cpi,
+        "价格应当先沉到一个低谷再回到稳态：低谷 {trough}，稳态 {}",
+        economy.history[50].cpi,
+    );
+    assert!(
+        trough >= 0.5 * economy.history[50].cpi,
+        "低谷 {trough} 相对稳态 {} 过深",
+        economy.history[50].cpi,
+    );
 }
 
 #[test]

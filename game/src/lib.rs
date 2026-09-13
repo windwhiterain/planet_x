@@ -1,7 +1,7 @@
 use fastrand::Rng;
 use planet_x::department::{Department, Departments, Policy};
 use planet_x::market::{Market, Merchandise, Trader, TraderMerchandise};
-use planet_x::warehouse::{SellerRule, Stock, Warehouse, Warehouses};
+use planet_x::warehouse::{Stock, Warehouse, Warehouses};
 
 pub const GOODS: usize = 3;
 pub const DEPARTMENTS: usize = 3;
@@ -81,9 +81,7 @@ impl DomesticEconomy {
                         } else {
                             (CAMPAIGN, CAMPAIGN / 2.0)
                         };
-                        stocks.push(
-                            Stock::new(volume, target).with_seller_rule(SellerRule::TargetVolume),
-                        );
+                        stocks.push(Stock::new(volume, target));
                     }
                     Warehouse::new(stocks)
                 })
