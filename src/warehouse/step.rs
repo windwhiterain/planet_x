@@ -173,52 +173,88 @@ fn volume_for_dealt(share: f32, depth: f32, goal: f32) -> f32 {
     f32::INFINITY
 }
 
-/// 买方：**在局部隐含价不超过参考价的前提下尽量多买**。
+/// 买方：**在"期望达标"和"货币"两个约束下尽量少花钱**。
 ///
-/// 与 `sale_scale` 互为镜像。卖方没有持货成本，所以它最大化
-/// `成交量 × 价 × 学到的局部比率`（收入）；买方**必须**有一个估值上限，
-/// 否则"最小化花费"会把报价压到 0——实测就是这条路把申报压到 `1e-28`、
-/// 把报价压到 `参考价 × e^-44`（129 档网格的下界，`2.132e-21 = 0.0274 × e^-44`）。
+/// ```text
+/// min   volume × unit                        花费（unit = 参考价 × 学到的局部比率）
+/// s.t.  response.get(volume, a) >= need      期望达标——约束是**绝对**的，对着缺口
+///       volume × unit <= cash                货币约束
+/// ```
 ///
-/// 三条判据全部换掉旧版的 argmin：
-/// 1. **数量锚在 `need`（缺口）上**，不锚在"模型以为市场能吸收多少"上——
-///    旧版 `goal = target.min(0.9 × share × depth)` 让申报量度量模型的信念；
-/// 2. **价格由学到的局部价把关**（`buy_price_curve`：挂这个比率，我实际成交在哪个比率），
-///    而不是搜一个"期望达标概率"——`normal_cdf` 在重度短缺时恒等于 0，
-///    分辨不出缺 5 个数量级和缺 29 个数量级；
-/// 3. **没有相对阈值**。旧版 `threshold = best_probability − 1e-4` 是相对**自己**的最大值
-///    定义的，全体没戏时恒成立，于是退化成"用最便宜的方式够不着"。
+/// 与旧版的差别全在"约束对着谁"：
+/// - 旧版 `threshold = best_probability − 1e-4` 是相对**自己**的最大值定义的，全体没戏时
+///   恒成立，于是判据退化成"用最便宜的方式够不着"；这里约束对着 `need`，够不着就是够不着。
+/// - 旧版 `goal = target.min(0.9 × share × depth)` 让申报量度量**模型的信念**；
+///   这里申报量由"要拿到 `need` 需要挂多少"反解出来（`volume_for_dealt`）。
+///
+/// **低尺度区域是不可行的**，这正是不再需要"取最小尺度"那种人为下界的原因：
+/// 那里 `share(a)` 太小、`volume_for_dealt` 反解不出有限的量，约束直接把它排除。
+/// 于是最便宜的解自然落在"刚好能拿下的那个价"上，而不是网格下界。
+///
+/// 估值上限 `realized <= 1` 是**外层**护栏：局部隐含价高于参考价时不出这个价。
+/// 没有它，够不着缺口时"最大化期望成交"那一支会把报价推到网格顶端（`e^44`）。
 fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f32, f32)> {
     if !(need > 0.0) || !(price > 0.0) || !(cash > 0.0) {
         return None;
     }
     let response = stock.buy_response();
     let curve = stock.buy_price_curve();
-    let mut best_dealt = 0.0f32;
-    let mut best: Option<(f32, f32)> = None;
+    let mut cheapest: Option<(f32, f32, f32)> = None; // (cost, volume, scale)
+    let mut most: Option<(f32, f32, f32)> = None; // (dealt, volume, scale) 够不着时的尽力
     for index in 0..SCALE_COARSE_STEPS {
         let scale = coarse_log_scale(index).exp();
         if !scale.is_finite() || !(scale > 0.0) {
             continue;
         }
-        // 学到的局部价高于参考价 ⇒ 这个价我不出
         let realized = curve.get(scale);
-        if !realized.is_finite() || realized > 1.0 {
+        if !realized.is_finite() || !(realized > 0.0) || realized > 1.0 {
             continue;
         }
-        let affordable = affordable_volume(price, scale, cash);
+        let aggressiveness = Stock::buy_aggressiveness(scale);
+        let unit = price * realized;
+        let volume = volume_for_dealt(
+            response.share(aggressiveness),
+            response.depth(aggressiveness),
+            need,
+        );
+        if volume.is_finite() && volume > 0.0 {
+            let cost = volume * unit;
+            if cost.is_finite() && cost <= cash {
+                let better = match cheapest {
+                    Some((best, _, _)) => cost < best,
+                    None => true,
+                };
+                if better {
+                    cheapest = Some((cost, volume, scale));
+                }
+                continue;
+            }
+        }
+        // 这个价拿不到 need（或拿不起）：记下'预算内能拿到最多'的那一档。
+        // **实测必须不夹在 need 上**：夹了之后 `motive_ladder=true` 那档从完美稳态
+        // （uncleared = 0.000、价格逐位不变 1200 轮）退化成 `uncleared = 1.000` 的发散。
+        // 也就是说这个分支实际承担的是"把现金按局部价换成货"的职能，
+        // 而约束（期望达标）在学到的天花板偏小时本来就常常不可行。
+        // 遗留：`dir` 那档的学到的局部价会塌到 1e-27，于是 `affordable = cash/unit`
+        // 算出 3.9e26 的申报量——那要治的是 `buy_price_curve` 的塌陷，不是在这里夹。
+        let affordable = affordable_volume(price, realized, cash);
         if !(affordable > 0.0) {
             continue;
         }
-        // **锚在缺口上**：要多少是需求，不是预测
-        let volume = affordable.min(need);
-        let dealt = response.get(volume, Stock::buy_aggressiveness(scale));
-        if dealt.is_finite() && dealt > best_dealt {
-            best_dealt = dealt;
-            best = Some((volume, scale));
+        let dealt = response.get(affordable, aggressiveness);
+        if dealt.is_finite() && dealt > 0.0 {
+            let better = match most {
+                Some((best, _, _)) => dealt > best,
+                None => true,
+            };
+            if better {
+                most = Some((dealt, affordable, scale));
+            }
         }
     }
-    best
+    cheapest
+        .map(|(_, volume, scale)| (volume, scale))
+        .or_else(|| most.map(|(_, volume, scale)| (volume, scale)))
 }
 
 fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise, reference: f32) {
