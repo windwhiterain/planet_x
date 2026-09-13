@@ -2,6 +2,10 @@ mod common;
 
 #[test]
 fn the_assembled_cloud_module_carries_the_field_and_its_gradient() {
+    let _ = (
+        px_render::clouds::Ablate::Surface,
+        std::mem::size_of::<px_render::clouds::CloudParams>(),
+    );
     let assembled = common::assemble("clouds.wgsl");
     for wanted in [
         "fn cloud_field(",

@@ -1,8 +1,3 @@
-mod atmosphere;
-mod clouds;
-mod planet;
-mod shaders;
-
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +27,7 @@ use px_protocol::render::{Lease, Request, Response, Scene};
 use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
+use px_render::{Canvas, OrbitCamera, ScenePart, asset_root, atmosphere, clouds, planet, shaders};
 
 const GOOD_COLORS: [Srgba; 3] = [
     Srgba::new(0.86, 0.72, 0.34, 1.0),
@@ -49,9 +45,6 @@ const LEASE_CHECK_INTERVAL: u32 = 120;
 const STAR_WIDTH: u32 = 2048;
 const STAR_HEIGHT: u32 = 1024;
 
-#[derive(Component)]
-pub struct ScenePart;
-
 #[derive(Resource, Clone, Copy)]
 struct InitialSize(u32, u32);
 
@@ -61,12 +54,6 @@ struct RenderReady(Arc<AtomicU8>);
 const PIPELINES_PENDING: u8 = 0;
 const PIPELINES_READY: u8 = 1;
 const PIPELINES_FAILED: u8 = 2;
-
-#[derive(Resource)]
-pub struct Canvas {
-    pub size: (u32, u32),
-    pub target: Handle<Image>,
-}
 
 #[derive(Resource)]
 struct Stars(Handle<Image>);
@@ -693,25 +680,6 @@ fn new_target(images: &mut Assets<Image>, width: u32, height: u32) -> Handle<Ima
     images.add(target)
 }
 
-pub(crate) fn asset_root() -> String {
-    let mut candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("px_render/assets"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cursor = exe.parent().map(|path| path.to_path_buf());
-        while let Some(directory) = cursor {
-            candidates.push(directory.join("px_render/assets"));
-            cursor = directory.parent().map(|path| path.to_path_buf());
-        }
-    }
-    candidates
-        .into_iter()
-        .find(|path| path.join("shaders/atmosphere.wgsl").exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("px_render/assets"))
-        .to_string_lossy()
-        .to_string()
-}
 fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -1287,9 +1255,6 @@ struct Rebuild(bool);
 
 #[derive(Resource, Default)]
 struct PendingShot(Option<u32>);
-
-#[derive(Component)]
-struct OrbitCamera;
 
 fn keep_rendering(
     error: &bevy::render::error_handler::RenderError,
