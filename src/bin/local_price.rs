@@ -1,7 +1,7 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::local_price::{
-    bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY,
-    NAMES, SECTOR_MOTIVE,
+    bloc_relations, Kind, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
+    LADDER_THRIFTY, NAMES, SECTOR_MOTIVE,
 };
 
 #[derive(Clone)]
@@ -441,7 +441,7 @@ fn ladder(args: &Args) {
         local.food_supply = supply;
         let mut lab = build_with(&local, Spec::ladder(local.polities, supply));
         lab.run(args.rounds);
-        let department = lab.department_of(0, 0);
+        let department = lab.department_of(0, 0, Kind::Producer);
         let processes = lab.process_state(department);
         let report = |index: usize| match processes.get(index) {
             Some((share, potential, _)) => format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential),
@@ -877,7 +877,7 @@ fn spread(lab: &Lab, seat: usize, good: usize) -> f32 {
 
 fn sanction_run(args: &Args) {
     let mut lab = build(args);
-    let department = lab.department_of(args.sanction_polity, args.sanction_unit);
+    let department = lab.department_of(args.sanction_polity, args.sanction_unit, Kind::Consumer);
     let name = lab.polities[args.sanction_polity].name;
     println!(
         "局部制裁：{name}(政权 {}) 第 {} 个部门 = 仓库 {department}，在 [{} , {}) 轮与政权外断链，权重 {}，规则 {}",
@@ -974,7 +974,7 @@ fn sanction_sweep(args: &Args) {
         let mut local = args.clone();
         local.sanction_w = weight;
         let mut lab = build(&local);
-        let department = lab.department_of(local.sanction_polity, local.sanction_unit);
+        let department = lab.department_of(local.sanction_polity, local.sanction_unit, Kind::Consumer);
         for _ in 0..args.rounds {
             lab.sanction(&[department], weight);
             lab.step();

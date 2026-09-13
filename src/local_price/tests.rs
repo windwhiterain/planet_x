@@ -249,7 +249,7 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
     outputs[1] = 4.0;
     let spec = scarce().with_transform(1, 1, inputs, outputs);
     let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
-    let department = lab.department_of(1, 0);
+    let department = lab.department_of(1, 0, Kind::Consumer);
     for round in 0..120 {
         if round >= 40 {
             lab.sanction(&[department], 0.0);
@@ -339,7 +339,7 @@ fn a_transformation_competes_with_consumption_for_its_input() {
 
 fn permanently_sanctioned(rule: LevelRule, weight: f32, rounds: usize) -> Lab {
     let mut lab = Lab::new(&scarce(), 11).with_rule(rule);
-    let department = lab.department_of(1, 0);
+    let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..rounds {
         lab.sanction(&[department], weight);
         lab.step();
@@ -417,9 +417,9 @@ fn a_targeted_sanction_opens_a_monotone_local_gap() {
 fn a_sanction_stays_local_to_the_named_department() {
     let lab = permanently_sanctioned(LevelRule::Fixed, 0.0, 80);
     let external = lab.department_external();
-    let sanctioned = lab.department_of(1, 0);
-    let neighbour = lab.department_of(1, 1);
-    let foreign = lab.department_of(2, 0);
+    let sanctioned = lab.department_of(1, 0, Kind::Consumer);
+    let neighbour = lab.department_of(1, 1, Kind::Consumer);
+    let foreign = lab.department_of(2, 0, Kind::Consumer);
 
     assert_eq!(external[sanctioned], 0.0, "被制裁的部门必须与政权外断链");
     assert!(
@@ -437,7 +437,7 @@ fn a_sanction_stays_local_to_the_named_department() {
 #[test]
 fn a_sanctioned_department_cannot_trade_out_but_no_longer_drowns() {
     let mut lab = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
-    let department = lab.department_of(1, 0);
+    let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..60 {
         lab.sanction(&[department], 0.0);
         lab.step();
@@ -523,7 +523,7 @@ fn with_absorber(rounds: usize) -> Lab {
     outputs[1] = 4.0;
     let spec = scarce().with_transform(1, 1, inputs, outputs);
     let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
-    let department = lab.department_of(1, 0);
+    let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..rounds {
         lab.sanction(&[department], 0.0);
         lab.step();
@@ -556,7 +556,7 @@ fn a_profitable_absorber_runs_and_the_flood_no_longer_grows() {
     //  · `吸收者压缩本地价差` —— 路线 b 之后这个比较**反了**（无 −0.216 有 −0.294），
     //    因为吸收者开工会把本地账本推得更偏，而不是拉回指数；
     //  · `fill < 0.3` —— 同上一条测试，`fill` 是内外合计，而"卖不出去"问的是外部。
-    let sanctioned = absorbing.department_of(1, 0);
+    let sanctioned = absorbing.department_of(1, 0, Kind::Consumer);
     assert_eq!(
         absorbing.department_external()[sanctioned],
         0.0,
@@ -573,7 +573,7 @@ fn a_profitable_absorber_runs_and_the_flood_no_longer_grows() {
 #[test]
 fn a_process_choice_follows_whichever_resource_is_tight() {
     let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11).with_rule(LevelRule::Fixed);
-    let department = lab.department_of(0, 0);
+    let department = lab.department_of(0, 0, Kind::Consumer);
     lab.market.merchandises[0].price = 1.0;
     lab.market.merchandises[1].price = 1.0;
     let slow = 0;
@@ -638,8 +638,8 @@ fn a_capacity_budget_throttles_the_department() {
     // 旧读数是被制裁部门的 `stocks[0].volume`（"紧的攒得多"）。路线 b 之后那个读数
     // 不再成立：宽松的产能预算会让部门把库存吃进消费里，终值反而更低。
     // 直接读**节流系数**（`capacity_scale`），那才是这条测试要问的东西。
-    let tight_scale = tight.departments.departments[tight.department_of(0, 0)].capacity_scale();
-    let loose_scale = loose.departments.departments[loose.department_of(0, 0)].capacity_scale();
+    let tight_scale = tight.departments.departments[tight.department_of(0, 0, Kind::Producer)].capacity_scale();
+    let loose_scale = loose.departments.departments[loose.department_of(0, 0, Kind::Producer)].capacity_scale();
     assert!(
         tight_scale < 1.0,
         "紧的产能预算应当真的卡住这个部门：{tight_scale}",

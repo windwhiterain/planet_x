@@ -9,6 +9,19 @@ use crate::warehouse::{Stock, Warehouse, Warehouses};
 
 pub const GOODS: usize = 3;
 pub const UNITS: usize = 3;
+
+/// 每个单元拆成两类部门：**生产部门**（只留生产政策，仓库里是投入品与产出品）
+/// 与**消费部门**（只留消费政策，仓库里是口粮，靠拨款过日子）。
+///
+/// 拆的理由是量出来的：一个部门一个仓库、一个 LP 的时候，消费政策与生产政策在同一个
+/// 目标里抢同一批库存，需求曲线会把生产者的投入品也吃光；而且部门既吃又产，
+/// "谁卖"永远悬空——最后没人有货可卖，`dealt = 0`、指数冻在初值。
+/// 拆开之后市场是两族之间**唯一**的通道，价格才有活干。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Producer,
+    Consumer,
+}
 pub const BASE: f32 = 4.0;
 pub const CAMPAIGN: f32 = 4.0;
 pub const MOTIVE: f32 = 20.0;
@@ -304,7 +317,7 @@ pub struct Polity {
 
 impl Polity {
     pub fn span(&self) -> std::ops::Range<usize> {
-        self.seat..self.seat + UNITS
+        self.seat..self.seat + 2 * UNITS
     }
 }
 
@@ -388,7 +401,7 @@ pub struct Lab {
 
 impl Lab {
     pub fn new(spec: &Spec, seed: u64) -> Self {
-        let count = spec.polities * UNITS;
+        let count = spec.polities * 2 * UNITS;
         let market = Market::new(
             (0..GOODS)
                 .map(|_| Merchandise { price: BASE_PRICE })
@@ -406,67 +419,77 @@ impl Lab {
         let mut polities = Vec::with_capacity(spec.polities);
         for polity in 0..spec.polities {
             for unit in 0..UNITS {
-                let mut stocks = Vec::with_capacity(GOODS);
-                for good in 0..GOODS {
-                    // 初始值与原来一致。目标从第二轮起就被"三倍取货量"覆盖，
-                    // 所以这里的初值只在第一轮起作用。
-                    let (volume, target) = if good == unit {
-                        (0.0, 0.0)
-                    } else {
-                        (CAMPAIGN, CAMPAIGN / 2.0)
+                for kind in [Kind::Producer, Kind::Consumer] {
+                    let mut stocks = Vec::with_capacity(GOODS);
+                    for good in 0..GOODS {
+                        // 自有商品是 0：生产者的自有商品本来就该全卖，消费者不吃自己那样。
+                        // 其余给一场战役的量——生产者的**投入品**和消费者的**口粮**都从
+                        // 这里来，所以这条规则拆前拆后都成立。目标从第二轮起被
+                        // "三倍取货量"覆盖，初值只在第一轮起作用。
+                        let (volume, target) = if good == unit {
+                            (0.0, 0.0)
+                        } else {
+                            (CAMPAIGN, CAMPAIGN / 2.0)
+                        };
+                        stocks.push(Stock::new(volume, target));
+                    }
+                    warehouses.push(
+                        Warehouse::new(stocks)
+                            .with_reference(vec![BASE_PRICE; GOODS])
+                            .with_locality(polity),
+                    );
+                    let policies: Vec<Policy> = match kind {
+                        // 生产部门：只有生产政策。它**不吃东西**——两族之间只剩市场这一条
+                        // 通道，价格才有活干。
+                        Kind::Producer => {
+                            let mut policies: Vec<Policy> = Vec::new();
+                            for transform in spec.transforms(polity, unit) {
+                                let mut outputs = transform.outputs.clone();
+                                specialize(&mut outputs, unit, spec.specialty_of(unit));
+                                policies.push(
+                                    Policy::production(transform.inputs.clone(), outputs)
+                                        .with_capacity_cost(transform.capacity_cost),
+                                );
+                            }
+                            if spec.primary_free || unit == 0 {
+                                let mut outputs = vec![0.0; GOODS];
+                                outputs[unit] = BASE * spec.supply(polity, unit);
+                                specialize(&mut outputs, unit, spec.specialty_of(unit));
+                                policies.push(
+                                    Policy::production(vec![0.0; GOODS], outputs)
+                                        .with_capacity_cost(PRIMARY_CAPACITY_COST),
+                                );
+                            }
+                            policies
+                        }
+                        // 消费部门：只有消费政策，产出为零，靠每轮的拨款过日子。
+                        Kind::Consumer => (0..GOODS)
+                            .filter(|good| spec.all_consume || *good != unit)
+                            .map(|good| {
+                                let mut consumptions = vec![0.0; GOODS];
+                                consumptions[good] = CAMPAIGN;
+                                Policy::consumption(
+                                    consumptions,
+                                    MOTIVE * spec.motive(polity, good) * spec.motive_ladder[good],
+                                )
+                            })
+                            .collect(),
                     };
-                    stocks.push(Stock::new(volume, target));
+                    let capacity = if spec.self_capacity {
+                        policies
+                            .iter()
+                            .filter(|policy| policy.is_production())
+                            .map(|policy| policy.capacity_use())
+                            .sum::<f32>()
+                    } else {
+                        spec.capacity
+                    };
+                    departments.push(Department::new(policies).with_capacity(capacity));
                 }
-                warehouses.push(
-                    Warehouse::new(stocks)
-                        .with_reference(vec![BASE_PRICE; GOODS])
-                        .with_locality(polity),
-                );
-                let policies = {
-                    let mut policies: Vec<Policy> = (0..GOODS)
-                        .filter(|good| spec.all_consume || *good != unit)
-                        .map(|good| {
-                            let mut consumptions = vec![0.0; GOODS];
-                            consumptions[good] = CAMPAIGN;
-                            Policy::consumption(
-                                consumptions,
-                                MOTIVE * spec.motive(polity, good) * spec.motive_ladder[good],
-                            )
-                        })
-                        .collect();
-                    for transform in spec.transforms(polity, unit) {
-                        let mut outputs = transform.outputs.clone();
-                        specialize(&mut outputs, unit, spec.specialty_of(unit));
-                        policies.push(
-                            Policy::production(transform.inputs.clone(), outputs)
-                                .with_capacity_cost(transform.capacity_cost),
-                        );
-                    }
-                    if spec.primary_free || unit == 0 {
-                        let mut outputs = vec![0.0; GOODS];
-                        outputs[unit] = BASE * spec.supply(polity, unit);
-                        specialize(&mut outputs, unit, spec.specialty_of(unit));
-                        policies.push(
-                            Policy::production(vec![0.0; GOODS], outputs)
-                                .with_capacity_cost(PRIMARY_CAPACITY_COST),
-                        );
-                    }
-                    policies
-                };
-                let capacity = if spec.self_capacity {
-                    policies
-                        .iter()
-                        .filter(|policy| policy.is_production())
-                        .map(|policy| policy.capacity_use())
-                        .sum::<f32>()
-                } else {
-                    spec.capacity
-                };
-                departments.push(Department::new(policies).with_capacity(capacity));
             }
             polities.push(Polity {
                 name: NAMES[polity % NAMES.len()],
-                seat: polity * UNITS,
+                seat: polity * 2 * UNITS,
                 level: vec![BASE_PRICE; GOODS],
                 wedge: vec![0.0; GOODS],
                 vwap: vec![BASE_PRICE; GOODS],
@@ -595,8 +618,9 @@ impl Lab {
             .set_relations(&vec![vec![1.0; traders]; traders]);
     }
 
-    pub fn department_of(&self, polity: usize, unit: usize) -> usize {
-        polity * UNITS + unit
+    /// 某个政权、某个单元里的一类部门（生产或消费）
+    pub fn department_of(&self, polity: usize, unit: usize, kind: Kind) -> usize {
+        polity * 2 * UNITS + unit * 2 + if kind == Kind::Producer { 0 } else { 1 }
     }
 
     /// 某个部门的各个转换工艺的（份额，单位产能利润，产能占用）
@@ -1136,11 +1160,11 @@ impl Lab {
 }
 
 pub fn warehouse_polity(warehouse: usize) -> usize {
-    warehouse / UNITS
+    warehouse / (2 * UNITS)
 }
 
 pub fn bloc_relations(polities: usize, outside: f32) -> Vec<Vec<f32>> {
-    let traders = polities * UNITS;
+    let traders = polities * 2 * UNITS;
     let mut relations = vec![vec![1.0; traders]; traders];
     for i in 0..traders {
         for j in 0..traders {
