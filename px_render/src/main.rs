@@ -54,9 +54,9 @@ struct InitialSize(u32, u32);
 struct RenderReady(Arc<AtomicBool>);
 
 #[derive(Resource)]
-struct Canvas {
-    size: (u32, u32),
-    target: Handle<Image>,
+pub struct Canvas {
+    pub size: (u32, u32),
+    pub target: Handle<Image>,
 }
 
 #[derive(Resource)]
@@ -601,6 +601,7 @@ fn asset_root() -> String {
 fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut atmosphere_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     size: Res<InitialSize>,
@@ -647,6 +648,7 @@ fn warm_up(
         })),
         Transform::from_xyz(0.0, 1.0, 0.0),
     ));
+    planet::warm_atmosphere(&mut commands, &mut meshes, &mut atmosphere_materials);
 }
 
 fn accept_jobs(
@@ -746,6 +748,7 @@ fn accept_jobs(
     let camera_transform = planet::probe_camera(request.view.cam);
     let camera = commands.spawn((
         ScenePart,
+        atmosphere::RequestCamera,
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(canvas.target.clone().into()),
@@ -1406,6 +1409,9 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
+
 
 
 

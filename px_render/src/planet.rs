@@ -47,11 +47,11 @@ impl Palette {
 
     pub fn atmosphere(self) -> (LinearRgba, f32, f32) {
         match self {
-            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.035, 0.50),
-            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 0.100, 0.40),
-            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.030, 0.60),
-            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.085, 0.45),
-            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.040, 0.46),
+            Self::Rocky => (LinearRgba::rgb(0.44, 0.64, 0.98), 0.022, 0.50),
+            Self::Gas => (LinearRgba::rgb(1.00, 0.86, 0.62), 0.070, 0.40),
+            Self::Ice => (LinearRgba::rgb(0.66, 0.87, 1.00), 0.020, 0.60),
+            Self::Lava => (LinearRgba::rgb(1.00, 0.46, 0.20), 0.055, 0.45),
+            Self::Desert => (LinearRgba::rgb(0.97, 0.79, 0.55), 0.026, 0.46),
         }
     }
 
@@ -742,6 +742,44 @@ pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
     Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
+pub fn warm_atmosphere(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<AtmosphereMaterial>,
+) {
+    let Ok(sphere) = Sphere::new(1.14).mesh().ico(16) else {
+        return;
+    };
+    let material = materials.add(AtmosphereMaterial {
+        params: AtmosphereParams {
+            inner: 1.0,
+            outer: 1.14,
+            density: 0.035,
+            softness: 0.5,
+            camera_x: 0.0,
+            camera_y: 0.55,
+            camera_z: 3.15,
+            screen_x: 960.0,
+            screen_y: 640.0,
+            padding_a: 0.0,
+            padding_b: 0.0,
+            padding_c: 0.0,
+            forward: Vec4::Z,
+            right: Vec4::X,
+            up: Vec4::Y,
+            reserved: Vec4::W,
+        },
+        tint: LinearRgba::rgb(0.44, 0.64, 0.98),
+    });
+    commands.spawn((
+        crate::ScenePart,
+        PlanetAtmosphere,
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(material),
+        Transform::default(),
+    ));
+}
+
 fn spawn_scattering(
     commands: &mut Commands,
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
@@ -778,8 +816,18 @@ fn spawn_atmosphere(
             outer: spec.radius * ATMOSPHERE_SHELL,
             density: density * spec.atmo,
             softness,
-            camera,
-            padding: 0.0,
+            camera_x: camera.x,
+            camera_y: camera.y,
+            camera_z: camera.z,
+            screen_x: 960.0,
+            screen_y: 640.0,
+            padding_a: 0.0,
+            padding_b: 0.0,
+            padding_c: 0.0,
+            forward: Vec4::Z,
+            right: Vec4::X,
+            up: Vec4::Y,
+            reserved: Vec4::W,
         },
         tint,
     });
@@ -1354,6 +1402,14 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
+
+
 
 
 
