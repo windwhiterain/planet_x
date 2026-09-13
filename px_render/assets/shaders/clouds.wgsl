@@ -33,6 +33,7 @@ const ABLATE_DETAIL: u32 = 4u;
 const ABLATE_SURFACE: u32 = 5u;
 const ABLATE_NORMALS: u32 = 6u;
 const SHADOW_GAIN: f32 = 4.0;
+const SLOPE_LIMIT: f32 = 0.9;
 
 struct Medium {
     direction: vec3<f32>,
@@ -45,6 +46,10 @@ struct Medium {
 
 fn to_local(point: vec3<f32>) -> vec3<f32> {
     return rotate_vector(vec4<f32>(-params.orientation.xyz, params.orientation.w), point);
+}
+
+fn to_world(vector: vec3<f32>) -> vec3<f32> {
+    return rotate_vector(params.orientation, vector);
 }
 
 fn span() -> f32 {
@@ -71,7 +76,14 @@ fn coverage_of(direction: vec3<f32>) -> f32 {
 
 fn surface_normal(direction: vec3<f32>) -> vec3<f32> {
     let baked = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0);
-    let up = direction - baked.gba * params.slope_scale;
+    let slope = baked.gba * params.slope_scale;
+    let magnitude = length(slope);
+    let bounded = select(
+        slope,
+        slope * (SLOPE_LIMIT / max(magnitude, 1e-5)),
+        magnitude > SLOPE_LIMIT,
+    );
+    let up = direction - bounded;
     let length_squared = dot(up, up);
     if length_squared <= 1e-8 {
         return direction;
@@ -137,7 +149,7 @@ fn detail_shading(direction: vec3<f32>) -> f32 {
     if length_squared <= 1e-8 {
         return 1.0;
     }
-    let normal = up * inverseSqrt(length_squared);
+    let normal = to_world(up * inverseSqrt(length_squared));
     return mix(0.45, 1.0, clamp(dot(normal, normalize(SUN_DIRECTION)) + 0.5, 0.0, 1.0));
 }
 
@@ -169,7 +181,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if params.ablate == ABLATE_NORMALS || params.ablate == ABLATE_SURFACE {
         let facing = normalize(to_local(in.world_position.xyz));
         let baked = textureSampleLevel(coverage_map, coverage_sampler, facing, 0.0);
-        let normal = surface_normal(facing);
+        let normal = to_world(surface_normal(facing));
         if params.ablate == ABLATE_NORMALS {
             return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
         }

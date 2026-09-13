@@ -98,7 +98,7 @@ impl CloudParams {
             bump: 0.85,
             seed: 7,
             ablate: Ablate::None.code(),
-            slope_scale: 0.08,
+            slope_scale: 0.04,
         }
     }
 }
