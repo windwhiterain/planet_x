@@ -1,0 +1,8 @@
+# 山脉：高频 ridged，只出现在 mask 高的地方
+frequency = 11.0
+octaves = 5
+lacunarity = 2.0
+gain = 0.55
+seed = 21
+aspect = 2.0
+sharpness = 1.8

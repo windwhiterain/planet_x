@@ -1,0 +1,6 @@
+# 最终高度：把地形压到 0..1 并做一次 smoothstep
+in_min = 0.0
+in_max = 1.0
+out_min = 0.0
+out_max = 1.0
+smooth = true

@@ -1338,3 +1338,60 @@ pub const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));   // 编译期算好
 
 - ⏳ **告警要不要升级成门**：把"源码变了但版本没升"做成 `check-pcg-versions` 失败？
   我倾向**先只告警** —— 门在纯重构时会误报，而误报的门最后会被人绕过去。
+
+---
+
+## 20. P2a 完成记录：PCG 层落地
+
+**做了什么**（`cargo test --workspace` 133 个全绿）：
+
+| 件 | 内容 |
+|---|---|
+| `px_ops` | `FieldOp` trait / `Field` / 值噪声 + fbm + ridged / `node::<Op>(名字, 输入)` / blake3 CAS / `index.json` + `manifest.json` / 版本不匹配告警 |
+| 算子 5 个（**一算子一文件**，各带自己的 ID / VERSION / SOURCE_HASH） | `field.constant`、`field.fbm`、`field.ridged`、`field.mix`（3 输入 a/b/mask）、`field.remap` |
+| `px_graphs` | `src/bin/planet.rs`：手写的一张图（continents / mountains / weight → terrain → height），带 `GRAPH_VERSION` |
+| 参数 | `art/planet/<节点>.toml`，**一节点一文件**；文件缺失即用默认值 |
+| 缓存 | `target/pcg/ab/<前两位>/<blake3>.pxart`（**内容就是 `px_protocol` 的流格式**）+ `index.json` + `manifest.json` |
+
+用法：`cargo run -p px_graphs --bin planet`
+
+### 20.1 验收结果（六条全过）
+
+| 验收 | 结果 |
+|---|---|
+| 改一个参数（mountains.frequency） | **命中 continents / weight，重算 mountains → terrain → height**（2 命中 3 重算） |
+| 只改注释 | **全部命中，键不变** |
+| `PX_PCG_FRESH=1` | 全部重算，且**重算出的值域与缓存里的完全一致** |
+| 改算子源码但没升 VERSION | **⚠ 精确点名 continents，缓存照常命中** |
+| 升 VERSION | 只有该算子与其下游重算（continents + terrain + height） |
+| 参数改回去后再全量重算 | **11 个产物逐字节不变** |
+
+最后一条是关键：**键是纯函数**。把参数改回去，键就回到原值、缓存自动命中 ——
+**不需要任何"撤销/失效"逻辑**，这是内容寻址白送的。
+
+### 20.2 实测数字
+
+| | 时间 |
+|---|---|
+| 5 个节点全量 cook（384×192，6 阶 fbm + 5 阶 ridged） | **52 ms** |
+| 5 个节点全命中 | **10 ms** |
+| 改一行 `px_ops` 重编（不链 Bevy） | **0.5 s 量级** |
+
+⚠️ 如实记一笔：**这个规模下缓存买不到速度**（全量也才 52 ms）。它现在买的是**边界** ——
+`cook` 的接口、参数文件的约定、产物格式；等要烘的东西变贵（高分辨率场、网格、侵蚀）时才回本。
+
+### 20.3 一个设计判断被实测支持
+
+`node::<Op>(名字, 输入)` 是**泛型函数、不是宏**：算子把
+`ID / VERSION / SOURCE_HASH / INPUTS / eval` 放在一个 `impl FieldOp for X` 里，
+所以"算子表"就是 trait 实现，编译期解析。**框架语法为零** —— 图程序读起来就是普通 Rust，
+这验证了 §18 的判断。
+
+### 20.4 还没做
+
+- **产物还没有消费者**：`px_render` 只读 `World` 帧，还不会读 `.pxart`（P2c）。
+- **只有 `Field` 一种产物类型**（Mesh / Instances 只在协议里有类型声明）。
+- 图程序与 sim 还没接（拿 `WorldView` 当输入是 P2c 的事）。
+- 输入个数是常量（`INPUTS` 是 `&'static [&'static str]`）；可变输入要等真有需求。
+- 噪声是**自己写的值噪声**，与另一条血缘的 GLSL（perlin / fbm / ridged / warp）**还没对过** ——
+  §14.5 第 4 条那个 CPU/GPU 一致性问题，现在正式变成一个待办。

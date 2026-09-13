@@ -4283,6 +4283,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "px_graphs"
+version = "0.1.0"
+dependencies = [
+ "px_ops",
+]
+
+[[package]]
+name = "px_ops"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "px_protocol",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "px_protocol"
 version = "0.1.0"
 dependencies = [

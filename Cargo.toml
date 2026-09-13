@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["game", "px_protocol", "px_render"]
-default-members = ["game", "px_protocol"]
+members = ["game", "px_protocol", "px_render", "px_ops", "px_graphs"]
+default-members = ["game", "px_protocol", "px_ops", "px_graphs"]
 
 [dependencies]
 fastrand = "2"

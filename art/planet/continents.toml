@@ -1,0 +1,7 @@
+# 大陆：低频 fbm，给出行星的大块陆地
+frequency = 3.2
+octaves = 6
+lacunarity = 2.0
+gain = 0.5
+seed = 7
+aspect = 2.0
