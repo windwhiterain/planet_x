@@ -1,3 +1,28 @@
+use std::ops::{Add, Div, Mul, Sub};
+
+pub trait Scalar:
+    Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + PartialOrd
+{
+    fn from_f32(value: f32) -> Self;
+    fn real(self) -> f32;
+    fn clamp01(self) -> Self;
+    fn zero() -> Self {
+        Self::from_f32(0.0)
+    }
+}
+
+impl Scalar for f32 {
+    fn from_f32(value: f32) -> Self {
+        value
+    }
+    fn real(self) -> f32 {
+        self
+    }
+    fn clamp01(self) -> Self {
+        self.clamp(0.0, 1.0)
+    }
+}
+
 pub const fn fnv1a(bytes: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut index = 0;
@@ -115,31 +140,35 @@ const GRADIENTS: [[f32; 3]; 12] = [
     [0.0, -1.0, -1.0],
 ];
 
-pub fn gradient_noise_3(point: [f32; 3], seed: u32) -> f32 {
-    let x0 = point[0].floor();
-    let y0 = point[1].floor();
-    let z0 = point[2].floor();
-    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
-    let tx = smooth(point[0] - x0);
-    let ty = smooth(point[1] - y0);
-    let tz = smooth(point[2] - z0);
+fn smooth_scalar<S: Scalar>(t: S) -> S {
+    t * t * (S::from_f32(3.0) - t - t)
+}
 
-    let mut total = 0.0_f32;
+pub fn gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
+    let x0 = point[0].real().floor();
+    let y0 = point[1].real().floor();
+    let z0 = point[2].real().floor();
+    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+    let tx = smooth_scalar(point[0] - S::from_f32(x0));
+    let ty = smooth_scalar(point[1] - S::from_f32(y0));
+    let tz = smooth_scalar(point[2] - S::from_f32(z0));
+
+    let mut total = S::zero();
     for corner in 0..8 {
         let step_x = (corner & 1) as i32;
         let step_y = (corner >> 1) as i32 & 1;
         let step_z = (corner >> 2) as i32 & 1;
         let offset = [step_x as f32, step_y as f32, step_z as f32];
         let gradient = GRADIENTS[(lattice3(ix + step_x, iy + step_y, iz + step_z, seed) % 12) as usize];
-        let dot = gradient[0] * (tx - offset[0])
-            + gradient[1] * (ty - offset[1])
-            + gradient[2] * (tz - offset[2]);
-        let weight = if step_x == 1 { tx } else { 1.0 - tx }
-            * if step_y == 1 { ty } else { 1.0 - ty }
-            * if step_z == 1 { tz } else { 1.0 - tz };
-        total += dot * weight;
+        let dot = S::from_f32(gradient[0]) * (tx - S::from_f32(offset[0]))
+            + S::from_f32(gradient[1]) * (ty - S::from_f32(offset[1]))
+            + S::from_f32(gradient[2]) * (tz - S::from_f32(offset[2]));
+        let weight = if step_x == 1 { tx } else { S::from_f32(1.0) - tx }
+            * if step_y == 1 { ty } else { S::from_f32(1.0) - ty }
+            * if step_z == 1 { tz } else { S::from_f32(1.0) - tz };
+        total = total + dot * weight;
     }
-    (total * 0.9 + 0.5).clamp(0.0, 1.0)
+    (total * S::from_f32(0.9) + S::from_f32(0.5)).clamp01()
 }
 
 pub fn direction(u: f32, v: f32) -> [f32; 3] {
@@ -149,29 +178,30 @@ pub fn direction(u: f32, v: f32) -> [f32; 3] {
     [ring * phi.cos(), theta.cos(), ring * phi.sin()]
 }
 
-pub fn fbm_3(point: [f32; 3], settings: &FbmSettings) -> f32 {
-    let mut total = 0.0_f32;
-    let mut amplitude = 1.0_f32;
-    let mut normalization = 0.0_f32;
+pub fn fbm_3<S: Scalar>(point: [S; 3], settings: &FbmSettings) -> S {
+    let mut total = S::zero();
+    let mut amplitude = S::from_f32(1.0);
+    let mut normalization = S::zero();
     let mut frequency = settings.frequency;
     for octave in 0..settings.octaves {
-        total += amplitude
-            * gradient_noise_3(
-                [
-                    point[0] * frequency,
-                    point[1] * frequency,
-                    point[2] * frequency,
-                ],
-                settings.seed ^ octave,
-            );
-        normalization += amplitude;
-        amplitude *= settings.gain;
+        total = total
+            + amplitude
+                * gradient_noise_3(
+                    [
+                        point[0] * S::from_f32(frequency),
+                        point[1] * S::from_f32(frequency),
+                        point[2] * S::from_f32(frequency),
+                    ],
+                    settings.seed ^ octave,
+                );
+        normalization = normalization + amplitude;
+        amplitude = amplitude * S::from_f32(settings.gain);
         frequency *= settings.lacunarity;
     }
-    if normalization > 0.0 {
+    if normalization > S::zero() {
         total / normalization
     } else {
-        0.0
+        S::zero()
     }
 }
 
