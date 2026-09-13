@@ -255,7 +255,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if length_squared <= 1e-14 {
             discard;
         }
-        let normal = gradient * inverseSqrt(length_squared);
+        let normal = -gradient * inverseSqrt(length_squared);
         if params.ablate == ABLATE_NORMALS {
             return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
         }
