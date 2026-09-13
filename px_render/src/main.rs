@@ -6,7 +6,7 @@ mod shaders;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,7 @@ const MAX_STACK: f32 = 5.0;
 const MAX_BAR: f32 = 4.0;
 const PIPELINE_DEADLINE: u32 = 1800;
 const FRAMES_AFTER_JOB: u32 = 6;
+const PIPELINE_POLL_INTERVAL: u32 = 20;
 const LEASE_CHECK_INTERVAL: u32 = 120;
 const STAR_WIDTH: u32 = 2048;
 const STAR_HEIGHT: u32 = 1024;
@@ -55,7 +56,11 @@ pub struct ScenePart;
 struct InitialSize(u32, u32);
 
 #[derive(Resource, Clone)]
-struct RenderReady(Arc<AtomicBool>);
+struct RenderReady(Arc<AtomicU8>);
+
+const PIPELINES_PENDING: u8 = 0;
+const PIPELINES_READY: u8 = 1;
+const PIPELINES_FAILED: u8 = 2;
 
 #[derive(Resource)]
 pub struct Canvas {
@@ -94,6 +99,7 @@ struct ActiveJob {
     started: Instant,
     reply: SyncSender<Frame>,
     warm: u32,
+    warned: bool,
     requested: bool,
 }
 
@@ -460,7 +466,7 @@ fn serve(options: Options) -> Result<(), String> {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<Job>();
     spawn_listener(listener, job_tx);
 
-    let ready = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicU8::new(PIPELINES_PENDING));
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
         .add_plugins(
@@ -610,12 +616,15 @@ fn pipeline_label(descriptor: &bevy::material::descriptor::PipelineDescriptor) -
 fn watch_pipelines(
     cache: Res<PipelineCache>,
     ready: Res<RenderReady>,
+    mut ticks: Local<u32>,
     mut announced: Local<bool>,
     mut reported: Local<Vec<String>>,
 ) {
-    if ready.0.load(Ordering::Relaxed) {
+    *ticks += 1;
+    if *ticks % PIPELINE_POLL_INTERVAL != 0 {
         return;
     }
+    let state = ready.0.load(Ordering::Relaxed);
     let total = cache.pipelines().count();
     let mut pending = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -632,17 +641,34 @@ fn watch_pipelines(
         *announced = true;
         println!("首个渲染管线入队：当前 {total} 条，待编译 {pending} 条");
     }
-    if total == 0 || pending > 0 {
-        return;
-    }
     if failures != *reported {
-        for line in &failures {
-            eprintln!("管线编译失败｜{line}");
+        if failures.is_empty() {
+            println!("渲染管线恢复正常");
+        } else {
+            for line in &failures {
+                eprintln!("管线编译失败｜{line}");
+            }
         }
         *reported = failures.clone();
     }
-    if failures.is_empty() {
-        ready.0.store(true, Ordering::Relaxed);
+    if !failures.is_empty() {
+        if state != PIPELINES_FAILED {
+            eprintln!("⚠ 有管线编译失败，在这修好之前拒绝一切出图任务");
+        }
+        ready.0.store(PIPELINES_FAILED, Ordering::Relaxed);
+        return;
+    }
+    if pending > 0 {
+        if state != PIPELINES_READY {
+            ready.0.store(PIPELINES_PENDING, Ordering::Relaxed);
+        }
+        return;
+    }
+    if total == 0 {
+        return;
+    }
+    if state != PIPELINES_READY {
+        ready.0.store(PIPELINES_READY, Ordering::Relaxed);
         println!("渲染管线全部就绪：共 {total} 条，失败 0 条");
     }
 }
@@ -876,6 +902,7 @@ fn accept_jobs(
         started: Instant::now(),
         reply: job.reply,
         warm: 0,
+        warned: false,
         requested: false,
     });
 }
@@ -1151,7 +1178,7 @@ fn idle_between_jobs(
     active: Res<Active>,
     mut cameras: Query<&mut Camera, With<Camera3d>>,
 ) {
-    let wanted = probe.0 || active.0.is_some() || !ready.0.load(Ordering::Relaxed);
+    let wanted = probe.0 || active.0.is_some() || ready.0.load(Ordering::Relaxed) == PIPELINES_PENDING;
     for mut camera in cameras.iter_mut() {
         if camera.is_active != wanted {
             camera.is_active = wanted;
@@ -1171,8 +1198,23 @@ fn drive(
         return;
     };
 
-    if !ready.0.load(Ordering::Relaxed) && ticks.0 < PIPELINE_DEADLINE {
+    let state = ready.0.load(Ordering::Relaxed);
+    if state == PIPELINES_FAILED {
+        let reason = "渲染管线编译失败，拒绝出图（细节见服务端日志的「管线编译失败」行）".to_string();
+        eprintln!("拒绝任务：{reason}");
+        let _ = job.reply.send(Frame::Refused(reason));
+        active.0 = None;
         return;
+    }
+    if state == PIPELINES_PENDING && ticks.0 < PIPELINE_DEADLINE {
+        return;
+    }
+    if state == PIPELINES_PENDING && !job.warned {
+        job.warned = true;
+        eprintln!(
+            "⚠ 管线还没就绪就超时放行了（第 {} 帧）：这张图可能是缺材质的，别当成结果",
+            ticks.0
+        );
     }
 
     if !job.requested {
@@ -1197,7 +1239,7 @@ fn drive(
         height: job.height,
         bytes: std::fs::metadata(&job.out).map(|meta| meta.len()).unwrap_or(0),
         millis: job.started.elapsed().as_millis() as u64,
-        warm: ready.0.load(Ordering::Relaxed),
+        warm: state == PIPELINES_READY,
     };
     println!(
         "出图：{} → {}（{}×{}，{} 字节，{} ms）",
@@ -1377,7 +1419,7 @@ fn view(options: Options) -> Result<(), String> {
         .and_then(|meta| meta.modified())
         .ok();
     let spin = options.spin.is_none();
-    let ready = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicU8::new(PIPELINES_PENDING));
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(AssetPlugin {
@@ -1634,7 +1676,7 @@ fn auto_shot(
         pending.0 = Some(frames - 1);
         return;
     }
-    if !ready.0.load(Ordering::Relaxed) {
+    if ready.0.load(Ordering::Relaxed) == PIPELINES_PENDING {
         return;
     }
 

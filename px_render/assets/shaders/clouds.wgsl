@@ -35,7 +35,6 @@ const ABLATE_DETAIL: u32 = 4u;
 const ABLATE_SURFACE: u32 = 5u;
 const ABLATE_NORMALS: u32 = 6u;
 const SHADOW_GAIN: f32 = 4.0;
-const SLOPE_LIMIT: f32 = 0.9;
 const SURFACE_STEPS: u32 = 56;
 const SURFACE_LEVEL: f32 = 0.20;
 const SURFACE_EPSILON: f32 = 0.05;
@@ -77,23 +76,6 @@ fn coverage_of(direction: vec3<f32>) -> f32 {
         0.45,
         clamp((mask - params.coverage) / max(1.0 - params.coverage, 1e-4), 0.0, 1.0),
     );
-}
-
-fn surface_normal(direction: vec3<f32>) -> vec3<f32> {
-    let baked = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0);
-    let slope = baked.gba * params.slope_scale;
-    let magnitude = length(slope);
-    let bounded = select(
-        slope,
-        slope * (SLOPE_LIMIT / max(magnitude, 1e-5)),
-        magnitude > SLOPE_LIMIT,
-    );
-    let up = direction - bounded;
-    let length_squared = dot(up, up);
-    if length_squared <= 1e-8 {
-        return direction;
-    }
-    return up * inverseSqrt(length_squared);
 }
 
 fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
@@ -161,11 +143,12 @@ fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
     let x = vec3<f32>(step, 0.0, 0.0);
     let y = vec3<f32>(0.0, step, 0.0);
     let z = vec3<f32>(0.0, 0.0, step);
+    let scale = 1.0 / (2.0 * step);
     return vec3<f32>(
         cloud_field(point + x) - cloud_field(point - x),
         cloud_field(point + y) - cloud_field(point - y),
         cloud_field(point + z) - cloud_field(point - z),
-    );
+    ) * scale;
 }
 
 fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {
