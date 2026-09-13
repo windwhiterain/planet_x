@@ -10,8 +10,8 @@ fn main() {
         name: "desert".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
-        width: 384,
-        height: 192,
+        width: 768,
+        height: 384,
     });
 
     let plateaus = node::<ops::fbm::Fbm>("plateaus", &[]);

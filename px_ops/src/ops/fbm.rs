@@ -35,7 +35,7 @@ impl Default for Params {
 impl FieldOp for Fbm {
     type Params = Params;
     const ID: &'static str = "field.fbm";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));
     const INPUTS: &'static [&'static str] = &[];
 

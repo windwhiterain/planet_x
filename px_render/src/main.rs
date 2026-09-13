@@ -205,7 +205,7 @@ impl Options {
                     planet::Palette::Gas => (0.010, 0.450, 2.35),
                     planet::Palette::Ice => (0.055, 0.500, 0.0),
                     planet::Palette::Lava => (0.095, 0.480, 0.0),
-                    planet::Palette::Desert => (0.085, 0.420, 0.0),
+                    planet::Palette::Desert => (0.085, 0.520, 0.0),
                 };
                 Scene::Planet {
                     field: path.display().to_string(),

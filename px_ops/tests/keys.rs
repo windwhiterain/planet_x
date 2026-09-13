@@ -7,6 +7,7 @@ fn key_of(params: &Params, graph_version: u32, inputs: &[[u8; 32]]) -> [u8; 32] 
         "field.fbm",
         1,
         graph_version,
+        (384, 192),
         &canonical_params(params),
         inputs,
     )
@@ -45,16 +46,24 @@ fn changing_a_value_changes_the_key() {
 #[test]
 fn bumping_the_version_changes_the_key() {
     let params = Params::default();
-    let v1 = node_key("field.fbm", 1, 1, &canonical_params(&params), &[]);
-    let v2 = node_key("field.fbm", 2, 1, &canonical_params(&params), &[]);
+    let v1 = node_key("field.fbm", 1, 1, (384, 192), &canonical_params(&params), &[]);
+    let v2 = node_key("field.fbm", 2, 1, (384, 192), &canonical_params(&params), &[]);
     assert_ne!(v1, v2, "算子版本必须进键");
+}
+
+#[test]
+fn the_canvas_size_is_part_of_the_key() {
+    let params = Params::default();
+    let small = node_key("field.fbm", 1, 1, (384, 192), &canonical_params(&params), &[]);
+    let large = node_key("field.fbm", 1, 1, (768, 384), &canonical_params(&params), &[]);
+    assert_ne!(small, large, "画布尺寸必须进键，否则改分辨率会命中旧尺寸的产物");
 }
 
 #[test]
 fn bumping_the_graph_version_changes_the_key() {
     let params = Params::default();
-    let g1 = node_key("field.fbm", 1, 1, &canonical_params(&params), &[]);
-    let g2 = node_key("field.fbm", 1, 2, &canonical_params(&params), &[]);
+    let g1 = node_key("field.fbm", 1, 1, (384, 192), &canonical_params(&params), &[]);
+    let g2 = node_key("field.fbm", 1, 2, (384, 192), &canonical_params(&params), &[]);
     assert_ne!(g1, g2, "图版本必须进键");
 }
 

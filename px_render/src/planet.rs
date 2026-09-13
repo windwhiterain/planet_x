@@ -1,7 +1,9 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::color::LinearRgba;
-use bevy::image::Image;
+use bevy::image::{
+    Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor,
+};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -66,7 +68,7 @@ pub struct Field {
 impl Field {
     pub fn sample(&self, u: f32, v: f32) -> f32 {
         let x = ((u.rem_euclid(1.0)) * self.width as f32) as u32 % self.width.max(1);
-        let y = ((1.0 - v.clamp(0.0, 1.0)) * (self.height as f32 - 1.0)).round() as u32;
+        let y = (v.clamp(0.0, 1.0) * (self.height as f32 - 1.0)).round() as u32;
         let y = y.min(self.height.saturating_sub(1));
         self.data[(y * self.width + x) as usize]
     }
@@ -297,7 +299,7 @@ fn surface_textures(
     let mut glow = Vec::with_capacity((field.width * field.height * 4) as usize);
 
     for y in 0..field.height {
-        let v = 1.0 - y as f32 / (field.height.max(2) - 1) as f32;
+        let v = y as f32 / (field.height.max(2) - 1) as f32;
         let latitude = ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0);
         for x in 0..field.width {
             let raw = field.data[(y * field.width + x) as usize];
@@ -308,7 +310,11 @@ fn surface_textures(
         }
     }
 
-    let color_image = image_from(field.width, field.height, color.clone());
+    let color_image = with_wrapping(
+        image_from(field.width, field.height, color.clone()),
+        ImageAddressMode::Repeat,
+        ImageAddressMode::ClampToEdge,
+    );
     let color_handle = images.add(color_image);
 
     let texels = color.len() / 4;
@@ -334,7 +340,11 @@ fn surface_textures(
     );
 
     let glow_handle = match palette {
-        Palette::Lava => Some(images.add(image_from(field.width, field.height, glow))),
+        Palette::Lava => Some(images.add(with_wrapping(
+            image_from(field.width, field.height, glow),
+            ImageAddressMode::Repeat,
+            ImageAddressMode::ClampToEdge,
+        ))),
         _ => None,
     };
     (color_handle, glow_handle)
@@ -353,6 +363,18 @@ fn image_from(width: u32, height: u32, data: Vec<u8>) -> Image {
         RenderAssetUsages::default(),
     );
     image.data = Some(data);
+    image
+}
+
+fn with_wrapping(mut image: Image, horizontal: ImageAddressMode, vertical: ImageAddressMode) -> Image {
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: horizontal,
+        address_mode_v: vertical,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..default()
+    });
     image
 }
 
@@ -445,7 +467,11 @@ fn ring_image(width: u32, height: u32) -> Image {
             data[last] = (alpha * 240.0) as u8;
         }
     }
-    image_from(width, height, data)
+    with_wrapping(
+        image_from(width, height, data),
+        ImageAddressMode::ClampToEdge,
+        ImageAddressMode::Repeat,
+    )
 }
 
 pub fn spawn_planet(

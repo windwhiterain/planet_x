@@ -37,7 +37,7 @@ impl Default for Params {
 impl FieldOp for Ridged {
     type Params = Params;
     const ID: &'static str = "field.ridged";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     const SOURCE_HASH: u64 = fnv1a(include_str!("ridged.rs"));
     const INPUTS: &'static [&'static str] = &[];
 

@@ -143,6 +143,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         Op::ID,
         Op::VERSION,
         context.spec.version,
+        (context.spec.width, context.spec.height),
         &params_json,
         &input_keys,
     );
@@ -296,6 +297,7 @@ pub fn node_key(
     op_id: &str,
     op_version: u32,
     graph_version: u32,
+    canvas: (u32, u32),
     params_json: &str,
     input_keys: &[Key],
 ) -> Key {
@@ -304,6 +306,8 @@ pub fn node_key(
     hasher.update(op_id.as_bytes());
     hasher.update(&op_version.to_le_bytes());
     hasher.update(&graph_version.to_le_bytes());
+    hasher.update(&canvas.0.to_le_bytes());
+    hasher.update(&canvas.1.to_le_bytes());
     hasher.update(params_json.as_bytes());
     for key in input_keys {
         hasher.update(key);

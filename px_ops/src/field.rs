@@ -47,7 +47,7 @@ impl Field {
     pub fn uv(&self, x: u32, y: u32) -> (f32, f32) {
         (
             x as f32 / self.width.max(1) as f32,
-            y as f32 / self.height.max(1) as f32,
+            y as f32 / (self.height.max(2) - 1) as f32,
         )
     }
 
