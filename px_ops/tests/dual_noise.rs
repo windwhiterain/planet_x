@@ -106,45 +106,104 @@ fn scatter(count: usize) -> Vec<[f64; 3]> {
 }
 
 #[test]
-#[ignore = "unresolved: worst 0.169 against a gradient magnitude of 2.33, seven percent. Not yet isolated between an inner octave hitting its clamp01 kink, which filtering on the averaged value cannot see because fbm_3 averages three separately clamped octaves, and a real disagreement between the dual and the f32 value function. Loosening the tolerance to make this green would be hiding it, so it stays ignored and visible."]
+fn diagnose_the_noise_discrepancy() {
+    let settings = settings();
+    let point = [
+        -2.6519325487039564_f64,
+        2.8856959088139638,
+        1.0339259678444934,
+    ];
+    for axis in 0..3 {
+        let dual = dual_axis(point, axis);
+        println!("轴 {axis}: 对偶数给 {dual:.9}");
+        for step in [1e-2_f64, 1e-3, 1e-4, 1e-5] {
+            let numeric = numeric_axis(point, axis, step);
+            println!(
+                "   h={step:e}  中心差分 {numeric:.9}  偏差 {:.9}",
+                (dual - numeric).abs()
+            );
+        }
+    }
+
+    let mut frequency = settings.frequency;
+    for octave in 0..settings.octaves {
+        let scaled = [
+            point[0] as f32 * frequency,
+            point[1] as f32 * frequency,
+            point[2] as f32 * frequency,
+        ];
+        let raw = px_ops::noise::gradient_noise_3(scaled, settings.seed ^ octave);
+        let clamped = raw <= 0.0 || raw >= 1.0;
+        println!(
+            "八度 {octave}: 频率 {frequency}  值 {raw:.9}{}",
+            if clamped { "   ← 夹住了" } else { "" }
+        );
+        frequency *= settings.lacunarity;
+    }
+
+    let base = value([point[0] as f32, point[1] as f32, point[2] as f32]);
+    println!("fbm 平均值 {base:.9}");
+}
+
+#[test]
 fn the_dual_gradient_of_the_noise_matches_its_own_values() {
     let points = scatter(4000);
-    let mut worst = 0.0_f64;
+    let steps = [1e-2_f64, 1e-3, 1e-4];
     let mut worst_at = [0.0_f64; 3];
     let mut magnitude = 0.0_f64;
 
     let mut sampled = 0usize;
     let mut saturated = 0usize;
-    for point in &points {
-        let here = value([point[0] as f32, point[1] as f32, point[2] as f32]);
-        if here <= 0.02 || here >= 0.98 {
-            saturated += 1;
-            continue;
-        }
-        for axis in 0..3 {
-            let dual = dual_axis(*point, axis);
-            let numeric = numeric_axis(*point, axis, 1e-3);
-            let error = (dual - numeric).abs();
-            if error > worst {
-                worst = error;
-                worst_at = *point;
+    let mut worst_per_step = Vec::new();
+    for step in steps {
+        let mut worst = 0.0_f64;
+        for point in &points {
+            let here = value([point[0] as f32, point[1] as f32, point[2] as f32]);
+            if here <= 0.02 || here >= 0.98 {
+                if step == steps[0] {
+                    saturated += 1;
+                }
+                continue;
             }
-            magnitude = magnitude.max(numeric.abs());
-            sampled += 1;
+            for axis in 0..3 {
+                let dual = dual_axis(*point, axis);
+                let numeric = numeric_axis(*point, axis, step);
+                let error = (dual - numeric).abs();
+                if error > worst {
+                    worst = error;
+                    if step == *steps.last().unwrap() {
+                        worst_at = *point;
+                    }
+                }
+                if step == steps[0] {
+                    magnitude = magnitude.max(numeric.abs());
+                    sampled += 1;
+                }
+            }
         }
+        worst_per_step.push(worst);
     }
+
     assert!(
         sampled > 1000,
         "有效采样点只有 {sampled} 个（饱和 {saturated} 个），这个测试没在测东西"
     );
-
     assert!(
         magnitude > 0.1,
         "梯度量级只有 {magnitude}，这个测试没在测东西"
     );
+
+    for pair in worst_per_step.windows(2) {
+        assert!(
+            pair[1] < pair[0] * 0.5,
+            "偏差没有随步长缩小，这正说明公式错了而不是步长太大：各步长最大偏差 {worst_per_step:?}"
+        );
+    }
+
+    let finest = *worst_per_step.last().unwrap();
     assert!(
-        worst < 5e-3,
-        "对偶数求得的 fbm 梯度与中心差分不符：最大偏差 {worst}（在 {worst_at:?}），梯度量级 {magnitude}"
+        finest < 2e-3,
+        "对偶数求得的 fbm 梯度与中心差分不符：最小步长下最大偏差 {finest}（在 {worst_at:?}），梯度量级 {magnitude}"
     );
 }
 
