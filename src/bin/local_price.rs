@@ -1,5 +1,6 @@
 use planet_x::local_price::{
-    bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, NAMES,
+    bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY,
+    NAMES, SECTOR_MOTIVE,
 };
 
 #[derive(Clone)]
@@ -27,6 +28,7 @@ struct Args {
     sanction_to: usize,
     sanction_w: f32,
     food_supply: f32,
+    motive_ladder: bool,
     relations: f32,
     block_from: usize,
     block_to: usize,
@@ -60,6 +62,7 @@ impl Default for Args {
             sanction_to: 80,
             sanction_w: 0.0,
             food_supply: 0.5,
+            motive_ladder: false,
             relations: 1.0,
             block_from: usize::MAX,
             block_to: usize::MAX,
@@ -80,6 +83,7 @@ fn main() {
         "sanction" => sanction_run(&args),
         "sanction-sweep" => sanction_sweep(&args),
         "ladder" => ladder(&args),
+        "sectors" => sectors(&args),
         _ => trace(&args),
     }
 }
@@ -113,6 +117,7 @@ fn parse() -> Option<Args> {
             "--sanction-to" => args.sanction_to = value()?.parse().ok()?,
             "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
             "--food-supply" => args.food_supply = value()?.parse().ok()?,
+            "--motive-ladder" => args.motive_ladder = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
@@ -144,6 +149,13 @@ fn spec(args: &Args) -> Spec {
     let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
         "ladder" => return Spec::ladder(args.polities, args.food_supply),
+        "sectors" => {
+            let mut spec = Spec::sectors(args.polities);
+            if args.motive_ladder {
+                spec.motive_ladder = SECTOR_MOTIVE.to_vec();
+            }
+            return spec;
+        }
         _ => Spec::scarce(args.polities, 0, 0),
     };
     if args.transform {
@@ -391,6 +403,76 @@ fn ladder(args: &Args) {
             report(1),
             lab.polities[0].execution,
             food,
+        );
+    }
+}
+
+fn sectors(args: &Args) {
+    for ladder in [false, true] {
+        let mut local = args.clone();
+        local.motive_ladder = ladder;
+        let mut lab = build_with(&local, Spec::sectors(local.polities));
+        lab.run(args.rounds);
+        let prices: Vec<f32> = lab
+            .market
+            .merchandises
+            .iter()
+            .map(|merchandise| merchandise.price)
+            .collect();
+        let mut gross = vec![0.0f32; GOODS];
+        let mut added = vec![0.0f32; GOODS];
+        let mut produced = vec![0.0f32; GOODS];
+        for (i, department) in lab.departments.departments.iter().enumerate() {
+            let unit = i % GOODS;
+            for policy in department
+                .policies
+                .iter()
+                .filter(|policy| policy.is_production())
+            {
+                let share = policy.distribution();
+                let out: f32 = policy
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(k, output)| output * prices[k])
+                    .sum::<f32>()
+                    * share;
+                let input: f32 = policy
+                    .consumptions
+                    .iter()
+                    .enumerate()
+                    .map(|(k, consumption)| consumption * prices[k])
+                    .sum::<f32>()
+                    * share;
+                gross[unit] += out;
+                added[unit] += out - input;
+                produced[unit] += policy.outputs[unit] * share;
+            }
+        }
+        let total: f32 = added.iter().sum();
+        println!(
+            "{}投入产出阶梯：价格 {}   相对一产 {}",
+            if ladder { "有" } else { "无" },
+            (0..GOODS)
+                .map(|k| format!("{:.3}", prices[k]))
+                .collect::<Vec<String>>()
+                .join(" "),
+            (0..GOODS)
+                .map(|k| format!("{:.2}", prices[k] / prices[0].max(1e-9)))
+                .collect::<Vec<String>>()
+                .join(" "),
+        );
+        println!(
+            "   部门增值占比 {}   产出量 {}   总增值 {:.1}",
+            (0..GOODS)
+                .map(|k| format!("{:.1}%", 100.0 * added[k] / total.max(1e-9)))
+                .collect::<Vec<String>>()
+                .join(" "),
+            (0..GOODS)
+                .map(|k| format!("{:.1}", produced[k]))
+                .collect::<Vec<String>>()
+                .join(" "),
+            total,
         );
     }
 }

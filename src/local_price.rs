@@ -62,6 +62,10 @@ pub const LADDER_CAPACITY: f32 = 8.0;
 pub const PRIMARY_CAPACITY_COST: f32 = 0.25;
 pub const LADDER_THRIFTY: (f32, f32, f32) = (0.2, 4.0, 2.0);
 pub const LADDER_FAST: (f32, f32, f32) = (0.8, 12.0, 0.2);
+pub const SECTOR_SCALE: f32 = 8.0;
+pub const SECTOR_INPUT: f32 = 2.0;
+pub const SECTOR_CAPACITY: [f32; 3] = [0.5, 1.0, 1.5];
+pub const SECTOR_MOTIVE: [f32; 3] = [1.0, 1.6, 2.4];
 
 pub struct Spec {
     pub polities: usize,
@@ -69,6 +73,9 @@ pub struct Spec {
     pub motive: Vec<Vec<f32>>,
     pub transforms: Vec<Transform>,
     pub capacity: f32,
+    pub self_capacity: bool,
+    pub primary_free: bool,
+    pub motive_ladder: Vec<f32>,
 }
 
 impl Spec {
@@ -79,7 +86,35 @@ impl Spec {
             motive: vec![vec![1.0; GOODS]; polities],
             transforms: Vec::new(),
             capacity: f32::INFINITY,
+            self_capacity: false,
+            primary_free: true,
+            motive_ladder: vec![1.0; GOODS],
         }
+    }
+
+    /// 三层投入产出：一产零投入、二产吃一产、三产吃二产，产能占用逐层变高
+    pub fn sectors(polities: usize) -> Self {
+        let mut spec = Self::symmetric(polities);
+        spec.self_capacity = true;
+        spec.primary_free = true;
+        for unit in 0..GOODS {
+            let mut inputs = vec![0.0; GOODS];
+            let mut outputs = vec![0.0; GOODS];
+            outputs[unit] = SECTOR_SCALE;
+            if unit > 0 {
+                inputs[unit - 1] = SECTOR_INPUT * SECTOR_SCALE;
+            }
+            for polity in 0..polities {
+                spec.transforms.push(Transform {
+                    polity,
+                    unit,
+                    inputs: inputs.clone(),
+                    outputs: outputs.clone(),
+                    capacity_cost: SECTOR_CAPACITY[unit],
+                });
+            }
+        }
+        spec
     }
 
     pub fn scarce(polities: usize, seat: usize, good: usize) -> Self {
@@ -263,15 +298,16 @@ impl Lab {
                         .with_reference(vec![BASE_PRICE; GOODS])
                         .with_locality(polity),
                 );
-                let mut outputs = vec![0.0; GOODS];
-                outputs[unit] = BASE * spec.supply(polity, unit);
                 let policies = {
                     let mut policies: Vec<Policy> = (0..GOODS)
                         .filter(|good| *good != unit)
                         .map(|good| {
                             let mut consumptions = vec![0.0; GOODS];
                             consumptions[good] = CAMPAIGN;
-                            Policy::consumption(consumptions, MOTIVE * spec.motive(polity, good))
+                            Policy::consumption(
+                                consumptions,
+                                MOTIVE * spec.motive(polity, good) * spec.motive_ladder[good],
+                            )
                         })
                         .collect();
                     for transform in spec.transforms(polity, unit) {
@@ -280,13 +316,26 @@ impl Lab {
                                 .with_capacity_cost(transform.capacity_cost),
                         );
                     }
-                    policies.push(
-                        Policy::production(vec![0.0; GOODS], outputs)
-                            .with_capacity_cost(PRIMARY_CAPACITY_COST),
-                    );
+                    if spec.primary_free || unit == 0 {
+                        let mut outputs = vec![0.0; GOODS];
+                        outputs[unit] = BASE * spec.supply(polity, unit);
+                        policies.push(
+                            Policy::production(vec![0.0; GOODS], outputs)
+                                .with_capacity_cost(PRIMARY_CAPACITY_COST),
+                        );
+                    }
                     policies
                 };
-                departments.push(Department::new(policies).with_capacity(spec.capacity));
+                let capacity = if spec.self_capacity {
+                    policies
+                        .iter()
+                        .filter(|policy| policy.is_production())
+                        .map(|policy| policy.capacity_use())
+                        .sum::<f32>()
+                } else {
+                    spec.capacity
+                };
+                departments.push(Department::new(policies).with_capacity(capacity));
             }
             polities.push(Polity {
                 name: NAMES[polity % NAMES.len()],
