@@ -1,3 +1,5 @@
+mod planet;
+
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
 use px_protocol::client;
-use px_protocol::render::{Lease, Request, Response};
+use px_protocol::render::{Lease, Palette, Request, Response, Scene};
 use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
@@ -32,20 +34,43 @@ const SPACING: f32 = 3.0;
 const MAX_STACK: f32 = 5.0;
 const MAX_BAR: f32 = 4.0;
 const PIPELINE_DEADLINE: u32 = 1800;
-const FRAMES_AFTER_JOB: u32 = 5;
+const FRAMES_AFTER_JOB: u32 = 6;
 const LEASE_CHECK_INTERVAL: u32 = 120;
+const STAR_WIDTH: u32 = 2048;
+const STAR_HEIGHT: u32 = 1024;
+
+#[derive(Component)]
+pub struct ScenePart;
 
 #[derive(Resource, Clone, Copy)]
 struct InitialSize(u32, u32);
 
-#[derive(Component)]
-struct Stage;
+#[derive(Resource, Clone)]
+struct RenderReady(Arc<AtomicBool>);
 
-#[derive(Component)]
-struct StageCamera;
+#[derive(Resource)]
+struct Canvas {
+    size: (u32, u32),
+    target: Handle<Image>,
+}
 
-#[derive(Component)]
-struct WorldPart;
+#[derive(Resource)]
+struct Stars(Handle<Image>);
+
+#[derive(Resource)]
+struct Inbox(std::sync::Mutex<Receiver<Job>>);
+
+#[derive(Resource, Default)]
+struct Active(Option<ActiveJob>);
+
+#[derive(Resource, Default)]
+struct Ticks(u32);
+
+#[derive(Resource)]
+struct LeaseWatch {
+    path: PathBuf,
+    pid: u32,
+}
 
 struct Job {
     request: Request,
@@ -53,8 +78,8 @@ struct Job {
 }
 
 struct ActiveJob {
+    label: String,
     out: PathBuf,
-    round: u32,
     width: u32,
     height: u32,
     started: Instant,
@@ -63,25 +88,7 @@ struct ActiveJob {
     requested: bool,
 }
 
-#[derive(Resource)]
-struct Inbox(std::sync::Mutex<Receiver<Job>>);
-
-#[derive(Resource, Default)]
-struct Active(Option<ActiveJob>);
-
-#[derive(Resource)]
-struct Canvas {
-    size: (u32, u32),
-    target: Handle<Image>,
-}
-
-#[derive(Resource, Clone)]
-struct RenderReady(Arc<AtomicBool>);
-
-#[derive(Resource, Default)]
-struct Ticks(u32);
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Options {
     serve: bool,
     autostart: bool,
@@ -91,30 +98,62 @@ struct Options {
     stream: PathBuf,
     round: Option<u32>,
     out: Option<PathBuf>,
+    planet: Option<PathBuf>,
+    palette: Palette,
+    displace: Option<f32>,
+    sea_level: Option<f32>,
+    radius: f32,
+    spin: Option<f32>,
 }
 
-impl Options {
-    fn parse() -> Result<Self, String> {
-        let mut options = Self {
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            serve: false,
+            autostart: false,
             port: 0,
             width: 960,
             height: 640,
             stream: PathBuf::from("target/world.pxstream"),
-            ..default()
-        };
+            round: None,
+            out: None,
+            planet: None,
+            palette: Palette::Rocky,
+            displace: None,
+            sea_level: None,
+            radius: 1.0,
+            spin: None,
+        }
+    }
+}
+
+impl Options {
+    fn parse() -> Result<Self, String> {
+        let mut options = Self::default();
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut next = |needed: &str| args.next().ok_or_else(|| format!("{needed} 需要一个值"));
+            let mut number = |needed: &str| -> Result<f32, String> {
+                next(needed)?
+                    .parse()
+                    .map_err(|_| format!("{needed} 需要一个数"))
+            };
             match arg.as_str() {
                 "--serve" => options.serve = true,
                 "--autostart" => options.autostart = true,
-                "--port" => {
-                    options.port = next("--port")?
-                        .parse()
-                        .map_err(|_| "--port 需要一个整数".to_string())?;
-                }
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
+                "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
+                "--out" => options.out = Some(PathBuf::from(next("--out")?)),
+                "--palette" => {
+                    let name = next("--palette")?;
+                    options.palette = Palette::parse(&name)
+                        .ok_or_else(|| format!("--palette 只认 rocky / gas / ice / lava，收到 {name}"))?;
+                }
+                "--displace" => options.displace = Some(number("--displace")?),
+                "--sea" => options.sea_level = Some(number("--sea")?),
+                "--radius" => options.radius = number("--radius")?,
+                "--spin" => options.spin = Some(number("--spin")?),
                 "--round" => {
                     options.round = Some(
                         next("--round")?
@@ -122,7 +161,11 @@ impl Options {
                             .map_err(|_| "--round 需要一个整数".to_string())?,
                     );
                 }
-                "--out" => options.out = Some(PathBuf::from(next("--out")?)),
+                "--port" => {
+                    options.port = next("--port")?
+                        .parse()
+                        .map_err(|_| "--port 需要一个整数".to_string())?;
+                }
                 "--width" => {
                     options.width = next("--width")?
                         .parse()
@@ -146,6 +189,31 @@ impl Options {
         }
         Ok(options)
     }
+
+    fn scene(&self) -> Scene {
+        match &self.planet {
+            Some(path) => {
+                let (displace, sea_level) = match self.palette {
+                    Palette::Rocky => (0.075, 0.520),
+                    Palette::Gas => (0.010, 0.450),
+                    Palette::Ice => (0.055, 0.500),
+                    Palette::Lava => (0.095, 0.480),
+                };
+                Scene::Planet {
+                    field: path.display().to_string(),
+                    palette: self.palette,
+                    displace: self.displace.unwrap_or(displace),
+                    sea_level: self.sea_level.unwrap_or(sea_level),
+                    radius: self.radius,
+                    spin: self.spin.unwrap_or(0.0),
+                }
+            }
+            None => Scene::World {
+                stream: self.stream.display().to_string(),
+                round: self.round,
+            },
+        }
+    }
 }
 
 fn usage() -> String {
@@ -153,9 +221,12 @@ fn usage() -> String {
         "用法：",
         "  px_render --serve [--port N] [--width W] [--height H]",
         "      常驻渲染服务：启动时预热管线，之后按请求出图（每次 ~0.3 s）",
-        "  px_render --stream PATH [--round N] [--out PNG] [--width W] [--height H] [--autostart]",
-        "      一次性请求：默认要求服务已在跑；--autostart 会顺手拉起一个（注意：服务会成为",
-        "      本进程的子进程，等整棵进程树结束的调用方会一直等下去）",
+        "  px_render --stream PATH [--round N] [--out PNG] [--width W] [--height H]",
+        "      经济世界：三根部门库存柱 + 三根价格柱",
+        "  px_render --planet FIELD.pxart [--palette rocky|gas|ice|lava] [--displace F] [--sea F]",
+        "            [--radius F] [--spin F] [--out PNG] [--width W] [--height H]",
+        "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景",
+        "  服务没在跑时会提示；要顺手拉起一个就加 --autostart",
     ]
     .join("\n")
 }
@@ -180,10 +251,12 @@ fn main() {
 }
 
 fn request_once(options: Options) -> i32 {
-    let out = options.out.clone().unwrap_or_else(|| PathBuf::from("target/shot.png"));
+    let out = options
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("target/shot.png"));
     let request = Request {
-        stream: options.stream.display().to_string(),
-        round: options.round,
+        scene: options.scene(),
         width: options.width,
         height: options.height,
         out: out.display().to_string(),
@@ -192,8 +265,8 @@ fn request_once(options: Options) -> i32 {
     match client::request_with(request, options.autostart) {
         Ok(response) => {
             println!(
-                "第 {} 轮 → {}（{}×{}，{} 字节，耗时 {} ms，{}）",
-                response.round,
+                "{} → {}（{}×{}，{} 字节，耗时 {} ms，{}）",
+                response.scene,
                 response.out,
                 response.width,
                 response.height,
@@ -239,9 +312,7 @@ fn serve(options: Options) -> Result<(), String> {
 
     println!(
         "渲染服务已启动：端口 {port}、协议指纹 {:016x}、git {}、pid {}",
-        id.protocol_hash,
-        id.git_rev,
-        lease.pid,
+        id.protocol_hash, id.git_rev, lease.pid,
     );
     println!("租约：{}", lease_path.display());
 
@@ -250,7 +321,7 @@ fn serve(options: Options) -> Result<(), String> {
 
     let ready = Arc::new(AtomicBool::new(false));
     let mut app = App::new();
-    app.insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.09)))
+    app.insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -272,7 +343,7 @@ fn serve(options: Options) -> Result<(), String> {
             path: lease_path,
             pid: lease.pid,
         })
-        .add_systems(Startup, build_camera)
+        .add_systems(Startup, warm_up)
         .add_systems(Update, (accept_jobs, drive, watch_lease));
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -311,10 +382,7 @@ fn spawn_listener(listener: TcpListener, jobs: Sender<Job>) {
                                 local.protocol_hash,
                                 local.git_rev,
                             );
-                            let _ = stream::write_frame(
-                                &mut stream,
-                                &Frame::Refused(reason.clone()),
-                            );
+                            let _ = stream::write_frame(&mut stream, &Frame::Refused(reason.clone()));
                             eprintln!("拒绝连接：{reason}");
                             return;
                         }
@@ -369,11 +437,7 @@ fn spawn_listener(listener: TcpListener, jobs: Sender<Job>) {
     });
 }
 
-fn watch_pipelines(
-    cache: Res<PipelineCache>,
-    ready: Res<RenderReady>,
-    mut announced: Local<bool>,
-) {
+fn watch_pipelines(cache: Res<PipelineCache>, ready: Res<RenderReady>, mut announced: Local<bool>) {
     if ready.0.load(Ordering::Relaxed) {
         return;
     }
@@ -397,17 +461,7 @@ fn watch_pipelines(
     }
 }
 
-#[derive(Resource)]
-struct LeaseWatch {
-    path: PathBuf,
-    pid: u32,
-}
-
-fn watch_lease(
-    watch: Res<LeaseWatch>,
-    mut ticks: ResMut<Ticks>,
-    mut exit: MessageWriter<AppExit>,
-) {
+fn watch_lease(watch: Res<LeaseWatch>, mut ticks: ResMut<Ticks>, mut exit: MessageWriter<AppExit>) {
     ticks.0 += 1;
     if ticks.0 % LEASE_CHECK_INTERVAL != 0 {
         return;
@@ -427,7 +481,7 @@ fn new_target(images: &mut Assets<Image>, width: u32, height: u32) -> Handle<Ima
     images.add(target)
 }
 
-fn build_camera(
+fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -443,22 +497,24 @@ fn build_camera(
         size: (size.0, size.1),
         target: handle.clone(),
     });
+    commands.insert_resource(Stars(images.add(planet::star_image(STAR_WIDTH, STAR_HEIGHT))));
+
     commands.spawn((
-        StageCamera,
+        ScenePart,
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(handle.into()),
         Transform::from_xyz(0.0, 6.0, 16.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
     ));
     commands.spawn((
-        Stage,
+        ScenePart,
         AmbientLight {
             brightness: 200.0,
             ..default()
         },
     ));
     commands.spawn((
-        Stage,
+        ScenePart,
         DirectionalLight {
             illuminance: 9000.0,
             ..default()
@@ -466,7 +522,7 @@ fn build_camera(
         Transform::from_xyz(7.0, 13.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.spawn((
-        WorldPart,
+        ScenePart,
         Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.5, 0.5, 0.5),
@@ -481,11 +537,11 @@ fn accept_jobs(
     inbox: Res<Inbox>,
     mut active: ResMut<Active>,
     mut canvas: ResMut<Canvas>,
+    stars: Res<Stars>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    parts: Query<Entity, With<WorldPart>>,
-    cameras: Query<Entity, With<StageCamera>>,
+    parts: Query<Entity, With<ScenePart>>,
 ) {
     if active.0.is_some() {
         return;
@@ -494,75 +550,63 @@ fn accept_jobs(
         Ok(job) => job,
         Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
     };
+    let request = &job.request;
 
-    let request = job.request;
-    let path = PathBuf::from(&request.stream);
-    let worlds = match stream::read_worlds(&path) {
-        Ok(worlds) if !worlds.is_empty() => worlds,
-        Ok(_) => {
-            let _ = job.reply.send(Frame::Refused(format!(
-                "{} 里没有 World 帧",
-                request.stream
-            )));
-            return;
-        }
-        Err(err) => {
-            let _ =
-                job.reply
-                    .send(Frame::Refused(format!("读 {} 失败：{err}", request.stream)));
-            return;
-        }
-    };
-
-    if let Ok(Some(declared)) = stream::declared_protocol(&path) {
-        let local = ProtocolId::local();
-        if declared.protocol_hash != local.protocol_hash {
-            let _ = job.reply.send(Frame::Refused(format!(
-                "{} 是 {:016x}（git {}）录的，本服务是 {:016x}；用同一份代码重录",
-                request.stream, declared.protocol_hash, declared.git_rev, local.protocol_hash
-            )));
-            return;
-        }
+    if canvas.size != (request.width, request.height) {
+        let handle = new_target(&mut images, request.width, request.height);
+        canvas.size = (request.width, request.height);
+        canvas.target = handle;
     }
-
-    let world = match request.round {
-        Some(round) => match worlds.iter().find(|world| world.round == round) {
-            Some(world) => world.clone(),
-            None => {
-                let _ = job
-                    .reply
-                    .send(Frame::Refused(format!("{} 里没有第 {round} 轮", request.stream)));
-                return;
-            }
-        },
-        None => worlds.last().cloned().unwrap(),
-    };
 
     for entity in parts.iter() {
         commands.entity(entity).despawn();
     }
 
-    if canvas.size != (request.width, request.height) {
-        for entity in cameras.iter() {
-            commands.entity(entity).despawn();
-        }
-        let handle = new_target(&mut images, request.width, request.height);
-        commands.spawn((
-            StageCamera,
-            Camera3d::default(),
-            Msaa::Off,
-            RenderTarget::Image(handle.clone().into()),
-            Transform::from_xyz(0.0, 6.0, 16.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
-        ));
-        canvas.size = (request.width, request.height);
-        canvas.target = handle;
-    }
+    let built = match &request.scene {
+        Scene::World { stream, round } => build_world_scene(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &canvas.target,
+            stream,
+            *round,
+        ),
+        Scene::Planet {
+            field,
+            palette,
+            displace,
+            sea_level,
+            radius,
+            spin,
+        } => planet::spawn_planet(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &canvas.target,
+            &stars.0,
+            &planet::PlanetSpec {
+                field: field.clone(),
+                palette: *palette,
+                displace: *displace,
+                sea_level: *sea_level,
+                radius: *radius,
+                spin: *spin,
+            },
+        ),
+    };
 
-    build_world(&mut commands, &mut meshes, &mut materials, &world);
+    let label = match built {
+        Ok(label) => label,
+        Err(err) => {
+            let _ = job.reply.send(Frame::Refused(err));
+            return;
+        }
+    };
 
     active.0 = Some(ActiveJob {
+        label,
         out: PathBuf::from(&request.out),
-        round: world.round,
         width: request.width,
         height: request.height,
         started: Instant::now(),
@@ -572,21 +616,50 @@ fn accept_jobs(
     });
 }
 
-fn build_world(
+fn build_world_scene(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    world: &WorldView,
-) {
+    target: &Handle<Image>,
+    stream_path: &str,
+    round: Option<u32>,
+) -> Result<String, String> {
+    let path = PathBuf::from(stream_path);
+    let worlds = stream::read_worlds(&path)
+        .map_err(|err| format!("读 {} 失败：{err}", path.display()))?;
+    if worlds.is_empty() {
+        return Err(format!("{} 里没有 World 帧", path.display()));
+    }
+    if let Some(declared) = stream::declared_protocol(&path).map_err(|err| err.to_string())? {
+        let local = ProtocolId::local();
+        if declared.protocol_hash != local.protocol_hash {
+            return Err(format!(
+                "{} 是 {:016x}（git {}）录的，本服务是 {:016x}；用同一份代码重录",
+                path.display(),
+                declared.protocol_hash,
+                declared.git_rev,
+                local.protocol_hash,
+            ));
+        }
+    }
+
+    let world: WorldView = match round {
+        Some(round) => worlds
+            .iter()
+            .find(|world| world.round == round)
+            .cloned()
+            .ok_or_else(|| format!("{} 里没有第 {round} 轮", path.display()))?,
+        None => worlds.last().cloned().unwrap(),
+    };
+
     commands.spawn((
-        WorldPart,
+        ScenePart,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(28.0, 28.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.10, 0.12, 0.17),
             perceptual_roughness: 0.9,
             ..default()
         })),
-        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
     let departments = world.departments.len().max(1);
@@ -609,7 +682,7 @@ fn build_world(
         for (good, holding) in department.holdings.iter().enumerate() {
             let height = (holding.max(0.0) / peak_stack * MAX_STACK).max(0.04);
             commands.spawn((
-                WorldPart,
+                ScenePart,
                 Mesh3d(meshes.add(Cuboid::new(1.5, height, 1.5))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::Srgba(GOOD_COLORS[good % GOOD_COLORS.len()]),
@@ -634,7 +707,7 @@ fn build_world(
         let x = (good as f32 - (goods as f32 - 1.0) / 2.0) * SPACING;
         let height = (view.price.max(0.0) / peak_price * MAX_BAR).max(0.04);
         commands.spawn((
-            WorldPart,
+            ScenePart,
             Mesh3d(meshes.add(Cuboid::new(0.7, height, 0.7))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::Srgba(GOOD_COLORS[good % GOOD_COLORS.len()]),
@@ -645,6 +718,31 @@ fn build_world(
             Transform::from_xyz(x, height / 2.0, 3.0),
         ));
     }
+
+    commands.spawn((
+        ScenePart,
+        AmbientLight {
+            brightness: 200.0,
+            ..default()
+        },
+    ));
+    commands.spawn((
+        ScenePart,
+        DirectionalLight {
+            illuminance: 9000.0,
+            ..default()
+        },
+        Transform::from_xyz(7.0, 13.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    commands.spawn((
+        ScenePart,
+        Camera3d::default(),
+        Msaa::Off,
+        RenderTarget::Image(target.clone().into()),
+        Transform::from_xyz(0.0, 6.0, 16.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
+    ));
+
+    Ok(format!("第 {} 轮", world.round))
 }
 
 fn drive(
@@ -680,7 +778,7 @@ fn drive(
 
     let response = Response {
         out: job.out.display().to_string(),
-        round: job.round,
+        scene: job.label.clone(),
         width: job.width,
         height: job.height,
         bytes: std::fs::metadata(&job.out).map(|meta| meta.len()).unwrap_or(0),
@@ -688,8 +786,8 @@ fn drive(
         warm: ready.0.load(Ordering::Relaxed),
     };
     println!(
-        "出图：第 {} 轮 → {}（{}×{}，{} 字节，{} ms）",
-        response.round, response.out, response.width, response.height, response.bytes, response.millis,
+        "出图：{} → {}（{}×{}，{} 字节，{} ms）",
+        response.scene, response.out, response.width, response.height, response.bytes, response.millis,
     );
     let _ = job.reply.send(Frame::Response(response));
     active.0 = None;

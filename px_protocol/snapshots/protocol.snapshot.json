@@ -1,19 +1,19 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 2
+        "schema_version": 3
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 2
+      "schema_version": 3
     },
     "art::ArtBundle": {
       "assets": [
@@ -43,11 +43,24 @@
       "port": 0,
       "protocol_hash": 0
     },
+    "render::Palette": [
+      "rocky",
+      "gas",
+      "ice",
+      "lava"
+    ],
     "render::Request": {
       "height": 640,
       "out": "target/shot.png",
-      "round": 200,
-      "stream": "target/world.pxstream",
+      "scene": {
+        "displace": 0.05999999865889549,
+        "field": "target/pcg/ab/xx/yy.pxart",
+        "kind": "planet",
+        "palette": "rocky",
+        "radius": 1.0,
+        "sea_level": 0.44999998807907104,
+        "spin": 0.0
+      },
       "width": 960
     },
     "render::Response": {
@@ -55,9 +68,14 @@
       "height": 640,
       "millis": 812,
       "out": "target/shot.png",
-      "round": 200,
+      "scene": "planet",
       "warm": true,
       "width": 960
+    },
+    "render::Scene.world": {
+      "kind": "world",
+      "round": 200,
+      "stream": "target/world.pxstream"
     },
     "sim::WorldView": {
       "departments": [
@@ -80,7 +98,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 2,
+      "schema_version": 3,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
-use px_protocol::render::{Lease, Request, Response};
+use px_protocol::render::{Lease, Palette, Request, Response, Scene};
 use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
@@ -61,20 +61,30 @@ fn canonical() -> String {
     };
 
     let request = Request {
-        stream: "target/world.pxstream".to_string(),
-        round: Some(200),
+        scene: Scene::Planet {
+            field: "target/pcg/ab/xx/yy.pxart".to_string(),
+            palette: Palette::Rocky,
+            displace: 0.06,
+            sea_level: 0.45,
+            radius: 1.0,
+            spin: 0.0,
+        },
         width: 960,
         height: 640,
         out: "target/shot.png".to_string(),
     };
     let response = Response {
         out: "target/shot.png".to_string(),
-        round: 200,
+        scene: "planet".to_string(),
         width: 960,
         height: 640,
         bytes: 326452,
         millis: 812,
         warm: true,
+    };
+    let world_scene = Scene::World {
+        stream: "target/world.pxstream".to_string(),
+        round: Some(200),
     };
     let lease = Lease {
         pid: 0,
@@ -93,6 +103,8 @@ fn canonical() -> String {
             "art::ArtBundle": art,
             "render::Request": request,
             "render::Response": response,
+            "render::Scene.world": world_scene,
+            "render::Palette": [Palette::Rocky, Palette::Gas, Palette::Ice, Palette::Lava],
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),
