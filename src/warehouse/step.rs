@@ -104,17 +104,21 @@ fn fluctuation_factor(amplitude: f32, rng: &mut fastrand::Rng) -> f32 {
 }
 
 fn declared_volumes(stock: &mut Stock, fluctuation: f32, rng: &mut Rng) {
-    // **仓库自适应的目标水位 = 三倍上一轮实际取走的量。**
+    // **仓库自适应的目标水位 = 三倍本轮实际取走的量。**
     //
     // 目标不再由部门按当轮计划写死（那会让计划为 0 的商品连目标也是 0，于是永远
     // 没人出价买它 —— §16.1bis 那个死结），也不再靠固定倍率乘除（那是个没有回复力
     // 的乘法游走：不被取空的商品一路下溢到 0，一直取空的商品一路涨到 1e29）。
     // 锚在**观测到的取货量**上就自然有界：取货量受消费能力约束。
+    //
+    // ⚠️ 锚的是 `stock.taken`（真正离开货架的量），**不是存量的净变化**。
+    // 净变化 = 产量 − 取货量，只要产量赶上取货量就被 `.min(0.0)` 夹成 0、
+    // 目标塌到下限：实测第 2000 轮九个部门三样商品全部停在下限上
+    // （goods 级目标 12.000 = 3×0 + 6×2.0），而取货量是 4.064/部门/轮。
     stock.natural_volume_delta = (stock.volume - stock.previous_volume).min(0.0);
     // 下限是构造时的初始目标：`CAMPAIGN/2`（自有商品是 0，那是对的——生产者的
     // 自有商品本来就该全卖）。没有这个下限，目标会在"没人取货"时塌到 0 并自锁。
-    stock.target_volume =
-        (Stock::TARGET_COVER * stock.natural_volume_delta.abs()).max(stock.target_floor);
+    stock.target_volume = (Stock::TARGET_COVER * stock.taken).max(stock.target_floor);
     let gap = stock.volume - stock.target_volume + stock.natural_volume_delta;
     // 旧代码这里还有一个 `clamp(0, |gap|)`：涨落只能**缩小**申报，不能放大。
     // 那也是一条策略假设，去掉。

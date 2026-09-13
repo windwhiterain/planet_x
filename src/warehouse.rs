@@ -90,6 +90,19 @@ pub struct Stock {
     marketing_price_scale: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
+    /// 本轮**被部门取走**的量（[`Stock::record_take`]），目标水位就锚在它上面。
+    ///
+    /// 锚在它上面，**不是**锚在存量的净变化上。净变化 = 产量 − 取货量，只要产量
+    /// 赶上取货量就被抵消成 0，于是"产多于吃"的时候目标塌到下限、
+    /// `TARGET_COVER × 取货量` 这一支完全失效：实测第 2000 轮九个部门三样商品
+    /// **全部停在下限上**，goods 级目标 = 3×0 + 6×2.0 = 12.000，逐位对上，
+    /// 而当时的取货量是 4.064/部门/轮（三倍应当是 12.19）、库存是 6636。
+    ///
+    /// 只算部门取货，**不算成交卖出**：卖出去的量是市场撮合的结果，把它算进来会
+    /// 让"卖得多 ⇒ 目标高 ⇒ 想囤更多"变成一条新的正反馈，而这不是这里要问的问题
+    /// （实测：算进来的话 `stock_moves_toward_the_target_without_overshoot` 里
+    /// 目标会跟着销量往上爬，库存再也回不到目标）。
+    taken: f32,
     /// 申报前的原始缺口（正 = 想卖，负 = 想买）。**只用于仪表**，不参与任何决策。
     pub declared_gap: f32,
     /// 想买但买不起：`purchase_scale` 返回 None 时申报被清零。**只用于仪表**。
@@ -241,13 +254,26 @@ impl Warehouse {
 }
 
 impl Stock {
-    /// 目标水位 = **`TARGET_COVER` × 上一轮实际被取走的量**。
+    /// 目标水位 = **`TARGET_COVER` × 本轮实际被取走的量**（见 [`Stock::taken`]）。
     ///
     /// 这是把目标**锚在观测到的流量上**，而不是锚在一个固定的乘法倍率上：
     /// 取货量受部门的消费能力约束、本身有界，所以目标不会像纯乘法那样
     /// 一路衰减到下溢或一路爆炸（实测固定 ×1.1/÷1.1 会让一产目标掉到 0.00、
     /// 三产目标涨到 1.13e29）。语义就是常说的"备三倍的货"。
     pub const TARGET_COVER: f32 = 3.0;
+
+    /// 记下本轮从货架上**离开**的量——部门结算后的实际提货量。
+    ///
+    /// 每次调用**覆盖**（不是累加）：部门每轮对每样商品调一次，重置就自然发生了；
+    /// 成交卖出由仓库自己累加在上面（申报发生在本轮成交之前，所以卖出的那部分
+    /// 要到下一轮才读得到）。
+    pub fn record_take(&mut self, volume: f32) {
+        self.taken = if volume.is_finite() {
+            volume.max(0.0)
+        } else {
+            0.0
+        };
+    }
 
     pub fn new(volume: f32, target_volume: f32) -> Self {
         Self {
@@ -258,6 +284,7 @@ impl Stock {
             marketing_price_scale: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
+            taken: 0.0,
             declared_gap: 0.0,
             purchase_blocked: false,
             buy_response: Response::new(Response::DEFAULT_FORGETTING),

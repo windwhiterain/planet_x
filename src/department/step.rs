@@ -311,6 +311,9 @@ pub(super) fn plan(
         // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
         // 自适应（见 `warehouse::step::declared_volumes`）。
         stock.volume = (supply[k] - eaten[k] as f32).max(0.0);
+        // 把**本轮实际取走的量**交给仓库：目标水位 = 三倍这个量，锚在取货量上
+        // 而不是锚在存量的净变化上（见 `Stock::taken`）。
+        stock.record_take(eaten[k] as f32);
     }
     // 对外报告的就是**实际提货量**（执行率已经打进去了）。
     let intake: Vec<f32> = eaten.iter().map(|amount| *amount as f32).collect();
