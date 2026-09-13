@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use super::{step::price_scales, Stock, Warehouse, Warehouses};
+use super::{Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
 use crate::market::{
@@ -466,7 +466,7 @@ fn zero_target_liquidates_all_stock() {
 }
 
 #[test]
-fn fluctuation_only_shrinks_the_declaration_and_keeps_its_direction() {
+fn fluctuation_keeps_the_direction_of_the_declaration() {
     let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
     let mut deterministic = market(1, 10.0, 2);
     let mut fluctuated = market(1, 10.0, 2);
@@ -481,10 +481,9 @@ fn fluctuation_only_shrinks_the_declaration_and_keeps_its_direction() {
     for i in 0..2 {
         let base = deterministic.traders[i].merchandises[0].volume;
         let value = fluctuated.traders[i].merchandises[0].volume;
-        assert!(
-            value.abs() <= base.abs() + 1e-5,
-            "交易者 {i} 的申报被放大：基准 {base}，实际 {value}",
-        );
+        // 旧断言里还有一条 `value.abs() <= base.abs() + 1e-5`（"涨落只能缩小申报"），
+        // 它随 `magnitude.clamp(0, |缺口|)` 一起删掉了——那是一条策略假设，不是守恒。
+        // 幂律抽样现在可以放大申报，所以两者的大小关系不再有保证，只有方向还保证。
         assert!(
             value * base >= 0.0,
             "交易者 {i} 的申报方向被翻转：基准 {base}，实际 {value}",
@@ -581,6 +580,27 @@ fn train_seller(stock: &mut Stock, price_curve: impl Fn(f32) -> f32) {
 }
 
 #[test]
+fn the_scale_search_terminates_far_from_one() {
+    // 这条测试是为一类真的死循环写的：细化若用**绝对**容差 1e-6，就小于 f32 在
+    // |log 尺度| ≈ 44 处的 ULP（3.8e-6），区间永远缩不下去 ⇒ 永不返回。
+    // 旧网格把尺度限在 [0.25, 4]（log ∈ ±1.39），所以这条悬崖碰不到；
+    // 把范围放开到 f32 边界之后，最优点落在远处就必然踩上它。
+    let far = |log_scale: f32| -(log_scale - 40.0).abs();
+    let found = super::step::maximize_log_scale(far);
+    assert!(
+        (found - 40.0).abs() < 1e-2,
+        "远端的最大值应当被找到：{found}",
+    );
+
+    let near = |log_scale: f32| -(log_scale + 43.0).abs();
+    let found = super::step::maximize_log_scale(near);
+    assert!(
+        (found + 43.0).abs() < 1e-2,
+        "贴着数值边界的最大值也应当被找到：{found}",
+    );
+}
+
+#[test]
 fn a_seller_picks_the_revenue_maximizing_scale() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
@@ -601,17 +621,22 @@ fn a_seller_picks_the_revenue_maximizing_scale() {
             * stock.sell_price_curve().get(scale)
     };
     let best = revenue(chosen);
-    for candidate in price_scales() {
+    // 尺度现在是**连续**的，所以"没有更好的"要在一段稠密采样上验，而不是在 49 档网格上验。
+    // 采样范围就是数值边界，不是报价范围——旧断言里那个"必须选在网格内部"已经失去意义：
+    // 尺度的定义域没有内部与外部，只有 f32 表示得到与表示不到。
+    let limit = crate::utils::LOG_LIMIT;
+    for step in 0..2001 {
+        let fraction = step as f32 / 2000.0;
+        let candidate = (-limit + 2.0 * limit * fraction).exp();
         assert!(
             revenue(candidate) <= best + 1e-3,
             "报价尺度 {candidate} 的收入 {} 高于所选 {chosen} 的 {best}",
             revenue(candidate),
         );
     }
-    let scales = price_scales();
     assert!(
-        chosen > scales[0] && chosen < scales[scales.len() - 1],
-        "收入最大化应当选在网格内部：{chosen}",
+        chosen > 0.0 && chosen.is_finite(),
+        "收入最大化的尺度必须是有限正数：{chosen}",
     );
 }
 

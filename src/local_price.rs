@@ -14,7 +14,6 @@ pub const CAMPAIGN: f32 = 4.0;
 pub const MOTIVE: f32 = 20.0;
 pub const GRANT: f32 = 10.0;
 pub const BASE_PRICE: f32 = 1.0;
-pub const MAX_WEDGE: f32 = 2.0;
 
 pub const NAMES: [&str; 6] = ["甲", "乙", "丙", "丁", "戊", "己"];
 
@@ -68,6 +67,22 @@ pub const SECTOR_INPUT: f32 = 2.0;
 pub const SECTOR_CAPACITY: [f32; 3] = [0.1, 0.2, 0.3];
 pub const SECTOR_MOTIVE: [f32; 3] = [1.0, 1.6, 2.4];
 
+/// 专精：把"这个部门自己那一层"的产出乘上 `factor`。
+///
+/// 只动**产出**，不动投入、不动产能占用——所以它改的是绝对效率，而每个部门
+/// 在别的层上仍然和别人一样，于是"谁该干什么"由相对效率决定（比较优势），
+/// 而不是由"谁能干什么"决定（绝对壁垒）。
+fn specialize(outputs: &mut [f32], unit: usize, factor: f32) {
+    if !(factor > 0.0) || (factor - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    if let Some(output) = outputs.get_mut(unit) {
+        if *output > 0.0 {
+            *output *= factor;
+        }
+    }
+}
+
 pub struct Spec {
     pub polities: usize,
     pub supply: Vec<Vec<f32>>,
@@ -78,6 +93,12 @@ pub struct Spec {
     pub primary_free: bool,
     pub all_consume: bool,
     pub motive_ladder: Vec<f32>,
+    /// 专精：第 `u` 号部门生产**自己那一层**（商品 `u`）的工艺产出乘数。
+    ///
+    /// `1.0` = 同构（历史行为），`> 1` = 有比较优势。**异质性从这里来**：
+    /// 九个部门同构时，"自己造"永远不比"买"贵，于是每个部门在自己内部把整条链跑完，
+    /// 成交恒为 0（§13.5 第 2 条）。让每个部门各自擅长一层，交易才有理由发生。
+    pub specialty: Vec<f32>,
 }
 
 impl Spec {
@@ -92,7 +113,33 @@ impl Spec {
             primary_free: true,
             all_consume: false,
             motive_ladder: vec![1.0; GOODS],
+            specialty: vec![1.0; GOODS],
         }
+    }
+
+    /// 每个部门擅长自己那一层：第 `u` 号部门生产商品 `u` 的工艺产出乘 `factor`。
+    ///
+    /// 这是"比较优势"的最小实现：各层仍然**人人可开**（wildcard 没动），
+    /// 所以交易是划算而不是必须——异质性负责让买比造便宜，不负责强迫分工。
+    /// 这一层的专精强度
+    pub fn specialty_of(&self, good: usize) -> f32 {
+        self.specialty.get(good).copied().unwrap_or(1.0)
+    }
+
+    pub fn with_specialty(mut self, factor: f32) -> Self {
+        let factor = if factor.is_finite() && factor > 0.0 { factor } else { 1.0 };
+        self.specialty = vec![factor; GOODS];
+        self
+    }
+
+    /// 只抬某一层的专精强度（`good` 是那一层的商品序号）
+    pub fn with_specialty_at(mut self, good: usize, factor: f32) -> Self {
+        if let Some(slot) = self.specialty.get_mut(good) {
+            if factor.is_finite() && factor > 0.0 {
+                *slot = factor;
+            }
+        }
+        self
     }
 
     /// 人人可搞一产、人人消耗三种产物、人人都能开各种工业。
@@ -262,6 +309,47 @@ impl Polity {
     }
 }
 
+/// 一种商品在某一轮的全场状态：申报、报价、成交、库存、投入产出
+///
+/// 「报价」是双方挂出来的价，「指数」是成交的加权平均——两者不是一回事：
+/// 指数只在有成交的那一轮才动，所以申报（尤其是一侧没有对手盘的申报）不会推动任何东西。
+#[derive(Clone, Copy, Default)]
+pub struct GoodState {
+    /// 银河指数，只有发生成交才会被改写
+    pub price: f32,
+    /// 本轮成交价（按成交量加权），没有成交记 0
+    pub deal_price: f32,
+    /// 卖侧申报量与量加权报价
+    pub declared_sell: f32,
+    pub quote_sell: f32,
+    /// 买侧申报量与量加权报价
+    pub declared_buy: f32,
+    pub quote_buy: f32,
+    /// 两侧的量加权报价尺度：>1 是加价，<1 是让价
+    pub scale_sell: f32,
+    pub scale_buy: f32,
+    /// 各地方账本的边际买价/卖价的平均（**决策**用的就是这一对，逐地方取）
+    pub bid: f32,
+    pub ask: f32,
+    /// 卖方/买方学习器**当前估的市场天花板** `share_max × depth_max` 的平均值
+    pub sell_ceiling: f32,
+    pub buy_ceiling: f32,
+    /// 原始缺口为负（想买）的部门数
+    pub wanted_buy: f32,
+    /// 想买但被"买不起"清零的部门数
+    pub blocked_buy: f32,
+    /// 实际成交量
+    pub dealt: f32,
+    /// 全场库存合计
+    pub stock: f32,
+    /// 本轮想吃的量（计划投入）
+    pub intake: f32,
+    /// 本轮实际吃进的量（计划投入 × 执行率）
+    pub consumed: f32,
+    /// 本轮实际入账的产出
+    pub delivery: f32,
+}
+
 pub struct Snapshot {
     pub round: usize,
     pub prices: Vec<f32>,
@@ -342,14 +430,17 @@ impl Lab {
                         })
                         .collect();
                     for transform in spec.transforms(polity, unit) {
+                        let mut outputs = transform.outputs.clone();
+                        specialize(&mut outputs, unit, spec.specialty_of(unit));
                         policies.push(
-                            Policy::production(transform.inputs.clone(), transform.outputs.clone())
+                            Policy::production(transform.inputs.clone(), outputs)
                                 .with_capacity_cost(transform.capacity_cost),
                         );
                     }
                     if spec.primary_free || unit == 0 {
                         let mut outputs = vec![0.0; GOODS];
                         outputs[unit] = BASE * spec.supply(polity, unit);
+                        specialize(&mut outputs, unit, spec.specialty_of(unit));
                         policies.push(
                             Policy::production(vec![0.0; GOODS], outputs)
                                 .with_capacity_cost(PRIMARY_CAPACITY_COST),
@@ -424,6 +515,12 @@ impl Lab {
 
     pub fn with_anchor(mut self, anchor: bool) -> Self {
         self.anchor = anchor;
+        self
+    }
+
+    /// 软成交容差，见 [`crate::market::Market::with_soft_eps`]
+    pub fn with_soft_eps(mut self, eps: f32) -> Self {
+        self.market = self.market.with_soft_eps(eps);
         self
     }
 
@@ -569,6 +666,145 @@ impl Lab {
         warehouse_polity(warehouse)
     }
 
+    /// 每种商品这一轮的全场状态。报价与指数分开给：报价是挂出来的，指数是成交出来的
+    pub fn good_states(&self) -> Vec<GoodState> {
+        let goods = self.market.merchandises.len();
+        let traders = self.market.traders.len();
+        let mut states = vec![GoodState::default(); goods];
+        for (k, state) in states.iter_mut().enumerate() {
+            state.price = self.market.merchandises[k].price;
+            // 账本：逐地方取边际买卖价，这里报的是各地方的平均（对称场景下就是那一个值）
+            let mut formed = 0.0;
+            for row in &self.warehouses.books {
+                let Some(book) = row.get(k) else { continue };
+                if !book.is_formed() {
+                    continue;
+                }
+                state.bid += book.bid;
+                state.ask += book.ask;
+                formed += 1.0;
+            }
+            if formed > 0.0 {
+                state.bid /= formed;
+                state.ask /= formed;
+            }
+            if traders > 0 {
+                state.sell_ceiling /= traders as f32;
+                state.buy_ceiling /= traders as f32;
+            }
+            for i in 0..traders {
+                let stock = &self.warehouses.warehouses[i].stocks[k];
+                state.sell_ceiling += stock.sell_response().ceiling();
+                state.buy_ceiling += stock.buy_response().ceiling();
+                if stock.declared_gap < 0.0 {
+                    state.wanted_buy += 1.0;
+                }
+                if stock.purchase_blocked {
+                    state.blocked_buy += 1.0;
+                }
+                let merchandise = &self.market.traders[i].merchandises[k];
+                let scale = self.warehouses.warehouses[i].stocks[k].marketing_price_scale();
+                let volume = merchandise.volume;
+                if volume > 0.0 {
+                    state.declared_sell += volume;
+                    state.quote_sell += volume * merchandise.price;
+                    state.scale_sell += volume * scale;
+                } else if volume < 0.0 {
+                    let size = -volume;
+                    state.declared_buy += size;
+                    state.quote_buy += size * merchandise.price;
+                    state.scale_buy += size * scale;
+                }
+            }
+            let mut volume = 0.0;
+            let mut value = 0.0;
+            for i in 0..traders {
+                for j in (i + 1)..traders {
+                    let deal = &self.market.deals[i][j][k];
+                    let size = deal.volume.abs();
+                    volume += size;
+                    value += size * deal.price;
+                }
+            }
+            state.dealt = volume;
+            state.deal_price = if volume > 0.0 { value / volume } else { 0.0 };
+            for warehouse in &self.warehouses.warehouses {
+                state.stock += warehouse.stocks.get(k).map(|stock| stock.volume).unwrap_or(0.0);
+            }
+            for department in &self.departments.departments {
+                let intake = department.intake().get(k).copied().unwrap_or(0.0);
+                state.intake += intake;
+                state.consumed += intake * department.policy_execution();
+                state.delivery += department.delivery().get(k).copied().unwrap_or(0.0);
+            }
+            state.quote_sell = if state.declared_sell > 0.0 {
+                state.quote_sell / state.declared_sell
+            } else {
+                0.0
+            };
+            state.quote_buy = if state.declared_buy > 0.0 {
+                state.quote_buy / state.declared_buy
+            } else {
+                0.0
+            };
+            state.scale_sell = if state.declared_sell > 0.0 {
+                state.scale_sell / state.declared_sell
+            } else {
+                0.0
+            };
+            state.scale_buy = if state.declared_buy > 0.0 {
+                state.scale_buy / state.declared_buy
+            } else {
+                0.0
+            };
+        }
+        states
+    }
+
+    /// 每个部门本轮的执行率
+    pub fn executions(&self) -> Vec<f32> {
+        self.departments
+            .departments
+            .iter()
+            .map(|department| department.policy_execution())
+            .collect()
+    }
+
+    /// 与 [`Self::spread`] 同形，但用的是**账本**而不是成交。
+    ///
+    /// 路线 b 之后这才是"本地价"的正身：账本中间价 ÷ 指数。`spread` 用的是已实现的
+    /// 成交价除以指数——而指数现在本身就是账本的聚合，两个口径混在一起读出来的数
+    /// 既不是"本地 vs 全局"，也不是"挂价 vs 成交"。账本口径不依赖成交，也不掺口径。
+    pub fn book_spread(&self, polity: usize, good: usize) -> f32 {
+        let level = |p: usize| -> f32 {
+            let mid = self
+                .warehouses
+                .book(p, good)
+                .map(|book| book.mid())
+                .unwrap_or(0.0);
+            let index = self
+                .market
+                .merchandises
+                .get(good)
+                .map(|merchandise| merchandise.price)
+                .unwrap_or(0.0);
+            if mid > 0.0 && index > 0.0 {
+                mid / index
+            } else {
+                1.0
+            }
+        };
+        let own = level(polity);
+        let others: Vec<f32> = (0..self.polities.len())
+            .filter(|p| *p != polity)
+            .map(level)
+            .collect();
+        if others.is_empty() {
+            return 0.0;
+        }
+        own - others.iter().sum::<f32>() / others.len() as f32
+    }
+
     /// 这个政权对某种商品的实际成交价相对银河指数的偏离，正数表示它比你别人买的贵
     pub fn spread(&self, polity: usize, good: usize) -> f32 {
         let own = self.polities[polity].vwap[good];
@@ -595,6 +831,19 @@ impl Lab {
             .collect();
         self.departments
             .step(&mut self.warehouses, &mut self.market, &mut self.rng);
+        // 指数改由**账本聚合**导出（账本先验、指数导出）。放在决策之后、锚之前：
+        // 锚要钉的就是这个由账本推出来的量。
+        let goods = self.market.merchandises.len();
+        for (k, price) in self
+            .warehouses
+            .aggregate_index(goods)
+            .into_iter()
+            .enumerate()
+        {
+            if price.is_finite() && price > 0.0 {
+                self.market.merchandises[k].price = price;
+            }
+        }
         self.gauge = self
             .market
             .merchandises
@@ -650,9 +899,20 @@ impl Lab {
             .iter()
             .map(|merchandise| merchandise.price.max(1e-6))
             .collect();
-        for polity in polities.iter_mut() {
+        for (p, polity) in polities.iter_mut().enumerate() {
             for good in 0..GOODS {
-                polity.level[good] = prices[good] * polity.wedge[good].exp();
+                // 参照价 = 银河指数 × e^楔子。
+                //
+                // 这里**不能**用"该政权自己账本的中间价"：挂价 = 参照价 × 尺度，尺度又由
+                // 账本推出来，于是 账本 → 参照价 → 挂价 → 账本 是一个没有锚的乘法环，
+                // 实测会把挂价推到 f32 边界（$10^{19}$）。本地信息改由**决策价**承载
+                // （`plan` 读逐地方的 bid/ask），不再由参照价承载。
+                let level = prices[good] * polity.wedge[good].exp();
+                polity.level[good] = if level.is_finite() && level > 0.0 {
+                    level
+                } else {
+                    prices[good]
+                };
             }
             let level = polity.level.clone();
             for warehouse in &mut warehouses.warehouses[polity.span()] {
@@ -753,7 +1013,10 @@ impl Lab {
                         }
                     }
                 }
-                polity.wedge[k] = polity.wedge[k].clamp(-MAX_WEDGE, MAX_WEDGE);
+                // 旧代码这里还有 `clamp(-MAX_WEDGE, MAX_WEDGE)`（±2.0）。那是个假天花板：
+                // §3.4 表里 `counterparty` 那一列的 −200% 就是钳位本身，不是学出来的楔子。
+                // 去掉之后发散会真的发走出去，代价是那个地方的参照价可能变成非有限——
+                // 这由 apply_levels 的有限性回退接住，而不是由一个常数掩盖。
             }
             polity.internal = internal[p];
             polity.external = external[p];

@@ -8,7 +8,7 @@ mod tests;
 use fastrand::Rng;
 
 use crate::market::Market;
-use crate::warehouse::Warehouses;
+use crate::warehouse::{Book, Warehouses};
 
 pub struct Departments {
     pub departments: Vec<Department>,
@@ -26,6 +26,12 @@ pub struct Department {
     policy_choice: usize,
     /// 本轮按分布实际提货的比例
     policy_execution: f32,
+    /// 本轮按分布想吃的量（计划投入，未经执行率打折）
+    intake: Vec<f32>,
+    /// 本轮实际入账的产出（计划产出 × 产能缩放）
+    delivery: Vec<f32>,
+    /// 本轮产能缩放系数
+    capacity_scale: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -129,16 +135,14 @@ impl Departments {
         self.debug_assert_aligned(warehouses, market);
         let Warehouses {
             warehouses: stocks,
-            local_ratios,
+            books,
             ..
         } = warehouses;
         for (i, department) in self.departments.iter_mut().enumerate() {
             let locality = stocks[i].locality;
-            let local: &[f32] = local_ratios
-                .get(locality)
-                .map(|ratios| ratios.as_slice())
-                .unwrap_or(&[]);
-            step::plan(department, &mut stocks[i], market, local);
+            // 这个部门所在地方的账本；还没成形就是空表，plan 会回退到指数
+            let book: &[Book] = books.get(locality).map(|row| row.as_slice()).unwrap_or(&[]);
+            step::plan(department, &mut stocks[i], market, book);
         }
     }
 
@@ -188,11 +192,18 @@ impl Departments {
 
 impl Department {
     pub fn new(policies: Vec<Policy>) -> Self {
+        let goods = policies
+            .first()
+            .map(|policy| policy.consumptions.len())
+            .unwrap_or(0);
         Self {
             policies,
             capacity: f32::INFINITY,
             policy_choice: 0,
             policy_execution: 0.0,
+            intake: vec![0.0; goods],
+            delivery: vec![0.0; goods],
+            capacity_scale: 0.0,
         }
     }
 
@@ -207,6 +218,20 @@ impl Department {
 
     pub fn policy_execution(&self) -> f32 {
         self.policy_execution
+    }
+
+    /// 本轮想吃的量，实际吃进的是它乘以 [`Self::policy_execution`]
+    pub fn intake(&self) -> &[f32] {
+        &self.intake
+    }
+
+    /// 本轮实际入账的产出
+    pub fn delivery(&self) -> &[f32] {
+        &self.delivery
+    }
+
+    pub fn capacity_scale(&self) -> f32 {
+        self.capacity_scale
     }
 }
 

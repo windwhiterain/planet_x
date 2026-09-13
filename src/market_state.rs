@@ -14,8 +14,6 @@ pub struct MerchandiseState {
 
 impl MarketState {
     pub const DEFAULT_FORGETTING: f32 = 0.95;
-    pub const MAX_DRIFT: f32 = 4.0;
-    pub const MAX_VOLATILITY: f32 = 4.0;
 
     pub fn new(prices: &[f32]) -> Self {
         Self {
@@ -76,8 +74,6 @@ impl MarketState {
         state.level = price;
         state.drift += (1.0 - forgetting) * (change - state.drift);
         state.volatility += (1.0 - forgetting) * ((change - state.drift).abs() - state.volatility);
-        state.drift = state.drift.clamp(-Self::MAX_DRIFT, Self::MAX_DRIFT);
-        state.volatility = state.volatility.clamp(0.0, Self::MAX_VOLATILITY);
     }
 
     fn state(&self, merchandise: usize) -> Option<&MerchandiseState> {

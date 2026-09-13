@@ -29,6 +29,12 @@ struct Args {
     sanction_w: f32,
     food_supply: f32,
     motive_ladder: bool,
+    specialty: f32,
+    capacity: Option<f32>,
+    ladder_scale: f32,
+    specialty_top: Option<f32>,
+    soft_eps: f32,
+    goods_trace: bool,
     relations: f32,
     block_from: usize,
     block_to: usize,
@@ -63,6 +69,12 @@ impl Default for Args {
             sanction_w: 0.0,
             food_supply: 0.5,
             motive_ladder: false,
+            specialty: 1.0,
+            capacity: None,
+            ladder_scale: 1.0,
+            specialty_top: None,
+            soft_eps: 0.0,
+            goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
             block_to: usize::MAX,
@@ -118,6 +130,12 @@ fn parse() -> Option<Args> {
             "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
             "--food-supply" => args.food_supply = value()?.parse().ok()?,
             "--motive-ladder" => args.motive_ladder = true,
+            "--specialty" => args.specialty = value()?.parse().ok()?,
+            "--capacity" => args.capacity = Some(value()?.parse().ok()?),
+            "--ladder-scale" => args.ladder_scale = value()?.parse().ok()?,
+            "--specialty-top" => args.specialty_top = Some(value()?.parse().ok()?),
+            "--soft-eps" => args.soft_eps = value()?.parse().ok()?,
+            "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
@@ -141,30 +159,43 @@ fn usage() {
     println!("  --w W            政权间的配对权重（默认 1.0）");
     println!("  --grant G        每个部门每轮的拨款（默认 10）");
     println!("  --no-anchor      关掉水平锚，观察原始漂移");
+    println!("  --trace          sectors/modern 场景逐轮逐商品打印申报、报价、尺度、成交、库存、投入产出");
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
     println!("  --seed, -s S     随机种子（默认 11）");
 }
 
 fn spec(args: &Args) -> Spec {
+    let mut spec = raw_spec(args);
+    if let Some(capacity) = args.capacity {
+        spec.capacity = capacity;
+    }
+    if let Some(factor) = args.specialty_top {
+        spec = spec.with_specialty_at(GOODS - 1, factor);
+    }
+    spec
+}
+
+fn raw_spec(args: &Args) -> Spec {
     let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
         "ladder" => return Spec::ladder(args.polities, args.food_supply),
         "modern" => {
-            let mut spec = Spec::modern(args.polities);
+            let mut spec = Spec::modern(args.polities).with_specialty(args.specialty);
             if args.motive_ladder {
-                spec.motive_ladder = SECTOR_MOTIVE.to_vec();
+                spec.motive_ladder = ladder_weights(args);
             }
             return spec;
         }
         "sectors" => {
-            let mut spec = Spec::sectors(args.polities);
+            let mut spec = Spec::sectors(args.polities).with_specialty(args.specialty);
             if args.motive_ladder {
-                spec.motive_ladder = SECTOR_MOTIVE.to_vec();
+                spec.motive_ladder = ladder_weights(args);
             }
             return spec;
         }
         _ => Spec::scarce(args.polities, 0, 0),
     };
+    let base = base.with_specialty(args.specialty);
     if args.transform {
         let mut inputs = vec![0.0; GOODS];
         let mut outputs = vec![0.0; GOODS];
@@ -188,6 +219,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         .with_gain(args.gain)
         .with_recenter(args.recenter)
         .with_anchor(args.anchor)
+        .with_soft_eps(args.soft_eps)
         .with_grant(args.grant)
         .with_relations(&bloc_relations(args.polities, args.relations))
 }
@@ -414,73 +446,237 @@ fn ladder(args: &Args) {
     }
 }
 
+/// 商品的短名，按 good 的索引
+const GOOD_LABELS: [&str; GOODS] = ["一产", "二产", "三产"];
+
+fn dash(value: f32) -> String {
+    if value > 0.0 {
+        format!("{value:.3}")
+    } else {
+        String::from("—")
+    }
+}
+
+/// 一种商品这一轮「最低保本价」：所有能产它的工艺里，投入成本 ÷ 产出量 的最小值
+fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
+    let mut best = f32::INFINITY;
+    for department in &lab.departments.departments {
+        for policy in department
+            .policies
+            .iter()
+            .filter(|policy| policy.is_production())
+        {
+            let output = policy.outputs.get(good).copied().unwrap_or(0.0);
+            if !(output > 0.0) {
+                continue;
+            }
+            let cost: f32 = policy
+                .consumptions
+                .iter()
+                .enumerate()
+                .map(|(k, consumption)| consumption.max(0.0) * prices.get(k).copied().unwrap_or(0.0))
+                .sum();
+            best = best.min(cost / output);
+        }
+    }
+    if best.is_finite() {
+        best
+    } else {
+        0.0
+    }
+}
+
+fn report_by_good(lab: &Lab, ladder: bool) {
+    let states = lab.good_states();
+    let prices: Vec<f32> = states.iter().map(|state| state.price).collect();
+    let bids: Vec<f32> = states
+        .iter()
+        .map(|state| if state.bid > 0.0 { state.bid } else { state.price })
+        .collect();
+    let asks: Vec<f32> = states
+        .iter()
+        .map(|state| if state.ask > 0.0 { state.ask } else { state.price })
+        .collect();
+    // 增值按**决策口径**估：产出用买价、投入用卖价。两边都用指数会和决策脱节。
+    let added: Vec<f32> = states
+        .iter()
+        .enumerate()
+        .map(|(k, state)| state.delivery * bids[k] - state.consumed * asks[k])
+        .collect();
+    let total: f32 = added.iter().sum();
+    // 注意不能用 `total.max(1e-9)` 当除零护栏：总和为负时 max 会挑走 1e-9，
+    // 占比立刻变成天文数字（实测 -5.95e11%）。要按绝对值判。
+    let share = |value: f32| {
+        if total.abs() > 1e-9 {
+            value / total
+        } else {
+            0.0
+        }
+    };
+    let row = |label: &str, values: &[f32], format: fn(f32) -> String| {
+        let cells = values
+            .iter()
+            .map(|value| format(*value))
+            .collect::<Vec<String>>()
+            .join(" ");
+        println!("   {label:<8} {cells}");
+    };
+    println!(
+        "{}投入产出阶梯：{} 轮后的价格（指数）与相对一产",
+        if ladder { "有" } else { "无" },
+        lab.round,
+    );
+    let first = prices.first().copied().unwrap_or(1.0).max(1e-9);
+    let number = |value: f32| format!("{value:>9.3}");
+    row("价格", &prices, number);
+    row(
+        "相对一产",
+        &prices.iter().map(|price| price / first).collect::<Vec<f32>>(),
+        number,
+    );
+    // 决策用的是账本（逐地方的边际买卖价），不是指数。两者必须并排看，
+    // 否则会拿"指数口径的保本"去解释"账本口径的选择"。
+    row("买价 bid", &bids, number);
+    row("卖价 ask", &asks, number);
+    row(
+        "保本(按卖价)",
+        &(0..GOODS).map(|k| break_even(lab, k, &asks)).collect::<Vec<f32>>(),
+        number,
+    );
+    row(
+        "保本(按指数)",
+        &(0..GOODS).map(|k| break_even(lab, k, &prices)).collect::<Vec<f32>>(),
+        number,
+    );
+    row(
+        "产出入库",
+        &states.iter().map(|state| state.delivery).collect::<Vec<f32>>(),
+        number,
+    );
+    row(
+        "投入消耗",
+        &states.iter().map(|state| state.consumed).collect::<Vec<f32>>(),
+        number,
+    );
+    row(
+        "成交",
+        &states.iter().map(|state| state.dealt).collect::<Vec<f32>>(),
+        number,
+    );
+    row(
+        "库存",
+        &states.iter().map(|state| state.stock).collect::<Vec<f32>>(),
+        |value| format!("{value:>9.1}"),
+    );
+    row(
+        "增值",
+        &added,
+        |value| format!("{value:>9.2}"),
+    );
+    row(
+        "增值占比",
+        &added.iter().map(|value| share(*value)).collect::<Vec<f32>>(),
+        |value| format!("{:>8.1}%", 100.0 * value),
+    );
+    let executions = lab.executions();
+    println!(
+        "   执行率   均值 {:.3}  最小 {:.3}   （共 {} 个部门）",
+        executions.iter().sum::<f32>() / executions.len().max(1) as f32,
+        executions.iter().cloned().fold(f32::INFINITY, f32::min),
+        executions.len(),
+    );
+}
+
+/// 阶梯陡度：`1 + (基准 − 1) × k`。k = 1 就是 `SECTOR_MOTIVE` 原样。
+///
+/// 注意**整体调高 `MOTIVE` 是没用的**——消费份额是 `motive/cost` 在消费族内归一化，
+/// 全体同比放大不改变任何相对份额。能改变顶层相对地位的只有这个形状参数。
+fn ladder_weights(args: &Args) -> Vec<f32> {
+    SECTOR_MOTIVE
+        .iter()
+        .map(|motive| 1.0 + (motive - 1.0) * args.ladder_scale)
+        .collect()
+}
+
 fn sectors(args: &Args) {
     for ladder in [false, true] {
         let mut local = args.clone();
         local.motive_ladder = ladder;
         let mut lab = build_with(&local, spec(&local));
-        lab.run(args.rounds);
-        let prices: Vec<f32> = lab
-            .market
-            .merchandises
-            .iter()
-            .map(|merchandise| merchandise.price)
-            .collect();
-        let mut gross = vec![0.0f32; GOODS];
-        let mut added = vec![0.0f32; GOODS];
-        let mut produced = vec![0.0f32; GOODS];
-        for (i, department) in lab.departments.departments.iter().enumerate() {
-            let unit = i % GOODS;
-            for policy in department
-                .policies
-                .iter()
-                .filter(|policy| policy.is_production())
-            {
-                let share = policy.distribution();
-                let out: f32 = policy
-                    .outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(k, output)| output * prices[k])
-                    .sum::<f32>()
-                    * share;
-                let input: f32 = policy
-                    .consumptions
-                    .iter()
-                    .enumerate()
-                    .map(|(k, consumption)| consumption * prices[k])
-                    .sum::<f32>()
-                    * share;
-                gross[unit] += out;
-                added[unit] += out - input;
-                produced[unit] += policy.outputs[unit] * share;
-            }
+        if args.goods_trace {
+            println!(
+                "=== 场景 {} 逐轮逐商品追踪（{} 轮，每 {} 轮一行）：{} ===",
+                args.scenario,
+                args.rounds,
+                args.every,
+                if ladder { "有意愿阶梯" } else { "无意愿阶梯" },
+            );
+            println!(
+                "{:>4} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9} {:>10} {:>10} {:>5} {:>5}",
+                "轮次",
+                "商品",
+                "指数",
+                "买价",
+                "卖价",
+                "卖申报",
+                "买申报",
+                "成交",
+                "成交价",
+                "库存",
+                "卖报价",
+                "买报价",
+                "买尺度",
+                "入库",
+                "投入",
+                "卖天花板",
+                "买天花板",
+                "想买",
+                "被拒",
+            );
         }
-        let total: f32 = added.iter().sum();
-        println!(
-            "{}投入产出阶梯：价格 {}   相对一产 {}",
-            if ladder { "有" } else { "无" },
-            (0..GOODS)
-                .map(|k| format!("{:.3}", prices[k]))
-                .collect::<Vec<String>>()
-                .join(" "),
-            (0..GOODS)
-                .map(|k| format!("{:.2}", prices[k] / prices[0].max(1e-9)))
-                .collect::<Vec<String>>()
-                .join(" "),
-        );
-        println!(
-            "   部门增值占比 {}   产出量 {}   总增值 {:.1}",
-            (0..GOODS)
-                .map(|k| format!("{:.1}%", 100.0 * added[k] / total.max(1e-9)))
-                .collect::<Vec<String>>()
-                .join(" "),
-            (0..GOODS)
-                .map(|k| format!("{:.1}", produced[k]))
-                .collect::<Vec<String>>()
-                .join(" "),
-            total,
-        );
+        for _ in 0..args.rounds {
+            lab.step();
+            if !args.goods_trace || (lab.round % args.every != 0 && lab.round != args.rounds) {
+                continue;
+            }
+            for (k, state) in lab.good_states().iter().enumerate() {
+                println!(
+                    "{:>4} {:>5} {:>9.3} {:>9.3} {:>9.3} {:>9.2} {:>9.2} {:>9.2} {:>9} {:>9.1} {:>8} {:>8} {:>8} {:>9.3} {:>9.3} {:>10.1} {:>10.1} {:>5.0} {:>5.0}",
+                    lab.round,
+                    GOOD_LABELS[k],
+                    state.price,
+                    dash(state.bid),
+                    dash(state.ask),
+                    state.declared_sell,
+                    state.declared_buy,
+                    state.dealt,
+                    dash(state.deal_price),
+                    state.stock,
+                    dash(state.quote_sell),
+                    dash(state.quote_buy),
+                    dash(state.scale_buy),
+                    state.delivery,
+                    state.consumed,
+                    state.sell_ceiling,
+                    state.buy_ceiling,
+                    state.wanted_buy,
+                    state.blocked_buy,
+                );
+            }
+            let executions = lab.executions();
+            println!(
+                "     {:>5} 执行率 均值 {:.3} 最小 {:.3}   未成交 {:>5.1}%",
+                "小结",
+                executions.iter().sum::<f32>() / executions.len().max(1) as f32,
+                executions.iter().cloned().fold(f32::INFINITY, f32::min),
+                100.0 * lab.history.last().unwrap().uncleared,
+            );
+        }
+        if args.goods_trace {
+            println!();
+        }
+        report_by_good(&lab, ladder);
+        println!();
     }
 }
 
@@ -596,8 +792,8 @@ fn sanction_sweep(args: &Args) {
         args.rule.name(),
     );
     println!(
-        "{:>7} {:>10} {:>12} {:>12} {:>10} {:>10}",
-        "权重", "对外成交", "制裁政权价", "其余政权价", "价差", "执行率"
+        "{:>7} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
+        "权重", "对外成交", "制裁政权价", "其余政权价", "价差(成交)", "价差(账本)", "执行率"
     );
     for weight in [1.0f32, 0.75, 0.5, 0.25, 0.0] {
         let mut local = args.clone();
@@ -611,7 +807,7 @@ fn sanction_sweep(args: &Args) {
         let external = lab.department_external();
         let seat = local.sanction_polity;
         println!(
-            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>10.2}",
+            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>+10.3} {:>10.2}",
             external[department],
             lab.polities[seat].vwap[0],
             mean(
@@ -623,6 +819,7 @@ fn sanction_sweep(args: &Args) {
                     .collect::<Vec<f32>>()
             ),
             spread(&lab, seat, 0),
+            lab.book_spread(seat, 0),
             lab.polities[seat].execution,
         );
     }
