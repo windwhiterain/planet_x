@@ -33,6 +33,14 @@ pub struct Warehouses {
 pub struct Book {
     pub bid: f32,
     pub ask: f32,
+    /// **两侧是否都来自本轮的真实报价。**
+    ///
+    /// `update_books` 会给缺失的一侧填上 `carried`（= 上次成交比 × 指数，或上一轮的
+    /// 中间价，或指数本身）。那是**合成值**，不是市场报出来的。而 `is_formed()` 只看
+    /// 「两侧都 > 0」，于是合成值照样让它"成形"——账本因此可以完全是自己的回音，
+    /// 再经 `aggregate_index` 写回指数。这个字段把"真实观测"与"合成"分开，
+    /// 让指数**只由真正的双边市场导出**（见 [`Warehouses::aggregate_index`]）。
+    pub observed: bool,
 }
 
 impl Book {
@@ -55,6 +63,11 @@ impl Book {
     /// 两侧都有效才算一本成形的账
     pub fn is_formed(&self) -> bool {
         self.bid.is_finite() && self.ask.is_finite() && self.bid > 0.0 && self.ask > 0.0
+    }
+
+    /// **两侧都是真实报价**（而不是被 `carried` 合成出来的）——指数只能由这种账本导出。
+    pub fn is_observed(&self) -> bool {
+        self.observed && self.is_formed()
     }
 }
 
@@ -130,7 +143,10 @@ impl Warehouses {
                 let Some(book) = row.get(k) else {
                     continue;
                 };
-                if !book.is_formed() {
+                // ⚠️ 这里原来判的是 `is_formed()`，但**合成出来的账本也会成形**：
+                // 缺失的一侧被 `carried` 填上（正数！），于是账本成了自己的回音，
+                // 经本函数写回指数。改成只认**真实双边报价**，指数才是市场观测。
+                if !book.is_observed() {
                     continue;
                 }
                 let mid = book.mid();

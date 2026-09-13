@@ -354,6 +354,9 @@ fn update_books(
             books[locality][k] = Book {
                 bid: blend(previous.bid, observed_bid),
                 ask: blend(previous.ask, observed_ask),
+                // 只有**本轮两侧都有真实报价**才算观测。`seen` 只在本轮有人以非零
+                // 申报量报价时才会被填，所以这一行同时排除了"零申报量的报价定账本"。
+                observed: seen.bid > 0.0 && seen.ask > 0.0,
             };
         }
     }
