@@ -34,6 +34,9 @@ const ABLATE_SURFACE: u32 = 5u;
 const ABLATE_NORMALS: u32 = 6u;
 const SHADOW_GAIN: f32 = 4.0;
 const SLOPE_LIMIT: f32 = 0.9;
+const SURFACE_STEPS: u32 = 56;
+const SURFACE_LEVEL: f32 = 0.06;
+const SURFACE_EPSILON: f32 = 0.06;
 
 struct Medium {
     direction: vec3<f32>,
@@ -126,6 +129,30 @@ fn density_of(medium: Medium, cover: f32, with_skin: bool) -> f32 {
     return shape_of(cover, medium.altitude, billows(medium.direction, medium.altitude, with_skin));
 }
 
+fn cloud_field(point: vec3<f32>) -> f32 {
+    let medium = medium_of(point);
+    if medium.altitude < 0.0 || medium.altitude > 1.0 {
+        return 0.0;
+    }
+    let cover = coverage_of(medium.direction);
+    if cover <= 0.0 {
+        return 0.0;
+    }
+    return density_of(medium, cover, true);
+}
+
+fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
+    let step = SURFACE_EPSILON * span();
+    let x = vec3<f32>(step, 0.0, 0.0);
+    let y = vec3<f32>(0.0, step, 0.0);
+    let z = vec3<f32>(0.0, 0.0, step);
+    return vec3<f32>(
+        cloud_field(point + x) - cloud_field(point - x),
+        cloud_field(point + y) - cloud_field(point - y),
+        cloud_field(point + z) - cloud_field(point - z),
+    );
+}
+
 fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {
     if reach <= 0.0 || params.ablate == ABLATE_SUN {
         return 1.0;
@@ -179,19 +206,47 @@ fn scene_distance(fragment: vec2<f32>) -> f32 {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if params.ablate == ABLATE_NORMALS || params.ablate == ABLATE_SURFACE {
-        let facing = normalize(to_local(in.world_position.xyz));
-        let baked = textureSampleLevel(coverage_map, coverage_sampler, facing, 0.0);
-        let normal = to_world(surface_normal(facing));
+        let camera = view.world_position.xyz;
+        let away = in.world_position.xyz - camera;
+        let distance = length(away);
+        if distance <= 1e-5 {
+            discard;
+        }
+        let ray = away / distance;
+        let shell = shell_thickness(camera, ray, params.inner, params.outer);
+        if !shell.valid || shell.exit <= shell.entry {
+            discard;
+        }
+
+        let stride = (shell.exit - shell.entry) / f32(SURFACE_STEPS);
+        var along = shell.entry;
+        var found = false;
+        var surface_point = camera + ray * shell.entry;
+        for (var index = 0u; index < SURFACE_STEPS; index += 1u) {
+            let point = camera + ray * along;
+            if cloud_field(point) > SURFACE_LEVEL {
+                surface_point = point;
+                found = true;
+                break;
+            }
+            along += stride;
+        }
+        if !found {
+            discard;
+        }
+
+        let gradient = cloud_field_gradient(surface_point);
+        let length_squared = dot(gradient, gradient);
+        if length_squared <= 1e-12 {
+            discard;
+        }
+        let normal = gradient * inverseSqrt(length_squared);
         if params.ablate == ABLATE_NORMALS {
             return vec4<f32>(normal * 0.5 + vec3<f32>(0.5), 1.0);
         }
-        if baked.r < params.coverage {
-            discard;
-        }
         let sun = normalize(SUN_DIRECTION);
         let lit = clamp(dot(normal, sun), 0.0, 1.0);
-        let shade = 0.18 + 0.82 * lit;
-        return vec4<f32>(params.tint.rgb * shade, 1.0);
+        return vec4<f32>(params.tint.rgb * (0.14 + 0.86 * lit), 1.0);
     }
 
     let camera = view.world_position.xyz;
