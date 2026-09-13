@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
+use px_protocol::art::{ArtBundle, AssetManifest, MeshData};
 use px_protocol::stream::{self, Frame};
 
 pub type Key = [u8; 32];
@@ -27,10 +27,41 @@ pub trait FieldOp {
     fn eval(params: &Self::Params, inputs: &[&Field], grid: Grid) -> Field;
 }
 
+pub trait MeshOp {
+    type Params: Serialize + DeserializeOwned + Default;
+    const ID: &'static str;
+    const VERSION: u32;
+    const SOURCE_HASH: u64;
+    const INPUTS: &'static [&'static str];
+    fn eval(params: &Self::Params, inputs: &[&Field], grid: Grid) -> MeshData;
+}
+
+#[derive(Debug, Clone)]
+pub enum Payload {
+    Field(Field),
+    Mesh(MeshData),
+}
+
 #[derive(Debug, Clone)]
 pub struct Artifact {
-    pub field: Field,
+    pub payload: Payload,
     pub key: Key,
+}
+
+impl Artifact {
+    pub fn field(&self) -> &Field {
+        match &self.payload {
+            Payload::Field(field) => field,
+            Payload::Mesh(_) => panic!("这个产物是网格，不是场"),
+        }
+    }
+
+    pub fn mesh(&self) -> &MeshData {
+        match &self.payload {
+            Payload::Mesh(mesh) => mesh,
+            Payload::Field(_) => panic!("这个产物是场，不是网格"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +181,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         inputs.len(),
     );
 
-    let params = load_params::<Op>(&context.param_dir, name);
+    let params = load_params::<Op::Params>(&context.param_dir, name);
     let params_json = canonical_params(&params);
     let input_keys: Vec<Key> = inputs.iter().map(|artifact| artifact.key).collect();
     let key = node_key(
@@ -172,13 +203,13 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         load_artifact(&path, context.spec.projection).ok()
     };
 
-    let (field, hit, bytes) = match cached {
-        Some(field) => {
+    let (payload, hit, bytes) = match cached {
+        Some(payload) => {
             let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-            (field, true, bytes)
+            (payload, true, bytes)
         }
         None => {
-            let borrowed: Vec<&Field> = inputs.iter().map(|artifact| &artifact.field).collect();
+            let borrowed: Vec<&Field> = inputs.iter().map(|artifact| artifact.field()).collect();
             let field = Op::eval(
                 &params,
                 &borrowed,
@@ -188,11 +219,16 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
                     projection: context.spec.projection,
                 },
             );
-            let bytes = write_artifact(&path, name, &field).unwrap_or_else(|err| {
+            let payload = Payload::Field(field);
+            let bytes = write_artifact(&path, name, &payload).unwrap_or_else(|err| {
                 panic!("写产物 {} 失败：{err}", path.display());
             });
-            (field, false, bytes)
+            (payload, false, bytes)
         }
+    };
+    let field = match &payload {
+        Payload::Field(field) => field.clone(),
+        Payload::Mesh(_) => unreachable!(),
     };
 
     let millis = started.elapsed().as_millis() as u64;
@@ -265,7 +301,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
             mean: stats.mean,
         });
 
-    Artifact { field, key }
+    Artifact { payload, key }
 }
 
 pub fn finish() {
@@ -356,29 +392,44 @@ fn artifact_path(cache_root: &Path, key: &Key) -> PathBuf {
         .join(format!("{full}.pxart"))
 }
 
-fn load_params<Op: FieldOp>(param_dir: &Path, name: &str) -> Op::Params {
+fn load_params<P: Serialize + DeserializeOwned + Default>(param_dir: &Path, name: &str) -> P {
     let path = param_dir.join(format!("{name}.toml"));
     match std::fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text)
             .unwrap_or_else(|err| panic!("读参数 {} 失败：{err}", path.display())),
-        Err(_) => Op::Params::default(),
+        Err(_) => P::default(),
     }
 }
 
-fn write_artifact(path: &Path, id: &str, field: &Field) -> Result<u64, String> {
-    let blob = field.to_blob();
-    let bundle = ArtBundle {
-        assets: vec![AssetManifest {
-            id: id.to_string(),
-            kind: field.projection.asset_kind(),
-            params: BTreeMap::from([
+fn write_artifact(path: &Path, id: &str, payload: &Payload) -> Result<u64, String> {
+    let (kind, blobs, params) = match payload {
+        Payload::Field(field) => (
+            field.projection.asset_kind(),
+            vec![field.to_blob()],
+            BTreeMap::from([
                 ("width".to_string(), field.width as f64),
                 ("height".to_string(), field.height as f64),
             ]),
-            blobs: vec![blob.header.clone()],
+        ),
+        Payload::Mesh(mesh) => (
+            px_protocol::art::AssetKind::Mesh,
+            mesh.blobs(),
+            BTreeMap::from([
+                ("vertices".to_string(), mesh.vertices() as f64),
+                ("triangles".to_string(), mesh.triangles() as f64),
+            ]),
+        ),
+    };
+    let bundle = ArtBundle {
+        assets: vec![AssetManifest {
+            id: id.to_string(),
+            kind,
+            params,
+            blobs: blobs.iter().map(|blob| blob.header.clone()).collect(),
         }],
     };
-    let frames = vec![Frame::Art(bundle), Frame::Blob(blob)];
+    let mut frames = vec![Frame::Art(bundle)];
+    frames.extend(blobs.into_iter().map(Frame::Blob));
 
     let mut bytes = Vec::new();
     stream::write_stream(&mut bytes, &frames).map_err(|err| err.to_string())?;
@@ -389,7 +440,7 @@ fn write_artifact(path: &Path, id: &str, field: &Field) -> Result<u64, String> {
     Ok(bytes.len() as u64)
 }
 
-fn load_artifact(path: &Path, projection: Projection) -> Result<Field, String> {
+fn load_artifact(path: &Path, projection: Projection) -> Result<Payload, String> {
     let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
     let blob = frames
@@ -399,9 +450,26 @@ fn load_artifact(path: &Path, projection: Projection) -> Result<Field, String> {
             _ => None,
         })
         .ok_or_else(|| "产物里没有数据块".to_string())?;
+    let kind = frames.iter().find_map(|frame| match frame {
+        Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.kind),
+        _ => None,
+    });
+    if kind == Some(px_protocol::art::AssetKind::Mesh) {
+        let blobs: Vec<&px_protocol::wire::Blob> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Blob(blob) => Some(blob),
+                _ => None,
+            })
+            .collect();
+        return MeshData::from_blobs(&blobs)
+            .map(Payload::Mesh)
+            .map_err(|err| err.to_string());
+    }
+
     let mut field = Field::from_blob(blob).map_err(|err| err.to_string())?;
     field.projection = projection;
-    Ok(field)
+    Ok(Payload::Field(field))
 }
 
 fn load_index(cache_root: &Path) -> BTreeMap<String, IndexEntry> {
@@ -425,7 +493,128 @@ fn save_index(cache_root: &Path, index: &BTreeMap<String, IndexEntry>) {
     }
 }
 
+pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
+    let context = context();
+    assert_eq!(
+        inputs.len(),
+        Op::INPUTS.len(),
+        "{} 需要 {} 个输入 {}，实际给了 {}",
+        Op::ID,
+        Op::INPUTS.len(),
+        Op::INPUTS.join(" / "),
+        inputs.len(),
+    );
 
+    let params = load_params::<Op::Params>(&context.param_dir, name);
+    let params_json = canonical_params(&params);
+    let input_keys: Vec<Key> = inputs.iter().map(|artifact| artifact.key).collect();
+    let key = node_key(
+        Op::ID,
+        Op::VERSION,
+        context.spec.version,
+        (context.spec.width, context.spec.height),
+        context.spec.projection,
+        &params_json,
+        &input_keys,
+    );
+    let path = artifact_path(&context.cache_root, &key);
+    let short = hex_short(&key);
+    let started = Instant::now();
 
+    let cached = if context.fresh {
+        None
+    } else {
+        load_artifact(&path, context.spec.projection).ok()
+    };
 
+    let (payload, hit, bytes) = match cached {
+        Some(payload) => {
+            let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            (payload, true, bytes)
+        }
+        None => {
+            let borrowed: Vec<&Field> = inputs.iter().map(|artifact| artifact.field()).collect();
+            let mesh = Op::eval(
+                &params,
+                &borrowed,
+                Grid {
+                    width: context.spec.width,
+                    height: context.spec.height,
+                    projection: context.spec.projection,
+                },
+            );
+            let payload = Payload::Mesh(mesh);
+            let bytes = write_artifact(&path, name, &payload).unwrap_or_else(|err| {
+                panic!("写产物 {} 失败：{err}", path.display());
+            });
+            (payload, false, bytes)
+        }
+    };
+
+    let millis = started.elapsed().as_millis() as u64;
+    let (vertices, triangles) = match &payload {
+        Payload::Mesh(mesh) => (mesh.vertices(), mesh.triangles()),
+        Payload::Field(_) => unreachable!(),
+    };
+
+    if hit {
+        let index = context.index.lock().expect("索引锁坏了");
+        if let Some(meta) = index.get(&hex(&key)) {
+            if meta.op_version == Op::VERSION && meta.source_hash != Op::SOURCE_HASH {
+                eprintln!(
+                    "⚠ {name}（{}）的源码变了但 VERSION 仍是 {}；若输出语义变了，请升版本并加 PX_PCG_FRESH=1 重烘",
+                    Op::ID, Op::VERSION,
+                );
+            }
+        }
+    } else {
+        let mut index = context.index.lock().expect("索引锁坏了");
+        index.insert(
+            hex(&key),
+            IndexEntry {
+                op_id: Op::ID.to_string(),
+                op_version: Op::VERSION,
+                graph_version: context.spec.version,
+                source_hash: Op::SOURCE_HASH,
+                graph_source_hash: context.spec.source_hash,
+                node: name.to_string(),
+                millis,
+                bytes,
+            },
+        );
+        save_index(&context.cache_root, &index);
+    }
+
+    println!(
+        "{} {:<12} {:<16} v{}  {}  {:>4} ms  {:>9} B  {} 顶点 / {} 三角形",
+        if hit { "命中" } else { "重算" },
+        name,
+        Op::ID,
+        Op::VERSION,
+        short,
+        millis,
+        bytes,
+        vertices,
+        triangles,
+    );
+
+    context
+        .manifest
+        .lock()
+        .expect("清单锁坏了")
+        .push(ManifestEntry {
+            node: name.to_string(),
+            op: Op::ID.to_string(),
+            op_version: Op::VERSION,
+            key: hex(&key),
+            hit,
+            millis,
+            bytes,
+            min: vertices as f32,
+            max: triangles as f32,
+            mean: 0.0,
+        });
+
+    Artifact { payload, key }
+}
 

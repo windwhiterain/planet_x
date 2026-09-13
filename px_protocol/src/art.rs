@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::wire::BlobHeader;
+use crate::wire::{Blob, BlobHeader, WireError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssetKind {
@@ -41,6 +41,75 @@ pub fn octahedral_direction(u: f32, v: f32) -> [f32; 3] {
 pub fn octahedral_direction_y_up(u: f32, v: f32) -> [f32; 3] {
     let direction = octahedral_direction(u, v);
     [direction[0], direction[2], -direction[1]]
+}
+
+pub fn octahedral_uv(direction: [f32; 3]) -> [f32; 2] {
+    let length = direction[0].abs() + direction[1].abs() + direction[2].abs();
+    if length <= f32::EPSILON {
+        return [0.5, 0.5];
+    }
+    let mut x = direction[0] / length;
+    let mut y = direction[1] / length;
+    if direction[2] < 0.0 {
+        let old_x = x;
+        x = (1.0 - y.abs()) * sign(old_x);
+        y = (1.0 - old_x.abs()) * sign(y);
+    }
+    [x * 0.5 + 0.5, y * 0.5 + 0.5]
+}
+
+pub fn octahedral_uv_y_up(direction: [f32; 3]) -> [f32; 2] {
+    octahedral_uv([direction[0], -direction[2], direction[1]])
+}
+
+pub const MESH_ATTRIBUTES: [&str; 4] = ["positions", "normals", "uvs", "indices"];
+pub const MESH_POSITION: usize = 0;
+pub const MESH_NORMAL: usize = 1;
+pub const MESH_UV: usize = 2;
+pub const MESH_INDEX: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MeshData {
+    pub positions: Vec<f32>,
+    pub normals: Vec<f32>,
+    pub uvs: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
+impl MeshData {
+    pub fn vertices(&self) -> usize {
+        self.positions.len() / 3
+    }
+
+    pub fn triangles(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    pub fn blobs(&self) -> Vec<Blob> {
+        vec![
+            Blob::from_f32(vec![self.vertices() as u32, 3], &self.positions),
+            Blob::from_f32(vec![self.vertices() as u32, 3], &self.normals),
+            Blob::from_f32(vec![self.vertices() as u32, 2], &self.uvs),
+            Blob::from_u32(vec![self.indices.len() as u32], &self.indices),
+        ]
+    }
+
+    pub fn from_blobs(blobs: &[&Blob]) -> Result<Self, WireError> {
+        if blobs.len() < MESH_ATTRIBUTES.len() {
+            return Err(WireError::TruncatedFrame);
+        }
+        let mesh = Self {
+            positions: blobs[MESH_POSITION].f32s()?,
+            normals: blobs[MESH_NORMAL].f32s()?,
+            uvs: blobs[MESH_UV].f32s()?,
+            indices: blobs[MESH_INDEX].u32s()?,
+        };
+        let vertices = mesh.vertices();
+        if mesh.normals.len() != vertices * 3 || mesh.uvs.len() != vertices * 2 {
+            return Err(WireError::TruncatedFrame);
+        }
+        Ok(mesh)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

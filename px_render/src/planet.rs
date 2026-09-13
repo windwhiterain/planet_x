@@ -7,7 +7,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use px_protocol::art::AssetKind;
+use px_protocol::art::{AssetKind, MeshData};
 use px_protocol::stream::{self, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,7 @@ impl Palette {
 
 pub struct PlanetSpec {
     pub field: String,
+    pub mesh: Option<String>,
     pub palette: Palette,
     pub displace: f32,
     pub sea_level: f32,
@@ -624,6 +625,137 @@ fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
+fn spawn_lights(commands: &mut Commands) {
+    commands.spawn((
+        crate::ScenePart,
+        DirectionalLight {
+            illuminance: 3800.0,
+            ..default()
+        },
+        Transform::from_xyz(-4.2, 1.15, 2.35).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    commands.spawn((
+        crate::ScenePart,
+        AmbientLight {
+            brightness: 16.0,
+            ..default()
+        },
+    ));
+}
+
+fn spawn_stars(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    stars: &Handle<Image>,
+) {
+    commands.spawn((
+        crate::ScenePart,
+        Mesh3d(meshes.add(Sphere::new(90.0).mesh().uv(64, 32))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color_texture: Some(stars.clone()),
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::default(),
+    ));
+}
+
+fn spawn_rings(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    spec: &PlanetSpec,
+) {
+    if spec.rings <= 0.0 {
+        return;
+    }
+    let inner = spec.radius * 1.30;
+    let outer = spec.radius * spec.rings.max(1.45);
+    commands.spawn((
+        crate::ScenePart,
+        Transform::from_rotation(Quat::from_rotation_x(SYSTEM_TILT)),
+        Visibility::default(),
+    )).with_children(|parent| {
+        parent.spawn((
+            PlanetRing,
+            Mesh3d(meshes.add(ring_mesh(inner, outer, 384))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color_texture: Some(images.add(ring_image(1024, 4))),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
+        ));
+    });
+}
+
+pub fn load_mesh(path: &str) -> Result<Mesh, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
+    let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
+    let kind = frames.iter().find_map(|frame| match frame {
+        Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.kind),
+        _ => None,
+    });
+    if kind != Some(AssetKind::Mesh) {
+        return Err(format!("{path} 不是 Mesh 产物：{kind:?}"));
+    }
+    let blobs: Vec<&px_protocol::wire::Blob> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            Frame::Blob(blob) => Some(blob),
+            _ => None,
+        })
+        .collect();
+    let data = MeshData::from_blobs(&blobs).map_err(|err| err.to_string())?;
+
+    let positions: Vec<[f32; 3]> = data
+        .positions
+        .chunks_exact(3)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    let normals: Vec<[f32; 3]> = data
+        .normals
+        .chunks_exact(3)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    let uvs: Vec<[f32; 2]> = data
+        .uvs
+        .chunks_exact(2)
+        .map(|chunk| [chunk[0], chunk[1]])
+        .collect();
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(data.indices));
+    weld_normals(&mut mesh);
+
+    if let (Some(VertexAttributeValues::Float32x3(normals)), Some(VertexAttributeValues::Float32x3(positions))) =
+        (
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+        )
+    {
+        let mut worst = 1.0_f32;
+        for (normal, position) in normals.iter().zip(positions.iter()) {
+            let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
+            worst = worst.min(Vec3::from(*normal).dot(radial));
+        }
+        println!("载入网格法线审计：最小点积 {worst:.3}");
+    }
+    Ok(mesh)
+}
+
 fn grid_normals(mesh: &mut Mesh, resolution: u32) {
     let n = resolution.max(2);
     let Some(VertexAttributeValues::Float32x3(positions)) =
@@ -853,6 +985,62 @@ pub fn spawn_planet(
 ) -> Result<String, String> {
     let field = load_field(&spec.field)?;
 
+    if let Some(path) = &spec.mesh {
+        let mesh = load_mesh(path)?;
+        let vertices = mesh.count_vertices();
+        let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
+        let mesh_handle = meshes.add(mesh);
+        let (color_texture, glow_texture) =
+            surface_textures(images, &field, spec.palette, spec.sea_level);
+        let emissive = if glow_texture.is_some() {
+            LinearRgba::rgb(3.0, 3.0, 3.0)
+        } else {
+            LinearRgba::rgb(0.0, 0.0, 0.0)
+        };
+
+        let system = commands
+            .spawn((
+                crate::ScenePart,
+                Transform::from_rotation(Quat::from_rotation_x(SYSTEM_TILT)),
+                Visibility::default(),
+            ))
+            .id();
+
+        commands.entity(system).with_children(|parent| {
+            parent.spawn((
+                PlanetBody,
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color_texture: Some(color_texture),
+                    emissive_texture: glow_texture,
+                    emissive,
+                    perceptual_roughness: 0.88,
+                    metallic: 0.0,
+                    ..default()
+                })),
+                Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
+            ));
+        });
+
+        spawn_rings(commands, meshes, materials, images, spec);
+        spawn_stars(commands, meshes, materials, stars);
+        spawn_lights(commands);
+
+        return Ok(format!(
+            "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}",
+            spec.palette.name(),
+            spec.field,
+            field.width,
+            field.height,
+            spec.sea_level,
+            if spec.rings > 0.0 {
+                format!("｜环 ×{:.2}", spec.rings)
+            } else {
+                String::new()
+            },
+        ));
+    }
+
     let mesh_handle = if field.equirect {
         meshes.add(uv_sphere(1.0, 224, 112))
     } else {
@@ -972,34 +1160,8 @@ pub fn spawn_planet(
         }
     });
 
-    commands.spawn((
-        crate::ScenePart,
-        Mesh3d(meshes.add(Sphere::new(90.0).mesh().uv(64, 32))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color_texture: Some(stars.clone()),
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        })),
-        Transform::default(),
-    ));
+    spawn_stars(commands, meshes, materials, stars);
 
-    commands.spawn((
-        crate::ScenePart,
-        DirectionalLight {
-            illuminance: 3800.0,
-            ..default()
-        },
-        Transform::from_xyz(-4.2, 1.15, 2.35).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    commands.spawn((
-        crate::ScenePart,
-        AmbientLight {
-            brightness: 16.0,
-            ..default()
-        },
-    ));
 
     let mut far = 0.0_f32;
     for position in positions.iter() {
@@ -1027,6 +1189,13 @@ pub fn spawn_planet(
         },
     ))
 }
+
+
+
+
+
+
+
 
 
 

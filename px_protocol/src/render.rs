@@ -9,6 +9,8 @@ pub enum Scene {
     },
     Planet {
         field: String,
+        #[serde(default)]
+        mesh: Option<String>,
         palette: String,
         displace: f32,
         sea_level: f32,
@@ -72,3 +74,4 @@ impl std::fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+

@@ -104,6 +104,7 @@ struct Options {
     round: Option<u32>,
     out: Option<PathBuf>,
     planet: Option<PathBuf>,
+    mesh: Option<PathBuf>,
     palette: planet::Palette,
     displace: Option<f32>,
     sea_level: Option<f32>,
@@ -127,6 +128,7 @@ impl Default for Options {
             round: None,
             out: None,
             planet: None,
+            mesh: None,
             palette: planet::Palette::Rocky,
             displace: None,
             sea_level: None,
@@ -157,6 +159,7 @@ impl Options {
                 "--autostart" => options.autostart = true,
                 "--stream" => options.stream = PathBuf::from(next("--stream")?),
                 "--planet" => options.planet = Some(PathBuf::from(next("--planet")?)),
+                "--mesh" => options.mesh = Some(PathBuf::from(next("--mesh")?)),
                 "--out" => options.out = Some(PathBuf::from(next("--out")?)),
                 "--palette" => {
                     let name = next("--palette")?;
@@ -213,6 +216,7 @@ impl Options {
             let (displace, sea_level, rings) = self.palette.defaults();
             planet::PlanetSpec {
                 field: path.display().to_string(),
+                mesh: self.mesh.as_ref().map(|mesh| mesh.display().to_string()),
                 palette: self.palette,
                 displace: self.displace.unwrap_or(displace),
                 sea_level: self.sea_level.unwrap_or(sea_level),
@@ -227,6 +231,7 @@ impl Options {
         match self.planet_spec() {
             Some(spec) => Scene::Planet {
                 field: spec.field,
+                mesh: spec.mesh,
                 palette: spec.palette.name().to_string(),
                 displace: spec.displace,
                 sea_level: spec.sea_level,
@@ -610,6 +615,7 @@ fn accept_jobs(
         ),
         Scene::Planet {
             field,
+            mesh,
             palette,
             displace,
             sea_level,
@@ -632,6 +638,7 @@ fn accept_jobs(
                 &stars.0,
                 &planet::PlanetSpec {
                     field: field.clone(),
+                    mesh: mesh.clone(),
                     palette,
                     displace: *displace,
                     sea_level: *sea_level,
@@ -951,6 +958,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
     match request.scene {
         Scene::Planet {
             field,
+            mesh,
             palette,
             displace,
             sea_level,
@@ -960,6 +968,7 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
         } => Some((
             planet::PlanetSpec {
                 field,
+                mesh,
                 palette: planet::Palette::parse(&palette)?,
                 displace,
                 sea_level,
@@ -1275,3 +1284,5 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+

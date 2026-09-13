@@ -21,10 +21,17 @@ fn main() {
     let terrain = node::<ops::mix::Mix>("terrain", &[&continents, &mountains, &weight]);
     let height = node::<ops::remap::Remap>("height", &[&terrain]);
 
-    let stats = height.field.stats();
+    let surface = px_ops::mesh_node::<ops::octasphere::Octasphere>("surface", &[&height]);
+
+    let stats = height.field().stats();
     println!(
         "输出 height：{}×{}，值域 {:.4}..{:.4}，均值 {:.4}",
-        height.field.width, height.field.height, stats.min, stats.max, stats.mean,
+        height.field().width, height.field().height, stats.min, stats.max, stats.mean,
+    );
+    println!(
+        "输出 surface：{} 顶点 / {} 三角形",
+        surface.mesh().vertices(),
+        surface.mesh().triangles()
     );
 
     finish();

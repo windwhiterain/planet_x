@@ -103,6 +103,26 @@ impl Field {
         }
     }
 
+    pub fn sample_direction(&self, direction: [f32; 3]) -> f32 {
+        match self.projection {
+            Projection::Octahedral => {
+                let uv = px_protocol::art::octahedral_uv_y_up(direction);
+                self.sample_uv(uv[0], uv[1])
+            }
+            Projection::Equirect => {
+                let v = direction[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+                let u = (direction[2].atan2(direction[0]) / std::f32::consts::TAU).rem_euclid(1.0);
+                self.sample_uv(u, v)
+            }
+        }
+    }
+
+    pub fn sample_uv(&self, u: f32, v: f32) -> f32 {
+        let x = u * self.width.max(1) as f32 - 0.5;
+        let y = v * self.height.max(1) as f32 - 0.5;
+        self.sample_bilinear(x, y)
+    }
+
     pub fn sample_bilinear(&self, x: f32, y: f32) -> f32 {
         let width = self.width.max(1);
         let height = self.height.max(1);
@@ -159,4 +179,5 @@ impl Field {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
     }
 }
+
 

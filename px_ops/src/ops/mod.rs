@@ -1,8 +1,10 @@
 pub mod constant;
 pub mod fbm;
 pub mod mix;
+pub mod octasphere;
 pub mod remap;
 pub mod ridged;
 pub mod warp;
+
 
 

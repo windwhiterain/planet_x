@@ -7,6 +7,7 @@ pub enum WireError {
     MissingHeader,
     BadPayloadLength { expected: usize, actual: usize },
     NotF32(DType),
+    NotU32(DType),
     BadMagic,
     BadStreamVersion(u32),
     TruncatedFrame,
@@ -22,6 +23,7 @@ impl std::fmt::Display for WireError {
                 write!(formatter, "二进制块长度不符：头部声明 {expected} 字节，实际 {actual} 字节")
             }
             Self::NotF32(dtype) => write!(formatter, "期望 f32 载荷，实际 {dtype:?}"),
+            Self::NotU32(dtype) => write!(formatter, "期望 u32 载荷，实际 {dtype:?}"),
             Self::BadMagic => write!(formatter, "不是 .pxstream：魔数不符"),
             Self::BadStreamVersion(version) => write!(formatter, "流版本不支持：{version}"),
             Self::TruncatedFrame => write!(formatter, "帧被截断或标签未知"),
@@ -105,6 +107,31 @@ impl Blob {
             .bytes
             .chunks_exact(4)
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect())
+    }
+
+    pub fn from_u32(shape: Vec<u32>, data: &[u32]) -> Self {
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for value in data {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Self {
+            header: BlobHeader {
+                dtype: DType::U32,
+                shape,
+            },
+            bytes,
+        }
+    }
+
+    pub fn u32s(&self) -> Result<Vec<u32>, WireError> {
+        if self.header.dtype != DType::U32 {
+            return Err(WireError::NotU32(self.header.dtype));
+        }
+        Ok(self
+            .bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect())
     }
 

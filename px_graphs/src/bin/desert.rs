@@ -23,12 +23,13 @@ fn main() {
     let terrain = node::<ops::mix::Mix>("terrain", &[&plateaus, &carved, &blend]);
     let height = node::<ops::remap::Remap>("height", &[&terrain]);
 
-    let stats = height.field.stats();
+    let stats = height.field().stats();
     println!(
         "输出 height：{}×{}，值域 {:.4}..{:.4}，均值 {:.4}",
-        height.field.width, height.field.height, stats.min, stats.max, stats.mean,
+        height.field().width, height.field().height, stats.min, stats.max, stats.mean,
     );
 
     finish();
 }
+
 
