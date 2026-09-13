@@ -1,19 +1,19 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 4
+        "schema_version": 5
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 4
+      "schema_version": 5
     },
     "art::ArtBundle": {
       "assets": [
@@ -50,11 +50,18 @@
         "displace": 0.05999999865889549,
         "field": "target/pcg/ab/xx/yy.pxart",
         "kind": "planet",
+        "mesh": "target/pcg/ab/zz/mesh.pxart",
         "palette": "rocky",
         "radius": 1.0,
         "rings": 0.0,
         "sea_level": 0.44999998807907104,
         "spin": 0.0
+      },
+      "view": {
+        "ambient": null,
+        "atmo": null,
+        "cam": null,
+        "scatter": null
       },
       "width": 960
     },
@@ -93,7 +100,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 4,
+      "schema_version": 5,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,
