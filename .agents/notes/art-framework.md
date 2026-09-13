@@ -2591,3 +2591,73 @@ ERROR bevy_render::...::pipeline_cache:  failed to process shader error: shaders
 那个怀疑来自 DeviceLost 调查，而 DeviceLost 后来定到了**空闲还在满速渲染**上（§39.4），
 跟热重载没关系 ✗。**当时"保险起见重启"的做法，被我继承成了习惯，白付了代价。**
 
+---
+
+## 43. 云密度场的**正确**梯度组装（调研结论，务必照抄）
+
+子 agent 调研 + **实测**得出 ✓。我原先写下的形式：
+
+```
+∇ρ = (∂ρ/∂r)·r̂ + (1/r)·∇_d ρ          ✗ 只有在"∂ρ/∂r 是固定 d 的真偏导、
+                                           且 ∇_d ρ 已经是切向"时才对
+```
+
+**完整且经验证的形式**（用 shader 里的名字，`along = across·span()`，所以 `along/span = across`）：
+
+```
+P_t = I − d⊗dᵀ                                    // 切向投影算子
+
+∇_p ρ = (ρ_a / span) · d                                              // ① 高度
+      + ρ_n · [ (s/r)·P_t·g_q  +  (along/span)·(d·g_q)·d ]            // ② 噪声
+      + (ρ_cover / r) · P_t · g_cover                                 // ③ 覆盖度贴图
+```
+
+⚠ **②中方括号里第二项是最容易漏的，而且漏了是灾难性的** —— 因为 `q` 通过 `a` 依赖 `r`，
+**噪声有一个"超出 ∂ρ/∂a"的径向依赖**。实测（20000 个壳内随机点，对比三维中心差分）：
+
+| 组装方式 | 中位数 | 最大 |
+|---|---|---|
+| **正确** | 1.3e-07 | 2.0e-05 ✓ |
+| 漏掉 `P_t` 投影 | 3.0e-01 | 6.2 ✗ 百分比级错 |
+| **漏掉 `(along/span)(d·g_q)d`** | **7.0e+00** | **9.7e+01 ✗✗ 灾难** |
+| 往 `g_cover` 里加 3.7·d 的径向垃圾 | 与正确**逐位相同** ✓ | ← `P_t` 把它吃掉了 |
+
+⇒ **③ 只需要 `g_cover` 的切向部分** ✓ —— 所以**那张烘焙图正好就是答案**：
+一次 `textureSampleLevel` 同时拿到 mask 和梯度，再 `P_t` 投影 ✓✓。
+用户那句"梯度不是烘焙了吗，只需要一次采样"**完全成立** ✓。
+
+⚠ 但必须确认 `gba` 是**喂给 `coverage_of` 的那个标量**的梯度（`.r` 的 mask）。
+现在 R=`mixed`、GBA=`∇mixed` ✓ 一致；但 `coverage_of` 之上还套了
+`smoothstep(0,0.45, clamp(...))`，所以 `∂cover/∂mask = 6t(1-t)/0.45 · 1/max(1-coverage,1e-4) · [0<t<1]` ✓。
+
+### 43.1 分段点的处理约定（不是障碍，是约定）
+
+`smoothstep` 的导数在两端**自己归零**（实测 `s'(0)=0`、`s'(1)=0`），
+所以 CAS 输出里那堆 Piecewise/Heaviside **会塌缩成一串 `select(...)`** ✓ —— 12 行就能转写完：
+
+```wgsl
+let t1 = clamp(a / base, 0.0, 1.0);
+let ds1 = select(0.0, 6.0 * t1 * (1.0 - t1) / base, t1 > 0.0 && t1 < 1.0);
+let dc_dn = select(0.0, top * detail_strength, m > base + 0.02);
+```
+
+⚠ 需要显式决定的：**解析梯度要不要在"值被强制为 0"的地方也返回 0** ✓。
+现在的 FD 版本在**壳边界会返回巨大的差商** ✗，而 `ABLATE_NORMALS` **正是靠这个尖峰找表面的** ✗ ——
+换解析版会改变那里的行为，要有意识地选，而不是让它悄悄变。
+
+### 43.2 工具选型（已调研，不要再重新查）
+
+| 工具 | 结论 |
+|---|---|
+| **`num-dual`**（MIT OR Apache，活跃） | ✓ **用它**。做 dev-dependency：把 `shape_of` + 噪声泛型化到 `D: DualNum<f64>` 上，得到 **f64 精度的 ∇ρ 参考** —— **这才是能长期复用的产物** ✓ |
+| `symbolica` | ✗ **不要**。源码可见但**非开源**：受雇使用需付费 **EUR 3000/年/开发机**，CI 单独报价 |
+| `egg` | ✗ 它是 e-graph 重写库，**你不写规则它就不会求导** —— 等于手推 |
+| `rust-gpu` / `cubecl` | ✗ 前者只出 SPIR-V；后者是 compute DSL，等于把场**写第三遍** |
+| `naga-rust` | 只能当"无 GPU 时执行"的备选，作者自己说"expect compilation failures" |
+
+⚠ **`num-dual` 的分段语义是它的卖点**：其源码注释明确
+*"Comparisons are only made based on the real part. This allows the code to follow
+the same execution path as real-valued code would."* ⇒ 分支与真值代码一致 ✓。
+但它**没有 `floor`/`min`/`max`/`clamp`/`abs`**（`Dual` 甚至不实现 `num_traits::Float`），
+要自己写 ~6 个泛型小工具 ✓ —— **这是好事**：分支语义变成显式可审的。
+
