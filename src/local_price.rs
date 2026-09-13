@@ -899,7 +899,7 @@ impl Lab {
             .iter()
             .map(|merchandise| merchandise.price.max(1e-6))
             .collect();
-        for (p, polity) in polities.iter_mut().enumerate() {
+        for polity in polities.iter_mut() {
             for good in 0..GOODS {
                 // 参照价 = 银河指数 × e^楔子。
                 //
