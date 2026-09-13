@@ -1,5 +1,6 @@
 # 大陆：低频 fbm，给出行星的大块陆地
-frequency = 3.2
+# 球面 3D 噪声：绕赤道一圈约 2π 个晶格，frequency 0.55 ≈ 赤道上 3.5 个特征
+frequency = 0.55
 octaves = 6
 lacunarity = 2.0
 gain = 0.5

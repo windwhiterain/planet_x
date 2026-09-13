@@ -1,5 +1,5 @@
 # 高原：低频 fbm，给出大块台地
-frequency = 2.2
+frequency = 0.45
 octaves = 5
 lacunarity = 2.0
 gain = 0.45

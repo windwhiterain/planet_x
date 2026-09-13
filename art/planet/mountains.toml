@@ -1,5 +1,5 @@
 # 山脉：高频 ridged，只出现在 mask 高的地方
-frequency = 11.0
+frequency = 1.9
 octaves = 5
 lacunarity = 2.0
 gain = 0.55

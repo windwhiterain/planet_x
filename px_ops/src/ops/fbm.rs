@@ -15,6 +15,7 @@ pub struct Params {
     pub gain: f32,
     pub seed: u32,
     pub aspect: f32,
+    pub spherical: bool,
 }
 
 impl Default for Params {
@@ -26,6 +27,7 @@ impl Default for Params {
             gain: 0.5,
             seed: 7,
             aspect: 2.0,
+            spherical: true,
         }
     }
 }
@@ -33,7 +35,7 @@ impl Default for Params {
 impl FieldOp for Fbm {
     type Params = Params;
     const ID: &'static str = "field.fbm";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));
     const INPUTS: &'static [&'static str] = &[];
 
@@ -49,7 +51,12 @@ impl FieldOp for Fbm {
         for y in 0..size.1 {
             for x in 0..size.0 {
                 let (u, v) = field.uv(x, y);
-                field.set(x, y, noise::fbm(u * params.aspect, v, &settings));
+                let value = if params.spherical {
+                    noise::fbm_3(noise::direction(u, v), &settings)
+                } else {
+                    noise::fbm(u * params.aspect, v, &settings)
+                };
+                field.set(x, y, value);
             }
         }
         field

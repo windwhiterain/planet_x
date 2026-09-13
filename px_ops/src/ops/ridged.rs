@@ -16,6 +16,7 @@ pub struct Params {
     pub seed: u32,
     pub aspect: f32,
     pub sharpness: f32,
+    pub spherical: bool,
 }
 
 impl Default for Params {
@@ -28,6 +29,7 @@ impl Default for Params {
             seed: 21,
             aspect: 2.0,
             sharpness: 1.6,
+            spherical: true,
         }
     }
 }
@@ -35,7 +37,7 @@ impl Default for Params {
 impl FieldOp for Ridged {
     type Params = Params;
     const ID: &'static str = "field.ridged";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     const SOURCE_HASH: u64 = fnv1a(include_str!("ridged.rs"));
     const INPUTS: &'static [&'static str] = &[];
 
@@ -51,11 +53,12 @@ impl FieldOp for Ridged {
         for y in 0..size.1 {
             for x in 0..size.0 {
                 let (u, v) = field.uv(x, y);
-                field.set(
-                    x,
-                    y,
-                    noise::ridged(u * params.aspect, v, &settings, params.sharpness),
-                );
+                let value = if params.spherical {
+                    noise::ridged_3(noise::direction(u, v), &settings, params.sharpness)
+                } else {
+                    noise::ridged(u * params.aspect, v, &settings, params.sharpness)
+                };
+                field.set(x, y, value);
             }
         }
         field
