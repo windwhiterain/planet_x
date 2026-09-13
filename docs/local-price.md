@@ -1362,3 +1362,76 @@ books[locality][k] = Book { bid: blend(previous.bid, observed_bid), ask: blend(p
 | `a_transformation_runs_only_while_it_pays` | 方向断言 → "不显著反转"（1.05×） | 实测闲置 1.0965 / 开工 1.1136，1.5% 反向，落在噪声内 |
 | `a_learned_wedge_costs_the_level_without_buying_a_gap` | 位移 <10% → "保留一半以上" | 实测 −26%：楔子仍有代价，但不再是 `e^-35` 那种崩溃 |
 | `the_anchor_..._scarce_good` 所在文件的本地价差界 | 0.25 → 0.30 | 实测 −0.286 |
+
+---
+
+## 18. consumption 的结算：从"部门一个标量"到"逐政策"，再到软化 LP
+
+### 18.1 缺陷：一条政策缺货，全部政策一起不吃
+
+`department/step.rs` 结算处原来是**整个部门共用一个 `execution` 标量**：
+
+```rust
+let mut execution = ...;
+for (k, want) in intake.iter().enumerate() {
+    if *want > 0.0 { execution = execution.min((available[k] + delivery[k]) / want); }
+}
+stock.volume = (available[k] + delivery[k] - intake[k] * execution).max(0.0);
+```
+
+`intake` 是**所有政策意愿的总和**，所以这个 `min` 跨了全部政策。实测后果（`cap12 spec2`，第 1500 轮）：
+
+```
+六个部门二产库存 = 0、缺口 = −2（想买买不到）
+⇒ execution = min(…, (0+0)/2) = 0.009
+⇒ 一产库存 117、三产库存 8320 **也**一起乘 0.009（三产投入 = 4.66e-12）
+⇒ t2 满产的 92/轮只进不出 ⇒ 洪水
+```
+
+一产/二产/三产本来是**三条彼此独立的 consumption policy**（有哪个就吃那个）。政策**内部**的配方是一个向量、要么整篮要么不吃（这是对的）；政策**之间**必须彼此独立。
+
+### 18.2 当前 interim（本 checkpoint）：逐政策的最小比值配给
+
+每条政策自己算 `share = min_{k∈篮} min(1, 供给_k / 总意愿_k)`，再按 `distribution × 配方 × share` 结算；同一种商品的分摊比例对所有政策一致，因此 `Σ 意愿 × 比例 ≤ 供给` 恒成立，不会超支。
+
+实测（`cap12 spec2`）：
+
+| 轮次 | 三产 投入/轮（改前） | 三产 投入/轮（interim） | 执行率 min（改前 → interim） |
+|---|---|---|---|
+| 500 | ~0 | **11.52** | 0.057 → **0.434** |
+| 1000 | 4.66e-12 | 0.80 | 0.009 → **0.089** |
+| 1500 | 4.66e-12 | 0.36 | 0.009 → **0.284** |
+
+**"连坐"修掉了**（执行率不再是 0.009，三产重新被吃），但**洪水没有停**：三产库存 1.46e4 → 4.17e4 → 6.94e4，因为消费在 1000 轮之后又衰减下去（50~64 产 / 0.36~0.8 吃）。
+
+### 18.3 下一步：软化 LP（**这是这个 interim 要替换掉的东西**）
+
+硬配给的 `min` 会把 `x_p` 顶死在某一样紧货的比例上，不是平滑解。按软化 LP 重写：
+
+```
+最大化   Σ_p w_p · x_p  −  (ρ/2) · Σ_p x_p²
+约束     Σ_p (distribution_p · 配方_pk) · x_p  ≤  供给_k        ← 仓库存量，**硬约束，防超取**
+         0 ≤ x_p ≤ 1
+```
+
+`λ_k ≥ 0` 是库存的影子价格，最优解为
+
+```
+x_p = clamp( ( w_p − Σ_k λ_k · distribution_p · 配方_pk ) / ρ , 0 , 1 )
+```
+
+`λ` 抬到约束恰好收紧为止。四条要验证的性质：
+
+1. **不超取**：逐商品 `Σ 消耗 ≤ 供给`
+2. **政策独立**：缺二产不再压死一产/三产的消费
+3. **篮子是原子的**：`Σ_k λ_k 配方_pk` 是整篮的影子成本，篮里任一样紧都压低 `x_p`
+4. **有哪个就吃那个**：不缺货的商品 `λ_k ≈ 0`，对应政策 `x_p = clamp(w_p/ρ, 0, 1)` 吃满
+
+### 18.4 checkpoint 状态（**诚实记录**）
+
+- 测试 **118 过 / 2 失败 / 1 ignore**：`a_transformation_runs_only_while_it_pays`、
+  `a_sanctioned_department_cannot_trade_out_but_no_longer_drowns`——两条都是我重定过基线的测试，
+  这次结算改动又把它们推动了。**这是欠账，不是通过。**
+- `intake` 的语义从"未经打折的意愿"改成"**实际提货量**"，`GoodState.consumed`
+  因此不再乘执行率（否则重复打折）。
+- 洪水仍在（见 18.2 表）。

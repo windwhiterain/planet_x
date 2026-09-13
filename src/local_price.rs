@@ -746,7 +746,9 @@ impl Lab {
             for department in &self.departments.departments {
                 let intake = department.intake().get(k).copied().unwrap_or(0.0);
                 state.intake += intake;
-                state.consumed += intake * department.policy_execution();
+                // `intake` 已经是**结算后的实际提货量**（逐政策执行率已经打进去了），
+                // 不能再乘一次执行率。
+                state.consumed += intake;
                 state.delivery += department.delivery().get(k).copied().unwrap_or(0.0);
             }
             state.quote_sell = if state.declared_sell > 0.0 {

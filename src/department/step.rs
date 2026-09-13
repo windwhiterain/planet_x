@@ -216,26 +216,67 @@ pub(super) fn plan(
     } else {
         1.0
     };
-    let mut execution: f32 = if consume_weight > 0.0 || produce_weight > 0.0 {
+    let mut delivery = vec![0.0; goods];
+    for (k, produced) in output.iter().enumerate() {
+        delivery[k] = produced * capacity_scale;
+    }
+    let supply: Vec<f32> = (0..goods).map(|k| available[k] + delivery[k]).collect();
+
+    // **逐政策执行率。** `intake` 此刻是**所有政策的总意愿**（Σ 分布 × 配方），
+    // 正好当分摊分母：同一种商品的配给比例对想要它的每条政策都一样，所以
+    // `Σ 政策意愿 × 比例 ≤ 供给` 恒成立，不会超支。
+    //
+    // 这里原来是**整个部门共用一个标量**（跨所有想要商品取 min）。那等于说
+    // "一条政策缺货，全部政策一起不吃"——一产/二产/三产本来是**三条彼此独立**的
+    // consumption policy（有哪个就吃那个），却被一个 min 连坐：实测六个部门缺二产，
+    // 就让一产库存 117、三产库存 8320 一起乘 0.009，t2 满产的 92/轮只进不出。
+    // 政策**内部**的配方是一个向量、要么整篮要么不吃（这是对的）；政策**之间**
+    // 必须彼此独立。
+    let want_total = intake.clone();
+    let mut eaten = vec![0.0; goods];
+    let mut weighted = 0.0f32;
+    let mut share_weight = 0.0f32;
+    for policy in department.policies.iter() {
+        if policy.distribution <= 0.0 {
+            continue;
+        }
+        let mut share = 1.0f32;
+        let mut wants = 0.0f32;
+        for (k, consumption) in policy.consumptions.iter().enumerate() {
+            if *consumption <= 0.0 {
+                continue;
+            }
+            wants += *consumption;
+            let total = want_total[k];
+            if total > 0.0 {
+                share = share.min((supply[k] / total).min(1.0));
+            }
+        }
+        if wants <= 0.0 {
+            continue;
+        }
+        let weight = policy.distribution * wants;
+        share_weight += weight;
+        weighted += weight * share;
+        for (k, consumption) in policy.consumptions.iter().enumerate() {
+            eaten[k] += policy.distribution * consumption.max(0.0) * share;
+        }
+    }
+    let execution = if share_weight > 0.0 {
+        (weighted / share_weight).clamp(0.0, 1.0)
+    } else if consume_weight > 0.0 || produce_weight > 0.0 {
         1.0
     } else {
         0.0
     };
-    let mut delivery = vec![0.0; goods];
-    for (k, want) in intake.iter().enumerate() {
-        delivery[k] = output[k] * capacity_scale;
-        if *want > 0.0 {
-            execution = execution.min((available[k] + delivery[k]) / want);
-        }
-    }
-    let execution = execution.clamp(0.0, 1.0);
 
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
         // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
-        // 自适应（见 `warehouse::step::declared_volumes`）——部门按当轮计划写目标会让
-        // 计划为 0 的商品连目标也变成 0，于是它永远不出价买那样东西。
-        stock.volume = (available[k] + delivery[k] - intake[k] * execution).max(0.0);
+        // 自适应（见 `warehouse::step::declared_volumes`）。
+        stock.volume = (supply[k] - eaten[k]).max(0.0);
     }
+    // 对外报告的就是**实际提货量**（不再是"未经执行率打折的意愿"）。
+    let intake = eaten;
 
     department.policy_choice = choice;
     department.policy_execution = execution;
