@@ -11,6 +11,8 @@ pub enum Scene {
         field: String,
         #[serde(default)]
         mesh: Option<String>,
+        #[serde(default)]
+        clouds: Option<String>,
         palette: String,
         displace: f32,
         sea_level: f32,
@@ -30,6 +32,8 @@ pub struct View {
     pub atmo: Option<f32>,
     #[serde(default)]
     pub scatter: Option<String>,
+    #[serde(default)]
+    pub cloud: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

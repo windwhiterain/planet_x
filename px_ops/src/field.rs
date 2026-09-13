@@ -1,7 +1,8 @@
-use px_protocol::art::{AssetKind, octahedral_direction_y_up};
+use px_protocol::art::AssetKind;
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
+pub use px_protocol::art::cube_map_extent;
 
 pub trait ProjectionKind {
     fn asset_kind(self) -> AssetKind;
@@ -13,6 +14,7 @@ impl ProjectionKind for Projection {
             Self::Equirect => AssetKind::Field2D,
             Self::Octahedral => AssetKind::OctahedralField,
             Self::Cube => AssetKind::CubeField,
+            Self::CubeMap => AssetKind::CubeMap,
         }
     }
 }
@@ -124,8 +126,40 @@ impl Field {
         direction_at(self.width, self.height, self.projection, x, y)
     }
     pub fn sample_direction(&self, direction: [f32; 3]) -> f32 {
+        if self.projection == Projection::CubeMap {
+            return self.sample_cube_map(direction);
+        }
         let uv = px_protocol::art::uv_of(self.projection, direction, self.width, self.height);
         self.sample_uv(uv[0], uv[1])
+    }
+
+    fn cube_map_texel(&self, direction: [f32; 3]) -> f32 {
+        let face_size = self.width.max(1);
+        let (face, s, t) = px_protocol::art::cube_face_of(direction);
+        let x = ((s * face_size as f32) as u32).min(face_size - 1);
+        let y = ((t * face_size as f32) as u32).min(face_size - 1);
+        self.at(x, face * face_size + y)
+    }
+
+    fn sample_cube_map(&self, direction: [f32; 3]) -> f32 {
+        let face_size = self.width.max(1) as f32;
+        let (face, s, t) = px_protocol::art::cube_face_of(direction);
+        let x = s * face_size - 0.5;
+        let y = t * face_size - 0.5;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (tx, ty) = (x - x0, y - y0);
+
+        let mut top = 0.0_f32;
+        let mut bottom = 0.0_f32;
+        for corner in 0..2 {
+            let column = (x0 + corner as f32 + 0.5) / face_size;
+            let weight = if corner == 1 { tx } else { 1.0 - tx };
+            let upper = px_protocol::art::cube_direction(face, column, (y0 + 0.5) / face_size);
+            let lower = px_protocol::art::cube_direction(face, column, (y0 + 1.5) / face_size);
+            top += weight * self.cube_map_texel(upper);
+            bottom += weight * self.cube_map_texel(lower);
+        }
+        top * (1.0 - ty) + bottom * ty
     }
     pub fn sample_uv(&self, u: f32, v: f32) -> f32 {
         let x = u * self.width.max(1) as f32 - 0.5;

@@ -6,6 +6,7 @@ fn every_domain_round_trips_through_its_own_uv() {
         (Domain::Equirect, 96_u32, 48_u32),
         (Domain::Octahedral, 64, 64),
         (Domain::Cube, 78, 52),
+        (Domain::CubeMap, 32, 192),
     ];
     for (domain, width, height) in domains {
         let mut worst = 0.0_f32;

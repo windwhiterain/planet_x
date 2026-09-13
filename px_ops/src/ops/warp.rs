@@ -78,11 +78,13 @@ mod tests {
             Projection::Equirect,
             Projection::Octahedral,
             Projection::Cube,
+            Projection::CubeMap,
         ] {
             let (width, height) = match projection {
                 Projection::Equirect => (96, 48),
                 Projection::Octahedral => (64, 64),
                 Projection::Cube => (78, 52),
+                Projection::CubeMap => (32, 192),
             };
             let grid = Grid {
                 width,

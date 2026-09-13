@@ -65,6 +65,7 @@ fn canonical() -> String {
         scene: Scene::Planet {
             field: "target/pcg/ab/xx/yy.pxart".to_string(),
             mesh: Some("target/pcg/ab/zz/mesh.pxart".to_string()),
+            clouds: Some("target/pcg/ab/cc/clouds.pxart".to_string()),
             palette: "rocky".to_string(),
             displace: 0.06,
             sea_level: 0.45,

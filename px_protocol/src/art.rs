@@ -9,6 +9,7 @@ pub enum AssetKind {
     Field2D,
     OctahedralField,
     CubeField,
+    CubeMap,
     Mesh,
     Instances,
 }
@@ -205,11 +206,17 @@ pub fn cube_atlas_uv(face: u32, s: f32, t: f32, face_size: u32, gutter: u32) -> 
 }
 
 
+pub fn cube_map_extent(face_size: u32) -> (u32, u32) {
+    let face = face_size.max(1);
+    (face, face * CUBE_FACES)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Domain {
     Equirect,
     Octahedral,
     Cube,
+    CubeMap,
 }
 
 impl Domain {
@@ -218,6 +225,7 @@ impl Domain {
             Self::Equirect => "equirect",
             Self::Octahedral => "octahedral",
             Self::Cube => "cube",
+            Self::CubeMap => "cubemap",
         }
     }
 }
@@ -248,10 +256,17 @@ pub fn direction_at(
             let t = (y % cell) as f32 + 0.5 - gutter as f32;
             cube_direction(face, s / face_size as f32, t / face_size as f32)
         }
+        Domain::CubeMap => {
+            let face_size = width.max(1);
+            let face = (y / face_size).min(CUBE_FACES - 1);
+            let s = (x as f32 + 0.5) / face_size as f32;
+            let t = ((y % face_size) as f32 + 0.5) / face_size as f32;
+            cube_direction(face, s, t)
+        }
     }
 }
 
-pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, height: u32) -> [f32; 2] {
+pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [f32; 2] {
     match domain {
         Domain::Equirect => {
             let v = direction[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
@@ -268,6 +283,10 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, height: u32) -> [f
                 cube_face_size(width),
                 CUBE_GUTTER,
             )
+        }
+        Domain::CubeMap => {
+            let (face, s, t) = cube_face_of(direction);
+            [s, (face as f32 + t) / CUBE_FACES as f32]
         }
     }
 }

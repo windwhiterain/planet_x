@@ -1,19 +1,19 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 5
+        "schema_version": 6
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 5
+      "schema_version": 6
     },
     "art::ArtBundle": {
       "assets": [
@@ -47,6 +47,7 @@
       "height": 640,
       "out": "target/shot.png",
       "scene": {
+        "clouds": "target/pcg/ab/cc/clouds.pxart",
         "displace": 0.05999999865889549,
         "field": "target/pcg/ab/xx/yy.pxart",
         "kind": "planet",
@@ -61,6 +62,7 @@
         "ambient": null,
         "atmo": null,
         "cam": null,
+        "cloud": null,
         "scatter": null
       },
       "width": 960
@@ -100,7 +102,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 5,
+      "schema_version": 6,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,
