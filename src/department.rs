@@ -1,5 +1,6 @@
 pub mod probe;
 
+mod settlement;
 mod step;
 
 #[cfg(test)]
@@ -15,6 +16,55 @@ pub struct Departments {
     /// index with [`Self::departments`]
     pub grants: Vec<f32>,
     pub treasury: f32,
+    /// 消费结算规则，默认走 [`Rationing::Interior`]
+    pub rationing: Rationing,
+}
+
+/// 默认障碍强度：无约束时一阶上只吃 `1 − 0.1`，精确根见 [`settlement`]
+pub const DEFAULT_BARRIER: f32 = settlement::BARRIER as f32;
+
+/// 消费怎么在彼此独立的政策之间分摊仓库存量
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Rationing {
+    /// 原始-对偶内点法，见 [`settlement`]。
+    ///
+    /// `barrier` 是障碍强度，读作**无约束时大致不吃的那部分**（一阶 `x ≈ 1 − barrier`，
+    /// 精确根见 [`settlement`] 的推导）；它同时决定解离 LP 退化面有多远、缺货过渡有多陡。
+    /// 越小越"准"、越大越"稳"。
+    Interior { barrier: f32 },
+    /// 旧的硬配给 `x_p = min(1, min_k 存量_k / 该商品的总意愿)`，只留作 A/B
+    Hard,
+}
+
+impl Default for Rationing {
+    fn default() -> Self {
+        Self::Interior {
+            barrier: settlement::BARRIER as f32,
+        }
+    }
+}
+
+/// 消费结算的诊断读数，见 [`settlement`]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettlementReport {
+    /// 对偶间隙——收敛证书，理论上等于 `(商品数 + 2×政策数) × μ`
+    pub gap: f64,
+    /// 收敛时的障碍参数
+    pub mu: f64,
+    /// 牛顿步总数
+    pub iterations: usize,
+    /// 残差是否压到容差；没压到就是**解没解出来**，不许静默继续
+    pub converged: bool,
+    /// 收尾时的相对残差（缩放无穷范数）——`converged` 为假时用来看**离得多远**
+    pub residual: f64,
+    /// 走了几档 μ
+    pub phases: usize,
+    /// 是否出现过退化（Cholesky 失败或回溯失败）
+    pub degraded: bool,
+    /// 因配方里有零存量商品被整条判死的政策数
+    pub blocked: usize,
+    /// 实际用掉的最紧那样货的比例，`≤ 1` 即不超取
+    pub utilization: f64,
 }
 
 /// index with [`crate::warehouse::Warehouse`]
@@ -26,12 +76,14 @@ pub struct Department {
     policy_choice: usize,
     /// 本轮按分布实际提货的比例
     policy_execution: f32,
-    /// 本轮按分布想吃的量（计划投入，未经执行率打折）
+    /// 本轮**实际提货量**（逐政策执行率已经打进去了）
     intake: Vec<f32>,
     /// 本轮实际入账的产出（计划产出 × 产能缩放）
     delivery: Vec<f32>,
     /// 本轮产能缩放系数
     capacity_scale: f32,
+    /// 本轮消费结算的收敛情况
+    settlement: SettlementReport,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,11 +116,18 @@ impl Departments {
             departments,
             grants,
             treasury: 0.0,
+            rationing: Rationing::default(),
         }
     }
 
     pub fn with_grants(mut self, grants: Vec<f32>) -> Self {
         self.grants = grants;
+        self
+    }
+
+    /// 换一套消费结算规则，见 [`Rationing`]
+    pub fn with_rationing(mut self, rationing: Rationing) -> Self {
+        self.rationing = rationing;
         self
     }
 
@@ -142,7 +201,7 @@ impl Departments {
             let locality = stocks[i].locality;
             // 这个部门所在地方的账本；还没成形就是空表，plan 会回退到指数
             let book: &[Book] = books.get(locality).map(|row| row.as_slice()).unwrap_or(&[]);
-            step::plan(department, &mut stocks[i], market, book);
+            step::plan(department, &mut stocks[i], market, book, self.rationing);
         }
     }
 
@@ -204,6 +263,7 @@ impl Department {
             intake: vec![0.0; goods],
             delivery: vec![0.0; goods],
             capacity_scale: 0.0,
+            settlement: SettlementReport::default(),
         }
     }
 
@@ -220,9 +280,14 @@ impl Department {
         self.policy_execution
     }
 
-    /// 本轮想吃的量，实际吃进的是它乘以 [`Self::policy_execution`]
+    /// 本轮**实际提货量**（[`Self::policy_execution`] 已经打进去了）
     pub fn intake(&self) -> &[f32] {
         &self.intake
+    }
+
+    /// 本轮消费结算的收敛情况，见 [`SettlementReport`]
+    pub fn settlement(&self) -> &SettlementReport {
+        &self.settlement
     }
 
     /// 本轮实际入账的产出

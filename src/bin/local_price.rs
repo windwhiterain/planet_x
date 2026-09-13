@@ -1,3 +1,4 @@
+use planet_x::department::{DEFAULT_BARRIER, Rationing};
 use planet_x::local_price::{
     bloc_relations, Lab, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY,
     NAMES, SECTOR_MOTIVE,
@@ -35,6 +36,8 @@ struct Args {
     specialty_top: Option<f32>,
     json: bool,
     soft_eps: f32,
+    rationing: String,
+    barrier: f32,
     goods_trace: bool,
     relations: f32,
     block_from: usize,
@@ -76,6 +79,8 @@ impl Default for Args {
             specialty_top: None,
             json: false,
             soft_eps: planet_x::market::Market::DEFAULT_SOFT_EPS,
+            rationing: String::from("interior"),
+            barrier: DEFAULT_BARRIER,
             goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
@@ -138,6 +143,8 @@ fn parse() -> Option<Args> {
             "--specialty-top" => args.specialty_top = Some(value()?.parse().ok()?),
             "--json" => args.json = true,
             "--soft-eps" => args.soft_eps = value()?.parse().ok()?,
+            "--rationing" => args.rationing = value()?,
+            "--barrier" => args.barrier = value()?.parse().ok()?,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
@@ -223,6 +230,12 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         .with_recenter(args.recenter)
         .with_anchor(args.anchor)
         .with_soft_eps(args.soft_eps)
+        .with_rationing(match args.rationing.as_str() {
+            "hard" => Rationing::Hard,
+            _ => Rationing::Interior {
+                barrier: args.barrier.max(0.0),
+            },
+        })
         .with_grant(args.grant)
         .with_relations(&bloc_relations(args.polities, args.relations))
 }
@@ -666,14 +679,24 @@ fn json_line(lab: &Lab) -> String {
             .iter()
             .map(|s| format!("{:e}", s.declared_gap))
             .collect();
+        let report = lab.departments.departments[i].settlement();
         departments.push_str(&format!(
-            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"execution\":{:e},\"capacity_scale\":{:e}}}",
+            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"execution\":{:e},\"capacity_scale\":{:e},\"settlement\":{{\"gap\":{:e},\"mu\":{:e},\"iterations\":{},\"phases\":{},\"converged\":{},\"residual\":{:e},\"degraded\":{},\"blocked\":{},\"utilization\":{:e}}}}}",
             stock.join(","),
             target.join(","),
             gap.join(","),
             lab.departments.departments[i].intake().iter().sum::<f32>(),
             lab.departments.departments[i].policy_execution(),
             lab.departments.departments[i].capacity_scale(),
+            report.gap,
+            report.mu,
+            report.iterations,
+            report.phases,
+            report.converged,
+            report.residual,
+            report.degraded,
+            report.blocked,
+            report.utilization,
         ));
     }
     let mut polities = String::new();
@@ -739,7 +762,8 @@ fn json_line(lab: &Lab) -> String {
         concat!(
             "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
             "\"books\":[{}],\"delivery_free_or_ladder\":[{}],",
-            "\"execution_mean\":{:e},\"execution_min\":{:e},\"uncleared\":{:e}}}"
+            "\"execution_mean\":{:e},\"execution_min\":{:e},\"uncleared\":{:e},",
+            "\"settlement_failures\":{}}}"
         ),
         lab.round,
         goods,
@@ -750,6 +774,7 @@ fn json_line(lab: &Lab) -> String {
         executions.iter().sum::<f32>() / executions.len().max(1) as f32,
         executions.iter().cloned().fold(f32::INFINITY, f32::min),
         lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
+        lab.settlement_failures,
     )
 }
 

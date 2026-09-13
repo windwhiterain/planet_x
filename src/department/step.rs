@@ -1,4 +1,5 @@
-use crate::department::{Department, Policy};
+use super::settlement;
+use crate::department::{Department, Policy, Rationing, SettlementReport};
 use crate::market::Market;
 use crate::warehouse::{Book, Warehouse};
 
@@ -97,6 +98,7 @@ pub(super) fn plan(
     warehouse: &mut Warehouse,
     market: &Market,
     book: &[Book],
+    rationing: Rationing,
 ) {
     let goods = warehouse.stocks.len();
 
@@ -222,45 +224,80 @@ pub(super) fn plan(
     }
     let supply: Vec<f32> = (0..goods).map(|k| available[k] + delivery[k]).collect();
 
-    // **逐政策执行率。** `intake` 此刻是**所有政策的总意愿**（Σ 分布 × 配方），
-    // 正好当分摊分母：同一种商品的配给比例对想要它的每条政策都一样，所以
-    // `Σ 政策意愿 × 比例 ≤ 供给` 恒成立，不会超支。
+    // === consumption 结算 ===
     //
-    // 这里原来是**整个部门共用一个标量**（跨所有想要商品取 min）。那等于说
-    // "一条政策缺货，全部政策一起不吃"——一产/二产/三产本来是**三条彼此独立**的
-    // consumption policy（有哪个就吃那个），却被一个 min 连坐：实测六个部门缺二产，
-    // 就让一产库存 117、三产库存 8320 一起乘 0.009，t2 满产的 92/轮只进不出。
-    // 政策**内部**的配方是一个向量、要么整篮要么不吃（这是对的）；政策**之间**
-    // 必须彼此独立。
-    let want_total = intake.clone();
-    let mut eaten = vec![0.0; goods];
+    // 一产/二产/三产是**三条彼此独立**的 consumption policy（有哪个就吃那个）。
+    // 政策**内部**的配方是一个向量：整篮按同一个执行率缩放；政策**之间**必须彼此独立，
+    // 不能因为一条政策缺货就把别的政策一起按下去。
+    //
+    // 默认走 [`settlement`] 的原始-对偶内点法：约束就是**仓库存量**，目标是
+    // `Σ 意愿 × 执行率`，对数障碍负责软化——结构上不超取、解唯一、对数据连续。
+    // `Rationing::Hard` 可以切回旧的硬配给做 A/B。
+    let plans: Vec<Vec<f64>> = department
+        .policies
+        .iter()
+        .map(|policy| {
+            policy
+                .consumptions
+                .iter()
+                .map(|consumption| (policy.distribution * consumption.max(0.0)) as f64)
+                .collect()
+        })
+        .collect();
+    let willingness: Vec<f64> = department
+        .policies
+        .iter()
+        .map(|policy| policy.distribution as f64)
+        .collect();
+    let inventory: Vec<f64> = supply.iter().map(|volume| *volume as f64).collect();
+
+    let (rates, eaten, settlement) = match rationing {
+        Rationing::Interior { barrier } => {
+            let outcome =
+                settlement::solve(&willingness, &plans, &inventory, barrier.max(0.0) as f64);
+            (outcome.x, outcome.eaten, outcome.report)
+        }
+        Rationing::Hard => {
+            let rates = hard_rationing(&plans, &inventory);
+            let eaten = take(&plans, &rates, goods);
+            let utilization = (0..goods).fold(0.0f64, |worst, k| {
+                if supply[k] > 0.0 {
+                    worst.max(eaten[k] / inventory[k])
+                } else {
+                    worst
+                }
+            });
+            (
+                rates,
+                eaten,
+                SettlementReport {
+                    converged: true,
+                    utilization,
+                    ..SettlementReport::default()
+                },
+            )
+        }
+    };
+
+    // 部门的对外执行率：按"这条政策想吃的篮子有多大"加权。
+    // 被判死（配方里有零存量商品）的政策也算进来，执行率是 0——那是诚实的读数。
     let mut weighted = 0.0f32;
     let mut share_weight = 0.0f32;
-    for policy in department.policies.iter() {
+    for (p, policy) in department.policies.iter().enumerate() {
         if policy.distribution <= 0.0 {
             continue;
         }
-        let mut share = 1.0f32;
-        let mut wants = 0.0f32;
-        for (k, consumption) in policy.consumptions.iter().enumerate() {
-            if *consumption <= 0.0 {
-                continue;
-            }
-            wants += *consumption;
-            let total = want_total[k];
-            if total > 0.0 {
-                share = share.min((supply[k] / total).min(1.0));
-            }
-        }
+        let wants: f32 = policy
+            .consumptions
+            .iter()
+            .filter(|consumption| **consumption > 0.0)
+            .sum();
         if wants <= 0.0 {
             continue;
         }
         let weight = policy.distribution * wants;
         share_weight += weight;
-        weighted += weight * share;
-        for (k, consumption) in policy.consumptions.iter().enumerate() {
-            eaten[k] += policy.distribution * consumption.max(0.0) * share;
-        }
+        weighted += weight * rates[p] as f32;
     }
     let execution = if share_weight > 0.0 {
         (weighted / share_weight).clamp(0.0, 1.0)
@@ -273,16 +310,50 @@ pub(super) fn plan(
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
         // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
         // 自适应（见 `warehouse::step::declared_volumes`）。
-        stock.volume = (supply[k] - eaten[k]).max(0.0);
+        stock.volume = (supply[k] - eaten[k] as f32).max(0.0);
     }
-    // 对外报告的就是**实际提货量**（不再是"未经执行率打折的意愿"）。
-    let intake = eaten;
+    // 对外报告的就是**实际提货量**（执行率已经打进去了）。
+    let intake: Vec<f32> = eaten.iter().map(|amount| *amount as f32).collect();
 
     department.policy_choice = choice;
     department.policy_execution = execution;
     department.intake = intake;
     department.delivery = delivery;
     department.capacity_scale = capacity_scale;
+    department.settlement = settlement;
+}
+
+/// 按逐政策执行率把计划用量兑现成实际消耗
+fn take(plans: &[Vec<f64>], rates: &[f64], goods: usize) -> Vec<f64> {
+    let mut eaten = vec![0.0f64; goods];
+    for (plan, rate) in plans.iter().zip(rates.iter()) {
+        for (k, amount) in plan.iter().enumerate() {
+            eaten[k] += amount * rate;
+        }
+    }
+    eaten
+}
+
+/// 旧的硬配给：`x_p = min(1, min_k 存量_k / 该商品的总意愿)`。
+///
+/// 留在这里只为了 A/B。它对**本政策**取 min 是对的，但解在 LP 的退化面上不唯一，
+/// 而且在"某样货恰好归零"处**不连续**。
+fn hard_rationing(plans: &[Vec<f64>], inventory: &[f64]) -> Vec<f64> {
+    let columns: Vec<f64> = (0..inventory.len())
+        .map(|k| plans.iter().map(|plan| plan[k]).sum())
+        .collect();
+    plans
+        .iter()
+        .map(|plan| {
+            let mut rate = 1.0f64;
+            for (k, amount) in plan.iter().enumerate() {
+                if *amount > 0.0 && columns[k] > 0.0 {
+                    rate = rate.min((inventory[k] / columns[k]).min(1.0));
+                }
+            }
+            rate.max(0.0)
+        })
+        .collect()
 }
 
 pub(super) fn revenue(market: &Market, i: usize) -> f32 {

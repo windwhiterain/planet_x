@@ -3,7 +3,7 @@ mod tests;
 
 use fastrand::Rng;
 
-use crate::department::{Department, Departments, Policy};
+use crate::department::{Department, Departments, Policy, Rationing};
 use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
 use crate::warehouse::{Stock, Warehouse, Warehouses};
 
@@ -381,6 +381,9 @@ pub struct Lab {
     pub anchor: bool,
     pub gauge: Vec<f32>,
     pub round: usize,
+    /// 消费结算**没解出来**的次数（逐部门逐轮计）。
+    /// 存在的意义就是"不许静默继续"：数值出问题必须在读数里看得见。
+    pub settlement_failures: usize,
     pub history: Vec<Snapshot>,
     rng: Rng,
 }
@@ -495,6 +498,7 @@ impl Lab {
             anchor: true,
             gauge: vec![0.0; GOODS],
             round: 0,
+            settlement_failures: 0,
             history: Vec::new(),
             rng: Rng::with_seed(seed),
         };
@@ -532,6 +536,12 @@ impl Lab {
     /// 软成交容差，见 [`crate::market::Market::with_soft_eps`]
     pub fn with_soft_eps(mut self, eps: f32) -> Self {
         self.market = self.market.with_soft_eps(eps);
+        self
+    }
+
+    /// 消费结算规则，见 [`crate::department::Rationing`]
+    pub fn with_rationing(mut self, rationing: Rationing) -> Self {
+        self.departments.rationing = rationing;
         self
     }
 
@@ -845,6 +855,12 @@ impl Lab {
             .collect();
         self.departments
             .step(&mut self.warehouses, &mut self.market, &mut self.rng);
+        for department in &self.departments.departments {
+            let report = department.settlement();
+            if !report.converged || report.degraded {
+                self.settlement_failures += 1;
+            }
+        }
         // 指数改由**账本聚合**导出（账本先验、指数导出）。放在决策之后、锚之前：
         // 锚要钉的就是这个由账本推出来的量。
         let goods = self.market.merchandises.len();
