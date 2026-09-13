@@ -1178,6 +1178,29 @@ fn ring_image(width: u32, height: u32) -> Image {
     )
 }
 
+pub fn check_scene(spec: &PlanetSpec) -> Result<(), String> {
+    for path in [
+        Some(spec.field.as_str()),
+        spec.mesh.as_deref(),
+        spec.clouds.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(err) = std::fs::metadata(path) {
+            return Err(format!("{path}：{err}"));
+        }
+    }
+    load_field(&spec.field)?;
+    if let Some(clouds) = &spec.clouds {
+        let field = load_field(clouds)?;
+        if field.projection != Domain::CubeMap {
+            return Err(format!("云覆盖度 {clouds} 不是 CubeMap 产物"));
+        }
+    }
+    Ok(())
+}
+
 pub fn spawn_clouds(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,

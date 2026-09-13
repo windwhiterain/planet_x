@@ -1165,11 +1165,16 @@ fn read_view_request() -> Option<(planet::PlanetSpec, u64, bool)> {
 
 fn view(options: Options) -> Result<(), String> {
     let (spec, request_at, shot) = if options.planet.is_some() {
+        let seen = std::fs::read_to_string(VIEW_REQUEST)
+            .ok()
+            .and_then(|text| serde_json::from_str::<ViewRequest>(&text).ok())
+            .map(|request| request.at)
+            .unwrap_or(0);
         (
             options
                 .planet_spec()
                 .ok_or_else(|| "命令行给的星球场景不完整".to_string())?,
-            0,
+            seen,
             options.shot,
         )
     } else {
@@ -1464,6 +1469,12 @@ fn rebuild_scene(
         return;
     }
     rebuild.0 = false;
+
+    if let Err(message) = planet::check_scene(&viewer.spec) {
+        eprintln!("⚠ 新场景读不出来，保留窗口里现在这张图：{message}");
+        return;
+    }
+
     for entity in parts.iter() {
         commands.entity(entity).despawn();
     }
