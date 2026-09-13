@@ -204,3 +204,70 @@ pub fn cube_atlas_uv(face: u32, s: f32, t: f32, face_size: u32, gutter: u32) -> 
     [x / width, y / height]
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum Domain {
+    Equirect,
+    Octahedral,
+    Cube,
+}
+
+impl Domain {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Equirect => "equirect",
+            Self::Octahedral => "octahedral",
+            Self::Cube => "cube",
+        }
+    }
+}
+
+pub fn direction_at(
+    domain: Domain,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+) -> [f32; 3] {
+    let u = (x as f32 + 0.5) / width.max(1) as f32;
+    let v = (y as f32 + 0.5) / height.max(1) as f32;
+    match domain {
+        Domain::Equirect => {
+            let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
+            let phi = u * std::f32::consts::TAU;
+            let ring = theta.sin();
+            [ring * phi.cos(), theta.cos(), ring * phi.sin()]
+        }
+        Domain::Octahedral => octahedral_direction_y_up(u, v),
+        Domain::Cube => {
+            let cell = cube_cell_size(width).max(1);
+            let face_size = cube_face_size(width).max(1);
+            let gutter = CUBE_GUTTER;
+            let face = (y / cell) * CUBE_COLUMNS + (x / cell);
+            let s = (x % cell) as f32 + 0.5 - gutter as f32;
+            let t = (y % cell) as f32 + 0.5 - gutter as f32;
+            cube_direction(face, s / face_size as f32, t / face_size as f32)
+        }
+    }
+}
+
+pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, height: u32) -> [f32; 2] {
+    match domain {
+        Domain::Equirect => {
+            let v = direction[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+            let u = (direction[2].atan2(direction[0]) / std::f32::consts::TAU).rem_euclid(1.0);
+            [u, v]
+        }
+        Domain::Octahedral => octahedral_uv_y_up(direction),
+        Domain::Cube => {
+            let (face, s, t) = cube_face_of(direction);
+            cube_atlas_uv(
+                face,
+                s,
+                t,
+                cube_face_size(width),
+                CUBE_GUTTER,
+            )
+        }
+    }
+}

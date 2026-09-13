@@ -602,7 +602,7 @@ fn warm_up(
         size: (size.0, size.1),
         target: handle.clone(),
     });
-    commands.insert_resource(Stars(images.add(planet::star_image(STAR_WIDTH, STAR_HEIGHT))));
+    commands.insert_resource(Stars(images.add(planet::star_image(2048, 1024))));
 
     commands.spawn((
         ScenePart,
@@ -1368,6 +1368,8 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
+
 
 
 

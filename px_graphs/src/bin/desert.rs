@@ -37,8 +37,15 @@ fn main() {
         surface.mesh().triangles()
     );
 
+    println!(
+        "渲染：px_render --planet {} --mesh {} --palette desert",
+        px_ops::artifact_path_of(&height.key).display(),
+        px_ops::artifact_path_of(&surface.key).display(),
+    );
+
     finish();
 }
+
 
 
 

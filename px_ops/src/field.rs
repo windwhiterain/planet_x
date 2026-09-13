@@ -1,27 +1,18 @@
 use px_protocol::art::{AssetKind, octahedral_direction_y_up};
 use px_protocol::wire::{Blob, DType, WireError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Projection {
-    Equirect,
-    Octahedral,
-    Cube,
+pub use px_protocol::art::Domain as Projection;
+
+pub trait ProjectionKind {
+    fn asset_kind(self) -> AssetKind;
 }
 
-impl Projection {
-    pub fn asset_kind(self) -> AssetKind {
+impl ProjectionKind for Projection {
+    fn asset_kind(self) -> AssetKind {
         match self {
             Self::Equirect => AssetKind::Field2D,
             Self::Octahedral => AssetKind::OctahedralField,
             Self::Cube => AssetKind::CubeField,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Equirect => "equirect",
-            Self::Octahedral => "octahedral",
-            Self::Cube => "cube",
         }
     }
 }
@@ -75,26 +66,7 @@ pub fn direction_at(
     x: u32,
     y: u32,
 ) -> [f32; 3] {
-    let u = (x as f32 + 0.5) / width.max(1) as f32;
-    let v = (y as f32 + 0.5) / height.max(1) as f32;
-    match projection {
-        Projection::Equirect => {
-            let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
-            let phi = u * std::f32::consts::TAU;
-            let ring = theta.sin();
-            [ring * phi.cos(), theta.cos(), ring * phi.sin()]
-        }
-        Projection::Octahedral => px_protocol::art::octahedral_direction_y_up(u, v),
-        Projection::Cube => {
-            let cell = px_protocol::art::cube_cell_size(width).max(1);
-            let face_size = px_protocol::art::cube_face_size(width).max(1);
-            let gutter = px_protocol::art::CUBE_GUTTER;
-            let face = (y / cell) * px_protocol::art::CUBE_COLUMNS + (x / cell);
-            let s = (x % cell) as f32 + 0.5 - gutter as f32;
-            let t = (y % cell) as f32 + 0.5 - gutter as f32;
-            px_protocol::art::cube_direction(face, s / face_size as f32, t / face_size as f32)
-        }
-    }
+    px_protocol::art::direction_at(projection, width, height, x, y)
 }
 impl Field {
     pub fn new(width: u32, height: u32, data: Vec<f32>) -> Self {
@@ -152,31 +124,9 @@ impl Field {
         direction_at(self.width, self.height, self.projection, x, y)
     }
     pub fn sample_direction(&self, direction: [f32; 3]) -> f32 {
-        match self.projection {
-            Projection::Octahedral => {
-                let uv = px_protocol::art::octahedral_uv_y_up(direction);
-                self.sample_uv(uv[0], uv[1])
-            }
-            Projection::Equirect => {
-                let v = direction[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
-                let u = (direction[2].atan2(direction[0]) / std::f32::consts::TAU).rem_euclid(1.0);
-                self.sample_uv(u, v)
-            }
-            Projection::Cube => {
-                let (face, s, t) = px_protocol::art::cube_face_of(direction);
-                let face_size = px_protocol::art::cube_face_size(self.width);
-                let uv = px_protocol::art::cube_atlas_uv(
-                    face,
-                    s,
-                    t,
-                    face_size,
-                    px_protocol::art::CUBE_GUTTER,
-                );
-                self.sample_uv(uv[0], uv[1])
-            }
-        }
+        let uv = px_protocol::art::uv_of(self.projection, direction, self.width, self.height);
+        self.sample_uv(uv[0], uv[1])
     }
-
     pub fn sample_uv(&self, u: f32, v: f32) -> f32 {
         let x = u * self.width.max(1) as f32 - 0.5;
         let y = v * self.height.max(1) as f32 - 0.5;
@@ -239,6 +189,7 @@ impl Field {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
     }
 }
+
 
 
 

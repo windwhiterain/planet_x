@@ -2,7 +2,7 @@ pub mod field;
 pub mod noise;
 pub mod ops;
 
-pub use field::{Field, Projection, Stats};
+pub use field::{Field, Projection, ProjectionKind, Stats};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -156,6 +156,7 @@ pub fn begin(spec: GraphSpec) {
 
     let context = context();
     std::fs::create_dir_all(&context.cache_root).ok();
+
     println!(
         "图 {} v{}｜画布 {}×{}｜参数 {}{}｜缓存 {} 条{}",
         context.spec.name,
@@ -274,6 +275,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         save_index(&context.cache_root, &index);
     }
 
+
     println!(
         "{} {:<12} {:<16} v{}  {}  {:>4} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}",
         if hit { "命中" } else { "重算" },
@@ -315,7 +317,10 @@ pub fn finish() {
     let cooked = manifest.len() - hits;
     let millis: u64 = manifest.iter().map(|entry| entry.millis).sum();
 
-    let path = context.cache_root.join("manifest.json");
+    let path = context
+        .cache_root
+        .join(&context.spec.name)
+        .join("manifest.json");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -327,6 +332,22 @@ pub fn finish() {
         }
         Err(err) => eprintln!("清单无法序列化：{err}"),
     }
+    let mut paths: Vec<String> = manifest
+        .iter()
+        .map(|entry| {
+            let mut raw = [0_u8; 32];
+            for index in 0..32 {
+                raw[index] = u8::from_str_radix(&entry.key[index * 2..index * 2 + 2], 16)
+                    .unwrap_or_default();
+            }
+            format!("{} -> {}", entry.node, artifact_path(&context.cache_root, &raw).display())
+        })
+        .collect();
+    paths.sort();
+    for line in &paths {
+        println!("产物 {line}");
+    }
+
 
     println!(
         "共 {} 个节点：命中 {hits}、重算 {cooked}，合计 {millis} ms；清单 {}",
@@ -335,7 +356,8 @@ pub fn finish() {
     );
 
     if cooked == 0 && !manifest.is_empty() {
-        println!("本次没有任何节点重算 —— 改参数只影响它自己与下游，上游会命中");
+    
+    println!("本次没有任何节点重算 —— 改参数只影响它自己与下游，上游会命中");
     }
 }
 
@@ -386,6 +408,10 @@ pub fn hex(key: &Key) -> String {
 
 pub fn hex_short(key: &Key) -> String {
     hex(key)[..12].to_string()
+}
+
+pub fn artifact_path_of(key: &Key) -> PathBuf {
+    artifact_path(&context().cache_root, key)
 }
 
 fn artifact_path(cache_root: &Path, key: &Key) -> PathBuf {
@@ -589,6 +615,7 @@ pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         save_index(&context.cache_root, &index);
     }
 
+
     println!(
         "{} {:<12} {:<16} v{}  {}  {:>4} ms  {:>9} B  {} 顶点 / {} 三角形",
         if hit { "命中" } else { "重算" },
@@ -621,6 +648,10 @@ pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
 
     Artifact { payload, key }
 }
+
+
+
+
 
 
 
