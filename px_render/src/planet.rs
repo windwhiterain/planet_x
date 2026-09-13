@@ -328,8 +328,10 @@ fn surface_textures(
         .chunks_exact(4)
         .filter(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200)
         .count();
+    let mip_levels = (field.width.max(field.height).max(1) as f32).log2().floor() as u32 + 1;
+    let mip_bytes = (field.width * field.height) as f64 * 4.0 * 4.0 / 3.0;
     println!(
-        "         贴图 {}{}×{}：平均 RGB ({:.0},{:.0},{:.0})，近白像素 {:.1}%",
+        "         贴图 {}{}×{}：平均 RGB ({:.0},{:.0},{:.0})，近白像素 {:.1}%，mip {mip_levels} 级（约 {:.1} MB）",
         palette.name(),
         field.width,
         field.height,
@@ -337,6 +339,7 @@ fn surface_textures(
         sums[1] / texels as f64,
         sums[2] / texels as f64,
         white as f64 * 100.0 / texels as f64,
+        mip_bytes / 1e6,
     );
 
     let glow_handle = match palette {
@@ -350,7 +353,49 @@ fn surface_textures(
     (color_handle, glow_handle)
 }
 
+fn mip_chain(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
+    let mut chain = base.to_vec();
+    let mut levels = 1_u32;
+    let mut source = base.to_vec();
+    let (mut w, mut h) = (width.max(1), height.max(1));
+
+    while w > 1 || h > 1 {
+        let next_w = (w / 2).max(1);
+        let next_h = (h / 2).max(1);
+        let mut next = vec![0_u8; (next_w * next_h * 4) as usize];
+
+        for y in 0..next_h {
+            for x in 0..next_w {
+                let mut sums = [0_u32; 4];
+                for step_y in 0..2 {
+                    for step_x in 0..2 {
+                        let sample_x = ((x * 2 + step_x) % w) as usize;
+                        let sample_y = ((y * 2 + step_y).min(h - 1)) as usize;
+                        let index = (sample_y * w as usize + sample_x) * 4;
+                        for channel in 0..4 {
+                            sums[channel] += source[index + channel] as u32;
+                        }
+                    }
+                }
+                let out = ((y * next_w + x) * 4) as usize;
+                for channel in 0..4 {
+                    next[out + channel] = (sums[channel] / 4) as u8;
+                }
+            }
+        }
+
+        chain.extend_from_slice(&next);
+        source = next;
+        w = next_w;
+        h = next_h;
+        levels += 1;
+    }
+
+    (chain, levels)
+}
+
 fn image_from(width: u32, height: u32, data: Vec<u8>) -> Image {
+    let (chain, levels) = mip_chain(width, height, &data);
     let mut image = Image::new_fill(
         Extent3d {
             width,
@@ -362,7 +407,8 @@ fn image_from(width: u32, height: u32, data: Vec<u8>) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    image.data = Some(data);
+    image.data = Some(chain);
+    image.texture_descriptor.mip_level_count = levels;
     image
 }
 
@@ -373,6 +419,7 @@ fn with_wrapping(mut image: Image, horizontal: ImageAddressMode, vertical: Image
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
         ..default()
     });
     image
