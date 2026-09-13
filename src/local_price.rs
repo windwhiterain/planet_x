@@ -50,10 +50,18 @@ impl LevelRule {
     }
 }
 
+pub struct Transform {
+    pub polity: usize,
+    pub unit: usize,
+    pub inputs: Vec<f32>,
+    pub outputs: Vec<f32>,
+}
+
 pub struct Spec {
     pub polities: usize,
     pub supply: Vec<Vec<f32>>,
     pub motive: Vec<Vec<f32>>,
+    pub transform: Option<Transform>,
 }
 
 impl Spec {
@@ -62,6 +70,7 @@ impl Spec {
             polities,
             supply: vec![vec![1.0; GOODS]; polities],
             motive: vec![vec![1.0; GOODS]; polities],
+            transform: None,
         }
     }
 
@@ -75,6 +84,22 @@ impl Spec {
             }
         }
         spec
+    }
+
+    pub fn with_transform(mut self, polity: usize, unit: usize, inputs: Vec<f32>, outputs: Vec<f32>) -> Self {
+        self.transform = Some(Transform {
+            polity,
+            unit,
+            inputs,
+            outputs,
+        });
+        self
+    }
+
+    fn transforms(&self, polity: usize, unit: usize) -> Option<&Transform> {
+        self.transform
+            .as_ref()
+            .filter(|transform| transform.polity == polity && transform.unit == unit)
     }
 
     pub fn supply(&self, polity: usize, good: usize) -> f32 {
@@ -124,6 +149,8 @@ pub struct Snapshot {
     pub uncleared: f32,
     pub treasury: f32,
     pub gauge: Vec<f32>,
+    pub transform_share: f32,
+    pub transform_potential: f32,
 }
 
 pub struct Lab {
@@ -176,14 +203,23 @@ impl Lab {
                 );
                 let mut productions = vec![0.0; GOODS];
                 productions[unit] = BASE * spec.supply(polity, unit);
-                let policies = (0..GOODS)
-                    .filter(|good| *good != unit)
-                    .map(|good| {
-                        let mut consumptions = vec![0.0; GOODS];
-                        consumptions[good] = CAMPAIGN;
-                        Policy::new(consumptions, MOTIVE * spec.motive(polity, good))
-                    })
-                    .collect();
+                let policies = {
+                    let mut policies: Vec<Policy> = (0..GOODS)
+                        .filter(|good| *good != unit)
+                        .map(|good| {
+                            let mut consumptions = vec![0.0; GOODS];
+                            consumptions[good] = CAMPAIGN;
+                            Policy::new(consumptions, MOTIVE * spec.motive(polity, good))
+                        })
+                        .collect();
+                    if let Some(transform) = spec.transforms(polity, unit) {
+                        policies.push(Policy::transform(
+                            transform.inputs.clone(),
+                            transform.outputs.clone(),
+                        ));
+                    }
+                    policies
+                };
                 departments.push(Department::new(productions, policies));
             }
             polities.push(Polity {
@@ -476,6 +512,12 @@ impl Lab {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let transform = self
+            .departments
+            .departments
+            .iter()
+            .flat_map(|department| department.policies.iter())
+            .find(|policy| policy.is_transform());
         let mut declared = 0.0;
         let mut dealt = 0.0;
         for k in 0..GOODS {
@@ -525,6 +567,8 @@ impl Lab {
             },
             treasury: self.departments.treasury,
             gauge: self.gauge.clone(),
+            transform_share: transform.map_or(0.0, |policy| policy.distribution()),
+            transform_potential: transform.map_or(0.0, |policy| policy.price_potential()),
         }
     }
 

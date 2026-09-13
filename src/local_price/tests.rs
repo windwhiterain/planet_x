@@ -168,6 +168,73 @@ fn relations_cut_the_cross_border_volume() {
     assert!(snapshot.internal > 0.0, "封锁不应当停掉政权内部的成交");
 }
 
+fn transformation(rate: f32, scale: f32) -> Spec {
+    let mut inputs = vec![0.0; GOODS];
+    let mut outputs = vec![0.0; GOODS];
+    inputs[1] = rate * scale;
+    outputs[0] = scale;
+    scarce().with_transform(0, 0, inputs, outputs)
+}
+
+fn premium(lab: &Lab) -> f32 {
+    let prices = &lab.history.last().unwrap().prices;
+    prices[0] / prices[1]
+}
+
+#[test]
+fn a_transformation_runs_only_while_it_pays() {
+    let mut paying = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    paying.run(40);
+    assert_eq!(
+        paying.history.last().unwrap().transform_share,
+        1.0,
+        "1 单位工业品换 1 单位粮食在溢价下应当开工",
+    );
+
+    let mut losing = Lab::new(&transformation(3.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    losing.run(40);
+    assert_eq!(
+        losing.history.last().unwrap().transform_share,
+        0.0,
+        "3 换 1 亏本时不应当开工",
+    );
+}
+
+#[test]
+fn a_running_transformation_shrinks_the_scarcity_premium() {
+    let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    idle.run(60);
+    let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    working.run(60);
+
+    assert!(
+        premium(&idle) > 1.05,
+        "没有转换时稀缺品应当有溢价：{}",
+        premium(&idle),
+    );
+    assert!(
+        premium(&working) < 0.5 * premium(&idle) + 0.5,
+        "转换开工后稀缺溢价应当显著收敛：闲置 {} 开工 {}",
+        premium(&idle),
+        premium(&working),
+    );
+}
+
+#[test]
+fn a_transformation_competes_with_consumption_for_its_input() {
+    let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    idle.run(40);
+    let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    working.run(40);
+
+    let idle_input = idle.history.last().unwrap().prices[1];
+    let working_input = working.history.last().unwrap().prices[1];
+    assert!(
+        working_input > idle_input,
+        "转换吃掉投入品后，投入品的相对价应当上升：闲置 {idle_input} 开工 {working_input}",
+    );
+}
+
 #[test]
 fn the_lab_is_reproducible() {
     let run = |seed: u64| {

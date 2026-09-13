@@ -31,6 +31,8 @@ pub struct Department {
 pub struct Policy {
     /// index with [`crate::warehouse::Stock`]
     pub consumptions: Vec<f32>,
+    /// index with [`crate::warehouse::Stock`]，转换政策的产出
+    pub outputs: Vec<f32>,
     pub motive: f32,
     /// 意愿除以资源价格
     price_potential: f32,
@@ -158,6 +160,11 @@ impl Departments {
                     goods,
                     "部门 {i} 的政策消耗表必须与仓库库存表等长且同序",
                 );
+                debug_assert_eq!(
+                    policy.outputs.len(),
+                    goods,
+                    "部门 {i} 的政策产出表必须与仓库库存表等长且同序",
+                );
             }
         }
     }
@@ -184,12 +191,29 @@ impl Department {
 
 impl Policy {
     pub fn new(consumptions: Vec<f32>, motive: f32) -> Self {
+        let outputs = vec![0.0; consumptions.len()];
         Self {
             consumptions,
+            outputs,
             motive,
             price_potential: 0.0,
             distribution: 0.0,
         }
+    }
+
+    /// 转换政策：吃进 inputs、产出 outputs，吸引力是市价下的利润率
+    pub fn transform(inputs: Vec<f32>, outputs: Vec<f32>) -> Self {
+        Self {
+            consumptions: inputs,
+            outputs,
+            motive: 0.0,
+            price_potential: 0.0,
+            distribution: 0.0,
+        }
+    }
+
+    pub fn is_transform(&self) -> bool {
+        self.outputs.iter().any(|output| *output > 0.0)
     }
 
     pub fn price_potential(&self) -> f32 {

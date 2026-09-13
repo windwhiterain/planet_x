@@ -11,6 +11,9 @@ struct Args {
     recenter: bool,
     anchor: bool,
     grant: f32,
+    transform: bool,
+    transform_rate: f32,
+    transform_scale: f32,
     relations: f32,
     block_from: usize,
     block_to: usize,
@@ -31,6 +34,9 @@ impl Default for Args {
             recenter: false,
             anchor: true,
             grant: 10.0,
+            transform: false,
+            transform_rate: 1.0,
+            transform_scale: 4.0,
             relations: 1.0,
             block_from: usize::MAX,
             block_to: usize::MAX,
@@ -68,6 +74,9 @@ fn parse() -> Option<Args> {
             "--recenter" => args.recenter = true,
             "--no-anchor" => args.anchor = false,
             "--grant" => args.grant = value()?.parse().ok()?,
+            "--transform" => args.transform = true,
+            "--transform-rate" => args.transform_rate = value()?.parse().ok()?,
+            "--transform-scale" => args.transform_scale = value()?.parse().ok()?,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
@@ -96,9 +105,18 @@ fn usage() {
 }
 
 fn spec(args: &Args) -> Spec {
-    match args.scenario.as_str() {
+    let base = match args.scenario.as_str() {
         "symmetric" => Spec::symmetric(args.polities),
         _ => Spec::scarce(args.polities, 0, 0),
+    };
+    if args.transform {
+        let mut inputs = vec![0.0; GOODS];
+        let mut outputs = vec![0.0; GOODS];
+        inputs[1] = args.transform_rate * args.transform_scale;
+        outputs[0] = args.transform_scale;
+        base.with_transform(0, 0, inputs, outputs)
+    } else {
+        base
     }
 }
 
@@ -135,8 +153,8 @@ fn trace(args: &Args) {
         args.recenter,
     );
     println!(
-        "{:>4} {:>22} {:>26} {:>7} {:>8} {:>18}",
-        "轮次", "银河指数", "各政权楔子(good0/1/2)", "执行率", "跨境占比", "每轮原始水平漂移"
+        "{:>4} {:>22} {:>26} {:>7} {:>8} {:>18} {:>9} {:>9}",
+        "轮次", "银河指数", "各政权楔子(good0/1/2)", "执行率", "跨境占比", "每轮原始水平漂移", "转换占比", "转换利润率"
     );
     for _ in 0..args.rounds {
         lab.step();
@@ -155,7 +173,7 @@ fn trace(args: &Args) {
             .map(|value| 100.0 * value)
             .collect::<Vec<f32>>();
         println!(
-            "{:>4} {:>22} {:>26} {:>7.3} {:>7.1}% {:>17}",
+            "{:>4} {:>22} {:>26} {:>7.3} {:>7.1}% {:>17} {:>9} {:>9}",
             snapshot.round,
             goods(&snapshot.prices),
             goods(&wedge),
@@ -165,6 +183,8 @@ fn trace(args: &Args) {
                 "{:+.2}%",
                 100.0 * snapshot.gauge.iter().sum::<f32>() / GOODS as f32
             ),
+            format!("{:.1}%", 100.0 * snapshot.transform_share),
+            format!("{:+.3}", snapshot.transform_potential),
         );
     }
     summary(&lab);
