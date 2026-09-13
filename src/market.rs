@@ -10,6 +10,8 @@ pub struct Market {
     pub traders: Vec<Trader>,
     /// key: deal sender, deal reciver, merchandise
     pub deals: Vec<Vec<Vec<Deal>>>,
+    /// key: deal sender, deal reciver
+    pub relations: Vec<Vec<f32>>,
     pub state: MarketState,
 }
 
@@ -74,11 +76,27 @@ impl Market {
         let deals = vec![vec![vec![Deal::default(); merchandises_len]; traders_len]; traders_len];
         let prices: Vec<f32> = merchandises.iter().map(|item| item.price).collect();
         let state = MarketState::new(&prices);
+        let relations = vec![vec![1.0; traders_len]; traders_len];
         Self {
             merchandises,
             traders,
             deals,
+            relations,
             state,
+        }
+    }
+
+    pub fn set_relations(&mut self, relations: &[Vec<f32>]) {
+        for (i, row) in relations.iter().enumerate() {
+            if i >= self.relations.len() {
+                break;
+            }
+            for (j, relation) in row.iter().enumerate() {
+                if j >= self.relations[i].len() {
+                    break;
+                }
+                self.relations[i][j] = relation.clamp(0.0, 1.0);
+            }
         }
     }
 

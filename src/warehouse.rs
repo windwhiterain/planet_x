@@ -19,6 +19,7 @@ pub struct Warehouses {
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
     pub currency: f32,
+    pub reference: Vec<f32>,
 }
 
 /// index with [`crate::market::Merchandise`]
@@ -71,7 +72,13 @@ impl Warehouse {
         Self {
             stocks,
             currency: 0.0,
+            reference: Vec::new(),
         }
+    }
+
+    pub fn with_reference(mut self, reference: Vec<f32>) -> Self {
+        self.reference = reference;
+        self
     }
 
     pub fn with_currency(mut self, currency: f32) -> Self {

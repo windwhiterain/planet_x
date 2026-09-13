@@ -24,7 +24,8 @@ pub(super) fn step(market: &mut super::Market) {
                 let deal = &mut market.deals[i][j][k];
                 deal.price_potential = price_potential;
                 deal.volume_potential = volume_potential;
-                deal.distribution = deal.price_potential * deal.volume_potential;
+                let relation = market.relations[i][j].clamp(0.0, 1.0);
+                deal.distribution = deal.price_potential * deal.volume_potential * relation;
             }
         }
     }

@@ -173,9 +173,19 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         .iter()
         .map(|merchandise| merchandise.price)
         .collect();
+    let references: Vec<Vec<f32>> = warehouses
+        .iter()
+        .map(|warehouse| {
+            if warehouse.reference.len() == reference_prices.len() {
+                warehouse.reference.clone()
+            } else {
+                reference_prices.clone()
+            }
+        })
+        .collect();
     let scales = price_scales();
     for (i, warehouse) in warehouses.iter_mut().enumerate() {
-        let Warehouse { stocks, currency } = warehouse;
+        let Warehouse { stocks, currency, .. } = warehouse;
         for stock in stocks.iter_mut() {
             declared_volumes(stock, fluctuation, rng);
         }
@@ -189,7 +199,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
             0.0
         };
         for (k, stock) in stocks.iter_mut().enumerate() {
-            let price = reference_prices[k].max(0.0);
+            let price = references[i][k].max(0.0);
             let scale = if stock.marketing_volume > 0.0 {
                 sale_scale(stock, stock.marketing_volume, price, &scales)
             } else if stock.marketing_volume < 0.0 {
@@ -210,7 +220,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         }
         for (k, stock) in stocks.iter_mut().enumerate() {
             let merchandise = &mut market.traders[i].merchandises[k];
-            merchandise.price = price_of(reference_prices[k], stock.marketing_price_scale);
+            merchandise.price = price_of(references[i][k], stock.marketing_price_scale);
             merchandise.volume = stock.marketing_volume;
         }
     }
@@ -219,7 +229,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
             let merchandise = &market.traders[i].merchandises[k];
             stock.volume -= merchandise.deal_volume();
-            observe(stock, merchandise, reference_prices[k]);
+            observe(stock, merchandise, references[i][k]);
             stock.previous_volume = stock.volume;
         }
     }
