@@ -52,9 +52,17 @@ fn bevy_stub(symbol: &str) -> Option<&'static str> {
             "struct ViewStub {\n\
              \x20   world_position: vec3<f32>,\n\
              \x20   view_from_world: mat4x4<f32>,\n\
+             \x20   clip_from_view: mat4x4<f32>,\n\
+             \x20   viewport: vec4<f32>,\n\
              };\n\
              @group(0) @binding(0) var<uniform> view: ViewStub;\n",
         ),
+        "bevy_pbr::mesh_view_bindings::depth_prepass_texture" => {
+            Some("@group(0) @binding(20) var depth_prepass_texture: texture_depth_2d;\n")
+        }
+        "bevy_pbr::view_transformations::depth_ndc_to_view_z" => {
+            Some("fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 { return -1.0 / max(ndc_depth, 1e-6); }\n")
+        }
         _ => None,
     }
 }
@@ -187,5 +195,6 @@ fn an_unknown_import_is_not_silently_ignored() {
     .is_err();
     assert!(caught, "未知 import 必须报错，不能静默略过");
 }
+
 
 

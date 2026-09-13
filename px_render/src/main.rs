@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::light::Skybox;
 use bevy::pbr::AtmosphereSettings;
@@ -621,6 +622,7 @@ fn warm_up(
     commands.spawn((
         ScenePart,
         Camera3d::default(),
+        DepthPrepass,
         Msaa::Off,
         RenderTarget::Image(handle.into()),
         Transform::from_xyz(0.0, 6.0, 16.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
@@ -751,6 +753,7 @@ fn accept_jobs(
         ScenePart,
         atmosphere::RequestCamera,
         Camera3d::default(),
+        DepthPrepass,
         Msaa::Off,
         RenderTarget::Image(canvas.target.clone().into()),
         Skybox {
@@ -901,6 +904,7 @@ fn build_world_scene(
     commands.spawn((
         ScenePart,
         Camera3d::default(),
+        DepthPrepass,
         Msaa::Off,
         RenderTarget::Image(target.clone().into()),
         Transform::from_xyz(0.0, 6.0, 16.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
@@ -1175,6 +1179,7 @@ fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         OrbitCamera,
         Camera3d::default(),
+        DepthPrepass,
         Msaa::Off,
         Skybox {
             image: Some(stars),
@@ -1410,6 +1415,7 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
         window.title = wanted;
     }
 }
+
 
 
 
