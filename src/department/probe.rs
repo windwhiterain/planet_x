@@ -102,7 +102,6 @@ pub struct Round {
     pub drift: [f32; GOODS],
     pub cash: [f32; DEPARTMENTS],
     pub net: [[f32; GOODS]; DEPARTMENTS],
-    pub execution: [f32; DEPARTMENTS],
 }
 
 /// 某个部门在它自产那种商品上的响应曲线与实况
@@ -199,7 +198,6 @@ struct Observation {
     price_intercept: [[f32; GOODS]; DEPARTMENTS],
     drift: [f32; GOODS],
     net: [[f32; GOODS]; DEPARTMENTS],
-    execution: [f32; DEPARTMENTS],
     stock: f32,
     uncleared: f32,
     frozen: bool,
@@ -360,7 +358,6 @@ impl Probe {
             price_intercept: [[0.0; GOODS]; DEPARTMENTS],
             drift: [0.0; GOODS],
             net: [[0.0; GOODS]; DEPARTMENTS],
-            execution: [0.0; DEPARTMENTS],
             stock: 0.0,
             uncleared: 0.0,
             frozen: false,
@@ -371,7 +368,6 @@ impl Probe {
             observation.drift[k] = self.market.state.drift(k);
         }
         for i in 0..DEPARTMENTS {
-            observation.execution[i] = self.departments.departments[i].policy_execution();
             for (k, stock) in self.warehouses.warehouses[i].stocks.iter().enumerate() {
                 observation.stocks[i][k] = stock.volume;
                 observation.targets[i][k] = stock.target_volume;
@@ -625,7 +621,6 @@ pub fn trace(
             drift: observation.drift,
             cash: observation.cash,
             net: observation.net,
-            execution: observation.execution,
         })
         .collect()
 }

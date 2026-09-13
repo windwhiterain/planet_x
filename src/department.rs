@@ -74,9 +74,7 @@ pub struct Department {
     pub capacity: f32,
     /// index [`Self::policies`]，份额最大的政策
     policy_choice: usize,
-    /// 本轮按分布实际提货的比例
-    policy_execution: f32,
-    /// 本轮**实际提货量**（逐政策执行率已经打进去了）
+    /// 本轮**实际提货量**（逐政策篮子数已经打进去了）
     intake: Vec<f32>,
     /// 本轮实际入账的产出（计划产出 × 产能缩放）
     delivery: Vec<f32>,
@@ -259,7 +257,6 @@ impl Department {
             policies,
             capacity: f32::INFINITY,
             policy_choice: 0,
-            policy_execution: 0.0,
             intake: vec![0.0; goods],
             delivery: vec![0.0; goods],
             capacity_scale: 0.0,
@@ -276,11 +273,7 @@ impl Department {
         self.policy_choice
     }
 
-    pub fn policy_execution(&self) -> f32 {
-        self.policy_execution
-    }
-
-    /// 本轮**实际提货量**（[`Self::policy_execution`] 已经打进去了）
+    /// 本轮**实际提货量**（逐政策的篮子数已经打进去了）
     pub fn intake(&self) -> &[f32] {
         &self.intake
     }

@@ -296,7 +296,6 @@ pub struct Polity {
     pub seat: usize,
     pub level: Vec<f32>,
     pub wedge: Vec<f32>,
-    pub execution: f32,
     pub vwap: Vec<f32>,
     pub internal: f32,
     pub external: f32,
@@ -357,7 +356,6 @@ pub struct Snapshot {
     pub prices: Vec<f32>,
     pub wedges: Vec<Vec<f32>>,
     pub levels: Vec<Vec<f32>>,
-    pub executions: Vec<f32>,
     pub vwaps: Vec<Vec<f32>>,
     pub internal: f32,
     pub external: f32,
@@ -471,7 +469,6 @@ impl Lab {
                 seat: polity * UNITS,
                 level: vec![BASE_PRICE; GOODS],
                 wedge: vec![0.0; GOODS],
-                execution: 1.0,
                 vwap: vec![BASE_PRICE; GOODS],
                 internal: 0.0,
                 external: 0.0,
@@ -785,15 +782,6 @@ impl Lab {
         states
     }
 
-    /// 每个部门本轮的执行率
-    pub fn executions(&self) -> Vec<f32> {
-        self.departments
-            .departments
-            .iter()
-            .map(|department| department.policy_execution())
-            .collect()
-    }
-
     /// 与 [`Self::spread`] 同形，但用的是**账本**而不是成交。
     ///
     /// 路线 b 之后这才是"本地价"的正身：账本中间价 ÷ 指数。`spread` 用的是已实现的
@@ -1050,11 +1038,6 @@ impl Lab {
             }
             polity.internal = internal[p];
             polity.external = external[p];
-            polity.execution = departments.departments[polity.span()]
-                .iter()
-                .map(|department| department.policy_execution())
-                .sum::<f32>()
-                / UNITS as f32;
             polity.cash = warehouses.warehouses[polity.span()]
                 .iter()
                 .map(|warehouse| warehouse.currency)
@@ -1110,11 +1093,6 @@ impl Lab {
                 .polities
                 .iter()
                 .map(|polity| polity.level.clone())
-                .collect(),
-            executions: self
-                .polities
-                .iter()
-                .map(|polity| polity.execution)
                 .collect(),
             vwaps: self
                 .polities

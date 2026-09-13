@@ -227,12 +227,13 @@ pub(super) fn plan(
     // === consumption 结算 ===
     //
     // 一产/二产/三产是**三条彼此独立**的 consumption policy（有哪个就吃那个）。
-    // 政策**内部**的配方是一个向量：整篮按同一个执行率缩放；政策**之间**必须彼此独立，
+    // 政策**内部**的配方是一个向量：整篮按同一个篮子数缩放；政策**之间**必须彼此独立，
     // 不能因为一条政策缺货就把别的政策一起按下去。
     //
-    // 默认走 [`settlement`] 的原始-对偶内点法：约束就是**仓库存量**，目标是
-    // `Σ 意愿 × 执行率`，对数障碍负责软化——结构上不超取、解唯一、对数据连续。
-    // `Rationing::Hard` 可以切回旧的硬配给做 A/B。
+    // 约束是**裸配方**（不再乘 `distribution`），目标是**绝对 motive**（不再归一化）。
+    // 旧版把归一化后的 `distribution` 同时当目标系数和物质量，于是 motive 的绝对大小
+    // 完全不起作用（全乘 1000 输出逐位不变），需求在量上对价格也毫无弹性。
+    // `distribution` 现在只是"这条政策在族里占多大份额"的读数。
     let plans: Vec<Vec<f64>> = department
         .policies
         .iter()
@@ -240,18 +241,26 @@ pub(super) fn plan(
             policy
                 .consumptions
                 .iter()
-                .map(|consumption| (policy.distribution * consumption.max(0.0)) as f64)
+                .map(|consumption| consumption.max(0.0) as f64)
                 .collect()
         })
         .collect();
+    // 参与与否仍由**经济可行性**把关（`price_potential > 0`：亏损的生产政策、
+    // 空篮子、零 motive 都不参与），但参与之后的目标权重是它自己的 motive。
     let willingness: Vec<f64> = department
         .policies
         .iter()
-        .map(|policy| policy.distribution as f64)
+        .map(|policy| {
+            if policy.price_potential > 0.0 {
+                policy.motive.max(0.0) as f64
+            } else {
+                0.0
+            }
+        })
         .collect();
     let inventory: Vec<f64> = supply.iter().map(|volume| *volume as f64).collect();
 
-    let (rates, eaten, settlement) = match rationing {
+    let (_rates, eaten, settlement) = match rationing {
         Rationing::Interior { barrier } => {
             let outcome =
                 settlement::solve(&willingness, &plans, &inventory, barrier.max(0.0) as f64);
@@ -279,34 +288,6 @@ pub(super) fn plan(
         }
     };
 
-    // 部门的对外执行率：按"这条政策想吃的篮子有多大"加权。
-    // 被判死（配方里有零存量商品）的政策也算进来，执行率是 0——那是诚实的读数。
-    let mut weighted = 0.0f32;
-    let mut share_weight = 0.0f32;
-    for (p, policy) in department.policies.iter().enumerate() {
-        if policy.distribution <= 0.0 {
-            continue;
-        }
-        let wants: f32 = policy
-            .consumptions
-            .iter()
-            .filter(|consumption| **consumption > 0.0)
-            .sum();
-        if wants <= 0.0 {
-            continue;
-        }
-        let weight = policy.distribution * wants;
-        share_weight += weight;
-        weighted += weight * rates[p] as f32;
-    }
-    let execution = if share_weight > 0.0 {
-        (weighted / share_weight).clamp(0.0, 1.0)
-    } else if consume_weight > 0.0 || produce_weight > 0.0 {
-        1.0
-    } else {
-        0.0
-    };
-
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
         // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
         // 自适应（见 `warehouse::step::declared_volumes`）。
@@ -319,7 +300,6 @@ pub(super) fn plan(
     let intake: Vec<f32> = eaten.iter().map(|amount| *amount as f32).collect();
 
     department.policy_choice = choice;
-    department.policy_execution = execution;
     department.intake = intake;
     department.delivery = delivery;
     department.capacity_scale = capacity_scale;

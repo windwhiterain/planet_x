@@ -114,9 +114,9 @@ fn assert_close(actual: f32, expected: f32, context: &str) {
 fn assert_finite_state(departments: &Departments, warehouses: &Warehouses, market: &Market) {
     for (i, department) in departments.departments.iter().enumerate() {
         assert!(
-            department.policy_execution().is_finite(),
-            "部门 {i} 的执行量非有限：{}",
-            department.policy_execution(),
+            department.intake().iter().all(|amount| amount.is_finite() && *amount >= 0.0),
+            "部门 {i} 的提货量非有限或为负：{:?}",
+            department.intake(),
         );
         assert!(
             warehouses.warehouses[i].currency.is_finite(),
@@ -167,11 +167,6 @@ fn production_is_a_policy_like_any_other() {
     departments.plan(&mut warehouses, &market);
 
     assert_close(holding(&warehouses, 0)[0], 14.0, "产出应当进仓");
-    assert_close(
-        departments.departments[0].policy_execution(),
-        1.0,
-        "主生产也是一条政策，照跑",
-    );
 }
 
 #[test]
@@ -191,11 +186,6 @@ fn policy_is_a_pure_resource_sink() {
     let rate = 0.90430605f32;
     assert_close(holding(&warehouses, 0)[0], 10.0 - 3.0 * rate, "政策消耗第一种资源");
     assert_close(holding(&warehouses, 0)[1], 10.0 - 2.0 * rate, "政策消耗第二种资源");
-    assert_close(
-        departments.departments[0].policy_execution(),
-        rate,
-        "障碍余量下的执行率",
-    );
     assert_close(total_stock(&warehouses), 20.0 - 5.0 * rate, "只减不增");
 }
 
@@ -219,11 +209,6 @@ fn the_higher_motive_policy_takes_the_larger_share() {
     // 意愿更强的那条政策**吃得更干净**：w = 0.8 与 0.2、μ = 0.1×平均意愿 = 0.05，
     // 两条无约束政策的执行率分别是 0.9378 / 0.8385（解析根），耦合下实测加权 0.9140332。
     assert_close(holding(&warehouses, 0)[0], 8.171934, "加权后的消耗量");
-    assert_close(
-        departments.departments[0].policy_execution(),
-        0.9140332,
-        "加权执行率",
-    );
 }
 
 #[test]
@@ -255,11 +240,6 @@ fn a_continuous_distribution_draws_from_every_policy() {
         10.0 - 3.0 * second * 0.8364800,
         "第二种资源按份额被提走",
     );
-    assert_close(
-        departments.departments[0].policy_execution(),
-        0.9115992,
-        "按篮子大小加权的执行率",
-    );
 }
 
 #[test]
@@ -273,7 +253,6 @@ fn a_policy_without_motive_takes_nothing() {
     departments.plan(&mut warehouses, &market);
 
     assert_close(departments.departments[0].policies[0].price_potential(), 0.0, "无意愿");
-    assert_close(departments.departments[0].policy_execution(), 0.0, "不应执行");
     assert_close(holding(&warehouses, 0)[0], 10.0, "库存不应被消耗");
 }
 
@@ -321,7 +300,6 @@ fn execution_is_bounded_by_the_stock_on_hand() {
     // `w + μ/x − μ/(1−x) = ĉ·μ/ŝ`（w = 1、μ = 0.1、ĉ = 10/4、ŝ = 1 − ĉx），
     // 得 x = 0.31466714，**故意留 0.853** 在仓库里。留多少正是"软化"本身——
     // 这是这次改动的题中之义，不是把量算错了。（手算核对：左 1.1718820、右 1.1718790。）
-    assert_close(departments.departments[0].policy_execution(), 0.31466714, "受库存约束");
     assert_close(holding(&warehouses, 0)[0], 0.85332847, "障碍允许的余量留在仓库");
 }
 

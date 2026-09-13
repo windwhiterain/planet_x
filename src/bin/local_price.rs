@@ -285,11 +285,10 @@ fn trace(args: &Args) {
             .map(|value| 100.0 * value)
             .collect::<Vec<f32>>();
         println!(
-            "{:>4} {:>22} {:>26} {:>7.3} {:>7.1}% {:>17} {:>9} {:>9}",
+            "{:>4} {:>22} {:>26} {:>7.1}% {:>17} {:>9} {:>9}",
             snapshot.round,
             goods(&snapshot.prices),
             goods(&wedge),
-            snapshot.executions[0],
             100.0 * share,
             format!(
                 "{:+.2}%",
@@ -325,13 +324,12 @@ fn summary(lab: &Lab) {
             .collect::<Vec<String>>()
             .join(" ");
         println!(
-            "{}({}) {:>26} {:>30} {:>30} 执行 {:.3}",
+            "{}({}) {:>26} {:>30} {:>30}",
             polity.name,
             p,
             wedge,
             level,
             vwap,
-            polity.execution,
         );
     }
     let snapshot = lab.history.last().unwrap();
@@ -384,7 +382,6 @@ fn summary(lab: &Lab) {
 fn blockade(args: &Args) {
     let mut lab = build(args);
     let mut max_wedge = 0.0f32;
-    let mut min_execution = 1.0f32;
     for round in 0..args.rounds {
         let blocked = round >= args.block_from && round < args.block_to;
         if blocked {
@@ -395,18 +392,16 @@ fn blockade(args: &Args) {
         lab.step();
         let polity = &lab.polities[args.block_polity];
         max_wedge = max_wedge.max(polity.wedge[0]);
-        min_execution = min_execution.min(polity.execution);
         if lab.round % args.every == 0 || lab.round == args.rounds {
             let snapshot = lab.history.last().unwrap();
             let volume = snapshot.internal + snapshot.external;
             println!(
-                "第 {:>3} 轮 {} 银河 {} 楔子 {} 本地价 {} 执行 {:.3} 跨境 {:>5.1}% 未成交 {:>5.1}%",
+                "第 {:>3} 轮 {} 银河 {} 楔子 {} 本地价 {} 跨境 {:>5.1}% 未成交 {:>5.1}%",
                 snapshot.round,
                 if blocked { "封锁" } else { "通行" },
                 goods(&snapshot.prices),
                 goods(&polity.wedge),
                 goods(&polity.level),
-                polity.execution,
                 if volume > 0.0 {
                     100.0 * snapshot.external / volume
                 } else {
@@ -417,10 +412,9 @@ fn blockade(args: &Args) {
         }
     }
     println!(
-        "封锁期间 {} 的 good0 楔子峰值 {:+.1}%，执行率最低 {:.3}",
+        "封锁期间 {} 的 good0 楔子峰值 {:+.1}%",
         NAMES[args.block_polity % NAMES.len()],
         100.0 * max_wedge,
-        min_execution,
     );
     summary(&lab);
 }
@@ -452,11 +446,10 @@ fn ladder(args: &Args) {
         let food = lab.market.merchandises[0].price;
         let manufacture = lab.market.merchandises[1].price;
         println!(
-            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>10.3} {:>10.3}",
+            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>10.3}",
             manufacture / food.max(1e-9),
             report(0),
             report(1),
-            lab.polities[0].execution,
             food,
         );
     }
@@ -605,13 +598,6 @@ fn report_by_good(lab: &Lab, ladder: bool) {
         &added.iter().map(|value| share(*value)).collect::<Vec<f32>>(),
         |value| format!("{:>8.1}%", 100.0 * value),
     );
-    let executions = lab.executions();
-    println!(
-        "   执行率   均值 {:.3}  最小 {:.3}   （共 {} 个部门）",
-        executions.iter().sum::<f32>() / executions.len().max(1) as f32,
-        executions.iter().cloned().fold(f32::INFINITY, f32::min),
-        executions.len(),
-    );
 }
 
 /// 阶梯陡度：`1 + (基准 − 1) × k`。k = 1 就是 `SECTOR_MOTIVE` 原样。
@@ -635,7 +621,6 @@ fn ladder_weights(args: &Args) -> Vec<f32> {
 /// · `polities`（逐政体逐商品的楔子）· 总执行率。
 fn json_line(lab: &Lab) -> String {
     let states = lab.good_states();
-    let executions = lab.executions();
     let wedges = lab.wedges();
     let mut goods = String::new();
     for (k, s) in states.iter().enumerate() {
@@ -681,12 +666,11 @@ fn json_line(lab: &Lab) -> String {
             .collect();
         let report = lab.departments.departments[i].settlement();
         departments.push_str(&format!(
-            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"execution\":{:e},\"capacity_scale\":{:e},\"settlement\":{{\"gap\":{:e},\"mu\":{:e},\"iterations\":{},\"phases\":{},\"converged\":{},\"residual\":{:e},\"degraded\":{},\"blocked\":{},\"utilization\":{:e}}}}}",
+            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"capacity_scale\":{:e},\"settlement\":{{\"gap\":{:e},\"mu\":{:e},\"iterations\":{},\"phases\":{},\"converged\":{},\"residual\":{:e},\"degraded\":{},\"blocked\":{},\"utilization\":{:e}}}}}",
             stock.join(","),
             target.join(","),
             gap.join(","),
             lab.departments.departments[i].intake().iter().sum::<f32>(),
-            lab.departments.departments[i].policy_execution(),
             lab.departments.departments[i].capacity_scale(),
             report.gap,
             report.mu,
@@ -762,7 +746,7 @@ fn json_line(lab: &Lab) -> String {
         concat!(
             "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
             "\"books\":[{}],\"delivery_free_or_ladder\":[{}],",
-            "\"execution_mean\":{:e},\"execution_min\":{:e},\"uncleared\":{:e},",
+            "\"uncleared\":{:e},",
             "\"settlement_failures\":{}}}"
         ),
         lab.round,
@@ -771,8 +755,6 @@ fn json_line(lab: &Lab) -> String {
         polities,
         books,
         delivery_split.join(","),
-        executions.iter().sum::<f32>() / executions.len().max(1) as f32,
-        executions.iter().cloned().fold(f32::INFINITY, f32::min),
         lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
         lab.settlement_failures,
     )
@@ -855,12 +837,9 @@ fn sectors(args: &Args) {
                     state.target,
                 );
             }
-            let executions = lab.executions();
             println!(
-                "     {:>5} 执行率 均值 {:.3} 最小 {:.3}   未成交 {:>5.1}%",
+                "     {:>5} 未成交 {:>5.1}%",
                 "小结",
-                executions.iter().sum::<f32>() / executions.len().max(1) as f32,
-                executions.iter().cloned().fold(f32::INFINITY, f32::min),
                 100.0 * lab.history.last().unwrap().uncleared,
             );
         }
@@ -999,7 +978,7 @@ fn sanction_sweep(args: &Args) {
         let external = lab.department_external();
         let seat = local.sanction_polity;
         println!(
-            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>+10.3} {:>10.2}",
+            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>+10.3}",
             external[department],
             lab.polities[seat].vwap[0],
             mean(
@@ -1012,7 +991,6 @@ fn sanction_sweep(args: &Args) {
             ),
             spread(&lab, seat, 0),
             lab.book_spread(seat, 0),
-            lab.polities[seat].execution,
         );
     }
 }
@@ -1058,7 +1036,7 @@ fn sweep(args: &Args) {
             .collect::<Vec<String>>()
             .join(" ");
         println!(
-            "{weight:>6.2} {:>9.1}% {:>24} {:>26} 执行 {}",
+            "{weight:>6.2} {:>9.1}% {:>24} {:>26}",
             if volume > 0.0 {
                 100.0 * snapshot.external / volume
             } else {
@@ -1066,11 +1044,6 @@ fn sweep(args: &Args) {
             },
             wedges,
             levels,
-            lab.polities
-                .iter()
-                .map(|polity| format!("{:.2}", polity.execution))
-                .collect::<Vec<String>>()
-                .join("/"),
         );
     }
 }
