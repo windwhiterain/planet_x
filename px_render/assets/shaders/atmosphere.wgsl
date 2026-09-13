@@ -32,13 +32,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         );
     }
 
-    let alpha = 1.0 - exp(-chord * params.density);
+    let ray = -to_camera;
     let sun = normalize(SUN_DIRECTION);
-    let facing = max(dot(normal, sun), 0.0);
-    let lit = 0.03 + 0.97 * pow(facing, params.softness);
-    return vec4<f32>(tint.rgb * lit * alpha, alpha);
+    let steps = 5;
+    var sunlit = 0.0;
+    for (var index = 0; index < steps; index += 1) {
+        let along = (f32(index) + 0.5) / f32(steps) * chord;
+        let point = surface + ray * along;
+        let reach = dot(normalize(point), sun);
+        sunlit += clamp((reach + 0.25) / 1.25, 0.0, 1.0);
+    }
+    sunlit /= f32(steps);
+
+    let alpha = 1.0 - exp(-chord * params.density);
+    return vec4<f32>(tint.rgb * (0.05 + 0.95 * sunlit) * alpha, alpha);
 }
-
-
 
 
