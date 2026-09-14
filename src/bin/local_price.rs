@@ -444,8 +444,17 @@ fn blockade(args: &Args) {
 }
 
 fn ladder(args: &Args) {
+    // 产能受限时的换挡点：两条工艺的 `单位产能利润` 相等处，解出 工业品价 ÷ 粮食价。
+    // 慢工艺每篮 (a, b) = (0.8, 4)、产能占用 w；快工艺 (9.6, 12)。
+    let unit = |rate: f32, scale: f32, capacity_cost: f32| {
+        let baskets = LADDER_CAPACITY / (capacity_cost * (rate * scale + scale));
+        (rate * scale * baskets, scale * baskets)
+    };
+    let (slow_in, slow_out) = unit(LADDER_THRIFTY.0, LADDER_THRIFTY.1, LADDER_THRIFTY.2);
+    let (fast_in, fast_out) = unit(LADDER_FAST.0, LADDER_FAST.1, LADDER_FAST.2);
+    let threshold = (fast_out - slow_out) / (fast_in - slow_in);
     println!(
-        "技术阶梯：同一个部门里两个工艺。省料但慢 = 每件粮吃 {:.2} 件工业品、产能占用 {:.2}/件；费料但快 = {:.2} 件工业品、产能占用 {:.2}/件；产能预算 {}。本例切换点在 工业品价 ÷ 粮食价 ≈ 1.10",
+        "技术阶梯：同一个部门里两个工艺。省料但慢 = 每件粮吃 {:.2} 件工业品、产能占用 {:.2}/件；费料但快 = {:.2} 件工业品、产能占用 {:.2}/件；产能预算 {}。产能受限时的换挡点在 工业品价 ÷ 粮食价 = {threshold:.3}",
         LADDER_THRIFTY.0,
         LADDER_THRIFTY.2,
         LADDER_FAST.0,
@@ -453,13 +462,13 @@ fn ladder(args: &Args) {
         LADDER_CAPACITY,
     );
     println!(
-        "{:>9} {:>10} {:>26} {:>26} {:>10} {:>10}",
-        "粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "部门执行率", "粮食指数"
+        "{:>9} {:>10} {:>26} {:>26} {:>10}",
+        "别处粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "粮食指数"
     );
-    for supply in [0.4f32, 0.6, 0.8, 1.0, 1.5, 2.5, 4.0] {
+    for supply in [0.01f32, 0.02, 0.05, 0.10, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0] {
         let mut local = args.clone();
         local.food_supply = supply;
-        let mut lab = build_with(&local, Spec::ladder(local.polities, supply));
+        let mut lab = build(&local);
         lab.run(args.rounds);
         let department = lab.department_of(0, 0, Kind::Producer);
         let processes = lab.process_state(department);
@@ -470,7 +479,7 @@ fn ladder(args: &Args) {
         let food = lab.market.merchandises[0].price;
         let manufacture = lab.market.merchandises[1].price;
         println!(
-            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>10.3}",
+            "{supply:>9.2} {:>10.3} {:>26} {:>26} {:>10.3}",
             manufacture / food.max(1e-9),
             report(0),
             report(1),

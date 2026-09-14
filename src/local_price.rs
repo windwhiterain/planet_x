@@ -80,6 +80,13 @@ pub struct Spec {
     pub fluctuation: f32,
     pub self_capacity: bool,
     pub primary_free: bool,
+    /// 这些 `(政权, 单元)` 的**生产部门不发**免费一产政策。
+    ///
+    /// 免费一产是"人人可种地"那版的默认工艺（`primary_free`），但 `LADDER_CAPACITY`
+    /// 只有 8：一个零投入、每篮只吃 1.0 产能的工艺会把窗口里所有产能都占掉，
+    /// 于是"技术阶梯"的两条工艺只剩 ~2% 份额、换挡永远看不见（§21）。
+    /// 要研究阶梯本身，就得把那条免费工艺从**这个**部门拿掉（其余部门照旧）。
+    pub no_primary: Vec<(usize, usize)>,
     pub all_consume: bool,
     pub motive_ladder: Vec<f32>,
     /// 专精：第 `u` 号部门生产**自己那一层**（商品 `u`）的工艺产出乘数。
@@ -101,6 +108,7 @@ impl Spec {
             fluctuation: DEFAULT_FLUCTUATION,
             self_capacity: false,
             primary_free: true,
+            no_primary: Vec::new(),
             all_consume: false,
             motive_ladder: vec![1.0; GOODS],
             specialty: vec![1.0; GOODS],
@@ -194,11 +202,21 @@ impl Spec {
         spec
     }
 
-    /// 同一个部门挂两个工艺：省料但慢、费料但快。切换点在 工业品价 ÷ 粮食价 = 1
+    /// 同一个部门挂两个工艺：省料但慢、费料但快。产能受限时的切换点是
+    /// 工业品价 ÷ 粮食价 = **1.104**（推导印在 `--scenario ladder` 的表头上；实测见 §21）
     pub fn ladder(polities: usize, food_supply: f32) -> Self {
         let mut spec = Self::scarce(polities, 0, 0);
-        spec.supply[0][0] = food_supply;
         spec.capacity = LADDER_CAPACITY;
+        // 只留阶梯的两条工艺：否则零投入的免费一产会把产能全占掉，阶梯份额掉到 2%。
+        spec.no_primary.push((0, 0));
+        // 粮食供给的杠杆放在**别的政权**的免费一产上。阶梯部门自己没有免费工艺，
+        // 于是杠杆只动**价格**，不动这门技术本身的产出（`with_specialty` 那种杠杆会
+        // 直接改产出，测的就不是价格反应了）。
+        for other in 0..polities {
+            if other != 0 {
+                spec.supply[other][0] = food_supply;
+            }
+        }
         for (rate, scale, capacity_cost) in [LADDER_THRIFTY, LADDER_FAST] {
             let mut inputs = vec![0.0; GOODS];
             let mut outputs = vec![0.0; GOODS];
@@ -438,7 +456,8 @@ impl Lab {
                                         .with_capacity_cost(transform.capacity_cost),
                                 );
                             }
-                            if spec.primary_free || unit == 0 {
+                            let bare = spec.no_primary.contains(&(polity, unit));
+                            if !bare && (spec.primary_free || unit == 0) {
                                 let mut outputs = vec![0.0; GOODS];
                                 outputs[unit] = BASE * spec.supply(polity, unit);
                                 specialize(&mut outputs, unit, spec.specialty_of(unit));

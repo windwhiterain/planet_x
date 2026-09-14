@@ -473,7 +473,9 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
     roomy.departments.plan(&mut roomy.warehouses, &roomy.market);
     let roomy_capacity = roomy.process_state(department);
 
-    assert_eq!(scarce_material.len(), 3, "阶梯两个工艺加上主生产");
+    // 这个部门只有阶梯的两条工艺：免费一产已经被 `Spec::no_primary` 拿掉
+    // （否则一个零投入、每篮只吃 1.0 产能的工艺会把 8 格产能全占掉，阶梯只剩 2% 份额）。
+    assert_eq!(scarce_material.len(), 2, "阶梯只有两条工艺");
     assert!(
         scarce_material[slow].0 > scarce_material[fast].0,
         "原料不足时应当选省料但慢的（利润高、单位产能产出低）：{scarce_material:?}",

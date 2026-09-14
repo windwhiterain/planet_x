@@ -399,6 +399,12 @@ impl Stock {
         }
     }
 
+    /// **测试用**：直接给出上一轮申报名义量（决策就是在这个量上读曲线的）。
+    #[cfg(test)]
+    pub(crate) fn set_marketing_volume(&mut self, volume: f32) {
+        self.marketing_volume = volume;
+    }
+
     pub fn marketing_volume(&self) -> f32 {
         self.marketing_volume
     }

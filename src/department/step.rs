@@ -22,8 +22,17 @@ fn basket_value(policy: &Policy, unit_sell: &[f32], unit_buy: &[f32]) -> (f32, f
         let consumption = consumption.max(0.0);
         let output = policy.outputs.get(k).copied().unwrap_or(0.0).max(0.0);
         demanded += consumption;
-        cost += consumption * unit_buy.get(k).copied().unwrap_or(0.0).max(0.0);
-        revenue += output * unit_sell.get(k).copied().unwrap_or(0.0).max(0.0);
+        // ⚠️ 只在系数**非零**时读估值。`0.0 * f32::INFINITY == NaN`，而 `NaN` 会顺着
+        // `margin <= 0` 的判断漏过去（`NaN <= 0.0` 是假），把**整条政策**——包括根本
+        // 不用那样货的政策——的得分毒成 `NaN`；`policy_share` 再把 `NaN` 判成 0。实测：
+        // 只要部门对**任何**一样商品估出"买不到"（曲线/响应退化时 `best_purchase_cost`
+        // 返回 ∞），整个部门就停摆，连不消耗那样货的免费一产政策也一起死（§21）。
+        if consumption > 0.0 {
+            cost += consumption * unit_buy.get(k).copied().unwrap_or(0.0).max(0.0);
+        }
+        if output > 0.0 {
+            revenue += output * unit_sell.get(k).copied().unwrap_or(0.0).max(0.0);
+        }
     }
     (cost, revenue, demanded)
 }
@@ -50,6 +59,59 @@ fn consumption_potential(policy: &Policy, unit_buy: &[f32], capacity: f32) -> f3
         return motive / capacity_use;
     }
     motive / cost.max(FREE_COST)
+}
+
+/// 政策估值的**单件价格向量**：把本部门的两条学习曲线读在**上一轮实际经手的量**上。
+///
+/// ## 为什么不是"1 件"
+///
+/// §20.13 把部门估值改成"当场对自己的曲线做 argmax / argmin"，但读的量取的是 **1 件**。
+/// 对一条**产线**（每轮要经手一整篮货）来说，1 件的读数是**单件最优**，不是价：
+///
+/// - 收入端 `best_sale_revenue(stock, 1)` 是"只卖一件能榨到的最高收入"。兑现率曲面在小量
+///   上饱和，所以这条读数**高于流量的成交价**；
+/// - 成本端 `best_purchase_cost(stock, 1)` 是"只买一件能压到的最低花费"。它是**最便宜的
+///   一件**，**低于流量的采购价**；而且部门从不买那样货时，这条买入曲线整场不被更新，
+///   读数就是一条**先验**。
+///
+/// 两个偏差方向相反，一起把"工业品价 ÷ 粮食价"这个**换挡信号**压掉（§21 实测：部门读到
+/// 的价比市场价低约 2.5 倍，换挡点从 1.104 跑到 **2.7**）。本轮把**收入端**改成在
+/// **本部门上一轮实际经手的量**上读，读数就是那条产线真正面对的（平均）成交价：换挡点
+/// 回到 **1.7** 附近，而且**输入太贵时两条工艺一起关停**（旧口径在 工/粮 ≈ 2.7 时还在
+/// 满负荷跑快工艺）。
+///
+/// **成本端这一步没修**：`best_purchase_cost(stock, q)` 在可行区间里对 `q` 是线性的
+/// （响应曲面那一支返回的收盘量正好是 `q`），所以单位价与 `q` 无关，"最便宜的一件"这个
+/// 偏差要靠部门**真的去买**、让曲面学出可行性边界来纠正。而"部门从不买 ⇒ 曲面是冷的 ⇒
+/// 读数偏乐观"这条**学习**上的鸡生蛋问题（§21）还开着。
+///
+/// 还没经手过（第一轮、或单测里没有申报）就退回"1 件"读数——那是旧行为。
+/// 已知近似：读的是**当前**流量，所以部门不会把自己这条政策**新增**的量算进去。
+fn traded_prices(warehouse: &Warehouse) -> (Vec<f32>, Vec<f32>) {
+    let goods = warehouse.stocks.len();
+    let mut unit_sell = Vec::with_capacity(goods);
+    let mut unit_buy = Vec::with_capacity(goods);
+    for k in 0..goods {
+        let stock = &warehouse.stocks[k];
+        let declared = stock.marketing_volume();
+        let sell_volume = if declared > 0.0 { declared.max(1.0) } else { 1.0 };
+        let buy_volume = if declared < 0.0 { (-declared).max(1.0) } else { 1.0 };
+        let revenue = best_sale_revenue(stock, sell_volume);
+        unit_sell.push(if revenue.is_finite() && revenue > 0.0 {
+            revenue / sell_volume
+        } else {
+            0.0
+        });
+        let cost = best_purchase_cost(stock, buy_volume);
+        unit_buy.push(if cost.is_finite() && cost > 0.0 {
+            cost / buy_volume
+        } else {
+            // 这个量买不到（曲面在大量上饱和、或曲线给不出可行报价）：退到一件的读数，
+            // 不要让整条政策因为读数是 ∞ 而消失（见 `basket_value` 的零系数注释）。
+            best_purchase_cost(stock, 1.0)
+        });
+    }
+    (unit_sell, unit_buy)
 }
 
 /// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷。
@@ -97,12 +159,8 @@ pub(super) fn plan(
 
     // 一切"价格"都在**这里**由本部门自己的学习曲线现算（报价维度 argmax / argmin）：
     // 不读账本、不读本地价、不读指数，也没有任何"价格"标量被存下来（§20.13）。
-    let unit_sell: Vec<f32> = (0..goods)
-        .map(|k| best_sale_revenue(&warehouse.stocks[k], 1.0))
-        .collect();
-    let unit_buy: Vec<f32> = (0..goods)
-        .map(|k| best_purchase_cost(&warehouse.stocks[k], 1.0))
-        .collect();
+    // 读的量是**本部门上一轮实际经手的量**（见 [`traded_prices`]），不是"1 件"。
+    let (unit_sell, unit_buy) = traded_prices(warehouse);
     // 手里的现金按买入曲线最多能换到几件（逐商品各自按整份现金算，与旧口径一致）。
     let buying_power: Vec<f32> = (0..goods)
         .map(|k| affordable_quantity(&warehouse.stocks[k], warehouse.currency))
@@ -335,4 +393,63 @@ pub(super) fn revenue(market: &Market, i: usize) -> f32 {
         }
     }
     revenue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::warehouse::Stock;
+
+    /// `0.0 × ∞ = NaN` 是这里的头号陷阱：`NaN` 能骗过 `margin <= 0`（`NaN <= 0.0` 是假），
+    /// 于是**每一条**政策的得分都变成 `NaN`，`policy_share` 再把它判成 0——一个部门只要
+    /// 有**任何一样**货买不到，哪怕它有一条根本不用那样货的政策，也会整场停摆。
+    #[test]
+    fn a_zero_coefficient_never_reads_an_infinite_price() {
+        let unroutable = f32::INFINITY;
+        // 商品 0 买不到（`unit_buy = ∞`）、卖得掉（产出价有限）；商品 1 两边都正常。
+        let unit_sell = [2.0f32, 3.0];
+        let unit_buy = [unroutable, 1.0];
+
+        // 零投入政策：成本必须是 0，不能因为"商品 0 买不到"被毒成 NaN。
+        let free = Policy::production(vec![0.0, 0.0], vec![4.0, 0.0]);
+        let (cost, revenue, _) = basket_value(&free, &unit_sell, &unit_buy);
+        assert_eq!((cost, revenue), (0.0, 4.0 * 2.0), "零系数不该读到 ∞");
+        assert!(production_score(&free, &unit_sell, &unit_buy, 1.0) > 0.0);
+
+        // 真的要用那件买不到的货：成本是 ∞（政策不可行），得分 0——但**不是 NaN**。
+        let needs_it = Policy::production(vec![1.0, 0.0], vec![4.0, 0.0]);
+        let (cost, revenue, _) = basket_value(&needs_it, &unit_sell, &unit_buy);
+        assert_eq!(cost, unroutable, "投入真的买不到时成本必须是 ∞");
+        assert!(revenue.is_finite());
+        assert_eq!(production_score(&needs_it, &unit_sell, &unit_buy, 1.0), 0.0);
+    }
+
+    /// 曲线要读在**本部门实际经手的量**上：卖 200 件的单位成交价必须低于只卖 1 件。
+    /// 旧口径两种情况都读"1 件"，于是收入端拿的是榨取价——这个偏差把换挡信号压掉（§21）。
+    /// （买入侧没有这个量效应，见下面那段注释。）
+    #[test]
+    fn the_curve_is_read_at_the_traded_quantity_not_at_one_unit() {
+        let mut warehouse = Warehouse::new(vec![Stock::new(1000.0, 0.0)]);
+        warehouse.stocks[0].set_marketing_volume(1.0);
+        let (one, _) = traded_prices(&warehouse);
+        warehouse.stocks[0].set_marketing_volume(200.0);
+        let (many, _) = traded_prices(&warehouse);
+        assert!(
+            one[0] > many[0] && many[0] > 0.0,
+            "单件读数是榨取价、流量读数是成交价：1 件 {} 对 200 件 {}",
+            one[0],
+            many[0],
+        );
+
+        // 买入侧**没有**这个量效应：`best_purchase_cost(stock, q)` 在可行区间里对 q 是
+        // 线性的（曲面在那一支上返回的收盘量正好是 `q`），所以单位价与 q 无关。真正压低
+        // 买入读数的是"**最便宜**的可行报价"这件事本身——它要靠部门真的去买、让曲面学出
+        // 可行性边界来纠正（§21 里那个"买不到"的坑就是这么来的）。
+        let mut warehouse = Warehouse::new(vec![Stock::new(0.0, 1000.0)]);
+        warehouse.stocks[0].set_marketing_volume(-1.0);
+        let (_, one) = traded_prices(&warehouse);
+        warehouse.stocks[0].set_marketing_volume(-200.0);
+        let (_, many) = traded_prices(&warehouse);
+        assert!(one[0] > 0.0 && (many[0] - one[0]).abs() <= 1e-4 * one[0]);
+    }
 }
