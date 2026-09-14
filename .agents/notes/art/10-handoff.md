@@ -7,13 +7,16 @@
 
 ## 9.1 现在在哪儿
 
-- worktree `.worktrees/field-dual`，分支 `wip/field-dual-arbiter`。
-- 已提交：`0071f5d art: 探针搬出 cargo test；产物带相机表与指纹；render 按内容缓存资源`。
-- ⚠️ **`game` 编译不过，而且是本轮之前就有的**：`game/src/project.rs:17` 读 `snapshot.executions`，
-  而 `Snapshot` 已把这个读数换成 `intake`（`game/src/lib.rs:37` 的注释写着"该读数已随 distribution
-  归一化一起删除"）。默认 members **含 `game`** ⇒ `cargo test` 是红的。
-  这是 sim 的语义裁决（`DepartmentView.execution` 该喂什么），**没有替它决定**。
-  在它修好之前用：
+- **这条线已经合进 `v2`**：`a666c13 Merge branch 'wip/field-dual-arbiter' into v2`（117 个文件，
+  +22892/−14，零冲突）。`wip/field-dual-arbiter` 已完全被 v2 包含 ⇒ **后续开工在 v2 上**，
+  或从 v2 拉新分支；原 worktree `.worktrees/field-dual` 只是个旧址。
+- 合并后 CPU 链在 v2 上复验过：`cargo check -p px_protocol -p px_ops -p px_graphs -p px_verify
+  --all-targets` ✅ 4.34 s；同四个 crate 的 `cargo test` 全绿。
+- ⚠️ **`game` 编译不过 —— 已知，且用户裁决「不管 game」**（2026-09-14）：
+  `game/src/project.rs:17` 读 `snapshot.executions`，而 `game` 自己的 `Snapshot` 已把这个读数
+  换成 `intake`（`game/src/lib.rs:47` 的注释：「原来这里是 `execution`（执行率），该读数已随
+  `distribution` 归一化一起删除；物理活跃度由 `intake` 承担」）。默认 members **含 `game`**
+  ⇒ `cargo test` 是红的。要绿用：
   `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。
 
 ## 9.2 已经能跑什么
