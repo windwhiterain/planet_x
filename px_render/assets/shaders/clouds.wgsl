@@ -38,7 +38,6 @@ const ABLATE_ANALYTIC: u32 = 7u;
 const SHADOW_GAIN: f32 = 4.0;
 const SURFACE_STEPS: u32 = 56;
 const SURFACE_LEVEL: f32 = 0.20;
-const SURFACE_EPSILON: f32 = 0.05;
 
 struct Medium {
     direction: vec3<f32>,
@@ -140,19 +139,6 @@ fn cloud_field(point: vec3<f32>) -> f32 {
         return 0.0;
     }
     return density_of(medium, cover, true);
-}
-
-fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
-    let step = SURFACE_EPSILON * span();
-    let x = vec3<f32>(step, 0.0, 0.0);
-    let y = vec3<f32>(0.0, step, 0.0);
-    let z = vec3<f32>(0.0, 0.0, step);
-    let scale = 1.0 / (2.0 * step);
-    return vec3<f32>(
-        cloud_field(point + x) - cloud_field(point - x),
-        cloud_field(point + y) - cloud_field(point - y),
-        cloud_field(point + z) - cloud_field(point - z),
-    ) * scale;
 }
 
 fn gate_open(value: f32) -> f32 {
@@ -417,7 +403,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
 
-        let gradient = cloud_field_gradient(surface_point);
+        let gradient = cloud_field_gradient_analytic(surface_point);
         let length_squared = dot(gradient, gradient);
         if length_squared <= 1e-14 {
             discard;

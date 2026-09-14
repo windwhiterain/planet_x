@@ -9,7 +9,7 @@ fn the_assembled_cloud_module_carries_the_field_and_its_gradient() {
     let assembled = common::assemble("clouds.wgsl");
     for wanted in [
         "fn cloud_field(",
-        "fn cloud_field_gradient(",
+        "fn cloud_field_gradient_analytic(",
         "fn fbm_3_grad(",
         "fn gradient_noise_3_grad(",
     ] {
