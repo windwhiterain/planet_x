@@ -83,6 +83,9 @@ fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
     if params.ablate == ABLATE_NOISE {
         return 0.55;
     }
+    if params.ablate == ABLATE_ANALYTIC {
+        return sampled_noise(direction, altitude, params.detail_scale, 1u, params.seed);
+    }
     let tower = sampled_noise(direction, altitude, params.detail_scale * 0.35, 3u, params.seed);
     if !with_skin {
         return tower;
@@ -202,7 +205,9 @@ fn shape_of_partials(cover: f32, altitude: f32, noise: f32) -> ShapePartials {
         0.0,
         under_top * lobed * slope_of_smoothstep(0.0, max(params.base, 1e-3), altitude),
         altitude > 0.0 && altitude < max(params.base, 1e-3),
-    ) - floor_here * lobed * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude);
+    ) - floor_here * lobed * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude)
+        - floor_here * under_top * params.coverage_gain * params.taper * 2.0 * height
+            * footprint_live * lobe_live;
     let altitude_partial = live * shape_altitude / erode_room;
     let shape_noise = floor_here
         * (
@@ -232,21 +237,39 @@ fn billows_along(direction: vec3<f32>, altitude: f32, with_skin: bool) -> vec4<f
     if params.ablate == ABLATE_NOISE {
         return vec4<f32>(0.55, vec3<f32>(0.0));
     }
+    let radius = params.inner + altitude * span();
+    if params.ablate == ABLATE_ANALYTIC {
+        let single_across = params.detail_scale;
+        let single = sampled_noise_along(direction, single_across, 1u, params.seed, altitude);
+        let single_live = gate_open(single.value);
+        let single_stretch = single_across + altitude * single_across * span();
+        let single_tangential =
+            single_live * single_stretch * project_tangential(single.gradient, direction);
+        let single_radial = single_live * radius * single_across * dot(direction, single.gradient);
+        return vec4<f32>(clamp(single.value, 0.0, 1.0), single_tangential + single_radial * direction);
+    }
     let tower_across = params.detail_scale * 0.35;
     let tower = sampled_noise_along(direction, tower_across, 3u, params.seed, altitude);
+    let tower_stretch = tower_across + altitude * tower_across * span();
     if !with_skin {
-        return vec4<f32>(tower.value, tower.gradient);
+        let live = gate_open(tower.value);
+        let tangential = live * tower_stretch * project_tangential(tower.gradient, direction);
+        let radial = live * radius * tower_across * dot(direction, tower.gradient);
+        return vec4<f32>(tower.value, tangential + radial * direction);
     }
     let skin_across = params.detail_scale * 1.70;
     let skin = sampled_noise_along(direction, skin_across, 2u, params.seed ^ 31u, altitude);
+    let skin_stretch = skin_across + altitude * skin_across * span();
     let blended = tower.value * 0.62 + skin.value * 0.38;
     let live = gate_open(blended);
-    let gradient = live * (tower.gradient * 0.62 + skin.gradient * 0.38);
+    let tangential = live
+        * (tower_stretch * project_tangential(tower.gradient, direction) * 0.62
+            + skin_stretch * project_tangential(skin.gradient, direction) * 0.38);
     let radial = live
-        * altitude
+        * radius
         * (tower_across * dot(direction, tower.gradient) * 0.62
             + skin_across * dot(direction, skin.gradient) * 0.38);
-    return vec4<f32>(clamp(blended, 0.0, 1.0), gradient - radial * direction);
+    return vec4<f32>(clamp(blended, 0.0, 1.0), tangential + radial * direction);
 }
 
 fn coverage_gradient_of(direction: vec3<f32>) -> vec4<f32> {
