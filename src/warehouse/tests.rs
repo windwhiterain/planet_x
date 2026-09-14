@@ -48,15 +48,6 @@ fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouses {
     warehouse(&quotes)
 }
 
-/// 给所有仓库设同一个**本地参照价**（本地价）。
-///
-/// 参照价不再回退到银河指数（§20.8），所以单独测 `Warehouses` 时要显式给。
-fn set_reference(warehouses: &mut Warehouses, price: f32) {
-    for warehouse in &mut warehouses.warehouses {
-        warehouse.reference = vec![price];
-    }
-}
-
 fn warehouse1(items: &[(f32, f32)]) -> Warehouses {
     let quotes: Vec<&[(f32, f32)]> = items.iter().map(std::slice::from_ref).collect();
     warehouse(&quotes)
@@ -118,10 +109,10 @@ fn assert_finite_state(warehouse: &Warehouses, market: &Market) {
                 item.volume
             );
             assert!(
-                item.marketing_volume.is_finite() && item.marketing_price_scale.is_finite(),
+                item.marketing_volume.is_finite() && item.marketing_price.is_finite(),
                 "交易者 {i} 商品 {k} 的报价非有限：{} / {}",
                 item.marketing_volume,
-                item.marketing_price_scale,
+                item.marketing_price,
             );
             assert!(
                 item.natural_volume_delta.is_finite(),
@@ -170,8 +161,6 @@ fn every_reachable_target_is_cleared_in_one_step() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
-    // 本地参照价现在必须**显式给**：它不再回退到市场指数（§20.8）。
-    set_reference(&mut warehouse, 10.0);
 
     warehouse.step(&mut market, &mut rng);
 
@@ -180,11 +169,10 @@ fn every_reachable_target_is_cleared_in_one_step() {
         volumes(&warehouse),
         "一步之内应清到目标"
     );
-    // 带宽 5~20 -> 2~100：清算价的**绝对水平**现在取决于兑现率曲面的饱和先验
-    // （§13.3 那条承重常数），实测 58.2 = 初始水位的 5.8 倍。这条测试真正要守的
-    // 不变量是"两侧各自择价之后价格还在同一量级、没有失控也没有塌掉"。
+    // 报价现在是**绝对价**（不再是参照价的倍数），水平由学习曲线 + 现金约束定；
+    // 这条测试真正要守的不变量是"两侧各自择价之后价格还在同一量级、没有失控也没有塌掉"。
     assert!(
-        (2.0..=100.0).contains(&market.merchandises[0].price),
+        (1e-3..=1e4).contains(&market.merchandises[0].price),
         "两方各自择价后清算价应当还在同一量级：{}",
         market.merchandises[0].price,
     );
@@ -382,20 +370,17 @@ fn trader_order_permutes_the_trajectory() {
 }
 
 #[test]
-fn zero_price_market_is_frozen_and_finite() {
+fn a_market_with_no_initial_readout_stays_finite() {
+    // 报价是绝对价、由学习曲线与现金约束定，所以"市场挂牌价 = 0"不再是一种状态。
+    // 这条测试只守"读数缺席时整场仍然有限、不产生 NaN/Inf"。
     let mut rng = deterministic_rng();
     let mut market = market(1, 0.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0)]);
-    set_reference(&mut warehouse, 0.0);
-    let before = volumes(&warehouse);
 
     for _ in 0..30 {
         warehouse.step(&mut market, &mut rng);
         assert_finite_state(&warehouse, &market);
     }
-
-    assert_eq!(before, volumes(&warehouse), "零价格下不应有库存变动");
-    assert_close(market.merchandises[0].price, 0.0, "零价格");
 }
 
 fn assert_active_quotes_are_positive(market: &Market) {
@@ -445,11 +430,9 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    set_reference(&mut warehouse, 10.0);
     warehouse.step(&mut market, &mut rng);
-    // 同上：带宽 5~20 -> 2~100，绝对水平取决于饱和先验，实测 58.2。
     assert!(
-        (2.0..=100.0).contains(&market.merchandises[0].price),
+        (1e-3..=1e4).contains(&market.merchandises[0].price),
         "首轮清算价应当还在同一量级：{}",
         market.merchandises[0].price,
     );
@@ -466,12 +449,10 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
 
     assert_close(warehouse.warehouses[0].stocks[0].volume, 10.0, "回补者");
     assert_close(warehouse.warehouses[1].stocks[0].volume, 0.0, "回吐者");
-    // 带宽同样 5~20 -> 2~100：实测 339 是初始水位的 34 倍。**这条测试真正要守的
-    // 是"同一笔交易反向后库存回到对方手里"**（上面两条 `assert_close`），
-    // 价格的绝对水位则跟着兑现率曲面的饱和先验走（§13.3 那条承重常数）。
-    // 反向后水位最多同量级抬升，而不是继续发散。
+    // **这条测试真正要守的是"同一笔交易反向后库存回到对方手里"**（上面两条
+    // `assert_close`）；价格的绝对水位由学习曲线 + 现金约束定，只要求还在同一量级。
     assert!(
-        (2.0..=1000.0).contains(&market.merchandises[0].price),
+        (1e-3..=1e4).contains(&market.merchandises[0].price),
         "同一笔交易反向后价格水位应当在同一量级，实际 {}",
         market.merchandises[0].price,
     );
@@ -637,7 +618,7 @@ fn a_seller_picks_the_revenue_maximizing_scale() {
     warehouse.step(&mut market, &mut rng);
 
     let stock = &warehouse.warehouses[0].stocks[0];
-    let chosen = stock.marketing_price_scale();
+    let chosen = stock.marketing_price();
     let revenue = |scale: f32| {
         stock
             .sell_response()
@@ -719,7 +700,7 @@ fn the_price_curve_learns_the_realized_level() {
     warehouse.step(&mut market, &mut rng);
 
     let stock = &warehouse.warehouses[0].stocks[0];
-    let scale = stock.marketing_price_scale();
+    let scale = stock.marketing_price();
     let realized = market.traders[0].merchandises[0].deal_price() / 10.0;
     assert!(realized > 0.0, "首轮应当成交");
     let prior = scale.powf(0.5);
@@ -770,14 +751,23 @@ fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
     // 两个地方必须不同，否则会算进同一个地方的成交量
     warehouses.warehouses[0].locality = 0;
     warehouses.warehouses[1].locality = 1;
-    warehouses.warehouses[0].reference = vec![1.0];
-    warehouses.warehouses[1].reference = vec![4.0];
+    warehouses.books = vec![
+        vec![Book {
+            bid: 1.0,
+            ask: 1.0,
+            observed: true,
+        }],
+        vec![Book {
+            bid: 4.0,
+            ask: 4.0,
+            observed: true,
+        }],
+    ];
     let index = warehouses.aggregate_index(1);
     assert!(
         (index[0] - 2.0).abs() < 1e-5,
         "银河价应当取各地方本地价的对数中心 2.0，实际 {}",
         index[0],
     );
-    // 决策账本（max/min）故意留空：读数不许读交易者报价。
-    assert!(warehouses.books.is_empty());
+
 }

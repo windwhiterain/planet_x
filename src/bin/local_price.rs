@@ -767,7 +767,7 @@ fn json_line(lab: &Lab) -> String {
             let mut weight = 0.0f32;
             for warehouse in &lab.warehouses.warehouses {
                 let declared = warehouse.stocks[k].marketing_volume().abs();
-                let scale = warehouse.stocks[k].marketing_price_scale();
+                let scale = warehouse.stocks[k].marketing_price();
                 if declared > 0.0 && scale.is_finite() && scale > 0.0 {
                     sum += declared * scale.ln();
                     weight += declared;

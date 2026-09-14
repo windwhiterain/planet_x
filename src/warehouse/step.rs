@@ -24,14 +24,6 @@ const SCALE_REFINE_STEPS: usize = 200;
 /// 二分的步数（区间缩到 2^-40）
 /// 黄金分割比
 const SCALE_GOLDEN: f32 = 0.618_034;
-/// 学到的"局部价 ÷ 参考价"预测的下限。
-///
-/// `realized` 是拟合量，实测会塌到 1e-27；而 `purchase_scale` 里
-/// `affordable = cash / (price × realized)` 于是无界，申报量能算出 1e26
-/// （旧代码的注释自己记了这条"遗留"）。这是**数值护栏**，不是"本地价不该低于
-/// 参考价的 x%"那种策略边界：只挡住学习器塌陷那一段。
-const REALIZED_FLOOR: f32 = 1e-3;
-
 /// 本地参照价缺席时的计价物。**不是银河指数**——指数是读数，回头当输入就又是一圈自指（§20.8）。
 const FALLBACK_REFERENCE: f32 = 1.0;
 
@@ -129,35 +121,39 @@ fn declared_volumes(stock: &mut Stock, fluctuation: f32, rng: &mut Rng) {
     stock.marketing_volume = gap.abs() * fluctuation_factor(fluctuation, rng) * gap.signum();
 }
 
-fn sale_scale(stock: &Stock, available: f32, price: f32) -> f32 {
-    if !(available > 0.0) || !(price > 0.0) {
-        return 1.0;
+/// 卖方：挑一个**绝对报价**（不是"参照价的倍数"）最大化 `成交价 × 成交量`。
+///
+/// 学习曲线 `sell_price_curve` 现在是 `报价 → 成交价`（两个都是绝对值）。卖方的"力度"
+/// 是 `1/报价`：报价越高越不激进、成交越少。
+fn sale_price(stock: &Stock, available: f32) -> f32 {
+    if !(available > 0.0) {
+        return FALLBACK_REFERENCE;
     }
     let response = stock.sell_response();
     let curve = stock.sell_price_curve();
-    let log_scale = maximize_log_scale(|log_scale| {
-        let scale = log_scale.exp();
-        let aggressiveness = Stock::sell_aggressiveness(scale);
+    let log_price = maximize_log_scale(|log_price| {
+        let price = log_price.exp();
+        let aggressiveness = Stock::sell_aggressiveness(price);
         let dealt = response.get(available, aggressiveness);
-        let revenue = dealt * price * curve.get(scale);
+        let revenue = dealt * curve.get(price);
         if revenue.is_finite() {
             revenue
         } else {
             f32::NEG_INFINITY
         }
     });
-    let scale = log_scale.exp();
-    if scale.is_finite() && scale > 0.0 {
-        scale
+    let price = log_price.exp();
+    if price.is_finite() && price > 0.0 {
+        price
     } else {
-        1.0
+        FALLBACK_REFERENCE
     }
 }
 
-fn affordable_volume(price: f32, scale: f32, cash: f32) -> f32 {
-    let limit = price * scale;
-    if limit.is_finite() && limit > 0.0 && cash.is_finite() && cash > 0.0 {
-        cash / limit
+/// 手上这点钱，在这个**绝对单位成本**下最多能买几件。
+fn affordable_volume(unit: f32, cash: f32) -> f32 {
+    if unit.is_finite() && unit > 0.0 && cash.is_finite() && cash > 0.0 {
+        cash / unit
     } else {
         0.0
     }
@@ -180,47 +176,36 @@ fn volume_for_dealt(share: f32, depth: f32, goal: f32) -> f32 {
     f32::INFINITY
 }
 
-/// 买方：**在"期望达标"和"货币"两个约束下尽量少花钱**。
+/// 买方：**在"期望达标"和"货币"两个约束下尽量少花钱**。决策变量是**绝对报价**。
 ///
 /// ```text
-/// min   volume × unit                        花费（unit = 参考价 × 学到的局部比率）
-/// s.t.  response.get(volume, a) >= need      期望达标——约束是**绝对**的，对着缺口
-///       volume × unit <= cash                货币约束
+/// min   volume × unit                         花费（unit = 曲线预测的**绝对**成交价）
+/// s.t.  response.get(volume, price) >= need    期望达标——约束对着缺口
+///       volume × unit <= cash                  货币约束（cash 是绝对货币）
 /// ```
 ///
-/// 与旧版的差别全在"约束对着谁"：
-/// - 旧版 `threshold = best_probability − 1e-4` 是相对**自己**的最大值定义的，全体没戏时
-///   恒成立，于是判据退化成"用最便宜的方式够不着"；这里约束对着 `need`，够不着就是够不着。
-/// - 旧版 `goal = target.min(0.9 × share × depth)` 让申报量度量**模型的信念**；
-///   这里申报量由"要拿到 `need` 需要挂多少"反解出来（`volume_for_dealt`）。
-///
-/// **低尺度区域是不可行的**，这正是不再需要"取最小尺度"那种人为下界的原因：
-/// 那里 `share(a)` 太小、`volume_for_dealt` 反解不出有限的量，约束直接把它排除。
-/// 于是最便宜的解自然落在"刚好能拿下的那个价"上，而不是网格下界。
-///
-/// 估值上限 `realized <= 1` 是**外层**护栏：局部隐含价高于参考价时不出这个价。
-/// 没有它，够不着缺口时"最大化期望成交"那一支会把报价推到网格顶端（`e^44`）。
-fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f32, f32)> {
-    if !(need > 0.0) || !(price > 0.0) || !(cash > 0.0) {
+/// 绝对口径带来一件关键的事：**现金约束不再随价格水平自动缩放**。旧口径
+/// `unit = 参考价 × realized` 里参考价每轮被指数重新缩放，于是价格水平在约束里被约掉，
+/// 整个经济没有名义锚（§20）。现在 `cash` 与 `unit` 都是绝对值：报价高了就真的买不起，
+/// 这就是水平的回复力。
+fn purchase_price(stock: &Stock, need: f32, cash: f32) -> Option<(f32, f32)> {
+    if !(need > 0.0) || !(cash > 0.0) {
         return None;
     }
     let response = stock.buy_response();
     let curve = stock.buy_price_curve();
-    let mut cheapest: Option<(f32, f32, f32)> = None; // (cost, volume, scale)
-    let mut most: Option<(f32, f32, f32)> = None; // (dealt, volume, scale) 够不着时的尽力
+    let mut cheapest: Option<(f32, f32, f32)> = None; // (cost, volume, price)
+    let mut most: Option<(f32, f32, f32)> = None; // (dealt, volume, price) 够不着时的尽力
     for index in 0..SCALE_COARSE_STEPS {
-        let scale = coarse_log_scale(index).exp();
-        if !scale.is_finite() || !(scale > 0.0) {
+        let price = coarse_log_scale(index).exp();
+        if !price.is_finite() || !(price > 0.0) {
             continue;
         }
-        let realized = curve.get(scale);
-        if !realized.is_finite() || !(realized > 0.0) || realized > 1.0 {
+        let unit = curve.get(price);
+        if !unit.is_finite() || !(unit > 0.0) {
             continue;
         }
-        let aggressiveness = Stock::buy_aggressiveness(scale);
-        // 学习器把 realized 预测到 0 附近时，按 0 计价会让 `cheapest` 与
-        // `affordable` 两条路一起跑飞；这里按数值下限计价（见 [`REALIZED_FLOOR`]）。
-        let unit = price * realized.max(REALIZED_FLOOR);
+        let aggressiveness = Stock::buy_aggressiveness(price);
         let volume = volume_for_dealt(
             response.share(aggressiveness),
             response.depth(aggressiveness),
@@ -234,19 +219,13 @@ fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f3
                     None => true,
                 };
                 if better {
-                    cheapest = Some((cost, volume, scale));
+                    cheapest = Some((cost, volume, price));
                 }
                 continue;
             }
         }
-        // 这个价拿不到 need（或拿不起）：记下'预算内能拿到最多'的那一档。
-        // **实测必须不夹在 need 上**：夹了之后 `motive_ladder=true` 那档从完美稳态
-        // （uncleared = 0.000、价格逐位不变 1200 轮）退化成 `uncleared = 1.000` 的发散。
-        // 也就是说这个分支实际承担的是"把现金按局部价换成货"的职能，
-        // 而约束（期望达标）在学到的天花板偏小时本来就常常不可行。
-        // 遗留：`dir` 那档的学到的局部价会塌到 1e-27，于是 `affordable = cash/unit`
-        // 算出 3.9e26 的申报量——本轮给 unit 兜了个数值底（见 [`REALIZED_FLOOR`]），但根治仍是 `buy_price_curve` 的塌陷（见 §20）。
-        let affordable = affordable_volume(price, realized.max(REALIZED_FLOOR), cash);
+        // 这个价拿不到 need（或拿不起）：记下"预算内能拿到最多"的那一档。
+        let affordable = affordable_volume(unit, cash);
         if !(affordable > 0.0) {
             continue;
         }
@@ -257,86 +236,51 @@ fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f3
                 None => true,
             };
             if better {
-                most = Some((dealt, affordable, scale));
+                most = Some((dealt, affordable, price));
             }
         }
     }
     cheapest
-        .map(|(_, volume, scale)| (volume, scale))
-        .or_else(|| most.map(|(_, volume, scale)| (volume, scale)))
+        .map(|(_, volume, price)| (volume, price))
+        .or_else(|| most.map(|(_, volume, price)| (volume, price)))
 }
 
-/// 逐商品把 log 报价尺度按申报量加权去均值，返回归一因子（几何平均尺度）。
+/// 把这一轮的成交回灌给两个学习器。**两个都学绝对值**：
+/// 价格曲线学 `报价 → 成交价`，响应曲线学 `(申报量, 力度) → 成交量`。
 ///
-/// 报价 = `参照价 × 尺度`，参照价 = `指数 × e^楔子`，而指数又由账本反推。于是
-/// "所有尺度 ×c、指数 ÷c"不改变任何一笔真实成交——这是个纯规范方向，学习器的目标
-/// 对它简并，没有任何东西把它拉回 1。回路增益因此就是"平均 log 尺度"：它每轮只要
-/// 不是 1，相对价就乘一次，一路漂到 f32 边界（§19.2）。
-///
-/// 把每个商品的这个自由度每轮钉到 0，尺度只留相对信息；水平交给 `anchor_prices`。
-/// 没有申报量的商品返回 1（不动）。
-fn scale_normalization(warehouses: &[Warehouse], goods: usize) -> Vec<f32> {
-    let mut log_sum = vec![0.0f32; goods];
-    let mut weight = vec![0.0f32; goods];
-    for warehouse in warehouses {
-        for (k, stock) in warehouse.stocks.iter().enumerate() {
-            let declared = stock.marketing_volume.abs();
-            let scale = stock.marketing_price_scale;
-            if k < goods && declared > 0.0 && scale.is_finite() && scale > 0.0 {
-                log_sum[k] += declared * scale.ln();
-                weight[k] += declared;
-            }
-        }
-    }
-    (0..goods)
-        .map(|k| {
-            if weight[k] > 0.0 && log_sum[k].is_finite() {
-                (log_sum[k] / weight[k]).exp()
-            } else {
-                1.0
-            }
-        })
-        .collect()
-}
-
-fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise, reference: f32) {
+/// 旧口径下曲线学的是 `deal_price / 参照价`，那让学习曲线对"价格水平"完全免疫——
+/// 水平因此没有任何来自学习器的锚（§20）。
+fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise) {
     let declared = stock.marketing_volume;
     if !declared.is_finite() || declared == 0.0 {
         return;
     }
-    let scale = stock.marketing_price_scale;
+    let price = stock.marketing_price;
     let dealt = merchandise.deal_volume().abs();
     if declared > 0.0 {
         stock
             .sell_response
-            .update(declared, Stock::sell_aggressiveness(scale), dealt);
+            .update(declared, Stock::sell_aggressiveness(price), dealt);
     } else {
         stock
             .buy_response
-            .update(declared.abs(), Stock::buy_aggressiveness(scale), dealt);
+            .update(declared.abs(), Stock::buy_aggressiveness(price), dealt);
     }
     let deal_price = merchandise.deal_price();
-    if reference.is_finite() && reference > 0.0 && deal_price.is_finite() && deal_price > 0.0 {
-        let realized = deal_price / reference;
+    if price.is_finite() && price > 0.0 && deal_price.is_finite() && deal_price > 0.0 {
         if declared > 0.0 {
-            stock.sell_price_curve.update(scale, realized);
+            stock.sell_price_curve.update(price, deal_price);
         } else {
-            stock.buy_price_curve.update(scale, realized);
+            stock.buy_price_curve.update(price, deal_price);
         }
     }
 }
 
-/// 逐地方的账本：把同一地方所有交易者的挂单并起来取两侧边际价，再按增益混进上一轮。
+/// 逐地方的**决策账本**：同一地方所有挂单并起来取两侧边际价，再按增益混进上一轮。
 ///
-/// **只看挂单，不看成交**——这正是它与 `local_ratios`（只在成交时更新）的分工。
-/// 缺一侧时走回退链：这一轮挂出来的 → 该地方最近成交价 → 上一轮的账本 → 银河指数。
-fn update_books(
-    warehouses: &[Warehouse],
-    market: &Market,
-    local_ratios: &[Vec<f32>],
-    books: &mut Vec<Vec<Book>>,
-    book_forgetting: f32,
-) {
+/// 回退链只用**本地量**：上一轮自己的中间价，再不行用计价物。**没有银河指数**——
+/// 指数是读数，不能回头当输入（§20.10）。
+fn update_books(warehouses: &[Warehouse], market: &Market, books: &mut Vec<Vec<Book>>, book_forgetting: f32) {
     let goods = market.merchandises.len();
     let mut observed: Vec<Vec<Book>> = Vec::new();
     for (i, warehouse) in warehouses.iter().enumerate() {
@@ -352,18 +296,13 @@ fn update_books(
             if !price.is_finite() || !(price > 0.0) {
                 continue;
             }
+            let book = &mut observed[locality][k];
             if merchandise.volume > 0.0 {
-                // 卖方：最低的要价才是边际
-                let book = &mut observed[locality][k];
                 if !(book.ask > 0.0) || price < book.ask {
                     book.ask = price;
                 }
-            } else if merchandise.volume < 0.0 {
-                // 买方：最高的出价才是边际
-                let book = &mut observed[locality][k];
-                if price > book.bid {
-                    book.bid = price;
-                }
+            } else if merchandise.volume < 0.0 && price > book.bid {
+                book.bid = price;
             }
         }
     }
@@ -374,30 +313,9 @@ fn update_books(
         if books[locality].len() != goods {
             books[locality] = vec![Book::default(); goods];
         }
-        // 这个地方的**本地参照价**（本地价）。回退链只用本地量 + 计价物，**不用银河指数**。
-        let local_reference = warehouses
-            .iter()
-            .find(|warehouse| warehouse.locality == locality)
-            .map(|warehouse| warehouse.reference.as_slice());
         for (k, seen) in row.iter().enumerate() {
-            let reference = local_reference
-                .and_then(|row| row.get(k).copied())
-                .filter(|price| price.is_finite() && *price > 0.0)
-                .unwrap_or(FALLBACK_REFERENCE);
-            let realized = local_ratios
-                .get(locality)
-                .and_then(|ratios| ratios.get(k))
-                .copied()
-                .unwrap_or(0.0)
-                * reference;
             let previous = books[locality][k];
-            let carried = if realized.is_finite() && realized > 0.0 {
-                realized
-            } else if previous.is_formed() {
-                previous.mid()
-            } else {
-                reference
-            };
+            let carried = if previous.is_formed() { previous.mid() } else { FALLBACK_REFERENCE };
             let observed_bid = if seen.bid > 0.0 { seen.bid } else { carried };
             let observed_ask = if seen.ask > 0.0 { seen.ask } else { carried };
             let blend = |old: f32, new: f32| {
@@ -410,8 +328,6 @@ fn update_books(
             books[locality][k] = Book {
                 bid: blend(previous.bid, observed_bid),
                 ask: blend(previous.ask, observed_ask),
-                // 只有**本轮两侧都有真实报价**才算观测。`seen` 只在本轮有人以非零
-                // 申报量报价时才会被填，所以这一行同时排除了"零申报量的报价定账本"。
                 observed: seen.bid > 0.0 && seen.ask > 0.0,
             };
         }
@@ -428,19 +344,6 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         ..
     } = warehouses;
     let fluctuation = *fluctuation;
-    let goods = market.merchandises.len();
-    // 本地参照价 = **本地价**（`apply_levels` 直接学的绝对值），与银河指数无关。
-    // 还没设过就退回计价物，**绝不退回指数**。
-    let references: Vec<Vec<f32>> = warehouses
-        .iter()
-        .map(|warehouse| {
-            if warehouse.reference.len() == goods {
-                warehouse.reference.clone()
-            } else {
-                vec![FALLBACK_REFERENCE; goods]
-            }
-        })
-        .collect();
     for (i, warehouse) in warehouses.iter_mut().enumerate() {
         let Warehouse { stocks, currency, .. } = warehouse;
         for stock in stocks.iter_mut() {
@@ -455,39 +358,29 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         } else {
             0.0
         };
-        for (k, stock) in stocks.iter_mut().enumerate() {
-            let price = references[i][k].max(0.0);
-            let scale = if stock.marketing_volume > 0.0 {
-                sale_scale(stock, stock.marketing_volume, price)
+        for stock in stocks.iter_mut() {
+            let price = if stock.marketing_volume > 0.0 {
+                sale_price(stock, stock.marketing_volume)
             } else if stock.marketing_volume < 0.0 {
-                match purchase_scale(stock, stock.marketing_volume.abs(), price, budget) {
-                    Some((volume, scale)) => {
+                match purchase_price(stock, stock.marketing_volume.abs(), budget) {
+                    Some((volume, price)) => {
                         stock.marketing_volume = -volume;
-                        scale
+                        price
                     }
                     None => {
                         stock.marketing_volume = 0.0;
                         stock.purchase_blocked = true;
-                        1.0
+                        FALLBACK_REFERENCE
                     }
                 }
             } else {
-                1.0
+                FALLBACK_REFERENCE
             };
-            stock.marketing_price_scale = scale;
+            stock.marketing_price = price;
         }
-    }
-    // 规范自由度：把每个商品的 log 尺度去均值（见 [`scale_normalization`]）。
-    // 必须在**全部**仓库的尺度都定下来之后、写报价之前做，而且是全局的一趟。
-    let normalization = scale_normalization(warehouses, market.merchandises.len());
-    for (i, warehouse) in warehouses.iter_mut().enumerate() {
-        for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-            let factor = normalization[k];
-            if factor.is_finite() && factor > 0.0 {
-                stock.marketing_price_scale /= factor;
-            }
+        for (k, stock) in stocks.iter_mut().enumerate() {
             let merchandise = &mut market.traders[i].merchandises[k];
-            merchandise.price = price_of(references[i][k], stock.marketing_price_scale);
+            merchandise.price = stock.marketing_price;
             merchandise.volume = stock.marketing_volume;
         }
     }
@@ -502,22 +395,32 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
             let merchandise = &market.traders[i].merchandises[k];
             stock.volume -= merchandise.deal_volume();
-            observe(stock, merchandise, references[i][k]);
+            observe(stock, merchandise);
             stock.previous_volume = stock.volume;
         }
         let locality = warehouse.locality;
         if local_ratios.len() <= locality {
             local_ratios.resize(locality + 1, Vec::new());
         }
+        // 只用于诊断：本地成交价 ÷ 上一轮的本地中间价（不是银河指数）。
+        let local_reference: Vec<f32> = (0..market.merchandises.len())
+            .map(|k| {
+                books.get(locality)
+                    .and_then(|row| row.get(k))
+                    .filter(|book| book.is_formed())
+                    .map(|book| book.mid())
+                    .unwrap_or(FALLBACK_REFERENCE)
+            })
+            .collect();
         observe_local_ratio(
             &market.traders[i],
-            &references[i],
+            &local_reference,
             &mut local_ratios[locality],
             *book_forgetting,
         );
     }
     // 账本最后更新：这一轮的挂单已经定稿，成交与否都看得见
-    update_books(warehouses, market, local_ratios, books, *book_forgetting);
+    update_books(warehouses, market, books, *book_forgetting);
 }
 
 fn observe_local_ratio(
@@ -551,14 +454,5 @@ fn observe_local_ratio(
         } else {
             ratio
         };
-    }
-}
-
-fn price_of(reference: f32, scale: f32) -> f32 {
-    let price = reference.max(0.0) * scale;
-    if price.is_finite() && price >= 0.0 {
-        price
-    } else {
-        0.0
     }
 }

@@ -93,7 +93,9 @@ pub struct Stock {
     pub target_volume: f32,
     /// 目标水位的**下限**，等于构造时的初始目标。见 [`Stock::TARGET_COVER`]。
     pub target_floor: f32,
-    marketing_price_scale: f32,
+    /// 本轮挂出去的**绝对报价**（货币/件）。不是"参照价的倍数"——学习曲线与账本都
+    /// 以绝对数为准（见 `sale_price` / `purchase_price` / `observe`）。
+    marketing_price: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
     /// 本轮**被部门取走**的量（[`Stock::record_take`]），目标水位就锚在它上面。
@@ -148,14 +150,11 @@ impl Warehouses {
 
     /// 银河价 = **各地方本地价的成交量加权几何平均**（纯读数，display only）。
     ///
-    /// 本地价 = `warehouse.reference`（逐政权直接学的绝对值，见 `apply_levels` / `update_levels`）。
+    /// 本地价 = 该地方账本的中间价（`Book::mid`，买卖双方**绝对报价**的几何平均）。
+    /// 报价现在是绝对价（`Stock::marketing_price`），不再有"参照价 × 尺度"那一层，
+    /// 所以账本中间价就是"大家在这地方实际挂出来的价格水平"。
     ///
-    /// ⚠️ **不要平均交易者的报价**：`quote = 本地价 × 价差`，而价差是每个交易者优化器
-    /// 在 `e^{±44}` 里挑的、只被 `scale_normalization` 钉住全局平均、离散度不受控——
-    /// 平均报价会把"价差离散度"混进水平，读数就被带跑（实测 `--rule fixed` 把本地价
-    /// 钉成 1，平均报价的读数仍漂到 1e5）。银河价既然只是读数，就应当只反映本地价。
-    ///
-    /// 某一轮一个本地价都没有时返回 0，调用方应当保留旧指数。
+    /// 某一轮一个地方都没成形时返回 0，调用方应当保留旧指数。
     pub fn aggregate_index(&self, goods: usize) -> Vec<f32> {
         let mut index = vec![0.0f32; goods];
         for (k, slot) in index.iter_mut().enumerate() {
@@ -163,32 +162,34 @@ impl Warehouses {
             let mut weighted_log = 0.0f32;
             let mut flat_log = 0.0f32;
             let mut formed = 0.0f32;
-            // 逐地方取一次本地价；同一地方的仓库共享同一个 `reference`。
-            let mut localities: Vec<(usize, f32, f32)> = Vec::new();
-            for warehouse in &self.warehouses {
-                let price = warehouse.reference.get(k).copied().unwrap_or(0.0);
-                if !(price > 0.0) || !price.is_finite() {
+            for (locality, row) in self.books.iter().enumerate() {
+                let Some(book) = row.get(k) else {
+                    continue;
+                };
+                if !book.is_formed() {
                     continue;
                 }
-                let volume = warehouse
-                    .stocks
-                    .get(k)
-                    .map(|stock| stock.marketing_volume().abs())
-                    .unwrap_or(0.0);
-                match localities
-                    .iter_mut()
-                    .find(|(locality, _, _)| *locality == warehouse.locality)
-                {
-                    Some(entry) => entry.2 += volume,
-                    None => localities.push((warehouse.locality, price, volume)),
+                let mid = book.mid();
+                if !(mid > 0.0) || !mid.is_finite() {
+                    continue;
                 }
-            }
-            for (_, price, volume) in localities {
-                let log_price = price.ln();
-                flat_log += log_price;
+                let log_mid = mid.ln();
+                flat_log += log_mid;
                 formed += 1.0;
+                let volume: f32 = self
+                    .warehouses
+                    .iter()
+                    .filter(|warehouse| warehouse.locality == locality)
+                    .map(|warehouse| {
+                        warehouse
+                            .stocks
+                            .get(k)
+                            .map(|stock| stock.marketing_volume().abs())
+                            .unwrap_or(0.0)
+                    })
+                    .sum();
                 if volume > 0.0 && volume.is_finite() {
-                    weighted_log += volume * log_price;
+                    weighted_log += volume * log_mid;
                     weight += volume;
                 }
             }
@@ -310,7 +311,7 @@ impl Stock {
             volume,
             target_floor: target_volume,
             target_volume,
-            marketing_price_scale: 1.0,
+            marketing_price: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
             taken: 0.0,
@@ -349,17 +350,19 @@ impl Stock {
         };
     }
 
-    pub fn buy_aggressiveness(price_scale: f32) -> f32 {
-        if price_scale.is_finite() && price_scale > 0.0 {
-            price_scale
+    /// 买方"力度"：报价越高越激进（越容易成交）。
+    pub fn buy_aggressiveness(price: f32) -> f32 {
+        if price.is_finite() && price > 0.0 {
+            price
         } else {
             1.0
         }
     }
 
-    pub fn sell_aggressiveness(price_scale: f32) -> f32 {
-        if price_scale.is_finite() && price_scale > 0.0 {
-            1.0 / price_scale
+    /// 卖方"力度"：报价越高越不激进（越难成交）。
+    pub fn sell_aggressiveness(price: f32) -> f32 {
+        if price.is_finite() && price > 0.0 {
+            1.0 / price
         } else {
             1.0
         }
@@ -369,8 +372,8 @@ impl Stock {
         self.marketing_volume
     }
 
-    pub fn marketing_price_scale(&self) -> f32 {
-        self.marketing_price_scale
+    pub fn marketing_price(&self) -> f32 {
+        self.marketing_price
     }
 
     pub fn buy_response(&self) -> &Response {

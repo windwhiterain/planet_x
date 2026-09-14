@@ -1959,3 +1959,43 @@ quote = 本地价 × marketing_price_scale
 测试：119 过 / 13 失败 / 1 ignore。`the_price_level_has_no_anchor_of_its_own` 断言的
 是"银河指数自己没有锚、`--no-anchor` 下四处游走"——这条旧语义被本轮推翻，已改写成
 `the_index_is_only_a_readout_of_the_local_prices`（本地价被固定规则钉住时读数也不游走）。
+
+### 20.11 学习曲线与报价都改成**绝对价**：`scale` 退场
+
+前面几轮一直没拆干净：本地价（`wedge`）虽然已经是绝对值，但**交易者的决策变量仍是
+`marketing_price_scale`**，学习曲线学的也还是 `deal_price / 参照价`。这正是"曲线学不出
+水平、水平没有锚"的来源。
+
+本轮把这一层整个拆掉：
+
+| 之前 | 现在 |
+|---|---|
+| `quote = 参照价 × marketing_price_scale` | `quote = marketing_price`（**绝对价**） |
+| 价格曲线学 `scale → 成交价 / 参照价` | 学 `报价 → 成交价`（两个都是**绝对值**） |
+| 买方 `unit = 参照价 × realized` | `unit = 曲线预测的绝对成交价` |
+| 力度：卖方 `1/scale`、买方 `scale` | 卖方 `1/报价`、买方 `报价` |
+| `scale_normalization` 钉 log 尺度的全局平均 | **删掉**（没有"尺度"了） |
+| `price_of()`、`REALIZED_FLOOR` | **删掉** |
+
+关键的一步：**绝对口径让现金约束不再自动缩放**。旧口径里 `unit = 参照价 × realized`，
+参照价每轮被指数重新缩放，价格水平于是在约束里被约掉；现在 `cash` 与 `unit` 都是绝对值，
+**报价高了就真的买不起**——水平的回复力由学习曲线自己提供。
+
+读数同步改成：**各地方账本中间价**（买卖双方绝对报价的几何平均）的成交量加权几何平均。
+`warehouse.reference` / `wedge` 从此只做"某一侧没挂单"时的回退。
+
+实测（5 个新抽种子 × 20000 轮，log10 三商品 index 的 max / min）：
+
+| | max / min |
+|---|---|
+| **绝对价（本轮）** | **1.0–6.0 / −7.9 – −1.5** |
+| 相对价（上一轮） | 14.8–29.5 / −40.3 – −14.9 |
+
+一条 2000 轮轨迹稳定在 0.5–3（计价物 = 1）附近，随后切到 1–8 / 0.02 的另一档——
+是**有界的经济波动**，不再是连乘到 f32 边界。
+
+测试：119 过 / 13 失败 → **120 过 / 12 失败 / 1 ignore**。`scale` 相关的断言按新语义重写：
+`zero_price_market_is_frozen_and_finite`（"零价市场"在绝对价下不存在）改成
+`a_market_with_no_initial_readout_stays_finite`；两条价格水位测试的 band 放宽到
+`1e-3..=1e4`；`the_index_is_only_a_readout_of_the_local_prices` 改成逐位复算
+"各地方本地价的加权几何平均"。

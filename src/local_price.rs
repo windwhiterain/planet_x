@@ -779,7 +779,7 @@ impl Lab {
                 }
                 state.target += stock.target_volume;
                 let merchandise = &self.market.traders[i].merchandises[k];
-                let scale = self.warehouses.warehouses[i].stocks[k].marketing_price_scale();
+                let scale = self.warehouses.warehouses[i].stocks[k].marketing_price();
                 let volume = merchandise.volume;
                 if volume > 0.0 {
                     state.declared_sell += volume;
