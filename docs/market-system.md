@@ -113,6 +113,7 @@ Lab::step
   aggregate_index       银河价 = 各地方本地价的成交量加权几何平均
   local_readout         逐政权本地价 = 该政权地方账本中间价
   anchor_prices         可选：把银河读数按"三商品几何平均 = 1"归一化（纯显示）
+  update_diagnostics    诊断读数：逐政权 vwap、内部/跨境成交量、现金（不写回任何决策）
 ```
 
 ---
@@ -128,6 +129,7 @@ Lab::step
 | `books`（账本） | 交易者报价 | **读数** |
 | `aggregate_index` / `local_readout` | `books` | **读数** |
 | `polity.level` | 本地价读数 | **显示** |
+| `update_diagnostics` | 成交明细 | **读数**（`vwap`/`internal`/`external`/`cash`） |
 
 **没有一条路径**把账本 / 本地价 / 银河价读回去当输入。
 
@@ -148,9 +150,10 @@ Lab::step
 
 ## 7. 残留 / 未决
 
-1. **`wedge` / `LevelRule` / `--rule` / `--forgetting` / `--gain` / `--recenter*` 是死状态**：
-   `update_levels` 现在只写诊断字段（`vwap` / `internal` / `external` / `cash`）和一个没人
-   读的 `wedge`。待删。
+1. ~~**`wedge` / `LevelRule` / `--rule` / `--forgetting` / `--gain` / `--recenter*` 是死状态**~~
+   —— **已删**。`update_levels` 改名 `update_diagnostics`，只写 `vwap` / `internal` /
+   `external` / `cash` 四个读数；`Polity` 不再有 `wedge`，CLI 也没有那五个旋钮
+   （JSON 的逐政权字段从 `wedge` 换成 `level`）。
 2. **部门估值的量取 "1 件"**：`best_*_revenue(stock, 1.0)`。如果要让兑现率曲面的非线性
    进来（比如"这次计划要卖一篮"），把 `1.0` 换成 policy 的对应数量。
 3. **报价搜索带宽还是 `e^{±44}`**：单个交易者仍可以在十几个数量级里挑报价，本地价的

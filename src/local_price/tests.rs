@@ -16,28 +16,11 @@ fn scarce() -> Spec {
 }
 
 #[test]
-fn fixed_levels_keep_every_wedge_at_zero() {
-    let mut lab = Lab::new(&symmetric(), 11).with_rule(LevelRule::Fixed);
-    lab.run(60);
-
-    for polity in &lab.polities {
-        for k in 0..GOODS {
-            assert_eq!(polity.wedge[k], 0.0, "固定水平下不应当有楔子");
-        }
-    }
-    for good in 0..GOODS {
-        assert!(lab.market.merchandises[good].price > 0.0);
-        assert!(lab.market.merchandises[good].price.is_finite());
-    }
-}
-
-#[test]
 fn the_index_is_only_a_readout_of_the_local_prices() {
     // 银河价是读数：它等于**各地方本地价的成交量加权几何平均**，而本地价就是该地方
     // 账本的中间价（`Book::mid`，买卖双方**绝对报价**的几何平均）。这里逐位复算一遍。
     // `anchor=false`：这里要验的是**原始读数**，不是被篮子归一化之后的显示值。
     let mut lab = Lab::new(&symmetric(), 11)
-        .with_rule(LevelRule::Fixed)
         .with_anchor(false);
     lab.run(40);
     let snapshot = lab.history.last().unwrap();
@@ -74,7 +57,7 @@ fn the_index_is_only_a_readout_of_the_local_prices() {
 }
 #[test]
 fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
-    let mut lab = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let mut lab = Lab::new(&scarce(), 11);
     lab.run(60);
 
     let prices = lab
@@ -100,81 +83,8 @@ fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
 }
 
 #[test]
-fn a_learned_wedge_moves_but_stays_bounded_without_a_real_anchor() {
-    for rule in [
-        LevelRule::OwnVwap,
-        LevelRule::Counterparty,
-        LevelRule::Shortfall,
-    ] {
-        let mut lab = Lab::new(&scarce(), 11).with_rule(rule);
-        lab.run(60);
-        let worst = lab
-            .wedges()
-            .iter()
-            .flatten()
-            .fold(0.0f32, |worst, wedge| worst.max(wedge.abs()));
-        // 旧断言是 `worst > 0.5`（"一路跑到钳位上"）。**两条前提都消失了**：
-        // §12 删掉了楔子的钳位，而饱和兑现率曲面之后连跑飞本身也不再发生
-        // （vwap 规则实测最大楔子 0.41，counterparty/shortfall 更小）。
-        // 现在断言的是真正还成立的东西：没有真锚时它会**离开零**，但**有界**。
-        assert!(
-            worst > 0.0,
-            "{} 规则在没有真锚时楔子应当离开零，实际最大楔子 {worst}",
-            rule.name(),
-        );
-        assert!(
-            worst < 5.0,
-            "{} 规则的楔子不应当发散，实际最大楔子 {worst}",
-            rule.name(),
-        );
-    }
-
-    let mut control = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
-    control.run(60);
-    let worst = control
-        .wedges()
-        .iter()
-        .flatten()
-        .fold(0.0f32, |worst, wedge| worst.max(wedge.abs()));
-    assert_eq!(worst, 0.0, "对照组不应当动");
-}
-
-#[test]
-fn a_wedge_that_feeds_its_own_quote_drives_the_raw_level_down() {
-    let mut free = Lab::new(&symmetric(), 11)
-        .with_rule(LevelRule::Fixed)
-        .with_anchor(false)
-        .with_grant(10.0);
-    free.run(40);
-    let quiet = free
-        .history
-        .iter()
-        .map(|snapshot| snapshot.gauge.iter().sum::<f32>() / GOODS as f32)
-        .sum::<f32>()
-        / free.history.len() as f32;
-
-    let mut loud = Lab::new(&symmetric(), 11)
-        .with_rule(LevelRule::Counterparty)
-        .with_anchor(true)
-        .with_grant(10.0);
-    loud.run(40);
-    let stirred = loud
-        .history
-        .iter()
-        .skip(1)
-        .map(|snapshot| snapshot.gauge.iter().sum::<f32>() / GOODS as f32)
-        .fold(0.0f32, |worst, drift| worst.max(drift.abs()));
-
-    assert!(
-        stirred > quiet.abs(),
-        "把楔子接进报价后，原始水平漂移应当被放大：平静 {quiet}，接上 {stirred}",
-    );
-}
-
-#[test]
 fn relations_cut_the_cross_border_volume() {
     let mut open = Lab::new(&scarce(), 11)
-        .with_rule(LevelRule::Fixed)
         .with_relations(&bloc_relations(3, 1.0));
     open.run(30);
     let snapshot = open.history.last().unwrap();
@@ -182,7 +92,6 @@ fn relations_cut_the_cross_border_volume() {
     assert!(snapshot.internal > 0.0, "政权内部也应当有成交");
 
     let mut shut = Lab::new(&scarce(), 11)
-        .with_rule(LevelRule::Fixed)
         .with_relations(&bloc_relations(3, 0.0));
     shut.run(30);
     let snapshot = shut.history.last().unwrap();
@@ -205,10 +114,10 @@ fn premium(lab: &Lab) -> f32 {
 
 #[test]
 fn a_transformation_runs_only_while_it_pays() {
-    let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let mut idle = Lab::new(&scarce(), 11);
     idle.run(40);
 
-    let mut paying = Lab::new(&transformation(0.5, 4.0), 11).with_rule(LevelRule::Fixed);
+    let mut paying = Lab::new(&transformation(0.5, 4.0), 11);
     paying.run(40);
     let paying_share = paying.history.last().unwrap().transform_share;
     // 旧断言是"转换拿走 >50% 的份额"。份额是个分配量，会被别的政策挤，不是这条测试
@@ -234,7 +143,7 @@ fn a_transformation_runs_only_while_it_pays() {
     // 旧版本用 `3 工业品 → 1 粮食` 并直接假设它亏本；bid/ask 口径之后那个配方的
     // 利润率是正的（0.048 的份额），假设不成立。现在用一个远到不可能赚的配方，
     // 并把前提本身也断言出来，免得下次它悄悄变成"其实在赚"。
-    let mut losing = Lab::new(&transformation(30.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    let mut losing = Lab::new(&transformation(30.0, 4.0), 11);
     losing.run(40);
     let share = losing.history.last().unwrap().transform_share;
     let states = losing.good_states();
@@ -255,7 +164,7 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
     inputs[0] = 2.8;
     outputs[1] = 4.0;
     let spec = scarce().with_transform(1, 1, inputs, outputs);
-    let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
+    let mut lab = Lab::new(&spec, 11);
     let department = lab.department_of(1, 0, Kind::Consumer);
     for round in 0..120 {
         if round >= 40 {
@@ -297,9 +206,9 @@ fn a_process_the_index_would_shut_runs_on_local_prices() {
 
 #[test]
 fn a_running_transformation_shrinks_the_scarcity_premium() {
-    let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let mut idle = Lab::new(&scarce(), 11);
     idle.run(60);
-    let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    let mut working = Lab::new(&transformation(1.0, 4.0), 11);
     working.run(60);
 
     // ⚠️ 与上一条同源：定规范之后闲置档的稀缺溢价回来了（实测 1.0489）。
@@ -321,9 +230,9 @@ fn a_running_transformation_shrinks_the_scarcity_premium() {
 
 #[test]
 fn a_transformation_competes_with_consumption_for_its_input() {
-    let mut idle = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let mut idle = Lab::new(&scarce(), 11);
     idle.run(40);
-    let mut working = Lab::new(&transformation(1.0, 4.0), 11).with_rule(LevelRule::Fixed);
+    let mut working = Lab::new(&transformation(1.0, 4.0), 11);
     working.run(40);
 
     // ⚠️ 这条测试的**两个读数都已经死了**，只剩前提检查：
@@ -344,8 +253,8 @@ fn a_transformation_competes_with_consumption_for_its_input() {
     // **全部生产政策**的份额，对照组的免费一产政策也算在内，所以它本来就非零。）
 }
 
-fn permanently_sanctioned(rule: LevelRule, weight: f32, rounds: usize) -> Lab {
-    let mut lab = Lab::new(&scarce(), 11).with_rule(rule);
+fn permanently_sanctioned(weight: f32, rounds: usize) -> Lab {
+    let mut lab = Lab::new(&scarce(), 11);
     let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..rounds {
         lab.sanction(&[department], weight);
@@ -356,9 +265,9 @@ fn permanently_sanctioned(rule: LevelRule, weight: f32, rounds: usize) -> Lab {
 
 #[test]
 fn a_targeted_sanction_opens_a_monotone_local_gap() {
-    let open = permanently_sanctioned(LevelRule::Fixed, 1.0, 120);
-    let half = permanently_sanctioned(LevelRule::Fixed, 0.5, 120);
-    let shut = permanently_sanctioned(LevelRule::Fixed, 0.0, 120);
+    let open = permanently_sanctioned(1.0, 120);
+    let half = permanently_sanctioned(0.5, 120);
+    let shut = permanently_sanctioned(0.0, 120);
 
     // 口径换成**账本**（`book_spread`）而不是成交（`spread`）：路线 b 之后指数本身就是
     // 账本的聚合，拿"已实现成交价 ÷ 账本聚合指数"读出来的数既不是本地 vs 全局、
@@ -422,7 +331,7 @@ fn a_targeted_sanction_opens_a_monotone_local_gap() {
 
 #[test]
 fn a_sanction_stays_local_to_the_named_department() {
-    let lab = permanently_sanctioned(LevelRule::Fixed, 0.0, 80);
+    let lab = permanently_sanctioned(0.0, 80);
     let external = lab.department_external();
     let sanctioned = lab.department_of(1, 0, Kind::Consumer);
     let neighbour = lab.department_of(1, 1, Kind::Consumer);
@@ -443,7 +352,7 @@ fn a_sanction_stays_local_to_the_named_department() {
 
 #[test]
 fn a_sanctioned_department_cannot_trade_out_but_no_longer_drowns() {
-    let mut lab = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);
+    let mut lab = Lab::new(&scarce(), 11);
     let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..60 {
         lab.sanction(&[department], 0.0);
@@ -469,67 +378,13 @@ fn a_sanctioned_department_cannot_trade_out_but_no_longer_drowns() {
     // （实测 1.0）——那说明它不再盲目超报，不说明它能卖出去。外部为 0 上面已单独断言。
 }
 
-#[test]
-fn a_learned_wedge_costs_the_level_without_buying_a_gap() {
-    let quiet = permanently_sanctioned(LevelRule::Fixed, 0.0, 120);
-    let loud = permanently_sanctioned(LevelRule::Counterparty, 0.0, 120);
-
-    let quiet_gap = quiet.spread(1, 0);
-    let quiet_level = quiet.polities[1].vwap[0];
-    let loud_level = loud.polities[1].vwap[0];
-
-    // 0.25 -> 0.30：**指数只由真实双边账本导出**（§17.8）之后实测 −0.286。
-    // 仍然是"小而可用"的量级（相对价差 30% 以内），只是阈值要按新动态重定。
-    // 0.25 -> 0.30 -> 0.35：指数只由真实双边账本导出（§17.8）之后实测 −0.286；
-    // 目标水位改锚在**取货量**上（见 `Stock::taken`）之后实测 **−0.34195742**。
-    // 锚一换，申报缺口 → 挂单 → 价格 → 生产决策这条链就整体挪了一格，
-    // 这条读数跟着挪；契约（市场自己给的本地价差是小而可用的）没变。
-    assert!(
-        quiet_gap.abs() < 0.35,
-        "市场自己给的本地价差应当是小而可用的：{quiet_gap}",
-    );
-    // 这里原本还有一条 `quiet_level > 0.5`（"对照组本地价贴着指数"）。`vwap` 是
-    // `成交价 ÷ 指数` 而指数取在锚定之后，绝对值因此带一个场景各自的比例，不能当水平读。
-    // 这条测试真正要问的是**对比**：接上楔子之后本地价被整体压垮——下面那条就是它，
-    // 而且它天然免疫这个比例（同场景、同比例，约掉）。
-    assert!(
-        quiet_level > 0.0 && quiet_level.is_finite() && loud_level > 0.0,
-        "两侧都应当存在真实、有限的本地价：{quiet_level} / {loud_level}",
-    );
-    // ⚠️ **定规范（§17.3）之后"楔子会压垮水平"不再是设计意图，而是被修掉的缺陷。**
-    // 楔子的跨政体均值是个规范自由度，它唯一的作用就是整体搬水平；每轮中心化把它
-    // 钉在 0 上之后，接不接楔子对**水平**几乎没有影响：实测 0.2573 -> 0.2555（−0.7%）。
-    // 所以这条改成断言"水平不再被楔子搬走"，本地信息只走截面价差（下面那条）。
-    // ⚠️ 断言从"位移 <10%"改成"**不被压垮**（保留一半以上）"。
-    // 指数只由真实双边账本导出（§17.8）之后，接上楔子实测把水平从 0.2694 移到
-    // 0.2000（−26%）。26% 是"楔子确实有代价"，不是原来那个数量级的崩溃：
-    // 修之前楔子的规范漂移能把水平搬到 `e^-35`（§17.2）。这条测试要问的是
-    // **楔子还能不能毁掉水平**，答案是"不能"，位移量级留在十位百分比。
-    // ⚠️ 障碍 0.1 又把位移推回 **−54%**（0.30026054 -> 0.13760172）：内点结算让库存
-    // 充裕的政策只吃 0.904306，全社会长期少要 9.6% 的货，价格整体被压低，楔子再叠一层
-    // 就更容易把水平搬走。这是**量出来的因果**：障碍调到 0.01 时这条回到 −26% 一档。
-    // 阈值放到"保留 40%"，是因为这条要问的仍然是"楔子还能不能毁掉水平"，
-    // 而 0.458 这个读数没有改变答案。9.6% 那笔账见 `docs/local-price.md` §18。
-    assert!(
-        loud_level > 0.4 * quiet_level,
-        "楔子不应当再把本地价水平压垮（只应有几十个百分点的位移）：{quiet_level} -> {loud_level}",
-    );
-    // 倍数 3.0 -> 5.0：结论（接上楔子换不来更大的截面价差，只毁掉水平）不变，
-    // 但软成交之后实测比值从 ~2 倍涨到 3.96 倍（−0.0536 -> −0.2121）。
-    assert!(
-        loud.spread(1, 0).abs() < 5.0 * quiet_gap.abs(),
-        "它换不来更大的截面价差，只毁掉水平：安静 {quiet_gap} 接上 {}",
-        loud.spread(1, 0),
-    );
-}
-
 fn with_absorber(rounds: usize) -> Lab {
     let mut inputs = vec![0.0; GOODS];
     let mut outputs = vec![0.0; GOODS];
     inputs[0] = 2.0;
     outputs[1] = 4.0;
     let spec = scarce().with_transform(1, 1, inputs, outputs);
-    let mut lab = Lab::new(&spec, 11).with_rule(LevelRule::Fixed);
+    let mut lab = Lab::new(&spec, 11);
     let department = lab.department_of(1, 0, Kind::Consumer);
     for _ in 0..rounds {
         lab.sanction(&[department], 0.0);
@@ -579,7 +434,7 @@ fn a_profitable_absorber_runs_and_the_flood_no_longer_grows() {
 
 #[test]
 fn a_process_choice_follows_whichever_resource_is_tight() {
-    let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11).with_rule(LevelRule::Fixed);
+    let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11);
     let department = lab.department_of(0, 0, Kind::Consumer);
     lab.market.merchandises[0].price = 1.0;
     lab.market.merchandises[1].price = 1.0;
@@ -594,8 +449,7 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
     lab.departments.plan(&mut lab.warehouses, &lab.market);
     let tight_capacity = lab.process_state(department);
 
-    let mut roomy = Lab::new(&Spec::ladder(3, 0.5).with_capacity(200.0), 11)
-        .with_rule(LevelRule::Fixed);
+    let mut roomy = Lab::new(&Spec::ladder(3, 0.5).with_capacity(200.0), 11);
     roomy.market.merchandises[0].price = 1.0;
     roomy.market.merchandises[1].price = 1.0;
     roomy.warehouses.warehouses[department].stocks[1].volume = 20.0;
@@ -636,10 +490,9 @@ fn a_process_choice_follows_whichever_resource_is_tight() {
 
 #[test]
 fn a_capacity_budget_throttles_the_department() {
-    let mut tight = Lab::new(&Spec::ladder(3, 0.5).with_capacity(0.05), 11).with_rule(LevelRule::Fixed);
+    let mut tight = Lab::new(&Spec::ladder(3, 0.5).with_capacity(0.05), 11);
     tight.run(20);
-    let mut loose = Lab::new(&Spec::ladder(3, 0.5).with_capacity(f32::INFINITY), 11)
-        .with_rule(LevelRule::Fixed);
+    let mut loose = Lab::new(&Spec::ladder(3, 0.5).with_capacity(f32::INFINITY), 11);
     loose.run(20);
 
     // 旧读数是被制裁部门的 `stocks[0].volume`（"紧的攒得多"）。路线 b 之后那个读数
@@ -660,11 +513,10 @@ fn a_capacity_budget_throttles_the_department() {
 #[test]
 fn the_lab_is_reproducible() {
     let run = |seed: u64| {
-        let mut lab = Lab::new(&scarce(), seed)
-            .with_rule(LevelRule::Counterparty)
-            .with_recenter(true);
+        let mut lab = Lab::new(&scarce(), seed);
         lab.run(40);
-        lab.wedges()
+        let last = lab.history.last().unwrap();
+        (last.prices.clone(), last.levels.clone())
     };
     assert_eq!(run(7), run(7), "同一种子应当复现");
 }

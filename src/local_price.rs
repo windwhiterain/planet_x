@@ -33,38 +33,6 @@ pub const BASE_PRICE: f32 = 1.0;
 
 pub const NAMES: [&str; 6] = ["甲", "乙", "丙", "丁", "戊", "己"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LevelRule {
-    Fixed,
-    OwnVwap,
-    Counterparty,
-    Shortfall,
-    Pressure,
-}
-
-impl LevelRule {
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "fixed" => Some(Self::Fixed),
-            "vwap" => Some(Self::OwnVwap),
-            "counterparty" => Some(Self::Counterparty),
-            "shortfall" => Some(Self::Shortfall),
-            "pressure" => Some(Self::Pressure),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Fixed => "fixed",
-            Self::OwnVwap => "vwap",
-            Self::Counterparty => "counterparty",
-            Self::Shortfall => "shortfall",
-            Self::Pressure => "pressure",
-        }
-    }
-}
-
 pub struct Transform {
     pub polity: usize,
     pub unit: usize,
@@ -317,7 +285,6 @@ pub struct Polity {
     pub name: &'static str,
     pub seat: usize,
     pub level: Vec<f32>,
-    pub wedge: Vec<f32>,
     pub vwap: Vec<f32>,
     pub internal: f32,
     pub external: f32,
@@ -376,7 +343,6 @@ pub struct GoodState {
 pub struct Snapshot {
     pub round: usize,
     pub prices: Vec<f32>,
-    pub wedges: Vec<Vec<f32>>,
     pub levels: Vec<Vec<f32>>,
     pub vwaps: Vec<Vec<f32>>,
     pub internal: f32,
@@ -394,13 +360,6 @@ pub struct Lab {
     pub warehouses: Warehouses,
     pub market: Market,
     pub polities: Vec<Polity>,
-    pub rule: LevelRule,
-    pub forgetting: f32,
-    pub gain: f32,
-    pub recenter: bool,
-    /// 定规范的强度：`wedge -= gain × 跨政体均值`。1.0 = 每轮把均值清零（旧行为），
-    /// 0 = 关掉，>1 = 过冲（如果均值是个正反馈模态，过冲才能把它压到稳定侧）。
-    pub recenter_gain: f32,
     pub anchor: bool,
     pub gauge: Vec<f32>,
     pub round: usize,
@@ -519,7 +478,6 @@ impl Lab {
                 name: NAMES[polity % NAMES.len()],
                 seat: polity * 2 * UNITS,
                 level: vec![BASE_PRICE; GOODS],
-                wedge: vec![0.0; GOODS],
                 vwap: vec![BASE_PRICE; GOODS],
                 internal: 0.0,
                 external: 0.0,
@@ -532,18 +490,6 @@ impl Lab {
             warehouses: Warehouses::new(warehouses).with_fluctuation(spec.fluctuation.max(0.0)),
             market,
             polities,
-            rule: LevelRule::Counterparty,
-            forgetting: 0.1,
-            gain: 0.02,
-            // **默认定规范。** `level = index × e^wedge` 在
-            // `index → index·c, wedge → wedge − ln c` 下不变，所以楔子的**均值是
-            // 一个规范自由度**：它不携带任何信息，只是把指数已经承载的水平又说了一遍。
-            // 留着它自由，环路就会沿这个方向漂——实测三产楔子漂到 −35.344，把**所有**
-            // 政体的三产水平一起压到指数的 4.5e-16，于是三产的买价变成 5.12e-17，
-            // t2 毛利 = 16×5.12e-17 − 16×3.14e-2 < 0 ⇒ 停产 ⇒ execution 冻结 ⇒ 洪水无界。
-            // 每轮跨政体中心化就把这个不可观测的自由度钉在 0 上，楔子只留相对信息。
-            recenter: true,
-            recenter_gain: 1.0,
             anchor: true,
             gauge: vec![0.0; GOODS],
             round: 0,
@@ -554,31 +500,6 @@ impl Lab {
         let snapshot = lab.snapshot();
         lab.history.push(snapshot);
         lab
-    }
-
-    pub fn with_rule(mut self, rule: LevelRule) -> Self {
-        self.rule = rule;
-        self
-    }
-
-    pub fn with_forgetting(mut self, forgetting: f32) -> Self {
-        self.forgetting = forgetting.clamp(0.0, 1.0);
-        self
-    }
-
-    pub fn with_gain(mut self, gain: f32) -> Self {
-        self.gain = gain.max(0.0);
-        self
-    }
-
-    pub fn with_recenter(mut self, recenter: bool) -> Self {
-        self.recenter = recenter;
-        self
-    }
-
-    pub fn with_recenter_gain(mut self, gain: f32) -> Self {
-        self.recenter_gain = gain;
-        self
     }
 
     /// 仓库内部的学习率：响应曲面、价格曲线、账本记忆。
@@ -934,7 +855,7 @@ impl Lab {
             }
         }
         // 本地价读数：逐政权 = 该政权地方账本中间价（由学习曲线产出的**绝对报价**聚合而来）。
-        // `wedge`/`apply_levels` 那套"独立学一个水平"的路子已经退场（§20.11）。
+        // 这里不再有"独立学一个水平"的状态：那条楔子/`apply_levels` 的路子已整条删掉（§20.7–§20.13）。
         let goods = self.market.merchandises.len();
         for (p, polity) in self.polities.iter_mut().enumerate() {
             let readout = local_readout(&self.warehouses, p, goods);
@@ -954,7 +875,7 @@ impl Lab {
         if self.anchor {
             self.anchor_prices();
         }
-        self.update_levels();
+        self.update_diagnostics();
         self.round += 1;
         let snapshot = self.snapshot();
         self.history.push(snapshot);
@@ -987,20 +908,19 @@ impl Lab {
         }
     }
 
-    fn update_levels(&mut self) {
-        let rule = self.rule;
-        let forgetting = self.forgetting;
-        let gain = self.gain;
-        let recenter = self.recenter;
-        let recenter_gain = self.recenter_gain;
+    /// 每轮的**诊断读数**：逐政权的成交均价（`vwap`）、内部/跨境成交量、现金。
+    ///
+    /// 这里**没有任何价格水平状态**。曾经那条「独立学一个楔子、再把指数乘回去」的路子
+    /// 已经整条退场（§20.7–§20.13）：价格水平由学习曲线产出的**绝对报价**承载，本函数
+    /// 只把已经发生的事记成读数，不写回任何决策路径。
+    fn update_diagnostics(&mut self) {
         let Self {
             polities,
             warehouses,
             market,
-            departments,
             ..
         } = self;
-        let mut observations = vec![vec![(0.0f32, 0.0f32, 0.0f32); GOODS]; polities.len()];
+        let mut observations = vec![vec![(0.0f32, 0.0f32); GOODS]; polities.len()];
         let mut internal = vec![0.0f32; polities.len()];
         let mut external = vec![0.0f32; polities.len()];
         let traders = market.traders.len();
@@ -1016,13 +936,9 @@ impl Lab {
                 if !(deal > 0.0) {
                     continue;
                 }
-                let quote = merchandise.price.max(1e-6);
-                // **绝对口径**：不再除以指数。指数是读数，进了这里就又变成了输入。
-                let counterparty = 2.0 * deal.ln() - quote.ln();
                 let entry = &mut observations[polity][k];
                 entry.0 += volume;
                 entry.1 += volume * deal;
-                entry.2 += volume * counterparty;
             }
             for j in 0..traders {
                 let other = warehouse_polity(j);
@@ -1041,46 +957,10 @@ impl Lab {
         }
         for (p, polity) in polities.iter_mut().enumerate() {
             for k in 0..GOODS {
-                let (volume, value, counterparty) = observations[p][k];
-                let vwap = if volume > 0.0 {
-                    // **绝对口径**：本地成交均价本身就是价格水平，不再除以指数。
-                    value / volume
-                } else {
-                    polity.vwap[k]
-                };
-                polity.vwap[k] = vwap;
-                match rule {
-                    LevelRule::Fixed => {}
-                    LevelRule::OwnVwap => {
-                        if volume > 0.0 && vwap > 0.0 {
-                            polity.wedge[k] += forgetting * (vwap.ln() - polity.wedge[k]);
-                        }
-                    }
-                    LevelRule::Counterparty => {
-                        if volume > 0.0 {
-                            let observed = counterparty / volume;
-                            polity.wedge[k] += forgetting * (observed - polity.wedge[k]);
-                        }
-                    }
-                    LevelRule::Shortfall | LevelRule::Pressure => {
-                        let mut need = 0.0;
-                        let mut surplus = 0.0;
-                        for warehouse in &warehouses.warehouses[polity.span()] {
-                            let stock = &warehouse.stocks[k];
-                            need += (stock.target_volume - stock.volume).max(0.0);
-                            surplus += (stock.volume - stock.target_volume).max(0.0);
-                        }
-                        let pressure = (need - surplus) / (need + surplus + BASE);
-                        polity.wedge[k] += gain * pressure;
-                        if rule == LevelRule::Pressure {
-                            polity.wedge[k] -= forgetting * polity.wedge[k];
-                        }
-                    }
+                let (volume, value) = observations[p][k];
+                if volume > 0.0 {
+                    polity.vwap[k] = value / volume;
                 }
-                // 旧代码这里还有 `clamp(-MAX_WEDGE, MAX_WEDGE)`（±2.0）。那是个假天花板：
-                // §3.4 表里 `counterparty` 那一列的 −200% 就是钳位本身，不是学出来的楔子。
-                // 去掉之后发散会真的发走出去，代价是那个地方的参照价可能变成非有限——
-                // 这由 apply_levels 的有限性回退接住，而不是由一个常数掩盖。
             }
             polity.internal = internal[p];
             polity.external = external[p];
@@ -1088,18 +968,6 @@ impl Lab {
                 .iter()
                 .map(|warehouse| warehouse.currency)
                 .sum();
-        }
-        if recenter {
-            for k in 0..GOODS {
-                let mean = polities
-                    .iter()
-                    .map(|polity| polity.wedge[k])
-                    .sum::<f32>()
-                    / polities.len() as f32;
-                for polity in polities.iter_mut() {
-                    polity.wedge[k] -= recenter_gain * mean;
-                }
-            }
         }
     }
 
@@ -1129,11 +997,6 @@ impl Lab {
                 .merchandises
                 .iter()
                 .map(|merchandise| merchandise.price)
-                .collect(),
-            wedges: self
-                .polities
-                .iter()
-                .map(|polity| polity.wedge.clone())
                 .collect(),
             levels: self
                 .polities
@@ -1170,13 +1033,6 @@ impl Lab {
         self.polities
             .iter()
             .map(|polity| polity.level.clone())
-            .collect()
-    }
-
-    pub fn wedges(&self) -> Vec<Vec<f32>> {
-        self.polities
-            .iter()
-            .map(|polity| polity.wedge.clone())
             .collect()
     }
 }
