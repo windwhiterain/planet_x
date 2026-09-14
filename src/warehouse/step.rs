@@ -90,6 +90,101 @@ pub(super) fn maximize_log_scale(objective: impl Fn(f32) -> f32) -> f32 {
     }
 }
 
+/// 报价维度 **argmax**：用卖出学习曲线，卖 `quantity` 件能拿到的**最好收入**。
+///
+/// 与 `sale_price` 同一个目标函数——这里只取最优值（给别人估值用），不取报价。
+/// 价格不是一个存量数：**每次需要它都在这里现算一遍**。
+pub(crate) fn best_sale_revenue(stock: &Stock, quantity: f32) -> f32 {
+    if !(quantity > 0.0) {
+        return 0.0;
+    }
+    let response = stock.sell_response();
+    let curve = stock.sell_price_curve();
+    let log_price = maximize_log_scale(|log_price| {
+        let price = log_price.exp();
+        let aggressiveness = Stock::sell_aggressiveness(price);
+        let dealt = response.get(quantity, aggressiveness);
+        let revenue = dealt * curve.get(price);
+        if revenue.is_finite() {
+            revenue
+        } else {
+            f32::NEG_INFINITY
+        }
+    });
+    let price = log_price.exp();
+    let dealt = response.get(quantity, Stock::sell_aggressiveness(price));
+    let revenue = dealt * curve.get(price);
+    if revenue.is_finite() && revenue > 0.0 {
+        revenue
+    } else {
+        0.0
+    }
+}
+
+/// 报价维度 **argmin**：用买入学习曲线，买到 `quantity` 件**至少要花多少钱**。
+///
+/// 曲线给不出可行报价时返回 `f32::INFINITY`（= 买不到）。
+pub(crate) fn best_purchase_cost(stock: &Stock, quantity: f32) -> f32 {
+    if !(quantity > 0.0) {
+        return 0.0;
+    }
+    let response = stock.buy_response();
+    let curve = stock.buy_price_curve();
+    let mut best = f32::INFINITY;
+    for index in 0..SCALE_COARSE_STEPS {
+        let price = coarse_log_scale(index).exp();
+        if !price.is_finite() || !(price > 0.0) {
+            continue;
+        }
+        let unit = curve.get(price);
+        if !unit.is_finite() || !(unit > 0.0) {
+            continue;
+        }
+        let aggressiveness = Stock::buy_aggressiveness(price);
+        let volume = volume_for_dealt(
+            response.share(aggressiveness),
+            response.depth(aggressiveness),
+            quantity,
+        );
+        if volume.is_finite() && volume > 0.0 {
+            let cost = volume * unit;
+            if cost.is_finite() && cost < best {
+                best = cost;
+            }
+        }
+    }
+    best
+}
+
+/// 报价维度 **argmax**：这笔现金按买入学习曲线**最多能换到几件**。
+pub(crate) fn affordable_quantity(stock: &Stock, cash: f32) -> f32 {
+    if !(cash > 0.0) {
+        return 0.0;
+    }
+    let response = stock.buy_response();
+    let curve = stock.buy_price_curve();
+    let mut best = 0.0f32;
+    for index in 0..SCALE_COARSE_STEPS {
+        let price = coarse_log_scale(index).exp();
+        if !price.is_finite() || !(price > 0.0) {
+            continue;
+        }
+        let unit = curve.get(price);
+        if !unit.is_finite() || !(unit > 0.0) {
+            continue;
+        }
+        let affordable = affordable_volume(unit, cash);
+        if !(affordable > 0.0) {
+            continue;
+        }
+        let dealt = response.get(affordable, Stock::buy_aggressiveness(price));
+        if dealt.is_finite() && dealt > best {
+            best = dealt;
+        }
+    }
+    best
+}
+
 fn fluctuation_factor(amplitude: f32, rng: &mut fastrand::Rng) -> f32 {
     let unit = rng.f32().clamp(1e-6, 1.0 - 1e-6);
     if !(amplitude > 0.0) {

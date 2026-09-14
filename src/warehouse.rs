@@ -1,4 +1,4 @@
-mod step;
+pub(crate) mod step;
 
 #[cfg(test)]
 mod tests;

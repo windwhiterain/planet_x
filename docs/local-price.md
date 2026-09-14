@@ -2029,3 +2029,36 @@ Stock::marketing_price = sale_price(学习曲线 + 兑现率曲面)
 **仍然残留**：`Polity.wedge` / `update_levels` / `LevelRule` / `--rule` / `--forgetting` /
 `--gain` / `--recenter`。它们现在只影响**显示**（`--anchor` 只把读数按"篮子几何平均 = 1"
 归一化），不进任何报价或决策路径。待办：整条删掉，让 `Polity` 只剩记账字段。
+
+### 20.13 价格不再是一个存量数：凡要价格的地方，当场对曲线做 argmin/argmax
+
+原则（本轮落地）：**不允许"从曲线里读一个数值当作价格"，也不允许把价格存下来再用。**
+价格不是一个固定的数；每个需要价格的地方，都必须在对应曲线上**现算一次 argmin/argmax**。
+
+为此在 `warehouse::step` 里暴露三个曲线估值助手：
+
+| 助手 | 语义 |
+|---|---|
+| `best_sale_revenue(stock, q)` | 报价维度 **argmax**：卖出 `q` 件能拿到的**最好收入** |
+| `best_purchase_cost(stock, q)` | 报价维度 **argmin**：买入 `q` 件**至少要花多少钱**（买不到 → ∞） |
+| `affordable_quantity(stock, cash)` | 报价维度 **argmax**：这笔现金**最多能换到几件** |
+
+部门决策改成**全部走曲线**（`department/step.rs`）：
+
+- `basket_value` 不再收 `bids`/`asks`（账本挂牌价），改收 `unit_sell` / `unit_buy`，
+  两样都在 `plan` 开头用上面的助手**现算**；
+- `material_ceiling` 的买入力改成 `affordable_quantity(stock, currency)`；
+- `plan` 去掉 `book: &[Book]` 参数，`Departments::plan` 也不再解构 `books`。
+
+审计（逐处 grep 过）：
+
+| 谁 | 读什么 | 性质 |
+|---|---|---|
+| 交易者决策 `sale_price` / `purchase_price` | 自己的两条曲线 | argmax / argmin（本来就是这样） |
+| 部门决策 `plan` | 自己的两条曲线 | argmax / argmin（本轮） |
+| 学习信号 `observe` | 本轮的自己的报价 + 成交价 | 学习用的观测，不是"读价格" |
+| 账本 `books` / `aggregate_index` / `local_readout` | 交易者报价 | **纯读数（display）** |
+| `update_levels` / `wedge` | 报价、成交价 | **残留**：只写显示字段，待删 |
+
+实测（5 个新抽种子 × 20000 轮）：`log10` index max/min = **2.9–8.4 / −8.2 – −4.5**，
+与上一版同量级（有界）。测试 120 过 / 12 失败 / 1 ignore。
