@@ -57,9 +57,9 @@ fn main() {
             snapshot.granted,
             snapshot.treasury,
             snapshot
-                .executions
+                .intake
                 .iter()
-                .map(|execution| format!("{execution:.2}"))
+                .map(|taken| format!("{taken:.2}"))
                 .collect::<Vec<String>>()
                 .join("/"),
         );

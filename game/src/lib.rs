@@ -41,7 +41,9 @@ pub struct Snapshot {
     pub turnover: f32,
     pub granted: f32,
     pub treasury: f32,
-    pub executions: [f32; DEPARTMENTS],
+    /// 逐部门**实际提货总量**。原来这里是 `execution`（执行率），该读数已随
+    /// `distribution` 归一化一起删除；物理活跃度由 `intake` 承担。
+    pub intake: [f32; DEPARTMENTS],
     pub revenues: [f32; DEPARTMENTS],
     pub payments: [f32; DEPARTMENTS],
     pub holdings: [[f32; GOODS]; DEPARTMENTS],
@@ -146,19 +148,17 @@ impl DomesticEconomy {
             None => 100.0,
         };
 
-        let mut executions = [0.0; DEPARTMENTS];
+        let mut intake = [0.0; DEPARTMENTS];
         let mut revenues = [0.0; DEPARTMENTS];
         let mut payments = [0.0; DEPARTMENTS];
         let mut holdings = [[0.0; GOODS]; DEPARTMENTS];
         let mut consumption = 0.0;
         for (i, department) in self.departments.departments.iter().enumerate() {
-            executions[i] = department.policy_execution();
-            let execution = department.policy_execution();
-            for policy in &department.policies {
-                let share = policy.distribution() * execution;
-                for (k, intake) in policy.consumptions.iter().enumerate() {
-                    consumption += share * intake.max(0.0) * prices[k];
-                }
+            // 消费额直接用**实际提货量**算，比 `分布 × 配方 × 执行率` 更直接，
+            // 也不再依赖那个已作废的读数。
+            intake[i] = department.intake().iter().sum();
+            for (k, taken) in department.intake().iter().enumerate() {
+                consumption += taken.max(0.0) * prices[k];
             }
             for (k, stock) in self.warehouses.warehouses[i].stocks.iter().enumerate() {
                 holdings[i][k] = stock.volume;
@@ -198,7 +198,7 @@ impl DomesticEconomy {
             turnover,
             granted: self.departments.grants.iter().sum(),
             treasury: self.departments.treasury,
-            executions,
+            intake,
             revenues,
             payments,
             holdings,
