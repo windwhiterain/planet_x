@@ -87,7 +87,8 @@ gap           = volume − target_volume + min(volume − previous_volume, 0)
 
 用它们算：
 
-- `basket_value(policy)` → `unit_sell` / `unit_buy`（都取 `q = 1` 件）→ 收入、成本、篮子需求；
+- `basket_value(policy)` → `unit_sell` / `unit_buy`（都取 `q = 1` 件）→ 收入、成本、篮子需求
+  （为什么不按整篮数量估，见 §7.2）；
 - `production_score` = `(收入 − 成本) × 产能/原料天花板`（亏损为 0）；
 - `consumption_potential` = `motive / 成本`（产能不限时用 `motive / 产能占用`）；
 - `material_ceiling` 的买入力 = `affordable_quantity(stock, currency)`。
@@ -156,8 +157,22 @@ Lab::step
    —— **已删**。`update_levels` 改名 `update_diagnostics`，只写 `vwap` / `internal` /
    `external` / `cash` 四个读数；`Polity` 不再有 `wedge`，CLI 也没有那五个旋钮
    （JSON 的逐政权字段从 `wedge` 换成 `level`）。
-2. **部门估值的量取 "1 件"**：`best_*_revenue(stock, 1.0)`。如果要让兑现率曲面的非线性
-   进来（比如"这次计划要卖一篮"），把 `1.0` 换成 policy 的对应数量。
+2. ~~**部门估值的量取 "1 件"**~~ —— **判过：不做**（本轮）。试过把 `best_*_revenue(stock, 1.0)`
+   换成 policy 的对应数量（整篮口径）：兑现率曲面在**大批量上饱和**，于是它**系统性惩罚
+   高吞吐工艺**——
+   - 探针（默认先验、天花板 `share_max × depth_max = 4×4 = 16`、带宽 1.0）：慢工艺
+     （进 0.8 / 出 4）边际利润 +3.68 → **+2.75**；快工艺（进 9.6 / 出 12）
+     **+4.48 → −13.98**（收入 13.22 → 5.84、成本 8.74 → 19.82）。`production_score`
+     见 `margin ≤ 0` 就返回 0，于是 `a_process_choice_follows_whichever_resource_is_tight`
+     里"产能紧张就选快工艺"直接变成份额 **0**。
+   - **与带宽无关**：`quote_band = 44` 下快工艺仍是 **−13.25**（不是 §7.3 收窄造成的）。
+   - 完整模拟（4 种子 × 5000 轮）不会崩（指数甚至更紧），但部分种子成交从 ~90 掉到
+     ~48–51 件/轮：它是在**改经济**，不是在修 bug。
+   - **不做的理由**：产出侧那一半是概念错配——部门**不直接把产出成批卖掉**，产出进仓库、
+     由仓库按 `target = 3 × taken` 自适应申报；"整篮卖出去"把下游并不存在的市场冲击
+     提前算进了工艺选择。买入侧那一半（`best_purchase_cost(stock, consumption)`）与部门
+     实际采购一致、是成立的，但不足以单独改工艺选择的相对优劣。
+   - 另有 `margin × ceiling` 对凹估值的线性外推不自洽。原型补丁已回退。
 3. ~~**报价搜索带宽还是 `e^{±44}`**~~ —— **已落地（本轮）**。每个 `Stock` 记住上一轮
    自己的**成交价** `last_deal`（带宽中心，`observe` 更新），报价搜索落在
    `last_deal × e^{±quote_band}` 里；`quote_band` 默认 **1.0**（`Warehouses::DEFAULT_QUOTE_BAND`，
