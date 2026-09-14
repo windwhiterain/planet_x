@@ -14,7 +14,8 @@ pub fn world_view(snapshot: &Snapshot) -> WorldView {
     let departments = (0..DEPARTMENTS)
         .map(|department| DepartmentView {
             name: DEPARTMENT_NAMES[department].to_string(),
-            execution: snapshot.executions[department],
+            // `executions`（执行率）随 §19.4 的换名删掉了，物理活跃度由 `intake` 承担。
+            execution: snapshot.intake[department],
             revenue: snapshot.revenues[department],
             payment: snapshot.payments[department],
             holdings: (0..GOODS)
