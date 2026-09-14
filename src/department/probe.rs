@@ -374,7 +374,7 @@ impl Probe {
                 observation.stock += stock.volume;
                 let declared = self.market.traders[i].merchandises[k].volume;
                 let sell = declared > 0.0;
-                let scale = stock.marketing_price_scale();
+                let scale = stock.marketing_price();
                 let aggressiveness = if sell {
                     Stock::sell_aggressiveness(scale)
                 } else {

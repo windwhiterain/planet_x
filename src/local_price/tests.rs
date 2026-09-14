@@ -32,39 +32,46 @@ fn fixed_levels_keep_every_wedge_at_zero() {
 }
 
 #[test]
-fn the_price_level_has_no_anchor_of_its_own() {
-    let mut free = Lab::new(&symmetric(), 11)
+fn the_index_is_only_a_readout_of_the_local_prices() {
+    // 银河价是读数：它等于**各地方本地价的成交量加权几何平均**，而本地价就是该地方
+    // 账本的中间价（`Book::mid`，买卖双方**绝对报价**的几何平均）。这里逐位复算一遍。
+    // `anchor=false`：这里要验的是**原始读数**，不是被篮子归一化之后的显示值。
+    let mut lab = Lab::new(&symmetric(), 11)
         .with_rule(LevelRule::Fixed)
         .with_anchor(false);
-    let mut excursion = 0.0f32;
-    for _ in 0..80 {
-        free.step();
-        let snapshot = free.history.last().unwrap();
-        for k in 0..GOODS {
-            excursion = excursion.max((snapshot.prices[k] / BASE_PRICE).ln().abs());
+    lab.run(40);
+    let snapshot = lab.history.last().unwrap();
+    for k in 0..GOODS {
+        let mut weight = 0.0f32;
+        let mut log_sum = 0.0f32;
+        for (locality, row) in lab.warehouses.books.iter().enumerate() {
+            let Some(book) = row.get(k) else { continue };
+            if !book.is_formed() {
+                continue;
+            }
+            let volume: f32 = lab
+                .warehouses
+                .warehouses
+                .iter()
+                .filter(|warehouse| warehouse.locality == locality)
+                .map(|warehouse| warehouse.stocks[k].marketing_volume().abs())
+                .sum();
+            if volume > 0.0 && volume.is_finite() {
+                weight += volume;
+                log_sum += volume * book.mid().ln();
+            }
+        }
+        if weight > 0.0 {
+            let expected = (log_sum / weight).exp();
+            assert_close(
+                snapshot.prices[k],
+                expected,
+                1e-4,
+                "银河读数 = 各地方本地价的加权几何平均",
+            );
         }
     }
-    assert!(
-        excursion > 0.2,
-        "没有任何锚时价格水平应当四处游走，实际最大偏离 {excursion}",
-    );
-
-    let mut anchored = Lab::new(&symmetric(), 11)
-        .with_rule(LevelRule::Fixed)
-        .with_anchor(true);
-    for _ in 0..80 {
-        anchored.step();
-        let snapshot = anchored.history.last().unwrap();
-        let basket = snapshot
-            .prices
-            .iter()
-            .map(|price| price.max(1e-9).ln())
-            .sum::<f32>()
-            / GOODS as f32;
-        assert_close(basket.exp(), BASE_PRICE, 1e-3, "锚应当把篮子钉在 1");
-    }
 }
-
 #[test]
 fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
     let mut lab = Lab::new(&scarce(), 11).with_rule(LevelRule::Fixed);

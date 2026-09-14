@@ -1,5 +1,10 @@
 # 局部价格实验记录（数据 + 名词）
 
+> ⚠️ 这是**实验日志**：§1–§20 记录了多轮口径变更，§16–§18 的数字已作废（见 §19.3），
+> §19 之后模型又改了几轮（display-only 指数 → 绝对价 → **价格不再存量、全部由曲线
+> argmin/argmax 现算**）。**当前设计见 [`market-system.md`](market-system.md)**；
+> 本文件只作为"为什么"的历史记录，不要再引用其中的价格数字。
+
 这份文档记录 `local-price` 分支上的实验：**同一个商品在不同地方的成交价是不是真的不一样、能不能被算出来、能不能拿来决策**。所有数字都是跑出来的原始输出，每条都附复现命令。
 
 > 数据基线：提交 `3f3a211`（"生产决策改用本地价"之后）。所有数字在 `cargo run -p planet_x --bin local_price -- ...` 上复测过。
@@ -1812,3 +1817,253 @@ cargo run --release -p planet_x --bin local_price -- \
   --scenario modern --capacity 12 --specialty 2 --fluctuation 0.05 \
   --seed 3 -n 400 --every 20 --json | grep -o '"gauge":\[[^]]*\]'
 ```
+
+### 20.7 追加：把 `max/min` 也换掉之后——问题不是口径，是缺一个锚
+
+§20.5 的第 1 条已落地：新增 `Warehouses::index_books`，两侧取**申报量加权的 log 平均**
+（`LogSide`），`max/min` 只留给 `books`（部门决策价）。指数不再读次序统计量。
+
+**还是不收敛**（20000 轮）：`log10(max index)` seed 3/5/8 = **18.6 / 18.5 / 17.3**。
+残差来源换了一个：不再是 `max` 的向上偏置，而是**买卖两侧的尺度不对称 × 买卖量不等**
+——`mid = sqrt(买侧均值 · 卖侧均值)`，两侧量不同时它不等于总体的加权几何平均。
+
+真正把"缺什么"定死的是这三组对照（20000 轮，seeds 3/5）：
+
+| 指数口径 | 楔子规则 | 学习器 | 结果 |
+|---|---|---|---|
+| 两侧各取 log 平均（§20.7 的改动） | `fixed` | 冻结 `--learning 1.0` | 10^15 炸 |
+| **两侧合并成一个几何平均** | `fixed` | 冻结 `--learning 1.0` | **10^0.3 稳** |
+| 两侧合并成一个几何平均 | `fixed` | 0.95 | 10^15 炸 |
+
+第二行：**只要把水平钉死，冻结学习器就能稳住**。第三行：**学习器一开动就把它重新激励起来**。
+
+结论（本轮真正的根因）：决策规则全都只看**相对**价——`realized = deal_price/reference`
+对"指数和所有尺度同时乘 c"完全不变。所以**价格的绝对水平对学习器是观测不到的**，它是一个
+**没有回复力的自由模态**。`anchor_prices` 只钉住三商品的**共模**，剩下两个相对模态就沿这个
+自由方向漂，学习器的任何不对称都会持续往里灌。
+
+**所以这不是口径问题，是缺一个锚。** 指数是"报价的自指聚合"，必须再补一条**逐商品的水平锚**
+（或者让指数由清空状态/货币约束推动）。在补上之前，换任何聚合口径、调任何学习率，都只是决定
+它漂多快。第 2 行那个"合并几何平均"就是事实上的水平锚，代价是**全局指数被冻住**：它对学习器
+本来就是不可观测的规范方向，冻住它不损失可观测信息，但"银河指数还能不能反映跨商品的相对
+稀缺"这件事需要拍板。
+
+### 20.8 结论：银河指数必须是 **display-only**（本轮落地）
+
+§20.7 的三行对照说明"缺一个锚"。**这个锚不该是指数**——指数的正确定位是**读数**：
+它由市场跑完之后汇总出来，不该再回到任何人的报价/决策里。原来的
+`参照价 = 银河指数 × e^楔子` 让指数变成了全场的输入，于是
+
+```
+指数 → 参照价 → 报价 → 账本 → 指数
+```
+
+是一圈乘法闭环；更糟的是参照价每轮被指数同步缩放，买方的 `cash / (参照价 × realized)`
+对整体价格水平**完全不变**——这个经济根本没有名义锚。指数越像"价格"，越没人真的用它。
+
+本轮落地：
+
+- `apply_levels`：`参照价 = BASE_PRICE × e^楔子`。**指数不在这里。**
+- `update_levels`：楔子规则改成**绝对口径**（`vwap = 成交额 / 成交量`、
+  `counterparty = 2·ln(deal) − ln(quote)`），不再除以指数。于是本地价由本地成交/对手价推出来，
+  银河指数只是把各地方账本汇总起来的读数。
+- **随机化默认**：`--seed` 不给就每次抽一个新种子，并打到 stderr
+  （`--json` 的 stdout 保持纯 JSONL）。`fluctuation` 本来就是默认 0.05。
+
+效果（5 个**新抽**种子 × 20000 轮，`--rule fixed`）：
+
+| | log10(max index) | log10(min index) |
+|---|---|---|
+| **display-only** | **7.0 – 9.9** | **−9.8 – −5.7** |
+| 旧（index 喂参照价） | 14.3 – 18.6 | −42.5 – −12.6 |
+
+⇒ 从"连乘到 f32 边界"变成"±10 量级的漂移"。**方向确认，但还没结案**：剩下的漂移来自
+**本地价自己的水平**——现在它被"每轮固定拨款"部分钉住，但各地之间仍会相对漂移。
+下一步是在**本地**那一层补回复力（未成交量/清空，或本地价的慢锚），继续不要动指数。
+
+默认规则 `counterparty`（现在也是绝对口径）仍偏大（10^11–13 量级），`vwap`/`fixed` 更小；
+楔子规则本身还需要按"本地价"重新审一遍。
+
+测试：122 过 / 10 失败 → **119 / 13**。新增的 3 条全是**价格水平读数**类
+（`a_learned_wedge_costs_the_level_without_buying_a_gap`、
+`a_running_transformation_shrinks_the_scarcity_premium`、
+`the_anchor_leaves_the_relative_premium_of_a_scarce_good`）——它们断言"指数/楔子随稀缺变化"，
+而按本节定位，稀缺应当体现在**本地价**上。重基线时让它们读逐政权本地价，不要读银河指数。
+
+### 20.9 本地价与银河指数彻底脱钩：指数只剩读数
+
+§20.8 之后还留着四处"指数回头当输入"的地方，这一轮全部拔掉：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `Warehouses::step` 的 `references` 回退 | 回退到 `market.merchandises[k].price` | 回退到计价物 `FALLBACK_REFERENCE`（= `BASE_PRICE`） |
+| `update_books` 的 `carried` | `local_ratio × 银河指数` | `local_ratio × 本地参照价` |
+| `observe_local_ratio` 的分母 | 银河指数 | 本地参照价（`local_ratios` 从此是"本地成交 ÷ 本地价"） |
+| `department::step::plan` 买卖价的回退 | 银河指数 | `warehouse.reference`（本地价） |
+
+于是：**本地价 = `polity.level`（= `BASE_PRICE × e^楔子`，逐政权逐商品直接学的绝对值），
+银河价 = `aggregate_index`（各地方账本的成交量加权几何平均）——只被写进
+`market.merchandises[k].price`，除此之外没有任何行为路径读它。**
+
+`warehouse::tests` 里有 3 条一直靠"参照价默认取市场初始价"（`every_reachable_target_is_cleared_in_one_step`、
+`reversing_the_same_trade_does_not_revalue_the_good`、`zero_price_market_is_frozen_and_finite`），
+按新语义改成显式给本地参照价（新增 `set_reference` 辅助）。
+
+规则对照（3 个**新抽**种子 × 10000 轮，`log10` 三商品 index 的 max/min）：
+
+| 本地价规则 | log10 max | log10 min |
+|---|---|---|
+| `fixed`（本地价恒为计价物） | 3.3 – 5.6 | −6.5 – −4.2 |
+| `pressure` | 4.0 – 7.7 | −7.6 – −4.5 |
+| `vwap` | 7.8 – 9.2 | −19.5 – −10.6 |
+| `counterparty`（默认） | 11.0 – 14.7 | −20.1 – −10.9 |
+
+两条结论：
+
+1. **默认规则该换**：`counterparty` 是"追对手的绝对报价"，本来就是随机游走，是四个里最差的；
+   `pressure`（库存压力 + 衰减）和 `fixed` 最好。
+2. **水平还在从 `scale` 泄漏**：`fixed` 把本地价钉成常数了，指数仍然漂到 10^5 ——说明
+   水平不只存在于 `wedge`，还存在于交易者各自的 `marketing_price_scale`。现在 `scale`
+   同时干两件事：**本地价水平** 和 **个体价差**。下一步要把这两件事拆开：
+   本地价（逐地方逐商品一个绝对值，直接学）负责水平，`scale` 只允许是它附近的一个小价差。
+
+### 20.10 银河价 = **本地价**的加权平均（不是交易者报价的平均）
+
+§20.9 之后还剩一个说不通的地方：`--rule fixed` 已经把本地价钉成常数 1，读数仍漂到 1e5。
+原因是读数平均的是**交易者报价**：
+
+```
+quote = 本地价 × marketing_price_scale
+```
+
+`marketing_price_scale` 是每个交易者**优化器**在 `e^{±44}` 里挑的价差，不是学的量；
+`scale_normalization` 只钉住它的**全局平均**，没管**离散度**。所以读数被价差的离散度带跑
+——**漂的是读数，不是本地价**。本地价（`polity.level`，由 `update_levels` 的规则直接学）
+只有一个 mode。
+
+本轮把 `aggregate_index` 改成：**银河价 = 各地方本地价（`warehouse.reference`）的
+成交量加权几何平均**。交易者报价不再进入读数（上一轮加的 `index_books` / `LogSide`
+整条删掉，`update_books` 只剩决策账本）。
+
+实测（5 个**新抽**种子 × 20000 轮，log10 三商品 index 的 max / min）：
+
+| 本地价规则 | max / min |
+|---|---|
+| `fixed` | 0.0 / 0.0（恒等于 1） |
+| `pressure` | 0.0–0.1 / −0.1–0.0 |
+| `vwap` | 3.8–7.2 / −18.2 – −9.3 |
+| `counterparty`（当前默认） | 14.8–29.5 / −40.3 – −14.9 |
+
+三条结论：
+
+1. 读数现在**只由学出来的本地价决定**：`fixed` 恒为 1，`pressure` 稳定在 1 附近。
+2. 剩下的问题只在**本地价的学习规则**上：`vwap` / `counterparty` 都是"追交易者报价"
+   的自指规则 → 漂；`pressure`（库存压力 + 衰减）有回复力 → 有界。
+3. **默认规则应当从 `counterparty` 换成 `pressure`**（`Lab::new` 与 CLI `Args` 两处）。
+
+测试：119 过 / 13 失败 / 1 ignore。`the_price_level_has_no_anchor_of_its_own` 断言的
+是"银河指数自己没有锚、`--no-anchor` 下四处游走"——这条旧语义被本轮推翻，已改写成
+`the_index_is_only_a_readout_of_the_local_prices`（本地价被固定规则钉住时读数也不游走）。
+
+### 20.11 学习曲线与报价都改成**绝对价**：`scale` 退场
+
+前面几轮一直没拆干净：本地价（`wedge`）虽然已经是绝对值，但**交易者的决策变量仍是
+`marketing_price_scale`**，学习曲线学的也还是 `deal_price / 参照价`。这正是"曲线学不出
+水平、水平没有锚"的来源。
+
+本轮把这一层整个拆掉：
+
+| 之前 | 现在 |
+|---|---|
+| `quote = 参照价 × marketing_price_scale` | `quote = marketing_price`（**绝对价**） |
+| 价格曲线学 `scale → 成交价 / 参照价` | 学 `报价 → 成交价`（两个都是**绝对值**） |
+| 买方 `unit = 参照价 × realized` | `unit = 曲线预测的绝对成交价` |
+| 力度：卖方 `1/scale`、买方 `scale` | 卖方 `1/报价`、买方 `报价` |
+| `scale_normalization` 钉 log 尺度的全局平均 | **删掉**（没有"尺度"了） |
+| `price_of()`、`REALIZED_FLOOR` | **删掉** |
+
+关键的一步：**绝对口径让现金约束不再自动缩放**。旧口径里 `unit = 参照价 × realized`，
+参照价每轮被指数重新缩放，价格水平于是在约束里被约掉；现在 `cash` 与 `unit` 都是绝对值，
+**报价高了就真的买不起**——水平的回复力由学习曲线自己提供。
+
+读数同步改成：**各地方账本中间价**（买卖双方绝对报价的几何平均）的成交量加权几何平均。
+`warehouse.reference` / `wedge` 从此只做"某一侧没挂单"时的回退。
+
+实测（5 个新抽种子 × 20000 轮，log10 三商品 index 的 max / min）：
+
+| | max / min |
+|---|---|
+| **绝对价（本轮）** | **1.0–6.0 / −7.9 – −1.5** |
+| 相对价（上一轮） | 14.8–29.5 / −40.3 – −14.9 |
+
+一条 2000 轮轨迹稳定在 0.5–3（计价物 = 1）附近，随后切到 1–8 / 0.02 的另一档——
+是**有界的经济波动**，不再是连乘到 f32 边界。
+
+测试：119 过 / 13 失败 → **120 过 / 12 失败 / 1 ignore**。`scale` 相关的断言按新语义重写：
+`zero_price_market_is_frozen_and_finite`（"零价市场"在绝对价下不存在）改成
+`a_market_with_no_initial_readout_stays_finite`；两条价格水位测试的 band 放宽到
+`1e-3..=1e4`；`the_index_is_only_a_readout_of_the_local_prices` 改成逐位复算
+"各地方本地价的加权几何平均"。
+
+### 20.12 本地价的来源与引用方（审计）
+
+报价只从一个地方来：
+
+```
+Stock::marketing_price = sale_price(学习曲线 + 兑现率曲面)
+                       或 purchase_price(同一套 + 现金约束)
+报价                    = marketing_price            （绝对价）
+```
+
+所以"本地价"现在**全是读数**，没有独立状态：
+
+| 口径 | 怎么来的 |
+|---|---|
+| 地方账本中间价 `Book::mid` | 该地方所有交易者**绝对报价**的两侧边际价之几何平均（`update_books`） |
+| 逐政权本地价 `polity.level` | 该政权地方账本中间价（`local_readout`，`Lab::step` 每轮刷新） |
+| 银河价 `market.merchandises[k].price` | 各地方本地价的成交量加权几何平均（`aggregate_index`），**纯读数** |
+
+审计"谁还在引用非学习曲线来源的价格"：**只有一处**——`department::step::plan` 在某一侧
+没有挂单时回退到 `warehouse.reference`（= `wedge` 学出来的水平）。本轮把它改成**该部门
+自己学出来的绝对报价** `Stock::marketing_price`。
+
+改完之后 `warehouse.reference` 再没有读者，连同 `apply_levels`（它唯一的作用就是把
+`wedge` 写进 `reference`）一起删掉；`polity.level` 改由 `local_readout` 每轮从账本刷新，
+不再由 `wedge` 推。
+
+**仍然残留**：`Polity.wedge` / `update_levels` / `LevelRule` / `--rule` / `--forgetting` /
+`--gain` / `--recenter`。它们现在只影响**显示**（`--anchor` 只把读数按"篮子几何平均 = 1"
+归一化），不进任何报价或决策路径。待办：整条删掉，让 `Polity` 只剩记账字段。
+
+### 20.13 价格不再是一个存量数：凡要价格的地方，当场对曲线做 argmin/argmax
+
+原则（本轮落地）：**不允许"从曲线里读一个数值当作价格"，也不允许把价格存下来再用。**
+价格不是一个固定的数；每个需要价格的地方，都必须在对应曲线上**现算一次 argmin/argmax**。
+
+为此在 `warehouse::step` 里暴露三个曲线估值助手：
+
+| 助手 | 语义 |
+|---|---|
+| `best_sale_revenue(stock, q)` | 报价维度 **argmax**：卖出 `q` 件能拿到的**最好收入** |
+| `best_purchase_cost(stock, q)` | 报价维度 **argmin**：买入 `q` 件**至少要花多少钱**（买不到 → ∞） |
+| `affordable_quantity(stock, cash)` | 报价维度 **argmax**：这笔现金**最多能换到几件** |
+
+部门决策改成**全部走曲线**（`department/step.rs`）：
+
+- `basket_value` 不再收 `bids`/`asks`（账本挂牌价），改收 `unit_sell` / `unit_buy`，
+  两样都在 `plan` 开头用上面的助手**现算**；
+- `material_ceiling` 的买入力改成 `affordable_quantity(stock, currency)`；
+- `plan` 去掉 `book: &[Book]` 参数，`Departments::plan` 也不再解构 `books`。
+
+审计（逐处 grep 过）：
+
+| 谁 | 读什么 | 性质 |
+|---|---|---|
+| 交易者决策 `sale_price` / `purchase_price` | 自己的两条曲线 | argmax / argmin（本来就是这样） |
+| 部门决策 `plan` | 自己的两条曲线 | argmax / argmin（本轮） |
+| 学习信号 `observe` | 本轮的自己的报价 + 成交价 | 学习用的观测，不是"读价格" |
+| 账本 `books` / `aggregate_index` / `local_readout` | 交易者报价 | **纯读数（display）** |
+| `update_levels` / `wedge` | 报价、成交价 | **残留**：只写显示字段，待删 |
+
+实测（5 个新抽种子 × 20000 轮）：`log10` index max/min = **2.9–8.4 / −8.2 – −4.5**，
+与上一版同量级（有界）。测试 120 过 / 12 失败 / 1 ignore。

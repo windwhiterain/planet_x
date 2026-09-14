@@ -1,36 +1,36 @@
 use super::settlement;
 use crate::department::{Department, Policy, Rationing, SettlementReport};
 use crate::market::Market;
-use crate::warehouse::{Book, Warehouse};
+use crate::warehouse::Warehouse;
+use crate::warehouse::step::{affordable_quantity, best_purchase_cost, best_sale_revenue};
 
 const FREE_COST: f32 = 1e-6;
 /// 分布的软化温度：越小越接近全押一个政策（角点、会抖），越大越平均
 const POLICY_TEMPERATURE: f32 = 0.25;
 
-/// 篮子估值：**产出按买价估、投入按卖价估**
+/// 篮子的**曲线估值**：产出按本部门**卖出学习曲线**的 argmax 估、投入按**买入学习曲线**
+/// 的 argmin 估。
 ///
-/// 这是"要跨过价差才算赚"的保守口径。旧口径两边都用同一个中间价，等于假设
-/// 自己既能按最高价卖、又能按最低价买——两头占便宜，也正是"过剩原料不会让下游变便宜"
-/// 与"没人卖也照样能给投入定价"这两个毛病的来源。
-fn basket_value(policy: &Policy, bids: &[f32], asks: &[f32]) -> (f32, f32, f32) {
+/// 这里**不读任何挂牌价 / 账本 / 指数**——价格不是一个存量数：每次需要它，就在对应曲线上
+/// 现算一遍 argmax/argmin（§20.13）。`unit_sell` / `unit_buy` 是"一件"的估值，由调用方用
+/// [`best_sale_revenue`] / [`best_purchase_cost`] 现算。
+fn basket_value(policy: &Policy, unit_sell: &[f32], unit_buy: &[f32]) -> (f32, f32, f32) {
     let mut cost = 0.0;
     let mut revenue = 0.0;
     let mut demanded = 0.0;
     for (k, consumption) in policy.consumptions.iter().enumerate() {
-        let ask = asks.get(k).copied().unwrap_or(0.0).max(0.0);
-        let bid = bids.get(k).copied().unwrap_or(0.0).max(0.0);
         let consumption = consumption.max(0.0);
         let output = policy.outputs.get(k).copied().unwrap_or(0.0).max(0.0);
         demanded += consumption;
-        cost += consumption * ask;
-        revenue += output * bid;
+        cost += consumption * unit_buy.get(k).copied().unwrap_or(0.0).max(0.0);
+        revenue += output * unit_sell.get(k).copied().unwrap_or(0.0).max(0.0);
     }
     (cost, revenue, demanded)
 }
 
-/// 生产族：把天花板内的资源全给它能赚多少钱。天花板由调用方统一到同一把尺子上
-fn production_score(policy: &Policy, bids: &[f32], asks: &[f32], ceiling: f32) -> f32 {
-    let (cost, revenue, _) = basket_value(policy, bids, asks);
+/// 生产族：把天花板内的资源全给它能赚多少钱（收入与成本都由曲线现算）。
+fn production_score(policy: &Policy, unit_sell: &[f32], unit_buy: &[f32], ceiling: f32) -> f32 {
+    let (cost, revenue, _) = basket_value(policy, unit_sell, unit_buy);
     let margin = revenue - cost;
     if margin <= 0.0 {
         return 0.0;
@@ -38,9 +38,9 @@ fn production_score(policy: &Policy, bids: &[f32], asks: &[f32], ceiling: f32) -
     margin * ceiling.max(0.0)
 }
 
-/// 消费族：只看价格，不看资源约束
-fn consumption_potential(policy: &Policy, asks: &[f32], capacity: f32) -> f32 {
-    let (cost, _, demanded) = basket_value(policy, &[], asks);
+/// 消费族：只看曲线给的买入成本，不看资源约束。
+fn consumption_potential(policy: &Policy, unit_buy: &[f32], capacity: f32) -> f32 {
+    let (cost, _, demanded) = basket_value(policy, &[], unit_buy);
     let motive = policy.motive.max(0.0);
     if motive <= 0.0 || demanded <= 0.0 {
         return 0.0;
@@ -52,24 +52,19 @@ fn consumption_potential(policy: &Policy, asks: &[f32], capacity: f32) -> f32 {
     motive / cost.max(FREE_COST)
 }
 
-/// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷
-/// （买入力按**卖价**折——那才是你真的要付的价）
-fn material_ceiling(policy: &Policy, asks: &[f32], warehouse: &Warehouse) -> f32 {
+/// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷。
+///
+/// 买入力由**买入学习曲线**现算（[`affordable_quantity`]），不读挂牌价。
+fn material_ceiling(policy: &Policy, buying_power: &[f32], warehouse: &Warehouse) -> f32 {
     let mut ceiling = f32::INFINITY;
     for (k, consumption) in policy.consumptions.iter().enumerate() {
         if *consumption > 0.0 {
-            let price = asks.get(k).copied().unwrap_or(0.0);
-            let buying_power = if price > 0.0 && warehouse.currency > 0.0 {
-                warehouse.currency / price
-            } else {
-                0.0
-            };
             let command = warehouse
                 .stocks
                 .get(k)
                 .map(|stock| stock.volume.max(0.0))
                 .unwrap_or(0.0)
-                + buying_power;
+                + buying_power.get(k).copied().unwrap_or(0.0).max(0.0);
             ceiling = ceiling.min(command / consumption);
         }
     }
@@ -96,37 +91,22 @@ fn policy_share(score: f32, best: f32) -> f32 {
 pub(super) fn plan(
     department: &mut Department,
     warehouse: &mut Warehouse,
-    market: &Market,
-    book: &[Book],
     rationing: Rationing,
 ) {
     let goods = warehouse.stocks.len();
 
-    // 决策价来自**这个部门所在地方的账本**（挂单推出来的、逐地方的），不再来自银河指数。
-    // 某一侧没有挂单就回退到指数——那是"没有人愿意在这个方向上成交"的诚实表达。
-    let index: Vec<f32> = (0..goods)
-        .map(|k| {
-            market
-                .merchandises
-                .get(k)
-                .map(|merchandise| merchandise.price.max(0.0))
-                .unwrap_or(0.0)
-        })
+    // 一切"价格"都在**这里**由本部门自己的学习曲线现算（报价维度 argmax / argmin）：
+    // 不读账本、不读本地价、不读指数，也没有任何"价格"标量被存下来（§20.13）。
+    let unit_sell: Vec<f32> = (0..goods)
+        .map(|k| best_sale_revenue(&warehouse.stocks[k], 1.0))
         .collect();
-    let side = |pick: fn(&Book) -> f32| -> Vec<f32> {
-        (0..goods)
-            .map(|k| {
-                let quoted = book.get(k).map(pick).unwrap_or(0.0);
-                if quoted > 0.0 && quoted.is_finite() {
-                    quoted
-                } else {
-                    index.get(k).copied().unwrap_or(0.0)
-                }
-            })
-            .collect()
-    };
-    let bids = side(|book| book.bid);
-    let asks = side(|book| book.ask);
+    let unit_buy: Vec<f32> = (0..goods)
+        .map(|k| best_purchase_cost(&warehouse.stocks[k], 1.0))
+        .collect();
+    // 手里的现金按买入曲线最多能换到几件（逐商品各自按整份现金算，与旧口径一致）。
+    let buying_power: Vec<f32> = (0..goods)
+        .map(|k| affordable_quantity(&warehouse.stocks[k], warehouse.currency))
+        .collect();
 
     let available: Vec<f32> = warehouse
         .stocks
@@ -139,7 +119,7 @@ pub(super) fn plan(
     let mut ceilings = Vec::with_capacity(department.policies.len());
     let mut reference = 0.0f32;
     for policy in department.policies.iter() {
-        let ceiling = material_ceiling(policy, &asks, warehouse)
+        let ceiling = material_ceiling(policy, &buying_power, warehouse)
             .min(capacity_ceiling(policy, department.capacity));
         if ceiling.is_finite() {
             reference = reference.max(ceiling);
@@ -158,10 +138,10 @@ pub(super) fn plan(
             } else {
                 reference
             };
-            policy.price_potential = production_score(policy, &bids, &asks, ceiling);
+            policy.price_potential = production_score(policy, &unit_sell, &unit_buy, ceiling);
             produce_best = produce_best.max(policy.price_potential);
         } else {
-            policy.price_potential = consumption_potential(policy, &asks, department.capacity);
+            policy.price_potential = consumption_potential(policy, &unit_buy, department.capacity);
         }
     }
 

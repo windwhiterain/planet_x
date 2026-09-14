@@ -9,7 +9,7 @@ mod tests;
 use fastrand::Rng;
 
 use crate::market::Market;
-use crate::warehouse::{Book, Warehouses};
+use crate::warehouse::Warehouses;
 
 pub struct Departments {
     pub departments: Vec<Department>,
@@ -194,16 +194,9 @@ impl Departments {
     /// 生产与政策：增产，选中政策，再从仓库提资源
     pub fn plan(&mut self, warehouses: &mut Warehouses, market: &Market) {
         self.debug_assert_aligned(warehouses, market);
-        let Warehouses {
-            warehouses: stocks,
-            books,
-            ..
-        } = warehouses;
+        // 部门完全从自己的学习曲线取价（报价维度 argmax/argmin），**不读账本**（§20.13）。
         for (i, department) in self.departments.iter_mut().enumerate() {
-            let locality = stocks[i].locality;
-            // 这个部门所在地方的账本；还没成形就是空表，plan 会回退到指数
-            let book: &[Book] = books.get(locality).map(|row| row.as_slice()).unwrap_or(&[]);
-            step::plan(department, &mut stocks[i], market, book, self.rationing);
+            step::plan(department, &mut warehouses.warehouses[i], self.rationing);
         }
     }
 

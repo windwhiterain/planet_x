@@ -1,4 +1,4 @@
-mod step;
+pub(crate) mod step;
 
 #[cfg(test)]
 mod tests;
@@ -81,7 +81,6 @@ impl Book {
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
     pub currency: f32,
-    pub reference: Vec<f32>,
     pub locality: usize,
 }
 
@@ -93,7 +92,9 @@ pub struct Stock {
     pub target_volume: f32,
     /// 目标水位的**下限**，等于构造时的初始目标。见 [`Stock::TARGET_COVER`]。
     pub target_floor: f32,
-    marketing_price_scale: f32,
+    /// 本轮挂出去的**绝对报价**（货币/件）。不是"参照价的倍数"——学习曲线与账本都
+    /// 以绝对数为准（见 `sale_price` / `purchase_price` / `observe`）。
+    marketing_price: f32,
     marketing_volume: f32,
     natural_volume_delta: f32,
     /// 本轮**被部门取走**的量（[`Stock::record_take`]），目标水位就锚在它上面。
@@ -146,23 +147,13 @@ impl Warehouses {
         }
     }
 
-    /// 银河指数 = **各地方账本中间价的申报量加权几何平均**（对数尺度上的中心）。
+    /// 银河价 = **各地方本地价的成交量加权几何平均**（纯读数，display only）。
     ///
-    /// 这是依赖倒置的另一半：账本先验、指数导出。旧口径的指数是"成交的加权平均"，
-    /// 没有成交就一个字都不动——三产的价格因此冻成第 1 轮的化石。
+    /// 本地价 = 该地方账本的中间价（`Book::mid`，买卖双方**绝对报价**的几何平均）。
+    /// 报价现在是绝对价（`Stock::marketing_price`），不再有"参照价 × 尺度"那一层，
+    /// 所以账本中间价就是"大家在这地方实际挂出来的价格水平"。
     ///
-    /// ⚠️ **必须用几何平均，不能用算术平均**（这正是 [`Book::mid`] 当初踩过、并在这里
-    /// 又踩了一次的同一个坑）。指数会被 `apply_levels` 乘回每一份报价，
-    /// 所以这条回路是**乘法**的：`index_{t+1} = index_t × F`，`F` 是各地方
-    /// `mid/参照价` 的加权平均。只要把 `F` 取成**算术**平均，Jensen 不等式就给出
-    /// `F ≥ exp(Σω ln(mid/参照价))`，只要各地方有**任何离散度**，`F` 就恒 > 1：
-    /// 指数每轮乘 `e^{σ²/2}`，一路漂到 f32 边界（实测 gauge 稳定在 +0.05…+0.11/轮，
-    /// 就是 `σ²/2`）。离散度是学习器制造出来的，所以"冻结价格曲线就稳"。
-    ///
-    /// 取几何平均之后，离散度只影响**相对**信息，不再给水平一个恒正增益；水平交给
-    /// 水平锚。代价照旧：`--no-anchor` 下不安全。
-    ///
-    /// 某一轮一本账都没成形时返回 0，调用方应当保留旧指数。
+    /// 某一轮一个地方都没成形时返回 0，调用方应当保留旧指数。
     pub fn aggregate_index(&self, goods: usize) -> Vec<f32> {
         let mut index = vec![0.0f32; goods];
         for (k, slot) in index.iter_mut().enumerate() {
@@ -174,16 +165,14 @@ impl Warehouses {
                 let Some(book) = row.get(k) else {
                     continue;
                 };
-                // ⚠️ 这里原来判的是 `is_formed()`，但**合成出来的账本也会成形**：
-                // 缺失的一侧被 `carried` 填上（正数！），于是账本成了自己的回音，
-                // 经本函数写回指数。改成只认**真实双边报价**，指数才是市场观测。
-                if !book.is_observed() {
+                if !book.is_formed() {
                     continue;
                 }
                 let mid = book.mid();
-                let Some(log_mid) = (mid > 0.0 && mid.is_finite()).then(|| mid.ln()) else {
+                if !(mid > 0.0) || !mid.is_finite() {
                     continue;
-                };
+                }
+                let log_mid = mid.ln();
                 flat_log += log_mid;
                 formed += 1.0;
                 let volume: f32 = self
@@ -272,18 +261,12 @@ impl Warehouse {
         Self {
             stocks,
             currency: 0.0,
-            reference: Vec::new(),
             locality: 0,
         }
     }
 
     pub fn with_locality(mut self, locality: usize) -> Self {
         self.locality = locality;
-        self
-    }
-
-    pub fn with_reference(mut self, reference: Vec<f32>) -> Self {
-        self.reference = reference;
         self
     }
 
@@ -321,7 +304,7 @@ impl Stock {
             volume,
             target_floor: target_volume,
             target_volume,
-            marketing_price_scale: 1.0,
+            marketing_price: 1.0,
             marketing_volume: 0.0,
             natural_volume_delta: 0.0,
             taken: 0.0,
@@ -360,17 +343,19 @@ impl Stock {
         };
     }
 
-    pub fn buy_aggressiveness(price_scale: f32) -> f32 {
-        if price_scale.is_finite() && price_scale > 0.0 {
-            price_scale
+    /// 买方"力度"：报价越高越激进（越容易成交）。
+    pub fn buy_aggressiveness(price: f32) -> f32 {
+        if price.is_finite() && price > 0.0 {
+            price
         } else {
             1.0
         }
     }
 
-    pub fn sell_aggressiveness(price_scale: f32) -> f32 {
-        if price_scale.is_finite() && price_scale > 0.0 {
-            1.0 / price_scale
+    /// 卖方"力度"：报价越高越不激进（越难成交）。
+    pub fn sell_aggressiveness(price: f32) -> f32 {
+        if price.is_finite() && price > 0.0 {
+            1.0 / price
         } else {
             1.0
         }
@@ -380,8 +365,8 @@ impl Stock {
         self.marketing_volume
     }
 
-    pub fn marketing_price_scale(&self) -> f32 {
-        self.marketing_price_scale
+    pub fn marketing_price(&self) -> f32 {
+        self.marketing_price
     }
 
     pub fn buy_response(&self) -> &Response {

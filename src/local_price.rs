@@ -411,6 +411,23 @@ pub struct Lab {
     rng: Rng,
 }
 
+/// 逐政权逐商品的**本地价读数**：该政权地方账本中间价
+/// （由学习曲线产出的**绝对报价**聚合出来的几何平均）。
+fn local_readout(warehouses: &Warehouses, locality: usize, goods: usize) -> Vec<f32> {
+    (0..goods)
+        .map(|k| {
+            warehouses
+                .books
+                .get(locality)
+                .and_then(|row| row.get(k))
+                .filter(|book| book.is_formed())
+                .map(|book| book.mid())
+                .filter(|mid| mid.is_finite() && *mid > 0.0)
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
 impl Lab {
     pub fn new(spec: &Spec, seed: u64) -> Self {
         let count = spec.polities * 2 * UNITS;
@@ -447,7 +464,6 @@ impl Lab {
                     }
                     warehouses.push(
                         Warehouse::new(stocks)
-                            .with_reference(vec![BASE_PRICE; GOODS])
                             .with_locality(polity),
                     );
                     let policies: Vec<Policy> = match kind {
@@ -535,7 +551,6 @@ impl Lab {
             history: Vec::new(),
             rng: Rng::with_seed(seed),
         };
-        lab.apply_levels();
         let snapshot = lab.snapshot();
         lab.history.push(snapshot);
         lab
@@ -779,7 +794,7 @@ impl Lab {
                 }
                 state.target += stock.target_volume;
                 let merchandise = &self.market.traders[i].merchandises[k];
-                let scale = self.warehouses.warehouses[i].stocks[k].marketing_price_scale();
+                let scale = self.warehouses.warehouses[i].stocks[k].marketing_price();
                 let volume = merchandise.volume;
                 if volume > 0.0 {
                     state.declared_sell += volume;
@@ -891,7 +906,6 @@ impl Lab {
     }
 
     pub fn step(&mut self) {
-        self.apply_levels();
         let before: Vec<f32> = self
             .market
             .merchandises
@@ -917,6 +931,17 @@ impl Lab {
         {
             if price.is_finite() && price > 0.0 {
                 self.market.merchandises[k].price = price;
+            }
+        }
+        // 本地价读数：逐政权 = 该政权地方账本中间价（由学习曲线产出的**绝对报价**聚合而来）。
+        // `wedge`/`apply_levels` 那套"独立学一个水平"的路子已经退场（§20.11）。
+        let goods = self.market.merchandises.len();
+        for (p, polity) in self.polities.iter_mut().enumerate() {
+            let readout = local_readout(&self.warehouses, p, goods);
+            for k in 0..goods {
+                if readout[k] > 0.0 {
+                    polity.level[k] = readout[k];
+                }
             }
         }
         self.gauge = self
@@ -962,40 +987,6 @@ impl Lab {
         }
     }
 
-    fn apply_levels(&mut self) {
-        let Self {
-            polities,
-            warehouses,
-            market,
-            ..
-        } = self;
-        let prices: Vec<f32> = market
-            .merchandises
-            .iter()
-            .map(|merchandise| merchandise.price.max(1e-6))
-            .collect();
-        for polity in polities.iter_mut() {
-            for good in 0..GOODS {
-                // 参照价 = 银河指数 × e^楔子。
-                //
-                // 这里**不能**用"该政权自己账本的中间价"：挂价 = 参照价 × 尺度，尺度又由
-                // 账本推出来，于是 账本 → 参照价 → 挂价 → 账本 是一个没有锚的乘法环，
-                // 实测会把挂价推到 f32 边界（$10^{19}$）。本地信息改由**决策价**承载
-                // （`plan` 读逐地方的 bid/ask），不再由参照价承载。
-                let level = prices[good] * polity.wedge[good].exp();
-                polity.level[good] = if level.is_finite() && level > 0.0 {
-                    level
-                } else {
-                    prices[good]
-                };
-            }
-            let level = polity.level.clone();
-            for warehouse in &mut warehouses.warehouses[polity.span()] {
-                warehouse.reference = level.clone();
-            }
-        }
-    }
-
     fn update_levels(&mut self) {
         let rule = self.rule;
         let forgetting = self.forgetting;
@@ -1009,11 +1000,6 @@ impl Lab {
             departments,
             ..
         } = self;
-        let prices: Vec<f32> = market
-            .merchandises
-            .iter()
-            .map(|merchandise| merchandise.price.max(1e-6))
-            .collect();
         let mut observations = vec![vec![(0.0f32, 0.0f32, 0.0f32); GOODS]; polities.len()];
         let mut internal = vec![0.0f32; polities.len()];
         let mut external = vec![0.0f32; polities.len()];
@@ -1031,7 +1017,8 @@ impl Lab {
                     continue;
                 }
                 let quote = merchandise.price.max(1e-6);
-                let counterparty = 2.0 * (deal / prices[k]).ln() - (quote / prices[k]).ln();
+                // **绝对口径**：不再除以指数。指数是读数，进了这里就又变成了输入。
+                let counterparty = 2.0 * deal.ln() - quote.ln();
                 let entry = &mut observations[polity][k];
                 entry.0 += volume;
                 entry.1 += volume * deal;
@@ -1056,7 +1043,8 @@ impl Lab {
             for k in 0..GOODS {
                 let (volume, value, counterparty) = observations[p][k];
                 let vwap = if volume > 0.0 {
-                    value / volume / prices[k]
+                    // **绝对口径**：本地成交均价本身就是价格水平，不再除以指数。
+                    value / volume
                 } else {
                     polity.vwap[k]
                 };
