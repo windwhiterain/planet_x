@@ -32,6 +32,9 @@ const SCALE_GOLDEN: f32 = 0.618_034;
 /// 参考价的 x%"那种策略边界：只挡住学习器塌陷那一段。
 const REALIZED_FLOOR: f32 = 1e-3;
 
+/// 本地参照价缺席时的计价物。**不是银河指数**——指数是读数，回头当输入就又是一圈自指（§20.8）。
+const FALLBACK_REFERENCE: f32 = 1.0;
+
 /// 粗扫的第 `index` 个 log 尺度
 fn coarse_log_scale(index: usize) -> f32 {
     let fraction = index as f32 / (SCALE_COARSE_STEPS - 1) as f32;
@@ -424,21 +427,29 @@ fn update_books(
         if index_books[locality].len() != goods {
             index_books[locality] = vec![Book::default(); goods];
         }
+        // 这个地方的**本地参照价**（本地价）。回退链只用本地量 + 计价物，**不用银河指数**。
+        let local_reference = warehouses
+            .iter()
+            .find(|warehouse| warehouse.locality == locality)
+            .map(|warehouse| warehouse.reference.as_slice());
         for (k, seen) in row.iter().enumerate() {
-            let index = market.merchandises[k].price.max(0.0);
+            let reference = local_reference
+                .and_then(|row| row.get(k).copied())
+                .filter(|price| price.is_finite() && *price > 0.0)
+                .unwrap_or(FALLBACK_REFERENCE);
             let realized = local_ratios
                 .get(locality)
                 .and_then(|ratios| ratios.get(k))
                 .copied()
                 .unwrap_or(0.0)
-                * index;
+                * reference;
             let previous = books[locality][k];
             let carried = if realized.is_finite() && realized > 0.0 {
                 realized
             } else if previous.is_formed() {
                 previous.mid()
             } else {
-                index
+                reference
             };
             let observed_bid = if seen.bid > 0.0 { seen.bid } else { carried };
             let observed_ask = if seen.ask > 0.0 { seen.ask } else { carried };
@@ -480,18 +491,16 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         ..
     } = warehouses;
     let fluctuation = *fluctuation;
-    let reference_prices: Vec<f32> = market
-        .merchandises
-        .iter()
-        .map(|merchandise| merchandise.price)
-        .collect();
+    let goods = market.merchandises.len();
+    // 本地参照价 = **本地价**（`apply_levels` 直接学的绝对值），与银河指数无关。
+    // 还没设过就退回计价物，**绝不退回指数**。
     let references: Vec<Vec<f32>> = warehouses
         .iter()
         .map(|warehouse| {
-            if warehouse.reference.len() == reference_prices.len() {
+            if warehouse.reference.len() == goods {
                 warehouse.reference.clone()
             } else {
-                reference_prices.clone()
+                vec![FALLBACK_REFERENCE; goods]
             }
         })
         .collect();
@@ -565,7 +574,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         }
         observe_local_ratio(
             &market.traders[i],
-            market,
+            &references[i],
             &mut local_ratios[locality],
             *book_forgetting,
         );
@@ -583,11 +592,11 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
 
 fn observe_local_ratio(
     trader: &Trader,
-    market: &Market,
+    reference: &[f32],
     local: &mut Vec<f32>,
     book_forgetting: f32,
 ) {
-    let goods = market.merchandises.len();
+    let goods = trader.merchandises.len();
     if local.len() != goods {
         *local = vec![1.0; goods];
     }
@@ -597,13 +606,12 @@ fn observe_local_ratio(
             continue;
         }
         let deal = merchandise.deal_price();
-        let index = market.merchandises[k].price;
-        if !(deal > 0.0) || !deal.is_finite() || !(index > 0.0) {
+        // 比值对着**本地参照价**（本地价），不是银河指数。
+        let reference = reference.get(k).copied().unwrap_or(FALLBACK_REFERENCE);
+        if !(deal > 0.0) || !deal.is_finite() || !(reference > 0.0) || !reference.is_finite() {
             continue;
         }
-        // 旧代码这里还有一个 `clamp(0.05, 20.0)`——"本地价最多是指数的 20 倍"同样是策略假设。
-        // 现在只要求比值有限且为正；真正越界时由上面的有限性检查挡掉。
-        let ratio = deal / index;
+        let ratio = deal / reference;
         if !ratio.is_finite() || !(ratio > 0.0) {
             continue;
         }

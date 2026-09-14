@@ -96,21 +96,22 @@ fn policy_share(score: f32, best: f32) -> f32 {
 pub(super) fn plan(
     department: &mut Department,
     warehouse: &mut Warehouse,
-    market: &Market,
     book: &[Book],
     rationing: Rationing,
 ) {
     let goods = warehouse.stocks.len();
 
-    // 决策价来自**这个部门所在地方的账本**（挂单推出来的、逐地方的），不再来自银河指数。
-    // 某一侧没有挂单就回退到指数——那是"没有人愿意在这个方向上成交"的诚实表达。
-    let index: Vec<f32> = (0..goods)
+    // 决策价来自**这个部门所在地方的账本**（挂单推出来的、逐地方的）。
+    // 某一侧没有挂单就回退到**本地参照价**（本地价）——那是"没有人愿意在这个方向上成交"
+    // 的诚实表达。**不用银河指数**：指数是读数，回头当输入就又是一圈自指（§20.8）。
+    let fallback: Vec<f32> = (0..goods)
         .map(|k| {
-            market
-                .merchandises
+            warehouse
+                .reference
                 .get(k)
-                .map(|merchandise| merchandise.price.max(0.0))
-                .unwrap_or(0.0)
+                .copied()
+                .filter(|price| price.is_finite() && *price > 0.0)
+                .unwrap_or(1.0)
         })
         .collect();
     let side = |pick: fn(&Book) -> f32| -> Vec<f32> {
@@ -120,7 +121,7 @@ pub(super) fn plan(
                 if quoted > 0.0 && quoted.is_finite() {
                     quoted
                 } else {
-                    index.get(k).copied().unwrap_or(0.0)
+                    fallback.get(k).copied().unwrap_or(1.0)
                 }
             })
             .collect()

@@ -201,9 +201,9 @@ impl Departments {
         } = warehouses;
         for (i, department) in self.departments.iter_mut().enumerate() {
             let locality = stocks[i].locality;
-            // 这个部门所在地方的账本；还没成形就是空表，plan 会回退到指数
+            // 这个部门所在地方的账本；还没成形就是空表，plan 会回退到**本地参照价**
             let book: &[Book] = books.get(locality).map(|row| row.as_slice()).unwrap_or(&[]);
-            step::plan(department, &mut stocks[i], market, book, self.rationing);
+            step::plan(department, &mut stocks[i], book, self.rationing);
         }
     }
 

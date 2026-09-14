@@ -1884,3 +1884,40 @@ cargo run --release -p planet_x --bin local_price -- \
 `a_running_transformation_shrinks_the_scarcity_premium`、
 `the_anchor_leaves_the_relative_premium_of_a_scarce_good`）——它们断言"指数/楔子随稀缺变化"，
 而按本节定位，稀缺应当体现在**本地价**上。重基线时让它们读逐政权本地价，不要读银河指数。
+
+### 20.9 本地价与银河指数彻底脱钩：指数只剩读数
+
+§20.8 之后还留着四处"指数回头当输入"的地方，这一轮全部拔掉：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `Warehouses::step` 的 `references` 回退 | 回退到 `market.merchandises[k].price` | 回退到计价物 `FALLBACK_REFERENCE`（= `BASE_PRICE`） |
+| `update_books` 的 `carried` | `local_ratio × 银河指数` | `local_ratio × 本地参照价` |
+| `observe_local_ratio` 的分母 | 银河指数 | 本地参照价（`local_ratios` 从此是"本地成交 ÷ 本地价"） |
+| `department::step::plan` 买卖价的回退 | 银河指数 | `warehouse.reference`（本地价） |
+
+于是：**本地价 = `polity.level`（= `BASE_PRICE × e^楔子`，逐政权逐商品直接学的绝对值），
+银河价 = `aggregate_index`（各地方账本的成交量加权几何平均）——只被写进
+`market.merchandises[k].price`，除此之外没有任何行为路径读它。**
+
+`warehouse::tests` 里有 3 条一直靠"参照价默认取市场初始价"（`every_reachable_target_is_cleared_in_one_step`、
+`reversing_the_same_trade_does_not_revalue_the_good`、`zero_price_market_is_frozen_and_finite`），
+按新语义改成显式给本地参照价（新增 `set_reference` 辅助）。
+
+规则对照（3 个**新抽**种子 × 10000 轮，`log10` 三商品 index 的 max/min）：
+
+| 本地价规则 | log10 max | log10 min |
+|---|---|---|
+| `fixed`（本地价恒为计价物） | 3.3 – 5.6 | −6.5 – −4.2 |
+| `pressure` | 4.0 – 7.7 | −7.6 – −4.5 |
+| `vwap` | 7.8 – 9.2 | −19.5 – −10.6 |
+| `counterparty`（默认） | 11.0 – 14.7 | −20.1 – −10.9 |
+
+两条结论：
+
+1. **默认规则该换**：`counterparty` 是"追对手的绝对报价"，本来就是随机游走，是四个里最差的；
+   `pressure`（库存压力 + 衰减）和 `fixed` 最好。
+2. **水平还在从 `scale` 泄漏**：`fixed` 把本地价钉成常数了，指数仍然漂到 10^5 ——说明
+   水平不只存在于 `wedge`，还存在于交易者各自的 `marketing_price_scale`。现在 `scale`
+   同时干两件事：**本地价水平** 和 **个体价差**。下一步要把这两件事拆开：
+   本地价（逐地方逐商品一个绝对值，直接学）负责水平，`scale` 只允许是它附近的一个小价差。

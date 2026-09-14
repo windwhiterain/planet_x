@@ -48,6 +48,15 @@ fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouses {
     warehouse(&quotes)
 }
 
+/// 给所有仓库设同一个**本地参照价**（本地价）。
+///
+/// 参照价不再回退到银河指数（§20.8），所以单独测 `Warehouses` 时要显式给。
+fn set_reference(warehouses: &mut Warehouses, price: f32) {
+    for warehouse in &mut warehouses.warehouses {
+        warehouse.reference = vec![price];
+    }
+}
+
 fn warehouse1(items: &[(f32, f32)]) -> Warehouses {
     let quotes: Vec<&[(f32, f32)]> = items.iter().map(std::slice::from_ref).collect();
     warehouse(&quotes)
@@ -161,6 +170,8 @@ fn every_reachable_target_is_cleared_in_one_step() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 3);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
+    // 本地参照价现在必须**显式给**：它不再回退到市场指数（§20.8）。
+    set_reference(&mut warehouse, 10.0);
 
     warehouse.step(&mut market, &mut rng);
 
@@ -375,6 +386,7 @@ fn zero_price_market_is_frozen_and_finite() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 0.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0)]);
+    set_reference(&mut warehouse, 0.0);
     let before = volumes(&warehouse);
 
     for _ in 0..30 {
@@ -433,6 +445,7 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
+    set_reference(&mut warehouse, 10.0);
     warehouse.step(&mut market, &mut rng);
     // 同上：带宽 5~20 -> 2~100，绝对水平取决于饱和先验，实测 58.2。
     assert!(
