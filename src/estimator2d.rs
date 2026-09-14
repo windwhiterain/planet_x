@@ -120,6 +120,44 @@ impl Response {
         }
     }
 
+    /// 参数快照：`[ln 份额上限, 份额斜率, ln 份额半饱和, ln 深度上限, 深度斜率, ln 深度半饱和]`。
+    /// `ln` 项已经在**对数尺度**上，所以算术平均就是"对数中心"。
+    pub fn params(&self) -> [f32; 6] {
+        [
+            self.log_share_max,
+            self.share_power,
+            self.log_share_half,
+            self.log_depth_max,
+            self.depth_power,
+            self.log_depth_half,
+        ]
+    }
+
+    /// 把参数往 `target` 推 `gain`（0 = 不动，1 = 变成 `target`），收尾用与 `update`
+    /// 相同的数值护栏。用途见 [`crate::warehouse::Warehouses::slide_silent_curves_toward_global`]。
+    pub fn slide_toward(&mut self, target: [f32; 6], gain: f32) {
+        if !gain.is_finite() || gain <= 0.0 {
+            return;
+        }
+        let gain = gain.min(1.0);
+        self.log_share_max += gain * (target[0] - self.log_share_max);
+        self.share_power += gain * (target[1] - self.share_power);
+        self.log_share_half += gain * (target[2] - self.log_share_half);
+        self.log_depth_max += gain * (target[3] - self.log_depth_max);
+        self.depth_power += gain * (target[4] - self.depth_power);
+        self.log_depth_half += gain * (target[5] - self.log_depth_half);
+        self.log_share_max = self.log_share_max.clamp(-Self::LOG_LIMIT, Self::LOG_LIMIT);
+        self.log_depth_max = self.log_depth_max.clamp(-Self::LOG_LIMIT, Self::LOG_LIMIT);
+        self.log_share_half = self.log_share_half.clamp(-Self::LOG_LIMIT, Self::LOG_LIMIT);
+        self.log_depth_half = self.log_depth_half.clamp(-Self::LOG_LIMIT, Self::LOG_LIMIT);
+        if !self.share_power.is_finite() {
+            self.share_power = 0.0;
+        }
+        if !self.depth_power.is_finite() {
+            self.depth_power = 0.0;
+        }
+    }
+
     pub fn fill_ratio(&self, volume: f32, aggressiveness: f32) -> f32 {
         self.ratio(volume, aggressiveness).min(1.0)
     }

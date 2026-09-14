@@ -4,7 +4,7 @@ use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
 use crate::market::Market;
 use crate::market::Trader;
-use crate::warehouse::{Book, Stock, Warehouse, Warehouses};
+use crate::warehouse::{Book, Side, Stock, Warehouse, Warehouses};
 
 /// 粗扫点数：只用来给细化定界，**不是模型常数**（间隔 = 带宽 / 128）
 const SCALE_COARSE_STEPS: usize = 129;
@@ -355,23 +355,21 @@ fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise) {
     }
     let price = stock.marketing_price;
     let dealt = merchandise.deal_volume().abs();
-    if declared > 0.0 {
-        stock
-            .sell_response
-            .update(declared, Stock::sell_aggressiveness(price), dealt);
-    } else {
-        stock
-            .buy_response
-            .update(declared.abs(), Stock::buy_aggressiveness(price), dealt);
-    }
+    let side = if declared > 0.0 { Side::Sell } else { Side::Buy };
+    let aggressiveness = match side {
+        Side::Sell => Stock::sell_aggressiveness(price),
+        Side::Buy => Stock::buy_aggressiveness(price),
+    };
+    // 自己的曲线：只在**这一轮真的有申报**时更新
+    stock
+        .response_mut(side)
+        .update(declared.abs(), aggressiveness, dealt);
+    stock.mark_response_learned(side);
     let deal_price = merchandise.deal_price();
     if price.is_finite() && price > 0.0 && deal_price.is_finite() && deal_price > 0.0 {
         stock.last_deal = deal_price;
-        if declared > 0.0 {
-            stock.sell_price_curve.update(price, deal_price);
-        } else {
-            stock.buy_price_curve.update(price, deal_price);
-        }
+        stock.price_curve_mut(side).update(price, deal_price);
+        stock.mark_price_learned(side);
     }
 }
 

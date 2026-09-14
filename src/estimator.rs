@@ -84,6 +84,36 @@ impl PowerLaw {
         [x.ln(), 1.0]
     }
 
+    /// 参数快照：`[斜率, 截距]`。两者都在**对数尺度**上，所以算术平均就是"对数中心"。
+    pub fn params(&self) -> [f32; 2] {
+        [self.slope, self.intercept]
+    }
+
+    /// 把参数往 `target` 推 `gain`（0 = 不动，1 = 变成 `target`）。
+    ///
+    /// `fixed_slope` 时只推截距。**协方差不动**：那是"我有多不确定"的状态，不是
+    /// "我认为价是多少"的信念；把它一起推掉会让刚滑过来的曲线瞬间变得"很自信"。
+    ///
+    /// 用途：一轮里**没有**学习信号的曲线向全局学习曲线滑动，见
+    /// [`crate::warehouse::Warehouses::slide_silent_curves_toward_global`]。
+    pub fn slide_toward(&mut self, target: [f32; 2], gain: f32) {
+        if !gain.is_finite() || gain <= 0.0 {
+            return;
+        }
+        let gain = gain.min(1.0);
+        if !self.fixed_slope {
+            self.slope += gain * (target[0] - self.slope);
+        }
+        self.intercept += gain * (target[1] - self.intercept);
+        // 数值护栏（与 `update` 同一条）：非有限值会永久污染后续预测
+        if !self.slope.is_finite() {
+            self.slope = 0.0;
+        }
+        if !self.intercept.is_finite() {
+            self.intercept = 0.0;
+        }
+    }
+
     /// 把协方差整体缩回 `max|P_ij| ≤ COVARIANCE_LIMIT`；非有限值直接归零。
     ///
     /// 用**整体缩放**而不是逐元素夹：逐元素会把正定矩阵夹成不定的，那样

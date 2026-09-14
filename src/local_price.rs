@@ -543,6 +543,13 @@ impl Lab {
         self
     }
 
+    /// 一轮里**没有**学习信号的曲线向全局学习曲线滑动多少（`0` = 关掉）。
+    /// 见 [`crate::warehouse::Globals`] 与 `docs/local-price.md` §22。
+    pub fn with_global_gain(mut self, gain: f32) -> Self {
+        self.warehouses = self.warehouses.with_global_gain(gain);
+        self
+    }
+
     pub fn with_anchor(mut self, anchor: bool) -> Self {
         self.anchor = anchor;
         self

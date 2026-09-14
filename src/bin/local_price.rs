@@ -41,6 +41,8 @@ struct Args {
     fluctuation: f32,
     /// 报价搜索的对数半宽（中心 = 上一轮自己的成交价）。
     quote_band: f32,
+    /// 没有学习信号的曲线每轮向全局学习曲线滑动多少
+    global_gain: f32,
     /// 仓库内部学习率（None = 各自默认）。见 `Lab::with_learning_rates`
     learning: Option<f32>,
     response_learning: Option<f32>,
@@ -89,6 +91,7 @@ impl Default for Args {
             curvature: DEFAULT_CURVATURE,
             fluctuation: DEFAULT_FLUCTUATION,
             quote_band: Warehouses::DEFAULT_QUOTE_BAND,
+            global_gain: Warehouses::DEFAULT_GLOBAL_GAIN,
             learning: None,
             response_learning: None,
             price_learning: None,
@@ -164,6 +167,7 @@ fn parse() -> Option<Args> {
             "--response-learning" => args.response_learning = Some(value()?.parse().ok()?),
             "--price-learning" => args.price_learning = Some(value()?.parse().ok()?),
             "--book-forgetting" => args.book_forgetting = Some(value()?.parse().ok()?),
+            "--global-gain" => args.global_gain = value()?.parse().ok()?,
             "--fixed-price-slope" => args.fixed_price_slope = true,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
@@ -205,6 +209,7 @@ fn usage() {
     println!("  --price-learning F     只改价格曲线（PowerLaw）的学习率——§19.5/§20 的承重旋钮");
     println!("  --book-forgetting F    账本/本地比值的记忆（默认 0.8，1.0 = 不混）");
     println!("  --fixed-price-slope    价格曲线只学水平、钉死阶数");
+    println!("  --global-gain G        没有学习信号的曲线每轮向**全局学习曲线**滑动多少（默认 {}，0 = 关掉）", Warehouses::DEFAULT_GLOBAL_GAIN);
 }
 
 fn spec(args: &Args) -> Spec {
@@ -278,6 +283,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         .with_grant(args.grant)
         .with_learning_rates(response_learning, price_learning, args.fixed_price_slope)
         .with_quote_band(args.quote_band)
+        .with_global_gain(args.global_gain)
         .with_relations(&bloc_relations(args.polities, args.relations));
     if let Some(forgetting) = args.book_forgetting {
         lab = lab.with_book_forgetting(forgetting);

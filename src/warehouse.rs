@@ -26,6 +26,10 @@ pub struct Warehouses {
     /// 与 `local_ratios` 的区别是要害：比值只在有成交时才更新，账本只看挂单，
     /// 所以没有成交的地方也有价。决策用的是这一套。
     pub books: Vec<Vec<Book>>,
+    /// 全局学习曲线（见 [`Globals`]）
+    pub globals: Globals,
+    /// 一轮里**没有**学习信号的曲线向全局曲线滑动多少（`0` = 关掉）
+    pub global_gain: f32,
 }
 
 /// 一个地方一种商品的账本：两侧的**边际**挂价
@@ -124,6 +128,132 @@ pub struct Stock {
     sell_response: Response,
     buy_price_curve: PowerLaw,
     sell_price_curve: PowerLaw,
+    /// 本轮这一侧**有没有吃到学习信号**（`observe` 里真的更新了它）。index with [`Side`]。
+    ///
+    /// 价格曲线与兑现率曲面分开记：同一次申报会让**响应**更新，但成交价缺席时
+    /// **价格曲线**并没有拿到东西（`observe` 只在 `deal_price > 0` 时更新它）。
+    learned_price: [bool; 2],
+    learned_response: [bool; 2],
+    /// 「这一侧这条曲线有多少自己的信息」的 EWMA（`0` = 从没学到过，`1` = 每轮都在学）。
+    /// index with [`Side`]。滑动的**权重**就是 `1 - evidence`：一条已经学了很久的曲线
+    /// 不该因为**一轮**没信号就被拉回全局（实测那会把所有曲线的**水平**耦合到一起，
+    /// 而那正是 §20.7 还缺锚的那个自由度，见 `docs/local-price.md` §22.3）。
+    price_evidence: [f32; 2],
+    response_evidence: [f32; 2],
+}
+
+/// 一条学习曲线的方向：买 / 卖。用的是 `0/1`，可以直接索引逐侧的数组。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Side {
+    Buy = 0,
+    Sell = 1,
+}
+
+impl Side {
+    pub const BOTH: [Side; 2] = [Side::Buy, Side::Sell];
+}
+
+/// **全局学习曲线**：全经济共享的一份「这样货在这个方向怎么定价 / 能成交多少」的模型，
+/// 每个商品、每个方向各一条。
+///
+/// ## 它不是另一个估计器
+///
+/// 第一版把它做成"独立的一条曲线，把全经济的观测都喂给它"。**那是错的**：全经济的样本
+/// 比任何个体都异质（不同地方、不同报价水平混在一个对数-对数回归里），遗忘最小二乘在
+/// 那里会**发散**——实测一条 `buy@1` 在 20 轮内从 0.85 跳到 5.32、斜率反号，然后被
+/// 当作滑动目标把所有人一起带跑（§22.2）。
+///
+/// 现在的定义是**有信息的人当前的共识**：每一轮取"拿到该侧学习信号的个体曲线"参数的
+/// **中位数**（抗离群：实测个体曲线自己也会发散到 `buy@1 = 133`，均值会被它毒掉）。
+/// 没有任何人拿到信号时，保留上一轮的共识。
+///
+/// 一轮里**没有**学习信号的个体曲线就向它滑动 [`Warehouses::global_gain`]：
+/// **没有信息，退回大家的共识**，而不是退回一条从没更新过的先验。
+///
+/// 动机（`docs/local-price.md` §21）：一个部门对「自己从不经手的那样货」读到的正是
+/// 那条没更新过的先验——不买 ⇒ 不知道价 ⇒ 更不该买，鸡生蛋。
+pub struct Globals {
+    /// index with `good`，再 index with [`Side`]：参数快照（`[斜率, 截距]`）
+    price: Vec<[Option<[f32; 2]>; 2]>,
+    /// index with `good`，再 index with [`Side`]：参数快照（6 个，见 [`Response::params`]）
+    response: Vec<[Option<[f32; 6]>; 2]>,
+}
+
+/// 一组数的中位数（会改动输入的顺序）。空集返回 `None`。
+fn median(values: &mut [f32]) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(values[values.len() / 2])
+}
+
+impl Globals {
+    pub fn new(goods: usize) -> Self {
+        Self {
+            price: vec![[None; 2]; goods],
+            response: vec![[None; 2]; goods],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.price.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.price.is_empty()
+    }
+
+    /// 某一轮这一格的共识参数；没人拿到信号时是上一轮的共识（起始为 `None`）。
+    pub fn price(&self, good: usize, side: Side) -> Option<[f32; 2]> {
+        self.price.get(good)?.get(side as usize)?.to_owned()
+    }
+
+    pub fn response(&self, good: usize, side: Side) -> Option<[f32; 6]> {
+        self.response.get(good)?.get(side as usize)?.to_owned()
+    }
+
+    /// 重算这一轮的共识：逐（商品、方向）取"拿到该侧信号的个体"参数的中位数。
+    /// 没人拿到信号的那一格保持原值（没有新信息，不改共识）。
+    pub fn refresh(&mut self, warehouses: &[Warehouse]) {
+        let goods = self.price.len();
+        for good in 0..goods {
+            for side in Side::BOTH {
+                let index = side as usize;
+                let mut slopes = Vec::new();
+                let mut intercepts = Vec::new();
+                let mut params: [Vec<f32>; 6] = std::array::from_fn(|_| Vec::new());
+                for warehouse in warehouses {
+                    let Some(stock) = warehouse.stocks.get(good) else {
+                        continue;
+                    };
+                    if stock.price_learned(side) {
+                        let snapshot = stock.price_curve(side).params();
+                        slopes.push(snapshot[0]);
+                        intercepts.push(snapshot[1]);
+                    }
+                    if stock.response_learned(side) {
+                        let snapshot = stock.response(side).params();
+                        for (slot, value) in params.iter_mut().zip(snapshot) {
+                            slot.push(value);
+                        }
+                    }
+                }
+                if let (Some(slope), Some(intercept)) =
+                    (median(&mut slopes), median(&mut intercepts))
+                {
+                    self.price[good][index] = Some([slope, intercept]);
+                }
+                if params.iter().all(|values| !values.is_empty()) {
+                    let mut snapshot = [0.0f32; 6];
+                    for (slot, values) in snapshot.iter_mut().zip(params.iter_mut()) {
+                        *slot = median(values).unwrap_or(0.0);
+                    }
+                    self.response[good][index] = Some(snapshot);
+                }
+            }
+        }
+    }
 }
 
 impl Warehouses {
@@ -138,7 +268,20 @@ impl Warehouses {
     /// （成交 → 0.66 件/轮）；3.0 则有一个种子长时程漂到 10^10.7。
     pub const DEFAULT_QUOTE_BAND: f32 = 1.0;
 
+    /// 没有学习信号的曲线每轮向全局曲线滑动的默认增益。
+    ///
+    /// 实测（`docs/local-price.md` §22.3）：字面的"没信号就滑到底"会把全经济的**水平**
+    /// 耦合起来、把 index 推到 `10^11`；加了 `1 - evidence` 的权重之后要**小**才不再明显
+    /// 放大漂移。`0.02` 是量出来的折中：阶梯的换挡点落回理论值 1.104 附近（0 是 2.7、
+    /// 0.05 是 0.8），4 个种子 × 20000 轮的极差与关掉时同量级（1 个种子仍更差）。
+    /// **这不是水平锚**：§20.7 那条锚还欠着，调大这个增益会直接把它暴露出来。
+    pub const DEFAULT_GLOBAL_GAIN: f32 = 0.02;
+
     pub fn new(warehouses: Vec<Warehouse>) -> Self {
+        let goods = warehouses
+            .first()
+            .map(|warehouse| warehouse.stocks.len())
+            .unwrap_or(0);
         Self {
             warehouses,
             fluctuation: Self::DEFAULT_FLUCTUATION,
@@ -147,7 +290,15 @@ impl Warehouses {
             book_forgetting: Self::DEFAULT_BOOK_FORGETTING,
             local_ratios: Vec::new(),
             books: Vec::new(),
+            globals: Globals::new(goods),
+            global_gain: Self::DEFAULT_GLOBAL_GAIN,
         }
+    }
+
+    /// 没有学习信号的曲线每轮向全局曲线滑动多少（`0` = 关掉）
+    pub fn with_global_gain(mut self, gain: f32) -> Self {
+        self.global_gain = if gain.is_finite() { gain.max(0.0) } else { 0.0 };
+        self
     }
 
     /// 一个地方的账本；这一轮还没成形就返回 None（调用方回退到指数）
@@ -255,6 +406,8 @@ impl Warehouses {
                 stock.reset_estimators(self.response_forgetting, self.price_forgetting, fixed_slope);
             }
         }
+        // 全局共识跟着重开：它是从个体曲线里算出来的，个体重开它就得重开。
+        self.globals = Globals::new(self.globals.len());
         self
     }
 
@@ -280,7 +433,65 @@ impl Warehouses {
     }
 
     pub fn step(&mut self, market: &mut Market, rng: &mut Rng) {
+        for warehouse in self.warehouses.iter_mut() {
+            for stock in warehouse.stocks.iter_mut() {
+                stock.clear_learning_signals();
+            }
+        }
         step::step(self, market, rng);
+        // 结算与观测都做完之后：这一轮**没吃到信号**的曲线向全局曲线滑动
+        self.slide_silent_curves_toward_global();
+    }
+
+    /// 先把这一轮的**全局共识**重算出来（[`Globals::refresh`]），再让一轮里
+    /// **没有**学习信号的曲线向它滑动 [`Self::global_gain`]。价格曲线与兑现率曲面
+    /// 分别判各自的信号。
+    ///
+    /// **滑动权重是 `global_gain × (1 - evidence)`**：`evidence` 是"这条曲线有多少自己的
+    /// 信息"的 EWMA（见 [`Stock::advance_evidence`]）。字面地"只要这一轮没信号就滑到底"
+    /// 会把全经济的曲线**水平**耦合在一起，而水平正是 §20.7 还缺锚的那个自由度——
+    /// 实测那样跑 20000 轮会把 index 推到 `10^11`（不耦合时是 `10^3`，见 §22.3）。
+    /// 加权的版本只拖动**没有自己信息**（或已经陈旧）的曲线，正是"不知道就问大家"。
+    ///
+    /// `global_gain = 0` 时共识照样刷新（只作读数），但谁都不动。
+    pub fn slide_silent_curves_toward_global(&mut self) {
+        let Self {
+            warehouses,
+            globals,
+            global_gain,
+            response_forgetting,
+            price_forgetting,
+            ..
+        } = self;
+        globals.refresh(warehouses);
+        let gain = *global_gain;
+        if !gain.is_finite() || gain <= 0.0 {
+            return;
+        }
+        let response_forgetting = *response_forgetting;
+        let price_forgetting = *price_forgetting;
+        for warehouse in warehouses.iter_mut() {
+            for (good, stock) in warehouse.stocks.iter_mut().enumerate() {
+                for side in Side::BOTH {
+                    let price_signalled = stock.price_learned(side);
+                    let evidence =
+                        stock.advance_evidence(side, true, price_forgetting, price_signalled);
+                    if let Some(target) = globals.price(good, side) {
+                        stock
+                            .price_curve_mut(side)
+                            .slide_toward(target, gain * (1.0 - evidence));
+                    }
+                    let response_signalled = stock.response_learned(side);
+                    let evidence =
+                        stock.advance_evidence(side, false, response_forgetting, response_signalled);
+                    if let Some(target) = globals.response(good, side) {
+                        stock
+                            .response_mut(side)
+                            .slide_toward(target, gain * (1.0 - evidence));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -344,6 +555,10 @@ impl Stock {
             sell_response: Response::new(Response::DEFAULT_FORGETTING),
             buy_price_curve: PowerLaw::new(0.5, 0.0, PowerLaw::DEFAULT_FORGETTING),
             sell_price_curve: PowerLaw::new(0.5, 0.0, PowerLaw::DEFAULT_FORGETTING),
+            learned_price: [false; 2],
+            learned_response: [false; 2],
+            price_evidence: [0.0; 2],
+            response_evidence: [0.0; 2],
         }
     }
 
@@ -371,6 +586,87 @@ impl Stock {
         } else {
             sell
         };
+        self.clear_learning_signals();
+        self.price_evidence = [0.0; 2];
+        self.response_evidence = [0.0; 2];
+    }
+
+    /// 推进"这一侧这条曲线有多少自己的信息"的 EWMA，返回新值。
+    ///
+    /// `forgetting` 用该估计器自己的 forgetting：每轮都拿到信号 ⇒ 收敛到 1，
+    /// 停下来的曲线会慢慢衰减回 0（于是**陈旧**的曲线也会重新向全局滑动）。
+    pub(crate) fn advance_evidence(
+        &mut self,
+        side: Side,
+        price: bool,
+        forgetting: f32,
+        signalled: bool,
+    ) -> f32 {
+        let slot = if price {
+            &mut self.price_evidence[side as usize]
+        } else {
+            &mut self.response_evidence[side as usize]
+        };
+        let forgetting = if forgetting.is_finite() {
+            forgetting.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let signal = if signalled { 1.0 } else { 0.0 };
+        *slot = forgetting * *slot + (1.0 - forgetting) * signal;
+        *slot
+    }
+
+    /// 清掉本轮的"吃到信号"标记。**每轮开始前**调一次（见 [`Warehouses::step`]）。
+    pub(crate) fn clear_learning_signals(&mut self) {
+        self.learned_price = [false; 2];
+        self.learned_response = [false; 2];
+    }
+
+    pub(crate) fn mark_price_learned(&mut self, side: Side) {
+        self.learned_price[side as usize] = true;
+    }
+
+    pub(crate) fn mark_response_learned(&mut self, side: Side) {
+        self.learned_response[side as usize] = true;
+    }
+
+    pub(crate) fn price_learned(&self, side: Side) -> bool {
+        self.learned_price[side as usize]
+    }
+
+    pub(crate) fn response_learned(&self, side: Side) -> bool {
+        self.learned_response[side as usize]
+    }
+
+    /// 这一侧的两条曲线（`Side` 索引）
+    pub fn price_curve(&self, side: Side) -> &PowerLaw {
+        match side {
+            Side::Buy => &self.buy_price_curve,
+            Side::Sell => &self.sell_price_curve,
+        }
+    }
+
+    pub(crate) fn price_curve_mut(&mut self, side: Side) -> &mut PowerLaw {
+        match side {
+            Side::Buy => &mut self.buy_price_curve,
+            Side::Sell => &mut self.sell_price_curve,
+        }
+    }
+
+    /// 这一侧的兑现率曲面（`Side` 索引）
+    pub fn response(&self, side: Side) -> &Response {
+        match side {
+            Side::Buy => &self.buy_response,
+            Side::Sell => &self.sell_response,
+        }
+    }
+
+    pub(crate) fn response_mut(&mut self, side: Side) -> &mut Response {
+        match side {
+            Side::Buy => &mut self.buy_response,
+            Side::Sell => &mut self.sell_response,
+        }
     }
     /// **测试用**：直接给出买入价格曲线（`报价 -> 绝对成交价`）。
     ///

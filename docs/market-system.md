@@ -20,7 +20,7 @@
 
 | 层 | 是什么 | 谁产生 | 谁读 |
 |---|---|---|---|
-| **模型** | 学习曲线（函数） | `observe` 每轮学 | 决策（做 argmax/argmin） |
+| **模型** | 学习曲线（函数） | `observe` 每轮学；**没有信号的曲线向"全局共识"滑动** | 决策（做 argmax/argmin） |
 | **决策** | 一个绝对报价（货币/件） | `sale_price` / `purchase_price` / 部门估值 | 撮合 |
 | **读数** | 本地价、银河价（数） | `update_books` / `aggregate_index` | 只有显示 |
 
@@ -41,7 +41,15 @@ marketing_volume                 申报量（正=卖，负=买）
 marketing_price                  **卖/买要报的绝对价**（不会被子系统当"价格"读）
 buy_response, sell_response      兑现率曲面（Response）
 buy_price_curve, sell_price_curve 价格曲线（PowerLaw）
+learned_price, learned_response  本轮这一侧有没有吃到学习信号（index with Side）
+price_evidence, response_evidence 这一侧"有多少自己的信息"的 EWMA（滑动权重 = 1 − 它）
 ```
+
+**全局学习曲线**（`Globals`）不是另一个估计器，而是**有信息的人当前的共识**：逐（商品、
+方向）取"这一轮拿到该侧学习信号的个体曲线"参数的**中位数**。一轮里没有信号的曲线向它
+滑动 `global_gain × (1 − evidence)`（`--global-gain`，默认 0.02，`0` = 关掉）。
+为什么必须是中位数、为什么必须按信息量加权、以及它和 §20.7 那条缺的水平锚的关系，
+见 `docs/local-price.md` §22。
 
 两个学习器都是**曲线**：
 
@@ -97,6 +105,9 @@ gap           = volume − target_volume + min(volume − previous_volume, 0)
 
 政策之间按 `exp(score / best / 0.25)` 分配，生产族/消费族各自归一。
 
+**估价用的那条曲线**可能是"别人的共识"：自己从没经手过那样货时（`evidence ≈ 0`），
+它已经被全局共识滑过来了；自己一直在做那样货时（`evidence ≈ 1`），它基本不动。
+
 ---
 
 ## 4. 一轮的流程
@@ -130,6 +141,7 @@ Lab::step
 | 交易者决策 | 自己的两条曲线 | argmax / argmin |
 | 部门决策 | 自己的两条曲线，**读在上一轮自己经手的量上**（`traded_prices`） | argmax / argmin |
 | 学习器 `observe` | 本轮自己的报价 + 成交价 | 观测（学习用） |
+| 全局共识 `Globals` | 本轮**拿到信号**的个体曲线参数（中位数） | 横向读数 → 只喂给**没有信号**的曲线 |
 | 撮合 `market.step` | 交易者报价、申报量 | 匹配 |
 | `books`（账本） | 交易者报价 | **读数** |
 | `aggregate_index` / `local_readout` | `books` | **读数** |
@@ -224,7 +236,13 @@ Lab::step
      （包括根本不消耗那样货的免费一产）都归零、整个部门停摆。回归测试
      `department::step::tests::a_zero_coefficient_never_reads_an_infinite_price`。
 
-6. **读数是否还会走到极端？** v2 实测：同一配置下 `seed 11` 只用 2000 轮就把两个商品读数
+6. **全局学习曲线与水平锚的相互作用**（本轮新增）。`Globals` 把"没有自己信息的"曲线
+   横向拉到共识上，于是全经济的价格**水平**被耦合起来——而水平正是 §20.7 还缺锚的那个
+   自由度。实测字面实现（没信号就滑满）会把 index 推到 `10^11`、把一个档位的成交从 107
+   打到 12.7；落地版本（中位数共识 + `(1 − evidence)` 权重 + `gain = 0.02`）与关掉时
+   同量级，但**不是稳定性修复**，增益不许调大。见 `docs/local-price.md` §22。
+
+7. **读数是否还会走到极端？** v2 实测：同一配置下 `seed 11` 只用 2000 轮就把两个商品读数
    打到 `0`、第三个打到 `2.4e8`，所以"有界"只是多数轨迹的性质。收窄报价带宽（§7.3，
    默认 1.0）之后**这个案例不再复现**（合并树复测 `seed 11` × 2000 / 5000 / 20000 轮：
    `log10` index = −0.73…1.35，没有一条非正）。但那条**代码路径**还在——`Lab::step` 只在
@@ -245,6 +263,12 @@ cargo run --release -p planet_x --bin local_price -- \
 cargo run --release -p planet_x --bin local_price -- \
   --scenario modern --capacity 12 --specialty 2 -n 20000 --every 400 --json \
   | grep -o '"index":[0-9.eE+-]*'
+```
+
+全局学习曲线的旋钮（默认 `0.02`，`0` = 关掉、退回 §21 的行为）：
+
+```bash
+cargo run --release -p planet_x --bin local_price -- --scenario ladder --seed 11 --global-gain 0 -n 120 --every 120
 ```
 
 

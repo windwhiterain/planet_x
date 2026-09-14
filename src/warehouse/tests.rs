@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use super::{Book, Stock, Warehouse, Warehouses};
+use super::{Book, Side, Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
 use crate::utils::LOG_LIMIT;
@@ -818,4 +818,80 @@ fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
         index[0],
     );
 
+}
+
+/// 全局学习曲线：**有信息的人当前的共识**，取中位数。
+/// 一条发散的个体曲线（实测真会到 `buy@1 = 133`）不该把共识带跑。
+#[test]
+fn the_global_consensus_is_a_median_so_one_diverged_curve_cannot_poison_it() {
+    let stock = || Stock::new(1.0, 1.0);
+    let mut warehouses = Warehouses::new(vec![
+        Warehouse::new(vec![stock()]),
+        Warehouse::new(vec![stock()]),
+        Warehouse::new(vec![stock()]),
+    ]);
+    // 三条买入价格曲线：两条落在 [斜率 0, 截距 1]，一条飞了（截距 20）。
+    for (i, intercept) in [(0usize, 1.0f32), (1, 3.0), (2, 20.0)] {
+        let stock = &mut warehouses.warehouses[i].stocks[0];
+        stock.price_curve_mut(Side::Buy).slide_toward([0.0, intercept], 1.0);
+        stock.mark_price_learned(Side::Buy);
+    }
+    warehouses.globals.refresh(&warehouses.warehouses);
+    let consensus = warehouses.globals.price(0, Side::Buy).unwrap();
+    assert_eq!(consensus, [0.0, 3.0], "共识取中位数，不是被 20 拉走的均值");
+}
+
+/// 一轮里没有学习信号的曲线向共识滑动；已经吃满自己信息的曲线基本不动。
+#[test]
+fn a_silent_curve_slides_toward_the_global_and_an_informed_one_does_not() {
+    let stock = || Stock::new(1.0, 1.0);
+    let mut warehouses = Warehouses::new(vec![
+        Warehouse::new(vec![stock()]),
+        Warehouse::new(vec![stock()]),
+    ])
+    .with_global_gain(0.5);
+    // #0 拿到一条价格信号（截距 2.0），#1 这一轮没有信号。
+    let informed = &mut warehouses.warehouses[0].stocks[0];
+    informed.price_curve_mut(Side::Buy).slide_toward([0.0, 2.0], 1.0);
+    informed.mark_price_learned(Side::Buy);
+
+    let before = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
+    warehouses.slide_silent_curves_toward_global();
+    let after = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
+    assert!(
+        after[1] > before[1] && after[1] < 2.0,
+        "冷曲线应当向共识滑动、但只滑一半：{before:?} -> {after:?}",
+    );
+    assert_eq!(
+        warehouses.warehouses[0].stocks[0].price_curve(Side::Buy).params(),
+        [0.0, 2.0],
+        "拿到信号的曲线不该被动",
+    );
+
+    // 反过来：#1 连着拿到信号之后 evidence → 1，滑动权重 → 0，它就不再被拖。
+    for _ in 0..200 {
+        warehouses.warehouses[1].stocks[0].mark_price_learned(Side::Buy);
+        warehouses.slide_silent_curves_toward_global();
+    }
+    let settled = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
+    warehouses.slide_silent_curves_toward_global();
+    let after = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
+    assert_eq!(after, settled, "吃满自己信息之后不该再被共识拖动");
+}
+
+/// 「有多少自己的信息」的 EWMA：每轮都拿到信号 → 1；停手之后衰减回 0（陈旧 ⇒ 重新滑）。
+#[test]
+fn evidence_rises_with_signals_and_decays_when_they_stop() {
+    let mut stock = Stock::new(1.0, 1.0);
+    let mut evidence = 0.0;
+    for _ in 0..300 {
+        evidence = stock.advance_evidence(Side::Buy, true, 0.95, true);
+    }
+    assert!(evidence > 0.999, "每轮都拿到信号 ⇒ evidence → 1：{evidence}");
+    for _ in 0..300 {
+        evidence = stock.advance_evidence(Side::Buy, true, 0.95, false);
+    }
+    assert!(evidence < 1e-3, "停手之后衰减回 0：{evidence}");
+    // 价格曲线与响应各记各的
+    assert_eq!(stock.advance_evidence(Side::Buy, false, 0.95, true), 1.0 - 0.95);
 }
