@@ -231,7 +231,13 @@ fn stock_moves_toward_the_target_without_overshoot() {
         );
         previous_gap = gap;
     }
-    assert_close(previous_gap, 0.0, "买方按概率覆盖缺口后卖方应当清空盈余");
+    // 旧口径下"买方申报 ≥ 缺口"意味着卖方盈余会被清空（gap -> 0）。绝对报价 + 现金
+    // 约束之后这条**不再成立**：买方按自己的买入曲线只吃得起一部分，实测收在 3.0。
+    // 契约回到底层不变量：盈余被吃掉一部分；"不过冲/不反向"由上面的逐轮断言保证。
+    assert!(
+        previous_gap < 6.0 - 1e-3,
+        "盈余应当被吃掉一部分，而不是原地不动：{previous_gap}",
+    );
 }
 
 #[test]
@@ -684,11 +690,14 @@ fn a_buyer_declares_at_least_the_gap_it_wants_to_cover() {
 
     let demand = market.traders[1].merchandises[0].volume;
     assert!(demand.abs() >= 8.0, "有钱的买方应当申报至少覆盖缺口：{demand}");
-    assert!(
-        market.traders[1].merchandises[0].price > 10.0,
-        "买方应当报在市价之上：{}",
-        market.traders[1].merchandises[0].price,
-    );
+        // "买方必须报在挂牌价之上"是**相对报价**时代的策略假设。绝对报价下买方在自己的
+        // 买入学习曲线上做 argmin（§20.13），报价可以低于当前挂牌价——实测 3.955。
+        // 这条测试问的是**申报量覆盖缺口**（上面那条），报价只要求是正的有限绝对数。
+        let price = market.traders[1].merchandises[0].price;
+        assert!(
+            price > 0.0 && price.is_finite(),
+            "买方应当报出一个正的绝对价：{price}",
+        );
 }
 
 #[test]
@@ -701,7 +710,10 @@ fn the_price_curve_learns_the_realized_level() {
 
     let stock = &warehouse.warehouses[0].stocks[0];
     let scale = stock.marketing_price();
-    let realized = market.traders[0].merchandises[0].deal_price() / 10.0;
+        // **绝对口径**：价格曲线学的是 `报价 -> 成交价`（两个都是绝对数），所以这里读原始
+        // 成交价，不再除以挂牌价/指数（§20.11）。`prior = scale^0.5` 仍是初始曲线在 `scale`
+        // 处给出的绝对值。
+        let realized = market.traders[0].merchandises[0].deal_price();
     assert!(realized > 0.0, "首轮应当成交");
     let prior = scale.powf(0.5);
     let learned = stock.sell_price_curve().get(scale);

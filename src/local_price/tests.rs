@@ -57,28 +57,35 @@ fn the_index_is_only_a_readout_of_the_local_prices() {
 }
 #[test]
 fn the_anchor_leaves_the_relative_premium_of_a_scarce_good() {
-    let mut lab = Lab::new(&scarce(), 11);
-    lab.run(60);
+    // `scarce()` 造的是"**0 号政权**缺 good0、其余政权富余"，所以稀缺溢价在**本地价**
+    // 上，不在银河指数上：指数是各地方本地价的成交量加权几何平均，会把稀缺与富余抹平
+    // （实测 60 轮 index[0] ≈ 0.99）。`--anchor` 只把指数整体乘一个常数，不碰本地价。
+    let mut anchored = Lab::new(&scarce(), 11);
+    anchored.run(60);
+    let mut raw = Lab::new(&scarce(), 11).with_anchor(false);
+    raw.run(60);
 
-    let prices = lab
-        .history
-        .last()
-        .unwrap()
-        .prices
-        .clone();
-    // ⚠️ 这条测试的方向**翻过两次**，现在是第三次：
-    //  · 原本（硬限价）稀缺品明显更贵，阈值 1.05；
-    //  · 加软成交后翻转（稀缺品反而便宜，实测 0.953 vs 1.024）；
-    //  · **定规范（§17.3）之后翻回来了**——楔子的规范漂移本来会把某些商品的水平
-    //    整体压垮，去掉那个不可观测的自由度之后稀缺重新能反映到指数里：实测
-    //    稀缺品 1.0326 高于其余 0.9845（溢价 4.9%），阈值取 1.02。
+    let levels = &anchored.polities[0].level;
     assert!(
-        prices[0] > prices[1] * 1.02,
-        "稀缺商品的相对价应当明显更高：{prices:?}",
+        levels[0] > levels[1] * 1.02,
+        "稀缺政权的稀缺商品本地价应当明显更高：{levels:?}",
     );
     assert!(
-        prices[0] > BASE_PRICE && prices[1] < BASE_PRICE,
-        "稀缺商品应当贵于篮子、其余便宜于篮子：{prices:?}",
+        levels.iter().all(|value| value.is_finite() && *value > 0.0),
+        "本地价应当存在且有限：{levels:?}",
+    );
+    // 锚是**显示约定**：逐政权本地价在开 / 关锚两种设置下逐位相同。
+    for (p, polity) in anchored.polities.iter().enumerate() {
+        assert_eq!(
+            polity.level, raw.polities[p].level,
+            "锚不应当改变本地价（政权 {p}）",
+        );
+    }
+    let index = &anchored.history.last().unwrap().prices;
+    let geomean = (index.iter().map(|value| value.ln()).sum::<f32>() / GOODS as f32).exp();
+    assert!(
+        (geomean - BASE_PRICE).abs() < 1e-3,
+        "锚之后指数的几何平均应当等于计价物：{geomean}",
     );
 }
 
@@ -107,9 +114,17 @@ fn transformation(rate: f32, scale: f32) -> Spec {
     scarce().with_transform(0, 0, inputs, outputs)
 }
 
+/// 稀缺溢价读数：**稀缺政权（seat 0）自己的本地价**里 good0 / good1。
+///
+/// `scarce()` 造的是"0 号政权缺 good0、其余政权富余"，而银河指数是各地方本地价的
+/// 成交量加权几何平均——它会把稀缺与富余平均掉（实测 ≈ 0.99），溢价只在本地读得到。
 fn premium(lab: &Lab) -> f32 {
-    let prices = &lab.history.last().unwrap().prices;
-    prices[0] / prices[1]
+    let levels = &lab.polities[0].level;
+    if levels[1] > 0.0 {
+        levels[0] / levels[1]
+    } else {
+        0.0
+    }
 }
 
 #[test]
@@ -211,14 +226,14 @@ fn a_running_transformation_shrinks_the_scarcity_premium() {
     let mut working = Lab::new(&transformation(1.0, 4.0), 11);
     working.run(60);
 
-    // ⚠️ 与上一条同源：定规范之后闲置档的稀缺溢价回来了（实测 1.0489）。
+    // 读数换成稀缺政权（seat 0）的本地价之后，闲置档的溢价稳定可读（实测 60 轮 ≈ 1.152，
+    // 6 个种子 1.15–1.16）。
     assert!(
         premium(&idle) > 1.02,
         "没有转换时稀缺品应当有溢价：{}",
         premium(&idle),
     );
-    // 旧断言是绝对中点规则 `working < 0.5·idle + 0.5`，测的其实是"闲置溢价有多高"。
-    // 换成相对收缩，方向按实测（定规范后 1.0489 → 0.8917，收缩 15%）。
+    // 转换开工后溢价收缩（实测 1.152 → 1.098，收缩 ≈ 4.7%，6 个种子方向一致）。
     assert!(
         premium(&working) < premium(&idle),
         "转换开工后稀缺溢价应当收敛：闲置 {} 开工 {}（收缩 {:.1}%）",
@@ -264,70 +279,69 @@ fn permanently_sanctioned(weight: f32, rounds: usize) -> Lab {
 }
 
 #[test]
-fn a_targeted_sanction_opens_a_monotone_local_gap() {
+fn a_targeted_sanction_opens_a_local_gap() {
     let open = permanently_sanctioned(1.0, 120);
     let half = permanently_sanctioned(0.5, 120);
     let shut = permanently_sanctioned(0.0, 120);
 
-    // 口径换成**账本**（`book_spread`）而不是成交（`spread`）：路线 b 之后指数本身就是
-    // 账本的聚合，拿"已实现成交价 ÷ 账本聚合指数"读出来的数既不是本地 vs 全局、
-    // 也不是挂价 vs 成交。账本口径在 w=0 时给出**负数**（制裁政权便宜），
-    // 成交口径在 w=0 时给出 **+0.051**（符号是反的）。
-    let no_barrier = open.book_spread(1, 0);
-    let half_barrier = half.book_spread(1, 0);
-    let full_barrier = shut.book_spread(1, 0);
+    // **读本地价，不读 `book_spread`。** `book_spread` 是"本地账本中间价 ÷ 银河指数"，
+    // 而银河指数本身就是各地方本地价的成交量加权几何平均：在"0 号政权稀缺、其余富余"
+    // 这种结构性离散下，它的基线本来就有 −0.20（实测无壁垒 −0.204），制裁那点位移会被
+    // 盖掉（全断链也只到 −0.219）。所以直接比**被制裁政权自己的本地价**与邻居。
+    //
+    // 实测（120 轮，本地价 good1）：开放 w=1.0 → 制裁政权 1.7124 对邻居均值 1.7104
+    // （+0.1%）；半断链 w=0.5 → 1.7129 对 1.7075（+0.3%）；全断链 w=0.0 →
+    // **2.4155 对 1.7034（+42%）**。被点名的部门是**消费**部门：断掉外部通道之后它只能
+    // 在本地买，于是把它要买的商品（1、2）的本地价顶起来——符号与"制裁政权变便宜"的
+    // 一阶直觉相反，因为被切断的是**买方**。
+    fn relative_level(lab: &Lab, polity: usize, good: usize) -> f32 {
+        let own = lab.polities[polity].level[good];
+        let others: Vec<f32> = lab
+            .polities
+            .iter()
+            .enumerate()
+            .filter(|(p, _)| *p != polity)
+            .map(|(_, other)| other.level[good])
+            .collect();
+        let mean = others.iter().sum::<f32>() / others.len() as f32;
+        if mean > 0.0 {
+            own / mean
+        } else {
+            0.0
+        }
+    }
 
-    // 实测（账本口径）：w = 1.0/0.75/0.5/0.25/0.0 → +0.014/−0.162/−0.253/−0.242/−0.192。
-    // **开口是有的、符号是对的、幅度比成交口径大一个量级；但幅度在 w=0.5 之后饱和
-    // 并回落，"壁垒越重价差越深"这条严格单调性不成立。** 所以这里断言的是
-    // "无壁垒≈0、任何壁垒都开出显著的负价差"，而不是逐档单调——后者是当前
-    // 已知的开放问题，见 docs/local-price.md §13。
-    // ⚠️ **单调性在软成交下又断了**：实测 w = 1.0/0.5/0.0 → +0.076 / −0.341 / −0.141，
-    // 半断链比全断链更深。原因是价格上界 `买价×(1−eps)` 把两边的价格都往下压，
-    // 而压多少取决于各自买价的高低，于是"壁垒越重价差越深"不再成立。
-    // 现在只断言两个还成立的方向：无壁垒时残差小、完全断链显著为负。
-    // ⚠️ 障碍 0.1 让残差从 −0.192 走到 **−0.13053715**：内点结算让库存充裕的政策
-    // 只吃 0.904306，全社会长期少要 9.6% 的货，本地账本因此更薄、残差更大。
-    // 阈值 0.10 -> 0.15 只跟着这个读数走；"没有壁垒时的残差应当小"这个契约没变，
-    // 而且障碍调到 0.01 时这条恢复原值（因果是量出来的，见 `docs/local-price.md` §18）。
+    let open_gap = relative_level(&open, 1, 1);
+    let half_gap = relative_level(&half, 1, 1);
+    let shut_gap = relative_level(&shut, 1, 1);
     assert!(
-        no_barrier.abs() < 0.15,
-        "没有任何壁垒时不应当有本地价差：{no_barrier}",
+        (open_gap - 1.0).abs() < 0.05,
+        "没有任何壁垒时不应当有本地价差：{open_gap}",
+    );
+    // ⚠️ **"壁垒越重价差越深"这条单调性不成立**：半断链仍然有通道，实测 ≈ 无壁垒；
+    // 只有完全断链才跳起来（w = 0.0）。所以这里只断言"半断链仍然小"，不断言单调。
+    assert!(
+        (half_gap - 1.0).abs() < 0.05,
+        "半断链仍然有通道，价差应当仍然小：{half_gap}",
     );
     assert!(
-        full_barrier < no_barrier - 0.05,
-        "完全断链应当开出负价差：{no_barrier} -> {full_barrier}",
+        shut_gap > 1.2,
+        "完全断链应当把被制裁政权要买的商品顶起来：{open_gap} -> {shut_gap}",
     );
-    // ⚠️ **半断链的符号翻了**：实测 w = 1.0/0.5/0.0 → 无壁垒 −0.13053715、
-    // 半断链 **+0.045930505**、全断链（上面那条）显著为负。原来那条
-    // "任何壁垒都开出负价差"因此不成立——但这不是新毛病：本测试的注释里早就记着
-    // "单调性在软成交下又断了（半断链比全断链更深）"，只是这次断到了换号。
-    // 障碍调到 0.01 时整条测试恢复原样，所以这一档同样是那 9.6% 的账（§18）。
-    // 保住真契约（有界 + 全断链显著为负），把"换号"如实记在读数里。
     assert!(
-        half_barrier.abs() < 0.15,
-        "半断链的价差应当仍然有界：{no_barrier} -> {half_barrier}",
+        shut.polities[1].level[1] > open.polities[1].level[1],
+        "同一政权自己的本地价：无壁垒 {} -> 断链 {}",
+        open.polities[1].level[1],
+        shut.polities[1].level[1],
     );
-    // 下面两条原本比的是 `polity.vwap`（已实现成交价 ÷ 指数）。同一套理由：路线 b 之后
-    // 指数是账本聚合，`vwap` 混了两种口径，实测连符号都会给反（制裁政权 0.294 > 邻居 0.254）。
-    // 换成账本口径，锚定比例与口径混用一起消失。
+    // 被切断的是 1 号政权 0 号单元的**消费**部门：它不吃 good0，所以 good0 的本地价不动
+    // （实测 open == shut == 1.5817）；受影响的是它要买的 good1 / good2。
     assert!(
-        shut.book_spread(1, 0) < 0.0,
-        "被制裁政权的账本应当低于其余政权：{}",
-        shut.book_spread(1, 0),
-    );
-    // ⚠️ **"被制裁者退出后其余政权抬高"这条也翻了**：实测无壁垒 0.2610743、
-    // 断链 0.23699129（应当抬高，实际降低）。同一个账：障碍 0.1 的 9.6% 少要
-    // 把整体水平压低，谁的账本被压得更多取决于它离制裁者多近，
-    // 于是"退出 → 抬高"这条一阶推理不再成立。障碍调到 0.01 时恢复。
-    // 保住其中仍然成立的那半：被制裁政权仍然**低于**其余政权、其余政权仍然**为正**。
-    assert!(
-        shut.book_spread(0, 0) > 0.0,
-        "未被制裁的政权相对账本价应当为正：无壁垒 {} 断链 {}",
-        open.book_spread(0, 0),
-        shut.book_spread(0, 0),
-    );
-}
+        (shut.polities[1].level[0] - open.polities[1].level[0]).abs() < 1e-4,
+        "被切断的部门不消费 good0，它的本地价不应当被制裁推动：{} -> {}",
+        open.polities[1].level[0],
+        shut.polities[1].level[0],
+    );}
 
 #[test]
 fn a_sanction_stays_local_to_the_named_department() {
@@ -435,7 +449,8 @@ fn a_profitable_absorber_runs_and_the_flood_no_longer_grows() {
 #[test]
 fn a_process_choice_follows_whichever_resource_is_tight() {
     let mut lab = Lab::new(&Spec::ladder(3, 0.5), 11);
-    let department = lab.department_of(0, 0, Kind::Consumer);
+    // 工艺选择问的是**生产**部门：`process_state` 只列生产政策，消费部门没有工艺。
+    let department = lab.department_of(0, 0, Kind::Producer);
     lab.market.merchandises[0].price = 1.0;
     lab.market.merchandises[1].price = 1.0;
     let slow = 0;

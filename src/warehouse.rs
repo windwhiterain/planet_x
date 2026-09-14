@@ -342,6 +342,14 @@ impl Stock {
             sell
         };
     }
+    /// **测试用**：直接给出买入价格曲线（`报价 -> 绝对成交价`）。
+    ///
+    /// 部门估值走的就是这条曲线（§20.13），但生产代码里它只由 `observe` 学习。
+    /// 要单独测"估值怎么影响政策份额"，就得能把它钉成一个已知映射。
+    #[cfg(test)]
+    pub(crate) fn set_buy_price_curve(&mut self, curve: PowerLaw) {
+        self.buy_price_curve = curve;
+    }
 
     /// 买方"力度"：报价越高越激进（越容易成交）。
     pub fn buy_aggressiveness(price: f32) -> f32 {

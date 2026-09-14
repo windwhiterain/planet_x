@@ -1,6 +1,7 @@
 use fastrand::Rng;
 
 use super::{Department, Departments, Policy};
+use crate::estimator::PowerLaw;
 use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
 use crate::warehouse::{Stock, Warehouse, Warehouses};
 
@@ -111,6 +112,81 @@ fn assert_close(actual: f32, expected: f32, context: &str) {
     );
 }
 
+/// 结算的障碍量纲：`μ = BARRIER × θ × 平均 motive`（见 `department::settlement`）。
+fn barrier_mu(motives: &[f64]) -> f64 {
+    0.1 * 0.5 * motives.iter().sum::<f64>() / motives.len() as f64
+}
+
+/// 单政策 KKT 的**独立对照根**（不依赖被测代码）：
+/// `θ·motive·x^{θ−1} + μ/x = Σ_k plan_k·μ/(inventory_k − plan_k·x)`，
+/// 左边随 `x` 递减、右边递增 ⇒ 根唯一，二分求它。
+fn basket_root(motive: f64, plan: &[f64], inventory: &[f64], mu: f64) -> f64 {
+    let curvature = 0.5;
+    let g = |x: f64| {
+        let utility = curvature * motive * x.powf(curvature - 1.0) + mu / x;
+        let shadow: f64 = plan
+            .iter()
+            .zip(inventory.iter())
+            .filter(|(consumption, _)| **consumption > 0.0)
+            .map(|(consumption, stock)| consumption * mu / (stock - consumption * x))
+            .sum();
+        utility - shadow
+    };
+    let cap = plan
+        .iter()
+        .zip(inventory.iter())
+        .filter(|(consumption, _)| **consumption > 0.0)
+        .map(|(consumption, stock)| stock / consumption)
+        .fold(f64::INFINITY, f64::min);
+    let (mut low, mut high) = (cap * 1e-12, cap * (1.0 - 1e-9));
+    for _ in 0..200 {
+        let mid = 0.5 * (low + high);
+        if g(mid) > 0.0 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    0.5 * (low + high)
+}
+
+/// 两条政策**抢同一种商品**（配方都是 `amount`）时的耦合 KKT：两者共享影子价格
+/// `λ = μ/(stock − amount·(x₀+x₁))`，各自解 `θ·motive_p·x^{θ−1} + μ/x = amount·λ`。
+/// 对剩余库存 `s` 二分（`h(s) = stock − amount·Σx_p(s) − s` 严格递减）。
+fn shared_good_root(motives: &[f64], amount: f64, stock: f64) -> (f64, f64) {
+    let curvature = 0.5;
+    let mu = barrier_mu(motives);
+    let x_of = |motive: f64, lambda: f64| {
+        let g = |x: f64| curvature * motive * x.powf(curvature - 1.0) + mu / x - amount * lambda;
+        let (mut low, mut high) = (stock * 1e-12, stock / amount * (1.0 - 1e-9));
+        for _ in 0..200 {
+            let mid = 0.5 * (low + high);
+            if g(mid) > 0.0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        0.5 * (low + high)
+    };
+    let h = |s: f64| {
+        let lambda = mu / s;
+        let xs: f64 = motives.iter().map(|motive| x_of(*motive, lambda)).sum();
+        stock - amount * xs - s
+    };
+    let (mut low, mut high) = (stock * 1e-12, stock * (1.0 - 1e-12));
+    for _ in 0..200 {
+        let mid = 0.5 * (low + high);
+        if h(mid) > 0.0 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let lambda = mu / (0.5 * (low + high));
+    (x_of(motives[0], lambda), x_of(motives[1], lambda))
+}
+
 fn assert_finite_state(departments: &Departments, warehouses: &Warehouses, market: &Market) {
     for (i, department) in departments.departments.iter().enumerate() {
         assert!(
@@ -179,14 +255,18 @@ fn policy_is_a_pure_resource_sink() {
 
     departments.plan(&mut warehouses, &market);
 
-    // 内点结算在库存充裕时**故意留一个障碍余量**：单政策、两条约束下实测执行率
-    // 0.90430605（解析根 `w·x² − (w−2μ)x − μ = 0` 在 λ = 0 的极限是 0.909902，
-    // 差的那一点就是约束的影子价格）。下面按同一个 x 反推读数，别撒魔数。
-    // 契约本身没变：政策**只减不增**，吃不掉的部分留在仓库里。
-    let rate = 0.90430605f32;
-    assert_close(holding(&warehouses, 0)[0], 10.0 - 3.0 * rate, "政策消耗第一种资源");
-    assert_close(holding(&warehouses, 0)[1], 10.0 - 2.0 * rate, "政策消耗第二种资源");
-    assert_close(total_stock(&warehouses), 20.0 - 5.0 * rate, "只减不增");
+    // 内点结算的变量是"跑几篮"（x），库存充裕时**故意留一个障碍余量**。单政策的 KKT
+    // 由 `basket_root` 独立二分求根（μ = 0.1 × θ × motive），不再撒旧口径的魔数。
+    // 契约没变：政策**只减不增**，吃不掉的留在仓库里；两样商品按同一个篮数缩放。
+    let motive = 40.0;
+    let x = basket_root(motive, &[3.0, 2.0], &[10.0, 10.0], barrier_mu(&[motive]));
+    assert!(
+        x > 0.0 && x < 10.0 / 3.0,
+        "篮数应当为正、且留一个障碍余量（库存 10 只够 3.33 篮）：{x}",
+    );
+    assert_close(holding(&warehouses, 0)[0], (10.0 - 3.0 * x) as f32, "政策消耗第一种资源");
+    assert_close(holding(&warehouses, 0)[1], (10.0 - 2.0 * x) as f32, "政策消耗第二种资源");
+    assert_close(total_stock(&warehouses), (20.0 - 5.0 * x) as f32, "只减不增");
 }
 
 #[test]
@@ -206,9 +286,19 @@ fn the_higher_motive_policy_takes_the_larger_share() {
         .map(|policy| policy.distribution())
         .sum();
     assert_close(distribution, 1.0, "分布应当归一化");
-    // 意愿更强的那条政策**吃得更干净**：w = 0.8 与 0.2、μ = 0.1×平均意愿 = 0.05，
-    // 两条无约束政策的执行率分别是 0.9378 / 0.8385（解析根），耦合下实测加权 0.9140332。
-    assert_close(holding(&warehouses, 0)[0], 8.171934, "加权后的消耗量");
+    // 两条政策**抢同一种商品**（配方都是 2 件 good0、存量 10），耦合 KKT 由
+    // `shared_good_root` 独立二分：共享影子价格 λ = μ/余量。契约是"意愿更强的
+    // 多跑几篮"，不再读归一化份额时代的加权执行率。
+    let (x_weak, x_strong) = shared_good_root(&[10.0, 40.0], 2.0, 10.0);
+    assert!(
+        x_strong > x_weak,
+        "意愿更强的那条政策应当多跑：{x_weak} vs {x_strong}",
+    );
+    assert_close(
+        holding(&warehouses, 0)[0],
+        (10.0 - 2.0 * (x_weak + x_strong)) as f32,
+        "两条政策的提货量之和",
+    );
 }
 
 #[test]
@@ -227,18 +317,25 @@ fn a_continuous_distribution_draws_from_every_policy() {
         first > 0.0 && second > 0.0,
         "两种政策都应当分到份额：{first} / {second}",
     );
-    // 每种资源按"这条政策自己的份额 × 自己的执行率"被提走。执行率不再恒等于 1：
-    // w = 0.75 / 0.25、μ = 0.1×平均意愿 = 0.05，解析根是 0.9378 / 0.8385，
-    // 耦合下实测 0.9366389 / 0.8364800（两条政策的 w 不同，所以余量也不同）。
+    // 两条政策各吃**一种**商品（互不耦合），但共享障碍 μ = 0.1×θ×平均意愿 = 1.0：
+    // 各自解一条单政策 KKT（`basket_root`），逐位复算提货量。
+    // 注意：`distribution` 现在只是份额读数，不再折算提货量。
+    let mu = barrier_mu(&[30.0, 10.0]);
+    let x_first = basket_root(30.0, &[3.0, 0.0], &[10.0, 10.0], mu);
+    let x_second = basket_root(10.0, &[0.0, 3.0], &[10.0, 10.0], mu);
+    assert!(
+        x_first > x_second,
+        "意愿更强的政策应当多跑：{x_first} vs {x_second}",
+    );
     assert_close(
         holding(&warehouses, 0)[0],
-        10.0 - 3.0 * first * 0.9366389,
-        "第一种资源按份额被提走",
+        (10.0 - 3.0 * x_first) as f32,
+        "第一种资源按 KKT 被提走",
     );
     assert_close(
         holding(&warehouses, 0)[1],
-        10.0 - 3.0 * second * 0.8364800,
-        "第二种资源按份额被提走",
+        (10.0 - 3.0 * x_second) as f32,
+        "第二种资源按 KKT 被提走",
     );
 }
 
@@ -263,12 +360,11 @@ fn a_cheaper_policy_takes_the_larger_share() {
         &[&[0.0, 0.0], &[0.0, 0.0]],
         &[&[(&[2.0, 0.0], 40.0), (&[0.0, 2.0], 40.0)], &[]],
     );
-    let market = {
-        let mut market = market;
-        market.merchandises[0].price = 1.0;
-        market.merchandises[1].price = 4.0;
-        market
-    };
+    // 部门**不读挂牌价**（§20.13）："便宜"必须由它自己的**买入学习曲线**给出。
+    // 把两条常数曲线钉成 1.0 / 4.0，就复现了"意愿 ÷ 价格"的 0.8 / 0.2 份额。
+    let constant = |price: f32| PowerLaw::new(0.0, price.ln(), PowerLaw::DEFAULT_FORGETTING);
+    warehouses.warehouses[0].stocks[0].set_buy_price_curve(constant(1.0));
+    warehouses.warehouses[0].stocks[1].set_buy_price_curve(constant(4.0));
 
     departments.plan(&mut warehouses, &market);
 
@@ -278,12 +374,11 @@ fn a_cheaper_policy_takes_the_larger_share() {
         first > second,
         "同样意愿下应当更偏向便宜的资源：{first} / {second}",
     );
-    assert_close(first, 0.8, "意愿除以价格");
-    assert_close(
-        holding(&warehouses, 0)[0],
-        8.494817,
-        "第一种资源按份额被提走（份额 0.8 × 执行率 ≈ 0.9141）",
-    );
+    assert_close(first, 0.8, "意愿除以曲线给出的单位成本");
+    // 两条政策的配方与意愿相同、各吃一种商品、库存对称 ⇒ 提货量也相同（x₀ == x₁）。
+    let x = basket_root(40.0, &[2.0], &[10.0], barrier_mu(&[40.0, 40.0]));
+    assert_close(holding(&warehouses, 0)[0], (10.0 - 2.0 * x) as f32, "第一种资源按 KKT 被提走");
+    assert_close(holding(&warehouses, 0)[1], (10.0 - 2.0 * x) as f32, "第二种资源对称地被提走");
 }
 
 #[test]
@@ -296,11 +391,17 @@ fn execution_is_bounded_by_the_stock_on_hand() {
 
     departments.plan(&mut warehouses, &market);
 
-    // 库存 4、想要 10：硬配给会把 4 全吃干（x = 0.4）。内点结算解
-    // `w + μ/x − μ/(1−x) = ĉ·μ/ŝ`（w = 1、μ = 0.1、ĉ = 10/4、ŝ = 1 − ĉx），
-    // 得 x = 0.31466714，**故意留 0.853** 在仓库里。留多少正是"软化"本身——
-    // 这是这次改动的题中之义，不是把量算错了。（手算核对：左 1.1718820、右 1.1718790。）
-    assert_close(holding(&warehouses, 0)[0], 0.85332847, "障碍允许的余量留在仓库");
+    // 库存 4、想要 10（plan 是裸配方 10，所以 x 读作篮数、x ≤ 0.4）。内点结算解
+    // `θ·motive·x^{θ−1} + μ/x = 10·μ/(4 − 10x)`，由 `basket_root` 独立二分。
+    // **故意留一个障碍余量**——留多少正是"软化"本身，不是把量算错了。
+    let motive = 1e6;
+    let x = basket_root(motive, &[10.0], &[4.0], barrier_mu(&[motive]));
+    let left = 4.0 - 10.0 * x;
+    assert!(
+        x > 0.0 && left > 0.0 && x < 0.4,
+        "障碍应当留一个正余量、且不超取：篮数 {x}，余 {left}",
+    );
+    assert_close(holding(&warehouses, 0)[0], left as f32, "障碍允许的余量留在仓库");
 }
 
 #[test]
