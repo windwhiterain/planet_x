@@ -102,14 +102,15 @@ pub(super) fn plan(
     let goods = warehouse.stocks.len();
 
     // 决策价来自**这个部门所在地方的账本**（挂单推出来的、逐地方的）。
-    // 某一侧没有挂单就回退到**本地参照价**（本地价）——那是"没有人愿意在这个方向上成交"
-    // 的诚实表达。**不用银河指数**：指数是读数，回头当输入就又是一圈自指（§20.8）。
+    // 某一侧没有挂单就回退到**这个部门自己学出来的绝对报价**（`Stock::marketing_price`，
+    // 它由学习曲线 + 现金约束定）——"没有人愿意在这个方向上成交"的诚实表达。
+    // **不用银河指数、也不用 wedge**：那些不是学习曲线出来的量（§20.11）。
     let fallback: Vec<f32> = (0..goods)
         .map(|k| {
             warehouse
-                .reference
+                .stocks
                 .get(k)
-                .copied()
+                .map(|stock| stock.marketing_price())
                 .filter(|price| price.is_finite() && *price > 0.0)
                 .unwrap_or(1.0)
         })

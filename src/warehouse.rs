@@ -81,7 +81,6 @@ impl Book {
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
     pub currency: f32,
-    pub reference: Vec<f32>,
     pub locality: usize,
 }
 
@@ -262,18 +261,12 @@ impl Warehouse {
         Self {
             stocks,
             currency: 0.0,
-            reference: Vec::new(),
             locality: 0,
         }
     }
 
     pub fn with_locality(mut self, locality: usize) -> Self {
         self.locality = locality;
-        self
-    }
-
-    pub fn with_reference(mut self, reference: Vec<f32>) -> Self {
-        self.reference = reference;
         self
     }
 

@@ -1999,3 +1999,33 @@ quote = 本地价 × marketing_price_scale
 `a_market_with_no_initial_readout_stays_finite`；两条价格水位测试的 band 放宽到
 `1e-3..=1e4`；`the_index_is_only_a_readout_of_the_local_prices` 改成逐位复算
 "各地方本地价的加权几何平均"。
+
+### 20.12 本地价的来源与引用方（审计）
+
+报价只从一个地方来：
+
+```
+Stock::marketing_price = sale_price(学习曲线 + 兑现率曲面)
+                       或 purchase_price(同一套 + 现金约束)
+报价                    = marketing_price            （绝对价）
+```
+
+所以"本地价"现在**全是读数**，没有独立状态：
+
+| 口径 | 怎么来的 |
+|---|---|
+| 地方账本中间价 `Book::mid` | 该地方所有交易者**绝对报价**的两侧边际价之几何平均（`update_books`） |
+| 逐政权本地价 `polity.level` | 该政权地方账本中间价（`local_readout`，`Lab::step` 每轮刷新） |
+| 银河价 `market.merchandises[k].price` | 各地方本地价的成交量加权几何平均（`aggregate_index`），**纯读数** |
+
+审计"谁还在引用非学习曲线来源的价格"：**只有一处**——`department::step::plan` 在某一侧
+没有挂单时回退到 `warehouse.reference`（= `wedge` 学出来的水平）。本轮把它改成**该部门
+自己学出来的绝对报价** `Stock::marketing_price`。
+
+改完之后 `warehouse.reference` 再没有读者，连同 `apply_levels`（它唯一的作用就是把
+`wedge` 写进 `reference`）一起删掉；`polity.level` 改由 `local_readout` 每轮从账本刷新，
+不再由 `wedge` 推。
+
+**仍然残留**：`Polity.wedge` / `update_levels` / `LevelRule` / `--rule` / `--forgetting` /
+`--gain` / `--recenter`。它们现在只影响**显示**（`--anchor` 只把读数按"篮子几何平均 = 1"
+归一化），不进任何报价或决策路径。待办：整条删掉，让 `Polity` 只剩记账字段。

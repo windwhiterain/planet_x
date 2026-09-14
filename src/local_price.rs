@@ -411,6 +411,23 @@ pub struct Lab {
     rng: Rng,
 }
 
+/// 逐政权逐商品的**本地价读数**：该政权地方账本中间价
+/// （由学习曲线产出的**绝对报价**聚合出来的几何平均）。
+fn local_readout(warehouses: &Warehouses, locality: usize, goods: usize) -> Vec<f32> {
+    (0..goods)
+        .map(|k| {
+            warehouses
+                .books
+                .get(locality)
+                .and_then(|row| row.get(k))
+                .filter(|book| book.is_formed())
+                .map(|book| book.mid())
+                .filter(|mid| mid.is_finite() && *mid > 0.0)
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
 impl Lab {
     pub fn new(spec: &Spec, seed: u64) -> Self {
         let count = spec.polities * 2 * UNITS;
@@ -447,7 +464,6 @@ impl Lab {
                     }
                     warehouses.push(
                         Warehouse::new(stocks)
-                            .with_reference(vec![BASE_PRICE; GOODS])
                             .with_locality(polity),
                     );
                     let policies: Vec<Policy> = match kind {
@@ -535,7 +551,6 @@ impl Lab {
             history: Vec::new(),
             rng: Rng::with_seed(seed),
         };
-        lab.apply_levels();
         let snapshot = lab.snapshot();
         lab.history.push(snapshot);
         lab
@@ -891,7 +906,6 @@ impl Lab {
     }
 
     pub fn step(&mut self) {
-        self.apply_levels();
         let before: Vec<f32> = self
             .market
             .merchandises
@@ -917,6 +931,17 @@ impl Lab {
         {
             if price.is_finite() && price > 0.0 {
                 self.market.merchandises[k].price = price;
+            }
+        }
+        // 本地价读数：逐政权 = 该政权地方账本中间价（由学习曲线产出的**绝对报价**聚合而来）。
+        // `wedge`/`apply_levels` 那套"独立学一个水平"的路子已经退场（§20.11）。
+        let goods = self.market.merchandises.len();
+        for (p, polity) in self.polities.iter_mut().enumerate() {
+            let readout = local_readout(&self.warehouses, p, goods);
+            for k in 0..goods {
+                if readout[k] > 0.0 {
+                    polity.level[k] = readout[k];
+                }
             }
         }
         self.gauge = self
@@ -959,37 +984,6 @@ impl Lab {
     pub fn run(&mut self, rounds: usize) {
         for _ in 0..rounds {
             self.step();
-        }
-    }
-
-    fn apply_levels(&mut self) {
-        let Self {
-            polities, warehouses, ..
-        } = self;
-        for polity in polities.iter_mut() {
-            for good in 0..GOODS {
-                // 参照价 = **固定计价物**（`BASE_PRICE`）× e^楔子。**银河指数不在这里。**
-                //
-                // 这条曾经是 `参照价 = 银河指数 × e^楔子`，那让"指数 → 参照价 → 挂价 →
-                // 账本 → 指数"变成一个**乘法闭环**：因为参照价每轮被指数重新缩放，
-                // 买方的预算约束 `cash / (参照价 × realized)` 对整体价格水平完全不变——
-                // 整个经济**没有名义锚**。实测那个环把相对价连乘到 f32 边界（§20）。
-                //
-                // 指数是**读数**，不是输入：它是一个市场跑完之后汇总出来的统计量，
-                // 不应该再回到任何人的决策里。价格水平的原始量是**逐政权的本地价**
-                // （`楔子`，见 `update_levels` 的绝对口径），它由本地成交/对手价推出来，
-                // 并被"每轮固定拨款"这个名义约束钉住。
-                let level = BASE_PRICE * polity.wedge[good].exp();
-                polity.level[good] = if level.is_finite() && level > 0.0 {
-                    level
-                } else {
-                    BASE_PRICE
-                };
-            }
-            let level = polity.level.clone();
-            for warehouse in &mut warehouses.warehouses[polity.span()] {
-                warehouse.reference = level.clone();
-            }
         }
     }
 
