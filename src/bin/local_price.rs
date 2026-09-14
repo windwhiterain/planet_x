@@ -14,6 +14,7 @@ struct Args {
     forgetting: f32,
     gain: f32,
     recenter: bool,
+    recenter_gain: f32,
     anchor: bool,
     grant: f32,
     transform: bool,
@@ -59,6 +60,7 @@ impl Default for Args {
             forgetting: 0.1,
             gain: 0.02,
             recenter: true,
+            recenter_gain: 1.0,
             anchor: true,
             grant: 10.0,
             transform: false,
@@ -125,6 +127,7 @@ fn parse() -> Option<Args> {
             "--forgetting" => args.forgetting = value()?.parse().ok()?,
             "--gain" => args.gain = value()?.parse().ok()?,
             "--no-recenter" => args.recenter = false,
+            "--recenter-gain" => args.recenter_gain = value()?.parse().ok()?,
             "--no-anchor" => args.anchor = false,
             "--grant" => args.grant = value()?.parse().ok()?,
             "--transform" => args.transform = true,
@@ -236,6 +239,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         .with_forgetting(args.forgetting)
         .with_gain(args.gain)
         .with_recenter(args.recenter)
+        .with_recenter_gain(args.recenter_gain)
         .with_anchor(args.anchor)
         .with_soft_eps(args.soft_eps)
         .with_rationing(match args.rationing.as_str() {

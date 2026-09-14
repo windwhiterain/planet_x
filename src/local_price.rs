@@ -398,6 +398,9 @@ pub struct Lab {
     pub forgetting: f32,
     pub gain: f32,
     pub recenter: bool,
+    /// 定规范的强度：`wedge -= gain × 跨政体均值`。1.0 = 每轮把均值清零（旧行为），
+    /// 0 = 关掉，>1 = 过冲（如果均值是个正反馈模态，过冲才能把它压到稳定侧）。
+    pub recenter_gain: f32,
     pub anchor: bool,
     pub gauge: Vec<f32>,
     pub round: usize,
@@ -524,6 +527,7 @@ impl Lab {
             // t2 毛利 = 16×5.12e-17 − 16×3.14e-2 < 0 ⇒ 停产 ⇒ execution 冻结 ⇒ 洪水无界。
             // 每轮跨政体中心化就把这个不可观测的自由度钉在 0 上，楔子只留相对信息。
             recenter: true,
+            recenter_gain: 1.0,
             anchor: true,
             gauge: vec![0.0; GOODS],
             round: 0,
@@ -554,6 +558,11 @@ impl Lab {
 
     pub fn with_recenter(mut self, recenter: bool) -> Self {
         self.recenter = recenter;
+        self
+    }
+
+    pub fn with_recenter_gain(mut self, gain: f32) -> Self {
+        self.recenter_gain = gain;
         self
     }
 
@@ -977,6 +986,7 @@ impl Lab {
         let forgetting = self.forgetting;
         let gain = self.gain;
         let recenter = self.recenter;
+        let recenter_gain = self.recenter_gain;
         let Self {
             polities,
             warehouses,
@@ -1084,7 +1094,7 @@ impl Lab {
                     .sum::<f32>()
                     / polities.len() as f32;
                 for polity in polities.iter_mut() {
-                    polity.wedge[k] -= mean;
+                    polity.wedge[k] -= recenter_gain * mean;
                 }
             }
         }
