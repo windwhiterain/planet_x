@@ -96,6 +96,12 @@ pub struct Stock {
     /// 以绝对数为准（见 `sale_price` / `purchase_price` / `observe`）。
     marketing_price: f32,
     marketing_volume: f32,
+    /// 上一轮自己的**成交价**（绝对价）：报价搜索带宽的中心（见 `quote_band`）。
+    /// 没有成交过时留在计价物上。
+    last_deal: f32,
+    /// 报价搜索的**对数半宽**：搜索区间 = `上月成交价 × e^{±quote_band}`。
+    /// 默认 [`Warehouses::DEFAULT_QUOTE_BAND`]（见 docs/market-system.md §7.3）。
+    quote_band: f32,
     natural_volume_delta: f32,
     /// 本轮**被部门取走**的量（[`Stock::record_take`]），目标水位就锚在它上面。
     ///
@@ -124,6 +130,13 @@ impl Warehouses {
     pub const DEFAULT_FLUCTUATION: f32 = 0.2;
     /// 账本/本地比值混合的默认记忆（旧 `warehouse::step::LOCAL_PRICE_FORGETTING`）
     pub const DEFAULT_BOOK_FORGETTING: f32 = 0.8;
+    /// 报价搜索的默认对数半宽（中心 = 上一轮自己的成交价）。
+    ///
+    /// §7.3 实测定档（modern/capacity 12）：半宽 1.0 在 20000 轮 × 5 个种子上把 index
+    /// 收到 10^-1.3…10^2.5、成交 74–96 件/轮（±44 时是 89），本地价的 log 跨度
+    /// （seed 11、5000 轮均值）从 **48** 收到 **1.45**；更紧的 0.5 会把市场冻死
+    /// （成交 → 0.66 件/轮）；3.0 则有一个种子长时程漂到 10^10.7。
+    pub const DEFAULT_QUOTE_BAND: f32 = 1.0;
 
     pub fn new(warehouses: Vec<Warehouse>) -> Self {
         Self {
@@ -251,6 +264,21 @@ impl Warehouses {
         self
     }
 
+    /// 报价搜索的对数半宽（中心 = 上一轮自己的成交价）。默认 = [`Warehouses::DEFAULT_QUOTE_BAND`]。
+    pub fn with_quote_band(mut self, band: f32) -> Self {
+        let band = if band.is_finite() {
+            band.clamp(0.0, crate::utils::LOG_LIMIT)
+        } else {
+            crate::utils::LOG_LIMIT
+        };
+        for warehouse in self.warehouses.iter_mut() {
+            for stock in warehouse.stocks.iter_mut() {
+                stock.quote_band = band;
+            }
+        }
+        self
+    }
+
     pub fn step(&mut self, market: &mut Market, rng: &mut Rng) {
         step::step(self, market, rng);
     }
@@ -306,6 +334,8 @@ impl Stock {
             target_volume,
             marketing_price: 1.0,
             marketing_volume: 0.0,
+            last_deal: 1.0,
+            quote_band: Warehouses::DEFAULT_QUOTE_BAND,
             natural_volume_delta: 0.0,
             taken: 0.0,
             declared_gap: 0.0,
@@ -342,6 +372,14 @@ impl Stock {
             sell
         };
     }
+    /// **测试用**：直接给出买入价格曲线（`报价 -> 绝对成交价`）。
+    ///
+    /// 部门估值走的就是这条曲线（§20.13），但生产代码里它只由 `observe` 学习。
+    /// 要单独测"估值怎么影响政策份额"，就得能把它钉成一个已知映射。
+    #[cfg(test)]
+    pub(crate) fn set_buy_price_curve(&mut self, curve: PowerLaw) {
+        self.buy_price_curve = curve;
+    }
 
     /// 买方"力度"：报价越高越激进（越容易成交）。
     pub fn buy_aggressiveness(price: f32) -> f32 {
@@ -367,6 +405,31 @@ impl Stock {
 
     pub fn marketing_price(&self) -> f32 {
         self.marketing_price
+    }
+
+    /// 报价搜索的对数区间 `[center − band, center + band]`，中心是上一轮自己的成交价。
+    ///
+    /// §7.3：把"单个交易者能在十几个数量级里挑报价"收成"上一个成交价附近的一个区间"。
+    /// `quote_band = LOG_LIMIT` 时区间就是全 f32 范围（历史行为，逐位不变）；
+    /// 默认见 [`Warehouses::DEFAULT_QUOTE_BAND`]。
+    pub(crate) fn quote_log_bounds(&self) -> (f32, f32) {
+        let limit = crate::utils::LOG_LIMIT;
+        let center = if self.last_deal.is_finite() && self.last_deal > 0.0 {
+            self.last_deal.ln().clamp(-limit, limit)
+        } else {
+            0.0
+        };
+        let band = if self.quote_band.is_finite() {
+            self.quote_band.clamp(0.0, limit)
+        } else {
+            limit
+        };
+        // 半宽取满 = "没有区间"：直接给全 f32 范围，**不受锚平移的影响**。
+        // 这条短路保证默认档与"不带宽带"的历史行为逐位相同。
+        if band >= limit {
+            return (-limit, limit);
+        }
+        ((center - band).max(-limit), (center + band).min(limit))
     }
 
     pub fn buy_response(&self) -> &Response {

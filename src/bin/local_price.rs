@@ -1,22 +1,18 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::estimator::PowerLaw;
 use planet_x::estimator2d::Response;
+use planet_x::warehouse::Warehouses;
 use planet_x::local_price::{
-    bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
-    LADDER_THRIFTY, NAMES, SECTOR_MOTIVE,
+    bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
+    LADDER_THRIFTY, SECTOR_MOTIVE,
 };
 
 #[derive(Clone)]
 struct Args {
     scenario: String,
-    rule: LevelRule,
     polities: usize,
     rounds: usize,
     every: usize,
-    forgetting: f32,
-    gain: f32,
-    recenter: bool,
-    recenter_gain: f32,
     anchor: bool,
     grant: f32,
     transform: bool,
@@ -43,6 +39,8 @@ struct Args {
     barrier: f32,
     curvature: f32,
     fluctuation: f32,
+    /// 报价搜索的对数半宽（中心 = 上一轮自己的成交价）。
+    quote_band: f32,
     /// 仓库内部学习率（None = 各自默认）。见 `Lab::with_learning_rates`
     learning: Option<f32>,
     response_learning: Option<f32>,
@@ -61,14 +59,9 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             scenario: String::from("scarce"),
-            rule: LevelRule::Counterparty,
             polities: 3,
             rounds: 120,
             every: 10,
-            forgetting: 0.1,
-            gain: 0.02,
-            recenter: true,
-            recenter_gain: 1.0,
             anchor: true,
             grant: 10.0,
             transform: false,
@@ -95,6 +88,7 @@ impl Default for Args {
             barrier: DEFAULT_BARRIER,
             curvature: DEFAULT_CURVATURE,
             fluctuation: DEFAULT_FLUCTUATION,
+            quote_band: Warehouses::DEFAULT_QUOTE_BAND,
             learning: None,
             response_learning: None,
             price_learning: None,
@@ -136,14 +130,9 @@ fn parse() -> Option<Args> {
         let mut value = || items.next();
         match flag.as_str() {
             "--scenario" => args.scenario = value()?,
-            "--rule" => args.rule = LevelRule::parse(&value()?)?,
             "--polities" => args.polities = value()?.parse().ok()?,
             "--rounds" | "-n" => args.rounds = value()?.parse().ok()?,
             "--every" => args.every = value()?.parse().ok()?,
-            "--forgetting" => args.forgetting = value()?.parse().ok()?,
-            "--gain" => args.gain = value()?.parse().ok()?,
-            "--no-recenter" => args.recenter = false,
-            "--recenter-gain" => args.recenter_gain = value()?.parse().ok()?,
             "--no-anchor" => args.anchor = false,
             "--grant" => args.grant = value()?.parse().ok()?,
             "--transform" => args.transform = true,
@@ -170,6 +159,7 @@ fn parse() -> Option<Args> {
             "--barrier" => args.barrier = value()?.parse().ok()?,
             "--curvature" => args.curvature = value()?.parse().ok()?,
             "--fluctuation" => args.fluctuation = value()?.parse().ok()?,
+            "--quote-band" => args.quote_band = value()?.parse().ok()?,
             "--learning" => args.learning = Some(value()?.parse().ok()?),
             "--response-learning" => args.response_learning = Some(value()?.parse().ok()?),
             "--price-learning" => args.price_learning = Some(value()?.parse().ok()?),
@@ -196,13 +186,10 @@ fn parse() -> Option<Args> {
 }
 
 fn usage() {
-    println!("用法：local_price [--scenario symmetric|scarce|blockade|sweep] [--rule fixed|vwap|counterparty|shortfall]");
+    println!("用法：local_price [--scenario symmetric|scarce|blockade|sweep]");
     println!("  --polities N     政权数（默认 3）");
     println!("  --rounds, -n N   轮数（默认 120）");
     println!("  --every K        每 K 轮打印一行（默认 10）");
-    println!("  --forgetting F   L 的学习率（默认 0.1）");
-    println!("  --gain G         shortfall 规则的增益（默认 0.02）");
-    println!("  --recenter       每轮把楔子的均值钉回 0");
     println!("  --w W            政权间的配对权重（默认 1.0）");
     println!("  --grant G        每个部门每轮的拨款（默认 10）");
     println!("  --no-anchor      关掉水平锚，观察原始漂移");
@@ -210,6 +197,9 @@ fn usage() {
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
     println!("  --seed, -s S     随机种子（不给就每次抽一个，打到 stderr；给了就复现）");
     println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
+    println!("  --quote-band F   报价搜索的对数半宽（中心 = 上一轮自己的成交价；默认 {}，{} = 全范围）",
+        Warehouses::DEFAULT_QUOTE_BAND,
+        planet_x::utils::LOG_LIMIT);
     println!("  --learning F     仓库两个学习器的 forgetting（默认 Response {} / PowerLaw {}，越小追得越快）", Response::DEFAULT_FORGETTING, PowerLaw::DEFAULT_FORGETTING);
     println!("  --response-learning F  只改响应曲面（Response）的学习率");
     println!("  --price-learning F     只改价格曲线（PowerLaw）的学习率——§19.5/§20 的承重旋钮");
@@ -276,11 +266,6 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         .or(args.learning)
         .unwrap_or(PowerLaw::DEFAULT_FORGETTING);
     let mut lab = Lab::new(&spec, args.seed)
-        .with_rule(args.rule)
-        .with_forgetting(args.forgetting)
-        .with_gain(args.gain)
-        .with_recenter(args.recenter)
-        .with_recenter_gain(args.recenter_gain)
         .with_anchor(args.anchor)
         .with_soft_eps(args.soft_eps)
         .with_rationing(match args.rationing.as_str() {
@@ -292,6 +277,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         })
         .with_grant(args.grant)
         .with_learning_rates(response_learning, price_learning, args.fixed_price_slope)
+        .with_quote_band(args.quote_band)
         .with_relations(&bloc_relations(args.polities, args.relations));
     if let Some(forgetting) = args.book_forgetting {
         lab = lab.with_book_forgetting(forgetting);
@@ -314,18 +300,15 @@ fn goods(values: &[f32]) -> String {
 fn trace(args: &Args) {
     let mut lab = build(args);
     println!(
-        "场景 {} 规则 {} 政权 {} 轮 {} 学习率 {} 权重 {} 重定心 {}",
+        "场景 {} 政权 {} 轮 {} 权重 {}",
         args.scenario,
-        args.rule.name(),
         args.polities,
         args.rounds,
-        args.forgetting,
         args.relations,
-        args.recenter,
     );
     println!(
         "{:>4} {:>22} {:>26} {:>7} {:>8} {:>18} {:>9} {:>9}",
-        "轮次", "银河指数", "各政权楔子(good0/1/2)", "执行率", "跨境占比", "每轮原始水平漂移", "转换占比", "转换利润率"
+        "轮次", "银河指数", "各政权本地价(good0/1/2)", "执行率", "跨境占比", "每轮原始水平漂移", "转换占比", "转换利润率"
     );
     for _ in 0..args.rounds {
         lab.step();
@@ -339,15 +322,12 @@ fn trace(args: &Args) {
         } else {
             0.0
         };
-        let wedge = snapshot.wedges[0]
-            .iter()
-            .map(|value| 100.0 * value)
-            .collect::<Vec<f32>>();
+        let levels = &snapshot.levels[0];
         println!(
             "{:>4} {:>22} {:>26} {:>7.1}% {:>17} {:>9} {:>9}",
             snapshot.round,
             goods(&snapshot.prices),
-            goods(&wedge),
+            goods(levels),
             100.0 * share,
             format!(
                 "{:+.2}%",
@@ -362,14 +342,8 @@ fn trace(args: &Args) {
 
 fn summary(lab: &Lab) {
     println!();
-    println!("政权      最终楔子(百分比)              本地价                          期望成交价");
+    println!("政权                            本地价                          期望成交价");
     for (p, polity) in lab.polities.iter().enumerate() {
-        let wedge = polity
-            .wedge
-            .iter()
-            .map(|value| format!("{:+.1}%", 100.0 * value))
-            .collect::<Vec<String>>()
-            .join(" ");
         let level = polity
             .level
             .iter()
@@ -383,10 +357,9 @@ fn summary(lab: &Lab) {
             .collect::<Vec<String>>()
             .join(" ");
         println!(
-            "{}({}) {:>26} {:>30} {:>30}",
+            "{}({}) {:>30} {:>30}",
             polity.name,
             p,
-            wedge,
             level,
             vwap,
         );
@@ -440,7 +413,6 @@ fn summary(lab: &Lab) {
 
 fn blockade(args: &Args) {
     let mut lab = build(args);
-    let mut max_wedge = 0.0f32;
     for round in 0..args.rounds {
         let blocked = round >= args.block_from && round < args.block_to;
         if blocked {
@@ -450,16 +422,14 @@ fn blockade(args: &Args) {
         }
         lab.step();
         let polity = &lab.polities[args.block_polity];
-        max_wedge = max_wedge.max(polity.wedge[0]);
         if lab.round % args.every == 0 || lab.round == args.rounds {
             let snapshot = lab.history.last().unwrap();
             let volume = snapshot.internal + snapshot.external;
             println!(
-                "第 {:>3} 轮 {} 银河 {} 楔子 {} 本地价 {} 跨境 {:>5.1}% 未成交 {:>5.1}%",
+                "第 {:>3} 轮 {} 银河 {} 本地价 {} 跨境 {:>5.1}% 未成交 {:>5.1}%",
                 snapshot.round,
                 if blocked { "封锁" } else { "通行" },
                 goods(&snapshot.prices),
-                goods(&polity.wedge),
                 goods(&polity.level),
                 if volume > 0.0 {
                     100.0 * snapshot.external / volume
@@ -470,11 +440,6 @@ fn blockade(args: &Args) {
             );
         }
     }
-    println!(
-        "封锁期间 {} 的 good0 楔子峰值 {:+.1}%",
-        NAMES[args.block_polity % NAMES.len()],
-        100.0 * max_wedge,
-    );
     summary(&lab);
 }
 
@@ -677,10 +642,10 @@ fn ladder_weights(args: &Args) -> Vec<f32> {
 /// 又只能人眼读、不能程序化分析。JSONL 让每一轮都能被脚本直接比对。
 ///
 /// 维度：`goods`（逐商品聚合）· `departments`（逐部门逐商品的库存/目标/计划/执行率）
-/// · `polities`（逐政体逐商品的楔子）· 总执行率。
+/// · `polities`（逐政体逐商品的本地价）· 总执行率。
 fn json_line(lab: &Lab) -> String {
     let states = lab.good_states();
-    let wedges = lab.wedges();
+    let levels = lab.levels();
     let mut goods = String::new();
     for (k, s) in states.iter().enumerate() {
         if k > 0 {
@@ -743,13 +708,13 @@ fn json_line(lab: &Lab) -> String {
         ));
     }
     let mut polities = String::new();
-    for (p, row) in wedges.iter().enumerate() {
+    for (p, row) in levels.iter().enumerate() {
         if p > 0 {
             polities.push(',');
         }
-        let cells: Vec<String> = row.iter().map(|w| format!("{w:e}")).collect();
+        let cells: Vec<String> = row.iter().map(|level| format!("{level:e}")).collect();
         polities.push_str(&format!(
-            "{{\"polity\":{p},\"wedge\":[{}]}}",
+            "{{\"polity\":{p},\"level\":[{}]}}",
             cells.join(","),
         ));
     }
@@ -964,13 +929,12 @@ fn sanction_run(args: &Args) {
     let department = lab.department_of(args.sanction_polity, args.sanction_unit, Kind::Consumer);
     let name = lab.polities[args.sanction_polity].name;
     println!(
-        "局部制裁：{name}(政权 {}) 第 {} 个部门 = 仓库 {department}，在 [{} , {}) 轮与政权外断链，权重 {}，规则 {}",
+        "局部制裁：{name}(政权 {}) 第 {} 个部门 = 仓库 {department}，在 [{} , {}) 轮与政权外断链，权重 {}",
         args.sanction_polity,
         args.sanction_unit,
         args.sanction_from,
         args.sanction_to,
         args.sanction_w,
-        args.rule.name(),
     );
     println!(
         "{:>4} {:>5} {:>9} {:>10} {:>10} {:>9} {:>9} {:>22} {:>9} {:>8} {:>9}",
@@ -1044,11 +1008,10 @@ fn sanction_run(args: &Args) {
 
 fn sanction_sweep(args: &Args) {
     println!(
-        "局部制裁严重度扫描：政权 {} 第 {} 个部门，{} 轮，规则 {}",
+        "局部制裁严重度扫描：政权 {} 第 {} 个部门，{} 轮",
         args.sanction_polity,
         args.sanction_unit,
         args.rounds,
-        args.rule.name(),
     );
     println!(
         "{:>7} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
@@ -1085,38 +1048,25 @@ fn sanction_sweep(args: &Args) {
 
 fn sweep(args: &Args) {
     println!(
-        "场景 {} 规则 {} 政权 {} 轮 {} 学习率 {} 重定心 {}",
+        "场景 {} 政权 {} 轮 {}",
         args.scenario,
-        args.rule.name(),
         args.polities,
         args.rounds,
-        args.forgetting,
-        args.recenter,
     );
-    println!("{:>6} {:>10} {:>24} {:>26}", "权重", "跨境占比", "最终楔子(good0)", "本地价(good0)");
+    println!("{:>6} {:>10} {:>26}", "权重", "跨境占比", "本地价(good0)");
     for weight in [0.0f32, 0.1, 0.25, 0.5, 0.75, 1.0] {
         let mut local = Args {
             relations: weight,
             ..Default::default()
         };
         local.scenario = args.scenario.clone();
-        local.rule = args.rule;
         local.polities = args.polities;
         local.rounds = args.rounds;
-        local.forgetting = args.forgetting;
-        local.gain = args.gain;
-        local.recenter = args.recenter;
         local.seed = args.seed;
         let mut lab = build(&local);
         lab.run(args.rounds);
         let snapshot = lab.history.last().unwrap();
         let volume = snapshot.internal + snapshot.external;
-        let wedges = lab
-            .polities
-            .iter()
-            .map(|polity| format!("{:+.1}%", 100.0 * polity.wedge[0]))
-            .collect::<Vec<String>>()
-            .join(" ");
         let levels = lab
             .polities
             .iter()
@@ -1124,13 +1074,12 @@ fn sweep(args: &Args) {
             .collect::<Vec<String>>()
             .join(" ");
         println!(
-            "{weight:>6.2} {:>9.1}% {:>24} {:>26}",
+            "{weight:>6.2} {:>9.1}% {:>26}",
             if volume > 0.0 {
                 100.0 * snapshot.external / volume
             } else {
                 0.0
             },
-            wedges,
             levels,
         );
     }

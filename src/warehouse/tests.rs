@@ -3,6 +3,7 @@ use fastrand::Rng;
 use super::{Book, Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
+use crate::utils::LOG_LIMIT;
 use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
@@ -231,7 +232,13 @@ fn stock_moves_toward_the_target_without_overshoot() {
         );
         previous_gap = gap;
     }
-    assert_close(previous_gap, 0.0, "买方按概率覆盖缺口后卖方应当清空盈余");
+    // 旧口径下"买方申报 ≥ 缺口"意味着卖方盈余会被清空（gap -> 0）。绝对报价 + 现金
+    // 约束之后这条**不再成立**：买方按自己的买入曲线只吃得起一部分，实测收在 3.0。
+    // 契约回到底层不变量：盈余被吃掉一部分；"不过冲/不反向"由上面的逐轮断言保证。
+    assert!(
+        previous_gap < 6.0 - 1e-3,
+        "盈余应当被吃掉一部分，而不是原地不动：{previous_gap}",
+    );
 }
 
 #[test]
@@ -591,18 +598,53 @@ fn the_scale_search_terminates_far_from_one() {
     // |log 尺度| ≈ 44 处的 ULP（3.8e-6），区间永远缩不下去 ⇒ 永不返回。
     // 旧网格把尺度限在 [0.25, 4]（log ∈ ±1.39），所以这条悬崖碰不到；
     // 把范围放开到 f32 边界之后，最优点落在远处就必然踩上它。
+    // 带宽现在是参数：这里显式给全 f32 范围，验的还是"细化在远处也收敛"。
     let far = |log_scale: f32| -(log_scale - 40.0).abs();
-    let found = super::step::maximize_log_scale(far);
+    let found = super::step::maximize_log_scale(far, -LOG_LIMIT, LOG_LIMIT);
     assert!(
         (found - 40.0).abs() < 1e-2,
         "远端的最大值应当被找到：{found}",
     );
 
     let near = |log_scale: f32| -(log_scale + 43.0).abs();
-    let found = super::step::maximize_log_scale(near);
+    let found = super::step::maximize_log_scale(near, -LOG_LIMIT, LOG_LIMIT);
     assert!(
         (found + 43.0).abs() < 1e-2,
         "贴着数值边界的最大值也应当被找到：{found}",
+    );
+}
+#[test]
+fn a_narrow_quote_band_confines_the_quote() {
+    // §7.3：报价搜索的中心是**上一轮自己的成交价**，半宽可配。锚 = 100、半宽 0.5
+    // ⇒ 报价只能落在 [100·e^-0.5, 100·e^0.5] ≈ [60.7, 164.9]。
+    let band = 0.5f32;
+    let anchor = 100.0f32;
+    let mut rng = deterministic_rng();
+    let mut narrow_market = market(1, 1.0, 1);
+    let mut warehouse = warehouse1(&[(10.0, 4.0)]);
+    {
+        let stock = &mut warehouse.warehouses[0].stocks[0];
+        stock.last_deal = anchor;
+        stock.quote_band = band;
+    }
+
+    warehouse.step(&mut narrow_market, &mut rng);
+    let quote = warehouse.warehouses[0].stocks[0].marketing_price();
+    assert!(
+        quote >= anchor * (-band).exp() * (1.0 - 1e-4)
+            && quote <= anchor * band.exp() * (1.0 + 1e-4),
+        "报价应当落在锚 ±{band} 的对数区间里：{quote}",
+    );
+
+    // 同一个仓位在**默认带宽**（全范围、中心仍是计价物）下会报回 ~1——说明窄区间
+    // 确实夹住了报价，而不是这条测试恰好落在区间里。
+    let mut wide_market = market(1, 1.0, 1);
+    let mut wide = warehouse1(&[(10.0, 4.0)]);
+    wide.step(&mut wide_market, &mut rng);
+    let free = wide.warehouses[0].stocks[0].marketing_price();
+    assert!(
+        free < anchor * (-band).exp(),
+        "默认全范围下不应当被这个窄区间约束：{free}",
     );
 }
 
@@ -684,11 +726,14 @@ fn a_buyer_declares_at_least_the_gap_it_wants_to_cover() {
 
     let demand = market.traders[1].merchandises[0].volume;
     assert!(demand.abs() >= 8.0, "有钱的买方应当申报至少覆盖缺口：{demand}");
-    assert!(
-        market.traders[1].merchandises[0].price > 10.0,
-        "买方应当报在市价之上：{}",
-        market.traders[1].merchandises[0].price,
-    );
+        // "买方必须报在挂牌价之上"是**相对报价**时代的策略假设。绝对报价下买方在自己的
+        // 买入学习曲线上做 argmin（§20.13），报价可以低于当前挂牌价——实测 3.955。
+        // 这条测试问的是**申报量覆盖缺口**（上面那条），报价只要求是正的有限绝对数。
+        let price = market.traders[1].merchandises[0].price;
+        assert!(
+            price > 0.0 && price.is_finite(),
+            "买方应当报出一个正的绝对价：{price}",
+        );
 }
 
 #[test]
@@ -701,7 +746,10 @@ fn the_price_curve_learns_the_realized_level() {
 
     let stock = &warehouse.warehouses[0].stocks[0];
     let scale = stock.marketing_price();
-    let realized = market.traders[0].merchandises[0].deal_price() / 10.0;
+        // **绝对口径**：价格曲线学的是 `报价 -> 成交价`（两个都是绝对数），所以这里读原始
+        // 成交价，不再除以挂牌价/指数（§20.11）。`prior = scale^0.5` 仍是初始曲线在 `scale`
+        // 处给出的绝对值。
+        let realized = market.traders[0].merchandises[0].deal_price();
     assert!(realized > 0.0, "首轮应当成交");
     let prior = scale.powf(0.5);
     let learned = stock.sell_price_curve().get(scale);

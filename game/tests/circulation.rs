@@ -26,7 +26,11 @@ fn every_department_sells_one_good_and_buys_the_other_two() {
 fn production_is_fully_consumed_by_the_other_departments() {
     let mut economy = DomesticEconomy::new(11);
 
-    for round in 0..60 {
+    // ⚠️ 报价带宽收窄到 1.0（planet_x §7.3）之后，前 5 轮是一次**启动过冲**：部门先吃掉
+    // 一部分初始库存（第 0 轮 intake 7.31），第 6 轮起流量就精确回到产量 4 并一直保持
+    // （实测到 400 轮）。所以这条"生产被完全消耗"按**稳态**断言：先空跑 10 轮预热，再查。
+    economy.run(10);
+    for round in 10..60 {
         economy.step();
         for k in 0..GOODS {
             let produced = 4.0;
@@ -63,13 +67,16 @@ fn the_treasury_collects_exactly_the_grants() {
 #[test]
 fn the_circulation_settles_into_a_fixed_point() {
     let mut economy = DomesticEconomy::new(11);
-    economy.run(60);
-    let settled = economy.history[60].clone();
+    // ⚠️ 报价带宽 1.0 之后定点出现得更晚：第 60 轮价格还在 1.8922 上行，第 ~75 轮才落到
+    // 1.913579 并**逐位停住**（实测到 400 轮不变；旧带宽下定点是 1.900542、第 60 轮已到）。
+    // 所以热身 60 -> 120、窗口 61..120 -> 121..180。
+    economy.run(120);
+    let settled = economy.history[120].clone();
     let settled_price = settled.prices;
     let settled_stock: f32 = settled.holdings.iter().flatten().sum::<f32>();
     let mut floor = settled.cpi;
 
-    for round in 61..120 {
+    for round in 121..180 {
         economy.step();
         let snapshot = &economy.history[round];
         floor = floor.min(snapshot.cpi);
