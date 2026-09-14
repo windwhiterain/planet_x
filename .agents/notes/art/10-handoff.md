@@ -128,7 +128,8 @@ target\debug\px_render.exe --planet <HEIGHT> --mesh <MESH> --palette rocky --she
 | 天空与大气（含 Bevy 散射大气的挂起状态） | `art/05-sky.md` |
 | 体积云与覆盖度 | `art/06-clouds.md` |
 | 云密度场的梯度：组装形式与判据 | `art/07-gradient.md` |
-| 渲染器怎么跑、改完怎么验 | `art/08-instruments.md` |
+| 渲染器怎么跑（离屏 / 服务 / viewer）＋ 资源缓存 | `art/08-renderer.md` |
+| 改完怎么验（热重载 / review 回路 / 单帧时间 / 探针） | `art/09-instruments.md` |
 | 不变式（每条都付过代价） | `art-framework.md` 顶部 |
 
 代码入口：`px_protocol/src/art.rs`（产物与协议）、`px_ops/src/lib.rs`（算子与缓存键）、

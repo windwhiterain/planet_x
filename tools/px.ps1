@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   探针不是测试：它们要 GPU、要几分钟，所以从 cargo test 里搬出来了
-  （见 .agents/notes/art/08-instruments.md §47）。**退出码才是判据**。
+  （见 .agents/notes/art/09-instruments.md §47）。**退出码才是判据**。
 
   「优化程度」由 -Level 选：
     dev      默认。编译最快（bevy 保持 -O0），跑得最慢。
