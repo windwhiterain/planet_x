@@ -34,6 +34,7 @@ const ABLATE_FETCH: u32 = 3u;
 const ABLATE_DETAIL: u32 = 4u;
 const ABLATE_SURFACE: u32 = 5u;
 const ABLATE_NORMALS: u32 = 6u;
+const ABLATE_ANALYTIC: u32 = 7u;
 const SHADOW_GAIN: f32 = 4.0;
 const SURFACE_STEPS: u32 = 56;
 const SURFACE_LEVEL: f32 = 0.20;
@@ -149,6 +150,167 @@ fn cloud_field_gradient(point: vec3<f32>) -> vec3<f32> {
         cloud_field(point + y) - cloud_field(point - y),
         cloud_field(point + z) - cloud_field(point - z),
     ) * scale;
+}
+
+fn gate_open(value: f32) -> f32 {
+    return select(0.0, 1.0, value > 0.0 && value < 1.0);
+}
+
+fn slope_of_smoothstep(low: f32, high: f32, value: f32) -> f32 {
+    let width = max(high - low, 1e-6);
+    let t = clamp((value - low) / width, 0.0, 1.0);
+    return select(0.0, 6.0 * t * (1.0 - t) / width, t > 0.0 && t < 1.0);
+}
+
+fn project_tangential(vector: vec3<f32>, direction: vec3<f32>) -> vec3<f32> {
+    return vector - dot(direction, vector) * direction;
+}
+
+struct ShapePartials {
+    cover: f32,
+    altitude: f32,
+    noise: f32,
+};
+
+fn shape_of_partials(cover: f32, altitude: f32, noise: f32) -> ShapePartials {
+    let height = clamp(altitude, 0.0, 1.0);
+    let footprint = max(cover - params.taper * height * height, 0.0);
+    let bias = footprint + noise - 1.0;
+    let lobed = clamp(bias * params.coverage_gain, 0.0, 1.0);
+    let floor_here = smoothstep(0.0, max(params.base, 1e-3), altitude);
+    let ceiling = max(
+        params.top * mix(1.0 - params.detail_strength, 1.0, noise),
+        params.base + 0.02,
+    );
+    let under_top = 1.0 - smoothstep(ceiling, ceiling + 0.20, altitude);
+    let raw = floor_here * under_top * lobed;
+    let shape = clamp(raw, 0.0, 1.0);
+    let erode_room = max(1.0 - params.erode, 1e-4);
+    let live = gate_open(shape);
+    let footprint_live = select(0.0, 1.0, footprint > 0.0);
+    let lobe_live = gate_open(lobed);
+    let under_live = gate_open(under_top);
+    let ceiling_live = select(
+        0.0,
+        params.top * params.detail_strength,
+        ceiling > params.base + 0.02,
+    );
+
+    let tall = floor_here * under_top * params.coverage_gain * footprint_live;
+    let cover_partial = live * lobe_live * tall / erode_room;
+    let shape_altitude = select(
+        0.0,
+        under_top * lobed * slope_of_smoothstep(0.0, max(params.base, 1e-3), altitude),
+        altitude > 0.0 && altitude < max(params.base, 1e-3),
+    ) - floor_here * lobed * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude);
+    let altitude_partial = live * shape_altitude / erode_room;
+    let shape_noise = floor_here
+        * (
+            under_top * params.coverage_gain * lobe_live
+                - lobed * ceiling_live * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude)
+        );
+    let noise_partial = live * shape_noise / erode_room;
+
+    return ShapePartials(
+        select(0.0, cover_partial, footprint_live > 0.0),
+        altitude_partial,
+        noise_partial,
+    );
+}
+
+fn sampled_noise_along(direction: vec3<f32>, across: f32, octaves: u32, seed: u32, altitude: f32) -> NoiseSample {
+    return fbm_3_grad(
+        direction * (across + altitude * across * span()),
+        octaves,
+        2.0,
+        0.5,
+        seed,
+    );
+}
+
+fn billows_along(direction: vec3<f32>, altitude: f32, with_skin: bool) -> vec4<f32> {
+    if params.ablate == ABLATE_NOISE {
+        return vec4<f32>(0.55, vec3<f32>(0.0));
+    }
+    let tower_across = params.detail_scale * 0.35;
+    let tower = sampled_noise_along(direction, tower_across, 3u, params.seed, altitude);
+    if !with_skin {
+        return vec4<f32>(tower.value, tower.gradient);
+    }
+    let skin_across = params.detail_scale * 1.70;
+    let skin = sampled_noise_along(direction, skin_across, 2u, params.seed ^ 31u, altitude);
+    let blended = tower.value * 0.62 + skin.value * 0.38;
+    let live = gate_open(blended);
+    let gradient = live * (tower.gradient * 0.62 + skin.gradient * 0.38);
+    let radial = live
+        * altitude
+        * (tower_across * dot(direction, tower.gradient) * 0.62
+            + skin_across * dot(direction, skin.gradient) * 0.38);
+    return vec4<f32>(clamp(blended, 0.0, 1.0), gradient - radial * direction);
+}
+
+fn coverage_gradient_of(direction: vec3<f32>) -> vec4<f32> {
+    if params.ablate == ABLATE_FETCH {
+        return vec4<f32>(0.45, 0.0, 0.0, 0.0);
+    }
+    let baked = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0);
+    let normalized = clamp(
+        (baked.r - params.coverage) / max(1.0 - params.coverage, 1e-4),
+        0.0,
+        1.0,
+    );
+    let cover = smoothstep(0.0, 0.45, normalized);
+    let slope = select(0.0, 6.0 * normalized * (1.0 - normalized) / 0.45, normalized > 0.0 && normalized < 1.0);
+    return vec4<f32>(
+        cover,
+        slope * baked.g / max(1.0 - params.coverage, 1e-4) * project_tangential(vec3<f32>(baked.g, baked.b, baked.a), direction),
+    );
+}
+
+fn kink_margin(medium: Medium, direction: vec3<f32>) -> f32 {
+    var margin = min(medium.altitude, 1.0 - medium.altitude);
+    if params.ablate == ABLATE_FETCH {
+        return margin;
+    }
+    let baked = textureSampleLevel(coverage_map, coverage_sampler, direction, 0.0).r;
+    margin = min(margin, abs(baked - params.coverage) / max(1.0 - params.coverage, 1e-4) / 0.45);
+    if params.ablate == ABLATE_NOISE {
+        return margin;
+    }
+    let cover = coverage_of(direction);
+    let noise = billows(direction, medium.altitude, true);
+    let height = clamp(medium.altitude, 0.0, 1.0);
+    let footprint = max(cover - params.taper * height * height, 0.0);
+    let lobed = clamp((footprint + noise - 1.0) * params.coverage_gain, 0.0, 1.0);
+    margin = min(margin, footprint / max(params.coverage_gain, 1e-4));
+    margin = min(margin, min(lobed, 1.0 - lobed) / params.coverage_gain);
+    let shape = shape_of(cover, medium.altitude, noise);
+    return min(margin, min(shape, 1.0 - shape) * max(1.0 - params.erode, 1e-4));
+}
+
+fn cloud_field_gradient_analytic(point: vec3<f32>) -> vec3<f32> {
+    let local = to_local(point);
+    let medium = medium_of(point);
+    let altitude = medium.altitude;
+    if !(altitude >= 0.0 && altitude <= 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let direction = medium.direction;
+    let cover = coverage_gradient_of(direction);
+    if cover.r <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let radius = max(length(local), 1e-5);
+    let billow = billows_along(direction, altitude, true);
+    let partials = shape_of_partials(cover.r, altitude, billow.x);
+    let altitude_axis = direction / span();
+    let cover_axis = project_tangential(cover.gba, direction);
+    let noise_axis = project_tangential(billow.yzw, direction)
+        + dot(direction, billow.yzw) * direction;
+    let gradient = partials.altitude * altitude_axis
+        + (partials.noise / radius) * noise_axis
+        + (partials.cover / radius) * cover_axis;
+    return to_world(gradient);
 }
 
 fn sun_shadow(point: vec3<f32>, reach: f32) -> f32 {

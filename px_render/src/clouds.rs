@@ -49,6 +49,7 @@ pub enum Ablate {
     Detail,
     Surface,
     Normals,
+    Analytic,
 }
 
 impl Ablate {
@@ -61,8 +62,9 @@ impl Ablate {
             "detail" => Ok(Self::Detail),
             "surface" => Ok(Self::Surface),
             "normals" => Ok(Self::Normals),
+            "analytic" => Ok(Self::Analytic),
             other => Err(format!(
-                "--cloud-ablate 只认 none / sun / noise / fetch / detail / surface / normals，不认 {other}"
+                "--cloud-ablate 只认 none / sun / noise / fetch / detail / surface / normals / analytic，不认 {other}"
             )),
         }
     }
@@ -76,6 +78,7 @@ impl Ablate {
             Self::Detail => 4,
             Self::Surface => 5,
             Self::Normals => 6,
+            Self::Analytic => 7,
         }
     }
 }
@@ -89,6 +92,7 @@ pub fn describe(ablate: Ablate) -> &'static str {
         Ablate::Detail => "体积云（关细节法线）",
         Ablate::Surface => "硬表面",
         Ablate::Normals => "法线",
+        Ablate::Analytic => "体积云（解析梯度探针）",
     }
 }
 
