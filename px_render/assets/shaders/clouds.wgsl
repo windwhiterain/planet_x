@@ -1,5 +1,5 @@
 #import planet_x::common::{SUN_DIRECTION, shell_thickness}
-#import planet_x::noise::{fbm_3, fbm_3_grad, rotate_vector}
+#import planet_x::noise::{fbm_3, fbm_3_grad, rotate_vector, NoiseSample}
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, depth_prepass_texture}
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
