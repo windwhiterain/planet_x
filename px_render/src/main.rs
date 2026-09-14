@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
-use bevy::camera::RenderTarget;
+use bevy::camera::{RenderTarget, Viewport};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
@@ -27,7 +27,9 @@ use px_protocol::render::{Lease, Request, Response, Scene};
 use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
-use px_render::{Canvas, OrbitCamera, ScenePart, asset_root, atmosphere, clouds, planet, shaders};
+use px_render::{
+    Canvas, OrbitCamera, ScenePart, art_cache, asset_root, atmosphere, clouds, planet, shaders,
+};
 
 const GOOD_COLORS: [Srgba; 3] = [
     Srgba::new(0.86, 0.72, 0.34, 1.0),
@@ -121,6 +123,8 @@ struct Options {
     scatter: Option<String>,
     spin: Option<f32>,
     rings: Option<f32>,
+    sheet: Option<PathBuf>,
+    columns: u32,
 }
 
 impl Default for Options {
@@ -155,6 +159,8 @@ impl Default for Options {
             scatter: None,
             spin: None,
             rings: None,
+            sheet: None,
+            columns: 4,
         }
     }
 }
@@ -247,6 +253,12 @@ impl Options {
                 "--radius" => options.radius = number("--radius")?,
                 "--spin" => options.spin = Some(number("--spin")?),
                 "--rings" => options.rings = Some(number("--rings")?),
+                "--sheet" => options.sheet = Some(PathBuf::from(next("--sheet")?)),
+                "--columns" => {
+                    options.columns = next("--columns")?
+                        .parse()
+                        .map_err(|_| "--columns 需要一个整数".to_string())?;
+                }
                 "--round" => {
                     options.round = Some(
                         next("--round")?
@@ -275,6 +287,13 @@ impl Options {
                 }
                 other => return Err(format!("未知参数：{other}\n{}", usage())),
             }
+        }
+
+        if options.sheet.is_some() && options.cam.is_some() {
+            return Err("--sheet 用的是产物自带的相机表，不要再给 --cam".to_string());
+        }
+        if let Some(sheet) = options.sheet.clone() {
+            options.out = Some(sheet);
         }
 
         if !options.serve && options.out.is_none() {
@@ -338,6 +357,10 @@ fn usage() -> String {
         "  px_render --planet FIELD.pxart [--palette rocky|gas|ice|lava|desert] [--displace F]",
         "            [--sea F] [--radius F] [--spin F] [--rings F] [--clouds CUBEMAP.pxart]",
         "            [--cloud F] [--out PNG] [--width W] [--height H]",
+        "            [--sheet PNG] [--columns N]",
+        "      --sheet：用产物自带的相机表（.pxart 的 AssetManifest.cameras）出一张多视角",
+        "      对照图，默认 4 列（--columns 可改）。给了 --sheet 就不用 --cam，",
+        "      相机表是烘图时用 px_ops::cameras::review() 灌进去的。",
         "      程序化星球：把 PCG 烘出来的高度场当位移，按色带着色，带星空背景；--rings 给个",
         "      大于 1 的倍数就加环系；--clouds 给一张 CubeMap 覆盖度就加体积云，--cloud 是",
         "      消光倍率（默认 1）；--fps 打开帧时间读数：日志每 120 帧打一行平均帧时间，",
@@ -390,6 +413,8 @@ fn request_once(options: Options) -> i32 {
             atmo: options.atmo,
             scatter: options.scatter.clone(),
             cloud: options.cloud,
+            sheet: options.sheet.is_some(),
+            columns: options.columns,
         },
         width: options.width,
         height: options.height,
@@ -485,6 +510,7 @@ fn serve(options: Options) -> Result<(), String> {
         .insert_resource(InitialSize(options.width, options.height))
         .init_resource::<Active>()
         .init_resource::<Ticks>()
+        .init_resource::<art_cache::ArtCache>()
         .insert_resource(LeaseWatch {
             path: lease_path,
             pid: lease.pid,
@@ -741,6 +767,7 @@ fn accept_jobs(
     inbox: Res<Inbox>,
     ablate: Res<ServerAblate>,
     mut active: ResMut<Active>,
+    mut cache: ResMut<art_cache::ArtCache>,
     mut canvas: ResMut<Canvas>,
     stars: Res<Stars>,
     mut images: ResMut<Assets<Image>>,
@@ -759,10 +786,50 @@ fn accept_jobs(
         Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
     };
     let request = &job.request;
+    cache.begin();
 
-    if canvas.size != (request.width, request.height) {
-        let handle = new_target(&mut images, request.width, request.height);
-        canvas.size = (request.width, request.height);
+    // 对照图：相机表住在产物里（`.pxart` 的 AssetManifest.cameras）。
+    // 一次请求 → 一个场景 → N 个视口 → 一张图，替掉以前「12 个进程 + 12 次全量重建 + CPU 拼图」。
+    let sheet: Option<Vec<px_protocol::art::Camera>> = if request.view.sheet {
+        let Scene::Planet { field, .. } = &request.scene else {
+            let _ = job
+                .reply
+                .send(Frame::Refused("--sheet 只支持程序化星球场景".to_string()));
+            return;
+        };
+        // 相机表住在清单里 ⇒ 只读清单帧就够，不必把场整个读进来（§50.2 顺手）。
+        match px_protocol::art::read_manifest(std::path::Path::new(field)) {
+            Ok(bundle) => {
+                let cameras = px_protocol::art::cameras_of(&bundle).to_vec();
+                if cameras.is_empty() {
+                    let _ = job.reply.send(Frame::Refused(format!(
+                        "{field} 没带相机表：烘图时给 GraphSpec 填 cameras（px_ops::cameras::review()）"
+                    )));
+                    return;
+                }
+                Some(cameras)
+            }
+            Err(err) => {
+                let _ = job.reply.send(Frame::Refused(err));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let columns = request.view.columns.max(1);
+    let rows = sheet
+        .as_ref()
+        .map(|cameras| (cameras.len() as u32).div_ceil(columns))
+        .unwrap_or(1);
+    let target = match &sheet {
+        Some(_) => (request.width * columns, request.height * rows),
+        None => (request.width, request.height),
+    };
+
+    if canvas.size != target {
+        let handle = new_target(&mut images, target.0, target.1);
+        canvas.size = target;
         canvas.target = handle;
     }
 
@@ -801,6 +868,7 @@ fn accept_jobs(
             let atmo = request.view.atmo;
             let camera_transform = planet::probe_camera(request.view.cam);
             planet::spawn_planet(
+                &mut cache,
                 &mut commands,
                 &mut meshes,
                 &mut materials,
@@ -837,36 +905,82 @@ fn accept_jobs(
             return;
         }
     };
+    // 只有真把场景搭起来了才结算缓存：一次被拒的请求不该让任何条目变冷。
+    println!("{}", cache.sweep());
+    println!("{}", cache.stats());
 
     let scattering = request.view.scatter.is_some();
-    let camera_transform = planet::probe_camera(request.view.cam);
-    let camera = commands.spawn((
-        ScenePart,
-        atmosphere::RequestCamera,
-        Camera3d::default(),
-        DepthPrepass,
-        Msaa::Off,
-        RenderTarget::Image(canvas.target.clone().into()),
-        Skybox {
-            image: Some(stars.0.clone()),
-            brightness: SKY_BRIGHTNESS,
-            rotation: Quat::IDENTITY,
-        },
-        AmbientLight {
-            brightness: request.view.ambient.unwrap_or(DEFAULT_AMBIENT),
-            ..default()
-        },
-        camera_transform,
-    )).id();
-    if scattering {
-        commands.entity(camera).insert(AtmosphereSettings::default());
+    let ambient = request.view.ambient.unwrap_or(DEFAULT_AMBIENT);
+    let placements: Vec<(Transform, Option<planet::SheetCell>)> = match &sheet {
+        Some(cameras) => cameras
+            .iter()
+            .enumerate()
+            .map(|(index, camera)| {
+                (
+                    planet::camera_for(camera),
+                    Some(planet::SheetCell {
+                        column: index as u32 % columns,
+                        row: index as u32 / columns,
+                        width: request.width,
+                        height: request.height,
+                    }),
+                )
+            })
+            .collect(),
+        None => vec![(planet::probe_camera(request.view.cam), None)],
+    };
+    for (order, (transform, cell)) in placements.into_iter().enumerate() {
+        let camera = commands
+            .spawn((
+                ScenePart,
+                atmosphere::RequestCamera,
+                Camera3d::default(),
+                DepthPrepass,
+                Msaa::Off,
+                RenderTarget::Image(canvas.target.clone().into()),
+                Skybox {
+                    image: Some(stars.0.clone()),
+                    brightness: SKY_BRIGHTNESS,
+                    rotation: Quat::IDENTITY,
+                },
+                AmbientLight {
+                    brightness: ambient,
+                    ..default()
+                },
+                transform,
+            ))
+            .id();
+        if scattering {
+            commands.entity(camera).insert(AtmosphereSettings::default());
+        }
+        if let Some(cell) = cell {
+            // 多相机共用一张 target：各自占一格视口，而且**只有第 0 台清屏**，
+            // 否则后面的相机会把前面已经画好的格子擦掉。
+            commands.entity(camera).insert(Camera {
+                viewport: Some(Viewport {
+                    physical_position: UVec2::new(
+                        cell.column * cell.width,
+                        cell.row * cell.height,
+                    ),
+                    physical_size: UVec2::new(cell.width, cell.height),
+                    depth: 0.0..1.0,
+                }),
+                order: order as isize,
+                clear_color: if order == 0 {
+                    ClearColorConfig::Default
+                } else {
+                    ClearColorConfig::None
+                },
+                ..default()
+            });
+        }
     }
 
     active.0 = Some(ActiveJob {
         label,
         out: PathBuf::from(&request.out),
-        width: request.width,
-        height: request.height,
+        width: target.0,
+        height: target.1,
         started: Instant::now(),
         reply: job.reply,
         warm: 0,
@@ -1239,6 +1353,8 @@ struct ViewRequest {
 struct Viewer {
     spec: planet::PlanetSpec,
     field_modified: Option<std::time::SystemTime>,
+    /// 上次真拿它重建过时的载荷指纹（`poll_field` 靠它分辨「动过」和「变了」）。
+    field_fingerprint: Option<u64>,
     request_at: u64,
     spin: bool,
 }
@@ -1383,6 +1499,7 @@ fn view(options: Options) -> Result<(), String> {
     let field_modified = std::fs::metadata(&spec.field)
         .and_then(|meta| meta.modified())
         .ok();
+    let field_fingerprint = art_cache::fingerprint_of(&spec.field).ok();
     let spin = options.spin.is_none();
     let ready = Arc::new(AtomicU8::new(PIPELINES_PENDING));
 
@@ -1410,6 +1527,7 @@ fn view(options: Options) -> Result<(), String> {
     .insert_resource(Viewer {
         spec,
         field_modified,
+        field_fingerprint,
         request_at,
         spin,
     })
@@ -1420,6 +1538,7 @@ fn view(options: Options) -> Result<(), String> {
     })
     .insert_resource(Rebuild(true))
     .insert_resource(PendingShot(shot.then_some(12)))
+    .init_resource::<art_cache::ArtCache>()
     .insert_resource(FrameProbe(options.fps))
     .insert_resource(ShowFps(true))
     .insert_resource(CloudView(options.cloud_ablate))
@@ -1617,6 +1736,7 @@ fn poll_request(
     viewer.field_modified = std::fs::metadata(&spec.field)
         .and_then(|meta| meta.modified())
         .ok();
+    viewer.field_fingerprint = art_cache::fingerprint_of(&spec.field).ok();
     viewer.spec = spec;
     rebuild.0 = true;
     if wants_shot {
@@ -1653,6 +1773,11 @@ fn auto_shot(
     println!("预览截图 → {path}");
 }
 
+/// 场文件变了吗 —— 判据从 mtime 换成**载荷指纹**（§49.5 P2）。
+///
+/// mtime 只是「该去看一眼」的闹钟（一次 metadata 调用，便宜）；真正的判据是清单里的
+/// 载荷指纹：重新烘一个内容一模一样的场（或者只是 touch 了一下）不该让窗口重建。
+/// 指纹为 0 的旧产物照样重建 —— 判不了就照旧。
 fn poll_field(mut viewer: ResMut<Viewer>, mut rebuild: ResMut<Rebuild>, mut ticks: Local<u32>) {
     *ticks += 1;
     if *ticks % 20 != 0 {
@@ -1664,11 +1789,24 @@ fn poll_field(mut viewer: ResMut<Viewer>, mut rebuild: ResMut<Rebuild>, mut tick
     let Ok(modified) = meta.modified() else {
         return;
     };
-    if viewer.field_modified != Some(modified) {
-        viewer.field_modified = Some(modified);
-        rebuild.0 = true;
-        println!("场文件更新，重载：{}", viewer.spec.field);
+    if viewer.field_modified == Some(modified) {
+        return;
     }
+    viewer.field_modified = Some(modified);
+
+    match art_cache::fingerprint_of(&viewer.spec.field) {
+        Ok(fingerprint) if fingerprint != 0 && Some(fingerprint) == viewer.field_fingerprint => {
+            println!(
+                "场文件动过，但载荷指纹没变（{:016x}）⇒ 不重建",
+                fingerprint
+            );
+            return;
+        }
+        Ok(fingerprint) => viewer.field_fingerprint = Some(fingerprint),
+        Err(err) => println!("场文件动过，读不到清单：{err}"),
+    }
+    rebuild.0 = true;
+    println!("场文件更新，重载：{}", viewer.spec.field);
 }
 
 fn rebuild_scene(
@@ -1677,8 +1815,9 @@ fn rebuild_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
-    mut cloud_materials: ResMut<Assets<clouds::CloudsMaterial>>,
+    mut clouds_materials: ResMut<Assets<clouds::CloudsMaterial>>,
     mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
+    mut cache: ResMut<art_cache::ArtCache>,
     stars: Res<Stars>,
     viewer: Res<Viewer>,
     mut rebuild: ResMut<Rebuild>,
@@ -1688,8 +1827,9 @@ fn rebuild_scene(
         return;
     }
     rebuild.0 = false;
+    cache.begin();
 
-    if let Err(message) = planet::check_scene(&viewer.spec) {
+    if let Err(message) = planet::check_scene(&mut cache, &viewer.spec) {
         eprintln!("⚠ 新场景读不出来，保留窗口里现在这张图：{message}");
         return;
     }
@@ -1698,6 +1838,7 @@ fn rebuild_scene(
         commands.entity(entity).despawn();
     }
     match planet::spawn_planet(
+        &mut cache,
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -1705,13 +1846,16 @@ fn rebuild_scene(
         &stars.0,
         &mut atmo_materials,
         &mut media,
-        &mut cloud_materials,
+        &mut clouds_materials,
         None,
         Transform::from_xyz(0.0, 0.55, 3.2).looking_at(Vec3::ZERO, Vec3::Y),
         &viewer.spec,
         CLOUD_EXTINCTION,
     ) {
-        Ok(label) => println!("{label}"),
+        Ok(label) => {
+            println!("{label}");
+            println!("{}", cache.sweep());
+        }
         Err(message) => eprintln!("重建场景失败：{message}"),
     }
 }

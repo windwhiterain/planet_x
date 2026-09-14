@@ -1,0 +1,14 @@
+[package]
+name = "px_probe"
+version = "0.1.0"
+edition = "2024"
+
+# 探针不是测试：它有 GPU、要几分钟、退出码才是判据（§47）。
+# 所以它不进 workspace 的 default-members，`cargo test` 不会碰它。
+[dependencies]
+px_render = { path = "../px_render" }
+px_verify = { path = "../px_verify" }
+wgpu = "29"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+encase = "0.12"

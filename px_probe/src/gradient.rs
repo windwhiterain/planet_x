@@ -1,8 +1,5 @@
-mod common;
-
-use bevy::render::render_resource::ShaderType;
-use common::{assemble, connect};
-use px_render::clouds::{Ablate, CLOUD_BASE, CLOUD_TOP, CloudParams};
+use crate::common::{assemble, connect};
+use px_render::clouds::{CLOUD_BASE, CLOUD_TOP, CloudParams};
 
 const POINTS: usize = 128;
 const STEPS: usize = 5;
@@ -943,14 +940,13 @@ fn best_of(rows: &[Row], step: usize) -> (Vec<f32>, Vec<f32>) {
     (errors, outside)
 }
 
-#[test]
 fn the_probe_harness_runs_the_production_shader_headless() {
     let points = shell_points();
     let rows = probe(&points, &production_params(), SWEEP, Mask::Varying);
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let live = rows.iter().filter(|row| row.field > 1e-4).count();
@@ -977,7 +973,6 @@ fn the_probe_harness_runs_the_production_shader_headless() {
     println!("探针能跑、能回读、能落进壳里 —— 梯度对不对由 field_dual 的 arbiter 断言，这里不断言收敛");
 }
 
-#[test]
 fn the_analytic_gradient_keeps_the_kink_convention() {
     let mut points = shell_points();
     for radius in [CLOUD_BASE, CLOUD_TOP] {
@@ -991,10 +986,10 @@ fn the_analytic_gradient_keeps_the_kink_convention() {
     }
     points.truncate(POINTS);
     let rows = probe(&points, &production_params(), SWEEP, Mask::Varying);
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), points.len(), "回读的点数不对");
 
     let mut zeroed = 0_usize;
@@ -1064,14 +1059,13 @@ fn simple_rows(rows: &[Row]) -> Vec<&Row> {
     measured_rows(rows, SIMPLE_SWEEP, KINK_FACTOR)
 }
 
-#[test]
 fn the_five_point_stencil_reproduces_a_known_derivative() {
     let points = simple_points();
     let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let mut worst = 0.0_f32;
@@ -1090,14 +1084,13 @@ fn the_five_point_stencil_reproduces_a_known_derivative() {
     );
 }
 
-#[test]
 fn the_simplified_field_keeps_every_gate_open() {
     let points = simple_points();
     let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let params = simple_params();
@@ -1183,14 +1176,13 @@ fn the_simplified_field_keeps_every_gate_open() {
     );
 }
 
-#[test]
 fn the_noise_term_coefficient_matches_a_single_octave_oracle() {
     let points = simple_points();
     let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let usable = simple_rows(&rows);
@@ -1250,7 +1242,6 @@ fn the_noise_term_coefficient_matches_a_single_octave_oracle() {
     println!("可用点到最近晶格面的最小距离（x 单位）：{lattice_low:e}");
 }
 
-#[test]
 fn the_f16_coverage_bake_cannot_resolve_the_production_stencil() {
     let travel = magnitude(&coverage_mask_gradient()) * 4.0 * SWEEP[0] / CLOUD_BASE;
     let mut step = 0.5_f32;
@@ -1268,14 +1259,13 @@ fn the_f16_coverage_bake_cannot_resolve_the_production_stencil() {
     );
 }
 
-#[test]
 fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
     let points = shell_points();
     let rows = probe(&points, &production_params(), SWEEP, Mask::Varying);
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let mut live = 0_usize;
@@ -1399,13 +1389,12 @@ fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
     );
 }
 
-#[test]
 fn the_residual_is_attributed_to_one_channel() {
     let simple = probe(&simple_points(), &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
-    if simple.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !simple.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(simple.len(), POINTS, "回读的点数不对");
     let production = probe(&shell_points(), &production_params(), SWEEP, Mask::Varying);
     assert_eq!(production.len(), POINTS, "回读的点数不对");
@@ -1601,3 +1590,41 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
     }
 }
 
+
+/// 全部 check，按「先便宜后贵」排。原来这些是 `#[test]`，现在由 bin 逐个跑。
+pub fn checks() -> Vec<(&'static str, fn())> {
+    vec![
+        (
+            "the_f16_coverage_bake_cannot_resolve_the_production_stencil",
+            the_f16_coverage_bake_cannot_resolve_the_production_stencil,
+        ),
+        (
+            "the_probe_harness_runs_the_production_shader_headless",
+            the_probe_harness_runs_the_production_shader_headless,
+        ),
+        (
+            "the_analytic_gradient_keeps_the_kink_convention",
+            the_analytic_gradient_keeps_the_kink_convention,
+        ),
+        (
+            "the_five_point_stencil_reproduces_a_known_derivative",
+            the_five_point_stencil_reproduces_a_known_derivative,
+        ),
+        (
+            "the_simplified_field_keeps_every_gate_open",
+            the_simplified_field_keeps_every_gate_open,
+        ),
+        (
+            "the_noise_term_coefficient_matches_a_single_octave_oracle",
+            the_noise_term_coefficient_matches_a_single_octave_oracle,
+        ),
+        (
+            "the_coverage_term_is_measurable_and_its_scalar_is_wrong",
+            the_coverage_term_is_measurable_and_its_scalar_is_wrong,
+        ),
+        (
+            "the_residual_is_attributed_to_one_channel",
+            the_residual_is_attributed_to_one_channel,
+        ),
+    ]
+}

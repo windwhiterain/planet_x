@@ -1,7 +1,8 @@
 # 美术框架：agent 截图友好 / 热重载 shader / 热重载程序化生成管线
 
-> **状态：已落地并在用** ✓。当前分支 `feature/art-stack`，worktree `.worktrees/art-stack`。
-> **新 session 请先读 §38「交接」** ✓ —— 那里是现状、已验证的工作流、以及下一步（体积云）。
+> **状态：已落地并在用** ✓。当前 worktree `.worktrees/field-dual`，分支 `wip/field-dual-arbiter`。
+> **新 session 请先读 §49「交接」** ✓ —— 那里是现状、已验证/未验证的边界、以及下一步（render 用 diff 做增量重建）。
+> §38 是 09-13 的交接，已被 §39–§49 覆盖 ⇒ **只当历史读** ✗。
 > 早期章节（§0–§10 的调研与裁决）保留为历史 ✓，其中 §2.2 / §2.3 / §4.5 的结论已被 §10 取代 ✗，
 > 不要当现状读。§34 有一条**已被推翻**的结论 ✗，就地留了更正。
 > 依据：2026-09-13 四路并行调研（DAG 层 / 几何与烘焙 / 渲染栈 / agent 视觉回路）
@@ -2914,3 +2915,462 @@ rotate_vector`，没列 `NoiseSample` ✓。补上即好 ✓。
    sed，剪坏了 `gradient.rs`（`mismatched closing delimiter`）；另一次先提交了编译不过的树。
    两次都源于"凭记忆用坐标" ✗。**行号一律现取**（`grep -n` + 算术），不要记 ✓。
 
+
+---
+
+## 47. 探针搬出 `cargo test`（用户裁决 2026-09-14）
+
+用户一次给了四条裁决：
+
+1. 目标 worktree = **`field-dual`** ✓；
+2. **「这些所谓的 test 很多应当是 probe，把它们移出 test」** ✓；
+3. 探针**固定 DX12** ✓；
+4. **优化程度从命令行选** ✓。
+
+### 47.1 动了什么
+
+`px_render/tests/` 里那三个 GPU 文件（和它们的引子）整体搬到新 crate **`px_probe`**：
+
+| 原来 | 现在 |
+|---|---|
+| `px_render/tests/gradient.rs`（8 个 GPU `#[test]`、10 次 probe） | `px_probe/src/gradient.rs` + `--bin gradient` |
+| `px_render/tests/field_dual.rs`（4 个 GPU `#[test]`，§46.3 的 arbiter） | `px_probe/src/field_dual.rs` + `--bin field_dual` |
+| `px_render/tests/headless_gpu.rs` | `px_probe/src/bin/device.rs` |
+| `px_render/tests/common/probe.rs`（云场探针 WGSL + 回读） | `px_probe/src/probe.rs` |
+| `px_render/tests/common/mod.rs` 的组装助手 | **上移到 `px_render::shaders`**；`tests/common/mod.rs` 缩成 re-export（一份实现，两个消费者） |
+
+- `px_probe` 是 workspace 成员，但**不进 `default-members`** ⇒ `cargo test`（默认那五个）**不再碰 bevy / wgpu**。
+- `px_render` 的 `[dev-dependencies]` 只剩 `naga`（`wgpu` / `bytemuck` / `pollster` / `encase` / `px_verify` 全撤）。
+- 留在 `cargo test` 的只有真门：`tests/shaders.rs`（naga 离线校验 + 体量守卫）、`tests/cloud_field.rs`（都是 CPU，秒级）。
+
+### 47.2 为什么（数字）
+
+- 搬之前 `cargo test -p px_render` 里有 **15 次** `connect()`：gradient 10 次 `probe()` + field_dual 4 次 `probe::run()`
+  + headless 1 次。每次都是 `Instance::default()` ⇒ §44.4 实测 **4.24 s**；另外还有 14 次
+  `create_shader_module` + `create_compute_pipeline`（每次把 `clouds.wgsl + noise + common + PROBE` 重新组装再编译）。
+- 而 `Instance::default()` 走的是 **Vulkan**：`target/viewer.err` 里
+  `02:22:42.10 → 02:22:44.92` = **2.8 s**（期间在刷一堆找不到的 Vulkan layer JSON）；
+  同一台机器 **DX12 只花 0.27 s**（`target/fp-volume.log.err` `02:17:06.82 → 02:17:07.09`）。
+- ⇒ 探针现在**一个进程一个设备**（`OnceLock`），后端固定 **DX12**（`WGPU_BACKEND=vulkan|gl` 仍可覆盖）。
+
+### 47.3 顺手堵掉的一个洞（比快更要紧）
+
+`connect()` 失败时原来是：
+
+```rust
+if rows.is_empty() { eprintln!("跳过：没有可用的 wgpu 适配器"); return; }
+```
+
+⇒ 测试**静默变绿**。而 §46.3 刚把 arbiter 定为「梯度对不对」的**唯一判据** —— 唯一判据可以被静默跳过，
+这是比慢严重得多的问题。现在：
+
+- `require_gpu()` 拿不到设备直接 `exit(2)`（并且报出请求的后端）；
+- 11 处「跳过」全部换成硬失败 `assert!(!rows.is_empty(), "探针没拿到数据…不要把它读成通过")`；
+- bin 用 `catch_unwind` 逐个 check、打印 `✓ / ✗`、有失败 `exit(1)`。**断言本身一字未改。**
+
+### 47.4 怎么用
+
+```text
+cargo run -p px_probe --bin field_dual   # §46.3 的 arbiter（唯一判据）
+cargo run -p px_probe --bin gradient     # 探针冒烟 + 门约定 + 逐通道归因
+cargo run -p px_probe --bin device       # 只要「无窗口设备能起来」
+```
+
+优化程度从命令行选（`opt` 只提升本地 crate，**不重编 bevy**）：
+
+```text
+cargo run -p px_probe --bin field_dual `
+  --config 'profile.dev.package.px_ops.opt-level=2' `
+  --config 'profile.dev.package.px_verify.opt-level=2' `
+  --config 'profile.dev.package.px_probe.opt-level=2'
+```
+
+⚠️ **故意没加** `[profile.probe]` 自定义 profile：cargo 会为新 profile **全量重编 552 个依赖**（一次性 ~3 min），
+那正好是本仓最贵的一笔；先用 `--config`，真要 profile 再单独裁决。
+
+⚠️ 探针 bin 名里的 `✓ / ✗` 与 `exit(1)` 是脚本判据的来源 —— 以后 `.ps1` 要用**退出码**判，不要再靠 `Select-String`。
+
+- ✅ **已核对（只编译，没跑任何测试、没跑任何探针 bin）**：
+  `cargo build -p px_probe` ✅ 25.7 s（含 px_render 重编）；`cargo check -p px_probe --all-targets` ✅；
+  `cargo check -p px_render --tests` ✅；快速链
+  `cargo check -p px_protocol -p px_ops -p px_graphs -p px_verify --all-targets` ✅ **4.49 s** ——
+  这条是「`cargo test` 默认不再碰 bevy」的证据（不是猜的）。
+- ⚠️ `px_probe` 还剩 2 条从原测试继承的 warning（`gradient.rs` 的未用变量 `step`、未读字段 `cover`），
+  不为它们动断言逻辑。
+- ⚠️ `Cargo.lock` 已由这次编译自动补上 `px_probe` ✓。
+
+### 47.5 还没做（探针「巨慢」的真正大头，下一批）
+
+1. **服务端每请求全量重建场景**：`accept_jobs` 先 `despawn` 所有 `ScenePart`（相机也在里面）再重建；
+   `spawn_planet` 每次请求都 `load_field`（读+解 `.pxart`+扫 min/max）+ `load_mesh`（**建 462720 条边的 HashMap 审计** +
+   `weld_normals`）+ `surface_textures`（逐 texel 上色 + 整条 mip 链）+ `octahedral_mesh(1.0, 320)`（612k 索引）。
+   而 `tools/probe.ps1` 的 12 个角度**只改 `--cam`** ⇒ 白重建 12 次。⇒ 按 `Scene`（+尺寸）缓存，只换相机。
+2. **`tools/frame-probe.ps1` 每 case 重启服务 + 60 s 盲等**：`target/fp-*.log` 四个文件 mtime 精确相隔 ~60 s
+   （`10:17:04 / 10:18:05 / 10:19:06 / 10:20:06`）。原因是那次 `NoiseSample` 编译失败（§46.4）
+   ⇒「渲染管线全部就绪」永不出现 ⇒ 每 case 白等满 60 s，而真错误被 `continue` 吞掉。
+3. `--cloud-ablate` 从服务级 `ServerAblate` 挪进 per-request 的 `View` ⇒ frame-probe 一个服务跑完 4 个 case。
+4. `tools/probe-clouds.ps1` 的 `Start-Sleep -Seconds 15` 与 `Get-Process px_render | Stop-Process`（全局杀）。
+5. 探针内的 shader module / pipeline 缓存 + 同参数 probe 结果复用（现在每个 check 各编译一次管线）。
+6. PCG 仍在 `-O0`：§25.3 的 287 ms / 619 ms / 779 ms 都是 -O0 的数，命令行加 `--config` 即可拿到数倍。
+7. §46.4 欠的那道门：把「`failed to process shader` 计数 = 0」做成门（现在只有 viewer 的 stderr 是仪器）。
+
+---
+
+## 48. 相机表进 `.pxart` + protocol 的产物 diff（用户裁决 2026-09-14）
+
+用户两条裁决：**① 把相机表放 `.pxart` 里；② protocol 支持 diff，render 用 protocol 的 diff 增量重建。**
+
+### 48.1 落在哪
+
+| 层 | 加了什么 |
+|---|---|
+| `px_protocol::art` | `Camera { direction, distance, tag }`（**局部系**方向 + 以半径 1 为单位的距离）；`AssetManifest.cameras` 与 `AssetManifest.fingerprint`（载荷 FNV-1a，都带 `#[serde(default)]` ⇒ 旧产物照样能读）；`AssetChange` / `AssetDiff` / `Diff` + `fn diff(before, after)`；`read_bundle` / `bundle_of` / `cameras_of` |
+| `px_ops` | `GraphSpec.cameras`；`px_ops::cameras::review()` = 那 12 个评审视角；`write_artifact` 写相机表 + 指纹；**相机表进缓存键**（`key_with_cameras`） |
+| `px_render` | `planet::camera_for(&Camera)`（`SYSTEM_TILT` 只在这一处出现）；`SheetCell`；`--sheet PNG` / `--columns N`；`accept_jobs` 一次请求 → 一个场景 → N 个视口 → **一张对照图** |
+
+### 48.2 为什么这么切（三条判据）
+
+- **相机表放产物里** ⇒「这个产物该怎么看」跟着产物走，`tools/probe.ps1` 的 `$views` + `AimLocal` + `$tilt = 0.34` 不再有第二份副本。产物里存的是**局部方向**，所以 PCG 侧不含任何渲染器约定；倾斜只在 `camera_for` 里出现一次。
+- **指纹必须进 manifest**：CAS 路径能分辨「新烘的产物」，但**同名覆盖**（脚本里 hardcode 路径、手工拷文件）分辨不了 —— 参数逐项相同、只有值变了的那个情形，只有指纹能说话。`diff` 的判据顺序因此是：指纹 > 参数 > 载荷头。
+- **相机表必须进缓存键**：它住在产物里 ⇒ 它变了产物内容就变 ⇒ 不进键就会出现「同一个键、不同内容」（§17.1 的老账）。
+
+### 48.3 数字与注意
+
+- `--sheet` 把 `probe.ps1` 的 12 个角度从 **12 次请求（12 个进程 + 12 次全量重建 + CPU 拼图）** 压成
+  **1 次请求（1 次重建 + 12 个视口 + 1 张图）**。
+- 实现是**一张 target + 每相机一个 `Viewport`**；**只有第 0 台清屏**（后面的给 `ClearColorConfig::None`），否则后画的格子会把前面的擦掉。两台 shader 本来就按 `view.viewport` / `view.world_position` 取值 ⇒ **多相机零 shader 改动**。
+- ⚠️ `atmosphere.rs::sync_cameras` 与 `AtmosphereParams.camera_x/y/z` 是死代码（§38.5 早就记着）：它把「最后一个带 `OrbitCamera` 的相机」写进**全局** material uniform，而 shader 早就改读 `view.world_position` 了。多相机让这件事更明显 ⇒ 阶段 3 换 surface material 时一起删。
+- ⚠️ 协议形状变了 ⇒ 快照变 ⇒ `protocol_hash` 变 ⇒ **旧服务的租约会被握手拒掉**（§13 的设计如此，属预期）。
+- ⚠️ 快照 JSON 的键是**排序**的（`serde_json` 没开 `preserve_order`）⇒ 手改必错，一律用
+  `PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol --test snapshot`。
+- ⚠️ `review()` 的两极停在 **82°** 而不是 90°（`looking_at` 的 up 与视线共线会退化）；角度语义也从「世界 yaw/pitch + 倾斜」变成「局部方向」，所以对照图构图整体转了 19.5°（`SYSTEM_TILT`）—— 这**更正确**（接缝/退化是局部域的性质），但和旧的 `target/probe-*.png` **不可逐像素比**。
+- ⚠️ **`game` 在我动手之前就是编译不过的**（不是本轮引入）：`game/src/project.rs:17` 还在读 `snapshot.executions`，而 `Snapshot` 已经把这个读数换成 `intake`（`game/src/lib.rs:37` 的注释写着"该读数已随 distribution 归一化一起删除"）。`cargo test`（默认 members **含 `game`**）因此是红的；绿的是
+  `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。这属于 sim 的语义裁决（`DepartmentView.execution` 该喂什么），不替它决定。
+
+### 48.4 验证（只编译 + 一个 CPU 门）
+
+```
+cargo check -p px_protocol -p px_ops -p px_graphs --all-targets   ✅
+cargo check -p px_render --all-targets                            ✅
+cargo check --workspace --all-targets                             ❌ 只红在 game（上面那条，先于本轮）
+cargo test  -p px_protocol                                        ✅ 29 个（含 6 条新 diff 单测 + 快照门）
+```
+
+### 48.5 还没做
+
+1. **render 真正用 diff 做增量重建**（裁决的后半句）：`accept_jobs` 换场景现在仍是「despawn + 全量重建」；
+   `diff` 已经能回答「哪个节点变了」，缺的是**资源级缓存**（解码后的 `Field` / 着色好的 `Image`+mip /
+   焊好法线的 `Mesh`，键 = 路径 + 指纹 + 渲染参数）与「输入零变化 ⇒ 只重出图」的快路径。
+2. viewer 的热重载（§40.1）现在只比 mtime ⇒ 改成走同一份 `diff`，并把摘要打出来。
+3. `tools/probe.ps1` 退休 ⇒ 直接 `px_render --sheet target/probe.png ...`。
+4. `--cloud-ablate` 进 per-request `View`（§47.5 第 3 条）。
+
+---
+
+## 49. 交接（2026-09-14 第二轮，**新 session 从这里开始**）
+
+> §38 是 09-13 的交接，已被 §39–§48 覆盖 ⇒ **只当历史读**。以下是**当前**状态。
+
+### 49.1 现在在哪儿
+
+- worktree `.worktrees/field-dual`，分支 `wip/field-dual-arbiter`（HEAD `c4f9e3b`）。
+- **§47 / §48 的全部改动还没提交**（`git status` 里：`px_probe/` 新增、`tools/px.ps1` 新增、
+  `px_protocol/src/art.rs`+`render.rs`+快照、`px_ops/src/{lib.rs,noise.rs,cameras.rs}`、
+  `px_graphs/src/bin/*`、`px_render/src/{main.rs,planet.rs,shaders.rs}`、四个 `git mv`）。
+- ⚠️ **`game` 在 HEAD 上就编译不过**：`game/src/project.rs:17` 读 `snapshot.executions`，
+  而 `Snapshot` 已把这个读数换成 `intake`（`game/src/lib.rs:37` 的注释写着"该读数已随 distribution
+  归一化一起删除"）。默认 members **含 `game`** ⇒ `cargo test` 是红的。
+  **先决定这条谁修**（是 sim 的语义裁决：`DepartmentView.execution` 该喂什么），
+  在它修好之前用 `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。
+
+### 49.2 这一轮改了什么（§47/§48 索引）
+
+一句话：**探针搬出 `cargo test`；产物自带相机表与内容指纹；protocol 有 diff；渲染器能一次请求出多视角对照图。**
+
+- **§47**：新 crate `px_probe`（`--bin field_dual` / `gradient` / `device`）承接原来 `px_render/tests/`
+  里的三个 GPU 文件；`connect()` 一个进程一个设备、固定 DX12；11 处"跳过"改成硬失败（原来会让
+  §46.3 的**唯一**判据静默变绿）；`tools/px.ps1 -Target … -Level dev|opt|release` 是统一入口。
+  `cargo test`（默认 members）不再碰 bevy。
+- **§48**：`px_protocol::art` 多了 `Camera` / `AssetManifest.cameras` / `AssetManifest.fingerprint` /
+  `diff()`；`px_ops::cameras::review()` 把 12 个评审视角写进三个图；`px_render --sheet PNG` 在一次请求里
+  用 N 个 `Viewport` 出一张对照图。
+
+### 49.3 已验证 / 未验证（**这条最要紧**）
+
+已验证（本轮真跑过的）：
+
+```
+cargo check -p px_protocol -p px_ops -p px_graphs --all-targets   ✅
+cargo check -p px_render --all-targets                            ✅
+cargo test  -p px_protocol                                        ✅ 29 个（含 6 条新 diff 单测 + 快照门）
+cargo check -p px_protocol -p px_ops -p px_graphs -p px_verify --all-targets   ✅ 4.49 s（确实没碰 bevy）
+```
+
+**未验证**（下个 session 的头等事）：
+
+1. `--sheet` 的多相机路径**从没在 GPU 上跑过**（只过了 `cargo check`）；
+2. 三个探针 bin **从没跑过**；
+3. 现有 `.pxart` 因为相机表进了缓存键而**全部作废**，还没重烘。
+
+### 49.4 第一次冒烟的顺序（照做）
+
+```powershell
+# 0) 最便宜的 GPU 门（约 10 秒）：探针能不能起、后端是不是 DX12
+cargo run -p px_probe --bin device
+
+# 1) 重烘（相机表进了键 ⇒ 会得到新的 CAS 路径）
+cargo run -p px_graphs --bin planet     # 记下打印的 <HEIGHT.pxart> 与 <MESH.pxart>
+cargo run -p px_graphs --bin clouds     # 记下 <COVER.pxart> 与三个 <SLOPE.pxart>
+
+# 2) 常驻服务；等日志出现「渲染管线全部就绪：共 … 条，失败 0 条」
+target\debug\px_render.exe --serve
+
+# 3) 一张对照图 —— 本轮唯一没验过的东西
+target\debug\px_render.exe --planet <HEIGHT> --mesh <MESH> --palette rocky --sheet target\sheet.png
+```
+
+盯三件事：
+
+1. **12 格是不是都画了**（不是只剩一格/只有第一格）。若只剩一格 ⇒ 清屏没关掉，检查
+   `accept_jobs` 里给第 0 台之后插 `ClearColorConfig::None` 那一步；
+2. **每格构图对不对**（角/棱/面心的特写真的在特写）⇒ 说明 `planet::camera_for` 的倾斜与距离对；
+3. 日志里有没有 `no definition in scope` 一类 shader 报错（§46.4 那个盲区）。
+
+⚠️ 对照图**不再烧 tag 文字**（以前 `probe.ps1` 用 System.Drawing 写的）。要标签就在 render 侧画，
+或 `--columns 1` 出单图再拼。
+
+### 49.5 下一步（按价值排；设计已经想好，直接开工）
+
+**P1｜render 用 diff 做增量重建**（用户裁决的后半句；§48.5 第 1 条）
+
+> ✅ **已完成，见 §50**（用户裁决：只做资源缓存，实体每请求照旧重建）。
+
+现状：`accept_jobs` 换场景 = `despawn` 全部 `ScenePart` + 从零 `spawn_planet`
+（`load_field` 解码、`load_mesh` 建 **462720 条边**的审计、`surface_textures` 逐 texel 上色 +
+整条 mip 链、`coverage_image` 做 f16 立方图）。`tools/probe.ps1` 的 12 个角度只改 `--cam` ⇒ 白重建 12 次。
+
+设计（三步，都不需要动 shader）：
+
+1. `px_render::art_cache`：条目键 = `(绝对路径, 载荷指纹)`，值是**渲染就绪态**
+   （解码后的 `Field`、着色好的 `Image` + mip、`coverage_image`、焊好法线的 `Mesh`）。
+   `Assets` 是引用计数 ⇒ 命中直接复用 `Handle`。
+2. **派生资源的键必须含渲染参数**：`surface_textures` 的键 = `(field 指纹, palette, sea_level, displace)`；
+   `coverage_image` 的键 = `(coverage 指纹, 三个 slope 指纹)`。
+   §25.2 那个"画布尺寸没进键"就是这类洞的现成前科。
+3. 场景级：存住上一批 `ArtBundle`（每个输入路径一份）。新请求先
+   `px_protocol::art::diff` 逐份比，然后
+   - **全部 identical 且渲染参数没变** ⇒ 只重出图（连实体都不重建）；
+   - 变了 ⇒ 重建，但只有 `Diff::touched()` 里的节点对应的子资源会重算；
+   - 把 `Diff::summary()` 打进日志 —— 这就是"这次重烘动了什么"。
+
+⚠️ `diff` 按 `id`（节点名）配对 ⇒ **图里的节点名不许随手改**，否则只会看到"一个新增一个移除"。
+
+**P2｜viewer 热重载走同一份 diff**（§40.1 现在只比 mtime）
+
+`poll_field` 现在盯场文件 mtime 就全量重建；改成 `read_bundle` + `diff`，只重建 `touched()` 的部分，
+并把摘要打进日志/窗口标题。
+
+**P3｜`tools/probe.ps1` 退休**
+
+它现在等价于 `--sheet`。删之前先跑一次 49.4 的第 3 步、和旧图并排比一眼。
+⚠️ **不可逐像素比**：构图语义从"世界 yaw/pitch + 倾斜"换成"局部方向"，整体转了 19.5°（§48.3）。
+
+**P4｜`tools/frame-probe.ps1` / `probe-clouds.ps1` 的 fail-fast**（§47.5 第 2/4 条）
+
+实证：`target/fp-*.log` 四个文件 mtime 精确相隔 ~60 s ⇒ 那次 `NoiseSample` 编译失败让每个 case
+白等满 60 s，而真错误被 `continue` 吞了。改法：给 `Wait-For` 加 `FailPattern`（命中立刻返回并打印
+`.err` 里的「管线编译失败」行）；`try/finally` 收尸；按租约 pid 停服务，**别** `Get-Process px_render | Stop-Process`。
+
+**P5｜`--cloud-ablate` 进 per-request `View`** ⇒ `frame-probe.ps1` 一个服务跑完 4 个 case。
+
+**P6｜预热与管线**（§12.3 的老账，一直没人做）
+
+只 warm 真正会用到的管线（现在 44 条里混着 `StandardMaterial` / `Skybox` 变体）；
+评估 wgpu 的**磁盘管线缓存** —— 它是把"每次重启服务 15–25 s"降到 <1 s 的唯一现成手段。
+
+**P7｜顺手该删的死代码**：`atmosphere.rs::sync_cameras` + `AtmosphereParams.camera_x/y/z`
+（§38.5 就记着"写了没人读"，多相机之后更明显：它把最后一台相机的世界位置写进**全局** material
+uniform）。阶段 3 换 surface material 时一起删，注意 uniform 布局要和 WGSL 同步改。
+
+### 49.6 血泪（本轮新增，别再踩）
+
+1. **快照 JSON 的键是排序的**（`serde_json` 没开 `preserve_order`）⇒ 手改必错。一律
+   `PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol --test snapshot`（0.3 秒，CPU，不是那条慢链）。
+2. **协议形状一变 ⇒ `protocol_hash` 变 ⇒ 在跑的旧服务立刻被握手拒掉**。停服务、重编、再起，
+   别以为是坏了（`target/render-server.json` 是租约，删了它服务 4 秒内自杀）。
+3. **相机表住在产物里 ⇒ 它必须进缓存键**，否则 CAS 会出现"同一个键、不同内容"（§17.1 的老账）。
+4. **`Instance::default()` 走 Vulkan**：本机枚举 2.8 s（还在挨个找不存在的 layer JSON），
+   DX12 只有 0.27 s（`target/viewer.err` vs `target/fp-volume.log.err` 的时间戳）⇒ 探针固定 DX12，
+   `WGPU_BACKEND` 可覆盖。
+5. **`connect()` 失败原来是静默 `return`** ⇒ 测试变绿。现在探针 `exit(2)`、断言硬失败。
+   **任何"跳过"都是判据的敌人**，尤其是当它守着的是唯一判据的时候。
+6. **`looking_at` 的 up 与视线共线会退化** ⇒ 两极视角停在 82°，不要"顺手改成 90°"。
+7. **CRLF/LF 在本仓是混的**（`px_render/**`、`px_ops/src/lib.rs`、`.agents/notes/*.md` 是 CRLF；
+   `px_ops/src/noise.rs`、本轮新增的文件是 LF）⇒ 批量改文件前先 `grep -qU $'\r'`，否则一个
+   perl 替换就把整文件 diff 掉。**perl 的多行正则要写 `\r?\n`，行锚点要写 `;\r$`。**
+8. **长命令会被截断**（heredoc 忘了结尾就静默半途而废）⇒ 大文件分块写，写完立刻
+   `wc -l` + `grep 关键符号` 校验，别信"应该写进去了"。
+9. **判据要在正确的仪器上取**（§41.1、§44.2、§46.3 都在说这件事）：本轮的等价物是
+   "`cargo check` 过了" ≠ "探针跑过了" —— 49.3 那张未验证清单就是这么来的。
+
+### 49.7 常用命令 / 文件地图（给下一个 session）
+
+```powershell
+.\tools\px.ps1 -Target test                    # 快速测试链（默认 members，不碰 bevy）
+.\tools\px.ps1 -Target test-all                # 全量（含 px_render / px_probe，慢）
+.\tools\px.ps1 -Target check                   # 只 check 不产 GPU 的那三个 crate
+.\tools\px.ps1 -Target device                  # 最便宜的 GPU 门（约 10 秒）
+.\tools\px.ps1 -Target field_dual              # §46.3 的 arbiter（唯一梯度判据）
+.\tools\px.ps1 -Target gradient                # 探针冒烟 + 逐通道归因
+.\tools\px.ps1 -Target planet   -Level opt     # 烘星球图；-Level opt 只提升本地 crate，不重编 bevy
+```
+
+| 想知道什么 | 看哪个文件 |
+|---|---|
+| 产物里有什么（相机表 / 指纹 / 参数） | `px_protocol/src/art.rs` |
+| 两份产物差在哪 | `px_protocol::art::diff` + `Diff::summary()` / `touched()` |
+| 12 个评审视角怎么定义的 | `px_ops/src/cameras.rs`（**局部方向**，不含渲染器常数） |
+| 相机怎么变成 Transform | `px_render/src/planet.rs::camera_for`（`SYSTEM_TILT` 只在这里出现） |
+| 一次请求怎么出多视角 | `px_render/src/main.rs::accept_jobs`（找 `sheet` / `Viewport` / `ClearColorConfig`） |
+| 产物怎么进缓存键 | `px_ops/src/lib.rs::key_with_cameras` |
+| 探针怎么起设备 | `px_probe/src/common.rs::connect`（DX12 + `OnceLock`） |
+| 梯度判据 | `px_probe/src/field_dual.rs` + `px_probe/src/probe.rs` |
+
+---
+
+## 50. P1 完成记录：产物级 / 派生级资源缓存（2026-09-14）
+
+用户三条裁决（§49.5 P1 的开工前确认）：
+
+1. 指纹**只认清单里那个**（`AssetManifest.fingerprint`）；指纹为 0（§48 之前的旧产物）⇒
+   **不缓存**，每次现造；
+2. **只做资源缓存，实体每请求照旧重建**（不碰实体生命周期，不做「全同就直接出图」的快路径）；
+3. 淘汰不按内存上限，**按「一条缓存被连续冷落几次」**（用户原话：「给每个缓存资源一定的 miss
+   次数，miss 超过就丢掉」）。
+
+P2（viewer 接同一份缓存 + 热重载判据换掉 mtime）一并做了。
+
+### 50.1 一句话
+
+`spawn_planet` 里那几件重活 —— 解码场、46 万条边的 HashMap 审计、逐 texel 上色 + 整条 mip 链、
+f16 立方图、八面体壳 + 位移 + 网格法线 + 焊法线 —— 现在**先问 `px_render::art_cache` 要**。
+键 = 产物内容（或内容 + 渲染参数）。实体（几十个）照旧每请求重建：重建它们不花钱，
+重建那几百万个 texel 才花钱。
+
+### 50.2 落在哪
+
+| 层 | 加了什么 |
+|---|---|
+| `px_protocol::art::read_manifest` | **只读清单帧**：清单写在流的最前面 ⇒ 读 64 KB 前缀就够（载荷一个字节都不读）；解不出来回落整读。缓存键与「变没变」都从这儿来 |
+| `px_render/src/art_cache.rs`（新） | `ArtCache` 资源：`field` / `mesh` / `sphere` / `texture` / `coverage` 五张表 + 按**角色**配对的 diff 账本 |
+| `px_render/src/planet.rs` | `build_sphere_mesh` / `build_artifact_mesh` 独立出来；`surface_textures` 与 `load_mesh`、`octahedral_mesh` 的审计从 `println!` 改成**返回值**；`spawn_planet` 改成「先问缓存」；`check_scene` 走同一份缓存（不再白解码一遍） |
+| `px_render/src/main.rs` | `accept_jobs` / `rebuild_scene` 每请求 `begin()` → 解析 → 成功才 `sweep()`；`--sheet` 的相机表改读 `read_manifest`（原来整读 8 MB） |
+| viewer | `poll_field` 的判据从 mtime 换成**载荷指纹**（mtime 只当「该去看一眼」的闹钟）；`Viewer` 多一个 `field_fingerprint` |
+
+### 50.3 键里到底装了什么（这是本轮唯一需要「想清楚」的地方）
+
+- **产物级**：`(规范路径, 载荷指纹)`。
+- `sphere`：`(场, palette, sea_level, displace, radius)` —— palette 决定 `flat_sea`（海平面压平），
+  后三个直接乘进顶点位置。
+- `texture`：`(场, palette, sea_level)` —— **`displace` / `radius` 不许进**：它们只动顶点、不动贴图，
+  拼进来只会白存几份一模一样的东西。
+- `coverage`：`(覆盖度, 三个梯度)` 四个指纹，渲染参数一个都不进（那张图只由这四份场决定）。
+
+⇒ 多放一个参数只是浪费内存，**少放一个就是「同一个键、不同内容」**（§17.1、§25.2 的前科）。
+`texture` 与 `sphere` 分成两张表不是过度设计，是这条纪律的直接后果。
+
+### 50.4 淘汰：按冷落次数，不是 LRU
+
+`MISS_LIMIT = 3`（`art_cache.rs`）：每次 `sweep()` 给没被用到的条目 `misses += 1`，`get` 命中清零，
+超过上限就丢。**不设内存上限**：服务是长期进程（§13），但相邻请求常在 A/B 之间来回
+（两个色板、两个消光档），LRU 的「最近最少用」在这里反而会挤掉还要用的那条。
+
+⚠️ `accept_jobs` **只在场景真搭起来之后**才 `sweep()` —— 一次被 `Refused` 的请求不该让任何条目变冷
+（否则连着几次参数写错就能把缓存清空）。
+
+### 50.5 审计不能因为走缓存就哑掉
+
+命中时把**造它那一次记下的审计文本原样重放**（`replay()`，前缀一行「缓存命中，下面是造它那一次
+记下的审计」）。为此 `load_mesh` / `surface_textures` / `octahedral_mesh` 的 `println!` 都变成了返回值。
+理由：审计是「这张图为什么是空的」的定性手段（§12.2），缓存可以省掉重算，不该省掉仪器。
+
+### 50.6 验证（**这条最要紧**）
+
+真跑过的：
+
+```
+cargo check -p px_render   --all-targets                                        ✅
+cargo check -p px_probe    --all-targets                                        ✅（只多两条 §47.4 记着的继承 warning）
+cargo check -p px_protocol -p px_ops -p px_graphs -p px_verify --all-targets   ✅
+cargo test  -p px_render                                                        ✅ 11 个（6 条新 art_cache 单测 + 原有的 5 条 CPU 门）
+cargo test  -p px_protocol                                                      ✅ 28 个（art::tests 6 → 8：清单前缀读 + 回落）
+cargo test  -p px_protocol -p px_ops -p px_graphs -p px_verify                  ✅
+```
+
+⚠️ §49.3 把 `cargo test -p px_protocol` 记成 **29**，本轮逐个分组数出来是 **28**
+（8+3+3+3+1+3+5+2）。不改旧节，记在这里 —— 数字对不上时，永远信现场那一次。
+
+最要紧的那条是 `art_cache::tests::the_second_request_reuses_everything_and_a_param_change_does_not`：
+它**自己造一份真的 `.pxart`**（清单帧 + 载荷帧，排布同 `px_ops::write_artifact`），然后要
+①第二次解析 field / sphere / texture **全部命中**，而且拿回的是**同一个 `Handle`**（不是等价的一份）；
+②只改 `sea_level` ⇒ 场照样命中、派生资源必须重造；③**同名覆盖换内容** ⇒ 场必须重新解码。
+0.25 s，纯 CPU，`cargo test` 里跑。
+
+**GPU 冒烟（随后补跑的，顺手把 §49.3 的第 1、3 条也堵了）**：
+
+重烘（`planet` 2.3 s / `clouds` 3.0 s，全部重算）→ 常驻服务（DX12、RTX 3060 Laptop、
+`渲染管线全部就绪：共 44 条，失败 0 条`）→ 同一个场景对同一个服务连发 4 次同样的 `--sheet`：
+
+```
+冷（0/8 命中，6 份产物全是「新」）  1867 ms
+热（8/8 命中，「零变化（6 份逐项相同）」） 1526 / 1530 / 1518 ms
+四张图 SHA256 全同：42ff067e00c77d4a12ce4c4849446acb0d7b3e89012fb0a3a43e366722d2be38
+```
+
+`--sheet` 那次的三条判据（§49.4）全过：**12 格都画了**（不是只剩一格）、每格构图对
+（第 3 行确实是棱/角/面心特写）、`sheet2-serve.err` 里一条 `failed to process shader` /
+`no definition in scope` 都没有。
+
+程序化球面那条路（不带 `--mesh`）也跑了：
+
+- 第一次 `命中 2/3`（场与贴图命中、八面体壳现造）；
+- 第二次 `命中 3/3`，审计原样重放（`八面体网格：203522 个三角形…` / `法线审计：102400 个顶点…`）；
+- 换 `--palette ice` ⇒ `命中 1/3`：**场照旧命中，球面与贴图按新键重造**（键里那两个参数真的在起作用）；
+- 连着 3 次请求没用到的条目真的被丢掉：`[缓存] 丢掉 6 条冷落超过 3 次请求的条目`。
+
+**顺手得到一个改变优先级的数字**：资源缓存省下的是 **1867 − 1525 ≈ 340 ms（约 18%）**，
+而且热/热的抖动只有 ±6 ms（所以这 340 ms 是信号不是噪声）。剩下那 82% 是**渲染本身**
+（12 个视口 × 体积云 56 步）。⇒ **§47.5 第 1 条那个「探针巨慢的真正大头 = 服务端每请求
+全量重建场景」只对了 18%**，真正的大头在 shader 里（该用 §41 那台仪器去量）。
+P4（`frame-probe.ps1` 白等 60 s）仍然值钱，但「服务端重建场景」不该再排在第一。
+
+**仍然没验证**：
+
+1. 三个探针 bin 从没跑过（§49.3 第 2 条，本轮没碰）；
+2. viewer 那条路（P2 的 `poll_field` 指纹判据、`rebuild_scene` 走缓存）**没在窗口里跑过** ——
+   它和 serve 共用同一份 `spawn_planet` 与同一份缓存（后者已在 GPU 上证过），
+   但「mtime 动过而指纹没变 ⇒ 不重建」这条分支只有 `cargo check`。
+
+⇒ 「`cargo check` 过了」这次被「测试跑过了」顶掉了一半，被「GPU 冒烟」顶掉了另一半 ——
+**但顶掉的都是资源层；渲染层（画面内容对不对）从来不是本轮的判据**。
+
+### 50.7 还没做
+
+1. 两个 `ico(64)` 壳（云、大气）与环、`ring_image(1024,4)` 仍是每请求现造 —— 相对那几百万 texel
+   是零头，但不是零；
+2. §47.5 那七条一条没动（服务端每请求重建实体、frame-probe 每 case 白等 60 s、`probe.ps1` 退休、
+   管线缓存、PCG 的 `-O0`…）；
+3. `stats()` 只报**条数**，不报字节数 —— 长期跑的服务想知道「吃了多少内存」还得自己算。
+
+### 50.8 血泪（本轮新增）
+
+1. **`#[derive(Default)]` 会给泛型参数加约束**：`Slots<K, V>` 一 derive 就要求 `K: Default, V: Default`，
+   而 `HashMap::new()` 一个都不需要 ⇒ 手写 `impl<K, V> Default`。
+2. **`edit` 的 `old_string` 收尾多带一个换行，会把下一行接到上一行后面**（本轮踩了两次，
+   都是靠 `cargo check` 才发现的）。改完立刻编译，别攒着。
+3. **`Assets<T>::default()` 能直接造**（不必起 App）⇒ 缓存这种「纯 CPU 的资源解析」可以在
+   `cargo test` 里验，不必等 GPU。这是本轮最有价值的一条：它把「唯一判据必须上 GPU」
+   这条默认前提，在**资源层**上撬开了一个口子。
+4. 缓存键的**成色**由用户定，不由我「顺手做对」：指纹为 0 就不缓存是**诚实**的选择 ——
+   键里少了「内容」这一维时，命中就等于认错了东西。这条写进了 `CacheKey::cacheable`，
+   由类型系统兜着（派生键只要有一个输入不可缓存，整条就不可缓存）。

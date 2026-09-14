@@ -1,12 +1,9 @@
-mod common;
-
-#[path = "common/probe.rs"]
-mod probe;
+use crate::probe;
 
 use px_render::clouds::{CLOUD_BASE, CLOUD_TOP, CloudParams};
 use px_verify::cloud_field::CloudFieldParams;
 use px_verify::noise::{FbmSettings, fbm_3, gradient_noise_3};
-use probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};
+use crate::probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};
 
 const SWEEP: [f32; STEPS] = [8e-5, 4e-5, 2e-5, 1e-5, 5e-6];
 const MASK: f32 = 153.0 / 255.0;
@@ -78,16 +75,15 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
-#[test]
 fn the_reference_ports_the_shader_parameters_exactly() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
     let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let cover = field.cover_from_mask(MASK) as f64;
@@ -131,16 +127,15 @@ fn the_reference_ports_the_shader_parameters_exactly() {
     );
 }
 
-#[test]
 fn the_reference_and_the_shader_agree_on_the_field_value() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
     let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let names = [
@@ -313,16 +308,15 @@ fn the_reference_and_the_shader_agree_on_the_field_value() {
     );
 }
 
-#[test]
 fn the_shader_coverage_term_matches_the_exact_band_gradient() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
     let rows = probe::run(&points, &params, SWEEP, Mask::Varying);
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let slope = [
@@ -398,16 +392,15 @@ fn the_shader_coverage_term_matches_the_exact_band_gradient() {
     );
 }
 
-#[test]
 fn the_shader_analytic_gradient_matches_the_exact_field_gradient() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
     let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
-    if rows.is_empty() {
-        eprintln!("跳过：没有可用的 wgpu 适配器");
-        return;
-    }
+    assert!(
+        !rows.is_empty(),
+        "探针没拿到数据（设备/管线失败）——不要把它读成通过"
+    );
     assert_eq!(rows.len(), POINTS, "回读的点数不对");
 
     let mut analytic_relative = Vec::new();
@@ -481,4 +474,27 @@ fn the_shader_analytic_gradient_matches_the_exact_field_gradient() {
         "解析梯度没有比最好的差商更准（{analytic_median:e} 对 {fd_best:e}）⇒ 差商的截断误差没被解析式甩开，\
          说明差商的误差已经不是瓶颈"
     );
+}
+
+/// §46.3 的 arbiter：4 条腿的场级对拍。两条腿用同一组参数，靠进程内缓存复用
+/// （原来是两个 `#[test]`，各建一次设备）。
+pub fn checks() -> Vec<(&'static str, fn())> {
+    vec![
+        (
+            "the_reference_ports_the_shader_parameters_exactly",
+            the_reference_ports_the_shader_parameters_exactly,
+        ),
+        (
+            "the_reference_and_the_shader_agree_on_the_field_value",
+            the_reference_and_the_shader_agree_on_the_field_value,
+        ),
+        (
+            "the_shader_coverage_term_matches_the_exact_band_gradient",
+            the_shader_coverage_term_matches_the_exact_band_gradient,
+        ),
+        (
+            "the_shader_analytic_gradient_matches_the_exact_field_gradient",
+            the_shader_analytic_gradient_matches_the_exact_field_gradient,
+        ),
+    ]
 }

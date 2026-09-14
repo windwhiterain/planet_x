@@ -181,7 +181,7 @@ fn half_from_f32(value: f32) -> u16 {
     sign | half
 }
 
-pub fn coverage_image(field: &Field, slopes: &[Field; 3]) -> Result<Image, String> {
+pub fn coverage_image(field: &Field, slopes: &[&Field; 3]) -> Result<Image, String> {
     if field.projection != Domain::CubeMap {
         return Err(format!(
             "云覆盖度需要 CubeMap 产物，这份是 {:?}",

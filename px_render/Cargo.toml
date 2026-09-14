@@ -11,10 +11,5 @@ serde_json = "1"
 
 [dev-dependencies]
 naga = { version = "29", features = ["wgsl-in", "hlsl-out"] }
-wgpu = "29"
-bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
-encase = "0.12"
-px_verify = { path = "../px_verify" }
 
 

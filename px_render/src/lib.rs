@@ -1,3 +1,4 @@
+pub mod art_cache;
 pub mod atmosphere;
 pub mod clouds;
 pub mod planet;

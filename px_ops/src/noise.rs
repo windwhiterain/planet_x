@@ -42,17 +42,23 @@ impl Scalar for f32 {
     }
 }
 
-pub const fn fnv1a(bytes: &str) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+/// FNV-1a 的 64 位常数（载荷指纹与源码哈希共用一套）。
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// 载荷指纹走字节版；源码哈希走字符串版。
+pub const fn fnv1a_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET;
     let mut index = 0;
-    let raw = bytes.as_bytes();
-    while index < raw.len() {
-        hash ^= raw[index] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
         index += 1;
     }
     hash
 }
+
+pub const fn fnv1a(text: &str) -> u64 { fnv1a_bytes(text.as_bytes()) }
 
 fn lattice(x: i32, y: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x27d4_eb2d) ^ (y as u32).wrapping_mul(0x1656_67b1) ^ seed;

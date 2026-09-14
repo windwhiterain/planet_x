@@ -1,5 +1,6 @@
 pub mod field;
 pub mod noise;
+pub mod cameras;
 pub mod ops;
 
 pub use field::{Field, Projection, ProjectionKind, Stats};
@@ -72,6 +73,9 @@ pub struct GraphSpec {
     pub width: u32,
     pub height: u32,
     pub projection: Projection,
+    /// 评审相机表：写进每一个产物（局部方向 + 距离，见 `px_protocol::art::Camera`）。
+    /// 它属于「怎么看」不属于「是什么」，但住在产物里 ⇒ 必须进缓存键（见 `key_with_cameras`）。
+    pub cameras: Vec<px_protocol::art::Camera>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +202,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         &params_json,
         &input_keys,
     );
+    let key = key_with_cameras(key, &context.spec.cameras);
     let path = artifact_path(&context.cache_root, &key);
     let short = hex_short(&key);
     let started = Instant::now();
@@ -225,7 +230,7 @@ pub fn node<Op: FieldOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
                 },
             );
             let payload = Payload::Field(field);
-            let bytes = write_artifact(&path, name, &payload).unwrap_or_else(|err| {
+            let bytes = write_artifact(&path, name, &payload, &context.spec.cameras).unwrap_or_else(|err| {
                 panic!("写产物 {} 失败：{err}", path.display());
             });
             (payload, false, bytes)
@@ -398,6 +403,36 @@ pub fn node_key(
     *hasher.finalize().as_bytes()
 }
 
+/// 相机表住在产物里 ⇒ 它变了产物内容就变了 ⇒ 必须进键。
+/// 否则 CAS 会出现「同一个键、不同内容」（§17.1 那条「键 = 内容」）。
+fn key_with_cameras(key: Key, cameras: &[px_protocol::art::Camera]) -> Key {
+    if cameras.is_empty() {
+        return key;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&key);
+    for camera in cameras {
+        for value in camera.direction {
+            hasher.update(&value.to_le_bytes());
+        }
+        hasher.update(&camera.distance.to_le_bytes());
+        hasher.update(camera.tag.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// 载荷内容的 FNV-1a。节点名也混进去，免得两个载荷相同的节点指纹撞上。
+fn payload_fingerprint(id: &str, blobs: &[px_protocol::wire::Blob]) -> u64 {
+    let mut hash = noise::fnv1a(id);
+    for blob in blobs {
+        for byte in &blob.bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(noise::FNV_PRIME);
+        }
+    }
+    hash
+}
+
 pub fn hex(key: &Key) -> String {
     let mut out = String::with_capacity(64);
     for byte in key {
@@ -431,7 +466,12 @@ fn load_params<P: Serialize + DeserializeOwned + Default>(param_dir: &Path, name
     }
 }
 
-fn write_artifact(path: &Path, id: &str, payload: &Payload) -> Result<u64, String> {
+fn write_artifact(
+    path: &Path,
+    id: &str,
+    payload: &Payload,
+    cameras: &[px_protocol::art::Camera],
+) -> Result<u64, String> {
     let (kind, blobs, params) = match payload {
         Payload::Field(field) => (
             field.projection.asset_kind(),
@@ -450,12 +490,15 @@ fn write_artifact(path: &Path, id: &str, payload: &Payload) -> Result<u64, Strin
             ]),
         ),
     };
+    let fingerprint = payload_fingerprint(id, &blobs);
     let bundle = ArtBundle {
         assets: vec![AssetManifest {
             id: id.to_string(),
             kind,
             params,
             blobs: blobs.iter().map(|blob| blob.header.clone()).collect(),
+            fingerprint,
+            cameras: cameras.to_vec(),
         }],
     };
     let mut frames = vec![Frame::Art(bundle)];
@@ -547,6 +590,7 @@ pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
         &params_json,
         &input_keys,
     );
+    let key = key_with_cameras(key, &context.spec.cameras);
     let path = artifact_path(&context.cache_root, &key);
     let short = hex_short(&key);
     let started = Instant::now();
@@ -574,7 +618,7 @@ pub fn mesh_node<Op: MeshOp>(name: &str, inputs: &[&Artifact]) -> Artifact {
                 },
             );
             let payload = Payload::Mesh(mesh);
-            let bytes = write_artifact(&path, name, &payload).unwrap_or_else(|err| {
+            let bytes = write_artifact(&path, name, &payload, &context.spec.cameras).unwrap_or_else(|err| {
                 panic!("写产物 {} 失败：{err}", path.display());
             });
             (payload, false, bytes)

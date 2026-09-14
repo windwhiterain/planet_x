@@ -13,6 +13,7 @@ fn main() {
         width: 780,
         height: 520,
         projection: px_ops::field::Projection::Cube,
+        cameras: px_ops::cameras::review(),
     });
 
     let plateaus = node::<ops::fbm::Fbm>("plateaus", &[]);

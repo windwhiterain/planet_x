@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
+use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
 use px_protocol::render::{Lease, Request, Response, Scene};
 use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::wire::{Blob, BlobHeader, DType};
@@ -57,6 +57,8 @@ fn canonical() -> String {
             kind: AssetKind::Field2D,
             params,
             blobs: vec![header.clone()],
+            fingerprint: 0x0123_4567_89ab_cdef,
+            cameras: vec![Camera::new([0.0, 0.0, 1.0], 3.15, "front")],
         }],
     };
 

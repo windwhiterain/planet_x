@@ -8,12 +8,13 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::art_cache::{ArtCache, ReadyMesh, ReadySphere, Role};
 use crate::atmosphere::{AtmosphereMaterial, AtmosphereParams};
 use crate::clouds::{self, CloudsMaterial};
 use px_protocol::art::{AssetKind, Domain, MeshData};
 use px_protocol::stream::{self, Frame};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Palette {
     Rocky,
     Gas,
@@ -372,12 +373,14 @@ fn push_color(bytes: &mut Vec<u8>, color: [f32; 3]) {
     bytes.push(255);
 }
 
-fn surface_textures(
+/// 逐 texel 上色 + 整条 mip 链。返回的第三项是**审计文本**（不是副作用）：
+/// 缓存命中时要把它原样重放，仪器不能因为走了缓存就哑掉（§12.2）。
+pub fn surface_textures(
     images: &mut Assets<Image>,
     field: &Field,
     palette: Palette,
     sea_level: f32,
-) -> (Handle<Image>, Option<Handle<Image>>) {
+) -> (Handle<Image>, Option<Handle<Image>>, String) {
     let mut color = Vec::with_capacity((field.width * field.height * 4) as usize);
     let mut glow = Vec::with_capacity((field.width * field.height * 4) as usize);
 
@@ -415,7 +418,7 @@ fn surface_textures(
         .count();
     let mip_levels = (field.width.max(field.height).max(1) as f32).log2().floor() as u32 + 1;
     let mip_bytes = (field.width * field.height) as f64 * 4.0 * 4.0 / 3.0;
-    println!(
+    let audit = format!(
         "         贴图 {}{}×{}：平均 RGB ({:.0},{:.0},{:.0})，近白像素 {:.1}%，mip {mip_levels} 级（约 {:.1} MB）",
         palette.name(),
         field.width,
@@ -440,7 +443,7 @@ fn surface_textures(
         }
         _ => None,
     };
-    (color_handle, glow_handle)
+    (color_handle, glow_handle, audit)
 }
 
 fn mip_chain_cube(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
@@ -676,7 +679,9 @@ pub fn star_cube(face: u32) -> Image {
     });
     image
 }
-fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
+/// 八面体域的球面壳。第二项是审计文本（面朝里多少个）——它是**值**不是副作用，
+/// 理由同 `surface_textures`。
+fn octahedral_mesh(radius: f32, resolution: u32) -> (Mesh, String) {
     let n = resolution.max(2);
     let mut positions = Vec::with_capacity((n * n) as usize);
     let mut normals = Vec::with_capacity((n * n) as usize);
@@ -721,16 +726,19 @@ fn octahedral_mesh(radius: f32, resolution: u32) -> Mesh {
             flipped += 1;
         }
     }
-    println!("八面体网格：{total} 个三角形，其中 {flipped} 个面法线朝内");
+    let audit = format!("八面体网格：{total} 个三角形，其中 {flipped} 个面法线朝内");
 
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+    (
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices)),
+        audit,
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
 }
 
 pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
@@ -883,7 +891,8 @@ fn spawn_rings(
     });
 }
 
-pub fn load_mesh(path: &str) -> Result<Mesh, String> {
+/// 网格产物 → 网格。返回的审计文本同上：它是**值**，要被缓存原样重放。
+pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
     let kind = frames.iter().find_map(|frame| match frame {
@@ -918,6 +927,7 @@ pub fn load_mesh(path: &str) -> Result<Mesh, String> {
         .map(|chunk| [chunk[0], chunk[1]])
         .collect();
 
+    let mut audit = String::new();
     {
         let mut edges: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
         for triangle in data.indices.chunks_exact(3) {
@@ -929,10 +939,10 @@ pub fn load_mesh(path: &str) -> Result<Mesh, String> {
         }
         let open = edges.values().filter(|count| **count == 1).count();
         let odd = edges.values().filter(|count| **count > 2).count();
-        println!(
-            "网格缝合审计：{} 条边，其中 {open} 条只属于一个三角形（开口），{odd} 条属于两个以上",
+        audit.push_str(&format!(
+            "网格缝合审计：{} 条边，其中 {open} 条只属于一个三角形（开口），{odd} 条属于两个以上\n",
             edges.len()
-        );
+        ));
     }
 
     let mut mesh = Mesh::new(
@@ -956,9 +966,147 @@ pub fn load_mesh(path: &str) -> Result<Mesh, String> {
             let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
             worst = worst.min(Vec3::from(*normal).dot(radial));
         }
-        println!("载入网格法线审计：最小点积 {worst:.3}");
+        audit.push_str(&format!("载入网格法线审计：最小点积 {worst:.3}\n"));
     }
-    Ok(mesh)
+    Ok((mesh, audit))
+}
+
+/// 造它那一次的审计文本照打一遍（缓存命中时打的是当时那份）。
+///
+/// 审计是定性手段（§12.2）：缓存能让它别重算，但**不能让仪器哑掉** ——
+/// 「这张图为什么是空的」永远得有人能回答。
+fn replay(audit: &str, hit: bool) {
+    if audit.trim().is_empty() {
+        return;
+    }
+    if hit {
+        println!("（缓存命中，下面是造它那一次记下的审计）");
+    }
+    println!("{}", audit.trim_end());
+}
+
+/// 网格产物 → 渲染就绪的网格资产：载入、焊法线、审计。
+pub fn build_artifact_mesh(path: &str, meshes: &mut Assets<Mesh>) -> Result<ReadyMesh, String> {
+    let (mesh, audit) = load_mesh(path)?;
+    Ok(ReadyMesh {
+        handle: meshes.add(mesh),
+        audit,
+    })
+}
+
+/// 顶点数 / 三角形数（从资产里数，不走缓存也便宜）。
+pub fn mesh_counts(meshes: &Assets<Mesh>, handle: &Handle<Mesh>) -> Result<(usize, usize), String> {
+    let mesh = meshes
+        .get(handle)
+        .ok_or_else(|| "拿不到刚插进去的网格资产".to_string())?;
+    Ok((
+        mesh.count_vertices(),
+        mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0),
+    ))
+}
+
+/// 程序化球面的网格：造壳 → 按场位移 → 法线 → 焊 → 审计。
+///
+/// 这是缓存**未命中**时才跑的那条路。键把 palette（决定 `flat_sea`）/ `sea_level` /
+/// `displace` / `radius` 都拼进去了 ⇒ 这里算出来的结果只对那一组参数成立。
+pub fn build_sphere_mesh(
+    meshes: &mut Assets<Mesh>,
+    field: &Field,
+    spec: &PlanetSpec,
+) -> Result<ReadySphere, String> {
+    let mut shell_audit = String::new();
+    let mesh_handle = if field.projection == Domain::Equirect {
+        meshes.add(uv_sphere(1.0, 224, 112))
+    } else {
+        let (mesh, audit) = octahedral_mesh(1.0, 320);
+        shell_audit = audit;
+        meshes.add(mesh)
+    };
+    let mut mesh = meshes
+        .get_mut(&mesh_handle)
+        .ok_or_else(|| "拿不到刚插入的球面网格".to_string())?;
+
+    let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+        Some(VertexAttributeValues::Float32x2(values)) => values.clone(),
+        _ => return Err("球面网格没有 UV 属性".to_string()),
+    };
+    let mut positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
+        _ => return Err("球面网格没有位置属性".to_string()),
+    };
+
+    let mut lowest = f32::INFINITY;
+    let mut highest = f32::NEG_INFINITY;
+    let flat_sea = matches!(spec.palette, Palette::Rocky | Palette::Ice);
+    for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
+        let height = if field.projection == Domain::Equirect {
+            field.normalized(field.sample_capped(uv[0], uv[1]))
+        } else {
+            field.normalized(field.sample(uv[0], uv[1]))
+        };
+        let shaped = if flat_sea && height < spec.sea_level {
+            spec.sea_level
+        } else {
+            height
+        };
+        let lift = 1.0 + spec.displace * (shaped - spec.sea_level);
+        lowest = lowest.min(lift);
+        highest = highest.max(lift);
+        position[0] *= spec.radius * lift;
+        position[1] *= spec.radius * lift;
+        position[2] *= spec.radius * lift;
+    }
+
+    match mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(target)) => target.clone_from(&positions),
+        _ => return Err("回写位置失败".to_string()),
+    }
+    if field.projection == Domain::Equirect {
+        mesh.compute_smooth_normals();
+    } else {
+        grid_normals(&mut mesh, 320);
+    }
+    weld_normals(&mut mesh);
+
+    let mut audit = shell_audit;
+    if !audit.is_empty() {
+        audit.push('\n');
+    }
+    if let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+    {
+        let mut inward = 0_usize;
+        let mut worst = 1.0_f32;
+        for (normal, position) in normals.iter().zip(positions.iter()) {
+            let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
+            let dot = Vec3::from(*normal).dot(radial);
+            if dot < 0.0 {
+                inward += 1;
+            }
+            worst = worst.min(dot);
+        }
+        audit.push_str(&format!(
+            "法线审计：{} 个顶点，{inward} 个与半径反向，最小点积 {worst:.3}",
+            normals.len()
+        ));
+    }
+    drop(mesh);
+
+    let mut far = 0.0_f32;
+    for position in positions.iter() {
+        far = far.max(
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt(),
+        );
+    }
+
+    Ok(ReadySphere {
+        mesh: mesh_handle,
+        displacement: format!(
+            "位移 {:.3}（半径 ×{:.3}..×{:.3}，最远顶点 {:.4}）",
+            spec.displace, lowest, highest, far
+        ),
+        audit,
+    })
 }
 
 fn grid_normals(mesh: &mut Mesh, resolution: u32) {
@@ -1180,7 +1328,9 @@ fn ring_image(width: u32, height: u32) -> Image {
     )
 }
 
-pub fn check_scene(spec: &PlanetSpec) -> Result<(), String> {
+/// 新场景能不能用。走的是同一份缓存 ⇒ 检过的场一会儿 `spawn_planet` 直接命中，
+/// 不会把 8 MB 的场解码两遍。
+pub fn check_scene(cache: &mut ArtCache, spec: &PlanetSpec) -> Result<(), String> {
     for path in [
         Some(spec.field.as_str()),
         spec.mesh.as_deref(),
@@ -1193,21 +1343,25 @@ pub fn check_scene(spec: &PlanetSpec) -> Result<(), String> {
             return Err(format!("{path}：{err}"));
         }
     }
-    load_field(&spec.field)?;
+    cache.field(Role::Height, &spec.field)?;
     if let Some(clouds) = &spec.clouds {
-        let field = load_field(clouds)?;
-        if field.projection != Domain::CubeMap {
+        let field = cache.field(Role::Coverage, clouds)?;
+        if field.value.field.projection != Domain::CubeMap {
             return Err(format!("云覆盖度 {clouds} 不是 CubeMap 产物"));
         }
         let paths = spec
             .slope
             .as_ref()
             .ok_or_else(|| "没有给云的梯度场（--cloud-slope x,y,z）".to_string())?;
-        for path in paths {
-            let slope = load_field(path)?;
-            if slope.projection != Domain::CubeMap
-                || slope.width != field.width
-                || slope.height != field.height
+        for (role, path) in [
+            (Role::SlopeX, &paths[0]),
+            (Role::SlopeY, &paths[1]),
+            (Role::SlopeZ, &paths[2]),
+        ] {
+            let slope = cache.field(role, path)?;
+            if slope.value.field.projection != Domain::CubeMap
+                || slope.value.field.width != field.value.field.width
+                || slope.value.field.height != field.value.field.height
             {
                 return Err(format!("云梯度 {path} 与覆盖度不同形"));
             }
@@ -1217,6 +1371,7 @@ pub fn check_scene(spec: &PlanetSpec) -> Result<(), String> {
 }
 
 pub fn spawn_clouds(
+    cache: &mut ArtCache,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<CloudsMaterial>,
@@ -1224,23 +1379,12 @@ pub fn spawn_clouds(
     spec: &PlanetSpec,
     density: f32,
 ) -> Result<String, String> {
-    let coverage = load_field(
-        spec.clouds
-            .as_deref()
-            .ok_or_else(|| "没有给云覆盖度".to_string())?,
-    )?;
-    let paths = spec
-        .slope
-        .as_ref()
-        .ok_or_else(|| "没有给云的梯度场（--cloud-slope x,y,z）".to_string())?;
-    let slopes = [
-        load_field(&paths[0])?,
-        load_field(&paths[1])?,
-        load_field(&paths[2])?,
-    ];
-    let face = coverage.width;
-    let image = clouds::coverage_image(&coverage, &slopes)?;
-    let handle = images.add(image);
+    let coverage = cache.coverage(spec, images)?;
+    let face = coverage.value.face;
+    replay(
+        &format!("         覆盖度立方图：{face}²×{}", px_protocol::art::CUBE_FACES),
+        coverage.hit,
+    );
 
     let inner = spec.radius * clouds::CLOUD_BASE;
     let outer = spec.radius * clouds::CLOUD_TOP;
@@ -1259,7 +1403,7 @@ pub fn spawn_clouds(
         Mesh3d(meshes.add(sphere)),
         MeshMaterial3d(materials.add(CloudsMaterial {
             params,
-            coverage: Some(handle),
+            coverage: Some(coverage.value.image),
         })),
         Transform::from_rotation(orientation),
     ));
@@ -1274,7 +1418,11 @@ pub fn spawn_clouds(
     ))
 }
 
+/// 一个场景的全部资源都从 `cache` 里来（§49.5 P1）：产物按内容认，派生资源按
+/// 「内容 + 渲染参数」认。实体还是每请求重建 —— 那是几十个实体的事，不是那几百万
+/// 个 texel 的事。
 pub fn spawn_planet(
+    cache: &mut ArtCache,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -1288,25 +1436,48 @@ pub fn spawn_planet(
     spec: &PlanetSpec,
     cloud_density: f32,
 ) -> Result<String, String> {
-    let field = load_field(&spec.field)?;
+    let field = cache.field(Role::Height, &spec.field)?;
     let cloud_note = if spec.clouds.is_some() {
-        spawn_clouds(commands, meshes, clouds_materials, images, spec, cloud_density)?
+        spawn_clouds(
+            cache,
+            commands,
+            meshes,
+            clouds_materials,
+            images,
+            spec,
+            cloud_density,
+        )?
     } else {
         String::new()
     };
 
-    if let Some(path) = &spec.mesh {
-        let mesh = load_mesh(path)?;
-        let vertices = mesh.count_vertices();
-        let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
-        let mesh_handle = meshes.add(mesh);
-        let (color_texture, glow_texture) =
-            surface_textures(images, &field, spec.palette, spec.sea_level);
-        let emissive = if glow_texture.is_some() {
-            LinearRgba::rgb(3.0, 3.0, 3.0)
+    let textures = cache.textures(&field.value, spec, images)?;
+    replay(&textures.value.audit, textures.hit);
+    let (color_texture, glow_texture) = (textures.value.color.clone(), textures.value.glow.clone());
+    let emissive = if glow_texture.is_some() {
+        LinearRgba::rgb(3.0, 3.0, 3.0)
+    } else {
+        LinearRgba::rgb(0.0, 0.0, 0.0)
+    };
+    let tail = format!(
+        "{}{}",
+        if spec.rings > 0.0 {
+            format!("｜环 ×{:.2}", spec.rings)
         } else {
-            LinearRgba::rgb(0.0, 0.0, 0.0)
-        };
+            String::new()
+        },
+        if cloud_note.is_empty() {
+            String::new()
+        } else {
+            format!("｜{cloud_note}")
+        },
+    );
+
+    if let Some(path) = &spec.mesh {
+        let ready = cache.artifact_mesh(Role::Surface, path, meshes)?;
+        replay(&ready.value.audit, ready.hit);
+        let mesh_handle = ready.value.handle.clone();
+        let (vertices, triangles) = mesh_counts(meshes, &mesh_handle)?;
 
         let system = commands
             .spawn((
@@ -1340,101 +1511,18 @@ pub fn spawn_planet(
         spawn_lights(commands);
 
         return Ok(format!(
-            "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{}{}",
+            "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{tail}",
             spec.palette.name(),
             spec.field,
-            field.width,
-            field.height,
+            field.value.field.width,
+            field.value.field.height,
             spec.sea_level,
-            if spec.rings > 0.0 {
-                format!("｜环 ×{:.2}", spec.rings)
-            } else {
-                String::new()
-            },
-            if cloud_note.is_empty() {
-                String::new()
-            } else {
-                format!("｜{cloud_note}")
-            },
         ));
     }
 
-    let mesh_handle = if field.projection == Domain::Equirect {
-        meshes.add(uv_sphere(1.0, 224, 112))
-    } else {
-        meshes.add(octahedral_mesh(1.0, 320))
-    };
-    let mut mesh = meshes
-        .get_mut(&mesh_handle)
-        .ok_or_else(|| "拿不到刚插入的球面网格".to_string())?;
-
-    let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
-        Some(VertexAttributeValues::Float32x2(values)) => values.clone(),
-        _ => return Err("球面网格没有 UV 属性".to_string()),
-    };
-    let mut positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
-        _ => return Err("球面网格没有位置属性".to_string()),
-    };
-
-    let mut lowest = f32::INFINITY;
-    let mut highest = f32::NEG_INFINITY;
-    let flat_sea = matches!(spec.palette, Palette::Rocky | Palette::Ice);
-    for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
-        let height = if field.projection == Domain::Equirect {
-            field.normalized(field.sample_capped(uv[0], uv[1]))
-        } else {
-            field.normalized(field.sample(uv[0], uv[1]))
-        };
-        let shaped = if flat_sea && height < spec.sea_level {
-            spec.sea_level
-        } else {
-            height
-        };
-        let lift = 1.0 + spec.displace * (shaped - spec.sea_level);
-        lowest = lowest.min(lift);
-        highest = highest.max(lift);
-        position[0] *= spec.radius * lift;
-        position[1] *= spec.radius * lift;
-        position[2] *= spec.radius * lift;
-    }
-
-    match mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
-        Some(VertexAttributeValues::Float32x3(target)) => target.clone_from(&positions),
-        _ => return Err("回写位置失败".to_string()),
-    }
-    if field.projection == Domain::Equirect {
-        mesh.compute_smooth_normals();
-    } else {
-        grid_normals(&mut mesh, 320);
-    }
-    weld_normals(&mut mesh);
-
-    if let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
-    {
-        let mut inward = 0_usize;
-        let mut worst = 1.0_f32;
-        for (normal, position) in normals.iter().zip(positions.iter()) {
-            let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
-            let dot = Vec3::from(*normal).dot(radial);
-            if dot < 0.0 {
-                inward += 1;
-            }
-            worst = worst.min(dot);
-        }
-        println!(
-            "法线审计：{} 个顶点，{inward} 个与半径反向，最小点积 {worst:.3}",
-            normals.len()
-        );
-    }
-    drop(mesh);
-
-    let (color_texture, glow_texture) = surface_textures(images, &field, spec.palette, spec.sea_level);
-    let emissive = if glow_texture.is_some() {
-        LinearRgba::rgb(3.0, 3.0, 3.0)
-    } else {
-        LinearRgba::rgb(0.0, 0.0, 0.0)
-    };
+    let sphere = cache.sphere(&field.value, spec, meshes)?;
+    replay(&sphere.value.audit, sphere.hit);
+    let mesh_handle = sphere.value.mesh.clone();
 
     let system = commands
         .spawn((
@@ -1478,36 +1566,14 @@ pub fn spawn_planet(
         }
     });
 
-
-    let mut far = 0.0_f32;
-    for position in positions.iter() {
-        far = far.max(
-            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
-                .sqrt(),
-        );
-    }
-
     Ok(format!(
-        "{}｜{}｜{}×{}｜位移 {:.3}（半径 ×{:.3}..×{:.3}，最远顶点 {:.4}）｜海平面 {:.2}{}{}",
+        "{}｜{}｜{}×{}｜{}｜海平面 {:.2}{tail}",
         spec.field,
         spec.palette.name(),
-        field.width,
-        field.height,
-        spec.displace,
-        lowest,
-        highest,
-        far,
+        field.value.field.width,
+        field.value.field.height,
+        sphere.value.displacement,
         spec.sea_level,
-        if spec.rings > 0.0 {
-            format!("｜环 ×{:.2}", spec.rings)
-        } else {
-            String::new()
-        },
-        if cloud_note.is_empty() {
-            String::new()
-        } else {
-            format!("｜{cloud_note}")
-        },
     ))
 }
 
@@ -1588,3 +1654,35 @@ pub fn spawn_planet(
 
 
 
+
+/// 对照图里的一格（列/行 + 格子尺寸）。相机表来自 `.pxart`，格子的排布是渲染器的事。
+#[derive(Debug, Clone, Copy)]
+pub struct SheetCell {
+    pub column: u32,
+    pub row: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 把产物里的一台评审相机翻成世界系的 `Transform`。
+///
+/// 倾斜（`SYSTEM_TILT`）只在这里出现一次：`.pxart` 里的 `direction` 是**局部系**的，
+/// 所以 PCG 侧不需要知道任何渲染器约定，`0.34` 也不会多出第二份副本。
+///
+/// ⚠️ 方向与 `Vec3::Y` 共线时 `looking_at` 的 up 会退化 —— `px_ops::cameras::review()`
+/// 因此把两极视角停在 82° 而不是 90°。
+pub fn camera_for(camera: &px_protocol::art::Camera) -> Transform {
+    let local = Vec3::new(
+        camera.direction[0],
+        camera.direction[1],
+        camera.direction[2],
+    );
+    let local = if local.length_squared() > 1e-12 {
+        local.normalize()
+    } else {
+        Vec3::Z
+    };
+    let direction = Quat::from_rotation_x(SYSTEM_TILT) * local;
+    Transform::from_translation(direction * camera.distance.max(1e-3))
+        .looking_at(Vec3::ZERO, Vec3::Y)
+}

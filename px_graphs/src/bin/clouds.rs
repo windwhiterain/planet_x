@@ -16,6 +16,7 @@ fn main() {
         width,
         height,
         projection: px_ops::field::Projection::CubeMap,
+        cameras: px_ops::cameras::review(),
     });
 
     let clusters = node::<ops::fbm::Fbm>("clusters", &[]);

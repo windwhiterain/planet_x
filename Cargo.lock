@@ -4407,6 +4407,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_probe"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "encase",
+ "pollster",
+ "px_render",
+ "px_verify",
+ "wgpu",
+]
+
+[[package]]
 name = "px_protocol"
 version = "0.1.0"
 dependencies = [
@@ -4420,15 +4432,10 @@ name = "px_render"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "bytemuck",
- "encase",
  "naga",
- "pollster",
  "px_protocol",
- "px_verify",
  "serde",
  "serde_json",
- "wgpu",
 ]
 
 [[package]]

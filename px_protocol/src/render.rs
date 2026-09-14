@@ -36,6 +36,12 @@ pub struct View {
     pub scatter: Option<String>,
     #[serde(default)]
     pub cloud: Option<f32>,
+    /// 用产物自带的相机表出「一张多视角对照图」（相机表住在 `.pxart` 里）。
+    #[serde(default)]
+    pub sheet: bool,
+    /// 对照图的列数（sheet 为真时有效）。
+    #[serde(default)]
+    pub columns: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

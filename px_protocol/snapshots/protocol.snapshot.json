@@ -27,6 +27,18 @@
               ]
             }
           ],
+          "cameras": [
+            {
+              "direction": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "distance": 3.1500000953674316,
+              "tag": "front"
+            }
+          ],
+          "fingerprint": 81985529216486895,
           "id": "planet/terran",
           "kind": "Field2D",
           "params": {
@@ -68,7 +80,9 @@
         "atmo": null,
         "cam": null,
         "cloud": null,
-        "scatter": null
+        "columns": 0,
+        "scatter": null,
+        "sheet": false
       },
       "width": 960
     },

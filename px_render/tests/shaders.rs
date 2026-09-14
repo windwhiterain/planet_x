@@ -1,6 +1,6 @@
 mod common;
 
-use common::{assemble, expand, import_path_of, module_sources, render_source, shader_files};
+use common::{expand, import_path_of, module_sources, render_source, shader_files};
 use std::path::Path;
 
 #[test]
