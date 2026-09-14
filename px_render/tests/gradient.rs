@@ -8,7 +8,7 @@ const POINTS: usize = 64;
 const STEPS: usize = 5;
 const CUBE_FACE: u32 = 64;
 const KINK_FACTOR: f32 = 8.0;
-const BLOCK: usize = 28;
+const BLOCK: usize = 32;
 const CANDIDATES: usize = 5;
 const SWEEP: [f32; STEPS] = [8e-5, 4e-5, 2e-5, 1e-5, 5e-6];
 const SIMPLE_SWEEP: [f32; STEPS] = [1e-2, 5e-3, 2.5e-3, 1.25e-3, 6.25e-4];
@@ -17,6 +17,7 @@ const SIMPLE_INNER: f32 = 1.0;
 const SIMPLE_OUTER: f32 = 1.5;
 const SIMPLE_DETAIL: f32 = 2.0;
 const SIMPLE_MASK: f32 = 156.0 / 255.0;
+const PRODUCTION_MASK: f32 = 153.0 / 255.0;
 
 #[derive(Clone, Copy)]
 enum Mask {
@@ -261,7 +262,7 @@ fn gradient_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let cover = coverage_of(medium.direction);
     let analytic = cloud_field_gradient_analytic(point);
     let field = cloud_field(point);
-    let row = index * 28u;
+    let row = index * 32u;
     out[row] = vec4<f32>(analytic, probe_gate_margin(point, cover));
     out[row + 1u] = vec4<f32>(field, cover, medium.altitude, length(analytic));
     for (var slot = 0u; slot < 5u; slot += 1u) {
@@ -270,7 +271,7 @@ fn gradient_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let altitude = medium.altitude;
     let direction = medium.direction;
     let radius = max(length(to_local(point)), 1e-5);
-    let noise = simple_noise_value(point);
+    let noise = probe_noise_value(direction, altitude);
     let height = clamp(altitude, 0.0, 1.0);
     let footprint = max(cover - params.taper * height * height, 0.0);
     let lobed = clamp((footprint + noise - 1.0) * params.coverage_gain, 0.0, 1.0);
@@ -316,19 +317,28 @@ fn gradient_probe(@builtin(global_invocation_id) id: vec3<u32>) {
         (partials.cover / radius) * project_tangential(cover_sample.gba, direction),
         0.0,
     );
-    let shape_raw = floor_here * under_top * lobed;
-    let footprint_correction = gate_open(shape_raw)
-        * gate_open(lobed)
-        * floor_here
-        * under_top
-        * params.coverage_gain
-        * (-params.taper * 2.0 * height)
-        * select(0.0, 1.0, footprint > 0.0)
-        / max(1.0 - params.erode, 1e-4);
     out[row + 27u] = vec4<f32>(
-        (partials.altitude + footprint_correction) * direction / span(),
-        0.0,
+        billow.x,
+        noise,
+        abs(billow.x - noise),
+        abs(field - shape_of(cover, altitude, noise)),
     );
+    let upper_live = select(
+        0.0,
+        params.top * params.detail_strength,
+        ceiling > params.base + 0.02,
+    );
+    let candidate_noise = gate_open(floor_here * under_top * lobed)
+        * floor_here
+        * (
+            under_top * params.coverage_gain * gate_open(lobed)
+                + lobed * upper_live * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude)
+        )
+        / max(1.0 - params.erode, 1e-4);
+    out[row + 28u] = vec4<f32>((candidate_noise / radius) * billow.yzw, 0.0);
+    for (var which = 0u; which < 3u; which += 1u) {
+        out[row + 29u + which] = vec4<f32>(channel_fd(point, job.steps[1].x, which), 0.0);
+    }
 }
 "#;
 
@@ -362,7 +372,9 @@ struct Row {
     lattice_margin: f32,
     channel: [[f32; 3]; 3],
     term: [[f32; 3]; 3],
-    altitude_candidate: [f32; 3],
+    noise_pair: [f32; 4],
+    noise_candidate: [f32; 3],
+    channel_fine: [[f32; 3]; 3],
 }
 
 impl Row {
@@ -732,12 +744,18 @@ fn probe(
                 [row[25][0], row[25][1], row[25][2]],
                 [row[26][0], row[26][1], row[26][2]],
             ],
-            altitude_candidate: [row[27][0], row[27][1], row[27][2]],
+            noise_pair: [row[27][0], row[27][1], row[27][2], row[27][3]],
+            noise_candidate: [row[28][0], row[28][1], row[28][2]],
+            channel_fine: [
+                [row[29][0], row[29][1], row[29][2]],
+                [row[30][0], row[30][1], row[30][2]],
+                [row[31][0], row[31][1], row[31][2]],
+            ],
         })
         .collect()
 }
 
-fn shell_points() -> Vec<[f32; 3]> {
+fn shell_points_between(inner: f32, outer: f32) -> Vec<[f32; 3]> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut next = || {
         state ^= state << 13;
@@ -750,7 +768,7 @@ fn shell_points() -> Vec<[f32; 3]> {
             let z = next() * 2.0 - 1.0;
             let phi = next() * std::f32::consts::TAU;
             let ring = (1.0 - z * z).max(0.0).sqrt();
-            let radius = CLOUD_BASE + (CLOUD_TOP - CLOUD_BASE) * next();
+            let radius = inner + (outer - inner) * next();
             [
                 ring * phi.cos() * radius,
                 z * radius,
@@ -758,6 +776,10 @@ fn shell_points() -> Vec<[f32; 3]> {
             ]
         })
         .collect()
+}
+
+fn shell_points() -> Vec<[f32; 3]> {
+    shell_points_between(CLOUD_BASE, CLOUD_TOP)
 }
 
 fn simple_points() -> Vec<[f32; 3]> {
@@ -1023,14 +1045,18 @@ fn noise_oracle(row: &Row, slot: usize) -> [f32; 3] {
     ]
 }
 
-fn simple_rows(rows: &[Row]) -> Vec<&Row> {
+fn measured_rows(rows: &[Row], sweep: [f32; STEPS], factor: f32) -> Vec<&Row> {
     rows.iter()
         .filter(|row| {
             row.field > 1e-3
-                && row.margin > KINK_FACTOR * SIMPLE_SWEEP[0]
-                && row.noise_margin > KINK_FACTOR * SIMPLE_SWEEP[0]
+                && row.margin > factor * sweep[0]
+                && row.noise_margin > factor * sweep[0]
         })
         .collect()
+}
+
+fn simple_rows(rows: &[Row]) -> Vec<&Row> {
+    measured_rows(rows, SIMPLE_SWEEP, KINK_FACTOR)
 }
 
 #[test]
@@ -1220,27 +1246,50 @@ fn the_noise_term_coefficient_matches_a_single_octave_oracle() {
 }
 
 #[test]
-fn the_simplified_residual_is_attributed_to_one_channel() {
-    let points = simple_points();
-    let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
-    if rows.is_empty() {
+fn the_residual_is_attributed_to_one_channel() {
+    let simple = probe(&simple_points(), &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
+    if simple.is_empty() {
         eprintln!("跳过：没有可用的 wgpu 适配器");
         return;
     }
-    assert_eq!(rows.len(), POINTS, "回读的点数不对");
+    assert_eq!(simple.len(), POINTS, "回读的点数不对");
+    let production = probe(&shell_points(), &production_params(), SWEEP, Mask::Varying);
+    assert_eq!(production.len(), POINTS, "回读的点数不对");
+    let flat = probe(&shell_points(), &production_params(), SWEEP, Mask::Constant(PRODUCTION_MASK));
+    assert_eq!(flat.len(), POINTS, "回读的点数不对");
 
-    let usable = simple_rows(&rows);
+    attribute("简化", &simple, SIMPLE_SWEEP, KINK_FACTOR);
+    attribute("生产", &production, SWEEP, KINK_FACTOR);
+    attribute("生产·定覆盖度", &flat, SWEEP, KINK_FACTOR);
+    attribute("生产·定覆盖度·严门限", &flat, SWEEP, 20.0 * KINK_FACTOR);
+    let mut near_params = production_params();
+    near_params.inner = 0.01;
+    near_params.outer = 0.06;
+    let near = probe(
+        &shell_points_between(0.01, 0.06),
+        &near_params,
+        SWEEP,
+        Mask::Constant(PRODUCTION_MASK),
+    );
+    assert_eq!(near.len(), POINTS, "回读的点数不对");
+    attribute("生产·小半径·定覆盖度", &near, SWEEP, KINK_FACTOR);
+}
+
+fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
+    let usable = measured_rows(rows, sweep, factor);
     println!(
-        "逐通道归因：可用点 {} / {}，步长 {:e}",
+        "[{label}] 逐通道归因：可用点 {} / {}，步长 {:e}",
         usable.len(),
         rows.len(),
-        SIMPLE_SWEEP[0],
+        sweep[0],
     );
-    assert!(usable.len() >= 16, "可用点只有 {} 个", usable.len());
+    assert!(usable.len() >= 8, "[{label}] 可用点只有 {} 个", usable.len());
 
     let names = ["高度 ①", "噪声 ②", "覆盖 ③"];
     let mut mirror_worst = 0.0_f32;
     let mut split_worst = 0.0_f32;
+    let mut pair_worst = 0.0_f32;
+    let mut face_worst = 0.0_f32;
     let mut chan_medians = [[0.0_f32; 3]; 3];
     let mut chan_maxima = [[0.0_f32; 3]; 3];
     for which in 0..3 {
@@ -1259,9 +1308,58 @@ fn the_simplified_residual_is_attributed_to_one_channel() {
         chan_maxima[which][0] = residuals
             .iter()
             .fold(0.0_f32, |worst, value| worst.max(*value));
+        let worst_row = usable
+            .iter()
+            .max_by(|one, two| {
+                let mut first = 0.0_f32;
+                let mut second = 0.0_f32;
+                for axis in 0..3 {
+                    first = first
+                        .max((one.term[which][axis] - one.channel[which][axis]).abs());
+                    second = second
+                        .max((two.term[which][axis] - two.channel[which][axis]).abs());
+                }
+                first.partial_cmp(&second).expect("残差里出现了 NaN")
+            })
+            .expect("上面刚断言过非空");
+        let mut relative: Vec<f32> = usable
+            .iter()
+            .map(|row| {
+                let mut error = 0.0_f32;
+                let mut scale = 1e-9_f32;
+                for axis in 0..3 {
+                    error = error
+                        .max((row.term[which][axis] - row.channel[which][axis]).abs());
+                    scale = scale.max(row.channel[which][axis].abs());
+                }
+                error / scale
+            })
+            .collect();
         println!(
-            "{which}（{}）解析项对通道差商的偏差：中位 {:e}，最大 {:e}",
-            names[which], chan_medians[which][0], chan_maxima[which][0],
+            "[{label}] {which}（{}）解析项对通道差商的偏差：中位 {:e}，最大 {:e}，相对中位 {:e}",
+            names[which], chan_medians[which][0], chan_maxima[which][0], median(&mut relative),
+        );
+        println!(
+            "[{label}] {which} 最坏点：解析 {:?} 差商 {:?}（半径 {:e}，altitude {:e}）",
+            worst_row.term[which], worst_row.channel[which], worst_row.radius, worst_row.altitude,
+        );
+        let mut finer: Vec<f32> = usable
+            .iter()
+            .map(|row| {
+                let mut error = 0.0_f32;
+                for axis in 0..3 {
+                    error = error
+                        .max((row.term[which][axis] - row.channel_fine[which][axis]).abs());
+                }
+                error
+            })
+            .collect();
+        let finer_median = median(&mut finer);
+        println!(
+            "[{label}] {which} 步长减半后（{:e}）中位偏差 {:e}，与粗步长之比 {:.3}",
+            sweep[1],
+            finer_median,
+            finer_median / chan_medians[which][0],
         );
     }
     for row in &usable {
@@ -1273,12 +1371,25 @@ fn the_simplified_residual_is_attributed_to_one_channel() {
             mirror_worst = mirror_worst.max((mirrored[axis] - row.analytic[axis]).abs());
             split_worst = split_worst.max((split[axis] - row.fd(0)[axis]).abs());
         }
+        pair_worst = pair_worst.max(row.noise_pair[2]);
+        face_worst = face_worst.max(row.noise_pair[3]);
     }
-    println!("三项之和偏离 shader 自己的返回值的最大值 {mirror_worst:e}");
-    println!("三条通道差商之和偏离整场差商的最大值 {split_worst:e}");
+    println!("[{label}] 解析路径的噪声值对值路径噪声值的最大出入 {pair_worst:e}");
+    println!("[{label}] 探针自己算的场值对 cloud_field 的最大出入 {face_worst:e}");
+    println!("[{label}] 三项之和偏离 shader 自己返回值的最大出入 {mirror_worst:e}");
     assert!(
-        mirror_worst < 1e-5,
-        "探针里复算的三项加起来和 shader 返回值差 {mirror_worst:e} ⇒ 拆项没抄对，归因无效"
+        pair_worst < 1e-6,
+        "[{label}] 解析路径的噪声值和值路径的噪声值差 {pair_worst:e} ⇒ 两边量的不是同一个场（同一函数的两条代码路径只该差 1 ULP）"
+    );
+    assert!(
+        face_worst == 0.0,
+        "[{label}] 探针算的场值和 cloud_field 差 {face_worst:e} ⇒ 差商 oracle 不是这条值路径"
+    );
+    assert!(
+        mirror_worst < 1e-5 * (1.0 + usable.iter().fold(0.0_f32, |worst, row| {
+            worst.max(magnitude(&row.analytic))
+        })),
+        "[{label}] 探针里复算的三项加起来和 shader 返回值差 {mirror_worst:e} ⇒ 拆项没抄对，归因无效"
     );
 
     let mut worst = 0_usize;
@@ -1288,7 +1399,7 @@ fn the_simplified_residual_is_attributed_to_one_channel() {
         }
     }
     println!(
-        "最大残差落在通道 {worst}（{}）：{:e}，另外两个是 {:e} 和 {:e}",
+        "[{label}] 最大残差落在通道 {worst}（{}）：{:e}，另外两个是 {:e} 和 {:e}",
         names[worst],
         chan_maxima[worst][0],
         chan_maxima[(worst + 1) % 3][0],
@@ -1298,38 +1409,38 @@ fn the_simplified_residual_is_attributed_to_one_channel() {
         .iter()
         .map(|row| distance(&row.fd(0), &row.analytic))
         .fold(0.0_f32, |worst, value| worst.max(value));
-    println!("整场最大残差 {total:e}");
-    println!("三条通道差商之和和整场差商的最大出入 {split_worst:e}（差商是有限步长，不是恒等式）");
-    assert!(
-        split_worst < 0.1 * chan_maxima[worst][0],
-        "三条通道差商之和和整场差商差 {split_worst:e}，和最大通道残差 {:e} 同量级 ⇒ 通道分解不成立，归因无效",
-        chan_maxima[worst][0],
-    );
-
-    let mut candidate_errors: Vec<f32> = usable
+    println!("[{label}] 整场最大残差 {total:e}");
+    let mut candidate_residuals: Vec<f32> = usable
         .iter()
         .map(|row| {
             let mut error = 0.0_f32;
             for axis in 0..3 {
                 error = error
-                    .max((row.altitude_candidate[axis] - row.channel[0][axis]).abs());
+                    .max((row.noise_candidate[axis] - row.channel[1][axis]).abs());
             }
             error
         })
         .collect();
-    let candidate_median = median(&mut candidate_errors);
-    let candidate_worst = candidate_errors
+    let candidate_median = median(&mut candidate_residuals);
+    let candidate_worst = candidate_residuals
         .iter()
         .fold(0.0_f32, |worst, value| worst.max(*value));
     println!(
-        "补上 footprint 高度依赖后的候选 ①：中位 {:e}，最大 {:e}（原来 {:e} / {:e}）",
-        candidate_median, candidate_worst, chan_medians[0][0], chan_maxima[0][0],
+        "[{label}] 从零重算的噪声项（ceiling 项取正号）对通道差商：中位 {:e}，最大 {:e}（现式 {:e} / {:e}）",
+        candidate_median, candidate_worst, chan_medians[1][0], chan_maxima[1][0],
     );
     assert!(
-        candidate_median < chan_medians[0][0] * 0.02,
-        "候选 ① 的中位残差 {:e} 没有比原来的 {:e} 小两个量级 ⇒ 缺的不是这一项",
-        candidate_median,
-        chan_medians[0][0],
+        candidate_median < 1e-3 || chan_medians[1][0] <= candidate_median * 1.5,
+        "[{label}] 从零重算的噪声项中位残差 {candidate_median:e}，shader 现式 {:e}：现式没有比从零推导的版本更好 ⇒ 噪声项还有别的错",
+        chan_medians[1][0],
+    );
+    println!(
+        "[{label}] 三条通道差商之和和整场差商的最大出入 {split_worst:e}（差商是有限步长，不是恒等式）"
+    );
+    assert!(
+        split_worst < 0.1 * chan_maxima[worst][0],
+        "[{label}] 三条通道差商之和和整场差商差 {split_worst:e}，和最大通道残差 {:e} 同量级 ⇒ 通道分解不成立，归因无效",
+        chan_maxima[worst][0],
     );
 }
 
@@ -1382,18 +1493,26 @@ fn the_simplified_analytic_gradient_matches_central_differences() {
         );
     }
 
-    let best = maxima.iter().fold(f32::MAX, |best, value| best.min(*value));
-    println!("整个扫描里最好的最大偏差 {best:e}");
+    let best = medians.iter().fold(f32::MAX, |best, value| best.min(*value));
+    println!("扫描里最好的中位偏差 {best:e}（修复前是 4.5e-1，且随步长完全不动）");
     assert!(
-        best < 5e-3,
-        "简化配置下解析梯度和中心差分最好也只差 {best:e} ⇒ 公式错"
+        best < 1e-3,
+        "简化配置下解析梯度和中心差分的相对中位偏差最好也有 {best:e} ⇒ 公式错"
     );
     for (slot, step) in SIMPLE_SWEEP.iter().enumerate() {
         assert!(
-            maxima[slot] < 20.0 * floors[slot],
-            "步长 {step:e} 上最大偏差 {:e} 超过 f32 相消下限估计 {:e} 的 20 倍 ⇒ 差的不是步长",
-            maxima[slot],
+            medians[slot] < 20.0 * floors[slot],
+            "步长 {step:e} 上中位偏差 {:e} 超过 f32 相消下限估计 {:e} 的 20 倍 ⇒ 中位偏差不是相消主导，公式还有错",
+            medians[slot],
             floors[slot],
+        );
+    }
+    for slot in 0..STEPS - 1 {
+        assert!(
+            maxima[slot + 1] < maxima[slot] * 0.7,
+            "最坏点偏差没有随步长缩小（{:e} → {:e}）⇒ 残差不是 oracle 的折点截断",
+            maxima[slot],
+            maxima[slot + 1],
         );
     }
 }

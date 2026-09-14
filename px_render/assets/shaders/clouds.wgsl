@@ -212,7 +212,7 @@ fn shape_of_partials(cover: f32, altitude: f32, noise: f32) -> ShapePartials {
     let shape_noise = floor_here
         * (
             under_top * params.coverage_gain * lobe_live
-                - lobed * ceiling_live * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude)
+                + lobed * ceiling_live * slope_of_smoothstep(ceiling, ceiling + 0.20, altitude)
         );
     let noise_partial = live * shape_noise / erode_room;
 
