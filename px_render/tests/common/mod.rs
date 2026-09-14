@@ -20,7 +20,7 @@ pub fn connect() -> Option<Gpu> {
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("headless probe"),
-        required_features: wgpu::Features::empty(),
+        required_features: adapter.features() & wgpu::Features::FLOAT32_FILTERABLE,
         required_limits: wgpu::Limits::downlevel_defaults(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
