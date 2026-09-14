@@ -6,7 +6,7 @@ mod probe;
 use px_render::clouds::{CLOUD_BASE, CLOUD_TOP, CloudParams};
 use px_verify::cloud_field::CloudFieldParams;
 use px_verify::noise::{FbmSettings, fbm_3, gradient_noise_3};
-use probe::{POINTS, STEPS};
+use probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};
 
 const SWEEP: [f32; STEPS] = [8e-5, 4e-5, 2e-5, 1e-5, 5e-6];
 const MASK: f32 = 153.0 / 255.0;
@@ -83,7 +83,7 @@ fn the_reference_ports_the_shader_parameters_exactly() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
-    let rows = probe::run(&points, &params, SWEEP, MASK);
+    let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
     if rows.is_empty() {
         eprintln!("跳过：没有可用的 wgpu 适配器");
         return;
@@ -136,7 +136,7 @@ fn the_reference_and_the_shader_agree_on_the_field_value() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
-    let rows = probe::run(&points, &params, SWEEP, MASK);
+    let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
     if rows.is_empty() {
         eprintln!("跳过：没有可用的 wgpu 适配器");
         return;
@@ -314,11 +314,96 @@ fn the_reference_and_the_shader_agree_on_the_field_value() {
 }
 
 #[test]
+fn the_shader_coverage_term_matches_the_exact_band_gradient() {
+    let params = production_params();
+    let field = reference(&params);
+    let points = shell_points();
+    let rows = probe::run(&points, &params, SWEEP, Mask::Varying);
+    if rows.is_empty() {
+        eprintln!("跳过：没有可用的 wgpu 适配器");
+        return;
+    }
+    assert_eq!(rows.len(), POINTS, "回读的点数不对");
+
+    let slope = [
+        quantised(MASK_GRADIENT[0]) as f64,
+        quantised(MASK_GRADIENT[1]) as f64,
+        quantised(MASK_GRADIENT[2]) as f64,
+    ];
+    let mut fixed = Vec::new();
+    let mut broken = Vec::new();
+    let mut baked_worst = 0.0_f64;
+    let mut skipped = 0_usize;
+
+    for (row, point) in rows.iter().zip(&points) {
+        if row.field <= LIVE {
+            continue;
+        }
+        baked_worst = baked_worst.max((row.baked_g as f64 - slope[0]).abs());
+        let direction = [
+            row.direction[0] as f64,
+            row.direction[1] as f64,
+            row.direction[2] as f64,
+        ];
+        let cover_slope = [
+            (row.chain * quantised(MASK_GRADIENT[0])) as f64,
+            (row.chain * quantised(MASK_GRADIENT[1])) as f64,
+            (row.chain * quantised(MASK_GRADIENT[2])) as f64,
+        ];
+        let base = row.cover as f64
+            - (cover_slope[0] * direction[0]
+                + cover_slope[1] * direction[1]
+                + cover_slope[2] * direction[2]);
+        let exact = field.band_gradient(lifted(*point), base, cover_slope);
+        let scale = magnitude(exact);
+        let axis = [row.new_axis[0], row.new_axis[1], row.new_axis[2]];
+        if scale < FLOOR || magnitude([axis[0] as f64, axis[1] as f64, axis[2] as f64]) < 1e-4 {
+            skipped += 1;
+            continue;
+        }
+        let as_before = [
+            row.analytic[0] - row.new_axis[0] + row.old_axis[0],
+            row.analytic[1] - row.new_axis[1] + row.old_axis[1],
+            row.analytic[2] - row.new_axis[2] + row.old_axis[2],
+        ];
+        fixed.push(distance(row.analytic, exact) / scale);
+        broken.push(distance(as_before, exact) / scale);
+    }
+
+    assert!(
+        fixed.len() > 20,
+        "覆盖度轴非零的可用点只有 {} 个（跳过 {skipped} 个），这个测试没在测东西",
+        fixed.len()
+    );
+    let fixed_median = median(&mut fixed);
+    let broken_median = median(&mut broken);
+    println!(
+        "变覆盖度：可用点 {} 个；探针读到的 baked.g 对烘焙值最大出入 {baked_worst:e}",
+        broken.len()
+    );
+    println!("  修复后的覆盖度项：中位相对偏差 {fixed_median:e}（最大 {:e}）", fixed.iter().fold(0.0_f64, |worst, value| worst.max(*value)));
+    println!("  修复前的覆盖度项：中位相对偏差 {broken_median:e}");
+
+    assert!(
+        baked_worst < 1e-6,
+        "探针读到的 baked.g 与烘焙值不符（{baked_worst:e}）⇒ 参考实现用的梯度分量不是 shader 用的那个"
+    );
+    assert!(
+        fixed_median < 1e-4,
+        "修复后的覆盖度项对精确梯度仍有 {fixed_median:e} 的偏差 ⇒ 覆盖度那条链还没对"
+    );
+    assert!(
+        broken_median > 1e-2,
+        "修复前的覆盖度项只偏了 {broken_median:e} ⇒ 这个 arbiter 分不出对错，正向对照失效"
+    );
+}
+
+#[test]
 fn the_shader_analytic_gradient_matches_the_exact_field_gradient() {
     let params = production_params();
     let field = reference(&params);
     let points = shell_points();
-    let rows = probe::run(&points, &params, SWEEP, MASK);
+    let rows = probe::run(&points, &params, SWEEP, Mask::Constant(MASK));
     if rows.is_empty() {
         eprintln!("跳过：没有可用的 wgpu 适配器");
         return;

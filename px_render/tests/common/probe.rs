@@ -3,7 +3,8 @@ use px_render::clouds::CloudParams;
 
 pub const POINTS: usize = 512;
 pub const STEPS: usize = 5;
-pub const BLOCK: usize = 12;
+pub const BLOCK: usize = 14;
+pub const MASK_GRADIENT: [f32; 3] = [0.108, 0.09, 0.1116];
 const CUBE_FACE: u32 = 64;
 const WORKGROUP: u32 = 64;
 
@@ -48,7 +49,7 @@ fn field_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let point = job.points[index].xyz;
     let medium = medium_of(point);
     let cover = coverage_of(medium.direction);
-    let row = index * 12u;
+    let row = index * 14u;
     let analytic = cloud_field_gradient_analytic(point);
     out[row] = vec4<f32>(analytic, length(analytic));
     out[row + 1u] = vec4<f32>(cloud_field(point), cover, medium.altitude, length(to_local(point)));
@@ -88,6 +89,21 @@ fn field_probe(@builtin(global_invocation_id) id: vec3<u32>) {
         0.0,
         0.0,
     );
+
+    let radius = max(length(to_local(point)), 1e-5);
+    let billow = billows_along(medium.direction, medium.altitude, true);
+    let partials = shape_of_partials(cover, medium.altitude, billow.x);
+    let baked = textureSampleLevel(coverage_map, coverage_sampler, medium.direction, 0.0);
+    let normalized = clamp((baked.r - params.coverage) / max(1.0 - params.coverage, 1e-4), 0.0, 1.0);
+    let slope = select(
+        0.0,
+        6.0 * normalized * (1.0 - normalized) / 0.45,
+        normalized > 0.0 && normalized < 1.0,
+    );
+    let chain = slope / max(1.0 - params.coverage, 1e-4);
+    let tangential = project_tangential(vec3<f32>(baked.g, baked.b, baked.a), medium.direction);
+    out[row + 12u] = vec4<f32>(to_world((partials.cover / radius) * chain * tangential), baked.g);
+    out[row + 13u] = vec4<f32>(to_world((partials.cover / radius) * chain * baked.g * tangential), chain);
 }
 "#;
 
@@ -97,6 +113,24 @@ struct Job {
     head: [u32; 4],
     steps: [[f32; 4]; STEPS],
     points: [[f32; 4]; POINTS],
+}
+
+#[derive(Clone, Copy)]
+pub enum Mask {
+    Constant(f32),
+    Varying,
+}
+
+pub fn level_of(value: f32) -> u8 {
+    (value * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+pub fn quantised(value: f32) -> f32 {
+    level_of(value) as f32 / 255.0
+}
+
+pub fn mask_of(direction: [f32; 3]) -> f32 {
+    0.62 + 0.18 * (direction[0] * 0.6 + direction[1] * 0.5 + direction[2] * 0.62)
 }
 
 pub struct Row {
@@ -121,6 +155,10 @@ pub struct Row {
     pub gradient_fixed: f32,
     pub tower_single: f32,
     pub skin_single: f32,
+    pub new_axis: [f32; 3],
+    pub old_axis: [f32; 3],
+    pub baked_g: f32,
+    pub chain: f32,
 }
 
 fn params_bytes(params: &CloudParams) -> Vec<u8> {
@@ -132,12 +170,41 @@ fn params_bytes(params: &CloudParams) -> Vec<u8> {
 fn coverage_cube(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    mask: f32,
+    mask: Mask,
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    let level = (mask * 255.0).round().clamp(0.0, 255.0) as u8;
     let mut pixels = Vec::with_capacity((CUBE_FACE * CUBE_FACE * 6) as usize * 4);
-    for _ in 0..CUBE_FACE * CUBE_FACE * 6 {
-        pixels.extend_from_slice(&[level, 0, 0, 255]);
+    for face in 0..6u32 {
+        for y in 0..CUBE_FACE {
+            for x in 0..CUBE_FACE {
+                let u = (x as f32 + 0.5) / CUBE_FACE as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / CUBE_FACE as f32 * 2.0 - 1.0;
+                let axis = match face {
+                    0 => [1.0, -v, -u],
+                    1 => [-1.0, -v, u],
+                    2 => [u, 1.0, v],
+                    3 => [u, -1.0, -v],
+                    4 => [u, -v, 1.0],
+                    _ => [-u, -v, -1.0],
+                };
+                let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+                let direction = [axis[0] / length, axis[1] / length, axis[2] / length];
+                let baked = match mask {
+                    Mask::Constant(value) => [value, 0.0, 0.0, 0.0],
+                    Mask::Varying => [
+                        mask_of(direction),
+                        MASK_GRADIENT[0],
+                        MASK_GRADIENT[1],
+                        MASK_GRADIENT[2],
+                    ],
+                };
+                pixels.extend_from_slice(&[
+                    level_of(baked[0]),
+                    level_of(baked[1]),
+                    level_of(baked[2]),
+                    level_of(baked[3]),
+                ]);
+            }
+        }
     }
     let size = wgpu::Extent3d {
         width: CUBE_FACE,
@@ -176,7 +243,7 @@ fn coverage_cube(
     (texture, view)
 }
 
-pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask: f32) -> Vec<Row> {
+pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask: Mask) -> Vec<Row> {
     let Some(gpu) = connect() else {
         return Vec::new();
     };
@@ -415,6 +482,10 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
             gradient_fixed: row[10][3],
             tower_single: row[11][0],
             skin_single: row[11][1],
+            new_axis: [row[12][0], row[12][1], row[12][2]],
+            baked_g: row[12][3],
+            old_axis: [row[13][0], row[13][1], row[13][2]],
+            chain: row[13][3],
         })
         .collect()
 }

@@ -166,10 +166,18 @@ impl CloudFieldParams {
     }
 
     pub fn density<S: Scalar>(&self, point: [S; 3], cover: S) -> S {
+        self.density_in_band(point, cover, [S::zero(); 3])
+    }
+
+    pub fn density_in_band<S: Scalar>(&self, point: [S; 3], base: S, slope: [S; 3]) -> S {
         let medium = self.medium_of(point);
         if medium.altitude.real() < 0.0 || medium.altitude.real() > 1.0 {
             return S::zero();
         }
+        let cover = base
+            + slope[0] * medium.direction[0]
+            + slope[1] * medium.direction[1]
+            + slope[2] * medium.direction[2];
         if cover.real() <= 0.0 {
             return S::zero();
         }
@@ -178,7 +186,16 @@ impl CloudFieldParams {
     }
 
     pub fn gradient(&self, point: [f64; 3], cover: f64) -> [f64; 3] {
-        let held = Dual::constant(cover);
+        self.band_gradient(point, cover, [0.0; 3])
+    }
+
+    pub fn band_gradient(&self, point: [f64; 3], base: f64, slope: [f64; 3]) -> [f64; 3] {
+        let held = [
+            Dual::constant(base),
+            Dual::constant(slope[0]),
+            Dual::constant(slope[1]),
+            Dual::constant(slope[2]),
+        ];
         let mut out = [0.0_f64; 3];
         for axis in 0..3 {
             let lifted = [
@@ -186,15 +203,16 @@ impl CloudFieldParams {
                 Dual::constant(point[1]),
                 Dual::constant(point[2]),
             ];
-            let (_, slope) = first_derivative(
+            let (_, derivative) = first_derivative(
                 |seed: Dual64| {
                     let mut seeded = lifted;
                     seeded[axis] = Dual(seed);
-                    self.density(seeded, held).0
+                    self.density_in_band(seeded, held[0], [held[1], held[2], held[3]])
+                        .0
                 },
                 point[axis],
             );
-            out[axis] = slope;
+            out[axis] = derivative;
         }
         out
     }
