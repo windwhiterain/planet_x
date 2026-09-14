@@ -1,4 +1,4 @@
-//! 产物级 / 派生级资源缓存（`.agents/notes/art-framework.md` §49.5 P1）。
+//! 产物级 / 派生级资源缓存（`.agents/notes/art/08-instruments.md` §50）。
 //!
 //! 服务端原来是「每请求从零造一遍」：读+解码场、建 46 万条边的 HashMap 审计、
 //! 逐 texel 上色 + 整条 mip 链、f16 立方图。这些活的输入只有两样 ——
