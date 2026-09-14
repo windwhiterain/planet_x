@@ -1,0 +1,6 @@
+# 不平滑：峡谷壁要利落
+in_min = 0.0
+in_max = 1.0
+out_min = 0.0
+out_max = 1.0
+smooth = false

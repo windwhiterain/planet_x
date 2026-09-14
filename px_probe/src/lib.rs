@@ -1,0 +1,27 @@
+//! 渲染 / PCG 的探针集合。
+//!
+//! 这些原来是 `px_render/tests/*.rs` 里的 `#[test]`，但它们是探针不是门：要 GPU、
+//! 要几分钟（§44.4 实测每次拿 adapter 4.24 s，而当时是 15 次）。挂在 `cargo test`
+//! 上的代价是「跑一次测试链 = 跑一次 probe」，而且 `connect()` 失败还会静默变绿。
+//!
+//! 现在它们是普通 bin，退出码才是判据：
+//!
+//! ```text
+//! cargo run -p px_probe --bin field_dual   # §46.3 说的那个 arbiter（唯一判据）
+//! cargo run -p px_probe --bin gradient     # 探针冒烟 + 门约定 + 逐通道归因
+//! cargo run -p px_probe --bin device       # 只要「无窗口设备能起来」
+//! ```
+//!
+//! 优化程度从命令行选（只提升本地 crate，不重编 bevy）：
+//!
+//! ```text
+//! cargo run -p px_probe --bin field_dual \
+//!   --config 'profile.dev.package.px_ops.opt-level=2' \
+//!   --config 'profile.dev.package.px_verify.opt-level=2' \
+//!   --config 'profile.dev.package.px_probe.opt-level=2'
+//! ```
+
+pub mod common;
+pub mod field_dual;
+pub mod gradient;
+pub mod probe;

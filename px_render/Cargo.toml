@@ -1,0 +1,15 @@
+[package]
+name = "px_render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+bevy = { version = "0.19", features = ["file_watcher"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in", "hlsl-out"] }
+
+

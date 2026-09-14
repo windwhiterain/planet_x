@@ -1,0 +1,154 @@
+{
+  "schema_version": 7,
+  "surfaces": {
+    "Handshake": {
+      "exe": "<exe>",
+      "id": {
+        "git_rev": "<rev>",
+        "protocol_hash": 0,
+        "schema_version": 7
+      },
+      "pid": 0
+    },
+    "ProtocolId": {
+      "git_rev": "<rev>",
+      "protocol_hash": 0,
+      "schema_version": 7
+    },
+    "art::ArtBundle": {
+      "assets": [
+        {
+          "blobs": [
+            {
+              "dtype": "F32",
+              "shape": [
+                2,
+                2
+              ]
+            }
+          ],
+          "cameras": [
+            {
+              "direction": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "distance": 3.1500000953674316,
+              "tag": "front"
+            }
+          ],
+          "fingerprint": 81985529216486895,
+          "id": "planet/terran",
+          "kind": "Field2D",
+          "params": {
+            "relief": 0.34
+          }
+        }
+      ]
+    },
+    "client::LEASE_PATH": "target/render-server.json",
+    "render::Lease": {
+      "exe": "<exe>",
+      "git_rev": "<rev>",
+      "pid": 0,
+      "port": 0,
+      "protocol_hash": 0
+    },
+    "render::Request": {
+      "height": 640,
+      "out": "target/shot.png",
+      "scene": {
+        "clouds": "target/pcg/ab/cc/clouds.pxart",
+        "displace": 0.05999999865889549,
+        "field": "target/pcg/ab/xx/yy.pxart",
+        "kind": "planet",
+        "mesh": "target/pcg/ab/zz/mesh.pxart",
+        "palette": "rocky",
+        "radius": 1.0,
+        "rings": 0.0,
+        "sea_level": 0.44999998807907104,
+        "slope": [
+          "target/pcg/ab/cc/slope_x.pxart",
+          "target/pcg/ab/cc/slope_y.pxart",
+          "target/pcg/ab/cc/slope_z.pxart"
+        ],
+        "spin": 0.0
+      },
+      "view": {
+        "ambient": null,
+        "atmo": null,
+        "cam": null,
+        "cloud": null,
+        "columns": 0,
+        "scatter": null,
+        "sheet": false
+      },
+      "width": 960
+    },
+    "render::Response": {
+      "bytes": 326452,
+      "height": 640,
+      "millis": 812,
+      "out": "target/shot.png",
+      "scene": "planet",
+      "warm": true,
+      "width": 960
+    },
+    "render::Scene.world": {
+      "kind": "world",
+      "round": 200,
+      "stream": "target/world.pxstream"
+    },
+    "sim::WorldView": {
+      "departments": [
+        {
+          "execution": 0.0,
+          "holdings": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "name": "甲(农业)",
+          "payment": 0.0,
+          "revenue": 0.0
+        }
+      ],
+      "goods": [
+        {
+          "name": "粮食",
+          "price": 1.0
+        }
+      ],
+      "round": 0,
+      "schema_version": 7,
+      "totals": {
+        "consumption": 0.0,
+        "cpi": 100.0,
+        "granted": 0.0,
+        "output": 0.0,
+        "treasury": 0.0,
+        "turnover": 0.0
+      }
+    },
+    "stream::Frame.kinds": [
+      "protocol",
+      "world",
+      "art",
+      "blob",
+      "request",
+      "response",
+      "refused"
+    ],
+    "stream::MAGIC": "PXST",
+    "stream::STREAM_VERSION": 1,
+    "wire::Blob.payload_bytes": 16,
+    "wire::BlobHeader": {
+      "dtype": "F32",
+      "shape": [
+        2,
+        2
+      ]
+    }
+  }
+}

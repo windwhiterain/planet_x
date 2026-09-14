@@ -1,0 +1,8 @@
+[package]
+name = "px_verify"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_ops = { path = "../px_ops" }
+num-dual = { version = "0.15", default-features = false }

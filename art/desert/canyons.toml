@@ -1,0 +1,8 @@
+# 峡谷：高频 ridged，脊线被扭曲后就是峡谷网络
+frequency = 3.20
+octaves = 6
+lacunarity = 2.1
+gain = 0.50
+seed = 12
+aspect = 2.0
+sharpness = 3.0

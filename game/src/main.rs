@@ -1,9 +1,13 @@
+use std::path::PathBuf;
+
 use game::{DEPARTMENT_NAMES, DomesticEconomy, GOOD_NAMES, GOODS};
 
 fn main() {
     let mut rounds = 40usize;
     let mut seed = 11u64;
     let mut trace = false;
+    let mut fluctuation = 0.0f32;
+    let mut record: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -15,6 +19,15 @@ fn main() {
                 seed = args.next().and_then(|value| value.parse().ok()).unwrap_or(seed);
             }
             "--trace" => trace = true,
+            "--fluctuation" | "-f" => {
+                fluctuation = args
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(fluctuation);
+            }
+            "--record" => {
+                record = args.next().map(PathBuf::from);
+            }
             "--help" | "-h" => {
                 usage();
                 return;
@@ -27,7 +40,12 @@ fn main() {
         }
     }
 
-    let mut economy = DomesticEconomy::new(seed);
+    if let Some(path) = record {
+        write_stream(&path, rounds, seed, fluctuation);
+        return;
+    }
+
+    let mut economy = DomesticEconomy::new(seed).with_fluctuation(fluctuation);
     println!("国内经济循环：{} 个部门、{} 种商品、{rounds} 轮、种子 {seed}", DEPARTMENT_NAMES.len(), GOODS);
     println!(
         "中央每轮拨款 {}，花不完的收回国库；部门生产自己的商品，政策只消耗资源",
@@ -108,9 +126,43 @@ fn main() {
     );
 }
 
+fn write_stream(path: &std::path::Path, rounds: usize, seed: u64, fluctuation: f32) {
+    let mut economy = DomesticEconomy::new(seed).with_fluctuation(fluctuation);
+    economy.run(rounds);
+
+    let mut frames = vec![px_protocol::Frame::Protocol(px_protocol::ProtocolId::local())];
+    frames.extend(
+        economy
+            .history
+            .iter()
+            .map(|snapshot| px_protocol::Frame::World(game::project::world_view(snapshot))),
+    );
+
+    let mut bytes = Vec::new();
+    px_protocol::stream::write_stream(&mut bytes, &frames).expect("写流失败");
+    std::fs::write(path, &bytes).expect("落盘失败");
+
+    let id = px_protocol::ProtocolId::local();
+    println!(
+        "录制 {} 帧（{} 轮、种子 {seed}）→ {}（{} 字节）",
+        frames.len(),
+        rounds,
+        path.display(),
+        bytes.len(),
+    );
+    println!(
+        "协议版本 {}、指纹 {}、git {}",
+        id.schema_version,
+        px_protocol::protocol_hash_hex(),
+        id.git_rev,
+    );
+}
+
 fn usage() {
-    println!("用法：game [--rounds N] [--seed S] [--trace]");
-    println!("  --rounds, -n  模拟轮数（默认 40）");
-    println!("  --seed,   -s  随机种子（默认 11）");
-    println!("  --trace       每轮打印各部门的收付与库存");
+    println!("用法：game [--rounds N] [--seed S] [--trace] [--fluctuation F] [--record PATH]");
+    println!("  --rounds, -n       模拟轮数（默认 40）");
+    println!("  --seed,   -s       随机种子（默认 11）");
+    println!("  --trace            每轮打印各部门的收付与库存");
+    println!("  --fluctuation, -f  仓库波动（默认 0；为 0 时世界与 seed 无关）");
+    println!("  --record           把每轮的 WorldView 录成 .pxstream（供渲染器离线消费）");
 }

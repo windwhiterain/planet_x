@@ -1,0 +1,7 @@
+[package]
+name = "px_graphs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_ops = { path = "../px_ops" }
