@@ -122,3 +122,28 @@ fn power_law_follows_a_regime_change() {
         estimator.slope(),
     );
 }
+
+#[test]
+fn a_forgotten_least_squares_does_not_wind_up() {
+    // 常数特征 = 没有激励方向。旧实现按 `P ← P/λ` 每轮涨 1/λ：λ=0.95 时 1000 轮约 1.9e22，
+    // 之后任何一次真实输入变化都会让 gain≈1、把斜率打飞几十个数量级。
+    // 夹住 P 之后协方差必须停在 COVARIANCE_LIMIT，参数与预测保持有限。
+    for forgetting in [0.8f32, 0.95, 0.99] {
+        let mut estimator = PowerLaw::new(0.5, 0.0, forgetting);
+        for _ in 0..5_000 {
+            estimator.update(1.0, 0.5);
+        }
+        for row in estimator.covariance() {
+            for value in row {
+                assert!(value.is_finite(), "λ={forgetting} 协方差非有限：{value}");
+                assert!(
+                    value.abs() <= PowerLaw::COVARIANCE_LIMIT * 1.001,
+                    "λ={forgetting} 协方差没被夹住：{value}",
+                );
+            }
+        }
+        assert!(estimator.slope().is_finite(), "λ={forgetting} 斜率非有限");
+        assert!(estimator.intercept().is_finite(), "λ={forgetting} 截距非有限");
+        assert!(estimator.get(2.0).is_finite());
+    }
+}

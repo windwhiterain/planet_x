@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use super::{Stock, Warehouse, Warehouses};
+use super::{Book, Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
 use crate::market::{
@@ -743,5 +743,37 @@ fn a_failed_quote_still_teaches_the_response() {
     assert!(
         after < before,
         "零成交应当压低响应曲线：{before} -> {after}",
+    );
+}
+
+#[test]
+fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
+    // 两个地方、同样成交量，账本中间价 1 和 4。算术平均给 2.5，几何平均给 2。
+    // 指数会被 `apply_levels` 乘回每一份报价，所以这条回路是乘法的：只有
+    // 几何平均（对数尺度上的中心）才不给它一个恒正的增益。用算术平均时
+    // Jensen 不等式让指数每轮乘 `e^{σ²/2} ≥ 1`，一路漂到 f32 边界（§19.2）。
+    let mut warehouses = warehouse(&[&[(1.0, 1.0)], &[(1.0, 1.0)]]);
+    warehouses.warehouses[0].stocks[0].marketing_volume = 1.0;
+    warehouses.warehouses[1].stocks[0].marketing_volume = 1.0;
+    // 两个地方必须不同，否则两本书都算进同一个地方的成交量
+    warehouses.warehouses[0].locality = 0;
+    warehouses.warehouses[1].locality = 1;
+    warehouses.books = vec![
+        vec![Book {
+            bid: 1.0,
+            ask: 1.0,
+            observed: true,
+        }],
+        vec![Book {
+            bid: 4.0,
+            ask: 4.0,
+            observed: true,
+        }],
+    ];
+    let index = warehouses.aggregate_index(1);
+    assert!(
+        (index[0] - 2.0).abs() < 1e-5,
+        "指数应当取对数尺度的中心 2.0，实际 {}",
+        index[0],
     );
 }

@@ -13,6 +13,12 @@ use fastrand::Rng;
 pub struct Warehouses {
     pub warehouses: Vec<Warehouse>,
     pub fluctuation: f32,
+    /// 响应曲面（[`Response`]）的学习率（forgetting）。越小追得越快。
+    pub response_forgetting: f32,
+    /// 价格曲线（[`PowerLaw`]）的学习率（forgetting）。§19.5 扫出来的承重旋钮。
+    pub price_forgetting: f32,
+    /// 账本与本地比值的记忆。旧实现里是常量 `LOCAL_PRICE_FORGETTING`。
+    pub book_forgetting: f32,
     /// index with 地方：同一地方共享一套「本地成交价 ÷ 指数」的比值（**已实现**的价）
     pub local_ratios: Vec<Vec<f32>>,
     /// index with 地方：同一地方共享一套账本（**挂出来**的价）
@@ -115,11 +121,16 @@ pub struct Stock {
 
 impl Warehouses {
     pub const DEFAULT_FLUCTUATION: f32 = 0.2;
+    /// 账本/本地比值混合的默认记忆（旧 `warehouse::step::LOCAL_PRICE_FORGETTING`）
+    pub const DEFAULT_BOOK_FORGETTING: f32 = 0.8;
 
     pub fn new(warehouses: Vec<Warehouse>) -> Self {
         Self {
             warehouses,
             fluctuation: Self::DEFAULT_FLUCTUATION,
+            response_forgetting: Response::DEFAULT_FORGETTING,
+            price_forgetting: PowerLaw::DEFAULT_FORGETTING,
+            book_forgetting: Self::DEFAULT_BOOK_FORGETTING,
             local_ratios: Vec::new(),
             books: Vec::new(),
         }
@@ -135,22 +146,29 @@ impl Warehouses {
         }
     }
 
-    /// 银河指数 = **各地方账本中间价的申报量加权聚合**。
+    /// 银河指数 = **各地方账本中间价的申报量加权几何平均**（对数尺度上的中心）。
     ///
     /// 这是依赖倒置的另一半：账本先验、指数导出。旧口径的指数是"成交的加权平均"，
     /// 没有成交就一个字都不动——三产的价格因此冻成第 1 轮的化石。
     ///
-    /// 代价要说清：指数一旦由账本导出，"指数 → 参照价 → 挂价 → 账本 → 指数"就是一个
-    /// 没有回复力的乘法环（实测把挂价推到过 f32 边界）。把它钉住的是**水平锚**——
-    /// 所以这套东西在 `--no-anchor` 下是不安全的，锚从"规范选择"变成了承重件。
+    /// ⚠️ **必须用几何平均，不能用算术平均**（这正是 [`Book::mid`] 当初踩过、并在这里
+    /// 又踩了一次的同一个坑）。指数会被 `apply_levels` 乘回每一份报价，
+    /// 所以这条回路是**乘法**的：`index_{t+1} = index_t × F`，`F` 是各地方
+    /// `mid/参照价` 的加权平均。只要把 `F` 取成**算术**平均，Jensen 不等式就给出
+    /// `F ≥ exp(Σω ln(mid/参照价))`，只要各地方有**任何离散度**，`F` 就恒 > 1：
+    /// 指数每轮乘 `e^{σ²/2}`，一路漂到 f32 边界（实测 gauge 稳定在 +0.05…+0.11/轮，
+    /// 就是 `σ²/2`）。离散度是学习器制造出来的，所以"冻结价格曲线就稳"。
+    ///
+    /// 取几何平均之后，离散度只影响**相对**信息，不再给水平一个恒正增益；水平交给
+    /// 水平锚。代价照旧：`--no-anchor` 下不安全。
     ///
     /// 某一轮一本账都没成形时返回 0，调用方应当保留旧指数。
     pub fn aggregate_index(&self, goods: usize) -> Vec<f32> {
         let mut index = vec![0.0f32; goods];
         for (k, slot) in index.iter_mut().enumerate() {
             let mut weight = 0.0f32;
-            let mut weighted = 0.0f32;
-            let mut flat = 0.0f32;
+            let mut weighted_log = 0.0f32;
+            let mut flat_log = 0.0f32;
             let mut formed = 0.0f32;
             for (locality, row) in self.books.iter().enumerate() {
                 let Some(book) = row.get(k) else {
@@ -163,7 +181,10 @@ impl Warehouses {
                     continue;
                 }
                 let mid = book.mid();
-                flat += mid;
+                let Some(log_mid) = (mid > 0.0 && mid.is_finite()).then(|| mid.ln()) else {
+                    continue;
+                };
+                flat_log += log_mid;
                 formed += 1.0;
                 let volume: f32 = self
                     .warehouses
@@ -178,17 +199,20 @@ impl Warehouses {
                     })
                     .sum();
                 if volume > 0.0 && volume.is_finite() {
-                    weighted += volume * mid;
+                    weighted_log += volume * log_mid;
                     weight += volume;
                 }
             }
             *slot = if weight > 0.0 {
-                weighted / weight
+                (weighted_log / weight).exp()
             } else if formed > 0.0 {
-                flat / formed
+                (flat_log / formed).exp()
             } else {
                 0.0
             };
+            if !slot.is_finite() {
+                *slot = 0.0;
+            }
         }
         index
     }
@@ -213,12 +237,28 @@ impl Warehouses {
     }
 
     /// 学习率与阶数：forgetting 越小追得越快，fixed_slope 为真则只学水平
-    pub fn with_learning(mut self, forgetting: f32, fixed_slope: bool) -> Self {
+    pub fn with_learning(self, forgetting: f32, fixed_slope: bool) -> Self {
+        self.with_learning_rates(forgetting, forgetting, fixed_slope)
+    }
+
+    /// 响应曲面与价格曲线**分开**设。
+    ///
+    /// §19.5 把"仓库内部那三个写死的学习率"列为唯一没扫过的旋钮。实测（多种子、
+    /// 5000 轮）扫出来的是**价格曲线**：冻结它整场就稳，只冻结 `Response` 照样炸。
+    pub fn with_learning_rates(mut self, response: f32, price: f32, fixed_slope: bool) -> Self {
+        self.response_forgetting = response.clamp(f32::MIN_POSITIVE, 1.0);
+        self.price_forgetting = price.clamp(f32::MIN_POSITIVE, 1.0);
         for warehouse in self.warehouses.iter_mut() {
             for stock in warehouse.stocks.iter_mut() {
-                stock.reset_estimators(forgetting, fixed_slope);
+                stock.reset_estimators(self.response_forgetting, self.price_forgetting, fixed_slope);
             }
         }
+        self
+    }
+
+    /// 账本与本地比值的混合记忆：`0.8` = 旧默认，`1.0` = 只认本轮真实报价（不混）
+    pub fn with_book_forgetting(mut self, forgetting: f32) -> Self {
+        self.book_forgetting = forgetting.clamp(0.0, 1.0);
         self
     }
 
@@ -294,12 +334,20 @@ impl Stock {
         }
     }
 
-    /// 重设两侧估计器：阶数可学或钉死，遗忘因子即学习率
-    pub fn reset_estimators(&mut self, forgetting: f32, fixed_slope: bool) {
-        self.buy_response = Response::new(forgetting);
-        self.sell_response = Response::new(forgetting);
-        let buy = PowerLaw::new(0.5, 0.0, forgetting);
-        let sell = PowerLaw::new(0.5, 0.0, forgetting);
+    /// 重设两侧估计器：阶数可学或钉死，遗忘因子即学习率。
+    ///
+    /// 响应曲面与价格曲线分开传：扫出来只有价格曲线是承重的（见
+    /// [`Warehouses::with_learning_rates`]）。
+    pub fn reset_estimators(
+        &mut self,
+        response_forgetting: f32,
+        price_forgetting: f32,
+        fixed_slope: bool,
+    ) {
+        self.buy_response = Response::new(response_forgetting);
+        self.sell_response = Response::new(response_forgetting);
+        let buy = PowerLaw::new(0.5, 0.0, price_forgetting);
+        let sell = PowerLaw::new(0.5, 0.0, price_forgetting);
         self.buy_price_curve = if fixed_slope {
             buy.with_fixed_slope()
         } else {

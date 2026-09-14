@@ -1700,3 +1700,115 @@ ladder amp:  89.7   89.5  106.0   47.9   45.1   23.5
 写死的学习率：`Response::DEFAULT_FORGETTING = 0.95`、两条 `PowerLaw` 的学习率、
 以及账本的 `LOCAL_PRICE_FORGETTING`——而价格曲线学的正是相对价格
 （`realized = deal_price/reference`），所以它们才是最该扫的。
+
+## 20. 动力学不稳定的根因：指数是**报价的加权平均**，而回路是**乘法**的
+
+§19.5 把"仓库内部那三个写死的学习率"列为唯一没扫过的旋钮。本轮把它们全部接出来扫了。
+结论：**旋钮扫不出稳定区，根因在指数口径。**
+
+### 20.1 扫学习率
+
+`--scenario modern --capacity 12 --specialty 2 --fluctuation 0.05`，采样 25 轮，
+记 `log10(三商品 index 的最大值)`：
+
+| 配置（1200 轮） | seed 3 | 5 | 8 | 11 | |
+|---|---|---|---|---|---|
+| 默认（`PowerLaw`=0.95，`Response`=0.95） | 15.0 | 18.1 | 14.1 | 16.7 | 炸 |
+| **冻结 `PowerLaw`（λ=1）** | 0.6 | 0.7 | 0.6 | 0.7 | **稳** |
+| 只冻结 `Response` | 18.6 | 13.6 | 17.3 | — | **仍炸**（另有 33–80 个采样轮 index 下溢到 0） |
+| 账本记忆 0.0 / 0.5 / 0.8 | 全炸 | | | | 无关 |
+| 五种 `LevelRule` | 全炸（10^11–10^18） | | | | 无关 |
+| 买+卖报价尺度夹到 `e^{±0.7}` | 14.2 | 14.5 | 15.8 | 16.6 | **仍炸** |
+
+**冻结价格曲线就稳、冻 `Response` 没用**——承重的是 `PowerLaw`（不是 `Response`，
+也不是账本记忆）。长时程把"慢学习率是稳定区"的假象也打碎了：
+
+| `--price-learning` | 5000 轮 | 20000 轮 |
+|---|---|---|
+| 0.99 | 10^17–18（炸） | 炸 |
+| 0.999 | 0.6–0.7（"稳"） | **10^15–18（炸）** |
+| 1.0（冻结） | 稳 | 稳 |
+
+**没有 λ<1 的稳定区。** 这是 §19.5 那条"窗口内的振幅不是平稳统计量"的再一次应验。
+
+### 20.2 机制：`aggregate_index` 用算术平均聚合了乘法回路
+
+```
+index → reference = index·e^wedge → quote = reference·scale → book → index
+```
+
+是一圈**乘法**。写成单轮增益：
+
+```
+index' = index · F,   F = Σ_l ω_l · e^{w_l} · sqrt(bid_scale_l · ask_scale_l)
+```
+
+稳态要求 `F = 1`；`F` 只要恒正一点点，相对价就每轮乘一次。而旧实现把地方间的聚合写成了
+**算术**平均（`weighted += volume * mid; weighted / weight`）。由 Jensen 不等式，
+
+```
+算术平均 ≥ 几何平均 = exp(Σω·ln mid)  ⇒  index 每轮至少乘 e^{σ²/2} ≥ 1
+```
+
+只要各地方挂价有**任何离散度**，`F` 就恒 > 1。实测 `gauge = ln(index'/index)` 稳定在
+**+0.05…+0.11/轮**（把 `σ²/2` 直接读了出来），并偶发冲到 **+19.5/轮**（seed 3 第 90 轮，
+那一轮买方尺度被 `PowerLaw` 推到 2.6e18）。离散度是学习器（`PowerLaw` 拟合
+`realized = deal_price/reference`）制造出来的——所以**冻结价格曲线就稳**。
+这也解释了为什么**夹住报价尺度没救**：偏置来自**离散度**，不是尺度大小。
+
+### 20.3 剩下的一半：`update_books` 的 max/min
+
+把 `aggregate_index` 改成几何平均之后，`scale_logmean` 已经逐位为 0，但 `gauge` 仍是
++0.05…+0.11/轮。残差来自 `update_books`：一个地方的边际价是 `bid = max(买价)`、
+`ask = min(卖价)`。`max`/`min` 是有偏的次序统计量（买方尺度分布比卖方宽得多，`max` 的
+向上偏置压过 `min` 的向下偏置），`mid = sqrt(bid·ask)` 因此系统性高于 `reference`。
+
+### 20.4 本轮落地了什么
+
+- **学习率接出来**：`--learning / --response-learning / --price-learning / --book-forgetting /
+  --fixed-price-slope`（`src/bin/local_price.rs`、`Lab::with_learning_rates`、
+  `Warehouses::with_learning_rates`）。§19.5 点名的三个旋钮从此可扫、可复现。
+- **`PowerLaw::COVARIANCE_LIMIT`**（`src/estimator.rs`）：遗忘最小二乘在无激励方向上
+  `P ← P/λ` 涨 `1/λ`，实测 λ=0.95 在 1000 轮涨到 **1.9e22**（λ=0.99 只有 2.3e4），
+  之后任何一次真实输入变化都会让 `gain≈1`、把斜率打飞几十个数量级。改成整体缩放回上界，
+  等价于有界的归一化梯度。回归测试 `a_forgotten_least_squares_does_not_wind_up`。
+- **`aggregate_index` 改成申报量加权几何平均**（`src/warehouse.rs`）。回归测试
+  `the_index_is_a_geometric_center_not_an_arithmetic_one`。
+- **逐商品 log 尺度去均值**（`scale_normalization`，`src/warehouse/step.rs`）：钉住
+  "所有尺度 ×c、指数 ÷c"这个纯规范方向。
+- **`purchase_scale` 兜底按 `REALIZED_FLOOR` 计价**（`src/warehouse/step.rs`）：
+  `realized` 塌到 0 时 `affordable = cash/(price·realized)` 会算出 1e26 的申报量
+  （旧注释自己记了这条"遗留"）。
+- **仪表**：`--json` 多出 `gauge` 与 `scale_logmean` 两列，用来量这一圈的单轮增益。
+
+测试：基线 **118 过 / 12 失败 / 1 ignore** → 本轮 **122 过 / 10 失败 / 1 ignore**
+（新增 2 条全绿，另 2 条先前失败的价格测试转绿，没有把任何先前通过的测试弄红）。
+
+### 20.5 还没解决：`update_books` 的次序统计量偏置
+
+几何聚合 + 尺度去均值**降低**了偏置，但没有消掉 `max/min` 那一半。在这一半修掉之前，
+`--learning` 怎么调都只是把爆炸往后推（§20.1）。
+
+要结案，得从下面两条里选一条（都要拍板）：
+
+1. **指数不要取 `max/min` 的中间价**：改用申报量加权、对数尺度上的**中心**（加权分位数或
+   加权几何平均），`max/min` 只留给部门决策价。这条只动指数口径，不动决策。
+2. **给价格水平一个回复力**：让指数由**清空状态**推动（未成交量/库存偏离），而不是纯由
+   挂单导出。现在"报价 → 指数"是开环的、"指数 → 报价"是乘法的，中间没有任何一项在说
+   "这个价卖不动"。
+
+在 (1) 或 (2) 落地之前，`--no-anchor` 仍不安全，而"稳定区"这个词不许再用。
+
+### 20.6 复现
+
+```bash
+# 扫学习率（必须多种子 + 长时程；单种子/短窗口会骗人）
+cargo run --release -p planet_x --bin local_price -- \
+  --scenario modern --capacity 12 --specialty 2 --fluctuation 0.05 \
+  --seed 3 -n 20000 --every 200 --json --price-learning 0.999
+
+# 只看单轮回路增益
+cargo run --release -p planet_x --bin local_price -- \
+  --scenario modern --capacity 12 --specialty 2 --fluctuation 0.05 \
+  --seed 3 -n 400 --every 20 --json | grep -o '"gauge":\[[^]]*\]'
+```

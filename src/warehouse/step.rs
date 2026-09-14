@@ -24,9 +24,13 @@ const SCALE_REFINE_STEPS: usize = 200;
 /// 二分的步数（区间缩到 2^-40）
 /// 黄金分割比
 const SCALE_GOLDEN: f32 = 0.618_034;
-/// 超买目标：缺口 × e^(2σ)
-/// 「同样的达标概率下不肯多花钱」的容差
-const LOCAL_PRICE_FORGETTING: f32 = 0.8;
+/// 学到的"局部价 ÷ 参考价"预测的下限。
+///
+/// `realized` 是拟合量，实测会塌到 1e-27；而 `purchase_scale` 里
+/// `affordable = cash / (price × realized)` 于是无界，申报量能算出 1e26
+/// （旧代码的注释自己记了这条"遗留"）。这是**数值护栏**，不是"本地价不该低于
+/// 参考价的 x%"那种策略边界：只挡住学习器塌陷那一段。
+const REALIZED_FLOOR: f32 = 1e-3;
 
 /// 粗扫的第 `index` 个 log 尺度
 fn coarse_log_scale(index: usize) -> f32 {
@@ -211,7 +215,9 @@ fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f3
             continue;
         }
         let aggressiveness = Stock::buy_aggressiveness(scale);
-        let unit = price * realized;
+        // 学习器把 realized 预测到 0 附近时，按 0 计价会让 `cheapest` 与
+        // `affordable` 两条路一起跑飞；这里按数值下限计价（见 [`REALIZED_FLOOR`]）。
+        let unit = price * realized.max(REALIZED_FLOOR);
         let volume = volume_for_dealt(
             response.share(aggressiveness),
             response.depth(aggressiveness),
@@ -236,8 +242,8 @@ fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f3
         // 也就是说这个分支实际承担的是"把现金按局部价换成货"的职能，
         // 而约束（期望达标）在学到的天花板偏小时本来就常常不可行。
         // 遗留：`dir` 那档的学到的局部价会塌到 1e-27，于是 `affordable = cash/unit`
-        // 算出 3.9e26 的申报量——那要治的是 `buy_price_curve` 的塌陷，不是在这里夹。
-        let affordable = affordable_volume(price, realized, cash);
+        // 算出 3.9e26 的申报量——本轮给 unit 兜了个数值底（见 [`REALIZED_FLOOR`]），但根治仍是 `buy_price_curve` 的塌陷（见 §20）。
+        let affordable = affordable_volume(price, realized.max(REALIZED_FLOOR), cash);
         if !(affordable > 0.0) {
             continue;
         }
@@ -255,6 +261,39 @@ fn purchase_scale(stock: &Stock, need: f32, price: f32, cash: f32) -> Option<(f3
     cheapest
         .map(|(_, volume, scale)| (volume, scale))
         .or_else(|| most.map(|(_, volume, scale)| (volume, scale)))
+}
+
+/// 逐商品把 log 报价尺度按申报量加权去均值，返回归一因子（几何平均尺度）。
+///
+/// 报价 = `参照价 × 尺度`，参照价 = `指数 × e^楔子`，而指数又由账本反推。于是
+/// "所有尺度 ×c、指数 ÷c"不改变任何一笔真实成交——这是个纯规范方向，学习器的目标
+/// 对它简并，没有任何东西把它拉回 1。回路增益因此就是"平均 log 尺度"：它每轮只要
+/// 不是 1，相对价就乘一次，一路漂到 f32 边界（§19.2）。
+///
+/// 把每个商品的这个自由度每轮钉到 0，尺度只留相对信息；水平交给 `anchor_prices`。
+/// 没有申报量的商品返回 1（不动）。
+fn scale_normalization(warehouses: &[Warehouse], goods: usize) -> Vec<f32> {
+    let mut log_sum = vec![0.0f32; goods];
+    let mut weight = vec![0.0f32; goods];
+    for warehouse in warehouses {
+        for (k, stock) in warehouse.stocks.iter().enumerate() {
+            let declared = stock.marketing_volume.abs();
+            let scale = stock.marketing_price_scale;
+            if k < goods && declared > 0.0 && scale.is_finite() && scale > 0.0 {
+                log_sum[k] += declared * scale.ln();
+                weight[k] += declared;
+            }
+        }
+    }
+    (0..goods)
+        .map(|k| {
+            if weight[k] > 0.0 && log_sum[k].is_finite() {
+                (log_sum[k] / weight[k]).exp()
+            } else {
+                1.0
+            }
+        })
+        .collect()
 }
 
 fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise, reference: f32) {
@@ -293,6 +332,7 @@ fn update_books(
     market: &Market,
     local_ratios: &[Vec<f32>],
     books: &mut Vec<Vec<Book>>,
+    book_forgetting: f32,
 ) {
     let goods = market.merchandises.len();
     let mut observed: Vec<Vec<Book>> = Vec::new();
@@ -350,7 +390,7 @@ fn update_books(
             let observed_ask = if seen.ask > 0.0 { seen.ask } else { carried };
             let blend = |old: f32, new: f32| {
                 if old.is_finite() && old > 0.0 {
-                    LOCAL_PRICE_FORGETTING * old + (1.0 - LOCAL_PRICE_FORGETTING) * new
+                    book_forgetting * old + (1.0 - book_forgetting) * new
                 } else {
                     new
                 }
@@ -370,8 +410,10 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
     let Warehouses {
         warehouses,
         fluctuation,
+        book_forgetting,
         local_ratios,
         books,
+        ..
     } = warehouses;
     let fluctuation = *fluctuation;
     let reference_prices: Vec<f32> = market
@@ -424,7 +466,16 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
             };
             stock.marketing_price_scale = scale;
         }
-        for (k, stock) in stocks.iter_mut().enumerate() {
+    }
+    // 规范自由度：把每个商品的 log 尺度去均值（见 [`scale_normalization`]）。
+    // 必须在**全部**仓库的尺度都定下来之后、写报价之前做，而且是全局的一趟。
+    let normalization = scale_normalization(warehouses, market.merchandises.len());
+    for (i, warehouse) in warehouses.iter_mut().enumerate() {
+        for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
+            let factor = normalization[k];
+            if factor.is_finite() && factor > 0.0 {
+                stock.marketing_price_scale /= factor;
+            }
             let merchandise = &mut market.traders[i].merchandises[k];
             merchandise.price = price_of(references[i][k], stock.marketing_price_scale);
             merchandise.volume = stock.marketing_volume;
@@ -448,13 +499,23 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         if local_ratios.len() <= locality {
             local_ratios.resize(locality + 1, Vec::new());
         }
-        observe_local_ratio(&market.traders[i], market, &mut local_ratios[locality]);
+        observe_local_ratio(
+            &market.traders[i],
+            market,
+            &mut local_ratios[locality],
+            *book_forgetting,
+        );
     }
     // 账本最后更新：这一轮的挂单已经定稿，成交与否都看得见
-    update_books(warehouses, market, local_ratios, books);
+    update_books(warehouses, market, local_ratios, books, *book_forgetting);
 }
 
-fn observe_local_ratio(trader: &Trader, market: &Market, local: &mut Vec<f32>) {
+fn observe_local_ratio(
+    trader: &Trader,
+    market: &Market,
+    local: &mut Vec<f32>,
+    book_forgetting: f32,
+) {
     let goods = market.merchandises.len();
     if local.len() != goods {
         *local = vec![1.0; goods];
@@ -477,7 +538,7 @@ fn observe_local_ratio(trader: &Trader, market: &Market, local: &mut Vec<f32>) {
         }
         let slot = &mut local[k];
         *slot = if slot.is_finite() {
-            LOCAL_PRICE_FORGETTING * *slot + (1.0 - LOCAL_PRICE_FORGETTING) * ratio
+            book_forgetting * *slot + (1.0 - book_forgetting) * ratio
         } else {
             ratio
         };

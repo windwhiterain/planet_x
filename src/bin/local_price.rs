@@ -1,4 +1,6 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
+use planet_x::estimator::PowerLaw;
+use planet_x::estimator2d::Response;
 use planet_x::local_price::{
     bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
     LADDER_THRIFTY, NAMES, SECTOR_MOTIVE,
@@ -41,6 +43,12 @@ struct Args {
     barrier: f32,
     curvature: f32,
     fluctuation: f32,
+    /// 仓库内部学习率（None = 各自默认）。见 `Lab::with_learning_rates`
+    learning: Option<f32>,
+    response_learning: Option<f32>,
+    price_learning: Option<f32>,
+    book_forgetting: Option<f32>,
+    fixed_price_slope: bool,
     goods_trace: bool,
     relations: f32,
     block_from: usize,
@@ -87,6 +95,11 @@ impl Default for Args {
             barrier: DEFAULT_BARRIER,
             curvature: DEFAULT_CURVATURE,
             fluctuation: DEFAULT_FLUCTUATION,
+            learning: None,
+            response_learning: None,
+            price_learning: None,
+            book_forgetting: None,
+            fixed_price_slope: false,
             goods_trace: false,
             relations: 1.0,
             block_from: usize::MAX,
@@ -154,6 +167,11 @@ fn parse() -> Option<Args> {
             "--barrier" => args.barrier = value()?.parse().ok()?,
             "--curvature" => args.curvature = value()?.parse().ok()?,
             "--fluctuation" => args.fluctuation = value()?.parse().ok()?,
+            "--learning" => args.learning = Some(value()?.parse().ok()?),
+            "--response-learning" => args.response_learning = Some(value()?.parse().ok()?),
+            "--price-learning" => args.price_learning = Some(value()?.parse().ok()?),
+            "--book-forgetting" => args.book_forgetting = Some(value()?.parse().ok()?),
+            "--fixed-price-slope" => args.fixed_price_slope = true,
             "--trace" => args.goods_trace = true,
             "--w" => args.relations = value()?.parse().ok()?,
             "--block-from" => args.block_from = value()?.parse().ok()?,
@@ -182,6 +200,11 @@ fn usage() {
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
     println!("  --seed, -s S     随机种子（默认 11）");
     println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
+    println!("  --learning F     仓库两个学习器的 forgetting（默认 Response {} / PowerLaw {}，越小追得越快）", Response::DEFAULT_FORGETTING, PowerLaw::DEFAULT_FORGETTING);
+    println!("  --response-learning F  只改响应曲面（Response）的学习率");
+    println!("  --price-learning F     只改价格曲线（PowerLaw）的学习率——§19.5/§20 的承重旋钮");
+    println!("  --book-forgetting F    账本/本地比值的记忆（默认 0.8，1.0 = 不混）");
+    println!("  --fixed-price-slope    价格曲线只学水平、钉死阶数");
 }
 
 fn spec(args: &Args) -> Spec {
@@ -234,7 +257,15 @@ fn raw_spec(args: &Args) -> Spec {
 }
 
 fn build_with(args: &Args, spec: Spec) -> Lab {
-    Lab::new(&spec, args.seed)
+    let response_learning = args
+        .response_learning
+        .or(args.learning)
+        .unwrap_or(Response::DEFAULT_FORGETTING);
+    let price_learning = args
+        .price_learning
+        .or(args.learning)
+        .unwrap_or(PowerLaw::DEFAULT_FORGETTING);
+    let mut lab = Lab::new(&spec, args.seed)
         .with_rule(args.rule)
         .with_forgetting(args.forgetting)
         .with_gain(args.gain)
@@ -250,7 +281,12 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
             },
         })
         .with_grant(args.grant)
-        .with_relations(&bloc_relations(args.polities, args.relations))
+        .with_learning_rates(response_learning, price_learning, args.fixed_price_slope)
+        .with_relations(&bloc_relations(args.polities, args.relations));
+    if let Some(forgetting) = args.book_forgetting {
+        lab = lab.with_book_forgetting(forgetting);
+    }
+    lab
 }
 
 fn build(args: &Args) -> Lab {
@@ -707,6 +743,33 @@ fn json_line(lab: &Lab) -> String {
             cells.join(","),
         ));
     }
+    // **每格的回路增益**：`gauge[k] = ln(本轮的指数 / 上一轮的指数)`，即
+    // `index → 参照价 → 报价 → 账本 → index` 这一圈的单轮乘数。稳态应当 ≈ 0；
+    // 它持续为正就是价格水平在自我放大。`scale_logmean` 是申报量加权的平均 log 尺度。
+    let gauge: Vec<String> = lab
+        .history
+        .last()
+        .map(|h| h.gauge.iter().map(|g| format!("{g:e}")).collect())
+        .unwrap_or_else(|| vec![String::from("0e0"); lab.market.merchandises.len()]);
+    let scale_logmean: Vec<String> = (0..lab.market.merchandises.len())
+        .map(|k| {
+            let mut sum = 0.0f32;
+            let mut weight = 0.0f32;
+            for warehouse in &lab.warehouses.warehouses {
+                let declared = warehouse.stocks[k].marketing_volume().abs();
+                let scale = warehouse.stocks[k].marketing_price_scale();
+                if declared > 0.0 && scale.is_finite() && scale > 0.0 {
+                    sum += declared * scale.ln();
+                    weight += declared;
+                }
+            }
+            if weight > 0.0 {
+                format!("{:e}", sum / weight)
+            } else {
+                String::from("0e0")
+            }
+        })
+        .collect();
     // **逐地方账本**：部门决策价读的就是它（`plan` 读 `books[locality]`），
     // 而指数是它的聚合。两者是否脱钩，只有把账本本身打出来才能看见。
     let mut books = String::new();
@@ -758,7 +821,7 @@ fn json_line(lab: &Lab) -> String {
     format!(
         concat!(
             "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
-            "\"books\":[{}],\"delivery_free_or_ladder\":[{}],",
+            "\"books\":[{}],\"gauge\":[{}],\"scale_logmean\":[{}],\"delivery_free_or_ladder\":[{}],",
             "\"uncleared\":{:e},",
             "\"settlement_failures\":{}}}"
         ),
@@ -767,6 +830,8 @@ fn json_line(lab: &Lab) -> String {
         departments,
         polities,
         books,
+        gauge.join(","),
+        scale_logmean.join(","),
         delivery_split.join(","),
         lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
         lab.settlement_failures,

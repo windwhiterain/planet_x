@@ -566,6 +566,21 @@ impl Lab {
         self
     }
 
+    /// 仓库内部的学习率：响应曲面、价格曲线、账本记忆。
+    ///
+    /// §19.5 点名"仓库内部那三个写死的学习率"是唯一没扫过的旋钮；实测（多种子、
+    /// 5000 轮）只有**价格曲线**是承重的：冻结它整场就稳，只冻 `Response` 照样炸。
+    pub fn with_learning_rates(mut self, response: f32, price: f32, fixed_slope: bool) -> Self {
+        self.warehouses = self.warehouses.with_learning_rates(response, price, fixed_slope);
+        self
+    }
+
+    /// 账本/本地比值的记忆（旧 `LOCAL_PRICE_FORGETTING` 常量）
+    pub fn with_book_forgetting(mut self, forgetting: f32) -> Self {
+        self.warehouses = self.warehouses.with_book_forgetting(forgetting);
+        self
+    }
+
     pub fn with_anchor(mut self, anchor: bool) -> Self {
         self.anchor = anchor;
         self
