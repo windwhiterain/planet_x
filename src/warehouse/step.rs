@@ -330,64 +330,19 @@ fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise, re
 ///
 /// **只看挂单，不看成交**——这正是它与 `local_ratios`（只在成交时更新）的分工。
 /// 缺一侧时走回退链：这一轮挂出来的 → 该地方最近成交价 → 上一轮的账本 → 银河指数。
-/// 指数账本**一侧**的累加器：申报量加权的 log 报价。
-///
-/// 决策账本取 `max`/`min`（"我立刻能成交的价"），那是有偏的次序统计量；指数是**水平**，
-/// 必须用无偏的中心，否则会给"报价 → 指数 → 参照价 → 报价"这一圈一个恒正的增益（见 §20）。
-#[derive(Clone, Copy, Default)]
-struct LogSide {
-    weight: f32,
-    log_sum: f32,
-}
-
-impl LogSide {
-    fn push(&mut self, volume: f32, price: f32) {
-        let weight = volume.abs();
-        let log_price = price.ln();
-        if weight > 0.0 && weight.is_finite() && log_price.is_finite() {
-            self.weight += weight;
-            self.log_sum += weight * log_price;
-        }
-    }
-
-    fn mean(&self) -> Option<f32> {
-        if !(self.weight > 0.0) || !self.log_sum.is_finite() {
-            return None;
-        }
-        let value = (self.log_sum / self.weight).exp();
-        if value.is_finite() && value > 0.0 {
-            Some(value)
-        } else {
-            None
-        }
-    }
-}
-
-/// 一个地方的一种商品，指数专用的两侧读数（申报量加权 log 平均）。
-#[derive(Clone, Copy, Default)]
-struct IndexSide {
-    bid: LogSide,
-    ask: LogSide,
-}
-
 fn update_books(
     warehouses: &[Warehouse],
     market: &Market,
     local_ratios: &[Vec<f32>],
     books: &mut Vec<Vec<Book>>,
-    index_books: &mut Vec<Vec<Book>>,
     book_forgetting: f32,
 ) {
     let goods = market.merchandises.len();
     let mut observed: Vec<Vec<Book>> = Vec::new();
-    let mut index_seen: Vec<Vec<IndexSide>> = Vec::new();
     for (i, warehouse) in warehouses.iter().enumerate() {
         let locality = warehouse.locality;
         if observed.len() <= locality {
             observed.resize(locality + 1, vec![Book::default(); goods]);
-        }
-        if index_seen.len() <= locality {
-            index_seen.resize(locality + 1, vec![IndexSide::default(); goods]);
         }
         let Some(trader) = market.traders.get(i) else {
             continue;
@@ -403,14 +358,12 @@ fn update_books(
                 if !(book.ask > 0.0) || price < book.ask {
                     book.ask = price;
                 }
-                index_seen[locality][k].ask.push(merchandise.volume, price);
             } else if merchandise.volume < 0.0 {
                 // 买方：最高的出价才是边际
                 let book = &mut observed[locality][k];
                 if price > book.bid {
                     book.bid = price;
                 }
-                index_seen[locality][k].bid.push(merchandise.volume, price);
             }
         }
     }
@@ -420,12 +373,6 @@ fn update_books(
         }
         if books[locality].len() != goods {
             books[locality] = vec![Book::default(); goods];
-        }
-        if index_books.len() <= locality {
-            index_books.resize(locality + 1, vec![Book::default(); goods]);
-        }
-        if index_books[locality].len() != goods {
-            index_books[locality] = vec![Book::default(); goods];
         }
         // 这个地方的**本地参照价**（本地价）。回退链只用本地量 + 计价物，**不用银河指数**。
         let local_reference = warehouses
@@ -467,15 +414,6 @@ fn update_books(
                 // 申报量报价时才会被填，所以这一行同时排除了"零申报量的报价定账本"。
                 observed: seen.bid > 0.0 && seen.ask > 0.0,
             };
-            // 指数账本：同一套 carried / blend，只是新值换成两侧的**申报量加权 log 平均**。
-            let previous_index = index_books[locality][k];
-            let log_bid = index_seen[locality][k].bid.mean();
-            let log_ask = index_seen[locality][k].ask.mean();
-            index_books[locality][k] = Book {
-                bid: blend(previous_index.bid, log_bid.unwrap_or(carried)),
-                ask: blend(previous_index.ask, log_ask.unwrap_or(carried)),
-                observed: log_bid.is_some() && log_ask.is_some(),
-            };
         }
     }
 }
@@ -487,7 +425,6 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         book_forgetting,
         local_ratios,
         books,
-        index_books,
         ..
     } = warehouses;
     let fluctuation = *fluctuation;
@@ -580,14 +517,7 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market, rng: &mut R
         );
     }
     // 账本最后更新：这一轮的挂单已经定稿，成交与否都看得见
-    update_books(
-        warehouses,
-        market,
-        local_ratios,
-        books,
-        index_books,
-        *book_forgetting,
-    );
+    update_books(warehouses, market, local_ratios, books, *book_forgetting);
 }
 
 fn observe_local_ratio(

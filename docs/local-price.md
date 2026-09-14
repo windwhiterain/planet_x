@@ -1921,3 +1921,41 @@ cargo run --release -p planet_x --bin local_price -- \
    水平不只存在于 `wedge`，还存在于交易者各自的 `marketing_price_scale`。现在 `scale`
    同时干两件事：**本地价水平** 和 **个体价差**。下一步要把这两件事拆开：
    本地价（逐地方逐商品一个绝对值，直接学）负责水平，`scale` 只允许是它附近的一个小价差。
+
+### 20.10 银河价 = **本地价**的加权平均（不是交易者报价的平均）
+
+§20.9 之后还剩一个说不通的地方：`--rule fixed` 已经把本地价钉成常数 1，读数仍漂到 1e5。
+原因是读数平均的是**交易者报价**：
+
+```
+quote = 本地价 × marketing_price_scale
+```
+
+`marketing_price_scale` 是每个交易者**优化器**在 `e^{±44}` 里挑的价差，不是学的量；
+`scale_normalization` 只钉住它的**全局平均**，没管**离散度**。所以读数被价差的离散度带跑
+——**漂的是读数，不是本地价**。本地价（`polity.level`，由 `update_levels` 的规则直接学）
+只有一个 mode。
+
+本轮把 `aggregate_index` 改成：**银河价 = 各地方本地价（`warehouse.reference`）的
+成交量加权几何平均**。交易者报价不再进入读数（上一轮加的 `index_books` / `LogSide`
+整条删掉，`update_books` 只剩决策账本）。
+
+实测（5 个**新抽**种子 × 20000 轮，log10 三商品 index 的 max / min）：
+
+| 本地价规则 | max / min |
+|---|---|
+| `fixed` | 0.0 / 0.0（恒等于 1） |
+| `pressure` | 0.0–0.1 / −0.1–0.0 |
+| `vwap` | 3.8–7.2 / −18.2 – −9.3 |
+| `counterparty`（当前默认） | 14.8–29.5 / −40.3 – −14.9 |
+
+三条结论：
+
+1. 读数现在**只由学出来的本地价决定**：`fixed` 恒为 1，`pressure` 稳定在 1 附近。
+2. 剩下的问题只在**本地价的学习规则**上：`vwap` / `counterparty` 都是"追交易者报价"
+   的自指规则 → 漂；`pressure`（库存压力 + 衰减）有回复力 → 有界。
+3. **默认规则应当从 `counterparty` 换成 `pressure`**（`Lab::new` 与 CLI `Args` 两处）。
+
+测试：119 过 / 13 失败 / 1 ignore。`the_price_level_has_no_anchor_of_its_own` 断言的
+是"银河指数自己没有锚、`--no-anchor` 下四处游走"——这条旧语义被本轮推翻，已改写成
+`the_index_is_only_a_readout_of_the_local_prices`（本地价被固定规则钉住时读数也不游走）。

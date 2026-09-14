@@ -761,34 +761,23 @@ fn a_failed_quote_still_teaches_the_response() {
 
 #[test]
 fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
-    // 两个地方、同样成交量，账本中间价 1 和 4。算术平均给 2.5，几何平均给 2。
-    // 指数会被 `apply_levels` 乘回每一份报价，所以这条回路是乘法的：只有
-    // 几何平均（对数尺度上的中心）才不给它一个恒正的增益。用算术平均时
-    // Jensen 不等式让指数每轮乘 `e^{σ²/2} ≥ 1`，一路漂到 f32 边界（§19.2）。
+    // 两个地方、同样成交量，本地价 1 和 4。算术平均给 2.5，几何平均给 2。
+    // 银河价是**读数**：它平均的是各地方**本地价**（`reference`），而不是交易者报价
+    // （报价 = 本地价 × 价差，价差的离散度会把读数带跑，见 §20.9）。
     let mut warehouses = warehouse(&[&[(1.0, 1.0)], &[(1.0, 1.0)]]);
     warehouses.warehouses[0].stocks[0].marketing_volume = 1.0;
     warehouses.warehouses[1].stocks[0].marketing_volume = 1.0;
-    // 两个地方必须不同，否则两本书都算进同一个地方的成交量
+    // 两个地方必须不同，否则会算进同一个地方的成交量
     warehouses.warehouses[0].locality = 0;
     warehouses.warehouses[1].locality = 1;
-    warehouses.index_books = vec![
-        vec![Book {
-            bid: 1.0,
-            ask: 1.0,
-            observed: true,
-        }],
-        vec![Book {
-            bid: 4.0,
-            ask: 4.0,
-            observed: true,
-        }],
-    ];
+    warehouses.warehouses[0].reference = vec![1.0];
+    warehouses.warehouses[1].reference = vec![4.0];
     let index = warehouses.aggregate_index(1);
     assert!(
         (index[0] - 2.0).abs() < 1e-5,
-        "指数应当取对数尺度的中心 2.0，实际 {}",
+        "银河价应当取各地方本地价的对数中心 2.0，实际 {}",
         index[0],
     );
-    // 决策账本（max/min）故意留空：指数不许读它。
-    assert!(warehouses.books.is_empty() || warehouses.books[0][0].mid() == 0.0);
+    // 决策账本（max/min）故意留空：读数不许读交易者报价。
+    assert!(warehouses.books.is_empty());
 }

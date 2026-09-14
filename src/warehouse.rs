@@ -21,13 +21,6 @@ pub struct Warehouses {
     pub book_forgetting: f32,
     /// index with 地方：同一地方共享一套「本地成交价 ÷ 指数」的比值（**已实现**的价）
     pub local_ratios: Vec<Vec<f32>>,
-    /// index with 地方：**指数专用**账本。两侧取申报量加权的 log 平均（对数尺度上的中心），
-    /// 而不是 [`Book`] 的 `max`/`min` 边际价。
-    ///
-    /// `max`/`min` 是有偏的次序统计量（买方尺度分布比卖方宽，`max` 的向上偏置压过
-    /// `min` 的向下偏置），拿它去乘回报价就是一个恒正的回路增益。部门决策要的是
-    /// "我立刻能成交的价"，所以 [`Book`] 保持边际；**指数是水平，必须无偏**。
-    pub index_books: Vec<Vec<Book>>,
     /// index with 地方：同一地方共享一套账本（**挂出来**的价）
     ///
     /// 与 `local_ratios` 的区别是要害：比值只在有成交时才更新，账本只看挂单，
@@ -140,7 +133,6 @@ impl Warehouses {
             book_forgetting: Self::DEFAULT_BOOK_FORGETTING,
             local_ratios: Vec::new(),
             books: Vec::new(),
-            index_books: Vec::new(),
         }
     }
 
@@ -154,27 +146,16 @@ impl Warehouses {
         }
     }
 
-    /// 银河指数 = **各地方中间价的申报量加权几何平均**（对数尺度上的中心）。
+    /// 银河价 = **各地方本地价的成交量加权几何平均**（纯读数，display only）。
     ///
-    /// 用的是 [`Warehouses::index_books`]（两侧是申报量加权的 log 平均），**不是**
-    /// [`Warehouses::books`] 的 `max`/`min` 边际价——边际价是有偏的次序统计量，
-    /// 拿它当水平就会给这个乘法回路一个恒正增益（见 §20）。
+    /// 本地价 = `warehouse.reference`（逐政权直接学的绝对值，见 `apply_levels` / `update_levels`）。
     ///
-    /// 这是依赖倒置的另一半：账本先验、指数导出。旧口径的指数是"成交的加权平均"，
-    /// 没有成交就一个字都不动——三产的价格因此冻成第 1 轮的化石。
+    /// ⚠️ **不要平均交易者的报价**：`quote = 本地价 × 价差`，而价差是每个交易者优化器
+    /// 在 `e^{±44}` 里挑的、只被 `scale_normalization` 钉住全局平均、离散度不受控——
+    /// 平均报价会把"价差离散度"混进水平，读数就被带跑（实测 `--rule fixed` 把本地价
+    /// 钉成 1，平均报价的读数仍漂到 1e5）。银河价既然只是读数，就应当只反映本地价。
     ///
-    /// ⚠️ **必须用几何平均，不能用算术平均**（这正是 [`Book::mid`] 当初踩过、并在这里
-    /// 又踩了一次的同一个坑）。指数会被 `apply_levels` 乘回每一份报价，
-    /// 所以这条回路是**乘法**的：`index_{t+1} = index_t × F`，`F` 是各地方
-    /// `mid/参照价` 的加权平均。只要把 `F` 取成**算术**平均，Jensen 不等式就给出
-    /// `F ≥ exp(Σω ln(mid/参照价))`，只要各地方有**任何离散度**，`F` 就恒 > 1：
-    /// 指数每轮乘 `e^{σ²/2}`，一路漂到 f32 边界（实测 gauge 稳定在 +0.05…+0.11/轮，
-    /// 就是 `σ²/2`）。离散度是学习器制造出来的，所以"冻结价格曲线就稳"。
-    ///
-    /// 取几何平均之后，离散度只影响**相对**信息，不再给水平一个恒正增益；水平交给
-    /// 水平锚。代价照旧：`--no-anchor` 下不安全。
-    ///
-    /// 某一轮一本账都没成形时返回 0，调用方应当保留旧指数。
+    /// 某一轮一个本地价都没有时返回 0，调用方应当保留旧指数。
     pub fn aggregate_index(&self, goods: usize) -> Vec<f32> {
         let mut index = vec![0.0f32; goods];
         for (k, slot) in index.iter_mut().enumerate() {
@@ -182,36 +163,32 @@ impl Warehouses {
             let mut weighted_log = 0.0f32;
             let mut flat_log = 0.0f32;
             let mut formed = 0.0f32;
-            for (locality, row) in self.index_books.iter().enumerate() {
-                let Some(book) = row.get(k) else {
-                    continue;
-                };
-                // ⚠️ 这里原来判的是 `is_formed()`，但**合成出来的账本也会成形**：
-                // 缺失的一侧被 `carried` 填上（正数！），于是账本成了自己的回音，
-                // 经本函数写回指数。改成只认**真实双边报价**，指数才是市场观测。
-                if !book.is_observed() {
+            // 逐地方取一次本地价；同一地方的仓库共享同一个 `reference`。
+            let mut localities: Vec<(usize, f32, f32)> = Vec::new();
+            for warehouse in &self.warehouses {
+                let price = warehouse.reference.get(k).copied().unwrap_or(0.0);
+                if !(price > 0.0) || !price.is_finite() {
                     continue;
                 }
-                let mid = book.mid();
-                let Some(log_mid) = (mid > 0.0 && mid.is_finite()).then(|| mid.ln()) else {
-                    continue;
-                };
-                flat_log += log_mid;
+                let volume = warehouse
+                    .stocks
+                    .get(k)
+                    .map(|stock| stock.marketing_volume().abs())
+                    .unwrap_or(0.0);
+                match localities
+                    .iter_mut()
+                    .find(|(locality, _, _)| *locality == warehouse.locality)
+                {
+                    Some(entry) => entry.2 += volume,
+                    None => localities.push((warehouse.locality, price, volume)),
+                }
+            }
+            for (_, price, volume) in localities {
+                let log_price = price.ln();
+                flat_log += log_price;
                 formed += 1.0;
-                let volume: f32 = self
-                    .warehouses
-                    .iter()
-                    .filter(|warehouse| warehouse.locality == locality)
-                    .map(|warehouse| {
-                        warehouse
-                            .stocks
-                            .get(k)
-                            .map(|stock| stock.marketing_volume().abs())
-                            .unwrap_or(0.0)
-                    })
-                    .sum();
                 if volume > 0.0 && volume.is_finite() {
-                    weighted_log += volume * log_mid;
+                    weighted_log += volume * log_price;
                     weight += volume;
                 }
             }

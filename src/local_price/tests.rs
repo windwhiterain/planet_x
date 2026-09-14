@@ -32,7 +32,11 @@ fn fixed_levels_keep_every_wedge_at_zero() {
 }
 
 #[test]
-fn the_price_level_has_no_anchor_of_its_own() {
+fn the_index_is_only_a_readout_of_the_local_prices() {
+    // 旧语义：银河指数自己是一个没有锚的自由模态，`--no-anchor` 下四处游走。
+    // 新语义（§20.8 / §20.9）：银河价 = 各地方**本地价**的加权平均，纯读数。
+    // `LevelRule::Fixed` 把本地价钉在计价物上，于是**读数也不再游走**；
+    // `anchor` 只负责把这个读数按"篮子几何平均 = 1"归一化。
     let mut free = Lab::new(&symmetric(), 11)
         .with_rule(LevelRule::Fixed)
         .with_anchor(false);
@@ -45,8 +49,8 @@ fn the_price_level_has_no_anchor_of_its_own() {
         }
     }
     assert!(
-        excursion > 0.2,
-        "没有任何锚时价格水平应当四处游走，实际最大偏离 {excursion}",
+        excursion < 1e-3,
+        "本地价被固定规则钉住时，读数不该游走，实际最大偏离 {excursion}",
     );
 
     let mut anchored = Lab::new(&symmetric(), 11)
