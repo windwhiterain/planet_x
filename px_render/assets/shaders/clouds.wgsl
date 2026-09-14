@@ -192,7 +192,6 @@ fn shape_of_partials(cover: f32, altitude: f32, noise: f32) -> ShapePartials {
     let live = gate_open(shape);
     let footprint_live = select(0.0, 1.0, footprint > 0.0);
     let lobe_live = gate_open(lobed);
-    let under_live = gate_open(under_top);
     let ceiling_live = select(
         0.0,
         params.top * params.detail_strength,
@@ -286,7 +285,7 @@ fn coverage_gradient_of(direction: vec3<f32>) -> vec4<f32> {
     let slope = select(0.0, 6.0 * normalized * (1.0 - normalized) / 0.45, normalized > 0.0 && normalized < 1.0);
     return vec4<f32>(
         cover,
-        slope * baked.g / max(1.0 - params.coverage, 1e-4) * project_tangential(vec3<f32>(baked.g, baked.b, baked.a), direction),
+        slope / max(1.0 - params.coverage, 1e-4) * project_tangential(vec3<f32>(baked.g, baked.b, baked.a), direction),
     );
 }
 
