@@ -34,7 +34,6 @@ const ABLATE_FETCH: u32 = 3u;
 const ABLATE_DETAIL: u32 = 4u;
 const ABLATE_SURFACE: u32 = 5u;
 const ABLATE_NORMALS: u32 = 6u;
-const ABLATE_ANALYTIC: u32 = 7u;
 const SHADOW_GAIN: f32 = 4.0;
 const SURFACE_STEPS: u32 = 56;
 const SURFACE_LEVEL: f32 = 0.20;
@@ -81,9 +80,6 @@ fn coverage_of(direction: vec3<f32>) -> f32 {
 fn billows(direction: vec3<f32>, altitude: f32, with_skin: bool) -> f32 {
     if params.ablate == ABLATE_NOISE {
         return 0.55;
-    }
-    if params.ablate == ABLATE_ANALYTIC {
-        return sampled_noise(direction, altitude, params.detail_scale, 1u, params.seed);
     }
     let tower = sampled_noise(direction, altitude, params.detail_scale * 0.35, 3u, params.seed);
     if !with_skin {
@@ -223,16 +219,6 @@ fn billows_along(direction: vec3<f32>, altitude: f32, with_skin: bool) -> vec4<f
         return vec4<f32>(0.55, vec3<f32>(0.0));
     }
     let radius = params.inner + altitude * span();
-    if params.ablate == ABLATE_ANALYTIC {
-        let single_across = params.detail_scale;
-        let single = sampled_noise_along(direction, single_across, 1u, params.seed, altitude);
-        let single_live = gate_open(single.value);
-        let single_stretch = single_across + altitude * single_across * span();
-        let single_tangential =
-            single_live * single_stretch * project_tangential(single.gradient, direction);
-        let single_radial = single_live * radius * single_across * dot(direction, single.gradient);
-        return vec4<f32>(clamp(single.value, 0.0, 1.0), single_tangential + single_radial * direction);
-    }
     let tower_across = params.detail_scale * 0.35;
     let tower = sampled_noise_along(direction, tower_across, 3u, params.seed, altitude);
     let tower_stretch = tower_across + altitude * tower_across * span();

@@ -163,7 +163,7 @@ fn smooth_scalar<S: Scalar>(t: S) -> S {
     t * t * (S::from_f32(3.0) - t - t)
 }
 
-pub fn gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
+pub fn faded_gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
     let x0 = point[0].real().floor();
     let y0 = point[1].real().floor();
     let z0 = point[2].real().floor();
@@ -205,7 +205,7 @@ pub fn fbm_3<S: Scalar>(point: [S; 3], settings: &FbmSettings) -> S {
     for octave in 0..settings.octaves {
         total = total
             + amplitude
-                * gradient_noise_3(
+                * faded_gradient_noise_3(
                     [
                         point[0] * S::from_f32(frequency),
                         point[1] * S::from_f32(frequency),
@@ -230,7 +230,7 @@ pub fn ridged_3(point: [f32; 3], settings: &FbmSettings, sharpness: f32) -> f32 
     let mut normalization = 0.0_f32;
     let mut frequency = settings.frequency;
     for octave in 0..settings.octaves {
-        let sample = gradient_noise_3(
+        let sample = faded_gradient_noise_3(
             [
                 point[0] * frequency,
                 point[1] * frequency,

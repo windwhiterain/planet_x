@@ -83,9 +83,6 @@ fn probe_noise_margin(direction: vec3<f32>, across: f32, seed: u32, altitude: f3
 }
 
 fn probe_noise_value(direction: vec3<f32>, altitude: f32) -> f32 {
-    if params.ablate == ABLATE_ANALYTIC {
-        return sampled_noise(direction, altitude, params.detail_scale, 1u, params.seed);
-    }
     let tower = sampled_noise(direction, altitude, params.detail_scale * 0.35, 3u, params.seed);
     let skin = sampled_noise(direction, altitude, params.detail_scale * 1.70, 2u, params.seed ^ 31u);
     return tower * 0.62 + skin * 0.38;
@@ -96,17 +93,10 @@ fn probe_gate_margin(point: vec3<f32>, cover: f32) -> f32 {
     let altitude = medium.altitude;
     let direction = medium.direction;
     var margin = min(altitude, 1.0 - altitude);
-    if params.ablate == ABLATE_ANALYTIC {
-        margin = min(
-            margin,
-            probe_noise_margin(direction, params.detail_scale, params.seed, altitude, 1u),
-        );
-    } else {
-        let tower_across = params.detail_scale * 0.35;
-        let skin_across = params.detail_scale * 1.70;
-        margin = min(margin, probe_noise_margin(direction, tower_across, params.seed, altitude, 3u));
-        margin = min(margin, probe_noise_margin(direction, skin_across, params.seed ^ 31u, altitude, 3u));
-    }
+    let tower_across = params.detail_scale * 0.35;
+    let skin_across = params.detail_scale * 1.70;
+    margin = min(margin, probe_noise_margin(direction, tower_across, params.seed, altitude, 3u));
+    margin = min(margin, probe_noise_margin(direction, skin_across, params.seed ^ 31u, altitude, 3u));
     if params.ablate == ABLATE_FETCH || params.ablate == ABLATE_NOISE {
         return margin;
     }
@@ -450,7 +440,6 @@ fn production_params() -> CloudParams {
 
 fn simple_params() -> CloudParams {
     let mut params = CloudParams::new(SIMPLE_INNER, SIMPLE_OUTER, 900.0);
-    params.ablate = Ablate::Analytic.code();
     params.coverage = 0.45;
     params.base = 1.20;
     params.top = 0.60;
