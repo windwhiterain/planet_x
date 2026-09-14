@@ -15,5 +15,6 @@ wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 encase = "0.12"
+px_verify = { path = "../px_verify" }
 
 

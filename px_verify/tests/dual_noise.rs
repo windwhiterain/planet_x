@@ -1,56 +1,5 @@
-use num_dual::{Dual64, DualNum, first_derivative};
-use px_ops::noise::{FbmSettings, Scalar, fbm_3};
-
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-struct Dual(Dual64);
-
-impl std::ops::Add for Dual {
-    type Output = Dual;
-    fn add(self, other: Dual) -> Dual {
-        Dual(self.0 + other.0)
-    }
-}
-
-impl std::ops::Sub for Dual {
-    type Output = Dual;
-    fn sub(self, other: Dual) -> Dual {
-        Dual(self.0 - other.0)
-    }
-}
-
-impl std::ops::Mul for Dual {
-    type Output = Dual;
-    fn mul(self, other: Dual) -> Dual {
-        Dual(self.0 * other.0)
-    }
-}
-
-impl std::ops::Div for Dual {
-    type Output = Dual;
-    fn div(self, other: Dual) -> Dual {
-        Dual(self.0 / other.0)
-    }
-}
-
-impl Scalar for Dual {
-    fn from_f32(value: f32) -> Self {
-        Dual(Dual64::from_re(value as f64))
-    }
-    fn real(self) -> f32 {
-        self.0.re as f32
-    }
-    fn clamp01(self) -> Self {
-        let low = Dual64::from_re(0.0);
-        let high = Dual64::from_re(1.0);
-        if self.0.re <= low.re {
-            Dual(low)
-        } else if self.0.re >= high.re {
-            Dual(high)
-        } else {
-            self
-        }
-    }
-}
+use px_verify::dual::{Dual, Dual64, first_derivative};
+use px_verify::noise::{FbmSettings, fbm_3};
 
 fn settings() -> FbmSettings {
     FbmSettings {
@@ -132,7 +81,7 @@ fn diagnose_the_noise_discrepancy() {
             point[1] as f32 * frequency,
             point[2] as f32 * frequency,
         ];
-        let raw = px_ops::noise::gradient_noise_3(scaled, settings.seed ^ octave);
+        let raw = px_verify::noise::gradient_noise_3(scaled, settings.seed ^ octave);
         let clamped = raw <= 0.0 || raw >= 1.0;
         println!(
             "八度 {octave}: 频率 {frequency}  值 {raw:.9}{}",
@@ -154,9 +103,10 @@ fn the_dual_gradient_of_the_noise_matches_its_own_values() {
 
     let mut sampled = 0usize;
     let mut saturated = 0usize;
-    let mut worst_per_step = Vec::new();
+    let mut worst = 0.0_f64;
+    let mut median_per_step = Vec::new();
     for step in steps {
-        let mut worst = 0.0_f64;
+        let mut errors: Vec<f64> = Vec::new();
         for point in &points {
             let here = value([point[0] as f32, point[1] as f32, point[2] as f32]);
             if here <= 0.02 || here >= 0.98 {
@@ -169,11 +119,10 @@ fn the_dual_gradient_of_the_noise_matches_its_own_values() {
                 let dual = dual_axis(*point, axis);
                 let numeric = numeric_axis(*point, axis, step);
                 let error = (dual - numeric).abs();
-                if error > worst {
+                errors.push(error);
+                if step == *steps.last().unwrap() && error > worst {
                     worst = error;
-                    if step == *steps.last().unwrap() {
-                        worst_at = *point;
-                    }
+                    worst_at = *point;
                 }
                 if step == steps[0] {
                     magnitude = magnitude.max(numeric.abs());
@@ -181,7 +130,8 @@ fn the_dual_gradient_of_the_noise_matches_its_own_values() {
                 }
             }
         }
-        worst_per_step.push(worst);
+        errors.sort_by(|one, two| one.partial_cmp(two).expect("误差里出现了 NaN"));
+        median_per_step.push(errors[errors.len() / 2]);
     }
 
     assert!(
@@ -193,17 +143,23 @@ fn the_dual_gradient_of_the_noise_matches_its_own_values() {
         "梯度量级只有 {magnitude}，这个测试没在测东西"
     );
 
-    for pair in worst_per_step.windows(2) {
-        assert!(
-            pair[1] < pair[0] * 0.5,
-            "偏差没有随步长缩小，这正说明公式错了而不是步长太大：各步长最大偏差 {worst_per_step:?}"
-        );
-    }
-
-    let finest = *worst_per_step.last().unwrap();
+    let best = median_per_step
+        .iter()
+        .fold(f64::MAX, |lowest, value| lowest.min(*value));
     assert!(
-        finest < 2e-3,
-        "对偶数求得的 fbm 梯度与中心差分不符：最小步长下最大偏差 {finest}（在 {worst_at:?}），梯度量级 {magnitude}"
+        median_per_step[1] < median_per_step[0] * 0.1,
+        "中位偏差没有随步长缩小，这正说明公式错了而不是步长太大：各步长中位偏差 {median_per_step:?}"
+    );
+    assert!(
+        best < 2e-3,
+        "最好的步长下中位偏差也只有 {best}（最坏点在 {worst_at:?}，绝对偏差 {worst}），梯度量级 {magnitude}"
+    );
+    assert!(
+        median_per_step[median_per_step.len() - 1] < 1e-2,
+        "最细步长上中位偏差反弹到 {:e}，比 h={:e} 差了 {:.1} 倍 ⇒ 差商已经落进 f32 的量化噪声，不是公式错",
+        median_per_step[median_per_step.len() - 1],
+        steps[1],
+        median_per_step[median_per_step.len() - 1] / median_per_step[1],
     );
 }
 

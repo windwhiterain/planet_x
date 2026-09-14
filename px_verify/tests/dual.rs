@@ -1,4 +1,4 @@
-use num_dual::{Dual64, DualNum};
+use px_verify::dual::{Dual64, DualNum, first_derivative};
 
 fn dmax<D: DualNum<Primitive = f64> + Copy>(one: D, two: D) -> D {
     if one.re() >= two.re() { one } else { two }
@@ -25,7 +25,7 @@ fn slope<F>(f: F, at: f64) -> f64
 where
     F: Fn(Dual64) -> Dual64,
 {
-    num_dual::first_derivative(f, at).1
+    first_derivative(f, at).1
 }
 
 fn smoothstep(value: f64, low: f64, high: f64) -> f64 {
