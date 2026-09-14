@@ -2798,7 +2798,7 @@ noise.wgsl::gradient_noise_3      let local = point - base;
 
 ⇒ **凡是拿 `px_ops` 当"shader 的参考"的验证都会被它带偏** ✓。
 `px_verify/src/noise.rs` 是**照抄 shader** 的独立实现 ✓ —— 两边**不应该**共享这份代码 ✓。
-**是否要让生产两边一致，是用户待定项** ✓。
+**是否要让生产两边一致 —— 已裁决：不改，只把 `px_ops` 那个改名成 `faded_gradient_noise_3`** ✓（§46.2）。
 
 **(b) 覆盖度那条链的链式因子写错** ✓（子 agent 的结构性证明：
 `|修正后| / |原先| = 9.259259 = 1/0.108 = 1/baked.g`，到 7 位）✓ ——
@@ -2840,12 +2840,77 @@ arbiter 一度报「**修复前** 3.1e-3 反而比**修复后** 2.0e-2 **更接�
   续跑；被打断 ≠ 失败，**不要新派一个重做** ✓。
   **不要在同一个分支上跑两个 agent** ✓ —— 另开 worktree（本节就是这么做的）。
 
-### 45.7 待裁决
+### 45.7 三项待裁决 —— 已全部裁决，见 §46
 
-1. `px_ops` 噪声要不要对齐 shader（§45.3a）——独立的生产改动，会影响 PCG 缓存键 ✓。
-2. `px_render --test gradient` 里那两个**仍然失败**的生产测试：它们的失败原因
-   （采样器量化的覆盖度通道、`(radius-inner)/span` 的 f32 相消、模板内门穿越）
-   **全被 ④ 绕开了** ✓ ⇒ 改成指向 arbiter，还是退役？
-3. `ABLATE_ANALYTIC` 单八度调试分支**还没用 ④ 量过** ✓ ——
-   之前"三处错"到底是真错还是那个分支独有的，**未下结论** ✓。
+---
+
+## 46. 三项裁决 + 解析梯度上生产 + 两个流程教训（2026-09-14）
+
+### 46.1 硬表面云换成解析梯度（生产改动）
+
+`cloud_field_gradient`（6 点差商）删除，`ABLATE_NORMALS` / `ABLATE_SURFACE` 改调
+`cloud_field_gradient_analytic` ✓。每像素少 6 次 `cloud_field` 调用（每次内含两组 fbm、
+共 5 个梯度噪声）⇒ 噪声工作量约降到 1/6。
+
+⚠ **§43.1 那句「`ABLATE_NORMALS` 靠 FD 的尖峰找表面」是错的** ✓：找面靠的是
+`if cloud_field(point) > SURFACE_LEVEL { break }` 的步进，**梯度只喂法线** ✓。
+
+**价格**（2240×1400，同一轮，min）：nocloud 15.10 / volume 15.50 / **surface 13.63** /
+normals 13.47。改之前是 surface **20.18** 对 volume 13.90，**贵 6.3 ms** ✓。
+
+⚠ 同一轮里 `nocloud` 比 `surface` 还慢 —— 不可能 ⇒ 有 **1.5–2 ms 的时间漂移** ✓。
+**可信的是"surface ≈ volume、溢价消失"这个相对关系**；绝对值要交错 A/B 才算数 ✓。
+
+### 46.2 三项裁决
+
+| §45.7 | 裁决 | 落法 |
+|---|---|---|
+| ① `px_ops` 噪声要不要对齐 shader | **不改代码，只改名** | `gradient_noise_3` → **`faded_gradient_noise_3`**。它点乘的是 `smoothstep(local)` 而不是 `local`，所以它**不是** Perlin 梯度噪声，而是把淡入曲线也套进偏移向量的变体；名字里带 `faded` 就是这个意思。shader 那边不动 —— `gradient noise` 本来就是这一类噪声的正式名称。**没有任何生产路径需要两者一致**，而对齐会改动出图并作废全部 PCG 缓存 ⇒ 不值。全仓只有 3 处引用，都在 `px_ops/src/noise.rs` 自身。 |
+| ② `gradient.rs` 里那两个失败的生产测试 | **A′：各自只保留还能兑现的部分** | `the_probe_harness…` 降级为烟测（探针能跑 / 能回读 / 能落进壳里），收敛性断言拿掉；`the_analytic_gradient_matches_central_differences` 先挪到 `inner 0.01 / outer 0.06` + 常量覆盖度，**仍然不收敛** ⇒ **删除**。 |
+| ③ `ABLATE_ANALYTIC` 单八度调试分支 | **删掉** | 常量、`billows` / `billows_along` 的单八度分支、`Ablate::Analytic`、`--cloud-ablate analytic`、probe 内的两条同款分支、`simple_params` 里的设置，全删。它存在的理由是"简化到能手推"，而 arbiter **不需要简化** ⇒ 没有产品功能、只剩误导。 |
+
+### 46.3 差商这条腿正式退场
+
+小半径配置**没能**救回收敛性 ✓。小半径治的是 `(radius-inner)/span` 的 f32 相消，
+治不了第三条成因 —— **模板内的门穿越**（场在 4h 上走 `|∇|·4h`，而折点余量在量纲上就不够）。
+
+⇒ **差商在任何一个生产相关的配置下都不足以判定梯度对错** ✓✓。
+它剩下的价值是"**完全不知道解析公式长什么样**"这个独立视角 ⇒ 由
+`the_analytic_gradient_keeps_the_kink_convention`（门约定）与
+`the_residual_is_attributed_to_one_channel`（逐通道归因）承担，两条保留 ✓。
+
+**梯度对错从现在起只有一个判据**：`px_render --test field_dual` 的 arbiter
+（f64 精确、无步长、无折点余量、两侧对照）✓。
+**宁可只有一个够格的判据，也不要一个不够格却看起来在判的** ✓。
+
+### 46.4 `#import` 只内联点名的符号 —— 测试侧严格宽松于运行时（新盲区）
+
+运行时报：
+
+```
+failed to process shader error: no definition in scope for identifier: `NoiseSample`
+    ┌─ shaders/clouds.wgsl:211:102   →  fn sampled_noise_along(...) -> NoiseSample
+```
+
+Bevy 只内联 `#import` 里**点名的**符号；`clouds.wgsl` 列了 `fbm_3 / fbm_3_grad /
+rotate_vector`，没列 `NoiseSample` ✓。补上即好 ✓。
+
+⚠ **它一直坏着，而且测试结构上看不见** ✓✓：`tests/common/mod.rs::assemble` 递归展开
+**整个模块**（`render_source` 把 `#import` 的模块全文拼进来），而运行时只给点名的符号
+⇒ **测试侧比运行时宽松** ✗。`tests/shaders.rs` 的"每个 shader 都能解析校验"
+**给不了**这个保证 ✓。
+
+⇒ **shader 的运行时正确性，唯一的仪器是 viewer 的 stderr** ✓。
+`failed to process shader` 计数必须为 0 —— 这该写成一个**门**，而不是靠人记得去看（待做）✓。
+
+### 46.5 三个流程教训（都是"以为手里的坐标还有效"）
+
+1. **`git stash push` 暂存不了已提交的改动** ✓。我拿它做 A/B，两次跑的都是**同一边**，
+   "PRE/POST 都是 4"什么也没证明 ✗。要取旧版本用 `git show <rev>:<path>` 写进工作区 ✓。
+2. **`git stash pop` 弹的是栈顶，不一定是你的** ✓。它弹出了别的分支的条目，把
+   `src/sim.rs` 落到这个 worktree 里。**stash 条目本身没丢** ✓（`git stash show` 核对过），
+   但这是一次真事故。
+3. **`edit` 之后文件就变了，任何基于行号的操作必须重新取** ✓✓。我拿**合并前**的行号去
+   sed，剪坏了 `gradient.rs`（`mismatched closing delimiter`）；另一次先提交了编译不过的树。
+   两次都源于"凭记忆用坐标" ✗。**行号一律现取**（`grep -n` + 算术），不要记 ✓。
 
