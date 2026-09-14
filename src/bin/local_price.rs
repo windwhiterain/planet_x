@@ -115,6 +115,8 @@ fn main() {
         usage();
         return;
     };
+    // 打到 stderr：`--json` 的 stdout 保持纯 JSONL，同时每次运行都可复现。
+    eprintln!("seed = {}", args.seed);
     match args.scenario.as_str() {
         "sweep" => sweep(&args),
         "blockade" => blockade(&args),
@@ -128,6 +130,7 @@ fn main() {
 
 fn parse() -> Option<Args> {
     let mut args = Args::default();
+    let mut seed_given = false;
     let mut items = std::env::args().skip(1);
     while let Some(flag) = items.next() {
         let mut value = || items.next();
@@ -177,10 +180,17 @@ fn parse() -> Option<Args> {
             "--block-from" => args.block_from = value()?.parse().ok()?,
             "--block-to" => args.block_to = value()?.parse().ok()?,
             "--block-polity" => args.block_polity = value()?.parse().ok()?,
-            "--seed" | "-s" => args.seed = value()?.parse().ok()?,
+            "--seed" | "-s" => {
+                args.seed = value()?.parse().ok()?;
+                seed_given = true;
+            }
             "--help" | "-h" => return None,
             _ => return None,
         }
+    }
+    // 不给 --seed 就抽一个新种子：随机化是默认，要复现将种子显式传回来。
+    if !seed_given {
+        args.seed = fastrand::u64(..);
     }
     Some(args)
 }
@@ -198,7 +208,7 @@ fn usage() {
     println!("  --no-anchor      关掉水平锚，观察原始漂移");
     println!("  --trace          sectors/modern 场景逐轮逐商品打印申报、报价、尺度、成交、库存、投入产出");
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
-    println!("  --seed, -s S     随机种子（默认 11）");
+    println!("  --seed, -s S     随机种子（不给就每次抽一个，打到 stderr；给了就复现）");
     println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
     println!("  --learning F     仓库两个学习器的 forgetting（默认 Response {} / PowerLaw {}，越小追得越快）", Response::DEFAULT_FORGETTING, PowerLaw::DEFAULT_FORGETTING);
     println!("  --response-learning F  只改响应曲面（Response）的学习率");

@@ -964,29 +964,26 @@ impl Lab {
 
     fn apply_levels(&mut self) {
         let Self {
-            polities,
-            warehouses,
-            market,
-            ..
+            polities, warehouses, ..
         } = self;
-        let prices: Vec<f32> = market
-            .merchandises
-            .iter()
-            .map(|merchandise| merchandise.price.max(1e-6))
-            .collect();
         for polity in polities.iter_mut() {
             for good in 0..GOODS {
-                // 参照价 = 银河指数 × e^楔子。
+                // 参照价 = **固定计价物**（`BASE_PRICE`）× e^楔子。**银河指数不在这里。**
                 //
-                // 这里**不能**用"该政权自己账本的中间价"：挂价 = 参照价 × 尺度，尺度又由
-                // 账本推出来，于是 账本 → 参照价 → 挂价 → 账本 是一个没有锚的乘法环，
-                // 实测会把挂价推到 f32 边界（$10^{19}$）。本地信息改由**决策价**承载
-                // （`plan` 读逐地方的 bid/ask），不再由参照价承载。
-                let level = prices[good] * polity.wedge[good].exp();
+                // 这条曾经是 `参照价 = 银河指数 × e^楔子`，那让"指数 → 参照价 → 挂价 →
+                // 账本 → 指数"变成一个**乘法闭环**：因为参照价每轮被指数重新缩放，
+                // 买方的预算约束 `cash / (参照价 × realized)` 对整体价格水平完全不变——
+                // 整个经济**没有名义锚**。实测那个环把相对价连乘到 f32 边界（§20）。
+                //
+                // 指数是**读数**，不是输入：它是一个市场跑完之后汇总出来的统计量，
+                // 不应该再回到任何人的决策里。价格水平的原始量是**逐政权的本地价**
+                // （`楔子`，见 `update_levels` 的绝对口径），它由本地成交/对手价推出来，
+                // 并被"每轮固定拨款"这个名义约束钉住。
+                let level = BASE_PRICE * polity.wedge[good].exp();
                 polity.level[good] = if level.is_finite() && level > 0.0 {
                     level
                 } else {
-                    prices[good]
+                    BASE_PRICE
                 };
             }
             let level = polity.level.clone();
@@ -1009,11 +1006,6 @@ impl Lab {
             departments,
             ..
         } = self;
-        let prices: Vec<f32> = market
-            .merchandises
-            .iter()
-            .map(|merchandise| merchandise.price.max(1e-6))
-            .collect();
         let mut observations = vec![vec![(0.0f32, 0.0f32, 0.0f32); GOODS]; polities.len()];
         let mut internal = vec![0.0f32; polities.len()];
         let mut external = vec![0.0f32; polities.len()];
@@ -1031,7 +1023,8 @@ impl Lab {
                     continue;
                 }
                 let quote = merchandise.price.max(1e-6);
-                let counterparty = 2.0 * (deal / prices[k]).ln() - (quote / prices[k]).ln();
+                // **绝对口径**：不再除以指数。指数是读数，进了这里就又变成了输入。
+                let counterparty = 2.0 * deal.ln() - quote.ln();
                 let entry = &mut observations[polity][k];
                 entry.0 += volume;
                 entry.1 += volume * deal;
@@ -1056,7 +1049,8 @@ impl Lab {
             for k in 0..GOODS {
                 let (volume, value, counterparty) = observations[p][k];
                 let vwap = if volume > 0.0 {
-                    value / volume / prices[k]
+                    // **绝对口径**：本地成交均价本身就是价格水平，不再除以指数。
+                    value / volume
                 } else {
                     polity.vwap[k]
                 };
