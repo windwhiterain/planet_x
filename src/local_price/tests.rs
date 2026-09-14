@@ -289,11 +289,10 @@ fn a_targeted_sanction_opens_a_local_gap() {
     // 这种结构性离散下，它的基线本来就有 −0.20（实测无壁垒 −0.204），制裁那点位移会被
     // 盖掉（全断链也只到 −0.219）。所以直接比**被制裁政权自己的本地价**与邻居。
     //
-    // 实测（120 轮，本地价 good1）：开放 w=1.0 → 制裁政权 1.7124 对邻居均值 1.7104
-    // （+0.1%）；半断链 w=0.5 → 1.7129 对 1.7075（+0.3%）；全断链 w=0.0 →
-    // **2.4155 对 1.7034（+42%）**。被点名的部门是**消费**部门：断掉外部通道之后它只能
-    // 在本地买，于是把它要买的商品（1、2）的本地价顶起来——符号与"制裁政权变便宜"的
-    // 一阶直觉相反，因为被切断的是**买方**。
+    // 实测（120 轮、默认带宽 1.0、本地价 good1）：开放 w=1.0 → 制裁政权 / 邻居均值
+    // = 0.9957；半断链 w=0.5 → 1.0577；全断链 w=0.0 → 1.0926（**单调**）。
+    // 被点名的部门是**消费**部门：断掉外部通道之后它只能在本地买，于是把它要买的商品
+    // （1、2）的本地价顶起来——符号与"制裁政权变便宜"的一阶直觉相反，因为被切断的是**买方**。
     fn relative_level(lab: &Lab, polity: usize, good: usize) -> f32 {
         let own = lab.polities[polity].level[good];
         let others: Vec<f32> = lab
@@ -318,30 +317,33 @@ fn a_targeted_sanction_opens_a_local_gap() {
         (open_gap - 1.0).abs() < 0.05,
         "没有任何壁垒时不应当有本地价差：{open_gap}",
     );
-    // ⚠️ **"壁垒越重价差越深"这条单调性不成立**：半断链仍然有通道，实测 ≈ 无壁垒；
-    // 只有完全断链才跳起来（w = 0.0）。所以这里只断言"半断链仍然小"，不断言单调。
+    // 收窄报价带宽（§7.3，默认 1.0）之后，价格水平不再被十几个数量级的挂价噪声盖住，
+    // 于是"壁垒越重、价差越深"**重新成立**——旧口径（±44）下这条单调性正是被噪声打断的。
     assert!(
-        (half_gap - 1.0).abs() < 0.05,
-        "半断链仍然有通道，价差应当仍然小：{half_gap}",
+        half_gap > open_gap,
+        "半断链应当比无壁垒更深：{open_gap} -> {half_gap}",
     );
     assert!(
-        shut_gap > 1.2,
-        "完全断链应当把被制裁政权要买的商品顶起来：{open_gap} -> {shut_gap}",
+        shut_gap > half_gap,
+        "完全断链应当比半断链更深：{half_gap} -> {shut_gap}",
     );
     assert!(
-        shut.polities[1].level[1] > open.polities[1].level[1],
-        "同一政权自己的本地价：无壁垒 {} -> 断链 {}",
+        shut.polities[1].level[1] > half.polities[1].level[1]
+            && half.polities[1].level[1] > open.polities[1].level[1],
+        "被制裁政权自己的本地价应当随壁垒加深单调抬高：{} / {} / {}",
         open.polities[1].level[1],
+        half.polities[1].level[1],
         shut.polities[1].level[1],
     );
     // 被切断的是 1 号政权 0 号单元的**消费**部门：它不吃 good0，所以 good0 的本地价不动
-    // （实测 open == shut == 1.5817）；受影响的是它要买的 good1 / good2。
+    // （实测 open == shut == 1.8004）；受影响的是它要买的 good1 / good2。
     assert!(
         (shut.polities[1].level[0] - open.polities[1].level[0]).abs() < 1e-4,
         "被切断的部门不消费 good0，它的本地价不应当被制裁推动：{} -> {}",
         open.polities[1].level[0],
         shut.polities[1].level[0],
-    );}
+    );
+}
 
 #[test]
 fn a_sanction_stays_local_to_the_named_department() {

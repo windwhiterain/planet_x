@@ -6,12 +6,7 @@ use crate::market::Market;
 use crate::market::Trader;
 use crate::warehouse::{Book, Stock, Warehouse, Warehouses};
 
-/// 报价尺度的数值边界：见 [`crate::utils::LOG_LIMIT`]。
-/// 旧代码这里是 `PRICE_SCALE_FLOOR = 0.25` / `PRICE_SCALE_CEILING = 4.0` +
-/// 49 档离散网格——那是三条策略假设：报价最多加价 4 倍、最多让价 4 倍、而且只能取 49 个值。
-/// 现在尺度是**连续**的，边界只剩"f32 表示不到更远"这一条。
-const SCALE_LOG_LIMIT: f32 = crate::utils::LOG_LIMIT;
-/// 粗扫点数：只用来给细化定界，**不是模型常数**（间隔 2×44/128 ≈ 0.69）
+/// 粗扫点数：只用来给细化定界，**不是模型常数**（间隔 = 带宽 / 128）
 const SCALE_COARSE_STEPS: usize = 129;
 /// 细化的**相对**对数容差：数值方法的收敛判据，不是"报价精度"。
 ///
@@ -27,62 +22,65 @@ const SCALE_GOLDEN: f32 = 0.618_034;
 /// 本地参照价缺席时的计价物。**不是银河指数**——指数是读数，回头当输入就又是一圈自指（§20.8）。
 const FALLBACK_REFERENCE: f32 = 1.0;
 
-/// 粗扫的第 `index` 个 log 尺度
-fn coarse_log_scale(index: usize) -> f32 {
+/// 粗扫的第 `index` 个 log 尺度，在 `[low, high]` 上等距取 `SCALE_COARSE_STEPS` 个点。
+fn coarse_log_scale(index: usize, low: f32, high: f32) -> f32 {
     let fraction = index as f32 / (SCALE_COARSE_STEPS - 1) as f32;
-    -SCALE_LOG_LIMIT + 2.0 * SCALE_LOG_LIMIT * fraction
+    low + (high - low) * fraction
 }
 
-fn coarse_log_step() -> f32 {
-    2.0 * SCALE_LOG_LIMIT / (SCALE_COARSE_STEPS - 1) as f32
+fn coarse_log_step(low: f32, high: f32) -> f32 {
+    (high - low) / (SCALE_COARSE_STEPS - 1) as f32
 }
 
-/// 一维最大化：粗扫定界 + 黄金分割细化。返回最优的 log 尺度。
+/// 在 `[low, high]`（log 尺度）上最大化 `objective`：粗扫定界 + 黄金分割细化。
 ///
 /// 粗扫只负责把最优点夹进一个格子，真正的解由细化给出——所以"每档几 %"是
-/// 收敛容差，不再是模型参数。
-pub(super) fn maximize_log_scale(objective: impl Fn(f32) -> f32) -> f32 {
+/// 收敛容差，不再是模型参数。`low`/`high` 由 [`Stock::quote_log_bounds`] 给出。
+pub(super) fn maximize_log_scale(objective: impl Fn(f32) -> f32, low: f32, high: f32) -> f32 {
+    if !(high > low) {
+        return low;
+    }
     let mut best_index = 0usize;
     let mut best_value = f32::NEG_INFINITY;
     for index in 0..SCALE_COARSE_STEPS {
-        let value = objective(coarse_log_scale(index));
+        let value = objective(coarse_log_scale(index, low, high));
         if value > best_value {
             best_value = value;
             best_index = index;
         }
     }
+    let centre = coarse_log_scale(best_index, low, high);
     if !best_value.is_finite() {
-        return 0.0;
+        return centre;
     }
-    let step = coarse_log_step();
-    let centre = coarse_log_scale(best_index);
-    let mut low = (centre - step).max(-SCALE_LOG_LIMIT);
-    let mut high = (centre + step).min(SCALE_LOG_LIMIT);
-    let mut left = high - SCALE_GOLDEN * (high - low);
-    let mut right = low + SCALE_GOLDEN * (high - low);
+    let step = coarse_log_step(low, high);
+    let mut lo = (centre - step).max(low);
+    let mut hi = (centre + step).min(high);
+    let mut left = hi - SCALE_GOLDEN * (hi - lo);
+    let mut right = lo + SCALE_GOLDEN * (hi - lo);
     let mut left_value = objective(left);
     let mut right_value = objective(right);
     for _ in 0..SCALE_REFINE_STEPS {
-        let width = high - low;
-        let resolution = SCALE_TOLERANCE * (1.0 + low.abs().max(high.abs()));
+        let width = hi - lo;
+        let resolution = SCALE_TOLERANCE * (1.0 + lo.abs().max(hi.abs()));
         if !(width > resolution) {
             break;
         }
         if left_value > right_value {
-            high = right;
+            hi = right;
             right = left;
             right_value = left_value;
-            left = high - SCALE_GOLDEN * (high - low);
+            left = hi - SCALE_GOLDEN * (hi - lo);
             left_value = objective(left);
         } else {
-            low = left;
+            lo = left;
             left = right;
             left_value = right_value;
-            right = low + SCALE_GOLDEN * (high - low);
+            right = lo + SCALE_GOLDEN * (hi - lo);
             right_value = objective(right);
         }
     }
-    let refined = 0.5 * (low + high);
+    let refined = 0.5 * (lo + hi);
     if objective(refined) >= best_value {
         refined
     } else {
@@ -100,6 +98,7 @@ pub(crate) fn best_sale_revenue(stock: &Stock, quantity: f32) -> f32 {
     }
     let response = stock.sell_response();
     let curve = stock.sell_price_curve();
+    let (low, high) = stock.quote_log_bounds();
     let log_price = maximize_log_scale(|log_price| {
         let price = log_price.exp();
         let aggressiveness = Stock::sell_aggressiveness(price);
@@ -110,7 +109,7 @@ pub(crate) fn best_sale_revenue(stock: &Stock, quantity: f32) -> f32 {
         } else {
             f32::NEG_INFINITY
         }
-    });
+    }, low, high);
     let price = log_price.exp();
     let dealt = response.get(quantity, Stock::sell_aggressiveness(price));
     let revenue = dealt * curve.get(price);
@@ -131,8 +130,9 @@ pub(crate) fn best_purchase_cost(stock: &Stock, quantity: f32) -> f32 {
     let response = stock.buy_response();
     let curve = stock.buy_price_curve();
     let mut best = f32::INFINITY;
+    let (low, high) = stock.quote_log_bounds();
     for index in 0..SCALE_COARSE_STEPS {
-        let price = coarse_log_scale(index).exp();
+        let price = coarse_log_scale(index, low, high).exp();
         if !price.is_finite() || !(price > 0.0) {
             continue;
         }
@@ -164,8 +164,9 @@ pub(crate) fn affordable_quantity(stock: &Stock, cash: f32) -> f32 {
     let response = stock.buy_response();
     let curve = stock.buy_price_curve();
     let mut best = 0.0f32;
+    let (low, high) = stock.quote_log_bounds();
     for index in 0..SCALE_COARSE_STEPS {
-        let price = coarse_log_scale(index).exp();
+        let price = coarse_log_scale(index, low, high).exp();
         if !price.is_finite() || !(price > 0.0) {
             continue;
         }
@@ -226,6 +227,7 @@ fn sale_price(stock: &Stock, available: f32) -> f32 {
     }
     let response = stock.sell_response();
     let curve = stock.sell_price_curve();
+    let (low, high) = stock.quote_log_bounds();
     let log_price = maximize_log_scale(|log_price| {
         let price = log_price.exp();
         let aggressiveness = Stock::sell_aggressiveness(price);
@@ -236,7 +238,7 @@ fn sale_price(stock: &Stock, available: f32) -> f32 {
         } else {
             f32::NEG_INFINITY
         }
-    });
+    }, low, high);
     let price = log_price.exp();
     if price.is_finite() && price > 0.0 {
         price
@@ -291,8 +293,9 @@ fn purchase_price(stock: &Stock, need: f32, cash: f32) -> Option<(f32, f32)> {
     let curve = stock.buy_price_curve();
     let mut cheapest: Option<(f32, f32, f32)> = None; // (cost, volume, price)
     let mut most: Option<(f32, f32, f32)> = None; // (dealt, volume, price) 够不着时的尽力
+    let (low, high) = stock.quote_log_bounds();
     for index in 0..SCALE_COARSE_STEPS {
-        let price = coarse_log_scale(index).exp();
+        let price = coarse_log_scale(index, low, high).exp();
         if !price.is_finite() || !(price > 0.0) {
             continue;
         }
@@ -363,6 +366,7 @@ fn observe(stock: &mut Stock, merchandise: &crate::market::TraderMerchandise) {
     }
     let deal_price = merchandise.deal_price();
     if price.is_finite() && price > 0.0 && deal_price.is_finite() && deal_price > 0.0 {
+        stock.last_deal = deal_price;
         if declared > 0.0 {
             stock.sell_price_curve.update(price, deal_price);
         } else {

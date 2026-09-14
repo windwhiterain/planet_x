@@ -1,6 +1,7 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::estimator::PowerLaw;
 use planet_x::estimator2d::Response;
+use planet_x::warehouse::Warehouses;
 use planet_x::local_price::{
     bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
     LADDER_THRIFTY, SECTOR_MOTIVE,
@@ -38,6 +39,8 @@ struct Args {
     barrier: f32,
     curvature: f32,
     fluctuation: f32,
+    /// 报价搜索的对数半宽（中心 = 上一轮自己的成交价）。
+    quote_band: f32,
     /// 仓库内部学习率（None = 各自默认）。见 `Lab::with_learning_rates`
     learning: Option<f32>,
     response_learning: Option<f32>,
@@ -85,6 +88,7 @@ impl Default for Args {
             barrier: DEFAULT_BARRIER,
             curvature: DEFAULT_CURVATURE,
             fluctuation: DEFAULT_FLUCTUATION,
+            quote_band: Warehouses::DEFAULT_QUOTE_BAND,
             learning: None,
             response_learning: None,
             price_learning: None,
@@ -155,6 +159,7 @@ fn parse() -> Option<Args> {
             "--barrier" => args.barrier = value()?.parse().ok()?,
             "--curvature" => args.curvature = value()?.parse().ok()?,
             "--fluctuation" => args.fluctuation = value()?.parse().ok()?,
+            "--quote-band" => args.quote_band = value()?.parse().ok()?,
             "--learning" => args.learning = Some(value()?.parse().ok()?),
             "--response-learning" => args.response_learning = Some(value()?.parse().ok()?),
             "--price-learning" => args.price_learning = Some(value()?.parse().ok()?),
@@ -192,6 +197,9 @@ fn usage() {
     println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
     println!("  --seed, -s S     随机种子（不给就每次抽一个，打到 stderr；给了就复现）");
     println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
+    println!("  --quote-band F   报价搜索的对数半宽（中心 = 上一轮自己的成交价；默认 {}，{} = 全范围）",
+        Warehouses::DEFAULT_QUOTE_BAND,
+        planet_x::utils::LOG_LIMIT);
     println!("  --learning F     仓库两个学习器的 forgetting（默认 Response {} / PowerLaw {}，越小追得越快）", Response::DEFAULT_FORGETTING, PowerLaw::DEFAULT_FORGETTING);
     println!("  --response-learning F  只改响应曲面（Response）的学习率");
     println!("  --price-learning F     只改价格曲线（PowerLaw）的学习率——§19.5/§20 的承重旋钮");
@@ -269,6 +277,7 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
         })
         .with_grant(args.grant)
         .with_learning_rates(response_learning, price_learning, args.fixed_price_slope)
+        .with_quote_band(args.quote_band)
         .with_relations(&bloc_relations(args.polities, args.relations));
     if let Some(forgetting) = args.book_forgetting {
         lab = lab.with_book_forgetting(forgetting);

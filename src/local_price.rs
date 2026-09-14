@@ -517,6 +517,13 @@ impl Lab {
         self
     }
 
+    /// 报价搜索的对数半宽（中心 = 上一轮自己的成交价）。默认 = `LOG_LIMIT`，
+    /// 即全 f32 范围（历史行为）。见 `docs/market-system.md` §7.3。
+    pub fn with_quote_band(mut self, band: f32) -> Self {
+        self.warehouses = self.warehouses.with_quote_band(band);
+        self
+    }
+
     pub fn with_anchor(mut self, anchor: bool) -> Self {
         self.anchor = anchor;
         self

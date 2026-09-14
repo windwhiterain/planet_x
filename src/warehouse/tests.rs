@@ -3,6 +3,7 @@ use fastrand::Rng;
 use super::{Book, Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
+use crate::utils::LOG_LIMIT;
 use crate::market::{
     Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
 };
@@ -597,18 +598,53 @@ fn the_scale_search_terminates_far_from_one() {
     // |log 尺度| ≈ 44 处的 ULP（3.8e-6），区间永远缩不下去 ⇒ 永不返回。
     // 旧网格把尺度限在 [0.25, 4]（log ∈ ±1.39），所以这条悬崖碰不到；
     // 把范围放开到 f32 边界之后，最优点落在远处就必然踩上它。
+    // 带宽现在是参数：这里显式给全 f32 范围，验的还是"细化在远处也收敛"。
     let far = |log_scale: f32| -(log_scale - 40.0).abs();
-    let found = super::step::maximize_log_scale(far);
+    let found = super::step::maximize_log_scale(far, -LOG_LIMIT, LOG_LIMIT);
     assert!(
         (found - 40.0).abs() < 1e-2,
         "远端的最大值应当被找到：{found}",
     );
 
     let near = |log_scale: f32| -(log_scale + 43.0).abs();
-    let found = super::step::maximize_log_scale(near);
+    let found = super::step::maximize_log_scale(near, -LOG_LIMIT, LOG_LIMIT);
     assert!(
         (found + 43.0).abs() < 1e-2,
         "贴着数值边界的最大值也应当被找到：{found}",
+    );
+}
+#[test]
+fn a_narrow_quote_band_confines_the_quote() {
+    // §7.3：报价搜索的中心是**上一轮自己的成交价**，半宽可配。锚 = 100、半宽 0.5
+    // ⇒ 报价只能落在 [100·e^-0.5, 100·e^0.5] ≈ [60.7, 164.9]。
+    let band = 0.5f32;
+    let anchor = 100.0f32;
+    let mut rng = deterministic_rng();
+    let mut narrow_market = market(1, 1.0, 1);
+    let mut warehouse = warehouse1(&[(10.0, 4.0)]);
+    {
+        let stock = &mut warehouse.warehouses[0].stocks[0];
+        stock.last_deal = anchor;
+        stock.quote_band = band;
+    }
+
+    warehouse.step(&mut narrow_market, &mut rng);
+    let quote = warehouse.warehouses[0].stocks[0].marketing_price();
+    assert!(
+        quote >= anchor * (-band).exp() * (1.0 - 1e-4)
+            && quote <= anchor * band.exp() * (1.0 + 1e-4),
+        "报价应当落在锚 ±{band} 的对数区间里：{quote}",
+    );
+
+    // 同一个仓位在**默认带宽**（全范围、中心仍是计价物）下会报回 ~1——说明窄区间
+    // 确实夹住了报价，而不是这条测试恰好落在区间里。
+    let mut wide_market = market(1, 1.0, 1);
+    let mut wide = warehouse1(&[(10.0, 4.0)]);
+    wide.step(&mut wide_market, &mut rng);
+    let free = wide.warehouses[0].stocks[0].marketing_price();
+    assert!(
+        free < anchor * (-band).exp(),
+        "默认全范围下不应当被这个窄区间约束：{free}",
     );
 }
 
