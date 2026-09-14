@@ -21,6 +21,13 @@ pub struct Warehouses {
     pub book_forgetting: f32,
     /// index with 地方：同一地方共享一套「本地成交价 ÷ 指数」的比值（**已实现**的价）
     pub local_ratios: Vec<Vec<f32>>,
+    /// index with 地方：**指数专用**账本。两侧取申报量加权的 log 平均（对数尺度上的中心），
+    /// 而不是 [`Book`] 的 `max`/`min` 边际价。
+    ///
+    /// `max`/`min` 是有偏的次序统计量（买方尺度分布比卖方宽，`max` 的向上偏置压过
+    /// `min` 的向下偏置），拿它去乘回报价就是一个恒正的回路增益。部门决策要的是
+    /// "我立刻能成交的价"，所以 [`Book`] 保持边际；**指数是水平，必须无偏**。
+    pub index_books: Vec<Vec<Book>>,
     /// index with 地方：同一地方共享一套账本（**挂出来**的价）
     ///
     /// 与 `local_ratios` 的区别是要害：比值只在有成交时才更新，账本只看挂单，
@@ -133,6 +140,7 @@ impl Warehouses {
             book_forgetting: Self::DEFAULT_BOOK_FORGETTING,
             local_ratios: Vec::new(),
             books: Vec::new(),
+            index_books: Vec::new(),
         }
     }
 
@@ -146,7 +154,11 @@ impl Warehouses {
         }
     }
 
-    /// 银河指数 = **各地方账本中间价的申报量加权几何平均**（对数尺度上的中心）。
+    /// 银河指数 = **各地方中间价的申报量加权几何平均**（对数尺度上的中心）。
+    ///
+    /// 用的是 [`Warehouses::index_books`]（两侧是申报量加权的 log 平均），**不是**
+    /// [`Warehouses::books`] 的 `max`/`min` 边际价——边际价是有偏的次序统计量，
+    /// 拿它当水平就会给这个乘法回路一个恒正增益（见 §20）。
     ///
     /// 这是依赖倒置的另一半：账本先验、指数导出。旧口径的指数是"成交的加权平均"，
     /// 没有成交就一个字都不动——三产的价格因此冻成第 1 轮的化石。
@@ -170,7 +182,7 @@ impl Warehouses {
             let mut weighted_log = 0.0f32;
             let mut flat_log = 0.0f32;
             let mut formed = 0.0f32;
-            for (locality, row) in self.books.iter().enumerate() {
+            for (locality, row) in self.index_books.iter().enumerate() {
                 let Some(book) = row.get(k) else {
                     continue;
                 };

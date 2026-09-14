@@ -758,7 +758,7 @@ fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
     // 两个地方必须不同，否则两本书都算进同一个地方的成交量
     warehouses.warehouses[0].locality = 0;
     warehouses.warehouses[1].locality = 1;
-    warehouses.books = vec![
+    warehouses.index_books = vec![
         vec![Book {
             bid: 1.0,
             ask: 1.0,
@@ -776,4 +776,6 @@ fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
         "指数应当取对数尺度的中心 2.0，实际 {}",
         index[0],
     );
+    // 决策账本（max/min）故意留空：指数不许读它。
+    assert!(warehouses.books.is_empty() || warehouses.books[0][0].mid() == 0.0);
 }
