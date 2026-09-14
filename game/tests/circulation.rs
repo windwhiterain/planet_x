@@ -30,19 +30,11 @@ fn production_is_fully_consumed_by_the_other_departments() {
         economy.step();
         for k in 0..GOODS {
             let produced = 4.0;
+            // 直接用**实际提货量**：`distribution × 执行率 × 配方` 那个口径随
+            // `distribution` 归一化与 `execution` 一起删掉了，而实际流量本来就该这么测。
             let consumed: f32 = (0..DEPARTMENTS)
                 .filter(|department| *department != k)
-                .map(|department| {
-                    economy.departments.departments[department]
-                        .policies
-                        .iter()
-                        .map(|policy| {
-                            policy.distribution()
-                                * economy.departments.departments[department].policy_execution()
-                                * policy.consumptions[k]
-                        })
-                        .sum::<f32>()
-                })
+                .map(|department| economy.departments.departments[department].intake()[k])
                 .sum();
             assert_close(consumed, produced, &format!("第 {round} 轮商品 {k} 的消耗"));
         }

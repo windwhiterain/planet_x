@@ -1654,5 +1654,49 @@ seed 8 ladder: 1e+01 2e+18 2e+21 2e+20 4e+14 4e+09 2e+06 4e+11 3e+19 5e+17 3e+09
   `a_targeted_sanction_opens_a_monotone_local_gap`、
   `a_sanction_stays_local_to_the_named_department`）：直接读价格水平，与 §19.2 的振荡是同一件事。
 
+**workspace 成员 `game`**：此前一直只构建根包（`--lib` / `--bins`），漏了它。
+它用到三处已删除的 `policy_execution`（`game/src/lib.rs` 两处、`game/tests/circulation.rs` 一处），
+改为**实际提货量 `intake`**；`game/src/main.rs` 的输出列与 `Snapshot` 字段一并改名。
+`cargo build --workspace --all-targets` 现在通过。`game` 自己的
+`cargo test --workspace`：**3 过 / 3 失败**——
+`production_is_fully_consumed_by_the_other_departments`、
+`the_first_rounds_swing_once_before_the_fixed_point`、
+`the_circulation_settles_into_a_fixed_point`。它们断言的是旧消费口径下的
+"固定点"（`game` 是另一套简化经济），与根包那 12 条同类，同样押后到增益问题查清。
+
 **重新基线要等 §19.2 的增益问题查清之后再做**，否则要改两遍；而且新的基线必须是
 "多个种子下的分布"（比如中位数与四分位），不能是单条轨迹的常数。
+
+### 19.5 更正：`recenter-gain = 0.1` 那个"稳定点"是瞬态，不是稳定区
+
+§19.2 之后我扫了 `--recenter-gain`，在 **400 轮窗口**下看到 `gain = 0.1` 时
+ladder 那档 `ln` 振幅只有 **1.6**、末值 `10^1.2`，据此写了"稳定区确实存在"。
+**这条是错的，此处撤回。**
+
+同一配置跑到 **600 轮**，seed 3 的 ladder 振幅变成 **106.0**；六个种子（1/2/3/5/8/11）
+在 `gain = 0.1` 下、600 轮的振幅分别是：
+
+```
+        seed:    1      2      3      5      8     11
+flat   amp:  55.2   39.3   92.0   42.3   98.8  105.4
+ladder amp:  89.7   89.5  106.0   47.9   45.1   23.5
+```
+
+**没有一条在 23.5 以下，两条在 100 上下。** 所以 400 轮那个 1.6 是系统处在
+一段安静期，再跑 200 轮就离开了——**"窗口内的振幅"不是平稳统计量**，
+而 400 轮不够长。
+
+方法论上要记住两条（都是这次踩出来的）：
+
+1. **振幅这个统计量本身在一条轨迹内就能变 15–20 个数量级**（见 §19.2 的序列），
+   所以拿窗口内的 max−min 当"稳定的度量"会系统性低估：安静期会让任何配置看起来都稳。
+   判据应该是**长时程**（≥ 数千轮）下的增长率，或者干脆是"这条轨迹有没有越过
+   某个界"。
+2. 单种子 + 短窗口的组合已经骗过我两次（先是零噪声的"完美稳态"，后是这个 1.6），
+   所以任何"找到了稳定区"的结论都必须先过**多种子 + 长时程**。
+
+至此已排除的旋钮：`--gain`（默认规则不读）、`--forgetting`（弱，17%）、
+`--recenter-gain`（表观效应是窗口假象）。**剩下唯一没扫过的候选**是仓库内部那三个
+写死的学习率：`Response::DEFAULT_FORGETTING = 0.95`、两条 `PowerLaw` 的学习率、
+以及账本的 `LOCAL_PRICE_FORGETTING`——而价格曲线学的正是相对价格
+（`realized = deal_price/reference`），所以它们才是最该扫的。
