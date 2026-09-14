@@ -99,8 +99,8 @@ fn power_law_keeps_its_quote_positive_and_bounded() {
                 quote > 0.0 && quote.is_finite(),
                 "斜率 {slope}、规模 {volume} 的报价越界：{quote}",
             );
-            assert!(quote <= PowerLaw::MAX_LOG_SCALE.exp() + 1e-3);
-            assert!(quote >= PowerLaw::MIN_LOG_SCALE.exp() - 1e-6);
+            assert!(quote <= PowerLaw::LOG_LIMIT.exp());
+            assert!(quote >= (-PowerLaw::LOG_LIMIT).exp());
         }
     }
 }

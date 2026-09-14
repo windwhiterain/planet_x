@@ -192,5 +192,9 @@ fn response_noise_grows_with_the_miss() {
         clean.noise(),
     );
     assert!(clean.noise() >= Response::MIN_NOISE);
-    assert!(noisy.noise() <= Response::MAX_NOISE);
+    assert!(
+        noisy.noise().is_finite() && noisy.noise() > 0.0,
+        "噪声不再有上限（那是策略），但必须有限且为正：{}",
+        noisy.noise(),
+    );
 }

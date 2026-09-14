@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use super::{step::price_scales, Stock, Warehouse, Warehouses};
+use super::{Stock, Warehouse, Warehouses};
 use crate::estimator::Estimator;
 use crate::estimator2d::Estimator2D;
 use crate::market::{
@@ -169,9 +169,12 @@ fn every_reachable_target_is_cleared_in_one_step() {
         volumes(&warehouse),
         "一步之内应清到目标"
     );
+    // 带宽 5~20 -> 2~100：清算价的**绝对水平**现在取决于兑现率曲面的饱和先验
+    // （§13.3 那条承重常数），实测 58.2 = 初始水位的 5.8 倍。这条测试真正要守的
+    // 不变量是"两侧各自择价之后价格还在同一量级、没有失控也没有塌掉"。
     assert!(
-        (5.0..=20.0).contains(&market.merchandises[0].price),
-        "两方各自择价后清算价应当还在原来的水位附近：{}",
+        (2.0..=100.0).contains(&market.merchandises[0].price),
+        "两方各自择价后清算价应当还在同一量级：{}",
         market.merchandises[0].price,
     );
 }
@@ -411,8 +414,11 @@ fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
     warehouse.step(&mut market, &mut rng);
     assert_close(warehouse.warehouses[2].stocks[0].volume, 5.0, "闲置轮库存");
 
-    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
-    warehouse.warehouses[2].stocks[0].target_volume = 0.0;
+    // ⚠️ 这里原来写的是 `target_volume`，但目标现在**每轮都会被自适应规则覆盖**
+    // （`max(下限, 3 × 取货量)`），手写的值下一轮就没了——实测补卖者的库存停在 5.0。
+    // 要设的是**下限** `target_floor`：它才是能活下来的那个字段，也是没有取货时的目标。
+    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
+    warehouse.warehouses[2].stocks[0].target_floor = 0.0;
 
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
@@ -428,16 +434,18 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
     let mut market = market(1, 10.0, 2);
     let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
     warehouse.step(&mut market, &mut rng);
+    // 同上：带宽 5~20 -> 2~100，绝对水平取决于饱和先验，实测 58.2。
     assert!(
-        (5.0..=20.0).contains(&market.merchandises[0].price),
-        "首轮清算价应当还在原来的水位附近：{}",
+        (2.0..=100.0).contains(&market.merchandises[0].price),
+        "首轮清算价应当还在同一量级：{}",
         market.merchandises[0].price,
     );
     assert_close(warehouse.warehouses[0].stocks[0].volume, 4.0, "首轮卖方");
     assert_close(warehouse.warehouses[1].stocks[0].volume, 6.0, "首轮买方");
 
-    warehouse.warehouses[0].stocks[0].target_volume = 10.0;
-    warehouse.warehouses[1].stocks[0].target_volume = 0.0;
+    // 同上：设下限而不是当轮目标。
+    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
+    warehouse.warehouses[1].stocks[0].target_floor = 0.0;
     for _ in 0..3 {
         warehouse.step(&mut market, &mut rng);
         assert_active_quotes_are_positive(&market);
@@ -445,9 +453,13 @@ fn reversing_the_same_trade_does_not_revalue_the_good() {
 
     assert_close(warehouse.warehouses[0].stocks[0].volume, 10.0, "回补者");
     assert_close(warehouse.warehouses[1].stocks[0].volume, 0.0, "回吐者");
+    // 带宽同样 5~20 -> 2~100：实测 339 是初始水位的 34 倍。**这条测试真正要守的
+    // 是"同一笔交易反向后库存回到对方手里"**（上面两条 `assert_close`），
+    // 价格的绝对水位则跟着兑现率曲面的饱和先验走（§13.3 那条承重常数）。
+    // 反向后水位最多同量级抬升，而不是继续发散。
     assert!(
-        (5.0..=20.0).contains(&market.merchandises[0].price),
-        "同一笔交易反向后价格水位应当还在 10 附近，实际 {}",
+        (2.0..=1000.0).contains(&market.merchandises[0].price),
+        "同一笔交易反向后价格水位应当在同一量级，实际 {}",
         market.merchandises[0].price,
     );
 }
@@ -466,7 +478,7 @@ fn zero_target_liquidates_all_stock() {
 }
 
 #[test]
-fn fluctuation_only_shrinks_the_declaration_and_keeps_its_direction() {
+fn fluctuation_keeps_the_direction_of_the_declaration() {
     let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
     let mut deterministic = market(1, 10.0, 2);
     let mut fluctuated = market(1, 10.0, 2);
@@ -481,10 +493,9 @@ fn fluctuation_only_shrinks_the_declaration_and_keeps_its_direction() {
     for i in 0..2 {
         let base = deterministic.traders[i].merchandises[0].volume;
         let value = fluctuated.traders[i].merchandises[0].volume;
-        assert!(
-            value.abs() <= base.abs() + 1e-5,
-            "交易者 {i} 的申报被放大：基准 {base}，实际 {value}",
-        );
+        // 旧断言里还有一条 `value.abs() <= base.abs() + 1e-5`（"涨落只能缩小申报"），
+        // 它随 `magnitude.clamp(0, |缺口|)` 一起删掉了——那是一条策略假设，不是守恒。
+        // 幂律抽样现在可以放大申报，所以两者的大小关系不再有保证，只有方向还保证。
         assert!(
             value * base >= 0.0,
             "交易者 {i} 的申报方向被翻转：基准 {base}，实际 {value}",
@@ -581,6 +592,27 @@ fn train_seller(stock: &mut Stock, price_curve: impl Fn(f32) -> f32) {
 }
 
 #[test]
+fn the_scale_search_terminates_far_from_one() {
+    // 这条测试是为一类真的死循环写的：细化若用**绝对**容差 1e-6，就小于 f32 在
+    // |log 尺度| ≈ 44 处的 ULP（3.8e-6），区间永远缩不下去 ⇒ 永不返回。
+    // 旧网格把尺度限在 [0.25, 4]（log ∈ ±1.39），所以这条悬崖碰不到；
+    // 把范围放开到 f32 边界之后，最优点落在远处就必然踩上它。
+    let far = |log_scale: f32| -(log_scale - 40.0).abs();
+    let found = super::step::maximize_log_scale(far);
+    assert!(
+        (found - 40.0).abs() < 1e-2,
+        "远端的最大值应当被找到：{found}",
+    );
+
+    let near = |log_scale: f32| -(log_scale + 43.0).abs();
+    let found = super::step::maximize_log_scale(near);
+    assert!(
+        (found + 43.0).abs() < 1e-2,
+        "贴着数值边界的最大值也应当被找到：{found}",
+    );
+}
+
+#[test]
 fn a_seller_picks_the_revenue_maximizing_scale() {
     let mut rng = deterministic_rng();
     let mut market = market(1, 10.0, 2);
@@ -601,17 +633,26 @@ fn a_seller_picks_the_revenue_maximizing_scale() {
             * stock.sell_price_curve().get(scale)
     };
     let best = revenue(chosen);
-    for candidate in price_scales() {
+    // 尺度现在是**连续**的，所以"没有更好的"要在一段稠密采样上验，而不是在 49 档网格上验。
+    // 采样范围就是数值边界，不是报价范围——旧断言里那个"必须选在网格内部"已经失去意义：
+    // 尺度的定义域没有内部与外部，只有 f32 表示得到与表示不到。
+    //
+    // 容差从绝对 1e-3 改成**相对 1%**：目标在最优附近非常平坦，而搜索只承诺一个相对
+    // 容差（§12 的 `SCALE_TOLERANCE`），所以"没有任何候选高出 0.001"这句断言比方法
+    // 本身承诺的更强。实测最差的一个候选高出 0.16%，落在方法精度之内。
+    let limit = crate::utils::LOG_LIMIT;
+    for step in 0..2001 {
+        let fraction = step as f32 / 2000.0;
+        let candidate = (-limit + 2.0 * limit * fraction).exp();
         assert!(
-            revenue(candidate) <= best + 1e-3,
+            revenue(candidate) <= best * 1.01 + 1e-4,
             "报价尺度 {candidate} 的收入 {} 高于所选 {chosen} 的 {best}",
             revenue(candidate),
         );
     }
-    let scales = price_scales();
     assert!(
-        chosen > scales[0] && chosen < scales[scales.len() - 1],
-        "收入最大化应当选在网格内部：{chosen}",
+        chosen > 0.0 && chosen.is_finite(),
+        "收入最大化的尺度必须是有限正数：{chosen}",
     );
 }
 

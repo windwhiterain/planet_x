@@ -31,8 +31,8 @@ pub struct PowerLaw {
 
 impl PowerLaw {
     pub const DEFAULT_FORGETTING: f32 = 0.95;
-    pub const MIN_LOG_SCALE: f32 = -6.907_755_4;
-    pub const MAX_LOG_SCALE: f32 = 6.907_755_4;
+    /// 数值边界，见 [`crate::utils::LOG_LIMIT`]——不是"价格倍数不该超出 1e±3"
+    pub const LOG_LIMIT: f32 = crate::utils::LOG_LIMIT;
     pub const INITIAL_COVARIANCE: f32 = 1.0;
 
     pub fn new(slope: f32, intercept: f32, forgetting: f32) -> Self {
@@ -122,8 +122,6 @@ impl Estimator for PowerLaw {
         if log_scale.is_nan() {
             return 0.0;
         }
-        log_scale
-            .clamp(Self::MIN_LOG_SCALE, Self::MAX_LOG_SCALE)
-            .exp()
+        log_scale.clamp(-Self::LOG_LIMIT, Self::LOG_LIMIT).exp()
     }
 }

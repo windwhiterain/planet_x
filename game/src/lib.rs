@@ -94,13 +94,16 @@ impl DomesticEconomy {
         let departments = Departments::new(
             (0..DEPARTMENTS)
                 .map(|department| {
-                    Department::new(
+                    let mut policies = vec![Policy::production(
+                        vec![0.0; GOODS],
                         production(department),
+                    )];
+                    policies.extend(
                         (0..GOODS)
                             .filter(|good| *good != department)
-                            .map(|good| Policy::new(campaign(good), MOTIVE))
-                            .collect(),
-                    )
+                            .map(|good| Policy::consumption(campaign(good), MOTIVE)),
+                    );
+                    Department::new(policies)
                 })
                 .collect(),
         )
@@ -181,8 +184,10 @@ impl DomesticEconomy {
 
         let mut output = 0.0;
         for department in &self.departments.departments {
-            for (k, productions) in department.productions.iter().enumerate() {
-                output += productions.max(0.0) * prices[k];
+            for policy in department.policies.iter().filter(|policy| policy.is_production()) {
+                for (k, produced) in policy.outputs.iter().enumerate() {
+                    output += produced.max(0.0) * prices[k];
+                }
             }
         }
 
