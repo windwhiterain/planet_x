@@ -3,10 +3,10 @@
 // 「场景里的那盏太阳」。**不许再写死方向**（§60）：太阳是哪种灯由场景说了算，
 // 这里只负责把 Bevy 的光源数据翻成着色要用的那一份。
 //
-// 为什么点光源要绕这一圈：`Lights` 那份 uniform 里**只有方向光**（`directional_lights`），
-// 点光源住在聚类缓冲 `clustered_lights` 里，得先按片元所在的 cluster 问出 id
-// （`view_fragment_cluster_index` → `unpack_clusterable_object_index_ranges`
-// → `get_clusterable_object_id`），这三跳与 `bevy_pbr::apply_pbr_lighting` 里的取法一致。
+// 为什么点光源要看 `clustered_lights`：`Lights` 那份 uniform 里**只有方向光**（`directional_lights`），
+// 点光源住在聚类缓冲 `clustered_lights.data` 里。
+// ⚠ 但**只在那一格里直接取第 0 个**，不走 `view_fragment_cluster_index` 那三跳（§64：那条路在远距离
+//    上会让大气的采样点查不到灯、退回兜底，画面上留下一条硬台阶）。
 
 #import bevy_pbr::mesh_view_bindings::{view, lights, clustered_lights}
 #import bevy_pbr::mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT
@@ -65,63 +65,55 @@ fn is_orthographic() -> bool {
     return view.clip_from_view[3][3] == 0.0;
 }
 
-/// 取"主光"：**先点光源**（问片元所在 cluster 要，取最近的一盏），没有才退回第 0 盏方向光。
+/// 取"主光"：**直接问场景里那盏点光源**（`clustered_lights.data[0]`），照不到才退回第 0 盏方向光。
 ///
 /// 于是"太阳是点光源还是平行光"是**场景**的事，shader 一个常量都不写死。
-/// 取最近而不是取最亮：一个 cluster 里有多盏时，"谁在照这个点"由距离决定，
-/// 这跟 Bevy 的 `point_light` 只挑"当前这一盏"的语义一致（真正的多灯累加留给以后）。
+/// ⚠ **不问 cluster**（§64 实测）：`view_fragment_cluster_index` 那条路按片元所在的格子取灯，
+///    而"我们的采样点落在哪个格子/哪一层 z 切片"是 Bevy 聚类网格的内部细节 —— 相机拉到远距离
+///    （viewer 里 `--place …,14`）时，大气沿 chord 的 5 个采样点**有一半查不到灯**，退回兜底，
+///    于是画面上沿网格边界出现一条**硬台阶**（左右两半的失败率 4% 对 57%）。
+///    这个渲染器只摆一盏灯 ⇒"最近的一盏"就是"这一盏"，直接取它既省一整套格子计算、又不受视口影响。
+///    真要多灯累加/灯间遮挡，得先把灯自己的数据喂进来（§60.5 记着这条）。
+/// ⚠ `frag_coord` 只为不动四个调用点而留着。
 fn sun_light(point: vec3<f32>, frag_coord: vec2<f32>) -> SunLight {
-    let cluster = view_fragment_cluster_index(frag_coord, view_z_of(point), is_orthographic());
-    let ranges = unpack_clusterable_object_index_ranges(cluster);
-
-    var chosen = 0xFFFFFFFFu;
-    var nearest = 1.0e30;
-    for (
-        var index = ranges.first_point_light_index_offset;
-        index < ranges.first_spot_light_index_offset;
-        index += 1u
-    ) {
-        let id = get_clusterable_object_id(index);
-        let offset = clustered_lights.data[id].position_radius.xyz - point;
-        let distance_squared = dot(offset, offset);
-        if distance_squared < nearest {
-            nearest = distance_squared;
-            chosen = id;
-        }
-    }
+    let data = &clustered_lights.data[0];
 
     var light: SunLight;
-    if chosen != 0xFFFFFFFFu {
-        let data = &clustered_lights.data[chosen];
-        let offset = (*data).position_radius.xyz - point;
-        light.direction = normalize(offset);
-        light.position = (*data).position_radius.xyz;
-        light.color = (*data).color_inverse_square_range.rgb
-            * range_attenuation(dot(offset, offset), (*data).color_inverse_square_range.w);
-        light.point = 1u;
-        light.shadow_maps = select(
-            0u,
-            1u,
-            ((*data).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u,
+    // 第 0 格"没被写过"（uniform 数组的默认值 = 全 0）⇒ 这一帧没有点光源，退回第 0 盏方向光
+    // （老场景、探针、只摆了平行光的场景）。
+    // ⚠ **不能拿 `position_radius.w` 当"有没有灯"**：那格不是 range（实测对这盏灯读到 0），
+    //    拿它判会把有点光源的场景也推进兜底 —— §64.4 那次"整幅受光变了"就是这么来的。
+    //    用颜色判"写没写过"：全零点光源本来就贡献 0，退兜底不会丢东西。
+    if all((*data).color_inverse_square_range.rgb == vec3<f32>(0.0)) {
+        // ⚠ 一盏方向光都没有时 `directional_lights[0]` 是全零，`normalize` 会算出 NaN ⇒
+        //   这里按 `n_directional_lights` 选一个安全的方向（朝 +Z，且颜色为 0 ⇒ 画面全黑而不是花屏）。
+        let directional = &lights.directional_lights[0];
+        let available = lights.n_directional_lights > 0u;
+        light.direction = select(
+            vec3<f32>(0.0, 0.0, 1.0),
+            normalize((*directional).direction_to_light),
+            available,
         );
-        light.shadow_id = chosen;
+        light.position = light.direction * FAR_LIGHT;
+        light.color = select(vec3<f32>(0.0), (*directional).color.rgb, available);
+        light.point = 0u;
+        light.shadow_maps = select(0u, (*directional).num_cascades, available);
+        light.shadow_id = 0u;
         return light;
     }
 
-    // 兜底：一盏点光源都没有的场景（老场景、探针、只摆了平行光的场景）。
-    // ⚠ 一盏方向光都没有时 `directional_lights[0]` 是全零，`normalize` 会算出 NaN ⇒
-    //   这里按 `n_directional_lights` 选一个安全的方向（朝 +Z，且颜色为 0 ⇒ 画面全黑而不是花屏）。
-    let directional = &lights.directional_lights[0];
-    let available = lights.n_directional_lights > 0u;
-    light.direction = select(
-        vec3<f32>(0.0, 0.0, 1.0),
-        normalize((*directional).direction_to_light),
-        available,
+    let offset = (*data).position_radius.xyz - point;
+    let distance_squared = dot(offset, offset);
+    light.direction = normalize(offset);
+    light.position = (*data).position_radius.xyz;
+    light.color = (*data).color_inverse_square_range.rgb
+        * range_attenuation(distance_squared, (*data).color_inverse_square_range.w);
+    light.point = 1u;
+    light.shadow_maps = select(
+        0u,
+        1u,
+        ((*data).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u,
     );
-    light.position = light.direction * FAR_LIGHT;
-    light.color = select(vec3<f32>(0.0), (*directional).color.rgb, available);
-    light.point = 0u;
-    light.shadow_maps = select(0u, (*directional).num_cascades, available);
     light.shadow_id = 0u;
     return light;
 }
