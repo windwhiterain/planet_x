@@ -1,4 +1,3 @@
-pub mod probe;
 
 mod settlement;
 mod step;
@@ -6,18 +5,20 @@ mod step;
 #[cfg(test)]
 mod tests;
 
-use fastrand::Rng;
 
 use crate::market::Market;
 use crate::warehouse::Warehouses;
 
 pub struct Departments {
     pub departments: Vec<Department>,
-    /// index with [`Self::departments`]
-    pub grants: Vec<f32>,
-    pub treasury: f32,
-    /// 消费结算规则，默认走 [`Rationing::Interior`]
+    /// 消费结算规则
     pub rationing: Rationing,
+    /// 转移支付速率：每轮把余额按这个比例拉向均值（0 = 不转移）
+    pub transfer_rate: f32,
+    /// 货币总量的目标值（0 = 不控制）。结算会净创造货币（部门把产出卖给自己的仓库，
+    /// 而仓库不持钱），所以存量货币必须有一个数量控制，否则购买力无界增长。
+    /// 按比例缩放保持相对份额，所以"存量"仍然成立。
+    pub money_target: f32,
 }
 
 /// 默认障碍强度：`μ = barrier × θ × 平均 motive`，读作**留货值多少**
@@ -86,6 +87,9 @@ pub struct Department {
     capacity_scale: f32,
     /// 本轮消费结算的收敛情况
     settlement: SettlementReport,
+    /// **部门手里的现金**。存量、跨轮累积：卖产出给自己的仓库收钱、买消费付钱。
+    /// 它同时是消费的预算约束（结算里的一条现金行）。
+    pub currency: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,18 +116,19 @@ pub struct Policy {
 }
 
 impl Departments {
+    pub const DEFAULT_TRANSFER: f32 = 0.5;
+
     pub fn new(departments: Vec<Department>) -> Self {
-        let grants = vec![0.0; departments.len()];
         Self {
             departments,
-            grants,
-            treasury: 0.0,
             rationing: Rationing::default(),
+            transfer_rate: Self::DEFAULT_TRANSFER,
+            money_target: 0.0,
         }
     }
 
-    pub fn with_grants(mut self, grants: Vec<f32>) -> Self {
-        self.grants = grants;
+    pub fn with_transfer(mut self, rate: f32) -> Self {
+        self.transfer_rate = rate.clamp(0.0, 1.0);
         self
     }
 
@@ -141,77 +146,92 @@ impl Departments {
         self.departments.is_empty()
     }
 
-    pub fn step(&mut self, warehouses: &mut Warehouses, market: &mut Market, rng: &mut Rng) {
-        self.grant(warehouses);
+    pub fn step(&mut self, warehouses: &mut Warehouses, market: &mut Market) {
         self.plan(warehouses, market);
-        warehouses.step(market, rng);
-        self.settle(warehouses, market);
-        self.reclaim(warehouses);
+        warehouses.step(market);
+        self.settle(warehouses);
+        self.normalize();
+        self.transfer(self.transfer_rate);
     }
 
-    /// 国内循环：回收上一轮的结余，再统一重新发放
-    pub fn step_redistributing(
-        &mut self,
-        warehouses: &mut Warehouses,
-        market: &mut Market,
-        rng: &mut Rng,
-    ) {
-        self.redistribute(warehouses);
-        self.plan(warehouses, market);
-        warehouses.step(market, rng);
-        self.settle(warehouses, market);
-    }
-
-    /// 国际循环：不收回、不发放，各凭手里的货币交易
-    pub fn step_free(&mut self, warehouses: &mut Warehouses, market: &mut Market, rng: &mut Rng) {
-        self.plan(warehouses, market);
-        warehouses.step(market, rng);
-        self.settle(warehouses, market);
-    }
-
-    /// 中央统筹：把全国的货币收回国库，再按部门平均发放
-    pub fn redistribute(&mut self, warehouses: &mut Warehouses) {
-        self.reclaim(warehouses);
-        let count = warehouses.warehouses.len();
-        if count == 0 {
+    /// 货币数量控制：把总量按比例拉回 [`Self::money_target`]。相对份额不变。
+    pub fn normalize(&mut self) {
+        if !(self.money_target > 0.0) {
             return;
         }
-        let share = self.treasury / count as f32;
-        for warehouse in &mut warehouses.warehouses {
-            warehouse.currency += share;
+        let total: f32 = self
+            .departments
+            .iter()
+            .map(|department| department.currency)
+            .sum();
+        if !total.is_finite() || !(total > 0.0) {
+            return;
         }
-        self.treasury -= share * count as f32;
+        let scale = self.money_target / total;
+        if !scale.is_finite() || !(scale > 0.0) {
+            return;
+        }
+        for department in self.departments.iter_mut() {
+            department.currency *= scale;
+        }
     }
 
-    /// 中央拨款：每轮把 [`Self::grants`] 拨进各部门的仓库
-    pub fn grant(&mut self, warehouses: &mut Warehouses) {
-        for (i, warehouse) in warehouses.warehouses.iter_mut().enumerate() {
-            let grant = self.grants.get(i).copied().unwrap_or(0.0);
-            warehouse.currency += grant.max(0.0);
+    /// 转移支付：把余额按 `rate` 的比例拉向均值。**总量守恒**（纯粹的再分配），
+    /// 所以它不会自己制造通货膨胀；它管的是"纯消费部门手里有没有钱"。
+    pub fn transfer(&mut self, rate: f32) {
+        let count = self.departments.len();
+        if count == 0 || !(rate > 0.0) {
+            return;
+        }
+        let rate = rate.min(1.0);
+        let mean = self
+            .departments
+            .iter()
+            .map(|department| department.currency)
+            .sum::<f32>()
+            / count as f32;
+        for department in self.departments.iter_mut() {
+            if department.currency.is_finite() {
+                department.currency += rate * (mean - department.currency);
+            } else {
+                department.currency = mean;
+            }
         }
     }
 
     /// 生产与政策：增产，选中政策，再从仓库提资源
     pub fn plan(&mut self, warehouses: &mut Warehouses, market: &Market) {
         self.debug_assert_aligned(warehouses, market);
-        // 部门完全从自己的学习曲线取价（报价维度 argmax/argmin），**不读账本**（§20.13）。
+        let Warehouses {
+            warehouses: stocks, ..
+        } = warehouses;
         for (i, department) in self.departments.iter_mut().enumerate() {
-            step::plan(department, &mut warehouses.warehouses[i], self.rationing);
+            step::plan(department, &mut stocks[i], self.rationing);
         }
     }
 
-    /// 结算：成交收入进仓库
-    pub fn settle(&mut self, warehouses: &mut Warehouses, market: &Market) {
-        for (i, warehouse) in warehouses.warehouses.iter_mut().enumerate() {
-            warehouse.currency += step::revenue(market, i);
-        }
-    }
-
-    /// 收回：花不完的拨款收回国库
-    pub fn reclaim(&mut self, warehouses: &mut Warehouses) {
-        for warehouse in &mut warehouses.warehouses {
-            self.treasury += warehouse.currency;
-            warehouse.currency = 0.0;
+    /// 结算：部门**直接与自己的仓库**交易。买走消费按仓库挂价付钱，
+    /// 交出产出按同一个挂价收钱，净额进余额。仓库不持钱，所以这里就是货币
+    /// 唯一的出入口——净产出为正是发行、净消费为正是回笼。
+    pub fn settle(&mut self, warehouses: &Warehouses) {
+        for (i, department) in self.departments.iter_mut().enumerate() {
+            let Some(warehouse) = warehouses.warehouses.get(i) else {
+                continue;
+            };
+            let mut cost = 0.0f32;
+            let mut revenue = 0.0f32;
+            for (k, stock) in warehouse.stocks.iter().enumerate() {
+                let price = if stock.price.is_finite() && stock.price > 0.0 {
+                    stock.price
+                } else {
+                    0.0
+                };
+                cost += price * department.intake.get(k).copied().unwrap_or(0.0);
+                revenue += price * department.delivery.get(k).copied().unwrap_or(0.0);
+            }
+            if cost.is_finite() && revenue.is_finite() {
+                department.currency += revenue - cost;
+            }
         }
     }
 
@@ -258,6 +278,7 @@ impl Department {
             delivery: vec![0.0; goods],
             capacity_scale: 0.0,
             settlement: SettlementReport::default(),
+            currency: 0.0,
         }
     }
 

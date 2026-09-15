@@ -8,7 +8,6 @@ members = ["game", "px_protocol", "px_render", "px_ops", "px_graphs", "px_verify
 default-members = ["game", "px_protocol", "px_ops", "px_graphs", "px_verify"]
 
 [dependencies]
-fastrand = "2"
 
 [profile.dev]
 debug = "line-tables-only"

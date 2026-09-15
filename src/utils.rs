@@ -8,10 +8,6 @@ mod tests;
 /// 不是"报价最多几倍"或"楔子最多偏离多少"——后者是模型假设，必须另有理由。
 pub const LOG_LIMIT: f32 = 44.0;
 
-pub fn same_signature(a: f32, b: f32) -> bool {
-    a >= 0.0 && b >= 0.0 || a <= 0.0 && b <= 0.0
-}
-
 pub fn conditional_swap<T>(a: T, b: T, condition: bool) -> (T, T) {
     if condition { (b, a) } else { (a, b) }
 }

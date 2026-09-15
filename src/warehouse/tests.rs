@@ -1,897 +1,256 @@
-use fastrand::Rng;
+use super::{Stock, Warehouse, Warehouses};
+use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
 
-use super::{Book, Side, Stock, Warehouse, Warehouses};
-use crate::estimator::Estimator;
-use crate::estimator2d::Estimator2D;
-use crate::utils::LOG_LIMIT;
-use crate::market::{
-    Market, Merchandise as MarketMerchandise, Trader as MarketTrader, TraderMerchandise,
-};
-
-const UNBOUNDED_CURRENCY: f32 = 1e12;
-
-fn market(goods: usize, price: f32, traders: usize) -> Market {
-    let merchandises = (0..goods).map(|_| MarketMerchandise { price }).collect();
-    let traders = (0..traders)
-        .map(|_| MarketTrader {
-            merchandises: (0..goods)
-                .map(|_| TraderMerchandise::new(0.0, 0.0))
-                .collect(),
-        })
-        .collect();
-    Market::new(merchandises, traders)
+fn market(goods: usize, traders: usize) -> Market {
+    Market::new(
+        (0..goods).map(|_| Merchandise { price: 1.0 }).collect(),
+        (0..traders)
+            .map(|_| Trader {
+                merchandises: (0..goods)
+                    .map(|_| TraderMerchandise::new(0.0, 0.0))
+                    .collect(),
+            })
+            .collect(),
+    )
 }
 
-fn deterministic_rng() -> Rng {
-    Rng::with_seed(0)
-}
-
-fn warehouse(quotes: &[&[(f32, f32)]]) -> Warehouses {
+fn build(stocks: &[&[(f32, f32)]]) -> Warehouses {
     Warehouses::new(
-        quotes
+        stocks
             .iter()
-            .map(|goods_quotes| {
+            .map(|goods| {
                 Warehouse::new(
-                    goods_quotes
+                    goods
                         .iter()
                         .map(|&(volume, target)| Stock::new(volume, target))
                         .collect(),
                 )
-                .with_currency(UNBOUNDED_CURRENCY)
+                .with_reference(vec![1.0; goods.len()])
             })
             .collect(),
     )
-    .with_fluctuation(0.0)
 }
 
-fn warehouse_from(quotes: &[Vec<(f32, f32)>]) -> Warehouses {
-    let quotes: Vec<&[(f32, f32)]> = quotes.iter().map(|quotes| quotes.as_slice()).collect();
-    warehouse(&quotes)
-}
-
-fn warehouse1(items: &[(f32, f32)]) -> Warehouses {
-    let quotes: Vec<&[(f32, f32)]> = items.iter().map(std::slice::from_ref).collect();
-    warehouse(&quotes)
-}
-
-fn volumes(warehouse: &Warehouses) -> Vec<f32> {
+fn prices(warehouse: &Warehouses, k: usize) -> Vec<f32> {
     warehouse
         .warehouses
         .iter()
-        .flat_map(|trader| trader.stocks.iter().map(|item| item.volume))
+        .map(|warehouse| warehouse.stocks[k].price)
         .collect()
 }
 
-fn targets(warehouse: &Warehouses) -> Vec<f32> {
+fn volumes(warehouse: &Warehouses, k: usize) -> Vec<f32> {
     warehouse
         .warehouses
         .iter()
-        .flat_map(|trader| trader.stocks.iter().map(|item| item.target_volume))
+        .map(|warehouse| warehouse.stocks[k].volume)
         .collect()
 }
 
-fn prices(market: &Market) -> Vec<f32> {
-    market
-        .merchandises
-        .iter()
-        .map(|merchandise| merchandise.price)
-        .collect()
-}
-
-fn total_stock(warehouse: &Warehouses) -> f32 {
-    warehouse
-        .warehouses
-        .iter()
-        .flat_map(|trader| trader.stocks.iter())
-        .map(|item| item.volume)
-        .sum()
-}
-
-fn dealt(market: &Market, i: usize, k: usize) -> f32 {
-    (0..market.traders.len())
-        .map(|j| market.deals[i][j][k].volume.abs())
-        .sum()
-}
-
-fn assert_close(actual: f32, expected: f32, context: &str) {
-    let tolerance = 1e-4 * expected.abs().max(1.0);
-    assert!(
-        (actual - expected).abs() <= tolerance,
-        "{context}：期望 {expected}，实际 {actual}",
-    );
-}
-
-fn assert_finite_state(warehouse: &Warehouses, market: &Market) {
-    for (i, trader) in warehouse.warehouses.iter().enumerate() {
-        for (k, item) in trader.stocks.iter().enumerate() {
-            assert!(
-                item.volume.is_finite(),
-                "交易者 {i} 商品 {k} 的库存非有限：{}",
-                item.volume
-            );
-            assert!(
-                item.marketing_volume.is_finite() && item.marketing_price.is_finite(),
-                "交易者 {i} 商品 {k} 的报价非有限：{} / {}",
-                item.marketing_volume,
-                item.marketing_price,
-            );
-            assert!(
-                item.natural_volume_delta.is_finite(),
-                "交易者 {i} 商品 {k} 的自然增减非有限：{}",
-                item.natural_volume_delta,
-            );
-        }
-    }
-    for (k, merchandise) in market.merchandises.iter().enumerate() {
-        assert!(
-            merchandise.price.is_finite(),
-            "市场商品 {k} 的价格非有限：{}",
-            merchandise.price
-        );
-    }
-    for row in &market.deals {
-        for column in row {
-            for deal in column {
-                assert!(deal.volume.is_finite(), "成交量非有限：{}", deal.volume);
-                assert!(deal.price.is_finite(), "成交价非有限：{}", deal.price);
-            }
+fn assert_finite(warehouse: &Warehouses) {
+    for warehouse in &warehouse.warehouses {
+        for stock in &warehouse.stocks {
+            assert!(stock.price.is_finite() && stock.price > 0.0, "挂价 {}", stock.price);
+            assert!(stock.volume.is_finite(), "库存 {}", stock.volume);
+            assert!(stock.target_volume.is_finite(), "目标 {}", stock.target_volume);
         }
     }
 }
 
 #[test]
-fn trader_at_target_stays_silent() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(4.0, 4.0), (8.0, 8.0), (5.0, 5.0)]);
-    let before = volumes(&warehouse);
+fn a_glut_lowers_the_price_and_a_shortage_raises_it() {
+    let mut warehouse = build(&[&[(0.5, 1.0)], &[(9.0, 1.0)]]);
+    warehouse.set_price_law(1.0, 0.0, 0.0);
+    let mut market = market(1, 2);
+    warehouse.step(&mut market);
+    let price = prices(&warehouse, 0);
+    assert!(
+        price[0] > 1.0,
+        "缺货的一方应当挂高价（对目标而言库存不足）：{}",
+        price[0],
+    );
+    assert!(price[1] < 1.0, "过剩的一方应当挂低价：{}", price[1]);
+    assert!(price[0] > price[1], "缺货方必须比过剩方贵");
+}
 
+#[test]
+fn the_map_is_bounded_by_the_curvature() {
+    for curvature in [0.5f32, 1.0, 3.0] {
+        let mut warehouse = build(&[&[(1e-6, 1.0)], &[(1e6, 1.0)]]);
+        warehouse.set_price_law(curvature, 0.0, 0.0);
+        let mut market = market(1, 2);
+        warehouse.step(&mut market);
+        let price = prices(&warehouse, 0);
+        let band = curvature.exp();
+        assert!(
+            price[0] <= band + 1e-3 && price[0] >= 1.0,
+            "缺货方的挂价 {:.4} 超出上界 e^{curvature} = {band:.4}",
+            price[0],
+        );
+        assert!(
+            price[1] >= 1.0 / band - 1e-3 && price[1] <= 1.0,
+            "过剩方的挂价 {:.4} 超出下界",
+            price[1],
+        );
+    }
+}
+
+#[test]
+fn inertia_damps_the_first_step() {
+    let stocks: &[&[(f32, f32)]] = &[&[(9.0, 1.0)]];
+    let mut fast = build(stocks);
+    fast.set_price_law(1.0, 0.0, 0.0);
+    let mut slow = build(stocks);
+    slow.set_price_law(1.0, 0.9, 0.0);
+    let mut market = market(1, 1);
+    fast.step(&mut market);
+    slow.step(&mut market);
+    let fast_drop = 1.0 - prices(&fast, 0)[0];
+    let slow_drop = 1.0 - prices(&slow, 0)[0];
+    assert!(fast_drop > 0.0, "惯性 0 时第一步就该降价");
+    assert!(
+        slow_drop < fast_drop * 0.5,
+        "惯性 0.9 应当把第一步压到远小于无惯性的幅度：{slow_drop} vs {fast_drop}",
+    );
+}
+
+#[test]
+fn the_target_rises_when_the_department_wanted_more_than_it_took() {
+    let mut warehouse = build(&[&[(5.0, 2.0)]]);
+    warehouse.set_price_law(1.0, 0.0, 0.1);
+    warehouse.warehouses[0].stocks[0].record_take(8.0, 2.0);
+    let mut market = market(1, 1);
+    warehouse.step(&mut market);
+    assert!(
+        warehouse.warehouses[0].stocks[0].target_volume > 2.0,
+        "意愿大于实际 ⇒ 目标应当抬起来：{}",
+        warehouse.warehouses[0].stocks[0].target_volume,
+    );
+}
+
+#[test]
+fn the_target_falls_when_the_department_was_served() {
+    let mut warehouse = build(&[&[(5.0, 2.0)]]);
+    warehouse.set_price_law(1.0, 0.0, 0.1);
+    warehouse.warehouses[0].stocks[0].target_volume = 6.0;
+    warehouse.warehouses[0].stocks[0].record_take(1.0, 3.0);
+    let mut market = market(1, 1);
+    warehouse.step(&mut market);
+    assert!(
+        warehouse.warehouses[0].stocks[0].target_volume < 6.0,
+        "意愿小于实际 ⇒ 目标应当降下来：{}",
+        warehouse.warehouses[0].stocks[0].target_volume,
+    );
+}
+
+#[test]
+fn the_target_never_leaves_its_floor_and_cap() {
+    let mut warehouse = build(&[&[(5.0, 2.0)]]);
+    warehouse.set_price_law(1.0, 0.0, 1.0);
+    let mut market = market(1, 1);
     for _ in 0..50 {
-        warehouse.step(&mut market, &mut rng);
+        warehouse.warehouses[0].stocks[0].record_take(1e9, 0.0);
+        warehouse.step(&mut market);
+        let target = warehouse.warehouses[0].stocks[0].target_volume;
+        assert!(target >= 2.0 - 1e-3, "目标跌破下限：{target}");
+        assert!(target <= Warehouses::TARGET_CAP, "目标冲破上限：{target}");
     }
-
-    assert_eq!(before, volumes(&warehouse), "无缺口时库存不应变化");
-    assert_close(market.merchandises[0].price, 10.0, "无缺口时价格");
-    for i in 0..3 {
-        assert_close(dealt(&market, i, 0), 0.0, "无缺口时不应有成交");
-    }
-}
-
-#[test]
-fn every_reachable_target_is_cleared_in_one_step() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
-
-    warehouse.step(&mut market, &mut rng);
-
-    assert_eq!(
-        targets(&warehouse),
-        volumes(&warehouse),
-        "一步之内应清到目标"
-    );
-    // 报价现在是**绝对价**（不再是参照价的倍数），水平由学习曲线 + 现金约束定；
-    // 这条测试真正要守的不变量是"两侧各自择价之后价格还在同一量级、没有失控也没有塌掉"。
-    assert!(
-        (1e-3..=1e4).contains(&market.merchandises[0].price),
-        "两方各自择价后清算价应当还在同一量级：{}",
-        market.merchandises[0].price,
-    );
-}
-
-#[test]
-fn settled_state_is_a_fixed_point() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0), (5.0, 5.0)]);
-    warehouse.step(&mut market, &mut rng);
-    let settled = volumes(&warehouse);
-    let settled_price = prices(&market);
-
-    for step in 1..50 {
-        warehouse.step(&mut market, &mut rng);
-        assert_eq!(settled, volumes(&warehouse), "第 {step} 步后库存漂移");
-        assert_eq!(settled_price, prices(&market), "第 {step} 步后价格漂移");
+    for _ in 0..50 {
+        warehouse.warehouses[0].stocks[0].record_take(0.0, 1e9);
+        warehouse.step(&mut market);
+        let target = warehouse.warehouses[0].stocks[0].target_volume;
+        assert!(target >= 2.0 - 1e-3, "目标跌破下限：{target}");
     }
 }
 
 #[test]
-fn declaration_sign_follows_the_gap() {
-    let mut rng = deterministic_rng();
-    for (volume, target) in [(10.0, 4.0), (2.0, 8.0), (5.0, 5.0), (0.0, 3.0)] {
-        let mut market = market(1, 10.0, 2);
-        let mut warehouse = warehouse1(&[(volume, target), (3.0, 3.0)]);
-        warehouse.step(&mut market, &mut rng);
-
-        let declaration = warehouse.warehouses[0].stocks[0].marketing_volume;
-        let gap = volume - target;
-        assert!(
-            declaration * gap >= 0.0,
-            "库存 {volume} 目标 {target}：申报 {declaration} 与缺口 {gap} 方向相反",
-        );
-        if gap != 0.0 {
-            assert!(declaration != 0.0, "有缺口却申报 0");
-        }
-    }
-}
-
-#[test]
-fn stock_moves_toward_the_target_without_overshoot() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 1.0), (0.0, 2.0)]);
-    let mut previous_gap = 6.0;
-
-    for step in 0..60 {
-        warehouse.step(&mut market, &mut rng);
-        let gap = warehouse.warehouses[0].stocks[0].volume - 4.0;
-        assert!(gap >= -1e-4, "第 {step} 步越过了目标：库存缺口 {gap}");
-        assert!(
-            gap <= previous_gap + 1e-4,
-            "第 {step} 步缺口从 {previous_gap} 涨到 {gap}",
-        );
-        previous_gap = gap;
-    }
-    // 旧口径下"买方申报 ≥ 缺口"意味着卖方盈余会被清空（gap -> 0）。绝对报价 + 现金
-    // 约束之后这条**不再成立**：买方按自己的买入曲线只吃得起一部分，实测收在 3.0。
-    // 契约回到底层不变量：盈余被吃掉一部分；"不过冲/不反向"由上面的逐轮断言保证。
-    assert!(
-        previous_gap < 6.0 - 1e-3,
-        "盈余应当被吃掉一部分，而不是原地不动：{previous_gap}",
-    );
-}
-
-#[test]
-fn a_buyer_overshoots_its_target_rather_than_missing_it() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 1.0), (0.0, 2.0)]);
-    warehouse.step(&mut market, &mut rng);
-
-    assert!(
-        warehouse.warehouses[1].stocks[0].volume >= 1.0 - 1e-4,
-        "买方 1 不应当低于目标：{}",
-        warehouse.warehouses[1].stocks[0].volume,
-    );
-    assert!(
-        warehouse.warehouses[2].stocks[0].volume >= 2.0 - 1e-4,
-        "买方 2 不应当低于目标：{}",
-        warehouse.warehouses[2].stocks[0].volume,
-    );
-    assert!(
-        warehouse.warehouses[0].stocks[0].volume <= 10.0 + 1e-4,
-        "卖方不应当买回自己的货：{}",
-        warehouse.warehouses[0].stocks[0].volume,
-    );
-    assert_close(total_stock(&warehouse), 10.0, "总库存");
-}
-
-#[test]
-fn inventory_is_conserved_over_a_long_run() {
-    let mut rng = deterministic_rng();
-    let mut market = market(2, 10.0, 3);
-    let mut warehouse = warehouse(&[
-        &[(10.0, 4.0), (8.0, 12.0)],
-        &[(2.0, 8.0), (14.0, 6.0)],
-        &[(0.0, 1.0), (5.0, 5.0)],
-    ]);
-    let initial = total_stock(&warehouse);
-
-    for step in 0..200 {
-        warehouse.step(&mut market, &mut rng);
-        assert_close(
-            total_stock(&warehouse),
-            initial,
-            &format!("第 {step} 步总库存"),
-        );
-    }
-}
-
-#[test]
-fn long_horizon_state_is_finite_and_bounded() {
-    let mut rng = deterministic_rng();
-    let mut market = market(2, 10.0, 3);
-    market.merchandises[1].price = 12.0;
-    let mut warehouse = warehouse(&[
-        &[(10.0, 4.0), (8.0, 12.0)],
-        &[(2.0, 8.0), (14.0, 6.0)],
-        &[(5.0, 5.0), (5.0, 5.0)],
-    ]);
-
-    for step in 0..500 {
-        warehouse.step(&mut market, &mut rng);
-        assert_finite_state(&warehouse, &market);
-        for (k, price) in prices(&market).iter().enumerate() {
-            assert!(
-                (1e-3..=1e3).contains(price),
-                "第 {step} 步商品 {k} 的价格 {price} 失控",
-            );
-        }
-        for (i, volume) in volumes(&warehouse).iter().enumerate() {
-            assert!(
-                volume.abs() <= 1e3,
-                "第 {step} 步第 {i} 项库存 {volume} 失控",
-            );
-        }
-    }
-}
-
-#[test]
-fn warehouse_run_is_deterministic() {
-    let mut market_a = market(2, 10.0, 3);
-    let mut market_b = market(2, 10.0, 3);
-    let quotes = vec![
-        vec![(10.0, 4.0), (8.0, 12.0)],
-        vec![(2.0, 8.0), (14.0, 6.0)],
-        vec![(5.0, 5.0), (5.0, 5.0)],
-    ];
-    let mut warehouse_a = warehouse_from(&quotes);
-    let mut warehouse_b = warehouse_from(&quotes);
-    let mut rng_a = deterministic_rng();
-    let mut rng_b = deterministic_rng();
-
-    for _ in 0..40 {
-        warehouse_a.step(&mut market_a, &mut rng_a);
-        warehouse_b.step(&mut market_b, &mut rng_b);
-        assert_eq!(volumes(&warehouse_a), volumes(&warehouse_b));
-        assert_eq!(prices(&market_a), prices(&market_b));
-    }
-}
-
-#[test]
-fn trader_order_permutes_the_trajectory() {
-    let base = vec![
-        vec![(10.0, 4.0)],
-        vec![(0.0, 1.0)],
-        vec![(0.0, 2.0)],
-        vec![(0.0, 3.0)],
-    ];
-    let order = [2usize, 0, 3, 1];
-    let permuted: Vec<Vec<(f32, f32)>> = order.iter().map(|&i| base[i].clone()).collect();
-
-    let mut base_market = market(1, 10.0, 4);
-    let mut permuted_market = market(1, 10.0, 4);
-    let mut base_warehouse = warehouse_from(&base);
-    let mut permuted_warehouse = warehouse_from(&permuted);
-    let mut rng_base = deterministic_rng();
-    let mut rng_permuted = deterministic_rng();
-
+fn a_zero_target_still_gives_a_finite_price() {
+    let mut warehouse = build(&[&[(0.0, 0.0)]]);
+    let mut market = market(1, 1);
     for _ in 0..20 {
-        base_warehouse.step(&mut base_market, &mut rng_base);
-        permuted_warehouse.step(&mut permuted_market, &mut rng_permuted);
-    }
-
-    assert_close(
-        base_market.merchandises[0].price,
-        permuted_market.merchandises[0].price,
-        "清算价",
-    );
-    for i in 0..4 {
-        let moved = order.iter().position(|&source| source == i).unwrap();
-        assert_close(
-            base_warehouse.warehouses[i].stocks[0].volume,
-            permuted_warehouse.warehouses[moved].stocks[0].volume,
-            &format!("交易者 {i} 的库存"),
-        );
+        warehouse.step(&mut market);
+        assert_finite(&warehouse);
     }
 }
 
 #[test]
-fn a_market_with_no_initial_readout_stays_finite() {
-    // 报价是绝对价、由学习曲线与现金约束定，所以"市场挂牌价 = 0"不再是一种状态。
-    // 这条测试只守"读数缺席时整场仍然有限、不产生 NaN/Inf"。
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 0.0, 2);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (2.0, 8.0)]);
-
-    for _ in 0..30 {
-        warehouse.step(&mut market, &mut rng);
-        assert_finite_state(&warehouse, &market);
+fn the_index_is_the_geometric_mean_of_the_posted_prices() {
+    let mut warehouse = build(&[&[(1.0, 1.0)], &[(4.0, 1.0)], &[(16.0, 1.0)]]);
+    for (i, stock) in warehouse.warehouses.iter_mut().enumerate() {
+        stock.stocks[0].price = [2.0, 8.0, 32.0][i];
     }
-}
-
-fn assert_active_quotes_are_positive(market: &Market) {
-    for (i, trader) in market.traders.iter().enumerate() {
-        for (k, item) in trader.merchandises.iter().enumerate() {
-            assert!(
-                item.price.is_finite(),
-                "交易者 {i} 商品 {k} 的报价非有限：{}",
-                item.price,
-            );
-            if item.volume != 0.0 {
-                assert!(
-                    item.price > 0.0,
-                    "交易者 {i} 商品 {k} 申报 {} 却挂出非正价格 {}",
-                    item.volume,
-                    item.price,
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn an_idle_round_does_not_lock_a_trader_out_of_the_market() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 3);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0), (5.0, 5.0)]);
-    warehouse.step(&mut market, &mut rng);
-    assert_close(warehouse.warehouses[2].stocks[0].volume, 5.0, "闲置轮库存");
-
-    // ⚠️ 这里原来写的是 `target_volume`，但目标现在**每轮都会被自适应规则覆盖**
-    // （`max(下限, 3 × 取货量)`），手写的值下一轮就没了——实测补卖者的库存停在 5.0。
-    // 要设的是**下限** `target_floor`：它才是能活下来的那个字段，也是没有取货时的目标。
-    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
-    warehouse.warehouses[2].stocks[0].target_floor = 0.0;
-
-    for _ in 0..3 {
-        warehouse.step(&mut market, &mut rng);
-        assert_active_quotes_are_positive(&market);
-    }
-    assert_close(warehouse.warehouses[2].stocks[0].volume, 0.0, "补卖者");
-    assert_close(warehouse.warehouses[0].stocks[0].volume, 9.0, "回补者");
-}
-
-#[test]
-fn reversing_the_same_trade_does_not_revalue_the_good() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    warehouse.step(&mut market, &mut rng);
+    let index = warehouse.quoted_index(1);
+    let expected = (2.0f32 * 8.0 * 32.0f32).powf(1.0 / 3.0);
     assert!(
-        (1e-3..=1e4).contains(&market.merchandises[0].price),
-        "首轮清算价应当还在同一量级：{}",
-        market.merchandises[0].price,
-    );
-    assert_close(warehouse.warehouses[0].stocks[0].volume, 4.0, "首轮卖方");
-    assert_close(warehouse.warehouses[1].stocks[0].volume, 6.0, "首轮买方");
-
-    // 同上：设下限而不是当轮目标。
-    warehouse.warehouses[0].stocks[0].target_floor = 10.0;
-    warehouse.warehouses[1].stocks[0].target_floor = 0.0;
-    for _ in 0..3 {
-        warehouse.step(&mut market, &mut rng);
-        assert_active_quotes_are_positive(&market);
-    }
-
-    assert_close(warehouse.warehouses[0].stocks[0].volume, 10.0, "回补者");
-    assert_close(warehouse.warehouses[1].stocks[0].volume, 0.0, "回吐者");
-    // **这条测试真正要守的是"同一笔交易反向后库存回到对方手里"**（上面两条
-    // `assert_close`）；价格的绝对水位由学习曲线 + 现金约束定，只要求还在同一量级。
-    assert!(
-        (1e-3..=1e4).contains(&market.merchandises[0].price),
-        "同一笔交易反向后价格水位应当在同一量级，实际 {}",
-        market.merchandises[0].price,
-    );
-}
-
-#[test]
-fn zero_target_liquidates_all_stock() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse1(&[(5.0, 0.0), (0.0, 5.0)]);
-
-    warehouse.step(&mut market, &mut rng);
-
-    assert_close(warehouse.warehouses[0].stocks[0].volume, 0.0, "清仓者");
-    assert_close(warehouse.warehouses[1].stocks[0].volume, 5.0, "补库者");
-    assert_eq!(targets(&warehouse), volumes(&warehouse));
-}
-
-#[test]
-fn fluctuation_keeps_the_direction_of_the_declaration() {
-    let quotes = [&[(10.0, 4.0)][..], &[(0.0, 6.0)][..]];
-    let mut deterministic = market(1, 10.0, 2);
-    let mut fluctuated = market(1, 10.0, 2);
-    let mut rng_plain = deterministic_rng();
-    let mut rng_fluctuated = deterministic_rng();
-
-    warehouse(&quotes).step(&mut deterministic, &mut rng_plain);
-    warehouse(&quotes)
-        .with_fluctuation(0.5)
-        .step(&mut fluctuated, &mut rng_fluctuated);
-
-    for i in 0..2 {
-        let base = deterministic.traders[i].merchandises[0].volume;
-        let value = fluctuated.traders[i].merchandises[0].volume;
-        // 旧断言里还有一条 `value.abs() <= base.abs() + 1e-5`（"涨落只能缩小申报"），
-        // 它随 `magnitude.clamp(0, |缺口|)` 一起删掉了——那是一条策略假设，不是守恒。
-        // 幂律抽样现在可以放大申报，所以两者的大小关系不再有保证，只有方向还保证。
-        assert!(
-            value * base >= 0.0,
-            "交易者 {i} 的申报方向被翻转：基准 {base}，实际 {value}",
-        );
-    }
-}
-
-#[test]
-fn fluctuation_is_a_deterministic_power_law_draw() {
-    let quotes = vec![vec![(10.0, 4.0)], vec![(0.0, 6.0)], vec![(5.0, 5.0)]];
-    let mut market_a = market(1, 10.0, 3);
-    let mut market_b = market(1, 10.0, 3);
-    let mut warehouse_a = warehouse_from(&quotes).with_fluctuation(0.5);
-    let mut warehouse_b = warehouse_from(&quotes).with_fluctuation(0.5);
-    let mut rng_a = deterministic_rng();
-    let mut rng_b = deterministic_rng();
-    for _ in 0..20 {
-        warehouse_a.warehouses[0].stocks[0].volume += 1.0;
-        warehouse_a.warehouses[1].stocks[0].volume -= 1.0;
-        warehouse_b.warehouses[0].stocks[0].volume += 1.0;
-        warehouse_b.warehouses[1].stocks[0].volume -= 1.0;
-        warehouse_a.step(&mut market_a, &mut rng_a);
-        warehouse_b.step(&mut market_b, &mut rng_b);
-        assert_eq!(
-            volumes(&warehouse_a),
-            volumes(&warehouse_b),
-            "同种子应当复现"
-        );
-        assert_eq!(prices(&market_a), prices(&market_b), "同种子价格应当复现");
-    }
-
-    let mut plain_market = market(1, 10.0, 3);
-    let mut fluctuated_market = market(1, 10.0, 3);
-    let mut plain = warehouse_from(&quotes);
-    let mut fluctuated = warehouse_from(&quotes).with_fluctuation(0.5);
-    let mut rng_plain = deterministic_rng();
-    let mut rng_fluctuated = deterministic_rng();
-    let mut differs = false;
-    for _ in 0..20 {
-        plain.warehouses[0].stocks[0].volume += 1.0;
-        plain.warehouses[1].stocks[0].volume -= 1.0;
-        fluctuated.warehouses[0].stocks[0].volume += 1.0;
-        fluctuated.warehouses[1].stocks[0].volume -= 1.0;
-        plain.step(&mut plain_market, &mut rng_plain);
-        fluctuated.step(&mut fluctuated_market, &mut rng_fluctuated);
-        if volumes(&plain) != volumes(&fluctuated) {
-            differs = true;
-        }
-    }
-    assert!(differs, "波动开启后轨迹应当与关闭时不同");
-}
-
-#[test]
-fn seed_selects_the_fluctuation_path() {
-    let quotes = vec![vec![(10.0, 4.0)], vec![(0.0, 6.0)], vec![(5.0, 5.0)]];
-    let run = |seed: u64| {
-        let mut market = market(1, 10.0, 3);
-        let mut warehouse = warehouse_from(&quotes).with_fluctuation(0.5);
-        let mut rng = Rng::with_seed(seed);
-        for _ in 0..20 {
-            warehouse.warehouses[0].stocks[0].volume += 1.0;
-            warehouse.warehouses[1].stocks[0].volume -= 1.0;
-            warehouse.step(&mut market, &mut rng);
-        }
-        market.merchandises[0].price
-    };
-
-    assert_eq!(run(7), run(7), "同一种子应当复现同一条路径");
-    let seeds = [0u64, 1, 2, 3, 7, 11];
-    let prices: Vec<f32> = seeds.iter().map(|seed| run(*seed)).collect();
-    let first = prices[0];
-    assert!(
-        prices.iter().any(|price| *price != first),
-        "不同种子应当走出不同路径：{prices:?}",
-    );
-}
-
-fn truth_dealt(volume: f32, aggressiveness: f32) -> f32 {
-    let share = aggressiveness;
-    let depth = 2.0 * aggressiveness;
-    (volume * share / (1.0 + volume / depth)).min(volume)
-}
-
-fn train_seller(stock: &mut Stock, price_curve: impl Fn(f32) -> f32) {
-    for round in 0..600 {
-        let scale = 0.25 * 1.12f32.powf((round % 24) as f32);
-        let volume = 1.0 + (round % 7) as f32;
-        let aggressiveness = Stock::sell_aggressiveness(scale);
-        stock
-            .sell_response
-            .update(volume, aggressiveness, truth_dealt(volume, aggressiveness));
-        stock.sell_price_curve.update(scale, price_curve(scale));
-    }
-}
-
-#[test]
-fn the_scale_search_terminates_far_from_one() {
-    // 这条测试是为一类真的死循环写的：细化若用**绝对**容差 1e-6，就小于 f32 在
-    // |log 尺度| ≈ 44 处的 ULP（3.8e-6），区间永远缩不下去 ⇒ 永不返回。
-    // 旧网格把尺度限在 [0.25, 4]（log ∈ ±1.39），所以这条悬崖碰不到；
-    // 把范围放开到 f32 边界之后，最优点落在远处就必然踩上它。
-    // 带宽现在是参数：这里显式给全 f32 范围，验的还是"细化在远处也收敛"。
-    let far = |log_scale: f32| -(log_scale - 40.0).abs();
-    let found = super::step::maximize_log_scale(far, -LOG_LIMIT, LOG_LIMIT);
-    assert!(
-        (found - 40.0).abs() < 1e-2,
-        "远端的最大值应当被找到：{found}",
-    );
-
-    let near = |log_scale: f32| -(log_scale + 43.0).abs();
-    let found = super::step::maximize_log_scale(near, -LOG_LIMIT, LOG_LIMIT);
-    assert!(
-        (found + 43.0).abs() < 1e-2,
-        "贴着数值边界的最大值也应当被找到：{found}",
-    );
-}
-#[test]
-fn a_narrow_quote_band_confines_the_quote() {
-    // §7.3：报价搜索的中心是**上一轮自己的成交价**，半宽可配。锚 = 100、半宽 0.5
-    // ⇒ 报价只能落在 [100·e^-0.5, 100·e^0.5] ≈ [60.7, 164.9]。
-    let band = 0.5f32;
-    let anchor = 100.0f32;
-    let mut rng = deterministic_rng();
-    let mut narrow_market = market(1, 1.0, 1);
-    let mut warehouse = warehouse1(&[(10.0, 4.0)]);
-    {
-        let stock = &mut warehouse.warehouses[0].stocks[0];
-        stock.last_deal = anchor;
-        stock.quote_band = band;
-    }
-
-    warehouse.step(&mut narrow_market, &mut rng);
-    let quote = warehouse.warehouses[0].stocks[0].marketing_price();
-    assert!(
-        quote >= anchor * (-band).exp() * (1.0 - 1e-4)
-            && quote <= anchor * band.exp() * (1.0 + 1e-4),
-        "报价应当落在锚 ±{band} 的对数区间里：{quote}",
-    );
-
-    // 同一个仓位在**默认带宽**（全范围、中心仍是计价物）下会报回 ~1——说明窄区间
-    // 确实夹住了报价，而不是这条测试恰好落在区间里。
-    let mut wide_market = market(1, 1.0, 1);
-    let mut wide = warehouse1(&[(10.0, 4.0)]);
-    wide.step(&mut wide_market, &mut rng);
-    let free = wide.warehouses[0].stocks[0].marketing_price();
-    assert!(
-        free < anchor * (-band).exp(),
-        "默认全范围下不应当被这个窄区间约束：{free}",
-    );
-}
-
-#[test]
-fn a_seller_picks_the_revenue_maximizing_scale() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    train_seller(&mut warehouse.warehouses[0].stocks[0], |scale| {
-        0.15 * scale.powf(1.5)
-    });
-
-    warehouse.step(&mut market, &mut rng);
-
-    let stock = &warehouse.warehouses[0].stocks[0];
-    let chosen = stock.marketing_price();
-    let revenue = |scale: f32| {
-        stock
-            .sell_response()
-            .get(6.0, Stock::sell_aggressiveness(scale))
-            * 10.0
-            * stock.sell_price_curve().get(scale)
-    };
-    let best = revenue(chosen);
-    // 尺度现在是**连续**的，所以"没有更好的"要在一段稠密采样上验，而不是在 49 档网格上验。
-    // 采样范围就是数值边界，不是报价范围——旧断言里那个"必须选在网格内部"已经失去意义：
-    // 尺度的定义域没有内部与外部，只有 f32 表示得到与表示不到。
-    //
-    // 容差从绝对 1e-3 改成**相对 1%**：目标在最优附近非常平坦，而搜索只承诺一个相对
-    // 容差（§12 的 `SCALE_TOLERANCE`），所以"没有任何候选高出 0.001"这句断言比方法
-    // 本身承诺的更强。实测最差的一个候选高出 0.16%，落在方法精度之内。
-    let limit = crate::utils::LOG_LIMIT;
-    for step in 0..2001 {
-        let fraction = step as f32 / 2000.0;
-        let candidate = (-limit + 2.0 * limit * fraction).exp();
-        assert!(
-            revenue(candidate) <= best * 1.01 + 1e-4,
-            "报价尺度 {candidate} 的收入 {} 高于所选 {chosen} 的 {best}",
-            revenue(candidate),
-        );
-    }
-    assert!(
-        chosen > 0.0 && chosen.is_finite(),
-        "收入最大化的尺度必须是有限正数：{chosen}",
-    );
-}
-
-#[test]
-fn a_seller_quotes_more_patiently_when_patience_pays() {
-    let mut rng = deterministic_rng();
-    let mut flat_market = market(1, 10.0, 2);
-    let mut steep_market = market(1, 10.0, 2);
-    let mut flat = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    let mut steep = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-    train_seller(&mut flat.warehouses[0].stocks[0], |_| 1.0);
-    train_seller(&mut steep.warehouses[0].stocks[0], |scale| {
-        0.2 * scale.powf(1.5)
-    });
-
-    flat.step(&mut flat_market, &mut rng);
-    steep.step(&mut steep_market, &mut rng);
-
-    let flat_quote = flat_market.traders[0].merchandises[0].price;
-    let steep_quote = steep_market.traders[0].merchandises[0].price;
-    assert!(
-        steep_quote > flat_quote,
-        "耐心更值钱时应当报更高的价：平价 {flat_quote}，陡峭 {steep_quote}",
-    );
-}
-
-#[test]
-fn a_buyer_declares_at_least_the_gap_it_wants_to_cover() {
-    let mut rng = deterministic_rng();
-    let quotes = [&[(100.0, 50.0)][..], &[(0.0, 8.0)][..]];
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse(&quotes);
-
-    warehouse.step(&mut market, &mut rng);
-
-    let demand = market.traders[1].merchandises[0].volume;
-    assert!(demand.abs() >= 8.0, "有钱的买方应当申报至少覆盖缺口：{demand}");
-        // "买方必须报在挂牌价之上"是**相对报价**时代的策略假设。绝对报价下买方在自己的
-        // 买入学习曲线上做 argmin（§20.13），报价可以低于当前挂牌价——实测 3.955。
-        // 这条测试问的是**申报量覆盖缺口**（上面那条），报价只要求是正的有限绝对数。
-        let price = market.traders[1].merchandises[0].price;
-        assert!(
-            price > 0.0 && price.is_finite(),
-            "买方应当报出一个正的绝对价：{price}",
-        );
-}
-
-#[test]
-fn the_price_curve_learns_the_realized_level() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (0.0, 6.0)]);
-
-    warehouse.step(&mut market, &mut rng);
-
-    let stock = &warehouse.warehouses[0].stocks[0];
-    let scale = stock.marketing_price();
-        // **绝对口径**：价格曲线学的是 `报价 -> 成交价`（两个都是绝对数），所以这里读原始
-        // 成交价，不再除以挂牌价/指数（§20.11）。`prior = scale^0.5` 仍是初始曲线在 `scale`
-        // 处给出的绝对值。
-        let realized = market.traders[0].merchandises[0].deal_price();
-    assert!(realized > 0.0, "首轮应当成交");
-    let prior = scale.powf(0.5);
-    let learned = stock.sell_price_curve().get(scale);
-    if realized > prior {
-        assert!(
-            learned > prior && learned <= realized + 1e-4,
-            "价格曲线未向实际成交水平上移：先验 {prior}，学得 {learned}，实际 {realized}",
-        );
-    } else {
-        assert!(
-            learned < prior && learned >= realized - 1e-4,
-            "价格曲线未向实际成交水平下移：先验 {prior}，学得 {learned}，实际 {realized}",
-        );
-    }
-}
-
-#[test]
-fn a_failed_quote_still_teaches_the_response() {
-    let mut rng = deterministic_rng();
-    let mut market = market(1, 10.0, 2);
-    let mut warehouse = warehouse1(&[(10.0, 4.0), (5.0, 5.0)]);
-    let before = warehouse.warehouses[0].stocks[0]
-        .sell_response()
-        .fill_ratio(6.0, 1.0);
-
-    for _ in 0..30 {
-        warehouse.step(&mut market, &mut rng);
-    }
-
-    let after = warehouse.warehouses[0].stocks[0]
-        .sell_response()
-        .fill_ratio(6.0, 1.0);
-    assert!(
-        after < before,
-        "零成交应当压低响应曲线：{before} -> {after}",
-    );
-}
-
-#[test]
-fn the_index_is_a_geometric_center_not_an_arithmetic_one() {
-    // 两个地方、同样成交量，本地价 1 和 4。算术平均给 2.5，几何平均给 2。
-    // 银河价是**读数**：它平均的是各地方**本地价**（`reference`），而不是交易者报价
-    // （报价 = 本地价 × 价差，价差的离散度会把读数带跑，见 §20.9）。
-    let mut warehouses = warehouse(&[&[(1.0, 1.0)], &[(1.0, 1.0)]]);
-    warehouses.warehouses[0].stocks[0].marketing_volume = 1.0;
-    warehouses.warehouses[1].stocks[0].marketing_volume = 1.0;
-    // 两个地方必须不同，否则会算进同一个地方的成交量
-    warehouses.warehouses[0].locality = 0;
-    warehouses.warehouses[1].locality = 1;
-    warehouses.books = vec![
-        vec![Book {
-            bid: 1.0,
-            ask: 1.0,
-            observed: true,
-        }],
-        vec![Book {
-            bid: 4.0,
-            ask: 4.0,
-            observed: true,
-        }],
-    ];
-    let index = warehouses.aggregate_index(1);
-    assert!(
-        (index[0] - 2.0).abs() < 1e-5,
-        "银河价应当取各地方本地价的对数中心 2.0，实际 {}",
+        (index[0] - expected).abs() < 1e-4,
+        "几何平均应当是 {expected}，实际 {}",
         index[0],
     );
-
 }
 
-/// 全局学习曲线：**有信息的人当前的共识**，取中位数。
-/// 一条发散的个体曲线（实测真会到 `buy@1 = 133`）不该把共识带跑。
 #[test]
-fn the_global_consensus_is_a_median_so_one_diverged_curve_cannot_poison_it() {
-    let stock = || Stock::new(1.0, 1.0);
-    let mut warehouses = Warehouses::new(vec![
-        Warehouse::new(vec![stock()]),
-        Warehouse::new(vec![stock()]),
-        Warehouse::new(vec![stock()]),
-    ]);
-    // 三条买入价格曲线：两条落在 [斜率 0, 截距 1]，一条飞了（截距 20）。
-    for (i, intercept) in [(0usize, 1.0f32), (1, 3.0), (2, 20.0)] {
-        let stock = &mut warehouses.warehouses[i].stocks[0];
-        stock.price_curve_mut(Side::Buy).slide_toward([0.0, intercept], 1.0);
-        stock.mark_price_learned(Side::Buy);
+fn the_index_ignores_a_warehouse_without_a_price() {
+    let mut warehouse = build(&[&[(1.0, 1.0)], &[(1.0, 1.0)]]);
+    warehouse.warehouses[0].stocks[0].price = 4.0;
+    warehouse.warehouses[1].stocks[0].price = 0.0;
+    let index = warehouse.quoted_index(1);
+    assert!((index[0] - 4.0).abs() < 1e-5, "无挂价的仓库不该拉低指数");
+}
+
+#[test]
+fn local_quotes_report_the_minimum_and_maximum_posted_price() {
+    let mut warehouse = build(&[&[(1.0, 1.0)], &[(1.0, 1.0)]]);
+    for (i, stock) in warehouse.warehouses.iter_mut().enumerate() {
+        stock.locality = 0;
+        stock.stocks[0].price = [3.0, 7.0][i];
     }
-    warehouses.globals.refresh(&warehouses.warehouses);
-    let consensus = warehouses.globals.price(0, Side::Buy).unwrap();
-    assert_eq!(consensus, [0.0, 3.0], "共识取中位数，不是被 20 拉走的均值");
+    let mut market = market(1, 2);
+    warehouse.step(&mut market);
+    assert!((warehouse.ask[0][0] - 3.0).abs() < 1e-4, "{:?}", warehouse.ask);
+    assert!((warehouse.bid[0][0] - 7.0).abs() < 1e-4, "{:?}", warehouse.bid);
 }
 
-/// 一轮里没有学习信号的曲线向共识滑动；已经吃满自己信息的曲线基本不动。
 #[test]
-fn a_silent_curve_slides_toward_the_global_and_an_informed_one_does_not() {
-    let stock = || Stock::new(1.0, 1.0);
-    let mut warehouses = Warehouses::new(vec![
-        Warehouse::new(vec![stock()]),
-        Warehouse::new(vec![stock()]),
-    ])
-    .with_global_gain(0.5);
-    // #0 拿到一条价格信号（截距 2.0），#1 这一轮没有信号。
-    let informed = &mut warehouses.warehouses[0].stocks[0];
-    informed.price_curve_mut(Side::Buy).slide_toward([0.0, 2.0], 1.0);
-    informed.mark_price_learned(Side::Buy);
-
-    let before = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
-    warehouses.slide_silent_curves_toward_global();
-    let after = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
-    assert!(
-        after[1] > before[1] && after[1] < 2.0,
-        "冷曲线应当向共识滑动、但只滑一半：{before:?} -> {after:?}",
-    );
-    assert_eq!(
-        warehouses.warehouses[0].stocks[0].price_curve(Side::Buy).params(),
-        [0.0, 2.0],
-        "拿到信号的曲线不该被动",
-    );
-
-    // 反过来：#1 连着拿到信号之后 evidence → 1，滑动权重 → 0，它就不再被拖。
-    for _ in 0..200 {
-        warehouses.warehouses[1].stocks[0].mark_price_learned(Side::Buy);
-        warehouses.slide_silent_curves_toward_global();
+fn the_market_receives_the_stock_and_not_a_declaration() {
+    let mut warehouse = build(&[&[(5.0, 2.0)], &[(1.0, 2.0)]]);
+    let mut market = market(1, 2);
+    warehouse.step(&mut market);
+    for i in 0..2 {
+        assert!(
+            market.traders[i].merchandises[0].volume >= 0.0,
+            "仓库挂出去的是库存本身，不应当是带方向的申报：{}",
+            market.traders[i].merchandises[0].volume,
+        );
     }
-    let settled = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
-    warehouses.slide_silent_curves_toward_global();
-    let after = warehouses.warehouses[1].stocks[0].price_curve(Side::Buy).params();
-    assert_eq!(after, settled, "吃满自己信息之后不该再被共识拖动");
 }
 
-/// 「有多少自己的信息」的 EWMA：每轮都拿到信号 → 1；停手之后衰减回 0（陈旧 ⇒ 重新滑）。
 #[test]
-fn evidence_rises_with_signals_and_decays_when_they_stop() {
-    let mut stock = Stock::new(1.0, 1.0);
-    let mut evidence = 0.0;
+fn a_long_run_stays_finite() {
+    let mut warehouse = build(&[&[(5.0, 2.0)], &[(1.0, 4.0)], &[(20.0, 1.0)]]);
+    let mut market = market(1, 3);
     for _ in 0..300 {
-        evidence = stock.advance_evidence(Side::Buy, true, 0.95, true);
+        warehouse.step(&mut market);
+        assert_finite(&warehouse);
     }
-    assert!(evidence > 0.999, "每轮都拿到信号 ⇒ evidence → 1：{evidence}");
-    for _ in 0..300 {
-        evidence = stock.advance_evidence(Side::Buy, true, 0.95, false);
+}
+
+#[test]
+fn the_stock_moves_by_the_net_deal_volume() {
+    let mut warehouse = build(&[&[(50.0, 1.0)], &[(5.0, 1.0)]]);
+    warehouse.set_price_law(1.0, 0.0, 0.0);
+    let mut market = market(1, 2);
+    let before = volumes(&warehouse, 0);
+    warehouse.step(&mut market);
+    let after = volumes(&warehouse, 0);
+    let net: Vec<f32> = (0..2)
+        .map(|i| market.traders[i].merchandises[0].deal_volume())
+        .collect();
+    for i in 0..2 {
+        let expected = (before[i] - net[i]).max(0.0);
+        assert!(
+            (after[i] - expected).abs() < 1e-3,
+            "仓库 {i} 的库存应当是 {expected}，实际 {}",
+            after[i],
+        );
     }
-    assert!(evidence < 1e-3, "停手之后衰减回 0：{evidence}");
-    // 价格曲线与响应各记各的
-    assert_eq!(stock.advance_evidence(Side::Buy, false, 0.95, true), 1.0 - 0.95);
 }

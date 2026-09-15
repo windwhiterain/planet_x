@@ -13,8 +13,8 @@ pub struct Market {
     /// key: deal sender, deal reciver
     pub relations: Vec<Vec<f32>>,
     pub state: MarketState,
-    /// 软成交容差，见 [`Market::with_soft_eps`]
-    pub soft_eps: f32,
+    /// 势流的价差尺度：`φ = tanh(ln(买价/卖价) / flow_scale)`
+    pub flow_scale: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,7 +30,7 @@ pub struct Trader {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraderMerchandise {
     pub price: f32,
-    /// positive buy negative sell
+    /// 这个仓库货架上有多少。**不是买卖申报**：方向由市场按挂价比较得出。
     pub volume: f32,
     deal_price: f32,
     deal_volume: f32,
@@ -56,47 +56,19 @@ impl TraderMerchandise {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Deal {
-    price_potential: f32,
-    volume_potential: f32,
-    distribution: f32,
-    /// 软成交的价格上界 = 买价×(1−eps)；0 = 关掉软成交（走旧的硬规则）
-    price_cap: f32,
-    /// positive buy negative sell
+    /// 正 = 这一对里 i 卖出的量，负 = i 买入的量
     pub volume: f32,
     pub price: f32,
 }
 
 impl Market {
-    /// 软成交：**替代限价**的方案。旧规则要求 `买价 ≥ 卖价` 才成交，差一点就
-    /// **精确地**一件不成交（实测最差部门执行率 0.057）。软成交把这个条件整个
-    /// 拿掉——**无论价差多大都成交**，价差只决定"成交多少"：
-    ///
-    /// ```text
-    /// 价格上界 = 买价 × (1 − eps)
-    /// 卖方量   = 申报量 ÷ max(1, 1 + (卖价 − 买价(1−eps)) / (买价·eps))
-    /// ```
-    ///
-    /// **价格竞争因此换成数量竞争**：卖方越贪、让步越大、拿到的那一份越小，
-    /// 但永远拿得到一份。`eps` 是买价里买方给自己留下的那一份。
-    ///
-    /// `0.0` = 关回旧的硬限价，只用于对照。
-    /// 默认容差。取 0.15 是**量出来的**：在 `capacity ∈ {6,12} × specialty=2` 两个
-    /// 配置上，它是唯一一个同时把成交量和最差部门执行率都抬上去的值——
-    ///
-    /// | eps | cap6 成交 一/二 | cap6 执行率最小 | cap12 成交 一/二 | cap12 执行率最小 |
-    /// |---|---|---|---|---|
-    /// | 0（硬） | 35.97 / 34.05 | 0.057 | 21.23 / 20.73 | 0.314 |
-    /// | 0.05 | **0** / 15.42 | 0.753 | **0** / 16.47 | 0.581 |
-    /// | 0.10 | 17.81 / 18.28 | 0.723 | 9.58 / 11.28 | **0.056** |
-    /// | **0.15** | **79.15 / 17.28** | **0.816** | **24.22 / 28.57** | **1.000** |
-    /// | 0.20 | 11.97 / 20.45 | 0.825 | — | — |
-    pub const DEFAULT_SOFT_EPS: f32 = 0.15;
+    pub const DEFAULT_FLOW_SCALE: f32 = 0.5;
 
-    pub fn with_soft_eps(mut self, eps: f32) -> Self {
-        self.soft_eps = if eps.is_finite() && eps > 0.0 {
-            eps
+    pub fn with_flow_scale(mut self, scale: f32) -> Self {
+        self.flow_scale = if scale.is_finite() && scale > 0.0 {
+            scale
         } else {
-            0.0
+            Self::DEFAULT_FLOW_SCALE
         };
         self
     }
@@ -121,7 +93,7 @@ impl Market {
             deals,
             relations,
             state,
-            soft_eps: Self::DEFAULT_SOFT_EPS,
+            flow_scale: Self::DEFAULT_FLOW_SCALE,
         }
     }
 

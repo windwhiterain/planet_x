@@ -8,28 +8,6 @@ fn assert_close(actual: f32, expected: f32) {
 }
 
 #[test]
-fn same_signature_groups_positive_and_negative() {
-    assert!(same_signature(1.0, 2.0));
-    assert!(same_signature(-1.0, -2.0));
-    assert!(!same_signature(1.0, -2.0));
-    assert!(!same_signature(-1.0, 2.0));
-}
-
-#[test]
-fn same_signature_treats_zero_as_both_sides() {
-    assert!(same_signature(0.0, 5.0));
-    assert!(same_signature(0.0, -5.0));
-    assert!(same_signature(0.0, 0.0));
-}
-
-#[test]
-fn nan_is_not_same_signature_as_anything() {
-    assert!(!same_signature(f32::NAN, f32::NAN));
-    assert!(!same_signature(f32::NAN, 1.0));
-    assert!(!same_signature(1.0, f32::NAN));
-}
-
-#[test]
 fn conditional_swap_swaps_only_when_asked() {
     assert_eq!(conditional_swap(1, 2, true), (2, 1));
     assert_eq!(conditional_swap(1, 2, false), (1, 2));
