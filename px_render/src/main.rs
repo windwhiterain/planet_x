@@ -765,6 +765,10 @@ struct Options {
     frames: u32,
     /// 报告 JSON 写哪儿（空 = 只回给调用方，不落盘）。
     report: String,
+    /// `--where`：问常驻窗口"相机现在在哪儿"（**只读**，不动画面、不换场景）。§64.8
+    ask_where: bool,
+    /// `--place yaw,pitch,distance`：把常驻窗口的相机摆到某个方位（复现某个视角用）。
+    place: Option<[f32; 3]>,
 }
 
 impl Default for Options {
@@ -795,6 +799,8 @@ impl Default for Options {
             drop_windows: 1,
             frames: 60,
             report: String::new(),
+            ask_where: false,
+            place: None,
         }
     }
 }
@@ -823,6 +829,9 @@ impl Options {
                 "--view" => options.view = true,
                 "--show" => options.show = true,
                 "--shot" => options.shot = true,
+                // 窗口相机的一问一答（§64.8）：只跟常驻窗口说话，不换场景、不重烘。
+                "--where" => options.ask_where = true,
+                "--place" => options.place = Some(parse_cam(&next("--place")?)?),
                 "--autostart" => options.autostart = true,
                 "--fps" => options.fps = true,
                 "--novsync" => options.novsync = true,
@@ -1047,6 +1056,11 @@ fn main() {
 
     if options.view {
         if let Err(message) = view(options) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    } else if options.ask_where || options.place.is_some() {
+        if let Err(message) = viewer_camera(&options) {
             eprintln!("{message}");
             std::process::exit(1);
         }
@@ -3422,6 +3436,8 @@ const FPS_WORST_FRAMES: u32 = 120;
 
 const VIEW_REQUEST: &str = "target/viewer-scene.json";
 const VIEW_LEASE: &str = "target/viewer.json";
+/// 窗口对"相机在哪儿"的回话（§64.8）。
+const VIEW_CAMERA: &str = "target/viewer-camera.json";
 
 /// 推给常驻窗口的东西：**哪一份场景产物** + 它的内容键。内容一个字段都不进来 ——
 /// 窗口自己去 CAS 取同一份产物。
@@ -3437,6 +3453,25 @@ struct ViewRequest {
     /// 窗口不开对照图（多视口是 `--serve` 出图的事），只用来打一行说明。
     #[serde(default)]
     sheet: bool,
+    /// 问一句"相机在哪儿"：窗口把方位写进 `VIEW_CAMERA`（§64.8）。
+    /// ⚠ 与 `shot` 一样是**附带动作**：`scene` / `key` 沿用上一次请求那份，不为问一句话换场景。
+    #[serde(default)]
+    ask_camera: bool,
+    /// 顺手把相机摆到这个方位（`yaw,pitch,distance`）：复现某个视角用。`None` = 不动。
+    #[serde(default)]
+    set_camera: Option<[f32; 3]>,
+}
+
+/// 窗口回话：**复现一个视角要的那三个数**，外加位置与视口尺寸（对账用）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CameraReply {
+    /// 回的是哪一次请求（`ViewRequest.at`）。
+    at: u64,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    position: [f32; 3],
+    size: [u32; 2],
 }
 
 #[derive(Resource)]
@@ -3502,6 +3537,8 @@ fn show(options: &Options) -> Result<(), String> {
         at: now_nanos(),
         shot: options.shot,
         sheet: options.sheet,
+        ask_camera: false,
+        set_camera: None,
     };
     let text = serde_json::to_string_pretty(&request).map_err(|err| err.to_string())?;
     std::fs::write(VIEW_REQUEST, text).map_err(|err| format!("写 {VIEW_REQUEST} 失败：{err}"))?;
@@ -3514,6 +3551,56 @@ fn show(options: &Options) -> Result<(), String> {
         _ => println!("⚠ 没检测到在跑的窗口；先执行 `px_render --view` 开一个，它会一直留着"),
     }
     Ok(())
+}
+
+/// `--where` / `--place`：**只问/只摆窗口的相机**，不换场景、不重烘（§64.8）。
+///
+/// 为什么需要这条 API：窗口的轨道相机只有鼠标能改，而"缝在不在"依赖那个视角 ——
+/// 量的时候必须能把当时的方位**读回来**（写进命令行的 `--place`），才算有了确定性复现。
+fn viewer_camera(options: &Options) -> Result<(), String> {
+    let previous = read_view_request().ok_or_else(|| {
+        "读不到 target/viewer-scene.json：先 `px_render --show --scene …` 推一份，或 `px_render --view --scene …`"
+            .to_string()
+    })?;
+    let at = now_nanos();
+    let request = ViewRequest {
+        scene: previous.scene,
+        key: previous.key,
+        at,
+        shot: false,
+        sheet: previous.sheet,
+        ask_camera: true,
+        set_camera: options.place,
+    };
+    let text = serde_json::to_string_pretty(&request).map_err(|err| err.to_string())?;
+    std::fs::write(VIEW_REQUEST, text).map_err(|err| format!("写 {VIEW_REQUEST} 失败：{err}"))?;
+    let _ = std::fs::remove_file(VIEW_CAMERA);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(VIEW_CAMERA) {
+            if let Ok(reply) = serde_json::from_str::<CameraReply>(&text) {
+                if reply.at == at {
+                    println!(
+                        "相机 yaw {:.4}｜pitch {:.4}｜distance {:.4}｜位置 ({:.3}, {:.3}, {:.3})｜视口 {}×{}",
+                        reply.yaw,
+                        reply.pitch,
+                        reply.distance,
+                        reply.position[0],
+                        reply.position[1],
+                        reply.position[2],
+                        reply.size[0],
+                        reply.size[1],
+                    );
+                    // 这一行能直接粘回命令行：换个窗口也能摆到同一个视角。
+                    println!("--place {:.4},{:.4},{:.4}", reply.yaw, reply.pitch, reply.distance);
+                    return Ok(());
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err("窗口没回话（3 s）：确认 `px_render --view` 在跑".to_string())
 }
 
 /// 窗口那一侧的起始场景：命令行给的 `--scene`，否则读 `--show` 推过来的那一份。
@@ -3534,6 +3621,8 @@ fn view(options: Options) -> Result<(), String> {
                 at: now_nanos(),
                 shot: options.shot,
                 sheet: options.sheet,
+                ask_camera: false,
+                set_camera: None,
             }
         }
         None => read_view_request().ok_or_else(|| {
@@ -3718,6 +3807,8 @@ fn poll_request(
     mut viewer: ResMut<Viewer>,
     mut rebuild: ResMut<Rebuild>,
     mut shot: ResMut<PendingShot>,
+    mut orbit: ResMut<Orbit>,
+    windows: Query<&Window>,
 ) {
     let Some(request) = read_view_request() else {
         return;
@@ -3726,6 +3817,43 @@ fn poll_request(
         return;
     }
     viewer.request_at = request.at;
+    // 换场景之前先把相机摆好：`--place` 与场景无关，只是"把镜头挪过去"。
+    if let Some(place) = request.set_camera {
+        orbit.yaw = place[0];
+        orbit.pitch = place[1];
+        orbit.distance = place[2];
+        println!(
+            "相机被摆到 yaw {:.4}｜pitch {:.4}｜distance {:.4}",
+            place[0], place[1], place[2]
+        );
+    }
+    if request.ask_camera {
+        // 位置与 `orbit_camera` 里那份算法逐字一致：不依赖"变换这一帧更新了没有"。
+        let rotation = Quat::from_rotation_y(orbit.yaw) * Quat::from_rotation_x(orbit.pitch);
+        let position = rotation * Vec3::new(0.0, 0.0, orbit.distance);
+        let size = windows
+            .iter()
+            .next()
+            .map(|window| {
+                let size = window.physical_size();
+                [size.x, size.y]
+            })
+            .unwrap_or([0, 0]);
+        let reply = CameraReply {
+            at: request.at,
+            yaw: orbit.yaw,
+            pitch: orbit.pitch,
+            distance: orbit.distance,
+            position: position.to_array(),
+            size,
+        };
+        match serde_json::to_string_pretty(&reply) {
+            Ok(text) => {
+                let _ = std::fs::write(VIEW_CAMERA, text);
+            }
+            Err(err) => eprintln!("写相机回话失败：{err}"),
+        }
+    }
     // 换了场景，或者内容键变了 ⇒ 重建；同一份产物再推一次只是「看见了」，不动。
     let changed = request.scene != viewer.scene
         || request.key == 0
