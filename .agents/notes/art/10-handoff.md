@@ -133,38 +133,55 @@
 **在哪条线上**：`.worktrees/soft-cloud-perf`（分支 `feature/soft-cloud-perf`，从 v2 的 `7a300e6` 拉）。
 口径与实测全在 `06-clouds.md` **§63**。
 
-**用户的一条**：**"需要：代理 + 软"** —— 把粗代理几何接到软云档（`gradient = 2`）上。
+**用户的三条**（2026-09-15）：①**"需要：代理 + 软"** —— 粗代理几何接到软云档
+（`gradient = 2`）上；②追问后定 **代理要进 `orbit-soft` 本体**（成为软档默认）；
+③接着做**软档循环内的上界早退**。窗口 review 排在最后再起。
 
-- **改动只有一个新场景**：`art/scene/orbit-soft-proxy.toml` 与 `orbit-soft.toml` **只差** clouds part
-  多一个 `proxy = "clouds::proxy"` 成员。**渲染侧与 shader 一行没改**，`clouds`/`planet` 两张图
-  这次重烘**全部命中**（15/15，键没变）⇒ 代理的形状不用重烘（`art/clouds/coarse.toml` 的
-  τ/inner/outer/形状参数与这一档本来就逐项相同）。
-- **覆盖结构上安全**：`billows ∈ [0,1]` ⇒ 软档密度 ≤ `coarse` ⇒ {有云} ⊆ {coarse > τ} = 代理圈的区域。
+**改了什么**
+
+- `art/scene/orbit-soft.toml`（本体）：clouds part 加 `proxy = "clouds::proxy"` 成员
+  ＋ `bound = 1`。**渲染侧一行没改**；`clouds`/`planet` 两张图这次重烘**全部命中**
+  （15/15，键没变）⇒ 代理的形状不用重烘（`art/clouds/coarse.toml` 的 τ/inner/outer/形状参数
+  与这一档本来就逐项相同）。
+- `art/shaders/clouds.wgsl`：软分支的步进循环里加**五行**（算完 `cover` 之后、`billows` 之前）——
+  `if soft && params.bound != 0u && shape_of(cover, medium.altitude, 1.0) <= params.surface_level { continue; }`。
+  上界够不着等值面 ⇒ 那一步的 `smoothstep` 恰为 0 ⇒ `visible = 0`、透射率不变 ⇒ 跳过与算出来
+  **逐位相同**，省掉 `billows` ＋ 那一步的法线 ＋ **一次 shadow map 采样**。
+  `params.bound` 缺省 0、且只挂在 `soft` 上 ⇒ 体积那条老分支与所有老场景一个像素都不动。
+- 消融档：`orbit-soft-shell`（球壳、无 `bound` = §63 之前的软档内容）、
+  `orbit-soft-proxy`（只有代理）。量完那个临时档 `orbit-soft-proxy-bound` 已删（折进本体了）。
 
 **已验证**：
 
-- 像素判据（2240×1400，一批一请求）：有差 227,733/3,136,000（7.26%），但 **90.5% 恰好只差 ±1**、
-  |Δ|≤2 占 99.53%、>20 只有 195 px。云掩码（Δ vs `orbit-bare` > 3）：**859,745 → 859,741**，
-  丢 40 / 多 36，Δ>8 的最大连通块 **15 px**（没有 ≥100 px 的块）⇒ **不是 §51.14 那种"轮廓丢一圈"**。
-- 帧时间（Vulkan / GPU p50 / 协议 v11 / 两轮 / 一个服务不重启 / 逐轮换序）：
-  `bare 0.67/0.66｜**orbit-soft-proxy 12.58/12.73**｜orbit-soft 14.44/14.55` ⇒
-  **代理 − 软 = −1.86/−2.17（中位 −2.0 ms）**，云净成本 **13.83 → 11.82 ms（−14.5%）**。
-  同口径下硬表面那条是 −41%（§51.20）⇒ **代理对软档只值 1/3 的钱**。
-- 顺带复验坐标：本树 `orbit-soft` GPU p50 = 14.44/14.55（§51.20 表里 14.10，+2.5%）✓。
+- **逐字节（早退）**：`orbit-soft-proxy` ↔ `orbit-soft`（只差 `bound`）
+  **2240×1400 与 480×300 两个分辨率哈希全同**；且折进来之后 `orbit-soft` = `04fe9dac8042a721…`
+  （= 量的时候那档的哈希）、`orbit-soft-shell` = `11b0a659bb71ad47…`（= §63 之前的 `orbit-soft`）✓。
+  改 shader 前后重出球壳档也逐字节相同 ⇒ 对没写 `bound` 的场景零影响。
+- **像素（代理）**：有差 227,733/3,136,000（7.26%），但 **90.5% 恰好只差 ±1**、|Δ|≤2 占 99.53%、
+  >20 只有 195 px。云掩码（Δ vs `orbit-bare` > 3）：**859,745 → 859,741**，丢 40 / 多 36，
+  Δ>8 的最大连通块 **15 px**（没有 ≥100 px 的块）⇒ **不是 §51.14 那种"轮廓丢一圈"**。
+- **帧时间**（Vulkan / GPU p50 / 协议 v11 / 四臂同批 / 两轮 / 逐轮换序）：
+  `bare ~0.67｜orbit-soft-shell 14.46/14.53｜orbit-soft-proxy 12.60/12.68｜**orbit-soft 7.53/7.55**`
+  ⇒ **云净成本 13.83 → 6.87 ms（−50.3%）**：代理 −1.85、早退 −5.08，两条近似相加。
+  三次会话跨批复现 ≤0.15 ms。`orbit-soft` 的 7.5 ms 是目前量到**最省的云路**
+  （§51.20 表里最省的 `orbit-proxy` 是 +10.04）。
+- 门：`cargo test -p px_render` 全绿（含三个 shader 的解析/校验/体量门）。
 
-**为什么只拿回 14%**（§63.4，这条决定了下一步）:软档的 `chord`/`steps`/起始点**全由解析壳定**，
-代理只能剔 fragment；而被剔掉的那些 fragment 在软档里每步只做 `coverage_of` 就 `continue`
-（`billows`/法线/shadow 采样都没发）⇒ 同样的剔除，硬表面值 7 ms、软档只值 2 ms。
-**杠杆在循环里**：到不了阈值的步本来什么都不产出。
+**为什么代理只值 13.5%**（§63.4，这条定死了"下一刀切哪里"）：软档的 `chord`/`steps`/起始点
+**全由解析壳定**，代理只能剔 fragment；而被剔掉的那些 fragment 在软档里每步只做 `coverage_of`
+就 `continue`（`billows`/法线/shadow 采样都没发）⇒ 同样的剔除，硬表面值 7 ms、软档只值 1.85 ms。
+**真杠杆在循环里** —— 也就是上面那五行。
 
 **没做 / 待办**：
 
-1. **`orbit-soft` 本体没动**（只加配对档 `orbit-soft-proxy`）—— 要不要让它成为软档默认，是下一轮第一个决定。
-2. **软档的 `bound` 上界早退没接**（§51.7 那个早退住在 `cloud_field` 里，软档循环不读它）；
-   软档每步要算 `billows` + `soft_step_normal` + 一次 shadow map 采样，这些正是"上界不达阈值的步"
-   可以整段跳过的（可证明逐位不变）。§51.13 那条"`bound + proxy`"的正确方向在软档上还没兑现。
+1. **这条线还没合进 v2**（全在 `feature/soft-cloud-perf`）。
+2. ⚠ **老的软档消融族口径变了**：`orbit-soft-plain` / `-noshadow` / `-nocloudshadow` / `-wind`、
+   `soft-e*` 文件没动 ⇒ 它们现在指的是**折叠前**的软档 = `orbit-soft-shell`（再叠各自那个开关）。
+   谁要用它们做配对，要么按 `orbit-soft-shell` 读，要么把它们重新折到新本体上。
 3. `--sheet` 12 视角、`--view` 窗口、`soft-e*` / `orbit-soft-wind` 都没跟着重出（改动没碰到它们）。
 4. 只测了 `review` 相机的第 1 个视口（`--perf` 不出 sheet），相机相关性没扫。
+5. 早退只测了 2240×1400 / 480×300 两个分辨率与 `orbit-soft` 这一档；`shadow = 0`、`steps` 变小
+   这些档没扫（上界那条论证与 `shadow` 无关，但没实测）。
 
 ## 9.2 已经能跑什么
 

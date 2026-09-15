@@ -1,4 +1,4 @@
-# 场景配方：软云档（体积渲染那条路）。
+# 场景配方：软云档，**没有**代理几何、**没有**上界早退（= §63 之前那一版 orbit-soft 的内容）。
 #
 # 与 orbit.toml 的差别**只有** clouds part 里那几个参数 ＋ planet part 上那三个新旋钮：
 # `gradient = 2` 是档位开关 —— 软档**每一步**都算这一步自己的法线（N·L 当自阴影），
@@ -13,14 +13,13 @@
 # 软档的三个云旋钮：gradient（档位）、surface_level（等值面高度，与硬表面同一个 cloud surface）、
 # shadow（自阴影强度：N·L 的指数）、extinction（不透明度）。
 #
-# 性能（§63）：这个档现在带**代理几何**（`proxy` 成员，把空区域在光栅阶段剔掉）与
-# **上界早退**（`bound = 1`，软档循环里上界够不着等值面的步整段跳过 ⇒ 逐字节不变）。
-# 两条合起来把云的净成本从 13.83 ms 压到 6.66 ms（Vulkan / GPU p50 / 2240×1400）。
-# 要拆开量：`orbit-soft-proxy`（只有代理）与 `orbit-soft-shell`（两个都没有）。
+# 为什么留着它（§63）：几何是 `ico(64)` 球壳 ⇒ 空区域的 fragment 也要走满步进。
+# `orbit-soft` = 这一份 ＋ 代理（`proxy` 成员）＋ 早退（`bound = 1`，逐字节不变）；
+# `orbit-soft-proxy` = 这一份 ＋ 代理。要单独量"代理值多少"就用它对 `orbit-soft-proxy`。
 #
-# 烘：cargo run -p px_graphs --bin scene orbit-soft
+# 烘：cargo run -p px_graphs --bin scene orbit-soft-shell
 
-name = "orbit-soft"
+name = "orbit-soft-shell"
 ambient = 80.0
 cameras = "review"
 
@@ -37,11 +36,10 @@ id = "clouds"
 kind = "clouds"
 shader = "clouds"
 graph = "clouds"
-members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z", proxy = "clouds::proxy" }
+members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z" }
 # gradient = 2：软云档。surface_level = 等值面高度（硬表面那条路的同一个阈值）。
 # shadow = 自阴影强度（软档里 1 = 全量、0 = 关）。extinction = 不透明度。
-# bound = 1：软档循环里的保守上界早退（§63.6，可证明逐字节不变）。
-params = { gradient = 2, surface_level = 0.20, bound = 1, inner = 1.01, outer = 1.06, extinction = 1400.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 0.85, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
+params = { gradient = 2, surface_level = 0.20, inner = 1.01, outer = 1.06, extinction = 1400.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 0.85, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
 
 [[parts]]
 id = "atmosphere"

@@ -999,16 +999,18 @@ final(p) = coarse(p) · detail(p)  ≤  coarse(p)
 
 ---
 
-## §63 软档接粗代理几何（「代理 + 软」）：云净成本 −14.2%，覆盖安全
+## §63 软档接粗代理几何 ＋ 循环内上界早退（「代理 + 软」）：云净成本 13.83 → 6.87 ms（**−50%**）
 
 > 用户口径（2026-09-15）：**"需要：代理 + 软"** —— 把 `clouds::proxy` 那张粗代理 mesh 接到
-> 软云档（`gradient = 2`，§51.17）上。活落在 `.worktrees/soft-cloud-perf`
-> （分支 `feature/soft-cloud-perf`）。
+> 软云档（`gradient = 2`，§51.17）上；追问后定：**代理要进 `orbit-soft` 本体**（成为软档默认）。
+> 活落在 `.worktrees/soft-cloud-perf`（分支 `feature/soft-cloud-perf`）。
 > 口径：**Vulkan**（§51.20 代码锁死）+ **GPU p50** + 参照 `orbit-bare` + 协议 v11 + 2240×1400。
+> 两条杠杆：**代理几何 −1.86 ms**（改一个成员，§63.1–§63.4）＋ **循环内上界早退 −5.08 ms**
+> （改 shader 五行、**逐字节不变**，§63.6）⇒ 合起来 **−6.95 ms（−50%）**（§63.7）。
 
-### §63.1 怎么接的（**渲染侧与 shader 一行没改**）
+### §63.1 怎么接的（代理那条：**渲染侧与 shader 一行没改**）
 
-新档 `art/scene/orbit-soft-proxy.toml` 与 `orbit-soft.toml` **只差 clouds part 多一个成员**：
+`orbit-soft.toml` 的 clouds part 加一个成员（与 `orbit-surface` → `orbit-proxy` 同一条路）：
 
 ```toml
 members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z", proxy = "clouds::proxy" }
@@ -1016,12 +1018,14 @@ members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", sl
 
 `planet.rs::spawn_clouds` 只看这个成员在不在（§51.11 那条路，与 `ablate` / `gradient` 无关）
 ⇒ 装配器把 `ico(64)` 球壳换成 **29,224 顶点 / 58,612 三角形**的代理 mesh。
+配对档：`orbit-soft-shell`（两个开关都没有 = §63 之前那一版 `orbit-soft` 的内容）、
+`orbit-soft-proxy`（只有代理）。三份的 planet / atmosphere part 逐字相同。
 
 **形状一个字节都不用重烘**：代理的标量场是 `coarse = shape_of(cover, altitude, 1.0)`、`τ = 0.20`、
-`inner/outer = 1.01/1.06`、`coverage/base/top/taper/coverage_gain/erode` —— 与 `orbit-soft` 的
-clouds part **逐项相同**（`art/clouds/coarse.toml` 就是照着这一档写的）⇒ 现成的
-`clouds::proxy@d4dc13fe6bde` 正是这一档的代理。本次重烘 `planet` / `clouds` 两张图**全部命中**
-（15/15 命中，键一个没变）⇒ 没有新烘任何内容。
+`inner/outer = 1.01/1.06`、`coverage/base/top/taper/coverage_gain/erode` —— 与这一档的
+clouds part **逐项相同**（`art/clouds/coarse.toml` 就是照着它写的）⇒ 现成的
+`clouds::proxy@d4dc13fe6bde` 正是这一档的代理。重烘 `planet` / `clouds` 两张图**全部命中**
+（15/15，键一个没变）⇒ 没有新烘任何内容。
 
 **覆盖为什么是结构上安全的**（不需要经验外扩）：软档这一步的密度 =
 `smoothstep(τ, τ + SOFT_EDGE, shape_of(cover, altitude, billows))`，而 `billows ∈ [0,1]` 且
@@ -1030,14 +1034,16 @@ clouds part **逐项相同**（`art/clouds/coarse.toml` 就是照着这一档写
 **本来就没有云**的 fragment。（与 §51.10.2 同一条论证；⚠ 与硬表面那档不同的是，软档**不吃**
 "步进栅格锚在壳上"那一套 —— 原因见 §63.4。）
 
-### §63.2 像素判据（2240×1400 / 一批一个请求 / 先热身）
+### §63.2 像素判据（代理那条；2240×1400 / 一批一个请求 / 先热身）
+
+**A = `orbit-soft-shell`（球壳）↔ B = `orbit-soft-proxy`（代理）**，这一对只差 `proxy` 成员：
 
 | 档 | 字节 | `has_cloud` | 与 `orbit-bare` 的网格差分 |
 |---|---|---|---|
-| `orbit-soft` | 1,257,647 | ✓ | 131,410,090 |
+| `orbit-soft-shell` | 1,257,647 | ✓ | 131,410,090 |
 | `orbit-soft-proxy` | 1,258,524 | ✓ | 131,714,644 |
 
-`uv run target/pixdiff.py -A fp-shot-r1-orbit-soft.png -B fp-shot-r1-orbit-soft-proxy.png`：
+`uv run target/pixdiff.py -A target\fin-shot-r1-orbit-soft-shell.png -B target\fin-shot-r1-orbit-soft-proxy.png`：
 
 | 口径 | 数 |
 |---|---|
@@ -1050,7 +1056,7 @@ clouds part **逐项相同**（`art/clouds/coarse.toml` 就是照着这一档写
 
 **"少没少一片云"这条单独判**（`target/softproxy-verdict.py`，Δ vs `orbit-bare` > 3 即算有云）：
 
-| 口径 | `orbit-soft` | `orbit-soft-proxy` |
+| 口径 | A = 球壳 | B = 代理 |
 |---|---|---|
 | 有云像素 | 859,745 | **859,741**（−4） |
 | 云**只在** A（丢了） | — | **40 px** |
@@ -1067,23 +1073,24 @@ clouds part **逐项相同**（`art/clouds/coarse.toml` 就是照着这一档写
 都是半透明的**：硬表面只在轮廓那一条线上翻位，体积分是每个半透明像素都可能翻一位。
 ⇒ 判据的形状只能是「分布 + 云掩码」两条一起看，不能指望哈希。
 
-### §63.3 帧时间（Vulkan / 2240×1400 / 协议 v11 / 60 帧 / 两轮 / 一个服务不重启 / 逐轮换序）
+### §63.3 帧时间（代理那一条；Vulkan / 2240×1400 / 协议 v11 / 60 帧 / 两轮 / 一个服务不重启 / 逐轮换序）
 
-| 档 | GPU p50（第 1 / 2 轮） | GPU p99 | app 均值 | 配对差 vs `orbit-bare` |
-|---|---|---|---|---|
-| `orbit-bare`（地板） | 0.67 / 0.66 | 0.76 | 15.48 / 15.45 | 0 |
-| **`orbit-soft-proxy`** | **12.58 / 12.73** | 13.00 / 18.86 | 27.47 / 27.90 | **+11.92 / +11.72** |
-| `orbit-soft` | 14.44 / 14.55 | 15.04 / 15.08 | 27.93 / 28.27 | +13.78 / +13.89 |
+三臂同批（`-Scenes orbit-soft-shell,orbit-soft-proxy,orbit-bare -Rounds 2`）：
 
-- **代理 − 软 = −1.86 / −2.17 ms ⇒ 中位 −2.0 ms**（两轮半极差 0.16 ms）。
-- **云净成本 13.83 → 11.82 ms（−14.5%）**；app 均值口径同步（−0.40 ms，因为 app 压在
-  ~15 ms 的提交地板上）。
-- 顺带复验了基线：本树 `orbit-soft` 的 GPU p50 = 14.44/14.55，与 §51.20 那张表的 **14.10** 同量级
-  （+2.5%）⇒ 坐标没漂。
+| 档 | GPU p50（第 1 / 2 轮） | 云净成本（Δ vs `orbit-bare`） |
+|---|---|---|
+| `orbit-bare`（地板） | 0.67 / 0.66 | 0 |
+| **`orbit-soft-proxy`**（代理） | **12.58 / 12.73** | **11.82 ms（−14.5%）** |
+| `orbit-soft-shell`（球壳） | 14.44 / 14.55 | 13.83 ms |
+
+- **代理 − 球壳 = −1.86 / −1.82 ms ⇒ 中位 −1.85 ms**（两轮半极差 0.02 ms）。
+- app 均值口径同步（−0.40 ms，因为 app 压在 ~15 ms 的提交地板上）。
+- 顺带复验了坐标：本树球壳档的 GPU p50 = 14.44/14.55，与 §51.20 那张表的 **14.10** 同量级
+  （+2.5%）✓。
 - 与硬表面那条**对照**（同为 Vulkan + 同口径，§51.20）：`orbit-surface` +17.08 → `orbit-proxy`
-  +10.04 是 **−7.04 ms（−41%）**。同一条代理几何在软档上只拿回 **−2.0 ms（−14.5%）**。
+  +10.04 是 **−7.04 ms（−41%）**。同一条代理几何在软档上只拿回 **−1.85 ms（−13.5%）**。
 
-### §63.4 为什么软档只拿回 −14%（不是硬表面的 −41%）—— 剩下的杠杆在循环里，不在几何里
+### §63.4 为什么软档只拿回 −13.5%（不是硬表面的 −41%）—— 剩下的杠杆在循环里，不在几何里
 
 **软档的步进与 fragment 落点无关**：`chord = min(hit.exit, scene_distance) − hit.entry`、
 `steps = clamp(chord/stride, 16, steps)`、`along = hit.entry + step*0.5` —— 这三个量全由
@@ -1093,32 +1100,116 @@ fragment**，一条射线都不会变短（硬表面那条不一样：§51.10.4 
 **被剔掉的那些 fragment 在软档里本来就很便宜**：它们的每步只做 `medium_of` + `coverage_of`，
 `cover <= 0` 就 `continue` —— `billows`（3+2 八度）、`soft_step_normal`、shadow map 采样
 **一律没发**（都在密度非零之后）。硬表面那条则每个空走 fragment 都要在 56 步里
-**每步调一次 `cloud_field`**（含 `billows`）⇒ 同样的"剔除空区域"，那边值 7 ms，这边只值 2 ms。
+**每步调一次 `cloud_field`**（含 `billows`）⇒ 同样的"剔除空区域"，那边值 7 ms，这边只值 1.85 ms。
 
 ⇒ 结论与 §51.9/§51.14.1 同向、但落点更具体：**软档的下一刀该切循环内部**（到不了阈值的步
-本来什么都不产出），而不是继续在几何/分辨上找。
+本来什么都不产出），而不是继续在几何/分辨上找。**这一刀就是 §63.6。**
 
-### §63.5 复现命令（都在 `.worktrees/soft-cloud-perf`）
+### §63.5 这次没做 / 没验（如实记）
+
+1. **这一批的改动只在 worktree 里**（`feature/soft-cloud-perf`），没合进 v2。
+2. **`--sheet`（12 视角）没出**；`--view` 窗口没开（§40 那条"看完再收工"这一批没做）。
+3. **`soft-e*` 三档不透明度、`orbit-soft-wind` 没跟着重出**（它们没被这次改动碰到）。
+4. **只测了 `review` 相机的第 1 个视口**（协议 v11 的 `--perf` 不出 sheet），相机相关性没扫。
+5. ⚠ **老那几张"与 orbit-soft 只差 X"的消融档口径变了**：`orbit-soft-plain` / `-noshadow` /
+   `-nocloudshadow` / `-wind`、`soft-e*` 的文件一个字节没动，所以它们现在指的是
+   **§63 之前的**软档 —— 也就是现在的 `orbit-soft-shell`（再叠它们各自那个开关）。
+   要接着用它们做配对，得按 `orbit-soft-shell` 读，或者把它们各自重新折到新本体上。
+
+### §63.6 第二条杠杆：软档循环内的保守上界早退（**逐字节不变**，−5.1 ms）
+
+**改哪一行**（`art/shaders/clouds.wgsl`，软分支的步进循环里、算完 `cover` 之后、`billows` 之前）：
+
+```wgsl
+if soft && params.bound != 0u && shape_of(cover, medium.altitude, 1.0) <= params.surface_level {
+    continue;
+}
+```
+
+**为什么逐位相同**：`shape_of` 对 noise 单调非降、`billows ∈ [0,1]` ⇒ 真实密度
+`shape_of(cover, alt, billows) ≤ shape_of(cover, alt, 1.0) ≤ surface_level` ⇒ 下面那次
+`smoothstep(surface_level, surface_level + SOFT_EDGE, …)` **恰为 0** ⇒ `visible = 1 − e⁰ = 0`
+⇒ `lit_sum += T·0·… = 0`、`transmittance *= 1.0`（逐位不变）、`optical += 0·step = 0`
+⇒ 这一步**本来什么都不产出**。跳过的只有三笔真开销：`billows`（3+2 八度）、
+`soft_step_normal`、以及**每步一次 shadow map 采样**。与 §51.7 那个 `bound` 是同一条论证
+（这边连"返回 0.0"都不用，直接 `continue`）。
+
+**为什么只挂在 `soft` 与 `params.bound` 上**：体积那条老分支读的是 `field_density` **本身**
+（`surface_level` 在那儿不是阈值）⇒ 早退会改像素，它不许拿这条；`params.bound` 缺省 0
+⇒ 所有老场景一个像素都不动。
+
+**判据（逐字节，两种分辨率）**：`orbit-soft-proxy` 与 `orbit-soft` 只差 `bound = 1`
+（量的时候赢的那一档还叫 `orbit-soft-proxy-bound`；它后来折进本体、文件删了 ——
+两者渲染逐字节相同，见 §63.8 的哈希对账）。
+
+| 分辨率 | `orbit-soft-proxy`（无 `bound`） | `orbit-soft`（`bound = 1`） |
+|---|---|---|
+| 2240×1400 | `04fe9dac8042a721…`（1,258,524 B） | **同一哈希**（同字节数） |
+| 480×300 | `0dc9fe248ecfc688…`（107,869 B） | **同一哈希**（同字节数） |
+
+顺带一条**回归**：改 shader 之前那张球壳档（现在的 `orbit-soft-shell`）是
+`11b0a659bb71ad47…`（1,257,647 B），改完重出**逐字节相同** ⇒ 这条改动对
+所有没写 `bound` 的场景确实是零影响。
+⚠ 480×300 那批的 `has_cloud` 报了一次 `False`：**不是丢云** —— 那两张图逐字节相同，
+而 `has_cloud` 的参考图是"这一批的第一张"（两张一样 ⇒ 网格差分 0 < 阈值）。
+判据图要么把无云档放第一个，要么看哈希（§57 那条 `has_cloud` 口径）。
+
+**帧时间（同一会话、同批、协议 v11、60 帧、两轮、逐轮换序）**：
+
+| 档 | GPU p50（第 1 / 2 轮） | 配对差 vs `orbit-bare` |
+|---|---|---|
+| `orbit-bare` | 0.67 / 1.08 ⚠ | 0 |
+| **`orbit-soft`（代理＋早退）** | **7.54 / 7.53** | **+6.87 / +6.45** |
+| `orbit-soft-proxy`（代理） | 12.61 / 12.70 | +11.94 / +12.02 |
+
+⇒ **早退 = 12.61−7.54 / 12.70−7.53 = −5.07 / −5.17 ⇒ 中位 −5.1 ms**（占那一档云成本的 **−40%**）。
+⚠ 第 2 轮 `orbit-bare` 那一格量到 1.08（平常 0.67）⇒ 第 2 轮的配对差偏低 0.4 ms，
+两轮都列出来。
+**仪器自证**：同批重测 `orbit-soft-proxy` = 12.61/12.70，与上一批的 12.58/12.73
+**差 ≤0.15 ms** ✓。
+
+### §63.7 两条合起来：软档云净成本 13.83 → 6.87 ms（**−50%**）
+
+最后一次会话（`-Scenes orbit-soft,orbit-soft-proxy,orbit-soft-shell,orbit-bare -Rounds 2`，
+四臂同批、一个服务不重启）：
+
+| 档 | 几何 | `bound` | GPU p50（第 1 / 2 轮） | 云净成本 | 相对球壳 |
+|---|---|---|---|---|---|
+| `orbit-soft-shell` | `ico(64)` 球壳 | — | 14.46 / 14.53 | 13.83 ms | — |
+| `orbit-soft-proxy` | 粗代理 | — | 12.60 / 12.68 | 11.98 ms | **−13.5%** |
+| **`orbit-soft`（本体）** | 粗代理 | 1 | **7.53 / 7.55** | **6.87 ms** | **−50.3%** |
+
+⇒ 代理值 **−1.85 ms**、早退值 **−5.08 ms**，**两条近似相加**（几何剔的是 fragment，
+早退剔的是步）⇒ 合计 **−6.95 ms**。
+`orbit-soft` 现在的 **7.5 ms** 是**目前量到最省的云路** —— §51.20 那张 Vulkan 表里
+最省的 `orbit-proxy` 是 **+10.04 ms**。
+三次独立会话对同一档的复现：`orbit-soft-proxy` 12.58/12.73 ｜ 12.61/12.70 ｜ 12.60/12.68，
+球壳档 14.44/14.55 ｜ 14.46/14.53 ⇒ **跨会话 ≤0.15 ms**。
+⚠ 判据强度不同：**早退是逐字节**（两种分辨率），**代理是 7.26% 像素 ±1 且无成片丢失**（§63.2）。
+
+### §63.8 本体怎么收（已落地）
+
+`orbit-soft` 本体加上 `proxy` 成员与 `bound = 1`（两个旋钮）；同内容的配对档留着：
+`orbit-soft-proxy`（代理、无 `bound`）与 `orbit-soft-shell`（球壳、无 `bound`，= 加这两条之前的
+`orbit-soft` 内容）⇒ 两条杠杆各自都还能用"只差一个开关"重测一遍。
+早退是逐字节的，所以本体收下它**没有像素代价**；代理那一条有 §63.2 那 7.26% 的 ±1。
+**对账（哈希，2240×1400）**：折进来之后 `orbit-soft` = `04fe9dac8042a721…`（= 量的时候那档
+`orbit-soft-proxy-bound` 的哈希 ⇒ §63.6 那些帧时间可以原样挪过来）；
+`orbit-soft-shell` = `11b0a659bb71ad47…`（= §63 之前的 `orbit-soft`）✓。
+
+### §63.9 复现命令（都在 `.worktrees/soft-cloud-perf`）
 
 ```powershell
 cargo run -p px_graphs --bin shaders
-cargo run -p px_graphs --bin scene orbit-soft-proxy
-.\tools\frame-probe.ps1 -Phase shot -Scenes orbit-bare,orbit-soft,orbit-soft-proxy -Width 2240 -Height 1400
-uv run target/pixdiff.py -A target\fp-shot-r1-orbit-soft.png -B target\fp-shot-r1-orbit-soft-proxy.png -Bands 1,2,8,20,80 -Out target\pixdiff-soft-proxy.png
-uv run target/softproxy-verdict.py -A target\fp-shot-r1-orbit-soft.png -B target\fp-shot-r1-orbit-soft-proxy.png -Bare target\fp-shot-r1-orbit-bare.png -Threshold 8
-.\tools\frame-probe.ps1 -Scenes orbit-soft-proxy,orbit-soft,orbit-bare -Rounds 2 -Width 2240 -Height 1400
+cargo run -p px_graphs --bin scene orbit-soft           # 本体：代理 ＋ 早退
+cargo run -p px_graphs --bin scene orbit-soft-proxy     # 消融：只有代理
+cargo run -p px_graphs --bin scene orbit-soft-shell     # 消融：两个都没有
+.\tools\frame-probe.ps1 -Phase shot -Scenes orbit-bare,orbit-soft-shell,orbit-soft-proxy,orbit-soft -Width 2240 -Height 1400 -Tag fin
+uv run target/pixdiff.py -A target\fin-shot-r1-orbit-soft-shell.png -B target\fin-shot-r1-orbit-soft-proxy.png -Bands 1,2,8,20,80 -Out target\pixdiff-soft-proxy.png
+uv run target/softproxy-verdict.py -A target\fin-shot-r1-orbit-soft-shell.png -B target\fin-shot-r1-orbit-soft-proxy.png -Bare target\fin-shot-r1-orbit-bare.png -Threshold 8
+.\tools\frame-probe.ps1 -Scenes orbit-soft,orbit-soft-proxy,orbit-soft-shell,orbit-bare -Rounds 2 -Width 2240 -Height 1400 -Tag fin
 ```
 
 ⚠ `target/softproxy-verdict.py` 是这次新加的判据仪器（与 `pixdiff.py` 同放在 `target/`，
 不进版本库）：pixdiff 只给分位数，判"有没有削掉一条云带"要的是大差异像素的**连通块形状**
 ＋"有云掩码"的对称性。
-
-### §63.6 这次没做 / 没验（如实记）
-
-1. **`orbit-soft` 本体没动**：代理只活在新档 `orbit-soft-proxy` 里，与 `orbit-surface`/`orbit-proxy`
-   那条"改一个成员、其余逐字相同"的配对惯例一致。要不要让它成为软档默认，是**下一轮的第一个决定**。
-2. **`--sheet`（12 视角）没出**；`--view` 窗口没开（§40 那条"看完再收工"这次没做）。
-3. **`soft-e*` 三档不透明度、`orbit-soft-wind` 没跟着重出**（它们没被这次改动碰到）。
-4. **只测了 `review` 相机的第 1 个视口**（协议 v11 的 `--perf` 不出 sheet），相机相关性没扫。
-5. **`bound` 上界早退在软档上仍然没接**（§51.7 那个早退住在 `cloud_field` 里，只有硬表面那条
-   路读它）——而 §63.4 判定的正是"杠杆在循环里"。

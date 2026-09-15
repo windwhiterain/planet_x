@@ -700,6 +700,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if cover <= 0.0 {
             continue;
         }
+        // 软档的保守上界早退：与 `cloud_field` 里那个 `bound`（§51.7）是同一条论证 ——
+        // `shape_of` 对 noise 单调非降、`billows` 夹在 [0,1] ⇒ 上界够不着等值面 ⇒
+        // 下面那次 `smoothstep` 恰为 0 ⇒ 这一步的 `visible` 是 0、透射率一字不变
+        // ⇒ 整段跳过与算出来**逐位相同**，省掉 `billows` ＋ 那一步的法线 ＋ 一次 shadow map 采样。
+        if soft && params.bound != 0u && shape_of(cover, medium.altitude, 1.0) <= params.surface_level {
+            continue;
+        }
         let noise = billows(medium.direction, medium.altitude, true);
         let field_density = shape_of(cover, medium.altitude, noise);
         if field_density <= 0.0 {
