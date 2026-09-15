@@ -104,6 +104,30 @@
 `light1-shot-r1-orbit-bare.png`（点光源下的裸行星），差异图
 `pixdiff-light.png` / `pixdiff-cloudshadow-point.png` / `pixdiff-shadowmap-point.png` / `pixdiff-wind.png`。
 
+### 9.1.3 本轮（2026-09-15，`fix/pipeline-fail-fast` worktree）：坏管线当场拒，不许一直 pending
+
+**用户的两条**：①把 `feature/cloud-surface-perf` 合进 v2；②"server 请求遇到坏管线要提前退出
+而不是一直 pending"。追问定下的口径：**失败当场拒绝，不能靠超时**；超预算时**只让这一步请求
+失败退出、不终止管线**（再请求一次可以拿到）。
+
+- **① 已合**：那条线的 tip `ffcef4b` 本来就是 v2 的祖先，真正没合的是 worktree 里
+  **63 项 / +12581−1356 未提交改动**（全 git 只此一份）⇒ 先落成一个提交 `52298d9`，再
+  `--no-ff` 合进 v2 = `f7da895`（零冲突；v2 那处编不过的 `ready.get()` 残留按用户裁决丢弃）。
+  合并结果复验：`cargo check -p px_render --all-targets` ✅、六个 CPU crate `--all-targets` ✅、
+  `cargo test -p px_render` 与五个 CPU crate 全绿。
+- **② 已做**：口径、落点表与实测全在 `08-renderer.md` **§62**。要点：`pipeline_gate` 成了出图前
+  唯一的闸（能证明坏就当场拒；只是没编完就有界地等，超预算**不出图**）；`accept_jobs` 在搭场景
+  **之前**就查失败明细与 shader 库装载态；等待预算从"全局 `Ticks`"改成"这一步的 `rebuilt_instant`"。
+
+**已验证**（Vulkan / RTX 3060 Laptop / 场景 `orbit-soft`）：坏 shader 库 ⇒ 请求 **1~2 s** 被拒
+（点名管线 + naga 原文、不出图）；修好后**同一个服务**再请求成功（357843 字节 /
+`de36e672a30b502f…`，没重启）；把预算临时改成 300 ms ⇒ 第一次请求被拒、同服务第二次成功
+（管线没被终止）；`cargo test -p px_render` 全绿。
+
+**没验证**：Bevy 那条"无限重试"支路本机造不出来（两种造法都被 naga_oil 放过）⇒ "等超预算"
+只有人为把预算改成 300 ms 那一次实测。`drive_stable` 的 `Assets` 相位、viewer（`--view` /
+`--show`）没接这道闸。
+
 ## 9.2 已经能跑什么
 
 > ⚠ **本节的命令行是旧接口（原文保留）**：内容旗标已在 §52 / P10 删除，内容只走 `--scene`；用法见 `09-instruments.md` §40 与 `08-renderer.md` §52。下面的 `--planet / --mesh / --clouds / …` 只能当历史形状看。

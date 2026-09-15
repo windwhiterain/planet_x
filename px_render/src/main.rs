@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
+use bevy::asset::LoadState;
 use bevy::camera::{RenderTarget, Viewport};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
@@ -49,7 +50,7 @@ const GOOD_COLORS: [Srgba; 3] = [
 const SPACING: f32 = 3.0;
 const MAX_STACK: f32 = 5.0;
 const MAX_BAR: f32 = 4.0;
-const PIPELINE_DEADLINE: u32 = 1800;
+const PIPELINE_WAIT_BUDGET: Duration = Duration::from_secs(30);
 const FRAMES_AFTER_JOB: u32 = 6;
 const LEASE_CHECK_INTERVAL: u32 = 120;
 const STAR_WIDTH: u32 = 2048;
@@ -66,6 +67,9 @@ struct RenderReady {
     /// 每次重建 +1。为什么不用 `state != READY` 去推断"该从头数"：主世界把状态打回
     /// PENDING 之后状态会一直是 PENDING，用状态反推就等于每帧把计数清零 ⇒ 永远数不到 2。
     epoch: Arc<AtomicU32>,
+    /// 已知坏在哪：**第一条**证到的原因留着不改，直到那批失败消失（`clear_failure`）
+    /// 或重建（新 epoch）。
+    failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl RenderReady {
@@ -73,6 +77,7 @@ impl RenderReady {
         Self {
             state: Arc::new(AtomicU8::new(PIPELINES_PENDING)),
             epoch: Arc::new(AtomicU32::default()),
+            failure: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -84,8 +89,33 @@ impl RenderReady {
         self.state.store(value, Ordering::Relaxed);
     }
 
+    fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// 证到坏了：留原因 + 置 FAILED。原因只认第一条（根因），后来的不覆盖。
+    fn fail(&self, detail: String) {
+        let mut slot = self.failure.lock().unwrap_or_else(|err| err.into_inner());
+        if slot.is_none() {
+            *slot = Some(detail);
+        }
+        drop(slot);
+        self.state.store(PIPELINES_FAILED, Ordering::Relaxed);
+    }
+
+    /// 那批失败没了（管线重新编过了）：明细跟着走，状态由 `watch_pipelines` 接着算。
+    /// 少了这一步，一次坏管线会把服务**钉死到重启**：拒绝的理由永远留着，新的请求
+    /// 在 `accept_jobs` 就被挡回去。
+    fn clear_failure(&self) {
+        *self.failure.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    }
+
     /// 重建 = 那个瞬时断言当场失效：epoch 加一 + 状态打回 PENDING。
     fn invalidate(&self) {
+        *self.failure.lock().unwrap_or_else(|err| err.into_inner()) = None;
         self.epoch.fetch_add(1, Ordering::Relaxed);
         self.state.store(PIPELINES_PENDING, Ordering::Relaxed);
     }
@@ -557,7 +587,6 @@ struct ActiveJob {
     started: Instant,
     reply: SyncSender<Frame>,
     warm: u32,
-    warned: bool,
     requested: bool,
     /// 这一步的图写出来了：`drive` 置位，`accept_jobs` 接着切下一步或回话。
     finished: bool,
@@ -648,7 +677,6 @@ impl ActiveJob {
             started: Instant::now(),
             reply: job.reply,
             warm: 0,
-            warned: false,
             requested: false,
             finished: false,
             queue,
@@ -1379,9 +1407,10 @@ fn watch_pipelines(
         if state != PIPELINES_FAILED {
             eprintln!("⚠ 有管线编译失败，在这修好之前拒绝一切出图任务");
         }
-        ready.store(PIPELINES_FAILED);
+        ready.fail(failures.join("\n"));
         return;
     }
+    ready.clear_failure();
     // 缓存条数变了 = 这一帧有管线刚进缓存（多半刚排队）。也算"不干净"。
     let grew = total != *total_seen;
     *total_seen = total;
@@ -1487,6 +1516,7 @@ fn accept_jobs(
     inbox: Res<Inbox>,
     ready: Res<RenderReady>,
     frames: Res<RenderFrames>,
+    libraries: Res<shaders::ShaderLibraries>,
     mut active: ResMut<Active>,
     mut cache: ResMut<art_cache::ArtCache>,
     mut canvas: ResMut<Canvas>,
@@ -1508,6 +1538,18 @@ fn accept_jobs(
         }
         None => match inbox.0.lock().expect("收件箱锁坏了").try_recv() {
             Ok(job) => {
+                if let Some(detail) = ready.failure() {
+                    let _ = job
+                        .reply
+                        .send(Frame::Refused(format!("渲染管线失败，拒绝出图：{detail}")));
+                    return;
+                }
+                if let Some(detail) = shader_load_failure(&tools.assets, &libraries.0, &[]) {
+                    let _ = job.reply.send(Frame::Refused(format!(
+                        "shader 资产装载失败，拒绝出图：{detail}"
+                    )));
+                    return;
+                }
                 // 性能那两路都要**去掉 60 Hz 上限**：不给 --fps 量到的是帧率上限，不是成本。
                 // 与其量出一个假数，不如当场拒掉。
                 if !matches!(job.request.job, JobKind::Shots) && !tools.probe.0 {
@@ -1747,7 +1789,6 @@ fn accept_jobs(
     job.width = target.0;
     job.height = target.1;
     job.warm = 0;
-    job.warned = false;
     job.requested = false;
     job.finished = false;
     // 重建 = 「全部就绪」这个**瞬时**断言当场失效：epoch 加一让渲染世界从头数干净帧，
@@ -2684,6 +2725,81 @@ fn idle_between_jobs(
     }
 }
 
+enum PipelineGate {
+    Ready,
+    Waiting,
+    Refuse(String),
+}
+
+/// 出图前那道闸：**能证明坏了就当场拒**，只是还没编完就等（有界），就绪才放行。
+///
+/// 为什么不是"等到超时再放行"：放行出一张缺材质的图，退出码 / 颜色 / 字节数 / 编译 /
+/// 单测全绿，只有哈希看得出（P32 就是这么丢的）。所以超预算的出路是**不出图**，
+/// 而不是"带警告照出"。超预算时**不动管线**、不锁失败 ⇒ 下一次请求照样有机会拿到。
+///
+/// 老写法把"等管线"的预算记在全局 `Ticks` 上（服务启动以来的帧数，`watch_lease` 每帧 +1），
+/// 于是服务起来满 1800 帧之后这道闸整个失效；`--fps` 下 1800 帧只要几秒。现在按
+/// **这一步**（`rebuilt_instant`）起算。
+fn pipeline_gate(
+    job: &ActiveJob,
+    ready: &RenderReady,
+    assets: &AssetServer,
+    libraries: &[Handle<Shader>],
+) -> PipelineGate {
+    if let Some(detail) = ready.failure() {
+        return PipelineGate::Refuse(format!("渲染管线失败，拒绝出图：{detail}"));
+    }
+    let state = ready.get();
+    if state == PIPELINES_FAILED {
+        return PipelineGate::Refuse(
+            "渲染管线编译失败，拒绝出图（细节见服务端日志的「管线编译失败」行）".to_string(),
+        );
+    }
+    if let Some(detail) = shader_load_failure(assets, libraries, &job.watched) {
+        return PipelineGate::Refuse(format!("shader 资产装载失败，拒绝出图：{detail}"));
+    }
+    if state != PIPELINES_READY {
+        if job.rebuilt_instant.elapsed() < PIPELINE_WAIT_BUDGET {
+            return PipelineGate::Waiting;
+        }
+        return PipelineGate::Refuse(format!(
+            "⚠ 等渲染管线就绪超过 {PIPELINE_WAIT_BUDGET:?}：这一步不出图（管线还在编，修好或稍后再请求一次就能拿到）"
+        ));
+    }
+    PipelineGate::Ready
+}
+
+/// `AssetServer` 那一侧能**证明**的坏：资产（或它的依赖）装载失败。
+///
+/// 槽里的 shader 走 `AssetServer::add`（同步、当场就有），它编不出来是 `ProcessShaderError`，
+/// 由渲染世界的 `watch_pipelines` 报；这里管的是走路径装载的 shader 库。
+/// 少了这道检查，`ShaderNotLoaded` / `ShaderImportNotYetAvailable` 在 Bevy 里是**无限重试**
+/// 的（`pipeline_cache.rs` 685~690 行），`pending` 永远 > 0 ⇒ 永远不就绪。
+fn shader_load_failure(
+    assets: &AssetServer,
+    libraries: &[Handle<Shader>],
+    watched: &[Handle<Shader>],
+) -> Option<String> {
+    for handle in libraries.iter().chain(watched.iter()) {
+        let Some((state, deps, recursive)) = assets.get_load_states(handle) else {
+            continue;
+        };
+        if !(state.is_failed() || deps.is_failed() || recursive.is_failed()) {
+            continue;
+        }
+        let name = handle
+            .path()
+            .map(|path| path.to_string())
+            .unwrap_or_else(|| format!("{:?}", handle.id()));
+        let detail = match &state {
+            LoadState::Failed(err) => format!("{err}"),
+            other => format!("{other:?} / 依赖 {deps:?} / 递归 {recursive:?}"),
+        };
+        return Some(format!("{name}｜{detail}"));
+    }
+    None
+}
+
 fn drive(
     mut commands: Commands,
     mut active: ResMut<Active>,
@@ -2692,7 +2808,6 @@ fn drive(
     capturing: Query<Entity, With<Capturing>>,
     stats: Res<ShotStats>,
     gpu: Res<GpuLog>,
-    ticks: Res<Ticks>,
     frames: Res<RenderFrames>,
     assets: Res<AssetServer>,
     libraries: Res<shaders::ShaderLibraries>,
@@ -2706,24 +2821,17 @@ fn drive(
         return;
     }
 
+    match pipeline_gate(job, &ready, &assets, &libraries.0) {
+        PipelineGate::Ready => {}
+        PipelineGate::Waiting => return,
+        PipelineGate::Refuse(reason) => {
+            eprintln!("拒绝任务：{reason}");
+            let _ = job.reply.send(Frame::Refused(reason));
+            active.0 = None;
+            return;
+        }
+    }
     let state = ready.get();
-    if state == PIPELINES_FAILED {
-        let reason = "渲染管线编译失败，拒绝出图（细节见服务端日志的「管线编译失败」行）".to_string();
-        eprintln!("拒绝任务：{reason}");
-        let _ = job.reply.send(Frame::Refused(reason));
-        active.0 = None;
-        return;
-    }
-    if state == PIPELINES_PENDING && ticks.0 < PIPELINE_DEADLINE {
-        return;
-    }
-    if state == PIPELINES_PENDING && !job.warned {
-        job.warned = true;
-        eprintln!(
-            "⚠ 管线还没就绪就超时放行了（第 {} 帧）：这张图可能是缺材质的，别当成结果",
-            ticks.0
-        );
-    }
 
     // 到这里 `ready` 一定是**重建之后**由渲染世界给出的 READY：`accept_jobs` 每次重建都把
     // 状态打回 PENDING，而 `watch_pipelines` 只有连着 `PIPELINES_CLEAN_FRAMES` 个渲染帧
@@ -3815,6 +3923,43 @@ mod tests {
         assert!(assembler("cloudz").is_none());
         assert!(assembler("surface").is_none());
         assert!(assembler("").is_none());
+    }
+
+    /// 失败明细是「**当前这一批**失败」的读数：置上去就带着原因，同一轮里后来的不覆盖
+    /// （根因第一条），管线重新编过（`clear_failure`）或重建（`invalidate`）才清。
+    /// `accept_jobs` 与 `pipeline_gate` 靠它把"拒绝出图"的原因说清楚 —— 而不是只留一句
+    /// 「细节见服务端日志」。
+    #[test]
+    fn a_proved_failure_keeps_its_first_reason_until_the_pipelines_recover() {
+        let ready = RenderReady::new();
+        assert!(ready.failure().is_none());
+        assert_eq!(ready.get(), PIPELINES_PENDING);
+
+        ready.fail("管线 A｜少了分号".to_string());
+        assert_eq!(ready.get(), PIPELINES_FAILED);
+        assert!(ready.failure().unwrap().contains("管线 A"));
+
+        ready.fail("管线 B｜另一条也坏了".to_string());
+        assert_eq!(
+            ready.failure().unwrap(),
+            "管线 A｜少了分号",
+            "根因只认第一条，后来的不覆盖"
+        );
+
+        ready.clear_failure();
+        assert!(ready.failure().is_none(), "管线编回来了：明细跟着走");
+        assert_eq!(
+            ready.get(),
+            PIPELINES_FAILED,
+            "状态由 watch_pipelines 接着算"
+        );
+
+        ready.fail("管线 C｜又坏了".to_string());
+        assert!(ready.failure().unwrap().contains("管线 C"));
+
+        ready.invalidate();
+        assert_eq!(ready.get(), PIPELINES_PENDING);
+        assert!(ready.failure().is_none());
     }
 
     /// 构建期插入的资源**第一次 run 也算 changed**（`FunctionSystem::initialize` 把 `last_run`

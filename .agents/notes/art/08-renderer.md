@@ -200,3 +200,68 @@ viewer 与 serve 共用同一份 `spawn_planet` 与同一份缓存；`poll_field
 - ⚠ `--view` / `--show` 只到**编译级**：`ViewRequest` 换成「场景路径 + 内容键」、窗口只在键变了才重建，但没有开窗口实跑。
 - ⏳ 若一份 WGSL **真的换了内容**，那一张仍要赌重编能在 40 帧内入队；要彻底就得在装过之后等 READY 再放行（怕管线永远编不出来时把任务挂住，所以现在是有界等待 + 警告）。
 - ⏳ `--scatter` 删掉后 `planet::spawn_scattering`（Bevy `AtmosphereSettings` 那条）与 `planet::check_scene` 成了死码，留着没删。
+
+## §62 坏管线要**当场拒**，不许"一直 pending"
+
+**病**（2026-09-15，用户报："server 请求遇到坏管线要提前退出而不是一直 pending"）。出图前
+只有一道路障，它有两个洞：
+
+1. **预算记错了对象**：`drive` 比的是 `PIPELINE_DEADLINE = 1800` 对 `Ticks` —— 那是
+   `watch_lease` 每帧 +1 的**服务启动以来帧数**，从不按请求重置。于是服务起来满 1800 帧
+   （60 Hz 下 30 s；`--fps` 下几秒）之后，"等管线"这道闸**整个失效**，`drive` 直接开拍 ⇒
+   又回到 P32 那个"静默出缺材质图"（退出码 / 颜色 / 字节数 / 编译 / 单测全绿，只有哈希看得出）。
+2. **等不到就永远等**：`drive_stable` 的 `StablePhase::Pipelines` 是
+   `if state != PIPELINES_READY { return false; }`，不设期限。而 `ShaderNotLoaded` /
+   `ShaderImportNotYetAvailable` 在 Bevy 里是**无限重试**的（`bevy_render` 的
+   `render_resource/pipeline_cache.rs` 685~690 行把它们打回 `Queued`）：只要那份 shader 进不了
+   `ShaderCache`，`pending` 就永远 > 0 ⇒ 永远不就绪 ⇒ 性能那一路的请求**永远挂着**
+   （客户端 180 s、服务端监听线程 300 s 才报超时）。
+
+**判据（两条，缺一不可）**：
+
+- **能证明坏了 ⇒ 当场拒**，不等超时。两条证明路：
+  · 渲染世界：`ProcessShaderError` / `CreateShaderModule` 是**终态**（同文件 692~707 行不再重试）
+    ⇒ `watch_pipelines` 把它连同**管线名 + naga 原文**写进 `RenderReady.failure` 并置 FAILED；
+  · 主世界：`AssetServer` 那侧 `LoadState::Failed`（含依赖 / 递归依赖）⇒ `pipeline_gate` 与
+    `accept_jobs` 当场拒并把失败资产点出来。
+- **只是还没编完 ⇒ 有界地等**：预算按**这一步**（`rebuilt_instant`）起算（`PIPELINE_WAIT_BUDGET`）。
+  超预算的出路是**不出图**（回 `Frame::Refused`），不是"警告后照出"——后者正是 §34 那条不变式
+  禁止的"少了那个材质的成功图"。超预算**不动管线、不置失败** ⇒ 下一次请求照样能拿到。
+
+**失败明细不是锁**：`RenderReady.failure` 只记**当前这一批**失败的第一条原因，管线重新编过
+（`watch_pipelines` 里失败清空时 `clear_failure`）或重建（`invalidate`）就清。理由：一次坏管线
+不能把服务钉死到重启 —— 否则"在这修好之前拒绝一切出图任务"会变成"永远拒绝"。
+
+**落点**（`px_render/src/main.rs`）：
+
+| 在哪 | 做什么 |
+|---|---|
+| `RenderReady::{failure, fail, clear_failure, invalidate}` | 失败明细：第一条原因 + FAILED；恢复/重建清 |
+| `watch_pipelines` | 有 `failures` ⇒ `ready.fail(明细)`；没有 ⇒ `clear_failure()` |
+| `accept_jobs` | 收件箱拿到新请求先查明细与 shader 库装载态 ⇒ **搭场景之前**就拒（这才是"提前退出"） |
+| `pipeline_gate` | 出图前唯一的闸：`Ready` / `Waiting`（有界）/ `Refuse(原因)` |
+| `shader_load_failure` | `AssetServer` 侧**可证明**的坏（含依赖与递归依赖） |
+| `drive` | 闸不放行就 `return`；`Refuse` ⇒ 回 `Refused`、放下这一步 |
+
+**实测**（Vulkan / RTX 3060 Laptop / 坏法是在运行时那份 `px_render/assets/shaders/light.wgsl`
+末尾加一行 `this is not wgsl`；服务用
+`--pcg-root .worktrees/cloud-surface-perf/target/pcg`，场景 `orbit-soft`）：
+
+| 请求 | 结果 |
+|---|---|
+| 坏 shader 库 | **1~2 s** 回 `渲染服务拒绝：渲染管线失败，拒绝出图：premultiplied_alpha_mesh_pipeline｜Composer error: … found "this"`，退出码 1，`target/failfast-shot1.png` **不存在** |
+| 修好 `light.wgsl` 后**同一个服务**再请求 | 成功，`357843` 字节 / `de36e672a30b502f…`，服务没重启 |
+| `PIPELINE_WAIT_BUDGET` 临时改 300 ms 后第一次请求（真 shader 要现编） | 回 `⚠ 等渲染管线就绪超过 300ms：这一步不出图…`，退出码 1，不出图 |
+| 紧接着同服务第二次请求 | 成功，`357843` 字节（管线没被终止） |
+
+`cargo test -p px_render` 全绿（新增 `a_proved_failure_keeps_its_first_reason_until_the_pipelines_recover`），
+好管线那条路照旧出图（最终二进制 + 真 30 s 预算：`357843` 字节 / 退出码 0）。
+
+**没验到**：Bevy 那条"无限重试"支路在本机**造不出来**。试了两种造法（文件尾部 `#import` 被
+naga_oil 忽略；顶部 `#import "definitely-missing.wgsl"` 居然照样编过，只是慢 1.2 s）⇒ "等超预算"
+只有上表那次人为把预算改成 300 ms 的实测。
+
+**没做**：`drive_stable` 的 `Assets` 相位仍只看 `is_loaded_with_dependencies`（资产卡在
+`Loading` 永不落地时会无限等）；它现在被 `pipeline_gate` 的资产检查盖住同一批句柄，但那条路
+本身没改。viewer（`--view` / `--show`）没接这道闸。
+
