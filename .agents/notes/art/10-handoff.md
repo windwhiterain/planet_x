@@ -248,13 +248,25 @@ planet / clouds / atmosphere 这些词：`KINDS` / `assembler` / `SceneBuild` / 
 1. **带云那两档的 20~30 个像素没归因**（所有输入与数学都逐项验过相同；唯一剩下的差别是绑定
    布局）。§65 末尾记了钉死它需要的那个专门实验。
 2. `--view` / `--show` 预览窗口这一轮**没跑**（收尾时给用户拉起来看过一次，见下）。
-3. 三个探针 bin（`field_dual` / `gradient` / `device`）没跑；`px_probe` 只保证编译过。
-4. 环（`rings > 0`）**没有实测图**（这批场景 `rings = 0`）；环现在是自写 shader
-   （`art/shaders/ring.wgsl`），迁移前走的是 Bevy 内建 `StandardMaterial{unlit}` —— 两条路的
-   曝光处理不同，第一次真出环时要重新看。
+3. 三个探针 bin：`device` / `dual_noise` 跑过（✓，见下面的补验块）；`field_dual` / `gradient`
+   这两个重的**没跑**；`px_probe` 整包只保证编译过。
+4. 环（`rings > 0`）**有实测图了**（本轮补验，见下），但**没有逐像素基线**：迁移前那条路
+   （Bevy 内建 `StandardMaterial{unlit}`）没出过图，两条路的曝光处理也不同。
 5. `--stream` 那条经济世界的老路（`build_world_scene`）**一个字没动**，还在。
 6. `.agents/notes` 里其它篇（02/03/06/07/09）仍按旧形状描述 KINDS/槽/`spawn_planet` ——
    这一轮**只**新增 §65，没有逐篇回改。
+
+**本轮补验（同一轮内追加）**：
+
+- **环**（唯一一条从没跑过的路径）：新增配方 `art/scene/orbit-rings.toml` 并出图，
+  `placeholder_px = 0`、管线 0 失败、环面与行星同倾斜、近侧压住行星远侧被挡 —— 图
+  `target/rings-shot.png`（1200×800）。细节见 `08-renderer.md` §65.1。
+- **harness 的一致性闸门**：`Get-SceneShaderMembers` 原来按 v1 的 `parts[]` 读 ⇒ v2 下
+  返回空表、闸门**静默失效**。已改成读 `objects[].material.shader`，且读到 0 条就抛错；
+  拿一份 v1 旧产物当反例验过（§65.2）。
+- 探针：`cargo run -p px_probe --bin device`（✓ 全部通过）与 `--bin dual_noise`（✓ 2/2）
+  都跑过；`field_dual` / `gradient` 这两个重的**没跑**。
+
 
 ## 9.2 已经能跑什么
 

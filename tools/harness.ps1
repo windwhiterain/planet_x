@@ -131,22 +131,32 @@ function Get-FramePayloads {
     return $frames
 }
 
-# 这份场景产物里每个「part/角色」钉的 shader 成员（角色一般是 shader，键 = 那一份 WGSL 的内容键）。
+# 这份场景产物里每个「物体/角色」钉的 shader 成员（角色一般是 shader，键 = 那一份 WGSL 的内容键）。
+#
+# ⚠ 读的是**通用渲染文档**（`px_protocol::scene` v2，`08-renderer.md` §65）：
+# 每个物体的 `material.shader` 是它自己那一份 WGSL。v1 的 `parts[]` 已经没有这个形状了 ——
+# 按老形状读会得到一张**空表**，而空表在这里等于"没有不一致"⇒ 闸门静默失效（比报错更坏）。
+# 所以下面这种"什么都没读到"要当场抛错，不能返回空表。
 function Get-SceneShaderMembers {
     param([string]$Path)
     $scene = @(Get-FramePayloads -Path $Path | Where-Object { $_.frame -eq 'scene' })
     if ($scene.Count -eq 0) { throw "产物里没有场景帧（Scene）：$Path" }
+    $document = $scene[0]
+    if (-not $document.PSObject.Properties.Name.Contains('objects')) {
+        throw "场景帧不像通用渲染文档（缺 objects）：$Path  schema=$($document.schema) parts=$($document.PSObject.Properties.Name -contains 'parts')"
+    }
     $members = [ordered]@{}
-    foreach ($part in $scene[0].parts) {
-        foreach ($role in @($part.members.PSObject.Properties.Name)) {
-            $member = $part.members.$role
-            if ($member.graph -eq 'shaders') {
-                $members["$($part.id)/$role"] = [pscustomobject]@{
-                    Slot = "$($member.graph)/$($member.node)"
-                    Key  = $member.key
-                }
+    foreach ($object in $document.objects) {
+        $shader = $object.material.shader
+        if ($shader.graph -eq 'shaders') {
+            $members["$($object.id)/shader"] = [pscustomobject]@{
+                Slot = "$($shader.graph)/$($shader.node)"
+                Key  = $shader.key
             }
         }
+    }
+    if ($members.Count -eq 0) {
+        throw "这份场景一个 shader 成员都没钉（objects=$($document.objects.Count)）：$Path"
     }
     return $members
 }

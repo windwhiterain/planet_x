@@ -351,3 +351,44 @@ mesh / texture / shader，键 = 路径 + 载荷指纹）、`material.rs`（`DocM
 
 **硬化**：`for _ in 0..8 { 重出 }` 无（没做稳定性扫描）；`cargo test -p px_protocol -p px_ops
 -p px_graphs -p px_verify -p px_render` 全绿；`px_probe` 编译过（三个探针 bin 这一轮**没跑**）。
+
+### §65.1 环：唯一一条没实测过的路径，现在有图了
+
+`rings > 0` 这条批场景里**从来是 0** ⇒ 迁移前那套 `spawn_rings`（Bevy 内建
+`StandardMaterial { base_color_texture, unlit, blend, cull: none }`）**没有一张实测图**，
+迁移后它换成自写 `art/shaders/ring.wgsl` + 烘图侧生成的环网格（`generate::ring_mesh`）
+与环带贴图（`generate::ring_band`）—— 两条都只在代码里活着。
+
+**判据**：新增配方 `art/scene/orbit-rings.toml`（`rings = 1.6`，行星 + 大气 + 环）。
+
+```
+cargo run -p px_graphs --bin scene orbit-rings
+px_render --scene <产物> --cam 0,22,4.2 --out target/rings-shot.png --width 1200 --height 800
+```
+
+实测：`placeholder_px = 0`（不是占位）、3 个物体（planet / atmosphere / rings）、
+管线 0 失败、`rings/shader@5b1613353a06` 进了槽。图里：环面与行星**同一个倾斜**
+（`SYSTEM_TILT` 在世界系里，环与行星拿的是同一个四元数）、近侧环压在行星上、远侧被行星挡住、
+环带有条纹（`ring_band` 的 alpha 环）、没有剔除错面（`cull = none`）。
+
+**没验**：环的**逐像素**对照（迁移前那条路没有基线图可对）；环的曝光处理与内建
+`StandardMaterial{unlit}` 不同（后者乘 `view.exposure`，自写材质不乘 —— 与云/大气同一处口径，
+见 `10-handoff.md` §9.1.6 第 3 条"云自己的曝光没动"）。
+
+### §65.2 仪器跟着改：harness 的 shader 一致性闸门
+
+`tools/harness.ps1` 的 `Get-SceneShaderMembers` 原来按 **v1** 的 `scene.parts[].members[role]`
+读场景帧。v2 文档没有 `parts` ⇒ 它返回一张**空表**，而空表在 `Assert-ShaderMembersAgree`
+里等于"没有不一致"⇒ **闸门静默失效**（比报错坏得多：那正是"混版量出来的数"要拦的东西）。
+
+改成读通用渲染文档的每个 `objects[].material.shader`；并且**读到 0 条就抛错**
+（"仪器拿不到数据时必须响"）。两条判据：
+
+```
+. .\tools\harness.ps1
+Get-SceneShaderMembers -Path <v2 产物>   # → planet/shader=shaders/surface@… / atmosphere/… / clouds/…
+Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像通用渲染文档（缺 objects）」
+```
+
+后者是本轮从**我的 worktree 的 CAS** 里翻出来的一份旧产物（`target/pcg/ab/d3/d3bcdfcc…pxart`）
+当反例。
