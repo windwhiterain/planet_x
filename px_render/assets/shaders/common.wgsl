@@ -1,6 +1,8 @@
 #define_import_path planet_x::common
 
-const SUN_DIRECTION: vec3<f32> = vec3<f32>(-0.8496, 0.2326, 0.4753);
+// ⚠ 这里以前有一个 `const SUN_DIRECTION`（写死的太阳方向）。**已删**（§60）：
+// 太阳的方向只能从场景那盏灯里读（`planet_x::light::sun_light`）—— 常量与灯是两个真相，
+// 改灯不动常量的时候，云和云影跟着常量走、山的影子跟着灯走，差一点点最难查。
 
 struct ShellHit {
     entry: f32,

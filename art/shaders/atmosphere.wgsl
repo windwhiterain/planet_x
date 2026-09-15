@@ -1,4 +1,4 @@
-#import planet_x::common::SUN_DIRECTION
+#import planet_x::light::sun_light
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, depth_prepass_texture}
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
@@ -35,12 +35,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let chord = max(end - entry, 0.0);
     let ray = -to_camera;
-    let sun = normalize(SUN_DIRECTION);
+    // 太阳由场景那盏灯说了算（§60）：点光源时方向随位置变，所以逐采样点现取（5 步而已）。
     let steps = 5;
     var sunlit = 0.0;
     for (var index = 0; index < steps; index += 1) {
         let along = (f32(index) + 0.5) / f32(steps) * chord;
         let point = surface + ray * along;
+        let sun = sun_light(point, in.position.xy).direction;
         sunlit += clamp((dot(normalize(point), sun) + 0.25) / 1.25, 0.0, 1.0);
     }
     sunlit /= f32(steps);

@@ -14,6 +14,7 @@
 .EXAMPLE
   .\tools\px.ps1 -Target field_dual -Level opt   # §46.3 的 arbiter
   .\tools\px.ps1 -Target gradient                # 探针冒烟 + 逐通道归因
+  .\tools\px.ps1 -Target dual_field              # 云场梯度 vs 对偶数（纯 CPU）
   .\tools\px.ps1 -Target planet -Level opt       # 烘星球图（PCG）
   .\tools\px.ps1 -Target test                    # 快速测试链（默认 members，不碰 bevy）
   .\tools\px.ps1 -Target test-all                # 全量（含 px_render / px_probe，慢）
@@ -21,6 +22,7 @@
 param(
     [ValidateSet(
         'field_dual', 'gradient', 'device',
+        'dual', 'dual_field', 'dual_noise',
         'planet', 'desert', 'clouds',
         'test', 'test-all', 'check'
     )][string]$Target = 'field_dual',
@@ -35,7 +37,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     $packages = @('px_ops', 'px_verify', 'px_graphs')
-    if ($Target -in 'field_dual', 'gradient', 'device') { $packages += 'px_probe' }
+    if ($Target -in 'field_dual', 'gradient', 'device', 'dual', 'dual_field', 'dual_noise') { $packages += 'px_probe' }
 
     $extra = @()
     switch ($Level) {
@@ -51,7 +53,7 @@ try {
     }
 
     $cargoArgs = switch ($Target) {
-        { $_ -in 'field_dual', 'gradient', 'device' } { @('run', '-p', 'px_probe', '--bin', $Target) + $extra }
+        { $_ -in 'field_dual', 'gradient', 'device', 'dual', 'dual_field', 'dual_noise' } { @('run', '-p', 'px_probe', '--bin', $Target) + $extra }
         { $_ -in 'planet', 'desert', 'clouds' } { @('run', '-p', 'px_graphs', '--bin', $Target) + $extra }
         'test' { @('test') + $extra }
         'test-all' { @('test', '--workspace') + $extra }

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["game", "px_protocol", "px_render", "px_ops", "px_graphs", "px_verify", "px_probe"]
-default-members = ["game", "px_protocol", "px_ops", "px_graphs", "px_verify"]
+members = ["game", "px_protocol", "px_render", "px_ops", "px_mc", "px_graphs", "px_verify", "px_probe"]
+default-members = ["game", "px_protocol", "px_ops", "px_mc", "px_graphs", "px_verify"]
 
 [dependencies]
 

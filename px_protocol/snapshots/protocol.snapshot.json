@@ -1,19 +1,19 @@
 {
-  "schema_version": 7,
+  "schema_version": 11,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 7
+        "schema_version": 11
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 7
+      "schema_version": 11
     },
     "art::ArtBundle": {
       "assets": [
@@ -47,7 +47,40 @@
         }
       ]
     },
+    "art::AssetKind.kinds": [
+      "field2d",
+      "octahedral_field",
+      "cube_field",
+      "cube_map",
+      "mesh",
+      "instances",
+      "volume",
+      "scene",
+      "shader"
+    ],
+    "art::VolumeData.shape": {
+      "bytes": 6591000,
+      "dtype": "F32",
+      "shape": [
+        6,
+        65,
+        65,
+        65
+      ]
+    },
     "client::LEASE_PATH": "target/render-server.json",
+    "render::Job.perf": {
+      "drop": 1,
+      "kind": "perf",
+      "windows": 4
+    },
+    "render::Job.shots": {
+      "kind": "shots"
+    },
+    "render::Job.stable": {
+      "frames": 60,
+      "kind": "stable"
+    },
     "render::Lease": {
       "exe": "<exe>",
       "git_rev": "<rev>",
@@ -55,34 +88,251 @@
       "port": 0,
       "protocol_hash": 0
     },
+    "render::Pair": {
+      "app_delta_ms": 27.5,
+      "app_mean_delta_ms": 30.1,
+      "gpu_delta_ms": 24.1,
+      "measured": "场景 orbit-surface｜planet",
+      "reference": "场景 orbit-bare｜planet",
+      "rule": "配对差 = perf[0] − perf[1]（被测档 − 参照档）"
+    },
+    "render::PerfReport": {
+      "compare": {
+        "app_mean_ms": 43.8,
+        "app_p50_ms": 63.25,
+        "gpu_p50_ms": 49.8,
+        "note": "以前拿 app 循环周期当 GPU 时间的代理量",
+        "ratio": 0.787,
+        "ratio_mean": 1.137
+      },
+      "dropped": [
+        45.7
+      ],
+      "error_bar": {
+        "rule": "单次请求内：干净窗口的半极差 (max−min)/2",
+        "value_ms": 0.3
+      },
+      "frames": [
+        62.9,
+        63.1,
+        63.5,
+        63.4
+      ],
+      "gpu": [
+        {
+          "power_w": [
+            92.0,
+            112.0
+          ],
+          "samples": 3,
+          "sm_mhz": [
+            1245.0,
+            1942.0
+          ],
+          "temp_c_max": 80.0,
+          "util_pct": [
+            98.0,
+            100.0
+          ],
+          "vram_mib_max": 481.0,
+          "window": 0
+        }
+      ],
+      "gpu_ms": {
+        "frames": [
+          44.2,
+          49.4,
+          49.8,
+          52.1
+        ],
+        "lag_frames": 3,
+        "max": 58.0,
+        "min": 44.2,
+        "n": 4,
+        "p50": 49.8,
+        "p90": 52.4,
+        "p99": 58.0,
+        "poll_us": 6.5,
+        "source": "render/main_opaque_pass_3d/elapsed_gpu=18.100 + render/main_transparent_pass_3d/elapsed_gpu=31.700"
+      },
+      "key": "bee2a7ec00000000",
+      "label": "场景 orbit｜rocky",
+      "max": 63.5,
+      "median": 63.25,
+      "min": 62.9,
+      "n": 4,
+      "p50": 63.25,
+      "p90": 63.5,
+      "p99": 63.5,
+      "scene": "target/pcg/ab/yy/orbit.pxart",
+      "waits": {
+        "assets_ms": 0.4,
+        "pipelines_ms": 412.0,
+        "sample_ms": 3810.0,
+        "settle_ms": 96.0,
+        "total_ms": 4318.4
+      },
+      "windows": [
+        63.5,
+        63.1,
+        62.9,
+        63.4
+      ]
+    },
+    "render::Report": {
+      "height": 1400,
+      "job": "stable",
+      "millis": 91234,
+      "pair": {
+        "app_delta_ms": 27.5,
+        "app_mean_delta_ms": 30.1,
+        "gpu_delta_ms": 24.1,
+        "measured": "场景 orbit-surface｜planet",
+        "reference": "场景 orbit-bare｜planet",
+        "rule": "配对差 = perf[0] − perf[1]（被测档 − 参照档）"
+      },
+      "perf": [
+        {
+          "compare": {
+            "app_mean_ms": 43.8,
+            "app_p50_ms": 63.25,
+            "gpu_p50_ms": 49.8,
+            "note": "以前拿 app 循环周期当 GPU 时间的代理量",
+            "ratio": 0.787,
+            "ratio_mean": 1.137
+          },
+          "dropped": [
+            45.7
+          ],
+          "error_bar": {
+            "rule": "单次请求内：干净窗口的半极差 (max−min)/2",
+            "value_ms": 0.3
+          },
+          "frames": [
+            62.9,
+            63.1,
+            63.5,
+            63.4
+          ],
+          "gpu": [
+            {
+              "power_w": [
+                92.0,
+                112.0
+              ],
+              "samples": 3,
+              "sm_mhz": [
+                1245.0,
+                1942.0
+              ],
+              "temp_c_max": 80.0,
+              "util_pct": [
+                98.0,
+                100.0
+              ],
+              "vram_mib_max": 481.0,
+              "window": 0
+            }
+          ],
+          "gpu_ms": {
+            "frames": [
+              44.2,
+              49.4,
+              49.8,
+              52.1
+            ],
+            "lag_frames": 3,
+            "max": 58.0,
+            "min": 44.2,
+            "n": 4,
+            "p50": 49.8,
+            "p90": 52.4,
+            "p99": 58.0,
+            "poll_us": 6.5,
+            "source": "render/main_opaque_pass_3d/elapsed_gpu=18.100 + render/main_transparent_pass_3d/elapsed_gpu=31.700"
+          },
+          "key": "bee2a7ec00000000",
+          "label": "场景 orbit｜rocky",
+          "max": 63.5,
+          "median": 63.25,
+          "min": 62.9,
+          "n": 4,
+          "p50": 63.25,
+          "p90": 63.5,
+          "p99": 63.5,
+          "scene": "target/pcg/ab/yy/orbit.pxart",
+          "waits": {
+            "assets_ms": 0.4,
+            "pipelines_ms": 412.0,
+            "sample_ms": 3810.0,
+            "settle_ms": 96.0,
+            "total_ms": 4318.4
+          },
+          "windows": [
+            63.5,
+            63.1,
+            62.9,
+            63.4
+          ]
+        }
+      ],
+      "protocol_hash": "0000000000000000",
+      "schema_version": 11,
+      "shots": [
+        {
+          "bright_px": 900000,
+          "bytes": 1622592,
+          "declared_clouds": true,
+          "diff_vs_ref_grid": 41234,
+          "has_cloud": true,
+          "height": 1400,
+          "label": "场景 orbit｜rocky",
+          "out": "target/orbit.png",
+          "placeholder_px": 0,
+          "scene": "target/pcg/ab/yy/orbit.pxart",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verdict": "有云",
+          "width": 2240
+        }
+      ],
+      "width": 2240
+    },
     "render::Request": {
       "height": 640,
-      "out": "target/shot.png",
+      "job": {
+        "drop": 1,
+        "kind": "perf",
+        "windows": 4
+      },
+      "out": "target/orbit.png",
+      "report": "target/report.json",
       "scene": {
-        "clouds": "target/pcg/ab/cc/clouds.pxart",
-        "displace": 0.05999999865889549,
-        "field": "target/pcg/ab/xx/yy.pxart",
-        "kind": "planet",
-        "mesh": "target/pcg/ab/zz/mesh.pxart",
-        "palette": "rocky",
-        "radius": 1.0,
-        "rings": 0.0,
-        "sea_level": 0.44999998807907104,
-        "slope": [
-          "target/pcg/ab/cc/slope_x.pxart",
-          "target/pcg/ab/cc/slope_y.pxart",
-          "target/pcg/ab/cc/slope_z.pxart"
-        ],
-        "spin": 0.0
+        "kind": "sequence",
+        "shots": [
+          {
+            "cam": null,
+            "out": "target/bare.png",
+            "scene": "target/pcg/ab/xx/bare.pxart"
+          },
+          {
+            "cam": [
+              0.0,
+              8.0,
+              3.299999952316284
+            ],
+            "out": "target/orbit.png",
+            "scene": "target/pcg/ab/yy/orbit.pxart"
+          }
+        ]
       },
       "view": {
-        "ambient": null,
-        "atmo": null,
-        "cam": null,
-        "cloud": null,
-        "columns": 0,
-        "scatter": null,
-        "sheet": false
+        "cam": [
+          30.0,
+          15.0,
+          3.200000047683716
+        ],
+        "columns": 4,
+        "sheet": true
       },
       "width": 960
     },
@@ -90,15 +340,139 @@
       "bytes": 326452,
       "height": 640,
       "millis": 812,
-      "out": "target/shot.png",
-      "scene": "planet",
+      "out": "target/orbit.png",
+      "report": "{\"job\":\"perf\"}",
+      "report_path": "target/report.json",
+      "scene": "场景 orbit｜planet",
+      "shots": [
+        "target/bare.png",
+        "target/orbit.png"
+      ],
       "warm": true,
       "width": 960
+    },
+    "render::Scene.artifact": {
+      "kind": "artifact",
+      "scene": "target/pcg/ab/7f/scene.pxart"
+    },
+    "render::Scene.sequence": {
+      "kind": "sequence",
+      "shots": [
+        {
+          "cam": [
+            0.0,
+            12.0,
+            3.1500000953674316
+          ],
+          "out": "target/shot.png",
+          "scene": "target/pcg/ab/7f/scene.pxart"
+        }
+      ]
     },
     "render::Scene.world": {
       "kind": "world",
       "round": 200,
       "stream": "target/world.pxstream"
+    },
+    "render::ShotReport": {
+      "bright_px": 900000,
+      "bytes": 1622592,
+      "declared_clouds": true,
+      "diff_vs_ref_grid": 41234,
+      "has_cloud": true,
+      "height": 1400,
+      "label": "场景 orbit｜rocky",
+      "out": "target/orbit.png",
+      "placeholder_px": 0,
+      "scene": "target/pcg/ab/yy/orbit.pxart",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "verdict": "有云",
+      "width": 2240
+    },
+    "scene::SceneSpec": {
+      "ambient": 80.0,
+      "cameras": [
+        {
+          "direction": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "distance": 3.1500000953674316,
+          "tag": "review"
+        }
+      ],
+      "name": "orbit",
+      "parts": [
+        {
+          "id": "planet",
+          "kind": "planet",
+          "members": {
+            "height": {
+              "graph": "planet",
+              "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "node": "height"
+            },
+            "mesh": {
+              "graph": "planet",
+              "key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "node": "surface"
+            }
+          },
+          "params": {
+            "displace": 0.06,
+            "palette": "rocky",
+            "radius": 1.0
+          },
+          "shader": "surface"
+        },
+        {
+          "id": "clouds",
+          "kind": "clouds",
+          "members": {
+            "field": {
+              "graph": "clouds",
+              "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "node": "mixed"
+            },
+            "shader": {
+              "graph": "shaders",
+              "key": "9999999999999999999999999999999999999999999999999999999999999999",
+              "node": "clouds"
+            },
+            "slope_x": {
+              "graph": "clouds",
+              "key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "node": "slope_x"
+            },
+            "slope_y": {
+              "graph": "clouds",
+              "key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "node": "slope_y"
+            },
+            "slope_z": {
+              "graph": "clouds",
+              "key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "node": "slope_z"
+            }
+          },
+          "params": {
+            "coverage": 0.35,
+            "extinction": 900.0,
+            "inner": 1.01,
+            "outer": 1.06,
+            "seed": 7.0,
+            "steps": 56.0,
+            "tint": [
+              0.4399999976158142,
+              0.6399999856948853,
+              0.9800000190734863
+            ]
+          },
+          "shader": "clouds"
+        }
+      ],
+      "schema": 1
     },
     "sim::WorldView": {
       "departments": [
@@ -121,7 +495,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 7,
+      "schema_version": 11,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,
@@ -135,6 +509,7 @@
       "protocol",
       "world",
       "art",
+      "scene",
       "blob",
       "request",
       "response",

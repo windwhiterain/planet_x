@@ -105,6 +105,36 @@ fn every_shader_parses_and_validates() {
     println!("shader 校验通过：{checked} 个");
 }
 
+/// 槽里那两个占位 shader 住成 Rust 内联常量（没有文件），所以它们不在
+/// `shader_files()` 的扫描范围里 —— 必须单独拉进来，否则「每个 shader 都要
+/// 解析并校验」这道门就对它们静默失效了。
+#[test]
+fn slot_placeholders_parse_and_validate() {
+    let modules = module_sources();
+    let mut checked = 0_usize;
+
+    for (name, source) in px_render::slots::placeholders() {
+        let mut seen = Vec::new();
+        let assembled = render_source(source, &modules, &mut seen);
+        let module = naga::front::wgsl::parse_str(&assembled).unwrap_or_else(|error| {
+            panic!(
+                "槽占位 {name} 解析失败：\n{}\n---- 组装后的源码 ----\n{assembled}",
+                error.emit_to_string(&assembled)
+            )
+        });
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("槽占位 {name} 校验失败：{error:?}"));
+        checked += 1;
+    }
+
+    assert_eq!(checked, 3, "槽占位应当正好三个");
+}
+
 #[test]
 fn the_checker_catches_a_broken_shader() {
     let broken = "fn bad() -> f32 { return vec3<f32>(1.0, 2.0, 3.0); }";

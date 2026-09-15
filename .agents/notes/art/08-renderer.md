@@ -131,3 +131,72 @@ f16 立方图、八面体壳 + 位移 + 网格法线 + 焊法线。这些活的�
 
 viewer 与 serve 共用同一份 `spawn_planet` 与同一份缓存；`poll_field` 的判据也从 mtime
 换成了**载荷指纹**（mtime 只当「该去看一眼」的闹钟）：重新烘一份内容一模一样的场不该让窗口重建。
+
+## §52 渲染内容由产物决定（场景产物）
+
+### §52.1 病根：接口是一串旗标，不是一个产物
+
+§18 写着「产物格式 = `ArtBundle`，与渲染器之间唯一的接口」，但实现里接口是一串命令行旗标：
+`--planet --mesh --clouds --cloud-slope --palette --displace --sea --radius --spin --rings --atmo --cloud`。
+后果两条，第二条更毒：
+
+1. **哈希路径静默过期**。内容寻址的路径一改就变；`tools/frame-probe.ps1` 把六个默认路径写死在参数里，CAS 一清就全死，而它又吞掉客户端退出码 ⇒ 服务继续画预热场景、照样每 120 帧打一行帧时间（§51.1）。
+2. **成员配错时形状校验照样通过**。拿 v1 的 `mixed` 配 v2 的 `slope_x`：宽高都是 `256²×6`，`clouds.rs` 只校验 `projection == CubeMap` 与尺寸一致 ⇒ **校验通过、法线是错的、不报错**。这正是 §43 花大力气建 arbiter 防的那类故障，却被 CLI 接口重新放开了一个口子。
+
+### §52.2 形状：一般场景描述，格式本身不认识"行星/云/大气"
+
+一个 part 只有五样东西：`id`、`kind`（装配器名）、`shader`（绑定槽）、`members`（按角色引用的产物）、`params`（按名字取的参数）。
+
+```json
+{ "frame": "scene", "schema": 1, "name": "orbit", "ambient": 80.0, "cameras": [ … ],
+  "parts": [
+    { "id": "planet", "kind": "planet", "shader": "surface",
+      "members": { "height": {"graph":"planet","node":"height","key":"69ee…"},
+                   "mesh":   {"graph":"planet","node":"surface","key":"f5d6…"} },
+      "params":  { "palette": "rocky", "displace": 0.06, "sea_level": 0.52, … } },
+    { "id": "clouds", "kind": "clouds", "shader": "clouds",
+      "members": { "shader":  {"graph":"shaders","node":"clouds","key":"0f83…"},
+                   "field":   {…}, "slope_x": {…}, "slope_y": {…}, "slope_z": {…} },
+      "params":  { "inner": 1.01, "outer": 1.06, "extinction": 900.0, "coverage": 0.35, … } },
+    { "id": "atmosphere", "kind": "atmosphere", "shader": "atmosphere",
+      "members": { "shader": {…} },
+      "params":  { "inner": 1.0, "outer": 1.14, "density": 0.3, "tint": [0.44,0.64,0.98] } } ] }
+```
+
+- 成员 = **图名 + 节点名 + 内容键**（§17.1「键 = 内容」）。名字给人看与报错，键给渲染器取产物。
+- 加物体（环、卫星、空间站、舰）**不动格式**，只加一个装配器 + 一个 shader。
+- 缺成员、缺参数、不认识的 kind、不认识的槽 —— 一律 `Err`，并且报出"这份有哪些可选项"。
+- 代价：参数变成字符串键、类型检查挪到运行期。这与 `AssetManifest.params` 和 `art/<图>/<节点>.toml` 是同一套既有做法，不是新发明的负担。
+
+### §52.3 shader 也是资产，走同一个缓存模式
+
+- `kind = Shader` 的产物：WGSL 作为 **U8 blob**，**键 = WGSL 的字节**（改一个字换一个键），由 `px_graphs --bin shaders` 从 `art/shaders/*.wgsl` 烘出，进 `target/pcg/shaders/manifest.json`。
+- 场景里用 `members["shader"]` 引用它 —— 和场、网格**同一个引用方式**。
+- 渲染器侧：注册一个 `slots://` 资产源（`bevy_asset::io::memory::Dir` 内存目录 + `MemoryAssetReader`），材质**静态**返回 `ShaderRef::Path(slots://<槽>.wgsl)`；装载场景时把产物里的 WGSL 写进内存目录，再 `asset_server.reload`。
+- ⚠ **资产源必须在 `AssetPlugin` 之前注册**（Bevy 自己的文档：`bevy_asset/src/lib.rs:561`，违反时 `:614` 会打 `must be registered before AssetPlugin`）。把 `SlotsPlugin` 排在 `DefaultPlugins` 之后 ⇒ 槽不存在 ⇒ shader 加载失败 ⇒ 管线永远编译不出来、服务永远到不了「渲染管线全部就绪」，而**编译与离线测试全绿**。这条只有真起一次服务才暴露 —— 别把「编译过 + 单测过」当成「能跑」。
+- **为什么这样是对的**：查实了 Bevy 的热重载就是这条调用 —— 文件监视器发 `ModifiedAsset` → `reload_path` → `reload_internal(path, true)`（`bevy_asset/src/server/mod.rs:2163`、`:2209`），而公开的 `AssetServer::reload` → `reload_internal(path, false)`（`mod.rs:952`）：**同一个函数，只差一个 log 标记**；下游 `pipeline_cache.rs:745` 听 `AssetEvent::Added | Modified` 重建管线。所以"运行时换 shader"不是绕路，**就是热重载本体**，区别只在触发者（场景装载 vs 文件 mtime）与字节来源（CAS vs 资产文件）。
+- 换来的第三条：**可复现**。文件热重载不记录当时用的是哪一版 shader，改一次文件、下一次测量量的就悄悄变成别的东西；场景产物把 shader 钉在内容键上。
+- ⚠⚠ **每请求都 `install + reload` 是个静默的大坑**（实测踩过）：reload 会把用这个 shader 的管线全部打回重编，而出图只等 `FRAMES_AFTER_JOB = 6` 帧 ⇒ 那一张图上**云壳没有管线可画，云直接消失**。更坏的是它**一切指标全绿**：退出码 0、不是洋红、图片大小稳定、编译与单测全过 —— 于是 `orbit` 与 `orbit-bare` 渲出**逐字节相同**的图，仪器测到的"云成本"恒为 0。判别靠哈希：`p2-single ≡ p2-seq-orbit ≡ p2-ablated ≡ scene-smoke`（全是 91071 / `5D7947A7…`），而修好后 `orbit` = 106070 / `4BE5AE3F…`，**与旧旗标路的 `legacy-smoke` 逐字节相同** —— 这一条同时钉死了因果。
+  修法两处：① 只在槽内容**真变了**时才装（`ShaderSlots::peek()` 比对，日志写「槽里已是这一份，不重装」），顺带不再每请求把管线打回重编；② `drive` 里加 `awaiting_pipelines`：装过 shader 的那一步先等"管线真的入了队"再开始数出图前的帧（上限 40 帧，等不到就带警告照常出图，有界不挂）。
+  **教训**：内容搬进产物之后，"换内容"的代价从"改文件"变成了"重编管线"，而重编是异步的 —— 出图窗口必须等它，否则画面缺件而所有门都是绿的。
+- 代价：改 shader 的循环变成「改 `art/shaders` → 重烘 `shaders` → 重烘 `scene` → 用新的场景产物路径请求」，热重载那条 1 秒近路不再直接适用（引擎那半截还在，缺的只是工具层的 watcher 去串这一步）。
+- ⚠ Bevy 的 `Material` 所有 shader 钩子都是**静态**的（`fragment_shader()` 没有 `self`），所以「槽名 → 绑定布局」永远由编译期注册表决定；产物能决定的是**槽里的源码**，不是绑定布局。另：占位 WGSL 是 Rust 内联常量（没有占位文件），并单独进了 shader 门（`slot_placeholders_parse_and_validate`），否则它会从「每个 shader 都要解析+校验」下面溜走。
+
+### §52.4 判据
+
+- 场景不成形 ⇒ `Err`（不是画一半再静默兜底）；
+- **场景键 = 场景 JSON + 全部成员键** ⇒ 成员内容一变场景键就变（§17.1）；
+- 逐字节判据现在是"两份只差一个 part 的场景产物之间的 PNG 对比"（实测：`orbit` 对 `orbit-bare` 差 10.05% 的通道，同一对场景在旧接口下量的）；
+- `cargo test` 里 shader 门同时覆盖 `art/shaders/*.wgsl`（真本）与 Rust 内联占位，按文件名解析时**两处同名要报错**（否则 `px_probe` 的梯度仲裁者会静默拿到占位 = 判据被换成空壳）。
+
+### §52.5 状态（P10 落地后）
+
+- ✅ `--scene <场景产物>` + `--pcg-root <目录>`（默认 `target/pcg`）已通。
+- ✅ **内容旗标全删**：`--planet/--mesh/--clouds/--cloud-slope/--cloud/--cloud-ablate/--scatter/--atmo/--ambient/--palette/--displace/--sea/--radius/--spin/--rings` 连同 `render::Scene::Planet` 变体、`Options::planet_spec()`、`ServerAblate` 资源一起没了。`--scene` 可以给多次（每步的 `--out/--cam` 配在它前面那个 `--scene` 上）。`SCHEMA_VERSION 8 → 9`，快照同步更新。
+- ✅ **消融归内容**：clouds part 的 `ablate = "surface"`（文本参数）走 `clouds::Ablate::parse`（认不出就报错并列出可用档名）；`params.steps` 与新增的 `params.surface_level` **现在都由 WGSL 硬表面路径读**（`SURFACE_STEPS` / `SURFACE_LEVEL` 两个常量删掉 —— 在这之前场景里写的 `steps` 对硬表面路是个谎）。三处 `struct CloudParams` 必须同序同布局：`art/shaders/clouds.wgsl`、`clouds.rs`、以及 `slots.rs` 里的内联占位。
+- ✅ **产物相机表接上**：`--sheet` 是裸开关，用 `.pxart` 里那 12 台评审相机，复用同一套 `SheetCell`/viewport 逻辑（实测 1920×900，洋红 0）。
+- ✅ **批量请求**：`Scene::Sequence { shots: Vec<Shot> }`（`Shot { scene, out, cam? }`，**没有 ablate**）；`ActiveJob` 排队，每存完一张 despawn `ScenePart` 再按下一步重建、重置 `warm/requested/warned`，**一步一行「出图：」**（harness 靠它逐步同步），队空才回 `Response`（`shots` 列全部、`out` = 最后一张）。实测两步：`orbit-bare` 91071 / `orbit` 106070，两张不同 ✓。
+- ✅ 旧路数值不变有回归测试钉住（`CloudShape::default()` = `CloudParams::new` 原先那 14 个数）。
+- ⚠ `--view` / `--show` 只到**编译级**：`ViewRequest` 换成「场景路径 + 内容键」、窗口只在键变了才重建，但没有开窗口实跑。
+- ⏳ 若一份 WGSL **真的换了内容**，那一张仍要赌重编能在 40 帧内入队；要彻底就得在装过之后等 READY 再放行（怕管线永远编不出来时把任务挂住，所以现在是有界等待 + 警告）。
+- ⏳ `--scatter` 删掉后 `planet::spawn_scattering`（Bevy `AtmosphereSettings` 那条）与 `planet::check_scene` 成了死码，留着没删。

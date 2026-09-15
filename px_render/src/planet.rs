@@ -9,8 +9,9 @@ use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension}
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::art_cache::{ArtCache, ReadyMesh, ReadySphere, Role};
-use crate::atmosphere::{AtmosphereMaterial, AtmosphereParams};
+use crate::atmosphere::{self, AtmosphereMaterial, AtmosphereParams};
 use crate::clouds::{self, CloudsMaterial};
+use crate::surface::SurfaceMaterial;
 use px_protocol::art::{AssetKind, Domain, MeshData};
 use px_protocol::stream::{self, Frame};
 
@@ -73,6 +74,25 @@ pub struct PlanetSpec {
     pub mesh: Option<String>,
     pub clouds: Option<String>,
     pub slope: Option<[String; 3]>,
+    /// 云的代理几何（clouds part 的可选成员 `proxy`）。没有它 ⇒ 云还是 ico 球壳。
+    pub proxy: Option<String>,
+    /// 云的相对内/外半径因子（× 行星半径）。场景产物里是 clouds part 的 inner / outer。
+    pub cloud_shell: (f32, f32),
+    /// 云的那一整档形状参数。老路 = `CloudShape::default()`（原来写死在 `CloudParams::new`）。
+    pub cloud_shape: clouds::CloudShape,
+    /// clouds part 钉的 WGSL 内容版本（0 = 没钉 ⇒ 占位）。只进管线特化的键，不进 bind group。
+    pub cloud_shader: u64,
+    /// atmosphere part 钉的 WGSL 内容版本（0 = 没钉 ⇒ 占位）。
+    pub atmosphere_shader: u64,
+    /// planet part 钉的表面材质版本（0 = 没钉 ⇒ 占位）。§39.6 阶段 3 起表面也自写。
+    pub surface_shader: u64,
+    /// 云影落在表面的强度（0 = 关）与它查云带的那一层「指定高度」。
+    pub cloud_shadow: f32,
+    pub shadow_height: f32,
+    /// 场景里那盏太阳（点光源，§60）：位置/颜色/强度，以及开不开阴影贴图。
+    pub sun: SunLightSpec,
+    /// 有没有大气壳由它表达（`None` 就不生成）；`atmo` 只当强度倍率。
+    pub atmosphere: Option<atmosphere::AtmosphereSpec>,
     pub palette: Palette,
     pub displace: f32,
     pub sea_level: f32,
@@ -81,6 +101,18 @@ pub struct PlanetSpec {
     pub rings: f32,
     pub atmo: f32,
     pub ablate: clouds::Ablate,
+}
+
+/// 老路（命令行色板）那一档大气：场景路从产物里读同样的四个数。
+/// 壳厚常数只在这里出现一次 —— 两条路各写一遍就是又一个「同一个值、两处维护」。
+pub fn legacy_atmosphere(palette: Palette) -> atmosphere::AtmosphereSpec {
+    let (tint, density, softness) = palette.atmosphere();
+    atmosphere::AtmosphereSpec {
+        outer: ATMOSPHERE_SHELL,
+        density,
+        softness,
+        tint: [tint.red, tint.green, tint.blue],
+    }
 }
 
 pub const SYSTEM_TILT: f32 = 0.34;
@@ -775,6 +807,7 @@ pub fn warm_atmosphere(
             reserved: 0.0,
         },
         tint: LinearRgba::rgb(0.44, 0.64, 0.98),
+        shader: 0,
     });
     commands.spawn((
         crate::ScenePart,
@@ -811,15 +844,18 @@ fn spawn_atmosphere(
     if spec.atmo <= 0.0 {
         return;
     }
-    let (tint, density, softness) = spec.palette.atmosphere();
+    let Some(atmosphere) = spec.atmosphere else {
+        return;
+    };
+    let outer = spec.radius * atmosphere.outer;
 
-    let Ok(sphere) = Sphere::new(spec.radius * ATMOSPHERE_SHELL).mesh().ico(64) else {
+    let Ok(sphere) = Sphere::new(outer).mesh().ico(64) else {
         return;
     };
     println!(
         "大气壳：半径 {:.3}，密度 {:.3}，相机 ({:.2},{:.2},{:.2})",
-        spec.radius * ATMOSPHERE_SHELL,
-        density * spec.atmo,
+        outer,
+        atmosphere.density * spec.atmo,
         camera.translation.x,
         camera.translation.y,
         camera.translation.z
@@ -827,36 +863,85 @@ fn spawn_atmosphere(
     let material = materials.add(AtmosphereMaterial {
         params: AtmosphereParams {
             inner: spec.radius,
-            outer: spec.radius * ATMOSPHERE_SHELL,
-            density: density * spec.atmo,
-            softness,
+            outer,
+            density: atmosphere.density * spec.atmo,
+            softness: atmosphere.softness,
             camera_x: camera.translation.x,
             camera_y: camera.translation.y,
             camera_z: camera.translation.z,
             reserved: 0.0,
         },
-        tint,
+        tint: LinearRgba::rgb(
+            atmosphere.tint[0],
+            atmosphere.tint[1],
+            atmosphere.tint[2],
+        ),
+        shader: spec.atmosphere_shader,
     });
     commands.spawn((
         crate::ScenePart,
         PlanetAtmosphere,
+        // 大气壳**不投**阴影：它是透明的，而它比行星还大 ⇒ 一旦进 shadow map，
+        // 整颗行星都会落在它自己的影子里（云收到的那份"别人的影"会全黑）。
+        bevy::light::NotShadowCaster,
         Mesh3d(meshes.add(sphere)),
         MeshMaterial3d(material),
         Transform::default(),
     ));
 }
 
-fn spawn_lights(commands: &mut Commands) {
+/// 场景里的那盏太阳：**点光源**（§60）。位置/强度/颜色都由 planet part 给，
+/// 缺省就是加这个特性之前那盏平行光的位置（`(-4.2, 1.15, 2.35)`，方向正是旧
+/// `SUN_DIRECTION` 归一化之后那片方向 ⇒ 老场景换过来时受光面不会跳）。
+#[derive(Clone, Copy, Debug)]
+pub struct SunLightSpec {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    /// Bevy 的 `PointLight.intensity`，单位是**流明**（它内部除以 4π 变成光强）。
+    pub intensity: f32,
+    pub shadows: bool,
+}
+
+/// 缺省的太阳强度：让**受光面**的照度与旧的那盏 `DirectionalLight`（3800 lx）相当。
+/// `3800 × 4π × d²`，d = |position| − 1（行星半径 1）= 3.95 ⇒ ≈ 7.6e5 流明。
+/// ⚠ 点光源没法"处处一样亮"（盘面上本来就有 1/d² 的梯度）—— 对齐的是天底点，
+/// 判据见 §60.2（量受光面像素）。
+pub const SUN_INTENSITY: f32 = 7.6e5;
+/// 缺省位置：与旧平行光那个实体同一个坐标。
+pub const SUN_POSITION: [f32; 3] = [-4.2, 1.15, 2.35];
+/// 点光源的"照到哪儿为止"：取 `|position| × 2.5` —— 一整颗行星（半径 1）都在里面，
+/// 但 range 的平滑落零又不会在盘面上留下可见的边。
+pub const SUN_RANGE_FACTOR: f32 = 2.5;
+
+impl Default for SunLightSpec {
+    fn default() -> Self {
+        Self {
+            position: SUN_POSITION,
+            color: [1.0, 1.0, 1.0],
+            intensity: SUN_INTENSITY,
+            shadows: false,
+        }
+    }
+}
+
+/// 场景里的那盏太阳。`spec.shadows` 由场景内容说了算（planet part 的 `shadows` 参数）：
+/// 开了才有 shadow map，山自阴影与环影才存在，云那边才收得到"别人的影"。
+fn spawn_lights(commands: &mut Commands, sun: SunLightSpec) {
+    let position = Vec3::from_array(sun.position);
+    let reach = position.length().max(1e-3) * SUN_RANGE_FACTOR;
     commands.spawn((
         crate::ScenePart,
-        DirectionalLight {
-            illuminance: 3800.0,
+        PointLight {
+            color: Color::linear_rgb(sun.color[0], sun.color[1], sun.color[2]),
+            intensity: sun.intensity,
+            range: reach,
+            shadow_maps_enabled: sun.shadows,
             ..default()
         },
-        Transform::from_xyz(-4.2, 1.15, 2.35).looking_at(Vec3::ZERO, Vec3::Y),
+        // 点光源的朝向不参与着色（影子是 cube），摆成"看着原点"只是为了和旧那盏一致、
+        // 也让窗口里选中它时看得明白。
+        Transform::from_translation(position).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-
-
 }
 
 fn spawn_rings(
@@ -889,6 +974,48 @@ fn spawn_rings(
             Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
         ));
     });
+}
+
+/// 闭合网格按**有向体积**判缠绕朝向：朝里就翻成朝外。返回翻之前的体积（`None` = 没动）。
+///
+/// 为什么渲染侧要管这件事：云材质走 Bevy 的通用 `Material` 管线，而那条管线把
+/// `cull_mode` 写死成 `Some(Face::Back)`（`bevy_pbr/src/render/mesh.rs`）。等值面算子
+/// 出来的代理缠绕朝里（实测有向体积 −0.47）⇒ 被剔掉的是**近**面，云会整片消失。
+/// 顺着缠绕翻，法线属性得跟着翻，否则顶点法与三角形绕向说的不是一件事。
+fn outward_winding(mesh: &mut Mesh) -> Option<f64> {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned()
+    else {
+        return None;
+    };
+    let Some(Indices::U32(indices)) = mesh.indices().cloned() else {
+        return None;
+    };
+    let at = |index: u32| Vec3::from(positions[index as usize]);
+    let mut volume = 0.0_f64;
+    for triangle in indices.chunks_exact(3) {
+        let (a, b, c) = (at(triangle[0]), at(triangle[1]), at(triangle[2]));
+        volume += f64::from(a.dot(b.cross(c)));
+    }
+    if volume >= 0.0 {
+        return None;
+    }
+
+    let mut flipped = indices;
+    for triangle in flipped.chunks_exact_mut(3) {
+        triangle.swap(1, 2);
+    }
+    mesh.insert_indices(Indices::U32(flipped));
+    if let Some(VertexAttributeValues::Float32x3(normals)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+    {
+        for normal in normals.iter_mut() {
+            for value in normal.iter_mut() {
+                *value = -*value;
+            }
+        }
+    }
+    Some(volume / 6.0)
 }
 
 /// 网格产物 → 网格。返回的审计文本同上：它是**值**，要被缓存原样重放。
@@ -954,6 +1081,13 @@ pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(data.indices));
     weld_normals(&mut mesh);
+
+    match outward_winding(&mut mesh) {
+        Some(volume) => audit.push_str(&format!(
+            "缠绕审计：有向体积 {volume:.4}（朝里）⇒ 已按朝外翻面\n"
+        )),
+        None => audit.push_str("缠绕审计：有向体积为正（朝外），不动\n"),
+    }
 
     if let (Some(VertexAttributeValues::Float32x3(normals)), Some(VertexAttributeValues::Float32x3(positions))) =
         (
@@ -1375,41 +1509,59 @@ pub fn spawn_clouds(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<CloudsMaterial>,
-    images: &mut Assets<Image>,
     spec: &PlanetSpec,
     density: f32,
+    coverage: Handle<Image>,
+    face: u32,
 ) -> Result<String, String> {
-    let coverage = cache.coverage(spec, images)?;
-    let face = coverage.value.face;
-    replay(
-        &format!("         覆盖度立方图：{face}²×{}", px_protocol::art::CUBE_FACES),
-        coverage.hit,
-    );
+    let (inner_factor, outer_factor) = spec.cloud_shell;
+    let inner = spec.radius * inner_factor;
+    let outer = spec.radius * outer_factor;
 
-    let inner = spec.radius * clouds::CLOUD_BASE;
-    let outer = spec.radius * clouds::CLOUD_TOP;
-    let Ok(sphere) = Sphere::new(outer).mesh().ico(64) else {
-        return Err("云壳网格造不出来".to_string());
+    // 几何：有代理 mesh 就用它（空区域在光栅阶段就被剔除，fragment 只决定从哪个下标
+    // 开始扫），没有就照旧球壳 —— 老场景的像素一个都不许变。两者都走同一套内容键缓存。
+    let (geometry, geometry_note) = match spec.proxy.as_deref() {
+        Some(path) => {
+            let ready = cache.artifact_mesh(Role::Proxy, path, meshes)?;
+            replay(&ready.value.audit, ready.hit);
+            let handle = ready.value.handle.clone();
+            let (vertices, triangles) = mesh_counts(meshes, &handle)?;
+            (
+                handle,
+                format!("｜代理几何 {vertices} 顶点 / {triangles} 三角形"),
+            )
+        }
+        None => {
+            let Ok(sphere) = Sphere::new(outer).mesh().ico(64) else {
+                return Err("云壳网格造不出来".to_string());
+            };
+            (meshes.add(sphere), String::new())
+        }
     };
 
     let orientation = Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin);
     let mut params = clouds::CloudParams::new(inner, outer, density);
+    spec.cloud_shape.overlay(&mut params);
     params.orientation = Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w);
     params.ablate = spec.ablate.code();
 
     commands.spawn((
         crate::ScenePart,
         clouds::PlanetCloud,
-        Mesh3d(meshes.add(sphere)),
+        // 云壳**不投**阴影：它是一整颗球，进 shadow map 就是一颗球形的硬影，
+        // 而不是云的形状。云影走的是地表材质里那条覆盖度立方图的解析近似。
+        bevy::light::NotShadowCaster,
+        Mesh3d(geometry),
         MeshMaterial3d(materials.add(CloudsMaterial {
             params,
-            coverage: Some(coverage.value.image),
+            coverage: Some(coverage),
+            shader: spec.cloud_shader,
         })),
         Transform::from_rotation(orientation),
     ));
 
     Ok(format!(
-        "云层：{:.3}..{:.3}｜覆盖度 {}²×{}｜消光 {:.1}",
+        "云层：{:.3}..{:.3}｜覆盖度 {}²×{}｜消光 {:.1}{geometry_note}",
         inner,
         outer,
         face,
@@ -1431,40 +1583,101 @@ pub fn spawn_planet(
     atmo_materials: &mut Assets<AtmosphereMaterial>,
     media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
     clouds_materials: &mut Assets<CloudsMaterial>,
+    surface_materials: &mut Assets<SurfaceMaterial>,
     scatter: Option<&str>,
     camera: Transform,
     spec: &PlanetSpec,
     cloud_density: f32,
 ) -> Result<String, String> {
     let field = cache.field(Role::Height, &spec.field)?;
-    let cloud_note = if spec.clouds.is_some() {
-        spawn_clouds(
+    // 覆盖度立方图在这里取一次，云壳与**地表云影**共用同一张（同一份内容键、同一个句柄）：
+    // 各取一次就是"同一个键、两次审计"，而且两张图一旦有一份过期就再也不一致。
+    let coverage = if spec.clouds.is_some() {
+        let ready = cache.coverage(spec, images)?;
+        replay(
+            &format!(
+                "         覆盖度立方图：{}²×{}",
+                ready.value.face,
+                px_protocol::art::CUBE_FACES
+            ),
+            ready.hit,
+        );
+        Some(ready.value)
+    } else {
+        None
+    };
+    let cloud_note = match &coverage {
+        Some(ready) => spawn_clouds(
             cache,
             commands,
             meshes,
             clouds_materials,
-            images,
             spec,
             cloud_density,
-        )?
-    } else {
-        String::new()
+            ready.image.clone(),
+            ready.face,
+        )?,
+        None => String::new(),
     };
 
     let textures = cache.textures(&field.value, spec, images)?;
     replay(&textures.value.audit, textures.hit);
     let (color_texture, glow_texture) = (textures.value.color.clone(), textures.value.glow.clone());
-    let emissive = if glow_texture.is_some() {
+    let has_glow = glow_texture.is_some();
+    let emissive = if has_glow {
         LinearRgba::rgb(3.0, 3.0, 3.0)
     } else {
         LinearRgba::rgb(0.0, 0.0, 0.0)
     };
+    let orientation = Quat::from_rotation_x(SYSTEM_TILT) * Quat::from_rotation_y(spec.spin);
+
+    // 地表的自写材质（§39.6 阶段 3/4）：直接光由它自己算，云影与 shadow map 都乘在这里。
+    // 云壳的 inner/outer 与覆盖度阈值跟云材质同一口径；没有云时 `shadow = 0` ⇒ 一次都不采。
+    let (inner_factor, outer_factor) = spec.cloud_shell;
+    let mut surface_params = crate::surface::SurfaceParams::new(
+        spec.radius * inner_factor,
+        spec.radius * outer_factor,
+        spec.cloud_shape.coverage,
+    );
+    surface_params.orientation = Vec4::new(orientation.x, orientation.y, orientation.z, orientation.w);
+    surface_params.emissive = if has_glow {
+        Vec4::new(emissive.red, emissive.green, emissive.blue, 1.0)
+    } else {
+        Vec4::ZERO
+    };
+    surface_params.shadow = if coverage.is_some() { spec.cloud_shadow } else { 0.0 };
+    surface_params.height = spec.shadow_height;
+    let surface_material = surface_materials.add(SurfaceMaterial {
+        params: surface_params,
+        albedo: Some(color_texture),
+        glow: glow_texture,
+        coverage: coverage.map(|ready| ready.image),
+        shader: spec.surface_shader,
+    });
+
     let tail = format!(
-        "{}{}",
+        "{}{}{}{}",
         if spec.rings > 0.0 {
             format!("｜环 ×{:.2}", spec.rings)
         } else {
             String::new()
+        },
+        // 光源那一档写在审计行里：太阳是点光源之后，"灯在哪、多亮"是场景内容的一部分，
+        // 出图日志里看不到它就没法复现一张图（§60.1）。
+        format!(
+            "｜点光源 ({:.2},{:.2},{:.2}) 强度 {:.3e} 色 ({:.2},{:.2},{:.2})",
+            spec.sun.position[0],
+            spec.sun.position[1],
+            spec.sun.position[2],
+            spec.sun.intensity,
+            spec.sun.color[0],
+            spec.sun.color[1],
+            spec.sun.color[2],
+        ),
+        if !spec.sun.shadows {
+            String::new()
+        } else {
+            "｜阴影贴图（山自阴影 + 环影）".to_string()
         },
         if cloud_note.is_empty() {
             String::new()
@@ -1491,14 +1704,7 @@ pub fn spawn_planet(
             parent.spawn((
                 PlanetBody,
                 Mesh3d(mesh_handle),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color_texture: Some(color_texture),
-                    emissive_texture: glow_texture,
-                    emissive,
-                    perceptual_roughness: 0.88,
-                    metallic: 0.0,
-                    ..default()
-                })),
+                MeshMaterial3d(surface_material.clone()),
                 Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
             ));
         });
@@ -1508,7 +1714,7 @@ pub fn spawn_planet(
             None => spawn_atmosphere(commands, meshes, atmo_materials, system, camera, spec),
         }
         spawn_rings(commands, meshes, materials, images, spec);
-        spawn_lights(commands);
+        spawn_lights(commands, spec.sun);
 
         return Ok(format!(
             "{}｜{}｜{}×{}｜PCG 网格 {vertices} 顶点 / {triangles} 三角形｜海平面 {:.2}{tail}",
@@ -1536,15 +1742,7 @@ pub fn spawn_planet(
         parent.spawn((
             PlanetBody,
             Mesh3d(mesh_handle),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color_texture: Some(color_texture),
-                emissive_texture: glow_texture,
-                emissive,
-                perceptual_roughness: 0.88,
-                metallic: 0.0,
-
-                ..default()
-            })),
+            MeshMaterial3d(surface_material),
             Transform::from_rotation(Quat::from_rotation_y(spec.spin)),
         ));
 

@@ -1,0 +1,26 @@
+# 无云的同一场景：给成对测量当"地板"用。
+#
+# 与 orbit.toml 的差别**只有**少了 clouds 那个 part —— 所以两份场景产物之间的
+# 帧时间差就是云的成本，不需要命令行开关去模拟"关掉云"。
+#
+# 烘：cargo run -p px_graphs --bin scene orbit-bare
+
+name = "orbit-bare"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+shader = "surface"
+graph = "planet"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 1.0, outer = 1.14, density = 0.3, softness = 0.5, tint = [0.44, 0.64, 0.98] }

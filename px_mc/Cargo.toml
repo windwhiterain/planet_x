@@ -1,0 +1,9 @@
+[package]
+name = "px_mc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_ops = { path = "../px_ops" }
+isosurface = "=0.1.0-alpha.0"
+serde = { version = "1", features = ["derive"] }

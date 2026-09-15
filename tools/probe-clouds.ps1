@@ -1,45 +1,64 @@
+<#
+.SYNOPSIS
+  云的多视角出图探针：几份场景 × 几个相机，看图不看数。
+
+.DESCRIPTION
+  与 frame-probe.ps1 共用 tools/harness.ps1：场景按**图名/节点名**从
+  `target/pcg/<图>/manifest.json` 解析，缺图缺节点就抛错；渲染器只收一个 `--scene`。
+
+  **消融档是场景的变体，不是开关**：`ablate = "surface"` 写在 clouds part 的参数里，
+  所以这里收到的是一串场景节点名（`orbit` / `orbit-bare` / `orbit-surface` …），
+  而不是一串档名。要量哪一档就先照 `art/scene/orbit-surface.toml` 那样烘一份。
+
+  服务就绪读日志的「渲染管线全部就绪」，不再 Sleep 15 硬等；
+  客户端退出码与 Refused 都当硬失败。停服务按租约 pid，不做全局杀。
+
+  帧时间归 frame-probe.ps1，这里只出图（判据是眼睛 + 并排比）。
+
+.EXAMPLE
+  .\tools\probe-clouds.ps1 -Scenes orbit,orbit-bare,orbit-surface
+#>
 param(
-    [string]$Field = "target/pcg/ab/ad/ad7a18ea349db3e259d429f9bdb72711bec1f714207827238a5456767f239517.pxart",
-    [string]$Mesh = "target/pcg/ab/6d/6df28459c385cf8e0f05f00ae8be6ad9b436b42b619e6f34e610f0919825c532.pxart",
-    [string]$Cover = "target/pcg/ab/81/81d3d21d406121f73be974a566778e3947365124fc30191674b9f899d6a315d5.pxart",
-    [string]$Slope = "target/pcg/ab/af/afc8c41a477401a5fcba4ac81e4e632dcc951ebaf12981061050c3b79943167b.pxart,target/pcg/ab/a7/a7aa0d14169157f6cb6b4e97b98f528660db139a2703ef49ac42ffac51346476.pxart,target/pcg/ab/4e/4e9571d1ba536d1a41e3517dd303238f7eb6856ec594696feb64a7b92ba995d5.pxart",
+    [string]$Graph = 'scene',
+    [string[]]$Scenes = @('orbit', 'orbit-bare', 'orbit-surface', 'orbit-proxy'),
     [int]$Size = 1100,
-    [string]$Out = "target/probe-clouds"
+    [string]$Out = 'target/probe-clouds'
 )
 
-$ErrorActionPreference = "Stop"
-$exe = "target\debug\px_render.exe"
-$env:WGPU_BACKEND = "dx12"
+. "$PSScriptRoot\harness.ps1"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 $cams = @(
-    "0.90,0.25,2.10",
-    "1.60,0.25,2.10",
-    "2.40,0.25,2.10",
-    "0.90,0.60,2.10"
-)
-$modes = @(
-    @{ Name = "volume";  Args = @() },
-    @{ Name = "surface"; Args = @("--cloud-ablate", "surface") },
-    @{ Name = "normals"; Args = @("--cloud-ablate", "normals") }
+    '0.90,0.25,2.10',
+    '1.60,0.25,2.10',
+    '2.40,0.25,2.10',
+    '0.90,0.60,2.10'
 )
 
-foreach ($mode in $modes) {
-    Get-Process -Name px_render -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 700
-    Remove-Item target\render-server.json -ErrorAction SilentlyContinue
-    $server = Start-Process -FilePath $exe -ArgumentList (@("--serve", "--width", $Size, "--height", $Size) + $mode.Args) `
-        -RedirectStandardOutput "$Out/$($mode.Name).log" -RedirectStandardError "$Out/$($mode.Name).err" -PassThru
-    Start-Sleep -Seconds 15
-    $index = 0
-    foreach ($cam in $cams) {
-        & $exe --planet $Field --mesh $Mesh --palette rocky --clouds $Cover --cloud-slope $Slope `
-            --width $Size --height $Size --cam $cam --out "$Out/$($mode.Name)-$index.png" | Out-Null
-        $index++
+foreach ($name in $Scenes) {
+    $sceneArtifact = Resolve-Artifact -Graph $Graph -Node $name
+    Write-Host "==== $name（全部来自产物）===="
+    Format-Artifact $sceneArtifact
+    $scene = @('--scene', $sceneArtifact.Path, '--pcg-root', $HarnessCacheRoot)
+
+    $log = "$Out/$name.log"
+    $err = "$log.err"
+    Write-Host "---- 起服务（不吃任何内容旗标）----"
+    $server = Start-RenderServer -Extra @() -Log $log -Err $err -Width $Size -Height $Size
+    try {
+        $index = 0
+        foreach ($cam in $cams) {
+            $shot = "$Out/$name-$index.png"
+            Invoke-Client -Err $err -What "出图 $name-$index" -Arguments ($scene + @(
+                    '--width', "$Size", '--height', "$Size", '--cam', $cam, '--out', $shot))
+            if (-not (Test-Path $shot)) { throw "没出图：$shot" }
+            Write-Host "  拍好 $name-$index（$cam）"
+            $index++
+        }
     }
-    Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 700
-    Write-Output "$($mode.Name): $($cams.Count) 张 -> $Out/$($mode.Name)-*.png"
+    finally {
+        Stop-RenderServer $server
+    }
+    Write-Host "$name：$($cams.Count) 张 -> $Out/$name-*.png"
 }
-Get-Process -Name px_render -ErrorAction SilentlyContinue | Stop-Process -Force
-Write-Output "probe 完成"
+Write-Host 'probe 完成'

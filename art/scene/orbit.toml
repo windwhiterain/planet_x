@@ -1,0 +1,40 @@
+# 场景配方：这次要渲什么、用什么参数。
+#
+# 内容全部来自产物（planet / clouds / shaders 三张图）；这里只有「怎么组装」——
+# 成员按「图名::节点名」引用，跨图的成员必须写明图名。改这份文件不重编。
+#
+# 烘：cargo run -p px_graphs --bin shaders
+#     cargo run -p px_graphs --bin scene
+# 渲：px_render --scene <烘出来的 SCENE.pxart>
+
+name = "orbit"
+ambient = 80.0
+# 评审相机表（`--sheet` 用）。"review" = px_ops::cameras::review()。
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+# shader 槽 = 用哪套材质绑定。行星表面自 §39.6 阶段 3 起也是自写材质（云影要压的只有直接光，
+# Bevy 的内建 PBR 没有那个位置）⇒ 真本必须由场景带进来，和云、大气同一个规矩。
+shader = "surface"
+graph = "planet"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0 }
+
+[[parts]]
+id = "clouds"
+kind = "clouds"
+shader = "clouds"
+graph = "clouds"
+# WGSL 本体是 CAS 里的资产（shaders 图），和场、网格同一个引用方式。
+members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z" }
+params = { inner = 1.01, outer = 1.06, extinction = 900.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 0.85, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 1.0, outer = 1.14, density = 0.3, softness = 0.5, tint = [0.44, 0.64, 0.98] }

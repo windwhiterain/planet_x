@@ -3,6 +3,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::render::{Request, Response};
+use crate::scene::SceneSpec;
 use crate::wire::{self, WireError};
 use crate::{ArtBundle, Blob, ProtocolId, WorldView};
 
@@ -14,6 +15,7 @@ pub enum Frame {
     Protocol(ProtocolId),
     World(WorldView),
     Art(ArtBundle),
+    Scene(SceneSpec),
     Blob(Blob),
     Request(Request),
     Response(Response),
@@ -26,6 +28,7 @@ enum TextFrame {
     Protocol(ProtocolId),
     World(WorldView),
     Art(ArtBundle),
+    Scene(SceneSpec),
     Request(Request),
     Response(Response),
     Refused { reason: String },
@@ -42,6 +45,7 @@ impl Frame {
             Self::Protocol(inner) => Self::encode_text(TextFrame::Protocol(inner.clone())),
             Self::World(inner) => Self::encode_text(TextFrame::World(inner.clone())),
             Self::Art(inner) => Self::encode_text(TextFrame::Art(inner.clone())),
+            Self::Scene(inner) => Self::encode_text(TextFrame::Scene(inner.clone())),
             Self::Request(inner) => Self::encode_text(TextFrame::Request(inner.clone())),
             Self::Response(inner) => Self::encode_text(TextFrame::Response(inner.clone())),
             Self::Refused(reason) => Self::encode_text(TextFrame::Refused {
@@ -60,6 +64,7 @@ impl Frame {
                     TextFrame::Protocol(inner) => Self::Protocol(inner),
                     TextFrame::World(inner) => Self::World(inner),
                     TextFrame::Art(inner) => Self::Art(inner),
+                    TextFrame::Scene(inner) => Self::Scene(inner),
                     TextFrame::Request(inner) => Self::Request(inner),
                     TextFrame::Response(inner) => Self::Response(inner),
                     TextFrame::Refused { reason } => Self::Refused(reason),

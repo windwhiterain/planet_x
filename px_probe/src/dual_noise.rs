@@ -53,8 +53,6 @@ fn scatter(count: usize) -> Vec<[f64; 3]> {
         .map(|_| [next() * 8.0 - 4.0, next() * 8.0 - 4.0, next() * 8.0 - 4.0])
         .collect()
 }
-
-#[test]
 fn diagnose_the_noise_discrepancy() {
     let settings = settings();
     let point = [
@@ -93,8 +91,6 @@ fn diagnose_the_noise_discrepancy() {
     let base = value([point[0] as f32, point[1] as f32, point[2] as f32]);
     println!("fbm 平均值 {base:.9}");
 }
-
-#[test]
 fn the_dual_gradient_of_the_noise_matches_its_own_values() {
     let points = scatter(4000);
     let steps = [1e-2_f64, 1e-3, 1e-4];
@@ -162,8 +158,6 @@ fn the_dual_gradient_of_the_noise_matches_its_own_values() {
         median_per_step[median_per_step.len() - 1] / median_per_step[1],
     );
 }
-
-#[test]
 fn the_noise_value_is_clamped_so_its_gradient_is_zero_outside() {
     let settings = settings();
     let mut saw_clamped = false;
@@ -193,4 +187,14 @@ fn the_noise_value_is_clamped_so_its_gradient_is_zero_outside() {
             }
         }
     }
+}
+pub fn checks() -> Vec<(&'static str, fn())> {
+    vec![
+        ("the_dual_gradient_of_the_noise_matches_its_own_values", the_dual_gradient_of_the_noise_matches_its_own_values),
+        ("the_noise_value_is_clamped_so_its_gradient_is_zero_outside", the_noise_value_is_clamped_so_its_gradient_is_zero_outside),
+    ]
+}
+
+pub fn diagnose() {
+    diagnose_the_noise_discrepancy()
 }
