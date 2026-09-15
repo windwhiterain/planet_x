@@ -1,10 +1,10 @@
 #import planet_x::common::shell_thickness
-#import planet_x::light::{sun_light, view_z_of}
+#import planet_x::light::sun_light
 #import planet_x::noise::{fbm_3, fbm_3_grad, rotate_vector, NoiseSample}
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, depth_prepass_texture, globals}
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
-#import bevy_pbr::shadows::{fetch_directional_shadow, fetch_point_shadow}
+#import bevy_pbr::shadows::fetch_point_shadow
 
 struct CloudParams {
     orientation: vec4<f32>,
@@ -700,6 +700,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if cover <= 0.0 {
             continue;
         }
+        // 软档的保守上界早退：与 `cloud_field` 里那个 `bound`（§51.7）是同一条论证 ——
+        // `shape_of` 对 noise 单调非降、`billows` 夹在 [0,1] ⇒ 上界够不着等值面 ⇒
+        // 下面那次 `smoothstep` 恰为 0 ⇒ 这一步的 `visible` 是 0、透射率一字不变
+        // ⇒ 整段跳过与算出来**逐位相同**，省掉 `billows` ＋ 那一步的法线 ＋ 一次 shadow map 采样。
+        if soft && params.bound != 0u && shape_of(cover, medium.altitude, 1.0) <= params.surface_level {
+            continue;
+        }
         let noise = billows(medium.direction, medium.altitude, true);
         let field_density = shape_of(cover, medium.altitude, noise);
         if field_density <= 0.0 {
@@ -727,24 +734,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             // 影子是 cube 还是级联由**灯的种类**决定（§60）：点光源查 cube，方向光查级联。
             // 灯没开影子时 `principal.shadow_maps == 0` ⇒ 一次采样都不发（输出仍是 1.0）。
             // ⚠ 名字不能叫 `cast`：WGSL 的保留字。
+            // ⚠ 只有点光源这一支：宇宙里没有平行光（§64.9）。
             var cast_shadow = 1.0;
             if facing > 0.0 && principal.shadow_maps != 0u {
-                if principal.point == 1u {
-                    cast_shadow = fetch_point_shadow(
-                        principal.shadow_id,
-                        vec4<f32>(point, 1.0),
-                        normal,
-                        in.position.xy,
-                    );
-                } else {
-                    cast_shadow = fetch_directional_shadow(
-                        principal.shadow_id,
-                        vec4<f32>(point, 1.0),
-                        normal,
-                        view_z_of(point),
-                        in.position.xy,
-                    );
-                }
+                cast_shadow = fetch_point_shadow(
+                    principal.shadow_id,
+                    vec4<f32>(point, 1.0),
+                    normal,
+                    in.position.xy,
+                );
             }
             lit_sum += transmittance * visible * lit * cast_shadow;
             transmittance *= 1.0 - visible;

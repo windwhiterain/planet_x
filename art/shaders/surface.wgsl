@@ -1,8 +1,8 @@
-#import planet_x::light::{sun_light, view_z_of}
+#import planet_x::light::sun_light
 #import planet_x::noise::rotate_vector
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
-#import bevy_pbr::shadows::{fetch_directional_shadow, fetch_point_shadow}
+#import bevy_pbr::shadows::fetch_point_shadow
 
 // 行星表面的自写材质（§39.6 阶段 3/4 的那一步，口径与实测见 `06-clouds.md` §59）。
 //
@@ -145,22 +145,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     //    ⚠ 名字不能叫 `cast`：WGSL 的保留字。
     var cast_shadow = 1.0;
     if facing > 0.0 && principal.shadow_maps != 0u {
-        if principal.point == 1u {
-            cast_shadow = fetch_point_shadow(
-                principal.shadow_id,
-                in.world_position,
-                normal,
-                in.position.xy,
-            );
-        } else {
-            cast_shadow = fetch_directional_shadow(
-                principal.shadow_id,
-                in.world_position,
-                normal,
-                view_z_of(in.world_position.xyz),
-                in.position.xy,
-            );
-        }
+        // ⚠ 只有点光源这一支：宇宙里没有平行光（§64.9）。
+        cast_shadow = fetch_point_shadow(
+            principal.shadow_id,
+            in.world_position,
+            normal,
+            in.position.xy,
+        );
     }
 
     // ② 云影（覆盖度立方图 + 指定高度）。0.88 是换材质之前 `StandardMaterial` 的

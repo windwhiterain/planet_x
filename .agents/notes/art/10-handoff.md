@@ -128,6 +128,96 @@
 只有人为把预算改成 300 ms 那一次实测。`drive_stable` 的 `Assets` 相位、viewer（`--view` /
 `--show`）没接这道闸。
 
+### 9.1.4 本轮（2026-09-15，`feature/soft-cloud-perf` worktree）：代理 + 软
+
+**在哪条线上**：`.worktrees/soft-cloud-perf`（分支 `feature/soft-cloud-perf`，从 v2 的 `7a300e6` 拉）。
+口径与实测全在 `06-clouds.md` **§63**。
+
+**用户的三条**（2026-09-15）：①**"需要：代理 + 软"** —— 粗代理几何接到软云档
+（`gradient = 2`）上；②追问后定 **代理要进 `orbit-soft` 本体**（成为软档默认）；
+③接着做**软档循环内的上界早退**。窗口 review 排在最后再起。
+
+**改了什么**
+
+- `art/scene/orbit-soft.toml`（本体）：clouds part 加 `proxy = "clouds::proxy"` 成员
+  ＋ `bound = 1`。**渲染侧一行没改**；`clouds`/`planet` 两张图这次重烘**全部命中**
+  （15/15，键没变）⇒ 代理的形状不用重烘（`art/clouds/coarse.toml` 的 τ/inner/outer/形状参数
+  与这一档本来就逐项相同）。
+- `art/shaders/clouds.wgsl`：软分支的步进循环里加**五行**（算完 `cover` 之后、`billows` 之前）——
+  `if soft && params.bound != 0u && shape_of(cover, medium.altitude, 1.0) <= params.surface_level { continue; }`。
+  上界够不着等值面 ⇒ 那一步的 `smoothstep` 恰为 0 ⇒ `visible = 0`、透射率不变 ⇒ 跳过与算出来
+  **逐位相同**，省掉 `billows` ＋ 那一步的法线 ＋ **一次 shadow map 采样**。
+  `params.bound` 缺省 0、且只挂在 `soft` 上 ⇒ 体积那条老分支与所有老场景一个像素都不动。
+- 消融档：`orbit-soft-shell`（球壳、无 `bound` = §63 之前的软档内容）、
+  `orbit-soft-proxy`（只有代理）。量完那个临时档 `orbit-soft-proxy-bound` 已删（折进本体了）。
+
+**已验证**：
+
+- **逐字节（早退）**：`orbit-soft-proxy` ↔ `orbit-soft`（只差 `bound`）
+  **2240×1400 与 480×300 两个分辨率哈希全同**；且折进来之后 `orbit-soft` = `04fe9dac8042a721…`
+  （= 量的时候那档的哈希）、`orbit-soft-shell` = `11b0a659bb71ad47…`（= §63 之前的 `orbit-soft`）✓。
+  改 shader 前后重出球壳档也逐字节相同 ⇒ 对没写 `bound` 的场景零影响。
+- **像素（代理）**：有差 227,733/3,136,000（7.26%），但 **90.5% 恰好只差 ±1**、|Δ|≤2 占 99.53%、
+  >20 只有 195 px。云掩码（Δ vs `orbit-bare` > 3）：**859,745 → 859,741**，丢 40 / 多 36，
+  Δ>8 的最大连通块 **15 px**（没有 ≥100 px 的块）⇒ **不是 §51.14 那种"轮廓丢一圈"**。
+- **帧时间**（Vulkan / GPU p50 / 协议 v11 / 四臂同批 / 两轮 / 逐轮换序）：
+  `bare ~0.67｜orbit-soft-shell 14.46/14.53｜orbit-soft-proxy 12.60/12.68｜**orbit-soft 7.53/7.55**`
+  ⇒ **云净成本 13.83 → 6.87 ms（−50.3%）**：代理 −1.85、早退 −5.10，两条近似相加。
+  三次会话跨批复现 ≤0.15 ms。`orbit-soft` 的 7.5 ms 是目前量到**最省的云路**
+  （§51.20 表里最省的 `orbit-proxy` 是 +10.04）。
+- 门：`cargo test -p px_render` 全绿（含三个 shader 的解析/校验/体量门）。
+
+**为什么代理只值 13.5%**（§63.4，这条定死了"下一刀切哪里"）：软档的 `chord`/`steps`/起始点
+**全由解析壳定**，代理只能剔 fragment；而被剔掉的那些 fragment 在软档里每步只做 `coverage_of`
+就 `continue`（`billows`/法线/shadow 采样都没发）⇒ 同样的剔除，硬表面值 7 ms、软档只值 1.85 ms。
+**真杠杆在循环里** —— 也就是上面那五行。
+
+**没做 / 待办**：
+
+1. **这条线还没合进 v2**（全在 `feature/soft-cloud-perf`）。
+2. ⚠ **老的软档消融族口径变了**：`orbit-soft-plain` / `-noshadow` / `-nocloudshadow` / `-wind`、
+   `soft-e*` 文件没动 ⇒ 它们现在指的是**折叠前**的软档 = `orbit-soft-shell`（再叠各自那个开关）。
+   谁要用它们做配对，要么按 `orbit-soft-shell` 读，要么把它们重新折到新本体上。
+3. `--sheet` 12 视角、`--view` 窗口、`soft-e*` / `orbit-soft-wind` 都没跟着重出（改动没碰到它们）。
+4. 只测了 `review` 相机的第 1 个视口（`--perf` 不出 sheet），相机相关性没扫。
+5. 早退只测了 2240×1400 / 480×300 两个分辨率与 `orbit-soft` 这一档；`shadow = 0`、`steps` 变小
+   这些档没扫（上界那条论证与 `shadow` 无关，但没实测）。
+
+### 9.1.5 同一天接着的一条**用户报的缺陷**：窗口里的「正中心接缝」——**已定位、已修、已并入 v2**
+
+**用户口径**：**"背面光照会出现跳变"**（2026-09-15，配窗口截图）；随后追加 **"不需要兜底，宇宙里没有平行光"**
+与 **"确保平行光被删除了，从渲染器里"**。全过程与证据链在 `06-clouds.md` **§64 / §64.9**。
+
+**根因（探针实测）**：`px_render/assets/shaders/light.wgsl::sun_light` 取灯走的是 **Bevy 聚类网格**
+（`view_fragment_cluster_index` 定格子 + `view_z_to_z_slice` 定 z 切片）。相机拉到 `distance = 14` 时，
+大气沿 chord 的 5 个采样点落在与近处完全不同的切片里，**有一半查不到灯** ⇒ 退回兜底（方向 (0,0,1)、
+颜色 0）⇒ 云/大气的受光沿网格边界**硬跳一档**。实测左右两半"5 个采样点全拿到灯"的比例是
+**57% 对 4.4%**，而"该格有没有灯"两边都是 55% ⇒ 不是"没有灯"，是**部分采样深度查不到**。
+
+**修法**：`sun_light` **不问网格**，直接取场景那盏灯（`clustered_lights.data[0]`），**并且没有兜底**
+（没有点光源就是没有光：颜色 0、`point = 0` ⇒ 全黑）。
+⚠ **不能拿 `position_radius.w` 当"有没有灯"的阈值**：那格不是 range（实测对这盏灯读到 0）。
+
+**平行光从渲染器里删干净（§64.9）**：出图路那盏遗留的 `DirectionalLight { 9000 lx }`（`main.rs` 两处）、
+`sun_light` 的方向光兜底、`FAR_LIGHT`、`view_z_of`/`is_orthographic`、`clouds/surface` 里
+`fetch_directional_shadow` 的 **else 死支**、离线门桩里的方向光结构 —— 全删；`AmbientLight` 留着（不是平行光）。
+**验证**：出图路四张判据图**删前删后逐字节相同** ⇒ 删掉的全是死代码。
+
+**验证（单变量）**：① 复现视角那条台阶 **+1.863 → −0.014 / −0.304**；② 出图路判据图**逐字节不变**；
+③ 窗口**初始轨道**修前修后**除 OSD 外 0 像素**变；④ `cargo test -p px_render` 全绿。
+⇒ **§59/§60/§63 的图与判据全部保持有效**。
+⚠ `clouds` / `surface` 的**内容键变了**（`cc4111d3d0f4 → 36def398451e`、`d59c0d736f3d → 9453bf54f629`）
+⇒ 产物键跟着变（`orbit-soft`：`d1ca4eb89781 → d3bcdfcc11b9`）；旧笔记钉的**产物键**按新键读，**图的哈希没变**。
+
+**新加的窗口相机 API**：`px_render --where` 读回当前方位（并打印可直接粘回命令行的 `--place y,p,d`），
+`px_render --place y,p,d` 把窗口摆过去（不换场景、不重烘）。
+
+⚠ **方法论（这一轮最贵的教训）**：窗口的轨道相机**是用户拖的**，且这个缺陷**依赖相机** ——
+我早期三次"换了缝就没了"的读数都是**没做自检**、在漂移后的相机上量的，**全部作废**。
+以后量窗口固定三拍：**连拍 A、B、A**，第 1 与第 3 张**除左上 OSD 外逐像素相同**才认。
+
+**没做的**：多光源仍不支持（取第 0 盏；§64.9.3 记了以后怎么改）。分支已 `--no-ff` 并入 `v2`。
+
 ## 9.2 已经能跑什么
 
 > ⚠ **本节的命令行是旧接口（原文保留）**：内容旗标已在 §52 / P10 删除，内容只走 `--scene`；用法见 `09-instruments.md` §40 与 `08-renderer.md` §52。下面的 `--planet / --mesh / --clouds / …` 只能当历史形状看。

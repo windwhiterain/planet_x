@@ -56,6 +56,11 @@ px_render --show --scene <SCENE.pxart> --shot                            # 推�
 - `--show` 写 `target/viewer-scene.json`，窗口每帧轮询；窗口还会盯**场文件的 mtime**
   ⇒ **重烘之后不用推，窗口自己更新**。
 - `--show` 会报「窗口在线 / 没在跑」（读 `target/viewer.json` 心跳）。
+- **窗口的相机有一问一答两条命令**（§64.5）：`px_render --where` 读回当前方位
+  （`yaw / pitch / distance / 位置 / 视口`，并打印一行可直接粘回命令行的 `--place y,p,d`），
+  `px_render --place yaw,pitch,distance` 把窗口摆过去。两条都**沿用上一次请求那份场景**
+  （不换场景、不重烘），请求字段是 `ask_camera` / `set_camera`，回话写 `target/viewer-camera.json`。
+  ⚠ 量"依赖视角"的东西（如 §64 那条接缝）**必须先 `--place` 记下方位**，否则量出来的数不可复现。
 - **`--shot` 让窗口自己存一张 `target/viewer-shot.png`** —— 这是不看屏幕就能验收的判据；
   截图要等管线就绪。
 
