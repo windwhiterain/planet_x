@@ -408,8 +408,12 @@
           "graph": "generated",
           "key": "7777777777777777777777777777777777777777777777777777777777777777",
           "node": "stars"
-        }
+        },
+        "skybox_brightness": 900.0
       },
+      "expects": [
+        "clouds"
+      ],
       "lights": [
         {
           "color": [
@@ -452,6 +456,7 @@
           "material": {
             "alpha": "opaque",
             "cull": "back",
+            "depth_bias": 0.0,
             "params": {
               "emissive": [
                 0.0,
@@ -521,6 +526,7 @@
           "material": {
             "alpha": "opaque",
             "cull": "back",
+            "depth_bias": 0.0,
             "params": {},
             "shader": {
               "graph": "shaders",
