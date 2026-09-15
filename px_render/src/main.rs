@@ -1490,14 +1490,9 @@ fn warm_up(
             ..default()
         },
     ));
-    commands.spawn((
-        ScenePart,
-        DirectionalLight {
-            illuminance: 9000.0,
-            ..default()
-        },
-        Transform::from_xyz(7.0, 13.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    // ⚠ 这里**故意不摆方向光**（§64.5）：场景的太阳由 `spawn_lights` 摆成 `PointLight`。
+    // 再留一盏 9000 lx 的方向光，`sun_light` 的兜底分支就会在出图路上"悄悄换个太阳"
+    // （窗口路没有它 ⇒ 同一个 shader 两条路含义不同）；删掉它，两条路的灯清单就一致了。
     commands.spawn((
         ScenePart,
         Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
@@ -2473,14 +2468,9 @@ fn build_world_scene(
             ..default()
         },
     ));
-    commands.spawn((
-        ScenePart,
-        DirectionalLight {
-            illuminance: 9000.0,
-            ..default()
-        },
-        Transform::from_xyz(7.0, 13.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    // ⚠ 这里**故意不摆方向光**（§64.5）：场景的太阳由 `spawn_lights` 摆成 `PointLight`。
+    // 再留一盏 9000 lx 的方向光，`sun_light` 的兜底分支就会在出图路上"悄悄换个太阳"
+    // （窗口路没有它 ⇒ 同一个 shader 两条路含义不同）；删掉它，两条路的灯清单就一致了。
     commands.spawn((
         ScenePart,
         Camera3d::default(),
