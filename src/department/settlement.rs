@@ -88,12 +88,22 @@ const BACKTRACK: usize = 60;
 const SUFFICIENT: f64 = 1e-4;
 /// 只用来挡住除零；f64 的最小正规数
 const TINY: f64 = 1e-300;
+/// 产能那一行的障碍权重。
+///
+/// 商品行是**存量**约束（`s_k` 是期末库存），障碍必须留出可观的一份，否则政策会把
+/// 货吃干；产能行是**预算**约束（`s` 是没用掉的那部分预算），把它和存量行同一个权重
+/// 会让每轮**系统性地少用约 10% 的产能**（实测经典三部门环里产量 4 → 3.605，
+/// `modern` 里 `capacity_scale` 顶在 0.955）。§18.7 早就点名了这条出路：两类约束的
+/// 障碍权重必须拆开。取 1e-3 等于"预算用到千分之一以内"。
+const BOX_WEIGHT: f64 = 1e-4;
 
 pub(super) struct Outcome {
     /// 逐政策**跑了几篮**，index 对齐调用方的政策表；未选中/被判死的政策是 0
     pub x: Vec<f64>,
     /// 逐商品实际消耗
     pub eaten: Vec<f64>,
+    /// 逐商品实际产出
+    pub delivered: Vec<f64>,
     pub report: SettlementReport,
 }
 
@@ -136,8 +146,12 @@ impl Point {
 struct System {
     /// 活跃政策在完整政策表里的下标
     active: Vec<usize>,
-    /// 进入约束的商品在完整商品表里的下标（存量 > 0）
+    /// 进入约束的行在完整商品表里的下标（存量 > 0）；产能行用 `goods` 当哨兵
     used: Vec<usize>,
+    /// 真实商品行数；`used[rows..]` 是产能那条虚拟行
+    rows: usize,
+    /// 产能行的障碍权重（商品行恒为 1），见 [`BOX_WEIGHT`]
+    box_weight: f64,
     /// `c[p][k]`，局部下标
     c: Vec<Vec<f64>>,
     w: Vec<f64>,
@@ -199,16 +213,17 @@ impl System {
             // 行已经按存量归一，所以约束的两侧都是 O(1)
             let feasibility = s + consumed - 1.0;
             worst = worst.max((feasibility / (1.0 + s.abs() + consumed.abs())).abs());
-            worst = worst.max(((s * lambda - mu_bar) / mu_bar).abs());
+            let target = self.row_weight(k) * mu_bar;
+            worst = worst.max(((s * lambda - target) / target).abs());
         }
         worst
     }
 
-    /// 当前点的对偶间隙：`Σ_k s_kλ_k + Σ_p x_p y_p = (K + P)·μ`
+    /// 当前点的对偶间隙：`Σ_k ω_k·s_kλ_k + Σ_p x_p y_p = (Σω + P)·μ`
     fn gap(&self, point: &Point) -> f64 {
         let mut gap = 0.0f64;
         for k in 0..self.used.len() {
-            gap += point.s[k] * point.lambda[k];
+            gap += self.row_weight(k) * point.s[k] * point.lambda[k];
         }
         for p in 0..self.w.len() {
             gap += point.x[p] * point.y[p];
@@ -222,6 +237,15 @@ impl System {
             total += self.c[p][k] * x[p];
         }
         total
+    }
+
+    /// 这一行的障碍权重：商品行 1，产能行 [`BOX_WEIGHT`]
+    fn row_weight(&self, k: usize) -> f64 {
+        if k < self.rows {
+            1.0
+        } else {
+            self.box_weight
+        }
     }
 
     /// 严格可行的起点：每条政策先取**边际项 = 影子价格**的领头平衡，再逐样货压到可行。
@@ -330,7 +354,7 @@ impl System {
             let lambda = point.lambda[k].max(TINY);
             let consumed = self.consumed(&point.x, k);
             let feasibility = s + consumed - self.supply[k];
-            let a = (mu_bar - s * lambda) / lambda;
+            let a = (self.row_weight(k) * mu_bar - s * lambda) / lambda;
             inverse_slack[k] = lambda / s;
             slack_step[k] = a;
             slack_rhs[k] = feasibility + a;
@@ -458,12 +482,23 @@ fn cholesky_solve(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// 结算一次。`w[p]` 是政策的 **motive（绝对值，不归一化）**，`plans[p][k]` 是**裸配方**，
-/// `supply[k]` 是本轮可用存量。返回的 `x[p]` 是**跑了几篮**。
+/// 一条**预算行**：`Σ_p coefficient[p]·x_p ≤ limit`。
+///
+/// 产能与现金都写成这种行——它们都不是商品存量，但同样该限制活动规模。
+/// 行的障碍权重取 [`BOX_WEIGHT`]（预算不是存量），所以预算会被用到近乎满。
+pub(super) struct Budget<'a> {
+    pub coefficient: &'a [f64],
+    pub limit: f64,
+}
+
+/// 结算一次。`w[p]` 是政策的目标权重（消费＝每篮效用、生产＝每篮净货币价值），
+/// `plans[p][k]` 是**裸配方**，`supply[k]` 是本轮可用存量。返回的 `x[p]` 是**跑了几篮**。
 pub(super) fn solve(
     w: &[f64],
     plans: &[Vec<f64>],
+    outputs: &[Vec<f64>],
     supply: &[f64],
+    budgets: &[Budget<'_>],
     barrier: f64,
     curvature: f64,
 ) -> Outcome {
@@ -472,13 +507,17 @@ pub(super) fn solve(
     let goods = supply.len();
     let mut x = vec![0.0f64; policies];
     let mut eaten = vec![0.0f64; goods];
+    let mut delivered = vec![0.0f64; goods];
 
     // 配方里要一样**存量已经是 0** 的货，整条政策就执行不了：篮子是不可分的。
     // （这和"缺货按比例少吃"不是一回事——按比例少吃是存量 > 0 时的连续配给。）
     let mut blocked = Vec::new();
     let mut active = Vec::new();
     for p in 0..policies {
-        if !(w[p] > 0.0) || !plans[p].iter().any(|c| *c > 0.0) {
+        // **空投入的政策是合法的**：零投入的主生产就是一条。旧版这里还要求
+        // `plans[p]` 里至少有一项 > 0，那是"结算只管消费"时代的残留；生产并入之后
+        // 它会把主生产政策静默丢掉，于是那个商品从此再也没有产出。
+        if !(w[p] > 0.0) {
             continue;
         }
         let missing = (0..goods).any(|k| plans[p][k] > 0.0 && !(supply[k] > 0.0));
@@ -488,13 +527,22 @@ pub(super) fn solve(
             active.push(p);
         }
     }
-    // 没有存量的商品不构成约束（`s_k = 0`，无货可留）
-    let used: Vec<usize> = (0..goods).filter(|k| supply[*k] > 0.0).collect();
+    let mut used: Vec<usize> = (0..goods).filter(|k| supply[*k] > 0.0).collect();
+    let rows = used.len();
+    // 预算行放在早退判据**之前**：一个**什么东西都没有、却有产能（或现金）**的部门
+    // 靠这些行才解得出来。放在后面会让这种部门直接返回零解。
+    let active_budgets: Vec<usize> = (0..budgets.len())
+        .filter(|i| budgets[*i].limit.is_finite() && budgets[*i].limit > 0.0)
+        .collect();
+    for (slot, _index) in active_budgets.iter().enumerate() {
+        used.push(goods + slot);
+    }
 
     if active.is_empty() || used.is_empty() {
         return Outcome {
             x,
             eaten,
+            delivered,
             report: SettlementReport {
                 gap: 0.0,
                 mu: 0.0,
@@ -509,24 +557,42 @@ pub(super) fn solve(
         };
     }
 
+    // **逐商品把约束行按存量归一**：`ŝ_k = s_k/S_k`、`ĉ_pk = c_pk/S_k`，于是约束是
+    // `ŝ_k + Σ_p ĉ_pk x_p = 1`、`ŝ ∈ (0,1)`。这不是近似——障碍项
+    // `μ·ln ŝ = μ·ln s − μ·ln S`，差一个与 `x` 无关的常数，`argmax` 逐字不变。
+    //
+    // 为什么非做不可：实测存量 `1e-30` 时（`--motive-ladder` 二产归零前那几轮）
+    // 未归一版的 `s` 会被步长推到 f64 下溢，`λ/s` 溢出成 `inf`，Cholesky 直接失败，
+    // 牛顿在 `残差 = 5.2e-2` 上打满 240 步也下不来。归一之后 `ŝ` 起点在
+    // `[0.02, 1]`、解也在 `O(1)`，整个"存量跨 30 个数量级"的区间被压平。
+    //
+    // 系数用**净配方**（投入 − 产出）：产出也是解给出的，不能预先加进 `supply`，
+    // 否则投入与产出的比例会碎。净系数为负时 `ŝ` 变大，障碍 `ln ŝ > 0` 直接就是
+    // "期末库存为正"。
+    let c: Vec<Vec<f64>> = active
+        .iter()
+        .map(|p| {
+            let mut row: Vec<f64> = used[..rows]
+                .iter()
+                .map(|k| (plans[*p][*k] - outputs[*p][*k]) / supply[*k])
+                .collect();
+            for index in active_budgets.iter() {
+                let budget = &budgets[*index];
+                row.push(budget.coefficient[*p] / budget.limit);
+            }
+            row
+        })
+        .collect();
+
     let system = System {
-        // **逐商品把约束行按存量归一**：`ŝ_k = s_k/S_k`、`ĉ_pk = c_pk/S_k`，于是约束是
-        // `ŝ_k + Σ_p ĉ_pk x_p = 1`、`ŝ ∈ (0,1)`。这不是近似——障碍项
-        // `μ·ln ŝ = μ·ln s − μ·ln S`，差一个与 `x` 无关的常数，`argmax` 逐字不变。
-        //
-        // 为什么非做不可：实测存量 `1e-30` 时（`--motive-ladder` 二产归零前那几轮）
-        // 未归一版的 `s` 会被步长推到 f64 下溢，`λ/s` 溢出成 `inf`，Cholesky 直接失败，
-        // 牛顿在 `残差 = 5.2e-2` 上打满 240 步也下不来。归一之后 `ŝ` 起点在
-        // `[0.02, 1]`、解也在 `O(1)`，整个"存量跨 30 个数量级"的区间被压平。
-        c: active
-            .iter()
-            .map(|p| used.iter().map(|k| plans[*p][*k] / supply[*k]).collect())
-            .collect(),
+        c,
         w: active.iter().map(|p| w[*p]).collect(),
         supply: vec![1.0; used.len()],
         curvature,
         active,
         used,
+        rows,
+        box_weight: BOX_WEIGHT,
     };
 
     // 障碍的量纲取 `x = 1` 处的边际效用 `θ × 平均 motive`，`BARRIER` 是它相对边际效用的倍数。
@@ -537,7 +603,7 @@ pub(super) fn solve(
     let mut point = system.start(mu_bar);
     let mut iterations = 0usize;
     let mut phases = 0usize;
-    let mut residual = f64::INFINITY;
+    let mut residual;
     let converged;
     let mut degraded = false;
 
@@ -595,12 +661,14 @@ pub(super) fn solve(
         if x[p] > 0.0 {
             for k in 0..goods {
                 eaten[k] += plans[p][k] * x[p];
+                delivered[k] += outputs[p][k] * x[p];
             }
         }
     }
     let utilization = system
         .used
         .iter()
+        .take(system.rows)
         .map(|k| {
             if supply[*k] > 0.0 {
                 eaten[*k] / supply[*k]
@@ -613,6 +681,7 @@ pub(super) fn solve(
     Outcome {
         x,
         eaten,
+        delivered,
         report: SettlementReport {
             gap: system.gap(&point),
             mu: mu_bar,
@@ -646,7 +715,16 @@ mod tests {
     }
 
     fn run(w: &[f64], plans: &[Vec<f64>], supply: &[f64]) -> Outcome {
-        solve(w, plans, supply, BARRIER, CURVATURE)
+        let outputs = vec![vec![0.0; supply.len()]; w.len()];
+        solve(
+            w,
+            plans,
+            &outputs,
+            supply,
+            &[],
+            BARRIER,
+            CURVATURE,
+        )
     }
 
     fn consumed(plans: &[Vec<f64>], x: &[f64], k: usize) -> f64 {
@@ -878,7 +956,16 @@ mod tests {
             "意愿更高的政策执行率应当更高：{:?}",
             outcome.x,
         );
-        let sharp = solve(&[3.0, 1.0], &plans, &[0.4], BARRIER * 1e-3, CURVATURE);
+        let outputs = vec![vec![0.0; 1]; 2];
+        let sharp = solve(
+            &[3.0, 1.0],
+            &plans,
+            &outputs,
+            &[0.4],
+            &[],
+            BARRIER * 1e-3,
+            CURVATURE,
+        );
         assert!(
             sharp.report.converged && sharp.report.utilization > outcome.report.utilization,
             "障碍调小必须吃得更干净：{} vs {}",

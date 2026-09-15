@@ -7,4 +7,3 @@ edition = "2024"
 members = ["game"]
 
 [dependencies]
-fastrand = "2"

@@ -1,21 +1,42 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::local_price::{
-    bloc_relations, Kind, Lab, DEFAULT_FLUCTUATION, LevelRule, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST,
-    LADDER_THRIFTY, NAMES, SECTOR_MOTIVE,
+    bloc_relations, Kind, Lab, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, NAMES,
+    SECTOR_MOTIVE,
 };
+use planet_x::warehouse::Warehouses;
+
+const GOOD_LABELS: [&str; GOODS] = ["一产", "二产", "三产"];
 
 #[derive(Clone)]
 struct Args {
     scenario: String,
-    rule: LevelRule,
     polities: usize,
     rounds: usize,
     every: usize,
-    forgetting: f32,
-    gain: f32,
-    recenter: bool,
-    anchor: bool,
     grant: f32,
+    transfer: f32,
+    flow_scale: f32,
+    price_curvature: f32,
+    price_inertia: f32,
+    target_rate: f32,
+    rationing: String,
+    barrier: f32,
+    curvature: f32,
+    relations: f32,
+    block_from: usize,
+    block_to: usize,
+    block_polity: usize,
+    block_weight: f32,
+    sanction_polity: usize,
+    sanction_unit: usize,
+    sanction_from: usize,
+    sanction_to: usize,
+    sanction_w: f32,
+    specialty: f32,
+    capacity: Option<f32>,
+    food_supply: f32,
+    motive_ladder: bool,
+    ladder_scale: f32,
     transform: bool,
     transform_rate: f32,
     transform_scale: f32,
@@ -23,44 +44,41 @@ struct Args {
     transform_unit: usize,
     transform_in: usize,
     transform_out: usize,
-    sanction_polity: usize,
-    sanction_unit: usize,
-    sanction_from: usize,
-    sanction_to: usize,
-    sanction_w: f32,
-    food_supply: f32,
-    motive_ladder: bool,
-    specialty: f32,
-    capacity: Option<f32>,
-    ladder_scale: f32,
-    specialty_top: Option<f32>,
     json: bool,
-    soft_eps: f32,
-    rationing: String,
-    barrier: f32,
-    curvature: f32,
-    fluctuation: f32,
     goods_trace: bool,
-    relations: f32,
-    block_from: usize,
-    block_to: usize,
-    block_polity: usize,
-    seed: u64,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Self {
-            scenario: String::from("scarce"),
-            rule: LevelRule::Counterparty,
+            scenario: String::from("modern"),
             polities: 3,
             rounds: 120,
             every: 10,
-            forgetting: 0.1,
-            gain: 0.02,
-            recenter: true,
-            anchor: true,
-            grant: 10.0,
+            grant: planet_x::local_price::GRANT,
+            transfer: planet_x::department::Departments::DEFAULT_TRANSFER,
+            flow_scale: planet_x::market::Market::DEFAULT_FLOW_SCALE,
+            price_curvature: Warehouses::DEFAULT_PRICE_CURVATURE,
+            price_inertia: Warehouses::DEFAULT_PRICE_INERTIA,
+            target_rate: Warehouses::DEFAULT_TARGET_RATE,
+            rationing: String::from("interior"),
+            barrier: DEFAULT_BARRIER,
+            curvature: DEFAULT_CURVATURE,
+            relations: 1.0,
+            block_from: usize::MAX,
+            block_to: usize::MAX,
+            block_polity: 0,
+            block_weight: 0.0,
+            sanction_polity: 1,
+            sanction_unit: 0,
+            sanction_from: 40,
+            sanction_to: 80,
+            sanction_w: 0.0,
+            specialty: 1.0,
+            capacity: None,
+            food_supply: 0.5,
+            motive_ladder: false,
+            ladder_scale: 1.0,
             transform: false,
             transform_rate: 1.0,
             transform_scale: 4.0,
@@ -68,29 +86,8 @@ impl Default for Args {
             transform_unit: 0,
             transform_in: 1,
             transform_out: 0,
-            sanction_polity: 1,
-            sanction_unit: 0,
-            sanction_from: 40,
-            sanction_to: 80,
-            sanction_w: 0.0,
-            food_supply: 0.5,
-            motive_ladder: false,
-            specialty: 1.0,
-            capacity: None,
-            ladder_scale: 1.0,
-            specialty_top: None,
             json: false,
-            soft_eps: planet_x::market::Market::DEFAULT_SOFT_EPS,
-            rationing: String::from("interior"),
-            barrier: DEFAULT_BARRIER,
-            curvature: DEFAULT_CURVATURE,
-            fluctuation: DEFAULT_FLUCTUATION,
             goods_trace: false,
-            relations: 1.0,
-            block_from: usize::MAX,
-            block_to: usize::MAX,
-            block_polity: 0,
-            seed: 11,
         }
     }
 }
@@ -101,11 +98,10 @@ fn main() {
         return;
     };
     match args.scenario.as_str() {
-        "sweep" => sweep(&args),
         "blockade" => blockade(&args),
         "sanction" => sanction_run(&args),
-        "sanction-sweep" => sanction_sweep(&args),
         "ladder" => ladder(&args),
+        "sweep" => sweep(&args),
         "sectors" | "modern" => sectors(&args),
         _ => trace(&args),
     }
@@ -118,15 +114,33 @@ fn parse() -> Option<Args> {
         let mut value = || items.next();
         match flag.as_str() {
             "--scenario" => args.scenario = value()?,
-            "--rule" => args.rule = LevelRule::parse(&value()?)?,
             "--polities" => args.polities = value()?.parse().ok()?,
             "--rounds" | "-n" => args.rounds = value()?.parse().ok()?,
             "--every" => args.every = value()?.parse().ok()?,
-            "--forgetting" => args.forgetting = value()?.parse().ok()?,
-            "--gain" => args.gain = value()?.parse().ok()?,
-            "--no-recenter" => args.recenter = false,
-            "--no-anchor" => args.anchor = false,
             "--grant" => args.grant = value()?.parse().ok()?,
+            "--transfer" => args.transfer = value()?.parse().ok()?,
+            "--flow-scale" => args.flow_scale = value()?.parse().ok()?,
+            "--price-curvature" => args.price_curvature = value()?.parse().ok()?,
+            "--price-inertia" => args.price_inertia = value()?.parse().ok()?,
+            "--target-rate" => args.target_rate = value()?.parse().ok()?,
+            "--rationing" => args.rationing = value()?,
+            "--barrier" => args.barrier = value()?.parse().ok()?,
+            "--curvature" => args.curvature = value()?.parse().ok()?,
+            "--w" => args.relations = value()?.parse().ok()?,
+            "--block-from" => args.block_from = value()?.parse().ok()?,
+            "--block-to" => args.block_to = value()?.parse().ok()?,
+            "--block-polity" => args.block_polity = value()?.parse().ok()?,
+            "--block-weight" => args.block_weight = value()?.parse().ok()?,
+            "--sanction-polity" => args.sanction_polity = value()?.parse().ok()?,
+            "--sanction-unit" => args.sanction_unit = value()?.parse().ok()?,
+            "--sanction-from" => args.sanction_from = value()?.parse().ok()?,
+            "--sanction-to" => args.sanction_to = value()?.parse().ok()?,
+            "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
+            "--specialty" => args.specialty = value()?.parse().ok()?,
+            "--capacity" => args.capacity = Some(value()?.parse().ok()?),
+            "--food-supply" => args.food_supply = value()?.parse().ok()?,
+            "--motive-ladder" => args.motive_ladder = true,
+            "--ladder-scale" => args.ladder_scale = value()?.parse().ok()?,
             "--transform" => args.transform = true,
             "--transform-rate" => args.transform_rate = value()?.parse().ok()?,
             "--transform-scale" => args.transform_scale = value()?.parse().ok()?,
@@ -134,30 +148,8 @@ fn parse() -> Option<Args> {
             "--transform-unit" => args.transform_unit = value()?.parse().ok()?,
             "--transform-in" => args.transform_in = value()?.parse().ok()?,
             "--transform-out" => args.transform_out = value()?.parse().ok()?,
-            "--sanction-polity" => args.sanction_polity = value()?.parse().ok()?,
-            "--sanction-unit" => args.sanction_unit = value()?.parse().ok()?,
-            "--sanction-from" => args.sanction_from = value()?.parse().ok()?,
-            "--sanction-to" => args.sanction_to = value()?.parse().ok()?,
-            "--sanction-w" => args.sanction_w = value()?.parse().ok()?,
-            "--food-supply" => args.food_supply = value()?.parse().ok()?,
-            "--motive-ladder" => args.motive_ladder = true,
-            "--specialty" => args.specialty = value()?.parse().ok()?,
-            "--capacity" => args.capacity = Some(value()?.parse().ok()?),
-            "--ladder-scale" => args.ladder_scale = value()?.parse().ok()?,
-            "--specialty-top" => args.specialty_top = Some(value()?.parse().ok()?),
             "--json" => args.json = true,
-            "--soft-eps" => args.soft_eps = value()?.parse().ok()?,
-            "--rationing" => args.rationing = value()?,
-            "--barrier" => args.barrier = value()?.parse().ok()?,
-            "--curvature" => args.curvature = value()?.parse().ok()?,
-            "--fluctuation" => args.fluctuation = value()?.parse().ok()?,
-            "--trace" => args.goods_trace = true,
-            "--w" => args.relations = value()?.parse().ok()?,
-            "--block-from" => args.block_from = value()?.parse().ok()?,
-            "--block-to" => args.block_to = value()?.parse().ok()?,
-            "--block-polity" => args.block_polity = value()?.parse().ok()?,
-            "--seed" | "-s" => args.seed = value()?.parse().ok()?,
-            "--help" | "-h" => return None,
+            "--trace" | "--goods-trace" => args.goods_trace = true,
             _ => return None,
         }
     }
@@ -165,32 +157,43 @@ fn parse() -> Option<Args> {
 }
 
 fn usage() {
-    println!("用法：local_price [--scenario symmetric|scarce|blockade|sweep] [--rule fixed|vwap|counterparty|shortfall]");
-    println!("  --polities N     政权数（默认 3）");
-    println!("  --rounds, -n N   轮数（默认 120）");
-    println!("  --every K        每 K 轮打印一行（默认 10）");
-    println!("  --forgetting F   L 的学习率（默认 0.1）");
-    println!("  --gain G         shortfall 规则的增益（默认 0.02）");
-    println!("  --recenter       每轮把楔子的均值钉回 0");
-    println!("  --w W            政权间的配对权重（默认 1.0）");
-    println!("  --grant G        每个部门每轮的拨款（默认 10）");
-    println!("  --no-anchor      关掉水平锚，观察原始漂移");
-    println!("  --trace          sectors/modern 场景逐轮逐商品打印申报、报价、尺度、成交、库存、投入产出");
-    println!("  --block-from A --block-to B --block-polity P   在 [A,B) 轮封锁 P");
-    println!("  --seed, -s S     随机种子（默认 11）");
-    println!("  --fluctuation F  申报涨落幅度（默认 {DEFAULT_FLUCTUATION}，0 = 关掉）");
-}
-
-fn spec(args: &Args) -> Spec {
-    let mut spec = raw_spec(args);
-    if let Some(capacity) = args.capacity {
-        spec.capacity = capacity;
-    }
-    spec.fluctuation = args.fluctuation.max(0.0);
-    if let Some(factor) = args.specialty_top {
-        spec = spec.with_specialty_at(GOODS - 1, factor);
-    }
-    spec
+    println!("用法：local_price [--scenario modern|sectors|scarce|symmetric|blockade|sanction|ladder|sweep]");
+    println!("  --polities N         政权数（默认 3）");
+    println!("  --rounds, -n N       轮数（默认 120）");
+    println!("  --every K            每 K 轮打印一行（默认 10）");
+    println!(
+        "  --grant G            每个部门开局的货币，同时是货币总量目标（默认 {}）",
+        planet_x::local_price::GRANT
+    );
+    println!(
+        "  --transfer R         每轮把余额拉向均值的比例，0 = 不转移（默认 {}）",
+        planet_x::department::Departments::DEFAULT_TRANSFER
+    );
+    println!(
+        "  --flow-scale S       势流的价差尺度，φ = tanh(Δln p / S)（默认 {}）",
+        planet_x::market::Market::DEFAULT_FLOW_SCALE
+    );
+    println!(
+        "  --price-curvature K  挂价对库存比值的陡度（默认 {}）",
+        Warehouses::DEFAULT_PRICE_CURVATURE
+    );
+    println!(
+        "  --price-inertia L    挂价的一阶低通系数，0 = 无惯性（默认 {}）",
+        Warehouses::DEFAULT_PRICE_INERTIA
+    );
+    println!(
+        "  --target-rate R      目标对未满足意愿的响应速率，0 = 恒为下限（默认 {}）",
+        Warehouses::DEFAULT_TARGET_RATE
+    );
+    println!("  --rationing interior|hard   消费结算规则（默认 interior）");
+    println!("  --barrier B --curvature T   内点法的障碍强度与边际效用曲率");
+    println!("  --specialty F        各部门对自己那一层的产出乘数（比较优势）");
+    println!("  --capacity N         部门产能预算");
+    println!("  --w W                政权间的配对权重（默认 1.0）");
+    println!("  --block-from A --block-to B --block-polity P [--block-weight W]   在 [A,B) 轮封锁 P（W 默认 0 = 完全掐断）");
+    println!("  --sanction-polity P --sanction-unit U --sanction-from A --sanction-to B   定向制裁一个部门");
+    println!("  --trace              逐轮逐商品打印指数/挂价/成交/库存/投入产出");
+    println!("  --json               每个采样轮次打一行 JSONL（全精度）");
 }
 
 fn raw_spec(args: &Args) -> Spec {
@@ -230,14 +233,17 @@ fn raw_spec(args: &Args) -> Spec {
     }
 }
 
+fn spec(args: &Args) -> Spec {
+    let mut spec = raw_spec(args);
+    if let Some(capacity) = args.capacity {
+        spec.capacity = capacity;
+    }
+    spec
+}
+
 fn build_with(args: &Args, spec: Spec) -> Lab {
-    Lab::new(&spec, args.seed)
-        .with_rule(args.rule)
-        .with_forgetting(args.forgetting)
-        .with_gain(args.gain)
-        .with_recenter(args.recenter)
-        .with_anchor(args.anchor)
-        .with_soft_eps(args.soft_eps)
+    Lab::new(&spec)
+        .with_flow_scale(args.flow_scale)
         .with_rationing(match args.rationing.as_str() {
             "hard" => Rationing::Hard,
             _ => Rationing::Interior {
@@ -246,6 +252,8 @@ fn build_with(args: &Args, spec: Spec) -> Lab {
             },
         })
         .with_grant(args.grant)
+        .with_transfer(args.transfer)
+        .with_price_law(args.price_curvature, args.price_inertia, args.target_rate)
         .with_relations(&bloc_relations(args.polities, args.relations))
 }
 
@@ -261,223 +269,10 @@ fn goods(values: &[f32]) -> String {
         .join(" ")
 }
 
-fn trace(args: &Args) {
-    let mut lab = build(args);
-    println!(
-        "场景 {} 规则 {} 政权 {} 轮 {} 学习率 {} 权重 {} 重定心 {}",
-        args.scenario,
-        args.rule.name(),
-        args.polities,
-        args.rounds,
-        args.forgetting,
-        args.relations,
-        args.recenter,
-    );
-    println!(
-        "{:>4} {:>22} {:>26} {:>7} {:>8} {:>18} {:>9} {:>9}",
-        "轮次", "银河指数", "各政权楔子(good0/1/2)", "执行率", "跨境占比", "每轮原始水平漂移", "转换占比", "转换利润率"
-    );
-    for _ in 0..args.rounds {
-        lab.step();
-        if lab.round % args.every != 0 && lab.round != args.rounds {
-            continue;
-        }
-        let snapshot = lab.history.last().unwrap();
-        let external = snapshot.internal + snapshot.external;
-        let share = if external > 0.0 {
-            snapshot.external / external
-        } else {
-            0.0
-        };
-        let wedge = snapshot.wedges[0]
-            .iter()
-            .map(|value| 100.0 * value)
-            .collect::<Vec<f32>>();
-        println!(
-            "{:>4} {:>22} {:>26} {:>7.1}% {:>17} {:>9} {:>9}",
-            snapshot.round,
-            goods(&snapshot.prices),
-            goods(&wedge),
-            100.0 * share,
-            format!(
-                "{:+.2}%",
-                100.0 * snapshot.gauge.iter().sum::<f32>() / GOODS as f32
-            ),
-            format!("{:.1}%", 100.0 * snapshot.transform_share),
-            format!("{:+.3}", snapshot.transform_potential),
-        );
-    }
-    summary(&lab);
+fn number(value: f32) -> String {
+    format!("{value:>9.3}")
 }
 
-fn summary(lab: &Lab) {
-    println!();
-    println!("政权      最终楔子(百分比)              本地价                          期望成交价");
-    for (p, polity) in lab.polities.iter().enumerate() {
-        let wedge = polity
-            .wedge
-            .iter()
-            .map(|value| format!("{:+.1}%", 100.0 * value))
-            .collect::<Vec<String>>()
-            .join(" ");
-        let level = polity
-            .level
-            .iter()
-            .map(|value| format!("{value:.3}"))
-            .collect::<Vec<String>>()
-            .join(" ");
-        let vwap = polity
-            .vwap
-            .iter()
-            .map(|value| format!("{value:.3}"))
-            .collect::<Vec<String>>()
-            .join(" ");
-        println!(
-            "{}({}) {:>26} {:>30} {:>30}",
-            polity.name,
-            p,
-            wedge,
-            level,
-            vwap,
-        );
-    }
-    let snapshot = lab.history.last().unwrap();
-    let first = &lab.history[0];
-    let drift = (0..GOODS)
-        .map(|k| (snapshot.prices[k] / first.prices[k]).ln())
-        .sum::<f32>()
-        / GOODS as f32;
-    let volume = snapshot.internal + snapshot.external;
-    let index: Vec<f32> = lab
-        .market
-        .merchandises
-        .iter()
-        .map(|merchandise| merchandise.price)
-        .collect();
-    for (p, polity) in lab.polities.iter().enumerate() {
-        let local = (0..GOODS)
-            .map(|k| {
-                format!(
-                    "{:.3}",
-                    index[k] * lab.warehouses.local_ratio(p, k).unwrap_or(1.0)
-                )
-            })
-            .collect::<Vec<String>>()
-            .join(" ");
-        println!(
-            "  {}({}) 本地成交价 {local}   本地比值 {}",
-            polity.name,
-            p,
-            (0..GOODS)
-                .map(|k| format!("{:.3}", lab.warehouses.local_ratio(p, k).unwrap_or(1.0)))
-                .collect::<Vec<String>>()
-                .join(" "),
-        );
-    }
-    println!(
-        "银河指数 {} 全程漂移 {:+.1}% 未成交 {:.1}% 跨境占比 {:.1}% 国库 {:.1}",
-        goods(&snapshot.prices),
-        100.0 * drift,
-        100.0 * snapshot.uncleared,
-        if volume > 0.0 {
-            100.0 * snapshot.external / volume
-        } else {
-            0.0
-        },
-        snapshot.treasury,
-    );
-}
-
-fn blockade(args: &Args) {
-    let mut lab = build(args);
-    let mut max_wedge = 0.0f32;
-    for round in 0..args.rounds {
-        let blocked = round >= args.block_from && round < args.block_to;
-        if blocked {
-            lab.block(&[args.block_polity], args.relations);
-        } else {
-            lab.block(&[args.block_polity], 1.0);
-        }
-        lab.step();
-        let polity = &lab.polities[args.block_polity];
-        max_wedge = max_wedge.max(polity.wedge[0]);
-        if lab.round % args.every == 0 || lab.round == args.rounds {
-            let snapshot = lab.history.last().unwrap();
-            let volume = snapshot.internal + snapshot.external;
-            println!(
-                "第 {:>3} 轮 {} 银河 {} 楔子 {} 本地价 {} 跨境 {:>5.1}% 未成交 {:>5.1}%",
-                snapshot.round,
-                if blocked { "封锁" } else { "通行" },
-                goods(&snapshot.prices),
-                goods(&polity.wedge),
-                goods(&polity.level),
-                if volume > 0.0 {
-                    100.0 * snapshot.external / volume
-                } else {
-                    0.0
-                },
-                100.0 * snapshot.uncleared,
-            );
-        }
-    }
-    println!(
-        "封锁期间 {} 的 good0 楔子峰值 {:+.1}%",
-        NAMES[args.block_polity % NAMES.len()],
-        100.0 * max_wedge,
-    );
-    summary(&lab);
-}
-
-fn ladder(args: &Args) {
-    println!(
-        "技术阶梯：同一个部门里两个工艺。省料但慢 = 每件粮吃 {:.2} 件工业品、产能占用 {:.2}/件；费料但快 = {:.2} 件工业品、产能占用 {:.2}/件；产能预算 {}。本例切换点在 工业品价 ÷ 粮食价 ≈ 1.10",
-        LADDER_THRIFTY.0,
-        LADDER_THRIFTY.2,
-        LADDER_FAST.0,
-        LADDER_FAST.2,
-        LADDER_CAPACITY,
-    );
-    println!(
-        "{:>9} {:>10} {:>26} {:>26} {:>10} {:>10}",
-        "粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "部门执行率", "粮食指数"
-    );
-    for supply in [0.4f32, 0.6, 0.8, 1.0, 1.5, 2.5, 4.0] {
-        let mut local = args.clone();
-        local.food_supply = supply;
-        let mut lab = build_with(&local, Spec::ladder(local.polities, supply));
-        lab.run(args.rounds);
-        let department = lab.department_of(0, 0, Kind::Producer);
-        let processes = lab.process_state(department);
-        let report = |index: usize| match processes.get(index) {
-            Some((share, potential, _)) => format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential),
-            None => String::from("—"),
-        };
-        let food = lab.market.merchandises[0].price;
-        let manufacture = lab.market.merchandises[1].price;
-        println!(
-            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>10.3}",
-            manufacture / food.max(1e-9),
-            report(0),
-            report(1),
-            food,
-        );
-    }
-}
-
-/// 商品的短名，按 good 的索引
-const GOOD_LABELS: [&str; GOODS] = ["一产", "二产", "三产"];
-
-fn dash(value: f32) -> String {
-    if value > 0.0 {
-        format!("{value:.3}")
-    } else {
-        String::from("—")
-    }
-}
-
-/// 价格专用：**科学计数**。价格会横跨 1e-30 ~ 1e30，定点格式（`{:.3}`）会把
-/// 任何小于 0.0005 的值一律打成 `0.000`，于是"塌到零"和"只是很小"分不出来——
-/// 这正好掩盖了 §16 那条链的关键一步。
 fn sci(value: f32) -> String {
     if value.is_finite() && value > 0.0 {
         format!("{value:.3e}")
@@ -486,7 +281,30 @@ fn sci(value: f32) -> String {
     }
 }
 
-/// 一种商品这一轮「最低保本价」：所有能产它的工艺里，投入成本 ÷ 产出量 的最小值
+fn money(lab: &Lab) -> (f32, f32, f32) {
+    let mut total = 0.0f32;
+    let mut low = f32::INFINITY;
+    let mut high = f32::NEG_INFINITY;
+    for department in &lab.departments.departments {
+        total += department.currency;
+        low = low.min(department.currency);
+        high = high.max(department.currency);
+    }
+    if lab.departments.departments.is_empty() {
+        low = 0.0;
+        high = 0.0;
+    }
+    (total, low, high)
+}
+
+fn ladder_weights(args: &Args) -> Vec<f32> {
+    SECTOR_MOTIVE
+        .iter()
+        .map(|motive| 1.0 + (motive - 1.0) * args.ladder_scale)
+        .collect()
+}
+
+/// 一种商品这一轮的最低保本价：所有能产它的工艺里，投入成本 ÷ 产出量的最小值
 fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
     let mut best = f32::INFINITY;
     for department in &lab.departments.departments {
@@ -503,7 +321,9 @@ fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
                 .consumptions
                 .iter()
                 .enumerate()
-                .map(|(k, consumption)| consumption.max(0.0) * prices.get(k).copied().unwrap_or(0.0))
+                .map(|(k, consumption)| {
+                    consumption.max(0.0) * prices.get(k).copied().unwrap_or(0.0)
+                })
                 .sum();
             best = best.min(cost / output);
         }
@@ -515,26 +335,23 @@ fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
     }
 }
 
-fn report_by_good(lab: &Lab, ladder: bool) {
+fn report_by_good(lab: &Lab) {
     let states = lab.good_states();
-    let prices: Vec<f32> = states.iter().map(|state| state.price).collect();
+    let prices: Vec<f32> = states.iter().map(|state| state.index).collect();
     let bids: Vec<f32> = states
         .iter()
-        .map(|state| if state.bid > 0.0 { state.bid } else { state.price })
+        .map(|state| if state.bid > 0.0 { state.bid } else { state.index })
         .collect();
     let asks: Vec<f32> = states
         .iter()
-        .map(|state| if state.ask > 0.0 { state.ask } else { state.price })
+        .map(|state| if state.ask > 0.0 { state.ask } else { state.index })
         .collect();
-    // 增值按**决策口径**估：产出用买价、投入用卖价。两边都用指数会和决策脱节。
     let added: Vec<f32> = states
         .iter()
         .enumerate()
         .map(|(k, state)| state.delivery * bids[k] - state.consumed * asks[k])
         .collect();
     let total: f32 = added.iter().sum();
-    // 注意不能用 `total.max(1e-9)` 当除零护栏：总和为负时 max 会挑走 1e-9，
-    // 占比立刻变成天文数字（实测 -5.95e11%）。要按绝对值判。
     let share = |value: f32| {
         if total.abs() > 1e-9 {
             value / total
@@ -548,33 +365,23 @@ fn report_by_good(lab: &Lab, ladder: bool) {
             .map(|value| format(*value))
             .collect::<Vec<String>>()
             .join(" ");
-        println!("   {label:<8} {cells}");
+        println!("   {label:<10} {cells}");
     };
-    println!(
-        "{}投入产出阶梯：{} 轮后的价格（指数）与相对一产",
-        if ladder { "有" } else { "无" },
-        lab.round,
-    );
+    println!("{} 轮后的逐商品状态：", lab.round);
     let first = prices.first().copied().unwrap_or(1.0).max(1e-9);
-    let number = |value: f32| format!("{value:>9.3}");
-    row("价格", &prices, number);
+    row("指数", &prices, number);
     row(
         "相对一产",
         &prices.iter().map(|price| price / first).collect::<Vec<f32>>(),
         number,
     );
-    // 决策用的是账本（逐地方的边际买卖价），不是指数。两者必须并排看，
-    // 否则会拿"指数口径的保本"去解释"账本口径的选择"。
     row("买价 bid", &bids, number);
     row("卖价 ask", &asks, number);
     row(
         "保本(按卖价)",
-        &(0..GOODS).map(|k| break_even(lab, k, &asks)).collect::<Vec<f32>>(),
-        number,
-    );
-    row(
-        "保本(按指数)",
-        &(0..GOODS).map(|k| break_even(lab, k, &prices)).collect::<Vec<f32>>(),
+        &(0..GOODS)
+            .map(|k| break_even(lab, k, &asks))
+            .collect::<Vec<f32>>(),
         number,
     );
     row(
@@ -588,7 +395,7 @@ fn report_by_good(lab: &Lab, ladder: bool) {
         number,
     );
     row(
-        "成交",
+        "成交量",
         &states.iter().map(|state| state.dealt).collect::<Vec<f32>>(),
         number,
     );
@@ -597,11 +404,7 @@ fn report_by_good(lab: &Lab, ladder: bool) {
         &states.iter().map(|state| state.stock).collect::<Vec<f32>>(),
         |value| format!("{value:>9.1}"),
     );
-    row(
-        "增值",
-        &added,
-        |value| format!("{value:>9.2}"),
-    );
+    row("增值", &added, |value| format!("{value:>9.2}"));
     row(
         "增值占比",
         &added.iter().map(|value| share(*value)).collect::<Vec<f32>>(),
@@ -609,28 +412,113 @@ fn report_by_good(lab: &Lab, ladder: bool) {
     );
 }
 
-/// 阶梯陡度：`1 + (基准 − 1) × k`。k = 1 就是 `SECTOR_MOTIVE` 原样。
-///
-/// 注意**整体调高 `MOTIVE` 是没用的**——消费份额是 `motive/cost` 在消费族内归一化，
-/// 全体同比放大不改变任何相对份额。能改变顶层相对地位的只有这个形状参数。
-fn ladder_weights(args: &Args) -> Vec<f32> {
-    SECTOR_MOTIVE
-        .iter()
-        .map(|motive| 1.0 + (motive - 1.0) * args.ladder_scale)
-        .collect()
+fn summary(lab: &Lab) {
+    let snapshot = lab.history.last().unwrap();
+    let (total, low, high) = money(lab);
+    println!(
+        "指数 {} 货币 合计 {total:.1} 最低 {low:.1} 最高 {high:.1} 转换占比 {:.1}% 转换利润率 {:+.3}",
+        goods(&snapshot.prices),
+        100.0 * snapshot.transform_share,
+        snapshot.transform_potential,
+    );
+    for (p, polity) in lab.polities.iter().enumerate() {
+        let row = snapshot.local_ratios.get(p).cloned().unwrap_or_default();
+        let local = (0..GOODS)
+            .map(|k| format!("{:.3}", snapshot.prices[k] * row.get(k).copied().unwrap_or(1.0)))
+            .collect::<Vec<String>>()
+            .join(" ");
+        println!(
+            "  {}({}) 本地挂价 {local}   本地比值 {}",
+            polity.name,
+            p,
+            (0..GOODS)
+                .map(|k| format!("{:.3}", row.get(k).copied().unwrap_or(1.0)))
+                .collect::<Vec<String>>()
+                .join(" "),
+        );
+    }
 }
 
+fn trace(args: &Args) {
+    let mut lab = build(args);
+    println!(
+        "场景 {} 政权 {} 轮 {} 货币 {} 势尺度 {} 挂价陡度 {} 惯性 {} 目标速率 {}",
+        args.scenario,
+        args.polities,
+        args.rounds,
+        args.grant,
+        args.flow_scale,
+        args.price_curvature,
+        args.price_inertia,
+        args.target_rate,
+    );
+    if args.goods_trace {
+        println!(
+            "{:>5} {:>6} {:>11} {:>11} {:>11} {:>9} {:>9} {:>9} {:>11} {:>9.1} {:>9.3} {:>9.3} {:>9.3} {:>12}",
+            "轮次",
+            "商品",
+            "指数",
+            "买价",
+            "卖价",
+            "卖出",
+            "买入",
+            "成交",
+            "成交价",
+            "库存",
+            "入库",
+            "投入",
+            "意愿",
+            "目标",
+        );
+    }
+    for _ in 0..args.rounds {
+        lab.step();
+        if lab.round % args.every != 0 && lab.round != args.rounds {
+            continue;
+        }
+        let snapshot = lab.history.last().unwrap();
+        let index: Vec<f32> = snapshot.prices.clone();
+        let range = if index.iter().all(|value| *value > 0.0) {
+            index.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+                / index.iter().cloned().fold(f32::INFINITY, f32::min)
+        } else {
+            0.0
+        };
+        println!(
+            "{:>5} 指数 {} 指数极差 {range:.3} 转换 {:>5.1}%",
+            snapshot.round,
+            goods(&index),
+            100.0 * snapshot.transform_share,
+        );
+        if args.goods_trace {
+            for (k, state) in lab.good_states().iter().enumerate() {
+                println!(
+                    "{:>5} {:>6} {:>11} {:>11} {:>11} {:>9.2} {:>9.2} {:>9.2} {:>11} {:>9.1} {:>9.3} {:>9.3} {:>9.3} {:>12.2}",
+                    snapshot.round,
+                    GOOD_LABELS[k],
+                    sci(state.index),
+                    sci(state.bid),
+                    sci(state.ask),
+                    state.sold,
+                    state.bought,
+                    state.dealt,
+                    sci(state.deal_price),
+                    state.stock,
+                    state.delivery,
+                    state.consumed,
+                    state.wanted,
+                    state.target,
+                );
+            }
+        }
+    }
+    println!();
+    report_by_good(&lab);
+    summary(&lab);
+}
 
-/// 一行 JSON = 一个采样轮次的**全部**状态，全精度（科学计数）。
-///
-/// 存在的理由：终端表格既有定点格式吞掉小数的问题（`{:.3}` 把 1e-15 打成 `0.000`），
-/// 又只能人眼读、不能程序化分析。JSONL 让每一轮都能被脚本直接比对。
-///
-/// 维度：`goods`（逐商品聚合）· `departments`（逐部门逐商品的库存/目标/计划/执行率）
-/// · `polities`（逐政体逐商品的楔子）· 总执行率。
 fn json_line(lab: &Lab) -> String {
     let states = lab.good_states();
-    let wedges = lab.wedges();
     let mut goods = String::new();
     for (k, s) in states.iter().enumerate() {
         if k > 0 {
@@ -639,420 +527,314 @@ fn json_line(lab: &Lab) -> String {
         goods.push_str(&format!(
             concat!(
                 "{{\"good\":{},\"index\":{:e},\"bid\":{:e},\"ask\":{:e},\"deal_price\":{:e},",
-                "\"declared_sell\":{:e},\"declared_buy\":{:e},\"quote_sell\":{:e},\"quote_buy\":{:e},",
-                "\"scale_sell\":{:e},\"scale_buy\":{:e},\"dealt\":{:e},\"stock\":{:e},",
-                "\"delivery\":{:e},\"consumed\":{:e},\"intake\":{:e},",
-                "\"sell_ceiling\":{:e},\"buy_ceiling\":{:e},\"target\":{:e},",
-                "\"wanted_buy\":{},\"blocked_buy\":{}}}"
+                "\"quote_sell\":{:e},\"quote_buy\":{:e},",
+                "\"sold\":{:e},\"bought\":{:e},\"dealt\":{:e},\"stock\":{:e},",
+                "\"delivery\":{:e},\"consumed\":{:e},\"wanted\":{:e},\"target\":{:e}}}"
             ),
-            k, s.price, s.bid, s.ask, s.deal_price,
-            s.declared_sell, s.declared_buy, s.quote_sell, s.quote_buy,
-            s.scale_sell, s.scale_buy, s.dealt, s.stock,
-            s.delivery, s.consumed, s.intake,
-            s.sell_ceiling, s.buy_ceiling, s.target,
-            s.wanted_buy, s.blocked_buy,
+            k,
+            s.index,
+            s.bid,
+            s.ask,
+            s.deal_price,
+            s.quote_sell,
+            s.quote_buy,
+            s.sold,
+            s.bought,
+            s.dealt,
+            s.stock,
+            s.delivery,
+            s.consumed,
+            s.wanted,
+            s.target,
         ));
     }
     let mut departments = String::new();
-    for (i, warehouse) in lab.warehouses.warehouses.iter().enumerate() {
+    for (i, department) in lab.departments.departments.iter().enumerate() {
         if i > 0 {
             departments.push(',');
         }
+        let warehouse = &lab.warehouses.warehouses[i];
         let stock: Vec<String> = warehouse
             .stocks
             .iter()
-            .map(|s| format!("{:e}", s.volume))
+            .map(|stock| format!("{:e}", stock.volume))
             .collect();
         let target: Vec<String> = warehouse
             .stocks
             .iter()
-            .map(|s| format!("{:e}", s.target_volume))
+            .map(|stock| format!("{:e}", stock.target_volume))
             .collect();
-        let gap: Vec<String> = warehouse
+        let price: Vec<String> = warehouse
             .stocks
             .iter()
-            .map(|s| format!("{:e}", s.declared_gap))
+            .map(|stock| format!("{:e}", stock.price))
             .collect();
-        let report = lab.departments.departments[i].settlement();
+        let intake: Vec<String> = department
+            .intake()
+            .iter()
+            .map(|value| format!("{value:e}"))
+            .collect();
+        let delivery: Vec<String> = department
+            .delivery()
+            .iter()
+            .map(|value| format!("{value:e}"))
+            .collect();
         departments.push_str(&format!(
-            "{{\"department\":{i},\"stock\":[{}],\"target\":[{}],\"gap\":[{}],\"intake\":{:e},\"capacity_scale\":{:e},\"settlement\":{{\"gap\":{:e},\"mu\":{:e},\"iterations\":{},\"phases\":{},\"converged\":{},\"residual\":{:e},\"degraded\":{},\"blocked\":{},\"utilization\":{:e}}}}}",
+            concat!(
+                "{{\"department\":{},\"stock\":[{}],\"target\":[{}],\"price\":[{}],",
+                "\"intake\":[{}],\"delivery\":[{}],",
+                "\"currency\":{:e},\"capacity_scale\":{:e},",
+                "\"converged\":{},\"degraded\":{},\"iterations\":{},\"residual\":{:e},\"utilization\":{:e}}}"
+            ),
+            i,
             stock.join(","),
             target.join(","),
-            gap.join(","),
-            lab.departments.departments[i].intake().iter().sum::<f32>(),
-            lab.departments.departments[i].capacity_scale(),
-            report.gap,
-            report.mu,
-            report.iterations,
-            report.phases,
-            report.converged,
-            report.residual,
-            report.degraded,
-            report.blocked,
-            report.utilization,
+            price.join(","),
+            intake.join(","),
+            delivery.join(","),
+            department.currency,
+            department.capacity_scale(),
+            department.settlement().converged,
+            department.settlement().degraded,
+            department.settlement().iterations,
+            department.settlement().residual,
+            department.settlement().utilization,
         ));
     }
-    let mut polities = String::new();
-    for (p, row) in wedges.iter().enumerate() {
-        if p > 0 {
-            polities.push(',');
-        }
-        let cells: Vec<String> = row.iter().map(|w| format!("{w:e}")).collect();
-        polities.push_str(&format!(
-            "{{\"polity\":{p},\"wedge\":[{}]}}",
-            cells.join(","),
-        ));
-    }
-    // **逐地方账本**：部门决策价读的就是它（`plan` 读 `books[locality]`），
-    // 而指数是它的聚合。两者是否脱钩，只有把账本本身打出来才能看见。
-    let mut books = String::new();
-    for (locality, row) in lab.warehouses.books.iter().enumerate() {
-        if locality > 0 {
-            books.push(',');
-        }
-        let cells: Vec<String> = row
-            .iter()
-            .map(|b| format!("[{:e},{:e},{}]", b.bid, b.ask, b.observed as u8))
-            .collect();
-        books.push_str(&format!(
-            "{{\"locality\":{locality},\"book\":[{}]}}",
-            cells.join(","),
-        ));
-    }
-    // **产出来自哪种政策**：`自有商品免费生产`（consumptions 全 0）还是`阶梯工艺`
-    // （consumptions 非 0）。`入库` 的总量分不出这两者——而三产入库非零**并不能**
-    // 证明 t2 在跑。
-    let mut split_free = vec![0.0f32; lab.market.merchandises.len()];
-    let mut split_ladder = vec![0.0f32; lab.market.merchandises.len()];
-    for (i, department) in lab.departments.departments.iter().enumerate() {
-        let scale = lab
-            .departments
-            .departments
-            .get(i)
-            .map(|d| d.capacity_scale())
-            .unwrap_or(0.0);
-        for policy in department.policies.iter() {
-            if !policy.is_production() {
-                continue;
-            }
-            let free = policy.consumptions.iter().all(|c| *c <= 0.0);
-            for (k, produced) in policy.outputs.iter().enumerate() {
-                let amount = policy.distribution() * produced * scale;
-                if free {
-                    split_free[k] += amount;
-                } else {
-                    split_ladder[k] += amount;
-                }
-            }
-        }
-    }
-    let delivery_split: Vec<String> = split_free
+    let quotes: Vec<String> = lab
+        .warehouses
+        .ask
         .iter()
-        .zip(split_ladder.iter())
-        .map(|(f, l)| format!("[{f:e},{l:e}]"))
+        .enumerate()
+        .map(|(locality, row)| {
+            let cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(k, ask)| {
+                    let bid = lab
+                        .warehouses
+                        .bid
+                        .get(locality)
+                        .and_then(|row| row.get(k))
+                        .copied()
+                        .unwrap_or(0.0);
+                    format!("[{bid:e},{ask:e}]")
+                })
+                .collect();
+            format!("{{\"locality\":{locality},\"quote\":[{}]}}", cells.join(","))
+        })
+        .collect();
+    let (total, low, high) = money(lab);
+    let delivery_split: Vec<String> = (0..GOODS)
+        .map(|k| {
+            let free: f32 = lab
+                .departments
+                .departments
+                .iter()
+                .flat_map(|department| department.policies.iter())
+                .filter(|policy| {
+                    policy.is_production() && policy.consumptions.iter().all(|value| *value <= 0.0)
+                })
+                .map(|policy| policy.distribution() * policy.outputs.get(k).copied().unwrap_or(0.0))
+                .sum();
+            let ladder: f32 = lab
+                .departments
+                .departments
+                .iter()
+                .flat_map(|department| department.policies.iter())
+                .filter(|policy| {
+                    policy.is_production() && policy.consumptions.iter().any(|value| *value > 0.0)
+                })
+                .map(|policy| policy.distribution() * policy.outputs.get(k).copied().unwrap_or(0.0))
+                .sum();
+            format!("[{free:e},{ladder:e}]")
+        })
         .collect();
     format!(
         concat!(
-            "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"polities\":[{}],",
-            "\"books\":[{}],\"delivery_free_or_ladder\":[{}],",
-            "\"uncleared\":{:e},",
-            "\"settlement_failures\":{}}}"
+            "{{\"round\":{},\"goods\":[{}],\"departments\":[{}],\"quotes\":[{}],",
+            "\"delivery_free_or_ladder\":[{}],",
+            "\"money\":{:e},\"money_min\":{:e},\"money_max\":{:e},",
+            "\"settlement_failures\":{},\"settlement_degraded\":{}}}"
         ),
         lab.round,
         goods,
         departments,
-        polities,
-        books,
+        quotes.join(","),
         delivery_split.join(","),
-        lab.history.last().map(|h| h.uncleared).unwrap_or(0.0),
+        total,
+        low,
+        high,
         lab.settlement_failures,
+        lab.settlement_degraded,
     )
 }
 
 fn sectors(args: &Args) {
-    for ladder in [false, true] {
-        let mut local = args.clone();
-        local.motive_ladder = ladder;
-        let mut lab = build_with(&local, spec(&local));
+    let mut lab = build(args);
+    for _ in 0..args.rounds {
+        lab.step();
         if args.json {
-            for _ in 0..args.rounds {
-                lab.step();
-                if lab.round % args.every != 0 && lab.round != args.rounds {
-                    continue;
-                }
+            if lab.round % args.every == 0 || lab.round == args.rounds {
                 println!("{}", json_line(&lab));
             }
             continue;
         }
-        if args.goods_trace {
-            println!(
-                "=== 场景 {} 逐轮逐商品追踪（{} 轮，每 {} 轮一行）：{} ===",
-                args.scenario,
-                args.rounds,
-                args.every,
-                if ladder { "有意愿阶梯" } else { "无意愿阶梯" },
-            );
-            println!(
-                "{:>4} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9} {:>10} {:>10} {:>5} {:>5} {:>10}",
-                "轮次",
-                "商品",
-                "指数",
-                "买价",
-                "卖价",
-                "卖申报",
-                "买申报",
-                "成交",
-                "成交价",
-                "库存",
-                "卖报价",
-                "买报价",
-                "买尺度",
-                "入库",
-                "投入",
-                "卖天花板",
-                "买天花板",
-                "想买",
-                "被拒",
-                "目标",
-            );
+        if lab.round % args.every != 0 && lab.round != args.rounds {
+            continue;
         }
-        for _ in 0..args.rounds {
-            lab.step();
-            if !args.goods_trace || (lab.round % args.every != 0 && lab.round != args.rounds) {
-                continue;
-            }
-            for (k, state) in lab.good_states().iter().enumerate() {
-                println!(
-                    "{:>4} {:>5} {:>11.3e} {:>11} {:>11} {:>9.2} {:>9.2} {:>9.2} {:>11} {:>9.1} {:>11} {:>11} {:>9.2} {:>9.3} {:>9.3} {:>10.1} {:>10.1} {:>5.0} {:>5.0} {:>12.2}",
-                    lab.round,
-                    GOOD_LABELS[k],
-                    state.price,
-                    sci(state.bid),
-                    sci(state.ask),
-                    state.declared_sell,
-                    state.declared_buy,
-                    state.dealt,
-                    sci(state.deal_price),
-                    state.stock,
-                    sci(state.quote_sell),
-                    sci(state.quote_buy),
-                    dash(state.scale_buy),
-                    state.delivery,
-                    state.consumed,
-                    state.sell_ceiling,
-                    state.buy_ceiling,
-                    state.wanted_buy,
-                    state.blocked_buy,
-                    state.target,
-                );
-            }
-            println!(
-                "     {:>5} 未成交 {:>5.1}%",
-                "小结",
-                100.0 * lab.history.last().unwrap().uncleared,
-            );
-        }
-        if args.goods_trace {
-            println!();
-        }
-        report_by_good(&lab, ladder);
-        println!();
+        let snapshot = lab.history.last().unwrap();
+        let consumed: f32 = lab
+            .good_states()
+            .iter()
+            .map(|state| state.consumed)
+            .sum();
+        let dealt: f32 = lab.good_states().iter().map(|state| state.dealt).sum();
+        let stock: f32 = lab.good_states().iter().map(|state| state.stock).sum();
+        println!(
+            "{:>5} 指数 {} 消费 {consumed:>10.2} 成交 {dealt:>10.2} 库存 {stock:>10.2}",
+            snapshot.round,
+            goods(&snapshot.prices),
+        );
     }
+    if args.json {
+        return;
+    }
+    println!();
+    report_by_good(&lab);
+    summary(&lab);
 }
 
-fn mean(values: &[f32]) -> f32 {
-    if values.is_empty() {
-        0.0
-    } else {
-        values.iter().sum::<f32>() / values.len() as f32
-    }
-}
-
-fn local_prices(lab: &Lab, good: usize) -> String {
-    lab.polities
-        .iter()
-        .map(|polity| format!("{:.3}", polity.vwap[good]))
+fn local_gap(lab: &Lab, good: usize) -> String {
+    (0..lab.polities.len())
+        .map(|p| format!("{}({:+.4})", lab.polities[p].name, lab.spread(p, good)))
         .collect::<Vec<String>>()
         .join(" ")
 }
 
-fn spread(lab: &Lab, seat: usize, good: usize) -> f32 {
-    lab.spread(seat, good)
+fn blockade(args: &Args) {
+    let mut lab = build(args);
+    for round in 0..args.rounds {
+        let blocked = round >= args.block_from && round < args.block_to;
+        if blocked {
+            lab.block(&[args.block_polity], args.block_weight);
+        } else {
+            lab.block(&[args.block_polity], 1.0);
+        }
+        lab.step();
+        if lab.round % args.every != 0 && lab.round != args.rounds {
+            continue;
+        }
+        let snapshot = lab.history.last().unwrap();
+        println!(
+            "第 {:>4} 轮 {} 指数 {} 一产价差 {}",
+            snapshot.round,
+            if blocked { "封锁" } else { "通行" },
+            goods(&snapshot.prices),
+            local_gap(&lab, 0),
+        );
+    }
+    summary(&lab);
 }
 
 fn sanction_run(args: &Args) {
     let mut lab = build(args);
-    let department = lab.department_of(args.sanction_polity, args.sanction_unit, Kind::Consumer);
-    let name = lab.polities[args.sanction_polity].name;
-    println!(
-        "局部制裁：{name}(政权 {}) 第 {} 个部门 = 仓库 {department}，在 [{} , {}) 轮与政权外断链，权重 {}，规则 {}",
-        args.sanction_polity,
-        args.sanction_unit,
-        args.sanction_from,
-        args.sanction_to,
-        args.sanction_w,
-        args.rule.name(),
-    );
-    println!(
-        "{:>4} {:>5} {:>9} {:>10} {:>10} {:>9} {:>9} {:>22} {:>9} {:>8} {:>9}",
-        "轮次", "状态", "粮食指数", "部门成交价", "部门兑现", "部门库存", "对外成交", "各政权本地价", "价差", "转换占比", "利润率"
-    );
-    let mut during = Vec::new();
-    let mut after = Vec::new();
+    let sanctioned = lab.department_of(args.sanction_polity, args.sanction_unit, Kind::Consumer);
     for round in 0..args.rounds {
-        let on = round >= args.sanction_from && round < args.sanction_to;
-        if on {
-            lab.sanction(&[department], args.sanction_w);
-        } else {
+        let active = round >= args.sanction_from && round < args.sanction_to;
+        if active {
+            lab.sanction(&[sanctioned], args.sanction_w);
+        } else if round == args.sanction_from {
             lab.unsanction();
         }
         lab.step();
-        let prices = lab.department_prices();
-        let fills = lab.department_fill();
-        let external = lab.department_external();
-        let gap = spread(&lab, args.sanction_polity, 0);
-        if on && round + 1 >= args.sanction_from + 8 {
-            during.push(gap);
+        if lab.round % args.every != 0 && lab.round != args.rounds {
+            continue;
         }
-        if !on && round >= args.sanction_to + 8 {
-            after.push(gap);
-        }
-        let edge = round + 1 == args.sanction_from || round + 1 == args.sanction_to;
-        if lab.round % args.every == 0 || edge || lab.round == args.rounds {
-            let snapshot = lab.history.last().unwrap();
-            println!(
-                "{:>4} {:>5} {:>9.3} {:>10} {:>10} {:>9.1} {:>9.2} {:>22} {:>+9.3} {:>8.1}% {:>+9.3}",
-                lab.round,
-                if on { "制裁" } else { "通行" },
-                lab.market.merchandises[0].price,
-                format!("{:.3}", prices[department][0]),
-                format!("{:.2}", fills[department][0]),
-                lab.warehouses.warehouses[department].stocks[0].volume,
-                external[department],
-                local_prices(&lab, 0),
-                gap,
-                100.0 * snapshot.transform_share,
-                snapshot.transform_potential,
-            );
-        }
+        let snapshot = lab.history.last().unwrap();
+        let department = &lab.departments.departments[sanctioned];
+        let fill: f32 = department
+            .intake()
+            .iter()
+            .zip(
+                lab.warehouses.warehouses[sanctioned]
+                    .stocks
+                    .iter()
+                    .map(|stock| stock.wanted),
+            )
+            .map(|(taken, wanted)| if wanted > 0.0 { taken / wanted } else { 1.0 })
+            .sum::<f32>()
+            / GOODS as f32;
+        println!(
+            "第 {:>4} 轮 {} 指数 {} 被制裁部门执行率 {:.3} 一产价差 {}",
+            snapshot.round,
+            if active { "制裁" } else { "通行" },
+            goods(&snapshot.prices),
+            fill,
+            local_gap(&lab, 0),
+        );
     }
-    let index = lab
-        .market
-        .merchandises
-        .iter()
-        .map(|merchandise| merchandise.price)
-        .collect::<Vec<f32>>();
-    for p in 0..lab.polities.len() {
-        let local = (0..GOODS)
-            .map(|k| {
-                format!(
-                    "{:.3}",
-                    index[k] * lab.warehouses.local_ratio(p, k).unwrap_or(1.0)
-                )
-            })
-            .collect::<Vec<String>>()
-            .join(" ");
-        println!("  地方 {p} 本地成交价 {local}   指数 {}", goods(&index));
-    }
-    println!(
-        "制裁期间价差均值 {:+.4}（{} 轮），解除后 {:+.4}（{} 轮）",
-        mean(&during),
-        during.len(),
-        mean(&after),
-        after.len(),
-    );
+    summary(&lab);
 }
 
-fn sanction_sweep(args: &Args) {
+fn ladder(args: &Args) {
     println!(
-        "局部制裁严重度扫描：政权 {} 第 {} 个部门，{} 轮，规则 {}",
-        args.sanction_polity,
-        args.sanction_unit,
-        args.rounds,
-        args.rule.name(),
+        "技术阶梯：同一个部门里两个工艺。省料但慢 = 每件粮吃 {:.2} 件工业品、产能占用 {:.2}/件；费料但快 = {:.2} 件工业品、产能占用 {:.2}/件；产能预算 {}",
+        LADDER_THRIFTY.0, LADDER_THRIFTY.2, LADDER_FAST.0, LADDER_FAST.2, LADDER_CAPACITY,
     );
     println!(
-        "{:>7} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
-        "权重", "对外成交", "制裁政权价", "其余政权价", "价差(成交)", "价差(账本)", "执行率"
+        "{:>9} {:>10} {:>26} {:>26} {:>12}",
+        "粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "粮食指数"
     );
-    for weight in [1.0f32, 0.75, 0.5, 0.25, 0.0] {
+    for supply in [0.4f32, 0.6, 0.8, 1.0, 1.5, 2.5, 4.0] {
         let mut local = args.clone();
-        local.sanction_w = weight;
-        let mut lab = build(&local);
-        let department = lab.department_of(local.sanction_polity, local.sanction_unit, Kind::Consumer);
-        for _ in 0..args.rounds {
-            lab.sanction(&[department], weight);
-            lab.step();
-        }
-        let external = lab.department_external();
-        let seat = local.sanction_polity;
+        local.food_supply = supply;
+        let mut lab = build_with(&local, Spec::ladder(local.polities, supply));
+        lab.run(args.rounds);
+        let department = lab.department_of(0, 0, Kind::Producer);
+        let processes = lab.process_state(department);
+        let report = |index: usize| match processes.get(index) {
+            Some((share, potential, _)) => format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential),
+            None => String::from("—"),
+        };
+        let food = lab.good_states()[0].index;
+        let manufacture = lab.good_states()[1].index;
         println!(
-            "{weight:>7.2} {:>10.2} {:>12.3} {:>12.3} {:>+10.3} {:>+10.3}",
-            external[department],
-            lab.polities[seat].vwap[0],
-            mean(
-                &lab.polities
-                    .iter()
-                    .enumerate()
-                    .filter(|(p, _)| *p != seat)
-                    .map(|(_, polity)| polity.vwap[0])
-                    .collect::<Vec<f32>>()
-            ),
-            spread(&lab, seat, 0),
-            lab.book_spread(seat, 0),
+            "{supply:>9.2} {:>10.2} {:>26} {:>26} {:>12.3}",
+            manufacture / food.max(1e-9),
+            report(0),
+            report(1),
+            food,
         );
     }
 }
 
 fn sweep(args: &Args) {
     println!(
-        "场景 {} 规则 {} 政权 {} 轮 {} 学习率 {} 重定心 {}",
-        args.scenario,
-        args.rule.name(),
-        args.polities,
-        args.rounds,
-        args.forgetting,
-        args.recenter,
+        "{:>10} {:>12} {:>12} {:>12} {:>12}",
+        "产能", "消费", "成交", "库存", "指数极差"
     );
-    println!("{:>6} {:>10} {:>24} {:>26}", "权重", "跨境占比", "最终楔子(good0)", "本地价(good0)");
-    for weight in [0.0f32, 0.1, 0.25, 0.5, 0.75, 1.0] {
-        let mut local = Args {
-            relations: weight,
-            ..Default::default()
-        };
-        local.scenario = args.scenario.clone();
-        local.rule = args.rule;
-        local.polities = args.polities;
-        local.rounds = args.rounds;
-        local.forgetting = args.forgetting;
-        local.gain = args.gain;
-        local.recenter = args.recenter;
-        local.seed = args.seed;
+    for capacity in [4.0f32, 6.0, 8.0, 12.0, 16.0, 24.0] {
+        let mut local = args.clone();
+        local.capacity = Some(capacity);
         let mut lab = build(&local);
         lab.run(args.rounds);
-        let snapshot = lab.history.last().unwrap();
-        let volume = snapshot.internal + snapshot.external;
-        let wedges = lab
-            .polities
-            .iter()
-            .map(|polity| format!("{:+.1}%", 100.0 * polity.wedge[0]))
-            .collect::<Vec<String>>()
-            .join(" ");
-        let levels = lab
-            .polities
-            .iter()
-            .map(|polity| format!("{:.3}", polity.level[0]))
-            .collect::<Vec<String>>()
-            .join(" ");
-        println!(
-            "{weight:>6.2} {:>9.1}% {:>24} {:>26}",
-            if volume > 0.0 {
-                100.0 * snapshot.external / volume
-            } else {
-                0.0
-            },
-            wedges,
-            levels,
-        );
+        let states = lab.good_states();
+        let consumed: f32 = states.iter().map(|state| state.consumed).sum();
+        let dealt: f32 = states.iter().map(|state| state.dealt).sum();
+        let stock: f32 = states.iter().map(|state| state.stock).sum();
+        let index: Vec<f32> = states.iter().map(|state| state.index).collect();
+        let range = if index.iter().all(|value| *value > 0.0) {
+            index.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+                / index.iter().cloned().fold(f32::INFINITY, f32::min)
+        } else {
+            0.0
+        };
+        println!("{capacity:>10.1} {consumed:>12.2} {dealt:>12.2} {stock:>12.2} {range:>12.3}");
     }
+}
+
+#[allow(dead_code)]
+fn name_of(polity: usize) -> &'static str {
+    NAMES[polity % NAMES.len()]
 }

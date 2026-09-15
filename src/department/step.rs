@@ -1,9 +1,11 @@
 use super::settlement;
 use crate::department::{Department, Policy, Rationing, SettlementReport};
-use crate::market::Market;
-use crate::warehouse::{Book, Warehouse};
+use crate::warehouse::Warehouse;
 
 const FREE_COST: f32 = 1e-6;
+
+/// 低于这个存量就当作空货架（见 [`plan`] 里对库存行的处理）
+const EMPTY_SHELF: f32 = 1e-3;
 /// 分布的软化温度：越小越接近全押一个政策（角点、会抖），越大越平均
 const POLICY_TEMPERATURE: f32 = 0.25;
 
@@ -52,24 +54,17 @@ fn consumption_potential(policy: &Policy, asks: &[f32], capacity: f32) -> f32 {
     motive / cost.max(FREE_COST)
 }
 
-/// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷
-/// （买入力按**卖价**折——那才是你真的要付的价）
-fn material_ceiling(policy: &Policy, asks: &[f32], warehouse: &Warehouse) -> f32 {
+/// 原料允许这个政策跑多少篮子；没有投入品的政策返回无穷。
+/// 钱不在这里：现金约束是结算里的一条预算行。
+fn material_ceiling(policy: &Policy, warehouse: &Warehouse) -> f32 {
     let mut ceiling = f32::INFINITY;
     for (k, consumption) in policy.consumptions.iter().enumerate() {
         if *consumption > 0.0 {
-            let price = asks.get(k).copied().unwrap_or(0.0);
-            let buying_power = if price > 0.0 && warehouse.currency > 0.0 {
-                warehouse.currency / price
-            } else {
-                0.0
-            };
             let command = warehouse
                 .stocks
                 .get(k)
                 .map(|stock| stock.volume.max(0.0))
-                .unwrap_or(0.0)
-                + buying_power;
+                .unwrap_or(0.0);
             ceiling = ceiling.min(command / consumption);
         }
     }
@@ -93,53 +88,37 @@ fn policy_share(score: f32, best: f32) -> f32 {
     ((score / best) / POLICY_TEMPERATURE).exp()
 }
 
-pub(super) fn plan(
-    department: &mut Department,
-    warehouse: &mut Warehouse,
-    market: &Market,
-    book: &[Book],
-    rationing: Rationing,
-) {
+pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, rationing: Rationing) {
     let goods = warehouse.stocks.len();
 
-    // 决策价来自**这个部门所在地方的账本**（挂单推出来的、逐地方的），不再来自银河指数。
-    // 某一侧没有挂单就回退到指数——那是"没有人愿意在这个方向上成交"的诚实表达。
-    let index: Vec<f32> = (0..goods)
-        .map(|k| {
-            market
-                .merchandises
-                .get(k)
-                .map(|merchandise| merchandise.price.max(0.0))
-                .unwrap_or(0.0)
+    // 决策价 = **这个仓库自己挂出来的价**（它按"库存对目标 + 未满足意愿"每轮自适应）。
+    // 不再读逐地方的账本、也不再回退到指数：仓库自己就是那个地方的边际价值。
+    // 一个地方每种货的当地信息由**仓库之间的价格差**经市场势流传递，而不是靠一个
+    // 由成交或挂单反解出来的中间价。
+    let prices: Vec<f32> = warehouse
+        .stocks
+        .iter()
+        .map(|stock| {
+            if stock.price.is_finite() && stock.price > 0.0 {
+                stock.price
+            } else {
+                1.0
+            }
         })
         .collect();
-    let side = |pick: fn(&Book) -> f32| -> Vec<f32> {
-        (0..goods)
-            .map(|k| {
-                let quoted = book.get(k).map(pick).unwrap_or(0.0);
-                if quoted > 0.0 && quoted.is_finite() {
-                    quoted
-                } else {
-                    index.get(k).copied().unwrap_or(0.0)
-                }
-            })
-            .collect()
-    };
-    let bids = side(|book| book.bid);
-    let asks = side(|book| book.ask);
+    let bids = prices.clone();
+    let asks = prices;
 
     let available: Vec<f32> = warehouse
         .stocks
         .iter()
         .map(|stock| stock.volume.max(0.0))
         .collect();
-    let mut intake = vec![0.0; goods];
-    let mut output = vec![0.0; goods];
 
     let mut ceilings = Vec::with_capacity(department.policies.len());
     let mut reference = 0.0f32;
     for policy in department.policies.iter() {
-        let ceiling = material_ceiling(policy, &asks, warehouse)
+        let ceiling = material_ceiling(policy, warehouse)
             .min(capacity_ceiling(policy, department.capacity));
         if ceiling.is_finite() {
             reference = reference.max(ceiling);
@@ -166,7 +145,6 @@ pub(super) fn plan(
     }
 
     let mut choice = department.policy_choice;
-    let mut capacity_want = 0.0;
     let mut consume_weight = 0.0;
     let mut produce_weight = 0.0;
     for policy in department.policies.iter_mut() {
@@ -199,12 +177,6 @@ pub(super) fn plan(
                 best_share = policy.distribution;
                 choice = p;
             }
-            capacity_want += policy.distribution * policy.capacity_use();
-            for (k, consumption) in policy.consumptions.iter().enumerate() {
-                let produced = policy.outputs.get(k).copied().unwrap_or(0.0);
-                intake[k] += policy.distribution * consumption.max(0.0);
-                output[k] += policy.distribution * produced.max(0.0);
-            }
         }
     } else {
         for policy in department.policies.iter_mut() {
@@ -213,27 +185,17 @@ pub(super) fn plan(
         }
     }
 
-    let capacity_scale = if capacity_want > 0.0 {
-        (department.capacity / capacity_want).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let mut delivery = vec![0.0; goods];
-    for (k, produced) in output.iter().enumerate() {
-        delivery[k] = produced * capacity_scale;
-    }
-    let supply: Vec<f32> = (0..goods).map(|k| available[k] + delivery[k]).collect();
-
-    // === consumption 结算 ===
+    // === 结算：**唯一的数量当局** ===
     //
-    // 一产/二产/三产是**三条彼此独立**的 consumption policy（有哪个就吃那个）。
-    // 政策**内部**的配方是一个向量：整篮按同一个篮子数缩放；政策**之间**必须彼此独立，
-    // 不能因为一条政策缺货就把别的政策一起按下去。
+    // 生产与消费同时进结算器，争同一批货与同一份产能。产出也是解给出的，所以约束用
+    // **净配方**（投入 − 产出）：`available` 是期初存量，`s_k > 0` 就是期末库存为正。
+    // 这一条同时修掉了"生产投入从未被扣除"的质量不守恒。
     //
-    // 约束是**裸配方**（不再乘 `distribution`），目标是**绝对 motive**（不再归一化）。
-    // 旧版把归一化后的 `distribution` 同时当目标系数和物质量，于是 motive 的绝对大小
-    // 完全不起作用（全乘 1000 输出逐位不变），需求在量上对价格也毫无弹性。
-    // `distribution` 现在只是"这条政策在族里占多大份额"的读数。
+    // 目标权重 `w_p` 是**每篮效用**，两族的量纲刻意不同、必须各自说清：
+    // - 生产：每篮净货币价值（`产出估值 − 投入估价`），所以产能与原料的稀缺直接进价格；
+    // - 消费：`motive ÷ 篮子要价`——**这就是需求的价格弹性**。旧版这里传的是裸
+    //   `motive`（常数），于是需求在量上对价格毫无反应，"价格涨 → 欲望降 → 价格落"
+    //   这条负反馈在输入端就不存在。
     let plans: Vec<Vec<f64>> = department
         .policies
         .iter()
@@ -245,22 +207,111 @@ pub(super) fn plan(
                 .collect()
         })
         .collect();
-    // 参与与否仍由**经济可行性**把关（`price_potential > 0`：亏损的生产政策、
-    // 空篮子、零 motive 都不参与），但参与之后的目标权重是它自己的 motive。
-    let willingness: Vec<f64> = department
+    let outputs: Vec<Vec<f64>> = department
         .policies
         .iter()
         .map(|policy| {
-            if policy.price_potential > 0.0 {
-                policy.motive.max(0.0) as f64
+            (0..goods)
+                .map(|k| policy.outputs.get(k).copied().unwrap_or(0.0).max(0.0) as f64)
+                .collect()
+        })
+        .collect();
+    // 一条**没有任何投入**的工艺（零投入主生产）在仓库存量上不构成任何一行约束，
+    // 于是它唯一的稀缺要素只能是产能。若它的 `capacity_cost` 又是 0（旧夹具、以及
+    // 任何没标产能占用的工艺），LP 对它就**没有上界**，产量与库存一起发散——旧代码
+    // 是用 `capacity_scale ≤ 1` 隐式挡住这件事的，那等于"整套政策各跑一遍"。
+    // 这里把它显式化：没有产能占用的零投入工艺按**一次运行**计价。
+    let unbounded: Vec<bool> = department
+        .policies
+        .iter()
+        .map(|policy| policy.consumptions.iter().all(|consumption| *consumption <= 0.0))
+        .collect();
+    let capacity_use: Vec<f64> = department
+        .policies
+        .iter()
+        .zip(unbounded.iter())
+        .map(|(policy, unbounded)| {
+            let use_per = policy.capacity_use().max(0.0) as f64;
+            if use_per > 0.0 {
+                use_per
+            } else if *unbounded {
+                1.0
             } else {
                 0.0
             }
         })
         .collect();
-    let inventory: Vec<f64> = supply.iter().map(|volume| *volume as f64).collect();
+    let capacity_budget = if department.capacity.is_finite() && department.capacity > 0.0 {
+        department.capacity as f64
+    } else {
+        capacity_use.iter().sum()
+    };
+    let willingness: Vec<f64> = department
+        .policies
+        .iter()
+        .map(|policy| {
+            if !(policy.price_potential > 0.0) {
+                return 0.0;
+            }
+            if policy.is_production() {
+                let (cost, revenue, _) = basket_value(policy, &bids, &asks);
+                (revenue - cost).max(0.0) as f64
+            } else {
+                let cost = basket_value(policy, &[], &asks).0;
+                (policy.motive.max(0.0) / cost.max(FREE_COST)) as f64
+            }
+        })
+        .collect();
+    // 货架上的"灰"不算库存：存量为正但极小（浮点残渣）时，约束行系数
+    // `(投入 − 产出) / 存量` 会放大到 1e5 量级，把内点法的 KKT 系统打成病态
+    // （实测残差 1.0、迭代顶到上限）。当成 0 就等于把这一行整条拿掉。
+    let inventory: Vec<f64> = available
+        .iter()
+        .map(|volume| {
+            if volume.is_finite() && *volume > EMPTY_SHELF {
+                *volume as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
-    let (_rates, eaten, settlement) = match rationing {
+    // 现金行的系数 = 一篮货物的要价（按**本仓库自己的挂价**算），上限 = 部门手里的余额。
+    // 它同时管两件事：消费的预算约束（买不起就少吃），以及规则 (b) 的 `wanted`
+    // ——把库存行拿掉之后，价格高 ⇒ 买得起的篮子数掉下来 ⇒ `wanted` 能落到 `taken`
+    // 以下 ⇒ 规则 (b) 的第二半（满足了就降目标）才可达。两向都有，才叫反馈。
+    let desire_use: Vec<f64> = capacity_use
+        .iter()
+        .map(|use_per| if *use_per > 0.0 { *use_per } else { 1.0 })
+        .collect();
+    let money_cost: Vec<f64> = department
+        .policies
+        .iter()
+        .map(|policy| basket_value(policy, &[], &asks).0.max(0.0) as f64)
+        .collect();
+    let cash = department.currency.max(0.0) as f64;
+    let desire = |barrier: f32, curvature: f32| -> Vec<f64> {
+        settlement::solve(
+            &willingness,
+            &plans,
+            &outputs,
+            &[],
+            &[
+                settlement::Budget {
+                    coefficient: &desire_use,
+                    limit: capacity_budget,
+                },
+                settlement::Budget {
+                    coefficient: &money_cost,
+                    limit: cash,
+                },
+            ],
+            barrier.max(0.0) as f64,
+            curvature.max(0.0) as f64,
+        )
+        .x
+    };
+    let (_rates, eaten, delivered, wanted_volume, settlement) = match rationing {
         Rationing::Interior {
             barrier,
             curvature,
@@ -268,17 +319,43 @@ pub(super) fn plan(
             let outcome = settlement::solve(
                 &willingness,
                 &plans,
+                &outputs,
                 &inventory,
+                &[
+                    settlement::Budget {
+                        coefficient: &capacity_use,
+                        limit: capacity_budget,
+                    },
+                    settlement::Budget {
+                        coefficient: &money_cost,
+                        limit: cash,
+                    },
+                ],
                 barrier.max(0.0) as f64,
                 curvature.max(0.0) as f64,
             );
-            (outcome.x, outcome.eaten, outcome.report)
+            let wanted = desire(barrier, curvature);
+            let wanted_volume: Vec<f64> = (0..goods)
+                .map(|k| {
+                    (0..plans.len())
+                        .map(|p| plans[p][k] * wanted[p])
+                        .sum()
+                })
+                .collect();
+            (
+                outcome.x,
+                outcome.eaten,
+                outcome.delivered,
+                wanted_volume,
+                outcome.report,
+            )
         }
         Rationing::Hard => {
             let rates = hard_rationing(&plans, &inventory);
             let eaten = take(&plans, &rates, goods);
+            let delivered = take(&outputs, &rates, goods);
             let utilization = (0..goods).fold(0.0f64, |worst, k| {
-                if supply[k] > 0.0 {
+                if available[k] > 0.0 {
                     worst.max(eaten[k] / inventory[k])
                 } else {
                     worst
@@ -286,6 +363,8 @@ pub(super) fn plan(
             });
             (
                 rates,
+                eaten.clone(),
+                delivered,
                 eaten,
                 SettlementReport {
                     converged: true,
@@ -295,16 +374,22 @@ pub(super) fn plan(
             )
         }
     };
+    let capacity_scale = if capacity_budget > 0.0 {
+        let used: f64 = capacity_use
+            .iter()
+            .zip(_rates.iter())
+            .map(|(use_per, rate)| use_per * rate)
+            .sum();
+        (used / capacity_budget).clamp(0.0, 1.0) as f32
+    } else {
+        1.0
+    };
+    let delivery: Vec<f32> = delivered.iter().map(|amount| *amount as f32).collect();
 
     for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-        // 部门**只管取货**：只结算库存，不写目标。目标归仓库自己按"货架有没有被取空"
-        // 自适应（见 `warehouse::step::declared_volumes`）。
-        stock.volume = (supply[k] - eaten[k] as f32).max(0.0);
-        // 把**本轮实际取走的量**交给仓库：目标水位 = 三倍这个量，锚在取货量上
-        // 而不是锚在存量的净变化上（见 `Stock::taken`）。
-        stock.record_take(eaten[k] as f32);
+        stock.volume = (available[k] + delivery[k] - eaten[k] as f32).max(0.0);
+        stock.record_take(wanted_volume[k] as f32, eaten[k] as f32);
     }
-    // 对外报告的就是**实际提货量**（执行率已经打进去了）。
     let intake: Vec<f32> = eaten.iter().map(|amount| *amount as f32).collect();
 
     department.policy_choice = choice;
@@ -345,14 +430,4 @@ fn hard_rationing(plans: &[Vec<f64>], inventory: &[f64]) -> Vec<f64> {
             rate.max(0.0)
         })
         .collect()
-}
-
-pub(super) fn revenue(market: &Market, i: usize) -> f32 {
-    let mut revenue = 0.0;
-    for deals in &market.deals[i] {
-        for deal in deals {
-            revenue += deal.volume * deal.price;
-        }
-    }
-    revenue
 }
