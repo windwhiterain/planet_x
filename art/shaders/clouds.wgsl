@@ -64,8 +64,10 @@ struct Medium {
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: CloudParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var coverage_map: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var coverage_sampler: sampler;
+// 覆盖度立方图占**第 5 格**：绑定约定见 `px_render::reflect`（0 = 参数块；1/3 = 2D 贴图；
+// 5/7 = cube 贴图；采样器永远在 +1）。通用材质只有一套布局，所有 shader 都按这一套声明。
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var coverage_map: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var coverage_sampler: sampler;
 
 fn to_local(point: vec3<f32>) -> vec3<f32> {
     return rotate_vector(vec4<f32>(-params.orientation.xyz, params.orientation.w), point);

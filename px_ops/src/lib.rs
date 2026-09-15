@@ -1,4 +1,5 @@
 pub mod field;
+pub mod generate;
 pub mod noise;
 pub mod cameras;
 pub mod ops;
@@ -459,7 +460,8 @@ fn key_with_cameras(key: Key, cameras: &[px_protocol::art::Camera]) -> Key {
 }
 
 /// 载荷内容的 FNV-1a。节点名也混进去，免得两个载荷相同的节点指纹撞上。
-fn payload_fingerprint(id: &str, blobs: &[px_protocol::wire::Blob]) -> u64 {
+/// （`generate` 那一侧的贴图/网格产物走的就是这里，口径与场、体积一致。）
+pub fn payload_fingerprint(id: &str, blobs: &[px_protocol::wire::Blob]) -> u64 {
     let mut hash = noise::fnv1a(id);
     for blob in blobs {
         for byte in &blob.bytes {

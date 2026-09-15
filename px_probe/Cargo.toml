@@ -12,3 +12,6 @@ wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 encase = "0.12"
+# 云参数的镜像（`src/params.rs`）里有 `vec4<f32>` 那两格：encase 对 glam 的实现就在 glam 这边
+# （`glam/impl_encase.rs`，靠 `encase` 这个 feature 打开）。版本与 bevy_math 那份一致。
+glam = { version = "0.32", features = ["encase"] }

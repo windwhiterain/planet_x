@@ -32,13 +32,11 @@ use px_protocol::render::{
     Compare, ErrorBar, GpuMs, GpuSample, Job as JobKind, Lease, Pair, PerfReport, Report, Request,
     Response, Scene, ShotReport, Waits,
 };
-use px_protocol::scene::Part;
 use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
 use px_render::{
-    Canvas, OrbitCamera, ScenePart, art_cache, asset_root, atmosphere, clouds, planet, shaders,
-    slots, surface,
+    Canvas, OrbitCamera, ScenePart, art_cache, asset_root, material, scene, shaders, slots,
 };
 
 const GOOD_COLORS: [Srgba; 3] = [
@@ -53,8 +51,8 @@ const MAX_BAR: f32 = 4.0;
 const PIPELINE_WAIT_BUDGET: Duration = Duration::from_secs(30);
 const FRAMES_AFTER_JOB: u32 = 6;
 const LEASE_CHECK_INTERVAL: u32 = 120;
-const STAR_WIDTH: u32 = 2048;
-const STAR_HEIGHT: u32 = 1024;
+// 星空（`STAR_WIDTH` / `STAR_HEIGHT`）从这里删掉了：它现在是产物（`generated::stars`），
+// 尺寸由烘图侧说了算，渲染器里一个常数都不留。
 
 #[derive(Resource, Clone, Copy)]
 struct InitialSize(u32, u32);
@@ -124,9 +122,6 @@ impl RenderReady {
 const PIPELINES_PENDING: u8 = 0;
 const PIPELINES_READY: u8 = 1;
 const PIPELINES_FAILED: u8 = 2;
-
-#[derive(Resource)]
-struct Stars(Handle<Image>);
 
 // ---------------------------------------------------------------------------
 // 报告：截图统计 + 卡读数
@@ -549,31 +544,30 @@ enum StepScene {
     Artifact(String),
 }
 
-/// 一步搭出来的东西：进 `Response.scene` 的标签、环境光、以及产物自带的相机表。
+/// 一步搭出来的东西：进 `Response.scene` 的标签、环境（环境光 + 天空盒）以及产物自带的相机表。
 struct Built {
     label: String,
     ambient: f32,
+    /// 天空盒是**内容**（cube 贴图产物）：没有就不挂，背景就是清屏色。
+    skybox: Option<Skybox>,
     cameras: Vec<px_protocol::art::Camera>,
     /// 这一步往槽里装了新 shader（要等管线重编，见 `drive`）。
     installed_shaders: bool,
-    /// 这一步的场景产物声明了 clouds part（报告里"该有云"的判据）。
+    /// 这一步的内容声明了 `clouds` 这个期望标签（报告里"该有云"的判据）。
     declared_clouds: bool,
     /// 这一步看的资产（槽里装的 shader 句柄）：等"资产装完"看的就是它们。
     watch: Vec<Handle<Shader>>,
+    /// 可以现场改的仪器参数（窗口那一套键）。
+    instruments: Vec<scene::Instrument>,
 }
 
-/// 一份场景产物搭出来的东西。
-struct ArtifactScene {
-    label: String,
-    ambient: f32,
-    cameras: Vec<px_protocol::art::Camera>,
-    installed_shaders: bool,
-    /// 产物说没说"这一档有云"。
-    declared_clouds: bool,
-    /// 产物说的消融档：窗口靠它把 `CloudView` 摆回和材质一致的位置（内容由产物决定）。
-    ablate: clouds::Ablate,
-    /// 这一步看的资产（槽里装的 shader 句柄）。
-    watch: Vec<Handle<Shader>>,
+/// 对照图里的一格（列/行 + 格子尺寸）。相机表来自 `.pxart`，格子的排布是渲染器的事。
+#[derive(Debug, Clone, Copy)]
+struct SheetCell {
+    column: u32,
+    row: u32,
+    width: u32,
+    height: u32,
 }
 
 struct ActiveJob {
@@ -1195,9 +1189,7 @@ fn serve(options: Options) -> Result<(), String> {
                 .set(render_plugin())
                 .disable::<WinitPlugin>(),
         )
-        .add_plugins(atmosphere::AtmospherePlugin)
-        .add_plugins(clouds::CloudsPlugin)
-        .add_plugins(surface::SurfacePlugin)
+        .add_plugins(material::DocMaterialPlugin)
         .add_plugins(shaders::ShaderLibraryPlugin)
         // 渲染侧的 GPU 时间戳/管线统计。Bevy 只在开了 `tracing-tracy` 时自己加它
         // （`bevy_render/src/lib.rs` 381 行），所以这里显式加一次：我们不用 tracy，
@@ -1217,6 +1209,8 @@ fn serve(options: Options) -> Result<(), String> {
         .init_resource::<Ticks>()
         .init_resource::<art_cache::ArtCache>()
         .init_resource::<ShotStats>()
+        // `accept_jobs` 会按产物刷新"可现场改的仪器参数"那张表（窗口的 v/m/n 用它）。
+        .init_resource::<SceneInstruments>()
         .insert_resource(gpu_log.clone())
         .insert_resource(PcgRoot(options.pcg_root.clone()))
         .insert_resource(LeaseWatch {
@@ -1472,8 +1466,6 @@ fn new_target(images: &mut Assets<Image>, width: u32, height: u32) -> Handle<Ima
 fn warm_up(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    mut atmosphere_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
-    mut cloud_materials: ResMut<Assets<clouds::CloudsMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     size: Res<InitialSize>,
@@ -1487,7 +1479,6 @@ fn warm_up(
         size: (size.0, size.1),
         target: handle.clone(),
     });
-    commands.insert_resource(Stars(images.add(planet::star_cube(512))));
 
     commands.spawn((
         ScenePart,
@@ -1504,7 +1495,7 @@ fn warm_up(
             ..default()
         },
     ));
-    // ⚠ 这里**故意不摆方向光**（§64.5）：场景的太阳由 `spawn_lights` 摆成 `PointLight`。
+    // ⚠ 这里**故意不摆方向光**（§64.5）：场景的太阳由产物里的灯表摆（点光源）。
     // 再留一盏 9000 lx 的方向光，`sun_light` 的兜底分支就会在出图路上"悄悄换个太阳"
     // （窗口路没有它 ⇒ 同一个 shader 两条路含义不同）；删掉它，两条路的灯清单就一致了。
     commands.spawn((
@@ -1516,8 +1507,6 @@ fn warm_up(
         })),
         Transform::from_xyz(0.0, 1.0, 0.0),
     ));
-    planet::warm_atmosphere(&mut commands, &mut meshes, &mut atmosphere_materials);
-    clouds::warm_clouds(&mut commands, &mut meshes, &mut cloud_materials);
 }
 
 fn accept_jobs(
@@ -1529,8 +1518,8 @@ fn accept_jobs(
     mut active: ResMut<Active>,
     mut cache: ResMut<art_cache::ArtCache>,
     mut canvas: ResMut<Canvas>,
-    stars: Res<Stars>,
     mut scene_assets: SceneAssets,
+    mut instruments: ResMut<SceneInstruments>,
     parts: Query<Entity, With<ScenePart>>,
     tools: SceneTools,
 ) {
@@ -1647,33 +1636,35 @@ fn accept_jobs(
         .map(|label| Built {
             label,
             ambient: DEFAULT_AMBIENT,
+            skybox: None,
             cameras: Vec::new(),
             installed_shaders: false,
             declared_clouds: false,
             watch: Vec::new(),
+            instruments: Vec::new(),
         }),
-        StepScene::Artifact(scene) => build_artifact_scene(
+        StepScene::Artifact(path) => scene::spawn_document(
             &mut cache,
             &mut commands,
             &mut scene_assets.meshes,
-            &mut scene_assets.materials,
             &mut scene_assets.images,
-            &stars.0,
-            &mut scene_assets.atmo_materials,
-            &mut scene_assets.media,
-            &mut scene_assets.cloud_materials,
-            &mut scene_assets.surface_materials,
-            &tools,
-            scene,
-            step.cam,
+            &mut scene_assets.doc_materials,
+            &tools.assets,
+            &tools.root.0,
+            path,
         )
-        .map(|built| Built {
-            label: built.label,
-            ambient: built.ambient,
-            cameras: built.cameras,
-            installed_shaders: built.installed_shaders,
-            declared_clouds: built.declared_clouds,
-            watch: built.watch,
+        .map(|document| {
+            let skybox = scene::skybox_of(&document);
+            Built {
+                label: document.label,
+                ambient: document.ambient,
+                skybox,
+                cameras: document.cameras,
+                installed_shaders: document.installed_shaders,
+                declared_clouds: document.declared_clouds,
+                watch: document.watched,
+                instruments: document.instruments,
+            }
         }),
     };
     let built = match built {
@@ -1716,14 +1707,14 @@ fn accept_jobs(
         canvas.target = handle;
     }
 
-    let placements: Vec<(Transform, Option<planet::SheetCell>)> = match &sheet {
+    let placements: Vec<(Transform, Option<SheetCell>)> = match &sheet {
         Some(cameras) => cameras
             .iter()
             .enumerate()
             .map(|(index, camera)| {
                 (
-                    planet::camera_for(camera),
-                    Some(planet::SheetCell {
+                    scene::camera_for(camera),
+                    Some(SheetCell {
                         column: index as u32 % columns,
                         row: index as u32 / columns,
                         width: job.cell.0,
@@ -1732,22 +1723,16 @@ fn accept_jobs(
                 )
             })
             .collect(),
-        None => vec![(planet::probe_camera(step.cam), None)],
+        None => vec![(scene::probe_camera(step.cam), None)],
     };
     for (order, (transform, cell)) in placements.into_iter().enumerate() {
         let camera = commands
             .spawn((
                 ScenePart,
-                atmosphere::RequestCamera,
                 Camera3d::default(),
                 DepthPrepass,
                 Msaa::Off,
                 RenderTarget::Image(canvas.target.clone().into()),
-                Skybox {
-                    image: Some(stars.0.clone()),
-                    brightness: SKY_BRIGHTNESS,
-                    rotation: Quat::IDENTITY,
-                },
                 AmbientLight {
                     brightness: built.ambient,
                     ..default()
@@ -1755,6 +1740,9 @@ fn accept_jobs(
                 transform,
             ))
             .id();
+        if let Some(skybox) = &built.skybox {
+            commands.entity(camera).insert(skybox.clone());
+        }
         if let Some(cell) = cell {
             // 多相机共用一张 target：各自占一格视口，而且**只有第 0 台清屏**，
             // 否则后面的相机会把前面已经画好的格子擦掉。
@@ -1791,6 +1779,8 @@ fn accept_jobs(
         StepScene::World { .. } => "0".to_string(),
     };
     job.watched = built.watch;
+    // 窗口那一套键要改的就是它们（渲染器不认识这些参数是什么意思，只按名字与偏移改）。
+    instruments.0 = built.instruments;
     if built.installed_shaders {
         println!("这一步装了以前没见过的 shader 版本：它的管线要现编，等 `watch_pipelines` 重新置 READY");
     }
@@ -1847,18 +1837,19 @@ fn preload_step_shaders(
     };
     let spec = px_protocol::scene::read_scene(std::path::Path::new(path))?;
     let mut fresh = false;
-    for part in &spec.parts {
+    for object in &spec.objects {
         // 槽判定的错**留给装配那一步报**（口径只有一处）；这里只要决定"要不要先挂资产"。
-        let Ok(Some(file)) = slots::wgsl_for(&part.shader, part.members.contains_key("shader"))
-        else {
-            continue;
-        };
-        let member = part.member("shader")?;
+        let member = &object.material.shader;
         let key_path = member.resolve(&tools.root.0)?;
         let entry = cache.shader(&key_path.display().to_string())?;
         let version = slots::version_of(&member.key)?;
-        if slots::activate(&tools.assets, &file, version, &entry.value.source) {
-            println!("shader 槽 {file}：版本 {version:016x} 第一次见，先挂上，下一帧再建材质");
+        if slots::activate(
+            &tools.assets,
+            slots::MATERIAL,
+            version,
+            &entry.value.source,
+        ) {
+            println!("shader 槽：版本 {version:016x} 第一次见，先挂上，下一帧再建材质");
             fresh = true;
         }
     }
@@ -1926,452 +1917,23 @@ struct PcgRoot(PathBuf);
 #[derive(bevy::ecs::system::SystemParam)]
 struct SceneTools<'w> {
     assets: Res<'w, AssetServer>,
-    slots: Res<'w, slots::ShaderSlots>,
     root: Res<'w, PcgRoot>,
     /// 帧时间探针开着没有（`--fps`）：性能请求没有它就是在量 60 Hz 的上限。
     probe: Res<'w, FrameProbe>,
 }
 
 /// 搭一个场景要往里塞的那些资产。同样的理由打包（§ 上面那条）：
-/// 表面材质从 §39.6 阶段 3 起又多占一格，摊平就顶穿 16 元组。
+/// 通用渲染把"每样东西一个材质类型"变成"一个材质类型装所有东西"，
+/// 但几何、贴图、材质三张资产表还是要一起拿。
 #[derive(bevy::ecs::system::SystemParam)]
 struct SceneAssets<'w> {
     images: ResMut<'w, Assets<Image>>,
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
-    atmo_materials: ResMut<'w, Assets<atmosphere::AtmosphereMaterial>>,
-    cloud_materials: ResMut<'w, Assets<clouds::CloudsMaterial>>,
-    surface_materials: ResMut<'w, Assets<surface::SurfaceMaterial>>,
-    media: ResMut<'w, Assets<bevy::light::atmosphere::ScatteringMedium>>,
+    doc_materials: ResMut<'w, Assets<material::DocMaterial>>,
 }
 
 /// 场景装配的中间态：每个 kind 的装配器只填自己那一段。
-/// 结构上就不给「悄悄用个默认值」留位置 —— 缺什么由 `finish` 报出来。
-#[derive(Default)]
-struct SceneBuild {
-    body: Option<SceneBody>,
-    clouds: Option<SceneClouds>,
-    atmosphere: Option<atmosphere::AtmosphereSpec>,
-    /// 大气 part 给的壳内半径，只用来和行星半径对一对。
-    atmosphere_inner: Option<f64>,
-    /// 云那部分的消融档（渲染程序的哪个变体）。老场景没这个参数 ⇒ 缺省是「不消融」。
-    ablate: Option<clouds::Ablate>,
-    /// clouds part 钉的 WGSL 内容版本（0 = 没钉）。材质拿它当管线特化的键。
-    cloud_shader: u64,
-    /// atmosphere part 钉的 WGSL 内容版本（0 = 没钉）。
-    atmosphere_shader: u64,
-    /// planet part 钉的表面材质版本（0 = 没钉）。
-    surface_shader: u64,
-    /// 表面的云影强度（0 = 关）与它查云带的那一层「指定高度」；以及光源开不开阴影贴图。
-    cloud_shadow: f32,
-    shadow_height: f32,
-    light_shadows: bool,
-    /// 场景里那盏太阳（点光源，§60）。装配时算好，`finish` 原样搬进 `PlanetSpec`。
-    sun: planet::SunLightSpec,
-}
-
-struct SceneBody {
-    field: String,
-    mesh: String,
-    palette: planet::Palette,
-    displace: f32,
-    sea_level: f32,
-    radius: f32,
-    spin: f32,
-    rings: f32,
-}
-
-struct SceneClouds {
-    coverage: String,
-    slope: [String; 3],
-    /// 可选成员：代理几何。没写就 `None`（云照旧用 ico 球壳）。
-    proxy: Option<String>,
-    shell: (f32, f32),
-    extinction: f32,
-    shape: clouds::CloudShape,
-}
-
-/// 认识的 kind（装配器注册表）。列在这里的才能进 `assembler` 的分支。
-const KINDS: [&str; 3] = ["planet", "clouds", "atmosphere"];
-
-/// kind → 装配器。表外的 kind 大声报错（顺带列出认识的）：
-/// 默默跳过就等于让产物里的东西凭空消失。
-fn assembler(
-    kind: &str,
-) -> Option<fn(&Part, &std::path::Path, &mut SceneBuild) -> Result<(), String>> {
-    match kind {
-        "planet" => Some(assemble_planet),
-        "clouds" => Some(assemble_clouds),
-        "atmosphere" => Some(assemble_atmosphere),
-        _ => None,
-    }
-}
-
-fn member_at(part: &Part, role: &str, root: &std::path::Path) -> Result<String, String> {
-    Ok(part.member(role)?.resolve(root)?.display().to_string())
-}
-
-/// 可选成员：没写就 `None`，写了但取不到就报错 —— 道理同 `optional_number`。
-fn optional_member_at(
-    part: &Part,
-    role: &str,
-    root: &std::path::Path,
-) -> Result<Option<String>, String> {
-    match part.members.get(role) {
-        None => Ok(None),
-        Some(member) => Ok(Some(member.resolve(root)?.display().to_string())),
-    }
-}
-
-fn members_of(part: &Part) -> String {
-    if part.members.is_empty() {
-        return "（空）".to_string();
-    }
-    part.members.keys().cloned().collect::<Vec<_>>().join(" / ")
-}
-
-fn assemble_planet(
-    part: &Part,
-    root: &std::path::Path,
-    build: &mut SceneBuild,
-) -> Result<(), String> {
-    let name = part.text("palette")?;
-    let Some(palette) = planet::Palette::parse(name) else {
-        return Err(format!(
-            "part '{}' 参数 'palette' 是 '{name}'，认不出来；可用：{}",
-            part.id,
-            planet::Palette::NAMES.join(" / ")
-        ));
-    };
-    build.body = Some(SceneBody {
-        field: member_at(part, "height", root)?,
-        mesh: member_at(part, "mesh", root)?,
-        palette,
-        displace: part.number("displace")? as f32,
-        sea_level: part.number("sea_level")? as f32,
-        radius: part.number("radius")? as f32,
-        spin: part.number("spin")? as f32,
-        rings: part.number("rings")? as f32,
-    });
-    // 表面材质从 §39.6 阶段 3 起也是**内容**：`surface` 槽不再是内建材质，
-    // planet part 必须把真本带上（和云、大气同一个规矩）。
-    build.surface_shader = slots::version_of(&part.member("shader")?.key)?;
-    // 三个新旋钮都缺省成"老行为"：不开阴影贴图、不投云影 —— 现有场景的像素一个都不许变。
-    // 要软档那套外观的场景显式写它们（`art/scene/orbit-soft.toml`）。
-    build.light_shadows = optional_number(part, "shadows")?.unwrap_or(0.0) != 0.0;
-    build.cloud_shadow = optional_number(part, "cloud_shadow")?.unwrap_or(0.0) as f32;
-    build.shadow_height = optional_number(part, "shadow_height")?
-        .unwrap_or(f64::from(surface::CLOUD_SHADOW_HEIGHT))
-        as f32;
-    // 太阳那盏点光源（§60）：位置/颜色/强度缺省就是加这个特性之前那盏平行光的坐标与照度，
-    // 所以老场景一行不改。**灯是内容** —— 消融"多像点光源"就是换一组数（§60.4）。
-    let default_sun = planet::SunLightSpec::default();
-    build.sun = planet::SunLightSpec {
-        position: optional_triple(part, "light_position")?.unwrap_or(default_sun.position),
-        color: optional_triple(part, "light_color")?.unwrap_or(default_sun.color),
-        intensity: optional_number(part, "light_intensity")?.unwrap_or(f64::from(default_sun.intensity))
-            as f32,
-        shadows: build.light_shadows,
-    };
-    Ok(())
-}
-
-/// 可选的三元参数：没写就 `None`，写了但不是三个数就报错 —— 与 `optional_number` 同一口径。
-fn optional_triple(part: &Part, key: &str) -> Result<Option<[f32; 3]>, String> {
-    match part.params.get(key) {
-        None => Ok(None),
-        Some(px_protocol::scene::Value::Triple(value)) => Ok(Some(*value)),
-        Some(other) => Err(format!(
-            "part '{}' 参数 '{key}' 要三个数（[x, y, z]），实际是 {other:?}",
-            part.id
-        )),
-    }
-}
-
-/// 可选参数：没写就返回 `None`，写了但类型不对就报错 ——
-/// 「写错了」不许被当成「没写」。
-fn optional_number(part: &Part, key: &str) -> Result<Option<f64>, String> {
-    match part.params.get(key) {
-        None => Ok(None),
-        Some(px_protocol::scene::Value::Num(value)) => Ok(Some(*value)),
-        Some(other) => Err(format!(
-            "part '{}' 参数 '{key}' 要一个数，实际是 {other:?}",
-            part.id
-        )),
-    }
-}
-
-/// 云那部分的消融档：`ablate = "surface"` 这种。它是**内容**（渲染程序的哪个变体），
-/// 所以住在场景产物里，和「有没有 clouds part」是同一类东西。
-/// 老场景没有这个参数 ⇒ 缺省 `none`（行为不许变）；给了但不认识就大声报错。
-fn ablate_of(part: &Part) -> Result<clouds::Ablate, String> {
-    match part.params.get("ablate") {
-        None => Ok(clouds::Ablate::None),
-        Some(px_protocol::scene::Value::Text(name)) => clouds::Ablate::parse(name)
-            .map_err(|err| format!("part '{}'：{err}", part.id)),
-        Some(other) => Err(format!(
-            "part '{}' 参数 'ablate' 要一段文本（消融档名），实际是 {other:?}",
-            part.id
-        )),
-    }
-}
-
-fn assemble_clouds(
-    part: &Part,
-    root: &std::path::Path,
-    build: &mut SceneBuild,
-) -> Result<(), String> {
-    build.ablate = Some(ablate_of(part)?);
-    // 这一档钉的是哪一份 WGSL：内容是唯一来源，版本号就是那个成员的内容键。
-    build.cloud_shader = slots::version_of(&part.member("shader")?.key)?;
-    build.clouds = Some(SceneClouds {
-        coverage: member_at(part, "field", root)?,
-        slope: [
-            member_at(part, "slope_x", root)?,
-            member_at(part, "slope_y", root)?,
-            member_at(part, "slope_z", root)?,
-        ],
-        // 代理几何是可选的：有它就把云的几何换成它，没有就照旧球壳。
-        proxy: optional_member_at(part, "proxy", root)?,
-        shell: (part.number("inner")? as f32, part.number("outer")? as f32),
-        extinction: part.number("extinction")? as f32,
-        shape: clouds::CloudShape {
-            coverage: part.number("coverage")? as f32,
-            base: part.number("base")? as f32,
-            top: part.number("top")? as f32,
-            detail_scale: part.number("detail_scale")? as f32,
-            detail_strength: part.number("detail_strength")? as f32,
-            erode: part.number("erode")? as f32,
-            phase: part.number("phase")? as f32,
-            shadow: part.number("shadow")? as f32,
-            steps: part.integer("steps")?,
-            bump: part.number("bump")? as f32,
-            seed: part.integer("seed")?,
-            slope_scale: part.number("slope_scale")? as f32,
-            taper: part.number("taper")? as f32,
-            coverage_gain: part.number("coverage_gain")? as f32,
-            // 硬表面那两条路的阈值：老场景没写 ⇒ 用以前写死在 WGSL 里的 0.20。
-            surface_level: optional_number(part, "surface_level")?
-                .unwrap_or_else(|| f64::from(clouds::CloudShape::default().surface_level))
-                as f32,
-            // 保守上界早退的开关：老场景没写 ⇒ 0（关），像素与以前逐位相同。
-            bound: optional_number(part, "bound")?.unwrap_or(0.0) as u32,
-            // 解析梯度的开关：老场景没写 ⇒ 1（算），就是老路写死的行为。
-            gradient: optional_number(part, "gradient")?
-                .unwrap_or_else(|| f64::from(clouds::CloudShape::default().gradient))
-                as u32,
-            // 细节风（§61）：老场景没写 ⇒ 0（不动）⇒ 像素与以前逐位相同。
-            wind: optional_number(part, "wind")?.unwrap_or(0.0) as f32,
-            wind_skin: optional_number(part, "wind_skin")?.unwrap_or(0.0) as f32,
-        },
-    });
-    Ok(())
-}
-
-fn assemble_atmosphere(
-    part: &Part,
-    _root: &std::path::Path,
-    build: &mut SceneBuild,
-) -> Result<(), String> {
-    // 壳内半径在渲染器里恒等于行星半径（`AtmosphereParams.inner`），
-    // 所以产物给的那一个只能用来对账 —— 对不上说明这份场景自相矛盾。
-    build.atmosphere_inner = Some(part.number("inner")?);
-    build.atmosphere_shader = slots::version_of(&part.member("shader")?.key)?;
-    build.atmosphere = Some(atmosphere::AtmosphereSpec {
-        outer: part.number("outer")? as f32,
-        density: part.number("density")? as f32,
-        softness: part.number("softness")? as f32,
-        tint: part.triple("tint")?,
-    });
-    Ok(())
-}
-
-impl SceneBuild {
-    /// 拼成一个 `PlanetSpec`，顺带回云的消光。
-    fn finish(self) -> Result<(planet::PlanetSpec, f32), String> {
-        let Some(body) = self.body else {
-            return Err(format!(
-                "场景里没有 kind planet 的 part：主体（height / mesh / palette / …）全在它身上；\
-                 这份渲染器认：{}",
-                KINDS.join(" / ")
-            ));
-        };
-        if let Some(inner) = self.atmosphere_inner
-            && (inner - f64::from(body.radius)).abs() > 1e-3
-        {
-            return Err(format!(
-                "大气 part 的 'inner' 是 {inner}，而行星半径是 {}：大气壳的内半径就是行星半径，\
-                 这两个对不上",
-                body.radius
-            ));
-        }
-        // 没有 clouds part 时这两个值没人看（`spawn_clouds` 根本不会被叫到）。
-        let (clouds, slope, proxy, cloud_shell, cloud_shape, extinction) = match self.clouds {
-            Some(clouds) => (
-                Some(clouds.coverage),
-                Some(clouds.slope),
-                clouds.proxy,
-                clouds.shell,
-                clouds.shape,
-                clouds.extinction,
-            ),
-            None => (
-                None,
-                None,
-                None,
-                (clouds::CLOUD_BASE, clouds::CLOUD_TOP),
-                clouds::CloudShape::default(),
-                0.0,
-            ),
-        };
-        Ok((
-            planet::PlanetSpec {
-                field: body.field,
-                mesh: Some(body.mesh),
-                clouds,
-                slope,
-                proxy,
-                cloud_shell,
-                cloud_shape,
-                cloud_shader: self.cloud_shader,
-                atmosphere_shader: self.atmosphere_shader,
-                surface_shader: self.surface_shader,
-                cloud_shadow: self.cloud_shadow,
-                shadow_height: self.shadow_height,
-                sun: self.sun,
-                atmosphere: self.atmosphere,
-                palette: body.palette,
-                displace: body.displace,
-                sea_level: body.sea_level,
-                radius: body.radius,
-                spin: body.spin,
-                rings: body.rings,
-                // 「大气强度倍率」以前是命令行的 `--atmo`；它随内容型开关一起没了，
-                // 「有没有大气」由 `atmosphere: Option<..>` 说了算。
-                atmo: 1.0,
-                ablate: self.ablate.unwrap_or(clouds::Ablate::None),
-            },
-            extinction,
-        ))
-    }
-}
-
-/// 一份场景产物 → 一个搭好的星球场景。两步次序不能换：材质建起来的时候槽里就得是真本，
-/// 否则这一帧画的是占位（洋红 = 没装上）。
-///
-/// ⚠ P30 起"装 shader"不再往同一个 asset 上 `reload`：每个内容版本有**自己的槽路径**
-/// （`slots://clouds.<版本>.wgsl`），装 = 写一份新文件 + `load` 一个新资产。见 `slots.rs`。
-///
-/// `cameras` 是产物自带的相机表（对照图用）——它住在 `.pxart` 里，不是命令行的东西。
-fn build_artifact_scene(
-    cache: &mut art_cache::ArtCache,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    stars: &Handle<Image>,
-    atmo_materials: &mut Assets<atmosphere::AtmosphereMaterial>,
-    media: &mut Assets<bevy::light::atmosphere::ScatteringMedium>,
-    cloud_materials: &mut Assets<clouds::CloudsMaterial>,
-    surface_materials: &mut Assets<surface::SurfaceMaterial>,
-    tools: &SceneTools,
-    scene: &str,
-    cam: Option<[f32; 3]>,
-) -> Result<ArtifactScene, String> {
-    let spec = px_protocol::scene::read_scene(std::path::Path::new(scene))?;
-    spec.check()?;
-
-    let mut installed_shaders = false;
-    // 这一步往槽里装/引用的 shader 句柄。等"资产装完"看的就是它们 ——
-    // 场景内容是**同步** add 进来的，所以只有槽里的 shader 真的在 `AssetServer` 里挂过号。
-    let mut watch: Vec<Handle<Shader>> = Vec::new();
-    for part in &spec.parts {
-        let installed = match slots::wgsl_for(&part.shader, part.members.contains_key("shader")) {
-            Ok(installed) => installed,
-            Err(err) => {
-                return Err(format!(
-                    "part '{}'（kind {}）：{err}；这份有成员：{}",
-                    part.id,
-                    part.kind,
-                    members_of(part)
-                ));
-            }
-        };
-        let Some(file) = installed else {
-            continue;
-        };
-        let path = part.member("shader")?.resolve(&tools.root.0)?;
-        let entry = cache.shader(&path.display().to_string())?;
-        // 版本 = 那个成员的内容键（键 = 内容，§17.1）。同一版永远映射到同一条槽路径。
-        let version = slots::version_of(&part.member("shader")?.key)?;
-        let had = tools.slots.peek_version(&file);
-        let fresh = slots::activate(&tools.assets, &file, version, &entry.value.source);
-        println!(
-            "shader 槽 {file} → {}：{} 字节（{}）｜版本 {:016x}｜{}",
-            slots::version_file(&file, version),
-            entry.value.source.len(),
-            if entry.hit { "缓存命中" } else { "现读产物" },
-            version,
-            match (fresh, had) {
-                (false, _) => "这一版已经在养，零动作（不 reload ⇒ 管线不重编）",
-                (true, Some(old)) if old != version => "第一次见这一版，装进槽（两版各自留管线）",
-                (true, _) => "第一次见这一版，装进槽（管线要现编）",
-            }
-        );
-        if fresh {
-            installed_shaders = true;
-        }
-        if let Some(handle) = slots::version_handle(&file, version) {
-            watch.push(handle);
-        }
-    }
-
-    let mut build = SceneBuild::default();
-    for part in &spec.parts {
-        let Some(assemble) = assembler(&part.kind) else {
-            return Err(format!(
-                "part '{}' 的 kind '{}' 不认识；这份渲染器认：{}",
-                part.id,
-                part.kind,
-                KINDS.join(" / ")
-            ));
-        };
-        assemble(part, &tools.root.0, &mut build)?;
-    }
-    let (planet_spec, extinction) = build.finish()?;
-    // 材质就是拿它建的（`spawn_clouds`），窗口那边也得拿同一个数摆 `CloudView`。
-    let ablate = planet_spec.ablate;
-
-    let label = planet::spawn_planet(
-        cache,
-        commands,
-        meshes,
-        materials,
-        images,
-        stars,
-        atmo_materials,
-        media,
-        cloud_materials,
-        surface_materials,
-        // 「用 Bevy 那套散射大气」以前是命令行的 `--scatter`；内容型开关删掉之后
-        // 只剩产物这一条路（`atmosphere` part），所以这里恒为 None。
-        None,
-        planet::probe_camera(cam),
-        &planet_spec,
-        extinction,
-    )?;
-    println!("{}", spec.audit());
-    Ok(ArtifactScene {
-        label: format!("场景 {}｜{label}", spec.name),
-        ambient: spec.ambient,
-        cameras: spec.cameras.clone(),
-        installed_shaders,
-        declared_clouds: spec.parts.iter().any(|part| part.kind == "clouds"),
-        ablate,
-        watch,
-    })
-}
-
 fn build_world_scene(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2567,96 +2129,109 @@ struct FpsReadout;
 #[derive(Resource, Clone, Copy)]
 struct ShowFps(bool);
 
-/// 当前生效的云视图：内容由产物决定（启动与每次重建由 `rebuild_scene` 按产物写一遍），
-/// `v/m/n` 只是临时覆盖。它**不是**命令行的初值 —— 命令行那份初值已经随 `--cloud-ablate` 删了。
-#[derive(Resource, Clone, Copy)]
-struct CloudView(clouds::Ablate);
+/// 产物里那个可以被窗口现场改的整数参数叫什么。**渲染器不认识它是什么意思** ——
+/// 云拿它当消融档（`clouds.wgsl` 的 `ABLATE_*`），换个 shader 拿它当别的都行。
+/// 只有"照名字改那一格"这条路是渲染器提供的（`scene::Instrument` 记了在哪份材质的第几字节）。
+const INSTRUMENT_PARAM: &str = "ablate";
+/// 三个键对应的档位码。它们是**那份 shader 定的**（`clouds.wgsl`：0 = 体积、5 = 硬表面、6 = 法线）。
+const INSTRUMENT_HEAVY: u32 = 0;
+const INSTRUMENT_SURFACE: u32 = 5;
+const INSTRUMENT_NORMALS: u32 = 6;
 
-impl Default for CloudView {
-    fn default() -> Self {
-        Self(clouds::Ablate::None)
-    }
-}
-
-/// 「用户刚按了 v/m/n」这件事，单独记成一次性请求：只认 `CloudView` 的 `Changed` 不行 ——
-/// 构建期插入的资源第一次 run 也算 changed，那会让窗口一开就被 `None` 顶掉产物里的 `surface`。
+/// 这一步搭出来的可改参数（重建时按新产物换一份）。
 #[derive(Resource, Default)]
-struct CloudViewKey(Option<clouds::Ablate>);
+struct SceneInstruments(Vec<scene::Instrument>);
 
-fn cloud_view_keys(keys: Res<ButtonInput<KeyCode>>, mut requested: ResMut<CloudViewKey>) {
+/// 窗口现场生效的那一档。`None` = 跟着产物走（还没被键覆盖过）。
+/// 它**不是**命令行的初值 —— 命令行那份已经随 `--cloud-ablate` 删了。
+#[derive(Resource, Default, Clone, Copy)]
+struct InstrumentView(Option<u32>);
+
+/// 「用户刚按了 v/m/n」这件事单独记成一次性请求：只认资源 `Changed` 不行 ——
+/// 构建期插入的资源第一次 run 也算 changed，那会让窗口一开就被默认值顶掉产物里的档。
+#[derive(Resource, Default)]
+struct InstrumentKey(Option<u32>);
+
+fn instrument_keys(keys: Res<ButtonInput<KeyCode>>, mut requested: ResMut<InstrumentKey>) {
     let wanted = if keys.just_pressed(KeyCode::KeyV) {
-        Some(clouds::Ablate::None)
+        Some(INSTRUMENT_HEAVY)
     } else if keys.just_pressed(KeyCode::KeyM) {
-        Some(clouds::Ablate::Surface)
+        Some(INSTRUMENT_SURFACE)
     } else if keys.just_pressed(KeyCode::KeyN) {
-        Some(clouds::Ablate::Normals)
+        Some(INSTRUMENT_NORMALS)
     } else {
         None
     };
     if let Some(wanted) = wanted {
         requested.0 = Some(wanted);
-        println!("云视图切到：{}", clouds::describe(wanted));
+        println!("仪器档切到：{wanted}");
     }
 }
 
 /// 临时覆盖只在**真按了键的那一帧**动手：请求取走就没有了，不和产物抢。
-fn apply_cloud_view(
-    mut requested: ResMut<CloudViewKey>,
-    mut view: ResMut<CloudView>,
-    mut materials: ResMut<Assets<clouds::CloudsMaterial>>,
-    shells: Query<&MeshMaterial3d<clouds::CloudsMaterial>>,
+fn apply_instrument(
+    mut requested: ResMut<InstrumentKey>,
+    mut view: ResMut<InstrumentView>,
+    instruments: Res<SceneInstruments>,
+    mut materials: ResMut<Assets<material::DocMaterial>>,
 ) {
-    let Some(wanted) = requested.0.take() else {
+    let Some(code) = requested.0.take() else {
         return;
     };
-    view.0 = wanted;
-    let code = wanted.code();
+    view.0 = Some(code);
     let mut touched = 0;
-    for handle in shells.iter() {
-        let stale = materials
-            .get(&handle.0)
-            .map(|material| material.params.ablate != code)
-            .unwrap_or(false);
-        if stale && let Some(mut material) = materials.get_mut(&handle.0) {
-            material.params.ablate = code;
-            touched += 1;
-        }
+    for instrument in instruments.0.iter().filter(|item| item.param == INSTRUMENT_PARAM) {
+        let Some(mut material) = materials.get_mut(&instrument.material) else {
+            continue;
+        };
+        let at = instrument.offset as usize;
+        let Some(cell) = material.params.get_mut(at..at + 4) else {
+            eprintln!(
+                "⚠ 仪器参数 '{}' 落在第 {at} 字节，超出参数块（{} 字节）",
+                instrument.param,
+                material.params.len()
+            );
+            continue;
+        };
+        cell.copy_from_slice(&code.to_le_bytes());
+        touched += 1;
     }
-    println!(
-        "应用云视图覆盖：{}（改了 {touched} 个云壳）",
-        clouds::describe(wanted)
-    );
+    println!("应用仪器档 {code}（改了 {touched} 份材质）");
 }
 
-/// 重建之后 `CloudView` 必须与材质同码：不同码就是「按一下键弹回上一份产物」那条缝又开了。
-/// 只在状态变化时报一行，不刷屏。
-fn check_cloud_view_matches(
-    view: Res<CloudView>,
-    materials: Res<Assets<clouds::CloudsMaterial>>,
-    shells: Query<&MeshMaterial3d<clouds::CloudsMaterial>>,
-    mut reported: Local<Option<(u32, u32)>>,
+/// 重建之后窗口那一档必须与材质里那一格同码：不同码就是「按一下键弹回上一份产物」那条缝
+/// 又开了。只在状态变化时报一行，不刷屏。
+fn check_instrument_matches(
+    view: Res<InstrumentView>,
+    instruments: Res<SceneInstruments>,
+    materials: Res<Assets<material::DocMaterial>>,
+    mut reported: Local<Option<(Option<u32>, u32)>>,
 ) {
-    let Some(actual) = shells
+    let Some(instrument) = instruments
+        .0
         .iter()
-        .next()
-        .and_then(|handle| materials.get(&handle.0))
-        .map(|material| material.params.ablate)
+        .find(|item| item.param == INSTRUMENT_PARAM)
     else {
         return;
     };
-    let state = (view.0.code(), actual);
+    let Some(material) = materials.get(&instrument.material) else {
+        return;
+    };
+    let at = instrument.offset as usize;
+    let Some(cell) = material.params.get(at..at + 4) else {
+        return;
+    };
+    let actual = u32::from_le_bytes([cell[0], cell[1], cell[2], cell[3]]);
+    let state = (view.0, actual);
     if *reported == Some(state) {
         return;
     }
     *reported = Some(state);
-    if actual == view.0.code() {
-        println!("云视图与材质一致：{}（码 {actual}）", clouds::describe(view.0));
-    } else {
-        eprintln!(
-            "⚠ 云视图与材质不一致：CloudView {}（码 {}）vs 材质码 {actual}",
-            clouds::describe(view.0),
-            view.0.code()
-        );
+    match view.0 {
+        Some(code) if code != actual => eprintln!(
+            "⚠ 仪器档与材质不一致：窗口 {code}（码 {actual}）—— 这一格被别的东西改过"
+        ),
+        _ => println!("仪器档与材质一致：码 {actual}"),
     }
 }
 
@@ -3429,7 +3004,6 @@ fn build_stable_report(label: &str, scene: &str, key: &str, gather: StableGather
 }
 
 const DEFAULT_AMBIENT: f32 = 80.0;
-const SKY_BRIGHTNESS: f32 = 900.0;
 const FRAME_PROBE_WINDOW: u32 = 120;
 const FPS_REFRESH_FRAMES: u32 = 10;
 const FPS_WORST_FRAMES: u32 = 120;
@@ -3660,9 +3234,7 @@ fn view(options: Options) -> Result<(), String> {
             })
             .set(render_plugin()),
     )
-    .add_plugins(atmosphere::AtmospherePlugin)
-    .add_plugins(clouds::CloudsPlugin)
-    .add_plugins(surface::SurfacePlugin)
+    .add_plugins(material::DocMaterialPlugin)
     .add_plugins(shaders::ShaderLibraryPlugin)
     .insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
     .insert_resource(PcgRoot(options.pcg_root.clone()))
@@ -3684,8 +3256,9 @@ fn view(options: Options) -> Result<(), String> {
     .init_resource::<art_cache::ArtCache>()
     .insert_resource(FrameProbe(options.fps))
     .insert_resource(ShowFps(true))
-    .init_resource::<CloudView>()
-    .init_resource::<CloudViewKey>()
+    .init_resource::<InstrumentView>()
+    .init_resource::<InstrumentKey>()
+    .init_resource::<SceneInstruments>()
     .init_resource::<ShotStats>()
     .init_resource::<GpuLog>()
     // `report_frame_time` 会去看"有没有正在收窗口的任务"（`Active`），预览窗口没有任务但那
@@ -3711,16 +3284,16 @@ fn view(options: Options) -> Result<(), String> {
             update_title,
             report_frame_time,
             update_fps_readout,
-            cloud_view_keys,
-            apply_cloud_view,
-            check_cloud_view_matches,
+            instrument_keys,
+            apply_instrument,
+            check_instrument_matches,
         )
             .chain(),
     );
 
     println!("预览窗口已开：左键拖动转视角、滚轮缩放；场景产物一换（键变了）就重建");
     println!("  空格 自转｜f 帧率开关｜s 存图｜q 退出");
-    println!("  v 体积云｜m 硬表面（场的梯度当法线）｜n 法线可视化 —— 三个键随时来回切，不用重开");
+    println!("  v/m/n 切产物里那个仪器参数（云拿它当消融档：体积 / 硬表面 / 法线）—— 随时来回切，不用重开");
     println!("  推一份新场景进来：px_render --show --scene <SCENE.pxart> [--shot]");
 
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -3734,19 +3307,14 @@ fn view(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn view_startup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let stars = images.add(planet::star_cube(512));
-    commands.insert_resource(Stars(stars.clone()));
+fn view_startup(mut commands: Commands) {
+    // 天空盒与灯都**由产物决定**：窗口起来时还没有场景，所以这里一个都不摆 ——
+    // 第一份场景重建时才把天空盒与环境光按产物挂上（`rebuild_scene`）。
     commands.spawn((
         OrbitCamera,
         Camera3d::default(),
         DepthPrepass,
         Msaa::Off,
-        Skybox {
-            image: Some(stars),
-            brightness: SKY_BRIGHTNESS,
-            rotation: Quat::IDENTITY,
-        },
         AmbientLight {
             brightness: DEFAULT_AMBIENT,
             ..default()
@@ -3946,17 +3514,14 @@ fn poll_scene(mut viewer: ResMut<Viewer>, mut rebuild: ResMut<Rebuild>, mut tick
 fn rebuild_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    mut atmo_materials: ResMut<Assets<atmosphere::AtmosphereMaterial>>,
-    mut clouds_materials: ResMut<Assets<clouds::CloudsMaterial>>,
-    mut surface_materials: ResMut<Assets<surface::SurfaceMaterial>>,
-    mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
+    mut doc_materials: ResMut<Assets<material::DocMaterial>>,
     mut cache: ResMut<art_cache::ArtCache>,
-    stars: Res<Stars>,
     viewer: Res<Viewer>,
     mut rebuild: ResMut<Rebuild>,
-    mut view: ResMut<CloudView>,
+    mut instruments: ResMut<SceneInstruments>,
+    mut view: ResMut<InstrumentView>,
+    camera: Query<(Entity, Option<&Skybox>), With<Camera3d>>,
     parts: Query<Entity, With<ScenePart>>,
     tools: SceneTools,
 ) {
@@ -3983,26 +3548,34 @@ fn rebuild_scene(
     for entity in parts.iter() {
         commands.entity(entity).despawn();
     }
-    match build_artifact_scene(
+    match scene::spawn_document(
         &mut cache,
         &mut commands,
         &mut meshes,
-        &mut materials,
         &mut images,
-        &stars.0,
-        &mut atmo_materials,
-        &mut media,
-        &mut clouds_materials,
-        &mut surface_materials,
-        &tools,
+        &mut doc_materials,
+        &tools.assets,
+        &tools.root.0,
         &viewer.scene,
-        None,
     ) {
-        Ok(scene) => {
-            // 初值跟着新产物走：重建不吞临时覆盖，也不让上一份产物的话留到这一份上。
-            view.0 = scene.ablate;
-            println!("{}", scene.label);
-            println!("云视图 ← 产物：{}", clouds::describe(scene.ablate));
+        Ok(built) => {
+            // 环境只换"挂在相机上"的那一样：天空盒按新产物换（没有就摘掉）。
+            // 相机的**位置与朝向是用户拖着**的，重建一根手指都不许碰 —— 窗口的轨道相机
+            // 是唯一的"怎么看"状态（§64 那条方法论：漂移过的相机量出来的数全部作废）。
+            let skybox = scene::skybox_of(&built);
+            for (entity, _) in camera.iter() {
+                match &skybox {
+                    Some(wanted) => {
+                        commands.entity(entity).insert(wanted.clone());
+                    }
+                    None => {
+                        commands.entity(entity).remove::<Skybox>();
+                    }
+                }
+            }
+            instruments.0 = built.instruments.clone();
+            view.0 = None;
+            println!("{}", built.label);
             println!("{}", cache.sweep());
         }
         Err(message) => eprintln!("重建场景失败：{message}"),
@@ -4030,17 +3603,41 @@ fn update_title(viewer: Res<Viewer>, mut windows: Query<&mut Window, With<Primar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use px_protocol::scene::SceneSpec;
 
-    /// 报错里列的那几个 kind 必须真有装配器，表外的名字一个都不许认 ——
-    /// 默默放行就等于让场景产物里的东西凭空消失。
+    /// **文档引用的成员一个都不能少**：几何、shader 都在 `members()` 里 ——
+    /// 少一个就是"场景要的东西没人去取"（缓存与 diff 也按这张表走）。
     #[test]
-    fn every_kind_in_the_error_message_has_an_assembler_and_nothing_else_does() {
-        for kind in KINDS {
-            assert!(assembler(kind).is_some(), "KINDS 里有 {kind}，注册表里没有");
-        }
-        assert!(assembler("cloudz").is_none());
-        assert!(assembler("surface").is_none());
-        assert!(assembler("").is_none());
+    fn a_document_declares_every_member_it_needs() {
+        let member = |node: &str| px_protocol::Member::new("generated", node, &"a".repeat(64));
+        let document = SceneSpec {
+            schema: px_protocol::SCENE_SCHEMA,
+            name: "夹具".to_string(),
+            environment: px_protocol::Environment {
+                ambient: 80.0,
+                skybox: Some(member("stars")),
+                skybox_brightness: 900.0,
+            },
+            cameras: Vec::new(),
+            expects: vec!["clouds".to_string()],
+            lights: vec![px_protocol::Light::point("sun", [1.0, 2.0, 3.0], [1.0; 3], 1.0)],
+            objects: vec![px_protocol::Object {
+                id: "云".to_string(),
+                geometry: px_protocol::Geometry::mesh(member("shell")),
+                material: px_protocol::Material::new(member("clouds"))
+                    .with_texture("coverage", px_protocol::TextureRef::new(5, member("coverage"), Default::default())),
+                transform: px_protocol::Transform::default(),
+                cast_shadow: false,
+            }],
+        };
+        document.check().expect("这份文档是成形的");
+        let names: Vec<String> = document
+            .members()
+            .iter()
+            .map(|entry| entry.node.clone())
+            .collect();
+        assert_eq!(names, vec!["shell", "clouds", "coverage", "stars"]);
+        assert!(document.expects.iter().any(|tag| tag == "clouds"));
     }
 
     /// 失败明细是「**当前这一批**失败」的读数：置上去就带着原因，同一轮里后来的不覆盖
@@ -4081,50 +3678,62 @@ mod tests {
     }
 
     /// 构建期插入的资源**第一次 run 也算 changed**（`FunctionSystem::initialize` 把 `last_run`
-    /// 摆到相对 `Tick::MAX` 的位置）—— 窗口「一开就变体积云」正是踩了这个。
-    /// 产物说 surface 的材质，没人按键时一个字节都不许动；真按了键才临时覆盖。
+    /// 摆到相对 `Tick::MAX` 的位置）—— 窗口「一开就换档」正是踩了这个。
+    /// 产物里那一格是什么，没人按键时一个字节都不许动；真按了键才临时覆盖。
     #[test]
-    fn cloud_view_only_overrides_after_a_key_request() {
+    fn the_instrument_only_overrides_after_a_key_request() {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut world = World::new();
-        world.insert_resource(Assets::<clouds::CloudsMaterial>::default());
-        world.insert_resource(CloudView::default());
-        world.init_resource::<CloudViewKey>();
+        world.insert_resource(Assets::<material::DocMaterial>::default());
+        world.insert_resource(InstrumentView::default());
+        world.init_resource::<InstrumentKey>();
+        world.init_resource::<SceneInstruments>();
 
         let handle = {
-            let mut materials = world.resource_mut::<Assets<clouds::CloudsMaterial>>();
-            let handle = materials.add(clouds::CloudsMaterial {
-                params: clouds::CloudParams::new(1.01, 1.06, 900.0),
-                coverage: None,
+            let mut materials = world.resource_mut::<Assets<material::DocMaterial>>();
+            let mut params = vec![0_u8; 32];
+            // 产物给的那一档：硬表面（5）。
+            params[16..20].copy_from_slice(&INSTRUMENT_SURFACE.to_le_bytes());
+            materials.add(material::DocMaterial {
+                params,
+                textures: Vec::new(),
+                alpha: AlphaMode::Opaque,
+                cull: px_protocol::scene::CullMode::Back,
+                depth_bias: 0.0,
                 shader: 0,
-            });
-            // 材质是 `spawn_clouds` 拿产物建的：产物说 surface。
-            materials.get_mut(&handle).unwrap().params.ablate = clouds::Ablate::Surface.code();
-            handle
+            })
         };
-        world.spawn(MeshMaterial3d(handle.clone()));
+        world.resource_mut::<SceneInstruments>().0 = vec![scene::Instrument {
+            material: handle.clone(),
+            param: INSTRUMENT_PARAM.to_string(),
+            offset: 16,
+        }];
 
-        let ablate = |world: &World, handle: &Handle<clouds::CloudsMaterial>| {
-            world
-                .resource::<Assets<clouds::CloudsMaterial>>()
+        let code = |world: &World, handle: &Handle<material::DocMaterial>| {
+            let material = world
+                .resource::<Assets<material::DocMaterial>>()
                 .get(handle)
-                .unwrap()
-                .params
-                .ablate
+                .unwrap();
+            u32::from_le_bytes([
+                material.params[16],
+                material.params[17],
+                material.params[18],
+                material.params[19],
+            ])
         };
 
-        world.run_system_once(apply_cloud_view).unwrap();
+        world.run_system_once(apply_instrument).unwrap();
         assert_eq!(
-            ablate(&world, &handle),
-            clouds::Ablate::Surface.code(),
+            code(&world, &handle),
+            INSTRUMENT_SURFACE,
             "没有按键请求就不该动产物给的材质"
         );
 
-        world.resource_mut::<CloudViewKey>().0 = Some(clouds::Ablate::Normals);
-        world.run_system_once(apply_cloud_view).unwrap();
-        assert_eq!(ablate(&world, &handle), clouds::Ablate::Normals.code());
-        assert_eq!(world.resource::<CloudView>().0, clouds::Ablate::Normals);
+        world.resource_mut::<InstrumentKey>().0 = Some(INSTRUMENT_NORMALS);
+        world.run_system_once(apply_instrument).unwrap();
+        assert_eq!(code(&world, &handle), INSTRUMENT_NORMALS);
+        assert_eq!(world.resource::<InstrumentView>().0, Some(INSTRUMENT_NORMALS));
     }
 }
 

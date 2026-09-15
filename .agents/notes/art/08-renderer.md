@@ -265,3 +265,130 @@ naga_oil 忽略；顶部 `#import "definitely-missing.wgsl"` 居然照样编过�
 `Loading` 永不落地时会无限等）；它现在被 `pipeline_gate` 的资产检查盖住同一批句柄，但那条路
 本身没改。viewer（`--view` / `--show`）没接这道闸。
 
+
+---
+
+## §65 通用渲染：渲染器只认产物，不认行星（2026-09-15）
+
+**病**：`pcg → render` 那条路一直叫"内容由产物决定"，但产物说的其实是**参数**，渲染器仍然
+认识"行星 / 云 / 大气"三件套 —— `KINDS = ["planet","clouds","atmosphere"]` + `assembler(kind)`
++ `PlanetSpec` + `spawn_planet`。代价是每加一种东西就要在渲染器里加一个分支、一份材质类型、
+一个槽名：**渲染器的形状被内容拽着走**。这一轮把它倒过来。
+
+**新形状**：一份 `.pxart` 就是一份**渲染文档**（`px_protocol::scene` v2，`SCENE_SCHEMA = 2`）：
+
+| 文档里有什么 | 渲染器拿它做什么 |
+|---|---|
+| `objects[]`：几何（`mesh` 产物 或 内建图元）+ 材质 + 世界系变换 + 投不投影 | 建实体，一样一个 |
+| `material.shader`：一份 WGSL 产物 | **反射**出它的绑定契约，装进唯一的那个 shader 槽 |
+| `material.params`：按**名字**给的数 | 按那份 WGSL **自己声明的结构体**打包（偏移从 naga 读） |
+| `material.textures`：按**绑定下标**给的贴图产物 + 采样器 | 绑到那一格（采样器跟图一起走） |
+| `material.alpha / cull / depth_bias` | 三条渲染状态 |
+| `lights[]` | 点 / 聚 / 平行各一盏实体（位置、色、强度、射程、开不开影全是数） |
+| `environment`：环境光 + 天空盒（cube 贴图产物）+ 亮度 | 相机上的 `AmbientLight` / `Skybox` |
+| `cameras[]`：**世界系**方向 + 距离 | `--sheet` 那 12 格视口 |
+| `expects[]`：内容声明的期望标签（如 `clouds`） | 只当字符串转给报告（判据用），渲染器不认识它 |
+
+**绑定约定**（`px_render::reflect` 的表，也是全部契约）：
+
+```
+第 0 格  uniform  参数块（结构体由这份 WGSL 自己声明）
+1 / 2    texture_2d<f32> / sampler      ← 第 1 格那张 2D
+3 / 4    texture_2d<f32> / sampler      ← 第 3 格那张 2D
+5 / 6    texture_cube<f32> / sampler    ← 第 5 格那张 cube
+7 / 8    texture_cube<f32> / sampler    ← 第 7 格那张 cube
+```
+
+**为什么布局必须是固定超集**：Bevy 每种材质类型只建**一份**绑定布局（
+`Material::fragment_shader()` 是静态函数），而产物能决定的只有槽里的源码。于是布局写成
+"参数块 + 4 格贴图（各带采样器）"的**超集**，空着的格一律绑兜底贴图；参数块那一格
+`min_binding_size: None`，每个材质各自建缓冲。**代价**：多绑 6 个空格（实测无代价，
+42→51 条管线、出图时间同量级）；**收益**：换 shader 不动布局，一版 WGSL = 一条管线。
+
+**参数为什么是反射的**：产物给的是"名字 → 数"，而"名字在缓冲的第几个字节、是什么类型"
+只有那份 WGSL 知道。写第二张 Rust 表就是第二个会漂开的默认值 ⇒ 用 naga 读它自己声明的
+结构体（`reflect.rs`）。三档当场报错、不静默：**缺参 / 多参 / 类型不符**。反射结果按
+（内容版本, 库指纹）缓存 —— 键 = 内容，同一版永远反射出同一份契约。
+
+**搬走了什么**（这是这一轮的主体）：
+
+| 原来在渲染器里 | 现在在哪 |
+|---|---|
+| `planet.rs` / `clouds.rs` / `surface.rs` / `atmosphere.rs`（四个材质 + 生成器 + spawn） | **删掉** |
+| 色板 → 颜色/发光贴图（含整条 mip 链、极点滤波） | `px_ops::generate::surface_color`（逐字节相同） |
+| 覆盖度 RGBA16F 立方图 | `px_ops::generate::coverage_cube`（逐字节相同） |
+| 星空立方图 / 环带贴图 / 环网格 | `px_ops::generate::{stars, ring_band, ring_mesh}`（逐字节相同） |
+| `KINDS` / `assembler` / `SceneBuild` / `PlanetSpec` / `spawn_planet` | **删掉**；语义搬到 `px_graphs --bin scene`（配方 → 文档） |
+| `SYSTEM_TILT`（相机与物体的倾斜） | 烘图侧：文档里的方向与朝向**都是世界系**的 |
+| `SUN_RANGE_FACTOR` / 天空盒亮度 / 云影 gain | 烘图侧（写进文档的数） |
+| 三个槽（clouds / atmosphere / surface） | 一个槽（`material.wgsl`） |
+| 渲染器里的 `CloudParams` / `SurfaceParams` / `AtmosphereParams` | 烘图侧一份（`px_ops::generate` + 场景编译器）；探针那一侧另有一份镜像（`px_probe::params`） |
+
+**留下的**：`mesh.rs`（网格产物 → `Mesh`，含缠绕翻转与法线焊）、`art_cache.rs`（三张表：
+mesh / texture / shader，键 = 路径 + 载荷指纹）、`material.rs`（`DocMaterial`：手动
+`AsBindGroup` + 固定超集布局 + 每版 shader 一条管线）、`reflect.rs`、`scene.rs`（通用装配）、
+`slots.rs`（一份 WGSL 一个内容版本，最多养 4 版）。
+
+**判据（同一 worktree、同一套工具链，只差代码；`--cam 0,5,3.2`、960×640）**：
+
+| 场景 | 不同像素 | 最大通道差 |
+|---|---|---|
+| `orbit-bare`（行星 + 大气，无云） | **0 / 614400** | 0（逐字节同像素） |
+| `orbit-allmiss`（云的片元全 discard） | **0 / 614400** | 0（逐字节同像素） |
+| `orbit-soft`（云 + 云影） | 22 / 614400（0.0036%） | 2 |
+| `orbit-soft-nocloudshadow`（云、无关云影） | 33 / 614400（0.0054%） | 2 |
+| `orbit-soft` 的 12 视角对照图（2240×1050） | 944 / 2352000（0.04%） | 17 |
+
+**已经逐项验过相同的**：网格与贴图产物（内容键相同 ⇒ 字节相同）、云的组装后 shader
+（`diff` 只有绑定下标与注释）、云的 25 个参数（与配方/旧结构体逐值核对）、灯
+（位置/色/强度/射程/影）、相机、物体变换（`quat_mul`/`rotate`/`length` 都改成 glam 的
+**逐项次序**：等价的另一种写法在 f32 下差最后一位，会被 `looking_at` 放大成亚像素抖动）。
+
+**没归因**：带云的两档那 20~30 个像素。输入、数学、状态都已逐项验过相同，剩下的唯一差别是
+**管线/绑定布局**（云那张 cube 从第 1 格挪到第 5 格，布局多了 6 个没用的格）。要钉死它需要
+一个专门实验：把约定改成"cube 在前"，让云的 cube 回到第 1 格、地表的 2D 挪到后面，看差异是
+跟着 cube 走还是跟着地表走。**没做**（时间预算），也**不该**在没钉死之前随便改约定。
+
+**硬化**：`for _ in 0..8 { 重出 }` 无（没做稳定性扫描）；`cargo test -p px_protocol -p px_ops
+-p px_graphs -p px_verify -p px_render` 全绿；`px_probe` 编译过（三个探针 bin 这一轮**没跑**）。
+
+### §65.1 环：唯一一条没实测过的路径，现在有图了
+
+`rings > 0` 这条批场景里**从来是 0** ⇒ 迁移前那套 `spawn_rings`（Bevy 内建
+`StandardMaterial { base_color_texture, unlit, blend, cull: none }`）**没有一张实测图**，
+迁移后它换成自写 `art/shaders/ring.wgsl` + 烘图侧生成的环网格（`generate::ring_mesh`）
+与环带贴图（`generate::ring_band`）—— 两条都只在代码里活着。
+
+**判据**：新增配方 `art/scene/orbit-rings.toml`（`rings = 1.6`，行星 + 大气 + 环）。
+
+```
+cargo run -p px_graphs --bin scene orbit-rings
+px_render --scene <产物> --cam 0,22,4.2 --out target/rings-shot.png --width 1200 --height 800
+```
+
+实测：`placeholder_px = 0`（不是占位）、3 个物体（planet / atmosphere / rings）、
+管线 0 失败、`rings/shader@5b1613353a06` 进了槽。图里：环面与行星**同一个倾斜**
+（`SYSTEM_TILT` 在世界系里，环与行星拿的是同一个四元数）、近侧环压在行星上、远侧被行星挡住、
+环带有条纹（`ring_band` 的 alpha 环）、没有剔除错面（`cull = none`）。
+
+**没验**：环的**逐像素**对照（迁移前那条路没有基线图可对）；环的曝光处理与内建
+`StandardMaterial{unlit}` 不同（后者乘 `view.exposure`，自写材质不乘 —— 与云/大气同一处口径，
+见 `10-handoff.md` §9.1.6 第 3 条"云自己的曝光没动"）。
+
+### §65.2 仪器跟着改：harness 的 shader 一致性闸门
+
+`tools/harness.ps1` 的 `Get-SceneShaderMembers` 原来按 **v1** 的 `scene.parts[].members[role]`
+读场景帧。v2 文档没有 `parts` ⇒ 它返回一张**空表**，而空表在 `Assert-ShaderMembersAgree`
+里等于"没有不一致"⇒ **闸门静默失效**（比报错坏得多：那正是"混版量出来的数"要拦的东西）。
+
+改成读通用渲染文档的每个 `objects[].material.shader`；并且**读到 0 条就抛错**
+（"仪器拿不到数据时必须响"）。两条判据：
+
+```
+. .\tools\harness.ps1
+Get-SceneShaderMembers -Path <v2 产物>   # → planet/shader=shaders/surface@… / atmosphere/… / clouds/…
+Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像通用渲染文档（缺 objects）」
+```
+
+后者是本轮从**我的 worktree 的 CAS** 里翻出来的一份旧产物（`target/pcg/ab/d3/d3bcdfcc…pxart`）
+当反例。

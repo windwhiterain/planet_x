@@ -38,6 +38,7 @@ pub enum DType {
     F32,
     F64,
     U8,
+    U16,
     U32,
 }
 
@@ -47,6 +48,7 @@ impl DType {
             Self::F32 | Self::U32 => 4,
             Self::F64 => 8,
             Self::U8 => 1,
+            Self::U16 => 2,
         }
     }
 }

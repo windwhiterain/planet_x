@@ -19,6 +19,144 @@ pub enum AssetKind {
     Scene,
     /// Shader 源码（U8 blob）。它和场、网格一样是内容寻址的资产。
     Shader,
+    /// 贴图载荷：像素 + 整条 mip 链，`layers` 层（1 = 2D、6 = cube）。
+    ///
+    /// 形状住在清单参数里（`width` / `height` / `layers` / `levels` / `format`）：
+    /// 位深与 sRGB 不是 blob 头那一档（`DType`）能表达的东西。
+    /// 渲染器**不生成**它 —— 色板、覆盖度立方图、星空都由烘图侧烘成产物（§65）。
+    Texture,
+}
+
+/// 贴图产物的格式档。数字写进清单参数 `format`（清单参数只有 f64）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureFormat {
+    /// 每通道 1 字节、sRGB 采样的 RGBA（颜色贴图、星空）。
+    Rgba8Srgb,
+    /// 每通道半精度的线性 RGBA（覆盖度立方图：mask + 三轴梯度）。
+    Rgba16Float,
+}
+
+impl TextureFormat {
+    pub const NAMES: [&'static str; 2] = ["rgba8_srgb", "rgba16_float"];
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "rgba8_srgb" => Some(Self::Rgba8Srgb),
+            "rgba16_float" => Some(Self::Rgba16Float),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rgba8Srgb => "rgba8_srgb",
+            Self::Rgba16Float => "rgba16_float",
+        }
+    }
+
+    pub fn code(self) -> f64 {
+        match self {
+            Self::Rgba8Srgb => 0.0,
+            Self::Rgba16Float => 1.0,
+        }
+    }
+
+    pub fn from_code(code: f64) -> Option<Self> {
+        match code as i64 {
+            0 => Some(Self::Rgba8Srgb),
+            1 => Some(Self::Rgba16Float),
+            _ => None,
+        }
+    }
+
+    /// 每个 texel 的字节数。
+    pub fn texel_bytes(self) -> usize {
+        match self {
+            Self::Rgba8Srgb => 4,
+            Self::Rgba16Float => 8,
+        }
+    }
+}
+
+/// 一份贴图产物的形状与格式（清单参数那一档）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureShape {
+    pub width: u32,
+    pub height: u32,
+    /// 1 = 2D，6 = cube。
+    pub layers: u32,
+    /// mip 链级数（含最细那一级）。
+    pub levels: u32,
+    pub format: TextureFormat,
+}
+
+impl TextureShape {
+    pub fn params(self) -> BTreeMap<String, f64> {
+        BTreeMap::from([
+            ("width".to_string(), f64::from(self.width)),
+            ("height".to_string(), f64::from(self.height)),
+            ("layers".to_string(), f64::from(self.layers)),
+            ("levels".to_string(), f64::from(self.levels)),
+            ("format".to_string(), self.format.code()),
+        ])
+    }
+
+    /// 从清单参数里读回来。缺项/取值不认识 ⇒ `Err`，不猜。
+    pub fn from_params(params: &BTreeMap<String, f64>) -> Result<Self, String> {
+        let number = |key: &str| -> Result<u32, String> {
+            let value = params
+                .get(key)
+                .ok_or_else(|| format!("贴图产物缺参数 '{key}'"))?;
+            if !(*value >= 0.0 && value.fract() == 0.0 && *value <= u32::MAX as f64) {
+                return Err(format!("贴图产物的 '{key}' 应当是非负整数，实际是 {value}"));
+            }
+            Ok(*value as u32)
+        };
+        let format = params
+            .get("format")
+            .and_then(|value| TextureFormat::from_code(*value))
+            .ok_or_else(|| {
+                format!(
+                    "贴图产物的 'format' 不认识（可用：{}）",
+                    TextureFormat::NAMES.join(" / ")
+                )
+            })?;
+        let shape = Self {
+            width: number("width")?,
+            height: number("height")?,
+            layers: number("layers")?,
+            levels: number("levels")?,
+            format,
+        };
+        if shape.width == 0 || shape.height == 0 {
+            return Err(format!(
+                "贴图产物尺寸是 {}×{}：宽高都不能是 0",
+                shape.width, shape.height
+            ));
+        }
+        if shape.layers != 1 && shape.layers != CUBE_FACES {
+            return Err(format!(
+                "贴图产物的 'layers' 只能是 1（2D）或 {CUBE_FACES}（cube），实际是 {}",
+                shape.layers
+            ));
+        }
+        if shape.levels == 0 {
+            return Err("贴图产物的 'levels' 至少是 1".to_string());
+        }
+        Ok(shape)
+    }
+
+    /// 整条 mip 链的字节数（从最细那一级逐级减半，直到某一维为 1）。
+    pub fn chain_bytes(self) -> usize {
+        let mut total = 0_usize;
+        let (mut width, mut height) = (self.width, self.height);
+        for _ in 0..self.levels {
+            total += width as usize * height as usize * self.layers as usize * self.format.texel_bytes();
+            width = (width / 2).max(1);
+            height = (height / 2).max(1);
+        }
+        total
+    }
 }
 
 fn sign(value: f32) -> f32 {

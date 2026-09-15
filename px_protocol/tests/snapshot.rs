@@ -20,6 +20,7 @@ fn asset_kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Volume => "volume",
         AssetKind::Scene => "scene",
         AssetKind::Shader => "shader",
+        AssetKind::Texture => "texture",
     }
 }
 
@@ -235,67 +236,70 @@ fn canonical() -> String {
     let scene_spec = px_protocol::SceneSpec {
         schema: px_protocol::SCENE_SCHEMA,
         name: "orbit".to_string(),
-        ambient: 80.0,
+        environment: px_protocol::Environment {
+            ambient: 80.0,
+            skybox: Some(px_protocol::Member::new("generated", "stars", &"7".repeat(64))),
+            skybox_brightness: 900.0,
+        },
         cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
-        parts: vec![
-            px_protocol::Part {
+        expects: vec!["clouds".to_string()],
+        lights: vec![
+            px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
+                .with_shadows(true),
+        ],
+        objects: vec![
+            px_protocol::Object {
                 id: "planet".to_string(),
-                kind: "planet".to_string(),
-                shader: "surface".to_string(),
-                members: BTreeMap::from([
-                    (
-                        "height".to_string(),
-                        px_protocol::Member::new("planet", "height", &"a".repeat(64)),
-                    ),
-                    (
-                        "mesh".to_string(),
-                        px_protocol::Member::new("planet", "surface", &"b".repeat(64)),
-                    ),
-                ]),
-                params: BTreeMap::from([
-                    ("palette".to_string(), px_protocol::Value::Text("rocky".to_string())),
-                    ("displace".to_string(), px_protocol::Value::Num(0.06)),
-                    ("radius".to_string(), px_protocol::Value::Num(1.0)),
-                ]),
-            },
-            px_protocol::Part {
-                id: "clouds".to_string(),
-                kind: "clouds".to_string(),
-                shader: "clouds".to_string(),
-                members: BTreeMap::from([
-                    (
-                        "shader".to_string(),
-                        px_protocol::Member::new("shaders", "clouds", &"9".repeat(64)),
-                    ),
-                    (
-                        "field".to_string(),
-                        px_protocol::Member::new("clouds", "mixed", &"c".repeat(64)),
-                    ),
-                    (
-                        "slope_x".to_string(),
-                        px_protocol::Member::new("clouds", "slope_x", &"d".repeat(64)),
-                    ),
-                    (
-                        "slope_y".to_string(),
-                        px_protocol::Member::new("clouds", "slope_y", &"e".repeat(64)),
-                    ),
-                    (
-                        "slope_z".to_string(),
-                        px_protocol::Member::new("clouds", "slope_z", &"f".repeat(64)),
-                    ),
-                ]),
-                params: BTreeMap::from([
+                geometry: px_protocol::Geometry::mesh(px_protocol::Member::new(
+                    "planet",
+                    "surface",
+                    &"b".repeat(64),
+                )),
+                material: px_protocol::Material::new(px_protocol::Member::new(
+                    "shaders",
+                    "surface",
+                    &"9".repeat(64),
+                ))
+                .with_params(BTreeMap::from([
                     ("inner".to_string(), px_protocol::Value::Num(1.01)),
-                    ("outer".to_string(), px_protocol::Value::Num(1.06)),
-                    ("extinction".to_string(), px_protocol::Value::Num(900.0)),
-                    ("coverage".to_string(), px_protocol::Value::Num(0.35)),
-                    ("steps".to_string(), px_protocol::Value::Num(56.0)),
-                    ("seed".to_string(), px_protocol::Value::Num(7.0)),
-                    (
-                        "tint".to_string(),
-                        px_protocol::Value::Triple([0.44, 0.64, 0.98]),
+                    ("emissive".to_string(), px_protocol::Value::Quad([0.0, 0.0, 0.0, 0.0])),
+                    ("tint".to_string(), px_protocol::Value::Triple([0.44, 0.64, 0.98])),
+                ]))
+                .with_texture(
+                    "albedo",
+                    px_protocol::TextureRef::new(
+                        1,
+                        px_protocol::Member::new("generated", "surface_color", &"c".repeat(64)),
+                        px_protocol::Sampler::repeat(),
                     ),
-                ]),
+                ),
+                transform: px_protocol::Transform::rotated([0.0, 0.0, 0.0, 1.0]),
+                cast_shadow: true,
+            },
+            px_protocol::Object {
+                id: "clouds".to_string(),
+                geometry: px_protocol::Geometry::primitive(
+                    "icosphere",
+                    BTreeMap::from([
+                        ("radius".to_string(), px_protocol::Value::Num(1.06)),
+                        ("subdivisions".to_string(), px_protocol::Value::Num(64.0)),
+                    ]),
+                ),
+                material: px_protocol::Material::new(px_protocol::Member::new(
+                    "shaders",
+                    "clouds",
+                    &"8".repeat(64),
+                ))
+                .with_texture(
+                    "coverage",
+                    px_protocol::TextureRef::new(
+                        5,
+                        px_protocol::Member::new("generated", "cloud_coverage", &"d".repeat(64)),
+                        px_protocol::Sampler::clamped(),
+                    ),
+                ),
+                transform: px_protocol::Transform::default(),
+                cast_shadow: false,
             },
         ],
     };
@@ -317,6 +321,7 @@ fn canonical() -> String {
         AssetKind::Volume,
         AssetKind::Scene,
         AssetKind::Shader,
+        AssetKind::Texture,
     ]
     .map(asset_kind_name)
     .to_vec();

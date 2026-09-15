@@ -8,10 +8,12 @@ struct AtmosphereParams {
     outer: f32,
     density: f32,
     softness: f32,
+    /// 大气色。原来是**第 1 格**的独立 uniform；通用材质只有一块参数（第 0 格），
+    /// 所以它搬进结构体里了（偏移 16，与原来那块 vec4 逐位相同）。
+    tint: vec4<f32>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: AtmosphereParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> tint: vec4<f32>;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -47,5 +49,5 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     sunlit /= f32(steps);
 
     let alpha = 1.0 - exp(-chord * params.density);
-    return vec4<f32>(tint.rgb * (0.05 + 0.95 * sunlit) * alpha, alpha);
+    return vec4<f32>(params.tint.rgb * (0.05 + 0.95 * sunlit) * alpha, alpha);
 }

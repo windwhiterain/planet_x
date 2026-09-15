@@ -4425,6 +4425,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "encase",
+ "glam",
  "pollster",
  "px_render",
  "px_verify",

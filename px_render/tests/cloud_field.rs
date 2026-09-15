@@ -2,10 +2,14 @@ mod common;
 
 #[test]
 fn the_assembled_cloud_module_carries_the_field_and_its_gradient() {
-    let _ = (
-        px_render::clouds::Ablate::Surface,
-        std::mem::size_of::<px_render::clouds::CloudParams>(),
-    );
+    // 参数块的形状现在由**反射**说了算（渲染器里没有第二个 Rust 结构体了）：这份 shader
+    // 声明的 24 个参数、128 字节的块，就是探针那边镜像要对上的那一份。
+    let layout = px_render::reflect::reflect_assembled(&common::assemble("clouds.wgsl"), "clouds.wgsl")
+        .expect("云的材质契约反射不出来");
+    assert_eq!(layout.params.len(), 25, "云参数少了一个：{}", layout.param_names());
+    assert_eq!(layout.params_bytes, 128);
+    assert_eq!(layout.param("steps").expect("steps 在").kind, px_render::reflect::ParamKind::U32);
+
     let assembled = common::assemble("clouds.wgsl");
     for wanted in [
         "fn cloud_field(",
