@@ -267,6 +267,18 @@ planet / clouds / atmosphere 这些词：`KINDS` / `assembler` / `SceneBuild` / 
 - 探针：`cargo run -p px_probe --bin device`（✓ 全部通过）与 `--bin dual_noise`（✓ 2/2）
   都跑过；`field_dual` / `gradient` 这两个重的**没跑**。
 
+**已并入 `v2`**：`e600ae9`（`--no-ff`，无冲突；用户要求"merge to v2"）。
+
+**并入后的冒烟**（在**主工作区**的 v2 上，不是在我的 worktree 上）：
+
+- `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify -p px_render` 全绿。
+- `cargo run -p px_graphs --bin shaders` → `clouds=b52f7a0d391b / atmosphere=381a0bd89054 /
+  surface=9453bf54f629`；`--bin scene orbit-soft` → 产物键 `13566f8817bd…`（与我 worktree 里
+  那把**同一个键**：键 = 内容，说明合并搬过来的就是同一份东西）。
+- 出图：`target/smoke-v2.png`（960×640、`placeholder_px = 0`），sha256
+  `eeda0f66be6967b5b2c8d212d6f3d205324b41f46008b852cdaec9e1589e600b` —— 与合并前分支上那张
+  **逐字节相同**（同产物 + 同代码 ⇒ 同图）。
+
 
 ## 9.2 已经能跑什么
 
