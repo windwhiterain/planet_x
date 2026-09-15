@@ -11,47 +11,17 @@ use bevy::shader::Shader;
 /// 槽资产源的名字。材质里的 `ShaderRef::Path` 指向 `slots://<槽>.<版本>.wgsl`。
 pub const SOURCE: &str = "slots";
 
-pub const CLOUDS: &str = "clouds.wgsl";
-pub const ATMOSPHERE: &str = "atmosphere.wgsl";
-pub const SURFACE: &str = "surface.wgsl";
-/// **通用材质的槽**（`crate::material::DocMaterial`）：一份 WGSL = 一份材质，
-/// 槽名不代表"云 / 地表 / 大气"那种语义。S4 把旧三个槽删掉之后就只剩它一个。
+/// **通用材质的槽**：一份 WGSL = 一份材质。槽名不再代表"云 / 地表 / 大气"那种语义
+/// —— 那正是通用渲染要去掉的东西（§65）：渲染器只认"产物给的这一份 WGSL 与它的绑定契约"。
 pub const MATERIAL: &str = "material.wgsl";
 
-/// 有 WGSL 真本的槽名。三个槽全在这张表里：行星表面从 §39.6 阶段 3 起也自写材质了
-/// （`StandardMaterial` 没有"只压直接光"的位置，云影进不去），所以没有"走 Bevy 内建材质"
-/// 的槽了 —— 每个 part 都必须把真本一起带上。
-pub const WGSL_SLOTS: [&str; 4] = ["clouds", "atmosphere", "surface", "material"];
-
-/// 认识的槽名全集。认错槽 = 装了个没人看的 shader，或者一块该有内容的壳画的是占位 ——
-/// 所以两个方向的错配（该带的没带、不该带的带了）都报错，不猜。
-pub const ALL_SLOTS: [&str; 4] = ["clouds", "atmosphere", "surface", "material"];
-
-/// 每个槽最多同时养几份**版本**（占位不算）。超了就把最久没用过的那份放掉。
+/// 槽里最多同时养几份**版本**（占位不算）。超了就把最久没用过的那份放掉。
 ///
 /// 为什么要有上界：每条活着的版本都是一份 WGSL 资产、外加它编出来的一整套管线
 /// （正向 / prepass / 阴影 / 变体）。不放的话，一个长跑的会话来回切 N 版就攒 N 套。
 /// 代价是**放掉的那一版下次用要重编** —— 所以 K 是「内存 ↔ 来回切不重编」的一个选择题，
 /// 不是一个实现细节。
 pub const MAX_LIVE_VERSIONS: usize = 4;
-
-/// 这个 part 该往槽里装哪个文件？`has_shader` = 产物里带没带 `shader` 成员。
-/// 认识的槽一律要有真本：没有 WGSL 的槽只能画占位（洋红），那不是能出图的状态。
-pub fn wgsl_for(slot: &str, has_shader: bool) -> Result<Option<String>, String> {
-    if WGSL_SLOTS.contains(&slot) {
-        if !has_shader {
-            return Err(format!(
-                "槽 '{slot}' 没有 shader 成员：没有 WGSL 的槽只能画出占位（洋红），\
-                 场景产物必须把真本一起带上"
-            ));
-        }
-        return Ok(Some(format!("{slot}.wgsl")));
-    }
-    Err(format!(
-        "不认识的 shader 槽 '{slot}'；这份渲染器认：{}",
-        ALL_SLOTS.join(" / ")
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // 版本号 / 文件名
@@ -194,94 +164,6 @@ pub fn activate(server: &AssetServer, slot: &str, version: u64, wgsl: &str) -> b
 // 占位
 // ---------------------------------------------------------------------------
 
-const PLACEHOLDER_CLOUDS: &str = r#"#import bevy_pbr::forward_io::VertexOutput
-
-struct CloudParams {
-    orientation: vec4<f32>,
-    tint: vec4<f32>,
-    inner: f32,
-    outer: f32,
-    density: f32,
-    coverage: f32,
-    base: f32,
-    top: f32,
-    detail_scale: f32,
-    detail_strength: f32,
-    erode: f32,
-    phase: f32,
-    shadow: f32,
-    steps: u32,
-    bump: f32,
-    seed: u32,
-    ablate: u32,
-    slope_scale: f32,
-    taper: f32,
-    coverage_gain: f32,
-    surface_level: f32,
-    bound: u32,
-    gradient: u32,
-    wind: f32,
-    wind_skin: f32,
-};
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: CloudParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var coverage_map: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var coverage_sampler: sampler;
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
-}
-"#;
-
-const PLACEHOLDER_ATMOSPHERE: &str = r#"#import bevy_pbr::forward_io::VertexOutput
-
-struct AtmosphereParams {
-    inner: f32,
-    outer: f32,
-    density: f32,
-    softness: f32,
-};
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: AtmosphereParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> tint: vec4<f32>;
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
-}
-"#;
-
-const PLACEHOLDER_SURFACE: &str = r#"#import bevy_pbr::forward_io::VertexOutput
-
-struct SurfaceParams {
-    orientation: vec4<f32>,
-    emissive: vec4<f32>,
-    inner: f32,
-    outer: f32,
-    coverage: f32,
-    shadow: f32,
-    height: f32,
-    gain: f32,
-};
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: SurfaceParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var albedo_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var albedo_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var glow_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var glow_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var coverage_map: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var coverage_sampler: sampler;
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
-}
-"#;
-
-/// 通用材质的占位：**同一套绑定**（0 = 参数块、1/3 = 2D、5/7 = cube，采样器在 +1）、洋红。
-/// 它的声明形状就是 `crate::reflect` 里那张表 —— 占位与真本布局不一致的话，
-/// 启动时那几条预热管线会直接编不出来。
 const PLACEHOLDER_MATERIAL: &str = r#"#import bevy_pbr::forward_io::VertexOutput
 
 struct DocParams {
@@ -304,13 +186,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-pub fn placeholders() -> [(&'static str, &'static str); 4] {
-    [
-        (CLOUDS, PLACEHOLDER_CLOUDS),
-        (ATMOSPHERE, PLACEHOLDER_ATMOSPHERE),
-        (SURFACE, PLACEHOLDER_SURFACE),
-        (MATERIAL, PLACEHOLDER_MATERIAL),
-    ]
+pub fn placeholders() -> [(&'static str, &'static str); 1] {
+    [(MATERIAL, PLACEHOLDER_MATERIAL)]
 }
 
 /// 槽的内容住在内存目录里：没有占位文件，真本由场景产物在运行时装进来。
@@ -373,33 +250,13 @@ fn seed_slot_shaders(server: Res<AssetServer>) {
 mod tests {
     use super::*;
 
+    /// 槽名的形状：`material.wgsl` 这种自带后缀的槽，版本插在后缀前面。
+    /// 认错槽名 = 装了一份没人看的 WGSL，所以这里只钉住**我们唯一的那个槽**的取文件名规则。
     #[test]
-    fn a_wgsl_slot_without_its_member_is_an_error_not_a_placeholder() {
-        assert_eq!(
-            wgsl_for("clouds", true).unwrap().as_deref(),
-            Some("clouds.wgsl")
-        );
-        assert_eq!(
-            wgsl_for("atmosphere", true).unwrap().as_deref(),
-            Some("atmosphere.wgsl")
-        );
-        assert_eq!(
-            wgsl_for("surface", true).unwrap().as_deref(),
-            Some("surface.wgsl")
-        );
-        for slot in WGSL_SLOTS {
-            let missing = wgsl_for(slot, false).unwrap_err();
-            assert!(missing.contains("占位"), "要说清画出来的是什么：{missing}");
-        }
-    }
-
-    #[test]
-    fn every_slot_takes_a_shader_member_and_no_other_name_is_known() {
-        assert_eq!(WGSL_SLOTS, ALL_SLOTS, "现在没有走内建材质的槽了");
-        let unknown = wgsl_for("lava", true).unwrap_err();
-        for slot in ALL_SLOTS {
-            assert!(unknown.contains(slot), "报错要列出认识的槽：{unknown}");
-        }
+    fn the_only_slot_is_the_generic_material() {
+        assert_eq!(MATERIAL, "material.wgsl");
+        assert_eq!(placeholder_file(MATERIAL), "material.placeholder.wgsl");
+        assert_eq!(version_file(MATERIAL, 0x1234), "material.0000000000001234.wgsl");
     }
 
     /// 版本号必须只由内容键决定，而且**不同内容必须是不同的路径** ——
@@ -414,15 +271,15 @@ mod tests {
         let va = version_of(a).unwrap();
         let vb = version_of(&b).unwrap();
         assert_ne!(va, vb, "内容不同 ⇒ 版本不同");
-        assert_ne!(version_file(CLOUDS, va), version_file(CLOUDS, vb));
+        assert_ne!(version_file(MATERIAL, va), version_file(MATERIAL, vb));
         assert_ne!(
-            placeholder_file(CLOUDS),
-            version_file(CLOUDS, va),
+            placeholder_file(MATERIAL),
+            version_file(MATERIAL, va),
             "占位不能被某一版真本盖掉"
         );
         // 扩展名必须还是 .wgsl：加载器按扩展名认。
-        assert!(version_file(CLOUDS, va).ends_with(".wgsl"));
-        assert_eq!(version_file(CLOUDS, va), format!("clouds.{va:016x}.wgsl"));
+        assert!(version_file(MATERIAL, va).ends_with(".wgsl"));
+        assert_eq!(version_file(MATERIAL, va), format!("material.{va:016x}.wgsl"));
         // 键不是 64 位十六进制 ⇒ 报错，不静默取前 16 位。
         assert!(version_of("deadbeef").is_err());
         assert!(version_of(&"z".repeat(64)).is_err());

@@ -218,6 +218,44 @@
 
 **没做的**：多光源仍不支持（取第 0 盏；§64.9.3 记了以后怎么改）。分支已 `--no-ff` 并入 `v2`。
 
+### 9.1.6 本轮（2026-09-15，`.worktrees/generic-render` 分支 `feature/generic-render`）：**通用渲染**
+
+用户原话：「目前 pcg->render 构架仍然不是通用渲染，`.pxart` 改成通用渲染」。口径与全部判据在
+`08-renderer.md` **§65**（这一轮新增），这里只写"做到哪了"。
+
+**形状**：`.pxart` 从"参数 + part 名"变成**渲染文档**（`SCENE_SCHEMA = 2`）：物体（几何 + 材质 +
+世界系变换）+ 灯表 + 环境（环境光 / 天空盒）+ 相机表 + 期望标签。渲染器里**再没有**
+planet / clouds / atmosphere 这些词：`KINDS` / `assembler` / `SceneBuild` / `PlanetSpec` /
+`spawn_planet` 与 `planet.rs`、`clouds.rs`、`surface.rs`、`atmosphere.rs` 全删，代之以
+`reflect.rs`（按产物那份 WGSL 反射参数块）+ `material.rs`（一种通用材质，固定超集绑定布局）
++ `scene.rs`（通用装配）+ `mesh.rs`。
+
+**搬走**：色板贴图 / 覆盖度立方图 / 星空 / 环（含 mip 链、极点滤波）→ `px_ops::generate`
+（**8/8 逐字节相同**，判据见 §65）；行星/云/大气的语义 → `px_graphs --bin scene`（配方文件形状
+**没变**）。倾斜、太阳射程系数、天空盒亮度、云影 gain 也都搬到烘图侧。
+
+**已验证**（同一 worktree、同一工具链，只差代码；`--cam 0,5,3.2`、960×640）：
+
+- `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify -p px_render` 全绿；
+  `cargo check -p px_probe --bins` 过。
+- 出图：`orbit-bare`（无云）与 `orbit-allmiss`（云全 discard）**逐字节同像素**；
+  `orbit-soft` 22/614400、`orbit-soft-nocloudshadow` 33/614400 个像素差，**最大通道差 2**；
+  12 视角对照图 944/2352000（0.04%）、最大 17。
+- 出图路、管线门、`--sheet`、报告（`has_cloud` 判据靠文档里的 `expects = ["clouds"]`）都在跑。
+
+**没验证 / 没做**：
+
+1. **带云那两档的 20~30 个像素没归因**（所有输入与数学都逐项验过相同；唯一剩下的差别是绑定
+   布局）。§65 末尾记了钉死它需要的那个专门实验。
+2. `--view` / `--show` 预览窗口这一轮**没跑**（收尾时给用户拉起来看过一次，见下）。
+3. 三个探针 bin（`field_dual` / `gradient` / `device`）没跑；`px_probe` 只保证编译过。
+4. 环（`rings > 0`）**没有实测图**（这批场景 `rings = 0`）；环现在是自写 shader
+   （`art/shaders/ring.wgsl`），迁移前走的是 Bevy 内建 `StandardMaterial{unlit}` —— 两条路的
+   曝光处理不同，第一次真出环时要重新看。
+5. `--stream` 那条经济世界的老路（`build_world_scene`）**一个字没动**，还在。
+6. `.agents/notes` 里其它篇（02/03/06/07/09）仍按旧形状描述 KINDS/槽/`spawn_planet` ——
+   这一轮**只**新增 §65，没有逐篇回改。
+
 ## 9.2 已经能跑什么
 
 > ⚠ **本节的命令行是旧接口（原文保留）**：内容旗标已在 §52 / P10 删除，内容只走 `--scene`；用法见 `09-instruments.md` §40 与 `08-renderer.md` §52。下面的 `--planet / --mesh / --clouds / …` 只能当历史形状看。

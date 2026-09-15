@@ -76,7 +76,7 @@ impl CloudParams {
             wind_skin: 0.0,
         }
     }
-
-    /// 这一档的字节（进 compute shader 的 uniform）由各自那一篇里的 `params_bytes` 写
-    /// （`probe.rs` / `gradient.rs` 各一份，与它们自己的管线绑定在一起）。
 }
+
+// 这一档的字节（进 compute shader 的 uniform）由各自那一篇里的 `params_bytes` 写
+// （`probe.rs` / `gradient.rs` 各一份，与它们自己的管线绑定在一起）—— 这里不再重复一份。

@@ -239,8 +239,10 @@ fn canonical() -> String {
         environment: px_protocol::Environment {
             ambient: 80.0,
             skybox: Some(px_protocol::Member::new("generated", "stars", &"7".repeat(64))),
+            skybox_brightness: 900.0,
         },
         cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
+        expects: vec!["clouds".to_string()],
         lights: vec![
             px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
                 .with_shadows(true),

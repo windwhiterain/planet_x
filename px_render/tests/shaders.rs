@@ -132,7 +132,7 @@ fn slot_placeholders_parse_and_validate() {
         checked += 1;
     }
 
-    assert_eq!(checked, 4, "槽占位应当正好四个（三个旧槽 + 通用材质的槽）");
+    assert_eq!(checked, 1, "只有一个槽：通用材质那份占位");
 }
 
 #[test]
