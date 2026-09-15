@@ -7,7 +7,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 /// 口径、判据与踩过的坑都在 `06-clouds.md` §59。
 ///
 /// 行星表面材质的整档参数。**直接光与环境光的强度不在这里**：它们从光源 uniform
-/// （`lights`）里读，只有一份来源（相机的 `AmbientLight` 与场景里的 `DirectionalLight`）。
+/// （`lights`）里读**环境光**，只有一份来源（相机的 `AmbientLight`；平行光已删，§64.9）。
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct SurfaceParams {
     /// 行星的世界朝向（`SYSTEM_TILT × spin`）。云覆盖度立方图烘在未倾斜的局部系里，

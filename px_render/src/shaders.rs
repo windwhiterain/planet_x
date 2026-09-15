@@ -126,34 +126,19 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
         "bevy_pbr::mesh_view_bindings::depth_prepass_texture" => {
             Some("@group(0) @binding(20) var depth_prepass_texture: texture_depth_2d;\n")
         }
-        // 自写表面材质读的是**同一个**光源 uniform（`lights`）：环境光与直接光的强度
-        // 只有一份来源（相机的 `AmbientLight` 与场景里的 `DirectionalLight`），
-        // 不再往材质 params 里抄一遍 —— 抄一遍就是"同一个值、两处维护"。
+        // 自写表面材质读的是**同一个**光源 uniform（`lights`）里的**环境光**：强度只有一份来源
+        // （相机的 `AmbientLight`），不再往材质 params 里抄一遍 —— 抄一遍就是"同一个值、两处维护"。
+        // ⚠ 桩里**只留 `ambient_color`**：平行光已经从渲染器里删掉了（§64.9），谁再想读
+        //    `directional_lights` 就该在离线门上直接报错，而不是运行期才发现画面不对。
         "bevy_pbr::mesh_view_bindings::lights" => Some(
-            "struct DirectionalLightStub {\n\
-             \x20   color: vec4<f32>,\n\
-             \x20   direction_to_light: vec3<f32>,\n\
-             \x20   flags: u32,\n\
-             \x20   num_cascades: u32,\n\
-             \x20   depth_texture_base_index: u32,\n\
-             };\n\
-             struct LightsStub {\n\
-             \x20   directional_lights: array<DirectionalLightStub, 1>,\n\
+            "struct LightsStub {\n\
              \x20   ambient_color: vec4<f32>,\n\
-             \x20   n_directional_lights: u32,\n\
              };\n\
              @group(0) @binding(1) var<uniform> lights: LightsStub;\n",
         ),
-        "bevy_pbr::shadows::fetch_directional_shadow" => Some(
-            "fn fetch_directional_shadow(\n\
-             \x20   light_id: u32,\n\
-             \x20   frag_position: vec4<f32>,\n\
-             \x20   surface_normal: vec3<f32>,\n\
-             \x20   view_z: f32,\n\
-             \x20   frag_coord_xy: vec2<f32>,\n\
-             ) -> f32 { return 1.0; }\n",
-        ),
-        // 点光源的影：cube shadow map（`fetch_directional_shadow` 的兄弟）。§60
+        // 点光源的影：cube shadow map。§60
+        // ⚠ 平行光那一支（`fetch_directional_shadow`）已经退休（§64.9：宇宙里没有平行光），
+        //    桩也删了 —— 谁再引它，离线门直接报"找不到这个符号"。
         "bevy_pbr::shadows::fetch_point_shadow" => Some(
             "fn fetch_point_shadow(\n\
              \x20   light_id: u32,\n\

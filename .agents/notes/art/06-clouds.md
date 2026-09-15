@@ -1225,6 +1225,9 @@ uv run target/softproxy-verdict.py -A target\fin-shot-r1-orbit-soft-shell.png -B
 
 ---
 
+
+---
+
 ## §64 窗口路的「正中心接缝」：**`sun_light` 走 Bevy 聚类网格，远距离时查不到灯**（已定位 + 已修 + 已验证）
 
 > 用户 2026-09-15 报：**"背面光照会出现跳变"**（配窗口截图）。
@@ -1232,7 +1235,8 @@ uv run target/softproxy-verdict.py -A target\fin-shot-r1-orbit-soft-shell.png -B
 > **根因**：`sun_light()` 里那条 Bevy 聚类光查询（`view_fragment_cluster_index` + z 切片）在
 > **相机拉远**时让大气沿 chord 的 5 个采样点**有一半查不到灯** ⇒ 退回兜底 ⇒ 画面上沿网格边界
 > 出现**硬台阶**。**修法**：`light.wgsl::sun_light` 直接取场景那盏灯（`clustered_lights.data[0]`），
-> 不问网格。**修完：出图路判据图逐字节不变、默认视角除 OSD 外 0 像素变、用户视角那条台阶消失。**
+> 不问网格、**也没有兜底**（宇宙里没有平行光，§64.9）。
+> **修完：出图路判据图逐字节不变、默认视角除 OSD 外 0 像素变、用户视角那条台阶消失。**
 
 ### §64.1 复现（**必须用这套，否则量出来的数不算**）
 
@@ -1246,7 +1250,7 @@ target\debug\px_render.exe --show --scene <diag-noatmo.pxart> ; sleep 6 ; … --
 uv run target\abstep.py -A target\u-atmo.png -B target\u-bare.png -Top 2
 ```
 
-判定：`正中心第 1119→1120 列` 的台阶。**出缝时 +1.863，修好后 +0.014。**
+判定：`正中心第 1119→1120 列` 的台阶。**出缝时 +1.863，修好后 −0.014…−0.304（噪声级）。**
 
 ⚠ **三拍自检**：重启窗口后连拍 A、B、A 三张，第 1 与第 3 张**除左上 OSD 外必须逐像素相同**
 （实测只差 OSD 区 ~1200 px、其余 0）—— 这才证明相机没动。**窗口的轨道相机是用户拿鼠标拖的**，
@@ -1254,7 +1258,7 @@ uv run target\abstep.py -A target\u-atmo.png -B target\u-bare.png -Top 2
 
 ### §64.2 根因（探针实测，不是推理）
 
-在同一视角上把 `sun_light` 的返回值和场景那盏灯逐采样点比对（探针返回三个二值通道：
+在同一视角上把 `sun_light` 的返回值和场景那盏灯逐采样点比对：
 
 | | 左半 | 右半 |
 |---|---|---|
@@ -1272,31 +1276,36 @@ uv run target\abstep.py -A target\u-atmo.png -B target\u-bare.png -Top 2
 
 **不问 cluster，直接问场景那盏灯**：`clustered_lights.data[0]`（点光源住在聚类缓冲里，而且
 Bevy 把点光源排在前面 ⇒ 只摆一盏灯的渲染器，"最近的一盏"就是这一盏）。
-兜底（"没有点光源"才退第 0 盏方向光）**改用颜色判"这格写没写过"**：
+
+⚠ **没有兜底**（用户口径）：宇宙里没有平行光 —— 第 0 格没被写过（uniform 数组默认值 = 全 0）
+就是"这一帧没有光"（颜色 0、`point = 0` ⇒ 画面全黑），**不再退任何"第 0 盏方向光"**。
 
 ```wgsl
-if all((*data).color_inverse_square_range.rgb == vec3<f32>(0.0)) { …退回方向光… }
+let lit = !all((*data).color_inverse_square_range.rgb == vec3<f32>(0.0));
+light.direction = select(vec3<f32>(0.0, 0.0, 1.0), normalize(offset), lit);  // 没光时给定值方向，避免 NaN
 ```
 
-⚠ **不能用 `position_radius.w` 判"有没有灯"**：那格**不是 range**（实测对这盏灯读到 0），
-拿它当阈值会把有点光源的场景也推进兜底 —— 上一轮那次"整幅受光变了 41.6%"就是这么来的
-（出图路兜底 = 那盏遗留的 9000 lx 方向光，"换了个太阳"）。那盏方向光已经删掉（§64.6）。
+⚠ **判"这格写没写过"只能看颜色**：`position_radius.w` **不是 range**（实测对这盏灯读到 0），
+拿它当阈值会把有点光源的场景也判成"没光" —— 上一轮那次"整幅受光变了 41.6%"就是这么来的
+（那时还有兜底，出图路兜底 = 那盏遗留的 9000 lx 方向光，"换了个太阳"）。那盏方向光已经删掉（§64.9）。
 
-### §64.4 验证（四条，都是单变量）
+### §64.4 验证（每条都是单变量）
 
 | 判据 | 结果 |
 |---|---|
-| 复现视角的台阶 | **+1.863 → +0.014**（三拍自检通过） |
+| 复现视角的台阶 | **+1.863 → −0.014**（清完平行光后复验 **−0.304**，三拍自检均通过） |
 | 出图路四张判据图（`frame-probe -Phase shot`） | **逐字节不变**（`5839AECB… / 11B0A659… / 04FE9DAC…`）⇒ 在原来看得到灯的地方**零影响** |
 | 窗口**初始轨道**（0.0, 0.17, 3.2）修前 vs 修后 | 除左上 OSD 外 **0 像素**变 |
 | 用户视角左半（原来查得到的那半） | 只差 1157 px（>4），右半（坏的那半）改 14406 px |
+| 清掉平行光的死分支/桩/`view_z_of` 之后 | 判据图**仍逐字节不变** |
 | `cargo test -p px_render` | 全绿（12/3/2/5） |
 
-⇒ §59 / §60 / §63 的图与判据**全部保持有效**。
+⇒ §59 / §60 / §63 的**图与判据**全部保持有效。
+⚠ 但 `clouds` / `surface` 的**内容键变了**（`cc4111d3d0f4 → 36def398451e`、`d59c0d736f3d → 9453bf54f629`，
+因为槽文件的字节变了）⇒ `orbit-soft` 等的产物键也跟着变（`d1ca4eb89781 → d3bcdfcc11b9`）。
+旧笔记里钉的**产物键**要按新键读；**图的哈希没变**。
 
 ### §64.5 顺手加的两条**窗口相机请求 API**（复现视角用）
-
-以前窗口的轨道相机**只有鼠标能改**，视角没法记录 ⇒ 这类"依赖视角"的量全部不可复现。现在：
 
 ```powershell
 px_render --where                       # 问窗口：相机现在在哪儿
@@ -1306,14 +1315,13 @@ px_render --place 1.2180,-0.2220,14.0000  # 把窗口摆到那个方位（不换
 ```
 
 实现：请求文件 `target/viewer-scene.json` 里多了 `ask_camera` / `set_camera` 两个字段，
-回话写 `target/viewer-camera.json`（`at` 对账）。`--where` / `--place` **沿用上一次请求那份场景**，
-所以只跟窗口说话、不重建。
+回话写 `target/viewer-camera.json`（`at` 对账）。`--where` / `--place` **沿用上一次请求那份场景**。
 
 ### §64.6 顺手查出的两条（都已落仓库）
 
 1. ✅ **出图路那盏遗留的 `DirectionalLight { illuminance: 9000.0 }` 已删**（`main.rs` 两处同款；
    窗口路本来就没有）。**删完出图路四张判据图逐字节不变** ⇒ 它在出图路上**从来没生效过**
-   ⇒ §59/§60/§63 的图不用重出，两条路的灯清单从此一致。
+   ⇒ §59/§60/§63 的图不用重出。
 2. `px_render/assets/shaders/{common,light,noise}.wgsl` 是**运行期热载、不在任何内容键里**
    （`viewer.err` 有 `Reloaded shaders\light.wgsl`；改完三个 shader 键一个没动、画面却会变）
    ⇒ 改库会**静默**改所有材质且不使任何缓存失效，§52.3"同一份 WGSL"的断言看不见它。
@@ -1341,4 +1349,38 @@ px_render --place 1.2180,-0.2220,14.0000  # 把窗口摆到那个方位（不换
 
 新仪器：`target/abstep.py`（逐行/逐列均值上最大的台阶）、`target/seam.py`（最长连续跳变段）、
 `target/atmodiff.py`、`target/patch.py`、`target/crop.py` —— 与 `pixdiff.py` 同放 `target/`，不进版本库。
-⚠ 窗口被别的窗口挡住时 `--shot` 仍是对的（应用自己存的图），但**用 OS 抓屏会抓到挡在前面的窗口**。
+
+---
+
+## §64.9 平行光从渲染器里**删干净**（用户口径：**宇宙里没有平行光**）
+
+用户 2026-09-15 追加口径：**"不需要兜底，宇宙里没有平行光，不在 cluster 里就说明没光。以后会加入多光源支持"**
++"确保平行光被删除了，从渲染器里"。下面是把这件事做到底的清单（**每一条都验证过输出不变**）。
+
+### §64.9.1 删了什么
+
+| 位置 | 删掉的东西 | 为什么 |
+|---|---|---|
+| `main.rs`（出图/性能路的建场，两处同款） | `DirectionalLight { illuminance: 9000.0, … }` | 出图路独有的遗留太阳；删完判据图**逐字节不变** ⇒ 从来没生效过 |
+| `light.wgsl::sun_light` | 整个"退回第 0 盏方向光"的兜底分支 | 没有点光源就是没有光（颜色 0、`point = 0`） |
+| `light.wgsl` | `const FAR_LIGHT`、"方向光 = 放在无穷远的点光源"那套说明 | 没有方向光就没有"无穷远"这回事 |
+| `light.wgsl` | `view_z_of` / `is_orthographic`（连同 `view` 的 import） | 它们只服务于"级联阴影挑级联"与聚类 z 切片，两条路都退休了 |
+| `clouds.wgsl` / `surface.wgsl` | `if principal.point == 1u { 点光源影 } else { fetch_directional_shadow(…) }` 里的 **else 支**（连带 `view_z_of` / `fetch_directional_shadow` 的 import） | 死代码：`point == 0` 现在只可能是"没有光"，而那时 `shadow_maps == 0` ⇒ 连采样都不发 |
+| `shaders.rs`（离线门桩） | `fetch_directional_shadow` 桩；`lights` 桩里的 `DirectionalLightStub` / `directional_lights` / `n_directional_lights` | 没人引了。**桩只留 `ambient_color`** ⇒ 谁再想读方向光，离线门直接报"找不到符号"，而不是运行期才发现画面不对 |
+| `planet.rs` / `surface.rs` 注释 | 把"场景里的 `DirectionalLight`"改成"那盏已经删了，只当标定基准" | 注释别撒谎 |
+
+**留着没删的**：`AmbientLight`（环境光，不是平行光；`surface.wgsl` 从 `lights.ambient_color` 读它）。
+
+### §64.9.2 验证（都是为了证明"删的是死代码"）
+
+- 出图路四张判据图（`orbit-bare` / `orbit-soft-shell` / `orbit-soft-proxy` / `orbit-soft`）
+  **删前删后逐字节相同**（`5839AECB… / 11B0A659… / 04FE9DAC…` ×2）⇒ 那些分支确实一次都没走到。
+- 复现视角（`--place 1.2180,-0.2220,14.0000`）的大气贡献台阶：**−0.304**（出缝时 +1.863），
+  三拍自检通过。
+- `cargo test -p px_render` 全绿。
+- 全仓库 grep：`DirectionalLight` / `directional_lights` 只剩**注释**，没有一处活的代码。
+
+### §64.9.3 以后加多光源时要注意
+
+`sun_light` 现在写死"取第 0 格"。多光源支持到来时，这里要改成**按场景那份灯表挑/累加**
+（§60.5 那条待办），而不是再回到"问 cluster 要 id"—— §64.2 已经证明那条路在远距离上不可靠。
