@@ -1,8 +1,11 @@
 pub mod art_cache;
 pub mod atmosphere;
 pub mod clouds;
+pub mod digest;
 pub mod planet;
 pub mod shaders;
+pub mod slots;
+pub mod surface;
 
 use bevy::prelude::*;
 
@@ -32,7 +35,7 @@ pub fn asset_root() -> String {
     }
     candidates
         .into_iter()
-        .find(|path| path.join("shaders/atmosphere.wgsl").exists())
+        .find(|path| path.join("shaders/common.wgsl").exists())
         .unwrap_or_else(|| std::path::PathBuf::from("px_render/assets"))
         .to_string_lossy()
         .to_string()

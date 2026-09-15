@@ -32,8 +32,6 @@ fn smoothstep(value: f64, low: f64, high: f64) -> f64 {
     let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
-
-#[test]
 fn a_dual_carries_the_derivative_of_the_branch_it_actually_took() {
     let taken = slope(|value| dmax(value, Dual64::from_re(2.0)), 3.0);
     assert!(
@@ -44,8 +42,6 @@ fn a_dual_carries_the_derivative_of_the_branch_it_actually_took() {
     let flat = slope(|value| dmax(value, Dual64::from_re(2.0)), 1.0);
     assert!(flat.abs() < 1e-12, "取到常数支时导数应当是 0，实测 {flat}");
 }
-
-#[test]
 fn clamping_is_flat_outside_and_linear_inside() {
     let value = |x: f64| x.clamp(0.0, 1.0);
     assert!(
@@ -63,8 +59,6 @@ fn clamping_is_flat_outside_and_linear_inside() {
     assert!((inside - 1.0).abs() < 1e-12, "界内斜率应当是 1，实测 {inside}");
     assert!(value(0.5) > 0.0);
 }
-
-#[test]
 fn smoothstep_kills_its_own_clamp_at_both_ends() {
     let dual = |at: f64| {
         slope(
@@ -83,8 +77,6 @@ fn smoothstep_kills_its_own_clamp_at_both_ends() {
     let middle = dual(0.5);
     assert!((middle - 1.5).abs() < 1e-12, "中点斜率应当是 1.5，实测 {middle}");
 }
-
-#[test]
 fn the_dual_smoothstep_matches_the_closed_form_derivative() {
     let dual = |at: f64| {
         slope(
@@ -117,8 +109,6 @@ fn the_dual_smoothstep_matches_the_closed_form_derivative() {
         "对偶数求得的 smoothstep 导数与闭式不符，最大偏差 {worst}"
     );
 }
-
-#[test]
 fn a_product_of_clamped_factors_differentiates_through_every_piece() {
     let value = |x: f64| {
         smoothstep(x, 0.0, 0.3) * (1.0 - smoothstep(x, 0.5, 0.7)) * x.clamp(0.1, 0.9)
@@ -155,4 +145,13 @@ fn a_product_of_clamped_factors_differentiates_through_every_piece() {
         worst < 1e-5,
         "离开折点后对偶数导数与中心差分不符，最大偏差 {worst}（折点邻域已排除：那里对偶数给单侧导数，中心差分跨折点，本来就没有可比性）"
     );
+}
+pub fn checks() -> Vec<(&'static str, fn())> {
+    vec![
+        ("a_dual_carries_the_derivative_of_the_branch_it_actually_took", a_dual_carries_the_derivative_of_the_branch_it_actually_took),
+        ("clamping_is_flat_outside_and_linear_inside", clamping_is_flat_outside_and_linear_inside),
+        ("smoothstep_kills_its_own_clamp_at_both_ends", smoothstep_kills_its_own_clamp_at_both_ends),
+        ("the_dual_smoothstep_matches_the_closed_form_derivative", the_dual_smoothstep_matches_the_closed_form_derivative),
+        ("a_product_of_clamped_factors_differentiates_through_every_piece", a_product_of_clamped_factors_differentiates_through_every_piece),
+    ]
 }

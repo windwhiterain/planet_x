@@ -74,8 +74,6 @@ fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|one, two| one.partial_cmp(two).expect("误差里出现了 NaN"));
     values[values.len() / 2]
 }
-
-#[test]
 fn the_dual_gradient_of_the_field_matches_the_fields_own_values() {
     let field = params();
     let cover = field.cover_from_mask(MASK);
@@ -153,8 +151,6 @@ fn the_dual_gradient_of_the_field_matches_the_fields_own_values() {
         medians[medians.len() - 1] / medians[1],
     );
 }
-
-#[test]
 fn the_field_gradient_is_flat_outside_the_shell() {
     let field = params();
     let cover = field.cover_from_mask(MASK);
@@ -179,4 +175,10 @@ fn the_field_gradient_is_flat_outside_the_shell() {
     println!("壳外 {outside} 个点梯度恰好为零；壳内 {inside} 个");
     assert!(outside > 100, "壳外的点只有 {outside} 个");
     assert!(inside > 50, "壳内的点只有 {inside} 个");
+}
+pub fn checks() -> Vec<(&'static str, fn())> {
+    vec![
+        ("the_dual_gradient_of_the_field_matches_the_fields_own_values", the_dual_gradient_of_the_field_matches_the_fields_own_values),
+        ("the_field_gradient_is_flat_outside_the_shell", the_field_gradient_is_flat_outside_the_shell),
+    ]
 }

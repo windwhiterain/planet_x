@@ -1,0 +1,34 @@
+# 消融档当内容：与 orbit.toml **只差** clouds part 里的 `ablate = "surface"`。
+#
+# 「硬表面」不是一个开关，而是渲染程序的一个变体 —— 和 orbit-bare（干脆没有 clouds part）
+# 同构。两份产物的 PNG 之差就是那一档的成本/样子，渲染器不需要任何 `--cloud-ablate`。
+#
+# 烘：cargo run -p px_graphs --bin scene orbit-surface
+
+name = "orbit-surface"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+shader = "surface"
+graph = "planet"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0 }
+
+[[parts]]
+id = "clouds"
+kind = "clouds"
+shader = "clouds"
+graph = "clouds"
+members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z" }
+params = { ablate = "surface", inner = 1.01, outer = 1.06, extinction = 900.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 0.85, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 1.0, outer = 1.14, density = 0.3, softness = 0.5, tint = [0.44, 0.64, 0.98] }

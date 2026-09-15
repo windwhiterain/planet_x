@@ -3155,6 +3155,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "isosurface"
+version = "0.1.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0f4b60411e179d54d05e856a1bbd799eb19b65e7339704bf970ff0b4b4b49e"
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4392,7 +4398,22 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "px_graphs"
 version = "0.1.0"
 dependencies = [
+ "px_mc",
  "px_ops",
+ "px_protocol",
+ "px_verify",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "px_mc"
+version = "0.1.0"
+dependencies = [
+ "isosurface",
+ "px_ops",
+ "serde",
 ]
 
 [[package]]

@@ -1,0 +1,44 @@
+# 不透明度消融档：与 orbit-soft 只差 extinction=300（软档的透明度旋钮）。
+# 判据：透明度 → 0（全不透）时着色要收敛到硬表面那条路（见 target/converge.ps1）。
+# 场景配方：软云档（体积渲染那条路）。
+#
+# 与 orbit.toml 的差别**只有** clouds part 里那几个参数 —— 其中 `gradient = 2` 是档位开关：
+# WGSL 里 SOFT_GRADIENT 那条路在累积不透明度穿过"可见表面"时算**一次**解析梯度当法线，
+# 用 N·L 近似自阴影（替掉沿太阳方向的覆盖度近似），并把密度按等值面做一次凹重映射
+# ⇒ 轮廓是软的（斜率为 0 的爬升）、体内是实的（一个宽度内饱和）。老场景的 gradient
+# 是缺省 1（只有硬表面那条路读它）⇒ 一个像素都不变。
+#
+# 软档的三个旋钮：gradient（档位）、surface_level（等值面高度，与硬表面同一个 cloud surface）、
+# shadow（自阴影强度：N·L 的指数）、extinction（不透明度）。
+#
+# 烘：cargo run -p px_graphs --bin scene orbit-soft
+
+name = "soft-e300"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+shader = "surface"
+graph = "planet"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0, shadows = 1, cloud_shadow = 1.0, shadow_height = 0.5 }
+
+[[parts]]
+id = "clouds"
+kind = "clouds"
+shader = "clouds"
+graph = "clouds"
+members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z" }
+# gradient = 2：软云档。surface_level = 等值面高度（硬表面那条路的同一个阈值）。
+# shadow = 自阴影强度（软档里 1 = 全量、0 = 关）。extinction = 不透明度。
+params = { gradient = 2, surface_level = 0.20, inner = 1.01, outer = 1.06, extinction = 300.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 1.2, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 1.0, outer = 1.14, density = 0.3, softness = 0.5, tint = [0.44, 0.64, 0.98] }

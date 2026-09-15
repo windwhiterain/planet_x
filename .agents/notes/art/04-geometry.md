@@ -107,3 +107,38 @@ gutter 只有 2 纹素、mip 2 之后就只剩 0.5 纹素，够不够全图 mip 
 ### §33.3 一个待办：两张图共用一个 manifest
 
 `planet` 与 `desert` 都写 `target/pcg/manifest.json`，取产物只能「取最后一个同名节点」✗ 有点脆 ⇒ 应改成**按图分文件**（`target/pcg/<图名>/manifest.json`），顺带让渲染命令能按图名找产物。
+
+## §54 程序化几何库：选型结论（2026-09 调研）
+
+一条贯穿的约束：生态里"能用"的几何 crate 有一大半把 glam / nalgebra 的**非 0.32 版本**放进公开 API，而 Bevy 0.19 锁 glam 0.32 ⇒ 类型层面炸（`fidget-mesh` nalgebra 0.35、`fast-surface-nets` glam 0.29、`csgrs` nalgebra 0.33、`smesh` 默认拉 bevy 0.17、`mesh-graph` 一边声称支持 bevy 0.19 一边 pin glam 0.33 —— 组合内部不自洽）。**所以每类都优先选"公开 API 里没有数学库"的那一支**，这不是巧合。
+
+| 用途 | 结论 |
+|---|---|
+| 等值面 | 现有 `isosurface`；只在要 LOD 缝合时加 `transvoxel 2.0.0`（零依赖、输出形状与 `MeshData` 同构） |
+| SDF / 布尔 | hero 走 **SDF 组合 + 网格化**；精确布尔用 `manifold-csg`（Apache-2.0，代价是 cmake 一次性编 manifold3d+Clipper2+TBB，不进运行时） |
+| LOD / 简化 | **`meshopt 0.6.2`** —— 默认**只拉 `cc`**（见下"教训"），一次解决简化+顶点缓存+meshlet 聚类+索引编码；`bevy_pbr` 的 meshlet_processor 自己就 dep 它 |
+| 网格校验 | `isomesh::validate` 当**独立第二意见**（见下） |
+| 半边 / 编辑 | **继续手写**（现在不需要半边结构）；真要引入用 `alum`（BSD-3、依赖仅 tobj） |
+| UV 展开 | **继续手写**（立方球天然自带 UV）；`xatlas-rs-v2` 的 `bindgen ^0.68.1` 是**非可选** build-dep ⇒ 可能违反"只接受 cc 编纯 C"，到时候再验 |
+| 凸包 / Delaunay | `spade`（2D，零冲突）+ `parry3d`（3D 凸包，**稳定版里只认 0.27.0**，它是唯一共用 glam 0.32 的）；碎块用 Voronoi 对偶/凸包+切割更省 |
+| 扫掠 / 放样 / bevel | Bevy 自带 `Extrusion`；要轮廓 DSL 才上 `procedural_modelling` + `bevy_procedural_meshes 0.19.0`；**只要管子手写 100~150 行** |
+| GPU / meshlet | **手写，而且现在不开工** —— Bevy 0.19 的 meshlet **官方只支持 Vulkan/Metal（我们是 DX12）**、须关 MSAA、材质必须不透明，官方原文 "**not suitable for dynamically generated geometry**" |
+| 格式导入 | **什么都不用加**：`bevy_gltf`（自带）+ `tobj`（OBJ） |
+
+**两条硬排除（容易踩）**：
+
+- **`truck 1.0.0` 是同名无关 crate**（"generates a cargo toml for you"，2020 年发布）—— 那个 CAD 内核只能经 `truck-modeling/-meshalgo/-geometry/-polymesh/-topology/-base/-shapeops` 成员引入，**绝不要 `cargo add truck`**。
+- **OpenCascade 绑定是 LGPL-2.1**（`opencascade` / `opencascade-sys` / `occt-sys`，会静态编 C++ OCCT）⇒ 白名单外，不依赖。
+
+**判据从哪来**：crates.io 全文搜 `euler characteristic`（85 条命中）**没有任何网格拓扑 crate**；也没查到专门的 3D 三角网格自交检测 crate ⇒ χ / genus / 边界环 / 非流形 / 朝向一致性这一整套，生态里能一次给全的只有 **`isomesh::validate`**（零依赖、无数学库、吃**裸切片** `&[[f32;3]]` + `&[u32]`，25 个字段含 `euler_characteristic` / `genus` / `boundary_edges` **+ `boundary_loops`** / `non_manifold_edges|vertices` / **`inconsistently_oriented_edges`** / `satisfies(SurfaceGate)` / `mesh_hash()` 可直接对上内容寻址）。但它是 0.0.10 / 785 下载 / 0 star / 单作者 / 自述 AI 未审 ⇒ **先过四个已知答案测试**（闭合球 χ=2、g=0；环面 χ=0、g=1；带一洞平面 χ=0、`boundary_loops=1`；内外翻球面 `inconsistently_oriented_edges>0` 而其余计数不变）**才允许进判据**；有一个错，就只把它的**定义当规格、自己实现一份对照**。
+摩擦：它吃 `&[[f32;3]]`，我们的 `MeshData` 是扁平 `Vec<f32>` ⇒ 一次 `chunks_exact(3)` 转换（廉价，不需要 bytemuck）。
+
+**`isosurface` 是冻结依赖**（2021 年的 alpha、仓库 2023-07 后未动）⇒ 把我们在用的那部分（稠密 MC 表 + 提取器；**自适应八叉树已实测用不了**，见 `06-clouds.md` §51.10.1）**vendor 进 `px_ops`**，否则它是几何栈里最大的单点风险。
+
+**教训（选型方法论）**：从 build-dep 列表里看到 `bindgen` 就断言"需要 libclang"是**错的** —— Cargo 里 build-dep 存在 ≠ build.rs 一定调用它。判据是 **`optional` 标志 + feature 表**：`meshopt 0.6.2` 的 `bindgen ^0.72` 是 `optional=True`，只有 feature `generate_bindings` 会开它，且**没有 `default` feature** ⇒ 默认只拉 `cc`。（真正非可选的是 `xatlas-rs-v2` 与 `meshoptimizer-sys`，别混。）
+
+**三个还没解的（查清前不要当成可用）**：
+
+1. `parry3d::math::Vec3` 是 glam 的 **re-export** 还是 **newtype** —— 若是前者，`parry3d 0.30.2` 与 Bevy 0.19 之间传 `Vec3` 是硬编译错误，必须降到 **0.27.0**（而 0.27.0 在 docs.rs 上 build 失败、无在线文档）。这是头号不确定点，两个独立调研源都独立撞上它。
+2. `xatlas-rs-v2` 到底要不要 libclang（build-dep 有 bindgen 非可选，但 build.rs 是否真调 `generate()` 未查）。
+3. `isomesh::validate` 的数算得对不对（见上，四个已知答案测试即验）。

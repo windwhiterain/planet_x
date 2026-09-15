@@ -1,9 +1,9 @@
 use px_ops::field::cube_map_extent;
 use px_ops::noise::fnv1a;
 use px_ops::ops;
-use px_ops::{GraphSpec, begin, finish, node};
+use px_ops::{GraphSpec, begin, finish, node, surface_node, volume_node};
 
-const GRAPH_VERSION: u32 = 4;
+const GRAPH_VERSION: u32 = 5;
 const SOURCE_HASH: u64 = fnv1a(include_str!("clouds.rs"));
 const FACE: u32 = 256;
 
@@ -30,6 +30,16 @@ fn main() {
     let slope_x = node::<ops::gradient::Gradient>("slope_x", &[&mixed]);
     let slope_y = node::<ops::gradient::Gradient>("slope_y", &[&mixed]);
     let slope_z = node::<ops::gradient::Gradient>("slope_z", &[&mixed]);
+
+    // 硬表面的代理：先烘一张立方球参数空间的场网格，再拿它出等值面。
+    // 两级分开进缓存 ⇒ 只改等值面参数（比如 depth）时，网格照命中。
+    let coarse = volume_node::<px_graphs::cloud_proxy::CoarseVolume>("coarse", &[&mixed]);
+    let proxy = surface_node::<px_mc::ProxySurface>("proxy", &[&coarse]);
+
+    // 第二份：同样的算子、烘**含细节的真场**（`field = "final"`，见 art/clouds/coarse_fine.toml）。
+    // 它不包住真场（它就是真表面）⇒ 判据从「包住」换成「像素逐字节」。
+    let fine = volume_node::<px_graphs::cloud_proxy::CoarseVolume>("coarse_fine", &[&mixed]);
+    let proxy_fine = surface_node::<px_mc::ProxySurface>("proxy_fine", &[&fine]);
 
     let stats = coverage.field().stats();
     println!(
@@ -75,6 +85,88 @@ fn main() {
         px_ops::artifact_path_of(&slope_y.key).display(),
         px_ops::artifact_path_of(&slope_z.key).display(),
     );
+    println!(
+        "代理：{}（{} 顶点 / {} 三角形）",
+        px_ops::artifact_path_of(&proxy.key).display(),
+        proxy.mesh().vertices(),
+        proxy.mesh().triangles(),
+    );
+    println!(
+        "细代理：{}（{} 顶点 / {} 三角形）",
+        px_ops::artifact_path_of(&proxy_fine.key).display(),
+        proxy_fine.mesh().vertices(),
+        proxy_fine.mesh().triangles(),
+    );
+
+    check("coarse", &mixed, &coarse, &proxy);
+    check("coarse_fine", &mixed, &fine, &proxy_fine);
 
     finish();
+}
+
+/// 判据 2（包住）与 `L` 的量法：每次烘完都在真数据上跑一遍，包括全部命中那一次
+/// —— 断言的对象是**存下来的产物**，不是内存里刚算出来的东西。
+fn check(name: &str, mixed: &px_ops::Artifact, volume: &px_ops::Artifact, proxy: &px_ops::Artifact) {
+    let params = px_ops::params_of::<px_graphs::cloud_proxy::Params>(name);
+    let cloud = params.cloud();
+    let coverage = mixed.field();
+    let mesh = proxy.mesh();
+    let final_field = params.field == px_graphs::cloud_proxy::FieldKind::Final;
+
+    let rays: usize = 256;
+    let report = px_graphs::cloud_proxy::containment(mesh, &cloud, coverage, &params, rays, 4096);
+    px_graphs::cloud_proxy::print_containment(&report, &params);
+    // 真场代理不再包住真场（它就是真表面）⇒ 「包住」这条对它不成立也不该成立，
+    // 但「一条都不许漏交点」仍然是硬失败（缺几何 = 没有 fragment）。
+    let contained = report.missing == 0 && report.worst_slack > -report.worst_cell;
+    println!(
+        "  {name} 包住：{}（{} 条参照场有交点的方向里漏了 {} 条；余量 {:+.6}，一个单元对角线 {:.6}）",
+        if contained { "是" } else { "否" },
+        report.rays_with_surface,
+        report.missing,
+        report.worst_slack,
+        report.worst_cell,
+    );
+    assert_eq!(
+        report.missing, 0,
+        "{name} 没包住：{} 条方向参照场有交点、代理一个交点都没有",
+        report.missing,
+    );
+    assert!(
+        contained || final_field,
+        "{name}（粗场）没包住参照场：最差余量 {:+.6}（一个单元对角线 {:.6}）",
+        report.worst_slack,
+        report.worst_cell,
+    );
+
+    // 量 L：默认网格 6 面 × 64² × 48 层；加 --bound 用更密的网格复核。
+    let dense = std::env::args().any(|arg| arg == "--bound");
+    let (faces, res, layers) = if dense { (6, 256, 96) } else { (6, 64, 48) };
+    let bound =
+        px_graphs::cloud_proxy::measure_gradient_bound(&cloud, coverage, &params, faces, res, layers);
+    println!(
+        "  {name} 梯度上界：{faces} 面 × {res}² × {layers} 层上量到 |∇场| ≤ {:.3}（三轴 {:.1} / {:.1} / {:.1}；在面 {} 参数 {:?}，方向 {:?}，场值 {:.4}）；参数里写的 scale = {:.3}",
+        bound.bound,
+        bound.axes[0],
+        bound.axes[1],
+        bound.axes[2],
+        bound.face,
+        bound.at.map(|value| (value * 1000.0).round() / 1000.0),
+        bound.direction.map(|value| (value * 1000.0).round() / 1000.0),
+        bound.value,
+        params.scale,
+    );
+    assert!(
+        bound.bound <= params.scale,
+        "{name} 量到的梯度上界 {:.3} 超过参数里的 scale {:.3} ⇒ 归一化没压到 1 以下",
+        bound.bound,
+        params.scale,
+    );
+    println!(
+        "  {name} 场网格：{} 面 × {}² 射线 × {} 层 = {} 个采样",
+        px_ops::PATCHES,
+        volume.volume().res,
+        volume.volume().layers,
+        volume.volume().samples(),
+    );
 }

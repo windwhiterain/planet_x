@@ -43,6 +43,8 @@ pub enum Role {
     SlopeX,
     SlopeY,
     SlopeZ,
+    /// 云的代理几何：它只决定云从哪里开始扫，是**另一份**产物（不是 surface）。
+    Proxy,
 }
 
 impl Role {
@@ -54,6 +56,7 @@ impl Role {
             Self::SlopeX => "slope-x",
             Self::SlopeY => "slope-y",
             Self::SlopeZ => "slope-z",
+            Self::Proxy => "proxy",
         }
     }
 }
@@ -166,6 +169,12 @@ pub struct ReadyCoverage {
     pub face: u32,
 }
 
+/// CAS 里的 WGSL 真本（`kind = Shader` 的 U8 blob）。键 = 路径 + 载荷指纹，与场、网格同规矩。
+#[derive(Clone)]
+pub struct ShaderEntry {
+    pub source: String,
+}
+
 struct Slot<V> {
     value: V,
     /// 连续多少次请求没用上它。
@@ -224,6 +233,7 @@ pub struct ArtCache {
     spheres: Slots<SurfaceKey, ReadySphere>,
     textures: Slots<TextureKey, ReadyTextures>,
     coverages: Slots<CoverageKey, ReadyCoverage>,
+    shaders: Slots<ArtKey, ShaderEntry>,
     /// 本次请求里每个角色拿到的清单（用于 diff）。
     seen: HashMap<Role, ArtBundle>,
     /// 上一批请求的清单。
@@ -249,7 +259,8 @@ impl ArtCache {
             + self.meshes.sweep()
             + self.spheres.sweep()
             + self.textures.sweep()
-            + self.coverages.sweep();
+            + self.coverages.sweep()
+            + self.shaders.sweep();
         self.last = std::mem::take(&mut self.seen);
         if evicted > 0 {
             println!("[缓存] 丢掉 {evicted} 条冷落超过 {MISS_LIMIT} 次请求的条目");
@@ -313,7 +324,7 @@ impl ArtCache {
     pub fn stats(&self) -> String {
         let total = self.hits + self.misses;
         format!(
-            "[缓存] 命中 {}/{}（在册 field {} / mesh {} / sphere {} / texture {} / coverage {}，冷落上限 {MISS_LIMIT}）",
+            "[缓存] 命中 {}/{}（在册 field {} / mesh {} / sphere {} / texture {} / coverage {} / shader {}，冷落上限 {MISS_LIMIT}）",
             self.hits,
             total,
             self.fields.len(),
@@ -321,6 +332,7 @@ impl ArtCache {
             self.spheres.len(),
             self.textures.len(),
             self.coverages.len(),
+            self.shaders.len(),
         )
     }
 
@@ -493,6 +505,31 @@ impl ArtCache {
         })
     }
 
+    /// shader 的 WGSL 文本。每次请求都从 `.pxart` 里抠一遍那个 U8 blob 没有意义 ——
+    /// 而这门缓存和其他几门同规矩：键 = 路径 + 载荷指纹，指纹为 0 就不进册。
+    pub fn shader(&mut self, path: &str) -> Result<Cached<ShaderEntry>, String> {
+        let key = ArtKey {
+            path: canonical(path),
+            fingerprint: fingerprint_of(path)?,
+        };
+        if let Some(entry) = self.shaders.get(&key) {
+            self.hits += 1;
+            return Ok(Cached {
+                value: entry,
+                hit: true,
+            });
+        }
+        self.misses += 1;
+        let entry = ShaderEntry {
+            source: px_protocol::art::read_shader(Path::new(path))?,
+        };
+        self.shaders.put(key, entry.clone());
+        Ok(Cached {
+            value: entry,
+            hit: false,
+        })
+    }
+
     /// 读清单、记进 `seen`，返回产物身份。指纹为 0 的旧产物返回 `None`（不缓存）。
     fn identity(&mut self, role: Role, path: &str) -> Result<Option<ArtKey>, String> {
         let bundle = art::read_manifest(Path::new(path))?;
@@ -652,6 +689,16 @@ mod tests {
             mesh: None,
             clouds: None,
             slope: None,
+            proxy: None,
+            cloud_shell: (crate::clouds::CLOUD_BASE, crate::clouds::CLOUD_TOP),
+            cloud_shape: crate::clouds::CloudShape::default(),
+            cloud_shader: 0,
+            atmosphere_shader: 0,
+            surface_shader: 0,
+            cloud_shadow: 0.0,
+            shadow_height: crate::surface::CLOUD_SHADOW_HEIGHT,
+            sun: crate::planet::SunLightSpec::default(),
+            atmosphere: Some(planet::legacy_atmosphere(Palette::Rocky)),
             palette: Palette::Rocky,
             displace: 0.0,
             sea_level: 0.5,

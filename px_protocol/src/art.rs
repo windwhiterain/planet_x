@@ -12,6 +12,13 @@ pub enum AssetKind {
     CubeMap,
     Mesh,
     Instances,
+    /// 立方球参数空间里的 3D 标量网格（等值面算子的输入）。
+    /// **渲染器不读它**：烘代理 mesh 是 PCG 那一侧的事，渲染器只认 `Mesh`。
+    Volume,
+    /// 场景配方：这次要渲什么、用什么参数、用哪个 shader 槽。
+    Scene,
+    /// Shader 源码（U8 blob）。它和场、网格一样是内容寻址的资产。
+    Shader,
 }
 
 fn sign(value: f32) -> f32 {
@@ -111,6 +118,62 @@ impl MeshData {
             return Err(WireError::TruncatedFrame);
         }
         Ok(mesh)
+    }
+}
+
+/// 立方球参数空间里的一张 3D 标量网格（`kind = Volume`）。
+///
+/// 排布：`data[((face * layers + layer) * res + t) * res + s]`，共
+/// `CUBE_FACES * layers * res * res` 个值。`s`/`t` 是面内参数，`layer` 是径向高度层
+/// （0 = `inner`、`layers-1` = `outer`）。
+///
+/// 它只是**等值面算子的输入**：渲染器不读它（见 `AssetKind::Volume` 的注释）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VolumeData {
+    pub res: u32,
+    pub layers: u32,
+    pub inner: f32,
+    pub outer: f32,
+    pub data: Vec<f32>,
+}
+
+/// Volume 载荷的 blob 形状：`[面, 径向层, t, s]`。
+pub const VOLUME_SHAPE: [u32; 4] = [CUBE_FACES, 0, 0, 0];
+
+impl VolumeData {
+    pub fn samples(&self) -> usize {
+        self.res as usize * self.layers as usize * self.res as usize * CUBE_FACES as usize
+    }
+
+    pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
+        self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
+    }
+
+    pub fn blobs(&self) -> Vec<Blob> {
+        vec![Blob::from_f32(
+            vec![CUBE_FACES, self.layers, self.res, self.res],
+            &self.data,
+        )]
+    }
+
+    /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_ops` 负责补）。
+    pub fn from_blob(blob: &Blob) -> Result<Self, WireError> {
+        let shape = &blob.header.shape;
+        if shape.len() != VOLUME_SHAPE.len() {
+            return Err(WireError::NotF32(blob.header.dtype));
+        }
+        let data = blob.f32s()?;
+        let volume = Self {
+            res: shape[3],
+            layers: shape[1],
+            inner: 0.0,
+            outer: 0.0,
+            data,
+        };
+        if volume.data.len() != volume.samples() {
+            return Err(WireError::TruncatedFrame);
+        }
+        Ok(volume)
     }
 }
 
@@ -630,6 +693,25 @@ mod tests {
     }
 }
 
+/// 读一份 Shader 产物（`kind = Shader`）里的 WGSL 文本。
+/// 它和场、网格走同一条 CAS：内容键 → 路径 → 载荷。
+pub fn read_shader(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let frames =
+        crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
+    let blob = frames
+        .iter()
+        .find_map(|frame| match frame {
+            crate::stream::Frame::Blob(blob) if blob.header.dtype == crate::wire::DType::U8 => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("{} 里没有 U8 blob（不是 shader 产物？）", path.display()))?;
+    String::from_utf8(blob.bytes.clone())
+        .map_err(|err| format!("{} 的 WGSL 不是合法 UTF-8：{err}", path.display()))
+}
+
 /// 从 `.pxart` / `.pxstream` 里取出第一份产物清单。
 pub fn read_bundle(path: &std::path::Path) -> Result<ArtBundle, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
@@ -683,8 +765,7 @@ fn bundle_from_prefix(prefix: &[u8]) -> Option<ArtBundle> {
 }
 
 /// 一组帧里的第一份清单。
-pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
-    frames.iter().find_map(|frame| match frame {
+pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {    frames.iter().find_map(|frame| match frame {
         crate::stream::Frame::Art(bundle) => Some(bundle),
         _ => None,
     })

@@ -1,17 +1,25 @@
 pub mod art;
 pub mod client;
 pub mod render;
+pub mod scene;
 pub mod sim;
 pub mod stream;
 pub mod wire;
 
 pub use art::{ArtBundle, AssetKind, AssetManifest, MeshData};
-pub use render::{ClientError, Lease, Request, Response, Scene, View};
+pub use render::{
+    ClientError, Compare, ErrorBar, GpuMs, GpuSample, Job, Lease, Pair, PerfReport, Report, Request,
+    Response, Scene, Shot, ShotReport, View, Waits,
+};
+pub use scene::{Member, Part, SCENE_SCHEMA, SceneSpec, Value};
 pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
 
-pub const SCHEMA_VERSION: u32 = 7;
+/// v10 → v11：`Job` 多一路 `Stable`（等到条件成立再逐帧采样）、`Report` 多 `pair`（配对差）、
+/// `PerfReport` 多 `frames`/分位数/`key`/`waits`/`gpu_ms`/`compare`。
+/// 老的两路（`Shots` / `Perf{windows,drop}`）一个字段都没动，老脚本照走。
+pub const SCHEMA_VERSION: u32 = 11;
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
 

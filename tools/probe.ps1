@@ -1,9 +1,7 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Field,
-    [string]$Mesh = "",
-    [string]$Palette = "rocky",
+    [string]$Graph = "scene",
+    [string]$Scene = "orbit",
     [string]$Out = "target/probe-sheet.png",
-    [double]$Ambient = 260,
     [double]$Distance = 3.15,
     [int]$Width = 480,
     [int]$Height = 320,
@@ -11,7 +9,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$env:WGPU_BACKEND = "dx12"
+. "$PSScriptRoot/harness.ps1"
+
+$sceneArtifact = Resolve-Artifact -Graph $Graph -Node $Scene
+Write-Host "对照图的场景：$(Format-Artifact $sceneArtifact)"
 
 $tilt = 0.34
 
@@ -53,18 +54,15 @@ Remove-Item "$shotDir\*.png" -ErrorAction SilentlyContinue
 foreach ($view in $views) {
     $shot = Join-Path $shotDir "$($view.Tag).png"
     $arguments = @(
-        "--planet", $Field,
-        "--palette", $Palette,
-        "--ambient", "$Ambient",
+        "--scene", $sceneArtifact.Path,
+        "--pcg-root", $HarnessCacheRoot,
         "--cam", "$($view.Yaw),$($view.Pitch),$(if ($view.Distance) { $view.Distance } else { $Distance })",
         "--width", "$Width",
         "--height", "$Height",
         "--out", $shot
     )
-    if ($Mesh -ne "") {
-        $arguments = @("--mesh", $Mesh) + $arguments
-    }
-    & $Exe @arguments | Out-Null
+    # 走 Invoke-Client：后端只对这条子进程生效，且非 0 退出码当硬失败。
+    Invoke-Client -Arguments $arguments -What "拍 $($view.Tag)"
     if (-not (Test-Path $shot)) {
         throw "角度 $($view.Tag) 没出图"
     }
@@ -94,6 +92,6 @@ $canvas.Dispose()
 $sheet.Save((Join-Path (Get-Location) $Out), [System.Drawing.Imaging.ImageFormat]::Png)
 $sheet.Dispose()
 
-Write-Host "对照图：$Out（$($views.Count) 个角度，环境光 $Ambient）"
+Write-Host "对照图：$Out（$($views.Count) 个角度，场景 $(Format-Artifact $sceneArtifact)）"
 
 

@@ -5,3 +5,9 @@ edition = "2024"
 
 [dependencies]
 px_ops = { path = "../px_ops" }
+px_protocol = { path = "../px_protocol" }
+px_verify = { path = "../px_verify" }
+px_mc = { path = "../px_mc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
