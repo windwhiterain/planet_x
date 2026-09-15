@@ -147,7 +147,7 @@ unmet = 意愿 − 实际取走
 ### 4.1 跨种子 / 长跑
 
 ```bash
-cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 400 --json
+cargo run -q -p planet_x --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 400 --json
 ```
 
 `modern --capacity 12 --specialty 2`，800 轮：
@@ -163,7 +163,7 @@ cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 
 ### 4.2 质量守恒
 
 ```bash
-cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 6 --every 1 --json
+cargo run -q -p planet_x --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 6 --every 1 --json
 ```
 
 逐轮残差 `Δ库存 − (产出 − 消费)` ≈ `1e-4`，通量 ~900/轮 ⇒ 浮点噪声量级。
@@ -176,7 +176,7 @@ cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 
 ### 4.4 测试
 
 ```bash
-cargo test --lib
+cargo test -p planet_x --lib
 ```
 
 84 passed / 0 failed。覆盖：挂价律的有界性与惯性、目标规则的双向性与上下限、
@@ -229,28 +229,28 @@ cargo test --lib
 cargo build -p planet_x --bin local_price
 
 # 测试
-cargo test --lib
+cargo test -p planet_x --lib
 
 # 主场景：逐商品状态 + 指数 + 货币
-cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 100
+cargo run -q -p planet_x --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 100
 
 # 逐轮逐商品表（指数/挂价/成交/库存/投入产出）
-cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 200 --every 10 --trace
+cargo run -q -p planet_x --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 200 --every 10 --trace
 
 # JSONL（每个采样轮次一行，全精度）
-cargo run -q --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 400 --json
+cargo run -q -p planet_x --bin local_price -- --scenario modern --capacity 12 --specialty 2 -n 800 --every 400 --json
 
 # 产能扫描
-cargo run -q --bin local_price -- --scenario sweep --specialty 2 --polities 3 -n 200
+cargo run -q -p planet_x --bin local_price -- --scenario sweep --specialty 2 --polities 3 -n 200
 
 # 技术阶梯：同一部门两个工艺，扫粮食禀赋
-cargo run -q --bin local_price -- --scenario ladder --polities 3 -n 200
+cargo run -q -p planet_x --bin local_price -- --scenario ladder --polities 3 -n 200
 
 # 封锁：在 [40, 80) 轮掐掉政权 0 的对外配对
-cargo run -q --bin local_price -- --scenario blockade --block-from 40 --block-to 80 --block-polity 0 -n 120 --every 10
+cargo run -q -p planet_x --bin local_price -- --scenario blockade --block-from 40 --block-to 80 --block-polity 0 -n 120 --every 10
 
 # 定向制裁：政权 1 第 0 单元的消费部门
-cargo run -q --bin local_price -- --scenario sanction --sanction-polity 1 --sanction-unit 0 --sanction-from 40 --sanction-to 80 -n 120 --every 10
+cargo run -q -p planet_x --bin local_price -- --scenario sanction --sanction-polity 1 --sanction-unit 0 --sanction-from 40 --sanction-to 80 -n 120 --every 10
 ```
 
 ---
