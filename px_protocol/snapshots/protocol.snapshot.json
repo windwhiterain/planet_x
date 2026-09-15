@@ -1,19 +1,19 @@
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "surfaces": {
     "Handshake": {
       "exe": "<exe>",
       "id": {
         "git_rev": "<rev>",
         "protocol_hash": 0,
-        "schema_version": 11
+        "schema_version": 12
       },
       "pid": 0
     },
     "ProtocolId": {
       "git_rev": "<rev>",
       "protocol_hash": 0,
-      "schema_version": 11
+      "schema_version": 12
     },
     "art::ArtBundle": {
       "assets": [
@@ -56,7 +56,8 @@
       "instances",
       "volume",
       "scene",
-      "shader"
+      "shader",
+      "texture"
     ],
     "art::VolumeData.shape": {
       "bytes": 6591000,
@@ -277,7 +278,7 @@
         }
       ],
       "protocol_hash": "0000000000000000",
-      "schema_version": 11,
+      "schema_version": 12,
       "shots": [
         {
           "bright_px": 900000,
@@ -390,7 +391,6 @@
       "width": 2240
     },
     "scene::SceneSpec": {
-      "ambient": 80.0,
       "cameras": [
         {
           "direction": [
@@ -402,77 +402,169 @@
           "tag": "review"
         }
       ],
-      "name": "orbit",
-      "parts": [
+      "environment": {
+        "ambient": 80.0,
+        "skybox": {
+          "graph": "generated",
+          "key": "7777777777777777777777777777777777777777777777777777777777777777",
+          "node": "stars"
+        }
+      },
+      "lights": [
         {
-          "id": "planet",
-          "kind": "planet",
-          "members": {
-            "height": {
-              "graph": "planet",
-              "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "node": "height"
-            },
-            "mesh": {
+          "color": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "id": "sun",
+          "inner_angle": 0.0,
+          "intensity": 760000.0,
+          "kind": "point",
+          "outer_angle": 0.0,
+          "position": [
+            -4.199999809265137,
+            1.149999976158142,
+            2.3499999046325684
+          ],
+          "range": null,
+          "shadows": true
+        }
+      ],
+      "name": "orbit",
+      "objects": [
+        {
+          "cast_shadow": true,
+          "geometry": {
+            "member": {
               "graph": "planet",
               "key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "node": "surface"
-            }
+            },
+            "source": "mesh"
           },
-          "params": {
-            "displace": 0.06,
-            "palette": "rocky",
-            "radius": 1.0
-          },
-          "shader": "surface"
-        },
-        {
-          "id": "clouds",
-          "kind": "clouds",
-          "members": {
-            "field": {
-              "graph": "clouds",
-              "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-              "node": "mixed"
+          "id": "planet",
+          "material": {
+            "alpha": "opaque",
+            "cull": "back",
+            "params": {
+              "emissive": [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "inner": 1.01,
+              "tint": [
+                0.4399999976158142,
+                0.6399999856948853,
+                0.9800000190734863
+              ]
             },
             "shader": {
               "graph": "shaders",
               "key": "9999999999999999999999999999999999999999999999999999999999999999",
-              "node": "clouds"
+              "node": "surface"
             },
-            "slope_x": {
-              "graph": "clouds",
-              "key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-              "node": "slope_x"
-            },
-            "slope_y": {
-              "graph": "clouds",
-              "key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "node": "slope_y"
-            },
-            "slope_z": {
-              "graph": "clouds",
-              "key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-              "node": "slope_z"
+            "textures": {
+              "albedo": {
+                "binding": 1,
+                "member": {
+                  "graph": "generated",
+                  "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "node": "surface_color"
+                },
+                "sampler": {
+                  "address_u": "repeat",
+                  "address_v": "clamp_to_edge",
+                  "anisotropy": 8,
+                  "filter": "linear"
+                }
+              }
             }
           },
-          "params": {
-            "coverage": 0.35,
-            "extinction": 900.0,
-            "inner": 1.01,
-            "outer": 1.06,
-            "seed": 7.0,
-            "steps": 56.0,
-            "tint": [
-              0.4399999976158142,
-              0.6399999856948853,
-              0.9800000190734863
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
             ]
+          }
+        },
+        {
+          "cast_shadow": false,
+          "geometry": {
+            "name": "icosphere",
+            "params": {
+              "radius": 1.06,
+              "subdivisions": 64.0
+            },
+            "source": "primitive"
           },
-          "shader": "clouds"
+          "id": "clouds",
+          "material": {
+            "alpha": "opaque",
+            "cull": "back",
+            "params": {},
+            "shader": {
+              "graph": "shaders",
+              "key": "8888888888888888888888888888888888888888888888888888888888888888",
+              "node": "clouds"
+            },
+            "textures": {
+              "coverage": {
+                "binding": 5,
+                "member": {
+                  "graph": "generated",
+                  "key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "node": "cloud_coverage"
+                },
+                "sampler": {
+                  "address_u": "clamp_to_edge",
+                  "address_v": "clamp_to_edge",
+                  "anisotropy": 0,
+                  "filter": "linear"
+                }
+              }
+            }
+          },
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
         }
       ],
-      "schema": 1
+      "schema": 2
     },
     "sim::WorldView": {
       "departments": [
@@ -495,7 +587,7 @@
         }
       ],
       "round": 0,
-      "schema_version": 11,
+      "schema_version": 12,
       "totals": {
         "consumption": 0.0,
         "cpi": 100.0,

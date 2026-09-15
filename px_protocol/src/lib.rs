@@ -6,12 +6,15 @@ pub mod sim;
 pub mod stream;
 pub mod wire;
 
-pub use art::{ArtBundle, AssetKind, AssetManifest, MeshData};
+pub use art::{ArtBundle, AssetKind, AssetManifest, MeshData, TextureFormat, TextureShape};
 pub use render::{
     ClientError, Compare, ErrorBar, GpuMs, GpuSample, Job, Lease, Pair, PerfReport, Report, Request,
     Response, Scene, Shot, ShotReport, View, Waits,
 };
-pub use scene::{Member, Part, SCENE_SCHEMA, SceneSpec, Value};
+pub use scene::{
+    Address, AlphaMode, CullMode, Environment, Filter, Geometry, Light, LightKind, Material, Member,
+    Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,
+};
 pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
@@ -19,7 +22,11 @@ pub use wire::{Blob, BlobHeader, DType, WireError};
 /// v10 → v11：`Job` 多一路 `Stable`（等到条件成立再逐帧采样）、`Report` 多 `pair`（配对差）、
 /// `PerfReport` 多 `frames`/分位数/`key`/`waits`/`gpu_ms`/`compare`。
 /// 老的两路（`Shots` / `Perf{windows,drop}`）一个字段都没动，老脚本照走。
-pub const SCHEMA_VERSION: u32 = 11;
+///
+/// v11 → v12：场景产物从「行星配方」（`parts[]` 带 `kind`）改成**通用渲染文档**
+/// （`objects[]` + `lights[]` + `environment`，`SCENE_SCHEMA` 1 → 2）；资产多一种
+/// `Texture`、位深多一档 `U16`。渲染器不再认识「行星 / 云 / 大气」。
+pub const SCHEMA_VERSION: u32 = 12;
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
 

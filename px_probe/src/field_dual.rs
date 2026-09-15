@@ -1,6 +1,6 @@
 use crate::probe;
 
-use px_render::clouds::{CLOUD_BASE, CLOUD_TOP, CloudParams};
+use crate::params::{CLOUD_BASE, CLOUD_TOP, CloudParams};
 use px_verify::cloud_field::CloudFieldParams;
 use px_verify::noise::{FbmSettings, fbm_3, gradient_noise_3};
 use crate::probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};

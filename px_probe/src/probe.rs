@@ -1,5 +1,5 @@
 use crate::common::{assemble, connect};
-use px_render::clouds::CloudParams;
+use crate::params::CloudParams;
 
 pub const POINTS: usize = 512;
 pub const STEPS: usize = 5;

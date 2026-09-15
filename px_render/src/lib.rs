@@ -1,14 +1,15 @@
 pub mod art_cache;
-pub mod atmosphere;
-pub mod clouds;
 pub mod digest;
-pub mod planet;
+pub mod material;
+pub mod mesh;
+pub mod reflect;
+pub mod scene;
 pub mod shaders;
 pub mod slots;
-pub mod surface;
 
 use bevy::prelude::*;
 
+/// 「重建世界时只动这些」的标记（§13 的三条结构规则：相机与灯是另外两类）。
 #[derive(Component)]
 pub struct ScenePart;
 

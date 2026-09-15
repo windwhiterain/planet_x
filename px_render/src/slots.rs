@@ -14,15 +14,18 @@ pub const SOURCE: &str = "slots";
 pub const CLOUDS: &str = "clouds.wgsl";
 pub const ATMOSPHERE: &str = "atmosphere.wgsl";
 pub const SURFACE: &str = "surface.wgsl";
+/// **通用材质的槽**（`crate::material::DocMaterial`）：一份 WGSL = 一份材质，
+/// 槽名不代表"云 / 地表 / 大气"那种语义。S4 把旧三个槽删掉之后就只剩它一个。
+pub const MATERIAL: &str = "material.wgsl";
 
 /// 有 WGSL 真本的槽名。三个槽全在这张表里：行星表面从 §39.6 阶段 3 起也自写材质了
 /// （`StandardMaterial` 没有"只压直接光"的位置，云影进不去），所以没有"走 Bevy 内建材质"
 /// 的槽了 —— 每个 part 都必须把真本一起带上。
-pub const WGSL_SLOTS: [&str; 3] = ["clouds", "atmosphere", "surface"];
+pub const WGSL_SLOTS: [&str; 4] = ["clouds", "atmosphere", "surface", "material"];
 
 /// 认识的槽名全集。认错槽 = 装了个没人看的 shader，或者一块该有内容的壳画的是占位 ——
 /// 所以两个方向的错配（该带的没带、不该带的带了）都报错，不猜。
-pub const ALL_SLOTS: [&str; 3] = ["clouds", "atmosphere", "surface"];
+pub const ALL_SLOTS: [&str; 4] = ["clouds", "atmosphere", "surface", "material"];
 
 /// 每个槽最多同时养几份**版本**（占位不算）。超了就把最久没用过的那份放掉。
 ///
@@ -276,11 +279,37 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-pub fn placeholders() -> [(&'static str, &'static str); 3] {
+/// 通用材质的占位：**同一套绑定**（0 = 参数块、1/3 = 2D、5/7 = cube，采样器在 +1）、洋红。
+/// 它的声明形状就是 `crate::reflect` 里那张表 —— 占位与真本布局不一致的话，
+/// 启动时那几条预热管线会直接编不出来。
+const PLACEHOLDER_MATERIAL: &str = r#"#import bevy_pbr::forward_io::VertexOutput
+
+struct DocParams {
+    unused: f32,
+};
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: DocParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var texture0: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var sampler0: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var texture1: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var sampler1: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var texture2: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var sampler2: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(7) var texture3: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(8) var sampler3: sampler;
+
+@fragment
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+}
+"#;
+
+pub fn placeholders() -> [(&'static str, &'static str); 4] {
     [
         (CLOUDS, PLACEHOLDER_CLOUDS),
         (ATMOSPHERE, PLACEHOLDER_ATMOSPHERE),
         (SURFACE, PLACEHOLDER_SURFACE),
+        (MATERIAL, PLACEHOLDER_MATERIAL),
     ]
 }
 
