@@ -183,6 +183,45 @@
 5. 早退只测了 2240×1400 / 480×300 两个分辨率与 `orbit-soft` 这一档；`shadow = 0`、`steps` 变小
    这些档没扫（上界那条论证与 `shadow` 无关，但没实测）。
 
+### 9.1.5 同一天接着的一条**用户报的缺陷**（诊断闭合，修法未定，试过的两刀都已还原）
+
+**用户口径**：**"背面光照会出现跳变"**（2026-09-15，配窗口截图）。全在 `06-clouds.md` **§64**。
+
+**诊到哪了**：缝是一条**贯穿圆盘的直角边界**，落点**正好是画面正中心**（2240×1400 的 `x=1120 / y=700`）。
+元凶是 **`sun_light()` 里那条 Bevy 聚类光源查询**（`px_render/assets/shaders/light.wgsl`：
+`view_fragment_cluster_index` 的网格按**视口尺寸**算）：窗口路里片元坐标跑到网格之外 ⇒ 查不到灯 ⇒ 走兜底
+（方向 (0,0,1)、颜色 0）⇒ 大气那层雾的 `sunlit` **整片跳变**。判据：把大气那句 `sun_light(...)` 换成常数方向，
+缝**消失**（`seam.py` 的 row 699 掉出榜单；受控 A/B 的"大气贡献"在两条边界上从各跳 +1 变成**处处平**）。
+
+**排除（单变量实测）**：§63 的两刀（`orbit-soft-shell` 逐字节等于改前内容）、shadow map（`shadows = 0` 不变）、
+覆盖度 cubemap（`ablate = "fetch"` 照样有）、软档着色分支（硬表面 `orbit-proxy` 同位置同幅度）；
+**去掉 atmosphere part 才消失**；`--serve` 出图路没有这条缝。
+⚠ **被证伪的那条假设**：大气的屏幕空间深度夹取（`textureLoad(depth_prepass_texture, in.position.xy)`
+＋ `view.viewport` 反推 NDC）—— 换成"与行星球解析求交"后缝**一字不变**（并有 1 bit 纯红实验证明新 shader 生效）。
+
+**顺手查出的两条（都值得单独立规矩）**：
+
+1. **两条路的灯清单不一致**：出图路多一盏遗留的 `DirectionalLight { illuminance: 9000.0 }`
+   （`main.rs:1495` / `2478`），窗口路只有 `AmbientLight` ⇒ 一旦 `sun_light` 走兜底，
+   出图路"换了个太阳"、窗口路"直接黑"。**证据**：把 `light.wgsl` 改成直接取 `clustered_lights.data[0]`
+   之后，出图路 41.6% 像素变了（`orbit-soft` 全幅均值 40.6→50.6、`orbit-bare` 24.2→21.4，连无云的档都变）
+   —— 那一刀**不是等价替换**，已还原。
+2. **`px_render/assets/shaders/{common,light,noise}.wgsl` 是运行期热载、不在任何内容键里**：
+   `viewer.err` 有 `Reloaded shaders\light.wgsl`，而改完三个 shader 键一个没动、画面全变了
+   ⇒ 改库**静默**改变所有材质的着色且不使任何缓存失效，§52.3"同一份 WGSL"的断言看不见它。
+
+**没做完 / 待办**：
+
+1. **没量到"那盏灯在第几格"**：探针做到一半，窗口 `--shot` 变成 1×1 存图（窗口被最小化时就这样）就停了。
+2. **修法三选一未定**：① 给自写材质喂**显式光源**（Rust 把 `light_position/color/intensity` 塞进材质 uniform）
+   —— 不动已验证的云/表面行为，最稳；② 探明正确的 `data[i]` 取法后做 shader-only 等价替换；
+   ③ 修根子（窗口路视口/聚类网格为什么只有一半）。
+3. ⚠ 若要删那盏遗留方向光（§64.5 第 1 条），**§59/§60/§63 的图都得跟着重出**。
+4. 三张临时诊断档（`diag-normals` / `diag-normals-fetch` / `diag-noatmo`）**配方留在 §64.7**，文件已删。
+5. 新仪器 `target/seam.py`（找最长连续跳变段）与 `target/atmodiff.py`（有/无大气的逐行逐列台阶）
+   与 `pixdiff.py` 同放 `target/`，不进版本库。
+
+
 ## 9.2 已经能跑什么
 
 > ⚠ **本节的命令行是旧接口（原文保留）**：内容旗标已在 §52 / P10 删除，内容只走 `--scene`；用法见 `09-instruments.md` §40 与 `08-renderer.md` §52。下面的 `--planet / --mesh / --clouds / …` 只能当历史形状看。
