@@ -247,11 +247,12 @@ impl ClusteredLight {
 
 /// 文档的 `range` 缺省时用哪个数：`PointLight::default().range`（`point_light.rs:133`）。
 ///
-/// ⚠ `px_protocol::scene::Light::range` 的文档注释写的是"缺省 = 按强度反推
-/// （`range = √(intensity/最小照度)`）"，而 oracle 实际做的是
-/// `light.range.unwrap_or_else(|| PointLight::default().range)`（`scene.rs:233`）
-/// —— **两处口径不一致，这里按 oracle 的实测行为办**（缺省 20.0），并把这个分岔记在这里：
-/// 真要"按强度反推"，那是改文档契约那一栏的注释，不是宿主自己挑一个。
+/// ⚠ 为什么这一格要专门记一笔：`px_protocol::scene::Light::range` 的文档注释原来写的是
+/// "缺省 = 按强度反推（`range = √(intensity/最小照度)`）" —— **契约的注释与 oracle 的行为是
+/// 两回事**，照那句注释实现出来，射程会差一大截（画面上只表现为"衰减快慢不对"）。
+/// 现在两边已经对齐（注释改成 oracle 那一句 `unwrap_or(PointLight::default().range)` = 20.0）：
+/// 这里留的是**分岔曾经存在过**这件事 —— 契约的散文与 oracle 的代码谁说了算，
+/// 答案是后者（可实测的那个）。
 pub const POINT_LIGHT_DEFAULT_RANGE: f32 = 20.0;
 
 /// `PointLight::default().radius`（`point_light.rs:134`）—— 它进 `position_radius.w`。

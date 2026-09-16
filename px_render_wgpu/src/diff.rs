@@ -781,6 +781,12 @@ impl Diff {
             self.large_pixels
         ));
         // 大差异的粗格地图：一眼看它是"贴着轮廓一圈"还是"挤在某一侧"。
+        //
+        // ⚠ 单位：`MAP_COLUMNS × MAP_ROWS` 是**格数**（48 列 × 24 行），一格折算成像素是
+        //    `图宽 / 48` × `图高 / 24`（960×640 上是 20.00 × 26.67）。这一行原来把**格数**
+        //    当成"每格多少像素"印出来（"每格 48×24 像素"）—— 而读它的人正是要拿它去算坐标的。
+        //    一个把自己的单位说错的仪表，与"替使用者猜角色"是同一类错（这一次只是小一号）：
+        //    两处的修法是同一条 —— **把单位写出来，别让读者去猜**。
         lines.push(format!(
             "剪影内差异的**细分直方图**（0.80–1.00R 每 0.02R 一格；行星轮廓 ≈0.87R、\
              大气壳外缘 ≈1.00R）：{}",
@@ -797,9 +803,9 @@ impl Diff {
         ));
         lines.push(format!(
             "大差异（Δ>{LARGE_DELTA}）落在画面的哪一块（**只算等效半径 {MAP_RADIUS_LIMIT} 以内**；\
-             每格 {}×{} 像素，数字是该格里的大差异像素数，9 封顶）：",
-            MAP_COLUMNS.max(1),
-            MAP_ROWS.max(1)
+             地图是 {MAP_COLUMNS} 列 × {MAP_ROWS} 行，一格 = {:.2}×{:.2} 像素，数字是该格里的大差异像素数，9 封顶）：",
+            self.width as f64 / MAP_COLUMNS as f64,
+            self.height as f64 / MAP_ROWS as f64
         ));
         for row in self.large_map.iter() {
             lines.push(format!(

@@ -418,7 +418,14 @@ pub struct Light {
     pub color: [f32; 3],
     /// Bevy 的语义：点/聚光 = 流明（内部除以 4π），平行光 = 勒克斯。
     pub intensity: f32,
-    /// 点/聚光的射程（米）。缺省 = 按强度反推（`range = √(intensity/最小照度)`）。
+    /// 点/聚光的射程（米）。`None` = 用**渲染器策略**里那一个缺省：oracle 是
+    /// `light.range.unwrap_or_else(|| PointLight::default().range)`（`px_render/src/scene.rs:233`）
+    /// = **20.0**（`bevy_light-0.19.1/src/point_light.rs:133`）。
+    ///
+    /// ⚠ 这里原来写的是"缺省 = 按强度反推（`range = √(intensity/最小照度)`）"—— **那是错的**：
+    /// oracle 从来没算过那个式子，照它实现出来的射程会与锚图差一大截（而画面上只表现为
+    /// "衰减快慢不对"）。口径以 oracle 的行为为准，分岔记在这里，免得下一个人照着旧注释
+    /// 自信地实现另一条规则。
     #[serde(default)]
     pub range: Option<f32>,
     #[serde(default)]
