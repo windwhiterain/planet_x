@@ -10,6 +10,7 @@
 ### 9.1.0 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 
 **在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
+**已 `--no-ff` 并入 `v2`**：合并提交 **`b0737c3`**（三个提交 `d799488` §28.2 / `35a1938` include-aware / `1dc172b` 笔记）。
 
 **做了什么**（起因：用户指出「PCG cache 机制并没有 shader include aware」）：
 
@@ -55,9 +56,23 @@
    `px_render.exe` —— 与主 checkout 的 `target/` 无关。
 8. **材质参数 schema 的调研（§66）**：只落笔记，**代码未动**；候选批次 P1 / P2 / P3 见 `08-renderer.md` §66.5。
    一并裁决待做的一条：**`Value::Text` 从 wire 的 `Value` 里删掉**（它今天在参数块里永远非法）。
-9. ⚠ **并入 `v2` 之后主 checkout 的 CAS 是"待重烘"状态**：老 shader 产物没有闭包指纹（`px_shader/v1` 时代），
-   新的装载闸门会**当场拒**任何还钉着它们的场景 ⇒ 要出图必须先
-   `cargo run -p px_graphs --bin shaders` → 再逐个 `--bin scene <名>`（带云的场景还要先把 `clouds` 图重烘）。
+9. ⚠ **并入 `v2` 之后主 checkout 的 CAS 是"部分待重烘"状态**：老 shader 产物没有闭包指纹（`px_shader/v1` 时代），
+   新的装载闸门会**当场拒**任何还钉着它们的场景。并入时已经在主工作区重烘了 `shaders` / `planet` /
+   `scene orbit-bare`（见下面那条并入记录），**其余场景（`orbit` / `orbit-soft*` / `orbit-rings` / `nebula-*`）
+   仍然钉着老产物** ⇒ 要出图得先 `cargo run -p px_graphs --bin shaders`，再逐个 `--bin scene <名>`
+   （带云的场景还要先把 `clouds` 图重烘）。
+
+**并入后的冒烟（主工作区 / `v2`，2026-09-16）**：
+
+- `cargo test`（默认 members）全绿；`cargo test -p px_render` 全绿（lib 16 含三条 `closure_check` 单测、
+  `tests/shaders.rs` 5、`cloud_field` 2、`spike_reflect` 1）；`cargo build -p px_render` 通过
+  （只剩 `main.rs` 那条 `unused_mut` 老警告，不是本轮的）。
+- 重烘 `shaders` / `planet` / `scene orbit-bare`：**键与 worktree 上逐字节相同**
+  （`clouds=5a88f3986ab8` / `atmosphere=d4501946bb0c` / `surface=f679cdf81015` / 场景 `28a9b516c132`）
+  —— 键是纯函数，两个 checkout 各算一遍也该一样，这条同时钉住了「并入没有改语义」。
+- 出图（Vulkan / RTX 3060 / 960×640）：`target/postmerge-orbit-bare.png` = **300012 字节**，
+  sha256 `6318415190…` —— 与 worktree 上的基线**逐字节相同**；服务端日志打出每个 shader 成员的
+  `include 闭包 …｜可达模块 …｜外部符号 …`。
 
 ### 9.1.1 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
 
