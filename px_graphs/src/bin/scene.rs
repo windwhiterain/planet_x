@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use px_ops::generate::{self, Generated, Palette};
 use px_ops::{GraphSpec, ManifestEntry};
 use px_protocol::art::{Camera, TextureFormat};
+use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
 use px_protocol::scene::{
     AlphaMode, CullMode, Environment, Geometry, Light, Material, Member, Object, Sampler, SceneSpec,
     TextureRef, Transform, Value,
@@ -155,22 +156,146 @@ impl PartFile {
             None => Err(format!("part '{}' 缺参数 '{key}'", self.id)),
         }
     }
+}
 
-    /// 只认这些参数名。**不许静默忽略**：打错一个字母在配方里看起来完全正常，
-    /// 而结果是一档悄悄退回缺省的画面。
-    fn check_keys(&self, known: &[&str]) -> Result<(), String> {
-        for key in self.params.keys() {
-            if !known.contains(&key.as_str()) {
+// ---------------------------------------------------------------------------
+// 配方词汇 → shader 词汇：**结构键由编译器消化，其余按名字透传**（§76 开工序的第 2 步）
+//
+// ⚠ 这里原来有一族 `check_keys(&白名单)` 调用：配方里写什么名字由**写死在 Rust 里的数组**说了算
+//   ⇒ 加一个 shader 参数要改 Rust（§79 的 W1）。2026-09-16 拆掉，判据换成「这份 shader 的契约」。
+// ---------------------------------------------------------------------------
+
+/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`08-renderer.md` §80.2）。
+///
+/// 为什么不现反射：产物里那份就是**装载时会被拿来对账的那一份** —— 烘图侧要校验的是
+/// 「这份产物说它要什么」，不是「现在这份 WGSL 会反射出什么」。两者不一致时装载会拒，
+/// 那时候再报错就晚了（而且报的是渲染器的错，不是作者写错了配方）。
+fn schema_of(member: &Member, root: &Path) -> Result<MaterialLayout, String> {
+    let path = px_protocol::scene::cas_path(root, &member.key)?;
+    let (_, schema) = px_protocol::art::read_shader_parts(&path)
+        .map_err(|err| format!("读 shader 成员 {member} 的产物失败（{}）：{err}", path.display()))?;
+    let text = schema.ok_or_else(|| {
+        format!(
+            "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口（§80）之前烘的。\n  \
+             先重烘：cargo run -p px_graphs --bin shaders"
+        )
+    })?;
+    MaterialLayout::from_json(&text)
+        .map_err(|err| format!("shader 成员 {member} 的 descriptor 解不开：{err}"))
+}
+
+/// TOML 里的一个值 → 产物里的值，**按 shader 声明的那一档**。
+fn coerce_value(slot: &ParamSlot, value: &toml::Value) -> Result<Value, String> {
+    let label = slot.kind.name();
+    match slot.kind {
+        ParamKind::F32 | ParamKind::I32 | ParamKind::U32 => match value {
+            toml::Value::Integer(number) => Ok(Value::Num(*number as f64)),
+            toml::Value::Float(number) => Ok(Value::Num(*number)),
+            other => Err(format!("要一个 {label}，实际是 {other:?}")),
+        },
+        ParamKind::Vec3 | ParamKind::Vec4 => {
+            let toml::Value::Array(items) = value else {
+                return Err(format!("要 {label}（一个数组），实际是 {value:?}"));
+            };
+            let wanted = if slot.kind == ParamKind::Vec3 { 3 } else { 4 };
+            if items.len() != wanted {
                 return Err(format!(
-                    "part '{}'（kind {}）不认识参数 '{key}'；它认：{}",
-                    self.id,
-                    self.kind,
-                    known.join(" / ")
+                    "要 {label}（{wanted} 个数），实际给了 {} 个",
+                    items.len()
                 ));
             }
+            let mut numbers = [0.0_f32; 4];
+            for (index, item) in items.iter().enumerate() {
+                numbers[index] = match item {
+                    toml::Value::Integer(number) => *number as f32,
+                    toml::Value::Float(number) => *number as f32,
+                    other => return Err(format!("第 {} 个数不是数：{other:?}", index + 1)),
+                };
+            }
+            if wanted == 3 {
+                Ok(Value::Triple([numbers[0], numbers[1], numbers[2]]))
+            } else {
+                Ok(Value::Quad(numbers))
+            }
         }
-        Ok(())
     }
+}
+
+/// 配方参数表 + 编译器算出来的那些 → 材质参数表，并在**烘图时**按契约校验一遍。
+///
+/// 三档，逐条都当场说清楚（§79 的 W1：原来「配方里能写什么」是一张写死的白名单，
+/// 加一个 shader 参数就得改那张表 —— 也就是改 Rust）：
+/// · 名字在 `structural` 里 ⇒ 编译器自己要用它（半径、色板、灯、消融档……），**不进**材质参数表；
+/// · 名字在这份 shader 的参数表里 ⇒ 按它声明的类型透传（**这就是「加一个参数不用改 Rust」**）；
+/// · 两边都不是 ⇒ 报错，并把两张表都列出来（原来要等到装载时才拒）。
+///
+/// 最后一步 `pack` 是烘图时的**完整性**校验：shader 声明了而没人给值 ⇒ 这里就红，
+/// 不会烘出一份装载时必被拒的产物。
+fn material_params(
+    part: &PartFile,
+    shader: &Member,
+    structural: &[&str],
+    computed: BTreeMap<String, Value>,
+    root: &Path,
+) -> Result<BTreeMap<String, Value>, String> {
+    let layout = schema_of(shader, root)?;
+    let params = merge_params(part, structural, &layout, computed)?;
+    layout.pack(&params).map_err(|err| {
+        format!(
+            "part '{}' 的材质参数对不上 {} 的契约：{err}",
+            part.id, shader.node
+        )
+    })?;
+    Ok(params)
+}
+
+/// [`material_params`] 里**纯**的那一半：结构键跳过、契约里有名字的透传、两边都不是的报错。
+/// 单独拆出来是为了能直接测（另一半要读 CAS 里的 descriptor）。
+fn merge_params(
+    part: &PartFile,
+    structural: &[&str],
+    layout: &MaterialLayout,
+    computed: BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, String> {
+    let mut params = computed;
+    for (key, value) in &part.params {
+        if structural.contains(&key.as_str()) {
+            continue;
+        }
+        let Some(slot) = layout.param(key) else {
+            return Err(format!(
+                "part '{}'（kind {}）不认识参数 '{key}'：\n  \
+                 编译器自己消化的结构键：{}\n  \
+                 这份 shader 声明的参数：{}\n  \
+                 ⇒ 要么名字拼错了，要么得先在 shader 的结构体里声明它（声明之后按名字透传，不用改 Rust）",
+                part.id,
+                part.kind,
+                structural.join(" / "),
+                layout.param_names(),
+            ));
+        };
+        let value = coerce_value(slot, value)
+            .map_err(|err| format!("part '{}' 的参数 '{key}'：{err}", part.id))?;
+        params.insert(key.clone(), value);
+    }
+    Ok(params)
+}
+
+/// 烘图时的最后一道：这份参数表**打得进这份契约吗**（缺参 / 多参 / 类型不符都在这里红）。
+///
+/// 为什么要在烘图时就打一遍：装载侧也会拒（`px_render::reflect` 的 `pack` 那一条），
+/// 但那时候报的是渲染器的错、离作者改配方已经很远 —— 而「写错一个名字」正是要在这里拦住的东西。
+fn validate_material(
+    label: &str,
+    shader: &Member,
+    params: &BTreeMap<String, Value>,
+    root: &Path,
+) -> Result<(), String> {
+    let layout = schema_of(shader, root)?;
+    layout
+        .pack(params)
+        .map(|_| ())
+        .map_err(|err| format!("{label} 的材质参数对不上 {} 的契约：{err}", shader.node))
 }
 
 fn member_of(part: &PartFile, role: &str, reference: &str) -> Member {
@@ -439,6 +564,9 @@ fn ablate_code(name: &str) -> Result<u32, String> {
     }
 }
 
+/// **编译器自己消化的结构键**（行星）：半径 / 色板 / 灯 / 消融档这些是拿来**造场景**的，
+/// 不是材质参数。⚠ 它**不再是**「配方里只能写这些」的白名单（那是 §80 第 2 步拆掉的墙）：
+/// 名字只要在这份 shader 的契约里就按名字透传，两边都不是才报错（`merge_params`）。
 const PLANET_KEYS: [&str; 15] = [
     "palette",
     "displace",
@@ -457,6 +585,8 @@ const PLANET_KEYS: [&str; 15] = [
     "ablate",
 ];
 
+/// **编译器自己消化的结构键**（云）：形状档、消融档、风——这些要么进几何、要么与云影同口径，
+/// 编译器得自己拿着算。名字在 shader 契约里的那些照旧**按名字透传**（`merge_params`）。
 const CLOUDS_KEYS: [&str; 24] = [
     "inner",
     "outer",
@@ -484,10 +614,13 @@ const CLOUDS_KEYS: [&str; 24] = [
     "tint",
 ];
 
+/// **编译器自己消化的结构键**（大气）：内半径要跟行星半径对账、外半径是因子、密度要乘行星的
+/// `atmo`、色要扩成四元数 —— 所以这四个由编译器算，不算「配方直接给材质的值」。
 const ATMOSPHERE_KEYS: [&str; 5] = ["inner", "outer", "density", "softness", "tint"];
 
 fn cloud_shape_of(part: &PartFile) -> Result<CloudShape, String> {
-    part.check_keys(&CLOUDS_KEYS)?;
+    // ⚠ 这里原来先 `check_keys(&CLOUDS_KEYS)`：白名单是**写死的**，加一个 shader 参数就得改它。
+    // 现在这条判据搬到 `material_params`：名字要么是结构键、要么在这份 shader 的契约里（§80 第 2 步）。
     let default = CloudShape::default();
     Ok(CloudShape {
         coverage: part.number_or("coverage", default.coverage),
@@ -679,7 +812,7 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         }
     }
 
-    planet.check_keys(&PLANET_KEYS)?;
+    // 配方的参数名不再在这里按白名单查：判据换成这份 shader 的契约（见 `material_params`）。
     let palette_name = planet.text("palette")?;
     let palette = Palette::parse(palette_name).ok_or_else(|| {
         format!(
@@ -745,32 +878,41 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         0.0
     };
     let has_glow = glow_member.is_some();
-    let mut surface = Material::new(surface_shader).with_params(BTreeMap::from([
-        ("orientation".to_string(), Value::Quad(world)),
-        (
-            "emissive".to_string(),
-            Value::Quad(if has_glow {
-                [3.0, 3.0, 3.0, 1.0]
-            } else {
-                [0.0, 0.0, 0.0, 0.0]
-            }),
-        ),
-        ("inner".to_string(), Value::Num(f64::from(cloud_inner))),
-        ("outer".to_string(), Value::Num(f64::from(cloud_outer))),
-        (
-            "coverage".to_string(),
-            Value::Num(f64::from(cloud_shape.coverage)),
-        ),
-        (
-            "shadow".to_string(),
-            Value::Num(f64::from(cloud_shadow)),
-        ),
-        (
-            "height".to_string(),
-            Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
-        ),
-        ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
-    ]));
+    // 行星的材质参数**全是算出来的**（云影那几个量必须与云材质同口径）⇒ `computed` 就是全部；
+    // 但配方里仍然可以按名字**补**这份 shader 声明过的其它参数（§80 第 2 步的透传）。
+    let surface_params = material_params(
+        planet,
+        &surface_shader,
+        &PLANET_KEYS,
+        BTreeMap::from([
+            ("orientation".to_string(), Value::Quad(world)),
+            (
+                "emissive".to_string(),
+                Value::Quad(if has_glow {
+                    [3.0, 3.0, 3.0, 1.0]
+                } else {
+                    [0.0, 0.0, 0.0, 0.0]
+                }),
+            ),
+            ("inner".to_string(), Value::Num(f64::from(cloud_inner))),
+            ("outer".to_string(), Value::Num(f64::from(cloud_outer))),
+            (
+                "coverage".to_string(),
+                Value::Num(f64::from(cloud_shape.coverage)),
+            ),
+            (
+                "shadow".to_string(),
+                Value::Num(f64::from(cloud_shadow)),
+            ),
+            (
+                "height".to_string(),
+                Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
+            ),
+            ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
+        ]),
+        root,
+    )?;
+    let mut surface = Material::new(surface_shader).with_params(surface_params);
     surface = surface.with_texture(
         "albedo",
         TextureRef::new(1, color_member.clone(), Sampler::repeat()),
@@ -796,7 +938,6 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
     // 先后，谁先画谁后画完全由这张表决定。次序照迁移前的渲染器摆：行星 → 大气 → 云。
     // 反过来的话，云壳薄的像素会差 1~2 个色阶（实测 33/614400 个像素、最大差 2）。
     if let Some(atmosphere) = atmosphere {
-        atmosphere.check_keys(&ATMOSPHERE_KEYS)?;
         let inner = atmosphere.number_or("inner", radius);
         if (inner - radius).abs() > 1e-3 {
             return Err(format!(
@@ -808,8 +949,12 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         let outer = radius * outer_factor;
         let density = atmosphere.number("density")? as f32 * planet.number_or("atmo", 1.0);
         let tint = atmosphere.triple("tint")?;
-        let material = Material::new(shader_member(atmosphere)?).with_params(BTreeMap::from(
-            [
+        let atmosphere_shader = shader_member(atmosphere)?;
+        let params = material_params(
+            atmosphere,
+            &atmosphere_shader,
+            &ATMOSPHERE_KEYS,
+            BTreeMap::from([
                 ("inner".to_string(), Value::Num(f64::from(radius))),
                 ("outer".to_string(), Value::Num(f64::from(outer))),
                 ("density".to_string(), Value::Num(f64::from(density))),
@@ -821,8 +966,10 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
                     "tint".to_string(),
                     Value::Quad([tint[0], tint[1], tint[2], 1.0]),
                 ),
-            ],
-        ));
+            ]),
+            root,
+        )?;
+        let material = Material::new(atmosphere_shader).with_params(params);
         let mut material = material;
         material.alpha = AlphaMode::Add;
         objects.push(Object {
@@ -843,8 +990,15 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
 
     if let Some(clouds) = clouds {
         let shape = cloud_shape_of(clouds)?;
-        let mut material = Material::new(shader_member(clouds)?)
-            .with_params(cloud_params(clouds, shape, cloud_inner, cloud_outer, world)?);
+        let clouds_shader = shader_member(clouds)?;
+        let params = material_params(
+            clouds,
+            &clouds_shader,
+            &CLOUDS_KEYS,
+            cloud_params(clouds, shape, cloud_inner, cloud_outer, world)?,
+            root,
+        )?;
+        let mut material = Material::new(clouds_shader).with_params(params);
         material.alpha = AlphaMode::Premultiplied;
         // 云壳压一点深度：它整颗球都盖在行星上。
         material.depth_bias = -1.0;
@@ -892,10 +1046,10 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
             generate::ring_band(RING_BAND.0, RING_BAND.1),
             "texture.ring",
         );
-        let mut material = Material::new(ring_shader()?).with_params(BTreeMap::from([(
-            "tint".to_string(),
-            Value::Quad([1.0, 1.0, 1.0, 1.0]),
-        )]));
+        let ring_shader = ring_shader()?;
+        let ring_params = BTreeMap::from([("tint".to_string(), Value::Quad([1.0, 1.0, 1.0, 1.0]))]);
+        validate_material("环", &ring_shader, &ring_params, root)?;
+        let mut material = Material::new(ring_shader).with_params(ring_params);
         material.alpha = AlphaMode::Blend;
         material.cull = CullMode::None;
         material = material.with_texture(
@@ -1005,8 +1159,10 @@ mod tests {
     }
 
     /// 打错的参数名必须当场报错：配方里看着完全正常，结果是悄悄少一个旋钮。
+    /// ⚠ 判据现在是**这份 shader 的契约**（`merge_params`），不再是写死的白名单（§80 第 2 步）。
     #[test]
     fn an_unknown_parameter_is_rejected() {
+        let layout = fixture_layout();
         let part = PartFile {
             id: "planet".to_string(),
             kind: "planet".to_string(),
@@ -1015,7 +1171,96 @@ mod tests {
             members: BTreeMap::new(),
             params: BTreeMap::from([("paltte".to_string(), toml::Value::String("rocky".into()))]),
         };
-        let err = part.check_keys(&PLANET_KEYS).unwrap_err();
+        let err = merge_params(&part, &PLANET_KEYS, &layout, BTreeMap::new()).unwrap_err();
         assert!(err.contains("paltte"), "报错要点名：{err}");
+        assert!(err.contains("palette"), "要把契约里的名字列出来：{err}");
+        assert!(err.contains("结构键"), "要说清哪些是编译器自己消化的：{err}");
+    }
+
+    /// **「加一个参数不用改 Rust」**：配方里写一个白名单没有、而 shader 声明了的名字 ⇒
+    /// 按声明的类型透传出去（这正是第 2 步要买的东西）。
+    #[test]
+    fn a_name_the_shader_declares_passes_through_by_name() {
+        let layout = fixture_layout();
+        let part = PartFile {
+            id: "planet".to_string(),
+            kind: "planet".to_string(),
+            shader: "surface".to_string(),
+            graph: Some("planet".to_string()),
+            members: BTreeMap::new(),
+            params: BTreeMap::from([
+                // 结构键：编译器自己要用，不进材质参数表
+                ("palette".to_string(), toml::Value::String("rocky".into())),
+                ("radius".to_string(), toml::Value::Float(1.5)),
+                // 契约里的名字：透传（还按它声明的类型转换）
+                ("gain".to_string(), toml::Value::Float(2.5)),
+                ("steps".to_string(), toml::Value::Integer(64)),
+                ("tint".to_string(), toml::Value::Array(vec![
+                    toml::Value::Float(0.1),
+                    toml::Value::Float(0.2),
+                    toml::Value::Float(0.3),
+                    toml::Value::Float(1.0),
+                ])),
+            ]),
+        };
+        let params = merge_params(&part, &PLANET_KEYS, &layout, BTreeMap::new()).expect("透传");
+        assert_eq!(params.len(), 3, "结构键不许漏进材质参数表：{params:?}");
+        assert_eq!(params.get("gain"), Some(&Value::Num(2.5)));
+        assert_eq!(params.get("steps"), Some(&Value::Num(64.0)));
+        assert_eq!(params.get("tint"), Some(&Value::Quad([0.1, 0.2, 0.3, 1.0])));
+        assert!(params.get("palette").is_none(), "palette 是结构键");
+        assert!(params.get("radius").is_none(), "radius 是结构键");
+    }
+
+    /// 类型对不上也要在**烘图时**说清（不然就是装载时才拒，离作者很远）。
+    #[test]
+    fn a_value_of_the_wrong_shape_is_rejected_at_bake_time() {
+        let layout = fixture_layout();
+        let part = PartFile {
+            id: "planet".to_string(),
+            kind: "planet".to_string(),
+            shader: "surface".to_string(),
+            graph: Some("planet".to_string()),
+            members: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("tint".to_string(), toml::Value::Float(1.0)),
+                ("seeds".to_string(), toml::Value::String("七".into())),
+            ]),
+        };
+        let err = merge_params(&part, &PLANET_KEYS, &layout, BTreeMap::new()).unwrap_err();
+        assert!(err.contains("tint"), "报错要点名：{err}");
+        assert!(err.contains("vec4"), "要说清要的是什么：{err}");
+
+        let part = PartFile {
+            params: BTreeMap::from([("seeds".to_string(), toml::Value::String("七".into()))]),
+            ..part
+        };
+        let err = merge_params(&part, &PLANET_KEYS, &layout, BTreeMap::new()).unwrap_err();
+        assert!(err.contains("seeds"), "{err}");
+    }
+
+    /// 一份夹具契约：三个参数、两种类型。
+    fn fixture_layout() -> MaterialLayout {
+        MaterialLayout {
+            params: vec![
+                ParamSlot {
+                    name: "gain".to_string(),
+                    offset: 0,
+                    kind: ParamKind::F32,
+                },
+                ParamSlot {
+                    name: "steps".to_string(),
+                    offset: 4,
+                    kind: ParamKind::U32,
+                },
+                ParamSlot {
+                    name: "tint".to_string(),
+                    offset: 16,
+                    kind: ParamKind::Vec4,
+                },
+            ],
+            params_bytes: 32,
+            textures: Vec::new(),
+        }
     }
 }
