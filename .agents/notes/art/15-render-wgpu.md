@@ -1471,3 +1471,56 @@ sha256（`CB363DA74A90F63E`）。实现方**没有**默默把它对齐，而是�
 
 ⚠ 这条改动落在 `target/oracle/` 里（不入 git），所以**记录在此**才是它持久的地方。
 往后谁重做仪器要记得：**锚吃冻件，新宿主吃新件** —— 两边吃的东西必须写清楚。
+
+---
+
+## §127 烘图侧三问：**全部同意** + `cull` 是真错，必须修而不是标注
+
+### Q1 布局 ⇒ 同意
+`art/frame/<name>.toml` **共享** + 场景配方的可选 `frame = "<name>"`（缺省 `default`）。
+理由就是它的理由：帧图是**六个场景共同**的事实，抄进六份文件等于让**共享**这件事变得看不见，
+漂移必然。每场景那个键是逃生口，不用改代码。
+
+### Q2 插入次序 ⇒ 同意，三条否决都对
+帧配方带 `[[before]]` / `[[after]]`；场景烘图器发 `before ++ after`；
+`--bin passes` 插在 `before.len()` 处，**且先核对该产物现有 passes 恰好是 `before ++ after`**，
+否则大声拒绝。被否决的备选及其正确理由：
+
+- **标记 pass**：要 `px_pass` 接受一种"什么都不做"的 kind ⇒ 预定义的角色从后门回来；
+- **"插在最后一条之前"**：把 blit 的位置写死在烘图器里 ⇒ `if label == "blit"` 那个味道，下沉一层；
+- **新增 `SceneSpec` 字段**：为一个烘图器内部的切分点去动 schema。
+
+⚠ **关键性质：新旧两种产物必须靠内容本身可区分**，而不是靠谁记得加了哪个开关。
+`before ++ after` 这条校验正好提供了它。失败信息要说清"期望哪个 frame、实际看到什么"。
+
+### Q3 目标 ⇒ 同意 (a)，含大声拒绝
+帧配方声明 `scene_color`(rgba8unorm-srgb) + `scene_depth`(depth32float)；
+绘制 pass 写 `scene_color`、`depth_target = "scene_depth"`；blit 全屏读 `scene_color`、写内建 `view`。
+
+⚠ **不只是自洽、而且是忠实的**：oracle 自己的次序就是
+prepass → 不透明 → alpha-mask → 透明 → **px_pass 那几条 → blit**
+—— Bevy 本来就是先渲到主纹理再 blit 到输出。所以 `scene_color` + 末尾 blit 是**照着 oracle
+的实际结构**写的，不是新发明一个。⇒ 同意把 `art/passes/*.toml` 改成写 `scene_color`；
+同意 `--bin passes` 在存在 `after` blit 时**拒绝**一条写 `view` 的内容 pass。
+
+### ⚠ `cull`：`RenderState` 按 pass 是**建模错误**
+
+数据暴露了它：`orbit-rings` 同一相位里 rings 是 `CullMode::None`、planet 是 `Back`，
+而 `RenderState.cull` 是按 pass 的 ⇒ 一条透明 pass 表达不了。
+
+实现方原本打算"发主导 cull + 每场景打提示"，备选是"按 cull 拆相位"。**两个都不接受**：
+
+- "主导 cull + 提示" = 把一份**已知错误的描述烘进产物**，正是本工程反复付学费的那种将就；
+- "拆相位" = 拿一个**已知错误的状态**去换一个**无法证明的次序**（Bevy 的透明排序是全局距离排序）。
+
+**真因**：`cull` 是**材质决定的** —— oracle 就是按材质建管线、带上那个材质的 cull
+（§109.2 还记了影子管线也用 `材质.cull`）。
+
+**修法**：把 `cull` 从 `RenderState` 移到**材质档**（`ResolvedMaterial`），
+就放在 §124 已经放过去的 **blend** 旁边 —— 同一条理由。
+`winding` 留在 `RenderState`（本项目只有一种绕序约定，没有按材质的东西可表达；
+哪天出现第二种它也跟着搬，这句写进注释）。管线键加上材质的 cull。
+cull 判据测试改成从材质驱动，并保留 `cull=front` 让三角形消失的断言。
+
+⇒ 独立一笔、**在烘图侧之前**落地 ⇒ 烘图器发出的描述是**对的**，而不是"至少能被标出来"。
+之后帧配方里根本不需要 cull，`orbit-rings` 由构造成立而不是靠提示。
