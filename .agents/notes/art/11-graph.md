@@ -169,13 +169,13 @@ naga 反射放**叶子 crate**：`px_protocol` 的运行时依赖被门钉死只
 | 项 | 事实与出处 |
 |---|---|
 | **source map（错误定位）** | 编译错误的行号指向**生成代码**，不指向节点（实测形态：`Shader warning in 'Shader Graphs/…': implicit truncation of vector type at line 509`）。**必须自己实现「生成行号 → 节点 id」的映射**，否则这个工具在出第一个错误时就废了。⚠ 本仓有个白送的一半：生成的 WGSL 交给 **naga 自己 parse + validate，错误自带 span**，行号这一侧不用自己算 |
-| **确定性（缓存命中的前提）** | Unity 的 shader 缓存命中判据就是「**identical source code**」；本仓是**键 = 内容**。⇒ 图遍历要按稳定 id 排序、临时变量按拓扑序编号、**不许依赖 HashMap 迭代顺序**、生成物里不许有路径/时间戳 |
+| **确定性（缓存命中的前提）** | Unity 的 shader 缓存命中判据就是「**identical source code**」；本仓是**键 = 内容**。⇒ 图遍历要按稳定 id 排序、临时变量按拓扑序编号、**不许依赖 HashMap 迭代顺序**、生成物里不许有路径/时间戳。**两条 A 级铁证**：① Unity 自己的 `ShaderGraphImporter` 在生成前对一个 `HashSet` 显式 `orderedSources.Sort()`；② Unreal 官方在 `bDeterministicShaderCodeOrder` 的文档里承认：关掉它时「the shader code will be stored in the library **essentially in a random order**」⇒ 上游工具自己都把哈希容器顺序当成不安全的 |
 | **名字不能当 id** | Unity 真实历史：节点改名（`Normal Create` → `Normal From Texture`）、属性名与保留字冲突、HDRP 有一整张**禁用属性名表**。⇒ 节点/属性都要 **stable id + 版本 + 迁移函数表**，codegen 要有保留命名空间 |
-| **类型推导与隐式转换要明文规定** | Unity 的规则是：Vector 互相 promote/truncate、**truncate 直接砍通道、promote 补 `(0,0,0,1)`**、Dynamic Vector 按**最低维度**截断。不写清就是静默截断 |
-| **常量折叠 / 死分支剪枝是前提不是优化** | MaterialX 把它写进生成流程第 1 步，理由是「让 shader 小得多、省编译时间与内存、**代码更可读便于调试**」 |
-| **变体爆炸** | Unity：`multi_compile` 编全部变体、`shader_feature` 只编用到的；全局 keyword 上限 **256**（Unity 自用约 60）、每 shader local **64**；生成器为**每个 keyword permutation** 走一遍全图（指数）；HDRP Lit 生成的源码在 **4MB~16MB** 量级。HDRP 的选择是「**用 shader_feature 而不是 multi_compile**」。⇒ **图里的「开关型节点」必须走「schema 变更 + 重编一次」，不许映射成运行期变体** |
-| **子图是内联，不是去重** | Unity Sub Graph 被引用时展开；MaterialX 把「公共子图合并」列为**可选**的图级优化。⇒ 同一子图用 N 次 ≈ N 份代码 |
-| **生成代码与手写代码混用的顺序问题** | Unity 专门改过导入顺序（「graphs are imported before Models」）⇒ 混用要走「include + 约定签名 + 版本化路径」，依赖顺序要显式管 |
+| **类型推导与隐式转换要明文规定** | Unity：Vector 互相 promote/truncate、**truncate 直接砍通道、promote 补 `(0,0,0,1)`**、Dynamic Vector 按**最低维度**截断。⚠ Unreal 更严：*"Arithmetic between two inequivalent data types is invalid. For example, float2 + float3 is invalid and returns an error."* ⇒ **照 Unreal 做（不兼容就报错），别学 Unity 的静默截断** |
+| **常量折叠 / 死分支剪枝是前提不是优化** | MaterialX 把它写进生成流程第 1 步，理由是「让 shader 小得多、省编译时间与内存、**代码更可读便于调试**」。⚠ Unreal 官方对「手写代码混进图」的代价说得更狠：*"**Using the custom node prevents constant folding** and may use significantly more instructions than an equivalent version done with built in nodes!"* |
+| **变体爆炸** | Unity：`multi_compile` 编全部变体、`shader_feature` 只编用到的；keyword 上限**按版本读**（2020.2 手册写全局 256 / 每 shader local 64，**Unity 6.5 手册改成「超过 128 个就要小心」**）；生成器为**每个 keyword permutation** 走一遍全图（指数）；HDRP Lit 生成源码在 **4MB~16MB** 量级。HDRP 的选择是「**用 shader_feature 而不是 multi_compile**」。⚠ Unreal 对 Static Switch 的官方定性：*"applied at compile time, not at runtime… **effectively free at runtime**. On the other hand, **a new version of the Material must be compiled for every used combination of static parameters**… can lead to a **massive increase in shader permutations if abused**."* ⇒ **图里的「开关型节点」必须走「schema 变更 + 重编一次」，不许映射成运行期变体** |
+| **子图是「函数」，不是文本内联**（更正） | Unity 的 Sub Graph 被 emit 成 **HLSL 函数 + Bindings 结构体**（`SG_<name>_<hash>(…)`），官方 Precision 文档也用函数类比它；MaterialX 把「公共子图合并」列为**可选**的图级优化。⇒ **去重是函数级的，不是调用点级的**：同一子图用 N 次 = N 次调用（CSE 要自己做，别指望下游驱动） |
+| **生成代码与手写代码混用的顺序问题** | Unity 专门改过导入顺序（「graphs are imported before Models」）⇒ 混用要走「include + 约定签名 + 版本化路径」，依赖顺序要显式管。⚠ **本仓已有现成机制**：include 闭包指纹 + 装载时对账（§52.3）就是这一条的答案 |
 
 ### S5｜编辑器（两条独立的路）
 
@@ -377,13 +377,15 @@ D3D12 Enhanced Barriers 把 Sync / Access / Layout 解耦（`ACCESS_NO_ACCESS` �
 
 | 方案 | 状态 | 对本案的意义 |
 |---|---|---|
-| **MaterialX**（ASF，USD/Hydra 那条线） | ⚠ **更正**：它的 `WgslShaderGenerator` **不生成真正的 WGSL**，只生成「便于转 WGSL 的 Vulkan GLSL」；官方 issue [#2751](https://github.com/AcademySoftwareFoundation/MaterialX/issues/2751)（2026-01 开、**至今 open**）原文：*"WgslShaderGenerator doesn't actually produce wgsl, but just an adapted variant of glsl that is suitable for conversion to wgsl."* 它**真正有**的是 **Slang 后端**（`MATERIALX_BUILD_GEN_SLANG` 默认 ON）⇒ 现成路径是 **MaterialX → Slang → WGSL**（**A**） | **架构最值得抄**（见下条），但**不要**把它当「节点图 → WGSL」的现成实现 |
-| **naga `Layouter`** | `naga::proc::Layouter` 会算 buffer layout 并能报 `TypeTooLarge`（**A**） | **「名字 → 字节偏移」的现成正统实现**，S3 的生成器直接用，别自己推出对齐规则 |
-| **WESL**（Bevy 的方向） | `Shader::from_wesl` 已存在（`bevy_shader-0.19.1/src/shader.rs:152`，feature `shader_format_wesl`），`ShaderLoader` 扩展名表里已有 `"wesl"`（`:380-382`）；`wesl` crate 支持**运行期**编译（`Compiler::compile` → `syntax.to_string()` 得纯 WGSL）；Bevy Project Goal #23015 写着 WESL 要**取代**现在这套基于 naga_oil 的「Bevy 扩展 WGSL」（**A**） | ⚠ **对代码生成方案的影响**：生成物应当是**纯 WGSL**；`#import`（naga_oil 语法）只许出现在**一个函数**里，将来换 WESL 是改一处。naga_oil 的 `virtual` 函数 + 可叠加的 `override fn` 是现成的「节点实现热替换」钩子，但**押注它要小心上面这条路线变更** |
-| **Slang** | WGSL 后端是 **experimental**，README 脚注「WGSL support is still work-in-progress」；限制：WGSL 目标下无 RT / mesh / tessellation / geometry / wave intrinsics，不支持 atomic f32/i64/f16（**A**） | 只做 WGSL 单后端时它只是多一层编译器；`[SpecializationConstant]` 的设计值得读 |
-| **three.js TSL** | 节点图是**运行期的 JS 对象**（`material.colorNode = ...`），是主流方案里唯一「schema 住在运行期」的；⚠ 但 TSL compute 改图后设 `needsUpdate` **不会**重建节点（官方 issue #33061）（**A**） | §1 裁决 19 已比过：浏览器不再是硬约束 ⇒ 整条 3D 走 web 才会用它 |
-| **Graphite**（Rust 节点图项目） | **build script** 把节点编成**一个 WGSL** 并以字符串 include（**构建期**，不是运行期）（**B**） | ⚠ **最诚实的标尺**：连最认真的 Rust 节点图项目也选了构建期编译 ⇒ **Rust 生态里没有「运行期节点图 → WGSL」的先例**，这块要自己啃 |
-| **egui_node_graph** | 只做节点图 **UI**，不含 codegen（**A**） | 将来做编辑器时可以省掉 UI 那一半 |
+| **MaterialX**（ASF，USD/Hydra 那条线） | ⚠ **更正**：它的 `WgslShaderGenerator` **不生成真正的 WGSL**，只生成「便于转 WGSL 的 Vulkan GLSL」；官方 issue [#2751](https://github.com/AcademySoftwareFoundation/MaterialX/issues/2751)（2026-01 开、**至今 open**）原文：*"WgslShaderGenerator doesn't actually produce wgsl, but just an adapted variant of glsl that is suitable for conversion to wgsl."* 真 WGSL 后端只存在于**未合并**的 PR [#2996](https://github.com/AcademySoftwareFoundation/MaterialX/pull/2996)（2026-07 开，+10k 行，仍在 review；PR 正文自陈「the current glsl to wgsl pathway… is **not suitable for runtime systems**」）。它**真正有**的是 **Slang 后端**（默认**关闭**，`MATERIALX_BUILD_GEN_SLANG`）⇒ 现成路径是 **MaterialX → Slang → WGSL**（**A**） | **架构最值得抄**（见 §71.4 末尾），但**不要**把它当「节点图 → WGSL」的现成实现；⛔ Rust binding 不可用（`materialx`/`materialx-sys` 都是 2021 年的 v0.0.0 占位符） |
+| **Rust 生态**（更正：**有**现成的「节点图 → WGSL」crate） | ⭐ `node_engine`（MIT/Apache-2.0，0.7.0）**直接产 WGSL 语法字符串**，自带 `FragmentOutputNode` / `UVNode` / `TextureNode` 等 shader 节点；`bevy_shader_graph` 0.4.0 是它的 Bevy 集成（含编辑器）；`reflow_shader`（~2.4k 行）也是「DAG → WGSL」；`bevy_hanabi::graph` 证明该模式在 Bevy 生产 VFX 里可行。⚠ 全都年轻/单人维护/文档薄（`node_engine` 文档 22%、下载量 7k）⇒ **可当原型与参考，不建议当依赖**。⛔ `egui_node_graph` **已被 yank**（0.1–0.4 全 yank），图形 UI 改用 `egui-snarl` | ⭐ **这一条把 S4 的代价估算改小了**：至少「DAG → WGSL 文本」这件事有可读的参考实现（一小时能读完 `reflow_shader`）。**但没有任何一个替你解决 source map / 确定性 / 迁移 / 变体**，那四条仍然是自己的活 |
+| **naga 的反射** | ⚠ `naga::proc::TypeLayout` 是 **per-type** 的、**没有 per-member offset**；**成员偏移在 IR 里**：`StructMember { name, ty, binding, offset }`；`ModuleInfo` 里**没有** offsets。⭐ 最值钱的契约：*"If you do perform full validation and `Validator::validate` returns `Ok`, then **Naga promises that code generation will either succeed or return an error; it should never panic.**"*；`ParseError` 提供 `labels()` / `location(source)` / `emit_to_string(source)` ⇒ **自带 span** | **「名字 → 字节偏移」的正统实现**：偏移读 `StructMember::offset`，大小/stride 读 `Layouter`；生成物用 `parse_str` + `validate` 自检，**错误定位白送一半**（只剩「生成行号 → 节点 id」要自己做） |
+| **Slang** | WGSL 后端是 **experimental**（README 脚注「WGSL support is still work-in-progress」）；**Apache-2.0 WITH LLVM Exception**，已转 Khronos 治理。⭐ 它的**反射最强**（`VariableLayoutReflection::getOffset/getBindingSpace`，WebGPU 下 binding space 就是 bind group；`TypeLayoutReflection::getSize/getStride`），⭐ 有**三套正交的运行期特化机制**（link-time specialization / generics+`specialize` / dynamic dispatch），⭐ 有 `[require(...)]` **能力系统**（能在 codegen **之前**拒绝一组能力不兼容的节点组合 —— 本调研里没有任何其它方案提供这种静态保证）。⚠ 反射**不能从 `slangc` 命令行拿**，必须走编译 API；⛔ Rust 侧**没有任何 Slang binding**，要自己写 FFI | ⭐ **一条绕开「WGSL 后端 experimental」的路**：**wgpu 直接吃 SPIR-V**，且官方原文 *"While WebGPU does not support any shading language other than WGSL, we will **automatically convert** your non-WGSL shaders if you're running on WebGPU."*（Bevy 侧 `Shader::from_spirv`）⇒ 真要上 Slang 就走 **Slang → SPIR-V → wgpu**，不赌它的 WGSL 文本后端 |
+| **WESL**（Bevy 的方向） | `Shader::from_wesl` 已存在（`bevy_shader-0.19.1/src/shader.rs:152`，feature `shader_format_wesl`），`ShaderLoader` 扩展名表里已有 `"wesl"`（`:380-382`）；`wesl` crate 支持**运行期**编译（`Compiler::compile` → `syntax.to_string()` 得纯 WGSL）；Bevy Project Goal #23015 写着 WESL 要**取代**现在这套基于 naga_oil 的「Bevy 扩展 WGSL」。⚠⚠ **时序**：Bevy 协作者明确说 *"Bevy imports in wesl are **not supported until bevy 0.20** is shipped"* ⇒ **短期仍用 naga_oil 的 `#import`，别提前迁移** | ⚠ **对代码生成方案的影响**：生成物应当是**纯 WGSL**；`#import` 只许出现在**一个函数**里，将来换 WESL 是改一处 |
+| **three.js TSL** | 节点图是**运行期的 JS 对象**，官方 wiki 明说 **同时编到 WGSL 与 GLSL**（`WGSLNodeBuilder` / `GLSLNodeBuilder`），节点可 `serialize()/deserialize()`；⚠ TSL compute 改图后设 `needsUpdate` **不会**重建节点（官方 issue #33061） | 主流方案里唯一「schema 住在运行期」的；但 §1 裁决 19 已定：整条 3D 走 web 才会用它 |
+| **Babylon NodeMaterial** | ⭐ **最接近本仓想要的产品形态**：节点材质是**可序列化 JSON**（`ParseFromFileAsync`），且官方原文 *"The assigned engine parameter will **NOT** be saved in the node material's JSON file, **allowing you to still choose the correct version at runtime**."* ⇒ **同一份图数据，运行期决定目标语言与绑定** | 值得当作「图数据 = 资产、编译 = 运行期服务」的形态参考（与 MaterialX / MDL / OSL 同一族） |
+| **Graphite**（Rust 节点图项目） | **build script** 把节点编成**一个 WGSL** 并以字符串 include（**构建期**，不是运行期）（**B**） | ⚠ 它只说明「连认真的 Rust 节点图项目也选了构建期」；**但 `node_engine` 证明运行期可行**（见上）⇒ 这条不再是「没有先例」的证据 |
+| **明确不要碰** | ⛔ `shaderc`（无反射，而且它**把原有的反射删了**）；⛔ `SPIRV-Cross` **无 WGSL 输出**（只可当反射补强，Rust 侧用 `spirv-cross2`，别用停维的 `spirv_cross`）；⛔ `wgsl-analyzer` **不发布 crate**（只能当编辑器工具）；⛔ Blender 的 codegen 是 **GPL**；⛔ Unity ShaderGraph 是 **Unity Companion License（非开源，不可移植）**；⛔ `litsdf` / `zygote` 等**无 LICENSE** | 都是**法律或能力**上的硬阻塞，别浪费评估时间 |
 
 ### §71.4 同类系统的 schema 住在哪（横向对照，全部 A 级）
 
@@ -501,23 +503,134 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
 
 ---
 
-## §73 需要用户裁决的点
+## §73 用户裁决（2026-09-16）
 
-调研到此**代码未动**。要往下走，先把下面四条定下来（每条都给一个推荐档）：
+| 问题 | 裁决 | 含义 |
+|---|---|---|
+| schema 落点 | **「render 不需要重新编译」**（没有选 A/B/C） | 目标不是面板、也不是编辑器，而是**改 schema 不重编 Rust** |
+| 先切哪条线 | **「不需要 Inspector，重点是改图改 schema 不重编译、不重启 render。可以接受切换/重构渲染器」** | ① **不需要**编辑器/面板；② 「改图」与「改 schema」都要**不重编、不重启**；③ **允许重构渲染器** —— 这条把「自建绘制路径」从禁区变成选项 |
+| pass 范围 | **全屏 + compute pass** | pass 执行器第一版就要有 compute |
+| 文档演进 | **允许「加法不升 `SCENE_SCHEMA`」，但未知字段不许静默忽略** | 加能力不再全链重烘 + 握手拒绝；同时必须堵住「旧渲染器读到新文档静默少画」 |
 
-1. **「像 Shader Graph」到底指哪一层？**
-   (a) 美术**自助加/改参数与贴图、自己看得见、错了当场报**（= §72.1 的第 1+3 步，不含图）；
-   (b) 还要**组合**能力（图 → WGSL，S3/S4）；
-   (c) 还要**拖节点的编辑器**（S5 后半）。
-   **推荐先做 (a)**：它拿走了「自助」的大头，而且不新增架构；S4 是唯一一次路线反转（§16.6），要单独裁决。
-2. **先切哪条线**：schema 线（§72.1 的 1–3）还是 render graph 线（§72.2 的 1–2）？
-   **推荐先做 render graph 线的第 1 步（R0）**：美术今天一个后处理都没有，而这一步几乎免费；
-   紧接着做 schema 线的第 1 步（Inspector），两条都不动架构。
-3. **render graph 的 pass 范围**：(a) 只要全屏后处理；(b) 还要中间目标 + 几何 pass；(c) 还要 compute。
-   **推荐 (a) 起步**，但要**在文档形状上给 (b) 留位置**（`targets[]` 先留字段不实现）。
-4. **文档/协议的演进**：允不允许「**加法不升 `SCENE_SCHEMA`**」（能力位 + 未知字段的处理写清），
-   还是维持「每加一种能力就升版本 + 旧产物全废」？
-   **推荐前者**：美术自助的前提是加东西不再需要一次全链重烘与握手拒绝；但**必须同时定下「未知字段不许静默忽略」**
-   （今天 `serde` 默认忽略未知字段 ⇒ 新文档被旧渲染器读会**静默少画**，那正是本仓最忌讳的失败形态）。
+**这四条合起来是一句很清楚的话**：
+> **把「改内容」的每一步都变成数据操作，一步都不许落回 Rust；并且这条性质要有可执行的判据。**
 
-*（裁决结果回填到本节，并把 §72 的表按裁决重排。）*
+### §73.1 调研时提的四个问题与推荐档（留档）
+
+1. **「像 Shader Graph」到底指哪一层？** (a) 自助改参数/贴图 + 自动面板；(b) 再加「组合」（图 → WGSL）；
+   (c) 连拖节点的编辑器一起要。**推荐 (a)** —— 裁决选了「都不是，重点是**不重编**」，
+   并把 (b) 收进了「改图不重编」这条要求里，(c) 明确不要。
+2. **先切哪条线？** **推荐先做 R0**（文档 → Bevy 自带后处理，几乎免费）。裁决没有直接回答这一条，
+   §74.3 按「一切服务于判据 P/R」重排为四步。
+3. **pass 范围？** **推荐全屏起步、形状上给后面留位置**；裁决**直接要 compute** ⇒ 形状里必须有 compute。
+4. **文档演进？** **推荐允许加法不升版本，但未知字段不许静默忽略** —— 与裁决一致。
+
+---
+
+## §74 按裁决修订后的路线
+
+### §74.1 先定义判据（裁决要求的那条性质，必须先可判）
+
+**判据 P（不重编）**：改 schema / 改 shader 图 / 改 pass 图之后，走完「重烘 → 请求 → 出图」，
+**`px_render.exe` 的 sha256 不变，且没有发生任何 `cargo` 编译**。
+两条都能一眼验：exe 哈希（或 mtime）在改动前后相同 + 流程里不出现 `cargo build`。
+
+**判据 R（不重启）**：**同一个服务会话（pid 不变）**里连续请求两份「schema / pass 图不同」的文档，
+两份都成功出图；服务日志里没有重启迹象。
+
+**判据 D（确定性）**：同一份图/文档两次生成（或两次装载）**逐字节相同**；装载时对账不通过就当场拒。
+
+> 这三条比任何设计文档都硬：**它们把「动态」从形容词变成可判定的东西**。后面每一步都要在报告里带这三条。
+
+### §74.2 今天挡住判据 P/R 的东西（逐条点名）
+
+| # | 挡路的东西 | 位置 | 谁要动 |
+|---|---|---|---|
+| 1 | 配方参数名的**手写白名单与映射** | `px_graphs/src/bin/scene.rs:442-487`、`:517-586` | 烘图侧（Rust） |
+| 2 | shader 槽的**硬编码数组** | `px_graphs/src/bin/shaders.rs:8` | 烘图侧（Rust） |
+| 3 | schema 在烘图侧**不可见**（只能盲写名字，错了装载时才报） | §66.3 形态 1 | 共享反射 crate |
+| 4 | 材质绑定布局的**固定超集**（4 张贴图、参数块 1024 字节、组号写死） | `px_render/src/reflect.rs:22-34`、`material.rs:98-133` | 渲染器（**要么加宽，要么换路**，见 §74.4） |
+| 5 | schema 变更**每次都要升 `SCENE_SCHEMA`** | `px_protocol/src/scene.rs:13`、`check()` `:530-536` | 协议（裁决已允许「加法不升」） |
+| 6 | 未知字段被 `serde` **静默忽略**（旧渲染器读新文档 = 静默少画） | 全仓 `SceneSpec` 未用 `deny_unknown_fields` | 协议（裁决要求堵住） |
+| 7 | 窗口那套仪器**写死 `ablate`** | `px_render/src/main.rs:2134-2143` | 渲染器（低优先级：裁决说不要 Inspector，但这条是「渲染器认识具体参数」的残留） |
+
+### §74.3 四步（每步都带判据 P/R/D）
+
+**第 1 步｜把 schema 变成数据（挡住 #1 #2 #3 #5 #6）**
+
+- 契约收口（§66 的 P1 / §69 的 S1）：绑定表 + `ParamKind` + `Value↔kind` 一份；naga 反射挪进叶子 crate
+  （`px_protocol` 的依赖被门钉死只有 serde，见 `px_protocol/tests/crate_graph.rs:4`）；
+  schema descriptor 进 shader 产物，**装载时对账**（`scene::closure_check` 同款）。
+- 配方 `params` **按名字透传**，由 descriptor 在**烘图时**校验；
+  `SLOTS` 换扫描 `art/shaders/*.wgsl`；配方词汇与 shader 词汇**对齐或显式成数据**。
+- 协议：`SCENE_SCHEMA` **加法不升**，但**显式拒未知字段**（`deny_unknown_fields` 或等价的能力位 + 报错）。
+- **判据**：故意写错参数名 ⇒ **烘图时**红；改一个参数值走完全链 ⇒ **判据 P 成立**；
+  现有场景重烘后**文档逐字段相同**（键会变，判据是文档等价）。
+- **代价**：中。这是后面三步的地基，**先做**。
+
+**第 2 步｜shader 图 → WGSL（裁决里的「改图」，且不要编辑器）**
+
+- 先做 S3（schema 生成 `struct` + 入口骨架，body 手写或调库函数），再做 S4（节点图组合）。
+- **没有编辑器**这一条把成本砍掉一半，但**剩下的四条一条都不能省**（§69 S4 的代价清单）：
+  **source map**（生成行号 → 节点 id；naga 的 `ParseError` 自带 span，白送一半）、
+  **确定性**（同图同字节；不许依赖哈希容器迭代顺序 —— Unity 自己的导入器都要先 `Sort()`）、
+  **名字不是 id**（stable id + 版本 + 迁移表）、**类型规则明文**（照 Unreal：不兼容就报错，不静默截断）。
+- 生成物是**纯 WGSL**；`#import` 只出现在一个函数里（WESL 是 Bevy 的方向：
+  `Shader::from_wesl` 已存在 `bevy_shader-0.19.1/src/shader.rs:152`，但 ⚠ **Bevy 自己的 import 要等 0.20**
+  —— 所以短期仍用 naga_oil 的 `#import`，别押注）。
+- **判据**：同图两次生成逐字节相同（D）；用现有 shader 反推 schema，生成结果与手写**逐字段 + 偏移相同**；
+  改图 ⇒ 重烘 ⇒ 出图，**判据 P 成立、R 成立**。
+- **代价**：大（但没有编辑器，是「可做」的）。**两条降低不确定性的做法**：
+  ① 先用 **`node_engine` / `bevy_shader_graph`**（真的产 WGSL、MIT/Apache-2.0）花一周打原型，
+  把「DAG → WGSL → 出图」这条链走通，**但不要把产品押上去**（单人维护、文档 22%、Bevy 版本旧）；
+  ② 生成物一律用 **naga `parse_str` + `Validator::validate` 自检**（naga 承诺「校验过就不会 panic」，
+  且 `ParseError` 自带 span）—— 这等于把「生成器写错了」变成**构造期就能发现的错误**。
+
+**第 3 步｜pass 图：全屏 + compute（裁决明确要 compute）**
+
+- 文档加 `passes[]`（`kind = fullscreen | compute`）+ 预留 `targets[]`；执行器 = **一个**系统，
+  按数据拓扑序逐个 pass 录制。
+- **绑定布局逐 pass 由数据建**（这条只对 `Material` 不成立 ⇒ 我们要走的就是**自己建布局**那条路，
+  见 §74.4）；管线键 = `(shader 内容版本, 目标格式, samples, HDR, 状态, 输入格集合)`；
+  **wgpu 的管线缓存 key 不含内容** ⇒ 内容键必须自己管（`SpecializedRenderPipelines` / `Variants`）。
+- **compute 的形状**：官方既有先例 —— `examples/shader/compute_shader_game_of_life.rs:110`
+  把 compute 系统加在**根 `RenderGraph` schedule** 上（`.before(camera_driver)`），
+  配 `pipeline_cache.queue_compute_pipeline(...)` + `get_bind_group_layout(...)` +
+  `CachedPipelineState::Ok` 门控 + `Image::new_target_texture(..., RenderAssetUsages::RENDER_WORLD)`。
+  ⇒ **全屏 pass 挂 `Core3d`（每相机），compute pass 挂根 `RenderGraph`（每帧）**，
+  两类各一个执行器，共用同一份 pass 表与同一套内容键。
+- **判据**：pass 表为空 ⇒ 与今天**逐字节相同**；开一条 pass ⇒ `pixdiff` 可判；
+  每个 pass 有自己的 GPU 时间戳并进 `gpu_snapshot` 求和（`main.rs:362-367` 现在只认 Bevy 那几条）；
+  坏 pass shader ⇒ **当场拒**（§62）；**判据 R**：同一会话换 pass 图，pid 不变、两份都出图。
+- **代价**：中。**先做全屏，compute 紧接着同一份形状**（避免两次改协议）。
+
+**第 4 步｜把「无顶」这件事做掉（§74.4 的那个选择）**
+
+### §74.4 唯一还需要用户点头的一条：材质的硬顶怎么处理
+
+裁决说「render 不需要重新编译」，而**只要 schema 还在固定超集里，就有顶**：
+4 张贴图、参数块 1024 字节（`reflect.rs:25-32`）。超了就必须改 Rust ⇒ 撞判据 P。
+
+| 选项 | 做法 | 代价 | 什么时候够用 |
+|---|---|---|---|
+| **(a) 加宽超集**（推荐先做） | 一次性把超集改成「参数块 + N 张 2D + M 张 cube」（例如 8 + 4）、参数上限提到 4 KB | 一次性 Rust 改动；每条管线多几个空格（§65 实测「多绑 6 个空格无代价」） | **绝大多数 schema 变更都在顶以下** ⇒ 判据 P 成立。代价最低 |
+| **(b) 自建材质绘制路径**（无顶） | 不用 `MaterialPlugin`：自己建布局、自己建管线、自己走一个 draw 阶段（Bevy 的 `FullscreenMaterial` / `bevy_anti_alias` 是现成模板） | **大**：prepass / 阴影 / 变体要把 Bevy 那条路接管过来 | 只有真要做到「任意张数的贴图」时才需要。**裁决允许重构渲染器，但不建议为此先付这个钱** |
+
+**建议**：先 (a)，把 (b) 记成明确的后备 —— 判据 P 是「在顶以下」的性质，
+而 (a) 让顶高到实际用不到；只有当美术真的撞到顶，才动 (b)。
+
+### §74.5 明确不做（裁决后仍然不做）
+
+- **运行期改 Bevy 的 schedule**：改正在运行的 schedule 会被**静默覆盖**（§70 R2）。
+- **通用 FrameGraph（任意连边）**：culling / aliasing / barrier / debug 视图全要自己写；
+  Unity 用 18 个固定注入槽、Godot 用 5 个 ⇒ 我们也要**固定 stage 枚举 + 有穷 pass 种类**。
+- **自研渲染器**（§1 裁决：3–6 人月到 parity）。裁决说的「可以接受切换/重构渲染器」是
+  **在 Bevy 之内换路**（§74.4 (b)），不是换掉 Bevy。
+- **Inspector / 图编辑器**：裁决明确不要。
+
+### §74.6 下一步
+
+**代码未动**。按 §74.3，第 1 步（schema 数据化：契约收口 + 配方透传 + 协议加法不升版本）是唯一的前置，
+而 §74.4 那条选择（加宽固定超集 (a) vs 自建绘制路径 (b)）是路线分叉点。
+另有一处待实测（本仓规矩：没跑过不算验过）：**改 WGSL 结构体 ⇒ 重烘 ⇒ 出图，全程不重编 exe**
+（§67.1 那条过期笔记的更正）。这一条实测通过，判据 P 的第 1 步就算立住了。
