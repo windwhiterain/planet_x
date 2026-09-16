@@ -28,13 +28,15 @@ mod shot;
 mod stubs;
 mod vec;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn usage() -> String {
     [
         "用法：",
-        "  px_render_wgpu --scene 文档.pxart --out PNG [--width W] [--height H]",
+        "  px_render_wgpu --scene 文档.pxart --out PNG [--width W] [--height H] [--stats]",
         "      按文档里的帧表画一帧（切片 1：预通道 → 不透明 → blit），回读、落 PNG。",
+        "      --stats 额外报回读字节的逐通道 min/max 与颜色数（平场那种判据靠它）。",
         "  px_render_wgpu --diff A.png B.png",
         "      两张 PNG 逐像素比（不要 GPU）：差异像素数 / 最大与平均通道差 / 差异区域 /",
         "      剪影内的像素是不是逐位相同。",
@@ -58,6 +60,16 @@ struct Options {
     scene: Option<PathBuf>,
     out: Option<PathBuf>,
     diff: Option<(PathBuf, PathBuf)>,
+    /// `--stats`：把回读到的 RGBA 的**逐通道最小/最大值**与"整幅是不是纯色"打出来。
+    ///
+    /// 为什么它是宿主的一个开关、而不是一个读 PNG 的脚本：读数要的是**回读出来的那些字节**，
+    /// 而"PNG 解码器"是这条判据链上一个新的、会自己出错的环节（本仓已经为"仪器验错了产物"
+    /// 付过学费，§122）。宿主手里本来就有那些字节 —— 顺手报一下，就不必再写第二个解码器。
+    ///
+    /// 判据 §86.4 用的正是它：`grade_half` 的 `strength = 0.5` 在纯反相上是**数学上的平场**
+    /// （`mix(x, 1−x, 0.5) ≡ 0.5`）⇒ `min = max = 188 = sRGB(0.5)`，于是"uniform 里到的
+    /// 到底是不是 0.5"从一个推断变成一个读数。
+    stats: bool,
     width: u32,
     height: u32,
 }
@@ -70,6 +82,7 @@ fn parse() -> Result<Options, String> {
         scene: None,
         out: None,
         diff: None,
+        stats: false,
         width: 960,
         height: 640,
     };
@@ -81,6 +94,7 @@ fn parse() -> Result<Options, String> {
         match arg.as_str() {
             "--device" => options.device = true,
             "--shaders" => options.shaders = true,
+            "--stats" => options.stats = true,
             "--shot" => options.shot = Some(PathBuf::from(next("--shot")?)),
             "--scene" => options.scene = Some(PathBuf::from(next("--scene")?)),
             "--out" => options.out = Some(PathBuf::from(next("--out")?)),
@@ -150,7 +164,7 @@ fn check_content_shaders() -> i32 {
 }
 
 /// `--scene`：按文档画一帧、回读、落 PNG。**失败就大声说**（返回非 0）。
-fn run_scene(scene: &Path, out: &Path, width: u32, height: u32) -> i32 {
+fn run_scene(scene: &Path, out: &Path, width: u32, height: u32, stats: bool) -> i32 {
     let gpu = gpu::connect();
     let rendered = match render::run(&gpu, scene, width, height) {
         Ok(rendered) => rendered,
@@ -169,6 +183,11 @@ fn run_scene(scene: &Path, out: &Path, width: u32, height: u32) -> i32 {
         rendered.pixels[2],
         rendered.pixels[3],
     ];
+    let stats_text = if stats {
+        Some(describe(&rendered.pixels))
+    } else {
+        None
+    };
     let bytes = match shot::write_png(out, width, height, rendered.pixels) {
         Ok(bytes) => bytes,
         Err(message) => {
@@ -186,12 +205,62 @@ fn run_scene(scene: &Path, out: &Path, width: u32, height: u32) -> i32 {
         digest::short(out)
     );
     println!("首像素：R={} G={} B={} A={}", first[0], first[1], first[2], first[3]);
+    if let Some(text) = stats_text {
+        println!("{text}");
+    }
     println!("执行了：{}", rendered.executed.join(" → "));
     for (label, why) in &rendered.skipped {
         println!("⚠ 没有执行 '{label}'：{why}");
     }
     println!("（离线：不碰交换链，渲染目标是本进程自己的 Rgba8UnormSrgb）");
     0
+}
+
+/// 回读到的 RGBA 的逐通道读数：最小 / 最大 / 不同颜色数 / 出现最多的那种颜色。
+///
+/// ⚠ 它读的是**回读出来的字节**，不是 PNG 解码的结果 —— 见 [`Options::stats`]。
+/// 用 `BTreeMap` 计颜色数：平场那种判据下颜色只有一两种，而它是稳定的（读数可复现）。
+fn describe(pixels: &[u8]) -> String {
+    let mut low = [255_u8; 4];
+    let mut high = [0_u8; 4];
+    let mut counts: BTreeMap<[u8; 4], usize> = BTreeMap::new();
+    for chunk in pixels.chunks_exact(4) {
+        let texel = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        for channel in 0..4 {
+            low[channel] = low[channel].min(texel[channel]);
+            high[channel] = high[channel].max(texel[channel]);
+        }
+        *counts.entry(texel).or_insert(0) += 1;
+    }
+    let (mode, count) = counts
+        .iter()
+        .max_by_key(|(color, count)| (**count, std::cmp::Reverse(**color)))
+        .map(|(color, count)| (*color, *count))
+        .unwrap_or(([0; 4], 0));
+    format!(
+        "读数：{} 个像素｜逐通道 min R={} G={} B={} A={}｜max R={} G={} B={} A={}\
+         ｜不同颜色 {} 种｜众数 R={} G={} B={} A={}（{} 个像素，{:.2}%）",
+        pixels.len() / 4,
+        low[0],
+        low[1],
+        low[2],
+        low[3],
+        high[0],
+        high[1],
+        high[2],
+        high[3],
+        counts.len(),
+        mode[0],
+        mode[1],
+        mode[2],
+        mode[3],
+        count,
+        if pixels.is_empty() {
+            0.0
+        } else {
+            100.0 * count as f64 / (pixels.len() / 4) as f64
+        }
+    )
 }
 
 /// `--diff`：两张 PNG 的实测差异。**不要 GPU**（它是读数，不是渲染）。
@@ -235,7 +304,13 @@ fn main() {
     // ⚠ 只给一个就当场拒：默认往某个文件名写图是"替调用方决定了一件它没说过的事"。
     match (&options.scene, &options.out) {
         (Some(scene), Some(out)) => {
-            std::process::exit(run_scene(scene, out, options.width, options.height));
+            std::process::exit(run_scene(
+                scene,
+                out,
+                options.width,
+                options.height,
+                options.stats,
+            ));
         }
         (Some(_), None) => {
             eprintln!("给了 --scene 却没给 --out：图写到哪里去？\n{}", usage());

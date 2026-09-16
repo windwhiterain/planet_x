@@ -1,7 +1,11 @@
+# 参数那条路的判据（§86.4）：`strength = 0.5` 在**纯反相**上是**数学上的平场**
+# （`mix(x, 1−x, 0.5) ≡ 0.5`）⇒ 整幅图必须是同一个值 `188 = sRGB(0.5)`。
+#
+# 为什么这条值得单独一份配方：它把"uniform 里到的到底是不是 0.5"从一个**推断**变成
+# 一个**读数** —— 参数没传、传成 0、传成垃圾、按另一个类型打包，四种错法都出不了平场。
+# （`px_render_wgpu --stats` 报逐通道 min/max；另有一份独立解码 PNG 的复核。）
 [[passes]]
 kind = "fullscreen"
 label = "half-invert"
 shader = "px_grade"
-reads = ["view"]
-writes = ["view"]
 params = { strength = 0.5 }

@@ -70,6 +70,66 @@ fn px_fullscreen_vertex(@builtin(vertex_index) index: u32) -> PxFullscreenOut {
 }
 "#;
 
+/// 这份 WGSL 里有没有叫这个名字的**那个阶段**的入口点。
+///
+/// 为什么在 `check()` 里做、而不是等 wgpu 建管线：写错的入口名原来一路畅通 ——
+/// `Plan::check` 只判"名字是不是空的"，于是那份文档**烘得出来、装载也过**，
+/// 直到 `create_render_pipeline` 才炸，而那时报的是
+/// `Unable to find entry point 'fs_wrong'` —— 离病因（配方里那一行）已经很远，
+/// 而且**在错误的作用域里**：它看起来像执行器的毛病，其实是文档写错了名字。
+/// 与 §136 那条 `bake_material` 从不校验 `entry`、§87 那条"配方生成器里那句 check"
+/// 是同一条规矩：**能在装载前拒的，不许拖到建管线那一刻。**
+///
+/// ⚠ 用 `wgpu::naga`（wgpu 自己带的那一份，`features = ["wgsl"]` 就有）而不是直接依赖
+/// `naga`：`px_pass` 的唯一依赖是 `wgpu`（§85 那张表），加一条 `naga = "29"` 会多出
+/// 一个**必须与 wgpu 内部那一份同版本**的真相 —— 那正是 §66.1 那颗雷的形状。
+/// （wgpu 把它 re-export 出来，本来就是给这件事用的。）
+///
+/// 返回的是"这个阶段有哪些入口"的列表文本 —— 拒的时候要**列出来**，
+/// 不列的话作者只能靠猜（§136 同一条口径）。
+fn entry_points_of<'a>(
+    at: &str,
+    source: &str,
+    stage: wgpu::naga::ShaderStage,
+) -> Result<Vec<String>, String> {
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .map_err(|err| format!("{at} 的 WGSL 解析不过：{}", err.emit_to_string(source)))?;
+    Ok(module
+        .entry_points
+        .iter()
+        .filter(|point| point.stage == stage)
+        .map(|point| point.name.clone())
+        .collect())
+}
+
+/// 要的那个入口点在不在；不在就拒，并把这一档有的入口全列出来。
+///
+/// 措辞与 Bevy 宿主（`px_render/src/passes.rs::validate_fragment`）一致 —— 那是这条拒词
+/// 的出处：两个宿主对**同一份坏文档**说同一句话，读的人不必先分清自己开的是哪一个。
+fn require_entry(
+    at: &str,
+    what: &str,
+    entry: &str,
+    entries: &[String],
+    stage: &str,
+) -> Result<(), String> {
+    if entries.iter().any(|name| name == entry) {
+        return Ok(());
+    }
+    let stage_name = match stage {
+        "fragment" => "片段",
+        other => other,
+    };
+    Err(format!(
+        "{at} 的 {what} 里没有 @{stage} 入口 '{entry}'；它有的{stage_name}入口：{}",
+        if entries.is_empty() {
+            "（一个都没有）".to_string()
+        } else {
+            entries.join(" / ")
+        }
+    ))
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
@@ -1136,7 +1196,14 @@ impl Plan {
                     if pass.entry.is_empty() {
                         return Err(format!("{at} 没给入口点名字"));
                     }
-                    if pass.params.is_empty() || pass.params.len() % align != 0 {
+                    // ⚠ 名字**指得到东西**也要验（见 `entry_points_of` 那段：写错的入口名
+                    //    原来一路走到 `create_render_pipeline` 才炸，报的是执行器的错）。
+                    let entries = entry_points_of(
+                        at.as_str(),
+                        &pass.shader,
+                        wgpu::naga::ShaderStage::Fragment,
+                    )?;
+                    require_entry(at.as_str(), "shader", &pass.entry, &entries, "fragment")?;                    if pass.params.is_empty() || pass.params.len() % align != 0 {
                         return Err(format!(
                             "{at} 的参数块是 {} 字节：布局要求它是 {align} 的正数倍",
                             pass.params.len()
@@ -1173,6 +1240,16 @@ impl Plan {
                     if pass.vertex_entry.is_empty() {
                         return Err(format!("{at} 没给 vertex_entry"));
                     }
+                    // 顶点那条同理，而且**就用 `pass.vertex_shader` 自己**：
+                    // 执行器建顶点模块用的正是这一段文本（`module_of_wgsl(.., &pass.vertex_shader)`），
+                    // 全屏三角那份 `FULLSCREEN_VERTEX` 是**另一条路**、与几何 pass 无关。
+                    // ⇒ 拿"拼接过的那份"校验等于验一个不存在的东西（§122 那类"验错产物"）。
+                    let entries = entry_points_of(
+                        at.as_str(),
+                        &pass.vertex_shader,
+                        wgpu::naga::ShaderStage::Vertex,
+                    )?;
+                    require_entry(at.as_str(), "顶点阶段", &pass.vertex_entry, &entries, "vertex")?;
                     // 几何 pass 的绑定组由宿主解析（`Frame::materials`），执行器一个都不造：
                     // 参数块 / 格位 / reads 三栏给了也没人用 ⇒ 给了就拒（"说了没做"那一类）。
                     //
@@ -2588,12 +2665,44 @@ mod tests {
         }
     }
 
+    /// 判据夹具用的**最小自足 WGSL**：一个全屏三角的顶点阶段 + 一个把源贴图原样吐出来的
+    /// 片元阶段。
+    ///
+    /// ⚠ 为什么夹具必须是**真的 WGSL** 而不是 `"x"` / `"vertex"` 这样的占位串：
+    /// `Plan::check` 现在要验"那个入口名在这份文本里真的存在"（见 [`entry_points_of`]），
+    /// 而占位串**根本解析不了** ⇒ 一条本该验"别的东西"的判据会在这里先红。
+    /// 更要紧的是：占位串正是那个缺陷一直没被发现的原因 —— 判据里的 shader 从来不是
+    /// 真 shader，"入口名指不到东西"这件事在测试里**从来没有机会发生**。
+    /// （§144：判据的价值不在于它证明对，而在于它把"没人看"这个状态消掉。）
+    const TEST_FRAGMENT: &str = r#"
+@group(3) @binding(0) var<uniform> params: vec4<f32>;
+@group(3) @binding(1) var px_source: texture_2d<f32>;
+@group(3) @binding(2) var px_sampler: sampler;
+
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    return textureSample(px_source, px_sampler, uv) + params;
+}
+"#;
+
+    const TEST_VERTEX: &str = r#"
+struct Out {
+    @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs_main(@location(0) position: vec3<f32>) -> Out {
+    var out: Out;
+    out.position = vec4<f32>(position, 1.0);
+    return out;
+}
+"#;
+
     /// 一条最普通的全屏后处理 pass（就是这一版之前 `px_render` 造出来的那种）。
-    fn fullscreen(label: &str) -> PassPlan {
-        PassPlan {
+    fn fullscreen(label: &str) -> PassPlan {        PassPlan {
             kind: PassKind::Fullscreen,
             label: label.to_string(),
-            shader: "x".to_string(),
+            shader: TEST_FRAGMENT.to_string(),
             entry: FRAGMENT_ENTRY.to_string(),
             writes: vec!["view".to_string()],
             params: vec![0; 16],
@@ -2607,7 +2716,7 @@ mod tests {
         PassPlan {
             kind: PassKind::Geometry,
             label: label.to_string(),
-            vertex_shader: "vertex".to_string(),
+            vertex_shader: TEST_VERTEX.to_string(),
             vertex_entry: "vs_main".to_string(),
             draws: vec![Draw {
                 geometry: "planet".to_string(),
@@ -2854,7 +2963,7 @@ mod tests {
         // 颜色 + 深度的几何 pass 也合法（不透明那一档就是它）。
         let mut opaque = fullscreen("opaque");
         opaque.kind = PassKind::Geometry;
-        opaque.vertex_shader = "vertex".to_string();
+        opaque.vertex_shader = TEST_VERTEX.to_string();
         opaque.vertex_entry = "vs_main".to_string();
         opaque.draws = vec![Draw {
             geometry: "planet".to_string(),
@@ -3013,6 +3122,46 @@ mod tests {
         }];
         let err = plan_of(vec![pass]).check().expect_err("全屏 pass 带 draws ⇒ 拒");
         assert!(err.contains("draws"), "{err}");
+    }
+
+    /// ⚠ 入口名**指不到东西**必须在装载时拒 —— 这一条是 `art/passes/bad_entry.toml`
+    /// 那条判据在 CPU 侧的影子。
+    ///
+    /// 那条配方写的是 `entry = "fs_wrong"`，而它此前一路畅通：`check()` 只判"名字是不是空的"，
+    /// 于是文档烘得出来、装载也过，直到 `create_render_pipeline` 才炸 —— 报的是
+    /// `Unable to find entry point 'fs_wrong'`，看起来像执行器的毛病，其实是配方写错了名字。
+    /// 现在这一句在**装载前**就红，而且把这份 shader 真有的入口**列出来**。
+    #[test]
+    fn an_entry_point_that_is_not_in_the_shader_is_refused_by_name() {
+        let mut pass = fullscreen("wrong-entry");
+        pass.entry = "fs_wrong".to_string();
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("入口名不在 shader 里 ⇒ 拒");
+        assert!(err.contains("fs_wrong"), "{err}");
+        // 列出来的那一份必须是**真的那一份**（`TEST_FRAGMENT` 里叫 fs_main）。
+        assert!(err.contains("fs_main"), "要列出它真有的入口：{err}");
+    }
+
+    /// 顶点那条同理：几何 pass 的 `vertex_entry` 指的是**它自己那份顶点 WGSL**里的名字。
+    #[test]
+    fn a_vertex_entry_point_that_is_not_in_the_shader_is_refused_by_name() {
+        let mut pass = depth_only("prepass");
+        pass.vertex_entry = "vs_wrong".to_string();
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("顶点入口名不在那份 WGSL 里 ⇒ 拒");
+        assert!(err.contains("vs_wrong"), "{err}");
+        assert!(err.contains("vs_main"), "要列出它真有的入口：{err}");
+    }
+
+    /// WGSL 本身解析不过也要在装载时拒，而不是把一段坏文本喂给 wgpu。
+    #[test]
+    fn a_shader_that_does_not_parse_is_refused_with_the_line() {
+        let mut pass = fullscreen("broken");
+        pass.shader = "这不是 WGSL".to_string();
+        let err = plan_of(vec![pass]).check().expect_err("解析不过 ⇒ 拒");
+        assert!(err.contains("WGSL 解析不过"), "{err}");
     }
 
     /// 名字查不到时报错要**列出宿主给了哪些名字**（拼错与真没给，只有列出来才分得清）。
