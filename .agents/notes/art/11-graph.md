@@ -934,3 +934,35 @@ Cycles 官方文档明说它按顺序做四件事：
   `AsBindGroup` 派生的 layout 是**关联函数**（`Self: Sized`，无 `&self`）⇒ **一个实例无法增删 binding**；
   `ShaderCache::set_shader` 返回「依赖它、因此必须重编的 pipeline 列表」。
   ⇒ §67.2 那三条硬边界**复核成立**。
+
+### §78.7 更正台账（**会改变判断的那几条**；其余是引用精度层面的，已就地改掉）
+
+这张表的用处只有一个：**防止以后有人把已经被推翻的说法再引回来**（本调研自己就绕过一圈）。
+
+| 先前的说法 | 更正 | 影响 |
+|---|---|---|
+| MaterialX 有官方 WGSL 后端 | ❌ 只产「便于转 WGSL 的 GLSL」；真后端仅在未合并 PR #2996 | 「现成的节点图 → WGSL」少了一条（§71.3） |
+| **Rust 生态没有「节点图 → WGSL」的 crate** | ❌ **有**：`node_engine` / `bevy_shader_graph` / `reflow_shader` | **S4 的代价估算下调**（§74.3 第 2 步） |
+| `egui_node_graph` 可用 | ❌ **已全部 yank**，改用 `egui-snarl` | 编辑器那一半（本项目已决定不做） |
+| SubGraph 的 keyword 计入变体上限 | ❌ **不计入**（Unity 专门修过） | 变体账要按「ShaderGraph 自己的 keyword」算（§69 S4） |
+| 全局 256 / local 64 keyword 上限 | ⚠️ 已过时；当前口径是「**超过 128** 会变慢」 | 引用要带版本号 |
+| three.js TSL 改图不重建节点 | ⚠️ **过头了**：issue #33061 已 CLOSED 且仅限 **compute kernel**；NodeMaterial 正常 | §71.3 的 TSL 行已改：**它是真正运行期可替换的** |
+| Unity 官方说生成代码不能改 | ❌ 无此声明；官方文档化了 **Regenerate** 按钮 | 「生成代码可回改」不构成反对 codegen 的理由；真问题是**没有回节点的映射**（=source map） |
+| Unity ShaderGraph 源码可读 | ✅ 可读，但 ⛔ **非开源**（Unity Companion License） | **可以读、不可以抄**（§71.3 已记） |
+| Godot `set_code` 的重编语义（B） | ✅ 升 **A** | **§78.1，出货先例** |
+| OSL 的反射 API 名（B） | ✅ 升 **A**，且是 `getparam(i)` / `fdefault`；另有三件套 | **§78.4，本调研最完整的运行期闭环** |
+| Blender 的 node group 去重无一方来源 | ✅ 升 **A**（官方 nodes 优化页） | **§78.3，S4 的 codegen 需求清单** |
+| WESL 仓库在 `wgsl-tooling-wg` | ❌ 实际是 **`webgpu-tools`** | 找文档别找错组织 |
+| MaterialX 可运行期读图生成 shader | ⚠️ 宿主可以，但官方明说该库 **"has no runtime"**、产物是源码不是字节码 | 引它时措辞要准 |
+
+### §78.8 一条**未验证**的「第三档」（记在这里，别当结论用）
+
+**SPIRV-Reflect 能在运行期重映射 descriptor binding 并改写 SPIR-V 字节码**
+（官方：runtime descriptor-binding remap + bytecode rewrite；⚠ 官方自陈 *"not a validator"*；Rust 侧用 `rspirv-reflect`）。
+⇒ 在「只能改值（重编）」与「重新 codegen」之间，理论上还有**第三档：只改绑定布局**。
+
+**对本方案的潜在意义**：若参数池设计成「固定布局 + 间接绑定表」，那么「加一个属性」可能只需**重映射 binding**，
+**不必重新 codegen、不必重编** —— 那会是判据 P 的一条更强实现。
+⚠ **但这条在本仓链路上完全没验证**：要走它，shader 产物得是 SPIR-V（而不是 WGSL 文本），
+且要确认 wgpu 对我们改写过的字节码仍然接受、绑定布局与 `BindGroupLayout` 仍然对得上。
+**在有人真跑通之前，它只是「值得知道的一件事」，不是方案的一部分。**
