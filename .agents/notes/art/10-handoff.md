@@ -39,13 +39,36 @@
 
 **没做 / 待办**：
 
-1. ⚠ **第 1 步（契约收口 + 加宽超集，`11-graph.md` §76 的开工序）还没开工** —— 那是下一批，也是本轮实测指向的位置。
+1. **第 1 步已开工并提交**（同一天的续，见下）⇒ 只剩第 2 步（配方透传 / `SLOTS` 扫描 / 协议加法不升版本）
+   与第 3 步（pass 图 —— 另一个 worktree `.worktrees/pass-table` 在做）。
 2. `art/shaders/*.wgsl` 与配方**本轮改的都已撤回**；`target/step0/` 那批仪器**不在 git 里**（`/target` 被忽略）。
    ⚠ 收工时 `art/shaders/clouds.wgsl` 上**还挂着一处不是本轮实验留下的**未提交改动
-   （`@align(16) density`——同一个 worktree 里另一个并行会话的东西）⇒ 按用户 2026-09-16 的裁决**留着不动**。
+   （`@align(16) density`——写它的那个会话已经搬到 `.worktrees/pass-table`）⇒ 按用户 2026-09-16 的裁决**留着不动**。
 3. 这一轮**没跑** `--view` / `--sheet`（只走 `--serve` 出图）；`orbit-bare` 只当对照。
-4. `clouds.exe` 这次是**全量重算 41.9 s**（这个 worktree 的 CAS 是新建的）；
-   借用的 `generic-render/target` 现在装着本分支的 exe（与上一轮借它的做法相同）。
+4. `clouds.exe` 这次是**全量重算 41.9 s**（这个 worktree 的 CAS 是新建的）。
+
+#### 续（同一天）：第 1 步「契约收口 + 加宽超集」已提交 **`c44e136`**
+
+**判据**：产物键逐字节不变｜出图哈希四张全同 `2b1a76f4…`（= 第 0 步基线）｜配对 gpu p50
+a4 **4.633** / b12 **4.537 ms**（−2.1%，噪声内）｜84 个用例通过。细节在 **`art/08-renderer.md` §80**。
+
+**做的事**：唯一一份表 `px_protocol::material`（组号 / 格号 / 维度 / 上限 / `ParamKind` / `pack`）；
+naga 反射与组装搬进叶子 crate `px_shader`；**灭掉 2/3 那颗雷**（一律替成 3 = Bevy 的
+`MATERIAL_BIND_GROUP_INDEX`，探针材质组 2→3、job 3→4）；占位 WGSL 由表生成；
+schema descriptor 进产物（第二个 U8 blob，不参与键）+ 装载时 `schema_check` 对账；
+**加宽**：贴图 4 → 12 格（8×2D + 4×cube）、参数块 1024 → 4096 字节（老四格一个没动）。
+
+**这一步之后还没做的**：① 第 2 步（配方透传）—— 在那之前「加一个参数」仍要改 Rust（§79 的 W1）；
+② 探针三个 bin 没跑（只改了绑定组号）；③ `--view` / `--sheet` 没跑；
+④ ⚠ `tests/cloud_field.rs` 那条门红着 —— 是 `clouds.wgsl` 上那处**外来改动**把它从 128 撑到 144，
+不是这一步引入的；⑤ 构建已从借用的 `generic-render/target` **改回本 worktree 自己的 `target/`**
+（两个会话共用那个目录时轮流覆盖 exe，已经因此白烧过一次烘图）。
+
+**⚠ 并发会话的两个后果，后来人要知道**：① 另一个会话在 `.worktrees/pass-table` 里做 pass 表，
+也在编辑 `.agents/notes/art/11-graph.md` —— 本轮的实测因此**另立** `art/12-step0.md`（用户裁决）；
+`11-graph.md` 第 734 行还留着那份副本（节号也是 §75，与那边的「裸 wgpu」撞号），**等他们收工再删**。
+② 起 `--serve` 前 harness 会拦（单例闸门）：对方在跑时**不要杀**，等对方自己收；两个并列的渲染循环
+会让双方的性能数据都作废（§80.3 记了那次被污染的读数）。
 
 ### 9.1.1 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 

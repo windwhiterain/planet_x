@@ -481,3 +481,76 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
 > 所以「像 Shader Graph 那样动态」在运行期这一侧本仓**已经超过它**；缺的是作者侧（§68）；
 > ③ **render graph**：Bevy 0.19 的 `RenderGraph` 已经是 **schedule**（不是节点图），
 > 动态组装的正确落点是「文档里的 pass 表 + 一个执行器系统」，不是运行期改 schedule（§70）。
+
+---
+
+## §80 契约收口与加宽超集（§76 开工序的第 1 步，2026-09-16）
+
+**一句话**：材质绑定契约从**八处手抄**收成**一份表**（`px_protocol::material`），
+并在这份表上一次性把两个硬顶加宽（贴图 **4 → 12 格**、参数块 **1024 → 4096 字节**）。
+提交 **`c44e136`**（分支 `feature/graph-research`）。
+
+判据：**产物键逐字节不变**（只搬代码 + 加宽都换不动键）｜**出图哈希四张全同**
+（`2b1a76f4…` = §75 的基线）｜配对量到的代价**在噪声内**（§80.3）｜84 个用例通过。
+
+### §80.1 收口：表住哪儿、谁抄过它
+
+| 原来（§67.4 的八处） | 现在 |
+|---|---|
+| `px_render/src/reflect.rs:22-30` 的真源（组号 / 格号 / 维度 / 上限） | **`px_protocol::material`**（新模块）：`MATERIAL_BIND_GROUP` / `PARAMS_BINDING` / `TEXTURE_SLOTS` / `MAX_PARAMS_BYTES` / `PARAMS_ALIGN` |
+| `px_render/src/slots.rs:167-187` 的占位 WGSL 手抄同一张表 | 占位 WGSL **由表生成**（`slots::placeholder_material`）；单测把生成物组装 + 反射回来与表逐格对账 |
+| `px_render/src/shaders.rs:254` 把 `#{MATERIAL_BIND_GROUP}` 替成字面量 `"2"` | 组装器（现在住 `px_shader::assemble`）替 **`MATERIAL_BIND_GROUP` = 3** —— 这就是 Bevy 在运行期用的那个数（`ShaderDefVal::UInt("MATERIAL_BIND_GROUP", 3)`，`bevy_pbr-0.19.1/src/material.rs:74` + `:466-473`）⇒ **离线组装 == 运行期组装** |
+| `px_protocol/src/scene.rs` `TextureRef` 的半份 `check()`（「奇数格、≥1」） | `check()` 问 `material::texture_slot_of` —— 半份抄本在表加宽之后会**开始拒合法的格** |
+| `Value`（4 种写法）vs `ParamKind`（5 种类型）：对应关系只活在 `write_value` 的 match 里 | `MaterialLayout::pack` 搬进 `px_protocol::material`，`Value ↔ ParamKind` 的合法映射就那一处 |
+| naga 反射住 `px_render`（拖 bevy ⇒ 烘图侧用不了） | 反射搬进叶子 crate **`px_shader::reflect`**（该 crate 加 `naga 29` + `px_protocol`）；`px_render::reflect` 只剩「版本 + 库指纹 → 缓存」 |
+| 组装（`bevy_pbr` 桩 + `#import` 展开）住 `px_render::shaders` | 搬进 **`px_shader::assemble`**：烘图侧也要组装 —— 烘 shader 产物时要反射出 descriptor |
+| `reflect.rs:499-527` 把 `tint@16` / `inner@32` / `params_bytes == 128` **钉死**（§75 的 W4） | 只钉**名字与类型**（偏移是 shader 的事、改布局是作者的权利）；「25 格 / 128 字节」那条留给 `tests/cloud_field.rs`，因为它是**探针镜像**的契约，不是布局的 |
+
+**依赖方向**：`px_protocol`（只有类型；运行时依赖被 `tests/crate_graph.rs` 钉死 `serde` / `serde_json`）
+← `px_shader`（naga + 组装 + 反射）← `px_render` / `px_ops` / `px_graphs`。
+
+**探针**：材质组从写死的 2 挪到 **3**、job/out 从 3 挪到 **4**（`px_probe/src/common.rs` 的
+`MATERIAL_BIND_GROUP` / `JOB_BIND_GROUP`，WGSL 里写 `#{JOB_BIND_GROUP}` 由探针自己替）。
+⚠ **探针三个 bin 本轮没跑**（待跑）。
+
+### §80.2 descriptor 进产物（第二个 U8 blob）＋ 装载时对账
+
+- 烘：`px_ops::write_shader` 反射一次 → 规范 JSON（字段顺序由结构体决定，没有 map 迭代顺序可以漂）
+  → 写成**第二个 U8 blob**（`[0]` WGSL、`[1]` descriptor）。
+  ⚠ **它不参与键**（键 = `px_shader/v2` ‖ `SHADER_VERSION` ‖ 闭包指纹 ‖ WGSL 字节）⇒ 加这一条**不换任何产物键**。
+  但**改反射规则要同时升 `SHADER_VERSION`**（`px_ops::shader_key` 的注释里写了为什么）：
+  否则盘上会出现「同一个键、两份契约」。
+- 装：`art_cache::shader` 用 `art::read_shader_parts` 把两半一起读出来；`scene::schema_check`
+  拿**产物记的那份**与**现在反射出来的那份**逐字节比：
+  - 对不上 ⇒ 拒（「这份产物是拿另一版**反射规则**烘的：里面的参数值按老契约打包」+ 重烘配方）；
+  - 没记过（契约收口之前的产物）⇒ 拒（与 §52.3 的闭包闸门同款）。
+- 为什么必须对账：反射规则会变（表加宽、`ParamKind` 多一档、偏移规则修正），而**键 / 清单 / 场景键 /
+  槽版本全都不动** ⇒ 那是「同一个键、不同内容」的另一种形态。
+
+### §80.3 加宽超集：数字与代价（配对测量）
+
+| 档 | 贴图格 | 参数上限 | 出图 sha256 | gpu p50（两轮） |
+|---|---|---|---|---|
+| **A**（加宽前） | 4（2×2D + 2×cube） | 1024 字节 | `2b1a76f4…` | 4.718 / 4.548 ⇒ 均值 **4.633 ms** |
+| **B**（加宽后） | **12（8×2D + 4×cube）** | **4096 字节** | `2b1a76f4…`（逐字节同 A） | 4.541 / 4.533 ⇒ 均值 **4.537 ms** |
+
+- 差 **−0.096 ms（−2.1%）**，在噪声内 ⇒ **空格不花钱**（与 §65「多绑 6 个空格无代价」同结论，这次是 16 个）。
+- 口径：`--perf --frames 60`、960×640、场景 `orbit`、Vulkan、**配对**（A/B/A/B 逐轮换序）、
+  两支 exe 各自起服务（`target/step1/px_render-a4.exe` / `-b12.exe`，报告与图在 `target/step1/`）。
+- ⚠ **一次被污染的读数（值得记住）**：单发对比（A 先跑）给出 A **10.43** / B **5.49 ms** ——
+  而 A 档自己的前 5 帧是 5.4 ms、之后跳到 10.4 ms：**别的负载插进来了**（同一个 worktree 的另一会话在用同一块 GPU）。
+  **结论：这类比较必须配对**，单发数字再漂亮也不算数。
+- 老四格 `1 / 3 / 5 / 7` **一个都没动**：加宽只许往后**追加**（挪老格 = 把既有 shader 的贴图换到别的格上），
+  `material.rs` 与 `slots.rs` 的单测钉着这一条。
+
+### §80.4 没做 / 待办
+
+1. **配方透传（§79 的 W1）不在这一步**：`CLOUDS_KEYS` / `PLANET_KEYS` / `ATMOSPHERE_KEYS` 与 `SLOTS`
+   一个字没动 —— 那是 §76 开工序的**第 2 步**（做完这一步，「加一个参数」才真的不用重编）。
+2. 探针三个 bin（`device` / `gradient` / `field_dual`）**没跑**：这一轮只改了它的绑定组号，
+   机械改动，但按本仓规矩「没跑过不算验过」。
+3. ⚠ `tests/cloud_field.rs` 那条门**红着** —— **不是这一步引入的**：
+   `art/shaders/clouds.wgsl` 上有一处**不是本轮**的未提交改动（`@align(16) density`），
+   把 `CloudParams` 从 128 撑到 **144**（`wind_skin@128`、span 132 对齐到 16），
+   而那条门钉的正是**探针镜像**的 25 格 / 128 字节。已按用户裁决留着不动，等那边收工再撤。
+4. `--view` / `--sheet` 没跑；`SCENE_SCHEMA` 的「加法不升版本 + 拒未知字段」也没做（同属第 2 步）。
