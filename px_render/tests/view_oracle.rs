@@ -118,7 +118,6 @@ fn dump_the_default_camera_matrices() {
 }
 
 /// 一批 **(输入 → glam 通用逆)** 的位模式向量，落盘给移植件当测试集。
-///
 /// 为什么要一批而不是一个：一个向量可能被碰巧对上，而"解析刚体逆"那条路在这里
 /// 只差 1–2 ulp —— 用一批不同姿态/缩放的矩阵才拦得住那种"差一点点"。
 #[test]
@@ -186,4 +185,70 @@ fn dump_inverse_vectors() {
     let path = directory.join("bevy-view-vectors.txt");
     std::fs::write(&path, lines.join("\n") + "\n").expect("写不了向量文件");
     println!("写了 {} 组向量：{}", cases.len(), path.display());
+}
+
+/// **判定性实验**：Bevy 建相机位姿走的是 `look_to` → `Quat::from_mat3` →
+/// `Affine3A::from_rotation_translation`（内部再 `Mat3A::from_quat`）。
+/// 也就是"三列 → 四元数 → 三列"绕了一圈。
+///
+/// 如果这一圈是**逐位恒等**的，移植件就**不用**移植 `Quat::from_mat3` / `Mat3::from_quat`
+/// —— 直接拿 `right/up/back` 拼矩阵即可，省掉一整块容易写错的 Shepperd 代码。
+/// 如果**不是**恒等，就必须照抄那两段。
+///
+/// 注意这里比的是 **`Affine3A`**（`Mat3A`，SIMD 版）那条真实路径，不是标量 `Mat3`。
+#[test]
+#[ignore = "oracle 导出：跑一次就够，不进日常门"]
+fn is_the_quaternion_round_trip_the_identity() {
+    fn same_mat4(a: &Mat4, b: &Mat4) -> bool {
+        [a.x_axis, a.y_axis, a.z_axis, a.w_axis]
+            .iter()
+            .zip([b.x_axis, b.y_axis, b.z_axis, b.w_axis].iter())
+            .all(|(l, r)| {
+                l.x.to_bits() == r.x.to_bits()
+                    && l.y.to_bits() == r.y.to_bits()
+                    && l.z.to_bits() == r.z.to_bits()
+                    && l.w.to_bits() == r.w.to_bits()
+            })
+    }
+
+    for cam in [
+        None,
+        Some([0.0_f32, 0.0, 3.5]),
+        Some([35.0, 20.0, 2.4]),
+        Some([-120.0, -55.0, 6.0]),
+    ] {
+        let transform = match cam {
+            None => Transform::from_xyz(0.0, 0.55, 3.15).looking_at(Vec3::ZERO, Vec3::Y),
+            Some([yaw, pitch, distance]) => {
+                let yaw = yaw.to_radians();
+                let pitch = pitch.clamp(-89.5, 89.5).to_radians();
+                let direction =
+                    Vec3::new(pitch.cos() * yaw.sin(), pitch.sin(), pitch.cos() * yaw.cos());
+                Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
+            }
+        };
+
+        // Bevy 的真实路径。
+        let bevy_way = Mat4::from_scale_rotation_translation(
+            transform.scale,
+            transform.rotation,
+            transform.translation,
+        );
+
+        // 解析路径：`look_to` 的三列直接拼。
+        let back = (-(Vec3::ZERO - transform.translation)).normalize();
+        let right = Vec3::Y.cross(back).normalize();
+        let up = back.cross(right);
+        let direct = Mat4::from_cols(
+            right.extend(0.0),
+            up.extend(0.0),
+            back.extend(0.0),
+            transform.translation.extend(1.0),
+        );
+
+        println!(
+            "cam {cam:?}｜三列直接拼 == Bevy 那条绕四元数的路：**{}**",
+            if same_mat4(&bevy_way, &direct) { "相同" } else { "不同" }
+        );
+    }
 }
