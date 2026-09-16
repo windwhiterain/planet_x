@@ -158,6 +158,14 @@ fn main() {
             reads: entry.reads.clone(),
             writes: entry.writes.clone(),
             params,
+            // 帧图那几栏（§125）留空 ⇒ 这一档出的仍是**老形状**的 pass，
+            // 与冻在 `target/oracle/pxart-frozen/` 里那六份逐字节同形。
+            // 要出几何 pass 时从这里往后加（烘图侧改的那一件事单列，不混在这一步里）。
+            draws: Vec::new(),
+            vertex_shader: String::new(),
+            vertex_entry: String::new(),
+            render: String::new(),
+            depth_target: None,
         });
     }
     spec.passes = passes;

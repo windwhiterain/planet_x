@@ -313,6 +313,52 @@ fn canonical() -> String {
         exe: "<exe>".to_string(),
     };
 
+    // ---- pass 表的两种形状（§125）--------------------------------------------
+    //
+    // ⚠ 这两条进快照是**故意的**：`PassSpec` 长了新字段，协议形状就变了 ——
+    // 快照变、`protocol_hash` 变、旧对端在握手处被拒。那正是要人看一眼的那一刻。
+    // 注意 `scene::SceneSpec` 那一条**一个字都没动**（它的 `passes` 还是空的）：
+    // "加字段是纯加法"这件事在快照里也是看得见的。
+    let pass_fullscreen = px_protocol::scene::PassSpec {
+        kind: "fullscreen".to_string(),
+        shader: px_protocol::Member::new("shaders", "grade", &"2".repeat(64)),
+        label: "grade".to_string(),
+        entry: "fs_main".to_string(),
+        reads: vec!["scene_color".to_string()],
+        writes: vec!["view".to_string()],
+        params: BTreeMap::from([("gain".to_string(), px_protocol::Value::Num(1.05))]),
+        draws: Vec::new(),
+        vertex_shader: String::new(),
+        vertex_entry: String::new(),
+        render: String::new(),
+        depth_target: None,
+    };
+    let pass_geometry = px_protocol::scene::PassSpec {
+        kind: "geometry".to_string(),
+        shader: px_protocol::Member::new("shaders", "surface", &"9".repeat(64)),
+        label: "planet".to_string(),
+        entry: "fragment".to_string(),
+        reads: Vec::new(),
+        writes: vec!["scene_color".to_string()],
+        params: BTreeMap::from([("gain".to_string(), px_protocol::Value::Num(1.0))]),
+        draws: vec![
+            px_protocol::scene::DrawSpec {
+                geometry: "planet".to_string(),
+                material: "surface".to_string(),
+            },
+            // 空材质 = 这一笔没有片元阶段（深度-only 那一笔）。
+            px_protocol::scene::DrawSpec {
+                geometry: "stars".to_string(),
+                material: String::new(),
+            },
+        ],
+        vertex_shader: "struct Out { @builtin(position) position: vec4<f32> }\n".to_string(),
+        vertex_entry: "vertex".to_string(),
+        // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
+        render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw".to_string(),
+        depth_target: Some("depth".to_string()),
+    };
+
     let asset_kinds: Vec<&'static str> = [
         AssetKind::Field2D,
         AssetKind::OctahedralField,
@@ -367,6 +413,8 @@ fn canonical() -> String {
             "render::Scene.artifact": artifact_scene,
             "render::Scene.sequence": sequence_scene,
             "scene::SceneSpec": scene_spec,
+            "scene::PassSpec.fullscreen": pass_fullscreen,
+            "scene::PassSpec.geometry": pass_geometry,
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),

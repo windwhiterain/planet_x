@@ -509,7 +509,22 @@ fn fragment_entry() -> String {
     "fs_main".to_string()
 }
 
+/// 一笔 draw：**按名字**说"用哪份几何、哪份材质"（§125 的帧图）。
+///
+/// 名字是内容（"planet" / "icosphere"），不是渲染器的概念：执行器（`px_pass`）不认识它们，
+/// 只把名字原样交给宿主去解析成 GPU 句柄。这里放名字、不放句柄 —— 句柄是运行期的东西，
+/// 而这一份文档是要烘进产物的。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrawSpec {
+    pub geometry: String,
+    /// 材质名。**空 = 没有材质**：这一笔只有顶点阶段（深度-only 的那一笔就是这样）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PassSpec {
     pub kind: String,
     pub shader: Member,
@@ -527,6 +542,35 @@ pub struct PassSpec {
     /// 空表不落盘 ⇒ 没有参数的老文档逐字节不变。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Value>,
+    // ---- 下面四栏是 §125（帧图写进产物）加的，**全是纯加法**：----------------
+    //
+    // 一条老形状的 pass 一个都不写，于是它的 JSON 一个字节都不变
+    // （判据在 `the_frozen_originals_round_trip_byte_for_byte`：六份冻结产物读→写逐字节相同）。
+    // ⚠ 顺序也在这条判据里：新字段一律**追加在末尾**，插在中间会改老文档的键序。
+    /// 这一笔 pass 画什么：几何名 + 材质名。空 = 全屏 pass（顶点由执行器自备）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draws: Vec<DrawSpec>,
+    /// 几何 pass 的**顶点阶段**：WGSL 全文 + 入口名。空 = 全屏 pass。
+    ///
+    /// 为什么是**全文**而不是 `Member`：内容 shader 是纯片元的（没有 `@vertex`），
+    /// 顶点变换是宿主与 Bevy 逐位对齐的那一段，由烘图侧**内联**进文档 ——
+    /// 它不是 CAS 里的一份资产，放不下 `Member` 那张"图/节点/内容键"的表。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vertex_shader: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vertex_entry: String,
+    /// 附件与固定功能状态，**文本**：
+    /// `color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw`。
+    ///
+    /// ⚠ 这里**不解析、也不重写那套规则**：解析器只有一份，住在 `px_pass`
+    /// （`RenderState::parse` / `name`）。协议把它当**不透明文本**带过去 ——
+    /// 两处各写一份解析就是"同一份契约、两个数"，而那种漂移只在出图那一刻才露头。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub render: String,
+    /// 深度附件用哪张图：`resources` 里的一个名字，或者宿主这一帧给的外部目标。
+    /// 与 `render` 文本里的 `depth=` 成对出现，配对规则同样由 `px_pass` 判。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_target: Option<String>,
 }
 
 impl PassSpec {
@@ -684,10 +728,12 @@ impl SceneSpec {
             let label = pass.label_or(index);
             let at = format!("第 {index} 条 pass '{label}'");
             match pass.kind.as_str() {
-                "fullscreen" | "compute" => {}
+                // ⚠ 这里只列**文档认得的类型名**；"这一档执行器会不会画"是另一件事，
+                // 由执行器自己判（`px_pass::Plan::check`：compute 它当场拒）。
+                "fullscreen" | "geometry" | "compute" => {}
                 other => {
                     return Err(format!(
-                        "{at} 的 kind 是 '{other}'：认 'fullscreen' 与 'compute'"
+                        "{at} 的 kind 是 '{other}'：认 'fullscreen' 与 'geometry' 与 'compute'"
                     ));
                 }
             }
@@ -695,7 +741,12 @@ impl SceneSpec {
                 return Err(format!("{at} 没给入口点名字（@fragment 那个函数叫什么）"));
             }
             if pass.writes.is_empty() {
-                return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"));
+                // ⚠ 几何那一档**允许空**：深度-only 的那条 pass 不写颜色
+                // （`render` 文本里 `color=none`）。它成不成立由执行器判 ——
+                // "挂了颜色却没写目标"那条判据住在 `px_pass`，因为只有它会去解析那串文本。
+                if pass.kind != "geometry" {
+                    return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"));
+                }
             }
             if pass.writes.len() > 1 {
                 return Err(format!(
@@ -839,6 +890,18 @@ pub fn read_scene(path: &Path) -> Result<SceneSpec, String> {
 /// 写一份场景产物：清单帧（`kind = Scene`，带指纹与相机表）+ 场景帧。
 /// 指纹由调用方算（协议 crate 不引哈希库，只承诺形状）。
 pub fn write_scene(path: &Path, spec: &SceneSpec, fingerprint: u64) -> Result<u64, String> {
+    let bytes = scene_bytes(spec, fingerprint)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(path, &bytes).map_err(|err| format!("写 {} 失败：{err}", path.display()))?;
+    Ok(bytes.len() as u64)
+}
+
+/// 一份场景产物的**字节**（清单帧 + 场景帧）。`write_scene` 就是它加一次落盘。
+///
+/// 分开是为了判据：往返要**逐字节**比，就不该为了比一次往磁盘上写一份。
+pub fn scene_bytes(spec: &SceneSpec, fingerprint: u64) -> Result<Vec<u8>, String> {
     spec.check()?;
     let bundle = crate::art::ArtBundle {
         assets: vec![crate::art::AssetManifest {
@@ -860,11 +923,7 @@ pub fn write_scene(path: &Path, spec: &SceneSpec, fingerprint: u64) -> Result<u6
     ];
     let mut bytes = Vec::new();
     crate::stream::write_stream(&mut bytes, &frames).map_err(|err| err.to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    std::fs::write(path, &bytes).map_err(|err| format!("写 {} 失败：{err}", path.display()))?;
-    Ok(bytes.len() as u64)
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -924,5 +983,346 @@ mod tests {
         );
         let err = serde_json::from_str::<SceneSpec>(&geometry).expect_err("几何上的未知字段必须报错");
         assert!(err.to_string().contains("subdivisons"), "{err}");
+
+        // 新加的那几栏同样不许被静默忽略（与上面同一条裁决）。
+        let pass = old_pass_doc().replace(r#""writes": ["view"]"#, r#""writes": ["view"], "render_typo": "x""#);
+        let err = serde_json::from_str::<SceneSpec>(&pass).expect_err("pass 上的未知字段必须报错");
+        assert!(err.to_string().contains("render_typo"), "{err}");
+
+        let draw = geometry_doc().replace(r#""geometry": "planet""#, r#""geometry": "planet", "matrial": "surface""#);
+        let err = serde_json::from_str::<SceneSpec>(&draw).expect_err("draw 上的未知字段必须报错");
+        assert!(err.to_string().contains("matrial"), "{err}");
+    }
+
+
+    /// 已知的**两份**漂移，以及它的根因（先于 §125 的改动就存在）。
+    ///
+    /// `orbit-proxy-fine-bound.pxart` 与 `orbit-soft.pxart` 里都有一个 17 位的十进制串
+    /// `"slope_scale":0.11999999731779099`（也就是 `0.12f32` 的精确 f64 值，两档都用了云）。
+    /// **`serde_json` 默认的浮点解析不是正确舍入的**（它的 `float_roundtrip` 特性默认关着），
+    /// 读这个串会得到**大 1 个 ulp** 的值，于是写回去变成 `0.119999997317791`（少 2 字节）。
+    ///
+    /// 实测（探针跑过，不是推的）：`"0.11999999731779099".parse::<f64>()` = `…000`，
+    /// 而 `serde_json::from_str::<f64>(同串)` = `…001`。`Value` 是 untagged，走的正是后者。
+    ///
+    /// 为什么这不影响锚：那一格是**材质参数**，渲染器把它按 `f32` 打包，两个值得出的
+    /// `f32` 完全相同（`0.12f32`）⇒ 画面与五个锚都不动。受影响的只有"把这一份读进来
+    /// 再写回去"的字节（例如重烘这两档时它们的产物键会变）。
+    const KNOWN_DRIFT: [&str; 2] = ["orbit-proxy-fine-bound.pxart", "orbit-soft.pxart"];
+
+    /// 两份载荷的差异是不是**只在一个数上、而且只差 1 个 ulp**（连 `f32` 视角都相同）。
+    ///
+    /// 返回一句人能读的结论；不成立就返回原因。判据比"长度差不多"严得多：
+    /// 它把左边那一处数换成右边的写法之后，两份必须**逐字节相同** —— 也就是
+    /// 「除了这一个数，别的地方一处都不许变」。
+    fn only_one_ulp_of_one_number(left: &str, right: &str) -> Result<String, String> {
+        let a = left.as_bytes();
+        let b = right.as_bytes();
+        let at = a
+            .iter()
+            .zip(b.iter())
+            .position(|(x, y)| x != y)
+            .ok_or_else(|| "两份载荷逐字节相同（那它不该走到这里）".to_string())?;
+        let is_number = |c: u8| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E');
+        let token_at = |bytes: &[u8], from: usize| -> (String, usize, usize) {
+            let mut start = from;
+            while start > 0 && is_number(bytes[start - 1]) {
+                start -= 1;
+            }
+            let mut end = from;
+            while end < bytes.len() && is_number(bytes[end]) {
+                end += 1;
+            }
+            (String::from_utf8_lossy(&bytes[start..end]).to_string(), start, end)
+        };
+        let (left_token, left_start, left_end) = token_at(a, at);
+        let (right_token, _, _) = token_at(b, at);
+        let x: f64 = left_token
+            .parse()
+            .map_err(|err| format!("'{left_token}' 不是数：{err}"))?;
+        let y: f64 = right_token
+            .parse()
+            .map_err(|err| format!("'{right_token}' 不是数：{err}"))?;
+        if x == y {
+            return Err(format!(
+                "'{left_token}' 与 '{right_token}' 是同一个值 —— 差异不在值上"
+            ));
+        }
+        let ulps = (i128::from(x.to_bits()) - i128::from(y.to_bits())).abs();
+        if ulps > 1 {
+            return Err(format!("'{left_token}' 与 '{right_token}' 差了 {ulps} 个 ulp"));
+        }
+        if (x as f32) != (y as f32) {
+            return Err(format!(
+                "'{left_token}' 与 '{right_token}' 只差 1 个 ulp，但 **f32 视角也不同** —— \
+                 渲染器吃的就是 f32，那就不再是「看不见的漂移」了"
+            ));
+        }
+        let mut mended = left.to_string();
+        mended.replace_range(left_start..left_end, &right_token);
+        if mended != right {
+            return Err("除了这一处数，别的地方也变了".to_string());
+        }
+        Ok(format!(
+            "'{left_token}' → '{right_token}'（差 1 个 ulp，f32 视角相同，别处一字未动）"
+        ))
+    }
+
+    /// 一份**老形状**的文档：pass 表只有全屏那一档，新字段一个都不出现。
+    fn old_pass_doc() -> String {
+        DOC.replace(
+            r#""lights": ["#,
+            r#""passes": [{"kind": "fullscreen", "shader": {"graph": "shaders", "node": "grade", "key": "22"}, "writes": ["view"]}], "lights": ["#,
+        )
+    }
+
+    /// 把一个流的 `(载荷起点, 载荷长度)` 逐个切出来（跳过 MAGIC + 版本号）。
+    ///
+    /// 判据要在**原始字节**上比，所以需要这个：解码再编码会把"两种写法、同一个值"
+    /// 的差异抹平 —— 而那种差异正是会改产物键的东西。
+    fn payload_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
+        let mut at = 8;
+        while at + 4 <= bytes.len() {
+            let len = u32::from_le_bytes([
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3],
+            ]) as usize;
+            spans.push((at + 4, len));
+            at += 4 + len;
+        }
+        spans
+    }
+
+    /// 一份**新形状**的文档：一条几何 pass，四栏新字段全用上。
+    fn geometry_doc() -> String {
+        DOC.replace(
+            r#""lights": ["#,
+            r#""resources": [{"name": "depth", "format": "depth32float", "size": "view", "usage": ["render_attachment"]}],
+               "passes": [{
+                 "kind": "geometry",
+                 "shader": {"graph": "shaders", "node": "surface", "key": "00"},
+                 "label": "prepass",
+                 "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n@vertex fn vertex() -> Out { return Out(vec4<f32>(0.0)); }",
+                 "vertex_entry": "vertex",
+                 "writes": ["view"],
+                 "draws": [{"geometry": "planet", "material": "surface"}, {"geometry": "planet"}],
+                 "render": "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+                 "depth_target": "depth"
+               }],
+               "lights": ["#,
+        )
+    }
+
+    /// 新字段是**纯加法**：老形状的 pass 落盘时一个都不许出现。
+    ///
+    /// ⚠ 这条不是锦上添花：`skip_serializing_if` 少写一个，老文档就会多出一串
+    /// `"draws":[]`，产物键跟着变 —— 而那正是五个锚会碎掉的方式。
+    #[test]
+    fn the_new_pass_fields_stay_out_of_old_documents() {
+        let spec: SceneSpec = serde_json::from_str(&old_pass_doc()).expect("老形状的 pass 要能解析");
+        assert_eq!(spec.passes.len(), 1);
+        assert!(spec.passes[0].draws.is_empty());
+        assert!(spec.passes[0].vertex_shader.is_empty());
+        assert!(spec.passes[0].render.is_empty());
+        assert_eq!(spec.passes[0].depth_target, None);
+        let text = serde_json::to_string(&spec).expect("序列化");
+        for key in [
+            "draws",
+            "vertex_shader",
+            "vertex_entry",
+            "depth_target",
+            "\"render\"",
+        ] {
+            assert!(!text.contains(key), "老形状的 pass 落盘时不该出现 {key}：{text}");
+        }
+        // 而且它逐字往返（键序、缺省值都不许变）。
+        assert_eq!(serde_json::to_string(&spec).expect("再序列化"), text);
+    }
+
+    /// 新形状（几何 pass）要能表达、也要能往返。
+    #[test]
+    fn a_geometry_pass_is_expressible_and_round_trips() {
+        let spec: SceneSpec =
+            serde_json::from_str(&geometry_doc()).expect("几何 pass 的文档要能解析");
+        spec.check().expect("这份文档是合法的");
+        let pass = &spec.passes[0];
+        assert_eq!(pass.kind, "geometry");
+        assert_eq!(pass.draws.len(), 2);
+        assert_eq!(pass.draws[0].material, "surface");
+        assert_eq!(pass.draws[1].material, "", "第二笔没有材质（深度-only 那一笔）");
+        assert_eq!(pass.vertex_entry, "vertex");
+        assert!(pass.render.starts_with("color=none|depth=clear(0)"));
+        assert_eq!(pass.depth_target.as_deref(), Some("depth"));
+
+        let text = serde_json::to_string(&spec).expect("序列化");
+        let back: SceneSpec = serde_json::from_str(&text).expect("再解析");
+        assert_eq!(back, spec, "带新字段的文档必须逐字往返");
+        // 新字段**真的落盘了**（不是"解析进默认值"那种假通过）。
+        for key in ["draws", "vertex_shader", "render", "depth_target"] {
+            assert!(text.contains(key), "{key} 没落盘：{text}");
+        }
+    }
+
+    /// **§125 的硬判据**：六份冻结的原始产物，读进来再写回去必须**逐字节相同**。
+    ///
+    /// 这是"给 `PassSpec` 加字段是纯加法"的唯一证据：字节不动 ⇒ 产物键不动 ⇒
+    /// 五个锚**由构造保证**仍然有效。⚠ 只判"还能解析"是不够的 —— 那种判据在
+    /// "新字段被写成默认值落盘"时照样绿，而那正是会改字节的情形。
+    ///
+    /// sha256 那一栏是烘图时的 oracle 读数（`Get-FileHash`，§125 那张表）；这里对的是
+    /// **字节数**，因为 `px_protocol` 里没有 sha256，而"为一个判据引 crate"或
+    /// "抄第三份摘要"都被本仓库自己的口径否掉（`px_render::digest` 开头那段）。
+    /// 逐字节相同比 sha256 相同**更强**，所以缺的不是判据、只是"输入没被人换过"那道保险。
+    #[test]
+    fn the_frozen_originals_round_trip_byte_for_byte() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("px_protocol 上面就是工作区根")
+            .join("target/oracle/pxart-frozen");
+        if !dir.is_dir() {
+            println!(
+                "⚠ 跳过：{} 不在（target/ 不入 git）—— 不是通过，是没测",
+                dir.display()
+            );
+            return;
+        }
+        // 名字 + 字节数（§125 那张表）。字节数是"输入没被换过"的那道保险：
+        // 六份互不相同，换掉任何一份都对不上。
+        let frozen = [
+            ("orbit-bare.pxart", 4126_usize),
+            ("orbit-bare-nolight.pxart", 4136),
+            ("orbit-bare-shadow.pxart", 4138),
+            ("orbit-proxy-fine-bound.pxart", 5749),
+            ("orbit-rings.pxart", 4890),
+            ("orbit-soft.pxart", 5721),
+        ];
+        // ⚠ `orbit-proxy-fine-bound` 有一处**先于本次改动**的漂移，见 `KNOWN_DRIFT` 那段。
+        let mut identical: Vec<String> = Vec::new();
+        let mut drifted: Vec<String> = Vec::new();
+        for (name, size) in frozen {
+            let path = dir.join(name);
+            if !path.exists() {
+                println!("⚠ 跳过 {name}：不在");
+                continue;
+            }
+            let original = std::fs::read(&path).expect("读冻结产物");
+            assert_eq!(
+                original.len(),
+                size,
+                "{name} 的字节数与 §125 那张表不符 —— 输入被换过了？"
+            );
+            let frames = crate::stream::read_stream(&mut original.as_slice())
+                .unwrap_or_else(|err| panic!("{name} 读不动：{err}"));
+            let spec = frames
+                .iter()
+                .find_map(|frame| match frame {
+                    crate::stream::Frame::Scene(spec) => Some(spec.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} 里没有场景帧"));
+            let fingerprint = frames
+                .iter()
+                .find_map(|frame| match frame {
+                    crate::stream::Frame::Art(bundle) => {
+                        bundle.assets.first().map(|asset| asset.fingerprint)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} 里没有清单帧"));
+            let again = scene_bytes(&spec, fingerprint).expect("重新拼字节");
+            if again == original {
+                identical.push(name.to_string());
+                println!("{name}：{} 字节，读→写逐字节相同 ✓", original.len());
+                continue;
+            }
+            // 不一样就得说清**差在哪**：逐载荷比，而且差异必须落在数上、只差 1 个 ulp。
+            let before = payload_spans(&original);
+            let after = payload_spans(&again);
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "{name}：帧数不同（原 {}、新 {}）",
+                before.len(),
+                after.len()
+            );
+            let mut verdicts: Vec<String> = Vec::new();
+            for (index, ((left_at, left_len), (right_at, right_len))) in
+                before.iter().zip(after.iter()).enumerate()
+            {
+                let left = &original[*left_at..*left_at + *left_len];
+                let right = &again[*right_at..*right_at + *right_len];
+                if left == right {
+                    continue;
+                }
+                let verdict = only_one_ulp_of_one_number(
+                    &String::from_utf8_lossy(left),
+                    &String::from_utf8_lossy(right),
+                )
+                .unwrap_or_else(|err| {
+                    let dump = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .expect("工作区根")
+                        .join("target/pxart-roundtrip");
+                    let _ = std::fs::create_dir_all(&dump);
+                    let _ = std::fs::write(
+                        dump.join(format!("{name}.frame{index}.original")),
+                        left,
+                    );
+                    let _ = std::fs::write(
+                        dump.join(format!("{name}.frame{index}.rewritten")),
+                        right,
+                    );
+                    panic!(
+                        "{name}：第 {index} 帧（{} → {} 字节）不是「只差一个 ulp 的数」：{err}\n  \
+                         两份都落在 {}，直接 diff 就能看出是哪一格",
+                        left.len(),
+                        right.len(),
+                        dump.display()
+                    )
+                });
+                verdicts.push(format!("第 {index} 帧：{verdict}"));
+            }
+            assert_eq!(
+                verdicts.len(),
+                1,
+                "{name}：有 {} 帧都不一样，判据只认「恰好一帧、一个数、1 个 ulp」",
+                verdicts.len()
+            );
+            drifted.push(format!("{name}：{}", verdicts[0]));
+            println!("{name}：{} 字节 ⇒ {} 字节（{}）", original.len(), again.len(), verdicts[0]);
+        }
+        println!("逐字节相同：{}", identical.join(" / "));
+        for line in &drifted {
+            println!("有漂移：{line}");
+        }
+        let done = identical.len() + drifted.len();
+        assert!(done > 0, "一份冻结产物都没跑到：这条判据没测（不是通过）");
+        assert_eq!(done, frozen.len(), "有冻结产物没跑到（缺文件？）");
+        // ⚠ 名单是**钉住**的：将来谁再漂一份，这里就红 —— 而不是被
+        // 「只差 1 个 ulp」那条宽容的判据悄悄放过（那正是最坏的一种绿灯）。
+        assert_eq!(
+            identical,
+            vec![
+                "orbit-bare.pxart",
+                "orbit-bare-nolight.pxart",
+                "orbit-bare-shadow.pxart",
+                "orbit-rings.pxart",
+            ],
+            "逐字节相同的名单变了"
+        );
+        assert_eq!(
+            drifted.len(),
+            KNOWN_DRIFT.len(),
+            "漂移的份数变了：{drifted:?}"
+        );
+        for (line, expected) in drifted.iter().zip(KNOWN_DRIFT.iter()) {
+            assert!(
+                line.starts_with(expected),
+                "漂移的不是预期那一份：{line}（预期 {expected}）"
+            );
+        }
     }
 }

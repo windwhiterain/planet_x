@@ -390,6 +390,55 @@
       "verdict": "有云",
       "width": 2240
     },
+    "scene::PassSpec.fullscreen": {
+      "entry": "fs_main",
+      "kind": "fullscreen",
+      "label": "grade",
+      "params": {
+        "gain": 1.05
+      },
+      "reads": [
+        "scene_color"
+      ],
+      "shader": {
+        "graph": "shaders",
+        "key": "2222222222222222222222222222222222222222222222222222222222222222",
+        "node": "grade"
+      },
+      "writes": [
+        "view"
+      ]
+    },
+    "scene::PassSpec.geometry": {
+      "depth_target": "depth",
+      "draws": [
+        {
+          "geometry": "planet",
+          "material": "surface"
+        },
+        {
+          "geometry": "stars"
+        }
+      ],
+      "entry": "fragment",
+      "kind": "geometry",
+      "label": "planet",
+      "params": {
+        "gain": 1.0
+      },
+      "reads": [],
+      "render": "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+      "shader": {
+        "graph": "shaders",
+        "key": "9999999999999999999999999999999999999999999999999999999999999999",
+        "node": "surface"
+      },
+      "vertex_entry": "vertex",
+      "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n",
+      "writes": [
+        "scene_color"
+      ]
+    },
     "scene::SceneSpec": {
       "cameras": [
         {

@@ -394,6 +394,12 @@ mod tests {
             reads: reads.iter().map(|name| name.to_string()).collect(),
             writes: writes.iter().map(|name| name.to_string()).collect(),
             params: Default::default(),
+            // 老形状的全屏 pass：帧图那几栏（§125）留空 —— 它们不落盘，字节与从前一样。
+            draws: Vec::new(),
+            vertex_shader: String::new(),
+            vertex_entry: String::new(),
+            render: String::new(),
+            depth_target: None,
         }
     }
 
