@@ -16,6 +16,7 @@
 //!    宿主不认识「太阳」，也不替它兜底（§64.9：宇宙里没有平行光，没有点光源就是没有光）。
 
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::mat4::{Mat4, Vec4};
 
@@ -193,6 +194,189 @@ impl ClusteredLight {
     pub fn absent() -> ClusteredLight {
         ClusteredLight::zeroed()
     }
+}
+
+// ---------------------------------------------------------------------------
+// 值 → GPU：**五格全绑**的那一组
+//
+// 布局是**固定超集**：五格一个不少地进绑定组，哪怕这一帧用到它的 shader 只声明了其中一格。
+// 三条理由，每一条都是踩过的：
+//
+// 1. 一条管线要覆盖它声明的**每一组**，而组里缺一格 ⇒ `create_render_pipeline` 当场拒；
+//    五格一次绑齐，换场景/换材质都不用重建布局。
+// 2. `depth_prepass_texture`（第 20 格）是**同一张深度图**的另一条入口：大气的片元要
+//    采样它，而那张图必须在 group 0 里 —— 所以深度图不许由执行器的池子另建一张
+//    （宿主自己建、自己交出去，见 `render.rs` 那段"顶掉文档声明的资源"）。
+// 3. 绑定号会改像素（§65 记的那 22–33 个像素至今没归因）⇒ 号只有这一份（上面那五个常量），
+//    由测试钉在组装出来的 WGSL 上。
+// ---------------------------------------------------------------------------
+
+/// `globals` 的三格：这一帧的时间。⚠ 四档内容里 `wind = wind_skin = 0` ⇒ 它与像素无关
+/// （只有 `orbit-soft-wind` 那一档不是），所以这里就是零，而且**打印出来**。
+pub fn globals_zero() -> GlobalsUniform {
+    GlobalsUniform::default()
+}
+
+/// group 0 的绑定组布局（五格超集）。**由契约常量建**，不另写一张表。
+pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let buffer = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            // 每份 shader 的结构体大小不同（`globals` 只 12 字节），真实大小由缓冲决定。
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("组 0（五格超集）"),
+        entries: &[
+            buffer(VIEW_BINDING.1, wgpu::BufferBindingType::Uniform),
+            buffer(LIGHTS_BINDING.1, wgpu::BufferBindingType::Uniform),
+            buffer(
+                CLUSTERED_LIGHTS_BINDING.1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ),
+            buffer(GLOBALS_BINDING.1, wgpu::BufferBindingType::Uniform),
+            wgpu::BindGroupLayoutEntry {
+                binding: DEPTH_PREPASS_BINDING.1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// 这一帧的 group 0：布局 + 绑定组。
+///
+/// ⚠ 缓冲不在这里留字段：`wgpu::BindGroup` **自己持有**它绑的那些资源（引用计数），
+/// 建完之后缓冲就可以放手 —— 这是 wgpu 的契约，不是"大概不会出事"。
+pub struct GroupZero {
+    pub layout: wgpu::BindGroupLayout,
+    pub bind_group: wgpu::BindGroup,
+    /// 这一帧真的填了什么（进审计文本：出问题时先看这一行）。
+    pub audit: Vec<String>,
+}
+
+/// 按这一帧的值建 group 0。
+///
+/// `module` 只用来**反射聚类缓冲的长度与步长**（"能放几盏灯"写在 shader 里，
+/// 不在 Rust 里抄第二份）；其余三格的大小由各自的 Rust 结构体定，而结构体与 WGSL 的
+/// 偏移/大小由 `cargo test` 那几条判据钉着。
+pub fn frame(
+    device: &wgpu::Device,
+    module: &naga::Module,
+    camera: &crate::camera::Camera,
+    ambient: f32,
+    width: u32,
+    height: u32,
+    depth: &wgpu::TextureView,
+) -> Result<GroupZero, String> {
+    let (group, binding) = CLUSTERED_LIGHTS_BINDING;
+    let array = storage_array_layout(module, group, binding)
+        .map_err(|err| format!("反射聚类缓冲失败：{err}"))?;
+    let light = std::mem::size_of::<ClusteredLight>();
+    if array.stride as usize != light {
+        return Err(format!(
+            "聚类数组的步长是 {}，而 `ClusteredLight` 是 {light} 字节：同一份契约的两个数",
+            array.stride
+        ));
+    }
+
+    let view = ViewUniform::from_camera(camera, [0.0, 0.0, width as f32, height as f32]);
+    let lights = LightsUniform::ambient(ambient);
+    let globals = globals_zero();
+    // 「没有点光源」= 全零（`light.wgsl` 判的正是颜色）。这一档那盏灯强度是 0 ⇒
+    // 颜色 0 ⇒ 内容 shader 自己判 `lit = false` —— 宿主不认识"太阳"，也不替它兜底（§64.9）。
+    // ⚠ 长度与步长来自**反射**（`array`），不是写死的 64：能放几盏灯写在 shader 里。
+    let cluster: Vec<u8> = to_bytes(&ClusteredLight::absent()).repeat(array.count as usize);
+
+    let uniform = |label: &str, bytes: &[u8]| {
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some(label),
+            usage: wgpu::BufferUsages::UNIFORM,
+            contents: bytes,
+        })
+    };
+    let view_buffer = uniform("组 0：view", &to_uniform_bytes(&view));
+    let lights_buffer = uniform("组 0：lights", &to_uniform_bytes(&lights));
+    let globals_buffer = uniform("组 0：globals", &to_uniform_bytes(&globals));
+    let cluster_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("组 0：clustered_lights"),
+        usage: wgpu::BufferUsages::STORAGE,
+        contents: &cluster,
+    });
+
+    let layout = bind_group_layout(device);
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("组 0（五格超集）"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: VIEW_BINDING.1,
+                resource: view_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: LIGHTS_BINDING.1,
+                resource: lights_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: CLUSTERED_LIGHTS_BINDING.1,
+                resource: cluster_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: GLOBALS_BINDING.1,
+                resource: globals_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: DEPTH_PREPASS_BINDING.1,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+        ],
+    });
+    let viewport = view.viewport;
+    Ok(GroupZero {
+        layout,
+        bind_group,
+        audit: vec![
+            format!(
+                "view：world_position ({:.3}, {:.3}, {:.3})｜exposure {:.9e}（位模式 {:08X}）｜viewport ({}, {}, {}, {})",
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                view.exposure,
+                view.exposure.to_bits(),
+                viewport[0],
+                viewport[1],
+                viewport[2],
+                viewport[3]
+            ),
+            format!(
+                "lights：ambient_color ({}, {}, {}, {})",
+                lights.ambient_color[0],
+                lights.ambient_color[1],
+                lights.ambient_color[2],
+                lights.ambient_color[3]
+            ),
+            format!(
+                "globals：time {}｜delta_time {}｜frame_count {}",
+                globals.time, globals.delta_time, globals.frame_count
+            ),
+            format!(
+                "clustered_lights：{} 格 × {} 字节 = {} 字节，**全零** ⇒ 内容 shader 判 lit = false（这一档那盏灯强度 0）",
+                array.count,
+                array.stride,
+                array.size
+            ),
+        ],
+    })
 }
 
 // ---------------------------------------------------------------------------

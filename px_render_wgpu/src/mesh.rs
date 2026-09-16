@@ -37,6 +37,77 @@ impl Mesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+
+    /// 顶点属性表：`(shader_location, 格式, 从哪个属性来)`。
+    ///
+    /// ⚠ **真本是产物自己带的那四个属性**（[`px_protocol::art::MESH_ATTRIBUTES`]）：
+    /// 位置 / 法线 / uv 三样在网格里就是三块 `f32` 数组，所以**位置天然就是**
+    /// location 0 的 `Float32x3`、法线 1、uv 2 —— 这个次序不是我挑的，是产物的形状定的
+    /// （与 Bevy 那份 `Mesh` 的 `POSITION` / `NORMAL` / `UV_0` 同一个次序，oracle 也是它）。
+    /// 在宿主里另写一张"我猜的布局"就是 §66.1：漂开的那天顶点属性会静默错位。
+    ///
+    /// ⚠ 交错只发生在**上传**这一步：产物是**非交错**的三块数组（每块自己一段），
+    /// 而 `px_pass` 的一笔 draw 只接受一个顶点缓冲 ⇒ 上传前必须拼成一条 `stride = 32` 的流。
+    /// 拼的次序就是这张表（0/1/2 依次排下去）。
+    pub fn attributes() -> Vec<(u32, wgpu::VertexFormat, &'static str)> {
+        vec![
+            (0, wgpu::VertexFormat::Float32x3, "positions"),
+            (1, wgpu::VertexFormat::Float32x3, "normals"),
+            (2, wgpu::VertexFormat::Float32x2, "uvs"),
+        ]
+    }
+
+    /// 交错后的顶点流（`positions → normals → uvs`，每条 `stride` 字节）。
+    ///
+    /// ⚠ 三块属性长度不一致就**当场拒**，不许按下标硬取：那会在上传时 panic 在
+    /// 一个看不出所以然的位置，而真正的原因是产物本身不完整。
+    pub fn interleaved(&self) -> Result<Vec<u8>, String> {
+        let count = self.positions.len();
+        if self.normals.len() != count || self.uvs.len() != count {
+            return Err(format!(
+                "网格的三块属性对不上：位置 {count} 条 / 法线 {} 条 / uv {} 条 ⇒ 拼不出交错顶点流",
+                self.normals.len(),
+                self.uvs.len()
+            ));
+        }
+        let stride = Self::stride() as usize;
+        let mut bytes = Vec::with_capacity(count * stride);
+        for index in 0..count {
+            for value in self.positions[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in self.normals[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in self.uvs[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// 一条顶点的字节数 = 三个属性的宽度之和（12 + 12 + 8 = 32）。
+    pub fn stride() -> u32 {
+        Self::attributes()
+            .iter()
+            .map(|(_, format, _)| format.size() as u32)
+            .sum()
+    }
+
+    /// `stride` / 每一格的偏移与格式。偏移是**表里累加出来的**（不是手抄的 0/12/24）。
+    pub fn vertex_attributes() -> Vec<wgpu::VertexAttribute> {
+        let mut offset = 0_u64;
+        let mut attributes = Vec::new();
+        for (shader_location, format, _) in Self::attributes() {
+            attributes.push(wgpu::VertexAttribute {
+                format,
+                offset,
+                shader_location,
+            });
+            offset += format.size();
+        }
+        attributes
+    }
 }
 
 /// 闭合网格按**有向体积**判缠绕朝向：朝里就翻成朝外。返回翻之前的体积（`None` = 没动）。

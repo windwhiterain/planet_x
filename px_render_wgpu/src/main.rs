@@ -1,13 +1,19 @@
-//! px_render_wgpu：**不依赖 bevy** 的渲染宿主（`art/15-render-wgpu.md` 的 S0）。
+//! px_render_wgpu：**不依赖 bevy** 的渲染宿主（`art/15-render-wgpu.md`）。
 //!
-//! S0 只证明一件事，但证到底：**设备 → 自己的 `Rgba8UnormSrgb` → 回读 → PNG** 这条路径
-//! 通，而且**哈希稳定**。后面每一档的判据都从这条路径上取数（§105）。
+//! 三条路，一条比一条走得远：
 //!
-//! ⚠ 这一步**故意**不碰 `.pxart`、不碰材质、不碰灯：判据要一处一处地加，
-//! 「一次改两个变量」在这张图上会让读数无法归因（§107）。
+//! - `--device [--shot PNG]`：S0。设备 → 自己的 `Rgba8UnormSrgb` → 回读 → PNG 这条路径
+//!   通，而且哈希稳定（§105）。
+//! - `--shaders`：离线门。四份内容 shader 按**本宿主的桩表**组装 + naga 校验，不要 GPU。
+//! - `--scene <文档> --out PNG`：**按文档里的帧表画一帧**（切片 1：背景 + 行星）。
+//!   判据取的是**像素**，不是"跑完了"：出图之后拿 `--diff` 对着 oracle 量差异。
+//!
+//! ⚠ 每一步都**不许多画一样东西**：切片 1 故意不画天空盒与大气，好让差异的归因只有一种
+//! 解释（§107：「一次改两个变量」在这张图上会让读数无法归因）。
 
 mod art;
 mod camera;
+mod diff;
 mod digest;
 mod gpu;
 mod group0;
@@ -15,16 +21,23 @@ mod icosphere;
 mod mat4;
 mod material;
 mod mesh;
+mod plan;
+mod render;
 mod shader;
 mod shot;
 mod stubs;
 mod vec;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn usage() -> String {
     [
         "用法：",
+        "  px_render_wgpu --scene 文档.pxart --out PNG [--width W] [--height H]",
+        "      按文档里的帧表画一帧（切片 1：预通道 → 不透明 → blit），回读、落 PNG。",
+        "  px_render_wgpu --diff A.png B.png",
+        "      两张 PNG 逐像素比（不要 GPU）：差异像素数 / 最大与平均通道差 / 差异区域 /",
+        "      行星剪影内的像素是不是逐位相同。",
         "  px_render_wgpu --device [--shot PNG] [--width W] [--height H]",
         "      建实例/适配器/设备（Vulkan 锁死），报「到设备就绪」的读数；",
         "      给了 --shot 就再清一张纯色图、回读、落 PNG。",
@@ -39,6 +52,9 @@ struct Options {
     device: bool,
     shaders: bool,
     shot: Option<PathBuf>,
+    scene: Option<PathBuf>,
+    out: Option<PathBuf>,
+    diff: Option<(PathBuf, PathBuf)>,
     width: u32,
     height: u32,
 }
@@ -48,6 +64,9 @@ fn parse() -> Result<Options, String> {
         device: false,
         shaders: false,
         shot: None,
+        scene: None,
+        out: None,
+        diff: None,
         width: 960,
         height: 640,
     };
@@ -60,6 +79,13 @@ fn parse() -> Result<Options, String> {
             "--device" => options.device = true,
             "--shaders" => options.shaders = true,
             "--shot" => options.shot = Some(PathBuf::from(next("--shot")?)),
+            "--scene" => options.scene = Some(PathBuf::from(next("--scene")?)),
+            "--out" => options.out = Some(PathBuf::from(next("--out")?)),
+            "--diff" => {
+                let left = PathBuf::from(next("--diff")?);
+                let right = PathBuf::from(next("--diff（第二张）")?);
+                options.diff = Some((left, right));
+            }
             "--width" => {
                 options.width = next("--width")?
                     .parse()
@@ -120,6 +146,66 @@ fn check_content_shaders() -> i32 {
     0
 }
 
+/// `--scene`：按文档画一帧、回读、落 PNG。**失败就大声说**（返回非 0）。
+fn run_scene(scene: &Path, out: &Path, width: u32, height: u32) -> i32 {
+    let gpu = gpu::connect();
+    let rendered = match render::run(&gpu, scene, width, height) {
+        Ok(rendered) => rendered,
+        Err(message) => {
+            eprintln!("渲染失败：{message}");
+            return 1;
+        }
+    };
+    for line in &rendered.audit {
+        println!("{line}");
+    }
+    // 首像素要在把 pixels 交出去之前抄下来：写 PNG 会把它移走。
+    let first = [
+        rendered.pixels[0],
+        rendered.pixels[1],
+        rendered.pixels[2],
+        rendered.pixels[3],
+    ];
+    let bytes = match shot::write_png(out, width, height, rendered.pixels) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            eprintln!("{message}");
+            return 1;
+        }
+    };
+    println!(
+        "写出：{} → {}（{}×{}，{} 字节，sha256 {}）",
+        scene.display(),
+        out.display(),
+        width,
+        height,
+        bytes,
+        digest::short(out)
+    );
+    println!("首像素：R={} G={} B={} A={}", first[0], first[1], first[2], first[3]);
+    println!("执行了：{}", rendered.executed.join(" → "));
+    for (label, why) in &rendered.skipped {
+        println!("⚠ 没有执行 '{label}'：{why}");
+    }
+    println!("（离线：不碰交换链，渲染目标是本进程自己的 Rgba8UnormSrgb）");
+    0
+}
+
+/// `--diff`：两张 PNG 的实测差异。**不要 GPU**（它是读数，不是渲染）。
+fn run_diff(left: &Path, right: &Path) -> i32 {
+    match diff::compare(left, right) {
+        Ok(report) => {
+            println!("比对：{} ↔ {}", left.display(), right.display());
+            println!("{}", report.report());
+            0
+        }
+        Err(message) => {
+            eprintln!("比不了：{message}");
+            1
+        }
+    }
+}
+
 fn main() {
     let options = match parse() {
         Ok(options) => options,
@@ -132,6 +218,28 @@ fn main() {
     // 组装那一路在建设备**之前**返回：它是离线的，不该为它付一次 Vulkan 初始化。
     if options.shaders {
         std::process::exit(check_content_shaders());
+    }
+
+    // 比对那一档同理：它是**读数**，一张 PNG 都不想重画。
+    if let Some((left, right)) = &options.diff {
+        std::process::exit(run_diff(left, right));
+    }
+
+    // 渲染那一档：要 `--scene` 与 `--out` **成对**出现。
+    // ⚠ 只给一个就当场拒：默认往某个文件名写图是"替调用方决定了一件它没说过的事"。
+    match (&options.scene, &options.out) {
+        (Some(scene), Some(out)) => {
+            std::process::exit(run_scene(scene, out, options.width, options.height));
+        }
+        (Some(_), None) => {
+            eprintln!("给了 --scene 却没给 --out：图写到哪里去？\n{}", usage());
+            std::process::exit(64);
+        }
+        (None, Some(_)) => {
+            eprintln!("给了 --out 却没给 --scene：画什么？\n{}", usage());
+            std::process::exit(64);
+        }
+        (None, None) => {}
     }
 
     if !options.device && options.shot.is_none() {
@@ -153,10 +261,7 @@ fn main() {
         .features()
         .contains(wgpu::Features::TIMESTAMP_QUERY)
     {
-        println!(
-            "时间戳周期：{} ns",
-            gpu.queue.get_timestamp_period()
-        );
+        println!("时间戳周期：{} ns", gpu.queue.get_timestamp_period());
     } else {
         // §104 第 12 条：不可用就降级（gpu_ms 报 null），**不许 panic**。
         println!("时间戳周期：（这一台不可用 ⇒ gpu_ms 将报 null，不做替代读数）");

@@ -383,7 +383,10 @@ fn load_object(
 ///    偏移规则修正）。规则一变，同一份 WGSL 读出的是另一份契约，而产物里的参数值是按
 ///    **老契约**打包的 —— 装出来是另一份东西却不报错。所以拿产物记的那份规范 JSON
 ///    跟现在反射出来的逐字节比。
-fn load_shader(
+/// ⚠ `pub(crate)`：**全屏 pass 的片元阶段走的是同一条路**（`plan.rs` 拿它组装 + 反射 +
+/// 打包参数）。全屏 pass 与材质共用同一份绑定契约，装载这两份 shader 的两道对账
+/// （include 闭包 / schema descriptor）也就只有这一份 —— 抄一遍就是"同一个成员、两处验"。
+pub(crate) fn load_shader(
     member: &Member,
     pcg_root: &Path,
     modules: &px_shader::ModuleTable,
