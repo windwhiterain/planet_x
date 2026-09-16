@@ -10,14 +10,16 @@
 ### 9.1.0 本轮（2026-09-16，`.worktrees/graph-research`）：动态 schema 调研 ＋ **第 0 步实测**（**代码未动**）
 
 **在哪条线上**：`.worktrees/graph-research`（分支 `feature/graph-research`，从 `v2` 的 `b2273e8` 拉），
-**还没并入 `v2`**。到这一轮为止**只有笔记**：`11-graph.md` §67–§74（动态 schema 与动态 render graph 的调研、
-四条用户裁决、修订后的路线与开工顺序），本轮的 **§75 是第一次实测**。
-**代码一行没改**：`git status` 干净，`px_render.exe` 的 sha256 全程不变。
+**还没并入 `v2`**。到这一轮为止**只有笔记**：`11-graph.md` §67–§78（动态 schema 与动态 render graph 的调研、
+四条用户裁决、修订后的路线与开工顺序、裸 wgpu 与 Bevy 图能有多动态的追问），本轮的实测**单独一篇**：
+**`art/12-step0.md` §79**。
+**代码一行没改**：`px_render.exe` 的 sha256 全程不变（`d1e39651066b0ed8…`），
+本轮改过的 `art/shaders/clouds.wgsl` 与 `art/scene/orbit.toml` **全部撤回**。
 
 **用户本轮重申的口径**：**「对于美术设计师来说 material schema 应当表现为动态的」**
 ⇒ 目标**不是**面板 / 编辑器（§73 已裁决不要），而是**改 WGSL + 改配方 ⇒ 重烘 ⇒ 出图：0 编译、0 重启**（判据 P/R）。
 
-**做了什么**（读数与逐条墙在 `11-graph.md` **§75**）：借 `.worktrees/generic-render/target` 当构建缓存
+**做了什么**（读数与四道墙在 `art/12-step0.md` **§79**）：借 `.worktrees/generic-render/target` 当构建缓存
 （复用 Bevy 依赖，本地 crate 39.8 s），**一个 `--serve` 会话（pid 18172）跑完八步**，
 中间只改 `art/shaders/clouds.wgsl`（结构体）与一次 `art/scene/orbit.toml`。
 仪器落在 `target/step0/`：`serve.ps1` / `req.ps1`（每次请求打 pid、退出码、png 哈希、exe 哈希）/
@@ -37,8 +39,10 @@
 
 **没做 / 待办**：
 
-1. ⚠ **§74.6 的第 1 步（契约收口 + 加宽超集）还没开工** —— 那是下一批，也是本轮实测指向的位置。
-2. `art/shaders/*.wgsl` 与配方**都已撤回**（收工 `git status` 干净）；`target/step0/` 那批仪器**不在 git 里**（`/target` 被忽略）。
+1. ⚠ **第 1 步（契约收口 + 加宽超集，`11-graph.md` §76 的开工序）还没开工** —— 那是下一批，也是本轮实测指向的位置。
+2. `art/shaders/*.wgsl` 与配方**本轮改的都已撤回**；`target/step0/` 那批仪器**不在 git 里**（`/target` 被忽略）。
+   ⚠ 收工时 `art/shaders/clouds.wgsl` 上**还挂着一处不是本轮实验留下的**未提交改动
+   （`@align(16) density`——同一个 worktree 里另一个并行会话的东西）⇒ 按用户 2026-09-16 的裁决**留着不动**。
 3. 这一轮**没跑** `--view` / `--sheet`（只走 `--serve` 出图）；`orbit-bare` 只当对照。
 4. `clouds.exe` 这次是**全量重算 41.9 s**（这个 worktree 的 CAS 是新建的）；
    借用的 `generic-render/target` 现在装着本分支的 exe（与上一轮借它的做法相同）。
