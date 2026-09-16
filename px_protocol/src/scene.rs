@@ -261,6 +261,7 @@ impl Sampler {
 ///
 /// **绑定下标就是契约**：shader 得在那一格声明贴图，`+1` 那一格声明采样器。
 /// 渲染器按反射出来的声明校验维度（2D / cube）与产物是不是同一回事 —— 对不上当场报错。
+/// 哪几格能放贴图**只有一份来源**：`crate::material::TEXTURE_SLOTS`（§74.3 的契约收口）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextureRef {
     pub binding: u32,
@@ -559,16 +560,15 @@ impl SceneSpec {
                 ));
             }
             for (role, texture) in &object.material.textures {
-                if texture.binding < 1 {
+                // 格号是不是合法的**只有一份**判据：契约表（`crate::material::TEXTURE_SLOTS`）。
+                // 这一段原来自己写「奇数格、≥1」——那是那张表的半份手抄（§67.4 第 4 处）：
+                // 表加宽之后（§74.4 裁决 (a)：4 格 → 12 格），半份抄本会开始拒合法的格。
+                if crate::material::texture_slot_of(texture.binding).is_none() {
                     return Err(format!(
-                        "物体 '{}' 的贴图 '{role}' 绑在 {} 格：0 格是参数块（uniform），贴图从 1 起",
-                        object.id, texture.binding
-                    ));
-                }
-                if texture.binding % 2 == 0 {
-                    return Err(format!(
-                        "物体 '{}' 的贴图 '{role}' 绑在 {} 格：贴图占奇数格、采样器占下一格（约定见 TextureRef）",
-                        object.id, texture.binding
+                        "物体 '{}' 的贴图 '{role}' 绑在第 {} 格：材质只认 {} 这几格（采样器占下一格）",
+                        object.id,
+                        texture.binding,
+                        crate::material::texture_bindings()
                     ));
                 }
             }

@@ -834,20 +834,38 @@ mod tests {
 /// 读一份 Shader 产物（`kind = Shader`）里的 WGSL 文本。
 /// 它和场、网格走同一条 CAS：内容键 → 路径 → 载荷。
 pub fn read_shader(path: &std::path::Path) -> Result<String, String> {
+    Ok(read_shader_parts(path)?.0)
+}
+
+/// 读一份 Shader 产物的两半：**WGSL 文本** + **schema descriptor**（规范 JSON）。
+///
+/// 约定：第一个 U8 blob 是 WGSL，第二个（如果有）是 descriptor ——
+/// 它由烘图侧用 `px_shader::reflect` 算出来（契约收口之后，§74.3）。
+/// 老产物只有第一个 blob ⇒ `None`：调用方该当场拒并给重烘配方，
+/// 与「闭包指纹没记过」同款（§52.3）—— 那一版没有 descriptor，认它等于认错契约。
+pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<String>), String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames =
         crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
-    let blob = frames
-        .iter()
-        .find_map(|frame| match frame {
-            crate::stream::Frame::Blob(blob) if blob.header.dtype == crate::wire::DType::U8 => {
-                Some(blob)
-            }
-            _ => None,
-        })
-        .ok_or_else(|| format!("{} 里没有 U8 blob（不是 shader 产物？）", path.display()))?;
-    String::from_utf8(blob.bytes.clone())
-        .map_err(|err| format!("{} 的 WGSL 不是合法 UTF-8：{err}", path.display()))
+    let mut blobs = frames.iter().filter_map(|frame| match frame {
+        crate::stream::Frame::Blob(blob) if blob.header.dtype == crate::wire::DType::U8 => {
+            Some(blob)
+        }
+        _ => None,
+    });
+    let Some(wgsl) = blobs.next() else {
+        return Err(format!("{} 里没有 U8 blob（不是 shader 产物？）", path.display()));
+    };
+    let source = String::from_utf8(wgsl.bytes.clone())
+        .map_err(|err| format!("{} 的 WGSL 不是合法 UTF-8：{err}", path.display()))?;
+    let schema = match blobs.next() {
+        Some(blob) => Some(
+            String::from_utf8(blob.bytes.clone())
+                .map_err(|err| format!("{} 的 schema descriptor 不是合法 UTF-8：{err}", path.display()))?,
+        ),
+        None => None,
+    };
+    Ok((source, schema))
 }
 
 /// 从 `.pxart` / `.pxstream` 里取出第一份产物清单。

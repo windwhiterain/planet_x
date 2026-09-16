@@ -13,7 +13,12 @@
 //! ⚠ 外部符号（`bevy_pbr::…`）**只记名字**：它们的实现由 Bevy / naga_oil 的版本决定，
 //! 那是 `px_ops::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
 //!
-//! 依赖方向：叶子 crate，不依赖本仓任何 crate（`px_ops` / `px_graphs` 与 `px_render` 都能用）。
+//! 依赖方向：**叶子 crate** —— 除了 `px_protocol`（只有类型，没有实现）不依赖本仓任何 crate，
+//! 也不依赖 bevy / wgpu。`px_ops` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
+//! 烘图侧要在这里算键、组装、反射，运行期要在同一份规则下装载与对账。
+
+pub mod assemble;
+pub mod reflect;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

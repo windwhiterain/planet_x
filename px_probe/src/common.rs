@@ -6,6 +6,23 @@
 
 pub use px_render::shaders::assemble;
 
+/// 材质绑定组 = **契约表里的那个数**（= Bevy 的 `MATERIAL_BIND_GROUP_INDEX`）。
+/// 探针原来自己写死 2（那是老组装器替出来的数），而运行期是 3 —— 同一个 `#{MATERIAL_BIND_GROUP}`
+/// 在两边组的不是同一份东西（`art/12-step0.md` §79 的「2/3 那颗雷」）。
+pub use px_protocol::material::MATERIAL_BIND_GROUP;
+
+/// 探针自己的 job/out 排在材质组后面一格。**不许写死数字**：`#{JOB_BIND_GROUP}` 由
+/// [`job_group_source`] 替进探针那段 WGSL，两处永远同一个数。
+pub const JOB_BIND_GROUP: u32 = MATERIAL_BIND_GROUP + 1;
+
+/// 探针 WGSL 里的组号占位（材质组那个占位由组装器替，见 `px_shader::assemble`）。
+pub const JOB_BIND_GROUP_TOKEN: &str = "#{JOB_BIND_GROUP}";
+
+/// 把探针自己那段 WGSL 里的 `#{JOB_BIND_GROUP}` 替成 [`JOB_BIND_GROUP`]。
+pub fn job_group_source(source: &str) -> String {
+    source.replace(JOB_BIND_GROUP_TOKEN, &JOB_BIND_GROUP.to_string())
+}
+
 use std::sync::OnceLock;
 
 pub struct Gpu {

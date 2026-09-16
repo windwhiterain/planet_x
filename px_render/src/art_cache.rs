@@ -94,10 +94,14 @@ pub struct ReadyTexture {
 /// `closure` = 产物烘的时候，它那份 WGSL 的 **include 闭包指纹**（`px_shader`，§52.3）。
 /// `None` = 老产物没记过（`px_shader/v1` 时代）⇒ 调用方该当场拒：那一版的键里少了
 /// 「include」这一维，认它等于认错东西。
+///
+/// `schema` = 同样在烘的时候算出来的 **schema descriptor**（规范 JSON，第二个 U8 blob）。
+/// `None` = 老产物没记过（契约收口之前）⇒ 同样当场拒，见 `scene::schema_check`。
 #[derive(Clone)]
 pub struct ShaderEntry {
     pub source: String,
     pub closure: Option<u64>,
+    pub schema: Option<String>,
 }
 
 struct Slot<V> {
@@ -323,6 +327,7 @@ impl ArtCache {
     /// 而这门缓存与其他几门同规矩：键 = 路径 + 载荷指纹，指纹为 0 就不进册。
     /// 顺带把清单里的**闭包指纹**带出来：装载时要拿它跟盘上现在的闭包对账（§52.3），
     /// 对不上就是"这份产物是拿另一版 include 烘的"。
+    /// 第二个 blob 是 **schema descriptor**：同样在装载时跟现反射出来的那份对账。
     pub fn shader(&mut self, path: &str) -> Result<Cached<ShaderEntry>, String> {
         let identity = self.identity(path, path)?;
         // 指纹为 0 的旧产物走到下面那条 `None` 支路（它多半也没记过闭包 ⇒ `closure` 是 None）。
@@ -331,10 +336,12 @@ impl ArtCache {
             .and_then(|(_, params)| px_shader::closure_from_params(params));
         let Some((key, _params)) = identity else {
             self.misses += 1;
+            let (source, schema) = art::read_shader_parts(Path::new(path))?;
             return Ok(Cached {
                 value: ShaderEntry {
-                    source: art::read_shader(Path::new(path))?,
+                    source,
                     closure,
+                    schema,
                 },
                 hit: false,
             });
@@ -347,9 +354,11 @@ impl ArtCache {
             });
         }
         self.misses += 1;
+        let (source, schema) = art::read_shader_parts(Path::new(path))?;
         let entry = ShaderEntry {
-            source: art::read_shader(Path::new(path))?,
+            source,
             closure,
+            schema,
         };
         self.shaders.put(key, entry.clone());
         Ok(Cached {

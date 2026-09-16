@@ -8,6 +8,8 @@ use bevy::asset::{AssetPath, AssetServer, Handle};
 use bevy::prelude::*;
 use bevy::shader::Shader;
 
+use px_protocol::material::{PARAMS_BINDING, TEXTURE_SLOTS};
+
 /// 槽资产源的名字。材质里的 `ShaderRef::Path` 指向 `slots://<槽>.<版本>.wgsl`。
 pub const SOURCE: &str = "slots";
 
@@ -164,30 +166,42 @@ pub fn activate(server: &AssetServer, slot: &str, version: u64, wgsl: &str) -> b
 // 占位
 // ---------------------------------------------------------------------------
 
-const PLACEHOLDER_MATERIAL: &str = r#"#import bevy_pbr::forward_io::VertexOutput
-
-struct DocParams {
-    unused: f32,
-};
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: DocParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var texture0: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var sampler0: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var texture1: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var sampler1: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var texture2: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var sampler2: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(7) var texture3: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(8) var sampler3: sampler;
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+/// 占位材质的 WGSL：**由契约表生成**（`px_protocol::material`）。
+///
+/// 这一段原来是**手抄**那张表（§67.4 的第 2 处）⇒ 加宽超集时两边一起改、漏一处就是
+/// 「布局里有这一格、占位 shader 里没有」。生成之后不存在这个问题：占位永远与表同形。
+///
+/// 组号写的是 `#{MATERIAL_BIND_GROUP}`（运行期由 Bevy 的 shader def 替成 3）：
+/// 这份文本是**交给 Bevy 装**的，替数的事归它 —— 离线那边替的是同一个数
+/// （`px_shader::assemble`），`the_placeholder_declares_exactly_the_table` 那条单测盯着这件事。
+fn placeholder_material() -> String {
+    /// 每条绑定声明的组前缀。写成 `#{}` 占位是**有意的**：这份文本交给 Bevy 装载，
+    /// 由它的 shader def 替成运行期那个数（离线那边由 `px_shader::assemble` 替同一个）。
+    const GROUP: &str = "@group(#{MATERIAL_BIND_GROUP})";
+    let mut out = String::from("#import bevy_pbr::forward_io::VertexOutput\n\n");
+    out.push_str("struct DocParams {\n    unused: f32,\n};\n\n");
+    out.push_str(&format!(
+        "{GROUP} @binding({PARAMS_BINDING}) var<uniform> params: DocParams;\n"
+    ));
+    for (index, (binding, dimension)) in TEXTURE_SLOTS.iter().enumerate() {
+        out.push_str(&format!(
+            "{GROUP} @binding({binding}) var texture{index}: {}<f32>;\n",
+            dimension.name()
+        ));
+        out.push_str(&format!(
+            "{GROUP} @binding({}) var sampler{index}: sampler;\n",
+            binding + 1
+        ));
+    }
+    out.push_str(
+        "\n@fragment\nfn fragment(in: VertexOutput) -> @location(0) vec4<f32> {\n    \
+         return vec4<f32>(1.0, 0.0, 1.0, 1.0);\n}\n",
+    );
+    out
 }
-"#;
 
-pub fn placeholders() -> [(&'static str, &'static str); 1] {
-    [(MATERIAL, PLACEHOLDER_MATERIAL)]
+pub fn placeholders() -> Vec<(&'static str, String)> {
+    vec![(MATERIAL, placeholder_material())]
 }
 
 /// 槽的内容住在内存目录里：没有占位文件，真本由场景产物在运行时装进来。
@@ -201,7 +215,7 @@ impl ShaderSlots {
     pub fn seeded() -> Self {
         let dir = Dir::new(PathBuf::from("slots"));
         for (slot, source) in placeholders() {
-            dir.insert_asset_text(Path::new(&placeholder_file(slot)), source);
+            dir.insert_asset_text(Path::new(&placeholder_file(slot)), &source);
         }
         Self { dir }
     }
@@ -283,5 +297,34 @@ mod tests {
         // 键不是 64 位十六进制 ⇒ 报错，不静默取前 16 位。
         assert!(version_of("deadbeef").is_err());
         assert!(version_of(&"z".repeat(64)).is_err());
+    }
+
+    /// 占位是**生成的**：它声明的绑定必须与契约表逐格相同 —— 这正是原来那张手抄表
+    /// 会漂开的地方（§67.4 第 2 处）。这里把生成文本离线组装一遍再反射回来对账。
+    #[test]
+    fn the_placeholder_declares_exactly_the_table() {
+        let source = placeholder_material();
+        let modules = crate::shaders::module_sources();
+        let mut seen = Vec::new();
+        let assembled = crate::shaders::render_source(&source, &modules, &mut seen);
+        assert!(
+            !assembled.contains("#{MATERIAL_BIND_GROUP}"),
+            "离线组装必须把组号替掉（替的就是运行期那个数）"
+        );
+        let layout = px_shader::reflect::reflect_assembled(&assembled, "占位").expect("反射占位");
+        assert_eq!(
+            layout.textures.len(),
+            TEXTURE_SLOTS.len(),
+            "占位声明的贴图格数必须等于表里的格数"
+        );
+        for (slot, (binding, dimension)) in layout.textures.iter().zip(TEXTURE_SLOTS.iter()) {
+            assert_eq!(slot.binding, *binding);
+            assert_eq!(slot.dimension, *dimension);
+        }
+        assert_eq!(
+            layout.textures.len(),
+            12,
+            "加宽之后是 8 张 2D + 4 张 cube（§74.4 裁决 (a)）"
+        );
     }
 }

@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 px_render = { path = "../px_render" }
 px_verify = { path = "../px_verify" }
+# 绑定组编号与渲染器**同一份来源**（契约表 `px_protocol::material`）：探针不再自己写死 2。
+px_protocol = { path = "../px_protocol" }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"

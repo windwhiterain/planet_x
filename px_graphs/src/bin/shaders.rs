@@ -31,7 +31,7 @@ fn main() {
         // 键不动、场景键不动、槽版本不动，而画出来的东西变了。
         let closure = px_shader::closure(&text, &modules);
         let (key, artifact, bytes) =
-            px_ops::write_shader(slot, &text, &closure).unwrap_or_else(|err| panic!("{err}"));
+            px_ops::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
         println!(
             "产物 {slot} -> {}（{}，{} 字节 WGSL）",
             artifact.display(),

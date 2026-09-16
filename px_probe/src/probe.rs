@@ -1,4 +1,6 @@
-use crate::common::{assemble, connect};
+use crate::common::{
+    JOB_BIND_GROUP, MATERIAL_BIND_GROUP, assemble, connect, job_group_source,
+};
 use crate::params::CloudParams;
 
 pub const POINTS: usize = 512;
@@ -15,8 +17,8 @@ struct Job {
     points: array<vec4<f32>, 512>,
 };
 
-@group(3) @binding(0) var<uniform> job: Job;
-@group(3) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
+@group(#{JOB_BIND_GROUP}) @binding(0) var<uniform> job: Job;
+@group(#{JOB_BIND_GROUP}) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
 
 fn fd_axis(point: vec3<f32>, axis: u32, h: f32) -> f32 {
     let ahead = vec3<f32>(
@@ -251,7 +253,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
     println!("适配器：{:?}", gpu.adapter.get_info());
 
     let mut source = assemble("clouds.wgsl");
-    source.push_str(PROBE);
+    source.push_str(&job_group_source(PROBE));
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cloud field probe"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -403,7 +405,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("probe"),
-        bind_group_layouts: &[None, None, Some(&material), Some(&job_layout)],
+        bind_group_layouts: &[None, None, None, Some(&material), Some(&job_layout)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -424,8 +426,8 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
             timestamp_writes: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(2, &material_group, &[]);
-        pass.set_bind_group(3, &job_group, &[]);
+        pass.set_bind_group(MATERIAL_BIND_GROUP, &material_group, &[]);
+        pass.set_bind_group(JOB_BIND_GROUP, &job_group, &[]);
         pass.dispatch_workgroups((points.len() as u32).div_ceil(WORKGROUP), 1, 1);
     }
     encoder.copy_buffer_to_buffer(&out_buffer, 0, &staging, 0, out_size);

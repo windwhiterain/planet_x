@@ -115,7 +115,7 @@ fn slot_placeholders_parse_and_validate() {
 
     for (name, source) in px_render::slots::placeholders() {
         let mut seen = Vec::new();
-        let assembled = render_source(source, &modules, &mut seen);
+        let assembled = render_source(&source, &modules, &mut seen);
         let module = naga::front::wgsl::parse_str(&assembled).unwrap_or_else(|error| {
             panic!(
                 "槽占位 {name} 解析失败：\n{}\n---- 组装后的源码 ----\n{assembled}",
