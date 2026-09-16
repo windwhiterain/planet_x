@@ -609,5 +609,46 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
 
 1. **加一种「结构键」**（比如配方里要能写 `moons = 3`）：那是编译器逻辑，仍要改 Rust（应该的）。
 2. **加一种全新的 part kind**（比如「环带」换成独立的 kind）：仍要改 Rust（装配逻辑）。
-3. 探针三个 bin 没跑；`--view` / `--sheet` 没跑。
+3. `--view` / `--sheet` 没跑。
 4. `art/11-graph.md` 里那份重复的 §75 副本还没删（等并发会话收工）。
+
+### §81.6 顺手修的：探针（唯一梯度判据）一直红着
+
+**它是怎么一直红着没人发现的**：第 1 步把 `#{MATERIAL_BIND_GROUP}` 从 2 统一到 3 之后，
+按规矩跑 `gradient`，8 个 check 里 7 个当场失败。于是做了 A/B：
+
+| 状态 | 组装器替的组号 | 探针 | 结果 |
+|---|---|---|---|
+| 第 0 步那次提交（`dbd227c`）原样 | 2 | 原样 | **同样红**：`Shader global ResourceBinding { group: 2, binding: 5 } is not available in the pipeline layout` |
+| 第 1 步之后 | 3 | 材质组 2→3、job 3→4 | 红：`group index 4 exceeds the max_bind_groups limit of 4` |
+| 现在 | 3 | 材质组 3、job **1**、材质贴图按契约第 5 格 | **7 / 8 通过** |
+
+**两条根因**：
+1. **探针是第四份手抄的绑定表**（§67.4 第 7 处的那一类）：它自己写「贴图 1 / 采样器 2」，
+   而 `76be114`（通用渲染 S0–S4）把材质贴图挪到了奇数格（云是**第 5 格**、采样器 6）⇒
+   探针的布局与 shader 声明对不上，`create_compute_pipeline` 直接把那一族 check 全判死。
+   ⇒ 现在这两个数来自契约（`px_probe::common::COVERAGE_BINDING`），并有单测钉「它必须是表里的一个 cube 格」。
+2. **材质的组号是 3、探针自己的组不能再往后排**：探针设备的 limits 是
+   `wgpu::Limits::downlevel_defaults()`（`max_bind_groups = 4` ⇒ 合法只有 0..3），
+   排到 4 会被 `create_shader_module` 拒。⇒ job/out 放**第 1 格**（0 是 Bevy 的视图组、2 空着），
+   管线布局数组也只有 4 项。
+
+**还剩一个 check 红着，而它暴露的是内容问题，不是管线**：
+`the_residual_is_attributed_to_one_channel` 的
+`[简化] 解析路径的噪声值和值路径的噪声值差 **2.2587842e-1**`
+—— 同一份噪声的两条代码路径（`billows` 值路径 / `billows_along(...).x` 解析路径）本该只差 1 ULP。
+`clouds.wgsl` 里这两条路的两侧（`sampled_noise` vs `sampled_noise_along`、`detail_curve` 的两侧）
+**看起来是对称的**（风偏置也逐位相同）。
+
+⚠ **但 arbiter 说不该慌**：同一次修复之后 `field_dual`（§46.3 的判据）**全部通过**，读数：
+
+| 项 | 出入 |
+|---|---|
+| 参考实现 vs shader：场值 / 噪声项 | 5.537e-5 / 8.345e-7 |
+| 解析梯度 vs 精确梯度 | 中位相对 **6.098e-6**、最大 9.368e-4（**优于最好的差商** 7.180e-4 @ h=8e-5） |
+| 覆盖度项 vs 精确带梯度 | 中位相对 4.450e-6（修复前 3.129e-2） |
+
+⇒ 梯度本身是对的；那条归因 check 更可能是**探针自己比错了两个量**（`noise_pair` 的构造，
+比如两侧的 `with_skin` / `ablate` 档不同义）。**在它判明之前**：`gradient` 的逐通道归因不当读数，
+`field_dual` 可以当。这也说明一件事——**判据死了要立刻修**：它红着的这段时间里，
+`field_dual` 一次也没跑过（管线建不起来），而它是本仓「梯度对不对」的唯一断言。

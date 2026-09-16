@@ -1,5 +1,6 @@
 use crate::common::{
-    JOB_BIND_GROUP, MATERIAL_BIND_GROUP, assemble, connect, job_group_source,
+    COVERAGE_BINDING, COVERAGE_SAMPLER_BINDING, JOB_BIND_GROUP, MATERIAL_BIND_GROUP, assemble,
+    connect, job_group_source,
 };
 use crate::params::CloudParams;
 
@@ -292,7 +293,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 1,
+                binding: COVERAGE_BINDING,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -302,7 +303,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 2,
+                binding: COVERAGE_SAMPLER_BINDING,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
@@ -344,11 +345,11 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 resource: params_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 1,
+                binding: COVERAGE_BINDING,
                 resource: wgpu::BindingResource::TextureView(&cube),
             },
             wgpu::BindGroupEntry {
-                binding: 2,
+                binding: COVERAGE_SAMPLER_BINDING,
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
         ],
@@ -405,7 +406,9 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("probe"),
-        bind_group_layouts: &[None, None, None, Some(&material), Some(&job_layout)],
+        // 5 格会超：探针设备是 downlevel_defaults（max_bind_groups = 4）⇒ 只能给 4 个布局。
+        // 材质组按契约在 3；探针自己的 job/out 放 1（0 是 Bevy 的视图组，2 空着）。
+        bind_group_layouts: &[None, Some(&job_layout), None, Some(&material)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
