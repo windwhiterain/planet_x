@@ -13,6 +13,7 @@ mod gpu;
 mod group0;
 mod icosphere;
 mod mat4;
+mod material;
 mod mesh;
 mod shader;
 mod shot;

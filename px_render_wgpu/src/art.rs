@@ -839,8 +839,8 @@ mod tests {
         let atmosphere = scene.object("atmosphere").expect("atmosphere 在");
         let (name, params) = atmosphere.geometry.primitive().expect("图元");
         let radius = number(params, "radius") as f32;
-        let subdivisions = number(params, "subdivisions") as u32;
         assert_eq!(radius.to_bits(), 1.14_f32.to_bits());
+        assert_eq!(number(params, "subdivisions"), 64.0);
 
         // 路（1）：物体里那份网格 **就是** 文档里那几个参数造出来的那一份。
         let from_document = primitive_mesh(name, params).expect("按文档再造一份");

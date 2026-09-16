@@ -1118,3 +1118,26 @@ writing comments is forbidden unless the project has its own comments style.
 ⚠ 注释不是装饰：本仓真正值钱的那些"别这么简化"（解析逆不成立、四元数往返不恒等、
 `Dir3` 是除法归一化、`ClusteredLight` 是 80 字节）**都写在代码旁边**，
 依据只留在笔记里的话，改代码的人看不见它。
+
+### §120 ⚠ group 0 是**按 shader 声明的子集**，不是那固定五条（第 6 件的前置更正）
+
+§108.3 那张反射表把 `view(0) / lights(1) / clustered_lights(8) / globals(11) /
+depth_prepass_texture(20)` 列成了一套，**容易读成"每份 shader 都用这五条"**。实测不是：
+
+| 物体 | 它**声明**的 group 0 |
+|---|---|
+| `planet`（`surface.wgsl`） | `view(0)` / `lights(1)` / `clustered_lights(8)` |
+| `atmosphere`（`atmosphere.wgsl`） | `view(0)` / `clustered_lights(8)` / `depth_prepass_texture(20)` |
+
+`surface.wgsl` **从没声明** `globals`(11) 与 `depth_prepass_texture`(20)；
+`atmosphere.wgsl` **从没声明** `lights`(1) 与 `globals`(11)。两条后果：
+
+1. **管线布局要按 shader 建。** 可以建一个含全部组的布局，但
+   **bind group 必须把它声明的 entry 全填上** —— 多填没事，少填不行。
+2. **共享的 group 0 bind-group 布局取五条的超集**（五个都绑，含
+   `depth_prepass_texture` 与 `globals`），一份布局伺候两份 shader。
+   否则要维护两份 group 0 布局 —— 正是 §66.1 那类"同一份契约、两个数"。
+
+⚠ 这条与 §110.4 / §109.5 同族但更隐蔽：那两次是**抄了一个数**，
+这次是**把一张"全量清单"误读成"每份 shader 的用量"**。
+反射表列的是**并集**，不是**逐 shader 的清单** —— 用之前要问一句"这是谁的集合"。
