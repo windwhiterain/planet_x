@@ -32,6 +32,20 @@
   `shaders/clouds@<内容键>`。不一致就退出 —— 混版量出来的数没有意义（`-AllowMixedShaders`
   是给"故意交错两版"那个实验留的口子）。
 
+  ⚠⚠ **事故记录（4）：「判据跑的是哪一份产物」（§122 / §131.2 / §144 那条形状第四次咬人）。**
+  `Invoke-StablePhase` 里 `Resolve-Artifact`（按 `target/pcg/<图>/manifest.json` 解析路径）
+  曾经跑在 `Invoke-Bake` **之前**，而另外三个相位早就写着"次序不能反"并已修好 ——
+  **只有 stable 这一路漏了**。后果不是报错，而是**静默量错东西**：先取路径再重烘 ⇒ 这一轮量的
+  是**上一份**产物（实测：清单里还是老形状的 `orbit-bare`（键 `28a9b516c132`，无帧图），
+  于是探针拿它出了四档的数，而当时刚烘出来的是 `add550e772b2`）。
+  ⚠ 那批读数**本身是有效的**（它们来自老形状的 `orbit-bare` —— 那正是锚宿主能读的那种文档，
+  见下条），有问题的是**探针没说清它读的是哪一份**。⇒ 报告里那句"档"要能回答
+  "我跑的是哪份产物"，否则数与产物对不上账。
+  ⚠ 与之配套的另一条：`target/oracle/px_render-bevy.exe`（S-1 那支锚，git `4fc772d`）
+  **读不了帧图形状的文档**（`PassSchema` 那些栏是它之后才加的：`missing field 'shader'`）。
+  要给锚取数就走 `--bin scene <档> --no-frame-graph` 烘**老形状**产物 + 本探针 `-Bake:$false`
+  （老形状可以当"提问的靶子"，不能当"交付的形状"）。
+
 .EXAMPLE
   .\tools\frame-probe.ps1 -Scenes orbit-proxy
   .\tools\frame-probe.ps1 -Sweep -Rounds 3
@@ -446,10 +460,13 @@ function Invoke-StablePhase {
     }
     $needed = [ordered]@{}
     foreach ($unit in $units) { foreach ($name in $unit) { $needed[$name] = $true } }
-    $artifacts = [ordered]@{}
-    foreach ($name in $needed.Keys) { $artifacts[$name] = (Resolve-Artifact -Graph $Graph -Node $name) }
     $bakeNames = @($needed.Keys)
     if ($Bake -and -not $SkipBake) { Invoke-Bake -Names $bakeNames }
+    # ⚠ **次序不能反**（`Invoke-ScenePhase` / `Invoke-ShotPhase` / `Invoke-AbPhase` 顶上那句注释
+    #    是同一件事）：`Resolve-Artifact` 取的是**清单里的键**，而清单要重烘之后才指向新内容。
+    #    这一条在本相位**漏过一次**，代价见文件头「事故记录」第 4 条 —— 所以解析放在烘之后。
+    $artifacts = [ordered]@{}
+    foreach ($name in $needed.Keys) { $artifacts[$name] = (Resolve-Artifact -Graph $Graph -Node $name) }
     $table = Assert-ShaderMembersAgree -Artifacts $artifacts -AllowMixed:$AllowMixedShaders
     Write-Host ''
     Write-ShaderTable -Table $table

@@ -246,6 +246,12 @@ pub struct Rendered {
     /// 这一档**没执行**的 pass 与原因。⚠ §136 起它是空的（六条全跑）——
     /// 这一栏留着是因为那条纪律还在：真开始跳的时候，理由必须**跟着名字一起**出来。
     pub skipped: Vec<(String, String)>,
+    /// 这份产物声明了 `clouds` 这个期望标签（`SceneSpec::expects`）。
+    ///
+    /// ⚠ 它在这里返回，而不是让服务那一侧再读一遍文档：`run` 手上本来就有 `spec`，
+    /// 而"再读一遍"就是同一条真本的第二份副本 —— 两次读之间文档被换掉的话，
+    /// 报告里的"该有云"与画出来的那张图说的就不是同一份产物了。
+    pub declared_clouds: bool,
 }
 
 /// 一笔 draw 在 GPU 上的几何：顶点/索引缓冲 + **产物的属性表**。
@@ -386,13 +392,23 @@ fn cull_of(cull: CullMode) -> Cull {
 }
 
 /// 跑这一帧。
+///
+/// ⚠ 四个「从哪儿来」的参数都是**调用方给的**，一个都不在这里取缺省：
+///
+/// - `pcg_root`：CAS 根。`--scene` 那条离线路传 [`art::default_pcg_root`]，服务那条路传
+///   租约进程自己的 `--pcg-root`（**服务端说了算**，客户端的同名旗标只报一声 ——
+///   解析成员的是渲染进程，这是协议里就定下的）。
+/// - `cam`：`Request::view.cam`（`None` = 用探针机位，Bevy 的 `probe_camera(step.cam)`）。
+///   它是**怎么看**，所以住在请求上，不住在文档里（§110.1：产物自带的相机表只给 `--sheet`）。
 pub fn run(
     gpu: &Gpu,
     scene_path: &Path,
+    pcg_root: &Path,
+    cam: Option<[f32; 3]>,
     width: u32,
     height: u32,
 ) -> Result<Rendered, String> {
-    let root = art::default_pcg_root();
+    let root = pcg_root.to_path_buf();
     let spec = art::read_spec(scene_path)?;
     let scene = art::load_scene(scene_path, &root)?;
     let mut audit: Vec<String> = Vec::new();
@@ -428,7 +444,7 @@ pub fn run(
     let executed_plan = all_passes(&plan, &mut audit)?;
 
     // ---- 相机：`camera.rs` 原样（逐位对齐 oracle），只有长宽比来自命令行 ----
-    let camera = crate::camera::probe_camera(None, width as f32 / height as f32);
+    let camera = crate::camera::probe_camera(cam, width as f32 / height as f32);
     audit.push(format!(
         "相机：from_xyz({}, {}, {}).looking_at(ZERO, Y)｜aspect {}（位模式 {:08X}）｜无限 reverse-Z / Depth32Float / 清 0.0 / GreaterEqual",
         camera.position.x,
@@ -1349,6 +1365,7 @@ pub fn run(
         //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
         //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
         skipped: Vec::new(),
+        declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
     })
 }
 

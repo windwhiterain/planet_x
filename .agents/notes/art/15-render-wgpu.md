@@ -3042,3 +3042,148 @@ identity / identity-x2 / identity-x3   三份都 63184151909371A5（链长 1/2/3
 于是五档全报"没有资源 `scene_depth`"）。⇒ 两份仪器现在都**先重烘再读这一趟的输出**，
 不读清单。而**夹具本身**也必须住在仓库里 —— 这两条是同一条纪律的两半：
 **判据要能回答"我跑的是哪份产物"，也要能回答"下一个人怎么跑出同样的东西"。**
+
+---
+
+## §147 S6 前半：`--serve` + `--report`，以及 J3 的 **P｜不重编** 与 **R｜不重启**（本单元）
+
+> 仪器：`target/serve/{common,p,r,escape,extra,refusals}.ps1`（不入 git，与 `passdoc/`、`j3/`
+> 同一个规矩）；读数落同目录的 `*-readings.txt`。
+> 宿主：`target/debug/px_render_wgpu.exe`，sha256 `63DE1492C07D9CA5…`（本单元**最终**那支；
+> ⚠ 下面这批读数在它上面**重测过一遍**：中途改过客户端的一句措辞、又补了 `--fps/--novsync`
+> 的收下行为，exe 就换了两次哈希 —— 而"同一份 exe"是这套读数的前提，§113 已经为同一件事写过一次）。
+> 尺寸 960×640（默认）｜相机：不给 `--cam`（探针机位）｜后端写死 Vulkan。
+
+### §147.1 判据（逐字）
+
+```
+P｜不重编   烘之前 63DE1492C07D9CA5…｜烘完之后 63DE1492C07D9CA5…｜收工 63DE1492C07D9CA5…
+            6 条单张请求 + 1 条批量（6 步）→ 六格哈希全等；全程 pid 唯一（12840）
+R｜不重启   一个会话（pid 14992）吃下 4 份 pass 表文档 + 1 份对照件 + 2 份坏文档 + 1 份收尾
+            none 63184151909371A5｜invert 733408200119C203｜invert_vignette 745BE24FE1467192
+            scratch 2D61519C6544E3C1｜对照件（只重新序列化）733408200119C203 ✓
+            坏一（入口名 fs_wrong）退出码 1、没写出图：
+              「第 5 条 pass 'invert' 的 shader 里没有 @fragment 入口 'fs_wrong'；它有的片段入口：fs_main」
+            坏二（depth_target = scene_depth_zzz）退出码 1、没写出图：
+              「group 0 第 20 格该绑 'scene_depth_zzz'，而宿主这一档只 seed 了 [scene_depth / scene_depth_sample]」
+            被拒两次之后同一条服务再出 invert：733408200119C203 ✓
+J1（六档，经**服务**出图）  63184151909371A5 / 7BBB18CE3612D4F7 / C03FFF3235264DD5
+                          / B5799E4F1649535C / FA20FAD37BC61EA2 / 32872F80AC867BE3  —— 六格全 ✓
+J3 其余几格  identity / identity-x2 / identity-x3 三份都 63184151909371A5（链长 1/2/3，两个奇偶）
+            grade_half（--offline --stats）min = max = 188（1 种颜色，614400/614400）8DECA8C60117989A
+逃生门      六份冻产物（`--no-frame-graph`）逐字节复现 target/oracle/pxart-frozen/：
+            2795F948E6987E11 / F60B19B0AE7E229F / 1A27679882A10D6B
+            / CB363DA74A90F63E / 2C6C8592AD45214B / ACB824E9EC0BA893 —— 六份全 ✓
+frame-probe .\tools\frame-probe.ps1 -Phase shot -Scenes <六档> -Exe target\debug\px_render_wgpu.exe
+            → **跑通**：六张图 300012 / 215193 / 298289 / 508562 / 358066 / 405380 字节，
+              has_cloud 对两档云场景为 True、四档无云档为 False，收尾「没有出现过无云的图」
+```
+
+### §147.2 落地的形状（**逐字照搬协议，一处形状差别**）
+
+| 件 | 落点 | 与 Bevy 宿主的关系 |
+|---|---|---|
+| 服务 | `px_render_wgpu/src/serve.rs` | `serve` / `spawn_listener` / `watch_lease` / 出图结算那几段逐字照搬 |
+| 报告 | `px_render_wgpu/src/report.rs` | `collect_shot_stat` / `has_cloud` / `verdict` 的口径逐字搬（常数也搬，注释记了出处） |
+| 客户端 | `px_render_wgpu/src/client.rs` | `request_once` 逐字照搬（连接/握手/超时全在 `px_protocol::client`） |
+
+**唯一一处形状差别**：Bevy 那边是"主世界发任务 → 渲染世界逐帧推进"的两段式（要有 `Job` 队列、
+`ActiveJob` 状态机、等管线/等资产/K 帧），本宿主一条请求在**一个函数调用**里跑完。
+⇒ 那一整套状态机在这里**不存在**，不是省略：`create_render_pipeline` 是同步的（§104 第 5 条），
+"坏管线当场拒"在这里是**结构性**成立的，不是靠 gate 兜的。
+
+⚠ **本宿主每条请求都自己 `render::run`（没有跨请求的保留态）**，而 Bevy 宿主"渲染相位常驻"。
+两条后果都要记清：
+1. **好处**：R 那条判据（一个会话吃 6 份文档）不必靠"每次重启"保证干净 —— 按构造就没有污染源。
+2. **代价**：没有管线缓存，每条请求重编它的管线。那一笔账属于计时（J4/S7），不属于这里。
+
+### §147.3 三条**连带的发现**（都不是本单元引入的）
+
+**① ⚠ 锚 exe 读不了**帧图形状**的文档**（三次实测 + 反证）。
+
+| exe | 构建 | git | 读现烘的 `add550e772b2` |
+|---|---|---|---|
+| `target/oracle/px_render-bevy.exe`（S-1 锚） | 12:54 | `4fc772d` | ✗ `JSON 编解码失败：missing field 'shader'` |
+| `target/debug/px_render.exe` | 19:49 | `80c7fac` | 能解码，但 `pass 'prepass' 的 kind 是 'geometry'：认 'fullscreen' 与 'compute'` |
+
+锚 exe 的 `PassSpec.shader` 还是**必填**的（§129 之前）⇒ 现烘的几何 pass（那一栏没有值）
+在反序列化时就失败。而**当前源码**的 Bevy 宿主 pass 那一路只实现 `fullscreen`。
+⇒ **帧图文档今天只有本宿主能渲**；要给锚取数只能走 `--no-frame-graph` 的老形状产物。
+用户裁决：**不去补 Bevy 宿主的 pass 路**（§107：它是锚，行为不许动），
+并立一条口径：**老形状可以当"提问的靶子"，不能当"交付的形状"。**
+
+**② ⚠ `tools/frame-probe.ps1` 的 stable 相位把产物解析放在重烘之前**（已修）。
+后果不是报错而是**静默量错东西**：我第一次跑它，量的是清单里**上一份**老形状产物
+（`28a9b516c132`），而当时刚烘出来的是 `add550e772b2` —— 数是有效的（老形状正是锚能读的那种），
+但**探针没说清它读的是哪一份**。这是 §122 / §131.2 / §144 那条形状**第四次**咬人。
+修法与其他三个相位一致（解析挪到烘之后），事故写进脚本头。
+
+**③ ⚠ J4 那条"排序"判据按现在的取法不成立**（实测，见 §147.4）。
+
+### §147.4 J4 的实测：**分组**成立，**排序**不成立（用户裁决改口径）
+
+Bevy 锚、老形状产物、2240×1400、60 帧、一次会话：
+
+| pair（`perf[0] − perf[1]`） | app 中位 | app **均值** | **`gpu_delta_ms`** |
+|---|---|---|---|
+| `orbit-rings − orbit-bare` | +0.05 | −0.23 | **+0.16** |
+| `orbit-soft − orbit-bare` | +9.47 | +11.39 | **+8.12** |
+| `orbit-proxy-fine-bound − orbit-bare` | +0.42 | +3.68 | **+8.29** |
+
+- **参照图自己在一次会话里漂了 4.5×**：`orbit-bare` 的 `gpu_ms.p50` 在第 1/2 单元是 **2.00/1.99**，
+  在第 3/4 单元是 **0.44/0.41**（逐段一致地快 5×：`main_opaque_pass_3d` 0.618 → 0.109）。
+  形状是"前一个测的是重场景 ⇒ 时钟被拉起来 ⇒ 后一个的数不可比"。
+- ⇒ `soft` 与 `proxy` 的差只有 **0.17 ms**，**比参照图自己的漂移（1.5 ms）小一个数量级**；
+  两个口径还给出**相反的**排序（GPU：proxy > soft；app 均值：soft > proxy）。
+- **口径改判**：J4 = **分组 + 量级**（`rings ≪ {soft, proxy}`，~0.2 / ~8 / ~8 ms），
+  不是"四档排序不变"。要恢复排序得先把仪器做成可重复的（预热时钟 + 交错取样 + 更多轮）——
+  那是**另一件活**。⚠ 不许为了让判据好看去调数据。
+- **可比性分栏**：`gpu_ms` 是**编码器级 span 的求和**，要的只是"同一帧被画出来" ⇒ **可比**；
+  app 那一栏**不可比**（Bevy 的 app 序列是双峰的，`compare.note` 自己写着"别拿中位当每帧成本"）
+  ⇒ **J4 只比 `gpu_ms`**。
+- ⚠ 与 §104 第 4 条的一处出入：`gpu_ms.source` 实测是**七段**
+  （`bin_unpacking + clustering + early prepass + early_mesh_preprocessing +
+  main_opaque_pass_3d + main_transparent_pass_3d + upscaling`），不是那一节列的几段。
+
+### §147.5 一处必须显式化的 CLI 语义：`--offline`
+
+`--scene A --out a.png` 在 Bevy 宿主那里的语义是**请求**（交给在跑的服务）——
+`tools/harness.ps1` / `tools/frame-probe.ps1` 就是这么调 exe 的。
+而本宿主在 S0–S5 期间把同一个写法用成了**离线出图**。两套语义共用一个写法，
+就等于让"**这张图是谁画的**"变成一条要靠猜的事。
+⇒ 加 `--offline`：缺省是客户端，离线要显式写。`--stats`（回读字节的逐通道读数）**只**属于离线那条路，
+给了服务请求就当场拒（服务那条路的同类读数住在 `--report` 里：服务端算的 sha256 / 网格差分 /
+兜底像素数）。三条"不适用"各有各的拒词（`--report` / `--perf` / 多份 `--scene`）。
+
+⚠ 连带的第二处：**`--fps` / `--novsync` 收下但不生效**（启动时打一行说明）。
+不是"顺手兼容"，而是**为了不让拒词指错原因**：`tools/harness.ps1::Start-RenderServer` 给性能那两路
+会传 `--fps`，而它等的就绪信号是日志里那行"渲染管线全部就绪" —— 当场拒 ⇒ 进程立刻退出，
+可 harness 的等待循环**看不见它死了**，要空等到 180 s 超时才报"服务没在 180 s 内就绪"。
+收下之后，真正的拒词由服务端在收到性能请求时说出来（"要的是帧循环，那是 S7 的"）。
+
+### §147.6 测试与改动落点
+
+| crate | 读数 |
+|---|---|
+| `px_render_wgpu` | **57 passed / 0 failed**（原 48；+9：`report.rs` 六个读数/分支判据 + `serve.rs` 三条批量与拒词判据） |
+| `px_pass` / `px_protocol` / `px_graphs` / `px_shader` | **26 / 40 / 22 / 20**，0 failed（含集成套件；brief 那几个数只算 lib 那一套） |
+| `tools/px.ps1 -Target test` | 退出码 **0**（36 个套件，0 failed） |
+
+⚠ 另一格：**同一个 exe 的两条出图路逐字节相同** —— `--offline` 出的 `orbit-bare`
+（`63184151909371A5`，300012 字节）与经**服务**出的那一张完全一致。
+这条不是本单元的判据，但没有它，"服务那条路出的图"与"S0–S5 一直在量的那张图"就是两件事。
+
+| 文件 | 改了什么 |
+|---|---|
+| `px_render_wgpu/src/{serve,client,report}.rs` | 新增：服务 / 客户端 / 报告读数 |
+| `px_render_wgpu/src/main.rs` | CLI 扩到服务与客户端；`--offline` 显式化；用法里写明"这一版没有的" |
+| `px_render_wgpu/src/render.rs` | `run` 多两个入参（`pcg_root` / `cam`，**都是调用方给的，不在这里取缺省**）；`Rendered` 多 `declared_clouds` |
+| `tools/frame-probe.ps1` | stable 相位的产物解析挪到重烘之后；文件头补事故记录（4） |
+
+### §147.7 一条 PowerShell 的坑（本单元新踩，写下来省下一次）
+
+**`@($null).Count` 是 1，不是 0**（实测）。判"报告里这一栏**缺席**"时写
+`@($r.perf).Count -ne 0` 会把每一份 shots 报告都判成"栏不对"——
+`Report` 的 `perf` / `pair` 正是**该缺席**的（`skip_serializing_if`）。
+⇒ 判缺席要用**属性在不在**（`$r.PSObject.Properties.Name -contains 'perf'`）。
+与 §108.4 那个 `switch` 拆数组同一族：**PowerShell 的"空"有好几种，别拿直觉当读数。**
