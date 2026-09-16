@@ -136,11 +136,18 @@ pub struct Diff {
     pub large_min_radius: f64,
     pub large_max_radius: f64,
     pub large_mean_radius: f64,
+    /// 大差异的**粗格地图**（`MAP_ROWS × MAP_COLUMNS`，每格是该格里大差异像素的个数）。
+    pub large_map: [[usize; MAP_COLUMNS]; MAP_ROWS],
     /// 剪影内差异像素按半径的直方图（每 0.1 个等效半径一格；最后一格是 ≥(N-1)×0.1）。
     ///
     /// 这一条是"**最里面到底有没有差**"的直接答案：例如"行星自己的盘里一个像素都不差"
     /// 这句话，只有看前几格全为 0 才说得出口。
     pub inside_histogram: [usize; HISTOGRAM_BINS],
+    /// 0.80–1.00R 那一段的**细分直方图**（每 0.02R 一格，共 [`FINE_BINS`] 格）。
+    ///
+    /// 行星轮廓（≈0.87R）与大气壳外缘（≈1.00R）都落在这一段里：粗格分不开它们，
+    /// 而"**盘内到底从哪个半径开始才有差异**"这句话要靠这一条才说得出口。
+    pub fine_histogram: [usize; FINE_BINS],
     /// 四带的 **Δ 分档**（`1 / 2 / 3–4 / 5–8 / 9–16 / 17–32 / 33–64 / 65+`）：
     /// 盘内 / 边缘 / 环上 / 更远。见 [`DELTA_BUCKETS`] 那段为什么必须分开看。
     pub band_buckets: [[usize; 8]; 4],
@@ -158,10 +165,18 @@ pub struct Diff {
 const DELTA_BUCKETS_LEN: usize = 8;
 /// 剪影内差异的半径直方图几格（每格 0.1 个等效半径）。
 const HISTOGRAM_BINS: usize = 12;
+/// 0.80–1.00R 那一段细分几格（每格 0.02R）。
+const FINE_BINS: usize = 10;
 /// 孤立差异像素最多留几个（**计数不受它限制**，只是列出来的上限）。
 const ISOLATED_CAP: usize = 4000;
 /// 报告里孤立像素最多列几行（**按半径从小到大** —— 越靠里越值得先看）。
 const ISOLATED_PRINT: usize = 16;
+/// 大差异粗格地图的列数与行数（格子里的数字是**该格里大差异像素的个数**，9 封顶）。
+const MAP_COLUMNS: usize = 48;
+const MAP_ROWS: usize = 24;
+/// 粗格地图只收**这个半径以内**的大差异（以剪影等效半径为单位）——
+/// 外面那一片是星点的天下，会把地图糊满。
+const MAP_RADIUS_LIMIT: f64 = 1.0;
 
 /// 通道差的档：`1 / 2 / 3–4 / 5–8 / 9–16 / 17–32 / 33–64 / 65+`。
 ///
@@ -337,6 +352,7 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         (0_usize, f64::INFINITY, 0.0_f64, 0.0_f64);
     // 剪影内差异的半径直方图（每 0.1 个等效半径一格，到 1.1 以上都进最后一格）。
     let mut inside_histogram = [0_usize; HISTOGRAM_BINS];
+    let mut fine_histogram = [0_usize; FINE_BINS];
     // 四带的 Δ 分档 + 边上/平处的分类 + 孤立像素（见各自的类型注释）。
     let mut band_buckets = [[0_usize; 8]; 4];
     let mut inside_on_edge = 0_usize;
@@ -436,15 +452,29 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
                 }
                 // 大差异落在画面的哪一块：一张**粗格地**比任何统计量都更直接 ——
                 // "贴着轮廓一圈"与"挤在某一侧"在数字上可能很像，在格子上一眼就分开。
-                let column = (x as usize * MAP_COLUMNS / left.width as usize).min(MAP_COLUMNS - 1);
-                let row = (y as usize * MAP_ROWS / left.height as usize).min(MAP_ROWS - 1);
-                large_map[row][column] += 1;
+                //
+                // ⚠ 只算**半径 1.0 以内**的：外面那一片的大差异绝大多数是**星点**，
+                //    它们会把整张地图糊满（那是切片 2 的事），而这一条要看的是
+                //    "行星轮廓那一圈"与"大气壳外缘那一圈"。
+                if distance <= MAP_RADIUS_LIMIT {
+                    let column =
+                        (x as usize * MAP_COLUMNS / left.width as usize).min(MAP_COLUMNS - 1);
+                    let row = (y as usize * MAP_ROWS / left.height as usize).min(MAP_ROWS - 1);
+                    large_map[row][column] += 1;
+                }
             }
             // 剪影内差异的半径直方图（每 0.1 个等效半径一格）：这条直接回答
             // "最里面到底有没有差" —— 例如"行星自己的盘内一个像素都不差"。
             if mine != background {
                 let bin = ((distance / 0.1) as usize).min(HISTOGRAM_BINS - 1);
                 inside_histogram[bin] += 1;
+                // 0.80–1.00R 那一段再细分成每 0.02R 一格：**行星的轮廓**与
+                // **大气壳的外缘**都在这一段里，粗格（0.1R=29 像素）分不开它们，
+                // 而"盘内到底从哪个半径开始才有差异"正是这一档要回答的那句话。
+                if (0.80..1.00).contains(&distance) {
+                    let fine = ((distance - 0.80) / 0.02) as usize;
+                    fine_histogram[fine.min(FINE_BINS - 1)] += 1;
+                }
             }
             if mine != background {
                 continue;
@@ -539,7 +569,9 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         } else {
             large_sum_radius / large_pixels as f64
         },
+        large_map,
         inside_histogram,
+        fine_histogram,
         band_buckets,
         inside_on_edge,
         large_on_edge,
@@ -682,6 +714,39 @@ impl Diff {
             self.large_on_edge,
             self.large_pixels
         ));
+        // 大差异的粗格地图：一眼看它是"贴着轮廓一圈"还是"挤在某一侧"。
+        lines.push(format!(
+            "剪影内差异的**细分直方图**（0.80–1.00R 每 0.02R 一格；行星轮廓 ≈0.87R、\
+             大气壳外缘 ≈1.00R）：{}",
+            self.fine_histogram
+                .iter()
+                .enumerate()
+                .map(|(bin, count)| format!(
+                    "{:.2}–{:.2}: {count}",
+                    0.80 + bin as f64 * 0.02,
+                    0.82 + bin as f64 * 0.02
+                ))
+                .collect::<Vec<_>>()
+                .join("｜")
+        ));
+        lines.push(format!(
+            "大差异（Δ>{LARGE_DELTA}）落在画面的哪一块（**只算等效半径 {MAP_RADIUS_LIMIT} 以内**；\
+             每格 {}×{} 像素，数字是该格里的大差异像素数，9 封顶）：",
+            MAP_COLUMNS.max(1),
+            MAP_ROWS.max(1)
+        ));
+        for row in self.large_map.iter() {
+            lines.push(format!(
+                "    {}",
+                row.iter()
+                    .map(|count| if *count == 0 {
+                        '.'
+                    } else {
+                        char::from_digit((*count).min(9) as u32, 10).unwrap_or('?')
+                    })
+                    .collect::<String>()
+            ));
+        }
         if self.isolated.is_empty() && self.isolated_count == 0 {
             lines.push("孤立差异像素（四邻居全都逐位相同）：一个都没有".to_string());
         } else {
@@ -771,4 +836,9 @@ mod tests {
         assert_eq!(region.bbox, Some((1, 4, 3, 9)));
         assert!(
             (region.mean_delta() - 1.5).abs() < 1e-12,
-            "平均**通道**差 = (7
+            "平均**通道**差 = (7+2)/(3×2) = 1.5，实际 {}",
+            region.mean_delta()
+        );
+        assert_eq!(Region::default().bbox_text(), "（没有像素）");
+    }
+}
