@@ -911,3 +911,31 @@ cam Some([-120.0, -55.0, 6.0]) 不同
 （SIMD 的 `Mat3A`）那条真实路径，不是标量 `Mat3`。
 
 仪器：`px_render/tests/view_oracle.rs::is_the_quaternion_round_trip_the_identity`（`#[ignore]`）。
+
+---
+
+## §117 相机那条位判据现在是**红的**，差 1 ulp（精确诊断已定位）
+
+`camera.rs` + `mat4.rs` 的扩展（`Vec3`/`Mat3`/`Quat`、`from_rotation_translation`、
+`from_scale_rotation_translation`、`mul_vec4`/`mul_mat4`、
+`perspective_inverse_reverse_rh`）已经写出来了，`cargo test` 12 passed / **1 failed**：
+
+```
+camera::tests::the_probe_camera_matches_bevy_bit_for_bit
+  assertion `left == right` failed:
+    world_from_view[6] (col 1 .z)  got BE302109  want BE302108
+    left: 3190825225  right: 3190825224
+```
+
+**只差一个 ulp，而且恰好落在 §116 预言的那一格上** —— `world_from_view.c1.z = −0.172001004`。
+注意 §110.1.1 那张表里，**解析逆**的 `c1.y/z` 用的是 `3F7C2F4D` / `3E302108`（与位姿矩阵的
+`c1.y/z` 同值），而实现给的是 `3E302109` ⇒ 说明这一格是在
+`Quat::from_mat3` → `quat_to_axes`/`Mat3A::from_quat` 那一串里舍入掉的。
+
+**下一步就是这一件事**：把移植的那串 `quat_to_axes` 与 glam 的
+`f32/sse2/mat4.rs` 的 `quat_to_axes` / `f32/sse2/mat3a.rs:278` `Mat3A::from_quat`
+**逐操作数**比一遍 —— SIMD 是 4 路并行，标量转写很容易在
+`1.0 - (yy + zz)` 这类表达式的**结合次序**上与它分岔（§110.1.1 是同一族坑的第三次出现）。
+
+⚠ **这一格红着，所以这些改动没有提交** —— 提交的树（`2c15fab`）仍然是
+**11 passed / 0 failed**。判据没拿到就不算完成，红着提交等于把门拆了。
