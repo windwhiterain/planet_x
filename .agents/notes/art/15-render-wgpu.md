@@ -832,3 +832,37 @@ S2/S3 的每一格判据都要拿"Bevy 宿主出的那张图"当基准，所以"
 
 ⚠ 顺带记一条：这次复核走的是**同一个锚 exe**（`target/oracle/px_render-bevy.exe`，
 sha256 `D7ED54FD…`）。换 exe 就要重新确认（§108.1 已经写过这条）。
+
+---
+
+## §114 §111 第 1 件落地：两份**逐位判据**都过了（2026-09-16）
+
+§112 那条派工教训改完之后，两件移植**当轮落地并自带硬判据** —— 这反过来印证了
+那条教训：把范围切到一个函数、并要求"先写文件再跑测试"之后，同样的两件事一次就成了。
+
+| 件 | 判据 | 读数 |
+|---|---|---|
+| `mat4.rs`（`Mat4::inverse`） | `target/oracle/bevy-view-vectors.txt` 的 **6 组**向量 × 16 个位模式 | **6/6 全等** |
+| `icosphere.rs` | oracle 的 **5 个 sha256**（1.0/1、1.0/5、1.0/64、1.02/64、1.06/64） | **5/5 全等** |
+
+- `cargo test -p px_render_wgpu`：**11 passed / 0 failed**（含这两条位判据）。
+- 两条判据都是**真门**，不是"看着差不多"：`mat4` 那条是 `CASES: [(&str,&str); 6]` +
+  `assert!(failed.is_empty())`；`icosphere` 那条把 5 个 sha256 写成常量，
+  **一个常量覆盖整块 2.3 MB 的数据**，而且不依赖 `target/` 下的文件。
+- ⚠ **期望值一个都没被改过**：icosphere 那边在第一次跑之前自己发现并修掉了
+  `INITIAL_POINTS` 第 10 个顶点的一位数字笔误，改的是**移植件**，不是判据。
+
+**两条过程上的账**：
+
+1. `icosphere.rs` 曾经**提交了但没接线**（`mod icosphere;` 漏了）—— 那一笔的树其实
+   编译不到，靠后一笔补上。教训：`git add -A` 在**别的 agent 也在写同一个目录**时
+   不安全（§112 已记过一次同类）；提交前该先看清 `git status`。
+2. 我要求"零警告"这条**过严了**：它逼出了 `mat4.rs` 上的模块级 `#![allow(dead_code)]`，
+   而那会把"还没接线"与"真的写多了"一起盖掉。已撤掉，改成一段说明 ——
+   `mesh.rs` / `vec.rs` / `icosphere.rs` / `mat4.rs` 处在同一阶段，
+   都在等 S2 的渲染路径来当它们的调用者。`cargo build` 现在 35 条 dead-code 警告
+   （`cargo test` 那条路是干净的），**S2 接上就消失**。
+
+**§111 的进度**：第 1 件**部分完成**（只差 `Vec3/Mat3/Quat`、`look_to`、
+`perspective_infinite_reverse_rh`、`from_scale_rotation_translation`）——
+第 2 件 `camera.rs` 因此还没开始。S2 与 S3 的判据锚已复核可复现（§113）。
