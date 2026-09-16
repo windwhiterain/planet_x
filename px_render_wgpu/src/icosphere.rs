@@ -896,7 +896,7 @@ mod tests {
 
     /// 期望值不是"跑一遍自己算出来的"——那样只能证明自己跟自己一致。它们是真实 Bevy 落盘的
     /// `target/oracle/bevy-icosphere-*.bin` 的 SHA-256（那批文件是逐字节的网格流，见下）。
-    const BEVY_ICOSPHERE: [(f32, u32, usize, usize, &str); 5] = [
+    const BEVY_ICOSPHERE: [(f32, u32, usize, usize, &str); 6] = [
         (
             1.0,
             1,
@@ -931,6 +931,16 @@ mod tests {
             42252,
             84500,
             "44212D8611D976DA7CDD74051D4956CD825E7E1EF939A9BF65FBFD66755F18AE",
+        ),
+        // ⚠ 这一格不是凑数：`art/scene/orbit-bare*.toml` 的 atmosphere 件 `outer = 1.14`，
+        // 落进产物就是 `{"name":"icosphere","params":{"radius":1.1399999856948853,
+        // "subdivisions":64.0}}` —— **判据场景真正用的那颗球**。
+        (
+            1.14,
+            64,
+            42252,
+            84500,
+            "F10159F5A5FBCA9A4E8015D36FFA9CCD6C91199957704DCCB17A9850A41FF218",
         ),
     ];
 

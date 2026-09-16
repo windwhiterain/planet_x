@@ -82,7 +82,12 @@ fn dump_the_icospheres_the_scenes_use() {
         write_mesh(&format!("icosphere-r1.0-s{subdivisions}"), &mesh);
     }
     // 半径也进文件名：产物给的是 (radius, subdivisions) 两个数，两个都要钉住。
-    for (radius, subdivisions) in [(1.06_f32, 64_u32), (1.02, 64)] {
+    //
+    // ⚠ `1.14` 不是凑数：`art/scene/orbit-bare*.toml` 里 atmosphere 那件的
+    // `outer = 1.14`，落到产物里就是 `{"name":"icosphere","params":{"radius":1.1399999856948853,
+    // "subdivisions":64.0}}` —— **判据场景真正用的那颗球就是这个**。
+    // 少了它，icosphere 那套门就只覆盖了"差不多"的半径。
+    for (radius, subdivisions) in [(1.06_f32, 64_u32), (1.02, 64), (1.14, 64)] {
         let mesh = Sphere::new(radius)
             .mesh()
             .ico(subdivisions)
