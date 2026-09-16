@@ -8,9 +8,11 @@
 
 mod digest;
 mod gpu;
+mod mesh;
 mod shader;
 mod shot;
 mod stubs;
+mod vec;
 
 use std::path::PathBuf;
 

@@ -508,3 +508,33 @@ S0 的依赖里**没有 `glam`、也没有 `encase`**。两者都是单态化大
 - **修法**：`$cargoArgs = @(switch ($Target) { … })` —— 一行 `@()`，行为不变，命令真的能跑了。
 - **教训**：与 §87 那两条同一族 —— **"文档里写着的命令"必须真的被跑过一次**。
   这次是判据 ① 顺手跑它才撞出来的，不是读代码读出来的。
+
+### §108.5 S2 起步（**未完，判据未取**）
+
+S2 要的是"网格 + 通用材质，**无灯**场景两个宿主逐字节相同"。先把不依赖相机的那几件落了：
+
+| 件 | 落点 | 状态 |
+|---|---|---|
+| 平面向量数学（**不用 glam**） | `px_render_wgpu/src/vec.rs` | ✓ 算式逐字抄 `glam 0.32.1`，2 条单测钉住 |
+| 网格产物 → 顶点/索引 | `px_render_wgpu/src/mesh.rs` | ✓ `weld_normals` / `outward_winding` / 审计文本逐字搬，2 条单测 |
+| 图元 oracle | `px_render/tests/primitive_oracle.rs`（`#[ignore]`） | ✓ 已导出到 `target/oracle/bevy-*.bin` |
+| 材质 / 管线缓存 / bind group | —— | 未开始 |
+| CAS 装载（`art_cache`） | —— | 未开始 |
+| 相机与投影 | —— | 未开始（**在查**） |
+
+**两条现在就定下来的事**：
+
+1. **`vec.rs` 的算式必须与 glam 逐位一致**，所以是从 `glam 0.32.1/src/f32/vec3.rs`
+   **连括号一起抄**的（`dot` 是左结合、`normalize_or_zero` 判的是**倒数**是不是有限正数，
+   不是拿长度判）。少抄一个括号 = `weld_normals` 焊出来的法线在最后一位分岔 = 逐字节判据红。
+2. **图元（icosphere）有个绕不开的依赖冲突**：Bevy 的 `Sphere::ico` 是转手给
+   **`hexasphere`** 的，而 `hexasphere` **硬依赖 `glam`** —— 正是 §92 量出来最贵的那个
+   （11.5 s 冷编）。而工单 §105 S0 的依赖白名单里没有 `hexasphere`。
+   ⇒ 按"最小化编译时间"那条口径，**不引它**，改为**移植**，并用上面那份 oracle
+   （Bevy 现场生成、原样落盘）来验，而不是"看着差不多"。
+   ⚠ 这条**尚未取到判据**：移植还没落，oracle 只导出了没比对（比对脚本也还没写）。
+
+**仪器**：`target/oracle/bevy-icosphere-r1.0-s64.bin` 等 5 份 oracle（小端拼
+`positions → normals → uvs → indices`，文件哈希就是判据）；
+导出命令 `cargo test -p px_render --test primitive_oracle -- --ignored --nocapture`。
+⚠ `s64` 的顶点数是 **42252 = 10×(64+1)²+2**、三角形 **84500** —— 这个闭式已经对上了。
