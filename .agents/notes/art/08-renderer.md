@@ -561,7 +561,7 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
 （产物里的 schema descriptor）。这一步之后 **「加一个参数 = 改 WGSL + 改配方，0 编译」成立**（§79 的 W1 拆掉）。
 提交 **`34c9b3f`**。
 
-### §81.1 三档判据（`px_graphs/src/bin/scene.rs` 的 `merge_params`）
+### §81.1 三档判据（`px_graphs::params::merge_named`）
 
 | 配方里的名字 | 谁说了算 | 结果 |
 |---|---|---|

@@ -10,7 +10,7 @@
 
 ---
 
-## §85 先划线：bevy 的边界其实只有两个 crate
+## §91 先划线：bevy 的边界其实只有两个 crate
 
 `grep -rn bevy` 的结论比预期干净：
 
@@ -19,7 +19,7 @@
 | `px_protocol` | **否**（注释里出现 4 次） | 只有类型 + serde |
 | `px_shader` | **否**（注释里出现 9 次） | 无依赖 |
 | `px_ops` / `px_graphs` / `px_verify` / `px_mc` / `game` / `src`(sim) | **否** | — |
-| **`px_pass`** | **否**（`Cargo.toml` 里只有 `wgpu`） | §79 那条编译期保证今天仍然成立 |
+| **`px_pass`** | **否**（`Cargo.toml` 里只有 `wgpu`） | §85 那条编译期保证今天仍然成立 |
 | **`px_render`** | **是**（`bevy = "0.19"` + `file_watcher`） | 唯一的宿主 |
 | `px_probe` | 只为了 `px_render::shaders::assemble` 而依赖 `px_render` | 自己已经是裸 wgpu（`probe.rs` 460 行） |
 
@@ -33,21 +33,21 @@ PCG 侧、协议侧、判据侧（`px_probe`）、sim 侧**一行都不用改**�
 
 ---
 
-## §86 编译代价：冷编、增量、体积（实测）
+## §92 编译代价：冷编、增量、体积（实测）
 
-### §86.1 依赖树
+### §92.1 依赖树
 
 | | 唯一 crate 数 | `bevy_*` crate 数 |
 |---|---|---|
 | `px_render`（今天） | **358** | 63 |
 | `px_pass`（只有 wgpu） | **53** | 0 |
-| 裸 wgpu 基线（`target/research/render-min`，见 §87） | **170 个编译单元** | 0 |
+| 裸 wgpu 基线（`target/research/render-min`，见 §93） | **170 个编译单元** | 0 |
 
 bevy 拖来的、本项目**一个字节都用不到**的：文字 / 字体 / ICU 一族 **47 个 crate**（`read-fonts` ×2、
 `skrifa` ×2、`swash`、`parley`、`fontique`、`harfrust`、`icu_*` ×12…，全部只为 viewer 里那行 FPS 读数）、
 glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个。
 
-### §86.2 冷编（全新 target dir，`cargo build -p px_render --timings`）
+### §92.2 冷编（全新 target dir，`cargo build -p px_render --timings`）
 
 | 读数 | 值 |
 |---|---|
@@ -61,7 +61,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 这和上游 [#23642](https://github.com/bevyengine/bevy/issues/23642)（OPEN，"渲染 crate 合起来 91.2 s
 = 总编译时间 76%，其中约一半是 `bevy_pbr`"）量级一致。
 
-### §86.3 增量（这才是日常）
+### §92.3 增量（这才是日常）
 
 | 动作 | 今天（bevy） | 裸 wgpu 基线 |
 |---|---|---|
@@ -88,7 +88,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 
 ---
 
-## §87 裸 wgpu 基线的实测（`target/research/render-min`）
+## §93 裸 wgpu 基线的实测（`target/research/render-min`）
 
 一个 70 行的 bin，依赖 = `wgpu 29`(vulkan+wgsl) + `winit 0.30` + `naga 29` + `serde`/`serde_json` +
 `image` + `notify` + `glam` + `encase` + `bytemuck` + `pollster` + `blake3`：
@@ -110,7 +110,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 
 ---
 
-## §88 启动代价（`--serve` headless，Vulkan，热文件缓存）
+## §94 启动代价（`--serve` headless，Vulkan，热文件缓存）
 
 外部仪器（一行代码都不改产品）：`target/research/startup-probe.ps1`，按日志行到达时间打戳。
 
@@ -130,7 +130,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 | `render_min --device`（裸 wgpu，Vulkan） | 8.45 MB | **329 / 458 / 570 ms**（首跑 5 683 ms） |
 | `px_render --serve`（bevy） | 156.6 MB | **1 312 / 1 419 ms**（首跑 10 235 ms） |
 
-### §88.1 三条结论
+### §94.1 三条结论
 
 1. **"Vulkan 枚举 2.8 s"是过期读数（§44.4 那条）。** 今天 Vulkan 与 DX12 的设备就绪都是 ~450 ms。
    `target/research/startup/serve-*.err` 里仍能看到成因（Vulkan loader 去找不存在的 layer JSON：
@@ -149,7 +149,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 
 ---
 
-## §89 候选逐个过（含子 agent 的 crates.io / GitHub 一手核查）
+## §95 候选逐个过（含子 agent 的 crates.io / GitHub 一手核查）
 
 筛选的第一道闸是 **wgpu 版本对齐**：今天锁 `wgpu 29.0.4` + `naga 29`（`bevy_render 0.19.1` 自己就钉
 `wgpu ^29.0.3` + `naga ^29.0.3`），而 **wgpu 每三个月一个 breaking 版本**（上游 README 原话）。
@@ -157,7 +157,7 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 | 候选 | 版本 / 状态 | wgpu | 判决 |
 |---|---|---|---|
 | **`winit` + `wgpu` +（可选 `egui-wgpu`）** | winit 0.30.13（`bevy_winit` 也钉 ^0.30）；wgpu 29.0.4 | **29** ✅ | **留下**（唯一三头都占的） |
-| `bevy` 最小特性集 | 0.19.1 | 29 ✅ | **不影响日常循环**（§86.3），只省冷编 |
+| `bevy` 最小特性集 | 0.19.1 | 29 ✅ | **不影响日常循环**（§92.3），只省冷编 |
 | `bevy_*` 子 crate 替代 umbrella | — | 29 ✅ | **无意义**：`bevy` 本体 19 行、唯一依赖 `bevy_internal` |
 | `kiss3d` 0.46 | 2026-08-15，活跃 | **30** | 否：差一个大版；**API 里没有任何 shadow map 类型**；自述"不是为功能完整或快而设计" |
 | `three-d` 0.19 | 活跃 | 无（`glow` OpenGL + **winit ^0.28**） | 否：后端不对；`PointLight` 没有影子 |
@@ -177,9 +177,9 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 
 ---
 
-## §90 自己写宿主：能得到什么、要写什么
+## §96 自己写宿主：能得到什么、要写什么
 
-### §90.1 今天 bevy 替我们做的事（逐条对照）
+### §96.1 今天 bevy 替我们做的事（逐条对照）
 
 | Bevy 提供的 | 裸 wgpu 侧要写的 | 量 |
 |---|---|---|
@@ -200,9 +200,9 @@ glTF 3 个、音频 7 个、手柄 4 个、`accesskit` 4 个、UI 布局 6 个�
 
 **估算：新写 + 改写 ≈ 3000–3500 行，其中真正全新的 ≈ 1200–1500 行**（影子、tonemap、截图回读、
 时间戳、winit 循环）。§4 当初记的"自研 wgpu + naga 要 3–6 人月才到 parity"今天**不成立**了 ——
-通用渲染（§65）与 `px_pass`（§79）已经把中间的活干掉了大半，而且本仓已有 `px_probe` 这份裸 wgpu 先例。
+通用渲染（§65）与 `px_pass`（§85）已经把中间的活干掉了大半，而且本仓已有 `px_probe` 这份裸 wgpu 先例。
 
-### §90.2 内容 shader 要改的地方（这是最容易被低估的一项）
+### §96.2 内容 shader 要改的地方（这是最容易被低估的一项）
 
 `art/shaders/*.wgsl` 里有 5 类 `bevy_pbr::*` 外部符号，**它们同时是 group 0 的绑定契约**：
 
@@ -220,11 +220,11 @@ bevy_pbr::view_transformations::depth_ndc_to_view_z
 （`surface.wgsl` / `light.wgsl` 的注释自己写着），从来没有真的依赖 bevy 的实现；
 真正只有 bevy 有的，是 **group 0 的布局 + 点光 cube shadow map 的采样**。换个绑定表就搬完了。
 
-### §90.3 判据的风险（这是最大的那一项，不是代码量）
+### §96.3 判据的风险（这是最大的那一项，不是代码量）
 
 这个仓的判据体系是**逐字节**的：
 
-- §12：同一轮跑两次逐字节相同；§65 迁移的判据是 `0 / 614400` 不同像素；§80 的 pass 表四条判据
+- §12：同一轮跑两次逐字节相同；§65 迁移的判据是 `0 / 614400` 不同像素；§86 的 pass 表四条判据
   里两条是"像素差 0"。
 - §51.18 那条铁律：**判据一律读 `pair.gpu_delta_ms`** —— 而那个 `gpu_ms` 今天来自
   `RenderDiagnosticsPlugin` 写进 `DiagnosticsStore` 的 `render/**/elapsed_gpu`。
@@ -240,7 +240,7 @@ bevy_pbr::view_transformations::depth_ndc_to_view_z
 
 ---
 
-## §91 分期与代价
+## §97 分期与代价
 
 ### 阶段 0（零风险、当天见效，建议先做）
 1. **`.cargo/config.toml` 打开 `rust-lld`**（工具链里已经有 `rust-lld.exe`，§4.5 记过它只是不在 PATH）。
@@ -257,7 +257,7 @@ bevy_pbr::view_transformations::depth_ndc_to_view_z
 - 新 crate（建议 `px_gpu`：实例/设备/交换链/深度/timestamp/截图回读 + `px_host`：材质/网格/灯/相机）。
 - `px_render` 保留为 bevy 宿主，**两个宿主消费同一份 `.pxart`**。
 - **验收判据 = 逐字节**：`orbit-bare` / `orbit-rings` / `orbit-soft` / `orbit-proxy-fine` 四档
-  与今天 bevy 宿主的图逐字节相同；`--sheet` 12 格逐字节相同；pass 表四份文档（§80）四条判据全过。
+  与今天 bevy 宿主的图逐字节相同；`--sheet` 12 格逐字节相同；pass 表四份文档（§86）四条判据全过。
 - 这一阶段结束时，两条路都活着，`cargo build -p px_render` 仍然是 bevy 的 16 s —— **不赚，但不赔**。
 
 ### 阶段 2 ｜切换与拆除
@@ -280,26 +280,26 @@ bevy_pbr::view_transformations::depth_ndc_to_view_z
 
 ---
 
-## §92 结论（一句话）
+## §98 结论（一句话）
 
 - **"换框架"能买到的是：冷编 366 → ~55 s、改一行 16 → ~3 s、产物 156 → ~10 MB、
   启动到设备 1.31 → ~0.45 s。**
 - **买不到的是：一个更轻的现成 3D 框架（榜上没有）**，所以落点必然是**自己写宿主**，
   新写 ≈ 1200–1500 行（影子 / tonemap / 回读 / 时间戳 / winit）。
-- **只砍 bevy 的特性集不解决日常循环**（§86.3：前端 1.43 s、链接 1.6 s，剩下 13 s 是 bevy 泛型的 LLVM 产码）。
-- **最大的风险不是代码量，是判据**：不逐字节复现，§51 那一整套性能账全部作废（§90.3）。
+- **只砍 bevy 的特性集不解决日常循环**（§92.3：前端 1.43 s、链接 1.6 s，剩下 13 s 是 bevy 泛型的 LLVM 产码）。
+- **最大的风险不是代码量，是判据**：不逐字节复现，§51 那一整套性能账全部作废（§96.3）。
 - 因此建议的次序是 **阶段 0（cranelift/lld/loader，当天见效、与剥离无关）→ 阶段 1（双宿主 + 逐字节判据）
   → 阶段 2（拆除）**，而不是直接开一个"删掉 bevy"的分支。
 
 ---
 
-## §93 没做 / 没验（明账）
+## §99 没做 / 没验（明账）
 
 - **没验**：`--view`（窗口那条路）的启动耗时；本轮只量了 `--serve` headless。
-- **没验**：`default-features = false` 的最小特性集能不能让 `px_render` 编过 —— §86.3 的推论
+- **没验**：`default-features = false` 的最小特性集能不能让 `px_render` 编过 —— §92.3 的推论
   （"不影响日常循环"）是从"前端 1.43 s / 链接 1.6 s / 其余为泛型产码"这三个读数推出来的，
   **没有真的裁一遍再量**。
-- **没验**：sccache 在本机 MSVC + bevy 上的命中率与开销（§91 阶段 0 第 4 条是推断）。
+- **没验**：sccache 在本机 MSVC + bevy 上的命中率与开销（§97 阶段 0 第 4 条是推断）。
 - **没验**：nightly + cranelift 在本仓的实际增益（引的是上游 Bevy 的实测，不是本机的）。
 - **没做**：`target/research/render-min` 只是个**量编译与设备启动的基线**，它不画东西。
 - **没动**：`px_render` 一行代码没改；本篇是调研。

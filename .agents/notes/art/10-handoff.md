@@ -101,6 +101,35 @@ descriptor 闸门端到端：拿第 0 步那份没有 descriptor 的产物请求
    呈现路径、**不给场景也复现** ⇒ 不是这一轮引入；离线服务无 swapchain 所以干净；**没做二分**。
 3. **笔记清理**：`11-graph.md` 里那份 §79 副本已删（原地留 5 行指路），三处引用同步。
 
+#### 再续（同一天，`.worktrees/pass-table` 分支 `feature/pass-table`）：**v2 的材质契约已并进来** ＋ pass shader 统一到材质契约
+
+**合并 `df82596`**（`4fc772d`）：唯一冲突是 `px_graphs/src/bin/shaders.rs` 的槽表 ——
+pass 表那侧把 `SLOTS` 从 3 加到 5，v2 那侧整张表删掉改成**扫目录**，取 v2 的（两份 pass shader 自动进表）。
+`art/shaders` 6 份入口全进清单（含此前从没被烘过的 `ring.wgsl`）。
+
+⚠ **合并把两个分支的 § 号撞在一起了**：`§79` 被 `12-step0.md` 与 `13-passtable.md` 同时用，
+`§80 §81 §82` 被 `08-renderer.md` 与 `13-passtable.md` 同时用。
+按「后合进来的那条让号」把 pass 表那篇整体挪到 **§85–§90**（本次调研跟着挪到 §91–§99；
+**§83 §84 空着是这次挪号留下的断档**）。`art-framework.md` 的篇表与 § 号表已同步，代码注释里的
+两处 `§79`（`px_pass/src/lib.rs`、`px_render/src/passes.rs`）也跟着改了。
+
+**合并撞到的真冲突（用户裁决走 C）**：v2 的扫目录把**每一份**入口都当材质烘，而 `write_shader`
+现在无条件要求第 0 格是参数块 —— 两份 pass shader 没有，烘图当场红。
+⇒ **pass shader 也声明参数块，`px_pass` 改用材质布局**，参数一次做到位（配方能按名字给数）。
+细节与判据在 **`art/13-passtable.md` §86.4**。
+
+**判据**：六张图与合并前的基线**逐字节相同**（`target/passdoc` → `target/passaccept`，
+`63184151909371A5` / `733408200119C203` / `745BE24FE1467192` / `2D61519C6544E3C1`）——
+绑定组从第 0 组挪到第 3 组、贴图从第 0 格挪到第 1 格、多一个参数块，**一个像素都没动**；
+§86 的 A/P/R/D 四条照旧全过；`cargo test` 全绿（`px_render` 26 单测 + 集成 11）；
+参数那条路的判据：`strength = 0.5` 在纯反相上必然是平场 ⇒ 实测 `min = max = 188 = sRGB(0.5)`。
+
+**剥 bevy 的调研**（**代码未动**）另立一篇：**`art/14-bevy-exit.md` §91–§99**。
+一句话：冷编 366 s → 裸 wgpu 基线 **54.7 s**、改一行 `px_render/src/main.rs` **13–16 s → 1.7 s**
+（`cargo check` 只值 1.43 s、链接只值 1.6 s，**其余全是 LLVM 为 bevy 泛型产码**）、
+产物 156.6 → 8.45 MB、进程到设备 1.31 → 0.45 s。**用户已裁决先走阶段 0**（cranelift / lld / 清 Vulkan loader /
+共享 target），**剥 bevy 本身尚未开工**。
+
 ⚠ **还欠着的**：`gradient` 的第 8 条（归因 check 的 2.259e-1）用户裁决**记账、不追**（§81.6 末）；
 探针的 `field_dual` / `gradient` 是手动跑的，**没进任何自动门**（本仓的规矩：探针不进 `cargo test`，
 退出码才是判据）—— 也就是说：**谁会想到去跑它，谁才会发现它红了**，这一轮就是这么发现的。

@@ -21,7 +21,7 @@ ERROR bevy_render::…::pipeline_cache:    failed to process shader error: shade
 | 改了什么 | 要不要重启 |
 |---|---|
 | **只有 `.wgsl`** | **不要** —— 存盘即可，约 1 秒生效 |
-| **uniform 结构**（加一格 / 换布局） | **不要** —— 装载时现反射（`px_render/src/reflect.rs::layout_of`，缓存键 = `(内容版本, 库指纹)`）。⚠ **但产物必须同时给出新增那一格的值**，否则当场拒；而「让产物给得出那个值」今天要改 `px_graphs/src/bin/scene.rs` 的白名单 ⇒ **那是烘图侧的事，与重启无关**。实测八步见 `art/12-step0.md` §79 |
+| **uniform 结构**（加一格 / 换布局） | **不要** —— 装载时现反射（`px_render/src/reflect.rs::layout_of`，缓存键 = `(内容版本, 库指纹)`）。⚠ **但产物必须同时给出新增那一格的值**，否则当场拒；而「让产物给得出那个值」**在 §81（配方按名字透传）之后就是在配方里按名字写**（`px_graphs::params::merge_named`）⇒ **那是烘图侧的事，与重启无关**。实测八步见 `art/12-step0.md` §79 |
 | CLI / 系统 / 插件 | **要** —— 改了 Rust 就得重编，exe 被占用 ⇒ 先停进程 |
 
 > **2026-09-16 更正**：本表原来那一行写的是「`CloudParams` 之类的 **uniform 结构** ⇒ **要** ——
