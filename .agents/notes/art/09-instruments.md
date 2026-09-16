@@ -21,8 +21,14 @@ ERROR bevy_render::…::pipeline_cache:    failed to process shader error: shade
 | 改了什么 | 要不要重启 |
 |---|---|
 | **只有 `.wgsl`** | **不要** —— 存盘即可，约 1 秒生效 |
-| `CloudParams` 之类的 **uniform 结构** | **要** —— 布局变了 ⇒ 必须 `cargo build` ⇒ exe 被占用 ⇒ 先停进程 |
-| CLI / 系统 / 插件 | **要** —— 同上 |
+| **uniform 结构**（加一格 / 换布局） | **不要** —— 装载时现反射（`px_render/src/reflect.rs::layout_of`，缓存键 = `(内容版本, 库指纹)`）。⚠ **但产物必须同时给出新增那一格的值**，否则当场拒；而「让产物给得出那个值」今天要改 `px_graphs/src/bin/scene.rs` 的白名单 ⇒ **那是烘图侧的事，与重启无关**。实测八步见 `art/12-step0.md` §79 |
+| CLI / 系统 / 插件 | **要** —— 改了 Rust 就得重编，exe 被占用 ⇒ 先停进程 |
+
+> **2026-09-16 更正**：本表原来那一行写的是「`CloudParams` 之类的 **uniform 结构** ⇒ **要** ——
+> 布局变了 ⇒ 必须 `cargo build` ⇒ exe 被占用 ⇒ 先停进程」。那**在 §65（通用渲染）之前是对的**
+> （当时参数块是 Rust 的 `#[derive(ShaderType)]` 结构体），今天不对：实测（`art/12-step0.md` §79）
+> 换了 `clouds.wgsl` 结构体的布局、又加了一格新名字，**同一个 pid** 一路出图，exe 的 sha256 没动、
+> 流程里没有一次 `cargo`。**原文保留在上面这条更正里**，免得下次又有人照旧形状判读。
 
 ⚠️ 每次重启的代价是 15–25 秒预热，**而且会把用户的 viewer 窗口杀掉**。
 

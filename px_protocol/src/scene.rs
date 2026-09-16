@@ -28,6 +28,7 @@ pub fn cas_path(root: &Path, key: &str) -> Result<PathBuf, String> {
 /// 场景对某个成员的引用：**图名 + 节点名 + 当时的键**。
 /// 名字给人看与报错，键给渲染器取产物（键 = 内容）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Member {
     pub graph: String,
     pub node: String,
@@ -100,6 +101,7 @@ fn value_kind(value: &Value) -> &'static str {
 /// 没有父子层级：产物给的就是最终变换 —— 层级是渲染器的事，而"谁挂在谁下面"
 /// 是内容，烘图侧比渲染器更清楚。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Transform {
     #[serde(default)]
     pub translation: [f32; 3],
@@ -158,7 +160,7 @@ impl Transform {
 /// 图元不是"行星"：球/环这种形状是任何渲染器都有的东西（`Sphere`、`Ring`），
 /// 而消融档（`orbit-soft-shell` 用一个细分球壳）要的正是"同一个球壳"。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case")]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Geometry {
     Mesh { member: Member },
     Primitive {
@@ -210,6 +212,7 @@ pub enum Filter {
 /// 采样器：**住在产物里**（"这张图该怎么采"跟图一起走）。
 /// 渲染器按它建 `Image` 自带的采样器 —— 图与采样器都从文档来，渲染器不猜。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sampler {
     #[serde(default)]
     pub address_u: Address,
@@ -261,7 +264,9 @@ impl Sampler {
 ///
 /// **绑定下标就是契约**：shader 得在那一格声明贴图，`+1` 那一格声明采样器。
 /// 渲染器按反射出来的声明校验维度（2D / cube）与产物是不是同一回事 —— 对不上当场报错。
+/// 哪几格能放贴图**只有一份来源**：`crate::material::TEXTURE_SLOTS`（§74.3 的契约收口）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextureRef {
     pub binding: u32,
     pub member: Member,
@@ -307,6 +312,7 @@ pub enum CullMode {
 /// 材质 = **一份 WGSL 产物 + 一袋按名字给的参数 + 按绑定下标给的贴图 + 两条渲染状态**。
 /// 渲染器不认识参数是什么意思：它把参数按 shader 自己声明的结构体打包（反射，见 `px_render::reflect`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Material {
     /// WGSL 产物（`kind = Shader`）。绑定布局由它自己声明。
     pub shader: Member,
@@ -369,6 +375,7 @@ impl Material {
 
 /// 场景里的一个物体。**没有 kind**：几何 + 材质 + 变换就是全部。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Object {
     /// 实体身份。重建场景时按它配对，所以同一份场景里不许重名。
     pub id: String,
@@ -398,6 +405,7 @@ pub enum LightKind {
 /// 一盏灯。位置 / 方向 / 颜色 / 强度 / 开不开影全部来自产物 —— 渲染器里没有
 /// `SUN_DIRECTION` 这种常量（§60）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Light {
     pub id: String,
     pub kind: LightKind,
@@ -459,6 +467,7 @@ impl Light {
 /// 环境：环境光强度 + 天空盒（cube 贴图产物）。天空盒是**内容**：
 /// 有没有星空、星空长什么样由产物说了算，渲染器只负责把它挂到相机上。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Environment {
     #[serde(default)]
     pub ambient: f32,
@@ -530,6 +539,7 @@ impl PassSpec {
 /// 一般渲染文档：环境 + 相机表 + 灯表 + 物体表 + pass 表。
 /// 渲染器只吃这一份，不再从命令行接收内容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SceneSpec {
     pub schema: u32,
     pub name: String,
@@ -610,16 +620,15 @@ impl SceneSpec {
                 ));
             }
             for (role, texture) in &object.material.textures {
-                if texture.binding < 1 {
+                // 格号是不是合法的**只有一份**判据：契约表（`crate::material::TEXTURE_SLOTS`）。
+                // 这一段原来自己写「奇数格、≥1」——那是那张表的半份手抄（§67.4 第 4 处）：
+                // 表加宽之后（§74.4 裁决 (a)：4 格 → 12 格），半份抄本会开始拒合法的格。
+                if crate::material::texture_slot_of(texture.binding).is_none() {
                     return Err(format!(
-                        "物体 '{}' 的贴图 '{role}' 绑在 {} 格：0 格是参数块（uniform），贴图从 1 起",
-                        object.id, texture.binding
-                    ));
-                }
-                if texture.binding % 2 == 0 {
-                    return Err(format!(
-                        "物体 '{}' 的贴图 '{role}' 绑在 {} 格：贴图占奇数格、采样器占下一格（约定见 TextureRef）",
-                        object.id, texture.binding
+                        "物体 '{}' 的贴图 '{role}' 绑在第 {} 格：材质只认 {} 这几格（采样器占下一格）",
+                        object.id,
+                        texture.binding,
+                        crate::material::texture_bindings()
                     ));
                 }
             }
@@ -843,4 +852,64 @@ pub fn write_scene(path: &Path, spec: &SceneSpec, fingerprint: u64) -> Result<u6
     }
     std::fs::write(path, &bytes).map_err(|err| format!("写 {} 失败：{err}", path.display()))?;
     Ok(bytes.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一份最小的合法文档：一个物体、一份材质、一盏灯。
+    const DOC: &str = r#"{
+        "schema": 2,
+        "name": "夹具",
+        "objects": [{
+            "id": "planet",
+            "geometry": {"source": "primitive", "name": "icosphere", "params": {"radius": 1.0}},
+            "material": {
+                "shader": {"graph": "shaders", "node": "surface", "key": "00"},
+                "params": {"gain": 1.0},
+                "textures": {"albedo": {"binding": 1, "member": {"graph": "generated", "node": "color", "key": "11"}}}
+            },
+            "transform": {"rotation": [0.0, 0.0, 0.0, 1.0]}
+        }],
+        "lights": [{"id": "sun", "kind": "point", "position": [1.0, 2.0, 3.0], "intensity": 1.0}]
+    }"#;
+
+    #[test]
+    fn our_own_documents_parse() {
+        let spec: SceneSpec = serde_json::from_str(DOC).expect("自己的文档必须解析得动");
+        assert_eq!(spec.objects.len(), 1);
+        assert_eq!(spec.objects[0].material.params.len(), 1);
+        spec.check().expect("这份夹具是合法的");
+    }
+
+    /// **未知字段不许静默忽略**（§73 用户裁决）：旧渲染器读到新文档时，
+    /// 静默忽略一个新字段就等于「少画了东西还报成功」—— 那正是 §34 禁止的那种绿灯。
+    #[test]
+    fn an_unknown_field_is_refused_not_ignored() {
+        let object = DOC.replace(r#""id": "planet","#, r#""id": "planet", "cast_shadow_typo": true,"#);
+        let err = serde_json::from_str::<SceneSpec>(&object).expect_err("物体上的未知字段必须报错");
+        assert!(err.to_string().contains("cast_shadow_typo"), "{err}");
+
+        let material = DOC.replace(r#""gain": 1.0"#, r#""gain": 1.0, "roughness": 0.4"#);
+        // 材质参数表是**按名字自由**的（那正是「加参数」要走的路），所以这里**不该**报错 ——
+        // 名字对不对由 shader 的 descriptor 说了算，不是协议说了算。
+        let spec: SceneSpec = serde_json::from_str(&material).expect("材质参数表按名字自由");
+        assert_eq!(spec.objects[0].material.params.len(), 2);
+
+        let texture = DOC.replace(r#""binding": 1,"#, r#""binding": 1, "wrap_typo": "repeat","#);
+        let err = serde_json::from_str::<SceneSpec>(&texture).expect_err("贴图上的未知字段必须报错");
+        assert!(err.to_string().contains("wrap_typo"), "{err}");
+
+        let spec_level = DOC.replace(r#""name": "夹具","#, r#""name": "夹具", "ambient_typo": 1.0,"#);
+        let err = serde_json::from_str::<SceneSpec>(&spec_level).expect_err("文档上的未知字段必须报错");
+        assert!(err.to_string().contains("ambient_typo"), "{err}");
+
+        let geometry = DOC.replace(
+            r#"{"source": "primitive", "name": "icosphere", "params": {"radius": 1.0}}"#,
+            r#"{"source": "primitive", "name": "icosphere", "subdivisons": 64, "params": {"radius": 1.0}}"#,
+        );
+        let err = serde_json::from_str::<SceneSpec>(&geometry).expect_err("几何上的未知字段必须报错");
+        assert!(err.to_string().contains("subdivisons"), "{err}");
+    }
 }

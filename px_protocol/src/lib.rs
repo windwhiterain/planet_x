@@ -1,5 +1,6 @@
 pub mod art;
 pub mod client;
+pub mod material;
 pub mod render;
 pub mod scene;
 pub mod sim;
@@ -7,6 +8,10 @@ pub mod stream;
 pub mod wire;
 
 pub use art::{ArtBundle, AssetKind, AssetManifest, MeshData, TextureFormat, TextureShape};
+pub use material::{
+    MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
+    ParamSlot, TEXTURE_SLOTS, TextureDimension, TextureSlot,
+};
 pub use render::{
     ClientError, Compare, ErrorBar, GpuMs, GpuSample, Job, Lease, Pair, PerfReport, Report, Request,
     Response, Scene, Shot, ShotReport, View, Waits,

@@ -22,7 +22,7 @@ use px_protocol::scene::{
 
 use crate::art_cache::ArtCache;
 use crate::material::{BoundTexture, DocMaterial};
-use crate::reflect::ParamKind;
+use crate::reflect::{MaterialLayout, ParamKind};
 use crate::{mesh, reflect, slots};
 
 /// 材质里一个**可以被窗口现场改**的整数参数。它记的是"哪一份材质、哪个名字、打在参数块的第几个字节"。
@@ -94,6 +94,38 @@ fn closure_check(
     }
 }
 
+/// 装载一份 shader 之前对账的第二半（§74.3 的契约收口）：产物烘的时候那份
+/// **schema descriptor**，跟**现在照着同一份规则反射出来**的那份比。
+///
+/// 为什么必须要这一条：反射规则本身会变（契约表加宽、`ParamKind` 多一档、偏移规则修正）。
+/// 规则一变，**同一份 WGSL 读出的是另一份契约**，而键 / 清单 / 场景键 / 槽版本全都没动
+/// —— 产物里的参数值是按老契约打包的，装出来的东西是错的却不报错。
+/// 所以在这里当场拒，并给出重烘配方（与 `closure_check` 同款）。
+fn schema_check(
+    member: &Member,
+    recorded: Option<&str>,
+    now: &MaterialLayout,
+) -> Result<(), String> {
+    const REBAKE: &str = "重烘配方：cargo run -p px_graphs --bin shaders；再逐个 cargo run -p px_graphs --bin scene <名>";
+    let now_text = now.to_json()?;
+    match recorded {
+        Some(text) if text == now_text => Ok(()),
+        Some(text) => Err(format!(
+            "shader 成员 {}/{} 的 schema descriptor 对不上：\n  \
+             产物记的 {text}\n  \
+             现在的   {now_text}\n  \
+             ⇒ 这份产物是拿另一版**反射规则**烘的：里面的参数值按老契约打包，装出来是另一份东西，\n    \
+             而键 / 场景键 / 槽版本全没动（§74.3）—— 所以在这里拒，不静默出图。\n  {REBAKE}",
+            member.graph, member.node,
+        )),
+        None => Err(format!(
+            "shader 成员 {}/{} 的产物没有 schema descriptor（契约收口之前的产物）：\n  \
+             那一版没有「产物记的契约」可以跟现在反射出来的对账，认它等于认一份没验过的布局。\n  {REBAKE}",
+            member.graph, member.node,
+        )),
+    }
+}
+
 /// 把文档里每一份材质要的 WGSL 装进槽里。**装之前**先问一句「槽里是不是已经是这一份」：
 /// 装 = 新资产 = 管线重编（§52.3 那个"云静默消失"的坑）。
 pub fn preload_shaders(
@@ -114,15 +146,21 @@ pub fn preload_shaders(
         let entry = cache.shader(&path.display().to_string())?;
         let closure = closure_check(member, &entry.value, &modules)?;
         let version = slots::version_of(&member.key)?;
+        // 第二道对账：产物的 schema descriptor 必须与现在反射出来的一致（§74.3）。
+        let layout = reflect::layout_of(version, &member.node, &entry.value.source)?;
+        schema_check(member, entry.value.schema.as_deref(), &layout)?;
         let fresh = slots::activate(server, slots::MATERIAL, version, &entry.value.source);
         println!(
-            "shader 成员 {}/{} → {}：{} 字节（{}）｜版本 {:016x}｜{}",
+            "shader 成员 {}/{} → {}：{} 字节（{}）｜版本 {:016x}｜契约 {} 格参数 / {} 字节 / {} 张贴图｜{}",
             member.graph,
             member.node,
             slots::version_file(slots::MATERIAL, version),
             entry.value.source.len(),
             if entry.hit { "缓存命中" } else { "现读产物" },
             version,
+            layout.params.len(),
+            layout.params_bytes,
+            layout.textures.len(),
             if fresh {
                 "第一次见这一版，装进槽（管线要现编）"
             } else {
@@ -514,7 +552,23 @@ mod tests {
         ShaderEntry {
             source: ENTRY.to_string(),
             closure,
+            schema: Some(schema_json()),
         }
+    }
+
+    /// 一份夹具契约的规范 JSON：对账比的就是这段文本。
+    fn schema_json() -> String {
+        MaterialLayout {
+            params: vec![crate::reflect::ParamSlot {
+                name: "gain".to_string(),
+                offset: 0,
+                kind: ParamKind::F32,
+            }],
+            params_bytes: 16,
+            textures: Vec::new(),
+        }
+        .to_json()
+        .expect("序列化")
     }
 
     #[test]
@@ -546,6 +600,48 @@ mod tests {
         let refusal = closure_check(&member(), &entry(None), &table)
             .expect_err("px_shader/v1 时代的产物必须当场拒");
         assert!(refusal.contains("没有 include 闭包指纹"), "{refusal}");
+        assert!(refusal.contains("重烘配方"), "{refusal}");
+    }
+
+    #[test]
+    fn the_schema_gate_passes_when_the_descriptor_matches_the_reflection() {
+        let recorded = schema_json();
+        let now = MaterialLayout::from_json(&recorded).expect("解回来");
+        schema_check(&member(), Some(&recorded), &now).expect("同一份契约应当放行");
+    }
+
+    #[test]
+    fn the_schema_gate_refuses_a_descriptor_from_another_reflection_rule() {
+        // 产物记的是"只有一个 f32"，现在反射出来的是"16 字节里两格" ⇒ 另一版规则烘的。
+        let now = MaterialLayout {
+            params: vec![
+                crate::reflect::ParamSlot {
+                    name: "gain".to_string(),
+                    offset: 0,
+                    kind: ParamKind::F32,
+                },
+                crate::reflect::ParamSlot {
+                    name: "extra".to_string(),
+                    offset: 4,
+                    kind: ParamKind::F32,
+                },
+            ],
+            params_bytes: 16,
+            textures: Vec::new(),
+        };
+        let refusal = schema_check(&member(), Some(&schema_json()), &now)
+            .expect_err("换了反射规则的产物必须当场拒");
+        assert!(refusal.contains("shaders/surface"), "要点名是谁：{refusal}");
+        assert!(refusal.contains("schema descriptor 对不上"), "{refusal}");
+        assert!(refusal.contains("重烘配方"), "拒了要给重烘配方：{refusal}");
+    }
+
+    #[test]
+    fn the_schema_gate_refuses_an_artifact_without_a_descriptor() {
+        let now = MaterialLayout::from_json(&schema_json()).expect("解回来");
+        let refusal = schema_check(&member(), None, &now)
+            .expect_err("契约收口之前的产物必须当场拒");
+        assert!(refusal.contains("没有 schema descriptor"), "{refusal}");
         assert!(refusal.contains("重烘配方"), "{refusal}");
     }
 }

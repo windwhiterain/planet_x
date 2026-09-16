@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# 契约的**类型**（MaterialLayout / ParamKind / 绑定表）住在这里：它只有 serde，没有实现。
+px_protocol = { path = "../px_protocol" }
+# 反射材质参数块用（`src/reflect.rs`）：解析组装好的 WGSL，按它自己声明的结构体读出布局。
+# 版本与 wgpu / naga_oil 自带的那一份是同一个（Cargo.lock 里只有一条 naga）。
+naga = { version = "29", features = ["wgsl-in"] }

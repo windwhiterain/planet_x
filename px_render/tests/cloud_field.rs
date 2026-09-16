@@ -2,10 +2,13 @@ mod common;
 
 #[test]
 fn the_assembled_cloud_module_carries_the_field_and_its_gradient() {
-    // 参数块的形状现在由**反射**说了算（渲染器里没有第二个 Rust 结构体了）：这份 shader
-    // 声明的 24 个参数、128 字节的块，就是探针那边镜像要对上的那一份。
-    let layout = px_render::reflect::reflect_assembled(&common::assemble("clouds.wgsl"), "clouds.wgsl")
-        .expect("云的材质契约反射不出来");
+    // 参数块的形状由**反射**说了算（渲染器里没有第二个 Rust 结构体了）。
+    // ⚠ 这里钉住的 25 / 128 不是"shader 的布局"（那是作者的权利，改结构体不该先撞上离线门），
+    // 而是**探针那边 `px_probe/src/params.rs` 的手抄镜像**必须与这份声明逐项相同 ——
+    // 镜像漂了，梯度判据量的就是另一个场。绑定契约的类型收在 `px_protocol::material`（§74.3）。
+    let layout =
+        px_shader::reflect::reflect_assembled(&common::assemble("clouds.wgsl"), "clouds.wgsl")
+            .expect("云的材质契约反射不出来");
     assert_eq!(layout.params.len(), 25, "云参数少了一个：{}", layout.param_names());
     assert_eq!(layout.params_bytes, 128);
     assert_eq!(layout.param("steps").expect("steps 在").kind, px_render::reflect::ParamKind::U32);

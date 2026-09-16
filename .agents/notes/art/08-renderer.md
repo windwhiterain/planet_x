@@ -381,7 +381,7 @@ px_render --scene <产物> --cam 0,22,4.2 --out target/rings-shot.png --width 12
 
 **没验**：环的**逐像素**对照（迁移前那条路没有基线图可对）；环的曝光处理与内建
 `StandardMaterial{unlit}` 不同（后者乘 `view.exposure`，自写材质不乘 —— 与云/大气同一处口径，
-见 `10-handoff.md` §9.1.6 第 3 条"云自己的曝光没动"）。
+见 `10-handoff.md` §9.1.7 第 3 条"云自己的曝光没动"）。
 
 ### §65.2 仪器跟着改：harness 的 shader 一致性闸门
 
@@ -471,3 +471,228 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
   `art/shaders` 从「手写资产」变成「模板」—— 这一刀要用户点头。
 
 ⚠ 三批都会动 `SCENE_SCHEMA`（形态 3 还要动 protocol 快照）⇒ 在跑的旧服务会被握手拒，这是设计不是故障。
+
+> **续（2026-09-16）**：美术那边提出「schema 要能像 Shader Graph 那样动态改变 ＋ render graph 要能动态组装重载」，
+> 于是又调研了一轮，落成 **`art/11-graph.md` §67–§73**。三条与本节直接相关的更新：
+> ① **§66 的缺口清单要补**：除了本节那五处手抄，**烘图侧**还有两张手写词表
+> （`px_graphs/src/bin/scene.rs:442-487` 的白名单与 `:517-586` 的映射、`shaders.rs:8` 的 `SLOTS` 常量）
+> —— 它们才是「加一个参数要重编 Rust」的真凶；
+> ② **Unity 的对照**：Shader Graph 的 schema 是**编译期**烘进材质的（材质是快照、运行期不能改），
+> 所以「像 Shader Graph 那样动态」在运行期这一侧本仓**已经超过它**；缺的是作者侧（§68）；
+> ③ **render graph**：Bevy 0.19 的 `RenderGraph` 已经是 **schedule**（不是节点图），
+> 动态组装的正确落点是「文档里的 pass 表 + 一个执行器系统」，不是运行期改 schedule（§70）。
+
+---
+
+## §80 契约收口与加宽超集（§76 开工序的第 1 步，2026-09-16）
+
+**一句话**：材质绑定契约从**八处手抄**收成**一份表**（`px_protocol::material`），
+并在这份表上一次性把两个硬顶加宽（贴图 **4 → 12 格**、参数块 **1024 → 4096 字节**）。
+提交 **`c44e136`**（分支 `feature/graph-research`）。
+
+判据：**产物键逐字节不变**（只搬代码 + 加宽都换不动键）｜**出图哈希四张全同**
+（`2b1a76f4…` = §75 的基线）｜配对量到的代价**在噪声内**（§80.3）｜84 个用例通过。
+
+### §80.1 收口：表住哪儿、谁抄过它
+
+| 原来（§67.4 的八处） | 现在 |
+|---|---|
+| `px_render/src/reflect.rs:22-30` 的真源（组号 / 格号 / 维度 / 上限） | **`px_protocol::material`**（新模块）：`MATERIAL_BIND_GROUP` / `PARAMS_BINDING` / `TEXTURE_SLOTS` / `MAX_PARAMS_BYTES` / `PARAMS_ALIGN` |
+| `px_render/src/slots.rs:167-187` 的占位 WGSL 手抄同一张表 | 占位 WGSL **由表生成**（`slots::placeholder_material`）；单测把生成物组装 + 反射回来与表逐格对账 |
+| `px_render/src/shaders.rs:254` 把 `#{MATERIAL_BIND_GROUP}` 替成字面量 `"2"` | 组装器（现在住 `px_shader::assemble`）替 **`MATERIAL_BIND_GROUP` = 3** —— 这就是 Bevy 在运行期用的那个数（`ShaderDefVal::UInt("MATERIAL_BIND_GROUP", 3)`，`bevy_pbr-0.19.1/src/material.rs:74` + `:466-473`）⇒ **离线组装 == 运行期组装** |
+| `px_protocol/src/scene.rs` `TextureRef` 的半份 `check()`（「奇数格、≥1」） | `check()` 问 `material::texture_slot_of` —— 半份抄本在表加宽之后会**开始拒合法的格** |
+| `Value`（4 种写法）vs `ParamKind`（5 种类型）：对应关系只活在 `write_value` 的 match 里 | `MaterialLayout::pack` 搬进 `px_protocol::material`，`Value ↔ ParamKind` 的合法映射就那一处 |
+| naga 反射住 `px_render`（拖 bevy ⇒ 烘图侧用不了） | 反射搬进叶子 crate **`px_shader::reflect`**（该 crate 加 `naga 29` + `px_protocol`）；`px_render::reflect` 只剩「版本 + 库指纹 → 缓存」 |
+| 组装（`bevy_pbr` 桩 + `#import` 展开）住 `px_render::shaders` | 搬进 **`px_shader::assemble`**：烘图侧也要组装 —— 烘 shader 产物时要反射出 descriptor |
+| `reflect.rs:499-527` 把 `tint@16` / `inner@32` / `params_bytes == 128` **钉死**（§75 的 W4） | 只钉**名字与类型**（偏移是 shader 的事、改布局是作者的权利）；「25 格 / 128 字节」那条留给 `tests/cloud_field.rs`，因为它是**探针镜像**的契约，不是布局的 |
+
+**依赖方向**：`px_protocol`（只有类型；运行时依赖被 `tests/crate_graph.rs` 钉死 `serde` / `serde_json`）
+← `px_shader`（naga + 组装 + 反射）← `px_render` / `px_ops` / `px_graphs`。
+
+**探针**：材质组从写死的 2 挪到 **3**、job/out 从 3 挪到 **4**（`px_probe/src/common.rs` 的
+`MATERIAL_BIND_GROUP` / `JOB_BIND_GROUP`，WGSL 里写 `#{JOB_BIND_GROUP}` 由探针自己替）。
+⚠ **探针三个 bin 本轮没跑**（待跑）。
+
+### §80.2 descriptor 进产物（第二个 U8 blob）＋ 装载时对账
+
+- 烘：`px_ops::write_shader` 反射一次 → 规范 JSON（字段顺序由结构体决定，没有 map 迭代顺序可以漂）
+  → 写成**第二个 U8 blob**（`[0]` WGSL、`[1]` descriptor）。
+  ⚠ **它不参与键**（键 = `px_shader/v2` ‖ `SHADER_VERSION` ‖ 闭包指纹 ‖ WGSL 字节）⇒ 加这一条**不换任何产物键**。
+  但**改反射规则要同时升 `SHADER_VERSION`**（`px_ops::shader_key` 的注释里写了为什么）：
+  否则盘上会出现「同一个键、两份契约」。
+- 装：`art_cache::shader` 用 `art::read_shader_parts` 把两半一起读出来；`scene::schema_check`
+  拿**产物记的那份**与**现在反射出来的那份**逐字节比：
+  - 对不上 ⇒ 拒（「这份产物是拿另一版**反射规则**烘的：里面的参数值按老契约打包」+ 重烘配方）；
+  - 没记过（契约收口之前的产物）⇒ 拒（与 §52.3 的闭包闸门同款）。
+- 为什么必须对账：反射规则会变（表加宽、`ParamKind` 多一档、偏移规则修正），而**键 / 清单 / 场景键 /
+  槽版本全都不动** ⇒ 那是「同一个键、不同内容」的另一种形态。
+
+### §80.3 加宽超集：数字与代价（配对测量）
+
+| 档 | 贴图格 | 参数上限 | 出图 sha256 | gpu p50（两轮） |
+|---|---|---|---|---|
+| **A**（加宽前） | 4（2×2D + 2×cube） | 1024 字节 | `2b1a76f4…` | 4.718 / 4.548 ⇒ 均值 **4.633 ms** |
+| **B**（加宽后） | **12（8×2D + 4×cube）** | **4096 字节** | `2b1a76f4…`（逐字节同 A） | 4.541 / 4.533 ⇒ 均值 **4.537 ms** |
+
+- 差 **−0.096 ms（−2.1%）**，在噪声内 ⇒ **空格不花钱**（与 §65「多绑 6 个空格无代价」同结论，这次是 16 个）。
+- 口径：`--perf --frames 60`、960×640、场景 `orbit`、Vulkan、**配对**（A/B/A/B 逐轮换序）、
+  两支 exe 各自起服务（`target/step1/px_render-a4.exe` / `-b12.exe`，报告与图在 `target/step1/`）。
+- ⚠ **一次被污染的读数（值得记住）**：单发对比（A 先跑）给出 A **10.43** / B **5.49 ms** ——
+  而 A 档自己的前 5 帧是 5.4 ms、之后跳到 10.4 ms：**别的负载插进来了**（同一个 worktree 的另一会话在用同一块 GPU）。
+  **结论：这类比较必须配对**，单发数字再漂亮也不算数。
+- 老四格 `1 / 3 / 5 / 7` **一个都没动**：加宽只许往后**追加**（挪老格 = 把既有 shader 的贴图换到别的格上），
+  `material.rs` 与 `slots.rs` 的单测钉着这一条。
+
+### §80.4 没做 / 待办
+
+1. **配方透传（§79 的 W1）不在这一步** —— 那正是**第 2 步**，当天已开工并提交，见下面 **§81**。
+2. 探针三个 bin（`device` / `gradient` / `field_dual`）**没跑**：这一轮只改了它的绑定组号，
+   机械改动，但按本仓规矩「没跑过不算验过」。
+3. `tests/cloud_field.rs` 那条门一度**红着** —— 起因**不是这一步**：`art/shaders/clouds.wgsl` 上当时挂着一处
+   **别的会话**的未提交改动（`@align(16) density`，把 `CloudParams` 从 128 撑到 144）。
+   用户裁决撤掉之后**门全绿**（112 个用例），产物键也回到第 0 步基线（`clouds=5a88f3986ab8`）。
+4. `--view` / `--sheet` 没跑（只走 `--serve` 出图）。
+
+---
+
+## §81 schema 变成数据：配方按名字透传（§76 开工序的第 2 步，2026-09-16）
+
+**一句话**：把「配方里能写什么参数」的判据，从**写死在 Rust 里的白名单**换成**这份 shader 自己声明的契约**
+（产物里的 schema descriptor）。这一步之后 **「加一个参数 = 改 WGSL + 改配方，0 编译」成立**（§79 的 W1 拆掉）。
+提交 **`34c9b3f`**。
+
+### §81.1 三档判据（`px_graphs/src/bin/scene.rs` 的 `merge_params`）
+
+| 配方里的名字 | 谁说了算 | 结果 |
+|---|---|---|
+| 在**结构键**表里（`PLANET_KEYS` / `CLOUDS_KEYS` / `ATMOSPHERE_KEYS`） | 编译器（半径 / 色板 / 灯 / 形状档 / 消融档……） | 编译器消化，**不进**材质参数表 |
+| 在这份 shader 的契约里 | shader（产物里的 descriptor） | **按声明的类型透传**（`coerce_value`） |
+| 两边都不是 | —— | **烘图时**报错，把两张表都列出来 |
+
+⚠ 那三个数组**留着**，但含义变了：它们不再是「配方只能写这些」，而是「编译器自己要用的那些」。
+没有把它们也变成数据，是因为那些键的含义是**编译器逻辑**（半径要跟大气对账、`extinction` 要乘行星的 `atmo`、
+云影那几个量必须与云材质同口径），不是 schema。
+
+### §81.2 槽表：写死的数组 → 扫目录
+
+`shaders.rs` 的 `const SLOTS: [&str; 3]` 没了：槽 = `art/shaders/*.wgsl` 里**没有 `#define_import_path`**
+的每一份入口（那条判据就是 `px_shader::import_path_of`，与「哪边是库、哪边是入口」是同一份规则）。
+今天扫出 4 份：`atmosphere / clouds / ring / surface`（`ring` 以前由 scene 图顺手烘、不进清单，现在也进）。
+**加一份材质 = 往 `art/shaders/` 丢一个文件。**
+
+### §81.3 协议：加法不升版本，但未知字段不许静默忽略
+
+`deny_unknown_fields` 加在文档会出现的那些结构上：`SceneSpec` / `Object` / `Material` / `TextureRef` /
+`Geometry`（内部标签枚举也认）/ `Light` / `Environment` / `Transform` / `Sampler` / `Member`。
+⚠ **自由的名字表保持自由**：`material.params` 与图元 `params` 是「按名字的自由映射」——
+名字对不对由 **shader 契约 / 图元参数表**说了算，不由协议说了算（**协议管形状，schema 管名字**）。
+`SCENE_SCHEMA` 不动（还是 2）：形状没变，在跑的旧服务不会被这一步拒。
+
+### §81.4 判据（全部实测）
+
+- **文档等价**：20 / 20 个场景，新判据与旧判据烘出来的**内容键逐字节相同**。
+  做法是 A/B：把这一步的改动 `git stash` 掉、用旧判据（旧 exe）再烘一遍全部场景，比键。
+- **用例**：116 个通过（新增：未知字段被拒 × 4 处、按名字透传、类型不符、契约不匹配……）。
+- **那条路走通了**（960×640 / `orbit` / Vulkan，服务 pid 21228 全程不变）：
+  1. 改 `clouds.wgsl`（`CloudParams` 加 `witness: f32`，着色里乘 `(1 + witness)`）+ 改 `orbit.toml`（`witness = 1.25`）；
+  2. `shaders.exe`：clouds 键 `5a88f3986ab8` → `3a4c4b6f5cc0`；`scene.exe orbit`：场景键 `18b091fc2654` → `a6bf36353013`；
+  3. 请求同一份文档 ⇒ **26 个参数**（基线 25）、出图 `708c02ad…`（基线 `2b1a76f4…`）：
+     **23.80%** 的像素变了（146211 / 614400）、最大通道差 76、包围盒 x 215..745 / y 53..586；
+  4. **exe sha256 前后都是 `4113C9018AEC9A86…`**（判据 P：0 编译）、**服务同 pid**（判据 R：0 重启）；
+  5. 回退那两处内容 ⇒ 键与出图**逐字节回到基线**。
+- **写错就在烘图时红**（三种，退出码都是 101）：名字打错一个字母 / 少给一个参数 / 值的形状不对。
+  （第 0 步 E3 那次同样的情况是**装载时**才拒的 —— 墙往前挪了一层，这正是这一步要买的东西。）
+- **descriptor 闸门端到端**：拿第 0 步那份手工造的产物（契约收口之前烘的、没有 descriptor）请求 ⇒
+  当场拒「没有 schema descriptor」+ 重烘配方，退出码 1、不出图。
+
+### §81.5 这一步之后仍然要改 Rust 的
+
+1. **加一种「结构键」**（比如配方里要能写 `moons = 3`）：那是编译器逻辑，仍要改 Rust（应该的）。
+2. **加一种全新的 part kind**（比如「环带」换成独立的 kind）：仍要改 Rust（装配逻辑）。
+3. `--view` / `--sheet` 没跑。
+4. `art/11-graph.md` 里那份重复的 §75 副本**已删**（2026-09-16，原地留一行指路 → 本篇 §79）。
+
+### §81.6 顺手修的：探针（唯一梯度判据）一直红着
+
+**它是怎么一直红着没人发现的**：第 1 步把 `#{MATERIAL_BIND_GROUP}` 从 2 统一到 3 之后，
+按规矩跑 `gradient`，8 个 check 里 7 个当场失败。于是做了 A/B：
+
+| 状态 | 组装器替的组号 | 探针 | 结果 |
+|---|---|---|---|
+| 第 0 步那次提交（`dbd227c`）原样 | 2 | 原样 | **同样红**：`Shader global ResourceBinding { group: 2, binding: 5 } is not available in the pipeline layout` |
+| 第 1 步之后 | 3 | 材质组 2→3、job 3→4 | 红：`group index 4 exceeds the max_bind_groups limit of 4` |
+| 现在 | 3 | 材质组 3、job **1**、材质贴图按契约第 5 格 | **7 / 8 通过** |
+
+**两条根因**：
+1. **探针是第四份手抄的绑定表**（§67.4 第 7 处的那一类）：它自己写「贴图 1 / 采样器 2」，
+   而 `76be114`（通用渲染 S0–S4）把材质贴图挪到了奇数格（云是**第 5 格**、采样器 6）⇒
+   探针的布局与 shader 声明对不上，`create_compute_pipeline` 直接把那一族 check 全判死。
+   ⇒ 现在这两个数来自契约（`px_probe::common::COVERAGE_BINDING`），并有单测钉「它必须是表里的一个 cube 格」。
+2. **材质的组号是 3、探针自己的组不能再往后排**：探针设备的 limits 是
+   `wgpu::Limits::downlevel_defaults()`（`max_bind_groups = 4` ⇒ 合法只有 0..3），
+   排到 4 会被 `create_shader_module` 拒。⇒ job/out 放**第 1 格**（0 是 Bevy 的视图组、2 空着），
+   管线布局数组也只有 4 项。
+
+**还剩一个 check 红着，而它暴露的是内容问题，不是管线**：
+`the_residual_is_attributed_to_one_channel` 的
+`[简化] 解析路径的噪声值和值路径的噪声值差 **2.2587842e-1**`
+—— 同一份噪声的两条代码路径（`billows` 值路径 / `billows_along(...).x` 解析路径）本该只差 1 ULP。
+`clouds.wgsl` 里这两条路的两侧（`sampled_noise` vs `sampled_noise_along`、`detail_curve` 的两侧）
+**看起来是对称的**（风偏置也逐位相同）。
+
+⚠ **但 arbiter 说不该慌**：同一次修复之后 `field_dual`（§46.3 的判据）**全部通过**，读数：
+
+| 项 | 出入 |
+|---|---|
+| 参考实现 vs shader：场值 / 噪声项 | 5.537e-5 / 8.345e-7 |
+| 解析梯度 vs 精确梯度 | 中位相对 **6.098e-6**、最大 9.368e-4（**优于最好的差商** 7.180e-4 @ h=8e-5） |
+| 覆盖度项 vs 精确带梯度 | 中位相对 4.450e-6（修复前 3.129e-2） |
+
+⇒ 梯度本身是对的；那条归因 check 更可能是**探针自己比错了两个量**（`noise_pair` 的构造，
+比如两侧的 `with_skin` / `ablate` 档不同义）。**在它判明之前**：`gradient` 的逐通道归因不当读数，
+`field_dual` 可以当。这也说明一件事——**判据死了要立刻修**：它红着的这段时间里，
+`field_dual` 一次也没跑过（管线建不起来），而它是本仓「梯度对不对」的唯一断言。
+（用户 2026-09-16 裁决：这条**记账、不追** —— arbiter 已经给出「梯度是对的」的结论，它不阻塞任何事。）
+
+---
+
+## §82 尾巴三件（§80/§81 之后，2026-09-16）
+
+### §82.1 探针镜像：从「手抄的字节布局」改成「值 + 契约」
+
+`px_probe/src/params.rs` 原来是一份**逐字镜像**（`#[derive(ShaderType)]` + `encase`，字段顺序就是 WGSL 的顺序）。
+那是**第五份手抄的契约**：shader 那边挪一格、改一档类型，这边不会有任何编译错误，
+只会在 GPU 上读出一块错位的 uniform —— 而这正是 §67.4 那一类要拆的东西。
+
+现在分开（§66 的 P2 / §69 的 S2 那一格）：
+
+| 谁 | 管什么 |
+|---|---|
+| `CloudParams` 结构体（留在原地） | **值**：探针的代码读 `params.base` 比读 map 清楚 |
+| `clouds.wgsl` 的**契约**（`params::layout()`，反射一次缓存住） | **名字 ↔ 字节**：`pack` 按它打包 |
+
+⇒ 漂移当场红：shader 声明了而这里没给 ⇒ `params_bytes` panic（"shader 声明了参数 'x'，产物没给"）；
+多给了同样报错。单测 `the_mirror_matches_the_contract` 再把**名字 / 顺序 / 类型**三样逐项钉住。
+**顺带删掉了 `encase` 与 `glam` 两个依赖**（它们只服务那份手抄布局）。
+
+**判据（换法不能换字节）**：`field_dual` 的三组读数与换之前**一字不差** ——
+场值 `5.537271499633789e-5`、覆盖度项中位相对 `4.4497380756112885e-6`、
+解析梯度中位相对 `6.097735898786375e-6` ⇒ 契约打包与旧 encase 布局**逐字节等价**。
+
+### §82.2 窗口模式复验（`--sheet` / `--view` / `--show`）
+
+- `--sheet`：走服务端出对照图（用产物自带的相机表）⇒ 4169573 字节、退出码 0。
+- `--view`：常驻窗口起得来、46 条管线全部就绪 0 失败；`--show` 推场景 ⇒
+  「已推给常驻窗口… 键 d2374142425c560e｜窗口在线（心跳 0.4 s 前）」；同一份再推一次**不重建** ✓。
+- ⚠ **窗口模式下有一条 Vulkan 校验错**（今天第一次记下）：
+  `vkAcquireNextImageKHR(): Semaphore must not be currently signaled`
+  （`VUID-vkAcquireNextImageKHR-semaphore-01286`，10 秒里 6 条）。**不是这一轮引入的**：
+  它落在**呈现路径**（acquire/present，材质契约碰不到），而且**不给任何场景**起窗口同样复现；
+  离线服务那条路没有 swapchain，所以一直是干净的。窗口照常渲染（没中断）。
+  **没做二分**（要为此重编一版渲染器）—— 记在这里，等哪次真要看窗口数据时再查。
+
+### §82.3 笔记清理
+
+`art/11-graph.md` 里那份 §79 的副本（节号撞成 §75、与那边的「裸 wgpu」同名）**已删**，
+原地留 5 行指路（`12-step0.md` §79）。引用了它的三处（`08-renderer.md` §81.5、
+`12-step0.md` 末条、`10-handoff.md`）也一并改成「已删」。

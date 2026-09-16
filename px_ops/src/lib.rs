@@ -548,6 +548,10 @@ pub fn scene_key(spec_json: &str, member_keys: &[String]) -> Key {
 /// 改一个字、或者改它 `#import` 到的任一模块，都换一个键 ⇒ 不会出现「同一个键、不同内容」。
 /// 闭包由 `px_shader` 算（与运行期 naga_oil 的模块解析同一份规则）：外部符号（`bevy_pbr::…`）
 /// 只按**名字**进指纹，它们的实现归 `SHADER_VERSION` 手动那一档管（§19.1）。
+///
+/// ⚠ **改反射规则（`px_shader::reflect` / `px_protocol::material` 那张表）也要升
+/// `SHADER_VERSION`**：schema descriptor 是随产物一起烘的，规则变了而键没变，
+/// 盘上就会出现「同一个键、两份契约」—— 装载时的 `schema_check` 拦得住，但键该先换。
 pub fn shader_key(text: &str, closure: &px_shader::Closure) -> Key {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"px_shader/v2");
@@ -557,37 +561,57 @@ pub fn shader_key(text: &str, closure: &px_shader::Closure) -> Key {
     *hasher.finalize().as_bytes()
 }
 
-/// 把一份 WGSL 写进 CAS：清单帧（`kind = Shader`）+ 一个 U8 blob。
+/// 把一份 WGSL 写进 CAS：清单帧（`kind = Shader`）+ **两个** U8 blob
+/// （`[0]` WGSL、`[1]` schema descriptor 的规范 JSON）。
+///
 /// 顺带把闭包指纹记进清单参数：渲染器装载时拿它跟**盘上现在的**闭包对账，
 /// 对不上就当场拒（§52.3）—— 键拦住的是"新烘的认错旧产物"，这一条拦的是
 /// "改了 include 但没重烘"：那时候场景指的还是老产物，而画出来的东西已经换了一版。
+///
+/// descriptor 同理（§74.3 的契约收口）：它是**装载时对账**用的那一半 ——
+/// 渲染器照着同一份规则再反射一次，对不上就是"这份产物是拿另一版反射规则烘的"。
+/// ⚠ 它**不参与键**（键 = WGSL 字节 ‖ 闭包指纹）⇒ 加这一条不换任何产物键。
 pub fn write_shader(
     id: &str,
     text: &str,
     closure: &px_shader::Closure,
+    modules: &px_shader::ModuleTable,
 ) -> Result<(Key, PathBuf, u64), String> {
     let key = shader_key(text, closure);
     let path = artifact_path(&context().cache_root, &key);
-    let bytes = text.as_bytes().to_vec();
-    let blob = px_protocol::Blob::new(
+    let descriptor = shader_schema(id, text, modules)?;
+    let wgsl_blob = px_protocol::Blob::new(
         px_protocol::BlobHeader {
             dtype: px_protocol::DType::U8,
-            shape: vec![bytes.len() as u32],
+            shape: vec![text.len() as u32],
         },
-        bytes,
+        text.as_bytes().to_vec(),
+    )
+    .map_err(|err| err.to_string())?;
+    let schema = descriptor.as_bytes().to_vec();
+    let schema_blob = px_protocol::Blob::new(
+        px_protocol::BlobHeader {
+            dtype: px_protocol::DType::U8,
+            shape: vec![schema.len() as u32],
+        },
+        schema,
     )
     .map_err(|err| err.to_string())?;
     let bundle = ArtBundle {
         assets: vec![AssetManifest {
             id: id.to_string(),
             kind: px_protocol::AssetKind::Shader,
-            params: shader_params(text, closure),
-            blobs: vec![blob.header.clone()],
+            params: shader_params(text, closure, &descriptor),
+            blobs: vec![wgsl_blob.header.clone(), schema_blob.header.clone()],
             fingerprint: noise::fnv1a(text),
             cameras: Vec::new(),
         }],
     };
-    let frames = vec![Frame::Art(bundle), Frame::Blob(blob)];
+    let frames = vec![
+        Frame::Art(bundle),
+        Frame::Blob(wgsl_blob),
+        Frame::Blob(schema_blob),
+    ];
     let mut out = Vec::new();
     stream::write_stream(&mut out, &frames).map_err(|err| err.to_string())?;
     if let Some(parent) = path.parent() {
@@ -597,9 +621,22 @@ pub fn write_shader(
     Ok((key, path, out.len() as u64))
 }
 
+/// 烘的时候反射一次：**契约由这份文本自己说了算**（表与反射都住在 `px_shader`，
+/// 运行期用的是同一份实现）。反射不出来 ⇒ 这次烘就失败，不许写出一个没有契约的产物。
+fn shader_schema(id: &str, text: &str, modules: &px_shader::ModuleTable) -> Result<String, String> {
+    let mut seen = Vec::new();
+    let assembled = px_shader::assemble::render_source(text, modules, &mut seen);
+    px_shader::reflect::reflect_assembled(&assembled, id)?.to_json()
+}
+
 /// 一份 shader 产物的清单参数。除了载荷形状，还记**闭包指纹**与它的规模：
 /// 指纹给渲染器对账用（对不上 = 这份产物是拿另一版 include 烘的），规模给人/报告看。
-fn shader_params(text: &str, closure: &px_shader::Closure) -> BTreeMap<String, f64> {
+/// schema 的规模也记在这里：`read_manifest` 只读前缀就能看出"这份产物有没有契约"。
+fn shader_params(
+    text: &str,
+    closure: &px_shader::Closure,
+    descriptor: &str,
+) -> BTreeMap<String, f64> {
     let fingerprint = closure.fingerprint();
     let mut params = BTreeMap::from([
         ("wgsl_bytes".to_string(), text.len() as f64),
@@ -612,6 +649,7 @@ fn shader_params(text: &str, closure: &px_shader::Closure) -> BTreeMap<String, f
             "closure_externals".to_string(),
             closure.externals.len() as f64,
         ),
+        ("schema_bytes".to_string(), descriptor.len() as f64),
     ]);
     for (name, value) in px_shader::closure_params(fingerprint) {
         params.insert(name, value);

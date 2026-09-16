@@ -1,4 +1,7 @@
-use crate::common::{assemble, connect};
+use crate::common::{
+    COVERAGE_BINDING, COVERAGE_SAMPLER_BINDING, JOB_BIND_GROUP, MATERIAL_BIND_GROUP, assemble,
+    connect, job_group_source,
+};
 use crate::params::CloudParams;
 
 pub const POINTS: usize = 512;
@@ -15,8 +18,8 @@ struct Job {
     points: array<vec4<f32>, 512>,
 };
 
-@group(3) @binding(0) var<uniform> job: Job;
-@group(3) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
+@group(#{JOB_BIND_GROUP}) @binding(0) var<uniform> job: Job;
+@group(#{JOB_BIND_GROUP}) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
 
 fn fd_axis(point: vec3<f32>, axis: u32, h: f32) -> f32 {
     let ahead = vec3<f32>(
@@ -161,12 +164,6 @@ pub struct Row {
     pub chain: f32,
 }
 
-fn params_bytes(params: &CloudParams) -> Vec<u8> {
-    let mut buffer = encase::UniformBuffer::new(Vec::new());
-    buffer.write(params).expect("写不进 params");
-    buffer.into_inner()
-}
-
 fn coverage_cube(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -251,13 +248,13 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
     println!("适配器：{:?}", gpu.adapter.get_info());
 
     let mut source = assemble("clouds.wgsl");
-    source.push_str(PROBE);
+    source.push_str(&job_group_source(PROBE));
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cloud field probe"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
-    let bytes = params_bytes(params);
+    let bytes = crate::params::params_bytes(params);
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("params"),
         size: bytes.len() as u64,
@@ -290,7 +287,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 1,
+                binding: COVERAGE_BINDING,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -300,7 +297,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 2,
+                binding: COVERAGE_SAMPLER_BINDING,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
@@ -342,11 +339,11 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
                 resource: params_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 1,
+                binding: COVERAGE_BINDING,
                 resource: wgpu::BindingResource::TextureView(&cube),
             },
             wgpu::BindGroupEntry {
-                binding: 2,
+                binding: COVERAGE_SAMPLER_BINDING,
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
         ],
@@ -403,7 +400,9 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("probe"),
-        bind_group_layouts: &[None, None, Some(&material), Some(&job_layout)],
+        // 5 格会超：探针设备是 downlevel_defaults（max_bind_groups = 4）⇒ 只能给 4 个布局。
+        // 材质组按契约在 3；探针自己的 job/out 放 1（0 是 Bevy 的视图组，2 空着）。
+        bind_group_layouts: &[None, Some(&job_layout), None, Some(&material)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -424,8 +423,8 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
             timestamp_writes: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(2, &material_group, &[]);
-        pass.set_bind_group(3, &job_group, &[]);
+        pass.set_bind_group(MATERIAL_BIND_GROUP, &material_group, &[]);
+        pass.set_bind_group(JOB_BIND_GROUP, &job_group, &[]);
         pass.dispatch_workgroups((points.len() as u32).div_ceil(WORKGROUP), 1, 1);
     }
     encoder.copy_buffer_to_buffer(&out_buffer, 0, &staging, 0, out_size);
