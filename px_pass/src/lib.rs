@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingResource, BindingType, ColorTargetState, ColorWrites,
-    CommandEncoder, Device, Extent3d, FragmentState, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureView, TextureViewDescriptor, VertexState,
+    BindGroupLayoutEntry, BindingResource, BindingType, BufferBinding, BufferBindingType,
+    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device,
+    Extent3d, FragmentState, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor,
+    TextureDimension as GpuDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 
 pub const FRAGMENT_ENTRY: &str = "fs_main";
@@ -160,6 +162,79 @@ pub enum PassKind {
     Compute,
 }
 
+// ---------------------------------------------------------------------------
+// 绑定布局是**宿主给的**（§79 的 C 案）
+//
+// 执行器不认识任何内建名字：它不知道"材质"、不知道 `view`，也不知道哪一格是参数块 ——
+// 这些都由宿主从**契约**（`px_protocol::material`）读出来之后填进来。
+// 于是 pass 与材质共用同一张表，而这张表在本 crate 里一个字都没有抄。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Dimension {
+    D2,
+    Cube,
+}
+
+impl Dimension {
+    pub fn name(self) -> &'static str {
+        match self {
+            Dimension::D2 => "texture_2d",
+            Dimension::Cube => "texture_cube",
+        }
+    }
+
+    fn view_dimension(self) -> TextureViewDimension {
+        match self {
+            Dimension::D2 => TextureViewDimension::D2,
+            Dimension::Cube => TextureViewDimension::Cube,
+        }
+    }
+
+    fn layers(self) -> u32 {
+        match self {
+            Dimension::D2 => 1,
+            Dimension::Cube => 6,
+        }
+    }
+}
+
+/// 一格贴图：绑定下标 + 维度。采样器永远在 `binding + 1`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Slot {
+    pub binding: u32,
+    pub dimension: Dimension,
+}
+
+/// 执行器的绑定组形状。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Layout {
+    /// 绑定组在第几组（材质的契约里是 `MATERIAL_BIND_GROUP`）。
+    pub group: u32,
+    /// 参数块占这一组的第几格（材质的契约里是 0）。
+    pub params_binding: u32,
+    /// 参数块的字节数按它对齐（材质的契约里是 16）。
+    pub params_align: u32,
+    /// 贴图能落在哪几格。
+    pub slots: Vec<Slot>,
+}
+
+impl Layout {
+    pub fn slot(&self, binding: u32) -> Option<&Slot> {
+        self.slots.iter().find(|slot| slot.binding == binding)
+    }
+
+    fn key(&self) -> String {
+        let slots = self
+            .slots
+            .iter()
+            .map(|slot| format!("{}:{}", slot.binding, slot.dimension.name()))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{}|{}|{slots}", self.group, self.params_binding)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PassPlan {
     pub kind: PassKind,
@@ -168,6 +243,10 @@ pub struct PassPlan {
     pub entry: String,
     pub reads: Vec<String>,
     pub writes: Vec<String>,
+    /// 参数块的字节：宿主按**这份 shader 自己声明的结构体**打好了（与材质同一条路）。
+    pub params: Vec<u8>,
+    /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。
+    pub slots: Vec<u32>,
 }
 
 impl PassPlan {
@@ -178,8 +257,21 @@ impl PassPlan {
 
 #[derive(Debug, Clone, Default)]
 pub struct Plan {
+    /// 全部 pass 共用一份布局（固定超集：空着的格绑兜底贴图）。
+    pub layout: Layout,
     pub resources: Vec<ResourceSpec>,
     pub passes: Vec<PassPlan>,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            group: 0,
+            params_binding: 0,
+            params_align: 16,
+            slots: Vec::new(),
+        }
+    }
 }
 
 impl Plan {
@@ -203,7 +295,32 @@ impl Plan {
         }
     }
 
+    fn layout_faults(&self) -> Result<(), String> {
+        let layout = &self.layout;
+        if layout.params_align == 0 {
+            return Err("布局的参数块对齐是 0".to_string());
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        for slot in &layout.slots {
+            if seen.contains(&slot.binding) {
+                return Err(format!("布局里第 {} 格出现了两次", slot.binding));
+            }
+            if slot.binding == layout.params_binding {
+                return Err(format!(
+                    "布局第 {} 格既是参数块又是贴图",
+                    slot.binding
+                ));
+            }
+            seen.push(slot.binding);
+            seen.push(slot.binding + 1);
+        }
+        Ok(())
+    }
+
     pub fn check(&self) -> Result<(), String> {
+        self.layout_faults()?;
+        let align = self.layout.params_align as usize;
+
         let mut names: Vec<&str> = Vec::new();
         for resource in &self.resources {
             if resource.name.is_empty() {
@@ -234,6 +351,32 @@ impl Plan {
             }
             if pass.entry.is_empty() {
                 return Err(format!("{at} 没给入口点名字"));
+            }
+            if pass.params.is_empty() || pass.params.len() % align != 0 {
+                return Err(format!(
+                    "{at} 的参数块是 {} 字节：布局要求它是 {align} 的正数倍",
+                    pass.params.len()
+                ));
+            }
+            if pass.slots.len() != pass.reads.len() {
+                return Err(format!(
+                    "{at} 给了 {} 个格位、{} 个 reads：一条 read 一个格，不能多也不能少",
+                    pass.slots.len(),
+                    pass.reads.len()
+                ));
+            }
+            for binding in &pass.slots {
+                if self.layout.slot(*binding).is_none() {
+                    return Err(format!(
+                        "{at} 的某一格是 {binding}，而布局里的贴图格只有：[{}]",
+                        self.layout
+                            .slots
+                            .iter()
+                            .map(|slot| slot.binding.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    ));
+                }
             }
             let target = pass.target().ok_or_else(|| {
                 format!("{at} 没有 writes：它不写任何东西，画了也没人看得见")
@@ -301,9 +444,11 @@ struct Pooled {
 #[derive(Default)]
 pub struct Executor {
     pipelines: HashMap<String, RenderPipeline>,
-    layouts: HashMap<usize, BindGroupLayout>,
+    layouts: HashMap<Layout, BindGroupLayout>,
     sampler: Option<Sampler>,
     pool: HashMap<String, Pooled>,
+    /// 没被 reads 占到的格一律绑它：布局是固定超集，shader 里声明了就一定绑得上。
+    fallback: HashMap<Dimension, TextureView>,
 }
 
 impl Executor {
@@ -348,7 +493,7 @@ impl Executor {
             },
             mip_level_count: 1,
             sample_count: 1,
-            dimension: TextureDimension::D2,
+            dimension: GpuDimension::D2,
             format,
             usage,
             view_formats: &[],
@@ -366,58 +511,157 @@ impl Executor {
         view
     }
 
-    fn layout(&mut self, device: &Device, textures: usize) -> BindGroupLayout {
-        if let Some(layout) = self.layouts.get(&textures) {
-            return layout.clone();
+    /// 兜底贴图：1×1 白（cube 是 1×1×6）。
+    ///
+    /// 用**编码器**清成白色而不是建完就算：新纹理按规范是清零的，而"没给这一格 ⇒ 采到纯白"
+    /// 才是与材质那一侧一致的语义（Bevy 的 `FallbackImage` 也是白的）。执行器拿不到 `Queue`，
+    /// 所以白是拿一个清屏 pass 写进去的 —— 就在同一个编码器里，顺序天然正确。
+    fn fallback(
+        &mut self,
+        device: &Device,
+        encoder: &mut CommandEncoder,
+        dimension: Dimension,
+    ) -> TextureView {
+        if let Some(view) = self.fallback.get(&dimension) {
+            return view.clone();
         }
-        let mut entries: Vec<BindGroupLayoutEntry> = Vec::new();
-        for index in 0..textures {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass_fallback"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: dimension.layers(),
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor {
+            label: Some("px_pass_fallback_view"),
+            dimension: Some(dimension.view_dimension()),
+            ..Default::default()
+        });
+        for layer in 0..dimension.layers() {
+            let layer_view = texture.create_view(&TextureViewDescriptor {
+                label: Some("px_pass_fallback_layer"),
+                dimension: Some(TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            let descriptor = RenderPassDescriptor {
+                label: Some("px_pass_fallback_clear"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &layer_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(wgpu::Color::WHITE),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            };
+            let _ = encoder.begin_render_pass(&descriptor);
+        }
+        self.fallback.insert(dimension, view.clone());
+        view
+    }
+
+    fn layout(&mut self, device: &Device, layout: &Layout) -> BindGroupLayout {
+        if let Some(cached) = self.layouts.get(layout) {
+            return cached.clone();
+        }
+        let mut entries: Vec<BindGroupLayoutEntry> = vec![BindGroupLayoutEntry {
+            binding: layout.params_binding,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                // 每个 shader 的结构体大小不同，而布局只有一份：真实大小由各自的缓冲决定。
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        for slot in &layout.slots {
             entries.push(BindGroupLayoutEntry {
-                binding: (index * 2) as u32,
+                binding: slot.binding,
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Texture {
                     sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: slot.dimension.view_dimension(),
                     multisampled: false,
                 },
                 count: None,
             });
             entries.push(BindGroupLayoutEntry {
-                binding: (index * 2 + 1) as u32,
+                binding: slot.binding + 1,
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Sampler(SamplerBindingType::Filtering),
                 count: None,
             });
         }
-        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        let built = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("px_pass_bind_group_layout"),
             entries: &entries,
         });
-        self.layouts.insert(textures, layout.clone());
-        layout
+        self.layouts.insert(layout.clone(), built.clone());
+        built
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_group(
         &mut self,
         device: &Device,
+        encoder: &mut CommandEncoder,
+        layout: &Layout,
         sampler: &Sampler,
-        sources: &[TextureView],
+        params: &[u8],
+        bound: &[(u32, TextureView)],
     ) -> BindGroup {
-        let layout = self.layout(device, sources.len());
-        let mut entries: Vec<BindGroupEntry> = Vec::new();
-        for (index, view) in sources.iter().enumerate() {
+        let group_layout = self.layout(device, layout);
+        let params_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass_params"),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            contents: params,
+        });
+        // 视图先全收进一个表里：`entries` 借的是它们，而它们必须活到 `create_bind_group` 之后。
+        let mut views: Vec<TextureView> = Vec::with_capacity(layout.slots.len());
+        for slot in &layout.slots {
+            let view = bound
+                .iter()
+                .find(|(binding, _)| *binding == slot.binding)
+                .map(|(_, view)| view.clone())
+                .unwrap_or_else(|| self.fallback(device, encoder, slot.dimension));
+            views.push(view);
+        }
+        let mut entries: Vec<BindGroupEntry> = vec![BindGroupEntry {
+            binding: layout.params_binding,
+            resource: BindingResource::Buffer(BufferBinding {
+                buffer: &params_buffer,
+                offset: 0,
+                size: None,
+            }),
+        }];
+        for (slot, view) in layout.slots.iter().zip(views.iter()) {
             entries.push(BindGroupEntry {
-                binding: (index * 2) as u32,
+                binding: slot.binding,
                 resource: BindingResource::TextureView(view),
             });
             entries.push(BindGroupEntry {
-                binding: (index * 2 + 1) as u32,
+                binding: slot.binding + 1,
                 resource: BindingResource::Sampler(sampler),
             });
         }
         device.create_bind_group(&BindGroupDescriptor {
             label: Some("px_pass_bind_group"),
-            layout: &layout,
+            layout: &group_layout,
             entries: &entries,
         })
     }
@@ -425,15 +669,16 @@ impl Executor {
     fn pipeline(
         &mut self,
         device: &Device,
+        layout: &Layout,
         pass: &PassPlan,
         format: TextureFormat,
-        textures: usize,
     ) -> RenderPipeline {
         let key = format!(
-            "{:016x}|{format:?}|{textures}|{}|{}",
+            "{:016x}|{format:?}|{}|{}|{}",
             fnv1a(pass.shader.as_bytes()),
             pass.entry,
-            pass.reads.join(",")
+            pass.reads.join(","),
+            layout.key()
         );
         if let Some(pipeline) = self.pipelines.get(&key) {
             return pipeline.clone();
@@ -447,10 +692,12 @@ impl Executor {
             label: Some(label.as_str()),
             source: ShaderSource::Wgsl(pass.shader.as_str().into()),
         });
-        let layout = self.layout(device, textures);
+        let group_layout = self.layout(device, layout);
+        let mut groups: Vec<Option<&BindGroupLayout>> = vec![None; layout.group as usize + 1];
+        groups[layout.group as usize] = Some(&group_layout);
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("px_pass_pipeline_layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &groups,
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -493,6 +740,7 @@ impl Executor {
         if plan.is_empty() {
             return Ok("pass 表是空的：这一帧没有任何 pass".to_string());
         }
+        let layout = plan.layout.clone();
         let sampler = self.sampler(device);
         let mut audit: Vec<String> = Vec::new();
 
@@ -504,13 +752,16 @@ impl Executor {
             let (destination, format) =
                 self.resolve(device, plan, frame, index, &pass.label, &target, Role::Write)?;
 
-            let mut sources: Vec<TextureView> = Vec::new();
-            for read in &pass.reads {
+            let mut bound: Vec<(u32, TextureView)> = Vec::new();
+            for (read, binding) in pass.reads.iter().zip(pass.slots.iter()) {
                 let (view, _) =
                     self.resolve(device, plan, frame, index, &pass.label, read, Role::Read)?;
-                sources.push(view);
+                bound.push((*binding, view));
             }
-            if sources.iter().any(|source| source == &destination) {
+            if bound
+                .iter()
+                .any(|(_, view)| view == &destination)
+            {
                 return Err(format!(
                     "pass '{}' 的读目标与写目标是**同一个视图**：宿主给这一条 pass 的这两样\
                      指到了同一张纹理（要读写同一张就得让宿主分开给，例如 ping-pong 的两张）",
@@ -518,8 +769,15 @@ impl Executor {
                 ));
             }
 
-            let pipeline = self.pipeline(device, pass, format, sources.len());
-            let bind_group = self.bind_group(device, &sampler, &sources);
+            let pipeline = self.pipeline(device, &layout, pass, format);
+            let bind_group = self.bind_group(
+                device,
+                encoder,
+                &layout,
+                &sampler,
+                &pass.params,
+                &bound,
+            );
             let pass_label = format!("px_pass {}", pass.label);
             let descriptor = RenderPassDescriptor {
                 label: Some(pass_label.as_str()),
@@ -539,14 +797,20 @@ impl Executor {
             };
             let mut render_pass = encoder.begin_render_pass(&descriptor);
             render_pass.set_pipeline(&pipeline);
-            render_pass.set_bind_group(0, &bind_group, &[]);
+            render_pass.set_bind_group(layout.group, &bind_group, &[]);
             render_pass.draw(0..3, 0..1);
             drop(render_pass);
 
             audit.push(format!(
-                "pass {index} '{}' 读 [{}] 写 '{target}'（{format:?}）",
+                "pass {index} '{}' 读 [{}] 写 '{target}'（{format:?}）｜参数 {} 字节｜格 {}",
                 pass.label,
-                pass.reads.join(" / ")
+                pass.reads.join(" / "),
+                pass.params.len(),
+                pass.slots
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
             ));
         }
         Ok(audit.join("\n"))

@@ -16,10 +16,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use px_graphs::params::schema_of;
 use px_ops::generate::{self, Generated, Palette};
 use px_ops::{GraphSpec, ManifestEntry};
 use px_protocol::art::{Camera, TextureFormat};
-use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
 use px_protocol::scene::{
     AlphaMode, CullMode, Environment, Geometry, Light, Material, Member, Object, Sampler, SceneSpec,
     TextureRef, Transform, Value,
@@ -165,61 +165,8 @@ impl PartFile {
 //   ⇒ 加一个 shader 参数要改 Rust（§79 的 W1）。2026-09-16 拆掉，判据换成「这份 shader 的契约」。
 // ---------------------------------------------------------------------------
 
-/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`08-renderer.md` §80.2）。
-///
-/// 为什么不现反射：产物里那份就是**装载时会被拿来对账的那一份** —— 烘图侧要校验的是
-/// 「这份产物说它要什么」，不是「现在这份 WGSL 会反射出什么」。两者不一致时装载会拒，
-/// 那时候再报错就晚了（而且报的是渲染器的错，不是作者写错了配方）。
-fn schema_of(member: &Member, root: &Path) -> Result<MaterialLayout, String> {
-    let path = px_protocol::scene::cas_path(root, &member.key)?;
-    let (_, schema) = px_protocol::art::read_shader_parts(&path)
-        .map_err(|err| format!("读 shader 成员 {member} 的产物失败（{}）：{err}", path.display()))?;
-    let text = schema.ok_or_else(|| {
-        format!(
-            "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口（§80）之前烘的。\n  \
-             先重烘：cargo run -p px_graphs --bin shaders"
-        )
-    })?;
-    MaterialLayout::from_json(&text)
-        .map_err(|err| format!("shader 成员 {member} 的 descriptor 解不开：{err}"))
-}
-
-/// TOML 里的一个值 → 产物里的值，**按 shader 声明的那一档**。
-fn coerce_value(slot: &ParamSlot, value: &toml::Value) -> Result<Value, String> {
-    let label = slot.kind.name();
-    match slot.kind {
-        ParamKind::F32 | ParamKind::I32 | ParamKind::U32 => match value {
-            toml::Value::Integer(number) => Ok(Value::Num(*number as f64)),
-            toml::Value::Float(number) => Ok(Value::Num(*number)),
-            other => Err(format!("要一个 {label}，实际是 {other:?}")),
-        },
-        ParamKind::Vec3 | ParamKind::Vec4 => {
-            let toml::Value::Array(items) = value else {
-                return Err(format!("要 {label}（一个数组），实际是 {value:?}"));
-            };
-            let wanted = if slot.kind == ParamKind::Vec3 { 3 } else { 4 };
-            if items.len() != wanted {
-                return Err(format!(
-                    "要 {label}（{wanted} 个数），实际给了 {} 个",
-                    items.len()
-                ));
-            }
-            let mut numbers = [0.0_f32; 4];
-            for (index, item) in items.iter().enumerate() {
-                numbers[index] = match item {
-                    toml::Value::Integer(number) => *number as f32,
-                    toml::Value::Float(number) => *number as f32,
-                    other => return Err(format!("第 {} 个数不是数：{other:?}", index + 1)),
-                };
-            }
-            if wanted == 3 {
-                Ok(Value::Triple([numbers[0], numbers[1], numbers[2]]))
-            } else {
-                Ok(Value::Quad(numbers))
-            }
-        }
-    }
-}
+// `schema_of`（产物里的 descriptor → 契约）与 `coerce_value`（TOML 值 → 按契约那一档）
+// 搬去了 `px_graphs::params`：pass 那条烘图路要的是**同一件事**，抄第二份就是第二个会漂开的真相。
 
 /// 配方参数表 + 编译器算出来的那些 → 材质参数表，并在**烘图时**按契约校验一遍。
 ///
@@ -239,46 +186,14 @@ fn material_params(
     root: &Path,
 ) -> Result<BTreeMap<String, Value>, String> {
     let layout = schema_of(shader, root)?;
-    let params = merge_params(part, structural, &layout, computed)?;
-    layout.pack(&params).map_err(|err| {
-        format!(
-            "part '{}' 的材质参数对不上 {} 的契约：{err}",
-            part.id, shader.node
-        )
-    })?;
-    Ok(params)
-}
-
-/// [`material_params`] 里**纯**的那一半：结构键跳过、契约里有名字的透传、两边都不是的报错。
-/// 单独拆出来是为了能直接测（另一半要读 CAS 里的 descriptor）。
-fn merge_params(
-    part: &PartFile,
-    structural: &[&str],
-    layout: &MaterialLayout,
-    computed: BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, Value>, String> {
-    let mut params = computed;
-    for (key, value) in &part.params {
-        if structural.contains(&key.as_str()) {
-            continue;
-        }
-        let Some(slot) = layout.param(key) else {
-            return Err(format!(
-                "part '{}'（kind {}）不认识参数 '{key}'：\n  \
-                 编译器自己消化的结构键：{}\n  \
-                 这份 shader 声明的参数：{}\n  \
-                 ⇒ 要么名字拼错了，要么得先在 shader 的结构体里声明它（声明之后按名字透传，不用改 Rust）",
-                part.id,
-                part.kind,
-                structural.join(" / "),
-                layout.param_names(),
-            ));
-        };
-        let value = coerce_value(slot, value)
-            .map_err(|err| format!("part '{}' 的参数 '{key}'：{err}", part.id))?;
-        params.insert(key.clone(), value);
-    }
-    Ok(params)
+    px_graphs::params::merge_named(
+        &format!("part '{}'（kind {}）", part.id, part.kind),
+        &part.params,
+        structural,
+        &layout,
+        computed,
+    )
+    .map_err(|err| format!("{err}\n  shader 成员：{}", shader.node))
 }
 
 /// 烘图时的最后一道：这份参数表**打得进这份契约吗**（缺参 / 多参 / 类型不符都在这里红）。
@@ -566,7 +481,7 @@ fn ablate_code(name: &str) -> Result<u32, String> {
 
 /// **编译器自己消化的结构键**（行星）：半径 / 色板 / 灯 / 消融档这些是拿来**造场景**的，
 /// 不是材质参数。⚠ 它**不再是**「配方里只能写这些」的白名单（那是 §80 第 2 步拆掉的墙）：
-/// 名字只要在这份 shader 的契约里就按名字透传，两边都不是才报错（`merge_params`）。
+/// 名字只要在这份 shader 的契约里就按名字透传，两边都不是才报错（`px_graphs::params::merge_named`）。
 const PLANET_KEYS: [&str; 15] = [
     "palette",
     "displace",
@@ -586,7 +501,7 @@ const PLANET_KEYS: [&str; 15] = [
 ];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风——这些要么进几何、要么与云影同口径，
-/// 编译器得自己拿着算。名字在 shader 契约里的那些照旧**按名字透传**（`merge_params`）。
+/// 编译器得自己拿着算。名字在 shader 契约里的那些照旧**按名字透传**（`px_graphs::params::merge_named`）。
 const CLOUDS_KEYS: [&str; 24] = [
     "inner",
     "outer",
@@ -1133,6 +1048,24 @@ fn ring_shader() -> Result<Member, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
+
+    /// 测试这一侧照生产那条路调一遍 `merge_named`（它要读 CAS descriptor，所以真正的
+    /// `material_params` 在这里跑不起来）。参数表用**结构键 + 契约**那两档，与生产同形。
+    fn merge_params(
+        part: &PartFile,
+        structural: &[&str],
+        layout: &MaterialLayout,
+        computed: BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        px_graphs::params::merge_named(
+            &format!("part '{}'（kind {}）", part.id, part.kind),
+            &part.params,
+            structural,
+            layout,
+            computed,
+        )
+    }
 
     /// 朝向的合成顺序：`rot_x(TILT) × rot_y(spin)` —— 与迁移前渲染器那个
     /// 「父实体带倾斜 + 子实体带自转」合成出来的世界旋转是同一个四元数。
@@ -1161,7 +1094,7 @@ mod tests {
     }
 
     /// 打错的参数名必须当场报错：配方里看着完全正常，结果是悄悄少一个旋钮。
-    /// ⚠ 判据现在是**这份 shader 的契约**（`merge_params`），不再是写死的白名单（§80 第 2 步）。
+    /// ⚠ 判据现在是**这份 shader 的契约**（`px_graphs::params::merge_named`），不再是写死的白名单（§80 第 2 步）。
     #[test]
     fn an_unknown_parameter_is_rejected() {
         let layout = fixture_layout();

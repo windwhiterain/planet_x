@@ -4,6 +4,7 @@ label = "invert"
 shader = "px_grade"
 reads = ["view"]
 writes = ["view"]
+params = { strength = 1.0 }
 
 [[passes]]
 kind = "fullscreen"
@@ -11,3 +12,4 @@ label = "vignette"
 shader = "px_vignette"
 reads = ["view"]
 writes = ["view"]
+params = { strength = 1.0 }

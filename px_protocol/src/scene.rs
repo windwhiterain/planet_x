@@ -520,6 +520,13 @@ pub struct PassSpec {
     #[serde(default)]
     pub reads: Vec<String>,
     pub writes: Vec<String>,
+    /// 给这份 pass shader 的参数：**按名字**给，按它自己声明的结构体打包。
+    ///
+    /// 与材质走的是同一条路（`px_protocol::material::MaterialLayout::pack`），
+    /// 判据也一样是三档当场报错（缺参 / 多参 / 类型不符）。
+    /// 空表不落盘 ⇒ 没有参数的老文档逐字节不变。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Value>,
 }
 
 impl PassSpec {
@@ -756,11 +763,17 @@ impl SceneSpec {
             ));
             for (index, pass) in self.passes.iter().enumerate() {
                 lines.push(format!(
-                    "    [{index}] {}｜{}｜读 [{}]｜写 [{}]｜shader {}",
+                    "    [{index}] {}｜{}｜读 [{}]｜写 [{}]｜参数 {} 个{}｜shader {}",
                     pass.label_or(index),
                     pass.kind,
                     pass.reads.join(" / "),
                     pass.writes.join(" / "),
+                    pass.params.len(),
+                    if pass.params.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{}）", keys_of(&pass.params))
+                    },
                     pass.shader
                 ));
             }

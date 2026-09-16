@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use px_graphs::params::{merge_named, schema_of};
 use px_protocol::scene::{Member, PassResource, PassSpec, SceneSpec};
 use serde::Deserialize;
 
@@ -7,7 +9,11 @@ const GRAPH_VERSION: u32 = 1;
 const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("passes.rs"));
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PassFile {
+    /// 可选：换掉文档的名字（不写就沿用基准场景的名字）。
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     resources: Vec<PassResourceFile>,
     #[serde(default)]
@@ -15,6 +21,7 @@ struct PassFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PassResourceFile {
     name: String,
     format: String,
@@ -24,6 +31,7 @@ struct PassResourceFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PassFileEntry {
     kind: String,
     shader: String,
@@ -34,6 +42,10 @@ struct PassFileEntry {
     #[serde(default)]
     reads: Vec<String>,
     writes: Vec<String>,
+    /// 传给这份 pass shader 的参数：**按名字**给，按它自己声明的结构体打包。
+    /// 名字不认识 / 声明了没人给 / 类型不符 —— 三档都在**烘图时**红，与材质同一条路。
+    #[serde(default)]
+    params: BTreeMap<String, toml::Value>,
 }
 
 fn fragment_entry() -> String {
@@ -75,6 +87,10 @@ fn main() {
     let mut spec: SceneSpec = px_protocol::scene::read_scene(Path::new(&input))
         .unwrap_or_else(|err| panic!("读不了场景产物 {input}：{err}"));
 
+    if let Some(name) = &file.name {
+        spec.name = name.clone();
+    }
+
     spec.resources = file
         .resources
         .iter()
@@ -100,21 +116,48 @@ fn main() {
         } else {
             entry.label.clone()
         };
+        let member = Member::new("shaders", &entry.shader, &key);
+        // 参数按**这份 shader 自己的契约**透传：烘图时就把三档（名字不认识 / 声明了没人给 /
+        // 类型不符）全拦下来，不等装载时才拒 —— 那时候报的是渲染器的错，离改配方已经很远。
+        let layout = schema_of(&member, &px_ops::cache_root())
+            .unwrap_or_else(|err| panic!("pass '{label}'：{err}"));
+        let params = merge_named(
+            &format!("pass '{label}'"),
+            &entry.params,
+            &[],
+            &layout,
+            BTreeMap::new(),
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         println!(
-            "pass {label}：{}｜shader {}（{}）｜读 [{}]｜写 [{}]",
+            "pass {label}：{}｜shader {}（{}）｜读 [{}]｜写 [{}]｜参数 {} 个{}",
             entry.kind,
             entry.shader,
             &key[..key.len().min(12)],
             entry.reads.join(" / "),
             entry.writes.join(" / "),
+            params.len(),
+            if params.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "（{}）",
+                    params
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                )
+            },
         );
         passes.push(PassSpec {
             kind: entry.kind.clone(),
-            shader: Member::new("shaders", &entry.shader, &key),
+            shader: member,
             label,
             entry: entry.entry.clone(),
             reads: entry.reads.clone(),
             writes: entry.writes.clone(),
+            params,
         });
     }
     spec.passes = passes;

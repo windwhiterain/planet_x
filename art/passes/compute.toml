@@ -5,3 +5,4 @@ shader = "px_grade"
 entry = "cs_main"
 reads = ["view"]
 writes = ["view"]
+params = { strength = 1.0 }

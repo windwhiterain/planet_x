@@ -4,3 +4,4 @@ label = "invert"
 shader = "px_grade"
 reads = ["view"]
 writes = ["view"]
+params = { strength = 1.0 }

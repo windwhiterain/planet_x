@@ -10,6 +10,7 @@ label = "invert-to-scratch"
 shader = "px_grade"
 reads = ["view"]
 writes = ["scratch"]
+params = { strength = 1.0 }
 
 [[passes]]
 kind = "fullscreen"
@@ -17,3 +18,4 @@ label = "vignette-back-to-view"
 shader = "px_vignette"
 reads = ["scratch"]
 writes = ["view"]
+params = { strength = 1.0 }

@@ -1,8 +1,7 @@
 [[passes]]
 kind = "fullscreen"
-label = "wrong-entry"
+label = "half-invert"
 shader = "px_grade"
-entry = "fs_wrong"
 reads = ["view"]
 writes = ["view"]
-params = { strength = 1.0 }
+params = { strength = 0.5 }

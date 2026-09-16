@@ -8,6 +8,9 @@ use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Extract, ExtractSchedule};
 
+use px_protocol::material::{
+    MATERIAL_BIND_GROUP, PARAMS_ALIGN, PARAMS_BINDING, TEXTURE_SLOTS, TextureDimension,
+};
 use px_protocol::scene::{SceneSpec, VIEW_BUILTIN};
 
 use crate::art_cache::ArtCache;
@@ -72,6 +75,29 @@ fn validate_fragment(label: &str, entry: &str, source: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// 执行器的绑定布局 = **材质的契约**（§79 的 C 案）。
+///
+/// 为什么要把表读出来填进去、而不是让 `px_pass` 自己去认识它：执行器里一个内建名字都不该有
+/// （它不知道"材质"、不知道 `view`、也不知道哪一格是参数块）。而抄一份常量进 `px_pass`
+/// 就是第二个会漂开的真相 —— 与 §66.1 那颗「同一条契约、两个数字」的雷同一族。
+pub fn executor_layout() -> px_pass::Layout {
+    px_pass::Layout {
+        group: MATERIAL_BIND_GROUP,
+        params_binding: PARAMS_BINDING,
+        params_align: PARAMS_ALIGN,
+        slots: TEXTURE_SLOTS
+            .iter()
+            .map(|(binding, dimension)| px_pass::Slot {
+                binding: *binding,
+                dimension: match dimension {
+                    TextureDimension::D2 => px_pass::Dimension::D2,
+                    TextureDimension::Cube => px_pass::Dimension::Cube,
+                },
+            })
+            .collect(),
+    }
+}
+
 pub fn resolve(
     document: &SceneSpec,
     cache: &mut ArtCache,
@@ -80,7 +106,10 @@ pub fn resolve(
     if document.passes.is_empty() {
         return Ok((None, "pass 表：空（只有主 pass，与没有这一节时逐字节相同）".to_string()));
     }
-    let mut plan = px_pass::Plan::default();
+    let mut plan = px_pass::Plan {
+        layout: executor_layout(),
+        ..Default::default()
+    };
     let mut lines = vec![format!("pass 表：{} 条（数组顺序就是执行顺序）", document.passes.len())];
 
     for resource in &document.resources {
@@ -136,24 +165,66 @@ pub fn resolve(
                  ⇒ 当场拒（要用库就先离线组装成一份自足的 WGSL）"
             ));
         }
-        validate_fragment(&label, &pass.entry, &source)?;
+        // 先组装再校验：入口文本里的 `#{MATERIAL_BIND_GROUP}` 还不是合法 WGSL，
+        // 组装器把它替成契约里那个数（与材质那条路是同一个函数、同一份表）。
+        let assembled = {
+            let modules = crate::shaders::module_sources();
+            let mut seen = Vec::new();
+            crate::shaders::render_source(&source, &modules, &mut seen)
+        };
+        validate_fragment(&label, &pass.entry, &assembled)?;
+
+        // 参数与格位都由**这份 shader 自己的契约**决定：反射出来什么就绑什么，一个数都不猜。
+        let version = px_render_shader_version(&pass.shader.key);
+        let contract = crate::reflect::layout_of(version, &format!("pass '{label}'"), &source)?;
+        if contract
+            .textures
+            .iter()
+            .any(|slot| slot.dimension != TextureDimension::D2)
+        {
+            return Err(format!(
+                "pass '{label}' 的 shader 声明了 cube 贴图格：这一版的 pass 资源（含内建 '{}'）\
+                 全是 2D —— 声明了执行器兑现不了的东西就当场拒",
+                VIEW_BUILTIN
+            ));
+        }
+        let slots: Vec<u32> = contract.textures.iter().map(|slot| slot.binding).collect();
+        if slots.len() != pass.reads.len() {
+            return Err(format!(
+                "pass '{label}' 的 shader 声明了 {} 个 2D 贴图格（[{}]），而这份 pass 有 {} 个 reads（[{}]）\
+                 —— 一条 read 占一格，对不上就是绑错东西",
+                slots.len(),
+                slots.iter().map(u32::to_string).collect::<Vec<_>>().join(" / "),
+                pass.reads.len(),
+                pass.reads.join(" / "),
+            ));
+        }
+        let params = contract
+            .pack(&pass.params)
+            .map_err(|err| format!("pass '{label}' 的参数：{err}"))?;
+
         lines.push(format!(
-            "  {label}：{}｜读 [{}]｜写 [{}]｜shader {}/{}（版本 {:016x}）{}",
+            "  {label}：{}｜读 {} → 格 [{}]｜写 [{}]｜参数 {} 个（{} 字节）｜shader {}/{}（版本 {:016x}）{}",
             pass.kind,
             pass.reads.join(" / "),
+            slots.iter().map(u32::to_string).collect::<Vec<_>>().join(" / "),
             pass.writes.join(" / "),
+            pass.params.len(),
+            params.len(),
             pass.shader.graph,
             pass.shader.node,
-            px_render_shader_version(&pass.shader.key),
+            version,
             if entry.hit { "缓存命中" } else { "现读产物" },
         ));
         plan.passes.push(px_pass::PassPlan {
             kind,
             label,
-            shader: source,
+            shader: assembled,
             entry: pass.entry.clone(),
             reads: pass.reads.clone(),
             writes: pass.writes.clone(),
+            params,
+            slots,
         });
     }
 
@@ -312,6 +383,7 @@ mod tests {
             entry: "fs_main".to_string(),
             reads: reads.iter().map(|name| name.to_string()).collect(),
             writes: writes.iter().map(|name| name.to_string()).collect(),
+            params: Default::default(),
         }
     }
 
@@ -396,6 +468,7 @@ mod tests {
         let mut spec = document(Vec::new(), vec![pass("a", &[], &["view"]), pass("b", &["view"], &["view"])]);
         spec.passes[0].label = "a".to_string();
         let plan = px_pass::Plan {
+            layout: executor_layout(),
             resources: Vec::new(),
             passes: spec
                 .passes
@@ -408,6 +481,8 @@ mod tests {
                     entry: pass.entry.clone(),
                     reads: pass.reads.clone(),
                     writes: pass.writes.clone(),
+                    params: vec![0; 16],
+                    slots: (0..pass.reads.len()).map(|_| 1).collect(),
                 })
                 .collect(),
         };
@@ -422,10 +497,62 @@ mod tests {
         assert!(plan.check().is_ok(), "{:?}", plan.check());
     }
 
+    /// 格位与 reads 对不上 = 绑错东西。这一条不该等到出图时才被发现。
+    #[test]
+    fn a_pass_whose_slots_do_not_match_its_reads_is_refused() {
+        let mut plan = px_pass::Plan {
+            layout: executor_layout(),
+            resources: Vec::new(),
+            passes: vec![px_pass::PassPlan {
+                kind: px_pass::PassKind::Fullscreen,
+                label: "grade".to_string(),
+                shader: "x".to_string(),
+                entry: "fs_main".to_string(),
+                reads: vec![VIEW_BUILTIN.to_string()],
+                writes: vec![VIEW_BUILTIN.to_string()],
+                params: vec![0; 16],
+                slots: Vec::new(),
+            }],
+        };
+        let err = plan.check().expect_err("reads 有 1 个而格位 0 个 ⇒ 拒");
+        assert!(err.contains("格位"), "{err}");
+        plan.passes[0].slots = vec![4];
+        let err = plan.check().expect_err("第 4 格不在布局里 ⇒ 拒");
+        assert!(err.contains("布局"), "{err}");
+        plan.passes[0].slots = vec![1];
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+    }
+
+    /// 参数块必须按契约对齐：没打包过的空参数块不许悄悄编出一条管线。
+    #[test]
+    fn a_pass_without_a_packed_params_block_is_refused() {
+        let mut plan = px_pass::Plan {
+            layout: executor_layout(),
+            resources: Vec::new(),
+            passes: vec![px_pass::PassPlan {
+                kind: px_pass::PassKind::Fullscreen,
+                label: "grade".to_string(),
+                shader: "x".to_string(),
+                entry: "fs_main".to_string(),
+                reads: Vec::new(),
+                writes: vec![VIEW_BUILTIN.to_string()],
+                params: Vec::new(),
+                slots: Vec::new(),
+            }],
+        };
+        let err = plan.check().expect_err("参数块为 0 字节 ⇒ 拒");
+        assert!(err.contains("参数块"), "{err}");
+        plan.passes[0].params = vec![0; 16];
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+    }
+
     #[test]
     fn a_compute_pass_is_refused_with_the_capability_reason() {
         let spec = document(Vec::new(), vec![pass("grade", &[], &["view"])]);
-        let mut plan = px_pass::Plan::default();
+        let mut plan = px_pass::Plan {
+            layout: executor_layout(),
+            ..Default::default()
+        };
         plan.passes.push(px_pass::PassPlan {
             kind: px_pass::PassKind::Compute,
             label: "reduce".to_string(),
@@ -433,6 +560,8 @@ mod tests {
             entry: "cs_main".to_string(),
             reads: Vec::new(),
             writes: vec!["view".to_string()],
+            params: vec![0; 16],
+            slots: Vec::new(),
         });
         let err = plan.check().expect_err("compute 这一版必须当场拒");
         assert!(err.contains("compute"), "{err}");
