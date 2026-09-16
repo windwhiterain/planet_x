@@ -121,10 +121,19 @@ pub fn shader_source_of(name: &str) -> std::path::PathBuf {
 }
 
 pub fn assemble(name: &str) -> String {
+    assemble_with(name, bevy_stub)
+}
+
+/// 组装一份 shader，**桩表由调用方给**（§103.1）。
+///
+/// Bevy 宿主传 [`bevy_stub`]（行为与从前逐字节相同）；裸 wgpu 宿主
+/// （`px_render_wgpu`）传自己那份 —— 它没有 naga_oil，必须自己兑现 `bevy_pbr::*`，
+/// 而其中 `fetch_point_shadow` 是**真实现**（采样我们自己的 cube 影子图），不是那句 `return 1.0`。
+pub fn assemble_with(name: &str, stubs: px_shader::assemble::Stubs) -> String {
     let modules = module_sources();
     let path = shader_source_of(name);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("读不了 {}：{error}", path.display()));
     let mut seen = Vec::new();
-    render_source(&source, &modules, &mut seen)
+    render_source(&source, &modules, stubs, &mut seen)
 }

@@ -7,5 +7,6 @@
 //!    ⇒「测试能过」给不了「运行时能过」的保证（§46.4）。
 
 pub use px_render::shaders::{
-    assemble, expand, import_path_of, module_sources, render_source, shader_files,
+    assemble, assemble_with, bevy_stub, expand, import_path_of, module_sources, render_source,
+    shader_files,
 };

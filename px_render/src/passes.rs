@@ -170,7 +170,7 @@ pub fn resolve(
         let assembled = {
             let modules = crate::shaders::module_sources();
             let mut seen = Vec::new();
-            crate::shaders::render_source(&source, &modules, &mut seen)
+            crate::shaders::render_source(&source, &modules, crate::shaders::bevy_stub, &mut seen)
         };
         validate_fragment(&label, &pass.entry, &assembled)?;
 

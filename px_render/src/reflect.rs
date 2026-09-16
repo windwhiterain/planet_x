@@ -48,7 +48,7 @@ pub fn layout_of(version: u64, name: &str, source: &str) -> Result<Arc<MaterialL
         return Ok(layout.clone());
     }
     let mut seen = Vec::new();
-    let assembled = crate::shaders::render_source(source, modules, &mut seen);
+    let assembled = crate::shaders::render_source(source, modules, crate::shaders::bevy_stub, &mut seen);
     let layout = Arc::new(px_shader::reflect::reflect_assembled(&assembled, name)?);
     cache()
         .lock()

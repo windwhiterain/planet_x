@@ -625,7 +625,10 @@ pub fn write_shader(
 /// 运行期用的是同一份实现）。反射不出来 ⇒ 这次烘就失败，不许写出一个没有契约的产物。
 fn shader_schema(id: &str, text: &str, modules: &px_shader::ModuleTable) -> Result<String, String> {
     let mut seen = Vec::new();
-    let assembled = px_shader::assemble::render_source(text, modules, &mut seen);
+    // 烘图侧是 **Bevy 那一侧**：它烘出来的契约要给运行期那个宿主用，
+    // 所以桩表必须是 Bevy 那张（`bevy_stub`），不能是裸 wgpu 宿主那张。
+    let assembled =
+        px_shader::assemble::render_source(text, modules, px_shader::assemble::bevy_stub, &mut seen);
     px_shader::reflect::reflect_assembled(&assembled, id)?.to_json()
 }
 

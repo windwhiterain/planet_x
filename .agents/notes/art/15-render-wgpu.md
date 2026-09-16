@@ -349,3 +349,162 @@ Remove-Item target\render-server.json -Force     # 停服务（4 秒内自查退
   但"别拍空白"这条不变）。
 - **别把探针挂进 `cargo test`**：探针不是门，退出码才是判据（本仓规矩）。
 - **别一次改两个变量**：这张图上每一个读数都要能归因到一处改动。
+
+---
+
+## §108 开工序实测（2026-09-16）
+
+> 这一节是**往下做之前先把锚钉死**的记录。每一档做完就往这里追加一段，
+> 判据没过的那一档**留红**，不修掉不许往下走。
+
+### §108.1 S-1 锚备好了 —— **判据过了**
+
+一条命令跑完：`target/oracle/s1-anchor.ps1`（不入 git，与 `passdoc/run.ps1` 同一个规矩：
+仪器放 `target/` 下）。它做的事与工单 §105 S-1 一致，另外把**"这张图是拿什么取的"**
+一并写进 `target/oracle/hashes.txt`。
+
+| 项 | 读数 |
+|---|---|
+| 锚 exe | `target/oracle/px_render-bevy.exe`，sha256 `D7ED54FDB8323EDD…` |
+| 后端 / 尺寸 / 相机 | Vulkan ／ 960×640（默认）／ 不给 `--cam`（用产物自带相机） |
+| 内容 | shaders 6 份；planet 0 个节点重算（命中）；**clouds 14 个节点重算，45.2 s**（这一档最慢） |
+| `orbit-bare` | **`63184151909371A5`** ✓ 与 §86.1 的既有读数一致（300012 B） |
+
+⚠ **一处与 `run.ps1` 不同的地方**：`run.ps1` 借了 `generic-render` worktree 的
+`CARGO_TARGET_DIR`，所以它那次用的 exe 其实不在这个 worktree 里。这次的锚
+**显式钉在 `$root\target`**，与判据同一个 worktree。
+
+**四档 + sheet 的哈希（新读数，工单原来只钉了 `orbit-bare` 那一格）**：
+
+| 档 | 哈希 | 字节 |
+|---|---|---|
+| `orbit-bare` | `63184151909371A5` | 300012 |
+| `orbit-rings` | `B5799E4F1649535C` | 508562 |
+| `orbit-soft` | `FA20FAD37BC61EA2` | 358066 |
+| `orbit-proxy-fine-bound` | `32872F80AC867BE3` | 405380 |
+| `sheet`（`--sheet` on `orbit-bare`） | `A94F9F2D1437C06C` | 3159948 |
+
+⇒ J1/J2 的五个比对值从这一刻起是**实测值**，不是"待测"。⚠ 它们绑死在
+「这台机器 + Vulkan + 这一份 exe」上；换 exe 就要重新确认 §86.1 那一格还对得上。
+
+**顺带被这次出图证实的两件事**：
+
+- `--sheet` 是 **4 列 × 3 行 = 12 格**（3840×1920），与 §104 第 7 条的描述一致。
+- 缺格绑兜底图是**正常路径**：`orbit-bare` 的 `planet` 物体在第 3 / 第 5 格声明了贴图而产物没给，
+  服务日志明说"绑兜底图（采到的是纯白）"。这与 §107「别把缺格当故障」是一件事 ——
+  但反过来说，**新宿主必须把同样的兜底做出来**，否则这两格会变成绑定错误。
+
+### §108.2 S0 地基 —— **判据过了**
+
+新 crate `px_render_wgpu`（workspace `members` 里有它，**`default-members` 里没有** ——
+`tools/px.ps1 -Target test` 不许因为它变慢）。S0 只做一件事：**设备 → 自己的
+`Rgba8UnormSrgb` → 回读 → PNG**，把这条路径单独验干净，再往上加东西。
+
+| 判据 | 读数 | 结果 |
+|---|---|---|
+| 进程 → 设备就绪 ≤ 600 ms | 暖 **570 / 548 / 557 ms**（冷 640 ms） | ✓（基线 329–570，§94） |
+| 纯色两跑哈希相同 | `137D1059C0C03DBD` == `137D1059C0C03DBD` | ✓ |
+| PNG 形状与锚一致 | `IHDR+IDAT+IEND`｜8 位｜颜色类型 2｜单个 IDAT | ✓ |
+| 冷编 ≤ 90 s | **26.8 s** | ✓ |
+| 改一行自己的代码 ≤ 5 s | **1.3 s** | ✓ |
+| 产物 ≤ 20 MB | **10.19 MB** | ✓ |
+
+对照 §92 的 bevy 宿主：冷编 **366.4 → 26.8 s（13.7×）**、
+改一行 **13.0–28.6 → 1.3 s（10–22×）**、产物 **156.6 → 10.19 MB（15.4×）**。
+
+**三条被这次实测钉住的事实**（后面每一档都要用）：
+
+1. **设备层锁死 Vulkan 是有效的**：选到的是 `NVIDIA GeForce RTX 3060 Laptop GPU`，
+   三个时间戳 feature 全开、周期 **1 ns**（与 §104 第 12 条的预期一致）。
+   `max_bind_groups = 8` ⇒ §104 第 1 条那套 group 0/3 的绑定号有足够空间。
+2. **PNG 那条路径与 Bevy 逐块同形**：`image 0.25.10` 的
+   `RgbaImage → DynamicImage::ImageRgba8 → to_rgb8() → save_with_format(Png)` 出来的
+   就是 `IHDR+IDAT+IEND` / 8 位 / 颜色类型 2 单 IDAT / 无辅助块，与锚 `orbit-bare.png` 一模一样。
+   这是 S3 逐字节判据能成立的前提，先在这里单独验掉。
+3. **`LoadOp::Clear` 的 `wgpu::Color` 是线性值，落盘时按 sRGB 编码**：
+   清 `(0.25, 0.5, 0.75, 1.0)` 得到首像素 `R=137 G=188 B=225 A=255`
+   （= `round(255·sRGB(0.25/0.5/0.75))`）。**这一条要记住**：主 pass 的清屏色、
+   以及 pass 表里 ping-pong 的清屏，都得按这个语义给值，否则会差一档。
+
+**与工单的一处偏离（按"能动态的就动态、最小化编译时间"这一条改的）**：
+S0 的依赖里**没有 `glam`、也没有 `encase`**。两者都是单态化大户（§92 实测 `glam` 一个就值
+11.5 s 冷编），而本仓的参数打包**本来就是动态的**（`px_protocol::material::pack` 出的是字节串），
+`UniformBuffer<T>` 这类泛型壳子一个都用不上。相机/轨道那点数用一个几十行的平面 `f32`
+数学模块代替即可。`wgpu` 自己的 `VertexBufferLayout` 也是运行时表，不需要为每种顶点布局生成代码。
+
+⚠ 一条操作上的坑（记下来省下一次）：`[System.IO.File]::ReadAllBytes` 用的是**进程当前目录**，
+`Set-Location` 改的那个对它不生效 —— 仪器脚本里一律用绝对路径。
+
+**仪器**（不入 git，与 `passdoc/run.ps1` 同一个规矩）：`target/oracle/s0-probe.ps1`（设备/哈希/PNG 形状）、
+`target/oracle/s0-coldbuild.ps1`（冷编/增量/体积），读数落 `target/oracle/s0-build.txt`。
+
+### §108.3 S1 group 0 契约 + 桩表改宿主提供 —— **判据过了**
+
+**唯一允许动的共享件**（§103.1）动完了：`px_shader::assemble::render_source` / `expand`
+多一个**桩表**参数，`px_render`（Bevy 宿主）与 `px_ops`（烘图侧）显式传 `bevy_stub`。
+
+⚠ **与 §103.1 原稿的一处偏离**：原稿写的是 `&dyn Stubs`（trait），这里落成
+**函数指针** `pub type Stubs = fn(&str) -> Option<&'static str>`。理由是 §100 的用户口径
+（"能动态的就动态、减少类型检查与单态化"）：两个宿主对同一批 `#import bevy_pbr::*` 的
+兑现方式不同，但组装器**只有一份** —— 不该为"宿主是谁"单态化出两份代码，也不该为一次
+间接调用养一张 vtable。`bevy_stub` 的签名本来就长这样，所以 Bevy 那一侧的改动是**加一个实参**。
+
+| 判据 | 做法 | 读数 |
+|---|---|---|
+| ① `cargo test` 全绿 | `tools/px.ps1 -Target test`（36 个套件） | **exit 0**；`px_render_wgpu` 4 个单测也过 |
+| ② **锚逐字节不变** | 重编 Bevy 宿主 → 同尺寸同相机重出**五张** | **五格全等**（见下） |
+| ③ 四份内容 shader 组装 + naga 校验 | `px_render_wgpu --shaders` | **四份全过** |
+
+判据 ② 的实测（S-1 的读数 → 改完共享件之后重出）：
+
+| | `orbit-bare` | `orbit-rings` | `orbit-soft` | `orbit-proxy-fine-bound` | `sheet` |
+|---|---|---|---|---|---|
+| S-1 | `63184151909371A5` | `B5799E4F1649535C` | `FA20FAD37BC61EA2` | `32872F80AC867BE3` | `A94F9F2D1437C06C` |
+| S1 之后 | `63184151909371A5` | `B5799E4F1649535C` | `FA20FAD37BC61EA2` | `32872F80AC867BE3` | `A94F9F2D1437C06C` |
+
+⇒ 桩表那条路**没有**参与 Bevy 宿主运行期的兑现（它跑的是 naga_oil + 真的 `bevy_pbr`），
+所以这个结果是预期的 —— 但"预期"不算判据，**哈希算**。
+
+**判据 ③ 顺带把 group 0 契约**反射**出来了**（这是它的真本，不是抄的）：
+
+| 符号 | group | binding | 空间 | 谁用 |
+|---|---|---|---|---|
+| `view` | 0 | 0 | uniform | 四份里的三份 |
+| `lights` | 0 | 1 | uniform | `surface` |
+| `clustered_lights` | 0 | 8 | **storage** | `surface` / `atmosphere` / `clouds`（经 `planet_x::light`） |
+| `globals` | 0 | 11 | uniform | `clouds` |
+| `depth_prepass_texture` | 0 | 20 | texture | `atmosphere` / `clouds` |
+| `params` | 3 | 0 | uniform | 四份全有 |
+| 贴图槽 `albedo`/`glow`/`coverage`/`ring` | 3 | 1…6 | texture+sampler | 按各自声明 |
+
+**两条这次才看清的事实**：
+
+1. **`ring.wgsl` 一个 group 0 绑定都没有**（只有 group 3 的 `params` + 环贴图）。
+   ⇒ 环那一档不需要视图组 —— 建 bind group layout 时别按"四份都一样"假设。
+2. 内容 shader 实际读到的 group 0 字段只有**六个**：
+   `view.{world_position, exposure, clip_from_view, viewport}`、`lights.ambient_color`、
+   `globals.time`（`clustered_lights.data` 是整块取的）。零依赖的 `_texture` 格
+   （`depth_prepass_texture`）只被 `textureSample` 用。⇒ 新宿主要喂的数据面很窄，
+   但**值必须一模一样**（尤其 `clip_from_view` 与 `exposure`）。
+
+**落点**：`px_render_wgpu/src/stubs.rs`（宿主桩表 = group 0 契约，**只有**
+`fetch_point_shadow` 与 Bevy 那张不同，其余逐字转给 `bevy_stub` ⇒ 绑定号由**构造**保证一致，
+而不是两边各抄一遍）、`src/shader.rs`（模块发现 + 组装 + naga 校验 + **绑定反射**）。
+⚠ 绑定号**不在 Rust 侧抄常量**：`--shaders` 打印的 `(group, binding)` 是从组装出来的 WGSL
+**反射**出来的。抄一份常量进 Rust 就是 §66.1 那颗「同一条契约、两个数字」的雷。
+
+### §108.4 顺手抓到的一个**真 bug**：`tools/px.ps1 -Target test` 根本跑不起来
+
+§105 的 J6 与 §106 都写着 `.\tools\px.ps1 -Target test`，而它在这个仓里**一直是坏的** ——
+只是没人踩到（只有**恰好输出一个元素**的那条分支才踩得到）。
+
+- **症状**：`cargo test` 报 `error: unexpected argument 's' found`，然后 `Usage: test [OPTIONS] [TESTNAME]`。
+- **根因**：PowerShell 的 `switch` 当**只有一个**匹配分支、且该分支只输出**一个**元素时，
+  会把数组**拆成标量**。`-Target test -Level dev` 时 `@('test') + @()` ⇒ 字符串 `"test"`；
+  而 `& cargo @cargoArgs` 对**字符串**是**按字符**摊开的 ⇒ cargo 实际收到 `test t e s t`。
+  报的是 `'s'` 而不是 `'t'`，是因为 `t` 被吃成了 `TESTNAME`（clap 的位置参数）。
+- **为什么以前没红**：`-Level opt`/`release` 会让 `$extra` 有内容 ⇒ 数组≥2 个元素 ⇒ 不拆。
+  而 `-Target test` 走的正是"`$extra` 为空"这条唯一的独木桥。
+- **修法**：`$cargoArgs = @(switch ($Target) { … })` —— 一行 `@()`，行为不变，命令真的能跑了。
+- **教训**：与 §87 那两条同一族 —— **"文档里写着的命令"必须真的被跑过一次**。
+  这次是判据 ① 顺手跑它才撞出来的，不是读代码读出来的。

@@ -13,10 +13,24 @@ use px_protocol::material::MATERIAL_BIND_GROUP;
 
 use crate::ModuleTable;
 
-/// Bevy 外部符号（`bevy_pbr::…`）的**桩**：本仓不重新实现它们，只让离线文本解析得过去。
+/// 外部符号（`bevy_pbr::…`）的**桩表**：由**宿主**提供，组装器自己一个符号都不认识。
 ///
-/// ⚠ 桩里**只留**我们还认的那些符号：谁再引一个已经退休的东西（比如平行光的
-/// `fetch_directional_shadow`），离线门应当直接报「找不到这个符号」，而不是运行期才发现画面不对。
+/// 为什么是**函数指针**而不是泛型/trait（§103.1 原稿写的是 `&dyn Stubs`）：
+/// 这是"能动态的就动态、减少单态化时间"那一条（§100 的用户口径）——
+/// 两个宿主对同一批 `#import bevy_pbr::*` 的兑现方式不同（Bevy 宿主运行期由 naga_oil 用
+/// Bevy 自己的实现兑现；裸 wgpu 宿主没有 naga_oil，必须自己兑），但组装器只有一份：
+/// 它不该为"宿主是谁"单态化出两份代码，也不该为一次间接调用养一张 vtable。
+///
+/// ⚠ 桩表的**内容**是宿主的判据来源：谁多认一个已经退休的符号（比如平行光的
+/// `fetch_directional_shadow`），离线门就该报「找不到这个符号」，而不是运行期才发现画面不对。
+pub type Stubs = fn(&str) -> Option<&'static str>;
+
+/// **Bevy 宿主**（`px_render`）与烘图侧（`px_ops`）用的那张表：把 `bevy_pbr::*` 替成
+/// **最小声明**，只让离线文本解析得过去，**不是**运行期真正用的实现。
+///
+/// ⚠ 运行期归 naga_oil 按 Bevy 自己的 `bevy_pbr` 兑现；这张表只服务"离线把文本拼出来"
+/// 这一件事（`px_shader::reflect` 与 `px_render/tests/shaders.rs`）。
+/// 裸 wgpu 宿主（`px_render_wgpu`）**不传这张**，它传自己那份（含真的 cube 影子实现）。
 pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
     match symbol {
         "bevy_pbr::forward_io::VertexOutput" => Some(
@@ -128,10 +142,10 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
     }
 }
 
-/// 展开一条 `#import`：外部符号走桩，本仓模块走文本内联（去重）。
-pub fn expand(import: &str, modules: &ModuleTable, seen: &mut Vec<String>) -> String {
+/// 展开一条 `#import`：外部符号走宿主的桩表，本仓模块走文本内联（去重）。
+pub fn expand(import: &str, modules: &ModuleTable, stubs: Stubs, seen: &mut Vec<String>) -> String {
     let import = import.trim();
-    if let Some(stub) = bevy_stub(import) {
+    if let Some(stub) = stubs(import) {
         // ⚠ 桩也要去重：同一个 `bevy_pbr::*` 符号可能被**入口 shader** 与**库模块**
         // 各 import 一次（`planet_x::light` 与 `surface.wgsl` 都要 `view`），
         // 不去重就会把同一份 `ViewStub` / `var<uniform> view` 内联两遍 ⇒ 重定义。
@@ -160,11 +174,16 @@ pub fn expand(import: &str, modules: &ModuleTable, seen: &mut Vec<String>) -> St
         .get(module)
         .expect("module_of 给出来的名字一定在表里");
     seen.push(module.to_string());
-    render_source(source, modules, seen)
+    render_source(source, modules, stubs, seen)
 }
 
 /// 入口 / 模块 → 可解析的完整 WGSL。
-pub fn render_source(source: &str, modules: &ModuleTable, seen: &mut Vec<String>) -> String {
+pub fn render_source(
+    source: &str,
+    modules: &ModuleTable,
+    stubs: Stubs,
+    seen: &mut Vec<String>,
+) -> String {
     let mut out = String::new();
     let mut imports: Vec<String> = Vec::new();
     for line in source.lines() {
@@ -188,11 +207,11 @@ pub fn render_source(source: &str, modules: &ModuleTable, seen: &mut Vec<String>
                 if symbol.is_empty() {
                     continue;
                 }
-                prelude.push_str(&expand(&format!("{module}::{symbol}"), modules, seen));
+                prelude.push_str(&expand(&format!("{module}::{symbol}"), modules, stubs, seen));
             }
             continue;
         }
-        prelude.push_str(&expand(&import, modules, seen));
+        prelude.push_str(&expand(&import, modules, stubs, seen));
     }
     format!("{prelude}\n{out}")
 }
@@ -208,6 +227,7 @@ mod tests {
         let text = render_source(
             "@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> p: f32;\n",
             &modules,
+            bevy_stub,
             &mut seen,
         );
         assert_eq!(
@@ -231,6 +251,7 @@ mod tests {
         let text = render_source(
             "#import planet_x::light::sun\n#import bevy_pbr::mesh_view_bindings::view\nfn f() -> f32 { return sun(); }\n",
             &modules,
+            bevy_stub,
             &mut seen,
         );
         assert_eq!(
@@ -246,8 +267,41 @@ mod tests {
         let modules = ModuleTable::new();
         let mut seen = Vec::new();
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            render_source("#import nobody::knows\n", &modules, &mut seen)
+            render_source("#import nobody::knows\n", &modules, bevy_stub, &mut seen)
         }));
         assert!(caught.is_err(), "带 :: 的未知 import 必须报错，不许静默丢掉");
+    }
+
+    /// 桩表是**宿主给的参数**：同一个符号，两张表给两份文本。
+    /// 这条是 §103.1 的判据 —— 组装器里不许再有"bevy 那一份"的暗默认。
+    #[test]
+    fn the_stub_table_comes_from_the_host() {
+        fn empty(_: &str) -> Option<&'static str> {
+            None
+        }
+        let modules = ModuleTable::new();
+        let mut seen = Vec::new();
+        let text = render_source(
+            "#import bevy_pbr::mesh_view_bindings::view\nfn f() -> f32 { return view.exposure; }\n",
+            &modules,
+            bevy_stub,
+            &mut seen,
+        );
+        assert!(text.contains("var<uniform> view"), "Bevy 那张表认这个符号：{text}");
+
+        let mut other_seen = Vec::new();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_source(
+                "#import bevy_pbr::mesh_view_bindings::view\n",
+                &modules,
+                empty,
+                &mut other_seen,
+            )
+        }));
+        assert!(
+            caught.is_err(),
+            "换一张空表，同一个符号就解不开了 —— 说明认符号的是**传进来的那张表**，\
+             不是组装器里写死的一份"
+        );
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "px_render_wgpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+px_shader = { path = "../px_shader" }
+px_pass = { path = "../px_pass" }
+# 后端**锁死 Vulkan**（§104 第 9 条）。`default-features = false` 之后必须显式点名后端，
+# 否则拿到的实例一个后端都没有 —— 那不是"默认"，那是空。
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+naga = { version = "29", features = ["wgsl-in"] }
+# PNG 必须走 image（§104 第 3 条）：哈希是被这个编码器定下来的，不是被我们。
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

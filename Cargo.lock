@@ -4464,6 +4464,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_render_wgpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "image",
+ "naga",
+ "pollster",
+ "px_pass",
+ "px_protocol",
+ "px_shader",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
 name = "px_shader"
 version = "0.1.0"
 dependencies = [

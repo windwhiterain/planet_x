@@ -199,7 +199,7 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("读不了 {name}：{err}"));
         let mut seen = Vec::new();
-        let assembled = crate::assemble::render_source(&source, &modules, &mut seen);
+        let assembled = crate::assemble::render_source(&source, &modules, crate::assemble::bevy_stub, &mut seen);
         reflect_assembled(&assembled, name).unwrap_or_else(|err| panic!("{err}"))
     }
 
@@ -211,7 +211,7 @@ mod tests {
         )
         .expect("模块表");
         let mut seen = Vec::new();
-        crate::assemble::render_source(source, &modules, &mut seen)
+        crate::assemble::render_source(source, &modules, crate::assemble::bevy_stub, &mut seen)
     }
 
     /// 契约的**形状**由 shader 自己的结构体说了算（不是 Rust 侧那张老表）。

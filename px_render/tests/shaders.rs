@@ -1,6 +1,6 @@
 mod common;
 
-use common::{expand, import_path_of, module_sources, render_source, shader_files};
+use common::{bevy_stub, expand, import_path_of, module_sources, render_source, shader_files};
 use std::path::Path;
 
 #[test]
@@ -21,7 +21,7 @@ fn the_backend_shader_stays_small_enough_for_a_driver() {
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let mut seen = Vec::new();
-        let assembled = render_source(&source, &modules, &mut seen);
+        let assembled = render_source(&source, &modules, bevy_stub, &mut seen);
 
         let module = naga::front::wgsl::parse_str(&assembled)
             .unwrap_or_else(|error| panic!("{name} 解析失败：{}", error.emit_to_string(&assembled)));
@@ -82,7 +82,7 @@ fn every_shader_parses_and_validates() {
             continue;
         }
         let mut seen = Vec::new();
-        let assembled = render_source(&source, &modules, &mut seen);
+        let assembled = render_source(&source, &modules, bevy_stub, &mut seen);
         let name = path.file_name().unwrap().to_string_lossy().to_string();
 
         let module = naga::front::wgsl::parse_str(&assembled).unwrap_or_else(|error| {
@@ -115,7 +115,7 @@ fn slot_placeholders_parse_and_validate() {
 
     for (name, source) in px_render::slots::placeholders() {
         let mut seen = Vec::new();
-        let assembled = render_source(&source, &modules, &mut seen);
+        let assembled = render_source(&source, &modules, bevy_stub, &mut seen);
         let module = naga::front::wgsl::parse_str(&assembled).unwrap_or_else(|error| {
             panic!(
                 "槽占位 {name} 解析失败：\n{}\n---- 组装后的源码 ----\n{assembled}",
@@ -157,7 +157,7 @@ fn an_unknown_import_is_not_silently_ignored() {
     let modules = module_sources();
     let mut seen = Vec::new();
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        expand("planet_x::missing::thing", &modules, &mut seen)
+        expand("planet_x::missing::thing", &modules, bevy_stub, &mut seen)
     }))
     .is_err();
     assert!(caught, "未知 import 必须报错，不能静默略过");

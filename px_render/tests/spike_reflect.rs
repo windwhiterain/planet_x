@@ -1,6 +1,6 @@
 mod common;
 
-use common::{module_sources, render_source};
+use common::{bevy_stub, module_sources, render_source};
 use naga::AddressSpace;
 
 fn describe(module: &naga::Module, handle: naga::Handle<naga::Type>) -> String {
@@ -39,7 +39,7 @@ fn spike_what_the_material_uniform_looks_like() {
         let path = px_render::shaders::shader_source_of(name);
         let source = std::fs::read_to_string(&path).expect("读不了 shader");
         let mut seen = Vec::new();
-        let assembled = render_source(&source, &modules, &mut seen);
+        let assembled = render_source(&source, &modules, bevy_stub, &mut seen);
         let module = naga::front::wgsl::parse_str(&assembled)
             .unwrap_or_else(|error| panic!("{name} 解析失败：{}", error.emit_to_string(&assembled)));
         let mut validator = naga::valid::Validator::new(
