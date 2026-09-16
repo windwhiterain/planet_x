@@ -25,7 +25,7 @@
 use std::path::Path;
 
 use px_pass::{
-    Attachment, Cull, Executor, External, Frame, PassKind, Plan, ResolvedGeometry, ResolvedGroup,
+    Attachment, Cull, External, Frame, PassKind, Plan, ResolvedGeometry, ResolvedGroup,
     ResolvedMaterial, Role,
 };
 use px_protocol::material::MATERIAL_BIND_GROUP;
@@ -47,22 +47,31 @@ use crate::shot;
 /// ⚠ 按标签挑是**宿主的切片策略**，不是执行器的分派规则：`px_pass` 一个 pass 名字都不认识，
 /// 它只按 `kind` 与状态分派（§124）。这一档之所以只能跑这三条，理由写在 [`SKIPPED`] 里，
 /// 而且每一条都要**打出来**——"绿是因为跳过了它"是本仓库最不能接受的那种绿。
-const EXECUTED: [&str; 3] = ["prepass", "opaque", "blit"];
-
-/// 这一档**不执行**的那两条，以及各自的原因（原样进日志）。
-const SKIPPED: [(&str, &str); 2] = [
-    (
-        "sky",
-        "切片 2 的天空盒：它那一笔要的材质名 'skybox' 在文档里没有对应物体\
-         （文档的物体只有 planet / atmosphere），宿主也没有天空盒的片元成员\
-         （`art/shaders` 里没有 skybox.wgsl）⇒ 那一笔现在建不出来",
-    ),
-    (
-        "transparent",
-        "切片 3 的大气：本切片的判据是「背景 + 行星，别的什么都没有」，\
-         执行它就没法把差异归因（§107：一次只动一个变量）",
-    ),
+const EXECUTED: [&str; 5] = [
+    "prepass",
+    "copy_depth",
+    "opaque",
+    "transparent",
+    "blit",
 ];
+
+/// 这一档**不执行**的那几条，以及各自的原因（原样进日志）。
+const SKIPPED: [(&str, &str); 1] = [(
+    "sky",
+    "切片 2 的天空盒：它那一笔要的材质名 'skybox' 在文档里没有对应物体\
+     （文档的物体只有 planet / atmosphere），宿主也没有天空盒的片元成员\
+     （`art/shaders` 里没有 skybox.wgsl）⇒ 那一笔现在建不出来。\
+     ⚠ 与『剪影外还剩星空』是**两件事**：星空是**切片 2 的素材**（环境里那份 `generated/stars`，\
+     不是这一笔能解决的），而天空盒的**顶点阶段对不上**（`art/frame/vertex_sky.wgsl` 只写 \
+     `@builtin(position)`）是另一处的活 —— 归因别糊在一起",
+)];
+
+/// 这一档由**宿主建、seed 进池子**的两张深度图（§132）。
+///
+/// ⚠ 两张都要：`scene_depth` 是主 pass 的深度附件（写），`scene_depth_sample` 是那次拷贝的
+/// 目标、也是第 20 格采样的那一张。只 seed 一张，另一张就会落到池子自建的那张上 ——
+/// 两张同名纹理，而错法是**一声不吭的错像素**。
+const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 
 /// 一份画好的图：紧凑 RGBA8 + 这一帧的审计文本。
 ///
@@ -220,25 +229,10 @@ pub fn run(
         (width as f32 / height as f32).to_bits()
     ));
 
-    // ---- 深度图：**宿主自己建**，等会儿当外部目标交出去 ----
-    //
-    // ⚠ 另外建一张 1×1 的**占位深度图**：wgpu 不许同一条 pass 里既把一张图当深度附件**写**、
-    //    又把它当资源绑进绑定组（实测文本：`TextureUses(DEPTH_STENCIL_WRITE) is an exclusive
-    //    usage and cannot be used with any other usages within the usage scope`）——
-    //    而 group 0 的第 20 格（`depth_prepass_texture`）**必须**有个视图。写深度的那几条
-    //    pass 因此绑占位图：反正这一档没有任何一条 shader 采样它（surface 不声明那一格）。
-    //    ⚠ 只读深度的那几条（`depth_write = false`，切片 3 的天空/透明）**可以**绑真图 ——
-    //    `DEPTH_STENCIL_READ | RESOURCE` 两种都是"包容用法"，实测不冲突。
-    let depth = create_depth(&gpu.device, width, height, "scene_depth（宿主建的，顶掉文档声明的池资源）");
-    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let placeholder = create_depth(&gpu.device, 1, 1, "group 0 第 20 格的占位深度图（1×1）");
-    let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+    // ---- 执行器：**先建**，因为深度图要先 `seed` 进去（§132）----
+    let mut executor = px_pass::Executor::new();
 
-    // ---- 每个物体该配哪一份 group 0：看**画它的那几条执行的 pass** 写不写深度 ----
-    //
-    // ⚠ 一条物体要是既被"写深度"的 pass 画、又被"只读深度"的 pass 画，**没有一份** group 0
-    //    能同时满足两边（第 20 格只能有一个视图）⇒ 当场拒，并说清该怎么改（执行器的
-    //    `Frame::materials` 是按名字查的**一张平表**，而这一格随 pass 变）。
+    // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
     let contract = scene
         .objects
         .first()
@@ -259,141 +253,126 @@ pub fn run(
         )
     };
 
-    let mut needs_writing: Vec<&str> = Vec::new();
-    let mut needs_reading: Vec<&str> = Vec::new();
-    let mut undrawn: Vec<&str> = Vec::new();
-    // ⚠ 第 20 格（`depth_prepass_texture`）的守卫。两条事实合起来才是这条守卫：
-    //    ① wgpu **不许**同一条 pass 里把一张图既当（写的）深度附件、又当资源绑进绑定组；
-    //    ② 所以"挂深度附件的 pass"里，第 20 格只能绑**别的东西**（那张 1×1 占位图）。
-    //    ⇒ 谁的片元阶段**真的读**第 20 格，谁就不能被"挂深度附件"的 pass 画：
-    //       绑占位图 ⇒ 读到的是 0（**像素是错的**，而且一声不吭）；
-    //       绑真图   ⇒ wgpu 当场拒（报错文本见 §131）。
-    //    正确形状是**先拷贝一次**：`prepass` 写 `scene_depth` → 一步 `copy` 出
-    //    `scene_depth_sample` → 主 pass 照旧挂 `scene_depth`（对真的预通道结果做深度测试），
-    //    只有采样那一方读 `scene_depth_sample`。⚠ 那一步拷贝**属于帧表**（谁提供未定），
-    //    宿主不许自己发一次 `copy_texture_to_texture` —— 那等于宿主又开始决定帧序。
-    //    这一条就是让这件事在切片 3 一开工就响的东西。
-    let depth_binding = group0::DEPTH_PREPASS_BINDING;
-    let mut sampling: Vec<&str> = Vec::new();
-    for object in &scene.objects {
-        let module = shader::validate(&object.id, &object.shader.assembled)?;
-        let samples_depth = shader::bindings(&module).iter().any(|(group, binding, _, _)| {
-            (*group, *binding) == depth_binding
+    // ---- 深度图：**宿主建、seed 进池子**（§132 定下的形状）----
+    //
+    // ⚠ 一个资源名只能有**一张**纹理。拷贝那条路要的是**纹理**（`copy_texture_to_texture`），
+    //    而 group 0 的第 20 格要的是**同一张纹理的视图** —— 两边各自建一张，就是
+    //    "copy 写池里那张、着色器读宿主那张"这种**一声不吭的错像素**。
+    //    所以两张深度图都由宿主建，`Executor::seed` 把它们按文档声明的规格收进池子：
+    //    从那一刻起，附件、绑定、拷贝用的都是同一张。
+    //
+    // ⚠ **两张都要 seed**：只 seed 拷贝的目标，源就会落到池子自建的那张上，
+    //    而附件用的是宿主那张 —— 又是两张同名纹理、又是静默错像素。
+    let mut seeded: Vec<(String, wgpu::Texture)> = Vec::new();
+    for name in DEPTH_RESOURCES {
+        let Some(resource) = plan.resource(name) else {
+            // 老文档（没有帧表）没有这两栏：这一档只在有帧表的产物上跑，缺了就当场说清。
+            return Err(format!(
+                "文档里没有资源 '{name}'（声明了的：{}）：这一档要把它 seed 成宿主建的那张深度图",
+                plan.resources
+                    .iter()
+                    .map(|resource| resource.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            ));
+        };
+        let (depth_width, depth_height) = resource.size.resolve(width, height);
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(name),
+            size: wgpu::Extent3d {
+                width: depth_width,
+                height: depth_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            // 用途照**文档声明的**来（映射只有一份，住在 `px_pass::texture_usage`）。
+            usage: px_pass::texture_usage(resource),
+            view_formats: &[],
         });
-        if !samples_depth {
+        executor.seed(resource, depth_width, depth_height, texture.clone())?;
+        audit.push(format!(
+            "  ⚠ 池子里的 '{name}' 现在就是**宿主建的**这一张（{}×{} {:?}，用途照文档声明）：\
+             谁被顶掉了要看得见 —— 不 seed 的话 copy 与绑定会各拿一张同名纹理，\
+             而那种错法是**一声不吭的错像素**",
+            depth_width,
+            depth_height,
+            texture.format()
+        ));
+        seeded.push((name.to_string(), texture));
+    }
+    let depth_texture = |name: &str| -> Option<&wgpu::Texture> {
+        seeded
+            .iter()
+            .find(|(seeded_name, _)| seeded_name == name)
+            .map(|(_, texture)| texture)
+    };
+    // group 0 第 20 格（`depth_prepass_texture`）绑哪张图：**从帧表里推**，不靠名字约定。
+    //
+    // 规则：看哪条 `copy` 把"深度附件用的那张图"搬到了别处 —— 搬出来的那一份就是
+    // "**当时**那份预通道深度"，而着色器要的正是它（它自己那条 pass 挂着的是同一张图的
+    // "现在"这份）。没有那条 copy 时退回深度附件本身。两条都没有就建不出来 ⇒ 说清楚。
+    let depth_target_name = executed_plan
+        .passes
+        .iter()
+        .find_map(|pass| match pass.render.depth {
+            Attachment::None => None,
+            _ => pass.depth_target.as_deref(),
+        })
+        .ok_or_else(|| {
+            "这一档的计划里没有一条 pass 挂深度附件：group 0 的第 20 格就没有来源了".to_string()
+        })?;
+    let sampled_depth = executed_plan
+        .passes
+        .iter()
+        .find(|pass| pass.kind == PassKind::Copy && pass.reads.first().map(String::as_str) == Some(depth_target_name))
+        .and_then(|pass| pass.writes.first().cloned())
+        .unwrap_or_else(|| depth_target_name.to_string());
+    let sampled_view = depth_texture(&sampled_depth)
+        .ok_or_else(|| {
+            format!(
+                "group 0 第 20 格该绑 '{sampled_depth}'，而宿主这一档只 seed 了 [{}]",
+                seeded
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            )
+        })?
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    audit.push(format!(
+        "group 0 第 20 格（depth_prepass_texture）⇒ '{sampled_depth}'（从帧表推出来的：\
+         深度附件用 '{depth_target_name}'，而那条 copy 把它搬成了 '{sampled_depth}'）"
+    ));
+
+    // ⚠ 第 20 格的守卫（**拦一类形状**，不是拦那件事）：同一条 pass 里，一张图不能
+    //    既当（写的）深度附件、又当资源绑进绑定组（wgpu：`TextureUses(DEPTH_STENCIL_WRITE)
+    //    is an exclusive usage`）。这条守卫从"拦占位深度那个事件"变成了"拦这一类"：
+    //    谁哪天把第 20 格指回它自己挂着的那张深度图（例如去掉那次 copy），这里当场响，
+    //    并列出三条出路 —— 它比那件事活得久（§132）。
+    for pass in &executed_plan.passes {
+        if pass.render.depth == Attachment::None {
             continue;
         }
-        sampling.push(object.id.as_str());
-        for pass in &executed_plan.passes {
-            if !pass.draws.iter().any(|draw| draw.material == object.id) {
-                continue;
-            }
-            if pass.render.depth == Attachment::None {
-                continue;
-            }
-            return Err(format!(
-                "物体 '{}' 的片元阶段声明了 @group({}) @binding({})（depth_prepass_texture），\
-                 而 pass '{}' 把 '{}' 当深度附件挂着。wgpu 不许同一条 pass 里既把这张图当附件、\
-                 又当资源绑进绑定组（实测：`TextureUses(DEPTH_STENCIL_WRITE) is an exclusive usage`），\
-                 所以这一笔**没有**正确的绑法：绑真图 ⇒ 建不出这条 pass；绑占位图 ⇒ 读到 0，\
-                 像素是错的且不会报错。正确形状是**帧表里先拷贝一次**\
-                 （prepass 写 scene_depth → copy 出 scene_depth_sample → 主 pass 仍挂 scene_depth、\
-                 采样那一方读 scene_depth_sample）。⚠ 拷贝那一步属于帧表，宿主不自己插",
-                object.id,
-                depth_binding.0,
-                depth_binding.1,
-                pass.label,
-                pass.depth_target.as_deref().unwrap_or("（没写 depth_target）")
-            ));
+        if pass.depth_target.as_deref() != Some(sampled_depth.as_str()) {
+            continue;
         }
-    }
-    for object in &scene.objects {
-        let drawn_by: Vec<&str> = executed_plan
-            .passes
-            .iter()
-            .filter(|pass| pass.draws.iter().any(|draw| draw.material == object.id))
-            .filter(|pass| pass.render.depth != Attachment::None)
-            .map(|pass| pass.label.as_str())
-            .collect();
-        let writes = executed_plan
-            .passes
-            .iter()
-            .filter(|pass| pass.draws.iter().any(|draw| draw.material == object.id))
-            .any(|pass| pass.render.depth != Attachment::None && pass.render.depth_write);
-        let reads = executed_plan
-            .passes
-            .iter()
-            .filter(|pass| pass.draws.iter().any(|draw| draw.material == object.id))
-            .any(|pass| pass.render.depth != Attachment::None && !pass.render.depth_write);
-        if writes && reads {
-            return Err(format!(
-                "物体 '{}' 同时被「写深度」与「只读深度」的 pass 画（{}）：第 20 格只能有一个视图，\
-                 没有一份 group 0 能同时配两边。要么把这一档的物体分开（各画各的 pass），\
-                 要么让执行器按**每一条 pass** 解析材质（现在 `Frame::materials` 是按名字查的一张平表）",
-                object.id,
-                drawn_by.join(" / ")
-            ));
-        }
-        if writes {
-            needs_writing.push(object.id.as_str());
-        } else if reads {
-            needs_reading.push(object.id.as_str());
-        } else {
-            // 这一档**没有执行的 pass** 画它（例如切片 1 里的大气：画它的 `transparent` 没执行）
-            // ⇒ 第 20 格随便配一份，反正这一帧用不到。**说出来**，不许悄悄挑一个。
-            undrawn.push(object.id.as_str());
-        }
-        audit.push(format!(
-            "  物体 '{}' 的 group 0 第 20 格 ⇒ {}{}",
-            object.id,
-            if writes {
-                "1×1 占位深度图（它被「写深度」的 pass 画）"
-            } else if reads {
-                "真的 scene_depth（它只被「只读深度」的 pass 画）"
-            } else {
-                "随便一份（这一档没有执行的 pass 画它）"
-            },
-            // 占位图**为什么无害**：这个物体的片元阶段声明里根本没有第 20 格 ⇒ 它不会被读到。
-            // （真的有人要读它时，上面那条守卫会先响。）
-            if sampling.contains(&object.id.as_str()) {
-                "；⚠ 它的片元阶段**声明了**第 20 格 ⇒ 见上面那条守卫"
-            } else {
-                "；它的片元阶段没有声明第 20 格 ⇒ 占位图不会被读到"
-            }
+        return Err(format!(
+            "pass '{}' 把 '{sampled_depth}' 当深度附件挂着，而 group 0 的第 20 格\
+             （depth_prepass_texture）绑的**也是它**：wgpu 不许同一条 pass 里把一张图既当附件、\
+             又当资源绑进绑定组（实测：`TextureUses(DEPTH_STENCIL_WRITE) is an exclusive usage \
+             and cannot be used with any other usages within the usage scope`）。\
+             三条出路：① 帧表里**先拷贝一次**（深度 → 快照，采样那一方读快照；这就是这一档的形状）；\
+             ② 那条 pass 不挂深度附件（丢掉遮挡测试）；③ 让执行器按**每一条 pass** 解析材质\
+             （现在 `Frame::materials` 是按名字查的一张平表）。⚠ 拷贝那一步属于帧表，宿主不自己插",
+            pass.label
         ));
     }
-    let zero_writing = if needs_writing.is_empty() {
-        None
-    } else {
-        Some(build_zero(&placeholder_view)?)
-    };
-    let mut zero_reading = if needs_reading.is_empty() {
-        None
-    } else {
-        Some(build_zero(&depth_view)?)
-    };
-    if zero_writing.is_none() && zero_reading.is_none() {
-        // 一条挂深度的 pass 都没有（当前帧表不会这样，但"没有"也得能建出来）：
-        // 第 20 格绑真图那份，因为没有任何 pass 会写它。
-        zero_reading = Some(build_zero(&depth_view)?);
-    }
+    let zero = build_zero(&sampled_view)?;
     audit.push("group 0（五格全绑，哪怕 shader 只声明了一部分）：".to_string());
-    let described = zero_reading.as_ref().or(zero_writing.as_ref()).expect("至少有一份");
-    audit.extend(described.audit.iter().map(|line| format!("  {line}")));
-    audit.push(format!(
-        "  ⚠ 第 20 格（depth_prepass_texture）建了 {} 份：写深度的那些物体 [{}] 绑 1×1 占位图，\
-         只读深度的那些 [{}] 绑真的 scene_depth —— 同一张图不能在同一条 pass 里既当写的附件又当资源",
-        usize::from(zero_writing.is_some()) + usize::from(zero_reading.is_some()),
-        if needs_writing.is_empty() { "（无）".to_string() } else { needs_writing.join(" / ") },
-        if needs_reading.is_empty() { "（无）".to_string() } else { needs_reading.join(" / ") }
-    ));
-    if !undrawn.is_empty() {
-        audit.push(format!(
-            "  ⚠ 这一档没有任何执行的 pass 画这些物体：[{}] ⇒ 它们的 group 0 第 20 格随便配一份\
-             （本帧用不到）。它们在文档里，只是画它们的 pass 没执行",
-            undrawn.join(" / ")
-        ));
-    }
+    audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
 
     // ---- 几何：按物体 id 上传（`Draw::geometry` 那个名字就是物体 id）----
     let mut geometries: Vec<Geometry> = Vec::with_capacity(scene.objects.len());
@@ -557,15 +536,6 @@ pub fn run(
         .zip(bindings.iter())
         .zip(stages.iter())
         .map(|((object, binding), stage)| {
-            // 这个物体配哪一份 group 0（写深度那份绑占位图，只读那份绑真图，没被画到的随便一份）。
-            let zero = if needs_writing.contains(&object.id.as_str()) {
-                zero_writing.as_ref()
-            } else {
-                zero_reading.as_ref()
-            }
-            .or(zero_writing.as_ref())
-            .or(zero_reading.as_ref())
-            .expect("至少建过一份：上面有一条兜底");
             Ok(ResolvedMaterial {
                 name: object.id.as_str(),
                 groups: vec![
@@ -603,24 +573,16 @@ pub fn run(
     // ---- 外部目标：深度图与最终目标 ----
     let target = shot::Target::new(&gpu.device, width, height);
     let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
-    let mut depth_overrides: Vec<String> = Vec::new();
     for (index, pass) in executed_plan.passes.iter().enumerate() {
         let mut set: Vec<External<'_>> = Vec::new();
-        if let Some(name) = pass.depth_target.as_deref() {
-            if plan.resource(name).is_some() {
-                // ⚠ **宿主顶掉文档声明的资源**（§130）：打印出来是硬要求，静默顶掉不行。
-                depth_overrides.push(format!(
-                    "[{index}] '{}' 的 Role::Depth '{name}'",
-                    pass.label
-                ));
-                set.push(External {
-                    name,
-                    role: Role::Depth,
-                    view: &depth_view,
-                    format: wgpu::TextureFormat::Depth32Float,
-                });
-            }
-        }
+        // ⚠ **`Role::Depth` 那条外部目标的路，这一档不再走**（§132）。
+        //
+        // 它没错，只是这一档不再需要：那条规则说的是"宿主给的外部目标顶掉同名声明资源"，
+        // 将来谁真需要"宿主提供一张**池子拥有**的视图"，它还在、还是对的。
+        // 这一档改成了 `Executor::seed` —— 因为深度那张图**必须只有一张**（拷贝要纹理、
+        // 绑定要同一张纹理的视图），而 seed 才保证得了"一张"。
+        // 两条路同时开着就是"同一个东西两套机制"，那是漂移的温床，所以这里**空着**。
+        let _ = (index, &pass.label);
         if pass.writes.first().map(String::as_str) == Some(px_protocol::scene::VIEW_BUILTIN) {
             set.push(External {
                 name: px_protocol::scene::VIEW_BUILTIN,
@@ -631,13 +593,6 @@ pub fn run(
         }
         sets.push(set);
     }
-    if !depth_overrides.is_empty() {
-        audit.push(format!(
-            "⚠ 顶掉文档声明的资源：'scene_depth' 由宿主这一帧自己建、以 Role::Depth 交出去（{}）。\
-             原因：大气的 group 0 binding 20 要采样**同一张**深度图，而池里那张的视图宿主拿不到（§130）",
-            depth_overrides.join(" / ")
-        ));
-    }
 
     let frame = Frame {
         width,
@@ -646,7 +601,6 @@ pub fn run(
         geometries: &resolved_geometry,
         materials: &resolved_materials,
     };
-    let mut executor = Executor::new();
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {

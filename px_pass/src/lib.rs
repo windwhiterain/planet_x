@@ -1282,10 +1282,9 @@ fn copy_aspect(format: TextureFormat) -> TextureAspect {
 
 /// 文档里声明的用途 → wgpu 的 `TextureUsages`。
 ///
-/// ⚠ 这是**唯一**一处决定池子里那张纹理带哪些用途的地方：声明什么就建什么。
-/// 少了 `copy_src` / `copy_dst` 两档，纹理建出来就拷不了，而失败发生在拷贝那一刻
-/// （报错指向纹理创建、不指向那条 pass）—— 所以文档的 `resources` 那一栏必须声明齐。
-fn texture_usage(resource: &ResourceSpec) -> TextureUsages {
+/// ⚠ 这是**唯一**一处映射：池子建纹理用它，宿主 `seed` 一张纹理时**也用它**
+/// （别在宿主里再写一份 —— 那种"一份契约两处说"的漂移只在拷贝那一刻才露头）。
+pub fn texture_usage(resource: &ResourceSpec) -> TextureUsages {
     let mut usage = TextureUsages::empty();
     for declared in &resource.usage {
         usage |= match declared {
@@ -1306,11 +1305,105 @@ pub struct Executor {
     pool: HashMap<String, Pooled>,
     /// 没被 reads 占到的格一律绑它：布局是固定超集，shader 里声明了就一定绑得上。
     fallback: HashMap<Dimension, TextureView>,
+    /// 宿主 `seed` 过的名字（见 [`Executor::seed`]）。
+    ///
+    /// ⚠ 它留在这里是为了 `execute` 能判"seed 了却没人用"：名字对不上（例如
+    /// `scene_depth_snapshot` vs `scene_depth_sample`）会让宿主**悄悄** seed 一张
+    /// 没人用的纹理，而那条 pass 照样让池子自建真的那张 —— 那是同一个 bug 换条路回来。
+    seeded: Vec<String>,
 }
 
 impl Executor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 宿主把某份资源的**纹理**预置进池子：这份资源从头到尾就是宿主给的这一张。
+    ///
+    /// 为什么需要它（§131 之后）：一条 `copy` 的两端要的是**纹理**，而 group 0 要的是
+    /// **同一张纹理的视图** —— 一个资源名只能有**一张**纹理，否则就是"copy 写池里那张、
+    /// 着色器读宿主那张"这种**一声不吭的错像素**。能让"一张"成立的形状只有
+    /// "宿主建、池子照单收下"。所以 `seed` 之后，这个名字在池子里就是那一张 ——
+    /// 附件、绑定、拷贝全都是它。
+    ///
+    /// ⚠ 规格要照**文档声明的**核一遍（格式 / 尺寸 / 层数 / mip / **用途**），对不上当场拒：
+    /// 用途那一栏尤其要紧 —— 宿主建纹理时给的用法必须**涵盖**文档声明的那几项，
+    /// 少了 `copy_src` / `copy_dst` 就是"校验全过、管线全对，拷贝那一刻才炸"。
+    ///
+    /// ⚠ "谁被顶掉了要看得见"是 §130 立的规矩：**顶掉这件事由宿主打印**
+    /// （`Plan::resources` 是公开的，谁被顶掉宿主知道）。这里不闷着替换。
+    pub fn seed(
+        &mut self,
+        resource: &ResourceSpec,
+        width: u32,
+        height: u32,
+        texture: Texture,
+    ) -> Result<(), String> {
+        let format = resource.format.to_wgpu();
+        let declared = texture_usage(resource);
+        let mut problems: Vec<String> = Vec::new();
+        if texture.format() != format {
+            problems.push(format!(
+                "格式是 {:?}，文档声明的是 {:?}",
+                texture.format(),
+                format
+            ));
+        }
+        if texture.width() != width || texture.height() != height {
+            problems.push(format!(
+                "尺寸是 {}×{}，文档那一条尺寸规则（{}）在这一帧是 {}×{}",
+                texture.width(),
+                texture.height(),
+                resource.size.name(),
+                width,
+                height
+            ));
+        }
+        if texture.depth_or_array_layers() != 1 || texture.mip_level_count() != 1 {
+            problems.push(format!(
+                "有 {} 层 / {} 级 mip，而池子建出来的一律是 1 层 1 级",
+                texture.depth_or_array_layers(),
+                texture.mip_level_count()
+            ));
+        }
+        let missing = declared - texture.usage();
+        if !missing.is_empty() {
+            problems.push(format!(
+                "用途少了 {:?}：文档给 '{}' 声明的是 [{}]，宿主建这张纹理时给的用法必须**涵盖**它们\
+                 （少了 copy_src / copy_dst 那种，是校验全过、拷贝那一刻才炸）",
+                missing,
+                resource.name,
+                resource
+                    .usage
+                    .iter()
+                    .map(|use_| use_.name())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(format!(
+                "宿主 seed 的 '{}' 与文档声明对不上：{}",
+                resource.name,
+                problems.join("；")
+            ));
+        }
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        self.pool.insert(
+            resource.name.clone(),
+            Pooled {
+                width,
+                height,
+                format,
+                usage: declared,
+                view,
+                texture,
+            },
+        );
+        if !self.seeded.contains(&resource.name) {
+            self.seeded.push(resource.name.clone());
+        }
+        Ok(())
     }
 
     fn sampler(&mut self, device: &Device) -> Sampler {
@@ -1837,6 +1930,36 @@ impl Executor {
         plan.check()?;
         if plan.is_empty() {
             return Ok("pass 表是空的：这一帧没有任何 pass".to_string());
+        }
+        // ⚠ 每一个 seed 过的名字都必须被**这份计划**用到（§131 的后半条）。
+        //
+        // seed 先发生、计划后到：一个错拼的名字（`scene_depth_snapshot` vs
+        // `scene_depth_sample`）会**悄悄** seed 一张没人用的纹理，而那条 pass 照样让池子
+        // 自建真的那张 —— 同一个 bug 换条路又回来了。seed 了却没人用 = **宿主与文档对
+        // "存在什么"意见不一致**，而那种不一致不许是静默的。
+        //
+        // "用到"的口径：这个名字出现在某条 pass 的 reads / writes / depth_target 里。
+        // 只"声明在 resources 里"不算 —— 声明了没人碰，正是这条要抓的那种不一致。
+        let used: Vec<&str> = plan
+            .passes
+            .iter()
+            .flat_map(|pass| {
+                pass.reads
+                    .iter()
+                    .map(String::as_str)
+                    .chain(pass.writes.iter().map(String::as_str))
+                    .chain(pass.depth_target.as_deref())
+            })
+            .collect();
+        for name in &self.seeded {
+            if !used.contains(&name.as_str()) {
+                return Err(format!(
+                    "宿主 seed 过 '{name}'，而这份计划里没有任何一条 pass 用到它\
+                     （计划声明过的资源：{}）—— seed 了却没人用，意味着宿主与文档对\
+                     『存在什么』意见不一致，而那种不一致不许是静默的",
+                    plan.name_list()
+                ));
+            }
         }
         let layout = plan.layout.clone();
         let sampler = self.sampler(device);
@@ -2863,8 +2986,103 @@ mod tests {
         assert!(err.contains("尺寸规则"), "{err}");
     }
 
-    /// **判据（要真设备）**：一次拷贝真的搬了东西。
-    ///
+    /// `seed`（§132）：宿主把某份资源的纹理交进池子 —— 规格照**文档声明的**核，
+    /// 而且"seed 了却没人用"要当场拒（那是宿主与文档对"存在什么"意见不一致）。
+    #[test]
+    fn a_seeded_texture_must_match_the_declared_spec_and_be_used() {
+        let (device, _queue) = test_device();
+        let mut executor = Executor::new();
+        let resource = ResourceSpec {
+            name: "depth".to_string(),
+            format: Format::Depth32Float,
+            size: SizeRule::View,
+            usage: vec![Use::RenderAttachment, Use::CopySrc],
+        };
+        let make = |usage: TextureUsages, format: TextureFormat| {
+            device.create_texture(&TextureDescriptor {
+                label: Some("seed 判据"),
+                size: Extent3d {
+                    width: SIDE,
+                    height: SIDE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: GpuDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+
+        // ① 格式对不上 ⇒ 拒。
+        let wrong_format = make(
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            TextureFormat::Rgba8UnormSrgb,
+        );
+        let err = executor
+            .seed(&resource, SIDE, SIDE, wrong_format)
+            .expect_err("格式对不上 ⇒ 拒");
+        assert!(err.contains("格式"), "{err}");
+
+        // ② 用途少了 copy_src ⇒ 拒（少了它就是"校验全过、拷贝那一刻才炸"）。
+        let missing_usage = make(TextureUsages::RENDER_ATTACHMENT, TextureFormat::Depth32Float);
+        let err = executor
+            .seed(&resource, SIDE, SIDE, missing_usage)
+            .expect_err("用途盖不住 ⇒ 拒");
+        assert!(err.contains("copy_src"), "{err}");
+        assert!(err.contains("用途"), "{err}");
+
+        // ③ 尺寸对不上 ⇒ 拒。
+        let good = make(
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            TextureFormat::Depth32Float,
+        );
+        let err = executor
+            .seed(&resource, SIDE + 1, SIDE, good.clone())
+            .expect_err("尺寸对不上 ⇒ 拒");
+        assert!(err.contains("尺寸"), "{err}");
+
+        // ④ 规格都对 ⇒ 收下；但"seed 了却没人用"要在**执行时**当场拒，
+        //    而且要把 seed 的名字与计划声明过的资源名一起报出来。
+        executor
+            .seed(&resource, SIDE, SIDE, good)
+            .expect("规格对得上就该收下");
+        // 这条计划合法（check 过得了），但它**一条 pass 都没用到** 'depth' ——
+        // 正是"宿主与文档对『存在什么』意见不一致"的形状。
+        let other = Plan {
+            layout: Layout::default(),
+            resources: vec![resource.clone()],
+            passes: vec![PassPlan {
+                kind: PassKind::Copy,
+                label: "copy".to_string(),
+                reads: vec!["depth".to_string()],
+                writes: vec!["other".to_string()],
+                render: RenderState::parse(
+                    "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+                )
+                .expect("copy 的状态"),
+                ..Default::default()
+            }],
+        };
+        let frame = Frame {
+            width: SIDE,
+            height: SIDE,
+            sets: &[],
+            geometries: &[],
+            materials: &[],
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass seed 判据"),
+        });
+        let err = executor
+            .execute(&device, &mut encoder, &other, &frame)
+            .expect_err("seed 了却没人用 ⇒ 拒");
+        assert!(err.contains("depth"), "要报出 seed 的名字：{err}");
+        assert!(err.contains("resources") || err.contains("声明"), "要报出计划声明过的资源：{err}");
+    }
+
+    /// **判据（要真设备）**：一次拷贝真的搬了东西。    ///
     /// 形状：① 一条深度-only 的几何 pass 在盘内写下 z=0.5；② 一次 copy 把那张深度搬到
     /// `depth_copy`；③ 第三条 pass 用 `depth_copy` 做深度测试、画一个**更远**的三角（z=0.2）。
     /// - 拷贝生效 ⇒ `0.2 >= 0.5` 不成立 ⇒ 三角被挡掉 ⇒ 盘内是**清屏色**；

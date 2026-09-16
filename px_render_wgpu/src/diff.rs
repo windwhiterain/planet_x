@@ -111,10 +111,11 @@ pub struct Diff {
     pub outside_min_radius: f64,
     pub outside_max_radius: f64,
     /// 差异像素按半径分成四带（以剪影等效半径为单位）：盘内 / 边缘 / 环上 / 更远。
-    pub band_inner: usize,
-    pub band_limb: usize,
-    pub band_ring: usize,
-    pub band_far: usize,
+    /// 每一带都带 (像素数, 最大通道差, 平均通道差) —— 只数个数会说不出"差多少"。
+    pub band_inner: Region,
+    pub band_limb: Region,
+    pub band_ring: Region,
+    pub band_far: Region,
     /// 剪影内**亮度**的皮尔逊相关系数：行星自己那一片的"花纹"在两张图里是不是同一片。
     ///
     /// ⚠ 它**不是**逐位判据（逐位那一条看 `inside.pixels == 0`）。它能回答的是另一个问题：
@@ -127,6 +128,112 @@ pub struct Diff {
     /// 拉下来，却几乎不动"细节"。所以"花纹一样"这件事要看**高通**那一份：同一片花纹 ⇒
     /// 局部对比几乎逐位对齐；花纹换了（UV / 法线 / 贴图错了）⇒ 它当场掉下来。
     pub inside_contrast_correlation: f64,
+    /// 大差异（Δ>8）的像素数与它们的**半径范围/均值**（以剪影等效半径为单位）。
+    ///
+    /// 为什么单列这一条：小差异铺满一圈（舍入、边缘那一圈）与大差异挤在一处
+    /// （某个东西画错了）在"差异像素数"上可能一样多，而它们是两件事。
+    pub large_pixels: usize,
+    pub large_min_radius: f64,
+    pub large_max_radius: f64,
+    pub large_mean_radius: f64,
+    /// 剪影内差异像素按半径的直方图（每 0.1 个等效半径一格；最后一格是 ≥(N-1)×0.1）。
+    ///
+    /// 这一条是"**最里面到底有没有差**"的直接答案：例如"行星自己的盘里一个像素都不差"
+    /// 这句话，只有看前几格全为 0 才说得出口。
+    pub inside_histogram: [usize; HISTOGRAM_BINS],
+    /// 四带的 **Δ 分档**（`1 / 2 / 3–4 / 5–8 / 9–16 / 17–32 / 33–64 / 65+`）：
+    /// 盘内 / 边缘 / 环上 / 更远。见 [`DELTA_BUCKETS`] 那段为什么必须分开看。
+    pub band_buckets: [[usize; 8]; 4],
+    /// 剪影内差异像素里，"在本宿主那张图的**边上**"的个数（见 [`is_edge`]）。
+    pub inside_on_edge: usize,
+    /// 剪影内**大差异**像素里，在边上的个数。
+    pub large_on_edge: usize,
+    /// 孤立的差异像素（四邻居全都逐位相同）—— 逐个列出来，好按几何去看它们落在哪。
+    /// ⚠ 列表有条数上限（[`ISOLATED_CAP`]），**计数另有一格** `isolated_count` 不受它限制。
+    pub isolated: Vec<Isolated>,
+    pub isolated_count: usize,
+}
+
+/// Δ 分档的档数（见 [`DELTA_BUCKETS`]）。
+const DELTA_BUCKETS_LEN: usize = 8;
+/// 剪影内差异的半径直方图几格（每格 0.1 个等效半径）。
+const HISTOGRAM_BINS: usize = 12;
+/// 孤立差异像素最多留几个（**计数不受它限制**，只是列出来的上限）。
+const ISOLATED_CAP: usize = 4000;
+/// 报告里孤立像素最多列几行（**按半径从小到大** —— 越靠里越值得先看）。
+const ISOLATED_PRINT: usize = 16;
+
+/// 通道差的档：`1 / 2 / 3–4 / 5–8 / 9–16 / 17–32 / 33–64 / 65+`。
+///
+/// ⚠ 为什么要分档而不是只看 max/mean：**"一圈里绝大部分只是 ±1 的舍入、少数才是真差异"**
+/// 与 **"整圈都是真差异"** 是两种完全不同的结论，而 max 与 mean 把这两件事糊在一起。
+const DELTA_BUCKETS: [&str; 8] = ["1", "2", "3–4", "5–8", "9–16", "17–32", "33–64", "65+"];
+
+fn delta_bucket(delta: u32) -> usize {
+    match delta {
+        0 | 1 => 0,
+        2 => 1,
+        3..=4 => 2,
+        5..=8 => 3,
+        9..=16 => 4,
+        17..=32 => 5,
+        33..=64 => 6,
+        _ => 7,
+    }
+}
+
+/// 一个像素在**本宿主那张图**里算不算"边上"：它与四邻居的最大通道差 > 8 就算。
+///
+/// 为什么这么定义：光栅化边缘、取样位置错半格这一类病因，症状都是"差异贴着几何边"；
+/// 而着色公式错了会**铺到面上**。两者在"差异像素数"上可能一样，分开才算定性。
+fn is_edge(bitmap: &Bitmap, x: u32, y: u32) -> bool {
+    const THRESHOLD: u32 = 8;
+    let center = bitmap.at(x, y);
+    let neighbours = [
+        (x.wrapping_sub(1), y),
+        (x + 1, y),
+        (x, y.wrapping_sub(1)),
+        (x, y + 1),
+    ];
+    neighbours.iter().any(|(nx, ny)| {
+        if *nx >= bitmap.width || *ny >= bitmap.height || (x == 0 && *nx == u32::MAX) {
+            return false;
+        }
+        let other = bitmap.at(*nx, *ny);
+        (0..3).any(|channel| u32::from(center[channel].abs_diff(other[channel])) > THRESHOLD)
+    })
+}
+
+/// 一个**孤立**差异像素：它自己与 oracle 不同，而四邻居**全都逐位相同**。
+#[derive(Debug, Clone, Copy)]
+pub struct Isolated {
+    pub x: u32,
+    pub y: u32,
+    pub ours: [u8; 3],
+    pub oracle: [u8; 3],
+    pub radius: f64,
+    /// 它在本宿主那张图里算不算"边上"（见 [`is_edge`]）。
+    pub on_edge: bool,
+}
+
+/// 什么叫"大差异"：8 位通道差超过 8（≈3% 满量程）就不是舍入能解释的了。
+const LARGE_DELTA: u32 = 8;
+
+/// 一条带的读法：`个数 像素（max Δ，平均 Δ，包围盒）`。
+///
+/// ⚠ 包围盒要带上：**个数相同、分布可能完全不同** —— 748 个像素挤在一小块，
+/// 与 748 个像素铺成一圈，是两件不同的事（前者是某个物体画错了，后者是边缘那一圈）。
+fn band_text(band: &Region) -> String {
+    if band.pixels == 0 {
+        return "0 像素".to_string();
+    }
+    format!(
+        "{} 像素（max Δ {}，平均 Δ {:.3}，包围盒 {}）",
+        band.pixels,
+        band.max_delta,
+        band.mean_delta(),
+        band.bbox_text()
+    )
 }
 
 /// 两张图比一遍。尺寸不同直接拒（"尺寸不同"不是一种差异，是两份不同的东西）。
@@ -204,6 +311,7 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         }
     }
 
+    // 剪影外的差异离边缘多远（以等效半径为单位）：星空在很远，大气的环贴着边缘。
     let radius = (silhouette.pixels as f64 / std::f64::consts::PI).sqrt();
     let center = if silhouette.pixels == 0 {
         (0.0, 0.0)
@@ -220,7 +328,23 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
     let mut min_radius = f64::INFINITY;
     let mut max_radius = 0.0_f64;
     // 四带 + 剪影内亮度的相关（两趟一起走：半径要先知道才谈得上分带）。
-    let (mut band_inner, mut band_limb, mut band_ring, mut band_far) = (0, 0, 0, 0);
+    let mut band_inner = Region::default();
+    let mut band_limb = Region::default();
+    let mut band_ring = Region::default();
+    let mut band_far = Region::default();
+    // 大差异（Δ>8）的半径分布：见下面那段的用法。
+    let (mut large_pixels, mut large_min_radius, mut large_max_radius, mut large_sum_radius) =
+        (0_usize, f64::INFINITY, 0.0_f64, 0.0_f64);
+    // 剪影内差异的半径直方图（每 0.1 个等效半径一格，到 1.1 以上都进最后一格）。
+    let mut inside_histogram = [0_usize; HISTOGRAM_BINS];
+    // 四带的 Δ 分档 + 边上/平处的分类 + 孤立像素（见各自的类型注释）。
+    let mut band_buckets = [[0_usize; 8]; 4];
+    let mut inside_on_edge = 0_usize;
+    let mut large_on_edge = 0_usize;
+    let mut isolated: Vec<Isolated> = Vec::new();
+    let mut isolated_count = 0_usize;
+    // 大差异的粗格地图（每一格是 `MAP_COLUMNS × MAP_ROWS` 分之一张图）。
+    let mut large_map = [[0_usize; MAP_COLUMNS]; MAP_ROWS];
     // 相关系数用**整数累加器**：亮度和、平方和、乘积和都是整数，避免了浮点求和的次序问题。
     let (mut count, mut sum_mine, mut sum_theirs, mut sum_sq_mine, mut sum_sq_theirs, mut sum_cross) =
         (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
@@ -250,14 +374,77 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
             if mine == theirs {
                 continue;
             }
+            let delta = (0..3)
+                .map(|channel| u32::from(mine[channel].abs_diff(theirs[channel])))
+                .max()
+                .unwrap_or(0);
             if distance < 0.95 {
-                band_inner += 1;
+                band_inner.add(x, y, delta);
+                band_buckets[0][delta_bucket(delta)] += 1;
             } else if distance < 1.0 {
-                band_limb += 1;
+                band_limb.add(x, y, delta);
+                band_buckets[1][delta_bucket(delta)] += 1;
             } else if distance < 1.15 {
-                band_ring += 1;
+                band_ring.add(x, y, delta);
+                band_buckets[2][delta_bucket(delta)] += 1;
             } else {
-                band_far += 1;
+                band_far.add(x, y, delta);
+                band_buckets[3][delta_bucket(delta)] += 1;
+            }
+            // 边上 / 平处：见 `is_edge` 那段为什么这条能把"光栅化边缘"与"着色公式"分开。
+            let edge = is_edge(&left, x, y);
+            if mine != background {
+                if edge {
+                    inside_on_edge += 1;
+                }
+                // 孤立像素：四邻居全都逐位相同。它们的坐标值得逐个看 ——
+                // "三个孤立像素"与"一圈几百个"在几何上往往不是一回事。
+                let neighbours_same = [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ]
+                .iter()
+                .all(|(nx, ny)| {
+                    let outside = *nx >= left.width || *ny >= left.height;
+                    outside || (x == 0 && *nx == u32::MAX) || left.at(*nx, *ny) == right.at(*nx, *ny)
+                });
+                if neighbours_same {
+                    isolated_count += 1;
+                    if isolated.len() < ISOLATED_CAP {
+                        isolated.push(Isolated {
+                            x,
+                            y,
+                            ours: mine,
+                            oracle: theirs,
+                            radius: distance,
+                            on_edge: edge,
+                        });
+                    }
+                }
+            }
+            // 大差异（Δ>8）落在哪儿：**只数个数说不出"差在哪"**，而小差异铺满一圈
+            // 与大差异挤成一点是两件完全不同的事（前者是舍入，后者是画错了）。
+            if delta > LARGE_DELTA {
+                large_pixels += 1;
+                large_min_radius = large_min_radius.min(distance);
+                large_max_radius = large_max_radius.max(distance);
+                large_sum_radius += distance;
+                if is_edge(&left, x, y) {
+                    large_on_edge += 1;
+                }
+                // 大差异落在画面的哪一块：一张**粗格地**比任何统计量都更直接 ——
+                // "贴着轮廓一圈"与"挤在某一侧"在数字上可能很像，在格子上一眼就分开。
+                let column = (x as usize * MAP_COLUMNS / left.width as usize).min(MAP_COLUMNS - 1);
+                let row = (y as usize * MAP_ROWS / left.height as usize).min(MAP_ROWS - 1);
+                large_map[row][column] += 1;
+            }
+            // 剪影内差异的半径直方图（每 0.1 个等效半径一格）：这条直接回答
+            // "最里面到底有没有差" —— 例如"行星自己的盘内一个像素都不差"。
+            if mine != background {
+                let bin = ((distance / 0.1) as usize).min(HISTOGRAM_BINS - 1);
+                inside_histogram[bin] += 1;
             }
             if mine != background {
                 continue;
@@ -340,6 +527,24 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         band_far,
         inside_luma_correlation: correlation,
         inside_contrast_correlation: contrast_correlation,
+        large_pixels,
+        large_min_radius: if large_min_radius.is_finite() {
+            large_min_radius
+        } else {
+            0.0
+        },
+        large_max_radius,
+        large_mean_radius: if large_pixels == 0 {
+            0.0
+        } else {
+            large_sum_radius / large_pixels as f64
+        },
+        inside_histogram,
+        band_buckets,
+        inside_on_edge,
+        large_on_edge,
+        isolated,
+        isolated_count,
     })
 }
 
@@ -414,7 +619,10 @@ impl Diff {
             ),
             format!(
                 "差异像素按半径分四带（以等效半径为单位）：盘内(<0.95) {}｜边缘(0.95–1.00) {}｜环上(1.00–1.15) {}｜更远(≥1.15) {}",
-                self.band_inner, self.band_limb, self.band_ring, self.band_far
+                band_text(&self.band_inner),
+                band_text(&self.band_limb),
+                band_text(&self.band_ring),
+                band_text(&self.band_far)
             ),
             format!(
                 "剪影内**亮度相关系数** {:.6}（1 = 同一片花纹，只是被叠了一层；掉下来 = 花纹本身就不一样）",
@@ -424,15 +632,90 @@ impl Diff {
                 "剪影内**局部对比相关系数**（横向 lag-2 差分）{:.6}",
                 self.inside_contrast_correlation
             ),
-        ];
-        lines.push(if self.inside.pixels == 0 {
-            "结论（只关于剪影）：行星自己那一片像素**逐位相同**；全部差异都在剪影之外。".to_string()
-        } else {
             format!(
+                "**大差异**（Δ>{}）：{} 像素｜半径 {:.3}–{:.3}（均值 {:.3}，以等效半径为单位）\
+                 —— 铺成一圈是边缘/舍入，挤在一处才是『哪个东西画错了』",
+                LARGE_DELTA,
+                self.large_pixels,
+                self.large_min_radius,
+                self.large_max_radius,
+                self.large_mean_radius
+            ),
+            format!(
+                "剪影内差异的**半径直方图**（每 0.1 个等效半径一格，最后一格是 ≥{}）：{}",
+                ((HISTOGRAM_BINS - 1) as f64) / 10.0,
+                self.inside_histogram
+                    .iter()
+                    .enumerate()
+                    .map(|(bin, count)| format!(
+                        "{:.1}–{:.1}: {count}",
+                        bin as f64 / 10.0,
+                        (bin + 1) as f64 / 10.0
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("｜")
+            ),
+        ];
+        // ---- 分类那几行：Δ 分档 / 边上还是平处 / 孤立像素 ----
+        let band_names = ["盘内(<0.95)", "边缘(0.95–1.00)", "环上(1.00–1.15)", "更远(≥1.15)"];
+        for (index, name) in band_names.iter().enumerate() {
+            let buckets = self.band_buckets[index];
+            if buckets.iter().all(|count| *count == 0) {
+                continue;
+            }
+            lines.push(format!(
+                "  带的 Δ 分档 {}：{}",
+                name,
+                DELTA_BUCKETS
+                    .iter()
+                    .zip(buckets.iter())
+                    .map(|(label, count)| format!("Δ{label}: {count}"))
+                    .collect::<Vec<_>>()
+                    .join("｜")
+            ));
+        }
+        lines.push(format!(
+            "剪影内差异像素**在几何边上**的：{} / {}（大差异里在边上的：{} / {}）\
+             —— 边上占多数 ⇒ 指向光栅化边缘/取样位置；平处占多数 ⇒ 指向着色公式",
+            self.inside_on_edge,
+            self.inside.pixels,
+            self.large_on_edge,
+            self.large_pixels
+        ));
+        if self.isolated.is_empty() && self.isolated_count == 0 {
+            lines.push("孤立差异像素（四邻居全都逐位相同）：一个都没有".to_string());
+        } else {
+            let mut listed = self.isolated.clone();
+            listed.sort_by(|a, b| a.radius.total_cmp(&b.radius));
+            lines.push(format!(
+                "孤立差异像素（四邻居全都逐位相同）：共 {} 个；下面按**半径从小到大**列前 {} 个\
+                 —— 越靠里越值得先看（最里面的那几个与贴边的成千上万个往往不是一回事）",
+                self.isolated_count,
+                ISOLATED_PRINT.min(listed.len())
+            ));
+            for pixel in listed.iter().take(ISOLATED_PRINT) {
+                lines.push(format!(
+                    "    ({}, {})｜r = {:.4}｜本宿主 {:?} vs oracle {:?}｜{}",
+                    pixel.x,
+                    pixel.y,
+                    pixel.radius,
+                    pixel.ours,
+                    pixel.oracle,
+                    if pixel.on_edge { "在边上" } else { "在平处" }
+                ));
+            }
+        }
+        if self.inside.pixels == 0 {
+            lines.push(
+                "结论（只关于剪影）：行星自己那一片像素**逐位相同**；全部差异都在剪影之外。"
+                    .to_string(),
+            );
+        } else {
+            lines.push(format!(
                 "结论（只关于剪影）：行星自己那一片像素里有 {} 个与 oracle 不同（最大通道差 {}）。",
                 self.inside.pixels, self.inside.max_delta
-            )
-        });
+            ));
+        }
         lines.join("\n")
     }
 }
@@ -488,9 +771,4 @@ mod tests {
         assert_eq!(region.bbox, Some((1, 4, 3, 9)));
         assert!(
             (region.mean_delta() - 1.5).abs() < 1e-12,
-            "平均**通道**差 = (7+2)/(3×2) = 1.5，实际 {}",
-            region.mean_delta()
-        );
-        assert_eq!(Region::default().bbox_text(), "（没有像素）");
-    }
-}
+            "平均**通道**差 = (7
