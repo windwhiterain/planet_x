@@ -26,7 +26,7 @@ use isosurface::source::ScalarSource;
 use isosurface::MarchingCubes;
 use serde::{Deserialize, Serialize};
 
-use px_ops::noise::fnv1a;
+use px_ops::noise::fnv1a_sources;
 use px_ops::{IsosurfaceOp, MeshData, PATCHES, VolumeSampler};
 
 pub struct ProxySurface;
@@ -188,7 +188,10 @@ impl IsosurfaceOp for ProxySurface {
     type Params = Params;
     const ID: &'static str = "mesh.proxy";
     const VERSION: u32 = 1;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("lib.rs"));
+    // 共享依赖：体积与面参数的约定住在 `px_ops/src/volume.rs`（§28.2）——
+    // 只哈希这个文件的话，改那份约定不会有任何告警。
+    const SOURCE_HASH: u64 =
+        fnv1a_sources(&[include_str!("lib.rs"), include_str!("../../px_ops/src/volume.rs")]);
     const INPUTS: &'static [&'static str] = &["volume"];
 
     fn surface(params: &Params, field: &dyn VolumeSampler) -> Result<MeshData, String> {

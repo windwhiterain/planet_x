@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
 use crate::Grid;
-use crate::noise::fnv1a;
+use crate::noise::fnv1a_sources;
 use crate::FieldOp;
 
 pub struct Mix;
@@ -23,7 +23,7 @@ impl FieldOp for Mix {
     type Params = Params;
     const ID: &'static str = "field.mix";
     const VERSION: u32 = 1;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("mix.rs"));
+    const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("mix.rs"), include_str!("../field.rs"), include_str!("../noise.rs")]);
     const INPUTS: &'static [&'static str] = &["a", "b", "mask"];
 
     fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {

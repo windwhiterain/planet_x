@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::{Field, normalize, tangent_frame};
-use crate::noise::fnv1a;
+use crate::noise::fnv1a_sources;
 use crate::{FieldOp, Grid};
 
 pub struct Gradient;
@@ -26,7 +26,7 @@ impl FieldOp for Gradient {
     type Params = Params;
     const ID: &'static str = "field.gradient";
     const VERSION: u32 = 1;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("gradient.rs"));
+    const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("gradient.rs"), include_str!("../field.rs"), include_str!("../noise.rs")]);
     const INPUTS: &'static [&'static str] = &["input"];
 
     fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {
