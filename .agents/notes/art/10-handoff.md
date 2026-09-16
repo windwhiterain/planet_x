@@ -105,6 +105,28 @@ descriptor 闸门端到端：拿第 0 步那份没有 descriptor 的产物请求
 探针的 `field_dual` / `gradient` 是手动跑的，**没进任何自动门**（本仓的规矩：探针不进 `cargo test`，
 退出码才是判据）—— 也就是说：**谁会想到去跑它，谁才会发现它红了**，这一轮就是这么发现的。
 
+#### 已 `--no-ff` 并入 `v2`：合并提交 **`df82596`**（17 个提交，`dbd227c` §79 → `6efb264` 尾巴）
+
+**并入后的冒烟（主工作区 / `v2`，2026-09-16）**：
+
+- `cargo test`（默认 members）退出码 0；`cargo test -p px_render` **27 个用例全过**；
+  `cargo build -p px_render -p px_graphs` 通过。
+- 主工作区重烘：`shaders` **4/4**（`clouds=5a88f3986ab8` / `atmosphere=d4501946bb0c` /
+  `ring=fcf9f5f88282` / `surface=f679cdf81015`）与 `planet` **6/6** 的键与 worktree **逐字节相同**；
+  把 `clouds` 图与 20 个场景（`orbit` / `orbit-soft*` / `orbit-rings` / `soft-*` …）逐个重烘之后，
+  场景键也与 worktree **逐个相同**（`orbit=18b091fc2654`、`orbit-soft=4b115d94428c`、`orbit-bare=28a9b516c132` …）
+  ⇒ **两个 checkout 各算一遍，键一字不差**（键是内容的纯函数，这条同时钉住「并入没有改语义」）。
+- 出图（Vulkan / RTX 3060 / 960×640 / `--cam 0,5,3.2`）：`target/postmerge-orbit-bare.png` =
+  **301107 字节**，sha256 `74d197431f…` —— 与 worktree 上的基线**逐字节相同**。
+- ⚠ 清理记录：主工作区当时留着一份**陈旧租约**（`target/render-server.json`，pid 28528，
+  exe 指向 `.worktrees/pass-table`）—— 进程早没了但文件没清，harness 的单例闸门会把它读成假故障。
+  确认进程不在之后删掉，冒烟才跑起来。**用 `Start-RenderServer` 起的服务一定要走 `Stop-RenderServer`。**
+- ⚠ `nebula-*` 三个场景**没重烘**（不属于这条线，仍钉着更早的产物；要出图得先重烘它们各自的图）。
+
+**这一支带来的「下次要注意」**：`SCENE_SCHEMA` 还是 2、协议形状没变，但**shader 产物多了 schema descriptor**
+⇒ 并入之后主工作区里任何**契约收口之前烘的**产物都会被装载闸门当场拒（提示重烘配方）。
+主工作区已经按上面那条重烘齐了。
+
 ### 9.1.1 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 
 **在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
