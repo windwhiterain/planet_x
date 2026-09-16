@@ -3,14 +3,15 @@ use std::collections::HashMap;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingResource, BindingType, BufferBinding, BufferBindingType,
-    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, CompareFunction, Device,
-    Extent3d, Face, FragmentState, FrontFace, LoadOp, MultisampleState, Operations,
+    BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBinding,
+    BufferBindingType, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device,
+    Extent3d, FragmentState, IndexFormat, LoadOp, MultisampleState, Operations,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture,
-    TextureDescriptor, TextureDimension as GpuDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor, TextureDimension as GpuDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+    TextureViewDimension, VertexBufferLayout, VertexState,
 };
 
 pub const FRAGMENT_ENTRY: &str = "fs_main";
@@ -41,10 +42,25 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// 报错时把"宿主这一帧到底给了哪些名字"列出来：只说"没给这个名字"是不够的，
+/// 人要看的是"你给的是哪几个"——拼错与真没给，只有列出来才分得清。
+fn name_list<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let names: Vec<&str> = names.collect();
+    if names.is_empty() {
+        "（一个都没有）".to_string()
+    } else {
+        names.join(" / ")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     Rgba8UnormSrgb,
     Rgba16Float,
+    /// 深度附件那一档。**只有这一种深度格式**：这个渲染器是无限 reverse-Z
+    /// （`Depth32Float` + `GreaterEqual` + 清 0.0，§110.1），换格式就得同时换比较方向，
+    /// 那不是"多一个格式"，是另一套约定。
+    Depth32Float,
 }
 
 impl Format {
@@ -52,6 +68,7 @@ impl Format {
         match self {
             Format::Rgba8UnormSrgb => "rgba8unorm-srgb",
             Format::Rgba16Float => "rgba16float",
+            Format::Depth32Float => "depth32float",
         }
     }
 
@@ -59,8 +76,10 @@ impl Format {
         match text {
             "rgba8unorm-srgb" => Ok(Format::Rgba8UnormSrgb),
             "rgba16float" => Ok(Format::Rgba16Float),
+            "depth32float" => Ok(Format::Depth32Float),
             other => Err(format!(
-                "不认识的资源格式 '{other}'：这一版认 'rgba8unorm-srgb' 与 'rgba16float'"
+                "不认识的资源格式 '{other}'：这一版认 'rgba8unorm-srgb' 与 'rgba16float'\
+                 与 'depth32float'"
             )),
         }
     }
@@ -69,6 +88,7 @@ impl Format {
         match self {
             Format::Rgba8UnormSrgb => TextureFormat::Rgba8UnormSrgb,
             Format::Rgba16Float => TextureFormat::Rgba16Float,
+            Format::Depth32Float => TextureFormat::Depth32Float,
         }
     }
 }
@@ -156,24 +176,245 @@ pub struct ResourceSpec {
     pub usage: Vec<Use>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PassKind {
     /// 一个全屏三角：`draw(0..3)`，顶点由执行器自备（后处理那一类）。
+    #[default]
     Fullscreen,
-    /// 一串几何：宿主给顶点/索引缓冲与绑定组，执行器按材质状态画（§121 第 2 件）。
+    /// 一串几何：**画什么写在 pass 的 `draws` 里**（按名字），宿主解析成 GPU 句柄。
     Geometry,
     Compute,
 }
 
+impl PassKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            PassKind::Fullscreen => "fullscreen",
+            PassKind::Geometry => "geometry",
+            PassKind::Compute => "compute",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "fullscreen" => Ok(PassKind::Fullscreen),
+            "geometry" => Ok(PassKind::Geometry),
+            "compute" => Ok(PassKind::Compute),
+            other => Err(format!(
+                "不认识的 pass 类型 '{other}'：这一版认 'fullscreen' / 'geometry' / 'compute'"
+            )),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// 附件与固定功能状态（§121 第 1 件）
+// 附件与固定功能状态：**本 crate 自己的类型**（§121 第 2 件）
 //
-// 在这一节之前，"这条 pass 挂什么、清什么、剔哪一面"是**写在 `execute` 里的常量**
-// （颜色 `Clear(TRANSPARENT)`、`depth_stencil: None`、不剔除）。那是"一条 pass 的状态"
-// 却住在代码里 ⇒ 序列与状态都改不动，而 §121 的裁决是：它们应当是**数据**。
-// 于是这一段把状态搬进 `plan`，而 [`RenderState::default`] 恰好等于那些常量 ——
-// 既有的全屏 pass 因此一个字节都不用改，行为逐位不变。
+// 这一节的每个类型都跟着本 crate 已有的那套约定走（见 `Format` / `SizeRule` / `Use`）：
+// `parse(&str) -> Result<Self, String>` 把文档里的文本读成值，`name()` 把值写回文本，
+// 两者互为反函数 —— `parse(&value.name()) == value` 逐变体测（`RenderState::parse`
+// 那一格就是把这条性质穷举一遍）。有了这条性质，"pass 的样子可以由序列化数据配"
+// 才是真的，而不是一句愿望。
+//
+// 为什么不直接把 wgpu 的类型当字段（`wgpu::Color` / `CompareFunction` / `Face` /
+// `FrontFace`）：那几种都只有"值"这一半，没有"从文本读回来"的那一半。镜像一份还有第二个
+// 好处：**合法取值由我们说了算** —— wgpu 加一档不该悄悄变成文档里多一个合法值。
+// 转换（`to_wgpu`）只发生在边缘：建管线、开 render pass、拼附件的那三处。
 // ---------------------------------------------------------------------------
+
+/// 颜色：**写进附件的四个数**。
+///
+/// ⚠ 它是**线性**的：wgpu 的 clear 值不做 sRGB 变换，硬件按目标格式自己编码。
+/// 想表达"文档里那个 sRGB 的 0.004"，得先自己转成线性再填进来。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Color {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
+}
+
+impl Color {
+    /// 透明黑：**颜色附件的默认清屏值**（与搬进数据模型之前写死在执行器里的那个逐位相同）。
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+
+    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub fn name(self) -> String {
+        format!("{},{},{},{}", self.r, self.g, self.b, self.a)
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+        if parts.len() != 4 {
+            return Err(format!(
+                "颜色要四个数（r,g,b,a），实际给了 {} 个：'{text}'",
+                parts.len()
+            ));
+        }
+        let mut channels = [0.0_f64; 4];
+        for (index, part) in parts.iter().enumerate() {
+            channels[index] = part.parse::<f64>().map_err(|_| {
+                format!(
+                    "颜色的第 {} 个通道不是数：'{part}'（整串 '{text}'）",
+                    index + 1
+                )
+            })?;
+        }
+        Ok(Color::new(
+            channels[0], channels[1], channels[2], channels[3],
+        ))
+    }
+
+    pub fn to_wgpu(self) -> wgpu::Color {
+        wgpu::Color {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a: self.a,
+        }
+    }
+}
+
+/// 深度比较函数（镜像 wgpu 的那一个）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Compare {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    /// 缺省档，也是这个渲染器唯一在用的那一档：无限 reverse-Z（近处 1.0、无限远 0.0）。
+    #[default]
+    GreaterEqual,
+    Always,
+}
+
+impl Compare {
+    pub fn name(self) -> &'static str {
+        match self {
+            Compare::Never => "never",
+            Compare::Less => "less",
+            Compare::Equal => "equal",
+            Compare::LessEqual => "less_equal",
+            Compare::Greater => "greater",
+            Compare::NotEqual => "not_equal",
+            Compare::GreaterEqual => "greater_equal",
+            Compare::Always => "always",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "never" => Ok(Compare::Never),
+            "less" => Ok(Compare::Less),
+            "equal" => Ok(Compare::Equal),
+            "less_equal" => Ok(Compare::LessEqual),
+            "greater" => Ok(Compare::Greater),
+            "not_equal" => Ok(Compare::NotEqual),
+            "greater_equal" => Ok(Compare::GreaterEqual),
+            "always" => Ok(Compare::Always),
+            other => Err(format!(
+                "不认识的深度比较 '{other}'：这一版认 never / less / equal / less_equal / \
+                 greater / not_equal / greater_equal / always"
+            )),
+        }
+    }
+
+    pub fn to_wgpu(self) -> wgpu::CompareFunction {
+        match self {
+            Compare::Never => wgpu::CompareFunction::Never,
+            Compare::Less => wgpu::CompareFunction::Less,
+            Compare::Equal => wgpu::CompareFunction::Equal,
+            Compare::LessEqual => wgpu::CompareFunction::LessEqual,
+            Compare::Greater => wgpu::CompareFunction::Greater,
+            Compare::NotEqual => wgpu::CompareFunction::NotEqual,
+            Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+            Compare::Always => wgpu::CompareFunction::Always,
+        }
+    }
+}
+
+/// 剔除哪一面。字与 `px_protocol::scene::CullMode` 同一套（`none` / `front` / `back`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Cull {
+    #[default]
+    None,
+    Front,
+    Back,
+}
+
+impl Cull {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cull::None => "none",
+            Cull::Front => "front",
+            Cull::Back => "back",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "none" => Ok(Cull::None),
+            "front" => Ok(Cull::Front),
+            "back" => Ok(Cull::Back),
+            other => Err(format!(
+                "不认识的剔除档 '{other}'：这一版认 'none' / 'front' / 'back'"
+            )),
+        }
+    }
+
+    pub fn to_wgpu(self) -> Option<wgpu::Face> {
+        match self {
+            Cull::None => None,
+            Cull::Front => Some(wgpu::Face::Front),
+            Cull::Back => Some(wgpu::Face::Back),
+        }
+    }
+}
+
+/// 哪一边算正面。⚠ 它与 [`Cull`] 是同一件事的两半：绕向反了，被剔掉的就是**近**面
+/// （`mesh.rs::outward_winding` 改的正是绕向）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Winding {
+    #[default]
+    Ccw,
+    Cw,
+}
+
+impl Winding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Winding::Ccw => "ccw",
+            Winding::Cw => "cw",
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "ccw" => Ok(Winding::Ccw),
+            "cw" => Ok(Winding::Cw),
+            other => Err(format!(
+                "不认识的正面朝向 '{other}'：这一版认 'ccw' 与 'cw'"
+            )),
+        }
+    }
+
+    pub fn to_wgpu(self) -> wgpu::FrontFace {
+        match self {
+            Winding::Ccw => wgpu::FrontFace::Ccw,
+            Winding::Cw => wgpu::FrontFace::Cw,
+        }
+    }
+}
 
 /// 一个附件这一帧怎么来：**不挂** / **清成某个值** / **接着上一次留下的内容**。
 ///
@@ -190,6 +431,60 @@ pub enum Attachment<T> {
     Load,
 }
 
+impl Attachment<Color> {
+    pub fn name(&self) -> String {
+        match self {
+            Attachment::None => "none".to_string(),
+            Attachment::Load => "load".to_string(),
+            Attachment::Clear(color) => format!("clear({})", color.name()),
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "none" => Ok(Attachment::None),
+            "load" => Ok(Attachment::Load),
+            other => match other
+                .strip_prefix("clear(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                Some(inner) => Ok(Attachment::Clear(Color::parse(inner)?)),
+                None => Err(format!(
+                    "认不出颜色附件 '{other}'：这一版认 'none' / 'load' / 'clear(r,g,b,a)'"
+                )),
+            },
+        }
+    }
+}
+
+impl Attachment<f32> {
+    pub fn name(&self) -> String {
+        match self {
+            Attachment::None => "none".to_string(),
+            Attachment::Load => "load".to_string(),
+            Attachment::Clear(value) => format!("clear({value})"),
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "none" => Ok(Attachment::None),
+            "load" => Ok(Attachment::Load),
+            other => match other
+                .strip_prefix("clear(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                Some(inner) => Ok(Attachment::Clear(inner.trim().parse::<f32>().map_err(
+                    |_| format!("深度值不是数：'{inner}'（整串 '{other}'）"),
+                )?)),
+                None => Err(format!(
+                    "认不出深度附件 '{other}'：这一版认 'none' / 'load' / 'clear(0.0)'"
+                )),
+            },
+        }
+    }
+}
+
 /// 一条 pass 的**附件 + 固定功能状态**。管线与 render pass 都从这一份建（§121.1：乙案）。
 ///
 /// [`Default`] **就是这一版之前的写死行为**：颜色清成透明、不挂深度、不剔除、逆时针为正面。
@@ -197,39 +492,110 @@ pub enum Attachment<T> {
 /// 默认值一变，那些哈希全都要重取。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderState {
-    /// 颜色附件。⚠ `Clear` 的那个颜色是**线性**的（wgpu 的 clear 值不是 sRGB，
-    /// 硬件按目标格式自己编码）—— 传 sRGB 数值进去就是"清屏色比想要的白一档"。
-    pub color: Attachment<wgpu::Color>,
-    /// 深度附件。`Clear` 的那个数就是**深度值本身**：这个渲染器是无限 reverse-Z
-    /// （近处 1.0、无限远 0.0），所以"远平面"是 `0.0`（§110.1）。
+    /// 颜色附件。⚠ `Clear` 的那个颜色是**线性**的（见 [`Color`]）。
+    pub color: Attachment<Color>,
+    /// 深度附件。`Clear` 的那个数就是**深度值本身**（reverse-Z 下远处是 0.0）。
     pub depth: Attachment<f32>,
     /// 挂上深度之后写不写。
     ///
     /// 缺省是**写**：只加一个深度附件、别的一个字不说，想要的显然是"这是一条深度 pass"
     /// （prepass 就是它）；缺省成"不写"的话，那条 pass 会静默地什么都不留下。
-    /// 透明档要的是"测但不写"，那种 pass 自己写 `depth_write: false`。
+    /// 透明档要的是"测但不写"，那种 pass 自己写 `depth_write = false`。
     pub depth_write: bool,
-    /// 深度比较函数。缺省 `GreaterEqual`：这个渲染器只有一种深度约定 —— reverse-Z，
-    /// 近处的值大。缺省成 `Less` 会让每一条忘了写这一格的几何 pass 都朝反方向比，
-    /// 而画面只是"深度全错、看不出是哪一步错的"。
-    pub depth_compare: CompareFunction,
-    /// 剔哪一面。`None` = 不剔（既有的全屏 pass 就是这样：一个三角，剔了就没东西了）。
-    pub cull: Option<Face>,
-    /// 正面朝向。绕向与剔除是同一件事的两半（`mesh.rs::outward_winding` 改的正是绕向），
-    /// 所以它和 `cull` 放在一起，不另开一处默认值。
-    pub front_face: FrontFace,
+    /// 深度比较函数。缺省 `greater_equal`（reverse-Z）。
+    pub compare: Compare,
+    /// 剔哪一面。`none` = 不剔（全屏 pass 就是这样：一个三角，剔了就没东西了）。
+    pub cull: Cull,
+    /// 正面朝向。
+    pub winding: Winding,
 }
 
 impl Default for RenderState {
     fn default() -> Self {
         Self {
-            color: Attachment::Clear(wgpu::Color::TRANSPARENT),
+            color: Attachment::Clear(Color::TRANSPARENT),
             depth: Attachment::None,
             depth_write: true,
-            depth_compare: CompareFunction::GreaterEqual,
-            cull: None,
-            front_face: FrontFace::Ccw,
+            compare: Compare::GreaterEqual,
+            cull: Cull::None,
+            winding: Winding::Ccw,
         }
+    }
+}
+
+/// `RenderState::name` / `parse` 认的六格。**六格都要写全** —— 缺一格就是"没说"，
+/// 而"没说"与"用了默认值"在文档里长得一模一样，那种含糊正是要避免的。
+const STATE_KEYS: [&str; 6] = [
+    "color",
+    "depth",
+    "depth_write",
+    "compare",
+    "cull",
+    "winding",
+];
+
+impl RenderState {
+    /// 写回文本：`color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw`。
+    pub fn name(&self) -> String {
+        format!(
+            "color={}|depth={}|depth_write={}|compare={}|cull={}|winding={}",
+            self.color.name(),
+            self.depth.name(),
+            self.depth_write,
+            self.compare.name(),
+            self.cull.name(),
+            self.winding.name()
+        )
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut state = RenderState::default();
+        let mut seen: Vec<&str> = Vec::new();
+        for part in text.split('|') {
+            let (key, value) = part.split_once('=').ok_or_else(|| {
+                format!("状态里的 '{part}' 不是 key=value 的形状（整串 '{text}'）")
+            })?;
+            let key = key.trim();
+            let value = value.trim();
+            if !STATE_KEYS.contains(&key) {
+                return Err(format!(
+                    "认不出的状态键 '{key}'：这一版认 {}（整串 '{text}'）",
+                    STATE_KEYS.join(" / ")
+                ));
+            }
+            if seen.contains(&key) {
+                return Err(format!("状态键 '{key}' 出现了两次（整串 '{text}'）"));
+            }
+            seen.push(key);
+            match key {
+                "color" => state.color = Attachment::<Color>::parse(value)?,
+                "depth" => state.depth = Attachment::<f32>::parse(value)?,
+                "depth_write" => {
+                    state.depth_write = match value {
+                        "true" => true,
+                        "false" => false,
+                        other => {
+                            return Err(format!(
+                                "depth_write 只认 'true' 与 'false'，实际是 '{other}'"
+                            ))
+                        }
+                    }
+                }
+                "compare" => state.compare = Compare::parse(value)?,
+                "cull" => state.cull = Cull::parse(value)?,
+                "winding" => state.winding = Winding::parse(value)?,
+                _ => unreachable!("STATE_KEYS 与上面这几支必须一一对应"),
+            }
+        }
+        for key in STATE_KEYS {
+            if !seen.contains(&key) {
+                return Err(format!(
+                    "状态里缺 '{key}'（整串 '{text}'）：六格都要写出来，\
+                     缺一格就是'没说'，而'没说'与默认值长得一样"
+                ));
+            }
+        }
+        Ok(state)
     }
 }
 
@@ -306,7 +672,20 @@ impl Layout {
     }
 }
 
-#[derive(Debug, Clone)]
+/// 一条 pass 要画的一笔：**按名字**说"用哪份几何、哪份材质"。
+///
+/// ⚠ 这两个名字是**内容**（"planet" / "surface"），不是这个 crate 的概念：`px_pass`
+/// 一个字都不认识它们，也不许认识 —— 它把名字原样交给宿主解析（[`Frame::geometries`] /
+/// [`Frame::materials`]），解析不到就当场报错。这样"这条 pass 画什么"才是**数据**，
+/// 加一条 pass 或换一份几何都不用改执行器。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Draw {
+    pub geometry: String,
+    /// 材质名。**空 = 没有材质**：这一笔只有顶点阶段（深度-only 的那一笔就是这样）。
+    pub material: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct PassPlan {
     pub kind: PassKind,
     pub label: String,
@@ -315,11 +694,29 @@ pub struct PassPlan {
     pub reads: Vec<String>,
     pub writes: Vec<String>,
     /// 参数块的字节：宿主按**这份 shader 自己声明的结构体**打好了（与材质同一条路）。
+    /// ⚠ 只有全屏 pass 用它（绑定组由执行器造）；几何 pass 的绑定组由宿主解析，
+    /// 所以那两栏必须空着，给了就当场拒 —— "给了没人用"就是"说了没做"。
     pub params: Vec<u8>,
-    /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。
+    /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。同样只有全屏 pass 用。
     pub slots: Vec<u32>,
     /// 附件与固定功能状态。缺省 = 这一版之前写在执行器里的那一套（见 [`RenderState`]）。
     pub render: RenderState,
+    /// 这条 pass 画什么（**序列化数据**：名字由宿主解析）。全屏 pass 留空 ——
+    /// 它的顶点由执行器自备。
+    pub draws: Vec<Draw>,
+    /// 深度附件用哪张图：`plan.resources` 里的一个名字（走纹理池），
+    /// 或者宿主这一帧给的外部目标（`Frame::sets` 里 `Role::Depth` 那一份）。
+    ///
+    /// ⚠ 与 `render.depth` 一一对应，两边都不许单独出现：挂了深度却不说用哪张图 =
+    /// "画到一张没名字的图上"，那种状态说不清，[`Plan::check`] 当场拒。
+    pub depth_target: Option<String>,
+    /// 几何 pass 的**顶点阶段**（WGSL 全文 + 入口名）。全屏 pass 留空 ⇒ 执行器自备全屏三角。
+    ///
+    /// 为什么顶点阶段必须由宿主给：内容 shader 是**纯片元**的（pxart 那几份没有 `@vertex`），
+    /// 顶点变换是宿主与 Bevy 逐位对齐的那一段（§110）。执行器要是自己写一份"差不多"的，
+    /// 两条宿主就会在两套矩阵算法上分岔 —— 而那正是逐字节判据最怕的漂移。
+    pub vertex_shader: String,
+    pub vertex_entry: String,
 }
 
 impl PassPlan {
@@ -428,7 +825,7 @@ impl Plan {
                     ));
                 }
                 return Err(format!(
-                    "{at} 的 kind 是 compute：这一版执行器只有 fullscreen。\
+                    "{at} 的 kind 是 compute：这一版执行器只有 fullscreen 与 geometry。\
                      声明了执行器不兑现的东西就当场拒 —— 静默跳过正是要避免的那种故障"
                 ));
             }
@@ -446,35 +843,112 @@ impl Plan {
                      不挂颜色就等于什么都没做（要只写深度就该是一条 geometry pass）"
                 ));
             }
-            if pass.shader.trim().is_empty() {
-                return Err(format!("{at} 的 shader 是空的"));
-            }
-            if pass.entry.is_empty() {
-                return Err(format!("{at} 没给入口点名字"));
-            }
-            if pass.params.is_empty() || pass.params.len() % align != 0 {
-                return Err(format!(
-                    "{at} 的参数块是 {} 字节：布局要求它是 {align} 的正数倍",
-                    pass.params.len()
-                ));
-            }
-            if pass.slots.len() != pass.reads.len() {
-                return Err(format!(
-                    "{at} 给了 {} 个格位、{} 个 reads：一条 read 一个格，不能多也不能少",
-                    pass.slots.len(),
-                    pass.reads.len()
-                ));
-            }
-            for binding in &pass.slots {
-                if self.layout.slot(*binding).is_none() {
+            // ---- 深度目标：说了清/接，就得说清用哪张图 ----
+            //
+            // ⚠ 这两格必须成对出现。只挂深度不给名字 = "画到一张没名字的图上"；
+            //    只给名字不挂深度 = 声明了一张用不上的图 —— 两种含糊都在这里拒掉。
+            match (&pass.render.depth, &pass.depth_target) {
+                (Attachment::None, Some(name)) => {
                     return Err(format!(
-                        "{at} 的某一格是 {binding}，而布局里的贴图格只有：[{}]",
-                        self.layout
-                            .slots
-                            .iter()
-                            .map(|slot| slot.binding.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" / ")
+                        "{at} 没挂深度附件，却给了 depth_target '{name}'：那张图没人用"
+                    ))
+                }
+                (Attachment::None, None) => {}
+                (_, None) => {
+                    return Err(format!(
+                        "{at} 挂了深度附件，却没给 depth_target：深度图从哪来？\
+                         （要么是 resources 里一份 depth32float，要么是宿主这一帧给的 Role::Depth）"
+                    ))
+                }
+                (_, Some(name)) => {
+                    if let Some(resource) = self.resource(name) {
+                        if resource.format != Format::Depth32Float {
+                            return Err(format!(
+                                "{at} 的深度目标 '{name}' 格式是 {}：深度附件只能是 \
+                                 depth32float（这个渲染器只有一种深度约定）",
+                                resource.format.name()
+                            ));
+                        }
+                        if !resource.usage.contains(&Use::RenderAttachment) {
+                            return Err(format!(
+                                "{at} 的深度目标 '{name}' 的 usage 里没有 render_attachment"
+                            ));
+                        }
+                    }
+                }
+            }
+            // ---- 类型各自的形状 ----
+            match pass.kind {
+                PassKind::Compute => unreachable!("上面已经 return 了"),
+                PassKind::Fullscreen => {
+                    if !pass.draws.is_empty() {
+                        return Err(format!(
+                            "{at} 是 fullscreen，却声明了 {} 笔 draws：全屏三角的顶点由执行器\
+                             自备，这两样说不清谁说了算（要画几何就该是一条 geometry pass）",
+                            pass.draws.len()
+                        ));
+                    }
+                    if pass.shader.trim().is_empty() {
+                        return Err(format!("{at} 的 shader 是空的"));
+                    }
+                    if pass.entry.is_empty() {
+                        return Err(format!("{at} 没给入口点名字"));
+                    }
+                    if pass.params.is_empty() || pass.params.len() % align != 0 {
+                        return Err(format!(
+                            "{at} 的参数块是 {} 字节：布局要求它是 {align} 的正数倍",
+                            pass.params.len()
+                        ));
+                    }
+                    if pass.slots.len() != pass.reads.len() {
+                        return Err(format!(
+                            "{at} 给了 {} 个格位、{} 个 reads：一条 read 一个格，不能多也不能少",
+                            pass.slots.len(),
+                            pass.reads.len()
+                        ));
+                    }
+                    for binding in &pass.slots {
+                        if self.layout.slot(*binding).is_none() {
+                            return Err(format!(
+                                "{at} 的某一格是 {binding}，而布局里的贴图格只有：[{}]",
+                                self.layout
+                                    .slots
+                                    .iter()
+                                    .map(|slot| slot.binding.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            ));
+                        }
+                    }
+                }
+                PassKind::Geometry => {
+                    if pass.vertex_shader.trim().is_empty() {
+                        return Err(format!(
+                            "{at} 是 geometry，却没给 vertex_shader：几何 pass 的顶点阶段\
+                             必须由宿主给（内容 shader 是纯片元的，没有 `@vertex`）"
+                        ));
+                    }
+                    if pass.vertex_entry.is_empty() {
+                        return Err(format!("{at} 没给 vertex_entry"));
+                    }
+                    // 几何 pass 的绑定组由宿主解析（`Frame::materials`），执行器一个都不造：
+                    // 参数块与格位那两栏给了也没人用 ⇒ 给了就拒（"说了没做"那一类）。
+                    if !pass.params.is_empty() || !pass.slots.is_empty() {
+                        return Err(format!(
+                            "{at} 是 geometry，却给了 params（{} 字节）/ slots（{} 个）：\
+                             几何 pass 的绑定组由宿主解析（材质名 → 组），执行器不自己造",
+                            pass.params.len(),
+                            pass.slots.len()
+                        ));
+                    }
+                }
+            }
+            // 几何 pass 的每一笔都要说清用哪份几何；材质可以空（深度-only 那一笔）。
+            for (order, draw) in pass.draws.iter().enumerate() {
+                if draw.geometry.trim().is_empty() {
+                    return Err(format!(
+                        "{at} 的第 {} 笔没说用哪份几何（geometry 是空的）",
+                        order + 1
                     ));
                 }
             }
@@ -530,6 +1004,9 @@ impl Plan {
 pub enum Role {
     Read,
     Write,
+    /// 深度附件那一份。它与"写"分开：同一张图可以是某条 pass 的深度附件，
+    /// 而"写颜色"是另一回事（一张深度图永远不是颜色目标）。
+    Depth,
 }
 
 pub struct External<'a> {
@@ -539,10 +1016,60 @@ pub struct External<'a> {
     pub format: TextureFormat,
 }
 
+/// 宿主**解析好的几何**：`Draw::geometry` 那个名字 → GPU 上的缓冲。
+///
+/// 名字由宿主与文档约定（"planet" / "icosphere"），`px_pass` 只按名字查表。
+pub struct ResolvedGeometry<'a> {
+    pub name: &'a str,
+    /// 顶点缓冲 + 它的布局。`None` = 这一笔没有顶点缓冲：顶点由顶点着色器按
+    /// `@builtin(vertex_index)` 现算（天空盒那种三个顶点的全屏三角就是它）。
+    /// ⚠ 布局进管线缓存键 —— 换一份交错方式就是另一条管线。
+    pub vertices: Option<(&'a Buffer, VertexBufferLayout<'a>)>,
+    /// 索引缓冲 + 格式 + 条数。`None` = 不索引：画 `vertex_count` 个顶点。
+    pub indices: Option<(&'a Buffer, IndexFormat, u32)>,
+    /// 不索引时画几个顶点（索引时以 `indices` 里那个条数为准）。
+    pub vertex_count: u32,
+}
+
+/// 宿主给的**一组绑定组**：组号 + 句柄 + **它的布局**（外加布局的身份）。
+///
+/// ⚠ 布局必须一并给：管线的组布局要按它拼，而 `wgpu::BindGroup` **不暴露自己那份布局**
+/// （查过 API，只有一个 `as_custom`）。组号也是数据（材质契约里材质在第 3 组），
+/// 执行器不认识任何一组叫什么。
+pub struct ResolvedGroup<'a> {
+    pub group: u32,
+    pub bind_group: &'a BindGroup,
+    pub layout: BindGroupLayout,
+    /// 这份布局的**身份**（宿主给的数）。
+    ///
+    /// ⚠ 契约有两条，缺一不可：**同一个布局必须给同一个 id，不同的布局必须给不同的 id**。
+    /// 它进管线缓存键，而键必须唯一确定被缓存的那条管线 —— 两种布局共用一个键，
+    /// 就是 §66.1 那种"一份契约、两个数"：错的那条管线在**别的 pass、别的帧**才炸出来。
+    ///
+    /// 为什么不让执行器自己算 id：`wgpu::BindGroupLayout` 既没有内容访问器也没有哈希，
+    /// 执行器手里没有"这两份布局是不是同一份"的判据；而布局本来就是宿主建的，
+    /// 只有它知道。
+    pub layout_id: u64,
+}
+
+/// 宿主**解析好的材质**：`Draw::material` 那个名字 → 要设的绑定组 + 混合档。
+pub struct ResolvedMaterial<'a> {
+    pub name: &'a str,
+    pub groups: Vec<ResolvedGroup<'a>>,
+    /// 混合档。⚠ 取值由**材质契约**那一侧算（`Add` 与 `Premultiplied` 在 Bevy 0.19 里
+    /// 是同一档 PREMULTIPLIED_ALPHA_BLENDING），`px_pass` 不替它翻译 ——
+    /// 翻译一遍就是"同一个混合档、两处说法"，那颗雷 §110.1 已经踩过一次。
+    pub blend: Option<BlendState>,
+}
+
 pub struct Frame<'a> {
     pub width: u32,
     pub height: u32,
     pub sets: &'a [Vec<External<'a>>],
+    /// 这一帧解析好的几何（按名字）。pass 的 `draws` 里点名谁就取谁。
+    pub geometries: &'a [ResolvedGeometry<'a>],
+    /// 这一帧解析好的材质（按名字）。同上。
+    pub materials: &'a [ResolvedMaterial<'a>],
 }
 
 struct Pooled {
@@ -777,7 +1304,43 @@ impl Executor {
         })
     }
 
-    fn pipeline(
+    /// 管线键里"状态"那一半。
+    ///
+    /// ⚠ 只放**管线真的会用到的**那几格：附件清成什么色不进键（clear 值不是管线状态），
+    /// 否则两条只差清屏色的 pass 会各建一条一模一样的管线。
+    fn states_key(render: &RenderState, blend: Option<BlendState>) -> String {
+        format!(
+            "cull={:?}|winding={:?}|dw={}|compare={:?}|depth={}|blend={:?}",
+            render.cull,
+            render.winding,
+            render.depth_write,
+            render.compare,
+            render.depth != Attachment::None,
+            blend
+        )
+    }
+
+    /// 顶点布局进键的那一半（步长 + 每一格的格式与位置）。
+    fn vertex_layout_key(layout: &VertexBufferLayout<'_>) -> String {
+        let attributes = layout
+            .attributes
+            .iter()
+            .map(|attribute| {
+                format!(
+                    "{}:{:?}:{}",
+                    attribute.shader_location, attribute.format, attribute.offset
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "stride={}|step={:?}|[{attributes}]",
+            layout.array_stride, layout.step_mode
+        )
+    }
+
+    /// 全屏那一档的管线（顶点由执行器自备）。
+    fn pipeline_fullscreen(
         &mut self,
         device: &Device,
         layout: &Layout,
@@ -785,11 +1348,12 @@ impl Executor {
         format: TextureFormat,
     ) -> RenderPipeline {
         let key = format!(
-            "{:016x}|{format:?}|{}|{}|{}",
+            "fullscreen|{:016x}|{format:?}|{}|{}|{}|{}",
             fnv1a(pass.shader.as_bytes()),
             pass.entry,
             pass.reads.join(","),
-            layout.key()
+            layout.key(),
+            Self::states_key(&pass.render, None)
         );
         if let Some(pipeline) = self.pipelines.get(&key) {
             return pipeline.clone();
@@ -820,7 +1384,12 @@ impl Executor {
                 compilation_options: PipelineCompilationOptions::default(),
                 buffers: &[],
             },
-            primitive: PrimitiveState::default(),
+            // 全屏三角没有可剔的面；绕向照旧 CCW（缺省状态就是这一套）。
+            primitive: PrimitiveState {
+                cull_mode: pass.render.cull.to_wgpu(),
+                front_face: pass.render.winding.to_wgpu(),
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: MultisampleState::default(),
             fragment: Some(FragmentState {
@@ -832,6 +1401,134 @@ impl Executor {
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.pipelines.insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// 几何那一档的管线（§121.1 乙案：**状态只有一个真源**，管线在这里按它建）。
+    ///
+    /// 键含：顶点 WGSL 内容 + 片元 WGSL 内容 + 两个入口名 + 顶点布局 + 颜色格式
+    /// + 状态里管线会用到的每一格 + 混合档 + **每一组的布局身份**（组号 + `layout_id`）。
+    ///
+    /// ⚠ 布局身份那一格必须在：键**唯一确定**被缓存的那条管线，少一格就是一条键对两条
+    /// 管线（§66.1）。`layout_id` 由宿主保证"同布局同 id、异布局异 id"。
+    fn pipeline_geometry(
+        &mut self,
+        device: &Device,
+        pass: &PassPlan,
+        color_format: Option<TextureFormat>,
+        geometry: &ResolvedGeometry<'_>,
+        material: Option<&ResolvedMaterial<'_>>,
+    ) -> RenderPipeline {
+        let vertex_layout = geometry.vertices.as_ref().map(|(_, layout)| layout);
+        let vertex_key = match vertex_layout {
+            Some(layout) => Self::vertex_layout_key(layout),
+            None => "procedural".to_string(),
+        };
+        let groups: Vec<(u32, BindGroupLayout)> = match material {
+            Some(material) => material
+                .groups
+                .iter()
+                .map(|group| (group.group, group.layout.clone()))
+                .collect(),
+            None => Vec::new(),
+        };
+        let blend = material.and_then(|material| material.blend);
+        // 布局身份按组号排一遍再进键：宿主给组的次序不该改变"这是哪条管线"。
+        let mut identities: Vec<String> = match material {
+            Some(material) => material
+                .groups
+                .iter()
+                .map(|group| format!("{}:{:016x}", group.group, group.layout_id))
+                .collect(),
+            None => Vec::new(),
+        };
+        identities.sort();
+        let key = format!(
+            "geometry|{:016x}|{:016x}|{}|{}|{vertex_key}|{color_format:?}|{}|{}",
+            fnv1a(pass.vertex_shader.as_bytes()),
+            fnv1a(pass.shader.as_bytes()),
+            pass.vertex_entry,
+            pass.entry,
+            Self::states_key(&pass.render, blend),
+            identities.join(",")
+        );
+        if let Some(pipeline) = self.pipelines.get(&key) {
+            return pipeline.clone();
+        }
+        let label = format!("px_pass {}", pass.label);
+        let vertex = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some(label.as_str()),
+            source: ShaderSource::Wgsl(pass.vertex_shader.as_str().into()),
+        });
+        // 没有颜色附件 ⇒ 没有片元阶段（深度-only 的那一笔）。⚠ 若这一笔**给了**片元 shader
+        // 却没有颜色目标（alpha-mask 的 discard 就是这种），就照建：片元阶段带**零个**颜色
+        // 目标，shader 里多出来的 `@location(0)` 由 wgpu 在建设备管线时当场拒 ——
+        // 那种"prepass 专用片元 shader"该不该有输出，是内容那一侧的事，不是这里猜的。
+        let fragment = if color_format.is_some() || !pass.shader.trim().is_empty() {
+            Some(device.create_shader_module(ShaderModuleDescriptor {
+                label: Some(label.as_str()),
+                source: ShaderSource::Wgsl(pass.shader.as_str().into()),
+            }))
+        } else {
+            None
+        };
+        let widest = groups.iter().map(|(group, _)| *group).max().unwrap_or(0);
+        let mut group_layouts: Vec<Option<&BindGroupLayout>> = vec![None; widest as usize + 1];
+        for (group, layout) in &groups {
+            group_layouts[*group as usize] = Some(layout);
+        }
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("px_pass_geometry_pipeline_layout"),
+            bind_group_layouts: &group_layouts,
+            immediate_size: 0,
+        });
+        let targets: Vec<Option<ColorTargetState>> = match color_format {
+            Some(format) => vec![Some(ColorTargetState {
+                format,
+                blend,
+                write_mask: ColorWrites::ALL,
+            })],
+            None => Vec::new(),
+        };
+        let depth_stencil = match pass.render.depth {
+            Attachment::None => None,
+            _ => Some(wgpu::DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: Some(pass.render.depth_write),
+                depth_compare: Some(pass.render.compare.to_wgpu()),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+        };
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some(label.as_str()),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &vertex,
+                entry_point: Some(pass.vertex_entry.as_str()),
+                compilation_options: PipelineCompilationOptions::default(),
+                buffers: match vertex_layout {
+                    Some(layout) => std::slice::from_ref(layout),
+                    None => &[],
+                },
+            },
+            primitive: PrimitiveState {
+                cull_mode: pass.render.cull.to_wgpu(),
+                front_face: pass.render.winding.to_wgpu(),
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: MultisampleState::default(),
+            fragment: fragment.as_ref().map(|module| FragmentState {
+                module,
+                entry_point: Some(pass.entry.as_str()),
+                compilation_options: PipelineCompilationOptions::default(),
+                targets: &targets,
             }),
             multiview_mask: None,
             cache: None,
@@ -856,111 +1553,213 @@ impl Executor {
         let mut audit: Vec<String> = Vec::new();
 
         for (index, pass) in plan.passes.iter().enumerate() {
-            // 数据模型能表达几何 pass（`check` 也认它），但**执行器这一版只会画全屏三角**
-            // ⇒ 在这里当场拒。⚠ 这一条不能省：省了就会把一条几何 pass 当成全屏三角画出去，
-            // 而"画错了但没报错"正是这一版要避免的故障（与 compute 那条同款，只是它住在
-            // `execute` 而不是 `check`：`check` 判的是数据对不对，执行器判的是自己会不会）。
-            if pass.kind == PassKind::Geometry {
-                return Err(format!(
-                    "第 {index} 条 pass '{}' 的 kind 是 geometry：几何执行还没落地（§121 第 2 件）。\
-                     数据模型（RenderState / kind）已经能表达它，但这一版执行器只会画全屏三角 —— \
-                     声明了执行器不兑现的东西就当场拒，不许把它当成一条全屏 pass 画出去",
-                    pass.label
-                ));
-            }
-            let target = pass
-                .target()
-                .ok_or_else(|| format!("第 {index} 条 pass '{}' 没有 writes", pass.label))?
-                .to_string();
-            let (destination, format) =
-                self.resolve(device, plan, frame, index, &pass.label, &target, Role::Write)?;
+            // ---- 颜色目标：只有**挂了颜色附件的** pass 才有颜色目标 ----
+            //
+            // ⚠ 深度-only 的 prepass 没有颜色目标，所以 `writes` 也空着 ——
+            //    "附件"与"writes"是两件事（见 `Plan::check`），这里按附件那一侧走。
+            let color = match pass.render.color {
+                Attachment::None => None,
+                load => {
+                    let target = pass.target().ok_or_else(|| {
+                        format!(
+                            "第 {index} 条 pass '{}' 挂了颜色附件却没有 writes",
+                            pass.label
+                        )
+                    })?;
+                    let (view, format) = self.resolve(
+                        device, plan, frame, index, &pass.label, target, Role::Write,
+                    )?;
+                    Some((view, format, load))
+                }
+            };
 
+            // ---- 深度目标：名字 → 视图（`plan.resources` 的池，或者宿主给的外部目标）----
+            let depth = match pass.render.depth {
+                Attachment::None => None,
+                load => {
+                    let name = pass.depth_target.as_deref().ok_or_else(|| {
+                        format!(
+                            "第 {index} 条 pass '{}' 挂了深度附件，却没给 depth_target",
+                            pass.label
+                        )
+                    })?;
+                    let (view, format) = self.resolve(
+                        device, plan, frame, index, &pass.label, name, Role::Depth,
+                    )?;
+                    if format != TextureFormat::Depth32Float {
+                        return Err(format!(
+                            "第 {index} 条 pass '{}' 的深度目标 '{name}' 是 {format:?}：\
+                             深度附件只能是 depth32float（这个渲染器只有一种深度约定）",
+                            pass.label
+                        ));
+                    }
+                    Some((view, load))
+                }
+            };
+
+            // ---- 全屏那一档才由执行器造绑定组（几何那一档的由宿主解析）----
+            let fullscreen = pass.kind == PassKind::Fullscreen;
             let mut bound: Vec<(u32, TextureView)> = Vec::new();
-            for (read, binding) in pass.reads.iter().zip(pass.slots.iter()) {
-                let (view, _) =
-                    self.resolve(device, plan, frame, index, &pass.label, read, Role::Read)?;
-                bound.push((*binding, view));
-            }
-            if bound
-                .iter()
-                .any(|(_, view)| view == &destination)
-            {
-                return Err(format!(
-                    "pass '{}' 的读目标与写目标是**同一个视图**：宿主给这一条 pass 的这两样\
-                     指到了同一张纹理（要读写同一张就得让宿主分开给，例如 ping-pong 的两张）",
-                    pass.label
-                ));
+            if fullscreen {
+                for (read, binding) in pass.reads.iter().zip(pass.slots.iter()) {
+                    let (view, _) =
+                        self.resolve(device, plan, frame, index, &pass.label, read, Role::Read)?;
+                    bound.push((*binding, view));
+                }
+                if let Some((destination, _, _)) = &color {
+                    if bound.iter().any(|(_, view)| view == destination) {
+                        return Err(format!(
+                            "pass '{}' 的读目标与写目标是**同一个视图**：宿主给这一条 pass 的这两样\
+                             指到了同一张纹理（要读写同一张就得让宿主分开给，例如 ping-pong 的两张）",
+                            pass.label
+                        ));
+                    }
+                }
             }
 
-            let pipeline = self.pipeline(device, &layout, pass, format);
-            let bind_group = self.bind_group(
-                device,
-                encoder,
-                &layout,
-                &sampler,
-                &pass.params,
-                &bound,
-            );
+            // ---- 几何那一档：**先把每一笔解析出来**，再开 pass ----
+            //
+            // ⚠ 顺序要紧：`begin_render_pass` 借走了编码器，中途出错就得先把它丢掉 ——
+            //    所以"名字查不到"这类错必须在这一步之前全部报掉。
+            let mut draws: Vec<(RenderPipeline, &ResolvedGeometry<'_>, Option<&ResolvedMaterial<'_>>)> =
+                Vec::new();
+            if !fullscreen {
+                let color_format = color.as_ref().map(|(_, format, _)| *format);
+                for draw in &pass.draws {
+                    let geometry = frame
+                        .geometries
+                        .iter()
+                        .find(|geometry| geometry.name == draw.geometry)
+                        .ok_or_else(|| {
+                            format!(
+                                "pass '{}' 要画几何 '{}'，而宿主这一帧没给这个名字（给了：{}）",
+                                pass.label,
+                                draw.geometry,
+                                name_list(frame.geometries.iter().map(|g| g.name))
+                            )
+                        })?;
+                    let material = if draw.material.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            frame
+                                .materials
+                                .iter()
+                                .find(|material| material.name == draw.material)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "pass '{}' 要材质 '{}'，而宿主这一帧没给这个名字（给了：{}）",
+                                        pass.label,
+                                        draw.material,
+                                        name_list(frame.materials.iter().map(|m| m.name))
+                                    )
+                                })?,
+                        )
+                    };
+                    let pipeline =
+                        self.pipeline_geometry(device, pass, color_format, geometry, material);
+                    draws.push((pipeline, geometry, material));
+                }
+            }
+
+            // ---- 全屏那一档：管线与绑定组都在开 pass **之前**备好 ----
+            //
+            // ⚠ 顺序要紧：`begin_render_pass` 借走了编码器，而兜底贴图与绑定组都要用编码器
+            //    （兜底白图是拿清屏 pass 写进去的）。所以它们必须在开 pass 之前做完。
+            let mut fullscreen_draw = None;
+            if fullscreen {
+                let pipeline = self.pipeline_fullscreen(
+                    device,
+                    &layout,
+                    pass,
+                    color
+                        .as_ref()
+                        .map(|(_, format, _)| *format)
+                        .expect("全屏 pass 的颜色附件由 check 保证"),
+                );
+                let bind_group =
+                    self.bind_group(device, encoder, &layout, &sampler, &pass.params, &bound);
+                fullscreen_draw = Some((pipeline, bind_group));
+            }
+
             let pass_label = format!("px_pass {}", pass.label);
             // 附件状态是**数据**（§121 第 1 件）：这里只做"状态 → LoadOp"的翻译，
             // 一个常量都不许再写死 —— 写死的那天，`plan` 说的与实际画的就是两回事。
-            //
-            // ⚠ 两处停在这里是**故意的**（不是漏了）：
-            //   · `color: None`（深度-only）与 `depth: 任何值` 都要等几何那一档（§121 第 2 件）
-            //     把"深度图从哪来"接上。静默地不挂，就成了"状态说了、执行器没做" ——
-            //     正是这一版要避免的那种故障，所以在这里当场拒。
-            let color_load = match pass.render.color {
-                Attachment::Clear(color) => LoadOp::Clear(color),
-                Attachment::Load => LoadOp::Load,
-                Attachment::None => {
-                    return Err(format!(
-                        "第 {index} 条 pass '{}' 的颜色附件是 None（深度-only）：这一版执行器\
-                         还没有几何那一档，没有颜色的 pass 画不出来（§121 第 2 件）",
-                        pass.label
-                    ))
-                }
+            let color_attachments: Vec<Option<RenderPassColorAttachment>> = match &color {
+                Some((view, _, load)) => vec![Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: match load {
+                            Attachment::Clear(color) => LoadOp::Clear(color.to_wgpu()),
+                            Attachment::Load => LoadOp::Load,
+                            Attachment::None => unreachable!("颜色附件是 None 的走不到这里"),
+                        },
+                        store: StoreOp::Store,
+                    },
+                })],
+                None => Vec::new(),
             };
-            if pass.render.depth != Attachment::None {
-                return Err(format!(
-                    "第 {index} 条 pass '{}' 声明了深度附件：深度图的来源还没落地（§121 第 2 件）——\
-                     现在静默不挂就是'状态说了、执行器没做'",
-                    pass.label
-                ));
-            }
-            let color_attachments = [Some(RenderPassColorAttachment {
-                view: &destination,
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations {
-                    load: color_load,
-                    store: StoreOp::Store,
-                },
-            })];
+            let depth_attachment = match (&depth, pass.render.depth) {
+                (Some((view, load)), _) => Some(RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(Operations {
+                        load: match load {
+                            Attachment::Clear(value) => LoadOp::Clear(*value),
+                            Attachment::Load => LoadOp::Load,
+                            Attachment::None => unreachable!("深度附件是 None 的走不到这里"),
+                        },
+                        store: StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                (None, _) => None,
+            };
             let descriptor = RenderPassDescriptor {
                 label: Some(pass_label.as_str()),
                 color_attachments: &color_attachments,
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
             let mut render_pass = encoder.begin_render_pass(&descriptor);
-            render_pass.set_pipeline(&pipeline);
-            render_pass.set_bind_group(layout.group, &bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
+            if let Some((pipeline, bind_group)) = &fullscreen_draw {
+                render_pass.set_pipeline(pipeline);
+                render_pass.set_bind_group(layout.group, bind_group, &[]);
+                render_pass.draw(0..3, 0..1);
+            } else {
+                for (pipeline, geometry, material) in &draws {
+                    render_pass.set_pipeline(pipeline);
+                    if let Some(material) = material {
+                        for group in &material.groups {
+                            render_pass.set_bind_group(group.group, group.bind_group, &[]);
+                        }
+                    }
+                    if let Some((buffer, _)) = &geometry.vertices {
+                        render_pass.set_vertex_buffer(0, buffer.slice(..));
+                    }
+                    match &geometry.indices {
+                        Some((buffer, format, count)) => {
+                            render_pass.set_index_buffer(buffer.slice(..), *format);
+                            render_pass.draw_indexed(0..*count, 0, 0..1);
+                        }
+                        None => render_pass.draw(0..geometry.vertex_count, 0..1),
+                    }
+                }
+            }
             drop(render_pass);
 
             audit.push(format!(
-                "pass {index} '{}' 读 [{}] 写 '{target}'（{format:?}）｜参数 {} 字节｜格 {}｜\
-                 颜色 {}｜深度 {}",
+                "pass {index} '{}'（{}）读 [{}] 写 '{}'｜颜色 {}｜深度 {}｜画的：{}",
                 pass.label,
+                pass.kind.name(),
                 pass.reads.join(" / "),
-                pass.params.len(),
-                pass.slots
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" / "),
+                color
+                    .as_ref()
+                    .map(|(_, format, _)| format!("{format:?}"))
+                    .unwrap_or_else(|| "（不挂）".to_string()),
                 match pass.render.color {
                     Attachment::Clear(_) => "清".to_string(),
                     Attachment::Load => "接着上次".to_string(),
@@ -970,6 +1769,21 @@ impl Executor {
                     Attachment::Clear(_) => "清".to_string(),
                     Attachment::Load => "接着上次".to_string(),
                     Attachment::None => "不挂".to_string(),
+                },
+                if fullscreen {
+                    format!("全屏三角｜参数 {} 字节｜格 {}", pass.params.len(), pass.slots.len())
+                } else {
+                    pass.draws
+                        .iter()
+                        .map(|draw| {
+                            if draw.material.is_empty() {
+                                format!("{}（无材质）", draw.geometry)
+                            } else {
+                                format!("{}+{}", draw.geometry, draw.material)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" / ")
                 }
             ));
         }
@@ -989,6 +1803,7 @@ impl Executor {
         let role_name = match role {
             Role::Read => "读",
             Role::Write => "写",
+            Role::Depth => "深度",
         };
         let resource = plan.resource(name);
         let external = frame.sets.get(index).and_then(|set| {
@@ -1019,6 +1834,7 @@ impl Executor {
                             match external.role {
                                 Role::Read => "（读）",
                                 Role::Write => "（写）",
+                                Role::Depth => "（深度）",
                             }
                         ))
                         .collect::<Vec<_>>()
@@ -1033,6 +1849,10 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // 纯数据：文档 ↔ 值（无 GPU）
+    // -----------------------------------------------------------------------
 
     fn plan_of(passes: Vec<PassPlan>) -> Plan {
         Plan {
@@ -1057,47 +1877,47 @@ mod tests {
             label: label.to_string(),
             shader: "x".to_string(),
             entry: FRAGMENT_ENTRY.to_string(),
-            reads: Vec::new(),
             writes: vec!["view".to_string()],
             params: vec![0; 16],
-            slots: Vec::new(),
             render: RenderState::default(),
+            ..Default::default()
         }
     }
 
-    /// 一条深度-only 的几何 pass（prepass）：有深度附件、没有颜色、没有 writes。
+    /// 一条深度-only 的几何 pass（prepass）：颜色不挂、writes 空着、只有深度目标与顶点阶段。
     fn depth_only(label: &str) -> PassPlan {
         PassPlan {
             kind: PassKind::Geometry,
             label: label.to_string(),
-            shader: "x".to_string(),
-            entry: "vs_main".to_string(),
-            reads: Vec::new(),
-            writes: Vec::new(),
-            params: vec![0; 16],
-            slots: Vec::new(),
+            vertex_shader: "vertex".to_string(),
+            vertex_entry: "vs_main".to_string(),
+            draws: vec![Draw {
+                geometry: "planet".to_string(),
+                material: String::new(),
+            }],
             render: RenderState {
                 color: Attachment::None,
                 depth: Attachment::Clear(0.0),
                 ..Default::default()
             },
+            depth_target: Some("depth".to_string()),
+            ..Default::default()
         }
     }
 
     /// **默认状态就是这一版之前的行为** —— 五格锚（§113）是在那套状态上取的，
-    /// 所以这不是风格问题，是判据问题：下面三个常量一个都不许动。
+    /// 所以这不是风格问题，是判据问题：下面几格一个都不许动。
     #[test]
     fn the_default_state_is_exactly_what_the_executor_used_to_hardcode() {
         let state = RenderState::default();
-        assert_eq!(state.color, Attachment::Clear(wgpu::Color::TRANSPARENT));
+        assert_eq!(state.color, Attachment::Clear(Color::TRANSPARENT));
         assert_eq!(state.depth, Attachment::None);
-        assert_eq!(state.cull, None);
-        assert_eq!(state.front_face, FrontFace::Ccw);
+        assert_eq!(state.cull, Cull::None);
+        assert_eq!(state.winding, Winding::Ccw);
         // 深度这两格在"不挂深度"时看不出效果，但一旦有 pass 只写 `depth: Clear(..)`
         // 就立刻成判据 ⇒ 缺省必须是这个渲染器唯一的那套约定（reverse-Z）。
-        assert_eq!(state.depth_compare, CompareFunction::GreaterEqual);
+        assert_eq!(state.compare, Compare::GreaterEqual);
         assert!(state.depth_write, "只加一个深度附件 ⇒ 想要的显然是写");
-        assert_eq!(state.color, Attachment::Clear(wgpu::Color::TRANSPARENT));
     }
 
     /// 既有的全屏 pass **一字不改**也必须过 check（缺省值就是它要的那套）。
@@ -1105,24 +1925,226 @@ mod tests {
     fn an_existing_fullscreen_pass_still_checks_out() {
         let plan = plan_of(vec![fullscreen("grade")]);
         assert!(plan.check().is_ok(), "{:?}", plan.check());
-        // 而且它与"显式写成今天那套常量"的状态是同一份东西。
         assert_eq!(plan.passes[0].render, RenderState::default());
     }
 
-    /// 深度-only 的几何 pass 是**合法**的（prepass 就是它）：颜色不挂、writes 空着。
+    /// `PassPlan::default()` **必须被拒**：否则 `..Default::default()` 会把
+    /// "我漏了一个必填字段"从编译错误变成一条静默的、什么都没说的 pass。
+    #[test]
+    fn a_default_pass_plan_is_refused() {
+        let err = plan_of(vec![PassPlan::default()])
+            .check()
+            .expect_err("全空的 pass ⇒ 拒");
+        assert!(!err.is_empty());
+        // 每一条必填项都得有人管：空的 kind（fullscreen）缺 shader/入口/参数块。
+        assert!(err.contains("shader") || err.contains("参数块"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 往返：每一个变体都要 parse(name(x)) == x
+    // -----------------------------------------------------------------------
+
+    /// **穷举**往返。⚠ 断言的是 `parse(name(x)) == x` 本身，不是"parse 没报错" ——
+    /// 一个什么文本都收、永远返回同一个变体的 `parse` 也能过后者。
+    /// 组合数是 4 × 5 × 2 × 8 × 3 × 2 = 1920。
+    #[test]
+    fn every_render_state_variant_survives_a_text_round_trip() {
+        let colors = [
+            Attachment::None,
+            Attachment::Load,
+            Attachment::Clear(Color::TRANSPARENT),
+            Attachment::Clear(Color::new(0.004, 0.005, 0.010, 1.0)),
+        ];
+        let depths = [
+            Attachment::None,
+            Attachment::Load,
+            Attachment::Clear(0.0),
+            Attachment::Clear(1.0),
+            Attachment::Clear(0.5),
+        ];
+        let compares = [
+            Compare::Never,
+            Compare::Less,
+            Compare::Equal,
+            Compare::LessEqual,
+            Compare::Greater,
+            Compare::NotEqual,
+            Compare::GreaterEqual,
+            Compare::Always,
+        ];
+        let culls = [Cull::None, Cull::Front, Cull::Back];
+        let windings = [Winding::Ccw, Winding::Cw];
+
+        let mut seen_text: Vec<String> = Vec::new();
+        let mut count = 0_usize;
+        for color in colors {
+            for depth in depths {
+                for depth_write in [true, false] {
+                    for compare in compares {
+                        for cull in culls {
+                            for winding in windings {
+                                let state = RenderState {
+                                    color,
+                                    depth,
+                                    depth_write,
+                                    compare,
+                                    cull,
+                                    winding,
+                                };
+                                let text = state.name();
+                                let back = RenderState::parse(&text)
+                                    .unwrap_or_else(|err| panic!("'{text}' 读不回来：{err}"));
+                                assert_eq!(back, state, "往返不一致：'{text}'");
+                                seen_text.push(text);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 4 * 5 * 2 * 8 * 3 * 2, "组合数变了");
+        assert_eq!(
+            seen_text.len(),
+            seen_text
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            "两个不同的状态写出了同一串文本 ⇒ name 不是单射，往返必有假的"
+        );
+        // 每一档都要在文本里出现过 —— 否则上面那个"穷举"是假的。
+        for compare in compares {
+            assert!(
+                seen_text
+                    .iter()
+                    .any(|text| text.contains(&format!("compare={}", compare.name()))),
+                "{} 没出现在任何一轮里",
+                compare.name()
+            );
+        }
+        for cull in culls {
+            assert!(seen_text
+                .iter()
+                .any(|text| text.contains(&format!("cull={}", cull.name()))));
+        }
+        assert!(seen_text
+            .iter()
+            .any(|text| text.contains("color=clear(0.004,0.005,0.01,1)")));
+        assert!(seen_text.iter().any(|text| text.contains("depth=clear(0.5)")));
+    }
+
+    /// 单个枚举的每一档也要能往返（`PassKind` / `Format` 同样进文档）。
+    #[test]
+    fn the_document_enums_round_trip_variant_by_variant() {
+        for kind in [
+            PassKind::Fullscreen,
+            PassKind::Geometry,
+            PassKind::Compute,
+        ] {
+            assert_eq!(PassKind::parse(kind.name()).unwrap(), kind, "{}", kind.name());
+        }
+        for format in [
+            Format::Rgba8UnormSrgb,
+            Format::Rgba16Float,
+            Format::Depth32Float,
+        ] {
+            assert_eq!(Format::parse(format.name()).unwrap(), format);
+        }
+        for compare in [
+            Compare::Never,
+            Compare::Less,
+            Compare::Equal,
+            Compare::LessEqual,
+            Compare::Greater,
+            Compare::NotEqual,
+            Compare::GreaterEqual,
+            Compare::Always,
+        ] {
+            assert_eq!(Compare::parse(compare.name()).unwrap(), compare);
+        }
+        for cull in [Cull::None, Cull::Front, Cull::Back] {
+            assert_eq!(Cull::parse(cull.name()).unwrap(), cull);
+        }
+        for winding in [Winding::Ccw, Winding::Cw] {
+            assert_eq!(Winding::parse(winding.name()).unwrap(), winding);
+        }
+        // 颜色与深度的文本形状：数值也要逐位回来（f64 / f32 的 Display 是可往返的）。
+        let color = Color::new(0.004, 0.005, 0.010, 1.0);
+        assert_eq!(Color::parse(&color.name()).unwrap(), color);
+        assert_eq!(color.name(), "0.004,0.005,0.01,1");
+    }
+
+    /// 文本错的那些：报错要说清**错在哪一格**，而不是"解析失败"。
+    #[test]
+    fn a_wrong_document_is_refused_with_the_offending_piece_named() {
+        let err = RenderState::parse(
+            "color=none|depth=none|depth_write=true|compare=nope|cull=none|winding=ccw",
+        )
+        .expect_err("认不出的比较档 ⇒ 拒");
+        assert!(err.contains("nope"), "{err}");
+        assert!(err.contains("greater_equal"), "要列出认哪些：{err}");
+
+        let err = RenderState::parse(
+            "color=none|depth=none|depth_write=maybe|compare=always|cull=none|winding=ccw",
+        )
+        .expect_err("depth_write 不是 bool ⇒ 拒");
+        assert!(err.contains("maybe"), "{err}");
+
+        let err = RenderState::parse("color=none|depth=none|compare=always|cull=none|winding=ccw")
+            .expect_err("缺 depth_write ⇒ 拒");
+        assert!(err.contains("depth_write"), "{err}");
+        assert!(err.contains("缺"), "{err}");
+
+        let err = RenderState::parse(
+            "color=none|depth=none|depth_write=true|compare=always|cull=none|winding=ccw|nope=1",
+        )
+        .expect_err("多一个不认识的键 ⇒ 拒");
+        assert!(err.contains("nope"), "{err}");
+
+        let err = Attachment::<Color>::parse("clear(1,2,3)").expect_err("三个通道 ⇒ 拒");
+        assert!(err.contains("四个数"), "{err}");
+
+        let err = Attachment::<f32>::parse("clear(abc)").expect_err("深度不是数 ⇒ 拒");
+        assert!(err.contains("abc"), "{err}");
+
+        let err = Color::parse("1,2,x,4").expect_err("第三个通道不是数 ⇒ 拒");
+        assert!(err.contains("第 3 个通道"), "{err}");
+
+        let err = PassKind::parse("shadow").expect_err("认不出的 kind ⇒ 拒");
+        assert!(err.contains("shadow"), "{err}");
+        assert!(err.contains("geometry"), "要列出认哪些：{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // check()：附件、深度目标、类型各自的形状
+    // -----------------------------------------------------------------------
+
+    /// 深度-only 的几何 pass 是**合法**的（prepass 就是它）。
     #[test]
     fn a_geometry_pass_may_carry_depth_only() {
         let plan = plan_of(vec![depth_only("prepass")]);
         assert!(plan.check().is_ok(), "{:?}", plan.check());
         assert_eq!(plan.passes[0].render.depth, Attachment::Clear(0.0));
         assert_eq!(plan.passes[0].render.color, Attachment::None);
-        // 颜色 + 深度的几何 pass 也合法（主 pass 就是它）。
+
+        // 颜色 + 深度的几何 pass 也合法（不透明那一档就是它）。
         let mut opaque = fullscreen("opaque");
         opaque.kind = PassKind::Geometry;
-        opaque.render.depth = Attachment::Load;
-        opaque.render.cull = Some(Face::Back);
+        opaque.vertex_shader = "vertex".to_string();
+        opaque.vertex_entry = "vs_main".to_string();
+        opaque.draws = vec![Draw {
+            geometry: "planet".to_string(),
+            material: "surface".to_string(),
+        }];
+        opaque.params = Vec::new();
+        opaque.render = RenderState::parse(
+            "color=load|depth=load|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+        )
+        .expect("状态文本要能读回来");
+        opaque.depth_target = Some("depth".to_string());
         let plan = plan_of(vec![opaque]);
         assert!(plan.check().is_ok(), "{:?}", plan.check());
+        assert_eq!(plan.passes[0].render.cull, Cull::Back);
     }
 
     /// 一个附件都不挂的 pass 不存在：它画到哪儿去？
@@ -1140,7 +2162,9 @@ mod tests {
     fn a_pass_with_a_write_target_but_no_color_attachment_is_refused() {
         let mut pass = depth_only("confused");
         pass.writes = vec!["view".to_string()];
-        let err = plan_of(vec![pass]).check().expect_err("空挂颜色却声明写目标 ⇒ 拒");
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("空挂颜色却声明写目标 ⇒ 拒");
         assert!(err.contains("写目标"), "{err}");
     }
 
@@ -1151,7 +2175,10 @@ mod tests {
         pass.render.color = Attachment::None;
         pass.writes = Vec::new();
         pass.render.depth = Attachment::Clear(0.0);
-        let err = plan_of(vec![pass]).check().expect_err("全屏 pass 没有颜色附件 ⇒ 拒");
+        pass.depth_target = Some("depth".to_string());
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("全屏 pass 没有颜色附件 ⇒ 拒");
         assert!(err.contains("颜色附件"), "{err}");
     }
 
@@ -1176,16 +2203,539 @@ mod tests {
         assert!(err.contains("静默跳过"), "{err}");
     }
 
-    /// `PassKind::Geometry` 在**数据模型**里合法（见上一条），但**执行器还没落地它**：
-    /// 那一条拒在 `execute` 里（不是 `check` 里）—— `check` 判的是数据对不对，
-    /// 执行器判的是自己会不会。⚠ 这一条**故意不写单测**：`execute` 要真设备，
-    /// 而这个 crate 没有建设备的地方（那是宿主的策略，见 `px_render_wgpu::gpu`），
-    /// 造一个假设备只会把"没测"伪装成"测过了"。等第 2 件落地时，
-    /// 这条拒会被换成真执行，判据在宿主那边（S2 的哈希）。
+    /// 深度目标与 `render.depth` 必须成对：单出一边就是"画到一张没名字的图上"。
     #[test]
-    fn a_geometry_pass_is_data_but_not_executable_yet() {
-        let plan = plan_of(vec![depth_only("prepass")]);
-        assert!(plan.check().is_ok(), "数据模型认它：{:?}", plan.check());
-        assert_eq!(plan.passes[0].kind, PassKind::Geometry);
+    fn the_depth_target_must_pair_with_the_depth_attachment() {
+        let mut pass = depth_only("prepass");
+        pass.depth_target = None;
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("挂了深度却不说用哪张 ⇒ 拒");
+        assert!(err.contains("depth_target"), "{err}");
+
+        let mut pass = fullscreen("grade");
+        pass.depth_target = Some("depth".to_string());
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("没挂深度却给了目标 ⇒ 拒");
+        assert!(err.contains("没人用"), "{err}");
+
+        // 池里的那份资源要是颜色格式，也当场拒（深度附件只能是 depth32float）。
+        let mut plan = plan_of(vec![depth_only("prepass")]);
+        plan.resources.push(ResourceSpec {
+            name: "depth".to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size: SizeRule::View,
+            usage: vec![Use::RenderAttachment],
+        });
+        let err = plan.check().expect_err("深度目标不是 depth32float ⇒ 拒");
+        assert!(err.contains("depth32float"), "{err}");
+
+        // 正确的深度资源 ⇒ 过。
+        plan.resources[0].format = Format::Depth32Float;
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+    }
+
+    /// 几何 pass 的形状：顶点阶段必须有；绑定组那两栏（params/slots）不许给。
+    #[test]
+    fn a_geometry_pass_needs_a_vertex_stage_and_builds_no_bind_group() {
+        let mut pass = depth_only("prepass");
+        pass.vertex_shader = String::new();
+        let err = plan_of(vec![pass]).check().expect_err("没有顶点阶段 ⇒ 拒");
+        assert!(err.contains("vertex_shader"), "{err}");
+
+        let mut pass = depth_only("prepass");
+        pass.params = vec![0; 16];
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("几何 pass 给了参数块 ⇒ 拒");
+        assert!(err.contains("宿主解析"), "{err}");
+
+        let mut pass = depth_only("prepass");
+        pass.draws = vec![Draw::default()];
+        let err = plan_of(vec![pass]).check().expect_err("一笔不说画哪份几何 ⇒ 拒");
+        assert!(err.contains("geometry"), "{err}");
+    }
+
+    /// 全屏 pass 声明了 draws 就说不清谁说了算（顶点是执行器自备的）。
+    #[test]
+    fn a_fullscreen_pass_with_draws_is_refused() {
+        let mut pass = fullscreen("grade");
+        pass.draws = vec![Draw {
+            geometry: "planet".to_string(),
+            material: "surface".to_string(),
+        }];
+        let err = plan_of(vec![pass]).check().expect_err("全屏 pass 带 draws ⇒ 拒");
+        assert!(err.contains("draws"), "{err}");
+    }
+
+    /// 名字查不到时报错要**列出宿主给了哪些名字**（拼错与真没给，只有列出来才分得清）。
+    #[test]
+    fn an_unresolved_draw_name_lists_the_ones_the_host_did_give() {
+        let list = name_list(["planet", "atmosphere"].into_iter());
+        assert_eq!(list, "planet / atmosphere");
+        assert_eq!(name_list(std::iter::empty()), "（一个都没有）");
+    }
+
+    // -----------------------------------------------------------------------
+    // 判据（要真设备）：一条 geometry pass 画进离屏纹理、读回来，
+    // 而且**剔除与深度都真的生效** —— 不是"建起来了"就算过。
+    // -----------------------------------------------------------------------
+
+    /// 顶点：位置就是**裁剪空间坐标**（这一格不测矩阵，测的是"这一笔到底画没画"）。
+    /// z 用 reverse-Z 的语义：大的近、小的远。
+    const TRIANGLE_VERTEX: &str = r#"
+struct Out {
+    @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs_main(@location(0) position: vec3<f32>) -> Out {
+    var out: Out;
+    out.position = vec4<f32>(position, 1.0);
+    return out;
+}
+"#;
+
+    /// 片元：颜色来自**材质那一组**（组 0 第 0 格）。这个 shader 里**没有参数块** ——
+    /// 它证明几何 pass 的绑定组确实来自宿主解析，而不是执行器自己造的那一组。
+    const TINT_FRAGMENT: &str = r#"
+struct Tint {
+    color: vec4<f32>,
+}
+
+@group(0) @binding(0) var<uniform> tint: Tint;
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return tint.color;
+}
+"#;
+
+    const TINT_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+    const SIDE: u32 = 8;
+    /// 两个取样点：`(4,4)` 在三角形里，`(0,0)` 在四个角上（三角形碰不到角）。
+    const INSIDE: (u32, u32) = (4, 4);
+    const OUTSIDE: (u32, u32) = (0, 0);
+    /// 三角写纯白、清屏写纯红、另一笔写纯绿：三个都是**精确**的 8 位值
+    /// （线性 0.0/1.0 的 sRGB 编解码恰好落在 0/255，不涉及舍入）。
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+    const STATE_BASE: &str =
+        "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw";
+
+    /// 一份"宿主解析好的材质"**连同它借出去的东西**：缓冲与绑定组都得活到 `execute` 之后。
+    struct TestMaterial {
+        /// 只为了活着（绑进组里的是它的引用）。
+        _buffer: Buffer,
+        bind_group: BindGroup,
+    }
+
+    fn test_device() -> (Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("后端断言失败：Vulkan 适配器拿不到 —— 这条判据必须真跑，不静默跳过");
+        let info = adapter.get_info();
+        assert_eq!(
+            info.backend,
+            wgpu::Backend::Vulkan,
+            "这一档只认 Vulkan（与产品同一条约束）"
+        );
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("px_pass 判据设备"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            }))
+            .expect("后端断言失败：Vulkan 设备建不出来");
+        println!("判据设备：{:?}｜{}", info.backend, info.name);
+        (device, queue)
+    }
+
+    fn vertex_buffer(device: &Device, z: f32) -> Buffer {
+        let corners = [(-0.6_f32, -0.6_f32), (0.6, -0.6), (0.0, 0.6)];
+        let mut data: Vec<u8> = Vec::with_capacity(3 * 12);
+        for (x, y) in corners {
+            for value in [x, y, z] {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据顶点"),
+            usage: BufferUsages::VERTEX,
+            contents: &data,
+        })
+    }
+
+    fn index_buffer(device: &Device) -> Buffer {
+        let mut data: Vec<u8> = Vec::with_capacity(3 * 4);
+        for index in [0_u32, 1, 2] {
+            data.extend_from_slice(&index.to_le_bytes());
+        }
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据索引"),
+            usage: BufferUsages::INDEX,
+            contents: &data,
+        })
+    }
+
+    fn test_material(device: &Device, layout: &BindGroupLayout, color: [f32; 4]) -> TestMaterial {
+        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+        for value in color {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据 tint"),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            contents: &bytes,
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("px_pass 判据 tint 组"),
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: &buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
+        TestMaterial {
+            _buffer: buffer,
+            bind_group,
+        }
+    }
+
+    fn resolved_material<'a>(
+        name: &'a str,
+        material: &'a TestMaterial,
+        layout: &BindGroupLayout,
+    ) -> ResolvedMaterial<'a> {
+        ResolvedMaterial {
+            name,
+            groups: vec![ResolvedGroup {
+                group: 0,
+                bind_group: &material.bind_group,
+                layout: layout.clone(),
+                // 这一台只有一份材质布局 ⇒ 一个 id。⚠ 契约：同布局同 id、异布局异 id。
+                layout_id: 1,
+            }],
+            blend: None,
+        }
+    }
+
+    /// 从**序列化文本**拼出这条 pass：`kind`、状态、每一笔画什么，全是数据。
+    /// ⚠ 判据要走的正是这条路 —— 手写结构体只能证明"执行器会画"，
+    /// 证明不了"pass 可以由序列化数据配"。
+    fn geometry_plan(label: &str, state: &str, draws: Vec<Draw>) -> Plan {
+        let render = RenderState::parse(state).unwrap_or_else(|err| panic!("状态文本：{err}"));
+        let depth_target = match render.depth {
+            Attachment::None => None,
+            _ => Some("depth".to_string()),
+        };
+        Plan {
+            layout: Layout::default(),
+            resources: vec![ResourceSpec {
+                name: "depth".to_string(),
+                format: Format::Depth32Float,
+                size: SizeRule::View,
+                usage: vec![Use::RenderAttachment],
+            }],
+            passes: vec![PassPlan {
+                kind: PassKind::parse("geometry").expect("geometry 是我们自己写的"),
+                label: label.to_string(),
+                vertex_shader: TRIANGLE_VERTEX.to_string(),
+                vertex_entry: "vs_main".to_string(),
+                shader: TINT_FRAGMENT.to_string(),
+                entry: "fs_main".to_string(),
+                writes: vec!["out".to_string()],
+                draws,
+                render,
+                depth_target,
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn draw(geometry: &str, material: &str) -> Draw {
+        Draw {
+            geometry: geometry.to_string(),
+            material: material.to_string(),
+        }
+    }
+
+    /// 跑一条 pass 并回读 `(三角形里, 三角形外)` 两个像素。
+    #[allow(clippy::too_many_arguments)]
+    fn run_case(
+        device: &Device,
+        queue: &wgpu::Queue,
+        executor: &mut Executor,
+        plan: &Plan,
+        target: &Texture,
+        geometries: &[ResolvedGeometry<'_>],
+        materials: &[ResolvedMaterial<'_>],
+    ) -> ([u8; 4], [u8; 4]) {
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let sets = vec![vec![External {
+            name: "out",
+            role: Role::Write,
+            view: &view,
+            format: TextureFormat::Rgba8UnormSrgb,
+        }]];
+        let frame = Frame {
+            width: SIDE,
+            height: SIDE,
+            sets: &sets,
+            geometries,
+            materials,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据"),
+        });
+        let audit = executor
+            .execute(device, &mut encoder, plan, &frame)
+            .unwrap_or_else(|err| panic!("execute 失败：{err}"));
+        println!("{audit}");
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("px_pass 判据回读"),
+            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * u64::from(SIDE),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(SIDE),
+                },
+            },
+            Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            })
+            .expect("等回读超时");
+        receiver.recv().expect("映射没有回调").expect("映射失败");
+        let data = slice.get_mapped_range();
+        let pixel = |x: u32, y: u32| {
+            let at = (y * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT + x * 4) as usize;
+            [data[at], data[at + 1], data[at + 2], data[at + 3]]
+        };
+        let inside = pixel(INSIDE.0, INSIDE.1);
+        let outside = pixel(OUTSIDE.0, OUTSIDE.1);
+        drop(data);
+        readback.unmap();
+        (inside, outside)
+    }
+
+    /// **§121 第 2 件的判据**：一条 geometry pass 走完整条路 ——
+    /// `Draw` 里的名字 → 宿主解析的句柄 → 执行器建管线/设组/draw → 离屏纹理 → 回读。
+    /// 断言的是**像素**：三角里的白来自材质那一组、清屏的红来自状态、剔除与深度各改一个像素。
+    #[test]
+    fn a_geometry_pass_draws_reads_back_and_culls() {
+        let (device, queue) = test_device();
+        let mut executor = Executor::new();
+
+        // ---- 目标：宿主自己的纹理（宿主也要读回来，所以走外部视图那条路）----
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据目标"),
+            size: Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        // ---- 几何：近的那个**不索引**，远的那个走索引缓冲（两条 draw 路都走一遍）----
+        let near = vertex_buffer(&device, 0.75);
+        let far = vertex_buffer(&device, 0.25);
+        let indices = index_buffer(&device);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+        let geometries = [
+            ResolvedGeometry {
+                name: "near",
+                vertices: Some((&near, vertex_layout.clone())),
+                indices: None,
+                vertex_count: 3,
+            },
+            ResolvedGeometry {
+                name: "far",
+                vertices: Some((&far, vertex_layout.clone())),
+                indices: Some((&indices, IndexFormat::Uint32, 3)),
+                vertex_count: 3,
+            },
+        ];
+
+        // ---- 材质：布局由宿主建、`layout_id` 也由宿主给（契约见 `ResolvedGroup`）----
+        let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据材质布局"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
+        let green = test_material(&device, &tint_layout, [0.0, 1.0, 0.0, 1.0]);
+        let materials = [
+            resolved_material("white", &white, &tint_layout),
+            resolved_material("green", &green, &tint_layout),
+        ];
+
+        // ① 基线：白三角画进红的清屏里。白来自**材质那一组**（片元真的跑了），
+        //    红来自**状态里的 clear**（颜色附件真的按数据清了）。
+        let baseline = geometry_plan("baseline", STATE_BASE, vec![draw("near", "white")]);
+        let (inside, outside) = run_case(
+            &device, &queue, &mut executor, &baseline, &target, &geometries, &materials,
+        );
+        assert_eq!(inside, WHITE, "三角形里应当是材质给的白色");
+        assert_eq!(outside, RED, "三角形外应当是清屏色");
+        assert_ne!(inside, outside, "三角内外必须不同（否则这一档什么都没画）");
+
+        // ② 剔除：同一个三角形，`cull` 换一档就该有像素消失。
+        //    ⚠ 绕向在 NDC 里算（**不是**帧缓冲坐标）：顶点给的 (-0.6,-0.6) → (0.6,-0.6) → (0.0,0.6)
+        //    在 NDC 里是逆时针 ⇒ `winding=ccw` 认定它是**正面** ⇒ 剔 back 留下、剔 front 剔掉。
+        //    这一档的数值是**量出来的**（先是按"帧缓冲 y 朝下"推的，量出来是反的，照量到的钉住）。
+        let back = geometry_plan(
+            "cull-back",
+            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+            vec![draw("near", "white")],
+        );
+        let front = geometry_plan(
+            "cull-front",
+            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=front|winding=ccw",
+            vec![draw("near", "white")],
+        );
+        let (back_inside, back_outside) = run_case(
+            &device, &queue, &mut executor, &back, &target, &geometries, &materials,
+        );
+        let (front_inside, front_outside) = run_case(
+            &device, &queue, &mut executor, &front, &target, &geometries, &materials,
+        );
+        println!("剔除：cull=back ⇒ 里 {back_inside:?}｜cull=front ⇒ 里 {front_inside:?}");
+        assert_eq!(back_outside, RED);
+        assert_eq!(front_outside, RED);
+        assert_ne!(
+            back_inside, front_inside,
+            "剔 back 与剔 front 必须一个画一个不画（两个一样 ⇒ 剔除没生效）"
+        );
+        assert!(
+            (back_inside == WHITE && front_inside == RED)
+                || (back_inside == RED && front_inside == WHITE),
+            "两档必须恰好一档画出白三角：back={back_inside:?} front={front_inside:?}"
+        );
+        // 钉住量出来的那一档：NDC 里逆时针 ⇒ 正面 ⇒ 剔 back 留下、剔 front 剔掉。
+        assert_eq!(back_inside, WHITE, "剔 back 应当把它留下（它在 NDC 里是正面）");
+        assert_eq!(front_inside, RED, "剔 front 应当把它剔掉（剔掉 ⇒ 只剩清屏色）");
+
+        // ③ 深度：两笔都在同一个像素上，近的（z=0.75）先画、远的（z=0.25）后画。
+        //    reverse-Z + `greater_equal` ⇒ 远的那笔**测不过**，像素保持白的。
+        //    这就是"深度附件真的挂上了、而且比较方向是对的"的证据。
+        let depth_state =
+            "color=clear(1,0,0,1)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=none|winding=ccw";
+        let with_depth = geometry_plan(
+            "depth-on",
+            depth_state,
+            vec![draw("near", "white"), draw("far", "green")],
+        );
+        let (depth_inside, _) = run_case(
+            &device, &queue, &mut executor, &with_depth, &target, &geometries, &materials,
+        );
+        assert_eq!(depth_inside, WHITE, "近的那笔先画，远的那笔应当被深度挡掉");
+
+        // ④ 同一份 draw 表、只是**不挂深度** ⇒ 后画的那笔直接盖上去（绿）——
+        //    与 ③ 只差 `depth=` 一格，所以 ③ 的白只可能来自深度测试本身。
+        let without_depth = geometry_plan(
+            "depth-off",
+            STATE_BASE,
+            vec![draw("near", "white"), draw("far", "green")],
+        );
+        let (no_depth_inside, _) = run_case(
+            &device,
+            &queue,
+            &mut executor,
+            &without_depth,
+            &target,
+            &geometries,
+            &materials,
+        );
+        assert_eq!(
+            no_depth_inside, GREEN,
+            "不挂深度时后画的那笔应当盖上去（否则 ③ 的白分不清是深度还是别的）"
+        );
+        assert_ne!(depth_inside, no_depth_inside, "有没有深度必须是看得出来的");
+
+        // ⑤ 名字写错时**当场报错**（不是静默少画一笔）。
+        let missing = geometry_plan("missing", STATE_BASE, vec![draw("planet", "white")]);
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let sets = vec![vec![External {
+            name: "out",
+            role: Role::Write,
+            view: &view,
+            format: TextureFormat::Rgba8UnormSrgb,
+        }]];
+        let frame = Frame {
+            width: SIDE,
+            height: SIDE,
+            sets: &sets,
+            geometries: &geometries,
+            materials: &materials,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（名字写错）"),
+        });
+        let err = executor
+            .execute(&device, &mut encoder, &missing, &frame)
+            .expect_err("几何名解析不到 ⇒ 拒");
+        assert!(err.contains("planet"), "{err}");
+        assert!(err.contains("near"), "要列出宿主给了哪些名字：{err}");
     }
 }

@@ -4425,6 +4425,7 @@ dependencies = [
 name = "px_pass"
 version = "0.1.0"
 dependencies = [
+ "pollster",
  "wgpu",
 ]
 

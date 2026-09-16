@@ -228,6 +228,9 @@ pub fn resolve(
             // 这一版从这里来的 pass 全是全屏后处理：状态就是 `RenderState::default()`
             // （清成透明、不挂深度、不剔除）—— 与搬进数据模型之前写在执行器里的那套逐字相同。
             render: px_pass::RenderState::default(),
+            // 从文档表来的 pass 全是全屏后处理：`draws`（画什么几何）、`depth_target`
+            // 与顶点阶段三栏都空着 —— 几何那一档才用得上它们。
+            ..Default::default()
         });
     }
 
@@ -300,6 +303,10 @@ pub fn run_passes(
         width: target.main_texture().width(),
         height: target.main_texture().height(),
         sets: &sets,
+        // 这一版的文档 pass 表里一条几何 pass 都没有（全是全屏后处理）⇒ 解析结果为空表。
+        // 要画几何时，宿主在这里把 `Draw { geometry, material }` 里的名字解析成 GPU 句柄。
+        geometries: &[],
+        materials: &[],
     };
     let key = Arc::as_ptr(plan) as usize;
     let device = ctx.render_device().clone();
@@ -487,6 +494,7 @@ mod tests {
                     params: vec![0; 16],
                     slots: (0..pass.reads.len()).map(|_| 1).collect(),
                     render: px_pass::RenderState::default(),
+                    ..Default::default()
                 })
                 .collect(),
         };
@@ -517,6 +525,7 @@ mod tests {
                 params: vec![0; 16],
                 slots: Vec::new(),
                 render: px_pass::RenderState::default(),
+                ..Default::default()
             }],
         };
         let err = plan.check().expect_err("reads 有 1 个而格位 0 个 ⇒ 拒");
@@ -544,6 +553,7 @@ mod tests {
                 params: Vec::new(),
                 slots: Vec::new(),
                 render: px_pass::RenderState::default(),
+                ..Default::default()
             }],
         };
         let err = plan.check().expect_err("参数块为 0 字节 ⇒ 拒");
@@ -575,6 +585,7 @@ mod tests {
                 color: px_pass::Attachment::None,
                 ..Default::default()
             },
+            ..Default::default()
         });
         let err = plan.check().expect_err("compute 这一版必须当场拒");
         assert!(err.contains("compute"), "{err}");
