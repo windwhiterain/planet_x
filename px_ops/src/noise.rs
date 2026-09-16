@@ -60,6 +60,39 @@ pub const fn fnv1a_bytes(bytes: &[u8]) -> u64 {
 
 pub const fn fnv1a(text: &str) -> u64 { fnv1a_bytes(text.as_bytes()) }
 
+/// 多段源码的 FNV-1a：算子的 `SOURCE_HASH` 要覆盖它的**共享依赖**（§28.2）。
+///
+/// 为什么必须有这个：`fnv1a(include_str!("fbm.rs"))` 只哈希算子自己那个文件 ⇒ 改
+/// `field.rs` 里的方向约定、`noise.rs` 里的噪声时，§19.1 那条「源码变了但版本没升」的
+/// 告警**一声不响**，而缓存照旧命中 —— 这正是那个告警存在的唯一理由。
+/// 代价只有一处：纯注释改动也会多响一次告警（§19.1 的口径：看一眼，忽略）。
+///
+/// 每段带 8 字节长度前缀 ⇒ `["ab","c"]` 与 `["a","bc"]` 不会撞；顺序由调用点写死
+/// （同一份列表换个顺序 = 另一个哈希，也算是"源码变了"）。
+pub const fn fnv1a_sources(sources: &[&str]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    let mut index = 0;
+    while index < sources.len() {
+        let bytes = sources[index].as_bytes();
+        let mut length = bytes.len() as u64;
+        let mut written = 0;
+        while written < 8 {
+            hash ^= (length & 0xff) as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            length >>= 8;
+            written += 1;
+        }
+        let mut at = 0;
+        while at < bytes.len() {
+            hash ^= bytes[at] as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            at += 1;
+        }
+        index += 1;
+    }
+    hash
+}
+
 fn lattice(x: i32, y: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x27d4_eb2d) ^ (y as u32).wrapping_mul(0x1656_67b1) ^ seed;
     h ^= h >> 15;

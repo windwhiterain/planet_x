@@ -17,7 +17,7 @@
 //! 淘汰不是 LRU 而是**按冷落次数**：服务是长期进程（§13），但相邻请求常在 A/B 之间
 //! 来回（两个色板、两个消光档），所以一条缓存被连续忽略 `MISS_LIMIT` 次才丢。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
@@ -90,9 +90,14 @@ pub struct ReadyTexture {
 }
 
 /// CAS 里的 WGSL 真本（`kind = Shader` 的 U8 blob）。键 = 路径 + 载荷指纹，与网格同规矩。
+///
+/// `closure` = 产物烘的时候，它那份 WGSL 的 **include 闭包指纹**（`px_shader`，§52.3）。
+/// `None` = 老产物没记过（`px_shader/v1` 时代）⇒ 调用方该当场拒：那一版的键里少了
+/// 「include」这一维，认它等于认错东西。
 #[derive(Clone)]
 pub struct ShaderEntry {
     pub source: String,
+    pub closure: Option<u64>,
 }
 
 struct Slot<V> {
@@ -251,7 +256,7 @@ impl ArtCache {
         path: &str,
         meshes: &mut Assets<Mesh>,
     ) -> Result<Cached<ReadyMesh>, String> {
-        let key = self.identity(label, path)?;
+        let key = self.identity(label, path)?.map(|(key, _)| key);
         let Some(key) = key else {
             self.misses += 1;
             return Ok(Cached {
@@ -280,8 +285,7 @@ impl ArtCache {
         sampler: &Sampler,
         images: &mut Assets<Image>,
     ) -> Result<Cached<ReadyTexture>, String> {
-        let identity = self.identity(label, path)?;
-        let key = identity.map(|art| TextureKey {
+        let key = self.identity(label, path)?.map(|(art, _)| TextureKey {
             art,
             sampler: *sampler,
         });
@@ -317,13 +321,20 @@ impl ArtCache {
 
     /// shader 的 WGSL 文本。每次请求都从 `.pxart` 里抠一遍那个 U8 blob 没有意义 ——
     /// 而这门缓存与其他几门同规矩：键 = 路径 + 载荷指纹，指纹为 0 就不进册。
+    /// 顺带把清单里的**闭包指纹**带出来：装载时要拿它跟盘上现在的闭包对账（§52.3），
+    /// 对不上就是"这份产物是拿另一版 include 烘的"。
     pub fn shader(&mut self, path: &str) -> Result<Cached<ShaderEntry>, String> {
-        let key = self.identity(path, path)?;
-        let Some(key) = key else {
+        let identity = self.identity(path, path)?;
+        // 指纹为 0 的旧产物走到下面那条 `None` 支路（它多半也没记过闭包 ⇒ `closure` 是 None）。
+        let closure = identity
+            .as_ref()
+            .and_then(|(_, params)| px_shader::closure_from_params(params));
+        let Some((key, _params)) = identity else {
             self.misses += 1;
             return Ok(Cached {
                 value: ShaderEntry {
                     source: art::read_shader(Path::new(path))?,
+                    closure,
                 },
                 hit: false,
             });
@@ -338,6 +349,7 @@ impl ArtCache {
         self.misses += 1;
         let entry = ShaderEntry {
             source: art::read_shader(Path::new(path))?,
+            closure,
         };
         self.shaders.put(key, entry.clone());
         Ok(Cached {
@@ -346,14 +358,17 @@ impl ArtCache {
         })
     }
 
-    /// 读清单、记进 `seen`，返回产物身份。指纹为 0 的旧产物返回 `None`（不缓存）。
-    fn identity(&mut self, label: &str, path: &str) -> Result<Option<ArtKey>, String> {
+    /// 读清单、记进 `seen`，返回产物身份 + 第一份资产的**清单参数**（闭包指纹住在那里）。
+    /// 指纹为 0 的旧产物返回 `None`（不缓存）。
+    fn identity(
+        &mut self,
+        label: &str,
+        path: &str,
+    ) -> Result<Option<(ArtKey, BTreeMap<String, f64>)>, String> {
         let bundle = art::read_manifest(Path::new(path))?;
-        let fingerprint = bundle
-            .assets
-            .first()
-            .map(|asset| asset.fingerprint)
-            .unwrap_or(0);
+        let first = bundle.assets.first();
+        let fingerprint = first.map(|asset| asset.fingerprint).unwrap_or(0);
+        let params = first.map(|asset| asset.params.clone()).unwrap_or_default();
         self.seen.insert(label.to_string(), bundle);
         if fingerprint == 0 {
             if self.warned.insert(path.to_string()) {
@@ -361,10 +376,13 @@ impl ArtCache {
             }
             return Ok(None);
         }
-        Ok(Some(ArtKey {
-            path: canonical(path),
-            fingerprint,
-        }))
+        Ok(Some((
+            ArtKey {
+                path: canonical(path),
+                fingerprint,
+            },
+            params,
+        )))
     }
 }
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::field::{Field, normalize, tangent_frame};
-use crate::noise::fnv1a;
+use crate::noise::fnv1a_sources;
 use crate::{FieldOp, Grid};
 
 pub struct Warp;
@@ -28,7 +28,7 @@ impl FieldOp for Warp {
     type Params = Params;
     const ID: &'static str = "field.warp";
     const VERSION: u32 = 3;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("warp.rs"));
+    const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("warp.rs"), include_str!("../field.rs"), include_str!("../noise.rs")]);
     const INPUTS: &'static [&'static str] = &["input", "warp"];
 
     fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> Field {

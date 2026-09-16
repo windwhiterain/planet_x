@@ -1,6 +1,6 @@
 use px_ops::field::{Field, Projection};
 use px_ops::ops::fbm::Params;
-use px_ops::{canonical_params, node_key};
+use px_ops::{canonical_params, node_key, shader_key};
 
 fn key_of(params: &Params, graph_version: u32, inputs: &[[u8; 32]]) -> [u8; 32] {
     node_key(
@@ -82,6 +82,45 @@ fn changing_an_input_changes_the_key() {
 fn an_unknown_parameter_is_rejected() {
     let parsed: Result<Params, _> = toml::from_str("frequncy = 4.0\n");
     assert!(parsed.is_err(), "拼错的参数名必须报错，而不是被静默忽略");
+}
+
+/// Shader 的键 = 入口字节 + **include 闭包**指纹（§17.1、§52.3）。
+/// 这条钉的就是那个洞：入口一个字没动、被 import 的模块改了 ⇒ 必须换键，
+/// 否则键不动、场景键不动、槽版本不动，而画出来的东西变了。
+#[test]
+fn a_shader_key_follows_its_include_closure() {
+    let entry = "#import planet_x::noise::fbm_3\nfn f() -> f32 { fbm_3() }\n";
+    let edited_entry = "#import planet_x::noise::fbm_3\nfn f() -> f32 { fbm_3() + 1.0 }\n";
+    let library = "#define_import_path planet_x::noise\nfn fbm_3() -> f32 { 1.0 }\n";
+    let edited_library = "#define_import_path planet_x::noise\nfn fbm_3() -> f32 { 2.0 }\n";
+
+    let base = closure_of(entry, library);
+    let same = closure_of(entry, library);
+    let include_changed = closure_of(entry, edited_library);
+
+    assert_eq!(
+        shader_key(entry, &base),
+        shader_key(entry, &same),
+        "同一份入口 + 同一份闭包 ⇒ 同一个键"
+    );
+    assert_ne!(
+        shader_key(entry, &base),
+        shader_key(entry, &include_changed),
+        "入口没动、include 变了 ⇒ 必须换键（这就是原来漏掉的那一维）"
+    );
+    assert_ne!(
+        shader_key(entry, &base),
+        shader_key(edited_entry, &base),
+        "入口改了也必须换键"
+    );
+}
+
+fn closure_of(entry: &str, library: &str) -> px_shader::Closure {
+    let modules: px_shader::ModuleTable =
+        [("planet_x::noise".to_string(), library.to_string())]
+            .into_iter()
+            .collect();
+    px_shader::closure(entry, &modules)
 }
 
 #[test]

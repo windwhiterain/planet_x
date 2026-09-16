@@ -60,6 +60,38 @@ pub fn read_document(path: &str) -> Result<SceneSpec, String> {
     Ok(spec)
 }
 
+/// 装载一份 shader 之前先对账：产物烘的时候那份 **include 闭包**，跟**现在盘上**的闭包
+/// 是不是同一份（§52.3）。
+///
+/// 为什么必须要这一条：`#import planet_x::…` 的真本住在 `assets/shaders/*.wgsl`，由 naga_oil
+/// 在运行期组装。改了库、没重烘 ⇒ 场景指的还是老产物、而组装用的是新库 —— 画出来的东西
+/// 既不是老那一版、也不是新那一版，**而键 / 清单 / 场景键 / 槽版本全都没动**：所有门都是绿的。
+/// 所以在这里当场拒，并给出重烘配方；返回闭包摘要给日志（对上了也要说清对的是哪一份）。
+fn closure_check(
+    member: &Member,
+    entry: &crate::art_cache::ShaderEntry,
+    modules: &px_shader::ModuleTable,
+) -> Result<String, String> {
+    const REBAKE: &str = "重烘配方：cargo run -p px_graphs --bin shaders；再逐个 cargo run -p px_graphs --bin scene <名>";
+    let current = px_shader::closure(&entry.source, modules);
+    let now = current.fingerprint();
+    match entry.closure {
+        Some(recorded) if recorded == now => Ok(current.summary()),
+        Some(recorded) => Err(format!(
+            "shader 成员 {}/{} 的 include 闭包对不上：\n  \
+             产物记的 {recorded:016x}｜盘上现在的 {now:016x}\n  \
+             ⇒ 这份产物是拿另一版 include 烘的：现在画出来的既不是老那一版、也不是新那一版，\n    \
+             而键 / 场景键 / 槽版本全没动（§52.3）—— 所以在这里拒，不静默出图。\n  {REBAKE}",
+            member.graph, member.node,
+        )),
+        None => Err(format!(
+            "shader 成员 {}/{} 的产物没有 include 闭包指纹（`px_shader/v1` 时代烘的）：\n  \
+             那一版的键里少了「include」这一维，认它等于认错东西。\n  {REBAKE}",
+            member.graph, member.node,
+        )),
+    }
+}
+
 /// 把文档里每一份材质要的 WGSL 装进槽里。**装之前**先问一句「槽里是不是已经是这一份」：
 /// 装 = 新资产 = 管线重编（§52.3 那个"云静默消失"的坑）。
 pub fn preload_shaders(
@@ -70,10 +102,15 @@ pub fn preload_shaders(
 ) -> Result<(bool, Vec<Handle<Shader>>), String> {
     let mut installed = false;
     let mut watched = Vec::new();
+    // 库表一个请求读一次就够（几万字节）；对账必须用**装载这一份时**盘上的库，
+    // 所以不缓存到进程级：改了库的下一刻就该拦得住。
+    let modules = px_shader::module_sources(&crate::shaders::shader_roots())
+        .map_err(|err| format!("读 shader 库失败：{err}"))?;
     for object in &document.objects {
         let member: &Member = &object.material.shader;
         let path = member.resolve(pcg_root)?;
         let entry = cache.shader(&path.display().to_string())?;
+        let closure = closure_check(member, &entry.value, &modules)?;
         let version = slots::version_of(&member.key)?;
         let fresh = slots::activate(server, slots::MATERIAL, version, &entry.value.source);
         println!(
@@ -90,6 +127,7 @@ pub fn preload_shaders(
                 "这一版已经在养，零动作（不 reload ⇒ 管线不重编）"
             }
         );
+        println!("  {closure}");
         installed |= fresh;
         if let Some(handle) = slots::version_handle(slots::MATERIAL, version) {
             watched.push(handle);
@@ -446,4 +484,63 @@ pub fn probe_camera(cam: Option<[f32; 3]>) -> Transform {
         pitch.cos() * yaw.cos(),
     );
     Transform::from_translation(direction * distance).looking_at(Vec3::ZERO, Vec3::Y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::art_cache::ShaderEntry;
+
+    /// 一份入口 + 它 import 的那个模块。入口文本一个字没动也能测出三种情形。
+    const ENTRY: &str = "#import planet_x::noise::fbm_3\nfn f() -> f32 { fbm_3() }\n";
+    const LIBRARY: &str = "#define_import_path planet_x::noise\nfn fbm_3() -> f32 { 1.0 }\n";
+
+    fn modules(source: &str) -> px_shader::ModuleTable {
+        [("planet_x::noise".to_string(), source.to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    fn member() -> Member {
+        Member::new("shaders", "surface", &"0".repeat(64))
+    }
+
+    fn entry(closure: Option<u64>) -> ShaderEntry {
+        ShaderEntry {
+            source: ENTRY.to_string(),
+            closure,
+        }
+    }
+
+    #[test]
+    fn the_gate_passes_when_the_artifact_was_baked_with_this_library() {
+        let table = modules(LIBRARY);
+        let recorded = px_shader::closure(ENTRY, &table).fingerprint();
+        let summary = closure_check(&member(), &entry(Some(recorded)), &table)
+            .expect("同一份闭包应当放行");
+        assert!(
+            summary.contains("include 闭包"),
+            "放行时也要说清对的是哪一份：{summary}"
+        );
+    }
+
+    #[test]
+    fn the_gate_refuses_an_artifact_baked_with_another_library() {
+        let table = modules(LIBRARY);
+        let recorded = px_shader::closure(ENTRY, &modules("别的库")).fingerprint();
+        let refusal = closure_check(&member(), &entry(Some(recorded)), &table)
+            .expect_err("另一版 include 烘的产物必须当场拒");
+        assert!(refusal.contains("shaders/surface"), "要点名是谁：{refusal}");
+        assert!(refusal.contains("include 闭包对不上"), "{refusal}");
+        assert!(refusal.contains("重烘配方"), "拒了要给重烘配方：{refusal}");
+    }
+
+    #[test]
+    fn the_gate_refuses_an_artifact_that_never_recorded_a_closure() {
+        let table = modules(LIBRARY);
+        let refusal = closure_check(&member(), &entry(None), &table)
+            .expect_err("px_shader/v1 时代的产物必须当场拒");
+        assert!(refusal.contains("没有 include 闭包指纹"), "{refusal}");
+        assert!(refusal.contains("重烘配方"), "{refusal}");
+    }
 }

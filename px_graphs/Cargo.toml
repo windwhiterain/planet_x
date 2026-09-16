@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 px_ops = { path = "../px_ops" }
+px_shader = { path = "../px_shader" }
 px_protocol = { path = "../px_protocol" }
 px_verify = { path = "../px_verify" }
 px_mc = { path = "../px_mc" }

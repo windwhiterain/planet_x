@@ -11,7 +11,7 @@
 //! * 判据仪器：射线求交（参照场的交点半径 vs 代理 mesh 的径向范围）与梯度上界 `L` 的量法。
 
 use px_ops::field::Field;
-use px_ops::noise::fnv1a;
+use px_ops::noise::fnv1a_sources;
 use px_ops::{PATCHES, VolumeData, VolumeOp, point_of};
 use px_verify::cloud_field::CloudFieldParams;
 use serde::{Deserialize, Serialize};
@@ -157,7 +157,17 @@ impl VolumeOp for CoarseVolume {
     type Params = Params;
     const ID: &'static str = "cloud.coarse";
     const VERSION: u32 = 1;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("cloud_proxy.rs"));
+    // 共享依赖（§28.2）：体积/面参数约定（`px_ops/src/volume.rs`）、场的约定
+    // （`px_ops/src/field.rs`）、以及它复算的那份参考场（`px_verify` 的 cloud_field
+    // 及其 dual/noise）—— 这些一变，这个算子的输出就跟着变。
+    const SOURCE_HASH: u64 = fnv1a_sources(&[
+        include_str!("cloud_proxy.rs"),
+        include_str!("../../px_ops/src/field.rs"),
+        include_str!("../../px_ops/src/volume.rs"),
+        include_str!("../../px_verify/src/cloud_field.rs"),
+        include_str!("../../px_verify/src/noise.rs"),
+        include_str!("../../px_verify/src/dual.rs"),
+    ]);
     const INPUTS: &'static [&'static str] = &["coverage"];
 
     fn bake(params: &Params, inputs: &[&Field]) -> VolumeData {

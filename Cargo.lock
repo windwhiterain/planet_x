@@ -4393,6 +4393,7 @@ dependencies = [
  "px_mc",
  "px_ops",
  "px_protocol",
+ "px_shader",
  "px_verify",
  "serde",
  "serde_json",
@@ -4414,6 +4415,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "px_protocol",
+ "px_shader",
  "serde",
  "serde_json",
  "toml",
@@ -4448,9 +4450,14 @@ dependencies = [
  "bevy",
  "naga",
  "px_protocol",
+ "px_shader",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "px_shader"
+version = "0.1.0"
 
 [[package]]
 name = "px_verify"

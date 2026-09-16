@@ -544,19 +544,29 @@ pub fn scene_key(spec_json: &str, member_keys: &[String]) -> Key {
     *hasher.finalize().as_bytes()
 }
 
-/// Shader 和场、网格一样是内容寻址的：键 = WGSL 的字节。
-/// 改一个字就换一个键 ⇒ 不会出现「同一个键、不同内容」。
-pub fn shader_key(text: &str) -> Key {
+/// Shader 和场、网格一样是内容寻址的：键 = WGSL 的字节 ‖ 它的 **include 闭包**指纹（§17.1、§52.3）。
+/// 改一个字、或者改它 `#import` 到的任一模块，都换一个键 ⇒ 不会出现「同一个键、不同内容」。
+/// 闭包由 `px_shader` 算（与运行期 naga_oil 的模块解析同一份规则）：外部符号（`bevy_pbr::…`）
+/// 只按**名字**进指纹，它们的实现归 `SHADER_VERSION` 手动那一档管（§19.1）。
+pub fn shader_key(text: &str, closure: &px_shader::Closure) -> Key {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"px_shader/v1");
+    hasher.update(b"px_shader/v2");
     hasher.update(&SHADER_VERSION.to_le_bytes());
+    hasher.update(&closure.fingerprint().to_le_bytes());
     hasher.update(text.as_bytes());
     *hasher.finalize().as_bytes()
 }
 
 /// 把一份 WGSL 写进 CAS：清单帧（`kind = Shader`）+ 一个 U8 blob。
-pub fn write_shader(id: &str, text: &str) -> Result<(Key, PathBuf, u64), String> {
-    let key = shader_key(text);
+/// 顺带把闭包指纹记进清单参数：渲染器装载时拿它跟**盘上现在的**闭包对账，
+/// 对不上就当场拒（§52.3）—— 键拦住的是"新烘的认错旧产物"，这一条拦的是
+/// "改了 include 但没重烘"：那时候场景指的还是老产物，而画出来的东西已经换了一版。
+pub fn write_shader(
+    id: &str,
+    text: &str,
+    closure: &px_shader::Closure,
+) -> Result<(Key, PathBuf, u64), String> {
+    let key = shader_key(text, closure);
     let path = artifact_path(&context().cache_root, &key);
     let bytes = text.as_bytes().to_vec();
     let blob = px_protocol::Blob::new(
@@ -571,10 +581,7 @@ pub fn write_shader(id: &str, text: &str) -> Result<(Key, PathBuf, u64), String>
         assets: vec![AssetManifest {
             id: id.to_string(),
             kind: px_protocol::AssetKind::Shader,
-            params: BTreeMap::from([
-                ("wgsl_bytes".to_string(), text.len() as f64),
-                ("shader_version".to_string(), f64::from(SHADER_VERSION)),
-            ]),
+            params: shader_params(text, closure),
             blobs: vec![blob.header.clone()],
             fingerprint: noise::fnv1a(text),
             cameras: Vec::new(),
@@ -588,6 +595,28 @@ pub fn write_shader(id: &str, text: &str) -> Result<(Key, PathBuf, u64), String>
     }
     std::fs::write(&path, &out).map_err(|err| format!("写 {} 失败：{err}", path.display()))?;
     Ok((key, path, out.len() as u64))
+}
+
+/// 一份 shader 产物的清单参数。除了载荷形状，还记**闭包指纹**与它的规模：
+/// 指纹给渲染器对账用（对不上 = 这份产物是拿另一版 include 烘的），规模给人/报告看。
+fn shader_params(text: &str, closure: &px_shader::Closure) -> BTreeMap<String, f64> {
+    let fingerprint = closure.fingerprint();
+    let mut params = BTreeMap::from([
+        ("wgsl_bytes".to_string(), text.len() as f64),
+        ("shader_version".to_string(), f64::from(SHADER_VERSION)),
+        (
+            "closure_modules".to_string(),
+            closure.modules.len() as f64,
+        ),
+        (
+            "closure_externals".to_string(),
+            closure.externals.len() as f64,
+        ),
+    ]);
+    for (name, value) in px_shader::closure_params(fingerprint) {
+        params.insert(name, value);
+    }
+    params
 }
 
 pub fn write_graph_manifest(graph: &str, entries: &[ManifestEntry]) -> Result<PathBuf, String> {

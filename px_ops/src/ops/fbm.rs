@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
 use crate::Grid;
-use crate::noise::{self, FbmSettings, fnv1a};
+use crate::noise::{self, FbmSettings, fnv1a_sources};
 use crate::FieldOp;
 
 pub struct Fbm;
@@ -37,7 +37,7 @@ impl FieldOp for Fbm {
     type Params = Params;
     const ID: &'static str = "field.fbm";
     const VERSION: u32 = 4;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));
+    const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("fbm.rs"), include_str!("../field.rs"), include_str!("../noise.rs")]);
     const INPUTS: &'static [&'static str] = &[];
 
     fn eval(params: &Params, _inputs: &[&Field], grid: Grid) -> Field {

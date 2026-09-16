@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::field::Field;
-use crate::noise::fnv1a;
+use crate::noise::fnv1a_sources;
 use crate::{Grid, MeshOp};
 use px_protocol::art::{
     CUBE_FACES, CUBE_GUTTER, MeshData, cube_atlas_uv, cube_cell_size, cube_direction,
@@ -59,7 +59,7 @@ impl MeshOp for CubeSphere {
     type Params = Params;
     const ID: &'static str = "mesh.cubesphere";
     const VERSION: u32 = 1;
-    const SOURCE_HASH: u64 = fnv1a(include_str!("cubesphere.rs"));
+    const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("cubesphere.rs"), include_str!("../field.rs"), include_str!("../noise.rs")]);
     const INPUTS: &'static [&'static str] = &["height"];
 
     fn eval(params: &Params, inputs: &[&Field], grid: Grid) -> MeshData {

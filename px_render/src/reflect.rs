@@ -431,33 +431,19 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
 // 反射是**纯函数**（WGSL 文本 → 契约），而 WGSL 的版本号就是它的内容键（键 = 内容，§17.1）
 // ⇒ 同一版永远反射出同一份契约。缓存键加上库的指纹：库文件换了内容时，
 // 即使入口 shader 一个字没动，也必须重新反射。
+//
+// ⚠ 库指纹的算口径只有一份，住在 `px_shader`（`modules_fingerprint`）：烘图侧把**闭包**
+// 指纹算进 shader 产物键（§52.3），这里算的是**整张模块表**。两处都不许自己搓 FNV ——
+// 各搓一份的结果是"键说没变、反射说变了"这种谁也说不清的分歧。
 // ---------------------------------------------------------------------------
 
-fn library() -> &'static (HashMap<String, String>, u64) {
-    static LIBRARY: OnceLock<(HashMap<String, String>, u64)> = OnceLock::new();
+fn library() -> &'static (px_shader::ModuleTable, u64) {
+    static LIBRARY: OnceLock<(px_shader::ModuleTable, u64)> = OnceLock::new();
     LIBRARY.get_or_init(|| {
         let modules = crate::shaders::module_sources();
-        let mut names: Vec<&String> = modules.keys().collect();
-        names.sort();
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for name in names {
-            let source = &modules[name];
-            hash ^= px_protocol_fnv(name.as_bytes());
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            hash ^= px_protocol_fnv(source.as_bytes());
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        (modules, hash)
+        let fingerprint = px_shader::modules_fingerprint(&modules);
+        (modules, fingerprint)
     })
-}
-
-fn px_protocol_fnv(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 type Cache = Mutex<HashMap<(u64, u64), Arc<MaterialLayout>>>;

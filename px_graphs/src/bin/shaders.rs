@@ -18,19 +18,27 @@ fn main() {
         cameras: Vec::new(),
     });
 
+    // 模块表读一次就够：三个入口共用同一批库（`planet_x::common / light / noise`）。
+    let modules = px_shader::workspace_modules(&px_ops::workspace_root())
+        .unwrap_or_else(|err| panic!("{err}"));
+
     let mut entries: Vec<ManifestEntry> = Vec::new();
     for slot in SLOTS {
         let path = Path::new("art").join("shaders").join(format!("{slot}.wgsl"));
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
+        // include 闭包进键（§17.1、§52.3）：改一个被 import 的模块也得换键，否则
+        // 键不动、场景键不动、槽版本不动，而画出来的东西变了。
+        let closure = px_shader::closure(&text, &modules);
         let (key, artifact, bytes) =
-            px_ops::write_shader(slot, &text).unwrap_or_else(|err| panic!("{err}"));
+            px_ops::write_shader(slot, &text, &closure).unwrap_or_else(|err| panic!("{err}"));
         println!(
             "产物 {slot} -> {}（{}，{} 字节 WGSL）",
             artifact.display(),
             px_ops::hex_short(&key),
             text.len()
         );
+        println!("  {}", closure.summary());
         entries.push(ManifestEntry {
             node: slot.to_string(),
             op: "shader.wgsl".to_string(),

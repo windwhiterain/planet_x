@@ -962,11 +962,15 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
 }
 
 /// 环的自写材质（原来是 Bevy 的 `StandardMaterial { unlit: true, blend, cull: none }`）。
+/// 和 `shaders` 图里那三份同规矩：**include 闭包进键**（§17.1、§52.3）。
 fn ring_shader() -> Result<Member, String> {
     let text = std::fs::read_to_string("art/shaders/ring.wgsl")
         .map_err(|err| format!("读不了 art/shaders/ring.wgsl：{err}"))?;
-    let (key, _path, _bytes) =
-        px_ops::write_shader("ring", &text).map_err(|err| format!("写环 shader 失败：{err}"))?;
+    let modules = px_shader::workspace_modules(&px_ops::workspace_root())?;
+    let closure = px_shader::closure(&text, &modules);
+    let (key, _path, _bytes) = px_ops::write_shader("ring", &text, &closure)
+        .map_err(|err| format!("写环 shader 失败：{err}"))?;
+    println!("环 shader {}｜{}", px_ops::hex_short(&key), closure.summary());
     Ok(Member::new("shaders", "ring", &px_ops::hex(&key)))
 }
 
