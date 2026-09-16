@@ -711,7 +711,7 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
 
 ---
 
-## §76 开工顺序（下一步，接 §74.3 / §75.5）
+## §76 开工顺序（下一步，接 §74.3 / §75.5 / §77.3）
 
 **代码未动**。四条裁决（不重编/不重启、不要编辑器、要 compute、加法不升版本）与硬顶裁决（先 (a)）都齐了
 ⇒ 开工顺序固定为：
@@ -719,6 +719,8 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
 0. **先补一次实测**（半小时，必须先做）：**改 WGSL 结构体（加一个参数）→ 重烘 `shaders` + `scene` → 出图，
    全程不重编 exe、不重启服务** ⇒ 判据 P/R 的现状被量出来。§67.1 那条「过期笔记」的更正**只有代码层面的判读**，
    而整个方案的第 1 步就架在它上面 ⇒ 不实测就是拿推理当前提。这一条同时会把 `09-instruments.md` §42.1 那张表改掉。
+0b. **可选，但很值**：把「最小离屏 app」抽成测试夹具，然后实测 §77 的**第 4 层**
+   （两帧之间给 `Core3d` 加一个系统并断言它跑了）—— 那是本调研里**唯一**还停在源码级的关键结论。
 1. **契约收口 + 加宽超集一起做**（一次动一个地方，别分两次）：绑定表/`ParamKind`/`Value↔kind` 收成一份
    （类型进 `px_protocol`、naga 反射进叶子 crate）+ **在同一份表上加宽超集**（§74.4 (a)）
    + schema descriptor 进产物 + 装载时对账。判据：**所有产物键逐字节不变**（只搬代码）；现有离线门 + 出图哈希不变。
@@ -728,3 +730,55 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
    后者动烘图侧，唯一交汇点是「pass 的 shader 也是 CAS 成员，走同一套键与对账」。
    ⚠ 第 3 步的执行器按 **§75.3** 写成「与宿主无关」的一层（输入 device/queue/目标 + pass 表，输出 CommandBuffer），
    这样它将来能整体搬到裸 wgpu。
+
+---
+
+## §77 Bevy 的图能有多动态（2026-09-16 追问）
+
+**一句话**：在**「开关 / 顺序与阶段 / 换整条图 / 两帧之间增删系统 / 造新 schedule」**五个维度上都能动态，
+**唯独「新增一种 pass 种类」不能** —— 而那一条恰好是通用执行器（§70 R1 / §75 L2）绕过去的东西。
+两者**不冲突，是互补的**：Bevy 的 dynamism 负责「**这一帧用哪条整体管线**」，
+执行器负责「**这条管线里有哪些 pass**」。
+
+| 层 | 能改什么 | 什么时候能改 | 怎么改 | 证据 |
+|---|---|---|---|---|
+| **0** | **新 pass 种类**：❌ 不能 | — | pass 是 Rust 系统，种类编译期固定（`Core3dSystems` 是枚举；系统是 fn / 闭包） | `bevy_core_pipeline-0.19.1/src/schedule.rs:46-52` |
+| **1** | **开关**：某个 pass 这帧跑不跑、跑多少 ✅ | **每帧**，近零成本 | 系统内按资源/组件 early-return —— **Bevy 自己就是这么做的** | `bloom/mod.rs:115-117`（`!camera.hdr` 早退）、`effect_stack/mod.rs:247,262-267`（`AnyOf<(&ChromaticAberration,&Vignette,&LensDistortion)>` 决定有没有活干）、`tonemapping/node.rs:50-52`（只在 hdr 时跑） |
+| **2** | **顺序与阶段**：⚠️ 只能在自己那条图的 set 结构里排 | 构建期一次；两帧之间也可 | `.before()` / `.after()` / `.in_set()` / `.chain()` | 四段主线在 `schedule.rs:66` 被 `.chain()` **钉死**（不能倒）；段内自由：`msaa_writeback.before(MainPass)`（`msaa_writeback.rs:32-33`）、`bloom.before(tonemapping)`（`bloom/mod.rs:77-80`）、`dof.after(bloom).before(tonemapping)`（`dof/mod.rs:235`） |
+| **3** | **换整条图**：每台相机跑不同的图 ✅ | **每帧**，**完全支持** | 主世界组件 `CameraRenderGraph` | `bevy_render/src/camera.rs:179`、`:188-192`（`set::<T>()`）→ 每帧 extract `:529`、`:630` → `camera_driver` `schedule.rs:163,200`；默认值由 `Core3dPlugin` 的 required component 注入（`core_3d/mod.rs:104-108`）；裸 `Camera` 有 on_add 警告，文案明说「可手动加 `CameraRenderGraph` 来创建自定义渲图」（`camera.rs:118-121`） |
+| **4** | **两帧之间增删系统 / 新建 SystemSet** ✅ | 两帧之间（`ExtractSchedule` 系统、或 `Render` 里排在 `render_system` 之前的系统） | `ResMut<Schedules>` + `Schedule::add_systems` / `configure_sets`；删要 `remove_systems_in_set` + `&mut World`（独占系统） | `schedule.rs:219-228`、`:245-255`、`:230-243`（**官方带 doctest**）；运行期建 set：`node.rs:764-772`；改完下次运行自动重建图（`:560-571`、`:601-635`） |
+| **5** | **运行期造新的 schedule 标签**（= 一条全新的图）✅ | 两帧之间 | `Schedules::insert(Schedule::new(label))`；非相机视图另有 `RootNonCameraView(InternedScheduleLabel)` | `bevy_ecs/src/world/mod.rs:3812-3815`；`schedule.rs:136-140`；`bevy_core_pipeline/src/schedule.rs:120-123`（**阴影贴图就走这条路** —— 现成的「非相机视图跑自己的图」先例） |
+
+### §77.1 四条硬限制（每一条都咬人）
+
+1. ⚠ **不能改正在运行的 schedule**：它已被 `remove_temporarily` 摘走，写入落到一个**新建的空 schedule**，
+   收尾时被 `reinsert` 覆盖，**只打一条 warn**（`bevy_ecs/src/world/mod.rs:3834-3846`；
+   不变量原文 `schedule.rs:44`；官方注释 `examples/showcase/stepping.rs:3-8`）。
+   因为 `Core3d` 跑在 `camera_driver` 里、`camera_driver` 又跑在 `RenderGraph` 里
+   ⇒ **任何 pass 系统都无法重组它自己所属的图**。第 4/5 层只能发生在**两帧之间**。
+2. ⚠ **匿名闭包不能当排序锚**：闭包是匿名类型 ⇒ 你没法说「这个 pass 排在那个 pass 前面」。
+   运行期拼的链只能靠「**可命名的 fn item + `SystemSet` + `.chain()`**」定位。
+3. ⚠ **四段主线的相对顺序是钉死的**（`Prepass → MainPass → EarlyPostProcess → PostProcess`）。
+   你只能在段内/段间插东西，**不能重排主 pass 与 tonemapping 的相对位置**。
+   想要别的结构 ⇒ 走第 5 层，自己建一条 schedule（并让相机指过去）。
+4. ⚠ **每次改都会触发调度图重建**（`graph.changed` → `initialize`）⇒ 顺序是「**文档变了才改**」，
+   **不是每帧改**。这条的代价必须量，不能假设为零。
+
+### §77.2 证据级别（本仓规矩：没跑过不算验过）
+
+- **第 0–3 层**：**A 级**（官方 example 在用；第 3 层等价物在本仓 `main.rs` 天天跑 ——
+  `Camera3d` 的 required component 就是 `CameraRenderGraph`）。
+- **第 4–5 层**：**只有源码级证据**（加上官方两条不变量注释），**没有实跑过**。
+  要升成 A 级需要一次 GPU 实测：最小离屏 app → 在**两帧之间**给 `Core3d` 加一个系统 →
+  断言它真的跑了 → 再删掉它。约 30 行测试 + 一次链接。
+  ⚠ 本仓**没有现成的 headless render-app 测试骨架**：`tests/` 下的四个都是 CPU 侧
+  （`common/mod.rs` 只转出组装助手，`spike_reflect.rs` 是纯 naga），GPU 那条路目前只有 `main.rs` 自己。
+  ⇒ 要做这个实测，得先把「最小离屏 app」抽成一个测试夹具（这本身是有价值的基建）。
+
+### §77.3 对本方案的含义
+
+- **§74.3 的第 3 步不需要第 4/5 层** —— 执行器（§75 L2）用的是裸 wgpu 命令，与调度无关。
+- **第 3 层是白送的一份能力**：「**文档声明用哪条预置渲图**」今天就成立（主世界组件 + 每帧 extract），
+  可以作为「一份文档整体换管线」的粗粒度开关，零新架构。
+- **第 4 层是陷阱**：它看起来像「动态拼 pass 链」，代价是「同一条内容键、两种图」+ 调度图重建 +
+  匿名闭包不能排序。**除非有非常具体的理由，不要用它当 pass 链的主干。**
