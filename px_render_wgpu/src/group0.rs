@@ -95,7 +95,7 @@ pub struct GlobalsUniform {
     pub frame_count: u32,
 }
 
-/// 一盏点光源在聚类缓冲里的那 80 字节 —— 对应桩里的 `ClusteredLightStub`。
+/// 一盏**点光源**在聚类缓冲里的那 80 字节 —— 对应桩里的 `ClusteredLightStub`。
 ///
 /// ⚠ **不是 64**：三块 `vec4`（48）＋ 8 个 4 字节标量（32）＝ **80**，
 /// naga 算出来的数组步长也是 80（`vec4` 把结构体对齐顶到 16）。
@@ -235,6 +235,175 @@ impl ClusteredLight {
 }
 
 // ---------------------------------------------------------------------------
+// 灯：文档里的一盏灯 → 上面那 80 字节
+//
+// ⚠ 这一节的**每一个数**都逐字来自 oracle 的源码，一个都不许"看着差不多"。
+//    出处只有两处：`bevy_light-0.19.1/src/point_light.rs` 的缺省值，与
+//    `bevy_pbr-0.19.1/src/render/light.rs` 的打包那一段。为什么缺省值也算数：
+//    `px_render/src/scene.rs:228-238` 建 `PointLight` 时写的是 `..default()` ——
+//    那几格**一个都没被文档覆盖**，所以 Bevy 的缺省值就是场景里真实的数，
+//    而不是"我们的缺省"（§109.2 那张表记的就是这件事）。
+// ---------------------------------------------------------------------------
+
+/// 文档的 `range` 缺省时用哪个数：`PointLight::default().range`（`point_light.rs:133`）。
+///
+/// ⚠ `px_protocol::scene::Light::range` 的文档注释写的是"缺省 = 按强度反推
+/// （`range = √(intensity/最小照度)`）"，而 oracle 实际做的是
+/// `light.range.unwrap_or_else(|| PointLight::default().range)`（`scene.rs:233`）
+/// —— **两处口径不一致，这里按 oracle 的实测行为办**（缺省 20.0），并把这个分岔记在这里：
+/// 真要"按强度反推"，那是改文档契约那一栏的注释，不是宿主自己挑一个。
+pub const POINT_LIGHT_DEFAULT_RANGE: f32 = 20.0;
+
+/// `PointLight::default().radius`（`point_light.rs:134`）—— 它进 `position_radius.w`。
+/// ⚠ **`.w` 是半径，不是 range**（`light.wgsl` 早就记过这条：拿它当射程会把有点光源的
+/// 场景判成没光）。今天恒 0.0。
+pub const POINT_LIGHT_RADIUS: f32 = 0.0;
+
+/// `PointLight::DEFAULT_SHADOW_DEPTH_BIAS`（`point_light.rs:149`）。
+pub const POINT_LIGHT_SHADOW_DEPTH_BIAS: f32 = 0.08;
+
+/// `PointLight::DEFAULT_SHADOW_NORMAL_BIAS`（`point_light.rs:151`）—— 还没乘 texel 的那个。
+pub const POINT_LIGHT_SHADOW_NORMAL_BIAS: f32 = 0.6;
+
+/// `PointLight::DEFAULT_SHADOW_MAP_NEAR_Z`（`point_light.rs:153`）。
+pub const POINT_LIGHT_SHADOW_MAP_NEAR_Z: f32 = 0.1;
+
+/// `PointLightShadowMap::default().size`（`point_light.rs:183`）—— cube 每面的边长（texel）。
+///
+/// ⚠ 它出现在**两个**地方：影子图本身的边长，以及 `shadow_normal_bias` 里那个 texel
+/// （`light.rs:444-449`）。所以它是一份契约、两个用处 —— 改一处而忘了另一处，
+/// 画面上只是"阴影边缘的锯齿换了一种"，任何门都不会响。
+pub const POINT_LIGHT_SHADOW_MAP_SIZE: u32 = 1024;
+
+/// `PointLightFlags::SHADOW_MAPS_ENABLED`（`light.rs:136`）—— bit0。
+///
+/// ⚠ 同一位在 WGSL 侧由桩表声明（`POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT`），
+/// 内容 shader 拿它去判"这盏灯要不要采样影子图"。两边是**同一条契约**：
+/// 值在这里由 [`tests::the_point_light_policy_numbers_are_the_oracles_literals`] 钉住。
+pub const POINT_LIGHT_FLAGS_SHADOWS_ENABLED: u32 = 1 << 0;
+
+/// `PointLightFlags::AFFECTS_LIGHTMAPPED_MESH_DIFFUSE`（`light.rs:139`）—— bit3。
+/// `PointLight::default()` 里它是 `true`（`point_light.rs:137`），而 px_render 不覆盖它
+/// ⇒ 这个场景每盏灯的 flags 里**都**有这一位（不是 0 就是 8）。
+pub const POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE: u32 = 1 << 3;
+
+/// `shadow_normal_bias`：`0.6 × texel × √2`（`light.rs:442-449` 与 `:545-547`）。
+///
+/// texel 是**每面边长**推出来的：`2.0 × tan(π/4) / 边长` = `2 / 边长`（`light.rs:444-449`）。
+/// √2 那一项是"最坏情况的对角偏移"（源码原话）。f32 的**乘法次序**照抄源码
+/// （`(0.6 × texel) × √2`）—— 换一下次序在 IEEE 下本来就是同一个数，但这里留着是为了
+/// 让"与哪一行对"这件事在代码里看得见。
+pub fn shadow_normal_bias() -> f32 {
+    POINT_LIGHT_SHADOW_NORMAL_BIAS * (2.0 / POINT_LIGHT_SHADOW_MAP_SIZE as f32)
+        * core::f32::consts::SQRT_2
+}
+
+/// 文档里的一盏灯 → 聚类缓冲里的那 80 字节（逐字复刻 `light.rs:1318-1345`）。
+///
+/// 三处最容易抄错、而且抄错了**不会有任何门响**的：
+///
+/// 1. **强度是流明**：`intensity / (4π)` 在 Bevy 的 extract 那一刻就除了
+///    （`light.rs:537`，注释原话是"luminous power → luminous intensity"），
+///    而 `color_inverse_square_range.rgb` 是 `颜色 × 那个商`。少除一个 4π ⇒ 亮 12.57 倍。
+/// 2. **`position_radius.w` 是半径**（见 [`POINT_LIGHT_RADIUS`]），`range` 另有一格。
+/// 3. **`light_custom_data` 是投影矩阵里的四个数**，不是"写死的 (0,-1,0.1,0)"：
+///    它是 `perspective_infinite_reverse_rh(π/2, 1.0, near)` 的
+///    `[2][2] [2][3] [3][2] [3][3]`（`light.rs:1266-1315`），而 `near` 是
+///    [`POINT_LIGHT_SHADOW_MAP_NEAR_Z`]。今天它算出来**恰好是** `(0,-1,0.1,0)`，
+///    但那是因为 `fov = π/2`、`aspect = 1.0` —— 抄字面量就把这条关系丢了。
+///
+/// ⚠ 聚光与平行光**当场拒**：这一版的内容 shader（`planet_x::light::sun_light`）把第 0 格
+/// 一律当点光源读（`direction` 是现算的、影子查 cube），把一盏聚光塞进去就是"画出来不对
+/// 但谁都不报错"。平行光在 Bevy 里**根本不住这个缓冲**（`Lights` 那份 uniform 里才有），
+/// 塞进来更是无中生有。
+pub fn light_of(light: &px_protocol::scene::Light) -> Result<ClusteredLight, String> {
+    if light.kind != px_protocol::scene::LightKind::Point {
+        return Err(format!(
+            "灯 '{}' 是 {:?}，而这一档只兑现**点光源**：聚光要 direction / 内外角/\
+             `spot_light_tan_angle`，平行光在 oracle 里根本不住 `clustered_lights`\
+             （它住 `Lights` 那份 uniform）—— 塞进这一格就是画出来不对而没人报错",
+            light.id, light.kind
+        ));
+    }
+    let range = light.range.unwrap_or(POINT_LIGHT_DEFAULT_RANGE);
+    // 流明 → 流明每球面度（`light.rs:534-537`）。
+    let intensity = light.intensity / (4.0 * core::f32::consts::PI);
+    // 那一面 cube 的投影（`light.rs:1266-1270`）：**每盏点光都算**，开不开影子都一样。
+    let face = Mat4::perspective_infinite_reverse_rh(
+        core::f32::consts::FRAC_PI_2,
+        1.0,
+        POINT_LIGHT_SHADOW_MAP_NEAR_Z,
+    );
+    Ok(ClusteredLight {
+        light_custom_data: [
+            face.z_axis.z,
+            face.z_axis.w,
+            face.w_axis.z,
+            face.w_axis.w,
+        ],
+        color_inverse_square_range: [
+            light.color[0] * intensity,
+            light.color[1] * intensity,
+            light.color[2] * intensity,
+            1.0 / (range * range),
+        ],
+        position_radius: [
+            light.position[0],
+            light.position[1],
+            light.position[2],
+            POINT_LIGHT_RADIUS,
+        ],
+        flags: POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE
+            | if light.shadows {
+                POINT_LIGHT_FLAGS_SHADOWS_ENABLED
+            } else {
+                0
+            },
+        shadow_depth_bias: POINT_LIGHT_SHADOW_DEPTH_BIAS,
+        shadow_normal_bias: shadow_normal_bias(),
+        // 点光没有锥角（`light.rs:1312-1313` 那一支给的就是 0.0）。
+        spot_light_tan_angle: 0.0,
+        // PCSS 没开（`bevy_pbr` 的 `experimental_pbr_pcss`）⇒ 恒 0.0（`light.rs:1340-1344`）。
+        soft_shadow_size: 0.0,
+        shadow_map_near_z: POINT_LIGHT_SHADOW_MAP_NEAR_Z,
+        // 没有 decal ⇒ `u32::MAX`（`light.rs:1334-1338` 的 `unwrap_or`）。
+        decal_index: u32::MAX,
+        range,
+    })
+}
+
+/// 文档的灯表 → 聚类缓冲的那几格，**次序照 oracle 的排序键**。
+///
+/// Bevy 的排序键写在 `light.rs:1215-1225` 的注释里，三维：
+/// ① 点光/聚光分块（让片元阶段能连着遍历）；② **开了影子的在前**（好让"第几盏"直接当
+/// 影子图的层号）；③ entity id（灯数超上限时"选中的那一批"要稳定）。
+/// 这个宿主只兑现点光 ⇒ 只剩第 ② 维，而它是**会改像素**的：内容 shader
+/// （`planet_x::light::sun_light`）只读 `data[0]`，所以哪一盏排在第一就是哪一盏当太阳。
+///
+/// ⚠ 第 ③ 维在文档里**没有对应物**：oracle 那边的 entity 是 `px_render/src/scene.rs`
+/// 按文档次序一个一个 spawn 出来的，所以"文档次序 = entity 次序"是**一条假设**，
+/// 不是实测（单灯场景里它不可验）。同档（都开影子或都不开）的多灯场景踩的就是这一条，
+/// 所以序列的**次序**进审计文本，出问题时先看那一行。
+///
+/// ⚠ 这里**不截断**：文档给了几盏就写几盏，"能放几盏"由 shader 里的数组长度定，
+/// 超了在 [`frame`] 里当场拒（静默丢掉几盏 = 一声不吭的错像素）。
+pub fn lights_of(lights: &[px_protocol::scene::Light]) -> Result<Vec<ClusteredLight>, String> {
+    let mut packed: Vec<ClusteredLight> = Vec::with_capacity(lights.len());
+    for light in lights {
+        packed.push(light_of(light)?);
+    }
+    // 稳定排序：同档保持文档次序（见上面第 ③ 维那一条）。
+    packed.sort_by_key(|light| {
+        if light.flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED != 0 {
+            0
+        } else {
+            1
+        }
+    });
+    Ok(packed)
+}
+
+// ---------------------------------------------------------------------------
 // 值 → GPU：**五格全绑**的那一组
 //
 // 布局是**固定超集**：五格一个不少地进绑定组，哪怕这一帧用到它的 shader 只声明了其中一格。
@@ -308,11 +477,16 @@ pub struct GroupZero {
 /// `module` 只用来**反射聚类缓冲的长度与步长**（"能放几盏灯"写在 shader 里，
 /// 不在 Rust 里抄第二份）；其余三格的大小由各自的 Rust 结构体定，而结构体与 WGSL 的
 /// 偏移/大小由 `cargo test` 那几条判据钉着。
+///
+/// `cluster` 是**文档那几盏灯**已经翻好的 80 字节（[`lights_of`] 翻的，调用方负责打印审计）。
+/// ⚠ 这个函数**不认识"太阳"**：它只把给它的那几盏填进去，剩下的格子填零 ——
+/// 而"零 = 这盏灯不存在"是内容 shader 自己判的（§64.9：没有点光源就是没有光）。
 pub fn frame(
     device: &wgpu::Device,
     module: &naga::Module,
     camera: &crate::camera::Camera,
     ambient: f32,
+    cluster: &[ClusteredLight],
     width: u32,
     height: u32,
     depth: &wgpu::TextureView,
@@ -327,14 +501,29 @@ pub fn frame(
             array.stride
         ));
     }
+    // ⚠ 多出来的灯**当场拒**，不许截断：`sun_light()` 只读 `data[0]`，
+    //    而"第 5 盏灯被悄悄丢掉了"在画面上不会有任何症状。
+    if cluster.len() > array.count as usize {
+        return Err(format!(
+            "文档里有 {} 盏灯，而聚类缓冲只有 {} 格（长度写在 shader 的 \
+             `clustered_lights.data` 里）：装不下的那 {} 盏会被静默丢掉",
+            cluster.len(),
+            array.count,
+            cluster.len() - array.count as usize
+        ));
+    }
 
     let view = ViewUniform::from_camera(camera, [0.0, 0.0, width as f32, height as f32]);
     let lights = LightsUniform::ambient(ambient);
     let globals = globals_zero();
-    // 「没有点光源」= 全零（`light.wgsl` 判的正是颜色）。这一档那盏灯强度是 0 ⇒
-    // 颜色 0 ⇒ 内容 shader 自己判 `lit = false` —— 宿主不认识"太阳"，也不替它兜底（§64.9）。
-    // ⚠ 长度与步长来自**反射**（`array`），不是写死的 64：能放几盏灯写在 shader 里。
-    let cluster: Vec<u8> = to_bytes(&ClusteredLight::absent()).repeat(array.count as usize);
+    // 长度与步长来自**反射**（`array`），不是写死的 64 / 80：能放几盏灯写在 shader 里。
+    // 后面的格子**必须**留成全零：`light.wgsl` 判"这一格写没写过"看的就是颜色，
+    // 填一半等于"第 N 格往后都有一盏黑色的灯"（不同半径上症状还不一样）。
+    let mut bytes: Vec<u8> = Vec::with_capacity(array.size as usize);
+    for light in cluster {
+        bytes.extend_from_slice(&to_bytes(light));
+    }
+    bytes.resize(array.size as usize, 0);
 
     let uniform = |label: &str, bytes: &[u8]| {
         device.create_buffer_init(&BufferInitDescriptor {
@@ -349,7 +538,7 @@ pub fn frame(
     let cluster_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("组 0：clustered_lights"),
         usage: wgpu::BufferUsages::STORAGE,
-        contents: &cluster,
+        contents: &bytes,
     });
 
     let layout = bind_group_layout(device);
@@ -380,10 +569,7 @@ pub fn frame(
         ],
     });
     let viewport = view.viewport;
-    Ok(GroupZero {
-        layout,
-        bind_group,
-        audit: vec![
+    let mut audit = vec![
             format!(
                 "view：world_position ({:.3}, {:.3}, {:.3})｜exposure {:.9e}（位模式 {:08X}）｜viewport ({}, {}, {}, {})",
                 camera.position.x,
@@ -408,12 +594,49 @@ pub fn frame(
                 globals.time, globals.delta_time, globals.frame_count
             ),
             format!(
-                "clustered_lights：{} 格 × {} 字节 = {} 字节，**全零** ⇒ 内容 shader 判 lit = false（这一档那盏灯强度 0）",
+                "clustered_lights：{} 格 × {} 字节 = {} 字节；文档 {} 盏灯写进前 {} 格，其余**全零**\
+                 （零 = 这盏灯不存在，内容 shader 自己判）",
                 array.count,
                 array.stride,
-                array.size
+                array.size,
+                cluster.len(),
+                cluster.len()
             ),
-        ],
+    ];
+    // 逐盏把**真的填进去的那几个数**打出来：出问题时先看这几行，不必猜"是不是灯没填"。
+    // ⚠ 打的是结构体里的值（不是文档里的原文）：字面量对而打包错，只有这样才看得见。
+    for (index, light) in cluster.iter().enumerate() {
+        audit.push(format!(
+            "  data[{index}]：color×强度/4π ({:.6e}, {:.6e}, {:.6e})｜1/range² {:.6e}｜位置 ({:.3}, {:.3}, {:.3})｜radius {}｜flags {}（影子 {}）｜depth_bias {}｜normal_bias {:.9e}｜near_z {}｜custom_data ({}, {}, {}, {})｜decal_index {}｜range {}",
+            light.color_inverse_square_range[0],
+            light.color_inverse_square_range[1],
+            light.color_inverse_square_range[2],
+            light.color_inverse_square_range[3],
+            light.position_radius[0],
+            light.position_radius[1],
+            light.position_radius[2],
+            light.position_radius[3],
+            light.flags,
+            if light.flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED != 0 {
+                "开"
+            } else {
+                "关"
+            },
+            light.shadow_depth_bias,
+            light.shadow_normal_bias,
+            light.shadow_map_near_z,
+            light.light_custom_data[0],
+            light.light_custom_data[1],
+            light.light_custom_data[2],
+            light.light_custom_data[3],
+            light.decal_index,
+            light.range
+        ));
+    }
+    Ok(GroupZero {
+        layout,
+        bind_group,
+        audit,
     })
 }
 
@@ -1059,5 +1282,180 @@ mod tests {
         assert!(to_bytes(&ClusteredLight::absent())
             .iter()
             .all(|byte| *byte == 0));
+    }
+
+    /// 政策常数**就是 oracle 的那几个字面量**（§109.2 那张表，出处见每个常数的注释）。
+    ///
+    /// 为什么值得单独钉一条：这几个数抄错的**唯一**症状是"受光面亮一点点 / 影子薄一点点"，
+    /// 而它们一个都不来自文档 —— 漂开的那天没有任何别的地方会响。
+    #[test]
+    fn the_point_light_policy_numbers_are_the_oracles_literals() {
+        assert_eq!(POINT_LIGHT_DEFAULT_RANGE, 20.0, "PointLight::default().range");
+        assert_eq!(POINT_LIGHT_RADIUS, 0.0, "PointLight::default().radius");
+        assert_eq!(
+            POINT_LIGHT_SHADOW_DEPTH_BIAS, 0.08,
+            "PointLight::DEFAULT_SHADOW_DEPTH_BIAS"
+        );
+        assert_eq!(
+            POINT_LIGHT_SHADOW_NORMAL_BIAS, 0.6,
+            "PointLight::DEFAULT_SHADOW_NORMAL_BIAS"
+        );
+        assert_eq!(
+            POINT_LIGHT_SHADOW_MAP_NEAR_Z, 0.1,
+            "PointLight::DEFAULT_SHADOW_MAP_NEAR_Z"
+        );
+        assert_eq!(POINT_LIGHT_SHADOW_MAP_SIZE, 1024, "PointLightShadowMap 的边长");
+        assert_eq!(POINT_LIGHT_FLAGS_SHADOWS_ENABLED, 1, "bit0");
+        assert_eq!(
+            POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE,
+            8,
+            "bit3 —— `PointLight::default()` 里这个开关是 true，所以它**每盏灯**都在"
+        );
+        // §109.2 那一格：`0.6 × (2/1024) × √2`
+        assert_eq!(
+            shadow_normal_bias().to_bits(),
+            0.0016572815f32.to_bits(),
+            "shadow_normal_bias＝0.6 × texel × √2，texel = 2/1024（§109.2）"
+        );
+    }
+
+    /// 文档里那盏太阳 → 80 字节：**逐格**对照 §109.2 的表（数值在这里现算，不抄结论）。
+    ///
+    /// 用的是 `orbit-bare-shadow` 里那一盏的字面参数（`art/scene/orbit-bare-shadow.toml`
+    /// 的 `light_position` / `light_intensity` 缺省 + `light_range = |position| × 2.5`）。
+    #[test]
+    fn the_sun_light_packs_into_the_oracles_eighty_bytes() {
+        let position = [-4.2f32, 1.15, 2.35];
+        let reach = (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+            .sqrt()
+            * 2.5;
+        let light = px_protocol::scene::Light::point("sun", position, [1.0, 1.0, 1.0], 7.6e5)
+            .with_range(reach)
+            .with_shadows(true);
+        let packed = light_of(&light).expect("点光");
+        assert_eq!(to_bytes(&packed).len(), 80);
+
+        // 强度是**流明**：颜色那一格是 `颜色 × (强度/4π)`，不是强度本身（§109.2）。
+        let intensity = 7.6e5f32 / (4.0 * core::f32::consts::PI);
+        assert_eq!(
+            packed.color_inverse_square_range,
+            [intensity, intensity, intensity, 1.0 / (reach * reach)],
+            "rgb = 颜色 × 强度/(4π)（少除一个 4π 就亮 12.57 倍）；w = 1/range²"
+        );
+        // `.w` 是**半径**（PointLight::radius），不是 range —— 拿它当射程会把有点光的场景判成没光。
+        assert_eq!(
+            packed.position_radius,
+            [position[0], position[1], position[2], 0.0],
+            "position_radius.w 是 radius（=0），range 另有一格"
+        );
+        assert_eq!(packed.flags, 9, "开影子 = bit0|bit3");
+        assert_eq!(packed.shadow_depth_bias, 0.08);
+        assert_eq!(packed.spot_light_tan_angle, 0.0, "点光没有锥角");
+        assert_eq!(packed.soft_shadow_size, 0.0, "PCSS 没开 ⇒ 恒 0");
+        assert_eq!(packed.shadow_map_near_z, 0.1);
+        assert_eq!(packed.decal_index, u32::MAX, "没有 decal");
+        assert_eq!(packed.range, reach);
+        // `light_custom_data` 不是抄来的四个数，是**那面 cube 的投影矩阵**里的四格：
+        // 这里用另一个 fov/aspect/near 重算一次，确认它真的跟着 `near` 走（抄字面量会在这里露馅）。
+        let face = Mat4::perspective_infinite_reverse_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1);
+        assert_eq!(
+            packed.light_custom_data,
+            [face.z_axis.z, face.z_axis.w, face.w_axis.z, face.w_axis.w],
+            "custom_data = 投影矩阵的 [2][2] [2][3] [3][2] [3][3]"
+        );
+        assert_eq!(
+            packed.light_custom_data,
+            [0.0, -1.0, POINT_LIGHT_SHADOW_MAP_NEAR_Z, 0.0],
+            "π/2、aspect 1.0 时它算出来恰好是 (0,-1,near,0)（§109.2）"
+        );
+    }
+
+    /// 关影子的灯只少 bit0；强度 0 的灯颜色全零 —— 而**颜色全零正是"这盏灯不存在"的判据**
+    /// （`light.wgsl`：`lit = !all(color_inverse_square_range.rgb == 0)`）。
+    ///
+    /// ⚠ 这一条是 `orbit-bare-nolight` 那条判据（`7BBB18CE3612D4F7`）在**数据层**的旁证：
+    /// 那一档强度是 0 ⇒ 颜色 0 ⇒ 内容 shader 判 `lit = false` ⇒ 填进去与全零**等价**
+    /// （实测：填灯之后那一档的哈希一个位都没动）。
+    #[test]
+    fn an_unlit_light_is_indistinguishable_from_an_empty_slot() {
+        let dark = px_protocol::scene::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 0.0)
+            .with_shadows(false);
+        let packed = light_of(&dark).expect("点光");
+        assert_eq!(
+            packed.color_inverse_square_range[..3],
+            [0.0, 0.0, 0.0],
+            "强度 0 ⇒ 颜色 0 ⇒ shader 判 lit = false"
+        );
+        assert_eq!(packed.flags, 8, "关影子 = 只剩 bit3");
+        // 其余格子**不是**零（位置、range、bias 都在）：所以"颜色是判据"这句话是**必要的**
+        // —— 谁哪天改成"看 position_radius 是不是零"，这一条会当场响。
+        assert_ne!(packed.position_radius, [0.0; 4]);
+        assert_eq!(packed.position_radius[3], 0.0, "半径本来就是 0");
+        // 对照：同样一盏灯、强度不为 0 ⇒ 颜色那三格**只有它们**不同
+        // （`lit` 这条判据认的就是这三格；其余格子两盏灯一模一样）。
+        let lit = light_of(&px_protocol::scene::Light::point(
+            "sun",
+            [-4.2, 1.15, 2.35],
+            [1.0, 1.0, 1.0],
+            1.0,
+        ))
+        .expect("点光");
+        assert_ne!(
+            packed.color_inverse_square_range[..3],
+            lit.color_inverse_square_range[..3]
+        );
+        assert_eq!(packed.flags, lit.flags);
+        assert_eq!(packed.position_radius, lit.position_radius);
+        assert_eq!(packed.range, lit.range, "range 与强度无关（两盏都缺省）");
+    }
+
+    /// 灯的次序 = oracle 的排序键：**开影子的在前**，同档保持文档次序（稳定排序）。
+    ///
+    /// ⚠ 这条会改像素：内容 shader 只读 `data[0]`，所以"哪一盏排第一"就是"哪一盏当太阳"。
+    #[test]
+    fn the_shadow_casting_lights_come_first_and_stay_stable() {
+        let light = |id: &str, shadows: bool| {
+            px_protocol::scene::Light::point(id, [1.0, 0.0, 0.0], [1.0, 1.0, 1.0], 10.0)
+                .with_shadows(shadows)
+        };
+        let order = lights_of(&[
+            light("a", false),
+            light("b", true),
+            light("c", false),
+            light("d", true),
+        ])
+        .expect("四盏都是点光");
+        let flags: Vec<u32> = order.iter().map(|packed| packed.flags).collect();
+        assert_eq!(flags, vec![9, 9, 8, 8], "开影子的排前面");
+        // 同档里的相对次序不许被打乱（文档 a 在 c 前、b 在 d 前）：
+        // 位置是现算的同一格 ⇒ 用 range 那一格当指纹（四盏的 range 都一样，改用 x 位置区分）。
+        let probe = |id: &str, shadows: bool, x: f32| {
+            px_protocol::scene::Light::point(id, [x, 0.0, 0.0], [1.0, 1.0, 1.0], 10.0)
+                .with_shadows(shadows)
+        };
+        let order = lights_of(&[
+            probe("a", false, 1.0),
+            probe("b", true, 2.0),
+            probe("c", false, 3.0),
+            probe("d", true, 4.0),
+        ])
+        .expect("四盏都是点光");
+        let xs: Vec<f32> = order
+            .iter()
+            .map(|packed| packed.position_radius[0])
+            .collect();
+        assert_eq!(xs, vec![2.0, 4.0, 1.0, 3.0], "同档内保持文档次序");
+    }
+
+    /// 聚光 / 平行光**当场拒**（不是"当点光凑合"）。
+    #[test]
+    fn spot_and_directional_lights_are_refused() {
+        let mut spot = px_protocol::scene::Light::point("s", [0.0; 3], [1.0; 3], 1.0);
+        spot.kind = px_protocol::scene::LightKind::Spot;
+        let err = light_of(&spot).expect_err("聚光必须拒");
+        assert!(err.contains("只兑现**点光源**"), "{err}");
+        let mut sun = px_protocol::scene::Light::point("d", [0.0; 3], [1.0; 3], 1.0);
+        sun.kind = px_protocol::scene::LightKind::Directional;
+        assert!(light_of(&sun).is_err(), "平行光在 oracle 里根本不住这个缓冲");
     }
 }

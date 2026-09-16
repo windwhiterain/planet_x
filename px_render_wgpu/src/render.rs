@@ -392,6 +392,27 @@ pub fn run(
         (width as f32 / height as f32).to_bits()
     ));
 
+    // ---- 灯：文档那几盏 → 聚类缓冲的那几格（`group0::lights_of`，逐字复刻 oracle 的打包）----
+    //
+    // ⚠ 这里是**内容 → 数值**的那一步，不是"摆一盏灯"：有没有灯、哪一盏、开不开影子
+    //    全部来自文档的 `lights`（§60：渲染器里没有 `SUN_DIRECTION` 这种常量）。
+    //    宿主只负责把那些数按 oracle 的字段语义摆进 80 字节，次序也照 oracle 的排序键。
+    let cluster = group0::lights_of(&spec.lights)?;
+    audit.push(format!(
+        "灯：文档 {} 盏 → 聚类缓冲前 {} 格（次序 = oracle 的排序键：开影子的在前，同档按文档次序）｜{}",
+        spec.lights.len(),
+        cluster.len(),
+        if spec.lights.is_empty() {
+            "（一盏都没有 ⇒ 整块全零 ⇒ 内容 shader 判 lit = false）".to_string()
+        } else {
+            spec.lights
+                .iter()
+                .map(|light| format!("{}（{:?}，影子 {}）", light.id, light.kind, light.shadows))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        }
+    ));
+
     // ---- 执行器：**先建**，因为深度图要先 `seed` 进去（§132）----
     let mut executor = px_pass::Executor::new();
 
@@ -410,6 +431,7 @@ pub fn run(
             &contract_module,
             &camera,
             scene.ambient,
+            &cluster,
             width,
             height,
             view,
