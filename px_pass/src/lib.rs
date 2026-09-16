@@ -1883,10 +1883,17 @@ impl Executor {
                 .find(|external| external.name == name && external.role == role)
         });
         match (resource, external) {
-            (Some(_), Some(_)) => Err(format!(
-                "pass '{label}' {role_name} '{name}'：文档声明了这个资源，宿主又给了同名的外部目标\
-                 —— 说不清该用哪一个"
-            )),
+            // ⚠ **宿主给的外部目标赢**（S2 宿主需要它，§128 之后定下的规则）：
+            //    文档把深度声明成池里的资源，而大气的 group 0 binding 20 要**采样同一张**
+            //    深度图 —— 那张 bind group 是宿主建的，池里的纹理视图它根本拿不到。
+            //    宿主给出同名外部目标，就是明确说"用这一张"，那就用它。
+            //
+            //    为什么不是"拒"：拒掉的话宿主只剩两条路 —— 自己另建一张深度图
+            //    （于是文档声明的资源成了摆设），或者去拆文档（更糟）。
+            //    而"宿主顶掉了资源"这件事**必须看得见**：宿主那一侧要自己打出来
+            //    （`Plan::resources` 是公开的，谁被顶掉宿主知道）。静默顶掉才是这里
+            //    唯一不能接受的。
+            (Some(_), Some(external)) => Ok((external.view.clone(), external.format)),
             (Some(resource), None) => {
                 let (width, height) = resource.size.resolve(frame.width, frame.height);
                 let format = resource.format.to_wgpu();
@@ -2889,5 +2896,26 @@ fn fs_main() -> @location(0) vec4<f32> {
             .expect_err("几何名解析不到 ⇒ 拒");
         assert!(err.contains("planet"), "{err}");
         assert!(err.contains("near"), "要列出宿主给了哪些名字：{err}");
+
+        // ⑦ 名字**既是文档声明的资源、又是宿主给的外部目标** ⇒ 宿主的赢。
+        //    这是 S2 宿主真正需要的那一条：深度声明在文档里，而大气的 group 0
+        //    binding 20 要采样同一张深度图，那张 bind group 只有宿主建得出来。
+        //    ⚠ 判据落在**像素**上：宿主赢了 ⇒ 三角画进外部目标（外面仍是清屏色）；
+        //      池里的资源赢了 ⇒ 外部目标一个像素都不会动。
+        let mut shadowed = geometry_plan("shadowed", STATE_BASE, vec![draw("near", "white")]);
+        shadowed.resources = vec![ResourceSpec {
+            name: "out".to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size: SizeRule::View,
+            usage: vec![Use::RenderAttachment],
+        }];
+        let (inside, outside) = run_case(
+            &device, &queue, &mut executor, &shadowed, &target, &geometries, &materials,
+        );
+        assert_eq!(
+            (inside, outside),
+            (WHITE, RED),
+            "宿主给的外部目标必须顶掉同名的池资源（否则画进了池里那张没人看的图）"
+        );
     }
 }

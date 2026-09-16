@@ -40,7 +40,7 @@ usage = ["render_attachment", "texture_binding"]
 label = "prepass"
 kind = "geometry"
 select = "opaque"
-vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
 vertex_entry = "vertex"
 writes = []
 depth_target = "scene_depth"
@@ -51,7 +51,7 @@ render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|windi
 label = "opaque"
 kind = "geometry"
 select = "opaque"
-vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
 vertex_entry = "vertex"
 writes = ["scene_color_a"]
 depth_target = "scene_depth"
@@ -66,7 +66,7 @@ render = "color=clear(0.00030959752321981426,0.00038699690402476784,0.0007739938
 label = "sky"
 kind = "geometry"
 select = "skybox"
-vertex_shader = "art/shaders/frame_sky.wgsl"
+vertex_shader = "art/frame/vertex_sky.wgsl"
 vertex_entry = "vertex"
 writes = ["scene_color_a"]
 depth_target = "scene_depth"
@@ -79,7 +79,7 @@ render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=
 label = "transparent"
 kind = "geometry"
 select = "transparent"
-vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
 vertex_entry = "vertex"
 writes = ["scene_color_a"]
 depth_target = "scene_depth"
@@ -87,13 +87,15 @@ render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=
 
 # ---- blit：把中间目标搬到最终目标（内建名 `view`）----
 # oracle 的结构就是这样：主纹理画完，最后一个 upscaling 节点搬到输出（§110.1）。
-# `px_grade` 的 `strength = 0` 就是恒等：这一条 pass 的职责是**搬**，不是调色。
+# ⚠ 它用的是 `blit`（`art/shaders/blit.wgsl`）**自己那支** shader，不是借 `px_grade`
+# 加个 `strength = 0`：借来的话，配方描述的就是"一道调色"，而这一条 pass 的职责是**搬**。
+# 谁在查一个错的像素，应该读六行就能回答"是不是 blit 的问题"。
 [[after]]
 label = "blit"
 kind = "fullscreen"
-fragment_shader = "px_grade"
+fragment_shader = "blit"
 entry = "fs_main"
 reads = ["scene_color_a"]
 writes = ["view"]
 render = "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
-params = { strength = 0.0 }
+params = { gain = 1.0 }
