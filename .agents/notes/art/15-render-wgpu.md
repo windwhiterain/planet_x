@@ -1141,3 +1141,63 @@ depth_prepass_texture(20)` 列成了一套，**容易读成"每份 shader 都用
 ⚠ 这条与 §110.4 / §109.5 同族但更隐蔽：那两次是**抄了一个数**，
 这次是**把一张"全量清单"误读成"每份 shader 的用量"**。
 反射表列的是**并集**，不是**逐 shader 的清单** —— 用之前要问一句"这是谁的集合"。
+
+---
+
+## §121 把 pass 的管理搬进 `px_pass`（用户裁决 **B 案**：内建 pass 也由 `px_pass` 亲自执行）
+
+### 为什么要动
+
+新宿主目前的计划是"host 里写死 prepass → 不透明 → 透明 → 天空盒 → blit，再把文档那张
+pass 表插在中间"。用户裁决：**pass 的管理应当放到 `px_pass`，且是动态定制的**
+（B 案）—— 序列、附件状态、每步读写的资源都应当是**数据**，加一条 pass 不用改 host。
+
+⚠ 这否掉了正在写的 `px_render_wgpu/src/render.rs`（已叫停，未落盘，无损失）。
+
+### 改动面（实测）
+
+`px_pass` 今天的样子：`Plan{layout, resources, passes}` + `Frame{width,height,sets}` +
+`Executor{管线条/布局/采样器/纹理池/兜底}`，`execute()` 按 `plan.passes` 循环。
+但它的 `execute` **只会画全屏三角**（`draw(0..3)`）、load op 写死 `Clear(TRANSPARENT)`、
+`depth_stencil_attachment: None`；`PassKind` 只有 `Fullscreen`/`Compute`（而 `Compute`
+在 `execute` 里**根本没实现**，`px_render/src/passes.rs:153` 是直接拒掉的）。
+
+消费者：`px_render/src/passes.rs`（从文档建 `Plan`、建 `Frame`、跑执行器）、
+`px_render/src/{main,scene}.rs`（只持有 `Arc<Plan>`）。
+⚠ `PassPlan` 是**公开字段结构体**，`px_render/src/passes.rs:219` 用字面量构造
+⇒ **加字段会打断它**，必须同步改构造点，并按 S1 的做法**重验五格锚逐字节不变**。
+
+### 三件（按依赖次序）
+
+**第 1 件｜数据模型（CPU 可测，无 GPU）**
+- `PassKind` 加 `Geometry`。
+- 新增 `RenderState`：颜色附件（`None` / `Clear(wgpu::Color)` / `Load`）、
+  深度附件（`None` / `Clear(f32)` / `Load`，外加 `write: bool` 与 `compare`）、
+  `cull: Option<Face>`、`front_face`。
+  `Default` = **今天的行为**（clear 透明、无深度、不剔除）⇒ 既有的全屏 pass 一字不改。
+- `PassPlan` 加 `render: RenderState`；`Plan::check` 相应扩展。
+- 配套改 `px_render/src/passes.rs` 的构造点，**重验五格锚**。
+
+**第 2 件｜几何执行（GPU）**
+- `Frame` 加 `draws: &'a [Vec<DrawItem<'a>>]`，与 `passes` 一一对应（全屏 pass 给空）。
+- `DrawItem` 携带：顶点缓冲 + 布局、索引缓冲 + 格式 + 条数、以及 `(group, &BindGroup)` 列表。
+- `Executor::execute` 按 `kind` 分派：`Fullscreen` 走 `draw(0..3)`；
+  `Geometry` 走 `set_vertex_buffer` / `set_index_buffer` / `draw_indexed`。
+
+**第 3 件｜host 用 plan 描述整帧**
+- `px_render_wgpu` 建一份含 prepass / 不透明 / 透明 / 天空盒 / blit（+ 文档那几条）的 `Plan`，
+  交给 `px_pass::Executor` 跑。判据仍是 S2 的 `7BBB18CE3612D4F7`。
+
+### ⚠ 一个必须你定的点：**管线由谁建**
+
+这决定了第 2 件的大小，也决定会不会踩 §66.1「同一份契约、两个数」：
+
+- **(甲) 管线仍由 host 建，`DrawItem` 直接带 `&RenderPipeline`。** `px_pass` 只管
+  顺序 / 附件 / 状态 / draw call。改动小。**风险**：pass 的 `RenderState`
+  与 host 建管线时用的状态是**两处**，必须保证一致 —— 否则又是一份契约两个数。
+- **(乙) 管线由 `px_pass` 建**（它已经缓存全屏管线了），键 = 顶点布局 + 片元入口 +
+  `RenderState` + 材质档。唯一真源，`px_pass` 真的"知道"几何与材质。
+  改动大（它要拿到 shader 模块与顶点布局），但把"两个数"从根上消掉。
+
+我倾向 **(乙)**：既然选了 B 案，状态的真源就该只有一处；否则 B 案只是把 `execute`
+挪了个地方，而 §66.1 那个病根还在。**等你点头再动第 2 件**，第 1 件（纯数据）不依赖这个选择，可以先落。
