@@ -62,6 +62,12 @@ struct SceneFile {
     /// `"review"` = 评审相机表；缺省也用它。
     #[serde(default)]
     cameras: Option<String>,
+    /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
+    ///
+    /// ⚠ 帧图是**渲染器的形状**，不是内容：六个场景共用 `default` 那一份，
+    /// 这一栏是"这个场景要另一种帧图"的逃生门，不是每份内容都要写一遍的东西。
+    #[serde(default)]
+    frame: Option<String>,
     parts: Vec<PartFile>,
 }
 
@@ -649,9 +655,16 @@ fn main() {
         cameras: Vec::new(),
     });
 
-    let recipe = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_SCENE.to_string());
+    // 用法：scene [配方名] [--no-frame-graph]
+    // ⚠ `--no-frame-graph` 是**兼容逃生门**（见 `compile` 里那段注释），不是常规用法。
+    let mut recipe = DEFAULT_SCENE.to_string();
+    let mut with_graph = true;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--no-frame-graph" => with_graph = false,
+            other => recipe = other.to_string(),
+        }
+    }
     let path = PathBuf::from("art").join("scene").join(format!("{recipe}.toml"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
@@ -659,7 +672,8 @@ fn main() {
         .unwrap_or_else(|err| panic!("{} 解不开：{err}", path.display()));
 
     let root = px_ops::cache_root();
-    let compiled = compile(&file, &root).unwrap_or_else(|err| panic!("{} 编译失败：{err}", file.name));
+    let compiled =
+        compile(&file, &root, with_graph).unwrap_or_else(|err| panic!("{} 编译失败：{err}", file.name));
 
     let spec_json = serde_json::to_string(&compiled.document).unwrap_or_else(|err| panic!("{err}"));
     let member_keys = compiled
@@ -709,7 +723,7 @@ fn main() {
     );
 }
 
-fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
+fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, String> {
     let mut generated = Generated2::new();
     let planet = file
         .parts
@@ -1009,6 +1023,32 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
 
     generated.finish();
 
+    // ---- 帧图（§128）：**渲染器的形状**烘进文档 ----
+    //
+    // `with_graph = false` 是兼容逃生门：两栏都空，产物因此与没有帧图时**逐字节相同**
+    // （六份冻产物的 sha256 是这条的判据）。它不是"另一种受支持的烘法" ——
+    // 它存在的唯一目的是证明老产物还能逐字节复现；它要是开始长自己的功能，就该删掉它。
+    let frame_name = file
+        .frame
+        .clone()
+        .unwrap_or_else(|| px_graphs::frame::DEFAULT_FRAME.to_string());
+    // ⚠ 逃生门那条路**连帧图配方都不读**：它是"证明老产物还能逐字节复现"的仪器，
+    //    不该因为帧图配方坏了就一起坏掉（那正是它要保的东西）。
+    let (resources, passes) = if with_graph {
+        let frame = px_graphs::frame::load(&frame_name)?;
+        let (resources, passes) = px_graphs::frame::build(&frame, &objects, true)?;
+        println!(
+            "帧图 {frame_name}：{} 条 pass（{} 前 / {} 后）｜中间目标 {} 个",
+            passes.len(),
+            frame.before.len(),
+            frame.after.len(),
+            resources.len()
+        );
+        (resources, passes)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let document = SceneSpec {
         schema: px_protocol::SCENE_SCHEMA,
         name: file.name.clone(),
@@ -1023,8 +1063,8 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         } else {
             Vec::new()
         },
-        resources: Vec::new(),
-        passes: Vec::new(),
+        resources,
+        passes,
         lights: vec![sun],
         objects,
     };

@@ -321,7 +321,7 @@ fn canonical() -> String {
     // "加字段是纯加法"这件事在快照里也是看得见的。
     let pass_fullscreen = px_protocol::scene::PassSpec {
         kind: "fullscreen".to_string(),
-        shader: px_protocol::Member::new("shaders", "grade", &"2".repeat(64)),
+        shader: Some(px_protocol::Member::new("shaders", "grade", &"2".repeat(64))),
         label: "grade".to_string(),
         entry: "fs_main".to_string(),
         reads: vec!["scene_color".to_string()],
@@ -335,7 +335,8 @@ fn canonical() -> String {
     };
     let pass_geometry = px_protocol::scene::PassSpec {
         kind: "geometry".to_string(),
-        shader: px_protocol::Member::new("shaders", "surface", &"9".repeat(64)),
+        // 几何 pass：片元阶段属于材质（§129）⇒ 这一栏必须是 None。
+        shader: None,
         label: "planet".to_string(),
         entry: "fragment".to_string(),
         reads: Vec::new(),
@@ -355,7 +356,7 @@ fn canonical() -> String {
         vertex_shader: "struct Out { @builtin(position) position: vec4<f32> }\n".to_string(),
         vertex_entry: "vertex".to_string(),
         // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
-        render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw".to_string(),
+        render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw".to_string(),
         depth_target: Some("depth".to_string()),
     };
 

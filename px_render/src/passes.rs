@@ -156,7 +156,15 @@ pub fn resolve(
                  声明了执行器不兑现的东西就当场拒 —— 静默跳过正是要避免的那种故障"
             ));
         }
-        let path = pass.shader.resolve(pcg_root)?;
+        // ⚠ 片元阶段现在**可以是空的**：几何 pass 的片元阶段属于材质（§129），
+        //    它的 `shader` 那一栏是 `None`。这一版 Bevy 宿主只会画全屏 pass ⇒ 当场拒。
+        //    （安静的跳过就是"少画了一条还报成功" —— 正是这一版要避免的那种故障。）
+        let Some(shader_member) = &pass.shader else {
+            return Err(format!(
+                "pass '{label}' 没有 pass 级片元阶段：它是一条几何 pass（片元阶段属于材质），                 而这一版 Bevy 宿主只画全屏 pass —— 它不认识 draws / 顶点阶段那些数据"
+            ));
+        };
+        let path = shader_member.resolve(pcg_root)?;
         let entry = cache.shader(&path.display().to_string())?;
         let source = entry.value.source.clone();
         if source.contains("#import") {
@@ -175,7 +183,7 @@ pub fn resolve(
         validate_fragment(&label, &pass.entry, &assembled)?;
 
         // 参数与格位都由**这份 shader 自己的契约**决定：反射出来什么就绑什么，一个数都不猜。
-        let version = px_render_shader_version(&pass.shader.key);
+        let version = px_render_shader_version(&shader_member.key);
         let contract = crate::reflect::layout_of(version, &format!("pass '{label}'"), &source)?;
         if contract
             .textures
@@ -211,8 +219,8 @@ pub fn resolve(
             pass.writes.join(" / "),
             pass.params.len(),
             params.len(),
-            pass.shader.graph,
-            pass.shader.node,
+            shader_member.graph,
+            shader_member.node,
             version,
             if entry.hit { "缓存命中" } else { "现读产物" },
         ));
@@ -372,6 +380,8 @@ mod tests {
                     params: Default::default(),
                 },
                 material: px_protocol::scene::Material {
+                    // ⚠ 材质的 `shader` 是**必有**的（一份材质就是那支片元 shader，§129）；
+                    //    只有 `PassSpec.shader` 变成了可选（几何 pass 那一栏没有值）。
                     shader: member(),
                     params: Default::default(),
                     textures: Default::default(),
@@ -388,7 +398,7 @@ mod tests {
     fn pass(label: &str, reads: &[&str], writes: &[&str]) -> PassSpec {
         PassSpec {
             kind: "fullscreen".to_string(),
-            shader: member(),
+            shader: Some(member()),
             label: label.to_string(),
             entry: "fs_main".to_string(),
             reads: reads.iter().map(|name| name.to_string()).collect(),

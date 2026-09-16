@@ -1,0 +1,99 @@
+# 帧图 `default`（§128）：**这颗渲染器怎么把一帧画出来**。
+#
+# ⚠ 这是**六个场景共用**的一份：帧图不是内容，是渲染器的形状。抄进每个场景，
+# 只会让"它们共用一套帧图"这件事变得看不见，而漂移是必然的。
+# 场景配方写 `frame = "default"` 指过来（不写也是它）。
+#
+# 顺序（与 oracle 实测的结构一致，§110.1）：
+#   prepass（**它清的深度**）→ 不透明 → 天空盒 → 透明 → [内容 pass 插在这里] → blit
+#
+# 清屏色 = `Color::srgb(0.004, 0.005, 0.010)` 的**线性**值：wgpu 的 clear 值不做
+# sRGB 变换，硬件按目标格式自己编码 —— 把 sRGB 数值填进来就是"清屏色偏亮一档"。
+# （0.004/12.92、0.005/12.92、0.010/12.92：三个数都在 0.04045 以下，走线性那一段。）
+
+# 内容链的**乒乓对**（§128 裁决 D）：插进来的 pass 按它轮流读写，
+# 最后 blit 读链尾那一个。恰好两个。
+chain_color = ["scene_color_a", "scene_color_b"]
+
+[[resources]]
+name = "scene_color_a"
+format = "rgba8unorm-srgb"
+size = "view"
+usage = ["render_attachment", "texture_binding"]
+
+[[resources]]
+name = "scene_color_b"
+format = "rgba8unorm-srgb"
+size = "view"
+usage = ["render_attachment", "texture_binding"]
+
+[[resources]]
+name = "scene_depth"
+format = "depth32float"
+size = "view"
+usage = ["render_attachment", "texture_binding"]
+
+# ---- prepass：只写深度（颜色附件不挂），它清的深度 ----
+# 它画**不透明**那一档：透明度高的那些在 oracle 里也不进 prepass
+# （`depth_prepass_texture` 因此只含不透明物体的深度，云与大气采样它正是要这个）。
+[[before]]
+label = "prepass"
+kind = "geometry"
+select = "opaque"
+vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_entry = "vertex"
+writes = []
+depth_target = "scene_depth"
+render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 不透明：清屏色在这里，深度接着 prepass 的 ----
+[[before]]
+label = "opaque"
+kind = "geometry"
+select = "opaque"
+vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=clear(0.00030959752321981426,0.00038699690402476784,0.0007739938080495357,1)|depth=load|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 天空盒：单独一条 pass ----
+# oracle 把它画在不透明那条 pass 的**末尾**（同一个 render pass，换一条管线）。
+# 这里给它自己的 pass，因为它的状态不一样（不写深度、不剔面），而状态是**每条 pass 一份**。
+# 结果一样：深度测试只让它画到没被盖住的地方；把它摆在不透明之后、透明之前，
+# 顺序也与 oracle 相同。几何是**程序化**的（没有顶点缓冲，三个顶点由 shader 现算）。
+[[before]]
+label = "sky"
+kind = "geometry"
+select = "skybox"
+vertex_shader = "art/shaders/frame_sky.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
+
+# ---- 透明：大气（Add）/ 云（Premultiplied）/ 环（Blend）都在这一条里 ----
+# ⚠ 它们的片元 shader 各不相同，而片元阶段属于**材质**（§129）—— 这正是那条裁决要保的东西。
+# 混合档、剔除、片元都按**材质**走（执行器按每一笔的材质建管线）。
+[[before]]
+label = "transparent"
+kind = "geometry"
+select = "transparent"
+vertex_shader = "art/shaders/frame_vertex.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
+
+# ---- blit：把中间目标搬到最终目标（内建名 `view`）----
+# oracle 的结构就是这样：主纹理画完，最后一个 upscaling 节点搬到输出（§110.1）。
+# `px_grade` 的 `strength = 0` 就是恒等：这一条 pass 的职责是**搬**，不是调色。
+[[after]]
+label = "blit"
+kind = "fullscreen"
+fragment_shader = "px_grade"
+entry = "fs_main"
+reads = ["scene_color_a"]
+writes = ["view"]
+render = "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
+params = { strength = 0.0 }

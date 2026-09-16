@@ -427,12 +427,7 @@
         "gain": 1.0
       },
       "reads": [],
-      "render": "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
-      "shader": {
-        "graph": "shaders",
-        "key": "9999999999999999999999999999999999999999999999999999999999999999",
-        "node": "surface"
-      },
+      "render": "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
       "vertex_entry": "vertex",
       "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n",
       "writes": [

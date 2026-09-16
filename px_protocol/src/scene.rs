@@ -529,7 +529,12 @@ pub struct DrawSpec {
 #[serde(deny_unknown_fields)]
 pub struct PassSpec {
     pub kind: String,
-    pub shader: Member,
+    /// 片元阶段的 shader 成员。**`None` = 这条 pass 没有 pass 级片元阶段**：
+    /// 几何 pass 的片元阶段**属于材质**（每个物体一支，§129），所以它这一栏必须是空的 ——
+    /// 编一个占位成员会在文档里留下一个假引用，还会污染成员表与闭包对账。
+    /// 全屏 pass 则**必须**有（那条 pass 就是它自己那支后处理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader: Option<Member>,
     #[serde(default)]
     pub label: String,
     #[serde(default = "fragment_entry")]
@@ -562,7 +567,8 @@ pub struct PassSpec {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vertex_entry: String,
     /// 附件与固定功能状态，**文本**：
-    /// `color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw`。
+    /// `color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|winding=ccw`。
+    /// ⚠ **没有 `cull`**：剔除属于材质（§127），不在这一串里。
     ///
     /// ⚠ 这里**不解析、也不重写那套规则**：解析器只有一份，住在 `px_pass`
     /// （`RenderState::parse` / `name`）。协议把它当**不透明文本**带过去 ——
@@ -581,10 +587,15 @@ impl PassSpec {
     }
 
     pub fn label_or(&self, index: usize) -> String {
-        if self.label.is_empty() {
-            format!("{index}:{}/{}", self.shader.graph, self.shader.node)
-        } else {
-            self.label.clone()
+        if !self.label.is_empty() {
+            return self.label.clone();
+        }
+        // 没给标签时的兜底名字：拿它自己那支 shader 的图/节点。
+        // ⚠ 几何 pass 没有 pass 级 shader（片元阶段属于材质）⇒ 退回 kind，
+        //    免得文档里出现一个空名字（那种"报错里认不出是哪条 pass"的坑）。
+        match &self.shader {
+            Some(shader) => format!("{index}:{}/{}", shader.graph, shader.node),
+            None => format!("{index}:{}", self.kind),
         }
     }
 }
@@ -636,7 +647,9 @@ impl SceneSpec {
             out.push(skybox);
         }
         for pass in &self.passes {
-            out.push(&pass.shader);
+            if let Some(shader) = &pass.shader {
+                out.push(shader);
+            }
         }
         out
     }
@@ -739,7 +752,22 @@ impl SceneSpec {
                     ));
                 }
             }
-            if pass.entry.trim().is_empty() {
+            // 片元阶段归谁：**全屏在 pass 上，几何在材质上**（§129）。
+            // 这条是文档级的形状判据；执行器那侧 `px_pass::Plan::check` 说的是同一件事。
+            match (&pass.shader, pass.kind.as_str()) {
+                (None, "fullscreen") => {
+                    return Err(format!(
+                        "{at} 是 fullscreen，却没给 shader：全屏 pass 就是它自己那支后处理"
+                    ))
+                }
+                (Some(_), "geometry") => {
+                    return Err(format!(
+                        "{at} 是 geometry，却给了 shader：几何 pass 的片元阶段属于**材质**                         （每个物体一支）"
+                    ))
+                }
+                _ => {}
+            }
+            if pass.shader.is_some() && pass.entry.trim().is_empty() {
                 return Err(format!("{at} 没给入口点名字（@fragment 那个函数叫什么）"));
             }
             if pass.writes.is_empty() {
@@ -827,7 +855,10 @@ impl SceneSpec {
                     } else {
                         format!("（{}）", keys_of(&pass.params))
                     },
-                    pass.shader
+                    match &pass.shader {
+                        Some(shader) => shader.to_string(),
+                        None => "（无 pass 级片元阶段：属于材质）".to_string(),
+                    }
                 ));
             }
         }
@@ -1104,13 +1135,12 @@ mod tests {
             r#""resources": [{"name": "depth", "format": "depth32float", "size": "view", "usage": ["render_attachment"]}],
                "passes": [{
                  "kind": "geometry",
-                 "shader": {"graph": "shaders", "node": "surface", "key": "00"},
                  "label": "prepass",
                  "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n@vertex fn vertex() -> Out { return Out(vec4<f32>(0.0)); }",
                  "vertex_entry": "vertex",
                  "writes": ["view"],
                  "draws": [{"geometry": "planet", "material": "surface"}, {"geometry": "planet"}],
-                 "render": "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+                 "render": "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
                  "depth_target": "depth"
                }],
                "lights": ["#,
@@ -1157,8 +1187,18 @@ mod tests {
         assert_eq!(pass.vertex_entry, "vertex");
         assert!(pass.render.starts_with("color=none|depth=clear(0)"));
         assert_eq!(pass.depth_target.as_deref(), Some("depth"));
+        // ⚠ 几何 pass 的片元阶段属于**材质**（§129）⇒ 这一栏必须是 `None`，
+        //    落盘时**一个 `shader` 键都不该有**（`skip_serializing_if` 那一条）。
+        assert!(pass.shader.is_none(), "几何 pass 不该有 pass 级 shader");
 
         let text = serde_json::to_string(&spec).expect("序列化");
+        // ⚠ 只对**这条 pass** 断言：物体的材质那一栏**应当**有 `shader`（材质就是那支
+        //    shader，§129）—— 拿整份文档去 grep 会把材质那一栏也算进来。
+        let pass_text = serde_json::to_string(&spec.passes[0]).expect("序列化这条 pass");
+        assert!(
+            !pass_text.contains("\"shader\""),
+            "几何 pass 落盘时不该出现 shader 键：{pass_text}"
+        );
         let back: SceneSpec = serde_json::from_str(&text).expect("再解析");
         assert_eq!(back, spec, "带新字段的文档必须逐字往返");
         // 新字段**真的落盘了**（不是"解析进默认值"那种假通过）。
