@@ -8,6 +8,7 @@
 
 mod digest;
 mod gpu;
+mod icosphere;
 mod mat4;
 mod mesh;
 mod shader;

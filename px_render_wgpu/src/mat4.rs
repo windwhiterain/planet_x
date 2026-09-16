@@ -12,6 +12,12 @@
 //!
 //! 判据见 `target/oracle/bevy-view-vectors.txt`：6 个输入矩阵（刚体、带缩放、
 //! 非正交都有），每个的 16 个位模式都要对上。
+//!
+//! ⚠ 这个模块还没有接进 `--device`/`--shot` 那条主路径，所以 `cargo build` 会报几条
+//! dead-code —— `mesh.rs` / `vec.rs` / `icosphere.rs` 处在**同一阶段**，一样报
+//! （`cargo test` 那条路是干净的，因为这些测试就是调用者）。
+//! **故意不在这里加 `#![allow(dead_code)]`**：那会把"还没接线"与"真的写多了"
+//! 一起盖掉，而后者正是要看得见的东西。S2 的渲染路径一接上，这些警告自己就没了。
 
 /// `Vec4`：与 `glam::Vec4` 同样的四个 `f32`。
 #[derive(Clone, Copy, Debug, PartialEq)]
