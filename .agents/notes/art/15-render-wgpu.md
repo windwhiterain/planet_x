@@ -1671,3 +1671,47 @@ pass 烘图器**覆盖**而不是**合并**基础产物的 `resources`（正因�
 这是本 session 我**第五次**自己出错而由流程兜住：我一直在要求实现方"自己算、别抄、
 别信二手结论"，而这次是我没看自己的脚本就差点得出错误结论。
 ⇒ 好在"六份全绿"这个**形状**本身逼我重跑了一遍 —— **判据的形状比我的判断可靠**。
+
+---
+
+## §131 帧图作为数据的**实际样子** —— 以及一个会毁掉画面的坑不在里面
+
+切片 1 派出去之后（在它还没产出时），我先把**它要执行的那份文档**自己验了一遍。
+这是输入侧的证据：**描述本身错了，宿主再对也出不来那张图。**
+
+`--bin shaders` 后 `--bin scene orbit-bare-nolight`（**帧烘**，不是逃生门那份）：
+产物 `fc1445307d5e`，11865 字节，5 条 pass、3 个中间目标。
+
+| label | kind | writes | depth_target | 状态 |
+|---|---|---|---|---|
+| `prepass` | geometry | `[]` | `scene_depth` | `color=none│depth=clear(0)│depth_write=true│compare=greater_equal│winding=ccw` |
+| `opaque` | geometry | `["scene_color_a"]` | `scene_depth` | `color=clear(0.0003095975…,0.0003869969…,0.0007739938…,1)│depth=load│depth_write=true` |
+| `sky` | geometry | `["scene_color_a"]` | `scene_depth` | `color=load│depth=load│depth_write=false` |
+| `transparent` | geometry | `["scene_color_a"]` | `scene_depth` | `color=load│depth=load│depth_write=false` |
+| `blit` | fullscreen | `["view"]` | — | `color=load│depth=none`，shader `blit=94555ef6ee2d`，`params={gain=1.0}` |
+
+`resources` = `scene_color_a` / `scene_color_b`（`rgba8unorm-srgb`、`size=view`、
+`render_attachment` + `texture_binding`）、`scene_depth`（`depth32float`、同样两种用途）。
+
+⚠ 清屏色那三个数**是线性的**，且对得上：sRGB 分量 ≤0.04045 时 `linear = c/12.92`
+⇒ `0.004/12.92 = 0.0003095975…`、`0.005/12.92 = 0.0003869969…`、
+`0.010/12.92 = 0.0007739938…`。**这正是 §110.1「wgpu 的清屏色是线性的、所以要自己转」
+的落地**，不是随手一个近似值。
+
+### 我特意去查的那个坑：**不在**里面
+
+三条 pass 写**同一个** `scene_color_a`（`opaque` / `sky` / `transparent`）。
+若 `sky` 或 `transparent` 用了 `clear`，它会把刚画好的行星**整个擦掉** ——
+而那张图仍会"出得来"、只是不对，属于最难查的一类。
+（`px_pass` 的 `execute` 以前正是把 load op 写死成 `Clear(TRANSPARENT)` 的，
+所以这条不是假想的风险。）
+
+实测：`opaque` 是 `clear`，`sky` 与 `transparent` 都是 **`load`** ⇒ 坑不在。
+`blit` 也是 `load`（读 `scene_color_a` 不该清它）。**清屏只发生一次，在 `opaque`。**
+
+⇒ 切片 1 拿到的是一份**正确的描述**：宿主若出错，就是宿主自己的错，
+不会是"文档说的和它以为的不一样"。
+
+⚠ 工具教训：`[System.IO.File]::ReadAllBytes` 用的是**进程的** cwd，不是 PowerShell `cd`
+之后的那个 ⇒ 相对路径会解析到 session 工作区去（这一轮就撞了一次）。
+本仓读产物要用 `(Resolve-Path …).Path` 或绝对路径。
