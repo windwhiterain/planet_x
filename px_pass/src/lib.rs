@@ -5,13 +5,14 @@ use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, Buffer, BufferBinding,
     BufferBindingType, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device,
-    Extent3d, FragmentState, IndexFormat, LoadOp, MultisampleState, Operations,
+    Extent3d, FragmentState, IndexFormat, LoadOp, MultisampleState, Operations, Origin3d,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment,
     RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipeline,
     RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor, TextureDimension as GpuDimension,
-    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState,
+    ShaderSource, ShaderStages, StoreOp, TexelCopyTextureInfo, Texture, TextureAspect,
+    TextureDescriptor, TextureDimension as GpuDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexBufferLayout,
+    VertexState,
 };
 
 pub const FRAGMENT_ENTRY: &str = "fs_main";
@@ -146,6 +147,11 @@ impl SizeRule {
 pub enum Use {
     RenderAttachment,
     TextureBinding,
+    /// 拷贝的**源**。⚠ 少了它，校验全过、管线全对，**拷贝那一刻才失败**，
+    /// 而报错指向纹理创建、不指向这条 pass（§131 之后加的 copy 那一档记着这条）。
+    CopySrc,
+    /// 拷贝的**目标**。同样必须在文档的 `resources` 那一栏声明出来。
+    CopyDst,
 }
 
 impl Use {
@@ -153,8 +159,11 @@ impl Use {
         match text {
             "render_attachment" => Ok(Use::RenderAttachment),
             "texture_binding" => Ok(Use::TextureBinding),
+            "copy_src" => Ok(Use::CopySrc),
+            "copy_dst" => Ok(Use::CopyDst),
             other => Err(format!(
                 "不认识的用途 '{other}'：这一版认 'render_attachment' 与 'texture_binding'\
+                 与 'copy_src' 与 'copy_dst'\
                  （storage_texture / storage_buffer 是 compute 那一档，还没接）"
             )),
         }
@@ -164,6 +173,8 @@ impl Use {
         match self {
             Use::RenderAttachment => "render_attachment",
             Use::TextureBinding => "texture_binding",
+            Use::CopySrc => "copy_src",
+            Use::CopyDst => "copy_dst",
         }
     }
 }
@@ -183,6 +194,19 @@ pub enum PassKind {
     Fullscreen,
     /// 一串几何：**画什么写在 pass 的 `draws` 里**（按名字），宿主解析成 GPU 句柄。
     Geometry,
+    /// **一次搬运**：`reads[0]` → `writes[0]`（`copy_texture_to_texture`）。
+    ///
+    /// ⚠ 它**不建管线、不开 render pass、不挂附件** —— 一条 copy 只做一件事：把一张图的内容
+    /// 搬到另一张。正因如此它不叫 blit：blit 是**画**（全屏三角 + 采样 + 混合），
+    /// 而"画"会在路上顺手做别的事（采样、缩放、调色）。名字一旦叫成 blit，
+    /// 迟早有人往里塞一个采样或者"顺手缩个放"，那时它就不再是一次搬运了。
+    ///
+    /// 为什么需要它（§131）：wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、
+    /// 又当资源绑进绑定组。于是"既要在主 pass 里对**真的**预通道深度做深度测试、
+    /// 又要让大气采样**当时那份**深度"这件事只有一条路：**先搬一份快照**。
+    /// 主 pass 照旧挂 `scene_depth`，采样那一方读 `scene_depth_sample`。
+    Copy,
+    /// 计算。⚠ 这一版执行器**没有** compute（`Plan::check` 当场拒）。
     Compute,
 }
 
@@ -191,6 +215,7 @@ impl PassKind {
         match self {
             PassKind::Fullscreen => "fullscreen",
             PassKind::Geometry => "geometry",
+            PassKind::Copy => "copy",
             PassKind::Compute => "compute",
         }
     }
@@ -199,9 +224,10 @@ impl PassKind {
         match text {
             "fullscreen" => Ok(PassKind::Fullscreen),
             "geometry" => Ok(PassKind::Geometry),
+            "copy" => Ok(PassKind::Copy),
             "compute" => Ok(PassKind::Compute),
             other => Err(format!(
-                "不认识的 pass 类型 '{other}'：这一版认 'fullscreen' / 'geometry' / 'compute'"
+                "不认识的 pass 类型 '{other}'：这一版认 'fullscreen' / 'geometry' / 'copy' / 'compute'"
             )),
         }
     }
@@ -810,6 +836,131 @@ impl Plan {
 
         for (index, pass) in self.passes.iter().enumerate() {
             let at = format!("第 {index} 条 pass '{}'", pass.label);
+            // ---- copy 先判（§131）----
+            //
+            // ⚠ 它**天生就没有附件**（一次搬运不画任何东西），所以"至少要有一个附件"那条
+            //    对它不成立；而它的 `writes` 说的是**搬运的目标**，不是颜色目标 ——
+            //    "没挂颜色附件却声明了写目标"那条对它同样不成立。顺序反了的话，
+            //    一条规规矩矩的 copy 会被这两条拦下，而真正的理由反而说不出口
+            //    （与下面 compute 那一段是同一个次序问题）。
+            if pass.kind == PassKind::Copy {
+                // 附件：一格都不许挂。⚠ 这是**当场拒**，不是"被忽略的字段"——
+                //    状态那一栏仍然必填，只是它必须写成"没有附件"那一种。
+                if pass.render.color != Attachment::None || pass.render.depth != Attachment::None {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy，却挂了附件（color={} / depth={}）：\
+                         拷贝不画附件，状态那一栏要写成『没有附件』那一种\
+                         （`color=none|depth=none|…`）。往拷贝上挂附件是当场拒，不是被忽略的字段",
+                        pass.render.color.name(),
+                        pass.render.depth.name()
+                    ));
+                }
+                if pass.reads.len() != 1 || pass.writes.len() != 1 {
+                    return Err(format!(
+                        "{at} 读 {} 张、写 {} 张：一条 copy 就是**一次搬运**，\
+                         恰好一读一写（读了 [{}]／写了 [{}]）",
+                        pass.reads.len(),
+                        pass.writes.len(),
+                        pass.reads.join(" / "),
+                        pass.writes.join(" / ")
+                    ));
+                }
+                // ⚠ 读写同一个名字要在**用途那几条之前**判：它是更基本的一条错，
+                //    先说"两端不能是同一张"比先说"这一端少了个 copy_dst"更贴切。
+                if pass.reads[0] == pass.writes[0] {
+                    return Err(format!(
+                        "{at} 读写的都是 '{}'：一次搬运的两端不能是同一张图",
+                        pass.reads[0]
+                    ));
+                }
+                if !pass.draws.is_empty() {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy，却声明了 {} 笔 draws：搬运不画东西，\
+                         要画几何就该是一条 geometry pass",
+                        pass.draws.len()
+                    ));
+                }
+                if !pass.shader.trim().is_empty() || !pass.entry.trim().is_empty() {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy，却给了 shader/entry：拷贝不建管线。\
+                         这两栏是 fullscreen 的（片元阶段），而几何 pass 的片元阶段属于**材质**"
+                    ));
+                }
+                if !pass.vertex_shader.trim().is_empty() || !pass.vertex_entry.trim().is_empty() {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy，却给了 vertex_shader/vertex_entry：\
+                         拷贝没有顶点阶段（它一个三角形都不画）"
+                    ));
+                }
+                if !pass.params.is_empty() || !pass.slots.is_empty() {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy，却给了参数块（{} 字节）/ 格位（{} 个）：\
+                         拷贝没有绑定组（参数与格位是全屏 pass 那两栏）",
+                        pass.params.len(),
+                        pass.slots.len()
+                    ));
+                }
+                // ---- 两端的**规格**：能比的都在这儿比掉 ----
+                //
+                // ⚠ 只比格式是不够的：尺寸/层数/mip 对不上时，`copy_texture_to_texture`
+                //    会在**执行那一刻**才失败，而报错指向纹理创建、不指向这条 pass ——
+                //    离病因很远。这里把它们一次比完（池里建出来的纹理一律 1 层 1 级 mip，
+                //    所以层数与 mip 是**构造保证**；尺寸与格式是文档里能写的不一样的两样）。
+                let source_name = pass.reads[0].as_str();
+                let target_name = pass.writes[0].as_str();
+                let source = self.resource(source_name);
+                let target = self.resource(target_name);
+                if let Some(source) = source {
+                    if !source.usage.contains(&Use::CopySrc) {
+                        return Err(format!(
+                            "{at} 读 '{source_name}'，而它的 usage 里没有 'copy_src'：\
+                             拷贝的两端都要在**文档的 `resources` 那一栏**声明用途\
+                             （源要 copy_src、目标要 copy_dst）。少了它这一条 pass 会一路\
+                             过到执行期才失败，而那时的报错指向纹理创建、不指向这里"
+                        ));
+                    }
+                    if !source.usage.contains(&Use::TextureBinding) {
+                        // 只搬不给人看是合法的（例如中间快照），所以这里**不要求**它；
+                        // 但反过来"谁要读它"那一条在别处管。这里只把该说的说清：
+                        // 源不需要 texture_binding，一个用途都不缺才放行。
+                    }
+                }
+                if let Some(target) = target {
+                    if !target.usage.contains(&Use::CopyDst) {
+                        return Err(format!(
+                            "{at} 写 '{target_name}'，而它的 usage 里没有 'copy_dst'：\
+                             拷贝的两端都要在**文档的 `resources` 那一栏**声明用途\
+                             （源要 copy_src、目标要 copy_dst）"
+                        ));
+                    }
+                }
+                if let (Some(source), Some(target)) = (source, target) {
+                    if source.format != target.format {
+                        return Err(format!(
+                            "{at} 把 '{source_name}'（{}）搬到 '{target_name}'（{}）：\
+                             格式不同的两张图不能直接拷（这一版不做格式转换）",
+                            source.format.name(),
+                            target.format.name()
+                        ));
+                    }
+                    // ⚠ 尺寸规则也要在这里比一遍：`check` 拿不到这一帧的尺寸，
+                    //    所以它比的是**规则**（`view` / `half` / `WxH`）。
+                    //    真正权威的那一次在 `execute` 里 —— 那时两张纹理都建出来了，
+                    //    宽/高/格式/层数/mip 逐格比（见 `copy_texture`）。
+                    if source.size.name() != target.size.name() {
+                        return Err(format!(
+                            "{at} 把 '{source_name}'（尺寸规则 {}）搬到 '{target_name}'（尺寸规则 {}）：\
+                             规则不同的两张在别的帧尺寸下就可能不一样大，而尺寸不同的一对\
+                             要按 min 裁着拷 —— 那是另一件事。这一版只搬**同规格**的两张\
+                             （层数与 mip 都是 1，由池子的建法保证）",
+                            source.size.name(),
+                            target.size.name()
+                        ));
+                    }
+                }
+                // ⚠ 读/写同一个名字在上面判过了（那一条更基本）。
+                continue;
+            }
             // ---- 附件（§121 第 1 件）----
             //
             // ⚠ compute 先判：它**天生就没有附件**（不画三角形），所以"至少要有一个附件"
@@ -880,6 +1031,7 @@ impl Plan {
             // ---- 类型各自的形状 ----
             match pass.kind {
                 PassKind::Compute => unreachable!("上面已经 return 了"),
+                PassKind::Copy => unreachable!("copy 在上面那一支就 continue 了"),
                 PassKind::Fullscreen => {
                     if !pass.draws.is_empty() {
                         return Err(format!(
@@ -1110,7 +1262,40 @@ struct Pooled {
     width: u32,
     height: u32,
     format: TextureFormat,
+    usage: TextureUsages,
     view: TextureView,
+    /// 纹理本身。⚠ 视图给不了纹理：`TextureView` 没有父纹理的访问器（查过 API），
+    /// 而 `copy_texture_to_texture` 要的正是纹理。所以池子两样都留着 ——
+    /// 拷贝那一档就是靠这一格落地的。
+    texture: Texture,
+}
+
+/// 拷贝时的**面**：深度格式只认 `DepthOnly`（`All` 对纯深度格式是非法的），
+/// 其它格式用 `All`。⚠ 这一格写错的症状是"拷贝那一刻才报"，所以它跟着格式一起决定。
+fn copy_aspect(format: TextureFormat) -> TextureAspect {
+    if format.has_depth_aspect() {
+        TextureAspect::DepthOnly
+    } else {
+        TextureAspect::All
+    }
+}
+
+/// 文档里声明的用途 → wgpu 的 `TextureUsages`。
+///
+/// ⚠ 这是**唯一**一处决定池子里那张纹理带哪些用途的地方：声明什么就建什么。
+/// 少了 `copy_src` / `copy_dst` 两档，纹理建出来就拷不了，而失败发生在拷贝那一刻
+/// （报错指向纹理创建、不指向那条 pass）—— 所以文档的 `resources` 那一栏必须声明齐。
+fn texture_usage(resource: &ResourceSpec) -> TextureUsages {
+    let mut usage = TextureUsages::empty();
+    for declared in &resource.usage {
+        usage |= match declared {
+            Use::RenderAttachment => TextureUsages::RENDER_ATTACHMENT,
+            Use::TextureBinding => TextureUsages::TEXTURE_BINDING,
+            Use::CopySrc => TextureUsages::COPY_SRC,
+            Use::CopyDst => TextureUsages::COPY_DST,
+        };
+    }
+    usage
 }
 
 #[derive(Default)]
@@ -1149,38 +1334,73 @@ impl Executor {
         width: u32,
         height: u32,
     ) -> TextureView {
+        self.pooled(device, resource, width, height).view.clone()
+    }
+
+    /// 池子里那张纹理（没有就按文档声明的规格建一张）。
+    ///
+    /// ⚠ 复用条件里带了 `usage`：用途是**文档说了算**的，第二帧要是把 `copy_src` 加上了，
+    /// 复用第一帧那张就拷不了 —— 那种失败离病因很远，所以用途进复用条件。
+    fn resource_texture(
+        &mut self,
+        device: &Device,
+        resource: &ResourceSpec,
+        width: u32,
+        height: u32,
+    ) -> Texture {
+        self.pooled(device, resource, width, height).texture.clone()
+    }
+
+    /// 该资源的池子条目（必要时新建）。**视图与纹理是同一份** ——
+    /// 视图由这张纹理建出来、缓存在一起，所以"同一张图"的两次解析拿到的是**同一个视图对象**
+    /// （`TextureView` 的相等是对象相等，`execute` 里那条"读写同一个视图"的守卫靠它）。
+    fn pooled(
+        &mut self,
+        device: &Device,
+        resource: &ResourceSpec,
+        width: u32,
+        height: u32,
+    ) -> &Pooled {
         let format = resource.format.to_wgpu();
-        if let Some(pooled) = self.pool.get(&resource.name) {
-            if pooled.width == width && pooled.height == height && pooled.format == format {
-                return pooled.view.clone();
+        let usage = texture_usage(resource);
+        let stale = match self.pool.get(&resource.name) {
+            Some(pooled) => {
+                pooled.width != width
+                    || pooled.height != height
+                    || pooled.format != format
+                    || pooled.usage != usage
             }
-        }
-        let usage = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
-        let texture: Texture = device.create_texture(&TextureDescriptor {
-            label: Some(resource.name.as_str()),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: GpuDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&TextureViewDescriptor::default());
-        self.pool.insert(
-            resource.name.clone(),
-            Pooled {
-                width,
-                height,
+            None => true,
+        };
+        if stale {
+            let texture: Texture = device.create_texture(&TextureDescriptor {
+                label: Some(resource.name.as_str()),
+                size: Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: GpuDimension::D2,
                 format,
-                view: view.clone(),
-            },
-        );
-        view
+                usage,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&TextureViewDescriptor::default());
+            self.pool.insert(
+                resource.name.clone(),
+                Pooled {
+                    width,
+                    height,
+                    format,
+                    usage,
+                    view,
+                    texture,
+                },
+            );
+        }
+        self.pool.get(&resource.name).expect("刚插进去的")
     }
 
     /// 兜底贴图：1×1 白（cube 是 1×1×6）。
@@ -1623,6 +1843,57 @@ impl Executor {
         let mut audit: Vec<String> = Vec::new();
 
         for (index, pass) in plan.passes.iter().enumerate() {
+            // ---- copy（§131）：一次搬运。**不建管线、不开 render pass、不挂附件** ----
+            //
+            // ⚠ 帧序 = 数组顺序：执行器不替它排序，也不为它插入任何别的一步
+            //    （"谁先谁后"是帧表说的，不是执行器猜的）。
+            if pass.kind == PassKind::Copy {
+                let source_name = pass.reads.first().ok_or_else(|| {
+                    format!("第 {index} 条 pass '{}' 是 copy，却没给 reads", pass.label)
+                })?;
+                let target_name = pass.writes.first().ok_or_else(|| {
+                    format!("第 {index} 条 pass '{}' 是 copy，却没给 writes", pass.label)
+                })?;
+                let (source, target) = self.copy_pair(
+                    device,
+                    plan,
+                    frame,
+                    index,
+                    &pass.label,
+                    source_name,
+                    target_name,
+                )?;
+                let extent = Extent3d {
+                    width: source.width(),
+                    height: source.height(),
+                    depth_or_array_layers: source.depth_or_array_layers(),
+                };
+                encoder.copy_texture_to_texture(
+                    TexelCopyTextureInfo {
+                        texture: &source,
+                        mip_level: 0,
+                        origin: Origin3d::ZERO,
+                        aspect: copy_aspect(source.format()),
+                    },
+                    TexelCopyTextureInfo {
+                        texture: &target,
+                        mip_level: 0,
+                        origin: Origin3d::ZERO,
+                        aspect: copy_aspect(target.format()),
+                    },
+                    extent,
+                );
+                audit.push(format!(
+                    "pass {index} '{}'（copy）搬运 '{source_name}' → '{target_name}'｜{}×{} {:?}\
+                     ｜不建管线、不开 render pass",
+                    pass.label,
+                    extent.width,
+                    extent.height,
+                    source.format()
+                ));
+                continue;
+            }
+
             // ---- 颜色目标：只有**挂了颜色附件的** pass 才有颜色目标 ----
             //
             // ⚠ 深度-only 的 prepass 没有颜色目标，所以 `writes` 也空着 ——
@@ -1879,6 +2150,78 @@ impl Executor {
         Ok(audit.join("\n"))
     }
 
+    /// 一条 copy 的两端：**都必须是文档声明的资源**（池子里那两张纹理）。
+    ///
+    /// ⚠ 为什么宿主给的外部目标在这儿不行：`External` 只给一个 `TextureView`
+    /// （附件与绑定组要的是它），而 `copy_texture_to_texture` 要的是**纹理本身** ——
+    /// 视图没有父纹理的访问器。所以拷贝的两端只能走池子；真要拷到宿主的图上，
+    /// 那是"宿主的目标也得按资源声明一遍"的另一件事，不是这里悄悄的第二次解析。
+    ///
+    /// ⚠ 这里把两张**已经建出来的**纹理逐格比一遍（宽/高/格式/层数/mip）：
+    /// `Plan::check` 只能比文档里的**规格**，而这里比的是实物 —— 拷贝那一刻的失败
+    /// 离病因太远（报错指向纹理创建），所以宁可在这里当场说清。
+    #[allow(clippy::too_many_arguments)]
+    fn copy_pair(
+        &mut self,
+        device: &Device,
+        plan: &Plan,
+        frame: &Frame<'_>,
+        index: usize,
+        label: &str,
+        source_name: &str,
+        target_name: &str,
+    ) -> Result<(Texture, Texture), String> {
+        let pick = |name: &str, what: &str| -> Result<ResourceSpec, String> {
+            plan.resource(name).cloned().ok_or_else(|| {
+                format!(
+                    "第 {index} 条 pass '{label}'（copy）{what} '{name}'：\
+                     文档没声明这个资源（声明了的：{}）。拷贝的两端都要是**文档声明的资源** ——\
+                     宿主给的外部目标只有视图，而拷贝要的是纹理本身",
+                    plan.name_list()
+                )
+            })
+        };
+        let source = pick(source_name, "的源")?;
+        let target = pick(target_name, "的目标")?;
+        let (width, height) = source.size.resolve(frame.width, frame.height);
+        let source_texture = self.resource_texture(device, &source, width, height);
+        let (target_width, target_height) = target.size.resolve(frame.width, frame.height);
+        let target_texture = self.resource_texture(device, &target, target_width, target_height);
+
+        let source_shape = (
+            source_texture.width(),
+            source_texture.height(),
+            source_texture.format(),
+            source_texture.depth_or_array_layers(),
+            source_texture.mip_level_count(),
+        );
+        let target_shape = (
+            target_texture.width(),
+            target_texture.height(),
+            target_texture.format(),
+            target_texture.depth_or_array_layers(),
+            target_texture.mip_level_count(),
+        );
+        if source_shape != target_shape {
+            return Err(format!(
+                "第 {index} 条 pass '{label}'（copy）搬不了：'{source_name}' 是 {}×{} {:?} \
+                 {} 层 {} 级 mip，'{target_name}' 是 {}×{} {:?} {} 层 {} 级 mip —— \
+                 两张图必须逐格同规格（这一版不做缩放、不做格式转换，也不裁着拷）",
+                source_shape.0,
+                source_shape.1,
+                source_shape.2,
+                source_shape.3,
+                source_shape.4,
+                target_shape.0,
+                target_shape.1,
+                target_shape.2,
+                target_shape.3,
+                target_shape.4
+            ));
+        }
+        Ok((source_texture, target_texture))
+    }
+
     fn resolve(
         &mut self,
         device: &Device,
@@ -2124,12 +2467,13 @@ mod tests {
         assert!(seen_text.iter().any(|text| text.contains("depth=clear(0.5)")));
     }
 
-    /// 单个枚举的每一档也要能往返（`PassKind` / `Format` 同样进文档）。
+    /// 单个枚举的每一档也要能往返（`PassKind` / `Format` / `Use` 同样进文档）。
     #[test]
     fn the_document_enums_round_trip_variant_by_variant() {
         for kind in [
             PassKind::Fullscreen,
             PassKind::Geometry,
+            PassKind::Copy,
             PassKind::Compute,
         ] {
             assert_eq!(PassKind::parse(kind.name()).unwrap(), kind, "{}", kind.name());
@@ -2140,6 +2484,16 @@ mod tests {
             Format::Depth32Float,
         ] {
             assert_eq!(Format::parse(format.name()).unwrap(), format);
+        }
+        // ⚠ `copy_src` / `copy_dst` 两档必须能往返：它们是 copy 那条 pass 的**前提**
+        //    （文档的 resources 那一栏要写得出这两个词，纹理才建得出对应用途）。
+        for usage in [
+            Use::RenderAttachment,
+            Use::TextureBinding,
+            Use::CopySrc,
+            Use::CopyDst,
+        ] {
+            assert_eq!(Use::parse(usage.name()).unwrap(), usage, "{}", usage.name());
         }
         for compare in [
             Compare::Never,
@@ -2387,6 +2741,314 @@ mod tests {
         let list = name_list(["planet", "atmosphere"].into_iter());
         assert_eq!(list, "planet / atmosphere");
         assert_eq!(name_list(std::iter::empty()), "（一个都没有）");
+    }
+
+    // -----------------------------------------------------------------------
+    // copy（§131）：一次搬运。**形状那几条先拒，像素那一条真跑**
+    // -----------------------------------------------------------------------
+
+    /// 一条规矩的 copy：两端都在 `resources` 里、用途声明齐、状态写着"没有附件"。
+    fn copy_plan() -> Plan {
+        Plan {
+            layout: Layout::default(),
+            resources: vec![
+                ResourceSpec {
+                    name: "src".to_string(),
+                    format: Format::Rgba8UnormSrgb,
+                    size: SizeRule::View,
+                    usage: vec![Use::RenderAttachment, Use::CopySrc, Use::TextureBinding],
+                },
+                ResourceSpec {
+                    name: "dst".to_string(),
+                    format: Format::Rgba8UnormSrgb,
+                    size: SizeRule::View,
+                    usage: vec![Use::RenderAttachment, Use::CopyDst, Use::TextureBinding],
+                },
+            ],
+            passes: vec![PassPlan {
+                kind: PassKind::Copy,
+                label: "copy".to_string(),
+                reads: vec!["src".to_string()],
+                writes: vec!["dst".to_string()],
+                render: RenderState::parse(
+                    "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+                )
+                .expect("copy 的状态就是『没有附件』那一种"),
+                ..Default::default()
+            }],
+        }
+    }
+
+    /// 一条 copy 的形状：**恰好一读一写**、不挂附件、没有 draws/管线两栏/参数两栏。
+    /// 每一条都要指出**该去哪一栏**改 —— 只给罪名不够。
+    #[test]
+    fn a_copy_pass_is_exactly_one_read_and_one_write_and_nothing_else() {
+        assert!(copy_plan().check().is_ok(), "{:?}", copy_plan().check());
+
+        // 两端都在，先确认基线没写错。
+        let mut pass = copy_plan();
+        pass.passes[0].reads.push("dst".to_string());
+        let err = pass.check().expect_err("两读 ⇒ 拒");
+        assert!(err.contains("恰好一读一写"), "{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].writes.push("src".to_string());
+        let err = pass.check().expect_err("两写 ⇒ 拒");
+        assert!(err.contains("恰好一读一写"), "{err}");
+
+        // 挂附件：**当场拒**（不是被忽略的字段）。
+        let mut pass = copy_plan();
+        pass.passes[0].render.color =
+            Attachment::Clear(Color::new(0.0, 0.0, 0.0, 1.0));
+        let err = pass.check().expect_err("挂了颜色附件 ⇒ 拒");
+        assert!(err.contains("color=none"), "要指出那一栏该怎么写：{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].render.depth = Attachment::Clear(0.0);
+        pass.passes[0].depth_target = Some("src".to_string());
+        let err = pass.check().expect_err("挂了深度附件 ⇒ 拒");
+        assert!(err.contains("depth=none"), "要指出那一栏该怎么写：{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].draws = vec![draw("planet", "white")];
+        let err = pass.check().expect_err("copy 带 draws ⇒ 拒");
+        assert!(err.contains("draws"), "{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].shader = "fragment".to_string();
+        let err = pass.check().expect_err("copy 带 shader ⇒ 拒");
+        assert!(err.contains("不建管线"), "{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].vertex_shader = TRIANGLE_VERTEX.to_string();
+        let err = pass.check().expect_err("copy 带顶点阶段 ⇒ 拒");
+        assert!(err.contains("vertex_shader"), "{err}");
+
+        let mut pass = copy_plan();
+        pass.passes[0].params = vec![0; 16];
+        let err = pass.check().expect_err("copy 带参数块 ⇒ 拒");
+        assert!(err.contains("绑定组"), "{err}");
+
+        // 读写的名字一样：一次搬运的两端不能是同一张图。
+        let mut pass = copy_plan();
+        pass.passes[0].writes = vec!["src".to_string()];
+        let err = pass.check().expect_err("读写同一张 ⇒ 拒");
+        assert!(err.contains("同一张图"), "{err}");
+    }
+
+    /// `copy_src` / `copy_dst` **必须在文档的 resources 那一栏声明**：少了它们，
+    /// 纹理建出来就拷不了，而失败发生在拷贝那一刻（报错指向纹理创建、不指向这条 pass）。
+    #[test]
+    fn a_copy_needs_the_declared_usage_on_both_ends() {
+        let mut pass = copy_plan();
+        pass.resources[0].usage = vec![Use::RenderAttachment];
+        let err = pass.check().expect_err("源没有 copy_src ⇒ 拒");
+        assert!(err.contains("copy_src"), "{err}");
+        assert!(err.contains("resources"), "要指出去哪一栏加：{err}");
+
+        let mut pass = copy_plan();
+        pass.resources[1].usage = vec![Use::RenderAttachment];
+        let err = pass.check().expect_err("目标没有 copy_dst ⇒ 拒");
+        assert!(err.contains("copy_dst"), "{err}");
+
+        // 格式不同 / 尺寸规则不同：也在这里拒（权威的那一次在 execute 里比实物）。
+        let mut pass = copy_plan();
+        pass.resources[1].format = Format::Rgba16Float;
+        let err = pass.check().expect_err("格式不同 ⇒ 拒");
+        assert!(err.contains("格式不同"), "{err}");
+
+        let mut pass = copy_plan();
+        pass.resources[1].size = SizeRule::Half;
+        let err = pass.check().expect_err("尺寸规则不同 ⇒ 拒");
+        assert!(err.contains("尺寸规则"), "{err}");
+    }
+
+    /// **判据（要真设备）**：一次拷贝真的搬了东西。
+    ///
+    /// 形状：① 一条深度-only 的几何 pass 在盘内写下 z=0.5；② 一次 copy 把那张深度搬到
+    /// `depth_copy`；③ 第三条 pass 用 `depth_copy` 做深度测试、画一个**更远**的三角（z=0.2）。
+    /// - 拷贝生效 ⇒ `0.2 >= 0.5` 不成立 ⇒ 三角被挡掉 ⇒ 盘内是**清屏色**；
+    /// - 拷贝没生效（目标还是一张全 0 的新图）⇒ `0.2 >= 0.0` 成立 ⇒ 盘内是**材质色**。
+    /// 对照：把 copy 那一条从计划里拿掉，同一个计划必须画出材质色。
+    /// 两条一起看，判据才落在"**搬运**"这件事上，而不是"pass 跑过了"。
+    #[test]
+    fn a_copy_pass_really_moves_a_depth_texture() {
+        let (device, queue) = test_device();
+        let mut executor = Executor::new();
+
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据 copy 目标"),
+            size: Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据 tint 布局"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let material = test_material(&device, &layout, [1.0, 1.0, 1.0, 1.0]);
+        let materials = vec![resolved_material("white", &material, &layout, Cull::None)];
+
+        let near = vertex_buffer(&device, 0.5);
+        let far = vertex_buffer(&device, 0.2);
+        let indices = index_buffer(&device);
+        let attribute = TINT_ATTRIBUTES;
+        let geometry_layout = || VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attribute,
+        };
+        let geometries = vec![
+            ResolvedGeometry {
+                name: "near",
+                vertices: Some((&near, geometry_layout())),
+                indices: Some((&indices, IndexFormat::Uint32, 3)),
+                vertex_count: 3,
+            },
+            ResolvedGeometry {
+                name: "far",
+                vertices: Some((&far, geometry_layout())),
+                indices: Some((&indices, IndexFormat::Uint32, 3)),
+                vertex_count: 3,
+            },
+        ];
+
+        let depth_state = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw";
+        let test_state =
+            "color=clear(0,1,0,1)|depth=load|depth_write=false|compare=greater_equal|winding=ccw";
+        let depth_only = |label: &str, geometry: &str, depth_target: &str| PassPlan {
+            kind: PassKind::Geometry,
+            label: label.to_string(),
+            vertex_shader: TRIANGLE_VERTEX.to_string(),
+            vertex_entry: "vs_main".to_string(),
+            writes: Vec::new(),
+            draws: vec![draw(geometry, "white")],
+            render: RenderState::parse(depth_state).expect("深度-only 的状态"),
+            depth_target: Some(depth_target.to_string()),
+            ..Default::default()
+        };
+        let test = |depth_target: &str| PassPlan {
+            kind: PassKind::Geometry,
+            label: "test".to_string(),
+            vertex_shader: TRIANGLE_VERTEX.to_string(),
+            vertex_entry: "vs_main".to_string(),
+            writes: vec!["out".to_string()],
+            draws: vec![draw("far", "white")],
+            render: RenderState::parse(test_state).expect("主 pass 的状态"),
+            depth_target: Some(depth_target.to_string()),
+            ..Default::default()
+        };
+        let copy = PassPlan {
+            kind: PassKind::Copy,
+            label: "copy".to_string(),
+            reads: vec!["depth".to_string()],
+            writes: vec!["depth_copy".to_string()],
+            render: RenderState::parse(
+                "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+            )
+            .expect("copy 的状态"),
+            ..Default::default()
+        };
+        let depth_resources = || {
+            vec![
+                ResourceSpec {
+                    name: "depth".to_string(),
+                    format: Format::Depth32Float,
+                    size: SizeRule::View,
+                    usage: vec![Use::RenderAttachment, Use::CopySrc],
+                },
+                ResourceSpec {
+                    name: "depth_copy".to_string(),
+                    format: Format::Depth32Float,
+                    size: SizeRule::View,
+                    usage: vec![Use::RenderAttachment, Use::CopyDst, Use::TextureBinding],
+                },
+            ]
+        };
+
+        // 有拷贝：三角被挡掉 ⇒ 盘内是清屏色（纯绿）。
+        let with_copy = Plan {
+            layout: Layout::default(),
+            resources: depth_resources(),
+            passes: vec![
+                depth_only("write", "near", "depth"),
+                copy.clone(),
+                test("depth_copy"),
+            ],
+        };
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let sets = vec![
+            Vec::new(),
+            Vec::new(),
+            vec![External {
+                name: "out",
+                role: Role::Write,
+                view: &view,
+                format: TextureFormat::Rgba8UnormSrgb,
+            }],
+        ];
+        let (inside, outside) = run_case_with_sets(
+            &device, &queue, &mut executor, &with_copy, &target, &geometries, &materials, &sets,
+        );
+        assert_eq!(
+            (inside, outside),
+            (GREEN, GREEN),
+            "拷贝生效 ⇒ 更远的三角（0.2）过不了拷贝过来的深度（0.5）"
+        );
+
+        // 对照：没有拷贝 ⇒ 目标是一张全 0 的新图 ⇒ 三角画得出来（纯白在盘内）。
+        // ⚠ 换一个**新执行器**：池子是执行器上的，同一个执行器里 `depth_copy` 会**复用**
+        //    上一轮那张纹理（还带着 0.5），对照就变成了"拷贝的残留"，测不出东西。
+        let mut fresh = Executor::new();
+        let without_copy = Plan {
+            layout: Layout::default(),
+            resources: depth_resources(),
+            passes: vec![
+                depth_only("write", "near", "depth"),
+                test("depth_copy"),
+            ],
+        };
+        let sets = vec![
+            Vec::new(),
+            vec![External {
+                name: "out",
+                role: Role::Write,
+                view: &view,
+                format: TextureFormat::Rgba8UnormSrgb,
+            }],
+        ];
+        let (inside, outside) = run_case_with_sets(
+            &device,
+            &queue,
+            &mut fresh,
+            &without_copy,
+            &target,
+            &geometries,
+            &materials,
+            &sets,
+        );
+        assert_eq!(
+            (inside, outside),
+            (WHITE, GREEN),
+            "没有拷贝时那张深度是全 0 ⇒ 三角照画（这条对照证明上面那个绿是拷贝造成的）"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2641,10 +3303,28 @@ fn fs_main() -> @location(0) vec4<f32> {
             view: &view,
             format: TextureFormat::Rgba8UnormSrgb,
         }]];
+        run_case_with_sets(
+            device, queue, executor, plan, target, geometries, materials, &sets,
+        )
+    }
+
+    /// 同上，但**外部目标表由调用方给**（多 pass 的计划里，"out" 那一份要落在
+    /// 真正写它的那条 pass 的下标上 —— 表是按 pass 下标查的）。
+    #[allow(clippy::too_many_arguments)]
+    fn run_case_with_sets(
+        device: &Device,
+        queue: &wgpu::Queue,
+        executor: &mut Executor,
+        plan: &Plan,
+        target: &Texture,
+        geometries: &[ResolvedGeometry<'_>],
+        materials: &[ResolvedMaterial<'_>],
+        sets: &[Vec<External<'_>>],
+    ) -> ([u8; 4], [u8; 4]) {
         let frame = Frame {
             width: SIDE,
             height: SIDE,
-            sets: &sets,
+            sets,
             geometries,
             materials,
         };
