@@ -89,6 +89,22 @@ descriptor 闸门端到端：拿第 0 步那份没有 descriptor 的产物请求
 **下一步的位置**：`art/11-graph.md` §76 开工序的第 3 步（**pass 图**：文档里的 pass 表 + 一个执行器系统）
 —— 那条线在 `.worktrees/pass-table` 里由另一个会话并行做，动手前先跟那边对齐。
 
+#### 再续（同一天）：尾巴三件已提交 **`7f8e144`**（另加探针修复 **`9c0add2`**）
+
+细节在 **`art/08-renderer.md` §82**：
+
+1. **探针镜像**：`px_probe/src/params.rs` 不再手抄字节布局 —— 结构体只管**值**，
+   **名字 ↔ 字节**来自 `clouds.wgsl` 的契约。判据：`field_dual` 三组读数**一字不差**
+   （⇒ 契约打包与旧 `encase` 布局逐字节等价）；`encase` / `glam` 两个依赖删掉。
+2. **窗口模式复验**：`--sheet`（出图 4.17 MB）、`--view`（46 条管线 0 失败）、`--show`（推送生效、同键不重建）✓。
+   ⚠ 记下一条**窗口模式下的 Vulkan 校验错**（`vkAcquireNextImageKHR` semaphore，10 s 6 条）：
+   呈现路径、**不给场景也复现** ⇒ 不是这一轮引入；离线服务无 swapchain 所以干净；**没做二分**。
+3. **笔记清理**：`11-graph.md` 里那份 §79 副本已删（原地留 5 行指路），三处引用同步。
+
+⚠ **还欠着的**：`gradient` 的第 8 条（归因 check 的 2.259e-1）用户裁决**记账、不追**（§81.6 末）；
+探针的 `field_dual` / `gradient` 是手动跑的，**没进任何自动门**（本仓的规矩：探针不进 `cargo test`，
+退出码才是判据）—— 也就是说：**谁会想到去跑它，谁才会发现它红了**，这一轮就是这么发现的。
+
 ### 9.1.1 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 
 **在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
