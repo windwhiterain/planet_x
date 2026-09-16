@@ -659,6 +659,34 @@ planet part 上多一个 `shadows = 1`（内容仍不含云 ⇒ 不违反 §107�
 | `globals.time` | 挂钟（`elapsed_secs_wrapped`）。四档内容的 `wind = wind_skin = 0` ⇒ 与时间无关；**只有 `orbit-soft-wind` 不逐帧可复现** |
 | ⚠ sRGB 往返 | 主纹理硬件编码 → blit 采样时硬件解码 → 输出再编码。`encode(decode(b)) == b` 逐字节成立**是驱动相关的**，必须实测（或者绕开：把最终字节写成非 sRGB 视图） |
 
+#### §110.1.1 ⚠ `view_from_world` **不许**用解析逆（实测，不是推测）
+
+Bevy 那条链是 `view_from_world = world_from_view.inverse()`，而 glam 走的是
+**通用余子式求逆**（`f32/sse2/mat4.rs::inverse_checked`，源自 glm 的 `glm_mat4_inverse`）。
+刚体变换明明有更省事的解析逆 `[Rᵀ | −Rᵀt]` —— **但它不是同一个数**：
+
+```
+case 0（默认相机）  通用逆 c1.y = 3E302109 ／ 解析逆 = 3E302108   （差 1 ulp）
+                    通用逆 c3.z = C04CA664 ／ 解析逆 = C04CA662   （差 2 ulp）
+                    另有若干 −0.0 与 +0.0 的差别
+```
+
+⇒ 移植件必须把 glam 那 40 行余子式**连括号一起抄**。省这一步 = 顶点裁剪坐标差 1–2 ulp
+= 42k 个顶点里总有那么几个落到另一侧 = 逐字节判据红，而且**归因不到**（正是 §65 那类
+"差 20–30 个像素、至今没归因"的来源）。
+
+仪器：`px_render/tests/view_oracle.rs`（`#[ignore]`），导出两份：
+- `target/oracle/bevy-view-vectors.txt` —— **6 组** `(输入 → glam 通用逆)` 的**位模式**，
+  混了纯平移、带缩放旋转、以及非正交的一般矩阵（免得移植件只对刚体成立）；
+- 一段给人看的读数：默认相机的 `world_from_view` / `view_from_world` / `clip_from_view` /
+  `clip_from_world`，以及 `clip_from_view` 与 `exposure` 的位模式。
+
+顺带被这次实测钉住的两格（都在 §110.1 那张表里，这里给位模式好对账）：
+`perspective_infinite_reverse_rh(π/4, 1.5, 0.1)` 的 `c0.x = 3FCE034C`、`c1.y = 401A8279`、
+`c2.w = BF800000`、`c3.z = 3DCCCCCD`；`exposure = f32::exp2(-9.7)/1.2` 的位模式是
+**`3A835274`**（≈1.001907978207e-3）—— ⚠ 它**不是** f64 那个值（1.001907888464288e-3）
+取整，必须按 f32 表达式算。
+
 ### §110.2 影子那一档的判据强度
 
 `orbit-bare-shadow` 这条判据一旦过了，等价于同时钉住：6 面 cube 影子图的**渲染**（每面一个 pass、
