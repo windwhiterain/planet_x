@@ -1046,3 +1046,25 @@ aspect 位模式 `3FC00000`、`position` 的 `00000000 3F0CCCCD 4049999A`、
 1. **必须先写文件**，且给出确切落点与 `mod` 行；
 2. 诊断心跳是 `Get-Process cargo,rustc` —— **既没写文件、又没有构建进程**的 agent，
    就是在空转，不是在努力。
+
+### §109.5 更正：`ClusteredLight` 是 **80 字节**，不是 64
+
+§109.2 那张表里写的是"struct = 64 B"，**错了**。实际算一遍：
+
+```
+light_custom_data          vec4<f32>   16   @0
+color_inverse_square_range vec4<f32>   16   @16
+position_radius            vec4<f32>   16   @32
+flags / shadow_depth_bias / shadow_normal_bias / spot_light_tan_angle
+soft_shadow_size / shadow_map_near_z / decal_index / range
+                           7 × 4 = 28       @48..76
+按 WGSL 的 16 字节对齐补到                    80
+```
+
+⇒ **80 字节**。这个错来自调研报告里那句"3× vec4 + 7 scalars → 64 bytes (44 → padded)"——
+`44` 那个数不知从哪来，`64` 也是拍的。**而我一度把它抄进了自己的哨兵断言**
+（`assert_eq!(size_of::<ClusteredLight>(), 64)`），是那条门把它抓出来的。
+
+⚠ 与 §110.4 同族，但更值得记：**判据要自己算，不要抄二手结论**。
+§110.4 那次是"抄了一个差不多的半径"，这次是"抄了一个差不多的结构大小"。
+两次都是**绿的假判据**——如果我没写那条哨兵，`64` 会一直躺在笔记里当权威。
