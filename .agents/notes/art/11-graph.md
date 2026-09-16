@@ -633,7 +633,85 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
   **在 Bevy 之内换路**（§74.4 (b)），不是换掉 Bevy。
 - **Inspector / 图编辑器**：裁决明确不要。
 
-### §74.6 下一步（裁决全部到齐后的开工顺序）
+## §75 「动态 render graph」与裸 wgpu（2026-09-16 追问）
+
+**结论**：**能**，而且是**三层阶梯**，且**最便宜的两层都在 Bevy 里面** ——
+关键事实是 **Bevy 已经把 wgpu 的 encoder 交到我们手上了**。
+
+| 台阶 | 做法 | 拿到什么 | 代价 |
+|---|---|---|---|
+| **L1｜Bevy 内一个执行器系统**（§70 R1） | 数据 pass 表 + 一个系统，`begin_tracked_render_pass` | 图的形状完全由数据决定；换文档 = 换图；不重编不重启 | 中 |
+| **L2｜在 Bevy 的帧里编裸 wgpu 命令** ⭐ **推荐把执行器写成这一层** | `RenderContext::command_encoder()` 返回的**就是 `wgpu::CommandEncoder`**（`bevy_render-0.19.1/src/renderer/render_context.rs:156-159`；`render_resource` 直接 re-export wgpu 的那批类型，`render_resource/mod.rs:48`）；`RenderDevice::wgpu_device()` 拿 `wgpu::Device`（`renderer/render_device.rs:258-259`），`create_texture` / `create_bind_group_layout` / `create_render_pipeline` 全可用 | **裸 wgpu 的表达力**（任意 pass、任意绑定布局、任意目标）+ **Bevy 的设备 / 提交 / 帧时机**（`RenderContextState` 按系统拓扑序 flush，`render_context.rs:106-126`） | 同 L1 —— 只要执行器**按裸 wgpu 写** |
+| **L3｜完全自研 wgpu 渲染器** | 自己的 device / queue / present | 全部自由 | §1 的 3–6 人月 parity，**而且要把本仓已建在 Bevy 上的那套搬过去**（见下） |
+
+### §75.1 为什么在 wgpu 上做动态 graph 比 Vulkan / D3D12 **便宜一大截**（三条 A 级事实）
+
+1. **wgpu 自己跟踪资源状态并插 barrier**：render pass descriptor **不带 layout / 初始状态**，
+   barrier 由 wgpu 在提交时补。文档块把这件事写得很明白：wgpu 在录制时**没有全局视野**，
+   于是会在用户 command buffer 之间**插入新的、只装 barrier 的 command buffer**
+   （`wgpu-29.0.4/src/api/command_encoder.rs:390-407`）。
+   ⇒ **图编译器最贵的那一块（invalidate / flush 推导）不用我们写。**
+2. **它同时把「批量 barrier」这个优化口子留出来了**：`CommandEncoder::transition_resources(
+   buffer_transitions, texture_transitions)`（同文件 `:384-447`），而文档举的例子**就是 frame graph 的场景**
+   （把 X 与 Y 一起转 `COLOR_TARGET`，消掉中间那条多余 barrier）；**native-only，web 上 no-op**。
+   ⇒ 我们**可以**做，但**不必**做：先让 wgpu 兜底，等真的量出来这里有问题再接管。
+   ⚠ 这条**更正**了本调研早期引的一份二手说法（「wgpu 不暴露 layout 转换 API」）——
+   wgpu 29 有；只是它是 advanced / native-only。
+3. **没有 aliasing API**：wgpu 不给显存别名 ⇒ Frostbite 那套 transient aliasing **不是「难做」，是「做不到」**，
+   中间目标只能按 `(尺寸, 格式)` 池化复用。
+   **反过来说：通用 FrameGraph 里最贵、最容易出错的一块，在本平台根本不存在。**
+   ⇒ 数据驱动 graph 的活只剩：**拓扑序 + 资源池 + 绑定 + 管线缓存**。
+
+**所以「裸 wgpu 能不能做动态 render graph」的答案是**：能，而且比教科书里那套简单得多 ——
+**简单到不值得为此离开 Bevy**（L2 已经把裸 wgpu 摆在我们面前）。
+
+### §75.2 裸 wgpu **不**解决什么（别把它当万能钥匙）
+
+- 它不给你主 pass / prepass / 阴影 / MSAA / HDR / tonemapping / present —— 这些**换谁写都是自己写**：
+  在 Bevy 里是 Bevy 写好的，在裸 wgpu 里就是你写。
+- 本仓最值钱的那套不变式（**键 = 内容**、装载时对账、坏管线当场拒、shader 版本 LRU、`slots://` 资产源）
+  今天**骑在 Bevy 的 `PipelineCache` / `AssetServer` / `RenderSystems` 上**；离开 Bevy 就要**把它搬过去**，
+  而那比画三角形难得多 —— §1 的「3–6 人月」主要买的是**这些**，不是「能编 pass」。
+- 管线编译的墙（运行期 naga 编译、冷启动 15–25 s）与宿主无关，一样在。
+- `px_probe` 已经证明本仓能直接写裸 wgpu（自己建 bind group layout 与 compute pipeline：
+  `px_probe/src/probe.rs:279-420`）—— **但那是 headless compute 探针，不是渲染器**；
+  它没证明「自研渲染器更便宜」。
+
+### §75.3 工程结论（这条最重要）：**把执行器写成「与宿主无关」的一层**
+
+执行器的签名应当长成这样：
+
+```
+一份 pass 表 + &Device + &Queue + 目标纹理集合  →  CommandBuffer（或直接编进给定的 encoder）
+```
+
+**Bevy 只是其中一个 provider**（`RenderDevice` + `RenderContext` 提供 device/queue/encoder 与帧时机）。
+这样做的三个后果：
+
+1. 今天就在 Bevy 里跑（L2）：判据 P / R / D 全都能验，一行 Bevy 渲染内部都不改；
+2. 哪天触发下面那些条件，就把**同一份执行器**搬到裸 wgpu（L3）—— 迁移的只是「谁提供 device 与目标」；
+3. ⇒ **「裸 wgpu」于是变成一个可逆决定，而不是一次豪赌。** 这正是「可以接受切换/重构渲染器」
+   这条裁决应当兑现的方式：**不是现在就换，而是现在就让换变得便宜。**
+
+### §75.4 什么时候才**真的必须**离开 Bevy（触发条件，不是原则）
+
+- 要**重排或替换 Bevy 自己的 pass**（主 pass / prepass / tonemapping 之间插几何 pass，或换掉主 pass 本身）
+  —— Bevy 只允许在固定 set 之间插（§70.0），这是它给不了的东西；
+- 要自管 view target 的格式 / MSAA / 多目标组合（`ViewTarget` 是 Bevy 的）；
+- 要 bindless、draw call 破千、或 GPU-driven culling（§1 列过的那三条迁栈判据）；
+- ⚠ **不构成理由的两条**：「想要 transient aliasing」（wgpu 上做不到）、
+  「想要动态 graph」（L2 已经给了）。
+
+### §75.5 对 §74 的影响
+
+§74.3 的第 3 步（pass 图：全屏 + compute）**执行器从第一天就按裸 wgpu 写**（L2），
+只把「提供 device / 目标 / 提交时机」留给 Bevy。
+⇒ 这一步的产物是一个**可搬走的执行器**，而不是又一层 Bevy 抽象；
+同时它让 §74.4 的 (b)（自建材质绘制路径）也从「重构渲染器」降级为「换一个 provider」。
+
+---
+
+## §76 开工顺序（下一步，接 §74.3 / §75.5）
 
 **代码未动**。四条裁决（不重编/不重启、不要编辑器、要 compute、加法不升版本）与硬顶裁决（先 (a)）都齐了
 ⇒ 开工顺序固定为：
@@ -648,3 +726,5 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
    判据：写错参数名 ⇒ **烘图时**红；改参数值全链 ⇒ **判据 P 成立**；现有场景重烘后文档逐字段相同。
 3. **第 3 步（pass 图，全屏 + compute）** 与 **第 2 步（shader 图）** 可以并行 —— 前者动渲染器，
    后者动烘图侧，唯一交汇点是「pass 的 shader 也是 CAS 成员，走同一套键与对账」。
+   ⚠ 第 3 步的执行器按 **§75.3** 写成「与宿主无关」的一层（输入 device/queue/目标 + pass 表，输出 CommandBuffer），
+   这样它将来能整体搬到裸 wgpu。
