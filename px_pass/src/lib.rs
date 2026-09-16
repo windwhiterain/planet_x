@@ -932,11 +932,17 @@ impl Plan {
                         return Err(format!("{at} 没给 vertex_entry"));
                     }
                     // 几何 pass 的绑定组由宿主解析（`Frame::materials`），执行器一个都不造：
-                    // 参数块与格位那两栏给了也没人用 ⇒ 给了就拒（"说了没做"那一类）。
-                    if !pass.params.is_empty() || !pass.slots.is_empty() {
+                    // 参数块 / 格位 / reads 三栏给了也没人用 ⇒ 给了就拒（"说了没做"那一类）。
+                    //
+                    // ⚠ `reads` 尤其要拒：执行器既解析不了它、也校验不了宿主到底绑了什么，
+                    //    留着就是一条**没人验的声明**，迟早烂掉。几何 pass 的纹理绑定
+                    //    住在宿主的绑定组里 —— 那是它自己的事，这里不替它记账。
+                    if !pass.params.is_empty() || !pass.slots.is_empty() || !pass.reads.is_empty() {
                         return Err(format!(
-                            "{at} 是 geometry，却给了 params（{} 字节）/ slots（{} 个）：\
-                             几何 pass 的绑定组由宿主解析（材质名 → 组），执行器不自己造",
+                            "{at} 是 geometry，却给了 reads（{} 个）/ params（{} 字节）/ \
+                             slots（{} 个）：几何 pass 的绑定组由宿主解析（材质名 → 组），\
+                             执行器不自己造，这几栏没人用",
+                            pass.reads.len(),
                             pass.params.len(),
                             pass.slots.len()
                         ));
@@ -2251,6 +2257,15 @@ mod tests {
             .expect_err("几何 pass 给了参数块 ⇒ 拒");
         assert!(err.contains("宿主解析"), "{err}");
 
+        // `reads` 与 params/slots 同一条理由：执行器解析不了、也验不了 ⇒ 留着就是烂账。
+        let mut pass = depth_only("prepass");
+        pass.reads = vec!["view".to_string()];
+        let err = plan_of(vec![pass])
+            .check()
+            .expect_err("几何 pass 给了 reads ⇒ 拒");
+        assert!(err.contains("reads"), "{err}");
+        assert!(err.contains("宿主解析"), "{err}");
+
         let mut pass = depth_only("prepass");
         pass.draws = vec![Draw::default()];
         let err = plan_of(vec![pass]).check().expect_err("一笔不说画哪份几何 ⇒ 拒");
@@ -2343,7 +2358,15 @@ fn fs_main() -> @location(0) vec4<f32> {
             force_fallback_adapter: false,
             compatible_surface: None,
         }))
-        .expect("后端断言失败：Vulkan 适配器拿不到 —— 这条判据必须真跑，不静默跳过");
+        .unwrap_or_else(|err| {
+            // ⚠ 说清**缺的是什么**：这一档不是"跳过"，是"这台机器现在跑不了"。
+            //    （`px_pass` 在 workspace 的 default-members 里 ⇒ `cargo test` 会走到这里。）
+            panic!(
+                "后端断言失败：这台机器上拿不到 Vulkan 适配器（{err}）。\
+                 几何判据必须真跑 —— 它要一个能用的 Vulkan 驱动；\
+                 这一档**不静默跳过**（同 `px_render_wgpu::gpu::connect`）"
+            )
+        });
         let info = adapter.get_info();
         assert_eq!(
             info.backend,
@@ -2359,7 +2382,12 @@ fn fs_main() -> @location(0) vec4<f32> {
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
             }))
-            .expect("后端断言失败：Vulkan 设备建不出来");
+            .unwrap_or_else(|err| {
+                panic!(
+                    "后端断言失败：Vulkan 适配器有了（{}）但设备建不出来：{err}",
+                    info.name
+                )
+            });
         println!("判据设备：{:?}｜{}", info.backend, info.name);
         (device, queue)
     }
