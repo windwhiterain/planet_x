@@ -471,3 +471,13 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
   `art/shaders` 从「手写资产」变成「模板」—— 这一刀要用户点头。
 
 ⚠ 三批都会动 `SCENE_SCHEMA`（形态 3 还要动 protocol 快照）⇒ 在跑的旧服务会被握手拒，这是设计不是故障。
+
+> **续（2026-09-16）**：美术那边提出「schema 要能像 Shader Graph 那样动态改变 ＋ render graph 要能动态组装重载」，
+> 于是又调研了一轮，落成 **`art/11-graph.md` §67–§73**。三条与本节直接相关的更新：
+> ① **§66 的缺口清单要补**：除了本节那五处手抄，**烘图侧**还有两张手写词表
+> （`px_graphs/src/bin/scene.rs:442-487` 的白名单与 `:517-586` 的映射、`shaders.rs:8` 的 `SLOTS` 常量）
+> —— 它们才是「加一个参数要重编 Rust」的真凶；
+> ② **Unity 的对照**：Shader Graph 的 schema 是**编译期**烘进材质的（材质是快照、运行期不能改），
+> 所以「像 Shader Graph 那样动态」在运行期这一侧本仓**已经超过它**；缺的是作者侧（§68）；
+> ③ **render graph**：Bevy 0.19 的 `RenderGraph` 已经是 **schedule**（不是节点图），
+> 动态组装的正确落点是「文档里的 pass 表 + 一个执行器系统」，不是运行期改 schedule（§70）。

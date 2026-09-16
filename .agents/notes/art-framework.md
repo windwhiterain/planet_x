@@ -41,6 +41,14 @@
 - **`#import` 只内联点名的符号** ⇒ 测试侧严格宽松于运行时；shader 运行时正确性唯一的仪器是 viewer 的 stderr。
 - **`looking_at` 的 up 与视线共线会退化** ⇒ 两极视角停在 82°，别顺手改成 90°。
 - **平台已经定义了标准格式时，不要手搓等价物。**
+- **「schema 动态」的缺口在作者侧，不在运行期**：参数块的大小与内容今天已经逐材质任意（`material.rs` 的
+  `min_binding_size: None`），换一份 WGSL 不需要重编 Rust。卡住的是**烘图侧**的手写词汇映射与白名单
+  （`px_graphs/src/bin/scene.rs` / `shaders.rs:8`）⇒ 别把预算花在「运行期热插拔 shader」上（§67，`art/11-graph.md`）。
+- **Bevy 0.19 的「渲染图」是 schedule，不是节点图**：`RenderGraph` 是 `ScheduleLabel`，pass 是系统。
+  ⚠ **运行中改 schedule 会被静默覆盖**（`bevy_ecs` 的 `schedule_scope` 把它临时摘出）
+  ⇒ 动态组装要落在**数据 + 一个执行器系统**上，不要落在改 schedule 上（§70，`art/11-graph.md`）。
+- **pass 的绑定布局不像材质那样固定**：「固定超集」只对 `Material`/`MaterialPlugin` 成立；
+  自己写的 pass 可以按数据建布局与管线（键要自己管 —— wgpu 的管线缓存 key 只覆盖适配器，不含内容）。
 
 **仓库习惯**
 
@@ -61,6 +69,7 @@
 | `art/08-renderer.md` | 渲染器怎么跑：离屏 / 常驻服务 / viewer 的实体分法 ＋ 资源缓存 |
 | `art/09-instruments.md` | 改完怎么验：热重载、review 回路、单帧时间、探针 |
 | `art/10-handoff.md` | **现状、已验证 / 未验证、下一步**（每轮开工前先读它） |
+| `art/11-graph.md` | **动态 schema 与动态 render graph 的调研**（§67–§73：今天已经动到哪儿、硬边界、候选形态、推荐路线、待裁决） |
 
 ## § 号 → 文件
 
@@ -76,6 +85,7 @@
 | §39 §43 §51（含 §51.0 现状速查–§51.20）§59 §60 §61 | `art/06-clouds.md` |
 | §44 §45 §46 | `art/07-gradient.md` |
 | §12 §13 §50 §52 §65 §66 | `art/08-renderer.md` |
+| §67 §68 §69 §70 §71 §72 §73 | `art/11-graph.md` |
 | §37 §40 §41 §42 §47 §53 §55 §56（含 §56.1）§57 §58（含 §58.1） | `art/09-instruments.md` |
 | §49 | `art/10-handoff.md` |
 
