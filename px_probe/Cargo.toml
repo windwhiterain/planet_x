@@ -10,10 +10,9 @@ px_render = { path = "../px_render" }
 px_verify = { path = "../px_verify" }
 # 绑定组编号与渲染器**同一份来源**（契约表 `px_protocol::material`）：探针不再自己写死 2。
 px_protocol = { path = "../px_protocol" }
+# 参数块的**布局**也来自契约：`params.rs` 反射 `clouds.wgsl` 自己声明的结构体，
+# 探针那份 `CloudParams` 只剩「值」（原来它是一份手抄的字节镜像，§69 S2）。
+px_shader = { path = "../px_shader" }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
-encase = "0.12"
-# 云参数的镜像（`src/params.rs`）里有 `vec4<f32>` 那两格：encase 对 glam 的实现就在 glam 这边
-# （`glam/impl_encase.rs`，靠 `encase` 这个 feature 打开）。版本与 bevy_math 那份一致。
-glam = { version = "0.32", features = ["encase"] }

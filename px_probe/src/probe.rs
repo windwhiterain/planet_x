@@ -164,12 +164,6 @@ pub struct Row {
     pub chain: f32,
 }
 
-fn params_bytes(params: &CloudParams) -> Vec<u8> {
-    let mut buffer = encase::UniformBuffer::new(Vec::new());
-    buffer.write(params).expect("写不进 params");
-    buffer.into_inner()
-}
-
 fn coverage_cube(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -260,7 +254,7 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
-    let bytes = params_bytes(params);
+    let bytes = crate::params::params_bytes(params);
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("params"),
         size: bytes.len() as u64,

@@ -428,12 +428,6 @@ impl Row {
     }
 }
 
-fn params_bytes(params: &CloudParams) -> Vec<u8> {
-    let mut buffer = encase::UniformBuffer::new(Vec::new());
-    buffer.write(params).expect("写不进 params");
-    buffer.into_inner()
-}
-
 fn production_params() -> CloudParams {
     CloudParams::new(CLOUD_BASE, CLOUD_TOP, 900.0)
 }
@@ -578,7 +572,7 @@ fn probe(
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
-    let bytes = params_bytes(params);
+    let bytes = crate::params::params_bytes(params);
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("params"),
         size: bytes.len() as u64,
