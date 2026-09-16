@@ -1,3 +1,22 @@
+//! **CAS 装载**：一份 `.pxart` 渲染文档 → 一堆"可以上传 GPU 的东西"（但这一步**不碰 GPU**）。
+//!
+//! §111 的第 4 件。为什么单独一篇、而且要在建管线之前：要渲染**任何**场景，
+//! 就得先回答"这份文档指的是哪些产物、那些产物里到底是什么"。于是这一篇把整条链走通一次：
+//!
+//! 文档（`read_scene`）→ 成员键 → CAS 路径（`Member::resolve`）→ 载荷（网格 / 贴图 / WGSL）
+//! → 组装 + 反射 → **打好包的参数字节**。
+//!
+//! 三条口径（每一条都是"换个做法就会出另一种图，而门不会响"）：
+//!
+//! 1. **贴图与采样器都由文档说了算**：绑哪一格写在 `Material.textures[binding]` 里，
+//!    "这张图该怎么采"（`Sampler`）跟图一起进屋。渲染器不猜、也不补默认值 ——
+//!    补一次默认值，就有了"两个地方说同一件事"。
+//! 2. **参数按 shader 自己声明的结构体打包**（`MaterialLayout::pack`，反射出来的那份）：
+//!    Rust 侧没有第二张参数表。缺参 / 多参 / 类型不符三档都当场报错。
+//! 3. **产物上的两道对账不许省**（`load_shader` 里那两条）：include 闭包（§52.3）与
+//!    schema descriptor（§74.3）。省掉它们，一次"改了库没重烘"或"换了反射规则"
+//!    会表现成**画面错但不报错**，而键 / 场景键 / 槽版本全都还是对的。
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +30,19 @@ use px_protocol::wire::DType;
 use crate::mesh::Mesh;
 use crate::shader;
 
+/// 一份**已解开**的贴图产物：形状 + 整条 mip 链的原始字节 + 最细那一级的 8 位预览。
+///
+/// ⚠ 两样都要留，而且**用途不同**：
+///
+/// - `bytes` + `shape` 是**上传用**的（`queue.write_texture` 要按 mip 一级一级喂，
+///   `shape.levels` 与各级尺寸决定 `bytes_per_row`）。只留解码后的那一级图，
+///   到了上传那一步就得回头重读产物 —— 那就是同一个东西读两遍。
+/// - `image` 是**给人看 / 给判据用**的预览（"这张图到底是不是我以为的那张"）。
+///   `Rgba16Float` 那一档是**有损**转成 8 位的（覆盖度图的 mask + 三轴梯度），
+///   所以它只能当预览，**不能**拿去上传：上传必须用 `bytes`。
+///
+/// 立方图（6 层）的预览把 6 个面**竖着码**成一张 `width × height*6` 的图 ——
+/// 判据里对尺寸的断言（星空的 512×3072）依赖这条口径。
 #[derive(Clone, Debug)]
 pub struct LoadedTexture {
     pub member: Member,
@@ -24,6 +56,7 @@ impl LoadedTexture {
         self.member.to_string()
     }
 
+    /// 最细那一级 mip 的字节数（后面按级上传时逐级切片的起点）。
     pub fn base_level_bytes(&self) -> usize {
         self.shape.width as usize
             * self.shape.height as usize
@@ -32,6 +65,10 @@ impl LoadedTexture {
     }
 }
 
+/// 材质里**实际绑上**的一格：格号（契约里的下标）+ 采样器 + 那张图。
+///
+/// 空着的格不在这里 —— 它们由 `material.rs` 绑兜底白图（§65 / §108.1：`orbit-bare` 的
+/// `planet` 真的会用到那两格），装载这一步只负责"产物给了的"。
 #[derive(Clone, Debug)]
 pub struct BoundTexture {
     pub binding: u32,
@@ -39,21 +76,37 @@ pub struct BoundTexture {
     pub texture: LoadedTexture,
 }
 
+/// 天空盒：一张 cube 贴图 + 它的采样器。
+///
+/// 采样器是**这里定的**（`Sampler::clamped()`），与材质那几格不同 —— 天空盒不是材质的一格，
+/// 它的采样方式不在文档里，而是渲染器与 Bevy 对齐的那一份（`bevy_core_pipeline` 的
+/// skybox 管线用默认采样器：clamp + 线性）。改这里等于改背景像素。
 #[derive(Clone, Debug)]
 pub struct Skybox {
     pub sampler: Sampler,
     pub texture: LoadedTexture,
 }
 
+/// 一份材质 shader 的三样东西：原文、**本宿主组装后的自足 WGSL**、反射出来的契约。
+///
+/// `assembled` 是直接喂给 `create_shader_module` 的那份文本（`#import` 全展开、
+/// `#{MATERIAL_BIND_GROUP}` 已替成 3）—— 运行期不再组装第二次：
+/// 组装两次就是"门测的那份"与"跑的那份"开始分岔的入口（§75 的「2/3 那颗雷」）。
 #[derive(Clone, Debug)]
 pub struct LoadedShader {
     pub member: Member,
     pub source: String,
     pub assembled: String,
     pub layout: MaterialLayout,
+    /// include 闭包的摘要（进日志：对上了也要说清对的是哪一份）。
     pub closure: String,
 }
 
+/// 几何：CAS 里的网格产物，或者一个**内建图元**（参数在文档里）。
+///
+/// ⚠ 图元这一支特意**把 `params` 原样留着**（而不是只留造出来的网格）：
+/// 「半径 / 细分是文档里的数」这件事得能被查（判据里就查它），
+/// 而且第 6 件之后要把这几个数写进日志时不必回头再读一遍文档。
 #[derive(Clone, Debug)]
 pub enum LoadedGeometry {
     Mesh {
@@ -105,6 +158,11 @@ impl LoadedGeometry {
     }
 }
 
+/// 一个物体：几何 + 材质（shader / 参数 / 贴图）+ 两条渲染状态 + 变换。
+///
+/// 这就是第 5、6 件要的全部输入。⚠ `alpha` / `cull` / `depth_bias` **原样带着**：
+/// 它们决定混合档、剔除面与透明排序，而"哪个档是什么状态"只有一份口径（`material.rs`），
+/// 这里不许先翻译一道 —— 提前翻译就是把同一个决定抄成两份。
 #[derive(Clone, Debug)]
 pub struct LoadedObject {
     pub id: String,
@@ -128,6 +186,8 @@ impl LoadedObject {
         self.shader.layout.param(name).map(|slot| slot.offset)
     }
 
+    /// 按**名字**读回参数块里的一个 `f32`。偏移来自反射 —— 判据里量"打包对不对"用它，
+    /// 于是判据本身也不必知道那 64 字节是怎么排的。
     pub fn f32_at(&self, name: &str) -> Option<f32> {
         let slot = self.shader.layout.param(name)?;
         if slot.kind != px_protocol::material::ParamKind::F32 {
@@ -139,6 +199,7 @@ impl LoadedObject {
     }
 }
 
+/// 一份装载好的文档。渲染器从这里取"这一步要画什么"，不认识行星、云、大气。
 #[derive(Clone, Debug)]
 pub struct LoadedScene {
     pub name: String,
@@ -153,6 +214,8 @@ impl LoadedScene {
         self.objects.iter().find(|object| object.id == id)
     }
 
+    /// 给人看/进日志的装载审计。口径与 Bevy 宿主那份**不要求逐字相同**（那是报告的事，
+    /// 不是像素的事），但要说清"这一步到底装了什么"：§12.2 —— 仪器不许哑掉。
     pub fn audit(&self) -> String {
         let mut lines = vec![format!(
             "渲染文档 {}｜物体 {} 个｜环境光 {}｜天空盒 {}（亮度 {}）",
@@ -201,18 +264,31 @@ impl LoadedScene {
     }
 }
 
+/// CAS 根的缺省值：`<工作区>/target/pcg`。
+///
+/// ⚠ **按 `CARGO_MANIFEST_DIR` 取，不按当前目录取**（`px_render` 那边是
+/// `PathBuf::from("target/pcg")`）。差别不是风格：`cargo test` 的当前目录是**包目录**
+/// （`px_render_wgpu/`），照当前目录解会去 `px_render_wgpu/target/pcg` 找一个不存在的 CAS；
+/// 而服务是别的进程按绝对路径调起来的，当前目录也不归我们管。
+///
+/// 真跑起来仍然应该由命令行 `--pcg-root` 说了算，这个函数只是它的缺省值。
 pub fn default_pcg_root() -> PathBuf {
     shader::workspace().join("target/pcg")
 }
 
+/// 读文档 + `check()`（形状 / 版本 / 引用完整性）。**不碰 CAS** ——
+/// "这份文档自己说得通吗"与"它要的产物在不在"是两件事，报错也该是两条。
 pub fn read_spec(scene_path: &Path) -> Result<SceneSpec, String> {
     let spec = px_protocol::scene::read_scene(scene_path)?;
     spec.check()?;
     Ok(spec)
 }
 
+/// 文档 + CAS 根 → 装载好的场景。**次序就是依赖次序**：shader 要先反射出契约，
+/// 才知道参数怎么打包、哪几格是贴图（§65：渲染器不认识内容，只认识契约）。
 pub fn load_scene(scene_path: &Path, pcg_root: &Path) -> Result<LoadedScene, String> {
     let spec = read_spec(scene_path)?;
+    // 库表一个请求读一次就够；对账要用**这一次**盘上的库，所以不缓存到进程级。
     let modules = shader::modules();
     let skybox = match &spec.environment.skybox {
         Some(member) => Some(Skybox {
@@ -241,6 +317,7 @@ fn load_object(
 ) -> Result<LoadedObject, String> {
     let id = object.id.as_str();
     let shader = load_shader(&object.material.shader, pcg_root, modules)?;
+    // 参数按**它自己声明的结构体**打包（缺参 / 多参 / 类型不符都当场报错）。
     let params = shader
         .layout
         .pack(&object.material.params)
@@ -248,6 +325,8 @@ fn load_object(
 
     let mut textures: Vec<BoundTexture> = Vec::with_capacity(object.material.textures.len());
     for (role, reference) in &object.material.textures {
+        // 产物想在某一格绑贴图，shader 就必须在那一格声明过 —— 否则这一格永远采不到，
+        // 而画面"看着还行"（采到兜底白图），错到看不出来。
         let slot = shader.layout.texture(reference.binding).ok_or_else(|| {
             format!(
                 "物体 '{id}' 的贴图 '{role}' 要绑在第 {} 格，但 shader {}/{} 没在那里声明贴图",
@@ -259,6 +338,7 @@ fn load_object(
             pcg_root,
             &format!("物体 '{id}' 的贴图 '{role}'"),
         )?;
+        // 维度也要对账：cube 塞进 2D 那一格，运行期建 bind group 时才炸，而那时已经晚了。
         if texture.shape.layers != slot.dimension.layers() {
             return Err(format!(
                 "物体 '{id}' 的贴图 '{role}' 是 {} 层，而 shader 第 {} 格声明的是 {}（{} 层）",
@@ -274,6 +354,7 @@ fn load_object(
             texture,
         });
     }
+    // 按格号排序：贴图表在文档里是 map（`BTreeMap` 已按角色名排），而下游要按**格号**走。
     textures.sort_by_key(|bound| bound.binding);
 
     Ok(LoadedObject {
@@ -290,6 +371,18 @@ fn load_object(
     })
 }
 
+/// 装一份 shader：读产物 → **两道对账** → 组装 → naga 校验 → 反射契约。
+///
+/// 两道对账都是"拒绝，而不是静默出图"（与 Bevy 宿主同款，改的只是措辞）：
+///
+/// 1. **include 闭包**（§52.3）：`#import planet_x::…` 的真本住在
+///    `px_render/assets/shaders/*.wgsl`，由组装器在**运行期**读盘。改了库、没重烘 ⇒
+///    场景指的还是老产物、而组装用的是新库 —— 画出来的东西既不是老那一版、也不是新那一版，
+///    而键 / 清单 / 场景键 / 槽版本**全都没动**：所有门都是绿的。所以在这里当场拒。
+/// 2. **schema descriptor**（§74.3）：反射**规则本身**会变（契约表加宽、`ParamKind` 多一档、
+///    偏移规则修正）。规则一变，同一份 WGSL 读出的是另一份契约，而产物里的参数值是按
+///    **老契约**打包的 —— 装出来是另一份东西却不报错。所以拿产物记的那份规范 JSON
+///    跟现在反射出来的逐字节比。
 fn load_shader(
     member: &Member,
     pcg_root: &Path,
@@ -322,6 +415,7 @@ fn load_shader(
 
     let assembled = shader::assemble(&source, modules, crate::stubs::stubs);
     let name = format!("{}/{}", member.graph, member.node);
+    // 校验是**门**：坏管线当场拒，不静默出缺材质的图（§104 第 5 条把这条判据留下来了）。
     shader::validate(&name, &assembled)?;
     let layout = px_shader::reflect::reflect_assembled(&assembled, &name)?;
     let now = layout.to_json()?;
@@ -348,6 +442,10 @@ fn load_shader(
     })
 }
 
+/// 贴图产物 → 形状 + 整条 mip 链 + 预览。
+///
+/// 形状（宽高 / 层数 / mip 级数 / 格式）**只信清单参数**，并且逐项与载荷字节数对账：
+/// 对不上就是产物坏了，当场报错，不许"按能读的读一部分"。
 fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTexture, String> {
     let path = member.resolve(pcg_root)?;
     let bytes = std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
@@ -376,6 +474,7 @@ fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTe
             _ => None,
         })
         .ok_or_else(|| format!("{what} {member}（{}）里没有载荷块", path.display()))?;
+    // 位深与格式是同一个事实的两半：`rgba8_srgb` 的载荷必须是 U8、`rgba16_float` 必须是 U16。
     let expected = match shape.format {
         TextureFormat::Rgba8Srgb => DType::U8,
         TextureFormat::Rgba16Float => DType::U16,
@@ -411,6 +510,8 @@ fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<Loade
     match geometry {
         Geometry::Mesh { member } => {
             let path = member.resolve(pcg_root)?;
+            // 审计文本照打（焊接 / 缠绕 / 法线）：它是"这张网格长什么样"的唯一仪器，
+            // 而 §102 记过两次搬运里那几个括号**改的是像素**，所以它必须一直看得见。
             let (mesh, audit) = crate::mesh::load_mesh(&path.display().to_string())
                 .map_err(|err| format!("物体 '{id}'：{err}"))?;
             println!("{}", audit.trim_end());
@@ -430,6 +531,13 @@ fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<Loade
     }
 }
 
+/// 内建图元 → 网格。**参数全部来自文档**，一个数都不写死。
+///
+/// ⚠ 现在只认 `icosphere`：`px_render_wgpu/src/icosphere.rs` 只移植了细分球。
+/// Bevy 宿主还有 `uv_sphere`（`Sphere::uv`）—— 那一支**故意不装**：
+/// 移植件没有、拿一个"看起来差不多"的球去顶，就是让两条宿主在同一个场景上出两张不同的图，
+/// 而报错信息比一张对不上的图便宜得多。要用它的那一天，先把移植件补上（`target/oracle/`
+/// 里有 `bevy-uvsphere-*.bin` 三份现成的 oracle 可以对着逐字节比）。
 pub fn primitive_mesh(name: &str, params: &BTreeMap<String, Value>) -> Result<Mesh, String> {
     let number = |key: &str| -> Result<f32, String> {
         match params.get(key) {
@@ -449,6 +557,8 @@ pub fn primitive_mesh(name: &str, params: &BTreeMap<String, Value>) -> Result<Me
         "icosphere" => {
             let radius = number("radius")?;
             let subdivisions = number("subdivisions")?;
+            // 上界 64 与 Bevy 那边一致（`Sphere::ico` 在 80 上会 Err，而 `MeshBuilder::build()`
+            // 直接 unwrap ⇒ 越界不是"图难看"，是 panic）；下界 1 同款。
             if !(subdivisions.fract() == 0.0 && (1.0..=64.0).contains(&subdivisions)) {
                 return Err(format!(
                     "图元 'icosphere' 的 'subdivisions' 是 {subdivisions}：要 1..=64 的整数"
@@ -462,6 +572,11 @@ pub fn primitive_mesh(name: &str, params: &BTreeMap<String, Value>) -> Result<Me
     }
 }
 
+/// 最细那一级 mip → `RgbaImage`（**预览**，不是上传源）。
+///
+/// 立方图把 6 个面竖着码（`height * layers`）；`Rgba16Float` 走半精度 → f32 → 8 位
+/// （截到 [0,1]，因为预览就是给人看的）。⚠ 这条有损路径**只服务预览**：上传要用
+/// [`LoadedTexture::bytes`] 那一条。
 fn decode_base_level(shape: &TextureShape, bytes: &[u8]) -> Result<image::RgbaImage, String> {
     let texels = shape.width as usize * shape.height as usize * shape.layers as usize;
     let level_bytes = texels * shape.format.texel_bytes();
@@ -493,6 +608,11 @@ fn decode_base_level(shape: &TextureShape, bytes: &[u8]) -> Result<image::RgbaIm
     })
 }
 
+/// IEEE 754 半精度 → 单精度。
+///
+/// ⚠ 手写而不是引 `half`：预览这条路只需要"读得懂"，而半精度→单精度是**精确**的
+/// （除次正规数外不丢位），十行就够；为它多一个依赖，等于让每个新克隆多编一个 crate。
+/// 次正规数与 ±∞ / NaN 两支都按标准处理（判据里各钉了一格）。
 pub fn half_to_f32(bits: u16) -> f32 {
     let sign = u32::from(bits & 0x8000) << 16;
     let exponent = u32::from((bits >> 10) & 0x1F);
@@ -500,8 +620,10 @@ pub fn half_to_f32(bits: u16) -> f32 {
     let value = match exponent {
         0 => {
             if mantissa == 0 {
+                // ±0
                 sign
             } else {
+                // 次正规数：左移到第一个 1 进隐含位，指数跟着减。
                 let mut mantissa = mantissa;
                 let mut exponent = 127 - 15 + 1;
                 while mantissa & 0x0400 == 0 {
@@ -511,6 +633,7 @@ pub fn half_to_f32(bits: u16) -> f32 {
                 sign | (exponent << 23) | ((mantissa & 0x03FF) << 13)
             }
         }
+        // ±∞ / NaN：指数全 1，尾数搬过去即可。
         0x1F => sign | 0x7F80_0000 | (mantissa << 13),
         _ => sign | ((exponent + 127 - 15) << 23) | (mantissa << 13),
     };
@@ -522,8 +645,11 @@ mod tests {
     use super::*;
     use crate::digest;
 
+    /// 判据的锚：`target/oracle/orbit-bare-nolight.txt`（一行，内容是场景产物的绝对路径）。
     const SCENE_LIST: &str = "target/oracle/orbit-bare-nolight.txt";
 
+    /// 锚在不在。**`target/` 不入 git** ⇒ 新克隆上它一定不在，而"硬失败"会让新克隆
+    /// 因为一个不是回归的原因变红。所以这里返回 `None`，由调用方**大声**说明"没测"。
     fn scene_path() -> Option<PathBuf> {
         let list = shader::workspace().join(SCENE_LIST);
         if !list.exists() {
@@ -540,6 +666,12 @@ mod tests {
         Some(path)
     }
 
+    /// 装载这一档的判据入口。
+    ///
+    /// ⚠ 三道门（清单文件 / 场景产物 / CAS 根）任一不在都**只打印不判**，
+    /// 而且打印里明说"不是通过，是没测"—— 静默跳过（`#[ignore]`、直接 `return`）是
+    /// 判据的敌人：它会让"这一档从来没跑过"看起来跟"这一档一直是对的"一样（§101）。
+    /// 反过来说，能跑的时候它必须**硬失败**：任何一个成员解析不出来都是错，不是警告。
     fn loaded() -> Option<LoadedScene> {
         let path = scene_path()?;
         let root = default_pcg_root();
@@ -567,6 +699,9 @@ mod tests {
             && one.indices == other.indices
     }
 
+    /// 网格的内容摘要，口径与 §110.3 那张 oracle 表**逐字相同**
+    /// （小端拼 `positions → normals → uvs → indices`）—— 口径不一致的话，
+    /// 下面拿它跟 oracle 对账的那一格就成了自说自话。
     fn digest_of(mesh: &Mesh) -> String {
         let mut bytes = Vec::new();
         for position in &mesh.positions {
@@ -590,6 +725,8 @@ mod tests {
         digest::sha256_hex(&bytes)[..16].to_uppercase()
     }
 
+    /// 本档的判据：五类成员**每一个**都解得出来，而且解出来的就是烘图侧印的那些值
+    /// （表里的期望值来自烘图侧的日志，一个字都不许改 —— 改了就是改判据）。
     #[test]
     fn the_orbit_bare_nolight_scene_resolves_member_by_member() {
         let Some(scene) = loaded() else {
@@ -616,8 +753,10 @@ mod tests {
         assert_eq!(planet.cull, CullMode::Back);
         assert!(planet.cast_shadow);
         assert_eq!(planet.textures.len(), 1);
+        // 顶点 / 三角形数与产物清单里的 `params` 对得上：网格真的整个读进来了。
         assert_eq!(planet.geometry.mesh().vertex_count(), 155_526);
         assert_eq!(planet.geometry.mesh().triangle_count(), 307_200);
+        // 预览的最细一级 = 780×520；整条链是 10 级 —— 上传要用的是**后者**。
         assert_eq!(
             planet.texture(1).expect("第 1 格").texture.image.dimensions(),
             (780, 520)
@@ -627,10 +766,12 @@ mod tests {
             planet.texture(1).expect("第 1 格").texture.bytes.len(),
             2_162_808
         );
+        // 参数块的长度是**反射出来的**那个数，不是猜的。
         assert_eq!(
             planet.params.len(),
             planet.shader.layout.params_bytes as usize
         );
+        // 值也要对：按名字读回来（偏移来自反射）。
         assert_eq!(planet.f32_at("gain"), Some(2.0));
         assert_eq!(planet.f32_at("coverage"), Some(0.3499999940395355));
         assert_eq!(planet.f32_at("height"), Some(0.5));
@@ -645,6 +786,7 @@ mod tests {
         let atmosphere = scene.object("atmosphere").expect("atmosphere 在");
         let (name, params) = atmosphere.geometry.primitive().expect("图元");
         assert_eq!(name, "icosphere");
+        // ⚠ 期望值是**文档里那串 f64**（= f32 的 1.14）：`as f32` 那一步不许改成 `as f64` 再取整。
         assert_eq!(number(params, "radius"), 1.1399999856948853);
         assert_eq!(number(params, "subdivisions"), 64.0);
         assert_eq!(atmosphere.shader.member.to_string(), "shaders/atmosphere@d4501946bb0c");
@@ -670,6 +812,7 @@ mod tests {
         );
         assert_eq!(skybox.texture.shape.layers, 6);
         assert_eq!(skybox.texture.shape.levels, 1);
+        // 6 个面竖着码的预览口径（512×3072）。
         assert_eq!(skybox.texture.image.dimensions(), (512, 3072));
         println!(
             "天空盒｜{}｜{}×{}×{} 层｜{} 级 mip｜{} 字节",
@@ -682,6 +825,11 @@ mod tests {
         );
     }
 
+    /// "半径 / 细分是**文档里的数**，不是写死的常数" —— 三路取证。
+    ///
+    /// 一条判据最容易被自己骗过去的地方是：`primitive_mesh` 与"期望值"都是我们写的，
+    /// 两边一起错就是绿的。所以这里一路对着**外部真值**（§110.3 的 oracle 摘要）比，
+    /// 另外两路把"文档 → 网格"这条链的两端各自钉住。
     #[test]
     fn the_primitive_parameters_come_from_the_document() {
         let Some(scene) = loaded() else {
@@ -694,11 +842,14 @@ mod tests {
         let subdivisions = number(params, "subdivisions") as u32;
         assert_eq!(radius.to_bits(), 1.14_f32.to_bits());
 
+        // 路（1）：物体里那份网格 **就是** 文档里那几个参数造出来的那一份。
         let from_document = primitive_mesh(name, params).expect("按文档再造一份");
         assert!(
             same_mesh(atmosphere.geometry.mesh(), &from_document),
             "物体里那份网格必须就是**文档里那几个参数**造出来的那一份"
         );
+        // 路（2）：摘要口径先对着外部 oracle 验一次（半径 1.0、细分 64 那一格），
+        // 否则下面那个"等于 1.14 那份"可能只是两边一起错。
         assert_eq!(
             digest_of(&crate::icosphere::icosphere(1.0, 64)),
             "B4B37AB464C3A743",
@@ -711,6 +862,7 @@ mod tests {
         );
         assert_ne!(digest_of(atmosphere.geometry.mesh()), "B4B37AB464C3A743");
 
+        // 路（3）：改一个数，网格必须跟着变 —— 常数（写死的半径）不会跟着变。
         let mut bigger = params.clone();
         bigger.insert("radius".to_string(), Value::Num(7.5));
         let other = primitive_mesh(name, &bigger).expect("换个半径再造一份");
@@ -741,6 +893,8 @@ mod tests {
         assert_ne!(coarse.indices.len(), atmosphere.geometry.mesh().indices.len());
     }
 
+    /// 解码那条路**不依赖 `target/`**：新克隆上唯一还能跑的判据就是它（所以它必须自己站得住）。
+    /// 8 位直通、半精度五位（0 / 0.5 / 1 / 2 / −1）、立方图竖码、以及各级形状的字节数都钉住。
     #[test]
     fn the_base_level_decoder_handles_both_formats() {
         let shape = TextureShape {
@@ -766,6 +920,7 @@ mod tests {
         for bits in [0x3C00u16, 0x3800, 0x0000, 0x4000, 0xBC00, 0x7C00, 0x0001, 0x3555] {
             payload.extend_from_slice(&bits.to_le_bytes());
         }
+        // 半精度那五档：1 / 0.5 / 2 / −1 / 0（外加 ±∞ 与次正规数走一遍不 panic）。
         assert_eq!(half_to_f32(0x3C00), 1.0);
         assert_eq!(half_to_f32(0x3800), 0.5);
         assert_eq!(half_to_f32(0x4000), 2.0);
@@ -773,6 +928,7 @@ mod tests {
         assert_eq!(half_to_f32(0x0000), 0.0);
         let image = decode_base_level(&float, &payload).expect("半精度解码");
         assert_eq!(image.dimensions(), (2, 1));
+        // 第二个 texel 是 (−1, +∞, 次正规数, 0.3333) ⇒ 截到 [0,1] 再落 8 位。
         assert_eq!(image.get_pixel(0, 0).0, [255, 128, 0, 255]);
         assert_eq!(image.get_pixel(1, 0).0, [0, 255, 0, 85]);
 
