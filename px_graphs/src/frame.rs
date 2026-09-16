@@ -676,7 +676,7 @@ pub fn build(
 ///
 /// ⚠ 它只是一根**给绑定状态起的名字**（§139）：宿主不认识这个格式，它只按
 /// `material_instances` 那张表查"这个名字照的是哪一份材质"，再按用到它的那条 pass
-/// 的 `cube_face` 决定"哪一面的 view/MeshStage"。所以这个格式**不进任何契约** ——
+/// 的 `cube_face` 决定「哪一面的 `PassView`」（§148）。所以这个格式**不进任何契约** ——
 /// 改它一个字都不会动画面（改的是文档里的字符串，两边一起改）。
 fn instance_name(base: &str, light: u32, face_name: &str) -> String {
     format!("{base}@shadow_{light}_{face_name}")

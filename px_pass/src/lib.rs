@@ -1361,6 +1361,36 @@ pub struct ResolvedGeometry<'a> {
     pub indices: Option<(&'a Buffer, IndexFormat, u32)>,
     /// 不索引时画几个顶点（索引时以 `indices` 里那个条数为准）。
     pub vertex_count: u32,
+    /// 这一笔画**哪几个实例**：`first_instance..last_instance`（`@builtin(instance_index)`
+    /// 从 `start` 起数）。
+    ///
+    /// ⚠ 它与 `vertex_count` / `indices` 是**同一类数据**（一笔 draw call 的三个数：
+    /// 画几个顶点、画几个索引、画哪几个实例），不是给执行器加的分类法：执行器不认识
+    /// "实例"是什么，也不知道那个下标是拿什么算出来的 —— 它只把区间交给
+    /// `draw_indexed`/`draw`，剩下的由**顶点阶段**（`@builtin(instance_index)`）决定。
+    ///
+    /// ⚠ 为什么它有资格出现在这里：**执行器原来把这一格写死成 `0..1`**，而那正是
+    /// "一个没人写过的数"（§104 第 3 条的缺省病）。per-instance 的参数一旦变成
+    /// "一份数组 + 一个下标"（`px_render_wgpu` 的 `MeshInstance` 数组就是它），
+    /// 下标就成了**每笔 draw 必须说的那件事** —— 不说就等于每笔都读第 0 格。
+    ///
+    /// ⚠ **长度等于 1 是常态**（今天每一笔画一个对象）：`k..k+1` 的 `instance_index` 恒为
+    /// `k`，算出来的值与"宿主给每个 (物体, 视图) 各建一份"逐字节相同 —— 这正是这条路
+    /// 值不值得走的那条判据（§109.1：实例化是**行为差异**，必须证明逐位等价，不许假设）。
+    ///
+    /// ⚠ **区间与几何表同源**：谁给这份几何，谁就知道它在数组里的下标（宿主那张
+    /// "每个物体一份几何"的表按 `objects[]` 的次序建，`MeshInstance` 那份数组也是）。
+    /// 于是"下标越界"在结构上不可能发生 —— 反过来说，**将来要是文档自己声明这个下标**，
+    /// 那一刻就必须补一条越界守卫：WGSL 的数组下标越界读是**静默**的（鲁棒性规定给 0），
+    /// wgpu 不会替你报。
+    ///
+    /// ⚠⚠ **这一格挂在几何上，靠的是"一个名字一份几何"这条今天为真的前提**（几何表
+    /// **按名字**查，而今天几何名 = 物体 id，1:1）。哪天**两个物体共用同一份网格**
+    /// （同一个画布、两个不同的变换），宿主**必须把同一份缓冲注册成两条几何记录**
+    /// （同名缓冲、不同区间）—— 否则第二个物体永远画的是第 0 格，而且**一声不吭**
+    /// （见上一条：越界与错格都不报）。这条不是今天的毛病，是这格注释存在的理由：
+    /// 下一个人加共用网格时不会想到它。
+    pub instances: std::ops::Range<u32>,
 }
 
 /// 宿主给的**一组绑定组**：组号 + 句柄 + **它的布局**（外加布局的身份）。
@@ -2358,6 +2388,18 @@ impl Executor {
                         Some((_, layout)) => Self::vertex_layout_key(layout),
                         None => "procedural（没有顶点缓冲）".to_string(),
                     };
+                    // ⚠ 空区间（`start == end`，也涵盖 `start > end`）**当场拒**：
+                    //    它在 wgpu 那边是合法的（实例数 0 ⇒ 什么都不画），也就是"这条 pass
+                    //    说了要画这一笔，却一个像素都没画" —— 那种绿是判据最怕的绿（§107）。
+                    //    真出现"这一笔今天没东西可画"，那是宿主**不该给这一笔**，而不是
+                    //    给一个空区间。
+                    if geometry.instances.is_empty() {
+                        return Err(format!(
+                            "pass '{}' 的几何 '{}' 给的实例区间是 {}..{}（空的）：\
+                             一笔 draw 至少要画一个实例；宿主不该给出这一笔",
+                            pass.label, draw.geometry, geometry.instances.start, geometry.instances.end
+                        ));
+                    }
                     match &shapes {
                         Some((first, first_shape)) if *first_shape != shape => {
                             return Err(format!(
@@ -2455,9 +2497,10 @@ impl Executor {
                     match &geometry.indices {
                         Some((buffer, format, count)) => {
                             render_pass.set_index_buffer(buffer.slice(..), *format);
-                            render_pass.draw_indexed(0..*count, 0, 0..1);
+                            // ⚠ 实例区间**来自几何那一格**（宿主解析好的），不再写死 `0..1`。
+                            render_pass.draw_indexed(0..*count, 0, geometry.instances.clone());
                         }
-                        None => render_pass.draw(0..geometry.vertex_count, 0..1),
+                        None => render_pass.draw(0..geometry.vertex_count, geometry.instances.clone()),
                     }
                 }
             }
@@ -2489,13 +2532,21 @@ impl Executor {
                 if fullscreen {
                     format!("全屏三角｜参数 {} 字节｜格 {}", pass.params.len(), pass.slots.len())
                 } else {
-                    pass.draws
+                    // ⚠ 实例区间**打进审计**：它是这一笔 draw 的一个数（谁画的、画第几个实例），
+                    //    而"图对了"说不清是"下标对了"还是"下标恰好都是 0"（今天每笔长度 1）。
+                    draws
                         .iter()
-                        .map(|draw| {
-                            if draw.material.is_empty() {
-                                format!("{}（无材质）", draw.geometry)
+                        .map(|(_, geometry, material)| {
+                            let instances = if geometry.instances.end == geometry.instances.start + 1 {
+                                format!("实例 {}", geometry.instances.start)
                             } else {
-                                format!("{}+{}", draw.geometry, draw.material)
+                                format!("实例 {}..{}", geometry.instances.start, geometry.instances.end)
+                            };
+                            match material {
+                                Some(material) => {
+                                    format!("{}+{}（{instances}）", geometry.name, material.name)
+                                }
+                                None => format!("{}（无材质，{instances}）", geometry.name),
                             }
                         })
                         .collect::<Vec<_>>()
@@ -3448,12 +3499,14 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
                 vertices: Some((&near, geometry_layout())),
                 indices: Some((&indices, IndexFormat::Uint32, 3)),
                 vertex_count: 3,
+                instances: 0..1,
             },
             ResolvedGeometry {
                 name: "far",
                 vertices: Some((&far, geometry_layout())),
                 indices: Some((&indices, IndexFormat::Uint32, 3)),
                 vertex_count: 3,
+                instances: 0..1,
             },
         ];
 
@@ -3625,6 +3678,12 @@ fn fs_main() -> @location(0) vec4<f32> {
     const WHITE: [u8; 4] = [255, 255, 255, 255];
     const RED: [u8; 4] = [255, 0, 0, 255];
     const GREEN: [u8; 4] = [0, 255, 0, 255];
+    /// §148 那条判据的三个读数（见那个测试头顶那张表）：
+    /// 蓝=**super** 那一格、绿=**instance** 那一格，各占一个通道 ⇒ 两类参数谁没到达
+    /// 是**两种不同的颜色**。
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const CYAN: [u8; 4] = [0, 255, 255, 255];
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
 
     const STATE_BASE: &str =
         "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|winding=ccw";
@@ -3703,6 +3762,192 @@ fn fs_main() -> @location(0) vec4<f32> {
         device.create_buffer_init(&BufferInitDescriptor {
             label: Some("px_pass 判据索引"),
             usage: BufferUsages::INDEX,
+            contents: &data,
+        })
+    }
+
+    // ========================================================================
+    // §148 的两类参数（**super 在 pass、instance 在数组里按下标选**）的夹具零件
+    // ========================================================================
+
+    /// 顶点阶段：**两类参数各读一格，各占颜色里的一个通道**。
+    ///
+    /// - **super**（`@group(1) @binding(0)`，**一条 pass 一份**）：`PassView.view_proj`
+    ///   的 w 列 —— 它就是"这一条 pass 配的那个矩阵"（真身是 `clip_from_world`）。
+    /// - **instance**（`@group(1) @binding(1)`，**长度 = 物体数的一份数组**）：按
+    ///   `@builtin(instance_index)` 选一格，读它的 w 列（真身是 `world_from_local` 的平移）。
+    ///
+    /// 颜色 = `(0, instance 那一格, 这一条 pass 那一格, 1)`：两个值各占一个通道，
+    /// 于是"哪一类没到达"在回读里是**两种不同的颜色**，而不是"看着不对"。
+    const TWO_CLASS_VERTEX: &str = r#"
+struct PassView {
+    view_proj: mat4x4<f32>,
+}
+
+struct MeshInstance {
+    world_from_local: mat4x4<f32>,
+    normal: mat3x3<f32>,
+}
+
+@group(1) @binding(0) var<uniform> pass_view: PassView;
+@group(1) @binding(1) var<storage, read> mesh: array<MeshInstance>;
+
+struct Out {
+    @builtin(position) position: vec4<f32>,
+    @location(0) tint: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @builtin(instance_index) instance_index: u32,
+) -> Out {
+    var out: Out;
+    out.position = vec4<f32>(position, 1.0);
+    // ⚠ WGSL 没有 `w_axis` 那种名字（那是 glam 的）：矩阵的第 4 列就是 `m[3]`，
+    //    而它的平移分量是 `.x` —— 与 `Mat4.w_axis.x` 是同一个格子。
+    out.tint = vec4<f32>(
+        0.0,
+        mesh[instance_index].world_from_local[3].x,
+        pass_view.view_proj[3].x,
+        1.0,
+    );
+    return out;
+}
+"#;
+
+    /// 片元阶段：颜色**全部来自顶点阶段**（两类参数在那里已经合过了）。
+    const TWO_CLASS_FRAGMENT: &str = r#"
+@fragment
+fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
+    return tint;
+}
+"#;
+
+    /// 组 1 的布局：binding 0 = `PassView`（uniform，super）、binding 1 = 实例数组
+    /// （storage，instance）—— 与 `px_render_wgpu` 那一份**同形**（照抄它的两个地址空间）。
+    fn two_class_layout(device: &Device) -> BindGroupLayout {
+        device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据：组 1（PassView + 实例数组）"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// 那一份**共用的**实例数组：每一格的 `world_from_local.w_axis.x` 按 `values` 写。
+    /// 一格 112 B（`mat4x4` 64 + `mat3x3` 48，都是 16 的倍数）。
+    fn instance_array(device: &Device, values: &[f32]) -> Buffer {
+        assert!(!values.is_empty(), "实例数组至少一格");
+        let mut data = vec![0_u8; values.len() * 112];
+        for (index, value) in values.iter().enumerate() {
+            data[index * 112 + 48..index * 112 + 52].copy_from_slice(&value.to_le_bytes());
+        }
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据实例数组"),
+            // ⚠ `STORAGE`（不是 `UNIFORM`）：与产线那一份同一个地址空间。
+            usage: BufferUsages::STORAGE,
+            contents: &data,
+        })
+    }
+
+    /// 一份"组 1"：**这一条 pass 的 super 值**（一个 64 B 的 `PassView`）+ 那一份
+    /// **共用的**实例数组句柄。
+    ///
+    /// ⚠ 实例数组**必须共用**：每份材质各建一份数组的夹具测不出"下标选的是一格数组"。
+    struct TwoClass {
+        /// 只为了活着（绑进组里的是它的引用）。
+        _view: Buffer,
+        bind_group: BindGroup,
+    }
+
+    fn two_class(device: &Device, layout: &BindGroupLayout, instances: &Buffer, super_value: f32) -> TwoClass {
+        let mut data = vec![0_u8; 64];
+        // `view_proj` 的 w 列（第 4 列 = 偏移 48）。
+        data[48..52].copy_from_slice(&super_value.to_le_bytes());
+        let view = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据 PassView"),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            contents: &data,
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("px_pass 判据组 1"),
+            layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: view.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: instances.as_entire_binding(),
+                },
+            ],
+        });
+        TwoClass {
+            _view: view,
+            bind_group,
+        }
+    }
+
+    /// 一份"组 1 就是它全部"的材质（这一条判据不给组 0/组 3：两类参数各占一个颜色通道，
+    /// 片元阶段除了把它们送出去什么都不做 —— 夹具里多一格就多一处能藏错的地方）。
+    fn two_class_material<'a>(
+        name: &'a str,
+        group: &'a TwoClass,
+        layout: &BindGroupLayout,
+    ) -> ResolvedMaterial<'a> {
+        ResolvedMaterial {
+            name,
+            groups: vec![ResolvedGroup {
+                group: 1,
+                bind_group: &group.bind_group,
+                layout: layout.clone(),
+                layout_id: 1,
+            }],
+            blend: None,
+            // 剔除关掉：这条判据要说的是"值到没到"，不是"三角形朝向对不对"。
+            cull: Cull::None,
+            fragment_shader: TWO_CLASS_FRAGMENT,
+            fragment_entry: "fs_main",
+        }
+    }
+
+    /// 角上那个三角：盖住取样点 `(0,0)`（clip 的 `(-1, +1)`）而盖不住 `(4,4)`。
+    ///
+    /// ⚠ 它是夹具的另一半：**两个取样点各由一条 pass 画** ⇒ 一张 8×8 的回读里同时读得到
+    /// "两条 pass 各自的 super"与"两格实例"。两笔都画中间那个三角的话，后一笔盖掉前一笔，
+    /// 只剩一个读数 —— 那样测不出"两条 pass 各配各的"。
+    fn corner_vertex_buffer(device: &Device) -> Buffer {
+        let corners = [(-1.0_f32, 1.0_f32), (-0.5, 1.0), (-1.0, 0.5)];
+        let mut data: Vec<u8> = Vec::with_capacity(3 * 12);
+        for (x, y) in corners {
+            for value in [x, y, 0.0] {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass 判据顶点（角上）"),
+            usage: BufferUsages::VERTEX,
             contents: &data,
         })
     }
@@ -3966,12 +4211,14 @@ fn fs_main() -> @location(0) vec4<f32> {
                 vertices: Some((&near, vertex_layout.clone())),
                 indices: None,
                 vertex_count: 3,
+                instances: 0..1,
             },
             ResolvedGeometry {
                 name: "far",
                 vertices: Some((&far, vertex_layout.clone())),
                 indices: Some((&indices, IndexFormat::Uint32, 3)),
                 vertex_count: 3,
+                instances: 0..1,
             },
         ];
 
@@ -4262,12 +4509,14 @@ fn fs_main() -> @location(0) vec4<f32> {
                 vertices: Some((&near, vertex_layout.clone())),
                 indices: None,
                 vertex_count: 3,
+                instances: 0..1,
             },
             ResolvedGeometry {
                 name: "far",
                 vertices: Some((&far, vertex_layout.clone())),
                 indices: None,
                 vertex_count: 3,
+                instances: 0..1,
             },
         ];
         let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -4353,11 +4602,185 @@ fn fs_main() -> @location(0) vec4<f32> {
         let (inside, outside) = run_case_with_sets(
             &device, &queue, &mut executor, &plan, &target, &geometries, &materials, &sets,
         );
-        assert_eq!(
-            inside, GREEN,
+        assert_eq!(inside, GREEN,
             "第 1 层是空的（新纹理按规范清成 0）⇒ 远三角画得出来；\
              层号被忽略的话它撞的是第 0 层里那个近三角写下的深度 ⇒ 白"
         );
         assert_eq!(outside, RED, "三角外仍是 pass 0 的清屏色");
+    }
+
+    /// **§148 的判据：两类参数真的到达 shader** ——
+    /// **super 在 pass 配**（组 1 binding 0：这一条 pass 的 `view_proj`）、
+    /// **instance 在数组里按下标选**（组 1 binding 1：长度 = 物体数的一份数组 +
+    /// `@builtin(instance_index)`）。
+    ///
+    /// 夹具里那两个值**各占颜色里的一个通道**，于是四种错法落在四种**互不相同**的颜色上：
+    ///
+    /// | 读到的 | `(0, 绿=实例那一格, 蓝=pass 那一格)` | 说明 |
+    /// |---|---|---|
+    /// | `RED`（清屏色） | —— | 这一笔**根本没画**（被跳过 / 被剔掉 / 区间是空的） |
+    /// | `GREEN` `(0,1,0)` | 绿=1、蓝=0 | **super 没到达**（pass 配的那一格是 0） |
+    /// | `BLUE` `(0,0,1)` | 绿=0、蓝=1 | **下标没到达**（两笔读的都是第 0 格） |
+    /// | `CYAN` `(0,1,1)` | 绿=1、蓝=1 | 两类都对 |
+    ///
+    /// ⚠ **它必须会坏**：本仓五份夹具曾经用占位 shader 字符串，于是"入口名写错"一路走到
+    /// `create_render_pipeline` 才炸 —— 只求通过的夹具**护不住**被测的东西。
+    /// 这里的三种错法各有各的颜色，而且下面**跑了第二遍**：只把两条几何的**实例区间对调**，
+    /// 两个像素就必须跟着对调（执行器要是把区间写死成 `0..1`，第二遍会与第一遍**逐位相同**，
+    /// 而第一遍也读不出 `CYAN`）。
+    #[test]
+    fn the_pass_parameter_and_the_instance_index_both_reach_the_shader() {
+        let (device, queue) = test_device();
+
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据：两类参数"),
+            size: Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        // **一份**实例数组，两格：第 0 格的绿通道 0.0、第 1 格 1.0。
+        let instances = instance_array(&device, &[0.0, 1.0]);
+        let layout = two_class_layout(&device);
+        // 两条 pass 各配各的 super：一条 1.0、一条 0.0。
+        let super_one = two_class(&device, &layout, &instances, 1.0);
+        let super_zero = two_class(&device, &layout, &instances, 0.0);
+        let material = two_class_material;
+        let materials = [
+            material("super_one", &super_one, &layout),
+            material("super_zero", &super_zero, &layout),
+        ];
+
+        // 两个取样点各一个三角（中点那个盖 (4,4)，角上那个盖 (0,0)）。
+        let middle = vertex_buffer(&device, 0.0);
+        let corner = corner_vertex_buffer(&device);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+
+        let state_one =
+            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|winding=ccw";
+        let state_zero =
+            "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw";
+        // 两条 pass，各一句话：第一条把两种参数配成 1.0 / 1.0，第二条配成 0.0 / 0.0。
+        // ⚠ 计划在**两遍里是同一份**：两遍之间只动几何表上的**实例区间** ——
+        //    这样"画面上换了什么"只可能是那个区间。
+        let plan = Plan {
+            layout: Layout::default(),
+            resources: Vec::new(),
+            passes: vec![
+                PassPlan {
+                    kind: PassKind::Geometry,
+                    label: "one".to_string(),
+                    vertex_shader: TWO_CLASS_VERTEX.to_string(),
+                    vertex_entry: "vs_main".to_string(),
+                    writes: vec!["out".to_string()],
+                    draws: vec![draw("middle", "super_one")],
+                    render: RenderState::parse(state_one).expect("状态文本"),
+                    ..Default::default()
+                },
+                PassPlan {
+                    kind: PassKind::Geometry,
+                    label: "zero".to_string(),
+                    vertex_shader: TWO_CLASS_VERTEX.to_string(),
+                    vertex_entry: "vs_main".to_string(),
+                    writes: vec!["out".to_string()],
+                    draws: vec![draw("corner", "super_zero")],
+                    render: RenderState::parse(state_zero).expect("状态文本"),
+                    ..Default::default()
+                },
+            ],
+        };
+        plan.check().expect("这份计划说得通");
+
+        let geometries = |middle_instances: std::ops::Range<u32>, corner_instances: std::ops::Range<u32>| {
+            vec![
+                ResolvedGeometry {
+                    name: "middle",
+                    vertices: Some((&middle, vertex_layout.clone())),
+                    indices: None,
+                    vertex_count: 3,
+                    instances: middle_instances,
+                },
+                ResolvedGeometry {
+                    name: "corner",
+                    vertices: Some((&corner, vertex_layout.clone())),
+                    indices: None,
+                    vertex_count: 3,
+                    instances: corner_instances,
+                },
+            ]
+        };
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let sets = || {
+            vec![
+                vec![External {
+                    name: "out",
+                    role: Role::Write,
+                    view: &view,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                }],
+                vec![External {
+                    name: "out",
+                    role: Role::Write,
+                    view: &view,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                }],
+            ]
+        };
+
+        // ---- 第一遍：中点那笔读第 1 格（绿=1）、角上那笔读第 0 格（绿=0）----
+        let mut executor = Executor::new();
+        let (inside, outside) = run_case_with_sets(
+            &device,
+            &queue,
+            &mut executor,
+            &plan,
+            &target,
+            &geometries(1..2, 0..1),
+            &materials,
+            &sets(),
+        );
+        assert_eq!(
+            inside, CYAN,
+            "中点那一笔：super=1（蓝）且实例第 1 格=1（绿）。读到 GREEN ⇒ pass 那一格没到达；\
+             读到 BLUE ⇒ 下标没到达（读的永远是第 0 格）；读到 RED ⇒ 这一笔根本没画"
+        );
+        assert_eq!(
+            outside, BLACK,
+            "角上那一笔：super=0 且实例第 0 格=0 ⇒ 两个通道都是 0。\
+             ⚠ 清屏色是 RED，所以 BLACK **不是**「没画」"
+        );
+
+        // ---- 第二遍：**只把两条几何的实例区间对调** ----
+        //
+        // ⚠ 换一个新执行器：池子是执行器上的（同上面那条拷贝判据的教训）。
+        let mut fresh = Executor::new();
+        let (inside, outside) = run_case_with_sets(
+            &device,
+            &queue,
+            &mut fresh,
+            &plan,
+            &target,
+            &geometries(0..1, 1..2),
+            &materials,
+            &sets(),
+        );
+        assert_eq!(
+            inside, BLUE,
+            "区间对调之后中点那笔读第 0 格（绿=0）、super 仍是 1（蓝）—— \
+             要是执行器把区间写死成 0..1，这一遍会与上一遍逐位相同"
+        );
+        assert_eq!(outside, GREEN, "角上那笔改读第 1 格（绿=1），而它那条 pass 的 super 仍是 0");
     }
 }

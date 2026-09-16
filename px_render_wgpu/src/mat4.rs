@@ -928,7 +928,7 @@ mod tests {
         );
     }
 
-    /// 同一件事再来一遍：**列相乘**（`clip_from_world = clip_from_view × view_from_world`）    /// 也要与 glam 逐位相同。它是 `MeshStage::view_proj` 那颗数。
+    /// 同一件事再来一遍：**列相乘**（`clip_from_world = clip_from_view × view_from_world`）    /// 也要与 glam 逐位相同。它是组 1 binding 0 那份 `PassView::view_proj` 那颗数。
     #[test]
     fn the_matrix_product_matches_glam_bit_for_bit() {
         use crate::mat4::{Mat4, Quat, Vec3};

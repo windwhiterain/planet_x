@@ -3212,3 +3212,119 @@ Bevy 锚、老形状产物、2240×1400、60 帧、一次会话：
 所以"建了 14 份、用了 8 份"（8 × 176 = 1408 B）。今天只值 1 KB，**但它说明这条路的粒度是
 "每个物体"而不是"每个投影者"** —— 若将来投影者变多，这个差会放大。
 **今天不改**（判据已逐字节成立，改它要动渲染路径），只记形状。
+
+---
+
+## §148 参数分类落地：**super 在 pass、instance 在 material instance**（实例化那一路）
+
+> 用户裁决（逐字）：「per pass 的材质参数应当相当于 material 参数的 **super class**，
+> **super 参数在 pass 配，instance 参数在 material instance 配**」；索引那一半是
+> **instancing**（`draw` 变成 `0..N` + `@builtin(instance_index)`）。
+> 仪器 `target/table/regress.ps1`（target/ 下不入 git）｜夹具 `px_pass` 的新判据**在仓库里**。
+
+### 判据（**我自己复现的**，`--offline`，960×640，不给 `--cam`）
+
+```
+宿主 target/debug/px_render_wgpu.exe  sha256 2422E73A39F837B7…
+J1 六档  63184151909371A5 / 7BBB18CE3612D4F7 / C03FFF3235264DD5
+        / B5799E4F1649535C / FA20FAD37BC61EA2 / 32872F80AC867BE3   —— 六格全 ✓
+J3 四条  none 63184151909371A5｜invert 733408200119C203
+        invert_vignette 745BE24FE1467192｜scratch 2D61519C6544E3C1 —— 四格全 ✓
+逃生门   六份冻产物（--no-frame-graph）逐字节相同：
+        2795F948E6987E11 / F60B19B0AE7E229F / 1A27679882A10D6B
+        ACB824E9EC0BA893 / CB363DA74A90F63E / 2C6C8592AD45214B        —— 六份全 ✓
+J3 附加  grade_half（--offline --stats）：min = max = 188（1 种颜色，614400/614400）
+        8DECA8C60117989A ✓（§147 记的那一格）
+计数     px_pass 27（+1，新判据）｜px_render_wgpu 57｜px_protocol 40｜px_graphs 22｜px_shader 20
+        ⚠ 六个数都是**同一支 exe/同一份源码**上重量的（`cargo test -p <crate>` 各跑一遍）
+```
+
+⚠ **`cargo test -p px_render` = 23 passed / 3 FAILED，而这三条是既有的**（不是本单元引入）：
+`passes::tests::{the_plan_keeps_the_array_order, a_pass_whose_slots_do_not_match_its_reads_is_refused,
+a_pass_without_a_packed_params_block_is_refused}` 那三份夹具用的是**占位 shader 字符串 `"x"`**，
+而 `px_pass::Plan::check` 的 WGSL 校验（`px_pass/src/lib.rs:96`，**HEAD 上一字不差**）当场拒它 ⇒
+**那条校验加进来那天它们就红了**。`px_render` 本单元 0 个文件改动（§107：它是锚，不许动）。
+
+### 形状：`MeshStage` 按**谁在配**拆成两格
+
+| 组 1 | 谁 | 内容 | 多大 |
+|---|---|---|---|
+| binding 0 | **super**（每条 pass 一份，由 `passes[].cube_face` 说哪一面，没有就是相机） | `PassView{view_proj}` | 64 B |
+| binding 1 | **instance**（**长度 = 物体数**的一份数组，`@builtin(instance_index)` 选格） | `MeshInstance{world_from_local, normal}` | 112 B/格 |
+
+`orbit-bare-shadow` 实测（宿主自己打的审计行）：
+
+```
+super = 每视图一份 PassView（7 份 × 64 B = 448 B：相机 1 + 影子面 6）
+instance = 全帧一份实例数组（2 个物体 × 112 B = 224 B）
+拆之前 = 每 (物体, 视图) 一份 176 B 的 MeshStage（14 份 = 2464 B）
+```
+
+⇒ **§142.1 那条"建了 14 份、用了 8 份"的粒度毛病跟着消失了**：现在 7 份视图各被自己那条 pass
+用掉，实例数组只有真有的那些物体。而 `draw_indexed` 从 `0..1` 变成 `k..k+1`。
+
+**`k`（实例下标）落在 `px_pass::ResolvedGeometry.instances`**（设计岔路，已报用户批准）：
+- 它**不是给执行器加概念**，是**撤掉执行器自己擅自决定的一个数**（`0..1` 是没人写过的缺省 ⇒ §104 第 3 条）；
+- 与 `vertex_count` / `indices` 同类（一笔 draw call 的三个数）；
+- **(B) 文档里再写一遍**被否：数组长度来自 `objects[]`、`k` 也从 `objects[]` 来 ⇒ 同一事实两处说，
+  写错就是**静默错像素**（§141 那条 `layer` 是**校验**不是**推导**，同一个道理）；
+- **(C) 挂在 `ResolvedMaterial` 上**被否：`Draw.material` 允许为空（深度-only 那一笔）⇒ 那一档没有
+  实例区间，只能落回一个**缺省值**（"derive, never default"）。
+
+⚠ 一条**今天为真、明天为假**的前提写进了那格注释：几何表是**按名字**查的，而今天几何名 = 物体 id
+（1:1）。哪天**两个物体共用同一份网格**，宿主必须把同一份缓冲注册成**两条几何记录**，
+否则第二个物体永远画第 0 格，而且**不报**（WGSL 下标越界是静默的）。
+
+### 判据：新能力**演示**，不是声称（§109.1：实例化是行为差异，必须证明）
+
+**① 仓库里的夹具**（`px_pass::tests::the_pass_parameter_and_the_instance_index_both_reach_the_shader`）：
+一条计划两条 pass，各配各的 super（1.0 / 0.0），**共用同一份两格实例数组**，
+两类值各占颜色一个通道 ⇒ 四种错法落在**四种不同的颜色**上：
+
+| 读到的 | 含义 |
+|---|---|
+| `RED`（清屏色） | 这一笔根本没画 |
+| `GREEN (0,1,0)` | **super 没到达** |
+| `BLUE (0,0,1)` | **下标没到达**（两笔都读第 0 格） |
+| `CYAN (0,1,1)` | 两类都对 |
+
+第二遍**只把两条几何的实例区间对调**，两个像素跟着对调（写死 `0..1` 的话两遍逐位相同）。
+
+**② 负对照（实测，各一次重编，改完就还原）**：
+
+| 故意造错 | orbit-bare | orbit-bare-shadow | orbit-rings | orbit-soft |
+|---|---|---|---|---|
+| 执行器把区间写死 `0..1` | 63184151909371A5 → **21CCC21B8CA5B4BA** | — | B5799E4F1649535C → **A36357B73A27FAD8** | FA20FAD37BC61EA2 → **893521225FE1B38D** |
+| 六个面全用相机那份 super | **不动**（它没有面 pass） | C03FFF3235264DD5 → **AE34A5334FA3AB14** | — | FA20FAD37BC61EA2 → **C8A38B968B74200B** |
+| 还原后 | 63184151909371A5 ✓ | C03FFF3235264DD5 ✓ | — | FA20FAD37BC61EA2 ✓ |
+
+⇒ 两类参数**都是承重的**：换掉任一类，判据当场变色；而"六个面全换成相机那份"这一刀
+**只动影子那几档**（`orbit-bare` 一格不动）—— 这正是"super 是**每条 pass** 配的"那个签名。
+
+**③ 正向读数（审计行，宿主自己打的）**：`orbit-rings` 的透明那条 pass：
+
+```
+transparent：rings+rings（实例 2） / atmosphere+atmosphere（实例 1）
+```
+
+⚠ 次序是**透明排序**（rings 先、atmosphere 后），而下标是**物体在 `objects[]` 里的格子**
+（planet 0 / atmosphere 1 / rings 2）—— 两者不是一回事，这一行同时读得到。
+
+### 两条坑（本单元新踩，写下来省下一次）
+
+1. ⚠⚠ **`Copy-Item` 会连 LastWriteTime 一起复制**（Windows 的 CopyFile 行为）⇒
+   用"备份 → 改 → 还原"做负对照时，**还原出来的文件比刚编出来的产物旧**，cargo 认为它是新鲜的
+   ⇒ 它跑的还是**改坏那一版**的二进制。我因此拿到过一个"还原之后仍然红"的假读数
+   （审计行说 `实例 1`、像素却是"下标没到"）。**还原之后必须 touch 一下**（或 `cargo clean -p`）。
+   与 §108.4 / §147.7 同族：**工具的"空"与"新鲜"都有好几种，别拿直觉当读数。**
+2. **WGSL 没有 `w_axis` / `x_axis` 那种名字**（那是 glam 的）：矩阵第 4 列是 `m[3]`，平移是 `.x`。
+   夹具第一版照 glam 的写法写，naga 当场拒（`invalid field accessor 'w_axis'`）—— 拒在 `Plan::check` 上，
+   离病因很近，值。
+
+### 本单元**没做**的（留形状，不建）
+
+- `material_instances` 带 `params`（§142 附那条**待决项**）—— 本单元只做 `MeshStage` 这一处的两类参数。
+- `--sheet`（另一个单元）。
+- `first_instance != 0` 的合法性是**查过**的（不是假设）：wgpu 29 的直接 draw **不**门控
+  `INDIRECT_FIRST_INSTANCE`（那只管 indirect），`validate_instance_limit` 只看
+  `first_instance + instance_count <= instance_limit`，而顶点缓冲是 `Vertex` 步进 ⇒ 上限 `u64::MAX`。

@@ -286,19 +286,25 @@ impl Geometry {
     }
 }
 
-/// 一个物体的 group 1（`MeshStage`）：两块矩阵，每个物体一份。
+/// 组 1 的**一份视图**（`PassView`）：这一条 pass 的 `view_proj` + 那一份**全帧共用的实例数组**。
 ///
-/// ⚠ 布局不在这里：它是**一份**（见 `run` 里那段），所有物体共用 —— 每个物体各建一份
+/// ⚠ 原来这里叫 `Stage`，是"每个 (物体, 视图) 一份 176 字节的 `MeshStage`"；§142 的参数分类
+/// 把它拆成两格：**super（`view_proj`）一条 pass 一份**、**instance（世界矩阵 + 法线矩阵）
+/// 长度 = 物体数的一份数组**（按 `@builtin(instance_index)` 选格）。这个结构体因此只剩
+/// "一份视图"那一半 —— 实例数组是**一份**，所有视图绑的是同一个缓冲。
+///
+/// ⚠ 布局不在这里：它是**一份**（见 `run` 里那段），所有视图共用 —— 每个视图各建一份
 /// "内容相同、对象不同"的布局会让管线缓存键与 wgpu 的布局比对说不到一块去。
 struct Stage {
-    _buffer: wgpu::Buffer,
+    /// 这一份 `PassView` 的 uniform 缓冲。只为了活着（绑进组里的是它的引用）。
+    _view: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
 /// 点光 cube 的**一面**：那个面当相机时的一套状态（§139）。
 ///
-/// 一条影子 pass 要用的是它：group 0 那份 `view`（这一面的矩阵）与每个物体那一份
-/// `MeshStage`（这一面的 `clip_from_world`）。名字是**生成的**（`material_instances`），
+/// 一条影子 pass 要用的是它：group 0 那份 `view`（这一面的矩阵）与组 1 里那一份
+/// `PassView`（这一面的 `clip_from_world`）。名字是**生成的**（`material_instances`），
 /// 而"名字 → 哪一面"由**用到它的那条 pass** 说（`PassSpec::cube_face`）。
 struct Face {
     /// cube 的下标（= 聚类缓冲的下标 = 着色器里的 `light_id`）。
@@ -307,28 +313,30 @@ struct Face {
     face: u32,
     /// 这一面的"相机"（`camera::face_view` 那条链算出来的四块矩阵）。
     ///
-    /// ⚠ 这一档**没有**"面的 group 0"：影子那一笔的顶点阶段读的是 `MeshStage`
-    /// （组 1，里面已经是这一面的 `clip_from_world`），而组 0 里第 2 格绑的正是这条
+    /// ⚠ 这一档**没有**"面的 group 0"：影子那一笔的顶点阶段读的是组 1 那份 `PassView`
+    /// （里面已经是这一面的 `clip_from_world`），而组 0 里第 2 格绑的正是这条
     /// pass 正在写的 cube —— 绑上它 wgpu 当场拒（实测：
     /// `TextureUses(DEPTH_STENCIL_WRITE) is an exclusive usage and cannot be used with
     /// any other usages within the usage scope`）。所以那一面的一切都从 `camera` 进
-    /// `MeshStage`，不进组 0。
+    /// `PassView`，不进组 0。
     camera: crate::camera::Camera,
 }
 
-/// 一块 `MeshStage` 的字节：`world_from_local` + `view_proj` + **法线矩阵**。
+/// **一格实例**（`MeshInstance`）的字节：`world_from_local` + **法线矩阵**。
 ///
-/// ⚠ 三块矩阵都走 `mat4.rs` 那几份**逐位**移植件：`world_from_local` 用
-/// `from_scale_rotation_translation`（文档的 `transform` 就是它的三个入参），
-/// `view_proj` 用相机自己算好的 `clip_from_world`（= `clip_from_view × view_from_world`）。
-/// 在这里重算一次 `clip_from_view × view_from_world` 就是"同一条契约、两处算"。
+/// ⚠ 这里**没有** `view_proj`：它是 super，住在 `PassView` 里（一条 pass 一份）。
+/// 拆开之后这一格是 112 字节，112 是 16 的倍数 ⇒ 它作为数组元素的步长合法
+/// （WGSL：`array<T>` 的元素步长必须是 16 的倍数）。
 ///
-/// ⚠ 法线矩阵是**第三块**（Bevy 的 `local_from_world_transpose`）：它是
+/// ⚠ 两块矩阵都走 `mat4.rs` 那几份**逐位**移植件：`world_from_local` 用
+/// `from_scale_rotation_translation`（文档的 `transform` 就是它的三个入参）。
+///
+/// ⚠ 法线矩阵是**第二块**（Bevy 的 `local_from_world_transpose`）：它是
 /// `Affine3A::inverse().matrix3.transpose()`（[`Mat4::normal_matrix_3x3`]，判据钉着），
 /// **不是** `world_from_local` 的 3×3 —— 均匀缩放下两者数学等价、**浮点不等价**，
 /// 而差的那一个末位正好落在"盘内散落的 ±1"上（本仓库这一族的第五次现形）。
 /// 每一列补齐到 16 字节（WGSL 的 `mat3x3<f32>` 布局）。
-fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera::Camera) -> [u8; 176] {
+fn instance_bytes(transform: &px_protocol::scene::Transform) -> [u8; 112] {
     let rotation = Quat::from_xyzw(
         transform.rotation[0],
         transform.rotation[1],
@@ -348,17 +356,13 @@ fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera
             transform.translation[2],
         ),
     );
-    let mut bytes = [0_u8; 176];
+    let mut bytes = [0_u8; 112];
     let normal = world_from_local.normal_matrix_3x3();
     for (index, column) in [
         world_from_local.x_axis,
         world_from_local.y_axis,
         world_from_local.z_axis,
         world_from_local.w_axis,
-        camera.clip_from_world.x_axis,
-        camera.clip_from_world.y_axis,
-        camera.clip_from_world.z_axis,
-        camera.clip_from_world.w_axis,
     ]
     .iter()
     .enumerate()
@@ -371,7 +375,30 @@ fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera
     // 法线矩阵：三列，**每列补齐到 16 字节**（第 4 位补 0，shader 读不到它）。
     for (index, column) in normal.iter().enumerate() {
         for (slot, value) in [column.x, column.y, column.z, 0.0].iter().enumerate() {
-            let at = 128 + index * 16 + slot * 4;
+            let at = 64 + index * 16 + slot * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+/// **一份 `PassView`** 的字节：这一条 pass 的 `clip_from_world`。
+///
+/// ⚠ 它**与物体无关**：同一个视图下所有物体共用这一份（原来它是每 (物体, 视图) 各一份
+/// `MeshStage` 里的第二块矩阵，值一模一样、抄了 N 遍 —— §148 之后它就住在这里）。
+fn view_bytes(camera: &crate::camera::Camera) -> [u8; 64] {
+    let mut bytes = [0_u8; 64];
+    for (index, column) in [
+        camera.clip_from_world.x_axis,
+        camera.clip_from_world.y_axis,
+        camera.clip_from_world.z_axis,
+        camera.clip_from_world.w_axis,
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (slot, value) in [column.x, column.y, column.z, column.w].iter().enumerate() {
+            let at = index * 16 + slot * 4;
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
@@ -698,7 +725,7 @@ pub fn run(
     audit.push("group 0（七格全绑，哪怕 shader 只声明了一部分）：".to_string());
     audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
 
-    // ---- 点光 cube 的**每一面**：一套 view + 每个投影物体一份 MeshStage（§139）----
+    // ---- 点光 cube 的**每一面**：一套 view；那一面的 `PassView` 由 §148 那一节按面建 ----
     //
     // 哪几面要用，**由文档说了算**：带 `cube_face` 的那些 pass 点名的 (灯, 面)。一条都没有
     // ⇒ 这里一个面都不建（那一帧也就没有影子 pass）。
@@ -750,7 +777,7 @@ pub fn run(
         );
         // 这一面的 group 0 **不建**：一来影子那一笔根本不会绑它（见下面实例那一段：
         // 绑了会撞 wgpu 的排他用法 —— 组 0 第 2 格就是这条 pass 正在写的 cube），
-        // 二来顶点阶段读的是 `MeshStage.view_proj`（那一面的矩阵已经在里面了，§110 的
+        // 二来顶点阶段读的是组 1 那一份 `PassView`（那一面的矩阵已经在里面了，§110 的
         // 那条"宿主算好、shader 只乘"）。所以这一面的信息全在 `camera` 里。
         let _ = &face_camera;
         let layer = light * group0::SHADOW_CUBE_FACES + face;
@@ -772,7 +799,7 @@ pub fn run(
         });
     }
 
-    // 每个面、每个物体的 `MeshStage`：矩阵照抄相机那一份的路，只把 `clip_from_world`
+    // ⚠ 这里建的是**面**（不是每个物体的矩阵）：§148 之后 `view_proj` 是按**视图**建的一份
     // ---- 几何：按物体 id 上传（`Draw::geometry` 那个名字就是物体 id）----
     let mut geometries: Vec<Geometry> = Vec::with_capacity(scene.objects.len());
     for object in &scene.objects {
@@ -883,58 +910,126 @@ pub fn run(
         ));
     }
 
-    // ---- 材质：group 3 由 `material.rs` 反射建（空槽绑兜底白图），group 1 每个物体一份 ----
+    // ---- 材质：group 3 由 `material.rs` 反射建（空槽绑兜底白图），group 1 每视图一份 ----
     let mut materials = Materials::new(&gpu.device, &gpu.queue);
     let material_layout = materials.bind_group_layout().clone();
-    // ⚠ group 1 的**布局只有一份**（所有物体共用同一份 `MeshStage` 形状）：每个物体各建一份
-    //    "内容相同但对象不同"的布局，会踩到 `ResolvedGroup::layout_id` 那条契约的边界 ——
-    //    管线缓存键相同、而 wgpu 那边比的是布局对象本身。一份布局 + 每个物体一个绑定组，
-    //    这两件事就都干净了。
+    // ⚠ group 1 的**布局只有一份**（所有视图共用同一份形状：`PassView` + 实例数组）：
+    //    每个视图各建一份"内容相同但对象不同"的布局，会踩到 `ResolvedGroup::layout_id`
+    //    那条契约的边界 —— 管线缓存键相同、而 wgpu 那边比的是布局对象本身。
+    //    一份布局 + 每个视图一个绑定组，这两件事就都干净了。
     let stage_layout = gpu
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("组 1：MeshStage"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: Some("组 1：PassView + MeshInstance 数组"),
+            entries: &[
+                // binding 0：**super** —— 这一条 pass 的 `view_proj`。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // binding 1：**instance** —— 长度 = 物体数的那份数组。
+                //
+                // ⚠ 地址空间跟着 oracle 走：Bevy 那份每实例数据是
+                //    `var<storage> mesh: array<Mesh>`（`mesh_bindings.wgsl:9`）。
+                //    两档读出来的浮点位模式一模一样 —— 选它**不是**为了性能，
+                //    是为了下一次对账时不必先怀疑这里。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
-    // 换成那一面的（`stage_bytes` 收的是 `camera`，而"面的相机"就是 [`crate::camera::face_view`]）。
-    let mut face_stages: Vec<Vec<Stage>> = Vec::with_capacity(faces.len());
-    for face in &faces {
-        let mut stages = Vec::with_capacity(scene.objects.len());
-        for object in &scene.objects {
-            let buffer = gpu
-                .device
-                .create_buffer_init(&BufferInitDescriptor {
-                    label: Some("组 1：MeshStage（影子面的 view_proj）"),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                    contents: &stage_bytes(&object.transform, &face.camera),
-                });
-            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("组 1：MeshStage（影子面）"),
-                layout: &stage_layout,
-                entries: &[wgpu::BindGroupEntry {
+
+    // ---- 实例数组：**一份**（长度 = 物体数），全帧、所有视图共用（§142）----
+    //
+    // ⚠ "长度 = 物体数"是这一档的**形状**，不是省字节的顺手之作：执行器按
+    //    `@builtin(instance_index)` 选格，而下标就是物体在 `objects[]` 里的次序
+    //    （几何表也是照那个次序建的 ⇒ 两者同源）。
+    let mut instance_stream: Vec<u8> = Vec::with_capacity(scene.objects.len() * 112);
+    for object in &scene.objects {
+        instance_stream.extend_from_slice(&instance_bytes(&object.transform));
+    }
+    let instance_buffer = gpu
+        .device
+        .create_buffer_init(&BufferInitDescriptor {
+            label: Some("组 1：MeshInstance 数组（长度 = 物体数）"),
+            usage: wgpu::BufferUsages::STORAGE,
+            contents: &instance_stream,
+        });
+
+    // ---- 每个**视图**一份 `PassView`（相机一份 + 影子每个面一份），实例数组是同一份 ----
+    //
+    // ⚠ 这一节就是"super 在 pass 配"的落地：`view_proj` 与物体无关（同一个视图下所有
+    //    物体共用它），所以它按**视图**建，不按 (物体, 视图) 建。视图是哪一个由
+    //    **文档的 pass** 说（`cube_face` → 那一面；没有就是相机）—— 见下面 `faces`。
+    let make_stage = |label: &str, view: &crate::camera::Camera| -> Stage {
+        let buffer = gpu
+            .device
+            .create_buffer_init(&BufferInitDescriptor {
+                label: Some(label),
+                usage: wgpu::BufferUsages::UNIFORM,
+                contents: &view_bytes(view),
+            });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &stage_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
                     binding: 0,
                     resource: buffer.as_entire_binding(),
-                }],
-            });
-            stages.push(Stage {
-                _buffer: buffer,
-                bind_group,
-            });
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        Stage {
+            _view: buffer,
+            bind_group,
         }
-        face_stages.push(stages);
-    }
+    };
+    // 影子那几面（`face_stages[k]` 与 `faces[k]` 同一次序 —— `face_of` 查的就是它）。
+    let face_stages: Vec<Stage> = faces
+        .iter()
+        .map(|face| {
+            make_stage(
+                &format!("组 1：PassView（灯 {} 面 {}）", face.light, face.face),
+                &face.camera,
+            )
+        })
+        .collect();
+    // 相机那一份：不带 `cube_face` 的 pass 用它（不透明/透明/预通道/天空盒那一档）。
+    let camera_stage = make_stage("组 1：PassView（相机）", &camera);
+    // ⚠ 实例数组要活到这一帧画完（`wgpu::BindGroup` 持的是它的引用 —— 引用计数保证它不会
+    //    先死；这里留一个绑定只是让"谁活着"这件事看得见，同下面那条 `_shadow_texture`）。
+    let _instance_buffer = instance_buffer;
+    audit.push(format!(
+        "组 1（§142 的两类参数）：**super** = 每视图一份 `PassView`（{} 份 × 64 B = {} B：\
+         相机 1 + 影子面 {}）｜**instance** = 全帧**一份**实例数组（{} 个物体 × 112 B = {} B，\
+         按 `@builtin(instance_index)` 选格）。拆之前是每 (物体, 视图) 一份 176 B 的 \
+         `MeshStage`（{} 份 = {} B）⇒ 数据从 (物体 × 视图) 那一维上下来了",
+        faces.len() + 1,
+        (faces.len() + 1) * 64,
+        faces.len(),
+        scene.objects.len(),
+        instance_stream.len(),
+        (faces.len() + 1) * scene.objects.len(),
+        (faces.len() + 1) * scene.objects.len() * 176,
+    ));
 
-
-    let mut stages: Vec<Stage> = Vec::with_capacity(scene.objects.len());
     let mut bindings = Vec::with_capacity(scene.objects.len());
     for object in &scene.objects {
         let binding = materials.bind(&gpu.device, &gpu.queue, object)?;
@@ -946,32 +1041,14 @@ pub fn run(
             binding.bound_slots,
             binding.fallback_slots
         ));
-        let buffer = gpu
-            .device
-            .create_buffer_init(&BufferInitDescriptor {
-                label: Some("组 1：MeshStage（world_from_local + view_proj）"),
-                usage: wgpu::BufferUsages::UNIFORM,
-                contents: &stage_bytes(&object.transform, &camera),
-            });
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("组 1：MeshStage"),
-            layout: &stage_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        });
-        stages.push(Stage {
-            _buffer: buffer,
-            bind_group,
-        });
         bindings.push(binding);
     }
 
     // ---- 执行器要的那几张表 ----
     let resolved_geometry: Vec<ResolvedGeometry<'_>> = geometries
         .iter()
-        .map(|geometry| ResolvedGeometry {
+        .enumerate()
+        .map(|(index, geometry)| ResolvedGeometry {
             name: geometry.name.as_str(),
             // ⚠ 程序化那一笔两栏都给 `None`：它**没有**顶点缓冲，顶点由顶点阶段按
             //    `vertex_index` 现算。给一个空缓冲是另一回事 —— 执行器会拿它去建管线的
@@ -985,6 +1062,18 @@ pub fn run(
                 .as_ref()
                 .map(|buffer| (buffer, wgpu::IndexFormat::Uint32, geometry.index_count)),
             vertex_count: geometry.vertex_count,
+            // ⚠ 实例下标 = **物体在 `objects[]` 里的次序**，而几何表就是照那个次序建的
+            //    （实例数组也是）⇒ 两者同源，"下标越界"在结构上不可能发生。
+            //    一格宽的区间 ⇒ `instance_index` 恒为 `index`：每个算式与拆之前逐位相同。
+            //
+            // ⚠ 程序化那一笔（天空盒）**不是物体**：它画一次（`instance_index` 恒 0），
+            //    而它的顶点阶段一个 `@group(1)` 都不读（顶点全由 `vertex_index` 现算）。
+            //    `0..1` 说的是这件事本身，不是一个"兜底默认值"。
+            instances: if index < scene.objects.len() {
+                index as u32..index as u32 + 1
+            } else {
+                0..1
+            },
         })
         .collect();
 
@@ -1059,20 +1148,24 @@ pub fn run(
         frame_materials.push((loaded, binding));
     }
 
-    // ⚠ 一笔 draw 的组：**group 0 + group 1 + group 3**。group 1 是**每个物体**的
-    //    （两块矩阵），所以"解析好的材质"其实按**物体**给：名字就是物体 id，
-    //    而文档里一笔 draw 的 geometry 与 material 用的正是同一个名字（`frame.rs::draws_of`）。
-    //    真出现"一条 pass 里同一个物体画两笔"的那天，这里要当场拒 —— 一个名字给不出两组矩阵。
+    // ⚠ 一笔 draw 的组：**group 0 + group 1 + group 3**。group 1 现在是**每个视图**一份的
+    //    （§142：super = 那一条 pass 的 `view_proj`；instance = 全帧那一份数组，
+    //    靠 `@builtin(instance_index)` 选格），所以内容材质那一档**共用同一份组 1** ——
+    //    "解析好的材质"仍然按**物体**给（名字是物体 id），因为**混合/剔除/片元阶段**是
+    //    每个物体一份的（§127/§129），而组 1 不是。
+    //    ⚠ 实例下标**不在这里**：它挂在几何那一格上（见上面 `resolved_geometry`）——
+    //    一笔 draw 的三个数（顶点、索引、实例区间）住在一起。
+    //    真出现"一条 pass 里同一个物体画两笔、两笔要不同实例区间"的那天，这里要当场拒 ——
+    //    几何是按**名字**查的，一个名字给不出两个区间。
     //
     // ⚠ 帧自有材质**没有 group 1**：它的顶点阶段是程序化的（`vertex_index` 现算），
-    //    `MeshStage` 那两块矩阵它一格都不读。少给一组不是省事 —— 给了它反而要求那段
+    //    组 1 那两格它一格都不读。少给一组不是省事 —— 给了它反而要求那段
     //    顶点阶段认一个它不认的布局。
     let mut resolved_materials: Vec<ResolvedMaterial<'_>> = scene
         .objects
         .iter()
         .zip(bindings.iter())
-        .zip(stages.iter())
-        .map(|((object, binding), stage)| {
+        .map(|(object, binding)| {
             Ok(ResolvedMaterial {
                 name: object.id.as_str(),
                 groups: vec![
@@ -1084,8 +1177,11 @@ pub fn run(
                     },
                     ResolvedGroup {
                         group: 1,
-                        bind_group: &stage.bind_group,
-                        // 一份布局，所有物体共用（见上面那段）。
+                        // ⚠ **所有物体共用同一份**：组 1 现在是"相机那一份 `PassView`
+                        //    + 全帧那一份实例数组"，与物体无关 —— 每个物体各建一份
+                        //    "只有绑的对象不同"的组，就是拆之前那个形状的残渣。
+                        bind_group: &camera_stage.bind_group,
+                        // 一份布局，所有视图共用（见上面那段）。
                         layout: stage_layout.clone(),
                         layout_id: STAGE_LAYOUT_ID,
                     },
@@ -1132,7 +1228,7 @@ pub fn run(
         fragment_entry: loaded.entry.as_str(),
     }));
 
-    // ---- 生成的材质实例（§139）：**影子六面各一套 view/MeshStage** ----
+    // ---- 生成的材质实例（§139）：**影子六面各一套组 1（那一面的 `PassView`）** ----
     //
     // ⚠ 这一节是"文档里那些不同的名字"的落地：每一份实例的名字在宿主这张表里
     //    **恰好一条**（执行器只有"名字 → 一套组"这一条规则，没有覆盖、没有优先级）。
@@ -1142,9 +1238,10 @@ pub fn run(
     // ⚠ 三条当场拒（都是"猜一个就会静默画错"的形状）：
     //    ① 同一个实例名被**两条面不同的 pass** 用（一个名字两套组 ⇒ 说不清）；
     //    ② 带 `cube_face` 的 pass 用了一个**不是实例**的材质名（它会拿到相机的
-    //       view/MeshStage ⇒ 影子贴到相机那面去，而画面上只是"影子歪了"）；
-    //    ③ 实例的 `base` 与那一笔的 `geometry` 不同名（`MeshStage` 是**物体**的，
-    //       base 的变换套到别的物体上就是另一个物体的位置）。
+    //       那一份 `PassView` ⇒ 影子贴到相机那面去，而画面上只是"影子歪了"）；
+    //    ③ 实例的 `base` 与那一笔的 `geometry` 不同名 —— ⚠ **拆分之后这条的病因换了**
+    //       （见下面那条注释：矩阵现在按**几何**的实例下标选，不再按 base 选），
+    //       但它拦的仍然是一件真事：这一笔会拿 A 的几何配 B 的剔除/混合/片元档。
     if !spec.material_instances.is_empty() {
         let face_of = |light: u32, face: u32| -> Result<usize, String> {
             faces
@@ -1179,7 +1276,7 @@ pub fn run(
                 }
                 [(label, Some(cube))] => {
                     audit.push(format!(
-                        "实例 '{}' ⇒ 照 '{}'，用在 pass '{label}' 上 ⇒ 那一面的 view/MeshStage\
+                        "实例 '{}' ⇒ 照 '{}'，用在 pass '{label}' 上 ⇒ 那一面的 PassView\
                          （灯 {}，面 {}，层 {}）",
                         instance.name, instance.base, cube.light, cube.face, cube.layer
                     ));
@@ -1188,7 +1285,7 @@ pub fn run(
                 [(label, None)] => {
                     return Err(format!(
                         "实例 '{}' 被 pass '{label}' 用了，而那条 pass 没有 `cube_face`：\
-                         实例是要照某一面的 view/MeshStage 建的，没有那一面就没有依据",
+                         实例是要照某一面的 PassView 建的，没有那一面就没有依据",
                         instance.name
                     ))
                 }
@@ -1233,6 +1330,13 @@ pub fn run(
                 .iter()
                 .position(|object| object.id == instance.base);
             // 每一笔用它的 draw 都要 base == geometry（③）。
+            //
+            // ⚠ **拆分之后这条守卫的病因换了，措辞也得跟着换**（§141 那一族教训：
+            //    一条响得对、说得不对的守卫与不响的守卫一样贵）：矩阵**不再按 base 选**
+            //    ——实例下标挂在**几何**那一格上（`resolved_geometry`），所以"另一个物体的
+            //    位置"这件事已经不可能发生。它现在拦的是：这一笔拿 **A 的几何**配
+            //    **B 的剔除/混合/片元档**（那三样来自实例照的那份材质）。今天两者都是
+            //    "投影的那个物体"，写错时画面上只是"影子的剔除反了"，没有任何别的门会响。
             for pass in plan.passes.iter() {
                 for draw in &pass.draws {
                     if draw.material != instance.name {
@@ -1240,31 +1344,36 @@ pub fn run(
                     }
                     if draw.geometry != instance.base {
                         return Err(format!(
-                            "pass '{}' 拿实例 '{}'（照 '{}'）去画几何 '{}'：`MeshStage` 是\
-                             **物体**的矩阵，照谁的材质就得用谁的几何 —— 不然影子落在另一个\
-                             物体的位置上",
-                            pass.label, instance.name, instance.base, draw.geometry
+                            "pass '{}' 拿实例 '{}'（照 '{}'）去画几何 '{}'：名字是照**物体**\
+                             生成的，而这一笔的剔除/混合/片元阶段来自 '{}'、几何与实例下标来自\
+                             '{}' —— 两者指不同的物体时，这一笔就是「用 A 的网格跑 B 的材质档」",
+                            pass.label, instance.name, instance.base, draw.geometry, instance.base,
+                            draw.geometry
                         ));
                     }
                 }
             }
-            // 一套新的组：**只留组 1**（那一面、那个物体的 `MeshStage`）。
+            // 一套新的组：**只留组 1**（那一面的 `PassView` + 那份全帧实例数组）。
             //
             // ⚠ 组 0 **不能绑**：它的第 2 格就是这条 pass 正在写的 cube，绑上它 wgpu
             //    当场拒（排他用法）。而影子那一笔没有片元阶段 ⇒ 组 0 那几格（view/lights/
             //    cluster/影图/预通道深度）一个都不会被读。组 3（材质的参数与贴图）同理：
             //    没有片元阶段，没人读它。**只留真正被读的那一组** —— 这一笔的管线布局
             //    因此与内容材质那一笔不同，那是应该的（它们是两条不同的管线）。
-            let object = object_index.ok_or_else(|| {
-                format!(
-                    "实例 '{}' 照的是帧自有材质 '{}'，而帧自有材质没有 group 1（程序化几何）\
-                     —— 影子那一笔只留组 1，没有组 1 就没有可绑的东西",
+            //
+            // ⚠ 这一份组 1 是**那一面的**（六面各一份）：`view_proj` 是 super、按 pass 配，
+            //    而实例数组是同一份 ⇒ 六个面画的都是那份数组，只是矩阵不同。
+            if object_index.is_none() {
+                return Err(format!(
+                    "实例 '{}' 照的是帧自有材质 '{}'：生成的实例只能照**物体**的材质\
+                     （`material_instances` 是烘图侧按「哪个物体投影」生成的），\
+                     照一份帧自有材质（天空盒那种）会静静地拿到它的剔除档去投影",
                     instance.name, instance.base
-                )
-            })?;
+                ));
+            }
             let groups = vec![ResolvedGroup {
                 group: 1,
-                bind_group: &face_stages[face_index][object].bind_group,
+                bind_group: &face_stages[face_index].bind_group,
                 layout: stage_layout.clone(),
                 layout_id: STAGE_LAYOUT_ID,
             }];
@@ -1302,7 +1411,7 @@ pub fn run(
                 {
                     return Err(format!(
                         "pass '{}' 带 `cube_face`（写 cube 的某一层），而它的 draw 用的是材质\
-                         '{}' —— 那不是生成的材质实例：这一笔会拿到**相机**的 view/MeshStage，\
+                         '{}' —— 那不是生成的材质实例：这一笔会拿到**相机**的那一份 PassView，\
                          影子会贴到相机那一面去（画面上只是「影子歪了」）。\
                          带 cube_face 的 pass 只能用 `material_instances` 里的名字",
                         pass.label, draw.material

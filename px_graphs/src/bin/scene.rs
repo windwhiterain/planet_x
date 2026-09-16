@@ -1066,7 +1066,7 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
         );
         if !baked.material_instances.is_empty() {
             println!(
-                "  生成的材质实例 {} 份（影子六面各一套 view/MeshStage，各起一个名字）：{}",
+                "  生成的材质实例 {} 份（影子六面各一套组，各起一个名字；§148 之后那一套里是**那一面的 PassView**）：{}",
                 baked.material_instances.len(),
                 baked
                     .material_instances
