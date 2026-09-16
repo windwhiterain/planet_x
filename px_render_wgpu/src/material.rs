@@ -992,11 +992,25 @@ mod tests {
                     },
                     count: None,
                 },
-                (naga::AddressSpace::Handle, naga::TypeInner::Image { dim, class, .. }) => {
-                    let view_dimension = match dim {
-                        naga::ImageDimension::D2 => wgpu::TextureViewDimension::D2,
-                        naga::ImageDimension::Cube => wgpu::TextureViewDimension::Cube,
-                        other => panic!("组 0 的贴图维度不认识：{other:?}"),
+                (
+                    naga::AddressSpace::Handle,
+                    naga::TypeInner::Image {
+                        dim,
+                        arrayed,
+                        class,
+                    },
+                ) => {
+                    // ⚠ naga 的 `ImageDimension` 只有 D1/D2/D3/Cube 四档：**数组**是另一个
+                    // 布尔（`arrayed`）。`texture_depth_cube_array` 就是 "Cube + arrayed"。
+                    let view_dimension = match (dim, arrayed) {
+                        (naga::ImageDimension::D2, false) => wgpu::TextureViewDimension::D2,
+                        (naga::ImageDimension::D2, true) => wgpu::TextureViewDimension::D2Array,
+                        (naga::ImageDimension::Cube, false) => wgpu::TextureViewDimension::Cube,
+                        // 点光 cube 影图那一格（§109）。
+                        (naga::ImageDimension::Cube, true) => wgpu::TextureViewDimension::CubeArray,
+                        (other, arrayed) => {
+                            panic!("组 0 的贴图维度不认识：{other:?}（数组 {arrayed}）")
+                        }
                     };
                     let sample_type = match class {
                         naga::ImageClass::Depth { .. } => wgpu::TextureSampleType::Depth,
@@ -1013,6 +1027,18 @@ mod tests {
                         count: None,
                     }
                 }
+                // 点光影子那个**比较采样器**（group 0 binding 3，§109）：
+                // ⚠ 必须反射成 `SamplerBindingType::Comparison` —— `fetch_point_shadow` 走的是
+                // `textureSampleCompareLevel`，普通采样器在那条路上是"类型不符"。
+                (
+                    naga::AddressSpace::Handle,
+                    naga::TypeInner::Sampler { comparison: true },
+                ) => wgpu::BindGroupLayoutEntry {
+                    binding: binding.binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
                 (space, inner) => panic!("组 0 多了个不认识的全局变量 {name}：{space:?} {inner:?}"),
             };
             entries.push(entry);
@@ -1239,15 +1265,17 @@ mod tests {
                     source: wgpu::ShaderSource::Wgsl(object.shader.assembled.as_str().into()),
                 });
             let (group_zero, rows) = group_zero_layout(&gpu.device, &module);
-            // ⚠ **组 0 的声明是「每个 shader 各一份子集」**，不是固定五格：
-            // `surface.wgsl` 读 view / lights / clustered_lights，`atmosphere.wgsl` 读
-            // view / clustered_lights / depth_prepass_texture（各自 import 什么就是什么）。
+            // ⚠ **组 0 的声明是「每个 shader 各一份子集」**，不是固定那几格：
+            // `surface.wgsl` 读 view / lights / clustered_lights（§109 起还读影子那两格 ——
+            // 它引的 `fetch_point_shadow` **自带** binding 2/3 的声明），`atmosphere.wgsl`
+            // 读 view / clustered_lights / depth_prepass_texture（各自 import 什么就是什么）。
             // 所以管线布局必须**按 shader 声明的那些格**建；反过来，真正给 GPU 用的
-            // 组 0 布局应该做成五格的**超集**（布局可以多、绑定不能少），
-            // 这一条是第 6 件要做的决定，这里只把"声明到底是什么"钉住。
+            // 组 0 布局应该做成七格的**超集**（布局可以多、绑定不能少）。
             let known = [
                 (0, 0, "view".to_string()),
                 (0, 1, "lights".to_string()),
+                (0, 2, "point_shadow_textures".to_string()),
+                (0, 3, "point_shadow_textures_comparison_sampler".to_string()),
                 (0, 8, "clustered_lights".to_string()),
                 (0, 11, "globals".to_string()),
                 (0, 20, "depth_prepass_texture".to_string()),
@@ -1259,7 +1287,13 @@ mod tests {
                 );
             }
             let expected: Vec<&str> = match id {
-                "planet" => vec!["view", "lights", "clustered_lights"],
+                "planet" => vec![
+                    "view",
+                    "lights",
+                    "point_shadow_textures",
+                    "point_shadow_textures_comparison_sampler",
+                    "clustered_lights",
+                ],
                 _ => vec!["view", "clustered_lights", "depth_prepass_texture"],
             };
             let names: Vec<&str> = rows.iter().map(|row| row.2.as_str()).collect();

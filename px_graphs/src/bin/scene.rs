@@ -1034,13 +1034,16 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
         .unwrap_or_else(|| px_graphs::frame::DEFAULT_FRAME.to_string());
     // ⚠ 逃生门那条路**连帧图配方都不读**：它是"证明老产物还能逐字节复现"的仪器，
     //    不该因为帧图配方坏了就一起坏掉（那正是它要保的东西）。
-    let (resources, passes, frame_materials) = if with_graph {
+    let (resources, passes, frame_materials, material_instances) = if with_graph {
         let frame = px_graphs::frame::load(&frame_name)?;
         // 帧材质的参数写的是**来源**，这里把**内容**那一边的值给它 ——
         // 帧配方里一个内容值都不许写死（§133），取值的词汇表住在 `px_graphs::frame`。
         let sources = px_graphs::frame::Sources {
             ambient: file.ambient,
             skybox_brightness: SKYBOX_BRIGHTNESS,
+            // 投影的点光有几盏：今天这张场景表就一盏（`sun`，`shadows` 由 planet 那一格给）。
+            // ⚠ 它是**内容**（`lights[].shadows`），所以走 `Sources` 这条通道进烘图。
+            shadow_lights: usize::from(sun.shadows),
         };
         let baked = px_graphs::frame::build(&frame, &objects, &sources, true)?;
         println!(
@@ -1061,9 +1064,26 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
                     .join(" / ")
             }
         );
-        (baked.resources, baked.passes, baked.materials)
+        if !baked.material_instances.is_empty() {
+            println!(
+                "  生成的材质实例 {} 份（影子六面各一套 view/MeshStage，各起一个名字）：{}",
+                baked.material_instances.len(),
+                baked
+                    .material_instances
+                    .iter()
+                    .map(|instance| format!("{}←{}", instance.name, instance.base))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            );
+        }
+        (
+            baked.resources,
+            baked.passes,
+            baked.materials,
+            baked.material_instances,
+        )
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
 
     let document = SceneSpec {
@@ -1085,6 +1105,7 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
         lights: vec![sun],
         objects,
         frame_materials,
+        material_instances,
     };
     document.check()?;
     Ok(Compiled { document })

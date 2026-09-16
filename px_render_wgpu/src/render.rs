@@ -44,22 +44,16 @@ use crate::plan;
 use crate::shader;
 use crate::shot;
 
-/// **这一档执行哪几条 pass**（`px_graphs::frame` 的那六个标签）。
+/// **这一档执行哪几条 pass**：文档声明的**每一条**。
 ///
-/// ⚠ 按标签挑是**宿主的切片策略**，不是执行器的分派规则：`px_pass` 一个 pass 名字都不认识，
-/// 它只按 `kind` 与状态分派（§124）。
+/// ⚠ 这里曾经是一张写死的标签表（§130–§136：那时宿主只兑现了六条里的几条，表就是
+/// "兑现了哪些"的读数）。§139 起那张表**不再成立**：影子那六条 pass 的标签是**生成**的
+/// （`point_shadow_0_+x`…），写死的表认识不了它们，而"按名字前缀认"就是把生成格式塞进
+/// 宿主 —— 而生成格式**不进任何契约**（改它一个字都不该动画面）。
+/// 于是策略只剩一条：文档声明的每一条都执行。
 ///
-/// ⚠ §136 起**一条都不跳**：天空盒那条 `sky` 现在真的画（名字解析 + 帧材质的反射装载 +
-/// 程序化几何三件都补齐了）。下面 [`subset`] 仍然把"没执行的"打出来 ——
-/// 那一条纪律（"绿是因为跳过了它"是最不能接受的那种绿）不因为今天没得跳就作废。
-const EXECUTED: [&str; 6] = [
-    "prepass",
-    "copy_depth",
-    "opaque",
-    "sky",
-    "transparent",
-    "blit",
-];
+/// ⚠ 那张表带来的**读数**没有消失：`Rendered::skipped` 那一栏还在（今天恒为空）。
+/// "绿是因为跳过了它"是最不能接受的那种绿 —— 真开始跳的那一天，理由必须跟着名字一起出来。
 
 /// 三份布局的**身份**（`ResolvedGroup::layout_id` 那条契约：同布局同 id、异布局异 id）。
 ///
@@ -93,6 +87,8 @@ enum MaterialTable {
     Objects(usize),
     /// 帧自有材质表里的第几份。
     Frame(usize),
+    /// 生成的材质实例表里的第几份（§139）。照的是哪一份由 `base` 说。
+    Instance(usize),
 }
 
 impl MaterialTable {
@@ -101,6 +97,9 @@ impl MaterialTable {
             MaterialTable::Objects(index) => format!("物体 id 那张表（第 {index} 个物体）"),
             MaterialTable::Frame(index) => {
                 format!("**帧自有材质**那张表（第 {index} 份，`frame_materials`）")
+            }
+            MaterialTable::Instance(index) => {
+                format!("**生成的材质实例**那张表（第 {index} 份，`material_instances`）")
             }
         }
     }
@@ -130,21 +129,39 @@ fn material_table(spec: &px_protocol::scene::SceneSpec, name: &str) -> Result<Ma
         .frame_materials
         .iter()
         .position(|material| material.name == name);
-    match (object, frame) {
-        (Some(_), Some(_)) => Err(format!(
+    // 生成的材质实例（§139）：名字照的是**另一份**（`base`）。⚠ 这里**只判"它落在哪张表"**，
+    // 不在这里解析名字的格式：磁盘上那份 `.pxart` 说了算（`material_instances`），
+    // 而"这个名字照的是谁"是那张表的两栏之一。
+    let instance = spec
+        .material_instances
+        .iter()
+        .position(|instance| instance.name == name);
+    match (object, frame, instance) {
+        (Some(_), Some(_), _) => Err(format!(
             "材质名 '{name}' 在**两张表**里都有：物体 id [{}] 与帧自有材质 [{}]。\n  \
              同一个名字两处真本 ⇒ 宿主只能猜一个，而猜错是**一声不吭的错像素**。\n  \
              ⇒ 这是调用方要改的：物体 id 与帧材质名必须互不相同",
             list(objects),
             list(frames)
         )),
-        (Some(index), None) => Ok(MaterialTable::Objects(index)),
-        (None, Some(index)) => Ok(MaterialTable::Frame(index)),
-        (None, None) => Err(format!(
-            "材质名 '{name}' **两张表里都没有**。\n  \
-             物体 id（它们的 id 就是材质名）：{}\n  帧自有材质（`frame_materials`）：{}",
+        (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => Err(format!(
+            "材质名 '{name}' 既是真本（物体 id 或帧自有材质），又是生成的实例：\
+             一个名字只能有一份真本"
+        )),
+        (Some(index), None, None) => Ok(MaterialTable::Objects(index)),
+        (None, Some(index), None) => Ok(MaterialTable::Frame(index)),
+        (None, None, Some(index)) => Ok(MaterialTable::Instance(index)),
+        (None, None, None) => Err(format!(
+            "材质名 '{name}' **三张表里都没有**。\n  \
+             物体 id（它们的 id 就是材质名）：{}\n  帧自有材质（`frame_materials`）：{}\n  \
+             生成的实例（`material_instances`）：{}",
             list(objects),
-            list(frames)
+            list(frames),
+            list(spec
+                .material_instances
+                .iter()
+                .map(|instance| instance.name.as_str())
+                .collect())
         )),
     }
 }
@@ -211,6 +228,14 @@ fn skybox_slot(
 /// 两张同名纹理，而错法是**一声不吭的错像素**。
 const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 
+/// 点光 cube 影图那份资源在**帧配方**里的名字（`art/frame/default.toml` 的 `[[resources]]`）。
+///
+/// ⚠ 这是宿主与帧配方之间**唯一**一个按名字的约定，而它与 `scene_depth` / `skybox`
+/// 那几个是同一类：**渲染器的形状**（哪一格绑哪张图）本来就住在宿主这一侧（§104 第 1 条）。
+/// 文档那边「有没有这份资源」是**内容/形状的合成结果**（一盏投影的点光都没有时它就不烘），
+/// 所以宿主必须自己判"有没有"，而不是假定它一定在。
+const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_textures";
+
 /// 一份画好的图：紧凑 RGBA8 + 这一帧的审计文本。
 ///
 /// ⚠ 不留目标纹理：回读在 [`run`] 里就做完了，"目标还在手上"是这一档用不到的余量。
@@ -262,6 +287,27 @@ impl Geometry {
 struct Stage {
     _buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+/// 点光 cube 的**一面**：那个面当相机时的一套状态（§139）。
+///
+/// 一条影子 pass 要用的是它：group 0 那份 `view`（这一面的矩阵）与每个物体那一份
+/// `MeshStage`（这一面的 `clip_from_world`）。名字是**生成的**（`material_instances`），
+/// 而"名字 → 哪一面"由**用到它的那条 pass** 说（`PassSpec::cube_face`）。
+struct Face {
+    /// cube 的下标（= 聚类缓冲的下标 = 着色器里的 `light_id`）。
+    light: u32,
+    /// 0..5，次序照 `bevy_camera::primitives::CUBE_MAP_FACES`。
+    face: u32,
+    /// 这一面的"相机"（`camera::face_view` 那条链算出来的四块矩阵）。
+    ///
+    /// ⚠ 这一档**没有**"面的 group 0"：影子那一笔的顶点阶段读的是 `MeshStage`
+    /// （组 1，里面已经是这一面的 `clip_from_world`），而组 0 里第 2 格绑的正是这条
+    /// pass 正在写的 cube —— 绑上它 wgpu 当场拒（实测：
+    /// `TextureUses(DEPTH_STENCIL_WRITE) is an exclusive usage and cannot be used with
+    /// any other usages within the usage scope`）。所以那一面的一切都从 `camera` 进
+    /// `MeshStage`，不进组 0。
+    camera: crate::camera::Camera,
 }
 
 /// 一块 `MeshStage` 的字节：`world_from_local` + `view_proj` + **法线矩阵**。
@@ -379,7 +425,7 @@ pub fn run(
             pass.render.name()
         ));
     }
-    let executed_plan = subset(&plan, &mut audit)?;
+    let executed_plan = all_passes(&plan, &mut audit)?;
 
     // ---- 相机：`camera.rs` 原样（逐位对齐 oracle），只有长宽比来自命令行 ----
     let camera = crate::camera::probe_camera(None, width as f32 / height as f32);
@@ -416,6 +462,79 @@ pub fn run(
     // ---- 执行器：**先建**，因为深度图要先 `seed` 进去（§132）----
     let mut executor = px_pass::Executor::new();
 
+    // ---- 点光 cube 影图（§109）：**文档烘了就是它，没烘就是兜底的那份** ----
+    //
+    // ⚠ 为什么会有"没烘"这一档：一盏投影的点光都没有时，帧图里那份 cube 资源与那六条
+    //    pass 一起不烘（`px_graphs::frame::build` 会把跳过的东西打印出来），而内容 shader
+    //    **仍然声明**了 group 0 的 binding 2 ⇒ 管线布局必须有这一格、必须绑得上。
+    //    那一档绑一份 1×1×6 全 0 的兜底图，并把"绑的是兜底"**打印出来** ——
+    //    没有投影的灯时没有任何一条路会去采它（`surface.wgsl` 那个 `shadow_maps` 位）。
+    let (shadow_texture, shadow_view, shadow_note) = match plan.resource(SHADOW_TEXTURE_RESOURCE) {
+        Some(resource) => {
+            let (cube_width, cube_height) = resource.size.resolve(width, height);
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(resource.name.as_str()),
+                size: wgpu::Extent3d {
+                    width: cube_width,
+                    height: cube_height,
+                    depth_or_array_layers: resource.layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: px_pass::texture_usage(resource),
+                view_formats: &[],
+            });
+            // ⚠ 和深度预通道那两张一样：**一张纹理**，`seed` 进池子 —— 六条影子 pass 的
+            //    附件（按 `PassPlan::layer` 建的单层视图）与 group 0 第 2 格（整份 cube 的
+            //    `CubeArray` 视图）必须是**同一张纹理**的两个视图。各建一张就是静默错像素。
+            executor.seed(resource, cube_width, cube_height, texture.clone())?;
+            // 整份 cube 的视图：`CubeArray` + `DepthOnly`（`light.rs:1416-1444` 那一份）。
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("点光 cube 影图（CubeArray/DepthOnly）"),
+                format: None,
+                dimension: Some(wgpu::TextureViewDimension::CubeArray),
+                usage: None,
+                aspect: wgpu::TextureAspect::DepthOnly,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: 0,
+                array_layer_count: Some(resource.layers),
+            });
+            let note = format!(
+                "文档烘的那份（{cube_width}×{cube_height} × {} 层 = {} 个 cube，每面一层，层号 = 灯×6 + 面）",
+                resource.layers,
+                resource.layers / group0::SHADOW_CUBE_FACES
+            );
+            audit.push(format!(
+                "  ⚠ 池子里的 '{SHADOW_TEXTURE_RESOURCE}' 现在就是**宿主建的**这一张\
+                 （{cube_width}×{cube_height} × {} 层）：六面各挂它的**单层**视图，\
+                 group 0 第 2 格挂整份的 CubeArray 视图",
+                resource.layers
+            ));
+            (Some(texture), view, note)
+        }
+        None => {
+            let (texture, view) = group0::fallback_cube(&gpu.device);
+            audit.push(format!(
+                "⚠ 文档里没有 '{SHADOW_TEXTURE_RESOURCE}'：这一帧**没有投影的点光**\
+                 （帧图把那份资源与那六条 pass 一起跳过了）⇒ group 0 第 2 格绑**兜底**的\
+                 1×1×6 全 0 cube。它永远不会被采到（内容 shader 只在 `shadow_maps` 那一位\
+                 立起来时才进 `fetch_point_shadow`，而那个位来自 `flags`）"
+            ));
+            (
+                Some(texture),
+                view,
+                "**兜底**的 1×1×6 全 0 cube（这一帧没有投影的点光）".to_string(),
+            )
+        }
+    };
+    // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
+    //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
+    let _shadow_texture = shadow_texture;
+    let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
+
     // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
     let contract = scene
         .objects
@@ -435,8 +554,12 @@ pub fn run(
             width,
             height,
             view,
+            &shadow_view,
+            &shadow_sampler,
+            &shadow_note,
         )
     };
+
 
     // ---- 深度图：**宿主建、seed 进池子**（§132 定下的形状）----
     //
@@ -556,9 +679,84 @@ pub fn run(
         ));
     }
     let zero = build_zero(&sampled_view)?;
-    audit.push("group 0（五格全绑，哪怕 shader 只声明了一部分）：".to_string());
+    audit.push("group 0（七格全绑，哪怕 shader 只声明了一部分）：".to_string());
     audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
 
+    // ---- 点光 cube 的**每一面**：一套 view + 每个投影物体一份 MeshStage（§139）----
+    //
+    // 哪几面要用，**由文档说了算**：带 `cube_face` 的那些 pass 点名的 (灯, 面)。一条都没有
+    // ⇒ 这里一个面都不建（那一帧也就没有影子 pass）。
+    //
+    // ⚠ 这一档**不是**"同一个材质换一套组"（那需要执行器有一条 per-pass 的优先级规则，
+    //    而那条路被用户裁决否掉了）：文档为每一面各生成了**自己的材质名**
+    //    （`material_instances`：名字 → 照哪一份），宿主给每个名字建**一套组**。
+    //    "一个名字恰好一套组"这条契约因此原样成立。
+    //
+    // ⚠ 面矩阵的**位模式**由 `camera::face_view` 负责（照抄 glam 的乘法链，§109.2）。
+    //    这里只把结果绑出去，一个数都不重算。
+    let face_keys: Vec<(u32, u32)> = {
+        let mut keys: Vec<(u32, u32)> = executed_plan
+            .passes
+            .iter()
+            .filter_map(|pass| {
+                spec.passes
+                    .iter()
+                    .enumerate()
+                    .find(|(index, document)| document.label_or(*index) == pass.label)
+                    .and_then(|(_, document)| document.cube_face)
+                    .map(|cube| (cube.light, cube.face))
+            })
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    };
+    let mut faces: Vec<Face> = Vec::with_capacity(face_keys.len());
+    for (light, face) in face_keys {
+        // 灯的位置：**从已经打包好的聚类缓冲里取**（按 cube 下标 —— 影子 pass 的 `light`
+        // 就是那个下标）。不另查一次文档：两处各查一次就是"同一件事两个来源"。
+        let clustered = cluster.get(light as usize).ok_or_else(|| {
+            format!(
+                "文档里有一条 cube_face 指着第 {light} 个 cube，而聚类缓冲只有 {} 格",
+                cluster.len()
+            )
+        })?;
+        let light_position = Vec3::new(
+            clustered.position_radius[0],
+            clustered.position_radius[1],
+            clustered.position_radius[2],
+        );
+        // 影子的近平面那一格来自 group 0 的策略常量（`PointLight::shadow_map_near_z` 的缺省）。
+        let face_camera = crate::camera::face_view(
+            light_position,
+            face,
+            group0::POINT_LIGHT_SHADOW_MAP_NEAR_Z,
+        );
+        // 这一面的 group 0 **不建**：一来影子那一笔根本不会绑它（见下面实例那一段：
+        // 绑了会撞 wgpu 的排他用法 —— 组 0 第 2 格就是这条 pass 正在写的 cube），
+        // 二来顶点阶段读的是 `MeshStage.view_proj`（那一面的矩阵已经在里面了，§110 的
+        // 那条"宿主算好、shader 只乘"）。所以这一面的信息全在 `camera` 里。
+        let _ = &face_camera;
+        let layer = light * group0::SHADOW_CUBE_FACES + face;
+        audit.push(format!(
+            "  面 (灯 {light}, 面 {face}, 层 {layer})：world_from_view 的平移 ({:.6}, {:.6}, {:.6})｜\
+             clip_from_world 的 w 列 ({:.9e}, {:.9e}, {:.9e}, {:.9e})",
+            face_camera.world_from_view.w_axis.x,
+            face_camera.world_from_view.w_axis.y,
+            face_camera.world_from_view.w_axis.z,
+            face_camera.clip_from_world.w_axis.x,
+            face_camera.clip_from_world.w_axis.y,
+            face_camera.clip_from_world.w_axis.z,
+            face_camera.clip_from_world.w_axis.w
+        ));
+        faces.push(Face {
+            light,
+            face,
+            camera: face_camera,
+        });
+    }
+
+    // 每个面、每个物体的 `MeshStage`：矩阵照抄相机那一份的路，只把 `clip_from_world`
     // ---- 几何：按物体 id 上传（`Draw::geometry` 那个名字就是物体 id）----
     let mut geometries: Vec<Geometry> = Vec::with_capacity(scene.objects.len());
     for object in &scene.objects {
@@ -691,6 +889,35 @@ pub fn run(
                 count: None,
             }],
         });
+    // 换成那一面的（`stage_bytes` 收的是 `camera`，而"面的相机"就是 [`crate::camera::face_view`]）。
+    let mut face_stages: Vec<Vec<Stage>> = Vec::with_capacity(faces.len());
+    for face in &faces {
+        let mut stages = Vec::with_capacity(scene.objects.len());
+        for object in &scene.objects {
+            let buffer = gpu
+                .device
+                .create_buffer_init(&BufferInitDescriptor {
+                    label: Some("组 1：MeshStage（影子面的 view_proj）"),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                    contents: &stage_bytes(&object.transform, &face.camera),
+                });
+            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("组 1：MeshStage（影子面）"),
+                layout: &stage_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            stages.push(Stage {
+                _buffer: buffer,
+                bind_group,
+            });
+        }
+        face_stages.push(stages);
+    }
+
+
     let mut stages: Vec<Stage> = Vec::with_capacity(scene.objects.len());
     let mut bindings = Vec::with_capacity(scene.objects.len());
     for object in &scene.objects {
@@ -889,6 +1116,186 @@ pub fn run(
         fragment_entry: loaded.entry.as_str(),
     }));
 
+    // ---- 生成的材质实例（§139）：**影子六面各一套 view/MeshStage** ----
+    //
+    // ⚠ 这一节是"文档里那些不同的名字"的落地：每一份实例的名字在宿主这张表里
+    //    **恰好一条**（执行器只有"名字 → 一套组"这一条规则，没有覆盖、没有优先级）。
+    //    名字照的是哪一份材质，由文档的 `material_instances` 说；而"哪一面"由
+    //    **用到这个名字的那条 pass** 说（`cube_face`）—— 一个事实一处。
+    //
+    // ⚠ 三条当场拒（都是"猜一个就会静默画错"的形状）：
+    //    ① 同一个实例名被**两条面不同的 pass** 用（一个名字两套组 ⇒ 说不清）；
+    //    ② 带 `cube_face` 的 pass 用了一个**不是实例**的材质名（它会拿到相机的
+    //       view/MeshStage ⇒ 影子贴到相机那面去，而画面上只是"影子歪了"）；
+    //    ③ 实例的 `base` 与那一笔的 `geometry` 不同名（`MeshStage` 是**物体**的，
+    //       base 的变换套到别的物体上就是另一个物体的位置）。
+    if !spec.material_instances.is_empty() {
+        let face_of = |light: u32, face: u32| -> Result<usize, String> {
+            faces
+                .iter()
+                .position(|candidate| candidate.light == light && candidate.face == face)
+                .ok_or_else(|| format!("这一面（灯 {light}，面 {face}）没有建出来（内部不一致）"))
+        };
+        for instance in &spec.material_instances {
+            // 用到这个名字的 pass（应当恰好一条带 cube_face 的）。
+            let users: Vec<(&str, Option<px_protocol::scene::PassCubeFace>)> = plan
+                .passes
+                .iter()
+                .filter_map(|pass| {
+                    if !pass.draws.iter().any(|draw| draw.material == instance.name) {
+                        return None;
+                    }
+                    let document = spec
+                        .passes
+                        .iter()
+                        .enumerate()
+                        .find(|(index, document)| document.label_or(*index) == pass.label)
+                        .map(|(_, document)| document);
+                    Some((pass.label.as_str(), document.and_then(|d| d.cube_face)))
+                })
+                .collect();
+            let cube = match users.as_slice() {
+                [] => {
+                    return Err(format!(
+                        "生成的材质实例 '{}' 没有任何一条 pass 用它（文档那边应当已经拒过）",
+                        instance.name
+                    ))
+                }
+                [(label, Some(cube))] => {
+                    audit.push(format!(
+                        "实例 '{}' ⇒ 照 '{}'，用在 pass '{label}' 上 ⇒ 那一面的 view/MeshStage\
+                         （灯 {}，面 {}，层 {}）",
+                        instance.name, instance.base, cube.light, cube.face, cube.layer
+                    ));
+                    *cube
+                }
+                [(label, None)] => {
+                    return Err(format!(
+                        "实例 '{}' 被 pass '{label}' 用了，而那条 pass 没有 `cube_face`：\
+                         实例是要照某一面的 view/MeshStage 建的，没有那一面就没有依据",
+                        instance.name
+                    ))
+                }
+                many => {
+                    let faces: Vec<String> = many
+                        .iter()
+                        .map(|(label, cube)| match cube {
+                            Some(cube) => format!("{label}（灯 {}，面 {}）", cube.light, cube.face),
+                            None => format!("{label}（没有 cube_face）"),
+                        })
+                        .collect();
+                    return Err(format!(
+                        "实例 '{}' 被 {} 条 pass 用了：{}。一个名字只能解析出**一套组** —— \
+                         两处用、面不同就是「哪一面赢」说不清（那正是被否掉的优先级规则）",
+                        instance.name,
+                        many.len(),
+                        faces.join(" / ")
+                    ));
+                }
+            };
+            let face_index = face_of(cube.light, cube.face)?;
+            // `base` 必须在两张表里找得到（协议已经判过；这里再判一次是因为**要建组**，
+            // 而建组那一刻的失败离病因太远）。
+            let base_index = resolved_materials
+                .iter()
+                .position(|material| material.name == instance.base)
+                .ok_or_else(|| {
+                    format!(
+                        "实例 '{}' 照的那份 '{}' 不在材质表里（表里有：{}）",
+                        instance.name,
+                        instance.base,
+                        resolved_materials
+                            .iter()
+                            .map(|material| material.name)
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                })?;
+            let base = &resolved_materials[base_index];
+            let object_index = scene
+                .objects
+                .iter()
+                .position(|object| object.id == instance.base);
+            // 每一笔用它的 draw 都要 base == geometry（③）。
+            for pass in plan.passes.iter() {
+                for draw in &pass.draws {
+                    if draw.material != instance.name {
+                        continue;
+                    }
+                    if draw.geometry != instance.base {
+                        return Err(format!(
+                            "pass '{}' 拿实例 '{}'（照 '{}'）去画几何 '{}'：`MeshStage` 是\
+                             **物体**的矩阵，照谁的材质就得用谁的几何 —— 不然影子落在另一个\
+                             物体的位置上",
+                            pass.label, instance.name, instance.base, draw.geometry
+                        ));
+                    }
+                }
+            }
+            // 一套新的组：**只留组 1**（那一面、那个物体的 `MeshStage`）。
+            //
+            // ⚠ 组 0 **不能绑**：它的第 2 格就是这条 pass 正在写的 cube，绑上它 wgpu
+            //    当场拒（排他用法）。而影子那一笔没有片元阶段 ⇒ 组 0 那几格（view/lights/
+            //    cluster/影图/预通道深度）一个都不会被读。组 3（材质的参数与贴图）同理：
+            //    没有片元阶段，没人读它。**只留真正被读的那一组** —— 这一笔的管线布局
+            //    因此与内容材质那一笔不同，那是应该的（它们是两条不同的管线）。
+            let object = object_index.ok_or_else(|| {
+                format!(
+                    "实例 '{}' 照的是帧自有材质 '{}'，而帧自有材质没有 group 1（程序化几何）\
+                     —— 影子那一笔只留组 1，没有组 1 就没有可绑的东西",
+                    instance.name, instance.base
+                )
+            })?;
+            let groups = vec![ResolvedGroup {
+                group: 1,
+                bind_group: &face_stages[face_index][object].bind_group,
+                layout: stage_layout.clone(),
+                layout_id: STAGE_LAYOUT_ID,
+            }];
+            resolved_materials.push(ResolvedMaterial {
+                name: instance.name.as_str(),
+                groups,
+                blend: base.blend,
+                cull: base.cull,
+                fragment_shader: base.fragment_shader,
+                fragment_entry: base.fragment_entry,
+            });
+        }
+        // ② 带 `cube_face` 的 pass 只许用实例名（见上面 ② 那段）。
+        for pass in plan.passes.iter() {
+            let Some(document) = spec
+                .passes
+                .iter()
+                .enumerate()
+                .find(|(index, document)| document.label_or(*index) == pass.label)
+                .map(|(_, document)| document)
+            else {
+                continue;
+            };
+            if document.cube_face.is_none() {
+                continue;
+            }
+            for draw in &pass.draws {
+                if draw.material.is_empty() {
+                    continue;
+                }
+                if !spec
+                    .material_instances
+                    .iter()
+                    .any(|instance| instance.name == draw.material)
+                {
+                    return Err(format!(
+                        "pass '{}' 带 `cube_face`（写 cube 的某一层），而它的 draw 用的是材质\
+                         '{}' —— 那不是生成的材质实例：这一笔会拿到**相机**的 view/MeshStage，\
+                         影子会贴到相机那一面去（画面上只是「影子歪了」）。\
+                         带 cube_face 的 pass 只能用 `material_instances` 里的名字",
+                        pass.label, draw.material
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- 外部目标：深度图与最终目标 ----
     let target = shot::Target::new(&gpu.device, width, height);
     let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
@@ -945,64 +1352,29 @@ pub fn run(
     })
 }
 
-/// 按 [`EXECUTED`] 把计划切成"这一档真的交给执行器的那一份"，并把**没执行的**打出来。
+/// 交给执行器的那一份计划：**文档声明的每一条 pass**（见 [`EXECUTED`] 那一段）。
 ///
-/// ⚠ 切出来的那一份仍然是 `px_pass::Plan`：资源表、布局、`PassPlan` 全都是原来的那几份，
-/// 只是少了没执行的那几条 —— 执行器看不到"切片"这回事。
-fn subset(plan: &Plan, audit: &mut Vec<String>) -> Result<Plan, String> {
-    let mut passes = Vec::with_capacity(EXECUTED.len());
-    for label in EXECUTED {
-        let pass = plan
-            .passes
-            .iter()
-            .find(|pass| pass.label == *label)
-            .ok_or_else(|| {
-                format!(
-                    "这一档要执行 '{label}'，而文档里没有这个标签的 pass（文档有：{}）",
-                    plan.passes
-                        .iter()
-                        .map(|pass| pass.label.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                )
-            })?;
-        passes.push(pass.clone());
-    }
-    let not_executed: Vec<&str> = plan
+/// ⚠ 返回的仍然是 `px_pass::Plan`（资源表、布局、`PassPlan` 全是原来那几份）：执行器
+/// 看不到"切片"这回事。
+///
+/// ⚠ 这里仍然把"没执行的"算一遍并打出来 —— 今天恒为空，而**那一条纪律不因为今天没得跳
+/// 就作废**：一个读数"绿"的原因如果是"那几条根本没跑"，它一文不值（§107）。
+fn all_passes(plan: &Plan, audit: &mut Vec<String>) -> Result<Plan, String> {
+    let executed: Vec<&str> = plan
         .passes
         .iter()
-        .filter(|pass| !EXECUTED.contains(&pass.label.as_str()))
         .map(|pass| pass.label.as_str())
         .collect();
     audit.push(format!(
-        "本切片执行的 pass：{}（{} / {}{}）",
-        EXECUTED.join(" → "),
-        EXECUTED.len(),
-        plan.passes.len(),
-        if not_executed.is_empty() {
-            "，**一条都不跳**"
-        } else {
-            ""
-        }
+        "本切片执行的 pass：{}（{} / {}，**按文档全执行**）",
+        executed.join(" → "),
+        executed.len(),
+        plan.passes.len()
     ));
-    // ⚠ 跳过的那些**必须**在这里被点名：不点名的话，"图对上了"与"那条 pass 根本没跑"
-    //    在读数上长得一模一样（§107 那条：「一次改两个变量」在这张图上会让读数无法归因）。
-    if !not_executed.is_empty() {
-        audit.push(format!(
-            "⚠ 本切片**没有执行**这 {} 条 pass（它们仍在计划里、也过了 `check()`，只是没交给执行器）：{}",
-            not_executed.len(),
-            not_executed.join(" / ")
-        ));
-    }
-    let subset = Plan {
-        layout: plan.layout.clone(),
-        resources: plan.resources.clone(),
-        passes,
-    };
-    subset
-        .check()
-        .map_err(|err| format!("切给执行器的那一份计划说不通：{err}"))?;
-    Ok(subset)
+    let plan = plan.clone();
+    plan.check()
+        .map_err(|err| format!("交给执行器的那一份计划说不通：{err}"))?;
+    Ok(plan)
 }
 
 /// `width × height` 的 `Depth32Float` 图：无限 reverse-Z 只有这一种深度格式（§110.1）。
@@ -1213,14 +1585,19 @@ mod tests {
         assert!(material_table(&spec, "skybox").unwrap().describe().contains("帧自有材质"));
     }
 
-    /// **两张表都没有** ⇒ 拒，而且**两张表都要列出来**（只说"找不到"会让人去改错的那一张）。
+    /// **三张表都没有** ⇒ 拒，而且**三张表都要列出来**（只说"找不到"会让人去改错的那一张）。
+    ///
+    /// ⚠ 下面那条 `contains("三张表里都没有")` 是**故意钉住表数**的：
+    /// 加第四张表却忘了改措辞时，它会当场变红 —— 这不是脆弱，这是它该做的。
+    /// （它已经响过一次：`material_instances` 加进来时这条先红了。）
     #[test]
-    fn a_name_in_neither_table_is_refused_with_both_lists() {
+    fn a_name_in_neither_table_is_refused_with_all_lists() {
         let spec = spec_of(&["planet"], &["skybox"]);
-        let err = material_table(&spec, "skybx").expect_err("两张表都没有 ⇒ 拒");
+        let err = material_table(&spec, "skybx").expect_err("三张表都没有 ⇒ 拒");
         assert!(err.contains("planet"), "要列出物体 id：{err}");
         assert!(err.contains("skybox"), "要列出帧自有材质：{err}");
-        assert!(err.contains("两张表里都没有"), "{err}");
+        assert!(err.contains("生成的实例"), "要列出生成的实例表：{err}");
+        assert!(err.contains("三张表里都没有"), "{err}");
     }
 
     /// **两张表都有** ⇒ 也拒（歧义是调用方要修的，静默的优先级不是规则）。

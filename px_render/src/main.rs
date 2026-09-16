@@ -3645,6 +3645,8 @@ mod tests {
             // 帧自有材质（§135）：Bevy 宿主**不消费**这一节（它是锚，吃的是冻件），
             // 这里留空只为把结构体补齐。
             frame_materials: Vec::new(),
+            // 生成的材质实例（§139）：同上 —— 锚吃冻件，不消费这一节。
+            material_instances: Vec::new(),
             objects: vec![px_protocol::Object {
                 id: "云".to_string(),
                 geometry: px_protocol::Geometry::mesh(member("shell")),

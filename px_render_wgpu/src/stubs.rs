@@ -13,6 +13,10 @@
 //! **原样转给 Bevy 那张表** —— 于是绑定号与字段次序**由构造保证**与 Bevy 一致，
 //! 而不是靠两边各抄一遍再祈祷它们不漂（§104 第 1 条：绑定号会改像素，省下的每一步
 //! 都是判据上的噪声）。§65 记的那次"cube 从第 1 格挪到第 5 格就差 22–33 个像素"至今没归因。
+//!
+//! ⚠ §109 起 `fetch_point_shadow` 那一格是**真实现**（不再是"先让文本解析得过去"的桩）：
+//! 它逐句抄 Bevy 的 Gaussian 采样路，并**自带** binding 2/3 两格的声明
+//! （内容 shader 只 import 这个符号，而 Bevy 那边那两格是另一条 import 顺带带进来的）。
 
 /// 3D 顶点输出。字段与 `bevy_pbr::forward_io::VertexOutput` 同形：
 /// 内容 shader 按 `position` / `world_position` / `world_normal` / `uv` 四个 location 取。
@@ -26,20 +30,151 @@ pub use px_shader::assemble::bevy_stub;
 /// 这里只是**把它认下来**。抄第二份 = §66.1 那颗「同一条契约、两个数字」的雷。
 pub use px_shader::assemble::HOST_VIEW_STUB as VIEW_STUB;
 
-/// 点光 cube 影子：**S3 换成真实现**（采样我们自己的 cube 影子图）。
+/// 点光 cube 影子：**真实现**（§109）。
 ///
-/// 今天这一份是"先让文本解析得过去"的桩，**故意**摆在最显眼的地方：
-/// 它是这个宿主与 Bevy 宿主在 group 0 上**唯一**的语义差别，
-/// 也是 §104 第 2 条那个"全局唯一没有现成参考的活"。
+/// 逐句抄 `bevy_pbr-0.19.1/src/render/shadows.wgsl:19-69`（`fetch_point_shadow`）与
+/// `shadow_sampling.wgsl` 那条 **Gaussian** 路（`ShadowFilteringMethod` 的缺省档）：
+/// `sample_shadow_cubemap`（`:517-539`）→ `sample_shadow_cubemap_gaussian`（`:423-460`）
+/// → `sample_shadow_cubemap_at_offset`（`:382-396`）→ `sample_shadow_cubemap_hardware`
+/// （`:324-341`）。以及 `bevy_render-0.19.1/src/maths.wgsl:80-87` 的 `orthonormalize`。
 ///
-/// 形状（参数个数与名字）必须与 Bevy 的 `fetch_point_shadow` 相同 —— 内容 shader
-/// 是按那个签名调的，签名改了这个符号就解不开了。
-pub const POINT_SHADOW_STUB: &str = "fn fetch_point_shadow(\n\
-                                     \x20   light_id: u32,\n\
-                                     \x20   frag_position: vec4<f32>,\n\
-                                     \x20   surface_normal: vec3<f32>,\n\
-                                     \x20   frag_coord_xy: vec2<f32>,\n\
-                                     \x20   ) -> f32 { return 1.0; }\n";
+/// ⚠ 三处**不许化简**：
+/// 1. `depth` 走"最大绝对轴"那条推导（`zw = -major × light_custom_data.xy +
+///    light_custom_data.zw`）—— 那个 `light_custom_data` 是**宿主**按
+///    `perspective_inverse_reverse_rh(π/2, 1, near)` 的 z/w 两轴算出来的
+///    （`group0::light_of`），不是这里随手推的。
+/// 2. 采样坐标要 `flip_z`：cube 是**左手 y-up**，Bevy 的世界是右手（`shadows.wgsl:17`、
+///    `:52-68` 那两处注释）。
+/// 3. Gaussian 那 8 个点是 **D3D 的 8×MSAA 位置**配 8 个高斯系数（`shadow_sampling.wgsl:70-102`），
+///    基向量是 `orthonormalize(normalize(light_local)) × 0.003 × distance_to_light`
+///    —— 三个数一个都不许"看起来差不多"。
+///
+/// ⚠ 它**自带两格的声明**（binding 2 的 cube array 与 binding 3 的比较采样器）：
+/// 内容 shader 只 import 这个符号，而 Bevy 那边这两格是 `mesh_view_bindings` 那份
+/// import 顺带带进来的。本宿主没有 naga_oil，所以"顺带"这件事必须写出来 ——
+/// 而绑定号仍然只有一处（[`crate::group0::POINT_SHADOW_TEXTURES_BINDING`] /
+/// [`crate::group0::POINT_SHADOW_SAMPLER_BINDING`]），由 `group0` 那条反射判据钉住。
+///
+/// ⚠ 用到的两个符号（`clustered_lights` 与 `light_id` 的下标语义）来自**别的 import**：
+/// `surface.wgsl` 引了 `clustered_lights`，所以这里直接用；谁哪天写一支只引
+/// `fetch_point_shadow` 的 shader，组装会当场报"找不到 `clustered_lights`"——
+/// 那正是我们要的失败方式（同 [`DEPTH_NDC_TO_VIEW_Z`] 那条判据）。
+pub const POINT_SHADOW_STUB: &str = "\
+@group(0) @binding(2) var point_shadow_textures: texture_depth_cube_array;\n\
+@group(0) @binding(3) var point_shadow_textures_comparison_sampler: sampler_comparison;\n\
+\n\
+// `bevy_render::maths::copysign`（`maths.wgsl:66-68`）：把 b 的符号位抄到 a 上。\n\
+//\n\
+// ⚠ 它**不是内建** —— 是 Bevy 自己定义的一个函数（正因为 naga 那条链上 `copysign`\n\
+// 不是人人都有；本宿主的 naga 29.0.4 的 WGSL 前端里也没有它，`parse/conv.rs` 的\n\
+// `map_standard_fun` 那张表里查不到）。Bevy 那句注释写着为什么非它不可：\n\
+// `copysign allows proper handling of negative zero to match the rust implementation of\n\
+// orthonormalize` —— `-0.0` 上它给 -1.0，而 `select(1.0, -1.0, z < 0.0)` 给 1.0，\n\
+// 那是**两个数**，而这两个数会让基向量翻个方向。照抄，一个字都不改。\n\
+fn copysign(a: f32, b: f32) -> f32 {\n\
+\x20   return bitcast<f32>((bitcast<u32>(a) & 0x7FFFFFFF) | (bitcast<u32>(b) & 0x80000000));\n\
+}\n\
+\n\
+// `bevy_render::maths::orthonormalize`（`maths.wgsl:75-87`）：把一个方向铺成一组正交基。\n\
+fn orthonormalize(z_basis: vec3<f32>) -> mat3x3<f32> {\n\
+\x20   let sign = copysign(1.0, z_basis.z);\n\
+\x20   let a = -1.0 / (sign + z_basis.z);\n\
+\x20   let b = z_basis.x * z_basis.y * a;\n\
+\x20   let x_basis = vec3<f32>(1.0 + sign * z_basis.x * z_basis.x * a, sign * b, -sign * z_basis.x);\n\
+\x20   let y_basis = vec3<f32>(b, sign + z_basis.y * z_basis.y * a, -z_basis.y);\n\
+\x20   return mat3x3<f32>(x_basis, y_basis, z_basis);\n\
+}\n\
+\n\
+const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
+\n\
+// D3D 那 8 个 MSAA 位置与对应的高斯系数（`shadow_sampling.wgsl:79-102`）。\n\
+const PX_D3D_SAMPLE_POINT_POSITIONS: array<vec2<f32>, 8> = array<vec2<f32>, 8>(\n\
+\x20   vec2<f32>( 0.125, -0.375),\n\
+\x20   vec2<f32>(-0.125,  0.375),\n\
+\x20   vec2<f32>( 0.625,  0.125),\n\
+\x20   vec2<f32>(-0.375, -0.625),\n\
+\x20   vec2<f32>(-0.625,  0.625),\n\
+\x20   vec2<f32>(-0.875, -0.125),\n\
+\x20   vec2<f32>( 0.375,  0.875),\n\
+\x20   vec2<f32>( 0.875, -0.875),\n\
+);\n\
+const PX_D3D_SAMPLE_POINT_COEFFS: array<f32, 8> = array<f32, 8>(\n\
+\x20   0.157112, 0.157112, 0.138651, 0.130251, 0.114946, 0.114946, 0.107982, 0.079001,\n\
+);\n\
+\n\
+fn px_sample_shadow_cubemap_at_offset(\n\
+\x20   position: vec2<f32>,\n\
+\x20   coeff: f32,\n\
+\x20   x_basis: vec3<f32>,\n\
+\x20   y_basis: vec3<f32>,\n\
+\x20   light_local: vec3<f32>,\n\
+\x20   depth: f32,\n\
+\x20   light_id: u32,\n\
+) -> f32 {\n\
+\x20   return textureSampleCompareLevel(\n\
+\x20       point_shadow_textures,\n\
+\x20       point_shadow_textures_comparison_sampler,\n\
+\x20       light_local + position.x * x_basis + position.y * y_basis,\n\
+\x20       i32(light_id),\n\
+\x20       depth,\n\
+\x20   ) * coeff;\n\
+}\n\
+\n\
+fn fetch_point_shadow(\n\
+\x20   light_id: u32,\n\
+\x20   frag_position: vec4<f32>,\n\
+\x20   surface_normal: vec3<f32>,\n\
+\x20   frag_coord_xy: vec2<f32>,\n\
+) -> f32 {\n\
+\x20   let light = &clustered_lights.data[light_id];\n\
+\x20   let surface_to_light = (*light).position_radius.xyz - frag_position.xyz;\n\
+\x20   let surface_to_light_abs = abs(surface_to_light);\n\
+\x20   let distance_to_light = max(\n\
+\x20       surface_to_light_abs.x,\n\
+\x20       max(surface_to_light_abs.y, surface_to_light_abs.z),\n\
+\x20   );\n\
+\x20   let normal_offset = (*light).shadow_normal_bias * distance_to_light * surface_normal.xyz;\n\
+\x20   let depth_offset = (*light).shadow_depth_bias * normalize(surface_to_light.xyz);\n\
+\x20   let offset_position = frag_position.xyz + normal_offset + depth_offset;\n\
+\x20   let frag_ls = offset_position.xyz - (*light).position_radius.xyz;\n\
+\x20   let abs_position_ls = abs(frag_ls);\n\
+\x20   let major_axis_magnitude = max(\n\
+\x20       abs_position_ls.x,\n\
+\x20       max(abs_position_ls.y, abs_position_ls.z),\n\
+\x20   );\n\
+\x20   let zw = -major_axis_magnitude * (*light).light_custom_data.xy\n\
+\x20       + (*light).light_custom_data.zw;\n\
+\x20   let depth = zw.x / zw.y;\n\
+\x20   let light_local = frag_ls * vec3<f32>(1.0, 1.0, -1.0);\n\
+\x20   let basis = orthonormalize(normalize(light_local))\n\
+\x20       * PX_POINT_SHADOW_SCALE * distance_to_light;\n\
+\x20   var sum: f32 = 0.0;\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[0], PX_D3D_SAMPLE_POINT_COEFFS[0],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[1], PX_D3D_SAMPLE_POINT_COEFFS[1],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[2], PX_D3D_SAMPLE_POINT_COEFFS[2],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[3], PX_D3D_SAMPLE_POINT_COEFFS[3],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[4], PX_D3D_SAMPLE_POINT_COEFFS[4],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[5], PX_D3D_SAMPLE_POINT_COEFFS[5],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[6], PX_D3D_SAMPLE_POINT_COEFFS[6],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20       PX_D3D_SAMPLE_POINT_POSITIONS[7], PX_D3D_SAMPLE_POINT_COEFFS[7],\n\
+\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20   return sum;\n\
+}\n";
 
 /// 视图变换表里**必须**与 Bevy 逐字同语义的那一个符号：`depth_ndc_to_view_z`。
 ///
@@ -187,18 +322,43 @@ mod tests {
         }
     }
 
-    /// 影子那一个符号**由本表显式提供**（不是漏下去让 `bevy_stub` 兜住的）。
+    /// 影子那一个符号**由本表显式提供**，而且是**真实现**（§109）。
     ///
-    /// ⚠ 这是一条**绊线**：S3 会把 [`POINT_SHADOW_STUB`] 换成真实现（采样我们自己的
-    /// cube 影子图），那时这条断言会响 —— 那正是它存在的意义：
-    /// 换实现必须是有意识的一步，而不是某次顺手改动。
+    /// ⚠ 这一条原来是"绊线"：桩换成真实现的那一天它会响，逼着换的人是有意识地换。
+    /// 现在它响过了，于是它改成钉**真实现的那几处不许化简**：8 个采样、`flip_z`、
+    /// 自带的两格声明、以及"它确实在采样"（而不是又退回一个常量）。
     #[test]
     fn the_point_shadow_symbol_is_owned_by_this_host() {
         let shadow = "bevy_pbr::shadows::fetch_point_shadow";
         assert_eq!(
             stubs(shadow),
             Some(POINT_SHADOW_STUB),
-            "影子走的是本表里那一格（S1 阶段它与 Bevy 那张同形；S3 换成真实现）"
+            "影子走的是本表里那一格（§109 起是真实现）"
+        );
+        assert!(
+            !POINT_SHADOW_STUB.contains("return 1.0;"),
+            "桩的痕迹（`return 1.0`）不许留在真实现里"
+        );
+        assert_eq!(
+            POINT_SHADOW_STUB
+                .matches("px_sample_shadow_cubemap_at_offset(")
+                .count(),
+            9,
+            "Gaussian 那条路是**八个**采样（一次定义 + 八次调用）"
+        );
+        assert!(
+            POINT_SHADOW_STUB.contains("textureSampleCompareLevel("),
+            "比较采样必须走 Level 那一档：`fetch_point_shadow` 的调用点有非一致控制流\
+             （`shadow_sampling.wgsl:319-323`），隐式 LOD 在那种地方是未定义行为"
+        );
+        assert!(
+            POINT_SHADOW_STUB.contains("vec3<f32>(1.0, 1.0, -1.0)"),
+            "采样坐标要 flip_z（cube 是左手 y-up）"
+        );
+        assert!(
+            POINT_SHADOW_STUB.contains("@group(0) @binding(2)")
+                && POINT_SHADOW_STUB.contains("@group(0) @binding(3)"),
+            "这一格要**自带** cube array 与比较采样器两格的声明（内容 shader 只 import 它）"
         );
     }
 

@@ -275,6 +275,12 @@ impl Vec3 {
     pub const X: Self = Self::new(1.0, 0.0, 0.0);
     pub const Y: Self = Self::new(0.0, 1.0, 0.0);
     pub const Z: Self = Self::new(0.0, 0.0, 1.0);
+    // ⚠ glam 那边 `NEG_X` 是**字面量** `-1.0`，不是"取负"（`src/f32/vec3.rs`）：
+    //    `Vec3::ZERO - Vec3::X` 与 `Vec3::NEG_X` 在 `-0.0` 上不是同一个位模式，
+    //    而 cube 那六面的 target/up 正是照字面量抄过来的（§109.2）。
+    pub const NEG_X: Self = Self::new(-1.0, 0.0, 0.0);
+    pub const NEG_Y: Self = Self::new(0.0, -1.0, 0.0);
+    pub const NEG_Z: Self = Self::new(0.0, 0.0, -1.0);
 
     #[inline(always)]
     pub const fn new(x: f32, y: f32, z: f32) -> Self {

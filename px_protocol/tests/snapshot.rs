@@ -308,6 +308,7 @@ fn canonical() -> String {
         // 一个字节都不该因为它变（"加字段是纯加法"这件事在快照里也是看得见的）。
         // 有内容的那一形状在 `px_protocol` 自己的单测里（`a_frame_material_is_expressible_and_round_trips`）。
         frame_materials: Vec::new(),
+        material_instances: Vec::new(),
     };
     let lease = Lease {
         pid: 0,
@@ -336,6 +337,7 @@ fn canonical() -> String {
         vertex_entry: String::new(),
         render: String::new(),
         depth_target: None,
+        cube_face: None,
     };
     let pass_geometry = px_protocol::scene::PassSpec {
         kind: "geometry".to_string(),
@@ -362,6 +364,7 @@ fn canonical() -> String {
         // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
         render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw".to_string(),
         depth_target: Some("depth".to_string()),
+        cube_face: None,
     };
 
     let asset_kinds: Vec<&'static str> = [

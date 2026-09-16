@@ -24,6 +24,7 @@ use px_protocol::material::{MATERIAL_BIND_GROUP, PARAMS_ALIGN, PARAMS_BINDING, T
 use px_protocol::scene::{PassSpec, SceneSpec};
 
 use crate::art;
+use crate::group0::SHADOW_CUBE_FACES;
 use crate::shader;
 
 /// 全屏 pass 的布局：**材质那一份**（组 3 / 参数块第 0 格 / 契约表里的 12 格贴图）。
@@ -80,6 +81,8 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
                 .map_err(|err| format!("资源 '{}' 的格式：{err}", resource.name))?,
             size: SizeRule::parse(&resource.size)
                 .map_err(|err| format!("资源 '{}' 的尺寸：{err}", resource.name))?,
+            // 层数是**文档里的一个整数**（不是规则）：烘图侧解出来，这里照搬。
+            layers: resource.layers,
             usage,
         });
     }
@@ -134,6 +137,13 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
                 })
                 .collect(),
             depth_target: pass.depth_target.clone(),
+            // 写第几层：文档给的是 `light` + `face` + `layer` 三样，这里**对账**那条算式
+            // （`layer == light × 6 + face`，`light.rs:2075`）再把它交给执行器。
+            //
+            // ⚠ 为什么对账住在这里：只有宿主知道 cube 是怎么排的（一盏投影的点光一个 cube、
+            //    面序照 `CUBE_MAP_FACES`）；执行器只认"写第 k 层"。于是文档里那个 `layer`
+            //    是一条**验证过的**事实，而不是一处"我说了算"的推导 —— 对不上就当场拒。
+            layer: layer_of(pass, &label)?,
             vertex_shader: pass.vertex_shader.clone(),
             vertex_entry: pass.vertex_entry.clone(),
         });
@@ -149,9 +159,34 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
     Ok(plan)
 }
 
+/// 文档里 `cube_face` 那一格 → 执行器要的"写第几层"，**顺带把算式对一遍**。
+///
+/// 六面、六个层号，两处必须同时成立：`layer == light × 6 + face`（cube 的排法）与
+/// `face < 6`（cube 就是六面）。⚠ 这里**不重算**那个数交给执行器（"重算一遍再交出去"
+/// 就是把文档里那个数悄悄丢掉），而是**比**：文档说什么、算式说什么，两样一致才放行。
+fn layer_of(pass: &PassSpec, label: &str) -> Result<Option<u32>, String> {
+    let Some(cube) = &pass.cube_face else {
+        return Ok(None);
+    };
+    if cube.face >= SHADOW_CUBE_FACES {
+        return Err(format!(
+            "pass '{label}' 的 cube_face.face 是 {}：cube 只有 {SHADOW_CUBE_FACES} 面",
+            cube.face
+        ));
+    }
+    let expected = cube.light * SHADOW_CUBE_FACES + cube.face;
+    if cube.layer != expected {
+        return Err(format!(
+            "pass '{label}' 的 cube_face 说 layer={}，而 light={} × {SHADOW_CUBE_FACES} + face={} = {expected}：\
+             两处对不上（层号是说出来让人对账的，不是唯一的真本）",
+            cube.layer, cube.light, cube.face
+        ));
+    }
+    Ok(Some(cube.layer))
+}
+
 /// 全屏 pass 的三样：组装后的 WGSL、打包好的参数、`reads` 的格位。
-fn fullscreen_of(
-    pass: &PassSpec,
+fn fullscreen_of(    pass: &PassSpec,
     label: &str,
     pcg_root: &Path,
     modules: &px_shader::ModuleTable,

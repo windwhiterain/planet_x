@@ -33,6 +33,23 @@ format = "depth32float"
 size = "view"
 usage = ["render_attachment", "texture_binding", "copy_src"]
 
+# ---- 点光 cube 影图（§109）：**一盏投影的点光一个 cube**（六层）----
+#
+# `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（§133 同一条口径 ——
+# 配方里一个内容值都不写死），文档里落的是解出来的整数。一盏投影的灯都没有时，
+# **这份资源与写它的那六条 pass 都不烘**（oracle 那边也不渲染影子图）。
+#
+# ⚠ 1024 / `depth32float` 是 oracle 的策略，不是随便挑的：`PointLightShadowMap` 的缺省
+# 边长就是 1024，而 `px_render` 从不插那个资源（全仓 grep 0 命中）⇒ 缺省值就是实况；
+# 格式则来自 `CORE_3D_DEPTH_FORMAT = Depth32Float`。两个数在 group 0 那一侧还有第二处用处：
+# `shadow_normal_bias = 0.6 × (2/边长) × √2`。
+[[resources]]
+name = "point_shadow_textures"
+format = "depth32float"
+size = "1024x1024"
+layers = "shadow_cubes"
+usage = ["render_attachment", "texture_binding"]
+
 # ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
 [[resources]]
 name = "scene_depth_sample"
@@ -51,6 +68,31 @@ vertex_shader = "art/frame/vertex_mesh.wgsl"
 vertex_entry = "vertex"
 writes = []
 depth_target = "scene_depth"
+render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 点光 cube 影图：**六面各一条单层 pass**（§109.1）----
+#
+# `cube_faces = 6` ⇒ 这一条**展开成**（投影的灯数 × 6）条：每面一条，各自 `cube_face =
+# { light, face, layer }`（层号 = light×6+face，算式只在烘图侧）。
+# 一盏投影的灯都没有 ⇒ 一条都不展开。
+#
+# ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现（§109.1）。
+# ⚠ `multiview_mask: None`、每面一个单层视图、`LoadOp::Clear(0.0)`、`depth_compare =
+# GreaterEqual`、每面 `world_from_view = 平移(灯位) × looking_at(CUBE_MAP_FACES[i])`、
+# 投影 `perspective_infinite_reverse_rh(π/2, 1.0, 0.1)` —— 这几样一条都不能少（§109.2）。
+# ⚠ 它画的是**投影的那些物体**（`cast_shadow`），**不是**"不透明的那些"：大气与云
+# 都是透明的，而它们不投影（Bevy 的 `NotShadowCaster`）。
+# ⚠ 剔除仍然来自**材质**（§127）：这条 pass 没有颜色附件 ⇒ 执行器不建片元阶段，
+# 而材质的 cull 照旧生效（材质带着片元 shader，它在 `color=none` 上不会输出颜色）。
+[[before]]
+label = "point_shadow"
+kind = "geometry"
+select = "shadow_casters"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
+vertex_entry = "vertex"
+writes = []
+depth_target = "point_shadow_textures"
+cube_faces = 6
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
 
 # ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----

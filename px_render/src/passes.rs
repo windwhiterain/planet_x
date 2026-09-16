@@ -135,6 +135,8 @@ pub fn resolve(
             name: resource.name.clone(),
             format,
             size,
+            // 层数照文档（§139）：老产物那一栏缺省是 1，Bevy 宿主这一档一个分层资源也不用。
+            layers: resource.layers,
             usage,
         });
     }
@@ -373,6 +375,7 @@ mod tests {
             resources,
             passes,
             lights: Vec::new(),
+            material_instances: Vec::new(),
             // 帧自有材质（§135）：这一档的夹具用不到它（老宿主也不消费这一节）。
             frame_materials: Vec::new(),
             objects: vec![px_protocol::scene::Object {
@@ -412,6 +415,7 @@ mod tests {
             vertex_entry: String::new(),
             render: String::new(),
             depth_target: None,
+            cube_face: None,
         }
     }
 
@@ -436,6 +440,7 @@ mod tests {
                 name: "scratch".to_string(),
                 format: "rgba16float".to_string(),
                 size: "view".to_string(),
+                layers: 1,
                 usage: vec!["render_attachment".to_string()],
             }],
             vec![pass("grade", &[], &["scratch"])],
@@ -453,6 +458,7 @@ mod tests {
                 name: "scratch".to_string(),
                 format: "rgba16float".to_string(),
                 size: "view".to_string(),
+                layers: 1,
                 usage: vec![
                     "render_attachment".to_string(),
                     "texture_binding".to_string(),
@@ -475,6 +481,7 @@ mod tests {
                 name: "view".to_string(),
                 format: "rgba16float".to_string(),
                 size: "view".to_string(),
+                layers: 1,
                 usage: vec!["render_attachment".to_string()],
             }],
             vec![pass("grade", &[], &["view"])],

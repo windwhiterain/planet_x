@@ -425,7 +425,86 @@ pub fn globals_zero() -> GlobalsUniform {
     GlobalsUniform::default()
 }
 
-/// group 0 的绑定组布局（五格超集）。**由契约常量建**，不另写一张表。
+/// `point_shadow_textures`（group 0 binding 2）—— 点光 cube 影图（**cube array**）。
+///
+/// ⚠ 视图维度是 `CubeArray`：着色器那一格的 `light_id` 是 **cube 的下标**（不是层号），
+/// 面由方向自己选（`shadow_sampling.wgsl:324-341`）。层号的排法是 `light × 6 + face`
+/// （`light.rs:2075`），而整份 cube 的视图是 `CubeArray` + `DepthOnly`
+/// （`light.rs:1416-1444`）；**每一面**那个视图是 `D2` + 单层（`light.rs:2083-2093`），
+/// 那一份由执行器按 `PassPlan::layer` 建（见 `px_pass::Executor::layer_view`）。
+pub const POINT_SHADOW_TEXTURES_BINDING: (u32, u32) = (0, 2);
+
+/// `point_shadow_textures_comparison_sampler`（group 0 binding 3）。
+///
+/// ⚠ 它必须是**比较采样器**（`compare: Some(GreaterEqual)`）：`fetch_point_shadow` 走的是
+/// `textureSampleCompareLevel`，普通采样器在那条路上是"类型不符"，而且
+/// `GreaterEqual` 正是 reverse-Z 那条深度约定的一半（`light.rs:244-259`）。
+pub const POINT_SHADOW_SAMPLER_BINDING: (u32, u32) = (0, 3);
+
+/// cube 有几面。⚠ 与 `px_graphs::frame::CUBE_FACES` 是**同一个数**的两个落点：
+/// 一份在文档侧（烘图算层号用），一份在宿主侧（对账与建视图用）。
+/// 两处一致由"层号对账"钉住（`plan::layer_of`：`layer == light × 6 + face`）——
+/// 不一致的那一天，文档里那六条 pass 会当场被拒。
+pub const SHADOW_CUBE_FACES: u32 = 6;
+
+/// 「这一帧没有影子 pass」时绑的那份 cube 影图：**1×1×6 层，全是 0**。
+///
+/// 为什么要它：着色器**声明**了 binding 2（内容 shader 引 `fetch_point_shadow`），
+/// 于是管线布局必须有这一格，绑不上就建不了管线。而没有投影的灯时，
+/// 内容 shader 一次都不会去采它（`surface.wgsl`：`principal.shadow_maps != 0` 才进
+/// `fetch_point_shadow`，而那个位来自 `flags`）—— 所以绑什么不影响像素。
+///
+/// ⚠ 与 oracle 的差别说清楚：Bevy 那边**照样分配**那张 1024²×6 的图
+/// （`max(1,count)*6` 层，`light.rs:1398-1414`），只是不往里渲染。而"分配"不出图 ——
+/// 一份没有任何 pass 写的资源进不了我们的文档（`px_pass` 的池子是**按需**建的，
+/// 而 `seed` 了没人用是当场拒）。所以这里绑一份小到看得见的兜底图，并**打印出来**。
+pub fn fallback_cube(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("组 0：兜底 cube 影图（1×1×6，全 0）"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: SHADOW_CUBE_FACES,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("组 0：兜底 cube 影图（CubeArray/DepthOnly）"),
+        format: None,
+        dimension: Some(wgpu::TextureViewDimension::CubeArray),
+        usage: None,
+        aspect: wgpu::TextureAspect::DepthOnly,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: Some(SHADOW_CUBE_FACES),
+    });
+    (texture, view)
+}
+
+/// 点光影子的**比较采样器**：与 Bevy 的 `point_light_comparison_sampler` 逐格一致
+/// （`light.rs:244-259`：ClampToEdge × 3、mag/min 都是 Linear、mipmap 是 Nearest、
+/// `compare = GreaterEqual`，其余取缺省 ⇒ lod 夹在 [0, 32]）。
+pub fn point_shadow_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("组 0：点光影子比较采样器"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        compare: Some(wgpu::CompareFunction::GreaterEqual),
+        ..Default::default()
+    })
+}
+
+/// group 0 的绑定组布局（七格超集）。**由契约常量建**，不另写一张表。
 pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let buffer = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
@@ -439,10 +518,27 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         count: None,
     };
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("组 0（五格超集）"),
+        label: Some("组 0（七格超集）"),
         entries: &[
             buffer(VIEW_BINDING.1, wgpu::BufferBindingType::Uniform),
             buffer(LIGHTS_BINDING.1, wgpu::BufferBindingType::Uniform),
+            // 点光 cube 影图 + 它的比较采样器（§109）：`fetch_point_shadow` 要这两格。
+            wgpu::BindGroupLayoutEntry {
+                binding: POINT_SHADOW_TEXTURES_BINDING.1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::CubeArray,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: POINT_SHADOW_SAMPLER_BINDING.1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
             buffer(
                 CLUSTERED_LIGHTS_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
@@ -491,6 +587,9 @@ pub fn frame(
     width: u32,
     height: u32,
     depth: &wgpu::TextureView,
+    shadow_cube: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+    shadow_note: &str,
 ) -> Result<GroupZero, String> {
     let (group, binding) = CLUSTERED_LIGHTS_BINDING;
     let array = storage_array_layout(module, group, binding)
@@ -544,7 +643,7 @@ pub fn frame(
 
     let layout = bind_group_layout(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("组 0（五格超集）"),
+        label: Some("组 0（七格超集）"),
         layout: &layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -554,6 +653,14 @@ pub fn frame(
             wgpu::BindGroupEntry {
                 binding: LIGHTS_BINDING.1,
                 resource: lights_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: POINT_SHADOW_TEXTURES_BINDING.1,
+                resource: wgpu::BindingResource::TextureView(shadow_cube),
+            },
+            wgpu::BindGroupEntry {
+                binding: POINT_SHADOW_SAMPLER_BINDING.1,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: CLUSTERED_LIGHTS_BINDING.1,
@@ -602,6 +709,15 @@ pub fn frame(
                 array.size,
                 cluster.len(),
                 cluster.len()
+            ),
+            // ⚠ 影图那一格要说清**绑的是哪一份**：文档烘了 cube 就是它，没烘就是兜底图
+            //    （1×1×6 全 0）。"绑了什么"看不见的话，"影子怎么全亮/全黑"就只能猜。
+            format!(
+                "point_shadow_textures（group 0 binding {}）：cube array，{shadow_note}｜\
+                 comparison sampler（binding {}）：ClampToEdge×3 / Linear / Linear / Nearest / \
+                 lod [0, 32] / GreaterEqual",
+                POINT_SHADOW_TEXTURES_BINDING.1,
+                POINT_SHADOW_SAMPLER_BINDING.1
             ),
     ];
     // 逐盏把**真的填进去的那几个数**打出来：出问题时先看这几行，不必猜"是不是灯没填"。

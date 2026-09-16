@@ -22,7 +22,7 @@
 
 #![allow(dead_code)]
 
-use crate::mat4::{Mat3, Mat4, Quat, Vec3};
+use crate::mat4::{Mat3, Mat4, Quat, Vec3, Vec4};
 
 pub struct Camera {
     pub position: Vec3,
@@ -83,6 +83,76 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
 /// Bevy `Transform::look_at` -> `look_to`。
 fn looking_at(translation: Vec3, target: Vec3, up: Vec3) -> Quat {
     look_to(target - translation, up)
+}
+
+/// 点光 cube 的**六面朝向**：`bevy_camera-0.19.1/src/primitives.rs:347-378` 的
+/// `CUBE_MAP_FACES`，次序 `+X −X +Y −Y +Z −Z`。
+///
+/// ⚠ 次序**不是**随便排的：它同时定了两件事 —— 烘图侧那个 `face` 数（`px_graphs::frame::
+/// FACE_NAMES` 与它同序）与这里算矩阵用的 target/up。两处不一致 ⇒ 影子贴到别的面上，
+/// 而"贴错面"在画面上常常看着像"影子有点歪"。宿主拿到的 `face` 与 `layer` 是一起进来的
+/// （`PassSpec::cube_face`），对账那条算式（`layer == light×6 + face`）就是这条一致性的门。
+///
+/// ⚠ `+Z` / `−Z` 两面的 target 是**反**的（`+Z` 用 `NEG_Z`、`−Z` 用 `+Z`）：cube 的坐标系是
+/// **左手 y-up**，而 Bevy 的世界是右手 y-up（`primitives.rs:341-346` 的注释），
+/// 所以"哪一面"要在两套约定之间翻一次。照抄，不要"理顺"。
+pub const CUBE_MAP_FACES: [(Vec3, Vec3); 6] = [
+    (Vec3::X, Vec3::Y),
+    (Vec3::NEG_X, Vec3::Y),
+    (Vec3::Y, Vec3::Z),
+    (Vec3::NEG_Y, Vec3::NEG_Z),
+    (Vec3::NEG_Z, Vec3::Y),
+    (Vec3::Z, Vec3::Y),
+];
+
+/// 点光 cube 的**某一面**当相机：`light.rs:2061-2123` 那条路。
+///
+/// ⚠⚠ 两处**不许化简**（§109.2）：
+///
+/// 1. `world_from_view = GlobalTransform::from_translation(灯位) × Transform::looking_at(...)`
+///    —— 那是**两个仿射矩阵相乘**（`Affine3A * Affine3A` ⇒ `matrix3.mul_mat3` 与
+///    `matrix3.mul_vec3(t) + t`），**不是**"拿四元数直接拼一个 `[R|t]`"。
+///    两种写法数学等价、浮点不等价（±0.0 与 1 ulp 那一族），而这里差一个末位就会
+///    让影子边缘的 8 个比较采样里有一个翻符号。所以照抄乘法链。
+/// 2. 投影是 `perspective_infinite_reverse_rh(FRAC_PI_2, 1.0, near_z)` —— **90°、宽高比 1**、
+///    近平面来自 `PointLight::shadow_map_near_z`（0.1）。那是 §109 里"最大的绝对轴就是
+///    世界深度"那条推导的前提（45° 的视锥面）。
+///
+/// `near_z` 由调用方给（它住在 group 0 那一份策略常量里）。
+pub fn face_view(light_position: Vec3, face: u32, near_z: f32) -> Camera {
+    let (target, up) = CUBE_MAP_FACES[face as usize];
+    // `Transform::IDENTITY.looking_at(target, up)`（`light.rs:1095-1098` 预先把六面算好）。
+    let rotation = looking_at(Vec3::ZERO, target, up);
+    // ---- `GlobalTransform::from_translation(灯位) * Transform::from_rotation(...)` ----
+    //
+    // 左边：单位矩阵 + 平移；右边：`Mat3::from_quat` + 零平移。
+    // `Affine3A * Affine3A` = `matrix3: a.m3 * b.m3`、`translation: a.m3 * b.t + a.t`。
+    let left = Mat3::IDENTITY;
+    let right = Mat3::from_quat(rotation);
+    let matrix3 = left.mul_mat3(&right);
+    let translation = left.mul_vec3(Vec3::ZERO).add(light_position);
+    let world_from_view = Mat4::from_cols(
+        Vec4::new(matrix3.x_axis.x, matrix3.x_axis.y, matrix3.x_axis.z, 0.0),
+        Vec4::new(matrix3.y_axis.x, matrix3.y_axis.y, matrix3.y_axis.z, 0.0),
+        Vec4::new(matrix3.z_axis.x, matrix3.z_axis.y, matrix3.z_axis.z, 0.0),
+        Vec4::new(translation.x, translation.y, translation.z, 1.0),
+    );
+    let clip_from_view = Mat4::perspective_infinite_reverse_rh(
+        core::f32::consts::FRAC_PI_2,
+        1.0,
+        near_z,
+    );
+    let view_from_world = world_from_view.inverse();
+    let view_from_clip = clip_from_view.inverse();
+    let clip_from_world = clip_from_view.mul_mat4(&view_from_world);
+    Camera {
+        position: light_position,
+        world_from_view,
+        view_from_world,
+        clip_from_view,
+        view_from_clip,
+        clip_from_world,
+    }
 }
 
 /// `bevy_transform-0.19.1` `src/components/transform.rs:475-484`。

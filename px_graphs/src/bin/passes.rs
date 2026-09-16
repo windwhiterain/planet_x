@@ -136,6 +136,7 @@ fn main() {
                 name: resource.name.clone(),
                 format: resource.format.clone(),
                 size: resource.size.clone(),
+                layers: 1,
                 usage: resource.usage.clone(),
             });
         }
@@ -205,6 +206,7 @@ fn main() {
             vertex_entry: String::new(),
             render: String::new(),
             depth_target: None,
+            cube_face: None,
         });
     }
     // ---- 落位（§128 裁决 D）----

@@ -510,8 +510,24 @@ pub struct PassResource {
     pub name: String,
     pub format: String,
     pub size: String,
+    /// **层数**（数组层 / cube 的面数）。缺省 = 1（普通的单层 2D 图）。
+    ///
+    /// ⚠ 文档里带的是**解出来的那个整数**，不是规则：规则（"每盏投影的点光一个 cube"）
+    /// 住在帧图配方里，由**烘图侧**按这一帧的场景解出来（§133 同一条口径：
+    /// 文档自描述、宿主不认识规则）。所以宿主只需要会数层，不需要会算层。
+    /// 缺省不落盘 ⇒ 没有分层资源的老文档逐字节不变。
+    #[serde(default = "one_layer", skip_serializing_if = "is_one_layer")]
+    pub layers: u32,
     #[serde(default)]
     pub usage: Vec<String>,
+}
+
+fn one_layer() -> u32 {
+    1
+}
+
+fn is_one_layer(layers: &u32) -> bool {
+    *layers == 1
 }
 
 fn fragment_entry() -> String {
@@ -615,6 +631,32 @@ pub struct PassSpec {
     /// 与 `render` 文本里的 `depth=` 成对出现，配对规则同样由 `px_pass` 判。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_target: Option<String>,
+    /// 这一条 pass 写**点光 cube 影子的哪一面**（§109：每面一条单层 pass）。
+    ///
+    /// ⚠ 三格**必须一起来**（`light` / `face` / `layer` 同在一个结构体里）：只给其中两格
+    /// 是一句说不清的话，而"两格凑一格"这种状态在类型上就不该存在。
+    /// ⚠ `layer` 是**说出来让人对账的**，不是唯一的真本：`light` 与 `face` 已经确定了它
+    /// （`layer = light × 6 + face`），而那条算式由**宿主**当场核对 —— 于是这个数是一条
+    /// **验证过的**事实。反过来说，只给 `layer` 会逼宿主自己发明一条"层号怎么排"的规则，
+    /// 而那正是 §109.2 那个 1 ulp 风险旁边的东西。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cube_face: Option<PassCubeFace>,
+}
+
+/// 一条 pass 的**点光 cube 面**：写第 `light` 个 cube 的第 `face` 面，落在第 `layer` 层。
+///
+/// `light` 是 **cube 的下标**（= 内容 shader 里那个 `light_id`，也是聚类缓冲里的下标）。
+/// 它等于"文档 `lights` 里第几盏**投影的点光**"（按文档次序）—— 因为宿主那一步排序
+/// （`lights_of`：开影子的在前、同档稳定）把投影的那些灯**原样**排在最前面，
+/// 所以第 m 盏投影点光的聚类下标恒为 m。⚠ 这一条不依赖那个**不可实测**的 entity 次序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassCubeFace {
+    pub light: u32,
+    /// 0..5，次序与 `bevy_camera` 的 `CUBE_MAP_FACES` 一致（+X −X +Y −Y +Z −Z，§109.2）。
+    pub face: u32,
+    /// 那份 cube array 里的层号：`light × 6 + face`。
+    pub layer: u32,
 }
 
 impl PassSpec {
@@ -669,6 +711,35 @@ pub struct SceneSpec {
     /// （判据在 `the_frozen_originals_round_trip_byte_for_byte`）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame_materials: Vec<FrameMaterial>,
+    /// **生成出来的材质实例**（§139 的用户裁决）：又一份材质，内容照 `base` 那一份，
+    /// 只是**另起一个名字**。
+    ///
+    /// 为什么需要它：一条 pass 引用一个材质名，而一条材质名在宿主那儿恰好解析出**一套组**
+    /// （组号 + 句柄 + 布局）。点光 cube 影子要六面，每面一套 view/MeshStage ⇒ 六面各要
+    /// **各自的名字**。名字由烘图侧**生成**（人写的那一层仍然只有一份意图 + "影子要六面"），
+    /// 而 `.pxart` 本来就是生成出来的指令流 —— "给一份不同的绑定状态起个名字"在指令流里
+    /// 不是范畴错误。
+    ///
+    /// ⚠ 为什么是**引用**（`base`）而不是把材质描述抄一遍：抄一遍会在文档里多出六份
+    /// 一模一样的 shader/参数/贴图表，而**抄不动的部分**（几何）还得跟着抄 ——
+    /// `objects[]` 一条就是"几何 + 材质"，宿主按物体装载网格，六份副本就是六次网格解码
+    /// 与六份上传。引用则一分不多：名字是新的，材质还是那一份。
+    ///
+    /// ⚠ 「这一面的 view 是哪一面」**不在这里**：它由**用到这个名字的那条 pass** 说
+    /// （`PassSpec::cube_face`）—— 同一个事实只有一处（§66.1），而宿主当场判
+    /// "一个名字只能被一条带 cube_face 的 pass 用"（两处用、面不同 ⇒ 歧义 ⇒ 拒）。
+    /// 空表不落盘 ⇒ 没有影子实例的文档逐字节不变。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_instances: Vec<MaterialInstance>,
+}
+
+/// 一份**生成的材质实例**：`name` 是它的名字（`draws[].material` 引它），
+/// `base` 是它的来源（某个物体的 id，或者一份帧自有材质的名字）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialInstance {
+    pub name: String,
+    pub base: String,
 }
 
 impl SceneSpec {
@@ -774,6 +845,12 @@ impl SceneSpec {
                     resource.name
                 ));
             }
+            if resource.layers == 0 {
+                return Err(format!(
+                    "pass 资源 '{}' 的层数是 0：一份资源至少一层",
+                    resource.name
+                ));
+            }
             resources.push(&resource.name);
         }
         let declared = if resources.is_empty() {
@@ -858,6 +935,25 @@ impl SceneSpec {
                 return Err(format!("pass 标签重了：'{label}'"));
             }
             labelled.push(label);
+            // 点光 cube 的那一面（§109：六面各一条单层 pass）。
+            //
+            // ⚠ 三处各管一件事，一件都不许抄成两处（§66.1）：
+            //    · **这里**判"文档自己说得通"：面号在 0..5 里、而且它得有个去处；
+            //    · **宿主**判那条算式 `layer = light × 6 + face`（只有它知道 cube 怎么排）；
+            //    · **`px_pass::Plan::check`** 判"那一层在不在那份资源里"。
+            if let Some(cube) = &pass.cube_face {
+                if cube.face >= 6 {
+                    return Err(format!(
+                        "{at} 的 cube_face.face 是 {}：cube 只有 6 面（0..5）",
+                        cube.face
+                    ));
+                }
+                if pass.depth_target.is_none() {
+                    return Err(format!(
+                        "{at} 给了 cube_face，却没给 depth_target：那一面要写进哪张 cube 影图？"
+                    ));
+                }
+            }
             for name in pass.reads.iter().chain(pass.writes.iter()) {
                 if name == VIEW_BUILTIN {
                     continue;
@@ -930,6 +1026,40 @@ impl SceneSpec {
             }
             frame_names.push(&material.name);
         }
+        // ---- 生成的材质实例（§139）--------------------------------------------
+        //
+        // ⚠ 这一节是**生成物**：不要手写它，也不要为它做去重（"六份名字其实一套组，
+        //    合成一份吧"）—— 那会把形状打回"一个名字两套组"，也就是需要给执行器
+        //    加优先级规则的那种形状（而那条路已经被用户裁决否掉了）。
+        let mut instance_names: Vec<&str> = Vec::new();
+        for (index, instance) in self.material_instances.iter().enumerate() {
+            let at = format!("第 {index} 份材质实例");
+            if instance.name.trim().is_empty() {
+                return Err(format!("{at} 没给名字：`draws[].material` 是按名字引用它的"));
+            }
+            // 三张表共用一个名字空间：宿主那边材质是**按名字**查的一张平表，
+            // 同一个名字在两处有真本就是歧义（它只能猜一个：画面错、没人报错）。
+            if self.objects.iter().any(|object| object.id == instance.name)
+                || frame_names.contains(&instance.name.as_str())
+                || instance_names.contains(&instance.name.as_str())
+            {
+                return Err(format!(
+                    "{at} 的名字 '{}' 与物体 id / 帧自有材质重了：材质名是一张平表，\
+                     一个名字只能有一份真本",
+                    instance.name
+                ));
+            }
+            if !self.objects.iter().any(|object| object.id == instance.base)
+                && !frame_names.contains(&instance.base.as_str())
+            {
+                return Err(format!(
+                    "{at} '{}' 的 base 是 '{}'，而那不是任何物体的 id、也不是帧自有材质：\
+                     它没有可照的那一份",
+                    instance.name, instance.base
+                ));
+            }
+            instance_names.push(&instance.name);
+        }
         // 一笔 draw 的材质名必须落在**那两张表**之一。⚠ 几何名这里查不了：
         // 文档里没有几何表（图元与网格由宿主按名字解析），所以这条只管材质。
         for (index, pass) in self.passes.iter().enumerate() {
@@ -940,13 +1070,14 @@ impl SceneSpec {
                 }
                 if self.objects.iter().any(|object| object.id == draw.material)
                     || frame_names.contains(&draw.material.as_str())
+                    || instance_names.contains(&draw.material.as_str())
                 {
                     continue;
                 }
                 return Err(format!(
                     "第 {index} 条 pass '{label}' 的 draw（几何 '{}'）要材质 '{}'，\
-                     而它既不是物体 id 也不是帧自有材质。\n  物体 id（它们的 id 就是材质名）：{}\n  \
-                     帧自有材质（`frame_materials`）：{}",
+                     而它既不是物体 id 也不是帧自有材质、也不是生成的材质实例。\n  物体 id（它们的 id 就是材质名）：{}\n  \
+                     帧自有材质（`frame_materials`）：{}\n  生成的材质实例（`material_instances`）：{}",
                     draw.geometry,
                     draw.material,
                     if self.objects.is_empty() {
@@ -962,6 +1093,11 @@ impl SceneSpec {
                         "（一个都没有）".to_string()
                     } else {
                         frame_names.join(" / ")
+                    },
+                    if instance_names.is_empty() {
+                        "（一个都没有）".to_string()
+                    } else {
+                        instance_names.join(" / ")
                     }
                 ));
             }
@@ -980,6 +1116,19 @@ impl SceneSpec {
             .copied()
             .filter(|name| !used.contains(name))
             .collect();
+        // 生成出来的材质实例同理：没人引用它 = 生成多了（或者名字写错了）。
+        let unused_instances: Vec<&str> = instance_names
+            .iter()
+            .copied()
+            .filter(|name| !used.contains(name))
+            .collect();
+        if !unused_instances.is_empty() {
+            return Err(format!(
+                "生成的材质实例 [{}] 没有任何一条 draw 用它 —— 生成多了，\
+                 或者名字与 draws 里写的对不上（声明了没人用的东西，在文档里就是一个假引用）",
+                unused_instances.join(" / ")
+            ));
+        }
         if !unused.is_empty() {
             return Err(format!(
                 "帧材质 [{}] 声明了却没有任何一条 draw 用它。draws 引用的材质名是 [{}] —— \

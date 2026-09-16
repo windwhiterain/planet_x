@@ -184,6 +184,16 @@ pub struct ResourceSpec {
     pub name: String,
     pub format: Format,
     pub size: SizeRule,
+    /// **层数**（数组层 / cube 的面数）。1 = 普通的单层 2D 图。
+    ///
+    /// ⚠ 它**不是**尺寸规则的一部分，也不是"视图维度"：三者是三件事 ——
+    /// 尺寸说"一张图多大"、层数说"这份资源里有几张"、视图维度说"谁把它当成什么看"。
+    /// 池子建纹理用的是前两个（`Extent3d { width, height, depth_or_array_layers }`），
+    /// 而第三个是**绑定**那一侧的事（谁把整份资源当一个 cube array 读，由那一格的
+    /// 声明说了算 —— 组 0 的契约在宿主那儿，正如 `depth_prepass_texture` 是 2D 还是
+    /// 数组也是它说了算）。执行器从不猜视图维度：它按**用途**给视图
+    /// （附件要单层，见 `PassPlan::layer`）。
+    pub layers: u32,
     pub usage: Vec<Use>,
 }
 
@@ -729,6 +739,14 @@ pub struct PassPlan {
     /// ⚠ 与 `render.depth` 一一对应，两边都不许单独出现：挂了深度却不说用哪张图 =
     /// "画到一张没名字的图上"，那种状态说不清，[`Plan::check`] 当场拒。
     pub depth_target: Option<String>,
+    /// 这条 pass 写 `depth_target` 那份资源的**第几层**。`None` = 不分层（单层资源）。
+    ///
+    /// ⚠ 执行器只知道"写第 k 层"，**不知道 k 是怎么来的**：`k = 灯 × 6 + 面`
+    /// 那条算式是宿主与 oracle 之间的约定（`bevy_pbr/src/render/light.rs:2075`），
+    /// 而执行器不认识"灯"也不认识"面"（§124：它只按 kind 与状态分派，一组叫什么、
+    /// 一个数怎么算都不归它管）。宿主把算式**对账**一遍再交进来（对不上就拒），
+    /// 于是这里那个数是一条**验证过的**事实，不是一处推导。
+    pub layer: Option<u32>,
     /// 几何 pass 的**顶点阶段**（WGSL 全文 + 入口名）。全屏 pass 留空 ⇒ 执行器自备全屏三角。
     ///
     /// 为什么顶点阶段必须由宿主给：内容 shader 是**纯片元**的（pxart 那几份没有 `@vertex`），
@@ -830,6 +848,9 @@ impl Plan {
                     "资源 '{}' 的 usage 是空的：读它还是写它，得说出来",
                     resource.name
                 ));
+            }
+            if resource.layers == 0 {
+                return Err(format!("资源 '{}' 的层数是 0：一份资源至少一层", resource.name));
             }
             names.push(&resource.name);
         }
@@ -1025,6 +1046,39 @@ impl Plan {
                                 "{at} 的深度目标 '{name}' 的 usage 里没有 render_attachment"
                             ));
                         }
+                        // ---- 分层写（`layer`）与层数必须**成对且自洽** ----
+                        //
+                        // ⚠ 两条都是"说不清就拒"：多层资源上不说写第几层 = 一张 6 层的图
+                        //    被当成附件挂上去（wgpu 那边要么报"视图层数不对"，要么更糟：
+                        //    按 multiview 理解）；单层资源上说"写第 3 层" = 那句话没有对象。
+                        //    ⚠ 执行器**不猜** k 是怎么来的（见 `PassPlan::layer`）—— 它只
+                        //    检查 k 在这份资源里存不存在，算式本身由宿主对账。
+                        match (pass.layer, resource.layers) {
+                            (None, layers) if layers > 1 => {
+                                return Err(format!(
+                                    "{at} 的深度目标 '{name}' 有 {layers} 层，而这条 pass \
+                                     没说写第几层：多层图上不分层就是一句说不清的话\
+                                     （要整份一起写就该显式说清那是哪一种 pass）"
+                                ))
+                            }
+                            (Some(layer), layers) if layer >= layers => {
+                                return Err(format!(
+                                    "{at} 要写 '{name}' 的第 {layer} 层，而那份资源只有 \
+                                     {layers} 层"
+                                ))
+                            }
+                            // 其余组合都是说得通的：单层图不写层号，或者写第 0..layers-1 层。
+                            _ => {}
+                        }
+                    } else if pass.layer.is_some() {
+                        // 外部目标（宿主给的 `Role::Depth` 视图）在文档里没有"几层"这一栏，
+                        // 所以"写第 k 层"在这里没有依据 —— 当场拒，不许猜。
+                        return Err(format!(
+                            "{at} 指定了写第 {} 层，而深度目标 '{name}' 不是 \
+                             `resources` 里的资源（是宿主给的外部目标）：它有几层、\
+                             分层视图怎么建都没有依据",
+                            pass.layer.expect("上面判过是 Some")
+                        ));
                     }
                 }
             }
@@ -1201,6 +1255,10 @@ pub struct ResolvedGeometry<'a> {
 /// ⚠ 布局必须一并给：管线的组布局要按它拼，而 `wgpu::BindGroup` **不暴露自己那份布局**
 /// （查过 API，只有一个 `as_custom`）。组号也是数据（材质契约里材质在第 3 组），
 /// 执行器不认识任何一组叫什么。
+///
+/// ⚠ `Clone` 只是**句柄的复制**（`BindGroup` / `TextureView` 那一族都是引用计数的句柄，
+/// 克隆不复制 GPU 资源）：宿主拼一份"材质那一套组"的时候复制的是句柄。
+#[derive(Clone)]
 pub struct ResolvedGroup<'a> {
     pub group: u32,
     pub bind_group: &'a BindGroup,
@@ -1255,18 +1313,28 @@ pub struct Frame<'a> {
     /// 这一帧解析好的几何（按名字）。pass 的 `draws` 里点名谁就取谁。
     pub geometries: &'a [ResolvedGeometry<'a>],
     /// 这一帧解析好的材质（按名字）。同上。
+    ///
+    /// ⚠ **一个名字恰好解析出一套组**（组号 + 句柄 + 布局）。这条契约没有例外，
+    /// 也没有优先级：谁需要"同一个材质、另一套 view"，谁就在文档里**另起一个名字**
+    /// （§139 的用户裁决：`.pxart` 是生成出来的指令流，"给一份不同的绑定状态起个名字"
+    /// 在指令流里不是范畴错误）。加一条"同号覆盖、pass 那份赢"看起来更省事，
+    /// 代价是组 0 有了**两个来源**，也就是 §66.1 那颗"同一件事两处说"的雷 ——
+    /// 而静默的优先级正是我们两次裁定不可接受的那一类（`Role::Depth` 退役、`seed` 顶替）。
     pub materials: &'a [ResolvedMaterial<'a>],
 }
 
 struct Pooled {
     width: u32,
     height: u32,
+    /// 层数。⚠ 它是"这份资源几张"的**实物**读数：池子建的与文档声明的必须是同一个数，
+    /// 而分层附件（[`PassPlan::layer`]）的边界检查看的就是它。
+    layers: u32,
     format: TextureFormat,
     usage: TextureUsages,
     view: TextureView,
     /// 纹理本身。⚠ 视图给不了纹理：`TextureView` 没有父纹理的访问器（查过 API），
     /// 而 `copy_texture_to_texture` 要的正是纹理。所以池子两样都留着 ——
-    /// 拷贝那一档就是靠这一格落地的。
+    /// 拷贝那一档就是靠这一格落地的；分层视图那一档也是（从纹理再开一个视图）。
     texture: Texture,
 }
 
@@ -1359,11 +1427,13 @@ impl Executor {
                 height
             ));
         }
-        if texture.depth_or_array_layers() != 1 || texture.mip_level_count() != 1 {
+        if texture.depth_or_array_layers() != resource.layers.max(1) || texture.mip_level_count() != 1
+        {
             problems.push(format!(
-                "有 {} 层 / {} 级 mip，而池子建出来的一律是 1 层 1 级",
+                "有 {} 层 / {} 级 mip，而文档声明的是 {} 层 1 级",
                 texture.depth_or_array_layers(),
-                texture.mip_level_count()
+                texture.mip_level_count(),
+                resource.layers.max(1)
             ));
         }
         let missing = declared - texture.usage();
@@ -1394,6 +1464,7 @@ impl Executor {
             Pooled {
                 width,
                 height,
+                layers: texture.depth_or_array_layers(),
                 format,
                 usage: declared,
                 view,
@@ -1430,6 +1501,44 @@ impl Executor {
         self.pooled(device, resource, width, height).view.clone()
     }
 
+    /// 池子里那份资源的**第 `layer` 层**视图（`D2`，只含那一层）。
+    ///
+    /// 为什么附件不能用"整份"那个视图：一张 6 层的深度图当附件挂上去，wgpu 要求
+    /// 附件的层数与 pass 的层数一致 —— 而这一条 pass 只画**一面**（§109.2：Bevy 是
+    /// 6 个单层 pass，`multiview_mask: None`）。⚠ 这里**不**用 multiview 去"优化"成
+    /// 一条 pass：那是行为差异（`gl_Layer` 的写入路径、`Layer` 内建与 multiview_mask
+    /// 的语义都不一样），不是等价实现。
+    fn layer_view(
+        &mut self,
+        device: &Device,
+        resource: &ResourceSpec,
+        width: u32,
+        height: u32,
+        layer: u32,
+    ) -> Result<TextureView, String> {
+        let pooled = self.pooled(device, resource, width, height);
+        if layer >= pooled.layers {
+            let (name, layers) = (resource.name.clone(), pooled.layers);
+            return Err(format!(
+                "资源 '{name}' 只有 {layers} 层，而这条 pass 要写第 {layer} 层"
+            ));
+        }
+        Ok(pooled.texture.create_view(&TextureViewDescriptor {
+            label: Some("px_pass_layer_view"),
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            usage: None,
+            // 深度格式与 Bevy 的每面视图一样用 `All`（`light.rs:2088`）：纯深度格式上
+            // wgpu 接受它，而 `DepthOnly` 是**拷贝**那一侧的规矩（见 `copy_aspect`）——
+            // 两处混用会在别的地方炸。
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: layer,
+            array_layer_count: Some(1),
+        }))
+    }
+
     /// 池子里那张纹理（没有就按文档声明的规格建一张）。
     ///
     /// ⚠ 复用条件里带了 `usage`：用途是**文档说了算**的，第二帧要是把 `copy_src` 加上了，
@@ -1456,10 +1565,12 @@ impl Executor {
     ) -> &Pooled {
         let format = resource.format.to_wgpu();
         let usage = texture_usage(resource);
+        let layers = resource.layers.max(1);
         let stale = match self.pool.get(&resource.name) {
             Some(pooled) => {
                 pooled.width != width
                     || pooled.height != height
+                    || pooled.layers != layers
                     || pooled.format != format
                     || pooled.usage != usage
             }
@@ -1471,7 +1582,7 @@ impl Executor {
                 size: Extent3d {
                     width,
                     height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: layers,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -1480,12 +1591,17 @@ impl Executor {
                 usage,
                 view_formats: &[],
             });
+            // 池子这一份视图是**整份资源**的（单层时是 D2，多层时 wgpu 按层数推成
+            // `D2Array`）。⚠ 附件要的**不是**它：分层写的那条路（`PassPlan::layer`）
+            // 另开一个单层视图 —— "整份"与"第 k 层"是两种东西，混用会在 wgpu 那边
+            // 变成一句"附件视图的层数不对"，离病因很远。
             let view = texture.create_view(&TextureViewDescriptor::default());
             self.pool.insert(
                 resource.name.clone(),
                 Pooled {
                     width,
                     height,
+                    layers,
                     format,
                     usage,
                     view,
@@ -2047,9 +2163,21 @@ impl Executor {
                             pass.label
                         )
                     })?;
-                    let (view, format) = self.resolve(
-                        device, plan, frame, index, &pass.label, name, Role::Depth,
-                    )?;
+                    // ⚠ 分层的深度目标（`pass.layer`）走**单层视图**那条路：
+                    //    名字先解析成资源，再取它的第 k 层 —— 而"这份资源有没有那么多层"
+                    //    由 `layer_view` 当场判（`Plan::check` 只能比文档里的数，这里比实物）。
+                    let (view, format) = match (pass.layer, plan.resource(name)) {
+                        (Some(layer), Some(resource)) => {
+                            let (width, height) = resource.size.resolve(frame.width, frame.height);
+                            (
+                                self.layer_view(device, resource, width, height, layer)?,
+                                resource.format.to_wgpu(),
+                            )
+                        }
+                        _ => self.resolve(
+                            device, plan, frame, index, &pass.label, name, Role::Depth,
+                        )?,
+                    };
                     if format != TextureFormat::Depth32Float {
                         return Err(format!(
                             "第 {index} 条 pass '{}' 的深度目标 '{name}' 是 {format:?}：\
@@ -2235,7 +2363,7 @@ impl Executor {
             drop(render_pass);
 
             audit.push(format!(
-                "pass {index} '{}'（{}）读 [{}] 写 '{}'｜颜色 {}｜深度 {}｜画的：{}",
+                "pass {index} '{}'（{}）读 [{}] 写 '{}'｜颜色 {}｜深度 {}｜层 {}｜画的：{}",
                 pass.label,
                 pass.kind.name(),
                 pass.reads.join(" / "),
@@ -2252,6 +2380,10 @@ impl Executor {
                     Attachment::Clear(_) => "清".to_string(),
                     Attachment::Load => "接着上次".to_string(),
                     Attachment::None => "不挂".to_string(),
+                },
+                match pass.layer {
+                    Some(layer) => format!("第 {layer} 层（{} 的）", pass.depth_target.as_deref().unwrap_or("?")),
+                    None => "不分层".to_string(),
                 },
                 if fullscreen {
                     format!("全屏三角｜参数 {} 字节｜格 {}", pass.params.len(), pass.slots.len())
@@ -2794,6 +2926,7 @@ mod tests {
         // 池里的那份资源要是颜色格式，也当场拒（深度附件只能是 depth32float）。
         let mut plan = plan_of(vec![depth_only("prepass")]);
         plan.resources.push(ResourceSpec {
+            layers: 1,
             name: "depth".to_string(),
             format: Format::Rgba8UnormSrgb,
             size: SizeRule::View,
@@ -2876,12 +3009,14 @@ mod tests {
             layout: Layout::default(),
             resources: vec![
                 ResourceSpec {
+                    layers: 1,
                     name: "src".to_string(),
                     format: Format::Rgba8UnormSrgb,
                     size: SizeRule::View,
                     usage: vec![Use::RenderAttachment, Use::CopySrc, Use::TextureBinding],
                 },
                 ResourceSpec {
+                    layers: 1,
                     name: "dst".to_string(),
                     format: Format::Rgba8UnormSrgb,
                     size: SizeRule::View,
@@ -2993,6 +3128,7 @@ mod tests {
         let (device, _queue) = test_device();
         let mut executor = Executor::new();
         let resource = ResourceSpec {
+            layers: 1,
             name: "depth".to_string(),
             format: Format::Depth32Float,
             size: SizeRule::View,
@@ -3187,12 +3323,14 @@ mod tests {
         let depth_resources = || {
             vec![
                 ResourceSpec {
+                    layers: 1,
                     name: "depth".to_string(),
                     format: Format::Depth32Float,
                     size: SizeRule::View,
                     usage: vec![Use::RenderAttachment, Use::CopySrc],
                 },
                 ResourceSpec {
+                    layers: 1,
                     name: "depth_copy".to_string(),
                     format: Format::Depth32Float,
                     size: SizeRule::View,
@@ -3475,6 +3613,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         Plan {
             layout: Layout::default(),
             resources: vec![ResourceSpec {
+                layers: 1,
                 name: "depth".to_string(),
                 format: Format::Depth32Float,
                 size: SizeRule::View,
@@ -3553,6 +3692,16 @@ fn fs_main() -> @location(0) vec4<f32> {
             .execute(device, &mut encoder, plan, &frame)
             .unwrap_or_else(|err| panic!("execute 失败：{err}"));
         println!("{audit}");
+        read_back(device, queue, encoder, target)
+    }
+
+    /// 把 `encoder` 里已经录好的东西交出去，回读 `(三角形里, 三角形外)` 两个像素。
+    fn read_back(
+        device: &Device,
+        queue: &wgpu::Queue,
+        mut encoder: wgpu::CommandEncoder,
+        target: &Texture,
+    ) -> ([u8; 4], [u8; 4]) {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("px_pass 判据回读"),
             size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * u64::from(SIDE),
@@ -3819,6 +3968,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         //      池里的资源赢了 ⇒ 外部目标一个像素都不会动。
         let mut shadowed = geometry_plan("shadowed", STATE_BASE, vec![draw("near", "white")]);
         shadowed.resources = vec![ResourceSpec {
+            layers: 1,
             name: "out".to_string(),
             format: Format::Rgba8UnormSrgb,
             size: SizeRule::View,
@@ -3832,5 +3982,209 @@ fn fs_main() -> @location(0) vec4<f32> {
             (WHITE, RED),
             "宿主给的外部目标必须顶掉同名的池资源（否则画进了池里那张没人看的图）"
         );
+    }
+
+    /// 分层那几条**当场拒**（纯数据，不要 GPU）：说不清就不许交出去。
+    #[test]
+    fn layered_depth_states_that_cannot_be_meant_are_refused() {
+        let layered = |layers: u32| ResourceSpec {
+            layers,
+            name: "shadow".to_string(),
+            format: Format::Depth32Float,
+            size: SizeRule::View,
+            usage: vec![Use::RenderAttachment],
+        };
+        let pass = |depth_target: &str, layer: Option<u32>| PassPlan {
+            kind: PassKind::Geometry,
+            label: "shadow".to_string(),
+            vertex_shader: TRIANGLE_VERTEX.to_string(),
+            vertex_entry: "vs_main".to_string(),
+            draws: vec![draw("near", "white")],
+            render: RenderState::parse(
+                "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
+            )
+            .expect("状态文本"),
+            depth_target: Some(depth_target.to_string()),
+            layer,
+            ..Default::default()
+        };
+        let plan = |resource: ResourceSpec, pass: PassPlan| Plan {
+            layout: Layout::default(),
+            resources: vec![resource],
+            passes: vec![pass],
+        };
+
+        // ① 多层资源上不说写第几层。
+        let err = plan(layered(6), pass("shadow", None))
+            .check()
+            .expect_err("6 层的图不说写哪一层 ⇒ 拒");
+        assert!(err.contains("没说写第几层"), "{err}");
+        // ② 层号越界。
+        let err = plan(layered(6), pass("shadow", Some(6)))
+            .check()
+            .expect_err("第 6 层不存在 ⇒ 拒");
+        assert!(err.contains("只有 6 层"), "{err}");
+        // ③ 层数是 0。
+        let err = plan(layered(0), pass("shadow", None))
+            .check()
+            .expect_err("0 层 ⇒ 拒");
+        assert!(err.contains("至少一层"), "{err}");
+        // ④ 外部目标上写第 k 层：文档里没有"它有几层"这一栏 ⇒ 没有依据。
+        let mut outside = plan(layered(1), pass("host_depth", Some(0)));
+        outside.passes[0].render = RenderState::parse(
+            "color=clear(1,0,0,1)|depth=load|depth_write=true|compare=greater_equal|winding=ccw",
+        )
+        .expect("状态文本");
+        outside.passes[0].depth_target = Some("host_depth".to_string());
+        outside.passes[0].writes = vec!["out".to_string()];
+        let err = outside
+            .check()
+            .expect_err("外部目标上分层 ⇒ 拒");
+        assert!(err.contains("外部目标"), "{err}");
+        // ⑤ 单层资源上写第 3 层。
+        let mut single = plan(layered(1), pass("shadow", Some(0)));
+        single.passes[0].layer = Some(3);
+        let err = single.check().expect_err("单层图上写第 3 层 ⇒ 拒");
+        assert!(err.contains("只有 1 层"), "{err}");
+    }
+
+    /// **`PassPlan::layer` 的判据**（§109.1 的六面单层 pass）：一条 pass 只写它点名的**那一层**。
+    ///
+    /// 判法不是"跑得过去"，而是让"层号被忽略"这件事**改像素**：
+    /// - pass 0：近三角写进第 0 层（深度清 0，颜色清红）⇒ 三角里是白；
+    /// - pass 1：远三角也写第 0 层、深度**接上次** ⇒ 被挡住，三角里还是白；
+    /// - pass 2：远三角改指第 **1** 层、深度接上次 —— 那一层从没被写过（按规范是 0）
+    ///   ⇒ 它画得出来 ⇒ 三角里变绿。
+    /// 若"第 k 层"被忽略（三条 pass 都挂第 0 层），pass 2 会撞上 pass 1 写下的深度 ⇒ 白。
+    /// ⚠ 这一条同时钉住"新纹理按规范是清查过的 0"—— S3-b 的"cube 清成 0 = 全亮"正是它。
+    #[test]
+    fn a_pass_writes_exactly_the_layer_it_names() {
+        let (device, queue) = test_device();
+        let mut executor = Executor::new();
+
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据（分层）目标"),
+            size: Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let near = vertex_buffer(&device, 0.75);
+        let far = vertex_buffer(&device, 0.25);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+        let geometries = [
+            ResolvedGeometry {
+                name: "near",
+                vertices: Some((&near, vertex_layout.clone())),
+                indices: None,
+                vertex_count: 3,
+            },
+            ResolvedGeometry {
+                name: "far",
+                vertices: Some((&far, vertex_layout.clone())),
+                indices: None,
+                vertex_count: 3,
+            },
+        ];
+        let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据（分层）布局"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
+        let green = test_material(&device, &tint_layout, [0.0, 1.0, 0.0, 1.0]);
+        let materials = [
+            resolved_material("white", &white, &tint_layout, Cull::None),
+            resolved_material("green", &green, &tint_layout, Cull::None),
+        ];
+
+        // 6 层的深度图（cube 六面那一档），一条颜色目标。
+        let layer_pass = |label: &str, geometry: &str, material: &str, layer: u32, state: &str| {
+            PassPlan {
+                kind: PassKind::Geometry,
+                label: label.to_string(),
+                vertex_shader: TRIANGLE_VERTEX.to_string(),
+                vertex_entry: "vs_main".to_string(),
+                writes: vec!["out".to_string()],
+                draws: vec![draw(geometry, material)],
+                render: RenderState::parse(state).expect("状态文本"),
+                depth_target: Some("shadow".to_string()),
+                layer: Some(layer),
+                ..Default::default()
+            }
+        };
+        let plan = Plan {
+            layout: Layout::default(),
+            resources: vec![ResourceSpec {
+                layers: 6,
+                name: "shadow".to_string(),
+                format: Format::Depth32Float,
+                size: SizeRule::View,
+                usage: vec![Use::RenderAttachment],
+            }],
+            passes: vec![
+                layer_pass(
+                    "face0",
+                    "near",
+                    "white",
+                    0,
+                    "color=clear(1,0,0,1)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
+                ),
+                layer_pass(
+                    "face0_again",
+                    "far",
+                    "green",
+                    0,
+                    "color=load|depth=load|depth_write=true|compare=greater_equal|winding=ccw",
+                ),
+                layer_pass(
+                    "face1",
+                    "far",
+                    "green",
+                    1,
+                    "color=load|depth=load|depth_write=true|compare=greater_equal|winding=ccw",
+                ),
+            ],
+        };
+        plan.check().expect("这份计划说得通");
+
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let external = || {
+            vec![External {
+                name: "out",
+                role: Role::Write,
+                view: &view,
+                format: TextureFormat::Rgba8UnormSrgb,
+            }]
+        };
+        let sets = vec![external(), external(), external()];
+        let (inside, outside) = run_case_with_sets(
+            &device, &queue, &mut executor, &plan, &target, &geometries, &materials, &sets,
+        );
+        assert_eq!(
+            inside, GREEN,
+            "第 1 层是空的（新纹理按规范清成 0）⇒ 远三角画得出来；\
+             层号被忽略的话它撞的是第 0 层里那个近三角写下的深度 ⇒ 白"
+        );
+        assert_eq!(outside, RED, "三角外仍是 pass 0 的清屏色");
     }
 }
