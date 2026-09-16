@@ -496,7 +496,9 @@ impl Default for Environment {
 
 pub const VIEW_BUILTIN: &str = "view";
 
+/// pass 表要读写的中间目标（`resources` 那一节）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PassResource {
     pub name: String,
     pub format: String,
@@ -995,20 +997,19 @@ mod tests {
     }
 
 
-    /// 已知的**两份**漂移，以及它的根因（先于 §125 的改动就存在）。
+    /// 允许漂移的名单 —— **现在是空的，而且必须一直是空的**。
     ///
-    /// `orbit-proxy-fine-bound.pxart` 与 `orbit-soft.pxart` 里都有一个 17 位的十进制串
-    /// `"slope_scale":0.11999999731779099`（也就是 `0.12f32` 的精确 f64 值，两档都用了云）。
-    /// **`serde_json` 默认的浮点解析不是正确舍入的**（它的 `float_roundtrip` 特性默认关着），
-    /// 读这个串会得到**大 1 个 ulp** 的值，于是写回去变成 `0.119999997317791`（少 2 字节）。
+    /// 它曾经有两份：`orbit-proxy-fine-bound.pxart` 与 `orbit-soft.pxart` 里的
+    /// `"slope_scale":0.11999999731779099`（`0.12f32` 的精确 f64 值）读回来会**大 1 个 ulp**，
+    /// 写回去少 2 字节。根因不在这个 crate：**`serde_json` 默认的浮点解析不是正确舍入的**
+    /// （`float_roundtrip` 特性默认关着）。实测：
+    /// `"0.11999999731779099".parse::<f64>()` = `…000`，而
+    /// `serde_json::from_str::<f64>(同串)` = `…001`。
     ///
-    /// 实测（探针跑过，不是推的）：`"0.11999999731779099".parse::<f64>()` = `…000`，
-    /// 而 `serde_json::from_str::<f64>(同串)` = `…001`。`Value` 是 untagged，走的正是后者。
-    ///
-    /// 为什么这不影响锚：那一格是**材质参数**，渲染器把它按 `f32` 打包，两个值得出的
-    /// `f32` 完全相同（`0.12f32`）⇒ 画面与五个锚都不动。受影响的只有"把这一份读进来
-    /// 再写回去"的字节（例如重烘这两档时它们的产物键会变）。
-    const KNOWN_DRIFT: [&str; 2] = ["orbit-proxy-fine-bound.pxart", "orbit-soft.pxart"];
+    /// 那个特性已经在五个 `Cargo.toml` 里打开，实测六份现在**全部**逐字节相同。
+    /// ⚠ 名单空着不等于判据松了：下面那条"只差 1 个 ulp"的宽容通道还在，
+    /// 只是**谁都不许走** —— 将来再漂一份，这里就该红，而不是被宽容掉。
+    const KNOWN_DRIFT: [&str; 0] = [];
 
     /// 两份载荷的差异是不是**只在一个数上、而且只差 1 个 ulp**（连 `f32` 视角都相同）。
     ///
@@ -1299,24 +1300,30 @@ mod tests {
             println!("有漂移：{line}");
         }
         let done = identical.len() + drifted.len();
-        assert!(done > 0, "一份冻结产物都没跑到：这条判据没测（不是通过）");
-        assert_eq!(done, frozen.len(), "有冻结产物没跑到（缺文件？）");
+        assert!(done == frozen.len(), "有冻结产物没跑到（缺文件？）");
         // ⚠ 名单是**钉住**的：将来谁再漂一份，这里就红 —— 而不是被
         // 「只差 1 个 ulp」那条宽容的判据悄悄放过（那正是最坏的一种绿灯）。
+        // 六份**全部**逐字节相同：开启 `serde_json` 的 `float_roundtrip` 之后就是这样（§126）。
         assert_eq!(
             identical,
             vec![
                 "orbit-bare.pxart",
                 "orbit-bare-nolight.pxart",
                 "orbit-bare-shadow.pxart",
+                "orbit-proxy-fine-bound.pxart",
                 "orbit-rings.pxart",
+                "orbit-soft.pxart",
             ],
             "逐字节相同的名单变了"
         );
+        // ⚠ 这两条**由名单驱动**（而不是写死"必须为空"）：名单现在是空的，
+        // 所以结论就是"一份都不许漂"；将来真要放宽，改的是名单那一行，
+        // 而不是把这里的判据删掉 —— 判据松掉是最坏的一种绿灯。
         assert_eq!(
             drifted.len(),
             KNOWN_DRIFT.len(),
-            "漂移的份数变了：{drifted:?}"
+            "漂移的份数变了（名单里 {} 份）：{drifted:?}",
+            KNOWN_DRIFT.len()
         );
         for (line, expected) in drifted.iter().zip(KNOWN_DRIFT.iter()) {
             assert!(
