@@ -408,7 +408,7 @@ D3D12 Enhanced Barriers 把 Sync / Access / Layout 解耦（`ACCESS_NO_ACCESS` �
    **把图的接口发布成 uniform 并能从生成结果读回**、scope 跟踪。
 
 
-### §71.4 Rust / wgpu 生态：没有可依赖的 render graph
+### §71.5 Rust / wgpu 生态：没有可依赖的 render graph
 
 - `rend3`（1160★，**2024-07-08 后 archived**）、`kajiya`（5342★，**2025-07-07 后 archived**）—— 都不能当依赖（**A**）。
 - `engawa` / `engawa-wgpu`：**纯数据 IR + 拓扑排序 + 环检测**，最贴近「图即数据」，但 v0.1.x、下载量三位数（**A**）⇒ 只能当参考。
@@ -417,7 +417,7 @@ D3D12 Enhanced Barriers 把 Sync / Access / Layout 解耦（`ACCESS_NO_ACCESS` �
   `pipeline_cache_key(adapter_info)`（**适配器级，不含 shader/图内容**），而且没有缩容 API（**A**）
   ⇒ 「图变了但键没变」必须**我们自己堵** —— 与本仓「键 = 内容」那条不变式同一个位置。
 
-### §71.5 Bevy 0.19 的其余相关事实（**A**，源码级，见 §70 各条行号）
+### §71.6 Bevy 0.19 的其余相关事实（**A**，源码级，见 §70 各条行号）
 
 - 0.19 **删掉了节点式 RenderGraph**（官方 0.19 发布说明：*"Bevy's RenderGraph architecture has been replaced with
   ECS schedules. Render passes are now regular systems…"*），`RenderGraph` 这个名字变成了 schedule label。
