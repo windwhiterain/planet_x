@@ -902,17 +902,43 @@ impl Executor {
                 &bound,
             );
             let pass_label = format!("px_pass {}", pass.label);
+            // 附件状态是**数据**（§121 第 1 件）：这里只做"状态 → LoadOp"的翻译，
+            // 一个常量都不许再写死 —— 写死的那天，`plan` 说的与实际画的就是两回事。
+            //
+            // ⚠ 两处停在这里是**故意的**（不是漏了）：
+            //   · `color: None`（深度-only）与 `depth: 任何值` 都要等几何那一档（§121 第 2 件）
+            //     把"深度图从哪来"接上。静默地不挂，就成了"状态说了、执行器没做" ——
+            //     正是这一版要避免的那种故障，所以在这里当场拒。
+            let color_load = match pass.render.color {
+                Attachment::Clear(color) => LoadOp::Clear(color),
+                Attachment::Load => LoadOp::Load,
+                Attachment::None => {
+                    return Err(format!(
+                        "第 {index} 条 pass '{}' 的颜色附件是 None（深度-only）：这一版执行器\
+                         还没有几何那一档，没有颜色的 pass 画不出来（§121 第 2 件）",
+                        pass.label
+                    ))
+                }
+            };
+            if pass.render.depth != Attachment::None {
+                return Err(format!(
+                    "第 {index} 条 pass '{}' 声明了深度附件：深度图的来源还没落地（§121 第 2 件）——\
+                     现在静默不挂就是'状态说了、执行器没做'",
+                    pass.label
+                ));
+            }
+            let color_attachments = [Some(RenderPassColorAttachment {
+                view: &destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: color_load,
+                    store: StoreOp::Store,
+                },
+            })];
             let descriptor = RenderPassDescriptor {
                 label: Some(pass_label.as_str()),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: StoreOp::Store,
-                    },
-                })],
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -925,7 +951,8 @@ impl Executor {
             drop(render_pass);
 
             audit.push(format!(
-                "pass {index} '{}' 读 [{}] 写 '{target}'（{format:?}）｜参数 {} 字节｜格 {}",
+                "pass {index} '{}' 读 [{}] 写 '{target}'（{format:?}）｜参数 {} 字节｜格 {}｜\
+                 颜色 {}｜深度 {}",
                 pass.label,
                 pass.reads.join(" / "),
                 pass.params.len(),
@@ -933,7 +960,17 @@ impl Executor {
                     .iter()
                     .map(u32::to_string)
                     .collect::<Vec<_>>()
-                    .join(" / ")
+                    .join(" / "),
+                match pass.render.color {
+                    Attachment::Clear(_) => "清".to_string(),
+                    Attachment::Load => "接着上次".to_string(),
+                    Attachment::None => "不挂".to_string(),
+                },
+                match pass.render.depth {
+                    Attachment::Clear(_) => "清".to_string(),
+                    Attachment::Load => "接着上次".to_string(),
+                    Attachment::None => "不挂".to_string(),
+                }
             ));
         }
         Ok(audit.join("\n"))
