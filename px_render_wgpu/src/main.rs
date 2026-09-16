@@ -9,6 +9,7 @@
 mod camera;
 mod digest;
 mod gpu;
+mod group0;
 mod icosphere;
 mod mat4;
 mod mesh;
