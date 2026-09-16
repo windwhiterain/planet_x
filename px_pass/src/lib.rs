@@ -1487,6 +1487,13 @@ impl Executor {
         //    ⚠ 代价说清楚：alpha-mask 那种"没有颜色输出、只为 discard 而存在"的
         //    预通道专用片元 shader，现在**没法表达** —— 那是一个缺口，不是静默行为：
         //    真需要它时，症状是 mask 没生效（画得比该画的满），而不是悄悄画错。
+        //    **缺口将来怎么补**（现在不补：`AlphaMode` 里没有 `Mask`，没有任何一档场景用它，
+        //    为够不着的分支加机器只会让状态文本再动一次、白白作废已烘的产物）：
+        //    表达它的形状是**在状态文本上开一格 per-pass 的选择**，形如
+        //    `fragment=auto|material|none`，默认 `auto` = 今天这条规则（有颜色附件才建片元
+        //    阶段）；`material` = 无颜色附件也照建材质的片元阶段（为 discard），
+        //    `none` = 永远不建。为什么必须是新的一格：现有的字段**任何组合**都表达不了
+        //    "这条 pass 没有颜色附件、但我仍要材质的片元阶段" —— 这正是缺口本身。
         let fragment = material
             .map(|material| (material.fragment_shader, material.fragment_entry))
             .filter(|(shader, _)| !shader.trim().is_empty())
