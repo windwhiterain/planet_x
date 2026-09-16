@@ -504,9 +504,9 @@ pub struct RenderState {
     pub depth_write: bool,
     /// 深度比较函数。缺省 `greater_equal`（reverse-Z）。
     pub compare: Compare,
-    /// 剔哪一面。`none` = 不剔（全屏 pass 就是这样：一个三角，剔了就没东西了）。
-    pub cull: Cull,
-    /// 正面朝向。
+    /// 正面朝向。⚠ 它**留在 pass 上**（不是漏搬）：这个项目只有**一套**绕向约定
+    /// （无限 reverse-Z 那一套，§110），没有"每份材质各自的正面"这回事。
+    /// 将来真出现第二种绕向，它才跟着 `cull` 一起搬到材质那一层。
     pub winding: Winding,
 }
 
@@ -517,33 +517,27 @@ impl Default for RenderState {
             depth: Attachment::None,
             depth_write: true,
             compare: Compare::GreaterEqual,
-            cull: Cull::None,
             winding: Winding::Ccw,
         }
     }
 }
 
-/// `RenderState::name` / `parse` 认的六格。**六格都要写全** —— 缺一格就是"没说"，
+/// `RenderState::name` / `parse` 认的五格。**五格都要写全** —— 缺一格就是"没说"，
 /// 而"没说"与"用了默认值"在文档里长得一模一样，那种含糊正是要避免的。
-const STATE_KEYS: [&str; 6] = [
-    "color",
-    "depth",
-    "depth_write",
-    "compare",
-    "cull",
-    "winding",
-];
+///
+/// ⚠ 这里**没有 `cull`**：剔除属于材质（见 [`ResolvedMaterial::cull`]），
+/// 所以它既不在 pass 的状态里、也不在这串文本里。
+const STATE_KEYS: [&str; 5] = ["color", "depth", "depth_write", "compare", "winding"];
 
 impl RenderState {
-    /// 写回文本：`color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw`。
+    /// 写回文本：`color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|winding=ccw`。
     pub fn name(&self) -> String {
         format!(
-            "color={}|depth={}|depth_write={}|compare={}|cull={}|winding={}",
+            "color={}|depth={}|depth_write={}|compare={}|winding={}",
             self.color.name(),
             self.depth.name(),
             self.depth_write,
             self.compare.name(),
-            self.cull.name(),
             self.winding.name()
         )
     }
@@ -582,7 +576,6 @@ impl RenderState {
                     }
                 }
                 "compare" => state.compare = Compare::parse(value)?,
-                "cull" => state.cull = Cull::parse(value)?,
                 "winding" => state.winding = Winding::parse(value)?,
                 _ => unreachable!("STATE_KEYS 与上面这几支必须一一对应"),
             }
@@ -1058,7 +1051,7 @@ pub struct ResolvedGroup<'a> {
     pub layout_id: u64,
 }
 
-/// 宿主**解析好的材质**：`Draw::material` 那个名字 → 要设的绑定组 + 混合档。
+/// 宿主**解析好的材质**：`Draw::material` 那个名字 → 要设的绑定组 + 混合档 + 剔除。
 pub struct ResolvedMaterial<'a> {
     pub name: &'a str,
     pub groups: Vec<ResolvedGroup<'a>>,
@@ -1066,6 +1059,16 @@ pub struct ResolvedMaterial<'a> {
     /// 是同一档 PREMULTIPLIED_ALPHA_BLENDING），`px_pass` 不替它翻译 ——
     /// 翻译一遍就是"同一个混合档、两处说法"，那颗雷 §110.1 已经踩过一次。
     pub blend: Option<BlendState>,
+    /// 剔哪一面。⚠ 它**属于材质，不属于 pass**（§127）：剔除是材质决定的
+    /// （oracle 是**每份材质**一条管线，带着那份材质的 cull），而一条 pass 里
+    /// 同时有"剔背面"和"两面都画"是常态 —— 环（`cull = none`）与行星（`Back`）
+    /// 就在同一条透明 pass 里。放在 pass 上就是"一份契约两处说"（§66.1），
+    /// 而环那一档会当场露馅（要么描述错、要么把一条 pass 拆成两条，
+    /// 后者会改掉透明排序 —— 那是拿"说不清的顺序"换"说不清的状态"）。
+    ///
+    /// 没有材质的那一笔（深度-only）取 [`Cull::None`]：没有任何东西声明过它要剔谁，
+    /// 那就两面都画 —— 猜一个方向是这里最不该做的事。
+    pub cull: Cull,
 }
 
 pub struct Frame<'a> {
@@ -1314,10 +1317,12 @@ impl Executor {
     ///
     /// ⚠ 只放**管线真的会用到的**那几格：附件清成什么色不进键（clear 值不是管线状态），
     /// 否则两条只差清屏色的 pass 会各建一条一模一样的管线。
-    fn states_key(render: &RenderState, blend: Option<BlendState>) -> String {
+    /// 剔除与混合来自**材质**（`cull` / `blend` 两个入参就是它们）——
+    /// 键必须跟着它们走，否则两种剔除档会共用一条管线。
+    fn states_key(render: &RenderState, blend: Option<BlendState>, cull: Cull) -> String {
         format!(
             "cull={:?}|winding={:?}|dw={}|compare={:?}|depth={}|blend={:?}",
-            render.cull,
+            cull,
             render.winding,
             render.depth_write,
             render.compare,
@@ -1359,7 +1364,7 @@ impl Executor {
             pass.entry,
             pass.reads.join(","),
             layout.key(),
-            Self::states_key(&pass.render, None)
+            Self::states_key(&pass.render, None, Cull::None)
         );
         if let Some(pipeline) = self.pipelines.get(&key) {
             return pipeline.clone();
@@ -1390,9 +1395,10 @@ impl Executor {
                 compilation_options: PipelineCompilationOptions::default(),
                 buffers: &[],
             },
-            // 全屏三角没有可剔的面；绕向照旧 CCW（缺省状态就是这一套）。
+            // 全屏三角两面都画：它没有"材质"，也就没有任何东西声明过要剔谁
+            // （§127：剔除住在材质那一层）。绕向照旧 CCW。
             primitive: PrimitiveState {
-                cull_mode: pass.render.cull.to_wgpu(),
+                cull_mode: None,
                 front_face: pass.render.winding.to_wgpu(),
                 ..Default::default()
             },
@@ -1444,6 +1450,8 @@ impl Executor {
             None => Vec::new(),
         };
         let blend = material.and_then(|material| material.blend);
+        // 剔除**只**从材质来：没有材质 ⇒ 两面都画（见 `ResolvedMaterial::cull`）。
+        let cull = material.map(|material| material.cull).unwrap_or(Cull::None);
         // 布局身份按组号排一遍再进键：宿主给组的次序不该改变"这是哪条管线"。
         let mut identities: Vec<String> = match material {
             Some(material) => material
@@ -1460,7 +1468,7 @@ impl Executor {
             fnv1a(pass.shader.as_bytes()),
             pass.vertex_entry,
             pass.entry,
-            Self::states_key(&pass.render, blend),
+            Self::states_key(&pass.render, blend, cull),
             identities.join(",")
         );
         if let Some(pipeline) = self.pipelines.get(&key) {
@@ -1524,7 +1532,7 @@ impl Executor {
                 },
             },
             primitive: PrimitiveState {
-                cull_mode: pass.render.cull.to_wgpu(),
+                cull_mode: cull.to_wgpu(),
                 front_face: pass.render.winding.to_wgpu(),
                 ..Default::default()
             },
@@ -1918,7 +1926,6 @@ mod tests {
         let state = RenderState::default();
         assert_eq!(state.color, Attachment::Clear(Color::TRANSPARENT));
         assert_eq!(state.depth, Attachment::None);
-        assert_eq!(state.cull, Cull::None);
         assert_eq!(state.winding, Winding::Ccw);
         // 深度这两格在"不挂深度"时看不出效果，但一旦有 pass 只写 `depth: Clear(..)`
         // 就立刻成判据 ⇒ 缺省必须是这个渲染器唯一的那套约定（reverse-Z）。
@@ -1952,7 +1959,7 @@ mod tests {
 
     /// **穷举**往返。⚠ 断言的是 `parse(name(x)) == x` 本身，不是"parse 没报错" ——
     /// 一个什么文本都收、永远返回同一个变体的 `parse` 也能过后者。
-    /// 组合数是 4 × 5 × 2 × 8 × 3 × 2 = 1920。
+    /// 组合数是 4 × 5 × 2 × 8 × 2 = 640（`cull` 搬去材质那一层之后少了一维）。
     #[test]
     fn every_render_state_variant_survives_a_text_round_trip() {
         let colors = [
@@ -1978,7 +1985,7 @@ mod tests {
             Compare::GreaterEqual,
             Compare::Always,
         ];
-        let culls = [Cull::None, Cull::Front, Cull::Back];
+        // ⚠ 这里没有 `cull` 了：它属于材质（§127），所以不在这一串文本的取值空间里。
         let windings = [Winding::Ccw, Winding::Cw];
 
         let mut seen_text: Vec<String> = Vec::new();
@@ -1987,29 +1994,26 @@ mod tests {
             for depth in depths {
                 for depth_write in [true, false] {
                     for compare in compares {
-                        for cull in culls {
-                            for winding in windings {
-                                let state = RenderState {
-                                    color,
-                                    depth,
-                                    depth_write,
-                                    compare,
-                                    cull,
-                                    winding,
-                                };
-                                let text = state.name();
-                                let back = RenderState::parse(&text)
-                                    .unwrap_or_else(|err| panic!("'{text}' 读不回来：{err}"));
-                                assert_eq!(back, state, "往返不一致：'{text}'");
-                                seen_text.push(text);
-                                count += 1;
-                            }
+                        for winding in windings {
+                            let state = RenderState {
+                                color,
+                                depth,
+                                depth_write,
+                                compare,
+                                winding,
+                            };
+                            let text = state.name();
+                            let back = RenderState::parse(&text)
+                                .unwrap_or_else(|err| panic!("'{text}' 读不回来：{err}"));
+                            assert_eq!(back, state, "往返不一致：'{text}'");
+                            seen_text.push(text);
+                            count += 1;
                         }
                     }
                 }
             }
         }
-        assert_eq!(count, 4 * 5 * 2 * 8 * 3 * 2, "组合数变了");
+        assert_eq!(count, 4 * 5 * 2 * 8 * 2, "组合数变了");
         assert_eq!(
             seen_text.len(),
             seen_text
@@ -2028,10 +2032,9 @@ mod tests {
                 compare.name()
             );
         }
-        for cull in culls {
-            assert!(seen_text
-                .iter()
-                .any(|text| text.contains(&format!("cull={}", cull.name()))));
+        // `cull` 的每一档也要能往返（它只是搬去了材质那一层，类型还在）。
+        for cull in [Cull::None, Cull::Front, Cull::Back] {
+            assert_eq!(Cull::parse(cull.name()).unwrap(), cull);
         }
         assert!(seen_text
             .iter()
@@ -2084,25 +2087,25 @@ mod tests {
     #[test]
     fn a_wrong_document_is_refused_with_the_offending_piece_named() {
         let err = RenderState::parse(
-            "color=none|depth=none|depth_write=true|compare=nope|cull=none|winding=ccw",
+            "color=none|depth=none|depth_write=true|compare=nope|winding=ccw",
         )
         .expect_err("认不出的比较档 ⇒ 拒");
         assert!(err.contains("nope"), "{err}");
         assert!(err.contains("greater_equal"), "要列出认哪些：{err}");
 
         let err = RenderState::parse(
-            "color=none|depth=none|depth_write=maybe|compare=always|cull=none|winding=ccw",
+            "color=none|depth=none|depth_write=maybe|compare=always|winding=ccw",
         )
         .expect_err("depth_write 不是 bool ⇒ 拒");
         assert!(err.contains("maybe"), "{err}");
 
-        let err = RenderState::parse("color=none|depth=none|compare=always|cull=none|winding=ccw")
+        let err = RenderState::parse("color=none|depth=none|compare=always|winding=ccw")
             .expect_err("缺 depth_write ⇒ 拒");
         assert!(err.contains("depth_write"), "{err}");
         assert!(err.contains("缺"), "{err}");
 
         let err = RenderState::parse(
-            "color=none|depth=none|depth_write=true|compare=always|cull=none|winding=ccw|nope=1",
+            "color=none|depth=none|depth_write=true|compare=always|winding=ccw|nope=1",
         )
         .expect_err("多一个不认识的键 ⇒ 拒");
         assert!(err.contains("nope"), "{err}");
@@ -2144,13 +2147,13 @@ mod tests {
         }];
         opaque.params = Vec::new();
         opaque.render = RenderState::parse(
-            "color=load|depth=load|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
+            "color=load|depth=load|depth_write=true|compare=greater_equal|winding=ccw",
         )
         .expect("状态文本要能读回来");
         opaque.depth_target = Some("depth".to_string());
         let plan = plan_of(vec![opaque]);
         assert!(plan.check().is_ok(), "{:?}", plan.check());
-        assert_eq!(plan.passes[0].render.cull, Cull::Back);
+        assert_eq!(plan.passes[0].render.winding, Winding::Ccw);
     }
 
     /// 一个附件都不挂的 pass 不存在：它画到哪儿去？
@@ -2339,7 +2342,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     const GREEN: [u8; 4] = [0, 255, 0, 255];
 
     const STATE_BASE: &str =
-        "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=none|winding=ccw";
+        "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|winding=ccw";
 
     /// 一份"宿主解析好的材质"**连同它借出去的东西**：缓冲与绑定组都得活到 `execute` 之后。
     struct TestMaterial {
@@ -2451,6 +2454,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         name: &'a str,
         material: &'a TestMaterial,
         layout: &BindGroupLayout,
+        cull: Cull,
     ) -> ResolvedMaterial<'a> {
         ResolvedMaterial {
             name,
@@ -2462,6 +2466,8 @@ fn fs_main() -> @location(0) vec4<f32> {
                 layout_id: 1,
             }],
             blend: None,
+            // ⚠ 剔除**在这里**（材质那一层，§127），不在 pass 的状态文本里。
+            cull,
         }
     }
 
@@ -2653,9 +2659,10 @@ fn fs_main() -> @location(0) vec4<f32> {
         });
         let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
         let green = test_material(&device, &tint_layout, [0.0, 1.0, 0.0, 1.0]);
+        // 这两份材质**两面都画**（`Cull::None`）：基线/深度那几档要的是"三角形一定画得出来"。
         let materials = [
-            resolved_material("white", &white, &tint_layout),
-            resolved_material("green", &green, &tint_layout),
+            resolved_material("white", &white, &tint_layout, Cull::None),
+            resolved_material("green", &green, &tint_layout, Cull::None),
         ];
 
         // ① 基线：白三角画进红的清屏里。白来自**材质那一组**（片元真的跑了），
@@ -2668,25 +2675,25 @@ fn fs_main() -> @location(0) vec4<f32> {
         assert_eq!(outside, RED, "三角形外应当是清屏色");
         assert_ne!(inside, outside, "三角内外必须不同（否则这一档什么都没画）");
 
-        // ② 剔除：同一个三角形，`cull` 换一档就该有像素消失。
+        // ② 剔除：同一个三角形，只把**材质**的 cull 换一档就该有像素消失。
+        //    ⚠ 剔除住在材质那一层（§127），所以这两条 pass 的**状态文本一模一样**，
+        //    差别只在材质表里那两格 —— 这正是"一份契约一处说"的判据。
         //    ⚠ 绕向在 NDC 里算（**不是**帧缓冲坐标）：顶点给的 (-0.6,-0.6) → (0.6,-0.6) → (0.0,0.6)
         //    在 NDC 里是逆时针 ⇒ `winding=ccw` 认定它是**正面** ⇒ 剔 back 留下、剔 front 剔掉。
         //    这一档的数值是**量出来的**（先是按"帧缓冲 y 朝下"推的，量出来是反的，照量到的钉住）。
-        let back = geometry_plan(
-            "cull-back",
-            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=back|winding=ccw",
-            vec![draw("near", "white")],
-        );
-        let front = geometry_plan(
-            "cull-front",
-            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|cull=front|winding=ccw",
-            vec![draw("near", "white")],
-        );
+        let cull_state =
+            "color=clear(1,0,0,1)|depth=none|depth_write=true|compare=greater_equal|winding=ccw";
+        let back = geometry_plan("cull-back", cull_state, vec![draw("near", "white-back")]);
+        let front = geometry_plan("cull-front", cull_state, vec![draw("near", "white-front")]);
+        let cull_materials = [
+            resolved_material("white-back", &white, &tint_layout, Cull::Back),
+            resolved_material("white-front", &white, &tint_layout, Cull::Front),
+        ];
         let (back_inside, back_outside) = run_case(
-            &device, &queue, &mut executor, &back, &target, &geometries, &materials,
+            &device, &queue, &mut executor, &back, &target, &geometries, &cull_materials,
         );
         let (front_inside, front_outside) = run_case(
-            &device, &queue, &mut executor, &front, &target, &geometries, &materials,
+            &device, &queue, &mut executor, &front, &target, &geometries, &cull_materials,
         );
         println!("剔除：cull=back ⇒ 里 {back_inside:?}｜cull=front ⇒ 里 {front_inside:?}");
         assert_eq!(back_outside, RED);
@@ -2708,7 +2715,7 @@ fn fs_main() -> @location(0) vec4<f32> {
         //    reverse-Z + `greater_equal` ⇒ 远的那笔**测不过**，像素保持白的。
         //    这就是"深度附件真的挂上了、而且比较方向是对的"的证据。
         let depth_state =
-            "color=clear(1,0,0,1)|depth=clear(0)|depth_write=true|compare=greater_equal|cull=none|winding=ccw";
+            "color=clear(1,0,0,1)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw";
         let with_depth = geometry_plan(
             "depth-on",
             depth_state,
