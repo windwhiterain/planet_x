@@ -363,11 +363,61 @@ pub fn draws_of(objects: &[Object], select: &str) -> Vec<DrawSpec> {
             .filter(|object| object.material.alpha == AlphaMode::Opaque)
             .map(draw)
             .collect(),
-        "transparent" => objects
-            .iter()
-            .filter(|object| object.material.alpha != AlphaMode::Opaque)
-            .map(draw)
-            .collect(),
+        // ⚠ 透明那一档的**次序是算出来的**，不是 `objects[]` 的顺序 —— 这是实测出来的，
+        // 不是顺手写的。规则两条，缺一条就错：
+        //
+        //   ① **主键 = 材质的 `depth_bias`（升序）** —— 更小的先画；
+        //   ② **平局时用 `objects[]` 的反序**。
+        //
+        // 也就是"先把 `objects[]` 反过来，再对它做一次**稳定**排序"。`sort_by` 是稳定排序，
+        // 所以 `depth_bias` 相等的那些会保持反序 —— 两条规则一次落地。
+        //
+        // **oracle 那边为什么是这样**：透明物体进的是 `Transparent3d`
+        // （`bevy_core_pipeline-0.19.1/src/core_3d/mod.rs:426-449`），排序键是
+        // `ViewRangefinder3d::distance(world_from_local * mesh.aabb_center) + depth_bias`、
+        // **升序**（远的先画），排序是稳定的（`IndexMap::sort_by_key`）。本仓今天的内容里，
+        // 距离那一项要么**精确平局**（环与大气）、要么**差三个数量级翻不过来**（云，见下），
+        // 所以次序实际由 `depth_bias` 与平局规则决定。
+        //
+        // **实测**（仪器 `target/rings/anchor-*.ps1`：拿 `target/debug/px_render.exe` 这个**锚宿主**
+        // 喂**改过的冻结 legacy 文档**，比对哈希）：
+        //
+        // | 扰动 | oracle 的结果 | 说明 |
+        // |---|---|---|
+        // | `orbit-rings` 基线（objects[] = planet, atmosphere, rings，两笔都 bias 0） | 画的是 [rings, atmosphere] | 平局 ⇒ **反序** |
+        // | 把 objects[] 前两个对调 | 跟着对调 | 次序**依赖 `objects[]`** ⇒ 距离项是平局 |
+        // | 复制一份 rings 成 ringsB（3 笔透明） | 六种排列里**只有一个**中：[ringsB, rings, atmosphere] | 反序 |
+        // | objects[] 换成 [planet, ringsB, atmosphere, rings] | 预测 [rings, atmosphere, ringsB]，**命中** | 反序 |
+        // | 再加一份 atmosphere2（4 笔透明） | 预测 [ringsB, rings, atmosphere2, atmosphere]，**命中** | 反序 |
+        // | `orbit-soft` 的 `clouds.depth_bias` −1 → **+1**（objects[] 不动） | **哈希变了** | bias **参与** |
+        // | `orbit-soft` 的 objects[] 换成 [planet, **clouds, atmosphere**]（bias 不动） | **哈希不变** | bias **压过** `objects[]` 次序 |
+        //
+        // ⚠ "按距离排序"这条假设被第 2 行直接否证：若真是距离说了算，对调 `objects[]`
+        // 不会改变画面 —— 而它改变了。
+        //
+        // ⚠ **没实现的那一项，以及为什么**：上面那个和里还有 `distance(mesh.aabb_center)`。
+        // 它**依赖相机**，而帧图是**每份文档烘一次**、相机是请求时才选的（`--cam` / `--sheet`
+        // 的 12 台）⇒ 一份烘好的次序**表达不了**相机相关的量。本仓今天的六个场景里它也
+        // **从不决定次序**，两个数都量过：
+        //   · 环网格的 aabb_center = **(0, 0, 0) 精确**（`ring_mesh` 顶点 y 恒为 0、x/z 对称）；
+        //     大气是 icosphere（中心对称）⇒ 两者**精确平局**（这正是 `orbit-rings` 走规则 ② 的原因）；
+        //   · 云的 proxy 网格 aabb_center = `(-0.000598, 0, -0.001809)`（**不**在原点 ——
+        //     它是阈值化生成的闭合壳，本来就左右不对称），整整 0.0019；而它跟大气的
+        //     `depth_bias` 差 **1.0**，差三个数量级 ⇒ 距离项翻不过来。
+        // ⇒ 距离项要真的参与，得先有"哪台相机"这个信息；那是**设计岔路**，不在这一档里挑。
+        //
+        // ⚠ 这个次序**不是**"政策"（渲染器不需要认识它）：文档里的 `draws` 就是一条有序的
+        // 指令流，宿主照单画；次序只在**烘图侧**把 `objects[]` 转录成 draw 列表这一步产生。
+        "transparent" => {
+            let mut picked: Vec<&Object> = objects
+                .iter()
+                .rev()
+                .filter(|object| object.material.alpha != AlphaMode::Opaque)
+                .collect();
+            // 稳定排序 ⇒ `depth_bias` 相等的保持上面那个反序（规则 ②）。
+            picked.sort_by(|a, b| a.material.depth_bias.total_cmp(&b.material.depth_bias));
+            picked.into_iter().map(draw).collect()
+        }
         // **投影的那些物体**（§109：`cast_shadow: true`）。
         // ⚠ 判据是物体自己那一格，**不是**它的透明度：大气（Add）与云（Premultiplied）
         //    都是透明的，而它们**不投影**（Bevy 的 `NotShadowCaster`）—— 按透明度挑
@@ -930,6 +980,9 @@ mod tests {
     }
 
     /// `select` 按**材质自带的 alpha 档**挑物体 —— 那是 oracle 分相位的依据。
+    ///
+    /// ⚠ 透明那一档**故意钉住"反序"**：它不是实现细节，而是 oracle 的实测行为
+    /// （见 `draws_of` 上那段注释）。哪天有人把 `.rev()` 删掉，这条会红。
     #[test]
     fn a_select_picks_objects_by_their_material_alpha() {
         let objects = vec![
@@ -949,15 +1002,42 @@ mod tests {
                 .iter()
                 .map(|d| d.geometry.as_str())
                 .collect::<Vec<_>>(),
-            vec!["atmosphere", "clouds", "rings"]
+            // `objects[]` 是 [planet, atmosphere, clouds, rings]，实测 oracle 画的是它的反序。
+            vec!["rings", "clouds", "atmosphere"]
         );
         // 一整笔的几何与材质用**同一个名字**（物体 id）：宿主按它查顶点数据与材质。
-        assert_eq!(transparent[0].material, "atmosphere");
+        assert_eq!(transparent[0].material, "rings");
         // 天空盒不是物体：程序化的三个顶点。
         let sky = draws_of(&objects, "skybox");
         assert_eq!(sky.len(), 1);
         assert_eq!(sky[0].geometry, "skybox");
         assert_eq!(draws_of(&objects, "none").len(), 0);
+    }
+
+    /// 透明次序的**主键是 `depth_bias`**，`objects[]` 反序只是**平局规则**。
+    ///
+    /// 与上一条分开写，因为它们是两件不同的事，而且**两档判据各钉一条**：
+    /// · 只按 `objects[]` 反序 ⇒ `orbit-rings` 对、带雾壳的档错；
+    /// · 只按 `depth_bias` ⇒ 带雾壳的档对、`orbit-rings` 错（它两笔 bias 都是 0）。
+    /// ⚠ 这里的期望值是**锚宿主实测**出来的（`target/rings/` 的仪器），不是推的。
+    #[test]
+    fn a_transparent_pass_sorts_by_depth_bias_before_the_reversed_order() {
+        // 雾壳带 -1.0：它必须**压过**反序 —— 反序本来会给出 [rings, clouds, atmosphere]。
+        let mut clouds = object("clouds", AlphaMode::Premultiplied);
+        clouds.material.depth_bias = -1.0;
+        let objects = vec![
+            object("planet", AlphaMode::Opaque),
+            object("atmosphere", AlphaMode::Add),
+            clouds,
+            object("rings", AlphaMode::Blend),
+        ];
+        assert_eq!(
+            draws_of(&objects, "transparent")
+                .iter()
+                .map(|d| d.geometry.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clouds", "rings", "atmosphere"]
+        );
     }
 
     /// 这一档的**内容那一边**的值（环境里那两个数）——「六个场景今天恰好都是 900」这件事

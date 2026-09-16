@@ -2446,3 +2446,174 @@ px_pass 几何那条路：draw_indexed(0..count, 0, 0..1)     ← 一个实例
 ⚠ 与被否掉的 `Frame.overrides` **不是一回事**：那个给**同一个组号**两个来源；这个是**另一个名字**。
 
 ⚠ **今天没有东西需要它** ⇒ **不建，只记形状** —— 与 §135 那条同一个处理。
+
+---
+
+## §143 `orbit-rings` 判据成立 —— 缺口是**透明相位的次序**，而次序在烘图侧（提交前留档）
+
+### 判据（**逐字**）
+
+```
+文档键 dcd78c638742（原 45964b2aae8d；透明次序改了之后 key 变了，这是预期的）
+执行了：prepass → copy_depth → opaque → sky → transparent → blit
+目标：orbit-rings 的**整份 PNG** sha256
+oracle  B5799E4F1649535C  508562 字节
+本宿主  B5799E4F1649535C  508562 字节        ← 与 §97/S-1 记的那一格逐字节相同
+四个档一起量（同一二进制、同一尺寸、不给 --cam）：
+  orbit-bare          63184151909371A5  300012 ✓（S-1 锚）
+  orbit-bare-nolight  7BBB18CE3612D4F7  215193 ✓（S2 判据）
+  orbit-bare-shadow   C03FFF3235264DD5  298289 ✓（S3 判据）
+  orbit-rings         B5799E4F1649535C  508562 ✓（本档）
+--diff 四档：**差异像素 0 / 614400**、最大通道差 0、剪影内外全 0
+复现：同一条命令再出一张相同；改到 800×600 再改回 960×640 **逐字节回到原样**（§104 第 8 条）
+```
+
+### 缺口长什么样（**先定性，再动手**）
+
+基线（`41A23361FC51762C`）对着 oracle 量：差异 **20618** 个像素，`max Δ 24`，
+差异像素上平均 Δ 3.56；**剪影内 20618、剪影外 0**。8 邻接连通块数 = **3**：
+
+| # | 像素 | 包围盒 | 形状 | 贴在哪 |
+|---|---|---|---|---|
+| 1 | 17321 | (261,515)-(700,614)，440×100 | 横跨行星下半盘的一弯**下弦月** | 环的**近侧**（在行星**前面**） |
+| 2 | 1694 | (186,227)-(242,296)，57×70 | 左上一条**细柳叶** | 环的**远侧**，只在行星轮廓之外看得见 |
+| 3 | 1603 | (721,228)-(773,296)，53×69 | 右上一条**细柳叶** | 同上 |
+
+三条定量结论（`target/rings/characterise.py`，都对着实测图算的）：
+
+1. **20618 个差异**全部**落在环的足迹里**（拿"透明 pass 只留 rings"那张当足迹）：环足迹内
+   **20618/20618**，环足迹外 **0**；
+2. 而且**没有一个是压在纯背景上的**（20618/20618 的底图都有内容）⇒ 不是"环本身画错了"，
+   而是"**环压在行星/大气上**"那一层合成；
+3. 方向是**我们偏亮**：59066 个通道更大、1776 个更小、18890/20618 个像素三通道全 ≥。
+   —— 这是**次序**的签名（后画的那一层盖住了先画的），不是着色公式的签名；
+   若是公式错（uv / 贴图 / tint），环压在**背景**上那一片也会错，而那一片是**逐位相同**的。
+
+### 归因：`transparent` 那一条 pass 里两笔 draw 的**先后**
+
+把文档里 `transparent` 的 draws 从 `[atmosphere, rings]` 对调成 `[rings, atmosphere]`
+（**只改这一个东西**，其余一字不动）⇒ 出图 **`B5799E4F1649535C`，与 oracle 逐字节相同**。
+
+⇒ 渲染器（`px_render_wgpu` + `px_pass`）**没有错**：它照文档给的次序画。
+错的是**烘图侧把 `objects[]` 转录成 draw 列表时用的次序**。这一条与"帧图是数据"完全一致 ——
+次序本来就是数据，只是那份数据之前**转录错了**。
+
+### 正确次序是什么：**主键 `depth_bias`，平局用 `objects[]` 反序**（实测，不是猜的）
+
+oracle 那边透明物体进的是 `Transparent3d`（`ViewSortedRenderPhases`）：
+`bevy_core_pipeline-0.19.1/src/core_3d/mod.rs:426-449`，排序键
+`ViewRangefinder3d::distance(world_from_local * mesh.aabb_center) + depth_bias`，**升序**，
+而且排序是**稳定**的（`IndexMap::sort_by_key`）。
+
+**问 oracle 本人**（仪器 `target/rings/anchor-fresh.ps1`：用 `target/debug/px_render.exe`
+这个**锚宿主**喂**改过的冻结 legacy 文档**，再出图比哈希）：
+
+| # | 扰动 | oracle 的结果 | 说明 |
+|---|---|---|---|
+| 1 | `orbit-rings` 基线（objects[] = planet, atmosphere, rings，两笔 bias 都是 0） | 画的是 **[rings, atmosphere]** | 平局 ⇒ 反序 |
+| 2 | 把 objects[] 前两个**对调** | 跟着对调（`41A23361FC51762C`） | 次序**依赖 `objects[]`** ⇒ 距离项是**平局** |
+| 3 | 把 `rings` 复制成 `ringsB`（3 笔透明，bias 全 0） | 六种排列里**只有一个**中：`[ringsB, rings, atmosphere]` | 反序 |
+| 4 | objects[] 换成 `[planet, ringsB, atmosphere, rings]` | 预测 `[rings, atmosphere, ringsB]`，**命中** | 反序 |
+| 5 | 再加一份 `atmosphere2`（4 笔透明） | 预测 `[ringsB, rings, atmosphere2, atmosphere]`，**命中** | 反序 |
+| 6 | `atmosphere.depth_bias = -1`（基线） | `[atmosphere, rings]` —— **翻过来了** | bias **参与** |
+| 7 | `rings.depth_bias = -1`（基线） | `[rings, atmosphere]` 不动（它本就在前） | 与第 6 行一致 |
+| 8 | `orbit-soft` 的 `clouds.depth_bias` **−1 → +1**（objects[] 不动） | 哈希 `FA20FAD37BC61EA2` → **`9AC47B50D0AFBC82`** | bias **参与**（而且是**主键**） |
+| 9 | `orbit-soft` 的 objects[] 换成 `[planet, **clouds, atmosphere**]`（bias 不动） | 哈希**一字不变** | bias **压过** `objects[]` 次序 |
+| 10 | `orbit-proxy-fine-bound` 同样两条 | 第 8 条变 `32872F80AC867BE3` → `EA16F39FAFFD5D4C`；第 9 条不变 | 同上 |
+
+⇒ **两条合起来才是规则**：① **主键 = `depth_bias` 升序**（第 8/9/10 行：bias 一动次序就动、
+bias 不动则 `objects[]` 怎么排都不动）；② **平局时用 `objects[]` 的反序**（第 1–5 行）。
+落地就是"**先把 `objects[]` 反过来，再对它做一次稳定排序**" —— 一次写完两条。
+
+⚠ **"按距离排序"这条假设被第 2 行直接否证**：若真是距离说了算，对调 `objects[]` 不会改变画面
+—— 而它改变了。这一条是"先写下一个可以被推翻的预测、再拿 oracle 去推翻它"，不是事后圆说。
+
+⚠ **距离那一项为什么没实现，以及为什么本仓今天可以不实现**：它**依赖相机**，而帧图是
+**每份文档烘一次**、相机是请求时才选的（`--cam` / `--sheet` 的 12 台）⇒ 一份烘好的次序
+**表达不了**相机相关的量。而它在今天的六个场景里**从不决定次序**，两个数都量过：
+
+| 网格 | `aabb_center = (min+max)/2` | 出处 |
+|---|---|---|
+| `ring_mesh`（环，770 顶点） | **(0, 0, 0) 精确**（顶点 y 恒为 0、x/z 对称） | CAS 键 `5f8caf3a5cfa` |
+| `icosphere(1.14, 64)`（大气） | 中心对称的点集 ⇒ 也精确为 0 | 图元，运行期生成 |
+| `clouds` 的 proxy 网格（29224 顶点） | **`(-0.000598, 0, -0.001809)`** —— **不**在原点 | CAS 键 `d4dc13fe6bde` |
+
+⇒ 环/大气那一对**精确平局**（这正是 `orbit-rings` 走规则 ② 的原因）；云的中心偏了 **0.0019**，
+而它与大气的 `depth_bias` 差 **1.0** —— 差三个数量级，任何相机都翻不过来。
+⚠ 但这是**关于今天这份内容**的证明，不是关于代码的（§126 那条）：真要让它参与，
+得先有"哪台相机"这个信息，那是**设计岔路**，不在这一档里挑。
+
+⚠ **必须一次服务一份文档**：`ViewSortedRenderPhases` 是 **retained** 的，同一进程连着出第二份
+可能把上一次的插入次序留下来。第一版脚本一份服务连出五张 —— 那个读数混了"上一份文档"这个
+变量，作废重做（`anchor-fresh.ps1`，每份一份新服务）。与 §122 同族。
+
+⚠ **还有一次实验是"无效"而不是"阴性"**，记下来：给 `orbit-soft` 的 **atmosphere** 设
+`depth_bias = -1` 时哈希不变 —— 因为那两档的 **clouds 本来就是 −1.0**（内容里带的），
+两份变成平局，次序没动。**"读数没变"与"变量没效果"是两件事**，中间隔着"这个扰动到底有没有
+真的改变被测的那个量"这一问。改成把 clouds 推到 +1.0 才问对（第 8 行）。
+
+### 落地
+
+`px_graphs/src/frame.rs::draws_of` 的 `"transparent"` 那一支：反序遍历 + **稳定**排序
+（`sort_by`）按 `depth_bias`，连同上面那一整段实测依据的注释。测试两条，**故意分开钉**：
+
+- `a_select_picks_objects_by_their_material_alpha`：期望值从
+  `["atmosphere","clouds","rings"]` 改成 `["rings","clouds","atmosphere"]` —— 钉规则 ②；
+- `a_transparent_pass_sorts_by_depth_bias_before_the_reversed_order`（新）：给雾壳 −1.0，
+  期望 `["clouds","rings","atmosphere"]` —— 钉规则 ①**压过** ②。
+
+⇒ 少任何一条，另一档判据就会红（`orbit-rings` 靠 ②、带雾壳那两档靠 ①），所以两条都得在。
+
+⚠ **`opaque` 与 `shadow_casters` 没动**（§107：一次只改一个变量）。理由不只是"没量"：
+不透明走的是 `ViewBinnedRenderPhases`（分箱，不是排序相位），而且本仓的不透明物体只有行星一个；
+影子那几条各自一笔 draw，纯深度、次序不影响结果。
+
+### 产物键
+
+| 场景 | 旧键 | 新键 | transparent 的 draws |
+|---|---|---|---|
+| orbit-bare | add550e772b2 | **add550e772b2**（不变） | `[atmosphere]` |
+| orbit-bare-nolight | 46b9b2ad4bd7 | **46b9b2ad4bd7**（不变） | `[atmosphere]` |
+| orbit-bare-shadow | 15e2d1e76fd2 | **15e2d1e76fd2**（不变） | `[atmosphere]` |
+| orbit-rings | 45964b2aae8d | **dcd78c638742** | `[rings, atmosphere]` |
+| orbit-proxy-fine-bound | 46f2191fdb4f | **ee7f12726c54** | `[clouds, atmosphere]` |
+| orbit-soft | 3638bac766c3 | **a2a0596d5863** | `[clouds, atmosphere]` |
+
+前三个键**一个都没动** —— 它们各只有一笔透明 draw，这个次序规则是恒等 ⇒ 三格判据由构造不受
+影响，实测也确认了三格逐字节不变。⚠ 后两档的 `[clouds, atmosphere]` 正是第 8/9 行的推论：
+雾壳带 `depth_bias = -1.0`，它必须**先**画 —— 而旧的烘法发的是 `[atmosphere, clouds]`，
+**那两档此前也一直是错的**（只是还没有判据图，所以没人看见）。
+
+### 判据
+
+```
+orbit-bare          63184151909371A5  300012 ✓（S-1 锚）
+orbit-bare-nolight  7BBB18CE3612D4F7  215193 ✓（S2 判据）
+orbit-bare-shadow   C03FFF3235264DD5  298289 ✓（S3 判据）
+orbit-rings         B5799E4F1649535C  508562 ✓（本档）
+--diff 四档：差异像素 0 / 614400、最大通道差 0
+复现：再出一张相同；800×600 再改回 960×640 逐字节回到原样（§104 第 8 条）
+```
+
+测试：`px_pass` 23｜`px_render_wgpu` 48｜`px_protocol` 20（lib）+ 20（集成）｜
+`px_graphs` **12**（lib，+1 新测试）+ 10（集成）｜`px_shader` 20 —— **0 failed**
+（重量于本档收尾时）。
+
+### ⚠ 这一档**没有**覆盖的（别让下一轮以为它是绿的）
+
+1. **`orbit-soft` / `orbit-proxy-fine-bound` 仍然没有判据图**：次序这一项现在按实测的规则
+   烘对了（`[clouds, atmosphere]`），但这两档还压着云自己的活（§107 解禁的那一批），
+   本轮**只到"次序不再是一个已知错误"为止**，没有出图对。
+2. **距离项没有实现**（上面那张表）：它今天从不决定次序，且它需要相机 ⇒ 一份烘好的次序
+   表达不了。**哪天有场景让两笔透明的 `depth_bias` 相等、而网格 `aabb_center` 差得足够大，
+   次序就会变成相机相关的量，而文档只有一个次序** —— 那一刻要定的是"次序该由谁产生"。
+   今天没有这样的场景，所以这一档不挑。
+3. **`--sheet` 的 12 格**没跑：判据只跑了默认相机那一档。
+4. **既有的 `orbit-rings` 判据图** `target/oracle/orbit-rings.png` 没被重取 —— 它是 §108.1
+   冻下来的锚，本轮只读不写（重取会毁掉可比性）。
+
+**仪器**（都不入 git，落在 `target/rings/`）：`anchor-fresh.ps1`（每份文档一份新锚服务）、
+`pxart.py` / `pngtool.py`（拆帧与读 PNG）、`derive.py` / `three.py` / `fourtrans.py` / `perm2.py` /
+`perturb.py` / `revothers.py` / `obs.py` / `biaswins.py`（文本手术派生扰动文档，**不重新序列化
+JSON** —— §126）、`components.ps1`（连通块）、`characterise.py`（差异的三条定量结论）、
+`aabb.py`（网格 `aabb_center`）、`crop1.ps1` / `rowscan.ps1`（看图与逐行读数）。
