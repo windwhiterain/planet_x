@@ -10,6 +10,22 @@
 //   - 立方图采样与亮度（`:74-81`）：`textureSample(skybox, skybox_sampler, dir * vec3(1.0, 1.0, -1.0))`
 //     后 `rgb * brightness`，**alpha 原样返回**。
 //
+// ⚠ **亮度那一格乘的是两个数**，而第二个数不在文档里：
+//    Bevy 的 extract 写的是 `brightness: skybox.brightness * exposure`
+//    （`bevy_core_pipeline-0.19.1/src/skybox/mod.rs:78-79`），`exposure` 是相机的
+//    `Exposure::default().exposure()` = `exp2(-9.7) / 1.2` = **1.0019079e-3**。
+//    也就是说：文档里那个 `900.0`（内容：`environment.skybox_brightness`）要乘上曝光
+//    才是 oracle 真正用的系数（≈0.9017）。**这不是"偏亮一点"**：原样用 900 的话，
+//    每一个超过 sRGB 30 的纹素都会被推到 255 —— 整幅星空变成一片白，而画面看起来
+//    "还是星空"（**实测**：`target/slice4/step2.png` 里 1701 个采样点被打到 255，
+//    而 oracle 的同一片背景里**一个 255 都没有**；两张图的非黑像素数**完全相同**，
+//    差的就是这个系数）。
+//    ⚠ 乘的**次序**也要与 oracle 相同：先把 `brightness * exposure` 乘出来（f32 一次乘法），
+//    再拿纹素去乘它。写成 `out.rgb * params.brightness * view.exposure` 是两次乘法、
+//    两个舍入 —— "数学等价、浮点不等价"在本仓库已经现形过五次。
+//    `view.exposure` 就在 group 0 的第 0 格里（`px_shader::assemble::HOST_VIEW_STUB`），
+//    值是宿主用**逐位**移植件算的，位模式 `3A835274`（`px_render_wgpu::group0::exposure`）。
+//
 // ⚠ 方向重建的**算术路径**必须与 Bevy 相同，不能"等价地换一条"：
 //    Bevy 走的是 `in.position.xy`（**片元坐标**）+ `view.viewport` + **逆矩阵**
 //    （`view_from_clip`、`world_from_view`），**不是**插值下来的裁剪坐标。
@@ -83,5 +99,8 @@ fn fragment(in: SkyVertexOutput) -> @location(0) vec4<f32> {
 
     // 立方图是左手系 ⇒ z 取反（`skybox.wgsl:78-79`）。
     let out = textureSample(skybox, skybox_sampler, ray_direction * vec3(1.0, 1.0, -1.0));
-    return vec4<f32>(out.rgb * params.brightness, out.a);
+    // ⚠ 乘积**先算**（与 Bevy 的 `SkyboxUniforms.brightness = skybox.brightness * exposure`
+    //    同一次 f32 乘法、同一个次序），再去乘纹素 —— 见文件头那段。
+    let brightness = params.brightness * view.exposure;
+    return vec4<f32>(out.rgb * brightness, out.a);
 }

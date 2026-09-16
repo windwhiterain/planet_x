@@ -491,6 +491,46 @@ fn bake_material(
     let layout = px_shader::reflect::reflect_assembled(&assembled, &at)
         .map_err(|err| format!("{at}（{}）反射不出参数块：{err}", material.shader))?;
 
+    // ⑥ 配方给的 `entry` 必须真的在那份 WGSL 里。    //
+    // ⚠ 这一条是 §136 补的，代价付过：这里原来写的是 `entry = "fs_main"`（全屏 pass 那条
+    //    约定），而 `art/frame/skybox.wgsl` 里那个函数叫 `fragment`。名字指不到东西 ⇒
+    //    那份产物**永远建不起来**（运行期 wgpu 报"找不到入口"），而报错离病因已经很远。
+    //    反射只读参数块与贴图格，**看不见入口名** —— 所以它必须单独有这一条。
+    let entries = px_shader::reflect::entry_points(&assembled, &at)?;
+    if !entries
+        .iter()
+        .any(|(name, stage)| name == &material.entry && *stage == "fragment")
+    {
+        let list = |stage: &str| -> String {
+            let found: Vec<&str> = entries
+                .iter()
+                .filter(|(_, kind)| *kind == stage)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if found.is_empty() {
+                "（一个都没有）".to_string()
+            } else {
+                found.join(" / ")
+            }
+        };
+        return Err(format!(
+            "{at} 要的片元入口 '{}' 在 {} 里不存在。\n  那份 WGSL 的**片元**入口：{}\n  \
+             全部入口：{}",
+            material.entry,
+            material.shader,
+            list("fragment"),
+            if entries.is_empty() {
+                "（一个都没有）".to_string()
+            } else {
+                entries
+                    .iter()
+                    .map(|(name, stage)| format!("{name}（{stage}）"))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            }
+        ));
+    }
+
     let mut given: BTreeMap<String, toml::Value> = BTreeMap::new();
     // ④ 配方给了 WGSL 没声明的参数 ⇒ 拒，并把这份 shader 声明的参数列出来。
     //    ⚠ 这一条不能省给 `merge_named`：下面那张 `given` 是**按声明的参数**填的，
@@ -700,7 +740,9 @@ mod tests {
             .iter()
             .find(|material| material.name == "skybox")
             .expect("默认帧图里那份天空盒");
-        assert_eq!(skybox.entry, "fs_main");
+        // ⚠ 入口名是 `fragment`（材质那条约定），不是全屏 pass 的 `fs_main`：
+        //    这一格写错时，烘图侧现在会当场拒（见下一条测试）。
+        assert_eq!(skybox.entry, "fragment");
         assert!(
             skybox.shader.contains("coords_to_ray_direction"),
             "内联的必须是**文件全文**（不是路径、也不是摘要）：{} 字节",
@@ -729,7 +771,7 @@ mod tests {
         let modules = px_shader::workspace_modules(&px_ops::workspace_root()).expect("模块表");
         let material = |params: &str| -> MaterialFile {
             toml::from_str(&format!(
-                "name = \"skybox\"\nshader = \"art/frame/skybox.wgsl\"\nentry = \"fs_main\"\nparams = {{ {params} }}\n"
+                "name = \"skybox\"\nshader = \"art/frame/skybox.wgsl\"\nentry = \"fragment\"\nparams = {{ {params} }}\n"
             ))
             .expect("夹具")
         };
@@ -774,9 +816,25 @@ mod tests {
         .expect("写夹具");
         let mut wrong_type = material("brightness = \"environment.skybox_brightness\"");
         wrong_type.shader = "target/frame-material-fixture/vec3_param.wgsl".to_string();
+        // ⚠ 夹具那份 WGSL 的入口叫 `fs_main`（它是个**全屏 pass 风格**的最小件），
+        //    所以这里要把 entry 一起换掉 —— 否则先撞上的是 ⑥ 那条"入口不存在"，
+        //    而这一档要验的是**类型不符**。
+        wrong_type.entry = "fs_main".to_string();
         let err = bake_material(&wrong_type, &sources(), &modules).expect_err("类型不符 ⇒ 拒");
         assert!(err.contains("类型不符"), "{err}");
         assert!(err.contains("vec3"), "要说清声明的是哪一档：{err}");
+
+        // ⑥ 入口名指不到东西 ⇒ 拒，并把**实际的入口**列出来（§136 补的那条守卫）。
+        //    这一格原来写的是 `fs_main`（全屏 pass 那条约定），而天空盒那份 WGSL 里
+        //    那个函数叫 `fragment`：产物烘得出来，运行期 wgpu 才报"找不到入口"。
+        let mut wrong_entry = material("brightness = \"environment.skybox_brightness\"");
+        wrong_entry.entry = "fs_main".to_string();
+        let err = bake_material(&wrong_entry, &sources(), &modules).expect_err("入口不存在 ⇒ 拒");
+        assert!(err.contains("fs_main"), "要点名那个指不到的名字：{err}");
+        assert!(
+            err.contains("fragment"),
+            "要把那份 WGSL 实际的入口列出来：{err}"
+        );
 
         // ④ 给了 shader 没声明的参数 ⇒ 拒，并由 `merge_named` 把两张表列出来。
         //    （夹具的 WGSL 只有 `brightness` 一格。）

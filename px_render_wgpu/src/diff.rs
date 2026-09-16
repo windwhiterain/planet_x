@@ -88,13 +88,18 @@ impl Region {
 pub struct Diff {
     pub width: u32,
     pub height: u32,
-    /// 本宿主那张图的背景色（出现次数最多的三元组）。
+    /// **左**图（第一个参数）的路径。⚠ 报告里要把它打出来：这个工具不认识角色，
+    /// 只按位置说话，所以"哪张是哪张"必须由调用方在报告里看得见。
+    pub left_path: std::path::PathBuf,
+    /// **右**图（第二个参数）的路径。
+    pub right_path: std::path::PathBuf,
+    /// 左图的背景色（出现次数最多的三元组）。
     pub background: [u8; 3],
     pub background_pixels: usize,
-    /// oracle 那张图自己的众数（"它的背景色"）与它的像素数 —— 用来回答"清屏色一样吗"。
+    /// 右图自己的众数（"它的背景色"）与它的像素数 —— 用来回答"两边的背景色是不是同一个"。
     pub oracle_background: [u8; 3],
     pub oracle_background_pixels: usize,
-    /// 剪影：本宿主这张图里**不等于背景色**的像素（切片 1 里它就是行星自己）。
+    /// 剪影：左图里**不等于背景色**的像素（切片 1 里它就是行星自己）。
     pub silhouette: Region,
     /// 全部差异像素。
     pub differing: Region,
@@ -577,6 +582,8 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
     Ok(Diff {
         width: left.width,
         height: left.height,
+        left_path: ours.to_path_buf(),
+        right_path: oracle.to_path_buf(),
         background,
         background_pixels,
         oracle_background,
@@ -625,30 +632,46 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
 
 impl Diff {
     /// 一行一个数的报告。⚠ 这里**不下结论**（"对上了"不是这一篇的事），只把读数列全。
+    ///
+    /// ⚠ 报告里一律叫**左图 / 右图**（第一个参数 / 第二个参数），**不叫"本宿主 / oracle"**：
+    /// 这个工具**不知道**哪一张是谁，而那正是它最容易骗人的地方 —— 参数一传反，
+    /// "剪影内 / 剪影外"整篇就反着读，而报告看起来完全正常（§136 实测：一次交接里的
+    /// inside/outside 就是这么反的）。所以：
+    ///
+    /// - 报告开头把**两条路径连同左右**打出来，并明说"左图按约定是本宿主那张"；
+    /// - 正文只用左 / 右，判断留给读的人。
     pub fn report(&self) -> String {
         let total = self.width as usize * self.height as usize;
         let percent = |count: usize| 100.0 * count as f64 / total as f64;
         let mut lines = vec![
+            format!(
+                "⚠ 本工具**不认识角色**：下面一律按**位置**称呼 —— \
+                 左图 = 第一个参数，右图 = 第二个参数；\
+                 背景色与剪影**只按左图**定（约定是『左 = 本宿主那张 / 右 = oracle』）。\
+                 传反了，整篇读数就反着读。"
+            ),
+            format!("  左：{}", self.left_path.display()),
+            format!("  右：{}", self.right_path.display()),
             format!("尺寸：{}×{}（{} 像素）", self.width, self.height, total),
             format!(
-                "本宿主那张图的背景色：{:?}（{} 像素，{:.2}%）—— 剪影按它定义",
+                "左图的背景色：{:?}（{} 像素，{:.2}%）—— 剪影按它定义",
                 self.background,
                 self.background_pixels,
                 percent(self.background_pixels)
             ),
             format!(
-                "oracle 那张图的众数色：{:?}（{} 像素，{:.2}%）{}",
+                "右图的众数色：{:?}（{} 像素，{:.2}%）{}",
                 self.oracle_background,
                 self.oracle_background_pixels,
                 percent(self.oracle_background_pixels),
                 if self.oracle_background == self.background {
-                    "—— 与我们的背景色**同一个值**"
+                    "—— 与左图的背景色**同一个值**"
                 } else {
-                    "—— ⚠ 与我们的背景色**不是同一个值**"
+                    "—— ⚠ 与左图的背景色**不是同一个值**"
                 }
             ),
             format!(
-                "行星剪影（本宿主这张图里 != 背景色的像素）：{} 像素（{:.2}%）｜包围盒 {}｜质心 ({:.2}, {:.2})｜等效半径 {:.2}",
+                "行星剪影（左图里 != 背景色的像素）：{} 像素（{:.2}%）｜包围盒 {}｜质心 ({:.2}, {:.2})｜等效半径 {:.2}",
                 self.silhouette.pixels,
                 percent(self.silhouette.pixels),
                 self.silhouette.bbox_text(),
@@ -791,7 +814,7 @@ impl Diff {
             ));
         }
         lines.push(format!(
-            "**远离任何几何处**（≥{BACKGROUND_RADIUS}R，那里只该有清屏色）：本宿主那张图里有 {} 个像素\
+            "**远离任何几何处**（≥{BACKGROUND_RADIUS}R，那里只该有清屏色）：左图里有 {} 个像素\
              不等于背景色 —— **0 ⇒ 均匀输入没被任何一条路扰动**（blit / sRGB 往返那一类\
              『处处生效』的病因就此排除）；>0 ⇒ 那条路有扰动",
             self.far_not_background
@@ -820,7 +843,7 @@ impl Diff {
             ));
             for pixel in listed.iter().take(ISOLATED_PRINT) {
                 lines.push(format!(
-                    "    ({}, {})｜r = {:.4}｜{}｜Δ{}｜本宿主 {:?} vs oracle {:?}｜{}",
+                    "    ({}, {})｜r = {:.4}｜{}｜Δ{}｜左 {:?} vs 右 {:?}｜{}",
                     pixel.x,
                     pixel.y,
                     pixel.radius,
@@ -834,12 +857,12 @@ impl Diff {
         }
         if self.inside.pixels == 0 {
             lines.push(
-                "结论（只关于剪影）：行星自己那一片像素**逐位相同**；全部差异都在剪影之外。"
+                "结论（只关于剪影）：剪影里那一片像素**逐位相同**；全部差异都在剪影之外。"
                     .to_string(),
             );
         } else {
             lines.push(format!(
-                "结论（只关于剪影）：行星自己那一片像素里有 {} 个与 oracle 不同（最大通道差 {}）。",
+                "结论（只关于剪影）：剪影里有 {} 个像素与右图不同（最大通道差 {}）。",
                 self.inside.pixels, self.inside.max_delta
             ));
         }

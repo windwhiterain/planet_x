@@ -21,12 +21,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use px_protocol::art::{self, AssetKind, TextureFormat, TextureShape};
-use px_protocol::material::MaterialLayout;
+use px_protocol::material::{MaterialLayout, TextureDimension};
 use px_protocol::scene::{
-    AlphaMode, CullMode, Geometry, Member, Object, Sampler, SceneSpec, Transform, Value,
+    AlphaMode, CullMode, FrameMaterial, Geometry, Member, Object, Sampler, SceneSpec, Transform,
+    Value,
 };
 use px_protocol::wire::DType;
 
+use crate::material::version_of;
 use crate::mesh::Mesh;
 use crate::shader;
 
@@ -85,6 +87,25 @@ pub struct BoundTexture {
 pub struct Skybox {
     pub sampler: Sampler,
     pub texture: LoadedTexture,
+}
+
+impl Skybox {
+    /// 这份天空盒绑到某一格的样子 —— 与内容材质那一格**同形**（`BoundTexture`）。
+    ///
+    /// 采样器就是它自己带的那个（[`Skybox::sampler`]，`Sampler::clamped()`）：oracle 那条路
+    /// 是**显式**传的（`px_render/src/scene.rs:294`），不是"落回缺省" ——
+    /// 详见 [`crate::material::sampler_of`] 那段。
+    ///
+    /// ⚠ 这里确实 clone 了一份**装载好的字节**（星空 6 MB）：绑定请求要的是**拥有**的
+    /// `BoundTexture`（与内容材质同一条路），而一帧只建一次。为省这一次 memcpy 去把
+    /// `BoundTexture` 改成借来的，等于让"格 → 图"这条契约多一种形状。
+    pub fn bound(&self, binding: u32) -> BoundTexture {
+        BoundTexture {
+            binding,
+            sampler: self.sampler,
+            texture: self.texture.clone(),
+        }
+    }
 }
 
 /// 一份材质 shader 的三样东西：原文、**本宿主组装后的自足 WGSL**、反射出来的契约。
@@ -371,6 +392,137 @@ fn load_object(
     })
 }
 
+/// 组装 + naga 校验 + 反射：**内容 shader 与帧自有材质共用的那一段**（§135）。
+///
+/// ⚠ 这一段只有一份。帧自有材质若另走一条反射路，同一份 WGSL 就会在两条路上读出两个契约
+/// （§66.1 那颗「同一条契约、两个数字」的雷），而它响的方式是"某个参数打包错位、
+/// 画面上只差一点点"，任何门都不会响。
+///
+/// `module` 一并留着，因为**入口名要在那份真模块里查**（[`fragment_entry`]）——
+/// 组装后的文本与反射出来的契约是两件事，"这个名字在不在"只有 naga 说得准。
+struct Reflected {
+    assembled: String,
+    layout: MaterialLayout,
+    module: naga::Module,
+}
+
+fn reflect_source(
+    name: &str,
+    source: &str,
+    modules: &px_shader::ModuleTable,
+) -> Result<Reflected, String> {
+    let assembled = shader::assemble(source, modules, crate::stubs::stubs);
+    // 校验是**门**：坏管线当场拒，不静默出缺材质的图（§104 第 5 条把这条判据留下来了）。
+    let module = shader::validate(name, &assembled)?;
+    let layout = px_shader::reflect::reflect_assembled(&assembled, name)?;
+    Ok(Reflected {
+        assembled,
+        layout,
+        module,
+    })
+}
+
+/// 一个（片元）入口名 → 核对它真的在那份 WGSL 里。
+///
+/// ⚠ 这是 §136 补上的一条守卫，代价付过：产物的 `frame_materials[].entry` 写的是
+/// `fs_main`（全屏 pass 那条约定），而它自己的 WGSL 里那个函数叫 `fragment` ——
+/// 名字指不到东西，于是 `sky` 那条 pass **永远建不起来**，报错来自 wgpu
+/// （"找不到入口"），离病因（配方里一个词写错）已经很远。
+///
+/// 拒的时候**必须把实际的入口列出来**：不列的话，作者只能对着两个名字猜。
+fn fragment_entry(module: &naga::Module, entry: &str, at: &str) -> Result<(), String> {
+    let names = |stage: Option<naga::ShaderStage>| -> String {
+        let found: Vec<&str> = module
+            .entry_points
+            .iter()
+            .filter(|point| stage.is_none_or(|wanted| point.stage == wanted))
+            .map(|point| point.name.as_str())
+            .collect();
+        if found.is_empty() {
+            "（一个都没有）".to_string()
+        } else {
+            found.join(" / ")
+        }
+    };
+    if module
+        .entry_points
+        .iter()
+        .any(|point| point.name == entry && point.stage == naga::ShaderStage::Fragment)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{at} 要的片元入口 '{entry}' 在它自己的 WGSL 里不存在。\n  \
+         那份 WGSL 的**片元**入口：{}\n  全部入口：{}",
+        names(Some(naga::ShaderStage::Fragment)),
+        names(None)
+    ))
+}
+
+/// 一份组装好的 shader 的**内容键**（管线键里"哪一版 WGSL"那一格）。
+///
+/// 内容 shader 的键是 CAS 成员键（那里面有 include 闭包指纹）；帧自有材质没有成员，
+/// 它的键就是**组装后全文**的 sha256 前 16 位 —— 同一把尺子（§17.1：键 = 内容），
+/// 而且组装后的文本把 `#import` 的闭包也含进去了（库改了、文本就变、键就变）。
+fn content_key(assembled: &str) -> Result<u64, String> {
+    version_of(&crate::digest::sha256_hex(assembled.as_bytes()))
+}
+
+/// 一份**帧自有材质**（§135）装载好的样子：组装后的全文 + 反射出来的契约 + 打包好的参数。
+///
+/// 它与内容材质共用**同一条**组装 / 反射 / 打包路（[`reflect_source`] +
+/// `MaterialLayout::pack`），差别只有两处，而且都是"它没有那个东西"：
+///
+/// 1. 文本在**文档里**（全文内联），不是 CAS 成员 ⇒ 没有 include 闭包指纹与
+///    schema descriptor 可以对账 —— 那两道对账的对象是产物，而它没有产物；
+/// 2. 片元入口名也在**文档里**给（内容材质那条路写死 `fragment`），所以这里要核对
+///    它真的存在（[`fragment_entry`]）。
+#[derive(Clone, Debug)]
+pub struct LoadedFrameMaterial {
+    pub name: String,
+    /// 片元入口名（已核对过它在组装后的 WGSL 里存在）。
+    pub entry: String,
+    /// 组装后的全文（直接喂 `create_shader_module`）。
+    pub assembled: String,
+    /// 参数：按**它自己声明的结构体**打包（缺参 / 多参 / 类型不符三档当场报错）。
+    pub params: Vec<u8>,
+    /// 它声明的贴图格（格号, 维度），升序。⚠ 帧材质在文档里**没有**"哪一格是哪张图"
+    /// 这一栏（内容材质有 `material.textures`），所以这一串是宿主唯一能问的东西。
+    pub textures: Vec<(u32, TextureDimension)>,
+    /// 内容键（见 [`content_key`]）。
+    pub version: u64,
+}
+
+/// 文档里的 `frame_materials` 一节 → 可以绑上 GPU 的一份材质。
+///
+/// ⚠ 这里**不碰 CAS**：那份 WGSL 的全文就在文档里（那正是"帧自有"的意思：
+/// 它不属于可换的内容，见 `px_protocol::scene::FrameMaterial`）。
+pub fn load_frame_material(
+    material: &FrameMaterial,
+    modules: &px_shader::ModuleTable,
+) -> Result<LoadedFrameMaterial, String> {
+    let at = format!("帧自有材质 '{}'", material.name);
+    let reflected = reflect_source(&at, &material.shader, modules)?;
+    fragment_entry(&reflected.module, &material.entry, &at)?;
+    let params = reflected
+        .layout
+        .pack(&material.params)
+        .map_err(|err| format!("{at} 的参数：{err}"))?;
+    Ok(LoadedFrameMaterial {
+        name: material.name.clone(),
+        entry: material.entry.clone(),
+        textures: reflected
+            .layout
+            .textures
+            .iter()
+            .map(|slot| (slot.binding, slot.dimension))
+            .collect(),
+        version: content_key(&reflected.assembled)?,
+        assembled: reflected.assembled,
+        params,
+    })
+}
+
 /// 装一份 shader：读产物 → **两道对账** → 组装 → naga 校验 → 反射契约。
 ///
 /// 两道对账都是"拒绝，而不是静默出图"（与 Bevy 宿主同款，改的只是措辞）：
@@ -416,11 +568,11 @@ pub(crate) fn load_shader(
         }
     }
 
-    let assembled = shader::assemble(&source, modules, crate::stubs::stubs);
     let name = format!("{}/{}", member.graph, member.node);
-    // 校验是**门**：坏管线当场拒，不静默出缺材质的图（§104 第 5 条把这条判据留下来了）。
-    shader::validate(&name, &assembled)?;
-    let layout = px_shader::reflect::reflect_assembled(&assembled, &name)?;
+    // ⚠ 组装 / 校验 / 反射走的是与帧自有材质**同一条**路（[`reflect_source`]）：
+    //    这里与它只差那两道对账（它们的对账对象是产物，帧材质没有产物）。
+    let reflected = reflect_source(&name, &source, modules)?;
+    let layout = reflected.layout;
     let now = layout.to_json()?;
     match &schema {
         Some(text) if *text == now => {}
@@ -439,7 +591,7 @@ pub(crate) fn load_shader(
     Ok(LoadedShader {
         member: member.clone(),
         source,
-        assembled,
+        assembled: reflected.assembled,
         layout,
         closure: closure.summary(),
     })
@@ -944,5 +1096,85 @@ mod tests {
         };
         let image = decode_base_level(&cube, &vec![7_u8; 2 * 2 * 6 * 4]).expect("立方图解码");
         assert_eq!(image.dimensions(), (2, 12));
+    }
+
+    /// 一份**帧自有材质**的夹具：WGSL 用的是**盘上那份真本**
+    /// （`art/frame/skybox.wgsl`，它在 git 里 ⇒ 这一档不依赖 `target/`），
+    /// 参数取烘图时那一份值（`environment.skybox_brightness`）。
+    fn frame_material_fixture(entry: &str) -> px_protocol::scene::FrameMaterial {
+        let path = shader::workspace().join("art/frame/skybox.wgsl");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
+        let mut params = BTreeMap::new();
+        params.insert("brightness".to_string(), Value::Num(900.0));
+        px_protocol::scene::FrameMaterial {
+            name: "skybox".to_string(),
+            shader: text,
+            entry: entry.to_string(),
+            params,
+        }
+    }
+
+    /// **帧自有材质**装载这一档（§135/§136）：与内容材质**同一条**组装 / 反射 / 打包路。
+    ///
+    /// 期望值来自烘图侧的日志（`px_graphs::frame::bake_material` 印的那一版）：
+    /// 入口 `fragment`、参数一个 `f32`、只声明第 5 格（Cube）。
+    #[test]
+    fn the_frame_material_is_reflected_and_packed_like_a_content_material() {
+        let declared = frame_material_fixture("fragment");
+        let loaded = load_frame_material(&declared, &shader::modules()).expect("装载帧材质");
+
+        assert_eq!(loaded.name, "skybox");
+        assert_eq!(loaded.entry, "fragment", "入口名是文档给的那个（已核对它存在）");
+        // 声明的格子**从反射来**：第 5 格是契约表里那几档 cube 之一。
+        assert_eq!(loaded.textures, vec![(5, TextureDimension::Cube)]);
+        // 参数按**它自己声明的结构体**打包：一个 f32，补齐到 16 字节（WGSL 的 uniform 对齐）。
+        assert_eq!(loaded.params.len(), 16);
+        assert_eq!(
+            f32::from_le_bytes(loaded.params[..4].try_into().expect("四个字节")),
+            900.0
+        );
+        // ⚠ 曝光那一乘**必须真的在组装后的文本里**：它是策略，不是注释。
+        //    少了它整幅背景会被推到 255（§136 实测：非黑像素数一样、值全错）。
+        assert!(
+            loaded.assembled.contains("params.brightness * view.exposure"),
+            "亮度那一格要乘上相机的曝光（oracle：`skybox.brightness * exposure`）"
+        );
+        // 内容键 = 组装后全文的 sha256 前 16 位（它没有 CAS 成员，见 [`content_key`]）。
+        assert_eq!(
+            loaded.version,
+            version_of(&crate::digest::sha256_hex(loaded.assembled.as_bytes())).expect("内容键")
+        );
+        println!(
+            "帧自有材质 '{}'：entry {}｜组装后 {} 字节｜参数 {} 字节｜贴图格 {:?}",
+            loaded.name,
+            loaded.entry,
+            loaded.assembled.len(),
+            loaded.params.len(),
+            loaded.textures
+        );
+    }
+
+    /// 入口名指不到东西 ⇒ **宿主当场拒**，并把那份 WGSL 实际的入口列出来（§136）。
+    ///
+    /// ⚠ 这一条与烘图侧那条（`px_graphs::frame::bake_material` 的第 ⑥ 条）是**两道**守卫，
+    /// 不是重复：烘图侧拦的是"配方写错了"，这里拦的是"手上这份文本里的名字指不到东西"
+    /// （老产物、手改的文档都会走到这一条）。
+    #[test]
+    fn a_frame_material_entry_that_does_not_exist_is_refused_by_name() {
+        // 全屏 pass 那条约定（`art/shaders/blit.wgsl` 的入口就叫这个）——
+        // 这正是 §136 实测踩到的那一个词。
+        let declared = frame_material_fixture("fs_main");
+        let err = load_frame_material(&declared, &shader::modules()).expect_err("指不到 ⇒ 拒");
+        assert!(err.contains("fs_main"), "要点名那个指不到的名字：{err}");
+        assert!(
+            err.contains("fragment"),
+            "要把那份 WGSL 实际的入口列出来：{err}"
+        );
+        assert_eq!(
+            err.matches("fragment").count(),
+            2,
+            "片元那一行与「全部入口」那一行都要有：{err}"
+        );
     }
 }

@@ -137,7 +137,13 @@ params = { gain = 1.0 }
 [[materials]]
 name = "skybox"
 shader = "art/frame/skybox.wgsl"
-entry = "fs_main"
+# ⚠ 入口名是 `fragment`，**不是** `fs_main`：`fs_main` 是全屏 pass 那条约定
+# （`art/shaders/blit.wgsl`），而帧自有材质走的是**材质**那条绑定组构造，
+# 它的入口约定就是 `fragment`（`px_render_wgpu::material::FRAGMENT_ENTRY`）。
+# 这一格原来写错成 `fs_main`，而当时**没有任何一处查过它**（反射只看参数块与贴图格）
+# ⇒ 产物烘得出来、运行期 wgpu 才报"找不到入口"（§136 实测）。
+# 现在烘图时就会拒（`px_graphs::frame::bake_material` 的第 ⑤ 条守卫）。
+entry = "fragment"
 # ⚠ 参数写的是**来源**，不是值：帧图是六个场景共用的一份，写死一个数就等于把内容
 # 焊进帧策略（§133：六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
 # 别的亮度的场景会得到整幅背景错的图，且不会有人报错）。

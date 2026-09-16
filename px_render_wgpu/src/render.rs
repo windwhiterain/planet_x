@@ -1,10 +1,12 @@
-//! 切片 1 的渲染路：**文档 → GPU → 回读 → PNG**（`art/15-render-wgpu.md` 的 S2 前半）。
+//! 渲染路：**文档 → GPU → 回读 → PNG**（`art/15-render-wgpu.md` 的 S2 后半）。
 //!
-//! 这一档画出来的是"**背景 + 行星，别的什么都没有**"：
+//! 这一档画出来的是"**背景（星空）+ 行星 + 大气**"，六条 pass **一条都不跳**：
 //!
-//! - `prepass`（深度-only）与 `opaque`（清屏色 + 行星）真的执行；
-//! - `blit` 把 `scene_color_a` 搬到内建目标 `view`（宿主自己的 `shot::Target`）；
-//! - `sky` 与 `transparent` **不执行**，而且**大声说明**（见 [`SKIPPED`] 那段）。
+//! - `prepass`（深度-only）、`copy_depth`（深度快照）、`opaque`（清屏色 + 行星）、
+//!   `sky`（**天空盒**，§136）、`transparent`（大气）、`blit` 全部执行；
+//! - `sky` 那一笔要的材质名解析走**两张表**（物体的 id 表 / 帧自有材质表），
+//!   帧自有材质的 WGSL 内联在文档里、由宿主按**与内容材质同一条**组装 / 反射 / 打包路装载
+//!   （见 [`material_table`] / [`skybox_slot`] / `art::load_frame_material`）。
 //!
 //! 三条口径，每一条都是"换个做法就会出另一种图，而门不会响"：
 //!
@@ -42,29 +44,165 @@ use crate::plan;
 use crate::shader;
 use crate::shot;
 
-/// **这一档执行哪几条 pass**（`px_graphs::frame` 的那五个标签）。
+/// **这一档执行哪几条 pass**（`px_graphs::frame` 的那六个标签）。
 ///
 /// ⚠ 按标签挑是**宿主的切片策略**，不是执行器的分派规则：`px_pass` 一个 pass 名字都不认识，
-/// 它只按 `kind` 与状态分派（§124）。这一档之所以只能跑这三条，理由写在 [`SKIPPED`] 里，
-/// 而且每一条都要**打出来**——"绿是因为跳过了它"是本仓库最不能接受的那种绿。
-const EXECUTED: [&str; 5] = [
+/// 它只按 `kind` 与状态分派（§124）。
+///
+/// ⚠ §136 起**一条都不跳**：天空盒那条 `sky` 现在真的画（名字解析 + 帧材质的反射装载 +
+/// 程序化几何三件都补齐了）。下面 [`subset`] 仍然把"没执行的"打出来 ——
+/// 那一条纪律（"绿是因为跳过了它"是最不能接受的那种绿）不因为今天没得跳就作废。
+const EXECUTED: [&str; 6] = [
     "prepass",
     "copy_depth",
     "opaque",
+    "sky",
     "transparent",
     "blit",
 ];
 
-/// 这一档**不执行**的那几条，以及各自的原因（原样进日志）。
-const SKIPPED: [(&str, &str); 1] = [(
-    "sky",
-    "切片 2 的天空盒：它那一笔要的材质名 'skybox' 在文档里没有对应物体\
-     （文档的物体只有 planet / atmosphere），宿主也没有天空盒的片元成员\
-     （`art/shaders` 里没有 skybox.wgsl）⇒ 那一笔现在建不出来。\
-     ⚠ 与『剪影外还剩星空』是**两件事**：星空是**切片 2 的素材**（环境里那份 `generated/stars`，\
-     不是这一笔能解决的），而天空盒的**顶点阶段对不上**（`art/frame/vertex_sky.wgsl` 只写 \
-     `@builtin(position)`）是另一处的活 —— 归因别糊在一起",
-)];
+/// 三份布局的**身份**（`ResolvedGroup::layout_id` 那条契约：同布局同 id、异布局异 id）。
+///
+/// 宿主每种布局只有一份 ⇒ 三个常数。⚠ 帧自有材质与内容材质**共用** group 0 与 group 3
+/// 那两份布局，所以它们的 id 也必须是同两个数 —— 两个数分岔就是"同一条键指两条管线"。
+const ZERO_LAYOUT_ID: u64 = 0;
+const STAGE_LAYOUT_ID: u64 = 1;
+const MATERIAL_LAYOUT_ID: u64 = 2;
+
+/// 程序化几何（没有顶点缓冲）画几个顶点：**三个**。
+///
+/// ⚠ 不是"随手挑的 3"：oracle 的天空盒就是这一笔 ——
+/// `bevy_core_pipeline-0.19.1/src/core_3d/main_opaque_pass_3d_node.rs:109` 的
+/// `render_pass.draw(0..3, 0..1)`，而它的顶点阶段（`skybox.wgsl:63-72`，本仓
+/// `art/frame/vertex_sky.wgsl`）正是拿 `vertex_index` 现算三个顶点盖满屏幕。
+/// 执行器的全屏 pass 也是 `draw(0..3, 1..2)`（同一个三角形）。
+const PROCEDURAL_VERTICES: u32 = 3;
+
+/// 一笔 draw 的材质名出自**哪张表**（§135）。
+///
+/// ⚠ 两张表都可能给出同一个名字，而**两张都给了就是歧义**：`objects` 的 id 就是它的材质名
+/// （`px_graphs::frame::draws_of` 拿物体 id 当材质名），`frame_materials` 是帧自己的材质。
+/// 同一个字符串在两处各有一份真本时，宿主**不许**替调用方挑一个 —— 静默的优先级是一条
+/// 没有写在任何地方、也没人会去读的规则。一个都没有时把**两张表都列出来**：
+/// 只说"找不到"会让人去翻错的那一张。
+///
+/// ⚠ 名字是**索引**，不是语义：这里（以及任何地方）都不许出现 `if name == "skybox"`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaterialTable {
+    /// 物体表里的第几个（那个物体的 id 就是它的材质名）。
+    Objects(usize),
+    /// 帧自有材质表里的第几份。
+    Frame(usize),
+}
+
+impl MaterialTable {
+    fn describe(self) -> String {
+        match self {
+            MaterialTable::Objects(index) => format!("物体 id 那张表（第 {index} 个物体）"),
+            MaterialTable::Frame(index) => {
+                format!("**帧自有材质**那张表（第 {index} 份，`frame_materials`）")
+            }
+        }
+    }
+}
+
+/// 文档里的两张名字表 → 一笔 draw 的材质名落在哪一张。
+fn material_table(spec: &px_protocol::scene::SceneSpec, name: &str) -> Result<MaterialTable, String> {
+    let list = |names: Vec<&str>| -> String {
+        if names.is_empty() {
+            "（一个都没有）".to_string()
+        } else {
+            names.join(" / ")
+        }
+    };
+    let objects = spec
+        .objects
+        .iter()
+        .map(|object| object.id.as_str())
+        .collect::<Vec<_>>();
+    let frames = spec
+        .frame_materials
+        .iter()
+        .map(|material| material.name.as_str())
+        .collect::<Vec<_>>();
+    let object = spec.objects.iter().position(|object| object.id == name);
+    let frame = spec
+        .frame_materials
+        .iter()
+        .position(|material| material.name == name);
+    match (object, frame) {
+        (Some(_), Some(_)) => Err(format!(
+            "材质名 '{name}' 在**两张表**里都有：物体 id [{}] 与帧自有材质 [{}]。\n  \
+             同一个名字两处真本 ⇒ 宿主只能猜一个，而猜错是**一声不吭的错像素**。\n  \
+             ⇒ 这是调用方要改的：物体 id 与帧材质名必须互不相同",
+            list(objects),
+            list(frames)
+        )),
+        (Some(index), None) => Ok(MaterialTable::Objects(index)),
+        (None, Some(index)) => Ok(MaterialTable::Frame(index)),
+        (None, None) => Err(format!(
+            "材质名 '{name}' **两张表里都没有**。\n  \
+             物体 id（它们的 id 就是材质名）：{}\n  帧自有材质（`frame_materials`）：{}",
+            list(objects),
+            list(frames)
+        )),
+    }
+}
+
+/// 帧自有材质声明的贴图格 → 环境里那份天空盒落在哪一格（§136）。
+///
+/// ⚠ 文档的 `frame_materials` 里**没有**"哪一格是哪张图"这一栏（内容材质有
+/// `material.textures`）⇒ 落点只能从**帧自己的环境**推：`environment.skybox` 是这一帧
+/// 唯一一张帧级贴图，而它该落在哪一格，由**那份 WGSL 自己声明了几格**定。
+///
+/// 声明的格数不是恰好一格就是**歧义**（两格以上时"天空盒落哪一格"没有任何依据），
+/// 歧义当场拒 —— 不许替调用方挑一个（与 [`material_table`] 同一条规矩）。
+fn skybox_slot(
+    material: &art::LoadedFrameMaterial,
+    skybox: Option<&art::Skybox>,
+) -> Result<Option<u32>, String> {
+    let at = format!("帧自有材质 '{}'", material.name);
+    let slots = material
+        .textures
+        .iter()
+        .map(|(binding, dimension)| format!("第 {binding} 格（{}）", dimension.name()))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    match (skybox, material.textures.as_slice()) {
+        // 环境里没有天空盒 ⇒ 这份帧材质也不该声明贴图格（声明了就没人能兑现它）。
+        (None, []) => Ok(None),
+        (None, _) => Err(format!(
+            "{at} 声明了贴图格 [{}]，而这一帧的环境里**没有天空盒**（`environment.skybox` 是空的）\
+             ：帧自有材质的贴图只有环境那一张来源，没有天空盒时这一格无处可绑",
+            slots
+        )),
+        (Some(skybox), [(binding, dimension)]) => {
+            let layers = skybox.texture.shape.layers;
+            if dimension.layers() != layers {
+                return Err(format!(
+                    "{at} 在第 {binding} 格声明的是 {}（{} 层），而环境里那份天空盒 \
+                     {} 是 {} 层 —— 同一张图在两边不是同一种东西",
+                    dimension.name(),
+                    dimension.layers(),
+                    skybox.texture.label(),
+                    layers
+                ));
+            }
+            Ok(Some(*binding))
+        }
+        (Some(_), []) => Err(format!(
+            "{at} 一格贴图都没声明，而这一帧的环境里有天空盒（`environment.skybox`）——\
+             那份天空盒没有去处。要么这份 WGSL 少了一个 texture 声明，要么这一帧不该带天空盒"
+        )),
+        (Some(_), _) => Err(format!(
+            "{at} 声明了 {} 格贴图（{}），而文档的 `frame_materials` 里**没有**\
+             \"哪一格是哪张图\"这一栏：天空盒该落在哪一格没有任何依据。\
+             ⚠ 不许挑一个 —— 要么这份 WGSL 只声明一格，要么先把那一栏加进契约",
+            material.textures.len(),
+            slots
+        )),
+    }
+}
 
 /// 这一档由**宿主建、seed 进池子**的两张深度图（§132）。
 ///
@@ -80,23 +218,34 @@ pub struct Rendered {
     pub pixels: Vec<u8>,
     pub audit: Vec<String>,
     pub executed: Vec<String>,
+    /// 这一档**没执行**的 pass 与原因。⚠ §136 起它是空的（六条全跑）——
+    /// 这一栏留着是因为那条纪律还在：真开始跳的时候，理由必须**跟着名字一起**出来。
     pub skipped: Vec<(String, String)>,
 }
 
-/// 一个物体在 GPU 上的几何：顶点/索引缓冲 + **产物的属性表**。
+/// 一笔 draw 在 GPU 上的几何：顶点/索引缓冲 + **产物的属性表**。
 ///
 /// ⚠ 布局的字段得活到 `Frame` 之后（执行器借的是它），所以 `attributes` 与 `layout`
 /// 都挂在这个结构体上，而不是在函数里现造一个临时的。
+///
+/// ⚠ 两块缓冲是 `Option`，而**没有第二栏**说"这一笔是程序化的"：`vertices.is_none()`
+/// 就是那件事本身（[`procedural_geometry`] 造出来的那一笔两栏都是 `None`）。
+/// 再加一个 `bool` 就是同一个事实的第二份副本 —— 两份会漂，而漂开时没人会响。
 struct Geometry {
     name: String,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    vertices: Option<wgpu::Buffer>,
+    indices: Option<wgpu::Buffer>,
     attributes: Vec<wgpu::VertexAttribute>,
     vertex_count: u32,
     index_count: u32,
 }
 
 impl Geometry {
+    /// 这一笔是不是程序化的：**没有顶点缓冲**，顶点由顶点阶段按 `vertex_index` 现算。
+    fn procedural(&self) -> bool {
+        self.vertices.is_none()
+    }
+
     fn layout(&self) -> wgpu::VertexBufferLayout<'_> {
         wgpu::VertexBufferLayout {
             array_stride: u64::from(Mesh::stride()),
@@ -402,16 +551,16 @@ pub fn run(
             .collect();
         geometries.push(Geometry {
             name: object.id.clone(),
-            vertices: gpu.device.create_buffer_init(&BufferInitDescriptor {
+            vertices: Some(gpu.device.create_buffer_init(&BufferInitDescriptor {
                 label: Some("顶点（交错，布局来自产物属性表）"),
                 usage: wgpu::BufferUsages::VERTEX,
                 contents: &bytes,
-            }),
-            indices: gpu.device.create_buffer_init(&BufferInitDescriptor {
+            })),
+            indices: Some(gpu.device.create_buffer_init(&BufferInitDescriptor {
                 label: Some("索引"),
                 usage: wgpu::BufferUsages::INDEX,
                 contents: &index_bytes,
-            }),
+            })),
             attributes: Mesh::vertex_attributes(),
             vertex_count: mesh.vertex_count() as u32,
             index_count: mesh.indices.len() as u32,
@@ -431,11 +580,17 @@ pub fn run(
         ));
     }
 
-    // ---- 顶点阶段 ↔ 产物属性表：**当场对账** ----
+    // ---- 顶点阶段 ↔ 产物属性表：**当场对账**；程序化那一笔在这里认出来 ----
     //
     // ⚠ 反射的是**文档里那段顶点阶段**（不是"我们以为它要什么"）：它声明的每一个
     //    `@location(n)` 都必须落在产物给的属性表里，而且类型一致。错位在画面上只是
     //    "某几个属性读成了别的格子"，任何门都不会响。
+    //
+    // ⚠ **程序化几何**不是按名字认的（那会变成 `if name == "skybox"`）：判据是
+    //    **那段顶点阶段读不读 `@location`** —— 一个都不读 ⇒ 顶点全靠 `vertex_index` 现算，
+    //    顶点缓冲根本用不上（`ResolvedGeometry.vertices = None`）。反过来，
+    //    读 `@location` 的顶点阶段必须拿到一张真的属性表，否则当场拒（今天那条守卫）。
+    //    两边的错法都是"画出来不对但谁都不报错"，所以两条都要拦。
     for pass in &executed_plan.passes {
         if pass.kind != PassKind::Geometry {
             continue;
@@ -444,12 +599,33 @@ pub fn run(
             &format!("pass '{}' 的顶点阶段", pass.label),
             &pass.vertex_shader,
         )?;
+        let inputs = vertex_inputs(&module, &pass.vertex_entry, &pass.label)?;
+        let procedural = inputs.is_empty();
         for draw in &pass.draws {
-            let geometry = geometries
+            let known = geometries
                 .iter()
-                .find(|geometry| geometry.name == draw.geometry)
-                .ok_or_else(|| {
-                    format!(
+                .position(|geometry| geometry.name == draw.geometry);
+            let geometry = match (known, procedural) {
+                (Some(index), false) => &geometries[index],
+                (Some(_), true) => {
+                    return Err(format!(
+                        "pass '{}' 的顶点阶段（{}）一个 `@location` 都不读（顶点全由 \
+                         `vertex_index` 现算），而这一笔点的几何 '{}' 是**物体的网格**：\
+                         那份顶点缓冲不会被用到 —— 要么这段顶点阶段写错了，要么这一笔画错了",
+                        pass.label, pass.vertex_entry, draw.geometry
+                    ))
+                }
+                (None, true) => {
+                    geometries.push(procedural_geometry(draw.geometry.clone()));
+                    audit.push(format!(
+                        "几何 '{}'：**程序化**（没有顶点缓冲；{} 个顶点由顶点阶段按 \
+                         `vertex_index` 现算 —— pass '{}' 的顶点阶段一个 `@location` 都不读）",
+                        draw.geometry, PROCEDURAL_VERTICES, pass.label
+                    ));
+                    geometries.last().expect("刚 push 的")
+                }
+                (None, false) => {
+                    return Err(format!(
                         "pass '{}' 要画几何 '{}'，而宿主这一档没给这个名字（给了：{}）",
                         pass.label,
                         draw.geometry,
@@ -458,14 +634,16 @@ pub fn run(
                             .map(|geometry| geometry.name.as_str())
                             .collect::<Vec<_>>()
                             .join(" / ")
-                    )
-                })?;
-            check_vertex_inputs(&module, &pass.vertex_entry, &pass.label, geometry)?;
+                    ))
+                }
+            };
+            if !procedural {
+                check_vertex_inputs(&inputs, &pass.label, geometry)?;
+            }
         }
         audit.push(format!(
-            "顶点阶段（pass '{}'）的输入与产物属性表对得上：{}",
-            pass.label,
-            pass.vertex_entry
+            "顶点阶段（pass '{}'）的输入与产物属性表对得上：{}（声明的输入 {:?}）",
+            pass.label, pass.vertex_entry, inputs
         ));
     }
 
@@ -530,21 +708,101 @@ pub fn run(
         .iter()
         .map(|geometry| ResolvedGeometry {
             name: geometry.name.as_str(),
-            vertices: Some((&geometry.vertices, geometry.layout())),
-            indices: Some((
-                &geometry.indices,
-                wgpu::IndexFormat::Uint32,
-                geometry.index_count,
-            )),
+            // ⚠ 程序化那一笔两栏都给 `None`：它**没有**顶点缓冲，顶点由顶点阶段按
+            //    `vertex_index` 现算。给一个空缓冲是另一回事 —— 执行器会拿它去建管线的
+            //    顶点布局，而那段顶点阶段不认那个布局。
+            vertices: geometry
+                .vertices
+                .as_ref()
+                .map(|buffer| (buffer, geometry.layout())),
+            indices: geometry
+                .indices
+                .as_ref()
+                .map(|buffer| (buffer, wgpu::IndexFormat::Uint32, geometry.index_count)),
             vertex_count: geometry.vertex_count,
         })
         .collect();
+
+    // ---- 材质名 → 哪张表（§135）：名字是**索引**，两张表都可能给出它 ----
+    //
+    // ⚠ 这一轮走的是**计划里每一条 draw**（不只是要执行的那几条）：文档说不说得通，
+    //    与"这一档执不执行它"是两件事（§130 的那条口径）。
+    for pass in &plan.passes {
+        for draw in &pass.draws {
+            if draw.material.is_empty() {
+                continue;
+            }
+            let table = material_table(&spec, &draw.material)?;
+            audit.push(format!(
+                "pass '{}' 的 draw（几何 '{}'）要材质 '{}' ⇒ {}",
+                pass.label,
+                draw.geometry,
+                draw.material,
+                table.describe()
+            ));
+        }
+    }
+
+    // ---- 帧自有材质（§135/§136）：全文在文档里，走**同一条**反射 / 打包 / 绑定路 ----
+    //
+    // ⚠ "帧自有"的意思是**兑现者自有**（那支 WGSL 只由裸 wgpu 宿主兑现），
+    //    不是契约自有：它照样走材质那条绑定组构造（12 格超集 + 空槽绑白图）。
+    //    这也是能复用 `sampler_of` / `upload_texture` / 兜底那一套的前提。
+    let modules = shader::modules();
+    let mut frame_materials: Vec<(art::LoadedFrameMaterial, material::MaterialBinding)> =
+        Vec::with_capacity(spec.frame_materials.len());
+    for declared in &spec.frame_materials {
+        let loaded = art::load_frame_material(declared, &modules)?;
+        // 它的贴图格只有一个来源：环境里那份天空盒（见 `skybox_slot`）。
+        let slot = skybox_slot(&loaded, scene.skybox.as_ref())?;
+        let textures: Vec<art::BoundTexture> = match (&scene.skybox, slot) {
+            (Some(skybox), Some(binding)) => vec![skybox.bound(binding)],
+            _ => Vec::new(),
+        };
+        let binding = materials.bind_request(
+            &gpu.device,
+            &gpu.queue,
+            &material::BindingRequest {
+                key: material::frame_key(loaded.version),
+                label: loaded.name.as_str(),
+                params: loaded.params.as_slice(),
+                textures: textures.as_slice(),
+            },
+        )?;
+        audit.push(format!(
+            "帧自有材质 '{}'：entry {}｜组装后 {} 字节（内容键 {:016x}）｜参数 {} 字节｜\
+             声明的贴图格 {:?}｜绑上的格 {:?}｜走兜底白图的格 {:?}（**与内容材质同一条 \
+             12 格超集的路**：帧材质的「自有」是兑现者自有，不是契约自有）",
+            loaded.name,
+            loaded.entry,
+            loaded.assembled.len(),
+            loaded.version,
+            loaded.params.len(),
+            loaded.textures,
+            binding.bound_slots,
+            binding.fallback_slots
+        ));
+        if let (Some(skybox), Some(binding)) = (&scene.skybox, slot) {
+            audit.push(format!(
+                "  ⚠ 第 {binding} 格绑的是环境里那份天空盒 {}（采样器 {:?} —— \
+                 oracle 是**显式**传 `Sampler::clamped()`，不是落回缺省；\
+                 它与 `Sampler::default()` 差在 `address_u`）",
+                skybox.texture.label(),
+                skybox.sampler
+            ));
+        }
+        frame_materials.push((loaded, binding));
+    }
 
     // ⚠ 一笔 draw 的组：**group 0 + group 1 + group 3**。group 1 是**每个物体**的
     //    （两块矩阵），所以"解析好的材质"其实按**物体**给：名字就是物体 id，
     //    而文档里一笔 draw 的 geometry 与 material 用的正是同一个名字（`frame.rs::draws_of`）。
     //    真出现"一条 pass 里同一个物体画两笔"的那天，这里要当场拒 —— 一个名字给不出两组矩阵。
-    let resolved_materials: Vec<ResolvedMaterial<'_>> = scene
+    //
+    // ⚠ 帧自有材质**没有 group 1**：它的顶点阶段是程序化的（`vertex_index` 现算），
+    //    `MeshStage` 那两块矩阵它一格都不读。少给一组不是省事 —— 给了它反而要求那段
+    //    顶点阶段认一个它不认的布局。
+    let mut resolved_materials: Vec<ResolvedMaterial<'_>> = scene
         .objects
         .iter()
         .zip(bindings.iter())
@@ -557,21 +815,20 @@ pub fn run(
                         group: 0,
                         bind_group: &zero.bind_group,
                         layout: zero.layout.clone(),
-                        // 契约：同布局同 id、异布局异 id。宿主每种布局只有一份 ⇒ 三个常数。
-                        layout_id: 0,
+                        layout_id: ZERO_LAYOUT_ID,
                     },
                     ResolvedGroup {
                         group: 1,
                         bind_group: &stage.bind_group,
                         // 一份布局，所有物体共用（见上面那段）。
                         layout: stage_layout.clone(),
-                        layout_id: 1,
+                        layout_id: STAGE_LAYOUT_ID,
                     },
                     ResolvedGroup {
                         group: MATERIAL_BIND_GROUP,
                         bind_group: &binding.bind_group,
                         layout: material_layout.clone(),
-                        layout_id: 2,
+                        layout_id: MATERIAL_LAYOUT_ID,
                     },
                 ],
                 // 混合档来自**材质契约**那一份（`Add` 与 `Premultiplied` 在 Bevy 0.19 里同档）。
@@ -583,6 +840,32 @@ pub fn run(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    resolved_materials.extend(frame_materials.iter().map(|(loaded, binding)| ResolvedMaterial {
+        name: loaded.name.as_str(),
+        groups: vec![
+            ResolvedGroup {
+                group: 0,
+                // ⚠ 与内容材质**同一份** group 0 布局 ⇒ 同一个 `layout_id`
+                //    （契约：同布局同 id、异布局异 id）。
+                bind_group: &zero.bind_group,
+                layout: zero.layout.clone(),
+                layout_id: ZERO_LAYOUT_ID,
+            },
+            ResolvedGroup {
+                group: MATERIAL_BIND_GROUP,
+                bind_group: &binding.bind_group,
+                layout: material_layout.clone(),
+                layout_id: MATERIAL_LAYOUT_ID,
+            },
+        ],
+        // 混合档与剔除档来自 `material::frame_key`（那两档**不在文档里**：它们是策略，
+        // 依据是 oracle 那条天空盒管线自己的固定状态，见那个函数的注释）。
+        blend: binding.key.blend(),
+        cull: Cull::None,
+        // 片元阶段：文档里内联的那份 WGSL 组装后的全文，入口也是文档给的那个名字。
+        fragment_shader: loaded.assembled.as_str(),
+        fragment_entry: loaded.entry.as_str(),
+    }));
 
     // ---- 外部目标：深度图与最终目标 ----
     let target = shot::Target::new(&gpu.device, width, height);
@@ -633,17 +916,17 @@ pub fn run(
             .iter()
             .map(|pass| pass.label.clone())
             .collect(),
-        skipped: SKIPPED
-            .iter()
-            .map(|(label, why)| (label.to_string(), why.to_string()))
-            .collect(),
+        // ⚠ §136 起这一栏是空的：文档里六条 pass 全部执行，**一条都不跳**。
+        //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
+        //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
+        skipped: Vec::new(),
     })
 }
 
 /// 按 [`EXECUTED`] 把计划切成"这一档真的交给执行器的那一份"，并把**没执行的**打出来。
 ///
 /// ⚠ 切出来的那一份仍然是 `px_pass::Plan`：资源表、布局、`PassPlan` 全都是原来的那几份，
-/// 只是少了没执行的两条 —— 执行器看不到"切片"这回事，它只看到一张三行的 pass 表。
+/// 只是少了没执行的那几条 —— 执行器看不到"切片"这回事。
 fn subset(plan: &Plan, audit: &mut Vec<String>) -> Result<Plan, String> {
     let mut passes = Vec::with_capacity(EXECUTED.len());
     for label in EXECUTED {
@@ -670,24 +953,24 @@ fn subset(plan: &Plan, audit: &mut Vec<String>) -> Result<Plan, String> {
         .map(|pass| pass.label.as_str())
         .collect();
     audit.push(format!(
-        "本切片执行的 pass：{}（{} / {}）",
+        "本切片执行的 pass：{}（{} / {}{}）",
         EXECUTED.join(" → "),
         EXECUTED.len(),
-        plan.passes.len()
+        plan.passes.len(),
+        if not_executed.is_empty() {
+            "，**一条都不跳**"
+        } else {
+            ""
+        }
     ));
+    // ⚠ 跳过的那些**必须**在这里被点名：不点名的话，"图对上了"与"那条 pass 根本没跑"
+    //    在读数上长得一模一样（§107 那条：「一次改两个变量」在这张图上会让读数无法归因）。
     if !not_executed.is_empty() {
         audit.push(format!(
-            "⚠ 本切片**没有执行**这 {} 条 pass（它们仍在计划里、也过了 `check()`，只是没交给执行器）：",
-            not_executed.len()
+            "⚠ 本切片**没有执行**这 {} 条 pass（它们仍在计划里、也过了 `check()`，只是没交给执行器）：{}",
+            not_executed.len(),
+            not_executed.join(" / ")
         ));
-        for label in not_executed {
-            let why = SKIPPED
-                .iter()
-                .find(|(skipped, _)| *skipped == label)
-                .map(|(_, why)| *why)
-                .unwrap_or("（没有登记原因：这是宿主自己的疏漏，不是文档的问题）");
-            audit.push(format!("    '{label}'：{why}"));
-        }
     }
     let subset = Plan {
         layout: plan.layout.clone(),
@@ -719,17 +1002,27 @@ fn create_depth(device: &wgpu::Device, width: u32, height: u32, label: &str) -> 
     })
 }
 
-/// 顶点阶段声明的**每一个输入**都必须落在产物的属性表里（位置/法线/uv）。
+/// 顶点阶段声明的一个输入：`location` 与它要的类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VertexInput {
+    location: u32,
+    format: wgpu::VertexFormat,
+}
+
+/// 一段顶点阶段声明的**全部 `@location` 输入**（按声明次序）。
 ///
-/// ⚠ 这条判据是 §131 那次"顶点阶段只写 position、而片元读三个 location"的**同一条推理的
-/// 另一半**：错位 / 缺属性在画面上只是"某几个属性读成了别的格子"，而任何门都不会响。
-/// 反射的是**文档里那段顶点阶段**，不是"我们以为它要什么"。
-fn check_vertex_inputs(
+/// ⚠ 反射的是**文档里那段顶点阶段**，不是"我们以为它要什么"：它声明的每一个
+/// `@location(n)` 都必须落在产物的属性表里，而且类型一致。错位在画面上只是
+/// "某几个属性读成了别的格子"，任何门都不会响。
+///
+/// ⚠ 返回**空表**不是"没事"，而是一条判据：一个 `@location` 都不读 ⇒ 这一笔是
+/// **程序化**的（顶点全由 `vertex_index` 现算，顶点缓冲用不上）。两件事共用这一次反射，
+/// 正是为了让"它读什么"只有一个答案。
+fn vertex_inputs(
     module: &naga::Module,
     entry_name: &str,
     label: &str,
-    geometry: &Geometry,
-) -> Result<(), String> {
+) -> Result<Vec<VertexInput>, String> {
     let entry = module
         .entry_points
         .iter()
@@ -745,6 +1038,7 @@ fn check_vertex_inputs(
                     .join(" / ")
             )
         })?;
+    let mut inputs = Vec::new();
     for argument in &entry.function.arguments {
         let Some(naga::Binding::Location { location, .. }) = argument.binding else {
             continue;
@@ -755,23 +1049,37 @@ fn check_vertex_inputs(
                 module.types[argument.ty].inner
             )
         })?;
+        inputs.push(VertexInput { location, format });
+    }
+    Ok(inputs)
+}
+
+/// 顶点阶段要的每一格都必须落在**产物的属性表**里（缺一格 / 类型不符都当场拒）。
+fn check_vertex_inputs(
+    inputs: &[VertexInput],
+    label: &str,
+    geometry: &Geometry,
+) -> Result<(), String> {
+    for input in inputs {
         let found = geometry
             .attributes
             .iter()
-            .find(|attribute| attribute.shader_location == location);
+            .find(|attribute| attribute.shader_location == input.location);
         match found {
-            Some(attribute) if attribute.format == format => {}
+            Some(attribute) if attribute.format == input.format => {}
             Some(attribute) => {
                 return Err(format!(
-                    "pass '{label}' 的顶点阶段在 location({location}) 上要 {format:?}，\
+                    "pass '{label}' 的顶点阶段在 location({}) 上要 {:?}，\
                      而几何 '{}' 在那里给的是 {:?}：属性表与顶点阶段说的不是一件事",
-                    geometry.name, attribute.format
+                    input.location, input.format, geometry.name, attribute.format
                 ))
             }
             None => {
                 return Err(format!(
-                    "pass '{label}' 的顶点阶段要 location({location})（{format:?}），\
+                    "pass '{label}' 的顶点阶段要 location({})（{:?}），\
                      而几何 '{}' 的属性表只有 [{}]：产物没带这个属性",
+                    input.location,
+                    input.format,
                     geometry.name,
                     geometry
                         .attributes
@@ -787,6 +1095,25 @@ fn check_vertex_inputs(
         }
     }
     Ok(())
+}
+
+/// 一笔**程序化**几何：没有顶点缓冲、没有索引缓冲，顶点数由帧策略定。
+///
+/// ⚠ `vertices: None` 就是这个意思（`ResolvedGeometry` 那条注释：顶点由顶点着色器按
+/// `@builtin(vertex_index)` 现算）。别在这里塞一个"空缓冲"顶上：空缓冲是**有**顶点缓冲，
+/// 执行器会拿它去建管线的顶点布局，而那段顶点阶段根本不认那个布局。
+fn procedural_geometry(name: String) -> Geometry {
+    Geometry {
+        name,
+        // ⚠ `vertices: None` **就是**"这一笔没有顶点缓冲"那件事本身（`Geometry::procedural`
+        // 直接读它）—— 别在这里塞一个"空缓冲"顶上：空缓冲是**有**顶点缓冲，
+        // 执行器会拿它去建管线的顶点布局，而那段顶点阶段根本不认那个布局。
+        vertices: None,
+        indices: None,
+        attributes: Vec::new(),
+        vertex_count: PROCEDURAL_VERTICES,
+        index_count: 0,
+    }
 }
 
 /// naga 的类型 → 顶点属性格式。只认产物真会带的那几种（`f32` / `vec2<f32>` / `vec3<f32>`），
@@ -807,5 +1134,171 @@ fn vertex_format(module: &naga::Module, ty: naga::Handle<naga::Type>) -> Option<
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use px_protocol::material::TextureDimension;
+    use px_protocol::scene::{Member, SceneSpec};
+
+    /// 一份最小文档：`objects` 与 `frame_materials` 两节的 JSON 由调用方给。
+    ///
+    /// ⚠ 判据只喂这两节 —— 名字解析这条规则的全部输入就是这两张表。
+    fn spec_of(objects: &[&str], frames: &[&str]) -> SceneSpec {
+        let object = |id: &str| {
+            format!(
+                r#"{{"id": "{id}",
+                     "geometry": {{"source": "primitive", "name": "icosphere", "params": {{"radius": 1.0}}}},
+                     "material": {{"shader": {{"graph": "shaders", "node": "surface", "key": "00"}}}}}}"#
+            )
+        };
+        let frame = |name: &str| {
+            format!(
+                r#"{{"name": "{name}",
+                     "shader": "@fragment fn fragment() -> @location(0) vec4<f32> {{ return vec4<f32>(1.0); }}",
+                     "entry": "fragment"}}"#
+            )
+        };
+        let text = format!(
+            r#"{{"schema": {}, "name": "夹具", "objects": [{}], "frame_materials": [{}]}}"#,
+            px_protocol::SCENE_SCHEMA,
+            objects.iter().map(|id| object(id)).collect::<Vec<_>>().join(","),
+            frames.iter().map(|name| frame(name)).collect::<Vec<_>>().join(",")
+        );
+        serde_json::from_str(&text).expect("夹具文档")
+    }
+
+    /// 名字落在**哪张表**：物体 id 与帧自有材质各自的名字空间。
+    #[test]
+    fn a_material_name_resolves_to_exactly_one_table() {
+        let spec = spec_of(&["planet", "atmosphere"], &["skybox"]);
+        assert_eq!(
+            material_table(&spec, "planet").expect("物体那张表"),
+            MaterialTable::Objects(0)
+        );
+        assert_eq!(
+            material_table(&spec, "atmosphere").expect("物体那张表"),
+            MaterialTable::Objects(1)
+        );
+        assert_eq!(
+            material_table(&spec, "skybox").expect("帧材质那张表"),
+            MaterialTable::Frame(0)
+        );
+        // ⚠ 名字是**索引**：解析结果里只有"第几张表的第几个"，没有一个字节的语义。
+        assert!(material_table(&spec, "planet").unwrap().describe().contains("物体"));
+        assert!(material_table(&spec, "skybox").unwrap().describe().contains("帧自有材质"));
+    }
+
+    /// **两张表都没有** ⇒ 拒，而且**两张表都要列出来**（只说"找不到"会让人去改错的那一张）。
+    #[test]
+    fn a_name_in_neither_table_is_refused_with_both_lists() {
+        let spec = spec_of(&["planet"], &["skybox"]);
+        let err = material_table(&spec, "skybx").expect_err("两张表都没有 ⇒ 拒");
+        assert!(err.contains("planet"), "要列出物体 id：{err}");
+        assert!(err.contains("skybox"), "要列出帧自有材质：{err}");
+        assert!(err.contains("两张表里都没有"), "{err}");
+    }
+
+    /// **两张表都有** ⇒ 也拒（歧义是调用方要修的，静默的优先级不是规则）。
+    #[test]
+    fn a_name_in_both_tables_is_refused_as_ambiguity() {
+        let spec = spec_of(&["planet"], &["planet"]);
+        let err = material_table(&spec, "planet").expect_err("两张表都有 ⇒ 拒");
+        assert!(err.contains("两张表"), "{err}");
+        assert!(err.contains("物体 id"), "{err}");
+        assert!(err.contains("帧自有材质"), "{err}");
+    }
+
+    /// 一份**帧材质**夹具：`textures` 就是反射出来的那几格。
+    fn frame_material(textures: &[(u32, TextureDimension)]) -> art::LoadedFrameMaterial {
+        art::LoadedFrameMaterial {
+            name: "skybox".to_string(),
+            entry: "fragment".to_string(),
+            assembled: String::new(),
+            params: Vec::new(),
+            textures: textures.to_vec(),
+            version: 0,
+        }
+    }
+
+    /// 一份**天空盒**夹具：只有层数与名字参与判据。
+    fn skybox_fixture(layers: u32) -> art::Skybox {
+        let shape = px_protocol::art::TextureShape {
+            width: 512,
+            height: 512,
+            layers,
+            levels: 1,
+            format: px_protocol::art::TextureFormat::Rgba8Srgb,
+        };
+        art::Skybox {
+            sampler: px_protocol::scene::Sampler::clamped(),
+            texture: art::LoadedTexture {
+                member: Member::new("generated", "stars", "00"),
+                shape,
+                bytes: Vec::new(),
+                image: image::RgbaImage::new(512, 512),
+            },
+        }
+    }
+
+    /// 帧材质的贴图格 → 天空盒落点：**恰好一格**才是可判的，其余三档都当场拒。
+    #[test]
+    fn the_skybox_lands_on_the_only_slot_the_frame_material_declares() {
+        let cube = [(5, TextureDimension::Cube)];
+        let skybox = skybox_fixture(6);
+        assert_eq!(
+            skybox_slot(&frame_material(&cube), Some(&skybox)).expect("一格 ⇒ 就是它"),
+            Some(5)
+        );
+
+        // 一格都没声明，而环境里有天空盒 ⇒ 那份天空盒没有去处 ⇒ 拒。
+        let err = skybox_slot(&frame_material(&[]), Some(&skybox)).expect_err("没有去处 ⇒ 拒");
+        assert!(err.contains("没有去处"), "{err}");
+
+        // 两格以上 ⇒ **无从知道**天空盒落哪一格 ⇒ 拒（不许挑一个）。
+        let two = [(5, TextureDimension::Cube), (7, TextureDimension::Cube)];
+        let err = skybox_slot(&frame_material(&two), Some(&skybox)).expect_err("歧义 ⇒ 拒");
+        assert!(err.contains("第 5 格") && err.contains("第 7 格"), "要列出那几格：{err}");
+        assert!(err.contains("没有任何依据"), "{err}");
+
+        // 维度不符（声明 2D、图是 6 层 cube）⇒ 拒。
+        let flat = [(1, TextureDimension::D2)];
+        let err = skybox_slot(&frame_material(&flat), Some(&skybox)).expect_err("维度不符 ⇒ 拒");
+        assert!(err.contains("6 层"), "{err}");
+
+        // 环境里**没有**天空盒 ⇒ 帧材质也不该声明贴图格（声明了就没人能兑现它）。
+        assert_eq!(
+            skybox_slot(&frame_material(&[]), None).expect("两边都空"),
+            None
+        );
+        let err = skybox_slot(&frame_material(&cube), None).expect_err("无处可绑 ⇒ 拒");
+        assert!(err.contains("没有天空盒"), "{err}");
+    }
+
+    /// 帧自有材质的状态是**策略**，取值来自 oracle 那条管线自己的固定状态：
+    /// 不混合（`ColorTargetState { blend: None }`）、两面都画
+    /// （`PrimitiveState::default()` 的 `cull_mode: None`）。
+    #[test]
+    fn the_frame_material_state_follows_the_oracle_pipeline() {
+        let key = material::frame_key(0x1234);
+        assert_eq!(key.shader, 0x1234);
+        assert_eq!(key.cull, material::cull_code(CullMode::None));
+        assert_eq!(key.alpha, material::alpha_code(px_protocol::scene::AlphaMode::Opaque));
+        assert_eq!(key.blend(), None, "不混合：oracle 那条管线的 blend 就是 None");
+        assert_eq!(key.cull_face(), None, "两面都画");
+    }
+
+    /// 程序化几何：**两块缓冲都不给**、顶点数是 oracle 自己那个 `draw(0..3, 0..1)`。
+    #[test]
+    fn procedural_geometry_has_no_buffers_and_three_vertices() {
+        let geometry = procedural_geometry("skybox".to_string());
+        assert!(geometry.vertices.is_none());
+        assert!(geometry.indices.is_none());
+        assert!(geometry.attributes.is_empty());
+        assert_eq!(geometry.vertex_count, PROCEDURAL_VERTICES);
+        assert_eq!(PROCEDURAL_VERTICES, 3, "oracle 的 `render_pass.draw(0..3, 0..1)`");
+        assert!(geometry.procedural(), "没有顶点缓冲**就是**程序化");
     }
 }

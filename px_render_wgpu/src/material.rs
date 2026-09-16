@@ -20,7 +20,7 @@ use px_protocol::material::{MATERIAL_BIND_GROUP, PARAMS_BINDING, TEXTURE_SLOTS, 
 use px_protocol::scene::{AlphaMode, CullMode, Sampler};
 use wgpu::util::{DeviceExt, TextureDataOrder};
 
-use crate::art::{LoadedObject, LoadedTexture};
+use crate::art::{BoundTexture, LoadedObject, LoadedTexture};
 use crate::shot::FORMAT;
 
 /// 内容 shader 的片元入口名。四份 pxart 内容（surface / atmosphere / clouds / ring）
@@ -470,6 +470,42 @@ pub struct MaterialBinding {
     pub fallback_slots: Vec<u32>,
 }
 
+/// 建一份绑定组要的全部输入：**内容材质与帧自有材质共用的那一份**（§135）。
+///
+/// ⚠ 为什么要有它：绑定组的构造只有一份（12 格超集 + 空槽绑兜底白图）。帧自有材质
+/// **没有** `LoadedObject`（它没有几何、没有变换、也没有 CAS 成员），若为它另写一份
+/// 绑定构造，"空格绑白图"这条口径就有了两个实现 —— 而漂开的那天，帧材质与内容材质
+/// 会在**同一份契约**上给出两种绑定组，画面只是"某几个像素不一样"。
+///
+/// 也就是说：帧自有材质的"自有"是**兑现者自有**（那支 WGSL 只由裸 wgpu 宿主兑现），
+/// 不是契约自有 —— 它照样走这条 12 格超集的路（§135 的裁决）。
+pub struct BindingRequest<'a> {
+    /// 管线特化键：哪一版 WGSL × 哪一档剔除 × 哪一档混合。
+    pub key: PipelineKey,
+    /// 报错与审计用的名字（物体 id，或者帧自有材质的名字）。
+    pub label: &'a str,
+    /// 按**这份 shader 自己声明的结构体**打包好的参数（`MaterialLayout::pack`）。
+    pub params: &'a [u8],
+    /// 这一份材质**真给了**的贴图。没给的格由这里绑兜底白图。
+    pub textures: &'a [BoundTexture],
+}
+
+/// **帧自有材质**的管线键（§135）：文档里没有"混合档 / 剔除档"这两栏（内容材质的
+/// `material.alpha` / `material.cull` 是内容），所以这两档是**渲染器的决定** ——
+/// 而它们的取值有出处，不是直觉：
+///
+/// - `blend = None`（不混合）：oracle 那条天空盒管线的
+///   `ColorTargetState { blend: None, .. }`（`bevy_core_pipeline-0.19.1/src/skybox/mod.rs:180-185`）；
+/// - `cull_mode = None`（两面都画）：同一处 `specialize` **没有**填 `primitive`，于是取
+///   `PrimitiveState::default()` 的 `cull_mode: None`（`RenderPipelineDescriptor::default()`）。
+///
+/// ⚠ 两档都落在 [`AlphaMode::Opaque`] / [`CullMode::None`] 上，而这两个"恰好是缺省"不是
+/// 理由 —— 理由是上面那两行 oracle。哪天帧材质多出一档（半透明的天空盒），要在这里
+/// 开一格，而不是让某一份文档去写它：帧状态是策略，策略不随内容走。
+pub fn frame_key(version: u64) -> PipelineKey {
+    PipelineKey::new(version, CullMode::None, AlphaMode::Opaque)
+}
+
 /// 建管线要的那几样输入。`key` 决定状态，其余的是"这一台/这一版不变"的东西。
 pub struct PipelineRequest<'a> {
     pub key: PipelineKey,
@@ -522,10 +558,7 @@ impl Materials {
         built
     }
 
-    /// 一个物体 → 参数缓冲 + group 3 绑定组。
-    ///
-    /// 参数缓冲**每个物体一份**（布局里 `min_binding_size: None`，真实大小由缓冲决定）：
-    /// 两份材质共用一块缓冲时，谁先写谁说了算 —— 那是"同一件事、两处维护"的另一种写法。
+    /// 一个物体 → 参数缓冲 + group 3 绑定组（内容材质那条入口，见 [`Self::bind_request`]）。
     ///
     /// ⚠ 贴图在这里**现传**（`upload_texture`）。判据与这一件只需要"绑得对"；
     /// 一张 1.6 MB 的 albedo 每帧重传当然不行，所以**上传缓存归调用方**
@@ -536,11 +569,30 @@ impl Materials {
         queue: &wgpu::Queue,
         object: &LoadedObject,
     ) -> Result<MaterialBinding, String> {
-        let key = key_of(object)?;
-        let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let request = BindingRequest {
+            key: key_of(object)?,
+            label: object.id.as_str(),
+            params: object.params.as_slice(),
+            textures: object.textures.as_slice(),
+        };
+        self.bind_request(device, queue, &request)
+    }
+
+    /// 一份材质 → 参数缓冲 + group 3 绑定组。**内容材质与帧自有材质走的是这一条**
+    /// （两条路的差别只有"键从哪来、贴图从哪来"，绑定组的形状一格都不许差）。
+    ///
+    /// 参数缓冲**每份材质一份**（布局里 `min_binding_size: None`，真实大小由缓冲决定）：
+    /// 两份材质共用一块缓冲时，谁先写谁说了算 —— 那是"同一件事、两处维护"的另一种写法。
+    pub fn bind_request(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        request: &BindingRequest<'_>,
+    ) -> Result<MaterialBinding, String> {
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            contents: &object.params,
+            contents: request.params,
         });
 
         // 视图先全收进一个表里：`entries` 借的是它们，而它们必须活到 `create_bind_group` 之后。
@@ -549,7 +601,11 @@ impl Materials {
         let mut bound_slots = Vec::new();
         let mut fallback_slots = Vec::new();
         for (binding, dimension) in TEXTURE_SLOTS {
-            match object.texture(binding) {
+            match request
+                .textures
+                .iter()
+                .find(|bound| bound.binding == binding)
+            {
                 Some(bound) => {
                     let (_, view) = upload_texture(device, queue, &bound.texture);
                     views.push(view);
@@ -568,7 +624,7 @@ impl Materials {
         let mut entries: Vec<wgpu::BindGroupEntry> = vec![wgpu::BindGroupEntry {
             binding: PARAMS_BINDING,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &params,
+                buffer: &params_buffer,
                 offset: 0,
                 size: None,
             }),
@@ -584,14 +640,15 @@ impl Materials {
             });
         }
 
+        let label = format!("material bind group（{}）", request.label);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("material bind group"),
+            label: Some(label.as_str()),
             layout: &self.layout,
             entries: &entries,
         });
         Ok(MaterialBinding {
-            key,
-            params,
+            key: request.key,
+            params: params_buffer,
             bind_group,
             bound_slots,
             fallback_slots,

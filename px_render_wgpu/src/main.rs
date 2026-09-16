@@ -37,7 +37,10 @@ fn usage() -> String {
         "      按文档里的帧表画一帧（切片 1：预通道 → 不透明 → blit），回读、落 PNG。",
         "  px_render_wgpu --diff A.png B.png",
         "      两张 PNG 逐像素比（不要 GPU）：差异像素数 / 最大与平均通道差 / 差异区域 /",
-        "      行星剪影内的像素是不是逐位相同。",
+        "      剪影内的像素是不是逐位相同。",
+        "      ⚠ **按位置读，不按角色读**：背景色与剪影**只按第一个参数（左图）**定，",
+        "        约定是『左 = 本宿主那张 / 右 = oracle』。传反了整篇读数就反着读 ——",
+        "        本工具不认识角色，所以报告开头会把两条路径连同左右一起打出来。",
         "  px_render_wgpu --device [--shot PNG] [--width W] [--height H]",
         "      建实例/适配器/设备（Vulkan 锁死），报「到设备就绪」的读数；",
         "      给了 --shot 就再清一张纯色图、回读、落 PNG。",
@@ -192,10 +195,13 @@ fn run_scene(scene: &Path, out: &Path, width: u32, height: u32) -> i32 {
 }
 
 /// `--diff`：两张 PNG 的实测差异。**不要 GPU**（它是读数，不是渲染）。
+///
+/// ⚠ 参数是**位置**，不是角色（`(左, 右)`）。报告开头会把这一点与两条路径一起打出来 ——
+/// 这个工具不知道哪一张是 oracle，而"它替使用者猜角色"正是 §136 那次读反的根因。
 fn run_diff(left: &Path, right: &Path) -> i32 {
     match diff::compare(left, right) {
         Ok(report) => {
-            println!("比对：{} ↔ {}", left.display(), right.display());
+            println!("比对（左 / 右 = 第一个 / 第二个参数）：");
             println!("{}", report.report());
             0
         }
