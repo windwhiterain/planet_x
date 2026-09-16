@@ -939,3 +939,32 @@ camera::tests::the_probe_camera_matches_bevy_bit_for_bit
 
 ⚠ **这一格红着，所以这些改动没有提交** —— 提交的树（`2c15fab`）仍然是
 **11 passed / 0 failed**。判据没拿到就不算完成，红着提交等于把门拆了。
+
+---
+
+## §118 相机位判据**转绿**，以及那 1 ulp 的真凶：Bevy 的 `Dir3` 是**除法**归一化
+
+§117 那 1 ulp（`world_from_view[6]` `BE302109` vs `BE302108`）抓到了，真凶不在四元数、
+不在 Shepperd、也不在 `quat_to_axes` —— 而在**归一化**：
+
+| 出处 | 写法 |
+|---|---|
+| Bevy `Dir3::new`（`bevy_math-0.19.1/src/direction.rs:587-594`） | **`value / length`** |
+| glam `Vec3::try_normalize` | `value * (1.0 / length)` |
+
+两者数学等价、**浮点上不等价**。`look_to` 里那句 `back = -direction.try_into()` 走的是
+Bevy 的 `Dir3` ⇒ **除法**；而同一函数里 `right = up.cross(back).try_normalize()` 用的是
+glam 的 `try_normalize` ⇒ **乘倒数**。**同一个函数里两处归一化，写法故意不同。**
+
+⚠ 这是同一族坑在本工程里的**第四次**出现（前三次：§110.1.1 解析逆 vs 通用逆、
+§116 四元数往返不恒等、§117 这次的表象）。它们的共同形状是：
+**"数学等价"在逐字节判据下不是等价**，而且**都只在跑过一遍之后才看得见**。
+⇒ 移植 Bevy/glam 的算式时，凡是"看起来可以统一写法"的地方，都要先当成**有嫌疑**。
+
+**读数**：`cargo test -p px_render_wgpu` = **13 passed / 0 failed**。
+`camera::tests::the_probe_camera_matches_bevy_bit_for_bit` 断言了
+aspect 位模式 `3FC00000`、`position` 的 `00000000 3F0CCCCD 4049999A`、
+以及 `world_from_view` 与 `clip_from_view` 的**全部 32 个位模式**（用 `to_bits()`，
+不是近似比较）。
+
+⇒ §111 第 1 件（相机数学）与第 2 件（`camera.rs`）**完成**。下一件是第 3 件 group 0。

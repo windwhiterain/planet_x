@@ -258,6 +258,468 @@ impl Mat4 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Vec3 —— `glam 0.32.1` `src/f32/vec3.rs`（非 SIMD 的普通类型）
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Vec3 {
+    pub const ZERO: Self = Self::new(0.0, 0.0, 0.0);
+    pub const ONE: Self = Self::new(1.0, 1.0, 1.0);
+    pub const X: Self = Self::new(1.0, 0.0, 0.0);
+    pub const Y: Self = Self::new(0.0, 1.0, 0.0);
+    pub const Z: Self = Self::new(0.0, 0.0, 1.0);
+
+    #[inline(always)]
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    #[inline(always)]
+    pub const fn splat(v: f32) -> Self {
+        Self { x: v, y: v, z: v }
+    }
+
+    #[inline(always)]
+    pub const fn from_array(a: [f32; 3]) -> Self {
+        Self {
+            x: a[0],
+            y: a[1],
+            z: a[2],
+        }
+    }
+
+    #[inline(always)]
+    pub const fn to_array(self) -> [f32; 3] {
+        [self.x, self.y, self.z]
+    }
+
+    /// `glam` `src/f32/vec3.rs:250`：`(x*x') + (y*y') + (z*z')`，左结合。
+    #[inline]
+    #[must_use]
+    pub fn dot(self, rhs: Self) -> f32 {
+        (self.x * rhs.x) + (self.y * rhs.y) + (self.z * rhs.z)
+    }
+
+    /// `glam` `src/f32/vec3.rs:264`
+    #[inline]
+    #[must_use]
+    pub fn cross(self, rhs: Self) -> Self {
+        Self {
+            x: self.y * rhs.z - rhs.y * self.z,
+            y: self.z * rhs.x - rhs.z * self.x,
+            z: self.x * rhs.y - rhs.x * self.y,
+        }
+    }
+
+    /// `glam` `src/f32/vec3.rs:554`
+    #[inline]
+    #[must_use]
+    pub fn length(self) -> f32 {
+        f32::sqrt(self.dot(self))
+    }
+
+    /// `glam` `src/f32/vec3.rs:573`
+    #[inline]
+    #[must_use]
+    pub fn length_recip(self) -> f32 {
+        self.length().recip()
+    }
+
+    /// `glam` `src/f32/vec3.rs:626`
+    #[inline]
+    #[must_use]
+    pub fn normalize(self) -> Self {
+        self.mul(self.length_recip())
+    }
+
+    /// `glam` `src/f32/vec3.rs:657`
+    #[inline]
+    #[must_use]
+    pub fn normalize_or_zero(self) -> Self {
+        let rcp = self.length_recip();
+        if rcp.is_finite() && rcp > 0.0 {
+            self * rcp
+        } else {
+            Self::ZERO
+        }
+    }
+
+    /// `glam` `src/f32/vec3.rs:641`（`try_normalize`，`look_to` 用它）
+    #[inline]
+    #[must_use]
+    pub fn try_normalize(self) -> Option<Self> {
+        let rcp = self.length_recip();
+        if rcp.is_finite() && rcp > 0.0 {
+            Some(self * rcp)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn mul(self, rhs: f32) -> Self {
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+            z: self.z * rhs,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn add(self, rhs: Self) -> Self {
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+            z: self.z + rhs.z,
+        }
+    }
+}
+
+impl core::ops::Add for Vec3 {
+    type Output = Self;
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        Vec3::add(self, rhs)
+    }
+}
+
+impl core::ops::Sub for Vec3 {
+    type Output = Self;
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+            z: self.z - rhs.z,
+        }
+    }
+}
+
+impl core::ops::Mul<f32> for Vec3 {
+    type Output = Self;
+    #[inline]
+    fn mul(self, rhs: f32) -> Self {
+        Vec3::mul(self, rhs)
+    }
+}
+
+impl core::ops::Neg for Vec3 {
+    type Output = Self;
+    #[inline]
+    fn neg(self) -> Self {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mat3 —— `glam 0.32.1` `src/f32/mat3.rs`
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mat3 {
+    pub x_axis: Vec3,
+    pub y_axis: Vec3,
+    pub z_axis: Vec3,
+}
+
+impl Mat3 {
+    pub const IDENTITY: Self = Self::from_cols(Vec3::X, Vec3::Y, Vec3::Z);
+
+    #[inline(always)]
+    pub const fn from_cols(x_axis: Vec3, y_axis: Vec3, z_axis: Vec3) -> Self {
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+        }
+    }
+
+    /// `glam` `src/f32/mat3.rs:212`（与 `src/f32/sse2/mat3a.rs:278` 的
+    /// `Mat3A::from_quat` 是同一串算式）
+    #[inline]
+    #[must_use]
+    pub fn from_quat(rotation: Quat) -> Self {
+        let x2 = rotation.x + rotation.x;
+        let y2 = rotation.y + rotation.y;
+        let z2 = rotation.z + rotation.z;
+        let xx = rotation.x * x2;
+        let xy = rotation.x * y2;
+        let xz = rotation.x * z2;
+        let yy = rotation.y * y2;
+        let yz = rotation.y * z2;
+        let zz = rotation.z * z2;
+        let wx = rotation.w * x2;
+        let wy = rotation.w * y2;
+        let wz = rotation.w * z2;
+
+        Self::from_cols(
+            Vec3::new(1.0 - (yy + zz), xy + wz, xz - wy),
+            Vec3::new(xy - wz, 1.0 - (xx + zz), yz + wx),
+            Vec3::new(xz + wy, yz - wx, 1.0 - (xx + yy)),
+        )
+    }
+
+    /// `glam` `src/f32/mat3.rs:493`
+    #[inline]
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        Self {
+            x_axis: Vec3::new(self.x_axis.x, self.y_axis.x, self.z_axis.x),
+            y_axis: Vec3::new(self.x_axis.y, self.y_axis.y, self.z_axis.y),
+            z_axis: Vec3::new(self.x_axis.z, self.y_axis.z, self.z_axis.z),
+        }
+    }
+
+    /// `glam` `src/f32/mat3.rs:677`
+    #[inline]
+    #[must_use]
+    pub fn mul_vec3(&self, rhs: Vec3) -> Vec3 {
+        let mut res = self.x_axis.mul(rhs.x);
+        res = res.add(self.y_axis.mul(rhs.y));
+        res = res.add(self.z_axis.mul(rhs.z));
+        res
+    }
+
+    /// `glam` `src/f32/mat3.rs:930`（`impl Mul for Mat3`，逐列 `mul_vec3`）
+    #[inline]
+    #[must_use]
+    pub fn mul_mat3(&self, rhs: &Mat3) -> Mat3 {
+        Mat3::from_cols(
+            self.mul_vec3(rhs.x_axis),
+            self.mul_vec3(rhs.y_axis),
+            self.mul_vec3(rhs.z_axis),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quat —— `glam 0.32.1` `src/f32/sse2/quat.rs`
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quat {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl Quat {
+    pub const IDENTITY: Self = Self::from_xyzw(0.0, 0.0, 0.0, 1.0);
+
+    #[inline(always)]
+    pub const fn from_xyzw(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    /// `glam` `src/f32/sse2/quat.rs:178`
+    #[inline]
+    #[must_use]
+    pub fn from_rotation_y(angle: f32) -> Self {
+        let (s, c) = f32::sin_cos(angle * 0.5);
+        Self::from_xyzw(0.0, s, 0.0, c)
+    }
+
+    /// `glam` `src/f32/sse2/quat.rs:277`
+    #[inline]
+    #[must_use]
+    pub fn from_mat3(mat: &Mat3) -> Self {
+        Self::from_rotation_axes(mat.x_axis, mat.y_axis, mat.z_axis)
+    }
+
+    /// `glam` `src/f32/sse2/quat.rs:208` `from_rotation_axes`（Shepperd /
+    /// DirectXMath `XMQuaternionRotationMatrix`）：分支条件、四个 `four_*sq`、
+    /// 每个分支自己的 `inv4* = 0.5 / sqrt(four_*sq)` 与分量顺序都照抄。
+    #[inline]
+    #[must_use]
+    pub fn from_rotation_axes(x_axis: Vec3, y_axis: Vec3, z_axis: Vec3) -> Self {
+        let (m00, m01, m02) = (x_axis.x, x_axis.y, x_axis.z);
+        let (m10, m11, m12) = (y_axis.x, y_axis.y, y_axis.z);
+        let (m20, m21, m22) = (z_axis.x, z_axis.y, z_axis.z);
+        if m22 <= 0.0 {
+            // x^2 + y^2 >= z^2 + w^2
+            let dif10 = m11 - m00;
+            let omm22 = 1.0 - m22;
+            if dif10 <= 0.0 {
+                // x^2 >= y^2
+                let four_xsq = omm22 - dif10;
+                let inv4x = 0.5 / f32::sqrt(four_xsq);
+                Self::from_xyzw(
+                    four_xsq * inv4x,
+                    (m01 + m10) * inv4x,
+                    (m02 + m20) * inv4x,
+                    (m12 - m21) * inv4x,
+                )
+            } else {
+                // y^2 >= x^2
+                let four_ysq = omm22 + dif10;
+                let inv4y = 0.5 / f32::sqrt(four_ysq);
+                Self::from_xyzw(
+                    (m01 + m10) * inv4y,
+                    four_ysq * inv4y,
+                    (m12 + m21) * inv4y,
+                    (m20 - m02) * inv4y,
+                )
+            }
+        } else {
+            // z^2 + w^2 >= x^2 + y^2
+            let sum10 = m11 + m00;
+            let opm22 = 1.0 + m22;
+            if sum10 <= 0.0 {
+                // z^2 >= w^2
+                let four_zsq = opm22 - sum10;
+                let inv4z = 0.5 / f32::sqrt(four_zsq);
+                Self::from_xyzw(
+                    (m02 + m20) * inv4z,
+                    (m12 + m21) * inv4z,
+                    four_zsq * inv4z,
+                    (m01 - m10) * inv4z,
+                )
+            } else {
+                // w^2 >= z^2
+                let four_wsq = opm22 + sum10;
+                let inv4w = 0.5 / f32::sqrt(four_wsq);
+                Self::from_xyzw(
+                    (m12 - m21) * inv4w,
+                    (m20 - m02) * inv4w,
+                    (m01 - m10) * inv4w,
+                    four_wsq * inv4w,
+                )
+            }
+        }
+    }
+}
+
+impl Mat4 {
+    /// `glam` `src/f32/sse2/mat4.rs:192` `quat_to_axes` —— 与
+    /// `Mat3A::from_quat`（`src/f32/sse2/mat3a.rs:278`）同一串算式，只是列是 `Vec4`
+    /// 且 `w = 0.0`。
+    #[inline]
+    #[must_use]
+    fn quat_to_axes(rotation: Quat) -> (Vec4, Vec4, Vec4) {
+        let (x, y, z, w) = (rotation.x, rotation.y, rotation.z, rotation.w);
+        let x2 = x + x;
+        let y2 = y + y;
+        let z2 = z + z;
+        let xx = x * x2;
+        let xy = x * y2;
+        let xz = x * z2;
+        let yy = y * y2;
+        let yz = y * z2;
+        let zz = z * z2;
+        let wx = w * x2;
+        let wy = w * y2;
+        let wz = w * z2;
+
+        (
+            Vec4::new(1.0 - (yy + zz), xy + wz, xz - wy, 0.0),
+            Vec4::new(xy - wz, 1.0 - (xx + zz), yz + wx, 0.0),
+            Vec4::new(xz + wy, yz - wx, 1.0 - (xx + yy), 0.0),
+        )
+    }
+
+    /// `glam` `src/f32/sse2/mat4.rs:246`
+    #[inline]
+    #[must_use]
+    pub fn from_rotation_translation(rotation: Quat, translation: Vec3) -> Self {
+        let (x_axis, y_axis, z_axis) = Self::quat_to_axes(rotation);
+        Self::from_cols(
+            x_axis,
+            y_axis,
+            z_axis,
+            Vec4::new(translation.x, translation.y, translation.z, 1.0),
+        )
+    }
+
+    /// `glam` `src/f32/sse2/mat4.rs:226`（等价于 `Affine3A::from_scale_rotation_translation`
+    /// `src/f32/affine3a.rs:253` + `From<Affine3A> for Mat4` `src/f32/affine3a.rs:691`）
+    #[inline]
+    #[must_use]
+    pub fn from_scale_rotation_translation(scale: Vec3, rotation: Quat, translation: Vec3) -> Self {
+        let (x_axis, y_axis, z_axis) = Self::quat_to_axes(rotation);
+        Self::from_cols(
+            x_axis.mul(scale.x),
+            y_axis.mul(scale.y),
+            z_axis.mul(scale.z),
+            Vec4::new(translation.x, translation.y, translation.z, 1.0),
+        )
+    }
+
+    /// `glam` `src/f32/sse2/mat4.rs:1408`
+    #[inline]
+    #[must_use]
+    pub fn mul_vec4(&self, rhs: Vec4) -> Vec4 {
+        let mut res = self.x_axis.mul(rhs.x);
+        res = res.add(self.y_axis.mul(rhs.y));
+        res = res.add(self.z_axis.mul(rhs.z));
+        res = res.add(self.w_axis.mul(rhs.w));
+        res
+    }
+
+    /// `glam` `src/f32/sse2/mat4.rs:1431` -> `:1671`
+    #[inline]
+    #[must_use]
+    pub fn mul_mat4(&self, rhs: &Mat4) -> Mat4 {
+        Mat4::from_cols(
+            self.mul_vec4(rhs.x_axis),
+            self.mul_vec4(rhs.y_axis),
+            self.mul_vec4(rhs.z_axis),
+            self.mul_vec4(rhs.w_axis),
+        )
+    }
+
+    /// `glam` `src/f32/sse2/mat4.rs:1197`（`math::tan` = `f32::tan`）
+    #[inline]
+    #[must_use]
+    pub fn perspective_infinite_reverse_rh(
+        fov_y_radians: f32,
+        aspect_ratio: f32,
+        z_near: f32,
+    ) -> Self {
+        let f = 1.0 / f32::tan(0.5 * fov_y_radians);
+        Self::from_cols(
+            Vec4::new(f / aspect_ratio, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, f, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, 0.0, -1.0),
+            Vec4::new(0.0, 0.0, z_near, 0.0),
+        )
+    }
+}
+
+impl Vec4 {
+    /// `glam` `src/f32/sse2/vec4.rs`：`impl Add for Vec4`（`_mm_add_ps`）
+    #[inline]
+    #[must_use]
+    pub fn add(self, rhs: Self) -> Self {
+        Self::new(
+            self.x + rhs.x,
+            self.y + rhs.y,
+            self.z + rhs.z,
+            self.w + rhs.w,
+        )
+    }
+
+    /// `glam` `src/f32/sse2/vec4.rs`：`impl Mul<f32> for Vec4`
+    #[inline]
+    #[must_use]
+    pub fn mul(self, rhs: f32) -> Self {
+        Self::new(self.x * rhs, self.y * rhs, self.z * rhs, self.w * rhs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Mat4, Vec4};
@@ -358,4 +820,17 @@ mod tests {
         }
         assert!(failed.is_empty(), "cases failed: {failed:?}");
     }
+}
+
+
+impl Mat4 {
+    /// 全零矩阵。`camera.rs` 的测试拿它当「没算出来」的哨兵。
+    /// 用结构体字面量而不是 `Vec4::new(..)`：这样 `const` 一定成立，
+    /// 不必去猜 `Vec4::new` 是不是 `const fn`。
+    pub const ZERO: Self = Self {
+        x_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+        y_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+        z_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+        w_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+    };
 }
