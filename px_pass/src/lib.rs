@@ -708,6 +708,13 @@ pub struct PassPlan {
     /// 为什么顶点阶段必须由宿主给：内容 shader 是**纯片元**的（pxart 那几份没有 `@vertex`），
     /// 顶点变换是宿主与 Bevy 逐位对齐的那一段（§110）。执行器要是自己写一份"差不多"的，
     /// 两条宿主就会在两套矩阵算法上分岔 —— 而那正是逐字节判据最怕的漂移。
+    ///
+    /// ⚠ 它挂在 pass 上**只是因为守卫还没响过**：顶点阶段其实由**几何**决定
+    /// （oracle 是按 mesh 的顶点布局选它的），而"一条 pass 里的几何恰好共用一套布局"
+    /// 是**当前数据的巧合**，不是结构保证。`execute` 里有一条硬守卫：
+    /// 同一条 pass 里两笔 draw 的顶点布局不同 ⇒ **当场拒**（不许拿 pass 的顶点阶段
+    /// 套到另一套布局上）。它要是哪天响了，这个字段就搬到**几何**那一层 ——
+    /// 不是搬到材质：顶点阶段说的是"这份几何**提供**什么"，不是"材质**期望**什么"。
     pub vertex_shader: String,
     pub vertex_entry: String,
 }
@@ -930,6 +937,13 @@ impl Plan {
                     // ⚠ `reads` 尤其要拒：执行器既解析不了它、也校验不了宿主到底绑了什么，
                     //    留着就是一条**没人验的声明**，迟早烂掉。几何 pass 的纹理绑定
                     //    住在宿主的绑定组里 —— 那是它自己的事，这里不替它记账。
+                    // ⚠ `shader` / `entry` 同理：几何 pass 的片元阶段**属于材质**（§129），
+                    //    挂在 pass 上只会让一条 pass 里的多种材质共用一支 shader。
+                    if !pass.shader.trim().is_empty() || !pass.entry.trim().is_empty() {
+                        return Err(format!(
+                            "{at} 是 geometry，却给了 shader/entry：片元阶段属于**材质**                             （每个物体一支），几何 pass 的这一栏没人用 ——                              把 shader 挪到材质的 `fragment_shader` 那一格去"
+                        ));
+                    }
                     if !pass.params.is_empty() || !pass.slots.is_empty() || !pass.reads.is_empty() {
                         return Err(format!(
                             "{at} 是 geometry，却给了 reads（{} 个）/ params（{} 字节）/ \
@@ -1069,6 +1083,17 @@ pub struct ResolvedMaterial<'a> {
     /// 没有材质的那一笔（深度-only）取 [`Cull::None`]：没有任何东西声明过它要剔谁，
     /// 那就两面都画 —— 猜一个方向是这里最不该做的事。
     pub cull: Cull,
+    /// 片元阶段的 WGSL 全文。**空 = 没有片元阶段**（深度-only 的那一笔就是这样）。
+    ///
+    /// ⚠ 它属于**材质**（§129），不属于 pass：一份材质就是那支片元 shader
+    /// （`surface.wgsl` / `clouds.wgsl` / `atmosphere.wgsl` 就是材质的身份）。
+    /// 一条透明 pass 里同时有大气的 `Add`、云的 `Premultiplied`、环的 `Blend`
+    /// 三支不同的片元 shader —— 把片元阶段挂在 pass 上，那三支里只能活一支。
+    /// 这与 `blend`（§124）、`cull`（§127）是同一条推理，而这一条最强：
+    /// 前两个只是**受材质影响**，片元阶段**就是**材质。
+    pub fragment_shader: &'a str,
+    /// 片元阶段的入口名（`fragment_shader` 非空时才有意义）。
+    pub fragment_entry: &'a str,
 }
 
 pub struct Frame<'a> {
@@ -1435,7 +1460,7 @@ impl Executor {
         color_format: Option<TextureFormat>,
         geometry: &ResolvedGeometry<'_>,
         material: Option<&ResolvedMaterial<'_>>,
-    ) -> RenderPipeline {
+    ) -> Result<RenderPipeline, String> {
         let vertex_layout = geometry.vertices.as_ref().map(|(_, layout)| layout);
         let vertex_key = match vertex_layout {
             Some(layout) => Self::vertex_layout_key(layout),
@@ -1452,6 +1477,10 @@ impl Executor {
         let blend = material.and_then(|material| material.blend);
         // 剔除**只**从材质来：没有材质 ⇒ 两面都画（见 `ResolvedMaterial::cull`）。
         let cull = material.map(|material| material.cull).unwrap_or(Cull::None);
+        // 片元阶段同理：**材质就是那支 shader**（§129）。没有材质 ⇒ 没有片元阶段。
+        let fragment = material
+            .map(|material| (material.fragment_shader, material.fragment_entry))
+            .filter(|(shader, _)| !shader.trim().is_empty());
         // 布局身份按组号排一遍再进键：宿主给组的次序不该改变"这是哪条管线"。
         let mut identities: Vec<String> = match material {
             Some(material) => material
@@ -1465,32 +1494,42 @@ impl Executor {
         let key = format!(
             "geometry|{:016x}|{:016x}|{}|{}|{vertex_key}|{color_format:?}|{}|{}",
             fnv1a(pass.vertex_shader.as_bytes()),
-            fnv1a(pass.shader.as_bytes()),
+            // ⚠ 键里放的是**材质那份**片元 shader：两种材质就是两条管线。
+            fnv1a(fragment.map(|(shader, _)| shader).unwrap_or("").as_bytes()),
             pass.vertex_entry,
-            pass.entry,
+            fragment.map(|(_, entry)| entry).unwrap_or(""),
             Self::states_key(&pass.render, blend, cull),
             identities.join(",")
         );
         if let Some(pipeline) = self.pipelines.get(&key) {
-            return pipeline.clone();
+            return Ok(pipeline.clone());
         }
         let label = format!("px_pass {}", pass.label);
         let vertex = device.create_shader_module(ShaderModuleDescriptor {
             label: Some(label.as_str()),
             source: ShaderSource::Wgsl(pass.vertex_shader.as_str().into()),
         });
-        // 没有颜色附件 ⇒ 没有片元阶段（深度-only 的那一笔）。⚠ 若这一笔**给了**片元 shader
-        // 却没有颜色目标（alpha-mask 的 discard 就是这种），就照建：片元阶段带**零个**颜色
-        // 目标，shader 里多出来的 `@location(0)` 由 wgpu 在建设备管线时当场拒 ——
-        // 那种"prepass 专用片元 shader"该不该有输出，是内容那一侧的事，不是这里猜的。
-        let fragment = if color_format.is_some() || !pass.shader.trim().is_empty() {
-            Some(device.create_shader_module(ShaderModuleDescriptor {
+        // 片元阶段来自**材质**（§129）。没有材质 ⇒ 没有片元阶段（深度-only 的那一笔）。
+        // ⚠ 挂了颜色附件却没有片元阶段 = 画不出东西来 ⇒ 当场拒（不是让 wgpu 在建管线时报一个
+        // 离现场很远的错）。⚠ 材质**有**片元 shader 却没有颜色目标（alpha-mask 的 discard
+        // 就是这种）就照建：片元阶段带**零个**颜色目标，shader 里多出来的 `@location(0)`
+        // 由 wgpu 当场拒 —— 那种"prepass 专用片元 shader"该不该有输出，是内容那一侧的事。
+        if color_format.is_some() && fragment.is_none() {
+            return Err(format!(
+                "pass '{}' 挂了颜色附件，而这一笔的材质{}没有片元阶段：颜色没人写。                 （深度-only 的那一笔不该挂颜色附件；要颜色就得给它一份有片元 shader 的材质）",
+                pass.label,
+                match material {
+                    Some(material) => format!(" '{}'", material.name),
+                    None => "（这一笔没给材质）".to_string(),
+                }
+            ));
+        }
+        let fragment_module = fragment.map(|(shader, _)| {
+            device.create_shader_module(ShaderModuleDescriptor {
                 label: Some(label.as_str()),
-                source: ShaderSource::Wgsl(pass.shader.as_str().into()),
-            }))
-        } else {
-            None
-        };
+                source: ShaderSource::Wgsl(shader.into()),
+            })
+        });
         let widest = groups.iter().map(|(group, _)| *group).max().unwrap_or(0);
         let mut group_layouts: Vec<Option<&BindGroupLayout>> = vec![None; widest as usize + 1];
         for (group, layout) in &groups {
@@ -1538,9 +1577,9 @@ impl Executor {
             },
             depth_stencil,
             multisample: MultisampleState::default(),
-            fragment: fragment.as_ref().map(|module| FragmentState {
+            fragment: fragment_module.as_ref().map(|module| FragmentState {
                 module,
-                entry_point: Some(pass.entry.as_str()),
+                entry_point: fragment.map(|(_, entry)| entry),
                 compilation_options: PipelineCompilationOptions::default(),
                 targets: &targets,
             }),
@@ -1548,7 +1587,7 @@ impl Executor {
             cache: None,
         });
         self.pipelines.insert(key, pipeline.clone());
-        pipeline
+        Ok(pipeline)
     }
 
     pub fn execute(
@@ -1639,6 +1678,11 @@ impl Executor {
                 Vec::new();
             if !fullscreen {
                 let color_format = color.as_ref().map(|(_, format, _)| *format);
+                // ⚠ 硬守卫（§129）：同一条 pass 里的几何必须**共用一套顶点布局**。
+                //    顶点阶段挂在 pass 上（`PassPlan::vertex_shader`），拿它去套另一套布局
+                //    就是错的；而"当前数据恰好共用"不是结构保证。这条守卫要是响了，
+                //    那个字段就搬到**几何**那一层（见 `PassPlan::vertex_shader` 的注释）。
+                let mut shapes: Option<(String, String)> = None;
                 for draw in &pass.draws {
                     let geometry = frame
                         .geometries
@@ -1670,8 +1714,22 @@ impl Executor {
                                 })?,
                         )
                     };
+                    let shape = match &geometry.vertices {
+                        Some((_, layout)) => Self::vertex_layout_key(layout),
+                        None => "procedural（没有顶点缓冲）".to_string(),
+                    };
+                    match &shapes {
+                        Some((first, first_shape)) if *first_shape != shape => {
+                            return Err(format!(
+                                "pass '{}' 里两笔 draw 的顶点布局不同：'{}' 是 {first_shape}，                                 '{}' 是 {shape} —— 顶点阶段挂在 pass 上，套到另一套布局上就是错的。                                 一条 pass 只能画同一种布局的几何（§129）",
+                                pass.label, first, draw.geometry
+                            ))
+                        }
+                        Some(_) => {}
+                        None => shapes = Some((draw.geometry.clone(), shape)),
+                    }
                     let pipeline =
-                        self.pipeline_geometry(device, pass, color_format, geometry, material);
+                        self.pipeline_geometry(device, pass, color_format, geometry, material)?;
                     draws.push((pipeline, geometry, material));
                 }
             }
@@ -2146,6 +2204,9 @@ mod tests {
             material: "surface".to_string(),
         }];
         opaque.params = Vec::new();
+        // 片元阶段属于材质（§129）：几何 pass 上这两栏必须空着。
+        opaque.shader = String::new();
+        opaque.entry = String::new();
         opaque.render = RenderState::parse(
             "color=load|depth=load|depth_write=true|compare=greater_equal|winding=ccw",
         )
@@ -2273,6 +2334,15 @@ mod tests {
         pass.draws = vec![Draw::default()];
         let err = plan_of(vec![pass]).check().expect_err("一笔不说画哪份几何 ⇒ 拒");
         assert!(err.contains("geometry"), "{err}");
+
+        // ③ 片元阶段属于**材质**（§129）：几何 pass 给了 shader/entry 就当场拒 ——
+        //    挂在 pass 上只会让一条 pass 里的多种材质共用一支 shader。
+        let mut pass = depth_only("prepass");
+        pass.shader = "fragment".to_string();
+        pass.entry = "fs_main".to_string();
+        let err = plan_of(vec![pass]).check().expect_err("几何 pass 带片元阶段 ⇒ 拒");
+        assert!(err.contains("材质"), "{err}");
+        assert!(err.contains("fragment_shader"), "要指出该挪到哪一格：{err}");
     }
 
     /// 全屏 pass 声明了 draws 就说不清谁说了算（顶点是执行器自备的）。
@@ -2468,6 +2538,24 @@ fn fs_main() -> @location(0) vec4<f32> {
             blend: None,
             // ⚠ 剔除**在这里**（材质那一层，§127），不在 pass 的状态文本里。
             cull,
+            // ⚠ 片元阶段也在这里（§129）：**材质就是那支 shader**。
+            //    搬过来之前它是 `PassPlan.shader`，而那时一条 pass 里的多种材质
+            //    只能共用一支 —— 这正是这一档要证伪的事。
+            fragment_shader: TINT_FRAGMENT,
+            fragment_entry: "fs_main",
+        }
+    }
+
+    /// 一份**没有片元阶段**的材质（深度-only 那一笔要它）。
+    fn resolved_material_depth_only<'a>(
+        name: &'a str,
+        material: &'a TestMaterial,
+        layout: &BindGroupLayout,
+    ) -> ResolvedMaterial<'a> {
+        ResolvedMaterial {
+            fragment_shader: "",
+            fragment_entry: "",
+            ..resolved_material(name, material, layout, Cull::None)
         }
     }
 
@@ -2493,8 +2581,8 @@ fn fs_main() -> @location(0) vec4<f32> {
                 label: label.to_string(),
                 vertex_shader: TRIANGLE_VERTEX.to_string(),
                 vertex_entry: "vs_main".to_string(),
-                shader: TINT_FRAGMENT.to_string(),
-                entry: "fs_main".to_string(),
+                // ⚠ 几何 pass **不给** shader/entry：片元阶段属于材质（§129），
+                //    给了会被 `check` 拒（"说了没做"那一类）。
                 writes: vec!["out".to_string()],
                 draws,
                 render,
@@ -2748,7 +2836,36 @@ fn fs_main() -> @location(0) vec4<f32> {
         );
         assert_ne!(depth_inside, no_depth_inside, "有没有深度必须是看得出来的");
 
-        // ⑤ 名字写错时**当场报错**（不是静默少画一笔）。
+        // ⑤ 挂了颜色附件、而材质没有片元阶段 ⇒ **当场拒**（运行时守卫）。
+        //    它是 §129 搬家之后新出现的一种错：以前片元阶段在 pass 上，永远不会缺；
+        //    现在它在材质上，于是"这份材质没写颜色"必须当场说出来，
+        //    而不是等 wgpu 在建设备管线时报一个离现场很远的错。
+        let blind = geometry_plan("no-fragment", STATE_BASE, vec![draw("near", "blind")]);
+        let blind_materials = [resolved_material_depth_only("blind", &white, &tint_layout)];
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let sets = vec![vec![External {
+            name: "out",
+            role: Role::Write,
+            view: &view,
+            format: TextureFormat::Rgba8UnormSrgb,
+        }]];
+        let frame = Frame {
+            width: SIDE,
+            height: SIDE,
+            sets: &sets,
+            geometries: &geometries,
+            materials: &blind_materials,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（材质没有片元阶段）"),
+        });
+        let err = executor
+            .execute(&device, &mut encoder, &blind, &frame)
+            .expect_err("挂了颜色却没有片元阶段 ⇒ 拒");
+        assert!(err.contains("blind"), "要说出是哪份材质：{err}");
+        assert!(err.contains("片元"), "{err}");
+
+        // ⑥ 名字写错时**当场报错**（不是静默少画一笔）。
         let missing = geometry_plan("missing", STATE_BASE, vec![draw("planet", "white")]);
         let view = target.create_view(&TextureViewDescriptor::default());
         let sets = vec![vec![External {
