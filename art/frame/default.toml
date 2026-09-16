@@ -31,7 +31,14 @@ usage = ["render_attachment", "texture_binding"]
 name = "scene_depth"
 format = "depth32float"
 size = "view"
-usage = ["render_attachment", "texture_binding"]
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
+# ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
+[[resources]]
+name = "scene_depth_sample"
+format = "depth32float"
+size = "view"
+usage = ["texture_binding", "copy_dst"]
 
 # ---- prepass：只写深度（颜色附件不挂），它清的深度 ----
 # 它画**不透明**那一档：透明度高的那些在 oracle 里也不进 prepass
@@ -45,6 +52,26 @@ vertex_entry = "vertex"
 writes = []
 depth_target = "scene_depth"
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----
+#
+# 为什么必须有这一步：wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当资源
+# 绑进绑定组（`DEPTH_STENCIL_WRITE` 是独占用法）。而主 pass 要的是**两件事一起**：
+# ① 对大气的遮挡测试必须打在**真的**预通道深度上；② 大气的着色要采到**当时那份**深度。
+# 少了这次拷贝，就只剩两种错法：主 pass 改挂第二张空深度图（行星挡不住大气 ——
+# 拿一个 wgpu 报错换一张错图），或者让大气读一张全 0 的占位图（像素是错的，还不报错）。
+# 搬一份快照之后两边各得其所：主 pass 照旧挂 `scene_depth`，采样那一方读 `scene_depth_sample`。
+#
+# ⚠ 它叫 **copy**、不叫 blit：blit 是**画**（全屏三角 + 采样 + 混合），
+# "画"会在路上顺手做别的事（采样、缩放、调色）。这一个的语义就是**搬运** ——
+# 名字一旦叫成 blit，迟早有人往里塞一个采样或者"顺手缩个放"。
+[[before]]
+label = "copy_depth"
+kind = "copy"
+reads = ["scene_depth"]
+writes = ["scene_depth_sample"]
+# ⚠ 状态那一栏仍然必填，而 copy 只认"没有附件"这一种（挂附件是当场拒，不是被忽略的字段）。
+render = "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
 
 # ---- 不透明：清屏色在这里，深度接着 prepass 的 ----
 [[before]]

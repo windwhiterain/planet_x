@@ -745,10 +745,15 @@ impl SceneSpec {
             match pass.kind.as_str() {
                 // ⚠ 这里只列**文档认得的类型名**；"这一档执行器会不会画"是另一件事，
                 // 由执行器自己判（`px_pass::Plan::check`：compute 它当场拒）。
-                "fullscreen" | "geometry" | "compute" => {}
+                //
+                // `copy` 是一条**搬运**（§131）：`reads[0]` → `writes[0]`，不建管线、不挂附件。
+                // 它为什么存在、形状上还要满足什么，由 `px_pass::Plan::check` 一条条判 ——
+                // 这里只负责让这个名字**是文档里写得出来的**（白名单少一个词，
+                // 批准的机制就根本不存在）。
+                "fullscreen" | "geometry" | "copy" | "compute" => {}
                 other => {
                     return Err(format!(
-                        "{at} 的 kind 是 '{other}'：认 'fullscreen' 与 'geometry' 与 'compute'"
+                        "{at} 的 kind 是 '{other}'：认 'fullscreen' 与 'geometry' 与 'copy' 与 'compute'"
                     ));
                 }
             }
@@ -765,6 +770,12 @@ impl SceneSpec {
                         "{at} 是 geometry，却给了 shader：几何 pass 的片元阶段属于**材质**                         （每个物体一支）"
                     ))
                 }
+                (Some(_), "copy") => {
+                    return Err(format!(
+                        "{at} 是 copy，却给了 shader：拷贝不建管线、也没有片元阶段\
+                         （片元阶段属于材质，pass 级 shader 只有全屏那一档才有）"
+                    ))
+                }
                 _ => {}
             }
             if pass.shader.is_some() && pass.entry.trim().is_empty() {
@@ -774,13 +785,29 @@ impl SceneSpec {
                 // ⚠ 几何那一档**允许空**：深度-only 的那条 pass 不写颜色
                 // （`render` 文本里 `color=none`）。它成不成立由执行器判 ——
                 // "挂了颜色却没写目标"那条判据住在 `px_pass`，因为只有它会去解析那串文本。
-                if pass.kind != "geometry" {
-                    return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"));
+                // ⚠ copy 那一档**必须写一个**：一次搬运没有目标就是空转
+                //（它连"画"都不是，没有"没人看得见"这回事，是**没搬**）。
+                match pass.kind.as_str() {
+                    "geometry" => {}
+                    "copy" => {
+                        return Err(format!(
+                            "{at} 是 copy，却没有 writes：一次搬运必须说清**搬到哪张图**\
+                             （`writes` 那一栏就是它的目标）"
+                        ))
+                    }
+                    _ => {
+                        return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"))
+                    }
                 }
             }
             if pass.writes.len() > 1 {
+                let what = if pass.kind == "copy" {
+                    "一次搬运只搬一张图"
+                } else {
+                    "一条 pass 只画一个颜色附件"
+                };
                 return Err(format!(
-                    "{at} 写了 {} 个目标：一条 pass 只画一个颜色附件",
+                    "{at} 写了 {} 个目标：{what}",
                     pass.writes.len()
                 ));
             }

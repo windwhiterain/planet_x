@@ -155,6 +155,17 @@ impl FrameFile {
                 ));
             }
             match (&entry.vertex_shader, &entry.fragment_shader) {
+                // ⚠ copy **先判**（§131）：它不画任何东西 —— 顶点阶段一个都不跑、片元阶段
+                //    也没有（拷贝是 `copy_texture_to_texture`，不建管线）。
+                //    所以这两栏**都必须是空的**，而"两栏都空"对别的 kind 又是错的。
+                (None, None) if entry.kind == "copy" => {}
+                (_, _) if entry.kind == "copy" => {
+                    return Err(format!(
+                        "{at} 的 kind 是 copy：拷贝不画东西，`vertex_shader` / `vertex_entry` / \
+                         `fragment_shader` / `entry` 四栏都该是空的\
+                         （顶点阶段是几何 pass 那一栏，片元成员是全屏 pass 那一栏）"
+                    ))
+                }
                 (Some(_), Some(_)) => {
                     return Err(format!(
                         "{at} 同时给了顶点阶段与片元成员：几何 pass 只给顶点阶段\
@@ -425,6 +436,17 @@ mod tests {
     #[test]
     fn a_broken_frame_recipe_is_refused_by_name() {
         begin();
+        // ⚠ 取那一条要**按标签**，不按下标：帧图会长（§131 就往 prepass 后面插了 copy_depth），
+        //    按下标写的判据会在别人加一条 pass 的那天悄悄指到另一条上去。
+        fn entry_mut<'a>(frame: &'a mut FrameFile, label: &str) -> &'a mut EntryFile {
+            frame
+                .before
+                .iter_mut()
+                .chain(frame.after.iter_mut())
+                .find(|entry| entry.label == label)
+                .unwrap_or_else(|| panic!("默认帧图里没有 '{label}' 这一条"))
+        }
+
         let mut frame = load(DEFAULT_FRAME).expect("默认帧图");
         let before = frame.chain_color.clone();
         frame.chain_color = vec![before[0].clone()];
@@ -437,14 +459,28 @@ mod tests {
         assert!(err.contains("nope"), "{err}");
 
         let mut frame = load(DEFAULT_FRAME).expect("默认帧图");
-        frame.before[0].select = Some("clouds".to_string());
+        entry_mut(&mut frame, "prepass").select = Some("clouds".to_string());
         let err = frame.check().expect_err("不认识的 select ⇒ 拒");
         assert!(err.contains("clouds"), "{err}");
 
         let mut frame = load(DEFAULT_FRAME).expect("默认帧图");
-        frame.before[1].fragment_shader = Some("px_grade".to_string());
+        entry_mut(&mut frame, "opaque").fragment_shader = Some("px_grade".to_string());
         let err = frame.check().expect_err("几何 pass 给片元成员 ⇒ 拒");
         assert!(err.contains("属于材质"), "{err}");
+
+        // ⚠ copy 那一档：两栏都必须是空的（拷贝不画东西）——
+        //    给了任一条都是"说了没做"，而且要给得出**去哪一栏改**。
+        let mut frame = load(DEFAULT_FRAME).expect("默认帧图");
+        entry_mut(&mut frame, "copy_depth").vertex_shader =
+            Some("art/frame/vertex_mesh.wgsl".to_string());
+        let err = frame.check().expect_err("copy 给顶点阶段 ⇒ 拒");
+        assert!(err.contains("拷贝不画东西"), "{err}");
+        assert!(err.contains("vertex_shader"), "要指出是哪一栏：{err}");
+
+        let mut frame = load(DEFAULT_FRAME).expect("默认帧图");
+        entry_mut(&mut frame, "copy_depth").fragment_shader = Some("blit".to_string());
+        let err = frame.check().expect_err("copy 给片元成员 ⇒ 拒");
+        assert!(err.contains("拷贝不画东西"), "{err}");
     }
 
     /// 核对基准产物：标签对不上就报出**期望什么**与**实际是什么**。
