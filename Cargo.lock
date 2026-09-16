@@ -4469,6 +4469,7 @@ name = "px_render_wgpu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam",
  "image",
  "naga",
  "pollster",

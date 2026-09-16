@@ -115,13 +115,19 @@ struct Stage {
     bind_group: wgpu::BindGroup,
 }
 
-/// 一块 `MeshStage` 的字节：`world_from_local` + `view_proj`。
+/// 一块 `MeshStage` 的字节：`world_from_local` + `view_proj` + **法线矩阵**。
 ///
-/// ⚠ 两块矩阵都走 `mat4.rs` 那几份**逐位**移植件：`world_from_local` 用
+/// ⚠ 三块矩阵都走 `mat4.rs` 那几份**逐位**移植件：`world_from_local` 用
 /// `from_scale_rotation_translation`（文档的 `transform` 就是它的三个入参），
 /// `view_proj` 用相机自己算好的 `clip_from_world`（= `clip_from_view × view_from_world`）。
 /// 在这里重算一次 `clip_from_view × view_from_world` 就是"同一条契约、两处算"。
-fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera::Camera) -> [u8; 128] {
+///
+/// ⚠ 法线矩阵是**第三块**（Bevy 的 `local_from_world_transpose`）：它是
+/// `Affine3A::inverse().matrix3.transpose()`（[`Mat4::normal_matrix_3x3`]，判据钉着），
+/// **不是** `world_from_local` 的 3×3 —— 均匀缩放下两者数学等价、**浮点不等价**，
+/// 而差的那一个末位正好落在"盘内散落的 ±1"上（本仓库这一族的第五次现形）。
+/// 每一列补齐到 16 字节（WGSL 的 `mat3x3<f32>` 布局）。
+fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera::Camera) -> [u8; 176] {
     let rotation = Quat::from_xyzw(
         transform.rotation[0],
         transform.rotation[1],
@@ -141,7 +147,8 @@ fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera
             transform.translation[2],
         ),
     );
-    let mut bytes = [0_u8; 128];
+    let mut bytes = [0_u8; 176];
+    let normal = world_from_local.normal_matrix_3x3();
     for (index, column) in [
         world_from_local.x_axis,
         world_from_local.y_axis,
@@ -157,6 +164,13 @@ fn stage_bytes(transform: &px_protocol::scene::Transform, camera: &crate::camera
     {
         for (slot, value) in [column.x, column.y, column.z, column.w].iter().enumerate() {
             let at = index * 16 + slot * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    // 法线矩阵：三列，**每列补齐到 16 字节**（第 4 位补 0，shader 读不到它）。
+    for (index, column) in normal.iter().enumerate() {
+        for (slot, value) in [column.x, column.y, column.z, 0.0].iter().enumerate() {
+            let at = 128 + index * 16 + slot * 4;
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
     }

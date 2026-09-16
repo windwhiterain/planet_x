@@ -21,3 +21,9 @@ serde = { version = "1", features = ["derive"] }
 # 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+# ⚠ **只在判据里**用真的 glam：`mat4.rs` 是"逐位移植"，而"移植得像不像"只能拿**原件**比。
+# 生产代码故意不依赖 glam（那条注释在 `mat4.rs` 顶上：移植是为了不把 SSE2 后端当成契约）。
+# 版本与 oracle 那条路（Bevy 0.19 → glam 0.32.1）对齐 —— 比错版本等于没比。
+glam = "0.32"

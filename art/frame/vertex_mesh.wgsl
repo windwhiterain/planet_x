@@ -29,6 +29,9 @@
 struct MeshStage {
     world_from_local: mat4x4<f32>,
     view_proj: mat4x4<f32>,
+    /// 法线矩阵 = `Affine3A::inverse().matrix3.transpose()`（Bevy 的
+    /// `local_from_world_transpose`，见下面 `vertex` 里那段）。
+    normal: mat3x3<f32>,
 };
 
 @group(1) @binding(0) var<uniform> stage: MeshStage;
@@ -47,14 +50,28 @@ fn vertex(
     @location(2) uv: vec2<f32>,
 ) -> VertexOutput {
     // ⚠ 三处输出与 oracle 的对应关系（§110）：世界位置是 `world_from_local × p`；
-    //    世界法线取 `world_from_local` 的 **3×3**（这几档的缩放是均匀的 1.0 ⇒ 3×3 就是
-    //    正确的法线矩阵；真出现非均匀缩放时这里要换成逆转置，那是另一件事）；
-    //    `uv` 原样透传。
+    //    世界法线走**法线矩阵**并且**逐顶点归一化**（见下）；`uv` 原样透传。
     let world = stage.world_from_local * vec4<f32>(position, 1.0);
     var out: VertexOutput;
     out.position = stage.view_proj * world;
     out.world_position = world;
-    out.world_normal = (stage.world_from_local * vec4<f32>(normal, 0.0)).xyz;
+    // ⚠⚠ 法线这一格曾经写成 `(world_from_local * vec4(normal, 0.0)).xyz`，理由是
+    //    "这几档的缩放是均匀的 1.0 ⇒ 3×3 就是正确的法线矩阵"。那句**数学上对、
+    //    逐位上错**：Bevy 那条路（`bevy_pbr-0.19.1/src/render/mesh.wgsl:64-69` →
+    //    `mesh_functions.wgsl:68-84`）用的是 `local_from_world_transpose`，而它是
+    //    `Affine3A::from(world_from_local).inverse().matrix3.transpose()`
+    //    （`bevy_math-0.19.1/src/affine3.rs:37-43`）—— 一个**专用例程**，与"取 3×3"
+    //    不是同一串算术。另外它**在顶点阶段就归一化**（`mesh_functions.wgsl:77`），
+    //    而我们原来是插值之后才在片元里归一化 —— `normalize(lerp(a,b))` 与
+    //    `lerp(normalize(a), normalize(b))` 也是两个数。
+    //    两处都属于"数学等价、浮点不等价"那一族，症状一模一样：**只进着色、不进位置
+    //    /深度** ⇒ 盘内散落的 ±1，而轮廓、深度、背景全都好。
+    //    归一化那一步照抄 Bevy 的守卫：法线全零就**原样给出去**（不让它变成 NaN）。
+    out.world_normal = select(
+        normal,
+        normalize(stage.normal * normal),
+        any(normal != vec3<f32>(0.0)),
+    );
     out.uv = uv;
     return out;
 }

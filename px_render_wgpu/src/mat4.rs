@@ -658,6 +658,43 @@ impl Mat4 {
         )
     }
 
+    /// **法线矩阵**：`Affine3A::from(world_from_local).inverse().matrix3.transpose()`。
+    ///
+    /// 逐行移植自 Bevy 那条路（原文行号）：
+    /// - `bevy_pbr-0.19.1/src/render/mesh.rs:664` 调 `world_from_local.inverse_transpose_3x3()`；
+    /// - 那是 `bevy_math-0.19.1/src/affine3.rs:37-43` 的扩展 trait：
+    ///   `Affine3A::from(self).inverse().matrix3.transpose()`；
+    /// - `glam 0.32.1` `src/f32/affine3a.rs:470-479`（`Affine3A::inverse` 取 `matrix3.inverse()`）
+    ///   + `src/f32/sse2/mat3a.rs:631`（`Mat3A::inverse` → `inverse_checked::<false>`，`:597-620`）。
+    ///
+    /// ⚠ 为什么不能拿 `world_from_local` 的 3×3 凑合（本仓库原先就是这么写的）：
+    /// **数学等价、浮点不等价** —— 均匀缩放 1.0 时 `inv(M)ᵀ == M` 成立，但两条算术路径
+    /// （一个走 `Mat3A::inverse`，一个只是取列）给出的是**不同的末位**。这一族在本仓库
+    /// 已经现形四次（§110.1.1 / §116 / §118 / §132），第五次就是它。
+    ///
+    /// 返回**三列**（列主序），与 WGSL 的 `mat3x3<f32>` 同序：着色器算 `normalize(M * n)`。
+    #[inline]
+    #[must_use]
+    pub fn normal_matrix_3x3(&self) -> [Vec3; 3] {
+        // `Mat3A::inverse_checked::<false>`：三个叉积 + 行列式 + 每个分量乘 `det.recip()`。
+        let (x, y, z) = (
+            Vec3::new(self.x_axis.x, self.x_axis.y, self.x_axis.z),
+            Vec3::new(self.y_axis.x, self.y_axis.y, self.y_axis.z),
+            Vec3::new(self.z_axis.x, self.z_axis.y, self.z_axis.z),
+        );
+        let tmp0 = y.cross(z);
+        let tmp1 = z.cross(x);
+        let tmp2 = x.cross(y);
+        let det = z.dot(tmp2);
+        // `Vec3A::splat(det.recip())`：`recip()` 就是 `1.0 / x`（f32 除法）。
+        let inv_det = 1.0 / det;
+        // ⚠ 这里**不再转置**：`Mat3A::inverse_checked` 内部已经 `.transpose()` 过一次
+        //    （`src/f32/sse2/mat3a.rs:617` 那句 `…from_cols(…).transpose()`），而 Bevy 那一行
+        //    （`bevy_math-0.19.1/src/affine3.rs:38`）又 `.matrix3.transpose()` 一次 ——
+        //    两次转置抵消 ⇒ 给出去的就是这三列。判据（真 glam 的**那条表达式**）钉着这一点。
+        [tmp0.mul(inv_det), tmp1.mul(inv_det), tmp2.mul(inv_det)]
+    }
+
     /// `glam` `src/f32/sse2/mat4.rs:1408`
     #[inline]
     #[must_use]
@@ -819,6 +856,175 @@ mod tests {
             }
         }
         assert!(failed.is_empty(), "cases failed: {failed:?}");
+    }
+
+    /// **`world_from_local` 那条路**（`Quat::from_xyzw` + `Mat4::from_scale_rotation_translation`
+    /// + `Mat4::mul_mat4`）与**真的 glam** 逐位相同。
+    ///
+    /// 为什么单列这一条：`inverse` 早就有逐位判据，而"物体变换"这条路只有**逐行移植的注释**
+    /// 没有判据。它一旦差一个末位，症状是**盘内散落的 ±1**（法线/位置各偏一丝 ⇒ 着色偏一丝
+    /// ⇒ 只有恰好压在舍入边界上的那些像素翻一格），而轮廓、矩阵、贴图、采样器**全都是对的**
+    /// —— 这一族本仓库已经踩过四次（§110.1.1 / §116 / §118 / §132），每次都是"数学等价、
+    /// 浮点不等价"。
+    ///
+    /// ⚠ 比的是**真的 glam crate**（只在 dev-dependencies 里），不是把同一段公式再抄一遍：
+    /// 抄一遍只能证明"我抄得跟我抄的一样"。
+    #[test]
+    fn the_object_transform_matches_glam_bit_for_bit() {
+        use crate::mat4::{Mat4, Quat, Vec3};
+        let rotations = [
+            // 文档里那一颗（`orbit-bare-nolight` 的 planet）：
+            [0.16918235_f32, 0.0, 0.0, 0.9855848],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.70710677, 0.0, 0.0, 0.70710677],
+            [0.1, -0.2, 0.3, 0.92736185],
+            [-0.5, 0.5, 0.5, 0.5],
+        ];
+        let scales = [
+            [1.0_f32, 1.0, 1.0],
+            [1.14, 1.14, 1.14],
+            [0.5, 2.0, 1.25],
+        ];
+        let translations = [[0.0_f32, 0.0, 0.0], [1.0, -2.0, 0.5]];
+        let mut mismatches = Vec::new();
+        for rotation in rotations {
+            for scale in scales {
+                for translation in translations {
+                    let ours = Mat4::from_scale_rotation_translation(
+                        Vec3::new(scale[0], scale[1], scale[2]),
+                        Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                        Vec3::new(translation[0], translation[1], translation[2]),
+                    );
+                    let theirs = glam::Mat4::from_scale_rotation_translation(
+                        glam::Vec3::new(scale[0], scale[1], scale[2]),
+                        glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                        glam::Vec3::new(translation[0], translation[1], translation[2]),
+                    );
+                    for (column, their_column) in
+                        bits16(&ours).iter().zip(theirs.to_cols_array().iter())
+                    {
+                        if column.to_bits() != their_column.to_bits() {
+                            mismatches.push(format!(
+                                "rot {rotation:?} scale {scale:?} trans {translation:?}：\
+                                 got {:08X} want {:08X}",
+                                column.to_bits(),
+                                their_column.to_bits()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "物体变换与 glam 不逐位相同（{} 处）：{mismatches:#?}",
+            mismatches.len()
+        );
+    }
+
+    /// 同一件事再来一遍：**列相乘**（`clip_from_world = clip_from_view × view_from_world`）    /// 也要与 glam 逐位相同。它是 `MeshStage::view_proj` 那颗数。
+    #[test]
+    fn the_matrix_product_matches_glam_bit_for_bit() {
+        use crate::mat4::{Mat4, Quat, Vec3};
+        let rotations = [
+            [0.16918235_f32, 0.0, 0.0, 0.9855848],
+            [0.3, 0.4, -0.2, 0.84261495],
+        ];
+        let mut mismatches = Vec::new();
+        for rotation in rotations {
+            let ours = Mat4::from_scale_rotation_translation(
+                Vec3::new(1.0, 1.0, 1.0),
+                Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                Vec3::new(0.0, 0.0, 0.0),
+            );
+            let theirs = glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::ONE,
+                glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                glam::Vec3::ZERO,
+            );
+            let product = Mat4::mul_mat4(&ours, &ours);
+            let their_product = theirs * theirs;
+            for (column, their_column) in
+                bits16(&product).iter().zip(their_product.to_cols_array().iter())
+            {
+                if column.to_bits() != their_column.to_bits() {
+                    mismatches.push(format!(
+                        "rot {rotation:?}：got {:08X} want {:08X}",
+                        column.to_bits(),
+                        their_column.to_bits()
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "矩阵相乘与 glam 不逐位相同（{} 处）：{mismatches:#?}",
+            mismatches.len()
+        );
+    }
+
+    /// **法线矩阵**与 Bevy 那条路逐位相同：`Affine3A::from(m).inverse().matrix3.transpose()`。
+    ///
+    /// ⚠ 判据里比的必须是**这条表达式**（用真 glam 写成 Bevy 那一行），不能比"我认为等价的
+    /// 另一条"：`world_from_local` 的 3×3 在均匀缩放下数学上就等于它，而**浮点上不等**
+    /// —— 这一条判据存在的全部理由就是把这两者分开。
+    #[test]
+    fn the_normal_matrix_matches_bevys_expression_bit_for_bit() {
+        use crate::mat4::{Mat4, Quat, Vec3};
+        let rotations = [
+            [0.16918235_f32, 0.0, 0.0, 0.9855848],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.70710677, 0.0, 0.0, 0.70710677],
+            [0.1, -0.2, 0.3, 0.92736185],
+        ];
+        let scales = [[1.0_f32, 1.0, 1.0], [1.14, 1.14, 1.14], [0.5, 2.0, 1.25]];
+        let translations = [[0.0_f32, 0.0, 0.0], [1.0, -2.0, 0.5]];
+        let mut mismatches = Vec::new();
+        for rotation in rotations {
+            for scale in scales {
+                for translation in translations {
+                    let ours_matrix = Mat4::from_scale_rotation_translation(
+                        Vec3::new(scale[0], scale[1], scale[2]),
+                        Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                        Vec3::new(translation[0], translation[1], translation[2]),
+                    );
+                    let theirs_matrix = glam::Mat4::from_scale_rotation_translation(
+                        glam::Vec3::new(scale[0], scale[1], scale[2]),
+                        glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                        glam::Vec3::new(translation[0], translation[1], translation[2]),
+                    );
+                    // Bevy 那一行（`bevy_math-0.19.1/src/affine3.rs:37-43`）：
+                    let theirs = glam::Affine3A::from_mat4(theirs_matrix)
+                        .inverse()
+                        .matrix3
+                        .transpose();
+                    let ours = ours_matrix.normal_matrix_3x3();
+                    let want = [
+                        [theirs.x_axis.x, theirs.x_axis.y, theirs.x_axis.z],
+                        [theirs.y_axis.x, theirs.y_axis.y, theirs.y_axis.z],
+                        [theirs.z_axis.x, theirs.z_axis.y, theirs.z_axis.z],
+                    ];
+                    for column in 0..3 {
+                        for row in 0..3 {
+                            let got = ours[column].to_array()[row];
+                            if got.to_bits() != want[column][row].to_bits() {
+                                mismatches.push(format!(
+                                    "rot {rotation:?} scale {scale:?} trans {translation:?} \
+                                     列{column} 行{row}：got {:08X} want {:08X}",
+                                    got.to_bits(),
+                                    want[column][row].to_bits()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "法线矩阵与 Bevy 那条路不逐位相同（{} 处）：{mismatches:#?}",
+            mismatches.len()
+        );
     }
 }
 

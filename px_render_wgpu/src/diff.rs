@@ -159,6 +159,14 @@ pub struct Diff {
     /// ⚠ 列表有条数上限（[`ISOLATED_CAP`]），**计数另有一格** `isolated_count` 不受它限制。
     pub isolated: Vec<Isolated>,
     pub isolated_count: usize,
+    /// 孤立像素里在剪影**内** / 剪影**外**的个数（这一族的头号分界线，见 [`Isolated::inside`]）。
+    pub isolated_inside: usize,
+    pub isolated_outside: usize,
+    /// ≥1.2R（远离任何几何）处，**本宿主那张图里**不等于背景色的像素数。
+    ///
+    /// ⚠ 这一格是"处处生效的病因"的判据：那一片只有清屏色 ⇒ 均匀输入若被 blit / sRGB
+    /// 往返扰动过，就会在这里冒出零星的非背景像素。**0 ⇒ 那条路对均匀输入是精确的。**
+    pub far_not_background: usize,
 }
 
 /// Δ 分档的档数（见 [`DELTA_BUCKETS`]）。
@@ -177,6 +185,8 @@ const MAP_ROWS: usize = 24;
 /// 粗格地图只收**这个半径以内**的大差异（以剪影等效半径为单位）——
 /// 外面那一片是星点的天下，会把地图糊满。
 const MAP_RADIUS_LIMIT: f64 = 1.0;
+/// "远离任何几何"的判据半径（以剪影等效半径为单位）：≥1.2R 处**只该有清屏色**。
+const BACKGROUND_RADIUS: f64 = 1.2;
 
 /// 通道差的档：`1 / 2 / 3–4 / 5–8 / 9–16 / 17–32 / 33–64 / 65+`。
 ///
@@ -229,6 +239,14 @@ pub struct Isolated {
     pub radius: f64,
     /// 它在本宿主那张图里算不算"边上"（见 [`is_edge`]）。
     pub on_edge: bool,
+    /// 它在**剪影内**（本宿主那张图里 != 背景色）还是剪影外。
+    ///
+    /// ⚠ 这一格是这一族像素最有用的分界线：剪影外是**均匀的清屏色**（没有任何着色），
+    /// 剪影内是"行星 + 纱"。若孤立 ±1 **只**出现在剪影内 ⇒ 病因在着色那几条路；
+    /// 若剪影外也有 ⇒ 病因在**处处生效**的那条路（blit / sRGB 往返）。
+    pub inside: bool,
+    /// 最大通道差（1 = 单通道一个台阶）。
+    pub delta: u32,
 }
 
 /// 什么叫"大差异"：8 位通道差超过 8（≈3% 满量程）就不是舍入能解释的了。
@@ -359,6 +377,10 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
     let mut large_on_edge = 0_usize;
     let mut isolated: Vec<Isolated> = Vec::new();
     let mut isolated_count = 0_usize;
+    let mut isolated_inside = 0_usize;
+    let mut isolated_outside = 0_usize;
+    // ≥1.2R 处"本宿主那张图里不等于背景色"的像素数（见 `BACKGROUND_RADIUS`）。
+    let mut far_not_background = 0_usize;
     // 大差异的粗格地图（每一格是 `MAP_COLUMNS × MAP_ROWS` 分之一张图）。
     let mut large_map = [[0_usize; MAP_COLUMNS]; MAP_ROWS];
     // 相关系数用**整数累加器**：亮度和、平方和、乘积和都是整数，避免了浮点求和的次序问题。
@@ -368,6 +390,17 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         for x in 0..left.width {
             let mine = left.at(x, y);
             let theirs = right.at(x, y);
+            // ⚠ 远离任何几何的那一片（r > 1.2R）：那里**只该有清屏色**。
+            //    本宿主那张图在这里出现任何"不等于背景色"的像素，就意味着**均匀输入
+            //    被某条路扰动了**（blit / sRGB 往返那一类"处处生效"的病因）——
+            //    这一条能把"处处生效"与"只在着色里"两类病因当场分开。
+            if mine != background {
+                let dx = f64::from(x) - center.0;
+                let dy = f64::from(y) - center.1;
+                if (dx * dx + dy * dy).sqrt() > BACKGROUND_RADIUS * radius {
+                    far_not_background += 1;
+                }
+            }
             let dx = f64::from(x) - center.0;
             let dy = f64::from(y) - center.1;
             let distance = (dx * dx + dy * dy).sqrt() / radius;
@@ -428,6 +461,11 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
                 });
                 if neighbours_same {
                     isolated_count += 1;
+                    if mine != background {
+                        isolated_inside += 1;
+                    } else {
+                        isolated_outside += 1;
+                    }
                     if isolated.len() < ISOLATED_CAP {
                         isolated.push(Isolated {
                             x,
@@ -436,6 +474,8 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
                             oracle: theirs,
                             radius: distance,
                             on_edge: edge,
+                            inside: mine != background,
+                            delta,
                         });
                     }
                 }
@@ -577,6 +617,9 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         large_on_edge,
         isolated,
         isolated_count,
+        isolated_inside,
+        isolated_outside,
+        far_not_background,
     })
 }
 
@@ -747,23 +790,42 @@ impl Diff {
                     .collect::<String>()
             ));
         }
+        lines.push(format!(
+            "**远离任何几何处**（≥{BACKGROUND_RADIUS}R，那里只该有清屏色）：本宿主那张图里有 {} 个像素\
+             不等于背景色 —— **0 ⇒ 均匀输入没被任何一条路扰动**（blit / sRGB 往返那一类\
+             『处处生效』的病因就此排除）；>0 ⇒ 那条路有扰动",
+            self.far_not_background
+        ));
         if self.isolated.is_empty() && self.isolated_count == 0 {
             lines.push("孤立差异像素（四邻居全都逐位相同）：一个都没有".to_string());
         } else {
             let mut listed = self.isolated.clone();
             listed.sort_by(|a, b| a.radius.total_cmp(&b.radius));
             lines.push(format!(
-                "孤立差异像素（四邻居全都逐位相同）：共 {} 个；下面按**半径从小到大**列前 {} 个\
-                 —— 越靠里越值得先看（最里面的那几个与贴边的成千上万个往往不是一回事）",
-                self.isolated_count,
-                ISOLATED_PRINT.min(listed.len())
+                "孤立差异像素（四邻居全都逐位相同）：共 {} 个 —— **剪影内 {} / 剪影外 {}**\
+                 （⚠ 剪影外是均匀清屏色、没有任何着色：那边也有 ⇒ 病因在处处生效的那条路；\
+                 只在剪影内 ⇒ 病因在着色那几条路）",
+                self.isolated_count, self.isolated_inside, self.isolated_outside
+            ));
+            lines.push(format!(
+                "  其中剪影内的：Δ1 有 {} 个（单通道一个台阶）｜剪影外的：Δ1 有 {} 个",
+                self.isolated
+                    .iter()
+                    .filter(|pixel| pixel.inside && pixel.delta == 1)
+                    .count(),
+                self.isolated
+                    .iter()
+                    .filter(|pixel| !pixel.inside && pixel.delta == 1)
+                    .count()
             ));
             for pixel in listed.iter().take(ISOLATED_PRINT) {
                 lines.push(format!(
-                    "    ({}, {})｜r = {:.4}｜本宿主 {:?} vs oracle {:?}｜{}",
+                    "    ({}, {})｜r = {:.4}｜{}｜Δ{}｜本宿主 {:?} vs oracle {:?}｜{}",
                     pixel.x,
                     pixel.y,
                     pixel.radius,
+                    if pixel.inside { "剪影内" } else { "剪影外" },
+                    pixel.delta,
                     pixel.ours,
                     pixel.oracle,
                     if pixel.on_edge { "在边上" } else { "在平处" }
