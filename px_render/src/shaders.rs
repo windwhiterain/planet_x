@@ -1,13 +1,12 @@
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Resource)]
 pub struct ShaderLibraries(pub Vec<Handle<Shader>>);
 
+/// 「这一份是不是模块」只有一条判据（`#define_import_path`），实现住在 `px_shader`。
 fn declares_import_path(source: &str) -> bool {
-    source
-        .lines()
-        .any(|line| line.trim_start().starts_with("#define_import_path"))
+    px_shader::import_path_of(source).is_some()
 }
 
 fn load_libraries(mut commands: Commands, assets: Res<AssetServer>) {
@@ -66,41 +65,29 @@ pub const SHADER_ROOT: &str = "assets/shaders";
 /// 一眼看得出不是成品）。两道门两边都要扫，否则真本会从「体积 / 校验」下面溜走。
 pub const CONTENT_SHADER_ROOT: &str = "../art/shaders";
 
-pub fn shader_files() -> Vec<std::path::PathBuf> {
+/// 两个根：`[0]` 库（`asset_root()/shaders`，与 `load_libraries` 扫的是同一个目录）、
+/// `[1]` 入口（`<workspace>/art/shaders`）。**约定只有一份**，住在 `px_shader`。
+///
+/// ⚠ 库这一侧必须跟 `load_libraries` 用同一个 `asset_root()`：装载时对账的闭包就是
+/// naga_oil 真去组装的那些模块（`scene::preload_shaders` 的闸门），两边指到不同目录
+/// 就等于拿另一批文件在核对。
+pub fn shader_roots() -> Vec<PathBuf> {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    for root in [manifest.join(SHADER_ROOT), manifest.join(CONTENT_SHADER_ROOT)] {
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            panic!("找不到 shader 目录：{}", root.display());
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("wgsl") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
+    let workspace = manifest.parent().expect("px_render 必须住在 workspace 下");
+    px_shader::roots(workspace, std::path::Path::new(&crate::asset_root()))
+}
+
+/// 两个根下的全部 `.wgsl`（离线门按它扫「每个 shader 都要解析 + 校验」）。
+pub fn shader_files() -> Vec<PathBuf> {
+    px_shader::wgsl_files(&shader_roots()).unwrap_or_else(|err| panic!("{err}"))
 }
 
 pub fn import_path_of(source: &str) -> Option<String> {
-    source.lines().find_map(|line| {
-        let line = line.trim();
-        line.strip_prefix("#define_import_path ")
-            .map(|rest| rest.trim().to_string())
-    })
+    px_shader::import_path_of(source).map(str::to_string)
 }
 
-pub fn module_sources() -> HashMap<String, String> {
-    let mut modules = HashMap::new();
-    for path in shader_files() {
-        let source = std::fs::read_to_string(&path).expect("读不了 shader");
-        if let Some(name) = import_path_of(&source) {
-            modules.insert(name, source);
-        }
-    }
-    modules
+pub fn module_sources() -> px_shader::ModuleTable {
+    px_shader::module_sources(&shader_roots()).unwrap_or_else(|err| panic!("{err}"))
 }
 
 pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
@@ -214,8 +201,8 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
     }
 }
 
-pub fn expand(path: &str, modules: &HashMap<String, String>, seen: &mut Vec<String>) -> String {
-    let import = path.trim();
+pub fn expand(import: &str, modules: &px_shader::ModuleTable, seen: &mut Vec<String>) -> String {
+    let import = import.trim();
     if let Some(stub) = bevy_stub(import) {
         // ⚠ 桩也要去重：同一个 `bevy_pbr::*` 符号可能被**入口 shader** 与**库模块**
         // 各 import 一次（`planet_x::light` 与 `surface.wgsl` 都要 `view`），
@@ -227,28 +214,30 @@ pub fn expand(path: &str, modules: &HashMap<String, String>, seen: &mut Vec<Stri
         return stub.to_string();
     }
 
-    let module = if modules.contains_key(import) {
-        import.to_string()
-    } else {
-        match import.rsplit_once("::") {
-            Some((module, _)) => module.to_string(),
-            None => return String::new(),
+    // 模块名怎么认（整串是模块名 / 最长前缀）只有一条规则，住在 `px_shader`：
+    // 这里宽松地递归展开，运行期由 naga_oil 按同一批模块名解析（§46.4 的差别只在
+    // 「内联整个模块」还是「只内联点名的符号」，模块名本身不许有两套口径）。
+    let Some(module) = px_shader::module_of(import, modules) else {
+        if import.contains("::") {
+            panic!("未知的 import：{import}");
         }
+        // 没有 `::` 又不是模块名 ⇒ 什么也展开不出来（老行为，不报错）。
+        return String::new();
     };
 
-    let Some(source) = modules.get(&module) else {
-        panic!("未知的 import：{import}");
-    };
-    if seen.iter().any(|entry| entry == &module) {
+    if seen.iter().any(|entry| entry == module) {
         return String::new();
     }
-    seen.push(module);
+    let source = modules
+        .get(module)
+        .expect("module_of 给出来的名字一定在表里");
+    seen.push(module.to_string());
     render_source(source, modules, seen)
 }
 
 pub fn render_source(
     source: &str,
-    modules: &HashMap<String, String>,
+    modules: &px_shader::ModuleTable,
     seen: &mut Vec<String>,
 ) -> String {
     let mut out = String::new();
