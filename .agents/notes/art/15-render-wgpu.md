@@ -684,8 +684,14 @@ D3D 8 点位置与系数、`orthonormalize` 基）、以及 `ClusteredLight` 那
 ⚠ **风险（必须实测，不许假设）**：`uv_of` 用 `f32::acos` / `f32::atan2`，在默认特性下是
 **平台 libm**（Windows 上是 UCRT），**不是正确舍入的** ⇒ 同机同工具链逐位一致，
 换平台会差几 ulp。`f32::sqrt` 是 IEEE 精确的，没问题。
-⚠ 还要查一件事：**有没有谁通过特性合并打开了 `hexasphere/libm` 或 `bevy_math/libm`**
-（`cargo tree -e features -i hexasphere`）—— 打开了就是另一套 acos/atan2。
+✅ **"有没有谁打开了 libm"这一格已经查清（实测，不是推测）**：
+`cargo tree -p px_render -e features -i hexasphere` ⇒ hexasphere 只开 `default` + `std`，
+**没有 `libm`**；`-i bevy_math` ⇒ 开的是 **`nostd-libm`**（不是 `libm`），
+而 `ops.rs:609/612` 的选择是
+`libm_ops` 需要 `any(libm, all(nostd-libm, not(std)))` ⇒ **不成立**，
+`std_ops` 需要 `all(not(libm), std)` ⇒ **成立**。
+⇒ 两边走的都是 **`f32::acos` / `f32::atan2`**（std，即平台 libm），与移植件同一套。
+⚠ 这条只在**同一台机器 + 同一工具链**上成立；换平台要重新确认（或干脆把网格烘成产物）。
 
 **判据怎么取**：`target/oracle/bevy-icosphere-*.bin` 是 Bevy 现场生成、原样落盘的 oracle
 （§108.5），移植件要**对着它逐字节比**，不是"顶点数对上了就算过"。
