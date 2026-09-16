@@ -3187,3 +3187,28 @@ Bevy 锚、老形状产物、2240×1400、60 帧、一次会话：
 `Report` 的 `perf` / `pair` 正是**该缺席**的（`skip_serializing_if`）。
 ⇒ 判缺席要用**属性在不在**（`$r.PSObject.Properties.Name -contains 'perf'`）。
 与 §108.4 那个 `switch` 拆数组同一族：**PowerShell 的"空"有好几种，别拿直觉当读数。**
+
+### §142.1 ⚠ 就地更正：那个"≈ 1.2 KB"是**我写错的**，正确是 **2464 B**
+
+§142 里我写"每 (物体, 视图) 一份 176 字节；`orbit-bare-shadow` 上 1 物体 × 7 视图 ≈ **1.2 KB**"。
+**两处都错**，正确的读数（**对着代码数出来的**，不是推的）：
+
+`px_render_wgpu/src/render.rs:909-969`：
+- **每条影子面 × 每个物体**：`for face in &faces { for object in &scene.objects { … } }`
+  ⇒ 6 × 2 = **12** 份（`stage_bytes(&object.transform, &face.camera)`）
+- **每个物体一份相机版**：`for object in &scene.objects { … stage_bytes(&object.transform, &camera) }`
+  ⇒ **2** 份
+
+⇒ **14 份 × 176 B = 2464 B**，而 `orbit-bare-shadow` 有 **2 个物体**（`planet` + `atmosphere`），
+不是 1 个。
+
+⚠ **这是本 session 里我自己的第八次出错，而且形状与我一直要求别人避免的那条一模一样**：
+我**没有去数**，写了一个"1 个物体"的想当然。§109.5（结构大小）、§110.4（图元半径）、
+§131/§131.2（旧键）、§134（`--diff` 参数传反）、§139（"两个 art 文件不影响键"）、
+§144（把 1 个像素归进错误的病因族）、以及这次的 1.2 KB —— **全部同一个形状：凭记忆写数，而不是去读。**
+
+⚠ **另一处顺带发现（同一个循环里）**：`face_stages` 对**每一个物体**都建，
+而只有 `planet` 有 `cast_shadow` ⇒ **`atmosphere` 那 6 份面 stage 建了但从不被画**。
+所以"建了 14 份、用了 8 份"（8 × 176 = 1408 B）。今天只值 1 KB，**但它说明这条路的粒度是
+"每个物体"而不是"每个投影者"** —— 若将来投影者变多，这个差会放大。
+**今天不改**（判据已逐字节成立，改它要动渲染路径），只记形状。
