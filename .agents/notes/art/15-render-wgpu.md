@@ -2653,3 +2653,46 @@ JSON** —— §126）、`components.ps1`（连通块）、`characterise.py`（�
 
 ⚠ `orbit-soft` 那个 **1 像素 ±1** 属于本 session 抓到过五次的同一族
 （§110.1.1 / §116 / §118 / §132 / §134）。判据是整份哈希 ⇒ **它是缺陷，不是噪声。**
+
+---
+
+## §145 六档全绿 —— 缺口是**一条编译档**，不是算术、不是次序
+
+### 结论先写
+
+`px_pass` 建 shader module 用的是裸 wgpu **安全的** `create_shader_module`，
+它走 `ShaderRuntimeChecks::default()` = `checked()`；
+而 Bevy 装 shader 走 `Shader::from_wgsl`（`validate_shader` 被定死成 `ValidateShader::Disabled`，
+`bevy_shader-0.19.1/src/shader.rs:98`），`pipeline_cache.rs:142-152` 再把它翻成
+`create_shader_module_trusted(desc, ShaderRuntimeChecks::unchecked())`。
+
+⇒ 两边拿**同一份 WGSL**、**同一版 naga/wgpu（29.0.4）**、**同一块驱动**，
+却喂了**两档不同的编译档**：`checked()` 会让 naga 往动态次数的循环里插边界计数器、
+往数组下标插边界检查。改成 `unchecked()` 之后**六档全绿**（一个字节的内容都没动）。
+
+### 怎么走到这一步的（消融链，全部两边各自出图）
+
+1. **把缺口锁进云那一层**：去掉 `clouds` 物体，两边都是 `63184151909371A5`（＝`orbit-bare`）；
+   只留 planet 两边都是 `F8DAC8B198770C2D` ⇒ 行星／大气／星空盒逐字节相同。
+2. **`ablate` 拨档**：体积那条路（0/1/2/3）两边**逐字节相同**；硬表面那条路（5/6）红。
+3. **把中间量当颜色输出对拍**（临时插调试档，烘完立刻还原源文件）：
+   `in.world_position` / `view.world_position` / `away` / `params.orientation` /
+   `shell.entry` / `stride` / `start` **各自 0 差异**；
+   而 `along = entry + start 次 += stride` 差 **114951 px**；
+   **三次显式相加**、**常数 3 次的 for** 却是 **0 差异**。
+   ⇒ 同一串加法、同样的操作数、同样的次数，只有"外面套着的东西"不同。
+4. **换成闭式**（`shell.entry + f32(start)*stride`）再出整图：缺口从 1180 px 掉到 **52 px**。
+   ⇒ 95% 的缺口就在那条**动态次数**的累加循环上。
+   （顺带证实：两边都把 `a*b+c` 收成 fma —— 写成 `fma(f32(start), stride, entry)` 出图**一模一样**。）
+
+### 教训
+
+> **"操作数逐位相同"推不出"结果逐位相同" —— 因为编译器也是输入的一部分。**
+
+这一条 §104 第 1 条（绑定号会改像素）已经写过一次，这次换了个面：
+**编译档会改像素**。而它之所以一直没被发现，是因为**四档绿场景里没有一条动态次数的循环**
+（三条 `orbit-bare*` 与 `orbit-rings` 都不含云）—— 又是"没被判据盯住的地方"。
+
+⚠ 判据要的是"两个宿主对**同一份内容**逐字节一致"，
+所以凡是从"和 Bevy 同源"推出来的东西（绑定号、字段次序、**编译档**），
+都必须**照抄**，不能用 wgpu 的缺省 —— 缺省是**第三个数字**。

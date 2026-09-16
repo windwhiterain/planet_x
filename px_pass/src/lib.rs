@@ -18,6 +18,42 @@ use wgpu::{
 pub const FRAGMENT_ENTRY: &str = "fs_main";
 pub const VERTEX_ENTRY: &str = "px_fullscreen_vertex";
 
+/// WGSL → shader module，**按 Bevy 那一档编译**（不是 wgpu 的缺省档）。
+///
+/// ⚠ 这一格是判据的一部分，不是"编译选项"：
+///
+/// 1. Bevy 装 shader 走 `Shader::from_wgsl`，它把 `validate_shader` 定死成
+///    `ValidateShader::Disabled`（`bevy_shader-0.19.1/src/shader.rs:98`）；
+///    `pipeline_cache.rs:142-152` 再把它翻成
+///    `create_shader_module_trusted(desc, ShaderRuntimeChecks::unchecked())`。
+/// 2. 裸 wgpu 那条**安全**的 `create_shader_module` 用的是
+///    `ShaderRuntimeChecks::default()` = `ShaderRuntimeChecks::checked()`
+///    （`wgpu-types-29.0.4/src/shader.rs:92-96`），也就是 `force_loop_bounding: true`
+///    ＋ `bounds_checks: true`。
+/// 3. 两者差的不是"检查严不严"，而是**喂给 naga 的编译档**：`checked()` 会让 naga
+///    往动态次数的循环里插边界计数器、往数组下标插边界检查 —— 同一份 WGSL 于是被编成
+///    不同的代码。本仓实测过它落在像素上：云的硬表面那条路里有一条
+///    `for (index < start) { along += stride; }` 的动态累加，两档在 960×640 上差
+///    **1180 个像素**（`orbit-proxy-fine-bound`：`68B8C35EB93002E4` vs 判据
+///    `32872F80AC867BE3`），而把循环换成闭式之后只剩 52 个。
+///
+/// ⇒ 判据要的是"两个宿主对**同一份内容**逐字节一致"，所以这里必须照抄 Bevy 的编译档；
+/// 用 wgpu 的缺省 = 换了一条编译路径，而那条路径**没有任何东西**在钉着它。
+///
+/// # Safety
+///
+/// `unchecked()` 的语义是"调用方保证这些 shader 没有死循环、数组下标不越界"。
+/// 来源与 Bevy 完全相同（内容 shader 是本仓自己的产物），风险面也一样。
+fn module_of_wgsl(device: &Device, label: &str, source: &str) -> wgpu::ShaderModule {
+    let descriptor = ShaderModuleDescriptor {
+        label: Some(label),
+        source: ShaderSource::Wgsl(source.into()),
+    };
+    unsafe {
+        device.create_shader_module_trusted(descriptor, wgpu::ShaderRuntimeChecks::unchecked())
+    }
+}
+
 const FULLSCREEN_VERTEX: &str = r#"
 struct PxFullscreenOut {
     @builtin(position) position: vec4<f32>,
@@ -1824,14 +1860,8 @@ impl Executor {
             return pipeline.clone();
         }
         let label = format!("px_pass {}", pass.label);
-        let vertex = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("px_pass_fullscreen_vertex"),
-            source: ShaderSource::Wgsl(FULLSCREEN_VERTEX.into()),
-        });
-        let fragment = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some(label.as_str()),
-            source: ShaderSource::Wgsl(pass.shader.as_str().into()),
-        });
+        let vertex = module_of_wgsl(device, "px_pass_fullscreen_vertex", FULLSCREEN_VERTEX);
+        let fragment = module_of_wgsl(device, label.as_str(), pass.shader.as_str());
         let group_layout = self.layout(device, layout);
         let mut groups: Vec<Option<&BindGroupLayout>> = vec![None; layout.group as usize + 1];
         groups[layout.group as usize] = Some(&group_layout);
@@ -1951,10 +1981,7 @@ impl Executor {
             return Ok(pipeline.clone());
         }
         let label = format!("px_pass {}", pass.label);
-        let vertex = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some(label.as_str()),
-            source: ShaderSource::Wgsl(pass.vertex_shader.as_str().into()),
-        });
+        let vertex = module_of_wgsl(device, label.as_str(), pass.vertex_shader.as_str());
         // 片元阶段来自**材质**（§129）。没有材质 ⇒ 没有片元阶段（深度-only 的那一笔）。
         // ⚠ 挂了颜色附件却没有片元阶段 = 画不出东西来 ⇒ 当场拒（不是让 wgpu 在建管线时报一个
         // 离现场很远的错）。⚠ 材质**有**片元 shader 却没有颜色目标（alpha-mask 的 discard
@@ -1971,10 +1998,7 @@ impl Executor {
             ));
         }
         let fragment_module = fragment.map(|(shader, _)| {
-            device.create_shader_module(ShaderModuleDescriptor {
-                label: Some(label.as_str()),
-                source: ShaderSource::Wgsl(shader.into()),
-            })
+            module_of_wgsl(device, label.as_str(), shader)
         });
         let widest = groups.iter().map(|(group, _)| *group).max().unwrap_or(0);
         let mut group_layouts: Vec<Option<&BindGroupLayout>> = vec![None; widest as usize + 1];
