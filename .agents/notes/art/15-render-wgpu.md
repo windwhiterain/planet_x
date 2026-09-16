@@ -1102,3 +1102,19 @@ if the task is huge with multi-steps, dispatch subagent for atomic one and you r
 **同一时刻只让一个写者动仓库**。三次（`git add -A` 卷进未验文件、`mat4.rs` 重复定义、
 `group0.rs` 被我覆盖）都靠对方重写才没丢东西 —— 那是运气。往后：
 派活给 A 的时候，我自己不动 A 的文件。
+
+### §115.3 口径**结案**（AGENTS.md 第三次更新，两边终于一致）
+
+`~/.dsh/AGENTS.md` 现在写的是：
+
+```
+writing comments is forbidden unless the project has its own comments style.
+```
+
+⇒ 与本仓"处处是密集中文 why-注释"这个事实**不再冲突**，也与你两次给我的答复一致。
+§115.1 那一笔描述的"工作区说禁、用户说写"的**冲突状态已经不存在**了，留它只为记录过程。
+
+**最终口径（不再变）**：**照本仓风格写中文 why-注释**；`art.rs` 补回注释。
+⚠ 注释不是装饰：本仓真正值钱的那些"别这么简化"（解析逆不成立、四元数往返不恒等、
+`Dir3` 是除法归一化、`ClusteredLight` 是 80 字节）**都写在代码旁边**，
+依据只留在笔记里的话，改代码的人看不见它。
