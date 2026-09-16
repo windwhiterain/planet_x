@@ -2218,3 +2218,59 @@ oracle  7BBB18CE3612D4F71A8003A2D86E09B52B43A10B3F1C7A1705983904F28A99EE  215193
 任何一次"编一份 Bevy 宿主"都会在链接那一步失败 —— 而它恰恰是**锚**。
 （这一档的 wgpu 宿主不受影响：它的产物已经在盘上，增量编得动。）
 
+
+---
+
+## §138 S3 基线实测 —— 缺口全在盘内，背景已经零差异
+
+### S3 是什么（§105）
+
+**灯 + 点光 cube shadow map ← 第一道真判据。**
+判据：**`orbit-bare-shadow` 逐字节相同（`C03FFF3235264DD5`）** ——
+= `orbit-bare` ＋ planet part 上多一个 `shadows = 1`（§109.3/§109.4 的用户裁决）。
+
+### 基线（我实测的，commit `d5f4e04`）
+
+锚图 `target/oracle/orbit-bare-shadow.png` 的 sha256 前16 = **`C03FFF3235264DD5`** ✓（与 §125 记的一致）。
+
+而**我们的出图是 `7BBB18CE3612D4F7`** —— **与无灯的 `orbit-bare-nolight` 同一个哈希**。
+原因：group 0 的 `clustered_lights` 现在**整块是零** ⇒ 完全没有光照 ⇒ 图像与无灯那份逐字节相同。
+
+对着真锚量：
+
+```
+差异像素 272750 / 614400（44.393%）｜max Δ 155｜平均 Δ 15.646801
+剪影内 272750｜**剪影外 0**
+差异包围盒 (185,25)-(774,614)
+```
+
+⚠ **两个结论**：
+1. **星空那一片在这个场景上也已经逐字节对了**（剪影外 0）；
+2. **缺口 100% 在盘内，而且就是光照**。
+
+### 拆成两半（各自可独立判定）
+
+- **S3-a（已派出）**：灯的数据通路 —— 填 `clustered_lights`（80 字节/盏，§109.5 更正过）、
+  `lights.ambient_color = vec4(80,80,80,80)`、把 `point_shadow_textures`（binding 2，
+  `Depth32Float` cube array，1024²×6，`CubeArray` 视图，`DepthOnly`）与比较采样器
+  （binding 3，ClampToEdge×3 / Linear / Linear / Nearest / lod[0,32] / **`CompareFunction::GreaterEqual`**）
+  建出来并绑上，**但这次把它清成 0、不往里渲染**。
+  ⚠ 清成 0 + reverse-Z 的 `GreaterEqual` ⇒ 一切通过 ⇒ **等于"全亮"** —— 这正是要的隔离：
+  灯对了之后，差异应当**只剩真正的阴影区**。
+- **S3-b（下一半）**：真的影子 —— 每面一条 pass（§109.1：Bevy 是**6 个单层 pass**、
+  `multiview_mask: None`；⚠ multiview 是**行为差异**，不许拿它"优化"）、
+  真的 `fetch_point_shadow`（`texture_depth_cube_array` + `textureSampleCompareLevel`，
+  `ShadowFilteringMethod::default()` 是 **Gaussian** ⇒ **8 次**采样）。
+
+⚠ **两条不许发明的东西**（§109.1）：`SHADOW_SHADER_HANDLE` 在 0.19.1 里**不存在**；
+group 0 **没有第 4 / 第 7 格**。
+
+⚠ **一处必须实测、读代码定不了的**（§109.2）：六个面向矩阵经过
+`Quat::from_mat3`（`looking_at` 存的是**四元数**）→ `Mat4::from_rotation_translation` →
+`inverse()` → `× 投影` 这条链，可能与"直接写理想整数矩阵"差 1 ulp。**这一条留给 S3-b。**
+
+### 环境
+
+⚠ C 盘此前**可用 0.00 GB**，判据第一次跑不出来。删 `target/debug/incremental`（6.41 GB，
+纯增量缓存）后恢复，**特意避开** `target/pcg`（CAS 产物）与 `target/oracle`（冻件与锚图）。
+四个 worktree 的 `target` 合计约 78 GB，**后续每轮开工前要看一眼**。
