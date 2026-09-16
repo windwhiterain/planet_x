@@ -723,3 +723,40 @@ D3D 8 点位置与系数、`orthonormalize` 基）、以及 `ClusteredLight` 那
 
 **判据怎么取**：`target/oracle/bevy-icosphere-*.bin` 是 Bevy 现场生成、原样落盘的 oracle
 （§108.5），移植件要**对着它逐字节比**，不是"顶点数对上了就算过"。
+
+✅ **判据已经落到 `cargo test` 里了**（比对着 `target/` 的文件强：`target/` 不入 git，
+依赖它的测试在新克隆上会假绿或假红）。做法是把 oracle 的 **sha256 当常量**嵌进测试 ——
+布局就是导出时那个（小端拼 `positions → normals → uvs → indices`），于是**一个常量覆盖整块数据**：
+
+| 调用 | 顶点 | 三角形 | sha256（前 16 位） |
+|---|---|---|---|
+| `icosphere(1.0, 1)` | 42 | 80 | `58819F3A63386F9C` |
+| `icosphere(1.0, 5)` | 362 | 720 | `B0939AF33378E766` |
+| `icosphere(1.0, 64)` | 42252 | 84500 | `B4B37AB464C3A743` |
+| `icosphere(1.02, 64)` | 42252 | 84500 | `4044EF96A1C5E99E` |
+| `icosphere(1.06, 64)` | 42252 | 84500 | `44212D8611D976DA` |
+
+⚠ **不许为了让测试变绿去改这个常量** —— 它来自真的 Bevy。对不上就是移植错了。
+
+---
+
+## §111 S2 的实施清单（下一步照着做）
+
+S2 的判据是"自造一份**无灯** `.pxart`，两个宿主各出一张，逐字节相同"。要渲染**任何**场景，
+就得把整条链搭起来 —— 没有捷径。按依赖次序：
+
+| # | 落点 | 内容 | 判据 |
+|---|---|---|---|
+| 1 | `cammath.rs` | `Vec3/Mat3/Quat/Mat4` 子集，**逐位抄 glam 0.32.1 的 SSE2 算法**（§110.1.1：解析逆不成立） | `target/oracle/bevy-view-vectors.txt` 那 6 组向量逐位相同 |
+| 2 | `camera.rs` | `probe_camera(opt)`（不给 `--cam` 时 `from_xyz(0,0.55,3.15).looking_at(ZERO,Y)`）+ `perspective_infinite_reverse_rh(π/4, aspect, 0.1)` + `clip_from_world = clip_from_view * view_from_world` | 对着 §110.1.1 那几格位模式 |
+| 3 | `group0.rs` | group 0 的**宿主侧**缓冲：`view`（只喂内容 shader 真读的 4 个字段）、`lights.ambient_color`、`globals`、`clustered_lights`(storage)。⚠ 字段偏移**由反射出来的 WGSL 决定**，不在 Rust 侧抄第二份 | 反射出的 `(group, binding)` 与 §108.3 那张表一致 |
+| 4 | `art.rs` | CAS 装载：`scene::read_scene` + `Member::resolve` + `cas_path`；网格走 `mesh::load_mesh`，贴图/采样器建 GPU 对象 | 五个成员都能解析出来 |
+| 5 | `material.rs` | **固定超集** bind group（`PARAMS_BINDING` + `TEXTURE_SLOTS` 的 12 格，空槽填 1×1 白兜底、cube 槽填白 cube）+ 管线缓存（键 = `(shader 内容版本, cull, alpha)`） | §65 那条"空着的格绑兜底图"要**做出来**（§108.1 记过 orbit-bare 真的会用到） |
+| 6 | `render.rs` | prepass（**它清深度**，颜色附件为空、`Store`）→ 主 pass（`Load` 深度、`GreaterEqual`、`depth_write` 按 alpha 档）→ blit 到输出 → 回读 → PNG | PNG 与锚同形（S0 已验过那条路径） |
+| 7 | CLI | `--scene <pxart> --out <png> [--width] [--height]` | 两宿主同图逐字节 |
+
+**这一档要一路小心的三件事**（都写在 §110 里，这里只重复最会咬人的）：
+- 深度是 **reverse-Z**（clear `0.0`、`GreaterEqual`、`depth_write` 与比较方向都别按直觉写）；
+- **一个色调映射都不跑**：内容 shader 自己乘 `view.exposure` 返回线性辐射度，
+  所以主纹理是 `Rgba8UnormSrgb`，**写入时由硬件做 sRGB 编码** —— 不要自己再编一次；
+- `view.exposure` 的位模式是 **`3A835274`**（f32 表达式算出来的），不是 f64 取整。
