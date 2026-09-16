@@ -225,6 +225,9 @@ pub fn resolve(
             writes: pass.writes.clone(),
             params,
             slots,
+            // 这一版从这里来的 pass 全是全屏后处理：状态就是 `RenderState::default()`
+            // （清成透明、不挂深度、不剔除）—— 与搬进数据模型之前写在执行器里的那套逐字相同。
+            render: px_pass::RenderState::default(),
         });
     }
 
@@ -483,6 +486,7 @@ mod tests {
                     writes: pass.writes.clone(),
                     params: vec![0; 16],
                     slots: (0..pass.reads.len()).map(|_| 1).collect(),
+                    render: px_pass::RenderState::default(),
                 })
                 .collect(),
         };
@@ -512,6 +516,7 @@ mod tests {
                 writes: vec![VIEW_BUILTIN.to_string()],
                 params: vec![0; 16],
                 slots: Vec::new(),
+                render: px_pass::RenderState::default(),
             }],
         };
         let err = plan.check().expect_err("reads 有 1 个而格位 0 个 ⇒ 拒");
@@ -538,6 +543,7 @@ mod tests {
                 writes: vec![VIEW_BUILTIN.to_string()],
                 params: Vec::new(),
                 slots: Vec::new(),
+                render: px_pass::RenderState::default(),
             }],
         };
         let err = plan.check().expect_err("参数块为 0 字节 ⇒ 拒");
@@ -562,6 +568,13 @@ mod tests {
             writes: vec!["view".to_string()],
             params: vec![0; 16],
             slots: Vec::new(),
+            // ⚠ 这一条测的是"执行器不兑现 compute"那条理由，所以附件要按 compute 该有的
+            // 样子留空：挂了颜色附件会被**前一条**（"compute 不挂附件"）先拦下，
+            // 而那一条的理由不一样（数据模型 vs 执行器能力），两条各有各的判据。
+            render: px_pass::RenderState {
+                color: px_pass::Attachment::None,
+                ..Default::default()
+            },
         });
         let err = plan.check().expect_err("compute 这一版必须当场拒");
         assert!(err.contains("compute"), "{err}");

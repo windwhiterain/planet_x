@@ -4,13 +4,13 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BufferBinding, BufferBindingType,
-    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device,
-    Extent3d, FragmentState, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor,
-    TextureDimension as GpuDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-    TextureViewDescriptor, TextureViewDimension, VertexState,
+    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, CompareFunction, Device,
+    Extent3d, Face, FragmentState, FrontFace, LoadOp, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture,
+    TextureDescriptor, TextureDimension as GpuDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 
 pub const FRAGMENT_ENTRY: &str = "fs_main";
@@ -158,8 +158,79 @@ pub struct ResourceSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassKind {
+    /// 一个全屏三角：`draw(0..3)`，顶点由执行器自备（后处理那一类）。
     Fullscreen,
+    /// 一串几何：宿主给顶点/索引缓冲与绑定组，执行器按材质状态画（§121 第 2 件）。
+    Geometry,
     Compute,
+}
+
+// ---------------------------------------------------------------------------
+// 附件与固定功能状态（§121 第 1 件）
+//
+// 在这一节之前，"这条 pass 挂什么、清什么、剔哪一面"是**写在 `execute` 里的常量**
+// （颜色 `Clear(TRANSPARENT)`、`depth_stencil: None`、不剔除）。那是"一条 pass 的状态"
+// 却住在代码里 ⇒ 序列与状态都改不动，而 §121 的裁决是：它们应当是**数据**。
+// 于是这一段把状态搬进 `plan`，而 [`RenderState::default`] 恰好等于那些常量 ——
+// 既有的全屏 pass 因此一个字节都不用改，行为逐位不变。
+// ---------------------------------------------------------------------------
+
+/// 一个附件这一帧怎么来：**不挂** / **清成某个值** / **接着上一次留下的内容**。
+///
+/// 为什么是枚举而不是 `Option<LoadOp>`：`Clear` 与 `Load` 的分野是"谁负责擦干净"
+/// （清屏的那条 pass 与接着画的那条是两种东西），而"根本没挂这个附件"又是第三件事 ——
+/// 挤进 `Option` 的同一个 `None` 上，读的人就分不出"不清"与"不挂"了。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Attachment<T> {
+    /// 这一帧不挂这个附件。
+    None,
+    /// 挂上，并清成这个值。
+    Clear(T),
+    /// 挂上，并用上一次留在这个附件里的内容。
+    Load,
+}
+
+/// 一条 pass 的**附件 + 固定功能状态**。管线与 render pass 都从这一份建（§121.1：乙案）。
+///
+/// [`Default`] **就是这一版之前的写死行为**：颜色清成透明、不挂深度、不剔除、逆时针为正面。
+/// ⚠ 这条等式是**判据**，不是风格：五格锚（§113）就是在"默认状态"下取的，
+/// 默认值一变，那些哈希全都要重取。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderState {
+    /// 颜色附件。⚠ `Clear` 的那个颜色是**线性**的（wgpu 的 clear 值不是 sRGB，
+    /// 硬件按目标格式自己编码）—— 传 sRGB 数值进去就是"清屏色比想要的白一档"。
+    pub color: Attachment<wgpu::Color>,
+    /// 深度附件。`Clear` 的那个数就是**深度值本身**：这个渲染器是无限 reverse-Z
+    /// （近处 1.0、无限远 0.0），所以"远平面"是 `0.0`（§110.1）。
+    pub depth: Attachment<f32>,
+    /// 挂上深度之后写不写。
+    ///
+    /// 缺省是**写**：只加一个深度附件、别的一个字不说，想要的显然是"这是一条深度 pass"
+    /// （prepass 就是它）；缺省成"不写"的话，那条 pass 会静默地什么都不留下。
+    /// 透明档要的是"测但不写"，那种 pass 自己写 `depth_write: false`。
+    pub depth_write: bool,
+    /// 深度比较函数。缺省 `GreaterEqual`：这个渲染器只有一种深度约定 —— reverse-Z，
+    /// 近处的值大。缺省成 `Less` 会让每一条忘了写这一格的几何 pass 都朝反方向比，
+    /// 而画面只是"深度全错、看不出是哪一步错的"。
+    pub depth_compare: CompareFunction,
+    /// 剔哪一面。`None` = 不剔（既有的全屏 pass 就是这样：一个三角，剔了就没东西了）。
+    pub cull: Option<Face>,
+    /// 正面朝向。绕向与剔除是同一件事的两半（`mesh.rs::outward_winding` 改的正是绕向），
+    /// 所以它和 `cull` 放在一起，不另开一处默认值。
+    pub front_face: FrontFace,
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self {
+            color: Attachment::Clear(wgpu::Color::TRANSPARENT),
+            depth: Attachment::None,
+            depth_write: true,
+            depth_compare: CompareFunction::GreaterEqual,
+            cull: None,
+            front_face: FrontFace::Ccw,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +318,8 @@ pub struct PassPlan {
     pub params: Vec<u8>,
     /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。
     pub slots: Vec<u32>,
+    /// 附件与固定功能状态。缺省 = 这一版之前写在执行器里的那一套（见 [`RenderState`]）。
+    pub render: RenderState,
 }
 
 impl PassPlan {
@@ -340,10 +413,37 @@ impl Plan {
 
         for (index, pass) in self.passes.iter().enumerate() {
             let at = format!("第 {index} 条 pass '{}'", pass.label);
+            // ---- 附件（§121 第 1 件）----
+            //
+            // ⚠ compute 先判：它**天生就没有附件**（不画三角形），所以"至少要有一个附件"
+            //    那条对它不成立 —— 顺序反了的话，一条规规矩矩的 compute pass 会被
+            //    "你不挂附件"拦下，而真正的理由（这一版执行器没有 compute）反而说不出口。
             if pass.kind == PassKind::Compute {
+                // 两条都拒，理由不同：data model 先说清"compute 不该有颜色附件"，
+                // 再说清"这一版执行器根本没有 compute"。
+                if pass.render.color != Attachment::None {
+                    return Err(format!(
+                        "{at} 的 kind 是 compute，却挂了颜色附件：compute 不画附件，\
+                         颜色/深度都不该挂给它"
+                    ));
+                }
                 return Err(format!(
                     "{at} 的 kind 是 compute：这一版执行器只有 fullscreen。\
                      声明了执行器不兑现的东西就当场拒 —— 静默跳过正是要避免的那种故障"
+                ));
+            }
+            // ⚠ "一个附件都不挂"与"没有 writes"是**两件事**：附件说"画到哪张图上"，
+            //    `writes` 说"文档里哪个名字是它的颜色目标"。深度-only 的 prepass
+            //    有附件、没有 writes（它不写颜色），所以这两条判据不能互相顶替。
+            if pass.render.color == Attachment::None && pass.render.depth == Attachment::None {
+                return Err(format!(
+                    "{at} 既不挂颜色也不挂深度：它画到哪儿去？一条 pass 至少要有一个附件"
+                ));
+            }
+            if pass.kind == PassKind::Fullscreen && pass.render.color == Attachment::None {
+                return Err(format!(
+                    "{at} 的 kind 是 fullscreen，却没挂颜色附件：全屏三角只会写颜色，\
+                     不挂颜色就等于什么都没做（要只写深度就该是一条 geometry pass）"
                 ));
             }
             if pass.shader.trim().is_empty() {
@@ -378,15 +478,26 @@ impl Plan {
                     ));
                 }
             }
-            let target = pass.target().ok_or_else(|| {
-                format!("{at} 没有 writes：它不写任何东西，画了也没人看得见")
-            })?;
             if pass.writes.len() > 1 {
                 return Err(format!(
                     "{at} 写了 {} 个目标：这一版一条 pass 只画一个颜色附件",
                     pass.writes.len()
                 ));
             }
+            if pass.render.color == Attachment::None {
+                // 深度-only 的 pass（prepass）：`writes` 必须空着 —— 写目标就是颜色附件，
+                // 挂了空的却在 writes 里点名，说明这条 pass 自己也没想清楚画到哪。
+                if !pass.writes.is_empty() {
+                    return Err(format!(
+                        "{at} 没挂颜色附件，却声明了写目标 [{}]：写目标就是颜色附件",
+                        pass.writes.join(" / ")
+                    ));
+                }
+                continue;
+            }
+            let target = pass.target().ok_or_else(|| {
+                format!("{at} 没有 writes：它不写任何东西，画了也没人看得见")
+            })?;
             if let Some(resource) = self.resource(target) {
                 if !resource.usage.contains(&Use::RenderAttachment) {
                     return Err(format!(
@@ -745,6 +856,18 @@ impl Executor {
         let mut audit: Vec<String> = Vec::new();
 
         for (index, pass) in plan.passes.iter().enumerate() {
+            // 数据模型能表达几何 pass（`check` 也认它），但**执行器这一版只会画全屏三角**
+            // ⇒ 在这里当场拒。⚠ 这一条不能省：省了就会把一条几何 pass 当成全屏三角画出去，
+            // 而"画错了但没报错"正是这一版要避免的故障（与 compute 那条同款，只是它住在
+            // `execute` 而不是 `check`：`check` 判的是数据对不对，执行器判的是自己会不会）。
+            if pass.kind == PassKind::Geometry {
+                return Err(format!(
+                    "第 {index} 条 pass '{}' 的 kind 是 geometry：几何执行还没落地（§121 第 2 件）。\
+                     数据模型（RenderState / kind）已经能表达它，但这一版执行器只会画全屏三角 —— \
+                     声明了执行器不兑现的东西就当场拒，不许把它当成一条全屏 pass 画出去",
+                    pass.label
+                ));
+            }
             let target = pass
                 .target()
                 .ok_or_else(|| format!("第 {index} 条 pass '{}' 没有 writes", pass.label))?
@@ -867,5 +990,165 @@ impl Executor {
                 }
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan_of(passes: Vec<PassPlan>) -> Plan {
+        Plan {
+            layout: Layout {
+                group: 3,
+                params_binding: 0,
+                params_align: 16,
+                slots: vec![Slot {
+                    binding: 1,
+                    dimension: Dimension::D2,
+                }],
+            },
+            resources: Vec::new(),
+            passes,
+        }
+    }
+
+    /// 一条最普通的全屏后处理 pass（就是这一版之前 `px_render` 造出来的那种）。
+    fn fullscreen(label: &str) -> PassPlan {
+        PassPlan {
+            kind: PassKind::Fullscreen,
+            label: label.to_string(),
+            shader: "x".to_string(),
+            entry: FRAGMENT_ENTRY.to_string(),
+            reads: Vec::new(),
+            writes: vec!["view".to_string()],
+            params: vec![0; 16],
+            slots: Vec::new(),
+            render: RenderState::default(),
+        }
+    }
+
+    /// 一条深度-only 的几何 pass（prepass）：有深度附件、没有颜色、没有 writes。
+    fn depth_only(label: &str) -> PassPlan {
+        PassPlan {
+            kind: PassKind::Geometry,
+            label: label.to_string(),
+            shader: "x".to_string(),
+            entry: "vs_main".to_string(),
+            reads: Vec::new(),
+            writes: Vec::new(),
+            params: vec![0; 16],
+            slots: Vec::new(),
+            render: RenderState {
+                color: Attachment::None,
+                depth: Attachment::Clear(0.0),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// **默认状态就是这一版之前的行为** —— 五格锚（§113）是在那套状态上取的，
+    /// 所以这不是风格问题，是判据问题：下面三个常量一个都不许动。
+    #[test]
+    fn the_default_state_is_exactly_what_the_executor_used_to_hardcode() {
+        let state = RenderState::default();
+        assert_eq!(state.color, Attachment::Clear(wgpu::Color::TRANSPARENT));
+        assert_eq!(state.depth, Attachment::None);
+        assert_eq!(state.cull, None);
+        assert_eq!(state.front_face, FrontFace::Ccw);
+        // 深度这两格在"不挂深度"时看不出效果，但一旦有 pass 只写 `depth: Clear(..)`
+        // 就立刻成判据 ⇒ 缺省必须是这个渲染器唯一的那套约定（reverse-Z）。
+        assert_eq!(state.depth_compare, CompareFunction::GreaterEqual);
+        assert!(state.depth_write, "只加一个深度附件 ⇒ 想要的显然是写");
+        assert_eq!(state.color, Attachment::Clear(wgpu::Color::TRANSPARENT));
+    }
+
+    /// 既有的全屏 pass **一字不改**也必须过 check（缺省值就是它要的那套）。
+    #[test]
+    fn an_existing_fullscreen_pass_still_checks_out() {
+        let plan = plan_of(vec![fullscreen("grade")]);
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+        // 而且它与"显式写成今天那套常量"的状态是同一份东西。
+        assert_eq!(plan.passes[0].render, RenderState::default());
+    }
+
+    /// 深度-only 的几何 pass 是**合法**的（prepass 就是它）：颜色不挂、writes 空着。
+    #[test]
+    fn a_geometry_pass_may_carry_depth_only() {
+        let plan = plan_of(vec![depth_only("prepass")]);
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+        assert_eq!(plan.passes[0].render.depth, Attachment::Clear(0.0));
+        assert_eq!(plan.passes[0].render.color, Attachment::None);
+        // 颜色 + 深度的几何 pass 也合法（主 pass 就是它）。
+        let mut opaque = fullscreen("opaque");
+        opaque.kind = PassKind::Geometry;
+        opaque.render.depth = Attachment::Load;
+        opaque.render.cull = Some(Face::Back);
+        let plan = plan_of(vec![opaque]);
+        assert!(plan.check().is_ok(), "{:?}", plan.check());
+    }
+
+    /// 一个附件都不挂的 pass 不存在：它画到哪儿去？
+    #[test]
+    fn a_pass_with_no_attachment_at_all_is_refused() {
+        let mut pass = fullscreen("nothing");
+        pass.render.color = Attachment::None;
+        pass.writes = Vec::new();
+        let err = plan_of(vec![pass]).check().expect_err("两个附件都不挂 ⇒ 拒");
+        assert!(err.contains("附件"), "{err}");
+    }
+
+    /// 没挂颜色附件却在 `writes` 里点名 = 这条 pass 自己没想清楚画到哪。
+    #[test]
+    fn a_pass_with_a_write_target_but_no_color_attachment_is_refused() {
+        let mut pass = depth_only("confused");
+        pass.writes = vec!["view".to_string()];
+        let err = plan_of(vec![pass]).check().expect_err("空挂颜色却声明写目标 ⇒ 拒");
+        assert!(err.contains("写目标"), "{err}");
+    }
+
+    /// 全屏 pass 不挂颜色就等于什么都没做（全屏三角只会写颜色）。
+    #[test]
+    fn a_fullscreen_pass_without_a_color_attachment_is_refused() {
+        let mut pass = fullscreen("useless");
+        pass.render.color = Attachment::None;
+        pass.writes = Vec::new();
+        pass.render.depth = Attachment::Clear(0.0);
+        let err = plan_of(vec![pass]).check().expect_err("全屏 pass 没有颜色附件 ⇒ 拒");
+        assert!(err.contains("颜色附件"), "{err}");
+    }
+
+    /// compute 不挂附件 —— 这一条**在**"执行器还没有 compute"那条之前，两条各有各的理由。
+    #[test]
+    fn a_compute_pass_must_not_carry_a_color_attachment() {
+        let mut pass = fullscreen("reduce");
+        pass.kind = PassKind::Compute;
+        let err = plan_of(vec![pass]).check().expect_err("compute 挂了颜色 ⇒ 拒");
+        assert!(err.contains("compute"), "{err}");
+        assert!(err.contains("颜色附件"), "{err}");
+    }
+
+    /// 把颜色摘掉的 compute pass 才会走到"执行器还没有 compute"那条能力理由上。
+    #[test]
+    fn a_compute_pass_without_attachments_is_refused_for_the_capability_reason() {
+        let mut pass = fullscreen("reduce");
+        pass.kind = PassKind::Compute;
+        pass.render.color = Attachment::None;
+        pass.writes = Vec::new();
+        let err = plan_of(vec![pass]).check().expect_err("compute ⇒ 拒");
+        assert!(err.contains("静默跳过"), "{err}");
+    }
+
+    /// `PassKind::Geometry` 在**数据模型**里合法（见上一条），但**执行器还没落地它**：
+    /// 那一条拒在 `execute` 里（不是 `check` 里）—— `check` 判的是数据对不对，
+    /// 执行器判的是自己会不会。⚠ 这一条**故意不写单测**：`execute` 要真设备，
+    /// 而这个 crate 没有建设备的地方（那是宿主的策略，见 `px_render_wgpu::gpu`），
+    /// 造一个假设备只会把"没测"伪装成"测过了"。等第 2 件落地时，
+    /// 这条拒会被换成真执行，判据在宿主那边（S2 的哈希）。
+    #[test]
+    fn a_geometry_pass_is_data_but_not_executable_yet() {
+        let plan = plan_of(vec![depth_only("prepass")]);
+        assert!(plan.check().is_ok(), "数据模型认它：{:?}", plan.check());
+        assert_eq!(plan.passes[0].kind, PassKind::Geometry);
     }
 }
