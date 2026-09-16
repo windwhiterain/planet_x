@@ -1731,3 +1731,76 @@ Error matching ShaderStages(FRAGMENT) shader requirements against the pipeline
 但要按 **`dd6be56d8028`** 去读，不能再用旧键。
 ⚠ 记这一笔是为了不让一个**已经作废的产物键**继续在笔记里当权威 ——
 本期已经有过"抄了一个差不多的数"的教训（§109.5 / §110.4），产物键同样会过期。
+
+---
+
+## §132 深度图不能**同时**当附件又被采样 —— 我上一轮的规则错了
+
+### 实测（子代理在切片 1 撞到的，verbatim）
+
+```
+Attempted to use Texture with 'scene_depth…' label with conflicting usages.
+Current usage TextureUses(RESOURCE) and new usage TextureUses(DEPTH_STENCIL_WRITE).
+TextureUses(DEPTH_STENCIL_WRITE) is an exclusive usage and cannot be used with any
+other usages within the usage scope (renderpass or compute dispatch).
+```
+
+⚠ **我上一轮定的规则是"宿主外部赢，且大气采样同一张深度图"。前半句对，后半句不可能。**
+我当时讲的是**优先级**，却默默假设了**共享** —— 而共享在 wgpu 里不存在。这条是我的错。
+
+**这个报错同时判掉了另外两条出路：**
+
+- **"`px_pass` 给只读深度开一条路"** —— 已被这次失败本身否证：透明那条 pass **已经是**
+  `depth_write=false`，照样冲突。因为 `RenderPassDepthStencilAttachment` **根本没有只读旗标**，
+  附件一律按独占写分类，与管线里的写开关无关。⇒ 那条路要改的是 wgpu-core，不是我们。
+- **"执行器按 pass 解析材质"** —— 它改的是"用哪张 bind group"，不是"挂着的纹理能不能同时被采样"。
+  与冲突无关，划掉。
+
+### 裁决：走"两张深度图"，但**必须补一次拷贝**
+
+```
+prepass     writes scene_depth              （纯深度，挂 scene_depth）
+copy        scene_depth → scene_depth_sample ← 缺的就是这一片
+opaque      color=… depth=load scene_depth
+sky         color=load depth=load scene_depth
+transparent color=load depth=load scene_depth，采样 scene_depth_sample
+blit
+```
+
+⚠ **为什么"两张深度图"的朴素版本是错的**：如果主 pass 只是挂**另一张空的**深度纹理，
+它们就**不再对预通道的结果做深度测试**，行星也就不再遮挡大气 ——
+那是拿一个 wgpu 报错换了**一张错的图**，比报错更糟。
+
+有了那次拷贝：**主 pass 仍对真正的预通道结果做深度测试**（同一张纹理、顺序执行、没有采样冲突），
+而大气采样的是**快照** —— 这同时也是**更诚实的语义**：shader 想要的是"预通道当时的深度"，
+而不是它正被挂着的那个缓冲。
+
+机制上：**拷贝是一个"操作"，不是一个"角色"**，所以 `px_pass` 长出一个数据驱动的 copy 类，
+与已经定下的一切一致（`kind` 是数据，执行器按它分派），并且走同一个资源解析器。
+⚠ 这个类**具体放哪、叫什么**是个设计点 ⇒ **先上报再动手，不许默默选一个。**
+
+**占位深度那条落地必须撤掉**（实现方自己已经判对了：它只让 wgpu 不报错，
+代价是大气读一张占位图 —— **像素是错的，不是不精确**）。
+但它加的那条**守卫留着**：一个物体若同时被"写深度"与"只读深度"的 pass 画 ⇒ 当场拒并列出三条出路。
+那条守卫正是让这件事在**切片 3 一开工就响**、而不是悄悄运出一个错的大气的东西。
+
+### 附一：`depth_ndc_to_view_z` 桩的语义分叉
+
+桩是 `-1.0/max(ndc,1e-6)`，Bevy 是 `-perspective_camera_near()/ndc_depth`。
+实测链条：深度图中心 0.045503 ⇒ 真距离 **2.198**（与相机到表面 2.15–2.2 吻合），
+桩算出 **21.98** ⇒ 大气 `end=min(...)` 永不截断 ⇒ alpha 0.034 变 **0.48** ⇒ 一颗被冲淡的灰蓝球。
+**这是画质的定性差别，不是舍入差别**，且由 §110.1 可直接推出：reverse-Z 下
+`ndc = near/(−z)` ⇒ `z = −near/ndc`。修法：`stubs.rs` 覆盖这一个符号，
+**near 从 `view.clip_from_view[3][2]` 取，不在 Rust 里抄 0.1**。
+
+⚠ 子代理**没有偷偷改**，而是把语义分叉标出来上报 —— 一个**默默改变含义**的桩，
+是两条宿主路线在双方都"看着对"的情况下漂开的方式。
+
+### 附二：口径的写法值得记
+
+实现方报切片 1 时先写口径：**"不是切片 1 已验证正确，是切片 1 成立且差异全部可归因"**，
+并明说"行星本身画对了"这一条**还看不见**（oracle 的大气壳把整个圆盘盖住了），
+子代理给的相关性数字**只是佐证不是证明**。
+
+⚠ 本 session 的代价大半来自"看着是绿的"判据。一条**说清自己覆盖什么、不覆盖什么**的判据，
+比一条听起来更强的判据值钱得多 —— 而这次是**实现方主动**这么写的。
