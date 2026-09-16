@@ -24,7 +24,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use px_protocol::scene::{AlphaMode, DrawSpec, Member, Object, PassResource, PassSpec, SceneSpec};
+use px_protocol::material::ParamKind;
+use px_protocol::scene::{
+    AlphaMode, DrawSpec, FrameMaterial, Member, Object, PassResource, PassSpec, SceneSpec, Value,
+};
 use serde::Deserialize;
 
 /// 不写 `frame = ...` 时用哪一张帧图。
@@ -59,6 +62,77 @@ pub struct FrameFile {
     /// 内容链的**乒乓对**（裁决 D）：插入的 pass 按它轮流读写，恰好两个。
     #[serde(default)]
     pub chain_color: Vec<String>,
+    /// **帧自有**的材质（§135）：名字 + WGSL **文件** + 入口 + 参数来源。
+    ///
+    /// ⚠ 它烘进文档时是**内联全文**（见 [`MaterialFile`]）：改 `art/frame/**` 下的 WGSL
+    /// 必须重烘。
+    #[serde(default)]
+    pub materials: Vec<MaterialFile>,
+}
+
+/// 帧配方里的 `[[materials]]`：一份**帧自有材质**（§135）—— 天空盒那种"属于这颗渲染器、
+/// 不是可换内容"的材质。
+///
+/// ⚠ `params` 写的是**来源**，不是值：`brightness = "environment.skybox_brightness"`。
+/// 帧图是六个场景**共用**的一份，往这里写死一个数就是 §133 那颗雷
+/// （"六份场景今天恰好都是 900.0" —— 第一份设了别的亮度的场景会得到整幅背景错的图，
+/// 而且不会有人报错）。烘图时按 `environment` 现取，文档里落的是**值**。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialFile {
+    /// 名字：一条 draw 的 `material` 按它解析（今天只有 `skybox`）。
+    pub name: String,
+    /// WGSL **文件**路径（仓库内相对路径，与 `vertex_shader` 同规矩）：全文内联进产物。
+    pub shader: String,
+    pub entry: String,
+    /// 参数名 → **来源名**（认得的见 [`SOURCES`]）。
+    #[serde(default)]
+    pub params: BTreeMap<String, toml::Value>,
+}
+
+/// 帧材质参数能从**文档**里取到的那几个内容值（今天的词汇表只有 `environment.*`）。
+///
+/// 词汇表故意窄：每加一个来源，都要在这里写清"它是什么、哪一档类型" ——
+/// 而"哪一档"正是烘图时能拒掉类型不符的依据（`brightness` 是 `f32`，
+/// 拿一个贴图成员塞进去必须是当场拒，不是打包时按 `f32` 硬写四个字节）。
+#[derive(Debug, Clone, Copy)]
+pub struct Sources {
+    pub ambient: f32,
+    pub skybox_brightness: f32,
+}
+
+/// 认得的来源名。⚠ 报错时**必须把它列出来** —— 不列的话作者只能靠猜，
+/// 而"猜一个来源名"正是这套东西想避免的那种试错。
+pub const SOURCES: [&str; 2] = ["environment.ambient", "environment.skybox_brightness"];
+
+/// 来源名 →（值，那一档类型）。`None` = 不认识这个名字。
+fn source_of(name: &str, sources: &Sources) -> Option<(Value, ParamKind)> {
+    match name {
+        "environment.ambient" => Some((Value::Num(f64::from(sources.ambient)), ParamKind::F32)),
+        "environment.skybox_brightness" => Some((
+            Value::Num(f64::from(sources.skybox_brightness)),
+            ParamKind::F32,
+        )),
+        _ => None,
+    }
+}
+
+/// `px_protocol::scene::Value` → `toml::Value`。
+///
+/// 为什么绕一圈：参数的校验与打包只有一份实现（`px_graphs::params::merge_named` +
+/// `MaterialLayout::pack`，材质与全屏 pass 都走它），而它的入口是 toml 值
+/// （配方那一侧本来就是 toml）。在烘图侧再写一份"按名字打包"就是第二个真相。
+fn toml_of(value: &Value) -> toml::Value {
+    match value {
+        Value::Num(number) => toml::Value::Float(*number),
+        Value::Text(text) => toml::Value::String(text.clone()),
+        Value::Triple(items) => {
+            toml::Value::Array(items.iter().map(|v| toml::Value::Float(f64::from(*v))).collect())
+        }
+        Value::Quad(items) => {
+            toml::Value::Array(items.iter().map(|v| toml::Value::Float(f64::from(*v))).collect())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +270,39 @@ impl FrameFile {
                 ));
             }
         }
+        // ---- 帧自有材质（§135）：**配方形状**那一半 ----------------------------
+        //
+        // 参数里的**来源对不对**（认不认识、类型对不对）要反射 WGSL 才知道，那一步在
+        // `bake_material` 里；这里只判"名字/入口/文件这些一眼能看出来的"。
+        let mut names: Vec<&str> = Vec::new();
+        for material in &self.materials {
+            let at = format!("帧图材质 '{}'", material.name);
+            if material.name.trim().is_empty() {
+                return Err("帧图有一份 `[[materials]]` 没给 name：draws 是按名字引用它的".to_string());
+            }
+            if names.contains(&material.name.as_str()) {
+                return Err(format!(
+                    "帧图里材质名重了：'{}'（两份材质同名 ⇒ 宿主只能猜一个）",
+                    material.name
+                ));
+            }
+            if material.shader.trim().is_empty() {
+                return Err(format!("{at} 没给 shader（WGSL 文件路径）"));
+            }
+            if material.entry.trim().is_empty() {
+                return Err(format!("{at} 没给 entry（@fragment 那个函数叫什么）"));
+            }
+            let full = px_ops::workspace_root().join(&material.shader);
+            if !full.is_file() {
+                return Err(format!(
+                    "{at} 的 shader '{}' 不是一份文件（{}）：它会被**内联**进产物，\
+                     所以必须读得到",
+                    material.shader,
+                    full.display()
+                ));
+            }
+            names.push(&material.name);
+        }
         Ok(())
     }
 }
@@ -230,9 +337,21 @@ pub fn draws_of(objects: &[Object], select: &str) -> Vec<DrawSpec> {
     }
 }
 
-/// 帧图 → 文档里的 `resources` + `passes`。
+/// 帧图烘出来的三节：中间目标、pass 表、**帧自有材质**。
 ///
-/// `with_graph = false` 就是**兼容逃生门**（`--no-frame-graph`）：两栏都空，产物因此与
+/// 打成一个结构体而不是元组：§135 之后是三节了，而"三节的次序"是一个没人会去读的约定。
+pub struct Baked {
+    pub resources: Vec<PassResource>,
+    pub passes: Vec<PassSpec>,
+    pub materials: Vec<FrameMaterial>,
+}
+
+/// 帧图 → 文档里的 `resources` + `passes` + `frame_materials`。
+///
+/// `sources` 是**内容**那一边的值（今天就是环境里那两个数）：帧材质的参数写的是**来源**，
+/// 这里才换成值 —— 帧配方里一个内容值都不许写死（§133）。
+///
+/// `with_graph = false` 就是**兼容逃生门**（`--no-frame-graph`）：三节都空，产物因此与
 /// 没有帧图时**逐字节相同**（六份冻产物的 sha256 是这条的判据）。
 ///
 /// ⚠ 那道开关**不是**"另一种受支持的烘法"：它存在的唯一目的是证明老产物还能逐字节复现。
@@ -240,10 +359,15 @@ pub fn draws_of(objects: &[Object], select: &str) -> Vec<DrawSpec> {
 pub fn build(
     frame: &FrameFile,
     objects: &[Object],
+    sources: &Sources,
     with_graph: bool,
-) -> Result<(Vec<PassResource>, Vec<PassSpec>), String> {
+) -> Result<Baked, String> {
     if !with_graph {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Baked {
+            resources: Vec::new(),
+            passes: Vec::new(),
+            materials: Vec::new(),
+        });
     }
     let resources = frame
         .resources
@@ -255,6 +379,14 @@ pub fn build(
             usage: resource.usage.clone(),
         })
         .collect();
+
+    let mut materials = Vec::with_capacity(frame.materials.len());
+    if !frame.materials.is_empty() {
+        let modules = px_shader::workspace_modules(&px_ops::workspace_root())?;
+        for material in &frame.materials {
+            materials.push(bake_material(material, sources, &modules)?);
+        }
+    }
 
     let mut passes: Vec<PassSpec> = Vec::new();
     for entry in frame.before.iter().chain(frame.after.iter()) {
@@ -312,7 +444,121 @@ pub fn build(
             depth_target: entry.depth_target.clone(),
         });
     }
-    Ok((resources, passes))
+    Ok(Baked {
+        resources,
+        passes,
+        materials,
+    })
+}
+
+/// 烘帧材质时组装 WGSL 用的桩表：**宿主那一张**（`bevy_stub` + 宿主自己的 `view`）。
+///
+/// ⚠ 为什么不能只用 `bevy_stub`：帧材质是**宿主自有**的 WGSL，它的运行期兑现者就是裸 wgpu
+/// 宿主 —— `art/frame/skybox.wgsl` 引的 `view.view_from_clip` 在 Bevy 那张**近似**表里
+/// 没有（Bevy 真正的 `View` 有七十多个字段，那张表只有五格）。所以这一格必须换成宿主那一份，
+/// 而它的文本**只有一处**（`px_shader::assemble::HOST_VIEW_STUB`，宿主与这里共用）。
+///
+/// ⚠ 内容 shader 的烘图侧走的是 Bevy 那张（`px_ops::shader_schema` 那段注释写了为什么）——
+/// 两张表的区别正是"这份 WGSL 是谁的"：内容是 Bevy 宿主与 wgpu 宿主**都要**兑现的，
+/// 帧自有材质只由 wgpu 宿主兑现。
+fn frame_stubs(symbol: &str) -> Option<&'static str> {
+    match symbol {
+        "bevy_pbr::mesh_view_bindings::view" => Some(px_shader::assemble::HOST_VIEW_STUB),
+        other => px_shader::assemble::bevy_stub(other),
+    }
+}
+
+/// 一份帧配方材质 → 文档里的 `frame_materials` 一节。
+///
+/// 三档校验都在**烘图时**做完（三处都在下面点名）：
+/// ① 来源名不认识；② WGSL 声明了参数而配方没给来源；③ 类型不符。
+/// ④ 配方给了 WGSL 没声明的参数 —— 交给 `px_graphs::params::merge_named`（它会把两张表列出来）。
+///
+/// 为什么要反射而不是信任配方：参数的**类型**只有 WGSL 说了算（那是契约的真本，
+/// 与材质、全屏 pass 走的是同一条路）。烘图时不问，就要等到装载/打包那一刻才报错，
+/// 而那时报的是渲染器的错，不是作者写错了配方。
+fn bake_material(
+    material: &MaterialFile,
+    sources: &Sources,
+    modules: &px_shader::ModuleTable,
+) -> Result<FrameMaterial, String> {
+    let at = format!("帧材质 '{}'", material.name);
+    let full = px_ops::workspace_root().join(&material.shader);
+    let text = std::fs::read_to_string(&full)
+        .map_err(|err| format!("{at} 读不了 {}：{err}", full.display()))?;
+    let mut seen = Vec::new();
+    let assembled = px_shader::assemble::render_source(&text, modules, frame_stubs, &mut seen);
+    let layout = px_shader::reflect::reflect_assembled(&assembled, &at)
+        .map_err(|err| format!("{at}（{}）反射不出参数块：{err}", material.shader))?;
+
+    let mut given: BTreeMap<String, toml::Value> = BTreeMap::new();
+    // ④ 配方给了 WGSL 没声明的参数 ⇒ 拒，并把这份 shader 声明的参数列出来。
+    //    ⚠ 这一条不能省给 `merge_named`：下面那张 `given` 是**按声明的参数**填的，
+    //       多出来的名字根本走不到它那里 —— 于是"多给一个参数"会**静默消失**，
+    //       而配方里那一行看着还在（§73 禁的那种绿灯）。
+    for name in material.params.keys() {
+        if layout.param(name).is_none() {
+            return Err(format!(
+                "{at} 不认识参数 '{name}'：\n  这份 WGSL 声明的参数：{}\n  \
+                 ⇒ 要么名字拼错了，要么得先在 shader 的结构体里声明它\
+                 （声明之后按名字透传，不用改 Rust）",
+                layout.param_names()
+            ));
+        }
+    }
+    // 按**声明**的次序走：这样报错的第一句总是"哪个参数"，而不是"配方里哪一行"。
+    for slot in &layout.params {
+        let Some(value) = material.params.get(&slot.name) else {
+            return Err(format!(
+                "{at} 的 WGSL 声明了参数 '{}'（{}），而配方没给它**来源**。\n  \
+                 认得的来源：{}\n  ⇒ 在 `[[materials]]` 的 params 里加一行 `{} = \"<来源>\"`",
+                slot.name,
+                slot.kind.name(),
+                SOURCES.join(" / "),
+                slot.name
+            ));
+        };
+        let Some(source) = value.as_str() else {
+            return Err(format!(
+                "{at} 的参数 '{}' 给的是 {value}：参数要说**来源**，不是值 ——\n  \
+                 帧图是六个场景共用的一份，写死一个数就等于把内容焊进帧策略\
+                 （§133：六份场景的亮度今天恰好都是 900，而内容可以不是）。\n  \
+                 认得的来源：{}",
+                slot.name,
+                SOURCES.join(" / ")
+            ));
+        };
+        let Some((resolved, kind)) = source_of(source, sources) else {
+            return Err(format!(
+                "{at} 的参数 '{}' 说的来源是 '{source}'：**不认得这个来源**。\n  \
+                 认得的来源：{}",
+                slot.name,
+                SOURCES.join(" / ")
+            ));
+        };
+        if kind != slot.kind {
+            return Err(format!(
+                "{at} 的参数 '{}'：来源 '{source}' 是 {}，而 WGSL 里声明的是 {} —— 类型不符\n  \
+                 ⇒ 要么改 WGSL 那一格，要么换一个类型对得上的来源（认得的：{}）",
+                slot.name,
+                kind.name(),
+                slot.kind.name(),
+                SOURCES.join(" / ")
+            ));
+        }
+        given.insert(slot.name.clone(), toml_of(&resolved));
+    }
+
+    let params = crate::params::merge_named(&at, &given, &[], &layout, BTreeMap::new())
+        .map_err(|err| err.to_string())?;
+    Ok(FrameMaterial {
+        name: material.name.clone(),
+        // ⚠ **原文**（组装前的那一份）落进文档：组装是宿主的事（它有自己的桩表），
+        //    而"文档里这是什么"必须与"宿主会拿它做什么"分开。
+        shader: text,
+        entry: material.entry.clone(),
+        params,
+    })
 }
 
 /// 这张帧图 `before ++ after` 的标签序列。
@@ -411,25 +657,150 @@ mod tests {
         assert_eq!(draws_of(&objects, "none").len(), 0);
     }
 
-    /// 兼容逃生门：不给帧图 ⇒ 两栏都空（产物逐字节回到老形状）。
+    /// 这一档的**内容那一边**的值（环境里那两个数）——「六个场景今天恰好都是 900」这件事
+    /// 不影响这里：帧材质要的是"从环境取"，取到的值是多少是内容的事。
+    fn sources() -> Sources {
+        Sources {
+            ambient: 80.0,
+            skybox_brightness: 900.0,
+        }
+    }
+
+    /// 兼容逃生门：不给帧图 ⇒ 三节都空（产物逐字节回到老形状）。
     #[test]
     fn the_legacy_switch_emits_nothing_at_all() {
         begin();
         let frame = load(DEFAULT_FRAME).expect("默认帧图要能读");
         let objects = vec![object("planet", AlphaMode::Opaque)];
-        let (resources, passes) = build(&frame, &objects, false).expect("老形状");
-        assert!(resources.is_empty(), "老形状不许有 resources");
-        assert!(passes.is_empty(), "老形状不许有 passes");
+        let baked = build(&frame, &objects, &sources(), false).expect("老形状");
+        assert!(baked.resources.is_empty(), "老形状不许有 resources");
+        assert!(baked.passes.is_empty(), "老形状不许有 passes");
+        assert!(
+            baked.materials.is_empty(),
+            "老形状不许有 frame_materials（多一节就改产物字节）"
+        );
         // 反过来：开着就得真的出东西。
-        let (resources, passes) = build(&frame, &objects, true).expect("帧图");
-        assert!(!resources.is_empty(), "帧图要声明中间目标");
+        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
+        assert!(!baked.resources.is_empty(), "帧图要声明中间目标");
         assert_eq!(
-            passes.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(),
+            baked
+                .passes
+                .iter()
+                .map(|p| p.label.as_str())
+                .collect::<Vec<_>>(),
             frame_labels(&frame)
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>()
         );
+        // ⚠ 帧自有材质（§135）：配方里声明了几份，文档里就该有几份，而且**全文内联**。
+        assert_eq!(baked.materials.len(), frame.materials.len());
+        let skybox = baked
+            .materials
+            .iter()
+            .find(|material| material.name == "skybox")
+            .expect("默认帧图里那份天空盒");
+        assert_eq!(skybox.entry, "fs_main");
+        assert!(
+            skybox.shader.contains("coords_to_ray_direction"),
+            "内联的必须是**文件全文**（不是路径、也不是摘要）：{} 字节",
+            skybox.shader.len()
+        );
+        assert!(
+            skybox.shader.contains("#{MATERIAL_BIND_GROUP}"),
+            "落进文档的是**组装前**的原文 —— 组装是宿主的事（它有自己的桩表与组号）"
+        );
+        // 参数是**值**：来源（`environment.skybox_brightness`）在烘图时已经换成了数。
+        assert_eq!(
+            skybox.params.get("brightness"),
+            Some(&Value::Num(900.0)),
+            "参数要按反射出来的结构体打包：{:?}",
+            skybox.params
+        );
+    }
+
+    /// 帧材质那三档拒法（§135）：来源不认识 / 声明了没给来源 / 类型不符。
+    ///
+    /// ⚠ 这三条都是**烘图时**的红：等到装载才发现，报的就是渲染器的错，
+    /// 而真正该改的是配方。
+    #[test]
+    fn a_broken_frame_material_is_refused_at_bake_time() {
+        begin();
+        let modules = px_shader::workspace_modules(&px_ops::workspace_root()).expect("模块表");
+        let material = |params: &str| -> MaterialFile {
+            toml::from_str(&format!(
+                "name = \"skybox\"\nshader = \"art/frame/skybox.wgsl\"\nentry = \"fs_main\"\nparams = {{ {params} }}\n"
+            ))
+            .expect("夹具")
+        };
+
+        // ① 来源不认识 ⇒ 拒，并把认得的来源列出来。
+        let err = bake_material(
+            &material("brightness = \"environment.skyboox_brightness\""),
+            &sources(),
+            &modules,
+        )
+        .expect_err("不认识的来源 ⇒ 拒");
+        assert!(err.contains("environment.skyboox_brightness"), "{err}");
+        assert!(
+            err.contains("environment.skybox_brightness"),
+            "要把认得的来源列出来：{err}"
+        );
+
+        // ② WGSL 声明了参数，配方没给来源 ⇒ 拒。
+        let err = bake_material(&material(""), &sources(), &modules).expect_err("声明了没给 ⇒ 拒");
+        assert!(err.contains("brightness"), "{err}");
+        assert!(err.contains("来源"), "{err}");
+
+        // ②′ 给的**是值不是来源** ⇒ 拒（这正是"参数要说来源"那条规矩的钉子）。
+        let err =
+            bake_material(&material("brightness = 900.0"), &sources(), &modules).expect_err("给值 ⇒ 拒");
+        assert!(err.contains("brightness"), "{err}");
+        assert!(err.contains("来源"), "{err}");
+
+        // ③ 类型不符：`brightness` 在 WGSL 里是 `f32`，而 `environment.ambient` 也是 f32
+        //    ⇒ 这一档得换个法子造：把参数名换成一个不存在的（那就变成 ④ 了）。
+        //    真正的类型不符要一份声明了别的类型的 WGSL —— 用一个临时夹具文本。
+        let dir = px_ops::workspace_root().join("target").join("frame-material-fixture");
+        std::fs::create_dir_all(&dir).expect("建夹具目录");
+        let fixture = dir.join("vec3_param.wgsl");
+        std::fs::write(
+            &fixture,
+            // 与 `view` 无关的一份最小 WGSL：只需要一个 `vec3<f32>` 参数。
+            "struct FixtureParams { brightness: vec3<f32> };\n\
+             @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: FixtureParams;\n\
+             @fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(params.brightness, 1.0); }\n",
+        )
+        .expect("写夹具");
+        let mut wrong_type = material("brightness = \"environment.skybox_brightness\"");
+        wrong_type.shader = "target/frame-material-fixture/vec3_param.wgsl".to_string();
+        let err = bake_material(&wrong_type, &sources(), &modules).expect_err("类型不符 ⇒ 拒");
+        assert!(err.contains("类型不符"), "{err}");
+        assert!(err.contains("vec3"), "要说清声明的是哪一档：{err}");
+
+        // ④ 给了 shader 没声明的参数 ⇒ 拒，并由 `merge_named` 把两张表列出来。
+        //    （夹具的 WGSL 只有 `brightness` 一格。）
+        let err = bake_material(
+            &material("brightness = \"environment.ambient\", gain = \"environment.ambient\""),
+            &sources(),
+            &modules,
+        )
+        .expect_err("多给参数 ⇒ 拒");
+        assert!(err.contains("gain"), "{err}");
+        assert!(err.contains("brightness"), "要列出 shader 声明的参数：{err}");
+
+        // ⑤ 正面：来源取的就是**环境里的值**（换个亮度，文档里的数就跟着变）。
+        let dim = Sources {
+            ambient: 80.0,
+            skybox_brightness: 1200.0,
+        };
+        let baked = bake_material(
+            &material("brightness = \"environment.skybox_brightness\""),
+            &dim,
+            &modules,
+        )
+        .expect("换一个亮度也要烘得出来");
+        assert_eq!(baked.params["brightness"], Value::Num(1200.0));
     }
 
     /// 帧图的形状判据：乒乓对、select 词汇、顶点/片元各归其位。
@@ -489,17 +860,18 @@ mod tests {
         begin();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
-        let (resources, passes) = build(&frame, &objects, true).expect("帧图");
+        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
         let spec = SceneSpec {
             schema: px_protocol::SCENE_SCHEMA,
             name: "夹具".to_string(),
             environment: Default::default(),
             cameras: Vec::new(),
             expects: Vec::new(),
-            resources,
-            passes,
+            resources: baked.resources,
+            passes: baked.passes,
             lights: Vec::new(),
             objects,
+            frame_materials: baked.materials,
         };
         verify(&spec, &frame, DEFAULT_FRAME).expect("自己烘的自己认");
 
@@ -508,5 +880,40 @@ mod tests {
         let err = verify(&stale, &frame, DEFAULT_FRAME).expect_err("少了两条 ⇒ 拒");
         assert!(err.contains(DEFAULT_FRAME), "要说清是哪张帧图：{err}");
         assert!(err.contains("prepass"), "要列出期望的标签：{err}");
+    }
+
+    /// 帧图烘出来的文档**自己说得通**：`SceneSpec::check` 那两条帧材质判据
+    /// （不与物体撞名、声明了必须有人用）在真配方上必须是绿的 ——
+    /// `sky` 那条 pass 的 draw 指的就是 `skybox`，而帧材质那一节正是它。
+    ///
+    /// ⚠ 这一条在 §135 之前是**红的**（`sky` 的材质名谁都不认识），
+    /// 而那时它只在宿主装载时才炸。
+    #[test]
+    fn the_baked_materials_satisfy_the_document_checks() {
+        begin();
+        let frame = load(DEFAULT_FRAME).expect("默认帧图");
+        let objects = vec![object("planet", AlphaMode::Opaque)];
+        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
+        let spec = SceneSpec {
+            schema: px_protocol::SCENE_SCHEMA,
+            name: "夹具".to_string(),
+            environment: Default::default(),
+            cameras: Vec::new(),
+            expects: Vec::new(),
+            resources: baked.resources,
+            passes: baked.passes,
+            lights: Vec::new(),
+            objects,
+            frame_materials: baked.materials,
+        };
+        spec.check()
+            .unwrap_or_else(|err| panic!("帧图烘出来的文档要自洽：{err}"));
+        // 反过来：把帧材质那一节拿掉，同一条 check 必须拒（证明那两条判据真的在管事）。
+        let mut without = spec.clone();
+        without.frame_materials.clear();
+        let err = without
+            .check()
+            .expect_err("少了帧材质，`sky` 的 draw 就没人认领了 ⇒ 必须拒");
+        assert!(err.contains("skybox"), "{err}");
     }
 }

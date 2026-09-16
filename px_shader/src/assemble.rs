@@ -142,6 +142,37 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
     }
 }
 
+/// **本工程自己**的 `view` 声明 —— 裸 wgpu 宿主运行期真正兑现的那一份。
+///
+/// 与 [`bevy_stub`] 的关系：那张表是"离线把 `bevy_pbr::*` 拼出来"的**近似**（Bevy 真正的 `View`
+/// 有七十多个字段，那张表里只有五格）。这一份不是近似，它是**契约**：宿主侧那个
+/// `#[repr(C)]` 的 `ViewUniform` 必须与它逐字对应，而两份的对账在宿主的 `cargo test` 里
+/// （`px_render_wgpu::group0` 的布局判据，偏移/大小/成员名逐格比）。
+///
+/// ⚠ 为什么文本住在**共享的叶子 crate**、而不是宿主自己的桩表里：帧材质
+/// （`art/frame/skybox.wgsl`）是**宿主自有**的 WGSL，而它必须在**烘图时**被反射
+/// （参数块的三档校验在烘图时就做，见 `px_graphs::frame`）；烘图侧够不到宿主 crate ——
+/// `px_render_wgpu` 拖着整棵 wgpu 树（§100：烘图侧要快）。所以这一格文本只有**一处**：
+/// 宿主的桩表返回它，烘图侧的桩表（`bevy_stub` + 这一格覆盖）也返回它。
+/// 抄成两份就是 §66.1 那颗「同一条契约、两个数字」的雷：漂开的那天，烘图侧校验过的参数
+/// 与宿主反射出来的布局不是同一份东西，而画面上只表现为"某几个像素不一样"。
+///
+/// ⚠ 最后两格（`view_from_clip` / `world_from_view`）是**追加在末尾**的，为的是天空盒
+/// 片元阶段重建视线方向（Bevy 的 `skybox.wgsl` 走的就是这两条逆矩阵，不是插值下来的
+/// 裁剪坐标）：追加 ⇒ 前面五格的偏移一个都不动，已经烘好的内容 shader 按名字读，读到的是
+/// 同一格。⚠ 两条逆矩阵都由宿主用**逐位移植的通用逆**（`px_render_wgpu::mat4::inverse`）算，
+/// **不许**在 shader 里求逆、也不许换成解析逆（§110.1.1 实测：解析逆差 1–2 ulp）。
+pub const HOST_VIEW_STUB: &str = "struct ViewStub {\n\
+                                   \x20   world_position: vec3<f32>,\n\
+                                   \x20   exposure: f32,\n\
+                                   \x20   view_from_world: mat4x4<f32>,\n\
+                                   \x20   clip_from_view: mat4x4<f32>,\n\
+                                   \x20   viewport: vec4<f32>,\n\
+                                   \x20   view_from_clip: mat4x4<f32>,\n\
+                                   \x20   world_from_view: mat4x4<f32>,\n\
+                                   };\n\
+                                   @group(0) @binding(0) var<uniform> view: ViewStub;\n";
+
 /// 展开一条 `#import`：外部符号走宿主的桩表，本仓模块走文本内联（去重）。
 pub fn expand(import: &str, modules: &ModuleTable, stubs: Stubs, seen: &mut Vec<String>) -> String {
     let import = import.trim();
@@ -302,6 +333,35 @@ mod tests {
             caught.is_err(),
             "换一张空表，同一个符号就解不开了 —— 说明认符号的是**传进来的那张表**，\
              不是组装器里写死的一份"
+        );
+    }
+
+    /// 本宿主那份 `view` 与 Bevy 那张近似表的**关系**：同一格绑定号、同样的前五格，
+    /// 末尾多两格逆矩阵。
+    ///
+    /// 为什么这算一条判据：两条路（宿主运行期 / 烘图侧反射帧材质）共用这一格文本，而
+    /// "共用"只有在它确实是"Bevy 那五格 + 两格"时才有意义 —— 谁把顺序改了、或者把新字段
+    /// 插在中间，前面五格的偏移就动了，而**内容 shader 是按名字读的**（读到的还是同一格，
+    /// 所以画面不会立刻错，只会某天开始错）。
+    #[test]
+    fn the_host_view_stub_is_bevys_five_fields_plus_two_inverses() {
+        let bevy = bevy_stub("bevy_pbr::mesh_view_bindings::view").expect("Bevy 那张表认这个符号");
+        let head = bevy.split("};\n").next().expect("Bevy 那份是个结构体");
+        let mine = HOST_VIEW_STUB.split("};\n").next().expect("这一份也是结构体");
+        assert!(
+            mine.starts_with(head),
+            "前五格必须与 Bevy 那张近似表逐字相同（新字段只许追加在末尾）：\n{head}\n---\n{mine}"
+        );
+        for field in ["view_from_clip: mat4x4<f32>", "world_from_view: mat4x4<f32>"] {
+            assert!(mine.contains(field), "缺了 {field}：\n{mine}");
+            assert!(
+                !head.contains(field),
+                "Bevy 那张近似表里本来没有 {field} —— 有的话这一格就不必由本工程自己声明"
+            );
+        }
+        assert!(
+            HOST_VIEW_STUB.contains("@group(0) @binding(0) var<uniform> view"),
+            "绑定号必须还是 0（§104 第 1 条：绑定号会改像素）"
         );
     }
 }

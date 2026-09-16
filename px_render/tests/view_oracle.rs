@@ -94,6 +94,10 @@ fn dump_the_default_camera_matrices() {
         0.1,
     );
     dump_matrix("clip_from_view（无限 reverse-Z 右手）", &clip_from_view);
+    // 天空盒片元阶段要的那条逆（`bevy_render-0.19.1/src/view/mod.rs:1048` 那一行）。
+    // ⚠ 它是**另一个矩阵**的逆：`view_from_world` 那条向量集（上面 6 组）盖不到它 ——
+    //    投影矩阵不是刚体，`[Rᵀ | −Rᵀt]` 那条解析路在这儿根本不成立。
+    dump_matrix("view_from_clip = clip_from_view.inverse()", &clip_from_view.inverse());
     dump_matrix(
         "clip_from_world = clip_from_view * view_from_world",
         &(clip_from_view * general),

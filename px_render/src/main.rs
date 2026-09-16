@@ -3642,6 +3642,9 @@ mod tests {
             resources: Vec::new(),
             passes: Vec::new(),
             lights: vec![px_protocol::Light::point("sun", [1.0, 2.0, 3.0], [1.0; 3], 1.0)],
+            // 帧自有材质（§135）：Bevy 宿主**不消费**这一节（它是锚，吃的是冻件），
+            // 这里留空只为把结构体补齐。
+            frame_materials: Vec::new(),
             objects: vec![px_protocol::Object {
                 id: "云".to_string(),
                 geometry: px_protocol::Geometry::mesh(member("shell")),

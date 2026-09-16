@@ -525,6 +525,35 @@ pub struct DrawSpec {
     pub material: String,
 }
 
+/// **帧自有**的材质（§135）：名字 + 内联 WGSL 全文 + 片元入口 + 参数。
+///
+/// 为什么它既不在 CAS 里、也不在 `objects` 里：内容材质是**产物**（`.pxart` 里指一个成员键，
+/// 可换、可热重载），而帧材质是**这颗渲染器自己的一部分** —— 天空盒那支 WGSL 必须与 oracle
+/// 逐位对齐，它不是可以换掉的内容。所以它**内联全文**进文档：读这份产物不需要再去 CAS 里找它，
+/// 也不会有人以为它能换（`art/frame/skybox.wgsl` 里那句"它不进 CAS"就是这条）。
+///
+/// ⚠ **改 `art/frame/**` 下任何一份 WGSL 都要重烘**：文档里存的是**当时的文本**，
+/// 不是指向文件的引用。⚠ 而且"图没变"**不等于**"改动没生效" —— 这一条付过代价：
+/// 一次交接写着"新加的 art 文件还没被任何东西读到 ⇒ 不影响产物键"，而那一份顶点 WGSL
+/// 正是被内联进文档的（§131.2）。产物键会动，图可能一个像素都不动。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameMaterial {
+    /// 名字：一条 draw 的 `material` 按它解析（今天只有 `skybox` 一个）。
+    pub name: String,
+    /// 内联的 WGSL 全文（**组装前**的原文：`#import` 与 `#{MATERIAL_BIND_GROUP}` 由宿主组装）。
+    pub shader: String,
+    /// 片元入口名（几何 pass 的顶点阶段是另一栏，属于 pass）。
+    pub entry: String,
+    /// 参数：按名字给的**值**，烘图时按这份 WGSL 反射出来的结构体打包（与材质同一条路）。
+    ///
+    /// ⚠ 帧配方的 `[[materials]]` 里写的是参数的**来源**（`environment.skybox_brightness`），
+    /// 到这里已经变成值 —— 亮度这类**内容值只有一处真源**（`environment`），
+    /// 帧配方里写死一个数就是 §133 那颗雷（"六份场景今天恰好都是 900"）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PassSpec {
@@ -626,6 +655,13 @@ pub struct SceneSpec {
     #[serde(default)]
     pub lights: Vec<Light>,
     pub objects: Vec<Object>,
+    /// **帧自有**的材质（§135）：天空盒那种"属于这颗渲染器、不是可换内容"的材质。
+    /// 名字由 `draws[].material` 引用；全文内联，因为改它要重烘（见 [`FrameMaterial`]）。
+    ///
+    /// ⚠ 空表不落盘 ⇒ 六份冻产物与 `--no-frame-graph` 那条逃生门**逐字节不变**
+    /// （判据在 `the_frozen_originals_round_trip_byte_for_byte`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_materials: Vec<FrameMaterial>,
 }
 
 impl SceneSpec {
@@ -847,6 +883,112 @@ impl SceneSpec {
                 self.passes.len()
             ));
         }
+
+        // ---- 帧自有材质（§135）--------------------------------------------------
+        //
+        // ⚠ 一条 draw 的 `material` 只有两个可能的出处：**物体 id**（内容材质 ——
+        //    `px_graphs::frame::draws_of` 就是拿物体 id 当材质名的）与**帧自有材质**。
+        //    两边撞名 ⇒ 宿主解析时"同一个名字在两张表里"，而它只能猜一个：画面错、没人报错。
+        //    所以撞名在这里就拒，并把**两处**都列出来。
+        let mut frame_names: Vec<&str> = Vec::new();
+        for (index, material) in self.frame_materials.iter().enumerate() {
+            if material.name.trim().is_empty() {
+                return Err(format!(
+                    "第 {index} 份帧材质没有名字：`draws[].material` 是按名字引用它的"
+                ));
+            }
+            if frame_names.contains(&material.name.as_str()) {
+                return Err(format!("帧材质名字重了：'{}'", material.name));
+            }
+            if let Some(object) = self.objects.iter().find(|object| object.id == material.name) {
+                return Err(format!(
+                    "帧材质 '{}' 与物体 '{}' 撞名：物体 id **就是**它的材质名\
+                     （`draws[].material` 用的就是它）⇒ 同一个名字在两张表里。\
+                     要改的是帧配方那一份（`art/frame/*.toml` 的 `[[materials]] name`）",
+                    material.name, object.id
+                ));
+            }
+            if material.shader.trim().is_empty() {
+                return Err(format!(
+                    "帧材质 '{}' 没给 WGSL 全文：它必须内联进文档\
+                     （不内联就等于文档指向了一个文档里没有的东西）",
+                    material.name
+                ));
+            }
+            if material.entry.trim().is_empty() {
+                return Err(format!(
+                    "帧材质 '{}' 没给片元入口名（@fragment 那个函数叫什么）",
+                    material.name
+                ));
+            }
+            frame_names.push(&material.name);
+        }
+        // 一笔 draw 的材质名必须落在**那两张表**之一。⚠ 几何名这里查不了：
+        // 文档里没有几何表（图元与网格由宿主按名字解析），所以这条只管材质。
+        for (index, pass) in self.passes.iter().enumerate() {
+            let label = pass.label_or(index);
+            for draw in &pass.draws {
+                if draw.material.is_empty() {
+                    continue;
+                }
+                if self.objects.iter().any(|object| object.id == draw.material)
+                    || frame_names.contains(&draw.material.as_str())
+                {
+                    continue;
+                }
+                return Err(format!(
+                    "第 {index} 条 pass '{label}' 的 draw（几何 '{}'）要材质 '{}'，\
+                     而它既不是物体 id 也不是帧自有材质。\n  物体 id（它们的 id 就是材质名）：{}\n  \
+                     帧自有材质（`frame_materials`）：{}",
+                    draw.geometry,
+                    draw.material,
+                    if self.objects.is_empty() {
+                        "（一个都没有）".to_string()
+                    } else {
+                        self.objects
+                            .iter()
+                            .map(|object| object.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    },
+                    if frame_names.is_empty() {
+                        "（一个都没有）".to_string()
+                    } else {
+                        frame_names.join(" / ")
+                    }
+                ));
+            }
+        }
+        // 声明了却没人用：与 `params` / `slots` / `reads` / `shader` 同一条规则
+        // （§129 拿它拒"几何 pass 带片元阶段"）。一个没人引用的帧材质在文档里就是个假引用：
+        // 它多半意味着名字写错了 —— 而那种错在画面上表现为"天空盒不画了"，不像是个拼写问题。
+        let used: Vec<&str> = self
+            .passes
+            .iter()
+            .flat_map(|pass| pass.draws.iter())
+            .map(|draw| draw.material.as_str())
+            .collect();
+        let unused: Vec<&str> = frame_names
+            .iter()
+            .copied()
+            .filter(|name| !used.contains(name))
+            .collect();
+        if !unused.is_empty() {
+            return Err(format!(
+                "帧材质 [{}] 声明了却没有任何一条 draw 用它。draws 引用的材质名是 [{}] —— \
+                 要么是名字写错了，要么这一份该删掉（声明了没人用的东西，在文档里就是一个假引用）",
+                unused.join(" / "),
+                if used.is_empty() {
+                    "（一个都没有）".to_string()
+                } else {
+                    used.iter()
+                        .filter(|name| !name.is_empty())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                }
+            ));
+        }
         Ok(())
     }
 
@@ -889,6 +1031,17 @@ impl SceneSpec {
                 ));
             }
         }
+        // 帧自有材质（§135）：**内联文本的长度要打出来** —— "改 art/frame 要不要重烘"
+        // 这个问题，答案就在这一行里（文档里存的是当时的文本，不是文件引用）。
+        for material in &self.frame_materials {
+            lines.push(format!(
+                "  帧材质 '{}'｜片元入口 {}｜内联 WGSL {} 字节｜参数 {}",
+                material.name,
+                material.entry,
+                material.shader.len(),
+                keys_of(&material.params)
+            ));
+        }
         for light in &self.lights {
             lines.push(format!(
                 "  [{}] 灯 {:?}｜位置 ({:.2},{:.2},{:.2})｜色 ({:.2},{:.2},{:.2})｜强度 {:.3e}{}",
@@ -903,8 +1056,7 @@ impl SceneSpec {
                 light.intensity,
                 if light.shadows { "｜阴影贴图" } else { "" },
             ));
-        }
-        for object in &self.objects {
+        }        for object in &self.objects {
             let geometry = match &object.geometry {
                 Geometry::Mesh { member } => format!("网格 {member}"),
                 Geometry::Primitive { name, params } => {
@@ -1156,6 +1308,13 @@ mod tests {
     }
 
     /// 一份**新形状**的文档：一条几何 pass，四栏新字段全用上。
+    ///
+    /// ⚠ 第二笔的材质名写的是**物体 id**（`planet`），不是那支 shader 的节点名
+    /// （`surface`）：`draws[].material` 只有两个出处 —— 物体 id 与帧自有材质
+    /// （`px_graphs::frame::draws_of` 就是拿 id 当材质名的），而 `check` 从 §135 起
+    /// 会拒"两边都不是"的名字。原来那个 `"surface"` 是**从来就解析不到**的写法，
+    /// 只是当时没有门去问它。这条判据判的是"几何 pass 表达得出来、往返得回去"，
+    /// 与那个名字是什么无关。
     fn geometry_doc() -> String {
         DOC.replace(
             r#""lights": ["#,
@@ -1166,7 +1325,7 @@ mod tests {
                  "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n@vertex fn vertex() -> Out { return Out(vec4<f32>(0.0)); }",
                  "vertex_entry": "vertex",
                  "writes": ["view"],
-                 "draws": [{"geometry": "planet", "material": "surface"}, {"geometry": "planet"}],
+                 "draws": [{"geometry": "planet", "material": "planet"}, {"geometry": "planet"}],
                  "render": "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
                  "depth_target": "depth"
                }],
@@ -1209,7 +1368,7 @@ mod tests {
         let pass = &spec.passes[0];
         assert_eq!(pass.kind, "geometry");
         assert_eq!(pass.draws.len(), 2);
-        assert_eq!(pass.draws[0].material, "surface");
+        assert_eq!(pass.draws[0].material, "planet");
         assert_eq!(pass.draws[1].material, "", "第二笔没有材质（深度-only 那一笔）");
         assert_eq!(pass.vertex_entry, "vertex");
         assert!(pass.render.starts_with("color=none|depth=clear(0)"));
@@ -1231,6 +1390,119 @@ mod tests {
         // 新字段**真的落盘了**（不是"解析进默认值"那种假通过）。
         for key in ["draws", "vertex_shader", "render", "depth_target"] {
             assert!(text.contains(key), "{key} 没落盘：{text}");
+        }
+    }
+
+    /// 一份带**帧自有材质**的文档：一条几何 pass 画 `skybox`，材质内联在 `frame_materials` 里。
+    fn frame_material_doc() -> String {
+        DOC.replace(
+            r#""lights": ["#,
+            r#""passes": [{
+                 "kind": "geometry",
+                 "label": "sky",
+                 "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n@vertex fn vertex() -> Out { return Out(vec4<f32>(0.0)); }",
+                 "vertex_entry": "vertex",
+                 "writes": ["view"],
+                 "draws": [{"geometry": "skybox", "material": "skybox"}],
+                 "render": "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
+               }],
+               "frame_materials": [{
+                 "name": "skybox",
+                 "shader": "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }",
+                 "entry": "fs_main",
+                 "params": {"brightness": 900.0}
+               }],
+               "lights": ["#,
+        )
+    }
+
+    /// 帧自有材质这一栏是**纯加法**：老文档落盘时一个键都不许多出来。
+    ///
+    /// ⚠ 与 `the_new_pass_fields_stay_out_of_old_documents` 同一条理由：`skip_serializing_if`
+    /// 少写一个，六份冻产物就会多出一串 `"frame_materials":[]`，产物键跟着变。
+    #[test]
+    fn the_frame_material_field_stays_out_of_old_documents() {
+        let spec: SceneSpec = serde_json::from_str(&old_pass_doc()).expect("老形状要能解析");
+        assert!(spec.frame_materials.is_empty());
+        let text = serde_json::to_string(&spec).expect("序列化");
+        assert!(
+            !text.contains("frame_materials"),
+            "老形状的文档里不该出现这一栏：{text}"
+        );
+    }
+
+    /// 帧自有材质表达得出来、往返得回去，而且**全文真的落盘了**。
+    #[test]
+    fn a_frame_material_is_expressible_and_round_trips() {
+        let spec: SceneSpec = serde_json::from_str(&frame_material_doc()).expect("要能解析");
+        spec.check().expect("这份文档是合法的");
+        assert_eq!(spec.frame_materials.len(), 1);
+        assert_eq!(spec.frame_materials[0].name, "skybox");
+        assert_eq!(spec.frame_materials[0].entry, "fs_main");
+        assert_eq!(
+            spec.frame_materials[0].params["brightness"],
+            Value::Num(900.0),
+            "参数是**值**（来源在帧配方里，烘图时已经换成值）"
+        );
+        let text = serde_json::to_string(&spec).expect("序列化");
+        let back: SceneSpec = serde_json::from_str(&text).expect("再解析");
+        assert_eq!(back, spec, "带帧自有材质的文档必须逐字往返");
+        // 内联的是**全文**：读这份产物不需要再回 CAS 找它。
+        assert!(
+            text.contains("@fragment fn fs_main"),
+            "WGSL 全文必须真的在文档里：{text}"
+        );
+    }
+
+    /// 帧自有材质的四条拒法：都当场说清楚**是谁**、**跟谁**冲突。
+    #[test]
+    fn a_broken_frame_material_is_refused_by_name() {
+        // ① 与物体 id 撞名 ⇒ 拒，而且两处都要列出来。
+        let clash = frame_material_doc()
+            .replace(r#""name": "skybox""#, r#""name": "planet""#)
+            .replace(r#""material": "skybox""#, r#""material": "planet""#);
+        let spec: SceneSpec = serde_json::from_str(&clash).expect("解析");
+        let err = spec.check().expect_err("帧材质与物体撞名 ⇒ 拒");
+        assert!(err.contains("planet"), "要说清是哪个名字：{err}");
+        assert!(err.contains("撞名"), "{err}");
+
+        // ② 名字重了 ⇒ 拒（同名两张材质，宿主只能猜一个）。
+        let two = frame_material_doc().replace(
+            r#""frame_materials": [{"#,
+            r#""frame_materials": [{"name": "skybox", "shader": "x", "entry": "fs_main"}, {"#,
+        );
+        let spec: SceneSpec = serde_json::from_str(&two).expect("解析");
+        let err = spec.check().expect_err("帧材质名字重了 ⇒ 拒");
+        assert!(err.contains("重了"), "{err}");
+
+        // ③ 声明了却没人用 ⇒ 拒，并把 draws 里真正的名字列出来。
+        let unused = frame_material_doc()
+            .replace(r#""material": "skybox""#, r#""material": "planet""#);
+        let spec: SceneSpec = serde_json::from_str(&unused).expect("解析");
+        let err = spec.check().expect_err("没人用 ⇒ 拒");
+        assert!(err.contains("skybox"), "要说清是哪一份没用上：{err}");
+        assert!(err.contains("planet"), "要列出 draws 真正引用的名字：{err}");
+
+        // ④ 一笔 draw 要了个两边都没有的材质 ⇒ 拒，并列出两张表。
+        let dangling = frame_material_doc()
+            .replace(r#""material": "skybox""#, r#""material": "skyboox""#);
+        let spec: SceneSpec = serde_json::from_str(&dangling).expect("解析");
+        let err = spec.check().expect_err("解析不到的材质名 ⇒ 拒");
+        assert!(err.contains("skyboox"), "{err}");
+        assert!(err.contains("planet"), "要列出物体 id 那张表：{err}");
+
+        // 空文本与空入口名同样是"说了没做"（`skip_serializing_if` 会把空串整个藏起来，
+        // 于是文档里看起来"没这一栏"，而 draws 仍然指着它）。
+        let shader_text = "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }";
+        for (field, original, fragment) in [
+            ("shader", shader_text, "WGSL 全文"),
+            ("entry", "fs_main", "片元入口名"),
+        ] {
+            let empty = frame_material_doc()
+                .replace(&format!(r#""{field}": "{original}""#), &format!(r#""{field}": """#));
+            let spec: SceneSpec = serde_json::from_str(&empty).expect("解析");
+            let err = spec.check().expect_err("空的那一栏 ⇒ 拒");
+            assert!(err.contains(fragment), "要说清是哪一栏（{fragment}）：{err}");
         }
     }
 

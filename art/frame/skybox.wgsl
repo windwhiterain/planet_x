@@ -17,11 +17,17 @@
 //
 // ⚠ **内容 vs 策略**（这一栏不许混）：
 //   - 内容（从文档来）：`brightness` 与立方图 —— 前者由帧材质表声明来源
-//     （`environment.skybox_brightness`）、在**烘图时**打包进参数块；后者是 `slots` 那一栏的
-//     `environment.skybox`，由宿主解析成文档成员。**WGSL 里一个内容字面量都不许出现。**
+//     （`environment.skybox_brightness`）、在**烘图时**打包进参数块；后者是环境里那一份
+//     `environment.skybox`（一个 cube 成员），由宿主解析成 GPU 句柄。**WGSL 里一个内容字面量都不许出现。**
 //   - 策略（住在这里/配方里）：方向重建、`position` 的 z 取 0.0（无限 reverse-Z 的远平面）、
 //     `depth_write = false` / `compare = greater_equal` / `cull = none`（后三条已经在
 //     `art/frame/default.toml` 的 `sky` 那一条里）、以及"画在 opaque 之后 transparent 之前"。
+//
+// ⚠ 采样器那一格**由宿主从产物那侧建**（`px_render_wgpu::material::sampler_of`），
+//    因为 oracle 那条路就是"图用它自己带的采样器"（`px_render/src/art_cache.rs:477`）；
+//    而这份星图产物**不带采样器字段** ⇒ 取的是**装载方显式传的那一个**
+//    （oracle 传的是 `Sampler::clamped()`，`px_render/src/scene.rs:294`）。
+//    详见 `sampler_of` 的注释：那里记着"Bevy 的缺省过滤是 Nearest、本工程是 Linear"这个陷阱。
 
 #import bevy_pbr::mesh_view_bindings::{view}
 
@@ -30,9 +36,14 @@ struct SkyboxParams {
     brightness: f32,
 };
 
+// ⚠ 格位不是随手挑的：帧材质与内容材质**共用同一份材质契约表**
+//    （`px_protocol::material::TEXTURE_SLOTS`：立方图只许占 5 / 7 / 21 / 23，
+//    第 1 格是**2D** 那一档）。反射器（`px_shader::reflect`）按那张表逐格校验，
+//    立方图写在第 1 格会被当场拒 —— 而宿主复用的正是材质那条绑定组构造
+//    （12 格超集 + 空槽绑白图），换一套格位就等于同一个东西两份契约。
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: SkyboxParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var skybox: texture_cube<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var skybox_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var skybox: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var skybox_sampler: sampler;
 
 struct SkyVertexOutput {
     @builtin(position) position: vec4<f32>,

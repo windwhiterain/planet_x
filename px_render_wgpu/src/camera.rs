@@ -15,6 +15,10 @@
 //!
 //! ⚠ `Mat3 → Quat → Mat3` **不是**逐位恒等（4 个相机位姿实测过），所以两个方向都必须是
 //! 忠实转写；这里 `from_mat3` 抄的是 Shepperd 分支，`from_quat` 抄的是 `quat_to_axes`。
+//!
+//! ⚠ 两条**逆矩阵**（`view_from_world` 与 `view_from_clip`）都走 `mat4::inverse` 那个
+//! **逐位移植的通用逆**（§110.1.1：解析逆差 1–2 ulp）。这不是"省事的写法"能换的：
+//! 刚体明明有 `[Rᵀ | −Rᵀt]` 这条更省事的解析逆，实测与 glam 的余子式逆**不是同一个数**。
 
 #![allow(dead_code)]
 
@@ -25,6 +29,11 @@ pub struct Camera {
     pub world_from_view: Mat4,
     pub view_from_world: Mat4,
     pub clip_from_view: Mat4,
+    /// `clip_from_view` 的**通用逆**（天空盒的片元阶段用它把片元坐标还原成视线方向）。
+    ///
+    /// ⚠ 它是**这一帧唯一的**求逆点：宿主算一次、进 `view` uniform，shader 那边只做乘法 ——
+    /// 在 shader 里求逆既慢又是另一条算术路径（§110.1.1，逐位判据下"等价"不算等价）。
+    pub view_from_clip: Mat4,
     pub clip_from_world: Mat4,
 }
 
@@ -55,6 +64,10 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
     let clip_from_view =
         Mat4::perspective_infinite_reverse_rh(core::f32::consts::PI / 4.0, aspect, 0.1);
     let view_from_world = world_from_view.inverse();
+    // 天空盒要的那条逆：Bevy 那边是 `let view_from_clip = clip_from_view.inverse();`
+    // （`bevy_render-0.19.1/src/view/mod.rs:1048`）—— 同一个函数、同一个顺序，
+    // 所以这里也是宿主算、shader 只乘。
+    let view_from_clip = clip_from_view.inverse();
     let clip_from_world = clip_from_view.mul_mat4(&view_from_world);
 
     Camera {
@@ -62,6 +75,7 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
         world_from_view,
         view_from_world,
         clip_from_view,
+        view_from_clip,
         clip_from_world,
     }
 }
@@ -125,6 +139,32 @@ mod tests {
         0x0000_0000, 0x0000_0000, 0x3DCC_CCCD, 0x0000_0000,
     ];
 
+    /// `world_from_view.inverse()` —— **不是**解析逆（§110.1.1）。
+    ///
+    /// 摘自 `target/oracle/bevy-view-vectors.txt` 的 `case 0` `out`：那 6 组向量的第一组
+    /// 就是默认相机（`case 0` 的 `in` 正是上面那个 `WORLD`），而它期望的 `out` 是
+    /// **glam 的通用余子式逆**。⚠ 解析刚体逆 `[Rᵀ | −Rᵀt]` 在这里给的是
+    /// `c1.y = 3F7C2F4D`（与位姿同值）、`c3.z = C04CA662` —— 差 1–2 ulp，**不是**这个常量。
+    const VIEW_FROM_WORLD: [u32; 16] = [
+        0x3F80_0000, 0x8000_0000, 0x0000_0000, 0x8000_0000,
+        0x8000_0000, 0x3F7C_2F4F, 0x3E30_2109, 0x0000_0000,
+        0x0000_0000, 0xBE30_2109, 0x3F7C_2F4F, 0x8000_0000,
+        0x0000_0000, 0xB380_0001, 0xC04C_A664, 0x3F80_0000,
+    ];
+
+    /// `clip_from_view.inverse()`（天空盒的片元阶段用它还原视线方向）。
+    ///
+    /// 摘自 `px_render/tests/view_oracle.rs::dump_the_default_camera_matrices` 这一次的
+    /// 实测读数（`bevy_render-0.19.1/src/view/mod.rs:1048` 那一行就是它的出处）。
+    /// ⚠ 这一格**盖不到**上面那 6 组向量：那批的输入是位姿/一般矩阵，而投影矩阵不是刚体 ——
+    /// `[Rᵀ | −Rᵀt]` 这条解析路在这儿连形式都不成立。所以它只能对着 Bevy 的读数钉。
+    const VIEW_FROM_CLIP: [u32; 16] = [
+        0x3F1F_0EDA, 0x8000_0000, 0x0000_0000, 0x8000_0000,
+        0x8000_0000, 0x3ED4_13CD, 0x8000_0000, 0x0000_0000,
+        0x0000_0000, 0x8000_0000, 0x0000_0000, 0x4120_0000,
+        0x8000_0000, 0x0000_0000, 0xBF7F_FFFF, 0x0000_0000,
+    ];
+
     #[test]
     fn the_probe_camera_matches_bevy_bit_for_bit() {
         let aspect = 960.0f32 / 640.0f32;
@@ -158,6 +198,25 @@ mod tests {
                 got[i],
                 CLIP[i]
             );
+        }
+
+        // 两条逆矩阵（§135）：一条给内容 shader 的透明排序/裁剪坐标那条路，
+        // 一条给天空盒重建视线方向。⚠ 都由**通用逆**产出 —— 解析逆在这两格上都不是这个数。
+        for (what, matrix, expected) in [
+            ("view_from_world", &cam.view_from_world, VIEW_FROM_WORLD),
+            ("view_from_clip", &cam.view_from_clip, VIEW_FROM_CLIP),
+        ] {
+            let got = bits(matrix);
+            for i in 0..16 {
+                assert_eq!(
+                    got[i], expected[i],
+                    "{what}[{i}] (col {} .{}) got {:08X} want {:08X}",
+                    i / 4,
+                    ["x", "y", "z", "w"][i % 4],
+                    got[i],
+                    expected[i]
+                );
+            }
         }
     }
 

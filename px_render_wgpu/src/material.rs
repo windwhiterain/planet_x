@@ -332,6 +332,37 @@ pub fn filter_mode(mode: px_protocol::scene::Filter) -> wgpu::FilterMode {
 ///
 /// `lod_clamp` 是 `0..32`（`SamplerDescriptor::default()` 那一份）：贴图最多 10 级，
 /// 32 够不着，所以它不参与像素。
+///
+/// ## 天空盒也走这一条（§135 的那一格）—— 三条实测，一条更正
+///
+/// **为什么复用 `sampler_of`**：oracle 那条路就是"图用它自己带的采样器" ——
+/// `image.sampler = ImageSampler::Descriptor(sampler_descriptor(sampler))`
+/// （`px_render/src/art_cache.rs:477`，`sampler_descriptor` 在同文件 `:510-518`），
+/// 天空盒的图也是从同一个 `ArtCache::texture` 出来的，**没有第二套采样器**。
+/// 所以本宿主这边也只有一条路：拿文档里的 `Sampler` 建采样器，天空盒与内容贴图共用它。
+///
+/// ⚠ **更正一处容易想当然的地方（我实测过）**："星空产物没带采样器 ⇒ 两边都落回各自的缺省"
+/// **不成立** —— 根本没有"落回"这回事：oracle 是**显式**传的
+/// `&Sampler::clamped()`（`px_render/src/scene.rs:288-296`）。
+/// 而 `Sampler::clamped()` 与 `Sampler::default()` **不是同一个采样器**：
+/// 前者 `address_u = ClampToEdge`，后者 `address_u = Repeat`（`address_v` 两者都是
+/// ClampToEdge）。立方图每个面的边界纹素正好落在这个差别上 ⇒ 宿主若图省事写成
+/// `Sampler::default()`，背景就是"看起来一样、逐位不一样"。
+/// **宿主必须用 `Sampler::clamped()`**（这就是 oracle 那个数），理由与 §110.1 同族：
+/// 缺省值不是判据，"oracle 传了什么"才是。
+///
+/// ⚠ 顺带核对过的一份产物（自己读的，不是转述）：`generated/stars` 的清单参数是
+/// `{"format":0.0,"height":512.0,"layers":6.0,"levels":1.0,"width":512.0}` ——
+/// 五个形状数，**一个采样器字段都没有**（`px_protocol::art::TextureShape::params` 就是这五个）。
+/// 采样器从哪来这件事因此完全由**装载方**决定，上面那条更正才要紧。
+///
+/// ⚠⚠ **另一个陷阱**：谁要是"反正产物没给，就用 Bevy 的缺省" ——
+/// Bevy 的 `ImageSamplerDescriptor::default()` 过滤是 **Nearest**
+/// （`bevy_image-0.19.1`：`ImageFilterMode` 的 `#[default]` 是 `Nearest`），
+/// 而本工程的 `Sampler::default()` / `Sampler::clamped()` 过滤是 **Linear**
+/// （`Filter` 的 `#[default]` 是 `Linear`）。星空是高频点状内容，Nearest 与 Linear
+/// 在那六张 512² 脸上出来的像素不同，而两张图看起来都"是星空" ——
+/// 这正是"用错缺省"最难被发现的那种形状。本宿主只认文档那一份。
 pub fn sampler_of(device: &wgpu::Device, sampler: &Sampler) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("material sampler"),
@@ -791,6 +822,25 @@ mod tests {
         );
         assert_eq!(0_u32.clamp(1, 16), 1, "产物写 0 = 不设 ⇒ 落回 1");
         assert_eq!(64_u32.clamp(1, 16), 16, "wgpu 的上限是 16");
+
+        // ⚠ 天空盒那一格（§135）用的是 `Sampler::clamped()`，它与 `default()` **只差
+        // `address_u`**（ClampToEdge / Repeat）。这一条把这个差别钉住：哪天有人把
+        // `clamped()` 写成 `default()`，"背景看起来一样、逐位不一样"就没有线索可循了。
+        assert_ne!(Sampler::clamped(), Sampler::default());
+        assert_eq!(Sampler::clamped().address_u, Address::ClampToEdge);
+        assert_eq!(Sampler::default().address_u, Address::Repeat);
+        assert_eq!(
+            Sampler::clamped().address_v,
+            Sampler::default().address_v,
+            "两者 v 轴都是 ClampToEdge —— 差别**只在** u 轴"
+        );
+        for sampler in [Sampler::clamped(), Sampler::default()] {
+            assert_eq!(
+                sampler.filter,
+                Filter::Linear,
+                "本工程的缺省过滤是 Linear（Bevy 的 ImageSamplerDescriptor::default() 是 Nearest）"
+            );
+        }
     }
 
     /// 兜底图的形状：1×1、六层的 cube 视图（尺寸不影响像素，但**维度**必须对，

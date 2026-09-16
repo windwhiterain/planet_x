@@ -126,3 +126,21 @@ reads = ["scene_color_a"]
 writes = ["view"]
 render = "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
 params = { gain = 1.0 }
+
+# ---- 帧自有材质（§135）：**这颗渲染器自己的一部分**，不是可换的内容 ----
+#
+# 为什么它不写成 CAS 成员、也不由 `--bin shaders` 烘：天空盒那支 WGSL 必须与 oracle
+# 逐位对齐（方向重建走的是 `view_from_clip` / `world_from_view` 两条逆矩阵），它不是
+# "可以换一张图试试"的内容。烘图时它的**全文被内联进产物** ⇒
+# ⚠ **改 `art/frame/*.wgsl` 就要重烘**；而且"图没变"不等于"改动没生效"
+# （文档里的文本变了 ⇒ 产物键就变了，哪怕像素一个都没动）。
+[[materials]]
+name = "skybox"
+shader = "art/frame/skybox.wgsl"
+entry = "fs_main"
+# ⚠ 参数写的是**来源**，不是值：帧图是六个场景共用的一份，写死一个数就等于把内容
+# 焊进帧策略（§133：六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
+# 别的亮度的场景会得到整幅背景错的图，且不会有人报错）。
+# 认得的来源只有 `environment.ambient` 与 `environment.skybox_brightness`;
+# 名称/类型对不上在**烘图时**当场拒（`px_graphs::frame::bake_material`）。
+params = { brightness = "environment.skybox_brightness" }

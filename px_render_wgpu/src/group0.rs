@@ -30,6 +30,14 @@ use crate::mat4::{Mat4, Vec4};
 /// 本宿主一个都不需要：桩表给的就是这一份，多写一格就是多一处会漂的数。
 /// `world_position` 是 `vec3` 紧跟着 `exposure: f32`（偏移 0 / 12）—— 那不是"省了 4 个字节"，
 /// 那就是 WGSL 的布局（`vec3` 对齐 16、大小 12）。
+///
+/// ⚠ **这是本宿主自己的布局，不是 Bevy 的 `View`**。两者只是**绑定号**相同
+/// （§104 第 1 条：绑定号会改像素）：Bevy 那个是 `world_from_view / view_from_world /
+/// clip_from_view / view_from_clip / world_position / exposure / viewport / main_pass_viewport /
+/// frustum / lod_view_world_position / color_grading / mip_bias / frame_count`，七十多个字段；
+/// 这一份是它按本工程用量的**子集**，而且次序是按"哪几格先要用"排的。所以：
+/// **字段加在哪里，谁都不许按 Bevy 那份去推** —— 这一份的真本是组装出来的 WGSL
+/// （[`px_shader::assemble::HOST_VIEW_STUB`] 就是它），由下面那些判据逐格对账。
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct ViewUniform {
@@ -37,12 +45,31 @@ pub struct ViewUniform {
     pub world_position: [f32; 3],
     /// `Exposure::default()`（EV100 = 9.7）＝ [`exposure`]。内容 shader 自己乘它。
     pub exposure: f32,
-    /// `world_from_view`（列主序，就是 `Mat4` 那 16 个数）。
+    /// `view_from_world`（列主序，就是 `Mat4` 那 16 个数）——**世界 → 视图**那条逆。
     pub view_from_world: [[f32; 4]; 4],
     /// `clip_from_view`（无限 reverse-Z 右手投影）。
     pub clip_from_view: [[f32; 4]; 4],
     /// **绝对像素矩形** `(x, y, w, h)`：片元坐标也是绝对的，`clouds` / `atmosphere` 依赖这一点。
     pub viewport: [f32; 4],
+    // ---- 下面两格是§135（天空盒）加的，**一律追加在末尾**：------------------------
+    //
+    // ⚠ 新字段只能加在**末尾**（这里就是 `viewport` 之后）。WGSL 结构体的偏移由声明次序决定，
+    // 而内容 shader 是**按名字**读那五格的：把新字段插在中间不会报错、只会让
+    // `view.viewport` 读到别的字节 —— 逐字节判据红，而画面看起来"背景偏了一点"。
+    // 追加在末尾 ⇒ 前五格的偏移一个都不动（判据里钉着 0 / 12 / 16 / 80 / 144 这五个数）。
+    /// `clip_from_view` 的逆：**裁剪 → 视图**。天空盒的片元阶段用它把片元坐标还原成视线方向
+    /// （`coords_to_ray_direction`，`bevy_core_pipeline-0.19.1/src/skybox/skybox.wgsl:50-55`）。
+    ///
+    /// ⚠ 它必须来自 [`crate::mat4::inverse`] 那个**逐位移植的通用逆**，不许换成解析逆
+    /// （§110.1.1 实测：解析刚体逆与通用逆差 1–2 ulp），也不许搬进 shader ——
+    /// "数学等价"在逐字节判据下不是等价。
+    pub view_from_clip: [[f32; 4]; 4],
+    /// 相机位姿（**视图 → 世界**）。同样是天空盒要的：方向要从视图系转回世界系。
+    ///
+    /// ⚠ 它与 `view_from_world` 不是互为倒数的两处写法：这一格是 `camera.rs` 里
+    /// `from_scale_rotation_translation` 直接拼出来的那个矩阵，而 `view_from_world` 是
+    /// 它的**通用逆**回去的那个数 —— 两个方向都要，因为两个方向算出来的东西不逐位互逆。
+    pub world_from_view: [[f32; 4]; 4],
 }
 
 /// `lights`（group 0 binding 1）—— 对应桩里的 `LightsStub`。
@@ -139,11 +166,16 @@ pub fn to_uniform_bytes<T: Pod>(value: &T) -> Vec<u8> {
 
 impl ViewUniform {
     /// 按名字填一份 `view`；`exposure` 由 [`exposure`] 给（内容 shader 自己乘它）。
+    ///
+    /// ⚠ 参数次序**就是** WGSL 结构体的声明次序（末尾两格是 §135 追加的逆矩阵）：
+    /// 两处各排一次而排得不同，是"同一份契约、两个数"最直白的一种写法。
     pub fn new(
         world_position: [f32; 3],
         view_from_world: [[f32; 4]; 4],
         clip_from_view: [[f32; 4]; 4],
         viewport: [f32; 4],
+        view_from_clip: [[f32; 4]; 4],
+        world_from_view: [[f32; 4]; 4],
     ) -> ViewUniform {
         ViewUniform {
             world_position,
@@ -151,19 +183,25 @@ impl ViewUniform {
             view_from_world,
             clip_from_view,
             viewport,
+            view_from_clip,
+            world_from_view,
         }
     }
 
     /// 探针相机 + 视口 → `view`。矩阵按列主序原样搬（`Mat4` 就是 glam 那 16 个数）。
     ///
-    /// ⚠ `view_from_world` 用的是 `camera.rs` 里那份**逐位**算出来的逆（§110.1.1：
-    /// 解析逆差 1–2 ulp，落到顶点裁剪坐标上就是几个顶点换边 ⇒ 逐字节判据红且归因不到）。
+    /// ⚠ `view_from_world` 与 `view_from_clip` 用的都是**逐位**算出来的通用逆
+    /// （§110.1.1：解析逆差 1–2 ulp，落到顶点裁剪坐标上就是几个顶点换边 ⇒ 逐字节判据红
+    /// 且归因不到；天空盒那条逆还要再乘一次片元坐标，同一个 1 ulp 会摊到整幅背景上）。
+    /// 两条逆都在 `camera.rs` 里算过一次，这里只搬 —— 宿主每帧只求一次逆。
     pub fn from_camera(camera: &crate::camera::Camera, viewport: [f32; 4]) -> ViewUniform {
         ViewUniform::new(
             [camera.position.x, camera.position.y, camera.position.z],
-            columns(&camera.world_from_view),
+            columns(&camera.view_from_world),
             columns(&camera.clip_from_view),
             viewport,
+            columns(&camera.view_from_clip),
+            columns(&camera.world_from_view),
         )
     }
 }
@@ -626,7 +664,8 @@ mod tests {
                          \x20   let light = clustered_lights.data[0];\n\
                          \x20   return vec4<f32>(\n\
                          \x20       view.exposure + lights.ambient_color.x + globals.time + globals.delta_time\n\
-                         \x20           + f32(light.flags) + f32(light.decal_index) + light.range + depth,\n\
+                         \x20           + f32(light.flags) + f32(light.decal_index) + light.range + depth\n\
+                         \x20           + view.view_from_clip[3][2] + view.world_from_view[3][3],\n\
                          \x20       view.world_position.x + view.view_from_world[0][0] + view.clip_from_view[0][0],\n\
                          \x20       view.viewport.x + view.viewport.w + in.world_position.x + in.world_normal.x,\n\
                          \x20       in.uv.x + in.uv.y,\n\
@@ -666,6 +705,18 @@ mod tests {
                 "mat4x4<f32>",
             ),
             ("viewport", offset_of!(ViewUniform, viewport), "vec4<f32>"),
+            // ⚠ 末尾这两格是 §135 追加的：它们的偏移（160 / 224）与上面五格的关系是
+            // **跟着走的**，所以这条判据同时钉住了"新字段没有把老的挤走"。
+            (
+                "view_from_clip",
+                offset_of!(ViewUniform, view_from_clip),
+                "mat4x4<f32>",
+            ),
+            (
+                "world_from_view",
+                offset_of!(ViewUniform, world_from_view),
+                "mat4x4<f32>",
+            ),
         ];
     }
 
@@ -916,6 +967,10 @@ mod tests {
 
     /// `view` 的**值**也要对：偏移对不对，最有说服力的判据是"按值读回来是不是那几个数"。
     /// 曝光那一格的位模式是 §110.1 钉死的 `3A835274`。
+    ///
+    /// ⚠ 末尾两格是 §135 加的，它们在这里的判据是"**前五格的偏移一个都没动**"
+    /// （144…156 还是 viewport）—— 这条与 `offset_of!` 那张表互为旁证：
+    /// 一个是编译器说的，一个是按字节读出来的。
     #[test]
     fn the_view_uniform_carries_the_probe_camera_and_the_exposure_bits() {
         assert_eq!(
@@ -926,7 +981,7 @@ mod tests {
         let camera = crate::camera::probe_camera(None, 960.0 / 640.0);
         let view = ViewUniform::from_camera(&camera, [0.0, 0.0, 960.0, 640.0]);
         let bytes = to_bytes(&view);
-        assert_eq!(bytes.len(), 160, "view 就是 160 字节");
+        assert_eq!(bytes.len(), 288, "view 是 160 + 两条逆矩阵的 128 = 288 字节");
         let word = |offset: usize| {
             u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("四个字节"))
         };
@@ -934,14 +989,37 @@ mod tests {
         assert_eq!(word(4), camera.position.y.to_bits(), "world_position.y");
         assert_eq!(word(8), camera.position.z.to_bits(), "world_position.z");
         assert_eq!(word(12), 0x3A83_5274, "exposure");
-        assert_eq!(word(16), camera.world_from_view.x_axis.x.to_bits());
-        assert_eq!(word(76), camera.world_from_view.w_axis.w.to_bits());
+        assert_eq!(
+            word(16),
+            camera.view_from_world.x_axis.x.to_bits(),
+            "view_from_world —— **世界 → 视图**那条逆，不是位姿矩阵"
+        );
+        assert_eq!(word(76), camera.view_from_world.w_axis.w.to_bits());
         assert_eq!(word(80), camera.clip_from_view.x_axis.x.to_bits());
         assert_eq!(word(140), camera.clip_from_view.w_axis.w.to_bits());
+        // ⚠ 前五格到这里就结束了：144 还是 viewport（§135 的追加**不许**动它）。
         assert_eq!(word(144), 0.0f32.to_bits(), "viewport.x = 0");
         assert_eq!(word(148), 0.0f32.to_bits(), "viewport.y = 0");
         assert_eq!(word(152), 960.0f32.to_bits(), "viewport.z = 宽");
         assert_eq!(word(156), 640.0f32.to_bits(), "viewport.w = 高");
+        assert_eq!(
+            word(160),
+            camera.view_from_clip.x_axis.x.to_bits(),
+            "view_from_clip 紧跟在 viewport 之后"
+        );
+        assert_eq!(
+            word(284),
+            camera.world_from_view.w_axis.w.to_bits(),
+            "world_from_view 收尾（224 + 60）"
+        );
+        // 位姿矩阵与它的逆在**同一个结构体里各占一格**，而不是同一份数据两处名字：
+        // 逐位比一次，确认这两格不是同一个数（对相机来说它们是互逆的，不是相等）。
+        assert_ne!(
+            camera.view_from_world.x_axis.y.to_bits(),
+            camera.world_from_view.x_axis.y.to_bits(),
+            "位姿与它的逆恰好在这一格上不同（0x00000000 vs 0x80000000）—— \
+             同一个数写两处的那种接错法会在这里露出来"
+        );
     }
 
     /// uniform 缓冲要 16 对齐（`globals` 是 12 字节）；补齐的字节全是 0，前缀一个字节都不许动。
@@ -961,7 +1039,7 @@ mod tests {
         assert_eq!(to_uniform_bytes(&ViewUniform::from_camera(
             &crate::camera::probe_camera(None, 1.5),
             [0.0, 0.0, 1.0, 1.0],
-        )).len(), 160);
+        )).len(), 288);
         assert_eq!(to_uniform_bytes(&LightsUniform::ambient(80.0)).len(), 16);
     }
 

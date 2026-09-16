@@ -304,6 +304,10 @@ fn canonical() -> String {
                 cast_shadow: false,
             },
         ],
+        // 帧自有材质（§135）：这一条夹具**故意留空** —— 空表不落盘，所以快照里
+        // 一个字节都不该因为它变（"加字段是纯加法"这件事在快照里也是看得见的）。
+        // 有内容的那一形状在 `px_protocol` 自己的单测里（`a_frame_material_is_expressible_and_round_trips`）。
+        frame_materials: Vec::new(),
     };
     let lease = Lease {
         pid: 0,

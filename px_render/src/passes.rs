@@ -373,6 +373,8 @@ mod tests {
             resources,
             passes,
             lights: Vec::new(),
+            // 帧自有材质（§135）：这一档的夹具用不到它（老宿主也不消费这一节）。
+            frame_materials: Vec::new(),
             objects: vec![px_protocol::scene::Object {
                 id: "o".to_string(),
                 geometry: px_protocol::scene::Geometry::Primitive {

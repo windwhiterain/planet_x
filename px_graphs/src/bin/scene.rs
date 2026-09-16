@@ -1034,19 +1034,36 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
         .unwrap_or_else(|| px_graphs::frame::DEFAULT_FRAME.to_string());
     // ⚠ 逃生门那条路**连帧图配方都不读**：它是"证明老产物还能逐字节复现"的仪器，
     //    不该因为帧图配方坏了就一起坏掉（那正是它要保的东西）。
-    let (resources, passes) = if with_graph {
+    let (resources, passes, frame_materials) = if with_graph {
         let frame = px_graphs::frame::load(&frame_name)?;
-        let (resources, passes) = px_graphs::frame::build(&frame, &objects, true)?;
+        // 帧材质的参数写的是**来源**，这里把**内容**那一边的值给它 ——
+        // 帧配方里一个内容值都不许写死（§133），取值的词汇表住在 `px_graphs::frame`。
+        let sources = px_graphs::frame::Sources {
+            ambient: file.ambient,
+            skybox_brightness: SKYBOX_BRIGHTNESS,
+        };
+        let baked = px_graphs::frame::build(&frame, &objects, &sources, true)?;
         println!(
-            "帧图 {frame_name}：{} 条 pass（{} 前 / {} 后）｜中间目标 {} 个",
-            passes.len(),
+            "帧图 {frame_name}：{} 条 pass（{} 前 / {} 后）｜中间目标 {} 个｜帧自有材质 {} 份（{}）",
+            baked.passes.len(),
             frame.before.len(),
             frame.after.len(),
-            resources.len()
+            baked.resources.len(),
+            baked.materials.len(),
+            if baked.materials.is_empty() {
+                "（无）".to_string()
+            } else {
+                baked
+                    .materials
+                    .iter()
+                    .map(|material| format!("{}={} 字节内联 WGSL", material.name, material.shader.len()))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            }
         );
-        (resources, passes)
+        (baked.resources, baked.passes, baked.materials)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
 
     let document = SceneSpec {
@@ -1067,6 +1084,7 @@ fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, 
         passes,
         lights: vec![sun],
         objects,
+        frame_materials,
     };
     document.check()?;
     Ok(Compiled { document })

@@ -1951,3 +1951,93 @@ copy 两端要**纹理**、大气的 group 0 要**同一张纹理的视图**，�
 
 ⇒ 规矩补一条：**交接里凡是给数字的地方，都要连"我是怎么量的、什么时候量的"一起给**；
 接的人**先重量再使用**，别直接引用。
+
+---
+
+## §135 帧自有材质进文档：`view` 的两条逆 + 天空盒的采样器与格位
+
+> 这一节是**帧材质这一单元**（工单三步）的落点与读数。判据仪器：`target/oracle/frame-materials-check.ps1`
+> （不入 git），读数落 `target/oracle/frame-materials-{before,after}.txt`。
+
+### 落点
+
+| 件 | 落点 | 说明 |
+|---|---|---|
+| `view` 多两格逆矩阵 | `px_shader::assemble::HOST_VIEW_STUB` | **文本的家**：宿主运行期与烘图侧反射帧材质共用这一处（烘图侧依赖不到 `px_render_wgpu` —— 那是 wgpu 树）。⚠ 它**不是** Bevy 的 `View`（那边七十多个字段），是"Bevy 那张近似表的五格 + 两格逆" |
+| 宿主认下它 | `px_render_wgpu/src/stubs.rs` → `VIEW_STUB` | 绊线测试从"**两**处与 Bevy 不同"改成"**三**处"（`view` 自己拥有） |
+| Rust 侧 | `group0.rs::ViewUniform`（160 → **288 字节**） | 两格**追加在末尾**（偏移 160 / 224）⇒ 前五格的偏移一个都没动，由 `offset_of!` 表 + 按字节读值两条判据同时钉 |
+| 两条逆 | `camera.rs`：`view_from_clip = clip_from_view.inverse()` | **通用逆**（§110.1.1）；判据 = Bevy 实测的 16 个位模式（下一段） |
+| 帧材质进文档 | `px_protocol::scene::{FrameMaterial, SceneSpec::frame_materials}` | `#[serde(default)] + skip_serializing_if` ⇒ 六份冻产物**逐字节不变** |
+| 帧配方 | `art/frame/default.toml` 的 `[[materials]]` | `brightness = "environment.skybox_brightness"` —— **来源**，不是值 |
+| 烘图侧 | `px_graphs::frame::{Sources, SOURCES, bake_material, frame_stubs}` | 四档当场拒（见下） |
+
+### 判据（全部现场重量，不引用交接里给的数）
+
+| # | 判据 | 读数 |
+|---|---|---|
+| 1 | 六份冻产物（`target/oracle/pxart-frozen/`） | `2795F948E6987E11` / `F60B19B0AE7E229F` / `1A27679882A10D6B` / `ACB824E9EC0BA893` / `CB363DA74A90F63E` / `2C6C8592AD45214B`（4126 / 4136 / 4138 / 5749 / 4890 / 5721 字节）✓ 与工单一致 |
+| 2 | `--no-frame-graph` 逐字节复现那六份 | 六份**全等**（键 `28a9b516c132` / `cbf452bfc590` / `ec43abadf875` / `48e3d4513a93` / `f34596e1c7fc` / `4b115d94428c`）✓ |
+| 3 | `orbit-bare-nolight` 帧烘的**新**产物键 | `86b759152dd4`（20776 B）→ **`8595a609f764`**（26313 B）：多出来的正是内联的那 5341 字节天空盒 WGSL（+JSON 转义） |
+| 4 | 四套测试 | `px_pass` **21** / `px_graphs` **11**（+2）/ `px_protocol` **20**（+3）/ `px_render_wgpu` **35** —— 0 failed |
+| 5 | `cargo check --workspace --all-targets` | exit **0** |
+| **6** | **两格新字段对像素是否中立** | 用新文档重出同一帧 → `1D61162240FD62CB`（185505 B），与 `target/slice3/after-normal-fix.png` **逐字节相同** ✓ |
+
+判据 3 的那份文档里，`frame_materials[0]` = `{"name":"skybox","shader":<5341 B 内联 WGSL>,"entry":"fs_main","params":{"brightness":900.0}}`：
+**参数落的是值**（来源在配方里）。⇒ 这条本文档**自带**天空盒的 WGSL，
+所以"**改 `art/frame/**` 必须重烘**"；而"图没变"**不等于**"改动没生效"——
+§131.2 那次交接的错话就是这个形状（改的是被内联的文本，动的却是产物键）。
+
+### ⚠ 两处与工单不符（实测，逐条给依据）
+
+**① "星图产物没带采样器 ⇒ 两边都落回各自的缺省" —— 不成立。**
+产物确实不带（自己读的：`generated/stars` 的清单参数只有
+`format/height/layers/levels/width` 五个，`TextureShape::params` 就这五个），
+但 oracle **不是**"落回缺省"，而是**显式**传 `&Sampler::clamped()`
+（`px_render/src/scene.rs:288-296`）。而 `Sampler::clamped()` 与 `Sampler::default()`
+**不是同一个采样器**：`address_u` = `ClampToEdge` / `Repeat`（v 轴两者都是 ClampToEdge）。
+⇒ 宿主必须用 **`clamped()`**，并把这条钉进 `material.rs` 的判据（两者必须不相等）。
+"用 Bevy 的缺省"是另一处更深的坑：`ImageSamplerDescriptor::default()` 的过滤是 **Nearest**
+（`bevy_image-0.19.1`：`ImageFilterMode` 的 `#[default]`），本工程的是 **Linear**。
+
+**② 帧材质的格位不是"自有"的 —— 它必须服从内容材质那张契约表。**
+`art/frame/skybox.wgsl` 原来把立方图写在**第 1 格**（采样器第 2 格），而
+`px_protocol::material::TEXTURE_SLOTS` 里**第 1 格是 2D**、立方图只许占 5 / 7 / 21 / 23；
+`px_shader::reflect` 按那张表逐格校验 ⇒ 烘图当场拒
+（`第 1 格声明的是 texture_cube，约定里这一格是 texture_2d`）。已把立方图挪到**第 5 格**
+（采样器 6，`art/frame/skybox.wgsl` 里写了为什么）。
+⇒ 口径写下来：帧自有材质的"自有"是**兑现者自有**（那支 WGSL 只由裸 wgpu 宿主兑现），
+**不是契约自有** —— 它照样走材质那条绑定组构造（12 格超集 + 空槽绑白图）。
+
+### 顺手抓到的一处**旧错**：`view.view_from_world` 里装的是位姿矩阵
+
+`ViewUniform::from_camera` 原来把 `camera.world_from_view`（**位姿**）填进了名为
+`view_from_world` 的那一格，而字段注释与 §110.1.1 那一整套"必须用通用逆"的说法都指着**逆**。
+今天没有内容 shader 读它（§108.3 那张反射表里只有 `world_position` / `exposure` /
+`clip_from_view` / `viewport`）⇒ 一直是**潜伏**的；而天空盒要的**正是位姿矩阵** ——
+不修的话，这个结构体里会出现"`view_from_world` 与 `world_from_view` 是同一个数"。
+已修，并把 `view_from_world` 的 16 个位模式按 `target/oracle/bevy-view-vectors.txt` 的
+**`case 0` `out`** 钉进 `camera.rs`（原来只钉了 `world_from_view` 与 `clip_from_view`）。
+新增的 `view_from_clip` 同样钉 16 个位模式，来源是这一轮**新导出**的
+`view_from_clip = clip_from_view.inverse()` 那一段（`px_render/tests/view_oracle.rs` 里加了一行 dump）——
+⚠ 那 6 组向量**盖不到**它：投影矩阵不是刚体，解析逆在那一格连形式都不成立。
+
+### 一处口径（按证据定的，可改）：文档里落**值**，配方里写**来源**
+
+工单那句"Params carry sources, not values"有两种读法。这里落的是：
+**配方**（`art/frame/*.toml` 的 `[[materials]]`）写来源，**文档**的 `frame_materials[].params` 落值。
+依据三条：① `art/frame/skybox.wgsl` 自己的注释写着"在**烘图时**按反射布局打包成值"；
+② 宿主那条口径是"只把名字解析成 GPU 句柄"（文档里放 `environment.skybox_brightness`
+这种表达式，等于让宿主学一门小语言）；③ `PassSpec.params` 的先例就是值。
+⚠ 反面（也是真的）：文档里那个 `brightness` 与 `environment.skybox_brightness` 是**同一个数的两处**。
+要翻成"文档存来源、宿主解析"的话，改的是 `FrameMaterial.params` 的类型 + 烘图侧少一步 + 宿主多一步，
+三处都小 —— 但那是下一单元开工前该定的事。
+
+### 还没做的（下一单元）
+
+`sky` 那条 pass 仍然**建不出来**（宿主按"物体 id"解析 draw 的材质名，`skybox` 不在物体表里）。
+这一单元只做到"文档说的是对的"：`SceneSpec::check` 现在会拒
+① 帧材质与物体 id 撞名（列出两处）；② 帧材质声明了却没有任何 draw 用它；
+③ 一笔 draw 的材质名既不是物体 id 也不是帧材质（列出两张表）。
+⚠ ③ 是**超出工单要求**的一条：它把"`sky` 那一笔没人认领"从**运行期**（宿主装载时才拒）
+提前到**烘图期**，正是这次那个"看起来能跑的错"。它顺带逼掉了协议里一处旧夹具
+（`geometry_doc` 的 `"material": "surface"` 从来就解析不到 —— 改成物体 id `planet`）。

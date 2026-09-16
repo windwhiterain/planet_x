@@ -7,9 +7,9 @@
 //! - 这个宿主**没有 naga_oil**，所以桩表**就是运行期真正用的那一份**：
 //!   组装出来的文本直接喂给 `create_shader_module`。
 //!
-//! 因此这里只覆盖**一个**符号：`fetch_point_shadow`。
-//! 其余（`view` / `lights` / `clustered_lights` / `globals` / `depth_prepass_texture` /
-//! `VertexOutput` / `depth_ndc_to_view_z` / `POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT`）
+//! 因此这里只覆盖**三**个符号：`fetch_point_shadow`、`depth_ndc_to_view_z`、`view`。
+//! 其余（`lights` / `clustered_lights` / `globals` / `depth_prepass_texture` /
+//! `VertexOutput` / `POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT`）
 //! **原样转给 Bevy 那张表** —— 于是绑定号与字段次序**由构造保证**与 Bevy 一致，
 //! 而不是靠两边各抄一遍再祈祷它们不漂（§104 第 1 条：绑定号会改像素，省下的每一步
 //! 都是判据上的噪声）。§65 记的那次"cube 从第 1 格挪到第 5 格就差 22–33 个像素"至今没归因。
@@ -17,6 +17,14 @@
 /// 3D 顶点输出。字段与 `bevy_pbr::forward_io::VertexOutput` 同形：
 /// 内容 shader 按 `position` / `world_position` / `world_normal` / `uv` 四个 location 取。
 pub use px_shader::assemble::bevy_stub;
+
+/// 本宿主 `view` 的声明：**与 Bevy 那张近似表差在末尾两格逆矩阵**（§135）。
+///
+/// ⚠ 文本**住在 `px_shader::assemble`**（[`px_shader::assemble::HOST_VIEW_STUB`]），不是这里 ——
+/// 因为烘图侧也要反射帧材质（`art/frame/skybox.wgsl` 引 `view.view_from_clip`），
+/// 而烘图侧依赖不到这个 crate（`px_render_wgpu` 拖着整棵 wgpu 树）。文本只有一份，
+/// 这里只是**把它认下来**。抄第二份 = §66.1 那颗「同一条契约、两个数字」的雷。
+pub use px_shader::assemble::HOST_VIEW_STUB as VIEW_STUB;
 
 /// 点光 cube 影子：**S3 换成真实现**（采样我们自己的 cube 影子图）。
 ///
@@ -70,6 +78,7 @@ pub fn stubs(symbol: &str) -> Option<&'static str> {
     match symbol {
         "bevy_pbr::shadows::fetch_point_shadow" => Some(POINT_SHADOW_STUB),
         "bevy_pbr::view_transformations::depth_ndc_to_view_z" => Some(DEPTH_NDC_TO_VIEW_Z),
+        "bevy_pbr::mesh_view_bindings::view" => Some(VIEW_STUB),
         other => bevy_stub(other),
     }
 }
@@ -82,10 +91,10 @@ mod tests {
     ///
     /// ⚠ 这条绊线的形状是改过的：原来它写的是"**只**差 `fetch_point_shadow` 一个符号"，
     /// 而那种"数个数"的断言在真的多出第二处差别时只会说"多了"，说不出**为什么**。
-    /// 现在两处各自点名、各自写清后果，剩下的符号仍然**必须逐字相同** ——
+    /// 现在三处各自点名、各自写清后果，剩下的符号仍然**必须逐字相同** ——
     /// 多差一个都意味着两边的 group 0 开始漂开。
     #[test]
-    fn the_table_differs_from_bevys_in_exactly_two_named_symbols() {
+    fn the_table_differs_from_bevys_in_exactly_three_named_symbols() {
         // ① 影子采样：本表**自己拥有**这一格（`bevy_stub` 今天给的也是同一段占位文本，
         //    差别在**语义**：Bevy 宿主运行期拿到的是 Bevy 的真实现，而我们拿到的是这段
         //    占位 —— S3 换成采样我们自己的 cube 影子图）。绊线见下一条测试。
@@ -114,10 +123,28 @@ mod tests {
             "near 不许抄成字面量（§66.1：同一条契约、两个数）"
         );
 
+        // ③ `view`：本宿主**自己拥有**这一格。Bevy 的 `View` 有七十多个字段，那张近似表里
+        //    只有五格；天空盒要的 `view_from_clip` 与 `world_from_view` 在近似表里**没有**，
+        //    所以这一格必须由本表说了算。⚠ 差别只许是"末尾多两格"：
+        //    前五格与绑定号必须逐字相同（否则内容 shader 按名字读到的是别的字节）。
+        let view = "bevy_pbr::mesh_view_bindings::view";
+        assert_eq!(stubs(view), Some(VIEW_STUB), "`view` 由本表显式提供");
+        let bevy_view = bevy_stub(view).expect("Bevy 那张近似表也认这一格");
+        assert_ne!(stubs(view), bevy_stub(view), "差别就是这一条存在的意义");
+        let head = bevy_view.split("};\n").next().expect("结构体");
+        let mine = VIEW_STUB.split("};\n").next().expect("结构体");
+        assert!(
+            mine.starts_with(head),
+            "前五格必须与 Bevy 那张逐字相同（新字段只许追加）：\n{head}\n---\n{mine}"
+        );
+        for field in ["view_from_clip", "world_from_view"] {
+            assert!(mine.contains(field), "缺了 {field}：{mine}");
+            assert!(!head.contains(field), "Bevy 那张近似表里没有 {field}");
+        }
+
         // 其余符号：逐字相同。少一个都不行 —— 这几格是 group 0 的绑定号与结构体形状。
         let probes = [
             "bevy_pbr::forward_io::VertexOutput",
-            "bevy_pbr::mesh_view_bindings::view",
             "bevy_pbr::mesh_view_bindings::lights",
             "bevy_pbr::mesh_view_bindings::depth_prepass_texture",
             "bevy_pbr::mesh_view_bindings::clustered_lights",
