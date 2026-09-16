@@ -275,8 +275,18 @@ target\oracle\px_render-bevy.exe --scene <orbit-bare 产物> --out target\oracle
 
 ### S3｜灯 + 点光 cube shadow map ← **第一道真判据**
 
-**判据 S3**：**`orbit-bare` 逐字节相同**（行星 + 大气 + 一盏点光 + 星空盒）。
-这是 J1 的第一格，也是整个工程最可能卡住的一格（§104 第 2 条）。
+**判据 S3**：**`orbit-bare-shadow` 逐字节相同**（`C03FFF3235264DD5`）——
+= `orbit-bare` ＋ planet part 上多一个 `shadows = 1`，行星 + 大气 + 一盏点光 + 星空盒、**不含云**。
+
+> ⚠ **就地更正（§109.3 实测）**：这一档原来写的是"`orbit-bare` 逐字节相同"，
+> 而 **`orbit-bare` 的配方里没有 `shadows` 键** ⇒ `sun.shadows = number_or("shadows", 0.0) > 0.5`
+> 判成 false ⇒ `shadow_maps = 0` ⇒ `fetch_point_shadow` **根本不被调用**、cube 影子图连建都不建。
+> 拿它当判据等于**这一档什么都没验**，而那 ~450 行会一路溜到 S6。
+> 用户裁决：把 bare **改造成需要采样阴影** ⇒ 派生档 `art/scene/orbit-bare-shadow.toml`，
+> 锚已取（§109.4）。原 `orbit-bare` 那一格仍留在 J1 里（S6），它照旧是 `63184151909371A5`。
+
+这是 J1 的第一格，也是整个工程最可能卡住的一格（§104 第 2 条 —— 但那条**有三处是错的**，
+按 §109.1 更正后的版本做）。
 
 ### S4｜天空盒 + 色调映射
 
@@ -538,3 +548,144 @@ S2 要的是"网格 + 通用材质，**无灯**场景两个宿主逐字节相同
 `positions → normals → uvs → indices`，文件哈希就是判据）；
 导出命令 `cargo test -p px_render --test primitive_oracle -- --ignored --nocapture`。
 ⚠ `s64` 的顶点数是 **42252 = 10×(64+1)²+2**、三角形 **84500** —— 这个闭式已经对上了。
+
+---
+
+## §109 §104 第 2 条的**更正**，以及 S3 判据的一个真空（一手源码核查）
+
+> 来源：对着 `bevy_pbr/bevy_light/bevy_render/bevy_camera/glam 0.19.1/0.32.1` 的 registry
+> 源码逐条核过（行号在下面）。**§104 第 2 条有三处是错的**，另外发现 **S3 的判据根本没碰到影子**。
+
+### §109.1 §104 第 2 条错在哪
+
+| §104 第 2 条原话 | 实际 | 依据 |
+|---|---|---|
+| "采样是 `texture_depth_cube` + `textureSampleCompare`（没有 layer 参数）" | native 分支走的是 **`texture_depth_cube_array`** + `textureSampleCompareLevel(tex, samp, coords, **i32(light_id)**, depth)` | `mesh_view_bindings.wgsl:12-20` 的 `#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT`；native 不走那一支 |
+| （暗示硬采样 2×2） | `ShadowFilteringMethod` 的 `#[default]` 是 **`Gaussian`**（`bevy_light-0.19.1/src/lib.rs:305-306`），`px_render` 从不插这个组件 ⇒ **8 次** `textureSampleCompareLevel`，D3D 8×MSAA 点位 + 高斯系数，basis = `orthonormalize(normalize(light_local)) * 0.003 * distance_to_light` | `shadow_sampling.wgsl:70-102 / 382-460 / 517-539` |
+| "`gl_Layer` 那套在 WGSL 里不存在 ⇒ 要么 6 个 pass，要么 multiview" | 对：Bevy 是**6 个单层 pass**，`multiview_mask: None`。但**multiview 是行为差异**，不是等价实现 —— 别拿它"优化" | `light.rs:2035-2144, 2860-2896` |
+
+另外两条**不许发明**的东西：**`SHADOW_SHADER_HANDLE` 在 0.19.1 里根本不存在**（影子走
+depth-only 的 `PrepassPipeline` 特化）；**group 0 没有第 4 / 第 7 格**
+（`point_shadow_textures_linear_sampler` 在 `experimental_pbr_pcss` 后面，本仓没开）。
+
+### §109.2 影子那一档的数（要逐字复现的）
+
+| 量 | 值 | 来源 |
+|---|---|---|
+| 绑定 | `point_shadow_textures`=**2**（`texture_depth_cube_array`，`Depth32Float`，1024²，6 层，`CubeArray` 视图，`DepthOnly`）；比较采样器=**3**；`clustered_lights`=**8**（storage） | `mesh_view_bindings.wgsl:12-39`、`light.rs:1398-1444` |
+| 采样器 | ClampToEdge×3 / Linear / Linear / Nearest / lod [0,32] / **`CompareFunction::GreaterEqual`** | `light.rs:244-269` |
+| 影子 pass | 每面一个 view：`world_from_view = translation × looking_at(CUBE_MAP_FACES[i])`，投影 `perspective_infinite_reverse_rh(FRAC_PI_2, 1.0, 0.1)`，`LoadOp::Clear(**0.0**)`，`depth_compare = GreaterEqual`，`DepthBiasState{0,0,0}`，**`cull_mode = 材质的 cull`**（`DocMaterial::specialize` 对 prepass 也设了它） | `light.rs:2058-2067, 2535, 2860-2896`、`prepass/mod.rs:613-651` |
+| `light_custom_data` | **`(0.0, -1.0, 0.1, 0.0)`**（`perspective_infinite_reverse_rh` 的 z/w 轴后两格）⇒ shader 里 `depth = 0.1 / major_axis_magnitude` | `light.rs:1266-1270, 1303-1315` |
+| `shadow_depth_bias` | **0.08** | `point_light.rs:147` |
+| `shadow_normal_bias` | **0.6 × (2/1024) × √2 = 0.0016572815…**（GPU 侧是乘过 texel 的） | `light.rs:442-449` |
+| `flags` | `9`（`shadows: true`）／`8`（false）：= bit0 影子 + bit3 `AFFECTS_LIGHTMAPPED_MESH_DIFFUSE` | `light.rs:1248-1345` |
+| `color_inverse_square_range` | `(linear_color × intensity/(4π)).rgb` + `.w = 1/range²`（**intensity 是流明，内部除 4π**） | `light.rs:534-537` |
+| `position_radius` | `(世界位置, radius=0.0)` —— **`.w` 不是 range**（`light.wgsl` 早就记过这条） | 同上 |
+| `decal_index` / `soft_shadow_size` | **`u32::MAX`** ／ **恒 0.0**（PCSS 没开 ⇒ PCSS 那一支永不进） | 同上 |
+| 环境光 | `lights.ambient_color = vec4(80,80,80,80)`（白 × 80） | `main.rs:1733-1747`、`light.rs:1756-1757` |
+| 谁能投影 | `orbit-*` 里**只有 `planet` 与 `rings`** 有 `cast_shadow: true`；大气（Add）与云（Premultiplied）是 `NotShadowCaster` | `scene.rs:430-431`、`bin/scene.rs:849/902/947/979` |
+
+⚠ **一处必须实测、读代码定不了的**：那 6 个面向矩阵经过 `Quat::from_mat3`（`looking_at` 存的是
+**四元数**）→ `Mat4::from_rotation_translation` → `inverse()` → `× 投影` 这条链，
+可能与"直接写理想整数矩阵"差 1 ulp。⇒ 要么照抄 glam 的调用序列，要么在 S3 实测里当场比。
+
+### §109.3 ⚠ S3 的判据**碰不到影子**（这一条会改开工序的形状）
+
+`px_graphs/src/bin/scene.rs:983-996`：`sun.shadows = planet.number_or("shadows", 0.0) > 0.5`。
+而 **`orbit-bare` 与 `orbit-rings` 的 planet 配方里没有 `shadows` 这个键** ⇒ 两档都是
+**`shadows = false`** ⇒ `sun_light()` 给出 `shadow_maps = 0` ⇒
+`surface.wgsl` / `clouds.wgsl` 里那句 `fetch_point_shadow` **根本不会被调用**。
+
+| 档 | shadows | 用到 cube 影子图吗 |
+|---|---|---|
+| `orbit-bare`（S3 判据） | false | **不** |
+| `orbit-rings`（S4 判据） | false | **不** |
+| `orbit-soft`（J1/S6） | **true** | 是 |
+| `orbit-proxy-fine-bound`（J1/S6） | **true** | 是 |
+
+⇒ §105 把 S3 叫做"灯 + 点光 cube shadow map ← **第一道真判据**、整个工程最可能卡住的一格"，
+但它给的判据是 `orbit-bare` —— **那档连影子图都不会建**。按现在的写法，
+§104 第 2 条那 ~450 行直到 **S6 的 J1** 才第一次被验，而 S6 还同时压着 serve/租约/报告/sheet。
+
+**用户裁决（§109.4 记了）**：**把 `orbit-bare` 改造成需要采样阴影** ——
+即以派生档 `orbit-bare-shadow`（= `orbit-bare` ＋ planet part 上多一个 `shadows = 1`）当 S3 的判据。
+⚠ 无论走哪条，§105 里"`orbit-bare` 是灯 + cube 影子"这句话都是**错的**，要就地更正。
+
+### §109.4 S3 判据档的锚（已取到）
+
+用户裁决之后落的：`art/scene/orbit-bare-shadow.toml` —— 与 `orbit-bare` 的差别**只有**
+planet part 上多一个 `shadows = 1`（内容仍不含云 ⇒ 不违反 §107）。
+烘出来 `ec43abadf875`，`px_graphs` 的日志当场印证了它真的开了影子：
+`[sun] 灯 Point｜位置 (-4.20,1.15,2.35)｜色 (1.00,1.00,1.00)｜强度 7.600e5｜`**`阴影贴图`**。
+
+| 图 | 哈希 | 字节 |
+|---|---|---|
+| `orbit-bare`（原锚，复核） | `63184151909371A5` | 300012 |
+| **`orbit-bare-shadow`（S3 的判据）** | **`C03FFF3235264DD5`** | 298289 |
+
+两条同时成立才算这份派生档有意义：**原锚没被污染**（还是 `63184151909371A5`）✓，
+**两份确实不同**（差 1723 字节 ⇒ `shadows = 1` 真的改变了画面，影子被采样了）✓。
+⚠ 两份场景产物的键不同（`28a9b516c132` vs `ec43abadf875`）⇒ S-1 那五格锚一个都没动。
+
+仪器：`target/oracle/s3-shadow-anchor.ps1`，读数落 `target/oracle/hashes-s3-shadow.txt`。
+
+---
+
+## §110 S2/S3 要照着做的数（一手源码核查的收口）
+
+> 来源同 §109。**这一节是"实现时对着抄"的表**，不是调研 —— 每一项都有一手依据。
+> 三份核查（相机与投影 / 点光 cube 影子 / icosphere 移植）的完整推导不在笔记里，
+> 只留**会改变像素的那些数**。
+
+### §110.1 相机与投影
+
+| 项 | 值 |
+|---|---|
+| 正常出图的相机 | **不是产物自带的相机表**！`--sheet` 才用 `camera_for`；普通请求走 `probe_camera(step.cam)`，不给 `--cam` 时是 **`from_xyz(0.0, 0.55, 3.15).looking_at(ZERO, Y)`** |
+| 朝向 | `look_to`：`back = -dir`、`right = up×back`、`up = back×right`、`rotation = Quat::from_mat3(cols(right, up, back))` —— 相机系右手、前方 −Z |
+| 投影 | **无限 reverse-Z 右手**：`m00 = f/aspect`、`m11 = f`、`m23 = −1`、`m32 = near`，其余 0；`f = 1/tan(fov/2) = 1+√2`，`fov = π/4`，`near = 0.1` |
+| `far = 1000` | **不进矩阵**，只用于视锥剔除 |
+| aspect | `viewport_w / viewport_h`（普通请求 = 图宽/图高；`--sheet` = 格宽/格高），**没有有理数吸附** |
+| 深度 | `Depth32Float`；clear **0.0**（reverse-Z 的远平面）；**每处都是 `CompareFunction::GreaterEqual`**（prepass / 主 pass / 天空盒） |
+| 深度偏置 | 主 pass 与 prepass 都是 `constant 0 / slope 0 / clamp 0`。⚠ 自定义材质的 `depth_bias` **只是透明排序的偏移，从不上 GPU** |
+| 颜色目标 | **`Rgba8UnormSrgb`**（8 位，写入时硬件做 sRGB 编码），MSAA **1** |
+| 清屏色 | `Color::srgb(0.004, 0.005, 0.010)` |
+| **色调映射** | **一个都不跑**！无 `Hdr` ⇒ tonemapping 节点当场 early-return；而 pxart 的内容 shader **从不调** `tone_mapping`（它们自己乘 `view.exposure` 返回线性辐射度）。⇒ 新宿主**不要**做 tone map、不要 dither、不要 bloom、不要 AA |
+| `view.exposure` | `Exposure::default()`（EV100 = 9.7）= `exp2(-9.7)/1.2` ≈ **0.0010019079**（f32 要按 Rust 表达式求，不是按 f64 结果取整） |
+| `view.viewport` | **绝对像素矩形** `(x, y, w, h)`（`--sheet` 时是格子矩形），片元坐标也是绝对的 —— `clouds.wgsl` / `atmosphere.wgsl` 依赖这一点 |
+| pass 顺序 | prepass（**它清的深度**）→ 不透明 → alpha-mask → 透明 → **px_pass 那几条** → 最后 blit 到输出 |
+| 透明排序 | 按 `row2(view_from_world)·(mesh_center,1) + depth_bias` **降序距离**（远的先画） |
+| ⚠ alpha 档 | **`Add` 与 `Premultiplied` 在 Bevy 0.19 里是同一套状态**（`PREMULTIPLIED_ALPHA_BLENDING`）—— `Add` **不是**加法混合 |
+| `globals.time` | 挂钟（`elapsed_secs_wrapped`）。四档内容的 `wind = wind_skin = 0` ⇒ 与时间无关；**只有 `orbit-soft-wind` 不逐帧可复现** |
+| ⚠ sRGB 往返 | 主纹理硬件编码 → blit 采样时硬件解码 → 输出再编码。`encode(decode(b)) == b` 逐字节成立**是驱动相关的**，必须实测（或者绕开：把最终字节写成非 sRGB 视图） |
+
+### §110.2 影子那一档的判据强度
+
+`orbit-bare-shadow` 这条判据一旦过了，等价于同时钉住：6 面 cube 影子图的**渲染**（每面一个 pass、
+`perspective_infinite_reverse_rh(π/2, 1.0, 0.1)`、`Clear(0.0)`、`GreaterEqual`、
+`cull = 材质的 cull`、depth-only 无片元）、**采样**（Gaussian 8 tap、`POINT_SHADOW_SCALE = 0.003`、
+D3D 8 点位置与系数、`orthonormalize` 基）、以及 `ClusteredLight` 那 64 字节的**每一个数**
+（`light_custom_data = (0,-1,0.1,0)`、`flags = 9`、`shadow_normal_bias = 0.0016572815…`、
+`decal_index = u32::MAX`、`intensity` 是流明要除 4π）。§109.2 是那张对照表。
+
+### §110.3 icosphere：移植已产出，**判据还没取**
+
+`Sphere::ico` 转手给 `hexasphere`，而它硬依赖 `glam`（§108.5 的取舍）⇒ 移植。
+移植件已按 `hexasphere-18.0.0` 的源码逐句产出（**不是**"数学等价"的重写）：
+
+- 基座是**字面量表**（12 个顶点 + 20 个三角形 + 30 条边），不是生成的；
+- 细分走 **slerp**（`(a+b)·(2(1+a·b))^−½` 与 sin 形式的 `geometric_slerp_multiple`），
+  **从不调 `normalize()`** ⇒ 点会漂在单位球外几 ulp，**要与 Bevy 一样漂**；
+- 分配次序是"**先 30 条边的 s 个点，再 20 个三角形各自的内点**"，内点数是 `s(s−1)/2`；
+- **边的朝向**由"0..20 里第一个碰到它的三角形"决定（ab → bc → ca 次序），后来的三角形
+  **反向**读它 —— 值与索引次序都依赖这个；
+- 尺寸闭式：顶点 `10(s+1)²+2`、索引 `60(s+1)²`（s=64 ⇒ **42252 / 253500**）。
+
+⚠ **风险（必须实测，不许假设）**：`uv_of` 用 `f32::acos` / `f32::atan2`，在默认特性下是
+**平台 libm**（Windows 上是 UCRT），**不是正确舍入的** ⇒ 同机同工具链逐位一致，
+换平台会差几 ulp。`f32::sqrt` 是 IEEE 精确的，没问题。
+⚠ 还要查一件事：**有没有谁通过特性合并打开了 `hexasphere/libm` 或 `bevy_math/libm`**
+（`cargo tree -e features -i hexasphere`）—— 打开了就是另一套 acos/atan2。
+
+**判据怎么取**：`target/oracle/bevy-icosphere-*.bin` 是 Bevy 现场生成、原样落盘的 oracle
+（§108.5），移植件要**对着它逐字节比**，不是"顶点数对上了就算过"。
