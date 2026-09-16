@@ -1478,9 +1478,19 @@ impl Executor {
         // 剔除**只**从材质来：没有材质 ⇒ 两面都画（见 `ResolvedMaterial::cull`）。
         let cull = material.map(|material| material.cull).unwrap_or(Cull::None);
         // 片元阶段同理：**材质就是那支 shader**（§129）。没有材质 ⇒ 没有片元阶段。
+        //
+        // ⚠ 还有一条：**没有颜色附件 ⇒ 不建片元阶段**（这一笔就是深度-only 的）。
+        //    深度预通道那一笔**必须**带着材质（**剔除是从材质来的**，§127）—— 材质带着
+        //    片元 shader，而它在 `color=none` 的 pass 上会把 `@location(0)` 写到零个颜色
+        //    目标上，wgpu 当场拒建管线（§131 实测）。所以"带材质但不要片元阶段"必须是
+        //    可表达的，而它的表达方式就是"这条 pass 没有颜色附件"。
+        //    ⚠ 代价说清楚：alpha-mask 那种"没有颜色输出、只为 discard 而存在"的
+        //    预通道专用片元 shader，现在**没法表达** —— 那是一个缺口，不是静默行为：
+        //    真需要它时，症状是 mask 没生效（画得比该画的满），而不是悄悄画错。
         let fragment = material
             .map(|material| (material.fragment_shader, material.fragment_entry))
-            .filter(|(shader, _)| !shader.trim().is_empty());
+            .filter(|(shader, _)| !shader.trim().is_empty())
+            .filter(|_| color_format.is_some());
         // 布局身份按组号排一遍再进键：宿主给组的次序不该改变"这是哪条管线"。
         let mut identities: Vec<String> = match material {
             Some(material) => material

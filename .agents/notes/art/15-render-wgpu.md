@@ -1715,3 +1715,19 @@ pass 烘图器**覆盖**而不是**合并**基础产物的 `resources`（正因�
 ⚠ 工具教训：`[System.IO.File]::ReadAllBytes` 用的是**进程的** cwd，不是 PowerShell `cd`
 之后的那个 ⇒ 相对路径会解析到 session 工作区去（这一轮就撞了一次）。
 本仓读产物要用 `(Resolve-Path …).Path` 或绝对路径。
+
+### §131.1 订正：帧烘产物键 **`fc1445307d5e` → `dd6be56d8028`**（16190 字节）
+
+§131 那张表是拿 `fc1445307d5e` 那份读的，而那份的 `vertex_mesh.wgsl` **只写了
+`@builtin(position)`** —— 片元读 `in.uv` / `in.world_normal` / `in.world_position` 就全错位，
+wgpu 在管线创建时直接拒：
+
+```
+Error matching ShaderStages(FRAGMENT) shader requirements against the pipeline
+  Location[0] Float32x4 … is not provided by the previous stage outputs
+```
+
+⇒ **§131 那张表本身仍然有效**（那份文档的 passes/resources 结构没变，只有内联的顶点级变了），
+但要按 **`dd6be56d8028`** 去读，不能再用旧键。
+⚠ 记这一笔是为了不让一个**已经作废的产物键**继续在笔记里当权威 ——
+本期已经有过"抄了一个差不多的数"的教训（§109.5 / §110.4），产物键同样会过期。
