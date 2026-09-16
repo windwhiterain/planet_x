@@ -381,7 +381,7 @@ px_render --scene <产物> --cam 0,22,4.2 --out target/rings-shot.png --width 12
 
 **没验**：环的**逐像素**对照（迁移前那条路没有基线图可对）；环的曝光处理与内建
 `StandardMaterial{unlit}` 不同（后者乘 `view.exposure`，自写材质不乘 —— 与云/大气同一处口径，
-见 `10-handoff.md` §9.1.6 第 3 条"云自己的曝光没动"）。
+见 `10-handoff.md` §9.1.7 第 3 条"云自己的曝光没动"）。
 
 ### §65.2 仪器跟着改：harness 的 shader 一致性闸门
 

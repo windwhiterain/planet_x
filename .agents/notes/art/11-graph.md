@@ -382,7 +382,7 @@ D3D12 Enhanced Barriers 把 Sync / Access / Layout 解耦（`ACCESS_NO_ACCESS` �
 | **naga 的反射** | ⚠ `naga::proc::TypeLayout` 是 **per-type** 的、**没有 per-member offset**；**成员偏移在 IR 里**：`StructMember { name, ty, binding, offset }`；`ModuleInfo` 里**没有** offsets。⭐ 最值钱的契约：*"If you do perform full validation and `Validator::validate` returns `Ok`, then **Naga promises that code generation will either succeed or return an error; it should never panic.**"*；`ParseError` 提供 `labels()` / `location(source)` / `emit_to_string(source)` ⇒ **自带 span** | **「名字 → 字节偏移」的正统实现**：偏移读 `StructMember::offset`，大小/stride 读 `Layouter`；生成物用 `parse_str` + `validate` 自检，**错误定位白送一半**（只剩「生成行号 → 节点 id」要自己做） |
 | **Slang** | WGSL 后端是 **experimental**（README 脚注「WGSL support is still work-in-progress」）；**Apache-2.0 WITH LLVM Exception**，已转 Khronos 治理。⭐ 它的**反射最强**（`VariableLayoutReflection::getOffset/getBindingSpace`，WebGPU 下 binding space 就是 bind group；`TypeLayoutReflection::getSize/getStride`），⭐ 有**三套正交的运行期特化机制**（link-time specialization / generics+`specialize` / dynamic dispatch），⭐ 有 `[require(...)]` **能力系统**（能在 codegen **之前**拒绝一组能力不兼容的节点组合 —— 本调研里没有任何其它方案提供这种静态保证）。⚠ 反射**不能从 `slangc` 命令行拿**，必须走编译 API；⛔ Rust 侧**没有任何 Slang binding**，要自己写 FFI | ⭐ **一条绕开「WGSL 后端 experimental」的路**：**wgpu 直接吃 SPIR-V**，且官方原文 *"While WebGPU does not support any shading language other than WGSL, we will **automatically convert** your non-WGSL shaders if you're running on WebGPU."*（Bevy 侧 `Shader::from_spirv`）⇒ 真要上 Slang 就走 **Slang → SPIR-V → wgpu**，不赌它的 WGSL 文本后端 |
 | **WESL**（Bevy 的方向） | `Shader::from_wesl` 已存在（`bevy_shader-0.19.1/src/shader.rs:152`，feature `shader_format_wesl`），`ShaderLoader` 扩展名表里已有 `"wesl"`（`:380-382`）；`wesl` crate 支持**运行期**编译（`Compiler::compile` → `syntax.to_string()` 得纯 WGSL）；Bevy Project Goal #23015 写着 WESL 要**取代**现在这套基于 naga_oil 的「Bevy 扩展 WGSL」。⚠⚠ **时序**：Bevy 协作者明确说 *"Bevy imports in wesl are **not supported until bevy 0.20** is shipped"* ⇒ **短期仍用 naga_oil 的 `#import`，别提前迁移** | ⚠ **对代码生成方案的影响**：生成物应当是**纯 WGSL**；`#import` 只许出现在**一个函数**里，将来换 WESL 是改一处 |
-| **three.js TSL** | 节点图是**运行期的 JS 对象**，官方 wiki 明说 **同时编到 WGSL 与 GLSL**（`WGSLNodeBuilder` / `GLSLNodeBuilder`），节点可 `serialize()/deserialize()`；⚠ TSL compute 改图后设 `needsUpdate` **不会**重建节点（官方 issue #33061） | 主流方案里唯一「schema 住在运行期」的；但 §1 裁决 19 已定：整条 3D 走 web 才会用它 |
+| **three.js TSL** | 节点图是**运行期的 JS 对象**，官方 wiki 明说 **同时编到 WGSL 与 GLSL**（`WGSLNodeBuilder` / `GLSLNodeBuilder`），节点可 `serialize()/deserialize()`；源码级：`needsUpdate` **只 bump version**，真正判据是 program cache key（`WebGLRenderer.getProgram` 比 `material.version !== __version` 时重推 key），而 **TSL 把节点图本身 hash 进 `customProgramCacheKey()`** ⇒ **节点图确实可以运行期替换**。⚠ 更正：issue #33061（改图后不重建）**只影响 compute kernel 那条路，且已 CLOSED**；NodeMaterial 那条路报告者自陈「works as expected」 | 主流方案里唯一「schema 住在运行期」的；但 §1 裁决 19 已定：整条 3D 走 web 才会用它 |
 | **Babylon NodeMaterial** | ⭐ **最接近本仓想要的产品形态**：节点材质是**可序列化 JSON**（`ParseFromFileAsync`），且官方原文 *"The assigned engine parameter will **NOT** be saved in the node material's JSON file, **allowing you to still choose the correct version at runtime**."* ⇒ **同一份图数据，运行期决定目标语言与绑定** | 值得当作「图数据 = 资产、编译 = 运行期服务」的形态参考（与 MaterialX / MDL / OSL 同一族） |
 | **Graphite**（Rust 节点图项目） | **build script** 把节点编成**一个 WGSL** 并以字符串 include（**构建期**，不是运行期）（**B**） | ⚠ 它只说明「连认真的 Rust 节点图项目也选了构建期」；**但 `node_engine` 证明运行期可行**（见上）⇒ 这条不再是「没有先例」的证据 |
 | **明确不要碰** | ⛔ `shaderc`（无反射，而且它**把原有的反射删了**）；⛔ `SPIRV-Cross` **无 WGSL 输出**（只可当反射补强，Rust 侧用 `spirv-cross2`，别用停维的 `spirv_cross`）；⛔ `wgsl-analyzer` **不发布 crate**（只能当编辑器工具）；⛔ Blender 的 codegen 是 **GPL**；⛔ Unity ShaderGraph 是 **Unity Companion License（非开源，不可移植）**；⛔ `litsdf` / `zygote` 等**无 LICENSE** | 都是**法律或能力**上的硬阻塞，别浪费评估时间 |
@@ -393,7 +393,7 @@ D3D12 Enhanced Barriers 把 Sync / Access / Layout 解耦（`ACCESS_NO_ACCESS` �
 |---|---|---|---|
 | **Unity**（Shader Graph） | 图 → 生成 ShaderLab `Properties` 块（Blackboard 就是它的图形化编辑器）；`Shader` 有整套**运行期反射** API（`GetPropertyCount/Type/Flags/Attributes/RangeLimits/Default*`） | `.mat` 存**属性名字符串 → 值**（`Shader.PropertyToID` 跨运行/跨机器不稳定，**不能落盘**）；**每个材质复制一份全量槽位** | **不能**。改图 = 重新 codegen + 重新编译（秒级）；属性**改名后旧条目变孤儿、不报错不迁移**；改了 Master Node 而未开在 Inspector 里的材质**会失同步并渲染损坏**（官方 Known issue，只能 `HDEditorUtils.ResetMaterialKeywords` 修） |
 | **Unreal** | 图里的 Parameter 节点 | Material Instance 只存**哪些参数被 override + 值**（⚠ 官方：未勾选字段的值在关窗时**丢失**） | **不能**。换父材质 ⇒ 新父材质没有的参数在实例上**消失**；Static Switch 改一次 = **一个新 permutation**；Epic 专门做了 Material Analyzer 做 reparent 来压 permutation 与存储 |
-| **Godot 4** | shader **文本**（`uniform float x : hint_range(0,1)`），renderer 从文本解析 | `ShaderMaterial.set_shader_parameter(名字, 值)`；per-instance 走 `set_instance_shader_parameter` | 换 shader 可以；**加 uniform = 换文本** |
+| **Godot 4** | shader **文本**（`uniform float x : hint_range(0,1)`），renderer 从文本解析 | `ShaderMaterial.set_shader_parameter(名字, 值)`；per-instance 走 `set_instance_shader_parameter` | ⭐ **A 级：`RenderingServer.shader_set_code` 的文档原文「Sets the shader's source code (which triggers recompilation after being changed)」**，而 uniform 列表就是从这段文本 parse 出来的 ⇒ **改文本 = 真·运行期 schema 变更**（这是最接近我们要的那件事的出货先例）。⚠ 反例：`set_shader_parameter` 对**不存在的名字无条件 insert、不报错、无效果**（源码级）⇒ 这条要主动避免（见 §72.3 不变式 3） |
 | **three.js** | 传统：JS 对象 + 字符串；**TSL：运行期的节点图对象** | uniforms 对象 | **TSL 是唯一「运行期可变」的主流方案**；传统路要 `needsUpdate` **且** program cache key 变了才会重编 |
 | **Blender** | 节点树（渲染时才编译）；Script Node 写 OSL，自动 `.osl → .oso` | 节点值 | 无「运行期」概念（DCC） |
 | **MaterialX / MDL / OSL** ★ | **schema 是资产**（XML / `.mdl` / `.osl`），**编译是运行期的服务** | 参数由 shader 声明 | **能** —— **这才是「运行期可改 schema」的真实工业先例**（但都不是游戏引擎；MDL JIT 到 PTX，OSL 用 LLVM JIT） |
@@ -716,9 +716,9 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
 **代码未动**。四条裁决（不重编/不重启、不要编辑器、要 compute、加法不升版本）与硬顶裁决（先 (a)）都齐了
 ⇒ 开工顺序固定为：
 
-0. **先补一次实测**（半小时，必须先做）：**改 WGSL 结构体（加一个参数）→ 重烘 `shaders` + `scene` → 出图，
-   全程不重编 exe、不重启服务** ⇒ 判据 P/R 的现状被量出来。§67.1 那条「过期笔记」的更正**只有代码层面的判读**，
-   而整个方案的第 1 步就架在它上面 ⇒ 不实测就是拿推理当前提。这一条同时会把 `09-instruments.md` §42.1 那张表改掉。
+0. ✅ **已做（2026-09-16）**：**改 WGSL 结构体（加一个参数）→ 重烘 `shaders` + `scene` → 出图，
+   全程不重编 exe、不重启服务** —— 八步读数与逐条墙在 **§75**（`09-instruments.md` §42.1 那张表已按它改掉）。
+   结论比原判读更细：**渲染器侧没有墙**（换布局、加新名字 + 新值都吃得下），墙全在**「谁给那个新参数一个值」**上（W1/W2）。
 0b. **可选，但很值**：把「最小离屏 app」抽成测试夹具，然后实测 §77 的**第 4 层**
    （两帧之间给 `Core3d` 加一个系统并断言它跑了）—— 那是本调研里**唯一**还停在源码级的关键结论。
 1. **契约收口 + 加宽超集一起做**（一次动一个地方，别分两次）：绑定表/`ParamKind`/`Value↔kind` 收成一份
@@ -728,6 +728,84 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
    判据：写错参数名 ⇒ **烘图时**红；改参数值全链 ⇒ **判据 P 成立**；现有场景重烘后文档逐字段相同。
 3. **第 3 步（pass 图，全屏 + compute）** 与 **第 2 步（shader 图）** 可以并行 —— 前者动渲染器，
    后者动烘图侧，唯一交汇点是「pass 的 shader 也是 CAS 成员，走同一套键与对账」。
+
+---
+
+## §75 第 0 步实测：改 schema 今天能走到哪儿（2026-09-16，`.worktrees/graph-research`）
+
+> §74.6 把「先补一次实测」钉成第 0 步，理由是 §67.1 那条更正**只有代码层面的判读**。
+> 这一节就是那次实测：**一个服务会话跑完八步**，中间只改 `art/shaders/clouds.wgsl`
+> 与一次 `art/scene/orbit.toml`，**没有一次 `cargo`**，`px_render.exe` 的 sha256 全程是
+> `d1e39651066b0ed8c52f8fb6da4390baca14dea895a55ce75ed67d95ed538bee`（收工复算仍是它）。
+>
+> **起因（用户本轮重申的口径）**：**「对于美术设计师来说 material schema 应当表现为动态的」**。
+> 所以这一节要回答的不是「今天会不会拒」，而是「**美术想做的那件事，卡在哪一环**」。
+
+### §75.1 布置
+
+| 项 | 值 |
+|---|---|
+| 构建 | 借 `.worktrees/generic-render/target` 当缓存（复用 Bevy 依赖；本地 crate 39.8 s） |
+| 场景 | `orbit`（planet + atmosphere + clouds）；960×640、`--cam 0,5,3.2`；另有一张无云的 `orbit-bare` 当对照 |
+| 会话 | 一个 `--serve`，pid **18172**：8 次请求（5 次出图、3 次当场拒）全程**没重启** |
+| 仪器 | `target/step0/req.ps1`（每次请求打 pid / 退出码 / png 哈希 / exe 哈希）、`target/step0/forge-param.py`（改产物里的参数表）、`uv run target/step0/pixdiff.py` |
+| 自变量 | 只在 `art/shaders/clouds.wgsl`（结构体）与一次 `art/scene/orbit.toml`；收工 `git status` 干净、改动全部撤回 |
+
+### §75.2 八步与读数（键 = 内容 ⇒ 键就是每步的自变量）
+
+| 步 | 改了什么 | clouds 键 | 场景键 | 结果 |
+|---|---|---|---|---|
+| E1 | 无（基线） | `5a88f3986ab8` | `18b091fc2654` | 出图 362773 B `2b1a76f4…`（`orbit-bare` 那张 301107 B `74d19743…`） |
+| E2 | 结构体**换布局**：`@align(16) density`（25 个名字**一个没动**） | `d59236580c12` | `4b8aa62b0b7a` | **出图，与基线逐字节相同** |
+| E3 | 结构体**加一格** `witness: f32`（配方一个字没动） | `c57e8a3406b4` | `4c0a74c91b12` | **拒**（退出码 1）：`shader 声明了参数 'witness'（f32），产物没给` + 列出全部 26 格 |
+| E5 | E3 的结构体 + **手工给那个值**（`forge-param.py` 改产物） | `c57e8a3406b4` | 手工造 | **出图 386919 B `03d3e9d7…`**：23.79% 像素变、最大通道差 67（`× (1 + witness)` 那条乘法） |
+| E6 | 结构体加到 **1088 字节**（26 + 240 格） | `10c1e7adc1a3` | `d6a1421e0220` | **拒**（退出码 1）：`clouds 的参数块是 1088 字节，超过上限 1024` |
+| E7 | 第 **9** 格加一张 2D 贴图（+ 第 10 格采样器） | `7c535d0a193a` | `2d49b88f1fdf` | **拒**（退出码 1）：`clouds 把贴图声明在第 9 格：贴图只能占 1 / 3 / 5 / 7 这几格` |
+| E4 | **配方**里写 `witness = 1.0` | — | — | **烘图时 panic**（退出码 101）：`part 'clouds'（kind clouds）不认识参数 'witness'；它认：…24 个` |
+| E8 | 全部撤回后重烘 | `5a88f3986ab8` | `18b091fc2654` | **出图 = 基线逐字节相同**；键也逐字节回到基线 |
+
+### §75.3 判据 P / R / D 的现状（§74.1 那三条）
+
+- **P（不重编）**：**在渲染器这一层成立，而且是硬的**。E2 与 E5 换的是 shader 内容（新版本、新结构体、
+  新名字 + 新值），exe 的 sha256 全程不变、流程里没有任何 `cargo`；服务日志里
+  `渲染管线全部就绪：共 42 → 46 → 47 → 48 → 49 → 50 条，失败 0 条` —— **新版本当帧现编管线**。
+  这正是 §67.1 说的那条路，现在有实测了。
+- **R（不重启）**：**成立**。三条拒（E3/E6/E7）与四次新版本装载都在**同一个 pid** 里发生，
+  拒完还能接着出图（E8 与基线逐字节相同）。拒词都点名到**具体参数 / 格号 / 字节数**（§62 的口径）。
+- **D（确定性）**：**成立**。内容撤回之后，**键与图都逐字节回到 E1** —— 键是内容的纯函数，
+  这也是「同图两次生成逐字节相同」那条判据的同一件事。
+
+### §75.4 墙在哪儿（逐条点名，含证据）
+
+> 一句话：**渲染器侧没有墙；墙全在「谁给那个新参数一个值」上。**
+
+| # | 墙 | 证据 | 归谁 |
+|---|---|---|---|
+| **W1** | **配方词汇是烘图侧 Rust 里的闭集**：`CLOUDS_KEYS` 24 个 / `PLANET_KEYS` 15 个 / `ATMOSPHERE_KEYS` 5 个，加一个名字必须改 `scene.rs` | E4（烘图 panic，退出码 101） | 第 1 步（配方按名字透传 + 按 descriptor 校验） |
+| **W2** | **装载时要求「产物给的参数名集合 == shader 声明的集合」逐项相等**：`reflect.rs::pack` 对缺参与多参都拒 | E3（拒词把 26 格全列出来） | 第 1 步（schema descriptor 进产物，由它校验/报错） |
+| **W3** | **两个硬顶**：参数块 1024 字节、贴图只有 4 格（2×2D + 2×cube，绑定组写死第 2 组） | E6（1088 > 1024）、E7（第 9 格） | 第 1 步（§74.4 (a) 一次性加宽超集） |
+| **W4** | **离线门对「加参数」是瞎的**：`reflect.rs:499-527` 把 `tint@16`/`inner@32`/`wind_skin@120`/`params_bytes == 128` 钉死 ⇒ **换布局**它会红（`wind_skin` 128 ≠ 120），**尾部加一格它照样绿**（128 → 128） | 门实跑两次 | 第 1 步顺手改成「按声明读」，别让它变成"改结构体就红"的假墙 |
+
+⚠ **一条容易读反的地方**：E3 的拒**不是**「渲染器不接受新 schema」—— 拒词里那份 26 格的清单就是它
+**当场反射出来的新结构体**。它拒的是「你声明了却没人给值」。所以 W1/W2 是**同一件事的两端**：
+配方说不出那个名字（W1），产物就带不上那个值（W2）。
+
+**E5 是这条论证的反证**：绕开烘图侧、直接给产物补上 `witness = 1.0`，渲染器**一次就成**，
+而且像素真的变了（23.79%、最大差 67 —— 数值与方向都对得上 `× (1 + witness)`）。
+⇒ **第 1/2 步不用动渲染器的架构**：要补的是「配方词汇 → 产物参数」这一段的数据通路。
+
+### §75.5 这次实测更正 / 坐实了什么
+
+1. **`09-instruments.md` §42.1 那张表是过期的**（原文：`CloudParams` 之类的 uniform 结构 ⇒ **要**重启、
+   必须 `cargo build`）：整条链上**没有任何一处**因为改结构体而需要重编或重启。表已按本节改掉。
+2. **§67.1 的判读取到实测支持**（不是推翻）：改结构体、换布局、加新名字，渲染器都在装载时现反射。
+3. ⚠ **但 §74.6 第 0 步原本的期望（「加一个参数 ⇒ 出图」）不成立**：加一格新字段之后，
+   **烘图侧没有任何机制能给出那个值** ⇒ E3 那三种拒 才是今天的真实形态。
+   这条不是坏消息：它把工程量**从渲染器挪到了烘图侧与契约**，而那正是第 1 步的位置。
+4. ⚠ **`witness` 那一段的 shader 改动与配方改动都已撤回**；`target/step0/` 里留着仪器、服务日志、
+   六张 png 与一份手工造的产物（`forged-orbit-witness.pxart`）——**它们不在 git 里**（`/target` 被忽略）。
+   要复跑：`target/step0/serve.ps1` → `target/step0/req.ps1 -Artifact <x.pxart> -Out <png> -Label <名>`。
+
    ⚠ 第 3 步的执行器按 **§75.3** 写成「与宿主无关」的一层（输入 device/queue/目标 + pass 表，输出 CommandBuffer），
    这样它将来能整体搬到裸 wgpu。
 
@@ -782,3 +860,77 @@ S4 的第一批用户应当是**新材质 / 简单材质 / 组合既有库函数
   可以作为「一份文档整体换管线」的粗粒度开关，零新架构。
 - **第 4 层是陷阱**：它看起来像「动态拼 pass 链」，代价是「同一条内容键、两种图」+ 调度图重建 +
   匿名闭包不能排序。**除非有非常具体的理由，不要用它当 pass 链的主干。**
+
+---
+
+## §78 外部终稿补遗：五条可以直接用的东西（2026-09-16）
+
+外部调研的最后一轮返回，其中五条**直接改变或加强**了本方案的判断。
+
+### §78.1 ⭐ 出货先例：Godot 的「改文本 = 改 schema」（A 级）
+
+`RenderingServer.shader_set_code` 文档原文：*"Sets the shader's source code (**which triggers recompilation after being changed**)."*
+而 Godot 的 uniform 列表就是从这段文本 parse 出来的 ⇒ **增删一行 `uniform` + `set_code()` 就是真正的运行期 schema 变更**，
+`get_shader_uniform_list()` 立刻反映。
+**这正是我们要的那件事，而且已经出货。** ⇒ 本方案（§74 第 1 步：schema 由 shader 声明 + 数据透传）走的
+**是同一条路**，不是孤例。
+
+⚠ 同族的**反面教材**（要主动避免）：Godot 的 `set_shader_parameter` 对**不存在的名字无条件 insert、不报错、无效果**
+（源码级：`param_cache` 无条件插，服务端只拒 NIL/OBJECT，不做存在性检查）
+⇒ 与 §72.3 不变式 3（**失败不许静默**）同一条，这里有了活的反例。
+
+### §78.2 ⭐ Unreal 官方替我们的 §74.4 (a) 背书（A 级）
+
+*"**Modifying the number of parameters in a collection will cause a recompile of all Materials that
+reference that collection.** If you need to add numerous parameters, it can be faster to
+**add a lot of parameters up front in an empty map**."*
+
+- 前半句就是我们要避免的失败形态：**参数集一变 ⇒ 下游全量重编**。
+- **后半句正是 §74.4 (a) 的做法**（一次性把超集加宽、留空位）。⇒ 我们的裁决有工业界同款先例。
+- 另两条硬限制可作参照：一个材质最多引用 **2 个** MPC；一个 collection 上限 **1024 标量 + 1024 向量**。
+- 同族正面证据：*"Material instancing… is used to change the appearance of a Material **without incurring an
+  expensive recompilation**."* ⇒ 「改值不重编」是共识；**「改 schema 不重编」才是我们这轮的差别**。
+
+### §78.3 ⭐ Blender Cycles 的官方优化清单 = S4 的 codegen 需求列表（A 级）
+
+Cycles 官方文档明说它按顺序做四件事：
+
+1. *"**expands all node groups, as if using the Ungroup tool**"*；
+2. 常量折叠（RGB / Math / Mix）与 no-op、0/1 因子消除；
+3. *"**Combine multiple copies of the same node with the same inputs into only one instance**"*（**CSE 去重**）；
+4. *"any nodes that end up **not connected** … are **removed**"*（死代码删除）。
+
+⇒ **这是唯一把「展开 + 折叠 + 去重 + 删死码」四件事全部写进官方文档的系统**，
+**可以直接当我们 S4 codegen 的需求清单**（§69 S4 那张代价表里「常量折叠是前提不是优化」「子图是函数、去重是函数级」
+两条，在这里得到一份可照抄的完整顺序）。
+
+### §78.4 OSL：运行期闭环的三个 API（A 级，本调研里最完整的先例）
+
+- `OSLCompiler::compile_buffer(source, osobuffer, …)` —— **进程内编译**（README 明说 liboslc 就是给「embed it into other applications」用的）；
+- `OSLQuery::open_bytecode(buffer)` —— *"get shader info **on runtime without creating a temporary file**"*；
+- `LoadMemoryCompiledShader(name, buffer)` —— *"Load compiled shader (oso) from a memory buffer, **overriding shader lookups in the shader search path**"*。
+
+⇒ **「字符串进 → 可反射的编译产物 → 运行期装载」是完整闭环**，Blender Cycles 是生产级示范。
+⇒ §71.4 那句「要抄的是 MaterialX / MDL / OSL 这一类」现在有了具体的 API 形状
+（⚠ 顺带更正：`OSLQuery` 的 API 是 `nparams()` / **`getparam(i)`**，默认值字段是 `fdefault`/`idefault`/`sdefault`）。
+
+### §78.5 两条「运行期注册」的成熟先例与它们各自的边界（A 级）
+
+- **Houdini Engine**：`HAPI_LoadAssetLibraryFromMemory(...)` + **`allow_overwrite`**
+  （*"overwriting asset definitions that have already been loaded from a different asset library file"*）
+  + `HAPI_GetParameters()` → `HAPI_ParmInfo`（**参数表在运行期被重新反射**）。
+  ⇒ 「**资产定义可在运行期覆盖并重新反射参数表**」在一款商业 DCC 中间件里做了很多年。
+- **Omniverse / Kit**：`UsdMdl.RegistryUtils.AddModuleToRegistry(path)` 运行期注册 MDL 模块，
+  再 `GetShaderNodeForPrim` → `GetInputNames()` → `CreateInput(name, sdf_type)` 反射成 USD shader inputs。
+  ⚠ **边界**：*"**Restarting Create is required when modifying search paths**"*
+  ⇒ **注册新模块可以，改搜索路径要重启** —— 这条边界与本仓「库是盘上的文件、不进 CAS」那条残留
+  （§52.3 末尾）是同一类问题。
+
+### §78.6 顺带确认的两条（对本仓是有利的）
+
+- **Godot 的引擎内建变量是硬编码的**（`shader_types.cpp` 里逐条写 `built_ins["VERTEX"] = TYPE_VEC3`），
+  只有用户 `uniform` 是可变的 ⇒ **「可变的只有内容，不变的是契约」是共识**，与本仓的固定超集同一档。
+- **Bevy 侧的前提复核无误**：0.19 里没有 `Material::shader()`，是 `vertex_shader()` / `fragment_shader() -> ShaderRef`；
+  `AsBindGroup` 派生的 layout 是**关联函数**（`Self: Sized`，无 `&self`）⇒ **一个实例无法增删 binding**；
+  `ShaderCache::set_shader` 返回「依赖它、因此必须重编的 pipeline 列表」。
+  ⇒ §67.2 那三条硬边界**复核成立**。

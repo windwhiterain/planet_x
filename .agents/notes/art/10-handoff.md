@@ -7,7 +7,43 @@
 
 ## 9.1 现在在哪儿
 
-### 9.1.0 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
+### 9.1.0 本轮（2026-09-16，`.worktrees/graph-research`）：动态 schema 调研 ＋ **第 0 步实测**（**代码未动**）
+
+**在哪条线上**：`.worktrees/graph-research`（分支 `feature/graph-research`，从 `v2` 的 `b2273e8` 拉），
+**还没并入 `v2`**。到这一轮为止**只有笔记**：`11-graph.md` §67–§74（动态 schema 与动态 render graph 的调研、
+四条用户裁决、修订后的路线与开工顺序），本轮的 **§75 是第一次实测**。
+**代码一行没改**：`git status` 干净，`px_render.exe` 的 sha256 全程不变。
+
+**用户本轮重申的口径**：**「对于美术设计师来说 material schema 应当表现为动态的」**
+⇒ 目标**不是**面板 / 编辑器（§73 已裁决不要），而是**改 WGSL + 改配方 ⇒ 重烘 ⇒ 出图：0 编译、0 重启**（判据 P/R）。
+
+**做了什么**（读数与逐条墙在 `11-graph.md` **§75**）：借 `.worktrees/generic-render/target` 当构建缓存
+（复用 Bevy 依赖，本地 crate 39.8 s），**一个 `--serve` 会话（pid 18172）跑完八步**，
+中间只改 `art/shaders/clouds.wgsl`（结构体）与一次 `art/scene/orbit.toml`。
+仪器落在 `target/step0/`：`serve.ps1` / `req.ps1`（每次请求打 pid、退出码、png 哈希、exe 哈希）/
+`forge-param.py`（改产物里的参数表）/ 服务日志 / 六张 png / 一份手工造的产物。
+
+**已验证**：
+
+- **判据 P/R 在渲染器这一层成立**：换结构体布局（E2）与「新字段 + 新值」（E5）都在同一 pid 里出图，
+  exe sha256 不变、流程里没有一次 `cargo`；日志 `渲染管线全部就绪：共 42 → 46 → 47 → 48 → 49 → 50 条，失败 0 条`
+  ⇒ **新版本当帧现编管线**。
+- **拒是当场拒、服务不死**：E3（产物没给 `witness`）/ E6（参数块 1088 > 1024）/ E7（贴图声明在第 9 格）
+  三条都是退出码 1 + 点名拒词，之后同一会话接着出图（E8 与基线**逐字节相同**）。
+- **键是内容的纯函数**：撤回之后**键与图都**逐字节回到基线（`clouds=5a88f3986ab8`、场景 `18b091fc2654`）。
+- **两个硬顶的实测读数**：参数块 1024 字节、贴图只有 4 格（1/3/5/7）—— 第 1 步要加宽的正是这两个。
+- **离线门**：结构体**换布局**会让 `px_render/src/reflect.rs:499-527` 红（`wind_skin` 128 ≠ 120）；
+  **尾部加一格不会**（128 → 128）⇒ 那道门对「加参数」是瞎的。
+
+**没做 / 待办**：
+
+1. ⚠ **§74.6 的第 1 步（契约收口 + 加宽超集）还没开工** —— 那是下一批，也是本轮实测指向的位置。
+2. `art/shaders/*.wgsl` 与配方**都已撤回**（收工 `git status` 干净）；`target/step0/` 那批仪器**不在 git 里**（`/target` 被忽略）。
+3. 这一轮**没跑** `--view` / `--sheet`（只走 `--serve` 出图）；`orbit-bare` 只当对照。
+4. `clouds.exe` 这次是**全量重算 41.9 s**（这个 worktree 的 CAS 是新建的）；
+   借用的 `generic-render/target` 现在装着本分支的 exe（与上一轮借它的做法相同）。
+
+### 9.1.1 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 
 **在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
 **已 `--no-ff` 并入 `v2`**：合并提交 **`b0737c3`**（三个提交 `d799488` §28.2 / `35a1938` include-aware / `1dc172b` 笔记）。
@@ -74,7 +110,7 @@
   sha256 `6318415190…` —— 与 worktree 上的基线**逐字节相同**；服务端日志打出每个 shader 成员的
   `include 闭包 …｜可达模块 …｜外部符号 …`。
 
-### 9.1.1 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
+### 9.1.2 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
 
 **在哪条线上**：`.worktrees/cloud-surface-perf`（分支 `feature/cloud-surface-perf`）。软档与
 场景产物那条路（§52）只活在这个 worktree 里，**v2 上没有** ⇒ 这一轮的所有改动都在这里。
@@ -128,7 +164,7 @@
   ⇒ `cargo test` 是红的。要绿用：
   `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。
 
-### 9.1.2 本轮续（同一天，接着 9.1.1 的两条之后）：光源去常量（点光源）＋ 细节风
+### 9.1.3 本轮续（同一天，接着 9.1.2 的两条之后）：光源去常量（点光源）＋ 细节风
 
 **用户的两条**：①"不要硬编码 `SUN_DIRECTION`，用通用的光源来处理"（追问定为**先支持点光源、
 太阳换点光源**，影一起接，光源做成场景参数）；②"让细节随着 noise 场时间变化而变化，
@@ -171,7 +207,7 @@
 `light1-shot-r1-orbit-bare.png`（点光源下的裸行星），差异图
 `pixdiff-light.png` / `pixdiff-cloudshadow-point.png` / `pixdiff-shadowmap-point.png` / `pixdiff-wind.png`。
 
-### 9.1.3 本轮（2026-09-15，`fix/pipeline-fail-fast` worktree）：坏管线当场拒，不许一直 pending
+### 9.1.4 本轮（2026-09-15，`fix/pipeline-fail-fast` worktree）：坏管线当场拒，不许一直 pending
 
 **用户的两条**：①把 `feature/cloud-surface-perf` 合进 v2；②"server 请求遇到坏管线要提前退出
 而不是一直 pending"。追问定下的口径：**失败当场拒绝，不能靠超时**；超预算时**只让这一步请求
@@ -195,7 +231,7 @@
 只有人为把预算改成 300 ms 那一次实测。`drive_stable` 的 `Assets` 相位、viewer（`--view` /
 `--show`）没接这道闸。
 
-### 9.1.4 本轮（2026-09-15，`feature/soft-cloud-perf` worktree）：代理 + 软
+### 9.1.5 本轮（2026-09-15，`feature/soft-cloud-perf` worktree）：代理 + 软
 
 **在哪条线上**：`.worktrees/soft-cloud-perf`（分支 `feature/soft-cloud-perf`，从 v2 的 `7a300e6` 拉）。
 口径与实测全在 `06-clouds.md` **§63**。
@@ -250,7 +286,7 @@
 5. 早退只测了 2240×1400 / 480×300 两个分辨率与 `orbit-soft` 这一档；`shadow = 0`、`steps` 变小
    这些档没扫（上界那条论证与 `shadow` 无关，但没实测）。
 
-### 9.1.5 同一天接着的一条**用户报的缺陷**：窗口里的「正中心接缝」——**已定位、已修、已并入 v2**
+### 9.1.6 同一天接着的一条**用户报的缺陷**：窗口里的「正中心接缝」——**已定位、已修、已并入 v2**
 
 **用户口径**：**"背面光照会出现跳变"**（2026-09-15，配窗口截图）；随后追加 **"不需要兜底，宇宙里没有平行光"**
 与 **"确保平行光被删除了，从渲染器里"**。全过程与证据链在 `06-clouds.md` **§64 / §64.9**。
@@ -285,7 +321,7 @@
 
 **没做的**：多光源仍不支持（取第 0 盏；§64.9.3 记了以后怎么改）。分支已 `--no-ff` 并入 `v2`。
 
-### 9.1.6 本轮（2026-09-15，`.worktrees/generic-render` 分支 `feature/generic-render`）：**通用渲染**
+### 9.1.7 本轮（2026-09-15，`.worktrees/generic-render` 分支 `feature/generic-render`）：**通用渲染**
 
 用户原话：「目前 pcg->render 构架仍然不是通用渲染，`.pxart` 改成通用渲染」。口径与全部判据在
 `08-renderer.md` **§65**（这一轮新增），这里只写"做到哪了"。
