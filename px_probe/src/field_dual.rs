@@ -16,7 +16,7 @@ fn production_params() -> CloudParams {
 
 fn reference(params: &CloudParams) -> CloudFieldParams {
     CloudFieldParams {
-        orientation: params.orientation.to_array(),
+        orientation: params.orientation,
         inner: params.inner,
         outer: params.outer,
         coverage: params.coverage,

@@ -4426,10 +4426,10 @@ name = "px_probe"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "encase",
- "glam",
  "pollster",
+ "px_protocol",
  "px_render",
+ "px_shader",
  "px_verify",
  "wgpu",
 ]
@@ -4458,6 +4458,10 @@ dependencies = [
 [[package]]
 name = "px_shader"
 version = "0.1.0"
+dependencies = [
+ "naga",
+ "px_protocol",
+]
 
 [[package]]
 name = "px_verify"

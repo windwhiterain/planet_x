@@ -285,12 +285,25 @@ mod tests {
     #[test]
     fn the_layout_is_the_fixed_superset_and_never_depends_on_the_instance() {
         // 布局是**静态**的（Bevy 每种材质类型只建一份）⇒ 它必须覆盖契约里全部格，
-        // 而且一个字节都不许随实例变。这里只钉住形状：参数块 + 每张贴图各带一个采样器。
-        assert_eq!(crate::reflect::MATERIAL_BIND_GROUP, 2);
+        // 而且一个字节都不许随实例变。期望值从**表**推出来：再抄一份就是第二个会漂开的真源。
+        assert_eq!(
+            crate::reflect::MATERIAL_BIND_GROUP,
+            3,
+            "运行期是 Bevy 说了算：`MATERIAL_BIND_GROUP_INDEX = 3`（§75 的「2/3 那颗雷」）"
+        );
         let bindings: Vec<u32> = TEXTURE_SLOTS
             .iter()
             .flat_map(|(binding, _)| [*binding, binding + 1])
             .collect();
-        assert_eq!(bindings, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(bindings.len(), TEXTURE_SLOTS.len() * 2, "每张贴图各带一个采样器");
+        assert!(
+            bindings.windows(2).all(|pair| pair[0] < pair[1]),
+            "格号必须递增：{bindings:?}"
+        );
+        assert_eq!(
+            &bindings[..8],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            "头四格永远是 2×2D + 2×cube —— 加宽超集只许往后**追加**，不许挪老格"
+        );
     }
 }

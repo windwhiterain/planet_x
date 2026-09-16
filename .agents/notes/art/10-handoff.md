@@ -7,7 +7,105 @@
 
 ## 9.1 现在在哪儿
 
-### 9.1.0 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
+### 9.1.0 本轮（2026-09-16，`.worktrees/graph-research`）：动态 schema 调研 ＋ **第 0 步实测**（**代码未动**）
+
+**在哪条线上**：`.worktrees/graph-research`（分支 `feature/graph-research`，从 `v2` 的 `b2273e8` 拉），
+**还没并入 `v2`**。到这一轮为止**只有笔记**：`11-graph.md` §67–§78（动态 schema 与动态 render graph 的调研、
+四条用户裁决、修订后的路线与开工顺序、裸 wgpu 与 Bevy 图能有多动态的追问），本轮的实测**单独一篇**：
+**`art/12-step0.md` §79**。
+**代码一行没改**：`px_render.exe` 的 sha256 全程不变（`d1e39651066b0ed8…`），
+本轮改过的 `art/shaders/clouds.wgsl` 与 `art/scene/orbit.toml` **全部撤回**。
+
+**用户本轮重申的口径**：**「对于美术设计师来说 material schema 应当表现为动态的」**
+⇒ 目标**不是**面板 / 编辑器（§73 已裁决不要），而是**改 WGSL + 改配方 ⇒ 重烘 ⇒ 出图：0 编译、0 重启**（判据 P/R）。
+
+**做了什么**（读数与四道墙在 `art/12-step0.md` **§79**）：借 `.worktrees/generic-render/target` 当构建缓存
+（复用 Bevy 依赖，本地 crate 39.8 s），**一个 `--serve` 会话（pid 18172）跑完八步**，
+中间只改 `art/shaders/clouds.wgsl`（结构体）与一次 `art/scene/orbit.toml`。
+仪器落在 `target/step0/`：`serve.ps1` / `req.ps1`（每次请求打 pid、退出码、png 哈希、exe 哈希）/
+`forge-param.py`（改产物里的参数表）/ 服务日志 / 六张 png / 一份手工造的产物。
+
+**已验证**：
+
+- **判据 P/R 在渲染器这一层成立**：换结构体布局（E2）与「新字段 + 新值」（E5）都在同一 pid 里出图，
+  exe sha256 不变、流程里没有一次 `cargo`；日志 `渲染管线全部就绪：共 42 → 46 → 47 → 48 → 49 → 50 条，失败 0 条`
+  ⇒ **新版本当帧现编管线**。
+- **拒是当场拒、服务不死**：E3（产物没给 `witness`）/ E6（参数块 1088 > 1024）/ E7（贴图声明在第 9 格）
+  三条都是退出码 1 + 点名拒词，之后同一会话接着出图（E8 与基线**逐字节相同**）。
+- **键是内容的纯函数**：撤回之后**键与图都**逐字节回到基线（`clouds=5a88f3986ab8`、场景 `18b091fc2654`）。
+- **两个硬顶的实测读数**：参数块 1024 字节、贴图只有 4 格（1/3/5/7）—— 第 1 步要加宽的正是这两个。
+- **离线门**：结构体**换布局**会让 `px_render/src/reflect.rs:499-527` 红（`wind_skin` 128 ≠ 120）；
+  **尾部加一格不会**（128 → 128）⇒ 那道门对「加参数」是瞎的。
+
+**没做 / 待办**：
+
+1. **第 1 步已开工并提交**（同一天的续，见下）⇒ 只剩第 2 步（配方透传 / `SLOTS` 扫描 / 协议加法不升版本）
+   与第 3 步（pass 图 —— 另一个 worktree `.worktrees/pass-table` 在做）。
+2. `art/shaders/*.wgsl` 与配方**本轮改的都已撤回**；`target/step0/` 那批仪器**不在 git 里**（`/target` 被忽略）。
+   ⚠ 收工时 `art/shaders/clouds.wgsl` 上**还挂着一处不是本轮实验留下的**未提交改动
+   （`@align(16) density`——写它的那个会话已经搬到 `.worktrees/pass-table`）⇒ 按用户 2026-09-16 的裁决**留着不动**。
+3. 这一轮**没跑** `--view` / `--sheet`（只走 `--serve` 出图）；`orbit-bare` 只当对照。
+4. `clouds.exe` 这次是**全量重算 41.9 s**（这个 worktree 的 CAS 是新建的）。
+
+#### 续（同一天）：第 1 步「契约收口 + 加宽超集」已提交 **`c44e136`**
+
+**判据**：产物键逐字节不变｜出图哈希四张全同 `2b1a76f4…`（= 第 0 步基线）｜配对 gpu p50
+a4 **4.633** / b12 **4.537 ms**（−2.1%，噪声内）｜84 个用例通过。细节在 **`art/08-renderer.md` §80**。
+
+**做的事**：唯一一份表 `px_protocol::material`（组号 / 格号 / 维度 / 上限 / `ParamKind` / `pack`）；
+naga 反射与组装搬进叶子 crate `px_shader`；**灭掉 2/3 那颗雷**（一律替成 3 = Bevy 的
+`MATERIAL_BIND_GROUP_INDEX`，探针材质组 2→3、job 3→4）；占位 WGSL 由表生成；
+schema descriptor 进产物（第二个 U8 blob，不参与键）+ 装载时 `schema_check` 对账；
+**加宽**：贴图 4 → 12 格（8×2D + 4×cube）、参数块 1024 → 4096 字节（老四格一个没动）。
+
+**这一步之后还没做的**：① 第 2 步（配方透传）—— 在那之前「加一个参数」仍要改 Rust（§79 的 W1）；
+② 探针三个 bin 没跑（只改了绑定组号）；③ `--view` / `--sheet` 没跑；
+④ ⚠ `tests/cloud_field.rs` 那条门红着 —— 是 `clouds.wgsl` 上那处**外来改动**把它从 128 撑到 144，
+不是这一步引入的；⑤ 构建已从借用的 `generic-render/target` **改回本 worktree 自己的 `target/`**
+（两个会话共用那个目录时轮流覆盖 exe，已经因此白烧过一次烘图）。
+
+**⚠ 并发会话的两个后果，后来人要知道**：① 另一个会话在 `.worktrees/pass-table` 里做 pass 表，
+也在编辑 `.agents/notes/art/11-graph.md` —— 本轮的实测因此**另立** `art/12-step0.md`（用户裁决）；
+`11-graph.md` 第 734 行那份副本**已删**（2026-09-16，原地留一行指路）。
+② 起 `--serve` 前 harness 会拦（单例闸门）：对方在跑时**不要杀**，等对方自己收；两个并列的渲染循环
+会让双方的性能数据都作废（§80.3 记了那次被污染的读数）。
+
+#### 续（同一天）：第 2 步「schema 变成数据」已提交 **`34c9b3f`**
+
+**这一步买的是「加一个参数 = 改 WGSL + 改配方，0 编译、0 重启」**（第 0 步 §79 的 W1 那道墙拆了）。
+细节在 **`art/08-renderer.md` §81**。
+
+**做的事**：烘图侧判据从**写死的白名单**换成**这份 shader 自己的契约**（产物里的 descriptor）——
+结构键编译器消化、契约里的名字按类型透传、两边都不是就报错（`merge_params`）；
+槽表从 `const SLOTS: [&str; 3]` 换成**扫 `art/shaders/*.wgsl`**（今天 4 份，`ring` 也进清单了）；
+协议给文档结构加 `deny_unknown_fields`（**加法不升 `SCENE_SCHEMA`，但未知字段不许静默忽略**；
+自由的名字表——材质参数、图元参数——保持自由）。
+
+**判据**：20 / 20 个场景与旧判据**键逐字节相同**（A/B：stash 掉改动用旧 exe 再烘一遍）｜116 个用例通过｜
+人工路走通：改 WGSL + 改配方 ⇒ 键换、**26 个参数**、像素变 **23.80%**，而 **exe sha256 不变、服务同 pid**；
+回退后逐字节回到基线｜三种写错（名字打错 / 少给参数 / 值形状不对）都在**烘图时**红（101）｜
+descriptor 闸门端到端：拿第 0 步那份没有 descriptor 的产物请求 ⇒ 当场拒 + 重烘配方。
+
+**下一步的位置**：`art/11-graph.md` §76 开工序的第 3 步（**pass 图**：文档里的 pass 表 + 一个执行器系统）
+—— 那条线在 `.worktrees/pass-table` 里由另一个会话并行做，动手前先跟那边对齐。
+
+#### 再续（同一天）：尾巴三件已提交 **`7f8e144`**（另加探针修复 **`9c0add2`**）
+
+细节在 **`art/08-renderer.md` §82**：
+
+1. **探针镜像**：`px_probe/src/params.rs` 不再手抄字节布局 —— 结构体只管**值**，
+   **名字 ↔ 字节**来自 `clouds.wgsl` 的契约。判据：`field_dual` 三组读数**一字不差**
+   （⇒ 契约打包与旧 `encase` 布局逐字节等价）；`encase` / `glam` 两个依赖删掉。
+2. **窗口模式复验**：`--sheet`（出图 4.17 MB）、`--view`（46 条管线 0 失败）、`--show`（推送生效、同键不重建）✓。
+   ⚠ 记下一条**窗口模式下的 Vulkan 校验错**（`vkAcquireNextImageKHR` semaphore，10 s 6 条）：
+   呈现路径、**不给场景也复现** ⇒ 不是这一轮引入；离线服务无 swapchain 所以干净；**没做二分**。
+3. **笔记清理**：`11-graph.md` 里那份 §79 副本已删（原地留 5 行指路），三处引用同步。
+
+⚠ **还欠着的**：`gradient` 的第 8 条（归因 check 的 2.259e-1）用户裁决**记账、不追**（§81.6 末）；
+探针的 `field_dual` / `gradient` 是手动跑的，**没进任何自动门**（本仓的规矩：探针不进 `cargo test`，
+退出码才是判据）—— 也就是说：**谁会想到去跑它，谁才会发现它红了**，这一轮就是这么发现的。
+
+### 9.1.1 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
 
 **在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
 **已 `--no-ff` 并入 `v2`**：合并提交 **`b0737c3`**（三个提交 `d799488` §28.2 / `35a1938` include-aware / `1dc172b` 笔记）。
@@ -74,7 +172,7 @@
   sha256 `6318415190…` —— 与 worktree 上的基线**逐字节相同**；服务端日志打出每个 shader 成员的
   `include 闭包 …｜可达模块 …｜外部符号 …`。
 
-### 9.1.1 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
+### 9.1.2 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
 
 **在哪条线上**：`.worktrees/cloud-surface-perf`（分支 `feature/cloud-surface-perf`）。软档与
 场景产物那条路（§52）只活在这个 worktree 里，**v2 上没有** ⇒ 这一轮的所有改动都在这里。
@@ -128,7 +226,7 @@
   ⇒ `cargo test` 是红的。要绿用：
   `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。
 
-### 9.1.2 本轮续（同一天，接着 9.1.1 的两条之后）：光源去常量（点光源）＋ 细节风
+### 9.1.3 本轮续（同一天，接着 9.1.2 的两条之后）：光源去常量（点光源）＋ 细节风
 
 **用户的两条**：①"不要硬编码 `SUN_DIRECTION`，用通用的光源来处理"（追问定为**先支持点光源、
 太阳换点光源**，影一起接，光源做成场景参数）；②"让细节随着 noise 场时间变化而变化，
@@ -171,7 +269,7 @@
 `light1-shot-r1-orbit-bare.png`（点光源下的裸行星），差异图
 `pixdiff-light.png` / `pixdiff-cloudshadow-point.png` / `pixdiff-shadowmap-point.png` / `pixdiff-wind.png`。
 
-### 9.1.3 本轮（2026-09-15，`fix/pipeline-fail-fast` worktree）：坏管线当场拒，不许一直 pending
+### 9.1.4 本轮（2026-09-15，`fix/pipeline-fail-fast` worktree）：坏管线当场拒，不许一直 pending
 
 **用户的两条**：①把 `feature/cloud-surface-perf` 合进 v2；②"server 请求遇到坏管线要提前退出
 而不是一直 pending"。追问定下的口径：**失败当场拒绝，不能靠超时**；超预算时**只让这一步请求
@@ -195,7 +293,7 @@
 只有人为把预算改成 300 ms 那一次实测。`drive_stable` 的 `Assets` 相位、viewer（`--view` /
 `--show`）没接这道闸。
 
-### 9.1.4 本轮（2026-09-15，`feature/soft-cloud-perf` worktree）：代理 + 软
+### 9.1.5 本轮（2026-09-15，`feature/soft-cloud-perf` worktree）：代理 + 软
 
 **在哪条线上**：`.worktrees/soft-cloud-perf`（分支 `feature/soft-cloud-perf`，从 v2 的 `7a300e6` 拉）。
 口径与实测全在 `06-clouds.md` **§63**。
@@ -250,7 +348,7 @@
 5. 早退只测了 2240×1400 / 480×300 两个分辨率与 `orbit-soft` 这一档；`shadow = 0`、`steps` 变小
    这些档没扫（上界那条论证与 `shadow` 无关，但没实测）。
 
-### 9.1.5 同一天接着的一条**用户报的缺陷**：窗口里的「正中心接缝」——**已定位、已修、已并入 v2**
+### 9.1.6 同一天接着的一条**用户报的缺陷**：窗口里的「正中心接缝」——**已定位、已修、已并入 v2**
 
 **用户口径**：**"背面光照会出现跳变"**（2026-09-15，配窗口截图）；随后追加 **"不需要兜底，宇宙里没有平行光"**
 与 **"确保平行光被删除了，从渲染器里"**。全过程与证据链在 `06-clouds.md` **§64 / §64.9**。
@@ -285,7 +383,7 @@
 
 **没做的**：多光源仍不支持（取第 0 盏；§64.9.3 记了以后怎么改）。分支已 `--no-ff` 并入 `v2`。
 
-### 9.1.6 本轮（2026-09-15，`.worktrees/generic-render` 分支 `feature/generic-render`）：**通用渲染**
+### 9.1.7 本轮（2026-09-15，`.worktrees/generic-render` 分支 `feature/generic-render`）：**通用渲染**
 
 用户原话：「目前 pcg->render 构架仍然不是通用渲染，`.pxart` 改成通用渲染」。口径与全部判据在
 `08-renderer.md` **§65**（这一轮新增），这里只写"做到哪了"。
