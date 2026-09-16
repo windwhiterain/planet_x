@@ -7,6 +7,58 @@
 
 ## 9.1 现在在哪儿
 
+### 9.1.0 本轮（2026-09-16，`.worktrees/shader-include`）：shader 缓存对 include 敏感 ＋ §28.2 收尾
+
+**在哪条线上**：`.worktrees/shader-include`（分支 `fix/shader-include-aware-key`，从 `v2` 的 `479cef0` 拉）。
+
+**做了什么**（起因：用户指出「PCG cache 机制并没有 shader include aware」）：
+
+- **新叶子 crate `px_shader`**：模块发现（两个根：`px_render/assets/shaders` 与 `art/shaders`）、`#import`
+  解析（最长模块名前缀，与 naga_oil 同口径）、**可达闭包**与它的指纹、指纹进出清单参数（`closure_hi/lo`）。
+  一份实现，烘图侧 / `px_render::shaders` / `reflect` / 门共用（原先 `reflect.rs` 自己搓过一份 FNV，已收敛）。
+- **`px_ops::shader_key` 升到 `px_shader/v2`**：键 = `SHADER_VERSION ‖ 闭包指纹 ‖ WGSL 字节`；`write_shader`
+  把闭包指纹与规模写进清单参数。两个烘图点接上：`px_graphs --bin shaders`（三个槽）与 `scene.rs::ring_shader`。
+- **装载时闸门**：`px_render::scene::closure_check` —— 产物记的闭包 ≠ 盘上现在的闭包（或老产物没记过）
+  ⇒ 当场拒 + 重烘配方（用户选的档：拒绝，不警告后继续）。
+- **§28.2**：算子 `SOURCE_HASH` 改为 `fnv1a_sources(&[…])`，覆盖共享依赖（`field.rs` / `noise.rs`；
+  `px_mc` 加 `volume.rs`；`cloud_proxy` 再加 `px_verify/{cloud_field,noise,dual}.rs`）。新门
+  `px_ops/tests/source_hash.rs` 钉住形状（退回单文件版就红）。
+
+**已验证**：
+
+- `cargo test`（默认 members）全绿；`cargo test -p px_render` 全绿（含离线 shader 门 —— 我改了它脚下的
+  `shaders.rs`：`shader_files` / `module_sources` 现在走 `px_shader`，返回 `BTreeMap`）。
+- 烘图实测（本 worktree 的 CAS）：`planet` → `shaders` → `scene orbit-bare`；日志打出每个槽的
+  `include 闭包 …｜可达模块 …｜外部符号 …`。
+- 端到端闸门实测（Vulkan / RTX 3060 / 960×640 / 一个服务会话）：基线出图 300012 字节 → 给
+  `light.wgsl` 加一行注释（不重烘）⇒ **退出码 1、不出图**，拒词点名 `shaders/surface` 与两个指纹；
+  重烘 `shaders`＋`scene` ⇒ 三个 shader 键与场景键全换、出图恢复且**与基线逐字节相同**；撤回那行
+  再重烘 ⇒ 键**逐字节回到基线**（键是纯函数）。细节在 `08-renderer.md` §52.3。
+- 旧键对照：主 checkout 的 `clouds` 是 `b52f7a0d…`，新键 `5a88f398…`（命名空间与闭包都进了键）。
+
+**没验证 / 没做**（如实记）：
+
+1. **没跑 `orbit`（带云）那条全链**：这一轮的 CAS 里只有 `planet` / `shaders` / `generated` /
+   `scene orbit-bare` —— 云图（`clouds` / `cloud_proxy`）没重烘、带云场景没出图。
+2. **没跑 `px_probe` 的三个 bin**（`field_dual` / `gradient` / `device`）：`assemble()` 的调用签名没变，
+   但它们读的是盘上的 shader，值得单独跑一次确认。
+3. **`--view` / `--show` 那条路没跑**；`tools/probe.ps1` / `frame-probe.ps1` 也没跑（只用了 harness 的
+   `Start-RenderServer` / `Invoke-Client`）。
+4. **口径边界**：`bevy_pbr::*` 这类外部符号只按**名字**进指纹 —— Bevy / naga_oil 换版本时键不会动，
+   要靠手动 `SHADER_VERSION`（§19.1 那一档）。这条是有意留的，不是漏的。
+5. **热重载那条残留**（`08-renderer.md` §52.3 写着）：服务在跑时改库文件，watcher 会把新模块组装进去、
+   槽版本没变 ⇒ 下一次装载场景之前那一小段画的是"新库 + 旧键"。下一次请求会被闸门拒，窗口本身没兜住；
+   要彻底得把库也搬进 CAS（用户裁决过的 C 档，本轮没做）。
+6. `ring` 那条（`scene.rs::ring_shader`）走同一个 helper，但本轮**没烘带环的场景**（`orbit-rings`）⇒
+   没有实测图。
+7. `generic-render` worktree 的 `target/` 被借来当构建缓存（复用 Bevy 依赖）；那里会多出这个分支的
+   `px_render.exe` —— 与主 checkout 的 `target/` 无关。
+8. **材质参数 schema 的调研（§66）**：只落笔记，**代码未动**；候选批次 P1 / P2 / P3 见 `08-renderer.md` §66.5。
+   一并裁决待做的一条：**`Value::Text` 从 wire 的 `Value` 里删掉**（它今天在参数块里永远非法）。
+9. ⚠ **并入 `v2` 之后主 checkout 的 CAS 是"待重烘"状态**：老 shader 产物没有闭包指纹（`px_shader/v1` 时代），
+   新的装载闸门会**当场拒**任何还钉着它们的场景 ⇒ 要出图必须先
+   `cargo run -p px_graphs --bin shaders` → 再逐个 `--bin scene <名>`（带云的场景还要先把 `clouds` 图重烘）。
+
 ### 9.1.1 本轮（2026-09-15，`feature/cloud-surface-perf` worktree）：软档收影 ＋ 地表云影
 
 **在哪条线上**：`.worktrees/cloud-surface-perf`（分支 `feature/cloud-surface-perf`）。软档与

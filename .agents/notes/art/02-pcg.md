@@ -19,8 +19,20 @@
 node_key = blake3("px_pcg/v1" ‖ op_id ‖ op_version ‖ graph_version
                   ‖ canvas.(W,H) ‖ projection.name ‖ 规范化参数 JSON ‖ [各输入的 key])
 ```
-- **凡是影响产物内容的都必须在键里**，否则 CAS 会出现「同一个键、不同内容」—— `px_ops/src/lib.rs:407` 的注释钉的就是这条。已知进键的：画布尺寸（`03-assets.md` §25.2）、投影 `GraphSpec.projection`、相机表（`key_with_cameras`，§48）、`graph_version`。
-- **引擎指纹不是「运行时哈希正在跑的 exe」**（那条口径已由 §19 作废）：任何一次重链接都会让整个缓存失效。现在是每算子 `const SOURCE_HASH: u64 = fnv1a(include_str!("<算子>.rs"))` + 手动 `op_version`。
+- **凡是影响产物内容的都必须在键里**，否则 CAS 会出现「同一个键、不同内容」—— `px_ops/src/lib.rs` 里 `node_key` 的注释钉的就是这条。已知进键的：画布尺寸（`03-assets.md` §25.2）、投影 `GraphSpec.projection`、相机表（`key_with_cameras`，§48）、`graph_version`。
+- **shader 这一档多一维：include 闭包**（`08-renderer.md` §52.3 的那条，2026-09 修的）：
+  ```
+  shader_key = blake3("px_shader/v2" ‖ SHADER_VERSION ‖ 闭包指纹 ‖ WGSL 字节)
+  闭包指纹  = FNV(sorted[(模块名, 模块源码)] + sorted[外部符号子句])        // px_shader
+  ```
+  病根：入口 `art/shaders/*.wgsl` 里的 `#import planet_x::*` 由 **naga_oil 在运行期**组装，模块真本住
+  `px_render/assets/shaders/*.wgsl` ⇒ 只哈希入口文本时，**改一个 include 什么都不动**：键不动、清单不动、
+  场景键不动、槽版本不动，而画出来的东西变了（同一个键、不同内容）。而且 `write_shader` 是无条件覆写，
+  `PX_PCG_FRESH=1` 也救不了。
+  规则只有一份实现（叶子 crate **`px_shader`**，烘图侧/运行期/门都用它）：只收**可达**模块（改
+  `surface.wgsl` 不该连带重烘 `clouds`），外部符号（`bevy_pbr::…`）**只记名字** —— 它们的实现由 Bevy /
+  naga_oil 的版本决定，归 `SHADER_VERSION` 手动那一档（§19.1 的口径）。
+- **引擎指纹不是「运行时哈希正在跑的 exe」**（那条口径已由 §19 作废）：任何一次重链接都会让整个缓存失效。现在是每算子 `const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("<算子>.rs"), include_str!("../field.rs"), include_str!("../noise.rs")])` + 手动 `op_version`（依赖也进哈希，见 §28.2）。
 - ⚠️ 已知盲区：**若将来启用 cdylib，dll 不在 exe 里**，那时要把 dll 文件一并纳入哈希。
 
 ### §17.2 参数：一节点一文件

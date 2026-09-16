@@ -170,7 +170,15 @@ viewer 与 serve 共用同一份 `spawn_planet` 与同一份缓存；`poll_field
 
 ### §52.3 shader 也是资产，走同一个缓存模式
 
-- `kind = Shader` 的产物：WGSL 作为 **U8 blob**，**键 = WGSL 的字节**（改一个字换一个键），由 `px_graphs --bin shaders` 从 `art/shaders/*.wgsl` 烘出，进 `target/pcg/shaders/manifest.json`。
+- `kind = Shader` 的产物：WGSL 作为 **U8 blob**，**键 = WGSL 的字节 ‖ include 闭包指纹**（改一个字、或者改它 `#import` 到的任一模块，都换一个键），由 `px_graphs --bin shaders` 从 `art/shaders/*.wgsl` 烘出，进 `target/pcg/shaders/manifest.json`。
+- **include 闭包为什么进键**（2026-09 修，`02-pcg.md` §17.1）：入口里的 `#import planet_x::*` 由 **naga_oil 在运行期**组装，模块真本住 `px_render/assets/shaders/*.wgsl` ⇒ 只哈希入口文本时，改一个 include **什么都不动**（键、清单、场景键、槽版本全不动），而画出来的东西变了。规则只一份实现：叶子 crate **`px_shader`**（`closure` / `modules_fingerprint` / `#define_import_path` 解析），烘图侧、`px_render::shaders`、`reflect`、离线门都用它；只收**可达**模块，外部符号（`bevy_pbr::…`）只记名字（它们的实现归 `SHADER_VERSION` 手动那一档，§19.1）。
+- **装载时对账**：产物清单参数里记着闭包指纹（`closure_hi` / `closure_lo`）与规模（`closure_modules` / `closure_externals`）；`preload_shaders` 拿它跟**盘上现在**的闭包比 —— 不一致、或者老产物压根没记过 ⇒ **当场拒**（`scene::closure_check`，三条单测钉住三种情形），并给出重烘配方 `cargo run -p px_graphs --bin shaders` → 逐个 `--bin scene <名>`。为什么必须有这条：改了库、没重烘时场景指的还是老产物，而组装用的是新库 —— 那幅图**既不是老那一版、也不是新那一版**，而键 / 场景键 / 槽版本全没动（§52.3 那个"云静默消失"的同族故障：所有门都绿）。
+  实测（2026-09-16，`.worktrees/shader-include`）：`orbit-bare` 基线出图 960×640 / 300012 字节；
+  给 `light.wgsl` 尾巴加一行注释（不重烘）⇒ 客户端退出码 1、不出图，拒词是
+  「产物记的 `abedb20f868bf99c`｜盘上现在的 `99665bc6f4471b30`」；重烘 `shaders`＋`scene` 后
+  三个 shader 键与场景键全换、出图恢复且**与基线逐字节相同**（改的是注释）；把那一行撤回再重烘，
+  键**逐字节回到基线**（键是纯函数）。
+- ⚠ **残留（有意留着，没处理）**：服务在跑的时候改库文件，Bevy 的 `file_watcher` 会把新模块组装进去、并重建管线，而**槽版本没变** ⇒ 在下一次装载场景之前的那一小段里，画的是"新库 + 旧键"。下一次请求会被上面那条闸门拒掉，但那一小段窗口没有机制兜 —— 要彻底就得把库也变成 CAS 成员（是另一个档次的改动：场景文档要声明库成员、`slots://` 内存目录要扩到库、探针与门全跟着改）。
 - 场景里用 `members["shader"]` 引用它 —— 和场、网格**同一个引用方式**。
 - 渲染器侧：注册一个 `slots://` 资产源（`bevy_asset::io::memory::Dir` 内存目录 + `MemoryAssetReader`），材质**静态**返回 `ShaderRef::Path(slots://<槽>.wgsl)`；装载场景时把产物里的 WGSL 写进内存目录，再 `asset_server.reload`。
 - ⚠ **资产源必须在 `AssetPlugin` 之前注册**（Bevy 自己的文档：`bevy_asset/src/lib.rs:561`，违反时 `:614` 会打 `must be registered before AssetPlugin`）。把 `SlotsPlugin` 排在 `DefaultPlugins` 之后 ⇒ 槽不存在 ⇒ shader 加载失败 ⇒ 管线永远编译不出来、服务永远到不了「渲染管线全部就绪」，而**编译与离线测试全绿**。这条只有真起一次服务才暴露 —— 别把「编译过 + 单测过」当成「能跑」。
@@ -392,3 +400,74 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
 
 后者是本轮从**我的 worktree 的 CAS** 里翻出来的一份旧产物（`target/pcg/ab/d3/d3bcdfcc…pxart`）
 当反例。
+
+## §66 材质参数 schema：谁定义它、能不能真正动态（2026-09-16 调研，**代码未动**）
+
+**起因**：一个断言 —— 「render 对 schema 的要求是 compile time fixed，材质 schema 就应当定义在 `px_protocol`」。
+**结论**：参数块的**大小与内容今天已经是完全动态的**（Bevy 那条路没堵），被钉死的只有**绑定契约**那一层；
+而「动态 schema」只能落在两条线上 —— **文本层（naga 反射）**或**数据层（schema 当产物/当输入）**，
+没有第三条：WebGPU 把驱动反射那条路删掉了。
+
+### §66.1 硬边界（都在依赖的源码里查实，不是推理）
+
+| 层 | 能不能动态 | 证据 |
+|---|---|---|
+| 绑定格集合（组号、格号、维度） | **不能**：同一类型的材质只有一份布局（只能"固定超集"） | `bevy_render-0.19.1/src/render_resource/bind_group.rs:609`：`bind_group_layout_entries(render_device, force_no_bindless)` 是**静态**方法（没有 `&self`） |
+| 材质绑定组在第几组 | 不能，Bevy 写死 | `bevy_pbr-0.19.1/src/material.rs:466-486`：`descriptor.layout.insert(3, …)` + shader def `MATERIAL_BIND_GROUP = MATERIAL_BIND_GROUP_INDEX`（= 3）—— 槽 shader 里那句 `#{MATERIAL_BIND_GROUP}` 运行期就是这样变成 3 的 |
+| 参数块的**大小与内容** | **已经能**，逐材质任意 | `px_render/src/material.rs:102-113`（`min_binding_size: None`，注释原文就是"每个 shader 的结构体大小不同，而布局只有一份"）+ `:143-153`（逐材质 `create_buffer_with_data`） |
+| 运行期问驱动"这程序有哪些 uniform" | **没有这条路** | GL 有 [`getActiveUniform`](https://developer.mozilla.org/en-US/docs/Web/API/WebGLRenderingContext/getActiveUniform)；WebGPU 明确放弃（[gpuweb#2470](https://github.com/gpuweb/gpuweb/issues/2470)），代价是 shader / layout / bind group 三处必须互相兼容、信息重复（[Toji: WebGPU bind group best practices](https://toji.dev/webgpu-best-practices/bind-groups.html)） |
+| 反射从哪来 | naga（今天）+ naga_oil（还能注生成物） | `px_render/src/reflect.rs:295-340` 读 `member.name` / `member.offset`；`naga_oil-0.22` 的 `Composer::make_naga_module` 直接回一份 `naga::Module`；`add_composable_module(ComposableModuleDescriptor { source, as_name, shader_defs, … })` 能把**生成的模块**注进组装 —— Bevy 自己就是这么把 `MATERIAL_BIND_GROUP` 注进去的 |
+
+⚠ **顺手查到的地雷（今天自洽，谁都别乱"修"）**：`#{MATERIAL_BIND_GROUP}` 在**运行期是 3**（Bevy 的 def），
+而我们自己组装文本时替成 **`"2"`**（`px_render/src/shaders.rs:265`，`reflect::MATERIAL_BIND_GROUP` 也是 2），
+`px_probe` 的管线布局同样放在第 2 组（`px_probe/src/probe.rs:406` 的 `&[None, None, Some(&material), …]`）。
+两边各自自洽（反射只需要文本**内部**一致；probe 用自己的管线），所以今天没错 ——
+但这是「同一条契约、两个数字」的活证据：谁哪天把那处字面量"修"成引用常量，就会静默错位。
+
+### §66.2 同一条契约今天有五个真相源
+
+| 位置 | 它说了什么 |
+|---|---|
+| `px_render/src/reflect.rs:22-30` | 真源：组号、第 0 格 uniform、贴图只占 1/3/5/7 及各格维度 |
+| `px_render/src/slots.rs:167-187` | 占位 WGSL 把那张表**手抄**了一遍 |
+| `px_render/src/shaders.rs:265` | 离线组装把 `#{MATERIAL_BIND_GROUP}` 替成**字面量 `"2"`** |
+| `px_protocol/src/scene.rs:262-284` | 半份：`TextureRef` 的注释 + `check()` 只查「贴图占奇数格、`>=1`」+ `sampler_binding()` |
+| `px_protocol::scene::Value`（4 种写法） vs `reflect::ParamKind`（5 种类型） | **同一份类型词表的两半**，对应关系只活在 `reflect.rs:192-248` 的 `write_value` match 里（无类型级约束、无门） |
+
+### §66.3 五条落地形态
+
+| | schema 的载体 | 谁解析、什么时候 | 增改一个参数 | 一致性靠什么 | 代价 |
+|---|---|---|---|---|---|
+| **1 今天** | WGSL 文本 | render 运行期 naga 反射 | 只改 WGSL + 配方，**0 重编** | 反射即唯一来源 | schema 只在 render 可见 ⇒ 烘图侧**盲写**名字；每次装载跑 naga |
+| **2 descriptor 进产物** | 反射结果落盘（`AssetManifest.params` 或单开一帧） | 烘图时反射一次；装载时读 | **0 重编** | 「产物记的 vs 盘上反射的」当场对账（`closure_check` 同款） | 烘图侧要能跑 naga（reflect 搬进共享叶子 crate，`px_graphs` 引 naga）；protocol 加 descriptor 类型 |
+| **3 protocol 里的 Rust 类型** | `px_protocol` | 两侧**编译期** | 改 protocol + **两侧重编** + 快照 + 旧服务被握手拒 | **必须补一道跨层门**（反射 `art/shaders/*.wgsl` ↔ protocol schema 逐字段比） | 破 §65 / §10.4 的「加材质 = 0 编译」；换来类型安全（烘图侧编译期抓错，`px_probe/src/params.rs` 那份镜像可删） |
+| **4 schema 生成 WGSL** | 同一份 schema（数据或 Rust），WGSL 的 `struct Params` 由它生成 | 烘图/装载时生成 | **0 重编** | 生成器保证一致（schema 是输入、WGSL 是输出） | WGSL 变成「生成的结构体 + 手写 body」；body 引用的名字要由生成器校验或改成生成常量 |
+| **5 容器化** | `struct Params { data: array<vec4<f32>, N> }` + 生成的下标常量 | 谁都行 | **0 重编，且布局恒定** | 下标由 schema 唯一决定 | 类型信息丢、可读性差、浪费带宽；body 要写成 `params.data[K].x` |
+
+### §66.4 选之前要认的三条判据
+
+1. **被钉死的只是绑定契约那一层** —— 它是 Bevy / WebGPU 的硬约束（§66.1 前两行），逐材质变不了；
+   但它的**声明**可以收敛到协议侧（`Material.params` 那一袋值已经在 protocol 里了）。
+2. **真正和「schema 定义在 protocol」冲突的不是动态性，是"唯一来源"**：`px_render/src/reflect.rs:289-293`
+   已经把这条裁决写死 ——「参数怎么排只能有**一个**来源，就是那份源码；写第二张表就是第二个会漂开的默认值」。
+   ⇒ 要在 protocol 里定义 schema 而**不同时生成** WGSL，就必须补那道跨层门（§10.2 的思路：语言管不住就用门看住）；
+   纯形态 3（protocol 类型 + 手写 WGSL + 无门）= 两份真相，与本仓既有裁决正面冲突。
+3. **凡是参与"shader 到底是什么"的东西都要进键**（§17.1、§52.3 的 include 闭包就是刚补的一课）：
+   schema 一旦生成 WGSL（形态 4/5），schema + 生成器版本就得跟闭包一样进 shader 键；
+   「产物记一份、装载时对账」的落点已经搭好（`scene::closure_check`）。
+
+### §66.5 状态与候选批次（都还没做）
+
+调研完成（2026-09-16），**代码未动**。一并裁决待做的一条：**`Value::Text` 从 wire 的 `Value` 里删掉** ——
+它今天在参数块里**永远非法**（`reflect.rs:192-248` 的 `write_value` 对任何 kind 都拒文本），全仓只有
+配方 / 烘图侧在用文本（`palette = "rocky"`、`ablate = "surface"`）。
+
+- **P1**：契约骨架（绑定表 + `ParamKind` + `Value↔ParamKind` 合法映射）收进 `px_protocol`、删 `Value::Text`、
+  §66.2 那五处手抄改成单一源（含 §66.1 那个 2/3 的坑）、schema descriptor 落进产物 + 装载时对账。
+  **不动 §65 的分工。**
+- **P2**（叠在 P1 上）：protocol 里加材质 schema 类型（烘图侧编译期抓错）+ 那道跨层门 +
+  探针改用 protocol 类型（删掉 `px_probe/src/params.rs` 的 `CloudParams` 镜像）。
+- **P3**：schema 生成 WGSL 的结构体声明（或容器化 + 生成下标），schema 与生成器版本一并进 shader 键；
+  `art/shaders` 从「手写资产」变成「模板」—— 这一刀要用户点头。
+
+⚠ 三批都会动 `SCENE_SCHEMA`（形态 3 还要动 protocol 快照）⇒ 在跑的旧服务会被握手拒，这是设计不是故障。
